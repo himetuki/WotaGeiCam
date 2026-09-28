@@ -18,6 +18,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -103,7 +105,9 @@ import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaIconButton
+import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.design.pillAnchor
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.theme.AcrylicScrim
 import com.wotagei.cam.ui.theme.MonoStyle
@@ -121,9 +125,6 @@ import kotlinx.coroutines.launch
 
 /** 双击判定窗口：单击要等满这么久才落地显隐，否则「双击启停」会顺带闪一下控件栏 */
 private const val DOUBLE_TAP_WINDOW_MS = 280L
-
-/** 倍速弹窗浮在底栏上方，让开的距离是底栏三行压缩后的近似高度（导航栏与挖孔另有 windowInsetsPadding 让开；第三行换 WotaChip 后高了 4dp） */
-private val SPEED_POPUP_BOTTOM_GAP: Dp = 88.dp
 
 /** 弹窗定宽：不固定的话每档按自身内容包裹，点击区参差 */
 private val SPEED_POPUP_PANEL_WIDTH: Dp = 148.dp
@@ -238,6 +239,8 @@ fun PlayerScreen(
     val playing by engine.isPlaying.collectState(false)
     val state by engine.playbackState.collectState(Player.STATE_IDLE)
     val ab by engine.ab.collectState(AbRange())
+    // 倍速弹窗改成就近弹：量住底栏最右那颗胶囊，弹窗跟着它走，不再手算底栏高度
+    var speedAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     val speed by engine.speed.collectState(PlayerSpeedTiers.DEFAULT)
     val loop by engine.loopModeState.collectState(LoopMode.OFF)
     val fps by engine.fps.collectState(25f)
@@ -370,64 +373,66 @@ fun PlayerScreen(
                         Text(formatDuration(duration), style = timeStyle, color = WotaTextDim)
                     }
 
+                    // 一行装下全部控件（用户 2026-09-28：三行太吃画面）。倍速钉在最右，
+                    // 左边那组在窄屏上横向可滚，不会因为并排而被裁掉
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.padding(horizontal = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                     ) {
-                        BarIconSlot(Icons.Filled.SkipPrevious, stringResource(R.string.player_step_back)) {
-                            engine.stepFrame(false)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
+                        ) {
+                            BarIconSlot(Icons.Filled.SkipPrevious, stringResource(R.string.player_step_back)) {
+                                engine.stepFrame(false)
+                            }
+                            BarIconSlot(
+                                image = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                description = stringResource(R.string.player_play_pause),
+                                accent = true,
+                                size = PlayIconSize,
+                                glyph = PlayGlyphSize
+                            ) { engine.softPause(playing) }
+                            BarIconSlot(Icons.Filled.SkipNext, stringResource(R.string.player_step_fwd)) {
+                                engine.stepFrame(true)
+                            }
+                            Text(
+                                stringResource(fpsStepLabelRes(fps), fps),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = WotaTextDim,
+                                maxLines = 1,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                            AbRow(
+                                ab = ab,
+                                onA = { engine.markA() },
+                                onB = { if (!engine.markB()) banner = R.string.player_ab_invalid },
+                                onLoop = { if (!engine.toggleAbLoop()) banner = R.string.player_ab_invalid },
+                                onClear = { engine.clearAb() }
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            WotaChip(
+                                label = stringResource(R.string.player_loop_one),
+                                selected = loop == LoopMode.ONE,
+                                onClick = {
+                                    engine.loopMode = if (loop == LoopMode.ONE) LoopMode.OFF else LoopMode.ONE
+                                }
+                            )
+                            // 环形箭头区分「整片循环 / 单曲循环」，chip 只有文案表达不了这个差别
+                            Icon(
+                                if (loop == LoopMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                                contentDescription = stringResource(R.string.player_loop_one),
+                                tint = if (loop == LoopMode.ONE) WotaColor.accent else WotaTextDim,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
-                        BarIconSlot(
-                            image = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            description = stringResource(R.string.player_play_pause),
-                            accent = true,
-                            size = PlayIconSize,
-                            glyph = PlayGlyphSize
-                        ) { engine.softPause(playing) }
-                        BarIconSlot(Icons.Filled.SkipNext, stringResource(R.string.player_step_fwd)) {
-                            engine.stepFrame(true)
-                        }
-                        Text(
-                            stringResource(fpsStepLabelRes(fps), fps),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = WotaTextDim,
-                            maxLines = 1,
-                            modifier = Modifier.padding(start = 2.dp)
-                        )
-                        AbRow(
-                            ab = ab,
-                            onA = { engine.markA() },
-                            onB = { if (!engine.markB()) banner = R.string.player_ab_invalid },
-                            onLoop = { if (!engine.toggleAbLoop()) banner = R.string.player_ab_invalid },
-                            onClear = { engine.clearAb() }
-                        )
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(horizontal = 6.dp)
-                    ) {
+                        // 倍速永远在最右：它是这一行里唯一带弹层的入口，弹窗就锚在这颗上面
                         WotaChip(
                             label = stringResource(R.string.player_speed_current, stringResource(speedLabelRes(speed))),
                             selected = speed != PlayerSpeedTiers.DEFAULT,
+                            modifier = Modifier.pillAnchor { rect -> speedAnchor = rect },
                             onClick = { speedMenu = !speedMenu }
-                        )
-                        Spacer(Modifier.weight(1f))
-                        WotaChip(
-                            label = stringResource(R.string.player_loop_one),
-                            selected = loop == LoopMode.ONE,
-                            onClick = {
-                                engine.loopMode = if (loop == LoopMode.ONE) LoopMode.OFF else LoopMode.ONE
-                            }
-                        )
-                        // 环形箭头区分「整片循环 / 单曲循环」，chip 只有文案表达不了这个差别
-                        Icon(
-                            if (loop == LoopMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
-                            contentDescription = stringResource(R.string.player_loop_one),
-                            tint = if (loop == LoopMode.ONE) WotaColor.accent else WotaTextDim,
-                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -452,15 +457,17 @@ fun PlayerScreen(
                 )
             }
 
-            SpeedTierPopup(
-                visible = controlsVisible && speedMenu,
-                current = speed,
-                onPick = { tier ->
-                    engine.setSpeed(tier)
-                    speedMenu = false
-                },
-                onDismiss = { speedMenu = false }
-            )
+            if (controlsVisible && speedMenu) {
+                SpeedTierPopup(
+                    anchor = speedAnchor,
+                    current = speed,
+                    onPick = { tier ->
+                        engine.setSpeed(tier)
+                        speedMenu = false
+                    },
+                    onDismiss = { speedMenu = false }
+                )
+            }
 
             // 反馈条从底边浮起再淡出；文案钉在快照上，否则退场那帧会闪成空条
             val msg = banner
@@ -592,70 +599,43 @@ private fun BarIconSlot(
     }
 }
 
-/** 倍速选择弹窗：底栏窄，五档收进来；点面板外关闭 */
+/**
+ * 倍速选择弹窗：底栏窄，五档收进来。
+ *
+ * 2026-09-28 起改走 [WotaPillPopup] 就近弹在底栏最右那颗倍速胶囊旁边 —— 原来它浮在整条底栏上方，
+ * 靠一个手算的 88dp 让位，底栏行数一变就对不上；壳、点外关闭、退场动画也都不用自己再写一份。
+ */
 @Composable
 private fun SpeedTierPopup(
-    visible: Boolean,
+    anchor: androidx.compose.ui.unit.IntRect,
     current: Float,
     onPick: (Float) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val motion = LocalMotion.current
-    Box(Modifier.fillMaxSize()) {
-        AnimatedVisibility(
-            visible = visible,
-            enter = fadeIn(motion.float),
-            exit = fadeOut(motion.float)
-        ) {
-            Box(Modifier.fillMaxSize().clickable(onClick = onDismiss))
-        }
-        AnimatedVisibility(
-            visible = visible,
-            enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it },
-            exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.displayCutout))
-                .padding(end = 10.dp, bottom = SPEED_POPUP_BOTTOM_GAP)
-        ) {
-            Column(
-                Modifier
-                    .width(SPEED_POPUP_PANEL_WIDTH)
-                    .clip(WotaShape.large)
-                    // 弹层压在视频上要近实底（同 WotaMenuPopup 的壳）：hudScrim 的 25% 透明在亮画面上读不清
-                    .background(WotaColor.surface.copy(alpha = 0.97f))
-                    .border(1.dp, WotaColor.acrylicBorder, WotaShape.large)
-                    .padding(vertical = 4.dp)
-            ) {
-                Text(
-                    stringResource(R.string.player_speed_title),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = WotaTextDim,
-                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 3.dp)
-                )
-                PlayerSpeedTiers.TIERS.forEach { tier ->
-                    val picked = tier == current
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(tier) }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            stringResource(speedLabelRes(tier)),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (picked) WotaColor.accent else WotaText,
-                            modifier = Modifier.weight(1f)
+    WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_speed_title)) {
+        Column(Modifier.width(SPEED_POPUP_PANEL_WIDTH)) {
+            PlayerSpeedTiers.TIERS.forEach { tier ->
+                val picked = tier == current
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(tier) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(speedLabelRes(tier)),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (picked) WotaColor.accent else WotaText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (picked) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = WotaColor.accent,
+                            modifier = Modifier.size(15.dp)
                         )
-                        if (picked) {
-                            Icon(
-                                Icons.Filled.Check,
-                                contentDescription = null,
-                                tint = WotaColor.accent,
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
                     }
                 }
             }
