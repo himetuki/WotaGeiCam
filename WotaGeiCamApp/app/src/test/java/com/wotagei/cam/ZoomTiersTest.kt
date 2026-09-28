@@ -1,6 +1,7 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.ui.zoomQuickTiers
+import com.wotagei.cam.ui.zoomRailTiers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,5 +39,16 @@ class ZoomTiersTest {
         val tiers = zoomQuickTiers(1f, 1f)
         assertEquals(listOf(1f), tiers)
         assertTrue(tiers.size <= 1)
+    }
+
+    @Test
+    fun railShowsOnlyTheNearestFourTiers() {
+        val all = listOf(0.5f, 1f, 2f, 3f, 4f, 6f, 10f)
+        // 右栏不滚动、横屏只有约 360dp 高：铺满 7 档会被裁掉尾巴，所以只留离当前值最近的 4 档
+        assertEquals(listOf(0.5f, 1f, 2f, 3f), zoomRailTiers(all, 1f))
+        assertEquals(listOf(3f, 4f, 6f, 10f), zoomRailTiers(all, 10f))
+        assertTrue(zoomRailTiers(all, 2f).size <= 4)
+        // 长按面板里的完整档位不受影响，这里只是右栏的显示子集
+        assertEquals(all, zoomQuickTiers(0.5f, 10f))
     }
 }

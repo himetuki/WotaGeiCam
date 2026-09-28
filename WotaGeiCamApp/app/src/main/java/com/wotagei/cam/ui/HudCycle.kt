@@ -117,3 +117,13 @@ fun zoomQuickTiers(lo: Float, hi: Float): List<Float> =
 
 /** 这两项的取值就是 AE 手动三件套的一部分，AE 锁定时不许被点按循环改动 */
 private val AE_LOCK_PROTECTED = setOf(HudItem.SHUTTER, HudItem.ISO)
+
+/**
+ * 竖排变焦胶囊实际画出来的那几档：从 `zoomQuickTiers` 的结果里取离当前值最近的 [max] 档。
+ *
+ * 右栏是竖向居中的 `Column`，不会滚动；横屏时可用高度只有约 360dp，
+ * 姿态仪卡片 + 音量 + 蓝牙 + 变焦 + 对焦 + 防抖已经吃掉大半，再把 7 档变焦全铺上去就会被裁掉尾巴
+ * （§39 量过这台机横屏 720px 的紧张程度）。全部档位仍在长按面板里，一个都不少。
+ */
+fun zoomRailTiers(tiers: List<Float>, current: Float, max: Int = 4): List<Float> =
+    tiers.sortedBy { kotlin.math.abs(it - current) }.take(max).sorted()
