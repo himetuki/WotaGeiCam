@@ -168,40 +168,6 @@ fun WotaIconButton(
     }
 }
 
-/** 底部参数卡：dim 小标签在上、粗数值在下，参考图「快门 1/50 / ISO AUTO」那四张 */
-@Composable
-fun WotaValueCard(
-    label: String,
-    value: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    /** 自动档 / 已生效用 accent，其余用 textHi */
-    accentValue: Boolean = false
-) {
-    Column(
-        modifier
-            .wotaCard()
-            .clip(WotaShape.card)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = label,
-            style = WotaType.label,
-            color = WotaColor.textLo,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            text = value,
-            style = WotaType.mono.copy(fontSize = 16.sp, lineHeight = 20.sp),
-            color = if (accentValue) WotaColor.accent else WotaColor.textHi,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
 
 /**
  * 缩略图上的白描边角标：深色字 + 白环 + 半透明白底。

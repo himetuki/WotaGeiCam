@@ -133,7 +133,6 @@ import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaShape
-import com.wotagei.cam.ui.design.WotaValueCard
 import com.wotagei.cam.ui.design.pillAnchor
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.dialog.CurveSheet
@@ -159,7 +158,6 @@ import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.BtChip
 import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.AttitudeCard
-import com.wotagei.cam.ui.widget.LevelBadge
 import com.wotagei.cam.ui.widget.RefLineOverlay
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow

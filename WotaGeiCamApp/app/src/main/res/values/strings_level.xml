@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 水平仪 / 俯仰仪（camera/SensorLevel.kt、ui/widget/LevelMeter.kt） -->
+    <!-- 水平仪 / 俯仰仪（camera/SensorLevel.kt、ui/widget/AttitudeMeter.kt） -->
     <string name="level_tag_roll">横滚</string>
     <string name="level_tag_pitch">俯仰</string>
     <!-- 仪表读数：左右水平角与镜头仰俯角共用一个格式（等宽字体显示） -->
