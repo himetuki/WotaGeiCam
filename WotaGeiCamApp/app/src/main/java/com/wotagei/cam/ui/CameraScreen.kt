@@ -505,7 +505,7 @@ fun CameraScreen(
                     onCycle = { item ->
                         // 录制中一律不改档（与面板同一条锁），改不动时给"本机不支持"而不是静默无反应
                         if (recording) lockTip()
-                        else if (!hudCycleStep(item, params, ability?.evStep ?: 1f)) showTip(unsupportedText)
+                        else if (!hudCycleStep(item, params)) showTip(unsupportedText)
                     },
                     onClick = { item ->
                         // 近似帧率先说明再让改：点上去弹一个"这档其实是 23.976"的浮层比直接改值有用
