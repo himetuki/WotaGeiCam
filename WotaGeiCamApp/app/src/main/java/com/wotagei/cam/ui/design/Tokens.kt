@@ -95,6 +95,15 @@ object WotaShape {
     val medium = RoundedCornerShape(12.dp)
 }
 
+/**
+ * 描边宽度：`wotaCard` 的高光边与融合连通体的描边共用一档。
+ * 提到令牌前这个 1dp 在 Widgets.kt 与 LiquidMerge.kt 各写一遍（审查 S4-2 的可选项），
+ * 两处一旦分叉，卡片边与腰边就不同粗。
+ */
+object WotaStroke {
+    val hairline: Dp = 1.dp
+}
+
 /** 动效时长：FLUENT 档沿用，参考图本身是静态图，动效按原规范不劣化即可 */
 object WotaMotion {
     /** 按压反馈不跟着放长：按下必须即时，只有状态变化的收尾按用户定的 0.75 秒走 */

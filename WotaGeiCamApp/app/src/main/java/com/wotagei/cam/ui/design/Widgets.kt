@@ -50,7 +50,7 @@ import androidx.compose.animation.core.tween
 
 /** 常驻控件卡的通用底：25% 透明暖黑 + 极淡高光边（分层靠透明度，不靠投影） */
 fun Modifier.wotaCard(shape: androidx.compose.ui.graphics.Shape = WotaShape.card): Modifier =
-    clip(shape).background(WotaColor.hudScrim).border(1.dp, WotaColor.acrylicBorder, shape)
+    clip(shape).background(WotaColor.hudScrim).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
 
 /**
  * 胶囊 chip：参考图顶栏「广角 13mm / 1080p 25p / 96.5G 3h20m」那一排。
