@@ -517,9 +517,11 @@ fun CameraScreen(
                         }
                     },
                     modifierFor = { item ->
-                        // 变焦的锚点是右栏那颗常驻胶囊：HUD 上的「变焦」只是读数，
-                        // 两处都抢写同一个 key 会让弹窗在两个位置之间抖
-                        if (item == HudItem.ZOOM) Modifier else anchorOf(item.pillKey())
+                        // 变焦的锚点平时让给右栏那颗常驻胶囊：HUD 上的「变焦」只是读数，
+                        // 两处都抢写同一个 key 会让弹窗在两个位置之间抖。
+                        // 但 #54 之后那颗可以被关掉——关掉时读数自己顶上，
+                        // 否则长按读数弹出的面板会因为量不到锚点而弹到屏幕原点。
+                        if (item != HudItem.ZOOM || CamPill.ZOOM in hiddenPills) anchorOf(item.pillKey()) else Modifier
                     },
                     // 底栏压在预览区下沿，HUD 不避让就会与「监看/闪光灯」文字叠字（真机截图核对）
                     modifier = Modifier.align(Alignment.BottomStart).padding(bottom = BottomBarSpace)
