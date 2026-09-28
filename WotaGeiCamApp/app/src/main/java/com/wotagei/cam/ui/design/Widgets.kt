@@ -10,6 +10,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -56,12 +57,14 @@ fun Modifier.wotaCard(shape: androidx.compose.ui.graphics.Shape = WotaShape.card
  * [selected] 换成 accent 实底；[valueColor] 给「剩余空间不足」这类告警读数；[dot] 是录制中的红点。
  * [onClick] 传 null 就是**纯读数**（不响应点击、无按压形变）：状态类胶囊不该假装是入口。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun WotaChip(
     label: String,
     selected: Boolean,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     secondary: String? = null,
     valueColor: Color? = null,
     dot: Color? = null
@@ -88,7 +91,16 @@ fun WotaChip(
     )
     val clickable = if (onClick == null) modifier else modifier
         .clip(WotaShape.pill)
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .then(
+            // 长按开面板、点按循环取值是取景器参数胶囊的一对动作（鸿蒙化第 2 条），
+            // 共用同一枚 interactionSource，按压缩放才不会只认其中一个手势
+            if (onLongClick == null) Modifier.clickable(
+                interactionSource = interaction, indication = null, onClick = onClick
+            ) else Modifier.combinedClickable(
+                interactionSource = interaction, indication = null,
+                onClick = onClick, onLongClick = onLongClick
+            )
+        )
     Row(
         clickable
             .graphicsLayer { scaleX = scale; scaleY = scale }

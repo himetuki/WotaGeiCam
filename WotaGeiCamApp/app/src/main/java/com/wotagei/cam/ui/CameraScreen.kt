@@ -501,6 +501,11 @@ fun CameraScreen(
                         }
                     },
                     locked = aeMode == AeMode.LOCK,
+                    onCycle = { item ->
+                        // 录制中一律不改档（与面板同一条锁），改不动时给"本机不支持"而不是静默无反应
+                        if (recording) lockTip()
+                        else if (!hudCycleStep(item, params, ability?.evStep ?: 1f)) showTip(unsupportedText)
+                    },
                     onClick = { item ->
                         // 近似帧率先说明再让改：点上去弹一个"这档其实是 23.976"的浮层比直接改值有用
                         if (item == HudItem.FPS && !fps.exact) {
@@ -857,6 +862,9 @@ private fun Dot() {
 
 // ------------------------------------------------------------------ 预览内 HUD
 
+/** 有 AUTO 档的几项：只有它们"切到手动才变蓝"，帧率/码率常年蓝着等于没有强调 */
+private val HUD_AUTO_ITEMS = setOf(HudItem.SHUTTER, HudItem.ISO, HudItem.EV, HudItem.WB)
+
 /**
  * 常驻参数读数：上屏哪几项由设置页 `hud_items` 决定，默认「快门 / 帧率 / 码率」。
  * 每格点按弹自己的就近胶囊（[modifierFor] 负责把锚点矩形回报给上层）；
@@ -868,6 +876,7 @@ private fun ParamsHud(
     valueOf: @Composable (HudItem) -> String?,
     locked: Boolean,
     onClick: (HudItem) -> Unit,
+    onCycle: (HudItem) -> Unit,
     modifierFor: (HudItem) -> Modifier,
     modifier: Modifier = Modifier
 ) {
@@ -891,12 +900,17 @@ private fun ParamsHud(
                         enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it / 3 },
                         exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it / 3 }
                     ) {
-                        WotaValueCard(
-                            label = stringResource(item.labelRes),
-                            value = lastValue.orEmpty(),
-                            accentValue = lastValue == "AUTO",
+                        // 悬浮参数胶囊：点按循环取值、长按开就近面板（鸿蒙化第 2 条）。
+                        // 「切到手动值即变蓝」只对本来有 AUTO 档的几项成立，否则帧率/码率会常年蓝着
+                        val manual = item in HUD_AUTO_ITEMS && lastValue != "AUTO"
+                        WotaChip(
+                            label = lastValue.orEmpty(),
+                            selected = false,
                             modifier = modifierFor(item),
-                            onClick = { onClick(item) }
+                            secondary = stringResource(item.labelRes),
+                            valueColor = if (manual) WotaAccent else null,
+                            onClick = { onCycle(item) },
+                            onLongClick = { onClick(item) }
                         )
                     }
                 }
