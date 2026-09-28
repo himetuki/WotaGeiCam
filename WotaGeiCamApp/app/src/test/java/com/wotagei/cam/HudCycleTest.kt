@@ -19,7 +19,7 @@ class HudCycleTest {
     @Test
     fun unknownCurrentGoesToFirst() {
         // 能力表换镜头后当前值可能已不在候选里：回到第一档比停在非法值安全
-        assertEquals(25, nextInCycle(listOf(24, 25, 30), 60))
+        assertEquals(24, nextInCycle(listOf(24, 25, 30), 60))
     }
 
     @Test
