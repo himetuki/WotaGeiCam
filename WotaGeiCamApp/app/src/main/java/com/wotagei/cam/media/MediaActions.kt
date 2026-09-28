@@ -205,8 +205,7 @@ class MediaActions private constructor(
     ): MediaOp {
         val done = ArrayList<VideoClip>()
         var failed = 0
-        for (index in pending.indices) {
-            val clip = pending[index]
+        for (clip in pending) {
             val err: Exception? = withContext(Dispatchers.IO) {
                 try {
                     // ContentResolver 没有单参 delete(Uri)（android.jar 只有 3 参旧签名与 API 30+ Bundle 版），
@@ -224,8 +223,8 @@ class MediaActions private constructor(
                 continue
             }
 
-            // 到这里就是删不掉：别人的文件只能靠系统授权框删，那个框的语言与横屏布局都不归我们管，
-            // 用户明确不要它 —— 计数跳过，剩余项继续删
+            // 删不掉就是缺「所有文件访问」去改别人录的行。绝不退回去弹系统那个英文框：
+            // 计数后继续删剩余项，收尾统一按权限状态给一句我们自己的文案（deniedRes）
             failed++
         }
         finishDelete(done, pop, refresh)
