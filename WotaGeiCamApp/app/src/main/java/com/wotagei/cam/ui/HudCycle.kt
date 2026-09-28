@@ -96,7 +96,7 @@ fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
         HudItem.ZOOM -> {
             val state = params.zoom.value
             val r = state.range ?: return false
-            val tiers = listOf(0.5f, 1f, 2f, 3f, 4f, 6f, 10f).filter { it >= r.start && it <= r.endInclusive }
+            val tiers = zoomQuickTiers(r.start, r.endInclusive)
             if (tiers.isEmpty()) return false
             val next = nextInCycle(tiers, state.value) ?: return false
             params.zoom.value = state.copy(value = next)
@@ -104,3 +104,10 @@ fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
         }
     }
 }
+
+/**
+ * 竖排变焦胶囊与循环取值共用的快捷档：只保留**运行时变焦范围里**的那些档，
+ * 本机没有 0.5× 能力就不会出现那颗（AGENTS：档位一律从能力表来）。
+ */
+fun zoomQuickTiers(lo: Float, hi: Float): List<Float> =
+    listOf(0.5f, 1f, 2f, 3f, 4f, 6f, 10f).filter { it >= lo && it <= hi }
