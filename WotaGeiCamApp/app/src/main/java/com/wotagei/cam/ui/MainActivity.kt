@@ -5,7 +5,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -41,6 +40,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wotagei.cam.R
+import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
@@ -109,7 +109,8 @@ private fun WotaRoot() {
         if (missing.isNotEmpty()) launcher.launch(missing)
     }
 
-    // 方向与沉浸随目的地切换：全站跟随用户旋转设置（录制页横竖都能录），录制页隐藏系统栏沉浸
+    // 方向与沉浸随目的地切换：录制页按设置页「默认方向」锁（默认横屏），其余页跟随用户系统旋转设置；
+    // 录制页隐藏系统栏沉浸
     DisposableEffect(nav, activity) {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
@@ -186,8 +187,12 @@ private fun WotaRoot() {
 private fun applyPageMode(activity: Activity?, route: String?) {
     val act = activity ?: return
     val cameraPage = route == ROUTE_CAMERA
-    // 录制页跟随传感器：横竖都能录（需求未要求锁横屏， 的横屏锁只是它的产品选择）
-    act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+    // 录制页方向由设置页「默认方向」决定（默认横屏使用，且不依赖系统自动旋转开关）；
+    // 非录制页恒跟随用户的系统旋转设置。映射本体是 core/UIOrientation.screenOrientationOf（有 JVM 单测）。
+    // 这里必须直读 prefs：纯 UI 设置走参数总线的话会被 applyDefaultsOnce 的「进程内只套一次」挡住，
+    // 设置页改完回录制页就不生效了。每次换页都重读，所以改档立刻生效。
+    val orientation = WotaSettings.uiOrientation(WotaSettings.of(act))
+    act.requestedOrientation = UIOrientation.screenOrientationOf(cameraPage, orientation)
     val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
     if (cameraPage) {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
