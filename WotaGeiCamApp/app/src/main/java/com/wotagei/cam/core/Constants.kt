@@ -148,3 +148,35 @@ object WotaTag {
     const val PARAMS = "WotaParams"
     const val VIDEO_SIZE = "WotaVideoSize"
 }
+
+/**
+ * 录制页上「点了会弹面板」的控件胶囊（#54）。与 [HudItem] 的常驻读数分两套位掩码：
+ * 读数继续走存量键 `hud_items`，控件走新键 `hud_pills`，默认全开 = 与改造前的界面完全一致。
+ *
+ * 快门、缩略图、设置齿轮不在这一套里：关掉它们等于把应用锁死，
+ * 用户要的是「整个录制页只保留录制按钮」，不是「什么都点不了」。
+ */
+enum class CamPill(val bit: Int, val labelRes: Int) {
+    LEVEL(1, com.wotagei.cam.R.string.cam_pill_level),
+    VOLUME(2, com.wotagei.cam.R.string.cam_pill_volume),
+    BT(4, com.wotagei.cam.R.string.cam_pill_bt),
+    ZOOM(8, com.wotagei.cam.R.string.cam_pill_zoom),
+    FOCUS(16, com.wotagei.cam.R.string.cam_pill_focus),
+    STAB(32, com.wotagei.cam.R.string.cam_pill_stab),
+    REFLINE(64, com.wotagei.cam.R.string.cam_pill_refline),
+    MONITOR(128, com.wotagei.cam.R.string.cam_pill_monitor),
+    CURVE(256, com.wotagei.cam.R.string.cam_pill_curve),
+    FLASH(512, com.wotagei.cam.R.string.cam_pill_flash),
+    LENS(1024, com.wotagei.cam.R.string.cam_pill_lens),
+    SIZE(2048, com.wotagei.cam.R.string.cam_pill_size),
+    STORAGE(4096, com.wotagei.cam.R.string.cam_pill_storage);
+
+    companion object {
+        val ALL: List<CamPill> = values().toList()
+        val DEFAULT_MASK: Int = ALL.fold(0) { acc, t -> acc or t.bit }
+
+        /** 掩码里“没置位”的那些就是要隐藏的胶囊 */
+        fun hiddenOf(mask: Int): Set<CamPill> = ALL.filter { mask and it.bit == 0 }.toSet()
+        fun maskOf(types: List<CamPill>): Int = types.fold(0) { acc, t -> acc or t.bit }
+    }
+}

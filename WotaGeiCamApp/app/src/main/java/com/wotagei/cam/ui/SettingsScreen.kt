@@ -53,6 +53,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.wotagei.cam.R
 import com.wotagei.cam.core.CurveStack
+import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.RefLineType
 import com.wotagei.cam.core.RenderMode
@@ -104,6 +105,8 @@ object WotaSettings {
     const val KEY_LEVEL_ENABLED = "level_enabled"
     const val KEY_LEVEL_BUZZ = "level_buzz_enabled"
     const val KEY_HUD_ITEMS = "hud_items"
+    /** 录制页控件胶囊的显隐（#54）：与读数分开一套位掩码，默认全开 */
+    const val KEY_HUD_PILLS = "hud_pills"
     const val KEY_TEXT_SCALE_CAMERA = "text_scale_camera"
     const val KEY_TEXT_SCALE_SETTINGS = "text_scale_settings"
     const val KEY_TEXT_SCALE_DIALOG = "text_scale_dialog"
@@ -154,6 +157,8 @@ object WotaSettings {
     fun levelEnabled(prefs: SharedPreferences) = prefs.getBoolean(KEY_LEVEL_ENABLED, true)
     fun levelBuzzEnabled(prefs: SharedPreferences) = prefs.getBoolean(KEY_LEVEL_BUZZ, true)
     fun hudItems(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_ITEMS, HudItem.DEFAULT_MASK)
+
+    fun hudPills(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)
 
     /** 各屏文本高度缩放系数；100% 即工程默认排版，越界值钳回区间内 */
     fun textScale(prefs: SharedPreferences, key: String): Float =
@@ -221,6 +226,7 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     var levelEnabled by remember { mutableStateOf(WotaSettings.levelEnabled(prefs)) }
     var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
+    var pillMask by remember { mutableStateOf(WotaSettings.hudPills(prefs)) }
     var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
         mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
@@ -403,6 +409,31 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                             val next = if (on) hudMask and item.bit.inv() else hudMask or item.bit
                             hudMask = next
                             prefs.edit().putInt(WotaSettings.KEY_HUD_ITEMS, next).apply()
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.set_pill_note),
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaTextDim
+            )
+            Spacer(Modifier.height(6.dp))
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CamPill.ALL.forEach { item ->
+                    val on = pillMask and item.bit != 0
+                    ChipCell(
+                        text = stringResource(item.labelRes),
+                        selected = on,
+                        onClick = {
+                            val next = if (on) pillMask and item.bit.inv() else pillMask or item.bit
+                            pillMask = next
+                            prefs.edit().putInt(WotaSettings.KEY_HUD_PILLS, next).apply()
                         }
                     )
                 }

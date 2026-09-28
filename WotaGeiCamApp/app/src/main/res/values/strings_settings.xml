@@ -23,8 +23,8 @@
     <string name="set_motion_note">只作用于面板与按钮的位移、缩放与淡入淡出</string>
 
     <!-- 取景器常驻读数 -->
-    <string name="set_group_hud">取景器常驻读数</string>
-    <string name="set_hud_note">默认只常驻「快门 / 帧率 / 码率」，勾选即上屏，其余项仍在参数抽屉里可调</string>
+    <string name="set_group_hud">取景器常驻功能</string>
+    <string name="set_hud_note">上排是常驻读数（默认只放「快门 / 帧率 / 码率」），下排是录制页的控件胶囊，勾掉即从取景器消失。</string>
 
     <!-- 参考线默认 -->
     <string name="set_group_refline">参考线默认</string>
@@ -64,4 +64,18 @@
     <string name="set_storage_note">打开后，删除、移入回收站、还原、重命名对本机所有视频直接生效，不会再出现系统的英文确认框；不开则只能改动本应用自己录的视频。</string>
     <string name="set_storage_open">去系统设置打开</string>
     <string name="set_storage_on">已开启</string>
+    <string name="cam_pill_level">水平仪</string>
+    <string name="cam_pill_volume">音量表</string>
+    <string name="cam_pill_bt">蓝牙音箱</string>
+    <string name="cam_pill_zoom">变焦</string>
+    <string name="cam_pill_focus">对焦</string>
+    <string name="cam_pill_stab">防抖</string>
+    <string name="cam_pill_refline">参考线</string>
+    <string name="cam_pill_monitor">屏幕监看</string>
+    <string name="cam_pill_curve">RGB 曲线</string>
+    <string name="cam_pill_flash">闪光灯</string>
+    <string name="cam_pill_lens">镜头</string>
+    <string name="cam_pill_size">画幅</string>
+    <string name="cam_pill_storage">剩余空间</string>
+    <string name="set_pill_note">关掉即从录制页消失；快门、缩略图与设置入口不可隐藏</string>
 </resources>
