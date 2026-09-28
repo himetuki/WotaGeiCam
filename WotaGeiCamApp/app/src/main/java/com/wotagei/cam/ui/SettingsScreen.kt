@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -226,7 +227,7 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     var levelEnabled by remember { mutableStateOf(WotaSettings.levelEnabled(prefs)) }
     var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
-    var pillMask by remember { mutableStateOf(WotaSettings.hudPills(prefs)) }
+    var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
     var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
         mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
