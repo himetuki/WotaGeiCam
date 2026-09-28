@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 媒体库：页签 -->
+    <string name="gallery_title">媒体库</string>
+    <string name="gallery_tab_all">全部</string>
+    <string name="gallery_tab_like">收藏</string>
+    <string name="gallery_tab_trash">回收站</string>
+
+    <!-- 数据范围与列表形态 -->
+    <string name="gallery_scope_wota">本应用</string>
+    <string name="gallery_scope_album">手机相册</string>
+    <string name="gallery_mode_timeline">时间线</string>
+    <string name="gallery_mode_grid">网格</string>
+    <string name="gallery_mode_full">全屏</string>
+    <string name="gallery_cols_fmt">%1$d 列</string>
+    <string name="gallery_open_player">打开播放页</string>
+
+    <!-- 时间线分组 -->
+    <string name="gallery_day_today">今天</string>
+    <string name="gallery_day_yesterday">昨天</string>
+    <string name="gallery_day_month_date">%1$d 月 %2$d 日</string>
+    <string name="gallery_day_year_date">%1$d 年 %2$d 月 %3$d 日</string>
+
+    <!-- 空态 -->
+    <string name="gallery_empty">这里还没有视频</string>
+    <string name="gallery_trash_empty">回收站是空的</string>
+
+    <!-- 图标朗读与菜单 -->
+    <string name="gallery_desc_back">返回</string>
+    <string name="gallery_desc_liked">已收藏</string>
+    <string name="gallery_desc_unliked">未收藏</string>
+    <string name="gallery_desc_trashed">已在回收站</string>
+    <string name="gallery_desc_menu">更多操作</string>
+    <string name="gallery_menu_like">收藏 / 取消收藏</string>
+    <string name="gallery_menu_compare">对比播放</string>
+    <string name="gallery_menu_share">分享</string>
+    <string name="gallery_menu_trash">移入回收站</string>
+    <string name="gallery_menu_restore">还原</string>
+    <string name="gallery_menu_purge">彻底删除</string>
+    <string name="gallery_menu_tags">分类标签</string>
+    <string name="gallery_menu_rename">重命名</string>
+
+    <!-- 多选 -->
+    <string name="gallery_selected_count">已选 %1$d 项</string>
+    <string name="gallery_select_clear">退出多选</string>
+
+    <!-- 删除确认 -->
+    <string name="gallery_purge_title">彻底删除该视频？</string>
+    <string name="gallery_purge_title_many">彻底删除 %1$d 个视频？</string>
+    <string name="gallery_purge_body">彻底删除后不可恢复，收藏与分类标签会一并清除。</string>
+
+    <!-- 重命名 / 标签 -->
+    <string name="gallery_rename_title">重命名</string>
+    <string name="gallery_tag_title">分类标签</string>
+    <string name="gallery_tag_hint">输入新标签，回车添加</string>
+    <string name="gallery_tag_add">添加标签</string>
+    <string name="gallery_tag_remove">删除标签</string>
+    <string name="gallery_tag_none">还没有自定义标签</string>
+
+    <!-- 分享 -->
+    <string name="gallery_share_title">分享视频</string>
+
+    <!-- 写操作提示（media/MediaActions.kt、media/Share.kt） -->
+    <string name="media_tag_invalid">标签不能为空且不超过 24 字</string>
+    <string name="media_name_empty">名称不能为空</string>
+    <string name="media_rename_failed">重命名失败或未获授权</string>
+    <string name="media_trash_failed">移入回收站失败或未获授权</string>
+    <string name="media_restore_failed">还原失败或未获授权</string>
+    <string name="media_delete_failed">删除失败或未获授权</string>
+    <string name="media_share_failed">分享失败</string>
+    <string name="media_share_no_app">没有可用于分享的应用</string>
+    <string name="media_need_all_files">到设置页打开「所有文件访问」，之后删改本机任何视频都不再弹系统框</string>
+    <string name="media_share_trashed">回收站里的视频要先还原才能分享</string>
+</resources>

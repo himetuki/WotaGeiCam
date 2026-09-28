@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WotaGeiCam" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/wota_bg</item>
+        <!-- 系统栏交回 edge-to-edge：底色透明，避让由 Compose 侧按 safeDrawing 自己算 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <!-- 不写这条的话横屏窗口会被挖孔压掉一截，右侧仪表列直接被推出可视区 -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
+    <style name="Theme.WotaGeiCam.Fullscreen">
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

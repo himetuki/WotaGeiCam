@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 只给 themes.xml 的 windowBackground 用；值必须与 ui/design/Tokens.kt 的 WotaColor.bg 一致，
+         否则冷启动那一帧与信箱边会透出另一套色板（原来留的是已作废的冷灰 #0E1116） -->
+    <color name="wota_bg">#12100E</color>
+</resources>

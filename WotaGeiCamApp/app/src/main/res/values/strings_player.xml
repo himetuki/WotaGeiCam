@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 播放器通用控件 -->
+    <string name="player_play_pause">播放 / 暂停</string>
+    <string name="player_step_back">帧后退</string>
+    <string name="player_step_fwd">帧步进</string>
+    <string name="player_fps_step">%1$.1f fps</string>
+    <string name="player_fps_step_exact">%1$.2f fps</string>
+    <string name="player_loop_one">单视频循环</string>
+    <string name="player_zoom">%1$.1fx 缩放</string>
+    <string name="player_error">播放失败，文件可能已损坏或格式不支持</string>
+
+    <!-- 倍速档位（需求：0.1 / 0.3 / 0.5 / 0.75 / 1.0） -->
+    <string name="player_speed_current">倍速 %1$s</string>
+    <string name="player_speed_title">播放倍速</string>
+    <string name="player_speed_01">0.1x</string>
+    <string name="player_speed_03">0.3x</string>
+    <string name="player_speed_05">0.5x</string>
+    <string name="player_speed_075">0.75x</string>
+    <string name="player_speed_10">1x</string>
+
+    <!-- AB 段循环 -->
+    <string name="player_ab_a">A</string>
+    <string name="player_ab_b">B</string>
+    <string name="player_ab_loop">循环</string>
+    <string name="player_ab_clear">清除</string>
+    <string name="player_ab_invalid">B 点要晚于 A 点，请先打 A</string>
+
+    <!-- 音频自动同步 -->
+    <string name="player_sync_done">已按音频对齐</string>
+    <string name="player_sync_low_confidence">同步置信度低，请手动校正</string>
+    <string name="player_sync_failed">音频对齐失败，请手动拖动进度条</string>
+    <string name="player_sync_no_audio">视频没有音轨，无法自动对齐</string>
+    <string name="player_sync_too_short">音频太短，无法自动对齐</string>
+
+    <!-- 双视频对比 -->
+    <string name="compare_title">对比播放</string>
+    <string name="compare_mode_auto">自动同步（音频）</string>
+    <string name="compare_mode_manual">手动同步</string>
+    <string name="compare_add_right">添加右侧视频</string>
+    <string name="compare_pick_right">选择右侧视频</string>
+    <string name="compare_audio_sync">基于音频自动同步</string>
+    <string name="compare_syncing">正在按音频对齐…</string>
+    <string name="compare_need_right">先添加右侧视频</string>
+    <string name="compare_left_tag">左</string>
+    <string name="compare_right_tag">右</string>
+    <string name="compare_left">左：%1$s</string>
+    <string name="compare_right">右：%1$s</string>
+    <string name="compare_offset">右偏移 %1$s</string>
+</resources>

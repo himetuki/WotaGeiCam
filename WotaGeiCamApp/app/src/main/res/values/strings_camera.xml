@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 录制页框架：顶栏 / 底栏 / 仪表列 / 就近胶囊 -->
+    <string name="cam_settings">设置</string>
+    <string name="cam_gallery_entry">回看</string>
+    <string name="cam_volume_meter">音量表</string>
+    <string name="cam_free_space">剩余 %1$s</string>
+    <string name="cam_perm_title">权限未授予</string>
+    <string name="cam_lock_tip">录制中，先停止才能改这一项</string>
+    <string name="cam_no_camera_perm">需要相机权限才能取景</string>
+    <string name="cam_preview_failed">预览未就绪</string>
+    <string name="cam_wait_preview">预览还没出图，请稍候再录</string>
+    <string name="cam_state_prepare">准备中</string>
+    <string name="cam_state_stopping">停止中</string>
+    <string name="cam_state_high_fps">该帧率超出本机能力，已退到可用上限</string>
+    <string name="cam_direct_no_effect">不使用 GPU 时斑马纹与峰值对焦不生效</string>
+
+    <!-- 参数滑杆组件 -->
+    <string name="cam_switch_input_mode">切换档位与滑杆输入</string>
+
+    <!-- 参数项标签 -->
+    <string name="cam_p_shutter">快门速度</string>
+    <string name="cam_p_iso">感光度</string>
+    <string name="cam_p_ev">曝光补偿</string>
+    <string name="cam_p_ae">曝光模式</string>
+    <string name="cam_p_af">对焦模式</string>
+    <string name="cam_p_mf">手动对焦</string>
+    <string name="cam_p_wb">白平衡</string>
+    <string name="cam_p_kelvin">色温</string>
+    <string name="cam_p_tint">色调</string>
+    <string name="cam_p_lens">镜头</string>
+    <string name="cam_p_size">分辨率</string>
+    <string name="cam_p_fps">帧率</string>
+    <string name="cam_p_bitrate">码率</string>
+    <string name="cam_p_stab">防抖</string>
+    <string name="cam_p_flash">闪光灯</string>
+    <string name="cam_p_zoom">变焦</string>
+    <string name="cam_p_refline">参考线</string>
+    <string name="pill_dismiss">收起</string>
+    <string name="pill_focus">对焦</string>
+    <string name="cam_af_fixed_focus">这颗镜头为定焦，没有可调对焦距离</string>
+    <string name="cam_free_space_title">可录时长</string>
+    <string name="pill_minutes_unit">分钟</string>
+    <string name="pill_hours_unit">小时</string>
+    <string name="pill_record_minutes">按当前码率约可录 %2$s %1$s</string>
+    <string name="pill_storage_note">估算只算视频码率，未计分段开销，实际略少</string>
+    <string name="cam_p_curve">RGB 曲线</string>
+    <string name="cam_p_monitor">屏幕监看</string>
+
+    <!-- 取景器内的参数读数 -->
+    <string name="cam_hud_shutter">快门</string>
+    <string name="cam_hud_iso">感光度</string>
+    <string name="cam_hud_wb">白平衡</string>
+    <string name="cam_hud_zoom">变焦</string>
+    <string name="cam_hud_ev">EV</string>
+    <string name="cam_hud_fps">帧率</string>
+    <string name="cam_hud_bitrate">码率</string>
+    <string name="cam_tap_center">中心点按对焦</string>
+    <string name="cam_tap_hint">轻触画面对焦并测光，长按半秒锁定 AE/AF</string>
+    <string name="cam_manual_exposure_only">切到手动曝光档后可调</string>
+    <string name="cam_auto_exposure_only">自动曝光档下生效</string>
+
+    <!-- 镜头面板 -->
+    <string name="cam_lens_tip">等效焦距与视场角按本机 characteristics 现算</string>
+    <string name="cam_lens_empty">没有可用镜头</string>
+    <string name="cam_lens_using">正在使用</string>
+    <string name="cam_lens_fov">等效 %1$s mm · 水平视场角 %2$s°</string>
+    <string name="cam_lens_fov_only">等效 %1$s mm</string>
+    <string name="cam_size_range">本机支持范围 %1$s ～ %2$s</string>
+    <string name="cam_lens_super_wide">超广角</string>
+    <string name="cam_lens_wide">广角</string>
+    <string name="cam_lens_telephoto">长焦</string>
+    <string name="cam_lens_super_telephoto">超长焦</string>
+    <string name="cam_lens_auto">自动</string>
+    <string name="cam_lens_front">前置</string>
+
+    <!-- 曝光 / 对焦 / 白平衡 / 闪光 / 防抖 / 渲染档位 -->
+    <string name="cam_ae_auto">自动</string>
+    <string name="cam_ae_manual">手动</string>
+    <string name="cam_ae_lock">锁定 AE/AF</string>
+    <string name="cam_af_continuous_video">录像连续</string>
+    <string name="cam_af_continuous_picture">拍照连续</string>
+    <string name="cam_af_macro">微距</string>
+    <string name="cam_af_manual">手动</string>
+    <string name="cam_wb_auto">自动</string>
+    <string name="cam_wb_incandescent">白炽灯</string>
+    <string name="cam_wb_fluorescent">荧光灯</string>
+    <string name="cam_wb_warm_fluorescent">暖荧光</string>
+    <string name="cam_wb_daylight">日光</string>
+    <string name="cam_wb_cloudy">阴天</string>
+    <string name="cam_wb_twilight">黄昏</string>
+    <string name="cam_wb_shade">阴影</string>
+    <string name="cam_wb_manual">手动色温</string>
+    <string name="cam_flash_off">闪光关闭</string>
+    <string name="cam_flash_on">闪光开启</string>
+    <string name="cam_flash_auto">闪光自动</string>
+    <string name="cam_flash_torch">常亮照明</string>
+    <string name="cam_stab_off">防抖关闭</string>
+    <string name="cam_stab_ois">光学防抖</string>
+    <string name="cam_stab_eis">电子防抖</string>
+    <string name="cam_stab_ois_eis">光学加电子</string>
+    <string name="cam_render_gpu">使用 GPU</string>
+    <string name="cam_render_direct">不使用 GPU</string>
+
+    <!-- 参考线面板 -->
+    <string name="cam_refline_title">参考线</string>
+    <string name="cam_refline_count">已选 %1$d 种</string>
+    <string name="cam_refline_all">全选</string>
+    <string name="cam_refline_clear">清空</string>
+
+    <!-- 屏幕监看面板 -->
+    <string name="cam_monitor_title">屏幕监看</string>
+    <string name="cam_monitor_need_gpu">需切到「使用 GPU」才生效</string>
+    <string name="cam_effect_none">关闭</string>
+    <string name="cam_effect_zebra">斑马纹</string>
+    <string name="cam_effect_peaking">峰值对焦</string>
+    <string name="cam_zebra_threshold">斑马纹阈值</string>
+    <string name="cam_zebra_density">条纹密度</string>
+    <string name="cam_zebra_d1">稀疏</string>
+    <string name="cam_zebra_d2">适中</string>
+    <string name="cam_zebra_d3">稠密</string>
+    <string name="cam_peaking_strength">峰值强度</string>
+    <string name="cam_peaking_color">峰值颜色</string>
+    <string name="cam_pk_white">白</string>
+    <string name="cam_pk_green">绿</string>
+    <string name="cam_pk_blue">蓝</string>
+    <string name="cam_pk_orange">橙</string>
+    <string name="cam_pk_red">红</string>
+
+    <!-- RGB 曲线面板 -->
+    <string name="cam_curve_title">RGB 曲线</string>
+    <string name="cam_curve_tip">拖点改亮度，点空白处加控制点；仅 GPU 渲染生效，录出与所见一致</string>
+    <string name="cam_curve_ch_master">白</string>
+    <string name="cam_curve_ch_red">红</string>
+    <string name="cam_curve_ch_green">绿</string>
+    <string name="cam_curve_ch_blue">蓝</string>
+    <string name="cam_curve_del_point">删除选中点</string>
+    <string name="cam_curve_reset_ch">复位本通道</string>
+    <string name="cam_curve_reset_all">全部复位</string>
+    <string name="cam_curve_custom">已调</string>
+    <string name="cam_curve_points_limit">最多 %1$d 个控制点</string>
+
+    <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案） -->
+    <string name="cam_record_saved">已保存，时长 %1$s</string>
+    <string name="cam_record_saved_uncommitted">已保存 %1$s，但相册登记未成功，重进相册或重启后再看</string>
+    <string name="cam_record_low_storage">存储空间不足：可用 %1$d MB，录制至少需要 %2$d MB</string>
+    <string name="cam_record_low_storage_short">存储空间不足，无法开始录制</string>
+    <string name="cam_record_no_output">无法创建输出文件，本次未录制</string>
+    <string name="cam_record_prepare_failed">编码器准备失败，请重试</string>
+    <string name="cam_record_start_failed">启动录制失败，请重试</string>
+    <string name="cam_record_engine_error">录制引擎报错，已停止并保留已录内容</string>
+    <string name="cam_record_too_short">录制不足一秒，按废片丢弃</string>
+    <string name="cam_record_stop_failed">停止录制失败，文件可能不完整</string>
+    <string name="cam_record_released">录制已取消</string>
+    <string name="cam_record_failed_generic">录制失败，请重试</string>
+</resources>
