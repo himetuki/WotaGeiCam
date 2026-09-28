@@ -146,7 +146,6 @@ import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.dialog.CurveSheet
 import com.wotagei.cam.ui.dialog.evText
 import com.wotagei.cam.ui.dialog.flashLabelRes
-import com.wotagei.cam.ui.dialog.freeSpaceText
 import com.wotagei.cam.ui.dialog.lensLabelRes
 import com.wotagei.cam.ui.dialog.observed
 import com.wotagei.cam.ui.dialog.shutterText
@@ -235,9 +234,11 @@ fun CameraScreen(
     // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
     val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
     val levelBuzz = WotaSettings.levelBuzzEnabled(settingsPrefs)
-    // §59：容量段要不要带「可录时长」取决于窗口真实宽度。取 LocalConfiguration 而不是根容器实测宽度——
-    // #58 量到这台机的根容器比可视窗口宽 68~168px，用根容器判断会把窄屏误判成宽屏、挤掉尾巴
+    // §59/§74：容量段取哪一档取决于顶栏真能给多宽。窗口宽扣掉顶栏固定预留（左右内边距 16 +
+    // 胶囊与设置入口的间距 6 + 设置入口约 44），再按录制页文本高度折算回 100% 基准
     val windowWidthDp = LocalConfiguration.current.screenWidthDp.dp
+    val topBarRoomDp = ((windowWidthDp - 66.dp) /
+        WotaSettings.textScale(settingsPrefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)).value
     val focusPoint by params.focusPoint.observed()
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
@@ -548,10 +549,10 @@ fun CameraScreen(
             sizeLabel = sizeText(size),
             // §59：窄屏（或文本高度被放大到 120%）时先退成只剩容量。判断放在调用方——
             // 这里拿得到根容器的实测宽度，而在 TopCapsule 里套测量层会把整段容量从树里吞掉
-            capacityLabel = if (windowWidthDp < CAPACITY_FULL_UNDER) freeSpaceText(freeMb)
-            else com.wotagei.cam.core.capacityLineText(
+            capacityLabel = com.wotagei.cam.core.capacityTierText(
                 freeMb,
-                bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
+                bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE,
+                topBarRoomDp
             ),
             freeLow = freeMb < WotaTiers.MIN_FREE_MB,
             recording = recStatus == RecordStatus.START,
@@ -1823,6 +1824,3 @@ private fun TopCapsule(
         }
     }
 }
-
-/** 窗口宽度低于此值时容量段退成只剩「96.2G」，丢掉可录时长（文本高度调到 120% 时不裁尾） */
-private val CAPACITY_FULL_UNDER = 320.dp
