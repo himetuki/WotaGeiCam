@@ -133,7 +133,6 @@ import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaValueCard
 import com.wotagei.cam.ui.design.pillAnchor
 import com.wotagei.cam.ui.design.wotaCard
-import com.wotagei.cam.ui.dialog.BtSpeakerSheet
 import com.wotagei.cam.ui.dialog.CurveSheet
 import com.wotagei.cam.ui.dialog.evText
 import com.wotagei.cam.ui.dialog.flashLabelRes
@@ -239,7 +238,6 @@ fun CameraScreen(
     var hint by remember { mutableStateOf<String?>(null) }
     var lastUri by remember { mutableStateOf<Uri?>(null) }
     var freeMb by remember { mutableStateOf(0L) }
-    var btSheet by remember { mutableStateOf(false) }
 
     // ---- 就近胶囊：锚点矩形由各控件在布局期回报，弹窗同一帧就能量到位置
     val pillAnchors = remember { mutableStateMapOf<PillKey, IntRect>() }
@@ -614,7 +612,7 @@ fun CameraScreen(
                 onZoomClick = { pop = PillKey.ZOOM },
                 onFocusClick = { pop = PillKey.FOCUS },
                 onStabClick = { pop = PillKey.STAB },
-                onBtClick = { btSheet = true },
+                onBtClick = { pop = PillKey.BT },
                 modifier = Modifier.align(Alignment.CenterEnd).displayCutoutPadding()
             )
             bottomBar(Modifier.align(Alignment.BottomCenter).safeDrawingPadding())
@@ -637,6 +635,7 @@ fun CameraScreen(
                 onFocusCenter = { if (focusUsable) writeFocusPoint(params, TapPoint(0.5f, 0.5f)) },
                 onPickLens = { picked -> ctrl.switchLens(picked) },
                 freeMb = freeMb,
+            bt = bt,
             )
         }
 
@@ -647,9 +646,6 @@ fun CameraScreen(
             visible = sheet == Sheet.CURVE,
             modifier = Modifier.matchParentSize()
         )
-        if (btSheet) {
-            BtSpeakerSheet(bt) { btSheet = false }
-        }
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，
         // 于是「录制中不能改画幅」这句话在真机上点了锁定项也看不见（v0.0.2 胶囊改造实测）
         hint?.let { text ->

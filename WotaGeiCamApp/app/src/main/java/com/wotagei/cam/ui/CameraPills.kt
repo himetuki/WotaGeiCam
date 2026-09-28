@@ -69,7 +69,7 @@ import kotlin.math.roundToInt
  * 没扩 [com.wotagei.cam.core.HudItem] 是因为那一位掩码要写进 `hud_items` 持久化键，
  * 加值就等于改存量配置语义；右栏的「对焦」和兜底的「更多」本来也不属于可自定义读数。
  */
-enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE }
+enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT }
 
 /**
  * 就近胶囊的内容宿主。
@@ -92,7 +92,8 @@ fun PillHost(
     onUnsupported: () -> Unit,
     onFocusCenter: () -> Unit,
     onPickLens: (LensSlot) -> Unit,
-    freeMb: Long
+    freeMb: Long,
+    bt: com.wotagei.cam.bt.BtSpeakerController
 ) {
     val ability = slot?.ability
     when (key) {
@@ -111,6 +112,7 @@ fun PillHost(
         PillKey.FLASH -> FlashPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STAB -> StabPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STORAGE -> StoragePill(anchor, params, freeMb, onClose)
+        PillKey.BT -> BtPill(anchor, bt, onClose)
     }
 }
 
@@ -719,3 +721,18 @@ private fun NoteText(text: String) {
 }
 
 private fun fmtX(v: Float): String = String.format(Locale.US, "%.1fx", v)
+
+/**
+ * 蓝牙音箱的就近面板（#53）：标题与「收起」由 `WotaPillPopup` 提供，
+ * 正文与原来的底部抽屉版共用同一个 [BtSpeakerPanel]，所以两处行为不会分叉。
+ */
+@Composable
+private fun BtPill(
+    anchor: IntRect,
+    controller: com.wotagei.cam.bt.BtSpeakerController,
+    onClose: () -> Unit
+) {
+    WotaPillPopup(anchor, onClose, title = stringResource(R.string.bt_title)) {
+        com.wotagei.cam.ui.dialog.BtSpeakerPanel(controller)
+    }
+}
