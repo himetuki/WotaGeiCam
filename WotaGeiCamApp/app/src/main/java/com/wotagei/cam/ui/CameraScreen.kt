@@ -627,7 +627,9 @@ fun CameraScreen(
                 },
                 focusLabel = stringResource(R.string.pill_focus),
                 hidden = hiddenPills,
-                showFocus = focusUsable,
+                // #54 的「对焦」开关 + #44 的定焦判定，两个都得认：
+                // 之前只认 focusUsable，设置页那颗「对焦」开关按下去没有任何反应（假开关）
+                showFocus = focusUsable && CamPill.FOCUS !in hiddenPills,
                 focusActive = afMode == AfMode.MANUAL,
                 stabLabel = stringResource(R.string.cam_p_stab),
                 stabActive = stabilize != Stabilize.OFF,
