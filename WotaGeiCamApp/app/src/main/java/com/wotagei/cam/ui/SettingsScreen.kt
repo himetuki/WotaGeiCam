@@ -58,6 +58,7 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.RefLineType
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.ui.anim.MotionMode
@@ -108,6 +109,12 @@ object WotaSettings {
     const val KEY_HUD_ITEMS = "hud_items"
     /** 录制页控件胶囊的显隐（#54）：与读数分开一套位掩码，默认全开 */
     const val KEY_HUD_PILLS = "hud_pills"
+    /**
+     * 录制页的默认方向（13 号计划第 6 条）：`landscape`（默认）/ `portrait`。
+     * 纯 UI 设置，**不进 [applyDefaultsOnce]** —— 那条链进程内只套一次，设置页改完回录制页会被挡住，
+     * 所以由 `MainActivity.applyPageMode()` 每次换页直读 prefs。
+     */
+    const val KEY_UI_ORIENTATION = "ui_orientation"
     const val KEY_TEXT_SCALE_CAMERA = "text_scale_camera"
     const val KEY_TEXT_SCALE_SETTINGS = "text_scale_settings"
     const val KEY_TEXT_SCALE_DIALOG = "text_scale_dialog"
@@ -160,6 +167,14 @@ object WotaSettings {
     fun hudItems(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_ITEMS, HudItem.DEFAULT_MASK)
 
     fun hudPills(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)
+
+    /** 录制页默认方向：缺键或坏串都回落到 [UIOrientation.DEFAULT]（横屏），不抛 */
+    fun uiOrientation(prefs: SharedPreferences): UIOrientation =
+        UIOrientation.fromPersistValue(prefs.getString(KEY_UI_ORIENTATION, UIOrientation.DEFAULT.persistValue))
+
+    fun setUiOrientation(prefs: SharedPreferences, orientation: UIOrientation) {
+        prefs.edit().putString(KEY_UI_ORIENTATION, orientation.persistValue).apply()
+    }
 
     /** 各屏文本高度缩放系数；100% 即工程默认排版，越界值钳回区间内 */
     fun textScale(prefs: SharedPreferences, key: String): Float =
@@ -228,6 +243,7 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
     var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
+    var uiOrientation by remember { mutableStateOf(WotaSettings.uiOrientation(prefs)) }
     var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
         mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
@@ -358,6 +374,37 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
                 )
             }
+        }
+
+        SettingGroup(stringResource(R.string.set_group_orientation))
+        Text(
+            text = stringResource(R.string.set_orientation_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaTextDim,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
+        Card {
+            val landscapeLabel = stringResource(R.string.set_orientation_landscape)
+            val portraitLabel = stringResource(R.string.set_orientation_portrait)
+            val options = UIOrientation.ALL
+            // 标签按枚举本身取，不用 ordinal 去索引定长列表（同上面动效档那条教训：加档时会显示空标签）
+            val nameOf = { o: UIOrientation ->
+                when (o) {
+                    UIOrientation.LANDSCAPE -> landscapeLabel
+                    UIOrientation.PORTRAIT -> portraitLabel
+                }
+            }
+            TierPicker(
+                label = stringResource(R.string.set_orientation_style),
+                selected = uiOrientation.ordinal,
+                items = options.map { TierItem(it.ordinal, nameOf(it)) },
+                format = { nameOf(options.getOrElse(it) { UIOrientation.DEFAULT }) },
+                onPick = { idx ->
+                    val next = options.getOrElse(idx) { UIOrientation.DEFAULT }
+                    uiOrientation = next
+                    WotaSettings.setUiOrientation(prefs, next)
+                }
+            )
         }
 
         SettingGroup(stringResource(R.string.set_group_motion))

@@ -14,6 +14,13 @@
     <string name="set_default_sample">默认采样率</string>
     <string name="set_default_render">默认渲染模式</string>
 
+    <!-- 界面方向（键 ui_orientation，默认横屏使用） -->
+    <string name="set_group_orientation">界面方向</string>
+    <string name="set_orientation_style">默认方向</string>
+    <string name="set_orientation_landscape">横屏使用</string>
+    <string name="set_orientation_portrait">竖屏使用</string>
+    <string name="set_orientation_note">此设置只决定录制页方向，设置、相册、播放器等非录制页仍跟随系统的自动旋转；改完回录制页立即生效，杀进程重进仍保留</string>
+
     <!-- 交互动画风格 -->
     <string name="set_group_motion">动画风格</string>
     <string name="set_motion_style">交互动画</string>
