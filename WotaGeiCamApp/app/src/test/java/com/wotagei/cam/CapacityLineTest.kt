@@ -1,6 +1,7 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.core.capacityLineText
+import com.wotagei.cam.core.capacityTierText
 import com.wotagei.cam.core.freeSpaceShort
 import com.wotagei.cam.core.recordableText
 import org.junit.Assert.assertEquals
@@ -38,5 +39,21 @@ class CapacityLineTest {
         assertEquals("--m", recordableText(0L, 10_128_000))
         assertEquals("--m", recordableText(1_000L, 0))
         assertEquals("0M · --m", capacityLineText(0L, 10_128_000))
+    }
+
+    @Test
+    fun tiersFollowAvailableRoom() {
+        // §74：竖屏 360dp 窗口扣掉顶栏固定预留 66dp 只剩 294dp → 走小时档；横屏 800dp 走满档
+        assertEquals("96.2G · 22h39m", capacityTierText(98_508L, 10_128_000, 734f))
+        assertEquals("96.2G · 22h", capacityTierText(98_508L, 10_128_000, 294f))
+        assertEquals("96.2G", capacityTierText(98_508L, 10_128_000, 245f))
+    }
+
+    @Test
+    fun subHourKeepsMinutesInHoursTier() {
+        // 不足 1 小时时小时档没有可退的空间，与满档同形；再窄就只剩容量
+        assertEquals("512M · 18m", capacityTierText(1_368L, 10_128_000, 294f))
+        assertEquals("512M", capacityTierText(1_368L, 10_128_000, 200f))
+        assertEquals("0M · --m", capacityTierText(0L, 10_128_000, 734f))
     }
 }

@@ -203,3 +203,27 @@ fun recordableText(freeMb: Long, totalBitrateBps: Int): String {
 /** 顶栏容量段读数：「96.2G · 3h18m」 */
 fun capacityLineText(freeMb: Long, totalBitrateBps: Int): String =
     "${freeSpaceShort(freeMb)} · ${recordableText(freeMb, totalBitrateBps)}"
+
+/** 满档之外再退一档：只留小时「96.2G · 3h」，1 小时以内与满档同形 */
+fun recordableHoursText(freeMb: Long, totalBitrateBps: Int): String {
+    if (freeMb <= 0L || totalBitrateBps <= 0) return "--m"
+    val sec = freeMb * 1_048_576L * 8L / totalBitrateBps
+    return if (sec < 3600L) recordableText(freeMb, totalBitrateBps) else "${sec / 3600L}h"
+}
+
+/** 整枚顶栏胶囊实测宽（100% 文本、真机节点）：广角 47.5 + 画幅 135 + 容量 134 + 分隔与内边距 */
+const val CAPACITY_ROOM_FULL_DP = 320f
+
+/** 「96.2G · 3h」这一档需要的宽度 */
+const val CAPACITY_ROOM_HOURS_DP = 290f
+
+/**
+ * 顶栏容量段按**可用宽度**取三档（§74）：竖屏 360dp 窗口扣掉顶栏固定预留只剩约 294dp，
+ * 全长「96.2G · 3h18m」本来就装不下，会被省略号裁成「96.2G · 3h1…」，所以退档而不是硬挤。
+ * `roomDp` 由调用方折算好（已除过文本高度），这里只做纯取位，便于单测。
+ */
+fun capacityTierText(freeMb: Long, totalBitrateBps: Int, roomDp: Float): String = when {
+    roomDp >= CAPACITY_ROOM_FULL_DP -> capacityLineText(freeMb, totalBitrateBps)
+    roomDp >= CAPACITY_ROOM_HOURS_DP -> "${freeSpaceShort(freeMb)} · ${recordableHoursText(freeMb, totalBitrateBps)}"
+    else -> freeSpaceShort(freeMb)
+}
