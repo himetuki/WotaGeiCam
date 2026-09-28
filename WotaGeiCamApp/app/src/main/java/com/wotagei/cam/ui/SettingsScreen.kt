@@ -450,8 +450,18 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.height(6.dp))
             val storageCtx = androidx.compose.ui.platform.LocalContext.current
-            // 每次组合都现读：他从系统设置页回来时这个组合会重跑，状态才不会停在旧的
-            val granted = com.wotagei.cam.core.WotaStorage.hasAllFilesAccess()
+            // 从系统设置页回来时不会自动重组合，所以挂一个 ON_RESUME 计数：
+            // 不这么做的话他开完权限回到设置页，这颗还写着"去系统设置打开"（状态是假的）
+            val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+            var resumeTick by remember { mutableIntStateOf(0) }
+            androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+            }
+            val granted = remember(resumeTick) { com.wotagei.cam.core.WotaStorage.hasAllFilesAccess() }
             ChipCell(
                 text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
                 selected = granted,
