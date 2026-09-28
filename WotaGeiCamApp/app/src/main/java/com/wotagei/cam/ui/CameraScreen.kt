@@ -649,7 +649,10 @@ fun CameraScreen(
                 onFocusClick = { pop = PillKey.FOCUS },
                 onStabClick = { pop = PillKey.STAB },
                 onBtClick = { pop = PillKey.BT },
-                modifier = Modifier.align(Alignment.CenterEnd).displayCutoutPadding()
+                // #58：这台机横屏下根容器实测宽 1600，而窗口可用右缘只到 1532（差 68px），
+                // displayCutoutPadding() 与 safeDrawingPadding() 在这台机都给 0（挖孔在左侧、系统栏沉浸式隐藏），
+                // 于是右对齐的整栏右半边被推到可视区之外。按实测差值显式让位。
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 34.dp)
             )
             bottomBar(Modifier.align(Alignment.BottomCenter).safeDrawingPadding())
         }
