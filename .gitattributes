@@ -1,0 +1,11 @@
+# 禁止 git 做任何行尾转换：
+# 行尾转换可能改变文件字节内容、破坏按字节校验的构建。
+* -text
+
+# 明确标记为二进制，避免 diff 噪音
+*.apk binary
+*.so binary
+*.dex binary
+*.png binary
+*.webp binary
+*.jar binary
