@@ -156,6 +156,7 @@ import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.BtChip
 import com.wotagei.cam.ui.widget.CameraSurface
+import com.wotagei.cam.ui.widget.AttitudeCard
 import com.wotagei.cam.ui.widget.LevelBadge
 import com.wotagei.cam.ui.widget.RefLineOverlay
 import kotlinx.coroutines.delay
@@ -614,6 +615,11 @@ fun CameraScreen(
                 btConnected = btActive?.connected == true,
                 btVolumePct = btVolumePct,
                 zoomLabel = String.format(java.util.Locale.US, "%.1fx", zoom.value),
+                zoomTiers = zoom.range?.let { zoomQuickTiers(it.start, it.endInclusive) }.orEmpty(),
+                zoomValue = zoom.value,
+                onZoomPick = { tier ->
+                    if (recording) lockTip() else params.zoom.value = zoom.copy(value = tier)
+                },
                 focusLabel = stringResource(R.string.pill_focus),
                 hidden = hiddenPills,
                 showFocus = focusUsable,
@@ -980,6 +986,9 @@ private fun RightRail(
     btConnected: Boolean,
     btVolumePct: Int,
     zoomLabel: String,
+    zoomTiers: List<Float>,
+    zoomValue: Float,
+    onZoomPick: (Float) -> Unit,
     focusLabel: String,
     showFocus: Boolean,
     hidden: Set<CamPill>,
@@ -1001,7 +1010,7 @@ private fun RightRail(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp, alignment = Alignment.CenterVertically)
     ) {
-        if (CamPill.LEVEL !in hidden) LevelBadge(roll, pitch, levelEnabled)
+        if (CamPill.LEVEL !in hidden) AttitudeCard(roll, pitch, levelEnabled)
         if (showVolume && CamPill.VOLUME !in hidden) VolumeLeds(db)
         if (CamPill.BT !in hidden) BtChip(connected = btConnected, volumePct = btVolumePct, onClick = onBtClick)
         if (CamPill.ZOOM !in hidden) WotaChip(
@@ -1010,6 +1019,23 @@ private fun RightRail(
             modifier = zoomModifier,
             onClick = onZoomClick
         )
+        // 竖排变焦快捷档（鸿蒙化第 3 条）：单手拇指就够得着；档位仍只取运行时变焦范围里存在的
+        if (CamPill.ZOOM !in hidden && zoomTiers.size > 1) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                zoomTiers.forEach { tier ->
+                    val picked = kotlin.math.abs(zoomValue - tier) < 0.01f
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.1fx", tier),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (picked) WotaAccent else WotaTextDim,
+                        modifier = Modifier
+                            .wotaCard(WotaShape.pill)
+                            .clickable { onZoomPick(tier) }
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                    )
+                }
+            }
+        }
         // #44：定焦镜头没有一样东西能调，整颗入口隐藏，不摆一排灰选项
         if (showFocus) {
             WotaChip(
