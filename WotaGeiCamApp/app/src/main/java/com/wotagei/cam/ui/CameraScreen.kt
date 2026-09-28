@@ -25,6 +25,9 @@ import androidx.compose.material.icons.filled.SwitchCamera
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -740,7 +743,14 @@ private fun HudItem.pillKey(): PillKey = when (this) {
  * 底栏在预览区下沿占位的高度：录制键 50dp + 底栏上下内边距 3dp×2 + 4dp 呼吸。
  * 预览内 HUD 用它避让，改底栏控件尺寸时同步改这里。
  */
-private val BottomBarSpace = 60.dp
+/**
+ * HUD 距屏幕底边的避让量。底栏是一整排（创作组 + 居中的悬浮 Dock），实测高约 62dp，
+ * 再加 HUD 自身的 6dp 内边距与安全余量。
+ *
+ * 真机量过两次：只给 60dp 时「10M 码率」那颗被「屏幕监看」整个压住；
+ * 底栏并成一排之前给到 112dp，HUD 又会被顶到画面中间。
+ */
+private val BottomBarSpace = 76.dp
 
 // ------------------------------------------------------------------ 顶栏
 
@@ -1016,8 +1026,13 @@ private fun RightRail(
     modifier: Modifier = Modifier
 ) {
     // 竖向居中而不是「贴顶 + 写死 34dp」：上下控件条现在浮在画面之上，靠边排就会被压住
+    // 竖向可滚：横屏可用高度只有约 360dp，姿态仪卡片 + 4 档变焦 + 对焦 + 防抖在某些开关组合下
+    // 仍会超出（真机截图里「对焦」被裁在屏幕底边外）。居中排布不变，超出时改成可滑动而不是裁尾。
     Column(
-        modifier.width(54.dp).fillMaxHeight(),
+        modifier
+            .width(54.dp)
+            .fillMaxHeight()
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp, alignment = Alignment.CenterVertically)
     ) {
@@ -1132,14 +1147,16 @@ private fun BottomBar(
 ) {
     // 参考图底栏没有通栏黑带，而且录制键恒在屏幕正中：左右两组用 Box 分别贴边，
     // 用两个等权 Spacer 会被较宽的一侧挤偏（真机截图核对过）
-    Column(
+    // 用户 2026-09-28：画面下侧只留一行。创作项与 Dock 同一排 ——
+    // 左边那组窄屏时横向可滚，中间的 Dock（缩略图/快门/翻转）恒居中，快门永远不用滑动就能点到。
+    Row(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        // 创作项仍是一排，挪到 Dock 上方，显隐继续由 #54 的开关管
         Row(
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -1175,7 +1192,6 @@ private fun BottomBar(
                 )
             }
         }
-        Spacer(Modifier.height(6.dp))
         // 悬浮胶囊 Dock（鸿蒙化第 4 条）：素材缩略图 / 快门 / 镜头翻转三件事共用一枚
         // hudScrim + 高光描边的壳，快门不再孤零零悬在画面中间
         Row(
@@ -1211,6 +1227,8 @@ private fun BottomBar(
                 onClick = onFlipLens
             )
         }
+        // 右侧等权占位：把 Dock 顶回屏幕正中（参考图底栏就是「录制键恒在正中」）
+        Spacer(Modifier.weight(1f))
     }
 }
 
