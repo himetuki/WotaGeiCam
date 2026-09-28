@@ -151,6 +151,19 @@ fun assignRearTiers(count: Int): List<LensType> = when {
         List(count - 3) { LensType.SUPER_TELEPHOTO }
 }
 
+/**
+ * 单击循环镜头的纯算式：在**运行时枚举出的**槽位键列表里取当前那颗的下一颗，走完最后一颗回第一颗。
+ *
+ * 只认 [LensSlot.key]（档位会重名，只有键能唯一指认一颗）；列表顺序即 `enumerateLenses` 的归档顺序
+ * （超广角→广角→长焦→超长焦→前摄），这里不出现任何机型硬编码。
+ * 不足两颗时返回 null，由调用方决定是提示还是什么都不做。
+ */
+fun nextLensKey(keys: List<String>, currentKey: String?): String? {
+    if (keys.size < 2) return null
+    val index = keys.indexOf(currentKey)
+    return keys[if (index < 0) 0 else (index + 1) % keys.size]
+}
+
 /** M1 门禁：`adb logcat -s WotaAbility` 打印镜头列表 + 每档能力范围 */
 fun dumpLenses(slots: List<LensSlot>) {
     Log.i(WotaTag.LENS, "lenses total=${slots.size}")

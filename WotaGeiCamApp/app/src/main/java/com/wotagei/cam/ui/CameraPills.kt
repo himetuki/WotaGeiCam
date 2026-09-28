@@ -67,9 +67,42 @@ import kotlin.math.roundToInt
  * 录制页就近胶囊的类别（一个 key 只管一件事）。
  *
  * 没扩 [com.wotagei.cam.core.HudItem] 是因为那一位掩码要写进 `hud_items` 持久化键，
- * 加值就等于改存量配置语义；右栏的「对焦」和兜底的「更多」本来也不属于可自定义读数。
+ * 加值就等于改存量配置语义；右竖 Dock 的「对焦」本来也不属于可自定义读数。
+ * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
 enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT }
+
+/**
+ * `PillKey` → 锚点写入方 登记表（审查 S2-2：把 §69「浮层甩到屏幕原点」这一族从结构上封死）。
+ *
+ * 每颗就近浮层都必须锚在**触发它的那颗控件**上：控件把 `anchorOf(PillKey.X)` 贴到自己身上，在布局期
+ * 把窗口矩形回报进 `CameraScreen` 的 `pillAnchors`；[PillHost] 取到的矩形为空时只能按 `IntRect.Zero`
+ * 弹到左上角。B1 之前的「蓝牙」就是这一族的原型：全工程只有读取方（这里）与触发点（`onBtClick`），
+ * 没有写入方，面板于是永久钉在左上角而入口在右缘——这类洞 lint 不报、编译不报，只有真机点得到。
+ *
+ * **新增 PillKey 的同轮义务**（与 AGENTS「新增控件的同轮义务」同一条）：
+ * ① 下面这张表加一行；② 承载它的控件把锚点形参做成**无默认值的必传参数**，让漏挂变编译错误
+ * （拿不到锚点的那些才显式传 `Modifier` 并在注释写明原因）；③ [PillHost] 的 when 补内容宿主（穷尽性已强制）。
+ * 忘了 ① 由 `PillAnchorRegistryTest` 判失败：表必须逐个 key 覆盖 [PillKey.values()]，写入方不许空串。
+ */
+val pillAnchorWriters: Map<PillKey, String> = mapOf(
+    PillKey.SIZE to "CameraScreen.TopBar(sizeModifier) → TopCapsule 画幅段",
+    PillKey.STORAGE to "CameraScreen.TopBar(freeModifier) → TopCapsule 容量段",
+    PillKey.LENS to "CameraScreen.BottomBar(lensModifier) → 底栏镜头那颗（六项第 7 条从顶栏搬来）",
+    PillKey.ZOOM to "CameraScreen.RightDock(zoomModifier)；右 Dock 关掉时由 ParamsHud 顶上",
+    PillKey.FOCUS to "CameraScreen.RightDock(focusModifier)",
+    PillKey.STAB to "CameraScreen.RightDock(stabModifier)",
+    PillKey.BT to "CameraScreen.RightDock(btModifier) → widget.BtChip(modifier)",
+    PillKey.REFLINE to "CameraScreen.LeftDock(modifierFor)",
+    PillKey.MONITOR to "CameraScreen.LeftDock(modifierFor)",
+    PillKey.FLASH to "CameraScreen.LeftDock(modifierFor)",
+    PillKey.SHUTTER to "CameraScreen.ParamsHud(modifierFor) → HudItem.SHUTTER",
+    PillKey.ISO to "CameraScreen.ParamsHud(modifierFor) → HudItem.ISO",
+    PillKey.EV to "CameraScreen.ParamsHud(modifierFor) → HudItem.EV",
+    PillKey.WB to "CameraScreen.ParamsHud(modifierFor) → HudItem.WB",
+    PillKey.FPS to "CameraScreen.ParamsHud(modifierFor) → HudItem.FPS",
+    PillKey.BITRATE to "CameraScreen.ParamsHud(modifierFor) → HudItem.BITRATE"
+)
 
 /**
  * 就近胶囊的内容宿主。
@@ -358,7 +391,9 @@ private fun ZoomPill(anchor: IntRect, params: WotaParams, onClose: () -> Unit) {
     val zoom by params.zoom.observed()
     val lo = zoom.range?.start ?: 1f
     val hi = zoom.range?.endInclusive ?: 1f
-    val quick = listOf(1f, 2f, 3f, 4f, 6f, 10f).filter { it >= lo && it <= hi }
+    // 快捷档与「点按循环」共用一份真源（审查 S3-6）：这里曾内联过一张不含 0.5× 的表，
+    // 于是同一台机点按能到 0.5×、面板里却没有那颗，两处倍率梯各说各话
+    val quick = zoomPanelTiers(lo, hi)
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_zoom)) {
         if (quick.isNotEmpty()) {
             PillChoices(

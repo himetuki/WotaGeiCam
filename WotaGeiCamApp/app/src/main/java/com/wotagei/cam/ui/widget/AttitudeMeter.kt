@@ -25,7 +25,6 @@ import com.wotagei.cam.camera.LevelSensor
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.wotaCard
-import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaDivider
 import com.wotagei.cam.ui.theme.WotaText
@@ -87,17 +86,22 @@ fun ArtificialHorizon(roll: Float, pitch: Float, modifier: Modifier = Modifier) 
 }
 
 /**
- * 姿态仪卡片：地平仪 + 俯仰/横滚双读数（右侧裸数值的老形态读不出趋势，见鸿蒙化第 3 条）。
+ * 姿态仪卡片：只剩圆形人工地平仪 + 一句状态。
+ * 用户 2026-09-28 六项第 2 条：横滚/俯仰的角度数字取消，"偏了多少"由天地线自己表达；
+ * 「已回正 / 偏斜中」留着一行，它不是角度数值而是异步采样状态，没有它人不知道传感器在不在工作。
  * [enabled] 为 false 时整块不组合，与 #54 的 `CamPill.LEVEL` 一起决定显隐。
+ *
+ * [card] 决定是否自绘那层底板（S3-4）：单独摆在画面上要有一层底才可读，默认 true 保持旧行为；
+ * 放进左右竖 Dock 时由 Dock 的底板统一承托，传 false，否则两层 hudScrim 叠成"卡中卡"。
  */
 @Composable
-fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean) {
+fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean, card: Boolean = true) {
     if (!enabled) return
     val level = kotlin.math.abs(roll) <= LevelSensor.LEVEL_TOLERANCE_DEG &&
         kotlin.math.abs(pitch) <= LevelSensor.LEVEL_TOLERANCE_DEG
     Column(
         Modifier
-            .wotaCard(WotaShape.medium)
+            .then(if (card) Modifier.wotaCard(WotaShape.medium) else Modifier)
             .padding(horizontal = 4.dp, vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -107,29 +111,6 @@ fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean) {
             text = stringResource(if (level) R.string.level_state_level else R.string.level_state_tilt),
             style = MaterialTheme.typography.labelSmall,
             color = if (level) WotaAccent else WotaWarn,
-            maxLines = 1
-        )
-        // 标签与数值分两行：一行的话「横滚 -1.6°」比右栏的 54dp 还宽，
-        // 整段会溢出到窗口右缘之外被裁掉（真机 uiautomator 量过：节点被裁到 [1500→1532]）
-        AttitudeReadout(R.string.level_tag_roll, roll)
-        AttitudeReadout(R.string.level_tag_pitch, pitch)
-    }
-}
-
-/** 姿态仪的一行读数：小标签在上、等宽数值在下，宽度落在 54dp 右栏里 */
-@Composable
-private fun AttitudeReadout(labelRes: Int, deg: Float) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = stringResource(labelRes),
-            style = MaterialTheme.typography.labelSmall,
-            color = WotaTextDim,
-            maxLines = 1
-        )
-        Text(
-            text = stringResource(R.string.level_angle_value, deg),
-            style = MonoStyle,
-            color = WotaText,
             maxLines = 1
         )
     }

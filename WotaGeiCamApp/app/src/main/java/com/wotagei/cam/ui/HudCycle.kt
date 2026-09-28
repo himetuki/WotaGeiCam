@@ -109,21 +109,21 @@ fun hudCycleStep(item: HudItem, params: WotaParams): Boolean {
 }
 
 /**
- * 竖排变焦胶囊与循环取值共用的快捷档：只保留**运行时变焦范围里**的那些档，
+ * 变焦「点按循环取值」的快捷档：**唯一一份倍率梯真源**。只保留**运行时变焦范围里**的那些档，
  * 本机没有 0.5× 能力就不会出现那颗（AGENTS：档位一律从能力表来）。
  */
 fun zoomQuickTiers(lo: Float, hi: Float): List<Float> =
     listOf(0.5f, 1f, 2f, 3f, 4f, 6f, 10f).filter { it >= lo && it <= hi }
 
+/**
+ * 长按面板里的快捷档：直接取 [zoomQuickTiers]，**与点按循环同源**（审查 S3-6）。
+ *
+ * B1 之前 `CameraPills.ZoomPill` 内联过另一张 `1,2,3,4,6,10`（不含 0.5×），两处各说各话：
+ * 点按循环能走到 0.5×，面板里却找不到那颗。留一个具名转发而不是让面板自己抄一遍表，
+ * 是为了让 `ZoomTiersTest.panelAndCycleShareOneLadder` 能在 JVM 里把"同源"这条钉住。
+ * 连续倍率与非常规档位仍由面板里那根滑杆覆盖（一个都不少）。
+ */
+fun zoomPanelTiers(lo: Float, hi: Float): List<Float> = zoomQuickTiers(lo, hi)
+
 /** 这两项的取值就是 AE 手动三件套的一部分，AE 锁定时不许被点按循环改动 */
 private val AE_LOCK_PROTECTED = setOf(HudItem.SHUTTER, HudItem.ISO)
-
-/**
- * 竖排变焦胶囊实际画出来的那几档：从 `zoomQuickTiers` 的结果里取离当前值最近的 [max] 档。
- *
- * 右栏是竖向居中的 `Column`，不会滚动；横屏时可用高度只有约 360dp，
- * 姿态仪卡片 + 音量 + 蓝牙 + 变焦 + 对焦 + 防抖已经吃掉大半，再把 7 档变焦全铺上去就会被裁掉尾巴
- * （§39 量过这台机横屏 720px 的紧张程度）。全部档位仍在长按面板里，一个都不少。
- */
-fun zoomRailTiers(tiers: List<Float>, current: Float, max: Int = 4): List<Float> =
-    tiers.sortedBy { kotlin.math.abs(it - current) }.take(max).sorted()
