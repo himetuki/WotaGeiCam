@@ -180,3 +180,26 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
         fun maskOf(types: List<CamPill>): Int = types.fold(0) { acc, t -> acc or t.bit }
     }
 }
+
+/** 剩余空间读数：≥1G 走一位小数（96.2G），否则直接 MB（512M） */
+fun freeSpaceShort(mb: Long): String = if (mb >= 1024L) "%.1fG".format(mb / 1024f) else "${mb}M"
+
+/**
+ * 剩余空间按**当前总码率**还能录多久：`3h18m` / `18m` / `<1m`，读不出来时给 `--m`。
+ *
+ * 码率一律由调用方现取（视频档 + 音频档），这里不写死任何机型数值；
+ * 换算按 1 MiB = 1048576 B 与总 bps 直算，误差来源只有码率控制本身。
+ */
+fun recordableText(freeMb: Long, totalBitrateBps: Int): String {
+    if (freeMb <= 0L || totalBitrateBps <= 0) return "--m"
+    val sec = freeMb * 1_048_576L * 8L / totalBitrateBps
+    return when {
+        sec < 60L -> "<1m"
+        sec < 3600L -> "${sec / 60L}m"
+        else -> "${sec / 3600L}h${"%02d".format(sec % 3600L / 60L)}m"
+    }
+}
+
+/** 顶栏容量段读数：「96.2G · 3h18m」 */
+fun capacityLineText(freeMb: Long, totalBitrateBps: Int): String =
+    "${freeSpaceShort(freeMb)} · ${recordableText(freeMb, totalBitrateBps)}"
