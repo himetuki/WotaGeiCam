@@ -1039,9 +1039,11 @@ private fun RightRail(
     // 竖向居中而不是「贴顶 + 写死 34dp」：上下控件条现在浮在画面之上，靠边排就会被压住
     // 竖向可滚：横屏可用高度只有约 360dp，姿态仪卡片 + 4 档变焦 + 对焦 + 防抖在某些开关组合下
     // 仍会超出（真机截图里「对焦」被裁在屏幕底边外）。居中排布不变，超出时改成可滑动而不是裁尾。
+    // §73：54dp 是「46dp 地平仪圆 + 左右各 4dp 内边距」刚好卡平，等宽读数的「-10.6°」差一个
+    // 度数符号就被卡片右缘裁成「-10.」（真机节点 92px＝46dp 撞满可用宽）。加宽 8dp 让读数留余量
     Column(
         modifier
-            .width(54.dp)
+            .width(62.dp)
             .fillMaxHeight()
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
