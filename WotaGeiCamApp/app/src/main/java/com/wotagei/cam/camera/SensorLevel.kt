@@ -197,7 +197,7 @@ class LevelSensor(context: Context) : SensorEventListener {
         /** 小于该角度变化不发布新值：50Hz 原始事件直接驱动 Compose 会白白重组发热 */
         const val EMIT_STEP_DEG = 0.1f
 
-        /** 判定左右水平（UI 侧同用一个函数着色，见 `ui/widget/LevelMeter`） */
+        /** 判定左右水平（UI 侧同用一个函数着色，见 `ui/widget/AttitudeMeter`） */
         fun isLevelOf(rollDegrees: Float): Boolean = abs(rollDegrees) < LEVEL_TOLERANCE_DEG
 
         private const val TAG = "WotaSensor"
