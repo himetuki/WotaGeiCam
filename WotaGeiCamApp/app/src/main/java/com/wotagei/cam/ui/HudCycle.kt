@@ -1,7 +1,6 @@
 package com.wotagei.cam.ui
 
 import com.wotagei.cam.core.AeMode
-import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.core.WotaParams
@@ -25,9 +24,11 @@ fun <T> nextInCycle(options: List<T>, current: T): T? {
 /**
  * 把某个读数胶囊推进一档。
  *
- * @return 有没有真的改动（false 时调用方给「这一项现在不能改」的提示，不静默吞掉点击）
+ * @return 有没有真的改动；false 时调用方给提示，绝不静默吞掉一次点击
  */
-fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
+fun hudCycleStep(item: HudItem, params: WotaParams): Boolean {
+    // 长按对焦锁 AE（组合动作）之后点快门/ISO 不该把锁悄悄解开：那是用户明确要的状态
+    if (item in AE_LOCK_PROTECTED && params.aeMode.value == AeMode.LOCK) return false
     val aeAuto = params.aeMode.value != AeMode.MANUAL
     return when (item) {
         HudItem.SHUTTER -> {
@@ -39,10 +40,11 @@ fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
             if (aeAuto) {
                 params.aeMode.value = AeMode.MANUAL
                 params.shutter.value = params.shutter.value.copy(value = ns.first())
+            } else if (params.shutter.value.value == ns.last()) {
+                params.aeMode.value = AeMode.AUTO   // 走完一圈：这一拍只回 AUTO，值留在最后一档
             } else {
                 val next = nextInCycle(ns, params.shutter.value.value) ?: return false
                 params.shutter.value = params.shutter.value.copy(value = next)
-                if (next == ns.first()) params.aeMode.value = AeMode.AUTO   // 走完一圈回 AUTO
             }
             true
         }
@@ -54,10 +56,11 @@ fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
             if (aeAuto) {
                 params.aeMode.value = AeMode.MANUAL
                 params.iso.value = params.iso.value.copy(value = ladder.first())
+            } else if (params.iso.value.value == ladder.last()) {
+                params.aeMode.value = AeMode.AUTO
             } else {
                 val next = nextInCycle(ladder, params.iso.value.value) ?: return false
                 params.iso.value = params.iso.value.copy(value = next)
-                if (next == ladder.first()) params.aeMode.value = AeMode.AUTO
             }
             true
         }
@@ -111,3 +114,6 @@ fun hudCycleStep(item: HudItem, params: WotaParams, evStep: Float): Boolean {
  */
 fun zoomQuickTiers(lo: Float, hi: Float): List<Float> =
     listOf(0.5f, 1f, 2f, 3f, 4f, 6f, 10f).filter { it >= lo && it <= hi }
+
+/** 这两项的取值就是 AE 手动三件套的一部分，AE 锁定时不许被点按循环改动 */
+private val AE_LOCK_PROTECTED = setOf(HudItem.SHUTTER, HudItem.ISO)
