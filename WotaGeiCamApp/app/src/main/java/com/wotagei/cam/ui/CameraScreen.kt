@@ -537,6 +537,7 @@ fun CameraScreen(
                 freeMb,
                 bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
             ),
+            capacityCompact = freeSpaceText(freeMb),
             freeLow = freeMb < WotaTiers.MIN_FREE_MB,
             recording = recStatus == RecordStatus.START,
             elapsedLabel = formatDuration(recElapsed),
@@ -746,6 +747,7 @@ private fun TopBar(
     sizeLabel: String,
     hidden: Set<CamPill>,
     capacityLabel: String,
+    capacityCompact: String,
     freeLow: Boolean,
     recording: Boolean,
     elapsedLabel: String,
@@ -804,6 +806,7 @@ private fun TopBar(
                     lensLabel = lensLabel,
                     sizeLabel = sizeLabel,
                     capacityLabel = capacityLabel,
+                    capacityCompact = capacityCompact,
                     hidden = hidden,
                     freeLow = freeLow,
                     lensModifier = lensModifier,
@@ -1738,6 +1741,7 @@ private fun TopCapsule(
     lensLabel: String,
     sizeLabel: String,
     capacityLabel: String,
+    capacityCompact: String,
     hidden: Set<CamPill>,
     freeLow: Boolean,
     lensModifier: Modifier,
@@ -1747,35 +1751,46 @@ private fun TopCapsule(
     onSizeClick: () -> Unit,
     onCapacityClick: () -> Unit
 ) {
-    val segs = buildList {
-        if (CamPill.LENS !in hidden) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
-        if (CamPill.SIZE !in hidden) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
-        if (CamPill.STORAGE !in hidden) {
-            add(TopSeg(capacityLabel, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))
-        }
-    }
-    if (segs.isEmpty()) return
-    Row(
-        Modifier
-            .wotaCard(WotaShape.pill)
-            .padding(horizontal = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        segs.forEachIndexed { index, seg ->
-            if (index > 0) {
-                Box(Modifier.width(1.dp).height(12.dp).background(WotaDivider))
+    val visibleLens = CamPill.LENS !in hidden
+    val visibleSize = CamPill.SIZE !in hidden
+    val visibleStorage = CamPill.STORAGE !in hidden
+    if (!visibleLens && !visibleSize && !visibleStorage) return
+    androidx.compose.foundation.layout.BoxWithConstraints {
+        // 这台机竖屏约 360dp 宽，三段按 12sp 估已接近占满；设置页还能把文本高度调到 120%，
+        // 那时最右的「可录时长」会被挤掉尾巴。窄于此阈值就先退成只剩容量，其余两段不动。
+        val capacityText = if (maxWidth < CAPACITY_FULL_UNDER) capacityCompact else capacityLabel
+        val segs = buildList {
+            if (visibleLens) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
+            if (visibleSize) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
+            if (visibleStorage) {
+                add(TopSeg(capacityText, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))
             }
-            Text(
-                text = seg.label,
-                style = MaterialTheme.typography.labelMedium,
-                color = seg.tint,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = seg.anchor
-                    .clip(RoundedCornerShape(percent = 50))
-                    .clickable(onClick = seg.onClick)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+        }
+        Row(
+            Modifier
+                .wotaCard(WotaShape.pill)
+                .padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            segs.forEachIndexed { index, seg ->
+                if (index > 0) {
+                    Box(Modifier.width(1.dp).height(12.dp).background(WotaDivider))
+                }
+                Text(
+                    text = seg.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = seg.tint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = seg.anchor
+                        .clip(RoundedCornerShape(percent = 50))
+                        .clickable(onClick = seg.onClick)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
         }
     }
 }
+
+/** 顶栏宽度低于此值时容量段退成只剩「96.2G」，丢掉可录时长（文本高度调到 120% 时不裁尾） */
+private val CAPACITY_FULL_UNDER = 320.dp
