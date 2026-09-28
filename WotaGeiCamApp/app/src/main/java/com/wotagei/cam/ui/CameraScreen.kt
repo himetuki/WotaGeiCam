@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -20,6 +21,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.material.icons.filled.SwitchCamera
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -591,7 +593,11 @@ fun CameraScreen(
                     )
                 }
             },
-            onThumbClick = { if (recording) lockTip() else onOpenGallery() }
+            onThumbClick = { if (recording) lockTip() else onOpenGallery() },
+            onFlipLens = {
+                if (recording) lockTip()
+                else ctrl.switchLens(if (isFront) LensType.WIDE else LensType.FRONT)
+            }
         )
     }
 
@@ -1116,17 +1122,19 @@ private fun BottomBar(
     onFlashClick: () -> Unit,
     onCurveClick: () -> Unit,
     onRecordClick: () -> Unit,
-    onThumbClick: () -> Unit
+    onThumbClick: () -> Unit,
+    onFlipLens: () -> Unit
 ) {
     // 参考图底栏没有通栏黑带，而且录制键恒在屏幕正中：左右两组用 Box 分别贴边，
     // 用两个等权 Spacer 会被较宽的一侧挤偏（真机截图核对过）
-    Box(
+    Column(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // 创作项仍是一排，挪到 Dock 上方，显隐继续由 #54 的开关管
         Row(
-            Modifier.align(Alignment.CenterStart),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -1162,30 +1170,41 @@ private fun BottomBar(
                 )
             }
         }
-        RecordButton(
-            recording = recording,
-            busy = busy,
-            modifier = Modifier.align(Alignment.Center),
-            onClick = onRecordClick
-        )
-        Box(
+        Spacer(Modifier.height(6.dp))
+        // 悬浮胶囊 Dock（鸿蒙化第 4 条）：素材缩略图 / 快门 / 镜头翻转三件事共用一枚
+        // hudScrim + 高光描边的壳，快门不再孤零零悬在画面中间
+        Row(
             Modifier
-                .align(Alignment.CenterEnd)
-                .size(40.dp)
-                .wotaCard(WotaShape.medium)
-                .clickable(onClick = onThumbClick)
+                .wotaCard(WotaShape.pill)
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            val uri = lastUri
-            if (uri != null) {
-                VideoThumbnail(uri = uri, modifier = Modifier.matchParentSize(), px = 160)
-            } else {
-                Icon(
-                    Icons.Filled.PhotoLibrary,
-                    contentDescription = stringResource(R.string.cam_gallery_entry),
-                    tint = WotaTextDim,
-                    modifier = Modifier.padding(9.dp).size(22.dp)
-                )
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onThumbClick),
+                contentAlignment = Alignment.Center
+            ) {
+                val uri = lastUri
+                if (uri != null) {
+                    VideoThumbnail(uri = uri, modifier = Modifier.matchParentSize(), px = 160)
+                } else {
+                    Icon(
+                        Icons.Filled.PhotoLibrary,
+                        contentDescription = stringResource(R.string.cam_gallery_entry),
+                        tint = WotaTextDim,
+                        modifier = Modifier.padding(6.dp).size(20.dp)
+                    )
+                }
             }
+            RecordButton(recording = recording, busy = busy, onClick = onRecordClick)
+            WotaIconButton(
+                image = Icons.Filled.SwitchCamera,
+                description = stringResource(R.string.cam_flip_lens),
+                onClick = onFlipLens
+            )
         }
     }
 }
@@ -1276,6 +1295,32 @@ private fun RecordButton(
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
+        if (recording && !busy) {
+            // 呼吸光环：录制中这一圈缓慢涨落，余光里也能确认"还在录"；只动 scale/alpha，
+            // 不碰布局参数（MotionSpec 的既有约束），所以不会把预览层挤一下
+            val grow = androidx.compose.animation.core.rememberInfiniteTransition().animateFloat(
+                initialValue = 0.94f,
+                targetValue = 1.14f,
+                animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                    androidx.compose.animation.core.keyframes {
+                        durationMillis = 1_600
+                        0.94f at 0
+                        1.14f at 800 with androidx.compose.animation.core.LinearOutSlowInEasing
+                        0.94f at 1_600
+                    }
+                )
+            )
+            Box(
+                Modifier
+                    .size(WotaHit.recordRing)
+                    .graphicsLayer {
+                        scaleX = grow.value
+                        scaleY = grow.value
+                        alpha = 1f - (grow.value - 0.94f) / 0.2f * 0.72f
+                    }
+                    .border(2.dp, WotaRec.copy(alpha = 0.5f), CircleShape)
+            )
+        }
         Box(
             Modifier
                 .size(WotaHit.recordRing)
@@ -1688,6 +1733,8 @@ private data class TopSeg(val label: String, val anchor: Modifier, val tint: Col
  * 容量段顺手把裸字节换算成「96.2G · 3h18m」—— 录制时真正想知道的是"还能录多久"，不是"还剩多少字节"。
  * 每一段仍受 #54 的 `CamPill` 开关控制，关掉的段整段不组合。
  */
+/** 三个段各带自己的就近锚点 Modifier，命名规则让位给语义（lint 的 ModifierParameter 只认单个 modifier 形参） */
+@android.annotation.SuppressLint("ModifierParameter")
 @Composable
 private fun TopCapsule(
     lensLabel: String,
