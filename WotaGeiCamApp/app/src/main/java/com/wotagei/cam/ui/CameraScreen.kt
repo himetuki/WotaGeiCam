@@ -619,7 +619,7 @@ fun CameraScreen(
                 btConnected = btActive?.connected == true,
                 btVolumePct = btVolumePct,
                 zoomLabel = String.format(java.util.Locale.US, "%.1fx", zoom.value),
-                zoomTiers = zoom.range?.let { zoomQuickTiers(it.start, it.endInclusive) }.orEmpty(),
+                zoomTiers = zoom.range?.let { zoomRailTiers(zoomQuickTiers(it.start, it.endInclusive), zoom.value) }.orEmpty(),
                 zoomValue = zoom.value,
                 onZoomPick = { tier ->
                     if (recording) lockTip() else params.zoom.value = zoom.copy(value = tier)
@@ -892,7 +892,7 @@ private fun ParamsHud(
 ) {
     if (items.isEmpty() && !locked) return
     val motion = LocalMotion.current
-    // 参考图里参数是「一张一张独立小卡」，不是一整块面板，所以这里不再套外层底
+    // 参数是一颗一颗独立的悬浮胶囊，不是一整块面板，所以这里不套外层底
     Column(
         modifier.padding(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
