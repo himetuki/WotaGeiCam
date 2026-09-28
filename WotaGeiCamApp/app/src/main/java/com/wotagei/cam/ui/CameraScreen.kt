@@ -104,6 +104,7 @@ import com.wotagei.cam.core.hasAdjustableFocus
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
+import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.RenderMode
@@ -222,6 +223,8 @@ fun CameraScreen(
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
     val hudMask = WotaSettings.hudItems(settingsPrefs)
+    // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
+    val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
     val levelBuzz = WotaSettings.levelBuzzEnabled(settingsPrefs)
     val focusPoint by params.focusPoint.observed()
     val lens by params.lens.observed()
@@ -522,6 +525,7 @@ fun CameraScreen(
     val topBar: @Composable (Modifier) -> Unit = { barModifier ->
         TopBar(
             lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
+            hidden = hiddenPills,
             sizeLabel = sizeText(size),
             freeLabel = stringResource(R.string.cam_free_space, freeSpaceText(freeMb)),
             freeLow = freeMb < WotaTiers.MIN_FREE_MB,
@@ -547,6 +551,7 @@ fun CameraScreen(
     val bottomBar: @Composable (Modifier) -> Unit = { barModifier ->
         BottomBar(
             refLineOn = refLines != 0,
+            hidden = hiddenPills,
             effect = frameEffect,
             flash = flash,
             flashAvailable = canFlash,
@@ -602,6 +607,7 @@ fun CameraScreen(
                 btVolumePct = btVolumePct,
                 zoomLabel = String.format(java.util.Locale.US, "%.1fx", zoom.value),
                 focusLabel = stringResource(R.string.pill_focus),
+                hidden = hiddenPills,
                 showFocus = focusUsable,
                 focusActive = afMode == AfMode.MANUAL,
                 stabLabel = stringResource(R.string.cam_p_stab),
@@ -720,6 +726,7 @@ private val BottomBarSpace = 60.dp
 private fun TopBar(
     lensLabel: String,
     sizeLabel: String,
+    hidden: Set<CamPill>,
     freeLabel: String,
     freeLow: Boolean,
     recording: Boolean,
@@ -748,10 +755,10 @@ private fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            WotaChip(label = lensLabel, selected = false, modifier = lensModifier, onClick = onLensClick)
-            WotaChip(label = sizeLabel, selected = false, modifier = sizeModifier, onClick = onSizeClick)
+            if (CamPill.LENS !in hidden) WotaChip(label = lensLabel, selected = false, modifier = lensModifier, onClick = onLensClick)
+            if (CamPill.SIZE !in hidden) WotaChip(label = sizeLabel, selected = false, modifier = sizeModifier, onClick = onSizeClick)
             // 帧率读数在可自定义的常驻 HUD，顶栏只留「镜头 · 画幅 · 剩余空间」
-            WotaChip(
+            if (CamPill.STORAGE !in hidden) WotaChip(
                 label = freeLabel,
                 selected = false,
                 modifier = freeModifier,
@@ -947,6 +954,7 @@ private fun RightRail(
     zoomLabel: String,
     focusLabel: String,
     showFocus: Boolean,
+    hidden: Set<CamPill>,
     focusActive: Boolean,
     stabLabel: String,
     stabActive: Boolean,
@@ -965,10 +973,10 @@ private fun RightRail(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp, alignment = Alignment.CenterVertically)
     ) {
-        LevelBadge(roll, pitch, levelEnabled)
-        if (showVolume) VolumeLeds(db)
-        BtChip(connected = btConnected, volumePct = btVolumePct, onClick = onBtClick)
-        WotaChip(
+        if (CamPill.LEVEL !in hidden) LevelBadge(roll, pitch, levelEnabled)
+        if (showVolume && CamPill.VOLUME !in hidden) VolumeLeds(db)
+        if (CamPill.BT !in hidden) BtChip(connected = btConnected, volumePct = btVolumePct, onClick = onBtClick)
+        if (CamPill.ZOOM !in hidden) WotaChip(
             label = zoomLabel,
             selected = false,
             modifier = zoomModifier,
@@ -983,7 +991,7 @@ private fun RightRail(
                 onClick = onFocusClick
             )
         }
-        WotaChip(
+        if (CamPill.STAB !in hidden) WotaChip(
             label = stabLabel,
             selected = stabActive,
             modifier = stabModifier,
@@ -1037,6 +1045,7 @@ private fun VolumeLeds(db: Float) {
 @Suppress("LongParameterList")
 private fun BottomBar(
     refLineOn: Boolean,
+    hidden: Set<CamPill>,
     effect: FrameEffect,
     flash: Flash,
     flashAvailable: Boolean,
@@ -1067,14 +1076,14 @@ private fun BottomBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            WotaIconButton(
+            if (CamPill.REFLINE !in hidden) WotaIconButton(
                 image = Icons.Filled.GridOn,
                 description = stringResource(R.string.cam_p_refline),
                 selected = refLineOn,
                 modifier = refLineModifier,
                 onClick = onRefLineClick
             )
-            WotaChip(
+            if (CamPill.MONITOR !in hidden) WotaChip(
                 label = stringResource(
                     if (effect == FrameEffect.NONE) R.string.cam_p_monitor else effectShortRes(effect)
                 ),
@@ -1083,13 +1092,13 @@ private fun BottomBar(
                 onClick = onMonitorClick
             )
             // 曲线与斑马纹同级，是创作项，不该藏在「更多」里（§37 第 2 条）
-            WotaChip(
+            if (CamPill.CURVE !in hidden) WotaChip(
                 label = stringResource(R.string.cam_p_curve),
                 selected = curveOn,
                 onClick = onCurveClick
             )
             // 本机没闪光灯就不占这一格（§37 第 5 条）：能力一律从 characteristics 读
-            if (flashAvailable) {
+            if (flashAvailable && CamPill.FLASH !in hidden) {
                 WotaIconButton(
                     image = flashIcon(flash),
                     description = stringResource(flashLabelRes(flash)),
