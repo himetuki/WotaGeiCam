@@ -4,7 +4,6 @@
     <string name="cam_settings">设置</string>
     <string name="cam_gallery_entry">回看</string>
     <string name="cam_volume_meter">音量表</string>
-    <string name="cam_free_space">剩余 %1$s</string>
     <string name="cam_perm_title">权限未授予</string>
     <string name="cam_lock_tip">录制中，先停止才能改这一项</string>
     <string name="cam_no_camera_perm">需要相机权限才能取景</string>
@@ -153,4 +152,5 @@
     <string name="cam_record_stop_failed">停止录制失败，文件可能不完整</string>
     <string name="cam_record_released">录制已取消</string>
     <string name="cam_record_failed_generic">录制失败，请重试</string>
+    <string name="cam_flip_lens">翻转镜头</string>
 </resources>
