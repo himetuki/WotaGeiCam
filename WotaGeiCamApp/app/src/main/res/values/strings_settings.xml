@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="set_title">设置</string>
+    <string name="set_back">返回</string>
+
+    <!-- 录制默认档位 -->
+    <string name="set_group_default">开机初始值</string>
+    <string name="set_default_note">只决定每次冷启动的起点；取景中经就近胶囊改的是当前值，不会写回这里</string>
+    <string name="set_default_mute">静音录制</string>
+    <string name="set_default_mute_note">初始是否不带音轨；缺麦克风权限时一律降级为纯视频</string>
+    <string name="set_default_fps">默认帧率</string>
+    <string name="set_default_shutter">默认快门</string>
+    <string name="set_default_bitrate">默认码率</string>
+    <string name="set_default_sample">默认采样率</string>
+    <string name="set_default_render">默认渲染模式</string>
+
+    <!-- 交互动画风格 -->
+    <string name="set_group_motion">动画风格</string>
+    <string name="set_motion_style">交互动画</string>
+    <string name="set_motion_plain">无动画</string>
+    <string name="set_motion_fluent">Fluent（默认）</string>
+    <string name="set_motion_liquid">液态 Q 弹</string>
+    <string name="set_motion_note">只作用于面板与按钮的位移、缩放与淡入淡出</string>
+
+    <!-- 取景器常驻读数 -->
+    <string name="set_group_hud">取景器常驻读数</string>
+    <string name="set_hud_note">默认只常驻「快门 / 帧率 / 码率」，勾选即上屏，其余项仍在参数抽屉里可调</string>
+
+    <!-- 参考线默认 -->
+    <string name="set_group_refline">参考线默认</string>
+    <string name="set_refline_note">进入录制页时默认勾选的参考线，可在参考线面板里临时改</string>
+
+    <!-- 取景辅助 -->
+    <string name="set_group_level">取景辅助</string>
+    <string name="set_level_enable">显示水平仪与俯仰仪</string>
+    <string name="set_level_buzz">水平仪、俯仰仪0°时震动</string>
+    <string name="set_level_buzz_note">回正瞬间轻震一次提示；关闭后两者都不震动</string>
+
+    <!-- 文本高度 -->
+    <string name="set_group_text">文本高度</string>
+    <string name="set_text_note">各屏独立调节，100% 为默认。小屏上文字过大挤掉取景窗时调低录制页一档</string>
+    <string name="set_text_camera">录制页（含顶栏与常驻读数）</string>
+    <string name="set_text_dialog">配置面板（参数/镜头/参考线/监看抽屉）</string>
+    <string name="set_text_settings">设置页</string>
+
+    <!-- 权限 -->
+    <string name="set_group_perm">权限状态</string>
+    <string name="set_perm_camera">相机</string>
+    <string name="set_perm_audio">麦克风</string>
+    <string name="set_perm_media">视频读取</string>
+    <string name="set_perm_bluetooth">蓝牙连接</string>
+    <string name="set_perm_granted">已授予</string>
+    <string name="set_perm_denied">未授予</string>
+    <string name="set_perm_note">缺麦克风只录画面，缺视频读取时媒体库看不到成片</string>
+    <string name="set_open_system_settings">打开系统设置</string>
+
+    <!-- 关于 -->
+    <string name="set_group_about">关于</string>
+    <string name="set_version">版本</string>
+    <string name="set_package">包名</string>
+    <string name="set_about_note">全部数据保存在本机，应用不联网</string>
+    <!-- 所有文件访问：删改本机任何视频都不弹系统英文确认框的前提 -->
+    <string name="set_group_storage">所有文件访问</string>
+    <string name="set_storage_note">打开后，删除、移入回收站、还原、重命名对本机所有视频直接生效，不会再出现系统的英文确认框；不开则只能改动本应用自己录的视频。</string>
+    <string name="set_storage_open">去系统设置打开</string>
+    <string name="set_storage_on">已开启</string>
+</resources>

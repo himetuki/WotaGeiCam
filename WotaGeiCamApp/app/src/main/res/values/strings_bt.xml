@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 蓝牙音箱（bt/BtSpeakerController.kt、ui/dialog/BtSpeakerSheet.kt、ui/widget/BtChip.kt） -->
+    <!-- 权限提示与「去设置」复用 strings.xml 的 perm_bluetooth_rationale / perm_open_settings -->
+    <string name="bt_title">蓝牙音箱</string>
+    <string name="bt_start_scan">搜索附近设备</string>
+    <string name="bt_stop_scan">停止搜索</string>
+
+    <!-- 当前输出 -->
+    <string name="bt_no_active">未连接音箱</string>
+    <string name="bt_active">当前输出：%1$s</string>
+    <string name="bt_battery">电量 %1$d%%</string>
+    <string name="bt_battery_unknown">电量未知</string>
+
+    <!-- 设备列表 -->
+    <string name="bt_group_paired">已配对</string>
+    <string name="bt_group_nearby">附近设备</string>
+    <string name="bt_group_nearby_scanning">附近设备（搜索中…）</string>
+    <string name="bt_no_device">还没有可用的蓝牙设备</string>
+    <string name="bt_connect">连接</string>
+    <string name="bt_connected">已连接</string>
+    <string name="bt_disconnected">未连接</string>
+    <!-- A2DP 主动连接不开放给三方应用，点「连接」只会跳系统设置 -->
+    <string name="bt_tip_settings_only">配对与连接请在系统蓝牙设置中完成</string>
+
+    <!-- 音量与播控 -->
+    <string name="bt_volume">媒体音量</string>
+    <string name="bt_volume_value">%1$d%%</string>
+    <string name="bt_play_pause">播放 / 暂停</string>
+    <string name="bt_prev">上一曲</string>
+    <string name="bt_next">下一曲</string>
+
+    <!-- 状态提示 -->
+    <string name="bt_grant">授予权限</string>
+    <string name="bt_adapter_off">系统蓝牙未开启，请先在设置中打开</string>
+
+    <!-- 录制页小控件的朗读文案（百分比本身是数字，无需本地化） -->
+    <string name="bt_chip_connected">蓝牙音箱已连接</string>
+    <string name="bt_chip_disconnected">蓝牙音箱未连接</string>
+</resources>

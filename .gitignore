@@ -1,0 +1,50 @@
+# ===== 构建产物 =====
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.gradle/
+.kotlin/
+*/build/
+app/build/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# ===== 本地环境与机器配置 =====
+local.properties
+*.jks
+*.keystore
+.cxx/
+.externalNativeBuild/
+obj/
+bin/
+gen/
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.fleet/
+.navigation/
+.vscode/
+
+# ===== 临时与缓存 =====
+.tmp/
+tmp/
+*.log
+hs_err_pid*
+replay_pid*
+.cxx-abi/
+
+# ===== 本机工具链（体积大且可重装）=====
+tools/android-sdk/
+tools/**/platform-tools/
+tools/**/build-tools/
+
+# ===== 系统与编辑器垃圾 =====
+.DS_Store
+Thumbs.db
+desktop.ini

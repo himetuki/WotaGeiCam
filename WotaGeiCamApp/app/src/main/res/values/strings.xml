@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WotaGeiCam</string>
+
+    <!-- 通用 -->
+    <string name="ok">确定</string>
+    <string name="cancel">取消</string>
+    <string name="close">关闭</string>
+    <string name="retry">重试</string>
+    <string name="unsupported_by_device">本机不支持</string>
+    <string name="approx_mark">※</string>
+    <string name="approx_mark_tip">相机未提供该固定帧率范围，已选择最接近的可用范围</string>
+    <string name="capability_limited_tip">本机相机能力受限（LEGACY 等级），部分手动参数不可用</string>
+
+    <!-- 权限 -->
+    <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱</string>
+    <string name="perm_denied_settings">权限被拒绝，请到系统设置中开启</string>
+    <string name="perm_open_settings">去设置</string>
+    <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>
+</resources>
