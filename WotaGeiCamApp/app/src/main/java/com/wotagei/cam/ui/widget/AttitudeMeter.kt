@@ -25,6 +25,7 @@ import com.wotagei.cam.camera.LevelSensor
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.wotaCard
+import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaDivider
 import com.wotagei.cam.ui.theme.WotaText
@@ -108,18 +109,27 @@ fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean) {
             color = if (level) WotaAccent else WotaWarn,
             maxLines = 1
         )
+        // 标签与数值分两行：一行的话「横滚 -1.6°」比右栏的 54dp 还宽，
+        // 整段会溢出到窗口右缘之外被裁掉（真机 uiautomator 量过：节点被裁到 [1500→1532]）
+        AttitudeReadout(R.string.level_tag_roll, roll)
+        AttitudeReadout(R.string.level_tag_pitch, pitch)
+    }
+}
+
+/** 姿态仪的一行读数：小标签在上、等宽数值在下，宽度落在 54dp 右栏里 */
+@Composable
+private fun AttitudeReadout(labelRes: Int, deg: Float) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            text = stringResource(R.string.level_tag_roll) + ' ' +
-                stringResource(R.string.level_angle_value, roll),
+            text = stringResource(labelRes),
             style = MaterialTheme.typography.labelSmall,
             color = WotaTextDim,
             maxLines = 1
         )
         Text(
-            text = stringResource(R.string.level_tag_pitch) + ' ' +
-                stringResource(R.string.level_angle_value, pitch),
-            style = MaterialTheme.typography.labelSmall,
-            color = WotaTextDim,
+            text = stringResource(R.string.level_angle_value, deg),
+            style = MonoStyle,
+            color = WotaText,
             maxLines = 1
         )
     }
