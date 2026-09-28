@@ -21,11 +21,9 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
-import androidx.compose.material.icons.filled.SwitchCamera
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -71,7 +69,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -85,13 +82,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
@@ -118,6 +114,7 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.core.nextLensKey
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WbPreset
@@ -141,6 +138,7 @@ import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.pillAnchor
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.dialog.CurveSheet
@@ -149,7 +147,6 @@ import com.wotagei.cam.ui.dialog.flashLabelRes
 import com.wotagei.cam.ui.dialog.lensLabelRes
 import com.wotagei.cam.ui.dialog.observed
 import com.wotagei.cam.ui.dialog.shutterText
-import com.wotagei.cam.ui.dialog.stabLabelRes
 import com.wotagei.cam.ui.dialog.sizeText
 import com.wotagei.cam.ui.dialog.wbLabelRes
 import com.wotagei.cam.ui.theme.MonoStyle
@@ -173,11 +170,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 /**
- * 录制页（06 文档 §4）：顶栏 / 预览 + 参考线 + 点按对焦框 / 右侧仪表列 / 底栏 / 左参数抽屉。
+ * 录制页（06 文档 §4）：顶栏 / 预览 + 参考线 + 点按对焦框 + 预览内常驻读数 / 左右两枚悬浮竖 Dock / 底栏。
  *
- * 横竖都能录：显示角 90/270（横屏）沿用「预览铺满 + 顶底栏浮在四边」；
- * 显示角 0/180（竖屏）改走列布局（顶栏 / 预览吃剩余高度等比居中 / 底栏），
- * 仪表列与抽屉把手仍贴预览两侧，参考线永远画在实际预览矩形上。
+ * 横竖都能录，且**共用同一套布局**：画面吃满整屏，顶栏、底栏、左右竖 Dock 与常驻读数全浮在它上面，
+ * 各自用 safeDrawing / 实测避让量贴边（不再有"竖屏走列布局"那套分支，也没有左参数抽屉与抽屉把手——
+ * 创作项已按六项第 2 条收进左竖 Dock）。参考线永远画在实际预览矩形上。
  *
  * 跨模块接缝全部走 public API：
  * - 取景：[CameraController]（页面级 ViewModel）+ [CameraSurface]，换渲染模式即换 sink 重建引擎；
@@ -458,6 +455,14 @@ fun CameraScreen(
     // 控件条一律浮在预览之上（不再各占一条黑带）：画面吃满整屏，25% 透明的材质才透得出内容
     val hudItems = HudItem.typesOf(hudMask)
 
+    // ---- 避让量改由控件自己在布局期回报实测尺寸（审查 S2-1 / S3-2）
+    // 顶栏第二行是告警条（DIRECT + 斑马纹这类常见组合会出现），竖 Dock 只让第一行的 44dp 必然叠上去；
+    // 左 Dock 的宽度跟着标签与字体缩放变（字体 120% 时比 100% 宽约两成），写死的宽度账两次都没算对。
+    // 初值仍给常量：首帧量不到时按老账避让，量到之后由实测值接管，不写第二个常量。
+    val hudDensity = LocalDensity.current
+    var topBarH by remember { mutableStateOf(TopBarSpace) }
+    var leftDockW by remember { mutableStateOf(LeftDockSpace) }
+
     val previewStage: @Composable (Modifier) -> Unit = { stageModifier ->
         Box(stageModifier, contentAlignment = Alignment.Center) {
             Box(
@@ -529,14 +534,18 @@ fun CameraScreen(
                         }
                     },
                     modifierFor = { item ->
-                        // 变焦的锚点平时让给右栏那颗常驻胶囊：HUD 上的「变焦」只是读数，
+                        // 变焦的锚点平时让给右竖 Dock 那颗常驻胶囊：HUD 上的「变焦」只是读数，
                         // 两处都抢写同一个 key 会让弹窗在两个位置之间抖。
                         // 但 #54 之后那颗可以被关掉——关掉时读数自己顶上，
                         // 否则长按读数弹出的面板会因为量不到锚点而弹到屏幕原点。
                         if (item != HudItem.ZOOM || CamPill.ZOOM in hiddenPills) anchorOf(item.pillKey()) else Modifier
                     },
-                    // 底栏压在预览区下沿，HUD 不避让就会与「监看/闪光灯」文字叠字（真机截图核对）
-                    modifier = Modifier.align(Alignment.BottomStart).padding(bottom = BottomBarSpace)
+                    // 底栏压在预览区下沿、左竖 Dock 压在预览区左沿，HUD 不避让就会与它们叠字
+                    // （§70 真机量过「10M 码率」被「屏幕监看」整个压住那一例）
+                    // 左侧避让量 = Dock 让给左缘的 8dp + Dock 自己回报的实测宽（S3-2：写死的 92dp 只够
+                    // 100% 字体缩放，胶囊走 sp，字体到 120% 时「屏幕监看」那颗要 102.4dp）
+                    modifier = Modifier.align(Alignment.BottomStart)
+                        .padding(start = WotaSpace.s + leftDockW, bottom = BottomBarSpace)
                 )
             }
         }
@@ -544,7 +553,6 @@ fun CameraScreen(
 
     val topBar: @Composable (Modifier) -> Unit = { barModifier ->
         TopBar(
-            lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
             hidden = hiddenPills,
             sizeLabel = sizeText(size),
             // §59：窄屏（或文本高度被放大到 120%）时先退成只剩容量。判断放在调用方——
@@ -564,11 +572,9 @@ fun CameraScreen(
             renderMode = renderMode,
             effect = frameEffect,
             sizeModifier = anchorOf(PillKey.SIZE),
-            lensModifier = anchorOf(PillKey.LENS),
             freeModifier = anchorOf(PillKey.STORAGE),
             modifier = barModifier,
             onSizeClick = { pop = PillKey.SIZE },
-            onLensClick = { pop = PillKey.LENS },
             onFreeClick = { pop = PillKey.STORAGE },
             onSettingsClick = { if (recording) lockTip() else onOpenSettings() }
         )
@@ -576,23 +582,14 @@ fun CameraScreen(
 
     val bottomBar: @Composable (Modifier) -> Unit = { barModifier ->
         BottomBar(
-            refLineOn = refLines != 0,
+            // 六项第 7 条：镜头入口从顶栏搬到这里那颗，标签读当前镜头名
+            lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
             hidden = hiddenPills,
-            effect = frameEffect,
-            flash = flash,
-            flashAvailable = canFlash,
-            curveOn = !curveStack.isPassthrough,
             recording = recStatus == RecordStatus.START,
             busy = recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
             lastUri = lastUri,
+            lensModifier = anchorOf(PillKey.LENS),
             modifier = barModifier,
-            refLineModifier = anchorOf(PillKey.REFLINE),
-            monitorModifier = anchorOf(PillKey.MONITOR),
-            flashModifier = anchorOf(PillKey.FLASH),
-            onRefLineClick = { pop = PillKey.REFLINE },
-            onMonitorClick = { pop = PillKey.MONITOR },
-            onFlashClick = { pop = PillKey.FLASH },
-            onCurveClick = { openSheet(Sheet.CURVE) },
             onRecordClick = {
                 when {
                     recStatus == RecordStatus.START -> runner.stopAsync()
@@ -609,10 +606,22 @@ fun CameraScreen(
                 }
             },
             onThumbClick = { if (recording) lockTip() else onOpenGallery() },
-            onFlipLens = {
-                if (recording) lockTip()
-                else ctrl.switchLens(if (isFront) LensType.WIDE else LensType.FRONT)
-            }
+            onCycleLens = {
+                if (recording) {
+                    lockTip()
+                } else {
+                    // 顺序与颗数全从运行时枚举出的镜头表取，不写死「广角↔前置」这种两档假设
+                    val keys = ui.lenses.map { it.key }
+                    val target = ui.lenses.firstOrNull { it.key == nextLensKey(keys, slot?.key) }
+                    when {
+                        // 相机还没枚举完就点：说"等预览"而不是"只有一颗镜头"，后者是假信息
+                        keys.isEmpty() -> showTip(app.getString(R.string.cam_wait_preview))
+                        target == null -> showTip(app.getString(R.string.cam_lens_only_one))
+                        else -> ctrl.switchLens(target)
+                    }
+                }
+            },
+            onOpenLensPanel = { if (recording) lockTip() else pop = PillKey.LENS }
         )
     }
 
@@ -627,7 +636,27 @@ fun CameraScreen(
         previewStage(Modifier.fillMaxSize())
         // 面板打开时收起四周一圈控件：它们本来就被点外关闭层挡住点不到，留着只会和面板叠字
         if (sheet == Sheet.NONE) {
-            RightRail(
+            LeftDock(
+                refLineOn = refLines != 0,
+                effect = frameEffect,
+                flash = flash,
+                flashAvailable = canFlash,
+                curveOn = !curveStack.isPassthrough,
+                hidden = hiddenPills,
+                modifierFor = anchorOf,
+                onWidthChanged = { leftDockW = it },
+                onRefLineClick = { pop = PillKey.REFLINE },
+                onMonitorClick = { pop = PillKey.MONITOR },
+                onFlashClick = { pop = PillKey.FLASH },
+                onCurveClick = { openSheet(Sheet.CURVE) },
+                // 左缘让位与顶栏第一颗胶囊同一条竖线（8dp）。这台机横屏的挖孔在左侧，
+                // 但 §58 实测 displayCutoutPadding 在这里给 0，所以仍按顶栏既有的经验值对齐。
+                // 上下夹在顶栏与底栏之间：占满全高会伸到顶栏胶囊与底栏 Dock 上（横屏只有约 360dp 高），
+                // 上边界读顶栏实测高 topBarH —— 告警条出现时顶栏不止 44dp（S2-1）
+                modifier = Modifier.align(Alignment.CenterStart)
+                    .padding(start = WotaSpace.s, top = topBarH, bottom = BottomBarSpace)
+            )
+            RightDock(
                 roll = roll,
                 pitch = pitch,
                 levelEnabled = levelEnabled,
@@ -636,11 +665,6 @@ fun CameraScreen(
                 btConnected = btActive?.connected == true,
                 btVolumePct = btVolumePct,
                 zoomLabel = String.format(java.util.Locale.US, "%.1fx", zoom.value),
-                zoomTiers = zoom.range?.let { zoomRailTiers(zoomQuickTiers(it.start, it.endInclusive), zoom.value) }.orEmpty(),
-                zoomValue = zoom.value,
-                onZoomPick = { tier ->
-                    if (recording) lockTip() else params.zoom.value = zoom.copy(value = tier)
-                },
                 focusLabel = stringResource(R.string.pill_focus),
                 hidden = hiddenPills,
                 // #54 的「对焦」开关 + #44 的定焦判定，两个都得认：
@@ -652,20 +676,31 @@ fun CameraScreen(
                 stabModifier = anchorOf(PillKey.STAB),
                 zoomModifier = anchorOf(PillKey.ZOOM),
                 focusModifier = anchorOf(PillKey.FOCUS),
+                btModifier = anchorOf(PillKey.BT),
                 onZoomClick = { pop = PillKey.ZOOM },
                 onFocusClick = { pop = PillKey.FOCUS },
                 onStabClick = { pop = PillKey.STAB },
                 onBtClick = { pop = PillKey.BT },
                 // #58：这台机横屏下根容器实测宽 1600，而窗口可用右缘只到 1532（差 68px），
                 // displayCutoutPadding() 与 safeDrawingPadding() 在这台机都给 0（挖孔在左侧、系统栏沉浸式隐藏），
-                // 于是右对齐的整栏右半边被推到可视区之外。按实测差值显式让位。
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 34.dp)
+                // 于是右对齐的整栏右半边被推到可视区之外。按实测差值显式让位——这个让位量是量出来的，别改小。
+                // 上下同样夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到右上角设置钮上。
+                // 上边界读顶栏实测高（S2-1：告警条那一行也算顶栏，只让 44dp 时 Dock 顶颗会压在它上面）
+                modifier = Modifier.align(Alignment.CenterEnd)
+                    .padding(end = 34.dp, top = topBarH, bottom = BottomBarSpace)
             )
             bottomBar(Modifier.align(Alignment.BottomCenter).safeDrawingPadding())
         }
-        topBar(Modifier.align(Alignment.TopCenter).safeDrawingPadding())
+        topBar(
+            // 顶栏整块（第一行胶囊 + 第二行告警条）的实测高回报给左右竖 Dock 当上边界（S2-1）
+            Modifier.align(Alignment.TopCenter).safeDrawingPadding()
+                .onSizeChanged { topBarH = with(hudDensity) { it.height.toDp() } }
+        )
 
-        // 就近胶囊：只在没有整块面板时挂出，锚点还没量到时按屏幕原点弹（下一帧就修正，不闪）
+        // 就近胶囊：只在没有整块面板时挂出。锚点由各控件在布局期回报，正常路径同一帧就量得到；
+        // 真量不到的只有两种：首帧还没测完、以及那颗控件刚被显隐开关收掉——这两种都下一帧就修正。
+        // 「有触发点但没有写入方」这一种已经由 pillAnchorWriters 登记表 + PillAnchorRegistryTest 封死：
+        // 蓝牙那颗当初就是没人写锚点，弹窗于是永远按 IntRect.Zero 钉在左上角（审查 S2-2，§69 缺陷族）
         val popped = pop
         if (popped != null && sheet == Sheet.NONE) {
             PillHost(
@@ -754,24 +789,43 @@ private fun HudItem.pillKey(): PillKey = when (this) {
 }
 
 /**
- * 底栏在预览区下沿占位的高度：录制键 50dp + 底栏上下内边距 3dp×2 + 4dp 呼吸。
- * 预览内 HUD 用它避让，改底栏控件尺寸时同步改这里。
- */
-/**
- * HUD 距屏幕底边的避让量。底栏是一整排（创作组 + 居中的悬浮 Dock），实测高约 62dp，
- * 再加 HUD 自身的 6dp 内边距与安全余量。
+ * HUD 距屏幕底边的避让量，也是左右竖 Dock 的下边界。底栏是一枚悬浮 Dock（S3-1 后是三段式：左右等权格
+ * 夹住居中的录制键），录制键 50dp + 底板上下内边距 5dp×2 + 底栏自己的上下 6dp×2 ≈ 72dp，
+ * 再加 HUD 自身的 6dp 内边距与安全余量取 76dp。
  *
  * 真机量过两次：只给 60dp 时「10M 码率」那颗被「屏幕监看」整个压住；
  * 底栏并成一排之前给到 112dp，HUD 又会被顶到画面中间。
  */
 private val BottomBarSpace = 76.dp
 
+/**
+ * 顶栏避让量的**首帧兜底值**：只到第一行那排（38dp 圆形设置钮 + 上下内边距 4+2 = 44dp）。
+ * 真值由 [TopBar] 那层 `onSizeChanged` 回报给 `topBarH`：顶栏是 Column，第二行还有能力/权限告警条约 22dp
+ * （DIRECT 渲染 + 开斑马纹、缺麦克风、LEGACY 都会触发，是常见组合），只让 44dp 时竖 Dock 顶颗会压在它上面。
+ * 这里不再是"顶栏有多高"的结论，只是量到之前的占位，别再往这里加第二段常量。
+ */
+private val TopBarSpace = 44.dp
+
+/**
+ * 左竖 Dock 避让量的**首帧兜底值**（HUD 真正用的是 Dock 自己回报的 `leftDockW`）。
+ *
+ * 宽度账（100% 字体缩放，胶囊文本 13sp 只从 WotaType 取）：底板内最宽那颗按审查口径取**「屏幕监看」**
+ * ——4 个汉字 ≈52dp（字体缩放到 120% ≈62.4dp；胶囊走 sp，所以跟着 OS fontScale 涨，而 px→Dp 换算只看
+ * density，实测值正好把这一档吃进来；`WotaChip` 的三字下限 39/46.8dp 在这颗上不 binding），
+ * 加胶囊左右内边距 12+12、底板内边距 4+4 = 84dp（120% ≈94.4dp），再加 Dock 让给左缘的 8dp
+ * → 整枚占位 92dp（100%）/ **102.4dp（120%）**，而 B1 写死的 92dp 只让到 100% 那一档。
+ * 两个订正：① `wotaCard` 那圈 `border(1.dp)` 画在盒内不占布局，旧注释把它重复算进了尺寸；
+ * ② 「RGB 曲线」（拉丁 3 字母 + 空格 + 2 汉字 ≈58dp）与「屏幕监看」同量级、且监看那颗的标签会随特效
+ * 换成「斑马纹 / 峰值对焦」——最宽是谁本来就随标签与字体缩放浮动，写死必然算错（§58/§73 两次固定宽裁字
+ * 就是这个坑），所以 HUD 侧改读 Dock 布局期回报的实测宽；Dock 整枚被关光时回报 0，只让左缘那 8dp。
+ */
+private val LeftDockSpace = 84.dp
+
 // ------------------------------------------------------------------ 顶栏
 
 @Composable
 @Suppress("LongParameterList")
 private fun TopBar(
-    lensLabel: String,
     sizeLabel: String,
     hidden: Set<CamPill>,
     capacityLabel: String,
@@ -784,12 +838,11 @@ private fun TopBar(
     device: DeviceStatus,
     renderMode: RenderMode,
     effect: FrameEffect,
-    sizeModifier: Modifier = Modifier,
-    lensModifier: Modifier = Modifier,
-    freeModifier: Modifier = Modifier,
+    // 两枚锚点必传（无默认值）：这两颗都有 `pop = PillKey.X` 触发点，漏挂就是"浮层甩到屏幕原点"那一族
+    sizeModifier: Modifier,
+    freeModifier: Modifier,
     modifier: Modifier = Modifier,
     onSizeClick: () -> Unit,
-    onLensClick: () -> Unit,
     onFreeClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
@@ -830,15 +883,12 @@ private fun TopBar(
                 exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.86f)
             ) {
                 TopCapsule(
-                    lensLabel = lensLabel,
                     sizeLabel = sizeLabel,
                     capacityLabel = capacityLabel,
                     hidden = hidden,
                     freeLow = freeLow,
-                    lensModifier = lensModifier,
                     sizeModifier = sizeModifier,
                     capacityModifier = freeModifier,
-                    onLensClick = onLensClick,
                     onSizeClick = onSizeClick,
                     onCapacityClick = onFreeClick
                 )
@@ -1002,15 +1052,32 @@ private fun HudValue(label: String, value: String, onClick: () -> Unit) {
 private fun wbShort(mode: WbPreset, kelvin: Int): String =
     if (mode == WbPreset.MANUAL) "${kelvin}K" else stringResource(wbLabelRes(mode))
 
-// ------------------------------------------------------------------ 右侧仪表列
+// ------------------------------------------------------------------ 左右悬浮竖 Dock
 
 /**
- * 右栏：水平仪 + 音量表 + 蓝牙，再加两颗常驻的「变焦 / 对焦」胶囊（用户 2026-09-27 定的位置）。
- * 这两颗是取景时最高频的调节，所以不进 HUD 可选项、也不藏进任何面板，直接常驻可点。
+ * 右竖 Dock（六项第 2 条）：姿态仪 + 音量 + 蓝牙 + 变焦/对焦/防抖，
+ * 从原来的「裸卡片堆叠」改成与底栏同一套卡片语言 —— 一枚圆角底板，内部各控件仍挂自己的就近锚点。
+ *
+ * 宽度不写死：由底板内最宽那颗控件决定。§58（当时的右栏，即现在的右竖 Dock，被裁 68px）与 §73
+ * （`-10.6°` 被裁成 `-10.`）都是"按 100% 字体缩放量出来的固定宽"在 120% 下不够用，而字体缩放是既定变量。
+ *
+ * **竖向顶部对齐 + 可滚**（S3-3）：横屏窗口约 360dp 高，扣掉顶栏与底栏才是 Dock 的带高——
+ * 顶栏按 S2-1 的实测口径：第一行 44dp（第二行告警条出现时约 66dp），底栏 76dp → 带高约 **240dp / 218dp**。
+ * 默认全开时内容高约 **303dp**（姿态仪 ≈72 + 音量表 ≈71 + 蓝牙 ≈42 + 变焦/对焦/防抖各 ≈30 +
+ * 5 段间隔与底板内边距 ≈28），缺口 63dp；告警条一出现缺口 85dp。没音表（未录或音频降级）时约 232dp，
+ * 不带告警条勉强塞得进，带告警条仍缺 14dp——所以"居中"排布在这里没有意义：内容超出时上下两头都会被顶出去，
+ * 改成顶部对齐让最高频的姿态仪/音量/蓝牙/变焦先露脸，尾部靠既有的 verticalScroll 滑动取用。
+ * 收纳方案（音量表与姿态仪并排两列、或某颗下沉到长按面板）另议，本批不砍控件、不缩字号、不改默认开关组合。
+ *
+ * 底板只在至少有一颗要画时才组合，否则全关掉后左/右会留一枚空壳。
+ * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：这枚盒子约 79×240dp，`RoundedCornerShape(percent = 50)`
+ * 的半径取短边一半 ≈39.5dp，`wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉约 6.7dp；
+ * 14dp 的 card 只把底板自己收成圆角矩形，不再咬内容。姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），
+ * 免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  */
 @Composable
 @Suppress("LongParameterList")
-private fun RightRail(
+private fun RightDock(
     roll: Float,
     pitch: Float,
     levelEnabled: Boolean,
@@ -1019,9 +1086,6 @@ private fun RightRail(
     btConnected: Boolean,
     btVolumePct: Int,
     zoomLabel: String,
-    zoomTiers: List<Float>,
-    zoomValue: Float,
-    onZoomPick: (Float) -> Unit,
     focusLabel: String,
     showFocus: Boolean,
     hidden: Set<CamPill>,
@@ -1031,77 +1095,167 @@ private fun RightRail(
     stabModifier: Modifier,
     zoomModifier: Modifier,
     focusModifier: Modifier,
+    btModifier: Modifier,
     onZoomClick: () -> Unit,
     onFocusClick: () -> Unit,
     onStabClick: () -> Unit,
     onBtClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 竖向居中而不是「贴顶 + 写死 34dp」：上下控件条现在浮在画面之上，靠边排就会被压住
-    // 竖向可滚：横屏可用高度只有约 360dp，姿态仪卡片 + 4 档变焦 + 对焦 + 防抖在某些开关组合下
-    // 仍会超出（真机截图里「对焦」被裁在屏幕底边外）。居中排布不变，超出时改成可滑动而不是裁尾。
-    // §73：54dp 是「46dp 地平仪圆 + 左右各 4dp 内边距」刚好卡平，等宽读数的「-10.6°」差一个
-    // 度数符号就被卡片右缘裁成「-10.」（真机节点 92px＝46dp 撞满可用宽）。加宽 8dp 让读数留余量
+    val showLevel = levelEnabled && CamPill.LEVEL !in hidden
+    val showVolumeLed = showVolume && CamPill.VOLUME !in hidden
+    val showBt = CamPill.BT !in hidden
+    val showZoom = CamPill.ZOOM !in hidden
+    val showStab = CamPill.STAB !in hidden
+    if (!showLevel && !showVolumeLed && !showBt && !showZoom && !showFocus && !showStab) return
     Column(
         modifier
-            .width(62.dp)
             .fillMaxHeight()
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp, alignment = Alignment.CenterVertically)
+        // 顶部对齐：内容超出带高时先保住姿态仪/音量/蓝牙这几颗常驻项露脸（S3-3）
+        verticalArrangement = Arrangement.spacedBy(WotaSpace.xs, alignment = Alignment.Top)
     ) {
-        if (CamPill.LEVEL !in hidden) AttitudeCard(roll, pitch, levelEnabled)
-        if (showVolume && CamPill.VOLUME !in hidden) VolumeLeds(db)
-        if (CamPill.BT !in hidden) BtChip(connected = btConnected, volumePct = btVolumePct, onClick = onBtClick)
-        if (CamPill.ZOOM !in hidden) WotaChip(
-            label = zoomLabel,
-            selected = false,
-            modifier = zoomModifier,
-            onClick = onZoomClick
-        )
-        // 竖排变焦快捷档（鸿蒙化第 3 条）：单手拇指就够得着；档位仍只取运行时变焦范围里存在的
-        if (CamPill.ZOOM !in hidden && zoomTiers.size > 1) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                zoomTiers.forEach { tier ->
-                    val picked = kotlin.math.abs(zoomValue - tier) < 0.01f
-                    Text(
-                        text = String.format(java.util.Locale.US, "%.1fx", tier),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (picked) WotaAccent else WotaTextDim,
-                        modifier = Modifier
-                            .wotaCard(WotaShape.pill)
-                            .clickable { onZoomPick(tier) }
-                            .padding(horizontal = 6.dp, vertical = 3.dp)
-                    )
-                }
-            }
-        }
-        // #44：定焦镜头没有一样东西能调，整颗入口隐藏，不摆一排灰选项
-        if (showFocus) {
-            WotaChip(
+        Column(
+            Modifier
+                .wotaCard(WotaShape.card)
+                .padding(WotaSpace.xs),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs)
+        ) {
+            if (showLevel) AttitudeCard(roll, pitch, levelEnabled, card = false)
+            if (showVolumeLed) VolumeLeds(db, card = false)
+            // btModifier 必传：这颗有 `pop = PillKey.BT` 触发点。B1 之前这里没人挂锚点，
+            // pillAnchors[BT] 恒为空 → 面板按 IntRect.Zero 永久钉在左上角，而入口在右缘（§69 缺陷族）
+            if (showBt) BtChip(
+                connected = btConnected,
+                volumePct = btVolumePct,
+                modifier = btModifier,
+                card = false,
+                onClick = onBtClick
+            )
+            if (showZoom) WotaChip(
+                label = zoomLabel,
+                selected = false,
+                modifier = zoomModifier,
+                onClick = onZoomClick
+            )
+            // #44：定焦镜头没有一样东西能调，整颗入口隐藏，不摆一排灰选项
+            if (showFocus) WotaChip(
                 label = focusLabel,
                 selected = focusActive,
                 modifier = focusModifier,
                 onClick = onFocusClick
             )
+            if (showStab) WotaChip(
+                label = stabLabel,
+                selected = stabActive,
+                modifier = stabModifier,
+                onClick = onStabClick
+            )
         }
-        if (CamPill.STAB !in hidden) WotaChip(
-            label = stabLabel,
-            selected = stabActive,
-            modifier = stabModifier,
-            onClick = onStabClick
-        )
     }
 }
 
-/** 音量表：`amplitude()` → dB 后 6 格 LED，仅录制中显示（06 文档 §4） */
+/**
+ * 左竖 Dock（六项第 2 条）：底栏左组那四颗创作项（参考线 / 屏幕监看 / RGB 曲线 / 闪光灯）收进来，
+ * 与右 Dock 同一枚圆角底板、同样竖向可滚。闪光灯的显隐仍由「本机有无闪光灯」这条运行时能力决定（§37 第 5 条）。
+ *
+ * 各颗的就近锚点用 [modifierFor] 按 key 取（同 [ParamsHud] 的写法），真实理由有两条：
+ * ① 这里已经 `@Suppress("LongParameterList")`，再塞三个具名 Modifier 形参会把参数表继续撑大；
+ * ② 传的是**整个取锚点的函数**，调用点一次给全，比"四选一别漏挂某个 key"更难出错。
+ * 原先注释写的「为了避开 lint 的 ModifierParameter」不成立：同批 [RightDock] 就挂了三个具名
+ * Modifier 形参并被 lint 点名（ModifierParameter 是 Warning，B1 基线里那 4 条就是它）。
+ *
+ * 自身宽度由 [onWidthChanged] 回报给 HUD 当左侧避让量（S3-2：写死的 92dp 是按错的宽度账来的，
+ * 字体缩放 120% 下「屏幕监看」那颗要 102.4dp）。整枚 Dock 被关光时不组合，这里回报 0，
+ * HUD 只让左缘那 8dp，不留一条没东西的缝。
+ */
 @Composable
-private fun VolumeLeds(db: Float) {
+@Suppress("LongParameterList")
+private fun LeftDock(
+    refLineOn: Boolean,
+    effect: FrameEffect,
+    flash: Flash,
+    flashAvailable: Boolean,
+    curveOn: Boolean,
+    hidden: Set<CamPill>,
+    modifierFor: (PillKey) -> Modifier,
+    onWidthChanged: (Dp) -> Unit,
+    onRefLineClick: () -> Unit,
+    onMonitorClick: () -> Unit,
+    onFlashClick: () -> Unit,
+    onCurveClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val showRefLine = CamPill.REFLINE !in hidden
+    val showMonitor = CamPill.MONITOR !in hidden
+    val showCurve = CamPill.CURVE !in hidden
+    val showFlash = flashAvailable && CamPill.FLASH !in hidden
+    if (!showRefLine && !showMonitor && !showCurve && !showFlash) {
+        // 不组合就没有布局节点，实测宽永远停在上一轮的值——这里主动归零，HUD 才不会被顶偏
+        LaunchedEffect(Unit) { onWidthChanged(0.dp) }
+        return
+    }
+    val dockDensity = LocalDensity.current
+    Column(
+        modifier
+            .fillMaxHeight()
+            .verticalScroll(rememberScrollState())
+            .onSizeChanged { onWidthChanged(with(dockDensity) { it.width.toDp() }) },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(WotaSpace.xs, alignment = Alignment.CenterVertically)
+    ) {
+        Column(
+            Modifier
+                .wotaCard(WotaShape.card)
+                .padding(WotaSpace.xs),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs)
+        ) {
+            if (showRefLine) WotaIconButton(
+                image = Icons.Filled.GridOn,
+                description = stringResource(R.string.cam_p_refline),
+                selected = refLineOn,
+                modifier = modifierFor(PillKey.REFLINE),
+                onClick = onRefLineClick
+            )
+            if (showMonitor) WotaChip(
+                label = stringResource(
+                    if (effect == FrameEffect.NONE) R.string.cam_p_monitor else effectShortRes(effect)
+                ),
+                selected = effect != FrameEffect.NONE,
+                modifier = modifierFor(PillKey.MONITOR),
+                onClick = onMonitorClick
+            )
+            // 曲线与斑马纹同级，是创作项，不该藏在「更多」里（§37 第 2 条）
+            if (showCurve) WotaChip(
+                label = stringResource(R.string.cam_p_curve),
+                selected = curveOn,
+                onClick = onCurveClick
+            )
+            if (showFlash) WotaIconButton(
+                image = flashIcon(flash),
+                description = stringResource(flashLabelRes(flash)),
+                selected = flash != Flash.OFF,
+                modifier = modifierFor(PillKey.FLASH),
+                onClick = onFlashClick
+            )
+        }
+    }
+}
+
+/** 音量表：`amplitude()` → dB 后 6 格 LED，仅录制中显示（06 文档 §4）
+ *
+ * [card] 与 [AttitudeCard]、[BtChip] 同一条规则（S3-4）：单独摆的时候自带一层底，
+ * 放进竖 Dock 时传 false，免得底板 + 内层底两层 hudScrim 叠成"卡中卡"。
+ */
+@Composable
+private fun VolumeLeds(db: Float, card: Boolean = true) {
     val lit = (((db.coerceIn(MIN_DB, MAX_DB) - MIN_DB) / (MAX_DB - MIN_DB)) * LED_COUNT).roundToInt()
     Column(
         Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(WotaHudScrim)
+            .then(if (card) Modifier.clip(RoundedCornerShape(8.dp)).background(WotaHudScrim) else Modifier)
             .padding(horizontal = 6.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -1135,114 +1289,86 @@ private fun VolumeLeds(db: Float) {
 
 // ------------------------------------------------------------------ 底栏
 
+/**
+ * 底栏只剩中央那枚悬浮 Dock（缩略图 / 快门 / 镜头）。
+ * 六项第 2 条把左组创作项收进左竖 Dock 之后，这里不再有"左右两组"要配平。
+ *
+ * **不变量：录制键中心恒等于屏幕水平中心**（B1 之前那行旧注释写的就是它，不许换成"Dock 居中"）。
+ * 所以内部是三段式：左右两格各 `weight(1f)` 等权，快门夹在正中，缩略图贴底板左内缘、镜头那颗贴右内缘。
+ * 这样「镜头」那颗开关一开一关（63dp ↔ 0dp）或缩略图有无素材，都不会让快门左右跳（S3-1：
+ * 整排内容居中时它偏左 14.5dp，关掉「镜头」后又跳到右侧 23dp）。
+ * 代价：底板从"刚好包住三颗"变成"铺满这排的可用宽度"，左右两格是等权空区，观感更接近贴底圆角工具条。
+ * 想同时保住紧凑胶囊的另一条路是量两颗的实测宽再把窄的一侧补到等宽（两轮布局），本批按审查给的
+ * weight 方案落地，那条备选记在批次报告里。
+ *
+ * 六项第 7 条：顶栏的镜头段并入这里那颗。单击按顺序循环到下一颗可用镜头，长按打开镜头就近面板，
+ * 标签读当前镜头名（广角 / 超广角 / 长焦 / 前置）。#54 的 `CamPill.LENS` 开关跟着搬到这颗上。
+ */
 @Composable
 @Suppress("LongParameterList")
 private fun BottomBar(
-    refLineOn: Boolean,
+    lensLabel: String,
     hidden: Set<CamPill>,
-    effect: FrameEffect,
-    flash: Flash,
-    flashAvailable: Boolean,
-    curveOn: Boolean,
     recording: Boolean,
     busy: Boolean,
     lastUri: Uri?,
-    refLineModifier: Modifier = Modifier,
-    monitorModifier: Modifier = Modifier,
-    flashModifier: Modifier = Modifier,
+    // 镜头那颗的锚点必传：这颗有 `pop = PillKey.LENS` 触发点，漏挂长按面板就弹到左上角
+    lensModifier: Modifier,
     modifier: Modifier = Modifier,
-    onRefLineClick: () -> Unit,
-    onMonitorClick: () -> Unit,
-    onFlashClick: () -> Unit,
-    onCurveClick: () -> Unit,
     onRecordClick: () -> Unit,
     onThumbClick: () -> Unit,
-    onFlipLens: () -> Unit
+    onCycleLens: () -> Unit,
+    onOpenLensPanel: () -> Unit
 ) {
-    // 参考图底栏没有通栏黑带，而且录制键恒在屏幕正中：左右两组用 Box 分别贴边，
-    // 用两个等权 Spacer 会被较宽的一侧挤偏（真机截图核对过）
-    // 用户 2026-09-28：画面下侧只留一行。创作项与 Dock 同一排 ——
-    // 左边那组窄屏时横向可滚，中间的 Dock（缩略图/快门/翻转）恒居中，快门永远不用滑动就能点到。
-    Row(
+    val showLens = CamPill.LENS !in hidden
+    Box(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = WotaSpace.s, vertical = 6.dp)
     ) {
-        Row(
-            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (CamPill.REFLINE !in hidden) WotaIconButton(
-                image = Icons.Filled.GridOn,
-                description = stringResource(R.string.cam_p_refline),
-                selected = refLineOn,
-                modifier = refLineModifier,
-                onClick = onRefLineClick
-            )
-            if (CamPill.MONITOR !in hidden) WotaChip(
-                label = stringResource(
-                    if (effect == FrameEffect.NONE) R.string.cam_p_monitor else effectShortRes(effect)
-                ),
-                selected = effect != FrameEffect.NONE,
-                modifier = monitorModifier,
-                onClick = onMonitorClick
-            )
-            // 曲线与斑马纹同级，是创作项，不该藏在「更多」里（§37 第 2 条）
-            if (CamPill.CURVE !in hidden) WotaChip(
-                label = stringResource(R.string.cam_p_curve),
-                selected = curveOn,
-                onClick = onCurveClick
-            )
-            // 本机没闪光灯就不占这一格（§37 第 5 条）：能力一律从 characteristics 读
-            if (flashAvailable && CamPill.FLASH !in hidden) {
-                WotaIconButton(
-                    image = flashIcon(flash),
-                    description = stringResource(flashLabelRes(flash)),
-                    selected = flash != Flash.OFF,
-                    modifier = flashModifier,
-                    onClick = onFlashClick
-                )
-            }
-        }
-        // 悬浮胶囊 Dock（鸿蒙化第 4 条）：素材缩略图 / 快门 / 镜头翻转三件事共用一枚
+        // 悬浮胶囊 Dock（鸿蒙化第 4 条）：素材缩略图 / 快门 / 镜头三件事共用一枚
         // hudScrim + 高光描边的壳，快门不再孤零零悬在画面中间
         Row(
             Modifier
+                .fillMaxWidth()
                 .wotaCard(WotaShape.pill)
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .padding(horizontal = WotaSpace.s, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(WotaSpace.m)
         ) {
-            Box(
-                Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onThumbClick),
-                contentAlignment = Alignment.Center
-            ) {
-                val uri = lastUri
-                if (uri != null) {
-                    VideoThumbnail(uri = uri, modifier = Modifier.matchParentSize(), px = 160)
-                } else {
-                    Icon(
-                        Icons.Filled.PhotoLibrary,
-                        contentDescription = stringResource(R.string.cam_gallery_entry),
-                        tint = WotaTextDim,
-                        modifier = Modifier.padding(6.dp).size(20.dp)
-                    )
+            // 左右两格等权：快门夹在正中，中心就是底板中心，也就是屏幕水平中心
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                Box(
+                    Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onThumbClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val uri = lastUri
+                    if (uri != null) {
+                        VideoThumbnail(uri = uri, modifier = Modifier.matchParentSize(), px = 160)
+                    } else {
+                        Icon(
+                            Icons.Filled.PhotoLibrary,
+                            contentDescription = stringResource(R.string.cam_gallery_entry),
+                            tint = WotaTextDim,
+                            modifier = Modifier.padding(6.dp).size(20.dp)
+                        )
+                    }
                 }
             }
             RecordButton(recording = recording, busy = busy, onClick = onRecordClick)
-            WotaIconButton(
-                image = Icons.Filled.SwitchCamera,
-                description = stringResource(R.string.cam_flip_lens),
-                onClick = onFlipLens
-            )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                if (showLens) WotaChip(
+                    label = lensLabel,
+                    selected = false,
+                    modifier = lensModifier,
+                    onClick = onCycleLens,
+                    onLongClick = onOpenLensPanel
+                )
+            }
         }
-        // 右侧等权占位：把 Dock 顶回屏幕正中（参考图底栏就是「录制键恒在正中」）
-        Spacer(Modifier.weight(1f))
     }
 }
 
@@ -1262,54 +1388,6 @@ private fun flashIcon(flash: Flash): ImageVector = when (flash) {
     Flash.ON -> Icons.Filled.FlashOn
     Flash.AUTO -> Icons.Filled.FlashAuto
     Flash.TORCH -> Icons.Filled.FlashlightOn
-}
-
-@Composable
-private fun IconHud(
-    icon: ImageVector,
-    description: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val motion = LocalMotion.current
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
-    Box(
-        Modifier
-            .size(38.dp)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = if (selected) WotaAccent else WotaText,
-            modifier = Modifier.size(20.dp)
-        )
-    }
-}
-
-@Composable
-private fun TextHud(text: String, selected: Boolean, onClick: () -> Unit) {
-    val motion = LocalMotion.current
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = if (selected) WotaAccent else WotaText,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-    )
 }
 
 /** 录制键：外圈常驻，内部圆点（待机）↔ 方角块（停止），中间态用转圈 */
@@ -1769,32 +1847,29 @@ private data class TopSeg(val label: String, val anchor: Modifier, val tint: Col
  *
  * 容量段顺手把裸字节换算成「96.2G · 3h18m」—— 录制时真正想知道的是"还能录多久"，不是"还剩多少字节"。
  * 每一段仍受 #54 的 `CamPill` 开关控制，关掉的段整段不组合。
+ *
+ * 六项第 7 条：镜头段整段删除，那颗入口与 `CamPill.LENS` 开关一起搬到底栏 Dock 的镜头那颗。
  */
-/** 三个段各带自己的就近锚点 Modifier，命名规则让位给语义（lint 的 ModifierParameter 只认单个 modifier 形参） */
+/** 两段（画幅 / 容量）各带自己的就近锚点 Modifier，命名规则让位给语义（lint 的 ModifierParameter 只认单个 modifier 形参） */
 @android.annotation.SuppressLint("ModifierParameter")
 @Composable
 private fun TopCapsule(
-    lensLabel: String,
     sizeLabel: String,
     capacityLabel: String,
     hidden: Set<CamPill>,
     freeLow: Boolean,
-    lensModifier: Modifier,
     sizeModifier: Modifier,
     capacityModifier: Modifier,
-    onLensClick: () -> Unit,
     onSizeClick: () -> Unit,
     onCapacityClick: () -> Unit
 ) {
-    val visibleLens = CamPill.LENS !in hidden
     val visibleSize = CamPill.SIZE !in hidden
     val visibleStorage = CamPill.STORAGE !in hidden
-    if (!visibleLens && !visibleSize && !visibleStorage) return
+    if (!visibleSize && !visibleStorage) return
     // §59：窄屏判断不放在这里。原先套的 `BoxWithConstraints` 是 TopBar 那行 Row 的无权重子节点，
     // 测量语义不同，会把整段容量读数从节点树里吞掉（真机 dump 里连节点都没有）。
     // 现在只收调用方算好的现成文案。
     val segs = buildList {
-        if (visibleLens) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
         if (visibleSize) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
         if (visibleStorage) {
             add(TopSeg(capacityLabel, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))

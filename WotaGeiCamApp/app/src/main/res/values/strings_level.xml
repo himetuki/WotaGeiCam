@@ -1,10 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 水平仪 / 俯仰仪（camera/SensorLevel.kt、ui/widget/AttitudeMeter.kt） -->
-    <string name="level_tag_roll">横滚</string>
-    <string name="level_tag_pitch">俯仰</string>
-    <!-- 仪表读数：左右水平角与镜头仰俯角共用一个格式（等宽字体显示） -->
-    <string name="level_angle_value">%1$.1f°</string>
+    <!-- 水平仪 / 俯仰仪（camera/SensorLevel.kt、ui/widget/AttitudeMeter.kt）
+         角度数字已随六项第 2 条取消，只剩「是否已回正」这一行异步状态文案 -->
     <string name="level_state_level">已回正</string>
     <string name="level_state_tilt">偏斜中</string>
 </resources>

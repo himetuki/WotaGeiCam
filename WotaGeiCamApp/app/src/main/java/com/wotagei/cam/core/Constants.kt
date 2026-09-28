@@ -211,15 +211,21 @@ fun recordableHoursText(freeMb: Long, totalBitrateBps: Int): String {
     return if (sec < 3600L) recordableText(freeMb, totalBitrateBps) else "${sec / 3600L}h"
 }
 
-/** 整枚顶栏胶囊实测宽（100% 文本、真机节点）：广角 47.5 + 画幅 135 + 容量 134 + 分隔与内边距 */
-const val CAPACITY_ROOM_FULL_DP = 320f
+/**
+ * 满档所需的可用宽度。B1（六项第 7 条）删掉顶栏镜头段后重新标定（审查 S4-1）：
+ * 两段实测账（100% 文本、真机节点）= 画幅 135 + 容量 134 + 一条分隔线 1 + 底板左右内边距 2+2 ≈ **274dp**，
+ * 旧值 320f 是三段时代（广角 47.5 + 画幅 135 + 容量 134 + 两条分隔线与内边距 ≈ 322.5）的口径，
+ * 沿用会让竖屏 294dp 明明装得下全长文案却白退一档。272f 给 2dp 余量。
+ */
+const val CAPACITY_ROOM_FULL_DP = 272f
 
-/** 「96.2G · 3h」这一档需要的宽度 */
-const val CAPACITY_ROOM_HOURS_DP = 290f
+/** 「96.2G · 3h」这一档需要的宽度：比满档省掉「39m」那截分钟（约 32dp），274 − 32 ≈ 242 */
+const val CAPACITY_ROOM_HOURS_DP = 242f
 
 /**
- * 顶栏容量段按**可用宽度**取三档（§74）：竖屏 360dp 窗口扣掉顶栏固定预留只剩约 294dp，
- * 全长「96.2G · 3h18m」本来就装不下，会被省略号裁成「96.2G · 3h1…」，所以退档而不是硬挤。
+ * 顶栏容量段按**可用宽度**取三档（§74，S4-1 已按 B1 之后的两段账重标阈值）：
+ * 竖屏 360dp 窗口扣掉顶栏固定预留 66dp 只剩 294dp，B1 删掉镜头段之后这个宽度装得下全长「96.2G · 22h39m」，
+ * 所以 294 走满档；窗口更窄（或文本高度放大到 120%）才依次退成小时档、只剩容量档，避免被省略号裁尾。
  * `roomDp` 由调用方折算好（已除过文本高度），这里只做纯取位，便于单测。
  */
 fun capacityTierText(freeMb: Long, totalBitrateBps: Int, roomDp: Float): String = when {
