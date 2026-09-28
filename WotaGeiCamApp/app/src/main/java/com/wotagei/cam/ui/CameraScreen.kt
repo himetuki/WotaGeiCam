@@ -83,6 +83,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
@@ -234,6 +235,9 @@ fun CameraScreen(
     // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
     val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
     val levelBuzz = WotaSettings.levelBuzzEnabled(settingsPrefs)
+    // §59：容量段要不要带「可录时长」取决于窗口真实宽度。取 LocalConfiguration 而不是根容器实测宽度——
+    // #58 量到这台机的根容器比可视窗口宽 68~168px，用根容器判断会把窄屏误判成宽屏、挤掉尾巴
+    val windowWidthDp = LocalConfiguration.current.screenWidthDp.dp
     val focusPoint by params.focusPoint.observed()
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
@@ -542,11 +546,13 @@ fun CameraScreen(
             lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
             hidden = hiddenPills,
             sizeLabel = sizeText(size),
-            capacityLabel = com.wotagei.cam.core.capacityLineText(
+            // §59：窄屏（或文本高度被放大到 120%）时先退成只剩容量。判断放在调用方——
+            // 这里拿得到根容器的实测宽度，而在 TopCapsule 里套测量层会把整段容量从树里吞掉
+            capacityLabel = if (windowWidthDp < CAPACITY_FULL_UNDER) freeSpaceText(freeMb)
+            else com.wotagei.cam.core.capacityLineText(
                 freeMb,
                 bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
             ),
-            capacityCompact = freeSpaceText(freeMb),
             freeLow = freeMb < WotaTiers.MIN_FREE_MB,
             recording = recStatus == RecordStatus.START,
             elapsedLabel = formatDuration(recElapsed),
@@ -768,7 +774,6 @@ private fun TopBar(
     sizeLabel: String,
     hidden: Set<CamPill>,
     capacityLabel: String,
-    capacityCompact: String,
     freeLow: Boolean,
     recording: Boolean,
     elapsedLabel: String,
@@ -827,7 +832,6 @@ private fun TopBar(
                     lensLabel = lensLabel,
                     sizeLabel = sizeLabel,
                     capacityLabel = capacityLabel,
-                    capacityCompact = capacityCompact,
                     hidden = hidden,
                     freeLow = freeLow,
                     lensModifier = lensModifier,
@@ -1770,7 +1774,6 @@ private fun TopCapsule(
     lensLabel: String,
     sizeLabel: String,
     capacityLabel: String,
-    capacityCompact: String,
     hidden: Set<CamPill>,
     freeLow: Boolean,
     lensModifier: Modifier,
@@ -1784,42 +1787,40 @@ private fun TopCapsule(
     val visibleSize = CamPill.SIZE !in hidden
     val visibleStorage = CamPill.STORAGE !in hidden
     if (!visibleLens && !visibleSize && !visibleStorage) return
-    androidx.compose.foundation.layout.BoxWithConstraints {
-        // 这台机竖屏约 360dp 宽，三段按 12sp 估已接近占满；设置页还能把文本高度调到 120%，
-        // 那时最右的「可录时长」会被挤掉尾巴。窄于此阈值就先退成只剩容量，其余两段不动。
-        val capacityText = if (maxWidth < CAPACITY_FULL_UNDER) capacityCompact else capacityLabel
-        val segs = buildList {
-            if (visibleLens) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
-            if (visibleSize) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
-            if (visibleStorage) {
-                add(TopSeg(capacityText, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))
-            }
+    // §59：窄屏判断不放在这里。原先套的 `BoxWithConstraints` 是 TopBar 那行 Row 的无权重子节点，
+    // 测量语义不同，会把整段容量读数从节点树里吞掉（真机 dump 里连节点都没有）。
+    // 现在只收调用方算好的现成文案。
+    val segs = buildList {
+        if (visibleLens) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
+        if (visibleSize) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
+        if (visibleStorage) {
+            add(TopSeg(capacityLabel, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))
         }
-        Row(
-            Modifier
-                .wotaCard(WotaShape.pill)
-                .padding(horizontal = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            segs.forEachIndexed { index, seg ->
-                if (index > 0) {
-                    Box(Modifier.width(1.dp).height(12.dp).background(WotaDivider))
-                }
-                Text(
-                    text = seg.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = seg.tint,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = seg.anchor
-                        .clip(RoundedCornerShape(percent = 50))
-                        .clickable(onClick = seg.onClick)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+    }
+    Row(
+        Modifier
+            .wotaCard(WotaShape.pill)
+            .padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        segs.forEachIndexed { index, seg ->
+            if (index > 0) {
+                Box(Modifier.width(1.dp).height(12.dp).background(WotaDivider))
             }
+            Text(
+                text = seg.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = seg.tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = seg.anchor
+                    .clip(RoundedCornerShape(percent = 50))
+                    .clickable(onClick = seg.onClick)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
         }
     }
 }
 
-/** 顶栏宽度低于此值时容量段退成只剩「96.2G」，丢掉可录时长（文本高度调到 120% 时不裁尾） */
+/** 窗口宽度低于此值时容量段退成只剩「96.2G」，丢掉可录时长（文本高度调到 120% 时不裁尾） */
 private val CAPACITY_FULL_UNDER = 320.dp
