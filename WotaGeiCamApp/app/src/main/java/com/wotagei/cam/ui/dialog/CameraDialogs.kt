@@ -190,8 +190,7 @@ internal fun evText(steps: Int, evStep: Float): String =
 internal fun sizeText(size: Size): String =
     "${size.width}x${size.height} ${aspectOf(size.width, size.height)}"
 
-internal fun freeSpaceText(mb: Long): String =
-    if (mb >= 1024L) String.format(Locale.US, "%.1fG", mb / 1024f) else "${mb}M"
+internal fun freeSpaceText(mb: Long): String = com.wotagei.cam.core.freeSpaceShort(mb)
 
 /** 斑马纹 UI 域 80–100 ↔ shader 域 0.6–1.0（、03 文档 §3.5） */
 internal fun zebraUiOfThreshold(threshold: Float): Int =

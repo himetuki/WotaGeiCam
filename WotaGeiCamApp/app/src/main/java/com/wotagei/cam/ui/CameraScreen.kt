@@ -527,7 +527,10 @@ fun CameraScreen(
             lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
             hidden = hiddenPills,
             sizeLabel = sizeText(size),
-            freeLabel = stringResource(R.string.cam_free_space, freeSpaceText(freeMb)),
+            capacityLabel = com.wotagei.cam.core.capacityLineText(
+                freeMb,
+                bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
+            ),
             freeLow = freeMb < WotaTiers.MIN_FREE_MB,
             recording = recStatus == RecordStatus.START,
             elapsedLabel = formatDuration(recElapsed),
@@ -727,7 +730,7 @@ private fun TopBar(
     lensLabel: String,
     sizeLabel: String,
     hidden: Set<CamPill>,
-    freeLabel: String,
+    capacityLabel: String,
     freeLow: Boolean,
     recording: Boolean,
     elapsedLabel: String,
@@ -755,16 +758,7 @@ private fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (CamPill.LENS !in hidden) WotaChip(label = lensLabel, selected = false, modifier = lensModifier, onClick = onLensClick)
-            if (CamPill.SIZE !in hidden) WotaChip(label = sizeLabel, selected = false, modifier = sizeModifier, onClick = onSizeClick)
-            // 帧率读数在可自定义的常驻 HUD，顶栏只留「镜头 · 画幅 · 剩余空间」
-            if (CamPill.STORAGE !in hidden) WotaChip(
-                label = freeLabel,
-                selected = false,
-                modifier = freeModifier,
-                valueColor = if (freeLow) WotaRec else null,
-                onClick = onFreeClick
-            )
+            // 元信息胶囊组与 REC 胶囊互斥，见下面两条 AnimatedVisibility
             // 计时与状态是**读数**，不是入口：给它们挂 onClick 只会让人以为点开有配置项（§37 第 4 条）
             // 计时 / 状态胶囊是取景器里最显眼的一次进出（按快门就出现），硬切会让人觉得画面顿了一下。
             // 只淡入缩放、不展开宽度：布局一次到位，旁边几颗胶囊不会跟着挤。
@@ -779,11 +773,31 @@ private fun TopBar(
                 enter = fadeIn(motion.float) + scaleIn(motion.float, initialScale = 0.86f),
                 exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.86f)
             ) {
+                // 录制中顶栏只说一件事：在录、录了多久。元信息那组整组让位（用户 2026-09-28 鸿蒙化第 1 条）
                 if (recording) {
                     WotaChip(label = elapsedLabel, selected = false, valueColor = WotaRec, dot = WotaRec)
                 } else {
                     WotaChip(label = stateLabel.orEmpty(), selected = false, valueColor = WotaWarn)
                 }
+            }
+            AnimatedVisibility(
+                visible = !recording && stateLabel == null,
+                enter = fadeIn(motion.float) + scaleIn(motion.float, initialScale = 0.86f),
+                exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.86f)
+            ) {
+                TopCapsule(
+                    lensLabel = lensLabel,
+                    sizeLabel = sizeLabel,
+                    capacityLabel = capacityLabel,
+                    hidden = hidden,
+                    freeLow = freeLow,
+                    lensModifier = lensModifier,
+                    sizeModifier = sizeModifier,
+                    capacityModifier = freeModifier,
+                    onLensClick = onLensClick,
+                    onSizeClick = onSizeClick,
+                    onCapacityClick = onFreeClick
+                )
             }
             Spacer(Modifier.weight(1f))
             WotaIconButton(
@@ -1620,5 +1634,63 @@ private fun recordResultText(res: Resources, code: String?): String? {
         code == RecordError.STOP_FAILED -> res.getString(R.string.cam_record_stop_failed)
         code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
         else -> res.getString(R.string.cam_record_failed_generic)
+    }
+}
+
+/** 顶栏胶囊组里的一段：文本 + 自己的就近锚点 + 点击 */
+private data class TopSeg(val label: String, val anchor: Modifier, val tint: Color, val onClick: () -> Unit)
+
+/**
+ * 顶栏元信息收成**一枚**胶囊（用户 2026-09-28 鸿蒙化第 1 条）：
+ * 原先「广角 / 1920x1080 16:9 / 剩余 96.2G」是散在画面上的三颗，读起来像三个入口；
+ * 现在共用一层 hudScrim 壳 + 高光描边，段与段之间一条细线，点各自段仍开各自的就近弹窗。
+ *
+ * 容量段顺手把裸字节换算成「96.2G · 3h18m」—— 录制时真正想知道的是"还能录多久"，不是"还剩多少字节"。
+ * 每一段仍受 #54 的 `CamPill` 开关控制，关掉的段整段不组合。
+ */
+@Composable
+private fun TopCapsule(
+    lensLabel: String,
+    sizeLabel: String,
+    capacityLabel: String,
+    hidden: Set<CamPill>,
+    freeLow: Boolean,
+    lensModifier: Modifier,
+    sizeModifier: Modifier,
+    capacityModifier: Modifier,
+    onLensClick: () -> Unit,
+    onSizeClick: () -> Unit,
+    onCapacityClick: () -> Unit
+) {
+    val segs = buildList {
+        if (CamPill.LENS !in hidden) add(TopSeg(lensLabel, lensModifier, WotaText, onLensClick))
+        if (CamPill.SIZE !in hidden) add(TopSeg(sizeLabel, sizeModifier, WotaText, onSizeClick))
+        if (CamPill.STORAGE !in hidden) {
+            add(TopSeg(capacityLabel, capacityModifier, if (freeLow) WotaRec else WotaText, onCapacityClick))
+        }
+    }
+    if (segs.isEmpty()) return
+    Row(
+        Modifier
+            .wotaCard(WotaShape.pill)
+            .padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        segs.forEachIndexed { index, seg ->
+            if (index > 0) {
+                Box(Modifier.width(1.dp).height(12.dp).background(WotaDivider))
+            }
+            Text(
+                text = seg.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = seg.tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = seg.anchor
+                    .clip(RoundedCornerShape(percent = 50))
+                    .clickable(onClick = seg.onClick)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
     }
 }
