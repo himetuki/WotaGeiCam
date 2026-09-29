@@ -5,6 +5,7 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.ui.GridBox
 import com.wotagei.cam.ui.GridCell
 import com.wotagei.cam.ui.HudEntry
+import com.wotagei.cam.ui.HudGridItem
 import com.wotagei.cam.ui.HudGridPlan
 import com.wotagei.cam.ui.HudLayoutTable
 import com.wotagei.cam.ui.HudPointPx
@@ -249,6 +250,71 @@ class HudLayoutPairCellTest {
         val brokenPlaced = gridPlacementOf(broken, broken.map { sizes.getValue(it.entry) }, gap)
         assertEquals(HudSizePx(116, 150), brokenPlaced.pitch)
         assertEquals("拆对后底板 = 54 + 4 + 4 = 62dp", 62, brokenPlaced.size.width / 2 + 8)
+    }
+
+    @Test
+    fun offsetsFollowTheInputIndexNotTheCellOrder() {
+        // 上一批的 `gridPlacementOfTheDefaultRightDockMeasuresTheNinetyFourBoard` 把 offsets 与手算 px
+        // 钉住了，但那次的 `items` **恰好就是格子顺序** ⇒ 它区分不了两种实现：
+        //   (a) offsets[i] 对应 items[i]（正确，也是 HudEntryGrid 依赖的语义）
+        //   (b) offsets 按格子分组/排序输出（写错的方式，屏幕上会把胶囊贴到别的格子上）
+        // 两种实现在那条用例里都绿。这条就是把 items **故意打乱**（含把配对格里的两颗反着列），
+        // 让 (b) 立刻红——这是渲染胶水层唯一还没被执行过的测试覆盖到的不变量。
+        val gap = HudSizePx(8, 8)
+        val sizes = mapOf(
+            e(CamPill.LEVEL) to HudSizePx(108, 140),
+            e(CamPill.VOLUME) to HudSizePx(56, 142),
+            e(CamPill.BT) to HudSizePx(94, 60),
+            e(CamPill.ZOOM) to HudSizePx(94, 60),
+            e(CamPill.FOCUS) to HudSizePx(94, 60),
+            e(CamPill.STAB) to HudSizePx(94, 60)
+        )
+        val shuffled = listOf(
+            HudGridItem(e(CamPill.STAB), GridCell(0, 4)),    // 最底行那颗排在**第 0 位**
+            HudGridItem(e(CamPill.VOLUME), GridCell(0, 0)),  // 配对格：音量表排在姿态仪**之前**
+            HudGridItem(e(CamPill.BT), GridCell(0, 1)),
+            HudGridItem(e(CamPill.LEVEL), GridCell(0, 0)),
+            HudGridItem(e(CamPill.ZOOM), GridCell(0, 2)),
+            HudGridItem(e(CamPill.FOCUS), GridCell(0, 3))
+        )
+        val placed = gridPlacementOf(shuffled, shuffled.map { sizes.getValue(it.entry) }, gap)
+
+        // 格长与格网尺寸**与次序无关**（撑 pitch 的还是那枚配对格）
+        assertEquals(HudSizePx(180, 150), placed.pitch)
+        assertEquals(HudSizePx(172, 742), placed.size)
+
+        // 按下标取——offsets[0] 属于 STAB，不是左上角那一格。这就是 (b) 会红的地方
+        assertEquals("第 0 位必须是 STAB 自己的落点", HudPointPx(43, 645), placed.offsets[0])
+        // 逐颗按**条目身份**点名（手算）：单住户格子恒为 x=43（(180−94)/2），y 由行号推
+        assertEquals(HudPointPx(43, 195), placed.offsets[2])   // BT  row 1
+        assertEquals(HudPointPx(43, 345), placed.offsets[4])   // ZOOM row 2
+        assertEquals(HudPointPx(43, 495), placed.offsets[5])   // FOCUS row 3
+        // 配对格：格内左右按**输入次序**排 ⇒ 音量表这次占了左边 4，姿态仪跟在它后面
+        // （上一批那条用例里是姿态仪在左、x=4；两颗互换位置是设计，不是 bug）
+        assertEquals("音量表这次在配对格左侧", HudPointPx(4, 4), placed.offsets[1])
+        assertEquals("姿态仪紧跟其后：4 + 56 + 8 = 68", HudPointPx(68, 5), placed.offsets[3])
+
+        // 真正的不变量：**单住户格子的落点只由它自己的 (col,row) 与尺寸决定，与列表次序无关**。
+        // 与"自然次序"那一版逐颗对撞——若实现把 offsets 按格子排，这里立刻红。
+        val natural = listOf(
+            HudGridItem(e(CamPill.LEVEL), GridCell(0, 0)),
+            HudGridItem(e(CamPill.VOLUME), GridCell(0, 0)),
+            HudGridItem(e(CamPill.BT), GridCell(0, 1)),
+            HudGridItem(e(CamPill.ZOOM), GridCell(0, 2)),
+            HudGridItem(e(CamPill.FOCUS), GridCell(0, 3)),
+            HudGridItem(e(CamPill.STAB), GridCell(0, 4))
+        )
+        val naturalPlaced = gridPlacementOf(natural, natural.map { sizes.getValue(it.entry) }, gap)
+        fun byEntry(items: List<HudGridItem>, pl: com.wotagei.cam.ui.GridPlacement) =
+            items.mapIndexed { i, it -> it.entry to pl.offsets[i] }.toMap()
+        val a = byEntry(shuffled, placed)
+        val b = byEntry(natural, naturalPlaced)
+        for (pill in listOf(CamPill.BT, CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB)) {
+            assertEquals(
+                "${pill.name} 的落点不该随列表次序变（变了就说明 offsets 是按格子排的）",
+                b[e(pill)], a[e(pill)]
+            )
+        }
     }
 
     @Test
