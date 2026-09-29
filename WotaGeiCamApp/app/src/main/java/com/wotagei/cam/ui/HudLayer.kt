@@ -638,6 +638,15 @@ fun BoxScope.HudZoneBox(
     modifier: Modifier = Modifier,
     shiftXPx: () -> Float = { 0f },
     shiftYPx: () -> Float = { 0f },
+    /**
+     * **顶栏原生对齐那一支的下限**（dp，安全区局部坐标；任务 #79）。只有 [HudZone.TOP] 读它，
+     * 其余四枚容器一律传 0（录制页顶栏本来就该贴顶，0 = 与改前逐字同值）。
+     *
+     * 形参**没有默认值**（#69 铁律）：这一处给默认值已经翻过车——上一批加这个形参时十一个调用点
+     * 只写了算式没传值，结果"三颗按钮能点了，顶栏那两枚又落在操作栏矩形里拖不动"，把一个缺陷换成另一个。
+     * 让它编译不过才是这条防线本身；新增调用点漏传直接红在编译器上，不红在真机上。
+     */
+    nativeTopMinDp: Int,
     onCardRect: (IntRect) -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -656,7 +665,16 @@ fun BoxScope.HudZoneBox(
             // ↓ 这五条分支就是 B1–B3 的定稿对齐与设计留白。fillMax* 必须排在 padding 前，
             //   否则"带高"会变成盒子自己的尺寸，居中与对齐基准就漂了（§58 那族坑的又一种走法）
             HudZone.TOP -> Modifier.align(Alignment.TopStart)
-                .offset { IntOffset(px(HudEdgePad.value.roundToInt()), px(TopTopPad.value.roundToInt())) }
+                // [nativeTopMinDp]：编辑页把顶栏整条推到它自己那条操作栏之下（录制页五处传 0 ⇒ 与改前逐字同值）。
+                // 不推的话这枚容器的两枚段会压在操作栏那三颗的矩形里，而那三颗现在在捕获层之上（z 序最后画），
+                // 交叠的那几颗就点不到也拖不动了——带的下缘怎么量出来的见 [chromeBandBottomDp]，
+                // 与 HudLayoutEditor 的「手势：一层捕获层」是同一条账的两头。
+                .offset {
+                    IntOffset(
+                        px(HudEdgePad.value.roundToInt()),
+                        px(maxOf(TopTopPad.value, nativeTopMinDp.toFloat()).roundToInt())
+                    )
+                }
             HudZone.LEFT -> Modifier.align(Alignment.CenterStart).fillMaxHeight()
                 .padding(start = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
             HudZone.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight()

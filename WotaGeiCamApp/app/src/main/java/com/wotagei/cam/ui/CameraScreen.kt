@@ -855,6 +855,9 @@ fun CameraScreen(
                 placement = placementOf(HudZone.TOP),
                 area = baseArea,
                 modifier = Modifier.widthIn(max = topBarMaxWidthDp),
+                // 录制页顶栏本来就贴顶（原生对齐只让一枚 TopTopPad）⇒ 0 = 与改前逐字同值；
+                // 这条下限只有编辑页那条操作栏需要（#79，见 chromeBandBottomDp）
+                nativeTopMinDp = 0,
                 onCardRect = { putCardRect(HudZone.TOP, it) }
             ) {
                 HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
@@ -864,6 +867,7 @@ fun CameraScreen(
                     zone = HudZone.LEFT,
                     placement = placementOf(HudZone.LEFT),
                     area = baseArea,
+                    nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
                     onCardRect = { putCardRect(HudZone.LEFT, it) }
                 ) {
                     HudDockZone(
@@ -881,6 +885,7 @@ fun CameraScreen(
                     zone = HudZone.RIGHT,
                     placement = placementOf(HudZone.RIGHT),
                     area = rightArea,
+                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                     onCardRect = { putCardRect(HudZone.RIGHT, it) }
                 ) {
                     HudDockZone(
@@ -901,6 +906,7 @@ fun CameraScreen(
                     zone = HudZone.READOUT,
                     placement = placementOf(HudZone.READOUT),
                     area = readoutArea,
+                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                     onCardRect = { putCardRect(HudZone.READOUT, it) }
                 ) {
                     HudReadoutZone(
@@ -921,6 +927,7 @@ fun CameraScreen(
                     placement = placementOf(HudZone.BOTTOM),
                     area = baseArea,
                     shiftYPx = { if (dockDragging) dockShiftPx else 0f },
+                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                     onCardRect = { putCardRect(HudZone.BOTTOM, it) }
                 ) {
                     HudBottomZone(
