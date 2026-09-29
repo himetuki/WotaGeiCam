@@ -874,7 +874,9 @@ fun CameraScreen(
                         HudZone.LEFT,
                         hudLayout.gridItems(HudZone.LEFT, gridPlan),
                         hudCtx,
-                        zoneBandHeight(HudZone.LEFT, baseArea)
+                        zoneBandHeight(HudZone.LEFT, baseArea),
+                        // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
+                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
                     )
                 }
                 // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
@@ -892,7 +894,8 @@ fun CameraScreen(
                         HudZone.RIGHT,
                         hudLayout.gridItems(HudZone.RIGHT, gridPlan),
                         hudCtx,
-                        zoneBandHeight(HudZone.RIGHT, rightArea)
+                        zoneBandHeight(HudZone.RIGHT, rightArea),
+                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
                     )
                 }
                 // 六项第 4 条：快门速度 / 帧率 / 码率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）。
@@ -912,7 +915,10 @@ fun CameraScreen(
                     HudReadoutZone(
                         hudLayout.gridItems(HudZone.READOUT, gridPlan),
                         hudCtx,
-                        zoneBandHeight(HudZone.READOUT, readoutArea)
+                        zoneBandHeight(HudZone.READOUT, readoutArea),
+                        // #80：读数块只预留**列数**（透明底板 ⇒ 不花观感钱），纵向那一轴是有意留的缺口，
+                        // 理由与两条出路都写在 GridAnchor 的文件头
+                        hudLayout.defaultGridOf(HudZone.READOUT, gridPlan)
                     )
                 }
                 // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
