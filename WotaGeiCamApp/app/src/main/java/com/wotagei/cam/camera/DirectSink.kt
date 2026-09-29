@@ -73,7 +73,7 @@ fun directDisplayMatrix(
  * 线程：全部方法可能被相机工作线程与主线程交替调用，状态用 @Volatile 收；
  * 回调 [onReconfigure] 固定抛回主线程（`TextureView` 只能在主线程改）。
  */
-class DirectSink : PreviewSink, DisplaySurfaceReceiver {
+class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -189,6 +189,32 @@ class DirectSink : PreviewSink, DisplaySurfaceReceiver {
      * （GL 路径自己管缓冲，用 [PreviewSink] 的默认空实现）。
      */
     override fun structuralToken(): String = if (streamWidth > 0) "direct=${streamWidth}x$streamHeight" else ""
+
+    // region 毛玻璃接缝（#84）：DIRECT 下的回答恒为「不可用」
+
+    /**
+     * 毛玻璃接缝在 DIRECT 下的实现：**开关接受但无效，查询永远回答"不可用"**。
+     *
+     * 这不是待补也不是偷懒：DIRECT 的相机帧根本不进 GL（`Camera2Engine` 把预览面直接挂进 session），
+     * 全工程那唯一一枚 EGL 上下文压根没被创建，也就没有可糊的纹理。UI 侧因此可以**无条件**调
+     * [setFrostBlurEnabled] 而不必先判断渲染模式——拿到的 false 就是「退成普通 scrim」的信号
+     * （docs/plan/14 §二 的优雅降级，与 curve/zebra 在 DIRECT 下不生效同族）。
+     * 开关状态刻意不存：存了就只能回答"用户想开"，仍然要接一句"但没有"，徒增一处不一致。
+     */
+    override fun setFrostBlurEnabled(enabled: Boolean) = Unit
+
+    override fun isFrostBlurEnabled(): Boolean = false
+
+    override fun isFrostBlurAvailable(): Boolean = false
+
+    override fun frostRenderTarget(): FrostRenderTarget? = null
+
+    override fun frostGeometry(
+        viewOriginXInWindowPx: Float,
+        viewOriginYInWindowPx: Float
+    ): FrostGeometry? = null
+
+    // endregion
 
     private fun recomputeStreamSize() {
         if (frameWidth <= 0 || frameHeight <= 0) {
