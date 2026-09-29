@@ -2,6 +2,7 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
+import com.wotagei.cam.ui.GridAnchor
 import com.wotagei.cam.ui.GridBox
 import com.wotagei.cam.ui.GridCell
 import com.wotagei.cam.ui.HudEntry
@@ -52,6 +53,14 @@ import kotlin.math.roundToInt
  * 没有任何一条是"拿实现的输出与实现自己比"。
  */
 class HudLayoutPairCellTest {
+
+    /**
+     * #80 之后 [com.wotagei.cam.ui.gridPlacementOf] 多了一个 `anchor` 形参。
+     * 本文件那几条测的是**宽度账与配对语义**（86dp 那格撑格长、底板 94dp），一律喂**空**的默认表：
+     * 空 = "这一帧还没量到默认表"那一档 ⇒ 格长退回"取渲染分组里最宽那枚格子"、预留档数 0，
+     * 与改前逐字同值。预留与"从右往里数"那两支的新行为在 `HudLayoutGridTest` 的 #80 那组用例里打。
+     */
+    private val rightAnchor = GridAnchor(HudZone.RIGHT, emptyMap())
 
     /**
      * 本文件默认那一份输入：**实测高一律 0**（⇒ 行跨度恒为 1）、格距手摆 30px。
@@ -249,7 +258,9 @@ class HudLayoutPairCellTest {
             e(CamPill.FOCUS) to HudSizePx(94, 60),
             e(CamPill.STAB) to HudSizePx(94, 60)
         )
-        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap, rowPitch)
+        // #80：喂**空** defaultCells = "默认表还没量到"那一档 ⇒ 格长退回"取渲染分组里最宽那枚格子"，
+        // 与改前逐字同值；本条测的就是这条兜底路径（预留那一档在 HudLayoutGridTest 的 #80 那组里单独打）
+        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap, rowPitch, rightAnchor)
         // 格长：宽 = 配对格 (108 + 8 + 56) + 8 = 180；高 = 直接就是喂进来的行距 150（#75：不再从颗里取）
         assertEquals(HudSizePx(180, 150), placed.pitch)
         // 格网尺寸：单列 ⇒ 宽 = 1 × 180 − 8 = 172px = 86dp；5 行 ⇒ 高 = 5 × 150 − 8 = 742px
@@ -274,7 +285,7 @@ class HudLayoutPairCellTest {
         val broken = HudLayoutTable.default()
             .placeEntryAt(e(CamPill.VOLUME), HudZone.RIGHT, 1, GridCell(0, 5), planAll)
             .gridItems(HudZone.RIGHT, planAll)
-        val brokenPlaced = gridPlacementOf(broken, broken.map { sizes.getValue(it.entry) }, gap, rowPitch)
+        val brokenPlaced = gridPlacementOf(broken, broken.map { sizes.getValue(it.entry) }, gap, rowPitch, rightAnchor)
         assertEquals(HudSizePx(116, 150), brokenPlaced.pitch)
         assertEquals("拆对后底板 = 54 + 4 + 4 = 62dp", 62, brokenPlaced.size.width / 2 + 8)
     }
@@ -306,7 +317,7 @@ class HudLayoutPairCellTest {
             HudGridItem(e(CamPill.ZOOM), GridCell(0, 2)),
             HudGridItem(e(CamPill.FOCUS), GridCell(0, 3))
         )
-        val placed = gridPlacementOf(shuffled, shuffled.map { sizes.getValue(it.entry) }, gap, rowPitch)
+        val placed = gridPlacementOf(shuffled, shuffled.map { sizes.getValue(it.entry) }, gap, rowPitch, rightAnchor)
 
         // 格长与格网尺寸**与次序无关**（撑 pitch 的还是那枚配对格）
         assertEquals(HudSizePx(180, 150), placed.pitch)
@@ -333,7 +344,7 @@ class HudLayoutPairCellTest {
             HudGridItem(e(CamPill.FOCUS), GridCell(0, 3)),
             HudGridItem(e(CamPill.STAB), GridCell(0, 4))
         )
-        val naturalPlaced = gridPlacementOf(natural, natural.map { sizes.getValue(it.entry) }, gap, rowPitch)
+        val naturalPlaced = gridPlacementOf(natural, natural.map { sizes.getValue(it.entry) }, gap, rowPitch, rightAnchor)
         fun byEntry(items: List<HudGridItem>, pl: com.wotagei.cam.ui.GridPlacement) =
             items.mapIndexed { i, it -> it.entry to pl.offsets[i] }.toMap()
         val a = byEntry(shuffled, placed)
@@ -396,7 +407,7 @@ class HudLayoutPairCellTest {
         assertEquals(GridCell(0, 5), cells[e(CamPill.FOCUS)])
         assertEquals(GridCell(0, 6), cells[e(CamPill.STAB)])
 
-        val placed = gridPlacementOf(items, items.map { HudSizePx(widths.getValue(it.entry), heights.getValue(it.entry)) }, gap, rowPitch)
+        val placed = gridPlacementOf(items, items.map { HudSizePx(widths.getValue(it.entry), heights.getValue(it.entry)) }, gap, rowPitch, rightAnchor)
         // 宽度那一轴一条没动：配对格 108 + 8 + 56 = 172 ⇒ 格长 180 ⇒ 格网 172px = 86dp ⇒ 底板 94dp
         assertEquals(HudSizePx(180, rowPitch), placed.pitch)
         assertEquals("格网 = 172px 宽（底板 94dp）", 94, placed.size.width / 2 + 8)
@@ -488,18 +499,24 @@ class HudLayoutPairCellTest {
         // 格内左右偏移：整枚格子在格宽里居中，再按各颗实测宽 + 行距依次排开
         val pitchPx = HudSizePx(180, 148)
         val widths = listOf(108, 56)
+        // #80 之后这两个函数各多两个形参（gridWidthPx / colFromEnd）：本文件这几条测的都是
+        // **col 0 贴左缘**那一支（左 Dock 与读数块），所以 colFromEnd = false、gridWidthPx 只是名义值
+        //（那一支不读它）；"贴右缘从右往里数"那一支在 HudLayoutGridTest 的 #80 那组用例里单独打
         assertEquals(
             "配对格内左缘 = 4 与 120（(180 − 172) / 2 = 4；4 + 108 + 8 = 120）",
-            listOf(4, 120), cellChildLeftsPx(GridCell(0, 0), pitchPx, widths, 8)
+            listOf(4, 120), cellChildLeftsPx(GridCell(0, 0), pitchPx, widths, 8, 352, colFromEnd = false)
         )
-        assertEquals("第 1 列要先加 col × pitch", listOf(184, 300), cellChildLeftsPx(GridCell(1, 0), pitchPx, widths, 8))
+        assertEquals(
+            "第 1 列要先加 col × pitch",
+            listOf(184, 300), cellChildLeftsPx(GridCell(1, 0), pitchPx, widths, 8, 352, colFromEnd = false)
+        )
         assertEquals(
             "单颗格子与 cellPlaceOffsetPx 的 x 逐字同值（两处不许各有一份居中算式）",
             listOf(cellPlaceOffsetPx(GridCell(2, 1), pitch, HudSizePx(30, 10), 1).x),
-            cellChildLeftsPx(GridCell(2, 1), pitch, listOf(30), 8)
+            cellChildLeftsPx(GridCell(2, 1), pitch, listOf(30), 8, 142, colFromEnd = false)
         )
-        assertEquals(10, cellChildLeftsPx(GridCell(0, 0), pitch, listOf(30), 8).single())
-        assertEquals(emptyList<Int>(), cellChildLeftsPx(GridCell(0, 0), pitch, emptyList(), 8))
+        assertEquals(10, cellChildLeftsPx(GridCell(0, 0), pitch, listOf(30), 8, 142, colFromEnd = false).single())
+        assertEquals(emptyList<Int>(), cellChildLeftsPx(GridCell(0, 0), pitch, emptyList(), 8, 142, colFromEnd = false))
         // 命中裁决（配对格被点中时该搬哪一颗，不许靠 Compose 的矩形回报顺序）
         val spans = listOf(4..111, 120..175)
         assertEquals("压在姿态仪上 ⇒ 搬姿态仪", 0, entryHitIndex(spans, 60))

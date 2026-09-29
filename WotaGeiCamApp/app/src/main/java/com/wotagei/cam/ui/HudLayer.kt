@@ -844,6 +844,14 @@ private fun HudEntryGrid(
     zone: HudZone,
     rowPitchPx: Int,
     heights: MutableMap<HudEntry, Int>,
+    /**
+     * 这一枚容器的**默认表**格子（[HudLayoutTable.defaultGridOf] 的产物，#80）。
+     * 与 [items] 的区别就一件事：它不看谁摆到了哪一格，所以格长与预留档数由它说了算——
+     * 这正是"拖一颗不动别颗"里"固定原点 + 固定格长"那两项的来源。
+     * **没有默认值**（#69 铁律）：漏挂的那一处会静默退回"格长取这一容器里最宽那枚格子"，
+     * 于是配对一拆开所有人的 x 平移一档（真机实测的那条），编译不过才是这条防线本身。
+     */
+    defaultCells: Map<HudEntry, GridCell>,
     modifier: Modifier = Modifier,
     content: @Composable (HudEntry) -> Unit
 ) {
@@ -856,7 +864,8 @@ private fun HudEntryGrid(
         // 整条算式（逐格住户 → 格长 → 行跨度 → 各颗落点）都在纯函数 [gridPlacementOf] 里，
         // 有手算期望值的 JVM 用例；这里只剩"把量到的尺寸喂进去、再把坐标 placeRelative 出来"
         val placed = gridPlacementOf(
-            items, placeables.map { HudSizePx(it.width, it.height) }, gapPx, rowPitchPx
+            items, placeables.map { HudSizePx(it.width, it.height) }, gapPx, rowPitchPx,
+            GridAnchor(zone, defaultCells)
         )
         layout(placed.size.width, placed.size.height) {
             placeables.forEachIndexed { i, placeable ->
@@ -951,6 +960,8 @@ fun HudDockZone(
     items: List<HudGridItem>,
     ctx: HudCtx,
     bandHeightDp: Int,
+    /** 该容器的默认表格子（#80，[HudLayoutTable.defaultGridOf]）：格长与预留档数的唯一来源，无默认值 */
+    defaultCells: Map<HudEntry, GridCell>,
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty()) return
@@ -968,7 +979,7 @@ fun HudDockZone(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // 网格节点的矩形经 ctx.gridOf 回报给编辑页（录制页传的是空链，一个节点都不加）
-        HudEntryGrid(items, zone, rowPitchPx, ctx.entryHeights, ctx.gridOf(zone)) { entry ->
+        HudEntryGrid(items, zone, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(zone)) { entry ->
             HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry), tier, clicksAccepted = true)
         }
     }
@@ -1008,6 +1019,9 @@ fun HudReadoutZone(
     items: List<HudGridItem>,
     ctx: HudCtx,
     bandHeightDp: Int,
+    /** 读数块的默认表格子（#80）：预留**列数**用，透明底板 ⇒ 预留不花观感钱；纵向是有意留的缺口，
+     *  理由逐条写在 [GridAnchor] 的文件头。无默认值（#69 铁律） */
+    defaultCells: Map<HudEntry, GridCell>,
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty() && !ctx.aeLocked) return
@@ -1026,7 +1040,7 @@ fun HudReadoutZone(
     ) {
         if (items.isNotEmpty()) {
             // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
-            HudEntryGrid(items, HudZone.READOUT, rowPitchPx, ctx.entryHeights, ctx.gridOf(HudZone.READOUT)) { entry ->
+            HudEntryGrid(items, HudZone.READOUT, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(HudZone.READOUT)) { entry ->
                 HudEntryItem(
                     entry, ctx,
                     Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),

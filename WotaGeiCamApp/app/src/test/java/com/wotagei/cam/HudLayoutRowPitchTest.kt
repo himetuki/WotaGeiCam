@@ -2,6 +2,7 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
+import com.wotagei.cam.ui.GridAnchor
 import com.wotagei.cam.ui.GridBox
 import com.wotagei.cam.ui.GridCell
 import com.wotagei.cam.ui.GridPlacement
@@ -123,7 +124,10 @@ class HudLayoutRowPitchTest {
             items,
             items.map { HudSizePx(widths.getValue(it.entry), heights.getValue(it.entry)) },
             HudSizePx(gapPx, gapPx),
-            plan.rowPitchOf(zone)
+            plan.rowPitchOf(zone),
+            // #80 的锚定输入：默认表就是 items 推导用的那一份 ⇒ used 档数 == 预留档数，
+            // 本文件那些"格网高度对撞带高"的手算期望值一条都没动（这正是"默认观感一个字没改"的证据）
+            GridAnchor(zone, HudLayoutTable.default().defaultGridOf(zone, plan))
         )
     }
 
@@ -403,7 +407,9 @@ class HudLayoutRowPitchTest {
         val placed = gridPlacementOf(
             list.map { HudGridItem(it.first, it.second) },
             list.map { HudSizePx(rightWidths.getValue(it.first), rightHeights100.getValue(it.first)) },
-            HudSizePx(8, 8), rowPitch
+            HudSizePx(8, 8), rowPitch,
+            // #80：变焦被摆到第 7 档 ⇒ used 8 档 > 预留 7 档，取大 = 8 档 ⇒ 536px 这条期望值一个字没动
+            GridAnchor(HudZone.RIGHT, HudLayoutTable.default().defaultGridOf(HudZone.RIGHT, plan))
         )
         assertEquals(536, placed.size.height)
         assertEquals("宽度账与挪动无关（底板仍 94dp）", 172, placed.size.width)
@@ -510,7 +516,8 @@ class HudLayoutRowPitchTest {
         val items = HudLayoutTable.default().gridItems(HudZone.RIGHT, plan100)
         val placed = gridPlacementOf(
             items, items.map { HudSizePx(rightWidths.getValue(it.entry), rightHeights100.getValue(it.entry)) },
-            HudSizePx(8, 8), plan100.rowPitchOf(HudZone.RIGHT)
+            HudSizePx(8, 8), plan100.rowPitchOf(HudZone.RIGHT),
+            GridAnchor(HudZone.RIGHT, HudLayoutTable.default().defaultGridOf(HudZone.RIGHT, plan100))
         )
         val bottoms = items.mapIndexed { i, it -> it.entry to placed.offsets[i].y + rightHeights100.getValue(it.entry) }
         // 手算（100%）：对焦 5×68 + 4 = 344 ⇒ 底边 404px；防抖 6×68 + 4 = 412 ⇒ 底边 472px；
@@ -526,7 +533,8 @@ class HudLayoutRowPitchTest {
         val items120 = HudLayoutTable.default().gridItems(HudZone.RIGHT, plan120)
         val placed120 = gridPlacementOf(
             items120, items120.map { HudSizePx(rightWidths.getValue(it.entry), rightHeights120.getValue(it.entry)) },
-            HudSizePx(8, 8), plan120.rowPitchOf(HudZone.RIGHT)
+            HudSizePx(8, 8), plan120.rowPitchOf(HudZone.RIGHT),
+            GridAnchor(HudZone.RIGHT, HudLayoutTable.default().defaultGridOf(HudZone.RIGHT, plan120))
         )
         val bottoms120 = items120.mapIndexed { i, it -> it.entry to placed120.offsets[i].y + rightHeights120.getValue(it.entry) }
         assertEquals(

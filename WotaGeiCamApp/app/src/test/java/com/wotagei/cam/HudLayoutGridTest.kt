@@ -2,12 +2,15 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
+import com.wotagei.cam.ui.GridAnchor
 import com.wotagei.cam.ui.GridCell
 import com.wotagei.cam.ui.HudAreaDp
 import com.wotagei.cam.ui.HudEntry
 import com.wotagei.cam.ui.HudGridPlan
 import com.wotagei.cam.ui.HudLayoutTable
+import com.wotagei.cam.ui.HudPointDp
 import com.wotagei.cam.ui.HudPointPx
+import com.wotagei.cam.ui.HudRectDp
 import com.wotagei.cam.ui.HudSizePx
 import com.wotagei.cam.ui.HudZone
 import com.wotagei.cam.ui.cellAtPointer
@@ -16,13 +19,19 @@ import com.wotagei.cam.ui.cellPlaceOffsetPx
 import com.wotagei.cam.ui.clampCellToBox
 import com.wotagei.cam.ui.clampStoredCell
 import com.wotagei.cam.ui.defaultCellsOf
+import com.wotagei.cam.ui.dropZoneOf
 import com.wotagei.cam.ui.freeCellNear
 import com.wotagei.cam.ui.gridBoxOf
+import com.wotagei.cam.ui.gridColFromEndOf
 import com.wotagei.cam.ui.gridColsCapOf
 import com.wotagei.cam.ui.gridPitchOf
+import com.wotagei.cam.ui.gridPlacementOf
 import com.wotagei.cam.ui.gridSizePx
 import com.wotagei.cam.ui.hudRowGroups
+import com.wotagei.cam.ui.reservedGridColsOf
+import com.wotagei.cam.ui.reservedGridRowsOf
 import com.wotagei.cam.ui.resolveCells
+import com.wotagei.cam.ui.zoneBandYRange
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -63,6 +72,14 @@ class HudLayoutGridTest {
 
     /** 手摆的格长（dp 无关，纯 px）：证明"格子 → 坐标"这条算式与容器里有几颗、谁在前都无关 */
     private val pitch = HudSizePx(50, 30)
+
+    /**
+     * #80 之后 [cellAtPointer] 多了三个形参（[gridWidthPx]/[gapPx]/[colFromEnd]），只有"从右往里数"
+     * 那一支读前两个。这里给一个够宽的名义格网与 0 行距：fromStart 那一支的结果与改前逐字同值，
+     * 本文件的逆算用例都测 fromStart（"从右往里数"那一支在 #80 那组新用例里单独打）。
+     */
+    private fun cellAt(pointer: HudPointPx, origin: HudPointPx, size: HudSizePx) =
+        cellAtPointer(pointer, origin, size, gridWidthPx = 5 * size.width, gapPx = 0, colFromEnd = false)
 
     private fun cells(zone: HudZone, table: HudLayoutTable = HudLayoutTable.default()) =
         table.gridItems(zone, planAll).associate { it.entry to it.cell }
@@ -338,12 +355,12 @@ class HudLayoutGridTest {
         // 正算出来的格网左上角再逆算回同一格（编辑页的吸附与渲染层的定位是同一条尺子）
         for (cell in listOf(GridCell(0, 0), GridCell(1, 2), GridCell(2, 4))) {
             val at = cellOffsetPx(cell, pitch)
-            assertEquals(cell, cellAtPointer(HudPointPx(origin.x + at.x + 1, origin.y + at.y + 1), origin, pitch))
+            assertEquals(cell, cellAt(HudPointPx(origin.x + at.x + 1, origin.y + at.y + 1), origin, pitch))
         }
         // 指针跑到网格左上方之外：floor 给负数，必须钳成 0 而不是 -1
-        assertEquals(GridCell(0, 0), cellAtPointer(HudPointPx(0, 0), origin, pitch))
+        assertEquals(GridCell(0, 0), cellAt(HudPointPx(0, 0), origin, pitch))
         // 格长 0（还没量到）时不许抛
-        assertEquals(GridCell(0, 0), cellAtPointer(HudPointPx(99, 99), origin, HudSizePx(0, 0)))
+        assertEquals(GridCell(0, 0), cellAt(HudPointPx(99, 99), origin, HudSizePx(0, 0)))
         // 格内居中：30×10 的小颗放进 50×30 的格子里，左上角补 (10,10)
         // 最后一形参是行跨度（#75）——1 档时与 #74 逐字同值，跨几档的那一档在 HudLayoutRowPitchTest 打
         assertEquals(HudPointPx(110, 100), cellPlaceOffsetPx(GridCell(2, 3), pitch, HudSizePx(30, 10), 1))
@@ -354,7 +371,11 @@ class HudLayoutGridTest {
         // 手摆：格长 50×30 dp、带高 120dp ⇒ 只放得下 4 行；拖到第 9 行必须钳回第 3 行
         // 后两形参（实测高、格距）#75 新加：这里一律喂"跨度 1"（高 0），钳制结果与 #74 逐字相同；
         // "跨度 > 1 时钳的是整块"那一档在 HudLayoutRowPitchTest 里喂真实高度另打
-        val box = gridBoxOf(HudZone.LEFT, pitchXDp = 50, pitchYDp = 30, bandHeightDp = 120, roomWidthDp = 0)
+        val box = gridBoxOf(
+            HudZone.LEFT, pitchXDp = 50, pitchYDp = 30, bandHeightDp = 120, roomWidthDp = 0,
+            // #80 的预留夹档：0 = 不预留（与改前逐字同值），预留那一档在下面的 #80 那组用例里单独打
+            reservedRows = 0, reservedCols = 0
+        )
         assertEquals(2, box.cols)
         assertEquals(4, box.rows)
         assertEquals(GridCell(1, 3), clampCellToBox(GridCell(7, 99), box, contentHeightPx = 0, rowPitchPx = 30))
@@ -364,10 +385,13 @@ class HudLayoutGridTest {
         // 读数块的列数由**可用内宽**说话：200dp ÷ 90dp 格长 = 2 列（够不到 3 列的上限）
         assertEquals(
             2,
-            gridBoxOf(HudZone.READOUT, pitchXDp = 90, pitchYDp = 42, bandHeightDp = 300, roomWidthDp = 200).cols
+            gridBoxOf(
+                HudZone.READOUT, pitchXDp = 90, pitchYDp = 42, bandHeightDp = 300, roomWidthDp = 200,
+                reservedRows = 0, reservedCols = 0   // #80 预留那一档在下面的用例里单独打
+            ).cols
         )
         // 带高不够（极矮窗口）也只给 1 行，不许 0 行让 coerceIn 抛
-        assertEquals(1, gridBoxOf(HudZone.READOUT, 0, 0, 300, 200).rows)
+        assertEquals(1, gridBoxOf(HudZone.READOUT, 0, 0, 300, 200, reservedRows = 0, reservedCols = 0).rows)
         // 存储层硬上限都从既有真源推出来：竖 Dock 两列（hudRowGroups 的并排分支最多两颗）、
         // 读数块三列（hudPerRowFor 的最高档），行数 = 条目总数
         assertEquals(2, gridColsCapOf(HudZone.LEFT))
@@ -407,5 +431,222 @@ class HudLayoutGridTest {
             GridCell(0, 0),
             HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }[e(CamPill.VOLUME)]
         )
+    }
+
+    // ---------- 六、#80：拖一颗不许动别颗（锚定与预留） ----------
+    //
+    // 硬判据（用户原话「移到一项其他项也会同时移动，这是极大的限制」的正解）：
+    // **每颗的屏幕坐标 = f(它自己的 col,row) + 固定原点 + 固定格长**，式子里不许出现任何其他颗的信息。
+    // 下面六条各自钉住那条式子的一个零件，期望值全部手算（写死常数），没有一条是"拿实现输出当期望值"：
+    // 手摆尺寸一律 60×20 / 100×20 / 40×20 这一档小整数，行距 30、行距 gap 8，
+    // 于是"居中补 (pitch − 内容)/2"与"每档 +30"都能口算。
+
+    private val gap8 = HudSizePx(8, 8)
+
+    /** 手摆实测尺寸（px）：左 Dock 四颗一样宽，右 Dock 让配对那两颗不一样宽（就是要考格长归属） */
+    private fun uniformLeftWidths(entries: List<com.wotagei.cam.ui.HudGridItem>) =
+        entries.map { HudSizePx(60, 20) }
+
+    private fun rightWidths(entries: List<com.wotagei.cam.ui.HudGridItem>) = entries.map {
+        when (it.entry.pill) {
+            CamPill.LEVEL -> HudSizePx(100, 20)
+            CamPill.VOLUME -> HudSizePx(60, 20)
+            else -> HudSizePx(40, 20)
+        }
+    }
+
+    private fun placedOf(zone: HudZone, items: List<com.wotagei.cam.ui.HudGridItem>) = gridPlacementOf(
+        items,
+        if (zone == HudZone.LEFT) uniformLeftWidths(items) else rightWidths(items),
+        gap8,
+        // 与 planAll.rowPitchOf 同值：30px 一档，且实测高喂 0 ⇒ 每格跨度 1
+        30,
+        GridAnchor(zone, HudLayoutTable.default().defaultGridOf(zone, planAll))
+    )
+
+    @Test
+    fun leftDockMoveChangesOnlyTheDraggedEntryWhileTheBoardGrowsWider() {
+        val table = HudLayoutTable.default()
+        val before = table.gridItems(HudZone.LEFT, planAll)
+        val placedBefore = placedOf(HudZone.LEFT, before)
+        // 手算（默认四颗各占一档、格长 60 + 8 = 68）：格网 60×112，逐颗左上角
+        assertEquals(HudSizePx(68, 30), placedBefore.pitch)
+        assertEquals(HudSizePx(60, 112), placedBefore.size)
+        assertEquals(
+            listOf(HudPointPx(4, 5), HudPointPx(4, 35), HudPointPx(4, 65), HudPointPx(4, 95)),
+            placedBefore.offsets
+        )
+        // 把监看摆到**第 1 列**（默认表单列，这一档就是把"用到的列数"从 1 撑到 2）
+        val moved = table.placeEntryAt(e(CamPill.MONITOR), HudZone.LEFT, 1, GridCell(1, 1), planAll)
+            .gridItems(HudZone.LEFT, planAll)
+        val placedAfter = placedOf(HudZone.LEFT, moved)
+        val byEntry = moved.mapIndexed { i, it -> it.entry to placedAfter.offsets[i] }.toMap()
+        // ① "板子会长大"与"别人不动"是两件事，分开断：宽度确实从 60 涨到 128（两列），高度一字未变
+        assertEquals("两列 ⇒ 格网宽 = 2×68−8 = 128（底板会长大，这条测的就是它）", HudSizePx(128, 112), placedAfter.size)
+        // ② 其余三颗逐颗点名：左 Dock 贴左缘锚定，第 2 列只向右生长 ⇒ 第 0 列的颗一个像素都不许动
+        assertEquals(HudPointPx(4, 5), byEntry[e(CamPill.REFLINE)])
+        assertEquals(HudPointPx(4, 65), byEntry[e(CamPill.CURVE)])
+        assertEquals(HudPointPx(4, 95), byEntry[e(CamPill.FLASH)])
+        // ③ 被拖那颗落在 (1,1)：左缘 = 1×68 + (68−60)/2 = 72，纵向 = 1×30 + 5 = 35
+        assertEquals(HudPointPx(72, 35), byEntry[e(CamPill.MONITOR)])
+    }
+
+    @Test
+    fun rowOverflowIsClampedAndEvenBadDataNeverTranslatesOthers() {
+        // ① 编辑页的钳制带：带高 300dp ÷ 档 30dp = 10 档，但默认表只预留 4 档 ⇒ 落点最多第 3 档
+        val box = gridBoxOf(
+            HudZone.LEFT, pitchXDp = 34, pitchYDp = 30, bandHeightDp = 300, roomWidthDp = 0,
+            reservedRows = 4, reservedCols = 0
+        )
+        assertEquals(2, box.cols)
+        assertEquals("预留 4 档 ⇒ 带内 10 档也只许用 4 档（拖不出预留）", 4, box.rows)
+        assertEquals(GridCell(0, 3), clampCellToBox(GridCell(0, 99), box, contentHeightPx = 0, rowPitchPx = 30))
+        // ② 坏数据那一档（手改 prefs / 预留之后又藏了一颗）：格网**会长高**，但别人的左上角照旧
+        val table = HudLayoutTable.default()
+        val over = listOf(
+            com.wotagei.cam.ui.HudGridItem(e(CamPill.REFLINE), GridCell(0, 0)),
+            com.wotagei.cam.ui.HudGridItem(e(CamPill.MONITOR), GridCell(0, 1)),
+            com.wotagei.cam.ui.HudGridItem(e(CamPill.CURVE), GridCell(0, 2)),
+            com.wotagei.cam.ui.HudGridItem(e(CamPill.FLASH), GridCell(0, 5))
+        )
+        val placed = placedOf(HudZone.LEFT, over)
+        assertEquals("6 档 × 30 − 8 = 172（板子会长大）", 172, placed.size.height)
+        val byEntry = over.mapIndexed { i, it -> it.entry to placed.offsets[i] }.toMap()
+        assertEquals("参考线不动", HudPointPx(4, 5), byEntry[e(CamPill.REFLINE)])
+        assertEquals("监看不动", HudPointPx(4, 35), byEntry[e(CamPill.MONITOR)])
+        assertEquals("曲线不动", HudPointPx(4, 65), byEntry[e(CamPill.CURVE)])
+    }
+
+    @Test
+    fun rightDockCountsColumnsFromItsAnchoredEdgeSoColZeroNeverMoves() {
+        val table = HudLayoutTable.default()
+        val before = table.gridItems(HudZone.RIGHT, planAll)
+        val placedBefore = placedOf(HudZone.RIGHT, before)
+        // 手算：配对格 100 + 8 + 60 = 168 ⇒ 格长 176；单列 ⇒ 格网宽 168、高 5×30−8 = 142
+        assertEquals(HudSizePx(176, 30), placedBefore.pitch)
+        assertEquals(HudSizePx(168, 142), placedBefore.size)
+        // 单列时"从右往里数"与"从左往里数"必须逐字同值（默认观感一个字没动的证据）
+        assertEquals(
+            listOf(
+                HudPointPx(4, 5),     // 姿态仪 (176−168)/2 = 4
+                HudPointPx(112, 5),   // 音量表 4 + 100 + 8
+                HudPointPx(68, 35),   // 蓝牙 (176−40)/2 = 68
+                HudPointPx(68, 65),
+                HudPointPx(68, 95),
+                HudPointPx(68, 125)
+            ),
+            placedBefore.offsets
+        )
+        // 把蓝牙摆到第 1 列：格网从 168 涨到 2×176−8 = 344
+        val moved = table.placeEntryAt(e(CamPill.BT), HudZone.RIGHT, 2, GridCell(1, 1), planAll)
+            .gridItems(HudZone.RIGHT, planAll)
+        val placedAfter = placedOf(HudZone.RIGHT, moved)
+        assertEquals(HudSizePx(344, 142), placedAfter.size)
+        // 右 Dock 的底板**贴右缘钉住**：屏幕上那颗离带右缘的距离 = size.width − offset.x，
+        // 所以"别颗不动"要断的是这个差值（不是 offset.x 本身）——逐颗手算：
+        // 改前 168 − 4 = 164，改后 344 − 180 = 164（格网向左长了 176，颗在格网里向右挪了同样的 176）
+        val byEntry = moved.mapIndexed { i, it -> it.entry to placedAfter.offsets[i] }.toMap()
+        for ((entry, beforeAt) in before.mapIndexed { i, it -> it.entry to placedBefore.offsets[i] }.toMap()) {
+            val afterAt = byEntry.getValue(entry)
+            if (entry == e(CamPill.BT)) continue
+            assertEquals(
+                "${entry.pill} 离带右缘的距离不许变",
+                placedBefore.size.width - beforeAt.x,
+                placedAfter.size.width - afterAt.x
+            )
+            assertEquals("${entry.pill} 的纵向不许变", beforeAt.y, afterAt.y)
+        }
+        // 被拖那颗自己：第 1 列在**左边**（背向锚定边生长），x = 344 − 2×176 + 8 + 68 = 244…手算核对
+        assertEquals(HudPointPx(68, 35), byEntry[e(CamPill.BT)])   // 它自己在网内的左上角仍是 68
+    }
+
+    @Test
+    fun splittingThePairKeepsTheReservedPitchAndTheOldModelWouldHaveMovedEveryone() {
+        val table = HudLayoutTable.default()
+        val before = table.gridItems(HudZone.RIGHT, planAll)
+        // 拆对：把音量表摆到第 5 档，配对那一格从此只剩姿态仪 100 宽
+        val split = table.placeEntryAt(e(CamPill.VOLUME), HudZone.RIGHT, 1, GridCell(0, 5), planAll)
+            .gridItems(HudZone.RIGHT, planAll)
+        val reserved = placedOf(HudZone.RIGHT, split)
+        assertEquals("格长仍取**默认表**那枚配对格 168 + 8 = 176", 176, reserved.pitch.width)
+        assertEquals("底板宽也不许因为拆对变窄（格长预留住了 ⇒ 1×176−8 = 168）", 168, reserved.size.width)
+        val byEntry = split.mapIndexed { i, it -> it.entry to reserved.offsets[i] }.toMap()
+        // ⚠ 留在原格那一颗会在**自己那一格里**重新居中：配对时格内容 168 ⇒ x = 4，只剩姿态仪 100 ⇒
+        // x = (176−100)/2 = 38。这是"共格的那两颗本来就是一个横排单元"的必然结果，
+        // 平移只发生在**同一枚格子内部**（±34px），跨格、跨列、跨行一颗都不动——
+        // 本批硬判据覆盖的是后者，这一条残差照实写在这里与报告里，不当成已修
+        assertEquals("姿态仪在自己那一格里重新居中", HudPointPx(38, 5), byEntry[e(CamPill.LEVEL)])
+        assertEquals("蓝牙的 x 与 y 都不许被拆对带偏", HudPointPx(68, 35), byEntry[e(CamPill.BT)])
+        assertEquals("对焦仍在第 3 档同一格", HudPointPx(68, 95), byEntry[e(CamPill.FOCUS)])
+        // **反证**（真断言的另一半）：把默认表喂空 = 改前那条"格长取渲染分组里最宽那枚格子"的算式，
+        // 格长立刻从 176 掉到 108，于是每一颗的 x 都平移 ⇒ 本批修的就是这个
+        val oldModel = gridPlacementOf(split, rightWidths(split), gap8, 30, GridAnchor(HudZone.RIGHT, emptyMap()))
+        assertEquals(108, oldModel.pitch.width)
+    }
+
+    @Test
+    fun readoutReservesColumnsOnlyAndSaysSoAboutRows() {
+        val table = HudLayoutTable.default()
+        val anchor = GridAnchor(HudZone.READOUT, table.defaultGridOf(HudZone.READOUT, planAll))
+        // 默认表（planAll 的 perRow = 3、七颗读数）⇒ 3 列、行号 0..2
+        assertEquals(
+            "读数块预留列数 = 默认表用到的列数", 3, reservedGridColsOf(anchor)
+        )
+        assertEquals(
+            "读数块**故意不预留行档**（要贴住 #70 A 那条基线，预留与允许多摆一档不能同时成立）",
+            0,
+            reservedGridRowsOf(anchor, { 0 }, 30)
+        )
+        // 两枚竖 Dock 反过来：预留行、不预留列（列数由用户摆，贴边那侧生长）
+        val rightAnchor = GridAnchor(HudZone.RIGHT, table.defaultGridOf(HudZone.RIGHT, planAll))
+        assertEquals(0, reservedGridColsOf(rightAnchor))
+        assertEquals("右 Dock 默认表用到 5 档", 5, reservedGridRowsOf(rightAnchor, { 0 }, 30))
+        val leftAnchor = GridAnchor(HudZone.LEFT, table.defaultGridOf(HudZone.LEFT, planAll))
+        assertEquals("左 Dock 默认表用到 4 档", 4, reservedGridRowsOf(leftAnchor, { 0 }, 30))
+        // 钳制带：读数块可用宽 500dp ÷ 90dp = 5 列，但上限 3、预留 2 ⇒ 夹到 2（#70 A「横屏一行两颗」定版）
+        assertEquals(
+            2,
+            gridBoxOf(
+                HudZone.READOUT, pitchXDp = 90, pitchYDp = 36, bandHeightDp = 300, roomWidthDp = 500,
+                reservedRows = 0, reservedCols = 2
+            ).cols
+        )
+        // 贴右缘生长的只有右 Dock（顶栏/底栏不上网格，读数块要保持"快门 | 帧率"那一对的左右序）
+        assertTrue(gridColFromEndOf(HudZone.RIGHT))
+        assertFalse(gridColFromEndOf(HudZone.LEFT))
+        assertFalse(gridColFromEndOf(HudZone.READOUT))
+    }
+
+    @Test
+    fun dropInsideTheSourceBandNeverReAssignsTheZone() {
+        // 横屏那一份实测带：360 − 顶栏 44 − 底栏 72 ⇒ 右 Dock 的带是 44..288
+        val land = HudAreaDp(width = 766, height = 360, topAvoidDp = 44, bottomAvoidDp = 72)
+        assertEquals(44, zoneBandYRange(HudZone.RIGHT, land).first)
+        assertEquals(288, zoneBandYRange(HudZone.RIGHT, land).last)
+        assertEquals("顶栏与底栏吃整条安全区", 0..360, zoneBandYRange(HudZone.TOP, land))
+        // 带高不够（极矮窗口）时退成整条安全区，不许给空区间
+        assertEquals(44..44, zoneBandYRange(HudZone.RIGHT, HudAreaDp(766, 50, 44, 72)))
+        val rightCard = HudRectDp(660, 60, 758, 260)
+        val band = zoneBandYRange(HudZone.RIGHT, land)
+        // ① 真机那条：指针拖出底板矩形（y=270 > 260）却还在带里 ⇒ 归属**不许**改给读数块
+        assertEquals(
+            HudZone.RIGHT,
+            dropZoneOf(HudPointDp(700, 270), HudZone.RIGHT, rightCard, band, hitAtPointer = HudZone.READOUT)
+        )
+        // ② 指针拖出带外（y=300 > 288）⇒ 这是明显的跨容器动作，照读数块落
+        assertEquals(
+            HudZone.READOUT,
+            dropZoneOf(HudPointDp(700, 300), HudZone.RIGHT, rightCard, band, hitAtPointer = HudZone.READOUT)
+        )
+        // ③ 横向拖离了底板那一列（x=620 < 660）⇒ 也是"往外搬"，允许改归属
+        assertEquals(
+            HudZone.READOUT,
+            dropZoneOf(HudPointDp(620, 270), HudZone.RIGHT, rightCard, band, hitAtPointer = HudZone.READOUT)
+        )
+        // ④ 指针谁都没压住 / 压住的正是来源 ⇒ 一律留在来源
+        assertEquals(HudZone.RIGHT, dropZoneOf(HudPointDp(700, 270), HudZone.RIGHT, rightCard, band, null))
+        assertEquals(HudZone.RIGHT, dropZoneOf(HudPointDp(700, 100), HudZone.RIGHT, rightCard, band, HudZone.RIGHT))
+        // ⑤ 首帧量不到底板矩形 ⇒ 退回改前那条算式（hit 说了算），两轮收敛手法
+        assertEquals(HudZone.READOUT, dropZoneOf(HudPointDp(700, 270), HudZone.RIGHT, null, band, HudZone.READOUT))
     }
 }
