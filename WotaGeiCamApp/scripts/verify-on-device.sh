@@ -199,18 +199,23 @@ PYEOF
 hr
 echo "[C] 独立性取证（脚本只取证，判定由人对着 XML 比同一颗的 bounds）"
 echo "    手法：进「编辑控件」-> 按住某一颗 -> 拖到别的格子 -> 松手 -> 保存 -> 回取景页"
+# ⚠ 上一版这里 `read` 在非交互（stdin 不是 tty，比如被 nohup/管道跑）时**立刻返回空串**，
+# 下面的 case 匹配不到 `q` 就走了 `*)` 那一支，于是"没拖任何东西"也被当成"拖完了"，
+# 连拍五张取景页 → 五份 XML 字节数一模一样（13376 B），[C]/[D] 看着有产物其实零证据。
+# 现在空输入与 EOF 一律显式跳过，宁可少一张图，也不许拿取景页连拍冒充"拖完一颗"。
+[ -t 0 ] || note "stdin 不是 tty：[C]/[D] 要人手拖拽与划最近任务，这三步会被跳过"
 shot C_before_drag
-read -r -p "    现在手动拖**一颗**，完成后回车（q 跳过）: " R1
-case "${R1,,}" in q) note "skipped" ;; *) shot C_after_drag ;; esac
-read -r -p "    保存并回取景页后回车（q 跳过）: " R2
-case "${R2,,}" in q) note "skipped" ;; *) shot C_back_on_camera ;; esac
+read -r -p "    现在手动拖**一颗**，完成后回车（q 或空 = 跳过）: " R1
+case "${R1,,}" in ""|q) note "[C] 第一拖跳过（无手动输入，不许拿取景页连拍冒充）" ;; *) shot C_after_drag ;; esac
+read -r -p "    保存并回取景页后回车（q 或空 = 跳过）: " R2
+case "${R2,,}" in ""|q) note "[C] 回取景页那帧跳过" ;; *) shot C_back_on_camera ;; esac
 
 # --- 5. 持久化：从最近任务划掉再进，**不许 force-stop** -------------------
 hr
 echo "[D] 持久化：手动从最近任务里划掉本应用再重进，摆位应仍在"
 echo "    （不用 am force-stop：强杀吃掉异步落盘，历史上就是这么误判出一条 S1 的）"
-read -r -p "    划掉再点开、看到取景页后回车（q 跳过）: " R3
-case "${R3,,}" in q) note "skipped" ;; *) shot D_after_relaunch; note "对照 C_back_on_camera 里各颗 bounds 是否一致" ;; esac
+read -r -p "    划掉再点开、看到取景页后回车（q 或空 = 跳过）: " R3
+case "${R3,,}" in ""|q) note "[D] 跳过（同上：空输入不等于'已划掉重进过'）" ;; *) shot D_after_relaunch; note "对照 C_back_on_camera 里各颗 bounds 是否一致" ;; esac
 
 # --- 6. 可选：#71 融合中间态 ---------------------------------------------
 if [ "$MERGE_STAGE" = 1 ]; then
@@ -220,10 +225,16 @@ if [ "$MERGE_STAGE" = 1 ]; then
   for P in 0.25 0.5 0.65 0.7 0.8 0.9 1; do
     "$ADB" shell am start -n "$PKG/.ui.MainActivity" --es wota_merge_hook "pin=$P" >/dev/null 2>&1
     sleep 2
-    "$ADB" shell screencap -p "/sdcard/wota_E_p$P.png" >/dev/null 2>&1
-    "$ADB" pull "/sdcard/wota_E_p$P.png" "$OUT/E_p$P.png" >/dev/null 2>&1
-    "$ADB" shell rm "/sdcard/wota_E_p$P.png" >/dev/null 2>&1
-    echo "   pinned p=$P -> E_p$P.png"
+    # ⚠ 必须走 shot()，不许再自己写 pull。上一版这里 pull 的目标是 "$OUT/E_p$P.png"
+    # ——那是 MSYS 形式（`/f/Works/...`），Windows 版 adb 认不出来，pull 直接失败；
+    # 失败又被 `>/dev/null 2>&1` 吞掉、返回码没人看，下一行还照打 "pinned p=… -> E_p….png"，
+    # 于是七张钉档帧一张都没落地，manifest.tsv 里也一行都没有（任务 #71 取证的第 2 个洞）。
+    # shot() 用的是 cygpath 转出来的 $OUTW，并且 pull 失败会 return 1 并打 !! pull failed。
+    shot "E_p$P"
+    # 钩子态的判据落在**像素之外的第二证**：徽标是文本节点，dump 里必须出现「调试钉住 p=…」，
+    # 没有它这张图就不能当钩子态证据（光看图容易把"底板本来就窄"当成钉住了）。
+    BADGE=$(grep -o 'text="调试钉住[^"]*"' "$OUT/E_p$P.xml" 2>/dev/null | head -1)
+    echo "   pinned p=$P -> E_p$P.png  徽标: ${BADGE:-!! dump 里没有「调试钉住」，这张不算钩子态证据}"
   done
   note "钩子不持久化。下面关掉它并冷启动，回到正常态再截一张做对照"
   "$ADB" shell am start -n "$PKG/.ui.MainActivity" --es wota_merge_hook "off" >/dev/null 2>&1
