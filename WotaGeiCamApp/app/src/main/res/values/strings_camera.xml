@@ -153,4 +153,22 @@
     <string name="cam_record_stop_failed">停止录制失败，文件可能不完整</string>
     <string name="cam_record_released">录制已取消</string>
     <string name="cam_record_failed_generic">录制失败，请重试</string>
+
+    <!-- 编辑控件页（docs/plan/13 第 5 条）：位置表 hud_layout 的编辑器 -->
+    <string name="hud_edit_back">返回</string>
+    <string name="hud_edit_save">保存</string>
+    <string name="hud_edit_saved">已保存，回录制页就是新位置</string>
+    <string name="hud_edit_reset">恢复默认</string>
+    <string name="hud_edit_reset_confirm">确认恢复默认？</string>
+    <string name="hud_edit_reset_arm_tip">再点一次「确认恢复默认」就把所有容器与顺序清回出厂位置</string>
+    <string name="hud_edit_reset_done">已恢复默认位置</string>
+    <string name="hud_edit_undo">撤销</string>
+    <string name="hud_edit_undo_done">已撤销，恢复前那一份位置回来了</string>
+    <string name="hud_edit_note">按住容器拖 = 整枚挪位；按住某颗控件拖 = 换序或拖到别的容器。重叠不禁止，只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
+    <string name="hud_edit_overlap_pair">%1$s 与 %2$s 的外接矩形叠在一起了（不拦，只是提示会叠字）</string>
+    <string name="hud_zone_top">顶栏胶囊组</string>
+    <string name="hud_zone_left">左竖 Dock</string>
+    <string name="hud_zone_right">右竖 Dock</string>
+    <string name="hud_zone_readout">常驻读数块</string>
+    <string name="hud_zone_bottom">底栏 Dock</string>
 </resources>

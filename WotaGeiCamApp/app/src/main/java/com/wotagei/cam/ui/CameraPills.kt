@@ -75,33 +75,40 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
 /**
  * `PillKey` → 锚点写入方 登记表（审查 S2-2：把 §69「浮层甩到屏幕原点」这一族从结构上封死）。
  *
- * 每颗就近浮层都必须锚在**触发它的那颗控件**上：控件把 `anchorOf(PillKey.X)` 贴到自己身上，在布局期
- * 把窗口矩形回报进 `CameraScreen` 的 `pillAnchors`；[PillHost] 取到的矩形为空时只能按 `IntRect.Zero`
- * 弹到左上角。B1 之前的「蓝牙」就是这一族的原型：全工程只有读取方（这里）与触发点（`onBtClick`），
- * 没有写入方，面板于是永久钉在左上角而入口在右缘——这类洞 lint 不报、编译不报，只有真机点得到。
+ * 每颗就近浮层都必须锚在**触发它的那颗控件**上。B4 之后这条只有一处落点：
+ * [com.wotagei.cam.ui.HudEntryItem] 统一给每颗条目挂 `ctx.anchorOf(entry)`，而 `CameraScreen` 造
+ * 那份 ctx 时把 [pillAnchorReport] 贴上去，在布局期把窗口矩形回报进 `CameraScreen` 的 `pillAnchors`；
+ * [PillHost] 取到的矩形为空时只能按 `IntRect.Zero` 弹到左上角。B1 之前的「蓝牙」就是这一族的原型：
+ * 全工程只有读取方（这里）与触发点（`onBtClick`），没有写入方，面板于是永久钉在左上角而入口在右缘
+ * ——这类洞 lint 不报、编译不报，只有真机点得到。
  *
  * **新增 PillKey 的同轮义务**（与 AGENTS「新增控件的同轮义务」同一条）：
- * ① 下面这张表加一行；② 承载它的控件把锚点形参做成**无默认值的必传参数**，让漏挂变编译错误
- * （拿不到锚点的那些才显式传 `Modifier` 并在注释写明原因）；③ [PillHost] 的 when 补内容宿主（穷尽性已强制）。
- * 忘了 ① 由 `PillAnchorRegistryTest` 判失败：表必须逐个 key 覆盖 [PillKey.values()]，写入方不许空串。
+ * ① 下面这张表加一行；② [HudEntry.pillKey] 补一条条目 → key 的映射（[com.wotagei.cam.ui.HudEntryItem]
+ * 只认这张表，漏了就等于那颗控件永远不报锚点）；③ [PillHost] 的 when 补内容宿主（穷尽性已强制）。
+ * 忘了 ① 或 ② 都由 `PillAnchorRegistryTest` 判失败：表必须逐个 key 覆盖 [PillKey.values()]、
+ * 写入方不许空串，且每个 key 都必须能在 [com.wotagei.cam.core.CamPill] / [com.wotagei.cam.core.HudItem]
+ * 的条目里找到归属。
+ *
+ * 「编辑控件」页不在这张表里：那页不弹就近浮层，`ctx.anchorOf` 那一路被改写成**条目矩形回报**
+ * （落点格位与 ghost 半径用它），页里 ghost 那份显式传空链，避免同一个 key 被 ghost 覆写。
  */
 val pillAnchorWriters: Map<PillKey, String> = mapOf(
-    PillKey.SIZE to "CameraScreen.TopBar(sizeModifier) → TopCapsule 画幅段",
-    PillKey.STORAGE to "CameraScreen.TopBar(freeModifier) → TopCapsule 容量段",
-    PillKey.LENS to "CameraScreen.BottomBar(lensModifier) → 底栏镜头那颗（六项第 7 条从顶栏搬来）",
-    PillKey.ZOOM to "CameraScreen.RightDock(zoomModifier)；右 Dock 关掉时由 ParamsHud 顶上",
-    PillKey.FOCUS to "CameraScreen.RightDock(focusModifier)",
-    PillKey.STAB to "CameraScreen.RightDock(stabModifier)",
-    PillKey.BT to "CameraScreen.RightDock(btModifier) → widget.BtChip(modifier)",
-    PillKey.REFLINE to "CameraScreen.LeftDock(modifierFor)",
-    PillKey.MONITOR to "CameraScreen.LeftDock(modifierFor)",
-    PillKey.FLASH to "CameraScreen.LeftDock(modifierFor)",
-    PillKey.SHUTTER to "CameraScreen.ParamsHud(modifierFor) → HudItem.SHUTTER",
-    PillKey.ISO to "CameraScreen.ParamsHud(modifierFor) → HudItem.ISO",
-    PillKey.EV to "CameraScreen.ParamsHud(modifierFor) → HudItem.EV",
-    PillKey.WB to "CameraScreen.ParamsHud(modifierFor) → HudItem.WB",
-    PillKey.FPS to "CameraScreen.ParamsHud(modifierFor) → HudItem.FPS",
-    PillKey.BITRATE to "CameraScreen.ParamsHud(modifierFor) → HudItem.BITRATE"
+    PillKey.SIZE to "HudLayer.HudEntryItem(SIZE) ← CameraScreen.ctx.anchorOf，宿主是可拖动的顶栏胶囊组",
+    PillKey.STORAGE to "HudLayer.HudEntryItem(STORAGE) ← CameraScreen.ctx.anchorOf，宿主是顶栏胶囊组容量段",
+    PillKey.LENS to "HudLayer.HudEntryItem(LENS) ← CameraScreen.ctx.anchorOf，宿主是底栏 Dock 那颗（六项第 7 条从顶栏搬来）",
+    PillKey.ZOOM to "HudLayer.HudEntryItem(ZOOM)：右竖 Dock 那颗为主，HudReadoutZone 里的变焦读数在那颗被关掉或被挪出可见集时顶上（裁决在 CameraScreen 的 anchorOf）",
+    PillKey.FOCUS to "HudLayer.HudEntryItem(FOCUS) ← 任意竖 Dock / 顶栏 / 底栏，条目被挪到哪枚就锚在哪枚",
+    PillKey.STAB to "HudLayer.HudEntryItem(STAB) ← 同上，位置由 hud_layout 的条目归属决定",
+    PillKey.BT to "HudLayer.HudEntryItem(BT) → widget.BtChip(modifier)",
+    PillKey.REFLINE to "HudLayer.HudEntryItem(REFLINE) → design.WotaIconButton(modifier)",
+    PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
+    PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
+    PillKey.SHUTTER to "HudLayer.HudEntryItem(HudItem.SHUTTER) → design.WotaChip(modifier)",
+    PillKey.ISO to "HudLayer.HudEntryItem(HudItem.ISO) → design.WotaChip(modifier)",
+    PillKey.EV to "HudLayer.HudEntryItem(HudItem.EV) → design.WotaChip(modifier)",
+    PillKey.WB to "HudLayer.HudEntryItem(HudItem.WB) → design.WotaChip(modifier)",
+    PillKey.FPS to "HudLayer.HudEntryItem(HudItem.FPS) → design.WotaChip(modifier)",
+    PillKey.BITRATE to "HudLayer.HudEntryItem(HudItem.BITRATE) → design.WotaChip(modifier)"
 )
 
 /**
