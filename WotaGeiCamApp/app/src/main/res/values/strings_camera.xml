@@ -44,7 +44,9 @@
     <string name="pill_record_minutes">按当前码率约可录 %2$s %1$s</string>
     <string name="pill_storage_note">估算只算视频码率，未计分段开销，实际略少</string>
     <string name="cam_p_curve">RGB 曲线</string>
-    <string name="cam_p_monitor">屏幕监看</string>
+    <!-- 取景器那颗只剩两个字（用户 2026-09-29：左 Dock 太宽，「屏幕监看」改「监看」）；
+         设置页那一列仍用全名 cam_pill_monitor「屏幕监看」，那里不是横向约束 -->
+    <string name="cam_p_monitor">监看</string>
 
     <!-- 取景器内的参数读数 -->
     <string name="cam_hud_shutter">快门</string>
@@ -160,11 +162,12 @@
     <string name="hud_edit_saved">已保存，回录制页就是新位置</string>
     <string name="hud_edit_reset">恢复默认</string>
     <string name="hud_edit_reset_confirm">确认恢复默认？</string>
-    <string name="hud_edit_reset_arm_tip">再点一次「确认恢复默认」就把所有容器与顺序清回出厂位置</string>
+    <string name="hud_edit_reset_arm_tip">再点一次「确认恢复默认」就把所有容器位置与每颗的格子清回出厂位置</string>
     <string name="hud_edit_reset_done">已恢复默认位置</string>
     <string name="hud_edit_undo">撤销</string>
     <string name="hud_edit_undo_done">已撤销，恢复前那一份位置回来了</string>
-    <string name="hud_edit_note">按住容器拖 = 整枚挪位（底栏只认上下两栏，横向永远跟着可视区居中）；按住某颗控件拖 = 换序或拖到别的容器。重叠不禁止，只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
+    <!-- #74：容器内改成固定格子。文案必须说清"拖一颗不动另一颗"，否则用户还会按旧模型预期 -->
+    <string name="hud_edit_note">按住容器拖 = 整枚挪位（底栏只认上下两栏，横向永远跟着可视区居中）；按住某颗控件拖 = 吸附到最近的空格，**只搬这一颗，别颗一律不动**（左/右竖 Dock 与读数块）。顶栏与底栏里仍按顺序排。空格子就空着，重叠不禁止只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
     <string name="hud_edit_overlap_pair">%1$s 与 %2$s 的外接矩形叠在一起了（不拦，只是提示会叠字）</string>
     <!-- 底栏那枚 Dock 只持久化 y：横向永远由安全区居中决定（快门中心＝可视窗口中心）。横拖一把之后必须给话，不能默默吞掉 -->
     <string name="hud_edit_bottom_x_locked">底栏只认上下两栏：横向永远跟着可视区居中，所以刚才那一下横拖没有存进位置表</string>

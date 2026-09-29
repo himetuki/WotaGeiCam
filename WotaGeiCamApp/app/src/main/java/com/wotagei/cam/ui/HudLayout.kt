@@ -6,22 +6,30 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * 「编辑控件」页与录制页共用的位置模型（docs/plan/13 第 5、8 条 + 用户定的两级模型）。
+ * 「编辑控件」页与录制页共用的位置模型（docs/plan/13 第 5、8 条 + 任务 #74 的网格格子改造）。
  *
- * ## 两级，而不是每颗一个坐标
- * 可拖动的单位是 **5 枚容器**（[HudZone]），每枚一份 (x, y)——**底栏只有 y 一轴**（x 恒哨兵）；
- * 容器**内**的条目可以拖拽换序，也可以挪到另一枚容器。这样「所有控件都能拖」成立，同时保住两件事：
- * - 悬浮 Dock 的观感（底板仍只包住内容，不是通栏条）；
- * - 「快门中心＝可视窗口水平中心」：底栏那两枚等宽槽的算式（[com.wotagei.cam.ui.anim.MergeSlot]）
- *   一行没动，而它的 x 永远是哨兵 ⇒ 横向落位始终由 `fillMaxWidth` + 居中决定（父区域就是套了
- *   `safeDrawingPadding()` 的那块，挖孔换边时中心跟着换），用户搬的只是"已经居中的那一整块"的上下。
+ * ## 两级：容器位置 + 条目格子
+ * 可拖动的单位有两层：
+ * - **容器整体**（[HudZone]，5 枚）各一份 (x, y)——**底栏只有 y 一轴**（x 恒哨兵）；
+ * - **容器内的每一颗条目**各一个 [GridCell]（列 / 行）。**三枚容器走网格**
+ *   （[HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT]，为什么另两枚不走见 [HudZone.isGrid]），
+ *   空格子就空着 ⇒ 拖动任意一颗都**不改变其他任何一颗的位置**。
  *
- * 明确**不做**（留给后续批次，见 B4 交付报告）：跨容器的自由坐标（每颗一份 x,y）、改尺寸、改层级。
- * 重叠只提示不禁止。
+ * 这一条改掉的正是"有序列表"模型的固有耦合：条目位置若由「顺序 × `Arrangement.spacedBy` 紧凑排布」**推导**
+ * 出来，把一个条目拖到别处，同容器里它后面的全部条目都会跟着重排——数据模型里根本没有"这一颗在第几格"
+ * 这件事，所以那不是 bug，是模型。[order] 仍然留着，但**降级成只参与默认格子的推导**（以及同一格子里的
+ * 稳定次序、[HudLayoutTable.visibleOrderOf] 的"隐藏再显示不回默认位置"），不再决定摆过的那颗在哪。
+ *
+ * ## 默认值走「推导」而不是手抄坐标
+ * [GridCell.DEFAULT] 是哨兵，语义＝"这颗从没被摆过 ⇒ 回落到按 [hudRowGroups] 推导出的那一格"，
+ * 与 [ZonePlacement.DEFAULT] 同源。这样"默认表"与"今天的排布"是**同一个函数**的输出，
+ * 不存在手抄一份坐标然后与实现分叉的可能；v1 的存量串也正是靠这一条免费迁移（见 [HudLayoutTable.decode]）。
+ *
+ * 明确**不做**（留给后续批次）：改尺寸、改层级、格子上的位置动画。重叠只提示不禁止。
  *
  * ## 本文件是纯 Kotlin
- * 没有 Android/Compose 依赖，所以 schema 编解码、默认表、越界钳制、隐藏后位置保留、换序/跨容器、
- * 底栏 y 落位全部能在 JVM 单测里真跑（`HudLayout*Test`），不需要 Robolectric。
+ * 没有 Android/Compose 依赖，所以 schema 编解码、默认表、越界钳制、隐藏后位置保留、格子吸附与
+ * 独立性保证、底栏 y 落位全部能在 JVM 单测里真跑（`HudLayout*Test`），不需要 Robolectric。
  * 读数块那三条纯算式（`hudPerRowFor` / `hudRoomDp` / `hudStripHeightDp`）与 [HudBlockPadDp] 同包直读，
  * 住在 `HudMetrics.kt`（#70 修复批次第 5 条：它们原先在 `ui/anim/LiquidMerge.kt` 里，让这个纯 Kotlin 文件
  * 反向依赖了一个带 `Path`/`Modifier`/`@Composable` 的动画文件）。
@@ -36,25 +44,35 @@ enum class HudAxis { ROW, COLUMN, GRID }
  * 每枚容器的**默认位置**不写在这里，而是「原生对齐」那条分支（见 [ZonePlacement.isDefault]）：
  * 默认值＝B1–B3 定稿时的对齐方式与内边距，由组合期实测避让量算出来，
  * 硬写一串 dp 数就等于把「8dp 起始内边距」这类既有真源复制一份到持久化层，迟早分叉。
+ *
+ * [isGrid] = 这一枚容器的条目是否走「固定格子」（任务 #74）。**本批只开三枚**（[HudZone.LEFT] /
+ * [HudZone.RIGHT] / [HudZone.READOUT]），另两枚**故意不上网格**，不是漏做：
+ * - [HudZone.BOTTOM] 那枚底板有「快门中心＝可视窗口水平中心」的 `W/2` 不变量
+ *   （`2S + R + 2G + 2P` 那笔等宽槽算式，见 [com.wotagei.cam.ui.anim.MergeSlot] 与 docs/plan/13 §14.3），
+ *   条目一旦离开"按顺序紧凑排布"就没有等宽槽可言，#71 那笔收拢动画的起点 `w(0)` 跟着塌；
+ * - [HudZone.TOP] 的宽度账与容量段三档取位（`capacityTierText` 的阈值 272/242，§59/§61/§74）
+ *   是按**段数增减**重标的，改成一格一颗就把那三档判据同时作废。
+ * 这两枚继续用 [order] 紧凑排布；[GridCell] 对它们不生效（[HudLayoutTable.normalize] 与编码两处都把
+ * 挂在非网格容器上的条目格子抹成哨兵，不留脏数据）。
  */
-enum class HudZone(val key: String, val axis: HudAxis) {
-    /** 顶栏胶囊组：录制计时/状态那颗 + 画幅/容量段 */
-    TOP("T", HudAxis.ROW),
+enum class HudZone(val key: String, val axis: HudAxis, val isGrid: Boolean) {
+    /** 顶栏胶囊组：录制计时/状态那颗 + 画幅/容量段（**保持有序列表模型**，理由见枚举头） */
+    TOP("T", HudAxis.ROW, false),
 
     /** 左竖 Dock：创作项 */
-    LEFT("L", HudAxis.COLUMN),
+    LEFT("L", HudAxis.COLUMN, true),
 
     /** 右竖 Dock：取景辅助与变焦/对焦/防抖 */
-    RIGHT("R", HudAxis.COLUMN),
+    RIGHT("R", HudAxis.COLUMN, true),
 
     /** 右下常驻读数块（六项第 4 条搬到录制键右侧那一块） */
-    READOUT("D", HudAxis.GRID),
+    READOUT("D", HudAxis.GRID, true),
 
     /**
-     * 底栏 Dock：缩略图 + 快门 + 镜头那颗。
+     * 底栏 Dock：缩略图 + 快门 + 镜头那颗（**保持有序列表模型**，理由见枚举头）。
      * 它的 y 就是第 8 条的「上栏/下栏」，**x 不进表**（恒哨兵 ⇒ 横向永远重新居中，见 [normalizedPosOf]）。
      */
-    BOTTOM("B", HudAxis.ROW);
+    BOTTOM("B", HudAxis.ROW, false);
 
     companion object {
         val ALL: List<HudZone> = values().toList()
@@ -146,8 +164,45 @@ data class ZonePlacement(val xDp: Int, val yDp: Int) {
     }
 }
 
-/** 一枚容器的完整状态：位置 + 条目顺序（顺序里**含被隐藏的条目**，见 [HudLayoutTable.visibleOrderOf]） */
-data class ZoneState(val pos: ZonePlacement, val order: List<HudEntry>)
+/**
+ * 一颗条目在容器**格网**里的坐标（列 / 行，都从 0 起）。
+ *
+ * [DEFAULT] 是哨兵，语义＝"**这颗从没被摆过** ⇒ 回落到由 [hudRowGroups] 推导出的那一格"。
+ * 手法与 [ZonePlacement.DEFAULT] 同源：默认值不写死一串坐标，而是每次现推，
+ * 于是"默认表"与"B1–B3 定稿的排布"永远是同一个函数的输出，不会分叉。
+ */
+data class GridCell(val col: Int, val row: Int) {
+
+    /** 没被摆过（两轴都是哨兵）= 用推导出来的默认格子 */
+    val isDefault: Boolean get() = col < 0 && row < 0
+
+    /** 持久化里的格子后缀（`0.2`）；哨兵写成 `-` */
+    val token: String get() = if (isDefault) "-" else "$col.$row"
+
+    companion object {
+        val DEFAULT = GridCell(-1, -1)
+    }
+}
+
+/** 一枚容器的完整状态。 */
+data class ZoneState(
+    val pos: ZonePlacement,
+    /**
+     * 容器内条目的**稳定次序**。#74 之后它只管三件事，**不再**是屏幕位置的来源：
+     * ① 没摆过的条目按它推导默认格子（[defaultCellsOf]）；② 同一格子里叠放时的先后；
+     * ③ [HudLayoutTable.visibleOrderOf] 那套"隐藏再显示不回默认位置"依赖它。
+     */
+    val order: List<HudEntry>,
+    /**
+     * 每颗条目**被用户摆过**的格子。缺席（或值为 [GridCell.DEFAULT]）＝没摆过 ⇒ 用推导格。
+     *
+     * 选 `Map<HudEntry, GridCell>` 而不是"与 [order] 并列的数组"：并列数组的下标就是 order 的下标，
+     * 而 order 会在跨容器移动时增删——下标一生变，格子就跟着整体错位，那正是本次要拆掉的耦合。
+     * 按条目身份 keyed 之后，增删顺序动不了任何人的格子。表里也**只存摆过的**（默认格不落表），
+     * 持久化串才不会为 20 颗各写一份可推导的坐标。
+     */
+    val cells: Map<HudEntry, GridCell>
+)
 
 /**
  * 位置表本体（版本化）。持久化键 `hud_layout`，编解码见 [encode] / [decode]。
@@ -176,32 +231,140 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 底栏的 x 强制抹回哨兵，调用方就算传了真值也存不进去）。
      */
     fun withZonePos(zone: HudZone, xDp: Int, yDp: Int): HudLayoutTable {
-        val cur = zones[zone] ?: ZoneState(ZonePlacement.DEFAULT, emptyList())
+        val cur = zones[zone] ?: ZoneState(ZonePlacement.DEFAULT, emptyList(), emptyMap())
         return copy(zones = zones + (zone to cur.copy(pos = ZonePlacement(xDp, yDp))))
     }
 
+    /** 该容器里**被用户摆过**的格子（含隐藏的条目；缺席或哨兵＝用推导格） */
+    fun cellsOf(zone: HudZone): Map<HudEntry, GridCell> = zones[zone]?.cells ?: emptyMap()
+
+    /** [cellsOf] 去掉哨兵与坏值后的净表（写回表里用的就是这一份） */
+    private fun placedCellsOf(zone: HudZone): Map<HudEntry, GridCell> =
+        cellsOf(zone).filter { (e, c) -> !c.isDefault && e in orderOf(zone) }
+
     /**
-     * 把条目挪到 [zone] 的第 [index] 格（同容器换序 = 同一个调用）。
+     * 这一枚容器**这一帧真正渲染**的格子清单（顺序＝[visibleOrderOf] 的顺序）。
      *
-     * 一次完整的移动 = 从**所有**容器里摘掉它，再插进目标容器第 [index] 格（越界夹到 [0, size]）。
-     * 先摘后插保证「一颗控件同时只属于一枚容器」，也让「隐藏中的条目被挪走」这条路径与
-     * 可见条目走的是同一份数据（[visibleOrderOf] 只是过滤，不改表）。
+     * 两趟解析，规则只有一条：**任何一格不许有两条条目**（否则"移动一颗"又会通过重叠影响另一颗）：
+     * 1. 摆过的条目先占自己的显式格子；
+     * 2. 没摆过的条目按 [defaultCellsOf]（对**可见**顺序分行）取推导格，被占了就在容器内就近让到空格。
+     * 默认表里没有任何显式格子 ⇒ 第 2 趟直接命中推导格 ⇒ 与今天的排布逐格相同（这是"默认表结构性等于
+     * 今天"这条硬要求的落点，也是 v1 存量串免费迁移的原因）。
      */
-    fun moveEntryTo(entry: HudEntry, zone: HudZone, index: Int): HudLayoutTable {
+    fun gridItems(zone: HudZone, plan: HudGridPlan): List<HudGridItem> {
+        if (!zone.isGrid) return visibleOrderOf(zone, plan.visible).map { HudGridItem(it, GridCell.DEFAULT) }
+        return resolveCells(
+            order = visibleOrderOf(zone, plan.visible),
+            placed = placedCellsOf(zone),
+            derived = defaultCellsOf(zone, visibleOrderOf(zone, plan.visible), plan.perRowOf(zone)),
+            cols = gridColsCapOf(zone),
+            rows = GridRowHardCap
+        )
+    }
+
+    /**
+     * 该容器**当前被占住**的格子（可见条目按 [gridItems] 解析结果，隐藏条目按表里的显式格子）。
+     *
+     * 隐藏条目也算占用：它只是这帧不画，格子还是它的位置（"隐藏再显示不回默认位置"那套语义）。
+     * 不把它算进来的话，用户往那颗的格子上放别的一条，它再显示时就会与别人挤在同一格。
+     */
+    fun occupiedCells(zone: HudZone, plan: HudGridPlan, exclude: HudEntry? = null): Set<GridCell> {
+        if (!zone.isGrid) return emptySet()
+        val visible = plan.visible
+        val out = HashSet<GridCell>()
+        gridItems(zone, plan).forEach { if (it.entry != exclude) out += it.cell }
+        placedCellsOf(zone).forEach { (e, c) -> if (e !in visible && e != exclude) out += c }
+        return out
+    }
+
+    /**
+     * 把 [zones] 里这些网格容器的**推导格固化成显式格子**（只写格子，不改任何人的位置）。
+     *
+     * 这是"移动一颗不动另一颗"的实现核心：[order] 一旦被增删，还挂着哨兵的条目会按**新的**可见顺序
+     * 重新推导 ⇒ 集体错位。所以任何改动 [order] 的操作之前，先把受牵连的那两枚容器（来源与目标）
+     * 的当前格子原样钉住；钉过之后 [order] 就再也决定不了任何一颗的实际位置。
+     */
+    fun pinned(plan: HudGridPlan, vararg zones: HudZone): HudLayoutTable {
+        var table = this
+        zones.filter { it.isGrid }.distinct().forEach { zone ->
+            val items = table.gridItems(zone, plan)
+            if (items.isNotEmpty()) {
+                val merged = table.placedCellsOf(zone) + items.associate { it.entry to it.cell }
+                table = table.replaceCells(zone, merged)
+            }
+        }
+        return table
+    }
+
+    /** 换掉一枚容器的格子表，其余字段（位置与顺序）一动不动 */
+    private fun replaceCells(zone: HudZone, cells: Map<HudEntry, GridCell>): HudLayoutTable {
+        val cur = zones[zone] ?: ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(zone), emptyMap())
+        return copy(zones = zones + (zone to cur.copy(cells = cells)))
+    }
+
+    /**
+     * 把条目摆到 [target] 的第 [cell] 格（同容器换格 = 同一个调用；[cell] 传 [GridCell.DEFAULT]
+     * 就是"只换顺序、位置交给推导"，[moveEntryTo] 走的就是这一支）。
+     *
+     * 四步，顺序有讲究：
+     * 1. **先钉格子**（来源与目标两枚容器，[pinned]）——这一步保证"其他一颗都不动"；
+     * 2. 再改顺序：从**所有**容器摘掉它，插进目标第 [index] 格（越界夹到 `[0, size]`）；
+     *    先摘后插保证「一颗控件同时只属于一枚容器」；
+     * 3. 格子落位：目标不是网格容器 ⇒ 抹成哨兵（不留脏数据）；是网格 ⇒ 先钳进容器硬上限，
+     *    再在"被别人占住的格子"之外就近找空格（[occupiedCells] 已排除它自己那一格）；
+     * 4. 其余三枚容器一行不碰 ⇒ 它们的顺序没变，哨兵条目继续推导出同一个格子。
+     */
+    fun placeEntryAt(
+        entry: HudEntry,
+        target: HudZone,
+        index: Int,
+        cell: GridCell,
+        plan: HudGridPlan
+    ): HudLayoutTable {
+        val source = sourceZoneOf(entry)
+        val pinnedTable = pinned(plan, source, target)
         val orders = LinkedHashMap<HudZone, MutableList<HudEntry>>()
         HudZone.ALL.forEach { z ->
-            val state = zones[z]
-            val list = (state?.order ?: defaultOrderOf(z)).toMutableList()
+            val list = (pinnedTable.zones[z]?.order ?: defaultOrderOf(z)).toMutableList()
             list.remove(entry)
             orders[z] = list
         }
-        val target = orders.getValue(zone)
-        target.add(index.coerceIn(0, target.size), entry)
-        val nextZones = HudZone.ALL.associateWith { z ->
-            ZoneState(zones[z]?.pos ?: ZonePlacement.DEFAULT, orders.getValue(z).toList())
+        val targetOrder = orders.getValue(target)
+        targetOrder.add(index.coerceIn(0, targetOrder.size), entry)
+        val finalCell = when {
+            // 非网格容器：格子对它不生效，一律抹成哨兵（[normalize] 那一道同样会抹）
+            !target.isGrid -> GridCell.DEFAULT
+            // 显式传哨兵 = "这次只换顺序，位置仍交给推导"（[moveEntryTo] 走的就是这一支）。
+            // 与第 1 步的钉格配套：别人的格子已经钉死，所以这里"交给推导"不会牵动任何人。
+            cell.isDefault -> GridCell.DEFAULT
+            else -> freeCellNear(
+                wanted = clampStoredCell(target, cell),
+                occupied = pinnedTable.occupiedCells(target, plan, exclude = entry),
+                cols = gridColsCapOf(target),
+                rows = GridRowHardCap
+            )
         }
-        return HudLayoutTable(version, nextZones)
+        val nextZones = HudZone.ALL.associateWith { z ->
+            val state = pinnedTable.zones[z] ?: ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(z), emptyMap())
+            val cells = if (z == target) {
+                if (finalCell.isDefault) state.cells - entry else state.cells + (entry to finalCell)
+            } else {
+                state.cells - entry
+            }
+            state.copy(order = orders.getValue(z).toList(), cells = cells)
+        }
+        return HudLayoutTable(version, nextZones).normalize()
     }
+
+    /**
+     * 把条目挪到 [zone] 的第 [index] 格（同容器换序 = 同一个调用），**位置交给推导**。
+     *
+     * #74 之后它只是 [placeEntryAt] 的哨兵格版本：还留着是因为非网格容器（顶栏/底栏）本来就该按
+     * 顺序排，且它同时负责"把来源容器钉住"这件必要的事——少了那一步，从网格容器抽走一颗就会让
+     * 剩下的那颗集体上移（正是用户抱怨的那个耦合）。
+     */
+    fun moveEntryTo(entry: HudEntry, zone: HudZone, index: Int, plan: HudGridPlan): HudLayoutTable =
+        placeEntryAt(entry, zone, index, GridCell.DEFAULT, plan)
 
     /** 条目当前归属（表里没有时回 [HudEntry.homeZone]） */
     fun sourceZoneOf(entry: HudEntry): HudZone =
@@ -214,16 +377,23 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 补全 + 去重 + 丢坏值：
      * - 同一个 id 出现在两枚容器 → **先到先得**，后出现的丢掉（手改 prefs 造成的重复不能让一颗控件渲染两遍）；
      * - 表里完全没有的条目 → 追加到它的 [HudEntry.homeZone] 末尾（新增 CamPill 位时老配置自动补齐）；
-     * - ordinal 越界的条目 → 丢弃。
+     * - ordinal 越界的条目 → 丢弃；
+     * - 格子表跟着条目走：丢了的人的格子一起丢，非网格容器（[HudZone.isGrid] = false）上的格子一律抹成
+     *   缺席（那两枚按顺序排，留着只会变成"下次进网格容器时莫名复活一个老位置"）。
      */
     fun normalize(): HudLayoutTable {
         val seen = HashSet<HudEntry>()
         val placed = LinkedHashMap<HudZone, MutableList<HudEntry>>()
-        HudZone.ALL.forEach { placed[it] = mutableListOf() }
+        val placedCells = LinkedHashMap<HudZone, MutableMap<HudEntry, GridCell>>()
+        HudZone.ALL.forEach { placed[it] = mutableListOf(); placedCells[it] = LinkedHashMap() }
         for (zone in HudZone.ALL) {
+            val cells = cellsOf(zone)
             for (e in orderOf(zone)) {
                 if (e.pill == null && e.item == null) continue
-                if (seen.add(e)) placed.getValue(zone).add(e)
+                if (seen.add(e)) {
+                    placed.getValue(zone).add(e)
+                    if (zone.isGrid) cells[e]?.let { c -> if (!c.isDefault) placedCells.getValue(zone)[e] = c }
+                }
             }
         }
         for (e in HudEntry.ALL) {
@@ -231,7 +401,7 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
         }
         val nextZones = LinkedHashMap<HudZone, ZoneState>()
         HudZone.ALL.forEach { z ->
-            nextZones[z] = ZoneState(normalizedPosOf(z), placed.getValue(z).toList())
+            nextZones[z] = ZoneState(normalizedPosOf(z), placed.getValue(z).toList(), placedCells.getValue(z))
         }
         return HudLayoutTable(version, nextZones)
     }
@@ -252,9 +422,11 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     }
 
     /**
-     * 编码：`v1;T,8,4,P11,P12;L,-1,-1,P6,P7,P8,P9;…`
+     * 编码（v2）：`v2;T,8,4,P11,P12;L,-1,-1,P6:0.0,P7:0.1,P8:0.2;…`
      *
-     * 分号分「版本段 / 五个容器段」，逗号分「x / y / id 串」；哨兵 `-1` = 该容器仍在默认位置。
+     * 分号分「版本段 / 五个容器段」，逗号分「x / y / id 串」；位置段的哨兵 `-1` = 该容器仍在默认位置。
+     * **v2 多的就是条目后缀**：`P8:0.2` = 摆到第 0 列第 2 行，光一串 `P8` = 没摆过（用推导格）。
+     * 后缀只在 [HudZone.isGrid] 的容器上写，非网格容器（顶栏/底栏）写了也没人读，不留脏数据。
      * 与 [CurveStack] 一样是一条紧凑字符串，同一个 prefs 文件、同样的 `putString + runCatching` 风格。
      */
     fun encode(): String = buildString {
@@ -263,19 +435,31 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
             append(';').append(zone.key).append(',')
             append(posOf(zone).xDp).append(',').append(posOf(zone).yDp)
             append(',')
-            val order = orderOf(zone)
-            order.forEachIndexed { i, e -> if (i > 0) append(','); append(e.id) }
+            val cells = placedCellsOf(zone)
+            orderOf(zone).forEachIndexed { i, e ->
+                if (i > 0) append(',')
+                append(e.id)
+                if (zone.isGrid) {
+                    append(':')
+                    append(cells[e]?.token ?: GridCell.DEFAULT.token)
+                }
+            }
         }
     }
 
     companion object {
-        /** 当前 schema 版本；改格式就 +1，并在 [decode] 里对旧版本做处置 */
-        const val CURRENT_VERSION = 1
+        /**
+         * 当前 schema 版本。v1 = 只有顺序没有格子（B4 那批），v2 = 每颗条目带一个格子（任务 #74）。
+         * 改格式就 +1，并在 [decode] 里对旧版本做处置。
+         */
+        const val CURRENT_VERSION = 2
 
-        /** 未编辑过的初值：位置全默认、顺序全按 [HudEntry.homeZone] 内的枚举声明序 */
+        /** 未编辑过的初值：位置全默认、顺序全按 [HudEntry.homeZone] 内的枚举声明序、格子全哨兵 */
         fun default(): HudLayoutTable = HudLayoutTable(
             CURRENT_VERSION,
-            HudZone.ALL.associateWith { ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(it)) }
+            HudZone.ALL.associateWith {
+                ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(it), emptyMap())
+            }
         ).normalize()
 
         /**
@@ -285,6 +469,9 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
          * · 右竖 Dock：姿态仪 → 音量表 → 蓝牙 → 变焦 → 对焦 → 防抖
          * · 读数块：`HudItem.typesOf(mask)` 的枚举序（快门 帧率 码率 ISO EV 白平衡 变焦）
          * · 底栏：只有镜头那颗是可编辑条目（缩略图与快门不可隐藏，不进表）
+         *
+         * 注意这张清单**只写顺序不写坐标**：默认格子由 [defaultCellsOf] 从它现推，
+         * 于是"默认表"与"录制页今天的排布"是同一个函数的输出（AGENTS 那条"手抄的默认值会和实现分叉"）。
          */
         fun defaultOrderOf(zone: HudZone): List<HudEntry> = when (zone) {
             HudZone.TOP -> listOf(HudEntry.of(CamPill.SIZE), HudEntry.of(CamPill.STORAGE))
@@ -301,9 +488,15 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
         }
 
         /**
-         * 解码：任何异常（null / 空串 / 缺段 / 未知容器 id / 版本不符 / 数字炸）都**不抛**，
+         * 解码：任何异常（null / 空串 / 缺段 / 未知容器 id / 版本不认识 / 数字炸）都**不抛**，
          * 坏的那一段丢掉、其余保留，整张表最后过一次 [normalize]。
          * 版本号**比本工程新**时整表按默认处理：新格式老代码读不懂，硬解会写出错位置。
+         *
+         * **v1 → v2 的迁移不换算坐标，而是"格子全留哨兵"**：v1 的位置本来就是「顺序 × 分行」推导出来的，
+         * 而 v2 的默认格子用的正是同一条 [defaultCellsOf] ⇒ 老串读进来逐颗落点与改前相同，
+         * 用户已经拖过的东西一样都不会被打回默认（这是本条迁移的硬要求）。
+         * 解出来的表版本一律抬到 [CURRENT_VERSION]：下一次保存自然写成 v2。
+         * 单条 token 的格子后缀坏了（`P6:0`、`P6:x.y`）只丢那一颗的格子，条目本身照留。
          */
         fun decode(raw: String?): HudLayoutTable {
             if (raw.isNullOrBlank()) return default()
@@ -311,17 +504,37 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
             val header = parts.firstOrNull().orEmpty()
             val version = header.removePrefix("v").toIntOrNull()
             if (version == null || version > CURRENT_VERSION) return default()
-            if (version < CURRENT_VERSION) return default() // v1 是第一版，还没有旧的版要迁
+            // 只有 v1（顺序模型）与 v2（格子模型）认得；v0 / 负数一律按坏串回默认
+            if (version < 1) return default()
             val zones = LinkedHashMap<HudZone, ZoneState>()
             for (seg in parts.drop(1)) {
                 val f = seg.split(',')
                 val zone = HudZone.fromKey(f.getOrNull(0)) ?: continue
                 val x = f.getOrNull(1)?.toIntOrNull() ?: -1
                 val y = f.getOrNull(2)?.toIntOrNull() ?: -1
-                val order = f.drop(3).mapNotNull { HudEntry.fromId(it) }
-                zones[zone] = ZoneState(ZonePlacement(x, y), order)
+                val order = mutableListOf<HudEntry>()
+                val cells = LinkedHashMap<HudEntry, GridCell>()
+                for (rawToken in f.drop(3)) {
+                    val head = rawToken.substringBefore(':')
+                    val entry = HudEntry.fromId(head) ?: continue
+                    order += entry
+                    if (!zone.isGrid) continue
+                    val suffix = rawToken.substringAfter(':', "")
+                    if (suffix.isEmpty() || suffix == "-") continue // v1 光串 / 显式哨兵 = 没摆过
+                    parseCell(suffix)?.let { cells[entry] = clampStoredCell(zone, it) }
+                }
+                zones[zone] = ZoneState(ZonePlacement(x, y), order, cells)
             }
-            return HudLayoutTable(version, zones).normalize()
+            return HudLayoutTable(CURRENT_VERSION, zones).normalize()
+        }
+
+        /** `0.2` → [GridCell]；缺列、非数字、负数一律 null（调用方把那颗按"没摆过"处理） */
+        private fun parseCell(token: String): GridCell? {
+            val f = token.split('.')
+            if (f.size != 2) return null
+            val col = f[0].toIntOrNull() ?: return null
+            val row = f[1].toIntOrNull() ?: return null
+            return if (col < 0 || row < 0) null else GridCell(col, row)
         }
     }
 }
@@ -395,6 +608,236 @@ fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: Hu
     val yRange = clampZoneYRange(zone, area, hDp)
     val x = if (zone == HudZone.BOTTOM) -1 else xDp.coerceIn(0, clampZoneX(area, wDp))
     return ZonePlacement(x, yDp.coerceIn(yRange.first, yRange.last))
+}
+
+// ------------------------------------------------------------------ 格子（#74：容器内的固定格网）
+
+/** 网格行数硬上限：每颗条目最多占一行，比条目总数还多的行编辑页**摆不出来**，只能来自手改 prefs */
+private val GridRowHardCap: Int get() = HudEntry.ALL.size
+
+/**
+ * 网格列数硬上限（逐枚容器，都从既有真源推出来，不是新造的观感值）：
+ * - [HudZone.READOUT] → 3：`hudPerRowFor` 的最高档就是一行三颗，编辑页也摆不出第四列；
+ * - 两枚竖 Dock → 2：`hudRowGroups` 的 [HudZone.RIGHT] 分支最多一行两颗（S2-2 B 那条姿态仪 + 音量表
+ *   并排），[HudZone.LEFT] 更是一行一颗；
+ * - 非网格容器 → 1（格子对它不生效，这里只给个不为 0 的数免得钳制算式里出现除零）。
+ */
+fun gridColsCapOf(zone: HudZone): Int = when {
+    !zone.isGrid -> 1
+    zone == HudZone.READOUT -> 3
+    else -> 2
+}
+
+/**
+ * 存进表 / 从表里读出来的格子先过这一道：列钳进 [gridColsCapOf]、行钳进 [GridRowHardCap]。
+ * 哨兵原样放行（它表示"没摆过"，不是越界值）。
+ */
+fun clampStoredCell(zone: HudZone, cell: GridCell): GridCell =
+    if (cell.isDefault) cell else GridCell(
+        cell.col.coerceIn(0, gridColsCapOf(zone) - 1),
+        cell.row.coerceIn(0, GridRowHardCap - 1)
+    )
+
+/** 指针/坐标落在哪一格之外的"容器可放带"（单位 dp，由调用方从实测带高与可用宽换算来） */
+data class GridBox(val cols: Int, val rows: Int) {
+    init {
+        require(cols >= 1 && rows >= 1) { "可放格数至少各 1，收到 cols=$cols rows=$rows" }
+    }
+}
+
+/**
+ * 可放带 → [GridBox]：行由**带高**决定（`带高 ÷ 行距`），列对读数块由**可用内宽**决定、对两枚竖 Dock
+ * 直接取 [gridColsCapOf]。
+ *
+ * 选「钳回可放带」而不是「扩行/列把容器撑出带外」：`heightIn(max = bandHeightDp)` 那条硬约束在这儿没变，
+ * 真扩出去的行不会把带撑大，只会被 [com.wotagei.cam.ui.HudLayer] 的 `verticalScroll` 接走——
+ * 那是"看得见但要点一下才够得着"，而把落点钳回来是"根本放不下"。两者都不静默裁字，但钳回不会让人
+ * 以为控件丢了。列的方向没有滚动可依赖（[HudZone.READOUT] 那枚的宽度账由 `planReadoutRow` 说话），
+ * 所以列必须钳：越过可用宽就是把 §58/§73 那族"按窄窗量出来的列数在宽窗里越界"再犯一遍。
+ */
+fun gridBoxOf(zone: HudZone, pitchXDp: Int, pitchYDp: Int, bandHeightDp: Int, roomWidthDp: Int): GridBox {
+    val rows = if (pitchYDp <= 0) 1 else (bandHeightDp / pitchYDp).coerceAtLeast(1)
+    val cols = if (zone != HudZone.READOUT) gridColsCapOf(zone)
+    else if (pitchXDp <= 0) 1 else (roomWidthDp / pitchXDp).coerceIn(1, gridColsCapOf(zone))
+    return GridBox(cols.coerceAtLeast(1), rows.coerceAtLeast(1))
+}
+
+/** 把格子钳进可放带（负数与越界都收回来；[GridCell.DEFAULT] 原样放行） */
+fun clampCellToBox(cell: GridCell, box: GridBox): GridCell =
+    if (cell.isDefault) cell else GridCell(
+        cell.col.coerceIn(0, box.cols - 1),
+        cell.row.coerceIn(0, box.rows - 1)
+    )
+
+/**
+ * 目标格被占了就在可放带里就近找**空格**（曼哈顿距离最小，同距离按「先上后下、先左后右」定序）。
+ *
+ * 为什么是"只落空格"而不是"与占位那颗交换"：交换的语义就是"移动一颗会动另一颗"，与用户这句诉求
+ * （「移到一项其他项也会同时移动，这是极大的限制」）正面冲突；找空位是本次唯一能让"我只搬了这一颗"
+ * 成立的写法。代价照实写：拖到已占的格子上时那颗不会如手指预期压上去，而是停在旁边一格。
+ *
+ * 带内一个空格都没有时返回 [wanted] 自己（调用方已钳过，此时带被填满——编辑页不会走到这一支，
+ * 因为带内格子数恒 ≥ 该容器条目数 + 1；真走到了也不许把两颗摞在同一格，所以 [HudLayoutTable.placeEntryAt]
+ * 的落点仍由 [freeCellNear] 决定，见它的 KDoc 第 3 步）。
+ */
+fun freeCellNear(wanted: GridCell, occupied: Set<GridCell>, cols: Int, rows: Int): GridCell {
+    val c = wanted.col.coerceIn(0, (cols - 1).coerceAtLeast(0))
+    val r = wanted.row.coerceIn(0, (rows - 1).coerceAtLeast(0))
+    if (GridCell(c, r) !in occupied) return GridCell(c, r)
+    val span = (cols.coerceAtLeast(1) * rows.coerceAtLeast(1))
+    for (d in 1..span) {
+        for (row in 0 until rows) {
+            for (col in 0 until cols) {
+                if (GridCell(col, row) in occupied) continue
+                if (abs(col - c) + abs(row - r) != d) continue
+                return GridCell(col, row)
+            }
+        }
+    }
+    return GridCell(c, r)
+}
+
+/** 一条条目在这一格（渲染层拿到的就是这一对，不再有第二份算式） */
+data class HudGridItem(val entry: HudEntry, val cell: GridCell)
+
+/**
+ * 解析一帧的格子清单：摆过的先占位，没摆过的用 [defaultCellsOf] 推，撞了就就近让位。
+ *
+ * 两趟（先全部显式、再全部推导）而不是逐颗按顺序处理：否则"谁先占位"取决于 [order] 的先后，
+ * 而 [order] 正是本次要降级的那个东西。返回值保证**逐格唯一**（[HudLayoutGridTest] 直接打这一条），
+ * 所以搜索盒必须用**整容器**的 `[0, cols) × [0, rows)`，不能拿"推导格自身那一小片"当盒——
+ * 一片被占满时按小盒搜会搜不到空格而把两颗摞在同一格，那正是本次要修的老行为。
+ */
+internal fun resolveCells(
+    order: List<HudEntry>,
+    placed: Map<HudEntry, GridCell>,
+    derived: Map<HudEntry, GridCell>,
+    cols: Int,
+    rows: Int
+): List<HudGridItem> {
+    val taken = HashSet<GridCell>()
+    val out = LinkedHashMap<HudEntry, GridCell>()
+    // 第 1 趟：摆过的条目占位。两颗被手改成同一格时先到先得、后者就近让位——[order] 在这里就是
+    // "同一格子里的稳定次序"那一条用途（枚举头的降级清单第 ① 条）
+    for (e in order) {
+        val want = placed[e]?.takeIf { !it.isDefault } ?: continue
+        val cell = if (want in taken) freeCellNear(want, taken, cols, rows) else want
+        taken += cell
+        out[e] = cell
+    }
+    // 第 2 趟：没摆过的用推导格；推导格被摆过的那颗占了就让位（显式优先，不然"拖过去的那颗"会被
+    // 一颗根本没编辑过的条目挤走）
+    for (e in order) {
+        if (out.containsKey(e)) continue
+        val cell = freeCellNear(derived[e] ?: GridCell(0, 0), taken, cols, rows)
+        taken += cell
+        out[e] = cell
+    }
+    return order.map { HudGridItem(it, out.getValue(it)) }
+}
+
+/**
+ * 「今天的排布」→ 格子的唯一一处换算：顺序按 [hudRowGroups] 分行，第几行就是 row、行内第几颗就是 col。
+ *
+ * **不许手抄一份默认坐标**（理由与 [ZonePlacement.DEFAULT] 同一条）：抄一份就会与实现分叉，
+ * 而这条函数与容器渲染读的是同一个 [hudRowGroups]，所以"没编辑过的表"结构性等于 B1–B3 定稿排布。
+ */
+fun defaultCellsOf(zone: HudZone, order: List<HudEntry>, perRow: Int): Map<HudEntry, GridCell> =
+    hudRowGroups(zone, order, perRow).flatMapIndexed { row, group ->
+        group.mapIndexed { col, entry -> entry to GridCell(col, row) }
+    }.toMap()
+
+/** 一帧网格解析要的两份运行时输入（都来自组合期实测，表本身不该知道它们） */
+data class HudGridPlan(
+    /** 设置里开着显示的条目集：两页各有一份同源计算（CameraScreen 与编辑页），传进来而不是表里再算一遍 */
+    val visible: Set<HudEntry>,
+    /** 读数块"一行几颗"那一档（[hudPerRowFor] / [planReadoutRow] 的产物），只作用 [HudZone.READOUT] */
+    val readoutPerRow: Int
+) {
+    /** 该容器推导默认格子时的分行档：只有读数块吃这个数，其余容器 [hudRowGroups] 不读它 */
+    fun perRowOf(zone: HudZone): Int = if (zone == HudZone.READOUT) readoutPerRow else 1
+}
+
+// ------------------------------------------------------------------ 格子 ↔ 像素（渲染与编辑页共用）
+
+/** 一个 px 尺寸（[HudLayout] 是纯 Kotlin，不引 Android 的 IntSize） */
+data class HudSizePx(val width: Int, val height: Int)
+
+/** 一个 px 坐标 */
+data class HudPointPx(val x: Int, val y: Int)
+
+/**
+ * 格子边长 = **该容器内最宽/最高那颗的实测尺寸 + 一枚行距**。
+ *
+ * 定 pitch 是"移动一颗不挪另一颗"的另一半：格子位置只跟 col/row 有关，跟"有几颗、谁在前"无关。
+ * pitch 取实测尺寸 ⇒ 字体拉到 120% 时格子自己变大，§58/§73 那族"按 100% 量出来的固定值在 120% 裁字"
+ * 在这里不复发（与 [hudPerRowFor] 用 `fontScale` 折算同一族防线，只是这一处量的是真尺寸不是估宽）。
+ *
+ * 行距没有省掉：`pitch = 最宽颗 + gap` 才让"只有一列 / 只有一行"时的总宽总高等于今天
+ * `spacedBy(gap)` 的紧凑排布——那正是"默认表结构性等于今天的排布"这条硬要求要的等式。
+ */
+fun gridPitchPx(maxChildWidthPx: Int, maxChildHeightPx: Int, gapXPx: Int, gapYPx: Int): HudSizePx =
+    HudSizePx(maxChildWidthPx + gapXPx, maxChildHeightPx + gapYPx)
+
+/** 网格总尺寸：`列数 × 格宽 − 一道行距`（最后一格后面不再有间距，与 `spacedBy` 同一条账） */
+fun gridSizePx(cols: Int, rows: Int, pitch: HudSizePx, gap: HudSizePx): HudSizePx {
+    if (cols <= 0 || rows <= 0) return HudSizePx(0, 0)
+    return HudSizePx(cols * pitch.width - gap.width, rows * pitch.height - gap.height)
+}
+
+/**
+ * [gridSizePx] 的逆算：编辑页拿的是网格节点的**实测矩形**，把格长除回来而不是再量一遍每颗条目。
+ *
+ * 为什么量网格不量条目：姿态仪与音量表那两颗本来就不报锚点（[HudEntry.pillKey] 返回 null 那三条之一），
+ * 靠条目矩形取"最宽/最高那颗"会漏掉它们——那正是 §58/§73 那族"量窄了于是裁字"的成因。
+ * 网格节点是渲染层用同一个 [gridPitchPx] 算完再 `layout()` 出去的，矩形与格长是同一个数的两面，
+ * 所以这里能整除回去（`(矩形 + 一道行距) ÷ 格数`），不需要第二条公式。
+ *
+ * 一列/一行都还没有（空容器）时退回"被拖那颗自己的尺寸 + 行距"：那一刻格长只能由它撑。
+ */
+fun gridPitchOf(
+    gridWidthPx: Int,
+    gridHeightPx: Int,
+    cols: Int,
+    rows: Int,
+    gapPx: Int,
+    fallbackChildWidthPx: Int,
+    fallbackChildHeightPx: Int
+): HudSizePx = HudSizePx(
+    width = if (cols > 0) (gridWidthPx + gapPx) / cols else (fallbackChildWidthPx + gapPx).coerceAtLeast(1),
+    height = if (rows > 0) (gridHeightPx + gapPx) / rows else (fallbackChildHeightPx + gapPx).coerceAtLeast(1)
+)
+
+/** 某格的左上角相对网格原点（**格子 → 坐标的正算式**，[cellAtPointer] 是它的逆） */
+fun cellOffsetPx(cell: GridCell, pitch: HudSizePx): HudPointPx =
+    HudPointPx(cell.col.coerceAtLeast(0) * pitch.width, cell.row.coerceAtLeast(0) * pitch.height)
+
+/**
+ * 指针 → 它**压住的那一格**（**编辑页吸附用的逆算式**，与 [cellOffsetPx] 一对一）。
+ *
+ * 取"压住"（floor）而不是"中心最近"（round）：手指按在条目中心拖，条目中心落在哪一格就该是哪一格；
+ * 用 round 会让指针对在格子左缘那一瞬跳到左边一格，视觉上像吸附迟滞了一格。
+ * 网格原点由 `HudEntryGrid` 节点自己回报（窗口矩形），所以这里不需要知道格内居中偏移
+ * （渲染层用 [cellPlaceOffsetPx] 补那半截，编辑页只按格网原点吸附，两条算式互不干扰）。
+ */
+fun cellAtPointer(pointer: HudPointPx, origin: HudPointPx, pitch: HudSizePx): GridCell {
+    if (pitch.width <= 0 || pitch.height <= 0) return GridCell(0, 0)
+    return GridCell(
+        col = floorDiv(pointer.x - origin.x, pitch.width).coerceAtLeast(0),
+        row = floorDiv(pointer.y - origin.y, pitch.height).coerceAtLeast(0)
+    )
+}
+
+/** 格内的居中偏移（颗比格子小的时候补这一段；[cellOffsetPx] 是格网左上角，这一条才是 child 的左上角） */
+fun cellPlaceOffsetPx(cell: GridCell, pitch: HudSizePx, child: HudSizePx): HudPointPx {
+    val g = cellOffsetPx(cell, pitch)
+    return HudPointPx(g.x + (pitch.width - child.width) / 2, g.y + (pitch.height - child.height) / 2)
+}
+
+/** 向下取整的除法（`/` 对负数是截断，指针拖到网格左上方时会给出 -0 这种暧昧值） */
+private fun floorDiv(v: Int, p: Int): Int {
+    val q = v / p
+    return if (v % p != 0 && (v xor p) < 0) q - 1 else q
 }
 
 /**

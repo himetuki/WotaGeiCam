@@ -4,9 +4,11 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.ui.HudEntry
 import com.wotagei.cam.ui.HudEntryKind
+import com.wotagei.cam.ui.HudGridPlan
 import com.wotagei.cam.ui.HudLayoutTable
 import com.wotagei.cam.ui.HudZone
 import com.wotagei.cam.ui.ZonePlacement
+import com.wotagei.cam.ui.GridCell
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -27,6 +29,10 @@ import org.junit.Test
  * - [futureVersionFallsBackToDefault] / [halfSetPlacementIsTreatedAsUntouched]：坏值不抛、按未编辑处理。
  */
 class HudLayoutCodecTest {
+    /** #74：格子解析要的两份运行时输入。测试里一律"全部可见 + 读数块一行 3 颗"，
+     * 与 [HudLayoutTable.default] 那张表的默认推导档同源（`hudPerRowFor` 在 360dp 宽给 3）。 */
+    private val planAll = HudGridPlan(HudEntry.ALL.toSet(), readoutPerRow = 3)
+
 
     private fun assertEachEntryOnce(table: HudLayoutTable, tag: String) {
         val all = table.allEntries()
@@ -38,7 +44,8 @@ class HudLayoutCodecTest {
     @Test
     fun encodeKeepsFiveZoneRecords() {
         val raw = HudLayoutTable.default().encode()
-        assertTrue("版本段必须是 v1，改格式就要 +1 并在 decode 里处置旧串", raw.startsWith("v1;"))
+        assertTrue("版本段必须是 v2（#74 起每颗条目带格子），改格式就要 +1 并在 decode 里处置旧串",
+            raw.startsWith("v2;"))
         // 1 段版本 + 5 段容器
         assertEquals(6, raw.split(';').size)
         for (zone in HudZone.ALL) {
@@ -50,6 +57,15 @@ class HudLayoutCodecTest {
             assertEquals(-1, f[1].toInt())
             assertEquals(-1, f[2].toInt())
         }
+        // #74 新增的两条格式约束：
+        // ① **网格容器**（左/右 Dock、读数块）每颗都带 `:格子` 后缀，默认表里全是哨兵 `-`；
+        //    实现若退回头都不写后缀，v2 与 v1 就同串了，格子存不下也读不出。
+        val left = raw.split(';').first { it.startsWith("L,") }.split(',').drop(3)
+        assertTrue("左 Dock 每颗都必须带 :格子 后缀：$raw", left.all { it.endsWith(":-") })
+        // ② **非网格容器**（顶栏/底栏）不许带后缀：那两枚按顺序排，写了没人读就是脏数据
+        val top = raw.split(';').first { it.startsWith("T,") }.split(',').drop(3)
+        assertTrue("顶栏不该出现格子后缀（本批不上网格）：$raw", top.none { it.contains(':') })
+        assertTrue(top.contains("P11"))
     }
 
     @Test
@@ -104,21 +120,42 @@ class HudLayoutCodecTest {
     fun roundTripPreservesUserEdits() {
         val edited = HudLayoutTable.default()
             .withZonePos(HudZone.RIGHT, 612, 88)
-            .moveEntryTo(HudEntry.of(CamPill.CURVE), HudZone.TOP, 1)
+            .moveEntryTo(HudEntry.of(CamPill.CURVE), HudZone.TOP, 1, planAll)
+            // #74：把左 Dock 的「闪光灯」摆到第 1 列第 3 行（一列之外的格子，只有格子模型表达得出来）
+            .placeEntryAt(
+                HudEntry.of(CamPill.FLASH), HudZone.LEFT, 3, GridCell(1, 3), planAll
+            )
         val back = HudLayoutTable.decode(edited.encode())
         assertEquals("编解码必须无损回到同一张表", edited, back)
         assertEquals(ZonePlacement(612, 88), back.posOf(HudZone.RIGHT))
         assertEquals(HudZone.TOP, back.sourceZoneOf(HudEntry.of(CamPill.CURVE)))
+        // 格子本身也要无损：光看"整张表相等"看不出 encode 漏写后缀（decode 会拿默认格子补齐，
+        // 而默认格子恰好等于钉住之前那一格，表照样相等——只有直接点格子值才测得出来）
+        assertEquals("摆过的格子必须原样读回来", GridCell(1, 3), back.cellsOf(HudZone.LEFT)[HudEntry.of(CamPill.FLASH)])
         assertEachEntryOnce(back, "回读表")
     }
 
     @Test
+    fun placedCellSurvivesAcrossRestartForGridZonesOnly() {
+        // 编码层的容器分治：网格容器写 `:列.行`，非网格容器写裸 id。
+        // 顶栏那颗就算被塞进 cellsOf 也不许进串（进了也没人读，留着只会变成下一次进网格容器时复活的老位置）
+        val t = HudLayoutTable.default()
+            .placeEntryAt(HudEntry.of(CamPill.BT), HudZone.RIGHT, 4, GridCell(1, 2), planAll)
+        val seg = t.encode().split(';').first { it.startsWith("R,") }
+        assertTrue("右 Dock 的格子后缀没写进串：$seg", seg.contains("${HudEntry.of(CamPill.BT).id}:1.2"))
+        val top = t.encode().split(';').first { it.startsWith("T,") }
+        assertFalse("顶栏写了格子后缀：$top", top.contains(':'))
+        val back = HudLayoutTable.decode(t.encode())
+        assertEquals(GridCell(1, 2), back.cellsOf(HudZone.RIGHT)[HudEntry.of(CamPill.BT)])
+    }
+
+    @Test
     fun hiddenEntrySurvivesInPersistedString() {
-        val moved = HudLayoutTable.default().moveEntryTo(HudEntry.of(CamPill.STORAGE), HudZone.LEFT, 0)
+        val moved = HudLayoutTable.default().moveEntryTo(HudEntry.of(CamPill.STORAGE), HudZone.LEFT, 0, planAll)
         val curve = HudEntry.of(CamPill.CURVE)
         val repositioned = moved
             .withZonePos(HudZone.LEFT, 200, 90)
-            .moveEntryTo(curve, HudZone.READOUT, 2)
+            .moveEntryTo(curve, HudZone.READOUT, 2, planAll)
         // 用户在设置页把「剩余空间」与「RGB 曲线」都关掉：可见集里没有它们
         val visible: Set<HudEntry> = CamPill.ALL.filter { it != CamPill.STORAGE && it != CamPill.CURVE }
             .map { HudEntry.of(it) }.toSet() + HudItem.ALL.map { HudEntry.of(it) }
@@ -160,8 +197,82 @@ class HudLayoutCodecTest {
             assertEquals("坏串 [$bad] 必须整表回默认而不是抛或写出错位置", def, t)
             assertEachEntryOnce(t, "坏串 [$bad]")
         }
-        // 版本比本工程新：整表按默认（老代码读不懂新格式，硬解会把控件摆到错地方）
-        assertEquals(def, HudLayoutTable.decode("v2;T,5,5,P11,P12;L,-1,-1;R,-1,-1;D,-1,-1;B,-1,-1"))
+        // 版本比本工程新：整表按默认（老代码读不懂新格式，硬解会把控件摆到错地方）。
+        // #74 之后"新"是 v3（本工程当前 v2）——这条必须跟着版本走，否则它测的就不再是"未来版本"
+        assertEquals(def, HudLayoutTable.decode("v3;T,5,5,P11,P12;L,-1,-1;R,-1,-1;D,-1,-1;B,-1,-1"))
+        // 版本号写成非数字 / 0 / 负数：一律按坏串回默认，不许走进 v1 迁移那一支
+        for (badHeader in listOf("v", "v0", "v-1", "vx")) {
+            assertEquals("坏版本头 [$badHeader] 必须整表回默认", def, HudLayoutTable.decode("$badHeader;T,5,5,P11,P12"))
+        }
+    }
+
+    @Test
+    fun v1StringMigratesToTheCellsItIsAlreadyShowing() {
+        // **v1 → v2 迁移的硬要求**：用户已经拖过的东西一律不许被打回默认。
+        // v1 的屏幕位置本来就是「顺序 × 分行」推导出来的，而 v2 的默认格子读的是同一个 hudRowGroups，
+        // 所以迁移的正确形态是"格子全留哨兵"——不换算坐标，而是让同一把推导尺子量出同一格。
+        // 这条是"计划→行为"的桥：把 defaultCellsOf 换成任何手抄的坐标表，下面逐颗的格子立刻红。
+        val v1 = "v1;T,42,7,P11,P12;L,-1,-1,P6,P7,P8,P9;R,-1,-1,P0,P1,P2,P3,P4,P5;" +
+            "D,-1,-1,H0,H1,H2,H3,H4,H5,H6;B,-1,-1,P2"
+        val t = HudLayoutTable.decode(v1)
+        assertEquals("读老串要把表版本抬到当前，下一次保存自然写成 v2", 2, t.version)
+        assertEquals("老串里已经拖过的容器位置必须原样保住", ZonePlacement(42, 7), t.posOf(HudZone.TOP))
+        // 逐颗点名默认格子：左 Dock 一行一颗 ⇒ 第 0..3 行
+        val left = t.gridItems(HudZone.LEFT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(0, 0), left[HudEntry.of(CamPill.REFLINE)])
+        assertEquals(GridCell(0, 2), left[HudEntry.of(CamPill.CURVE)])
+        assertEquals(GridCell(0, 3), left[HudEntry.of(CamPill.FLASH)])
+        // 右 Dock 的「姿态仪 + 音量表」并排 ⇒ 同一行两列（S2-2 B 那笔账在格子里同样成立）
+        val right = t.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(0, 0), right[HudEntry.of(CamPill.LEVEL)])
+        assertEquals(GridCell(1, 0), right[HudEntry.of(CamPill.VOLUME)])
+        assertEquals(GridCell(0, 1), right[HudEntry.of(CamPill.BT)])
+        assertEquals(GridCell(0, 4), right[HudEntry.of(CamPill.STAB)])
+        // 读数块一行 3 颗 ⇒ 第 7 颗（变焦读数）落在第 2 行第 0 列
+        val readout = t.gridItems(HudZone.READOUT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(2, 1), readout[HudEntry.of(HudItem.WB)])
+        assertEquals(GridCell(0, 2), readout[HudEntry.of(HudItem.ZOOM)])
+        // 迁移不写格子表：表里必须一个显式格子都没有（写了就是把手抄的默认值钉进持久化）
+        for (zone in HudZone.ALL) {
+            assertTrue("${zone.key} 段迁移后不该有显式格子", t.cellsOf(zone).isEmpty())
+        }
+        // 非网格容器（顶栏/底栏）永远拿哨兵格：那两枚还按顺序排
+        assertTrue(t.gridItems(HudZone.TOP, planAll).all { it.cell.isDefault })
+        assertEachEntryOnce(t, "v1 迁移表")
+    }
+
+    @Test
+    fun v1EditedOrderMigratesToWhereThatOrderRenders() {
+        // 上一批 B4 里用户能做的编辑只有"换序 / 跨容器"。取一条真实的 v1 串（变焦被拖到左 Dock 第 0 格、
+        // 左 Dock 整体被拖到 (120,300)），迁移后它必须**还在**第 0 行第 0 列、容器落点一个字没变。
+        val v1 = "v1;T,-1,-1,P11,P12;L,120,300,P3,P6,P7,P8,P9;R,-1,-1,P0,P1,P2,P4,P5;" +
+            "D,-1,-1,H0,H1,H2,H3,H4,H5,H6;B,-1,-1,P2"
+        val t = HudLayoutTable.decode(v1)
+        assertEquals(HudZone.LEFT, t.sourceZoneOf(HudEntry.of(CamPill.ZOOM)))
+        val left = t.gridItems(HudZone.LEFT, planAll)
+        assertEquals("拖到左 Dock 第 0 格的变焦必须还在第 0 格", GridCell(0, 0), left.first().cell)
+        assertEquals(HudEntry.of(CamPill.ZOOM), left.first().entry)
+        assertEquals(GridCell(0, 1), left[1].cell)
+        assertEquals("容器整体落点必须原样搬过来", ZonePlacement(120, 300), t.posOf(HudZone.LEFT))
+        // 右 Dock 少了变焦 ⇒ 姿态仪/音量表仍相邻、仍并排
+        val right = t.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(1, 0), right[HudEntry.of(CamPill.VOLUME)])
+        assertEquals(GridCell(0, 2), right[HudEntry.of(CamPill.FOCUS)])
+    }
+
+    @Test
+    fun badCellTokensFallBackToDerivedCellNotCrash() {
+        // 手改 prefs 造的坏格子：后缀缺行、非数字、负数、越界列，全部**只丢那一颗的格子**，
+        // 条目本身照留（与"坏 id 丢掉、其余保留"同一条纪律），整表不许抛
+        val raw = "v2;T,-1,-1,P11,P12;L,-1,-1,P6:0,P7:1.2,P8:x.y,P9:9.9;R,-1,-1,P0;D,-1,-1,H0;B,-1,-1,P2"
+        val t = HudLayoutTable.decode(raw)
+        val left = t.gridItems(HudZone.LEFT, planAll).associate { it.entry to it.cell }
+        assertEquals("${HudEntry.of(CamPill.REFLINE).id}:0 缺行 ⇒ 按没摆过处理", GridCell(0, 0), left[HudEntry.of(CamPill.REFLINE)])
+        assertEquals("合法后缀必须收下", GridCell(1, 2), left[HudEntry.of(CamPill.MONITOR)])
+        assertEquals(GridCell(0, 2), left[HudEntry.of(CamPill.CURVE)])
+        // `P9:9.9` 的列越界（左 Dock 最多两列）⇒ 解码时就钳进上限；行 9 没超行上限（条目总数 20）所以照收
+        assertEquals("越界列必须钳进 gridColsCapOf", GridCell(1, 9), left[HudEntry.of(CamPill.FLASH)])
+        assertEquals(4, t.orderOf(HudZone.LEFT).size)
     }
 
     @Test
@@ -232,7 +343,7 @@ class HudLayoutCodecTest {
         val edited = HudLayoutTable.default()
             .withZonePos(HudZone.LEFT, 12, 300)
             .withZonePos(HudZone.READOUT, 500, 250)
-            .moveEntryTo(HudEntry.of(CamPill.LENS), HudZone.RIGHT, 0)
+            .moveEntryTo(HudEntry.of(CamPill.LENS), HudZone.RIGHT, 0, planAll)
         val beforeReset = edited.encode()
         // 重置按钮写下去的就是这一张表：任何绝对坐标都不许残留
         val afterReset = HudLayoutTable.default()
@@ -241,6 +352,49 @@ class HudLayoutCodecTest {
         assertEquals(HudEntry.of(CamPill.LENS), afterReset.orderOf(HudZone.BOTTOM).single())
         // 「即时可重做」的模型前提：重置前那张表的串还完整可读回来（撤销靠的是它，不是内存里的手抄本）
         assertEquals("撤销重置要把前一张表原样读回来", edited, HudLayoutTable.decode(beforeReset))
+    }
+
+    @Test
+    fun v1StringWithDraggedContainerAndMovedEntryMigratesWhole() {
+        // 交付报告第 3 项那条"真实 v1 串"：容器被拖过（左 Dock 到 (200,90)）+ 两颗被搬过容器
+        // （剩余空间 P12 进左 Dock 第 0 位、RGB 曲线 P8 进读数块第 2 位）+ 之后用户在设置页把这两颗关掉。
+        // 这一条把"迁移 + 隐藏态"两层语义一起钉住。
+        val v1 = "v1;T,-1,-1,P11;L,200,90,P12,P6,P7,P9;R,-1,-1,P0,P1,P2,P3,P4,P5;" +
+            "D,-1,-1,H0,H1,P8,H2,H3,H4,H5,H6;B,-1,-1,P10"
+        val t = HudLayoutTable.decode(v1)
+        // ① 容器落点原样
+        assertEquals(ZonePlacement(200, 90), t.posOf(HudZone.LEFT))
+        assertTrue("没拖过的容器仍必须是哨兵", t.posOf(HudZone.RIGHT).isDefault)
+        // ② 归属与顺序原样（跨容器那两颗还在原位）
+        assertEquals(
+            listOf(HudEntry.of(CamPill.STORAGE), HudEntry.of(CamPill.REFLINE),
+                HudEntry.of(CamPill.MONITOR), HudEntry.of(CamPill.FLASH)),
+            t.orderOf(HudZone.LEFT)
+        )
+        assertEquals(HudZone.READOUT, t.sourceZoneOf(HudEntry.of(CamPill.CURVE)))
+        // ③ 逐颗的格子＝改前那副排布（全可见时：左 Dock 一列四行；读数块 3+3+2）
+        val left = t.gridItems(HudZone.LEFT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(0, 0), left[HudEntry.of(CamPill.STORAGE)])
+        assertEquals(GridCell(0, 1), left[HudEntry.of(CamPill.REFLINE)])
+        assertEquals(GridCell(0, 3), left[HudEntry.of(CamPill.FLASH)])
+        val readout = t.gridItems(HudZone.READOUT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(2, 0), readout[HudEntry.of(CamPill.CURVE)])
+        assertEquals(GridCell(1, 1), readout[HudEntry.of(HudItem.ISO)])
+        assertEquals(GridCell(1, 2), readout[HudEntry.of(HudItem.ZOOM)])
+        // ④ 关掉那两颗再重开：显示回来的位置还是"改前它所在的那一格"，且没有回出厂容器
+        val hidden: Set<HudEntry> = CamPill.ALL.filter { it != CamPill.STORAGE && it != CamPill.CURVE }
+            .map { HudEntry.of(it) }.toSet() + HudItem.ALL.map { HudEntry.of(it) }
+        val whileHidden = t.visibleOrderOf(HudZone.LEFT, hidden)
+        assertFalse("关掉的条目不许出现在页面上", HudEntry.of(CamPill.STORAGE) in whileHidden)
+        val shown = HudLayoutTable.decode(t.encode()).visibleOrderOf(HudZone.LEFT, HudEntry.ALL.toSet())
+        assertEquals("重开显示必须回到左 Dock 第 0 位（不是出厂的顶栏）",
+            HudEntry.of(CamPill.STORAGE), shown.first())
+        assertEquals("重开后落点还是第 0 行", GridCell(0, 0),
+            HudLayoutTable.decode(t.encode()).gridItems(HudZone.LEFT, planAll).first().cell)
+        // ⑤ 重开进程仍一样：读的就是这一份串（`WotaSettings.setHudLayout` 走同步 commit，
+        //    这里用"同一串二次解码与首次逐字段相同"表达"进程重启看到的表不变"）
+        assertEquals(t, HudLayoutTable.decode(t.encode()))
+        assertEachEntryOnce(t, "v1 拖过 + 隐藏过")
     }
 
     @Test

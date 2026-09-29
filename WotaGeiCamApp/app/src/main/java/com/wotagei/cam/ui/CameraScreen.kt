@@ -535,6 +535,10 @@ fun CameraScreen(
         else -> baseArea
     }
 
+    // #74：网格解析要的两份运行时输入（可见集 + 读数块一行几颗）。编辑页造的是同一份，
+    // 两页都只经 [HudLayoutTable.gridItems] 这一条换算，不许出现第二份"格子 → 坐标"。
+    val gridPlan = HudGridPlan(visible = visibleEntries, readoutPerRow = readoutPlan.perRow)
+
     /**
      * 表里的位置 → 这一帧真正用的位置。
      * - 两轴都是哨兵（用户没把这枚容器拖离定稿位置）原样返回，由 [HudZoneBox] 走 B1–B3 的原生对齐分支；
@@ -711,7 +715,9 @@ fun CameraScreen(
                 HudItem.BITRATE -> "${bitrate / 1_000_000}M"
             }
         },
-        readoutPerRow = readoutPlan.perRow,
+        // 录制页不做格子吸附（拖拽只在编辑页），这一路给空链：一个节点都不加，零成本。
+        // 形参没有默认值是故意的（#69 铁律），漏挂的那一页会静默失去格子吸附能力而编译照过
+        gridOf = { Modifier },
         anchorOf = { entry ->
             val key = entry.pillKey()
             when {
@@ -849,7 +855,7 @@ fun CameraScreen(
                 ) {
                     HudDockZone(
                         HudZone.LEFT,
-                        hudLayout.visibleOrderOf(HudZone.LEFT, visibleEntries),
+                        hudLayout.gridItems(HudZone.LEFT, gridPlan),
                         hudCtx,
                         zoneBandHeight(HudZone.LEFT, baseArea)
                     )
@@ -866,7 +872,7 @@ fun CameraScreen(
                 ) {
                     HudDockZone(
                         HudZone.RIGHT,
-                        hudLayout.visibleOrderOf(HudZone.RIGHT, visibleEntries),
+                        hudLayout.gridItems(HudZone.RIGHT, gridPlan),
                         hudCtx,
                         zoneBandHeight(HudZone.RIGHT, rightArea)
                     )
@@ -885,7 +891,7 @@ fun CameraScreen(
                     onCardRect = { putCardRect(HudZone.READOUT, it) }
                 ) {
                     HudReadoutZone(
-                        hudLayout.visibleOrderOf(HudZone.READOUT, visibleEntries),
+                        hudLayout.gridItems(HudZone.READOUT, gridPlan),
                         hudCtx,
                         zoneBandHeight(HudZone.READOUT, readoutArea)
                     )

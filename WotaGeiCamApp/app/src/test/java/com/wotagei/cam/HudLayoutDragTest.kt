@@ -4,6 +4,7 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.ui.HudAxis
 import com.wotagei.cam.ui.HudEntry
+import com.wotagei.cam.ui.HudGridPlan
 import com.wotagei.cam.ui.HudLayoutTable
 import com.wotagei.cam.ui.HudPointDp
 import com.wotagei.cam.ui.HudRectDp
@@ -29,6 +30,10 @@ import org.junit.Test
  * - [dropIndex] 的三档入参是**手摆的矩形**，与实现的读序方式无关，所以数格子那条算式错了会当场红。
  */
 class HudLayoutDragTest {
+    /** #74：格子解析要的两份运行时输入。测试里一律"全部可见 + 读数块一行 3 颗"，
+     * 与 [HudLayoutTable.default] 那张表的默认推导档同源（`hudPerRowFor` 在 360dp 宽给 3）。 */
+    private val planAll = HudGridPlan(HudEntry.ALL.toSet(), readoutPerRow = 3)
+
 
     private fun once(table: HudLayoutTable, tag: String) {
         val all = table.allEntries()
@@ -41,7 +46,7 @@ class HudLayoutDragTest {
 
     @Test
     fun crossContainerMoveKeepsBothListsConsistent() {
-        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.ZOOM), HudZone.LEFT, 0)
+        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.ZOOM), HudZone.LEFT, 0, planAll)
         assertEquals(
             listOf(e(CamPill.ZOOM), e(CamPill.REFLINE), e(CamPill.MONITOR), e(CamPill.CURVE), e(CamPill.FLASH)),
             t.orderOf(HudZone.LEFT)
@@ -61,8 +66,8 @@ class HudLayoutDragTest {
 
     @Test
     fun moveBackToHomeZoneRestoresTheOriginalOrder() {
-        val out = HudLayoutTable.default().moveEntryTo(e(CamPill.ZOOM), HudZone.LEFT, 0)
-        val back = out.moveEntryTo(e(CamPill.ZOOM), HudZone.RIGHT, 3)
+        val out = HudLayoutTable.default().moveEntryTo(e(CamPill.ZOOM), HudZone.LEFT, 0, planAll)
+        val back = out.moveEntryTo(e(CamPill.ZOOM), HudZone.RIGHT, 3, planAll)
         assertEquals("回到右 Dock 第 3 格就是它原来那一格", HudLayoutTable.default().orderOf(HudZone.RIGHT), back.orderOf(HudZone.RIGHT))
         assertEquals(HudLayoutTable.default().orderOf(HudZone.LEFT), back.orderOf(HudZone.LEFT))
         once(back, "挪回")
@@ -70,7 +75,7 @@ class HudLayoutDragTest {
 
     @Test
     fun reorderInsideOneContainer() {
-        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.STAB), HudZone.RIGHT, 0)
+        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.STAB), HudZone.RIGHT, 0, planAll)
         assertEquals(
             listOf(e(CamPill.STAB), e(CamPill.LEVEL), e(CamPill.VOLUME), e(CamPill.BT), e(CamPill.ZOOM), e(CamPill.FOCUS)),
             t.orderOf(HudZone.RIGHT)
@@ -84,7 +89,7 @@ class HudLayoutDragTest {
     @Test
     fun readoutReorderKeepsHiddenItemsInPlace() {
         // 读数块里把「码率」挪到第一格，同时设置页关掉了 EV 与白平衡
-        val t = HudLayoutTable.default().moveEntryTo(e(HudItem.BITRATE), HudZone.READOUT, 0)
+        val t = HudLayoutTable.default().moveEntryTo(e(HudItem.BITRATE), HudZone.READOUT, 0, planAll)
         val visible = setOf(e(HudItem.SHUTTER), e(HudItem.FPS), e(HudItem.BITRATE), e(HudItem.ZOOM))
         assertEquals(
             listOf(e(HudItem.BITRATE), e(HudItem.SHUTTER), e(HudItem.FPS), e(HudItem.ZOOM)),
@@ -104,8 +109,8 @@ class HudLayoutDragTest {
             .withZonePos(HudZone.LEFT, 200, 90)
             .withZonePos(HudZone.READOUT, 640, 250)
         val moved = positioned
-            .moveEntryTo(e(CamPill.CURVE), HudZone.TOP, 1)
-            .moveEntryTo(e(HudItem.ISO), HudZone.LEFT, 0)
+            .moveEntryTo(e(CamPill.CURVE), HudZone.TOP, 1, planAll)
+            .moveEntryTo(e(HudItem.ISO), HudZone.LEFT, 0, planAll)
         assertEquals("挪条目不许顺手重置左 Dock 的位置", ZonePlacement(200, 90), moved.posOf(HudZone.LEFT))
         assertEquals("挪条目不许顺手重置读数块的位置", ZonePlacement(640, 250), moved.posOf(HudZone.READOUT))
         // 顶栏被塞进一颗也不代表它被"移动"过
@@ -118,7 +123,7 @@ class HudLayoutDragTest {
     @Test
     fun emptyingBottomContainerIsLegal() {
         // 底栏只有「镜头」一颗可编辑；把它挪走之后那枚容器顺序为空，底板仍按等宽槽算（MergeSlot 有用例）
-        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1)
+        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1, planAll)
         assertTrue(t.orderOf(HudZone.BOTTOM).isEmpty())
         assertEquals(listOf(e(CamPill.SIZE), e(CamPill.LENS), e(CamPill.STORAGE)), t.orderOf(HudZone.TOP))
         once(t, "底栏清空")
@@ -126,9 +131,9 @@ class HudLayoutDragTest {
 
     @Test
     fun indexOutOfRangeIsClampedNotIgnored() {
-        val tail = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.RIGHT, 999)
+        val tail = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.RIGHT, 999, planAll)
         assertEquals(e(CamPill.LENS), tail.orderOf(HudZone.RIGHT).last())
-        val head = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.RIGHT, -5)
+        val head = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.RIGHT, -5, planAll)
         assertEquals(e(CamPill.LENS), head.orderOf(HudZone.RIGHT).first())
         assertEquals(7, head.orderOf(HudZone.RIGHT).size)
         once(tail, "越界 index")
@@ -190,14 +195,14 @@ class HudLayoutDragTest {
         )
         assertTrue(rightDockPacksLevelAndVolume(def))
         // 用户把音量表挪到左 Dock：右 Dock 少一颗、且不再并排（并排判据只看相邻，不看枚举序）
-        val movedOut = HudLayoutTable.default().moveEntryTo(HudEntry.of(CamPill.VOLUME), HudZone.LEFT, 0)
+        val movedOut = HudLayoutTable.default().moveEntryTo(HudEntry.of(CamPill.VOLUME), HudZone.LEFT, 0, planAll)
         val rest = movedOut.orderOf(HudZone.RIGHT)
         assertEquals(5, rest.size)
         assertEquals(rest.map { listOf(it) }, hudRowGroups(HudZone.RIGHT, rest, perRow = 1))
         assertFalse(rightDockPacksLevelAndVolume(rest))
         // 相邻但顺序颠倒（用户拖出来的合法形态）：仍并排，组内保持用户那个顺序
         val swapped = HudLayoutTable.default()
-            .moveEntryTo(HudEntry.of(CamPill.VOLUME), HudZone.RIGHT, 0)
+            .moveEntryTo(HudEntry.of(CamPill.VOLUME), HudZone.RIGHT, 0, planAll)
             .orderOf(HudZone.RIGHT)
         assertEquals(
             listOf(HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.LEVEL)),
@@ -238,7 +243,7 @@ class HudLayoutDragTest {
     @Test
     fun readoutChunkingFollowsUserOrderNotEnumOrder() {
         // 把码率挪到首格后，一行 2 颗的分法是「码率+快门 / 帧率+ISO」，不是枚举序的那两组
-        val t = HudLayoutTable.default().moveEntryTo(HudEntry.of(HudItem.BITRATE), HudZone.READOUT, 0)
+        val t = HudLayoutTable.default().moveEntryTo(HudEntry.of(HudItem.BITRATE), HudZone.READOUT, 0, planAll)
         val groups = hudRowGroups(HudZone.READOUT, t.orderOf(HudZone.READOUT), perRow = 2)
         assertEquals(
             listOf(
@@ -260,7 +265,7 @@ class HudLayoutDragTest {
         val placed = HudLayoutTable.default().withZonePos(HudZone.BOTTOM, -1, 282)
         assertFalse("底栏 y-only 落位不是默认态", placed.posOf(HudZone.BOTTOM).isDefault)
         assertEquals(ZonePlacement(-1, 282), placed.posOf(HudZone.BOTTOM))
-        val moved = placed.moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1)
+        val moved = placed.moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1, planAll)
         assertEquals("挪条目不许顺手丢掉底栏的 y", ZonePlacement(-1, 282), moved.posOf(HudZone.BOTTOM))
         val back = HudLayoutTable.decode(placed.encode())
         assertEquals("编解码一轮之后 y 还在、x 仍是哨兵", placed.posOf(HudZone.BOTTOM), back.posOf(HudZone.BOTTOM))
