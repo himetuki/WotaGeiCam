@@ -58,19 +58,33 @@ fun hudRoomDp(safeWidthDp: Float, endPadDp: Float): Float =
     (safeWidthDp - endPadDp - 2f * HudBlockPadDp).coerceAtLeast(0f)
 
 /**
+ * 一颗胶囊的**高**（dp）＝ `WotaType.chip` 的 lineHeight 18sp（随字体缩放）+ `WotaChip` 上下内边距 6+6。
+ * 默认档 30dp、120% 档 33.6dp（与 `HudLayoutPairCellTest` 里实测那颗 60px / 71dp 的胶囊同量级）。
+ *
+ * **两条算式共读它**（任务 #75 提出来这一条）：
+ * - [hudStripHeightDp] 的读数块高度预测（原来这个数是它的局部变量）；
+ * - `HudLayout.kt` 的 [gridRowPitchPx]——网格的纵向格距按"胶囊档 + 一道行距"推，与格子里住了几颗、
+ *   谁最高**无关**，那一档 74dp 的姿态仪顶高行距正是 #75 要修的回归。
+ * 两处各写一份就是第二份真源（S3-5 那一族），改了内边距而预测与格距不同步，裁字与叠字都会复发。
+ */
+fun hudChipHeightDp(fontScale: Float): Float {
+    val scale = if (fontScale < 1f) 1f else fontScale
+    return ChipLineHeightDp * scale + ChipVerticalPaddingDp
+}
+
+/**
  * 读数块高度的**预测初值**（审查 S3-6）：首帧实测之前先按「行数 × 一颗胶囊高 + 行距 + 块内上下边距」估，
  * 免得右竖 Dock 的下边界第一帧按 0 算、最低那颗落在读数块的位置上叠一帧。
  *
- * 一颗读数胶囊 = [WotaType.chip] 的 lineHeight 18sp（随字体缩放）+ `WotaChip` 上下内边距 6+6
- * ⇒ 默认 3 读数一行时 12 + 30 = 42dp，与实测同量级。「AE 已锁定」那行提示不计入预测（它一出现
+ * 一颗读数胶囊走 [hudChipHeightDp]（18sp 行高随字体缩放 + 上下内边距 6+6）⇒ 默认 3 读数一行时
+ * 12 + 30 = 42dp，与实测同量级。「AE 已锁定」那行提示不计入预测（它一出现
  * 下一帧实测就跟上），这是预测不是结论。
  */
 fun hudStripHeightDp(itemCount: Int, perRow: Int, fontScale: Float): Float {
     if (itemCount <= 0) return 0f
     val columns = if (perRow < 1) 1 else perRow
     val rows = (itemCount + columns - 1) / columns
-    val scale = if (fontScale < 1f) 1f else fontScale
-    val chip = ChipLineHeightDp * scale + ChipVerticalPaddingDp
+    val chip = hudChipHeightDp(fontScale)
     return 2f * HudBlockPadDp + rows * chip + (rows - 1) * HudRowGapDp
 }
 

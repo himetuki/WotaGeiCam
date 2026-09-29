@@ -537,7 +537,17 @@ fun CameraScreen(
 
     // #74：网格解析要的两份运行时输入（可见集 + 读数块一行几颗）。编辑页造的是同一份，
     // 两页都只经 [HudLayoutTable.gridItems] 这一条换算，不许出现第二份"格子 → 坐标"。
-    val gridPlan = HudGridPlan(visible = visibleEntries, readoutPerRow = readoutPlan.perRow)
+    // #75 再添两份：**纵向格距**（由胶囊档 + 该容器行距推出，与住户无关）与**每颗条目的实测高**
+    //（写方只有 HudEntryGrid 一处，本页自己存一份，与编辑页各持一份同理——两页读的是同一个算式）。
+    // 这两条就是"高条目自己吃掉几档、不把别人的行距顶高"的全部证据；量不到那一帧跨度按一档算，
+    // 下一帧实测接管（与 topBarH / dockStripH 同一套"两轮收敛"，不是新写的首帧常量）。
+    val hudEntryHeights = remember { mutableStateMapOf<HudEntry, Int>() }
+    val gridPlan = HudGridPlan(
+        visible = visibleEntries,
+        readoutPerRow = readoutPlan.perRow,
+        rowPitchOf = { zone -> hudGridRowPitchPx(zone, hudDensity) },
+        cellHeightOf = { entry -> hudEntryHeights[entry] ?: 0 }
+    )
 
     /**
      * 表里的位置 → 这一帧真正用的位置。
@@ -718,6 +728,9 @@ fun CameraScreen(
         // 录制页不做格子吸附（拖拽只在编辑页），这一路给空链：一个节点都不加，零成本。
         // 形参没有默认值是故意的（#69 铁律），漏挂的那一页会静默失去格子吸附能力而编译照过
         gridOf = { Modifier },
+        // #75：实测高仍要回报——录制页不做吸附，但**跨度**（高条目吃掉几档）在两页都得算，
+        // 而它唯一的数据源就是这份实测高（不回报就永远按一档 ⇒ 又变回"行距取最高那颗"那个老模型）
+        entryHeights = hudEntryHeights,
         anchorOf = { entry ->
             val key = entry.pillKey()
             when {

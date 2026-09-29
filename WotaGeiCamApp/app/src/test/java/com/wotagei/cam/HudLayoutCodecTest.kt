@@ -30,8 +30,15 @@ import org.junit.Test
  */
 class HudLayoutCodecTest {
     /** #74：格子解析要的两份运行时输入。测试里一律"全部可见 + 读数块一行 3 颗"，
-     * 与 [HudLayoutTable.default] 那张表的默认推导档同源（`hudPerRowFor` 在 360dp 宽给 3）。 */
-    private val planAll = HudGridPlan(HudEntry.ALL.toSet(), readoutPerRow = 3)
+     * 与 [HudLayoutTable.default] 那张表的默认推导档同源（`hudPerRowFor` 在 360dp 宽给 3）。
+     * #75 添的两份在这里取"手摆一档 + 量不到高"：本文件测的是**编解码与迁移**，
+     * 跨度按 1 才能让"格子后缀原样往返"那几条期望值与 #74 逐字相同（跨度那一档另开文件打）。 */
+    private val planAll = HudGridPlan(
+        visible = HudEntry.ALL.toSet(),
+        readoutPerRow = 3,
+        rowPitchOf = { 30 },
+        cellHeightOf = { 0 }
+    )
 
 
     private fun assertEachEntryOnce(table: HudLayoutTable, tag: String) {
