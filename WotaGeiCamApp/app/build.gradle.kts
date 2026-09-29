@@ -35,17 +35,49 @@ android {
         }
     }
 
+    // r13 用的那张证书（keystore.properties 在则用它，不在则退回 debug 签名，与 release 同一条判据）
+    val wotaSign = if (rootProject.file("keystore.properties").exists()) {
+        signingConfigs.getByName("wota")
+    } else {
+        signingConfigs.getByName("debug")
+    }
+
     buildTypes {
-        debug { isMinifyEnabled = false }
+        debug {
+            isMinifyEnabled = false
+            // 钩子在 debug 变体也**不通**：这条判据故意不跟 isDebuggable 走，
+            // 免得以后有人以为"debug 包能装"就等于"钩子能验"（本机装不了 debug 包，见 docs/plan/13 §14.3）
+            buildConfigField("boolean", "MERGE_HOOK", "false")
+        }
+        /**
+         * #73 的取证变体：**release 同签名 + debuggable=true**。
+         *
+         * 为什么要这么拧：这台华为测试机上没有 `screenrecord`（实测 `inaccessible or not found`），
+         * `screencap` 单张 464–541ms，而 FLUENT 档 `WotaMotion.COMMIT_MS = 750ms` ⇒ 整个动画窗口只够拍 1 帧，
+         * 中间态只能靠**应用内把进度钉死**来取证。而钉进度的入口不能留给用户误触，
+         * 又不能走 `BuildConfig.DEBUG`：换装 debug 包签名不同 ⇒ 必须 `adb uninstall` ⇒ 清空 `wota_settings`
+         * 与 `wota_media.db`（用户设置与收藏，本项目的硬红线）。
+         * 所以另开一枚与 r13 **同签名**的变体：`adb install -r` 覆盖即装即换、不动数据，
+         * 钩子的开关由 [MERGE_HOOK] 这条 buildConfigField 挡（只在 debugHook 为 true，release 恒 false）。
+         *
+         * `matchingFallbacks` 是给"依赖只带 debug/release 两种构建类型属性"的 AAR 一个退路，
+         * 没有它 AGP 在解析 androidx/material3 那些 aar 时会报"找不到 debugHook 的匹配"。
+         */
+        create("debugHook") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = wotaSign
+            matchingFallbacks += listOf("release", "debug")
+            buildConfigField("boolean", "MERGE_HOOK", "true")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = if (rootProject.file("keystore.properties").exists()) {
-                signingConfigs.getByName("wota")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = wotaSign
+            buildConfigField("boolean", "MERGE_HOOK", "false")
         }
     }
 
@@ -55,7 +87,11 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        // #73：钩子的开关走变体专属字段 BuildConfig.MERGE_HOOK（AGP 8 默认关，不开就没有这个类）
+        buildConfig = true
+    }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.2" }
 
     packaging {

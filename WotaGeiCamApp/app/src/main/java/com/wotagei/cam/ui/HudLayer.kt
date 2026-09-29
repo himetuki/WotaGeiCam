@@ -50,6 +50,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.wotagei.cam.R
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.Flash
@@ -82,12 +84,15 @@ import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.media.VideoThumbnail
 import com.wotagei.cam.ui.anim.LiquidMerge
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.anim.MergeDebugHook
 import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
+import com.wotagei.cam.ui.anim.chipClicksAccepted
 import com.wotagei.cam.ui.anim.chipTravelPxOf
+import com.wotagei.cam.ui.anim.dragOwnedByRecordKey
 import com.wotagei.cam.ui.anim.mergeAnchor
 import com.wotagei.cam.ui.anim.mergePlanFor
-import com.wotagei.cam.ui.anim.mergeProgressOf
+import com.wotagei.cam.ui.anim.mergeProgressWithHook
 import com.wotagei.cam.ui.anim.wotaPillHost
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaChipTier
@@ -197,6 +202,14 @@ internal val DockSlotSpace = 63.dp
  * 它同时是左槽宽度的首帧兜底——有/无素材都画在这同一枚方框里，所以素材切换不改槽宽。
  */
 internal val ThumbBoxSpace = 34.dp
+
+/**
+ * 底栏里录制键的 z 序（#73 命中权交接第二刀）。
+ *
+ * 那两颗条目不写这个值 ⇒ 它们恒为 0f，录制键压在它们上面。绘制与命中两层都由它决定，
+ * 证据与"为什么仍然不把它当唯一保证"见 [HudBottomZone] 里 RecordButton 那条注释。
+ */
+private const val RecordZIndex = 1f
 
 /**
  * 底栏底板**宽度**的首帧兜底值（真值由那颗自己在布局期回报，见 [HudBottomZone] 的 `dockW`）。
@@ -358,6 +371,10 @@ internal fun chipTierFor(zone: HudZone): WotaChipTier =
  * 条目渲染里那条"按档位选入口"的路：同一个实现、两档内剂量（[WotaChip] / [WotaDockChip]）。
  * 写成一条私有 composable 而不是在六条 when 分支里各写一遍 `if (tier == …)`，是为了让"哪些胶囊可能被收窄"
  * 这件事在本文件里只有一个落点。读数那颗（`entry.item` 那条分支）永远走全局档，见 [chipTierFor] 的注释。
+ *
+ * [onClick] 可以为 null：那是 #73 的命中权交接在起作用（吸收期那两颗**不装点击链**），
+ * 而 [WotaChip] 本来就有"`onClick == null` 就不挂 clickable"这一条，
+ * 所以断链落在它已有的结构上，不需要在外面再套一层 `pointerInput` 打补丁。
  */
 @Composable
 private fun TierChip(
@@ -365,7 +382,7 @@ private fun TierChip(
     label: String,
     selected: Boolean,
     modifier: Modifier,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)?,
     onLongClick: (() -> Unit)? = null
 ) {
     if (tier == WotaChipTier.Dock) {
@@ -374,6 +391,16 @@ private fun TierChip(
         WotaChip(label, selected, modifier, onClick, onLongClick)
     }
 }
+
+/**
+ * 「这一颗的动作要不要摘掉」（#73 命中权交接的唯一落点）。
+ *
+ * 返回 null 时 [WotaChip] 连 `clip + clickable` 那一段都不 install，点击链路在结构上断开——
+ * 刻意不用 `clickable(enabled = false)`：那种写法节点还在，只是不回调，
+ * 而本批要证的正是"越过空隙的那一指不会被这颗吃掉"，不能压在一个未证的框架行为上。
+ */
+private fun gatedClick(accepted: Boolean, onClick: () -> Unit): (() -> Unit)? =
+    if (accepted) onClick else null
 
 /**
  * 一颗可编辑控件的渲染：按条目取控件类型，按 [ctx] 取读数与动作。
@@ -391,13 +418,21 @@ private fun TierChip(
  * 读数那一半（`entry.item`）恒走全局档，因为它与 `hudPerRowFor` 的 90dp 估宽是同一笔账。
  * **没有默认值**（#69 铁律：该必传的形参给了默认值，漏挂的那处就永远吃全局档，`chipTierFor` 里改
  * 那枚竖 Dock 也测不出来）：五枚容器各自显式传 `chipTierFor(HudZone.X)`，新增调用点漏传直接编译不过。
+ *
+ * [clicksAccepted] 同理**没有默认值**（#73 命中权交接）：底栏 Dock 在吸收期传进来的是
+ * `chipClicksAccepted(progress)`，false 时这一颗的点击/长按动作经 [gatedClick] 摘成 null，
+ * [WotaChip] 连 `clip + clickable` 都不 install。其余四枚容器没有吸收态，显式传 true。
+ * ⚠ 覆盖范围只有胶囊族（TierChip 与读数那颗）：`WotaIconButton` / `BtChip` / 姿态仪那三类的
+ * `onClick` 现在不可空，底栏 Dock 里也不可能出现它们（[HudBottomZone] 只渲染缩略图 + 键 + LENS 那颗）；
+ * 谁把它们搬进底栏，就得同轮把那几处的 `onClick` 也改成可空，否则这条闸门会漏掉那颗。
  */
 @Composable
 fun HudEntryItem(
     entry: HudEntry,
     ctx: HudCtx,
     modifier: Modifier = Modifier,
-    tier: WotaChipTier
+    tier: WotaChipTier,
+    clicksAccepted: Boolean
 ) {
     // 锚点只在这一层挂，且只经 ctx.anchorOf 这一条路（调用方在里面做「同一 PillKey 两个候选写入方」的裁决）
     val anchor = ctx.anchorOf(entry)
@@ -412,9 +447,9 @@ fun HudEntryItem(
                 card = false,
                 onClick = ctx.onBtClick
             )
-            CamPill.ZOOM -> TierChip(tier, ctx.zoomLabel, false, anchor.then(modifier), ctx.onZoomClick)
-            CamPill.FOCUS -> TierChip(tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier), ctx.onFocusClick)
-            CamPill.STAB -> TierChip(tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier), ctx.onStabClick)
+            CamPill.ZOOM -> TierChip(tier, ctx.zoomLabel, false, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onZoomClick))
+            CamPill.FOCUS -> TierChip(tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onFocusClick))
+            CamPill.STAB -> TierChip(tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onStabClick))
             CamPill.REFLINE -> WotaIconButton(
                 image = Icons.Filled.GridOn,
                 description = stringResource(R.string.cam_p_refline),
@@ -423,11 +458,11 @@ fun HudEntryItem(
                 onClick = ctx.onRefLineClick
             )
             CamPill.MONITOR -> TierChip(
-                tier, ctx.monitorLabel, ctx.monitorActive, anchor.then(modifier), ctx.onMonitorClick
+                tier, ctx.monitorLabel, ctx.monitorActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onMonitorClick)
             )
             // 曲线开的是整块面板，没有就近锚点（[HudEntry.pillKey] 返回 null）；与斑马纹同级，是创作项
             CamPill.CURVE -> TierChip(
-                tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier), ctx.onCurveClick
+                tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onCurveClick)
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),
@@ -438,10 +473,11 @@ fun HudEntryItem(
             )
             CamPill.LENS -> TierChip(
                 tier, ctx.lensLabel, false,
-                // 点按循环镜头、长按开就近面板（六项第 7 条把顶栏那段并到这颗）
+                // 点按循环镜头、长按开就近面板（六项第 7 条把顶栏那段并到这颗）；
+                // 吸收期这两条动作一起摘掉（#73：底栏那两颗越靠后越压着录制键，谁都不许吃那一指）
                 modifier = anchor.then(modifier),
-                onClick = ctx.onLensCycle,
-                onLongClick = ctx.onOpenLensPanel
+                onClick = gatedClick(clicksAccepted, ctx.onLensCycle),
+                onLongClick = if (clicksAccepted) ctx.onOpenLensPanel else null
             )
             CamPill.SIZE -> TopSegment(ctx.sizeLabel, WotaColor.textHi, anchor.then(modifier), ctx.onSizeClick)
             CamPill.STORAGE -> TopSegment(
@@ -473,8 +509,8 @@ fun HudEntryItem(
             modifier = anchor,
             secondary = stringResource(item.labelRes),
             valueColor = if (manual) WotaColor.accent else null,
-            onClick = { ctx.onReadoutCycle(item) },
-            onLongClick = { ctx.onReadoutOpen(item) }
+            onClick = gatedClick(clicksAccepted) { ctx.onReadoutCycle(item) },
+            onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) }
         )
     }
 }
@@ -680,10 +716,12 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
                         Box(Modifier.width(1.dp).height(12.dp).background(WotaColor.outline))
                     }
                     // 顶栏恒走全局档（容量段那笔窄屏阈值 272/242 按它量的），但档位仍只有一处裁决点
+                    // clicksAccepted 恒 true：吸收态是底栏 Dock 独有的（#73），顶栏那颗不飞进录制键
                     HudEntryItem(
                         entry, ctx,
                         Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),
-                        chipTierFor(HudZone.TOP)
+                        chipTierFor(HudZone.TOP),
+                        clicksAccepted = true
                     )
                 }
             }
@@ -747,11 +785,13 @@ fun HudDockZone(
                     horizontalArrangement = Arrangement.spacedBy(WotaSpace.xs),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    group.forEach { HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it), tier) }
+                    group.forEach {
+                        HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it), tier, clicksAccepted = true)
+                    }
                 }
             } else {
                 val single = group.first()
-                HudEntryItem(single, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == single), tier)
+                HudEntryItem(single, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == single), tier, clicksAccepted = true)
             }
         }
     }
@@ -806,7 +846,9 @@ fun HudReadoutZone(
                     HudEntryItem(
                         it, ctx,
                         Modifier.ghostWhileDragged(ctx.hiddenEntry == it),
-                        chipTierFor(HudZone.READOUT)
+                        chipTierFor(HudZone.READOUT),
+                        // 读数块在 Dock 之外（#70 A 硬约束），永远不参与吸收，所以闸门恒开
+                        clicksAccepted = true
                     )
                 }
             }
@@ -984,7 +1026,9 @@ data class HudDockDrag(
  * ⇒ 两槽实测回报仍对称、不变量②同形成立，且 120% 那档底板自己长到 2×70.8 + 50 + 40 = 231.6dp。
  *
  * ## 第 3 条：录制态吸收与分裂，只作用这两颗（码率那颗不参与）
- * 进度 = `mergeProgressOf(plan, recording || dragging, anim)`，几何与纪律全在
+ * 进度 = `mergeProgressWithHook(plan, recording || dragging, anim, 钩子钉值)`，而那条函数只是
+ * `mergeProgressOf(plan, absorbed, anim?.value)` 的一层上游包装（#73 的取证钩子；钉值为 null 时逐字等价），
+ * 几何与纪律全在
  * [com.wotagei.cam.ui.anim.LiquidMerge]（B4 的拖拽动感复用同一套连通体几何，不写第二份腰公式）：
  * - **不动布局参数**：两颗的原位槽位宽度全程不变，动画只作用 translation / scale / alpha / path，
  *   所以底板既不重排也不跳动。就近锚点也不打架：进度 0 时那几项变换全是单位变换，
@@ -992,6 +1036,14 @@ data class HudDockDrag(
  *   （面板已开再按录制那条由 `LaunchedEffect(recording) { pop = null }` 收掉，S3-2）。
  * - **本体位移有上限，上限就是实测空隙**：`min(圆心距 × TRAVEL_FRACTION, clearance)`。那颗淡出后
  *   命中区还在（alpha = 0 仍可点），越过空隙就会把"停止录制"那一指吃掉——停止录制是最高优先级手势。
+ * - **#73 命中权交接（#71b 放开位移的硬前置，三条一起做）**：
+ *   ① 吸收期（进度 > 0）那两颗**不装点击链**——判据是纯函数 [chipClicksAccepted]，落地方式是缩略图那颗
+ *     条件拼 `Modifier.clickable`、镜头那颗经 `gatedClick` 把动作摘成 null（[WotaChip] 的 `onClick == null`
+ *     分支本来就不 install clip+clickable）。**不是** `clickable(enabled = false)`：那种写法节点还在。
+ *     闸门值走 `derivedStateOf`，所以每帧只重算谓词、只有跨过 0 那两次翻转才重组本容器。
+ *   ② 录制键 [RecordZIndex] 压在两颗之上：绘制与命中两层同时解决（证据见 RecordButton 那处注释）。
+ *   ③ 底板那枚长按换栏探测器落在键上时**不接管**（[dragOwnedByRecordKey]），这一指整个留给键。
+ *     位移算式与 clearance 夹子本批**一行没动**，放开到全程 68.5dp 是 #71b 的事。
  * - **可打断**：进度由 [animateFloatAsState] 驱动，中途反向时从**当前值**继续，不跳回起点。
  * - **PLAIN 档直接切换**：[mergePlanFor] 给 PLAIN 返回 `animated=false`，调用点**不创建**动画状态
  *   （S3-1），进度走 [mergeProgressOf] 只认开关态 0/1、位移走 [chipTravelPxOf] 恒 0、绘制层第一条就
@@ -1025,8 +1077,17 @@ fun HudBottomZone(
     val absorbed = ctx.recording || drag?.dragging == true
     // PLAIN 档**不创建**动画状态（S3-1）：anim 为 null，连 120ms 的 tween 都不跑
     val anim = if (plan.animated) animateFloatAsState(if (absorbed) 1f else 0f, motion.float) else null
-    // 进度只经 mergeProgressOf 这一条桥取（S4-1 要测的就是它）
-    val progress: () -> Float = { mergeProgressOf(plan, absorbed, anim?.value) }
+    // 进度只经 mergeProgressOf 这一条桥取（S4-1 要测的就是它）；#73 的取证钩子只是这条桥**上游**的
+    // 一个可选覆盖（pinned 非 null 才顶掉动画值，null 时逐字退回原来的表达式），PLAIN 不吃钩子值
+    // 由那条桥自己的 `plan.animated` 分支保证，这里不重复判断。
+    val progress: () -> Float = { mergeProgressWithHook(plan, absorbed, anim?.value, MergeDebugHook.pinnedProgress) }
+    // #73 第 2 件：吸收期那两颗**不装点击链**。这里读 progress 用的是 derivedStateOf，
+    // 所以每帧只重算谓词、不重组——只有"跨过 0"那两次翻转才让本 composable 重组一次。
+    // 不能直接 `progress() <= 0f` 写在组合期：那会让整个底栏每帧重组（08:79 帧率红线，
+    // 也是本文件"进度只在 draw / graphicsLayer 阶段读"那条纪律的由来）。
+    val clicksAccepted by remember(plan, absorbed, anim) {
+        derivedStateOf { chipClicksAccepted(progress()) }
+    }
     // 位移上限：那颗的近缘与录制键触摸盒之间的实测空隙。绘制期算，零分配
     val thumbClearance = {
         LiquidMerge.clearancePx(
@@ -1075,9 +1136,16 @@ fun HudBottomZone(
                 // 而回调全走 rememberUpdatedState，不需要跟着 drag 换实例重启探测器
                 if (drag == null) Modifier else Modifier.pointerInput(Unit) {
                     detectDragGesturesAfterLongPress(
-                        onDragStart = {
-                            if (allowStart.value?.invoke() == true) dragActive[0] = true
-                            else blocked.value?.invoke()
+                        onDragStart = { pos ->
+                            // #73 第 3 条：底板那枚长按探测器挂在**父节点**上，zIndex 管不到父子之间，
+                            // 所以手指落在录制键实测矩形里时底板**不接管**这一指（不置 dragActive、
+                            // 也不给锁提示），让键自己收尾。顺带修掉今天"按住键不动 → 松手既换栏又切录制"
+                            // 那一下双动作：那条路以前会进拖拽，现在根本不进。
+                            // 判据是纯函数 dragOwnedByRecordKey（量不到键的矩形时返回 false，退回旧行为）。
+                            if (!dragOwnedByRecordKey(scene, pos.x, pos.y)) {
+                                if (allowStart.value?.invoke() == true) dragActive[0] = true
+                                else blocked.value?.invoke()
+                            }
                         },
                         onDrag = { change, amount ->
                             if (dragActive[0]) {
@@ -1130,7 +1198,10 @@ fun HudBottomZone(
                     }
                     .size(ThumbBoxSpace)
                     .clip(WotaShape.small)
-                    .clickable(onClick = ctx.onThumbClick),
+                    // #73 命中权交接：吸收期（进度 > 0）这一颗**不装点击链**，
+                    // 而不是 `clickable(enabled = false)`——后者节点还在，能不能让开那一指未证。
+                    // clip 与位移照旧（那是观感，与命中无关），所以断链只断点击这一件事。
+                    .then(if (clicksAccepted) Modifier.clickable(onClick = ctx.onThumbClick) else Modifier),
                 contentAlignment = Alignment.Center
             ) {
                 val uri = ctx.lastUri
@@ -1149,7 +1220,15 @@ fun HudBottomZone(
         RecordButton(
             recording = ctx.recording,
             busy = ctx.busy,
-            modifier = Modifier.align(Alignment.Center).mergeAnchor(scene, MergeScene.RECORD),
+            // #73 第 2 条：录制键在**绘制顺序**与**命中顺序**两层都要压在那两颗之上。
+            // 证据（本机 compose-ui 1.5.4 的字节码，不是记忆）：`InnerNodeCoordinator.hitTestChild`
+            // 遍历的是 `LayoutNode.getZSortedChildren()`，而且**从末尾往前**遍历；`performDraw`
+            // 同一个表正向遍历。ZComparator 的比较键是 (zIndex, placeOrder)。
+            // ⇒ 同层兄弟之间 zIndex **确实**同时决定绘制与命中（zIndex 高者先命中、后绘制＝画在上面）。
+            // 但本批不把"吸收期那两根不吃这一指"押在这条上：那两条链是被 chipClicksAccepted
+            // 结构性摘掉的（键在 p=1 时可点由那条 + 这条 zIndex 双保险成立），而父节点那枚长按探测器
+            // 是 zIndex 管不到的另一层，见上面 dragOwnedByRecordKey 那一处。
+            modifier = Modifier.align(Alignment.Center).zIndex(RecordZIndex).mergeAnchor(scene, MergeScene.RECORD),
             onClick = ctx.onRecordClick
         )
         Box(
@@ -1166,6 +1245,11 @@ fun HudBottomZone(
                     // 底栏这颗**必须**留全局档：它的宽就是 `DockSlotSpace = 63dp` 那笔槽宽账的来源，
                     // 而槽宽是底板宽的输入、#71 收拢算式 w(0) 的起点（裁决仍只经 [chipTierFor] 一处）
                     tier = chipTierFor(HudZone.BOTTOM),
+                    // #73：这颗与缩略图那颗同一条闸门（进度 > 0 就不装点击链）。
+                    // 断链点在 HudEntryItem → gatedClick → WotaChip(onClick = null)，
+                    // 不在这里另套一层 pointerInput：clickable/combinedClickable 是 WotaChip 内部的
+                    // 条件修饰符，从它自己那条分支摘掉才是结构性断开
+                    clicksAccepted = clicksAccepted,
                     // 锚点 + 实测宽 + 融合位移三件事都挂在这颗的同一个节点上
                     modifier = Modifier
                         .ghostWhileDragged(ctx.hiddenEntry == lensEntry)

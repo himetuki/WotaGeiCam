@@ -44,6 +44,8 @@ import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
+import com.wotagei.cam.ui.anim.EXTRA_MERGE_HOOK
+import com.wotagei.cam.ui.anim.MergeDebugHook
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.anim.WotaMotionProvider
 import com.wotagei.cam.ui.theme.TextScaleLayer
@@ -66,6 +68,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        applyMergeHook(intent)
         setContent {
             WotaTheme {
                 val prefs = remember { WotaSettings.of(this) }
@@ -74,6 +77,28 @@ class MainActivity : ComponentActivity() {
                 WotaMotionProvider(mode = motion) { WotaRoot() }
             }
         }
+    }
+
+    /**
+     * `launchMode="singleTask"`：应用已在前台时，第二次 `am start` 只送新 intent、不重建 Activity。
+     * 换档（p=0.25 → 0.5）靠的就是这一条，所以这里必须收下新 intent，否则只有冷启动那一次生效。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyMergeHook(intent)
+    }
+
+    /**
+     * #73 取证钩子**唯一**的写入入口：adb 的 intent extra（[EXTRA_MERGE_HOOK]）。
+     *
+     * 没有第二个写入方——设置页没有这一行、没有可误触的手势、不写 prefs。
+     * extra 缺失（从桌面图标或最近任务重进）就是关闭态，所以"进程重启即失效"之外还多一条
+     * "重新进一次就失效"，取证跑完不需要手动清。正式的 release/debug 变体里 [MergeDebugHook.applySpec]
+     * 只能得到关闭态（闸门在 `mergeHookArgsOf`），这条调用点也就是零成本。
+     */
+    private fun applyMergeHook(intent: Intent?) {
+        MergeDebugHook.applySpec(intent?.getStringExtra(EXTRA_MERGE_HOOK))
     }
 }
 

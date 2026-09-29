@@ -17,4 +17,9 @@
     <string name="perm_denied_settings">权限被拒绝，请到系统设置中开启</string>
     <string name="perm_open_settings">去设置</string>
     <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>
+
+    <!-- #73 取证钩子生效时的顶栏标识：只有 debugHook 变体（BuildConfig.MERGE_HOOK=true）且 adb 带了
+         wota_merge_hook 那枚 extra 才可能显示，release/debug 两个变体进不到这一支，用户看不到这两句 -->
+    <string name="merge_hook_pinned">调试钉住 p=%1$.2f · 时长 ×%2$.0f</string>
+    <string name="merge_hook_scale">调试倍率 ×%1$.0f（未钉进度）</string>
 </resources>

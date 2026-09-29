@@ -92,6 +92,59 @@ fun waistVisibleFor(plan: MergePlan, progress: Float): Boolean =
 fun linkAlphaFor(plan: MergePlan, progress: Float): Float =
     if (waistVisibleFor(plan, progress)) LiquidMerge.linkAlpha(progress) else 0f
 
+/**
+ * 「取证钩子 → 进度」：钩子只是 [mergeProgressOf] 这条桥**上游**的一个可选覆盖（#73 第 1 件）。
+ *
+ * 写成一条独立纯函数而不是在调用点散写 `pinned ?: anim?.value`，有两个原因：
+ * 1. 调用点仍然只经 [mergeProgressOf] 这一条桥取进度，**默认路径逐字不变**（[pinned] = null 时结果
+ *    与 `mergeProgressOf(plan, recording, animatedValue)` 完全相等，用例钉的就是这条）；
+ * 2. 「钩子不许漏进 PLAIN 档」由 [mergeProgressOf] 自己的 `plan.animated` 分支保证，
+ *    这里**不重复判断**——重复判断就会变成第二处真源，而 PLAIN 没有中间态那条不变量（S3-1）
+ *    只在一条桥上成立过。
+ */
+fun mergeProgressWithHook(
+    plan: MergePlan,
+    recording: Boolean,
+    animatedValue: Float?,
+    pinned: Float?
+): Float = mergeProgressOf(plan, recording, pinned ?: animatedValue)
+
+/**
+ * 「进度 → 这一颗还收不收点击」（#73 第 2 件：吸收期的命中权交接）。
+ *
+ * 判据取 **进度 > 0 就断**，不取"淡到看不见了才断"（`chipAlpha` 到 0 要 p ≥ 0.9），理由是：
+ * - 入向（开始录制）：一有位移就不许这点那颗，#71b 把位移放开到全程 68.5dp 之后，
+ *   半融那几帧两颗正压在录制键的命中区上，而"停止录制"是最高优先级手势；
+ * - 出向（停止录制 → 分裂）：两颗从键心往外飞，头几百毫秒仍与键重叠，
+ *   这时若按"目标态"放行点击，用户在键上那一下就会被**刚飞出去的那颗**吃掉（点第二次录制点不动）；
+ * - PLAIN 档进度只有 0/1，于是这一条等价于"录制中不可点"，没有中间态可漏。
+ *
+ * ⚠ 返回值只用来决定**装不装那枚点击修饰符**（结构性断链），不是 `clickable(enabled = false)`：
+ * 后者仍会在节点链上留一个 pointer-input 节点，命中顺序上到底吃不吃这一指取决于实现细节，
+ * 而"不吃录制键那一指"是本批要的证据，不能压在一个未证的行为上。
+ */
+fun chipClicksAccepted(progress: Float): Boolean = progress <= 0f
+
+/**
+ * 「底板上的长按落点 → 这一指是不是归录制键」（#73 第 2 件第 3 条）。
+ *
+ * 底板那枚 `detectDragGesturesAfterLongPress` 挂在**父节点**上，`zIndex` 管不到父子之间：
+ * 手指按在录制键上超过长按阈值时，父节点那个探测器会开始跟手，把键上那一指变成"整枚 Dock 换栏"。
+ * 所以进入拖拽之前先问这一条：落点在录制键实测矩形内 → 底板**不接管**，那一指留给键。
+ *
+ * 坐标：入参是相对底板（绘制层宿主）左上角的本地坐标，[MergeScene] 存的是窗口坐标，
+ * 两者同帧由布局期回报（[mergeAnchor]），所以减一下就对齐了（与 `cx/cy` 同一套换算）。
+ * 录制键还没测到（面积 0，只有首帧那一次）时返回 false：退回今天的行为，宁可这次长按能换栏，
+ * 也不要在没量到的时候凭空拒绝手势。
+ */
+fun dragOwnedByRecordKey(scene: MergeScene, localX: Float, localY: Float): Boolean {
+    if (scene.area(MergeScene.RECORD) <= 0f) return false
+    val left = scene.recordLeft - scene.canvasLeft
+    val top = scene.recordTop - scene.canvasTop
+    return localX >= left && localX <= left + scene.recordWidth &&
+        localY >= top && localY <= top + scene.recordHeight
+}
+
 /** 连通体的形状参数：都是"算法自己的常数"，既不是机型数值也不是观感令牌 */
 object LiquidMerge {
 
