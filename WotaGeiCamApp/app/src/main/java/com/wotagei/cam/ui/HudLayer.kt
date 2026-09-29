@@ -751,8 +751,9 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
  * · 两枚竖 Dock = [WotaSpace.xs]（改前是 `Column`/`Row` 的 `spacedBy(WotaSpace.xs)`）；
  * · 读数块 = [HudRowGapDp]（改前是 `spacedBy(HudRowGapDp.dp)`，与 `hudStripHeightDp` 的行距同一真源）。
  *
- * **渲染层与编辑页都只读这一条**：格子边长 = 最宽/最高那颗 + 这个行距（[gridPitchPx]），
- * 两处各写一份的话编辑页的吸附就会与画出来的位置错开半格（S3-5 那一族"两边判的不是同一条不等式"）。
+ * **渲染层与编辑页都只读这一条**：格子边长 = 最宽那枚格子（同组多颗时含格内那道行距，见
+ * [cellContentWidthPx]）+ 这个行距（[gridPitchPx]），两处各写一份的话编辑页的吸附就会与画出来的位置
+ * 错开半格（S3-5 那一族"两边判的不是同一条不等式"）。格内那几颗之间的间距用的也是这一档，没新造数。
  */
 internal fun hudGridGap(zone: HudZone): Dp =
     if (zone == HudZone.READOUT) HudRowGapDp.dp else WotaSpace.xs
@@ -761,9 +762,14 @@ internal fun hudGridGap(zone: HudZone): Dp =
  * 一枚容器里的**固定格网**（任务 #74 的渲染落点）。
  *
  * 为什么必须自己写 `Layout` 而不是 `Column`/`Row` + `spacedBy`：后者把"第几颗"当成位置来源，
- * 抽走或插入一颗就整体重排——那是本次要拆的耦合。`Layout` 里格长取**实测**的最宽/最高颗
- * （[gridPitchPx]），落点只由 `col/row` 决定（[cellPlaceOffsetPx]），所以：
+ * 抽走或插入一颗就整体重排——那是本次要拆的耦合。格长、格网尺寸、每颗的落点**全部**由纯函数
+ * [gridPlacementOf] 算（格长取最宽那枚**格子**的内容宽 + 行距，见 [cellContentWidthPx]），
+ * 本层只剩"量尺寸 + `placeRelative`"两条调用，所以：
  * - 移动任意一颗都不改变其他任何一颗的屏幕坐标（空格子就空着）；
+ * - **一枚格子里可以横向住同组的多颗**（#74 后果修复：右 Dock 那对 S2-2B 并排 = 一格两颗，
+ *   不再是一行两列）。格长因此由"最宽那枚格子"而不是"最宽那颗"撑出来，右 Dock 才回到单列、
+ *   底板才回到 ≈94dp（这笔账逐颗列在 [HudDockZone] 的 KDoc 里）；格内左右次序 = [HudGridItem] 清单序，
+ *   与编辑页的命中裁决 [entryHitIndex] 读的是同一个序；
  * - 字体拉到 120% 时格长自己变大（颗的实测尺寸涨了），不需要任何按 100% 量出来的固定值，
  *   §58/§73 那族"固定档位在 120% 裁字"在这里没有落点；
  * - 只有一列 / 只有一行时总宽总高与改前 `spacedBy` 的紧凑排布**逐像素相等**（见 [gridSizePx] 那笔减法）。
@@ -788,20 +794,12 @@ private fun HudEntryGrid(
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
         val placeables = measurables.map { it.measure(loose) }
         val gapPx = HudSizePx(gap.roundToPx(), gap.roundToPx())
-        val pitch = gridPitchPx(
-            maxChildWidthPx = placeables.maxOfOrNull { it.width } ?: 0,
-            maxChildHeightPx = placeables.maxOfOrNull { it.height } ?: 0,
-            gapXPx = gapPx.width,
-            gapYPx = gapPx.height
-        )
-        val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
-        val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
-        val size = gridSizePx(cols, rows, pitch, gapPx)
-        layout(size.width, size.height) {
+        // 整条算式（逐格住户 → 格长 → 各颗落点）都在纯函数 [gridPlacementOf] 里，有手算期望值的 JVM 用例；
+        // 这里只剩"把量到的尺寸喂进去、再把坐标 placeRelative 出来"，没有分支、没有第二份账
+        val placed = gridPlacementOf(items, placeables.map { HudSizePx(it.width, it.height) }, gapPx)
+        layout(placed.size.width, placed.size.height) {
             placeables.forEachIndexed { i, placeable ->
-                val at = cellPlaceOffsetPx(
-                    items[i].cell, pitch, HudSizePx(placeable.width, placeable.height)
-                )
+                val at = placed.offsets[i]
                 placeable.placeRelative(at.x, at.y)
             }
         }
@@ -811,9 +809,11 @@ private fun HudEntryGrid(
 /**
  * 竖 Dock 的一枚（[HudZone.LEFT] / [HudZone.RIGHT]）：一枚圆角底板 + 内部按**固定格子**摆条目。
  *
- * 宽度不写死：底板宽 = 格网宽 = `列数 × (最宽那颗 + 行距) − 行距`，所以字体 120% 时自动加宽，
- * §58/§73 那族「按 100% 字体量出来的固定宽在 120% 下裁字」在这里不复发。
+ * 宽度不写死：底板宽 = 格网宽 = `列数 × (最宽那枚格子 + 行距) − 行距`（[gridPitchPx] + [gridSizePx]），
+ * 所以字体 120% 时自动加宽，§58/§73 那族「按 100% 字体量出来的固定宽在 120% 下裁字」在这里不复发。
  * 条目位置来自 [HudGridItem.cell]，**与 [HudGridItem] 的先后无关**（#74：拖走一颗不动另一颗）。
+ * 唯一读"清单先后"的地方是**同一枚格子内部**那几颗的左右序（#74 后果修复后新增的那一档，
+ * 见 [gridPlacementOf] 第 ① 条），格与格之间仍然只看 `col/row`。
  *
  * **胶囊在本容器内走 [WotaChipTier.Dock] 紧凑档**（#70 B，档位裁决只有一处：[chipTierFor]）。
  * 收窄前后的账（汉字按 1 em、拉丁按 0.6 em 估，与 `hudPerRowFor` 同一套估算口径）：
@@ -826,21 +826,27 @@ private fun HudEntryGrid(
  *      39 + 16 = 55 → 底板 **63dp**，改名才真生效（76 → 63）。
  * · 右 Dock 静置时最宽那颗是「1.0x」（31dp 文字，被 3 汉字下限撑到 39）→ 71dp 底板；
  *   紧凑档 47.2 → 底板 **55dp**（−16dp）。
- * · ⚠ **录制中右 Dock 回到 ≈94dp，且这一档不是胶囊给的**：S2-2 B 那条「姿态仪 + 音量表并成一行两列」
- *   的并排规则让那一行 = 姿态仪 54（46dp 天地线 + 4+4 内边距）+ 间距 4 + 音量表 28（16dp LED + 6+6）
- *   = 86dp，底板再包 8 = **94dp**——r11 量到的 94 就是这个数。格网把这一档原样搬了过来
- *   （LEVEL 在第 0 列、VOLUME 在第 1 列，见 [defaultCellsOf] 读的 [hudRowGroups]），要再窄只能动那条
- *   并排规则或动这两颗自绘件，两者都不在 #70 B 的授权范围内，已单列进交付报告的未决项。
+ * · ⚠ **录制中右 Dock ≈94dp，这一档由"配对格"撑出来**（#70 B 那批把它列为未决项，#74 后果修复已闭合）：
+ *   S2-2 B 那条「姿态仪 + 音量表并排」现在是**同一枚格子里的两个条目**（不再是一行两列，见
+ *   [defaultCellsOf] 的三条收益），所以那一格的内容宽 = 姿态仪 54（46dp 天地线 + 左右内边距 4+4）
+ *   + 行距 [WotaSpace.xs] 4 + 音量表 28（16dp LED + 左右内边距 6+6）= **86dp**；
+ *   右 Dock 是**单列**网格 ⇒ 格网宽 = 1 × (86 + 4) − 4 = 86，底板再包 `padding(WotaSpace.xs)` 左右各 4 = **94dp**
+ *   ——与 r11 真机量到的 94 对上（这笔是**手算**，本轮手机锁屏未实测，见 docs/plan/13 §15.7）。
+ *   窄的那些行（变焦/对焦/防抖 47dp、蓝牙那颗）居中在 86dp 宽里，与改前 `Column` 的行为一致。
+ *   历史：#74 第一版把 pitch 定成"最宽那**颗**"，那对并排于是占两列、第二列也按 54dp 算
+ *   ⇒ 底板 120dp，把用户要的"更窄"做反了 26dp。要再窄只能动这两颗自绘件本身的尺寸（下一轮的事）。
  *
  * 底板只在至少有一颗要画时才组合，否则全关掉后会留一枚空壳。
  * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：`percent = 50` 的半径取短边一半，
  * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
  * 姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  *
- * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里，但**降级成只管默认格子**：
- * 姿态仪与音量表在顺序里相邻时推导成同一行的两列，省下的 ≈75dp 正好把变焦/对焦从折叠线下捞回来；
+ * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里，但**降级成只管默认格子的分组**：
+ * 姿态仪与音量表在顺序里相邻时**共用同一枚格子**（格内横着排两颗，#74 后果修复；改前是"推导成同一行的
+ * 两列"，那正是把底板撑到 120dp 的那一步），省下的 ≈75dp 仍然够把变焦/对焦从折叠线下捞回来。
  * 用户把任何一颗摆过一次之后那一枚容器就整体钉住（[HudLayoutTable.pinned]），并排规则不再重排别人的位置——
- * 这是「条目可重排」与「横屏 360dp 带高不够」唯一能同时成立的写法。
+ * 这是「条目可重排」与「横屏 360dp 带高不够」唯一能同时成立的写法。钉过之后配对还可以被用户拆开、
+ * 也可以合回去（同组两颗共用一格不算撞格，判据在 [blockingCells]），这条比"两列各自固定"更自由。
  * 内容超出带高时靠 [verticalScroll] 取用，顶部对齐保证高频项先露脸（内容超出时居中排布
  * 会把上下两头都顶出去，没有意义）。
  */

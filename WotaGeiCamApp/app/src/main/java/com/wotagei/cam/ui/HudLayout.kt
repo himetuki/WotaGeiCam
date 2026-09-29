@@ -15,6 +15,11 @@ import kotlin.math.roundToInt
  *   （[HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT]，为什么另两枚不走见 [HudZone.isGrid]），
  *   空格子就空着 ⇒ 拖动任意一颗都**不改变其他任何一颗的位置**。
  *
+ * 格子是**位置单位**而不是"条目单位"：一枚格子可以住同属一个默认行组的多颗（今天只有右 Dock 那对
+ * S2-2B 并排「姿态仪 + 音量表」），跨组共格一律算坏数据。这一条是 #74 的后果修复——上一批把
+ * "均匀 pitch" 的 pitch 定成"最宽那颗"，于是那对并排的第二列也按姿态仪 54dp 撑，右 Dock 底板从
+ * ≈94dp 涨到 ≈120dp，与用户这轮" Dock 还是太宽"的诉求正好相反（算式与三条收益见 [defaultCellsOf]）。
+ *
  * 这一条改掉的正是"有序列表"模型的固有耦合：条目位置若由「顺序 × `Arrangement.spacedBy` 紧凑排布」**推导**
  * 出来，把一个条目拖到别处，同容器里它后面的全部条目都会跟着重排——数据模型里根本没有"这一颗在第几格"
  * 这件事，所以那不是 bug，是模型。[order] 仍然留着，但**降级成只参与默认格子的推导**（以及同一格子里的
@@ -170,6 +175,13 @@ data class ZonePlacement(val xDp: Int, val yDp: Int) {
  * [DEFAULT] 是哨兵，语义＝"**这颗从没被摆过** ⇒ 回落到由 [hudRowGroups] 推导出的那一格"。
  * 手法与 [ZonePlacement.DEFAULT] 同源：默认值不写死一串坐标，而是每次现推，
  * 于是"默认表"与"B1–B3 定稿的排布"永远是同一个函数的输出，不会分叉。
+ *
+ * ## 一枚格子可以住**同组的多颗**（#74 后果修复，见 [defaultCellsOf] 的三条收益）
+ * 格子是"位置单位"而不是"条目单位"：[HudZone.RIGHT] 那对 S2-2B 并排（姿态仪 + 音量表）
+ * 由 [hudRowGroups] 判成一个行组，行组 = **一枚格子**，两颗共用同一个 (col, row)。
+ * 于是右 Dock 是**单列**网格、列宽由那枚配对格撑出来（86dp），底板回到 r11 实测的 ≈94dp。
+ * 共格只允许发生在**同一枚默认组**内部（判据仍是 [defaultCellsOf] 的输出，没有第二份配对尺子）；
+ * 跨组撞进同一格一律算坏数据，由 [resolveCells] 就近拆开。
  */
 data class GridCell(val col: Int, val row: Int) {
 
@@ -245,9 +257,12 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     /**
      * 这一枚容器**这一帧真正渲染**的格子清单（顺序＝[visibleOrderOf] 的顺序）。
      *
-     * 两趟解析，规则只有一条：**任何一格不许有两条条目**（否则"移动一颗"又会通过重叠影响另一颗）：
+     * 两趟解析，规则只有一条：**一枚格子只许住"同一个默认组"的颗**（今天只有 S2-2B 那对
+     * 「姿态仪 + 音量表」，见 [cellGroupMatesOf]）——跨组撞进同一格就是又造出"移动一颗会压到另一颗"，
+     * 由 [resolveCells] 把后到的那颗就近挪到空格：
      * 1. 摆过的条目先占自己的显式格子；
-     * 2. 没摆过的条目按 [defaultCellsOf]（对**可见**顺序分行）取推导格，被占了就在容器内就近让到空格。
+     * 2. 没摆过的条目按 [defaultCellsOf]（对**可见**顺序分行）取推导格，**同组的颗整组一起落位**，
+     *    被占了就在容器内就近让到空格。
      * 默认表里没有任何显式格子 ⇒ 第 2 趟直接命中推导格 ⇒ 与今天的排布逐格相同（这是"默认表结构性等于
      * 今天"这条硬要求的落点，也是 v1 存量串免费迁移的原因）。
      */
@@ -263,18 +278,33 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     }
 
     /**
-     * 该容器**当前被占住**的格子（可见条目按 [gridItems] 解析结果，隐藏条目按表里的显式格子）。
+     * 该容器**当前挡得住一颗**的格子（可见条目按 [gridItems] 解析结果，隐藏条目按表里的显式格子）。
      *
      * 隐藏条目也算占用：它只是这帧不画，格子还是它的位置（"隐藏再显示不回默认位置"那套语义）。
      * 不把它算进来的话，用户往那颗的格子上放别的一条，它再显示时就会与别人挤在同一格。
+     *
+     * ## "被占了"的口径（#74 后果修复：一格多颗之后不再是"格子里有人就叫占"）
+     * 一格只剩**与被拖那颗不同组**的住户时才算挡路。同组的颗（那对并排）不算 ⇒
+     * 把姿态仪拖回音量表所在的那一格是**重新并排**，不是撞车；不这样判的话配对一旦被拆开就再也合不回去
+     * （[placeEntryAt] 第一步就把两颗都钉成显式格，那一格永远"有人"，就近让位会把这颗甩到第 1 列，
+     * 白白多撑一列宽）。跨组那颗照样挡路——用户拖不出"两颗叠在一格"这种形态。
      */
     fun occupiedCells(zone: HudZone, plan: HudGridPlan, exclude: HudEntry? = null): Set<GridCell> {
         if (!zone.isGrid) return emptySet()
         val visible = plan.visible
-        val out = HashSet<GridCell>()
-        gridItems(zone, plan).forEach { if (it.entry != exclude) out += it.cell }
-        placedCellsOf(zone).forEach { (e, c) -> if (e !in visible && e != exclude) out += c }
-        return out
+        // 逐格累计住户：可见的那份来自渲染解析结果，隐藏的那份来自表里的显式格
+        val residents = LinkedHashMap<GridCell, MutableList<HudEntry>>()
+        gridItems(zone, plan).forEach { residents.getOrPut(it.cell) { mutableListOf() } += it.entry }
+        placedCellsOf(zone).forEach { (entry, cell) ->
+            if (entry !in visible) residents.getOrPut(cell) { mutableListOf() } += entry
+        }
+        return blockingCells(
+            residents,
+            self = exclude,
+            mates = if (exclude == null) emptySet() else cellGroupMatesOf(
+                defaultCellsOf(zone, visibleOrderOf(zone, visible), plan.perRowOf(zone)), exclude
+            )
+        )
     }
 
     /**
@@ -283,6 +313,9 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 这是"移动一颗不动另一颗"的实现核心：[order] 一旦被增删，还挂着哨兵的条目会按**新的**可见顺序
      * 重新推导 ⇒ 集体错位。所以任何改动 [order] 的操作之前，先把受牵连的那两枚容器（来源与目标）
      * 的当前格子原样钉住；钉过之后 [order] 就再也决定不了任何一颗的实际位置。
+     *
+     * 钉的是**格子**不是"每颗各一格"：配对那两颗钉完仍然共用同一枚格子（[gridItems] 解析出的就是同一格），
+     * 所以这一步不会把 S2-2B 的并排拆开，也不会因为拆开而多撑出一列宽。
      */
     fun pinned(plan: HudGridPlan, vararg zones: HudZone): HudLayoutTable {
         var table = this
@@ -311,7 +344,9 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 2. 再改顺序：从**所有**容器摘掉它，插进目标第 [index] 格（越界夹到 `[0, size]`）；
      *    先摘后插保证「一颗控件同时只属于一枚容器」；
      * 3. 格子落位：目标不是网格容器 ⇒ 抹成哨兵（不留脏数据）；是网格 ⇒ 先钳进容器硬上限，
-     *    再在"被别人占住的格子"之外就近找空格（[occupiedCells] 已排除它自己那一格）；
+     *    再在"挡得住它的格子"之外就近找空格（[occupiedCells] 已排除它自己那一格与它的同组搭档）。
+     *    ⚠ 钳制与让位吃的都是**格子**这一层，不是条目那一层：同组两颗共用一格 ⇒ 越界钳回来仍是同一格，
+     *    不会出现"配对格被钳进两格"这种顺手把配对拆开、连带撑出一列的写法（[clampCellToBox] 是格→格的函数）。
      * 4. 其余三枚容器一行不碰 ⇒ 它们的顺序没变，哨兵条目继续推导出同一个格子。
      */
     fun placeEntryAt(
@@ -427,6 +462,8 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 分号分「版本段 / 五个容器段」，逗号分「x / y / id 串」；位置段的哨兵 `-1` = 该容器仍在默认位置。
      * **v2 多的就是条目后缀**：`P8:0.2` = 摆到第 0 列第 2 行，光一串 `P8` = 没摆过（用推导格）。
      * 后缀只在 [HudZone.isGrid] 的容器上写，非网格容器（顶栏/底栏）写了也没人读，不留脏数据。
+     * **一格多颗不需要第二种写法**：`tok:col.row` 是逐颗写的，配对那两颗同格就是两个相同的后缀
+     * （右 Dock 默认钉过之后是 `P0:0.0,P1:0.0`），schema 版本、键名、段结构一个都不动。
      * 与 [CurveStack] 一样是一条紧凑字符串，同一个 prefs 文件、同样的 `putString + runCatching` 风格。
      */
     fun encode(): String = buildString {
@@ -616,10 +653,13 @@ fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: Hu
 private val GridRowHardCap: Int get() = HudEntry.ALL.size
 
 /**
- * 网格列数硬上限（逐枚容器，都从既有真源推出来，不是新造的观感值）：
- * - [HudZone.READOUT] → 3：`hudPerRowFor` 的最高档就是一行三颗，编辑页也摆不出第四列；
- * - 两枚竖 Dock → 2：`hudRowGroups` 的 [HudZone.RIGHT] 分支最多一行两颗（S2-2 B 那条姿态仪 + 音量表
- *   并排），[HudZone.LEFT] 更是一行一颗；
+ * 网格列数硬上限（逐枚容器）：
+ * - [HudZone.READOUT] → 3：`hudPerRowFor` 的最高档就是一行三颗，编辑页也摆不出第四列（这条从既有真源读出）；
+ * - 两枚竖 Dock → 2：**#74 后果修复之后这一档不再是"并排占两列"**（配对那两颗现在共用一格，默认是单列），
+ *   它是**存储层**的上限：第 2 列只由用户主动摆出来、或 [freeCellNear] 就近让位时使用，
+ *   手改 prefs 造出的第 3 列一律在 [clampStoredCell] 钳回。真要把宽度封死靠的是运行时的
+ *   [clampZoneX] 与带高那条 `heightIn(max =)`，不是这一档；上一版把"2"论证成"`hudRowGroups`
+ *   右 Dock 分支最多一行两颗"，那条判据随配对同格一起作废了，照实改掉，不许留一句假论证。
  * - 非网格容器 → 1（格子对它不生效，这里只给个不为 0 的数免得钳制算式里出现除零）。
  */
 fun gridColsCapOf(zone: HudZone): Int = when {
@@ -662,7 +702,13 @@ fun gridBoxOf(zone: HudZone, pitchXDp: Int, pitchYDp: Int, bandHeightDp: Int, ro
     return GridBox(cols.coerceAtLeast(1), rows.coerceAtLeast(1))
 }
 
-/** 把格子钳进可放带（负数与越界都收回来；[GridCell.DEFAULT] 原样放行） */
+/**
+ * 把格子钳进可放带（负数与越界都收回来；[GridCell.DEFAULT] 原样放行）
+ *
+ * ⚠ 它是**格 → 格**的函数，不吃条目，所以"配对格 86dp 宽 + 容器可用宽不够"这一档不可能把同组两颗
+ * 钳进两个不同格子（那等于顺手拆开配对、再牵连别颗）：两颗拿到的是同一个入参、同一个出参。
+ * 唯一会把它们拆开的是用户**自己**把其中一颗摆到别处（[HudLayoutTable.placeEntryAt] 那条路）。
+ */
 fun clampCellToBox(cell: GridCell, box: GridBox): GridCell =
     if (cell.isDefault) cell else GridCell(
         cell.col.coerceIn(0, box.cols - 1),
@@ -697,16 +743,25 @@ fun freeCellNear(wanted: GridCell, occupied: Set<GridCell>, cols: Int, rows: Int
     return GridCell(c, r)
 }
 
-/** 一条条目在这一格（渲染层拿到的就是这一对，不再有第二份算式） */
+/**
+ * 一条条目在这一格（渲染层拿到的就是这一对，不再有第二份算式）。
+ *
+ * **同一个格子可以出现多条**（同组那颗共用一格，见 [GridCell] 的"一格可住同组多颗"），它们在格内的
+ * 左右次序 = 本清单里的先后 = [HudLayoutTable.visibleOrderOf] 的次序——渲染层（`HudEntryGrid`）与
+ * 编辑页的命中裁决（[entryHitIndex]）都只读这一处，不许再排第二次序。
+ */
 data class HudGridItem(val entry: HudEntry, val cell: GridCell)
 
 /**
  * 解析一帧的格子清单：摆过的先占位，没摆过的用 [defaultCellsOf] 推，撞了就就近让位。
  *
  * 两趟（先全部显式、再全部推导）而不是逐颗按顺序处理：否则"谁先占位"取决于 [order] 的先后，
- * 而 [order] 正是本次要降级的那个东西。返回值保证**逐格唯一**（[HudLayoutGridTest] 直接打这一条），
- * 所以搜索盒必须用**整容器**的 `[0, cols) × [0, rows)`，不能拿"推导格自身那一小片"当盒——
- * 一片被占满时按小盒搜会搜不到空格而把两颗摞在同一格，那正是本次要修的老行为。
+ * 而 [order] 正是本次要降级的那个东西。落点规则是 [blockingCells] 那一条（**同组的颗可以共用一格**，
+ * 跨组才算撞车），所以搜索盒必须用**整容器**的 `[0, cols) × [0, rows)`，不能拿"推导格自身那一小片"当盒——
+ * 一片被占满时按小盒搜会搜不到空格而把两颗硬摞在同一格，那正是 #74 要修的老行为。
+ *
+ * 同组两颗不必在这里"成组处理"：第 2 趟逐颗走就行——先落的那颗占了推导格，后落的那颗发现
+ * "那一格里只有我的搭档"（[cellGroupMatesOf]），于是不算挡路、原地落进同一格。格内的先后 = [order] 的先后。
  */
 internal fun resolveCells(
     order: List<HudEntry>,
@@ -715,37 +770,80 @@ internal fun resolveCells(
     cols: Int,
     rows: Int
 ): List<HudGridItem> {
-    val taken = HashSet<GridCell>()
+    val taken = LinkedHashMap<GridCell, MutableList<HudEntry>>()
     val out = LinkedHashMap<HudEntry, GridCell>()
-    // 第 1 趟：摆过的条目占位。两颗被手改成同一格时先到先得、后者就近让位——[order] 在这里就是
-    // "同一格子里的稳定次序"那一条用途（枚举头的降级清单第 ① 条）
+    // 第 1 趟：摆过的条目占位。两颗**不同组**的被手改成同一格时先到先得、后者就近让位——
+    // [order] 在这里就是"同一格子里的稳定次序"那一条用途（枚举头的降级清单第 ① 条）；
+    // 同组两颗（钉过格子的 S2-2B 配对）共用一格是合法形态，不让位
     for (e in order) {
         val want = placed[e]?.takeIf { !it.isDefault } ?: continue
-        val cell = if (want in taken) freeCellNear(want, taken, cols, rows) else want
-        taken += cell
+        val blocked = blockingCells(taken, self = e, mates = cellGroupMatesOf(derived, e))
+        val cell = if (want in blocked) freeCellNear(want, blocked, cols, rows) else want
+        taken.getOrPut(cell) { mutableListOf() }.add(e)
         out[e] = cell
     }
     // 第 2 趟：没摆过的用推导格；推导格被摆过的那颗占了就让位（显式优先，不然"拖过去的那颗"会被
     // 一颗根本没编辑过的条目挤走）
     for (e in order) {
         if (out.containsKey(e)) continue
-        val cell = freeCellNear(derived[e] ?: GridCell(0, 0), taken, cols, rows)
-        taken += cell
+        val blocked = blockingCells(taken, self = e, mates = cellGroupMatesOf(derived, e))
+        val cell = freeCellNear(derived[e] ?: GridCell(0, 0), blocked, cols, rows)
+        taken.getOrPut(cell) { mutableListOf() }.add(e)
         out[e] = cell
     }
     return order.map { HudGridItem(it, out.getValue(it)) }
 }
 
 /**
- * 「今天的排布」→ 格子的唯一一处换算：顺序按 [hudRowGroups] 分行，第几行就是 row、行内第几颗就是 col。
+ * 「今天的排布」→ 格子的唯一一处换算：顺序按 [hudRowGroups] 分行。
  *
  * **不许手抄一份默认坐标**（理由与 [ZonePlacement.DEFAULT] 同一条）：抄一份就会与实现分叉，
  * 而这条函数与容器渲染读的是同一个 [hudRowGroups]，所以"没编辑过的表"结构性等于 B1–B3 定稿排布。
+ *
+ * ## 行组 → 格子：一枚行组＝一枚格子（竖 Dock），一行组＝一**排**格子（读数块）
+ * [HudAxis.GRID]（读数块）那一支，行组里的每一颗各占一列——里面全是胶囊，没有异型件，
+ * 均匀 pitch 不会产生离群列宽，本批**一行不碰**它的行为。
+ * 其余（[HudZone.LEFT] / [HudZone.RIGHT]，[HudAxis.COLUMN]）走"整组共格"：列恒 0、行 = 行组下标。
+ * 这一条就是 #74 后果修复的落点——S2-2B 那对「姿态仪 + 音量表」原先占 (0,0) 与 (1,0) **两格**，
+ * 均匀 pitch 之下第 1 列也按姿态仪的 54dp 算 ⇒ 一行两列 ≈112dp、底板 ≈120dp，
+ * 比 #74 之前的老排布（54 + 4 + 28 = 86 → 底板 94dp）**宽了 26dp**，而用户这一轮要的是**更窄**
+ * （原话「左dock栏还是太宽了」）。改成共格之后三条收益：
+ * 1. **宽度回到 ≈94dp**：右 Dock 变成单列网格，列宽 = 最宽那枚**格子**的内容宽 = 配对格的 86dp；
+ *    窄的那些行（变焦/对焦 47dp）居中在 86 宽里，与今天 `Column` 的行为一致，观感不变。
+ * 2. **独立性更强**：单列网格下**根本没有第二列**，任何条目在列内移动都不可能改变别颗的 x 坐标。
+ * 3. **配对变成用户可解开的**：把配对里任意一颗拖到别的格子，配对自然拆开，拆开后两者各自独立——
+ *    比"两列各自固定"更符合他要的自由度（合回去同理，见 [blockingCells]）。
  */
 fun defaultCellsOf(zone: HudZone, order: List<HudEntry>, perRow: Int): Map<HudEntry, GridCell> =
     hudRowGroups(zone, order, perRow).flatMapIndexed { row, group ->
-        group.mapIndexed { col, entry -> entry to GridCell(col, row) }
+        if (zone.axis == HudAxis.GRID) group.mapIndexed { col, entry -> entry to GridCell(col, row) }
+        else group.map { entry -> entry to GridCell(0, row) }
     }.toMap()
+
+/**
+ * 与 [entry] **同属一枚默认格组**的其他颗（也就是可以合法与它共用一格的那些）。
+ *
+ * 判据只有一条：**推导格相同**（[defaultCellsOf] 的输出）。所以配对尺子仍然只有 [hudRowGroups] 那一把，
+ * 本文件不许出现第二份"姿态仪与音量表算一对"的写死判据。今天唯一的多颗组是右 Dock 那对 S2-2B 并排；
+ * 读数块每颗各占一列 ⇒ 这条对任何读数都是空集，行为与改前逐字相同。
+ * 隐藏的颗拿不到推导格（它不在可见顺序里）⇒ 它谁的搭档都不是，照常挡路（与改前同一条语义）。
+ */
+fun cellGroupMatesOf(derived: Map<HudEntry, GridCell>, entry: HudEntry): Set<HudEntry> {
+    val home = derived[entry] ?: return emptySet()
+    return derived.filterValues { it == home }.keys - entry
+}
+
+/**
+ * 「这一格挡不挡 [self] 的路」的唯一判据：格子里住着**既不是它自己、也不是它同组搭档**的颗才算挡。
+ *
+ * 空格不挡；只住着搭档的那一格也不挡（把姿态仪放回音量表那一格是**重新并排**，不是撞车）。
+ * [resolveCells] 与 [HudLayoutTable.occupiedCells] 共读这一条，渲染解析与写表落位不会分叉。
+ */
+fun blockingCells(
+    residents: Map<GridCell, Collection<HudEntry>>,
+    self: HudEntry?,
+    mates: Set<HudEntry>
+): Set<GridCell> = residents.filterValues { who -> who.any { it != self && it !in mates } }.keys.toSet()
 
 /** 一帧网格解析要的两份运行时输入（都来自组合期实测，表本身不该知道它们） */
 data class HudGridPlan(
@@ -767,17 +865,116 @@ data class HudSizePx(val width: Int, val height: Int)
 data class HudPointPx(val x: Int, val y: Int)
 
 /**
- * 格子边长 = **该容器内最宽/最高那颗的实测尺寸 + 一枚行距**。
+ * 格长 = **该容器内最宽那枚格子的内容宽 / 最高那颗的实测尺寸 + 一枚行距**。
+ *
+ * ⚠ 宽度这一侧吃的是**格子**不是"颗"（#74 后果修复）：配对那两颗共用一格，格子的内容宽由
+ * [cellContentWidthPx] 算（各颗之和 + 行距）。按"最宽那颗"定 pitch 会让第二列也撑到姿态仪的 54dp，
+ * 一行两列 = 112dp、底板 120dp——那正是把右 Dock 加宽 26dp 的那次回归。
  *
  * 定 pitch 是"移动一颗不挪另一颗"的另一半：格子位置只跟 col/row 有关，跟"有几颗、谁在前"无关。
  * pitch 取实测尺寸 ⇒ 字体拉到 120% 时格子自己变大，§58/§73 那族"按 100% 量出来的固定值在 120% 裁字"
  * 在这里不复发（与 [hudPerRowFor] 用 `fontScale` 折算同一族防线，只是这一处量的是真尺寸不是估宽）。
  *
- * 行距没有省掉：`pitch = 最宽颗 + gap` 才让"只有一列 / 只有一行"时的总宽总高等于今天
+ * 高度那一侧仍是"最高那颗"：**同组的颗是横着排的**（[cellChildLeftsPx]），一格的高度就是它里面最高
+ * 那颗的高度，所以"格子的最大高"＝"最大颗高"，两处读同一个数是这条算式的本义而不是巧合。
+ *
+ * 行距没有省掉：`pitch = 最宽格 + gap` 才让"只有一列 / 只有一行"时的总宽总高等于今天
  * `spacedBy(gap)` 的紧凑排布——那正是"默认表结构性等于今天的排布"这条硬要求要的等式。
  */
-fun gridPitchPx(maxChildWidthPx: Int, maxChildHeightPx: Int, gapXPx: Int, gapYPx: Int): HudSizePx =
-    HudSizePx(maxChildWidthPx + gapXPx, maxChildHeightPx + gapYPx)
+fun gridPitchPx(maxCellWidthPx: Int, maxCellHeightPx: Int, gapXPx: Int, gapYPx: Int): HudSizePx =
+    HudSizePx(maxCellWidthPx + gapXPx, maxCellHeightPx + gapYPx)
+
+/**
+ * 一枚格子的**内容宽** = 格内各颗实测宽之和 + (n − 1) 道行距（一颗时就是它自己的宽，不多算行距）。
+ *
+ * 行距取的就是该容器既有那档 [hudGridGap]（竖 Dock = `WotaSpace.xs` = 4dp），**没有新造间距值**。
+ * 录制中右 Dock 那枚配对格：姿态仪 46 + 4 + 4 = 54dp，音量表 16 + 6 + 6 = 28dp
+ * ⇒ 54 + 4 + 28 = **86dp**，与 #74 之前那行 `Row(spacedBy(4.dp))` 的实测宽同值（老 94dp 底板的账）。
+ */
+fun cellContentWidthPx(childWidthsPx: List<Int>, gapXPx: Int): Int =
+    if (childWidthsPx.isEmpty()) 0 else childWidthsPx.sum() + gapXPx * (childWidthsPx.size - 1)
+
+/**
+ * 格内各颗相对**网格原点**的左缘（px）：整枚格子在它那一格里居中（窄行居中在宽格里，与今天 `Column`
+ * 的行为一致），再按各颗实测宽 + 行距依次排开。
+ *
+ * 渲染层（[com.wotagei.cam.ui.HudEntryGrid] 的 `layout` 块）与编辑页的"指针压在哪一颗"
+ * （[entryHitIndex]）共读这一条算式，两页不会各有一份格内偏移。
+ * 单颗格子时它与 [cellPlaceOffsetPx] 的 x 逐字同值（那是 #74 原来的唯一一支）。
+ */
+fun cellChildLeftsPx(cell: GridCell, pitch: HudSizePx, childWidthsPx: List<Int>, gapXPx: Int): List<Int> {
+    if (childWidthsPx.isEmpty()) return emptyList()
+    val content = cellContentWidthPx(childWidthsPx, gapXPx)
+    var x = cell.col.coerceAtLeast(0) * pitch.width + (pitch.width - content) / 2
+    return childWidthsPx.map { width -> val left = x; x += width + gapXPx; left }
+}
+
+/**
+ * 一帧格网的**完整测量结果**：格长、格网尺寸、每颗相对网格原点的左上角。
+ *
+ * ## 为什么把这段算术从渲染层搬进来
+ * [com.wotagei.cam.ui.HudEntryGrid] 那个 `Layout` 在 JVM 单测里打不到（本工程不引 Robolectric），
+ * 而"pitch 到底取最宽那枚**格子**还是最宽那**颗**"恰恰是 #74 后果修复唯一会走错的一步——
+ * 留在 `Layout` 里就是"只有真机能验、用例证不了"的缺口（AGENTS 那条"恒等式不算证明"最容易被这种
+ * 地方蒙过去）。搬成纯函数之后，底板那笔宽度账（172px = 86dp ⇒ 底板 94dp）有手算期望值可打，
+ * `HudEntryGrid` 退化成"量尺寸 + `placeRelative`"两条没有分支的调用。
+ *
+ * 三条规则：① 逐格累计住户（**清单序** = 格内左右序，与 [HudGridItem] 的说明同源）；
+ * ② 格长 = 最宽那枚格子的内容宽（[cellContentWidthPx]）+ 行距、高 = 最高那颗 + 行距（[gridPitchPx]）
+ *    ——同组的颗是横着排的，所以"最高的格子"就是"最高那颗"；
+ * ③ 每颗落点 = 所在格子的内容在格宽里居中 + 格内左缘（[cellChildLeftsPx]），纵向沿用 [cellPlaceOffsetPx]。
+ *
+ * 要求 [childSizes] 与 [items] 等长（同一个 `Layout` 的 measurables 必然等长；不等长是编程错误，直接抛）。
+ */
+fun gridPlacementOf(
+    items: List<HudGridItem>,
+    childSizes: List<HudSizePx>,
+    gapPx: HudSizePx
+): GridPlacement {
+    require(items.size == childSizes.size) { "格网测量：颗数与尺寸数不等 ${items.size} vs ${childSizes.size}" }
+    val cells = LinkedHashMap<GridCell, MutableList<Int>>()
+    items.forEachIndexed { i, item -> cells.getOrPut(item.cell) { mutableListOf() }.add(i) }
+    val cellWidths = cells.map { (_, idx) -> cellContentWidthPx(idx.map { childSizes[it].width }, gapPx.width) }
+    val pitch = gridPitchPx(
+        maxCellWidthPx = cellWidths.maxOrNull() ?: 0,
+        maxCellHeightPx = childSizes.maxOfOrNull { it.height } ?: 0,
+        gapXPx = gapPx.width,
+        gapYPx = gapPx.height
+    )
+    val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
+    val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
+    val offsets = Array(items.size) { HudPointPx(0, 0) }
+    cells.forEach { (cell, idx) ->
+        val lefts = cellChildLeftsPx(cell, pitch, idx.map { childSizes[it].width }, gapPx.width)
+        idx.forEachIndexed { k, childIndex ->
+            offsets[childIndex] = HudPointPx(
+                x = lefts[k], y = cellPlaceOffsetPx(cell, pitch, childSizes[childIndex]).y
+            )
+        }
+    }
+    return GridPlacement(pitch = pitch, size = gridSizePx(cols, rows, pitch, gapPx), offsets = offsets.toList())
+}
+
+/** [gridPlacementOf] 的产物：渲染层只读这三件，不再自己算任何一格的位置 */
+data class GridPlacement(val pitch: HudSizePx, val size: HudSizePx, val offsets: List<HudPointPx>)
+
+/**
+ * 一格多颗时"指针压住的是哪一颗"（#74 后果修复：配对 = 一格两颗，编辑器必须能点名要搬哪一颗）。
+ *
+ * 规则两条，写在这里而不是靠 Compose 的命中回报顺序：
+ * 1. 先取**横向区间真的压住指针**的那些颗；都不压住（指针对在两颗之间那道行距里）时把候选放宽到全部，
+ *    这样"按在缝上"也抓得起一颗，而不是整枚容器跟着走；
+ * 2. 候选里取**区间中心离指针最近**的那颗，同距离取靠左那颗（`minByOrNull` 返回首个最小值，定序稳定）。
+ *
+ * [spans] 是格内各颗的实测横向闭区间（**格内渲染顺序**，与 [cellChildLeftsPx] 同序），返回下标；
+ * 空候选返回 -1。
+ */
+fun entryHitIndex(spans: List<IntRange>, pointerX: Int): Int {
+    if (spans.isEmpty()) return -1
+    val inside = spans.indices.filter { pointerX in spans[it] }
+    val pool = inside.ifEmpty { spans.indices.toList() }
+    return pool.minByOrNull { abs((spans[it].first + spans[it].last) / 2 - pointerX) } ?: pool.first()
+}
 
 /** 网格总尺寸：`列数 × 格宽 − 一道行距`（最后一格后面不再有间距，与 `spacedBy` 同一条账） */
 fun gridSizePx(cols: Int, rows: Int, pitch: HudSizePx, gap: HudSizePx): HudSizePx {
@@ -1109,9 +1306,11 @@ fun dockDragBlocked(status: com.wotagei.cam.camera.RecordStatus): Boolean =
  *
  * - [HudZone.TOP] / [HudZone.BOTTOM]：横排一行；
  * - [HudZone.LEFT]：一行一颗；
- * - [HudZone.RIGHT]：**S2-2 B 那条并排规则保留**——姿态仪与音量表在顺序里相邻时并成一行两列
- *   （省下 ≈75dp，正好把变焦/对焦从折叠线下捞回来）。顺序被用户拆开就不再并排，
- *   这是"用户可以重排"与"横屏 360dp 带高不够"两条要求唯一能同时成立的写法；
+ * - [HudZone.RIGHT]：**S2-2 B 那条并排规则保留**——姿态仪与音量表在顺序里相邻时并成一行
+ *   （省下的是"一行一颗"两行的行距与格高，≈75dp 那笔账，正好把变焦/对焦从折叠线下捞回来）。
+ *   #74 后果修复之后这一行是**一枚格子里放两颗**而不是"一行两列"：列数不再被撑开，
+ *   底板宽度才回到 r11 实测的 ≈94dp（读这份分组的唯一一处是 [defaultCellsOf]，见它的三条收益）。
+ *   顺序被用户拆开就不再并排，这是"用户可以重排"与"横屏 360dp 带高不够"两条要求唯一能同时成立的写法；
  * - [HudZone.READOUT]：按 [perRow] 分行（[hudPerRowFor] 按可用宽与字体缩放取档，横屏那一路还要过
  *   [DockRowPerRowCap] 这道上限）。
  */

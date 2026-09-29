@@ -222,10 +222,12 @@ class HudLayoutCodecTest {
         assertEquals(GridCell(0, 0), left[HudEntry.of(CamPill.REFLINE)])
         assertEquals(GridCell(0, 2), left[HudEntry.of(CamPill.CURVE)])
         assertEquals(GridCell(0, 3), left[HudEntry.of(CamPill.FLASH)])
-        // 右 Dock 的「姿态仪 + 音量表」并排 ⇒ 同一行两列（S2-2 B 那笔账在格子里同样成立）
+        // 右 Dock 的「姿态仪 + 音量表」并排 ⇒ **同一枚格子的两颗**（#74 后果修复；上一批这里是 (0,0)+(1,0)，
+        // 均匀 pitch 之下那两列把底板撑到 120dp）。v1 存量串迁移后必须与新默认同形，
+        // 否则用户一进编辑页就会看到右 Dock 突然变宽
         val right = t.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
         assertEquals(GridCell(0, 0), right[HudEntry.of(CamPill.LEVEL)])
-        assertEquals(GridCell(1, 0), right[HudEntry.of(CamPill.VOLUME)])
+        assertEquals(GridCell(0, 0), right[HudEntry.of(CamPill.VOLUME)])
         assertEquals(GridCell(0, 1), right[HudEntry.of(CamPill.BT)])
         assertEquals(GridCell(0, 4), right[HudEntry.of(CamPill.STAB)])
         // 读数块一行 3 颗 ⇒ 第 7 颗（变焦读数）落在第 2 行第 0 列
@@ -254,9 +256,11 @@ class HudLayoutCodecTest {
         assertEquals(HudEntry.of(CamPill.ZOOM), left.first().entry)
         assertEquals(GridCell(0, 1), left[1].cell)
         assertEquals("容器整体落点必须原样搬过来", ZonePlacement(120, 300), t.posOf(HudZone.LEFT))
-        // 右 Dock 少了变焦 ⇒ 姿态仪/音量表仍相邻、仍并排
+        // 右 Dock 少了变焦 ⇒ 姿态仪/音量表仍相邻、仍**共用同一枚格子**（#74 后果修复之后是两颗同格 (0,0)，
+        // 上一批是 (0,0)+(1,0)）；对焦那颗仍在第 2 行——行号是"行组下标"，配对吃掉哪一列都不影响它
         val right = t.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
-        assertEquals(GridCell(1, 0), right[HudEntry.of(CamPill.VOLUME)])
+        assertEquals(GridCell(0, 0), right[HudEntry.of(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 0), right[HudEntry.of(CamPill.VOLUME)])
         assertEquals(GridCell(0, 2), right[HudEntry.of(CamPill.FOCUS)])
     }
 
@@ -352,6 +356,35 @@ class HudLayoutCodecTest {
         assertEquals(HudEntry.of(CamPill.LENS), afterReset.orderOf(HudZone.BOTTOM).single())
         // 「即时可重做」的模型前提：重置前那张表的串还完整可读回来（撤销靠的是它，不是内存里的手抄本）
         assertEquals("撤销重置要把前一张表原样读回来", edited, HudLayoutTable.decode(beforeReset))
+    }
+
+    @Test
+    fun pairCellsRoundTripThroughThePersistedString() {
+        // **同格两颗必须能 encode/decode 往返**（#74 后果修复的持久化前提：配对改成共格之后，
+        // `tok:col.row` 这套格式对两颗同格是天然可表达的——不许为此动 schema 版本、不许新造键）
+        val paired = HudLayoutTable.default()
+            .placeEntryAt(HudEntry.of(CamPill.BT), HudZone.RIGHT, 2, GridCell(1, 0), planAll)
+        // 真实串（钉的是格式本身：换成任何"两颗合并写"的新写法，这一条就红）
+        assertEquals(
+            "R,-1,-1,P0:0.0,P1:0.0,P2:1.0,P3:0.2,P4:0.3,P5:0.4",
+            paired.encode().split(';').first { it.startsWith("R,") }
+        )
+        val back = HudLayoutTable.decode(paired.encode())
+        assertEquals("整张表无损", paired, back)
+        assertEquals("编→解→编同串（幂等）", paired.encode(), back.encode())
+        assertEquals(GridCell(0, 0), back.cellsOf(HudZone.RIGHT)[HudEntry.of(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 0), back.cellsOf(HudZone.RIGHT)[HudEntry.of(CamPill.VOLUME)])
+        assertEquals(
+            "解析后两颗仍共用 (0,0)，且**格内左右次序 = 清单次序**（渲染层与命中裁决读的就是这一个序）",
+            listOf(HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME)),
+            back.gridItems(HudZone.RIGHT, planAll).filter { it.cell == GridCell(0, 0) }.map { it.entry }
+        )
+        assertEachEntryOnce(back, "配对同格往返")
+        // 出厂默认表（格子全哨兵）里两颗也共用推导格 (0,0)：与上面那段是**两条不同的码路**
+        // （一条走显式格的编解码，一条走哨兵格的默认推导），改坏任何一条都有一处红
+        val derived = HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
+        assertEquals(GridCell(0, 0), derived[HudEntry.of(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 0), derived[HudEntry.of(CamPill.VOLUME)])
     }
 
     @Test

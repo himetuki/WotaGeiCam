@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,10 +88,13 @@ import kotlin.math.roundToInt
  * ## 条目拖拽 = 吸附到格子（#74 的核心）
  * [HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT] 三枚容器里，每颗条目自带一个 [GridCell]：
  * 拖动 ⇒ [cellAtPointer] 吸附到指针压住的那一格 ⇒ [clampCellToBox] 钳进可放带 ⇒ [freeCellNear] 找空格
- * （**只落空格，不与占位那颗交换**——交换等于"动一颗会动另一颗"，与用户这句诉求正面冲突）。
+ * （**只落不挡路的格子，不与占位那颗交换**——交换等于"动一颗会动另一颗"，与用户这句诉求正面冲突；
+ * 唯一允许落进"已有颗的那一格"是拖回自己同组搭档那一格 = 把 S2-2B 的配对合回去，见 [blockingCells]）。
  * 顶栏与底栏仍按顺序插位（为什么那两枚不上网格见 [HudZone.isGrid]）。
  * 预览与写表读的是**同一个** [snapOf]，所以"看着在哪一格"与"落在哪一格"不可能差半格；
  * 格长不另量，从网格节点实测矩形按 [gridPitchOf]（[gridSizePx] 的逆）除回来。
+ * 起手那一指的命中裁决在 [entryAtPointer]（#74 后果修复：一枚格子里住两颗时按 x 定点名搬哪一颗，
+ * 候选按表里的渲染序数，不靠 `entryRects` 这张可变 Map 的插入顺序）。
  *
  * ## 蓝牙/水平姿态/音量这三颗在这页拿到的是出厂态
  * （未连接 / 水平 / 静音），因为它们的数据源（蓝牙控制器、加速度计、编码器振幅）都挂在录制页上。
@@ -217,6 +221,14 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     // #74：网格解析的两份运行时输入。与录制页同一份构造（可见集 + 读数块一行几颗），
     // 两页的"格子 → 坐标"都只经 [HudLayoutTable.gridItems] 这一条，不许出现第二份算式
     val gridPlan = HudGridPlan(visible = visibleEntries, readoutPerRow = perRow)
+    // ⚠ 拖拽处理器在 `pointerInput(Unit)` 里 ⇒ 那条协程用的**始终是创建那帧**的闭包，直接读上面的
+    // [gridPlan] 就是读一份过期快照：转一次屏幕后 `readoutPerRow` 还停在上一副姿态那一档、设置页改过
+    // 显隐后 `visible` 还是老集合，于是命中判定与松手写表都按旧格子算（#74 后果修复补的这条）。
+    // 与上面那几条 `dragY`/`drop` 一样走 [rememberUpdatedState]：读的时候才取当前值。
+    val liveGridPlan = rememberUpdatedState(gridPlan)
+
+    /** 拖拽那一路读网格档的唯一出口：见上面 [liveGridPlan] 那条"闭包捕获过期快照"的说明 */
+    fun planNow(): HudGridPlan = liveGridPlan.value
 
     /** 这一枚容器的**可放带**（钳制格子落点用），与它自己的 [HudZoneBox] 喂的是同一份 area */
     fun bandOf(zone: HudZone): Int = when (zone) {
@@ -261,6 +273,39 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val overlaps = overlappingZones(zoneRectsDp())
 
     /**
+     * 指针压住的是哪一颗条目（**拖拽的唯一命中裁决**，#74 后果修复）。
+     *
+     * 老写法是 `entryRects.keys.firstOrNull { 它的 rect 压住 }`——`keys` 的迭代序 = 各颗**回报矩形的先后**，
+     * 与渲染顺序无关。每颗各占一格时那没问题（压住的至多一颗）；**一枚格子里住两颗**（右 Dock 那对
+     * S2-2B 并排）之后必须给一个与回报顺序无关的答案，所以裁决搬进纯函数 [entryHitIndex]：
+     * ① 候选取"压住指针的那些颗"，按**表里的渲染序**（[HudLayoutTable.allEntries]）数，不数 map 的序；
+     * ② 一颗都不压住时，只补"配对格中间那道行距"这一档：把候选放宽到**同一格那几颗的并集矩形**
+     *    （≥2 颗的格才补，所以单颗格子的落点判据与改前逐字相同），按 x 落在哪一颗上取中心最近的那颗；
+     * ③ 还不算 ⇒ 返回 null，这一指按"拖整枚容器"处理（与改前同一条语义）。
+     */
+    fun entryAtPointer(px: Int, py: Int): HudEntry? {
+        // [entryHitIndex] 吃的候选区间与候选颗必须同长同序；`inside` 是靠 rect 筛出来的，所以那颗一定有 rect
+        val spansOf = { list: List<HudEntry> -> list.map { e -> val r = local(entryRects[e])!!; r.left until r.right } }
+        val inside = draft.allEntries().filter { local(entryRects[it]).containsPoint(px, py) }
+        if (inside.size == 1) return inside.first()
+        if (inside.size > 1) return inside.getOrNull(entryHitIndex(spansOf(inside), px))
+        for (zone in HudZone.ALL) {
+            if (!zone.isGrid) continue
+            for ((_, group) in draft.gridItems(zone, planNow()).groupBy { it.cell }) {
+                val rects = group.mapNotNull { local(entryRects[it.entry]) }
+                if (rects.size < 2) continue
+                val inBox = py in rects.minOf { it.top } until rects.maxOf { it.bottom } &&
+                    px in rects.minOf { it.left } until rects.maxOf { it.right }
+                if (!inBox) continue
+                return group.getOrNull(
+                    entryHitIndex(rects.map { it.left until it.right }, px)
+                )?.entry
+            }
+        }
+        return null
+    }
+
+    /**
      * 指针 → 这一帧的落点格子（**跟手预览与松手写表共用这一条**，两处各算一次就会差半格）。
      *
      * 返回 null 的三种情况都按"不吸附、只换顺序"处理：① 目标不是网格容器；② 这一帧还没量到网格节点
@@ -279,7 +324,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         ) ?: draft.sourceZoneOf(entry)
         if (!zone.isGrid) return null
         val rect = gridRects[zone] ?: return null
-        val items = draft.gridItems(zone, gridPlan)
+        val items = draft.gridItems(zone, planNow())
         val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
         val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
         val gapPx = with(density) { hudGridGap(zone).roundToPx() }
@@ -301,8 +346,9 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         val wanted = clampCellToBox(cellAtPointer(pointer, origin, pitch), box)
         return GridSnap(
             zone = zone,
-            // 被占了就就近让到空格：编辑页不许把两颗钳进同一格（那等于又造出"动一颗影响另一颗"）
-            cell = freeCellNear(wanted, draft.occupiedCells(zone, gridPlan, exclude = entry), box.cols, box.rows),
+            // 挡路的格子不许落（[blockingCells]：跨组那颗算挡路、同组搭档不算），被挡就就近让到空格。
+            // 唯一允许的"落进已有颗的那一格"是拖回自己搭档那一格 = 把配对合回去（#74 后果修复）
+            cell = freeCellNear(wanted, draft.occupiedCells(zone, planNow(), exclude = entry), box.cols, box.rows),
             origin = origin,
             pitch = pitch,
             gapPx = gapPx
@@ -323,15 +369,15 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         val pointer = HudPointDp(pxToDp(dragPointer.x, density.density), pxToDp(dragPointer.y, density.density))
         val snap = snapOf(entry)
         val target = snap?.zone ?: zoneAt(pointer, zoneRectsDp()) ?: draft.sourceZoneOf(entry)
-        val ordered = draft.visibleOrderOf(target, visibleEntries).filter { it != entry }
+        val ordered = draft.visibleOrderOf(target, planNow().visible).filter { it != entry }
         val rects = ordered.mapNotNull { toDpRect(entryRects[it]) }
         // 网格容器按"行优先"数插位（与格网读序一致），非网格容器仍按各自主轴
         val axis = if (target.isGrid) HudAxis.GRID else target.axis
         val index = dropIndexFor(axis, rects, pointer)
         draft = if (snap != null) {
-            draft.placeEntryAt(entry, target, index, snap.cell, gridPlan)
+            draft.placeEntryAt(entry, target, index, snap.cell, planNow())
         } else {
-            draft.moveEntryTo(entry, target, index, gridPlan)
+            draft.moveEntryTo(entry, target, index, planNow())
         }
     }
 
@@ -663,9 +709,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                                 dragStart = pos
                                 dragPointer = pos
                                 dragShift = Offset.Zero
-                                val hit = entryRects.keys.firstOrNull { key ->
-                                    local(entryRects[key])?.containsLocal(pos.x, pos.y) == true
-                                }
+                                // 命中裁决走 [entryAtPointer]（#74 后果修复：一格多颗时要按 x 定点名哪一颗）
+                                val hit = entryAtPointer(pos.x.roundToInt(), pos.y.roundToInt())
                                 if (hit != null) {
                                     dragEntry = hit
                                     dragZone = null
@@ -705,9 +750,12 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-/** 点在矩形内（安全区局部坐标，右/下是开区间，与 [HudRectDp.contains] 同一口径） */
-private fun IntRect.containsLocal(x: Float, y: Float): Boolean =
-    x >= left && x < right && y >= top && y < bottom
+/**
+ * 点在矩形内（安全区局部坐标，右/下是开区间，与 [HudRectDp.contains] 同一口径）。
+ * 收 null 是为了让 [HudLayoutEditorScreen.entryAtPointer] 那句筛选写成一趟而不是两处判空。
+ */
+private fun IntRect?.containsPoint(x: Int, y: Int): Boolean =
+    this != null && x in left until right && y in top until bottom
 
 /**
  * 一次拖动的吸附结果（安全区局部 px）：落在哪枚容器的哪一格、格网原点与格长各是多少。
