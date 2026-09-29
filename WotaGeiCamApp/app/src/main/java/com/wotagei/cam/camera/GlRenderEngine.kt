@@ -64,7 +64,8 @@ interface DisplaySurfaceReceiver {
  *
  * 实例一次性：[release] 后不可复用（线程已退出），重建请 new 新实例。
  */
-class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFrameAvailableListener {
+class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
+    SurfaceTexture.OnFrameAvailableListener {
 
     companion object {
         /** EGL14 未暴露该常量，取 Khronos 原值 EGL_OPENGL_ES3_BIT_KHR */
@@ -131,6 +132,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
     /** 等比居中区（窗口坐标，原点左上），GL 线程整体替换、主线程读快照 */
     @Volatile
     private var publishedContentRect = Rect()
+
+    /**
+     * 毛玻璃 A/B 开关的**意图**（#84，默认关）。写在调用线程、生效在 GL 线程（见 [setFrostBlurEnabled]）。
+     *
+     * 真源在 `ui/`（配置键/持久化都不在本层），这里只认这一个布尔值；DIRECT 模式下它同样能被设 true，
+     * 但 [isFrostBlurAvailable] 恒为 false —— 那是物理上限而不是 bug（docs/plan/14 §二）。
+     */
+    @Volatile
+    private var wantFrostBlur = false
 
     // endregion
 
@@ -225,6 +235,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
     private var uTexelLoc = -1
     private var uStrengthLoc = -1
     private var uColorLoc = -1
+
+    /**
+     * 毛玻璃离屏链（OES→2D + 两趟高斯）。只在 GL 线程创建与使用；
+     * null = `initGl` 还没跑（或已 release），此时 [isFrostBlurAvailable] 一律 false。
+     */
+    private var frostChain: FrostBlurChain? = null
+
+    /** 结果纹理 + 它对应的那块等比画面矩形，一次原子发布给主线程做卡片 → UV 换算 */
+    @Volatile
+    private var publishedFrost: FrostSnapshot? = null
 
     private val stMatrix = FloatArray(16)
 
@@ -408,6 +428,64 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
 
     // endregion
 
+    // region 毛玻璃背板接口（#84，见 FrostBlurProvider 的语义边界）
+
+    /**
+     * A/B 开关（默认关）。**不**触发 `requestRender()`：状态刷新会连带重画一次编码 pass，
+     * 那就是往录像里塞一帧重复帧——开关只该影响上屏方向（docs/plan/14 §二 定版口径）。
+     * 于是打开后模糊在下一个相机帧产出（30–60fps 下 ≤33ms，肉眼与"点了没反应"分不开的情况不存在）；
+     * 关掉则是立即生效（[isFrostBlurAvailable] 当场变 false，不等下一帧）。
+     */
+    override fun setFrostBlurEnabled(enabled: Boolean) {
+        if (released.get()) return
+        if (wantFrostBlur == enabled) return
+        wantFrostBlur = enabled
+        postGl {
+            if (enabled) {
+                // 给停用过的链一次重试机会（显式人为动作才重置，不是每帧重试）
+                frostChain?.resetAfterBreak()
+                frostChain?.prepare()
+            } else {
+                // 关就是"现在就没有模糊"，快照当场撤掉；资源保留不删，再开不重建也不闪
+                publishedFrost = null
+            }
+        }
+    }
+
+    override fun isFrostBlurEnabled(): Boolean = wantFrostBlur && !released.get()
+
+    override fun isFrostBlurAvailable(): Boolean =
+        wantFrostBlur && !released.get() && publishedFrost != null
+
+    override fun frostRenderTarget(): FrostRenderTarget? {
+        if (!isFrostBlurAvailable()) return null
+        val s = publishedFrost ?: return null
+        return FrostRenderTarget(s.textureId, s.texWidthPx, s.texHeightPx)
+    }
+
+    /**
+     * 卡片矩形 → UV 所需几何（一次原子读，RT 尺寸与等比画面矩形保证同帧）。
+     *
+     * @param viewOriginXInWindowPx 承载视图在 app 窗口里的原点 X（px）；视图本来就铺满窗口时传 0f
+     * @param viewOriginYInWindowPx 同上，Y
+     */
+    override fun frostGeometry(
+        viewOriginXInWindowPx: Float,
+        viewOriginYInWindowPx: Float
+    ): FrostGeometry? {
+        if (!isFrostBlurAvailable()) return null
+        val s = publishedFrost ?: return null
+        return FrostGeometry(
+            contentRectInViewPx = s.contentRectInViewPx,
+            viewOriginXInWindowPx = viewOriginXInWindowPx,
+            viewOriginYInWindowPx = viewOriginYInWindowPx,
+            texWidthPx = s.texWidthPx,
+            texHeightPx = s.texHeightPx
+        )
+    }
+
+    // endregion
+
     // region 帧驱动与查询
 
     /** 相机帧到达（构造 SurfaceTexture 时已把回调 handler 设为 GL 线程） */
@@ -427,10 +505,18 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
     /** 最近一帧的相机时间戳（ns，`SurfaceTexture.getTimestamp()`），未出帧为 0 */
     fun frameTimestampNs(): Long = lastDrawnTimestampNs
 
-    /** 画面在窗口中的等比居中区（窗口坐标，原点左上） */
+    /**
+     * 画面在窗口中的等比居中区（窗口坐标，原点左上）。
+     *
+     * ⚠ 「窗口」在这里指**这条 EGL 窗口面 = 承载视图自己**（分母是
+     * [DisplaySurfaceReceiver.onDisplaySurfaceChanged] 回报的视图宽高），**不是 app 整屏**。
+     * HUD 卡片实测矩形走的是整屏坐标（`positionInWindow`），两者差一枚视图原点——
+     * 拿它直接配卡片矩形必错位，换算请走 [frostGeometry]（它要视图在窗口里的原点）+
+     * [frostUvOfCard]（[FrostRectPx] / [FrostGeometry] 全在 `FrostBlur.kt`，有手算单测）。
+     */
     fun contentRect(): Rect = Rect(publishedContentRect)
 
-    /** 窗口承载尺寸（px） */
+    /** 窗口承载尺寸（px）——同上，这是承载视图的尺寸，不是整屏 */
     fun windowSize(): Pair<Int, Int> = windowWidth to windowHeight
 
     // endregion
@@ -551,6 +637,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
         st.setOnFrameAvailableListener(this, handler)
         inputTexture = st
         cameraTargetSurface = Surface(st)
+
+        // 链本体只存对象、不碰 GL（program/RT 都按需在建好上下文之后才编/建），所以放这里安全
+        frostChain = FrostBlurChain(::link, ::drainGlError, positionBuffer)
 
         glReady = true
         syncEffect()
@@ -759,6 +848,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
         if (programId == 0) return
 
         drawEncoderPass()
+        drawFrostPass(hasFrame)
         drawWindowPass(stateOnly)
 
         onFrameDrawn?.invoke(lastDrawnTimestampNs)
@@ -792,6 +882,67 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
         runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
             .onFailure { Log.w(TAG_GL, "写呈现时间戳失败：${it.message}") }
         encoderFrameIndex++
+    }
+
+    /**
+     * 毛玻璃离屏 pass（#84 步骤 1）。夹在编码 pass 之后、上屏 pass 之前，四道门缺一不可：
+     *
+     * - 开关关 ⇒ 一次 GL 调用都不发（A/B 对照组必须干净）；
+     * - `hasFrame` 为假 ⇒ 状态刷新重画没有新像素可糊，跳过；
+     * - 没有窗口面 ⇒ 后台纯录制时糊给谁看？跳过（省掉一整趟离屏，编码路径零影响）；
+     * - 上屏这帧本来就要被 [MAX_DISPLAY_FPS] 节流掉 ⇒ 糊了也没人看，跳过。
+     *
+     * 与录制的所有瓜葛到此为止：本函数**不进** [drawEncoderPass]，不改它的视口/纹理坐标/swap 时机/PTS，
+     * 链内部进出各存各恢复 `glViewport`、`glScissor`、`glUseProgram` 与顶点属性 enable 位
+     * （见 [FrostBlurChain] 的状态恢复），所以录出来的画面与开关无关、上屏的状态也不带脏。
+     * 唯一的观感分叉是「GL 模式的上屏多了霜、DIRECT 没有」，性质与 curve/zebra 同族。
+     */
+    private fun drawFrostPass(hasFrame: Boolean) {
+        if (!wantFrostBlur) {
+            if (publishedFrost != null) publishedFrost = null
+            return
+        }
+        if (!hasFrame) return
+        val chain = frostChain ?: return
+        if (windowEglSurface == null || windowThrottled()) return
+        val contentW = glContentRect.width()
+        val contentH = glContentRect.height()
+        if (contentW <= 0 || contentH <= 0) {
+            if (publishedFrost != null) publishedFrost = null
+            return
+        }
+        // 拷贝趟要和上屏 pass 采同一套坐标（含转正与镜像），RT 里的图才与屏幕上看到的同朝向；
+        // buildTexCoords 自带按 key 缓存，这里不会每帧重算
+        buildTexCoords(encoderPass = false)
+        chain.draw(oesTextureId, stMatrix, displayTexCoordBuffer, contentW, contentH)
+        publishFrost(chain.target)
+    }
+
+    /**
+     * 快照只在真变化时换对象（每帧零分配的另一半）：内容 = 结果纹理 + 同帧的等比画面矩形，
+     * 一次写一个 @Volatile 引用，主线程不会读到「新尺寸配旧矩形」这种撕裂组合。
+     */
+    private fun publishFrost(target: FrostRenderTarget?) {
+        if (target == null) {
+            if (publishedFrost != null) publishedFrost = null
+            return
+        }
+        val l = glContentRect.left.toFloat()
+        val t = glContentRect.top.toFloat()
+        val r = glContentRect.right.toFloat()
+        val b = glContentRect.bottom.toFloat()
+        val current = publishedFrost
+        if (current != null &&
+            current.matches(target.textureId, target.widthPx, target.heightPx, l, t, r, b)
+        ) {
+            return
+        }
+        publishedFrost = FrostSnapshot(
+            textureId = target.textureId,
+            texWidthPx = target.widthPx,
+            texHeightPx = target.heightPx,
+            contentRectInViewPx = FrostRectPx(l, t, r, b)
+        )
     }
 
     private fun drawWindowPass(stateOnly: Boolean) {
@@ -903,6 +1054,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
     /**
      * 等比居中：内容尺寸 = 相机帧按 sensorOrientation 旋转后的包围盒。
      * 用包围盒公式而不是「只有 90 倍数才交换宽高」，兼容个别机型报非整百的 sensorOrientation。
+     *
+     * 「按比例缩放 + 取整 + 居中」那一半算术抽在 [letterboxContentRectInPx]（纯函数、有手算单测）：
+     * 毛玻璃的 RT 尺寸与卡片 → UV 换算都以这块矩形为基准，两边共用一个真源才不会各算各的。
      */
     private fun updateContentRect() {
         val w = windowWidth
@@ -924,12 +1078,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
             publishedContentRect = Rect(glContentRect)
             return
         }
-        val scale = minOf(w / contentW, h / contentH)
-        val drawW = (contentW * scale).roundToInt().coerceAtLeast(1)
-        val drawH = (contentH * scale).roundToInt().coerceAtLeast(1)
-        val left = (w - drawW) / 2
-        val top = (h - drawH) / 2
-        glContentRect.set(left, top, left + drawW, top + drawH)
+        val fit = letterboxContentRectInPx(w, h, contentW, contentH)
+        glContentRect.set(fit.left.roundToInt(), fit.top.roundToInt(), fit.right.roundToInt(), fit.bottom.roundToInt())
         publishedContentRect = Rect(glContentRect)
     }
 
@@ -1195,6 +1345,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
         }
         programEffect = FrameEffect.NONE
         programCurve = false
+        // 离屏链的 2 纹理 + 2 FBO + 2 program 全在这一次调用里删（内部删完把 target 置 null）
+        frostChain?.release()
+        frostChain = null
+        publishedFrost = null
         deleteStripeTexture()
         deleteCurveTexture()
         if (oesTextureId != 0) {
@@ -1219,19 +1373,34 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, SurfaceTexture.OnFra
 
     private fun eglErrorHex(): String = Integer.toHexString(EGL14.eglGetError())
 
+    /** 现有调用点都只要"记日志"，所以它们继续用这个不关心返回值的老签名 */
     private fun checkGlError(where: String) {
+        drainGlError(where)
+    }
+
+    /**
+     * 排空错误队列并**报告条数**：日志口径与 [checkGlError] 逐字相同（同一个 TAG_GL、同一句格式），
+     * 只是多返回一个计数——离屏链要靠它把「这帧 GL 报错了」当成停用判据，而不只是留一行日志。
+     */
+    private fun drainGlError(where: String): Int {
+        var count = 0
         var error = GLES20.glGetError()
         while (error != GLES20.GL_NO_ERROR) {
+            count++
             Log.w(TAG_GL, "$where: glError 0x${Integer.toHexString(error)}")
             error = GLES20.glGetError()
         }
+        return count
     }
 
     // endregion
 }
 
-/** FloatArray 拷成 GL 需要的直接缓冲（GLES20 只有 Buffer 版 glVertexAttribPointer 重载） */
-private fun nativeFloatBuffer(values: FloatArray): FloatBuffer =
+/**
+ * FloatArray 拷成 GL 需要的直接缓冲（GLES20 只有 Buffer 版 glVertexAttribPointer 重载）。
+ * internal 而非 private：[FrostBlurChain] 的恒等纹理坐标缓冲也要走同一条构造路，不许另抄一份。
+ */
+internal fun nativeFloatBuffer(values: FloatArray): FloatBuffer =
     ByteBuffer.allocateDirect(values.size * BYTES_PER_FLOAT)
         .order(ByteOrder.nativeOrder())
         .asFloatBuffer()

@@ -144,4 +144,80 @@ $decl
         }
         """.trimIndent()
     }
+
+    // region 毛玻璃离屏链（#84：三趟里后两趟的源；第一趟见 FROST_COPY_FS）
+
+    /**
+     * 第 ① 趟 OES → 2D 拷贝（离屏）。
+     *
+     * 为什么非有这一趟不可：`GL_TEXTURE_EXTERNAL_OES` **不能当 FBO 颜色附件**，而高斯要跑在 FBO 上，
+     * 所以先把相机帧拷进一张普通 `GL_TEXTURE_2D`。这一层今天之前全工程不存在（唯一的 2D 纹理是曲线 LUT
+     * 与斑马纹瓦片，都是贴图不是画布）。
+     *
+     * 顶点源沿用 [TEXTURE_VS]、纹理坐标沿用「上屏 pass 那一套」（`buildTexCoords(encoderPass = false)`），
+     * 于是拷出来的 RT 与屏幕上看到的等比画面**同朝向、同内容**：卡片矩形 → UV 只剩一次仿射，
+     * 不必再管机型给的缓冲矩阵。
+     *
+     * 它是新增片元里**唯一**允许出现 `samplerExternalOES` 的一条；模糊那两条只吃 `sampler2D`，
+     * 两者混进同一个 program 会直接链接失败。
+     */
+    val FROST_COPY_FS = """
+        #extension GL_OES_EGL_image_external : require
+        precision mediump float;
+        varying vec2 vUv;
+        uniform samplerExternalOES uFrame;
+        void main() {
+            // 强制不透明：与 PASS_THROUGH_FS 同一个理由——HAL 给 alpha=0 时这里会连着糊出一张全黑
+            gl_FragColor = vec4(texture2D(uFrame, vUv).rgb, 1.0);
+        }
+    """.trimIndent()
+
+    /**
+     * 第 ②③ 趟的顶点源：恒等映射，**不乘** `uTexMatrix`。
+     *
+     * RT 已经是普通 2D 图（朝向在拷贝趟就烘进去了），再乘一次机型给的缓冲矩阵会被转两遍。
+     */
+    val FROST_QUAD_VS = """
+        attribute vec4 aPosition;
+        attribute vec2 aTexCoord;
+        varying vec2 vUv;
+        void main() {
+            gl_Position = aPosition;
+            vUv = aTexCoord;
+        }
+    """.trimIndent()
+
+    /**
+     * 可分离高斯的一趟源（横向与纵向共用同一条 program，差别只在 `uOffset` 的方向，
+     * 由 [fillFrostBlurOffset] 给；这样只需一枚 program，转屏/改尺寸都不必重编译）。
+     *
+     * - 只吃 `sampler2D`（见 [FROST_COPY_FS] 那条纪律）；
+     * - `uWeight` 是长度 = [FROST_BLUR_WEIGHTS] 表长的**常量下标**数组（ES 1.00 允许常量下标，
+     *   不允许变量下标），抽头展开成 2N-1 次取样；表长与下标必须同源，否则链接期数组越界、整条链停用；
+     * - 默认 highp：取样位移是 1/RT 边长量级的小数，mediump 下与 vUv 相加会丢精度（糊出来的方向偏移）；
+     *   少数驱动不支持片元 highp，调用方会把 [highp] 改 false 重编一次再不行才停用模糊
+     *   （与 `GlRenderEngine.buildProgram` 的退避同一思路）。
+     */
+    fun frostGaussianFragment(weightCount: Int, highp: Boolean): String {
+        val precision = if (highp) "highp" else "mediump"
+        val taps = StringBuilder()
+        taps.append("        vec3 sum = texture2D(uSrc, vUv).rgb * uWeight[0];")
+        for (i in 1 until weightCount) {
+            taps.append("\n        sum += (texture2D(uSrc, vUv + uOffset * ").append(i).append(".0).rgb")
+            taps.append(" + texture2D(uSrc, vUv - uOffset * ").append(i).append(".0).rgb) * uWeight[").append(i).append("];")
+        }
+        return """
+        precision $precision float;
+        varying vec2 vUv;
+        uniform sampler2D uSrc;
+        uniform vec2 uOffset;
+        uniform float uWeight[$weightCount];
+        void main() {
+$taps
+            gl_FragColor = vec4(sum, 1.0);
+        }
+        """.trimIndent()
+    }
+
+    // endregion
 }
