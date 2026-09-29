@@ -52,6 +52,8 @@ import com.wotagei.cam.ui.theme.WotaTheme
 /** 本层新增的两条路由（其余路由用 media 包 [WotaNav] 常量，避免两处定义） */
 const val ROUTE_CAMERA = "camera"
 const val ROUTE_SETTINGS = "settings"
+/** 「编辑控件」页（13 号计划第 5 条）：方向与沉浸都跟着录制页，见 [UIOrientation.screenOrientationOf] */
+const val ROUTE_HUD_EDITOR = "hudEditor"
 
 /**
  * 单 Activity + NavHost（06 文档 §1）。
@@ -110,7 +112,7 @@ private fun WotaRoot() {
     }
 
     // 方向与沉浸随目的地切换：录制页按设置页「默认方向」锁（默认横屏），其余页跟随用户系统旋转设置；
-    // 录制页隐藏系统栏沉浸
+    // HUD 页（录制页 + 编辑控件页）隐藏系统栏沉浸
     DisposableEffect(nav, activity) {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
@@ -161,7 +163,16 @@ private fun WotaRoot() {
         }
         composable(ROUTE_SETTINGS) {
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS)) {
-                SettingsScreen(onBack = { nav.popBackStack() })
+                SettingsScreen(
+                    onBack = { nav.popBackStack() },
+                    onOpenHudEditor = { nav.navigate(ROUTE_HUD_EDITOR) }
+                )
+            }
+        }
+        composable(ROUTE_HUD_EDITOR) {
+            // 编辑的是录制页的控件，文本高度也走录制页那一档，两边量出来的宽度才同一个数
+            TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) {
+                HudLayoutEditorScreen(onBack = { nav.popBackStack() })
             }
         }
     }
@@ -186,15 +197,16 @@ private fun WotaRoot() {
 
 private fun applyPageMode(activity: Activity?, route: String?) {
     val act = activity ?: return
-    val cameraPage = route == ROUTE_CAMERA
-    // 录制页方向由设置页「默认方向」决定（默认横屏使用，且不依赖系统自动旋转开关）；
-    // 非录制页恒跟随用户的系统旋转设置。映射本体是 core/UIOrientation.screenOrientationOf（有 JVM 单测）。
+    // 录制页与「编辑控件」页共用一套方向 + 沉浸：两页的 (x, y) 必须落在同一个安全区里才谈得上"位置"
+    val hudPage = route == ROUTE_CAMERA || route == ROUTE_HUD_EDITOR
+    // HUD 页方向由设置页「默认方向」决定（默认横屏使用，且不依赖系统自动旋转开关）；
+    // 其余页恒跟随用户的系统旋转设置。映射本体是 core/UIOrientation.screenOrientationOf（有 JVM 单测）。
     // 这里必须直读 prefs：纯 UI 设置走参数总线的话会被 applyDefaultsOnce 的「进程内只套一次」挡住，
     // 设置页改完回录制页就不生效了。每次换页都重读，所以改档立刻生效。
     val orientation = WotaSettings.uiOrientation(WotaSettings.of(act))
-    act.requestedOrientation = UIOrientation.screenOrientationOf(cameraPage, orientation)
+    act.requestedOrientation = UIOrientation.screenOrientationOf(hudPage, orientation)
     val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
-    if (cameraPage) {
+    if (hudPage) {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
     } else {

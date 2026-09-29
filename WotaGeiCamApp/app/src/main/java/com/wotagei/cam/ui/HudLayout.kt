@@ -1,0 +1,528 @@
+package com.wotagei.cam.ui
+
+import com.wotagei.cam.core.CamPill
+import com.wotagei.cam.core.HudItem
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/**
+ * 「编辑控件」页与录制页共用的位置模型（docs/plan/13 第 5、8 条 + 用户定的两级模型）。
+ *
+ * ## 两级，而不是每颗一个坐标
+ * 可拖动的单位是 **5 枚容器**（[HudZone]），每枚一份 (x, y)；容器**内**的条目可以拖拽换序，
+ * 也可以挪到另一枚容器。这样「所有控件都能拖」成立，同时保住两件事：
+ * - 悬浮 Dock 的观感（底板仍只包住内容，不是通栏条）；
+ * - 「快门中心＝可视窗口水平中心」：底栏那两枚等宽槽的算式（[com.wotagei.cam.ui.anim.MergeSlot]）
+ *   一行没动，x=0 档仍是居中基准，用户把整枚 Dock 搬走时搬的是「已经居中的那一整块」。
+ *
+ * 明确**不做**（留给后续批次，见 B4 交付报告）：跨容器的自由坐标（每颗一份 x,y）、改尺寸、改层级。
+ * 重叠只提示不禁止。
+ *
+ * ## 本文件是纯 Kotlin
+ * 没有 Android/Compose 依赖，所以 schema 编解码、默认表、越界钳制、隐藏后位置保留、换序/跨容器、
+ * 底栏 y 落位全部能在 JVM 单测里真跑（`HudLayout*Test`），不需要 Robolectric。
+ */
+
+/** 条目在容器内的排布主轴：决定「拖到第几格」怎么算 */
+enum class HudAxis { ROW, COLUMN, GRID }
+
+/**
+ * 可拖动的容器。[key] 是持久化里的单字母 id（改它等于改存量配置语义，只能加不能改）。
+ *
+ * 每枚容器的**默认位置**不写在这里，而是「原生对齐」那条分支（见 [ZonePlacement.isDefault]）：
+ * 默认值＝B1–B3 定稿时的对齐方式与内边距，由组合期实测避让量算出来，
+ * 硬写一串 dp 数就等于把「8dp 起始内边距」这类既有真源复制一份到持久化层，迟早分叉。
+ */
+enum class HudZone(val key: String, val axis: HudAxis) {
+    /** 顶栏胶囊组：录制计时/状态那颗 + 画幅/容量段 */
+    TOP("T", HudAxis.ROW),
+
+    /** 左竖 Dock：创作项 */
+    LEFT("L", HudAxis.COLUMN),
+
+    /** 右竖 Dock：取景辅助与变焦/对焦/防抖 */
+    RIGHT("R", HudAxis.COLUMN),
+
+    /** 右下常驻读数块（六项第 4 条搬到录制键右侧那一块） */
+    READOUT("D", HudAxis.GRID),
+
+    /** 底栏 Dock：缩略图 + 快门 + 镜头那颗；它的 y 就是第 8 条的「上栏/下栏」 */
+    BOTTOM("B", HudAxis.ROW);
+
+    companion object {
+        val ALL: List<HudZone> = values().toList()
+        fun fromKey(raw: String?): HudZone? = ALL.firstOrNull { it.key == raw }
+    }
+}
+
+/**
+ * 一颗可编辑控件的引用。
+ *
+ * 两个命名空间必须分开编码：`CamPill.ZOOM`（右竖 Dock 那颗胶囊）与 `HudItem.ZOOM`（读数块那颗读数）
+ * 是**两个东西**，共用 ordinal 会让持久化串自相矛盾。所以 id = 字母前缀 + ordinal：`P<n>` / `H<n>`。
+ */
+data class HudEntry(val kind: HudEntryKind, val ordinal: Int) {
+
+    /** 对应 [CamPill] 开关位；[HudEntryKind.READOUT] 一律 null */
+    val pill: CamPill? get() = if (kind == HudEntryKind.PILL) CamPill.ALL.getOrNull(ordinal) else null
+
+    /** 对应 [HudItem] 开关位；[HudEntryKind.PILL] 一律 null */
+    val item: HudItem? get() = if (kind == HudEntryKind.READOUT) HudItem.ALL.getOrNull(ordinal) else null
+
+    /** 持久化 token；[pill]/[item] 都取不到（越界 ordinal）时仍是这个串，由 [HudEntry.fromId] 拒绝 */
+    val id: String get() = (if (kind == HudEntryKind.PILL) "P" else "H") + ordinal
+
+    /** 设置页/编辑页显示的名字（走资源，不散写字面量）；ordinal 越界的坏条目返回 null */
+    val labelRes: Int? get() = pill?.labelRes ?: item?.labelRes
+
+    /** 未编辑时的归属容器 = B1–B3 定稿位置 */
+    val homeZone: HudZone
+        get() = when (kind) {
+            HudEntryKind.READOUT -> HudZone.READOUT
+            // 认枚举名而不是 ordinal：新增一颗 CamPill 时这条 when 编译不过，逼着当场定容器；
+            // 按 ordinal 写死数字位则会给它一个"看起来对"的默认落位，且整表错位测不出来
+            HudEntryKind.PILL -> when (pill) {
+                CamPill.SIZE, CamPill.STORAGE -> HudZone.TOP            // 顶栏两段
+                CamPill.LENS -> HudZone.BOTTOM                           // 底栏那颗（六项第 7 条从顶栏搬来）
+                CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH -> HudZone.LEFT
+                CamPill.LEVEL, CamPill.VOLUME, CamPill.BT,
+                CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB -> HudZone.RIGHT
+                // 越界 ordinal：[HudLayoutTable.normalize] 会把这种坏条目丢掉，这里只需给个不抛的值
+                null -> HudZone.RIGHT
+            }
+        }
+
+    override fun toString(): String = id
+
+    companion object {
+        /** 全部可编辑条目 = 13 颗 CamPill + 7 颗 HudItem；顺序即持久化里的稳定顺序 */
+        val ALL: List<HudEntry> =
+            CamPill.ALL.map { HudEntry(HudEntryKind.PILL, it.ordinal) } +
+                HudItem.ALL.map { HudEntry(HudEntryKind.READOUT, it.ordinal) }
+
+        /** 坏串（手改 prefs、版本不符、ordinal 越界）返回 null，由调用方丢弃而不是抛 */
+        fun fromId(raw: String): HudEntry? {
+            if (raw.length < 2) return null
+            val kind = when (raw[0]) {
+                'P' -> HudEntryKind.PILL
+                'H' -> HudEntryKind.READOUT
+                else -> return null
+            }
+            val n = raw.substring(1).toIntOrNull() ?: return null
+            val size = if (kind == HudEntryKind.PILL) CamPill.ALL.size else HudItem.ALL.size
+            return if (n in 0 until size) HudEntry(kind, n) else null
+        }
+
+        fun of(pill: CamPill) = HudEntry(HudEntryKind.PILL, pill.ordinal)
+        fun of(item: HudItem) = HudEntry(HudEntryKind.READOUT, item.ordinal)
+    }
+}
+
+enum class HudEntryKind { PILL, READOUT }
+
+/**
+ * 一枚容器的位置。
+ *
+ * 两轴**一起**是绝对值、一起是默认（[isDefault]）：编辑页一次拖动必然同时给出 x 与 y，
+ * 而「一轴绝对、一轴原生」只能来自手改 prefs，那种半吊子状态一律按未编辑处理（[HudLayoutTable.normalize] 会抹平）。
+ *
+ * 绝对值是**容器左上角相对 root 安全区左上角**的 dp 偏移，不是相对原生对齐点的偏移——
+ * 存绝对值才谈得上「钳进安全区」，也才让编辑页与录制页对同一个数给出同一个视觉位置。
+ */
+data class ZonePlacement(val xDp: Int, val yDp: Int) {
+    val isDefault: Boolean get() = xDp < 0 || yDp < 0
+
+    companion object {
+        val DEFAULT = ZonePlacement(-1, -1)
+    }
+}
+
+/** 一枚容器的完整状态：位置 + 条目顺序（顺序里**含被隐藏的条目**，见 [HudLayoutTable.visibleOrderOf]） */
+data class ZoneState(val pos: ZonePlacement, val order: List<HudEntry>)
+
+/**
+ * 位置表本体（版本化）。持久化键 `hud_layout`，编解码见 [encode] / [decode]。
+ */
+data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) {
+
+    fun posOf(zone: HudZone): ZonePlacement = zones[zone]?.pos ?: ZonePlacement.DEFAULT
+
+    /** 该容器的完整顺序（含被设置页关掉的条目） */
+    fun orderOf(zone: HudZone): List<HudEntry> = zones[zone]?.order ?: emptyList()
+
+    /**
+     * 录制页/编辑页真正渲染的那份顺序：[visible]（设置里开着显示的条目）过滤一遍，**顺序仍来自表**。
+     *
+     * 「控件被隐藏、再打开显示时位置保持用户改过的值」就落在这里 + [moveEntryTo]：
+     * 隐藏不写表，所以表里一直是用户放好的那个位置。
+     */
+    fun visibleOrderOf(zone: HudZone, visible: Set<HudEntry>): List<HudEntry> =
+        orderOf(zone).filter { it in visible }
+
+    /** 写一轴绝对位置（另一轴同时改，见 [ZonePlacement]）；越界钳制由调用方先做 */
+    fun withZonePos(zone: HudZone, xDp: Int, yDp: Int): HudLayoutTable {
+        val cur = zones[zone] ?: ZoneState(ZonePlacement.DEFAULT, emptyList())
+        return copy(zones = zones + (zone to cur.copy(pos = ZonePlacement(xDp, yDp))))
+    }
+
+    /**
+     * 把条目挪到 [zone] 的第 [index] 格（同容器换序 = 同一个调用）。
+     *
+     * 一次完整的移动 = 从**所有**容器里摘掉它，再插进目标容器第 [index] 格（越界夹到 [0, size]）。
+     * 先摘后插保证「一颗控件同时只属于一枚容器」，也让「隐藏中的条目被挪走」这条路径与
+     * 可见条目走的是同一份数据（[visibleOrderOf] 只是过滤，不改表）。
+     */
+    fun moveEntryTo(entry: HudEntry, zone: HudZone, index: Int): HudLayoutTable {
+        val orders = LinkedHashMap<HudZone, MutableList<HudEntry>>()
+        HudZone.ALL.forEach { z ->
+            val state = zones[z]
+            val list = (state?.order ?: defaultOrderOf(z)).toMutableList()
+            list.remove(entry)
+            orders[z] = list
+        }
+        val target = orders.getValue(zone)
+        target.add(index.coerceIn(0, target.size), entry)
+        val nextZones = HudZone.ALL.associateWith { z ->
+            ZoneState(zones[z]?.pos ?: ZonePlacement.DEFAULT, orders.getValue(z).toList())
+        }
+        return HudLayoutTable(version, nextZones)
+    }
+
+    /** 条目当前归属（表里没有时回 [HudEntry.homeZone]） */
+    fun sourceZoneOf(entry: HudEntry): HudZone =
+        HudZone.ALL.firstOrNull { entry in orderOf(it) } ?: entry.homeZone
+
+    /** 整张表的条目（按容器分组、容器按 [HudZone.ALL] 顺序） */
+    fun allEntries(): List<HudEntry> = HudZone.ALL.flatMap { orderOf(it) }
+
+    /**
+     * 补全 + 去重 + 丢坏值：
+     * - 同一个 id 出现在两枚容器 → **先到先得**，后出现的丢掉（手改 prefs 造成的重复不能让一颗控件渲染两遍）；
+     * - 表里完全没有的条目 → 追加到它的 [HudEntry.homeZone] 末尾（新增 CamPill 位时老配置自动补齐）；
+     * - ordinal 越界的条目 → 丢弃。
+     */
+    fun normalize(): HudLayoutTable {
+        val seen = HashSet<HudEntry>()
+        val placed = LinkedHashMap<HudZone, MutableList<HudEntry>>()
+        HudZone.ALL.forEach { placed[it] = mutableListOf() }
+        for (zone in HudZone.ALL) {
+            for (e in orderOf(zone)) {
+                if (e.pill == null && e.item == null) continue
+                if (seen.add(e)) placed.getValue(zone).add(e)
+            }
+        }
+        for (e in HudEntry.ALL) {
+            if (seen.add(e)) placed.getValue(e.homeZone).add(e)
+        }
+        val nextZones = LinkedHashMap<HudZone, ZoneState>()
+        HudZone.ALL.forEach { z ->
+            val base = zones[z]
+            // 半吊子位置（一轴绝对一轴哨兵）按未编辑处理，见 ZonePlacement 的说明
+            val pos = base?.pos?.takeIf { it.xDp >= 0 && it.yDp >= 0 } ?: ZonePlacement.DEFAULT
+            nextZones[z] = ZoneState(pos, placed.getValue(z).toList())
+        }
+        return HudLayoutTable(version, nextZones)
+    }
+
+    /**
+     * 编码：`v1;T,8,4,P11,P12;L,-1,-1,P6,P7,P8,P9;…`
+     *
+     * 分号分「版本段 / 五个容器段」，逗号分「x / y / id 串」；哨兵 `-1` = 该容器仍在默认位置。
+     * 与 [CurveStack] 一样是一条紧凑字符串，同一个 prefs 文件、同样的 `putString + runCatching` 风格。
+     */
+    fun encode(): String = buildString {
+        append("v").append(version)
+        for (zone in HudZone.ALL) {
+            append(';').append(zone.key).append(',')
+            append(posOf(zone).xDp).append(',').append(posOf(zone).yDp)
+            append(',')
+            val order = orderOf(zone)
+            order.forEachIndexed { i, e -> if (i > 0) append(','); append(e.id) }
+        }
+    }
+
+    companion object {
+        /** 当前 schema 版本；改格式就 +1，并在 [decode] 里对旧版本做处置 */
+        const val CURRENT_VERSION = 1
+
+        /** 未编辑过的初值：位置全默认、顺序全按 [HudEntry.homeZone] 内的枚举声明序 */
+        fun default(): HudLayoutTable = HudLayoutTable(
+            CURRENT_VERSION,
+            HudZone.ALL.associateWith { ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(it)) }
+        ).normalize()
+
+        /**
+         * 默认表里每枚容器的条目顺序 = **B1–B3 定稿代码里的书写顺序**，逐个对过源码：
+         * · 顶栏 `TopCapsule` 的 buildList：SIZE → STORAGE
+         * · 左竖 Dock：参考线 → 屏幕监看 → RGB 曲线 → 闪光灯
+         * · 右竖 Dock：姿态仪 → 音量表 → 蓝牙 → 变焦 → 对焦 → 防抖
+         * · 读数块：`HudItem.typesOf(mask)` 的枚举序（快门 帧率 码率 ISO EV 白平衡 变焦）
+         * · 底栏：只有镜头那颗是可编辑条目（缩略图与快门不可隐藏，不进表）
+         */
+        fun defaultOrderOf(zone: HudZone): List<HudEntry> = when (zone) {
+            HudZone.TOP -> listOf(HudEntry.of(CamPill.SIZE), HudEntry.of(CamPill.STORAGE))
+            HudZone.LEFT -> listOf(
+                HudEntry.of(CamPill.REFLINE), HudEntry.of(CamPill.MONITOR),
+                HudEntry.of(CamPill.CURVE), HudEntry.of(CamPill.FLASH)
+            )
+            HudZone.RIGHT -> listOf(
+                HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.BT),
+                HudEntry.of(CamPill.ZOOM), HudEntry.of(CamPill.FOCUS), HudEntry.of(CamPill.STAB)
+            )
+            HudZone.BOTTOM -> listOf(HudEntry.of(CamPill.LENS))
+            HudZone.READOUT -> HudItem.ALL.map { HudEntry.of(it) }
+        }
+
+        /**
+         * 解码：任何异常（null / 空串 / 缺段 / 未知容器 id / 版本不符 / 数字炸）都**不抛**，
+         * 坏的那一段丢掉、其余保留，整张表最后过一次 [normalize]。
+         * 版本号**比本工程新**时整表按默认处理：新格式老代码读不懂，硬解会写出错位置。
+         */
+        fun decode(raw: String?): HudLayoutTable {
+            if (raw.isNullOrBlank()) return default()
+            val parts = raw.split(';')
+            val header = parts.firstOrNull().orEmpty()
+            val version = header.removePrefix("v").toIntOrNull()
+            if (version == null || version > CURRENT_VERSION) return default()
+            if (version < CURRENT_VERSION) return default() // v1 是第一版，还没有旧的版要迁
+            val zones = LinkedHashMap<HudZone, ZoneState>()
+            for (seg in parts.drop(1)) {
+                val f = seg.split(',')
+                val zone = HudZone.fromKey(f.getOrNull(0)) ?: continue
+                val x = f.getOrNull(1)?.toIntOrNull() ?: -1
+                val y = f.getOrNull(2)?.toIntOrNull() ?: -1
+                val order = f.drop(3).mapNotNull { HudEntry.fromId(it) }
+                zones[zone] = ZoneState(ZonePlacement(x, y), order)
+            }
+            return HudLayoutTable(version, zones).normalize()
+        }
+    }
+}
+
+// ------------------------------------------------------------------ 越界钳制与落位（纯函数）
+
+/**
+ * 安全区与避让量，单位全 dp。
+ *
+ * - [width]/[height]：root 容器套上 `safeDrawingPadding()` 之后的实测尺寸（不是 `screenWidthDp`）；
+ * - [endInsetDp]：喂进来的是 `VisibleEndInset`，**只有横屏非 0**（两页都按方向取，与录制页同一条判据）。
+ *   它依据的"可视右缘 1532"已被 2026-09-29 真机复测推翻（那条不可视带在**左**短边，且外层
+ *   `safeDrawingPadding()` 已经避开），取值与方向等用户确认后统一改，见 docs/plan/13 §九·补。
+ *   这一轮它只参与"钳制上限"的算术，不参与任何新增落位。
+ * - [topAvoidDp]/[bottomAvoidDp]：顶栏与底栏的**实测**避让量（S2-1 / S2-2 C 那两路回报），
+ *   不是新写的魔法数。编辑页的这两个值是它自己那条操作栏与底栏 Dock 实占带的高。
+ */
+data class HudAreaDp(
+    val width: Int,
+    val height: Int,
+    val endInsetDp: Int,
+    val topAvoidDp: Int,
+    val bottomAvoidDp: Int
+)
+
+/** 一个 dp 矩形（安全区局部坐标，左上原点） */
+data class HudRectDp(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val width: Int get() = right - left
+    val height: Int get() = bottom - top
+    fun contains(x: Int, y: Int): Boolean = x in left until right && y in top until bottom
+}
+
+data class HudPointDp(val x: Int, val y: Int)
+
+/**
+ * 横向可放区间 `[0, 可视右缘 − 容器宽]`；可视右缘 = 安全区宽 − [HudAreaDp.endInsetDp]。
+ * 容器比可视区还宽（120% 文本 + 极窄分屏）时上限夹成 0，也就是贴左放，**不许为负**。
+ */
+fun clampZoneX(area: HudAreaDp, widthDp: Int): Int =
+    (area.width - area.endInsetDp - widthDp).coerceAtLeast(0)
+
+/**
+ * 纵向可放区间。
+ * - [HudZone.TOP] / [HudZone.BOTTOM]：整条安全区（顶栏本来贴顶、底栏可以搬到上栏，见第 8 条）；
+ * - 其余三枚：`[topAvoid, height − bottomAvoid − h]` —— 这就是「钳制必须吃 topBarH / bottomBarH 实测避让量」的落点。
+ *
+ * 带高不够（告警条 + 满配读数把带挤没了）时退成整条安全区，**区间永不为负**，
+ * 否则 `coerceIn` 会抛而整个 HUD 就没了。
+ */
+fun clampZoneYRange(zone: HudZone, area: HudAreaDp, heightDp: Int): IntRange {
+    val band = zone != HudZone.TOP && zone != HudZone.BOTTOM
+    val lo = if (band) area.topAvoidDp.coerceAtLeast(0) else 0
+    val hi = if (band) area.height - area.bottomAvoidDp - heightDp else area.height - heightDp
+    // 带高不够（告警条 + 满配读数把带挤没了，或容器本身比屏还高）时退成整条安全区，
+    // 区间不许为负 —— `coerceIn` 遇到 lo > hi 是直接抛的，那一抛整个 HUD 就没了
+    return if (hi < lo) 0..(area.height - heightDp).coerceAtLeast(0) else lo..hi
+}
+
+/** 绝对位置钳进安全区（尺寸未测到时传 0，等价于「只保证左上角不越界」） */
+fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: HudAreaDp): ZonePlacement {
+    val maxX = clampZoneX(area, wDp)
+    val yRange = clampZoneYRange(zone, area, hDp)
+    return ZonePlacement(xDp.coerceIn(0, maxX), yDp.coerceIn(yRange.first, yRange.last))
+}
+
+/**
+ * 外接矩形重叠检测（重叠**只提示不禁止**，所以这里只负责「提示看得懂」：把重叠的两枚容器报出来）。
+ * 返回按 [HudZone.ALL] 顺序去重后的容器名对，调用方拿它拼一句人话。
+ */
+fun overlappingZones(rects: Map<HudZone, HudRectDp>): List<Pair<HudZone, HudZone>> {
+    val out = mutableListOf<Pair<HudZone, HudZone>>()
+    val list = HudZone.ALL.filter { rects.containsKey(it) }
+    for (i in list.indices) {
+        for (j in i + 1 until list.size) {
+            val a = rects.getValue(list[i])
+            val b = rects.getValue(list[j])
+            if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+                out += list[i] to list[j]
+            }
+        }
+    }
+    return out
+}
+
+/**
+ * 落点在哪枚容器：命中**最里面**（面积最小）的那枚，都不命中返回 null（= 这次拖动不改归属）。
+ * 取最小面积而不是第一个命中，是因为读数块贴在底栏 Dock 右上时会嵌套；按顺序取第一枚就会把
+ * 「拖进读数块」判成「拖进底栏」。
+ */
+fun zoneAt(pointer: HudPointDp, rects: Map<HudZone, HudRectDp>): HudZone? =
+    rects.filter { it.value.contains(pointer.x, pointer.y) }.minByOrNull { it.value.width * it.value.height }?.key
+
+/**
+ * 松手后条目该插到目标容器的第几格。
+ *
+ * [items] 是目标容器**当前渲染顺序**的实测矩形（安全区局部坐标，与 [pointer] 同一坐标系）。
+ * - ROW / COLUMN：沿主轴数「有几颗的中心比指针更靠前」；
+ * - GRID（读数块那种一行多颗、按 [HudZone] 换行）：先按上下边界把行分簇，再在指针那一行里数横向。
+ *
+ * 返回 0..size，越界由 [HudLayoutTable.moveEntryTo] 再夹一次。
+ */
+fun dropIndexFor(axis: HudAxis, items: List<HudRectDp>, pointer: HudPointDp): Int {
+    if (items.isEmpty()) return 0
+    return when (axis) {
+        HudAxis.ROW -> items.count { (it.left + it.right) / 2 < pointer.x }
+        HudAxis.COLUMN -> items.count { (it.top + it.bottom) / 2 < pointer.y }
+        HudAxis.GRID -> {
+            val rows = clusterRows(items)
+            val row = rows.firstOrNull { pointer.y in it.first().top..it.last().bottom }
+                ?: rows.minByOrNull { abs((it.first().top + it.last().bottom) / 2 - pointer.y) }
+            if (row == null) items.size else {
+                val beforeRows = rows.takeWhile { it !== row }.sumOf { it.size }
+                beforeRows + row.count { (it.left + it.right) / 2 < pointer.x }
+            }
+        }
+    }
+}
+
+/** 按竖直方向重叠把条目分簇成「行」（保持入参顺序，簇内也按入参顺序） */
+private fun clusterRows(items: List<HudRectDp>): List<List<HudRectDp>> {
+    val rows = mutableListOf<MutableList<HudRectDp>>()
+    for (rect in items.sortedBy { it.top }) {
+        val hit = rows.firstOrNull { row ->
+            val r = row.first()
+            rect.top < r.bottom && r.top < rect.bottom
+        }
+        (hit ?: mutableListOf<HudRectDp>().also { rows += it }).add(rect)
+    }
+    // 还原入参顺序，调用方要的是「按当前顺序插到哪」
+    return rows.map { row -> items.filter { it in row } }.filter { it.isNotEmpty() }
+}
+
+// ------------------------------------------------------------------ 第 8 条：底栏 Dock 的上栏/下栏
+
+/**
+ * 底栏 Dock 的两档 y（用户第 8 条：长按收起两颗 → 上下拖 → 松手落「上栏 / 下栏」）。
+ *
+ * **下栏 = 定稿位置**（底边贴安全区底再让开 [BottomBarOuterPadDp]），
+ * **上栏 = 下栏再上一整排**，间距一枚 [gapDp]（调用方传令牌 `WotaSpace.s`，这里不散写观感值）：
+ * `上栏 = 安全区高 − 下边距 − 排高 − 排高 − gap`。全程只有实测高与令牌，没有机型数值。
+ */
+fun dockLowerY(area: HudAreaDp, heightDp: Int, bottomPadDp: Int): Int =
+    (area.height - bottomPadDp - heightDp).coerceAtLeast(0)
+
+fun dockUpperY(area: HudAreaDp, heightDp: Int, bottomPadDp: Int, gapDp: Int): Int =
+    (dockLowerY(area, heightDp, bottomPadDp) - heightDp - gapDp).coerceAtLeast(0)
+
+/**
+ * 拖动位移 → 落在哪一栏（**只有两档**，第 8 条要的是「上栏 / 下栏」而不是自由 y）。
+ *
+ * [deltaYDp] 是相对下栏的竖直位移（屏幕坐标，向上为负）：往上过半程去上栏，其余一律回下栏。
+ * 上档取的是 [dockUpperY]，它本身已经被安全区顶边钳过，所以拖出上边界也只会贴到能放的最上面一格。
+ */
+fun dockSnapY(area: HudAreaDp, heightDp: Int, bottomPadDp: Int, gapDp: Int, deltaYDp: Int): Int {
+    val lower = dockLowerY(area, heightDp, bottomPadDp)
+    val upper = dockUpperY(area, heightDp, bottomPadDp, gapDp)
+    val pitch = lower - upper
+    return if (pitch > 0 && -deltaYDp.toFloat() >= pitch / 2f) upper else lower
+}
+
+/** px → dp 的整数换算（编辑页与录制页共写位置时用，避免出现第二套换算式） */
+fun pxToDp(px: Float, density: Float): Int =
+    if (density <= 0f) 0 else (px / density).roundToInt()
+
+/**
+ * 右竖 Dock 的下界要多让开常驻读数块那一截（六项第 4 条把读数搬到录制键右侧之后，两枚都在右缘，
+ * 不互相让位就会叠字）。左竖 Dock 与读数块本身不需要这一截，所以单独一条函数而不是改 [HudAreaDp] 的语义。
+ *
+ * 读数块空了回报 0，这一截缝就自己收回去（与改前 `padding(bottom = bottomBarH + hudStripH)` 同一条算式）。
+ */
+fun areaForRightDock(area: HudAreaDp, readoutHeightDp: Int): HudAreaDp =
+    area.copy(bottomAvoidDp = area.bottomAvoidDp + readoutHeightDp.coerceAtLeast(0))
+
+/**
+ * 第 8 条进入拖拽的 gate（13 号计划：正在录的时候不能让人把底栏搬走）。
+ *
+ * PREPARE / START / STOPPING 三态一律拒绝——「停止录制」是取景页最高优先级的手势，而拖拽会把
+ * 那一指的触摸盒整枚搬走；ERROR 不算忙（Recorder 那一侧已经复位，此时搬底栏不影响停录）。
+ */
+fun dockDragBlocked(status: com.wotagei.cam.camera.RecordStatus): Boolean =
+    status == com.wotagei.cam.camera.RecordStatus.PREPARE ||
+        status == com.wotagei.cam.camera.RecordStatus.START ||
+        status == com.wotagei.cam.camera.RecordStatus.STOPPING
+
+// ------------------------------------------------------------------ 容器内的条目渲染分组
+
+/**
+ * 把一枚容器的可见条目切成「一行一行」，五枚容器共用这一条算式（B1–B3 的高度账就靠它）。
+ *
+ * - [HudZone.TOP] / [HudZone.BOTTOM]：横排一行；
+ * - [HudZone.LEFT]：一行一颗；
+ * - [HudZone.RIGHT]：**S2-2 B 那条并排规则保留**——姿态仪与音量表在顺序里相邻时并成一行两列
+ *   （省下 ≈75dp，正好把变焦/对焦从折叠线下捞回来）。顺序被用户拆开就不再并排，
+ *   这是"用户可以重排"与"横屏 360dp 带高不够"两条要求唯一能同时成立的写法；
+ * - [HudZone.READOUT]：按 [perRow] 分行（[com.wotagei.cam.ui.anim.hudPerRowFor] 按可用宽与字体缩放取档）。
+ */
+fun hudRowGroups(zone: HudZone, order: List<HudEntry>, perRow: Int): List<List<HudEntry>> = when (zone) {
+    HudZone.TOP, HudZone.BOTTOM -> if (order.isEmpty()) emptyList() else listOf(order)
+    HudZone.LEFT -> order.map { listOf(it) }
+    HudZone.RIGHT -> {
+        val groups = mutableListOf<List<HudEntry>>()
+        val level = HudEntry.of(CamPill.LEVEL)
+        val volume = HudEntry.of(CamPill.VOLUME)
+        var i = 0
+        while (i < order.size) {
+            val next = order.getOrNull(i + 1)
+            if (order[i] == level && next == volume) {
+                groups += listOf(level, volume)
+                i += 2
+            } else if (order[i] == volume && next == level) {
+                groups += listOf(volume, level)
+                i += 2
+            } else {
+                groups += listOf(order[i])
+                i++
+            }
+        }
+        groups
+    }
+    HudZone.READOUT -> order.chunked(if (perRow < 1) 1 else perRow)
+}
+
+/**
+ * 右竖 Dock 的「并排」判据（单独暴露给用例）：姿态仪与音量表**相邻**才并排。
+ * 用户把音量表挪到别处、或把它关掉了（[order] 里没有它），都必须退回一行一颗。
+ */
+fun rightDockPacksLevelAndVolume(order: List<HudEntry>): Boolean {
+    val level = order.indexOf(HudEntry.of(CamPill.LEVEL))
+    val volume = order.indexOf(HudEntry.of(CamPill.VOLUME))
+    return level >= 0 && volume >= 0 && kotlin.math.abs(level - volume) == 1
+}

@@ -45,11 +45,14 @@ enum class UIOrientation(val persistValue: String) {
          *   「横竖都能录、且反向横屏也要能用」是既有需求（#21），并且正反向横屏切换时窗口尺寸不变、
          *   Compose 的 `onSizeChanged` 不会触发，`ui/CameraScreen.kt` 那边专门挂了 DisplayListener 才跟着转
          *   （该文件里 90↔270 的注释）；锁成单方向会把这条路堵死。
-         * - 非录制页（设置 / 相册 / 播放器 / 对比）：恒 `FULL_USER`，即继续跟随用户的系统旋转设置，
+         * - [hudPage] = 取景器那一圈控件的页面：录制页 **与「编辑控件」页**（13 号计划第 5 条）。
+         *   编辑页摆的就是录制页那五枚容器的坐标，两页必须同一套方向 + 同一套沉浸，
+         *   安全区才同名 —— 一个显示系统栏、一个隐藏，存进 hud_layout 的 (x, y) 就不是同一个位置。
+         * - 非 HUD 页（设置 / 相册 / 播放器 / 对比）：恒 `FULL_USER`，即继续跟随用户的系统旋转设置，
          *   本设置不越界去锁它们。这里形参收下 [orientation] 是为调用方写起来对称，语义上刻意忽略其值。
          */
-        fun screenOrientationOf(cameraPage: Boolean, orientation: UIOrientation): Int =
-            if (!cameraPage) {
+        fun screenOrientationOf(hudPage: Boolean, orientation: UIOrientation): Int =
+            if (!hudPage) {
                 ActivityInfo.SCREEN_ORIENTATION_FULL_USER
             } else {
                 when (orientation) {

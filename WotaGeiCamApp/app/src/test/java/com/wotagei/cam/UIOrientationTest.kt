@@ -22,7 +22,7 @@ class UIOrientationTest {
 
     @Test
     fun `横屏档锁横屏但保留两个朝向自动翻转`() {
-        val o = UIOrientation.screenOrientationOf(cameraPage = true, orientation = UIOrientation.LANDSCAPE)
+        val o = UIOrientation.screenOrientationOf(hudPage = true, orientation = UIOrientation.LANDSCAPE)
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, o)
         // 钉死「不是单方向锁」：锁成 LANDSCAPE / USER_LANDSCAPE / LOCKED 会让反向横屏（270°）录不了，
         // 且 90↔270 切换不再触发显示变化，CameraScreen 的 DisplayListener 那条路就白挂了
@@ -34,7 +34,7 @@ class UIOrientationTest {
 
     @Test
     fun `竖屏档锁竖屏且保留两个朝向自动翻转`() {
-        val o = UIOrientation.screenOrientationOf(cameraPage = true, orientation = UIOrientation.PORTRAIT)
+        val o = UIOrientation.screenOrientationOf(hudPage = true, orientation = UIOrientation.PORTRAIT)
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT, o)
         assertNotEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, o)
         assertNotEquals(ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT, o)
@@ -48,7 +48,7 @@ class UIOrientationTest {
             assertEquals(
                 "$orientation 档下非录制页不该被锁方向",
                 ActivityInfo.SCREEN_ORIENTATION_FULL_USER,
-                UIOrientation.screenOrientationOf(cameraPage = false, orientation = orientation)
+                UIOrientation.screenOrientationOf(hudPage = false, orientation = orientation)
             )
         }
     }

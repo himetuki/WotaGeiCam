@@ -85,4 +85,7 @@
     <string name="cam_pill_size">画幅</string>
     <string name="cam_pill_storage">剩余空间</string>
     <string name="set_pill_note">关掉即从录制页消失；快门、缩略图与设置入口不可隐藏</string>
+    <!-- 编辑控件位置（键 hud_layout）：入口放在「取景器常驻功能」分组里 -->
+    <string name="set_hud_editor">编辑控件位置</string>
+    <string name="set_hud_editor_note">只有上面已开启显示的控件可编辑：拖容器改位置、容器内拖条目换序、拖到别的容器；改完点「保存」，录制页立刻生效，杀进程重进仍在。位置不会因为控件被隐藏而回到默认，要回默认用编辑页里的「恢复默认」</string>
 </resources>

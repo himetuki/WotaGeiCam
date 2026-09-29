@@ -115,6 +115,16 @@ object WotaSettings {
      * 所以由 `MainActivity.applyPageMode()` 每次换页直读 prefs。
      */
     const val KEY_UI_ORIENTATION = "ui_orientation"
+    /**
+     * 可拖动容器的位置表（13 号计划第 5、8 条）：版本化的「容器 id → (x, y) + 容器内条目顺序」，
+     * 编解码与钳制全在 [HudLayoutTable]，一条紧凑串存进同一个 prefs 文件。
+     *
+     * 与 `hud_items` / `ui_orientation` 同一类**纯 UI 设置**：消费方每次组合直读 prefs，
+     * **不走 [applyDefaultsOnce]**（那条链进程内只套一次，会把编辑页"保存即生效"与设置页的改动挡掉）。
+     * 缺键 = [HudLayoutTable.default]，也就是 B1–B3 的定稿位置；控件被隐藏再打开显示时不回默认，
+     * 落点在 [HudLayoutTable.visibleOrderOf]（过滤只读表、不改表）。
+     */
+    const val KEY_HUD_LAYOUT = "hud_layout"
     const val KEY_TEXT_SCALE_CAMERA = "text_scale_camera"
     const val KEY_TEXT_SCALE_SETTINGS = "text_scale_settings"
     const val KEY_TEXT_SCALE_DIALOG = "text_scale_dialog"
@@ -176,6 +186,22 @@ object WotaSettings {
         prefs.edit().putString(KEY_UI_ORIENTATION, orientation.persistValue).apply()
     }
 
+    /** 位置表：坏串由 [HudLayoutTable.decode] 吞掉并回落默认表，不抛（与 [curveStack] 同一条纪律） */
+    fun hudLayout(prefs: SharedPreferences): HudLayoutTable =
+        HudLayoutTable.decode(prefs.getString(KEY_HUD_LAYOUT, null))
+
+    fun setHudLayout(prefs: SharedPreferences, table: HudLayoutTable) {
+        prefs.edit().putString(KEY_HUD_LAYOUT, table.encode()).apply()
+    }
+
+    /**
+     * 重置：整张表清回默认（删键，缺键就是 [HudLayoutTable.default]）。
+     * 「即时可重做」靠的是调用方留着重置前那一份串，写回 [setHudLayout] 就是撤销。
+     */
+    fun clearHudLayout(prefs: SharedPreferences) {
+        prefs.edit().remove(KEY_HUD_LAYOUT).apply()
+    }
+
     /** 各屏文本高度缩放系数；100% 即工程默认排版，越界值钳回区间内 */
     fun textScale(prefs: SharedPreferences, key: String): Float =
         (prefs.getInt(key, 100).coerceIn(TEXT_SCALE_PCTS.first(), TEXT_SCALE_PCTS.last()) / 100f)
@@ -228,7 +254,11 @@ object WotaSettings {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenHudEditor: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     val prefs = remember(context) { WotaSettings.of(context) }
     var motionMode by remember { mutableStateOf(WotaSettings.motionMode(prefs)) }
@@ -486,6 +516,19 @@ fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     )
                 }
             }
+            Spacer(Modifier.height(8.dp))
+            // 位置编辑入口（键 hud_layout）：只列上面开着显示的控件，入口文案必须把这条说清楚
+            Text(
+                text = stringResource(R.string.set_hud_editor_note),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim
+            )
+            Spacer(Modifier.height(6.dp))
+            ChipCell(
+                text = stringResource(R.string.set_hud_editor),
+                selected = false,
+                onClick = onOpenHudEditor
+            )
         }
 
         SettingGroup(stringResource(R.string.set_group_storage))
