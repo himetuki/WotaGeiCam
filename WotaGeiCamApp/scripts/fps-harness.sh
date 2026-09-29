@@ -144,7 +144,12 @@ if [ "$DRIVE" = 1 ]; then
   DXML="$OUT/driver_dump.xml"
   "$ADB" shell uiautomator dump /sdcard/wota_driver.xml >/dev/null 2>&1
   "$ADB" pull /sdcard/wota_driver.xml "$OUTW/$(basename "$DXML")" >/dev/null 2>&1 && "$ADB" shell rm -f /sdcard/wota_driver.xml >/dev/null 2>&1
-  TAP=$(python - "$DXML" <<'PY'
+  # ⚠ Windows 版 python **不认 MSYS 绝对路径**（`/f/Works/...`），传进去就是"文件读不到"，
+  # 而那会被下面那句误诊成"胶囊都被关了"。这条教训来自 verify-on-device.sh 的 `c27052e`，同一个坑不许栽第三次。
+  if [ ! -f "$DXML" ]; then
+    say "!! driver dump 没落地（pull 失败），这一组**没有动效窗口**，label 要如实反映"
+  else
+  TAP=$(python - "$(cygpath -w "$DXML" 2>/dev/null || echo "$DXML")" <<'PY'
 import re,sys
 try: t=open(sys.argv[1],encoding='utf-8').read()
 except Exception: sys.exit(0)
@@ -162,6 +167,7 @@ PY
   else
     say "⚠ 没在 dump 里找到常驻胶囊（hud_pills 可能把它们都关了），这一组**没有动效窗口**，label 要如实反映"
   fi
+  fi
 fi
 
 sleep "$SEC"
@@ -174,7 +180,12 @@ hr
 # Windows 版 dump 有时带 \r，统一一下再算
 tr -d '\r' < "$OUT/gfxinfo_raw.txt" > "$OUT/gfxinfo.txt"
 
-python - "$OUT/gfxinfo.txt" "$LABEL" "$MOTION" "$BLUR" "$EXPECT_FPS" "$((T1-T0))" <<'PY'
+# ⚠ 同一个坑第二处：Windows 版 python 不认 MSYS 绝对路径，这里也换成 Windows 形式
+if [ ! -s "$OUT/gfxinfo.txt" ]; then
+  say "!! gfxinfo 输出是空的——这一组没有可用数据（常见原因：没进到应用、或包名不对）"
+  exit 1
+fi
+python - "$(cygpath -w "$OUT/gfxinfo.txt" 2>/dev/null || echo "$OUT/gfxinfo.txt")" "$LABEL" "$MOTION" "$BLUR" "$EXPECT_FPS" "$((T1-T0))" <<'PY'
 import re,sys
 path,label,motion,blur,expect,wall = sys.argv[1:7]
 t=open(path,encoding='utf-8',errors='replace').read()
