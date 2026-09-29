@@ -25,29 +25,49 @@ import org.junit.Test
 /**
  * 越界钳制、重叠提示、底栏两档落位（13 号计划第 5、8 条里唯一能纯算的两块）。
  *
- * 数值档用的是**录制页实测同源的那些数**（横屏 800×360、右缘不可视带 34dp、顶栏 44dp、底栏 72dp、
- * 底栏外边距 6dp、上栏间距取令牌 `WotaSpace.s` 8dp），所以这里钉的是"钳制吃了哪些避让量"，
- * 而不是随手编一组好算的数。钳制本身是真断言：把 `endInsetDp` 忘了、把 `topAvoid` 当 0、
- * 区间算成负数（`coerceIn` 会抛）这三类退化都会当场红。
+ * 数值档用的是**录制页实测同源的那些数**：横屏那枚 `HudAreaDp.width` 取的是套上 `safeDrawingPadding()`
+ * 之后的**安全区实测宽 766dp**（本机 1600px 面板让掉挖孔那条 68px 边），不是根容器的 800dp；
+ * 竖屏 360dp（侧边没有不可视带，那一层只在上下让）。顶栏 44dp、底栏 72dp、底栏外边距 6dp、
+ * 上栏间距取令牌 `WotaSpace.s` 8dp——都是首帧兜底/实测回报那两条真源，不是随手编的好算数。
+ *
+ * 钳制本身是真断言：把安全区宽当根容器宽、把 `topAvoid` 当 0、区间算成负数（`coerceIn` 会抛）、
+ * 底栏落位写进绝对 x 这四类退化都会当场红。
  */
 class HudLayoutClampTest {
 
-    /** 横屏默认档：safeDrawing 后 800×360，§58 的右缘让位 34，顶栏 44（S2-1 实测回报的兜底档），底栏 72 */
-    private val land = HudAreaDp(width = 800, height = 360, endInsetDp = 34, topAvoidDp = 44, bottomAvoidDp = 72)
+    /** 横屏：safeDrawing 后实测 766×360（挖孔那条边已经在里面），顶栏 44（S2-1 实测回报的兜底档），底栏 72 */
+    private val land = HudAreaDp(width = 766, height = 360, topAvoidDp = 44, bottomAvoidDp = 72)
 
-    /** 竖屏同一台机：根容器就是可视宽，右缘让位必须为 0（S3-3：套上去会把快门反向推偏） */
-    private val port = HudAreaDp(width = 360, height = 800, endInsetDp = 0, topAvoidDp = 44, bottomAvoidDp = 72)
+    /** 竖屏同一台机：360×800，侧边不让位（旧写法在这里再扣 34dp 就是凭空吃掉一档） */
+    private val port = HudAreaDp(width = 360, height = 800, topAvoidDp = 44, bottomAvoidDp = 72)
 
     @Test
-    fun rightEdgeInsetOnlyComesFromLandscape() {
-        // 可视右缘 = 800 − 34 = 766；宽 94dp 的右竖 Dock 最右只能摆到 766 − 94 = 672
+    fun rightEdgeIsTheSafeAreaEdgeItself() {
+        // 横屏：安全区宽 766 就是可视右缘（挖孔那条边已由外层 safeDrawingPadding 让掉，不再扣第二笔）
         assertEquals(672, clampZoneX(land, 94))
-        // 竖屏没有那条不可视带，360 就是右缘
+        // 竖屏：360 就是可视右缘，侧边本来就没有不可视带
         assertEquals(266, clampZoneX(port, 94))
         // 容器比可视区还宽（120% 文本 + 极窄分屏）：贴左放，**不许为负**
         assertEquals(0, clampZoneX(land, 900))
         // 零宽（条目全被关掉、底板空了）时上限就是可视右缘本身，不是 0
         assertEquals(766, clampZoneX(land, 0))
+        // 算式里没有"方向"这一项：挖孔落左短边还是右短边，safeDrawingPadding 都给 766 宽的安全区，
+        // 调用方把实测宽原样报上来就两个姿态都对（旧的 endInsetDp 是按方向写死的一补，换姿态必错一次，
+        // #68 已删）。这条只能钉"入参里没有方向量"，姿态本身要真机量（见交付报告的真机待验清单）
+    }
+
+    @Test
+    fun bottomDockDropNeverWritesAnXOverride() {
+        // B4 审查 S1：底栏的横向落位**不许进表**。录制页 onDrop 与编辑页 dropContainer 都只把
+        // clampZonePos 的结果写进表，所以这道闸就在这儿：给它一个再像真值不过的绝对 x，也必须是哨兵
+        assertEquals(ZonePlacement(-1, 250), clampZonePos(HudZone.BOTTOM, 500, 250, 216, 72, land))
+        // 纵向照常钳（下界 = 安全区高 − 排高 = 288），只有 x 被抹
+        assertEquals(ZonePlacement(-1, 288), clampZonePos(HudZone.BOTTOM, 0, 9999, 216, 72, land))
+        // 负 y 夹回 0（走到这一步说明 y 是拖出来的：两轴都是哨兵时调用方早早原样返回了）
+        assertEquals(ZonePlacement(-1, 0), clampZonePos(HudZone.BOTTOM, -1, -50, 216, 72, land))
+        // 反面对照：另外四枚容器的 x 照旧钳进安全区，这条闸只作用底栏
+        assertEquals(466, clampZonePos(HudZone.READOUT, 9999, 300, 300, 42, land).xDp)
+        assertEquals(672, clampZonePos(HudZone.RIGHT, 9999, 100, 94, 202, land).xDp)
     }
 
     @Test
@@ -64,7 +84,7 @@ class HudLayoutClampTest {
     @Test
     fun degenerateBandFallsBackInsteadOfThrowing() {
         // 告警条 + 满配读数把带挤没了：区间若为负，coerceIn 直接抛，整个 HUD 就没了
-        val squeezed = HudAreaDp(width = 800, height = 200, endInsetDp = 34, topAvoidDp = 120, bottomAvoidDp = 100)
+        val squeezed = HudAreaDp(width = 766, height = 200, topAvoidDp = 120, bottomAvoidDp = 100)
         val range = clampZoneYRange(HudZone.RIGHT, squeezed, 90)
         assertTrue("区间必须非负：$range", range.first <= range.last)
         assertEquals(0..(200 - 90), range)
@@ -123,7 +143,7 @@ class HudLayoutClampTest {
     @Test
     fun dockRowSnapIsStableWhenThereIsNoSecondRow() {
         // 极矮窗口（分屏 / 120% 文本把带挤光）：两档重合时不许跳，一律按下栏处理
-        val tiny = HudAreaDp(width = 800, height = 70, endInsetDp = 34, topAvoidDp = 0, bottomAvoidDp = 0)
+        val tiny = HudAreaDp(width = 766, height = 70, topAvoidDp = 0, bottomAvoidDp = 0)
         assertEquals(0, dockLowerY(tiny, heightDp = 72, bottomPadDp = 6))
         assertEquals(0, dockUpperY(tiny, heightDp = 72, bottomPadDp = 6, gapDp = 8))
         assertEquals(0, dockSnapY(tiny, 72, 6, 8, -999))

@@ -1,7 +1,6 @@
 package com.wotagei.cam.ui
 
 import android.content.Context
-import android.content.res.Configuration
 import android.content.res.Resources
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -58,9 +57,7 @@ import androidx.compose.ui.geometry.Size as GeoSize
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -201,12 +198,10 @@ fun CameraScreen(
     // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
     val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
     val levelBuzz = WotaSettings.levelBuzzEnabled(settingsPrefs)
-    // §59/§74：容量段取哪一档取决于顶栏真能给多宽。窗口宽扣掉顶栏固定预留（左右内边距 16 +
-    // 胶囊与设置入口的间距 6 + 设置入口约 44，见 TopBarChromeReserveDp），再按录制页文本高度折算回 100% 基准
+    // §59/§74：容量段取哪一档取决于顶栏真能给多宽。这条账放在 safeW 量到之后再算（见下面的 topBarRoomDp），
+    // 因为它必须与顶栏胶囊组自己的布局上限 topBarMaxWidthDp **同一个来源**：套了 safeDrawingPadding()
+    // 之后的安全区实测宽，而不是 configuration.screenWidthDp（本机横屏两者差 34dp，就是挖孔那条边）
     val configuration = LocalConfiguration.current
-    val windowWidthDp = configuration.screenWidthDp.dp
-    val topBarRoomDp = ((windowWidthDp - TopBarChromeReserveDp.dp) /
-        WotaSettings.textScale(settingsPrefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)).value
     val focusPoint by params.focusPoint.observed()
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
@@ -425,28 +420,27 @@ fun CameraScreen(
     // 控件条一律浮在预览之上（不再各占一条黑带）：画面吃满整屏，25% 透明的材质才透得出内容
     val hudItems = HudItem.typesOf(hudMask)
 
-    // ---- 位置表（hud_layout）与避让量：能实测的一律由控件自己在布局期回报，量不到的（可视右缘）
-    // 留一个共享常量。顶栏第二行是告警条（DIRECT + 斑马纹这类常见组合会出现），竖 Dock 只让第一行的
-    // 44dp 必然叠上去；竖 Dock 的宽度跟着标签与字体缩放变（字体 120% 时比 100% 宽约两成），写死的宽度账
-    // 两次都没算对。初值一律给兜底常量或预测值：首帧量不到时按兜底避让，量到之后由实测值接管。
+    // ---- 位置表（hud_layout）与避让量：能实测的一律由控件自己在布局期回报，**贴边避让本身交给系统**
+    // （下面那层套了 safeDrawingPadding() 的盒子），这一层不留任何按方向写死的避让常量。
+    // 顶栏第二行是告警条（DIRECT + 斑马纹这类常见组合会出现），竖 Dock 只让第一行的 44dp 必然叠上去；
+    // 竖 Dock 的宽度跟着标签与字体缩放变（字体 120% 时比 100% 宽约两成），写死的宽度账两次都没算对。
+    // 初值一律给兜底常量或预测值：首帧量不到时按兜底避让，量到之后由实测值接管。
     val hudDensity = LocalDensity.current
-    // 编辑页「保存」走 apply()，这条监听立刻打到 → 录制页实时生效，杀进程重进读的是同一份 prefs
+    // 编辑页「保存」走 commit()（同步落盘，理由见 WotaSettings.setHudLayout），这条监听在写入返回后立刻
+    // 打到 → 录制页实时生效，杀进程重进读的是同一份 prefs
     val hudLayout = rememberHudLayout(settingsPrefs)
     var topBarH by remember { mutableIntStateOf(TopBarSpace.value.roundToInt()) }
-    // S3-3：这条让位只在横屏取非 0 值（原判据是"右缘不可视带只有横屏有"）。竖屏根容器就等于可视宽，
-    // 把避让量套到竖屏反而会把快门反向推偏，故按方向取。
-    // 注意 §九·补 已用真机数据推翻它的方向（带在左短边、且随 90/270 换边），改法等用户确认。
-    val endInsetDp = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-        VisibleEndInset.value.roundToInt()
-    } else {
-        0
-    }
-    // 安全区实测尺寸就是位置表 (x, y) 的坐标参考（"root 的安全区"）。初值取 configuration 的运行时估算
-    // （不是新写的机型魔法数），量到之后由 onSizeChanged 接管；旋转换档先按新方向估算，下一帧实测校正
+    // 安全区实测尺寸就是位置表 (x, y) 的坐标参考（"root 的安全区"）：挖孔与系统栏让掉的那条边**已经包含**
+    // 在这份尺寸里，所以它同时是钳制上限、顶栏容量段取档、读数块取档的同一个可用宽来源（旧写法在这里
+    // 另扣一笔写死的 34dp 右缘让位，而那条带会随横屏 90/270 换边 ⇒ 两个姿态必错一次，已删，见 §九·补）。
+    // 初值取 configuration 的运行时估算（不是新写的机型魔法数），量到之后由 onSizeChanged 接管；
+    // 旋转换档先按新方向估算，下一帧实测校正
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
-    var safeOriginX by remember { mutableIntStateOf(0) }
-    var safeOriginY by remember { mutableIntStateOf(0) }
+    // §59/§74：容量段取档的可用宽 = 安全区实测宽 − 顶栏右端固定件预留，再按录制页文本高度折算回 100% 基准。
+    // 它必须与胶囊组自己的布局上限 topBarMaxWidthDp 同一条账、同一个来源，否则判据比实际盒子宽
+    val topBarRoomDp = ((safeW - TopBarChromeReserveDp).dp /
+        WotaSettings.textScale(settingsPrefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)).value
     // 五枚卡片本体在窗口里的实测矩形：钳制要的容器尺寸与第 8 条要的"底栏现在在哪"都只读这一份
     val zoneRects = remember { mutableStateMapOf<HudZone, IntRect>() }
     val bottomOuterPadDp = BottomBarOuterPadV.value.roundToInt()
@@ -471,9 +465,10 @@ fun CameraScreen(
         }.forEach { add(HudEntry.of(it)) }
         hudItems.forEach { add(HudEntry.of(it)) }
     }
-    // S3-5：喂 hudPerRowFor 的是 hudRoomDp（窗口宽 − 右缘避让量 − 块内左右内边距），与读数块自己
-    // 原生对齐用的 VisibleEndInset 同一个避让量；直接传 screenWidthDp 会把"贴边"当"装得下"。
-    val hudRoom = hudRoomDp(windowWidthDp.value, VisibleEndInset.value)
+    // S3-5：喂 hudPerRowFor 的是 hudRoomDp（**安全区实测宽** − 读数块那枚设计留白 − 块内左右内边距），
+    // 三个量都与读数块自己原生对齐用的是同一批真源（safeW 那条回报、HudEdgePad、HudBlockPadDp）；
+    // 直接传 screenWidthDp 会把"贴边"当"装得下"，传旧的 34dp 避让量则会在挖孔换边的那个姿态里双重让位。
+    val hudRoom = hudRoomDp(safeW.toFloat(), HudEdgePad.value)
     val readoutCount = hudLayout.visibleOrderOf(HudZone.READOUT, visibleEntries).size
     val hudPerRow = remember(readoutCount, hudDensity.fontScale, hudRoom) {
         hudPerRowFor(readoutCount, hudDensity.fontScale, hudRoom)
@@ -486,7 +481,6 @@ fun CameraScreen(
     val baseArea = HudAreaDp(
         width = safeW,
         height = safeH,
-        endInsetDp = endInsetDp,
         topAvoidDp = topBarH,
         bottomAvoidDp = dockStripH
     )
@@ -501,9 +495,10 @@ fun CameraScreen(
 
     /**
      * 表里的位置 → 这一帧真正用的位置。
-     * - 哨兵（用户没拖过）原样返回，由 [HudZoneBox] 走 B1–B3 的原生对齐分支；
-     * - 拖过的先钳进安全区。容器尺寸量不到那一帧按 0 算 ⇒ 左上角坐标原样成立、不跳回默认位置，
-     *   下一帧实测接管"装不装得下"。
+     * - 两轴都是哨兵（用户没把这枚容器拖离定稿位置）原样返回，由 [HudZoneBox] 走 B1–B3 的原生对齐分支；
+     * - 有绝对轴的先钳进安全区。容器尺寸量不到那一帧按 0 算 ⇒ 左上角坐标原样成立、不跳回默认位置，
+     *   下一帧实测接管"装不装得下"。**底栏**钳完的 x 恒为哨兵（[clampZonePos] 那一支），所以它只可能
+     *   带绝对 y，[HudZoneBox] 因此仍按 fillMaxWidth + 居中画它。
      */
     fun placementOf(zone: HudZone): ZonePlacement {
         val raw = hudLayout.posOf(zone)
@@ -548,11 +543,16 @@ fun CameraScreen(
                 gapDp = WotaSpace.s.value.roundToInt(),
                 deltaYDp = pxToDp(dockShiftPx, hudDensity.density)
             )
-            val saved = hudLayout.posOf(HudZone.BOTTOM)
-            // x 沿用现状：拖过就保留；没拖过就把"当前实测左缘"换算成绝对值（这两档之间换的只有 y）
-            val x = if (!saved.isDefault) saved.xDp
-            else pxToDp((zoneRects[HudZone.BOTTOM]?.left ?: safeOriginX).toFloat() - safeOriginX, hudDensity.density)
-            WotaSettings.setHudLayout(settingsPrefs, hudLayout.withZonePos(HudZone.BOTTOM, x, y))
+            // **只写 y，x 留哨兵**：底栏横向永远由 fillMaxWidth + 居中决定，90↔270 翻转与横竖换档都会
+            // 重新居中快门。旧写法在这里把"当前实测左缘"换算成绝对 x 一起写进表，纯长按不动也会落一个
+            // 绝对值，此后那枚 Dock 就再也不跟可视中心走了（B4 审查 S1 那条设计缺陷）。
+            // 哨兵值取 ZonePlacement.DEFAULT.xDp，与表里"没拖过"的那一轴同一个数。
+            // commit() 返回 false = 没落成盘（重启就回原栏），不许静默，给一句提示
+            val ok = WotaSettings.setHudLayout(
+                settingsPrefs,
+                hudLayout.withZonePos(HudZone.BOTTOM, ZonePlacement.DEFAULT.xDp, y)
+            )
+            if (!ok) showTip(app.getString(R.string.hud_edit_save_failed))
             dockDragging = false
             dockShiftPx = 0f
         },
@@ -752,11 +752,10 @@ fun CameraScreen(
             .onSizeChanged { deviceDegrees = readDeviceDegrees(context) }
     ) {
         // 画面先铺满整屏，五枚容器浮在它上面：横竖屏共用一套布局，各自那条不透明黑带随之消失。
-        // 容器统一放进这层套了 safeDrawingPadding 的盒子里——它就是位置表 (x, y) 的坐标参考，
-        // 系统栏与挖孔由这一层按实际所在边自动避让，容器自己不再各写一份。
-        // （抽取前的注释写着"这台机这两条给 0"，2026-09-29 真机复测是 **左 68 / 右 0**：这个姿态下
-        //   外层避让之后右缘并没有不可视带，而反向横屏那条带会换到右短边、仍由外层这一次避让接住。
-        //   VisibleEndInset 那三处按方向写死的让位因此整体待用户确认后再改（见 docs/plan/13 §九·补）——本轮没动它）
+        // 容器统一放进这层套了 safeDrawingPadding() 的盒子里——它就是位置表 (x, y) 的坐标参考，
+        // 系统栏与挖孔由这一层**按它实际所在的那条边**自动避让，容器自己不再各写一份（也不许再往容器
+        // 上补按方向写死的让位量：那 68px 是竖屏顶边居中的挖孔，横屏 90/270 会让它换边，
+        // 写死 end 就必错一次。docs/plan/13 §九·补，任务 #68）
         previewStage(Modifier.fillMaxSize())
         Box(
             Modifier
@@ -767,13 +766,6 @@ fun CameraScreen(
                     val h = with(hudDensity) { it.height.toDp().value.roundToInt() }
                     if (w != safeW) safeW = w
                     if (h != safeH) safeH = h
-                }
-                .onGloballyPositioned { coords ->
-                    val p = coords.positionInWindow()
-                    val nx = p.x.toInt()
-                    val ny = p.y.toInt()
-                    if (nx != safeOriginX) safeOriginX = nx
-                    if (ny != safeOriginY) safeOriginY = ny
                 }
         ) {
             // 顶栏那排的固定件（设置入口 + 告警条）实测高回报给竖 Dock 当上边界（S2-1）
@@ -815,11 +807,9 @@ fun CameraScreen(
                         zoneBandHeight(HudZone.LEFT, baseArea)
                     )
                 }
-                // 右缘让位取 VisibleEndInset（单一共享来源，S1-1），本轮不改它的取值与方向。
-                // 但注意：它依据的「可视右缘 1532」已被 2026-09-29 10:11 真机复测推翻——那 68px
-                // 不可视带在**左**短边，且 safeDrawingPadding() 在本机横屏实测给左 68/右 0（不是 0），
-                // 外层那盒子已经在避让它。挖孔随横屏方向换边，写死方向的 padding 必错一次，
-                // 怎么改等用户确认现场姿态，见 docs/plan/13 §九·补。
+                // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
+                // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
+                // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
                 // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
                 HudZoneBox(
                     zone = HudZone.RIGHT,
@@ -849,9 +839,12 @@ fun CameraScreen(
                         zoneBandHeight(HudZone.READOUT, baseArea)
                     )
                 }
-                // S3-3：这枚 Dock 的居中父区域扣掉横屏的右缘不可视带 ⇒ 快门落在**可视窗口**水平中心，
-                // 不再是 1600px 根容器的中心（旧基准偏右 17dp）。S2-2 C：整排实测高回报给三处下边界。
-                // 第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进 graphicsLayer）→ 松手落上栏/下栏。
+                // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
+                // 可视窗口水平中心，挖孔落到左短边还是右短边都跟着中心走。旧写法在这里又扣一笔写死的 34dp
+                // （外层已经避过让位了，等于双重让位），于是两个横屏姿态都往**左**偏 34px：带在左时中心落在
+                // 800px（应为 834px）、带在右时 732px（应为 766px）。任务 #68 已删那笔扣减。
+                // S2-2 C：整排实测高回报给三处下边界。第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进
+                // graphicsLayer）→ 松手落上栏/下栏，**只有 y 进表**（x 恒哨兵，见 onDrop 那段）。
                 // 镜头那颗被挪去别的容器时这枚 Dock 只留等宽空槽（右槽实测宽归 0，槽宽回到 34dp 那一档）
                 HudZoneBox(
                     zone = HudZone.BOTTOM,

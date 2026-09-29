@@ -1,7 +1,6 @@
 package com.wotagei.cam.ui
 
 import android.content.SharedPreferences
-import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -71,6 +70,7 @@ import com.wotagei.cam.ui.dialog.sizeText
 import com.wotagei.cam.ui.dialog.wbLabelRes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -91,7 +91,8 @@ import kotlin.math.roundToInt
  * ## 手势：一层捕获层
  * 拖动是这页唯一的手势，所以整页盖一层透明捕获层（[pointerInput] + `detectDragGestures`）。
  * 捕获层排在容器之后 ⇒ z 序在上面：命中某颗条目 → 拖**条目**（原位留空壳 + 跟手的 ghost + 「腰」）；
- * 否则命中某枚容器 → 拖**整枚容器**。这样不会出现"想拖动却把参数面板点开"，也不让子控件的
+ * 否则命中某枚容器 → 拖**整枚容器**（底栏这枚只认纵向：松手后横向弹回可视中心并给一句提示，
+ * x 进不了表，见 [dropContainer]）。这样不会出现"想拖动却把参数面板点开"，也不让子控件的
  * `clickable` 与父层拖拽互相抢事件（那种组合在 Compose 里本就不可靠）。代价照实写：
  * 这页点不到控件，要改参数回录制页改。
  *
@@ -103,9 +104,10 @@ import kotlin.math.roundToInt
  * 不重组整页），松手落位那一帧才把绝对坐标写进表 —— 一次重排，不是动画。
  *
  * ## 越界钳制与重叠
- * 钳制吃 §58 的 [VisibleEndInset] 与本层实测的两条避让量：操作栏高（对应录制页的顶栏实测高）与
- * 底栏那排实占带高，没有新写魔法数。重叠**只提示不禁止**（用户定的口径），提示把叠在一起的两枚
- * 容器点名，不静默。
+ * 钳制吃**安全区实测宽高**（套了 safeDrawingPadding() 之后那块，挖孔让掉的边已经在里面）与本层实测的
+ * 两条避让量：操作栏高（对应录制页的顶栏实测高）与底栏那排实占带高，没有新写魔法数，也没有按方向写死的
+ * 右缘让位量（任务 #68 删的就是它，见 docs/plan/13 §九·补）。重叠**只提示不禁止**（用户定的口径），
+ * 提示把叠在一起的两枚容器点名，不静默。
  *
  * ## 保存语义
  * 改动先进内存草稿，**点「保存」才落 prefs**（录制页每次组合直读 prefs + 挂变更监听，所以立刻生效）；
@@ -159,22 +161,17 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val dockStripH = if (dockCardH > 0) dockCardH + 2 * bottomOuterPadDp
     else BottomBarSpaceFallback.value.roundToInt()
     val hudStripH = zoneRects[HudZone.READOUT].dpHeightToDp(density)
-    val endInsetDp = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-        VisibleEndInset.value.roundToInt()
-    } else {
-        0
-    }
     val baseArea = HudAreaDp(
         width = safeW,
         height = safeH,
-        endInsetDp = endInsetDp,
         topAvoidDp = chromeH,
         bottomAvoidDp = dockStripH
     )
     // 与录制页同一条：右竖 Dock 的下界要多让开读数块那一截
     val rightArea = areaForRightDock(baseArea, hudStripH)
-    // S3-5：取档喂的是 hudRoomDp（窗口宽 − 右缘避让量 − 块内左右内边距），与录制页同一个表达式
-    val hudRoom = hudRoomDp(safeW.toFloat(), endInsetDp.toFloat())
+    // S3-5：取档喂的是 hudRoomDp（安全区实测宽 − 读数块那枚设计留白 − 块内左右内边距），
+    // 与录制页同一个表达式、同一批真源（safeW / HudEdgePad / HudBlockPadDp）
+    val hudRoom = hudRoomDp(safeW.toFloat(), HudEdgePad.value)
     val readoutCount = draft.visibleOrderOf(HudZone.READOUT, visibleEntries).size
     val perRow = remember(readoutCount, density.fontScale, hudRoom) {
         hudPerRowFor(readoutCount, density.fontScale, hudRoom)
@@ -221,7 +218,13 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         draft = draft.moveEntryTo(entry, target, dropIndexFor(target.axis, rects, pointer))
     }
 
-    /** 整枚容器落位：当前实测左上角 + 累计位移 → 绝对 dp → 钳进安全区 */
+    /**
+     * 整枚容器落位：当前实测左上角 + 累计位移 → 绝对 dp → 钳进安全区。
+     *
+     * **底栏只有 y 进得了表**：[clampZonePos] 把它的 x 强制抹回哨兵，松手后那枚 Dock 就弹回可视中心
+     * （跟手位移只进 graphicsLayer，所以回弹是看得见的）。横向确实拖过一把时再补一句提示，
+     * 别让用户以为"没生效是 bug"——判据取"横位移比竖位移大"，也就是他明显想横着搬，而不是随手一拖。
+     */
     fun dropContainer(zone: HudZone) {
         val rect = local(zoneRects[zone]) ?: return
         val area = if (zone == HudZone.RIGHT) rightArea else baseArea
@@ -231,6 +234,9 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         val y = pxToDp(rect.top.toFloat(), density.density) + pxToDp(dragShift.y, density.density)
         val clamped = clampZonePos(zone, x, y, w, h, area)
         draft = draft.withZonePos(zone, clamped.xDp, clamped.yDp)
+        if (zone == HudZone.BOTTOM && abs(dragShift.x) > abs(dragShift.y)) {
+            hint = context.getString(R.string.hud_edit_bottom_x_locked)
+        }
     }
 
     // 「镜头」那颗在底栏占不占右槽，判据与录制页同一条（设置开关 + 归属容器），见 HudBottomZone 的宽度账
@@ -279,11 +285,16 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     // 有未保存改动时这颗亮着，让"改了还没落盘"在视觉上有落点
                     selected = draft != saved,
                     onClick = {
-                        WotaSettings.setHudLayout(prefs, draft)
+                        // commit() 的返回值就是"这次真落盘了吗"：没落成不许说"已保存"
+                        val ok = WotaSettings.setHudLayout(prefs, draft)
                         saved = draft
                         undoRaw = null
                         resetArmed = false
-                        hint = context.getString(R.string.hud_edit_saved)
+                        hint = if (ok) {
+                            context.getString(R.string.hud_edit_saved)
+                        } else {
+                            context.getString(R.string.hud_edit_save_failed)
+                        }
                     }
                 )
                 WotaChip(
@@ -298,11 +309,15 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                         } else {
                             // 重置 = 删键（缺键就是默认表）；「撤销」靠的是把重置前那一份串原样写回来
                             undoRaw = WotaSettings.hudLayout(prefs).encode()
-                            WotaSettings.clearHudLayout(prefs)
+                            val ok = WotaSettings.clearHudLayout(prefs)
                             draft = HudLayoutTable.default()
                             saved = draft
                             resetArmed = false
-                            hint = context.getString(R.string.hud_edit_reset_done)
+                            hint = if (ok) {
+                                context.getString(R.string.hud_edit_reset_done)
+                            } else {
+                                context.getString(R.string.hud_edit_save_failed)
+                            }
                         }
                     }
                 )
@@ -312,11 +327,15 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                         selected = false,
                         onClick = {
                             val back = HudLayoutTable.decode(raw)
-                            WotaSettings.setHudLayout(prefs, back)
+                            val ok = WotaSettings.setHudLayout(prefs, back)
                             draft = back
                             saved = back
                             undoRaw = null
-                            hint = context.getString(R.string.hud_edit_undo_done)
+                            hint = if (ok) {
+                                context.getString(R.string.hud_edit_undo_done)
+                            } else {
+                                context.getString(R.string.hud_edit_save_failed)
+                            }
                         }
                     )
                 }
@@ -370,7 +389,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 freeMb = freeMb,
                 perRow = perRow,
                 entryRects = entryRects,
-                capacityRoomDp = (safeW - endInsetDp - 66f).coerceAtLeast(1f),
+                capacityRoomDp = (safeW - 66f).coerceAtLeast(1f),
                 hiddenEntry = dragEntry
             )
             HudZoneBox(

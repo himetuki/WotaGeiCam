@@ -542,11 +542,13 @@ private fun Path.appendHalfCap(cx: Float, cy: Float, r: Float, sx: Float, sy: Fl
  * · 一行 3 颗：100% 294dp、120% 348dp（「感光度 AUTO / 白平衡 5500K / 变焦 1.0x」这一组就这个量级）
  * · 一行 2 颗：100% 198dp、120% 234dp
  *
- * 入参 [roomWidthDp] 必须是**调用点同一个表达式**算出的可用宽（[hudRoomDp]：窗口宽 − 右缘避让量 − 块内
- * 左右内边距），不许直接塞 `screenWidthDp`（审查 S3-5：B2 那一版用例传 352、调用点传 360/800，两边判的
- * 不是同一条不等式）。判据本该是「行宽 ≤ 窗口宽 − 34 − 12」，直接比「行宽 + 24 ≤ 窗口宽」少扣 22dp：
- * 115% 字体、竖屏 360dp 时行宽 322.5 + 24 = 346.5 ≤ 360 → 错取 3 颗，整块 322.5+12+34 = 368.5dp 越界。
- * （120% 那一档在 360dp 上只是**恰好**没取到：Float 舍入让 336+24 成了 360.00003 > 360，是运气不是设计。）
+ * 入参 [roomWidthDp] 必须是**调用点同一个表达式**算出的可用宽（[hudRoomDp]：安全区实测宽 − 设计留白 8
+ * − 块内左右内边距 12），不许直接塞 `screenWidthDp`（审查 S3-5：B2 那一版用例传 352、调用点传 360/800，
+ * 两边判的不是同一条不等式）。竖屏 360dp 上可用 = 340：100% 三颗要 282 + 24 = 306 → 取 3，
+ * 110% 要 309 + 24 = 333 → 仍取 3（旧写法替挖孔多扣 34dp 只剩 314，这一档会白退一级），
+ * 115% 要 322.5 + 24 = 346.5 → 退到 2。
+ * （旧写法扣的那笔 34dp 右缘避让来自"可视右缘 1532"那条伪事实，竖屏侧边根本没有不可视带；
+ * 避让已经由调用方的 safeDrawingPadding() 算进 [hudRoomDp] 的入参里，这里不再扣第二笔，见 #68。）
  * 字宽是算术估计（汉字按 1 em、拉丁按 0.6 em）不是量出来的，所以取档必须带安全余量 [PerRowMarginDp]；
  * §58/§73/§70 三次翻车都死在这半成的余量上。取不到的档位退到下一档，这是"小屏优先"的算术。
  */
@@ -561,13 +563,17 @@ fun hudPerRowFor(chipCount: Int, fontScale: Float, roomWidthDp: Float): Int {
 }
 
 /**
- * 读数块的可用横向宽度 = 窗口宽 − 右缘避让量 − 块自身左右内边距（[HudBlockPadDp] 各一份）。
+ * 读数块的可用横向宽度 = **安全区实测宽** − 那枚设计留白 − 块自身左右内边距（[HudBlockPadDp] 各一份）。
  *
  * 抽成函数只为了一个目的：调用点与用例喂 [hudPerRowFor] 的是**同一个表达式**（S3-5）。
- * 右缘避让量在 CameraScreen 侧是 `VisibleEndInset`（§58 实测），与读数块自己的 `padding(end = …)` 同源。
+ *
+ * - [safeWidthDp]：调用方那层 `safeDrawingPadding()` 盒子的**实测宽**（本机横屏 766dp 而不是 800dp：
+ *   挖孔让掉的那条边已经算在里面了，所以这里不再按方向扣第二笔，见 docs/plan/13 §九·补 / 任务 #68）。
+ * - [endPadDp]：读数块原生对齐 `padding(end=)` 用的那枚**设计留白**，两页都传 `HudEdgePad`（8dp 令牌，
+ *   与左竖 Dock 的起始边同一枚）。它不是避让量：不分方向、不分姿态；改了它这条宽度账跟着改（同源）。
  */
-fun hudRoomDp(windowWidthDp: Float, endInsetDp: Float): Float =
-    (windowWidthDp - endInsetDp - 2f * HudBlockPadDp).coerceAtLeast(0f)
+fun hudRoomDp(safeWidthDp: Float, endPadDp: Float): Float =
+    (safeWidthDp - endPadDp - 2f * HudBlockPadDp).coerceAtLeast(0f)
 
 /**
  * 读数块高度的**预测初值**（审查 S3-6）：首帧实测之前先按「行数 × 一颗胶囊高 + 行距 + 块内上下边距」估，
