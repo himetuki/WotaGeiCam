@@ -55,8 +55,6 @@ import com.wotagei.cam.core.capacityTierText
 import com.wotagei.cam.record.BitratePolicy
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.ui.anim.appendLiquidLink
-import com.wotagei.cam.ui.anim.hudPerRowFor
-import com.wotagei.cam.ui.anim.hudRoomDp
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
@@ -78,7 +76,8 @@ import kotlin.math.roundToInt
  *
  * ## 与录制页共用同一条渲染路
  * 五枚容器全走 [HudZoneBox] + [HudTopZone] / [HudDockZone] / [HudReadoutZone] / [HudBottomZone]，
- * 位置表读同一份 [HudLayoutTable]，钳制走同一条 [clampZonePos]，取档走同一条 [hudPerRowFor]。
+ * 位置表读同一份 [HudLayoutTable]，钳制走同一条 [clampZonePos]，读数块的"底边 + 一行几颗"走同一条
+ * [planReadoutRow]（#70 A），胶囊档位走同一条 [chipTierFor]（#70 B）。
  * 所以"编辑页画了个假布局、两边分叉"在结构上不可能发生。**唯一**的差别是数据源：这页没有相机、
  * 没有传感器，读数取的是**用户设定的开机默认值**（[WotaSettings.applyDefaults] 那条链，与录制页
  * 同一份 prefs）与**真实剩余空间**（`VideoStore.freeSpaceMb()`，与录制页同一个来源）。
@@ -161,21 +160,38 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val dockStripH = if (dockCardH > 0) dockCardH + 2 * bottomOuterPadDp
     else BottomBarSpaceFallback.value.roundToInt()
     val hudStripH = zoneRects[HudZone.READOUT].dpHeightToDp(density)
+    // 读数块实测宽：喂给 planReadoutRow 当"同一行装不装得下"的安全网（与录制页同一个入参）
+    val hudStripW = zoneRects[HudZone.READOUT].dpWidthToDp(density)
     val baseArea = HudAreaDp(
         width = safeW,
         height = safeH,
         topAvoidDp = chromeH,
         bottomAvoidDp = dockStripH
     )
-    // 与录制页同一条：右竖 Dock 的下界要多让开读数块那一截
-    val rightArea = areaForRightDock(baseArea, hudStripH)
-    // S3-5：取档喂的是 hudRoomDp（安全区实测宽 − 读数块那枚设计留白 − 块内左右内边距），
-    // 与录制页同一个表达式、同一批真源（safeW / HudEdgePad / HudBlockPadDp）
-    val hudRoom = hudRoomDp(safeW.toFloat(), HudEdgePad.value)
+    // #70 A：与录制页同一条决策（planReadoutRow），两个页面各摆一份 hudRoomDp/hudPerRowFor 就是 S3-5
+    // 那条"两边判的不是同一条不等式"的老坑。底栏宽取本页实测（编辑页的底栏照样是居中的那枚底板），
+    // 首帧量不到同样退到 BottomDockWidthFallback。
+    val dockCardW = zoneRects[HudZone.BOTTOM].dpWidthToDp(density)
     val readoutCount = draft.visibleOrderOf(HudZone.READOUT, visibleEntries).size
-    val perRow = remember(readoutCount, density.fontScale, hudRoom) {
-        hudPerRowFor(readoutCount, density.fontScale, hudRoom)
+    val readoutPlan = remember(
+        readoutCount, density.fontScale, safeW, dockCardW, dockStripH, hudStripW
+    ) {
+        planReadoutRow(
+            readoutCount = readoutCount,
+            fontScale = density.fontScale,
+            safeWidthDp = safeW,
+            dockWidthDp = if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt(),
+            dockStripDp = dockStripH,
+            bottomRowPadDp = bottomOuterPadDp,
+            endPadDp = HudEdgePad.value,
+            dockGapDp = WotaSpace.s.value,
+            readoutWidthDp = hudStripW
+        )
     }
+    val readoutArea = baseArea.copy(bottomAvoidDp = readoutPlan.bottomAvoidDp)
+    // 与录制页同一条：右竖 Dock 的下界要让开读数块那一截，但同一条横带上取大不求和
+    val rightArea = areaForRightDock(baseArea, hudStripH, readoutPlan.bottomAvoidDp)
+    val perRow = readoutPlan.perRow
 
     // ---- 拖拽态。位移只在 draw 阶段与 ghost 的 offset 里用，所以是快照状态但只在绘制期读
     var dragEntry by remember { mutableStateOf<HudEntry?>(null) }
@@ -432,8 +448,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             }
             HudZoneBox(
                 zone = HudZone.READOUT,
-                placement = placementOf(draft, HudZone.READOUT, zoneRects, density, baseArea),
-                area = baseArea,
+                placement = placementOf(draft, HudZone.READOUT, zoneRects, density, readoutArea),
+                area = readoutArea,
                 shiftXPx = shiftXOf(HudZone.READOUT),
                 shiftYPx = shiftYOf(HudZone.READOUT),
                 onCardRect = { if (zoneRects[HudZone.READOUT] != it) zoneRects[HudZone.READOUT] = it }
@@ -441,7 +457,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 HudReadoutZone(
                     draft.visibleOrderOf(HudZone.READOUT, visibleEntries),
                     ctx,
-                    zoneBandHeight(HudZone.READOUT, baseArea)
+                    zoneBandHeight(HudZone.READOUT, readoutArea)
                 )
             }
             HudZoneBox(
@@ -505,7 +521,11 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                                     (p.y - ghostSize.height / 2f).roundToInt()
                                 )
                             }
-                    ) { HudEntryItem(dragged, ghostCtx) }
+                    ) {
+                        // ghost 与原位那一颗必须同档位（#70 B）：从竖 Dock 拖出来的那颗在容器内是紧凑档，
+                        // ghost 若走全局档会长一号，"跟手的比洞大"看着就是漂移。归属容器由表说了算
+                        HudEntryItem(dragged, ghostCtx, tier = chipTierFor(draft.sourceZoneOf(dragged)))
+                    }
                 }
             }
             Box(
