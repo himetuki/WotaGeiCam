@@ -88,7 +88,7 @@ import com.wotagei.cam.ui.anim.MergeDebugHook
 import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
 import com.wotagei.cam.ui.anim.chipClicksAccepted
-import com.wotagei.cam.ui.anim.chipTravelPxOf
+import com.wotagei.cam.ui.anim.chipTravelForScene
 import com.wotagei.cam.ui.anim.dragOwnedByRecordKey
 import com.wotagei.cam.ui.anim.mergeAnchor
 import com.wotagei.cam.ui.anim.mergePlanFor
@@ -1045,6 +1045,17 @@ data class HudDockDrag(
  *   旧上限 `min(圆心距 × 0.16, clearance)`（实测 10.96/13.28dp）就是"只是原地淡化"的算术原因，已撤。
  *   撤它**不是**"点不到了没关系"，靠的是下面那两层命中保证；`chipAlpha` 那条淡出曲线降为**收尾配角**
  *   （只处理液滴与键重合处的残留），不再是那颗消失的手段。
+ *   ⚠ 第一批只在**纯函数层**放开了这条：同一层 graphicsLayer 里 Compose 先平移再绕 pivot 缩放，
+ *   `translationX` 被 `scaleX = chipScale(p)` 乘掉，按算式那颗只能走 72% 的路（p=1 还差 38px 才到键心）。
+ *   第二批把位移与缩放拆成两层（外层只 translationX），于是「p=1 落到键心」第一次真的可能发生在像素上
+ *   ——静态推理，真机未验（钩子 `pin=1` 一张图判）。
+ * - **#71 第二批：接触颈的端点走视觉圆心，光感只靠亮缘**。颈（连通体）画在 [wotaPillHost] 里，
+ *   它的端点是 [chipVisualCx] = 布局圆心 + 与那颗**同源**的那个数（[chipTravelForScene]），
+ *   端点半径是 [chipVisualRadiusPx] = 布局内切圆半径 × 同一个 `chipScale`。
+ *   用回 `scene.cx(...)` 就是"颈钉在原位、那颗飞走了"——布局矩形不反映那颗自己的 graphicsLayer 位移。
+ *   观感那一侧只有亮缘这一条路（禁模糊禁投影，API 30 上 `RenderEffect` 不可用）：同一张 Path 再描一遍
+ *   径向亮缘，峰值落在录制键自身的圆周（接触圈），颜色两端都取既有令牌，笔刷在组合期 remember、
+ *   每帧只 `setLocalMatrix`，于是绘制阶段仍然零分配。
  * - **#73 命中权交接（放开位移的硬前置，本批一行没削弱）**：
  *   ① 吸收期（进度 > 0）那两颗**不装点击链**——判据是纯函数 [chipClicksAccepted]，落地方式是缩略图那颗
  *     条件拼 `Modifier.clickable`、镜头那颗经 `gatedClick` 把动作摘成 null（[WotaChip] 的 `onClick == null`
@@ -1056,7 +1067,7 @@ data class HudDockDrag(
  *     但命中顺序的最终裁决不许靠读代码断定）。
  * - **可打断**：进度由 [animateFloatAsState] 驱动，中途反向时从**当前值**继续，不跳回起点。
  * - **PLAIN 档直接切换**：[mergePlanFor] 给 PLAIN 返回 `animated=false`，调用点**不创建**动画状态
- *   （S3-1），进度走 [mergeProgressOf] 只认开关态 0/1、位移走 [chipTravelPxOf] 恒 0、绘制层第一条就
+ *   （S3-1），进度走 [mergeProgressOf] 只认开关态 0/1、位移走 [chipTravelForScene] 恒 0、绘制层第一条就
  *   return。这是"确实消失"而不是"变快"：没有动画状态，也就没有动画窗口。
  * - 12 号包写的"跟手"是**拖拽**语境的词：录制态那一路的触发是状态切换、没有指针可跟，所以那一路
  *   只有可打断；**第 8 条的换栏拖拽才是跟手那一路**（[drag]：整枚 Dock 的位移直接跟着指针）。
@@ -1192,16 +1203,21 @@ fun HudBottomZone(
                     .mergeAnchor(scene, MergeScene.THUMB)
                     // S2-1：左槽也回报实测宽（与右槽对称），兜底值只管第一帧之前的组合
                     .onSizeChanged { if (it.width != thumbW) thumbW = it.width }
+                    // ⚠ **位移与缩放拆成两层**（#71 第二批）：同一层里 Compose 的变换顺序是
+                    // 「先平移、再绕 pivot 缩放」⇒ 平移量会被 scaleX 乘掉，按算式那颗只能走 72% 的路
+                    // （p=1 还差 38px 才到键心），而颈的端点吃的是**真**视觉圆心
+                    // （`chipVisualCx = 布局圆心 + travel`）。拆成外层只平移、内层只 alpha/scale 之后，
+                    // 外层平移落在内层缩放之外，量纲不被缩，那条算式才可能成立
+                    // （静态推理，真机未验：钩子 pin=1 那张图判那颗到底落在哪儿）。
+                    .graphicsLayer {
+                        translationX = chipTravelForScene(scene, MergeScene.THUMB, plan, progress())
+                    }
                     .graphicsLayer {
                         val p = progress()
                         alpha = LiquidMerge.chipAlpha(p)
                         val s = LiquidMerge.chipScale(p)
                         scaleX = s
                         scaleY = s
-                        translationX = chipTravelPxOf(
-                            plan, p,
-                            scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.THUMB)
-                        )
                     }
                     .size(ThumbBoxSpace)
                     .clip(WotaShape.small)
@@ -1262,16 +1278,17 @@ fun HudBottomZone(
                         .ghostWhileDragged(ctx.hiddenEntry == lensEntry)
                         .onSizeChanged { if (it.width != lensW) lensW = it.width }
                         .mergeAnchor(scene, MergeScene.LENS)
+                        // 与缩略图那颗同一手法：**外层只管位移、内层只管 alpha 与缩放**，
+                        // 免得同层里 translationX 被 scaleX 乘掉（理由见上面缩略图那处的注释）
+                        .graphicsLayer {
+                            translationX = chipTravelForScene(scene, MergeScene.LENS, plan, progress())
+                        }
                         .graphicsLayer {
                             val p = progress()
                             alpha = LiquidMerge.chipAlpha(p)
                             val s = LiquidMerge.chipScale(p)
                             scaleX = s
                             scaleY = s
-                            translationX = chipTravelPxOf(
-                                plan, p,
-                                scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.LENS)
-                            )
                         }
                 )
             }
