@@ -1,6 +1,9 @@
 package com.wotagei.cam.ui.anim
 
 import android.annotation.SuppressLint
+import android.graphics.Matrix
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -9,8 +12,10 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
@@ -32,12 +37,14 @@ import kotlin.math.pow
  * "它的原位"，接口里的圆心与半径全部由外部喂实测值，不绑定底栏。
  *
  * 四条纪律（由结构与类型保证，不靠自觉）：
- * - 绘制层每帧 **Path 分配次数 0**：`Path` 与 `Stroke` 在 [wotaPillHost] 的**组合期**各 `remember` 一次，
+ * - 绘制层每帧 **Path 分配次数 0**：`Path`、`Stroke` 与亮缘那只 [ShaderBrush]（连同它复用的
+ *   `android.graphics.Matrix`）在 [wotaPillHost] 的**组合期**各 `remember` 一次，
  *   描边宽度也在组合期用 LocalDensity 换算成 px。这里**不依赖** `drawWithCache` 的缓存语义——它的节点
  *   实现 `ObserverModifierNode`，`onObservedReadsChanged → invalidateDrawCache`，所以"外块只在尺寸变化时
  *   执行"不成立（审查 S3-4）；把对象提到组合期才是结构性保证。每帧只 `reset()` + 往同一个 Path 上追加
  *   moveTo/cubicTo/close（半圆用贝塞尔逼近，因此**不需要** `addArc(Rect)`，也就不会在绘制阶段构造
- *   Rect/Offset 一类对象）。真机 profiler 的运行时计数仍列「未验」。
+ *   Rect/Offset 一类对象），亮缘每帧只 `Shader.setLocalMatrix`（改的是既有 Matrix，零分配）。
+ *   真机 profiler 的运行时计数仍列「未验」。
  *   底板轮廓那一层（[wotaDockShell]）同纪律：`Stroke` 组合期 remember，绘制期只往 `drawRoundRect` 传
  *   float 算出来的 `Offset`/`Size`/`CornerRadius`（`drawRoundRect` 的入参形态，允许清单内），
  *   **不构造 `Path`、不构造 `Rect`、不构造 `Shape`**。
@@ -91,6 +98,74 @@ fun mergeProgressOf(plan: MergePlan, recording: Boolean, animatedValue: Float?):
 /** 「档位 → 本体位移」桥：PLAIN 一律零位移，调用点不各自写 travel 判断 */
 fun chipTravelPxOf(plan: MergePlan, progress: Float, deltaPx: Float): Float =
     if (plan.travel) LiquidMerge.chipTravelPx(progress, deltaPx) else 0f
+
+/**
+ * 「那颗 → 本帧位移」的**唯一**写入算式（#71 第二批）。
+ *
+ * 纲（`键心 − 布局圆心`）也在函数内部现取，不留给调用点抄第二遍：`graphicsLayer.translationX`
+ * 与连通体绘制层两边吃的必须是同一个数，否则那颗飞它的、颈连它的，两边各自漂移
+ * （用户口径：不许重算第二份）。
+ */
+fun chipTravelForScene(scene: MergeScene, target: Int, plan: MergePlan, progress: Float): Float =
+    chipTravelPxOf(plan, progress, scene.cx(MergeScene.RECORD) - scene.cx(target))
+
+/**
+ * 「布局圆心 → **视觉**圆心」桥（#71 第二批第 1 件，本批承重的证明，JVM 可测）。
+ *
+ * ## 为什么非这座桥不可
+ * [MergeScene] 里那颗的矩形是 [mergeAnchor] 经 `onGloballyPositioned { positionInWindow() }` 回报的
+ * **布局**矩形，而第一批给两颗加的位移走的是同一颗自己那层 `graphicsLayer.translationX`——
+ * 布局回报读的是布局位置，不吃本节点这层的平移（§69 那族"锚点跟不上视觉位置"就是同一件事）。
+ * 于是直接拿 `scene.cx(...)` 画颈，颈会连到那颗**离开之前的原位**，画面上那颗已经飞走了：
+ * 观感就是"一条莫名其妙的线"。⚠ 这条前提本批只有静态推理 + 纯函数用例，**真机未复验**，
+ * 复验手段是 #73 的取证钩子（`pin=0.7` 那一帧颈应当接在飞行中的那颗上，而不是留在原位）。
+ *
+ * ## 位移为什么不再乘 scale（本批顺带修掉的一条静缺陷）
+ * Compose `GraphicsLayerScope` 的变换顺序是「先 translation，再绕 pivot 旋转/缩放」，
+ * 所以**同一层**里 `translationX` 会被本层的 `scaleX` 乘掉：那颗按 `chipScale` 缩到 0.72，
+ * 位移就只剩 72%，p=1 的实测落点差在键心外侧 137 × 0.28 ≈ 38px（19.2dp）。
+ * 第一批的纯函数用例只测 `chipTravelPx` 的返回值，看不见这一层矩阵语义，所以全绿而屏幕上是错的。
+ * 本批把**平移与缩放拆成两层**（外层只有 translationX，内层只有 alpha/scale，见 HudLayer 那两处）：
+ * 外层平移落在内层缩放之外，量纲不被缩，`视觉圆心 = 布局圆心 + travel` 这条算式才真的成立——
+ * 它同时是第一批「p=1 条目中心正好落到键心」那句话从纯函数层落到屏幕上的那一步。
+ * ⚠ 同样是静态推理，真机未验（拆层之后那颗是否真落在键心，靠钩子 `pin=1` 一张图判）。
+ *
+ * 纵向不需要这座桥：底栏两颗的中心与键心同一条水平中线（用例 `linkCannotEscapeTheLayoutBox...` 钉着
+ * 这个坐标前提），位移只有 translationX 一个写入方。
+ */
+fun chipVisualCx(scene: MergeScene, target: Int, plan: MergePlan, progress: Float): Float =
+    scene.cx(target) + chipTravelForScene(scene, target, plan, progress)
+
+/**
+ * 「布局内切圆半径 → **视觉**半径」桥：那颗同帧正在被 [LiquidMerge.chipScale] 缩，
+ * 颈必须接到缩之后的实体上，否则颈的帽会比那颗本身还粗，从键里露出一圈没有来路的暗盘。
+ */
+fun chipVisualRadiusPx(scene: MergeScene, target: Int, progress: Float): Float =
+    scene.radius(target) * LiquidMerge.chipScale(progress)
+
+/** 那颗**视觉**圆心到键心的距离（本帧长不长得出颈就只看这个数；纵向差按实测矩形算，不假设 0） */
+fun chipVisualDistToKeyPx(scene: MergeScene, target: Int, plan: MergePlan, progress: Float): Float {
+    val dx = chipVisualCx(scene, target, plan, progress) - scene.cx(MergeScene.RECORD)
+    val dy = scene.cy(target) - scene.cy(MergeScene.RECORD)
+    return hypot(dx, dy)
+}
+
+/**
+ * 「这一帧这颗到底长不长得出颈」（#71 第二批逐帧表的算式本体）。
+ *
+ * 三条都过才算可见：档位闸门（[waistVisibleFor]，PLAIN 恒 false）、两颗都真在树里（面积 > 0）、
+ * 视觉圆心距落在断开阈值以内且腰宽过 [LiquidMerge.MIN_WAIST_PX]。
+ * 注意阈值吃的是**视觉**半径（那颗在缩），所以 `cut` 本身也随进度轻微收窄。
+ */
+fun neckVisibleFor(plan: MergePlan, scene: MergeScene, target: Int, progress: Float): Boolean {
+    if (!waistVisibleFor(plan, progress)) return false
+    if (scene.area(target) <= 0f || scene.area(MergeScene.RECORD) <= 0f) return false
+    return LiquidMerge.linkVisible(
+        chipVisualDistToKeyPx(scene, target, plan, progress),
+        chipVisualRadiusPx(scene, target, progress),
+        scene.radius(MergeScene.RECORD)
+    )
+}
 
 /** 「档位 → 这一帧画不画腰」桥 */
 fun waistVisibleFor(plan: MergePlan, progress: Float): Boolean =
@@ -198,6 +273,29 @@ object LiquidMerge {
     /** 液滴终点半径占录制键半径的比例：小一圈才像"被吞进去"，而不是把按钮糊住 */
     const val BLOB_TARGET_RATIO = 0.5f
 
+    /**
+     * 亮缘（光感）径向渐变的**跨度**：渐变半径 = 录制键半径 × 本系数。
+     *
+     * 1.4 的依据是这一帧连通体真正露在外面的范围：那颗露在键圆之外的月牙最远到
+     * `视觉圆心距 + 视觉半径`，而颈刚长出来那一刻它 ≈ `cut + rA ≈ 1.35 × rRec`
+     * （阈值算式见 [cutDistancePx]），再往外就什么都没有了，亮出去只会给胶囊本体描一圈白边。
+     */
+    const val NECK_GLOW_SPAN = 1.4f
+
+    /**
+     * 亮缘峰值所在的**归一化半径**档（0 = 键心，1 = 跨度外缘）。
+     *
+     * 它是独立写死的字面量，故意**不**写成 `1f / NECK_GLOW_SPAN`：这样"峰值落在哪一档"与
+     * "半径有多长"是两个能各自跑偏的数，用例 `neckGlowPeakSitsOnTheKeyCircle` 把两者乘回去
+     * 必须等于键半径本身（±0.5%），任一处单独改动就红。写成派生式就是一条恒等式，
+     * 什么退化都测不出（AGENTS「恒等式不算证明」）。
+     * 0.714 = 1/1.4 ⇒ 峰值正好落在**键自身的圆周**上，也就是两圆相切/互穿的那圈接触线。
+     */
+    const val NECK_GLOW_PEAK_STOP = 0.714f
+
+    /** 亮缘渐变的像素半径（每帧喂给 [NeckGlowBrush] 的 local matrix，不在绘制阶段新建对象） */
+    fun neckGlowRadiusPx(recordRadiusPx: Float): Float = recordRadiusPx * NECK_GLOW_SPAN
+
     /** 圆心距 → 腰半径：d=0 最粗（= min(rA, rB)），d→阈值 收到 0 */
     fun waistRadiusPx(distPx: Float, rA: Float, rB: Float, cutPx: Float): Float {
         if (rA <= 0f || rB <= 0f || cutPx <= 0f) return 0f
@@ -268,11 +366,25 @@ object LiquidMerge {
     fun chipTravelPx(progress: Float, deltaPx: Float): Float =
         deltaPx * progress.coerceIn(0f, 1f)
 
-    /** 液滴半径：从那颗的原位半径过渡到录制键半径的一小半 */
+    /**
+     * 液滴半径：从那颗的原位半径过渡到录制键半径的一小半。
+     *
+     * ⚠ **#71 第二批之后绘制层不再消费它**（连通体的条目那一端改接那颗的**视觉**半径
+     * [chipVisualRadiusPx]，也就是那颗自己缩之后的实体，否则颈的帽会比那颗还粗、从键里糊出一圈
+     * 没有来路的暗盘）。留着是因为它是"液滴被吞进去时该缩多少"这条曲线的唯一记录，且 B4 的拖拽动感
+     * 复用得到；它与 [chipScale] 那条不再是同一条曲线，**不许**再拿它当颈的端点半径。
+     */
     fun blobRadius(progress: Float, rHome: Float, rRecord: Float): Float =
         rHome + (rRecord * BLOB_TARGET_RATIO - rHome) * progress.coerceIn(0f, 1f)
 
-    /** 液滴圆心：原位与录制键中心的线性插值（进度 0 = 原位，1 = 重合） */
+    /**
+     * 液滴圆心：原位与录制键中心的线性插值（进度 0 = 原位，1 = 重合）。
+     *
+     * 位移纲放开成"整段圆心距"之后（[chipTravelPx]），这一条与 [chipVisualCx] 是**同一件事的两种写法**
+     * （前者从插值出发、后者从"布局圆心 + 同源位移"出发）。绘制层只走后者那一条（位移与颈必须同源），
+     * 这里保留并由用例 `visualCenterIsTheSamePointAsTheBlobPath` 把两条独立写法对撞：
+     * 任一侧被单边改错（插值方向写反、位移纲换掉）当场红。
+     */
     fun blobX(progress: Float, homeX: Float, recordX: Float): Float =
         homeX + (recordX - homeX) * progress.coerceIn(0f, 1f)
 
@@ -540,13 +652,37 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
  * 先画，子节点后画 → 盖住腰的两端）。
  *
  * 本批把原来的 `wotaCard`（第一环是 `clip`）换成了 [wotaDockShell]（纯绘制，没有 clip），所以这里
- * 少了一道"容器把腰拦在胶囊里"的保险。核账：腰的两端分别是以两颗**原位**圆心、内切圆半径为半径的圆帽
- * （镜头 15dp、缩略图 17dp）＋ 控制点的法向偏移 `c = (8·腰 − rA − rB)/6 ≤ (8·15 − 15 − 25)/6 ≈ 6.7dp`，
- * 于是 |x| 最远 = 那颗中心 68.5/83 + 半径 15/17 ≤ 100 < 布局盒半宽 108，|y| 最远 ≤ 15 + 6.7 < 30 = 半高
- * ⇒ **腰本来就出不了布局盒**，旧的 clip 是一条从未生效的保险，撤掉它观感不变（用例把这笔账钉住了）。
+ * 少了一道"容器把腰拦在胶囊里"的保险。核账（#71 第二批改口径之后）：颈的两端是**那颗的视觉圆**
+ * （圆心 [chipVisualCx]、半径 [chipVisualRadiusPx]）与**录制键圆**，条目那一端永远落在
+ * 「原位圆心 → 键心」这条线段上，于是横向最远仍在原位那一头：68.5 + 15 = 83.5dp、83 + 17 = 100dp，
+ * 都 < 布局盒半宽 108；纵向（中线到轮廓）最远 = max(那颗视觉半径, 键半径, 控制点法向偏移)
+ * = 键半径 **25dp** ≤ 布局盒半高 30dp（偏移那一档 `c = (8·腰 − rA − rB)/6 ≤ (8·15 − 15 − 25)/6 ≈ 6.7dp`
+ * 本来就比半径小，三次贝塞尔不会出自己的控制点凸包）⇒ **颈本来就出不了布局盒**，旧的 clip 是一条
+ * 从未生效的保险；用例 `neckStaysInsideTheCollapsingShell` 把这笔账按**收拢中的轮廓**（不是布局盒）
+ * 再核一遍并钉住。
+ *
+ * ## 颈的端点为什么一律走 [chipVisualCx]（本批唯一的坐标陷阱）
+ * [MergeScene] 存的是**布局**矩形，`positionInWindow()` 不反映那颗自己那层 `graphicsLayer.translationX`。
+ * 直接拿 `scene.cx(...)` 画颈，颈就钉在原位、那颗飞走了，观感是"一条莫名其妙的线"。
+ * 位移与颈现在共用 [chipTravelForScene] 这一条算式（同源），绘制阶段读的是与那颗那层 `graphicsLayer`
+ * **同一个** [progress] lambda（同一帧不可能两个值）。
+ *
+ * ## 光感（#71 第二批第 2 件）
+ * 只有一条路：**轮廓上的亮缘**。硬红线是预览层之上不许实时背景模糊、不许投影，而 minSdk 29 /
+ * 主测机 API 30 上 `RenderEffect` 根本不可用，也不引任何第三方。于是在既有的 `hudScrim` 填充 +
+ * `acrylicBorder` 细描边之外，同一张 Path 再描一遍 [NeckGlowBrush]：一枚径向亮缘，峰值档按
+ * [LiquidMerge.neckGlowRadiusPx] × [LiquidMerge.NECK_GLOW_PEAK_STOP] 落在**录制键自身的圆周**
+ * （两圆接触那一圈），向键心与跨度外缘线性衰减。笔刷与它的临时 `Matrix` 都在**组合期**各建一次
+ * （与 [Path]/[Stroke] 同一条纪律），每帧只 `setLocalMatrix` ⇒ 绘制阶段零分配，
+ * 也不构造 Path/Rect/Offset 之外的对象。两枚颗的颈共用同一张 Path 与同一支笔刷（径向以键心为极，
+ * 左右对称），所以既不会出现"同一处叠两笔半透明"的暗缝，也不需要第二条腰公式。
+ *
+ * `linkAlpha`（[LINK_FADE_FROM] 起整体淡出）那条语义一字未改：亮缘与填充、描边吃同一支 alpha 一起收，
+ * 底板描边（[wotaDockShell]）与徽标那些也没动。PLAIN 档由 [linkAlphaFor] 第一条就 return，
+ * **一条路径都不描、一次 drawPath 都不发**（用例 `plainModeHasNoAnimationWindowAtAll` 盯的就是这个）。
  *
  * 材料沿用 `wotaCard` 那一套令牌（[WotaColor.hudScrim] 填充 + [WotaColor.acrylicBorder] 描边，
- * 描边宽度 [WotaStroke.hairline] 与卡片边同一档），不加模糊、不加投影。
+ * 描边宽度 [WotaStroke.hairline] 与卡片边同一档），亮缘两端也全是既有令牌（见 [NeckGlowBrush]）。
  *
  * 之所以是 `@Composable`：[Path] 与 [Stroke] 必须在**组合期** remember（审查 S3-4）。留在
  * `drawWithCache` 的外块里就仍受缓存语义支配（外块会因被观察的读取变化而重跑，"每帧零分配"当时只是
@@ -567,6 +703,9 @@ fun Modifier.wotaPillHost(
     val strokeWidthPx = with(LocalDensity.current) { WotaStroke.hairline.toPx() }
     val link = remember { Path() }
     val edge = remember(strokeWidthPx) { Stroke(width = strokeWidthPx, cap = StrokeCap.Round) }
+    // 亮缘笔刷与它的临时矩阵各在组合期建一次：每帧只 setLocalMatrix（绘制阶段零分配）
+    val glow = remember { NeckGlowBrush(newNeckGlowGradient()) }
+    val glowMatrix = remember { Matrix() }
     return this then Modifier.drawWithCache {
         onDrawBehind {
             val p = progress()
@@ -579,46 +718,49 @@ fun Modifier.wotaPillHost(
             link.reset()
             var drew = false
             if (scene.area(MergeScene.THUMB) > 0f) {
-                drew = appendChipLink(
-                    link, scene.cx(MergeScene.THUMB), scene.cy(MergeScene.THUMB), scene.radius(MergeScene.THUMB),
-                    rcx, rcy, rRec, p
-                )
+                drew = appendChipLink(link, scene, MergeScene.THUMB, plan, p, rcx, rcy, rRec) || drew
             }
             if (scene.area(MergeScene.LENS) > 0f) {
-                drew = appendChipLink(
-                    link, scene.cx(MergeScene.LENS), scene.cy(MergeScene.LENS), scene.radius(MergeScene.LENS),
-                    rcx, rcy, rRec, p
-                ) || drew
+                drew = appendChipLink(link, scene, MergeScene.LENS, plan, p, rcx, rcy, rRec) || drew
             }
             if (!drew) return@onDrawBehind
             // 两枚液滴的连通体在同一个 Path 的同一个子路径族里，一次 drawPath → 一次混合，重叠处不叠暗缝
             drawPath(link, WotaColor.hudScrim, alpha = alpha)
             drawPath(link, WotaColor.acrylicBorder, alpha = alpha, style = edge)
+            // 光感：同一张轮廓再描一笔亮缘，峰值落在键自身圆周（接触圈）。宽度仍是 hairline 那一档，
+            // "更亮"靠颜色档位（acrylicBorder 15% 白 → refLine 80% 白），不加宽、不加投影、不加模糊
+            glow.place(rcx, rcy, LiquidMerge.neckGlowRadiusPx(rRec), glowMatrix)
+            drawPath(link, glow, alpha = alpha, style = edge)
         }
     }
 }
 
 /**
- * 一颗控件被吸收的整条连通体：`原位圆 ↔ 液滴` 与 `液滴 ↔ 录制键圆` 两段，追加进同一个 [Path]。
+ * 一颗控件被吸收的这一条颈：`那颗的**视觉**圆 ↔ 录制键圆`，追加进同一个 [Path]。
+ *
+ * **旧版这里是两段**（`原位圆 ↔ 液滴` + `液滴 ↔ 键`）。第二段吃的液滴圆心本来就等于那颗的视觉位置
+ * （纲放开之后 `blobX` 与 [chipVisualCx] 是同一点），第一段却把端点钉在**布局**原位——那颗飞走之后，
+ * 那一段就在原位留了一枚圆帽加一条尾巴，正是"颈和胶囊脱节、像一条莫名其妙的线"的成因。
+ * 现在端点一律走桥，两段并成一段，不再有任何以布局圆心画的几何。
  * 每帧只在既有 Path 上追加线段，不新建对象。
  */
 private fun appendChipLink(
     path: Path,
-    homeX: Float,
-    homeY: Float,
-    rHome: Float,
+    scene: MergeScene,
+    target: Int,
+    plan: MergePlan,
+    progress: Float,
     recordX: Float,
     recordY: Float,
-    rRecord: Float,
-    progress: Float
-): Boolean {
-    val bx = LiquidMerge.blobX(progress, homeX, recordX)
-    val by = LiquidMerge.blobY(progress, homeY, recordY)
-    val br = LiquidMerge.blobRadius(progress, rHome, rRecord)
-    val a = path.appendLiquidLink(homeX, homeY, rHome, bx, by, br)
-    val b = path.appendLiquidLink(bx, by, br, recordX, recordY, rRecord)
-    return a || b
-}
+    rRecord: Float
+): Boolean = path.appendLiquidLink(
+    chipVisualCx(scene, target, plan, progress),
+    scene.cy(target),
+    chipVisualRadiusPx(scene, target, progress),
+    recordX,
+    recordY,
+    rRecord
+)
 
 /**
  * 把「两圆 + 两条公切贝塞尔」的连通体追加到 [this]：单个闭合子路径，Winding 填充 → 一次混合。
@@ -693,4 +835,55 @@ private fun Path.appendHalfCap(cx: Float, cy: Float, r: Float, sx: Float, sy: Fl
         cx + r * nx + h * qx, cy + r * ny + h * qy,
         cx + r * nx, cy + r * ny
     )
+}
+
+/**
+ * 亮缘（光感）用的规范半径：这里只把渐变建成"圆心 (0,0)、半径 [NECK_GLOW_CANONICAL_RADIUS_PX]"
+ * 的标准形状，每帧靠 `setLocalMatrix` 平移到实测键心并按比例缩放。
+ * 取 100（不是 1）是为了让 Skia 求反矩阵时落在数量级正常的数上，缩放系数每帧只有 0.5~1.0 一档。
+ */
+private const val NECK_GLOW_CANONICAL_RADIUS_PX = 100f
+
+/**
+ * 亮缘渐变本身（组合期建一次）。四个数都是既有令牌，没有新造色值：
+ * - 键心那一头 [WotaColor.acrylicBorder]（0x26FFFFFF，卡片边那一档 15% 白）：接触圈以内不许亮，
+ *   否则键心里会出现一枚没有来路的白斑；
+ * - 峰值 [WotaColor.refLine]（0xCCFFFFFF，参考线那一档 80% 白）——令牌里唯一"比卡片边更亮、
+ *   又不是实色"的白，最贴水银将合未合那一口反光；`textHi` 是 95% 实白，描在连通体上会读成
+ *   一根白线而不是一圈反光，所以取 refLine；
+ * - 跨度外缘收到 acrylicBorder 的 **0 透明度**（同一色相、只是把 alpha 拉到 0），
+ *   CLAMP 之外恒为透明，不会把亮缘拖到胶囊本体上。
+ */
+private fun newNeckGlowGradient(): RadialGradient = RadialGradient(
+    0f, 0f, NECK_GLOW_CANONICAL_RADIUS_PX,
+    intArrayOf(
+        WotaColor.acrylicBorder.toArgb(),
+        WotaColor.refLine.toArgb(),
+        WotaColor.acrylicBorder.copy(alpha = 0f).toArgb()
+    ),
+    floatArrayOf(0f, LiquidMerge.NECK_GLOW_PEAK_STOP, 1f),
+    Shader.TileMode.CLAMP
+)
+
+/**
+ * [ShaderBrush] 外壳：把规范渐变按实测几何搬到本帧的接触圈上。
+ *
+ * `place()` 每帧只做三件事：`reset` + `postScale` + `postTranslate`（写进**同一枚** remember 住的
+ * [Matrix]，再把局部矩阵塞回 shader），全程零分配 —— 与 [Path]/[Stroke] 那条"组合期建、绘制期复用"
+ * 的纪律同一条。缩放放在平移**之前**（`post*` 是右乘，先缩放后平移才能得到 `k·p + c`）。
+ */
+private class NeckGlowBrush(private val radial: RadialGradient) : ShaderBrush() {
+
+    /** foundation 1.5.4 的 `ShaderBrush` 是抽象类（不带参构造），自己把既有 shader 交出去：忽略 size，
+     *  几何全在 [place] 写的 local matrix 上，所以每帧不会因为画布尺寸变化而重建 shader */
+    override fun createShader(size: Size): Shader = radial
+
+    /** @param cx/cy 键心（绘制层本地坐标）@param radiusPx 本帧的亮缘半径 = [LiquidMerge.neckGlowRadiusPx] */
+    fun place(cx: Float, cy: Float, radiusPx: Float, into: Matrix) {
+        val k = if (radiusPx > 0f) radiusPx / NECK_GLOW_CANONICAL_RADIUS_PX else 0f
+        into.reset()
+        into.postScale(k, k)
+        into.postTranslate(cx, cy)
+        radial.setLocalMatrix(into)
+    }
 }

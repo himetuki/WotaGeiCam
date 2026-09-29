@@ -7,9 +7,14 @@ import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.anim.chipClicksAccepted
+import com.wotagei.cam.ui.anim.chipTravelForScene
 import com.wotagei.cam.ui.anim.chipTravelPxOf
+import com.wotagei.cam.ui.anim.chipVisualCx
+import com.wotagei.cam.ui.anim.chipVisualDistToKeyPx
+import com.wotagei.cam.ui.anim.chipVisualRadiusPx
 import com.wotagei.cam.ui.anim.dragOwnedByRecordKey
 import com.wotagei.cam.ui.anim.mergeProgressWithHook
+import com.wotagei.cam.ui.anim.neckVisibleFor
 import com.wotagei.cam.ui.hudPerRowFor
 import com.wotagei.cam.ui.hudRoomDp
 import com.wotagei.cam.ui.hudStripHeightDp
@@ -647,6 +652,290 @@ class LiquidMergeTest {
         assertFalse("下边差一点：底板接管", dragOwnedByRecordKey(scene, 125f, 56f))
         assertFalse("底板最左上的缩略图那一片：正常换栏入口", dragOwnedByRecordKey(scene, 20f, 30f))
         assertFalse("首帧还没量到键的矩形 → 退回旧行为（别凭空拒绝手势）", dragOwnedByRecordKey(MergeScene(), 0f, 0f))
+    }
+
+    // ---------- ⑧ #71 第二批：接触颈的端点必须跟着位移走（视觉圆心桥）+ 光感亮缘 ----------
+
+    /**
+     * 主测机（720×1600、density 2）100% 字体下底栏的**实测几何，px 为单位**。
+     * 必须用 px：[LiquidMerge.MIN_WAIST_PX] / [LiquidMerge.MIN_DIST_PX] 两条门槛本来就是像素值，
+     * 拿 dp 喂它们等于把门槛放大两倍，"颈到底画不画"的判定就假了。
+     * 逐格对齐 HudLayer 那三格排布：布局盒 432×120、左槽 34dp 方框、右槽 63×30dp 胶囊、键 50dp。
+     */
+    private fun bottomScenePx(): MergeScene {
+        val s = MergeScene()
+        s.put(MergeScene.CANVAS, 0f, 0f, 432f, 120f)
+        s.put(MergeScene.THUMB, 16f, 26f, 68f, 68f)
+        s.put(MergeScene.LENS, 290f, 30f, 126f, 60f)
+        s.put(MergeScene.RECORD, 166f, 10f, 100f, 100f)
+        return s
+    }
+
+    /**
+     * **本批承重的证明**：颈的端点是「布局圆心 + 同源位移」，不是布局圆心。
+     *
+     * 红法①（这条用例的存在理由）：把 [chipVisualCx] 退回 `scene.cx(target)` → 除 p=0 那一条之外全红
+     * （p=0.5 时期望 283.25px 却拿到 353px）。
+     * 红法②：把位移换成"重算第二份"（例如在桥里另写 `delta × p` 而不走 [chipTravelForScene]）
+     * 而那颗那层仍走 plan 闸门 → PLAIN 那两条红。
+     * 红法③：位移纲被改回 16% 夹子 → 终点态 `= 键心` 那条红（137 × 0.16 走不到 216）。
+     */
+    @Test
+    fun neckEndpointFollowsTheDisplacementNotTheLayoutSlot() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        val layoutCx = scene.cx(MergeScene.LENS)      // 353px（= 176.5dp，那颗离开之前的原位）
+        val keyCx = scene.cx(MergeScene.RECORD)       // 216px
+        assertEquals(353f, layoutCx, 0.001f)
+        assertEquals(216f, keyCx, 0.001f)
+        // 逐档钉死视觉圆心：p=0 还在原位，之后线性落到键心
+        assertEquals("p=0 不动", layoutCx, chipVisualCx(scene, MergeScene.LENS, plan, 0f), 0.001f)
+        assertEquals(284.5f, chipVisualCx(scene, MergeScene.LENS, plan, 0.5f), 0.001f)
+        assertEquals(243.4f, chipVisualCx(scene, MergeScene.LENS, plan, 0.8f), 0.001f)
+        assertEquals("p=1 那颗的中心正好落在键心", keyCx, chipVisualCx(scene, MergeScene.LENS, plan, 1f), 0.001f)
+        // 任何 p>0 都不许等于布局圆心（这就是"退回 scene.cx 必红"的那一条）
+        var i = 1
+        while (i <= 20) {
+            val p = i / 20f
+            assertTrue("p=$p 时颈的端点还钉在原位 $layoutCx", chipVisualCx(scene, MergeScene.LENS, plan, p) != layoutCx)
+            // 圆心距按 (1−p) 线性塌缩：68.5dp → 0
+            assertEquals(
+                "p=$p 的视觉圆心距", (1f - p) * 137f,
+                chipVisualDistToKeyPx(scene, MergeScene.LENS, plan, p), 0.001f
+            )
+            i++
+        }
+        // 左边的缩略图那颗带符号：它在键的**左侧**，位移是正方向
+        assertEquals(50f, chipVisualCx(scene, MergeScene.THUMB, plan, 0f), 0.001f)
+        assertEquals(133f, chipVisualCx(scene, MergeScene.THUMB, plan, 0.5f), 0.001f)
+        assertEquals(216f, chipVisualCx(scene, MergeScene.THUMB, plan, 1f), 0.001f)
+        // 桥与那颗那层 graphicsLayer 吃的是**同一个数**（同源，不许两份算式）
+        for (p in listOf(0f, 0.3f, 0.5f, 0.72f, 0.9f, 1f)) {
+            assertEquals(
+                "p=$p 位移与视觉圆心必须同源",
+                chipTravelForScene(scene, MergeScene.LENS, plan, p),
+                chipVisualCx(scene, MergeScene.LENS, plan, p) - layoutCx,
+                0.0001f
+            )
+        }
+    }
+
+    /**
+     * PLAIN 档：桥本身不吃中间态（位移恒 0 ⇒ 视觉圆心恒等于布局圆心），
+     * 且 [neckVisibleFor] 恒 false ⇒ 绘制层一条路径都不描。
+     * 红法：把 [chipTravelForScene] 里的 `chipTravelPxOf` 换成裸 `LiquidMerge.chipTravelPx`（绕过 plan 闸门）
+     * → 前两条红；把 [waistVisibleFor] 的 `plan.drawWaist` 删掉 → 后两条红。
+     */
+    @Test
+    fun plainModeHasNoNeckAndNoVisualDisplacement() {
+        val scene = bottomScenePx()
+        val plain = mergePlanFor(MotionMode.PLAIN)
+        for (recording in listOf(true, false)) {
+            val p = mergeProgressOf(plain, recording, 0.75f)
+            for (target in listOf(MergeScene.THUMB, MergeScene.LENS)) {
+                assertEquals(
+                    "PLAIN 的视觉圆心 == 布局圆心（recording=$recording）",
+                    scene.cx(target), chipVisualCx(scene, target, plain, p), 0.0001f
+                )
+                assertFalse("PLAIN 任何档都不长颈", neckVisibleFor(plain, scene, target, p))
+            }
+        }
+        // 半径那条桥故意不吃 plan（PLAIN 的进度只有 0/1，缩到位那一档本体 alpha 也已经是 0）：
+        // 这里钉的是"桥与那颗那层 graphicsLayer 用同一个 chipScale"，两个数值都是独立字面量
+        assertEquals(30f, chipVisualRadiusPx(scene, MergeScene.LENS, 0f), 0.001f)
+        assertEquals("录制态那一档那颗缩到 0.72", 21.6f, chipVisualRadiusPx(scene, MergeScene.LENS, 1f), 0.001f)
+    }
+
+    /**
+     * 颈的端点半径 = 那颗**缩之后**的实体半径。
+     * 红法：把 `× chipScale(progress)` 删掉（直接用 `scene.radius`）→ 后两条红，
+     * 而画面上是"颈的帽比那颗本身还粗"，从键里糊出一圈没有来路的暗盘。
+     */
+    @Test
+    fun neckRadiusIsTheShrunkenBody() {
+        val scene = bottomScenePx()
+        assertEquals(30f, chipVisualRadiusPx(scene, MergeScene.LENS, 0f), 0.001f)
+        assertEquals(30f * LiquidMerge.chipScale(0.5f), chipVisualRadiusPx(scene, MergeScene.LENS, 0.5f), 0.001f)
+        assertEquals("终点缩到 0.72 档", 21.6f, chipVisualRadiusPx(scene, MergeScene.LENS, 1f), 0.001f)
+        assertTrue("中途必须严格小于布局半径", chipVisualRadiusPx(scene, MergeScene.LENS, 0.8f) < 30f)
+        assertEquals(34f, chipVisualRadiusPx(scene, MergeScene.THUMB, 0f), 0.001f)
+        assertEquals(24.48f, chipVisualRadiusPx(scene, MergeScene.THUMB, 1f), 0.001f)
+        // 那颗没组合（面积 0）⇒ 半径 0 ⇒ 颈无从长起
+        val noLens = bottomScenePx().apply { put(MergeScene.LENS, 0f, 0f, 0f, 0f) }
+        assertEquals(0f, chipVisualRadiusPx(noLens, MergeScene.LENS, 0.8f), 0.001f)
+        assertFalse("没组合的那颗不许长颈", neckVisibleFor(mergePlanFor(MotionMode.FLUENT), noLens, MergeScene.LENS, 0.8f))
+    }
+
+    /**
+     * 两条**独立写法**必须落在同一个点上：`blobX`（从插值出发）与 [chipVisualCx]（从"布局圆心 + 同源位移"出发）。
+     * 这条不是恒等式——两边各有一条自己的算式，任一侧单边改错（插值方向写反、纲换掉、闸门漏挂）就红。
+     */
+    @Test
+    fun visualCenterIsTheSamePointAsTheBlobPath() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        for (target in listOf(MergeScene.THUMB, MergeScene.LENS)) {
+            val home = scene.cx(target)
+            val key = scene.cx(MergeScene.RECORD)
+            var i = 0
+            while (i <= 25) {
+                val p = i / 25f
+                assertEquals(
+                    "target=$target p=$p",
+                    LiquidMerge.blobX(p, home, key),
+                    chipVisualCx(scene, target, plan, p),
+                    0.001f
+                )
+                i++
+            }
+        }
+    }
+
+    /**
+     * **旧的假颈确实存在过，现在被消除**（这条是本批"脱节"症状的回归锁）。
+     *
+     * 旧写法在同一张 Path 上追加两段：`布局原位圆 ↔ 液滴` 与 `液滴 ↔ 键`。第一段把端点钉在布局原位，
+     * 而那颗已经跟着 translationX 飞走 —— 于是 p 小的那一段（那颗才走了两三成路）在原位留出一截
+     * 画得出来的圆帽 + 尾巴。这里用生产算式把这截**量化**出来（p=0.2 时腰宽 6.7px，完全看得见），
+     * 再断言新写法的两段并成一段：条目那一端与那颗的视觉位置重合 ⇒ 长度 0 ⇒ `linkVisible` 拒绝。
+     * 红法：把 `appendChipLink` 改回两段（第一段喂 `scene.cx`）→ 第一条断言就从"证据"变成"缺陷"，
+     * 但真正会红的是 [neckEndpointFollowsTheDisplacementNotTheLayoutSlot]；这条负责说明为什么要改。
+     */
+    @Test
+    fun phantomTailAtTheLayoutSlotIsEliminated() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        val home = scene.cx(MergeScene.LENS)
+        val key = scene.cx(MergeScene.RECORD)
+        val p = 0.2f
+        // 旧的第一段：布局原位 ↔ 液滴（液滴 = 那颗此刻的视觉位置）
+        val phantomLen = abs(LiquidMerge.blobX(p, home, key) - home)
+        assertEquals("那颗才走了 27.4px", 27.4f, phantomLen, 0.01f)
+        val phantomWaist = LiquidMerge.waistRadiusPx(
+            phantomLen, scene.radius(MergeScene.LENS),
+            LiquidMerge.blobRadius(p, scene.radius(MergeScene.LENS), scene.radius(MergeScene.RECORD)),
+            LiquidMerge.cutDistancePx(
+                scene.radius(MergeScene.LENS),
+                LiquidMerge.blobRadius(p, scene.radius(MergeScene.LENS), scene.radius(MergeScene.RECORD))
+            )
+        )
+        assertTrue("p=0.2 时那一截假颈腰宽 $phantomWaist px 是真画得出来的（>2px）", phantomWaist > 2f)
+        // 新写法：颈的条目端 == 那颗的视觉位置 ⇒ 没有"原位↔液滴"这一段
+        assertEquals(0f, abs(chipVisualCx(scene, MergeScene.LENS, plan, p) - LiquidMerge.blobX(p, home, key)), 0.001f)
+        assertFalse(
+            "同一点 ⇒ MIN_DIST_PX 挡掉，不再有任何留在原位的几何",
+            LiquidMerge.linkVisible(0f, chipVisualRadiusPx(scene, MergeScene.LENS, p), scene.radius(MergeScene.RECORD))
+        )
+    }
+
+    /**
+     * **颈真的会长出来，一个常数都没抬**（`CUT_FACTOR = 0.7` 原值）。
+     *
+     * 位移纲放开之后，视觉圆心距从 137px 线性塌到 0，而阈值 `cut = 0.7 × (rA + 50px)` 本身也随那颗缩小
+     * 轻微收窄（rA = 30px × chipScale），两者在 p ≈ 0.643 交叉 —— 那之后颈逐帧变粗。
+     * 红法：把位移改回 16% 夹子 → 视觉圆心距最低只到 115px，全程 > cut ⇒ 四条断言全红
+     * （这就是"第一批放开位移把这条死路径自己盘活"的那句验收）。
+     */
+    @Test
+    fun neckAppearsOnItsOwnOnceTravelIsReleased() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        assertFalse("p=0.5 还没有颈", neckVisibleFor(plan, scene, MergeScene.LENS, 0.5f))
+        assertFalse("p=0.60 还差一点", neckVisibleFor(plan, scene, MergeScene.LENS, 0.60f))
+        assertTrue("p=0.65 颈刚长出来（腰已过 0.6px 门槛）", neckVisibleFor(plan, scene, MergeScene.LENS, 0.65f))
+        assertTrue("p=0.80 颈在变粗", neckVisibleFor(plan, scene, MergeScene.LENS, 0.80f))
+        assertTrue("p=0.90 颈最粗（整体正在淡出）", neckVisibleFor(plan, scene, MergeScene.LENS, 0.90f))
+        // 交叉点必须在行程后段、且在淡出起点之前，否则肉眼窗口太短
+        var cross = 1f
+        var k = 0
+        while (k <= 200) {
+            val p = k / 200f
+            if (neckVisibleFor(plan, scene, MergeScene.LENS, p)) { cross = p; break }
+            k++
+        }
+        assertTrue("颈的起点 p=$cross 应落在 0.55~0.72（淡出从 LINK_FADE_FROM=${LiquidMerge.LINK_FADE_FROM} 起）",
+            cross in 0.55f..0.72f)
+        // 缩略图那颗更远（166px）但半径更大 ⇒ 颈起点略晚，同样不需要抬常数
+        assertFalse(neckVisibleFor(plan, scene, MergeScene.THUMB, 0.6f))
+        assertTrue(neckVisibleFor(plan, scene, MergeScene.THUMB, 0.75f))
+    }
+
+    /**
+     * 颈可见的**行程换算成毫秒**（FLUENT = `tween(WotaMotion.COMMIT_MS, LinearOutSlowInEasing)`）。
+     * 判据：这一窗口的时长。太短就等于没有，跟阈值交叉在 p 的哪一档无关。
+     *
+     * 用库里的缓动函数把 p 反对回去（不是自己抄一条曲线），所以这条同时钉住
+     * 「时长只从令牌取」那一条：红法——把 `MotionSpec.float` 的时长换小，窗口跟着缩就红。
+     */
+    @Test
+    fun neckVisibleWindowIsLongEnoughToSee() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        val steps = 2000
+        var visible = 0
+        var firstT = -1f
+        var lastT = -1f
+        for (n in 0..steps) {
+            val t = n / steps.toFloat()
+            val p = androidx.compose.animation.core.LinearOutSlowInEasing.transform(t)
+            if (neckVisibleFor(plan, scene, MergeScene.LENS, p)) {
+                visible++
+                if (firstT < 0f) firstT = t
+                lastT = t
+            }
+        }
+        val ms = visible * WotaMotion.COMMIT_MS / steps
+        assertTrue("颈可见窗口只有 $ms ms（${firstT}~${lastT} 段），低于 350ms 就肉眼不可用", ms >= 350)
+        assertTrue("窗口要覆盖动画后半段（firstT=$firstT）", firstT in 0.20f..0.45f)
+    }
+
+    /**
+     * 颈按**收拢中的轮廓**逐帧不出界（旧 clip 撤掉之后唯一的那道账，本批改了端点口径就要重算）。
+     * 条目那一端：视觉圆心距 + 视觉半径 ≤ 本帧底板轮廓半宽。
+     * ⚠ 键那一端的帽半径恒等于键自己那条圆（50px > 收拢后的半高 46px），它不在这笔账里，
+     *   因为录制键以 `RecordZIndex` 后画、正好把它压住——这条事实由真机点验，不由本用例。
+     */
+    @Test
+    fun neckStaysInsideTheCollapsingShell() {
+        val scene = bottomScenePx()
+        val plan = mergePlanFor(MotionMode.FLUENT)
+        val shellHalfStart = 216f   // 布局盒半宽 432/2
+        val shellHalfEnd = 46f      // 终点 = recordRing 46dp 的半宽（23dp × 2）
+        var i = 0
+        while (i <= 40) {
+            val p = i / 40f
+            val shellHalf = DockShell.sidePx(shellHalfStart, shellHalfEnd, p)
+            for (target in listOf(MergeScene.THUMB, MergeScene.LENS)) {
+                if (!neckVisibleFor(plan, scene, target, p)) continue
+                val outside = chipVisualDistToKeyPx(scene, target, plan, p) +
+                    chipVisualRadiusPx(scene, target, p) - shellHalf
+                assertTrue("$target 在 p=$p 的颈露出收拢中的轮廓 $outside px", outside <= 0.001f)
+            }
+            i++
+        }
+        // 最紧的一档就是颈刚长出来那一刻（p≈0.65），这里把它和轮廓的余量钉住：余量突然变小 = 端点口径被改坏
+        val tight = chipVisualDistToKeyPx(scene, MergeScene.LENS, plan, 0.65f) +
+            chipVisualRadiusPx(scene, MergeScene.LENS, 0.65f) -
+            DockShell.sidePx(shellHalfStart, shellHalfEnd, 0.65f)
+        assertTrue("刚长出颈时还要有 20px 以上余量（实测 $tight）", tight < -20f)
+    }
+
+    /**
+     * 光感：亮缘半径与峰值档是**两枚独立字面量**，乘回去必须正好落在录制键自己的圆周（接触圈）。
+     * 红法：只改 [LiquidMerge.NECK_GLOW_SPAN]（半径变长）或只改 [LiquidMerge.NECK_GLOW_PEAK_STOP]
+     * （峰值那一档挪走）→ 乘积偏离键半径 >0.5% 即红。写成 `1f / span` 的派生式就测不出任何东西，
+     * 所以故意不派生（AGENTS「恒等式不算证明」）。
+     */
+    @Test
+    fun neckGlowPeakSitsOnTheKeyCircle() {
+        val rRec = 50f
+        val radius = LiquidMerge.neckGlowRadiusPx(rRec)
+        assertTrue("跨度必须大于键半径，否则外缘连那颗露出的月牙都盖不到", radius > rRec)
+        assertEquals("峰值档乘回半径 = 键半径", rRec, radius * LiquidMerge.NECK_GLOW_PEAK_STOP, rRec * 0.005f)
+        assertTrue("峰值档必须落在 0..1 之间", LiquidMerge.NECK_GLOW_PEAK_STOP in 0f..1f)
+        assertEquals(70f, radius, 0.001f)
+        // 键没量到（半径 0）时半径归 0，绘制层本来就在第一条 return，不许凭空起一枚亮斑
+        assertEquals(0f, LiquidMerge.neckGlowRadiusPx(0f), 0.001f)
     }
 
     private companion object {
