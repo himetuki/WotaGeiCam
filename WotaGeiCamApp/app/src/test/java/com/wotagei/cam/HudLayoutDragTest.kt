@@ -274,13 +274,18 @@ class HudLayoutDragTest {
     fun rightDockBandEatsReadoutHeightAndClosesWhenItIsEmpty() {
         // 横屏安全区实测宽 766（不是根容器 800）：与 HudLayoutClampTest 那两个 area 同一个来源
         val area = HudAreaDp(width = 766, height = 360, topAvoidDp = 44, bottomAvoidDp = 72)
+        // #70 A 之后这条算式多了第三个入参（读数块自己那条底边）。这里钉的是**退化档**：
+        // 读数块让到整排之上（readoutBottomDp = 72）时两截仍是串联，与改前逐字相同。
         // 默认 3 读数一行 ≈ 42dp：右 Dock 的下界从 72 抬到 114
-        assertEquals(114, areaForRightDock(area, 42).bottomAvoidDp)
+        assertEquals(114, areaForRightDock(area, 42, 72).bottomAvoidDp)
         // 读数全关（块回报 0）时那条缝必须收回去，回到只有底栏那一截
-        assertEquals(area, areaForRightDock(area, 0))
+        assertEquals(area, areaForRightDock(area, 0, 72))
         // 坏值（负高）不许把下界拉到比底栏还高，等于让 Dock 伸进底栏
-        assertEquals(72, areaForRightDock(area, -50).bottomAvoidDp)
+        assertEquals(72, areaForRightDock(area, -50, 72).bottomAvoidDp)
         // 其余两枚容器不受这条影响（左 Dock 与读数块都不在右缘那一列）
         assertEquals(72, area.bottomAvoidDp)
+        // 同基线档（#70 A 的默认档）改成"取大不求和"，那一整排的 66dp 不再重复让两次
+        // ——详细数值档与可证伪性写在 HudReadoutRowPlanTest.rightDockDodgeIsParallelWhenRowIsShared…
+        assertEquals(72, areaForRightDock(area, 42, 6).bottomAvoidDp)
     }
 }

@@ -92,7 +92,9 @@ import com.wotagei.cam.ui.anim.mergePlanFor
 import com.wotagei.cam.ui.anim.mergeProgressOf
 import com.wotagei.cam.ui.anim.wotaPillHost
 import com.wotagei.cam.ui.design.WotaChip
+import com.wotagei.cam.ui.design.WotaChipTier
 import com.wotagei.cam.ui.design.WotaColor
+import com.wotagei.cam.ui.design.WotaDockChip
 import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaShape
@@ -115,8 +117,10 @@ import kotlin.math.roundToInt
  *
  * 位置怎么来（[HudZoneBox]）：
  * - 表里 [ZonePlacement.isDefault]（两轴都是哨兵）→ 走 B1–B3 定稿的那条**原生对齐**分支
- *   （`CenterStart + padding(start = 8dp)`、`CenterEnd + padding(end = 8dp)`、`BottomEnd − 底栏实测带`、
- *   `BottomCenter + fillMaxWidth` 居中），8dp 是 [HudEdgePad] 那枚设计留白，**避让量全是组合期实测回报值**，
+ *   （`CenterStart + padding(start = 8dp)`、`CenterEnd + padding(end = 8dp)`、
+ *   `BottomEnd + padding(bottom = 读数块那一条带的底边)`（#70 A 之后默认＝与底栏同基线的那 6dp，
+ *   见 [com.wotagei.cam.ui.ReadoutRowPlan]）、`BottomCenter + fillMaxWidth` 居中），
+ *   8dp 是 [HudEdgePad] 那枚设计留白，**避让量全是组合期实测回报值**，
  *   贴挖孔/系统栏那一层由调用方的 `safeDrawingPadding()` 承担，本层没有按方向写死的避让常量；
  * - 用户拖过 → 走 `align(TopStart) + offset(x, y)` 的绝对定位，坐标相对 root 安全区的左上角，
  *   写进去之前先经 [clampZonePos] 钳进安全区。**底栏是唯一的例外**：它只认 y，x 永远是哨兵，
@@ -194,6 +198,18 @@ internal val DockSlotSpace = 63.dp
  * 它同时是左槽宽度的首帧兜底——有/无素材都画在这同一枚方框里，所以素材切换不改槽宽。
  */
 internal val ThumbBoxSpace = 34.dp
+
+/**
+ * 底栏底板**宽度**的首帧兜底值（真值由那颗自己在布局期回报，见 [HudBottomZone] 的 `dockW`）。
+ *
+ * #70 A 要用它算「读数块与底栏同一行时右半还剩多宽」（`planReadoutRow` 的 `dockWidthDp` 入参）：
+ * 首帧量不到底板宽，按 0 算会把右半带估得比实际宽，于是第一帧挑了一行 3 颗、第二帧实测回来才发现挤——
+ * 与 [BottomBarSpaceFallback] 同一套"首帧兜底、第二帧实测接管"的手法。
+ * 由 [DockSlotSpace] / [WotaHit.recordTouch] / 内边距与间距令牌（[WotaSpace.m] + [WotaSpace.s]）拼出来，
+ * 算式与 [HudBottomZone] KDoc 那条「镜头开：W = 2×63 + 50 + 2×(12+8) = 216dp」是同一笔账（不是新常量）。
+ * 左槽的 [ThumbBoxSpace] 不进来：底板宽取的是 `max(左, 右)` 那一档，这里按"镜头那颗占右槽"的常态估。
+ */
+internal val BottomDockWidthFallback = DockSlotSpace * 2 + WotaHit.recordTouch + (WotaSpace.m + WotaSpace.s) * 2
 
 internal const val LED_COUNT = 6
 internal const val MIN_DB = 20f
@@ -323,6 +339,44 @@ private fun Modifier.ghostWhileDragged(dragged: Boolean): Modifier =
 private val HUD_AUTO_ITEMS = setOf(HudItem.SHUTTER, HudItem.ISO, HudItem.EV, HudItem.WB)
 
 /**
+ * **唯一一处**「哪枚容器的胶囊走紧凑档」的裁决（任务 #70 B）。五枚容器里只有两枚竖 Dock 收窄：
+ *
+ * - [HudZone.LEFT] / [HudZone.RIGHT] → [WotaChipTier.Dock]：底板宽由最宽那颗撑出来，条目一窄底板跟着窄；
+ * - [HudZone.BOTTOM] → [WotaChipTier.Standard]：**必须留全局档**。底栏那颗镜头胶囊的宽就是
+ *   `DockSlotSpace = 63dp` 那笔槽宽账的来源，而槽宽是底板 `dockWidthPx` 的输入、#71 收拢算式 `w(0)`
+ *   的起点（docs/plan/13 §14.3）——收它等于顺手改 #71；
+ * - [HudZone.READOUT] → [WotaChipTier.Standard]：**也必须留全局档**。
+ *   `hudPerRowFor` 里「一颗读数 = 39 + 24 + 5 + 22 = 90dp」那串常数（`ChipPaddingDp = 24`）
+ *   量的就是全局档，换档等于让换行算式与真实块宽分叉，那是 §58/§73 那一族"按估宽排版然后裁字"的成因；
+ * - [HudZone.TOP] → 全局档：顶栏容量段那笔窄屏阈值（272/242）按它量的。
+ *
+ * 姿态仪、音量表、蓝牙那三颗自绘件不走 [WotaChip]，所以这条裁决对它们没有作用（也就不参与这笔宽度账）。
+ */
+internal fun chipTierFor(zone: HudZone): WotaChipTier =
+    if (zone == HudZone.LEFT || zone == HudZone.RIGHT) WotaChipTier.Dock else WotaChipTier.Standard
+
+/**
+ * 条目渲染里那条"按档位选入口"的路：同一个实现、两档内剂量（[WotaChip] / [WotaDockChip]）。
+ * 写成一条私有 composable 而不是在六条 when 分支里各写一遍 `if (tier == …)`，是为了让"哪些胶囊可能被收窄"
+ * 这件事在本文件里只有一个落点。读数那颗（`entry.item` 那条分支）永远走全局档，见 [chipTierFor] 的注释。
+ */
+@Composable
+private fun TierChip(
+    tier: WotaChipTier,
+    label: String,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
+) {
+    if (tier == WotaChipTier.Dock) {
+        WotaDockChip(label, selected, modifier, onClick, onLongClick)
+    } else {
+        WotaChip(label, selected, modifier, onClick, onLongClick)
+    }
+}
+
+/**
  * 一颗可编辑控件的渲染：按条目取控件类型，按 [ctx] 取读数与动作。
  *
  * 三条刻意的约束：
@@ -333,9 +387,18 @@ private val HUD_AUTO_ITEMS = setOf(HudItem.SHUTTER, HudItem.ISO, HudItem.EV, Hud
  *   不用 expandIn/shrinkOut（MotionSpec 不许在预览层做布局参数动画）；
  * - 点按与长按的分工照旧：竖 Dock 的胶囊点按开就近面板（没有点按循环的语义），
  *   底栏镜头那颗点按循环镜头 / 长按开面板，读数条目点按循环取值 / 长按开面板。
+ *
+ * [tier] 只影响"控件胶囊"那一半分支的内剂量（#70 B，裁决在 [chipTierFor]，两枚竖 Dock 才收紧凑档）；
+ * 读数那一半（`entry.item`）恒走全局档，因为它与 `hudPerRowFor` 的 90dp 估宽是同一笔账。
+ * 默认值是全局档：漏传只会退回旧观感，不会把底栏/顶栏/读数块意外收窄。
  */
 @Composable
-fun HudEntryItem(entry: HudEntry, ctx: HudCtx, modifier: Modifier = Modifier) {
+fun HudEntryItem(
+    entry: HudEntry,
+    ctx: HudCtx,
+    modifier: Modifier = Modifier,
+    tier: WotaChipTier = WotaChipTier.Standard
+) {
     // 锚点只在这一层挂，且只经 ctx.anchorOf 这一条路（调用方在里面做「同一 PillKey 两个候选写入方」的裁决）
     val anchor = ctx.anchorOf(entry)
     entry.pill?.let { pill ->
@@ -349,9 +412,9 @@ fun HudEntryItem(entry: HudEntry, ctx: HudCtx, modifier: Modifier = Modifier) {
                 card = false,
                 onClick = ctx.onBtClick
             )
-            CamPill.ZOOM -> WotaChip(label = ctx.zoomLabel, selected = false, modifier = anchor.then(modifier), onClick = ctx.onZoomClick)
-            CamPill.FOCUS -> WotaChip(label = ctx.focusLabel, selected = ctx.focusActive, modifier = anchor.then(modifier), onClick = ctx.onFocusClick)
-            CamPill.STAB -> WotaChip(label = ctx.stabLabel, selected = ctx.stabActive, modifier = anchor.then(modifier), onClick = ctx.onStabClick)
+            CamPill.ZOOM -> TierChip(tier, ctx.zoomLabel, false, anchor.then(modifier), ctx.onZoomClick)
+            CamPill.FOCUS -> TierChip(tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier), ctx.onFocusClick)
+            CamPill.STAB -> TierChip(tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier), ctx.onStabClick)
             CamPill.REFLINE -> WotaIconButton(
                 image = Icons.Filled.GridOn,
                 description = stringResource(R.string.cam_p_refline),
@@ -359,18 +422,12 @@ fun HudEntryItem(entry: HudEntry, ctx: HudCtx, modifier: Modifier = Modifier) {
                 modifier = anchor.then(modifier),
                 onClick = ctx.onRefLineClick
             )
-            CamPill.MONITOR -> WotaChip(
-                label = ctx.monitorLabel,
-                selected = ctx.monitorActive,
-                modifier = anchor.then(modifier),
-                onClick = ctx.onMonitorClick
+            CamPill.MONITOR -> TierChip(
+                tier, ctx.monitorLabel, ctx.monitorActive, anchor.then(modifier), ctx.onMonitorClick
             )
             // 曲线开的是整块面板，没有就近锚点（[HudEntry.pillKey] 返回 null）；与斑马纹同级，是创作项
-            CamPill.CURVE -> WotaChip(
-                label = stringResource(R.string.cam_p_curve),
-                selected = ctx.curveOn,
-                modifier = anchor.then(modifier),
-                onClick = ctx.onCurveClick
+            CamPill.CURVE -> TierChip(
+                tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier), ctx.onCurveClick
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),
@@ -379,9 +436,8 @@ fun HudEntryItem(entry: HudEntry, ctx: HudCtx, modifier: Modifier = Modifier) {
                 modifier = anchor.then(modifier),
                 onClick = ctx.onFlashClick
             )
-            CamPill.LENS -> WotaChip(
-                label = ctx.lensLabel,
-                selected = false,
+            CamPill.LENS -> TierChip(
+                tier, ctx.lensLabel, false,
                 // 点按循环镜头、长按开就近面板（六项第 7 条把顶栏那段并到这颗）
                 modifier = anchor.then(modifier),
                 onClick = ctx.onLensCycle,
@@ -476,7 +532,14 @@ private fun nativeContentAlignment(zone: HudZone): Alignment = when (zone) {
     HudZone.BOTTOM -> Alignment.Center
 }
 
-/** 一枚容器可用的最大带高：竖 Dock 与读数块被顶/底避让量夹，顶栏与底栏受整条安全区夹 */
+/**
+ * 一枚容器可用的最大带高：竖 Dock 与读数块被顶/底避让量夹，顶栏与底栏受整条安全区夹。
+ *
+ * ⚠ [HudZone.READOUT] 那一枚**必须喂它自己的 area**（`ReadoutRowPlan.bottomAvoidDp` 那份，
+ * 不是 `baseArea`）：#70 A 之后读数块默认与底栏同基线，喂 baseArea 会把带高少算一整排（66dp），
+ * 条目就白白多滚一屏。原生对齐分支、`clampZonePos`、这条带高三处读的是同一个 `area.bottomAvoidDp`，
+ * 所以只要 area 给对了，三处不会分叉。
+ */
 internal fun zoneBandHeight(zone: HudZone, area: HudAreaDp): Int =
     if (zone == HudZone.TOP || zone == HudZone.BOTTOM) area.height
     else (area.height - area.topAvoidDp - area.bottomAvoidDp).coerceAtLeast(0)
@@ -532,6 +595,12 @@ fun BoxScope.HudZoneBox(
                 .padding(start = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
             HudZone.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight()
                 .padding(end = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
+            // #70 A：读数块的 bottom 不再吃"底栏那一排的带高"。调用方喂给它的是 ReadoutRowPlan 算出来的
+            // 那一条底边（与 readoutRoomBesideDockDp 同一次决策的产物）：
+            // 常态与底栏同基线（＝下一行 BOTTOM 用的同一个 BottomBarOuterPadV，两块底边对齐、同一行并排），
+            // 只有两种情况退回底栏带高、让到整排之上：① 右半带连两颗读数都装不下（竖屏 360dp），
+            // ② 估宽说装得下而**实测块宽**已经越过了那条带（安全网，见 planReadoutRow）。
+            // 手算让位只用在几何上真会重叠的那一对，这条规矩是 §14.2 里用户 11:39 那句原话的落点。
             HudZone.READOUT -> Modifier.align(Alignment.BottomEnd)
                 .padding(end = HudEdgePad, bottom = area.bottomAvoidDp.dp)
             // 底栏的槽位要横向铺满才谈得上「底板在可视窗口里居中」。居中基准这里不许扣任何让位量：
@@ -622,9 +691,21 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
  * 宽度不写死：由底板内最宽那行撑出来，所以字体 120% 时自动加宽，§58/§73 那族
  * 「按 100% 字体量出来的固定宽在 120% 下裁字」在这里不复发。
  *
+ * **胶囊在本容器内走 [WotaChipTier.Dock] 紧凑档**（#70 B，档位裁决只有一处：[chipTierFor]）。
+ * 收窄前后的账（汉字按 1 em、拉丁按 0.6 em 估，与 `hudPerRowFor` 同一套估算口径）：
+ * · 左 Dock：「屏幕监看」4 汉字 52dp + 全局档左右内边距 12+12 = 76dp，底板再包 `WotaSpace.xs` ×2 = **84dp**
+ *   ——r11 真机量到的「底板约 84dp」正是这一档；紧凑档 52 + 8+8 = 68 → 底板 **76dp**。
+ *   同排还有「RGB 曲线」（≈53dp 文字）→ 底板 ≈ **77dp**，所以左 Dock 实收约 7dp。
+ * · 右 Dock 静置时最宽那颗是「1.0x」（31dp 文字，被 3 汉字下限撑到 39）→ 71dp 底板；
+ *   紧凑档 47.2 → 底板 **55dp**（−16dp）。
+ * · ⚠ **录制中右 Dock 回到 ≈94dp，且这一档不是胶囊给的**：S2-2 B 那条「姿态仪 + 音量表并成一行两列」
+ *   的并排规则让那一行 = 姿态仪 54（46dp 天地线 + 4+4 内边距）+ 间距 4 + 音量表 28（16dp LED + 6+6）
+ *   = 86dp，底板再包 8 = **94dp**——r11 量到的 94 就是这个数。要再窄只能动那条并排规则或动这两颗自绘件，
+ *   两者都不在 #70 B「做 Dock 内专用紧凑档」的授权范围内，已单列进交付报告的未决项。
+ *
  * 底板只在至少有一颗要画时才组合，否则全关掉后会留一枚空壳。
- * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：这枚盒子约 94×202dp，`percent = 50` 的半径取短边
- * 一半 ≈47dp，而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
+ * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：`percent = 50` 的半径取短边一半，
+ * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
  * 姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  *
  * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里：姿态仪与音量表在顺序里相邻时
@@ -643,6 +724,8 @@ fun HudDockZone(
 ) {
     if (order.isEmpty()) return
     val groups = hudRowGroups(zone, order, perRow = 1)
+    // #70 B：本容器内所有"控件胶囊"统一走这一档，读数条目不受影响（见 chipTierFor 的注释）
+    val tier = chipTierFor(zone)
     Column(
         modifier
             .wotaCard(WotaShape.card)
@@ -658,11 +741,11 @@ fun HudDockZone(
                     horizontalArrangement = Arrangement.spacedBy(WotaSpace.xs),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    group.forEach { HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it)) }
+                    group.forEach { HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it), tier) }
                 }
             } else {
                 val single = group.first()
-                HudEntryItem(single, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == single))
+                HudEntryItem(single, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == single), tier)
             }
         }
     }
@@ -671,6 +754,12 @@ fun HudDockZone(
 /**
  * 右下常驻读数块（[HudZone.READOUT]，六项第 4 条搬到录制键右侧）。
  *
+ * **#70 A：它与底栏 Dock 是"同一条横带上的两个落位"，不是一上一下。** 底边默认停在
+ * `BottomBarOuterPadV` 那一档（与底栏原生分支同一个数）⇒ 两块底边对齐；横向各占一半：
+ * 底栏居中、读数块贴右缘，中间让开一枚 `WotaSpace.s`。可用宽由
+ * [com.wotagei.cam.ui.planReadoutRow] 一次算清（含"右半带装不下两颗就退回整排之上"那一档退化），
+ * 本层的 [bandHeightDp] 与调用方喂给 [HudZoneBox] 的 `bottomAvoidDp` 都出自同一次决策。
+ *
  * 每格点按循环取值、长按弹自己的就近胶囊；行与行都**右对齐**，最后一行不满时也贴右缘，
  * 不会在右边留一段空白让人以为被裁了。一行几颗由调用方算（[com.wotagei.cam.ui.anim.hudPerRowFor]），
  * 这里只照数分行——竖屏 360dp 宽时一行 3 颗会顶出右缘裁字，那是 §58/§73 那一族老坑。
@@ -678,7 +767,10 @@ fun HudDockZone(
  *
  * 参数是一颗一颗独立的悬浮胶囊，不是一整块面板，所以这里不套外层底。
  * 不进底栏那枚 Dock 的理由照旧：Dock 内左右两槽必须等宽快门才居中，读数进去会把整枚 Dock 撑到
- * 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
+ * 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。**读数在 Dock 之外**这条是 #70 A 的硬约束：
+ * 它绝不参与 `2S + R + 2G + 2P` 那笔居中算式，也不许为了放读数去动底栏槽位。
+ * 这几颗胶囊也**不走紧凑档**（[chipTierFor] 把 READOUT 钉在 [WotaChipTier.Standard]），
+ * 因为 `hudPerRowFor` 的 90dp 估宽量的就是全局档。
  */
 @Composable
 fun HudReadoutZone(
@@ -858,6 +950,9 @@ data class HudDockDrag(
  *    录制键在内容区里由 [Alignment.Center] 定位 ⇒ 它到左内边缘 = S + G + R/2 ⇒
  *    录制键中心 = P + S + G + R/2 = (W − 2P)/2 + P = **W/2** = 底板中心。
  *    S 只由 `max(左, 右)` 决定，两颗各自显示与否只改变 S 的大小、不改变"两槽等宽"这件事。
+ *    #70 A 之后右下那几颗常驻读数与这枚底板**共用底部那一条横带**（各占一半：底板居中、读数贴右缘），
+ *    它们在底板之外、一行都没进上面这笔算式；反过来也不许为了塞进读数去加第三个槽或改 S——
+ *    加了就等于把快门从可视中心挪走，那条不变量是本函数唯一的承重条件。
  * · 镜头开：S = max(34, 63) = 63 → W = 2×63 + 50 + 2×(12+8) = **216dp**（100% 字体缩放）
  * · 镜头关（或被编辑页挪去别的容器，两种都是 [showLens] = false，那颗不在这枚 Dock 里组合）：
  *   S = max(34, 0) = 34 → W = **158dp**

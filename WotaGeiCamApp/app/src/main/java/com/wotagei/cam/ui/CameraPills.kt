@@ -91,6 +91,11 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
  *
  * 「编辑控件」页不在这张表里：那页不弹就近浮层，`ctx.anchorOf` 那一路被改写成**条目矩形回报**
  * （落点格位与 ghost 半径用它），页里 ghost 那份显式传空链，避免同一个 key 被 ghost 覆写。
+ *
+ * 表里 `→ design.WotaChip(...)` 那几行说的是"由哪件控件画"，**档位在 [com.wotagei.cam.ui.chipTierFor]
+ * 一处裁决**（#70 B）：只有两枚竖 Dock 里的"控件胶囊"改走 `design.WotaDockChip` 紧凑档，
+ * 底栏那颗镜头、顶栏两段、右下读数块一律还是 `design.WotaChip` 全局档——后两处的宽度账分别
+ * 是 `DockSlotSpace` 与 `hudPerRowFor` 的输入，收窄会连带改掉 #71 的算式起点。
  */
 val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.SIZE to "HudLayer.HudEntryItem(SIZE) ← CameraScreen.ctx.anchorOf，宿主是可拖动的顶栏胶囊组",

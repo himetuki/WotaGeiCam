@@ -108,8 +108,6 @@ import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.ui.anim.LocalMotion
-import com.wotagei.cam.ui.anim.hudPerRowFor
-import com.wotagei.cam.ui.anim.hudRoomDp
 import com.wotagei.cam.ui.anim.hudStripHeightDp
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.dialog.CurveSheet
@@ -465,33 +463,64 @@ fun CameraScreen(
         }.forEach { add(HudEntry.of(it)) }
         hudItems.forEach { add(HudEntry.of(it)) }
     }
-    // S3-5：喂 hudPerRowFor 的是 hudRoomDp（**安全区实测宽** − 读数块那枚设计留白 − 块内左右内边距），
-    // 三个量都与读数块自己原生对齐用的是同一批真源（safeW 那条回报、HudEdgePad、HudBlockPadDp）；
-    // 直接传 screenWidthDp 会把"贴边"当"装得下"，传旧的 34dp 避让量则会在挖孔换边的那个姿态里双重让位。
-    val hudRoom = hudRoomDp(safeW.toFloat(), HudEdgePad.value)
+    // S3-5：读数块的取档判据必须是"调用点同一个表达式"算出的可用宽（旧写法直接传 screenWidthDp 会把
+    // "贴边"当"装得下"，传旧的 34dp 避让量则会在挖孔换边的那个姿态里双重让位）。
+    // #70 A 之后那条表达式收进了 planReadoutRow（HudLayout.kt，纯函数 + JVM 用例）：它一次算清
+    // 「底边停哪一档 + 一行几颗 + 可用内宽」，本文件与编辑页都只调它，不再各摆一份 hudRoomDp/hudPerRowFor。
     val readoutCount = hudLayout.visibleOrderOf(HudZone.READOUT, visibleEntries).size
-    val hudPerRow = remember(readoutCount, hudDensity.fontScale, hudRoom) {
-        hudPerRowFor(readoutCount, hudDensity.fontScale, hudRoom)
-    }
-    // S3-6：读数块高度首帧按行数预测而不是 0——0 会让进页首帧的右 Dock 下界按未扣值算，最低那颗叠一帧。
-    // 旋转换档时它仍是上一轮那一档，与 topBarH 同一套"两轮收敛"手法，下一帧就正。
-    val hudStripH = zoneRects[HudZone.READOUT].dpHeightToDp(hudDensity).let {
-        if (it > 0) it else hudStripHeightDp(readoutCount, hudPerRow, hudDensity.fontScale).roundToInt()
-    }
     val baseArea = HudAreaDp(
         width = safeW,
         height = safeH,
         topAvoidDp = topBarH,
         bottomAvoidDp = dockStripH
     )
-    // 六项第 4 条之后右竖 Dock 与读数块都在右缘：右 Dock 的下界还要多让开读数块那一截，否则会叠字
-    val rightArea = areaForRightDock(baseArea, hudStripH)
+    // ---- #70 A：读数块与底栏**共用底部那一条横带**，不再被"底栏带高"抬到 Dock 上方。
+    // 一次决策同时给出三件事，谁都不许另写一份：① 底边停在哪一档（同基线 / 退回整排之上）、
+    // ② 一行几颗（右半带装不下两颗就退回，判据与退化理由见 ReadoutRowPlan 的 KDoc）、③ 可用内宽。
+    // 输入是实测底栏宽（首帧量不到按 BottomDockWidthFallback 兜底，与 dockStripH 同一套两轮收敛手法）、
+    // 安全区实测宽，以及读数块自己的实测宽（只做"估宽说谎时别压上底板"的安全网）。
+    // 主判据不读块宽 ⇒ 没有档位↔块宽的来回翻；退化档取整幅宽、块只会更宽，一旦退出去就稳在里面。
+    val dockCardW = zoneRects[HudZone.BOTTOM].dpWidthToDp(hudDensity)
+    val readoutCardRect = zoneRects[HudZone.READOUT]
+    val readoutCardW = readoutCardRect.dpWidthToDp(hudDensity)
+    val readoutPlan = remember(
+        readoutCount, hudDensity.fontScale, safeW, dockCardW, dockStripH, readoutCardW
+    ) {
+        planReadoutRow(
+            readoutCount = readoutCount,
+            fontScale = hudDensity.fontScale,
+            safeWidthDp = safeW,
+            dockWidthDp = if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt(),
+            dockStripDp = dockStripH,
+            bottomRowPadDp = bottomOuterPadDp,
+            endPadDp = HudEdgePad.value,
+            dockGapDp = WotaSpace.s.value,
+            // 实测块宽做安全网：`hudPerRowFor` 的字宽是算术估计，副标签「感光度 / 曝光补偿」比它假设的
+            // 两汉字宽，估宽偏小时真值会压上底板。量不到那一帧传 0 = 先按估宽走，下一帧实测接管
+            readoutWidthDp = readoutCardW
+        )
+    }
+    // 读数块那枚容器的 area：底边由上面那次决策说了算（默认＝与底栏同基线），带高与钳制都只读这一份
+    val readoutArea = baseArea.copy(bottomAvoidDp = readoutPlan.bottomAvoidDp)
+    // S3-6：读数块高度首帧按行数预测而不是 0——0 会让进页首帧的右 Dock 下界按未扣值算，最低那颗叠一帧。
+    // 旋转换档时它仍是上一轮那一档，与 topBarH 同一套"两轮收敛"手法，下一帧就正。
+    val hudStripH = readoutCardRect.dpHeightToDp(hudDensity).let {
+        if (it > 0) it else hudStripHeightDp(readoutCount, readoutPlan.perRow, hudDensity.fontScale).roundToInt()
+    }
+    // 六项第 4 条之后右竖 Dock 与读数块都在右缘：右 Dock 的下界还要多让开读数块那一截，否则会叠字。
+    // #70 A 之后这两枚在**同一条横带**上（各占一半），所以那截让位与底栏带高取大而不是求和，
+    // 见 areaForRightDock 的 KDoc（同基线档下读数块矮于底栏那一排时，那条缝整个收回去）
+    val rightArea = areaForRightDock(baseArea, hudStripH, readoutPlan.bottomAvoidDp)
     // 顶栏胶囊组的宽度上限：抽取前它待在 `fillMaxWidth` 的顶栏 Row 里，右边被设置入口顶死，
     // 装不下时靠 Text 的 maxLines+Ellipsis 收；搬进独立可拖容器后没有那层约束了，120% 文本 + 窄窗
     // 会直接从右缘画出去。参考区从「窗口宽」换成「安全区实测宽」，与顶栏那行 Row 当年同一个基准。
     val topBarMaxWidthDp = (safeW - TopBarChromeReserveDp).coerceAtLeast(0).dp
 
-    fun areaOf(zone: HudZone): HudAreaDp = if (zone == HudZone.RIGHT) rightArea else baseArea
+    fun areaOf(zone: HudZone): HudAreaDp = when (zone) {
+        HudZone.RIGHT -> rightArea
+        HudZone.READOUT -> readoutArea
+        else -> baseArea
+    }
 
     /**
      * 表里的位置 → 这一帧真正用的位置。
@@ -669,7 +698,7 @@ fun CameraScreen(
                 HudItem.BITRATE -> "${bitrate / 1_000_000}M"
             }
         },
-        readoutPerRow = hudPerRow,
+        readoutPerRow = readoutPlan.perRow,
         anchorOf = { entry ->
             val key = entry.pillKey()
             when {
@@ -827,16 +856,20 @@ fun CameraScreen(
                 // 六项第 4 条：快门速度 / 帧率 / 码率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）。
                 // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
                 // 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
+                // #70 A：这块的底边与带高读的是 readoutArea（planReadoutRow 那次决策），不再读 baseArea——
+                // 后者带的是"底栏那一排的带高"，把它当 padding(bottom=) 用就是把读数手算抬到 Dock 上方，
+                // 那是 §14.2 里被点名第二次的写法。绝对落位那一支（placementOf）也走同一个 areaOf 出口，
+                // 所以钳制带与原生对齐带不会分叉。
                 HudZoneBox(
                     zone = HudZone.READOUT,
                     placement = placementOf(HudZone.READOUT),
-                    area = baseArea,
+                    area = readoutArea,
                     onCardRect = { putCardRect(HudZone.READOUT, it) }
                 ) {
                     HudReadoutZone(
                         hudLayout.visibleOrderOf(HudZone.READOUT, visibleEntries),
                         hudCtx,
-                        zoneBandHeight(HudZone.READOUT, baseArea)
+                        zoneBandHeight(HudZone.READOUT, readoutArea)
                     )
                 }
                 // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
