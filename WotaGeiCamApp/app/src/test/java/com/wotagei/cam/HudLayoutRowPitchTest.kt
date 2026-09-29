@@ -315,6 +315,66 @@ class HudLayoutRowPitchTest {
 
     // ---------- 三、独立性不许因为跨度而退化（#74 的验收口径，一条没让） ----------
 
+    /**
+     * #76：把"应用内文本高度"与"系统字体档"**当成两个独立旋钮**来撞带高。
+     *
+     * 为什么必须拆开：格距走 [gridRowPitchPx]，吃的是 `Density.fontScale`（系统档），因为
+     * `WotaType.chip` 是静态字阶、不吃应用内设置（#72 那条排版双真源）；
+     * 而撑起右 Dock 那枚配对块的是姿态仪的状态文字，它走 `MaterialTheme.typography.labelSmall`，
+     * **吃应用内 `text_scale_camera`**（`TextScaleLayer` 只换 MaterialTheme）。
+     * 于是同一枚格子里，"块的高"与"格距"由两个不同的设置各管一半——
+     * 上面那批 `*Heights120` 矩阵把两个旋钮当成同一个数喂，正好漏掉最坏那一角。
+     *
+     * 块高的构成（dp，与 `AttitudeCard` 的布局输入一一对应）：
+     *   天地线 Canvas 46 + `padding(vertical=5)`×2 + `spacedBy(2)` = **58dp 固定**，
+     *   再加状态文字行高 `labelSmall.lineHeight 14sp` × 应用档 × 系统档。
+     * 格距构成：`WotaType.chip.lineHeight 18sp` × 系统档 + 上下内边距 6+6 + 一道行距 4。
+     */
+    @Test
+    fun theTwoTextScaleKnobsTogetherPushTheRightDockOverTheLandscapeBand() {
+        val bandDp = 360f - 44f - 72f          // 横屏带高 = 带宽 − 顶栏 − 底栏
+        // (应用内文本高度档, 系统字体档)
+        val corners = listOf(
+            ScaleCorner("app100 sys100", 1f, 1f),
+            ScaleCorner("app120 sys100", 1.2f, 1f),
+            ScaleCorner("app100 sys120", 1f, 1.2f),
+            ScaleCorner("app120 sys120", 1.2f, 1.2f)
+        )
+        val overflow = mutableMapOf<String, Float>()
+        for (c in corners) {
+            // 格距向上取整到整 dp（生产的口径：34dp / 38dp，不是 37.6）
+            val pitchDp = kotlin.math.ceil(18.0 * c.systemScale + 16.0).toFloat()
+            val blockDp = 58f + 14f * c.appScale * c.systemScale
+            val span = Math.ceil((blockDp / pitchDp).toDouble()).toInt().coerceAtLeast(1)
+            // 配对块吃 span 档，其余四颗各一档 ⇒ 一档都省不掉
+            val rows = span + 4
+            val gridDp = rows * pitchDp - 4f
+            overflow[c.name] = gridDp - bandDp
+            // 走生产纯函数复核跨度，不接受这里只是手算（块高换算成 px 喂进去）
+            val heights = rightHeights100 + mapOf(
+                e(CamPill.LEVEL) to (blockDp * density).toInt(),
+                e(CamPill.VOLUME) to (blockDp * density).toInt()
+            )
+            val placed = gridPlaced(HudZone.RIGHT, c.systemScale, heights, rightWidths)
+            assertEquals(
+                "${c.name}：格距必须由系统档推出，不许被应用档带着走",
+                (pitchDp * density).toInt(), placed.pitch.height
+            )
+            assertEquals(
+                "${c.name}：网格总高对撞带高（红就说明某个旋钮组合把右 Dock 顶出带外）",
+                (gridDp * density).toInt(), placed.size.height
+            )
+        }
+        // 三档装得进、最坏那一角**超带 18dp**：这条断言的是已知极限的测量值。
+        assertEquals("app120 sys100 仍装得进", 0f, maxOf(0f, overflow.getValue("app120 sys100")), 0.01f)
+        assertEquals("app100 sys120 最松（块只涨一档而格距涨 10%）", 0f, maxOf(0f, overflow.getValue("app100 sys120")), 0.01f)
+        assertEquals(
+            "#76 已知极限：应用档与系统档**同时** 120% 时配对块要 3 档，7×38−4 = 262dp > 244dp，" +
+                "超带 18dp ⇒ 防抖要滚一下才全露。这一条断的是已知极限，真机确认之前不许当成已修",
+            18f, overflow.getValue("app120 sys120"), 0.5f
+        )
+    }
+
     @Test
     fun movingTheTallEntryLeavesEveryOtherCellAndOffsetUntouched() {
         val rowPitch = gridRowPitchPx(1f, dockGapDp, density)
@@ -475,3 +535,6 @@ class HudLayoutRowPitchTest {
         )
     }
 }
+
+/** #76 那个角落矩阵的一行：两个旋钮各给一档 */
+private data class ScaleCorner(val name: String, val appScale: Float, val systemScale: Float)
