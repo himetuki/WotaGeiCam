@@ -51,8 +51,20 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class HudLayoutPersistProbeTest {
 
-    /** 摆位集合取"全开"：探针不依赖 hud_pills 当前值，默认格的推导才有确定结果 */
-    private val plan = HudGridPlan(visible = HudEntry.ALL.toSet(), readoutPerRow = 3)
+    /**
+     * 摆位集合取"全开"：探针不依赖 hud_pills 当前值，默认格的推导才有确定结果。
+     *
+     * #75 给 [HudGridPlan] 添的两份（纵向格距、每颗实测高）在这里取"手摆一档 + 量不到高"：
+     * 探针测的是**跨进程落盘**，格子必须与 #74 那一次取证逐字同一份（监看 (0,4)、参考线 (0,0)…），
+     * 喂真实高度就会让行跨度参与推导、把期望值改掉——那等于同时换掉了取证的可比性。
+     * 跨度本身由 JVM 侧 `HudLayoutRowPitchTest` 打；这一层只是把它按 1 冻住。
+     */
+    private val plan = HudGridPlan(
+        visible = HudEntry.ALL.toSet(),
+        readoutPerRow = 3,
+        rowPitchOf = { 30 },
+        cellHeightOf = { 0 }
+    )
 
     /**
      * 第 1 步：写三处各有内容的编辑——

@@ -171,6 +171,9 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     // #74：三枚网格容器的**网格节点**矩形（窗口 px）。格长由它反解，落点吸附与预览都读这一份。
     // 与录制页同一套"首帧量不到就退化成不吸附"的两轮收敛手法，见 snapCellOf 返回 null 那两支。
     val gridRects = remember { mutableStateMapOf<HudZone, IntRect>() }
+    // #75：每颗条目的**实测高**（px）——行跨度唯一的数据源，写方只有 HudEntryGrid 一处（值真变才写）。
+    // 与上面那三张矩形表同一套"首帧量不到 ⇒ 跨度按一档 ⇒ 下一帧实测接管"的两轮收敛手法。
+    val entryHeights = remember { mutableStateMapOf<HudEntry, Int>() }
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
     // 与录制页同一个"横屏"真源（定版：横屏永远同行）
@@ -219,8 +222,17 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val rightArea = areaForRightDock(baseArea, hudStripH, readoutPlan.bottomAvoidDp)
     val perRow = readoutPlan.perRow
     // #74：网格解析的两份运行时输入。与录制页同一份构造（可见集 + 读数块一行几颗），
-    // 两页的"格子 → 坐标"都只经 [HudLayoutTable.gridItems] 这一条，不许出现第二份算式
-    val gridPlan = HudGridPlan(visible = visibleEntries, readoutPerRow = perRow)
+    // 两页的"格子 → 坐标"都只经 [HudLayoutTable.gridItems] 这一条，不许出现第二份算式。
+    // #75 又添两份：**纵向格距**（从令牌推，与格子里住了谁无关）与**每颗的实测高**
+    // （[HudEntryGrid] 回报的那份）。高条目吃掉几档就由这两个数现算——少了它们就静默退回
+    // "行距取容器里最高那颗"那一档，而那正是把右 Dock 撑到 386dp、超出横屏 244dp 带高的模型。
+    // 两条都是**无默认值的必传形参**（#69 铁律），漏挂直接编译不过。
+    val gridPlan = HudGridPlan(
+        visible = visibleEntries,
+        readoutPerRow = perRow,
+        rowPitchOf = { zone -> hudGridRowPitchPx(zone, density) },
+        cellHeightOf = { entry -> entryHeights[entry] ?: 0 }
+    )
     // ⚠ 拖拽处理器在 `pointerInput(Unit)` 里 ⇒ 那条协程用的**始终是创建那帧**的闭包，直接读上面的
     // [gridPlan] 就是读一份过期快照：转一次屏幕后 `readoutPerRow` 还停在上一副姿态那一档、设置页改过
     // 显隐后 `visible` 还是老集合，于是命中判定与松手写表都按旧格子算（#74 后果修复补的这条）。
@@ -309,11 +321,14 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
      * 指针 → 这一帧的落点格子（**跟手预览与松手写表共用这一条**，两处各算一次就会差半格）。
      *
      * 返回 null 的三种情况都按"不吸附、只换顺序"处理：① 目标不是网格容器；② 这一帧还没量到网格节点
-     * （进页首帧，与 `dockStripH` 那一套两轮收敛同一手法）；③ 格长反解出 0。
+     * （进页首帧，与 `dockStripH` 那一套两轮收敛同一手法）；③ 列长反解出 0。
      *
-     * 格长不另量一遍，从网格节点的实测矩形**除回来**：渲染层的正算式是
-     * [gridSizePx]（`列数 × 格长 − 一道行距`），这里就是它的逆 [gridPitchOf]。
-     * 空容器（一列都没有）时退回"被拖那颗自己的实测尺寸 + 行距"，因为那一刻格长只能由它撑。
+     * **列**长仍从网格节点的实测矩形**除回来**（渲染层的正算式是 [gridSizePx]，这里就是它的逆
+     * [gridPitchOf]；[snapGridPitchPx] 只透出它算的那一轴）；
+     * **行**距不除回来（#75）：高条目吃掉几档之后 `网格高 ÷ 行数` 已经不是行距了，除回来会把格子
+     * 算矮，于是"预览框画在一格、松手落到另一格"。纵向恒取 [hudGridRowPitchPx]——与渲染层、
+     * 与 [HudLayoutTable.gridItems] 里推默认行的那一个数，三处同一个来源。
+     * 空容器（一列都没有）时列长退回"被拖那颗自己的实测宽 + 行距"，因为那一刻列长只能由它撑。
      */
     fun snapOf(dragged: HudEntry?): GridSnap? {
         val entry = dragged ?: return null
@@ -324,17 +339,20 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         ) ?: draft.sourceZoneOf(entry)
         if (!zone.isGrid) return null
         val rect = gridRects[zone] ?: return null
-        val items = draft.gridItems(zone, planNow())
+        val plan = planNow()
+        val items = draft.gridItems(zone, plan)
         val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
-        val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
         val gapPx = with(density) { hudGridGap(zone).roundToPx() }
         val own = entryRects[entry]
-        val pitch = gridPitchOf(
-            gridWidthPx = rect.width, gridHeightPx = rect.height, cols = cols, rows = rows, gapPx = gapPx,
-            fallbackChildWidthPx = own?.width ?: ghostSize.width,
-            fallbackChildHeightPx = own?.height ?: ghostSize.height
+        val rowPitchPx = hudGridRowPitchPx(zone, density)
+        val pitch = snapGridPitchPx(
+            gridWidthPx = rect.width, cols = cols, gapPx = gapPx,
+            fallbackChildWidthPx = own?.width ?: ghostSize.width, rowPitchPx = rowPitchPx
         )
         if (pitch.width <= 0 || pitch.height <= 0) return null
+        // 这一颗要吃几档：实测高优先取网格回报的那份（姿态仪与音量表根本不报锚点，见 HudEntryItem），
+        // 两处都没量到就按 0 ⇒ 跨度 1，下一帧实测接管（两轮收敛，与首帧不吸附同一条手法）
+        val contentHeightPx = maxOf(own?.height ?: 0, plan.cellHeightOf(entry))
         val box = gridBoxOf(
             zone = zone,
             pitchXDp = pxToDp(pitch.width.toFloat(), density.density),
@@ -343,15 +361,20 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             roomWidthDp = roomOf(zone)
         )
         val origin = HudPointPx(rect.left - originXPx, rect.top - originYPx)
-        val wanted = clampCellToBox(cellAtPointer(pointer, origin, pitch), box)
+        // 钳制与让位吃的都是**整块**：起始档钳到 `带档数 − 跨度`，候选档还要检查块尾是否出带（#75）
+        val wanted = clampCellToBox(cellAtPointer(pointer, origin, pitch), box, contentHeightPx, rowPitchPx)
         return GridSnap(
             zone = zone,
-            // 挡路的格子不许落（[blockingCells]：跨组那颗算挡路、同组搭档不算），被挡就就近让到空格。
-            // 唯一允许的"落进已有颗的那一格"是拖回自己搭档那一格 = 把配对合回去（#74 后果修复）
-            cell = freeCellNear(wanted, draft.occupiedCells(zone, planNow(), exclude = entry), box.cols, box.rows),
+            // 挡路的格子不许落（[blockingCells]：跨组那颗算挡路、同组搭档不算；高格连它压住的几档一起算），
+            // 被挡就就近让到空格。唯一允许的"落进已有颗的那一格"是拖回自己搭档那一格 = 把配对合回去
+            cell = freeCellNear(
+                wanted, draft.occupiedCells(zone, plan, exclude = entry),
+                box.cols, box.rows, contentHeightPx, rowPitchPx
+            ),
             origin = origin,
             pitch = pitch,
-            gapPx = gapPx
+            gapPx = gapPx,
+            rowSpan = cellRowSpan(contentHeightPx, rowPitchPx)
         )
     }
 
@@ -552,6 +575,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 freeMb = freeMb,
                 entryRects = entryRects,
                 gridRects = gridRects,
+                entryHeights = entryHeights,
                 capacityRoomDp = (safeW - 66f).coerceAtLeast(1f),
                 hiddenEntry = dragEntry
             )
@@ -645,9 +669,11 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                                     (snap.origin.x + at.x).toFloat(),
                                     (snap.origin.y + at.y).toFloat()
                                 ),
+                                // #75：框的是**整块**（跨度 × 格距 − 一道行距），不是一档。
+                                // 跨度已经由被拖那颗的实测高算好，与渲染层排的那几档同一个数
                                 size = androidx.compose.ui.geometry.Size(
                                     (snap.pitch.width - snap.gapPx).toFloat(),
-                                    (snap.pitch.height - snap.gapPx).toFloat()
+                                    (snap.pitch.height * snap.rowSpan - snap.gapPx).toFloat()
                                 ),
                                 style = linkEdge
                             )
@@ -762,13 +788,18 @@ private fun IntRect?.containsPoint(x: Int, y: Int): Boolean =
  *
  * [pitch] 与 [origin] 一起带出来只为一个目的：**预览框与落点用同一份数据**，
  * 否则预览要再算一次格长，那就是"格子 → 坐标"的第二份算式（S3-5 那一族）。
+ *
+ * [rowSpan]（#75）= 这一格要吃掉几档行距，由被拖那颗的实测高 ÷ 格距现算。
+ * 预览框必须按**整块**画：只画一档的话，拖一枚 72dp 的姿态仪时框子只有 34dp 高，
+ * 松手之后那颗却占着三档——"看着在一格、落在三格"就是这一条没接上时的现象。
  */
 private data class GridSnap(
     val zone: HudZone,
     val cell: GridCell,
     val origin: HudPointPx,
     val pitch: HudSizePx,
-    val gapPx: Int
+    val gapPx: Int,
+    val rowSpan: Int
 )
 
 /** 五枚容器的中文名资源 id（重叠提示用，别露出 T/L/R/D/B 那种持久化 id） */
@@ -830,9 +861,14 @@ private fun editorReadoutOf(params: WotaParams): EditorReadout = EditorReadout(
  * 要每颗条目的实测矩形，而 [HudEntryItem] 只认 `ctx.anchorOf` 这一处挂点 —— 所以复用它，
  * 不另开一条回报路（两条路迟早一边写了另一边没写）。
  *
- * [HudCtx.gridOf] 这一路在这页改写成「**网格节点**矩形回报」：#74 的格子吸附要格网原点与格长，
- * 而格长只能从渲染层那次 `gridSizePx` 反解（[gridPitchOf] 是它的逆）；姿态仪与音量表那两颗不报锚点，
+ * [HudCtx.gridOf] 这一路在这页改写成「**网格节点**矩形回报」：#74 的格子吸附要格网原点与**列**长，
+ * 而列长只能从渲染层那次 `gridSizePx` 反解（[gridPitchOf] 是它的逆）；姿态仪与音量表那两颗不报锚点，
  * 用条目矩形取"最宽/最高那颗"会漏掉它们 ⇒ 必须量网格本体那一个节点。录制页传的是空链，不做吸附。
+ * ⚠ #75 之后**纵向不再从这里反解**（高条目吃几档 ⇒ `网格高 ÷ 行数 ≠ 行距`），行距走 [hudGridRowPitchPx]，
+ * 见 [snapGridPitchPx]。
+ *
+ * [HudCtx.entryHeights] 这一路是「每颗条目的**实测高**回报」：行跨度（[cellRowSpan]）唯一的证据来源，
+ * 写方只有 `HudEntryGrid` 一处、读方是 [HudGridPlan.cellHeightOf]（与录制页同一条链，见 CameraScreen）。
  *
  * 容量段按**满档**取（[capacityRoomDp] 给的是宽裕值）：这页没有录制页那 66dp 的固定预留可量，
  * 摆位置要看的是"这一段最多占多宽"，§74 三档里满档就是最宽的那一档，按最宽的摆不会挤。
@@ -844,6 +880,7 @@ private fun editorCtx(
     freeMb: Long,
     entryRects: MutableMap<HudEntry, IntRect>,
     gridRects: MutableMap<HudZone, IntRect>,
+    entryHeights: MutableMap<HudEntry, Int>,
     capacityRoomDp: Float,
     hiddenEntry: HudEntry?
 ): HudCtx {
@@ -899,6 +936,7 @@ private fun editorCtx(
         gridOf = { zone ->
             Modifier.pillAnchor { rect -> if (gridRects[zone] != rect) gridRects[zone] = rect }
         },
+        entryHeights = entryHeights,
         onSizeClick = { },
         onFreeClick = { },
         onRefLineClick = { },

@@ -329,6 +329,19 @@ data class HudCtx(
      * 录制页不需要格子吸附，传 `{ Modifier }`（零成本：那条链上一个节点都不加）。
      */
     val gridOf: (HudZone) -> Modifier,
+    /**
+     * **每颗条目实测高的回报处**（任务 #75：行跨度的唯一数据来源，[HudEntryGrid] 布局期写进来）。
+     *
+     * 与 [gridOf] / [anchorOf] 同一条纪律：**没有默认值**（#69 铁律）。高条目吃掉几档行距是由
+     * 实测高 ÷ 格距现算的（[com.wotagei.cam.ui.cellRowSpan]），量不到就退回"人人都只占一档"——
+     * 而那正是本次要修的那个"行距被最高那颗顶高"的形态（换了一种走法而已），所以漏挂必须编译不过。
+     *
+     * 两页都给**自己那一份** `mutableStateMapOf`：写方只有 [HudEntryGrid] 一处（量到的那一帧、值真变了
+     * 才写），读方是 [com.wotagei.cam.ui.HudGridPlan.cellHeightOf]（组合期读 ⇒ 挂上订阅，
+     * 量到之后下一帧跨度接管，与 `dockStripH` / [gridOf] 同一套"两轮收敛"手法）。
+     * 顶栏与底栏不进网格，它们那几颗永远不出现在这张表里（不是漏做）。
+     */
+    val entryHeights: MutableMap<HudEntry, Int>,
     // ---- 锚点与动作
     val anchorOf: (HudEntry) -> Modifier,
     val onSizeClick: () -> Unit,
@@ -751,40 +764,68 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
  * · 两枚竖 Dock = [WotaSpace.xs]（改前是 `Column`/`Row` 的 `spacedBy(WotaSpace.xs)`）；
  * · 读数块 = [HudRowGapDp]（改前是 `spacedBy(HudRowGapDp.dp)`，与 `hudStripHeightDp` 的行距同一真源）。
  *
- * **渲染层与编辑页都只读这一条**：格子边长 = 最宽那枚格子（同组多颗时含格内那道行距，见
+ * **渲染层与编辑页都只读这一条**：格子的列长 = 最宽那枚格子（同组多颗时含格内那道行距，见
  * [cellContentWidthPx]）+ 这个行距（[gridPitchPx]），两处各写一份的话编辑页的吸附就会与画出来的位置
  * 错开半格（S3-5 那一族"两边判的不是同一条不等式"）。格内那几颗之间的间距用的也是这一档，没新造数。
+ *
+ * ⚠ #75 之后这一档在**纵向**只剩"格距的一部分"：纵向格距 = 一颗胶囊高 + 这一档（[hudGridRowPitchPx]），
+ * 不再是"容器里最高那颗 + 这一档"。改这条要同时知道 [hudGridRowPitchPx] 在读它。
  */
 internal fun hudGridGap(zone: HudZone): Dp =
     if (zone == HudZone.READOUT) HudRowGapDp.dp else WotaSpace.xs
 
 /**
- * 一枚容器里的**固定格网**（任务 #74 的渲染落点）。
+ * 该容器的**纵向格距**（px，任务 #75 的唯一算式入口）：一颗胶囊高 + 该容器那一道行距，
+ * 全从既有令牌推（[gridRowPitchPx] → [hudChipHeightDp] + [hudGridGap]），**与格子里住了谁无关**。
+ *
+ * 这一条是 #74 那个回归的正解：原来纵向格长取"容器内最高那颗的实测高 + 行距"，
+ * 右 Dock 那枚 ≈72dp 的姿态仪把行距顶到 ≈78dp，把 30dp 的胶囊全按 78dp 排 ⇒ 网格 ≈386dp
+ * 而横屏带高只有 244dp ⇒ 溢出 142dp，对焦与防抖整颗掉到折叠线以下。
+ * 现在行距恒为 ≈34dp（100% 档），高的那颗自己吃掉几档（[com.wotagei.cam.ui.cellRowSpan]），
+ * 5 枚格子 7 档 = 234dp ≤ 244dp。
+ *
+ * 三个消费方必须读同一个数，否则"看着在一格、松手落另一格"：
+ * [HudEntryGrid]（排像素）、[com.wotagei.cam.ui.HudLayoutTable.gridItems] 那条解析（推默认行、算占用，
+ * 经 `HudGridPlan.rowPitchOf`）、编辑页的吸附框（经 [snapGridPitchPx]）。
+ */
+internal fun hudGridRowPitchPx(zone: HudZone, density: androidx.compose.ui.unit.Density): Int =
+    gridRowPitchPx(density.fontScale, hudGridGap(zone).value, density.density)
+
+/**
+ * 一枚容器里的**固定格网**（任务 #74 的渲染落点，#75 加行跨度）。
  *
  * 为什么必须自己写 `Layout` 而不是 `Column`/`Row` + `spacedBy`：后者把"第几颗"当成位置来源，
  * 抽走或插入一颗就整体重排——那是本次要拆的耦合。格长、格网尺寸、每颗的落点**全部**由纯函数
- * [gridPlacementOf] 算（格长取最宽那枚**格子**的内容宽 + 行距，见 [cellContentWidthPx]），
- * 本层只剩"量尺寸 + `placeRelative`"两条调用，所以：
+ * [gridPlacementOf] 算（横向取最宽那枚**格子**的内容宽 + 行距见 [cellContentWidthPx]；
+ * 纵向取传进来的 [rowPitchPx]（[hudGridRowPitchPx] 那份，与住户无关）＋高条目按实测高吃几档），
+ * 本层只剩"量尺寸 → 回报实测高 → `placeRelative`"三条调用，所以：
  * - 移动任意一颗都不改变其他任何一颗的屏幕坐标（空格子就空着）；
  * - **一枚格子里可以横向住同组的多颗**（#74 后果修复：右 Dock 那对 S2-2B 并排 = 一格两颗，
  *   不再是一行两列）。格长因此由"最宽那枚格子"而不是"最宽那颗"撑出来，右 Dock 才回到单列、
  *   底板才回到 ≈94dp（这笔账逐颗列在 [HudDockZone] 的 KDoc 里）；格内左右次序 = [HudGridItem] 清单序，
  *   与编辑页的命中裁决 [entryHitIndex] 读的是同一个序；
- * - 字体拉到 120% 时格长自己变大（颗的实测尺寸涨了），不需要任何按 100% 量出来的固定值，
- *   §58/§73 那族"固定档位在 120% 裁字"在这里没有落点；
- * - 只有一列 / 只有一行时总宽总高与改前 `spacedBy` 的紧凑排布**逐像素相等**（见 [gridSizePx] 那笔减法）。
+ * - **高条目不再把别人的行距顶高**（#75）：它自己吃掉 `row .. row+span−1`，胶囊仍按 ≈34dp 排。
+ *   实测高就是跨度唯一的证据来源，所以这一层必须把它回报给 [HudCtx.entryHeights]——
+ *   回报的是**颗**的高（不是格子的），格子归属变了也不用清表（跨度按当前住户现算）；
+ * - 字体拉到 120% 时格距自己变大（[gridRowPitchPx] 吃 `fontScale`），横向仍取实测宽，
+ *   不需要任何按 100% 量出来的固定值，§58/§73 那族"固定档位在 120% 裁字"在这里没有落点；
+ * - 只有一列 / 只有一行且没有高条目时总宽总高与改前 `spacedBy` 的紧凑排布**逐像素相等**
+ *   （见 [gridSizePx] 那笔减法）。
  *
  * 定位只发生在**布局期**（`placeRelative`），没有位置动画、没有 `animateDpAsState`
  * （AGENTS.md 与 `Motion.kt` 的红线：预览层之上不做布局参数动画）。容器整体仍然只在
  * [HudZoneBox] 那一层承担位置。
  *
- * 网格节点自己经 [Modifier]（调用方传 `ctx.gridOf(zone)`）回报窗口矩形：编辑页由它反解格长，
- * 不需要再量每颗条目（姿态仪与音量表那两颗本来就不报锚点，见 [HudEntryItem] 的 when 分支）。
+ * 网格节点自己经 [Modifier]（调用方传 `ctx.gridOf(zone)`）回报窗口矩形：编辑页由它反解**列**长
+ * （[gridPitchOf]，纵向不再反解，见 [snapGridPitchPx]），不需要再量每颗条目（姿态仪与音量表那两颗
+ * 本来就不报锚点，见 [HudEntryItem] 的 when 分支）。
  */
 @Composable
 private fun HudEntryGrid(
     items: List<HudGridItem>,
     zone: HudZone,
+    rowPitchPx: Int,
+    heights: MutableMap<HudEntry, Int>,
     modifier: Modifier = Modifier,
     content: @Composable (HudEntry) -> Unit
 ) {
@@ -794,13 +835,21 @@ private fun HudEntryGrid(
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
         val placeables = measurables.map { it.measure(loose) }
         val gapPx = HudSizePx(gap.roundToPx(), gap.roundToPx())
-        // 整条算式（逐格住户 → 格长 → 各颗落点）都在纯函数 [gridPlacementOf] 里，有手算期望值的 JVM 用例；
-        // 这里只剩"把量到的尺寸喂进去、再把坐标 placeRelative 出来"，没有分支、没有第二份账
-        val placed = gridPlacementOf(items, placeables.map { HudSizePx(it.width, it.height) }, gapPx)
+        // 整条算式（逐格住户 → 格长 → 行跨度 → 各颗落点）都在纯函数 [gridPlacementOf] 里，
+        // 有手算期望值的 JVM 用例；这里只剩"把量到的尺寸喂进去、再把坐标 placeRelative 出来"
+        val placed = gridPlacementOf(
+            items, placeables.map { HudSizePx(it.width, it.height) }, gapPx, rowPitchPx
+        )
         layout(placed.size.width, placed.size.height) {
             placeables.forEachIndexed { i, placeable ->
                 val at = placed.offsets[i]
                 placeable.placeRelative(at.x, at.y)
+            }
+            // #75：实测高回报给位置表（跨度唯一的数据源）。只在**值真变了**才写，
+            // 与 [pillAnchorReport] / `thumbW` 同一手法——布局期写状态会重组，值没变还照写就是每帧空转
+            items.forEachIndexed { i, item ->
+                val h = placeables[i].height
+                if (heights[item.entry] != h) heights[item.entry] = h
             }
         }
     }
@@ -841,9 +890,33 @@ private fun HudEntryGrid(
  * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
  * 姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  *
+ * ## 纵向账（#75：格距与住户无关 + 高条目吃行跨度）
+ * 行距不再是"容器里最高那颗 + 一道行距"，而是 [hudGridRowPitchPx] 推出来的固定格距
+ * （100% 档 = 胶囊 30dp + `WotaSpace.xs` 4dp = **34dp**；120% 档 38dp）。
+ * 于是录制中右 Dock 默认那一列（本机 density 2.0，全部手算）：
+ *
+ * | 格（起始 row） | 跨度 | 住户与实测高 | 吃掉第几档 |
+ * |---|---|---|---|
+ * | (0,0) | 3 | 配对格：姿态仪 ≈72dp（天地线 46 + 上下内边距 5+5 + spacedBy 2 + `labelSmall` 行高 14）／音量表 ≈71dp | 0、1、2 |
+ * | (0,3) | 1 | 蓝牙 ≈30dp | 3 |
+ * | (0,4) | 1 | 变焦 ≈30dp | 4 |
+ * | (0,5) | 1 | 对焦 ≈30dp | 5 |
+ * | (0,6) | 1 | 防抖 ≈30dp | 6 |
+ *
+ * 网格高 = 7 档 × 68px − 8px = **468px = 234dp** ≤ 横屏带高 244dp（`360 − 顶栏 44 − 底栏 72`）⇒ **溢出 0**，
+ * 对焦与防抖都在折叠线以上。120% 那一档：格距 76px、配对块实测 ≈150px ⇒ 跨度 2 ⇒ 6 档 = 448px = 224dp，
+ * 同样不溢出。改前那一版是 5 档 × 156px = 386dp，**溢出 142dp（1.8 行）**，对焦与防抖整颗掉到带外。
+ * 底板高 = 网格高 + 上下内边距 4+4 = 242dp（100%），仍在带内；两枚竖 Dock 各自算，别把这两笔相加。
+ *
+ * 跨度**不进表**（[GridCell] 只有 (col, row)）：它由 [HudEntryGrid] 回报的实测高现算，
+ * 所以字体缩放、文案长度、条目被搬走这三件事都不需要迁移任何持久化数据。
+ * 每颗的 row 仍然是**它自己那格的起始档**——跨度只决定"哪些档算被占"和"默认推导往哪推进"，
+ * 不用来重排任何已经摆过的条目（[HudLayoutPairCellTest] 那几条独立性用例逐颗钉着坐标）。
+ *
  * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里，但**降级成只管默认格子的分组**：
  * 姿态仪与音量表在顺序里相邻时**共用同一枚格子**（格内横着排两颗，#74 后果修复；改前是"推导成同一行的
- * 两列"，那正是把底板撑到 120dp 的那一步），省下的 ≈75dp 仍然够把变焦/对焦从折叠线下捞回来。
+ * 两列"，那正是把底板撑到 120dp 的那一步）。**#75 之后它省的是宽度与列数，不再是高度**：
+ * 高度那笔账改由固定格距负责（上面那张表），配对块只吃它自己需要的 3 档，不再替四颗胶囊决定行距。
  * 用户把任何一颗摆过一次之后那一枚容器就整体钉住（[HudLayoutTable.pinned]），并排规则不再重排别人的位置——
  * 这是「条目可重排」与「横屏 360dp 带高不够」唯一能同时成立的写法。钉过之后配对还可以被用户拆开、
  * 也可以合回去（同组两颗共用一格不算撞格，判据在 [blockingCells]），这条比"两列各自固定"更自由。
@@ -861,6 +934,9 @@ fun HudDockZone(
     if (items.isEmpty()) return
     // #70 B：本容器内所有"控件胶囊"统一走这一档，读数条目不受影响（见 chipTierFor 的注释）
     val tier = chipTierFor(zone)
+    // #75：纵向格距与住户无关（姿态仪那枚 ≈72dp 的自绘件不许再把别人的行距顶高），
+    // 它自己吃掉几档由实测高经 [com.wotagei.cam.ui.cellRowSpan] 现算
+    val rowPitchPx = hudGridRowPitchPx(zone, LocalDensity.current)
     Column(
         modifier
             .wotaCard(WotaShape.card)
@@ -870,7 +946,7 @@ fun HudDockZone(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // 网格节点的矩形经 ctx.gridOf 回报给编辑页（录制页传的是空链，一个节点都不加）
-        HudEntryGrid(items, zone, ctx.gridOf(zone)) { entry ->
+        HudEntryGrid(items, zone, rowPitchPx, ctx.entryHeights, ctx.gridOf(zone)) { entry ->
             HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry), tier, clicksAccepted = true)
         }
     }
@@ -914,6 +990,10 @@ fun HudReadoutZone(
 ) {
     if (items.isEmpty() && !ctx.aeLocked) return
     val motion = LocalMotion.current
+    // #75：读数块的行距档是 [HudRowGapDp]（与竖 Dock 的 WotaSpace.xs 不同一档），所以格距按容器现算。
+    // 这一档 100% 时 (18+12+6)×2 = 72px，与 #74 那版"实测最高那颗 60px + 行距 12px"逐字同值——
+    // 读数块里每颗都是胶囊、没有异型件，所以这一批它的观感一条没变（看门狗用例钉着这一条）
+    val rowPitchPx = hudGridRowPitchPx(HudZone.READOUT, LocalDensity.current)
     Column(
         modifier
             .heightIn(max = bandHeightDp.dp)
@@ -924,7 +1004,7 @@ fun HudReadoutZone(
     ) {
         if (items.isNotEmpty()) {
             // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
-            HudEntryGrid(items, HudZone.READOUT, ctx.gridOf(HudZone.READOUT)) { entry ->
+            HudEntryGrid(items, HudZone.READOUT, rowPitchPx, ctx.entryHeights, ctx.gridOf(HudZone.READOUT)) { entry ->
                 HudEntryItem(
                     entry, ctx,
                     Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),

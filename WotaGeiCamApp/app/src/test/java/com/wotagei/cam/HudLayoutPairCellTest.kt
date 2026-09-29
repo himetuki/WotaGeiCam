@@ -24,11 +24,13 @@ import com.wotagei.cam.ui.entryHitIndex
 import com.wotagei.cam.ui.gridPitchOf
 import com.wotagei.cam.ui.gridPitchPx
 import com.wotagei.cam.ui.gridPlacementOf
+import com.wotagei.cam.ui.gridRowPitchPx
 import com.wotagei.cam.ui.gridSizePx
 import com.wotagei.cam.ui.hudRowGroups
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.roundToInt
 
 /**
  * 任务 #74 的**后果修复**：配对那一对（S2-2B「姿态仪 + 音量表」）从"相邻两格"改成"同一枚格子里的两个条目"。
@@ -39,14 +41,31 @@ import org.junit.Test
  *    （[thePairedCellIsWidthOwnerAndTheBoardIsNinetyFour] 与
  *    [gridPlacementOfTheDefaultRightDockMeasuresTheNinetyFourBoard]）；
  * 2. **独立性**：拆对、合对、跨组撞格三条都有逐颗手算的格子/坐标清单（另外四条用例）；
- * 3. **配对格被点中时该搬哪一颗**：规则是纯函数 [entryHitIndex]，不靠 Compose 的矩形回报顺序。
+ * 3. **配对格被点中时该搬哪一颗**：规则是纯函数 [entryHitIndex]，不靠 Compose 的矩形回报顺序；
+ * 4. **#75 之后多出来的一条**：[rightDockGridNowFitsTheLandscapeBandThatWasTheKnownDefect]——
+ *    它原来叫"已知缺陷的测量值"（均匀行距把网格撑到 386dp、超出横屏 244dp 带高 142dp），
+ *    行距改成固定格距 + 高条目吃行跨度之后**同一条对撞翻成溢出 0**。
+ *    纵向那一套算式本身（格距怎么推、跨度怎么算、跨度会不会动到别人的行号）在
+ *    `HudLayoutRowPitchTest`，本文件只管"宽度账与配对语义没被纵向改动带偏"。
  *
  * 恒等式与真断言的分工（AGENTS.md 那条）：所有期望值都是**人能手算**的 px/dp 与逐颗点名的格子，
  * 没有任何一条是"拿实现的输出与实现自己比"。
  */
 class HudLayoutPairCellTest {
 
-    private val planAll = HudGridPlan(HudEntry.ALL.toSet(), readoutPerRow = 3)
+    /**
+     * 本文件默认那一份输入：**实测高一律 0**（⇒ 行跨度恒为 1）、格距手摆 30px。
+     * 这样 #74 那一版逐颗点名的行号与屏幕坐标一字不动——本文件查的是"配对共格 ⇒ 宽度回到 94dp"
+     * 与独立性，跨度那一档另在 `HudLayoutRowPitchTest` 喂真实高度打，两条不混。
+     * 唯一例外是 [rightDockGridNowFitsTheLandscapeBandThatWasTheKnownDefect]：那条就是要拿真实高度
+     * 与真实格距去对撞带高（#75 的验收口径），它自己造 plan。
+     */
+    private val planAll = HudGridPlan(
+        visible = HudEntry.ALL.toSet(),
+        readoutPerRow = 3,
+        rowPitchOf = { 30 },
+        cellHeightOf = { 0 }
+    )
     private fun e(p: CamPill) = HudEntry.of(p)
     private fun h(i: HudItem) = HudEntry.of(i)
 
@@ -65,7 +84,7 @@ class HudLayoutPairCellTest {
             hudRowGroups(HudZone.RIGHT, def, perRow = 1).first()
         )
         // ② 默认推导把这一组落成**同一枚格子**，其余每颗各占一行；整容器只有一列
-        val derived = defaultCellsOf(HudZone.RIGHT, def, perRow = 1)
+        val derived = defaultCellsOf(HudZone.RIGHT, def, planAll)
         assertEquals(GridCell(0, 0), derived[e(CamPill.LEVEL)])
         assertEquals(GridCell(0, 0), derived[e(CamPill.VOLUME)])
         assertEquals(GridCell(0, 1), derived[e(CamPill.BT)])
@@ -74,7 +93,7 @@ class HudLayoutPairCellTest {
         // ③ 同组搭档：配对两颗互为搭档，其余颗谁都不是；读数块恒空（每颗各占一列，行为一条没变）
         assertEquals(setOf(e(CamPill.VOLUME)), cellGroupMatesOf(derived, e(CamPill.LEVEL)))
         assertTrue(cellGroupMatesOf(derived, e(CamPill.BT)).isEmpty())
-        val readout = defaultCellsOf(HudZone.READOUT, HudLayoutTable.defaultOrderOf(HudZone.READOUT), perRow = 3)
+        val readout = defaultCellsOf(HudZone.READOUT, HudLayoutTable.defaultOrderOf(HudZone.READOUT), planAll)
         for (item in HudItem.ALL) {
             assertTrue("读数块不许出现共格：${item.name}", cellGroupMatesOf(readout, h(item)).isEmpty())
         }
@@ -165,21 +184,23 @@ class HudLayoutPairCellTest {
             GridCell(0, 1) to listOf(e(CamPill.BT)),
             GridCell(1, 0) to listOf(e(CamPill.ZOOM))
         )
-        val derived = defaultCellsOf(HudZone.RIGHT, HudLayoutTable.defaultOrderOf(HudZone.RIGHT), perRow = 1)
+        val derived = defaultCellsOf(HudZone.RIGHT, HudLayoutTable.defaultOrderOf(HudZone.RIGHT), planAll)
+        // 后面三形参里的 `{ 0 }` = "量不到高" ⇒ 跨度 1 ⇒ 被占的就是那一格本身（与 #74 逐字相同）。
+        // 跨度 > 1 时"整块都算占"那一档在 HudLayoutRowPitchTest 用真实高度打，不混进这条共格口径的判据
         assertEquals(
             "音量表眼里：配对格不算挡路（它随时能合回去），别人的格子算",
             setOf(GridCell(0, 1), GridCell(1, 0)),
-            blockingCells(residents, e(CamPill.VOLUME), cellGroupMatesOf(derived, e(CamPill.VOLUME)))
+            blockingCells(residents, e(CamPill.VOLUME), cellGroupMatesOf(derived, e(CamPill.VOLUME)), { 0 }, 30)
         )
         assertEquals(
             "蓝牙眼里：配对格也挡路（跨组不许共格）",
             setOf(GridCell(0, 0), GridCell(1, 0)),
-            blockingCells(residents, e(CamPill.BT), cellGroupMatesOf(derived, e(CamPill.BT)))
+            blockingCells(residents, e(CamPill.BT), cellGroupMatesOf(derived, e(CamPill.BT)), { 0 }, 30)
         )
         assertEquals(
             "self = null 时逐字退回「格子里有人就算占」的旧口径",
             setOf(GridCell(0, 0), GridCell(0, 1), GridCell(1, 0)),
-            blockingCells(residents, null, emptySet())
+            blockingCells(residents, null, emptySet(), { 0 }, 30)
         )
     }
 
@@ -213,6 +234,12 @@ class HudLayoutPairCellTest {
         // 拿默认右 Dock 的格子清单 + 手写的实测尺寸（px，本机 density 2.0），逐颗列出落点。
         // `HudEntryGrid` 现在只剩"量尺寸 + placeRelative"，所以这一条就是底板宽度的 JVM 侧证据
         val gap = HudSizePx(8, 8)   // 令牌 WotaSpace.xs = 4dp
+        // 手喂的行距：#74 那一版"实测最高那颗 142 + 行距 8"算出来的 150px。
+        // 本用例查的是**宽度账**（底板 94dp），纵向取多少不影响宽度；#75 真实格距（68px）与
+        // 由它推出的行跨度，在下面那条溢出用例和 `HudLayoutRowPitchTest` 里打。
+        // 喂 150 之后每一格都只占一档（142 ≤ 150），所以格网尺寸与各颗落点与 #74 **逐字同值**——
+        // 这正是"宽度那条账不许被纵向改动带偏"的证据本身
+        val rowPitch = 150
         val items = HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll)
         val sizes = mapOf(
             e(CamPill.LEVEL) to HudSizePx(108, 140),   // 姿态仪：54 × 70dp
@@ -222,8 +249,8 @@ class HudLayoutPairCellTest {
             e(CamPill.FOCUS) to HudSizePx(94, 60),
             e(CamPill.STAB) to HudSizePx(94, 60)
         )
-        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap)
-        // 格长：宽 = 配对格 (108 + 8 + 56) + 8 = 180；高 = 最高那颗 142 + 8 = 150
+        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap, rowPitch)
+        // 格长：宽 = 配对格 (108 + 8 + 56) + 8 = 180；高 = 直接就是喂进来的行距 150（#75：不再从颗里取）
         assertEquals(HudSizePx(180, 150), placed.pitch)
         // 格网尺寸：单列 ⇒ 宽 = 1 × 180 − 8 = 172px = 86dp；5 行 ⇒ 高 = 5 × 150 − 8 = 742px
         assertEquals(HudSizePx(172, 742), placed.size)
@@ -247,7 +274,7 @@ class HudLayoutPairCellTest {
         val broken = HudLayoutTable.default()
             .placeEntryAt(e(CamPill.VOLUME), HudZone.RIGHT, 1, GridCell(0, 5), planAll)
             .gridItems(HudZone.RIGHT, planAll)
-        val brokenPlaced = gridPlacementOf(broken, broken.map { sizes.getValue(it.entry) }, gap)
+        val brokenPlaced = gridPlacementOf(broken, broken.map { sizes.getValue(it.entry) }, gap, rowPitch)
         assertEquals(HudSizePx(116, 150), brokenPlaced.pitch)
         assertEquals("拆对后底板 = 54 + 4 + 4 = 62dp", 62, brokenPlaced.size.width / 2 + 8)
     }
@@ -261,6 +288,8 @@ class HudLayoutPairCellTest {
         // 两种实现在那条用例里都绿。这条就是把 items **故意打乱**（含把配对格里的两颗反着列），
         // 让 (b) 立刻红——这是渲染胶水层唯一还没被执行过的测试覆盖到的不变量。
         val gap = HudSizePx(8, 8)
+        // 与上面那条宽度用例同一个手喂行距（150px ⇒ 每格一档），本条只查"offsets 按下标对齐"
+        val rowPitch = 150
         val sizes = mapOf(
             e(CamPill.LEVEL) to HudSizePx(108, 140),
             e(CamPill.VOLUME) to HudSizePx(56, 142),
@@ -277,7 +306,7 @@ class HudLayoutPairCellTest {
             HudGridItem(e(CamPill.ZOOM), GridCell(0, 2)),
             HudGridItem(e(CamPill.FOCUS), GridCell(0, 3))
         )
-        val placed = gridPlacementOf(shuffled, shuffled.map { sizes.getValue(it.entry) }, gap)
+        val placed = gridPlacementOf(shuffled, shuffled.map { sizes.getValue(it.entry) }, gap, rowPitch)
 
         // 格长与格网尺寸**与次序无关**（撑 pitch 的还是那枚配对格）
         assertEquals(HudSizePx(180, 150), placed.pitch)
@@ -304,7 +333,7 @@ class HudLayoutPairCellTest {
             HudGridItem(e(CamPill.FOCUS), GridCell(0, 3)),
             HudGridItem(e(CamPill.STAB), GridCell(0, 4))
         )
-        val naturalPlaced = gridPlacementOf(natural, natural.map { sizes.getValue(it.entry) }, gap)
+        val naturalPlaced = gridPlacementOf(natural, natural.map { sizes.getValue(it.entry) }, gap, rowPitch)
         fun byEntry(items: List<HudGridItem>, pl: com.wotagei.cam.ui.GridPlacement) =
             items.mapIndexed { i, it -> it.entry to pl.offsets[i] }.toMap()
         val a = byEntry(shuffled, placed)
@@ -317,42 +346,90 @@ class HudLayoutPairCellTest {
         }
     }
 
+    /**
+     * #74 那一版这条叫 `rightDockGridOverflowsTheLandscapeBandAndThatIsAKnownDefect`，
+     * 断言的是"已知缺陷的测量值：溢出 142dp ≈ 1.8 行"。#75 修完了，**同一条对撞翻成溢出 0**——
+     * 没有删它、没有放松成"不崩就行"，改的只是期望值与注释（那一档历史数值留在下面的对照段里）。
+     *
+     * 三段全是"计划 → 行为"的桥，不是恒等式：
+     * 1. **行距与住户无关**：[gridRowPitchPx] = (18sp 行高 + 上下内边距 6+6 + 行距 4) × density 2 = **68px**。
+     * 改坏它（换成"实测最高那颗 + 行距"那一支）⇒ 本条红在行距那一格断言上。
+     * 2. **默认行按跨度推进**：配对块实测 144px ⇒ [com.wotagei.cam.ui.cellRowSpan] = 3 ⇒ 蓝牙 (0,3)、
+     * 变焦 (0,4)、对焦 (0,5)、防抖 (0,6)。改坏 `defaultCellsOf` 的 `row += span`（退回 `row++`）
+     * ⇒ 颗数那一组断言红（后面的胶囊会压在配对块身上，正是这次要禁的形态）。
+     * 3. **网格高对撞带高**：`7 × 68 − 8 = 468px =` **234dp** ≤ 横屏带高 244dp ⇒ 溢出 0，
+     * 且最底那颗（防抖）的**底边 + 底板内边距**也在带内 ⇒ 对焦与防抖这次露得出来。
+     * 改坏 [gridPlacementOf] 的行数算式（不按跨度算总档）⇒ 高度那一条红。
+     */
     @Test
-    fun rightDockGridOverflowsTheLandscapeBandAndThatIsAKnownDefect() {
-        // #75：这条不是在为现状背书，是把"均匀行距把右 Dock 撑高到超出带高"这件事**变成已执行的测量**。
-        // 现有那条 `gridPlacementOfTheDefaultRightDockMeasuresTheNinetyFourBoard` 把 742px 钉得很准，
-        // 但没有任何用例拿它去比 `zoneBandHeight` ⇒ 数值测准了、预算却没对撞，这是一类新假绿。
-        //
-        // 修好（rowSpan / 缩小姿态仪 / 明确接受滚动）之后，**这条的期望值应当翻成溢出 0**，
-        // 翻它的人必须同时改这里的注释，不许悄悄把断言放松成"只要不崩就行"。
-        val gap = HudSizePx(8, 8)
-        val items = HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll)
-        val sizes = mapOf(
-            e(CamPill.LEVEL) to HudSizePx(148, 148),   // 姿态仪：天地线 46 + 上下内边距 5+5 + 状态文字 ≈16 ⇒ 高 74dp
-            e(CamPill.VOLUME) to HudSizePx(56, 142),
-            e(CamPill.BT) to HudSizePx(94, 60),
-            e(CamPill.ZOOM) to HudSizePx(94, 60),
-            e(CamPill.FOCUS) to HudSizePx(94, 60),
-            e(CamPill.STAB) to HudSizePx(94, 60)
-        )
-        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap)
-        val rowPitchDp = placed.pitch.height / 2.0      // 本机 density 2.0
-        val gridHeightDp = placed.size.height / 2.0
-        // 横屏带高 = 带宽 360dp − 顶栏 44dp − 底栏 72dp（zoneBandHeight 的同一条算式）
-        val bandDp = 360 - 44 - 72
-        val overflowDp = gridHeightDp - bandDp
+    fun rightDockGridNowFitsTheLandscapeBandThatWasTheKnownDefect() {
+        val density = 2f
+        val gap = HudSizePx(8, 8)   // 令牌 WotaSpace.xs = 4dp
+        val rowPitch = gridRowPitchPx(1f, 4f, density)
+        assertEquals("格距 =（胶囊 18sp 行高 + 上下内边距 6+6 + 行距 4）× 2 ⇒ 68px = 34dp", 68, rowPitch)
 
-        assertEquals("行距被姿态仪那颗顶高到 78dp（胶囊档本来只要 34dp）", 78.0, rowPitchDp, 0.5)
-        assertTrue(
-            "#75 现状：网格高 ${gridHeightDp}dp 超出横屏带高 ${bandDp}dp，" +
-                "溢出 ${overflowDp}dp ≈ ${(overflowDp / rowPitchDp).toInt()} 行 ⇒ 对焦/防抖落在折叠线以下。" +
-                "这一条断言的是**已知缺陷的测量值**，修好后应翻成溢出 0",
-            overflowDp > 100.0
+        // 手写的实测高（px，本机 density 2.0）：
+        // 姿态仪 46 天地线 + 上下内边距 5+5 + spacedBy 2 + labelSmall 行高 14sp = 72dp = 144px
+        // 音量表 13 图标 + 4 间隔 + 6 格 ×(5 + 1+1) = 59dp + 上下内边距 6+6 = 71dp = 142px
+        // 四颗紧凑档胶囊 = 18sp + 6+6 = 30dp = 60px
+        val heights = mapOf(
+            e(CamPill.LEVEL) to 144, e(CamPill.VOLUME) to 142,
+            e(CamPill.BT) to 60, e(CamPill.ZOOM) to 60, e(CamPill.FOCUS) to 60, e(CamPill.STAB) to 60
         )
-        // 改前 Column 的自然行高（配对格 74 + 4 颗 30 + 间距 4×4 = 210dp）是**装得进** 244dp 的，
-        // 这正是 S2-2B 当年把这两颗并排的理由；均匀行距把它抵消了。
-        val naturalColumnDp = 74.0 + 4 * 30.0 + 4 * 4.0
-        assertTrue("对照基准：改前 $naturalColumnDp dp 本该装得进 ${bandDp}dp 带", naturalColumnDp <= bandDp)
+        val widths = mapOf(
+            e(CamPill.LEVEL) to 108, e(CamPill.VOLUME) to 56,
+            e(CamPill.BT) to 94, e(CamPill.ZOOM) to 94, e(CamPill.FOCUS) to 94, e(CamPill.STAB) to 94
+        )
+        val plan = HudGridPlan(
+            visible = HudEntry.ALL.toSet(),
+            readoutPerRow = 3,
+            rowPitchOf = { rowPitch },
+            cellHeightOf = { heights.getValue(it) }
+        )
+        val items = HudLayoutTable.default().gridItems(HudZone.RIGHT, plan)
+        val cells = items.associate { it.entry to it.cell }
+        // ② 默认行号逐颗点名（跨度推进之后的那一套；#74 那一版这里是 0,1,2,3,4）
+        assertEquals(GridCell(0, 0), cells[e(CamPill.LEVEL)])
+        assertEquals("配对两颗仍然共用第 0 格（宽度账没被纵向改动带偏）", GridCell(0, 0), cells[e(CamPill.VOLUME)])
+        assertEquals("蓝牙必须让到配对块**之外**的第 3 档", GridCell(0, 3), cells[e(CamPill.BT)])
+        assertEquals(GridCell(0, 4), cells[e(CamPill.ZOOM)])
+        assertEquals(GridCell(0, 5), cells[e(CamPill.FOCUS)])
+        assertEquals(GridCell(0, 6), cells[e(CamPill.STAB)])
+
+        val placed = gridPlacementOf(items, items.map { HudSizePx(widths.getValue(it.entry), heights.getValue(it.entry)) }, gap, rowPitch)
+        // 宽度那一轴一条没动：配对格 108 + 8 + 56 = 172 ⇒ 格长 180 ⇒ 格网 172px = 86dp ⇒ 底板 94dp
+        assertEquals(HudSizePx(180, rowPitch), placed.pitch)
+        assertEquals("格网 = 172px 宽（底板 94dp）", 94, placed.size.width / 2 + 8)
+        // ③ 总高 = 7 档 × 68 − 8 = 468px = 234dp；横屏带高 = 360 − 顶栏 44 − 底栏 72 = 244dp
+        val bandDp = 360 - 44 - 72
+        val gridHeightDp = placed.size.height / density
+        assertEquals("7 档 ⇒ 468px = 234dp", 234.0f, gridHeightDp, 0.01f)
+        val overflowDp = gridHeightDp - bandDp
+        assertEquals(
+            "#75 已修：网格高 ${gridHeightDp}dp 必须装进横屏带高 ${bandDp}dp（溢出取 max(0,·)）。" +
+                "这里红就说明行距又被哪颗顶高了，或跨度没让后面的行号让开",
+            0, maxOf(0, overflowDp.roundToInt())
+        )
+        // "露不露出"逐颗点名：比的是颗自己的**底边** + 底板那枚 WotaSpace.xs 内边距（8px），
+        // 因为带高管的是整枚卡片；只比网格高的话，最后一颗伸出网格但仍在底板内会误报
+        val bottoms = items.mapIndexed { i, it -> it.entry to placed.offsets[i].y + heights.getValue(it.entry) }
+            .toMap()
+        val cardBottomPx = placed.size.height + 8
+        assertEquals("整枚底板（含 4dp 内边距）= 476px = 238dp ≤ 488px", 476, cardBottomPx)
+        for (pill in listOf(CamPill.BT, CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB)) {
+            assertTrue(
+                "${pill.name} 的底边 ${bottoms.getValue(e(pill))}px + 底板内边距必须落在带内（带底 488px）",
+                bottoms.getValue(e(pill)) + 8 <= bandDp * density
+            )
+        }
+        // 对照段：把行距换回 #74 那一版"实测最高那颗 148 + 行距 8 = 156px"、人人各占一档，
+        // 同一批函数（[gridSizePx]）算出来是 5 × 156 − 8 = 772px = 386dp ⇒ **溢出 142dp**——
+        // 那就是被投诉的那个形态。这一段是"旧模型的手工复刻"，它红就说明有人改了格网那笔减法
+        val oldModelDp = gridSizePx(1, 5, HudSizePx(180, 156), gap).height / density
+        assertEquals("旧模型对照：386dp，比带高多 142dp ≈ 1.8 行（当年对焦/防抖整颗掉到带外）", 142.0f, oldModelDp - bandDp, 0.01f)
+        // 而改前那条 `Column` 的自然行高（74 + 4×30 + 4×4 = 210dp）本来就装得进 244dp：
+        // 均匀行距把它抵消了；现在按跨度排完之后 234dp，重新装得进，且不再靠"把两颗并排"省高度
+        assertTrue("改前自然行高 210dp 是这条账的基准，装得进 ${bandDp}dp", 74.0 + 4 * 30.0 + 4 * 4.0 <= bandDp)
     }
 
     @Test
@@ -374,13 +451,15 @@ class HudLayoutPairCellTest {
         assertEquals(chip, cellContentWidthPx(listOf(chip), gapX))
         assertEquals(0, cellContentWidthPx(emptyList(), gapX))
         // 单列 ⇒ 格网宽 = 1 × pitch − 一道行距 = 最宽那枚格子的内容宽；底板再包左右各 4dp ⇒ 94dp
-        val pitchW = gridPitchPx(maxCellWidthPx = 172, maxCellHeightPx = 140, gapXPx = gapX, gapYPx = 8).width
+        // #75 之后 gridPitchPx 的纵向形参是"格距"（直接透传，不再 +行距）；这里仍喂手摆的 148/140，
+        // 因为本用例只看**宽度**那一轴——纵向那一档在 HudLayoutRowPitchTest 与溢出用例里打
+        val pitchW = gridPitchPx(maxCellWidthPx = 172, rowPitchPx = 148, gapXPx = gapX).width
         assertEquals(180, pitchW)
         val gridW = gridSizePx(cols = 1, rows = 5, pitch = HudSizePx(pitchW, 148), gap = HudSizePx(gapX, gapX)).width
         assertEquals(172, gridW)
         assertEquals("底板 = 86 + 4 + 4 = 94dp（r11 真机量到的那一档；本轮锁屏，是手算不是实测）", 94, gridW / 2 + 8)
         // 反证：上一批"配对占两列"那一档在同一个 gridSizePx 下给 224px = 112dp，底板 120dp（要抹掉的那 26dp）
-        val oldPitch = gridPitchPx(maxCellWidthPx = attitude, maxCellHeightPx = 140, gapXPx = gapX, gapYPx = 8).width
+        val oldPitch = gridPitchPx(maxCellWidthPx = attitude, rowPitchPx = 148, gapXPx = gapX).width
         assertEquals(
             224,
             gridSizePx(cols = 2, rows = 5, pitch = HudSizePx(oldPitch, 148), gap = HudSizePx(gapX, gapX)).width
@@ -390,7 +469,7 @@ class HudLayoutPairCellTest {
             108,
             gridSizePx(
                 cols = 1, rows = 6,
-                pitch = HudSizePx(gridPitchPx(attitude, 140, gapX, 8).width, 148),
+                pitch = HudSizePx(gridPitchPx(attitude, 148, gapX).width, 148),
                 gap = HudSizePx(gapX, gapX)
             ).width
         )
@@ -416,7 +495,7 @@ class HudLayoutPairCellTest {
         assertEquals("第 1 列要先加 col × pitch", listOf(184, 300), cellChildLeftsPx(GridCell(1, 0), pitchPx, widths, 8))
         assertEquals(
             "单颗格子与 cellPlaceOffsetPx 的 x 逐字同值（两处不许各有一份居中算式）",
-            listOf(cellPlaceOffsetPx(GridCell(2, 1), pitch, HudSizePx(30, 10)).x),
+            listOf(cellPlaceOffsetPx(GridCell(2, 1), pitch, HudSizePx(30, 10), 1).x),
             cellChildLeftsPx(GridCell(2, 1), pitch, listOf(30), 8)
         )
         assertEquals(10, cellChildLeftsPx(GridCell(0, 0), pitch, listOf(30), 8).single())
@@ -446,10 +525,12 @@ class HudLayoutPairCellTest {
         assertEquals("两列上限 ⇒ 两颗一起钳到第 1 列", GridCell(1, 9), after[e(CamPill.LEVEL)])
         assertEquals("同格这条不许被钳制破坏", GridCell(1, 9), after[e(CamPill.VOLUME)])
         assertEquals(GridCell(1, 9), clampStoredCell(HudZone.RIGHT, GridCell(5, 9)))
+        // 后两形参喂"量不到高"（0 ⇒ 跨度 1）：这一条查的是**同格不许被钳开**，跨度那一档在
+        // HudLayoutRowPitchTest 打；两颗入参相同 ⇒ 出参相同，这条与 #74 逐字同值
         assertEquals(
             "钳制对同一枚格子给唯一结果（把两颗钳进两格的那一步在这里红）",
             1,
-            listOf(GridCell(5, 9), GridCell(5, 9)).map { clampCellToBox(it, GridBox(2, 10)) }.distinct().size
+            listOf(GridCell(5, 9), GridCell(5, 9)).map { clampCellToBox(it, GridBox(2, 10), 0, 30) }.distinct().size
         )
         // 没被摆过的四颗仍按推导格落位：钳一枚配对格不该重排别人
         assertEquals(GridCell(0, 1), after[e(CamPill.BT)])

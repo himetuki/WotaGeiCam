@@ -42,7 +42,22 @@ import org.junit.Test
  */
 class HudLayoutGridTest {
 
-    private val planAll = HudGridPlan(HudEntry.ALL.toSet(), readoutPerRow = 3)
+    /**
+     * 手摆的一帧网格输入：行距与 [pitch] 的纵向同值（30px），**实测高一律 0**。
+     *
+     * 0 = "这一帧还没量到" ⇒ [com.wotagei.cam.ui.cellRowSpan] 恒为 1 ⇒ 本文件那些逐颗点名的行号
+     * 与 #74 那一版**一字不动**。跨度本身的行为在 `HudLayoutRowPitchTest` 里喂真实高度另开一组，
+     * 这样"改了跨度算式会不会悄悄动到独立性/钳制的老账"在本文件就红不了——它红只可能是有人动了
+     * 独立性那条路，测的各自是各自的事。
+     */
+    private fun planPerRow(perRow: Int) = HudGridPlan(
+        visible = HudEntry.ALL.toSet(),
+        readoutPerRow = perRow,
+        rowPitchOf = { 30 },
+        cellHeightOf = { 0 }
+    )
+
+    private val planAll = planPerRow(3)
     private fun e(p: CamPill) = HudEntry.of(p)
     private fun h(i: HudItem) = HudEntry.of(i)
 
@@ -91,10 +106,10 @@ class HudLayoutGridTest {
         // 同一张默认表、只换分行档：1 颗一列时 7 颗 7 行；3 颗一列时 3 行。
         // 这条钉的是"推导读的是 hudRowGroups 的档"，把 perRow 写死成常量的实现会当场红
         val order = HudLayoutTable.defaultOrderOf(HudZone.READOUT)
-        assertEquals(GridCell(0, 6), defaultCellsOf(HudZone.READOUT, order, perRow = 1)[h(HudItem.ZOOM)])
-        assertEquals(GridCell(0, 2), defaultCellsOf(HudZone.READOUT, order, perRow = 3)[h(HudItem.ZOOM)])
+        assertEquals(GridCell(0, 6), defaultCellsOf(HudZone.READOUT, order, planPerRow(1))[h(HudItem.ZOOM)])
+        assertEquals(GridCell(0, 2), defaultCellsOf(HudZone.READOUT, order, planPerRow(3))[h(HudItem.ZOOM)])
         // 与 hudRowGroups 逐行对齐（推导尺子只有一把）
-        val two = defaultCellsOf(HudZone.READOUT, order, perRow = 2)
+        val two = defaultCellsOf(HudZone.READOUT, order, planPerRow(2))
         val groups = hudRowGroups(HudZone.READOUT, order, perRow = 2)
         groups.forEachIndexed { row, group ->
             group.forEachIndexed { col, entry -> assertEquals("第 $row 行第 $col 列", GridCell(col, row), two[entry]) }
@@ -204,16 +219,18 @@ class HudLayoutGridTest {
     @Test
     fun freeCellNearNeverReturnsAnOccupiedCell() {
         // 手摆：2 列 3 行，(0,0)/(1,0)/(0,1) 已占。指针落在 (0,0) 那颗身上
+        // 入参里那颗高 0（跨度 1）⇒ 这一组期望值与 #74 逐字相同；跨度那一档单独在
+        // HudLayoutRowPitchTest 里喂真实高度打（"块尾不许出带"），两条不许混着写
         val occupied = setOf(GridCell(0, 0), GridCell(1, 0), GridCell(0, 1))
         // 期望值是口算出来的最近空格 (1,1)（距离 2；同距离按"先上后下、先左后右"定序）
-        assertEquals(GridCell(1, 1), freeCellNear(GridCell(0, 0), occupied, cols = 2, rows = 3))
+        assertEquals(GridCell(1, 1), freeCellNear(GridCell(0, 0), occupied, cols = 2, rows = 3, contentHeightPx = 0, rowPitchPx = 30))
         // 空格就在旁边一步时不许跳到远处
-        assertEquals(GridCell(1, 0), freeCellNear(GridCell(0, 0), setOf(GridCell(0, 0)), cols = 2, rows = 3))
+        assertEquals(GridCell(1, 0), freeCellNear(GridCell(0, 0), setOf(GridCell(0, 0)), 2, 3, 0, 30))
         // 拖出带外的落点先钳进带内（负列 → 0 列，99 行 → 最后一行），再找空位
-        assertEquals(GridCell(0, 2), freeCellNear(GridCell(-9, 99), emptySet(), cols = 2, rows = 3))
+        assertEquals(GridCell(0, 2), freeCellNear(GridCell(-9, 99), emptySet(), 2, 3, 0, 30))
         // 整带占满时不许抛，也不许返回被占格以外的野值（这一支编辑页走不到，但模型必须自洽）
         val full = (0 until 2).flatMap { c -> (0 until 3).map { r -> GridCell(c, r) } }.toSet()
-        assertEquals(GridCell(0, 0), freeCellNear(GridCell(0, 0), full, cols = 2, rows = 3))
+        assertEquals(GridCell(0, 0), freeCellNear(GridCell(0, 0), full, 2, 3, 0, 30))
     }
 
     @Test
@@ -241,14 +258,19 @@ class HudLayoutGridTest {
             e(CamPill.CURVE) to GridCell(0, 2)
         )
         // ① 两颗显式同格 ⇒ 顺序在前的保留，后者就近让位（这就是 [order] 降级后剩下的用途①）
+        // 两颗都按"量不到高"（0 ⇒ 跨度 1）喂，与 #74 那一版逐字同值
+        val noHeights = { _: HudEntry -> 0 }
         val collided = resolveCells(
             order,
             mapOf(e(CamPill.REFLINE) to GridCell(0, 0), e(CamPill.MONITOR) to GridCell(0, 0)),
-            derived, cols = 2, rows = 3
+            derived, cols = 2, rows = 3, cellHeightPx = noHeights, rowPitchPx = 30
         )
         assertEquals(listOf(GridCell(0, 0), GridCell(1, 0), GridCell(0, 2)), collided.map { it.cell })
         // ② 显式格正好压在别颗的**推导格**上 ⇒ 摆过的那颗赢、没摆过的那颗让
-        val override = resolveCells(order, mapOf(e(CamPill.CURVE) to GridCell(0, 1)), derived, cols = 2, rows = 3)
+        val override = resolveCells(
+            order, mapOf(e(CamPill.CURVE) to GridCell(0, 1)), derived,
+            cols = 2, rows = 3, cellHeightPx = noHeights, rowPitchPx = 30
+        )
         assertEquals(GridCell(0, 0), override[0].cell)
         assertEquals("推导那颗让位", GridCell(1, 1), override[1].cell)
         assertEquals("摆过那颗拿到它要的那格", GridCell(0, 1), override[2].cell)
@@ -261,7 +283,12 @@ class HudLayoutGridTest {
         // （与 HudLayoutCodecTest.hiddenEntrySurvivesInPersistedString 同一条语义的另一半）
         val placed = HudLayoutTable.default()
             .placeEntryAt(e(CamPill.BT), HudZone.RIGHT, 2, GridCell(1, 3), planAll)
-        val visibleOnly = HudGridPlan(HudEntry.ALL.toSet() - e(CamPill.BT), readoutPerRow = 3)
+        val visibleOnly = HudGridPlan(
+            visible = HudEntry.ALL.toSet() - e(CamPill.BT),
+            readoutPerRow = 3,
+            rowPitchOf = { 30 },
+            cellHeightOf = { 0 }
+        )
         assertTrue("隐藏那颗的格子必须算占用", placed.occupiedCells(HudZone.RIGHT, visibleOnly).contains(GridCell(1, 3)))
         val dropped = placed.placeEntryAt(e(CamPill.STAB), HudZone.RIGHT, 4, GridCell(1, 3), visibleOnly)
         val cells = dropped.gridItems(HudZone.RIGHT, visibleOnly).associate { it.entry to it.cell }
@@ -318,19 +345,22 @@ class HudLayoutGridTest {
         // 格长 0（还没量到）时不许抛
         assertEquals(GridCell(0, 0), cellAtPointer(HudPointPx(99, 99), origin, HudSizePx(0, 0)))
         // 格内居中：30×10 的小颗放进 50×30 的格子里，左上角补 (10,10)
-        assertEquals(HudPointPx(110, 100), cellPlaceOffsetPx(GridCell(2, 3), pitch, HudSizePx(30, 10)))
+        // 最后一形参是行跨度（#75）——1 档时与 #74 逐字同值，跨几档的那一档在 HudLayoutRowPitchTest 打
+        assertEquals(HudPointPx(110, 100), cellPlaceOffsetPx(GridCell(2, 3), pitch, HudSizePx(30, 10), 1))
     }
 
     @Test
     fun cellClampUsesTheContainerBandNotAScreenGuess() {
         // 手摆：格长 50×30 dp、带高 120dp ⇒ 只放得下 4 行；拖到第 9 行必须钳回第 3 行
+        // 后两形参（实测高、格距）#75 新加：这里一律喂"跨度 1"（高 0），钳制结果与 #74 逐字相同；
+        // "跨度 > 1 时钳的是整块"那一档在 HudLayoutRowPitchTest 里喂真实高度另打
         val box = gridBoxOf(HudZone.LEFT, pitchXDp = 50, pitchYDp = 30, bandHeightDp = 120, roomWidthDp = 0)
         assertEquals(2, box.cols)
         assertEquals(4, box.rows)
-        assertEquals(GridCell(1, 3), clampCellToBox(GridCell(7, 99), box))
-        assertEquals(GridCell(0, 1), clampCellToBox(GridCell(-3, 1), box))
+        assertEquals(GridCell(1, 3), clampCellToBox(GridCell(7, 99), box, contentHeightPx = 0, rowPitchPx = 30))
+        assertEquals(GridCell(0, 1), clampCellToBox(GridCell(-3, 1), box, 0, 30))
         // 哨兵不参与钳制（"没摆过"不是越界值，钳成 (0,0) 等于凭空造一个位置）
-        assertEquals(GridCell.DEFAULT, clampCellToBox(GridCell.DEFAULT, box))
+        assertEquals(GridCell.DEFAULT, clampCellToBox(GridCell.DEFAULT, box, 0, 30))
         // 读数块的列数由**可用内宽**说话：200dp ÷ 90dp 格长 = 2 列（够不到 3 列的上限）
         assertEquals(
             2,
