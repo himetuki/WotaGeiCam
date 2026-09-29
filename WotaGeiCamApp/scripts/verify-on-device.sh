@@ -130,7 +130,14 @@ shot A_default
 # --- 3. 从 dump 里**算**宽度 ----------------------------------------------
 hr
 echo "[B] 左右 Dock 与读数块的实测宽度"
-python - "$OUT/A_default.xml" "$DENSITY" <<'PYEOF'
+if [ ! -s "$OUT/A_default.xml" ]; then
+  printf '%s	%s	%s	%s
+' "A_default.xml" "0 B" "n/a" "SUSPECT-EMPTY-DUMP" >> "$OUT/manifest.tsv"
+  echo "   !! uiautomator 没吐出内容（这台机 dump 有时会报成功但写空），[B] 的数字这一轮不可用"
+fi
+# ⚠ 这里必须先 cd 进 $OUT 再传**相对文件名**：Windows 版 python 与 Windows 版 adb 一样不认
+# `/f/Works/...` 这种 MSYS 绝对路径（dry-run 时它就报了 No such file，而文件确实在）。
+( cd "$OUT" && python - "A_default.xml" "$DENSITY" <<'PYEOF' 
 import io, re, sys
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -186,6 +193,7 @@ if any(r[0] == "监看" for r in rows):
 else:
     print("   !! 树里没有「监看」：改名没落到取景页那颗，回去查 cam_p_monitor 的消费点")
 PYEOF
+)
 
 # --- 4. #74 独立性：拖一颗，别颗不许动 -----------------------------------
 hr
