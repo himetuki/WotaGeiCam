@@ -72,6 +72,28 @@ android {
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
         }
+        /**
+         * #74 加的**取证构建**：release 同签名 + debuggable + **不混淆**，并且是 `testBuildType`。
+         *
+         * 为什么要单独一枚，而不是复用 `debugHook` 或直接跑默认的 debug：
+         * AGP 的仪器测试只跟 `testBuildType` 那一条变体走（默认 `debug`）。默认值在这台机上是**危险**的——
+         * debug 包与 release 两张证书，装上就必须先 `adb uninstall`，而那会清空 `wota_settings` 与
+         * `wota_media.db`（用户设置、收藏、tag）。把 `testBuildType` 钉到一枚与 release 同签名的变体上，
+         * "跑仪器测试"与"不许清用户数据"就同时成立，不用每次靠人记住别用错命令。
+         *
+         * 与 `debugHook` 的差别只有一处：**这里不混淆**。R8 会把测试 APK 里的 `@Test` 类名改掉，
+         * `am instrument -e class com.wotagei.cam.XxxTest#method` 就点不到方法了；
+         * 而 `debugHook` 那枚要保持与真实 release 尽量一致（带 R8），所以两枚各司其职：
+         * `debugHook` 出截图与钩子态，`probe` 跑仪器测试。
+         */
+        create("probe") {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            isDebuggable = true
+            signingConfig = wotaSign
+            matchingFallbacks += listOf("release", "debug")
+            buildConfigField("boolean", "MERGE_HOOK", "true")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -86,6 +108,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    // 仪器测试只准跑在 `probe` 上：默认值 debug 与 release 不同签名，装上必须先 uninstall ⇒ 清空用户存档。
+    testBuildType = "probe"
 
     buildFeatures {
         compose = true
