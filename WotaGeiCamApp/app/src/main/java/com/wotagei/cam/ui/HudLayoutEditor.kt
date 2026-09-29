@@ -1,6 +1,7 @@
 package com.wotagei.cam.ui
 
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -147,10 +148,14 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
 
     // ---- 实测：安全盒尺寸与窗口原点、五枚卡片本体、每颗条目本体
-    val zoneRects = remember { mutableStateMapOf<HudZone, IntRect>() }
+    // 这批矩形必须**随方向复位**（与下面 safeW/safeH 同一个 key）：#70 A 的读数块决策吃底板宽与块宽，
+    // 拿上一副姿态的陈旧值去判"装不下"会把读数闩在错误那一档（与录制页同一个理由，见 CameraScreen）
+    val zoneRects = remember(configuration.orientation) { mutableStateMapOf<HudZone, IntRect>() }
     val entryRects = remember { mutableStateMapOf<HudEntry, IntRect>() }
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
+    // 与录制页同一个"横屏"真源（定版：横屏永远同行）
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     var originXPx by remember { mutableIntStateOf(0) }
     var originYPx by remember { mutableIntStateOf(0) }
     // 编辑页的"顶栏避让量"就是自己这条操作栏的实测高（与录制页读顶栏实测高同一手法）
@@ -160,7 +165,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val dockStripH = if (dockCardH > 0) dockCardH + 2 * bottomOuterPadDp
     else BottomBarSpaceFallback.value.roundToInt()
     val hudStripH = zoneRects[HudZone.READOUT].dpHeightToDp(density)
-    // 读数块实测宽：喂给 planReadoutRow 当"同一行装不装得下"的安全网（与录制页同一个入参）
+    // 读数块实测宽：竖屏那道"估宽说谎时别压上底板"的安全网（横屏不读它，见 planReadoutRow；与录制页同一个入参）
     val hudStripW = zoneRects[HudZone.READOUT].dpWidthToDp(density)
     val baseArea = HudAreaDp(
         width = safeW,
@@ -174,7 +179,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val dockCardW = zoneRects[HudZone.BOTTOM].dpWidthToDp(density)
     val readoutCount = draft.visibleOrderOf(HudZone.READOUT, visibleEntries).size
     val readoutPlan = remember(
-        readoutCount, density.fontScale, safeW, dockCardW, dockStripH, hudStripW
+        readoutCount, density.fontScale, safeW, dockCardW, dockStripH, hudStripW, isLandscape
     ) {
         planReadoutRow(
             readoutCount = readoutCount,
@@ -182,9 +187,11 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             safeWidthDp = safeW,
             dockWidthDp = if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt(),
             dockStripDp = dockStripH,
-            bottomRowPadDp = bottomOuterPadDp,
+            // 与录制页同一个基线令牌：计划里会减掉读数块自己的 HudBlockPadDp，对齐的才是可见底边
+            dockRowBaselineDp = bottomOuterPadDp,
             endPadDp = HudEdgePad.value,
             dockGapDp = WotaSpace.s.value,
+            landscape = isLandscape,
             readoutWidthDp = hudStripW
         )
     }

@@ -1,6 +1,7 @@
 package com.wotagei.cam.ui
 
 import android.content.Context
+import android.content.res.Configuration
 import android.content.res.Resources
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -108,7 +109,6 @@ import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.ui.anim.LocalMotion
-import com.wotagei.cam.ui.anim.hudStripHeightDp
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.dialog.CurveSheet
 import com.wotagei.cam.ui.dialog.evText
@@ -435,12 +435,20 @@ fun CameraScreen(
     // 旋转换档先按新方向估算，下一帧实测校正
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
+    // #70 A 定版「横屏永远同行」的判据：就用这两行已经在用的那个 orientation（同一个真源，不另造第二套
+    // "横屏"定义，比如按窗口宽高比现推——那会和这里复位 safeW/safeH 的条件分叉）
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     // §59/§74：容量段取档的可用宽 = 安全区实测宽 − 顶栏右端固定件预留，再按录制页文本高度折算回 100% 基准。
     // 它必须与胶囊组自己的布局上限 topBarMaxWidthDp 同一条账、同一个来源，否则判据比实际盒子宽
     val topBarRoomDp = ((safeW - TopBarChromeReserveDp).dp /
         WotaSettings.textScale(settingsPrefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)).value
-    // 五枚卡片本体在窗口里的实测矩形：钳制要的容器尺寸与第 8 条要的"底栏现在在哪"都只读这一份
-    val zoneRects = remember { mutableStateMapOf<HudZone, IntRect>() }
+    // 五枚卡片本体在窗口里的实测矩形：钳制要的容器尺寸与第 8 条要的"底栏现在在哪"都只读这一份。
+    // ⚠ 必须**随方向复位**（与上面 safeW/safeH 同一个 key）：旋转那一刻这批矩形还是上一副姿态的尺寸，
+    // 而 #70 A 的读数块决策吃的正是里面的宽度（底板宽、块宽）。不复位的话，竖屏按整幅排出来的
+    // 294dp 块宽会在新姿态的首帧被当成"实测越线"，配合退化档的自反馈就把读数永久闩在错误那一档
+    // （#70 修复批次第 1 条点名的帮凶）。复位后首帧退回 [BottomDockWidthFallback] 等兜底值，
+    // 下一帧实测接管，与 topBarH / dockStripH 那套"两轮收敛"手法同一条。
+    val zoneRects = remember(configuration.orientation) { mutableStateMapOf<HudZone, IntRect>() }
     val bottomOuterPadDp = BottomBarOuterPadV.value.roundToInt()
     val dockCardH = zoneRects[HudZone.BOTTOM].dpHeightToDp(hudDensity)
     // S2-2 C：底栏那一排占的带高 = 卡片实测高 + 卡片外上下边距各一份（原来的 76dp 是"真机量过两次"的
@@ -475,16 +483,18 @@ fun CameraScreen(
         bottomAvoidDp = dockStripH
     )
     // ---- #70 A：读数块与底栏**共用底部那一条横带**，不再被"底栏带高"抬到 Dock 上方。
-    // 一次决策同时给出三件事，谁都不许另写一份：① 底边停在哪一档（同基线 / 退回整排之上）、
-    // ② 一行几颗（右半带装不下两颗就退回，判据与退化理由见 ReadoutRowPlan 的 KDoc）、③ 可用内宽。
+    // 一次决策同时给出三件事，谁都不许另写一份：① 底边停在哪一档、② 一行几颗、③ 可用内宽。
+    // 定版口径（用户 2026-09-29 12:20）：横屏**永远同行**、列数上限两颗；只有竖屏保留"退回整排之上"。
+    // 底边那一档不是直接把 BottomBarOuterPadV 交给容器：读数块自己还吃一枚 HudBlockPadDp 内边距，
+    // 计划里减掉它，对齐的才是**胶囊可见底边**与**底板可见底边**（第 6 条那笔 6dp 账）。
     // 输入是实测底栏宽（首帧量不到按 BottomDockWidthFallback 兜底，与 dockStripH 同一套两轮收敛手法）、
-    // 安全区实测宽，以及读数块自己的实测宽（只做"估宽说谎时别压上底板"的安全网）。
-    // 主判据不读块宽 ⇒ 没有档位↔块宽的来回翻；退化档取整幅宽、块只会更宽，一旦退出去就稳在里面。
+    // 安全区实测宽，以及读数块自己的实测宽（竖屏那道"估宽说谎时别压上底板"的安全网；横屏不读它，
+    // 否则列数↔块宽会形成每帧振荡的环，理由见 planReadoutRow）。
     val dockCardW = zoneRects[HudZone.BOTTOM].dpWidthToDp(hudDensity)
     val readoutCardRect = zoneRects[HudZone.READOUT]
     val readoutCardW = readoutCardRect.dpWidthToDp(hudDensity)
     val readoutPlan = remember(
-        readoutCount, hudDensity.fontScale, safeW, dockCardW, dockStripH, readoutCardW
+        readoutCount, hudDensity.fontScale, safeW, dockCardW, dockStripH, readoutCardW, isLandscape
     ) {
         planReadoutRow(
             readoutCount = readoutCount,
@@ -492,15 +502,17 @@ fun CameraScreen(
             safeWidthDp = safeW,
             dockWidthDp = if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt(),
             dockStripDp = dockStripH,
-            bottomRowPadDp = bottomOuterPadDp,
+            dockRowBaselineDp = bottomOuterPadDp,
             endPadDp = HudEdgePad.value,
             dockGapDp = WotaSpace.s.value,
-            // 实测块宽做安全网：`hudPerRowFor` 的字宽是算术估计，副标签「感光度 / 曝光补偿」比它假设的
+            landscape = isLandscape,
+            // 实测块宽做竖屏安全网：`hudPerRowFor` 的字宽是算术估计，副标签「感光度 / 曝光补偿」比它假设的
             // 两汉字宽，估宽偏小时真值会压上底板。量不到那一帧传 0 = 先按估宽走，下一帧实测接管
             readoutWidthDp = readoutCardW
         )
     }
-    // 读数块那枚容器的 area：底边由上面那次决策说了算（默认＝与底栏同基线），带高与钳制都只读这一份
+    // 读数块那枚容器的 area：底边由上面那次决策说了算（横屏恒与底栏同一行，那一档的让位已经在计划里
+    // 减掉块自己的内边距 ⇒ 对齐的是可见底边），带高与钳制都只读这一份
     val readoutArea = baseArea.copy(bottomAvoidDp = readoutPlan.bottomAvoidDp)
     // S3-6：读数块高度首帧按行数预测而不是 0——0 会让进页首帧的右 Dock 下界按未扣值算，最低那颗叠一帧。
     // 旋转换档时它仍是上一轮那一档，与 topBarH 同一套"两轮收敛"手法，下一帧就正。
