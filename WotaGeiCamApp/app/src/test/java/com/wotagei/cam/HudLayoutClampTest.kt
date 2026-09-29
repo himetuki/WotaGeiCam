@@ -8,6 +8,7 @@ import com.wotagei.cam.ui.ZonePlacement
 import com.wotagei.cam.ui.clampZonePos
 import com.wotagei.cam.ui.clampZoneX
 import com.wotagei.cam.ui.clampZoneYRange
+import com.wotagei.cam.ui.chromeBandBottomDp
 import com.wotagei.cam.ui.dockLowerY
 import com.wotagei.cam.camera.RecordStatus
 import com.wotagei.cam.ui.dockDragBlocked
@@ -205,6 +206,56 @@ class HudLayoutClampTest {
         // 边界：右缘与下缘是**开区间**（相邻两枚外接矩形边贴边时 contains 不能两边都 true）
         assertTrue(r.contains(8, 60))
         assertFalse("右下缘是开区间，相邻两枚容器边贴边时不能两边都命中", r.contains(200, 262))
+    }
+
+    // ---------- #79：操作栏与顶栏那两枚段的交叠判定 ----------
+
+    /**
+     * 竖屏本机一手算出来的那些数（density 2.0，单位 dp 一律安全区局部坐标，原点 = 套了
+     * `safeDrawingPadding()` 之后那块）：
+     * · 安全区窗口原点 y = **68px**（`dumpsys display` 实测挖孔让位 `insets=Rect(0,68-0,0)`）
+     * · 操作栏下缘 = 原点 + 上内边距 4dp(8px) + 胶囊行 30dp(60px) + 行距 4dp(8px) +
+     *   说明文字 14dp(28px) + 下内边距 4dp(8px) = 68 + 112 = **180px** ⇒ 让位量 = (180−68)/2 = **56dp**
+     *   （胶囊行 30dp = `WotaType.chip` 行高 18sp + `WotaChip` 上下内边距 6+6，与 [hudChipHeightDp] 同一条尺子）
+     * · 三颗胶囊自己的矩形 = 左 8dp（`WotaSpace.s`）起、上 4dp（`TopTopPad`）起、高 30dp、
+     *   宽 返回50 + 间距8 + 保存50 + 间距8 + 恢复默认76 = **192dp** ⇒ 右缘 200dp
+     *   （胶囊宽 = 汉字数 × 13sp + 左右内边距 12+12；「恢复默认」四字 52+24 = 76）
+     * · 顶栏那两枚段 = 真机 bounds 整宽 **271dp**（两段之间只差 `WotaStroke.hairline` 1dp），
+     *   原生对齐起点 = 左 8dp（`HudEdgePad`）、上 4dp（`TopTopPad`），高 = labelMedium 16dp + 上下内边距 4+4 = **24dp**
+     */
+    private val chips = HudRectDp(8, 4, 200, 34)
+    private val topUnpushed = HudRectDp(8, 4, 8 + 271, 4 + 24)
+
+    @Test
+    fun chromeBandBottomReadsTheMeasuredWindowBottom() {
+        // 手算：(180 − 68) / 2 = 56dp
+        assertEquals(56, chromeBandBottomDp(180, 68, 2f))
+        // 没量到（回报 0）必须给 0，不许给 -34：负 dp 喂进 maxOf 结果虽无害，但日志里那是个假真值
+        assertEquals(0, chromeBandBottomDp(0, 68, 2f))
+        // 坏值（下缘在原点之上）同样钳成 0
+        assertEquals(0, chromeBandBottomDp(40, 68, 2f))
+        // density 0（分屏过渡帧）退成 0 而不是除零
+        assertEquals(0, chromeBandBottomDp(180, 68, 0f))
+    }
+
+    @Test
+    fun topZoneOverlapsTheActionBarChipsUnlessPushedToTheMeasuredBand() {
+        // ① **证实**上一批没收尾的那件事：不推（nativeTopMinDp = 0）时顶栏那两枚段整条落在
+        //    三颗胶囊的矩形里 ⇒ 操作栏在捕获层之上，那几像素既点不到顶栏段也拖不动它
+        assertTrue("不推就必须交叠（这条红 = 交叠判据或那两组手算数被动过）", topUnpushed.intersects(chips))
+        // ② 推到实测带（56dp）之后不再交叠
+        val pushed = HudRectDp(8, 56, 8 + 271, 56 + 24)
+        assertFalse("推到操作栏下缘之后必须完全让开", pushed.intersects(chips))
+        // ③ 承重的是**哪条线**：三颗胶囊自己的矩形下缘在 34dp（4 + 30），说明文字那行没有 pointerInput
+        //    ⇒ 只判"点得到/拖得动"的话 34dp 就够；本批取整条带的 56dp，多让的那 22dp 是**观感**账
+        //    （顶栏胶囊不许压在说明文字上）。34 这一档必须验，否则让位量取 30、取 20 都测不出来
+        assertTrue("33dp 那一档仍压在胶囊行里", HudRectDp(8, 33, 8 + 271, 33 + 24).intersects(chips))
+        assertFalse("34dp 正好脱离胶囊行（下缘是开区间）", HudRectDp(8, 34, 8 + 271, 34 + 24).intersects(chips))
+        // ④ 横向确实重叠（不重叠的话①③测不到任何东西）：顶栏段左 8 右 279 vs 胶囊行左 8 右 200
+        assertTrue(topUnpushed.left < chips.right && chips.left < topUnpushed.right)
+        // ⑤ maxOf(TopTopPad, ·) 那一支：让位量为 0 时必须等于改前的 4dp（录制页五处就是这个数）
+        assertEquals(4, maxOf(4, chromeBandBottomDp(0, 68, 2f)))
+        assertEquals(56, maxOf(4, chromeBandBottomDp(180, 68, 2f)))
     }
 
     @Test

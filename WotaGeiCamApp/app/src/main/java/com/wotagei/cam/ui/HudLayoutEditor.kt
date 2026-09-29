@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
@@ -180,8 +181,12 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     var originXPx by remember { mutableIntStateOf(0) }
     var originYPx by remember { mutableIntStateOf(0) }
-    // 编辑页的"顶栏避让量"就是自己这条操作栏的实测高（与录制页读顶栏实测高同一手法）
-    var chromeH by remember { mutableIntStateOf(0) }
+    // 编辑页的"顶栏避让量"就是自己这条操作栏压到多低（与录制页读顶栏实测高同一手法）。
+    // 回报的是**窗口坐标下的下缘 px**，不是内容高：内容高不含操作栏自己那圈上下内边距，
+    // 少算那 8dp 就会让顶栏那两枚仍压在操作栏的下内边距里（#79，量法与理由见 [chromeBandBottomDp]）。
+    // 挂在 `safeDrawingPadding()` 之内、那圈 padding 之外的链上，所以系统栏与挖孔那两截不会被重复扣。
+    var chromeBottomWinPx by remember { mutableIntStateOf(0) }
+    val chromeAvoidDp = chromeBandBottomDp(chromeBottomWinPx, originYPx, density.density)
     val bottomOuterPadDp = BottomBarOuterPadV.value.roundToInt()
     val dockCardH = zoneRects[HudZone.BOTTOM].dpHeightToDp(density)
     val dockStripH = if (dockCardH > 0) dockCardH + 2 * bottomOuterPadDp
@@ -192,7 +197,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val baseArea = HudAreaDp(
         width = safeW,
         height = safeH,
-        topAvoidDp = chromeH,
+        topAvoidDp = chromeAvoidDp,
         bottomAvoidDp = dockStripH
     )
     // #70 A：与录制页同一条决策（planReadoutRow），两个页面各摆一份 hudRoomDp/hudPerRowFor 就是 S3-5
@@ -443,111 +448,6 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             .fillMaxSize()
             .background(WotaColor.bg)
     ) {
-        // ---- 操作栏（它的实测高就是本层给钳制用的顶栏避让量）
-        Column(
-            Modifier
-                .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .safeDrawingPadding()
-                .padding(start = WotaSpace.s, end = WotaSpace.s, top = TopTopPad, bottom = WotaSpace.xs)
-                .onSizeChanged {
-                    val h = with(density) { it.height.toDp().value.roundToInt() }
-                    if (chromeH != h) chromeH = h
-                },
-            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
-            ) {
-                WotaChip(
-                    label = stringResource(R.string.hud_edit_back),
-                    selected = false,
-                    // 未保存就退出 = 整批丢弃草稿（prefs 一个字节都没写，录制页不受影响）
-                    onClick = onBack
-                )
-                WotaChip(
-                    label = stringResource(R.string.hud_edit_save),
-                    // 有未保存改动时这颗亮着，让"改了还没落盘"在视觉上有落点
-                    selected = draft != saved,
-                    onClick = {
-                        // commit() 的返回值就是"这次真落盘了吗"：没落成不许说"已保存"
-                        val ok = WotaSettings.setHudLayout(prefs, draft)
-                        saved = draft
-                        undoRaw = null
-                        resetArmed = false
-                        hint = if (ok) {
-                            context.getString(R.string.hud_edit_saved)
-                        } else {
-                            context.getString(R.string.hud_edit_save_failed)
-                        }
-                    }
-                )
-                WotaChip(
-                    label = stringResource(
-                        if (resetArmed) R.string.hud_edit_reset_confirm else R.string.hud_edit_reset
-                    ),
-                    selected = resetArmed,
-                    onClick = {
-                        if (!resetArmed) {
-                            resetArmed = true
-                            hint = context.getString(R.string.hud_edit_reset_arm_tip)
-                        } else {
-                            // 重置 = 删键（缺键就是默认表）；「撤销」靠的是把重置前那一份串原样写回来
-                            undoRaw = WotaSettings.hudLayout(prefs).encode()
-                            val ok = WotaSettings.clearHudLayout(prefs)
-                            draft = HudLayoutTable.default()
-                            saved = draft
-                            resetArmed = false
-                            hint = if (ok) {
-                                context.getString(R.string.hud_edit_reset_done)
-                            } else {
-                                context.getString(R.string.hud_edit_save_failed)
-                            }
-                        }
-                    }
-                )
-                undoRaw?.let { raw ->
-                    WotaChip(
-                        label = stringResource(R.string.hud_edit_undo),
-                        selected = false,
-                        onClick = {
-                            val back = HudLayoutTable.decode(raw)
-                            val ok = WotaSettings.setHudLayout(prefs, back)
-                            draft = back
-                            saved = back
-                            undoRaw = null
-                            hint = if (ok) {
-                                context.getString(R.string.hud_edit_undo_done)
-                            } else {
-                                context.getString(R.string.hud_edit_save_failed)
-                            }
-                        }
-                    )
-                }
-            }
-            Text(
-                text = stringResource(R.string.hud_edit_note),
-                style = WotaType.caption,
-                color = WotaColor.textLo
-            )
-            // 重叠只提示不禁止：把叠在一起的两枚容器点名，别静默
-            if (overlaps.isNotEmpty()) {
-                Text(
-                    // 名称这条 joinToString 的 lambda 不是 composable 上下文，所以标签走 context.getString
-                    //（真源仍是那五条资源，见 zoneLabelRes）
-                    text = overlaps.joinToString("；") { (a, b) ->
-                        context.getString(R.string.hud_edit_overlap_pair, context.getString(zoneLabelRes(a)), context.getString(zoneLabelRes(b)))
-                    },
-                    style = WotaType.caption,
-                    color = WotaColor.warn
-                )
-            }
-            hint?.let {
-                Text(text = it, style = WotaType.caption, color = WotaColor.accent)
-            }
-        }
-
         // ---- 安全区：位置表 (x, y) 的坐标参考，与录制页同一条（套 safeDrawing 之后那块）
         Box(
             Modifier
@@ -585,6 +485,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 area = baseArea,
                 shiftXPx = shiftXOf(HudZone.TOP),
                 shiftYPx = shiftYOf(HudZone.TOP),
+                // 顶栏整条推到操作栏之下（#79）：0 = 还没量到那一帧，与改前逐字同值，下一帧实测接管
+                nativeTopMinDp = chromeAvoidDp,
                 onCardRect = { if (zoneRects[HudZone.TOP] != it) zoneRects[HudZone.TOP] = it }
             ) { HudTopZone(draft.visibleOrderOf(HudZone.TOP, visibleEntries), ctx) }
             HudZoneBox(
@@ -593,6 +495,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 area = baseArea,
                 shiftXPx = shiftXOf(HudZone.LEFT),
                 shiftYPx = shiftYOf(HudZone.LEFT),
+                nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
                 onCardRect = { if (zoneRects[HudZone.LEFT] != it) zoneRects[HudZone.LEFT] = it }
             ) {
                 HudDockZone(
@@ -608,6 +511,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 area = rightArea,
                 shiftXPx = shiftXOf(HudZone.RIGHT),
                 shiftYPx = shiftYOf(HudZone.RIGHT),
+                nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                 onCardRect = { if (zoneRects[HudZone.RIGHT] != it) zoneRects[HudZone.RIGHT] = it }
             ) {
                 HudDockZone(
@@ -623,6 +527,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 area = readoutArea,
                 shiftXPx = shiftXOf(HudZone.READOUT),
                 shiftYPx = shiftYOf(HudZone.READOUT),
+                nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                 onCardRect = { if (zoneRects[HudZone.READOUT] != it) zoneRects[HudZone.READOUT] = it }
             ) {
                 HudReadoutZone(
@@ -637,6 +542,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 area = baseArea,
                 shiftXPx = shiftXOf(HudZone.BOTTOM),
                 shiftYPx = shiftYOf(HudZone.BOTTOM),
+                nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                 onCardRect = { if (zoneRects[HudZone.BOTTOM] != it) zoneRects[HudZone.BOTTOM] = it }
             ) {
                 // drag = null：长按换栏是**录制页**的手势，这页改 y 用整枚拖动。
@@ -772,6 +678,125 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                         )
                     }
             )
+        }
+
+        // ---- 操作栏（**必须是根 Box 的最后一个子节点**，画在捕获层之上，任务 #79 任务一）
+        // 它排在捕获层之前时，那三颗 WotaChip 一个事件都收不到：捕获层 `matchParentSize()` 铺满整条安全区，
+        // 而操作栏的内容区（`safeDrawingPadding()` 之下、从挖孔那条边起算）正好落在这一片里，
+        // 触摸按 Compose 的命中序先给最上面那层带 pointerInput 的节点 ⇒ 每一指都被拖拽层吃掉。
+        // 挪到最顶之后点按归这三颗；而这条 Column 与 Row 本身**没有** pointerInput，所以只有三颗胶囊
+        // 自己的矩形会让拖拽失去那几像素。**反过来**：顶栏那两枚段原生对齐只让一枚 TopTopPad（4dp），
+        // 正好落在这三颗的矩形里 ⇒ 那两枚就拖不动了（把一个缺陷换成另一个，正是上一批没收尾的那件事）。
+        // 所以这里回报操作栏**窗口坐标下的下缘**，经 [chromeBandBottomDp] 换成安全区局部的避让量，
+        // 同时喂两处：顶栏原生对齐的下限（nativeTopMinDp，把整条顶栏推到操作栏之下）与 baseArea.topAvoidDp。
+        // 拖拽层原点一个字没动 ⇒ 安全区局部坐标那套算式（cellAtPointer/zoneAt/snapOf）不漂移。
+        // ⚠ 残留一条没修：用户把顶栏**整枚容器**拖进那三颗的矩形里，那一段像素仍然既点不到也拖不动
+        //   （clampZoneYRange 对 TOP 的纵向下限是 0，不读 topAvoidDp）。列进真机待验清单。
+        Column(
+            Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .safeDrawingPadding()
+                // 回报点挂在 safeDrawingPadding() **之内**、下面那圈 padding **之外**：这样量到的下缘
+                // 含操作栏自己的上下内边距（顶栏最低只许贴到它之下），不含系统栏与挖孔那两截
+                // （那两截安全区原点里已经扣过一次，再算就是双重让位——HudAreaDp 记着同一笔账）
+                .onGloballyPositioned { coords ->
+                    val bottom = coords.boundsInWindow().bottom.roundToInt()
+                    if (chromeBottomWinPx != bottom) chromeBottomWinPx = bottom
+                }
+                .padding(start = WotaSpace.s, end = WotaSpace.s, top = TopTopPad, bottom = WotaSpace.xs),
+            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
+            ) {
+                WotaChip(
+                    label = stringResource(R.string.hud_edit_back),
+                    selected = false,
+                    // 未保存就退出 = 整批丢弃草稿（prefs 一个字节都没写，录制页不受影响）
+                    onClick = onBack
+                )
+                WotaChip(
+                    label = stringResource(R.string.hud_edit_save),
+                    // 有未保存改动时这颗亮着，让"改了还没落盘"在视觉上有落点
+                    selected = draft != saved,
+                    onClick = {
+                        // commit() 的返回值就是"这次真落盘了吗"：没落成不许说"已保存"
+                        val ok = WotaSettings.setHudLayout(prefs, draft)
+                        saved = draft
+                        undoRaw = null
+                        resetArmed = false
+                        hint = if (ok) {
+                            context.getString(R.string.hud_edit_saved)
+                        } else {
+                            context.getString(R.string.hud_edit_save_failed)
+                        }
+                    }
+                )
+                WotaChip(
+                    label = stringResource(
+                        if (resetArmed) R.string.hud_edit_reset_confirm else R.string.hud_edit_reset
+                    ),
+                    selected = resetArmed,
+                    onClick = {
+                        if (!resetArmed) {
+                            resetArmed = true
+                            hint = context.getString(R.string.hud_edit_reset_arm_tip)
+                        } else {
+                            // 重置 = 删键（缺键就是默认表）；「撤销」靠的是把重置前那一份串原样写回来
+                            undoRaw = WotaSettings.hudLayout(prefs).encode()
+                            val ok = WotaSettings.clearHudLayout(prefs)
+                            draft = HudLayoutTable.default()
+                            saved = draft
+                            resetArmed = false
+                            hint = if (ok) {
+                                context.getString(R.string.hud_edit_reset_done)
+                            } else {
+                                context.getString(R.string.hud_edit_save_failed)
+                            }
+                        }
+                    }
+                )
+                undoRaw?.let { raw ->
+                    WotaChip(
+                        label = stringResource(R.string.hud_edit_undo),
+                        selected = false,
+                        onClick = {
+                            val back = HudLayoutTable.decode(raw)
+                            val ok = WotaSettings.setHudLayout(prefs, back)
+                            draft = back
+                            saved = back
+                            undoRaw = null
+                            hint = if (ok) {
+                                context.getString(R.string.hud_edit_undo_done)
+                            } else {
+                                context.getString(R.string.hud_edit_save_failed)
+                            }
+                        }
+                    )
+                }
+            }
+            Text(
+                text = stringResource(R.string.hud_edit_note),
+                style = WotaType.caption,
+                color = WotaColor.textLo
+            )
+            // 重叠只提示不禁止：把叠在一起的两枚容器点名，别静默
+            if (overlaps.isNotEmpty()) {
+                Text(
+                    // 名称这条 joinToString 的 lambda 不是 composable 上下文，所以标签走 context.getString
+                    //（真源仍是那五条资源，见 zoneLabelRes）
+                    text = overlaps.joinToString("；") { (a, b) ->
+                        context.getString(R.string.hud_edit_overlap_pair, context.getString(zoneLabelRes(a)), context.getString(zoneLabelRes(b)))
+                    },
+                    style = WotaType.caption,
+                    color = WotaColor.warn
+                )
+            }
+            hint?.let {
+                Text(text = it, style = WotaType.caption, color = WotaColor.accent)
+            }
         }
     }
 }

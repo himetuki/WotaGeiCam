@@ -664,6 +664,13 @@ data class HudRectDp(val left: Int, val top: Int, val right: Int, val bottom: In
     val width: Int get() = right - left
     val height: Int get() = bottom - top
     fun contains(x: Int, y: Int): Boolean = x in left until right && y in top until bottom
+
+    /**
+     * 与另一枚矩形的交叠判据（**唯一一处**，[overlappingZones] 与 #79 那条"顶栏有没有压在操作栏带里"
+     * 共读这一条）。边界相接（`a.right == b.left`）算**不**交叠：那两块像素没有重叠。
+     */
+    fun intersects(other: HudRectDp): Boolean =
+        left < other.right && other.left < right && top < other.bottom && other.top < bottom
 }
 
 data class HudPointDp(val x: Int, val y: Int)
@@ -705,6 +712,27 @@ fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: Hu
     val x = if (zone == HudZone.BOTTOM) -1 else xDp.coerceIn(0, clampZoneX(area, wDp))
     return ZonePlacement(x, yDp.coerceIn(yRange.first, yRange.last))
 }
+
+/**
+ * 「编辑控件」页那条**操作栏**在安全区局部坐标里压到多低（dp，任务 #79 的唯一算式）。
+ *
+ * 为什么要单独一条纯函数：这页整页只有一层拖拽捕获层，操作栏那三颗胶囊（返回/保存/恢复默认）
+ * 必须是**根 Box 的最后一个子节点**才收得到点按（排在捕获层之前时每一指都被拖拽层吃掉，一颗都点不动）。
+ * 挪到最上之后反过来压住了顶栏那两枚段——它们原生对齐只让一枚 [com.wotagei.cam.ui.TopTopPad]（4dp），
+ * 正好落在操作栏的矩形里，于是**点不到也拖不动**（缺陷换了个方向）。所以顶栏原生对齐那一支的下限
+ * 必须由这条算式给：操作栏在窗口坐标里的**下缘**减去安全区的**窗口原点**，就是它在安全区局部坐标里
+ * 压到的那条线（两个数都是组合期实测回报，没有任何按方向写死的避让常量，AGENTS 那条铁照守）。
+ *
+ * ⚠ 回报点必须挂在操作栏 `safeDrawingPadding()` **之内**、它那圈 `padding(top/bottom)` 之外的那条链上：
+ * 那样量到的下缘才是"顶栏内容最低能贴到哪"，含它自己的上下内边距、不含系统栏与挖孔那两截
+ * （那两截安全区原点里已经扣过一次，再算一次就是双重让位——[HudAreaDp] 的注释记着同一笔账）。
+ *
+ * 量不到（回报 0）时返回 **0** = "这一帧不推"，与改前逐字同值；下一帧实测接管。
+ * 不许返回负数：负 dp 喂进 `maxOf(TopTopPad, ·)` 虽然结果无害，但它会让"量到了多低"这件事
+ * 在日志里变成一个看起来像真值的假数（#69 那族"哨兵值参与算式"的坑）。
+ */
+fun chromeBandBottomDp(chromeBottomWinPx: Int, safeOriginYPx: Int, density: Float): Int =
+    pxToDp((chromeBottomWinPx - safeOriginYPx).coerceAtLeast(0).toFloat(), density)
 
 // ------------------------------------------------------------------ 格子（#74：容器内的固定格网）
 
@@ -1327,7 +1355,7 @@ fun overlappingZones(rects: Map<HudZone, HudRectDp>): List<Pair<HudZone, HudZone
         for (j in i + 1 until list.size) {
             val a = rects.getValue(list[i])
             val b = rects.getValue(list[j])
-            if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+            if (a.intersects(b)) {
                 out += list[i] to list[j]
             }
         }
