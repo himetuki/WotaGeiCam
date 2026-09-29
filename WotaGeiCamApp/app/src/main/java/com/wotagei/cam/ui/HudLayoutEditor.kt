@@ -531,7 +531,13 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     ) {
                         // ghost 与原位那一颗必须同档位（#70 B）：从竖 Dock 拖出来的那颗在容器内是紧凑档，
                         // ghost 若走全局档会长一号，"跟手的比洞大"看着就是漂移。归属容器由表说了算
-                        HudEntryItem(dragged, ghostCtx, tier = chipTierFor(draft.sourceZoneOf(dragged)))
+                        HudEntryItem(
+                            dragged, ghostCtx,
+                            tier = chipTierFor(draft.sourceZoneOf(dragged)),
+                            // 编辑页没有录制态，闸门恒开（ghost 拿不到事件是靠上面那层捕获层，
+                            // 不是靠这道闸门；#73 那条断链只在录制页底栏 Dock 有意义）
+                            clicksAccepted = true
+                        )
                     }
                 }
             }

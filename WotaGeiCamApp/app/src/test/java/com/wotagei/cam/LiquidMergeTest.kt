@@ -5,7 +5,10 @@ import com.wotagei.cam.ui.anim.MergePlan
 import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
 import com.wotagei.cam.ui.anim.MotionMode
+import com.wotagei.cam.ui.anim.chipClicksAccepted
 import com.wotagei.cam.ui.anim.chipTravelPxOf
+import com.wotagei.cam.ui.anim.dragOwnedByRecordKey
+import com.wotagei.cam.ui.anim.mergeProgressWithHook
 import com.wotagei.cam.ui.hudPerRowFor
 import com.wotagei.cam.ui.hudRoomDp
 import com.wotagei.cam.ui.hudStripHeightDp
@@ -420,6 +423,78 @@ class LiquidMergeTest {
         assertTrue(360f - 66f - BottomBarDp - 114f > 0f)
         // 读数块自己那条带：360 − 顶栏 44 − 底栏 72 = 244dp，最满的一档也装得下（不需要滚动就不裁字）
         assertTrue(hudStripHeightDp(7, 2, 1.2f) <= 360f - TopBarDp - BottomBarDp)
+    }
+
+    // ---------- ⑦ #73：取证钩子的上游覆盖 + 吸收期命中权交接 ----------
+
+    /**
+     * 钩子只能作为 [mergeProgressOf] 这条桥**上游**的一个可选覆盖。
+     * 三条断言各钉一种退化：
+     * - 钉值顶掉动画值 → 红在第一条（把 `pinned ?: animatedValue` 写反或忽略 pinned 就红）；
+     * - 钩子不许漏进 PLAIN 档 → 红在第二条（把 [mergeProgressWithHook] 实现成
+     *   `pinned ?: mergeProgressOf(...)`，PLAIN 也会出现中间态，S3-1 那条"确实消失"就白写了）；
+     * - 默认路径（pinned = null）逐字不变 → 红在第三、四条（动画值与开关态两种喂法各一条）。
+     */
+    @Test
+    fun hookOverrideEntersOnlyUpstreamOfTheBridge() {
+        val fluent = mergePlanFor(MotionMode.FLUENT)
+        val plain = mergePlanFor(MotionMode.PLAIN)
+        // ① 动画档：钉值赢过动画当前值（哪怕录制态还是 false，画面也该停在半融）
+        assertEquals(0.75f, mergeProgressWithHook(fluent, false, 0f, 0.75f), 0.0001f)
+        assertEquals(0.5f, mergeProgressWithHook(fluent, true, 0.2f, 0.5f), 0.0001f)
+        // ② PLAIN 档：桥自己的 `plan.animated` 分支必须把钉值一起吃掉
+        assertEquals(0f, mergeProgressWithHook(plain, false, 0.3f, 0.9f), 0.0001f)
+        assertEquals(1f, mergeProgressWithHook(plain, true, 0.3f, 0f), 0.0001f)
+        // ③ 没钩子（null）时与不接钩子的写法逐字同一：动画值优先、没有动画值才退开关态
+        assertEquals(0.2f, mergeProgressWithHook(fluent, true, 0.2f, null), 0.0001f)
+        assertEquals(1f, mergeProgressWithHook(fluent, true, null, null), 0.0001f)
+        assertEquals(0f, mergeProgressWithHook(fluent, false, null, null), 0.0001f)
+        // ④ 钉 0 是合法档（两颗回原位、且不收点击），所以它不能被当成"没钉"
+        assertEquals(0f, mergeProgressWithHook(fluent, false, 0.4f, 0f), 0.0001f)
+    }
+
+    /**
+     * 吸收期那两颗**不可命中**的判据（#73 第 2 件第一刀）。
+     *
+     * 断的不是"alpha 到 0"而是"位移一开始就断"，这才是 #71b 敢把位移从 10.96dp 放开到 68.5dp 的前提：
+     * 半融那一帧那颗明明还看得见（chipAlpha > 0），却已经点不动了。
+     * 红法：把 `progress <= 0f` 改成 `chipAlpha(progress) > 0f` 之类"看得见了才收点击"的写法，
+     * p=0.2 这一条立刻红；改成恒 `true`（今天的行为）也一样红。
+     */
+    @Test
+    fun chipsStopAcceptingClicksAsSoonAsAbsorptionStarts() {
+        assertTrue("进度 0 = 原位，正常收点击", chipClicksAccepted(0f))
+        assertFalse("位移刚起步就不许再收点击", chipClicksAccepted(0.0001f))
+        assertFalse("半融那一帧不可点（此时它视觉上还在：alpha 还没到 0）", chipClicksAccepted(0.2f))
+        assertFalse("终点态也不可点（键正被两颗压着）", chipClicksAccepted(1f))
+        // 与淡出曲线对照：0.2 处 alpha 还远大于 0，说明"不可点"早于"看不见"，不是同一条判据
+        assertTrue(LiquidMerge.chipAlpha(0.2f) > 0.5f)
+        assertTrue("越界值也当已吸收（动画收尾前的 overshoot 不许把点击放回来）", !chipClicksAccepted(1.4f))
+        // 反向过冲（LIQUID 弹簧从 1 回到 0 会甩到负值）按"已回原位"对待：放行点击是安全的——
+        // 那一刻两颗在原生位置**之外**（chipTravelPx 带符号，负进度只会把它推离录制键），不可能盖住键
+        assertTrue("负过冲 = 已回到原位之外，恢复收点击", chipClicksAccepted(-0.01f))
+    }
+
+    /**
+     * 底板那枚长按换栏探测器落在录制键上时必须**不接管**（#73 第 2 件第三刀）。
+     *
+     * 坐标系是"相对底板左上角"，所以用例特意把 CANVAS 原点挪到 (200, 60)：
+     * 红法①把 `- canvasLeft` 那两笔减法删掉 → 落在键内那条断言红（窗口坐标被当本地坐标比）；
+     * 红法②把"量不到就返回 false"那条守卫删掉 → 未测量那条断言红（首帧所有字段都是 0，
+     *   (0,0) 会被算成"在键里"，于是首帧长按永远换不了栏）。
+     */
+    @Test
+    fun longPressInsideTheRecordKeyIsLeftToTheButton() {
+        val scene = MergeScene()
+        scene.put(MergeScene.CANVAS, 200f, 60f, 216f, 60f)
+        scene.put(MergeScene.RECORD, 300f, 65f, 50f, 50f)
+        // 键在底板本地坐标里就是 [100,5]–[150,55]
+        assertTrue("正中：这一指归键", dragOwnedByRecordKey(scene, 125f, 30f))
+        assertTrue("左上角点上也算键内（边界含）", dragOwnedByRecordKey(scene, 100f, 5f))
+        assertFalse("左边差一点：底板接管", dragOwnedByRecordKey(scene, 99f, 30f))
+        assertFalse("下边差一点：底板接管", dragOwnedByRecordKey(scene, 125f, 56f))
+        assertFalse("底板最左上的缩略图那一片：正常换栏入口", dragOwnedByRecordKey(scene, 20f, 30f))
+        assertFalse("首帧还没量到键的矩形 → 退回旧行为（别凭空拒绝手势）", dragOwnedByRecordKey(MergeScene(), 0f, 0f))
     }
 
     private companion object {

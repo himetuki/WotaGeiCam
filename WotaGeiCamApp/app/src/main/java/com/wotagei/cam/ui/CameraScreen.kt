@@ -109,6 +109,7 @@ import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.anim.MergeDebugBadge
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.dialog.CurveSheet
 import com.wotagei.cam.ui.dialog.evText
@@ -819,6 +820,11 @@ fun CameraScreen(
                 onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
                 onHeightChanged = { if (topBarH != it) topBarH = it }
             )
+            // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
+            // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
+            // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。
+            // 位置只吃 safeDrawingPadding()（贴边避让交系统），不写任何方向常量。
+            MergeDebugBadge(Modifier.align(Alignment.TopCenter).padding(top = WotaSpace.xs))
             // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
             // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
             // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
