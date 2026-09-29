@@ -62,15 +62,19 @@ class HudLayoutGridTest {
         assertEquals(GridCell(0, 1), left[e(CamPill.MONITOR)])
         assertEquals(GridCell(0, 2), left[e(CamPill.CURVE)])
         assertEquals(GridCell(0, 3), left[e(CamPill.FLASH)])
-        // 右 Dock：S2-2 B 那条「姿态仪 + 音量表并排」必须原样落进格子（同一行两列），
-        // 否则 #70 那笔省 75dp 的账在格网模型里就丢了
+        // 右 Dock：S2-2 B 那条「姿态仪 + 音量表并排」必须原样落进格子——**同一枚格子的两颗**（#74 后果修复）。
+        // 期望值重算的理由（不是为了让它绿）：上一批的默认是 LEVEL(0,0) + VOLUME(1,0)，均匀 pitch 之下
+        // 第二列也按姿态仪的 54dp 撑 ⇒ 底板 120dp，把用户要的"更窄"做反了。现在配对共格、右 Dock 单列，
+        // 底板回到 r11 实测的 94dp；行号与上一批逐颗相同（0..4），所以省下的那 ≈75dp 一分没丢。
         val right = cells(HudZone.RIGHT)
         assertEquals(GridCell(0, 0), right[e(CamPill.LEVEL)])
-        assertEquals(GridCell(1, 0), right[e(CamPill.VOLUME)])
+        assertEquals("音量表与姿态仪**共用第 0 行第 0 列**（配对同格 ⇒ 单列网格）", GridCell(0, 0), right[e(CamPill.VOLUME)])
         assertEquals(GridCell(0, 1), right[e(CamPill.BT)])
         assertEquals(GridCell(0, 2), right[e(CamPill.ZOOM)])
         assertEquals(GridCell(0, 3), right[e(CamPill.FOCUS)])
         assertEquals(GridCell(0, 4), right[e(CamPill.STAB)])
+        // 这一枚容器的默认形态**只有一列**：任何一颗都不许落在第 1 列
+        assertEquals("右 Dock 默认是单列网格（有第二列就是把宽度账做反的那一步）", setOf(0), right.values.map { it.col }.toSet())
         // 读数块：一行 3 颗 ⇒ 7 颗排 3 + 3 + 1
         val readout = cells(HudZone.READOUT)
         assertEquals(GridCell(0, 0), readout[h(HudItem.SHUTTER)])
@@ -153,15 +157,18 @@ class HudLayoutGridTest {
             HudLayoutTable.default().moveEntryTo(e(CamPill.BT), HudZone.TOP, 1, planAll).orderOf(HudZone.RIGHT)
         )
         // 逐颗点名（手抄期望值，删掉 placeEntryAt 里那一步 pinned 就会红）
+        // ⚠ 期望值按 #74 后果修复后的新默认**重算**过：配对那两颗现在共用 (0,0)（上一批是 (0,0)+(1,0)），
+        // 行号仍是钉住之前那一档（蓝牙占第 1 行，抽走之后第 1 行留空）——断言一条没放松
         assertEquals(GridCell(0, 0), after[e(CamPill.LEVEL)])
-        assertEquals(GridCell(1, 0), after[e(CamPill.VOLUME)])
+        assertEquals("音量表与姿态仪仍在同一格（抽走蓝牙不该把配对拆开）", GridCell(0, 0), after[e(CamPill.VOLUME)])
         assertEquals("变焦不许因为蓝牙被抽走而上移一行", GridCell(0, 2), after[e(CamPill.ZOOM)])
         assertEquals("对焦不许上移", GridCell(0, 3), after[e(CamPill.FOCUS)])
         assertEquals("防抖不许上移", GridCell(0, 4), after[e(CamPill.STAB)])
         // 屏幕坐标同样不变，且期望值是**手算**的 px（格长按 50×30 px 手摆）：
         // 只写"改前与改后相等"是同源自比，写出坐标本身才测得出"格子被重排了但两边一起错"
+        // 配对两颗同一格 ⇒ 屏幕坐标也是同一个点（格内的左右偏移由渲染层按实测宽算，不进这张表）
         assertEquals(HudPointPx(0, 0), cellOffsetPx(after.getValue(e(CamPill.LEVEL)), pitch))
-        assertEquals(HudPointPx(50, 0), cellOffsetPx(after.getValue(e(CamPill.VOLUME)), pitch))
+        assertEquals(HudPointPx(0, 0), cellOffsetPx(after.getValue(e(CamPill.VOLUME)), pitch))
         assertEquals(HudPointPx(0, 60), cellOffsetPx(after.getValue(e(CamPill.ZOOM)), pitch))
         assertEquals(HudPointPx(0, 90), cellOffsetPx(after.getValue(e(CamPill.FOCUS)), pitch))
         assertEquals(HudPointPx(0, 120), cellOffsetPx(after.getValue(e(CamPill.STAB)), pitch))
@@ -366,8 +373,8 @@ class HudLayoutGridTest {
             assertTrue("${z.key} 段重置后不许留格子", HudLayoutTable.default().cellsOf(z).isEmpty())
         }
         assertEquals(
-            "重置后音量表回到第 1 列第 0 行",
-            GridCell(1, 0),
+            "重置后音量表回到**配对那一格** (0,0)（#74 后果修复：上一批的默认是 (1,0)，那一档把底板撑到 120dp）",
+            GridCell(0, 0),
             HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }[e(CamPill.VOLUME)]
         )
     }
