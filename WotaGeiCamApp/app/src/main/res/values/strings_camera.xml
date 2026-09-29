@@ -164,8 +164,11 @@
     <string name="hud_edit_reset_done">已恢复默认位置</string>
     <string name="hud_edit_undo">撤销</string>
     <string name="hud_edit_undo_done">已撤销，恢复前那一份位置回来了</string>
-    <string name="hud_edit_note">按住容器拖 = 整枚挪位；按住某颗控件拖 = 换序或拖到别的容器。重叠不禁止，只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
+    <string name="hud_edit_note">按住容器拖 = 整枚挪位（底栏只认上下两栏，横向永远跟着可视区居中）；按住某颗控件拖 = 换序或拖到别的容器。重叠不禁止，只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
     <string name="hud_edit_overlap_pair">%1$s 与 %2$s 的外接矩形叠在一起了（不拦，只是提示会叠字）</string>
+    <!-- 底栏那枚 Dock 只持久化 y：横向永远由安全区居中决定（快门中心＝可视窗口中心）。横拖一把之后必须给话，不能默默吞掉 -->
+    <string name="hud_edit_bottom_x_locked">底栏只认上下两栏：横向永远跟着可视区居中，所以刚才那一下横拖没有存进位置表</string>
+    <string name="hud_edit_save_failed">没能写进设置（保存失败），这里显示的仍是旧位置</string>
     <string name="hud_zone_top">顶栏胶囊组</string>
     <string name="hud_zone_left">左竖 Dock</string>
     <string name="hud_zone_right">右竖 Dock</string>

@@ -353,36 +353,40 @@ class LiquidMergeTest {
 
     /**
      * 用例入参必须与调用点**同一个表达式**算出来的可用宽（审查 S3-5）。
-     * 调用点：`hudPerRowFor(hudItems.size, fontScale, hudRoomDp(screenWidthDp, VisibleEndInset))`。
-     * 判据本该是「3 颗的行宽 ≤ 窗口宽 − 右缘避让 34 − 块内边距 12」，旧写法比的是「行宽 + 24 ≤ 窗口宽」，
-     * 少扣 22dp。反面对照用 115%（1.15f）：120% 在 360dp 窗口上只是**恰好**被判到 2 颗——
-     * `3×1.2f` 换算成 Float 是 108.00000763，三颗加行距加余量得 360.00003 > 360，
-     * 差 4×10⁻⁵ dp 才没取到 3 颗，那是浮点舍入给的运气，不是设计。
+     * 调用点：`hudPerRowFor(readoutCount, fontScale, hudRoomDp(safeW, HudEdgePad.value))`——
+     * `safeW` 是套了 `safeDrawingPadding()` 之后那层的**实测宽**（本机横屏 766dp、竖屏 360dp），
+     * `HudEdgePad` 是读数块 `padding(end=)` 那枚 8dp 设计留白（与左竖 Dock 起始边同一枚令牌）。
+     * #68 之前这里喂的是 `hudRoomDp(screenWidthDp, VisibleEndInset)`：那笔 34dp 是按方向写死的假避让，
+     * 竖屏也跟着扣（白退一档），横屏则与外层 safeDrawingPadding 重复扣一次。
+     * 反面对照用 115%（1.15f）：直接喂窗口宽就把 8dp 留白与 24dp 估算余量一起吃掉，会多取一颗。
      */
     @Test
     fun threePerRowNeedsSafetyMargin() {
-        val landscape = hudRoomDp(800f, EndInsetDp)   // 754dp
-        val portrait = hudRoomDp(360f, EndInsetDp)    // 314dp
-        assertEquals(754f, landscape, 0.001f)
-        assertEquals(314f, portrait, 0.001f)
+        val landscape = hudRoomDp(766f, EdgePadDp)   // 746dp（本机横屏安全区实测宽 − 8 − 12）
+        val portrait = hudRoomDp(360f, EdgePadDp)     // 340dp（竖屏侧边不让位，只扣留白与内边距）
+        assertEquals(746f, landscape, 0.001f)
+        assertEquals(340f, portrait, 0.001f)
         // 横屏：一行 3 颗（100% 282dp / 120% 336dp）+ 24dp 余量都装得下
         assertEquals(3, hudPerRowFor(3, 1f, landscape))
         assertEquals(3, hudPerRowFor(3, 1.2f, landscape))
-        // 竖屏 100%：306 ≤ 314 → 3 颗（块宽 294dp，右缘正好让开不可视带）
+        // 竖屏 100%：行宽 282 + 余量 24 = 306 ≤ 340 → 3 颗（块宽 294 + 留白 8 = 302 ≤ 360 安全区）
         assertEquals(3, hudPerRowFor(3, 1f, portrait))
-        // 竖屏 115%：3 颗要 346.5dp 的位（行宽 322.5 + 余量），可用只有 314 → 退到 2 颗
+        // 竖屏 110%：3×99=297 加两条行距 12 → 309，309 + 24 = 333 ≤ 340 → 仍取 3 颗（旧写法只剩 314，这一档白退一级）
+        assertEquals(3, hudPerRowFor(3, 1.1f, portrait))
+        // 竖屏 115%：3 颗要 322.5 + 24 = 346.5 > 340 → 退到 2 颗
         assertEquals(2, hudPerRowFor(3, 1.15f, portrait))
         assertEquals(2, hudPerRowFor(3, 1.2f, portrait))
         // 极窄（分屏 / 大字模式）：退到一行 1 颗，宁可高也不裁字
-        assertEquals(1, hudPerRowFor(3, 1.2f, hudRoomDp(240f, EndInsetDp)))
-        // 反面对照（留档 S3-5 的成因）：同一档字体、直接喂 screenWidthDp 就会错取 3 颗/行，
-        // 块宽 322.5 + 12 内边距 + 34 让位 = 368.5dp > 360dp，最右那颗的副标签被裁
+        assertEquals(1, hudPerRowFor(3, 1.2f, hudRoomDp(240f, EdgePadDp)))
+        // 反面对照（留档 S3-5 的成因）：同一档字体、直接喂 screenWidthDp 就会错取 3 颗/行
+        // （346.5 ≤ 360），块宽 334.5 + 留白 8 = 342.5 离 360 只剩 17.5dp——24dp 估算余量被吃光，
+        // 而字宽是"汉字 1em / 拉丁 0.6em"的算术估计，偏一点就从右缘画出去
         assertEquals(3, hudPerRowFor(3, 1.15f, 360f))
     }
 
     @Test
     fun perRowNeverExceedsItemCount() {
-        val landscape = hudRoomDp(800f, EndInsetDp)
+        val landscape = hudRoomDp(766f, EdgePadDp)
         assertEquals(1, hudPerRowFor(1, 1f, landscape))
         assertEquals(2, hudPerRowFor(2, 1f, landscape))
         // 一颗都没开时返回 1（chunked(1) 对空表不产生行，perRow 只需保证 ≥1 不炸）
@@ -418,7 +422,7 @@ class LiquidMergeTest {
         const val RecordPx = 50f  // WotaHit.recordTouch
         const val GapPx = 12f     // WotaSpace.m
         const val PadPx = 8f      // WotaSpace.s
-        const val EndInsetDp = 34f // CameraScreen.VisibleEndInset（§58 实测的横屏右缘不可视带）
+        const val EdgePadDp = 8f   // HudLayer.HudEdgePad（WotaSpace.s）：读数块 padding(end=) 那枚设计留白
         const val TopBarDp = 44f   // CameraScreen.TopBarSpace 首帧兜底
         const val BottomBarDp = 72f // CameraScreen.BottomBarSpaceFallback（50 + 5×2 + 6×2）
     }

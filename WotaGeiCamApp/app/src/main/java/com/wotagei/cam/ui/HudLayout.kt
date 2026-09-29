@@ -9,11 +9,12 @@ import kotlin.math.roundToInt
  * 「编辑控件」页与录制页共用的位置模型（docs/plan/13 第 5、8 条 + 用户定的两级模型）。
  *
  * ## 两级，而不是每颗一个坐标
- * 可拖动的单位是 **5 枚容器**（[HudZone]），每枚一份 (x, y)；容器**内**的条目可以拖拽换序，
- * 也可以挪到另一枚容器。这样「所有控件都能拖」成立，同时保住两件事：
+ * 可拖动的单位是 **5 枚容器**（[HudZone]），每枚一份 (x, y)——**底栏只有 y 一轴**（x 恒哨兵）；
+ * 容器**内**的条目可以拖拽换序，也可以挪到另一枚容器。这样「所有控件都能拖」成立，同时保住两件事：
  * - 悬浮 Dock 的观感（底板仍只包住内容，不是通栏条）；
  * - 「快门中心＝可视窗口水平中心」：底栏那两枚等宽槽的算式（[com.wotagei.cam.ui.anim.MergeSlot]）
- *   一行没动，x=0 档仍是居中基准，用户把整枚 Dock 搬走时搬的是「已经居中的那一整块」。
+ *   一行没动，而它的 x 永远是哨兵 ⇒ 横向落位始终由 `fillMaxWidth` + 居中决定（父区域就是套了
+ *   `safeDrawingPadding()` 的那块，挖孔换边时中心跟着换），用户搬的只是"已经居中的那一整块"的上下。
  *
  * 明确**不做**（留给后续批次，见 B4 交付报告）：跨容器的自由坐标（每颗一份 x,y）、改尺寸、改层级。
  * 重叠只提示不禁止。
@@ -46,7 +47,10 @@ enum class HudZone(val key: String, val axis: HudAxis) {
     /** 右下常驻读数块（六项第 4 条搬到录制键右侧那一块） */
     READOUT("D", HudAxis.GRID),
 
-    /** 底栏 Dock：缩略图 + 快门 + 镜头那颗；它的 y 就是第 8 条的「上栏/下栏」 */
+    /**
+     * 底栏 Dock：缩略图 + 快门 + 镜头那颗。
+     * 它的 y 就是第 8 条的「上栏/下栏」，**x 不进表**（恒哨兵 ⇒ 横向永远重新居中，见 [normalizedPosOf]）。
+     */
     BOTTOM("B", HudAxis.ROW);
 
     companion object {
@@ -123,14 +127,16 @@ enum class HudEntryKind { PILL, READOUT }
 /**
  * 一枚容器的位置。
  *
- * 两轴**一起**是绝对值、一起是默认（[isDefault]）：编辑页一次拖动必然同时给出 x 与 y，
- * 而「一轴绝对、一轴原生」只能来自手改 prefs，那种半吊子状态一律按未编辑处理（[HudLayoutTable.normalize] 会抹平）。
+ * 默认态 = **两轴都是哨兵**。"一轴绝对 + 一轴哨兵"里只有**底栏**是合法状态：它的 x 恒为哨兵
+ * （横向永远跟着可视窗口居中，[clampZonePos] 与 [HudLayoutTable.normalize] 两处都把它抹成哨兵），
+ * 长按换栏只写 y。其余四枚容器的半吊子串只能来自手改 prefs，一律按未编辑处理（[HudLayoutTable.normalize] 会抹平）。
  *
  * 绝对值是**容器左上角相对 root 安全区左上角**的 dp 偏移，不是相对原生对齐点的偏移——
  * 存绝对值才谈得上「钳进安全区」，也才让编辑页与录制页对同一个数给出同一个视觉位置。
  */
 data class ZonePlacement(val xDp: Int, val yDp: Int) {
-    val isDefault: Boolean get() = xDp < 0 || yDp < 0
+    /** 两轴都没绝对值 = 用户没把这枚容器拖离过定稿位置（底栏的 y-only 落位**不是**默认态） */
+    val isDefault: Boolean get() = xDp < 0 && yDp < 0
 
     companion object {
         val DEFAULT = ZonePlacement(-1, -1)
@@ -159,7 +165,13 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     fun visibleOrderOf(zone: HudZone, visible: Set<HudEntry>): List<HudEntry> =
         orderOf(zone).filter { it in visible }
 
-    /** 写一轴绝对位置（另一轴同时改，见 [ZonePlacement]）；越界钳制由调用方先做 */
+    /**
+     * 写一枚容器的绝对位置。
+     *
+     * 底栏那枚**只该传 y**（x 传哨兵 -1，见 [normalizedPosOf]）：写入方是录制页的长按换栏与编辑页的整枚拖动，
+     * 两处都只搬上下栏，写进绝对 x 就等于把快门横向钉死。越界钳制由调用方先做（[clampZonePos] 会把
+     * 底栏的 x 强制抹回哨兵，调用方就算传了真值也存不进去）。
+     */
     fun withZonePos(zone: HudZone, xDp: Int, yDp: Int): HudLayoutTable {
         val cur = zones[zone] ?: ZoneState(ZonePlacement.DEFAULT, emptyList())
         return copy(zones = zones + (zone to cur.copy(pos = ZonePlacement(xDp, yDp))))
@@ -216,12 +228,24 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
         }
         val nextZones = LinkedHashMap<HudZone, ZoneState>()
         HudZone.ALL.forEach { z ->
-            val base = zones[z]
-            // 半吊子位置（一轴绝对一轴哨兵）按未编辑处理，见 ZonePlacement 的说明
-            val pos = base?.pos?.takeIf { it.xDp >= 0 && it.yDp >= 0 } ?: ZonePlacement.DEFAULT
-            nextZones[z] = ZoneState(pos, placed.getValue(z).toList())
+            nextZones[z] = ZoneState(normalizedPosOf(z), placed.getValue(z).toList())
         }
         return HudLayoutTable(version, nextZones)
+    }
+
+    /**
+     * 位置段的合规化（[normalize] 的其中一步，单独露出来给用例直接打）：
+     * - **底栏只认 y**：绝对 x 一律抹回哨兵。落一次位就把 x 写成绝对值会把"快门跟随可视中心"冻住
+     *   （90↔270 翻转与横竖换档都不再重新居中，B4 审查 S1 那条设计缺陷），所以这里连存量脏数据一起治；
+     * - 其余四枚：一轴绝对、一轴哨兵的半吊子（只能来自手改 prefs）按未编辑处理，见 [ZonePlacement] 的说明。
+     */
+    fun normalizedPosOf(zone: HudZone): ZonePlacement {
+        val raw = posOf(zone)
+        return if (zone == HudZone.BOTTOM) {
+            if (raw.yDp >= 0) ZonePlacement(-1, raw.yDp) else ZonePlacement.DEFAULT
+        } else {
+            if (raw.xDp >= 0 && raw.yDp >= 0) raw else ZonePlacement.DEFAULT
+        }
     }
 
     /**
@@ -302,20 +326,19 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
 // ------------------------------------------------------------------ 越界钳制与落位（纯函数）
 
 /**
- * 安全区与避让量，单位全 dp。
+ * 安全区与两条实测避让量，单位全 dp。
  *
- * - [width]/[height]：root 容器套上 `safeDrawingPadding()` 之后的实测尺寸（不是 `screenWidthDp`）；
- * - [endInsetDp]：喂进来的是 `VisibleEndInset`，**只有横屏非 0**（两页都按方向取，与录制页同一条判据）。
- *   它依据的"可视右缘 1532"已被 2026-09-29 真机复测推翻（那条不可视带在**左**短边，且外层
- *   `safeDrawingPadding()` 已经避开），取值与方向等用户确认后统一改，见 docs/plan/13 §九·补。
- *   这一轮它只参与"钳制上限"的算术，不参与任何新增落位。
+ * - [width]/[height]：root 容器套上 `safeDrawingPadding()` 之后的**实测尺寸**（不是 `screenWidthDp`）。
+ *   它就是位置表 (x, y) 的坐标参考：挖孔在哪条边，系统就把那条边让掉，于是这里**不需要**任何
+ *   "按方向补一笔右缘让位"的字段——这里曾有 `endInsetDp`（喂的是写死的 `VisibleEndInset = 34.dp`），
+ *   2026-09-29 真机复测证明那条"可视右缘 1532"是伪值、68px 让位来自会换边的挖孔，字段已删净
+ *   （docs/plan/13 §九·补）。安全区本身已经把避让算进 [width]，再扣一次就是双重让位。
  * - [topAvoidDp]/[bottomAvoidDp]：顶栏与底栏的**实测**避让量（S2-1 / S2-2 C 那两路回报），
  *   不是新写的魔法数。编辑页的这两个值是它自己那条操作栏与底栏 Dock 实占带的高。
  */
 data class HudAreaDp(
     val width: Int,
     val height: Int,
-    val endInsetDp: Int,
     val topAvoidDp: Int,
     val bottomAvoidDp: Int
 )
@@ -330,11 +353,12 @@ data class HudRectDp(val left: Int, val top: Int, val right: Int, val bottom: In
 data class HudPointDp(val x: Int, val y: Int)
 
 /**
- * 横向可放区间 `[0, 可视右缘 − 容器宽]`；可视右缘 = 安全区宽 − [HudAreaDp.endInsetDp]。
- * 容器比可视区还宽（120% 文本 + 极窄分屏）时上限夹成 0，也就是贴左放，**不许为负**。
+ * 横向可放区间 `[0, 安全区宽 − 容器宽]`。安全区宽已经是"套上 `safeDrawingPadding()` 之后"的量，
+ * 挖孔让掉的边在里面扣过了，所以这里不再按方向另扣一笔（旧写法扣 34dp，两个横屏姿态里必错一次）。
+ * 容器比安全区还宽（120% 文本 + 极窄分屏）时上限夹成 0，也就是贴左放，**不许为负**。
  */
 fun clampZoneX(area: HudAreaDp, widthDp: Int): Int =
-    (area.width - area.endInsetDp - widthDp).coerceAtLeast(0)
+    (area.width - widthDp).coerceAtLeast(0)
 
 /**
  * 纵向可放区间。
@@ -353,11 +377,17 @@ fun clampZoneYRange(zone: HudZone, area: HudAreaDp, heightDp: Int): IntRange {
     return if (hi < lo) 0..(area.height - heightDp).coerceAtLeast(0) else lo..hi
 }
 
-/** 绝对位置钳进安全区（尺寸未测到时传 0，等价于「只保证左上角不越界」） */
+/**
+ * 绝对位置钳进安全区（尺寸未测到时传 0，等价于「只保证左上角不越界」）。
+ *
+ * **底栏的 x 在这里就被抹成哨兵**：它只能上下搬（第 8 条的上栏/下栏），写入方就算把实测左缘换算成
+ * 绝对 x 送进来也存不进表——那会让快门从此不再跟随可视中心（90↔270 翻转、横竖换档都不重新居中，
+ * B4 审查 S1 那条）。[HudLayoutTable.normalizedPosOf] 在读表时同样抹一次，把存量脏数据一起治掉。
+ */
 fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: HudAreaDp): ZonePlacement {
-    val maxX = clampZoneX(area, wDp)
     val yRange = clampZoneYRange(zone, area, hDp)
-    return ZonePlacement(xDp.coerceIn(0, maxX), yDp.coerceIn(yRange.first, yRange.last))
+    val x = if (zone == HudZone.BOTTOM) -1 else xDp.coerceIn(0, clampZoneX(area, wDp))
+    return ZonePlacement(x, yDp.coerceIn(yRange.first, yRange.last))
 }
 
 /**
@@ -432,7 +462,7 @@ private fun clusterRows(items: List<HudRectDp>): List<List<HudRectDp>> {
 /**
  * 底栏 Dock 的两档 y（用户第 8 条：长按收起两颗 → 上下拖 → 松手落「上栏 / 下栏」）。
  *
- * **下栏 = 定稿位置**（底边贴安全区底再让开 [BottomBarOuterPadDp]），
+ * **下栏 = 定稿位置**（底边贴安全区底再让开 [bottomPadDp]，调用方传 `BottomBarOuterPadV`），
  * **上栏 = 下栏再上一整排**，间距一枚 [gapDp]（调用方传令牌 `WotaSpace.s`，这里不散写观感值）：
  * `上栏 = 安全区高 − 下边距 − 排高 − 排高 − gap`。全程只有实测高与令牌，没有机型数值。
  */

@@ -252,8 +252,28 @@ class HudLayoutDragTest {
     }
 
     @Test
+    fun bottomDockKeepsItsYWhenItNeverHasAnX() {
+        // 底栏的落位是"y 绝对 + x 哨兵"这一支。三个退化都要在这里红：
+        // ① isDefault 若还是"任一轴哨兵就算默认"，那 (-1, 282) 会被当成没拖过 ⇒ 快门回到底边、上栏白搬；
+        // ② normalize/decode 若把"一轴绝对"整段抹平，重启后同样回默认；
+        // ③ moveEntryTo 重建 ZoneState 时若把 pos 抄成 DEFAULT，挪一颗条目就把落位丢了。
+        val placed = HudLayoutTable.default().withZonePos(HudZone.BOTTOM, -1, 282)
+        assertFalse("底栏 y-only 落位不是默认态", placed.posOf(HudZone.BOTTOM).isDefault)
+        assertEquals(ZonePlacement(-1, 282), placed.posOf(HudZone.BOTTOM))
+        val moved = placed.moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1)
+        assertEquals("挪条目不许顺手丢掉底栏的 y", ZonePlacement(-1, 282), moved.posOf(HudZone.BOTTOM))
+        val back = HudLayoutTable.decode(placed.encode())
+        assertEquals("编解码一轮之后 y 还在、x 仍是哨兵", placed.posOf(HudZone.BOTTOM), back.posOf(HudZone.BOTTOM))
+        // 其余四枚容器不吃这个特例：半吊子仍然按未编辑处理（见 HudLayoutCodecTest）
+        val half = HudLayoutTable.default().withZonePos(HudZone.LEFT, -1, 90)
+        assertTrue("左 Dock 只有一轴绝对仍算没拖过", HudLayoutTable.decode(half.encode()).posOf(HudZone.LEFT).isDefault)
+        once(moved, "底栏 y-only")
+    }
+
+    @Test
     fun rightDockBandEatsReadoutHeightAndClosesWhenItIsEmpty() {
-        val area = HudAreaDp(width = 800, height = 360, endInsetDp = 34, topAvoidDp = 44, bottomAvoidDp = 72)
+        // 横屏安全区实测宽 766（不是根容器 800）：与 HudLayoutClampTest 那两个 area 同一个来源
+        val area = HudAreaDp(width = 766, height = 360, topAvoidDp = 44, bottomAvoidDp = 72)
         // 默认 3 读数一行 ≈ 42dp：右 Dock 的下界从 72 抬到 114
         assertEquals(114, areaForRightDock(area, 42).bottomAvoidDp)
         // 读数全关（块回报 0）时那条缝必须收回去，回到只有底栏那一截

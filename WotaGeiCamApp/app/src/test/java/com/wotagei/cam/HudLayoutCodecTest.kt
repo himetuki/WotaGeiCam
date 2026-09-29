@@ -196,6 +196,28 @@ class HudLayoutCodecTest {
     }
 
     @Test
+    fun legacyBottomXOverrideIsWipedWhenReading() {
+        // r11 那版录制页的 onDrop 会把"当前实测左缘"写成绝对 x（纯长按不动也会写，此后快门再也不跟
+        // 可视中心走）。存量 prefs 里就有这种串，读表时必须连 x 一起抹掉、只留 y。
+        // 这条是真断言：normalize 里那个 BOTTOM 特例一旦删掉，第一个 assertEquals 就红
+        val t = HudLayoutTable.decode("v1;T,-1,-1;L,-1,-1;R,-1,-1;D,-1,-1;B,120,282,P2")
+        assertEquals(ZonePlacement(-1, 282), t.posOf(HudZone.BOTTOM))
+        assertFalse(
+            "抹掉 x 之后底栏落位仍不许算默认（否则长按搬到上栏等于白搬）",
+            t.posOf(HudZone.BOTTOM).isDefault
+        )
+        // y 也是哨兵（没拖过）时不许凭空造出一个 0
+        val untouched = HudLayoutTable.decode("v1;T,-1,-1;L,-1,-1;R,-1,-1;D,-1,-1;B,-1,-1,P2")
+        assertTrue(untouched.posOf(HudZone.BOTTOM).isDefault)
+        // 同一个闸门的入口函数：绝对 x + 绝对 y 进来，出的仍是哨兵 x
+        val legacy = HudLayoutTable.default().withZonePos(HudZone.BOTTOM, 66, 300)
+        assertEquals(ZonePlacement(-1, 300), legacy.normalizedPosOf(HudZone.BOTTOM))
+        // 另外四枚容器没有这个特例：两轴绝对照收（少认一边就是把闸门做成了全局）
+        val right = HudLayoutTable.default().withZonePos(HudZone.RIGHT, 612, 88)
+        assertEquals(ZonePlacement(612, 88), right.normalizedPosOf(HudZone.RIGHT))
+    }
+
+    @Test
     fun unknownIdsAreDroppedMissingOnesGoHome() {
         // 只声明一颗不存在的 P99 与一颗缺失的 SIZE：坏 id 丢，缺失的补回 home 容器末尾
         val t = HudLayoutTable.decode("v1;T,1,1,P99,P12;L,-1,-1;R,-1,-1;D,-1,-1;B,-1,-1")

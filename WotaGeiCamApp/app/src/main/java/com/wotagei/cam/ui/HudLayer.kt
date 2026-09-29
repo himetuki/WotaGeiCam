@@ -114,10 +114,13 @@ import kotlin.math.roundToInt
  * **手势**（编辑页是拖拽，录制页是点按/长按）。
  *
  * 位置怎么来（[HudZoneBox]）：
- * - 表里 [ZonePlacement.isDefault] → 走 B1–B3 定稿的那条**原生对齐**分支（8dp 起始内边距、
- *   `CenterEnd − `[VisibleEndInset]、`BottomEnd − 底栏实测带` 等），避让量全是组合期实测回报值；
+ * - 表里 [ZonePlacement.isDefault]（两轴都是哨兵）→ 走 B1–B3 定稿的那条**原生对齐**分支
+ *   （`CenterStart + padding(start = 8dp)`、`CenterEnd + padding(end = 8dp)`、`BottomEnd − 底栏实测带`、
+ *   `BottomCenter + fillMaxWidth` 居中），8dp 是 [HudEdgePad] 那枚设计留白，**避让量全是组合期实测回报值**，
+ *   贴挖孔/系统栏那一层由调用方的 `safeDrawingPadding()` 承担，本层没有按方向写死的避让常量；
  * - 用户拖过 → 走 `align(TopStart) + offset(x, y)` 的绝对定位，坐标相对 root 安全区的左上角，
- *   写进去之前先经 [clampZonePos] 钳进安全区。
+ *   写进去之前先经 [clampZonePos] 钳进安全区。**底栏是唯一的例外**：它只认 y，x 永远是哨兵，
+ *   所以它的绝对落位是 `fillMaxWidth` + 居中 + `offset(y)`，横向仍跟着可视窗口中心走。
  *
  * 锚点：绝对定位用的是**布局偏移**（`Modifier.offset`），于是 `Modifier.pillAnchor` 回报的窗口矩形
  * 天然跟着视觉位置走（§69 那族「浮层甩到屏幕原点」的另一半成因就是位置改了锚点没改）。
@@ -141,20 +144,19 @@ internal val DockInnerPadV = 5.dp
 internal val BottomBarSpaceFallback = WotaHit.recordTouch + DockInnerPadV * 2 + BottomBarOuterPadV * 2
 
 /**
- * 可视区右缘的让位量：**单一共享来源**（审查 S1-1）。读取点与抽取前完全同集合，本轮一处没新增：
- * ① [HudZoneBox] 右竖 Dock 分支的 `padding(end=)`；② 同函数右下读数块分支；③ 同函数底栏分支的居中基准
- * （由调用方算好的 `area.endInsetDp > 0` 把关，与改前的 `dockEndShift` 同一条按方向取的判据）；
- * ④ `CameraScreen` 喂 [com.wotagei.cam.ui.anim.hudRoomDp] 的那笔右缘扣减。除此之外不许散写 `34.dp`。
+ * 贴边避让**一律交给系统**（AGENTS.md 铁律）：五枚容器都在调用方那层 `safeDrawingPadding()` 的盒子里，
+ * 挖孔 / 状态栏 / 导航条由那一层按它实际所在的边自动让开，本层不再有任何按方向写死的避让常量。
  *
- * 出处是 §58 的实测：这台机横屏根容器宽 1600px、"可视右缘只到 1532px"，差 68px ≈ 34dp，
- * 于是右对齐的浮层右半边被推到可视区之外。
+ * 历史（这里曾有 `VisibleEndInset = 34.dp`）：§58 把"可视右缘只到 1532"当承重事实，按方向写死了一笔
+ * 右缘让位。2026-09-29 真机复测把它推翻了（docs/plan/13 §九·补）——那 68px 是**竖屏顶边居中的 64×68 挖孔**
+ * （`insets=Rect(0,68-0,0)`、`boundingRect=Rect(328,0-392,68)`），竖屏让上边、`ROTATION_90` 让左边、
+ * `ROTATION_270` 让右边，而 `safeDrawingPadding()` 在本机横屏实测给**左 68 / 右 0**（不是 §58 说的
+ * "两边都给 0"）；"1532"本身是 uiautomator 把 app-bounds 的**宽度**当成**右边界**得到的伪值。
+ * 同一枚写死方向的 `padding(end=)` 在两个横屏姿态里必错一次，所以常量已删净，不许再写第二份。
  *
- * **这条出处已在 2026-09-29 10:11 真机复测中被推翻**（docs/plan/13 §九·补）：那 68px 不可视带在**左**短边，
- * `safeDrawingPadding()` 实测给左 68/右 0（不是 §58 说的"两边都给 0"），外层安全区盒子已经把它避掉了；
- * 而挖孔会随横屏两个方向换边，所以"按方向写死 end 让位"这个设计必错一次。
- * 取值与用法**等用户确认现场姿态后再改，本轮一行没动**；改掉之前别再新增第五处读取。
+ * 本层剩下的边距只有**设计留白**：右竖 Dock 与右下读数块各让一枚 [HudEdgePad]（8dp 令牌，与左竖 Dock
+ * 的起始边同一枚，见 [HudZoneBox] 的原生对齐分支）。它与系统避让无关、不分方向、也不分姿态。
  */
-internal val VisibleEndInset = 34.dp
 
 /**
  * 顶栏避让量的**首帧兜底值**：只到第一行那排（38dp 圆形设置钮 + 上下内边距 4+2 = 44dp）。
@@ -165,8 +167,9 @@ internal val VisibleEndInset = 34.dp
 internal val TopBarSpace = 44.dp
 
 /**
- * 顶栏胶囊组与左竖 Dock 的**起始边内边距**（B1–B3 定稿值：顶栏 `padding(start)` 与左 Dock
- * `padding(start)` 本来就是同一个 8dp，这里合并成一个真源）。
+ * 贴边那两枚自由边的**设计留白**（8dp 令牌，不是避让常量）：顶栏 `padding(start)`、左竖 Dock
+ * `padding(start)`、右竖 Dock 与右下读数块 `padding(end)` 用的都是它，左右两边因此对称。
+ * 系统避让（挖孔 / 系统栏）不在这里，由调用方那层 `safeDrawingPadding()` 承担（见文件头那条说明）。
  */
 internal val HudEdgePad = WotaSpace.s
 
@@ -481,6 +484,15 @@ internal fun zoneBandHeight(zone: HudZone, area: HudAreaDp): Int =
 /**
  * 一枚容器的外壳：定稿位置走原生对齐，用户拖过的位置走绝对 `offset`。
  *
+ * 三条分支（按表里的绝对轴取）：
+ * - **底栏落位**（只有 y 绝对）：`align(TopStart) + fillMaxWidth + offset(y)`，横向仍由
+ *   [nativeContentAlignment] 的 Center 居中 ⇒ 快门恒等于**可视窗口**水平中心，90↔270 翻转与
+ *   横竖换档都会重新居中。底栏的 x 在 [clampZonePos] 与 [HudLayoutTable.normalize] 两处都被抹成哨兵，
+ *   所以它不可能带绝对 x（B4 审查 S1：落一次位就把 x 冻成绝对值，此后再也不居中）。
+ * - **其余容器的绝对位置**（x 与 y 都绝对）：`align(TopStart) + offset(x, y)`。
+ * - **定稿位置**（两轴都是哨兵）：B1–B3 那五条原生对齐分支。贴边避让全部由调用方那层
+ *   `safeDrawingPadding()` 承担，本层只剩 [HudEdgePad] 这枚设计留白。
+ *
  * 两层节点：**外层是"槽位"**（原生对齐时那条带避让量的带，绝对定位时只是一个锚点），
  * **内层才是卡片本体**：[onCardRect] 回报的是它的窗口矩形，重叠提示、落点格位、拖动起点全用这一份，
  * 所以"槽位比卡片大"的原生分支不会把假尺寸喂给钳制算式。
@@ -501,28 +513,32 @@ fun BoxScope.HudZoneBox(
     content: @Composable () -> Unit
 ) {
     val density = LocalDensity.current
-    val absolute = !placement.isDefault
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
-    val slot = if (absolute) {
+    // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
+    val bottomYOnly = zone == HudZone.BOTTOM && placement.yDp >= 0
+    val absolute = !bottomYOnly && (placement.xDp >= 0 || placement.yDp >= 0)
+    val slot = when {
+        bottomYOnly -> Modifier.align(Alignment.TopStart).fillMaxWidth()
+            .offset { IntOffset(0, px(placement.yDp)) }
         // 钳过的绝对坐标 → 布局偏移：pillAnchor 回报的窗口矩形跟着视觉位置一起走
-        Modifier.align(Alignment.TopStart).offset { IntOffset(px(placement.xDp), px(placement.yDp)) }
-    } else when (zone) {
-        // ↓ 这五条分支就是 B1–B3 的定稿对齐与避让量，逐条与改前代码同形（fillMax* 必须排在 padding 前，
-        //   否则"带高"会变成盒子自己的尺寸，居中基准就漂了 17dp——§58 那族坑的又一种走法）
-        HudZone.TOP -> Modifier.align(Alignment.TopStart)
-            .offset { IntOffset(px(HudEdgePad.value.roundToInt()), px(TopTopPad.value.roundToInt())) }
-        HudZone.LEFT -> Modifier.align(Alignment.CenterStart).fillMaxHeight()
-            .padding(start = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
-        HudZone.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight()
-            .padding(end = VisibleEndInset, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
-        HudZone.READOUT -> Modifier.align(Alignment.BottomEnd)
-            .padding(end = VisibleEndInset, bottom = area.bottomAvoidDp.dp)
-        // 底栏的槽位要横向铺满才谈得上「底板在可视区里居中」；S3-3：右缘不可视带只有横屏有
-        HudZone.BOTTOM -> Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-            .padding(
-                end = if (area.endInsetDp > 0) VisibleEndInset else 0.dp,
-                bottom = BottomBarOuterPadV
-            )
+        absolute -> Modifier.align(Alignment.TopStart)
+            .offset { IntOffset(px(placement.xDp), px(placement.yDp)) }
+        else -> when (zone) {
+            // ↓ 这五条分支就是 B1–B3 的定稿对齐与设计留白。fillMax* 必须排在 padding 前，
+            //   否则"带高"会变成盒子自己的尺寸，居中与对齐基准就漂了（§58 那族坑的又一种走法）
+            HudZone.TOP -> Modifier.align(Alignment.TopStart)
+                .offset { IntOffset(px(HudEdgePad.value.roundToInt()), px(TopTopPad.value.roundToInt())) }
+            HudZone.LEFT -> Modifier.align(Alignment.CenterStart).fillMaxHeight()
+                .padding(start = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
+            HudZone.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+                .padding(end = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
+            HudZone.READOUT -> Modifier.align(Alignment.BottomEnd)
+                .padding(end = HudEdgePad, bottom = area.bottomAvoidDp.dp)
+            // 底栏的槽位要横向铺满才谈得上「底板在可视窗口里居中」。居中基准这里不许扣任何让位量：
+            // 旧版扣了 34dp（写死的右缘避让），快门就偏在可视中心左边 17dp
+            HudZone.BOTTOM -> Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .padding(bottom = BottomBarOuterPadV)
+        }
     }
     Box(
         slot.then(modifier),
@@ -833,10 +849,11 @@ data class HudDockDrag(
  * ① 底板只包住内容：`底板宽 = 2 × 槽宽 + 录制键 + 2 × (条目间距 + 底板内边距)`，
  *    槽宽 = `max(缩略图实测宽, 镜头那颗实测宽)`；材质沿用 [wotaCard]（hudScrim + 顶部高光描边），
  *    不加模糊、不加投影。
- * ② 录制键中心恒等于**底板中心**（等宽槽是唯一的承重条件），而原生对齐分支把底板摆在
- *    **可视窗口**水平中心（S3-3：居中父区域已扣掉横屏那 34dp 不可视带），所以 x 偏移为 0 时
- *    「快门中心＝可视窗口水平中心」成立；用户把整枚 Dock 搬走时搬的是"已经居中的那一整块"，
- *    这条算式本身一行没动。
+ * ② 录制键中心恒等于**底板中心**（等宽槽是唯一的承重条件），而底板摆在**可视窗口**水平中心——
+ *    居中父区域就是套了 `safeDrawingPadding()` 的那块整宽安全区（旧写法在这里再扣一笔写死的 34dp
+ *    右缘避让，两个横屏姿态里都往左偏 34px，任务 #68 已删）。落位只写 y、x 恒哨兵，
+ *    所以「快门中心＝可视窗口水平中心」在定稿位与用户搬过的上栏/下栏都成立；
+ *    用户搬的始终是"已经居中的那一整块"的上下，这条算式本身一行没动。
  *    算式：设底板全宽 W、内边距 P、槽宽 S、录制键宽 R，内容区宽 = W − 2P = 2S + R + 2G（G 为条目间距）。
  *    录制键在内容区里由 [Alignment.Center] 定位 ⇒ 它到左内边缘 = S + G + R/2 ⇒
  *    录制键中心 = P + S + G + R/2 = (W − 2P)/2 + P = **W/2** = 底板中心。
@@ -887,11 +904,13 @@ fun HudBottomZone(
     val plan = remember(motion.mode) { mergePlanFor(motion.mode) }
     val scene = remember { MergeScene() }
     val density = LocalDensity.current
-    // 进度取的是 `recording || busy || dragging`，前两项的并集就是 PREPARE / START / STOPPING 三态，
-    // 所以真实时序是：**PREPARE 一上来就开始吸 → START 吸到底 → STOPPING 全程保持吸 → 回到 IDLE 才
-    // 细胞分裂**（S2-3① 定的口径）。ctx.recording 只是 START 那一档、ctx.busy 是 PREPARE / STOPPING，
-    // 只喂 recording 的话 PREPARE 那几百毫秒底栏还是满的，会话重建时看起来就是"吸慢了一拍"
-    val absorbed = ctx.recording || ctx.busy || drag?.dragging == true
+    // 吸收态判据（与已装机 r10/r11 同一条，快照那一版曾把它换成 `recording || busy || dragging`，本轮退回）：
+    // **只有 START 算录制态吸收**——ctx.recording 就是 `recStatus == RecordStatus.START`（调用点唯一喂法），
+    // ctx.busy（PREPARE / STOPPING）**不参与**：PREPARE 期会话还没起来，两颗该留在原位可点；
+    // 一进 STOPPING 就立刻开始细胞分裂，不等收尾跑完再分裂。
+    // ctx.busy 仍然有消费方（RecordButton 的转圈与顶栏状态那颗），只是不再决定吸收态。
+    // 第 8 条的换栏拖拽是新增的那一档：拖拽中两颗同样处于吸收态。
+    val absorbed = ctx.recording || drag?.dragging == true
     // PLAIN 档**不创建**动画状态（S3-1）：anim 为 null，连 120ms 的 tween 都不跑
     val anim = if (plan.animated) animateFloatAsState(if (absorbed) 1f else 0f, motion.float) else null
     // 进度只经 mergeProgressOf 这一条桥取（S4-1 要测的就是它）
@@ -1122,8 +1141,10 @@ private fun RecordButton(
 // ------------------------------------------------------------------ 位置表的组合期接入
 
 /**
- * 读 `hud_layout` 并跟随它的变化：编辑页「保存」用的是 `apply()`，这条监听立刻把新表打到录制页上，
- * 于是"保存后录制页实时生效"成立；页面在栈里被销毁重进时读的还是同一份 prefs，杀进程重进也在。
+ * 读 `hud_layout` 并跟随它的变化：写入方（编辑页「保存」、录制页底栏换栏）走的是 `commit()`，
+ * **磁盘写完成之后**这条监听才打到录制页，于是"保存后实时生效"与"强杀进程仍保得住"同时成立
+ * （`apply()` 是异步落盘，改完就被 `am force-stop` 杀掉会整批丢掉，任务 #69 那族误判的根因）。
+ * 页面在栈里被销毁重进时读的还是同一份 prefs，杀进程重进也在。
  *
  * 与 [WotaSettings.KEY_MOTION] 在 MainActivity 里的 `WatchMotion` 同一条手法，**不走 applyDefaultsOnce**
  * （那条链进程内只套一次，会把编辑页改动挡在门外）。
