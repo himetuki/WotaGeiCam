@@ -6,9 +6,9 @@ import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.anim.chipTravelPxOf
-import com.wotagei.cam.ui.anim.hudPerRowFor
-import com.wotagei.cam.ui.anim.hudRoomDp
-import com.wotagei.cam.ui.anim.hudStripHeightDp
+import com.wotagei.cam.ui.hudPerRowFor
+import com.wotagei.cam.ui.hudRoomDp
+import com.wotagei.cam.ui.hudStripHeightDp
 import com.wotagei.cam.ui.anim.linkAlphaFor
 import com.wotagei.cam.ui.anim.mergePlanFor
 import com.wotagei.cam.ui.anim.mergeProgressOf
@@ -349,16 +349,20 @@ class LiquidMergeTest {
         assertEquals(10f, LiquidMerge.blobX(-1f, 10f, 110f), 0.001f)
     }
 
-    // ---------- ⑥ 常驻读数搬到录制键右侧后的换行档与高度档（六项第 4 条） ----------
+    // ---------- ⑥ 常驻读数的换行档与高度档（六项第 4 条；#70 修复批次第 5 条起，这三条纯函数住在
+    // `ui/HudMetrics.kt`，不在 `ui/anim/LiquidMerge.kt` 里——用例仍留在本文件这一组，只换 import） ----------
 
     /**
      * 用例入参必须与调用点**同一个表达式**算出来的可用宽（审查 S3-5）。
-     * 调用点：`hudPerRowFor(readoutCount, fontScale, hudRoomDp(safeW, HudEdgePad.value))`——
+     * 调用点：`planReadoutRow(…)` → `readoutRoomBesideDockDp` / `hudRoomDp(safeW, HudEdgePad.value)`，
      * `safeW` 是套了 `safeDrawingPadding()` 之后那层的**实测宽**（本机横屏 766dp、竖屏 360dp），
      * `HudEdgePad` 是读数块 `padding(end=)` 那枚 8dp 设计留白（与左竖 Dock 起始边同一枚令牌）。
      * #68 之前这里喂的是 `hudRoomDp(screenWidthDp, VisibleEndInset)`：那笔 34dp 是按方向写死的假避让，
      * 竖屏也跟着扣（白退一档），横屏则与外层 safeDrawingPadding 重复扣一次。
      * 反面对照用 115%（1.15f）：直接喂窗口宽就把 8dp 留白与 24dp 估算余量一起吃掉，会多取一颗。
+     *
+     * ⚠ 这里测的是**裸档位函数** `hudPerRowFor`（能给到 3）。横屏实际落地的列数还要过
+     * `DockRowPerRowCap` 那道上限（定版「一行两颗」），那一档由 `HudReadoutRowPlanTest` 钉。
      */
     @Test
     fun threePerRowNeedsSafetyMargin() {

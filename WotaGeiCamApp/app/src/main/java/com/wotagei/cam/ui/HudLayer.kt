@@ -80,8 +80,6 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.media.VideoThumbnail
-import com.wotagei.cam.ui.anim.HudBlockPadDp
-import com.wotagei.cam.ui.anim.HudRowGapDp
 import com.wotagei.cam.ui.anim.LiquidMerge
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeScene
@@ -118,8 +116,9 @@ import kotlin.math.roundToInt
  * 位置怎么来（[HudZoneBox]）：
  * - 表里 [ZonePlacement.isDefault]（两轴都是哨兵）→ 走 B1–B3 定稿的那条**原生对齐**分支
  *   （`CenterStart + padding(start = 8dp)`、`CenterEnd + padding(end = 8dp)`、
- *   `BottomEnd + padding(bottom = 读数块那一条带的底边)`（#70 A 之后默认＝与底栏同基线的那 6dp，
- *   见 [com.wotagei.cam.ui.ReadoutRowPlan]）、`BottomCenter + fillMaxWidth` 居中），
+ *   `BottomEnd + padding(bottom = 读数块那一条带的底边)`（#70 A 之后与底栏**同一行**，那一档送下来的
+ *   让位＝共用基线减掉块自己的内边距，见 [com.wotagei.cam.ui.ReadoutRowPlan]）、
+ *   `BottomCenter + fillMaxWidth` 居中），
  *   8dp 是 [HudEdgePad] 那枚设计留白，**避让量全是组合期实测回报值**，
  *   贴挖孔/系统栏那一层由调用方的 `safeDrawingPadding()` 承担，本层没有按方向写死的避让常量；
  * - 用户拖过 → 走 `align(TopStart) + offset(x, y)` 的绝对定位，坐标相对 root 安全区的左上角，
@@ -298,7 +297,7 @@ data class HudCtx(
     val aeLocked: Boolean,
     /** 读数格的当前值；返回 null = 这一格此刻不适用（如 AE 手动档下的 EV），淡出、不占位 */
     val readoutValue: @Composable (HudItem) -> String?,
-    /** 一行几颗读数：调用方按可用宽与字体缩放算（[com.wotagei.cam.ui.anim.hudPerRowFor]） */
+    /** 一行几颗读数：调用方按可用宽与字体缩放算（[hudPerRowFor]，横屏还要过 `DockRowPerRowCap`） */
     val readoutPerRow: Int,
     // ---- 锚点与动作
     val anchorOf: (HudEntry) -> Modifier,
@@ -390,14 +389,15 @@ private fun TierChip(
  *
  * [tier] 只影响"控件胶囊"那一半分支的内剂量（#70 B，裁决在 [chipTierFor]，两枚竖 Dock 才收紧凑档）；
  * 读数那一半（`entry.item`）恒走全局档，因为它与 `hudPerRowFor` 的 90dp 估宽是同一笔账。
- * 默认值是全局档：漏传只会退回旧观感，不会把底栏/顶栏/读数块意外收窄。
+ * **没有默认值**（#69 铁律：该必传的形参给了默认值，漏挂的那处就永远吃全局档，`chipTierFor` 里改
+ * 那枚竖 Dock 也测不出来）：五枚容器各自显式传 `chipTierFor(HudZone.X)`，新增调用点漏传直接编译不过。
  */
 @Composable
 fun HudEntryItem(
     entry: HudEntry,
     ctx: HudCtx,
     modifier: Modifier = Modifier,
-    tier: WotaChipTier = WotaChipTier.Standard
+    tier: WotaChipTier
 ) {
     // 锚点只在这一层挂，且只经 ctx.anchorOf 这一条路（调用方在里面做「同一 PillKey 两个候选写入方」的裁决）
     val anchor = ctx.anchorOf(entry)
@@ -596,10 +596,11 @@ fun BoxScope.HudZoneBox(
             HudZone.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight()
                 .padding(end = HudEdgePad, top = area.topAvoidDp.dp, bottom = area.bottomAvoidDp.dp)
             // #70 A：读数块的 bottom 不再吃"底栏那一排的带高"。调用方喂给它的是 ReadoutRowPlan 算出来的
-            // 那一条底边（与 readoutRoomBesideDockDp 同一次决策的产物）：
-            // 常态与底栏同基线（＝下一行 BOTTOM 用的同一个 BottomBarOuterPadV，两块底边对齐、同一行并排），
-            // 只有两种情况退回底栏带高、让到整排之上：① 右半带连两颗读数都装不下（竖屏 360dp），
-            // ② 估宽说装得下而**实测块宽**已经越过了那条带（安全网，见 planReadoutRow）。
+            // 那一条底边（与 readoutRoomBesideDockDp 同一次决策的产物），两档：
+            // · 同行档（横屏恒真、竖屏右半带装得下两颗时为真）：这里的数**已经减掉本容器 Column 自己那枚
+            //   `padding(HudBlockPadDp)`**（见 planReadoutRow 的"6dp 账"），所以对齐的是**胶囊可见底边**与
+            //   下一行 BOTTOM 那枚底板可见底边，而不是两枚容器的外缘——否则读数会浮在底板上 6dp。
+            // · 退化档（只有竖屏）：让到整排之上，容器底边压在带顶上（本容器不吃那一截减法，留缝是设计）。
             // 手算让位只用在几何上真会重叠的那一对，这条规矩是 §14.2 里用户 11:39 那句原话的落点。
             HudZone.READOUT -> Modifier.align(Alignment.BottomEnd)
                 .padding(end = HudEdgePad, bottom = area.bottomAvoidDp.dp)
@@ -678,7 +679,12 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
                     if (index > 0) {
                         Box(Modifier.width(1.dp).height(12.dp).background(WotaColor.outline))
                     }
-                    HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry))
+                    // 顶栏恒走全局档（容量段那笔窄屏阈值 272/242 按它量的），但档位仍只有一处裁决点
+                    HudEntryItem(
+                        entry, ctx,
+                        Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),
+                        chipTierFor(HudZone.TOP)
+                    )
                 }
             }
         }
@@ -754,14 +760,18 @@ fun HudDockZone(
 /**
  * 右下常驻读数块（[HudZone.READOUT]，六项第 4 条搬到录制键右侧）。
  *
- * **#70 A：它与底栏 Dock 是"同一条横带上的两个落位"，不是一上一下。** 底边默认停在
- * `BottomBarOuterPadV` 那一档（与底栏原生分支同一个数）⇒ 两块底边对齐；横向各占一半：
- * 底栏居中、读数块贴右缘，中间让开一枚 `WotaSpace.s`。可用宽由
- * [com.wotagei.cam.ui.planReadoutRow] 一次算清（含"右半带装不下两颗就退回整排之上"那一档退化），
- * 本层的 [bandHeightDp] 与调用方喂给 [HudZoneBox] 的 `bottomAvoidDp` 都出自同一次决策。
+ * **#70 A：它与底栏 Dock 是"同一条横带上的两个落位"，不是一上一下**（用户 2026-09-29 12:20 定版：
+ * 「读数缩到一行两颗，横屏永远同行」——横屏 [com.wotagei.cam.ui.ReadoutRowPlan.sharesDockRow] 恒真，
+ * 只有竖屏（右半带排不下两颗，或估宽说排得下而**实测块宽**越过了那条带）才整块退到底栏之上）。
+ * 对齐的是**可见底边**：本容器除了 `padding(bottom=)`
+ * 还吃 `.padding(HudBlockPadDp)`，所以 [com.wotagei.cam.ui.planReadoutRow] 送下来的让位是
+ * `BottomBarOuterPadV − HudBlockPadDp`（本机 0dp），胶囊底边才与底板底边同高，不再浮 6dp。
+ * 横向各占一半：底栏居中、读数块贴右缘，中间让开一枚 `WotaSpace.s`；可用宽与列数（横屏上限
+ * `DockRowPerRowCap` = 两颗）都由那一条纯函数一次算清，本层的 [bandHeightDp] 与调用方喂给
+ * [HudZoneBox] 的 `bottomAvoidDp` 出自同一次决策。
  *
  * 每格点按循环取值、长按弹自己的就近胶囊；行与行都**右对齐**，最后一行不满时也贴右缘，
- * 不会在右边留一段空白让人以为被裁了。一行几颗由调用方算（[com.wotagei.cam.ui.anim.hudPerRowFor]），
+ * 不会在右边留一段空白让人以为被裁了。一行几颗由调用方算（[hudPerRowFor]），
  * 这里只照数分行——竖屏 360dp 宽时一行 3 颗会顶出右缘裁字，那是 §58/§73 那一族老坑。
  * 内边距与间隔走 `hudRoomDp` / `hudStripHeightDp` 的同源常量（S3-5）：改了这里必须同时改那两条算式。
  *
@@ -791,7 +801,14 @@ fun HudReadoutZone(
     ) {
         hudRowGroups(HudZone.READOUT, order, ctx.readoutPerRow).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(HudRowGapDp.dp)) {
-                row.forEach { HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it)) }
+                // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
+                row.forEach {
+                    HudEntryItem(
+                        it, ctx,
+                        Modifier.ghostWhileDragged(ctx.hiddenEntry == it),
+                        chipTierFor(HudZone.READOUT)
+                    )
+                }
             }
         }
         // 长按对焦锁 AE 时这颗提示凭空出现，是最容易被当成「画面闪了一下」的硬切
@@ -1146,6 +1163,9 @@ fun HudBottomZone(
                 HudEntryItem(
                     entry = lensEntry,
                     ctx = ctx,
+                    // 底栏这颗**必须**留全局档：它的宽就是 `DockSlotSpace = 63dp` 那笔槽宽账的来源，
+                    // 而槽宽是底板宽的输入、#71 收拢算式 w(0) 的起点（裁决仍只经 [chipTierFor] 一处）
+                    tier = chipTierFor(HudZone.BOTTOM),
                     // 锚点 + 实测宽 + 融合位移三件事都挂在这颗的同一个节点上
                     modifier = Modifier
                         .ghostWhileDragged(ctx.hiddenEntry == lensEntry)

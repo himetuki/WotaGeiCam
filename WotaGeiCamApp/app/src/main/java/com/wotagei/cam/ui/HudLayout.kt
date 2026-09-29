@@ -2,8 +2,6 @@ package com.wotagei.cam.ui
 
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
-import com.wotagei.cam.ui.anim.hudPerRowFor
-import com.wotagei.cam.ui.anim.hudRoomDp
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -22,10 +20,11 @@ import kotlin.math.roundToInt
  * 重叠只提示不禁止。
  *
  * ## 本文件是纯 Kotlin
- * 没有 Android/Compose 类型依赖，所以 schema 编解码、默认表、越界钳制、隐藏后位置保留、换序/跨容器、
+ * 没有 Android/Compose 依赖，所以 schema 编解码、默认表、越界钳制、隐藏后位置保留、换序/跨容器、
  * 底栏 y 落位全部能在 JVM 单测里真跑（`HudLayout*Test`），不需要 Robolectric。
- * 唯一的跨文件调用是 `ui.anim` 里那两条**只吃 Float 的纯函数**（`hudPerRowFor` / `hudRoomDp`），
- * 它们本来就在录制页与编辑页的调用点上共用（S3-5 同源），不带来任何 Compose 依赖。
+ * 读数块那三条纯算式（`hudPerRowFor` / `hudRoomDp` / `hudStripHeightDp`）与 [HudBlockPadDp] 同包直读，
+ * 住在 `HudMetrics.kt`（#70 修复批次第 5 条：它们原先在 `ui/anim/LiquidMerge.kt` 里，让这个纯 Kotlin 文件
+ * 反向依赖了一个带 `Path`/`Modifier`/`@Composable` 的动画文件）。
  */
 
 /** 条目在容器内的排布主轴：决定「拖到第几格」怎么算 */
@@ -341,7 +340,7 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
  *   不是新写的魔法数。编辑页的这两个值是它自己那条操作栏与底栏 Dock 实占带的高。
  *   ⚠ **#70 A 之后这两条轴是"按容器分别喂"的**：底栏那一排的带高只喂给 `LEFT` / `RIGHT`
  *   （它们几何上真会叠在底栏上）与"读数块退化到整排之上"那一档；`READOUT` 拿到的是
- *   [ReadoutRowPlan.bottomAvoidDp]，默认与底栏**同一条基线**（=`BottomBarOuterPadV`），
+ *   [ReadoutRowPlan.bottomAvoidDp]。横屏恒与底栏**共用同一条基线**（定版：`读数缩到一行两颗，横屏永远同行`），
  *   所以同一帧里不同容器读到的 `bottomAvoidDp` 不再同一个数——这是有意的，别再合并回去。
  */
 data class HudAreaDp(
@@ -504,9 +503,10 @@ fun pxToDp(px: Float, density: Float): Int =
  * 加在一起才对。现在两块共用底栏那一行（同一基线），是**并联**关系 ⇒ 取大而不是求和，
  * 否则右 Dock 白白多让一整排（横屏实测会多让 66dp，把最高的那颗条目挤进滚动区）。
  *
- * - [readoutBottomDp]：读数块自己的底边让位（`ReadoutRowPlan.bottomAvoidDp`）。与底栏同基线时是
- *   `BottomBarOuterPadV`（6dp）；窄窗退化到"让到整排之上"时它本身就是底栏带高，
- *   此时 `readoutBottomDp + readoutHeightDp` 又回到旧的串联算式，**退化路径一条没丢**。
+ * - [readoutBottomDp]：读数块**容器**自己的底边让位（就是 [ReadoutRowPlan.bottomAvoidDp]）。与底栏同基线时
+ *   它是 `基线 − 块内边距`（本机 6 − 6 = 0dp，块比那一排矮 ⇒ 这条缝整个收回去）；
+ *   窄窗退化到"让到整排之上"时它本身就是底栏带高，此时 `readoutBottomDp + readoutHeightDp`
+ *   又回到旧的串联算式，**退化路径一条没丢**。
  * - 读数块空了回报 0，这一截缝自己收回去（与改前同一条语义）。坏值（负高）按 0 处理。
  */
 fun areaForRightDock(area: HudAreaDp, readoutHeightDp: Int, readoutBottomDp: Int): HudAreaDp =
@@ -516,35 +516,55 @@ fun areaForRightDock(area: HudAreaDp, readoutHeightDp: Int, readoutBottomDp: Int
 
 // ------------------------------------------------------------------ #70 A：读数块与底栏那一行
 
+/** 用户 2026-09-29 12:20 定版的列数上限：横屏「读数缩到一行两颗」，不是按剩余宽度算到 3 */
+const val DockRowPerRowCap = 2
+
+/**
+ * 「这一帧有横行可言」的下限：右半带至少排得下 [MinColumnsForSharedRow] 颗才算同行（只剩一颗就是竖列，
+ * 不构成横行）。与 [DockRowPerRowCap] 同为 2 但**不是同一个数**：那条是上限（少列的目标），这条是门槛
+ * （够不够格同行）；竖屏退化档的判据读这条，横屏的列数读那条。
+ */
+private const val MinColumnsForSharedRow = 2
+
 /**
  * 读数块与底栏 Dock 之间那一条**底部横带**的关系，一次算清（任务 #70 A 的唯一裁决点）。
- * 两个底边档位都由 [planReadoutRow] 的入参喂进来：`bottomRowPadDp`（与底栏同基线那一档）与
+ * 两个底边档位都由 [planReadoutRow] 的入参喂进来：`dockRowBaselineDp`（与底栏共用那条基线那一档）与
  * `dockStripDp`（底栏那一排的带高，退化时用）。
  *
- * - [sharesDockRow]：true = 这一帧读数块与底栏**同基线**（两块底边停在同一个 `bottomRowPadDp`，
- *   读数块不再吃"底栏带高"那笔手算让位）。这正是用户 11:39 要的「放在和底 Dock 栏同一行」。
- * - [bottomAvoidDp]：喂给读数块那枚容器 `HudAreaDp.bottomAvoidDp` 的值。两档：
- *   同基线 = `bottomRowPadDp`；退化 = `dockStripDp`（让到整排之上）。
- * - [perRow]：一行几颗，来自 `hudPerRowFor`，喂的是 [roomWidthDp]。
+ * ## 定版口径（用户 2026-09-29 12:20：「读数缩到一行两颗，横屏永远同行」）
+ * - **横屏没有"退回 Dock 上方"这一档**：[sharesDockRow] 恒真，列数上限 [DockRowPerRowCap]。
+ *   横向装不下的解法是让读数**变少列**（两颗→一列），而不是放弃同行。
+ * - **只有竖屏允许退回**：底板右缘那条带连两颗都排不下时，整块让到底栏那一排之上（旧落位）。
+ *
+ * - [sharesDockRow]：这一帧到底同不同行。**它是裁决本身的露出点**（用例与调试读它），UI 侧只消费
+ *   [bottomAvoidDp] 与 [perRow]——照 [com.wotagei.cam.ui.anim.MergePlan.durationMs] 的规矩如实写在这里。
+ * - [bottomAvoidDp]：喂给读数块那枚容器（`HudAreaDp.bottomAvoidDp` → `padding(bottom=)`）的**容器**让位。
+ *   两档：同基线 = `dockRowBaselineDp − HudBlockPadDp`（见下面那笔 6dp 账）；退化 = `dockStripDp`。
+ * - [perRow]：一行几颗（横屏再经 [DockRowPerRowCap] 夹一次）。
  * - [roomWidthDp]：这一帧真正可用的**块内宽**（已经扣掉设计留白与块自身内边距）。
  *
- * ## 为什么必须有"退化"这一档，以及它的判据为什么长这样
+ * ## 第 6 条那笔 6dp：同基线档为什么要减一枚 [HudBlockPadDp]
+ * 底栏那枚容器 `padding(bottom = BottomBarOuterPadV)`（6dp），量的就是**底板可见底边**到安全区底；
+ * 读数块那枚容器除了自己的让位，内部还吃了 `HudReadoutZone` 的 `.padding(HudBlockPadDp)`（6dp）⇒
+ * 两枚容器若用同一个 6dp，胶囊的可见底边就停在 12dp 高，比底板底边**高出一整枚内边距**——
+ * 那就是"浮在 Dock 上方"，只是从 66dp 缩成了 6dp。所以同基线档返回 `基线 − 块内边距`（本机 0dp，
+ * 只用现有令牌相减，不新造散值），让**胶囊可见底边**与**底板可见底边**落在同一条线上。
+ * 夹到 ≥0：万一基线令牌改得比块内边距还小，宁可差几 dp 也不把块画出安全区底。
+ * 退化档不减：那一档的语义本来就是"整排之上"，容器底边压在带顶上，留缝是设计不是缺陷。
+ *
+ * ## 竖屏为什么必须有"退化"这一档，以及它的判据为什么长这样
  * 底栏在可视窗口里**水平居中**（`clampZonePos` 把它的 x 恒抹成哨兵，见本文件第 8 条那一段），
  * 所以它与读数块争的是同一段右半区：底栏右缘 = `安全区宽/2 + 底板宽/2`。
  * 竖屏 360dp 上底板 216dp ⇒ 那条带只剩 56dp（180 − 108 − 8 间距 − 8 留白），
- * **连一颗读数胶囊（估宽 90dp）都放不下**。
- * 那种时候只有两条路：压住底栏那颗镜头胶囊（等于挡住入口，不可接受），或让到整排之上（就是旧行为，
- * 而且此时两枚容器**几何上真会重叠**——恰好落在"让位量只许用在几何上真会重叠的那一对"这条规矩里）。
+ * **连一颗读数胶囊（估宽 90dp）都放不下**。那种时候只有两条路：压住底栏那颗镜头胶囊（等于挡住入口，
+ * 不可接受），或让到整排之上（就是旧行为，而且此时两枚容器**几何上真会重叠**——恰好落在"让位量只许
+ * 用在几何上真会重叠的那一对"这条规矩里）。横屏没有这个问题，所以横屏不再有这一档。
  *
- * 判据取 `hudPerRowFor(…, 右半可用宽) ≥ 2`，不是"能不能装下一颗"：
+ * 判据取 `hudPerRowFor(…, 右半可用宽) ≥ [MinColumnsForSharedRow]`，不是"能不能装下一颗"：
  * - `hudPerRowFor` 只在「两颗 + 行距 + 安全余量 24dp ≤ 可用宽」时才给 2 以上，
  *   所以选了这一档之后**块宽必然 ≤ 可用宽 − 24dp**，同一行不会撞底栏，这是它自带的算术保证；
- * - 给到 1 就意味着那条右半带连"两颗 + 余量"都容不下，那是"这一帧没有横行可言"的信号，
- *   此时退回整排之上并用**整幅宽**取档（竖屏回到改前的 3 颗一行，不产生新的裁字面）。
- * - 反过来若判据用"实测块宽 vs 右半带"作为**唯一**判据，就会形成 `档位→块宽→档位` 的闭环：竖屏会出现
- *   一行 3 颗（宽）↔ 一列 3 颗（窄）来回翻的**振荡**。所以估宽判据（`perRow ≥ 2`）是主判据，
- *   实测块宽只是它旁边的一道**安全网**（[readoutWidthDp] > 那条带的宽度时退回整排之上）：
- *   退化档取的整幅宽只会让块更宽 ⇒ 一旦退出去就稳在里面，不产生来回。
+ * - 给到 1 就意味着那条右半带连"两颗 + 余量"都容不下，竖屏此时退回整排之上并用**整幅宽**取档
+ *   （回到改前的 3 颗一行，不产生新的裁字面）。
  */
 data class ReadoutRowPlan(
     val sharesDockRow: Boolean,
@@ -557,7 +577,7 @@ data class ReadoutRowPlan(
  * 与底栏同一行时**整块读数**（含它自己的内边距）允许占的那一段宽度：底栏右缘 + 一枚间距 → 安全区右缘 − 设计留白。
  *
  * 与 [readoutRoomBesideDockDp] 是同一笔账的两个口径：那条给 `hudPerRowFor` 用（块**内**可用宽，
- * 已再扣掉左右各 [com.wotagei.cam.ui.anim.HudBlockPadDp]），这条给"实测块宽 ≤ 容得下吗"用。
+ * 已再扣掉左右各 [HudBlockPadDp]），这条给"实测块宽 ≤ 容得下吗"用。
  * 两处共用同一个表达式，不许各写一份。
  */
 fun readoutStripWidthDp(safeWidthDp: Int, dockWidthDp: Int, endPadDp: Float, dockGapDp: Float): Float =
@@ -576,32 +596,56 @@ fun readoutStripWidthDp(safeWidthDp: Int, dockWidthDp: Int, endPadDp: Float, doc
 fun readoutRoomBesideDockDp(safeWidthDp: Int, dockWidthDp: Int, endPadDp: Float, dockGapDp: Float): Float =
     hudRoomDp(safeWidthDp / 2f - dockWidthDp / 2f - dockGapDp, endPadDp)
 
-/** [ReadoutRowPlan] 的算式本体。两页（录制页 / 编辑页）必须调这一条，不许各写一份判据（S3-5 同源） */
+/**
+ * [ReadoutRowPlan] 的算式本体。两页（录制页 / 编辑页）必须调这一条，不许各写一份判据（S3-5 同源）。
+ *
+ * 两个形参**没有默认值**，都是承重的（#69 那条铁律：该必传的形参给了默认值，漏挂就静默失去安全网）：
+ * - [landscape]：定版那条"横屏永远同行"由调用方从 `Configuration.orientation` 送进来（两页本来就在用它
+ *   复位 `safeW`/`safeH`，同一个真源，不另造第二套横屏判据）；
+ * - [readoutWidthDp]：实测块宽。给默认值 0 等于"永远放行"，新调用点漏传就等于把竖屏那道安全网拆了。
+ *
+ * @param dockRowBaselineDp 两枚容器共用的那条基线（= 底板可见底边的高度，调用方传 `BottomBarOuterPadV`）
+ */
 fun planReadoutRow(
     readoutCount: Int,
     fontScale: Float,
     safeWidthDp: Int,
     dockWidthDp: Int,
     dockStripDp: Int,
-    bottomRowPadDp: Int,
+    dockRowBaselineDp: Int,
     endPadDp: Float,
     dockGapDp: Float,
-    readoutWidthDp: Int = 0
+    landscape: Boolean,
+    readoutWidthDp: Int
 ): ReadoutRowPlan {
     val besideRoom = readoutRoomBesideDockDp(safeWidthDp, dockWidthDp, endPadDp, dockGapDp)
     val perRowBeside = hudPerRowFor(readoutCount, fontScale, besideRoom)
+    // 同基线档的容器让位：基线减掉块自己那枚内边距，胶囊可见底边才与底板可见底边齐平（第 6 条那笔账）
+    val dockRowBottomDp = (dockRowBaselineDp - HudBlockPadDp.roundToInt()).coerceAtLeast(0)
+    if (landscape) {
+        // 横屏（定版）：恒同行、列数夹到 [DockRowPerRowCap]。这一支**不读** [readoutWidthDp]——
+        // 拿实测块宽去改横屏列数会形成 `列数→块宽→列数` 的每帧振荡（2 颗嫌宽退 1 颗，1 颗又"装得下"
+        // 于是回到 2 颗），而那正是要防的那个环。横屏既然不许退，窄的办法就只剩少列。
+        return ReadoutRowPlan(true, dockRowBottomDp, minOf(DockRowPerRowCap, perRowBeside), besideRoom)
+    }
+    val fullRoom = hudRoomDp(safeWidthDp.toFloat(), endPadDp)
+    val perRowFull = hudPerRowFor(readoutCount, fontScale, fullRoom)
     // 安全网：`hudPerRowFor` 的字宽是**算术估计**（汉字 1 em、拉丁 0.6 em，见其 KDoc），
     // 「感光度 AUTO」「曝光补偿 +1.0」这类副标签比它假设的 2 汉字宽，估宽会偏小 ⇒ 光靠估宽判断可能真压上底板。
     // 所以再用**实测块宽**兜一道：量到且已经越过那一段宽度，就退回整排之上（量不到那一帧 0 = 先按估宽走，
     // 下一帧实测接管，与 topBarH / dockStripH 同一套"两轮收敛"手法）。
-    // 这条判据不会来回翻：退化档取的是整幅宽，块只会更宽（perRow 单调），一旦判 false 就稳在 false。
     val stripWidth = readoutStripWidthDp(safeWidthDp, dockWidthDp, endPadDp, dockGapDp)
     val measuredFitsBeside = readoutWidthDp <= 0 || readoutWidthDp <= stripWidth
-    if (perRowBeside >= 2 && measuredFitsBeside) {
-        return ReadoutRowPlan(true, bottomRowPadDp, perRowBeside, besideRoom)
+    if (perRowBeside >= MinColumnsForSharedRow && measuredFitsBeside) {
+        return ReadoutRowPlan(true, dockRowBottomDp, perRowBeside, besideRoom)
     }
-    val fullRoom = hudRoomDp(safeWidthDp.toFloat(), endPadDp)
-    return ReadoutRowPlan(false, dockStripDp, hudPerRowFor(readoutCount, fontScale, fullRoom), fullRoom)
+    // 退化档的列数必须对**本帧这次决策不敏感**，否则 `块宽→档位` 会把自己闩死（#70 修复批次第 1 条，S1）：
+    // 实测块宽是上一帧按当前档位排出来的布局产物，退化档若照样取整幅宽（3 颗）就永远比阈值宽 ⇒ 判据
+    // 永久 false（旧注释把这写成"稳在 false"的优点，判反了：那是卡死，不是稳定）。
+    // 夹成 min(perRowBeside, perRowFull) 之后：陈旧宽 → 下一帧按 2 颗重排 → 实测回到阈值以内 → 自动 true；
+    // 而"估宽说谎、2 颗真装不下"时块保持 2 颗宽度、稳定 false ⇒ 防振荡的收益一条不丢。
+    val perRow = if (perRowBeside >= MinColumnsForSharedRow) minOf(perRowBeside, perRowFull) else perRowFull
+    return ReadoutRowPlan(false, dockStripDp, perRow, fullRoom)
 }
 
 /**
@@ -625,7 +669,8 @@ fun dockDragBlocked(status: com.wotagei.cam.camera.RecordStatus): Boolean =
  * - [HudZone.RIGHT]：**S2-2 B 那条并排规则保留**——姿态仪与音量表在顺序里相邻时并成一行两列
  *   （省下 ≈75dp，正好把变焦/对焦从折叠线下捞回来）。顺序被用户拆开就不再并排，
  *   这是"用户可以重排"与"横屏 360dp 带高不够"两条要求唯一能同时成立的写法；
- * - [HudZone.READOUT]：按 [perRow] 分行（[com.wotagei.cam.ui.anim.hudPerRowFor] 按可用宽与字体缩放取档）。
+ * - [HudZone.READOUT]：按 [perRow] 分行（[hudPerRowFor] 按可用宽与字体缩放取档，横屏那一路还要过
+ *   [DockRowPerRowCap] 这道上限）。
  */
 fun hudRowGroups(zone: HudZone, order: List<HudEntry>, perRow: Int): List<List<HudEntry>> = when (zone) {
     HudZone.TOP, HudZone.BOTTOM -> if (order.isEmpty()) emptyList() else listOf(order)
