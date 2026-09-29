@@ -318,6 +318,44 @@ class HudLayoutPairCellTest {
     }
 
     @Test
+    fun rightDockGridOverflowsTheLandscapeBandAndThatIsAKnownDefect() {
+        // #75：这条不是在为现状背书，是把"均匀行距把右 Dock 撑高到超出带高"这件事**变成已执行的测量**。
+        // 现有那条 `gridPlacementOfTheDefaultRightDockMeasuresTheNinetyFourBoard` 把 742px 钉得很准，
+        // 但没有任何用例拿它去比 `zoneBandHeight` ⇒ 数值测准了、预算却没对撞，这是一类新假绿。
+        //
+        // 修好（rowSpan / 缩小姿态仪 / 明确接受滚动）之后，**这条的期望值应当翻成溢出 0**，
+        // 翻它的人必须同时改这里的注释，不许悄悄把断言放松成"只要不崩就行"。
+        val gap = HudSizePx(8, 8)
+        val items = HudLayoutTable.default().gridItems(HudZone.RIGHT, planAll)
+        val sizes = mapOf(
+            e(CamPill.LEVEL) to HudSizePx(148, 148),   // 姿态仪：天地线 46 + 上下内边距 5+5 + 状态文字 ≈16 ⇒ 高 74dp
+            e(CamPill.VOLUME) to HudSizePx(56, 142),
+            e(CamPill.BT) to HudSizePx(94, 60),
+            e(CamPill.ZOOM) to HudSizePx(94, 60),
+            e(CamPill.FOCUS) to HudSizePx(94, 60),
+            e(CamPill.STAB) to HudSizePx(94, 60)
+        )
+        val placed = gridPlacementOf(items, items.map { sizes.getValue(it.entry) }, gap)
+        val rowPitchDp = placed.pitch.height / 2.0      // 本机 density 2.0
+        val gridHeightDp = placed.size.height / 2.0
+        // 横屏带高 = 带宽 360dp − 顶栏 44dp − 底栏 72dp（zoneBandHeight 的同一条算式）
+        val bandDp = 360 - 44 - 72
+        val overflowDp = gridHeightDp - bandDp
+
+        assertEquals("行距被姿态仪那颗顶高到 78dp（胶囊档本来只要 34dp）", 78.0, rowPitchDp, 0.5)
+        assertTrue(
+            "#75 现状：网格高 ${gridHeightDp}dp 超出横屏带高 ${bandDp}dp，" +
+                "溢出 ${overflowDp}dp ≈ ${(overflowDp / rowPitchDp).toInt()} 行 ⇒ 对焦/防抖落在折叠线以下。" +
+                "这一条断言的是**已知缺陷的测量值**，修好后应翻成溢出 0",
+            overflowDp > 100.0
+        )
+        // 改前 Column 的自然行高（配对格 74 + 4 颗 30 + 间距 4×4 = 210dp）是**装得进** 244dp 的，
+        // 这正是 S2-2B 当年把这两颗并排的理由；均匀行距把它抵消了。
+        val naturalColumnDp = 74.0 + 4 * 30.0 + 4 * 4.0
+        assertTrue("对照基准：改前 $naturalColumnDp dp 本该装得进 ${bandDp}dp 带", naturalColumnDp <= bandDp)
+    }
+
+    @Test
     fun thePairedCellIsWidthOwnerAndTheBoardIsNinetyFour() {
         // **本批唯一的验收口径**：录制中右 Dock 的宽度账（px；本机 density 2.0；颗宽取实测值）
         val gapX = 8            // 令牌 WotaSpace.xs = 4dp
