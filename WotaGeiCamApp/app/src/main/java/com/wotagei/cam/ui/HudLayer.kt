@@ -93,6 +93,7 @@ import com.wotagei.cam.ui.anim.dragOwnedByRecordKey
 import com.wotagei.cam.ui.anim.mergeAnchor
 import com.wotagei.cam.ui.anim.mergePlanFor
 import com.wotagei.cam.ui.anim.mergeProgressWithHook
+import com.wotagei.cam.ui.anim.wotaDockShell
 import com.wotagei.cam.ui.anim.wotaPillHost
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaChipTier
@@ -998,8 +999,9 @@ data class HudDockDrag(
  *
  * ## 两个不变量同时成立
  * ① 底板只包住内容：`底板宽 = 2 × 槽宽 + 录制键 + 2 × (条目间距 + 底板内边距)`，
- *    槽宽 = `max(缩略图实测宽, 镜头那颗实测宽)`；材质沿用 [wotaCard]（hudScrim + 顶部高光描边），
- *    不加模糊、不加投影。
+ *    槽宽 = `max(缩略图实测宽, 镜头那颗实测宽)`；材质沿用 [wotaCard] 那一套令牌（hudScrim + 顶部高光
+ *    描边），不加模糊、不加投影。#71 第一批起这层材质由 [com.wotagei.cam.ui.anim.wotaDockShell] 在
+ *    **绘制期**自绘（形状要跟着进度收拢，静态 Shape 做不到），令牌一个没换、`p = 0` 那一帧与原来同形。
  * ② 录制键中心恒等于**底板中心**（等宽槽是唯一的承重条件），而底板摆在**可视窗口**水平中心——
  *    居中父区域就是套了 `safeDrawingPadding()` 的那块整宽安全区（旧写法在这里再扣一笔写死的 34dp
  *    右缘避让，两个横屏姿态里都往左偏 34px，任务 #68 已删）。落位只写 y、x 恒哨兵，
@@ -1034,16 +1036,24 @@ data class HudDockDrag(
  *   所以底板既不重排也不跳动。就近锚点也不打架：进度 0 时那几项变换全是单位变换，
  *   而录制中这三颗只回锁提示、不开浮层，`pillAnchor` 回报的矩形没有任何一条路径会读到位移态
  *   （面板已开再按录制那条由 `LaunchedEffect(recording) { pop = null }` 收掉，S3-2）。
- * - **本体位移有上限，上限就是实测空隙**：`min(圆心距 × TRAVEL_FRACTION, clearance)`。那颗淡出后
- *   命中区还在（alpha = 0 仍可点），越过空隙就会把"停止录制"那一指吃掉——停止录制是最高优先级手势。
- * - **#73 命中权交接（#71b 放开位移的硬前置，三条一起做）**：
+ * - **底板整枚收拢进键形**（#71 第一批第 1 件）：可见轮廓由 [com.wotagei.cam.ui.anim.DockShell] 按 p
+ *   同时收缩长轴与短轴（216×60 → recordRing 46），半径恒 `min(w,h)/2` ⇒ 全程是体育场形、
+ *   `w == h` 那一帧就是正圆。**没有 scaleX/scaleY**（216×60 不可能等比变圆，缩放必然把描边压扁），
+ *   也没有动布局盒（`.width(dockW)` 那行是锁死的，见上面不变量①②）。反方向就是 p 反向播。
+ * - **本体位移的纲 = 条目中心到键心的实测距离**（#71 第一批第 2 件，**已放开**）：`chipTravelPx(p, delta)`
+ *   在 p=1 时把那颗的中心正好送到键心，进度夹 0..1 ⇒ 不穿过键心、反向过冲也不冲出原位。
+ *   旧上限 `min(圆心距 × 0.16, clearance)`（实测 10.96/13.28dp）就是"只是原地淡化"的算术原因，已撤。
+ *   撤它**不是**"点不到了没关系"，靠的是下面那两层命中保证；`chipAlpha` 那条淡出曲线降为**收尾配角**
+ *   （只处理液滴与键重合处的残留），不再是那颗消失的手段。
+ * - **#73 命中权交接（放开位移的硬前置，本批一行没削弱）**：
  *   ① 吸收期（进度 > 0）那两颗**不装点击链**——判据是纯函数 [chipClicksAccepted]，落地方式是缩略图那颗
  *     条件拼 `Modifier.clickable`、镜头那颗经 `gatedClick` 把动作摘成 null（[WotaChip] 的 `onClick == null`
  *     分支本来就不 install clip+clickable）。**不是** `clickable(enabled = false)`：那种写法节点还在。
  *     闸门值走 `derivedStateOf`，所以每帧只重算谓词、只有跨过 0 那两次翻转才重组本容器。
  *   ② 录制键 [RecordZIndex] 压在两颗之上：绘制与命中两层同时解决（证据见 RecordButton 那处注释）。
  *   ③ 底板那枚长按换栏探测器落在键上时**不接管**（[dragOwnedByRecordKey]），这一指整个留给键。
- *     位移算式与 clearance 夹子本批**一行没动**，放开到全程 68.5dp 是 #71b 的事。
+ *     ⚠ 放开位移后那颗会压进键的绘制区，"停止录制那一指还灵不灵"只有真机点得出（两层保证都在，
+ *     但命中顺序的最终裁决不许靠读代码断定）。
  * - **可打断**：进度由 [animateFloatAsState] 驱动，中途反向时从**当前值**继续，不跳回起点。
  * - **PLAIN 档直接切换**：[mergePlanFor] 给 PLAIN 返回 `animated=false`，调用点**不创建**动画状态
  *   （S3-1），进度走 [mergeProgressOf] 只认开关态 0/1、位移走 [chipTravelPxOf] 恒 0、绘制层第一条就
@@ -1088,19 +1098,12 @@ fun HudBottomZone(
     val clicksAccepted by remember(plan, absorbed, anim) {
         derivedStateOf { chipClicksAccepted(progress()) }
     }
-    // 位移上限：那颗的近缘与录制键触摸盒之间的实测空隙。绘制期算，零分配
-    val thumbClearance = {
-        LiquidMerge.clearancePx(
-            scene.cx(MergeScene.THUMB), scene.halfWidth(MergeScene.THUMB),
-            scene.cx(MergeScene.RECORD), scene.halfWidth(MergeScene.RECORD)
-        )
-    }
-    val lensClearance = {
-        LiquidMerge.clearancePx(
-            scene.cx(MergeScene.LENS), scene.halfWidth(MergeScene.LENS),
-            scene.cx(MergeScene.RECORD), scene.halfWidth(MergeScene.RECORD)
-        )
-    }
+    // 位移上限的**纲**（#71 第一批第 2 件）：条目中心到键心的这段实测距离本身，进度 1 就落到键心。
+    // 旧版的 `min(圆心距 × TRAVEL_FRACTION, clearance)` 夹子（底栏实测只有 10.96/13.28dp）已撤——
+    // 它就是"只是原地淡化"的算术原因。撤它靠的是两层已落地的命中保证（#73，本批一行没削弱）：
+    // 吸收期那两颗不 install 点击链（chipClicksAccepted → gatedClick / 条件拼 clickable），
+    // 且录制键以 RecordZIndex 在绘制与命中两层压在它们之上；**从不拿 alpha 当命中屏蔽**。
+    // 为什么放开之后不需要给条目加 clip，算式见 LiquidMerge.chipTravelPx 的 KDoc（端点线性 ⇒ 只看两端）。
     // 两槽各自兜底（S2-1：以前一处 63dp 兼两槽，实测前左槽按右槽的宽度算，底板宽到 216dp 才收敛）
     val lensFallbackPx = remember(density) { with(density) { DockSlotSpace.toPx() }.roundToInt() }
     val thumbFallbackPx = remember(density) { with(density) { ThumbBoxSpace.toPx() }.roundToInt() }
@@ -1127,8 +1130,13 @@ fun HudBottomZone(
     Box(
         modifier
             .width(dockW)
-            .wotaCard(WotaShape.pill)
-            // 连通体画在底板之上、两颗之下：宿主节点自己报原点与尺寸，两颗报窗口坐标，绘制时相减
+            // 底板轮廓改为**绘制期自绘**（#71 第一批第 1 件）：原来这里是 `wotaCard(WotaShape.pill)`，
+            // 形状静态、只能"整枚底板原地淡出"。现在同一套令牌（hudScrim + acrylicBorder + hairline）
+            // 在 draw 阶段按 p 画一枚居中的体育场形，长轴与短轴一起收拢到 recordRing。
+            // ⚠ 上一行的 `.width(dockW)` 与下面内层三格排布、`MergeSlot.dockWidthPx` 那笔账**一行都不许动**：
+            //   布局盒全程锁死 216×60，动了就重排、快门跳、不变量②（键心＝可视水平中心）当场崩。
+            .wotaDockShell(WotaHit.recordRing, progress)
+            // 连通体画在底板轮廓之上、两颗之下：宿主节点自己报原点与尺寸，两颗报窗口坐标，绘制时相减
             .mergeAnchor(scene, MergeScene.CANVAS)
             .wotaPillHost(scene, plan, progress)
             .then(
@@ -1192,8 +1200,7 @@ fun HudBottomZone(
                         scaleY = s
                         translationX = chipTravelPxOf(
                             plan, p,
-                            scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.THUMB),
-                            thumbClearance()
+                            scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.THUMB)
                         )
                     }
                     .size(ThumbBoxSpace)
@@ -1263,8 +1270,7 @@ fun HudBottomZone(
                             scaleY = s
                             translationX = chipTravelPxOf(
                                 plan, p,
-                                scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.LENS),
-                                lensClearance()
+                                scene.cx(MergeScene.RECORD) - scene.cx(MergeScene.LENS)
                             )
                         }
                 )

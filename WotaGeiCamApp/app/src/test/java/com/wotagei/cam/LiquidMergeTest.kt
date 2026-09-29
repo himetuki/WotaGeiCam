@@ -1,6 +1,7 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.ui.anim.LiquidMerge
+import com.wotagei.cam.ui.anim.DockShell
 import com.wotagei.cam.ui.anim.MergePlan
 import com.wotagei.cam.ui.anim.MergeScene
 import com.wotagei.cam.ui.anim.MergeSlot
@@ -21,6 +22,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
+import kotlin.math.max
 
 /**
  * B2 的纯函数层（六项第 3、4 条 + 底栏居中算式）。
@@ -113,9 +116,9 @@ class LiquidMergeTest {
         // 进度：传进一个"腰还挂着"的 0.4f，PLAIN 也必须只认 recording（0/1），不走中间态
         assertEquals(1f, mergeProgressOf(plain, recording = true, animatedValue = 0.4f), 0.001f)
         assertEquals(0f, mergeProgressOf(plain, recording = false, animatedValue = 0.4f), 0.001f)
-        // 位移：中间态进度下仍然是 0
-        assertEquals(0f, chipTravelPxOf(plain, 0.5f, 68.5f, 12f), 0.001f)
-        assertEquals(0f, chipTravelPxOf(plain, 1f, -68.5f, 12f), 0.001f)
+        // 位移：中间态进度下仍然是 0（纲放开之后这条更要紧：位移现在能到整段圆心距，PLAIN 必须一点不动）
+        assertEquals(0f, chipTravelPxOf(plain, 0.5f, 68.5f), 0.001f)
+        assertEquals(0f, chipTravelPxOf(plain, 1f, -68.5f), 0.001f)
         // 绘制：中间态进度不画腰，连通体也不描（一条路径都不建、一次 drawPath 都不发）
         assertFalse(waistVisibleFor(plain, 0.5f))
         assertFalse(waistVisibleFor(plain, 1f))
@@ -137,11 +140,10 @@ class LiquidMergeTest {
             // 状态还没建起来（null，首帧）时退化成 0/1，不许读出一个凭空的中间态
             assertEquals("$mode 无动画值时按开关态取", 1f, mergeProgressOf(plan, true, null), 0.001f)
             assertEquals("$mode 无动画值时按开关态取", 0f, mergeProgressOf(plan, false, null), 0.001f)
-            // 位移带符号且被实测空隙夹住：want = −68.5 × 0.16 = −10.96，夹到 −12 之内不触发，
-            // 再乘进度 0.25 ⇒ −2.74（负号 = 往左吸向录制键）
-            assertEquals("$mode 位移应为负（往录制键吸）", -2.74f, chipTravelPxOf(plan, 0.25f, -68.5f, 12f), 0.02f)
-            // 夹住的分支：按圆心距取比例已经越过空隙时必须被 clearance 截住（120% 那一档就是这种）
-            assertEquals("$mode 位移被实测空隙夹住", -12f, chipTravelPxOf(plan, 1f, -100f, 12f), 0.02f)
+            // 位移带符号且**放开到全程**：−68.5 × 0.25 = −17.125（负号 = 往左吸向录制键）
+            assertEquals("$mode 位移应为负（往录制键吸）", -17.125f, chipTravelPxOf(plan, 0.25f, -68.5f), 0.02f)
+            // 纲 = 那段圆心距本身：p=1 那颗的中心正好落在键心（与 blobX/blobY 的终点同一处）
+            assertEquals("$mode 终点落在键心", -68.5f, chipTravelPxOf(plan, 1f, -68.5f), 0.02f)
             assertTrue("$mode 中间态要画腰", waistVisibleFor(plan, 0.5f))
             assertEquals(
                 "$mode 的连通体不透明度就是 linkAlpha 那一条曲线",
@@ -262,48 +264,154 @@ class LiquidMergeTest {
         assertEquals(rRec * LiquidMerge.BLOB_TARGET_RATIO, blob, 0.001f)
     }
 
-    // ---------- ④ 录制态位移的安全余量（不能被那颗吃掉"停止录制"的点击） ----------
+    // ---------- ④ #71 第一批第 2 件：位移放开到「条目中心 → 键心」，且全程落在收拢中的底板轮廓内 ----------
 
     /**
-     * 底栏真实几何（100% 字体缩放，用 dp 数值表达，比例与真机一致）：
-     * 底板 216 = 内边距 8 + 左槽 63 + 间距 12 + 录制键 50 + 间距 12 + 右槽 63 + 内边距 8。
-     * 缩略图 34dp 贴左槽起始边 ⇒ 占 [8, 42]；录制键触摸盒 = [83, 133]；镜头那颗填满右槽 ⇒ 占 [145, 208]。
-     * 两颗的近缘与触摸盒之间只剩 41dp 与 **12dp**——位移必须被它夹住：那颗淡出之后命中区还在
-     * （alpha = 0 仍可点），越界就把"停止录制"那一指吃掉。
+     * 纲换成那段实测圆心距本身（旧版是 `min(圆心距 × TRAVEL_FRACTION, clearance)`，底栏实测只有
+     * 10.96dp / 13.28dp，那就是用户投诉的"只是原地淡化"的算术原因）。
+     *
+     * 红法：① 把 0.16 那套夹子写回来 → 前两条红（只剩 10.96/13.28）；② 进度不夹 0..1 → 第三、四条红
+     * （LIQUID 弹簧过冲会把那颗甩过键心，反向甩出则冲出原位）；③ 取绝对值 → 第二条红。
      */
     @Test
-    fun travelIsCappedByMeasuredClearance() {
-        val thumbClear = LiquidMerge.clearancePx(25f, 17f, 108f, 25f)
-        val lensClear = LiquidMerge.clearancePx(176.5f, 31.5f, 108f, 25f)
-        assertEquals(41f, thumbClear, 0.001f)
-        assertEquals(12f, lensClear, 0.001f)
-        for (p in listOf(0f, 0.25f, 0.5f, 0.75f, 1f)) {
-            val thumbEdge = 42f + LiquidMerge.chipTravelPx(p, 83f, thumbClear)
-            val lensEdge = 145f + LiquidMerge.chipTravelPx(p, -68.5f, lensClear)
-            assertTrue("p=$p 缩略图近缘 $thumbEdge 必须 ≤ 83", thumbEdge <= 83f + 0.001f)
-            assertTrue("p=$p 镜头近缘 $lensEdge 必须 ≥ 133", lensEdge >= 133f - 0.001f)
-        }
+    fun releasedTravelDeliversTheWholeGapToTheKeyCenter() {
+        assertEquals("镜头那颗一步吸到键心", -68.5f, LiquidMerge.chipTravelPx(1f, -68.5f), 0.001f)
+        assertEquals("缩略图那颗一步吸到键心", 83f, LiquidMerge.chipTravelPx(1f, 83f), 0.001f)
+        assertEquals("中途线性、带符号", -34.25f, LiquidMerge.chipTravelPx(0.5f, -68.5f), 0.001f)
+        assertEquals("正向过冲不许穿过键心", -68.5f, LiquidMerge.chipTravelPx(1.4f, -68.5f), 0.001f)
+        assertEquals("反向过冲不许甩出原位", 0f, LiquidMerge.chipTravelPx(-0.4f, -68.5f), 0.001f)
+        assertEquals("那颗本来就在键心时不位移", 0f, LiquidMerge.chipTravelPx(0.7f, 0f), 0.001f)
     }
 
+    /**
+     * 条目外缘与底板轮廓半宽的差（>0 = 露出轮廓）。中心位移与本体缩放都**直接调生产算式**
+     * （[LiquidMerge.chipTravelPx] / [LiquidMerge.chipScale]），轮廓走 [DockShell.sidePx]，
+     * 所以这不是"由定义推出的等式"，而是一条会因实现改动而红的行为断言。
+     *
+     * 三项对 p 都是线性的 ⇒「全程在内」⇔ 两个端点在内，端点账（100% 字体，dp）：
+     * · p=0：`d + hw ≤ 布局盒半宽` ⇔ 68.5+31.5 = 100 ≤ 108、83+17 = 100 ≤ 108（承重的就是那 8dp 内边距）
+     * · p=1：`0.72·hw ≤ 圆环半宽 23` ⇔ 镜头 22.68、缩略图 12.24（**靠 chipScale 在承重**）
+     *
+     * 红法：把位移改回 16% 那段夹子 → 循环里 p≥0.5 的采样全部红（那颗停在原地顶穿收拢中的轮廓）；
+     * 把 `chipScale` 撤成恒 1 → 最后一条与 p=1 那一档红。这条用例也是"本批不给条目加 clip"的依据。
+     */
     @Test
-    fun narrowClearanceWinsOverFraction() {
-        // 120% 字体缩放：槽宽 63→70.8、那颗半宽 31.5→35.4，触摸盒右缘 140.8，右槽左缘只剩 144.4
-        // ⇒ 空隙 3.6dp。按圆心距取比例会算出 −10.24dp，必须被夹到 −3.6dp：clearance 才是主约束
-        val clear = LiquidMerge.clearancePx(179.8f, 35.4f, 115.8f, 25f)
-        assertEquals(3.6f, clear, 0.01f)
-        assertEquals(-3.6f, LiquidMerge.chipTravelPx(1f, 115.8f - 179.8f, clear), 0.01f)
-        // 空隙算出来 ≤0（本来就重叠）时位移必须为 0：宁可不 animate，也不盖住录制键
-        assertEquals(0f, LiquidMerge.chipTravelPx(1f, 60f, 0f), 0.001f)
-        assertEquals(0f, LiquidMerge.chipTravelPx(1f, 60f, -8f), 0.001f)
+    fun releasedTravelKeepsChipsInsideTheCollapsingShell() {
+        val chips = listOf(68.5f to 31.5f, 83f to 17f)   // 镜头那颗 / 缩略图那颗：离键心距离 + 位移轴半宽
+        for ((delta, half) in chips) {
+            var i = 0
+            while (i <= 20) {
+                val p = i / 20f
+                val outside = edgeOutsideShellPx(delta, half, p, DockHalfStart, DockHalfEnd)
+                assertTrue("离键心 ${delta}dp 的颗在 p=$p 露出轮廓 $outside dp", outside <= 0.001f)
+                i++
+            }
+        }
+        assertTrue(
+            "终点帧的条目半宽（含 0.72 缩放）必须小于圆环半径，否则那颗顶出圆环",
+            31.5f * LiquidMerge.chipScale(1f) < DockHalfEnd
+        )
+    }
+
+    /**
+     * 反面对照（留档，别下批以为"漏了个 clip"）：120% 字体那一档那颗有 70.8dp 宽（位移轴半宽 35.4），
+     * 比 46dp 的圆环本身就宽，于是行程末段外缘会顶出收拢中的轮廓。露出量对 p 线性
+     * （`72.4(1-p) + 35.4(1-0.28p) - (115.8 - 92.8p) = -8 + 10.488p`）⇒ p≈0.763 起为正，
+     * 最坏（p=0.9）只有 1.44dp，而那一刻 `chipAlpha` 已经走到 0。
+     * 定版是"不加裁切"，这条用例钉的就是"露出只发生在淡出末段、且不超过 1.5dp"这个已知边界：
+     * 位移算式或淡出曲线被改坏（露出提前 / 变大）就红。
+     */
+    @Test
+    fun largeFontLeakIsKnownAndOnlyInTheFadingTail() {
+        val leakP = 0.77f
+        val leak = edgeOutsideShellPx(72.4f, 35.4f, leakP, 115.8f, DockHalfEnd)
+        assertTrue("末段才露，且不超过 1.5dp（实测 $leak）", leak in 0f..1.5f)
+        assertTrue("露出那一帧本体淡出已经 ≤ 0.2", LiquidMerge.chipAlpha(leakP) <= 0.2f)
+        // 100% 那一档的中段还在轮廓内 4dp 以上（上一条用例逐帧核过全程），这里钉一个对照数值
+        assertTrue(edgeOutsideShellPx(68.5f, 31.5f, 0.5f, DockHalfStart, DockHalfEnd) < -4f)
     }
 
     @Test
     fun travelKeepsItsSignTowardTheButton() {
         // 左边那颗往右吸（正），右边那颗往左移（负）：取绝对值就会把镜头那颗反着推出去
-        assertEquals(13.28f, LiquidMerge.chipTravelPx(1f, 83f, 41f), 0.01f)
-        assertEquals(-10.96f, LiquidMerge.chipTravelPx(1f, -68.5f, 41f), 0.01f)
-        assertEquals(0f, LiquidMerge.chipTravelPx(0f, 100f, 40f), 0.001f)
+        assertEquals(83f, LiquidMerge.chipTravelPx(1f, 83f), 0.01f)
+        assertEquals(-68.5f, LiquidMerge.chipTravelPx(1f, -68.5f), 0.01f)
+        assertEquals(0f, LiquidMerge.chipTravelPx(0f, 100f), 0.001f)
     }
+
+    /** 条目外缘离收拢中的轮廓还有多少（正 = 露出）；中心与缩放与轮廓三条都走生产算式 */
+    private fun edgeOutsideShellPx(deltaAbs: Float, chipHalfPx: Float, p: Float, dockHalfPx: Float, endHalfPx: Float): Float {
+        val travel = LiquidMerge.chipTravelPx(p, deltaAbs)
+        val center = deltaAbs - travel                       // 离键心还剩多少（体育场关于中心对称，取同侧幅度即可）
+        val half = chipHalfPx * LiquidMerge.chipScale(p)     // 本体同帧在缩小
+        val shellHalf = DockShell.sidePx(dockHalfPx, endHalfPx, p)
+        return center + half - shellHalf
+    }
+
+    // ---------- ④·补 #71 第一批第 1 件：底板整枚收拢（长度缩减，短轴也贴合，全程合法体育场形） ----------
+
+    /**
+     * 半宽/半高的账（100% 字体、镜头开，全部由令牌推出，用一半的数值表达同一笔账）：
+     * 布局盒 216×60 ⇒ 半宽 108、半高 30；终点是录制键**可见圆环** 46 ⇒ 半 23（不是 50 的命中盒）。
+     *
+     * 这条用例是"长度缩减 + 短轴同时贴合 + 没有椭圆帧"唯一能被静态核对的证据：
+     * 红法①只缩长轴不缩短轴（第一版的错）→ 短轴那条单调断言红；
+     * 红法②拿 `graphicsLayer.scaleX/scaleY` 非等比缩放代替自绘（第二版的错）→ 半径 = 短轴一半那条红；
+     * 红法③终点写成 50（命中盒）→ 终点两轴相等那条虽然仍成立，但 [DockHalfEnd] 与令牌分叉，
+     *   上面 `releasedTravelKeepsChipsInsideTheCollapsingShell` 的端点账立刻红（22.68 vs 25 那档）。
+     */
+    @Test
+    fun shellCollapsesBothAxesIntoAStadiumNotAnEllipse() {
+        var i = 0
+        var previousW = Float.MAX_VALUE
+        var previousH = Float.MAX_VALUE
+        var stadiumFrames = 0
+        while (i <= 20) {
+            val p = i / 20f
+            val w = DockShell.sidePx(DockHalfStart, DockHalfEnd, p)
+            val h = DockShell.sidePx(DockHalfTop, DockHalfEnd, p)
+            assertTrue("长轴单调收拢（p=$p）", w <= previousW + 0.0001f)
+            assertTrue("短轴也必须收拢（p=$p）", h <= previousH + 0.0001f)
+            previousW = w
+            previousH = h
+            assertEquals("半径恒等于短轴一半（描边因此全程不被压扁）", h, 2f * DockShell.cornerRadiusPx(w, h), 0.0001f)
+            if (p < 1f) {
+                assertTrue("到底之前长轴严格大于短轴（p=$p），平直段 = w−h 还在", w > h)
+                stadiumFrames++
+            }
+            i++
+        }
+        assertEquals("终点两轴相等 ⇒ 那一帧是正圆", DockShell.sidePx(DockHalfStart, DockHalfEnd, 1f), DockShell.sidePx(DockHalfTop, DockHalfEnd, 1f), 0.0001f)
+        assertTrue("中段要有足够帧数才谈得上「全程体育场」", stadiumFrames >= 15)
+    }
+
+    /** 进度夹在 0..1：弹簧过冲不许把轮廓收成负尺寸，也不许让它反向长大到超出布局盒 */
+    @Test
+    fun shellSideClampsOvershoot() {
+        assertEquals(DockHalfEnd, DockShell.sidePx(DockHalfStart, DockHalfEnd, 1f), 0.0001f)
+        assertEquals(DockHalfEnd, DockShell.sidePx(DockHalfStart, DockHalfEnd, 1.4f), 0.0001f)
+        assertEquals(DockHalfStart, DockShell.sidePx(DockHalfStart, DockHalfEnd, -0.4f), 0.0001f)
+        // 不夹的话 p=1.4 会把长轴算成 108 − 85×1.4 = −11（负尺寸什么都画不出来，等于底板消失）
+        assertTrue("夹住之后必须是正数", DockShell.sidePx(DockHalfStart, DockHalfEnd, 1.4f) > 0f)
+        assertEquals("收拢中的轮廓留在布局盒正中（中心 ≡ 键心 ≡ 可视水平中心）", 42.5f, DockShell.insetPx(DockHalfStart, DockHalfEnd), 0.0001f)
+    }
+
+    /**
+     * PLAIN 档的底板没有中间帧：形状只由 [mergeProgressOf] 那条桥决定，于是直接是起点或终点那一档。
+     * 红法：把桥里的 `if (plan.animated)` 删掉 → PLAIN 吃到 0.4f 这个中间值，四条断言全红。
+     */
+    @Test
+    fun plainShellIsTerminalShapeNotAnIntermediateOne() {
+        val plain = mergePlanFor(MotionMode.PLAIN)
+        for (recording in listOf(true, false)) {
+            val p = mergeProgressOf(plain, recording, 0.4f)
+            val expectHalf = if (recording) DockHalfEnd else DockHalfStart
+            assertEquals("PLAIN 的长轴只能是端点", expectHalf, DockShell.sidePx(DockHalfStart, DockHalfEnd, p), 0.0001f)
+            assertEquals("PLAIN 的短轴只能是端点", if (recording) DockHalfEnd else DockHalfTop, DockShell.sidePx(DockHalfTop, DockHalfEnd, p), 0.0001f)
+            assertEquals("PLAIN 的位移恒 0（那颗不飞）", 0f, chipTravelPxOf(plain, p, -68.5f), 0.0001f)
+        }
+    }
+
 
     // ---------- ⑤ 场景坐标换算（绘制层读的是相对宿主节点的位置） ----------
 
@@ -320,10 +428,9 @@ class LiquidMergeTest {
         // 半径取短边一半：胶囊 63×30 → 15，录制键 50×50 → 25
         assertEquals(15f, scene.radius(MergeScene.LENS), 0.001f)
         assertEquals(25f, scene.radius(MergeScene.RECORD), 0.001f)
-        // 位移轴上的半宽取的是**宽**的一半（31.5 而不是 15）：算命中区余量必须用它，
-        // 用内切圆半径会把空隙高估一倍以上，正是第一次把位移算漏的原因
-        assertEquals(31.5f, scene.halfWidth(MergeScene.LENS), 0.001f)
-        assertEquals(25f, scene.halfWidth(MergeScene.RECORD), 0.001f)
+        // （原来这里还钉过 `halfWidth` —— 位移轴半宽，它是 clearance 夹子的输入。#71 第一批把纲换成
+        //  「条目中心到键心的距离」之后那个夹子与 halfWidth 一起删了，半宽的账改由
+        //  `edgeOutsideShellPx` 直接用 dp 数值表达，见 `releasedTravelKeepsChipsInsideTheCollapsingShell`）
         // 那颗没组合时面积为 0：绘制层据此不画腰、底板也不留空壳
         scene.put(MergeScene.LENS, 0f, 0f, 0f, 0f)
         assertEquals(0f, scene.area(MergeScene.LENS), 0.001f)
@@ -333,6 +440,51 @@ class LiquidMergeTest {
         assertEquals(50f * 50f, scene.area(MergeScene.RECORD), 0.001f)
         // CANVAS 的中心换算也自洽：宿主自己相对自己 = 宽的一半
         assertEquals(109f, scene.cx(MergeScene.CANVAS), 0.001f)
+    }
+
+    /**
+     * 底板那枚 `clip` 撤掉之后（#71 第一批把 `wotaCard` 换成纯绘制的 [com.wotagei.cam.ui.anim.wotaDockShell]），
+     * 腰（连通体）必须**自己**出不了布局盒，否则细胞分裂那几帧会画到底板外面。
+     *
+     * 布局盒 216×60 ⇒ 半宽 108、半高 30。腰的全部材料 = 原位圆 + 液滴圆 + 两条公切贝塞尔，
+     * 而三颗的中心都在同一水平中线上（底栏的几何前提，第二条断言就在校这件事），所以轴是水平的、
+     * 法向就是竖直的 ⇒ 横向最远 = 两圆心离盒心的最大距离 + 各自半径，纵向最远 = max(半径, |控制点偏移|)。
+     * 三次贝塞尔不会超出控制点凸包，所以这个上界是**闭式**的，不用逐点采样曲线。
+     *
+     * 红法：`CUT_FACTOR`/`WAIST_EXPONENT`/`controlOffsetPx` 任一处被改大使腰鼓出去，或 `BLOB_TARGET_RATIO`
+     * 被抬到让液滴比键还粗 → 上界超过 108/30；`blobX` 写反方向 → 第一条坐标前提红。
+     */
+    @Test
+    fun linkCannotEscapeTheLayoutBoxNowThatTheClipIsGone() {
+        val scene = MergeScene()
+        scene.put(MergeScene.CANVAS, 0f, 0f, 216f, 60f)
+        scene.put(MergeScene.THUMB, 8f, 13f, 34f, 34f)   // 左槽：内边距 8dp 起，垂直居中
+        scene.put(MergeScene.LENS, 145f, 15f, 63f, 30f)  // 右槽：那颗填满 63dp 槽，垂直居中
+        scene.put(MergeScene.RECORD, 83f, 5f, 50f, 50f)
+        val rcx = scene.cx(MergeScene.RECORD)
+        val rcy = scene.cy(MergeScene.RECORD)
+        val rRec = scene.radius(MergeScene.RECORD)
+        assertEquals("键心 ≡ 布局盒中心（不变量②，坐标前提就这一条）", 108f, rcx, 0.001f)
+        for (target in listOf(MergeScene.THUMB, MergeScene.LENS)) {
+            val hx = scene.cx(target)
+            val hr = scene.radius(target)
+            assertEquals("两颗中心与键心同一条水平中线", rcy, scene.cy(target), 0.001f)
+            var i = 1
+            while (i <= 20) {
+                val p = i / 20f
+                val bx = LiquidMerge.blobX(p, hx, rcx)
+                val br = LiquidMerge.blobRadius(p, hr, rRec)
+                val waist = LiquidMerge.waistRadiusPx(
+                    abs(bx - hx), hr, br, LiquidMerge.cutDistancePx(hr, br)
+                )
+                val c = abs(LiquidMerge.controlOffsetPx(waist, hr, br))
+                val farX = max(abs(hx - rcx) + hr, abs(bx - rcx) + br)
+                val farY = max(max(hr, br), c)
+                assertTrue("target=$target p=$p 腰横向最远 $farX 必须 ≤ 108", farX <= 108f + 0.001f)
+                assertTrue("target=$target p=$p 腰纵向最远 $farY 必须 ≤ 30", farY <= 30f + 0.001f)
+                i++
+            }
+        }
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -504,5 +656,12 @@ class LiquidMergeTest {
         const val EdgePadDp = 8f   // HudLayer.HudEdgePad（WotaSpace.s）：读数块 padding(end=) 那枚设计留白
         const val TopBarDp = 44f   // CameraScreen.TopBarSpace 首帧兜底
         const val BottomBarDp = 72f // CameraScreen.BottomBarSpaceFallback（50 + 5×2 + 6×2）
+
+        // #71 第一批的底板收拢账（**半宽/半高**表达，100% 字体、镜头开，全部由令牌推出）：
+        // 布局盒 216×60 ⇒ 半宽 108、半高 30；终点是录制键可见圆环 WotaHit.recordRing 46 ⇒ 半 23
+        // （不是 50 的命中盒 recordTouch——那是命中区不是形状）。见 DockShell 的 KDoc。
+        const val DockHalfStart = 108f
+        const val DockHalfTop = 30f
+        const val DockHalfEnd = 23f
     }
 }
