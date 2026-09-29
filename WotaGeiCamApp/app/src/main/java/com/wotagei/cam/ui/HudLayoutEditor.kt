@@ -73,25 +73,34 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * 「编辑控件」页（docs/plan/13 第 5 条）：拖容器改位置、容器内换序、跨容器挪，保存写 `hud_layout`。
+ * 「编辑控件」页（docs/plan/13 第 5 条 + 任务 #74 的网格改造）：拖容器改位置、拖条目改格子，保存写 `hud_layout`。
  *
  * ## 与录制页共用同一条渲染路
  * 五枚容器全走 [HudZoneBox] + [HudTopZone] / [HudDockZone] / [HudReadoutZone] / [HudBottomZone]，
- * 位置表读同一份 [HudLayoutTable]，钳制走同一条 [clampZonePos]，读数块的"底边 + 一行几颗"走同一条
- * [planReadoutRow]（#70 A），胶囊档位走同一条 [chipTierFor]（#70 B）。
+ * 位置表读同一份 [HudLayoutTable]，钳制走同一条 [clampZonePos]，格子也走同一条 [HudLayoutTable.gridItems]
+ * （**两页没有第二份"格子 → 坐标"**），读数块的"底边 + 一行几颗"走同一条 [planReadoutRow]（#70 A），
+ * 胶囊档位走同一条 [chipTierFor]（#70 B）。
  * 所以"编辑页画了个假布局、两边分叉"在结构上不可能发生。**唯一**的差别是数据源：这页没有相机、
  * 没有传感器，读数取的是**用户设定的开机默认值**（[WotaSettings.applyDefaults] 那条链，与录制页
  * 同一份 prefs）与**真实剩余空间**（`VideoStore.freeSpaceMb()`，与录制页同一个来源）。
  *
- * 蓝牙/水平姿态/音量这三颗在这页拿到的是出厂态（未连接 / 水平 / 静音），因为它们的实时数据源
- * （蓝牙控制器、加速度计、编码器振幅）都挂在录制页上。**不是假开关**：显隐判据一条没少，
- * 闪光灯（本机有无闪光）、对焦（能否调焦）、音量表（只在录制中）这三条运行时判据仍在
- * [CameraScreen] 的可见条目集里，这页能摆的只是**位置**。
+ * ## 条目拖拽 = 吸附到格子（#74 的核心）
+ * [HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT] 三枚容器里，每颗条目自带一个 [GridCell]：
+ * 拖动 ⇒ [cellAtPointer] 吸附到指针压住的那一格 ⇒ [clampCellToBox] 钳进可放带 ⇒ [freeCellNear] 找空格
+ * （**只落空格，不与占位那颗交换**——交换等于"动一颗会动另一颗"，与用户这句诉求正面冲突）。
+ * 顶栏与底栏仍按顺序插位（为什么那两枚不上网格见 [HudZone.isGrid]）。
+ * 预览与写表读的是**同一个** [snapOf]，所以"看着在哪一格"与"落在哪一格"不可能差半格；
+ * 格长不另量，从网格节点实测矩形按 [gridPitchOf]（[gridSizePx] 的逆）除回来。
+ *
+ * ## 蓝牙/水平姿态/音量这三颗在这页拿到的是出厂态
+ * （未连接 / 水平 / 静音），因为它们的数据源（蓝牙控制器、加速度计、编码器振幅）都挂在录制页上。
+ * **不是假开关**：显隐判据一条没少，闪光灯（本机有无闪光）、对焦（能否调焦）、音量表（只在录制中）
+ * 这三条运行时判据仍在 [CameraScreen] 的可见条目集里，这页能摆的只是**位置**。
  *
  * ## 手势：一层捕获层
  * 拖动是这页唯一的手势，所以整页盖一层透明捕获层（[pointerInput] + `detectDragGestures`）。
- * 捕获层排在容器之后 ⇒ z 序在上面：命中某颗条目 → 拖**条目**（原位留空壳 + 跟手的 ghost + 「腰」）；
- * 否则命中某枚容器 → 拖**整枚容器**（底栏这枚只认纵向：松手后横向弹回可视中心并给一句提示，
+ * 捕获层排在容器之后 ⇒ z 序在上面：命中某颗条目 → 拖**条目**（原位留空壳 + 跟手的 ghost + 「腰」+
+ * 落点格描边）；否则命中某枚容器 → 拖**整枚容器**（底栏这枚只认纵向：松手后横向弹回可视中心并给一句提示，
  * x 进不了表，见 [dropContainer]）。这样不会出现"想拖动却把参数面板点开"，也不让子控件的
  * `clickable` 与父层拖拽互相抢事件（那种组合在 Compose 里本就不可靠）。代价照实写：
  * 这页点不到控件，要改参数回录制页改。
@@ -101,18 +110,21 @@ import kotlin.math.roundToInt
  * 超过阈值掐断），半径取条目与 ghost 的实测短边一半，**没有第二套腰公式**。
  * `Path` 与 [Stroke] 在组合期 [remember]，每帧只 `reset()` + 追加，零分配。
  * 红线照旧：拖动位移只进 draw 阶段与布局偏移之外的那一层（draw 阶段读快照状态只重画那一层，
- * 不重组整页），松手落位那一帧才把绝对坐标写进表 —— 一次重排，不是动画。
+ * 不重组整页），松手落位那一帧才把格子与绝对坐标写进表 —— 一次重排，不是动画。
+ * **格子位置一律不做动画**（AGENTS.md 与 `Motion.kt` 的红线），落点预览也只是 draw 阶段一枚描边框。
  *
  * ## 越界钳制与重叠
  * 钳制吃**安全区实测宽高**（套了 safeDrawingPadding() 之后那块，挖孔让掉的边已经在里面）与本层实测的
  * 两条避让量：操作栏高（对应录制页的顶栏实测高）与底栏那排实占带高，没有新写魔法数，也没有按方向写死的
- * 右缘让位量（任务 #68 删的就是它，见 docs/plan/13 §九·补）。重叠**只提示不禁止**（用户定的口径），
+ * 右缘让位量（任务 #68 删的就是它，见 docs/plan/13 §九·补）。格子的可放带同理：行由带高除出来、
+ * 读数块的列由 `planReadoutRow` 那条可用宽除出来（[gridBoxOf]）。重叠**只提示不禁止**（用户定的口径），
  * 提示把叠在一起的两枚容器点名，不静默。
  *
  * ## 保存语义
  * 改动先进内存草稿，**点「保存」才落 prefs**（录制页每次组合直读 prefs + 挂变更监听，所以立刻生效）；
  * 返回不保存就整批丢弃，文案里写明白了。「重置」两步确认（第一次只是武装，第二次才清），
  * 清完给一个**即时可重做**的「撤销」—— 靠的是重置前那一份编码串原样写回，不是内存里的手抄本。
+ * 重置与撤销都连格子一起回默认（[HudLayoutTable.default] 的格子表是空的）。
  */
 @Composable
 @Suppress("LongMethod")
@@ -152,6 +164,9 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     // 拿上一副姿态的陈旧值去判"装不下"会把读数闩在错误那一档（与录制页同一个理由，见 CameraScreen）
     val zoneRects = remember(configuration.orientation) { mutableStateMapOf<HudZone, IntRect>() }
     val entryRects = remember { mutableStateMapOf<HudEntry, IntRect>() }
+    // #74：三枚网格容器的**网格节点**矩形（窗口 px）。格长由它反解，落点吸附与预览都读这一份。
+    // 与录制页同一套"首帧量不到就退化成不吸附"的两轮收敛手法，见 snapCellOf 返回 null 那两支。
+    val gridRects = remember { mutableStateMapOf<HudZone, IntRect>() }
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
     // 与录制页同一个"横屏"真源（定版：横屏永远同行）
@@ -196,9 +211,23 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         )
     }
     val readoutArea = baseArea.copy(bottomAvoidDp = readoutPlan.bottomAvoidDp)
-    // 与录制页同一条：右竖 Dock 的下界要让开读数块那一截，但同一条横带上取大不求和
+    // 与录制页同一条：右竖 Dock 的下界还要让开读数块那一截，但同一条横带上取大不求和
     val rightArea = areaForRightDock(baseArea, hudStripH, readoutPlan.bottomAvoidDp)
     val perRow = readoutPlan.perRow
+    // #74：网格解析的两份运行时输入。与录制页同一份构造（可见集 + 读数块一行几颗），
+    // 两页的"格子 → 坐标"都只经 [HudLayoutTable.gridItems] 这一条，不许出现第二份算式
+    val gridPlan = HudGridPlan(visible = visibleEntries, readoutPerRow = perRow)
+
+    /** 这一枚容器的**可放带**（钳制格子落点用），与它自己的 [HudZoneBox] 喂的是同一份 area */
+    fun bandOf(zone: HudZone): Int = when (zone) {
+        HudZone.LEFT -> zoneBandHeight(HudZone.LEFT, baseArea)
+        HudZone.RIGHT -> zoneBandHeight(HudZone.RIGHT, rightArea)
+        HudZone.READOUT -> zoneBandHeight(HudZone.READOUT, readoutArea)
+        else -> 0
+    }
+
+    /** 读数块那枚容器的**可用内宽**（[planReadoutRow] 算出来的那一档，横方向没有滚动可取用） */
+    fun roomOf(zone: HudZone): Int = if (zone == HudZone.READOUT) readoutPlan.roomWidthDp.toInt() else 0
 
     // ---- 拖拽态。位移只在 draw 阶段与 ghost 的 offset 里用，所以是快照状态但只在绘制期读
     var dragEntry by remember { mutableStateOf<HudEntry?>(null) }
@@ -231,14 +260,79 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
     val overlaps = overlappingZones(zoneRectsDp())
 
-    /** 落点格位：目标容器 + 第几格，两条判据都是 [HudLayout] 里的纯函数 */
+    /**
+     * 指针 → 这一帧的落点格子（**跟手预览与松手写表共用这一条**，两处各算一次就会差半格）。
+     *
+     * 返回 null 的三种情况都按"不吸附、只换顺序"处理：① 目标不是网格容器；② 这一帧还没量到网格节点
+     * （进页首帧，与 `dockStripH` 那一套两轮收敛同一手法）；③ 格长反解出 0。
+     *
+     * 格长不另量一遍，从网格节点的实测矩形**除回来**：渲染层的正算式是
+     * [gridSizePx]（`列数 × 格长 − 一道行距`），这里就是它的逆 [gridPitchOf]。
+     * 空容器（一列都没有）时退回"被拖那颗自己的实测尺寸 + 行距"，因为那一刻格长只能由它撑。
+     */
+    fun snapOf(dragged: HudEntry?): GridSnap? {
+        val entry = dragged ?: return null
+        val pointer = HudPointPx(dragPointer.x.roundToInt(), dragPointer.y.roundToInt())
+        val zone = zoneAt(
+            HudPointDp(pxToDp(pointer.x.toFloat(), density.density), pxToDp(pointer.y.toFloat(), density.density)),
+            zoneRectsDp()
+        ) ?: draft.sourceZoneOf(entry)
+        if (!zone.isGrid) return null
+        val rect = gridRects[zone] ?: return null
+        val items = draft.gridItems(zone, gridPlan)
+        val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
+        val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
+        val gapPx = with(density) { hudGridGap(zone).roundToPx() }
+        val own = entryRects[entry]
+        val pitch = gridPitchOf(
+            gridWidthPx = rect.width, gridHeightPx = rect.height, cols = cols, rows = rows, gapPx = gapPx,
+            fallbackChildWidthPx = own?.width ?: ghostSize.width,
+            fallbackChildHeightPx = own?.height ?: ghostSize.height
+        )
+        if (pitch.width <= 0 || pitch.height <= 0) return null
+        val box = gridBoxOf(
+            zone = zone,
+            pitchXDp = pxToDp(pitch.width.toFloat(), density.density),
+            pitchYDp = pxToDp(pitch.height.toFloat(), density.density),
+            bandHeightDp = bandOf(zone),
+            roomWidthDp = roomOf(zone)
+        )
+        val origin = HudPointPx(rect.left - originXPx, rect.top - originYPx)
+        val wanted = clampCellToBox(cellAtPointer(pointer, origin, pitch), box)
+        return GridSnap(
+            zone = zone,
+            // 被占了就就近让到空格：编辑页不许把两颗钳进同一格（那等于又造出"动一颗影响另一颗"）
+            cell = freeCellNear(wanted, draft.occupiedCells(zone, gridPlan, exclude = entry), box.cols, box.rows),
+            origin = origin,
+            pitch = pitch,
+            gapPx = gapPx
+        )
+    }
+
+    /**
+     * 松手写表。两条路（[HudZone.isGrid] 说了算，本批只有左/右 Dock 与读数块走网格）：
+     * - **网格容器** ⇒ 吸附到最近的可落空格（[snapCellOf]），经 [HudLayoutTable.placeEntryAt] 落表。
+     *   这一步同时把来源与目标两枚容器的推导格**钉成显式格**，所以别的颗一颗都不会动；
+     * - **顶栏 / 底栏** ⇒ 维持"按顺序插第 index 格"（[HudLayoutTable.moveEntryTo]），那两枚容器的
+     *   宽度账与 `W/2` 居中不变量不能上网格，理由逐条写在 [HudZone] 的枚举头。
+     * 两支都同样把来源容器钉住：从网格容器抽走一颗而不钉，剩下那些"没摆过"的颗会按新的可见顺序
+     * 重新推导 ⇒ 集体上移，那正是用户抱怨的耦合。
+     */
     fun dropEntry() {
         val entry = dragEntry ?: return
         val pointer = HudPointDp(pxToDp(dragPointer.x, density.density), pxToDp(dragPointer.y, density.density))
-        val target = zoneAt(pointer, zoneRectsDp()) ?: draft.sourceZoneOf(entry)
+        val snap = snapOf(entry)
+        val target = snap?.zone ?: zoneAt(pointer, zoneRectsDp()) ?: draft.sourceZoneOf(entry)
         val ordered = draft.visibleOrderOf(target, visibleEntries).filter { it != entry }
         val rects = ordered.mapNotNull { toDpRect(entryRects[it]) }
-        draft = draft.moveEntryTo(entry, target, dropIndexFor(target.axis, rects, pointer))
+        // 网格容器按"行优先"数插位（与格网读序一致），非网格容器仍按各自主轴
+        val axis = if (target.isGrid) HudAxis.GRID else target.axis
+        val index = dropIndexFor(axis, rects, pointer)
+        draft = if (snap != null) {
+            draft.placeEntryAt(entry, target, index, snap.cell, gridPlan)
+        } else {
+            draft.moveEntryTo(entry, target, index, gridPlan)
+        }
     }
 
     /**
@@ -410,8 +504,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 prefs = prefs,
                 params = params,
                 freeMb = freeMb,
-                perRow = perRow,
                 entryRects = entryRects,
+                gridRects = gridRects,
                 capacityRoomDp = (safeW - 66f).coerceAtLeast(1f),
                 hiddenEntry = dragEntry
             )
@@ -433,7 +527,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             ) {
                 HudDockZone(
                     HudZone.LEFT,
-                    draft.visibleOrderOf(HudZone.LEFT, visibleEntries),
+                    draft.gridItems(HudZone.LEFT, gridPlan),
                     ctx,
                     zoneBandHeight(HudZone.LEFT, baseArea)
                 )
@@ -448,7 +542,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             ) {
                 HudDockZone(
                     HudZone.RIGHT,
-                    draft.visibleOrderOf(HudZone.RIGHT, visibleEntries),
+                    draft.gridItems(HudZone.RIGHT, gridPlan),
                     ctx,
                     zoneBandHeight(HudZone.RIGHT, rightArea)
                 )
@@ -462,7 +556,7 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 onCardRect = { if (zoneRects[HudZone.READOUT] != it) zoneRects[HudZone.READOUT] = it }
             ) {
                 HudReadoutZone(
-                    draft.visibleOrderOf(HudZone.READOUT, visibleEntries),
+                    draft.gridItems(HudZone.READOUT, gridPlan),
                     ctx,
                     zoneBandHeight(HudZone.READOUT, readoutArea)
                 )
@@ -493,6 +587,25 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     .matchParentSize()
                     .drawWithContent {
                         drawContent()
+                        // 落点预览（#74）：吸附结果与松手写表读的是**同一个** [snapOf]，
+                        // 所以"看着在哪一格"与"落在哪一格"是同一个数，不会画一格落另一格。
+                        // 只画描边（复用那枚 WotaStroke.hairline 的 linkEdge，没有新观感值）、
+                        // 只进 draw 阶段：布局参数一个不动、没有位置动画（AGENTS.md 与 Motion.kt 的红线）
+                        snapOf(dragEntry)?.let { snap ->
+                            val at = cellOffsetPx(snap.cell, snap.pitch)
+                            drawRect(
+                                color = WotaColor.accentDim,
+                                topLeft = Offset(
+                                    (snap.origin.x + at.x).toFloat(),
+                                    (snap.origin.y + at.y).toFloat()
+                                ),
+                                size = androidx.compose.ui.geometry.Size(
+                                    (snap.pitch.width - snap.gapPx).toFloat(),
+                                    (snap.pitch.height - snap.gapPx).toFloat()
+                                ),
+                                style = linkEdge
+                            )
+                        }
                         val src = sourceLocal ?: return@drawWithContent
                         // draw 阶段读 dragStart/dragShift/ghostSize 这几个快照状态 ⇒ 只让这一层重画，
                         // 不重组整页（这是本文件唯一每帧被读的状态，其余都在松手之后才写）
@@ -596,6 +709,20 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 private fun IntRect.containsLocal(x: Float, y: Float): Boolean =
     x >= left && x < right && y >= top && y < bottom
 
+/**
+ * 一次拖动的吸附结果（安全区局部 px）：落在哪枚容器的哪一格、格网原点与格长各是多少。
+ *
+ * [pitch] 与 [origin] 一起带出来只为一个目的：**预览框与落点用同一份数据**，
+ * 否则预览要再算一次格长，那就是"格子 → 坐标"的第二份算式（S3-5 那一族）。
+ */
+private data class GridSnap(
+    val zone: HudZone,
+    val cell: GridCell,
+    val origin: HudPointPx,
+    val pitch: HudSizePx,
+    val gapPx: Int
+)
+
 /** 五枚容器的中文名资源 id（重叠提示用，别露出 T/L/R/D/B 那种持久化 id） */
 @androidx.annotation.StringRes
 private fun zoneLabelRes(zone: HudZone): Int = when (zone) {
@@ -651,9 +778,13 @@ private fun editorReadoutOf(params: WotaParams): EditorReadout = EditorReadout(
 /**
  * 编辑页的 [HudCtx]：读数取开机默认参数 + 真实剩余空间，动作一律空实现（捕获层在上面，这页点不到条目）。
  *
- * [HudCtx.anchorOf] 这一路在这页改写成「条目矩形回报」：就近浮层在这页不弹，但落点格位与 ghost 半径
- * 都要每颗条目的实测矩形，而 [HudEntryItem] 只认 `ctx.anchorOf` 这一处挂点 —— 所以复用它，
+ * [HudCtx.anchorOf] 这一路在这页改写成「条目矩形回报」：就近浮层在这页不弹，但 ghost 半径
+ * 要每颗条目的实测矩形，而 [HudEntryItem] 只认 `ctx.anchorOf` 这一处挂点 —— 所以复用它，
  * 不另开一条回报路（两条路迟早一边写了另一边没写）。
+ *
+ * [HudCtx.gridOf] 这一路在这页改写成「**网格节点**矩形回报」：#74 的格子吸附要格网原点与格长，
+ * 而格长只能从渲染层那次 `gridSizePx` 反解（[gridPitchOf] 是它的逆）；姿态仪与音量表那两颗不报锚点，
+ * 用条目矩形取"最宽/最高那颗"会漏掉它们 ⇒ 必须量网格本体那一个节点。录制页传的是空链，不做吸附。
  *
  * 容量段按**满档**取（[capacityRoomDp] 给的是宽裕值）：这页没有录制页那 66dp 的固定预留可量，
  * 摆位置要看的是"这一段最多占多宽"，§74 三档里满档就是最宽的那一档，按最宽的摆不会挤。
@@ -663,8 +794,8 @@ private fun editorCtx(
     prefs: SharedPreferences,
     params: WotaParams,
     freeMb: Long,
-    perRow: Int,
     entryRects: MutableMap<HudEntry, IntRect>,
+    gridRects: MutableMap<HudZone, IntRect>,
     capacityRoomDp: Float,
     hiddenEntry: HudEntry?
 ): HudCtx {
@@ -714,9 +845,11 @@ private fun editorCtx(
                 HudItem.BITRATE -> d.bitrateLabel
             }
         },
-        readoutPerRow = perRow,
         anchorOf = { entry ->
             Modifier.pillAnchor { rect -> if (entryRects[entry] != rect) entryRects[entry] = rect }
+        },
+        gridOf = { zone ->
+            Modifier.pillAnchor { rect -> if (gridRects[zone] != rect) gridRects[zone] = rect }
         },
         onSizeClick = { },
         onFreeClick = { },

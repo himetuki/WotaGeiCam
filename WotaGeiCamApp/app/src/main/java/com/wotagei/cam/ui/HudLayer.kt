@@ -64,12 +64,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
@@ -135,6 +137,12 @@ import kotlin.math.roundToInt
  * 天然跟着视觉位置走（§69 那族「浮层甩到屏幕原点」的另一半成因就是位置改了锚点没改）。
  * 编辑页拖动过程中走 [graphicsLayer] 位移（不动布局参数，四条红线之一），松手那一帧才写 offset ——
  * 一次重排，不是动画；录制页也从不在拖动手势里开浮层。
+ *
+ * 容器**内**的位置（任务 #74）：[HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT] 三枚走
+ * **固定格子**（[HudEntryGrid]，条目坐标只由 [GridCell] 与实测格长决定，见 [gridPitchPx]），
+ * 顶栏与底栏仍按 [HudLayoutTable.visibleOrderOf] 的顺序紧凑排布——为什么那两枚不能上网格，
+ * 逐条写在 [HudZone.isGrid] 的注释里。**每颗的锚点仍然挂在那颗自己的节点上**（[HudEntryItem] 里
+ * `ctx.anchorOf(entry)` 这一处），换成格子定位没有动这条结构闸。
  */
 
 /** 底栏那排自己的上下外边距（底板之外的 padding，同时进 [BottomBarSpaceFallback] 的算式） */
@@ -311,8 +319,16 @@ data class HudCtx(
     val aeLocked: Boolean,
     /** 读数格的当前值；返回 null = 这一格此刻不适用（如 AE 手动档下的 EV），淡出、不占位 */
     val readoutValue: @Composable (HudItem) -> String?,
-    /** 一行几颗读数：调用方按可用宽与字体缩放算（[hudPerRowFor]，横屏还要过 `DockRowPerRowCap`） */
-    val readoutPerRow: Int,
+    /**
+     * **网格节点的锚点挂点**（任务 #74，编辑页的格子吸附只有这一条数据来源）。
+     *
+     * 与 [anchorOf] 同一条纪律：**没有默认值**（#69 铁律）。它挂在 [HudEntryGrid] 那个 `Layout` 节点上，
+     * 回报的是"格网原点 + 网格实测尺寸"，编辑页据此反解格长（[gridPitchPx] 的逆算）。
+     * 给默认值 `Modifier` 的话，编辑页漏挂就静默退化成"量不到格子 ⇒ 只换顺序"，
+     * 而那正是本次要修的"拖一颗动一片"的老行为，测试里也照不出漏挂。
+     * 录制页不需要格子吸附，传 `{ Modifier }`（零成本：那条链上一个节点都不加）。
+     */
+    val gridOf: (HudZone) -> Modifier,
     // ---- 锚点与动作
     val anchorOf: (HudEntry) -> Modifier,
     val onSizeClick: () -> Unit,
@@ -731,44 +747,112 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
 }
 
 /**
- * 竖 Dock 的一枚（[HudZone.LEFT] / [HudZone.RIGHT]）：一枚圆角底板 + 内部按 [hudRowGroups] 分行。
+ * 网格的行距（同一枚容器横竖共用一档，与 #74 之前那两处 `spacedBy` 逐字同值）：
+ * · 两枚竖 Dock = [WotaSpace.xs]（改前是 `Column`/`Row` 的 `spacedBy(WotaSpace.xs)`）；
+ * · 读数块 = [HudRowGapDp]（改前是 `spacedBy(HudRowGapDp.dp)`，与 `hudStripHeightDp` 的行距同一真源）。
  *
- * 宽度不写死：由底板内最宽那行撑出来，所以字体 120% 时自动加宽，§58/§73 那族
- * 「按 100% 字体量出来的固定宽在 120% 下裁字」在这里不复发。
+ * **渲染层与编辑页都只读这一条**：格子边长 = 最宽/最高那颗 + 这个行距（[gridPitchPx]），
+ * 两处各写一份的话编辑页的吸附就会与画出来的位置错开半格（S3-5 那一族"两边判的不是同一条不等式"）。
+ */
+internal fun hudGridGap(zone: HudZone): Dp =
+    if (zone == HudZone.READOUT) HudRowGapDp.dp else WotaSpace.xs
+
+/**
+ * 一枚容器里的**固定格网**（任务 #74 的渲染落点）。
+ *
+ * 为什么必须自己写 `Layout` 而不是 `Column`/`Row` + `spacedBy`：后者把"第几颗"当成位置来源，
+ * 抽走或插入一颗就整体重排——那是本次要拆的耦合。`Layout` 里格长取**实测**的最宽/最高颗
+ * （[gridPitchPx]），落点只由 `col/row` 决定（[cellPlaceOffsetPx]），所以：
+ * - 移动任意一颗都不改变其他任何一颗的屏幕坐标（空格子就空着）；
+ * - 字体拉到 120% 时格长自己变大（颗的实测尺寸涨了），不需要任何按 100% 量出来的固定值，
+ *   §58/§73 那族"固定档位在 120% 裁字"在这里没有落点；
+ * - 只有一列 / 只有一行时总宽总高与改前 `spacedBy` 的紧凑排布**逐像素相等**（见 [gridSizePx] 那笔减法）。
+ *
+ * 定位只发生在**布局期**（`placeRelative`），没有位置动画、没有 `animateDpAsState`
+ * （AGENTS.md 与 `Motion.kt` 的红线：预览层之上不做布局参数动画）。容器整体仍然只在
+ * [HudZoneBox] 那一层承担位置。
+ *
+ * 网格节点自己经 [Modifier]（调用方传 `ctx.gridOf(zone)`）回报窗口矩形：编辑页由它反解格长，
+ * 不需要再量每颗条目（姿态仪与音量表那两颗本来就不报锚点，见 [HudEntryItem] 的 when 分支）。
+ */
+@Composable
+private fun HudEntryGrid(
+    items: List<HudGridItem>,
+    zone: HudZone,
+    modifier: Modifier = Modifier,
+    content: @Composable (HudEntry) -> Unit
+) {
+    val gap = hudGridGap(zone)
+    Layout(content = { items.forEach { content(it.entry) } }, modifier = modifier) { measurables, constraints ->
+        // 与改前 Column/Row 的宽松约束同一条：条目按自己的内容量，不被格子拉伸
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val placeables = measurables.map { it.measure(loose) }
+        val gapPx = HudSizePx(gap.roundToPx(), gap.roundToPx())
+        val pitch = gridPitchPx(
+            maxChildWidthPx = placeables.maxOfOrNull { it.width } ?: 0,
+            maxChildHeightPx = placeables.maxOfOrNull { it.height } ?: 0,
+            gapXPx = gapPx.width,
+            gapYPx = gapPx.height
+        )
+        val cols = (items.maxOfOrNull { it.cell.col.coerceAtLeast(0) } ?: -1) + 1
+        val rows = (items.maxOfOrNull { it.cell.row.coerceAtLeast(0) } ?: -1) + 1
+        val size = gridSizePx(cols, rows, pitch, gapPx)
+        layout(size.width, size.height) {
+            placeables.forEachIndexed { i, placeable ->
+                val at = cellPlaceOffsetPx(
+                    items[i].cell, pitch, HudSizePx(placeable.width, placeable.height)
+                )
+                placeable.placeRelative(at.x, at.y)
+            }
+        }
+    }
+}
+
+/**
+ * 竖 Dock 的一枚（[HudZone.LEFT] / [HudZone.RIGHT]）：一枚圆角底板 + 内部按**固定格子**摆条目。
+ *
+ * 宽度不写死：底板宽 = 格网宽 = `列数 × (最宽那颗 + 行距) − 行距`，所以字体 120% 时自动加宽，
+ * §58/§73 那族「按 100% 字体量出来的固定宽在 120% 下裁字」在这里不复发。
+ * 条目位置来自 [HudGridItem.cell]，**与 [HudGridItem] 的先后无关**（#74：拖走一颗不动另一颗）。
  *
  * **胶囊在本容器内走 [WotaChipTier.Dock] 紧凑档**（#70 B，档位裁决只有一处：[chipTierFor]）。
  * 收窄前后的账（汉字按 1 em、拉丁按 0.6 em 估，与 `hudPerRowFor` 同一套估算口径）：
- * · 左 Dock：「屏幕监看」4 汉字 52dp + 全局档左右内边距 12+12 = 76dp，底板再包 `WotaSpace.xs` ×2 = **84dp**
- *   ——r11 真机量到的「底板约 84dp」正是这一档；紧凑档 52 + 8+8 = 68 → 底板 **76dp**。
- *   同排还有「RGB 曲线」（≈53dp 文字）→ 底板 ≈ **77dp**，所以左 Dock 实收约 7dp。
+ * · 左 Dock：r11 那档「底板约 84dp」是**全局档**下「屏幕监看」4 汉字 52 + 12+12 = 76，再包 8 得出的。
+ *   紧凑档之后同那颗 52 + 8+8 = 68 → 底板 76dp；但**这一档从来不是监看在撑**——
+ *   「RGB 曲线」≈53.3 文字 → 69.3 → 底板 ≈**77dp**，才是左 Dock 的真约束（监看改名后仍是它）。
+ *   用户 2026-09-29 把那颗改成「监看」（26 + 16 = 42），于是：
+ *   —— 曲线**开着**时底板仍 ≈77dp（改名对底板宽**无效**，要再窄得改「RGB 曲线」那条文案或换图标）；
+ *   —— 曲线**关掉**时（本机 `hud_pills=7935` 就是这一档）最宽颗降到 3 汉字的「闪光灯/参考线」
+ *      39 + 16 = 55 → 底板 **63dp**，改名才真生效（76 → 63）。
  * · 右 Dock 静置时最宽那颗是「1.0x」（31dp 文字，被 3 汉字下限撑到 39）→ 71dp 底板；
  *   紧凑档 47.2 → 底板 **55dp**（−16dp）。
  * · ⚠ **录制中右 Dock 回到 ≈94dp，且这一档不是胶囊给的**：S2-2 B 那条「姿态仪 + 音量表并成一行两列」
  *   的并排规则让那一行 = 姿态仪 54（46dp 天地线 + 4+4 内边距）+ 间距 4 + 音量表 28（16dp LED + 6+6）
- *   = 86dp，底板再包 8 = **94dp**——r11 量到的 94 就是这个数。要再窄只能动那条并排规则或动这两颗自绘件，
- *   两者都不在 #70 B「做 Dock 内专用紧凑档」的授权范围内，已单列进交付报告的未决项。
+ *   = 86dp，底板再包 8 = **94dp**——r11 量到的 94 就是这个数。格网把这一档原样搬了过来
+ *   （LEVEL 在第 0 列、VOLUME 在第 1 列，见 [defaultCellsOf] 读的 [hudRowGroups]），要再窄只能动那条
+ *   并排规则或动这两颗自绘件，两者都不在 #70 B 的授权范围内，已单列进交付报告的未决项。
  *
  * 底板只在至少有一颗要画时才组合，否则全关掉后会留一枚空壳。
  * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：`percent = 50` 的半径取短边一半，
  * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
  * 姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  *
- * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里：姿态仪与音量表在顺序里相邻时
- * 并成一行两列，省下的 ≈75dp 正好把变焦/对焦从折叠线下捞回来；用户把它们拆开就不再并排——
- * 这是「条目可重排」与「横屏 360dp 带高不够」唯一能同时成立的写法，露出颗数见 B4 交付报告。
+ * [HudZone.RIGHT] 的并排规则（S2-2 B）**保留在** [hudRowGroups] 里，但**降级成只管默认格子**：
+ * 姿态仪与音量表在顺序里相邻时推导成同一行的两列，省下的 ≈75dp 正好把变焦/对焦从折叠线下捞回来；
+ * 用户把任何一颗摆过一次之后那一枚容器就整体钉住（[HudLayoutTable.pinned]），并排规则不再重排别人的位置——
+ * 这是「条目可重排」与「横屏 360dp 带高不够」唯一能同时成立的写法。
  * 内容超出带高时靠 [verticalScroll] 取用，顶部对齐保证高频项先露脸（内容超出时居中排布
  * 会把上下两头都顶出去，没有意义）。
  */
 @Composable
 fun HudDockZone(
     zone: HudZone,
-    order: List<HudEntry>,
+    items: List<HudGridItem>,
     ctx: HudCtx,
     bandHeightDp: Int,
     modifier: Modifier = Modifier
 ) {
-    if (order.isEmpty()) return
-    val groups = hudRowGroups(zone, order, perRow = 1)
+    if (items.isEmpty()) return
     // #70 B：本容器内所有"控件胶囊"统一走这一档，读数条目不受影响（见 chipTierFor 的注释）
     val tier = chipTierFor(zone)
     Column(
@@ -777,23 +861,11 @@ fun HudDockZone(
             .heightIn(max = bandHeightDp.dp)
             .verticalScroll(rememberScrollState())
             .padding(WotaSpace.xs),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(WotaSpace.xs, alignment = Alignment.Top)
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        groups.forEach { group ->
-            if (group.size > 1) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.xs),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    group.forEach {
-                        HudEntryItem(it, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == it), tier, clicksAccepted = true)
-                    }
-                }
-            } else {
-                val single = group.first()
-                HudEntryItem(single, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == single), tier, clicksAccepted = true)
-            }
+        // 网格节点的矩形经 ctx.gridOf 回报给编辑页（录制页传的是空链，一个节点都不加）
+        HudEntryGrid(items, zone, ctx.gridOf(zone)) { entry ->
+            HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry), tier, clicksAccepted = true)
         }
     }
 }
@@ -811,10 +883,14 @@ fun HudDockZone(
  * `DockRowPerRowCap` = 两颗）都由那一条纯函数一次算清，本层的 [bandHeightDp] 与调用方喂给
  * [HudZoneBox] 的 `bottomAvoidDp` 出自同一次决策。
  *
- * 每格点按循环取值、长按弹自己的就近胶囊；行与行都**右对齐**，最后一行不满时也贴右缘，
- * 不会在右边留一段空白让人以为被裁了。一行几颗由调用方算（[hudPerRowFor]），
- * 这里只照数分行——竖屏 360dp 宽时一行 3 颗会顶出右缘裁字，那是 §58/§73 那一族老坑。
+ * 每格点按循环取值、长按弹自己的就近胶囊。**#74 之后不再"每行右对齐"**：改按固定格子摆
+ * （[HudEntryGrid]），空格子就空着，最后一行不满时右边那段空白是用户自己留的，不是被裁了——
+ * 这与"移动一颗不动另一颗"是同一件事的两面（旧的右对齐本质上是按行重新推导位置，那正是被拆掉的耦合）。
+ * 一行几颗只在**没摆过**时参与默认格子推导（[defaultCellsOf] → [hudRowGroups]，档位来自 [hudPerRowFor]，
+ * 横屏那一路还要过 `DockRowPerRowCap`），摆过一次就整体钉住。
  * 内边距与间隔走 `hudRoomDp` / `hudStripHeightDp` 的同源常量（S3-5）：改了这里必须同时改那两条算式。
+ * 只有读数块这一枚的**列数**受可用内宽约束（编辑页落点钳在 `roomWidthDp ÷ 格宽` 那一档，
+ * 见 [gridBoxOf]），因为横方向没有 `verticalScroll` 那样的取用路径。
  *
  * 参数是一颗一颗独立的悬浮胶囊，不是一整块面板，所以这里不套外层底。
  * 不进底栏那枚 Dock 的理由照旧：Dock 内左右两槽必须等宽快门才居中，读数进去会把整枚 Dock 撑到
@@ -825,12 +901,12 @@ fun HudDockZone(
  */
 @Composable
 fun HudReadoutZone(
-    order: List<HudEntry>,
+    items: List<HudGridItem>,
     ctx: HudCtx,
     bandHeightDp: Int,
     modifier: Modifier = Modifier
 ) {
-    if (order.isEmpty() && !ctx.aeLocked) return
+    if (items.isEmpty() && !ctx.aeLocked) return
     val motion = LocalMotion.current
     Column(
         modifier
@@ -840,18 +916,16 @@ fun HudReadoutZone(
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(HudRowGapDp.dp)
     ) {
-        hudRowGroups(HudZone.READOUT, order, ctx.readoutPerRow).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(HudRowGapDp.dp)) {
-                // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
-                row.forEach {
-                    HudEntryItem(
-                        it, ctx,
-                        Modifier.ghostWhileDragged(ctx.hiddenEntry == it),
-                        chipTierFor(HudZone.READOUT),
-                        // 读数块在 Dock 之外（#70 A 硬约束），永远不参与吸收，所以闸门恒开
-                        clicksAccepted = true
-                    )
-                }
+        if (items.isNotEmpty()) {
+            // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
+            HudEntryGrid(items, HudZone.READOUT, ctx.gridOf(HudZone.READOUT)) { entry ->
+                HudEntryItem(
+                    entry, ctx,
+                    Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),
+                    chipTierFor(HudZone.READOUT),
+                    // 读数块在 Dock 之外（#70 A 硬约束），永远不参与吸收，所以闸门恒开
+                    clicksAccepted = true
+                )
             }
         }
         // 长按对焦锁 AE 时这颗提示凭空出现，是最容易被当成「画面闪了一下」的硬切
