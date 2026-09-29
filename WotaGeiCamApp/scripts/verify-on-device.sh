@@ -40,6 +40,8 @@ hr()   { echo "------------------------------------------------------------"; }
 [ -x "$ADB" ] || fail "adb not found at $ADB"
 "$ADB" devices | grep -qw device || fail "no authorized device"
 mkdir -p "$OUT" || fail "cannot create $OUT"
+# adb 是 Windows 版：给它 `/f/Works/...` 这种 MSYS 绝对路径会**直接 pull 失败**（实测）。本地文件操作用 $OUT，喂给 adb 的那一份换成 cygpath 转出来的 Windows 路径。
+OUTW=$(cygpath -w "$OUT" 2>/dev/null) || OUTW="$OUT"
 
 hr
 echo "evidence dir: $OUT"
@@ -75,6 +77,16 @@ if [ "$LOCKED" != "deviceLocked=0" ]; then
   LOCKED=$("$ADB" shell dumpsys trust 2>/dev/null | grep -oE "deviceLocked=[01]" | head -1)
   [ "$LOCKED" = "deviceLocked=0" ] || fail "still locked ($LOCKED). Unlock it, then re-run."
 fi
+# 解了锁不代表屏幕还醒着（WAKEUP 不总粘住；熄屏后 activity 也不 resume、不走 layout）。
+# 锁屏下 `am start` 只会把焦点留在 NotificationShade，截出来是空帧——这条是实测过的，见 §15.8。
+AWAKE=$("$ADB" shell dumpsys power | grep -oE "mWakefulness=[A-Za-z]*" | head -1)
+if [ "$AWAKE" != "mWakefulness=Awake" ]; then
+  note "screen not awake ($AWAKE) after unlock; waking once more"
+  "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
+  sleep 1
+  AWAKE=$("$ADB" shell dumpsys power | grep -oE "mWakefulness=[A-Za-z]*" | head -1)
+  [ "$AWAKE" = "mWakefulness=Awake" ] || fail "屏幕仍是 $AWAKE —— 空帧会被当成证据，先让它亮着再跑"
+fi
 note "unlocked. focus now:"
 "$ADB" shell dumpsys window | grep -E "mCurrentFocus" | head -1
 
@@ -86,12 +98,29 @@ sleep 3
 shot() {  # shot <name> -> $OUT/<name>.png 与 .xml
   local name="$1"
   "$ADB" shell screencap -p "/sdcard/wota_${name}.png" >/dev/null 2>&1 || { echo "   !! screencap failed"; return 1; }
-  "$ADB" pull "/sdcard/wota_${name}.png" "$OUT/${name}.png" >/dev/null 2>&1 || { echo "   !! pull failed"; return 1; }
+  "$ADB" pull "/sdcard/wota_${name}.png" "$OUTW/${name}.png" >/dev/null 2>&1 || { echo "   !! pull failed"; return 1; }
   "$ADB" shell rm "/sdcard/wota_${name}.png" >/dev/null 2>&1
   "$ADB" shell uiautomator dump /sdcard/wota_${name}.xml >/dev/null 2>&1
   "$ADB" shell cat "/sdcard/wota_${name}.xml" > "$OUT/${name}.xml" 2>/dev/null
   "$ADB" shell rm "/sdcard/wota_${name}.xml" >/dev/null 2>&1
-  echo "   captured ${name}.png ($(stat -c '%s' "$OUT/${name}.png" 2>/dev/null || echo '?') B)"
+  local sz
+  sz=$(stat -c '%s' "$OUT/${name}.png" 2>/dev/null || echo 0)
+  # 阈值来自实测：锁屏熄屏时 screencap 仍然"成功"，但只出 7904 B 的空图，
+  # 而取景页这种带相机画面的帧是几百 KB 量级。低于 40 KB 一律判为可疑，不当证据用。
+  if [ "${sz}" -lt 40000 ]; then
+    echo "   !! ${name}.png 只有 ${sz} B —— 像是熄屏/空帧，重试一次"
+    "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; sleep 1
+    "$ADB" shell screencap -p "/sdcard/wota_${name}.png" >/dev/null 2>&1
+    "$ADB" pull "/sdcard/wota_${name}.png" "$OUTW/${name}.png" >/dev/null 2>&1
+    "$ADB" shell rm "/sdcard/wota_${name}.png" >/dev/null 2>&1
+    sz=$(stat -c '%s' "$OUT/${name}.png" 2>/dev/null || echo 0)
+  fi
+  local wk flag
+  wk=$("$ADB" shell dumpsys power | grep -oE "mWakefulness=[A-Za-z]*" | head -1)
+  if [ "${sz}" -lt 40000 ]; then flag="SUSPECT-BLANK"; else flag="ok"; fi
+  printf '%s	%s B	%s	%s
+' "$name" "$sz" "$wk" "$flag" >> "$OUT/manifest.tsv"
+  echo "   captured ${name}.png (${sz} B, ${wk})"
 }
 
 hr
@@ -208,4 +237,5 @@ echo
 echo "怎么读这批图："
 echo "  [B] 的数字是算出来的（前提见那两行 ⚠）；"
 echo "  [C]/[D] 对着 XML 比：应当**只有一颗**的 bounds 变了，且划掉重进后与保存时一致；"
+echo "  manifest.tsv：每帧的大小/当时唤醒态/是否可疑；出现 SUSPECT-BLANK 就说明那帧是空帧，别拿它下结论。"
 echo "  [E] 逐档看底板长轴是否**连续变短**、两颗是否真的离开原位、接触颈是否接在飞行中的那颗上。"
