@@ -5,12 +5,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMotion
 import com.wotagei.cam.ui.design.WotaStroke
@@ -34,10 +38,14 @@ import kotlin.math.pow
  *   执行"不成立（审查 S3-4）；把对象提到组合期才是结构性保证。每帧只 `reset()` + 往同一个 Path 上追加
  *   moveTo/cubicTo/close（半圆用贝塞尔逼近，因此**不需要** `addArc(Rect)`，也就不会在绘制阶段构造
  *   Rect/Offset 一类对象）。真机 profiler 的运行时计数仍列「未验」。
+ *   底板轮廓那一层（[wotaDockShell]）同纪律：`Stroke` 组合期 remember，绘制期只往 `drawRoundRect` 传
+ *   float 算出来的 `Offset`/`Size`/`CornerRadius`（`drawRoundRect` 的入参形态，允许清单内），
+ *   **不构造 `Path`、不构造 `Rect`、不构造 `Shape`**。
  * - 绘制层读 [progress] 只发生在 draw / graphicsLayer 阶段：快照状态在绘制期被读只让该层重画，
  *   **不触发重组**，预览层不会被重排（08:79 帧率红线）。
  * - 只作用 translation / scale / alpha / path，**不动任何布局参数**：两颗控件的槽位宽度全程不变，
- *   底栏不因动画重排，快门也就不跳。
+ *   底栏不因动画重排，快门也就不跳。底板的收拢同样只在 draw 阶段改**画出来的尺寸**，布局盒恒等于
+ *   `Modifier.width(dockW)` 那一枚（[DockShell] 的注释写了为什么动布局就是动快门居中的不变量）。
  * - 实测位置由布局期回调写进 [MergeScene] 的普通 Float 字段（不是快照状态）：写它不重组、读它不重组。
  */
 
@@ -81,8 +89,8 @@ fun mergeProgressOf(plan: MergePlan, recording: Boolean, animatedValue: Float?):
     }
 
 /** 「档位 → 本体位移」桥：PLAIN 一律零位移，调用点不各自写 travel 判断 */
-fun chipTravelPxOf(plan: MergePlan, progress: Float, deltaPx: Float, clearancePx: Float): Float =
-    if (plan.travel) LiquidMerge.chipTravelPx(progress, deltaPx, clearancePx) else 0f
+fun chipTravelPxOf(plan: MergePlan, progress: Float, deltaPx: Float): Float =
+    if (plan.travel) LiquidMerge.chipTravelPx(progress, deltaPx) else 0f
 
 /** 「档位 → 这一帧画不画腰」桥 */
 fun waistVisibleFor(plan: MergePlan, progress: Float): Boolean =
@@ -113,7 +121,7 @@ fun mergeProgressWithHook(
  * 「进度 → 这一颗还收不收点击」（#73 第 2 件：吸收期的命中权交接）。
  *
  * 判据取 **进度 > 0 就断**，不取"淡到看不见了才断"（`chipAlpha` 到 0 要 p ≥ 0.9），理由是：
- * - 入向（开始录制）：一有位移就不许这点那颗，#71b 把位移放开到全程 68.5dp 之后，
+ * - 入向（开始录制）：一有位移就不许这点那颗，#71 第一批把位移放开到全程 68.5dp 之后，
  *   半融那几帧两颗正压在录制键的命中区上，而"停止录制"是最高优先级手势；
  * - 出向（停止录制 → 分裂）：两颗从键心往外飞，头几百毫秒仍与键重叠，
  *   这时若按"目标态"放行点击，用户在键上那一下就会被**刚飞出去的那颗**吃掉（点第二次录制点不动）；
@@ -177,14 +185,6 @@ object LiquidMerge {
     /** 控件本体被"吸"时的最大缩小量 */
     const val CHIP_SHRINK = 0.28f
 
-    /**
-     * 本体位移占圆心距的比例（上限还要再被 [chipTravelPx] 的 clearance 夹一次）。
-     * 取 0.16 而不是更大的值是因为底栏的真实余量很小：镜头那颗填满 63dp 槽位，它的近缘离录制键
-     * 触摸盒只有 `G − R/2 + ...`≈12dp（120% 字体缩放时≈3.6dp），位移超过这个空隙就会**盖住录制键的
-     * 命中区**——录制中点不停止录制是不可接受的，比动画好不好看重要得多。
-     */
-    const val TRAVEL_FRACTION = 0.16f
-
     /** 单段 90° 圆弧的三次贝塞尔逼近系数（标准值 0.5523）；两段拼半圆，误差 <0.02% 半径 */
     const val KAPPA = 0.5523f
 
@@ -241,35 +241,32 @@ object LiquidMerge {
     fun chipScale(progress: Float): Float = 1f - CHIP_SHRINK * progress.coerceIn(0f, 1f)
 
     /**
-     * 本体被"吸"的位移（受 clearance 夹住，见下）。
+     * 本体位移（#71 第一批第 2 件：**放开**，条目真的跟进去）。
      * **带符号**：入参是 `录制键中心 − 那颗中心`，左边的颗得往右移（正）、右边的颗往左移（负），
      * 取绝对值就会把镜头那颗反着推出去。
      *
-     * `clearancePx` = 那颗的近缘与**录制键触摸盒**之间的实测空隙（调用方从布局矩形算）。位移被它夹住是
-     * 硬要求：那颗淡出之后命中区还在（alpha = 0 仍可点），越过这个空隙就吃掉"停止录制"那一指。
-     * 底栏真实数值：圆心距 68.5~83dp，而镜头那颗 63dp 宽填满槽位、近缘离触摸盒只剩 ≈12dp
-     * （120% 字体缩放只剩 ≈3.6dp）——**clearance 才是主约束**，只按圆心距取比例一定越界
-     * （本仓第一版就把圆心距当成 100dp 算过，实际只有 68.5dp，用例改回来后才发现余量根本不够）。
+     * ## 纲换成「条目中心到键心的这段距离」
+     * `deltaPx` 本身就是位移上限：进度 1 ⇒ 条目中心**正好落到键心**（与 [blobX]/[blobY] 的终点同一处），
+     * 进度夹在 0..1 ⇒ 不许穿过键心甩到另一边，也不许在反向过冲时冲出原位（LIQUID 弹簧两头都会过冲）。
+     *
+     * 旧版的上限是「那颗的近缘与录制键**触摸盒**之间的实测空隙 clearance」（`min(圆心距 × 0.16, clearance)`，
+     * 底栏实测算出来只有 10.96dp / 13.28dp）。它就是"看起来只是原地淡化"的算术原因，本批按用户口径撤掉。
+     * 撤它的前提**不是**"点不到了没关系"，而是 #73 已经落地的两层保证（本批一行都不许削弱）：
+     * - [chipClicksAccepted]：进度 > 0 那两颗连 `clip + clickable` 都不 install，命中链在结构上断开，
+     *   不是 `clickable(enabled = false)` 那种"节点还在只是不回调"，也**从不拿 alpha 当命中屏蔽**；
+     * - `RecordZIndex`：录制键在绘制与命中两层都压在两颗之上（同层兄弟的证据见 HudLayer 那处注释）。
+     *
+     * ## 为什么放开之后不需要给条目做裁切（可静态核对的算式，用例 `releasedTravelKeepsChipsInsideShell`）
+     * 以键心为原点，条目中心 = `d(1 − p)`、条目半宽 = `hw(1 − 0.28p)`（[chipScale] 同一条线性）、
+     * 轮廓半宽 = `W0/2 − (W0 − W1)p/2`（[DockShell] 的线性收拢），三项对 p 都是**线性**的，
+     * 于是「外缘在轮廓内」⇔ 两个端点都在内：
+     * · p=0：`d + hw ≤ W0/2` ⇔ 底板内边距（镜头那颗 68.5 + 31.5 = 100 ≤ 108，缩略图 83 + 17 = 100 ≤ 108）；
+     * · p=1：`0.72·hw ≤ W1/2 = 23` ⇔ 那颗缩到 0.72 之后的半宽不超过圆环半径（镜头 22.68、缩略图 12.24）。
+     * 两条都成立 ⇒ 全程不越界，本批不给条目加 `clip`。**注意 p=1 那条是 chipScale 在承重**：
+     * 把 scale 撤掉就是 31.5 > 23，那颗会露出圆环（用例把这条依赖钉住了，不许当理所当然）。
      */
-    fun chipTravelPx(progress: Float, deltaPx: Float, clearancePx: Float): Float {
-        val cap = if (clearancePx > 0f) clearancePx else 0f
-        val want = deltaPx * TRAVEL_FRACTION
-        val bounded = if (want > cap) cap else if (want < -cap) -cap else want
-        return progress.coerceIn(0f, 1f) * bounded
-    }
-
-    /**
-     * 那颗的近缘与录制键触摸盒之间还剩多少空隙（重叠或贴边返回 0）。
-     * 两边都按**位移轴上的半宽**算，不按内切圆半径算——半径会把余量高估一倍以上。
-     */
-    fun clearancePx(chipCenter: Float, chipHalf: Float, recordCenter: Float, recordHalf: Float): Float {
-        val gap = if (chipCenter <= recordCenter) {
-            (recordCenter - recordHalf) - (chipCenter + chipHalf)
-        } else {
-            (chipCenter - chipHalf) - (recordCenter + recordHalf)
-        }
-        return if (gap > 0f) gap else 0f
-    }
+    fun chipTravelPx(progress: Float, deltaPx: Float): Float =
+        deltaPx * progress.coerceIn(0f, 1f)
 
     /** 液滴半径：从那颗的原位半径过渡到录制键半径的一小半 */
     fun blobRadius(progress: Float, rHome: Float, rRecord: Float): Float =
@@ -306,6 +303,44 @@ object MergeSlot {
     /** 底板全宽（含内边距）。gap 与 pad 由调用方从令牌换算成 px，这里不出现 dp 字面量 */
     fun dockWidthPx(slotPx: Float, recordPx: Float, gapPx: Float, padPx: Float): Float =
         2f * slotPx + recordPx + 2f * gapPx + 2f * padPx
+}
+
+/**
+ * 底板**可见轮廓**的收拢算式（#71 第一批第 1 件，docs/plan/13 §14.3 定版构造）。
+ * 单位由调用方自洽（本对象只在同一单位里做加减），纯函数、JVM 可测。
+ *
+ * ## 是「长度缩减」，不是缩放
+ * `graphicsLayer.scaleX/scaleY` 一次都不出现。216×60 的圆角矩形**不可能等比**变成圆（短轴缩到位时
+ * 长轴还剩三倍），所以"缩放"这个念头本身就会把人逼进非等比的坑——而长度缩减根本不需要缩放。
+ * 收拢只改**画出来的那两个轴**：
+ * · 长轴 `w(p) = 起点 → 终点` 线性（起点 = 布局盒实测宽，100% 字体下由 [MergeSlot.dockWidthPx]
+ *   算出 216dp；终点 = 录制键**可见圆环** recordRing，不是 50dp 的命中盒 recordTouch）；
+ * · 短轴 `h(p) = 布局盒实测高（recordTouch + 2×DockInnerPadV = 60dp）→ 同一个圆环`，**也在收**；
+ * · 半径 `cornerRadius ≡ min(w, h) / 2` ⇒ 全程是一枚合法**体育场形**，`w == h` 那一帧自动就是正圆。
+ *   半径由短轴**推出来**，所以没有任何一帧是"圆角不匹配的钝角矩形"，也没有椭圆帧；描边是恒定宽度的
+ *   `Stroke`，不跟着任何轴向压扁（第一版把它压到 0.23dp 的那个代价就是这么避免掉的）。
+ *
+ * ## 布局盒全程锁死（本文件唯一不许动的地方）
+ * 起终点都由**布局盒实测尺寸**给出（[wotaDockShell] 里读 `DrawScope.size`），也就是
+ * `Modifier.width(dockW)` + 内层三格排布 + [MergeSlot.dockWidthPx] 那一行都不许改。理由：动了布局
+ * 就重排、快门就跳，而"录制键中心 ≡ 底板中心 ≡ 可视窗口水平中心"那条 `W/2` 不变量当场崩
+ * （见 HudBottomZone KDoc 不变量②）。收拢只发生在 draw 阶段。
+ *
+ * ## 反方向
+ * 细胞分裂就是 p 反向播，同一套算式，**不写第二份**。
+ */
+object DockShell {
+
+    /** 单轴收拢：起点是布局盒实测（不是 dp 字面量），终点是键形；进度夹 0..1（弹簧过冲不许把轮廓收成负尺寸） */
+    fun sidePx(startPx: Float, endPx: Float, progress: Float): Float =
+        startPx + (endPx - startPx) * progress.coerceIn(0f, 1f)
+
+    /** 体育场半径 = 短轴一半；`w == h` 时它同时是长轴一半，那一帧就是正圆 */
+    fun cornerRadiusPx(widthPx: Float, heightPx: Float): Float =
+        if (widthPx < heightPx) widthPx * 0.5f else heightPx * 0.5f
+
+    /** 居中偏移：收拢中的轮廓留在布局盒正中 ⇒ 轮廓中心 ≡ 键心 ≡ 可视水平中心（不变量②） */
+    fun insetPx(boxPx: Float, sidePx: Float): Float = (boxPx - sidePx) * 0.5f
 }
 
 /**
@@ -382,12 +417,6 @@ class MergeScene {
         return (if (w < h) w else h) * 0.5f
     }
 
-    /**
-     * 位移轴上的半宽（胶囊 63×30 → 31.5，不是内切圆半径 15）。
-     * 算"那颗离录制键触摸盒还剩多少空隙"必须用它，用半径会把余量高估一倍以上。
-     */
-    fun halfWidth(target: Int): Float = rawWidth(target) * 0.5f
-
     private fun rawLeft(target: Int): Float = when (target) {
         THUMB -> thumbLeft
         LENS -> lensLeft
@@ -433,8 +462,88 @@ fun Modifier.mergeAnchor(scene: MergeScene, target: Int): Modifier =
     }
 
 /**
- * 连通体绘制层：画在**底板之上、两颗控件之下**（挂在那个容器的节点上：容器的 `wotaCard` 在链路更外侧
- * 所以先画，子节点后画 → 盖住腰的两端；容器自身的 clip 又把连通体拦在胶囊里，溢不出底栏）。
+ * 底板的**可见轮廓**随进度从整枚布局盒收拢到录制键圆环（#71 第一批第 1 件，替代这里原来的
+ * `Modifier.wotaCard(WotaShape.pill)`）。
+ *
+ * 材质一个都没新造：填充 [WotaColor.hudScrim]、描边 [WotaColor.acrylicBorder]、宽度
+ * [WotaStroke.hairline]，与 [com.wotagei.cam.ui.design.wotaCard] 是同一套令牌；p=0 时
+ * `w = 布局盒宽`、`h = 布局盒高`、`radius = min(w,h)/2 = 短轴一半`，画出来的形状与
+ * `RoundedCornerShape(percent = 50)` 在同一个盒子上的形状**逐像素同形**（那枚 shape 的半径也是短轴一半），
+ * 所以静止态没有观感变化，变的只是"轮廓跟着 p 一起缩"。
+ *
+ * ## 为什么自绘而不是继续用 wotaCard
+ * `wotaCard` 的填充是 `clip(shape).background(color)`、描边是 `border(width, color, shape)`，
+ * 三件都吃**静态 Shape**；要按 p 改形状就得每帧造一枚新 Shape（`RoundedCornerShape(pct)` 走
+ * `Shape.createOutline` 还要在每帧构造 `Path`/`Rect`），而把布局盒本身改小更是直接踩红线——
+ * 布局一改就重排、快门跳、`W/2` 居中不变量崩（[DockShell] 那一条）。绘制期自绘一枚居中的圆角矩形
+ * 是唯一同时满足"轮廓可变 + 布局盒锁死 + 描边恒定"的写法。
+ *
+ * ## 每帧成本（诚实记账）
+ * [Stroke] 在**组合期** remember；绘制期只读 `progress()` 与 `size`，构造 `Offset`/`Size`/`CornerRadius`
+ * 各两枚（填充一枚、描边内缩半线宽再一枚）给 `drawRoundRect` —— 这是该基元的入参形态，本仓允许清单内。
+ * **不构造 Path、不构造 Rect、不构造 Shape**；一次收拢动画（750ms × 60fps）总共约 540 枚 8 字节量级的
+ * 短命对象，落在 young-gen，量级与 `drawWithCache` 外块重跑那枚 lambda 同一档。
+ * 真机 profiler 的运行时计数仍列「未验」。
+ *
+ * ## 反方向与档位
+ * 反方向（细胞分裂）= p 反向播，同一套算式没有第二份；PLAIN 档由 [mergeProgressOf] 那条桥把 p 钉成
+ * 0/1，于是底板直接是**起点形状**或**终点形状**，不存在中间帧（不需要在这里再判一次 plan）。
+ *
+ * @param collapsedSize 终点边长：录制键**可见圆环** [com.wotagei.cam.ui.design.WotaHit.recordRing]（46dp），
+ *   不是 50dp 的命中盒 recordTouch——那是命中区不是形状。长轴与短轴收到同一个值 ⇒ 终点是正圆
+ * @param progress 归一化进度；只在绘制阶段读，不触发重组
+ */
+@SuppressLint("ComposableModifierFactory")
+@Composable
+fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
+    val density = LocalDensity.current
+    val strokeWidthPx = with(density) { WotaStroke.hairline.toPx() }
+    val endPx = with(density) { collapsedSize.toPx() }
+    // 描边宽度在组合期换算并 remember（每帧不许新建 Stroke）；闭合的圆角矩形不需要端点帽
+    val edge = remember(strokeWidthPx) { Stroke(width = strokeWidthPx) }
+    return this then Modifier.drawWithCache {
+        onDrawBehind {
+            val p = progress().coerceIn(0f, 1f)
+            // 起点取**布局盒实测**：这里不出现 216/60 这类 dp 字面量，宽度账只有一条真源
+            val boxW = size.width
+            val boxH = size.height
+            val w = DockShell.sidePx(boxW, endPx, p)
+            val h = DockShell.sidePx(boxH, endPx, p)
+            val r = DockShell.cornerRadiusPx(w, h)
+            val left = DockShell.insetPx(boxW, w)
+            val top = DockShell.insetPx(boxH, h)
+            // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）
+            drawRoundRect(
+                color = WotaColor.hudScrim,
+                topLeft = Offset(left, top),
+                size = Size(w, h),
+                cornerRadius = CornerRadius(r, r)
+            )
+            // 描边内缩半个线宽（= 旧的 border(width, color, shape) 那一层的语义：画在边界之内），
+            // 于是 p=0 那一帧与换掉之前逐像素对齐，p=1 那一帧的 1dp 细边也**不会**探出 46dp 圆环
+            // （它落在 22–23dp 处，正好压在录制键那枚 3dp 圆环下面，不会画出一圈多余的亮边）
+            val half = strokeWidthPx * 0.5f
+            val sr = if (r > half) r - half else 0f
+            drawRoundRect(
+                color = WotaColor.acrylicBorder,
+                topLeft = Offset(left + half, top + half),
+                size = Size(w - strokeWidthPx, h - strokeWidthPx),
+                cornerRadius = CornerRadius(sr, sr),
+                style = edge
+            )
+        }
+    }
+}
+
+/**
+ * 连通体绘制层：画在**底板轮廓之上、两颗控件之下**（挂在那个容器的节点上：底板轮廓在链路更外侧所以
+ * 先画，子节点后画 → 盖住腰的两端）。
+ *
+ * 本批把原来的 `wotaCard`（第一环是 `clip`）换成了 [wotaDockShell]（纯绘制，没有 clip），所以这里
+ * 少了一道"容器把腰拦在胶囊里"的保险。核账：腰的两端分别是以两颗**原位**圆心、内切圆半径为半径的圆帽
+ * （镜头 15dp、缩略图 17dp）＋ 控制点的法向偏移 `c = (8·腰 − rA − rB)/6 ≤ (8·15 − 15 − 25)/6 ≈ 6.7dp`，
+ * 于是 |x| 最远 = 那颗中心 68.5/83 + 半径 15/17 ≤ 100 < 布局盒半宽 108，|y| 最远 ≤ 15 + 6.7 < 30 = 半高
+ * ⇒ **腰本来就出不了布局盒**，旧的 clip 是一条从未生效的保险，撤掉它观感不变（用例把这笔账钉住了）。
  *
  * 材料沿用 `wotaCard` 那一套令牌（[WotaColor.hudScrim] 填充 + [WotaColor.acrylicBorder] 描边，
  * 描边宽度 [WotaStroke.hairline] 与卡片边同一档），不加模糊、不加投影。
