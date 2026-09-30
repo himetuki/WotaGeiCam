@@ -123,7 +123,7 @@ fun Modifier.wotaHudCard(
  *   才各花一次"表头事务 + 一格 7 个 float"；静止态一次都不写；
  * - 写之前先 [com.wotagei.cam.ui.HudFrost.refreshHeader]：视图原点用到的"组合根尺寸"与卡片矩形
  *   出自同一次布局，两件事不会因为一个改了另一个没跟而错开一整代（跨线程不撕裂那一半由
- *   `FrostCardTable` 的序号锁保证，两处各司其职、不是重复保险）。
+ *   `FrostCardTable` 的双缓冲 + 引用交换保证，两处各司其职、不是重复保险）。
  *
  * ⚠ 已知不吃位移：这里量的是**布局**矩形（`positionInWindow`），祖先那层 `graphicsLayer` 的
  * translation（编辑页拖拽、#71 吸收态那颗的飞行）不反映在实测值里——与
