@@ -5,6 +5,7 @@ import android.graphics.Matrix
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -20,9 +21,13 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import com.wotagei.cam.camera.FrostCardTable
+import com.wotagei.cam.ui.HudFrost
+import com.wotagei.cam.ui.design.HudInkLevel
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMotion
 import com.wotagei.cam.ui.design.WotaStroke
+import com.wotagei.cam.ui.design.frostScrimAlphaFor
 import kotlin.math.hypot
 import kotlin.math.pow
 
@@ -583,6 +588,13 @@ fun Modifier.mergeAnchor(scene: MergeScene, target: Int): Modifier =
  * `RoundedCornerShape(percent = 50)` 在同一个盒子上的形状**逐像素同形**（那枚 shape 的半径也是短轴一半），
  * 所以静止态没有观感变化，变的只是"轮廓跟着 p 一起缩"。
  *
+ * ## #84 步骤 2 之后：fill 只在霜没在屏幕上时画
+ * [com.wotagei.cam.ui.HudFrost.live] 为 true 时这一层不再自绘 fill，而是把**当前可见矩形**注册进
+ * `camera/FrostCardTable`，由 GL 在预览 blit 之后贴「霜 + 圆角 + 底板色」（A2 混合路线，
+ * docs/plan/14 §二）。描边、录制键、两颗条目一概不动。注册走绘制期而不是布局期，是因为可见轮廓每帧
+ * 随 p 收拢而布局盒锁死；半径送「短边一半」的负数哨兵，与 [DockShell.cornerRadiusPx] 同一个数、
+ * 两边不各写一份。live 为 false（开关关 / DIRECT / 离屏链停用）时这里就是**改前那一段代码**，逐字同观感。
+ *
  * ## 为什么自绘而不是继续用 wotaCard
  * `wotaCard` 的填充是 `clip(shape).background(color)`、描边是 `border(width, color, shape)`，
  * 三件都吃**静态 Shape**；要按 p 改形状就得每帧造一枚新 Shape（`RoundedCornerShape(pct)` 走
@@ -613,7 +625,28 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     val endPx = with(density) { collapsedSize.toPx() }
     // 描边宽度在组合期换算并 remember（每帧不许新建 Stroke）；闭合的圆角矩形不需要端点帽
     val edge = remember(strokeWidthPx) { Stroke(width = strokeWidthPx) }
-    return this then Modifier.drawWithCache {
+    // 霜（#84 步骤 2 · A2）：底板真在屏幕上时这一块不再自绘 fill，改为把**可见**矩形注册进矩形表，
+    // 由 GL 在预览 blit 之后把「霜 + 圆角 + 底板色」贴在那里。注册走绘制期而不是布局期，理由只有一条：
+    // 这枚底板的可见轮廓由 p 每帧收拢，而布局盒全程锁死（216×60），拿布局盒去贴板就会在 p>0 之后
+    // 露出一大块"板比轮廓大"的玻璃。窗口原点由本节点自己在布局期量（`frostOriginPx`），
+    // 与 drawWithCache 的 size 出自同一次布局，所以窗口坐标在这里是量得出的。
+    val live = HudFrost.live
+    val frostSlot = if (live) remember { FrostCardTable.acquireSlot() } else -1
+    val frostLast = remember { FloatArray(4) }
+    val frostOriginPx = remember { FloatArray(2) }
+    val frostAlpha = frostScrimAlphaFor(HudInkLevel.SECONDARY)
+    DisposableEffect(frostSlot) {
+        onDispose {
+            if (frostSlot >= 0) FrostCardTable.releaseSlot(frostSlot)
+        }
+    }
+    return this then Modifier
+        .onGloballyPositioned { coords ->
+            val p = coords.positionInWindow()
+            frostOriginPx[0] = p.x
+            frostOriginPx[1] = p.y
+        }
+        .drawWithCache {
         onDrawBehind {
             val p = progress().coerceIn(0f, 1f)
             // 起点取**布局盒实测**：这里不出现 216/60 这类 dp 字面量，宽度账只有一条真源
@@ -624,13 +657,37 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val r = DockShell.cornerRadiusPx(w, h)
             val left = DockShell.insetPx(boxW, w)
             val top = DockShell.insetPx(boxH, h)
-            // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）
-            drawRoundRect(
-                color = WotaColor.hudScrim,
-                topLeft = Offset(left, top),
-                size = Size(w, h),
-                cornerRadius = CornerRadius(r, r)
-            )
+            if (live && frostSlot >= 0) {
+                // 静止态不写表（写一次 = 两次 volatile epoch）：只有轮廓真的动了才重报
+                if (frostLast[0] != left || frostLast[1] != top || frostLast[2] != w || frostLast[3] != h) {
+                    frostLast[0] = left
+                    frostLast[1] = top
+                    frostLast[2] = w
+                    frostLast[3] = h
+                    HudFrost.refreshHeader()
+                    FrostCardTable.writeCard(
+                        slot = frostSlot,
+                        leftPx = frostOriginPx[0] + left,
+                        topPx = frostOriginPx[1] + top,
+                        rightPx = frostOriginPx[0] + left + w,
+                        bottomPx = frostOriginPx[1] + top + h,
+                        // 全程体育场形 ⇒ 半径恒等于短边一半（与 [DockShell.cornerRadiusPx] 同一个数）；
+                        // 送负数哨兵让 camera 侧按实测宽高现算，两边不各写一份"短边一半"
+                        radiusPx = -1f,
+                        alpha = frostAlpha
+                    )
+                }
+            }
+            // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）。
+            // 霜在屏幕上时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）
+            if (!live) {
+                drawRoundRect(
+                    color = WotaColor.hudScrim,
+                    topLeft = Offset(left, top),
+                    size = Size(w, h),
+                    cornerRadius = CornerRadius(r, r)
+                )
+            }
             // 描边内缩半个线宽（= 旧的 border(width, color, shape) 那一层的语义：画在边界之内），
             // 于是 p=0 那一帧与换掉之前逐像素对齐，p=1 那一帧的 1dp 细边也**不会**探出 46dp 圆环
             // （它落在 22–23dp 处，正好压在录制键那枚 3dp 圆环下面，不会画出一圈多余的亮边）
@@ -668,9 +725,13 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
  * **同一个** [progress] lambda（同一帧不可能两个值）。
  *
  * ## 光感（#71 第二批第 2 件）
- * 只有一条路：**轮廓上的亮缘**。硬红线是预览层之上不许实时背景模糊、不许投影，而 minSdk 29 /
- * 主测机 API 30 上 `RenderEffect` 根本不可用，也不引任何第三方。于是在既有的 `hudScrim` 填充 +
- * `acrylicBorder` 细描边之外，同一张 Path 再描一遍 [NeckGlowBrush]：一枚径向亮缘，峰值档按
+ * 只有一条路：**轮廓上的亮缘**。当年这条是硬红线（"预览层之上不许实时背景模糊、不许投影"），
+ * 而 minSdk 29 / 主测机 API 30 上 `RenderEffect` 根本不可用、也不引任何第三方。
+ * ⚠ #84 已经把"不许模糊"那半条作废（docs/plan/14 §五）：底板现在是 GL 自绘的真·透光毛玻璃，
+ * 见 [wotaDockShell] 那一段；但**连通体（颈）这一层仍然走旧材质**——它是随 p 变形的自由 Path，
+ * 而 A2 的画板只吃"矩形 + 圆角"这一种形状，圆角之外的任何视觉细节都不在 GL 侧。
+ * 亮缘因此照旧：在 [WotaColor.hudScrim] 填充 + [WotaColor.acrylicBorder] 细描边之外，
+ * 同一张 Path 再描一遍 [NeckGlowBrush]：一枚径向亮缘，峰值档按
  * [LiquidMerge.neckGlowRadiusPx] × [LiquidMerge.NECK_GLOW_PEAK_STOP] 落在**录制键自身的圆周**
  * （两圆接触那一圈），向键心与跨度外缘线性衰减。笔刷与它的临时 `Matrix` 都在**组合期**各建一次
  * （与 [Path]/[Stroke] 同一条纪律），每帧只 `setLocalMatrix` ⇒ 绘制阶段零分配，
@@ -728,7 +789,8 @@ fun Modifier.wotaPillHost(
             drawPath(link, WotaColor.hudScrim, alpha = alpha)
             drawPath(link, WotaColor.acrylicBorder, alpha = alpha, style = edge)
             // 光感：同一张轮廓再描一笔亮缘，峰值落在键自身圆周（接触圈）。宽度仍是 hairline 那一档，
-            // "更亮"靠颜色档位（acrylicBorder 15% 白 → refLine 80% 白），不加宽、不加投影、不加模糊
+            // "更亮"靠颜色档位（acrylicBorder 15% 白 → refLine 80% 白），不加宽、不加投影；
+            // 也不给这一层加模糊——#84 的霜只做「矩形 + 圆角」的底板，自由 Path 的颈不在那条路上
             glow.place(rcx, rcy, LiquidMerge.neckGlowRadiusPx(rRec), glowMatrix)
             drawPath(link, glow, alpha = alpha, style = edge)
         }

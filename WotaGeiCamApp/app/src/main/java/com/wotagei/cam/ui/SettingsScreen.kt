@@ -53,6 +53,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.wotagei.cam.R
+import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.core.CurveStack
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
@@ -129,6 +130,16 @@ object WotaSettings {
     const val KEY_TEXT_SCALE_SETTINGS = "text_scale_settings"
     const val KEY_TEXT_SCALE_DIALOG = "text_scale_dialog"
     const val KEY_GALLERY_COLUMNS = "gallery_columns"
+
+    /**
+     * 取景 HUD 的毛玻璃背板（#84 步骤 2 · A2 混合）。**默认关**，且只有用户在下面那一行亲手翻过
+     * 才会为 true：这条不走 [applyDefaultsOnce]、不被任何"上次记得的开"之外的路径自动打开——
+     * DIRECT 模式或离屏链停用时它开着也不会有板（`HudFrost.live` 只认 GL 的真回报）。
+     *
+     * 消费方是 [com.wotagei.cam.ui.HudFrost]（prefs 监听 + 开着期间的低频轮询），它把这一位写进
+     * `camera/FrostCardTable` 的表头，GL 每帧搬进引擎那枚门 —— 录制页拿不到引擎实例，也不该拿到。
+     */
+    const val KEY_FROST_BLUR = "hud_frost_blur"
 
     /** 手调曲线的恢复值：曲线是用户一点点拖出来的，重开进程不该丢 */
     const val KEY_CURVE_STACK = "curve_stack"
@@ -221,6 +232,20 @@ object WotaSettings {
     fun galleryColumns(prefs: SharedPreferences): Int =
         prefs.getInt(KEY_GALLERY_COLUMNS, 2).let { if (it in GALLERY_COLUMN_TIERS) it else 2 }
 
+    /**
+     * 毛玻璃背板开关（[KEY_FROST_BLUR]）：**缺键 = false**。
+     * 这条刻意不给"跟随系统/跟随渲染模式"之类的隐式来源，默认关就是字面意义的默认关。
+     */
+    fun frostBlurEnabled(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_FROST_BLUR, false)
+
+    /**
+     * 写入开关。用 `apply()`：这一位的消费方是 prefs 监听（同进程内存里立刻可见），
+     * 磁盘落不落与观感无关，不需要 [setHudLayout] 那种同步落盘回执。
+     */
+    fun setFrostBlurEnabled(prefs: SharedPreferences, enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_FROST_BLUR, enabled).apply()
+    }
+
     /** 坏串由 [CurveStack.decode] 吞掉并回落恒等，不会抛 */
     fun curveStack(prefs: SharedPreferences): CurveStack =
         CurveStack.decode(prefs.getString(KEY_CURVE_STACK, null))
@@ -284,6 +309,8 @@ fun SettingsScreen(
     var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
     var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
+    // 毛玻璃背板（#84 步骤 2）：默认关，只有这一颗 Switch 会把它打开（没有别的写入方）
+    var frostBlur by remember { mutableStateOf(WotaSettings.frostBlurEnabled(prefs)) }
     var uiOrientation by remember { mutableStateOf(WotaSettings.uiOrientation(prefs)) }
     var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
@@ -540,6 +567,36 @@ fun SettingsScreen(
                 selected = false,
                 onClick = onOpenHudEditor
             )
+            Spacer(Modifier.height(10.dp))
+            // 毛玻璃背板开关（键 hud_frost_blur，#84 步骤 2 · A2 混合）。
+            // ⚠ 本轮**唯一**没走 `res/values/strings_settings.xml` 的两条 UI 文案：那个文件不在本刀的
+            // 可改清单里。下一轮把它换成 `R.string.set_frost_blur` / `set_frost_blur_note` 两个 key，
+            // 与本文件其余行一致（记在这儿免得被当成"本来就该硬编码"）。
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "HUD 毛玻璃背板",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = WotaText
+                    )
+                    Text(
+                        text = "取景控件底板透出被模糊的实时画面。仅 GPU 模式生效；关掉即回到现在的观感。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WotaTextDim
+                    )
+                }
+                Switch(
+                    checked = frostBlur,
+                    onCheckedChange = {
+                        frostBlur = it
+                        WotaSettings.setFrostBlurEnabled(prefs, it)
+                        // 顺手把这一位当场送进矩形表：设置页翻完不用等一次布局回调才带上表头，
+                        // GL 在下一帧把它搬进引擎那枚门（UI 拿不到引擎实例，这是唯一一条生产路）
+                        FrostCardTable.setUiEnabled(it)
+                    },
+                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
+                )
+            }
         }
 
         SettingGroup(stringResource(R.string.set_group_storage))

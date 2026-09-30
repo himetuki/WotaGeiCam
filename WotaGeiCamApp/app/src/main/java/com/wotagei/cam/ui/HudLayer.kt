@@ -1,6 +1,11 @@
 package com.wotagei.cam.ui
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.view.View
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -49,7 +54,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -68,7 +76,9 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -77,6 +87,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.wotagei.cam.R
+import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
@@ -97,6 +108,8 @@ import com.wotagei.cam.ui.anim.mergePlanFor
 import com.wotagei.cam.ui.anim.mergeProgressWithHook
 import com.wotagei.cam.ui.anim.wotaDockShell
 import com.wotagei.cam.ui.anim.wotaPillHost
+import com.wotagei.cam.ui.design.HudFrostCard
+import com.wotagei.cam.ui.design.HudInkLevel
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaChipTier
 import com.wotagei.cam.ui.design.WotaColor
@@ -105,8 +118,11 @@ import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
+import com.wotagei.cam.ui.design.hudFrostInherit
+import com.wotagei.cam.ui.design.hudFrostPlate
 import com.wotagei.cam.ui.design.pillAnchor
 import com.wotagei.cam.ui.design.wotaCard
+import com.wotagei.cam.ui.design.wotaHudCard
 import com.wotagei.cam.ui.dialog.flashLabelRes
 import com.wotagei.cam.ui.dialog.wbLabelRes
 import com.wotagei.cam.ui.widget.AttitudeCard
@@ -277,6 +293,178 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
     }
 } ?: item?.pillKey()
 
+// ------------------------------------------------------------------ 毛玻璃（#84 步骤 2）的 UI 侧控制器
+
+/**
+ * 霜的 UI 侧唯一状态机：**底板的纯色 fill 该不该让位**只看这一个值。
+ *
+ * 判据是 `设置开关 ∧ GL 真贴了板`（[com.wotagei.cam.camera.FrostCardTable.isPlatesDrawn]），
+ * 不是"开关开着"——差别就在能不能守住「关掉要能完整回到现在的观感」这条：
+ * DIRECT 模式、离屏链被坏驱动停用、相机还没出帧、窗口面被回收，这几种情况下开关可能仍是开的，
+ * 但屏幕上一块板都没有。此时若让 fill 让位，卡片就变成"压在实时画面上的透明描边框"，
+ * 属于 S1 级可读性事故；不让位则观感与接霜前**逐字相同**。
+ *
+ * ## 事件驱动，不是每帧轮询
+ * - 开关本身走 `OnSharedPreferenceChangeListener`（设置页一翻就打到，零延迟，与
+ *   [rememberHudLayout] 同一条手法）；
+ * - 可用性只有"开着的期间"才需要盯：那是一条 200ms 的轮询（读一枚 volatile + 刷一次表头），
+ *   关掉开关或宿主为 0 就 `removeCallbacks`，**不留常驻定时器**（录制页的帧率红线 08:79 吃的就是这条）。
+ *   为什么不能不轮：GL 侧停用/撤报发生在渲染线程，Compose 这边没有任何 state 可订阅；
+ *   引擎里也没有 share context 之类的反向通道。5Hz 读两个 volatile 的成本可以忽略，
+ *   换来的是"链坏了 fill 在 200ms 内回来"而不是"永久没有底衬"。
+ *
+ * ## 表头为什么在这里刷
+ * [refreshHeader] 送的是「组合根在窗口里的矩形 + 底板色 + 开关位」。GL 侧要把窗口坐标的卡片矩形
+ * 换算成它自己的视口坐标，缺不可承载视图的原点，而那个原点由**根尺寸**（只有 View 侧量得到）与
+ * **视图尺寸**（只有 GL 知道）按"`CameraScreen.previewStage` 是居中盒"反推
+ * （算式与它唯一的推断量都写在 `camera/frostViewOriginInto`）。注册点写卡片矩形之前会先调这里一次，
+ * 所以那一次事务里"根"与"卡片"出自同一次布局。
+ */
+internal object HudFrost {
+
+    /** 轮询周期（只在开关开着时跑）：可用性翻转最多晚一个周期被看见，真机延迟未量 */
+    private const val REFRESH_MS = 200L
+
+    /** 底板 fill 让位态：只有 GL 真贴了板才 true（组合期读它，写它必须在主线程） */
+    var live by mutableStateOf(false)
+        private set
+
+    private val locationInWindow = IntArray(2)
+    private val tintScratch = FloatArray(3)
+
+    private var root: View? = null
+    private var prefs: SharedPreferences? = null
+    private var hosts = 0
+    private var enabled = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Suppress("DEPRECATION")
+    private val prefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || key == WotaSettings.KEY_FROST_BLUR) evaluateEnabled()
+        }
+
+    private val tick = object : Runnable {
+        override fun run() {
+            if (hosts <= 0 || !enabled) return
+            refreshAvailability()
+            mainHandler.postDelayed(this, REFRESH_MS)
+        }
+    }
+
+    /**
+     * 宿主登记：五枚容器各调一次（[HudZoneBox] 里），引用计数到 0 就把定时器与监听全撤干净。
+     * 编辑页复用同一批容器 composable，所以那一页也会登记一个宿主——这不是漏做：
+     * 那一页的可用性同样只能由 GL 的回报说了算，没有 GL 出图就没有板，fill 不让位。
+     */
+    @Composable
+    fun host() {
+        val context = LocalContext.current
+        val view = LocalView.current
+        DisposableEffect(context, view) {
+            attach(context.applicationContext, view)
+            onDispose { detach() }
+        }
+    }
+
+    private fun attach(appContext: Context, view: View) {
+        val p = WotaSettings.of(appContext)
+        if (hosts == 0) {
+            root = view
+            prefs = p
+            p.registerOnSharedPreferenceChangeListener(prefsListener)
+        }
+        hosts++
+        evaluateEnabled()
+    }
+
+    private fun detach() {
+        if (hosts <= 0) return
+        hosts--
+        if (hosts > 0) return
+        val p = prefs
+        @Suppress("DEPRECATION")
+        p?.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        mainHandler.removeCallbacks(tick)
+        root = null
+        prefs = null
+        enabled = false
+        live = false
+    }
+
+    /** 开关意图变了：开 ⇒ 起轮询；关 ⇒ 停轮询并当场把 fill 收回来（不等下一帧） */
+    private fun evaluateEnabled() {
+        val p = prefs ?: return
+        val next = WotaSettings.frostBlurEnabled(p)
+        if (next == enabled) return
+        enabled = next
+        mainHandler.removeCallbacks(tick)
+        if (next) {
+            refreshAvailability()
+            mainHandler.postDelayed(tick, REFRESH_MS)
+        } else {
+            live = false
+        }
+    }
+
+    private fun refreshAvailability() {
+        if (!enabled) {
+            if (live) live = false
+            return
+        }
+        refreshHeader()
+        val drawn = FrostCardTable.isPlatesDrawn()
+        if (drawn != live) live = drawn
+    }
+
+    /**
+     * 把「组合根在窗口里的矩形 + 底板色 + 开关位」写进矩形表表头（主线程）。
+     *
+     * 表头与卡片矩形是两次事务、共用同一把序号锁，所以 GL 那一侧永远读得到一整代；
+     * "同一代"不等于"同一次布局"，后者靠的是注册点在写卡片前先调这里一次。
+     */
+    fun refreshHeader() {
+        val r = root ?: return
+        val p = prefs ?: return
+        if (r.width <= 0 || r.height <= 0) return
+        r.getLocationInWindow(locationInWindow)
+        WotaColor.hudFrostTintRgb(tintScratch)
+        FrostCardTable.writeHeader(
+            rootLeftPx = locationInWindow[0].toFloat(),
+            rootTopPx = locationInWindow[1].toFloat(),
+            rootWidthPx = r.width.toFloat(),
+            rootHeightPx = r.height.toFloat(),
+            tintRed = tintScratch[0],
+            tintGreen = tintScratch[1],
+            tintBlue = tintScratch[2],
+            uiEnabled = enabled
+        )
+    }
+}
+
+/**
+ * 「外面那层已经是一块玻璃了」的 ambient（#84 步骤 2）。
+ *
+ * 为什么走 CompositionLocal 而不是形参：五枚容器的 composable 由 `CameraScreen` 与「编辑控件」页
+ * 共同调用，而那两处本轮都不许改——新增形参只能带默认值，带默认值就等于没人传，功能直接变死代码。
+ * ambient 的默认值是 null（= 不在任何板上），只有 [HudDockZone] / [HudBottomZone] 在自己的内容外面
+ * provide 一份 [hudFrostInherit]，里面的条目于是自动变成"吃父板的玻璃、不重复注册"。
+ * 这张表也**不是**容器归属的真源：谁在哪枚容器里仍旧只由 `pillAnchorWriters` 与位置表说了算。
+ */
+internal val LocalHudFrostParent = compositionLocalOf<HudFrostCard?> { null }
+
+/** 条目该用的霜身份：父板存在就吃父板，否则自己出一块板（胶囊/圆形 = 短边一半，送负数哨兵） */
+internal fun hudFrostForEntry(parent: HudFrostCard?): HudFrostCard? =
+    parent ?: hudFrostPlate(radiusPx = -1f, ink = HudInkLevel.SECONDARY)
+
+/**
+ * 胶囊族共用的那一份板身份（顶栏元信息壳、顶栏录制那颗、条目自己出板时都是它）。
+ *
+ * 提成 `val` 而不是在每处调用点现造：`HudFrostCard` 是 data class，现造就意味着每次重组一次分配，
+ * 而这一枚的值永远一样（半径 = 短边一半的哨兵 + 承载 textMid 级着色的那一档）。
+ */
+internal val hudFrostPillPlate: HudFrostCard = hudFrostPlate(radiusPx = -1f, ink = HudInkLevel.SECONDARY)
+
 // ------------------------------------------------------------------ 一帧 HUD 的全部输入
 
 /**
@@ -413,12 +601,13 @@ private fun TierChip(
     selected: Boolean,
     modifier: Modifier,
     onClick: (() -> Unit)?,
+    frost: HudFrostCard?,
     onLongClick: (() -> Unit)? = null
 ) {
     if (tier == WotaChipTier.Dock) {
-        WotaDockChip(label, selected, modifier, onClick, onLongClick)
+        WotaDockChip(label, selected, modifier, onClick, onLongClick, frost = frost)
     } else {
-        WotaChip(label, selected, modifier, onClick, onLongClick)
+        WotaChip(label, selected, modifier, onClick, onLongClick, frost = frost)
     }
 }
 
@@ -466,6 +655,9 @@ fun HudEntryItem(
 ) {
     // 锚点只在这一层挂，且只经 ctx.anchorOf 这一条路（调用方在里面做「同一 PillKey 两个候选写入方」的裁决）
     val anchor = ctx.anchorOf(entry)
+    // 霜（#84 步骤 2）：外面那层已经是板 → 只让 fill、不重复注册；没有父板 → 这颗自己出板。
+    // 带 secondary 标签的读数那颗由 WotaChipImpl 内部把这份身份摘掉（textLo 在透光区间没有合格档位）
+    val frost = hudFrostForEntry(LocalHudFrostParent.current)
     entry.pill?.let { pill ->
         when (pill) {
             CamPill.LEVEL -> AttitudeCard(ctx.roll, ctx.pitch, ctx.levelEnabled, card = false)
@@ -477,28 +669,41 @@ fun HudEntryItem(
                 card = false,
                 onClick = ctx.onBtClick
             )
-            CamPill.ZOOM -> TierChip(tier, ctx.zoomLabel, false, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onZoomClick))
-            CamPill.FOCUS -> TierChip(tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onFocusClick))
-            CamPill.STAB -> TierChip(tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onStabClick))
+            CamPill.ZOOM -> TierChip(
+                tier, ctx.zoomLabel, false, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onZoomClick), frost
+            )
+            CamPill.FOCUS -> TierChip(
+                tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onFocusClick), frost
+            )
+            CamPill.STAB -> TierChip(
+                tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onStabClick), frost
+            )
             CamPill.REFLINE -> WotaIconButton(
                 image = Icons.Filled.GridOn,
                 description = stringResource(R.string.cam_p_refline),
                 selected = ctx.refLineOn,
                 modifier = anchor.then(modifier),
+                frost = frost,
                 onClick = ctx.onRefLineClick
             )
             CamPill.MONITOR -> TierChip(
-                tier, ctx.monitorLabel, ctx.monitorActive, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onMonitorClick)
+                tier, ctx.monitorLabel, ctx.monitorActive, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onMonitorClick), frost
             )
             // 曲线开的是整块面板，没有就近锚点（[HudEntry.pillKey] 返回 null）；与斑马纹同级，是创作项
             CamPill.CURVE -> TierChip(
-                tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier), gatedClick(clicksAccepted, ctx.onCurveClick)
+                tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onCurveClick), frost
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),
                 description = stringResource(flashLabelRes(ctx.flash)),
                 selected = ctx.flash != Flash.OFF,
                 modifier = anchor.then(modifier),
+                frost = frost,
                 onClick = ctx.onFlashClick
             )
             CamPill.LENS -> TierChip(
@@ -507,6 +712,7 @@ fun HudEntryItem(
                 // 吸收期这两条动作一起摘掉（#73：底栏那两颗越靠后越压着录制键，谁都不许吃那一指）
                 modifier = anchor.then(modifier),
                 onClick = gatedClick(clicksAccepted, ctx.onLensCycle),
+                frost = frost,
                 onLongClick = if (clicksAccepted) ctx.onOpenLensPanel else null
             )
             CamPill.SIZE -> TopSegment(ctx.sizeLabel, WotaColor.textHi, anchor.then(modifier), ctx.onSizeClick)
@@ -540,7 +746,10 @@ fun HudEntryItem(
             secondary = stringResource(item.labelRes),
             valueColor = if (manual) WotaColor.accent else null,
             onClick = gatedClick(clicksAccepted) { ctx.onReadoutCycle(item) },
-            onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) }
+            onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) },
+            // 传了也会被 WotaChipImpl 因 secondary 非空而摘掉（见那条注释）；留在这里是为了
+            // "哪天把次级标签换成 textHi，只需改一处判据"这件事在代码里看得见，而不是散落成一个洞
+            frost = frost
         )
     }
 }
@@ -650,6 +859,9 @@ fun BoxScope.HudZoneBox(
     onCardRect: (IntRect) -> Unit,
     content: @Composable () -> Unit
 ) {
+    // 霜的宿主登记（#84 步骤 2）：五枚容器各登记一次，引用计数到 0 才撤定时器与 prefs 监听。
+    // 挂在这里而不是某枚具体容器的理由是：只要 HUD 在屏幕上，就总得有人盯 GL 的可用回报。
+    HudFrost.host()
     val density = LocalDensity.current
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
@@ -744,10 +956,22 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
             exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.86f)
         ) {
             // 录制中顶栏只说一件事：在录、录了多久。元信息那组整组让位（鸿蒙化第 1 条）
+            // 这两颗各自是一块玻璃板（顶栏没有整块底板，胶囊就是底板本身）
             if (ctx.recording) {
-                WotaChip(label = ctx.elapsedLabel, selected = false, valueColor = WotaColor.rec, dot = WotaColor.rec)
+                WotaChip(
+                    label = ctx.elapsedLabel,
+                    selected = false,
+                    valueColor = WotaColor.rec,
+                    dot = WotaColor.rec,
+                    frost = hudFrostPillPlate
+                )
             } else {
-                WotaChip(label = ctx.recStateLabel.orEmpty(), selected = false, valueColor = WotaColor.warn)
+                WotaChip(
+                    label = ctx.recStateLabel.orEmpty(),
+                    selected = false,
+                    valueColor = WotaColor.warn,
+                    frost = hudFrostPillPlate
+                )
             }
         }
         AnimatedVisibility(
@@ -756,7 +980,8 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
             exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.86f)
         ) {
             Row(
-                Modifier.wotaCard(WotaShape.pill).padding(horizontal = 2.dp),
+                // 元信息那枚壳自己是一块玻璃板（里面那几段 TopSegment 不画底，所以不用往下 provide）
+                Modifier.wotaHudCard(WotaShape.pill, hudFrostPillPlate).padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 order.forEachIndexed { index, entry ->
@@ -970,17 +1195,25 @@ fun HudDockZone(
     // #75：纵向格距与住户无关（姿态仪那枚 ≈72dp 的自绘件不许再把别人的行距顶高），
     // 它自己吃掉几档由实测高经 [com.wotagei.cam.ui.cellRowSpan] 现算
     val rowPitchPx = hudGridRowPitchPx(zone, LocalDensity.current)
-    Column(
-        modifier
-            .wotaCard(WotaShape.card)
-            .heightIn(max = bandHeightDp.dp)
-            .verticalScroll(rememberScrollState())
-            .padding(WotaSpace.xs),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // 网格节点的矩形经 ctx.gridOf 回报给编辑页（录制页传的是空链，一个节点都不加）
-        HudEntryGrid(items, zone, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(zone)) { entry ->
-            HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry), tier, clicksAccepted = true)
+    // 霜（#84 步骤 2）：底板自己注册一块玻璃，里面的条目一律改成"吃父板"——
+    // 它们再各注册一块就会与父板重叠（同一条 UV 上叠两层混色，白白多画一遍），
+    // 而它们的 fill 必须让位，否则 74.9% 不透明的药丸把底下的霜全盖死。
+    // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）
+    val plateRadiusPx = with(LocalDensity.current) { WotaShape.radiusCard.toPx() }
+    val plate = remember(plateRadiusPx) { hudFrostPlate(plateRadiusPx, HudInkLevel.PRIMARY) }
+    CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
+        Column(
+            modifier
+                .wotaHudCard(WotaShape.card, plate)
+                .heightIn(max = bandHeightDp.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(WotaSpace.xs),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 网格节点的矩形经 ctx.gridOf 回报给编辑页（录制页传的是空链，一个节点都不加）
+            HudEntryGrid(items, zone, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(zone)) { entry ->
+                HudEntryItem(entry, ctx, Modifier.ghostWhileDragged(ctx.hiddenEntry == entry), tier, clicksAccepted = true)
+            }
         }
     }
 }
@@ -1196,8 +1429,12 @@ data class HudDockDrag(
  * ## 两个不变量同时成立
  * ① 底板只包住内容：`底板宽 = 2 × 槽宽 + 录制键 + 2 × (条目间距 + 底板内边距)`，
  *    槽宽 = `max(缩略图实测宽, 镜头那颗实测宽)`；材质沿用 [wotaCard] 那一套令牌（hudScrim + 顶部高光
- *    描边），不加模糊、不加投影。#71 第一批起这层材质由 [com.wotagei.cam.ui.anim.wotaDockShell] 在
+ *    描边），不加投影。#71 第一批起这层材质由 [com.wotagei.cam.ui.anim.wotaDockShell] 在
  *    **绘制期**自绘（形状要跟着进度收拢，静态 Shape 做不到），令牌一个没换、`p = 0` 那一帧与原来同形。
+ *    #84 步骤 2 又加了一档：**霜真在屏幕上时这层 fill 让位**，同一枚可见矩形注册进
+ *    `camera/FrostCardTable`，由 GL 贴「霜 + 圆角 + 底板色」——描边、两颗条目、录制键一概不动，
+ *    开关关掉（或 DIRECT / 链停用）就是①这一条原本的样子。旧文档那四条"预览层之上禁模糊"
+ *    已被 docs/plan/14 §五作废，别再照着它们判这块玻璃是 bug。
  * ② 录制键中心恒等于**底板中心**（等宽槽是唯一的承重条件），而底板摆在**可视窗口**水平中心——
  *    居中父区域就是套了 `safeDrawingPadding()` 的那块整宽安全区（旧写法在这里再扣一笔写死的 34dp
  *    右缘避让，两个横屏姿态里都往左偏 34px，任务 #68 已删）。落位只写 y、x 恒哨兵，
@@ -1249,7 +1486,8 @@ data class HudDockDrag(
  *   它的端点是 [chipVisualCx] = 布局圆心 + 与那颗**同源**的那个数（[chipTravelForScene]），
  *   端点半径是 [chipVisualRadiusPx] = 布局内切圆半径 × 同一个 `chipScale`。
  *   用回 `scene.cx(...)` 就是"颈钉在原位、那颗飞走了"——布局矩形不反映那颗自己的 graphicsLayer 位移。
- *   观感那一侧只有亮缘这一条路（禁模糊禁投影，API 30 上 `RenderEffect` 不可用）：同一张 Path 再描一遍
+ *   观感那一侧这一条只走亮缘（颈是自由 Path，A2 的画板只吃「矩形 + 圆角」，罩不住它；
+ *   minSdk 29 / 主测机 API 30 上 `RenderEffect` 也不可用）：同一张 Path 再描一遍
  *   径向亮缘，峰值落在录制键自身的圆周（接触圈），颜色两端都取既有令牌，笔刷在组合期 remember、
  *   每帧只 `setLocalMatrix`，于是绘制阶段仍然零分配。
  * - **#73 命中权交接（放开位移的硬前置，本批一行没削弱）**：
@@ -1458,35 +1696,39 @@ fun HudBottomZone(
         ) {
             if (showLens) {
                 val lensEntry = HudEntry.of(CamPill.LENS)
-                HudEntryItem(
-                    entry = lensEntry,
-                    ctx = ctx,
-                    // 底栏这颗**必须**留全局档：它的宽就是 `DockSlotSpace = 63dp` 那笔槽宽账的来源，
-                    // 而槽宽是底板宽的输入、#71 收拢算式 w(0) 的起点（裁决仍只经 [chipTierFor] 一处）
-                    tier = chipTierFor(HudZone.BOTTOM),
-                    // #73：这颗与缩略图那颗同一条闸门（进度 > 0 就不装点击链）。
-                    // 断链点在 HudEntryItem → gatedClick → WotaChip(onClick = null)，
-                    // 不在这里另套一层 pointerInput：clickable/combinedClickable 是 WotaChip 内部的
-                    // 条件修饰符，从它自己那条分支摘掉才是结构性断开
-                    clicksAccepted = clicksAccepted,
-                    // 锚点 + 实测宽 + 融合位移三件事都挂在这颗的同一个节点上
-                    modifier = Modifier
-                        .ghostWhileDragged(ctx.hiddenEntry == lensEntry)
-                        .onSizeChanged { if (it.width != lensW) lensW = it.width }
-                        .mergeAnchor(scene, MergeScene.LENS)
-                        // 与缩略图那颗同一手法：**外层只管位移、内层只管 alpha 与缩放**，
-                        // 免得同层里 translationX 被 scaleX 乘掉（理由见上面缩略图那处的注释）
-                        .graphicsLayer {
-                            translationX = chipTravelForScene(scene, MergeScene.LENS, plan, progress())
-                        }
-                        .graphicsLayer {
-                            val p = progress()
-                            alpha = LiquidMerge.chipAlpha(p)
-                            val s = LiquidMerge.chipScale(p)
-                            scaleX = s
-                            scaleY = s
-                        }
-                )
+                // 霜（#84 步骤 2）：这颗吃底板那块玻璃（`wotaDockShell` 自己在绘制期注册的是**可见**矩形，
+                // 收拢动画跟得上），它自己不再注册一块；fill 让位由 ambient 决定
+                CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
+                    HudEntryItem(
+                        entry = lensEntry,
+                        ctx = ctx,
+                        // 底栏这颗**必须**留全局档：它的宽就是 `DockSlotSpace = 63dp` 那笔槽宽账的来源，
+                        // 而槽宽是底板宽的输入、#71 收拢算式 w(0) 的起点（裁决仍只经 [chipTierFor] 一处）
+                        tier = chipTierFor(HudZone.BOTTOM),
+                        // #73：这颗与缩略图那颗同一条闸门（进度 > 0 就不装点击链）。
+                        // 断链点在 HudEntryItem → gatedClick → WotaChip(onClick = null)，
+                        // 不在这里另套一层 pointerInput：clickable/combinedClickable 是 WotaChip 内部的
+                        // 条件修饰符，从它自己那条分支摘掉才是结构性断开
+                        clicksAccepted = clicksAccepted,
+                        // 锚点 + 实测宽 + 融合位移三件事都挂在这颗的同一个节点上
+                        modifier = Modifier
+                            .ghostWhileDragged(ctx.hiddenEntry == lensEntry)
+                            .onSizeChanged { if (it.width != lensW) lensW = it.width }
+                            .mergeAnchor(scene, MergeScene.LENS)
+                            // 与缩略图那颗同一手法：**外层只管位移、内层只管 alpha 与缩放**，
+                            // 免得同层里 translationX 被 scaleX 乘掉（理由见上面缩略图那处的注释）
+                            .graphicsLayer {
+                                translationX = chipTravelForScene(scene, MergeScene.LENS, plan, progress())
+                            }
+                            .graphicsLayer {
+                                val p = progress()
+                                alpha = LiquidMerge.chipAlpha(p)
+                                val s = LiquidMerge.chipScale(p)
+                                scaleX = s
+                                scaleY = s
+                            }
+                    )
+                }
             }
         }
     }

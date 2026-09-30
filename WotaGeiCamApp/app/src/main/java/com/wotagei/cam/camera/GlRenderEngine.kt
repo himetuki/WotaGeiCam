@@ -56,6 +56,8 @@ interface DisplaySurfaceReceiver {
  * GPU 渲染引擎：EGL14 上下文 + GLES 程序 + 双 viewport 输出 + 相机帧驱动（03 文档第 3 节）。
  *
  * 数据流：Camera2 → 本引擎的 `SurfaceTexture`(OES) → ①编码器输入面（严格全屏）②窗口面（等比居中）。
+ * ②那一侧可以多一道「毛玻璃底板」的贴板 pass（#84，[FrostCardTable] 交矩形、[FrostPlatePass] 画），
+ * ①那一侧永远只有相机帧本身——成片里出现毛玻璃是 S1 缺陷，这条有源码级用例守着。
  * 所有 GL/EGL 调用都在专用 [HandlerThread] 上，主线程只投递状态；帧节奏由
  * [SurfaceTexture.OnFrameAvailableListener] 驱动（WHEN_DIRTY 语义，不定时器空转）。
  *
@@ -136,7 +138,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /**
      * 毛玻璃 A/B 开关的**意图**（#84，默认关）。写在调用线程、生效在 GL 线程（见 [setFrostBlurEnabled]）。
      *
-     * 真源在 `ui/`（配置键/持久化都不在本层），这里只认这一个布尔值；DIRECT 模式下它同样能被设 true，
+     * 真源在 `ui/`（配置键/持久化都不在本层），而 A2 之后 UI 是把这一位**写进 [FrostCardTable] 的表头**、
+     * 由 GL 线程每帧搬进来（见 [adoptFrostIntentFromTable]）——UI 拿不到引擎实例，也不需要拿到。
+     * 这里只认这一个布尔值；DIRECT 模式下它同样能被设 true，
      * 但 [isFrostBlurAvailable] 恒为 false —— 那是物理上限而不是 bug（docs/plan/14 §二）。
      */
     @Volatile
@@ -242,9 +246,32 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      */
     private var frostChain: FrostBlurChain? = null
 
-    /** 结果纹理 + 它对应的那块等比画面矩形，一次原子发布给主线程做卡片 → UV 换算 */
+    /**
+     * 毛玻璃**上屏画板**（#84 步骤 2）：按 [FrostCardTable] 的矩形表把霜贴到窗口面，
+     * 只在 [drawWindowPass] 的预览 blit 之后被叫到 —— [drawEncoderPass] 里没有、也不许有它的引用。
+     */
+    private var frostPlatePass: FrostPlatePass? = null
+
+    /**
+     * 结果纹理 + 它对应的那块等比画面矩形，一次原子发布。
+     *
+     * A2 路线下这份快照有**两个读者**：本层的 [drawWindowPass]（画板，同一线程所以不会撕裂）与
+     * [frostGeometry] 那条取证/工装入口（主线程）。UI 侧不再拿它做换算——那枚纹理出不了这条上下文。
+     */
     @Volatile
     private var publishedFrost: FrostSnapshot? = null
+
+    /**
+     * 矩形表的两份读方副本（**双缓冲**：一份是"上一帧成功读到的那份"、一份是本帧的试读缓冲）。
+     * 分成两枚是因为 [FrostCardTable.tryReadInto] 撞车时可能已经把半份新数据写进缓冲，
+     * 直接拿它画就会把两次布局的板位置混着贴；撞车那帧改为沿用 last-good 那份 ⇒ 慢一帧、不脏。
+     * 两者都是构造期分配的定长数组，运行期只换引用 ⇒ 每帧零分配。
+     */
+    private var frostTableGood = FloatArray(FrostCardTable.TABLE_FLOATS)
+    private var frostTableTried = FloatArray(FrostCardTable.TABLE_FLOATS)
+
+    /** [frostTableGood] 里压实后的卡片数；-1 = 一次都没成功读过（第一帧没有可画的板） */
+    private var frostTableCards = -1
 
     private val stMatrix = FloatArray(16)
 
@@ -434,7 +461,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * A/B 开关（默认关）。**不**触发 `requestRender()`：状态刷新会连带重画一次编码 pass，
      * 那就是往录像里塞一帧重复帧——开关只该影响上屏方向（docs/plan/14 §二 定版口径）。
      * 于是打开后模糊在下一个相机帧产出（30–60fps 下 ≤33ms，肉眼与"点了没反应"分不开的情况不存在）；
-     * 关掉则是立即生效（[isFrostBlurAvailable] 当场变 false，不等下一帧）。
+     * 关掉则是立即生效（[isFrostBlurAvailable] 当场变 false，不等下一帧），画板也当场撤报。
+     *
+     * ⚠ 生产路径上这一位不由 UI 直接调本函数携带：`ui/` 拿不到引擎实例，开关意图写在
+     * [FrostCardTable] 的表头里，由 GL 线程每帧经 [adoptFrostIntentFromTable] 搬进来。
+     * 本函数因此是**同一枚门的直注入口**（工装/取证用），直接注进来的意图下一帧会被表位覆盖回去。
      */
     override fun setFrostBlurEnabled(enabled: Boolean) {
         if (released.get()) return
@@ -442,13 +473,38 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         wantFrostBlur = enabled
         postGl {
             if (enabled) {
-                // 给停用过的链一次重试机会（显式人为动作才重置，不是每帧重试）
+                // 给停用过的链与画板各一次重试机会（显式人为动作才重置，不是每帧重试）
                 frostChain?.resetAfterBreak()
                 frostChain?.prepare()
+                frostPlatePass?.resetAfterBreak()
+                frostPlatePass?.prepare()
             } else {
                 // 关就是"现在就没有模糊"，快照当场撤掉；资源保留不删，再开不重建也不闪
                 publishedFrost = null
+                FrostCardTable.reportPlatesDrawn(false)
             }
+        }
+    }
+
+    /**
+     * GL 线程：把 UI 写进矩形表表头的开关意图搬进 [wantFrostBlur]（#84 步骤 2 的唯一一条生产入口）。
+     *
+     * 只在真变化时做事，所以每帧的成本是一次 volatile 读 + 一次比较；`prepared` 那两趟编译
+     * 也因此只发生在翻转那一帧（与 [setFrostBlurEnabled] 的退避同一条理由：编译落在热点帧上就是明晃晃掉帧）。
+     * 关掉时顺手把画板回报撤成 false，UI 下一帧就把底板的纯色 fill 画回来。
+     */
+    private fun adoptFrostIntentFromTable() {
+        val want = FrostCardTable.hasUiEnabled()
+        if (want == wantFrostBlur) return
+        wantFrostBlur = want
+        if (want) {
+            frostChain?.resetAfterBreak()
+            frostChain?.prepare()
+            frostPlatePass?.resetAfterBreak()
+            frostPlatePass?.prepare()
+        } else {
+            publishedFrost = null
+            FrostCardTable.reportPlatesDrawn(false)
         }
     }
 
@@ -511,8 +567,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * ⚠ 「窗口」在这里指**这条 EGL 窗口面 = 承载视图自己**（分母是
      * [DisplaySurfaceReceiver.onDisplaySurfaceChanged] 回报的视图宽高），**不是 app 整屏**。
      * HUD 卡片实测矩形走的是整屏坐标（`positionInWindow`），两者差一枚视图原点——
-     * 拿它直接配卡片矩形必错位，换算请走 [frostGeometry]（它要视图在窗口里的原点）+
-     * [frostUvOfCard]（[FrostRectPx] / [FrostGeometry] 全在 `FrostBlur.kt`，有手算单测）。
+     * 拿它直接配卡片矩形必错位。#84 步骤 2 之后这条换算发生在 GL 线程内部
+     * （[drawFrostPlates] → [FrostPlatePass]，原点由 [frostViewOriginInto] 现算，
+     * 卡片矩形经 [FrostCardTable] 交过来），所以 UI 侧不必再换算；
+     * [frostGeometry] + [frostUvOfCard] 那一对入口留给取证/工装（手算单测都在 `FrostBlur.kt` 那一层）。
      */
     fun contentRect(): Rect = Rect(publishedContentRect)
 
@@ -640,6 +698,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
         // 链本体只存对象、不碰 GL（program/RT 都按需在建好上下文之后才编/建），所以放这里安全
         frostChain = FrostBlurChain(::link, ::drainGlError, positionBuffer)
+        // 上屏画板同理：只存对象，program 等到开关真打开时才编（见 setFrostBlurEnabled）
+        frostPlatePass = FrostPlatePass(::link, ::drainGlError, positionBuffer)
 
         glReady = true
         syncEffect()
@@ -848,6 +908,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (programId == 0) return
 
         drawEncoderPass()
+        // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
+        // 不许让它挡在编码器的 swap 前面（那是成片的一帧）
+        adoptFrostIntentFromTable()
         drawFrostPass(hasFrame)
         drawWindowPass(stateOnly)
 
@@ -895,6 +958,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 与录制的所有瓜葛到此为止：本函数**不进** [drawEncoderPass]，不改它的视口/纹理坐标/swap 时机/PTS，
      * 链内部进出各存各恢复 `glViewport`、`glScissor`、`glUseProgram` 与顶点属性 enable 位
      * （见 [FrostBlurChain] 的状态恢复），所以录出来的画面与开关无关、上屏的状态也不带脏。
+     * 糊出来之后**谁把霜贴到屏幕上**是另一件事：那在本文件的 [drawFrostPlates]（上屏 pass 里，
+     * 同样绝不进编码 pass），两者共用 `publishedFrost` 这一份同帧快照。
      * 唯一的观感分叉是「GL 模式的上屏多了霜、DIRECT 没有」，性质与 curve/zebra 同族。
      */
     private fun drawFrostPass(hasFrame: Boolean) {
@@ -963,7 +1028,53 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 窗口坐标 Y 向下 → GL 视口 Y 向上
         GLES20.glViewport(left, windowHeight - top - height, width, height)
         drawPass(encoderPass = false)
+        // 预览 blit 之后、swap 之前：按矩形表把霜底板贴上去（#84 步骤 2，A2 混合）。
+        // 这一步只在窗口面里发生，[drawEncoderPass] 走的是另一条完整独立的路（同一条"绝不碰霜"红线）
+        drawFrostPlates()
         if (!swap(window)) dropWindowSurface() else lastWindowSwapNs = System.nanoTime()
+    }
+
+    /**
+     * 上屏画板（#84 步骤 2）：读一张矩形表、贴若干块「霜 + 圆角 + 底板色」，然后把"这帧真贴了板"
+     * 回报给 [FrostCardTable]，UI 侧据此决定底板的纯色 fill 让不让位。
+     *
+     * 三条口径值得写明白：
+     * - **读表与画板在同一条 GL 线程上**，所以表里的矩形与 `publishedFrost` 的等比画面矩形是同一帧的账，
+     *   不需要再防"新尺寸配旧矩形"（跨线程那一半由 [FrostCardTable] 的序号锁保证，见它的类注释）；
+     * - 撞车（[FrostCardTable.tryReadInto] 返回 -1）就沿用上一帧那份副本 ⇒ 慢一帧、不脏；
+     *   一次都没读过成功（`frostTableCards < 0`，第一帧）就一块都不画；
+     * - 快照为 null（开关刚关、链停用、还没出帧）时报 false ⇒ 旧的纯色 fill 立刻回来，
+     *   这一条是"关掉要能完整回到现在的观感"的可证部分。
+     */
+    private fun drawFrostPlates() {
+        val snapshot = publishedFrost
+        val pass = frostPlatePass
+        val read = FrostCardTable.tryReadInto(frostTableTried)
+        if (read >= 0) {
+            val tmp = frostTableGood
+            frostTableGood = frostTableTried
+            frostTableTried = tmp
+            frostTableCards = read
+        }
+        val drew = if (snapshot != null && pass != null && frostTableCards > 0) {
+            val rect = snapshot.contentRectInViewPx
+            pass.draw(
+                texId = snapshot.textureId,
+                texWidthPx = snapshot.texWidthPx,
+                texHeightPx = snapshot.texHeightPx,
+                contentLeftPx = rect.left,
+                contentTopPx = rect.top,
+                contentRightPx = rect.right,
+                contentBottomPx = rect.bottom,
+                viewWidthPx = windowWidth,
+                viewHeightPx = windowHeight,
+                table = frostTableGood,
+                cardCount = frostTableCards
+            )
+        } else {
+            0
+        }
+        FrostCardTable.reportPlatesDrawn(drew > 0)
     }
 
     private fun dropWindowSurface() {
@@ -1348,7 +1459,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 离屏链的 2 纹理 + 2 FBO + 2 program 全在这一次调用里删（内部删完把 target 置 null）
         frostChain?.release()
         frostChain = null
+        // 画板的 program 与那枚结果纹理的绑定也在这里收口（新资源必须在此登记删除，14 号计划 §二）
+        frostPlatePass?.release()
+        frostPlatePass = null
         publishedFrost = null
+        frostTableCards = -1
+        // 引擎没了 ⇒ 屏幕上不可能还有板：撤报，UI 下一帧把旧的纯色 fill 画回来
+        FrostCardTable.reportPlatesDrawn(false)
         deleteStripeTexture()
         deleteCurveTexture()
         if (oesTextureId != 0) {

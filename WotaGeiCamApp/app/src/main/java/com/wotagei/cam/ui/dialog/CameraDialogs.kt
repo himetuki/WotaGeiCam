@@ -79,8 +79,12 @@ import kotlin.math.roundToInt
  *
  * 全部走「同层覆盖」而不是独立窗口：系统弹窗的遮罩会盖住取景器，而参考线/斑马纹/峰值要求边改边看
  * （03 文档 §4 参考线只在 View 层绘制、不进录像）。所以每个面板从调用方拿到与预览同尺寸的
- * [modifier]（CameraScreen 传 `matchParentSize()`），面板自身只做半透明底 + 滚动内容，
- * 且不使用 `Modifier.blur`（预览层之上禁用模糊，见 06 文档 §2）。
+ * [modifier]（CameraScreen 传 `matchParentSize()`），面板自身只做半透明底 + 滚动内容。
+ *
+ * 面板**不用** `Modifier.blur`，也不是因为旧文档那句"预览层之上禁模糊"（那条红线已被 docs/plan/14 §五
+ * 作废）：`Modifier.blur` / `RenderEffect` 是 API 31+，minSdk 29 / 主测机 API 30 上它根本不渲染，
+ * 而面板要的"近实底保证长列表可读"本来就比玻璃更实。取景 HUD 那层真·透光毛玻璃走的是另一条路
+ * ——GL 自绘（`camera/FrostBlurChain` + `FrostPlatePass`），跟这些面板无关。
  */
 
 // ------------------------------------------------------------------ 枚举 → 文案
