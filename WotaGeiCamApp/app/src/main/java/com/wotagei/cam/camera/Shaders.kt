@@ -220,4 +220,75 @@ $taps
     }
 
     // endregion
+
+    // region 上屏画板（#84 步骤 2 · A2 混合：GL 只出「模糊纹理 + 圆角裁切 + 底板色」这一块板）
+
+    /**
+     * 画板的顶点源：一枚**单位四边形**（`GlRenderEngine.positions` 那套 `-1..1`）按 uniform 摆到
+     * 这一块板在 NDC 里的位置。
+     *
+     * 为什么走 uniform 而不是每帧改顶点缓冲：矩形表每帧最多 8 块板，走 `glVertexAttribPointer` 就要
+     * 每帧往 direct buffer 里重写 4×2 个数并 `position(0)`（且两块板之间还得防着读到上一块的数据），
+     * 而 uniform 版一次绘制只改 3 个 uniform、顶点缓冲恒是那枚构造期建好的全屏四边形，**零缓冲改动**。
+     *
+     * `vLocal` 带着 `-1..1` 的局部坐标进片元（`uHalfPx` 在片元侧乘回像素），`vUv` 直接线性插值到
+     * 采样窗口：u 用 x、v 用 y 且 **y=+1 落在 vMax**（GL 的 v 向上，与 [FrostUvRect] 同一口径）。
+     * 不乘 `uTexMatrix`：霜面已经是普通 2D 图（朝向在拷贝趟就烘进去了），再乘一次机型缓冲矩阵会被转两遍
+     * ——与 [FROST_QUAD_VS] 同一条理由。
+     */
+    val FROST_PLATE_VS = """
+        attribute vec4 aPosition;
+        uniform vec4 uRect;
+        uniform vec4 uUvRect;
+        varying vec2 vLocal;
+        varying vec2 vUv;
+        void main() {
+            gl_Position = vec4(uRect.xy + aPosition.xy * uRect.zw, 0.0, 1.0);
+            vLocal = aPosition.xy;
+            vec2 t = (aPosition.xy + 1.0) * 0.5;
+            vUv = vec2(mix(uUvRect.x, uUvRect.y, t.x), mix(uUvRect.z, uUvRect.w, t.y));
+        }
+    """.trimIndent()
+
+    /**
+     * 画板的片元：rounded-rect SDF 遮罩 + 霜面取样 + 底板色压深。
+     *
+     * - `sd` 那三行与 [frostRoundedRectSdfPx] 是同一条算式（后者是能在 JVM 上跑的镜像、有手算单测；
+     *   前者只有真机能证）。半径先夹进 `[0, 短边一半]` 再参与算式：`uRadiusPx` 送进来的可能是
+     *   「胶囊 = 短边一半」这一档，不夹就会出现 `half - r` 为负、整块板被判到外面（板凭空消失）。
+     * - `cover` 只在轮廓那 1px 里取中间值 ⇒ **圆角靠它，不靠 stencil、不加 pass**：
+     *   配合 `GL_BLEND` 的 `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`，alpha=0 的像素等于没画。
+     * - `mix(uTint, blur, 1.0 - uAlpha)`：底板色与透光是一枚值的两面，透光 = 1 − alpha，
+     *   档位只从 `ui/design/frostScrimAlphaFor` 那条桥来（docs/plan/14 §二 的 WCAG 账），
+     *   片元这里**不许**再写第二个 alpha 常量。
+     * - 信箱黑边不参与采样：送进来的 `uUvRect` 已经被 [frostUvInto] 裁到等比画面内，
+     *   贴边那几块板最多多吃一个纹素（CLAMP_TO_EDGE + 向外取整），不会绕到画面另一头。
+     * - 默认 highp：`sd` 的自变量是**像素**坐标（本机 Dock 底板半轴 ≈216px），mediump 的 10 位尾数
+     *   在 200 量级上只剩 ±0.1px 分辨力，圆角过渡带会被量化成锯齿；少数驱动不支持片元 highp，
+     *   调用方会拿 [highp] = false 重编一次、再不行才停用画板（与 [GlRenderEngine.buildProgram] 同思路）。
+     */
+    fun frostPlateFragment(highp: Boolean): String {
+        val precision = if (highp) "highp" else "mediump"
+        return """
+        precision $precision float;
+        varying vec2 vLocal;
+        varying vec2 vUv;
+        uniform sampler2D uSrc;
+        uniform vec2 uHalfPx;
+        uniform float uRadiusPx;
+        uniform vec3 uTint;
+        uniform float uAlpha;
+        void main() {
+            vec2 ext = uHalfPx;
+            float r = min(max(uRadiusPx, 0.0), min(ext.x, ext.y));
+            vec2 q = abs(vLocal) * ext - (ext - vec2(r));
+            float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+            float cover = 1.0 - smoothstep(-1.0, 1.0, sd);
+            vec3 plate = mix(uTint, texture2D(uSrc, vUv).rgb, 1.0 - uAlpha);
+            gl_FragColor = vec4(plate, cover);
+        }
+        """.trimIndent()
+    }
+
+    // endregion
 }

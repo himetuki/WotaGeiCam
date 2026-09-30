@@ -45,16 +45,22 @@ echo "lock=${LOCKED:-unknown} power=${AWAKE:-unknown}"
 [ "$AWAKE" = "mWakefulness=Awake" ] || fail "屏幕没醒（$AWAKE）——空帧会被当成证据。"
 
 # 跑完约 90 秒，中途熄屏会让后半批取证变成假帧。改系统设置前先记原值，收尾必复原。
+# ⚠ 这机器上它从没被设过，`settings get` 返回的是字面量 "null" 而不是空串——
+# 拿 "null" 回填等于写进一个非法值，所以"原值是 null"这一支必须走 settings delete。
 STAY_ON=$("$ADB" settings get global stay_on_while_plugged_in 2>/dev/null | tr -d '\r')
-echo "stay_on_while_plugged_in 原值 = ${STAY_ON:-null}"
+echo "stay_on_while_plugged_in 原值 = ${STAY_ON:-空}"
 "$ADB" settings put global stay_on_while_plugged_in 2 >/dev/null 2>&1
 
 restore() {
-  "$ADB" settings put global stay_on_while_plugged_in "${STAY_ON:-0}" >/dev/null 2>&1
+  if [ -z "$STAY_ON" ] || [ "$STAY_ON" = "null" ]; then
+    "$ADB" settings delete global stay_on_while_plugged_in >/dev/null 2>&1
+  else
+    "$ADB" settings put global stay_on_while_plugged_in "$STAY_ON" >/dev/null 2>&1
+  fi
   AFTER_STAY=$("$ADB" settings get global stay_on_while_plugged_in 2>/dev/null | tr -d '\r')
-  echo "-- 复原核对：stay_on_while_plugged_in = ${AFTER_STAY}（原值 ${STAY_ON:-null}）"
+  echo "-- 复原核对：stay_on_while_plugged_in = ${AFTER_STAY}（原值 ${STAY_ON:-空}）"
   "$ADB" shell input keyevent KEYCODE_SLEEP >/dev/null 2>&1
-  echo "-- 已熄屏：$(("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1))"
+  echo "-- 已熄屏：$("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1)"
 }
 trap restore EXIT
 
@@ -137,6 +143,31 @@ PY
 )
 }
 
+# findscroll <xml名> <标签> [最多滚几次] -> "X Y"；最后一次 dump 落在 $OUT/<xml名>.xml
+# 设置页那行入口在长列表底部，不滚根本不在 dump 里——第一版就栽在这儿。
+findscroll() {
+  local name="$1" label="$2" max="${3:-10}" i=0 C
+  while : ; do
+    dump "$name" >/dev/null
+    if C=$(center "$name.xml" "$label" 2>/dev/null); then echo "$C"; return 0; fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] && { echo "   滚了 $max 次仍没有「$label」" >&2; return 1; }
+    "$ADB" shell input swipe 800 600 800 240 400 >/dev/null 2>&1; sleep 1
+  done
+}
+
+# --- 0. 原始 prefs 快照：收尾要能证明"一个字节都没多留" ---------------------
+hr
+"$ADB" shell "run-as $PKG cat shared_prefs/wota_settings.xml" > "$OUT/prefs_original.xml" 2>/dev/null \
+  || note "!! 读不到 prefs（装的是 release 包？run-as 只对 debuggable 生效）"
+if grep -q 'name="hud_layout"' "$OUT/prefs_original.xml" 2>/dev/null; then
+  note "原始态里 hud_layout **已存在** ⇒ 本轮保存会覆盖它，而「恢复默认」是删键，回不到原值。"
+  note "  要么先手工把这份原值记牢再跑，要么接受收尾时键消失。原值："
+  grep -oE 'name="hud_layout"[^>]*>[^<]*' "$OUT/prefs_original.xml" | head -1 | cut -c1-300
+else
+  note "原始态没有 hud_layout（缺键 = 用默认表）⇒ 「恢复默认」删键即可完整复原"
+fi
+
 # --- 1. 进取景页，取默认态基线 ---------------------------------------------
 hr
 "$ADB" shell am start -n "$PKG/.ui.MainActivity" >/dev/null 2>&1
@@ -150,8 +181,7 @@ hr
 C=$(center CAM_0.xml "设置") || fail "dump 里找不到「设置」那枚，入口没锚上"
 note "点设置 @ $C"
 "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
-dump SET_0
-C=$(center SET_0.xml "编辑控件位置") || fail "设置页里没有「编辑控件位置」那行"
+C=$(findscroll SET_0 "编辑控件位置") || fail "设置页滚到底也没有「编辑控件位置」那行"
 note "点编辑控件位置 @ $C"
 "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
 dump ED_0; shot ED_0
@@ -200,31 +230,40 @@ echo "  保存后 hud_layout 那一行的值："
 grep -oE 'name="hud_layout"[^>]*>[^<]*' "$OUT/prefs_after.xml" | head -1 | cut -c1-400
 diffd CAM_0.xml CAM_1.xml
 
-# --- 6. 复原：恢复默认（两步确认）+ 保存 -----------------------------------
+# --- 6. 复原：恢复默认是**两步**，第二步的标签会变成「确认恢复默认」 ----------
+# 看代码：HudLayoutEditor.kt:802 那颗 WotaChip 的 label 随 resetArmed 换文案，
+# 点第二下走 clearHudLayout（删键，缺键就是默认表）。所以复原之后**不许再点保存**——
+# 保存会把内存里的默认表又写回 prefs，键凭空多出来，等于没复原。
 hr
-echo "[复原] 恢复默认 -> 武装 -> 再点一次 -> 保存"
+echo "[复原] 恢复默认 -> 确认恢复默认（两步，第二步标签会变）"
 "$ADB" shell am start -n "$PKG/.ui.MainActivity" >/dev/null 2>&1; sleep 2
 dump CAM_2
 C=$(center CAM_2.xml "设置"); "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
-dump SET_1
-C=$(center SET_1.xml "编辑控件位置"); "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
+C=$(findscroll SET_1 "编辑控件位置") || fail "复原阶段设置页里没有「编辑控件位置」"
+"$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
 dump ED_3
 if C=$(center ED_3.xml "恢复默认"); then
+  note "  第一步：点「恢复默认」@$C（只是武装，不该删）"
   "$ADB" shell input tap $C >/dev/null 2>&1; sleep 1
   dump ED_4
-  if C2=$(center ED_4.xml "恢复默认"); then
+  if C2=$(center ED_4.xml "确认恢复默认"); then
+    note "  第二步：标签确实变成「确认恢复默认」@$C2 —— 两步确认这条被 dump 证实了"
     "$ADB" shell input tap $C2 >/dev/null 2>&1; sleep 1
-    note "  两步确认已点"
   else
-    note "  !! 第二次「恢复默认」没在树里，可能一步就生效了，也可能武装态文案变了——看图 ED_4"
+    fail "武装之后 dump 里没出现「确认恢复默认」，第二步点不了；别乱点，回去看 ED_4.xml"
   fi
   dump ED_5; shot ED_5_reset
-  if C=$(center ED_5.xml "保存"); then "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2; fi
   "$ADB" shell "run-as $PKG cat shared_prefs/wota_settings.xml" > "$OUT/prefs_restored.xml" 2>/dev/null
-  echo "  复原后 hud_layout："
-  grep -oE 'name="hud_layout"[^>]*>[^<]*' "$OUT/prefs_restored.xml" | head -1 | cut -c1-200
+  if grep -q 'name="hud_layout"' "$OUT/prefs_restored.xml" 2>/dev/null; then
+    note "  !! 复原失败：hud_layout 仍在 prefs 里"
+  else
+    note "  hud_layout 已从 prefs 删除（回到原始缺键态）"
+  fi
+  echo "  与原始 prefs 逐项对比："
+  diff <(tr -d '\r' < "$OUT/prefs_original.xml" | sort) <(tr -d '\r' < "$OUT/prefs_restored.xml" | sort) \
+    && echo "    prefs 与原始态**完全一致**" || note "    ↑ 上面这些差异就是本轮没复原干净的部分"
 else
-  note "  !! 没找到「恢复默认」，摆位可能留在本轮草稿里，回去看图手工复原"
+  note "  !! 没找到「恢复默认」，摆位可能留在草稿里——但草稿不落盘，回录制页不受影响"
 fi
 dump CAM_3; shot CAM_3_final
 diffd CAM_0.xml CAM_3.xml "设置"
