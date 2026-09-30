@@ -59,8 +59,12 @@ restore() {
   fi
   AFTER_STAY=$("$ADB" settings get global stay_on_while_plugged_in 2>/dev/null | tr -d '\r')
   echo "-- 复原核对：stay_on_while_plugged_in = ${AFTER_STAY}（原值 ${STAY_ON:-空}）"
-  "$ADB" shell input keyevent KEYCODE_SLEEP >/dev/null 2>&1
-  echo "-- 已熄屏：$("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1)"
+  if [ "${WT_KEEP_AWAKE:-0}" = 1 ]; then
+    echo "-- 按要求**不熄屏**（连着跑多段时用；最后一遍必须去掉这个变量，让收尾照常熄屏）"
+  else
+    "$ADB" shell input keyevent KEYCODE_SLEEP >/dev/null 2>&1
+    echo "-- 已熄屏：$("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1)"
+  fi
 }
 trap restore EXIT
 
@@ -168,13 +172,97 @@ else
   note "原始态没有 hud_layout（缺键 = 用默认表）⇒ 「恢复默认」删键即可完整复原"
 fi
 
+# assert_moved <before.xml> <after.xml> <标签> —— 被拖的那颗自己动没动。
+# 少了这道判据，"动了 0 项"会被读成"独立性成立"，而真相可能是那一指根本没吃进去
+# （实测栽过：读数块那颗向下拖 90px 掉出 720 高的屏幕，diff 报 0 移动，看着像通过）。
+assert_moved() {
+  ( cd "$OUT" && python - "$1" "$2" "$3" <<'PY'
+import io,re,sys
+sys.stdout.reconfigure(encoding="utf-8")
+def b0(f,want):
+    x=io.open(f,encoding="utf-8",errors="replace").read()
+    for m in re.finditer(r'<node[^>]*>',x):
+        s=m.group(0)
+        t=re.search(r'text="([^"]*)"',s); d=re.search(r'content-desc="([^"]*)"',s)
+        lab=((t.group(1) if t else "") or (d.group(1) if d else "")).strip()
+        if lab==want:
+            bb=re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',s)
+            if bb: return tuple(int(bb.group(i)) for i in range(1,5))
+    return None
+a=b0(sys.argv[1],sys.argv[3]); b=b0(sys.argv[2],sys.argv[3])
+if a is None or b is None:
+    print("   ?? 「%s」有一头不在树里（%s / %s）"%(sys.argv[3],a,b)); sys.exit(2)
+if a==b:
+    print("   !! 「%s」自己没动 ⇒ 这一组拖拽未生效，不许当成独立性成立"%(sys.argv[3])); sys.exit(1)
+print("   被拖的「%s」确实动了：%s -> %s"%(sys.argv[3],a,b)); sys.exit(0)
+PY
+)
+}
+
+# goto_camera <探针名>：把 app 弄回取景页。
+# ⚠ `am start` **不重置导航栈**：上一轮中止时 app 停在设置页，am start 只会把它恢复回设置页，
+# 于是"取景页基线"截出来是设置页那组「取景器常驻功能」的清单（实测栽过一次，PNG 只有 192KB）。
+# 判据用取景页独有的那枚「设置」content-desc 节点；不在就按 BACK，最多 5 次，仍不在就停手。
+goto_camera() {
+  local probe="$1" i=0
+  "$ADB" shell am start -n "$PKG/.ui.MainActivity" >/dev/null 2>&1; sleep 2
+  while : ; do
+    dump "$probe" >/dev/null
+    if center "$probe.xml" "设置" >/dev/null 2>&1; then
+      if [ "$i" -gt 0 ]; then note "  第 $i 次 BACK 之后回到取景页"; else note "  本来就在取景页"; fi
+      return 0
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 5 ]; then
+      echo "   连按 5 次 BACK 仍回不到取景页；去看 $OUT/$probe.xml 到底停在哪一页" >&2
+      return 1
+    fi
+    note "  不在取景页，按 BACK（第 $i 次）"
+    "$ADB" shell input keyevent KEYCODE_BACK >/dev/null 2>&1; sleep 1
+  done
+}
+
 # --- 1. 进取景页，取默认态基线 ---------------------------------------------
 hr
-"$ADB" shell am start -n "$PKG/.ui.MainActivity" >/dev/null 2>&1
-sleep 3
-dump CAM_0; shot CAM_0
+goto_camera CAM_0 || fail "回不到取景页，后面的判据全都不成立"
+shot CAM_0
+# 拖拽目标必须夹在屏内。上一轮栽的就是这个：参考线 已被前一轮拖到 y=552，再 +160 就是 712，
+# 那一指被系统直接丢掉，而 diff 报"0 移动"看着像独立性成立 —— assert_moved 就是为堵这个才加的。
+# ⚠ 尺寸只能在**到了取景页之后**量：`wm size` 报的是竖屏物理值（本机 720x1600），
+# 而脚本刚起来时前台还是竖屏 launcher，在这行之前量会算成 720x1600。
 ROT=$("$ADB" shell dumpsys input 2>/dev/null | grep -m1 "SurfaceOrientation" | grep -oE "[0-9]$")
 note "SurfaceOrientation=$ROT（取景页应为 1 或 3 的横屏；0 说明方向没生效）"
+SCREEN_W=1600; SCREEN_H=720
+case "$ROT" in 0|2) SCREEN_W=720; SCREEN_H=1600;; esac
+clamp() { local v=$1; [ "$v" -lt 24 ] && v=24; [ "$v" -gt "$((SCREEN_H - 24))" ] && v=$((SCREEN_H - 24)); echo "$v"; }
+note "可视尺寸取 ${SCREEN_W}x${SCREEN_H}"
+
+# --- 0M. --reset-only：只把摆位清回出厂，不做取证 ---------------------------
+# 基线被上一轮拖脏时先跑一次这个再跑完整取证，否则 ED_0 不是默认态、整批差值不可解释。
+# 走的是编辑页那两步「恢复默认」-> 「确认恢复默认？」，它内部是 clearHudLayout（删键），
+# 删完就是原始缺键态 —— 与本轮取证之前抓的 prefs_original.xml 可比。
+if [ "${1:-}" = "--reset-only" ]; then
+  hr
+  echo "[--reset-only] 归零摆位，不做取证"
+  C=$(center CAM_0.xml "设置") || fail "取景页里没有「设置」那枚"
+  "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
+  C=$(findscroll SET_0 "编辑控件位置") || fail "设置页里没有「编辑控件位置」"
+  "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
+  dump ED_R
+  C=$(center ED_R.xml "恢复默认") || fail "编辑页里没有「恢复默认」那颗"
+  note "  第一步（武装）@ $C"
+  "$ADB" shell input tap $C >/dev/null 2>&1; sleep 1
+  dump ED_R2
+  C=$(center ED_R2.xml "确认恢复默认？") || fail "武装后没出现「确认恢复默认？」，别乱点"
+  note "  第二步（真删）@ $C"
+  "$ADB" shell input tap $C >/dev/null 2>&1; sleep 1
+  "$ADB" shell "run-as $PKG cat shared_prefs/wota_settings.xml" > "$OUT/prefs_after_reset.xml" 2>/dev/null
+  if grep -q 'name="hud_layout"' "$OUT/prefs_after_reset.xml" 2>/dev/null; then
+    fail "hud_layout 仍在盘上，归零没成"
+  fi
+  note "  hud_layout 已删，回到缺键=默认表态"
+  exit 0
+fi
 
 # --- 2. 进设置 -> 编辑控件位置 ---------------------------------------------
 hr
@@ -199,18 +287,24 @@ hr
 echo "[#80-A] 左 Dock 拖「参考线」向下 2 格"
 SRC=$(center ED_0.xml "参考线") || fail "编辑页里没有「参考线」那颗"
 set -- $SRC; SX=$1; SY=$2
-note "  源 @ $SX,$SY -> $SX,$((SY+160))"
-"$ADB" shell input swipe $SX $SY $SX $((SY+160)) 900 >/dev/null 2>&1; sleep 1
+TY=$(clamp $((SY + 160)))
+[ "$TY" = "$SY" ] && fail "  「参考线」在 y=$SY，向下已无处可拖（上限 $((SCREEN_H-24))）⇒ 先跑 --reset-only 归零再取证"
+note "  源 @ $SX,$SY -> $SX,$TY（想拖 +160，夹后实拖 $((TY-SY))）"
+"$ADB" shell input swipe $SX $SY $SX $TY 900 >/dev/null 2>&1; sleep 1
 dump ED_1; shot ED_1_after_A
+assert_moved ED_0.xml ED_1.xml "参考线"
 diffd ED_0.xml ED_1.xml
 
 hr
 echo "[#80-B] 读数块拖「快门」向下 1 格（这条是**已知残差**：整块会平移，量出来别当新缺陷）"
 SRC=$(center ED_1.xml "快门") || fail "ED_1 里没有「快门」那颗"
 set -- $SRC; SX=$1; SY=$2
-note "  源 @ $SX,$SY -> $SX,$((SY+90))"
-"$ADB" shell input swipe $SX $SY $SX $((SY+90)) 900 >/dev/null 2>&1; sleep 1
+TY=$(clamp $((SY - 120)))
+[ "$TY" = "$SY" ] && fail "  「快门」在 y=$SY，向上已无处可拖 ⇒ 这一组测不了"
+note "  源 @ $SX,$SY -> $SX,$TY（想拖 -120，夹后实拖 $((SY-TY))）"
+"$ADB" shell input swipe $SX $SY $SX $TY 900 >/dev/null 2>&1; sleep 1
 dump ED_2; shot ED_2_after_B
+assert_moved ED_1.xml ED_2.xml "快门"
 diffd ED_1.xml ED_2.xml
 
 # --- 5. 落盘证据：run-as 读盘上的 prefs（不是 force-stop 重进） -------------
@@ -224,7 +318,17 @@ if C=$(center ED_2.xml "保存"); then
 else
   fail "ED_2 里没有「保存」那颗 —— #79 的判据不成立，先回去查操作栏"
 fi
-dump CAM_1; shot CAM_1_after_save
+# 保存只落盘、不返回（`HudLayoutEditor` 里 onClick 只写 prefs + 置 hint）。
+# 少了这一步 BACK，CAM_1 截到的会是编辑页，拿它跟 CAM_0 比就是拿两页相比。
+if C=$(center ED_2.xml "返回"); then
+  note "  点返回 @ $C ← #79 的第二颗"
+  "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
+else
+  note "  「返回」那颗不在 dump 里，退而按系统 BACK"
+  "$ADB" shell input keyevent KEYCODE_BACK >/dev/null 2>&1; sleep 2
+fi
+goto_camera CAM_1 || fail "保存返回后进不了取景页，CAM_1 不能跟 CAM_0 比"
+shot CAM_1_after_save
 "$ADB" shell "run-as $PKG cat shared_prefs/wota_settings.xml" > "$OUT/prefs_after.xml" 2>/dev/null
 echo "  保存后 hud_layout 那一行的值："
 grep -oE 'name="hud_layout"[^>]*>[^<]*' "$OUT/prefs_after.xml" | head -1 | cut -c1-400
@@ -237,7 +341,7 @@ diffd CAM_0.xml CAM_1.xml
 hr
 echo "[复原] 恢复默认 -> 确认恢复默认（两步，第二步标签会变）"
 "$ADB" shell am start -n "$PKG/.ui.MainActivity" >/dev/null 2>&1; sleep 2
-dump CAM_2
+goto_camera CAM_2 || fail "复原阶段回不到取景页"
 C=$(center CAM_2.xml "设置"); "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
 C=$(findscroll SET_1 "编辑控件位置") || fail "复原阶段设置页里没有「编辑控件位置」"
 "$ADB" shell input tap $C >/dev/null 2>&1; sleep 2
@@ -246,11 +350,11 @@ if C=$(center ED_3.xml "恢复默认"); then
   note "  第一步：点「恢复默认」@$C（只是武装，不该删）"
   "$ADB" shell input tap $C >/dev/null 2>&1; sleep 1
   dump ED_4
-  if C2=$(center ED_4.xml "确认恢复默认"); then
-    note "  第二步：标签确实变成「确认恢复默认」@$C2 —— 两步确认这条被 dump 证实了"
+  if C2=$(center ED_4.xml "确认恢复默认？"); then
+    note "  第二步：标签确实变成「确认恢复默认？」@$C2 —— 两步确认这条被 dump 证实了"
     "$ADB" shell input tap $C2 >/dev/null 2>&1; sleep 1
   else
-    fail "武装之后 dump 里没出现「确认恢复默认」，第二步点不了；别乱点，回去看 ED_4.xml"
+    fail "武装之后 dump 里没出现「确认恢复默认？」，第二步点不了；别乱点，回去看 ED_4.xml"
   fi
   dump ED_5; shot ED_5_reset
   "$ADB" shell "run-as $PKG cat shared_prefs/wota_settings.xml" > "$OUT/prefs_restored.xml" 2>/dev/null
@@ -265,7 +369,8 @@ if C=$(center ED_3.xml "恢复默认"); then
 else
   note "  !! 没找到「恢复默认」，摆位可能留在草稿里——但草稿不落盘，回录制页不受影响"
 fi
-dump CAM_3; shot CAM_3_final
+dump CAM_3; center CAM_3.xml "设置" >/dev/null || fail "复原后仍不在取景页"
+shot CAM_3_final
 diffd CAM_0.xml CAM_3.xml "设置"
 
 hr
