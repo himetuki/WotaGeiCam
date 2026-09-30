@@ -262,16 +262,18 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     private var publishedFrost: FrostSnapshot? = null
 
     /**
-     * 矩形表的两份读方副本（**双缓冲**：一份是"上一帧成功读到的那份"、一份是本帧的试读缓冲）。
-     * 分成两枚是因为 [FrostCardTable.tryReadInto] 撞车时可能已经把半份新数据写进缓冲，
-     * 直接拿它画就会把两次布局的板位置混着贴；撞车那帧改为沿用 last-good 那份 ⇒ 慢一帧、不脏。
-     * 两者都是构造期分配的定长数组，运行期只换引用 ⇒ 每帧零分配。
+     * 矩形表的读方副本（构造期定长分配，运行期只读只覆写 ⇒ 每帧零分配）。
+     *
+     * 上一版这里还是**两份**（last-good + 试读，靠"撞车就沿用上一帧"来躲撕裂）；
+     * [FrostCardTable] 换成双缓冲 + 一次引用交换之后读方不可能再读到半张表，
+     * 那套试读/换手的 dance 就成了纯粹的复杂度，已收掉一份。留着副本（而不是直接把发布出去
+     * 的那块数组交给画板逐帧读）仍然是有意义的：画板要贴着 GL 调用画满一整帧，
+     * 期间主线程还能继续发布新表，拿副本读就没有"读到底时被换掉"的账要算。
      */
-    private var frostTableGood = FloatArray(FrostCardTable.TABLE_FLOATS)
-    private var frostTableTried = FloatArray(FrostCardTable.TABLE_FLOATS)
+    private val frostTableCopy = FloatArray(FrostCardTable.TABLE_FLOATS)
 
-    /** [frostTableGood] 里压实后的卡片数；-1 = 一次都没成功读过（第一帧没有可画的板） */
-    private var frostTableCards = -1
+    /** [frostTableCopy] 里压实后的卡片数（读表成功才有值；0 = 这帧一块板都不画） */
+    private var frostTableCards = 0
 
     private val stMatrix = FloatArray(16)
 
@@ -489,8 +491,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /**
      * GL 线程：把 UI 写进矩形表表头的开关意图搬进 [wantFrostBlur]（#84 步骤 2 的唯一一条生产入口）。
      *
-     * 只在真变化时做事，所以每帧的成本是一次 volatile 读 + 一次比较；`prepared` 那两趟编译
-     * 也因此只发生在翻转那一帧（与 [setFrostBlurEnabled] 的退避同一条理由：编译落在热点帧上就是明晃晃掉帧）。
+     * 只在真变化时做事，所以每帧的成本是一次读表位（[FrostCardTable.hasUiEnabled]：一把无竞争的监视器锁 +
+     * 一次表头位读，与 [FrostCardTable.tryReadInto] 同一把锁、同一份已发布的表）加一次比较；
+     * `prepared` 那两趟编译也因此只发生在翻转那一帧
+     * （与 [setFrostBlurEnabled] 的退避同一条理由：编译落在热点帧上就是明晃晃掉帧）。
      * 关掉时顺手把画板回报撤成 false，UI 下一帧就把底板的纯色 fill 画回来。
      */
     private fun adoptFrostIntentFromTable() {
@@ -1040,22 +1044,23 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      *
      * 三条口径值得写明白：
      * - **读表与画板在同一条 GL 线程上**，所以表里的矩形与 `publishedFrost` 的等比画面矩形是同一帧的账，
-     *   不需要再防"新尺寸配旧矩形"（跨线程那一半由 [FrostCardTable] 的序号锁保证，见它的类注释）；
-     * - 撞车（[FrostCardTable.tryReadInto] 返回 -1）就沿用上一帧那份副本 ⇒ 慢一帧、不脏；
-     *   一次都没读过成功（`frostTableCards < 0`，第一帧）就一块都不画；
+     *   不需要再防"新尺寸配旧矩形"（跨线程那一半由 [FrostCardTable] 的双缓冲 + 一次引用交换保证，
+     *   见它的类注释「不撕裂」一节）；
+     * - 读表**不会失败也不会撞车**：一次 `tryReadInto` 拿到的就是某一整代的完整表（-1 只在调用方
+     *   数组太短时出现，本类的 [frostTableCopy] 按 [FrostCardTable.TABLE_FLOATS] 定长，永不触发）；
+     *   读到的表为空（`frostTableCards == 0`，HUD 还没注册板 / 表被停用）就一块都不画；
      * - 快照为 null（开关刚关、链停用、还没出帧）时报 false ⇒ 旧的纯色 fill 立刻回来，
      *   这一条是"关掉要能完整回到现在的观感"的可证部分。
+     *
+     * ⚠ **本函数不是每帧都跑到**：[drawWindowPass] 被 `windowThrottled()` 早退的那些帧（上屏帧率高于
+     * [MAX_DISPLAY_FPS] 时的节流帧）压根不进这里，既不贴板也不回报 ⇒ [FrostCardTable.isPlatesDrawn]
+     * 在节流间隔里保持上一帧的值。节流帧本来就不上屏，所以这不是漏报，但"每帧回报"那句话别说满。
      */
     private fun drawFrostPlates() {
         val snapshot = publishedFrost
         val pass = frostPlatePass
-        val read = FrostCardTable.tryReadInto(frostTableTried)
-        if (read >= 0) {
-            val tmp = frostTableGood
-            frostTableGood = frostTableTried
-            frostTableTried = tmp
-            frostTableCards = read
-        }
+        val read = FrostCardTable.tryReadInto(frostTableCopy)
+        if (read >= 0) frostTableCards = read
         val drew = if (snapshot != null && pass != null && frostTableCards > 0) {
             val rect = snapshot.contentRectInViewPx
             pass.draw(
@@ -1068,7 +1073,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 contentBottomPx = rect.bottom,
                 viewWidthPx = windowWidth,
                 viewHeightPx = windowHeight,
-                table = frostTableGood,
+                table = frostTableCopy,
                 cardCount = frostTableCards
             )
         } else {
@@ -1463,7 +1468,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         frostPlatePass?.release()
         frostPlatePass = null
         publishedFrost = null
-        frostTableCards = -1
+        frostTableCards = 0
         // 引擎没了 ⇒ 屏幕上不可能还有板：撤报，UI 下一帧把旧的纯色 fill 画回来
         FrostCardTable.reportPlatesDrawn(false)
         deleteStripeTexture()

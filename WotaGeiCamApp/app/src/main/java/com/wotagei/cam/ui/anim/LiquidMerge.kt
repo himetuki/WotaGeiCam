@@ -658,7 +658,8 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val left = DockShell.insetPx(boxW, w)
             val top = DockShell.insetPx(boxH, h)
             if (live && frostSlot >= 0) {
-                // 静止态不写表（写一次 = 两次 volatile epoch）：只有轮廓真的动了才重报
+                // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
+                // 只有轮廓真的动了才重报
                 if (frostLast[0] != left || frostLast[1] != top || frostLast[2] != w || frostLast[3] != h) {
                     frostLast[0] = left
                     frostLast[1] = top

@@ -31,7 +31,8 @@ import kotlin.math.roundToInt
  * #84 步骤 2 走的是 A2 混合路线：**GL 只出「模糊纹理 + 圆角裁切 + 底板色」这一块板**，描边、选中高亮、
  * 图标、文字仍由 Compose 叠在 TextureView 之上画。所以 `ui/` 与 `camera/` 之间只共享一张矩形表
  * （[FrostCardTable]），不共享任何视觉；片元里的圆角用 rounded-rect SDF 判掉（[frostRoundedRectSdfPx]
- * 是那条 GLSL 的 Kotlin 镜像，两边同一条算式，镜像有手算单测、GLSL 只有真机能证）。
+ * 是那条 GLSL 的 Kotlin 镜像，**非负半径**那一段两边同一条算式，负半径那一边不同——夹法与分工见它自己的注释；
+ * 镜像有手算单测、GLSL 只有真机能证）。
  */
 
 // region 渲染参数（常量集中在这一节；帧率不达标只动这里，不动链本体）
@@ -501,10 +502,18 @@ fun frostResolveRadiusPx(widthPx: Float, heightPx: Float, radiusPx: Float): Floa
 
 /**
  * rounded-rect 的**带符号距离**（px，板内为负、板外为正，0 就是轮廓）。
- * 与 [Shaders] 的 `frostPlateFragment` 里那三行是同一条算式，这里留一份能跑在 JVM 上的镜像：
+ * [Shaders] 的 `frostPlateFragment` 里那三行是它的 GLSL 同族，这里是能跑在 JVM 上的镜像：
  * 片元在真机上看不见摸不着，能静态证明的只有这条镜像 + 一条"GLSL 源码里必须有这三行"的字符串断言。
  *
- * 半径先过 [frostResolveRadiusPx] 夹一遍（与上屏那侧同一个函数，两边不会分叉）。
+ * ⚠ **两边只在"半径非负"时是同一条算式**，负半径各夹各的，别把这句写成"同一条算式"糊过去：
+ * - Kotlin 这一侧把负数当**胶囊档**（[frostResolveRadiusPx]：负 ⇒ 短边一半），因为调用方量不到自己
+ *   的尺寸、只能送哨兵过来；
+ * - 片元那一侧是 `min(max(uRadiusPx, 0.0), min(ext.x, ext.y))`，**负数夹成 0 = 直角板**，
+ *   它没有"胶囊档"这个概念。
+ * 于是同一个 −1 送进两边会得到两块形状不同的板。生产路径不会走到分歧：uniform 那一路的值
+ * 在 [FrostPlatePass.draw] 里已经先过过一次 [frostResolveRadiusPx]（负 ⇒ 短边一半、再夹上界），
+ * 到片元手里时恒为非负，片元那次 `max(…, 0.0)` 只是"有人绕过 Kotlin 直注 uniform"的保险。
+ * **谁负责夹**：档位语义在 Kotlin 侧解，越界保护两边各留一份。
  */
 fun frostRoundedRectSdfPx(localXpx: Float, localYpx: Float, halfWidthPx: Float, halfHeightPx: Float, radiusPx: Float): Float {
     val r = frostResolveRadiusPx(halfWidthPx * 2f, halfHeightPx * 2f, radiusPx)
@@ -514,9 +523,16 @@ fun frostRoundedRectSdfPx(localXpx: Float, localYpx: Float, halfWidthPx: Float, 
     return outside + min(max(qx, qy), 0f) - r
 }
 
-/** [frostRoundedRectSdfPx] 的覆盖度（0=完全在外、1=完全在内），过渡带宽 `aaPx`，与片元那条同一条 */
+/**
+ * [frostRoundedRectSdfPx] 的覆盖度（0=完全在外、1=完全在内），过渡带 `sd ∈ [-aaPx, +aaPx]`。
+ *
+ * 口径与片元 `1.0 - smoothstep(-1.0, 1.0, sd)` 对齐：`aaPx = 1f`（**±1px**）就是那条 GLSL。
+ * `aaPx` 非法（≤0）时的保底也取 1px，与片元同口径——上一版这里保底 0.5px，只有显式传 1f 才等价，
+ * 于是"镜像与片元同一条算式"这句话在漏传参数的调用上是假的（本函数只被单测调用，上屏那侧的带宽
+ * 由片元自己写死 ±1.0，所以改保底不影响任何出货像素）。
+ */
 fun frostCoverOfSdf(signedDistancePx: Float, aaPx: Float): Float {
-    val half = if (aaPx <= 0f) 0.5f else aaPx
+    val half = if (aaPx <= 0f) 1f else aaPx
     val t = ((signedDistancePx + half) / (2f * half)).coerceIn(0f, 1f)
     return 1f - t * t * (3f - 2f * t)
 }
@@ -533,24 +549,42 @@ fun frostCoverOfSdf(signedDistancePx: Float, aaPx: Float): Float {
  * 底板矩形却只有 HUD 各节点自己在布局期量得到。让 GL 每帧来读这张表，`ui/` 就不必拿到引擎引用，
  * 引擎也不必认识 `ui/`。
  *
+ * ## 前提（不是散文，违反就停用整张表）
+ * 1. **只有一个写方线程**：写入口 [writeHeader] / [writeCard] / [setUiEnabled] / [acquireSlot] /
+ *    [releaseSlot] 必须全部来自同一枚线程（生产口径 = `ui/` 主线程）。首写方把自己登记下来，
+ *    后来的写方不是同一枚 ⇒ [disableLocked] 记账 + 停用，**不静默继续**。
+ *    为什么值得为它写代码：上一版用序号锁，两枚线程同写时实测 332/3000 次读到半张表；
+ *    这一版换了发布方式，那个具体的洞没了，但"表体是两块可复用数组在换手"这件事仍然建立在
+ *    写方只有一枚之上（[scratch] 不是原子的，两枚写方会互相踩）。
+ * 2. **只有一个读方**：[tryReadInto] 只由 GL 线程每帧调一次（见 [GlRenderEngine.drawFrostPlates]）。
+ * 3. 读方与写方**都不许在持表期间做任何可能长时间阻塞的事**：两边的临界区都只有几十字节的数组搬运，
+ *    锁只是用来把"回收缓冲"和"正在拷"错开（理由见下面「不撕裂」一节的第三条）。
+ *
  * ## 每帧零分配
- * 表体是**构造期一次性分配的**两块 `FloatArray`（`data` 与读方无关，GL 侧的副本数组由调用方自带），
- * 写方是"取槽 → 写 7 个 float → 收口"，没有任何 List/Rect/Pair 出入。槽位从预填好的空闲栈里拿，
- * 用完还回去（`ArrayDeque` 的两个数组在 init 就分配好，运行期不再长）。
+ * 表体是**构造期一次性分配的**两块 [FloatArray]（[scratch] 写方私有、[published] 发布出去的那块），
+ * 写方是"取槽 → 写 7 个 float → 交换引用"，读方是"引用交换的镜像 + 拷进调用方自带的数组"，
+ * 运行期没有任何 List/Rect/Pair/new 数组（唯一的例外是 [resetForTests] 那条测试专用路径）。
+ * 槽位从预填好的空闲栈里拿、用完还回去（`ArrayDeque` 的两个数组在 init 就分配好，运行期不再长）。
  *
  * ## 不撕裂（一次读要么整张新表、要么整张旧表）
- * 全局 `epoch` 当**序号锁**（seqlock）用：写方 `epoch++`（奇数=正在写）→ 改数据 → `epoch++`（偶数=稳定）；
- * 读方「读 epoch → 若奇数则重试」→ 拷数据 → 「再读 epoch，与第一次不等就重试」（最多 [READ_RETRY_LIMIT] 次）。
- * 三个关键点：
- * - 单字 float/int 写本身不撕裂（JVM 保证 32 位值的原子写；`epoch` 是 **Long 且 @Volatile**，也不给撕裂机会）；
- * - 数据写在两次 volatile 写**之间**，所以"看见了某个 epoch"就等于看见了它之前的全部写（release/acquire）；
- * - 拷到一半被写方插进来时，读方**不会**用那半份数据：第二次 epoch 不等 ⇒ 丢弃重来或沿用上一帧的副本。
- * 于是「新表头配旧矩形」这种组合在读方一侧根本不可能被用出去（读到的要么是完整一代，要么是上一代）。
+ * **双缓冲 + 一次 volatile 引用交换**，与 [GlRenderEngine] 的 `publishedFrost` 同族：
+ * - 写方只改 [scratch]（除它之外没人能碰），发布就是在 [monitor] 里把 [published] 与 [scratch] **换个引用**；
+ * - 每次事务开前先做一次 [beginTransactionLocked]（把已发布的那份整表抄进 scratch）：一格一次事务、
+ *   表头另算一次，不抄的话交换出去的那份就只有这一笔的字段、其余是上上代 ⇒ "写了两块只读到一块"。
+ *   抄的是定长 [TABLE_FLOATS] 个 float，跑在布局期，不新建数组 ⇒ 仍然是零分配；
+ * - 读方只读 [published]。旧表头配新半径这种组合之所以不可能被读出去，靠的是**安全发布**：
+ *   写方那些普通 store 发生在 volatile 写 `published = scratch` **之前**，读方 volatile 读到那个引用
+ *   之后就与它们建立了 happens-before，于是一定看得见全套新值（而不是"可能看见一半"）；
+ * - ⚠ 光有引用交换**还不够**：交换回来的那块旧 `published` 会变成写方的下一份 [scratch]，
+ *   而读方可能**还在那块数组里拷**（它被抢占多久都不受保证，缓冲只有两块 ⇒ 写方两次事务就能踩回它）。
+ *   所以拷贝与交换必须在同一把 [monitor] 里互斥：这是"回收握手"，不是发布手段（发布靠上一条）。
+ *   当初考虑过用序号锁免锁，但 JVM 上没有 `VarHandle`（minSdk 29 拿不到）、`@Volatile` 又不能标数组元素，
+ *   第二次 volatile 读拦不住前面那些普通读沉下去 ⇒ 序号锁在本工程根本没有正确实现，已整个删掉。
  *
  * ## 谁在什么线程上写
- * - `ui/` 主线程：[writeHeader] / [writeCard] / [acquireSlot] / [releaseSlot] / [setUiEnabled]；
+ * - `ui/` 主线程（**唯一写方**）：[writeHeader] / [writeCard] / [acquireSlot] / [releaseSlot] / [setUiEnabled]；
  *   各枚底板在自己的布局回调里写自己那一格，所以一格一次事务；写之前 HUD 会顺手刷一次表头，
- *   于是"视图原点与卡片矩形出自同一次布局"在实践里成立（epoch 保证的是不撕裂，不是同一次布局）。
+ *   于是"视图原点与卡片矩形出自同一次布局"在实践里成立（引用交换保证的是不撕裂，不是同一次布局）。
  * - GL 线程：[tryReadInto]（读）与 [reportPlatesDrawn]（回报"这帧真画了板"）。
  * - `ui/` 主线程读：[isPlatesDrawn] / [hasUiEnabled]。
  *
@@ -574,13 +608,24 @@ object FrostCardTable {
      */
     const val SLOT_CAPACITY = 8
 
-    /** 读方重试上限：3 次还撞车就沿用上一帧副本（宁可慢一帧也不要脏数据） */
-    const val READ_RETRY_LIMIT = 3
-
     /** 整张表的 float 数（读方的副本数组按这个长度预分配） */
     const val TABLE_FLOATS = HEADER_FLOATS + SLOT_CAPACITY * SLOT_FLOATS
 
-    /** 表内偏移：卡片块从 HEADER_FLOATS 起，第 i 格在 HEADER_FLOATS + i * SLOT_FLOATS */
+    /**
+     * 表头字段偏移。写方（[writeHeader] / [setUiEnabled]）与读方（`FrostPlatePass.draw`）
+     * **一律走这组常量**，一个裸下标都不许留：表头加一个字段，裸下标 `table[0]…table[6]` 会
+     * 一声不响地整体错位（读到的"底板色"其实是别人），比崩溃更难查。
+     */
+    const val HEADER_ROOT_LEFT = 0
+    const val HEADER_ROOT_TOP = 1
+    const val HEADER_ROOT_WIDTH = 2
+    const val HEADER_ROOT_HEIGHT = 3
+    const val HEADER_TINT_RED = 4
+    const val HEADER_TINT_GREEN = 5
+    const val HEADER_TINT_BLUE = 6
+    const val HEADER_UI_ENABLED = 7
+
+    /** 表内偏移：卡片块从 HEADER_FLOATS 起，第 i 格在 [cardBase] */
     const val CARD_LEFT = 0
     const val CARD_TOP = 1
     const val CARD_RIGHT = 2
@@ -589,27 +634,80 @@ object FrostCardTable {
     const val CARD_ALPHA = 5
     const val CARD_PRESENT = 6
 
-    private val data = FloatArray(TABLE_FLOATS)
+    /** 第 [slot] 格在整张表里的起始偏移（压实后的卡片块偏移另算，见 [tryReadInto]） */
+    fun cardBase(slot: Int): Int = HEADER_FLOATS + slot * SLOT_FLOATS
+
+    /**
+     * 发布侧的锁：把「写 scratch + 交换引用」与「读 published + 拷贝」错开。
+     * 护的是**缓冲回收**那两手（两块数组轮转，回收必须等上一位读者拷完），不是发布手段。
+     */
+    private val monitor = Any()
+
+    /** 写方私有的那一份：只有当前写方线程、且在 [monitor] 里才会被改 */
+    private var scratch = FloatArray(TABLE_FLOATS)
+
+    /** 发布出去的那一份：读方只看它；换引用 = 一次发布（口径见类注释「不撕裂」） */
+    @Volatile
+    private var published = FloatArray(TABLE_FLOATS)
 
     /** 空闲槽栈（init 就填满，运行期只有 add/remove，不再长） */
     private val freeSlots = ArrayDeque<Int>(SLOT_CAPACITY).apply {
         for (i in SLOT_CAPACITY - 1 downTo 0) addLast(i)
     }
 
-    @Volatile
-    private var epoch = 0L
+    /**
+     * 在场位/租约：`leased[s] == true` ⇔ 「第 s 格此刻在某个组件手里、不在 [freeSlots] 里」。
+     *
+     * 判重一律看这一位，**不再去看 [freeSlots] 的内容**（`contains` 那种写法只能挡住
+     * "同一格在空闲栈里出现两次"，挡不住"把别人正持有的格塞回空闲栈"）。
+     *
+     * ⚠ 诚实边界：形参只有一枚 `slot: Int`，携带不了持有人身份，所以**证不出"这一位释放来自谁"**。
+     * 能挡住的是同一份租约的重复释放（第二次到达时这一位已经是 false ⇒ 直接忽略）；
+     * 挡不住的是"甲释放 → 乙抢到同一格 → 甲的迟到二次释放"，那种顺序下的状态和乙自己正常释放**逐位相同**，
+     * 只有把 API 换成令牌（`ui/` 要跟着改）才可能区分。已列入上机/后续项。
+     */
+    private val leased = BooleanArray(SLOT_CAPACITY)
 
     @Volatile
     private var platesDrawn = false
 
-    /** 取一个槽位（主线程，布局期）。满了返回 -1，调用方据此退回旧观感 */
-    fun acquireSlot(): Int = synchronized(freeSlots) { freeSlots.removeLastOrNull() ?: -1 }
+    /** 首写方线程 id（-1 = 还没人写过）；前提①的登记处，只在 [monitor] 里写 */
+    @Volatile
+    private var writerThreadId = -1L
 
-    /** 还槽（主线程，节点离开组合时）：先把在场位清掉，否则 GL 会画一块已经不存在的板 */
+    /** 停用位：true 之后所有写入口一律拒绝，读方只看得懂"空表 + 开关关"这一种状态 */
+    @Volatile
+    private var disabled = false
+
+    /** 停用原因（供取证/单测断言；null = 没停用） */
+    @Volatile
+    private var disabledReason: String? = null
+
+    /** 取一个槽位（主线程，布局期）。满了/停用了返回 -1，调用方据此退回旧观感 */
+    fun acquireSlot(): Int = synchronized(monitor) {
+        if (disabled) return@synchronized -1
+        if (!checkWriterLocked("acquireSlot")) return@synchronized -1
+        val slot = freeSlots.removeLastOrNull() ?: return@synchronized -1
+        leased[slot] = true
+        slot
+    }
+
+    /**
+     * 还槽（主线程，节点离开组合时）：先把在场位清掉，否则 GL 会画一块已经不存在的板。
+     *
+     * 重复/迟到的释放（这一格本来就不在任何持有人手里）**整条忽略**，不会把槽再塞回空闲栈 ⇒
+     * 空闲栈里永远不可能同时出现两份同一格。判据用 [leased] 而不是 `freeSlots.contains`，理由见那张表。
+     */
     fun releaseSlot(slot: Int) {
         if (slot < 0 || slot >= SLOT_CAPACITY) return
-        writeSlotAt(slot, present = false)
-        synchronized(freeSlots) { if (!freeSlots.contains(slot)) freeSlots.addLast(slot) }
+        synchronized(monitor) {
+            if (disabled) return@synchronized
+            if (!checkWriterLocked("releaseSlot")) return@synchronized
+            if (!leased[slot]) return@synchronized
+            leased[slot] = false
+            writePresentLocked(slot, present = false)
+            freeSlots.addLast(slot)
+        }
     }
 
     /**
@@ -617,6 +715,8 @@ object FrostCardTable {
      * 由 GL 侧的 [frostResolveRadiusPx] 现场夹；`alpha` 是底板色的不透明度（透光 = 1 − alpha）。
      *
      * 四边反序或零面积一律当"这帧没有这块板"（在场位写 0），与 [frostUvInto] 的退化口径一致。
+     * 槽位不在自己手里（没抢过 / 已经还过）时返回 false 且**一个字都不写**：那种晚到的写入
+     * 画出去就是一块"节点已经离开组合、但板上还留着"的幽灵板。
      */
     fun writeCard(
         slot: Int,
@@ -628,24 +728,31 @@ object FrostCardTable {
         alpha: Float
     ): Boolean {
         if (slot < 0 || slot >= SLOT_CAPACITY) return false
-        if (rightPx <= leftPx || bottomPx <= topPx) {
-            writeSlotAt(slot, present = false)
-            return false
+        return synchronized(monitor) {
+            if (disabled) return@synchronized false
+            if (!checkWriterLocked("writeCard")) return@synchronized false
+            if (!leased[slot]) return@synchronized false
+            beginTransactionLocked()
+            val d = scratch
+            val base = cardBase(slot)
+            if (rightPx <= leftPx || bottomPx <= topPx) {
+                d[base + CARD_PRESENT] = 0f
+                publishLocked()
+                return@synchronized false
+            }
+            d[base + CARD_LEFT] = leftPx
+            d[base + CARD_TOP] = topPx
+            d[base + CARD_RIGHT] = rightPx
+            d[base + CARD_BOTTOM] = bottomPx
+            d[base + CARD_RADIUS] = radiusPx
+            d[base + CARD_ALPHA] = alpha.coerceIn(0f, 1f)
+            d[base + CARD_PRESENT] = 1f
+            publishLocked()
+            true
         }
-        val e = beginWrite()
-        val base = HEADER_FLOATS + slot * SLOT_FLOATS
-        data[base + CARD_LEFT] = leftPx
-        data[base + CARD_TOP] = topPx
-        data[base + CARD_RIGHT] = rightPx
-        data[base + CARD_BOTTOM] = bottomPx
-        data[base + CARD_RADIUS] = radiusPx
-        data[base + CARD_ALPHA] = alpha.coerceIn(0f, 1f)
-        data[base + CARD_PRESENT] = 1f
-        endWrite(e)
-        return true
     }
 
-    /** 写表头（主线程）：组合根矩形 + 底板色 + UI 开关意图。与卡片同一把锁，一次事务 */
+    /** 写表头（主线程）：组合根矩形 + 底板色 + UI 开关意图。与卡片各是一次事务，一次发布一块板 */
     fun writeHeader(
         rootLeftPx: Float,
         rootTopPx: Float,
@@ -656,61 +763,78 @@ object FrostCardTable {
         tintBlue: Float,
         uiEnabled: Boolean
     ) {
-        val e = beginWrite()
-        data[0] = rootLeftPx
-        data[1] = rootTopPx
-        data[2] = rootWidthPx
-        data[3] = rootHeightPx
-        data[4] = tintRed
-        data[5] = tintGreen
-        data[6] = tintBlue
-        data[7] = if (uiEnabled) 1f else 0f
-        endWrite(e)
+        synchronized(monitor) {
+            if (disabled) return@synchronized
+            if (!checkWriterLocked("writeHeader")) return@synchronized
+            beginTransactionLocked()
+            val d = scratch
+            d[HEADER_ROOT_LEFT] = rootLeftPx
+            d[HEADER_ROOT_TOP] = rootTopPx
+            d[HEADER_ROOT_WIDTH] = rootWidthPx
+            d[HEADER_ROOT_HEIGHT] = rootHeightPx
+            d[HEADER_TINT_RED] = tintRed
+            d[HEADER_TINT_GREEN] = tintGreen
+            d[HEADER_TINT_BLUE] = tintBlue
+            d[HEADER_UI_ENABLED] = if (uiEnabled) 1f else 0f
+            publishLocked()
+        }
     }
 
     /** 只改开关意图（设置页翻转时立刻可见，不必等一次布局）；表头其余字段照抄原值 */
     fun setUiEnabled(enabled: Boolean) {
-        val e = beginWrite()
-        data[7] = if (enabled) 1f else 0f
-        endWrite(e)
+        synchronized(monitor) {
+            if (disabled) return@synchronized
+            if (!checkWriterLocked("setUiEnabled")) return@synchronized
+            beginTransactionLocked()
+            scratch[HEADER_UI_ENABLED] = if (enabled) 1f else 0f
+            publishLocked()
+        }
     }
 
-    /** 读方：UI 侧的开关意图（GL 线程每帧问一次） */
-    fun hasUiEnabled(): Boolean {
-        val e = epoch
-        if (e and 1L != 0L) return false
-        return data[7] != 0f
+    /**
+     * 读方：UI 侧的开关意图（GL 线程每帧问一次）。
+     *
+     * 与 [tryReadInto] 同一把锁、同一份 [published]，所以不存在"开关说开了、表还是空的"这种岔架；
+     * 停用后恒为 false（GL 因此撤快照、UI 把旧的纯色 fill 画回来）。
+     */
+    fun hasUiEnabled(): Boolean = synchronized(monitor) {
+        !disabled && published[HEADER_UI_ENABLED] != 0f
     }
 
     /**
      * 读方：把整张表拷进调用方复用的 `out`（长度必须 ≥ [TABLE_FLOATS]）。
      *
      * 返回 ≥0 = 有效卡片数，第 i 块在 `out[HEADER_FLOATS + i * SLOT_FLOATS]`（**压实**过：只在场的槽位
-     * 才占一块，读方不用跳过空槽）；返回 -1 = 撞车到重试上限之外，或 `out` 太短 ⇒
-     * 调用方沿用上一帧的副本（慢一帧，但不脏）。表头恒在 `out[0 until HEADER_FLOATS]`。
+     * 才占一块，读方不用跳过空槽）；表头恒在 `out[0 until HEADER_FLOATS]`。
+     * 返回 -1 只有一种成因：`out` 太短（调用方数组是构造期按 [TABLE_FLOATS] 定的，正常永不触发）。
+     * 换了双缓冲之后**读方不会再"撞车"**：引用交换本身就是一次完整发布，没有重试上限可言，
+     * 于是也就没有"沿用上一帧副本"这条退路需要维持（引擎那一侧的双缓冲副本数组仍留着，见
+     * [GlRenderEngine.drawFrostPlates]）。
      */
     fun tryReadInto(out: FloatArray): Int {
         if (out.size < TABLE_FLOATS) return -1
-        var attempt = 0
-        while (attempt < READ_RETRY_LIMIT) {
-            attempt++
-            val before = epoch
-            if (before and 1L != 0L) continue
+        return synchronized(monitor) {
+            val src = published
+            for (i in 0 until HEADER_FLOATS) out[i] = src[i]
             var written = 0
-            for (i in 0 until HEADER_FLOATS) out[i] = data[i]
             for (slot in 0 until SLOT_CAPACITY) {
-                val base = HEADER_FLOATS + slot * SLOT_FLOATS
-                if (data[base + CARD_PRESENT] == 0f) continue
+                val base = cardBase(slot)
+                if (src[base + CARD_PRESENT] == 0f) continue
                 val dst = HEADER_FLOATS + written * SLOT_FLOATS
-                for (k in 0 until SLOT_FLOATS) out[dst + k] = data[base + k]
+                for (k in 0 until SLOT_FLOATS) out[dst + k] = src[base + k]
                 written++
             }
-            if (epoch == before) return written
+            written
         }
-        return -1
     }
 
-    /** GL 线程回报：这一帧到底画没画板（唯一一条 GL→UI 的反向通道，单布尔不给撕裂机会） */
+    /**
+     * GL 线程回报：这一帧到底画没画板（唯一一条 GL→UI 的反向通道，单布尔不给撕裂机会）。
+     *
+     * ⚠ 口径：**每个真画了的窗口帧回报一次**，不是"每帧"。上屏被 [GlRenderEngine] 的
+     * `windowThrottled()` 节流掉的那一帧连 [drawFrostPlates] 都不进，因此既不贴板也不回报 ⇒
+     * [isPlatesDrawn] 在节流间隔里保持上一帧的值（节流帧本来就不该画，所以这不是漏报）。
+     */
     fun reportPlatesDrawn(drawn: Boolean) {
         if (platesDrawn != drawn) platesDrawn = drawn
     }
@@ -719,22 +843,102 @@ object FrostCardTable {
     fun isPlatesDrawn(): Boolean = platesDrawn
 
     // 诊断/测试用：当前占用槽数（不是渲染路径，允许加锁）
-    internal fun usedSlotCount(): Int = synchronized(freeSlots) { SLOT_CAPACITY - freeSlots.size }
+    internal fun usedSlotCount(): Int = synchronized(monitor) { leased.count { it } }
 
-    private fun writeSlotAt(slot: Int, present: Boolean) {
-        val e = beginWrite()
-        data[HEADER_FLOATS + slot * SLOT_FLOATS + CARD_PRESENT] = if (present) 1f else 0f
-        endWrite(e)
+    /** 诊断/单测用：表有没有因为写方线程漂移被停用，以及为什么 */
+    internal fun isDisabledForDiagnostics(): Boolean = disabled
+
+    /** 诊断/单测用：停用原因（null = 没停用） */
+    internal fun disabledReasonForDiagnostics(): String? = disabledReason
+
+    /** 诊断/单测用：已登记的写方线程 id（-1 = 还没人写过） */
+    internal fun writerThreadIdForDiagnostics(): Long = writerThreadId
+
+    /**
+     * **只给单测用**：把这张进程级单例恢复到刚 init 的样子（含清空写方线程登记）。
+     *
+     * 存在的理由是前提①：写方线程一旦登记就再也改不回来，而单测里既有用主线程写的用例、
+     * 也有必须让写方跑在专用线程上的并发用例，不在它们之间清账就会互相绊倒。
+     * 生产路径不许调（`main` 里出现一次就是一条用例红），也不受每帧零分配的约束（会 new 数组）。
+     */
+    internal fun resetForTests() {
+        synchronized(monitor) {
+            disabled = false
+            disabledReason = null
+            writerThreadId = -1L
+            platesDrawn = false
+            leased.fill(false)
+            freeSlots.clear()
+            for (i in SLOT_CAPACITY - 1 downTo 0) freeSlots.addLast(i)
+            scratch = FloatArray(TABLE_FLOATS)
+            published = FloatArray(TABLE_FLOATS)
+        }
     }
 
-    private fun beginWrite(): Long {
-        val e = epoch + 1L
-        epoch = e
-        return e
+    /** 写方只清在场位这一条路（[releaseSlot] 用），必须在 [monitor] 里 */
+    private fun writePresentLocked(slot: Int, present: Boolean) {
+        beginTransactionLocked()
+        scratch[cardBase(slot) + CARD_PRESENT] = if (present) 1f else 0f
+        publishLocked()
     }
 
-    private fun endWrite(startedAt: Long) {
-        epoch = startedAt + 1L
+    /** 发布 = 一次引用交换；交换回来的旧那份下一轮给写方当 scratch（每帧零分配就靠这一句） */
+    private fun publishLocked() {
+        val old = published
+        published = scratch
+        scratch = old
+    }
+
+    /**
+     * 开一次写事务：先把已发布的那份**整表抄进 scratch**，写方才开始改自己那几格。
+     *
+     * 为什么必须抄：一块板是一次事务、表头另算一次，写方每次只改 7~8 个 float。
+     * 若直接往 scratch 里改，交换出去的那份就只带这一笔的字段、其余全是上上代的（甚至是最初的 0），
+     * 于是"写了 2 块板只读到 1 块"——这是双缓冲最容易踩的那脚空，[FrostCardTableTest] 里
+     * 「读出来的是表头加压实后的卡片块」就是它的探针。
+     * 抄一份是 64 个 float 的定长搬运（写在布局期、每帧至多几次），比每帧新建数组便宜得多，
+     * 也不产生任何分配 ⇒ [TABLE_FLOATS] 这个长度就是这条路的成本上限。
+     */
+    private fun beginTransactionLocked() {
+        val src = published
+        val dst = scratch
+        for (i in 0 until TABLE_FLOATS) dst[i] = src[i]
+    }
+
+    /**
+     * 前提①的执行处：首写方登记线程 id，后来的写方不是同一枚就**停用整张表**。
+     * 必须在 [monitor] 里调用（登记本身就是读-改-写）。
+     */
+    private fun checkWriterLocked(op: String): Boolean {
+        if (disabled) return false
+        val id = Thread.currentThread().id
+        val first = writerThreadId
+        if (first == -1L) {
+            writerThreadId = id
+            return true
+        }
+        if (first == id) return true
+        disableLocked(
+            "FrostCardTable 的写方必须是同一枚线程：首写方 tid=$first，这次来自 $id（${Thread.currentThread().name}）" +
+                "，操作 $op。整张表停用，毛玻璃退回普通 scrim。"
+        )
+        return false
+    }
+
+    /**
+     * 停用：记原因 + 发布一张**全空表**（表头开关位归 0、所有在场位归 0），此后所有写入口一律拒绝。
+     *
+     * 为什么不是抛异常：本层的失败口径从头到尾都是"退化成没有毛玻璃、预览照常"
+     * （见 [FrostBlurChain] 的 failChain 与画板的 broken），为了一个观感特性把主线程写崩是不可接受的；
+     * 但也不能静默：原因同时写进 [disabledReasonForDiagnostics] 和 stderr，取证看得见。
+     */
+    private fun disableLocked(reason: String) {
+        if (disabled) return
+        disabled = true
+        disabledReason = reason
+        scratch.fill(0f)
+        publishLocked()
+        System.err.println("WotaFrostTable: $reason")
     }
 }
 

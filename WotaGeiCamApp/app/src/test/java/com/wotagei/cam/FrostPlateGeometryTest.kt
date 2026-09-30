@@ -372,11 +372,21 @@ class FrostPlateGeometryTest {
         // 覆盖度必须单调不增：sd 越大越透（写成 1-t 之外的任何形式都可能反向）
         val ramp = (-3..3).map { frostCoverOfSdf(it * 0.5f, 1f) }
         assertTrue("覆盖度随 sd 单调不增：$ramp", ramp.zipWithNext().all { (a, b) -> a >= b })
-        // aaPx 非法时保底 0.5px，不许除零给 NaN
-        assertTrue("aaPx=0 必须退到 0.5px 而不是 NaN", !frostCoverOfSdf(0f, 0f).isNaN())
-        assertEquals(0.5f, frostCoverOfSdf(0f, 0f), eps)
+        // aaPx 非法（≤0）时的保底必须与片元同口径（±1px），上一版保底 0.5px 只有显式传 1f 才等价
+        assertTrue("aaPx=0 不许除零给 NaN", !frostCoverOfSdf(0f, 0f).isNaN())
+        assertEquals("轮廓上仍然正好一半（保底带宽改动不该动中点）", 0.5f, frostCoverOfSdf(0f, 0f), eps)
         assertEquals("负 aaPx 同样走保底", 0.5f, frostCoverOfSdf(0f, -5f), eps)
-        assertEquals("保底 0.5px：sd=0.5 正好落在上端", 0f, frostCoverOfSdf(0.5f, 0f), eps)
-        assertTrue(abs(frostCoverOfSdf(-2f, 0f) - 1f) < eps)
+        listOf(-2f, -1f, -0.5f, 0f, 0.5f, 1f, 2f).forEach { sd ->
+            assertEquals(
+                "保底带宽必须逐点等于片元那条 ±1px 的算式（sd=$sd）",
+                frostCoverOfSdf(sd, 1f),
+                frostCoverOfSdf(sd, 0f),
+                eps
+            )
+            assertEquals("负 aaPx 也走同一条保底（sd=$sd）", frostCoverOfSdf(sd, 1f), frostCoverOfSdf(sd, -5f), eps)
+        }
+        // 反向证据：上一版的 0.5px 保底在 sd=0.5 处已经走到上端（全透），换成 1px 之后不该还是 0
+        assertEquals("保底 1px：sd=0.5 还在过渡带里（0.5px 那版会算成 0，那是假锋利）", 0.15625f, frostCoverOfSdf(0.5f, 0f), 1e-4f)
+        assertTrue("覆盖度随 sd 单调不增（保底档也一样）", (-3..3).map { frostCoverOfSdf(it * 0.5f, 0f) }.zipWithNext().all { (a, b) -> a >= b })
     }
 }

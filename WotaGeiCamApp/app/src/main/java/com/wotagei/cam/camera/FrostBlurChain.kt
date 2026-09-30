@@ -517,21 +517,23 @@ internal class FrostPlatePass(
         }
         // 表头：根在窗口里的矩形 + 底板色。视图原点由这两个数与 GL 自己知道的视图尺寸现算
         // （推断量与前提见 frostViewOriginInto 的注释），前提不成立就一块都不画。
+        // 偏移一律走 FrostCardTable.HEADER_*：卡片那侧一直是用 CARD_* 常量取的，表头这两套写法并存
+        // 的时候，表头加一个字段就会让下面这七行整体错一位（读到"底色"其实是别人），且不报错。
         if (!frostViewOriginInto(
                 originScratch,
-                rootLeftPx = table[0],
-                rootTopPx = table[1],
-                rootWidthPx = table[2],
-                rootHeightPx = table[3],
+                rootLeftPx = table[FrostCardTable.HEADER_ROOT_LEFT],
+                rootTopPx = table[FrostCardTable.HEADER_ROOT_TOP],
+                rootWidthPx = table[FrostCardTable.HEADER_ROOT_WIDTH],
+                rootHeightPx = table[FrostCardTable.HEADER_ROOT_HEIGHT],
                 viewWidthPx = viewWidthPx,
                 viewHeightPx = viewHeightPx
             )
         ) {
             return 0
         }
-        val tintRed = table[4]
-        val tintGreen = table[5]
-        val tintBlue = table[6]
+        val tintRed = table[FrostCardTable.HEADER_TINT_RED]
+        val tintGreen = table[FrostCardTable.HEADER_TINT_GREEN]
+        val tintBlue = table[FrostCardTable.HEADER_TINT_BLUE]
 
         val scissorWasEnabled = saveState()
         var drew = 0
