@@ -59,11 +59,13 @@ restore() {
   fi
   AFTER_STAY=$("$ADB" settings get global stay_on_while_plugged_in 2>/dev/null | tr -d '\r')
   echo "-- 复原核对：stay_on_while_plugged_in = ${AFTER_STAY}（原值 ${STAY_ON:-空}）"
-  if [ "${WT_KEEP_AWAKE:-0}" = 1 ]; then
-    echo "-- 按要求**不熄屏**（连着跑多段时用；最后一遍必须去掉这个变量，让收尾照常熄屏）"
-  else
+  # ⚠ 用户 2026-09-30 明令：**不要主动熄屏/锁定**。这台机"熄屏"与"锁定"是同一件事
+  # —— 一熄屏就进 keyguard，害得每轮都要他亲手解锁。所以这里**不再发 KEYCODE_SLEEP**，
+  # 只把 stay_on_while_plugged_in 复原成原值。要真熄屏由他自己来。
+  echo "-- 按要求不主动熄屏（这台机熄屏即锁屏）；只复原 stay_on，屏幕交给系统自己超时"
+  if [ "${WT_SLEEP_AT_END:-0}" = 1 ]; then
     "$ADB" shell input keyevent KEYCODE_SLEEP >/dev/null 2>&1
-    echo "-- 已熄屏：$("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1)"
+    echo "-- 显式要求才熄屏：$("$ADB" shell dumpsys power | grep -oE 'mWakefulness=[A-Za-z]*' | head -1)"
   fi
 }
 trap restore EXIT
@@ -369,7 +371,7 @@ if C=$(center ED_3.xml "恢复默认"); then
 else
   note "  !! 没找到「恢复默认」，摆位可能留在草稿里——但草稿不落盘，回录制页不受影响"
 fi
-dump CAM_3; center CAM_3.xml "设置" >/dev/null || fail "复原后仍不在取景页"
+goto_camera CAM_3 || fail "复原后回不到取景页"
 shot CAM_3_final
 diffd CAM_0.xml CAM_3.xml "设置"
 
