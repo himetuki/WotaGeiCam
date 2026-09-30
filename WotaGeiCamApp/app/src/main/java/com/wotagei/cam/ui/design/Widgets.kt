@@ -119,7 +119,7 @@ fun Modifier.wotaHudCard(
  *
  * 每帧零分配怎么做到的（这一段是本任务唯一的资源纪律，写清以免被后来人"顺手改成每帧 new"）：
  * - 槽位 `remember` 一次，节点离开组合时 `releaseSlot`（fill 让位态结束时槽自动还回去）；
- * - 写表发生在 `LaunchedEffect` 里，**键变了才写**：布局矩形变、`live` 翻转、透光档位变这三件事
+ * - 写表发生在 `LaunchedEffect` 里，**键变了才写**：布局矩形变、`intent` 翻转、透光档位变这三件事
  *   才各花一次"表头事务 + 一格 7 个 float"；静止态一次都不写；
  * - 写之前先 [com.wotagei.cam.ui.HudFrost.refreshHeader]：视图原点用到的"组合根尺寸"与卡片矩形
  *   出自同一次布局，两件事不会因为一个改了另一个没跟而错开一整代（跨线程不撕裂那一半由
@@ -134,17 +134,19 @@ fun Modifier.wotaHudCard(
 @Composable
 private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard): Modifier {
     val alpha = frostScrimAlphaFor(frost.ink)
-    val live = HudFrost.live
-    val slot = remember { FrostCardTable.acquireSlot() }
+    // 喂表只看"开关意图"，不看 live —— 用 live 当闸门会启动死锁：卡片要 live 才写、
+    // live 要 GL 画过板才真、GL 要表里有卡片才画得出。分工见 HudFrost.intent 的注释。
+    val intent = HudFrost.intent
+    val slot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     DisposableEffect(slot) {
         onDispose {
             if (slot >= 0) FrostCardTable.releaseSlot(slot)
         }
     }
-    LaunchedEffect(slot, coords, alpha, live) {
+    LaunchedEffect(slot, coords, alpha, intent) {
         val c = coords ?: return@LaunchedEffect
-        if (slot < 0 || !live) return@LaunchedEffect
+        if (slot < 0 || !intent) return@LaunchedEffect
         val p = c.positionInWindow()
         val size = c.size
         HudFrost.refreshHeader()

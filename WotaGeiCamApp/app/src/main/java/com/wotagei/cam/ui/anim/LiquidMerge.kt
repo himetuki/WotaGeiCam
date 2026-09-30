@@ -630,8 +630,11 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     // 这枚底板的可见轮廓由 p 每帧收拢，而布局盒全程锁死（216×60），拿布局盒去贴板就会在 p>0 之后
     // 露出一大块"板比轮廓大"的玻璃。窗口原点由本节点自己在布局期量（`frostOriginPx`），
     // 与 drawWithCache 的 size 出自同一次布局，所以窗口坐标在这里是量得出的。
+    // live 管"这一层 fill 让不让位"，intent 管"要不要注册进矩形表"。两者不能并成一个：
+    // 用 live 去闸注册会启动死锁（卡片要 live 才写、live 要画过板才真、画板要卡片才有）。
     val live = HudFrost.live
-    val frostSlot = if (live) remember { FrostCardTable.acquireSlot() } else -1
+    val intent = HudFrost.intent
+    val frostSlot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     val frostLast = remember { FloatArray(4) }
     val frostOriginPx = remember { FloatArray(2) }
     val frostAlpha = frostScrimAlphaFor(HudInkLevel.SECONDARY)
@@ -657,7 +660,7 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val r = DockShell.cornerRadiusPx(w, h)
             val left = DockShell.insetPx(boxW, w)
             val top = DockShell.insetPx(boxH, h)
-            if (live && frostSlot >= 0) {
+            if (intent && frostSlot >= 0) {
                 // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
                 // 只有轮廓真的动了才重报
                 if (frostLast[0] != left || frostLast[1] != top || frostLast[2] != w || frostLast[3] != h) {

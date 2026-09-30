@@ -329,13 +329,23 @@ internal object HudFrost {
     var live by mutableStateOf(false)
         private set
 
+    /**
+     * 设置开关的**意图**：开着就该往矩形表里喂卡片。
+     *
+     * ⚠ 这条与 [live] 必须是两个值，不能合并。曾经注册点用 `live` 当"要不要写卡片"的闸门，
+     * 于是形成启动死锁：卡片要 `live` 才写 → `live` 要 GL 画过板才真 → GL 要表里有卡片才画得出。
+     * 真机上的表现是开关翻了背板纹丝不动（背板区开/关两帧只有 2.0% 像素变化，
+     * 而同两帧纯预览参照区自己就变了 24.5%）。分工：**[intent] 管喂表，[live] 管让位。**
+     */
+    var intent by mutableStateOf(false)
+        private set
+
     private val locationInWindow = IntArray(2)
     private val tintScratch = FloatArray(3)
 
     private var root: View? = null
     private var prefs: SharedPreferences? = null
     private var hosts = 0
-    private var enabled = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Suppress("DEPRECATION")
@@ -346,7 +356,7 @@ internal object HudFrost {
 
     private val tick = object : Runnable {
         override fun run() {
-            if (hosts <= 0 || !enabled) return
+            if (hosts <= 0 || !intent) return
             refreshAvailability()
             mainHandler.postDelayed(this, REFRESH_MS)
         }
@@ -388,7 +398,7 @@ internal object HudFrost {
         mainHandler.removeCallbacks(tick)
         root = null
         prefs = null
-        enabled = false
+        intent = false
         live = false
     }
 
@@ -396,8 +406,8 @@ internal object HudFrost {
     private fun evaluateEnabled() {
         val p = prefs ?: return
         val next = WotaSettings.frostBlurEnabled(p)
-        if (next == enabled) return
-        enabled = next
+        if (next == intent) return
+        intent = next
         mainHandler.removeCallbacks(tick)
         if (next) {
             refreshAvailability()
@@ -408,7 +418,7 @@ internal object HudFrost {
     }
 
     private fun refreshAvailability() {
-        if (!enabled) {
+        if (!intent) {
             if (live) live = false
             return
         }
@@ -438,7 +448,7 @@ internal object HudFrost {
             tintRed = tintScratch[0],
             tintGreen = tintScratch[1],
             tintBlue = tintScratch[2],
-            uiEnabled = enabled
+            uiEnabled = intent
         )
     }
 }
