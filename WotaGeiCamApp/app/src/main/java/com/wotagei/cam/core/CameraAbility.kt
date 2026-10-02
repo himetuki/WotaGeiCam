@@ -217,6 +217,42 @@ data class CameraAbility(
 /** 目标帧率 → 实际写入 CONTROL_AE_TARGET_FPS_RANGE 的范围（固定 [f,f] 优先，避免 AE 漂移） */
 data class FpsPick(val lo: Int, val hi: Int, val exact: Boolean)
 
+/**
+ * 快门「强制档」是否落在本机曝光范围之外 —— UI 打 `※` 的唯一判据（与下发侧的
+ * `RequestApplier.clampShutterNs` 用同一个 [WotaTiers.isRequiredShutterNs]）。
+ *
+ * 能力缺失（[RangeI.closed]）时不算超范围：那种设备整条手动曝光都不可用，另有灰显路径，
+ * 这里再打一个 `※` 只会变成噪音。
+ */
+fun forcedShutterOutOfRange(shutterNs: Long, exposureNs: RangeI): Boolean =
+    exposureNs.ok() && WotaTiers.isRequiredShutterNs(shutterNs) &&
+        shutterNs !in exposureNs.lo.toLong()..exposureNs.hi.toLong()
+
+/**
+ * 快门可用上限（纳秒）—— `WotaParams.applyExposure` 写进 [ParamState.range] 的那个数。
+ *
+ * 三步**取最小**（实现是 `minOf(...)` 一次求交，三步的先后顺序对结果没有影响）：
+ * 1. **先把设备曝光上限抬到强制档**（1/24 = 41_666_666ns）：设备能力表里没有这两档时也要可选
+ *    （与「本机没有 `[24,24]` 固定帧率范围也照样让 24fps 可选」一条对称口径）；
+ * 2. 1/10s 防手抖上限；
+ * 3. ≤1/帧周期——这一刀吃的是**实际生效的帧率上界** [fpsHi]，不是用户档位：25fps 的 40ms
+ *    帧周期会把 1/24 挡在范围外；24fps 退化成非精确范围（如 [15,30]，上界 30）时，1/24 同样会被
+ *    30fps 帧周期压回，这是刻意的（曝光长过帧周期只会丢帧，不是"设备表外"该豁免的那一刀）。
+ *
+ * 抽成纯函数是为了让上面这条口径**可被单测钉住**：否则它只是 `applyAbility` 里的一个副作用，
+ * 谁把"抬到强制档"那一步删掉都没有用例会红（AGENTS：配置类纯函数必须配桥函数并测桥本身）。
+ *
+ * ⚠ 已知边界（刻意接受，记录在案）：抬上限会让 `ParamState.range` 比设备真实上限宽出一段，
+ * 滑杆能落到「设备范围外、又不是那两档精确值」的空档里（1µs 粒度才够得着），这种值下发时仍会被
+ * [com.wotagei.cam.camera.RequestApplier.clampShutterNs] 夹回设备上限——因为档位列表是**离散档**、
+ * 而滑杆是连续域，一个闭区间表达不了"设备区间 ∪ 两个强制点"这种非连续集合。
+ * 强制值请走档位胶囊（它给的是精确纳秒值，会按该值下发）。
+ */
+fun shutterCeilingNs(deviceMaxNs: Long, fpsHi: Int): Long {
+    val raised = maxOf(deviceMaxNs, WotaTiers.REQUIRED_SHUTTER_NS.max())
+    return minOf(raised, WotaTiers.SHUTTER_CAP_NS, WotaTiers.NS_PER_SECOND / fpsHi.coerceAtLeast(1))
+}
+
 /** 返回 null 表示设备没有任何范围能覆盖 target，UI 侧该档位灰显 */
 fun pickFpsRange(ranges: List<RangeI>, target: Int): FpsPick? {
     if (ranges.isEmpty()) return null

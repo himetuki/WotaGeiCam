@@ -5,7 +5,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -249,20 +248,15 @@ private fun TierPill(
         animationSpec = motion.float
     )
     // 借 WotaChip 的配色语义而不直接用它：它内部写死 WotaType.chip，「文本高度」设置会对档位失效
-    // 选中底色与"本机不支持"的灰化都走动画档：档位是胶囊弹窗里最常点的控件，硬切最显眼
-    val tierFill by androidx.compose.animation.animateColorAsState(
-        targetValue = if (selected) WotaColor.accent else Color.Transparent,
-        animationSpec = androidx.compose.animation.core.tween(motion.durationMs)
-    )
+    // #81 第 1 条：选中底色与文字色即时切换（禁动画颜色）；"本机不支持"的灰化走下面的 alpha（允许档）
+    // 选中底走 accentSurface：选中胶囊上压的是 onAccent 白字小字，白字对 #007DFF(accent)
+    // 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过（见 WotaColor.accentSurface 注）
+    val tierFill = if (selected) WotaColor.accentSurface else Color.Transparent
     val tierAlpha by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (supported) 1f else 0.35f,
         animationSpec = motion.float
     )
-    // 文字色与底色必须同一条 spec，否则底色还在渐变、字已经先跳成 onAccent
-    val tierTextColor by androidx.compose.animation.animateColorAsState(
-        targetValue = if (selected) WotaColor.onAccent else WotaColor.textHi,
-        animationSpec = androidx.compose.animation.core.tween(motion.durationMs)
-    )
+    val tierTextColor = if (selected) WotaColor.onAccent else WotaColor.textHi
     Row(
         modifier = Modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }

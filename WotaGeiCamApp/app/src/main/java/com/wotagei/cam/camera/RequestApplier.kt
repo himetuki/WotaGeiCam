@@ -151,13 +151,28 @@ object RequestApplier {
     /**
      * 快门双钳制（三条硬规则）：≤ 1/fps（否则丢帧）、≤ 1/10s（防手抖糊片），
      * 最后夹进设备曝光时间范围；范围缺失（closed）时跳过对应那一刀。
+     *
+     * [forceDeviceRange] 只给「强制快门档」（1/24、1/25，见 [WotaTiers.isRequiredShutterNs]）用：
+     * 设备 `SENSOR_INFO_EXPOSURE_TIME_RANGE` 里没有这两个值时，也照样按该值下发——是否被 HAL
+     * 接受由设备决定（Camera2 契约里超出上报范围的值由 HAL 自行夹回或忽略，不保证原样生效），
+     * 与 24/25fps 在无固定范围设备上仍可选的强制语义对称。
+     * **只豁免设备范围那两刀**：1/10s 与 1/帧周期两条产品规则照旧生效（否则 25fps 下 1/24
+     * 会给出比帧周期还长的曝光，直接把时间戳打乱）。
      */
-    fun clampShutterNs(shutterNs: Long, fps: Int, exposureMinNs: Long, exposureMaxNs: Long): Long {
+    fun clampShutterNs(
+        shutterNs: Long,
+        fps: Int,
+        exposureMinNs: Long,
+        exposureMaxNs: Long,
+        forceDeviceRange: Boolean = false
+    ): Long {
         val safeFps = fps.coerceAtLeast(1)
         val perFrame = WotaTiers.NS_PER_SECOND / safeFps
         var value = minOf(shutterNs, perFrame, WotaTiers.SHUTTER_CAP_NS)
-        if (exposureMaxNs > 0) value = minOf(value, exposureMaxNs)
-        if (exposureMinNs > 0) value = maxOf(value, exposureMinNs)
+        if (!forceDeviceRange) {
+            if (exposureMaxNs > 0) value = minOf(value, exposureMaxNs)
+            if (exposureMinNs > 0) value = maxOf(value, exposureMinNs)
+        }
         return if (value <= 0L) 1L else value
     }
 
@@ -327,7 +342,11 @@ object RequestApplier {
             builder.set(CaptureRequest.SENSOR_SENSITIVITY, state.clampIso(p.iso))
             builder.set(
                 CaptureRequest.SENSOR_EXPOSURE_TIME,
-                clampShutterNs(p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs)
+                clampShutterNs(
+                    p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
+                    // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
+                    forceDeviceRange = WotaTiers.isRequiredShutterNs(p.shutterNs)
+                )
             )
             builder.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDurationNs(fps))
         } else {

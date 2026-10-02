@@ -21,9 +21,9 @@ import org.junit.Test
  * 所以这里把三道闸换成四道：
  * - [everyPillKeyHasAnchorWriter]：表逐个 key 覆盖 [PillKey.values]，新增 key 忘了登记就红。
  *   取"全覆盖"而不是"只覆盖有触发点的 key"，是因为后者要在测试里再抄一份触发点清单，两处都可能漏抄。
- * - [everyWriterNamesTheEntryItemBranch]：**改前**这条要求写入方以 `CameraScreen.` 开头（锚点是各容器
- *   的具形参）；B4 起锚点只有一个挂点，所以断言换成「必须点名 HudLayer.HudEntryItem 的哪一条分支」——
- *   比原来更严：光说 CameraScreen 已经不说明谁挂了。
+ * - [everyWriterNamesTheEntryItemBranch]：B4 起锚点只有一个挂点（HudEntryItem 分支）；10-01 布局批起
+ *   合法写入方有**两族**——HudEntryItem 网格分支，或 `CameraScreen.` 固定读数（BITRATE 移出网格后
+ *   锚点随渲染点迁移）。断言认这两类前缀；真正强闸仍是 [everyPillKeyIsOwnedByAnEntry] + §69 运行时兜底。
  * - [everyPillKeyIsOwnedByAnEntry]：每个 PillKey 都必须能从某颗可编辑条目映射到（[HudEntry.pillKey]）。
  *   这张对照表漏一条，那颗控件就永远不会报锚点，浮层又回原点——这一条是 B4 新增的结构闸。
  * - [entriesWithoutPillKeyAreExactlyTheReadOnlyOnes]：反过来钉「没有就近浮层」的那三条
@@ -44,7 +44,13 @@ class PillAnchorRegistryTest {
         // 否则"登记了但没人挂"这种洞照样过得去
         pillAnchorWriters.forEach { (key, writer) ->
             assertTrue("$key 的写入方写得太少：'$writer'", writer.length > 12)
-            assertTrue("$key 的写入方没落在唯一的锚点挂点上：'$writer'", writer.startsWith("HudLayer.HudEntryItem("))
+            // 10-01 布局批起合法写入方有两族：HudEntryItem 网格分支，或 CameraScreen 的
+            // 固定读数（BITRATE 移出网格后锚点随渲染点迁移）。断言只认这两类前缀，
+            // 防"登记了但没人挂"的洞借换家混进来
+            assertTrue(
+                "$key 的写入方没落在已知锚点挂点上：'$writer'",
+                writer.startsWith("HudLayer.HudEntryItem(") || writer.startsWith("CameraScreen.")
+            )
             assertTrue("$key 的写入方没点名条目：'$writer'", writer.contains(key.name) || writer.contains("HudItem."))
         }
     }

@@ -61,6 +61,36 @@ internal object Shaders {
         }
     """.trimIndent()
 
+    // region 光弧修复（用户需求第 7 项：后台插帧，不改任何既有 pass）
+
+    /**
+     * 插帧混合（cross-fade）片元：重建帧 = 相邻两原帧的加权和。
+     *
+     * - `uCur` 是**当前解码帧**，落在 `SurfaceTexture` 的 `GL_TEXTURE_EXTERNAL_OES` 上，
+     *   所以必须 `#extension GL_OES_EGL_image_external : require`；`uPrev` 是**上一帧的 2D 备份**。
+     *   外置 OES 与普通 `sampler2D` 同处一条 program 是允许的（既有 [CURVE_FS] 就是这么写的），
+     *   前提是外置那枚声明成 `samplerExternalOES`、且 `#extension` 是首条指令。
+     * - 取样单元固定 **0 = uCur（OES）、1 = uPrev（2D）**（宿主 ArcRepairGl 同一份常量）。
+     * - `uPrevWeight` 是**前一帧权重**（v1 恒 0.5，来自 `record/ArcRepairPlan.blendWeight`），
+     *   当前帧权重恒为 `1 − uPrevWeight`，两者和为 1 ⇒ 电压/亮度域上不引入整体增益。
+     * - 强制不透明：与 [PASS_THROUGH_FS] 同一个理由——HAL/解码器给 alpha=0 时混出来会是半透明黑。
+     */
+    val ARC_REPAIR_FS = """
+        #extension GL_OES_EGL_image_external : require
+        precision mediump float;
+        varying vec2 vUv;
+        uniform samplerExternalOES uCur;
+        uniform sampler2D uPrev;
+        uniform float uPrevWeight;
+        void main() {
+            vec3 prev = texture2D(uPrev, vUv).rgb * uPrevWeight;
+            vec3 cur = texture2D(uCur, vUv).rgb * (1.0 - uPrevWeight);
+            gl_FragColor = vec4(prev + cur, 1.0);
+        }
+    """.trimIndent()
+
+    // endregion
+
     /** 注入到斑马纹/峰值里的曲线取样实现；曲线关着时调用方传空串，源码与引入曲线前逐字相同。 */
     private const val CURVE_DECL = """
 uniform sampler2D uCurve;

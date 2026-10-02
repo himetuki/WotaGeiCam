@@ -12,7 +12,15 @@ data class ReqSize(val width: Int, val height: Int, val aspect: String) {
     override fun toString(): String = "${width}x$height($aspect)"
 }
 
-/** 需求.md「视频录制分辨率」19 档候选表（参考表，最终可选项 = 与设备表求交） */
+/**
+ * 候选表（参考表，最终可选项 = 与设备表求交）：需求.md「视频录制分辨率」19 档。
+ * 按宽度降序排列。
+ *
+ * ⚠ 这里只放**产品需求档位**，不许写死任何机型尺寸（10-01 用户纠正：项目面向所有新安卓，
+ * 禁止按测试机写死参数）。10-01 用户指令的「原相机全屏分辨率」档不进本表——它在
+ * [buildVideoSizeTable] 里按设备屏幕比例**运行时推导**（传 `screenAspect`），
+ * 换任何机型都会推出该机自己的全屏档。
+ */
 object VideoSizeCandidates {
     /** 设备尺寸与需求档位的容差：HAL 常给出 4032x2268 之类与 4032x2272 差几像素的近似档 */
     const val TOLERANCE_PX = 2
@@ -46,10 +54,23 @@ object VideoSizeCandidates {
 /** 帧周期查不到（尺寸不在设备上任何输出表里）时的哨兵值 */
 const val SIZE_UNSUPPORTED_DURATION: Long = -1L
 
+// 常用比例表按比值升序；20:9 是通用比例标签（10-01 用户指令补的全屏档在此展示），
+// 只是"这个比值叫什么"的登记，不是机型参数——任何机型的同比档都会命中这条标签
 private val STANDARD_RATIOS = listOf(
     "1:1" to 1.0, "5:3" to 5.0 / 3.0, "4:3" to 4.0 / 3.0, "3:2" to 3.0 / 2.0,
-    "16:10" to 1.6, "16:9" to 16.0 / 9.0, "18:9" to 2.0, "21:9" to 21.0 / 9.0
+    "16:10" to 1.6, "16:9" to 16.0 / 9.0, "18:9" to 2.0, "20:9" to 20.0 / 9.0, "21:9" to 21.0 / 9.0
 )
+
+/**
+ * 屏幕宽高比（无向，长边/短边）：10-01「原相机全屏分辨率」档的运行时推导依据。
+ * 竖横屏都归一到 ≥1 的比值——录像档天生长边在前（如 1920x1080），拿无向比才对得上。
+ * 传 0 或负数返回 0（= 调用方还没量到屏幕，推导自动跳过）。
+ */
+fun screenAspectOf(screenW: Int, screenH: Int): Double {
+    if (screenW <= 0 || screenH <= 0) return 0.0
+    val a = screenW.toDouble() / screenH.toDouble()
+    return if (a >= 1.0) a else 1.0 / a
+}
 
 /** 比例标签现算：先匹配常用比例（±0.02），否则 gcd 约分，避免机型怪尺寸显示 unknown */
 fun aspectOf(w: Int, h: Int): String {
@@ -139,14 +160,21 @@ data class VideoSizeTable(
 
 /**
  * 纯函数：需求候选表 × 设备输出表求交（±2 像素容差）。
+ *
  * @param minDurationNs 该尺寸的最短帧周期；用 [videoSizeTable] 接 StreamConfigurationMap，
  *        单测可直接注入 lambda，不需要 Android 环境。
+ * @param screenAspect 设备屏幕宽高比（[screenAspectOf] 归一值；0/null = 不推导全屏档）。
+ *        10-01 用户指令「分辨率增加原相机全屏分辨率」的**机型无关**实现：
+ *        在设备能力表里找与屏幕同比、像素最大的档进表——换任何机型推出的都是该机自己的
+ *        全屏档，不写死任何尺寸（10-01 用户纠正：禁止按测试机写死参数）。
+ *        该档与需求档同级排序（inRequirement=true，与 10-01 指令的档位地位一致）。
  */
 fun buildVideoSizeTable(
     a: CameraAbility,
     minDurationNs: (Size) -> Long = { SIZE_UNSUPPORTED_DURATION },
     requiredFps: List<Int> = WotaTiers.REQUIRED_FPS.sorted(),
-    tolerancePx: Int = VideoSizeCandidates.TOLERANCE_PX
+    tolerancePx: Int = VideoSizeCandidates.TOLERANCE_PX,
+    screenAspect: Double? = null
 ): VideoSizeTable {
     val device = a.videoSizes
     val options = mutableListOf<VideoSizeOption>()
@@ -157,8 +185,27 @@ fun buildVideoSizeTable(
         options += optionOf(cand.toSize(), match, cand.aspect, true, minDurationNs, requiredFps, a, tolerancePx)
     }
 
+    // 全屏档（10-01 指令）：屏幕同比里像素最大的设备档；已与需求档求交过的（或屏幕还没量到）
+    // 就不加——防同一尺寸出两行，也防 4:3 屏上把需求表已有的最大 4:3 档重复进表
+    if (screenAspect != null && screenAspect > 0.0) {
+        val fullScreen = device
+            .filter { it.width > 0 && it.height > 0 }
+            .filter {
+                val ratio = it.width.toDouble() / it.height.toDouble()
+                val unoriented = if (ratio >= 1.0) ratio else 1.0 / ratio
+                abs(unoriented - screenAspect) <= ASPECT_RATIO_TOLERANCE * screenAspect
+            }
+            .maxByOrNull { it.pixels }
+        if (fullScreen != null && options.none { sizeCloseTo(it.size, fullScreen, tolerancePx) }) {
+            options += optionOf(
+                fullScreen, fullScreen, null, true,
+                minDurationNs, requiredFps, a, tolerancePx
+            )
+        }
+    }
+
     val extras = device
-        .filter { d -> VideoSizeCandidates.CANDIDATES.none { sizeCloseTo(d, it.toSize(), tolerancePx) } }
+        .filter { d -> options.none { sizeCloseTo(d, it.size, tolerancePx) } }
         .sortedByDescending { it.pixels }
         .take(VideoSizeCandidates.EXTRA_TOP_COUNT)
     extras.forEach { options += optionOf(it, it, null, false, minDurationNs, requiredFps, a, tolerancePx) }
@@ -218,8 +265,9 @@ private fun optionOf(
 fun videoSizeTable(
     a: CameraAbility,
     map: StreamConfigurationMap,
-    requiredFps: List<Int> = WotaTiers.REQUIRED_FPS.sorted()
-): VideoSizeTable = buildVideoSizeTable(a, { s -> minFrameDurationNs(map, s) }, requiredFps)
+    requiredFps: List<Int> = WotaTiers.REQUIRED_FPS.sorted(),
+    screenAspect: Double? = null
+): VideoSizeTable = buildVideoSizeTable(a, { s -> minFrameDurationNs(map, s) }, requiredFps, screenAspect = screenAspect)
 
 /**
  * DIRECT 预览流的面积上限（06 文档 §6 降热：预览不必超过 1080p 档）。

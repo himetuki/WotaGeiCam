@@ -158,7 +158,10 @@ findscroll() {
     if C=$(center "$name.xml" "$label" 2>/dev/null); then echo "$C"; return 0; fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] && { echo "   滚了 $max 次仍没有「$label」" >&2; return 1; }
-    "$ADB" shell input swipe 800 600 800 240 400 >/dev/null 2>&1; sleep 1
+    # 滚动坐标按屏推导（原 800/600/800/240 是 1600x720 横屏的写死值）；
+    # 函数定义早于 SCREEN 赋值，调用时才取值，故带 :- 兜底
+    local _sw=${SCREEN_W:-1600} _sh=${SCREEN_H:-720}
+    "$ADB" shell input swipe $((_sw / 2)) $((_sh * 2 / 3)) $((_sw / 2)) $((_sh / 4)) 400 >/dev/null 2>&1; sleep 1
   done
 }
 
@@ -234,10 +237,29 @@ shot CAM_0
 # 而脚本刚起来时前台还是竖屏 launcher，在这行之前量会算成 720x1600。
 ROT=$("$ADB" shell dumpsys input 2>/dev/null | grep -m1 "SurfaceOrientation" | grep -oE "[0-9]$")
 note "SurfaceOrientation=$ROT（取景页应为 1 或 3 的横屏；0 说明方向没生效）"
-SCREEN_W=1600; SCREEN_H=720
-case "$ROT" in 0|2) SCREEN_W=720; SCREEN_H=1600;; esac
+# 面板尺寸运行时读（10-01 清查：不再按测试机写死 1600x720）。wm size 给的是物理尺寸，
+# 注释里的经验是它通常报竖屏值；按取景页实测的 SurfaceOrientation 决定是否交换成长边在前。
+WMSIZE=$("$ADB" shell wm size 2>/dev/null)
+# Override 行优先（同 wm density 口径：开发者选项改过显示大小后 app 实际用 override）
+PHYS=$(echo "$WMSIZE" | grep -i override | grep -oE '[0-9]+x[0-9]+' | head -1)
+[ -z "$PHYS" ] && PHYS=$(echo "$WMSIZE" | grep -oE '[0-9]+x[0-9]+' | head -1)
+PW=${PHYS%x*}; PH=${PHYS#*x}
+if [ -z "$PW" ] || [ -z "$PH" ]; then
+    note "!! wm size 读不到（'$WMSIZE'），屏幕夹取退回 1600x720 —— 换机时先修这里"
+    PW=720; PH=1600
+fi
+SCREEN_W=$PW; SCREEN_H=$PH
+case "$ROT" in 1|3) SCREEN_W=$PH; SCREEN_H=$PW;; esac
+# 密度同轮读出（拖拽位移按 dp 标定，见 DY_DOWN/DY_UP）：wm density → "320" ⇒ 3.20
+WMD=$("$ADB" shell wm density 2>/dev/null)
+DENSITY_RAW=$(echo "$WMD" | grep -i override | grep -oE '[0-9]+' | head -1)
+[ -z "$DENSITY_RAW" ] && DENSITY_RAW=$(echo "$WMD" | grep -oE '[0-9]+' | head -1)
+DENSITY_RAW=${DENSITY_RAW:-320}
+# 原按 density 2 标定的两个位移（+160/-120 px = 80dp/60dp），换成 dp 标定后换机自动跟随
+DY_DOWN=$((80 * DENSITY_RAW / 100))
+DY_UP=$((60 * DENSITY_RAW / 100))
 clamp() { local v=$1; [ "$v" -lt 24 ] && v=24; [ "$v" -gt "$((SCREEN_H - 24))" ] && v=$((SCREEN_H - 24)); echo "$v"; }
-note "可视尺寸取 ${SCREEN_W}x${SCREEN_H}"
+note "可视尺寸取 ${SCREEN_W}x${SCREEN_H}（wm size ${PW}x${PH} + ROT=$ROT），位移 ${DY_DOWN}/${DY_UP}px（density ${DENSITY_RAW}）"
 
 # --- 0M. --reset-only：只把摆位清回出厂，不做取证 ---------------------------
 # 基线被上一轮拖脏时先跑一次这个再跑完整取证，否则 ED_0 不是默认态、整批差值不可解释。
@@ -289,9 +311,9 @@ hr
 echo "[#80-A] 左 Dock 拖「参考线」向下 2 格"
 SRC=$(center ED_0.xml "参考线") || fail "编辑页里没有「参考线」那颗"
 set -- $SRC; SX=$1; SY=$2
-TY=$(clamp $((SY + 160)))
+TY=$(clamp $((SY + DY_DOWN)))
 [ "$TY" = "$SY" ] && fail "  「参考线」在 y=$SY，向下已无处可拖（上限 $((SCREEN_H-24))）⇒ 先跑 --reset-only 归零再取证"
-note "  源 @ $SX,$SY -> $SX,$TY（想拖 +160，夹后实拖 $((TY-SY))）"
+note "  源 @ $SX,$SY -> $SX,$TY（想拖 +${DY_DOWN}px，夹后实拖 $((TY-SY))）"
 "$ADB" shell input swipe $SX $SY $SX $TY 900 >/dev/null 2>&1; sleep 1
 dump ED_1; shot ED_1_after_A
 assert_moved ED_0.xml ED_1.xml "参考线"
@@ -301,9 +323,9 @@ hr
 echo "[#80-B] 读数块拖「快门」向下 1 格（这条是**已知残差**：整块会平移，量出来别当新缺陷）"
 SRC=$(center ED_1.xml "快门") || fail "ED_1 里没有「快门」那颗"
 set -- $SRC; SX=$1; SY=$2
-TY=$(clamp $((SY - 120)))
+TY=$(clamp $((SY - DY_UP)))
 [ "$TY" = "$SY" ] && fail "  「快门」在 y=$SY，向上已无处可拖 ⇒ 这一组测不了"
-note "  源 @ $SX,$SY -> $SX,$TY（想拖 -120，夹后实拖 $((SY-TY))）"
+note "  源 @ $SX,$SY -> $SX,$TY（想拖 -${DY_UP}px，夹后实拖 $((SY-TY))）"
 "$ADB" shell input swipe $SX $SY $SX $TY 900 >/dev/null 2>&1; sleep 1
 dump ED_2; shot ED_2_after_B
 assert_moved ED_1.xml ED_2.xml "快门"

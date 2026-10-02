@@ -9,16 +9,17 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -38,10 +39,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wotagei.cam.R
@@ -50,19 +55,21 @@ import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.LensType
-import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.WbPreset
+import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.core.aspectOf
+import com.wotagei.cam.core.forcedShutterOutOfRange
+import com.wotagei.cam.core.shutterCeilingNs
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.WotaSettings
+import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.theme.AcrylicScrim
 import com.wotagei.cam.ui.theme.TextScaleLayer
-import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaDivider
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
@@ -210,6 +217,41 @@ internal fun <T> StateFlow<T>.observed(): State<T> = collectAsStateWithLifecycle
 
 // ------------------------------------------------------------------ 共用小件
 
+// ---- 半模态尺寸纪律（Top8 #8；来源 bindsheet.md 直板机/平板通用尺寸规格节，design-spec §8.2）----
+// 档位收成常量供本包（CurveSheet 等）共用，禁止逐面板手调；含窗口/inset 的量一律运行时取，
+// 禁止按方向写死（本机横屏挖孔在左右两侧，同一枚写死方向的常量在两个横屏方向必错一次）。
+//   宽 480dp 上限        ——「手机横屏时保持宽度 480vp 最大宽度」/ 平板「宽度默认为 480vp」
+//   最小高 320dp         ——「半模态最小高度为 320vp」
+//   最大高=短边 90%      ——「半模态最大高度为屏幕短边的 90% 高度」
+//   距信号栏 8dp         ——Size-Regular「高度距离信号栏保持 8vp 间距」（inset 运行时读）
+//   >600dp 短边转居中    ——「大于 600vp 设备断点以上时…屏幕居中显示」（断点输入是**短边**：
+//                          平板/折叠屏展开态才居中，手机横竖屏一律底贴屏；2026-10-02 用户裁决，
+//                          原「宽度>600」会让手机横屏常驻居中；短边运行时取，不按方向写死）
+internal val SheetMaxWidth = 480.dp
+internal val SheetMinHeight = 320.dp
+internal const val SheetMaxShortRatio = 0.9f
+internal val SheetSignalGap = 8.dp
+/** 弹窗内间距 12dp（⑤；design-spec §5.1 `ohos_id_default_padding_start/end`=12vp） */
+internal val SheetInnerPadding = 12.dp
+internal const val SheetCenterBreakpoint = 600
+
+/**
+ * 半模态面板的最大高（dp）：短边 90% 与「窗口高 − 顶部避让」取小。
+ * 顶部避让 = max(信号栏 inset + 8dp, [PanelTopKeep] 兜底)——inset 运行时读；本机横屏
+ * 挖孔在左右两侧时 top inset 自然为 0，48dp 的顶栏兜底接手（PanelTopKeep 的已知债仍有效）。
+ * 面板本体（[BottomPanel]）与曲线画布（`CurveSheet.canvasSide`）共用同一份口径，不许各算各的。
+ */
+@Composable
+internal fun sheetMaxHeight(): Dp {
+    val config = LocalConfiguration.current
+    val density = LocalDensity.current
+    val shortSide = minOf(config.screenWidthDp, config.screenHeightDp).dp
+    val topInset = with(density) { WindowInsets.safeDrawing.getTop(density).toDp() }
+    val topKeep = maxOf(topInset + SheetSignalGap, PanelTopKeep)
+    return (minOf(shortSide * SheetMaxShortRatio, config.screenHeightDp.dp - topKeep))
+        .coerceAtLeast(0.dp)
+}
+
 @Composable
 internal fun BottomPanel(
     visible: Boolean,
@@ -220,6 +262,11 @@ internal fun BottomPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val motion = LocalMotion.current
+    // ⑧ 第 5 条：断点输入是短边（min(宽,高)，随旋转变正是所需语义）——平板/折叠屏展开态短边
+    // >600dp 才转居中，手机横竖屏短边一律 <600dp 底贴屏（2026-10-02 用户裁决，原「宽度>600」
+    // 会让手机横屏 800dp 命中常驻居中）
+    val config = LocalConfiguration.current
+    val centered = minOf(config.screenWidthDp, config.screenHeightDp) > SheetCenterBreakpoint
     Box(modifier.fillMaxSize()) {
         AnimatedVisibility(
             visible = visible,
@@ -233,7 +280,7 @@ internal fun BottomPanel(
             visible = visible,
             enter = slideInVertically(motion.offset) { it },
             exit = slideOutVertically(motion.offset) { it },
-            modifier = Modifier.align(Alignment.BottomCenter)
+            modifier = Modifier.align(if (centered) Alignment.Center else Alignment.BottomCenter)
         ) {
             val ctx = LocalContext.current
             val dialogScale = WotaSettings.textScale(
@@ -241,45 +288,49 @@ internal fun BottomPanel(
                 WotaSettings.KEY_TEXT_SCALE_DIALOG
             )
             TextScaleLayer(dialogScale) {
-                BoxWithConstraints {
-                    // 整块限高到「顶栏以下」并只让参数区滚：以前是整块 verticalScroll，
-                    // 参数一多就撑满全高、标题被顶到屏幕最上沿压住录制页顶栏文字（真机截图核对）
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .widthIn(max = 560.dp)
-                            .heightIn(max = maxHeight - PanelTopKeep)
-                            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                            .background(AcrylicScrim)
-                            .safeDrawingPadding()
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(title, style = MaterialTheme.typography.titleMedium, color = WotaText)
-                                subtitle?.let {
-                                    Text(
-                                        text = it,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = WotaTextDim,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                            IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
-                                Icon(
-                                    Icons.Filled.Close,
-                                    contentDescription = stringResource(R.string.close),
-                                    tint = WotaTextDim
+                // 整块限高到「顶栏以下」并只让参数区滚：以前是整块 verticalScroll，
+                // 参数一多就撑满全高、标题被顶到屏幕最上沿压住录制页顶栏文字（真机截图核对）
+                val sheetMaxH = sheetMaxHeight()
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = SheetMaxWidth)
+                        .heightIn(min = minOf(SheetMinHeight, sheetMaxH), max = sheetMaxH)
+                        // WotaShape.dialog 是 Dp 件位值（24dp）不是 Shape，clip 要 Shape 就地包。
+                        // 口径备注：官方底贴屏面板只圆**上缘** 24dp，这里仍是全形状四角皆圆（本轮改动最小）；
+                        // 待令牌层出"仅上缘"半径档后一行切换
+                        .clip(RoundedCornerShape(WotaShape.dialog))
+                        .background(AcrylicScrim)
+                        .safeDrawingPadding()
+                        .padding(SheetInnerPadding)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(title, style = MaterialTheme.typography.titleMedium, color = WotaText)
+                            subtitle?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    // 正文压 AcrylicScrim(0xB3)：textLo worst ≈2.8、textMid worst ≈4.26 都不够 4.5，
+                                    // 面板正文档只有 textHi（worst 5.71）
+                                    color = WotaText,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
-                        Spacer(Modifier.height(4.dp))
-                        DividerLine()
-                        Column(Modifier.verticalScroll(rememberScrollState())) {
-                            content()
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = stringResource(R.string.close),
+                                tint = WotaTextDim
+                            )
                         }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    DividerLine()
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        content()
                     }
                 }
             }
@@ -287,7 +338,16 @@ internal fun BottomPanel(
     }
 }
 
-/** 面板顶部要给录制页顶栏留出的高度 */
+/**
+ * 面板顶部要给录制页顶栏留出的高度——**兜底近似，不是实测值**：
+ * 顶栏设计高 44（`ui/HudLayer` 的 `TopBarSpace`：38 圆钮 + 上下 4+2）+ 4 的一次固定加成。
+ *
+ * 已知债：顶栏实测更高时本预留不足会压面板顶——能力/权限告警条约 22dp 出现、或字体缩放 120%
+ * 把顶栏撑高，都是常见场景。正解是由录制页把 `topBarH` 实测（`CameraScreen` 里
+ * `HudTopChrome.onSizeChanged` 回报、现只喂 `HudLayout` 的 `topAvoidDp` 那份）经 CompositionLocal
+ * 传入本面板，待跨文件接线（provide 点在 `CameraScreen`，不属本轮可改文件；10-01 清查记录）。
+ * 上账的「顶 inset」那一笔已由 [sheetMaxHeight] 运行时读掉（⑧ 距信号栏 8dp），这里只剩 topBarH 一笔。
+ */
 private val PanelTopKeep = 48.dp
 
 @Composable
@@ -300,7 +360,10 @@ internal fun SmallTextButton(text: String, onClick: () -> Unit) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelMedium,
-        color = WotaAccent,
+        // 动作小字不压 AcrylicScrim 用 accent：亮画面 worst 只有 ≈2.2；改 textHi（scrim 上
+        // 最稳的一档，worst 5.71）+ 下划线保留「可点」语义，accent 强调交给需要时的图形件
+        color = WotaText,
+        textDecoration = TextDecoration.Underline,
         textAlign = TextAlign.Center,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -309,12 +372,39 @@ internal fun SmallTextButton(text: String, onClick: () -> Unit) {
     )
 }
 
-/** 快门药丸：产品档 ∩ 本机范围，交集外灰显（02 文档 §7 档位求交） */
-internal fun shutterItems(shutter: ParamState<Long>): List<TierItem> {
-    val lo = shutter.range?.start
-    val hi = shutter.range?.endInclusive
+/**
+ * 快门药丸：产品档 ∩ 本机范围，交集外灰显（02 文档 §7 档位求交）。
+ *
+ * 可选性的上限由 **[shutterCeilingNs]** 按 [fpsHi] 现算，**不再**读按用户档位算出来的
+ * `ParamState.range`——两者会在「用户选 24fps、设备只给 [15,30]（非精确）」时分裂：
+ * 旧口径把 1/24 判成可选并打 `※`，而下发/回写（`RequestApplier` 与 `Camera2Engine.clampShutterToFrame`）
+ * 都按**实际生效帧周期** 30fps 把请求夹成 1/30，露出一个点不住的死档位。现在判据与回写同源：
+ * 列表里可选 = 下发不会被帧周期改掉。
+ *
+ * [deviceNs] 是本机曝光范围（`ability.exposureNs`）；[fpsHi] 是**实际生效的帧率上界**
+ * （`pickFpsRange(...)` 的结果 `.hi`，与 `applyExposure` / 引擎 `normal.hi` 同一个量）。
+ * [approxMark] 是 `※`：**强制档**（1/24、1/25）超出设备范围时在档位标签上打上它。
+ * 注意 `※` 与「可选」绑定——`forced` 只在 `supported` 为真时参与 label，灰显档一律不带标
+ * （帧率侧的 `※` 也是同样的「只有近似才打、灰显绝不打」规则）。
+ *
+ * 形参 [fpsHi]、[approxMark] **不给默认值**：漏传就编译不过
+ * （与 §69「控件锚点无默认值必传」同一条纪律）。
+ */
+internal fun shutterItems(
+    deviceNs: RangeI?,
+    fpsHi: Int,
+    approxMark: String
+): List<TierItem> {
+    val exp = deviceNs?.takeIf { it.ok() }
     return WotaTiers.SHUTTER_DENOM.map { denom ->
         val ns = WotaTiers.NS_PER_SECOND / denom
-        TierItem(ns.toInt(), "1/$denom", lo != null && hi != null && ns in lo..hi)
+        val hi = exp?.let { shutterCeilingNs(it.hi.toLong(), fpsHi) }
+        val supported = exp != null && hi != null && ns in exp.lo.toLong()..hi
+        val forced = exp != null && supported && forcedShutterOutOfRange(ns, exp)
+        TierItem(
+            ns.toInt(),
+            "1/$denom" + if (forced) approxMark else "",
+            supported
+        )
     }
 }

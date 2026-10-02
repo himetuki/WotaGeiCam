@@ -68,6 +68,9 @@ internal class FrostBlurChain(
     @Volatile
     private var broken = false
 
+    /** 霜探针（#84）：只读；true = 连续 GL 错误后已停用，等显式 resetAfterBreak */
+    internal fun isBrokenForDiagnostics(): Boolean = broken
+
     // --- program（2 枚：拷贝 + 模糊共用一枚横向/纵向）
     private var copyProgram = 0
     private var blurProgram = 0
@@ -461,6 +464,9 @@ internal class FrostPlatePass(
 
     @Volatile
     private var broken = false
+
+    /** 霜探针（#84）：只读；true = program 链接失败已停用（prepare 的 Log.w 有现场） */
+    internal fun isBrokenForDiagnostics(): Boolean = broken
 
     private var program = 0
     private var aPositionLoc = -1

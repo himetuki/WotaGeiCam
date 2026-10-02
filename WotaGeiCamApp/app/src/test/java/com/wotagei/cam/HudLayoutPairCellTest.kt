@@ -175,19 +175,21 @@ class HudLayoutPairCellTest {
 
     @Test
     fun onlyCellMatesMayShareACellStrangersGetDisplaced() {
-        // "一格多颗"之后「这格被占了」的新口径（[blockingCells]）：**同组搭档不算占，跨组算占**。
-        // 把变焦硬拖到配对那一格 (0,0) ⇒ 配对两颗一颗都不许动，变焦就近让到 (1,0)
-        //（曼哈顿距离 1 的两个候选里 (0,1) 被蓝牙占着，所以唯一解是 (1,0)）
+        // "一格多颗"之后「这格被占了」的口径（[blockingCells]）：**同组搭档不算占，跨组算占**。
+        // 本批把落点改成交换之后，把变焦硬拖到配对那一格 (0,0) 的结果是：
+        // 配对两颗（LEVEL+VOLUME，互为搭档）**整组**让到变焦的原格 (0,2)，变焦自己拿到 (0,0)。
+        // 退回旧实现（只落空格）时配对两颗原地不动、变焦落在 (1,0)，本用例红。
         val after = rightCells(
             HudLayoutTable.default().placeEntryAt(e(CamPill.ZOOM), HudZone.RIGHT, 2, GridCell(0, 0), planAll)
         )
-        assertEquals("配对那颗不许被挤走", GridCell(0, 0), after[e(CamPill.LEVEL)])
-        assertEquals("配对那颗不许被挤走", GridCell(0, 0), after[e(CamPill.VOLUME)])
-        assertEquals("跨组撞格 ⇒ 拖过来那颗就近让到隔壁空格", GridCell(1, 0), after[e(CamPill.ZOOM)])
+        assertEquals("跨组那颗拿到目标格", GridCell(0, 0), after[e(CamPill.ZOOM)])
+        assertEquals("配对两颗整组让到变焦的原格（仍是同一格 ⇒ 配对没被拆开）", GridCell(0, 2), after[e(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 2), after[e(CamPill.VOLUME)])
         assertEquals(GridCell(0, 1), after[e(CamPill.BT)])
         assertEquals(GridCell(0, 3), after[e(CamPill.FOCUS)])
         assertEquals(GridCell(0, 4), after[e(CamPill.STAB)])
-        // 占用判据本身逐格点名（手摆住户表，不经过任何实现路径）
+        assertEquals("配对仍是共格（交换不该把它拆开）", after[e(CamPill.LEVEL)], after[e(CamPill.VOLUME)])
+        // 占用判据本身逐格点名（手摆住户表，不经过任何实现路径；这一块是 blockingCells 的直打，不受交换改动影响）
         val residents = mapOf(
             GridCell(0, 0) to listOf(e(CamPill.LEVEL), e(CamPill.VOLUME)),
             GridCell(0, 1) to listOf(e(CamPill.BT)),

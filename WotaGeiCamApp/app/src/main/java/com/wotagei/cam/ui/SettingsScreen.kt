@@ -26,7 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -71,7 +72,6 @@ import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaType
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.theme.MonoStyle
-import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaBg
 import com.wotagei.cam.ui.theme.WotaRec
 import com.wotagei.cam.ui.theme.WotaText
@@ -79,8 +79,6 @@ import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.widget.TierItem
 import com.wotagei.cam.ui.widget.TierPicker
 import kotlin.math.roundToInt
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -346,7 +344,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
+                Icon(Icons.Outlined.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
             }
             Text(
                 text = stringResource(R.string.set_title),
@@ -359,10 +357,12 @@ fun SettingsScreen(
         Line()
 
         SettingGroup(stringResource(R.string.set_group_default))
+        // 本页所有 bodyMedium 说明统一升 textMid（下面各卡同）：textLo 压 surface 只有 3.82，
+        // 过不了正文 4.5，Tokens 口径「正文与数值一律 textMid 以上」
         Text(
             text = stringResource(R.string.set_default_note),
             style = MaterialTheme.typography.bodyMedium,
-            color = WotaTextDim,
+            color = WotaColor.textMid,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
         Card {
@@ -439,7 +439,7 @@ fun SettingsScreen(
                         defaultMuted = it
                         prefs.edit().putBoolean(WotaSettings.KEY_DEFAULT_AUDIO_MUTE, it).apply()
                     },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
+                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
                 )
             }
         }
@@ -448,7 +448,7 @@ fun SettingsScreen(
         Text(
             text = stringResource(R.string.set_orientation_note),
             style = MaterialTheme.typography.bodyMedium,
-            color = WotaTextDim,
+            color = WotaColor.textMid,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
         Card {
@@ -508,7 +508,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_hud_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim
+                color = WotaColor.textMid
             )
             Spacer(Modifier.height(6.dp))
             FlowRow(
@@ -533,7 +533,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_pill_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim
+                color = WotaColor.textMid
             )
             Spacer(Modifier.height(6.dp))
             FlowRow(
@@ -594,7 +594,7 @@ fun SettingsScreen(
                         // GL 在下一帧把它搬进引擎那枚门（UI 拿不到引擎实例，这是唯一一条生产路）
                         FrostCardTable.setUiEnabled(it)
                     },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
+                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
                 )
             }
         }
@@ -604,7 +604,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_storage_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim
+                color = WotaColor.textMid
             )
             Spacer(Modifier.height(6.dp))
             val storageCtx = androidx.compose.ui.platform.LocalContext.current
@@ -634,7 +634,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_refline_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim
+                color = WotaColor.textMid
             )
             Spacer(Modifier.height(6.dp))
             // 用 FlowRow 而不是 chunked(2)+weight(1f)：后者会把每颗强行撑到半行宽，短标签就变成"长胶囊配短字"
@@ -673,7 +673,7 @@ fun SettingsScreen(
                         levelEnabled = it
                         prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_ENABLED, it).apply()
                     },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
+                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -695,7 +695,7 @@ fun SettingsScreen(
                         levelBuzz = it
                         prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_BUZZ, it).apply()
                     },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accent, checkedThumbColor = WotaColor.layer)
+                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
                 )
             }
         }
@@ -705,7 +705,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_text_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim
+                color = WotaColor.textMid
             )
             Spacer(Modifier.height(6.dp))
             TextScalePicker(
@@ -750,7 +750,9 @@ fun SettingsScreen(
                     Text(
                         text = stringResource(if (row.granted) R.string.set_perm_granted else R.string.set_perm_denied),
                         style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
-                        color = if (row.granted) WotaAccent else WotaRec
+                        // 状态小字不用 accent（压 surface 4.48 < 4.5）：已授权降为 textMid 安静态，
+                        // 未授权保留 WotaRec 红作强调——需要突出的只有「未授权」
+                        color = if (row.granted) WotaColor.textMid else WotaRec
                     )
                 }
                 Line()
@@ -759,13 +761,15 @@ fun SettingsScreen(
                 Text(
                     text = stringResource(R.string.set_perm_note),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = WotaTextDim,
+                    color = WotaColor.textMid,
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = stringResource(R.string.set_open_system_settings),
                     style = MaterialTheme.typography.labelMedium,
-                    color = WotaAccent,
+                    // 可点动作小字：accent 压 surface 4.48 过不了 AA，改 textHi + 下划线（链接惯例）表达可点
+                    color = WotaText,
+                    textDecoration = TextDecoration.Underline,
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .clickable { context.openAppSettings() }
@@ -783,7 +787,7 @@ fun SettingsScreen(
             Text(
                 text = stringResource(R.string.set_about_note),
                 style = MaterialTheme.typography.bodyMedium,
-                color = WotaTextDim,
+                color = WotaColor.textMid,
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
@@ -824,7 +828,8 @@ private fun Card(content: @Composable androidx.compose.foundation.layout.ColumnS
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp)
-            .clip(WotaShape.large)
+            // 接件位档：设置卡属「大卡」类（design-spec §4.2 card=24dp），不用旧的浮层级 radiusLarge
+            .clip(RoundedCornerShape(WotaShape.card))
             .background(WotaColor.surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         content = content
@@ -832,7 +837,7 @@ private fun Card(content: @Composable androidx.compose.foundation.layout.ColumnS
 }
 
 /**
- * 多选 chip 格：借 [WotaChip] 的配色语义（选中 accent 实底 + onAccent 字、未选中 wotaCard 胶囊），
+ * 多选 chip 格：借 [WotaChip] 的配色语义（选中 accentSurface 实底 + onAccent 字、未选中 wotaCard 胶囊），
  * 但不直接用它——内部写死 WotaType.chip 会让「设置页文本高度」失效。
  *
  * 宽度**按内容自适应**，另给一个最短长度下限：3 个汉字。以前调用方用 `weight(1f)` 把每颗强行撑到
@@ -851,17 +856,12 @@ private fun ChipCell(text: String, selected: Boolean, modifier: Modifier = Modif
     val threeCharsMin = (style.fontSize.value * 3f * density.fontScale).dp
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    // 选中底色与按压缩放都走动效档：原来点一下是硬切成 accent 实底，读起来像页面卡了一下
-    // 颜色动画吃不到 motion.float（那是 Float 的 spec），改用同一档的时长，保证与缩放/位移同源
-    val colorSpec = tween<Color>(durationMillis = motion.durationMs)
-    val fill by animateColorAsState(
-        if (selected) WotaColor.accent else Color.Transparent,
-        colorSpec
-    )
-    val labelColor by animateColorAsState(
-        if (selected) WotaColor.onAccent else WotaColor.textHi,
-        colorSpec
-    )
+    // 选中底色与文字色**即时切换**（#81 第 1 条定版：只动画 alpha 与 scale，禁动画颜色）；
+    // 按压缩放保留（scale 在允许档）。两枚值同帧一起换，不存在"底还在渐变、字先跳"的分叉
+    // 选中底走 accentSurface：这里是 bodyMedium 白字小字的承载面，白字对 #007DFF(accent)
+    // 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过（见 WotaColor.accentSurface 注）
+    val fill = if (selected) WotaColor.accentSurface else Color.Transparent
+    val labelColor = if (selected) WotaColor.onAccent else WotaColor.textHi
     val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
     Box(
         modifier

@@ -41,6 +41,21 @@ class MotionSpecScaleTest {
     }
 
     @Test
+    fun intSizeDurationFollowsInteractTokenAndReducedGoesZero() {
+        // 10-01 布局批：Dock 平滑宽高的 IntSize 档——账面时长钉 INTERACT_MS 令牌（240），
+        // 倍率照乘（×20 连拍取证时 Dock 也放长），reduced（系统减少动效）恒 0 = 直达
+        assertEquals(
+            com.wotagei.cam.ui.design.WotaMotion.INTERACT_MS,
+            MotionSpec(MotionMode.FLUENT, 1f).intSizeDurationMs
+        )
+        assertEquals(
+            com.wotagei.cam.ui.design.WotaMotion.INTERACT_MS * 20,
+            MotionSpec(MotionMode.FLUENT, 20f).intSizeDurationMs
+        )
+        assertEquals(0, MotionSpec(MotionMode.FLUENT, 1f, reduced = true).intSizeDurationMs)
+    }
+
+    @Test
     fun garbageScaleFallsBackToOne() {
         for (bad in listOf(0f, -1f, -20f, Float.NaN, Float.POSITIVE_INFINITY)) {
             assertEquals("非法倍率 $bad 必须退回 1f", WotaMotion.COMMIT_MS, MotionSpec(MotionMode.FLUENT, bad).durationMs)

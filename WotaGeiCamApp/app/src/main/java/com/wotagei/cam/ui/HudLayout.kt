@@ -69,7 +69,8 @@ enum class HudAxis { ROW, COLUMN, GRID }
  * - [HudZone.BOTTOM] 那枚底板有「快门中心＝可视窗口水平中心」的 `W/2` 不变量
  *   （`2S + R + 2G + 2P` 那笔等宽槽算式，见 [com.wotagei.cam.ui.anim.MergeSlot] 与 docs/plan/13 §14.3），
  *   条目一旦离开"按顺序紧凑排布"就没有等宽槽可言，#71 那笔收拢动画的起点 `w(0)` 跟着塌；
- * - [HudZone.TOP] 的宽度账与容量段三档取位（`capacityTierText` 的阈值 272/242，§59/§61/§74）
+ * - [HudZone.TOP] 的宽度账与容量段三档取位（`capacityTierText` 三档判据，10-01 起由调用方
+ *   TextMeasurer 实测两段文案宽传入，旧 272/242 常量已删；§59/§61/§74 的档位语义不变）
  *   是按**段数增减**重标的，改成一格一颗就把那三档判据同时作废。
  * 这两枚继续用 [order] 紧凑排布；[GridCell] 对它们不生效（[HudLayoutTable.normalize] 与编码两处都把
  * 挂在非网格容器上的条目格子抹成哨兵，不留脏数据）。
@@ -336,14 +337,8 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     fun occupiedCells(zone: HudZone, plan: HudGridPlan, exclude: HudEntry? = null): Set<GridCell> {
         if (!zone.isGrid) return emptySet()
         val visible = plan.visible
-        // 逐格累计住户：可见的那份来自渲染解析结果，隐藏的那份来自表里的显式格
-        val residents = LinkedHashMap<GridCell, MutableList<HudEntry>>()
-        gridItems(zone, plan).forEach { residents.getOrPut(it.cell) { mutableListOf() } += it.entry }
-        placedCellsOf(zone).forEach { (entry, cell) ->
-            if (entry !in visible) residents.getOrPut(cell) { mutableListOf() } += entry
-        }
         return blockingCells(
-            residents,
+            residentsOf(zone, plan),
             self = exclude,
             mates = if (exclude == null) emptySet() else cellGroupMatesOf(
                 defaultCellsOf(zone, visibleOrderOf(zone, visible), plan), exclude
@@ -351,6 +346,26 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
             cellHeightPx = plan.cellHeightOf,
             rowPitchPx = plan.rowPitchOf(zone)
         )
+    }
+
+    /**
+     * 这一枚容器**这一帧的住户表**：锚点格 → 住在那里的条目（可见的那份来自渲染解析结果，
+     * 隐藏的那份来自表里的显式格）。[occupiedCells] 的"挡路集"与 [placeEntryAt] 的"同格交换"
+     * **共读这一份**（不许各建一遍：两张表一旦分叉，就会出现"预览说这格有人、写表说没人"）。
+     *
+     * 声明成 `internal` 而不是 `private`，是因为编辑页预览（`HudLayoutEditor.snapOf`）也要把同一张表
+     * 喂进 [cellDropOf] 才能与写表读同一条裁决——把住户表藏进表内而让预览自己造一份，正是要防的分叉。
+     */
+    internal fun residentsOf(zone: HudZone, plan: HudGridPlan): Map<GridCell, List<HudEntry>> {
+        if (!zone.isGrid) return emptyMap()
+        val visible = plan.visible
+        // 逐格累计住户：可见的那份来自渲染解析结果，隐藏的那份来自表里的显式格
+        val residents = LinkedHashMap<GridCell, MutableList<HudEntry>>()
+        gridItems(zone, plan).forEach { residents.getOrPut(it.cell) { mutableListOf() } += it.entry }
+        placedCellsOf(zone).forEach { (entry, cell) ->
+            if (entry !in visible) residents.getOrPut(cell) { mutableListOf() } += entry
+        }
+        return residents
     }
 
     /**
@@ -393,12 +408,17 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 2. 再改顺序：从**所有**容器摘掉它，插进目标第 [index] 格（越界夹到 `[0, size]`）；
      *    先摘后插保证「一颗控件同时只属于一枚容器」；
      * 3. 格子落位：目标不是网格容器 ⇒ 抹成哨兵（不留脏数据）；是网格 ⇒ 先钳进容器硬上限，
-     *    再在"挡得住它的格子"之外就近找空格（[occupiedCells] 已排除它自己那一格与它的同组搭档）。
+     *    再定落点（[cellDropOf]）：
+     *    · **同容器**（`target == source`）走交换语义——目标格住了"别人"就与它对调，被挤的那组去
+     *      "你的原格"（[pinnedTable] 里那颗当前的格子），原格承接不了才就近让位；
+     *    · **跨容器**仍走 [freeCellNear]（只落空格）：跨容器没有"你的原格"可退回，硬用交换语义会写出
+     *      一枚只在本容器带内有意义的越区格。
      *    ⚠ 钳制与让位吃的都是**格子**这一层，不是条目那一层：同组两颗共用一格 ⇒ 越界钳回来仍是同一格，
      *    不会出现"配对格被钳进两格"这种顺手把配对拆开、连带撑出一列的写法（[clampCellToBox] 是格→格的函数）。
-     *    ⚠ #75：这里的"空格"是**档**——[occupiedCells] 已经把高格连它压住的几档一起给出来，
+     *    ⚠ #75：这里的"空格"是**档**——[occupiedCells] / [cellDropOf] 已经把高格连它压住的几档一起算，
      *    [freeCellNear] 再拒掉"整块出带"的候选（吃 [droppedCellHeightPx] 与 `plan.rowPitchOf(target)`）。
-     *    注意这一步**只挑这一颗自己的落点**：别人的格子在第 1 步就钉死了，跨度改动不了任何已经摆过的人。
+     *    注意这一步**只挑这一颗与"被它挤开的那一组"的落点**：别人的格子在第 1 步就钉死了，
+     *    交换也改动不了任何没被点名的条目。
      * 4. 其余三枚容器一行不碰 ⇒ 它们的顺序没变，哨兵条目继续推导出同一个格子。
      */
     fun placeEntryAt(
@@ -418,27 +438,51 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
         }
         val targetOrder = orders.getValue(target)
         targetOrder.add(index.coerceIn(0, targetOrder.size), entry)
-        val finalCell = when {
+        val drop: CellDrop = when {
             // 非网格容器：格子对它不生效，一律抹成哨兵（[normalize] 那一道同样会抹）
-            !target.isGrid -> GridCell.DEFAULT
+            !target.isGrid -> CellDrop(GridCell.DEFAULT, emptyMap())
             // 显式传哨兵 = "这次只换顺序，位置仍交给推导"（[moveEntryTo] 走的就是这一支）。
             // 与第 1 步的钉格配套：别人的格子已经钉死，所以这里"交给推导"不会牵动任何人。
-            cell.isDefault -> GridCell.DEFAULT
-            else -> freeCellNear(
-                wanted = clampStoredCell(target, cell),
-                occupied = pinnedTable.occupiedCells(target, plan, exclude = entry),
-                cols = gridColsCapOf(target),
-                rows = GridRowHardCap,
-                // #75：这一颗要占几档由**它自己的实测高**说了算；合回配对那一格时按搭档的高取大
-                //（两块合成一块，跨度是整块的高而不是被拖那颗的高——按小的算会把搭档的尾巴挤出块外）
-                contentHeightPx = droppedCellHeightPx(plan, entry, target),
-                rowPitchPx = plan.rowPitchOf(target)
+            cell.isDefault -> CellDrop(GridCell.DEFAULT, emptyMap())
+            // 同容器 ⇒ 交换：origin 是这一颗**当前**的格子（钉过之后必定是显式格）；
+            // 它此刻还没被写进新表，所以 gridItems 读到的仍是原位
+            target == source -> {
+                val origin = pinnedTable.gridItems(target, plan).firstOrNull { it.entry == entry }?.cell
+                    ?: GridCell.DEFAULT
+                cellDropOf(
+                    wanted = clampStoredCell(target, cell),
+                    origin = origin,
+                    residents = pinnedTable.residentsOf(target, plan),
+                    self = entry,
+                    mates = cellGroupMatesOf(pinnedTable.defaultGridOf(target, plan), entry),
+                    // #75：这一颗要占几档由**它自己的实测高**说了算；合回配对那一格时按搭档的高取大
+                    //（两块合成一块，跨度是整块的高而不是被拖那颗的高——按小的算会把搭档的尾巴挤出块外）
+                    draggedHeightPx = droppedCellHeightPx(plan, entry, target),
+                    cellHeightPx = plan.cellHeightOf,
+                    cols = gridColsCapOf(target),
+                    rows = GridRowHardCap,
+                    rowPitchPx = plan.rowPitchOf(target)
+                )
+            }
+            // 跨容器 ⇒ 维持"只落空格"：没有"你的原格"这一说，不许写出越区格
+            else -> CellDrop(
+                freeCellNear(
+                    wanted = clampStoredCell(target, cell),
+                    occupied = pinnedTable.occupiedCells(target, plan, exclude = entry),
+                    cols = gridColsCapOf(target),
+                    rows = GridRowHardCap,
+                    contentHeightPx = droppedCellHeightPx(plan, entry, target),
+                    rowPitchPx = plan.rowPitchOf(target)
+                ),
+                emptyMap()
             )
         }
         val nextZones = HudZone.ALL.associateWith { z ->
             val state = pinnedTable.zones[z] ?: ZoneState(ZonePlacement.DEFAULT, defaultOrderOf(z), emptyMap())
             val cells = if (z == target) {
-                if (finalCell.isDefault) state.cells - entry else state.cells + (entry to finalCell)
+                // 被拖那颗 → drop.dropped；被挤出的那组 → drop.moved，一并写进同一枚容器（都是显式格）
+                if (drop.dropped.isDefault) state.cells - entry
+                else state.cells + (entry to drop.dropped) + drop.moved
             } else {
                 state.cells - entry
             }
@@ -701,10 +745,24 @@ fun clampZoneX(area: HudAreaDp, widthDp: Int): Int =
  *
  * 带高不够（告警条 + 满配读数把带挤没了）时退成整条安全区，**区间永不为负**，
  * 否则 `coerceIn` 会抛而整个 HUD 就没了。
+ *
+ * ## [topZoneMinYDp] 是只有 [HudZone.TOP] 读的绝对定位支下限（本批补的那一格）
+ * 与 [com.wotagei.cam.ui.HudLayer.HudZoneBox] 的 `nativeTopMinDp` 完全同构：那条管"原生对齐支"，
+ * 这条给"绝对定位支"（用户把顶栏整枚拖过）立同一条下限。没有它时顶栏一旦被拖到编辑页那条操作栏
+ * 的矩形里，整枚容器既点不到也拖不动（操作栏在拖拽捕获层之上）。
+ *
+ * ⚠ **录制页恒传 0**：录制页构造的 [HudAreaDp] 里 `topAvoidDp = topBarH`（实测顶栏高，不是 0），
+ * 若让它吃 `topAvoidDp`，同一份位置表会在编辑页与录制页渲染出不同位置（编辑页画的是假的）。
+ * 所以下限不取 area 里的任何字段，而是由调用方显式喂一个"这一帧量到的操作栏下缘"——
+ * 编辑页喂 [chromeBandBottomDp] 的产物，其余调用点（含录制页）一律传 0 ⇒ 逐字退回改前。
  */
-fun clampZoneYRange(zone: HudZone, area: HudAreaDp, heightDp: Int): IntRange {
+fun clampZoneYRange(zone: HudZone, area: HudAreaDp, heightDp: Int, topZoneMinYDp: Int): IntRange {
     val band = zone != HudZone.TOP && zone != HudZone.BOTTOM
-    val lo = if (band) area.topAvoidDp.coerceAtLeast(0) else 0
+    val lo = when {
+        band -> area.topAvoidDp.coerceAtLeast(0)
+        zone == HudZone.TOP -> topZoneMinYDp.coerceAtLeast(0)
+        else -> 0
+    }
     val hi = if (band) area.height - area.bottomAvoidDp - heightDp else area.height - heightDp
     // 带高不够（告警条 + 满配读数把带挤没了，或容器本身比屏还高）时退成整条安全区，
     // 区间不许为负 —— `coerceIn` 遇到 lo > hi 是直接抛的，那一抛整个 HUD 就没了
@@ -718,10 +776,17 @@ fun clampZoneYRange(zone: HudZone, area: HudAreaDp, heightDp: Int): IntRange {
  * 这条算的是"这一条带本身吃到哪"（指针在不在带里）。两者共用同一批实测入参，
  * 分叉不了——所以 #80 里"拖过头"与"真要跨容器"判的是同一条带。
  * 带高不够（告警条把带挤没）时退成整条安全区，与 [clampZoneYRange] 同一条兜底。
+ *
+ * [topZoneMinYDp] 与 [clampZoneYRange] 同步加、TOP 的 lo 取**同一个值**：两者是"拖过头"与
+ * "真要跨容器"判同一条带的一对，分叉了就会出现"看着还在顶栏带里、松手却换了容器"。
  */
-fun zoneBandYRange(zone: HudZone, area: HudAreaDp): IntRange {
+fun zoneBandYRange(zone: HudZone, area: HudAreaDp, topZoneMinYDp: Int): IntRange {
     val band = zone != HudZone.TOP && zone != HudZone.BOTTOM
-    val lo = if (band) area.topAvoidDp.coerceAtLeast(0) else 0
+    val lo = when {
+        band -> area.topAvoidDp.coerceAtLeast(0)
+        zone == HudZone.TOP -> topZoneMinYDp.coerceAtLeast(0)
+        else -> 0
+    }
     val hi = (if (band) area.height - area.bottomAvoidDp else area.height).coerceAtLeast(lo)
     return lo..hi
 }
@@ -732,9 +797,20 @@ fun zoneBandYRange(zone: HudZone, area: HudAreaDp): IntRange {
  * **底栏的 x 在这里就被抹成哨兵**：它只能上下搬（第 8 条的上栏/下栏），写入方就算把实测左缘换算成
  * 绝对 x 送进来也存不进表——那会让快门从此不再跟随可视中心（90↔270 翻转、横竖换档都不重新居中，
  * B4 审查 S1 那条）。[HudLayoutTable.normalizedPosOf] 在读表时同样抹一次，把存量脏数据一起治掉。
+ *
+ * [topZoneMinYDp] 透传给 [clampZoneYRange]（只有 TOP 的绝对定位支读它）；录制页与其余调用点传 0
+ * ⇒ 逐字退回改前那一档，同一份位置表在两页渲染出同一个位置。
  */
-fun clampZonePos(zone: HudZone, xDp: Int, yDp: Int, wDp: Int, hDp: Int, area: HudAreaDp): ZonePlacement {
-    val yRange = clampZoneYRange(zone, area, hDp)
+fun clampZonePos(
+    zone: HudZone,
+    xDp: Int,
+    yDp: Int,
+    wDp: Int,
+    hDp: Int,
+    area: HudAreaDp,
+    topZoneMinYDp: Int
+): ZonePlacement {
+    val yRange = clampZoneYRange(zone, area, hDp, topZoneMinYDp)
     val x = if (zone == HudZone.BOTTOM) -1 else xDp.coerceIn(0, clampZoneX(area, wDp))
     return ZonePlacement(x, yDp.coerceIn(yRange.first, yRange.last))
 }
@@ -820,6 +896,14 @@ data class GridBox(val cols: Int, val rows: Int) {
  * 那是"看得见但要点一下才够得着"，而把落点钳回来是"根本放不下"。两者都不静默裁字，但钳回不会让人
  * 以为控件丢了。列的方向没有滚动可依赖（[HudZone.READOUT] 那枚的宽度账由 `planReadoutRow` 说话），
  * 所以列必须钳：越过可用宽就是把 §58/§73 那族"按窄窗量出来的列数在宽窗里越界"再犯一遍。
+ *
+ * ## 本批：行档可**生长**一格（[GridRowGrowthRows]）
+ * 原来这里是 `minOf(带内档数, 预留档数)`：预留几档就只许落那几档，"拖动根本撑不大"是 #80 立的规则，
+ * 但它把用户能摆的范围也锁死在默认表用到的档数上（左 Dock 预留 4 档 ⇒ 第 5 档永远摆不到）。
+ * 现在多出来的两个形参由调用方显式表态：编辑页传 `rowGrowth = [GridRowGrowthRows]`（放开一格）、
+ * `colGrowth = 0`；**其余调用点全部传 0** ⇒ 逐字退回改前那一句 `minOf(带内, 预留)`。
+ * 两个形参**没有默认值**（#69 铁律，与 `nativeTopMinDp` 同族）：漏挂必须编译不过，
+ * 否则新调用点会静默拿到"有生长"或"无生长"的一侧，两页的钳制带当场分叉。
  */
 fun gridBoxOf(
     zone: HudZone,
@@ -828,17 +912,40 @@ fun gridBoxOf(
     bandHeightDp: Int,
     roomWidthDp: Int,
     reservedRows: Int,
-    reservedCols: Int
+    reservedCols: Int,
+    rowGrowth: Int,
+    colGrowth: Int
 ): GridBox {
     val rows = if (pitchYDp <= 0) 1 else (bandHeightDp / pitchYDp).coerceAtLeast(1)
     val cols = if (zone != HudZone.READOUT) gridColsCapOf(zone)
     else if (pitchXDp <= 0) 1 else (roomWidthDp / pitchXDp).coerceIn(1, gridColsCapOf(zone))
-    // 预留夹一道：0 = 不预留（那一支与改前逐字同值）；夹完至少留 1 档，GridBox 的构造门守着
+    // 预留夹一道：0 = 不预留（那一支与改前逐字同值）；夹完至少留 1 档，GridBox 的构造门守着。
+    // 行侧的生长量走 [editableGridRowsOf]（预留 + rowGrowth，再夹进带内档数）；列侧同构，本批 colGrowth 恒 0
     return GridBox(
-        cols = if (reservedCols > 0) minOf(cols, reservedCols).coerceAtLeast(1) else cols.coerceAtLeast(1),
-        rows = if (reservedRows > 0) minOf(rows, reservedRows).coerceAtLeast(1) else rows.coerceAtLeast(1)
+        cols = if (reservedCols > 0) minOf(cols, reservedCols + colGrowth).coerceAtLeast(1) else cols.coerceAtLeast(1),
+        rows = editableGridRowsOf(reservedRows, rows, rowGrowth)
     )
 }
+
+/**
+ * 编辑上限相对默认表预留的**额外行档数**（用户 10-01 明示放宽的那一格）。
+ * 只由编辑页那一处消费（[gridBoxOf] 的 `rowGrowth` 形参），取值 1 = 允许比预留多摆一档。
+ */
+const val GridRowGrowthRows = 1
+
+/**
+ * 可编辑的行档数：预留 + 生长余量，再夹进带内实际档数；`reservedRows <= 0`（不预留，读数块那一支）
+ * 与改前逐字同值 = 带内实际档数。生长由 [growthRows] 显式喂进来（默认 [GridRowGrowthRows] 只是
+ * 为了让"用户批准的那一格"有一个可读的默认调用形态），**不许**在这里偷偷给别的调用点加档。
+ * 带高不够（`bandRows <= reservedRows`）时结果就是 `bandRows`，不抛、不给空区间。
+ */
+fun editableGridRowsOf(
+    reservedRows: Int,
+    bandRows: Int,
+    growthRows: Int = GridRowGrowthRows
+): Int =
+    if (reservedRows <= 0) bandRows.coerceAtLeast(1)
+    else minOf(bandRows, reservedRows + growthRows).coerceAtLeast(1)
 
 /**
  * 把格子钳进可放带（负数与越界都收回来；[GridCell.DEFAULT] 原样放行）
@@ -862,15 +969,101 @@ fun clampCellToBox(cell: GridCell, box: GridBox, contentHeightPx: Int, rowPitchP
     )
 
 /**
+ * 一次落点的裁决结果：被拖那颗落哪、被挤出的那些各自落哪（未发生交换/让位时 [moved] 为空）。
+ *
+ * [moved] 的键是**被挤出的住户**（它们本来就住在目标容器里，只是从被拖那颗抢来的那格挪开），
+ * 值是它们的新锚点格。写表时与"被拖那颗 → [dropped]"一并写进同一枚容器的 cells。
+ */
+data class CellDrop(val dropped: GridCell, val moved: Map<HudEntry, GridCell>)
+
+/**
+ * 同容器内一次落点的唯一裁决（本批：拖到已占格**交换**，而不是跳到最近空格）。
+ *
+ * ## 为什么改成交换
+ * 旧写法（[freeCellNear]）只落空格，拖到已占格会跳到最近一格，用户觉得"不听话"；把"同格里的人和被拖的人
+ * 对调"才是手指的预期。**交换 ≠ #74 那条独立性退化**：交换只动"目标格那位"这一颗（[moved] 里点名），
+ * 其余条目（含高格压住的档）一个都不动——所以"移一项其他项也会同时移动"那条诉求仍然成立，
+ * 只是把"同时移动"限定成用户亲手指定的那一颗。
+ *
+ * ## 步骤（每条都有对应的可证伪用例）
+ * 1. `wanted` 夹进 `[0,cols) × [0,rows)`；`span = cellRowSpan(draggedHeightPx, rowPitchPx)`。
+ * 2. **块尾出带**（`r > rows - span`）⇒ 退回 [freeCellNear]（不挤人，这就是今天的兜底）。
+ * 3. `occupant` = `residents[wanted]` 里**锚点恰为 `wanted`** 且不属于 `{self} ∪ mates` 的那些。
+ *    ⚠ 只认锚点：`residents` 的键就是锚点格，所以这里天然只取"格主"。若 `wanted` 落在另一颗高格的
+ *    跨度尾巴上（`residents` 里没人锚在这，但 [blockingCells] 展开的 `blocked` 含它），那不算"一格"，
+ *    第 4 步会把它当"不是空格"处理——否则会把两颗画在同一段像素上。
+ * 4. `occupant` 为空：`wanted` 真是空格（含"拖回自己同组搭档那一格"这一支 ⇒ 合对语义保持不变）
+ *    ⇒ 落 `wanted`；若 `wanted` 在 `blocked` 里（只是别颗高格的跨度尾巴）⇒ 退回 [freeCellNear]。
+ * 5. `occupant` 非空且 `origin` 能承接 ⇒ 交换：`occupant` 全部→`origin`，`self` 拿 `wanted`。
+ *    能承接 = `origin != wanted`、在盒内、`origin + 占位组最高跨度 <= rows`、且 `origin` 那一整块
+ *    （`origin .. origin+span−1`）不被其余住户占着——不查整块的话，一枚 3 档的高格会被换到只空 1 档的
+ *    地方，尾巴压到第三颗身上（正是"不牵动第三颗"那条要禁的形态）。
+ * 6. 否则 ⇒ `occupant` 全部就近让位到 [freeCellNear]（在"扣掉 self 与 occupant"之后的占位集里找空格），
+ *    `self` 仍拿 `wanted`。
+ *
+ * 形参一律**没有默认值**：`residents` / `mates` / 实测高取器 / 格距缺一档，判据就静默退回旧行为，
+ * 漏挂的调用点必须编译不过（#69 铁律）。本函数与 [HudLayoutTable.placeEntryAt] 是同一个裁决的两个入口，
+ * 编辑页预览直接读它 ⇒"看着在哪一格 = 落在哪一格"。
+ */
+fun cellDropOf(
+    wanted: GridCell,
+    origin: GridCell,
+    residents: Map<GridCell, Collection<HudEntry>>,
+    self: HudEntry,
+    mates: Set<HudEntry>,
+    draggedHeightPx: Int,
+    cellHeightPx: (HudEntry) -> Int,
+    cols: Int,
+    rows: Int,
+    rowPitchPx: Int
+): CellDrop {
+    val target = GridCell(
+        wanted.col.coerceIn(0, (cols - 1).coerceAtLeast(0)),
+        wanted.row.coerceIn(0, (rows - 1).coerceAtLeast(0))
+    )
+    val span = cellRowSpan(draggedHeightPx, rowPitchPx)
+    val blocked = blockingCells(residents, self, mates, cellHeightPx, rowPitchPx)
+    // ② 块尾出带 ⇒ 退回就近找空格（与改前同一条兜底，只是不再吞掉"交换"这条路）
+    if (target.row > rows - span) {
+        return CellDrop(freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx), emptyMap())
+    }
+    // ③ 只认"锚点恰在 target"的住户当格主（mates 与 self 自己不算）
+    val occupant = residents[target].orEmpty().filter { it != self && it !in mates }
+    if (occupant.isEmpty()) {
+        // ④ 真空格（含拖回同组搭档那一格）⇒ 落它；只是别颗高格的跨度尾巴 ⇒ 不是"一格"，退回让位
+        return if (target !in blocked) CellDrop(target, emptyMap())
+        else CellDrop(freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx), emptyMap())
+    }
+    // ⑤ 原格能不能承接这一组：扣掉 self 与 occupant 之后再算一遍"谁还占着哪一块"
+    val rest = LinkedHashMap<GridCell, MutableList<HudEntry>>()
+    residents.forEach { (cell, who) ->
+        val keep = who.filter { it != self && it !in occupant }
+        if (keep.isNotEmpty()) rest[cell] = keep.toMutableList()
+    }
+    val restBlocked = blockingCells(rest, self = null, mates = emptySet(), cellHeightPx, rowPitchPx)
+    val occupantBlockPx = occupant.maxOf { cellHeightPx(it).coerceAtLeast(0) }
+    val occupantSpan = cellRowSpan(occupantBlockPx, rowPitchPx)
+    val originInBox = origin.col in 0 until cols && origin.row in 0 until rows
+    val originHosts = origin != target && originInBox &&
+        origin.row + occupantSpan <= rows &&
+        spannedCells(origin, occupantSpan).none { it in restBlocked }
+    if (originHosts) return CellDrop(target, occupant.associateWith { origin })
+    // ⑥ 原格不可承接 ⇒ 占位者就近让位，被拖那颗仍拿目标格
+    val fallback = freeCellNear(origin, restBlocked, cols, rows, occupantBlockPx, rowPitchPx)
+    return CellDrop(target, occupant.associateWith { fallback })
+}
+
+/**
  * 目标格被占了就在可放带里就近找**空格**（曼哈顿距离最小，同距离按「先上后下、先左后右」定序）。
  *
- * 为什么是"只落空格"而不是"与占位那颗交换"：交换的语义就是"移动一颗会动另一颗"，与用户这句诉求
- * （「移到一项其他项也会同时移动，这是极大的限制」）正面冲突；找空位是本次唯一能让"我只搬了这一颗"
- * 成立的写法。代价照实写：拖到已占的格子上时那颗不会如手指预期压上去，而是停在旁边一格。
+ * ⚠ 本批之前这里的 KDoc 有一条"为什么不交换"的论证（"交换等于动一颗动另一颗，与用户诉求冲突"），
+ * **那条论证已被推翻**：用户要的正是"拖到哪一格就落到哪一格"，交换与独立性可以同时成立——
+ * 交换只动被指到的那一颗，其余条目一颗不动（见 [cellDropOf] 的第 5 步）。于是本函数退回它本来的
+ * 职责：**只负责"在给定占位集里找最近空格"这一条算术**，被三个地方复用——
+ * ① [cellDropOf] 的"块尾出带 / 跨度尾巴 / 占位者让位"三支；② 跨容器落点（没有"你的原格"可退回）；
+ * ③ 渲染解析 [resolveCells] 的就近让位。它**不再**是同容器落点的唯一裁决（那条在 [cellDropOf]）。
  *
- * 带内一个空格都没有时返回 [wanted] 自己（调用方已钳过，此时带被填满——编辑页不会走到这一支，
- * 因为带内格子数恒 ≥ 该容器条目数 + 1；真走到了也不许把两颗摞在同一格，所以 [HudLayoutTable.placeEntryAt]
- * 的落点仍由本条决定，见它的 KDoc 第 3 步）。
+ * 带内一个空格都没有时返回 [wanted] 自己（调用方已钳过，此时带被填满）。
  *
  * ## #75：候选格必须**整块**放得下
  * [occupied] 喂进来的是[blockingCells] 展开之后的那一套（高格连它压住的几档一起算占），
@@ -1262,8 +1455,9 @@ fun gridPitchPx(maxCellWidthPx: Int, rowPitchPx: Int, gapXPx: Int): HudSizePx =
  *
  * 这是 #75 的核心那一档：行距由**胶囊档**推出来，与"这一容器里最高那颗是谁"完全无关。
  * 每一项都有真源，一个都不许换成散值：
- * - 胶囊高走 [hudChipHeightDp]（`WotaType.chip` 的 lineHeight 18sp + `WotaChip` 上下内边距 6+6，
- *   与读数块高度预测 [hudStripHeightDp] 同一把尺子）；紧凑档与全局档**只在横向内边上分档**
+ * - 胶囊高走 [hudChipHeightDp]（`WotaType.chip` 的 lineHeight 18sp + 纵向内边距预算 12——
+ *   WotaChip 实高 28dp（5+5），预算按旧档 30dp 保守多留 2dp，与读数块高度预测 [hudStripHeightDp]
+ *   同一把尺子）；紧凑档与全局档**只在横向内边上分档**
  *   （`WotaChipTier` 的 `horizontalPad`/`minLabelEm`），纵向两档同值，所以这一条对五枚容器都成立；
  * - 行距由调用方传该容器 [com.wotagei.cam.ui.hudGridGap] 的那一档（两枚竖 Dock = `WotaSpace.xs` 4dp、
  *   读数块 = [HudRowGapDp] 6dp），与列向、格内各颗之间用的是同一个数；
@@ -1672,11 +1866,68 @@ fun pxToDp(px: Float, density: Float): Int =
  *   窄窗退化到"让到整排之上"时它本身就是底栏带高，此时 `readoutBottomDp + readoutHeightDp`
  *   又回到旧的串联算式，**退化路径一条没丢**。
  * - 读数块空了回报 0，这一截缝自己收回去（与改前同一条语义）。坏值（负高）按 0 处理。
+ *
+ * ⚠ 2026-10-01（用户第 5 项「Dock 更高、显示更全」）：录制页与编辑页的右 Dock 已改调 [dockBottomAvoidDp]
+ * ——那条在"取大不求和"之外还多了「只避真正横向重叠的邻居」这一档。本条只剩它自己钉住的并联语义
+ * （`HudReadoutRowPlanTest` / `HudLayoutDragTest` 仍逐档读它），**生产调用点已归零**、别再往回接。
  */
 fun areaForRightDock(area: HudAreaDp, readoutHeightDp: Int, readoutBottomDp: Int): HudAreaDp =
     area.copy(
         bottomAvoidDp = maxOf(area.bottomAvoidDp, readoutBottomDp + readoutHeightDp.coerceAtLeast(0))
     )
+
+/**
+ * 竖 Dock 与"真压上来的邻居"之间那枚**观感缝**（dp）：只为让两块胶囊的边不相接。
+ * 与 [com.wotagei.cam.ui.design.WotaSpace] 的 4pt 栅格**不是同一条账**（那不是设计节奏，是"两块贴边"
+ * 这件事的间隙），所以它在这里就地命名，不往令牌表里塞第二枚同值令牌。
+ */
+private const val DockNeighborGapDp = 2
+
+/**
+ * 竖 Dock 的底部避让（dp）：只避**真正横向重叠**的邻居（用户 2026-10-01 第 5 项「左右侧 Dock 更高、
+ * 内部控件显示更全」）。
+ *
+ * 背景：竖 Dock 贴边、底栏**居中**（本机常态宽 216dp），常规屏宽下两者横向**不重叠**——此前一律避
+ * "底栏整带 72dp"，把不重叠的那截空间白白送掉：右 Dock 5 组内容 ≈250dp 被夹进 244dp 带里，
+ * 第 5 组（防抖）出带、默认态「对焦」裁半截。本条按几何一次算清该避多少，录制页与编辑页**同账**
+ * （两页只调这一条，不许各摆一份判据——S3-5 那条「两边判的不是同一条不等式」的老坑）。
+ *
+ * 规则：
+ * - Dock 与底栏横向不重叠 ⇒ 底栏不构成避让，该侧只留 [HudEdgePad] 那枚设计留白；
+ * - 横向重叠（窄窗 / 分屏）⇒ 退回 [bottomDockStripDp]（**旧行为，降级路径一条不丢**）；
+ * - 右 Dock（[fromEnd] = true）与读数块同贴右缘、恒横向重叠 ⇒ 还要叠 READOUT 那一截
+ *   （`readoutBottomDp + readoutHeightDp + 一枚 [DockNeighborGapDp]`），与 [areaForRightDock] 的
+ *   **并联取大**同一条语义（同一条横带上两块各占一半，求和会让 Dock 白让一整排）；
+ * - [dockWidthDp] ≤ 0（首帧还没量到那个宽）⇒ 保守返回 [bottomDockStripDp]：无从判重叠就别赌，
+ *   下一帧实测接管（与 topBarH / dockStripH 同一套"两轮收敛"手法）。
+ *
+ * 重叠判据用**严格不等**（与 [HudRectDp.intersects] 同一条边界语义：两块边相接时那几像素没有重叠）。
+ *
+ * @param fromEnd 该 Dock 是否从右缘起算（RIGHT = true / LEFT = false）
+ */
+internal fun dockBottomAvoidDp(
+    safeWidthDp: Int,
+    dockWidthDp: Int,
+    bottomDockWidthDp: Int,
+    bottomDockStripDp: Int,
+    fromEnd: Boolean,
+    readoutBottomDp: Int,
+    readoutHeightDp: Int,
+): Int {
+    // 首帧还没量到 Dock 自己的宽：判不了重叠，保守按"会重叠"给（下一帧实测接管）
+    if (dockWidthDp <= 0) return bottomDockStripDp
+    // 底栏横向恒居中：x 范围 = [(safe − bw)/2, (safe + bw)/2]；Dock 贴自己那条边
+    val bottomLeft = (safeWidthDp - bottomDockWidthDp) / 2
+    val bottomRight = (safeWidthDp + bottomDockWidthDp) / 2
+    val dockLeft = if (fromEnd) safeWidthDp - dockWidthDp else 0
+    val dockRight = if (fromEnd) safeWidthDp else dockWidthDp
+    val overlaps = dockLeft < bottomRight && bottomLeft < dockRight
+    // 不重叠 ⇒ 这一侧的自由边只剩设计留白；重叠 ⇒ 退回旧行为（整条底栏带）
+    val stripDp = if (overlaps) bottomDockStripDp else HudEdgePad.value.roundToInt()
+    // 左 Dock 不叠读数块（它在右缘）：读数那两枚入参不参与这一支
+    if (!fromEnd) return stripDp
+    return maxOf(stripDp, readoutBottomDp + readoutHeightDp.coerceAtLeast(0) + DockNeighborGapDp)
+}
 
 // ------------------------------------------------------------------ #70 A：读数块与底栏那一行
 

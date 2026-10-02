@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Locale
 
@@ -380,6 +381,15 @@ fun formatSize(bytes: Long): String {
 /**
  * 缩略图加载：ContentResolver.loadThumbnail（API 29+）失败回退 MediaMetadataRetriever。
  * 并发限 2；列表滑动中由 [paused] 暂停新请求（06 文档性能节）。
+ *
+ * ⚠ **解码必须切到 [Dispatchers.IO]**：本函数的调用方是 `VideoThumbnail` 的 `LaunchedEffect`，
+ * 那是组合期上下文（AndroidUiDispatcher.Main）。`MediaMetadataRetriever.setDataSource` +
+ * `getFrameAtTime` 是**阻塞调用**，不切线程就是把每张缩略图的解码直接压在主线程上——
+ * 进媒体库时网格一次组合出十几张卡，主线程被排队的解码逐张占住，转场动画就一顿一顿的
+ * （这正是"进出媒体库动画卡顿"那一条的定位结论，`GalleryScreen.kt` 的 `LaunchedEffect(uri, px)`）。
+ * 切到 IO 之后阻塞调用不再参与上屏帧预算；调用方取消后**本次结果不再写缓存、也不再返回**，
+ * 但**本次解码仍会跑完**——`MediaMetadataRetriever.setDataSource` / `getFrameAtTime` 阻塞且不可中断，
+ * 取消只能作废结果（原先在主线程上的 decode 连这一点都做不到）。
  */
 object ThumbLoader {
 
@@ -408,7 +418,7 @@ object ThumbLoader {
         }
         return permits.withPermit {
             cache.get(key)?.let { return@withPermit it }
-            val bmp = decode(app, uri, px)
+            val bmp = withContext(Dispatchers.IO) { decode(app, uri, px) }
             if (bmp != null) cache.put(key, bmp)
             bmp
         }

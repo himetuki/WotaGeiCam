@@ -2,6 +2,7 @@ package com.wotagei.cam.ui.widget
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
@@ -10,6 +11,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -19,12 +23,14 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.LevelSensor
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.wotaCard
+import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaDivider
 import com.wotagei.cam.ui.theme.WotaText
@@ -86,9 +92,20 @@ fun ArtificialHorizon(roll: Float, pitch: Float, modifier: Modifier = Modifier) 
 }
 
 /**
- * 姿态仪卡片：只剩圆形人工地平仪 + 一句状态。
- * 用户 2026-09-28 六项第 2 条：横滚/俯仰的角度数字取消，"偏了多少"由天地线自己表达；
- * 「已回正 / 偏斜中」留着一行，它不是角度数值而是异步采样状态，没有它人不知道传感器在不在工作。
+ * 姿态仪卡片，两种显示模式（用户 2026-10-01 指令，点击整卡切换）：
+ * - 气泡模式（默认）：圆形人工地平仪 + 「已回正/偏斜中」状态行，即 2026-09-28 六项第 2 条的画法，逐字未动；
+ * - 数值模式：不画地平仪圆，改两行等宽数字「俯仰 +12.3°」「倾角 -1.6°」（标签 + 带符号一位小数），
+ *   状态行保留在数字下方——用户砍的是数字不是状态行，它仍是"传感器在不在工作"的唯一信号。
+ *
+ * 数值是会话态（[numeric]）：点击切换、不持久化，退出页面重置回气泡模式。
+ * roll/pitch 本身就是度数，定义域由 `LevelMath` 保证：roll 经 foldToHalfCircle 折回 -90..90，
+ * pitch 是 atan2(-sz, planar≥0) 天然落在 -90..90，所以原样显示、不夹取不截断。
+ *
+ * 宽度教训（git 1920335 删掉的旧 AttitudeReadout）：当年在右栏 54dp 固定宽里被裁
+ * （「横滚 -1.6°」超宽）。本实现不再踩：Dock 是包内容宽，数值行不写死宽度、行文案最宽
+ * 也就「俯仰 +90.0°」约 68dp（labelSmall 等宽，见 [AngleRow]）；两模式宽度不同引发的
+ * 底板横移交给 Dock 的 animateContentSize 平滑（10-01 布局批）。
+ *
  * [enabled] 为 false 时整块不组合，与 #54 的 `CamPill.LEVEL` 一起决定显隐。
  *
  * [card] 决定是否自绘那层底板（S3-4）：单独摆在画面上要有一层底才可读，默认 true 保持旧行为；
@@ -99,14 +116,28 @@ fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean, card: Boolean = tr
     if (!enabled) return
     val level = kotlin.math.abs(roll) <= LevelSensor.LEVEL_TOLERANCE_DEG &&
         kotlin.math.abs(pitch) <= LevelSensor.LEVEL_TOLERANCE_DEG
+    // 会话态：点击整卡在气泡/数值两种模式间切换，不持久化，退出页面即重置
+    var numeric by remember { mutableStateOf(false) }
     Column(
         Modifier
             .then(if (card) Modifier.wotaCard(WotaShape.medium) else Modifier)
+            // 宽度一律包内容：气泡 54dp ↔ 数值约 76dp，切换时 Dock 底板的横移由
+            // HudDockZone 的 animateContentSize（10-01 布局批）平滑化。这里不设 min 守卫——
+            // 两种模式的自然宽度都大于 46dp，写了也是永不生效的假断言（审查 P3）
+            .clickable(
+                onClickLabel = stringResource(R.string.level_mode_toggle),
+                role = Role.Button
+            ) { numeric = !numeric }
             .padding(horizontal = 4.dp, vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        ArtificialHorizon(roll, pitch)
+        if (numeric) {
+            AngleRow(R.string.level_tag_pitch, pitch)
+            AngleRow(R.string.level_tag_roll, roll)
+        } else {
+            ArtificialHorizon(roll, pitch)
+        }
         Text(
             text = stringResource(if (level) R.string.level_state_level else R.string.level_state_tilt),
             style = MaterialTheme.typography.labelSmall,
@@ -114,4 +145,15 @@ fun AttitudeCard(roll: Float, pitch: Float, enabled: Boolean, card: Boolean = tr
             maxLines = 1
         )
     }
+}
+
+/** 数值模式的一行：`俯仰 +12.3°`，等宽字体 + textHi 色，行宽包内容不写死（1920335 裁宽教训） */
+@Composable
+private fun AngleRow(labelRes: Int, deg: Float) {
+    Text(
+        text = stringResource(labelRes) + " " + stringResource(R.string.level_angle_value, deg),
+        style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+        color = WotaText,
+        maxLines = 1
+    )
 }

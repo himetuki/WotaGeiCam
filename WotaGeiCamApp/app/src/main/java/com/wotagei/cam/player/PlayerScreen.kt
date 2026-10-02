@@ -40,22 +40,24 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CompareArrows
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
-import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.AutoFixHigh
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Flip
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Repeat
+import androidx.compose.material.icons.outlined.RepeatOne
+import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.SkipNext
+import androidx.compose.material.icons.outlined.SkipPrevious
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -101,6 +103,8 @@ import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaOps
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.record.ArcRepairRunner
+import com.wotagei.cam.record.ArcRepairStatus
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
@@ -123,11 +127,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
-/** 双击判定窗口：单击要等满这么久才落地显隐，否则「双击启停」会顺带闪一下控件栏 */
-private const val DOUBLE_TAP_WINDOW_MS = 280L
+/** 双击判定窗口：单击要等满这么久才落地显隐，否则「双击启停」会顺带闪一下控件栏。
+ *  提成 internal：对比播放页的沉浸式控制层（10-01）复用同一套单击/双击仲裁，两处各抄一份迟早漂移。 */
+internal const val DOUBLE_TAP_WINDOW_MS = 280L
 
 /** 弹窗定宽：不固定的话每档按自身内容包裹，点击区参差 */
 private val SPEED_POPUP_PANEL_WIDTH: Dp = 148.dp
+
+/** 光弧修复弹层定宽：要装下那句 30 字的说明小字，比倍速档（纯数字）宽一档 */
+private val ARC_POPUP_PANEL_WIDTH: Dp = 240.dp
 
 /**
  * 播放页圆钮尺寸沿用 30/18dp，不复用 WotaHit.iconButton(38)/iconGlyph(19)：
@@ -169,25 +177,38 @@ fun rememberPlayerEngine(): PlayerEngine {
 }
 
 /**
- * 播放画面：SurfaceView + 缩放变换（不开 media3 自带 controller，控件全部自绘）。
+ * 播放画面：**TextureView** + 缩放/镜像变换（不开 media3 自带 controller，控件全部自绘）。
  *
  * Media3 1.1.1 的 PlayerView 只公开 resizeMode（SURFACE_TYPE_* 与 keepAspectRatio 均非公开，
- * surface 类型只能通过 XML 的 app:surface_type 指定，默认已是 surface_view）。
- * RESIZE_MODE_FIT 等价于旧的「保持宽高比」，超出部分由外层 graphicsLayer 缩放。
+ * surface 类型只能通过 XML 的 app:surface_type 指定——本工程经 `view_player_surface.xml`
+ * 指定为 texture_view，10-01 起弃默认 surface_view，理由见该 XML 与 factory 内注释）。
+ * RESIZE_MODE_FIT 等价于旧的「保持宽高比」，超出部分由外层 graphicsLayer 缩放；
+ * [mirror] 是同一层 graphicsLayer 上的水平翻转（scaleX 取负），与缩放正确复合。
  */
+// InflateParams 是有意为之：AndroidView 的 factory 里 root 必须为 null——
+// Compose 自己量尺寸并施加 LayoutParams，挂了 parent 反而带进错误的 LayoutParams
+@android.annotation.SuppressLint("InflateParams")
 @Composable
 fun WotaPlayerSurface(
     engine: PlayerEngine,
     modifier: Modifier = Modifier,
-    scale: Float = 1f
+    scale: Float = 1f,
+    mirror: Boolean = false
 ) {
     AndroidView(
         modifier = modifier.graphicsLayer {
-            scaleX = scale
+            // 水平镜像=渲染层翻转 scaleX 取负：纯视图变换，不碰播放位置/帧步进/倍速/AB。
+            // TextureView（见 factory）是普通 View，这类变换跨驱动确定；SurfaceView 做不到
+            scaleX = if (mirror) -scale else scale
             scaleY = scale
         },
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            // 面从默认 SurfaceView 换成 TextureView（app:surface_type="texture_view"）：
+            // 镜像这类视图变换在 SurfaceView 上跨驱动不可靠（合成器旁路），TextureView 是确定性路径
+            // （本机 API 30）。XML 定属性，代码里再设一遍做双保险（两处语义一致，不会打架）
+            val view = android.view.LayoutInflater.from(ctx)
+                .inflate(R.layout.view_player_surface, null, false) as PlayerView
+            view.apply {
                 useController = false
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 setShutterBackgroundColor(Color.TRANSPARENT)
@@ -234,6 +255,22 @@ fun PlayerScreen(
     val engine = rememberPlayerEngine()
     val scope = rememberCoroutineScope()
 
+    // 光弧修复后台执行器（用户需求第 7 项）：Context 取 applicationContext，避免把 Activity 钉在
+    // 一条可能跑几十秒的后台线程上。**只由按钮触发**，这里没有任何自动启动。
+    val app = LocalContext.current.applicationContext
+    val arcRunner = remember(app) { ArcRepairRunner(app) }
+    val arcStatus by arcRunner.status.collectState(ArcRepairStatus.IDLE)
+    val arcProgress by arcRunner.progress.collectState(0f)
+    var arcMenu by remember { mutableStateOf(false) }
+    var arcAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
+    // 置真并等 3s 收尾，等于丢掉用户已经发起的修复；这种情形下让它跑到结束自行写回相册
+    // （run 返回前这条线程不会退，是一次性的、可容忍的驻留）。读 runner.status.value 而非外层
+    // 那个 by 值，后者在 onDispose 时已经是组合初值、读到的是陈旧快照。
+    DisposableEffect(arcRunner) {
+        onDispose { if (arcRunner.status.value != ArcRepairStatus.RUNNING) arcRunner.shutdown() }
+    }
+
     val pos by engine.positionMs.collectState(0L)
     val dur by engine.durationMs.collectState(clip.durationMs)
     val playing by engine.isPlaying.collectState(false)
@@ -253,6 +290,8 @@ fun PlayerScreen(
     var tagDialog by remember { mutableStateOf(false) }
     var purgeDialog by remember { mutableStateOf(false) }
     var speedMenu by remember { mutableStateOf(false) }
+    // 水平镜像（10-01 修订）：练习照镜用的会话态，不持久化——要不要记住偏好等用户提了再做
+    var mirrored by remember { mutableStateOf(false) }
 
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
     val tapArbiter = remember { TapArbiter(DOUBLE_TAP_WINDOW_MS) }
@@ -275,6 +314,14 @@ fun PlayerScreen(
     }
     LaunchedEffect(playError) {
         if (playError) banner = R.string.player_error
+    }
+    // 后台修复的终态提示走现成反馈条（2.6s 自动隐）；进行中的进度另给一行小字，见下面 Box
+    LaunchedEffect(arcStatus) {
+        when (arcStatus) {
+            ArcRepairStatus.DONE -> banner = R.string.player_arc_done
+            ArcRepairStatus.FAILED -> banner = R.string.player_arc_failed
+            else -> Unit
+        }
     }
 
     val duration = if (dur > 0L) dur else clip.durationMs
@@ -307,8 +354,12 @@ fun PlayerScreen(
                         })
                     }
             ) {
-                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value)
-                if (state != Player.STATE_READY) {
+                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value, mirror = mirrored)
+                // 转圈只代表"还没画面"：IDLE（未起播）与 BUFFERING（缓冲中）。
+                // STATE_ENDED 是播完停在末帧，不是加载——判据漏了它就会在播完那一刻
+                // 凭空转圈且不消失（用户 2026-10-01 反馈的"播完后出现加载动画"即此）；
+                // 重播由 [PlayerEngine.softPause] 的 seek(0) 处理，与这枚圈无关
+                if (state != Player.STATE_READY && state != Player.STATE_ENDED) {
                     CircularProgressIndicator(
                         Modifier.align(Alignment.Center).size(34.dp),
                         color = WotaAccent,
@@ -384,17 +435,17 @@ fun PlayerScreen(
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                             modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())
                         ) {
-                            BarIconSlot(Icons.Filled.SkipPrevious, stringResource(R.string.player_step_back)) {
+                            BarIconSlot(Icons.Outlined.SkipPrevious, stringResource(R.string.player_step_back)) {
                                 engine.stepFrame(false)
                             }
                             BarIconSlot(
-                                image = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                image = if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
                                 description = stringResource(R.string.player_play_pause),
                                 accent = true,
                                 size = PlayIconSize,
                                 glyph = PlayGlyphSize
                             ) { engine.softPause(playing) }
-                            BarIconSlot(Icons.Filled.SkipNext, stringResource(R.string.player_step_fwd)) {
+                            BarIconSlot(Icons.Outlined.SkipNext, stringResource(R.string.player_step_fwd)) {
                                 engine.stepFrame(true)
                             }
                             Text(
@@ -421,11 +472,28 @@ fun PlayerScreen(
                             )
                             // 环形箭头区分「整片循环 / 单曲循环」，chip 只有文案表达不了这个差别
                             Icon(
-                                if (loop == LoopMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                                if (loop == LoopMode.ONE) Icons.Outlined.RepeatOne else Icons.Outlined.Repeat,
                                 contentDescription = stringResource(R.string.player_loop_one),
                                 tint = if (loop == LoopMode.ONE) WotaColor.accent else WotaTextDim,
                                 modifier = Modifier.size(16.dp)
                             )
+                            // 水平镜像（10-01 修订）：练习动作时照镜看，选中=accent 蓝底白线
+                            BarIconSlot(
+                                Icons.Outlined.Flip,
+                                stringResource(R.string.player_mirror),
+                                accent = mirrored
+                            ) { mirrored = !mirrored }
+                            // 光弧修复入口（用户需求第 7 项）：默认关闭、绝不自动跑；点开才在弹层里
+                            // 二选一（GPU/CPU）起后台任务。进行中亮 accent，给一个"在忙"的静态记号，
+                            // 与顶栏收藏/删除的选中语义同一套（不是小字色，不受 accent 对比度约束）。
+                            // BarIconSlot 不收 modifier，套一层 Box 只为挂 pillAnchor 量锚点。
+                            Box(Modifier.pillAnchor { arcAnchor = it }) {
+                                BarIconSlot(
+                                    Icons.Outlined.AutoFixHigh,
+                                    stringResource(R.string.player_arc_repair),
+                                    accent = arcStatus == ArcRepairStatus.RUNNING
+                                ) { arcMenu = !arcMenu }
+                            }
                         }
                         // 倍速永远在最右：它是这一行里唯一带弹层的入口，弹窗就锚在这颗上面
                         WotaChip(
@@ -448,7 +516,7 @@ fun PlayerScreen(
                     .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
             ) {
                 WotaIconButton(
-                    image = Icons.Filled.ArrowBack,
+                    image = Icons.Outlined.ArrowBack,
                     description = stringResource(R.string.gallery_desc_back),
                     onClick = onBack,
                     modifier = Modifier.padding(6.dp),
@@ -469,6 +537,24 @@ fun PlayerScreen(
                 )
             }
 
+            if (controlsVisible && arcMenu) {
+                ArcRepairPopup(
+                    anchor = arcAnchor,
+                    onPick = { useGpu ->
+                        arcMenu = false
+                        // 重复启动保护：管线本身同一时刻只跑一条（runner.busy 也会兜一层），
+                        // 这里给个明确提示，避免用户以为点第二下没反应。DONE/FAILED 不算在忙，
+                        // 允许接着再修一条（runner.start 会自行重置 result/progress）。
+                        if (arcStatus == ArcRepairStatus.RUNNING) {
+                            banner = R.string.player_arc_busy
+                        } else {
+                            arcRunner.start(clip.uri, useGpu)
+                        }
+                    },
+                    onDismiss = { arcMenu = false }
+                )
+            }
+
             // 反馈条从底边浮起再淡出；文案钉在快照上，否则退场那帧会闪成空条
             val msg = banner
             var msgSnapshot by remember { mutableStateOf<Int?>(null) }
@@ -486,6 +572,16 @@ fun PlayerScreen(
                         .background(WotaSurface)
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) { Text(stringResource(msgSnapshot ?: 0), style = MaterialTheme.typography.bodyMedium) }
+            }
+            // 后台修复进行中的轻量反馈：一行等宽小字，不占控件栏、不挡画面、与控制栏显隐无关。
+            // 位置压在反馈条上方（banner 走 120dp），两条同时在位时不会互相盖住。
+            if (arcStatus == ArcRepairStatus.RUNNING) {
+                Text(
+                    text = stringResource(R.string.player_arc_running, (arcProgress * 100f).toInt()),
+                    style = MonoStyle,
+                    color = WotaText,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 168.dp)
+                )
             }
             if (zoom.value > 1.01f) {
                 Text(
@@ -519,7 +615,7 @@ fun PlayerScreen(
 }
 
 /**
- * AB 段循环四按钮：A / B / 循环 / 清除（激活绿色 —— ）。
+ * AB 段循环四按钮：A / B / 循环 / 清除（激活蓝底白字，accent 见 Tokens —— ）。
  * 四个动作散排时读作 4 个独立控件，套一层卡片让它们成一个控件组。
  */
 @Composable
@@ -546,7 +642,8 @@ internal fun AbRow(
 
 /**
  * 组内迷你胶囊沿用自绘：WotaChip 的 12/6dp 内边距 ×4 枚会把底栏第二行撑溢出（窄屏真机量过），
- * 这里只借它的配色语义（选中 accent 实底 + onAccent 字）。
+ * 这里只借它的配色语义（选中 accentSurface 实底 + onAccent 字——labelMedium 白字小字的承载面，
+ * 白字对 #007DFF(accent) 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过）。
  */
 @Composable
 private fun AbPill(label: String, active: Boolean, onClick: () -> Unit) {
@@ -558,7 +655,7 @@ private fun AbPill(label: String, active: Boolean, onClick: () -> Unit) {
         maxLines = 1,
         modifier = Modifier
             .clip(WotaShape.pill)
-            .background(if (active) WotaColor.accent else ComposeColor.Transparent)
+            .background(if (active) WotaColor.accentSurface else ComposeColor.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 7.dp, vertical = 3.dp)
     )
@@ -604,9 +701,10 @@ private fun BarIconSlot(
  *
  * 2026-09-28 起改走 [WotaPillPopup] 就近弹在底栏最右那颗倍速胶囊旁边 —— 原来它浮在整条底栏上方，
  * 靠一个手算的 88dp 让位，底栏行数一变就对不上；壳、点外关闭、退场动画也都不用自己再写一份。
+ * 提成 internal：对比播放页（10-01 沉浸式改造）的倍速入口复用同一枚弹层，五档与壳不各抄一份。
  */
 @Composable
-private fun SpeedTierPopup(
+internal fun SpeedTierPopup(
     anchor: androidx.compose.ui.unit.IntRect,
     current: Float,
     onPick: (Float) -> Unit,
@@ -626,12 +724,15 @@ private fun SpeedTierPopup(
                     Text(
                         stringResource(speedLabelRes(tier)),
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (picked) WotaColor.accent else WotaText,
+                        // 选中态不用 accent 当文字色：accent 换 HarmonyOS 蓝（2026-10-01）后
+                        // 蓝字压 WotaSurface 小字 CR≈3.37 过不了正文档 4.5；选中语义由旁边那枚
+                        // accent 对勾承担（图形件过 3.0 大字/图形档即可，contrast-audit 实测）
+                        color = WotaText,
                         modifier = Modifier.weight(1f)
                     )
                     if (picked) {
                         Icon(
-                            Icons.Filled.Check,
+                            Icons.Outlined.Check,
                             contentDescription = null,
                             tint = WotaColor.accent,
                             modifier = Modifier.size(15.dp)
@@ -639,6 +740,49 @@ private fun SpeedTierPopup(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 光弧修复的方式选择弹层（用户需求第 7 项）：写法照 [SpeedTierPopup]——就近弹在底栏那枚修复钮旁边。
+ *
+ * 两行是**二选一的动作**，不是选中态：所以不给对勾、不存 current，点完即关并在上层起后台任务。
+ * 说明小字讲清代价与"不改原片"，避免用户以为它会把当前文件覆盖掉。
+ */
+@Composable
+private fun ArcRepairPopup(
+    anchor: androidx.compose.ui.unit.IntRect,
+    onPick: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_arc_repair)) {
+        Column(Modifier.width(ARC_POPUP_PANEL_WIDTH)) {
+            // 行尾留空：一挂对勾就会被读成"当前选中项"，而这里点哪个是发起动作
+            Text(
+                stringResource(R.string.player_arc_gpu),
+                style = MaterialTheme.typography.labelMedium,
+                color = WotaText,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(true) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+            Text(
+                stringResource(R.string.player_arc_cpu),
+                style = MaterialTheme.typography.labelMedium,
+                color = WotaText,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(false) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+            Text(
+                stringResource(R.string.player_arc_note),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            )
         }
     }
 }
@@ -664,7 +808,7 @@ private fun PlayerTopBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 顶栏 7 枚圆钮压到 30dp：M3 IconButton 强制 ≥48dp，七个就把文件名挤成「…」
-        BarIconSlot(Icons.Filled.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
+        BarIconSlot(Icons.Outlined.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
         Text(
             clip.name,
             style = MaterialTheme.typography.titleMedium,
@@ -672,23 +816,23 @@ private fun PlayerTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(horizontal = 2.dp)
         )
-        BarIconSlot(Icons.Filled.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
+        BarIconSlot(Icons.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
         BarIconSlot(
-            if (clip.liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            if (clip.liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
             // 图标已经分状态了，标签也必须跟着分：原来恒报「已收藏」，未收藏的成片读屏也说成已收藏
             stringResource(if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked),
             tint = if (clip.liked) WotaRec else WotaText,
             onClick = onLike
         )
-        BarIconSlot(Icons.Filled.Tune, stringResource(R.string.gallery_menu_tags), onClick = onTag)
-        BarIconSlot(Icons.Filled.Share, stringResource(R.string.gallery_menu_share), onClick = onShare)
+        BarIconSlot(Icons.Outlined.Tune, stringResource(R.string.gallery_menu_tags), onClick = onTag)
+        BarIconSlot(Icons.Outlined.Share, stringResource(R.string.gallery_menu_share), onClick = onShare)
         if (clip.isTrashed) {
-            BarIconSlot(Icons.Filled.Restore, stringResource(R.string.gallery_menu_restore), onClick = onTrash)
+            BarIconSlot(Icons.Outlined.Restore, stringResource(R.string.gallery_menu_restore), onClick = onTrash)
         } else {
-            BarIconSlot(Icons.Filled.Delete, stringResource(R.string.gallery_menu_trash), onClick = onTrash)
+            BarIconSlot(Icons.Outlined.Delete, stringResource(R.string.gallery_menu_trash), onClick = onTrash)
         }
         BarIconSlot(
-            Icons.Filled.DeleteForever,
+            Icons.Outlined.DeleteForever,
             stringResource(R.string.gallery_menu_purge),
             tint = WotaRec,
             onClick = onPurge
@@ -698,8 +842,10 @@ private fun PlayerTopBar(
 
 // region 手势与进度条
 
-/** 双指缩放 1..4x：只在第二指按下后才消费，单指滑动不消费（因此画面滑动不会 seek） */
-private fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 1f, max: Float = 4f): Modifier =
+/** 双指缩放 1..4x：只在第二指按下后才消费，单指滑动不消费（因此画面滑动不会 seek）。
+ *  提成 internal：对比播放页（#4，用户 2026-09-30 反馈「对比播放没有双指缩放」）复用同一份
+ *  手势与同一档上下限，两边各抄一份迟早各改各的。 */
+internal fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 1f, max: Float = 4f): Modifier =
     pointerInput(min, max) {
         awaitEachGesture {
             var baseDist = 0f
@@ -731,6 +877,11 @@ private fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 1f, 
 /**
  * 进度条：唯一可拖动 seek 的入口，轨道上画 A/B 标记。
  * 拖动中本地值覆盖轮询值，松手才 seek。
+ *
+ * 样式来源=用户 2026-10-01 视觉规格：已播放 [WotaColor.sliderFill]（白）、未播放轨道
+ * [WotaColor.sliderRest]（#333）、thumb 是直径 6px@2x 的白色微小圆点、拖拽时圆点放大——
+ * 放大走 if 跳变，颜色/尺寸动画被 MotionHygieneTest 守卫拦，不做动画。
+ * 规格里「thumb 散发微光」一条不做：本工程设计纪律禁投影/发光（见 Tokens.kt 头注）。
  */
 @Composable
 fun WotaSeekBar(
@@ -742,6 +893,7 @@ fun WotaSeekBar(
     onDrag: (Float) -> Unit = {},
     onDragEnd: (Float) -> Unit = {}
 ) {
+    var dragging by remember { mutableStateOf(false) }
     Box(
         modifier
             .fillMaxWidth()
@@ -752,6 +904,7 @@ fun WotaSeekBar(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     var last = fracOf(down.position.x, size.width)
                     down.consume()
+                    dragging = true
                     onDrag(last)
                     while (true) {
                         val event = awaitPointerEvent()
@@ -760,6 +913,7 @@ fun WotaSeekBar(
                         change.consume()
                         onDrag(last)
                     }
+                    dragging = false
                     onDragEnd(last)
                 }
             },
@@ -770,15 +924,16 @@ fun WotaSeekBar(
             val w = size.width
             val f = fraction.coerceIn(0f, 1f)
             val tick = 7.dp.toPx()
-            drawLine(WotaColor.outline, Offset(0f, cy), Offset(w, cy), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
-            drawLine(WotaColor.accent, Offset(0f, cy), Offset(w * f, cy), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            drawLine(WotaColor.sliderRest, Offset(0f, cy), Offset(w, cy), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            drawLine(WotaColor.sliderFill, Offset(0f, cy), Offset(w * f, cy), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
             aFraction?.let {
                 drawLine(WotaColor.textMid, Offset(w * it, cy - tick), Offset(w * it, cy + tick), strokeWidth = 2.dp.toPx())
             }
             bFraction?.let {
                 drawLine(WotaColor.textMid, Offset(w * it, cy - tick), Offset(w * it, cy + tick), strokeWidth = 2.dp.toPx())
             }
-            drawCircle(WotaColor.textHi, radius = 5.dp.toPx(), center = Offset(w * f, cy))
+            // 微光规格按工程禁投影纪律不做，2026-10-01
+            drawCircle(WotaColor.sliderFill, radius = (if (dragging) 5.dp else 3.dp).toPx(), center = Offset(w * f, cy))
         }
     }
 }

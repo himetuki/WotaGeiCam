@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         applyMergeHook(intent)
+        applyFrostProbe(intent)
         setContent {
             WotaTheme {
                 val prefs = remember { WotaSettings.of(this) }
@@ -87,6 +88,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         applyMergeHook(intent)
+        applyFrostProbe(intent)
     }
 
     /**
@@ -99,6 +101,11 @@ class MainActivity : ComponentActivity() {
      */
     private fun applyMergeHook(intent: Intent?) {
         MergeDebugHook.applySpec(intent?.getStringExtra(EXTRA_MERGE_HOOK))
+    }
+
+    /** #84 霜探针的唯一写入入口：与 [applyMergeHook] 同一套纪律（见 [FrostProbe] 的类注释） */
+    private fun applyFrostProbe(intent: Intent?) {
+        FrostProbe.apply(intent?.getBooleanExtra(EXTRA_FROST_PROBE, false) == true)
     }
 }
 
