@@ -39,6 +39,9 @@ hs_err_pid*
 replay_pid*
 .cxx-abi/
 
+# ===== mapping 归档（docs/plan/15 步骤 5：与 *.apk 同等待遇，不进 git，靠 APK-LOG.md 清单追溯）=====
+deliverable/**/mapping/
+
 # ===== 本机工具链（体积大且可重装）=====
 tools/android-sdk/
 tools/**/platform-tools/

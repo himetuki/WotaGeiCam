@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -26,8 +28,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -50,6 +54,22 @@ import com.wotagei.cam.ui.anim.LocalMotion
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内 */
 private const val MAX_HEIGHT_RATIO = 0.62f
+
+/**
+ * HDS 阴影 md 档（Toast/气泡/菜单默认档）落 Compose 的 elevation：令牌
+ * `ohos_id_shadow_default_md_shadow`=60 / `md_offset_y`=10（tokens.json，design-spec §5.3）。
+ * Compose 的 `shadow()` 没有 blur/offset 直调参数，按平台经验映射 blur ≈ 2×elevation 取 30；
+ * Y 偏移不可表达——系统光源自顶部，落影天然偏下，方向与 10vp 同侧。
+ * 阴影色/不透明度：HDS 素材没有 A 级色值（design-spec §1.3 缺口），用默认黑、交系统渲染。
+ */
+private val HDS_SHADOW_MD_ELEVATION = 30.dp
+
+/**
+ * 菜单弹层的件位形：`WotaShape.menu` 自 Top 8 #2 起是 20dp 的 **Dp** 半径值、不再是 Shape，
+ * 而 shadow/clip/border 三处要的都是 Shape——包一枚放文件级，本文件三处共用（同 Widgets.kt 的
+ * `chipShape`/`menuShape` 惯例，省得每处各 new 一枚）。
+ */
+private val menuShape = RoundedCornerShape(WotaShape.menu)
 
 /**
  * 就近锚定的胶囊小弹窗（仿 HarmonyOS Next 的控件级浮层）。
@@ -123,6 +143,9 @@ fun PillChoices(
                         // 不支持的档位必须看得出「灰着」：抽屉时代 TierPicker 自带淡显，
                         // 胶囊里若不淡显，点上去只弹一句「本机不支持」，等于让用户试错（真机 7680x4320 踩过）
                         valueColor = if (opt.enabled) null else WotaColor.textLo,
+                        // 2026-10-02 补通道：此前只调暗文字，chip 仍可点、onPick 照收
+                        // （真机事故：24※ 下点 1/24 被钳成 1/30）。灰显还必须点不动
+                        enabled = opt.enabled,
                         onClick = { onPick(opt) },
                         modifier = Modifier.weight(1f)
                     )
@@ -156,6 +179,8 @@ fun PillToggles(
                         label = opt.label,
                         selected = isOn(opt),
                         valueColor = if (opt.enabled) null else WotaColor.textLo,
+                        // 与 PillChoices 同一条：灰显不许只是调暗文字，点击也要关掉
+                        enabled = opt.enabled,
                         onClick = { onToggle(opt) },
                         modifier = Modifier.weight(1f)
                     )
@@ -186,13 +211,27 @@ fun PillRowList(
                     .clickable { onPick(row) }
                     .padding(horizontal = 8.dp, vertical = 6.dp)
             ) {
-                Text(
-                    text = row.label,
-                    style = WotaType.chip,
-                    color = if (row.active) WotaColor.accent else WotaColor.textHi,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    // 激活指示改用 accent 圆点：accent 换 HarmonyOS 蓝（2026-10-01）后
+                    // 蓝小字压 surface CR≈3.15 过不了正文档 4.5，但过图形档 3.0——
+                    // 文字保持 textHi，语义交给这枚图形件（原先是蓝字当指示，已撤）
+                    if (row.active) {
+                        Box(
+                            Modifier
+                                .padding(end = 6.dp)
+                                .size(6.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .background(WotaColor.accent)
+                        )
+                    }
+                    Text(
+                        text = row.label,
+                        style = WotaType.chip,
+                        color = WotaColor.textHi,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 Text(
                     text = row.detail,
                     style = WotaType.label,
@@ -291,7 +330,8 @@ fun WotaPillPopup(
     val density = LocalDensity.current
     val root = LocalView.current.rootView
     val gapPx = with(density) { 8.dp.roundToPx() }
-    val marginPx = with(density) { 10.dp.roundToPx() }
+    // 距屏边最小 6dp：HDS「气泡到屏幕边缘最小可以到 6vp」（.tmp/hw_popup-0000001956975269.md 指向型气泡节）
+    val marginPx = with(density) { 6.dp.roundToPx() }
     var popupSize by remember { mutableStateOf(IntSize.Zero) }
     val area = IntSize(max(1, root.width), max(1, root.height))
     val placed = PillAnchor.place(anchor, popupSize, area, gapPx, marginPx)
@@ -319,16 +359,27 @@ fun WotaPillPopup(
         val maxContentH = (area.height * MAX_HEIGHT_RATIO / density.density).dp
         Column(
             modifier
-                .widthIn(max = 320.dp)
+                // 最大宽 400dp 封顶：HDS「最大拉伸到 400vp 宽度时不再跟随放大」
+                // （.tmp/hw_popup-0000001956975269.md 指向型气泡节；component-map Top 8 #6）。
+                // 上限只是 max，调用点显式传宽的（镜像 120dp、倍速 148、光弧 240）不受影响
+                .widthIn(max = 400.dp)
                 .onSizeChanged { popupSize = it }
                 .graphicsLayer {
                     alpha = appearAlpha
                     scaleX = appearScale
                     scaleY = appearScale
                 }
-                .clip(WotaShape.large)
+                // 阴影 md 档见 [HDS_SHADOW_MD_ELEVATION]；圆角对齐 HDS 菜单档 20vp
+                // （令牌 ohos_id_corner_radius_menu，design-spec §4.2；component-map Top 8 #6）
+                .shadow(
+                    elevation = HDS_SHADOW_MD_ELEVATION,
+                    shape = menuShape,
+                    ambientColor = Color.Black,
+                    spotColor = Color.Black
+                )
+                .clip(menuShape)
                 .background(WotaColor.surface.copy(alpha = 0.97f))
-                .border(1.dp, WotaColor.acrylicBorder, WotaShape.large)
+                .border(1.dp, WotaColor.acrylicBorder, menuShape)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {

@@ -175,9 +175,13 @@ class FrostEncoderGuardTest {
     @Test
     fun `画板对象只允许被窗口那一侧与开关路径碰到`() {
         // frostPlatePass 的合法持有者：建资源（initGl）、编 program 与撤报（开关两条路）、
-        // 拆资源（releaseGl）、以及唯一的绘制点 drawFrostPlates。
+        // 拆资源（releaseGl）、唯一的绘制点 drawFrostPlates、以及 #84 霜探针那枚只读诊断入口
+        // （frostPlateBrokenForDiagnostics：GL 线程写的 broken 位原样读出，不参与任何绘制判断）。
         // 白名单而不是黑名单：新增一个函数去碰它，守卫会直接问"你是哪条路"。
-        val allowed = setOf("initGl", "setFrostBlurEnabled", "adoptFrostIntentFromTable", "releaseGl", "drawFrostPlates")
+        val allowed = setOf(
+            "initGl", "setFrostBlurEnabled", "adoptFrostIntentFromTable", "releaseGl", "drawFrostPlates",
+            "frostPlateBrokenForDiagnostics"
+        )
         val sites = KotlinSourceScan.occurrences(masked, "frostPlatePass").map {
             it to KotlinSourceScan.enclosingOf(bodies, it)
         }

@@ -4,6 +4,7 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.ui.GridAnchor
 import com.wotagei.cam.ui.GridCell
+import com.wotagei.cam.ui.GridRowGrowthRows
 import com.wotagei.cam.ui.HudAreaDp
 import com.wotagei.cam.ui.HudEntry
 import com.wotagei.cam.ui.HudGridPlan
@@ -14,12 +15,15 @@ import com.wotagei.cam.ui.HudRectDp
 import com.wotagei.cam.ui.HudSizePx
 import com.wotagei.cam.ui.HudZone
 import com.wotagei.cam.ui.cellAtPointer
+import com.wotagei.cam.ui.cellDropOf
+import com.wotagei.cam.ui.cellGroupMatesOf
 import com.wotagei.cam.ui.cellOffsetPx
 import com.wotagei.cam.ui.cellPlaceOffsetPx
 import com.wotagei.cam.ui.clampCellToBox
 import com.wotagei.cam.ui.clampStoredCell
 import com.wotagei.cam.ui.defaultCellsOf
 import com.wotagei.cam.ui.dropZoneOf
+import com.wotagei.cam.ui.editableGridRowsOf
 import com.wotagei.cam.ui.freeCellNear
 import com.wotagei.cam.ui.gridBoxOf
 import com.wotagei.cam.ui.gridColFromEndOf
@@ -251,18 +255,155 @@ class HudLayoutGridTest {
     }
 
     @Test
-    fun droppingIntoOccupiedCellDisplacesNobody() {
-        // 用户把「闪光灯」拖到「RGB 曲线」已经占着的那一格 ⇒ 曲线原地不动、闪光灯就近让位。
-        // 选"只落空格"而不是"与占位那颗交换"：交换的语义就是"移动一颗会动另一颗"，
-        // 与用户那句「移到一项其他项也会同时移动，这是极大的限制」正面冲突
+    fun droppingIntoOccupiedCellSwapsTheTwo() {
+        // 本批把"拖到已占格"的语义从"跳到最近空格"改成**交换**（用户要的是手指的预期）。
+        // 用户把「闪光灯」拖到「RGB 曲线」已经占着的那一格 (0,2)：曲线挪到闪光的**原格** (0,3)，
+        // 闪光拿到目标格 (0,2)，其余两颗（参考线 / 监看）一颗都不动。
+        // 退回旧实现（freeCellNear 只落空格）时"曲线"仍在 (0,2)、"闪光灯"落到 (1,2)，本用例当场红。
         val placed = HudLayoutTable.default()
             .placeEntryAt(e(CamPill.FLASH), HudZone.LEFT, 2, GridCell(0, 2), planAll)
         val after = placed.gridItems(HudZone.LEFT, planAll).associate { it.entry to it.cell }
-        assertEquals("被占的那颗（曲线）一格都不许让", GridCell(0, 2), after[e(CamPill.CURVE)])
-        assertEquals("拖过来那颗就近让到隔壁空格", GridCell(1, 2), after[e(CamPill.FLASH)])
-        assertEquals("其余两颗不动", GridCell(0, 0), after[e(CamPill.REFLINE)])
-        assertEquals("其余两颗不动", GridCell(0, 1), after[e(CamPill.MONITOR)])
+        assertEquals("被拖那颗拿到目标格", GridCell(0, 2), after[e(CamPill.FLASH)])
+        assertEquals("占位者（曲线）挪到被拖那颗的原格 (0,3)", GridCell(0, 3), after[e(CamPill.CURVE)])
+        // 其余两颗逐颗点名：一个都不许动
+        assertEquals("参考线不动", GridCell(0, 0), after[e(CamPill.REFLINE)])
+        assertEquals("监看不动", GridCell(0, 1), after[e(CamPill.MONITOR)])
+        // 交换后两者都是**显式格**（写表时把被挤者一并写进去；漏写的话下一帧推导会把它打回默认）
+        assertEquals(GridCell(0, 3), placed.cellsOf(HudZone.LEFT)[e(CamPill.CURVE)])
         assertEquals("四颗仍各占一格（叠格就是又一颗摞在另一颗上）", 4, after.values.toSet().size)
+    }
+
+    @Test
+    fun exchangeIsRefusedWhenTheOriginStillHoldsAThirdEntry() {
+        // 原格承接不了时：占位者就近让位，被拖那颗仍拿目标格，第三颗（这里是被拖那颗的同组搭档）不动。
+        // 右 Dock：姿态仪 + 音量表共格 (0,0)。把音量表拖到蓝牙那一格 (0,1) ⇒ 格主是蓝牙，
+        // 但"音量表的原格" (0,0) 里还住着搭档姿态仪（除自己与 occupant 之外还有住户）⇒ 不交换。
+        // 于是蓝牙就近让到 (1,0)，音量表落到 (0,1)，姿态仪留在 (0,0) 一格不动。
+        // 退回旧实现（只落空格）时音量表会停在 (0,1) 附近的空格、蓝牙原地不动，本用例红。
+        val placed = HudLayoutTable.default()
+            .placeEntryAt(e(CamPill.VOLUME), HudZone.RIGHT, 1, GridCell(0, 1), planAll)
+        val after = placed.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
+        assertEquals("被拖那颗仍拿目标格", GridCell(0, 1), after[e(CamPill.VOLUME)])
+        assertEquals("占位者（蓝牙）就近让到 (1,0)", GridCell(1, 0), after[e(CamPill.BT)])
+        assertEquals("第三颗（搭档姿态仪）一格不动", GridCell(0, 0), after[e(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 0), placed.cellsOf(HudZone.RIGHT)[e(CamPill.LEVEL)])
+        assertEquals(GridCell(1, 0), placed.cellsOf(HudZone.RIGHT)[e(CamPill.BT)])
+        // 其余三颗（变焦/对焦/防抖）也不许被牵连
+        assertEquals(GridCell(0, 2), after[e(CamPill.ZOOM)])
+        assertEquals(GridCell(0, 3), after[e(CamPill.FOCUS)])
+        assertEquals(GridCell(0, 4), after[e(CamPill.STAB)])
+    }
+
+    @Test
+    fun crossContainerDropOntoAnOccupiedCellNeverSwaps() {
+        // 跨容器没有"你的原格"可退回 ⇒ 仍走"只落空格"，且目标容器里那颗原地不动、不写出越区格。
+        // 把左 Dock 的「参考线」拖到右 Dock 蓝牙已经占着的 (0,1)：
+        // freeCellNear 在右 Dock 的占位集里按曼哈顿距离逐环找最近空格。距 (0,1) 为 1 的候选只有
+        // (1,1)/(0,0)/(0,2)，其中 (1,1) 空着且块尾没出带 ⇒ 落 (1,1)（(1,0) 的距离是 2，轮不到它）。蓝牙仍在 (0,1)。
+        val placed = HudLayoutTable.default()
+            .placeEntryAt(e(CamPill.REFLINE), HudZone.RIGHT, 1, GridCell(0, 1), planAll)
+        val after = placed.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }
+        assertEquals("跨容器落点 = 曼哈顿距离 1 的最近空格 (1,1)", GridCell(1, 1), after[e(CamPill.REFLINE)])
+        assertEquals("目标容器里那颗原地不动", GridCell(0, 1), after[e(CamPill.BT)])
+        assertEquals("姿态仪仍在配对格 (0,0)", GridCell(0, 0), after[e(CamPill.LEVEL)])
+        // ⚠ 既有缺陷（**与本批无关，改前逐字同值**，已记入 docs/plan/16 待办）：
+        // 音量表的**存储格**被钉在 (0,0)（见下面 cellsOf 那两条），但渲染解析把它挪到了 (1,0)。
+        // 机制：搭档关系由 `cellGroupMatesOf(defaultCellsOf(zone, **当前 order**), e)` 推出，而这一步
+        // 把「参考线」插进了 RIGHT 的 order 第 1 位 ⇒ 音量表在**新 order** 里的推导格不再是 (0,0)
+        // ⇒ 它认不出姿态仪是搭档 ⇒ 被 resolveCells 移到隔壁空格。`placeEntryAt` 的交换支读的却是
+        // `defaultGridOf`（**默认 order**），两处尺子不同。要根治得让搭档表统一以默认 order 为准。
+        assertEquals("音量表渲染落点（既有缺陷：被拆出配对格）", GridCell(1, 0), after[e(CamPill.VOLUME)])
+        assertEquals("配对格在存储层没丢：姿态仪钉 (0,0)", GridCell(0, 0), placed.cellsOf(HudZone.RIGHT)[e(CamPill.LEVEL)])
+        assertEquals("配对格在存储层没丢：音量表也钉 (0,0)", GridCell(0, 0), placed.cellsOf(HudZone.RIGHT)[e(CamPill.VOLUME)])
+        // 不写出越区格：列不超过右 Dock 的列上限（2）
+        assertTrue("越区格：$after", after.values.all { it.col in 0 until gridColsCapOf(HudZone.RIGHT) })
+        // 来源容器不再有它，且来源剩下的三颗位置不变（钉格那一步的效力）
+        assertEquals(HudZone.RIGHT, placed.sourceZoneOf(e(CamPill.REFLINE)))
+        val left = placed.gridItems(HudZone.LEFT, planAll).associate { it.entry to it.cell }
+        // 钉格的效力：抽走参考线之后，剩下三颗仍是原来的 (0,1)/(0,2)/(0,3)。
+        // 少了钉格这一步，三颗会按新 order 集体上移成一格 (0,0)/(0,1)/(0,2)——正是 #74 要禁的耦合
+        assertEquals("监看留在原格（没被上移）", GridCell(0, 1), left[e(CamPill.MONITOR)])
+        assertEquals(GridCell(0, 2), left[e(CamPill.CURVE)])
+        assertEquals(GridCell(0, 3), left[e(CamPill.FLASH)])
+    }
+
+    @Test
+    fun cellDropOfAndPlaceEntryAtReadTheSameRuler() {
+        // 桥测：同一组入参分别喂 cellDropOf 与 placeEntryAt，落点必须一致（预览与写表同源）。
+        // 预览侧读 cellDropOf(...).dropped；写表侧 placeEntryAt 内部也走 cellDropOf。
+        val table = HudLayoutTable.default()
+        val plan = planAll
+        val wanted = GridCell(0, 2)                     // 曲线那一格
+        val origin = GridCell(0, 3)                     // 闪光灯当前那一格（默认表里它就在这）
+        val expected = cellDropOf(
+            wanted = wanted,
+            origin = origin,
+            residents = table.residentsOf(HudZone.LEFT, plan),
+            self = e(CamPill.FLASH),
+            mates = cellGroupMatesOf(table.defaultGridOf(HudZone.LEFT, plan), e(CamPill.FLASH)),
+            draggedHeightPx = 0,
+            cellHeightPx = plan.cellHeightOf,
+            cols = gridColsCapOf(HudZone.LEFT),
+            rows = HudEntry.ALL.size,                    // 与 placeEntryAt 内部的 GridRowHardCap 同值
+            rowPitchPx = plan.rowPitchOf(HudZone.LEFT)
+        )
+        assertEquals(GridCell(0, 2), expected.dropped)
+        assertEquals(mapOf(e(CamPill.CURVE) to GridCell(0, 3)), expected.moved)
+        val written = table.placeEntryAt(e(CamPill.FLASH), HudZone.LEFT, 2, wanted, plan)
+        val after = written.gridItems(HudZone.LEFT, plan).associate { it.entry to it.cell }
+        assertEquals("预览落点必须等于写表落点", expected.dropped, after[e(CamPill.FLASH)])
+        // 被挤者的落点也必须一致
+        for ((who, cell) in expected.moved) assertEquals("被挤者 $who 的落点", cell, after[who])
+    }
+
+    @Test
+    fun editableGridRowsGrowByOneOverTheReservation() {
+        // 用户 10-01 明示放宽的那一格：可编辑行档 = 预留 + 1，再夹进带内实际档数。
+        // 手算：左 Dock 横屏带 308dp ÷ 34dp ≈ 9 档、预留 4 ⇒ 可编辑 5（+1 生效）
+        assertEquals(5, editableGridRowsOf(4, 9))
+        // 带高只够预留那么多 ⇒ 生长被带高吃光，结果就是带内档数（不是没做）
+        assertEquals(4, editableGridRowsOf(4, 4))
+        // 右 Dock 横屏那一档：带 266dp ÷ 34dp ≈ 7 档、预留 7 ⇒ 可编辑 7（生长被带高吃光）
+        assertEquals(7, editableGridRowsOf(7, 7))
+    }
+
+    @Test
+    fun editableGridRowsWithoutReservationStayByteIdentical() {
+        // reservedRows <= 0（读数块那一支）：结果必须与改前逐字同值 = 带内实际档数，与生长量无关。
+        // 改错（比如把 0 那一支也加生长量 / 给了空区间）这里红
+        assertEquals(9, editableGridRowsOf(0, 9))
+        assertEquals(1, editableGridRowsOf(0, 0))        // 带连一档都没有也只给 1，不许 0 档
+        assertEquals(1, editableGridRowsOf(-3, 0))
+        // 生长量显式传别的值：只影响"有预留"的那一支，且夹子仍然生效
+        assertEquals(7, editableGridRowsOf(7, 9, growthRows = 0))
+        assertEquals(9, editableGridRowsOf(7, 9, growthRows = 5))
+    }
+
+    @Test
+    fun gridBoxClampsToTheGrownRowLimit() {
+        // 桥：gridBoxOf 真按生长后的上限夹。带 10 档、预留 4：传 growth=1 ⇒ 5 档（编辑页那一档）
+        val grown = gridBoxOf(
+            HudZone.LEFT, pitchXDp = 34, pitchYDp = 30, bandHeightDp = 300, roomWidthDp = 0,
+            reservedRows = 4, reservedCols = 0, rowGrowth = GridRowGrowthRows, colGrowth = 0
+        )
+        assertEquals(5, grown.rows)
+        // GridCell(0,99) 落在**生长后的最后一档** (0,4)，而不是预留那一档 (0,3)
+        assertEquals(GridCell(0, 4), clampCellToBox(GridCell(0, 99), grown, contentHeightPx = 0, rowPitchPx = 30))
+        // 同一入参 growth=0 ⇒ 逐字退回预留那一档（与既有的 rowOverflowBelowReservation 那条互补）
+        val reservedOnly = gridBoxOf(
+            HudZone.LEFT, pitchXDp = 34, pitchYDp = 30, bandHeightDp = 300, roomWidthDp = 0,
+            reservedRows = 4, reservedCols = 0, rowGrowth = 0, colGrowth = 0
+        )
+        assertEquals(4, reservedOnly.rows)
+        assertEquals(GridCell(0, 3), clampCellToBox(GridCell(0, 99), reservedOnly, 0, 30))
+        // 带高不够时生长被吃光：带 4 档、预留 4、growth=1 ⇒ 仍是 4（不抛、不给空区间）
+        assertEquals(
+            4,
+            gridBoxOf(
+                HudZone.LEFT, pitchXDp = 34, pitchYDp = 30, bandHeightDp = 120, roomWidthDp = 0,
+                reservedRows = 4, reservedCols = 0, rowGrowth = GridRowGrowthRows, colGrowth = 0
+            ).rows
+        )
     }
 
     @Test
@@ -296,7 +437,9 @@ class HudLayoutGridTest {
 
     @Test
     fun hiddenEntriesStillHoldTheirCells() {
-        // 隐藏的条目不画，但格子还是它的：不算进来就会两颗挤在同一格
+        // 隐藏的条目不画，但格子还是它的：不算进来就会两颗挤在同一格。
+        // 本批把落点语义改成交换之后，这条契约的**后半段**跟着变：隐藏条目仍算占用 ⇒ 被人压上时
+        // 它被**显式挤走**（写进 cells），而不是"占着不动、让被拖那颗绕开"。
         // （与 HudLayoutCodecTest.hiddenEntrySurvivesInPersistedString 同一条语义的另一半）
         val placed = HudLayoutTable.default()
             .placeEntryAt(e(CamPill.BT), HudZone.RIGHT, 2, GridCell(1, 3), planAll)
@@ -307,12 +450,16 @@ class HudLayoutGridTest {
             cellHeightOf = { 0 }
         )
         assertTrue("隐藏那颗的格子必须算占用", placed.occupiedCells(HudZone.RIGHT, visibleOnly).contains(GridCell(1, 3)))
+        // 防抖（可见）拖到蓝牙（隐藏）那一格 (1,3)：格主是隐藏的蓝牙 ⇒ 交换 ⇒ 蓝牙挪到防抖的原格 (0,4)
         val dropped = placed.placeEntryAt(e(CamPill.STAB), HudZone.RIGHT, 4, GridCell(1, 3), visibleOnly)
         val cells = dropped.gridItems(HudZone.RIGHT, visibleOnly).associate { it.entry to it.cell }
-        assertEquals("蓝牙那一格不许被压", GridCell(1, 3), dropped.cellsOf(HudZone.RIGHT)[e(CamPill.BT)])
-        assertTrue("防抖被就近让开", cells.getValue(e(CamPill.STAB)) != GridCell(1, 3))
+        assertEquals("被拖那颗拿到目标格", GridCell(1, 3), cells.getValue(e(CamPill.STAB)))
         assertEquals(
-            "蓝牙重新可见后仍回到它被摆的那一格", GridCell(1, 3),
+            "隐藏条目被**显式**挤到防抖的原格 (0,4)（写进 cells，不是绕开）",
+            GridCell(0, 4), dropped.cellsOf(HudZone.RIGHT)[e(CamPill.BT)]
+        )
+        assertEquals(
+            "蓝牙重新可见后落在它被挤到的那一格（= 被拖那颗的原格）", GridCell(0, 4),
             dropped.gridItems(HudZone.RIGHT, planAll).associate { it.entry to it.cell }[e(CamPill.BT)]
         )
     }
@@ -373,8 +520,9 @@ class HudLayoutGridTest {
         // "跨度 > 1 时钳的是整块"那一档在 HudLayoutRowPitchTest 里喂真实高度另打
         val box = gridBoxOf(
             HudZone.LEFT, pitchXDp = 50, pitchYDp = 30, bandHeightDp = 120, roomWidthDp = 0,
-            // #80 的预留夹档：0 = 不预留（与改前逐字同值），预留那一档在下面的 #80 那组用例里单独打
-            reservedRows = 0, reservedCols = 0
+            // #80 的预留夹档：0 = 不预留（与改前逐字同值），预留那一档在下面的 #80 那组用例里单独打。
+            // 生长档本批是编辑页专用的那一档，这里显式传 0 ⇒ 期望值与改前一字不变
+            reservedRows = 0, reservedCols = 0, rowGrowth = 0, colGrowth = 0
         )
         assertEquals(2, box.cols)
         assertEquals(4, box.rows)
@@ -387,11 +535,11 @@ class HudLayoutGridTest {
             2,
             gridBoxOf(
                 HudZone.READOUT, pitchXDp = 90, pitchYDp = 42, bandHeightDp = 300, roomWidthDp = 200,
-                reservedRows = 0, reservedCols = 0   // #80 预留那一档在下面的用例里单独打
+                reservedRows = 0, reservedCols = 0, rowGrowth = 0, colGrowth = 0   // #80 预留那一档在下面的用例里单独打
             ).cols
         )
         // 带高不够（极矮窗口）也只给 1 行，不许 0 行让 coerceIn 抛
-        assertEquals(1, gridBoxOf(HudZone.READOUT, 0, 0, 300, 200, reservedRows = 0, reservedCols = 0).rows)
+        assertEquals(1, gridBoxOf(HudZone.READOUT, 0, 0, 300, 200, reservedRows = 0, reservedCols = 0, rowGrowth = 0, colGrowth = 0).rows)
         // 存储层硬上限都从既有真源推出来：竖 Dock 两列（hudRowGroups 的并排分支最多两颗）、
         // 读数块三列（hudPerRowFor 的最高档），行数 = 条目总数
         assertEquals(2, gridColsCapOf(HudZone.LEFT))
@@ -496,10 +644,10 @@ class HudLayoutGridTest {
         // ① 编辑页的钳制带：带高 300dp ÷ 档 30dp = 10 档，但默认表只预留 4 档 ⇒ 落点最多第 3 档
         val box = gridBoxOf(
             HudZone.LEFT, pitchXDp = 34, pitchYDp = 30, bandHeightDp = 300, roomWidthDp = 0,
-            reservedRows = 4, reservedCols = 0
+            reservedRows = 4, reservedCols = 0, rowGrowth = 0, colGrowth = 0
         )
         assertEquals(2, box.cols)
-        assertEquals("预留 4 档 ⇒ 带内 10 档也只许用 4 档（拖不出预留）", 4, box.rows)
+        assertEquals("预留 4 档 ⇒ 带内 10 档也只许用 4 档（growth 传 0 = 拖不出预留）", 4, box.rows)
         assertEquals(GridCell(0, 3), clampCellToBox(GridCell(0, 99), box, contentHeightPx = 0, rowPitchPx = 30))
         // ② 坏数据那一档（手改 prefs / 预留之后又藏了一颗）：格网**会长高**，但别人的左上角照旧
         val table = HudLayoutTable.default()
@@ -608,7 +756,7 @@ class HudLayoutGridTest {
             2,
             gridBoxOf(
                 HudZone.READOUT, pitchXDp = 90, pitchYDp = 36, bandHeightDp = 300, roomWidthDp = 500,
-                reservedRows = 0, reservedCols = 2
+                reservedRows = 0, reservedCols = 2, rowGrowth = 0, colGrowth = 0
             ).cols
         )
         // 贴右缘生长的只有右 Dock（顶栏/底栏不上网格，读数块要保持"快门 | 帧率"那一对的左右序）
@@ -621,13 +769,14 @@ class HudLayoutGridTest {
     fun dropInsideTheSourceBandNeverReAssignsTheZone() {
         // 横屏那一份实测带：360 − 顶栏 44 − 底栏 72 ⇒ 右 Dock 的带是 44..288
         val land = HudAreaDp(width = 766, height = 360, topAvoidDp = 44, bottomAvoidDp = 72)
-        assertEquals(44, zoneBandYRange(HudZone.RIGHT, land).first)
-        assertEquals(288, zoneBandYRange(HudZone.RIGHT, land).last)
-        assertEquals("顶栏与底栏吃整条安全区", 0..360, zoneBandYRange(HudZone.TOP, land))
+        assertEquals(44, zoneBandYRange(HudZone.RIGHT, land, topZoneMinYDp = 0).first)
+        assertEquals(288, zoneBandYRange(HudZone.RIGHT, land, topZoneMinYDp = 0).last)
+        // 顶栏与底栏吃整条安全区（topZoneMinYDp = 0 那一档 = 改前；本批新增的 TOP 下限在 HudLayoutClampTest 打）
+        assertEquals(0..360, zoneBandYRange(HudZone.TOP, land, topZoneMinYDp = 0))
         // 带高不够（极矮窗口）时退成整条安全区，不许给空区间
-        assertEquals(44..44, zoneBandYRange(HudZone.RIGHT, HudAreaDp(766, 50, 44, 72)))
+        assertEquals(44..44, zoneBandYRange(HudZone.RIGHT, HudAreaDp(766, 50, 44, 72), topZoneMinYDp = 0))
         val rightCard = HudRectDp(660, 60, 758, 260)
-        val band = zoneBandYRange(HudZone.RIGHT, land)
+        val band = zoneBandYRange(HudZone.RIGHT, land, topZoneMinYDp = 0)
         // ① 真机那条：指针拖出底板矩形（y=270 > 260）却还在带里 ⇒ 归属**不许**改给读数块
         assertEquals(
             HudZone.RIGHT,

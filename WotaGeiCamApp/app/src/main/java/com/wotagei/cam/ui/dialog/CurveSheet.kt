@@ -1,8 +1,6 @@
 package com.wotagei.cam.ui.dialog
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -30,7 +28,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
@@ -188,9 +185,11 @@ fun CurveSheet(
             style = MaterialTheme.typography.labelSmall,
             color = WotaColor.textLo
         )
+        // 三枚文字动作保持横排（间距对齐 hw_button 的 12vp）：它们是面板内容工具行、
+        // 不是弹窗按钮操作区，竖排会吃掉约 90dp 竖向空间——本面板竖向预算本就按 90% 短边封顶
         Row(
             Modifier.fillMaxWidth().padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SmallTextButton(stringResource(R.string.cam_curve_del_point)) {
                 if (selected > 0 && selected < points.size - 1) {
@@ -214,17 +213,18 @@ fun CurveSheet(
 }
 
 /**
- * 画布边长：按屏高让位。横屏 360dp 里标题+两行档位+计数+按钮约吃掉 190dp，
- * 再按原来的 230dp 方块就会把内容顶出屏幕、而画布自己又吞掉滚动手势；
- * 竖屏空间富余，仍取上限 230dp。
+ * 画布边长：按「面板最大高 − 周边 chrome」让位。⑧ 半模态纪律后最大高=短边 90%（本机 324dp），
+ * 旧的「按整屏算」口径（竖屏 800−190=230）会让画布把计数与动作行顶出面板；
+ * 收进同一份预算后横竖屏都取下限档附近，超出预算的内容交给面板自身滚动。
  */
 @Composable
 private fun canvasSide(): Dp {
-    val screenH = LocalConfiguration.current.screenHeightDp.dp
-    return (screenH - PanelChromeH).coerceIn(MinCanvasH, MaxCanvasH)
+    val budget = sheetMaxHeight() - PanelChromeH
+    return budget.coerceIn(MinCanvasH, MaxCanvasH)
 }
 
-private val PanelChromeH = 190.dp
+/** 面板内画布以外的竖向开销（标题+两行档位+计数+动作行+内边距 12dp）的估算值 */
+private val PanelChromeH = 198.dp
 private val MinCanvasH = 120.dp
 private val MaxCanvasH = 230.dp
 
@@ -278,8 +278,9 @@ private fun CurveCanvas(
         val from = shown.value
         FloatArray(target.size) { from[it] + (target[it] - from[it]) * t }
     } else target
-    val strokeColor by animateColorAsState(color.copy(alpha = if (enabled) 1f else 0.4f), tween(motion.durationMs))
-    val dotColor by animateColorAsState(color, tween(motion.durationMs))
+    // #81 第 1 条：颜色即时切换（禁动画颜色）；灰化程度由下面那条 dim（alpha，允许档）承担
+    val strokeColor = color.copy(alpha = if (enabled) 1f else 0.4f)
+    val dotColor = color
     val dim by animateFloatAsState(if (enabled) 1f else 0.35f, motion.float)
     Canvas(modifier) {
         val w = size.width

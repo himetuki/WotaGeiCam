@@ -14,6 +14,17 @@
     <string name="cam_state_high_fps">该帧率超出本机能力，已退到可用上限</string>
     <string name="cam_direct_no_effect">不使用 GPU 时斑马纹与峰值对焦不生效</string>
 
+    <!-- 录制页分屏（用户第 3 项的前半：分屏控件 + 左侧压缩 + 右侧模式外壳） -->
+    <string name="cam_split">分屏</string>
+    <string name="cam_split_exit">退出分屏</string>
+    <string name="cam_split_lens">另镜头录制</string>
+    <string name="cam_split_compare">实时对比播放</string>
+    <!-- 第 3 项后半：右侧对比播放器；播放/暂停复用 player_play_pause，选片失败复用 compare_pick_failed -->
+    <string name="cam_split_pick">选择视频</string>
+    <!-- 双摄并发探测为空时挂在「另镜头录制」项下；可用态本次仍占位，点击只给下一批提示 -->
+    <string name="cam_split_lens_unsupported">本机不支持双摄并发</string>
+    <string name="cam_split_lens_soon">下一批实现</string>
+
     <!-- 参数滑杆组件 -->
     <string name="cam_switch_input_mode">切换档位与滑杆输入</string>
 
@@ -167,7 +178,9 @@
     <string name="hud_edit_undo">撤销</string>
     <string name="hud_edit_undo_done">已撤销，恢复前那一份位置回来了</string>
     <!-- #74：容器内改成固定格子。文案必须说清"拖一颗不动另一颗"，否则用户还会按旧模型预期 -->
-    <string name="hud_edit_note">按住容器拖 = 整枚挪位（底栏只认上下两栏，横向永远跟着可视区居中）；按住某颗控件拖 = 吸附到最近的空格，**只搬这一颗，别颗一律不动**（左/右竖 Dock 与读数块）。顶栏与底栏里仍按顺序排。空格子就空着，重叠不禁止只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
+    <!-- 10-01 夜：同容器拖到**已被占**的格子从"跳到最近空格"改成**与那格对调**，
+         这一句必须跟着改——留着旧说法会让用户以为拖不动是 bug（行为与文案不一致比缺文案更贵） -->
+    <string name="hud_edit_note">按住容器拖 = 整枚挪位（底栏只认上下两栏，横向永远跟着可视区居中）；按住某颗控件拖 = 吸附到最近的格子，**落到已被占的格子就与那格对调**，别颗一律不动（左/右竖 Dock 与读数块）。顶栏与底栏里仍按顺序排。空格子就空着，重叠不禁止只提示。这页点不到控件本身（要改参数回录制页）；返回时不保存就丢弃未保存的改动。</string>
     <string name="hud_edit_overlap_pair">%1$s 与 %2$s 的外接矩形叠在一起了（不拦，只是提示会叠字）</string>
     <!-- 底栏那枚 Dock 只持久化 y：横向永远由安全区居中决定（快门中心＝可视窗口中心）。横拖一把之后必须给话，不能默默吞掉 -->
     <string name="hud_edit_bottom_x_locked">底栏只认上下两栏：横向永远跟着可视区居中，所以刚才那一下横拖没有存进位置表</string>

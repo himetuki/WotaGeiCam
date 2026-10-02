@@ -3,6 +3,7 @@ package com.wotagei.cam.ui.design
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
@@ -49,8 +51,6 @@ import androidx.compose.ui.unit.sp
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.ui.HudFrost
 import com.wotagei.cam.ui.anim.LocalMotion
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 
 /**
  * 参考图语言里的四类基础控件：胶囊 chip、圆形图标钮、标签在上数值在下的参数卡、白描边角标。
@@ -61,12 +61,15 @@ import androidx.compose.animation.core.tween
  * 常驻控件卡的通用底：74.9% 不透明暖黑（alpha 0xBF，透光只有 25.1%）+ 极淡高光边。
  * 分层靠透明度、不靠投影；描边是那条 1dp 高光边，不是"靠描边分层"（观感规范见 docs/plan/11）。
  *
+ * 默认圆角是**件位档大卡 24dp**（`WotaShape.card`，design-spec §4.2 `ohos_id_corner_radius_card`，
+ * Top 8 #2：相册卡/弹窗/半模态底板这一类）；要别的圆角照旧显式传。
+ *
  * ⚠ **这一条只描述"霜没在屏幕上时"的样子**。取景 HUD 的底板走 [#84 步骤 2 的毛玻璃][wotaHudCard]：
  * 霜真在屏幕上时这一层 `background` 让位（74.9% 不透明的 fill 会把下面的霜全盖死，等于没做），
  * 只留描边、选中高亮与内容——那就是本函数去掉中间那一环之后的样子。
  * 纸面页（设置/媒体库/播放器/弹窗）永远走这里，一个像素都不受霜影响。
  */
-fun Modifier.wotaCard(shape: androidx.compose.ui.graphics.Shape = WotaShape.card): Modifier =
+fun Modifier.wotaCard(shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(WotaShape.card)): Modifier =
     clip(shape).background(WotaColor.hudScrim).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
 
 /**
@@ -105,7 +108,7 @@ val hudFrostInherit: HudFrostCard = HudFrostCard(asPlate = false, radiusPx = 0f,
  */
 @Composable
 fun Modifier.wotaHudCard(
-    shape: androidx.compose.ui.graphics.Shape = WotaShape.card,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(WotaShape.card),
     frost: HudFrostCard? = null
 ): Modifier {
     if (frost == null || !HudFrost.live) return this.wotaCard(shape)
@@ -167,7 +170,8 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard): Modifier {
  * 胶囊的**两档内剂量**（任务 #70 B）。做成"档"而不是直接改 [WotaChip] 的理由写在字段注释里：
  * 全局档是几处宽度账的输入，改它等于顺手改了别处的算式。
  *
- * - [horizontalPad]：Row 的左右内边距（上下两档共用 6dp，本任务只收宽度）；
+ * - [horizontalPad]：Row 的左右内边距（上下两档共用 5dp——HDS 件高 28vp = 18sp 行高 + 2×5dp，
+ *   component-map Top 8 #3；2026-10-02 从 6dp 收了 1dp，高从 30 变 28，宽度账不受影响）；
  * - [minLabelEm]：主标签的最短宽度下限，单位是「几个汉字」（13sp × 该系数 × fontScale，走 sp 所以跟着字体缩放涨）。
  *   下限的作用见 [WotaChip] 原注释：两字标签别配成长胶囊。
  */
@@ -195,9 +199,32 @@ enum class WotaChipTier(val horizontalPad: Dp, val minLabelEm: Float) {
 }
 
 /**
+ * Chip 的件位形（圆角 18dp = `WotaShape.chip`，design-spec §4.2 `ohos_id_corner_radius_tips_instant_tip`）
+ * 与菜单弹层的件位形（20dp = `WotaShape.menu`）。放文件级省得每颗胶囊都 new 一枚。
+ * 28dp 高的件上 18dp 半径会被裁成短边一半（14dp），观感仍近全圆——HDS 就是这个口径（design-spec §4.4）。
+ */
+private val chipShape = RoundedCornerShape(WotaShape.chip)
+private val menuShape = RoundedCornerShape(WotaShape.menu)
+
+/**
  * 胶囊 chip：参考图顶栏「广角 13mm / 1080p 25p / 96.5G 3h20m」那一排。**全局档**，见 [WotaChipTier.Standard]。
- * [selected] 换成 accent 实底；[valueColor] 给「剩余空间不足」这类告警读数；[dot] 是录制中的红点。
+ * [selected] 换成 [WotaColor.accentSurface] 实底 + 白字（13sp 小字承载面，见该令牌注）；
+ * [valueColor] 给「剩余空间不足」这类告警读数；[dot] 是录制中的红点。
  * [onClick] 传 null 就是**纯读数**（不响应点击、无按压形变）：状态类胶囊不该假装是入口。
+ *
+ * 视觉规格 2026-10-02 对齐 HDS Chip（component-map Top 8 #3，design-spec §4.2/§5.2）：
+ * 高 28dp、常态底 [WotaColor.chipBg]（#0C182431 原样照用）、激活 = 强调底 + 白字、圆角 [chipShape]；
+ * 行为/语义（[enabled] 通道、[onClick]、命中区）一律没动。
+ *
+ * [enabled] 是 2026-10-02 给既有组件**补的通道**（真机事故：灰显档只调暗了文字、点上去照样回调，
+ * 见 [com.wotagei.cam.ui.dialog.shutterItems] 的口径注释）：它只把点击真正关掉
+ * （`clickable(enabled=false)`，无障碍树会如实报 `enabled=false`——这正是灰显档真机验收的判据），
+ * **不新造视觉**——灰显观感仍由调用方用 `valueColor = textLo` 那套表达。
+ * 默认 `true` 是有意的：这是给既有组件补通道，不是新增必传协作件——缺省值就是所有既有调用点的
+ * 现状（一行都不用跟着改），而"调用方该传表达式却漏传"这种错不因必传而拦得住，所以不适用
+ * 「就近弹窗锚点无默认值必传」那条纪律。它与 HudLayer.gatedClick 那条「刻意不用 clickable(enabled=false)」
+ * 也不冲突：那里断的是命中区（#73 命中权交接，节点要整个让位），这里保的是灰显节点的 Disabled 语义
+ * （节点必须留在无障碍树里、只是报 disabled）——两种刻意不同，别"统一"成一种。
  *
  * [frost] 只有取景 HUD 会传（#84 步骤 2）：非 null 且霜真在屏幕上时，那层纯色 fill 让位给底下的玻璃。
  * 纸面页与弹窗一律留空 ⇒ 这个默认值就是"观感与接霜前逐字相同"的那道门，别顺手在别处传。
@@ -212,9 +239,10 @@ fun WotaChip(
     secondary: String? = null,
     valueColor: Color? = null,
     dot: Color? = null,
+    enabled: Boolean = true,
     frost: HudFrostCard? = null
 ) = WotaChipImpl(
-    label, selected, modifier, onClick, onLongClick, secondary, valueColor, dot, WotaChipTier.Standard, frost
+    label, selected, modifier, onClick, onLongClick, secondary, valueColor, dot, WotaChipTier.Standard, enabled, frost
 )
 
 /**
@@ -233,9 +261,10 @@ fun WotaDockChip(
     onLongClick: (() -> Unit)? = null,
     secondary: String? = null,
     valueColor: Color? = null,
+    enabled: Boolean = true,
     frost: HudFrostCard? = null
 ) = WotaChipImpl(
-    label, selected, modifier, onClick, onLongClick, secondary, valueColor, null, WotaChipTier.Dock, frost
+    label, selected, modifier, onClick, onLongClick, secondary, valueColor, null, WotaChipTier.Dock, enabled, frost
 )
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -251,6 +280,7 @@ private fun WotaChipImpl(
     valueColor: Color?,
     dot: Color?,
     tier: WotaChipTier,
+    enabled: Boolean,
     frost: HudFrostCard?
 ) {
     val motion = LocalMotion.current
@@ -258,30 +288,27 @@ private fun WotaChipImpl(
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
     /**
-     * 选中底色与文字色都走动画档。
+     * 选中底色与文字色**即时切换**（#81 第 1 条定版：只动画 alpha 与 scale，禁动画颜色）。
+     * 原来这里走 `animateColorAsState` 渐变（理由是"硬切读起来像卡了一下"）；定版之后两枚值
+     * **同一帧**一起换，渐变版最怕的"底还在渐变、字先跳成 onAccent"那类分叉反而结构性不存在。
      *
-     * `WotaChip` 是顶栏读数、曲线面板的通道/色调档、各胶囊弹窗的选项共用的控件，
-     * 原来选中态是 `if (selected) then(background(accent))` 的硬切：切通道时底色和字色同一帧跳掉。
-     * 文字色必须与底色用**同一条 spec**，否则底色还在渐变、字已经先变成 onAccent。
+     * 底色对齐 HDS Chip（component-map Top 8 #3）：常态 = [WotaColor.chipBg]（#0C182431 薄罩，原样照用），
+     * 选中 = [WotaColor.accentSurface]——13sp 白字要过 AA 正文，白字对 #007DFF 只有 3.91:1，
+     * 对旧蓝 5.55:1（scripts/contrast-audit.py 实测），所以承载小字的选中面不走 [WotaColor.accent]。
      */
-    val colorSpec = tween<Color>(motion.durationMs)
-    val fill by animateColorAsState(
-        if (selected) WotaColor.accent else Color.Transparent,
-        colorSpec
-    )
-    val animatedLabelColor by animateColorAsState(
-        if (selected) WotaColor.onAccent else WotaColor.textHi,
-        colorSpec
-    )
+    val fill = if (selected) WotaColor.accentSurface else WotaColor.chipBg
+    val labelColor = if (selected) WotaColor.onAccent else WotaColor.textHi
     val clickable = if (onClick == null) modifier else modifier
-        .clip(WotaShape.pill)
+        .clip(chipShape)
         .then(
             // 长按开面板、点按循环取值是取景器参数胶囊的一对动作（鸿蒙化第 2 条），
             // 共用同一枚 interactionSource，按压缩放才不会只认其中一个手势
+            // enabled 走 Compose 的 Disabled 语义：点击/长按都不回调，无障碍树如实报 enabled=false。
+            // 灰显视觉不在这里做——调用方用 valueColor=textLo 表达（见 WotaChip 的 [enabled] 注）
             if (onLongClick == null) Modifier.clickable(
-                interactionSource = interaction, indication = null, onClick = onClick
+                interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick
             ) else Modifier.combinedClickable(
-                interactionSource = interaction, indication = null,
+                interactionSource = interaction, indication = null, enabled = enabled,
                 onClick = onClick, onLongClick = onLongClick
             )
         )
@@ -289,13 +316,15 @@ private fun WotaChipImpl(
         clickable
             .graphicsLayer { scaleX = scale; scaleY = scale }
             // 带 secondary 标签（textLo 那级）的胶囊**不接霜**：14 号计划 §二 的审计表里
-            // textLo 在 0xA6~0xB3 这整个透光区间都不合格（最低也只有 2.80 < 4.5），
-            // 而"给它自己一层更实的底衬"与"换成 textHi"都超出本轮批准范围（那条欠账明令不许顺手修）。
-            // 所以这里把它摘成 null，让它继续用 74.9% 不透明的实底——档位区间是死的，不是保守。
-            .wotaHudCard(WotaShape.pill, if (secondary != null) null else frost)
+            // textLo 在 0xA6~0xB3 这整个透光区间都不合格（worst case 2.52 < 4.5；换成白基 40% 后
+            // 实底上也只有 3.83，仍只够辅助文本档），所以承载它的件只准用 74.9% 不透明的实底。
+            .wotaHudCard(chipShape, if (secondary != null) null else frost)
             .background(fill)
-            .clip(WotaShape.pill)
-            .padding(horizontal = tier.horizontalPad, vertical = 6.dp),
+            .clip(chipShape)
+            // 高 28dp = HDS 件高档（ohos_id_piece_height，component-map Top 8 #3）：
+            // 18sp 行高 + 2×5dp 内边距正好 28，heightIn 兜住更小字体缩放的情形，随字体放大照常长高。
+            .heightIn(min = 28.dp)
+            .padding(horizontal = tier.horizontalPad, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
@@ -310,7 +339,7 @@ private fun WotaChipImpl(
                 min = (WotaType.chip.fontSize.value * tier.minLabelEm * LocalDensity.current.fontScale).dp
             ),
             style = WotaType.chip,
-            color = valueColor ?: animatedLabelColor,
+            color = valueColor ?: labelColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -411,6 +440,7 @@ data class WotaMenuEntry(val label: String, val danger: Boolean = false, val onC
  * 紧凑菜单弹层。不用 Material3 `AlertDialog`：它的 24dp 内边距 + 固定行距会把 7 项撑到超出屏幕，
  * 真机上「分类标签/重命名/彻底删除」三项直接被裁掉看不见。
  * 这里行高固定 34dp、超高滚动、点外关闭，弹层本身用近实底保证压在画面上可读。
+ * 圆角走 HDS 菜单件位 20dp（`WotaShape.menu`，design-spec §4.2 `ohos_id_corner_radius_menu`；原 18dp）。
  */
 @Composable
 fun WotaMenuPopup(
@@ -441,9 +471,9 @@ fun WotaMenuPopup(
                 }
                 .padding(horizontal = 10.dp, vertical = 10.dp)
                 .widthIn(max = 300.dp)
-                .clip(WotaShape.large)
+                .clip(menuShape)
                 .background(WotaColor.surface.copy(alpha = 0.97f))
-                .border(1.dp, WotaColor.acrylicBorder, WotaShape.large)
+                .border(1.dp, WotaColor.acrylicBorder, menuShape)
                 .padding(vertical = 4.dp)
         ) {
             if (title != null) {

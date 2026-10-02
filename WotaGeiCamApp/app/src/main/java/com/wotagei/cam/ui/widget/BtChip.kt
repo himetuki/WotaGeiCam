@@ -48,13 +48,17 @@ import com.wotagei.cam.ui.theme.WotaWarn
 @Composable
 fun BtChip(connected: Boolean, volumePct: Int, modifier: Modifier, card: Boolean = true, onClick: () -> Unit) {
     val accent = if (connected) WotaAccent else WotaTextDim
-    Column(
+    // 10-01 第 5 项「右 Dock 显示更全」：原为竖排两行（图标 / 点+百分比），真机实测高 ≈2 档；
+    // 蓝牙断开时音量表（VOLUME）不在场、「地平仪+音量表」默认配对自然失效，内容挤到第 8 档
+    // 把「防抖」顶出带外。改横排单行（图标+点+百分比）后收成 1 档，与变焦/对焦那排横排 chip
+    // 观感统一；内容 8 档→7 档，横屏任何字体缩放下都留在带内（真机 logcat 探针实测，见 plan/16）。
+    Row(
         modifier
             .then(if (card) Modifier.wotaCard(WotaShape.medium) else Modifier)
             .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 5.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(2.dp)
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Icon(
             imageVector = if (connected) Icons.Filled.BluetoothConnected else Icons.Filled.BluetoothDisabled,
@@ -62,25 +66,20 @@ fun BtChip(connected: Boolean, volumePct: Int, modifier: Modifier, card: Boolean
                 if (connected) R.string.bt_chip_connected else R.string.bt_chip_disconnected
             ),
             tint = accent,
-            modifier = Modifier.size(16.dp)
+            modifier = Modifier.size(15.dp)
         )
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            // 连接态点：主色 = 已连上 A2DP，橙色 = 未连接
-            Box(
-                Modifier
-                    .size(5.dp)
-                    .clip(CircleShape)
-                    .background(if (connected) WotaAccent else WotaWarn)
-            )
-            Text(
-                stringResource(R.string.bt_volume_value, volumePct),
-                style = MonoStyle.copy(fontSize = 10.sp),
-                color = if (connected) WotaText else WotaTextDim
-            )
-        }
+        // 连接态点：主色 = 已连上 A2DP，橙色 = 未连接
+        Box(
+            Modifier
+                .size(5.dp)
+                .clip(CircleShape)
+                .background(if (connected) WotaAccent else WotaWarn)
+        )
+        Text(
+            stringResource(R.string.bt_volume_value, volumePct),
+            style = MonoStyle.copy(fontSize = 10.sp),
+            color = if (connected) WotaText else WotaTextDim
+        )
     }
 }
 

@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 水平仪 / 俯仰仪（camera/SensorLevel.kt、ui/widget/AttitudeMeter.kt）
-         角度数字已随六项第 2 条取消，只剩「是否已回正」这一行异步状态文案 -->
+         2026-10-01 用户指令恢复数值模式（可点击切换）：AttitudeCard 点击在
+         人工地平仪气泡与两行角度数字间切换，两种模式都保留「已回正/偏斜中」状态行 -->
     <string name="level_state_level">已回正</string>
     <string name="level_state_tilt">偏斜中</string>
+    <string name="level_tag_pitch">俯仰</string>
+    <string name="level_tag_roll">倾角</string>
+    <!-- 带符号、宽 5、一位小数：等宽字体下两行数值右缘对齐；定义域 ±90 内最宽 +90.0 恰 5 字符 -->
+    <string name="level_angle_value">%1$+5.1f°</string>
+    <string name="level_mode_toggle">切换图形/数值显示</string>
 </resources>

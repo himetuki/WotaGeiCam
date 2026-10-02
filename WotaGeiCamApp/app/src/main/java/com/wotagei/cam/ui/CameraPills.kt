@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntRect
@@ -28,6 +29,7 @@ import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.core.buildVideoSizeTable
+import com.wotagei.cam.core.screenAspectOf
 import com.wotagei.cam.core.enumerateLenses
 import com.wotagei.cam.core.hFovOf
 import com.wotagei.cam.core.pickFpsRange
@@ -113,7 +115,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.EV to "HudLayer.HudEntryItem(HudItem.EV) → design.WotaChip(modifier)",
     PillKey.WB to "HudLayer.HudEntryItem(HudItem.WB) → design.WotaChip(modifier)",
     PillKey.FPS to "HudLayer.HudEntryItem(HudItem.FPS) → design.WotaChip(modifier)",
-    PillKey.BITRATE to "HudLayer.HudEntryItem(HudItem.BITRATE) → design.WotaChip(modifier)"
+    PillKey.BITRATE to "CameraScreen.BOTTOM 带 BITRATE chip（HudZoneBox 之后的 WotaChip + pillAnchorReport）→ 10-01 布局批：码率移出 READOUT 网格、Dock 左侧固定读数"
 )
 
 /**
@@ -188,7 +190,13 @@ private fun SizePill(
 ) {
     val size by params.size.observed()
     val fps by params.fps.observed()
-    val table = remember(ability) { ability?.let { buildVideoSizeTable(it) } }
+    // 全屏档（10-01 指令）的机型无关推导依据：当前窗口的屏幕比例（运行时读，不写死任何机型）；
+    // 比例变了（转屏）要重建表——键里带上这两个 dp 值
+    val cfg = LocalConfiguration.current
+    val screenAspect = remember(cfg.screenWidthDp, cfg.screenHeightDp) {
+        screenAspectOf(cfg.screenWidthDp, cfg.screenHeightDp)
+    }
+    val table = remember(ability, screenAspect) { ability?.let { buildVideoSizeTable(it, screenAspect = screenAspect) } }
     val options = table?.options.orEmpty()
     val selected = options.indexOfFirst { sizeCloseTo(it.size, size) }
     val bounds = ability?.videoBounds()
@@ -275,13 +283,30 @@ private fun fpsOptions(ability: CameraAbility?, size: Size, highSpeed: Boolean):
 private fun ShutterPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?, onClose: () -> Unit) {
     val aeMode by params.aeMode.observed()
     val shutter by params.shutter.observed()
+    val size by params.size.observed()
+    val fps by params.fps.observed()
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_shutter)) {
         AeModeRow(params, ability)
         if (aeMode == AeMode.MANUAL) {
+            // 档位可选性吃「实际生效的 fps 上界」= pickFpsRange 的 hi，与下发/回写同一个帧周期口径；
+            // 取不到（该档 fps 不可用）时退回用户档位，与 WotaParams.applyExposure 的退回一致。
+            val ranges = ability?.fpsRangesFor(size, fps.value > WotaTiers.HIGH_SPEED_FPS) ?: emptyList()
+            val fpsHi = pickFpsRange(ranges, fps.value)?.hi ?: fps.value
             PillChoices(
-                options = shutterItems(shutter).map { PillOption(it.value, it.label, it.supported) },
+                // 强制档（1/24、1/25）：设备曝光范围没有也照样可选，标签上打 ※ 与帧率侧一致
+                options = shutterItems(ability?.exposureNs, fpsHi, stringResource(R.string.approx_mark))
+                    .map { PillOption(it.value, it.label, it.supported) },
                 selected = shutter.value.toInt(),
-                onPick = { params.shutter.value = shutter.copy(value = it.value.toLong()) }
+                onPick = { opt ->
+                    // 灰显档必须挡在参数总线之外。为什么必须查 enabled：真机实测（2026-10-02 02:29 包），
+                    // 本机 24※（24fps 判非精确档、实际 fps 上界 30）下点 1/24——此前这条回调是全工程
+                    // 唯一不查 enabled 就直写总线的（对照 SizePill/FpsPill），引擎 5ms 合并后
+                    // clampShutterToFrame 按帧周期把 41,666,666 钳成 33,333,333，"选了 1/24 当场变 1/30"。
+                    // 视觉灰显（valueColor→textLo）没有执行力；chip 的 clickable(enabled=false) 是第一道闸，
+                    // 这里的守卫是第二道（对照 SizePill:target.supported / FpsPill:!opt.enabled 同一条纪律）。
+                    if (!opt.enabled) return@PillChoices
+                    params.shutter.value = shutter.copy(value = opt.value.toLong())
+                }
             )
             val lo = shutter.range?.start?.toLong()
             val hi = shutter.range?.endInclusive?.toLong()

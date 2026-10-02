@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
@@ -200,7 +201,7 @@ internal val BottomBarSpaceFallback = WotaHit.recordTouch + DockInnerPadV * 2 + 
 internal val TopBarSpace = 44.dp
 
 /**
- * 贴边那两枚自由边的**设计留白**（8dp 令牌，不是避让常量）：顶栏 `padding(start)`、左竖 Dock
+ * 贴边那两枚自由边的**设计留白**（8dp 令牌，不是避让常量）：顶栏 `padding(start)` + `padding(end)`、左竖 Dock
  * `padding(start)`、右竖 Dock 与右下读数块 `padding(end)` 用的都是它，左右两边因此对称。
  * 系统避让（挖孔 / 系统栏）不在这里，由调用方那层 `safeDrawingPadding()` 承担（见文件头那条说明）。
  */
@@ -589,7 +590,8 @@ private val HUD_AUTO_ITEMS = setOf(HudItem.SHUTTER, HudItem.ISO, HudItem.EV, Hud
  * - [HudZone.READOUT] → [WotaChipTier.Standard]：**也必须留全局档**。
  *   `hudPerRowFor` 里「一颗读数 = 39 + 24 + 5 + 22 = 90dp」那串常数（`ChipPaddingDp = 24`）
  *   量的就是全局档，换档等于让换行算式与真实块宽分叉，那是 §58/§73 那一族"按估宽排版然后裁字"的成因；
- * - [HudZone.TOP] → 全局档：顶栏容量段那笔窄屏阈值（272/242）按它量的。
+ * - [HudZone.TOP] → 全局档：顶栏容量段三档取位的估宽（13sp 文本账）按它量的；
+ *   具体阈值 10-01 起是调用方实测文案宽（旧 272/242 常量已删）。
  *
  * 姿态仪、音量表、蓝牙那三颗自绘件不走 [WotaChip]，所以这条裁决对它们没有作用（也就不参与这笔宽度账）。
  */
@@ -999,7 +1001,7 @@ fun HudTopZone(order: List<HudEntry>, ctx: HudCtx, modifier: Modifier = Modifier
                     if (index > 0) {
                         Box(Modifier.width(1.dp).height(12.dp).background(WotaColor.outline))
                     }
-                    // 顶栏恒走全局档（容量段那笔窄屏阈值 272/242 按它量的），但档位仍只有一处裁决点
+                    // 顶栏恒走全局档（估宽账按它量；阈值已是实测文案宽，旧 272/242 已删），档位仍只有一处裁决点
                     // clicksAccepted 恒 true：吸收态是底栏 Dock 独有的（#73），顶栏那颗不飞进录制键
                     HudEntryItem(
                         entry, ctx,
@@ -1153,8 +1155,10 @@ private fun HudEntryGrid(
  *   ⇒ 底板 120dp，把用户要的"更窄"做反了 26dp。要再窄只能动这两颗自绘件本身的尺寸（下一轮的事）。
  *
  * 底板只在至少有一颗要画时才组合，否则全关掉后会留一枚空壳。
- * 底板圆角用 [WotaShape.card] 而不是 pill（S3-4）：`percent = 50` 的半径取短边一半，
- * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 的 card 不咬内容。
+ * 底板圆角用 [WotaShape.radiusCard]（14dp）而不是 pill（S3-4）：`percent = 50` 的半径取短边一半，
+ * 而 `wotaCard` 第一环就是 clip，会把首尾那颗卡片的外角各削掉一截；14dp 不咬内容。
+ * （`WotaShape.card` 自 Top 8 #2 起是 24dp 的 Dp 件位值、不再是 Shape，HUD 小卡不接那一档，
+ * 所以这里显式包 `RoundedCornerShape(radiusCard)`。）
  * 姿态仪与蓝牙这两颗在 Dock 内不再自绘底（`card = false`），免得底板 + 内层卡两层 hudScrim 叠成"卡中卡"。
  *
  * ## 纵向账（#75：格距与住户无关 + 高条目吃行跨度）
@@ -1212,10 +1216,22 @@ fun HudDockZone(
     // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）
     val plateRadiusPx = with(LocalDensity.current) { WotaShape.radiusCard.toPx() }
     val plate = remember(plateRadiusPx) { hudFrostPlate(plateRadiusPx, HudInkLevel.PRIMARY) }
+    val motion = LocalMotion.current
     CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
         Column(
             modifier
-                .wotaHudCard(WotaShape.card, plate)
+                // HUD 常驻小卡不接 24dp 件位大卡档（§4.4 建议 2），仍走 radiusCard 14dp——
+                // 与下面 GL 板的 plateRadiusPx 同一枚令牌，两处不会分叉
+                .wotaHudCard(RoundedCornerShape(WotaShape.radiusCard), plate)
+                // 10-01 布局批：Dock 随内部控件数量平滑变化宽高（用户指令；Motion 例外 #2，
+                // 规格见 MotionSpec.intSize，PLAIN 档同样走 scaled、reduced 时 0 时长直达）。
+                // 位置必须排在 wotaHudCard **之后**（链上更内侧）：wotaHudCard 第一环是 clip、
+                // 它是外层节点，画的是内层上报的尺寸——animateContentSize 在它内侧，底板就跟着
+                // 动画后的尺寸走，clip 也裁在动画尺寸上，内容不会长出底板外；放它前面则底板直接
+                // 跳到终尺寸、只有外层盒在动，观感断裂。放 heightIn 之前＝"先按带高钳住内容、
+                // 再对钳完的实测尺寸做动画"，次序不能再换。编辑页复用同一容器，不用另改；
+                // READOUT/底栏/TOP 用户未点名，不加。
+                .animateContentSize(motion.intSize)
                 .heightIn(max = bandHeightDp.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(WotaSpace.xs),
@@ -1231,6 +1247,11 @@ fun HudDockZone(
 
 /**
  * 右下常驻读数块（[HudZone.READOUT]，六项第 4 条搬到录制键右侧）。
+ *
+ * **10-01 布局批：码率已挪 Dock 外同带**（录制键控件组左侧，录制页在 CameraScreen 单独渲染那颗
+ * chip），此处只剩快门/帧率一行。用户要的"快门/帧率下移一行（落到码率原来的那一行）"不需要任何
+ * "下移"代码：本容器 BottomEnd 锚定 + 包内容，去掉码率后整块变矮、底缘（readoutPlan.bottomAvoidDp
+ * 那一档）不变，剩下的那一行自然落在原码率行的高度。
  *
  * **#70 A：它与底栏 Dock 是"同一条横带上的两个落位"，不是一上一下**（用户 2026-09-29 12:20 定版：
  * 「读数缩到一行两颗，横屏永远同行」——横屏 [com.wotagei.cam.ui.ReadoutRowPlan.sharesDockRow] 恒真，
@@ -1268,7 +1289,12 @@ fun HudReadoutZone(
     defaultCells: Map<HudEntry, GridCell>,
     modifier: Modifier = Modifier
 ) {
-    if (items.isEmpty() && !ctx.aeLocked) return
+    // 10-01 布局批：码率不再是 READOUT 网格的一员——改为 Dock 外固定读数（录制页在 CameraScreen
+    // 单独渲染），不进网格/编辑页。录制页已在 visibleEntries 里滤掉 BITRATE，这行对它是空操作；
+    // 编辑页自带 visibleEntries（HudLayoutEditor 那份）不走那层滤网，两页共用的容器在这里再挡一道，
+    // 两页的 READOUT 才一致。旧 hud_layout 表串不迁移：decode 照旧，表里的 BITRATE 槽位记录自然不渲染。
+    val gridItems = items.filterNot { it.entry.item == HudItem.BITRATE }
+    if (gridItems.isEmpty() && !ctx.aeLocked) return
     val motion = LocalMotion.current
     // #75：读数块的行距档是 [HudRowGapDp]（与竖 Dock 的 WotaSpace.xs 不同一档），所以格距按容器现算。
     // 这一档 100% 时 (18+12+6)×2 = 72px，与 #74 那版"实测最高那颗 60px + 行距 12px"逐字同值——
@@ -1282,9 +1308,9 @@ fun HudReadoutZone(
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(HudRowGapDp.dp)
     ) {
-        if (items.isNotEmpty()) {
+        if (gridItems.isNotEmpty()) {
             // 读数胶囊恒走全局档（`hudPerRowFor` 的 90dp 估宽按它量），同样只经 [chipTierFor] 一处
-            HudEntryGrid(items, HudZone.READOUT, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(HudZone.READOUT)) { entry ->
+            HudEntryGrid(gridItems, HudZone.READOUT, rowPitchPx, ctx.entryHeights, defaultCells, ctx.gridOf(HudZone.READOUT)) { entry ->
                 HudEntryItem(
                     entry, ctx,
                     Modifier.ghostWhileDragged(ctx.hiddenEntry == entry),
@@ -1381,7 +1407,8 @@ fun BoxScope.HudTopChrome(
             .onSizeChanged { onHeightChanged(with(density) { it.height.toDp() }.value.roundToInt()) }
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(start = HudEdgePad, end = 8.dp, top = TopTopPad, bottom = 2.dp),
+            // 左右两端同一枚令牌（HudEdgePad），不再散写 8.dp：改一枚两端一起变，对称不脱链
+            Modifier.fillMaxWidth().padding(start = HudEdgePad, end = HudEdgePad, top = TopTopPad, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(TopRowGap)
         ) {

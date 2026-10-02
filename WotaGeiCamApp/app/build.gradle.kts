@@ -14,8 +14,8 @@ android {
         applicationId = "com.wotagei.cam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.0.2"
+        versionCode = 3
+        versionName = "0.0.3"
         ndk { abiFilters += listOf("arm64-v8a") }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -48,6 +48,7 @@ android {
             // 钩子在 debug 变体也**不通**：这条判据故意不跟 isDebuggable 走，
             // 免得以后有人以为"debug 包能装"就等于"钩子能验"（本机装不了 debug 包，见 docs/plan/13 §14.3）
             buildConfigField("boolean", "MERGE_HOOK", "false")
+            buildConfigField("boolean", "FROST_PROBE", "false")
         }
         /**
          * #73 的取证变体：**release 同签名 + debuggable=true**。
@@ -71,6 +72,8 @@ android {
             signingConfig = wotaSign
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
+            // #84 霜探针：与 MERGE_HOOK 同一条纪律（debugHook 出证据，release/debug 恒关，见 ui/FrostProbe.kt）
+            buildConfigField("boolean", "FROST_PROBE", "true")
         }
         /**
          * #74 加的**取证构建**：release 同签名 + debuggable + **不混淆**，并且是 `testBuildType`。
@@ -93,6 +96,7 @@ android {
             signingConfig = wotaSign
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
+            buildConfigField("boolean", "FROST_PROBE", "true")
         }
         release {
             isMinifyEnabled = true
@@ -100,6 +104,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = wotaSign
             buildConfigField("boolean", "MERGE_HOOK", "false")
+            buildConfigField("boolean", "FROST_PROBE", "false")
         }
     }
 

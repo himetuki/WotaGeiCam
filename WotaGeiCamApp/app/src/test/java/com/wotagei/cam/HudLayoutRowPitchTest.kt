@@ -415,6 +415,25 @@ class HudLayoutRowPitchTest {
         assertEquals("宽度账与挪动无关（底板仍 94dp）", 172, placed.size.width)
     }
 
+    @Test
+    fun exchangingATallCellNeverTouchesAThirdEntry() {
+        // 本批新增：高格（跨度 > 1）参与交换时，中间的第三颗一格都不许动。
+        // 把防抖 (0,6) 拖到配对高格 (0,0)：格主是 LEVEL+VOLUME（一对），它们整组让到防抖的原格 (0,6)
+        // ——那一块的 3 档 (0,6)(0,7)(0,8) 全空，所以"整块"搬得动；蓝牙/变焦/对焦三颗原地不动。
+        // 退回旧实现（只落空格）时防抖会落在 (1,0) 附近、配对不动，本用例红。
+        val plan = planOf(1f, rightHeights100)
+        val moved = HudLayoutTable.default().placeEntryAt(e(CamPill.STAB), HudZone.RIGHT, 5, GridCell(0, 0), plan)
+        val after = moved.gridItems(HudZone.RIGHT, plan).associate { it.entry to it.cell }
+        assertEquals("被拖那颗拿到配对高格", GridCell(0, 0), after[e(CamPill.STAB)])
+        assertEquals("配对整组让到防抖的原格（含跨度 ≥3 的那个起始档）", GridCell(0, 6), after[e(CamPill.LEVEL)])
+        assertEquals(GridCell(0, 6), after[e(CamPill.VOLUME)])
+        // 第三颗逐颗点名：一个都不许被高格搬家带偏
+        assertEquals(GridCell(0, 3), after[e(CamPill.BT)])
+        assertEquals(GridCell(0, 4), after[e(CamPill.ZOOM)])
+        assertEquals(GridCell(0, 5), after[e(CamPill.FOCUS)])
+        assertEquals("配对仍是共格", after[e(CamPill.LEVEL)], after[e(CamPill.VOLUME)])
+    }
+
     // ---------- 四、钳制与就近让位吃的是整块 ----------
 
     @Test

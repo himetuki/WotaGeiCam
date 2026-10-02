@@ -7,8 +7,20 @@
     <string name="player_fps_step">%1$.1f fps</string>
     <string name="player_fps_step_exact">%1$.2f fps</string>
     <string name="player_loop_one">单视频循环</string>
+    <string name="player_mirror">水平镜像</string>
     <string name="player_zoom">%1$.1fx 缩放</string>
+    <string name="player_zoom_badge">x%1$.2f</string>
     <string name="player_error">播放失败，文件可能已损坏或格式不支持</string>
+
+    <!-- 光弧修复（用户需求第 7 项：可选按钮，绝不自动；GPU/CPU 二选一，后台处理不阻塞播放） -->
+    <string name="player_arc_repair">光弧修复</string>
+    <string name="player_arc_gpu">GPU 加速</string>
+    <string name="player_arc_cpu">纯 CPU</string>
+    <string name="player_arc_note">后台处理，完成后生成新视频，不改原片；耗时随片长与所选方式变化</string>
+    <string name="player_arc_done">修复完成，已存入相册</string>
+    <string name="player_arc_failed">修复失败</string>
+    <string name="player_arc_running">修复中 %1$d%%</string>
+    <string name="player_arc_busy">已有修复任务在跑</string>
 
     <!-- 倍速档位（需求：0.1 / 0.3 / 0.5 / 0.75 / 1.0） -->
     <string name="player_speed_current">倍速 %1$s</string>
@@ -33,13 +45,14 @@
     <string name="player_sync_no_audio">视频没有音轨，无法自动对齐</string>
     <string name="player_sync_too_short">音频太短，无法自动对齐</string>
 
-    <!-- 双视频对比 -->
-    <string name="compare_title">对比播放</string>
+    <!-- 双视频对比（沉浸式浮层版，10-01：标题/长描述两条随旧布局一并移除，git 可回） -->
     <string name="compare_mode_auto">自动同步（音频）</string>
     <string name="compare_mode_manual">手动同步</string>
+    <string name="compare_side_a">左音频</string>
+    <string name="compare_side_b">右音频</string>
+    <string name="compare_sync">同步</string>
     <string name="compare_add_right">添加右侧视频</string>
     <string name="compare_pick_right">选择右侧视频</string>
-    <string name="compare_audio_sync">基于音频自动同步</string>
     <string name="compare_syncing">正在按音频对齐…</string>
     <string name="compare_need_right">先添加右侧视频</string>
     <string name="compare_left_tag">左</string>
@@ -47,4 +60,13 @@
     <string name="compare_left">左：%1$s</string>
     <string name="compare_right">右：%1$s</string>
     <string name="compare_offset">右偏移 %1$s</string>
+    <string name="compare_history">历史</string>
+    <string name="compare_history_empty">还没有对比记录</string>
+    <string name="compare_history_missing">视频已不存在</string>
+    <string name="compare_history_remove">删除该记录</string>
+    <string name="compare_pick_failed">无法读取所选视频</string>
+    <string name="compare_mirror">镜像</string>
+    <string name="compare_mirror_left">左镜像</string>
+    <string name="compare_mirror_right">右镜像</string>
+    <string name="compare_mirror_all">全镜像</string>
 </resources>

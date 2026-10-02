@@ -170,11 +170,19 @@ class PlayerEngine(private val context: Context) {
             }
     }
 
-    /** 非破坏性暂停：唯一允许的「暂停」语义 */
+    /**
+     * 非破坏性暂停：唯一允许的「暂停」语义。
+     * 播完（STATE_ENDED）后再点播放/双击 = 重播：ExoPlayer 在 ENDED 停在末帧，只置
+     * playWhenReady=true 不会重放、必须先 seek 回起点（用户 2026-10-01 反馈：播完后
+     * 播放键与双击都无效）。seek(0) 后状态走 BUFFERING→READY，播放由 playWhenReady 自然接上。
+     */
     fun softPause(paused: Boolean) {
         val p = player ?: return
         // 恢复播放即放弃步进目标：位置从此由播放推进决定，继续护着会把 AB 回绕卡住
-        if (!paused) pendingStepMs = null
+        if (!paused) {
+            pendingStepMs = null
+            if (p.playbackState == Player.STATE_ENDED) p.seekTo(0)
+        }
         p.playWhenReady = !paused
         _isPlaying.value = if (paused) false else p.isPlaying
     }

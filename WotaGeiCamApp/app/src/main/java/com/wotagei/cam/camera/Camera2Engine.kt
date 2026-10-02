@@ -661,7 +661,12 @@ class Camera2Engine(
     private fun clampShutterToFrame(fps: Int) {
         val state = reqState ?: return
         val current: ParamState<Long> = params.shutter.value
-        val clamped = RequestApplier.clampShutterNs(current.value, fps, state.exposureMinNs, state.exposureMaxNs)
+        val clamped = RequestApplier.clampShutterNs(
+            current.value, fps, state.exposureMinNs, state.exposureMaxNs,
+            // 同 applyExposure：1/24、1/25 是强制档，回写时也不许被设备曝光范围改掉
+            // （帧周期那一刀仍生效：25fps 下切到 1/24 会被压回 1/25，与钳制口径一致）
+            forceDeviceRange = WotaTiers.isRequiredShutterNs(current.value)
+        )
         if (current.value != clamped) params.shutter.value = current.copy(value = clamped)
     }
 

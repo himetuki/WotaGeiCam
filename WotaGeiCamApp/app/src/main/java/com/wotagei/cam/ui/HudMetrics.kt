@@ -58,8 +58,12 @@ fun hudRoomDp(safeWidthDp: Float, endPadDp: Float): Float =
     (safeWidthDp - endPadDp - 2f * HudBlockPadDp).coerceAtLeast(0f)
 
 /**
- * 一颗胶囊的**高**（dp）＝ `WotaType.chip` 的 lineHeight 18sp（随字体缩放）+ `WotaChip` 上下内边距 6+6。
+ * 一颗胶囊的**高**（dp）＝ `WotaType.chip` 的 lineHeight 18sp（随字体缩放）+ 纵向内边距预算 12。
  * 默认档 30dp、120% 档 33.6dp（与 `HudLayoutPairCellTest` 里实测那颗 60px / 71dp 的胶囊同量级）。
+ *
+ * ⚠ 预算与实高差 2dp（2026-10-02 起 `WotaChip` 对齐 HDS 件高 28dp：上下内边距 5+5，18+10 = 28）；
+ * 这里**有意沿用旧档 12**——预测/格距按 30dp 保守多留 2dp 只会多让位、不会裁字，
+ * 而格距与测试期望值都锁在这条算式上，改数就是全网格重排，那不是本轮的事。
  *
  * **两条算式共读它**（任务 #75 提出来这一条）：
  * - [hudStripHeightDp] 的读数块高度预测（原来这个数是它的局部变量）；
@@ -76,7 +80,7 @@ fun hudChipHeightDp(fontScale: Float): Float {
  * 读数块高度的**预测初值**（审查 S3-6）：首帧实测之前先按「行数 × 一颗胶囊高 + 行距 + 块内上下边距」估，
  * 免得右竖 Dock 的下边界第一帧按 0 算、最低那颗落在读数块的位置上叠一帧。
  *
- * 一颗读数胶囊走 [hudChipHeightDp]（18sp 行高随字体缩放 + 上下内边距 6+6）⇒ 默认 3 读数一行时
+ * 一颗读数胶囊走 [hudChipHeightDp]（18sp 行高随字体缩放 + 纵向内边距预算 12）⇒ 默认 3 读数一行时
  * 12 + 30 = 42dp，与实测同量级。「AE 已锁定」那行提示不计入预测（它一出现
  * 下一帧实测就跟上），这是预测不是结论。
  */
@@ -93,7 +97,9 @@ private const val ChipPaddingDp = 24f      // WotaChip 左右内边距 12+12
 private const val ChipGapDp = 5f           // WotaChip 主副标签之间
 private const val ChipSecondaryDp = 22f    // WotaType.label 11sp × 2 汉字（「快门」「码率」）
 private const val ChipLineHeightDp = 18f   // WotaType.chip 的 lineHeight
-private const val ChipVerticalPaddingDp = 12f // WotaChip 上下内边距 6+6
+// WotaChip 实际纵向内边距是 5+5（HDS 件高 28dp），这里按旧档 12 保守多留 2dp：预测/格距不会裁字，
+// 代价只是多让 2dp；30dp 这条预算被格距算式与一批测试期望值锁着，别顺手改成 10（见 hudChipHeightDp 注）
+private const val ChipVerticalPaddingDp = 12f
 const val HudRowGapDp = 6f               // ParamsHud 行内/行间的间隔档：那两处 spacedBy 用的就是它（S3-5 同源）
 
 /**

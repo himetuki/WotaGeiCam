@@ -45,11 +45,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
 import com.wotagei.cam.bt.BtDevice
 import com.wotagei.cam.bt.BtSpeakerController
+import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaDivider
@@ -123,7 +125,9 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
                 text = if (active == null) stringResource(R.string.bt_no_active)
                 else stringResource(R.string.bt_active, active?.displayLabel().orEmpty()),
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (active == null) WotaTextDim else WotaAccent,
+                // 正文性信息不走 accent 小字（accent 压面板底 4.48 < 4.5）也不走 textLo（3.82）：
+                // 有设备名是本行主信息给 textHi，未连接的提示降半档给 textMid，两档压面板底都过 AA 正文
+                color = if (active == null) WotaColor.textMid else WotaText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
@@ -143,9 +147,16 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
 
         if (!hasPermission) {
             HintCard(stringResource(R.string.perm_bluetooth_rationale))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 双按钮左右排间距 12vp（hw_button 响应式布局节；面板本身是气泡族、不套 ⑧ 半模态尺寸）
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton(onClick = { permissionLauncher.launch(controller.missingPermissions()) }) {
-                    Text(stringResource(R.string.bt_grant), color = WotaAccent)
+                    // 可点动作保语义不保 accent：小字 accent 压面板底 4.48 过不了 AA，
+                    // 改 textHi（压底 4.5+ 达标）+ 下划线（链接惯例）表达「可点」
+                    Text(
+                        stringResource(R.string.bt_grant),
+                        color = WotaText,
+                        textDecoration = TextDecoration.Underline
+                    )
                 }
                 TextButton(onClick = { openBluetoothSettings(context) }) {
                     Text(stringResource(R.string.perm_open_settings))
@@ -159,7 +170,8 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
         val paired = devices.filter { it.bonded }
         val nearby = devices.filter { !it.bonded }
         if (paired.isEmpty() && nearby.isEmpty()) {
-            Text(stringResource(R.string.bt_no_device), style = MaterialTheme.typography.bodyMedium, color = WotaTextDim)
+            // bodyMedium 是正文，textLo 只够非正文 3:1 档（压面板底 3.82），正文升 textMid
+            Text(stringResource(R.string.bt_no_device), style = MaterialTheme.typography.bodyMedium, color = WotaColor.textMid)
         }
         Column(
             Modifier
@@ -278,7 +290,9 @@ private fun DeviceRow(device: BtDevice, isActive: Boolean, battery: Int?, onConn
             Text(
                 stringResource(if (device.connected) R.string.bt_connected else R.string.bt_disconnected),
                 style = MaterialTheme.typography.labelSmall,
-                color = if (device.connected) WotaAccent else WotaTextDim
+                // 状态文案不用 accent 小字（4.48 < 4.5）：「已连接」的语义由行首 LED（accent 圆点）承载；
+                // 未连接分支是 labelSmall 辅助级，留 textLo 合规
+                color = if (device.connected) WotaColor.textMid else WotaTextDim
             )
         }
         if (isActive && battery != null) {
@@ -289,7 +303,14 @@ private fun DeviceRow(device: BtDevice, isActive: Boolean, battery: Int?, onConn
             )
         }
         if (!device.connected) {
-            TextButton(onClick = onConnect) { Text(stringResource(R.string.bt_connect), color = WotaAccent) }
+            // 同「授予权限」：动作小字用 textHi + 下划线表达可点，不用过不了 AA 的 accent
+            TextButton(onClick = onConnect) {
+                Text(
+                    stringResource(R.string.bt_connect),
+                    color = WotaText,
+                    textDecoration = TextDecoration.Underline
+                )
+            }
         }
     }
 }

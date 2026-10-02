@@ -37,16 +37,38 @@ object WotaTiers {
 
     // 需求二：快门分子档位（分母即秒数），1/24 与 1/25 必须
     val SHUTTER_DENOM = listOf(24, 25, 30, 50, 60, 120, 240)
+
+    /**
+     * 「强制快门档」= 产品必须的 1/24、1/25（与 [REQUIRED_FPS] 一条对称口径）。
+     *
+     * 含义：设备 `SENSOR_INFO_EXPOSURE_TIME_RANGE` 里**没有**这两档时，它们照样可选、
+     * 并按该值下发——是否被 HAL 接受由设备决定（超出上报范围的值 HAL 可夹回或忽略，不保证原样生效）；
+     * 与「本机没有 `[24,24]` 固定帧率范围也照样让 24fps 可选」是同一套语义
+     * （见 [com.wotagei.cam.core.CameraAbility] 的 `pickFpsRange` 回退支）。
+     *
+     * 边界：只豁免**设备曝光范围**这一刀。产品自己的两条硬规则（1/10s 防手抖、≤1/帧周期防丢帧）
+     * 照旧生效——所以 25fps 下 1/24 仍不可选（帧周期容不下），24fps 退化成非精确范围（上界 30）时
+     * 1/24 也会被帧周期压回不可选，24fps+1/24、25fps+1/25 这两对才是它真正生效的场景（也是产品定位里的那两对）。
+     */
+    val REQUIRED_SHUTTER_DENOM = setOf(24, 25)
+
     const val SHUTTER_CAP_NS = 100_000_000L          // 1/10s 防手抖钳制
     const val MAX_FILE_BYTES = 3_758_096_384L        // 3.5GiB FAT32 安全上限
     const val MIN_FREE_MB = 200L                     // 录像前余量门槛
-    val ASPECTS = listOf("16:9", "4:3", "1:1", "5:3", "4:3p" /* 4080x3060 类 */)
+    val ASPECTS = listOf("16:9", "20:9" /* 原相机全屏档，10-01 用户指令 */, "4:3", "1:1", "5:3", "4:3p" /* 4080x3060 类 */)
 
     const val NS_PER_SECOND = 1_000_000_000L
     const val HIGH_SPEED_FPS = 60                    // >60fps 分水岭：会话/防抖/分析流行为全换
 
     // 快门档位对应的纳秒值，UI 与快门滑杆共用一份，避免各处重复 1e9/分母
     val SHUTTER_TIER_NS = SHUTTER_DENOM.map { NS_PER_SECOND / it }
+
+    /** 强制快门档的纳秒值（1/24 = 41_666_666、1/25 = 40_000_000），下发与 UI 共用一份 */
+    val REQUIRED_SHUTTER_NS: Set<Long> =
+        SHUTTER_DENOM.filter { it in REQUIRED_SHUTTER_DENOM }.map { NS_PER_SECOND / it }.toSet()
+
+    /** 强制档判据的唯一出处：下发侧（跳过设备曝光范围那两刀）与 UI（打 ※）必须同源 */
+    fun isRequiredShutterNs(ns: Long): Boolean = ns in REQUIRED_SHUTTER_NS
 
     // 色温/色调是「产品滑杆域」（02 文件第 6 节 u=(K-2000)/8000、v=(tint+50)/100），非设备能力
     const val KELVIN_MIN = 2000
@@ -212,24 +234,74 @@ fun recordableHoursText(freeMb: Long, totalBitrateBps: Int): String {
 }
 
 /**
- * 满档所需的可用宽度。B1（六项第 7 条）删掉顶栏镜头段后重新标定（审查 S4-1）：
- * 两段实测账（100% 文本、真机节点）= 画幅 135 + 容量 134 + 一条分隔线 1 + 底板左右内边距 2+2 ≈ **274dp**，
- * 旧值 320f 是三段时代（广角 47.5 + 画幅 135 + 容量 134 + 两条分隔线与内边距 ≈ 322.5）的口径，
- * 沿用会让竖屏 294dp 明明装得下全长文案却白退一档。272f 给 2dp 余量。
+ * 顶栏**右端固定件**吃掉的宽度（dp）：左右内边距 8+8 + 胶囊组与设置入口的间距 6 + 圆形设置入口约 44。
+ *
+ * 抽取前它是顶栏那行 `fillMaxWidth` Row 的自然结果；现在录制页的两条判据都要显式用它 ——
+ * 容量段取档的可用宽（`topBarRoomDp`）与胶囊组自己的布局宽度上限（`topBarMaxWidthDp`），
+ * 必须是同一条账、同一个来源，否则判据会比实际盒子宽。编辑页预览也用它对齐同一条口径。
+ *
+ * 原本是 CameraScreen 里的 private `TopBarChromeReserveDp = 66`，编辑页又散写了一份 `66f`
+ * （10-01 清魔数）：收拢到这一处，两边改预留只改这里。
  */
-const val CAPACITY_ROOM_FULL_DP = 272f
-
-/** 「96.2G · 3h」这一档需要的宽度：比满档省掉「39m」那截分钟（约 32dp），274 − 32 ≈ 242 */
-const val CAPACITY_ROOM_HOURS_DP = 242f
+const val TOP_BAR_CHROME_RESERVE_DP = 66f
 
 /**
- * 顶栏容量段按**可用宽度**取三档（§74，S4-1 已按 B1 之后的两段账重标阈值）：
- * 竖屏 360dp 窗口扣掉顶栏固定预留 66dp 只剩 294dp，B1 删掉镜头段之后这个宽度装得下全长「96.2G · 22h39m」，
- * 所以 294 走满档；窗口更窄（或文本高度放大到 120%）才依次退成小时档、只剩容量档，避免被省略号裁尾。
- * `roomDp` 由调用方折算好（已除过文本高度），这里只做纯取位，便于单测。
+ * 顶栏元信息卡里**与文字无关的固定件**（dp），[capacityNetRoomDp] 从可用宽里一路扣到「容量段文字
+ * 真正能画的那截」。逐项对应 `ui/HudLayer.kt` 的渲染路：
+ * 画幅段自身左右内边距 8+8（`TopSegment` 的 `padding(horizontal = 8.dp)`）+
+ * 段间分隔线 1（`HudTopZone` 里那枚 `width(1.dp)`）+
+ * 元信息卡左右内边距 2+2（`HudTopZone` 的 `padding(horizontal = 2.dp)`）+
+ * 容量段自身左右内边距 8+8（同 `TopSegment`）= **37**。
+ *
+ * ⚠ `HudLayer.kt` 不在本轮改动域：那边改内边距，这里必须同步，否则判据与真盒子差一截。
+ *
+ * 口径是「画幅段 + 容量段**两段都在**」的上界：`hud_pills` 关掉画幅（SIZE）时卡里只剩容量段，
+ * 这里仍扣 16+1，净宽会保守少算约 `sizeText+17`dp —— 最坏（竖屏 120% 文本）可能提前退一档，
+ * 只保守不溢出（审查 P3 备案；要精确就把"画幅段是否在场"做成入参，属后续优化）。
  */
-fun capacityTierText(freeMb: Long, totalBitrateBps: Int, roomDp: Float): String = when {
-    roomDp >= CAPACITY_ROOM_FULL_DP -> capacityLineText(freeMb, totalBitrateBps)
-    roomDp >= CAPACITY_ROOM_HOURS_DP -> "${freeSpaceShort(freeMb)} · ${recordableHoursText(freeMb, totalBitrateBps)}"
-    else -> freeSpaceShort(freeMb)
+const val CAPACITY_ROOM_FIXED_CHROME_DP = 37f
+
+/**
+ * 容量段的**净可用宽**（dp）：`roomDp` 是顶栏胶囊组整条的可用宽
+ * （安全区实测宽 − [TOP_BAR_CHROME_RESERVE_DP]），扣掉画幅段文案的实测宽
+ * （每台机器、每个字号都不同，由调用方 TextMeasurer 量）与固定件 [CAPACITY_ROOM_FIXED_CHROME_DP]，
+ * 剩下的才是容量段文字能占的宽度。
+ *
+ * 10-01 文本实测化改造后，取档判据不再依赖「画幅 135 + 容量 134 ≈ 274dp」那笔测试机真机账 ——
+ * 那笔账里的画幅宽现在是入参，这里只剩与文字无关的加减。
+ */
+fun capacityNetRoomDp(roomDp: Float, sizeTextDp: Float): Float =
+    roomDp - sizeTextDp - CAPACITY_ROOM_FIXED_CHROME_DP
+
+/** 小时档文案「96.2G · 22h」（[capacityTierText] 中档那一支；调用方按同一串字量宽，不许各写一份） */
+fun capacityHoursText(freeMb: Long, totalBitrateBps: Int): String =
+    "${freeSpaceShort(freeMb)} · ${recordableHoursText(freeMb, totalBitrateBps)}"
+
+/**
+ * 顶栏容量段按**净可用宽**取三档（§74；**10-01 改造**：阈值不再是测试机真机字体度量常量
+ * `CAPACITY_ROOM_FULL_DP=272` / `CAPACITY_ROOM_HOURS_DP=242`，那两个常量已删除）。
+ *
+ * 判据两侧都是实测宽：`roomDp` 由调用方经 [capacityNetRoomDp] 折算，`fullTextDp` / `hoursTextDp`
+ * 由调用方用 TextMeasurer 按**现显示的同一 style** 量两段候选文案传入 —— 系统字体、OEM 字形字重、
+ * 文本高度缩放怎么变，判据都跟着变，不再有「2dp 余量随字体漂移，别的机器提前退档或被省略号裁尾」。
+ * 本函数仍是**纯取位**（不碰 UI、不读设备，可 JVM 单测），余量是函数内的局部量。
+ *
+ * @param roomDp 容量段净可用宽（[capacityNetRoomDp] 的产物，不是整枚胶囊组的宽）
+ * @param fullTextDp 满档文案 [capacityLineText] 的实测宽（dp）
+ * @param hoursTextDp 小时档文案 [capacityHoursText] 的实测宽（dp）
+ */
+fun capacityTierText(
+    freeMb: Long,
+    totalBitrateBps: Int,
+    roomDp: Float,
+    fullTextDp: Float,
+    hoursTextDp: Float,
+): String {
+    // 2dp 余量：文案宽度是量出来的、可用宽是容器回报的，两边各有取整误差，贴着边排会来回抖
+    val marginDp = 2f
+    return when {
+        roomDp >= fullTextDp + marginDp -> capacityLineText(freeMb, totalBitrateBps)
+        roomDp >= hoursTextDp + marginDp -> capacityHoursText(freeMb, totalBitrateBps)
+        else -> freeSpaceShort(freeMb)
+    }
 }

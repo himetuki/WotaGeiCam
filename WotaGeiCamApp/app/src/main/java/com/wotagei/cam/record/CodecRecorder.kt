@@ -177,7 +177,113 @@ class CodecRecorder(
         return null
     }
 
-    private fun createVideoEncoder(mime: String, p: RecordProfile, surface: Surface): MediaCodec? {
+    /**
+     * 找一枚"能吃 YUV420 ByteBuffer 输入"的编码器，顺带给出它接受的颜色格式。
+     *
+     * 与 [findSurfaceEncoder] 分开命名（不改旧名以免动既有调用点）是因为两者探测的条件不同：
+     * Surface 路线要 `COLOR_FormatSurface`，YUV 路线要 `COLOR_FormatYUV420*`，一类机型的两个能力
+     * 不一定出现在同一枚编码器上（真机实测就有只吐 Flexible、不给 Surface 的实现）。
+     *
+     * 颜色格式按「Flexible → SemiPlanar → Planar」优先级挑：**Flexible 优先**是因为只有它保证
+     * `getInputImage()` 能拿到带合法 rowStride/pixelStride 的 Image，从而不必猜内存布局；
+     * 后两者只能在 `getInputBuffer()` 上手写字节序，是最差情况下的退路。
+     */
+    private fun findYuvEncoder(mime: String, w: Int, h: Int): Pair<String, Int>? {
+        val infos = try {
+            @Suppress("DEPRECATION")
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+        } catch (e: Exception) {
+            Log.e(TAG, "codec list unavailable: ${e.message}")
+            return null
+        }
+        val priority = intArrayOf(
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+        )
+        for (info in infos) {
+            if (!info.isEncoder) continue
+            if (!info.supportedTypes.any { it.equals(mime, ignoreCase = true) }) continue
+            val caps = try {
+                info.getCapabilitiesForType(mime)
+            } catch (e: IllegalArgumentException) {
+                continue
+            }
+            // 先过分辨率闸：吃不下的编码器即便自称支持 mime 也不能用
+            val ok = try {
+                caps.isFormatSupported(MediaFormat.createVideoFormat(mime, w, h))
+            } catch (e: Exception) {
+                false
+            }
+            if (!ok) continue
+            val cf = priority.firstOrNull { caps.colorFormats.contains(it) } ?: continue
+            return info.name to cf
+        }
+        return null
+    }
+
+    /**
+     * 建一枚 YUV420 ByteBuffer 输入的编码器（能力探测走 [findYuvEncoder]）。
+     *
+     * **为什么单独开一个方法而不是复用 [createVideoEncoder]**：录制与 GPU 路线走 Surface 输入，
+     * 帧的时间戳由输入面的生产者按系统墙钟生成，代码给不了 PTS；光弧修复的 **CPU 路线**要把逐平面
+     * 混合结果直接写进编码器输入缓冲并要求**自己指定 PTS**，只能走 ByteBuffer 模式（surface 传 null）。
+     * 真机教训：曾用 `Surface.lockCanvas()` 往输入面写帧，1.875s 的素材 CPU 处理了 41s，容器里的
+     * 帧步长就被写成 ≈0.46s（21 倍慢放）——这不是"处理快一点"能绕过的，必须换成显式 PTS。
+     *
+     * 除 `KEY_COLOR_FORMAT` 外，其余参数与 [createVideoEncoder] **逐字相同**：两条路线的产物码率/画质
+     * 必须同口径，否则同一素材走 GPU 与 CPU 会得到两种画质（AGENTS.md：不为同一件事写第二份口径）。
+     */
+    internal fun createYuvEncoder(mime: String, p: RecordProfile): MediaCodec? {
+        val found = findYuvEncoder(mime, p.width, p.height)
+        if (found == null) {
+            Log.e(TAG, "no yuv420 encoder for $mime ${p.width}x${p.height}")
+            return null
+        }
+        val (name, colorFormat) = found
+        val codec = try {
+            MediaCodec.createByCodecName(name)
+        } catch (e: IOException) {
+            Log.e(TAG, "yuv encoder create failed ($name): ${e.message}")
+            return null
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "bad yuv encoder name ($name): ${e.message}")
+            return null
+        }
+        val fmt = MediaFormat.createVideoFormat(mime, p.width, p.height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+            setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+            )
+            setInteger(MediaFormat.KEY_BIT_RATE, p.effectiveBitrate())
+            setInteger(MediaFormat.KEY_FRAME_RATE, p.fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SEC)
+            if (p.timeLapse) setFloat(KEY_CAPTURE_RATE, p.captureRate)
+        }
+        return try {
+            // surface = null：这就是与 Surface 路线的唯一差别，PTS 交回调用方掌控
+            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec
+        } catch (e: Exception) {
+            Log.e(TAG, "yuv video configure failed: ${e.javaClass.simpleName} ${e.message}")
+            releaseQuietly(codec)
+            null
+        }
+    }
+
+    /**
+     * 建一枚 Surface 输入的编码器（能力探测走 [findSurfaceEncoder]，参数表与录制逐字相同）。
+     * `internal` 供 ArcRepair 复用：光弧修复的插帧编码器与录制必须同一套能力探测与参数口径，
+     * 复制一份迟早与录制分叉（AGENTS.md：不为同一件事写第二份）。
+     *
+     * @param surface 输入面；**传 null = 只 configure 不绑面**，调用方随后自行
+     *   `codec.createInputSurface()` 取它自己的输入面。ArcRepair 走这条：MediaCodec 的
+     *   `createPersistentInputSurface()` 是给 MediaRecorder 共享输入面的专用件，拿它当 EGL 渲染
+     *   目标在真机上 `eglCreateWindowSurface` 直接失败（EGL_BAD_ALLOC 0x3003，实测）。录制路照旧
+     *   传自己的输入面，行为逐字不变。
+     */
+    internal fun createVideoEncoder(mime: String, p: RecordProfile, surface: Surface?): MediaCodec? {
         val name = findSurfaceEncoder(mime, p.width, p.height)
         val codec = try {
             if (name != null) MediaCodec.createByCodecName(name) else MediaCodec.createEncoderByType(mime)

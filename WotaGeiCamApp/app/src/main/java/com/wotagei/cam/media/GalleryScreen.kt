@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,21 +37,21 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CompareArrows
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.ViewDay
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.ViewDay
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -87,9 +88,11 @@ import com.wotagei.cam.R
 import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.ui.WotaSettings
+import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMenuEntry
 import com.wotagei.cam.ui.design.WotaMenuPopup
 import com.wotagei.cam.ui.design.WotaOutlineIcon
+import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaBg
@@ -99,13 +102,11 @@ import com.wotagei.cam.ui.theme.WotaSurfaceAlt
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandIn
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import kotlinx.coroutines.delay
@@ -134,6 +135,17 @@ object WotaNav {
 private const val GALLERY_ENTER_SLIDE_DP = 24
 
 /**
+ * HDS 子页签容器高：`ohos_id_tab_default_height` = 56vp（Tabs 默认高度，float.json L2016，
+ * research/refs/oss/tokens.json size 组）。指示条/文字块在此容器内垂直居中。
+ */
+private val SUBTAB_CONTAINER_HEIGHT = 56.dp
+
+/**
+ * 子页签指示条与文字的间距：`ohos_id_subtab_line_gap` = 8vp（float.json L588，tokens.json 同组）。
+ */
+private val SUBTAB_LINE_GAP = 8.dp
+
+/**
  * 媒体库页（需求 29 行）：收藏 / 分享 / 删除 / 回收站 / tag（无数量限制 + 分类标签页）
  * 与时间线 / 网格 / 全屏滑动三种形态。
  */
@@ -160,9 +172,16 @@ fun GalleryScreen(
 
     LaunchedEffect(filter, scope, mode) { selectedIds = emptySet() }
 
-    val customTags by repo.customTags().collectState(emptyList())
+    // 这两条 Flow **必须 remember**：`repo.clips(...)` / `repo.customTags()` 每次调用都造一条新的
+    // 冷管道，而 `collectAsState` 的 producer 以 **Flow 实例**为 key —— 不 remember 就等于
+    // 「每重组一次就取消并重开一轮 MediaStore + Room 查询」（多选点一下、横幅变一次、切页签都算），
+    // 进媒体库那几帧本来就紧，这些 churn 是白送的。键取 (repo, scope, filter)：库是单例，
+    // 作用域/页签一变就该换管道，与原来「每次调用新建」的语义等价，只是不再随重组重开。
+    val clipsFlow = remember(repo, scope, filter) { repo.clips(scope, filter) }
+    val tagsFlow = remember(repo) { repo.customTags() }
+    val customTags by tagsFlow.collectState(emptyList())
     val tabs = remember(customTags) { GalleryTabs.build(app, customTags) }
-    val clips by repo.clips(scope, filter).collectState(emptyList())
+    val clips by clipsFlow.collectState(emptyList())
 
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -304,15 +323,17 @@ fun GalleryScreen(
                 )
             }
 
-            // 操作反馈条：出现/2.6s 后消失都走动画。它在 Column 里，不展开高度的话
-            // 上面那块 weight(1f) 的内容会被瞬间顶一下
+            // 操作反馈条：出现/2.6s 后消失都走动画。它在 Column 里，出现/消失会占/让高度，
+            // 上方 weight(1f) 的内容随之瞬移一帧——expandIn/shrinkOut 是**布局尺寸动画**（#81 第 1 条
+            // 定版禁掉），换 alpha+scale（允许档）后瞬移仍在；要免掉得给这行常驻高度槽，观感取舍
+            // 留真机看过再定，别悄悄把尺寸动画加回来
             val msg = banner
             var msgSnapshot by remember { mutableStateOf<Int?>(null) }
             if (msg != null) msgSnapshot = msg
             AnimatedVisibility(
                 visible = msg != null,
-                enter = fadeIn(motion.float) + expandIn(tween(motion.durationMs)),
-                exit = fadeOut(motion.float) + shrinkOut(tween(motion.durationMs))
+                enter = fadeIn(motion.float) + scaleIn(motion.float, initialScale = 0.9f),
+                exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.9f)
             ) {
                 Box(
                     Modifier
@@ -359,7 +380,7 @@ private fun GalleryTopBar(
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         // M3 1.1.2 的 IconButton / TextButton 会把布局撑到 ≥48dp（不受父约束上限压缩），窄栏只能自绘命中区
-        ToolIcon(Icons.Filled.Close, stringResource(R.string.gallery_desc_back), onBack)
+        ToolIcon(Icons.Outlined.Close, stringResource(R.string.gallery_desc_back), onBack)
         Text(
             stringResource(R.string.gallery_title),
             style = MaterialTheme.typography.bodyMedium,
@@ -376,9 +397,9 @@ private fun GalleryTopBar(
                 onColumns(nextColumnTier(gridColumns))
             }
         }
-        ToolIcon(Icons.Filled.ViewDay, stringResource(R.string.gallery_mode_timeline)) { onMode(ListMode.Timeline) }
-        ToolIcon(Icons.Filled.GridView, stringResource(R.string.gallery_mode_grid)) { onMode(ListMode.Grid) }
-        ToolIcon(Icons.Filled.Fullscreen, stringResource(R.string.gallery_mode_full)) { onMode(ListMode.Fullscreen) }
+        ToolIcon(Icons.Outlined.ViewDay, stringResource(R.string.gallery_mode_timeline)) { onMode(ListMode.Timeline) }
+        ToolIcon(Icons.Outlined.GridView, stringResource(R.string.gallery_mode_grid)) { onMode(ListMode.Grid) }
+        ToolIcon(Icons.Outlined.Fullscreen, stringResource(R.string.gallery_mode_full)) { onMode(ListMode.Fullscreen) }
     }
 }
 
@@ -411,8 +432,18 @@ private fun ToolChip(label: String, onClick: () -> Unit) {
 }
 
 /**
- * 页签条：M3 的 ScrollableTabRow/Tab 把高度钉在 48dp（TabBaselineLayout 内部取容器最小高，压不动），
- * 窄工具条只能自绘。仍是一行独立命中区，不与顶栏合并。
+ * 页签条：HDS 子页签（下划线型）。形态依据 `.tmp/hw_chipsgroup-0000001929788350.md`：
+ * 子页签是「在一个组件内切换不同页面内容」的切换控件，下划线即其传统形态；胶囊样式归
+ * ChipGroup（筛选/可多选语义），且本条页签数随自定义 tag 无上限、文案可长——规范允许
+ * 「文本较长时超出屏幕展示区域，同时提供左右滑动」，下划线 + 横向滚动比胶囊组更贴。
+ * 数值全部取系统令牌（research/refs/oss/tokens.json，逐条带 float.json/color.json 行号）：
+ * 容器高 56vp（[SUBTAB_CONTAINER_HEIGHT]）、指示条高 2vp（ohos_id_subtab_line_height）、
+ * 文字↔指示条 8vp（[SUBTAB_LINE_GAP]）、指示条圆角 4vp（ohos_id_corner_radius_subtab）、
+ * 选中字/线 = 品牌蓝 #007DFF（ohos_id_color_subtab_text_on / _line_on；作指示条是纯图形，
+ * 作文字是 WotaColor.accent 审计过的前景用法）、未选字 = 60% 次级（ohos_id_color_subtab_text_off，
+ * 深色 #99FFFFFF 与 WotaColor.textMid 逐值一致）。
+ * M3 的 ScrollableTabRow/Tab 把高度钉在 48dp（TabBaselineLayout 内部取容器最小高，压不动），
+ * 只能自绘。指示条不做位移/颜色动画（#81 第 1 条：状态即时切换；切页反馈由内容区入场位移承担）。
  */
 @Composable
 private fun GalleryTabStrip(tabs: List<GalleryTab>, selected: Int, onSelect: (Int, GalleryTab) -> Unit) {
@@ -423,30 +454,41 @@ private fun GalleryTabStrip(tabs: List<GalleryTab>, selected: Int, onSelect: (In
     }
     LazyRow(
         state = listState,
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier.fillMaxWidth().height(SUBTAB_CONTAINER_HEIGHT),
+        contentPadding = PaddingValues(horizontal = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         itemsIndexed(tabs) { i, tab ->
             val active = i == selected
-            val motion = LocalMotion.current
-            val colorSpec = tween<Color>(motion.durationMs)
-            val labelColor by animateColorAsState(if (active) WotaAccent else WotaTextDim, colorSpec)
-            val bgColor by animateColorAsState(if (active) WotaSurface else Color.Transparent, colorSpec)
-            Text(
-                tab.label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = labelColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            // #81 第 1 条：文字/指示条颜色即时切换，禁动画
+            val labelColor = if (active) WotaColor.accent else WotaColor.textMid
+            Column(
                 modifier = Modifier
+                    .fillMaxHeight()
                     .widthIn(max = 140.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(bgColor)
                     .clickable { onSelect(i, tab) }
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
-            )
+                    .padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    tab.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = labelColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(SUBTAB_LINE_GAP))
+                // 未选中不给指示条（规范只有 _line_on 一档），但保留透明占位，避免选中切换时行高跳动
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (active) WotaColor.accent else Color.Transparent)
+                )
+            }
         }
     }
 }
@@ -485,14 +527,14 @@ private fun SelectionBar(
             color = WotaTextDim,
             modifier = Modifier.weight(1f)
         )
-        IconButton(onClick = onShare) { Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.gallery_menu_share)) }
-        IconButton(onClick = onLike) { Icon(Icons.Filled.Favorite, contentDescription = stringResource(R.string.gallery_menu_like)) }
+        IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, contentDescription = stringResource(R.string.gallery_menu_share)) }
+        IconButton(onClick = onLike) { Icon(Icons.Outlined.Favorite, contentDescription = stringResource(R.string.gallery_menu_like)) }
         if (trashedOnly) {
-            IconButton(onClick = onRestore) { Icon(Icons.Filled.Restore, contentDescription = stringResource(R.string.gallery_menu_restore)) }
+            IconButton(onClick = onRestore) { Icon(Icons.Outlined.Restore, contentDescription = stringResource(R.string.gallery_menu_restore)) }
         } else {
-            IconButton(onClick = onTrash) { Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.gallery_menu_trash)) }
+            IconButton(onClick = onTrash) { Icon(Icons.Outlined.Delete, contentDescription = stringResource(R.string.gallery_menu_trash)) }
         }
-        IconButton(onClick = onPurge) { Icon(Icons.Filled.DeleteForever, contentDescription = stringResource(R.string.gallery_menu_purge), tint = WotaRec) }
+        IconButton(onClick = onPurge) { Icon(Icons.Outlined.DeleteForever, contentDescription = stringResource(R.string.gallery_menu_purge), tint = WotaRec) }
         TextButton(onClick = onClear) { Text(stringResource(R.string.gallery_select_clear)) }
     }
 }
@@ -546,9 +588,9 @@ private fun TimelineList(clips: List<VideoClip>, isTrash: Boolean, onOpen: (Long
                         )
                         TagPills(clip.tags)
                     }
-                    if (clip.liked) Icon(Icons.Filled.Favorite, contentDescription = stringResource(R.string.gallery_desc_liked), tint = WotaRec, modifier = Modifier.size(16.dp))
+                    if (clip.liked) Icon(Icons.Outlined.Favorite, contentDescription = stringResource(R.string.gallery_desc_liked), tint = WotaRec, modifier = Modifier.size(16.dp))
                     IconButton(onClick = { onMenu(clip) }) {
-                        Icon(Icons.Filled.Tune, contentDescription = stringResource(R.string.gallery_desc_menu), tint = WotaTextDim, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Outlined.Tune, contentDescription = stringResource(R.string.gallery_desc_menu), tint = WotaTextDim, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -601,17 +643,15 @@ private fun ClipGrid(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, onMenu: () -> Unit) {
-    // 描边用颜色渐变而不是 if/else 挂不挂 Modifier：硬切会让多选勾上的一瞬间描边"闪"出来，
-    // 且挂/卸 border 会改变测量路径，渐变则始终有一层透明描边占位
-    val borderColor by animateColorAsState(
-        if (selected) WotaAccent else Color.Transparent,
-        tween(durationMillis = LocalMotion.current.durationMs)
-    )
+    // 描边层**常驻**（透明占位，保住"挂/卸 border 会改测量路径"那条原诉求），
+    // 颜色即时切换（#81 第 1 条：禁动画颜色）——只去掉渐变，层不动。
+    // 圆角走件位档 24dp（WotaShape.card = ohos_id_corner_radius_card，Top 8 #2 的本文件落点）
+    val borderColor = if (selected) WotaAccent else Color.Transparent
     Box(
         Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(WotaShape.card))
             .background(WotaSurface)
-            .border(2.dp, borderColor, RoundedCornerShape(12.dp))
+            .border(2.dp, borderColor, RoundedCornerShape(WotaShape.card))
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
         Column {
@@ -634,19 +674,19 @@ private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, on
         ) {
             // 角标一律自带白描边底衬：纯 tint 图标压在亮画面上会整个看不见（真机截图核对）
             if (clip.liked) WotaOutlineIcon(
-                Icons.Filled.Favorite,
+                Icons.Outlined.Favorite,
                 stringResource(R.string.gallery_desc_liked),
                 size = 22.dp,
                 glyph = 13.dp,
                 ink = WotaRec
             )
             if (clip.isTrashed) WotaOutlineIcon(
-                Icons.Filled.Restore,
+                Icons.Outlined.Restore,
                 stringResource(R.string.gallery_desc_trashed),
                 size = 22.dp,
                 glyph = 13.dp
             )
-            WotaOutlineIcon(Icons.Filled.Tune, stringResource(R.string.gallery_desc_menu), onClick = onMenu)
+            WotaOutlineIcon(Icons.Outlined.Tune, stringResource(R.string.gallery_desc_menu), onClick = onMenu)
         }
     }
 }
@@ -731,7 +771,7 @@ fun MediaTagDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) {
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(onClick = { ops.addTag(clip, input); input = "" }) {
-                        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.gallery_tag_add), tint = WotaAccent)
+                        Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.gallery_tag_add), tint = WotaAccent)
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -743,7 +783,7 @@ fun MediaTagDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(tag, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                         IconButton(onClick = { ops.removeTag(clip, tag) }) {
-                            Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.gallery_tag_remove), modifier = Modifier.size(16.dp))
+                            Icon(Icons.Outlined.Close, contentDescription = stringResource(R.string.gallery_tag_remove), modifier = Modifier.size(16.dp))
                         }
                     }
                 }
@@ -813,28 +853,28 @@ private fun FullscreenBrowse(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { engine.softPause(playing) }) {
-                        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = stringResource(R.string.player_play_pause))
+                        Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, contentDescription = stringResource(R.string.player_play_pause))
                     }
                     Text("${formatDuration(pos)} / ${formatDuration(dur)}", style = MonoStyle, color = WotaText)
                     Spacer(Modifier.width(6.dp))
                     IconButton(onClick = { ops.setLike(clip, !clip.liked) }) {
                         Icon(
-                            if (clip.liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                            if (clip.liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
                             // 标签必须跟着状态走：原来恒报「已收藏」，未收藏的成片读屏也说成已收藏
                             contentDescription = stringResource(
                                 if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked
                             )
                         )
                     }
-                    IconButton(onClick = { ops.share(listOf(clip)) }) { Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.gallery_menu_share)) }
-                    IconButton(onClick = { ops.moveToTrash(listOf(clip)) }) { Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.gallery_menu_trash)) }
+                    IconButton(onClick = { ops.share(listOf(clip)) }) { Icon(Icons.Outlined.Share, contentDescription = stringResource(R.string.gallery_menu_share)) }
+                    IconButton(onClick = { ops.moveToTrash(listOf(clip)) }) { Icon(Icons.Outlined.Delete, contentDescription = stringResource(R.string.gallery_menu_trash)) }
                     if (clip.isTrashed) {
                         IconButton(onClick = { ops.restoreFromTrash(listOf(clip)) }) {
-                            Icon(Icons.Filled.Restore, contentDescription = stringResource(R.string.gallery_menu_restore))
+                            Icon(Icons.Outlined.Restore, contentDescription = stringResource(R.string.gallery_menu_restore))
                         }
                     }
-                    IconButton(onClick = { onCompare(clip.id) }) { Icon(Icons.Filled.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
-                    IconButton(onClick = { onOpen(clip.id) }) { Icon(Icons.Filled.Fullscreen, contentDescription = stringResource(R.string.gallery_open_player)) }
+                    IconButton(onClick = { onCompare(clip.id) }) { Icon(Icons.Outlined.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
+                    IconButton(onClick = { onOpen(clip.id) }) { Icon(Icons.Outlined.Fullscreen, contentDescription = stringResource(R.string.gallery_open_player)) }
                 }
             }
         }

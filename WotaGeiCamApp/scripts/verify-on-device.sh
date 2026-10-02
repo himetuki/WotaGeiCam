@@ -29,7 +29,17 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ADB="$ROOT/tools/android-sdk/platform-tools/adb.exe"
 PKG="com.wotagei.cam"
 OUT="$ROOT/.tmp/verify-$(date +%Y%m%d-%H%M)"
-DENSITY=2.0          # 本机实测 320dpi ⇒ dp = px / 2
+# 密度运行时读（10-01 清查：不再按测试机写死 2.0）。wm density 输出形如
+# "Physical density: 320" ⇒ px/dp = 320/100；读不到才退回 2.0 并提示（换机取证先看这里）
+# Override 行优先（开发者选项/改显示大小后 app 实际用 override 值；无 override 才取 physical）
+WMD=$("$ADB" shell wm density 2>/dev/null)
+DENSITY_RAW=$(echo "$WMD" | grep -i override | grep -oE '[0-9]+' | head -1)
+[ -z "$DENSITY_RAW" ] && DENSITY_RAW=$(echo "$WMD" | grep -oE '[0-9]+' | head -1)
+if [ -n "$DENSITY_RAW" ]; then
+    DENSITY=$(awk "BEGIN{printf \"%.2f\", $DENSITY_RAW/100}")
+else
+    DENSITY=2.0; echo "!! wm density 读不到，DENSITY 回退 2.0（换机时 dp 换算可能错）" >&2
+fi
 MERGE_STAGE=0
 [ "${1:-}" = "--merge" ] && MERGE_STAGE=1
 

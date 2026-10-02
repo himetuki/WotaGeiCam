@@ -61,53 +61,78 @@ class HudLayoutClampTest {
     fun bottomDockDropNeverWritesAnXOverride() {
         // B4 审查 S1：底栏的横向落位**不许进表**。录制页 onDrop 与编辑页 dropContainer 都只把
         // clampZonePos 的结果写进表，所以这道闸就在这儿：给它一个再像真值不过的绝对 x，也必须是哨兵
-        assertEquals(ZonePlacement(-1, 250), clampZonePos(HudZone.BOTTOM, 500, 250, 216, 72, land))
+        assertEquals(ZonePlacement(-1, 250), clampZonePos(HudZone.BOTTOM, 500, 250, 216, 72, land, topZoneMinYDp = 0))
         // 纵向照常钳（下界 = 安全区高 − 排高 = 288），只有 x 被抹
-        assertEquals(ZonePlacement(-1, 288), clampZonePos(HudZone.BOTTOM, 0, 9999, 216, 72, land))
+        assertEquals(ZonePlacement(-1, 288), clampZonePos(HudZone.BOTTOM, 0, 9999, 216, 72, land, topZoneMinYDp = 0))
         // 负 y 夹回 0（走到这一步说明 y 是拖出来的：两轴都是哨兵时调用方早早原样返回了）
-        assertEquals(ZonePlacement(-1, 0), clampZonePos(HudZone.BOTTOM, -1, -50, 216, 72, land))
+        assertEquals(ZonePlacement(-1, 0), clampZonePos(HudZone.BOTTOM, -1, -50, 216, 72, land, topZoneMinYDp = 0))
         // 反面对照：另外四枚容器的 x 照旧钳进安全区，这条闸只作用底栏
-        assertEquals(466, clampZonePos(HudZone.READOUT, 9999, 300, 300, 42, land).xDp)
-        assertEquals(672, clampZonePos(HudZone.RIGHT, 9999, 100, 94, 202, land).xDp)
+        assertEquals(466, clampZonePos(HudZone.READOUT, 9999, 300, 300, 42, land, topZoneMinYDp = 0).xDp)
+        assertEquals(672, clampZonePos(HudZone.RIGHT, 9999, 100, 94, 202, land, topZoneMinYDp = 0).xDp)
     }
 
     @Test
     fun bandZonesEatBothMeasuredAvoidances() {
         // 左/右/读数块三枚：y 下界是顶栏实测高，上界是安全区高 − 底栏实测高 − 自身高
-        assertEquals(44..86, clampZoneYRange(HudZone.RIGHT, land, 202))
-        assertEquals(44..278, clampZoneYRange(HudZone.LEFT, land, 10))
-        assertEquals(44..(800 - 72 - 42), clampZoneYRange(HudZone.READOUT, port, 42))
-        // 顶栏与底栏两枚贴的是屏幕边，不受这两条避让量约束（底栏还要往上搬一栏，见第 8 条）
-        assertEquals(0..(360 - 44), clampZoneYRange(HudZone.TOP, land, 44))
-        assertEquals(0..(360 - 72), clampZoneYRange(HudZone.BOTTOM, land, 72))
+        assertEquals(44..86, clampZoneYRange(HudZone.RIGHT, land, 202, topZoneMinYDp = 0))
+        assertEquals(44..278, clampZoneYRange(HudZone.LEFT, land, 10, topZoneMinYDp = 0))
+        assertEquals(44..(800 - 72 - 42), clampZoneYRange(HudZone.READOUT, port, 42, topZoneMinYDp = 0))
+        // 顶栏与底栏两枚贴的是屏幕边，不受这两条避让量约束（底栏还要往上搬一栏，见第 8 条）。
+        // ⚠ TOP 的 lo 现在由第四个形参说了算：传 0 = 改前那一档（本批新增的那一条在下面单独打）
+        assertEquals(0..(360 - 44), clampZoneYRange(HudZone.TOP, land, 44, topZoneMinYDp = 0))
+        assertEquals(0..(360 - 72), clampZoneYRange(HudZone.BOTTOM, land, 72, topZoneMinYDp = 0))
     }
 
     @Test
     fun degenerateBandFallsBackInsteadOfThrowing() {
         // 告警条 + 满配读数把带挤没了：区间若为负，coerceIn 直接抛，整个 HUD 就没了
         val squeezed = HudAreaDp(width = 766, height = 200, topAvoidDp = 120, bottomAvoidDp = 100)
-        val range = clampZoneYRange(HudZone.RIGHT, squeezed, 90)
+        val range = clampZoneYRange(HudZone.RIGHT, squeezed, 90, topZoneMinYDp = 0)
         assertTrue("区间必须非负：$range", range.first <= range.last)
         assertEquals(0..(200 - 90), range)
         // 落点仍然取得到，并且落在回退区间里
-        assertEquals(110, clampZonePos(HudZone.RIGHT, 700, 9999, 94, 90, squeezed).yDp)
-        assertEquals(672, clampZonePos(HudZone.RIGHT, 700, 9999, 94, 90, squeezed).xDp)
+        assertEquals(110, clampZonePos(HudZone.RIGHT, 700, 9999, 94, 90, squeezed, topZoneMinYDp = 0).yDp)
+        assertEquals(672, clampZonePos(HudZone.RIGHT, 700, 9999, 94, 90, squeezed, topZoneMinYDp = 0).xDp)
     }
 
     @Test
     fun absolutePositionIsClampedOnBothAxes() {
         // 右竖 Dock（实测 94×202dp）拖出可视右缘与上下界
-        val far = clampZonePos(HudZone.RIGHT, 9999, 9999, 94, 202, land)
+        val far = clampZonePos(HudZone.RIGHT, 9999, 9999, 94, 202, land, topZoneMinYDp = 0)
         assertEquals(ZonePlacement(672, 86), far)
-        val negative = clampZonePos(HudZone.RIGHT, -50, 10, 94, 202, land)
+        val negative = clampZonePos(HudZone.RIGHT, -50, 10, 94, 202, land, topZoneMinYDp = 0)
         assertEquals(ZonePlacement(0, 44), negative)
-        // 顶栏贴顶：允许 y=0，但下界是「安全区底 − 自身高」
-        val top = clampZonePos(HudZone.TOP, 0, 0, 300, 44, land)
+        // 顶栏贴顶：允许 y=0，但下界是「安全区底 − 自身高」。
+        // topZoneMinYDp 传 0 = 录制页/改前那一档（编辑页把操作栏下缘喂进来的那一档在下面单独打）
+        val top = clampZonePos(HudZone.TOP, 0, 0, 300, 44, land, topZoneMinYDp = 0)
         assertEquals(ZonePlacement(0, 0), top)
-        val topDown = clampZonePos(HudZone.TOP, 10, 9999, 300, 44, land)
+        val topDown = clampZonePos(HudZone.TOP, 10, 9999, 300, 44, land, topZoneMinYDp = 0)
         assertEquals(ZonePlacement(10, 316), topDown)
         // 钳过的值再钳一次不变（幂等，编辑页连续拖动靠这条才不会漂）
-        assertEquals(far, clampZonePos(HudZone.RIGHT, far.xDp, far.yDp, 94, 202, land))
+        assertEquals(far, clampZonePos(HudZone.RIGHT, far.xDp, far.yDp, 94, 202, land, topZoneMinYDp = 0))
+    }
+
+    /**
+     * 本批新增：TOP 的**绝对定位支**下限（[clampZoneYRange] 的 `topZoneMinYDp`）。
+     * 场景是编辑页那条操作栏压在顶栏上——把顶栏整枚拖进操作栏矩形里时，纵向下限必须把它推到
+     * 操作栏下缘之下，否则那几像素既点不到也拖不动（操作栏在拖拽捕获层之上）。
+     *
+     * 可证伪：把 TOP 的 lo 改回恒 0（或错取 area.topAvoidDp）这两条就红。
+     * `topZoneMinYDp=0` 那一条同时钉住"录制页逐字不变"（录制页恒传 0）。
+     */
+    @Test
+    fun topZoneAbsolutePlacementEatsTheMeasuredActionBarBottom() {
+        // 操作栏下缘换算成 56dp（与 chromeBandBottomDp(180, 68, 2f) 同源）⇒ 顶栏 y=0 被推到 56
+        assertEquals(56, clampZonePos(HudZone.TOP, 0, 0, 300, 44, land, topZoneMinYDp = 56).yDp)
+        // 已经在 56 之下（y=100）不动；上界仍是「安全区底 − 自身高」= 316
+        assertEquals(100, clampZonePos(HudZone.TOP, 0, 100, 300, 44, land, topZoneMinYDp = 56).yDp)
+        assertEquals(316, clampZonePos(HudZone.TOP, 0, 9999, 300, 44, land, topZoneMinYDp = 56).yDp)
+        // 传播到区间那一层（两者必须同一条带）
+        assertEquals(56..316, clampZoneYRange(HudZone.TOP, land, 44, topZoneMinYDp = 56))
+        // 0 = 录制页/改前那一档：贴顶仍是 0
+        assertEquals(0, clampZonePos(HudZone.TOP, 0, 0, 300, 44, land, topZoneMinYDp = 0).yDp)
+        // 非 TOP 容器**不读**这条下限（把它喂给 LEFT 也不该改变 44 的下界）
+        assertEquals(44, clampZonePos(HudZone.LEFT, 0, 0, 94, 10, land, topZoneMinYDp = 56).yDp)
     }
 
     // ---------- 第 8 条：底栏 Dock 的上栏 / 下栏 ----------
@@ -216,7 +241,8 @@ class HudLayoutClampTest {
      * · 安全区窗口原点 y = **68px**（`dumpsys display` 实测挖孔让位 `insets=Rect(0,68-0,0)`）
      * · 操作栏下缘 = 原点 + 上内边距 4dp(8px) + 胶囊行 30dp(60px) + 行距 4dp(8px) +
      *   说明文字 14dp(28px) + 下内边距 4dp(8px) = 68 + 112 = **180px** ⇒ 让位量 = (180−68)/2 = **56dp**
-     *   （胶囊行 30dp = `WotaType.chip` 行高 18sp + `WotaChip` 上下内边距 6+6，与 [hudChipHeightDp] 同一条尺子）
+     *   （胶囊行 30dp = `WotaType.chip` 行高 18sp + 纵向内边距预算 12——WotaChip 实高 28dp（5+5），
+     *   预算按旧档 30dp 保守多留 2dp，与 [hudChipHeightDp] 同一条尺子）
      * · 三颗胶囊自己的矩形 = 左 8dp（`WotaSpace.s`）起、上 4dp（`TopTopPad`）起、高 30dp、
      *   宽 返回50 + 间距8 + 保存50 + 间距8 + 恢复默认76 = **192dp** ⇒ 右缘 200dp
      *   （胶囊宽 = 汉字数 × 13sp + 左右内边距 12+12；「恢复默认」四字 52+24 = 76）

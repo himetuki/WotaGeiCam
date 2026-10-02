@@ -1,12 +1,16 @@
 package com.wotagei.cam.ui
 
+import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
 import android.content.res.Resources
+import android.hardware.camera2.CameraManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -15,6 +19,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -27,15 +33,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.displayCutoutPadding
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -48,6 +60,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +68,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as GeoSize
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -64,7 +78,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
@@ -83,8 +99,10 @@ import com.wotagei.cam.camera.PreviewOrientation
 import com.wotagei.cam.camera.PreviewSink
 import com.wotagei.cam.camera.PreviewStatus
 import com.wotagei.cam.camera.RecordStatus
+import com.wotagei.cam.camera.concurrentCameraIdsWith
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.hasAdjustableFocus
+import com.wotagei.cam.core.forcedShutterOutOfRange
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.CamPill
@@ -93,11 +111,15 @@ import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.nextLensKey
 import com.wotagei.cam.core.Stabilize
+import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.player.WotaPlayerSurface
+import com.wotagei.cam.player.WotaSeekBar
+import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
@@ -110,7 +132,12 @@ import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeDebugBadge
+import com.wotagei.cam.ui.design.WotaChip
+import com.wotagei.cam.ui.design.WotaColor
+import com.wotagei.cam.ui.design.WotaHit
+import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaSpace
+import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.dialog.CurveSheet
 import com.wotagei.cam.ui.dialog.evText
 import com.wotagei.cam.ui.dialog.lensLabelRes
@@ -127,6 +154,8 @@ import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.RefLineOverlay
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -216,6 +245,19 @@ fun CameraScreen(
     var hint by remember { mutableStateOf<String?>(null) }
     var lastUri by remember { mutableStateOf<Uri?>(null) }
     var freeMb by remember { mutableStateOf(0L) }
+
+    // ---- 分屏（用户第 3 项）：把**完整录制页**压到左半屏，右侧让给模式面板。
+    // 压缩只做 graphicsLayer 变换、布局参数一个都没动 ⇒ 参数/参考线/用户摆好的位置全部**结构性保持**
+    //（什么都没重排，只是整层做了个变换）。这是**变换动画不是布局动画**，不撞 #81——守卫拦的是
+    // animateColorAsState/animateDp 那类颜色与尺寸动画，animateFloatAsState 驱动的 scale 不在禁列。
+    var splitOn by remember { mutableStateOf(false) }
+    val splitMotion = LocalMotion.current
+    val splitP by animateFloatAsState(if (splitOn) 1f else 0f, splitMotion.float)
+    // 右侧面板的第二态：false = 模式列表，true = 「实时对比播放」。
+    // 切出分屏时把它清回 false ⇒ 对比子树离开组合，播放器随之被 rememberPlayerEngine 的
+    // DisposableEffect 释放（切出分屏 / 返回模式列表 / 离开录制页三条出口共用这一条收尾）。
+    var compareOn by remember { mutableStateOf(false) }
+    LaunchedEffect(splitOn) { if (!splitOn) compareOn = false }
 
     // ---- 就近胶囊：锚点矩形由各控件在布局期回报，弹窗同一帧就能量到位置
     val pillAnchors = remember { mutableStateMapOf<PillKey, IntRect>() }
@@ -335,6 +377,20 @@ fun CameraScreen(
     val focusUsable = ability?.hasAdjustableFocus() ?: true
     val isFront = (slot?.type ?: lens) == LensType.FRONT
     val sensorOrientation = ability?.sensorOrientation ?: 0
+    // ---- 双摄并发探测（用户第 3 项后半）：决定「另镜头录制」的可用态。
+    // 现开镜头 id 取现场 [slot].logicId（**不写死任何 id**，nil 就等下一帧）；API 分级与异常吞掉
+    // 都在 DualCameraProbe 内。进入分屏时探一次（分屏中换镜头会因 key 变化重探），结果只进状态与
+    // 一行日志，供真机 logcat 核对。
+    val camMgr = remember(app) { app.getSystemService(Context.CAMERA_SERVICE) as? CameraManager }
+    val buddies = remember { mutableStateOf<Set<String>>(emptySet()) }
+    LaunchedEffect(splitOn, slot?.logicId, camMgr) {
+        if (!splitOn) return@LaunchedEffect
+        val mgr = camMgr ?: return@LaunchedEffect
+        val id = slot?.logicId ?: return@LaunchedEffect
+        val found = concurrentCameraIdsWith(mgr, id)
+        buddies.value = found
+        Log.i("WotaSplit", "concurrent buddies=${found.joinToString(",")} camera=$id")
+    }
     var deviceDegrees by remember { mutableStateOf(0) }
     LaunchedEffect(owner, ui.device) { deviceDegrees = readDeviceDegrees(context) }
     // 正反向横屏（90↔270）窗口尺寸不变，onSizeChanged 不会触发，必须另挂显示监听才能跟着转
@@ -439,10 +495,16 @@ fun CameraScreen(
     // #70 A 定版「横屏永远同行」的判据：就用这两行已经在用的那个 orientation（同一个真源，不另造第二套
     // "横屏"定义，比如按窗口宽高比现推——那会和这里复位 safeW/safeH 的条件分叉）
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    // §59/§74：容量段取档的可用宽 = 安全区实测宽 − 顶栏右端固定件预留，再按录制页文本高度折算回 100% 基准。
-    // 它必须与胶囊组自己的布局上限 topBarMaxWidthDp 同一条账、同一个来源，否则判据比实际盒子宽
-    val topBarRoomDp = ((safeW - TopBarChromeReserveDp).dp /
-        WotaSettings.textScale(settingsPrefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)).value
+    // §59/§74：容量段取档的可用宽 = 安全区实测宽 − 顶栏右端固定件预留。它必须与胶囊组自己的布局上限
+    // topBarMaxWidthDp 同一条账、同一个来源（都吃下面这枚**实际预留**），否则判据比实际盒子宽。
+    // 10-01 文本实测化：删掉了"再按录制页文本高度折算回 100% 基准"那一步除法 —— 判据另一侧的两段文案宽
+    // 是 TextMeasurer 按**实际** style 量的（TextScaleLayer 的文本高度缩放与系统 fontScale 都已含在
+    // 量出来的 px 里），两边必须同为"真机上真实的 dp"，再除一次缩放就是双重折算。
+    // 分屏入口与设置齿轮**同排**（都在顶栏右端）⇒ 录制页的右端固定件比 core 里那枚 66f 多一枚图标钮
+    // 加一枚同排间距。增量只加在录制页这一侧：编辑页没有分屏入口，它继续用 core 的 66f（两页固定件不同）。
+    val splitChromeReserveDp = WotaHit.iconButton.value + TopRowGap.value
+    val topBarChromeReserveDp = TOP_BAR_CHROME_RESERVE_DP + splitChromeReserveDp
+    val topBarRoomDp = (safeW - topBarChromeReserveDp).coerceAtLeast(0f)
     // 五枚卡片本体在窗口里的实测矩形：钳制要的容器尺寸与第 8 条要的"底栏现在在哪"都只读这一份。
     // ⚠ 必须**随方向复位**（与上面 safeW/safeH 同一个 key）：旋转那一刻这批矩形还是上一副姿态的尺寸，
     // 而 #70 A 的读数块决策吃的正是里面的宽度（底板宽、块宽）。不复位的话，竖屏按整幅排出来的
@@ -470,7 +532,12 @@ fun CameraScreen(
                 else -> true
             }
         }.forEach { add(HudEntry.of(it)) }
-        hudItems.forEach { add(HudEntry.of(it)) }
+        // 10-01 布局批：码率不再是 READOUT 网格的一员——改为 Dock 外固定读数（下面 BOTTOM 那枚
+        // HudZoneBox 之后单独渲染的 chip），不进网格/编辑页。不进 visibleEntries，网格、默认格推导
+        // 与 readoutCount 的取档规划一并见不到它（READOUT 只剩快门/帧率，planReadoutRow 的单行账
+        // 自然成立）；编辑页那条链的渲染一致由 HudReadoutZone 里的同一道过滤兜住。旧 hud_layout
+        // 表串不用迁移：decode 照旧，表里的 BITRATE 槽位记录自然不渲染。
+        hudItems.forEach { if (it != HudItem.BITRATE) add(HudEntry.of(it)) }
     }
     // S3-5：读数块的取档判据必须是"调用点同一个表达式"算出的可用宽（旧写法直接传 screenWidthDp 会把
     // "贴边"当"装得下"，传旧的 34dp 避让量则会在挖孔换边的那个姿态里双重让位）。
@@ -521,15 +588,42 @@ fun CameraScreen(
         if (it > 0) it else hudStripHeightDp(readoutCount, readoutPlan.perRow, hudDensity.fontScale).roundToInt()
     }
     // 六项第 4 条之后右竖 Dock 与读数块都在右缘：右 Dock 的下界还要多让开读数块那一截，否则会叠字。
-    // #70 A 之后这两枚在**同一条横带**上（各占一半），所以那截让位与底栏带高取大而不是求和，
-    // 见 areaForRightDock 的 KDoc（同基线档下读数块矮于底栏那一排时，那条缝整个收回去）
-    val rightArea = areaForRightDock(baseArea, hudStripH, readoutPlan.bottomAvoidDp)
+    // #70 A 之后这两枚在**同一条横带**上（各占一半），那截让位与底栏带高取大而不是求和
+    // （并联不求和那条旧账见 areaForRightDock 的 KDoc）。10-01 第 5 项起两枚竖 Dock 都改读
+    // dockBottomAvoidDp：只避**真横向重叠**的邻居——底栏居中，常规屏宽下与竖 Dock 不叠，那整条
+    // 72dp 不再白让（左 Dock 只留 HudEdgePad，右 Dock 另叠读数块那一截）。
+    val rightArea = baseArea.copy(
+        bottomAvoidDp = dockBottomAvoidDp(
+            safeWidthDp = safeW,
+            dockWidthDp = zoneRects[HudZone.RIGHT].dpWidthToDp(hudDensity),   // 实测宽；0 = 首帧还没量到
+            bottomDockWidthDp = dockCardW,                                    // 底板常态宽（实测，首帧 0）
+            bottomDockStripDp = dockStripH,
+            fromEnd = true,
+            readoutBottomDp = readoutPlan.bottomAvoidDp,
+            readoutHeightDp = hudStripH,   // 读数块条带高（原先喂 areaForRightDock 的就是它）
+        )
+    )
+    // 左 Dock 同一条账、fromEnd = false：它贴左缘、读数块在右缘 ⇒ 读数那两枚入参不参与左支
+    // （函数 KDoc 记着），这里显式传 0 只为满足 #69 那套"无默认值必传"。
+    val leftArea = baseArea.copy(
+        bottomAvoidDp = dockBottomAvoidDp(
+            safeWidthDp = safeW,
+            dockWidthDp = zoneRects[HudZone.LEFT].dpWidthToDp(hudDensity),
+            bottomDockWidthDp = dockCardW,
+            bottomDockStripDp = dockStripH,
+            fromEnd = false,
+            readoutBottomDp = 0,
+            readoutHeightDp = 0,
+        )
+    )
     // 顶栏胶囊组的宽度上限：抽取前它待在 `fillMaxWidth` 的顶栏 Row 里，右边被设置入口顶死，
     // 装不下时靠 Text 的 maxLines+Ellipsis 收；搬进独立可拖容器后没有那层约束了，120% 文本 + 窄窗
-    // 会直接从右缘画出去。参考区从「窗口宽」换成「安全区实测宽」，与顶栏那行 Row 当年同一个基准。
-    val topBarMaxWidthDp = (safeW - TopBarChromeReserveDp).coerceAtLeast(0).dp
+    // 会直接从右缘画出去。参考区从「窗口宽」换成「安全区实测宽」，与顶栏那行 Row 当年同一个基准，
+    // 预留量读的是上面那枚**实际预留**（含分屏入口多占的一枚图标钮），与 topBarRoomDp 同源。
+    val topBarMaxWidthDp = (safeW - topBarChromeReserveDp).coerceAtLeast(0f).dp
 
     fun areaOf(zone: HudZone): HudAreaDp = when (zone) {
+        HudZone.LEFT -> leftArea
         HudZone.RIGHT -> rightArea
         HudZone.READOUT -> readoutArea
         else -> baseArea
@@ -562,7 +656,10 @@ fun CameraScreen(
         val rect = zoneRects[zone]
         val w = rect.dpWidthToDp(hudDensity)
         val h = rect.dpHeightToDp(hudDensity)
-        return clampZonePos(zone, raw.xDp, raw.yDp, w, h, areaOf(zone))
+        // topZoneMinYDp 恒 0：录制页的顶栏本就该贴顶（编辑页那条操作栏在这页不存在）。
+        // 它的 baseArea.topAvoidDp 是**实测顶栏高**（≠0），若拿它去当顶栏绝对定位的下限，
+        // 同一份位置表会在两页渲染出不同位置——编辑页画的就是假的。录制页逐字不变靠的正是这个 0。
+        return clampZonePos(zone, raw.xDp, raw.yDp, w, h, areaOf(zone), topZoneMinYDp = 0)
     }
 
     // 「镜头」那颗归属哪枚容器由表说了算：不在底栏时底栏那个右槽留等宽空区，那颗在别的容器里
@@ -668,6 +765,12 @@ fun CameraScreen(
     }
 
     // ---- 一帧 HUD 的全部输入：录制页这份读实时参数总线，编辑页那份读出厂默认，渲染只有一条路
+    // §59 + 10-01 文本实测化：容量段取档的三段文案宽**现量现传**（画幅段 / 满档 / 小时档），样式取
+    // TopSegment 现显示的那条 labelMedium，TextScaleLayer 的文本高度缩放与系统 fontScale 都在量出来的
+    // px 里；阈值不再是测试机字体度量常量。三段文本随剩余空间/码率变，自然键 = 文案 + 样式 + 密度
+    val topBarTotalBps = bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
+    val topBarSizeLabel = sizeText(size)
+    val topBarWidths = rememberCapacityTextWidths(freeMb, topBarTotalBps, topBarSizeLabel)
     val hudCtx = HudCtx(
         recording = recStatus == RecordStatus.START,
         busy = recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
@@ -678,13 +781,16 @@ fun CameraScreen(
             else -> null
         },
         elapsedLabel = formatDuration(recElapsed),
-        sizeLabel = sizeText(size),
+        sizeLabel = topBarSizeLabel,
         // §59：窄屏（或文本高度被放大到 120%）时先退成只剩容量。判断放在调用方——这里拿得到根容器的
-        // 实测宽度，而在胶囊组里套测量层会把整段容量从树里吞掉
+        // 实测宽度，而在胶囊组里套测量层会把整段容量从树里吞掉；
+        // roomDp 先经 capacityNetRoomDp 扣掉画幅段文案与卡内固定件，比的才是容量段自己的净可用宽
         capacityLabel = com.wotagei.cam.core.capacityTierText(
             freeMb,
-            bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE,
-            topBarRoomDp
+            topBarTotalBps,
+            com.wotagei.cam.core.capacityNetRoomDp(topBarRoomDp, topBarWidths.sizeDp),
+            topBarWidths.fullDp,
+            topBarWidths.hoursDp
         ),
         freeLow = freeMb < WotaTiers.MIN_FREE_MB,
         zoomLabel = String.format(java.util.Locale.US, "%.1fx", zoom.value),
@@ -712,7 +818,14 @@ fun CameraScreen(
         readoutValue = { item ->
             val aeAuto = aeMode != AeMode.MANUAL
             when (item) {
-                HudItem.SHUTTER -> if (aeAuto) "AUTO" else shutterText(shutter.value)
+                // 快门读数：强制档（1/24、1/25）超出本机曝光范围时也打 ※，
+                // 与帧率读数那颗 `24※` 同一套可见性（判据 core/forcedShutterOutOfRange，与下发侧同源）
+                HudItem.SHUTTER -> if (aeAuto) "AUTO" else {
+                    val forced = ability?.exposureNs
+                        ?.let { forcedShutterOutOfRange(shutter.value, it) } == true
+                    shutterText(shutter.value) +
+                        if (forced) stringResource(R.string.approx_mark) else ""
+                }
                 HudItem.ISO -> if (aeAuto) "AUTO" else "${iso.value}"
                 HudItem.EV ->
                     if (aeMode == AeMode.AUTO) evText(ev.value, ability?.evStep ?: 1f) else null
@@ -817,134 +930,276 @@ fun CameraScreen(
         // 系统栏与挖孔由这一层**按它实际所在的那条边**自动避让，容器自己不再各写一份（也不许再往容器
         // 上补按方向写死的让位量：那 68px 是竖屏顶边居中的挖孔，横屏 90/270 会让它换边，
         // 写死 end 就必错一次。docs/plan/13 §九·补，任务 #68）
-        previewStage(Modifier.fillMaxSize())
+        // 分屏（用户第 3 项）：把**完整录制页**（预览 + HUD 五容器 + 各覆盖层）压到左半屏。
+        // **只做 graphicsLayer 变换，布局参数一个都没动** ⇒ 已调好的参数/参考线/用户摆过的位置
+        // 全部结构性保持（什么都没重排，只是整层做了个变换）。splitP 由 animateFloatAsState 驱动，
+        // 是变换动画不是布局动画，不撞 #81。
+        // transformOrigin 取**左缘中点**：缩放后 x' = origin.x + (x − origin.x)·s = x·s（origin.x = 0）
+        // ⇒ 内容自然收进左半屏，无需额外 translationX；y 以中线为原点 ⇒ 纵向保持居中。
+        // 参数/参考线"保持"不需要任何搬运代码，它来自"没重排"这个结构事实。
         Box(
             Modifier
                 .matchParentSize()
-                .safeDrawingPadding()
-                .onSizeChanged {
-                    val w = with(hudDensity) { it.width.toDp().value.roundToInt() }
-                    val h = with(hudDensity) { it.height.toDp().value.roundToInt() }
-                    if (w != safeW) safeW = w
-                    if (h != safeH) safeH = h
+                .graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0.5f)
+                    val s = 1f - SPLIT_SQUEEZE * splitP
+                    scaleX = s
+                    scaleY = s
                 }
         ) {
-            // 顶栏那排的固定件（设置入口 + 告警条）实测高回报给竖 Dock 当上边界（S2-1）
-            HudTopChrome(
-                audioDegraded = ui.audioDegraded,
-                legacy = ability?.isLegacy() == true,
-                deviceFailedHighFps = ui.device == DeviceStatus.OPEN_FAILED_HIGH_FPS,
-                effect = frameEffect,
-                renderMode = renderMode,
-                onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
-                onHeightChanged = { if (topBarH != it) topBarH = it }
-            )
-            // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
-            // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
-            // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。
-            // 位置只吃 safeDrawingPadding()（贴边避让交系统），不写任何方向常量。
-            MergeDebugBadge(Modifier.align(Alignment.TopCenter).padding(top = WotaSpace.xs))
-            // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
-            // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
-            // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
-            // 凭证，跟着四周一起收掉就等于把录制指示藏了，所以这里与 [HudTopChrome] 同进同出。
-            // 宽度上限补回抽取前那条 fillMaxWidth Row 给的硬约束（见 topBarMaxWidthDp）：胶囊组一旦
-            // 脱离那行 Row 就没有布局兜底了，字宽估算是纯算术，估算偏了只会从右缘溢出去。
-            HudZoneBox(
-                zone = HudZone.TOP,
-                placement = placementOf(HudZone.TOP),
-                area = baseArea,
-                modifier = Modifier.widthIn(max = topBarMaxWidthDp),
-                // 录制页顶栏本来就贴顶（原生对齐只让一枚 TopTopPad）⇒ 0 = 与改前逐字同值；
-                // 这条下限只有编辑页那条操作栏需要（#79，见 chromeBandBottomDp）
-                nativeTopMinDp = 0,
-                onCardRect = { putCardRect(HudZone.TOP, it) }
+            previewStage(Modifier.fillMaxSize())
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .safeDrawingPadding()
+                    .onSizeChanged {
+                        val w = with(hudDensity) { it.width.toDp().value.roundToInt() }
+                        val h = with(hudDensity) { it.height.toDp().value.roundToInt() }
+                        if (w != safeW) safeW = w
+                        if (h != safeH) safeH = h
+                    }
             ) {
-                HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
+                // 顶栏那排的固定件（设置入口 + 告警条）实测高回报给竖 Dock 当上边界（S2-1）
+                HudTopChrome(
+                    audioDegraded = ui.audioDegraded,
+                    legacy = ability?.isLegacy() == true,
+                    deviceFailedHighFps = ui.device == DeviceStatus.OPEN_FAILED_HIGH_FPS,
+                    effect = frameEffect,
+                    renderMode = renderMode,
+                    onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
+                    onHeightChanged = { if (topBarH != it) topBarH = it }
+                )
+                // 分屏入口：与设置齿轮**同级**的固定件（同一排右端）。它是"开/关分屏"的开关，
+                // 不是可拖动/可隐藏的胶囊 ⇒ 不进 hud_pills 掩码、不进位置表、不进 pillAnchorWriters。
+                // 与齿轮同一道录制锁：录制中只给锁提示，不切分屏（会话与文件已经开写，不能中途改版面）。
+                WotaIconButton(
+                    image = Icons.Outlined.Splitscreen,
+                    description = stringResource(R.string.cam_split),
+                    selected = splitOn,
+                    onClick = { if (recording) lockTip() else splitOn = !splitOn },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        // 让到齿轮左侧：右缘按「设计留白 + 齿轮宽 + 同排间距」退，令牌全部来自同一套
+                        // （HudEdgePad/TopRowGap 是 HudTopChrome 那排自己的令牌，不新造间距数字）
+                        .padding(end = HudEdgePad + WotaHit.iconButton + TopRowGap, top = TopTopPad)
+                )
+                // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
+                // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
+                // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。
+                // 位置只吃 safeDrawingPadding()（贴边避让交系统），不写任何方向常量。
+                MergeDebugBadge(Modifier.align(Alignment.TopCenter).padding(top = WotaSpace.xs))
+                // #84 霜探针：debugHook 变体 + adb extra 才组合（见 FrostProbe 的类注释）。
+                // 挂 TopStart：默认横屏下左上角不与顶栏（居中）或左 Dock（中段）相压；只画不收指
+                FrostProbeOverlay(glEngine, Modifier.align(Alignment.TopStart))
+                // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
+                // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
+                // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
+                // 凭证，跟着四周一起收掉就等于把录制指示藏了，所以这里与 [HudTopChrome] 同进同出。
+                // 宽度上限补回抽取前那条 fillMaxWidth Row 给的硬约束（见 topBarMaxWidthDp）：胶囊组一旦
+                // 脱离那行 Row 就没有布局兜底了，字宽估算是纯算术，估算偏了只会从右缘溢出去。
+                HudZoneBox(
+                    zone = HudZone.TOP,
+                    placement = placementOf(HudZone.TOP),
+                    area = baseArea,
+                    modifier = Modifier.widthIn(max = topBarMaxWidthDp),
+                    // 录制页顶栏本来就贴顶（原生对齐只让一枚 TopTopPad）⇒ 0 = 与改前逐字同值；
+                    // 这条下限只有编辑页那条操作栏需要（#79，见 chromeBandBottomDp）
+                    nativeTopMinDp = 0,
+                    onCardRect = { putCardRect(HudZone.TOP, it) }
+                ) {
+                    HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
+                }
+                if (sheet == Sheet.NONE) {
+                    HudZoneBox(
+                        zone = HudZone.LEFT,
+                        placement = placementOf(HudZone.LEFT),
+                        // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
+                        area = leftArea,
+                        nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
+                        onCardRect = { putCardRect(HudZone.LEFT, it) }
+                    ) {
+                        HudDockZone(
+                            HudZone.LEFT,
+                            hudLayout.gridItems(HudZone.LEFT, gridPlan),
+                            hudCtx,
+                            zoneBandHeight(HudZone.LEFT, leftArea),
+                            // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
+                            hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
+                        )
+                    }
+                    // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
+                    // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
+                    // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
+                    // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
+                    HudZoneBox(
+                        zone = HudZone.RIGHT,
+                        placement = placementOf(HudZone.RIGHT),
+                        area = rightArea,
+                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                        onCardRect = { putCardRect(HudZone.RIGHT, it) }
+                    ) {
+                        HudDockZone(
+                            HudZone.RIGHT,
+                            hudLayout.gridItems(HudZone.RIGHT, gridPlan),
+                            hudCtx,
+                            zoneBandHeight(HudZone.RIGHT, rightArea),
+                            hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
+                        )
+                    }
+                    // 六项第 4 条：快门速度 / 帧率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）；
+                    // 码率已挪 Dock 外同带（10-01 布局批，见下面 BOTTOM 那枚 HudZoneBox 之后的 chip）。
+                    // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
+                    // 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
+                    // #70 A：这块的底边与带高读的是 readoutArea（planReadoutRow 那次决策），不再读 baseArea——
+                    // 后者带的是"底栏那一排的带高"，把它当 padding(bottom=) 用就是把读数手算抬到 Dock 上方，
+                    // 那是 §14.2 里被点名第二次的写法。绝对落位那一支（placementOf）也走同一个 areaOf 出口，
+                    // 所以钳制带与原生对齐带不会分叉。
+                    HudZoneBox(
+                        zone = HudZone.READOUT,
+                        placement = placementOf(HudZone.READOUT),
+                        area = readoutArea,
+                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                        onCardRect = { putCardRect(HudZone.READOUT, it) }
+                    ) {
+                        HudReadoutZone(
+                            hudLayout.gridItems(HudZone.READOUT, gridPlan),
+                            hudCtx,
+                            zoneBandHeight(HudZone.READOUT, readoutArea),
+                            // #80：读数块只预留**列数**（透明底板 ⇒ 不花观感钱），纵向那一轴是有意留的缺口，
+                            // 理由与两条出路都写在 GridAnchor 的文件头
+                            hudLayout.defaultGridOf(HudZone.READOUT, gridPlan)
+                        )
+                    }
+                    // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
+                    // 可视窗口水平中心，挖孔落到左短边还是右短边都跟着中心走。旧写法在这里又扣一笔写死的 34dp
+                    // （外层已经避过让位了，等于双重让位），于是两个横屏姿态都往**左**偏 34px：带在左时中心落在
+                    // 800px（应为 834px）、带在右时 732px（应为 766px）。任务 #68 已删那笔扣减。
+                    // S2-2 C：整排实测高回报给三处下边界。第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进
+                    // graphicsLayer）→ 松手落上栏/下栏，**只有 y 进表**（x 恒哨兵，见 onDrop 那段）。
+                    // 镜头那颗被挪去别的容器时这枚 Dock 只留等宽空槽（右槽实测宽归 0，槽宽回到 34dp 那一档）
+                    HudZoneBox(
+                        zone = HudZone.BOTTOM,
+                        placement = placementOf(HudZone.BOTTOM),
+                        area = baseArea,
+                        shiftYPx = { if (dockDragging) dockShiftPx else 0f },
+                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                        onCardRect = { putCardRect(HudZone.BOTTOM, it) }
+                    ) {
+                        HudBottomZone(
+                            showLens = lensInBottomDock,
+                            ctx = hudCtx,
+                            drag = dockDrag
+                        )
+                    }
+                    // ---- 码率读数 chip（10-01 布局批第 1 条）：底栏 Dock 左侧、同一带 ----
+                    // 选 b 案（HUD 根盒上加 sibling）不选 a 案（Row 包 BOTTOM 的 HudZoneBox）：BOTTOM
+                    // 槽位是 `align(BottomCenter) + fillMaxWidth`（HudZoneBox），Row 里先摆 chip 再摆 Dock
+                    // 会把 Dock 的居中基准从"整宽安全区"改成"扣掉 chip 的剩余宽"，录制键中心≠可视水平
+                    // 中心，不变量②当场崩；且 HudZoneBox 是 BoxScope 扩展，Row 作用域里编译不过。
+                    // 横向用 offset 反推而不用 padding(end=)：padding 会把左半带剩余宽压成 chip 的测量
+                    // 上限（竖屏 360dp 那档只有 ≈64dp，chip 自然宽 ≈90dp 被迫裁字——§58/§73 那族坑）；
+                    // offset 只平移不改测量约束，chip 永远按自然宽量。左半带真装不下（竖屏）时先退贴屏幕
+                    // 左缘；若那样仍压到 Dock（fallback 右缘越过 Dock 左缘）则再上移退出这条带
+                    // （见 bitrateYOffPx）——分两步退，第一步保持同带、第二步才是离带。chip 宽实测
+                    // 两轮收敛（与 topBarH/dockStripH 同一套手法），首帧按退避位画、第二帧贴上 Dock 左缘。
+                    // 已知边界：第 8 条把 Dock 长按换到上栏后这颗留在底带——跟 y 需要安全区盒的窗口原点
+                    // 这个新机制，用户未要求，不做。
+                    if (HudItem.BITRATE in hudItems) {
+                        val bitrateLabel = hudCtx.readoutValue(HudItem.BITRATE)
+                        if (bitrateLabel != null) {
+                            var bitrateChipWpx by remember { mutableIntStateOf(0) }
+                            val bitrateGapPx = with(hudDensity) { WotaSpace.s.toPx() }
+                            val bitrateEdgePx = with(hudDensity) { HudEdgePad.toPx() }
+                            val bitrateDockW =
+                                if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt()
+                            // Dock 居中于整宽安全区（不变量②），左缘 = (safeW − dockW)/2；
+                            // chip 右缘目标 = Dock 左缘 − 一枚 WotaSpace.s（与 planReadoutRow 的 dockGapDp 同一枚令牌）
+                            val bitrateDockLeftPx =
+                                with(hudDensity) { ((safeW - bitrateDockW).coerceAtLeast(0) / 2f).dp.toPx() }
+                            val bitrateHugX = bitrateDockLeftPx - bitrateGapPx - bitrateChipWpx
+                            val bitrateFits = bitrateChipWpx > 0 && bitrateHugX >= bitrateEdgePx
+                            val bitrateX = if (bitrateFits) bitrateHugX else bitrateEdgePx
+                            // 审查 P1（10-01 布局批）：竖屏窄带（safeW <≈434dp）时 fallback 位（贴屏幕左缘）
+                            // 的右缘会越过 Dock 左缘、压上底板 26dp——fallback 必须真正退出这条带：上移一档
+                            // （dockStripH + 一枚间隙），与 READOUT 退化档"装不下就退到带上方"真正同族
+                            // （原注释称同族是错的，两者的退法并不同族）。首帧 chipW=0 不判重叠，第二帧实测接管
+                            val bitrateYOffPx =
+                                if (!bitrateFits && bitrateEdgePx + bitrateChipWpx > bitrateDockLeftPx) {
+                                    with(hudDensity) { (dockStripH.dp + WotaSpace.s).toPx() }.roundToInt()
+                                } else 0
+                            WotaChip(
+                                label = bitrateLabel,
+                                selected = false,
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    // 与底板可见底边齐平（BottomBarOuterPadV 那一档），即与 READOUT 那行
+                                    // 同一条底缘线——"同带"的纵向口径与 #70 A 一致；上移档由 bitrateYOffPx 承担
+                                    .padding(bottom = BottomBarOuterPadV)
+                                    .offset { IntOffset(bitrateX.roundToInt(), -bitrateYOffPx) }
+                                    .onSizeChanged { if (it.width != bitrateChipWpx) bitrateChipWpx = it.width }
+                                    // BITRATE 就近浮层的锚点写入方从 HudEntryItem 换到这颗：不挂的话
+                                    // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
+                                    .pillAnchorReport(pillAnchors, PillKey.BITRATE),
+                                secondary = stringResource(HudItem.BITRATE.labelRes),
+                                onClick = { hudCtx.onReadoutCycle(HudItem.BITRATE) },
+                                onLongClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
+                                frost = hudFrostPillPlate
+                            )
+                        }
+                    }
+                }
             }
-            if (sheet == Sheet.NONE) {
-                HudZoneBox(
-                    zone = HudZone.LEFT,
-                    placement = placementOf(HudZone.LEFT),
-                    area = baseArea,
-                    nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
-                    onCardRect = { putCardRect(HudZone.LEFT, it) }
-                ) {
-                    HudDockZone(
-                        HudZone.LEFT,
-                        hudLayout.gridItems(HudZone.LEFT, gridPlan),
-                        hudCtx,
-                        zoneBandHeight(HudZone.LEFT, baseArea),
-                        // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
-                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
-                    )
-                }
-                // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
-                // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
-                // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
-                // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
-                HudZoneBox(
-                    zone = HudZone.RIGHT,
-                    placement = placementOf(HudZone.RIGHT),
-                    area = rightArea,
-                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                    onCardRect = { putCardRect(HudZone.RIGHT, it) }
-                ) {
-                    HudDockZone(
-                        HudZone.RIGHT,
-                        hudLayout.gridItems(HudZone.RIGHT, gridPlan),
-                        hudCtx,
-                        zoneBandHeight(HudZone.RIGHT, rightArea),
-                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
-                    )
-                }
-                // 六项第 4 条：快门速度 / 帧率 / 码率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）。
-                // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
-                // 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
-                // #70 A：这块的底边与带高读的是 readoutArea（planReadoutRow 那次决策），不再读 baseArea——
-                // 后者带的是"底栏那一排的带高"，把它当 padding(bottom=) 用就是把读数手算抬到 Dock 上方，
-                // 那是 §14.2 里被点名第二次的写法。绝对落位那一支（placementOf）也走同一个 areaOf 出口，
-                // 所以钳制带与原生对齐带不会分叉。
-                HudZoneBox(
-                    zone = HudZone.READOUT,
-                    placement = placementOf(HudZone.READOUT),
-                    area = readoutArea,
-                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                    onCardRect = { putCardRect(HudZone.READOUT, it) }
-                ) {
-                    HudReadoutZone(
-                        hudLayout.gridItems(HudZone.READOUT, gridPlan),
-                        hudCtx,
-                        zoneBandHeight(HudZone.READOUT, readoutArea),
-                        // #80：读数块只预留**列数**（透明底板 ⇒ 不花观感钱），纵向那一轴是有意留的缺口，
-                        // 理由与两条出路都写在 GridAnchor 的文件头
-                        hudLayout.defaultGridOf(HudZone.READOUT, gridPlan)
-                    )
-                }
-                // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
-                // 可视窗口水平中心，挖孔落到左短边还是右短边都跟着中心走。旧写法在这里又扣一笔写死的 34dp
-                // （外层已经避过让位了，等于双重让位），于是两个横屏姿态都往**左**偏 34px：带在左时中心落在
-                // 800px（应为 834px）、带在右时 732px（应为 766px）。任务 #68 已删那笔扣减。
-                // S2-2 C：整排实测高回报给三处下边界。第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进
-                // graphicsLayer）→ 松手落上栏/下栏，**只有 y 进表**（x 恒哨兵，见 onDrop 那段）。
-                // 镜头那颗被挪去别的容器时这枚 Dock 只留等宽空槽（右槽实测宽归 0，槽宽回到 34dp 那一档）
-                HudZoneBox(
-                    zone = HudZone.BOTTOM,
-                    placement = placementOf(HudZone.BOTTOM),
-                    area = baseArea,
-                    shiftYPx = { if (dockDragging) dockShiftPx else 0f },
-                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                    onCardRect = { putCardRect(HudZone.BOTTOM, it) }
-                ) {
-                    HudBottomZone(
-                        showLens = lensInBottomDock,
-                        ctx = hudCtx,
-                        drag = dockDrag
-                    )
-                }
+
+            CurveSheet(
+                params = params,
+                gpuMode = renderMode == RenderMode.GPU,
+                onDismiss = { sheet = Sheet.NONE },
+                visible = sheet == Sheet.CURVE,
+                modifier = Modifier.matchParentSize()
+            )
+            // 录制中会话会因换输出面而重建，预览瞬间回到 START，此时不能盖遮罩。
+            // 遮罩本身改成淡入淡出：镜头切换 / 会话重建时它原来是「啪地盖上、啪地撤掉」，
+            // 但淡入淡出只处理这层的进出，加载该多久还是多久 —— 不用动画去掩盖真实延迟
+            val gateMotion = LocalMotion.current
+            AnimatedVisibility(
+                visible = ui.preview != PreviewStatus.ING && recStatus == RecordStatus.IDLE,
+                enter = fadeIn(gateMotion.float),
+                exit = fadeOut(gateMotion.float),
+                modifier = Modifier.matchParentSize()
+            ) {
+                PreviewGate(
+                    opening = ui.device == DeviceStatus.OPEN_ING,
+                    needPermission = ui.needsCameraPermission,
+                    modifier = Modifier.fillMaxSize(),
+                    onRetry = {
+                        val missing = ctrl.missingPermissions()
+                        if (missing.isNotEmpty()) permissionLauncher.launch(missing) else ctrl.restartPreview()
+                    },
+                    onOpenSettings = { context.openAppSettings() }
+                )
             }
         }
 
+        // 右侧分屏面板：挂在**压图层之外**（根 Box 的另一个孩子），所以它自己不跟着压缩。
+        // 两态由 [compareOn] 决定：模式列表（另镜头录制 / 实时对比播放 / 退出分屏）或对比播放器。
+        // 「另镜头录制」的可用态来自 [buddies]（双摄并发探测）；可用也仍是占位，点击只给「下一批实现」提示。
+        AnimatedVisibility(
+            visible = splitOn,
+            enter = fadeIn(splitMotion.float) + slideInHorizontally(splitMotion.offset) { it },
+            exit = fadeOut(splitMotion.float) + slideOutHorizontally(splitMotion.offset) { it },
+            modifier = Modifier.align(Alignment.CenterEnd)
+        ) {
+            SplitPanel(
+                onExit = { splitOn = false },
+                compareOn = compareOn,
+                onToggleCompare = { compareOn = it },
+                lensSupported = buddies.value.isNotEmpty(),
+                onLensClick = { showTip(app.getString(R.string.cam_split_lens_soon)) }
+            )
+        }
+
+        // 就近胶囊与提示条是**全局浮层**（各自独立 Popup 窗口），挂在压图层之外：窗口不参与父层
+        // 变换，压进去反而会拿被缩放的父坐标去定位。所以它们不进左侧那层 graphicsLayer。
         // 就近胶囊：只在没有整块面板时挂出。锚点由各控件在布局期回报，正常路径同一帧就量得到；
         // 真量不到的只有两种：首帧还没测完、以及那颗控件刚被显隐开关收掉——这两种都下一帧就修正。
         // 「有触发点但没有写入方」这一种已经由 pillAnchorWriters 登记表 + PillAnchorRegistryTest 封死：
@@ -967,14 +1222,6 @@ fun CameraScreen(
             bt = bt,
             )
         }
-
-        CurveSheet(
-            params = params,
-            gpuMode = renderMode == RenderMode.GPU,
-            onDismiss = { sheet = Sheet.NONE },
-            visible = sheet == Sheet.CURVE,
-            modifier = Modifier.matchParentSize()
-        )
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，
         // 于是「录制中不能改画幅」这句话在真机上点了锁定项也看不见（v0.0.2 胶囊改造实测）
         hint?.let { text ->
@@ -982,29 +1229,20 @@ fun CameraScreen(
                 alignment = Alignment.TopCenter,
                 properties = PopupProperties(focusable = false, dismissOnClickOutside = false)
             ) {
-                HintBar(text = text, shown = hintShown, modifier = Modifier.padding(top = 76.dp))
+                // 顶部偏移 = 顶栏固定件**实测高** + 一枚间隙令牌。原 `76.dp` 无出处
+                //（AGENTS.md 禁机型性写死值），字重/字号/告警条一变就压上去，现在跟着同一条实测链走。
+                // ⚠ 坐标系：topBarH 是 HudTopChrome 在 **safeDrawingPadding 内层**量的（不含系统 inset），
+                // 而这个 Popup 挂在根 Box（窗口原点）下——审查 P1：不先消费 inset 的话，竖屏挖孔机
+                //（顶 inset 34dp 级）提示条会压进顶栏。所以先 safeDrawingPadding() 把原点对回安全盒，
+                // 再叠实测高；横屏 inset=0 时逐字等于旧算式
+                HintBar(
+                    text = text,
+                    shown = hintShown,
+                    modifier = Modifier
+                        .safeDrawingPadding()
+                        .padding(top = topBarH.dp + WotaSpace.s)
+                )
             }
-        }
-        // 录制中会话会因换输出面而重建，预览瞬间回到 START，此时不能盖遮罩。
-        // 遮罩本身改成淡入淡出：镜头切换 / 会话重建时它原来是「啪地盖上、啪地撤掉」，
-        // 但淡入淡出只处理这层的进出，加载该多久还是多久 —— 不用动画去掩盖真实延迟
-        val gateMotion = LocalMotion.current
-        AnimatedVisibility(
-            visible = ui.preview != PreviewStatus.ING && recStatus == RecordStatus.IDLE,
-            enter = fadeIn(gateMotion.float),
-            exit = fadeOut(gateMotion.float),
-            modifier = Modifier.matchParentSize()
-        ) {
-            PreviewGate(
-                opening = ui.device == DeviceStatus.OPEN_ING,
-                needPermission = ui.needsCameraPermission,
-                modifier = Modifier.fillMaxSize(),
-                onRetry = {
-                    val missing = ctrl.missingPermissions()
-                    if (missing.isNotEmpty()) permissionLauncher.launch(missing) else ctrl.restartPreview()
-                },
-                onOpenSettings = { context.openAppSettings() }
-            )
         }
     }
 }
@@ -1012,17 +1250,251 @@ fun CameraScreen(
 /** 面板互斥态（就近胶囊不占这里：它可以和顶栏共存，只跟整块面板互斥） */
 private enum class Sheet { NONE, CURVE }
 
+/**
+ * 分屏时整页的压缩比例：`scale = 1 − SPLIT_SQUEEZE · splitP`，1f 那一帧恰好压到半宽/半高。
+ * 这是版面比例（不是机型参数），左右各占半屏的对半分屏由它定义。
+ */
+private const val SPLIT_SQUEEZE = 0.5f
+
+/**
+ * 右侧分屏面板（用户第 3 项）。宽度取根宽一半，与左侧被压进去的那半屏对齐；它挂在**压图层之外**
+ * （根 Box 的兄弟节点），所以自己不跟着压缩——左侧压缩与右侧面板是同一层级里互不干涉的两块。
+ *
+ * 两态：
+ * - [compareOn] = false（模式列表）：两个功能项 + 退出。
+ *   「另镜头录制」的可用态由 [lensSupported]（双摄并发探测所见即所得）决定：不可用 = `onClick = null`
+ *   （[WotaChip] 的纯读数形态）+ `valueColor` 退到 `textLo` 灰显，并在项下挂一行小字；
+ *   **可用也仍是占位**（双录实现是下一批），点击只给「下一批实现」提示 ⇒ 不是假开关。
+ * - [compareOn] = true（对比模式）：顶部「返回」回列表 + [SplitComparePlayer] 播放参考视频。
+ */
+@Composable
+private fun SplitPanel(
+    onExit: () -> Unit,
+    compareOn: Boolean,
+    onToggleCompare: (Boolean) -> Unit,
+    lensSupported: Boolean,
+    onLensClick: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxHeight()
+            .fillMaxWidth(0.5f)
+            .padding(WotaSpace.s)
+            .wotaCard()
+            .padding(WotaSpace.l),
+        verticalArrangement = Arrangement.spacedBy(WotaSpace.m)
+    ) {
+        if (compareOn) {
+            // 返回是这一态的顶栏项：回模式列表不退出分屏（退出分屏另有一颗）。复用编辑页那枚「返回」串
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
+            ) {
+                WotaChip(
+                    label = stringResource(R.string.hud_edit_back),
+                    selected = false,
+                    onClick = { onToggleCompare(false) }
+                )
+                Text(
+                    text = stringResource(R.string.cam_split_compare),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = WotaText
+                )
+            }
+            SplitComparePlayer(Modifier.weight(1f))
+        } else {
+            Text(
+                text = stringResource(R.string.cam_split),
+                style = MaterialTheme.typography.titleMedium,
+                color = WotaText
+            )
+            WotaChip(
+                label = stringResource(R.string.cam_split_lens),
+                selected = false,
+                valueColor = if (lensSupported) null else WotaColor.textLo,
+                onClick = if (lensSupported) onLensClick else null
+            )
+            if (!lensSupported) {
+                Text(
+                    text = stringResource(R.string.cam_split_lens_unsupported),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WotaColor.textLo
+                )
+            }
+            WotaChip(
+                label = stringResource(R.string.cam_split_compare),
+                selected = false,
+                onClick = { onToggleCompare(true) }
+            )
+            // 退出按钮顶到底部，与上面几个"选功能"的模式项在视觉上分开
+            Spacer(Modifier.weight(1f))
+            WotaChip(
+                label = stringResource(R.string.cam_split_exit),
+                selected = false,
+                onClick = onExit
+            )
+        }
+    }
+}
+
+/**
+ * 分屏右侧的实时对比播放器（用户第 3 项后半）。
+ *
+ * 生命周期：引擎由 [rememberPlayerEngine] 持有，它在**本子树离开组合时** releasePlayer——
+ * 切出分屏 / 返回模式列表 / 离开录制页三条出口全走这一条，与单播放页同一先例，不会漏 release。
+ * 左侧录制与这里互不干扰：这是**独立**的引擎实例，整条相机链路一次都不碰。
+ *
+ * 参考视频**外放**（用 PlayerEngine 默认音量）：内录要 MediaProjection 授权，本批不做，
+ * 只让用户听得见。选片走系统相册 ACTION_PICK（与对比页同一手法）：content Uri → mediaId → 仓库反查；
+ * 选完默认暂停（[com.wotagei.cam.player.PlayerEngine.attach] 内置 playWhenReady=false），点播放才播。
+ */
+@Composable
+private fun SplitComparePlayer(modifier: Modifier = Modifier) {
+    val app = LocalContext.current.applicationContext
+    val repo = rememberMediaRepo()
+    val engine = rememberPlayerEngine()
+    val scope = rememberCoroutineScope()
+    var clipUri by remember { mutableStateOf<Uri?>(null) }
+    var banner by remember { mutableStateOf<Int?>(null) }
+    // 拖动中本地值覆盖轮询值（与单播放页同一条  手法）：松手才 seek，避免 seek 未完成时进度回跳
+    var dragFrac by remember { mutableStateOf<Float?>(null) }
+
+    val pos by engine.positionMs.observed()
+    val dur by engine.durationMs.observed()
+    val playing by engine.isPlaying.observed()
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        // 坏 Uri / 解析失败一律按没选成处理：parseId 只认 media uri，个别相册会回私有 provider uri，
+        // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）
+        val uri = result.data?.data
+        var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
+        if (id <= 0L && uri != null) {
+            id = runCatching {
+                app.contentResolver.query(uri, arrayOf(MediaStore.Video.Media._ID), null, null, null)
+                    ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+            }.getOrNull() ?: 0L
+        }
+        if (id <= 0L) {
+            banner = R.string.compare_pick_failed
+        } else {
+            scope.launch {
+                val clip = repo.clipById(id).first()
+                if (clip == null) {
+                    banner = R.string.compare_pick_failed
+                } else {
+                    engine.attach(clip.uri)
+                    clipUri = clip.uri
+                }
+            }
+        }
+    }
+
+    if (clipUri == null) {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
+            ) {
+                WotaChip(
+                    label = stringResource(R.string.cam_split_pick),
+                    selected = false,
+                    onClick = {
+                        // 不加 FLAG_GRANT_READ_URI_PERMISSION：结果 uri 的读授权由相册在 result 里自行授予
+                        picker.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+                    }
+                )
+                // 失败提示就地挂在选择按钮下方（本页主职是录制，不另起横幅浮层）
+                banner?.let {
+                    Text(
+                        text = stringResource(it),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WotaColor.textLo
+                    )
+                }
+            }
+        }
+    } else {
+        Column(modifier, verticalArrangement = Arrangement.spacedBy(WotaSpace.s)) {
+            WotaPlayerSurface(
+                engine = engine,
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
+            // 极简控制行：一枚播放/暂停 + 一条时间读数；进度条是唯一可拖 seek 的入口
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
+            ) {
+                WotaIconButton(
+                    image = if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                    description = stringResource(R.string.player_play_pause),
+                    onClick = { engine.softPause(playing) }
+                )
+                Text(
+                    text = "${formatDuration(pos)} / ${formatDuration(dur)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WotaColor.textLo
+                )
+            }
+            WotaSeekBar(
+                fraction = dragFrac ?: if (dur > 0) (pos.toFloat() / dur.toFloat()) else 0f,
+                onDrag = { dragFrac = it },
+                onDragEnd = { frac ->
+                    engine.seekTo((frac * dur).toLong())
+                    dragFrac = null
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
 private const val HINT_MS = 2_000L
 private const val FOCUS_HINT_MS = 1_500L
 private const val TAG_UI = "WotaUi"
 
 /**
- * 顶栏右端固定件吃掉的宽度（左右内边距 8+8 + 胶囊组与设置入口的间距 6 + 圆形设置入口约 44）。
- * 抽取前它是顶栏那行 `fillMaxWidth` Row 的自然结果，现在两条判据都要显式用它：
- * 容量段取档用的 `topBarRoomDp`（§59/§74）与胶囊组的布局宽度上限 `topBarMaxWidthDp`，必须是同一条账。
+ * 顶栏容量段三档取位要的**文本实测宽**（dp）。10-01 改造：阈值不再是测试机真机字体度量常量，
+ * 改由这里现量两段候选文案（外加画幅段文案，供 [com.wotagei.cam.core.capacityNetRoomDp] 扣减）。
  */
-private const val TopBarChromeReserveDp = 66
+internal data class CapacityTextWidths(
+    /** 画幅段文案（`sizeLabel`）实测宽 */
+    val sizeDp: Float,
+    /** 满档文案 [com.wotagei.cam.core.capacityLineText] 实测宽 */
+    val fullDp: Float,
+    /** 小时档文案 [com.wotagei.cam.core.capacityHoursText] 实测宽 */
+    val hoursDp: Float,
+)
 
+/**
+ * 量顶栏三段文案的宽（dp）：样式与 `HudLayer.TopSegment` 现显示的那条**同一个**
+ * （`MaterialTheme.typography.labelMedium`，字号已被 TextScaleLayer 按录制页文本高度缩放过，
+ * 系统 fontScale 也在密度里），所以量到的宽度就是真机上画出来的宽度。
+ *
+ * 缓存自然键 = **三段文案 + style + 密度**：文案随剩余空间/码率变（每变一次就三段一起重测），
+ * style 变（改文本高度档）与密度变（改系统字号）都必须重测，键里少一个都会拿旧宽去比新字。
+ * 量不到半帧的空档不存在：三段文案都是纯函数产物，任何时刻都能现量。
+ */
+@Composable
+internal fun rememberCapacityTextWidths(
+    freeMb: Long,
+    totalBitrateBps: Int,
+    sizeLabel: String,
+): CapacityTextWidths {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val style = MaterialTheme.typography.labelMedium
+    val fullText = com.wotagei.cam.core.capacityLineText(freeMb, totalBitrateBps)
+    val hoursText = com.wotagei.cam.core.capacityHoursText(freeMb, totalBitrateBps)
+    return remember(measurer, density, style, sizeLabel, fullText, hoursText) {
+        // px → dp 用**当前**密度：measurer 里缓存的布局随 measure 时的 density 重排，这里换算口径要一致
+        fun widthDpOf(text: String): Float =
+            with(density) { measurer.measure(text, style).size.width.toDp().value }
+        CapacityTextWidths(widthDpOf(sizeLabel), widthDpOf(fullText), widthDpOf(hoursText))
+    }
+}
 
 // ------------------------------------------------------------------ 取景覆盖
 

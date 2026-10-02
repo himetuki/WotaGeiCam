@@ -77,7 +77,10 @@ class WotaParams(private val scope: CoroutineScope) {
         fps.value = if (pick == null) ParamState(targetFps, null, enabled = false, exact = false)
         else ParamState(targetFps, pick.lo..pick.hi, true, pick.exact)
 
-        applyExposure(a, targetFps)
+        // 快门上限吃「实际生效的帧周期上界」= 上面 pick 到的 hi（无固定 [f,f] 时是设备的可变范围上界），
+        // 不是用户档位本身：否则用户选 24fps、设备只给 [15,30]（非精确）时，列表会按 1/24 判可选，
+        // 下发/回写却按 30fps 帧周期压回 1/30，露出一个点不住的死档位。
+        applyExposure(a, targetFps, pick?.hi)
         applyEv(a)
         applyZoom(a)
         applyFocus(a)
@@ -89,18 +92,25 @@ class WotaParams(private val scope: CoroutineScope) {
         a.dump(lens.value.name)
     }
 
-    private fun applyExposure(a: CameraAbility, targetFps: Int) {
+    /**
+     * @param fpsHi 实际生效的帧率上界（`pickFpsRange` 的 `.hi`）；为 null（该档 fps 不可用）时
+     *              退回用户档位 [targetFps]，与改动前行为一致。帧周期一律吃这个量，不吃 [targetFps]。
+     */
+    private fun applyExposure(a: CameraAbility, targetFps: Int, fpsHi: Int?) {
         iso.value = if (a.iso.ok()) {
             ParamState(clamped(iso.value.value, a.iso.lo, a.iso.hi), a.iso.lo..a.iso.hi)
         } else {
             ParamState(iso.value.value, null, enabled = false)
         }
 
-        // 三条硬规则：快门 ≤ 设备上限、≤ 1/10s 防手抖、≤ 1/fps 防丢帧
-        val period = WotaTiers.NS_PER_SECOND / targetFps.coerceAtLeast(1)
+        // 三条硬规则：快门 ≤ 设备上限、≤ 1/10s 防手抖、≤ 1/fps 防丢帧。
+        // 上限的算法抽在 core 的 [shutterCeilingNs]（纯函数，有 JVM 单测）：它先把设备上限抬到
+        // 强制档 1/24、1/25，再过 1/10s 与 1/帧周期。帧周期吃的是**实际生效的 fps 上界**（[fpsHi]）：
+        // 25fps 下 1/24 被 40ms 帧周期压回；24fps 退化成非精确范围（如 [15,30]，上界 30）时，
+        // 1/24 同样会被 30fps 的帧周期压回——不能只看用户档位那个 24。
         if (a.exposureNs.ok()) {
             val lo = a.exposureNs.lo.toLong()
-            val hi = minOf(a.exposureNs.hi.toLong(), WotaTiers.SHUTTER_CAP_NS, period)
+            val hi = shutterCeilingNs(a.exposureNs.hi.toLong(), fpsHi ?: targetFps)
             shutter.value = if (hi >= lo) {
                 ParamState(clamped(shutter.value.value, lo, hi), lo..hi)
             } else {

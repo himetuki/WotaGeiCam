@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  播放器的承载面（PlayerScreen.WotaPlayerSurface inflate 用）。
+  为什么用 TextureView 而不是默认的 SurfaceView（10-01 水平镜像修订）：
+  镜像这类视图变换（graphicsLayer.scaleX 取负）在 SurfaceView 上会穿透到独立合成层，
+  各家驱动/合成器表现不一致；TextureView 是普通 View，变换确定性成立（本机 API 30）。
+  四个 attr 均已对 media3-ui 1.1.1 的 declare-styleable PlayerView 核实。
+-->
+<androidx.media3.ui.PlayerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view"
+    app:use_controller="false"
+    app:resize_mode="fit"
+    app:shutter_background_color="@android:color/transparent" />

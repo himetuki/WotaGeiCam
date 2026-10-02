@@ -275,6 +275,32 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** [frostTableCopy] 里压实后的卡片数（读表成功才有值；0 = 这帧一块板都不画） */
     private var frostTableCards = 0
 
+    // region 霜探针诊断位（#84 取证，读方见 ui/FrostProbe.kt）
+    //
+    // 三个 @Volatile，GL 线程在 [drawFrostPlates] 里写、UI 线程的探针叠层读。
+    // 与 [frostTableCards] 的关系：那枚是私有工作值，这三枚是它的**对外镜像**——镜像而已，
+    // 不参与任何绘制判断，删探针也不许动绘制路径。口径与 [FrostCardTable.isPlatesDrawn] 同一条：
+    // `windowThrottled()` 早退的帧连 [drawFrostPlates] 都不进，这三枚在节流间隔里保持上一帧的值。
+    //
+    // 三个合成一条因果链，正好是交接里点名的四个数：
+    // [frostDiagSnapshotPublished]（快照非空？）→ [frostDiagTableCards]（表里有几块板？）→
+    // [frostDiagDrewPlates]（实画出去几块？）。前两个真、第三个 0 ⇒ 断点在
+    // [FrostPlatePass.draw] 内部（broken / 视图原点推断失败 / UV 求交全落空），用
+    // [frostPlateBrokenForDiagnostics] 与探针侧自算的 frostViewOriginInto 区分。
+
+    /** 最近一个窗口帧：模糊快照是否在手上（= publishedFrost != null） */
+    @Volatile
+    internal var frostDiagSnapshotPublished: Boolean = false
+
+    /** 最近一个窗口帧：矩形表里压实后的卡片数（读表失败保持 -1，正常路径不会发生） */
+    @Volatile
+    internal var frostDiagTableCards: Int = -1
+
+    /** 最近一个窗口帧：[FrostPlatePass.draw] 实画出去的板数（0 = 一块都没画） */
+    @Volatile
+    internal var frostDiagDrewPlates: Int = -1
+    // endregion
+
     private val stMatrix = FloatArray(16)
 
     /** 上屏 pass 与编码 pass 各一份纹理坐标与脏标记：两者施加的转正角不同，见 [buildTexCoords] */
@@ -516,6 +542,17 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     override fun isFrostBlurAvailable(): Boolean =
         wantFrostBlur && !released.get() && publishedFrost != null
+
+    // 霜探针（#84）：两枚 pass 有没有因连续错误进入停用态。只读不写，false 也可能是"还没建"。
+    // ⚠ 故意写成**块体**：表达式体（`= expr`）不被源码守卫的函数体定位识别，
+    // 体内的 frostPlatePass/frostChain 会被误判成"第二枚属性声明"把 FrostEncoderGuardTest 打红
+    internal fun frostChainBrokenForDiagnostics(): Boolean {
+        return frostChain?.isBrokenForDiagnostics() ?: false
+    }
+
+    internal fun frostPlateBrokenForDiagnostics(): Boolean {
+        return frostPlatePass?.isBrokenForDiagnostics() ?: false
+    }
 
     override fun frostRenderTarget(): FrostRenderTarget? {
         if (!isFrostBlurAvailable()) return null
@@ -1079,6 +1116,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         } else {
             0
         }
+        // 霜探针（#84）：只做镜像写，不参与任何判断——这帧"表里几块、实画几块、快照在不在"如实留档
+        frostDiagSnapshotPublished = snapshot != null
+        frostDiagTableCards = frostTableCards
+        frostDiagDrewPlates = drew
         FrostCardTable.reportPlatesDrawn(drew > 0)
     }
 
@@ -1469,6 +1510,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         frostPlatePass = null
         publishedFrost = null
         frostTableCards = 0
+        frostDiagSnapshotPublished = false
+        frostDiagTableCards = -1
+        frostDiagDrewPlates = -1
         // 引擎没了 ⇒ 屏幕上不可能还有板：撤报，UI 下一帧把旧的纯色 fill 画回来
         FrostCardTable.reportPlatesDrawn(false)
         deleteStripeTexture()
