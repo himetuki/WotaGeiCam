@@ -79,5 +79,15 @@ data class ArcDropLog(
         fun deleteFor(videoPath: String): Boolean = runCatching {
             File(sidecarFor(videoPath)).delete()
         }.getOrDefault(false)
+
+        /** 成片改名时连带搬 sidecar（位次档案与成片的对应关系不能断）；无可搬文件返回 false */
+        fun renameFor(oldVideoPath: String, newVideoPath: String): Boolean = runCatching {
+            val from = File(sidecarFor(oldVideoPath))
+            if (!from.isFile) return@runCatching false
+            val to = File(sidecarFor(newVideoPath))
+            if (to.absolutePath == from.absolutePath) return@runCatching true
+            to.parentFile?.mkdirs()
+            from.renameTo(to)
+        }.getOrDefault(false)
     }
 }
