@@ -84,6 +84,18 @@ class ArcRecordConvertTest {
         for (n in 0 until 10) assertTrue(rule.onFrame(n.toLong()))
     }
 
+    @Test
+    fun `时间戳回退的陈旧帧按丢弃处理_等下次到点_不炸不死锁`() {
+        // 传感器时间戳理论上单调，防御性钉住：回退帧一律视为"未到点"丢弃并计入丢弃账，
+        // 且不影响后续正常帧到点照常保留
+        val rule = ArcKeepRule(slot24)
+        assertTrue(rule.onFrame(0L))
+        assertFalse(rule.onFrame(-1_000L))          // 回退帧：丢弃
+        assertEquals(1, rule.takeDrops())            // 计入丢弃账
+        assertFalse(rule.onFrame(frame30 / 2))       // 仍未到应到时刻：丢弃
+        assertTrue(rule.onFrame(slot24))             // 到点：照常保留
+    }
+
     // endregion
 
     // region 被抽帧位次 sidecar（ArcDropLog）
