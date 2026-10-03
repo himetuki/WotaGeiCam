@@ -192,6 +192,24 @@ class ArcRecordConvertTest {
         f.delete()
     }
 
+    @Test
+    fun `renameFor搬移sidecar_旧名不留_目标同名幂等`() {
+        val f = File.createTempFile("arcside3", ".mp4")
+        ArcDropLog.writeTo(f.absolutePath, ArcDropLog("mend", 24, listOf(1 to 1)))
+        val renamed = ArcDropLog.renameFor(f.absolutePath, f.absolutePath + ".bak")
+        assertTrue(renamed)
+        assertFalse("旧 sidecar 应已搬走", File(ArcDropLog.sidecarFor(f.absolutePath)).exists())
+        assertEquals(
+            ArcDropLog("mend", 24, listOf(1 to 1)),
+            ArcDropLog.readFrom(f.absolutePath + ".bak")
+        )
+        // 同路径重命名（名字没变的保存）= 幂等不丢
+        assertTrue(ArcDropLog.renameFor(f.absolutePath + ".bak", f.absolutePath + ".bak"))
+        assertTrue(File(ArcDropLog.sidecarFor(f.absolutePath + ".bak")).exists())
+        File(f.absolutePath + ".bak").delete()
+        File(f.absolutePath + ".bak.drops.json").delete()
+    }
+
     // endregion
 
     // region 引擎强制选型（Recorders.useCodecEngine）

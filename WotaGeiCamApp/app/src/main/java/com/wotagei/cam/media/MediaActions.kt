@@ -90,9 +90,22 @@ class MediaActions private constructor(
             put(MediaStore.Video.Media.DISPLAY_NAME, ensureSuffix(name, clip.name))
         }
         return try {
-            withContext(Dispatchers.IO) { app.contentResolver.update(clip.uri, values, null, null) }
-            repo.invalidate()
-            MediaOp.Done
+            val oldPath = clip.dataPath
+            val rows = withContext(Dispatchers.IO) { app.contentResolver.update(clip.uri, values, null, null) }
+            if (rows > 0) {
+                repo.invalidate()
+                // MediaStore 改 DISPLAY_NAME 会连底层文件一起改名：sidecar（被抽帧位次档案）
+                // 必须跟着搬，否则改名后位次档案脱钩（旧名孤儿 + 新片无档案）
+                if (oldPath != null) withContext(Dispatchers.IO) {
+                    val newName = values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val dir = oldPath.substringBeforeLast('/', "")
+                    val newPath = if (dir.isEmpty()) newName else "$dir/$newName"
+                    com.wotagei.cam.record.ArcDropLog.renameFor(oldPath, newPath)
+                }
+                MediaOp.Done
+            } else {
+                MediaOp.Message(deniedRes(R.string.media_rename_failed))
+            }
         } catch (se: SecurityException) {
             // 改动别人的文件只能走系统授权框，那个框的语言与横屏布局都不归我们管，用户明确不要它：报失败即可
             MediaOp.Message(deniedRes(R.string.media_rename_failed))
