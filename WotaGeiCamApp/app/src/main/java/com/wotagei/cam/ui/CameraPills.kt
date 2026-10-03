@@ -41,6 +41,7 @@ import com.wotagei.cam.core.screenAspectOf
 import com.wotagei.cam.core.enumerateLenses
 import com.wotagei.cam.core.hFovOf
 import com.wotagei.cam.core.pickFpsRange
+import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.sizeCloseTo
 import com.wotagei.cam.record.StorageEstimate
 import com.wotagei.cam.ui.design.PillChoices
@@ -278,10 +279,19 @@ private fun FpsPill(
                 } else if (!opt.enabled) {
                     onUnsupported()
                 } else {
-                    params.fps.value = fps.copy(value = opt.value)
+                    // 换档必须**按目标档重查**精确性：copy(value=) 会沿用旧档的 exact——
+                    // "有原生 [25,25] 但无 [24,24]"的机型从 ※24 切到 25 会把 exact=false 带过去，
+                    // 转换误激活（白抽帧）+ 假 ※。fpsOptions 的求交口径在这里复用同一支。
+                    val highSpeed = opt.value > WotaTiers.HIGH_SPEED_FPS
+                    val pick = pickFpsRange(
+                        ability?.fpsRangesFor(size, highSpeed) ?: emptyList(), opt.value
+                    )
+                    params.fps.value = pick
+                        ?.let { ParamState(opt.value, it.lo..it.hi, enabled = true, exact = it.exact) }
+                        ?: fps.copy(value = opt.value, enabled = false, exact = false)
                     // 选定 ※ 档（24/25 无精确档）即预告转换：DIRECT 渲染没有 GL 编码支路、
                     // 无法拒帧，当场切 GPU（会话重建立即可见），录制按下时的守卫只作后备
-                    if (opt.value in WotaTiers.REQUIRED_FPS && fps.exact == false &&
+                    if (opt.value in WotaTiers.REQUIRED_FPS && params.fps.value.exact == false &&
                         params.renderMode.value == RenderMode.DIRECT
                     ) {
                         params.renderMode.value = RenderMode.GPU
