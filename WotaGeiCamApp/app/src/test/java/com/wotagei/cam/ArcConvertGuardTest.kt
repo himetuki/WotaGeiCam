@@ -69,4 +69,30 @@ class ArcConvertGuardTest {
             }
         }
     }
+
+    @Test
+    fun `录制侧转换接线在位`() {
+        val screen = maskedMain("ui/CameraScreen.kt")
+        assertTrue(
+            "录制启动必须把转换模式写进编码面（setArcConvert 接线缺失 = 抽帧静默失效）",
+            screen.contains("setArcConvert(")
+        )
+        assertTrue(
+            "DIRECT 撞上转换必须自动切 GPU 并提示（cam_arc_switch_gpu 守卫缺失 = 出 30fps 假 24 文件）",
+            screen.contains("cam_arc_switch_gpu")
+        )
+        assertTrue(
+            "停止录制必须写被抽帧位次 sidecar（ArcDropLog.writeTo 缺失 = 位次记录需求失效）",
+            screen.contains("ArcDropLog.writeTo(")
+        )
+        assertTrue(
+            "停录前必须冲刷 MEND 滞留帧（flushArcPending 缺失 = 每段尾帧必丢）",
+            screen.contains("flushArcPending(")
+        )
+        val recorder = maskedMain("record/Recorder.kt")
+        assertTrue(
+            "useCodecEngine 必须感知 arcConvert（MediaRecorder 无法拒帧，转换会话漏进 MR = 抽帧全废）",
+            recorder.contains("arcConvert")
+        )
+    }
 }
