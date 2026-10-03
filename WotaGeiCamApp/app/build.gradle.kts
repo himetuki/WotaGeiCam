@@ -7,8 +7,8 @@ plugins {
 }
 
 // 版本单一来源：defaultConfig 与产物命名共用
-val appVersionCode = 4
-val appVersionName = "0.0.4"
+val appVersionCode = 5
+val appVersionName = "0.0.5"
 
 // 产物命名：CI 传 -PapkBaseName=WotaGeiCam 时产物名带版本号（用户 10-03 指令），
 // 如 WotaGeiCam-v0.0.4-release.apk；本地不传该属性保持 app-*.apk 旧名，
