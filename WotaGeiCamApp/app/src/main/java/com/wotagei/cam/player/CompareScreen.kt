@@ -956,10 +956,10 @@ private fun TimePill(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** 每片缩放倍率角标（参考图左上角 x1.2088724 那枚）：1x 附近不组合，缩了才出现 */
+/** 每片缩放倍率角标（参考图左上角 x1.2088724 那枚）：1x 附近不组合；缩小（下限 0.1x）同样显示 */
 @Composable
 private fun ZoomBadge(zoom: Float, modifier: Modifier = Modifier) {
-    if (zoom <= 1.01f) return
+    if (zoom in 0.99f..1.01f) return
     Text(
         stringResource(R.string.player_zoom_badge, zoom),
         style = MonoStyle,
