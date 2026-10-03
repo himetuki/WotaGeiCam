@@ -5,6 +5,7 @@ import com.wotagei.cam.core.CurveEdit
 import com.wotagei.cam.core.CurveStack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -238,11 +239,79 @@ class ColorCurveTest {
     }
 
     @Test
+    fun `加点避让邻居_无缝时放弃而不落重复x`() {
+        // 回归（2026-10-04 自检）：纵向远处（hitTest 够不着）横向贴着已有点的点按，
+        // 旧实现会插出 x 重复的控制点——零宽线段跳变 + 该点 moved 时 lo>hi 永久卡死
+        val pts = CurveEdit.pointsOf(curve(0f to 0f, 0.04f to 0.9f, 1f to 1f))
+        val before = pts.toList()
+        assertNull(CurveEdit.inserted(pts, 0.03f, 0.1f))   // 落在 0.04 点的 MIN_DX 邻域内：放弃
+        assertEquals(before, pts)
+        // 正常避让：0.48 < 0.5 ⇒ 插在 0 与 0.5 之间，钳到 0.5−MIN_DX，与两邻居都保距
+        val base = CurveEdit.pointsOf(curve(0f to 0f, 0.5f to 0.5f, 1f to 1f))
+        val (next, at) = CurveEdit.inserted(base, 0.48f, 0.1f)!!
+        assertEquals(1, at)
+        assertEquals(0.46f, next[1].x, 1e-6f)
+        assertTrue(next[2].x - next[1].x >= CurveEdit.MIN_DX - 1e-6f)
+        assertNull(CurveEdit.inserted(next, 0.48f, 0.1f))  // 0.46 与 0.5 之间缝宽恰 0：再点同处放弃
+        assertNull(CurveEdit.inserted(next, 0.47f, 0.1f))  // 同缝：仍放弃
+    }
+
+    @Test
+    fun `编辑器模糊_混合操作后不变量恒成立`() {
+        // UI 同构流（插入前先 hitTest）随机打 800 次组合拳，钉住编辑器契约：
+        // 点数 2..MAX、x 严格升序且相邻间距 ≥MIN_DX、端点 x 锁 0/1、y 全在 0..1
+        // 种子固定 = 失败可复现（非加密用途，弱随机告警不适用）；换种子等于换一套用例
+        val rnd = java.util.Random(42)
+        var pts = CurveEdit.pointsOf(ColorCurve.IDENTITY)
+        var selected = -1
+        repeat(800) {
+            when (val r = rnd.nextInt(100)) {
+                in 0 until 45 -> {                                  // 拖动（含端点纵移）
+                    val idx = rnd.nextInt(pts.size)
+                    pts = CurveEdit.moved(pts, idx, rnd.nextFloat(), rnd.nextFloat())
+                    selected = idx
+                }
+                in 45 until 75 -> {                                 // 点空白新增（先命中后插入，同 UI）
+                    val gx = rnd.nextFloat()
+                    val gy = rnd.nextFloat()
+                    if (CurveEdit.hitTest(pts, gx, gy) < 0) {
+                        val added = CurveEdit.inserted(pts, gx, gy)
+                        if (added != null) {
+                            pts = added.first
+                            selected = added.second
+                        }
+                    }
+                }
+                else -> {                                           // 删除选中点（端点由 removed 自守）
+                    if (selected > 0 && selected < pts.size - 1) {
+                        pts = CurveEdit.removed(pts, selected)
+                    }
+                    selected = -1
+                }
+            }
+            // ---- 不变量
+            assertTrue("点数下限", pts.size >= 2)
+            assertTrue("点数上限", pts.size <= CurveEdit.MAX_POINTS)
+            assertEquals("端点 x=0", 0f, pts.first().x, 1e-6f)
+            assertEquals("端点 x=1", 1f, pts.last().x, 1e-6f)
+            for (i in 0 until pts.size - 1) {
+                val gap = pts[i + 1].x - pts[i].x
+                assertTrue("相邻间距 ≥MIN_DX（#$i gap=$gap）", gap >= CurveEdit.MIN_DX - 1e-6f)
+            }
+            pts.forEach { p ->
+                assertTrue("y 在 0..1（$p）", p.y in 0f..1f)
+            }
+        }
+    }
+
+    @Test
     fun `控制点到达上限后不再接受新点`() {
         var pts = CurveEdit.pointsOf(ColorCurve.IDENTITY)
         var guard = 0
+        // 宽间距铺点（2026-10-04 起 inserted 避让邻居：贴着已有点的点按会被放弃，
+        // 旧用例那套 0.01 步进的扎堆插法本身就落在被修掉的行为里）
         while (guard++ < 20) {
-            val x = 0.05f + guard * 0.01f
+            val x = (0.21f + guard * 0.13f).coerceAtMost(0.96f)
             val added = CurveEdit.inserted(pts, x, 0.5f) ?: break
             pts = added.first
         }
