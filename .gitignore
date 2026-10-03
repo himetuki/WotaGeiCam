@@ -57,7 +57,7 @@ desktop.ini
 keystore.properties
 # ===== 内部材料一律不进公开仓库（2026-10-03 用户指令，边界调整）=====
 /AGENTS.md
-/README.md
+/readme.md
 /需求.md
 /deliverable/
 /research/
