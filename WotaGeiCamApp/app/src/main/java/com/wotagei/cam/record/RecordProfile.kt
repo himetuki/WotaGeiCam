@@ -2,6 +2,7 @@ package com.wotagei.cam.record
 
 import android.media.MediaFormat
 import android.util.Size
+import com.wotagei.cam.core.ArcConvertMode
 
 /**
  * 一次录制的全部编码参数快照（04 文件 §2 契约，字段名与顺序不得改）。
@@ -26,7 +27,13 @@ data class RecordProfile(
     val audioEnabled: Boolean,
     val orientationHint: Int,
     val mirrored: Boolean,
-    val useGpu: Boolean
+    val useGpu: Boolean,
+    /**
+     * 强制 24/25fps 在无原生精确档设备上的录制期转换（null = 不转换，按既有口径）。
+     * 非 null 时 [com.wotagei.cam.record.Recorders.useCodecEngine] 强制走 MediaCodec 引擎
+     * （MediaRecorder 面输入无法拒帧），且 GL 编码支路按该模式抽帧/补弧。
+     */
+    val arcConvert: ArcConvertMode? = null
 ) {
     companion object {
         /** 参数表 `codec` 取值：与 MediaRecorder.VideoEncoder / MediaCodec mime 双向映射 */

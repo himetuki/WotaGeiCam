@@ -353,7 +353,7 @@ private class ArcRepairSession(
         val plan = ArcRepairPlan.of(srcFrames, srcFps, dstFps)
         if (plan.dstFrames <= 0) throw ArcFail(ArcRepairError.SOURCE)
         dstTotal = plan.dstFrames
-        flow = ArcRepairFlow(plan, dstFps)
+        flow = ArcRepairFlow(plan)
         note = "源实测≈${srcFps}fps（容器标 $containerFps）→ 目标 ${dstFps}fps，" +
             "被抽帧画面已取大并入前后帧；不改原片"
         Log.i(

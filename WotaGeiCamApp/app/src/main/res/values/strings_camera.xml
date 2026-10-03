@@ -41,6 +41,13 @@
     <string name="cam_p_lens">镜头</string>
     <string name="cam_p_size">分辨率</string>
     <string name="cam_p_fps">帧率</string>
+    <!-- 录制期转换（强制 24/25fps 无原生精确档设备，2026-10-03 定版） -->
+    <string name="cam_fps_convert_title">本机无原生档，录制时抽帧到所选帧率</string>
+    <string name="cam_fps_convert_mend">自动抽帧补弧</string>
+    <string name="cam_fps_convert_drop">仅抽帧</string>
+    <string name="cam_fps_convert_mend_note">被抽帧的画面并入前后帧，光弧连贯</string>
+    <string name="cam_fps_convert_drop_note">只丢帧不补，光弧在抽帧点会有断口</string>
+    <string name="cam_arc_switch_gpu">已切换 GPU 渲染：抽帧需要 GPU 编码通路，请再按一次录制</string>
     <string name="cam_p_bitrate">码率</string>
     <string name="cam_p_stab">防抖</string>
     <string name="cam_p_flash">闪光灯</string>

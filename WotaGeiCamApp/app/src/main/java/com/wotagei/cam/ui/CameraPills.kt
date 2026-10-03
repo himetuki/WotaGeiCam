@@ -2,6 +2,10 @@ package com.wotagei.cam.ui
 
 import android.content.Context
 import android.hardware.camera2.CameraManager
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -11,9 +15,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
+import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
@@ -41,9 +48,11 @@ import com.wotagei.cam.ui.design.PillRow
 import com.wotagei.cam.ui.design.PillRowList
 import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.PillToggles
+import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaType
+import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.dialog.afLabelRes
 import com.wotagei.cam.ui.dialog.aeLabelRes
 import com.wotagei.cam.ui.dialog.bitrateText
@@ -248,8 +257,16 @@ private fun FpsPill(
     onLockTip: () -> Unit,
     onUnsupported: () -> Unit
 ) {
+    val app = LocalContext.current
+    val settingsPrefs = remember(app) { WotaSettings.of(app) }
     val size by params.size.observed()
     val fps by params.fps.observed()
+    // 强制 24/25fps 在无原生精确档（※ 档）设备上的录制期转换模式（2026-10-03 定版）：
+    // MEND=抽帧+取大补弧（弧连续）/ DROP=仅抽帧（弧在抽帧点断，用户自选）。有精确档时不显示。
+    val convertActive = fps.value in WotaTiers.REQUIRED_FPS && !fps.exact
+    var convertMode by remember(settingsPrefs) {
+        mutableStateOf(WotaSettings.arcConvertMode(settingsPrefs))
+    }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_fps)) {
         PillChoices(
             options = fpsOptions(ability, size, fps.value > WotaTiers.HIGH_SPEED_FPS),
@@ -265,6 +282,42 @@ private fun FpsPill(
                 }
             }
         )
+        if (convertActive) {
+            Text(
+                stringResource(R.string.cam_fps_convert_title),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ArcConvertMode.entries.forEach { mode ->
+                    WotaChip(
+                        label = stringResource(
+                            if (mode == ArcConvertMode.MEND) R.string.cam_fps_convert_mend
+                            else R.string.cam_fps_convert_drop
+                        ),
+                        selected = convertMode == mode,
+                        // 录制中只看不改（与档位选择同一把锁）
+                        onClick = {
+                            if (!recording) {
+                                convertMode = mode
+                                WotaSettings.setArcConvertMode(settingsPrefs, mode)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Text(
+                stringResource(
+                    if (convertMode == ArcConvertMode.MEND) R.string.cam_fps_convert_mend_note
+                    else R.string.cam_fps_convert_drop_note
+                ),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
     }
 }
 

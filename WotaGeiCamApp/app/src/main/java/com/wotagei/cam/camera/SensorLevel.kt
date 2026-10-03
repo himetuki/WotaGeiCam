@@ -6,6 +6,8 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -81,6 +83,26 @@ class LevelSensor(context: Context) : SensorEventListener {
     private var primed = false
     private var vibrator: Vibrator? = null
 
+    // ---- 静默自愈 watchdog（首启"俯仰仪无响应、重启恢复"的缺陷修复，2026-10-03 用户反馈）：
+    // 部分机型冷启时 registerListener 返回 true 但 HAL 迟迟不吐样本（传感器服务唤醒竞态），
+    // 二次启动才正常。注册后 600ms 仍零样本就注销重挂，最多两次；收到任一样本即解除。
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var samplesSeen = 0
+    private var watchdogRetries = 0
+
+    private val watchdog = Runnable {
+        if (!registered || samplesSeen > 0) return@Runnable
+        if (watchdogRetries >= WATCHDOG_MAX_RETRIES) {
+            Log.w(TAG, "accelerometer silent after $watchdogRetries re-register attempts, giving up")
+            return@Runnable
+        }
+        watchdogRetries++
+        Log.w(TAG, "accelerometer silent after register, re-registering (retry=$watchdogRetries)")
+        registered = false
+        runCatching { sensorManager?.unregisterListener(this) }
+        start()
+    }
+
     // 低通后的重力分量；NaN = 尚未收到首个样本
     private var sx = Float.NaN
     private var sy = Float.NaN
@@ -95,15 +117,24 @@ class LevelSensor(context: Context) : SensorEventListener {
             return
         }
         if (registered) return
+        samplesSeen = 0
         val ok = runCatching {
             manager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
         }.getOrDefault(false)
         registered = ok
-        if (!ok) Log.w(TAG, "registerListener(ACCELEROMETER) failed")
+        if (!ok) {
+            Log.w(TAG, "registerListener(ACCELEROMETER) failed")
+            return
+        }
+        if (watchdogRetries < WATCHDOG_MAX_RETRIES) {
+            mainHandler.removeCallbacks(watchdog)
+            mainHandler.postDelayed(watchdog, WATCHDOG_DELAY_MS)
+        }
     }
 
     /** 停止采样；下次 [start] 从当前姿态重新收敛，不会用旧值做低通起点 */
     fun stop() {
+        mainHandler.removeCallbacks(watchdog)
         if (!registered) return
         registered = false
         runCatching { sensorManager?.unregisterListener(this) }
@@ -115,6 +146,7 @@ class LevelSensor(context: Context) : SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+        samplesSeen++
         val values = event.values
         if (values.size < 3) return
         val x = values[0]
@@ -205,5 +237,11 @@ class LevelSensor(context: Context) : SensorEventListener {
         private const val GRAVITY = 9.80665f
         private const val MIN_VALID_G = 0.6f
         private const val FLAT_GUARD = 0.25f
+
+        /** 注册后静默多久判定"HAL 没吐数据"并重挂 */
+        private const val WATCHDOG_DELAY_MS = 600L
+
+        /** 自愈重挂上限（两次仍静默就放弃，避免死循环耗电） */
+        private const val WATCHDOG_MAX_RETRIES = 2
     }
 }

@@ -59,6 +59,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.core.CurveStack
+import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.RefLineType
@@ -133,6 +134,13 @@ object WotaSettings {
     const val KEY_GALLERY_COLUMNS = "gallery_columns"
 
     /**
+     * 强制 24/25fps 在无原生精确档设备上的录制期转换模式（2026-10-03 定版）：
+     * `MEND`（默认，抽帧+取大补弧）/ `DROP`（仅抽帧）。只在帧率弹层选中 24/25 且设备无
+     * 精确档时生效；设备有原生档时该控件不显示、值不参与录制。
+     */
+    const val KEY_ARC_CONVERT = "arc_convert_mode"
+
+    /**
      * 取景 HUD 的毛玻璃背板（#84 步骤 2 · A2 混合）。**默认关**，且只有用户在下面那一行亲手翻过
      * 才会为 true：这条不走 [applyDefaultsOnce]、不被任何"上次记得的开"之外的路径自动打开——
      * DIRECT 模式或离屏链停用时它开着也不会有板（`HudFrost.live` 只认 GL 的真回报）。
@@ -166,6 +174,15 @@ object WotaSettings {
 
     fun setMotionMode(prefs: SharedPreferences, mode: MotionMode) {
         prefs.edit().putString(KEY_MOTION, mode.name).apply()
+    }
+
+    /** 录制期转换模式（强制 24/25fps 无原生精确档时）：默认自动抽帧补弧 */
+    fun arcConvertMode(prefs: SharedPreferences): ArcConvertMode =
+        runCatching { ArcConvertMode.valueOf(prefs.getString(KEY_ARC_CONVERT, ArcConvertMode.MEND.name)!!) }
+            .getOrDefault(ArcConvertMode.MEND)
+
+    fun setArcConvertMode(prefs: SharedPreferences, mode: ArcConvertMode) {
+        prefs.edit().putString(KEY_ARC_CONVERT, mode.name).apply()
     }
 
     fun defaultFps(prefs: SharedPreferences) = prefs.getInt(KEY_DEFAULT_FPS, 25)

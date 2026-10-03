@@ -16,10 +16,14 @@ import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
 import android.view.Surface
+import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.ColorCurve
 import com.wotagei.cam.core.CurveStack
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.PeakingColor
+import com.wotagei.cam.record.ArcKeepRule
+import com.wotagei.cam.record.ArcOp
+import com.wotagei.cam.record.ArcRepairFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -196,6 +200,31 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 音频侧的时钟跨域，muxer 直接产出不可用文件（真机表现为录制后无成片）。
      */
     private var encoderBaseNs = 0L
+
+    // region 录制期转换（强制 24/25fps 无精确档时的抽帧/补弧，2026-10-03 定版）
+
+    /** 转换模式；null = 不转换（编码支路照旧整帧直通） */
+    @Volatile
+    private var arcConvert: ArcConvertMode? = null
+
+    /** 转换目标帧率（= RecordProfile.fps，喂均匀节奏与 PTS 分母） */
+    @Volatile
+    private var arcDstFps = 0
+
+    /** 在线保留规则：到达时刻 vs 应到时刻，无需预估传感器帧率 */
+    private var arcRule = ArcKeepRule(slotNs = 0L)
+
+    /** 抽帧/补弧状态机（录制在线路：保留决策走 onClassification） */
+    private var arcFlow = ArcRepairFlow(dstFps = 24)
+
+    /** MEND 模式的离屏通道（pending/acc 乒乓 + 取大合并），GL 线程内使用 */
+    private var arcMendPass: ArcMendPass? = null
+
+    /** 被抽帧位次账（GL 线程写、主线程 stop 时快照取走；配对 = 输出位次 to 丢弃数） */
+    private val arcDrops = ArrayList<Pair<Int, Int>>()
+    private val arcDropsLock = Any()
+
+    // endregion
 
     private var inputTexture: SurfaceTexture? = null
     private var oesTextureId = 0
@@ -429,6 +458,33 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     /** 编码器面尺寸（px），未绑定为 0x0 */
     fun outputSurfaceSize(): Pair<Int, Int> = encoderWidth to encoderHeight
+
+    /**
+     * 配置录制期转换（强制 24/25fps 无精确档时的抽帧/补弧）。[mode] = null 关闭（直通）。
+     * 必须在 [setOutputSurface] **之前**调：节奏锚点随编码面重挂一起复位。
+     */
+    fun setArcConvert(mode: ArcConvertMode?, dstFps: Int) {
+        if (released.get()) return
+        postGl {
+            arcConvert = mode?.takeIf { dstFps > 0 }
+            arcDstFps = dstFps
+            arcRule.reset()
+            arcFlow = ArcRepairFlow(dstFps)
+            synchronized(arcDropsLock) { arcDrops.clear() }
+            arcMendPass?.release()
+            arcMendPass = if (arcConvert == ArcConvertMode.MEND && encoderWidth > 0) {
+                ArcMendPass().also { it.ensure(encoderWidth, encoderHeight) }
+            } else {
+                null
+            }
+            Log.i(TAG_GL, "arcConvert=$mode dstFps=$dstFps")
+        }
+    }
+
+    /** 取走被抽帧位次账（录制收尾写 sidecar 用；取走即清空） */
+    fun drainArcDrops(): List<Pair<Int, Int>> = synchronized(arcDropsLock) {
+        arcDrops.toList().also { arcDrops.clear() }
+    }
 
     // endregion
 
@@ -890,6 +946,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         encoderHeight = heightPx
         encoderFrameIndex = 0
         encoderBaseNs = System.nanoTime()
+        // 转换会话：新文件新节奏（分段/重挂都从这里走），位次账随文件清零
+        arcRule.reset()
+        if (arcDstFps > 0) arcFlow = ArcRepairFlow(arcDstFps)
+        synchronized(arcDropsLock) { arcDrops.clear() }
+        if (arcConvert == ArcConvertMode.MEND && widthPx > 0 && heightPx > 0) {
+            if (arcMendPass == null) arcMendPass = ArcMendPass()
+            arcMendPass?.ensure(widthPx, heightPx)
+        }
         dirty = true
         scheduleDraw()
     }
@@ -948,7 +1012,20 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         syncEffect()
         if (programId == 0) return
 
-        drawEncoderPass()
+        // 录制期转换（抽帧/补弧）只动编码支路；预览/霜/上屏各走各的，一帧不丢。
+        // skip=true 的帧跳过编码 swap（帧序号不推进 ⇒ 输出节奏均匀）；MEND 通道内部失败会
+        // 把自己降级并返回"需要直通补一帧"，所以这里的直通调用点恒一（FrostEncoderGuard 钉着）。
+        var keep = true
+        var skip = false
+        when (arcConvert) {
+            ArcConvertMode.DROP -> skip = !arcRule.onFrame(lastDrawnTimestampNs)
+            ArcConvertMode.MEND -> {
+                keep = arcRule.onFrame(lastDrawnTimestampNs)
+                skip = drawEncoderMended(keep)
+            }
+            else -> Unit
+        }
+        if (!skip) drawEncoderPass()
         // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
         // 不许让它挡在编码器的 swap 前面（那是成片的一帧）
         adoptFrostIntentFromTable()
@@ -970,6 +1047,71 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         drawPass(encoderPass = true)
         stampEncoderPresentation(encoder)
         if (!swap(encoder)) dropEncoderSurface()
+    }
+
+    /**
+     * MEND（自动抽帧补弧）路的编码支路：特效链先渲进离屏 cur，再由 `ArcRepairFlow` 的指令
+     * 决定滞留/并弧/发出。
+     * @return true = 本帧需要调用方**直通补发**（内部失败已把自己降级，安全阀语义）；
+     *         false = 本帧已处理（发出/滞留/丢弃），调用方跳过直通。
+     */
+    private fun drawEncoderMended(keep: Boolean): Boolean {
+        val encoder = encoderEglSurface
+        val mend = arcMendPass
+        if (encoder == null || mend == null || !mend.ready || encoderWidth <= 0) {
+            degradeArcConvert("补弧链未就绪")
+            return true
+        }
+        if (!makeCurrent(encoder)) {
+            dropEncoderSurface()
+            return false
+        }
+        // 1) 特效链 → 离屏 cur（编码口径：只抵消矩阵分量、不转正不镜像）
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mend.curFbo())
+        GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
+        drawPass(encoderPass = true)
+
+        // 2) 状态机指令（保留决策已在 drawFrame 里交给 arcRule）
+        for (op in arcFlow.onClassification(keep)) {
+            val ok = when (op) {
+                is ArcOp.AccumulateCur -> mend.accumulate(op.fresh)
+                is ArcOp.FoldAccIntoPending -> mend.foldAccIntoPending()
+                is ArcOp.HoldCurAsPending -> mend.holdCurAsPending()
+                is ArcOp.MergeCurAsPending -> mend.mergeCurAsPending(op.useAcc)
+                is ArcOp.EmitPending -> emitMended(encoder, mend)
+            }
+            if (!ok) {
+                degradeArcConvert("补弧 GL 指令失败")
+                return true
+            }
+            if (op is ArcOp.EmitPending) {
+                // 刚发出的输出位次 = 自增前的帧序号；伴随丢弃数在保留判定时已累计
+                synchronized(arcDropsLock) {
+                    arcDrops += (encoderFrameIndex - 1) to arcRule.takeDrops()
+                }
+            }
+        }
+        return false
+    }
+
+    /** 待发帧 → 编码器面（视口/均匀 PTS/swap 与 [drawEncoderPass] 同一口径；帧序号只在 emit 推进） */
+    private fun emitMended(encoder: EGLSurface, mend: ArcMendPass): Boolean {
+        GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
+        if (!mend.drawPending()) return false
+        stampEncoderPresentation(encoder)
+        if (!swap(encoder)) {
+            dropEncoderSurface()
+            return false
+        }
+        return true
+    }
+
+    /** 转换链路失败的安全阀：本会话降级为直通编码，杜绝逐帧重试坏链 */
+    private fun degradeArcConvert(reason: String) {
+        Log.w(TAG_GL, "录制期转换降级为直通：$reason")
+        arcConvert = null
+        arcMendPass?.release()
+        arcMendPass = null
     }
 
     /**

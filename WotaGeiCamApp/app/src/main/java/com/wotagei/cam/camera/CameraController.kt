@@ -181,11 +181,15 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     // ------------------------------------------------- 权限结果入口
 
-    /** UI 据此决定是否弹权限申请（CAMERA 必需，RECORD_AUDIO 影响音轨） */
+    /**
+     * UI 据此决定是否弹权限申请。**显式全量申请**（用户 2026-10-03 指令）：CAMERA 与
+     * RECORD_AUDIO 恒一起申请，不再受 `audioEnabled` 门控——首启一次性把运行时权限要齐，
+     * 避免后续开音/开功能时再补弹。（传感器类无需任何 manifest/运行时权限，不在此列。）
+     */
     fun missingPermissions(): Array<String> {
         val list = mutableListOf<String>()
         if (!granted(Manifest.permission.CAMERA)) list += Manifest.permission.CAMERA
-        if (params.audioEnabled.value && !granted(Manifest.permission.RECORD_AUDIO)) {
+        if (!granted(Manifest.permission.RECORD_AUDIO)) {
             list += Manifest.permission.RECORD_AUDIO
         }
         return list.toTypedArray()

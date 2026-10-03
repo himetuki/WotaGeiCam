@@ -220,6 +220,8 @@ class MediaActions private constructor(
                 }
             }
             if (err == null) {
+                // 连带删被抽帧位次 sidecar（2026-10-03 定版：sidecar 随视频生命周期走，不留残留）
+                clip.dataPath?.let { com.wotagei.cam.record.ArcDropLog.deleteFor(it) }
                 done += clip
                 continue
             }

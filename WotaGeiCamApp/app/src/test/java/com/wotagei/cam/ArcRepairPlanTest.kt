@@ -173,7 +173,7 @@ class ArcRepairPlanTest {
 
     /** 按 30→24/N=45 完整喂一遍流，返回 (emitted pts 列表, 全部指令) */
     private fun feed30to24(): Pair<List<Long>, List<ArcOp>> {
-        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24), dstFps = 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24))
         val ops = mutableListOf<ArcOp>()
         for (s in 0 until 45) ops += flow.onSourceFrame(s)
         ops += flow.onSourceEos()
@@ -206,7 +206,7 @@ class ArcRepairPlanTest {
         assertEquals(35, merges)
         assertEquals(emits, holds + merges)
         // EOS 后状态机清零：再问一次只会得到空指令
-        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24), 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24))
         for (s in 0 until 45) flow.onSourceFrame(s)
         flow.onSourceEos()
         assertTrue(flow.onSourceEos().isEmpty())
@@ -227,7 +227,7 @@ class ArcRepairPlanTest {
 
     @Test
     fun `桥_连续抽帧时第二枚不fresh_不清残留也不漏累积`() {
-        val flow = ArcRepairFlow(ArcRepairPlan.of(60, 60, 24), 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(60, 60, 24))
         val accs = mutableListOf<ArcOp.AccumulateCur>()
         for (s in 0 until 60) accs += flow.onSourceFrame(s).filterIsInstance<ArcOp.AccumulateCur>()
         // 60→24 的连续抽帧对（源 3,4 等）：第一枚 fresh 清残留、第二枚接着取大
@@ -240,7 +240,7 @@ class ArcRepairPlanTest {
     fun `桥_EOS尾巴上的被抽帧并进最后一枚保留帧`() {
         // 30→24/N=45：最后一枚源（44）恰是抽帧位次 ⇒ EOS 指令 = [Fold, Emit(最后一枚的PTS)]
         // （35 = 已发出的前 35 枚，待发的那枚正是输出第 35 位）
-        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24), 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24))
         for (s in 0 until 45) flow.onSourceFrame(s)
         val tail = flow.onSourceEos()
         assertEquals(
@@ -251,17 +251,17 @@ class ArcRepairPlanTest {
 
     @Test
     fun `桥_首保留帧之前的被抽帧直接弃_空流不炸`() {
-        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24), 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24))
         // -1 是防御位（计划里负下标不保留），此时还没有滞留帧 ⇒ 空指令
         assertTrue(flow.onSourceFrame(-1).isEmpty())
         // 空流 EOS：没有滞留帧就没有输出
-        assertTrue(ArcRepairFlow(ArcRepairPlan.of(0, 30, 24), 24).onSourceEos().isEmpty())
+        assertTrue(ArcRepairFlow(ArcRepairPlan.of(0, 30, 24)).onSourceEos().isEmpty())
     }
 
     /** 整段枚举：对 30→24/N=45 的每一帧逐个对账（防"删掉某个分支仍全绿"） */
     @Test
     fun `整段枚举_45帧逐帧对账`() {
-        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24), 24)
+        val flow = ArcRepairFlow(ArcRepairPlan.of(45, 30, 24))
         var emitted = 0
         var pending = false
         var hasAcc = false
