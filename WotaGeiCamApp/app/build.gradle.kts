@@ -6,19 +6,42 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// CI 传 -PapkBaseName=WotaGeiCam 时产物名为 WotaGeiCam-*.apk；本地默认 app-* 不动既有脚本
+base {
+    archivesName.set((project.findProperty("apkBaseName") as? String) ?: "app")
+}
+
 android {
     namespace = "com.wotagei.cam"
     compileSdk = 34
+
+    // CI 四件套开关（.github/workflows/build-apk.yml）：传 -PabiSplits=true 时 ABI 交给下方
+    // splits.include 决定（plain/universal/arm64-v8a/armeabi-v7a 各一枚）；
+    // 平时不传该属性，保持"仅 arm64-v8a"的本地默认行为不变。
+    val ciAbiSplits = (project.findProperty("abiSplits") as? String)?.toBoolean() ?: false
 
     defaultConfig {
         applicationId = "com.wotagei.cam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.0.3"
-        ndk { abiFilters += listOf("arm64-v8a") }
+        versionCode = 4
+        versionName = "0.0.4"
+        if (!ciAbiSplits) {
+            ndk { abiFilters += listOf("arm64-v8a") }
+        }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+    }
+
+    if (ciAbiSplits) {
+        splits {
+            abi {
+                isEnable = true
+                reset()
+                include("arm64-v8a", "armeabi-v7a")
+                isUniversalApk = true
+            }
+        }
     }
 
     signingConfigs {
