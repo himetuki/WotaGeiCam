@@ -98,7 +98,17 @@ class Camera2Engine(
     private val manager = context.applicationContext
         .getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
-    private val workThread = HandlerThread("WotaCamEngine").apply { start() }
+    // 引擎线程兜底取证（审查 P1）：本线程原先没有 UncaughtExceptionHandler，任何漏网异常 =
+    // 静默进程死亡（正是「EV 可见时调快门/帧率闪退」的表现通道）。这里只负责**取证**：
+    // 记完必须原样交回默认处理器（Android 上即 KillApplicationHandler）——吞掉不交会让进程变
+    // 僵尸（相机线程死了、UI 还在），且 crash 不进 crash buffer/dropbox，恰恰丢掉最需要的崩栈。
+    private val workThread = HandlerThread("WotaCamEngine").apply {
+        uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { thread, e ->
+            Log.e(TAG, "引擎线程未捕获异常（取证后交默认处理终止进程）：${paramSnapshot()}", e)
+            Thread.getDefaultUncaughtExceptionHandler()?.uncaughtException(thread, e)
+        }
+        start()
+    }
     private val workHandler = Handler(workThread.looper)
     private val workExecutor = Executor { runnable -> workHandler.post(runnable) }
 
@@ -140,9 +150,19 @@ class Camera2Engine(
     private var tapRestoreTask: Runnable? = null
 
     private var dirty = false
+
+    /**
+     * 合并刷新任务本体必须自带 try（审查 P1）：[markDirty] 把它直发 Handler（不经 [post] 的
+     * catch 包装），apply/build 抛出的任何 RuntimeException 都会穿透到引擎线程未捕获 → 进程死亡。
+     * catch 里带参数快照（诊断 C 项）：真机一次 logcat 就能对上「崩的那一下下发的是什么档」。
+     */
     private val flushTask = Runnable {
-        dirty = false
-        if (session != null || highSpeedSession != null) applyRepeatingNow()
+        try {
+            dirty = false
+            if (session != null || highSpeedSession != null) applyRepeatingNow()
+        } catch (e: Exception) {
+            Log.e(TAG, "flushTask 异常：${paramSnapshot()}", e)
+        }
     }
 
     private val collectJobs = mutableListOf<Job>()
@@ -570,24 +590,44 @@ class Camera2Engine(
         )
     }
 
+    /** 崩溃取证用的参数快照（一行）：读参数总线不受引擎线程状态影响，给各 catch 分支共用 */
+    private fun paramSnapshot(): String = with(params) {
+        "aeMode=${aeMode.value} ev=${ev.value.value}steps(en=${ev.value.enabled}) " +
+            "fps=${fps.value.value}(exact=${fps.value.exact}) shutter=${shutter.value.value}ns " +
+            "iso=${iso.value.value} hs=$highSpeedActive session=${session != null}"
+    }
+
     private fun applyRepeatingNow() {
         val builder = reqBuilder
         val state = reqState
         if (builder == null || state == null) return
-        syncFpsPick(writeBack = true)
-        RequestApplier.apply(builder, state, snapshot())
-        val request = builder.build()
-        val hs = highSpeedSession
-        val normal = session
+        // 审查 P1：syncFpsPick/apply/build 原先都在 try 外，任何 RuntimeException 直接穿透
+        // （flushTask 与 onConfigured 都无包装）→ 引擎线程未捕获即进程死亡。一并纳入，
+        // 让下面的分类 catch 对「下发前的最后计算」同样生效。
         try {
+            syncFpsPick(writeBack = true)
+            RequestApplier.apply(builder, state, snapshot())
+            val request = builder.build()
+            val hs = highSpeedSession
+            val normal = session
             if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), null, workHandler)
             else normal?.setRepeatingRequest(request, captureCallback, workHandler)
         } catch (e: CameraAccessException) {
+            Log.w(TAG, "repeating 下发失败：${paramSnapshot()}", e)
             failDevice(mapAccessReason(e.reason), "repeating 下发失败 reason=${e.reason}")
         } catch (e: IllegalArgumentException) {
-            downgradeHighSpeed("高速请求列表被拒：fps=${fpsValue()}")
+            // P2 误路由修复：原先不分会话类型一律 downgradeHighSpeed——普通会话被 IAE 时会
+            // 静默把用户 fps 改写成 30、清空结构签名整个重建会话，还误报 OPEN_FAILED_HIGH_FPS。
+            // 只有高速会话的「高速请求列表被拒」才是 fps 降级的正确语义；普通会话保持现状
+            // （不改参数、不重建），现场留日志取证。
+            if (highSpeedSession != null) {
+                Log.w(TAG, "高速请求列表被拒：${paramSnapshot()}", e)
+                downgradeHighSpeed("高速请求列表被拒：fps=${fpsValue()}")
+            } else {
+                Log.w(TAG, "repeating 请求被拒（普通会话，保持现状不重建）：${paramSnapshot()}", e)
+            }
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "会话已失效，走重建恢复")
+            Log.w(TAG, "会话已失效，走重建恢复：${paramSnapshot()}", e)
             restartPreview()
         }
     }

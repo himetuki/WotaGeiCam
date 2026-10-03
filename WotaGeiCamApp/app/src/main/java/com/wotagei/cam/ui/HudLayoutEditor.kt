@@ -27,6 +27,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -41,6 +42,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -76,6 +80,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/**
+ * 提示水印层的文字最大宽度：占安全区宽的**比例**（不是 dp 常量，也不按方向写死）。
+ *
+ * 为什么是比例：水印排在五枚容器**之下**，而容器底板 74.9% 不透明——文字一旦钻到卡片底下
+ * 就是半张糊字。竖屏安全宽 360dp、默认布局左 Dock 占 8..62dp（HudEdgePad 8 + 宽 54）、
+ * 右 Dock 占 284..352dp（EdgePad 8 + 宽 68）⇒ 居中文字的右缘 ≤284 ⇒ 最宽 208dp ≈ 0.58×360。
+ * 取 **0.56**（≈202dp）留 3dp 余量：默认布局下两枚 Dock 都压不到这段字。
+ * 横屏安全宽 ≈732dp 时同比例给到 ≈410dp，落在左右两枚 Dock 之间的中腹空档。
+ * ⚠ Dock 是用户可拖的，所以这一档只保证**默认布局**不压卡；拖开后叠上了也只是
+ * "背景在卡片后面"这一设计本身的样貌（卡片透光 25.1%，糊字几乎读不出，不是 bug）。
+ */
+private const val NOTE_WATERMARK_WIDTH_FRACTION = 0.56f
 
 /**
  * 「编辑控件」页（docs/plan/13 第 5 条 + 任务 #74 的网格改造）：拖容器改位置、拖条目改格子，保存写 `hud_layout`。
@@ -146,6 +163,21 @@ import kotlin.math.roundToInt
  * 重叠**只提示不禁止**（用户定的口径），
  * 提示把叠在一起的两枚容器点名，不静默。
  *
+ * ## 提示语是背景，不占布局高度（本任务）
+ * 操作说明三件套（`hud_edit_note` + 格边长读数 `hud_edit_page_cell_size` + 弱化标记
+ * `hud_edit_hidden_entries_note`）以**水印层**呈现：一层 `matchParentSize()` 的纯 draw 层，
+ * 排在可放范围底板与网格底纹之上、五枚容器之下，`drawBehind` 里一次 `drawText` 画完。
+ * 它**不吃事件**（没有 pointerInput ⇒ 上面那条捕获层的命中区分派一字未改）、
+ * **不参与兄弟测量**（matchParentSize ⇒ 五枚容器与操作栏的 Modifier 链一个字没动）。
+ * 收益是真机量出来的（docs/plan/16「新发现的缺陷」1）：改前说明行 3 行高 112px + 它那档
+ * 行间距 8px 把右 Dock 的可用带从 538px 压到 424px（对焦被裁 13px、防抖整颗跌出带外）；
+ * 搬回背景后编辑页顶部避让 202px → ≈81px、带高 545px，右 Dock 拿回完整内容 526px。
+ * 观感：颜色与字阶**逐字复用旧说明行那一档**（`WotaType.caption` + `WotaColor.textLo`，
+ * contrast-audit 实测对 bg 3.84 / 对底板 hudScrim 3.83，过非正文 3:1 档），不是新造的淡色，
+ * 所以"太淡看不见"不成立——它与改前那条前景说明行是同一档可读性，只是换了 z 序。
+ * 只有**即时反馈**留前景：重叠警示与「已保存 / 已恢复默认」那类 `hint`
+ * （干净基线里它们都是 0 行，一行都不多吃）。
+ *
  * ## 保存语义
  * 改动先进内存草稿，**点「保存」才落 prefs**（录制页每次组合直读 prefs + 挂变更监听，所以立刻生效）；
  * 返回不保存就整批丢弃，文案里写明白了。「重置」两步确认（第一次只是武装，第二次才清），
@@ -175,16 +207,25 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     var freeMb by remember { mutableLongStateOf(0L) }
     LaunchedEffect(app) { freeMb = runCatching { VideoStore(app).freeSpaceMb() }.getOrDefault(0L) }
 
-    // ---- 可见条目：只认设置里的两个开关位（13 号计划第 5 条：只有已开启显示的控件可编辑）
+    // ---- 可见条目：**全集**，不再看设置里那两枚开关位（docs/plan/17 §十一 2，用户 2026-10-02 明示：
+    // 「编辑控件位置页时应当显示所有的可装载控件，不能只显示用户自己选择要显示的控件」）
+    // 根因：改前这里与录制页同一套掩码判据 ⇒ 用户在图库/设置里关掉显示的控件，在编辑页既不显示也不能摆
+    //（"隐藏即摘表"的同族缺陷）。真源是纯函数 [editorVisibleEntries]（四条判据的去留在它的 KDoc 里
+    // 逐条说清），所以 JVM 用例能直接打；把这里改回掩码口径，可见性那几条当场红。
     val pillMask = WotaSettings.hudPills(prefs)
     val hudMask = WotaSettings.hudItems(prefs)
-    val visibleEntries: Set<HudEntry> = remember(pillMask, hudMask) {
+    val levelEnabled = WotaSettings.levelEnabled(prefs)
+    val visibleEntries: Set<HudEntry> = remember(pillMask, hudMask, levelEnabled) {
+        editorVisibleEntries(levelEnabled)
+    }
+    // §11.2 的**弱化标记**名单：两枚掩码关掉、但编辑页照旧列出来的那些条目。有了这一句说明，
+    // 用户不会以为"我在编辑页摆的位没生效"（他摆的正是录制页当前不显示的那几颗）。
+    // 与 [editorVisibleEntries] 取交集：那两份都不列的条目（码率、显示开关关掉的水平仪）不该出现在这句话里。
+    val editorOnlyEntries: Set<HudEntry> = remember(pillMask, hudMask, levelEnabled) {
         buildSet {
-            CamPill.ALL.filter { it !in CamPill.hiddenOf(pillMask) }.forEach { add(HudEntry.of(it)) }
-            // 10-01 布局批：码率改为 Dock 外固定读数（不进网格/不可拖），编辑页与录制页一致；
-            // hud_layout 旧表里的 BITRATE 槽位记录自然失效（decode 照旧、不迁移）
-            HudItem.typesOf(hudMask).filter { it != HudItem.BITRATE }.forEach { add(HudEntry.of(it)) }
-        }
+            CamPill.hiddenOf(pillMask).forEach { add(HudEntry.of(it)) }
+            HudItem.ALL.filter { it !in HudItem.typesOf(hudMask) }.forEach { add(HudEntry.of(it)) }
+        }.intersect(visibleEntries)
     }
 
     // ---- 实测：安全盒尺寸与窗口原点、五枚卡片本体、每颗条目本体
@@ -198,8 +239,34 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     // #75：每颗条目的**实测高**（px）——行跨度唯一的数据源，写方只有 HudEntryGrid 一处（值真变才写）。
     // 与上面那三张矩形表同一套"首帧量不到 ⇒ 跨度按一档 ⇒ 下一帧实测接管"的两轮收敛手法。
     val entryHeights = remember { mutableStateMapOf<HudEntry, Int>() }
+    // P1（docs/plan/17 §六）：整页网格的**格边长**（px）——页格与 Dock 内格同源同尺的那一档格距
+    //（[pageCellPx] 直接复用 [gridRowPitchPx]，100% 档 34dp / 120% 档 38dp，随系统字号档一起涨）。
+    // 两个消费方共读这一个数：下面的网格描边（draw 阶段）与水印层那条「格 N×N dp」读数。
+    val cellPx = pageCellPx(density.fontScale, density.density)
+    // 水印层里那个格边长读数（dp，取整）：与描边画的是同一把尺子
+    val cellDp = pxToDp(cellPx.toFloat(), density.density)
+
     var safeW by remember(configuration.orientation) { mutableIntStateOf(configuration.screenWidthDp) }
     var safeH by remember(configuration.orientation) { mutableIntStateOf(configuration.screenHeightDp) }
+    // ---- 提示语水印（文件头「提示语是背景」那一节）：原操作栏下那条常驻说明行整体搬进背景
+    // 三份资源拼成同一段文字（与改前逐字同序同值），喂给下面 remember 住的 layout
+    val noteMeasurer = rememberTextMeasurer()
+    val noteText = stringResource(R.string.hud_edit_note) + " " +
+        stringResource(R.string.hud_edit_page_cell_size, cellDp, cellDp) +
+        if (editorOnlyEntries.isEmpty()) "" else " " + stringResource(R.string.hud_edit_hidden_entries_note)
+    // 可用宽按安全区宽的固定比例推（理由见 [NOTE_WATERMARK_WIDTH_FRACTION]）：默认布局不压 Dock 卡
+    val noteMaxWidthPx = with(density) { (safeW * NOTE_WATERMARK_WIDTH_FRACTION).dp.toPx() }
+    // **每帧零分配**的关键一步：measure 与 layout 结果都钉在 remember 上。三个 key 一个都没漏——
+    // 文字（含格边长读数与弱化标记进出）、可用宽（横竖屏 / 分屏 / 字号档让 safeW 变）、
+    // measurer（自身随 fontScale 重建）。draw 里因此只做一次 drawText 与两次减法。
+    // 颜色与字阶逐字复用旧说明行那一档 ⇒ 对比度与改前完全一致（audit：bg 3.84 / 底板 3.83）。
+    val noteLayout = remember(noteMeasurer, noteText, noteMaxWidthPx) {
+        noteMeasurer.measure(
+            text = noteText,
+            style = WotaType.caption.copy(color = WotaColor.textLo),
+            constraints = Constraints(maxWidth = noteMaxWidthPx.roundToInt().coerceAtLeast(1))
+        )
+    }
     // 与录制页同一个"横屏"真源（定版：横屏永远同行）
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     var originXPx by remember { mutableIntStateOf(0) }
@@ -457,6 +524,41 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         // · 同容器（zone == source）读 [cellDropOf]：拖到已占格发生交换，拖回搭档那一格仍是合对；
         // · 跨容器仍读 [freeCellNear]：没有"你的原格"可退回，不许把目标容器里那颗挤走。
         // 预览与松手不可能差半格。`draft.gridItems(zone, plan)` 读到的就是这一颗**当前**的格子（同位相消即 origin）。
+        //
+        // ⚠ 同容器支的 `rows` 必须喂 **GridRowHardCap**（与写表侧 `placeEntryAt` 逐字同一个常量），
+        // 不许喂 `box.rows`：`box.rows` 是**可放带内档数**（[gridBoxOf] 的 reservedRows + 生长余量），
+        // 写表侧拿不到带高、只有存储层这个上限。两边一个是"带内"、一个是"上限"，落到 `freeCellNear`
+        // 的兜底搜索上就是两只不同的盒子 ⇒ 带被占满时会"预览画一格、松手落另一格"
+        // （r2_rootcause §二 同类隐患 4 那处）。对齐之后写表侧行为一字不改（它本来就用这个数），
+        // 只是预览不再说谎。
+        // "编辑页只给带内档"这条原意**没有让**：`wanted` 仍由上面的 [clampCellToBox] 钳进 `box`，
+        // `gridBoxOf` 的 reservedRows/生长余量照旧只在这一个盒子上生效。
+        // 只有"带内一个整块空格都没有"这一退化态下，兜底搜索才会落到带外档——而那时写表侧本来就会
+        // 落到带外（旧预览画的是带内重叠格，松手存的却是带外格，两页本来就分叉）。
+        //
+        // ⚠ 同容器支的 `cols` 同样必须喂 [gridColsCapOf]（与写表侧 `placeEntryAt` 同容器支逐字同一个
+        // 函数），不许喂 `box.cols`：`box.cols` 对读数块会被**可用内宽**再夹一刀（[gridBoxOf] 的
+        // `roomWidthDp / pitchXDp`，外面还套一层预留列数），横屏"一行两颗"那一档带盒只剩 2 列，而
+        // 写表侧拿不到带高、只有存储层的 3 列上限。两只盒子喂进 [cellDropOf] 会在三处判据上分叉：
+        // ① `originInBox`（判据 B）：原格落在第 3 列时带盒判它"出盒" ⇒ 预览把交换降级成"占位者就近
+        //    让位"，写表侧却照旧交换、把占位者送回原格 ⇒ "预览画一格、松手落另一格"（T9 的 cols 侧孪生）；
+        // ② 第 ②/④/⑥/⑨ 步 `freeCellNear` 兜底/让位搜索的**可搜索列宽**（2 列 vs 3 列）；
+        // ③ `target` 的列钳制——这一处是同值的（`wanted` 已被 [clampCellToBox] 钳进 `box`，列号本来就
+        //    到不了带外），写出来只为说明前两处才是真分叉，别误以为"钳制已经保了险"。
+        // "编辑页只给带内列"这条原意同样**没有让**：`wanted` 仍由 [clampCellToBox] 钳进 `box`，
+        // 只有兜底/让位这两种退化态才会落到带外列，而那时写表侧本来就会落到带外。
+        // 对齐之后写表侧行为一字不改（它本来就用这个函数），只是预览不再说谎。
+        //
+        // ⚠ 跨容器支的两个形参也必须与写表侧 `placeEntryAt` 跨容器支**逐字同源**：
+        // `rows` 喂 [GridRowHardCap]、`cols` 喂 [gridColsCapOf]（那里喂的是 `target == zone`）。
+        // 上一个同源修在 T9 只改了同容器支的 `rows`，跨容器支仍喂 `box.rows`/`box.cols`——
+        // `box.rows` 是**可放带内档数**（[gridBoxOf] 的 reservedRows + 生长余量），`box.cols` 对
+        // 读数块还会被 **可用内宽**再夹一刀（[gridBoxOf] 的 `roomWidthDp / pitchXDp`），而写表侧
+        // 拿不到带高、只有存储层那两个上限。两只盒子落到 `freeCellNear` 的兜底搜索上就是两个答案
+        // ⇒ 带被占满（或读数块内宽只容得下两列）时"预览画一格、松手落另一格"
+        // （r2_rootcause §二 同类隐患 4 在跨容器支的孪生）。跨容器支**没有** `wanted` 之外的第二重
+        // 钳制（`cellDropOf` 同容器支至少还拿 `box` 判过"块尾出带"），所以这里同源是唯一的收口。
+        // 对齐之后写表侧行为一字不改（它本来就用这两个数），只是预览不再说谎。
         val cell = if (zone == source) {
             cellDropOf(
                 wanted = wanted,
@@ -466,14 +568,14 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 mates = cellGroupMatesOf(draft.defaultGridOf(zone, plan), entry),
                 draggedHeightPx = contentHeightPx,
                 cellHeightPx = plan.cellHeightOf,
-                cols = box.cols,
-                rows = box.rows,
+                cols = gridColsCapOf(zone),
+                rows = GridRowHardCap,
                 rowPitchPx = rowPitchPx
             ).dropped
         } else {
             freeCellNear(
                 wanted, draft.occupiedCells(zone, plan, exclude = entry),
-                box.cols, box.rows, contentHeightPx, rowPitchPx
+                gridColsCapOf(zone), GridRowHardCap, contentHeightPx, rowPitchPx
             )
         }
         return GridSnap(
@@ -596,6 +698,79 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             // 一层极淡的描边把"可放范围"画出来，用的还是 wotaCard 那套令牌，不新造观感值
             // （card 是 Dp 件位值 24dp，要 Shape 就地包）
             Box(Modifier.matchParentSize().wotaCard(RoundedCornerShape(WotaShape.card)))
+            // ---- P1（docs/plan/17 §六）：整页网格的**只读**描边。三条硬约束：
+            // ① 只进 draw 阶段——这一层没有内容、没有布局参数、没有命中区（捕获层在更下面那枚
+            //    `pointerInput` Box 上，一个字没动 ⇒ 拖动行为与改前逐像素相同）；
+            // ② 必须排在五枚容器**之下**：写在它们之前，"先画线后画内容"就是这句话本身，格线不会
+            //    盖住落点描边 / 「腰」/ ghost（那三样在更靠上的两层）；
+            // ③ 描边复用既有令牌：宽度与圆头那一档**逐字取落点描边那枚 [linkEdge]**
+            //    （它本身就是 [WotaStroke.hairline] 那一档，没有新观感值），颜色取 acrylicBorder
+            //    ——与 wotaCard 的边框同一个色，画在安全区底衬之上是一张极淡的格网。
+            //    注：drawLine 在 1.5.x 只有 strokeWidth/cap 两个形参（没有 DrawStyle 那个），
+            //    所以从 [linkEdge] 上把宽度与圆头读出来，而不是另算一遍 hairline.toPx()。
+            // 格边长与列/行数全部来自纯函数（[pageCellPx] / [pageGridBoxOf]），P3 的落点算式读同一条。
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .drawWithContent {
+                        // 先画线后画内容：本层自己没有内容，drawContent() 是空操作，写在后头只为
+                        // 让"网格在容器之下"这件事在代码里就是书写顺序
+                        val box = pageGridBoxOf(size.width.toInt(), size.height.toInt(), cellPx)
+                        if (box.cols > 1) {
+                            for (col in 1 until box.cols) {
+                                val x = col * cellPx.toFloat()
+                                drawLine(
+                                    WotaColor.acrylicBorder,
+                                    Offset(x, 0f),
+                                    Offset(x, size.height),
+                                    strokeWidth = linkEdge.width,
+                                    cap = linkEdge.cap
+                                )
+                            }
+                        }
+                        if (box.rows > 1) {
+                            for (row in 1 until box.rows) {
+                                val y = row * cellPx.toFloat()
+                                drawLine(
+                                    WotaColor.acrylicBorder,
+                                    Offset(0f, y),
+                                    Offset(size.width, y),
+                                    strokeWidth = linkEdge.width,
+                                    cap = linkEdge.cap
+                                )
+                            }
+                        }
+                        drawContent()
+                    }
+            )
+            // ---- 提示语水印层（文件头「提示语是背景」那一节）：说明行走背景的唯一落点
+            // 为什么画在网格之上、容器之下：水印字（textLo 40% 白）比 acrylicBorder 那档格线
+            // （15% 白）亮，压在格线后面会让笔画上爬满细亮丝；反过来字盖线，线只在笔画间隙断一下。
+            // 四条硬约束（一条都不许破，HudEditNoteWatermarkTest 逐条钉着）：
+            // ① 只 draw、不吃事件：本层没有 pointerInput、没有内容 ⇒ 全屏捕获层的命中区分派
+            //    一字未改（它在更下面那枚 matchParentSize Box 上，z 序与命中都不经过这里）；
+            // ② matchParentSize ⇒ 不参与兄弟测量：五枚容器、操作栏、可放范围盒的 Modifier 链
+            //    一个字没动，删掉的只有文案区那 120px 高度（说明行 112px + 它那档行间距 8px）；
+            // ③ 每帧零分配：[noteLayout] 由 remember 钉住，本 lambda 里没有 measure、没有 remember，
+            //    只有一次 drawText 与两次减法（Offset 是值类型，不落堆）；
+            // ④ 居中画在安全区里：默认布局下正好落在左右两枚 Dock 之间的空列（宽度理由见
+            //    [NOTE_WATERMARK_WIDTH_FRACTION]）。measure 得到的宽度已经排好版，这里只定位。
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .drawBehind {
+                        val noteW = noteLayout.size.width
+                        val noteH = noteLayout.size.height
+                        if (noteW <= 0 || noteH <= 0) return@drawBehind
+                        drawText(
+                            textLayoutResult = noteLayout,
+                            topLeft = Offset(
+                                ((size.width - noteW) / 2f).coerceAtLeast(0f),
+                                ((size.height - noteH) / 2f).coerceAtLeast(0f)
+                            )
+                        )
+                    }
+            )
             val ctx = editorCtx(
                 prefs = prefs,
                 params = params,
@@ -916,11 +1091,10 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     )
                 }
             }
-            Text(
-                text = stringResource(R.string.hud_edit_note),
-                style = WotaType.caption,
-                color = WotaColor.textLo
-            )
+            // 说明行已整体搬进背景水印层（文件头「提示语是背景」那一节，draw 阶段的 noteLayout）：
+            // 改前这三份资源以 Text 排在这里，三行高 ≈112px + 行间距 8px 把右 Dock 的可用带
+            // 从 538px 压到 424px（docs/plan/16「新发现的缺陷」1）。**不许在这里加回任何
+            // 常驻说明文字**——那正是本任务要消掉的东西；操作栏只留即时反馈（下面那两行）。
             // 重叠只提示不禁止：把叠在一起的两枚容器点名，别静默
             if (overlaps.isNotEmpty()) {
                 Text(

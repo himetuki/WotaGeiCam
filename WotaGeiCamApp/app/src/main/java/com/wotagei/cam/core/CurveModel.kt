@@ -83,7 +83,10 @@ private fun fmt(v: Float): String = java.util.Locale.US.let { String.format(it, 
 
 /**
  * 四条曲线的组合（白 / 红 / 绿 / 蓝），一次烘焙出 GL 直接可用的 `TABLE_SIZE*3` 张量。
- * 张量按 R、G、B 三段连续存放，方便一次 `glTexImage2D` 上传成 256×3 的 RGB 纹理。
+ * 张量按 GL_RGB **交错**布局存放：第 i 个 texel 连续携带 (R[i], G[i], B[i]) 三分量，
+ * 一次 `glTexImage2D` 即可上传成 256×1 的 RGB 纹理。
+ * 字节布局与 `GlRenderEngine.ensureCurveTexture` 的消费语义是同一个契约，两边不许各写一遍——改一处必须同步另一处。
+ * （2026-10-03 真机花图缺陷即此处曾按平面三段产出、消费侧按交错解释成乱表，取证 `.tmp/curve-corruption.md`。）
  */
 data class CurveStack(
     val master: ColorCurve = ColorCurve.IDENTITY,
@@ -122,20 +125,27 @@ data class CurveStack(
         }
     }
 
-    /** 烘焙成 `size*3` 的 RGB 张量，供一维纹理上传 */
+    /**
+     * 烘焙成 `size*3` 的 RGB 张量，供一维纹理上传。
+     * 布局必须是**交错**的：out[3i]=R[i]、out[3i+1]=G[i]、out[3i+2]=B[i]——
+     * GL 侧按 256×1 GL_RGB 纹理上传后，shader 对同一 texel 取 .r/.g/.b 当作对应通道的查表值
+     * （见 `Shaders.CURVE_DECL` 的 `applyCurve`）。若按平面三段（R‖G‖B）产出，
+     * GPU 把乱序字节当交错读，每通道变成三轮 0→255 锯齿 ⇒ 花图。
+     */
     fun bake(size: Int = ColorCurve.TABLE_SIZE): FloatArray {
         val out = FloatArray(size * 3)
         for (i in 0 until size) {
             val v = i.toFloat() / (size - 1)
-            out[i] = evaluate(ColorCurve.CHANNEL_RED, v)
-            out[size + i] = evaluate(ColorCurve.CHANNEL_GREEN, v)
-            out[2 * size + i] = evaluate(ColorCurve.CHANNEL_BLUE, v)
+            out[3 * i] = evaluate(ColorCurve.CHANNEL_RED, v)
+            out[3 * i + 1] = evaluate(ColorCurve.CHANNEL_GREEN, v)
+            out[3 * i + 2] = evaluate(ColorCurve.CHANNEL_BLUE, v)
         }
         return out
     }
 
     /**
-     * 上传给 `glTexImage2D` 的 256×1 RGB 纹理数据。
+     * 上传给 `glTexImage2D` 的 256×1 RGB 纹理数据：字节布局 = [bake] 的交错布局量化到 8bit
+     * （唯一消费点是 `GlRenderEngine.ensureCurveTexture`，契约以那边的上传/采样语义为准，两边不许各写一遍）。
      * 必须走 UNSIGNED_BYTE：GLES 2.0 里 `GL_RGB + GL_FLOAT` 不是合法组合格式，
      * 只有 `GL_LUMINANCE`/`GL_ALPHA` 才允许浮点，直接传 FloatBuffer 会在部分 ROM 上出黑屏。
      */

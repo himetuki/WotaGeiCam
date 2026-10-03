@@ -28,13 +28,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowBack
@@ -45,11 +43,9 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -78,6 +74,7 @@ import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.dialog.BottomPanel
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaIconButton
@@ -138,7 +135,6 @@ fun CompareScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
     val app = LocalContext.current.applicationContext
@@ -717,13 +713,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
                 }
             }
         }
-    }
-
-    // 历史半屏面板：material3 ModalBottomSheet（1.1.2 起），containerColor 用主题表面色
-    if (historyOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { historyOpen = false },
-            containerColor = WotaSurface
+        // 历史半屏面板：换装录制页同一套自绘半模态（ui/design/SheetSpec 纪律，宿主 BottomPanel）
+        // ——原先 M3 ModalBottomSheet(fillMaxHeight(0.55f)) 接不上 480dp 宽/最小高 320/短边 90%
+        // 这套档位。BottomPanel 是同层覆盖，必须挂在铺满整屏的根 Box 里（放在最后=绘制在最上）；
+        // AnimatedVisibility 隐藏时不组合内容，等价于原先 if(historyOpen) 的按需组合。
+        BottomPanel(
+            visible = historyOpen,
+            onDismiss = { historyOpen = false },
+            title = stringResource(R.string.compare_history)
         ) {
             CompareHistorySheet(
                 prefs = prefs,
@@ -740,9 +737,15 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
 }
 
 /**
- * 「历史」半屏面板：把 [CompareHistory] 的记录逐条经 [MediaRepo.clipById] 反查成视频——
+ * 「历史」面板**内容**：把 [CompareHistory] 的记录逐条经 [MediaRepo.clipById] 反查成视频——
  * 还在的显示片名 + 时长（整行点选直接设为右侧视频，并把这条记回队首再收面板），
  * 已不存在的（删了/换库）显示灰色占位行，行尾删除钮把这条记录摘掉后就地刷新。
+ *
+ * 容器（标题/关闭钮/scrim/滚动/宽高纪律）全部由录制页同一枚 [BottomPanel] 提供——
+ * 本函数只管行列表。换装取舍：M3 ModalBottomSheet 的**手势下滑关闭**没有等价搬过来
+ * （自绘容器做拖拽收起要另起 anchoredDraggable 一套，代价大于收益），关闭语义由
+ * scrim 点击 + 标题行关闭钮承担，与录制页全部面板一致；M3 的半开档/手势条避让
+ * 也一并由 BottomPanel 的最小高 320dp 与 safeDrawingPadding 取代。
  * 行配色全部即时切换（#81：面板内不做任何颜色/尺寸动画）。
  */
 @Composable
@@ -751,8 +754,9 @@ private fun CompareHistorySheet(
     repo: MediaRepo,
     onPick: (VideoClip) -> Unit
 ) {
-    // 记录 → (记录, 反查结果)；反查 null = 视频已不存在。面板只在打开时进组合，
-    // LaunchedEffect 首组合必跑；行内删除后靠 refresh 换 key 重解析。
+    // 记录 → (记录, 反查结果)；反查 null = 视频已不存在。面板由 BottomPanel 的
+    // AnimatedVisibility 承载：隐藏时不组合、打开瞬间才进组合，LaunchedEffect 首组合必跑；
+    // 行内删除后靠 refresh 换 key 重解析。
     // 解析直接用 LaunchedEffect 自己的协程（查询本体在 flowOn(IO)），不丢进外部 scope：
     // 外部 scope 在换 key 重解析时不会取消上一个任务，旧结果可能反过来盖掉刚删完的新列表。
     var items by remember { mutableStateOf<List<Pair<CompareHistory.Entry, VideoClip?>>>(emptyList()) }
@@ -764,21 +768,7 @@ private fun CompareHistorySheet(
         }
         items = resolved
     }
-    // 半屏高度：12 条上限在滚动区内，面板不会顶满整屏。
-    // m3 1.1.2 的 ModalBottomSheet 没有 windowInsets 形参（1.2 才补），内容自己避手势条
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.55f)
-            .verticalScroll(rememberScrollState())
-            .navigationBarsPadding()
-    ) {
-        Text(
-            stringResource(R.string.compare_history),
-            style = MaterialTheme.typography.titleMedium,
-            color = WotaText,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-        )
+    Column(Modifier.fillMaxWidth()) {
         if (items.isEmpty()) {
             Box(
                 Modifier.fillMaxWidth().padding(vertical = 48.dp),
@@ -787,15 +777,16 @@ private fun CompareHistorySheet(
                 Text(
                     stringResource(R.string.compare_history_empty),
                     style = MaterialTheme.typography.bodyMedium,
-                    // 正文升 textMid（textLo 压 surface 3.82 < 4.5）
-                    color = WotaColor.textMid
+                    // 底从 WotaSurface 换成 BottomPanel 的 AcrylicScrim(0xB3)：正文压 scrim
+                    // 只准 textHi（textMid worst ≈4.28 < 4.5），与录制页面板同一纪律
+                    color = WotaText
                 )
             }
         } else {
             items.forEach { (entry, clip) ->
                 val c = clip
                 if (c == null) {
-                    // 失效行：灰字 + 行尾删除钮，点了摘记录就地刷新
+                    // 失效行：灰度语义交给删除线 + 行尾删除钮
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -803,9 +794,8 @@ private fun CompareHistorySheet(
                         Text(
                             stringResource(R.string.compare_history_missing),
                             style = MaterialTheme.typography.bodyMedium,
-                            // 失效条目：正文色合规化升 textMid，「失效」语义交给删除线 + 行尾灰度删除钮，
-                            // 不再用不达标的 textLo 弱化
-                            color = WotaColor.textMid,
+                            // 正文压 AcrylicScrim 只准 textHi（同上）；「失效」语义由删除线承担
+                            color = WotaText,
                             textDecoration = TextDecoration.LineThrough,
                             modifier = Modifier.weight(1f)
                         )
@@ -839,8 +829,8 @@ private fun CompareHistorySheet(
                         Text(
                             formatDuration(c.durationMs),
                             style = MonoStyle,
-                            // MonoStyle 默认字阶 = bodyLarge（16sp）属正文字号，数值升 textMid
-                            color = WotaColor.textMid
+                            // 时长读数与片名同为正文字号（MonoStyle=bodyLarge）：压 scrim 一并升 textHi
+                            color = WotaText
                         )
                     }
                 }

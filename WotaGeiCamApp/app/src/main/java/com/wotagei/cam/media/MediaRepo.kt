@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
@@ -73,6 +74,20 @@ class MediaRepo private constructor(private val app: Context) {
         refreshGate.value = false
         invalidate()
     }
+
+    /**
+     * 闸门当前态的**只读视图**（UI 侧唯一入口，写入仍只有 [holdListRefresh] / [releaseListRefresh]）。
+     *
+     * 为什么只放一个 StateFlow 出去、不让 UI 调那两个写方法：闸门的开合是删除收尾的编排
+     * （见 [runDeleteFinish]），UI 只该"知道"它，不该"参与"它。
+     *
+     * 消费方是媒体库的空态裁决：关闸期间列表**故意**不下发（定版：刷新必须晚于播放页出栈），
+     * 那一刻"列表是空的"是**编排的结果**而不是真相——播放器彻底删除后返回媒体库，最多约
+     * `POP_DELAY + REFRESH_DELAY` 里 `collectAsState(emptyList())` 只有空列表可显示，
+     * 照旧显示"这里还没有视频"会让用户以为 13 条视频没了。读到这里就该显示"刷新中"，
+     * 闸门一开真实快照自然替换（见 `GalleryScreen.galleryEmptyState`）。
+     */
+    val listRefreshing: StateFlow<Boolean> get() = refreshGate
 
     fun invalidate() {
         version.value += 1

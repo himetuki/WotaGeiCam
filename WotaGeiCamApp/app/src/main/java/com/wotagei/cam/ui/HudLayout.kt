@@ -410,7 +410,9 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
      * 3. 格子落位：目标不是网格容器 ⇒ 抹成哨兵（不留脏数据）；是网格 ⇒ 先钳进容器硬上限，
      *    再定落点（[cellDropOf]）：
      *    · **同容器**（`target == source`）走交换语义——目标格住了"别人"就与它对调，被挤的那组去
-     *      "你的原格"（[pinnedTable] 里那颗当前的格子），原格承接不了才就近让位；
+     *      "你的原格"（[pinnedTable] 里那颗当前的格子），原格承接不了才就近让位；交换会让被拖那颗的
+     *      跨度尾压到第三颗时**拒绝交换**（[cellDropOf] 判据 A，2026-10-02 真机取证那笔），
+     *      被拖那颗退回就近空格、别颗原地不动；
      *    · **跨容器**仍走 [freeCellNear]（只落空格）：跨容器没有"你的原格"可退回，硬用交换语义会写出
      *      一枚只在本容器带内有意义的越区格。
      *    ⚠ 钳制与让位吃的都是**格子**这一层，不是条目那一层：同组两颗共用一格 ⇒ 越界钳回来仍是同一格，
@@ -690,6 +692,47 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     }
 }
 
+// ------------------------------------------------------------------ 两页各自的可见集（纯函数）
+
+/**
+ * 「编辑控件」页的可见集（docs/plan/17 §十一 2，用户 2026-10-02 明示：**编辑页应当显示所有可装载控件，
+ * 不能只显示用户自己选择要"显示"的那些**）。
+ *
+ * ## 根因：改前编辑页与录制页共用同一套掩码判据
+ * 改前 `HudLayoutEditor` 自己那份 `visible` 与录制页同一条规则（`hud_pills` / `hud_items` 两枚掩码）
+ * ⇒ 用户在设置里关掉显示的控件，在编辑页**既不显示也不能摆**——正是 §11.2 点名的"隐藏即摘表"同族缺陷
+ * （与"隐藏再显示不回默认"那条纪律相反：那一套要的是**表不动**，而这里是连表都够不着）。
+ *
+ * ## 四条判据逐条分清（录制页那四条在 `CameraScreen` 的 `visibleEntries` 里是同一个集合的四个分支，
+ * 容易糊成一句"都保留"，所以这里一条一条说）
+ * 1. **`hud_pills` / `hud_items` 掩码**：这里**不读**。那是"用户不想显示"，而编辑页要的正是把
+ *    这些也列出来、也能摆。录制页照旧过滤（[HudLayoutTable.visibleOrderOf] 只过滤不改表的纪律
+ *    一字不动 ⇒ "隐藏 → 再显示不回默认"的根基不变）。
+ * 2. **`canFlash` / `focusUsable`**（`CameraAbility.flashAvailable` / `hasAdjustableFocus`）：
+ *    编辑页**没有相机**，拿不到 ability ⇒ 这一档在本页本就无从判起（改前编辑页也从不判这两条），
+ *    保持原样。要在本页补判就得引一条 CameraManager 探测链，那是另一件事，不属于 §11.2。
+ * 3. **`levelEnabled`**（设置页「显示水平仪与俯仰仪」开关）：**保留**，但不是因为它是"设备做不到"
+ *    （它其实是显示偏好，与掩码同族）——真实理由是渲染：那颗在 [HudCtx.levelEnabled] = false 时
+ *    整个返回空（`AttitudeCard` 的第一行），列在编辑页只会得到一格看不见的空洞，用户拖不动一个
+ *    不存在的东西。所以本页照旧不列它；设置打开后它自然回到编辑页。
+ *    ⚠ 若将来要把这一条也放开（连空格一起列），配套动作是把编辑页 ctx 的 `levelEnabled` 恒定传 true
+ *    （这颗在这页本来就是"出厂态读数"，与蓝牙/音量同一条口径），否则那一格是**看得见边界、看不见控件**
+ *    的空洞，用户会以为格子渲染坏了。
+ * 4. **`recording`**：编辑页从设置页进、录制中进不来（`HudCtx.recording` 恒 false）⇒ 既有闸门原样。
+ *
+ * 唯一例外是码率（[HudItem.BITRATE]）：10-01 布局批起它移出网格、是 Dock 外的固定读数，
+ * **不进两页的可见集**（录制页与编辑页都是同一道过滤）。
+ *
+ * 落成纯函数（而不是停在 `@Composable` 里）是给 JVM 用例一座可打的桥：把编辑器改回掩码口径时，
+ * `HudPageGridTest` 的可见性那几条当场红（AGENTS"恒等式不算证明"那条纪律的行为版）。
+ */
+fun editorVisibleEntries(levelEnabled: Boolean): Set<HudEntry> = HudEntry.ALL
+    // 码率不进两页的可见集（Dock 外固定读数）
+    .filter { it.item != HudItem.BITRATE }
+    // 水平仪那颗在显示开关关掉时整颗不渲染 ⇒ 列出来也只是空格，本页不列
+    .filterNot { it.pill == CamPill.LEVEL && !levelEnabled }
+    .toSet()
+
 // ------------------------------------------------------------------ 越界钳制与落位（纯函数）
 
 /**
@@ -845,8 +888,13 @@ fun chromeBandBottomDp(chromeBottomWinPx: Int, safeOriginYPx: Int, density: Floa
  * 但这个数本身一个字没动：它只管**存进来的起始行**不许离谱（[clampStoredCell] 与解码共用），
  * 与"那颗有多高、压住几档"是两件事。改成"条目数 ÷ 平均跨度"之类的算法会把上限变成内容的函数，
  * 那正好违反上面那条"跨度不进 schema"。
+ *
+ * 可见性是 `internal` 而不是 `private`：编辑页落点裁决（`HudLayoutEditor.snapOf` 的同容器支）
+ * 也要读**这同一个数**，否则预览喂 `box.rows`（带内档数）、写表喂这里 ⇒ 两处 `rows` 不同源，
+ * 带边界形态下会"预览画一格、松手落另一格"（r2_rootcause §二 同类隐患 4）。同包直接读，
+ * 不另开一个公开常量（那会多出一份会与它分叉的真源）。
  */
-private val GridRowHardCap: Int get() = HudEntry.ALL.size
+internal val GridRowHardCap: Int get() = HudEntry.ALL.size
 
 /**
  * 网格列数硬上限（逐枚容器）：
@@ -994,12 +1042,30 @@ data class CellDrop(val dropped: GridCell, val moved: Map<HudEntry, GridCell>)
  *    第 4 步会把它当"不是空格"处理——否则会把两颗画在同一段像素上。
  * 4. `occupant` 为空：`wanted` 真是空格（含"拖回自己同组搭档那一格"这一支 ⇒ 合对语义保持不变）
  *    ⇒ 落 `wanted`；若 `wanted` 在 `blocked` 里（只是别颗高格的跨度尾巴）⇒ 退回 [freeCellNear]。
- * 5. `occupant` 非空且 `origin` 能承接 ⇒ 交换：`occupant` 全部→`origin`，`self` 拿 `wanted`。
- *    能承接 = `origin != wanted`、在盒内、`origin + 占位组最高跨度 <= rows`、且 `origin` 那一整块
- *    （`origin .. origin+span−1`）不被其余住户占着——不查整块的话，一枚 3 档的高格会被换到只空 1 档的
- *    地方，尾巴压到第三颗身上（正是"不牵动第三颗"那条要禁的形态）。
- * 6. 否则 ⇒ `occupant` 全部就近让位到 [freeCellNear]（在"扣掉 self 与 occupant"之后的占位集里找空格），
- *    `self` 仍拿 `wanted`。
+ *    ⚠ 第 4 步**也要查被拖那颗自己的整块**（span≥2 落到真空格上，跨度尾可能正压在下方某颗的锚点上，
+ *    那仍是"渲染格 ≠ 存储格"的自相矛盾表——2026-10-02 审查方 Python 复刻实测：左 Dock 四颗默认表下
+ *    监看先去 (1,2)，参考线再拖到真空格 (0,2)，跨度尾 (0,3) 正是曲线的锚点 ⇒ 渲染 `CURVE=(1,3)`
+ *    而存储 `(0,3)`）。排除集**必须 mate 感知**：只由"非 self 非 mate"的住户的块组成。合对时
+ *    selfBlock 必然覆盖搭档的块尾（T10 的 LEVEL (0,1)(0,2)），把第 5 步那个 `selfClear`
+ *    （`restBlocked` = residents 扣掉 self 与 occupant，**mates 仍在内**）原样搬进第 4 步就会把
+ *    合对误杀——第 4 步没有 occupant， mates 在这儿就是"可以合法共格的人"，必须整体排除。
+ * 5. 【判据 A】`occupant` 非空时先查**被拖那颗自己的整块**：`selfBlock = spannedCells(target, span)`
+ *    （含跨度尾）里没有一档落在 `restBlocked`（扣掉 self 与 occupant 之后的占位集）。
+ *    为什么要有这一笔：2026-10-02 真机取证——左 Dock 可见 {参考线 76px/span2、监看 60px/span1、
+ *    闪光 76px/span2}、行距 68px，把参考线拖到监看格 (0,2)，旧实现判"交换成立"写出
+ *    参考线(0,2)+监看(0,0)+闪光(0,3)，而参考线的跨度尾 (0,3) 正是闪光的锚点 ⇒ 渲染层把闪光
+ *    让位到 (1,3)（真机 x 123→223），存储串却仍 `P9:0.3`——一张"渲染格 ≠ 存储格"的自相矛盾表。
+ *    原来只校验"被挤的那组能否落回原格"，漏的正是"被拖那颗的目标格其跨度尾会不会压到第三颗"。
+ * 6. 【判据 B】原格承接：`origin != target`、在盒内、`origin + occupantSpan <= rows`、且 `origin`
+ *    那一整块不与 `restBlocked ∪ selfBlock` 相交。把 `selfBlock` 并进排除集的原因：原格可能正落在
+ *    self 新块的中间（把高的那颗往上拖一格就是这一步），不查的话占位者会被写进 self 的块里，
+ *    渲染侧又得把它挪走 ⇒ 同样的自相矛盾。
+ * 7. 判据 A、B 都过 ⇒ 交换：`occupant` 全部→`origin`，`self` 拿 `wanted`。
+ * 8. 只剩"原格承接不了"（判据 B 假）⇒ `occupant` 全部就近让位到 [freeCellNear]，让位搜索的占位集
+ *    **并进 `selfBlock`**（不许把占位者塞进 self 的新块），`self` 仍拿 `wanted`。
+ * 9. 判据 A 不过 ⇒ **拒绝交换**（[moved] 为空，别颗一律不动）：被拖那颗退回与第 2/4 步同一条
+ *    "不挤人"的 [freeCellNear] 就近空格。用户可见语义："拖到已占格＝对调"退化为
+ *    "跳到最近不压人的空格、被占那格原地不动"；编辑页预览读同一个 [cellDropOf] ⇒ 松手前就看得见。
  *
  * 形参一律**没有默认值**：`residents` / `mates` / 实测高取器 / 格距缺一档，判据就静默退回旧行为，
  * 漏挂的调用点必须编译不过（#69 铁律）。本函数与 [HudLayoutTable.placeEntryAt] 是同一个裁决的两个入口，
@@ -1031,7 +1097,21 @@ fun cellDropOf(
     val occupant = residents[target].orEmpty().filter { it != self && it !in mates }
     if (occupant.isEmpty()) {
         // ④ 真空格（含拖回同组搭档那一格）⇒ 落它；只是别颗高格的跨度尾巴 ⇒ 不是"一格"，退回让位
-        return if (target !in blocked) CellDrop(target, emptyMap())
+        // ④′ 同族整块判据：被拖那颗落下去占的整块（含跨度尾）不许压到**别人**的块上。
+        //    少了这一笔，span≥2 的颗拖到"真空格、但下方 span−1 档内有别人锚点"的格子上，
+        //    写出的表仍是"渲染格 ≠ 存储格"（审查方复刻：参考线拖到真空格 (0,2)，跨度尾 (0,3)
+        //    正是曲线的锚点 ⇒ 渲染 CURVE=(1,3) 而存储 (0,3)）。
+        //    ⚠ 排除集必须 mate 感知：只算"非 self 非 mate"的住户，否则合对（拖回搭档那一格）时
+        //    selfBlock 必然覆盖搭档的块尾（T10 的 LEVEL (0,1)(0,2)）而把合对误杀。mates 与 self
+        //    在第 4 步都**不算挡路的人**，与上面 `blocked` 的口径保持一致。
+        val others = LinkedHashMap<GridCell, MutableList<HudEntry>>()
+        residents.forEach { (cell, who) ->
+            val keep = who.filter { it != self && it !in mates }
+            if (keep.isNotEmpty()) others[cell] = keep.toMutableList()
+        }
+        val othersBlocked = blockingCells(others, self = null, mates = emptySet(), cellHeightPx, rowPitchPx)
+        return if (target !in blocked && spannedCells(target, span).none { it in othersBlocked })
+            CellDrop(target, emptyMap())
         else CellDrop(freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx), emptyMap())
     }
     // ⑤ 原格能不能承接这一组：扣掉 self 与 occupant 之后再算一遍"谁还占着哪一块"
@@ -1044,13 +1124,27 @@ fun cellDropOf(
     val occupantBlockPx = occupant.maxOf { cellHeightPx(it).coerceAtLeast(0) }
     val occupantSpan = cellRowSpan(occupantBlockPx, rowPitchPx)
     val originInBox = origin.col in 0 until cols && origin.row in 0 until rows
+    // ⑤a【判据 A，新增】被拖那颗落下去占的整块（含跨度尾）不许压到第三颗的块上——
+    //    不查这一笔，2026-10-02 真机上交换把跨 2 档的参考线落到 (0,2)，尾巴 (0,3) 压住闪光的锚点，
+    //    渲染层把闪光让到 (1,3)（x 123→223）而存储串仍 col0 ⇒ "渲染格 ≠ 存储格"的自相矛盾表
+    val selfBlock = spannedCells(target, span)
+    val selfClear = selfBlock.none { it in restBlocked }
+    // ⑤b【判据 B，升级】原格承接：既要避开第三颗，也要避开 self 落下去那一块
+    //    （原格可能正落在 self 新块的中间：把高的那颗往上拖一格就是这一步）
     val originHosts = origin != target && originInBox &&
         origin.row + occupantSpan <= rows &&
-        spannedCells(origin, occupantSpan).none { it in restBlocked }
-    if (originHosts) return CellDrop(target, occupant.associateWith { origin })
-    // ⑥ 原格不可承接 ⇒ 占位者就近让位，被拖那颗仍拿目标格
-    val fallback = freeCellNear(origin, restBlocked, cols, rows, occupantBlockPx, rowPitchPx)
-    return CellDrop(target, occupant.associateWith { fallback })
+        spannedCells(origin, occupantSpan).none { it in restBlocked || it in selfBlock }
+    if (selfClear && originHosts) return CellDrop(target, occupant.associateWith { origin })
+    if (selfClear) {
+        // ⑥ 只剩"原格承接不了" ⇒ 占位者就近让位，被拖那颗仍拿目标格；
+        //    让位搜索的占位集并进 selfBlock——别把占位者塞进 self 的新块（同一矛盾的第二入口）
+        return CellDrop(target, occupant.associateWith {
+            freeCellNear(origin, restBlocked + selfBlock, cols, rows, occupantBlockPx, rowPitchPx)
+        })
+    }
+    // ⑥′【新增】交换会让 self 的跨度尾压到第三颗 ⇒ 拒绝交换（moved 为空，别颗一律不动），
+    //     被拖那颗退回与第 ②/④ 步同一条"不挤人"的就近空格兜底
+    return CellDrop(freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx), emptyMap())
 }
 
 /**
@@ -1060,7 +1154,8 @@ fun cellDropOf(
  * **那条论证已被推翻**：用户要的正是"拖到哪一格就落到哪一格"，交换与独立性可以同时成立——
  * 交换只动被指到的那一颗，其余条目一颗不动（见 [cellDropOf] 的第 5 步）。于是本函数退回它本来的
  * 职责：**只负责"在给定占位集里找最近空格"这一条算术**，被三个地方复用——
- * ① [cellDropOf] 的"块尾出带 / 跨度尾巴 / 占位者让位"三支；② 跨容器落点（没有"你的原格"可退回）；
+ * ① [cellDropOf] 的"块尾出带 / 跨度尾巴 / 占位者让位 / 拒绝交换后的兜底"四支；
+ * ② 跨容器落点（没有"你的原格"可退回）；
  * ③ 渲染解析 [resolveCells] 的就近让位。它**不再**是同容器落点的唯一裁决（那条在 [cellDropOf]）。
  *
  * 带内一个空格都没有时返回 [wanted] 自己（调用方已钳过，此时带被填满）。
@@ -1070,6 +1165,14 @@ fun cellDropOf(
  * 本条再加一道"这一颗的块不许越过第 [rows] 档"：`row + rowSpan − 1 <= rows − 1`。
  * 少了这一道，一颗 72dp 的姿态仪能被放到最后一档、尾巴伸出带外——那与本次修的回归同一个形状。
  * 两个形参与 [clampCellToBox] 同源同理由：**没有默认值**（缺了就静默退回一档到底的老写法）。
+ *
+ * ## 2026-10-02 那半笔：候选判据从"锚点不在占位集"升级为"整块不与占位集相交"
+ * 上面只挡"块尾出带"，这里把"块尾压人"也挡掉：`spannedCells(候选, rowSpan)` 里任何一档落在
+ * [occupied] 就拒。旧式只查锚点，span>1 的候选仍可能"锚点空着、尾巴压住别人的锚点"
+ * （例：occupied={(0,3)}、span 2 ⇒ 旧式返回 (0,2)，其尾正是 (0,3)）。本函数是"在给定占位集里
+ * 找最近空格"的唯一算术点（[cellDropOf] 的兜底/让位/拒绝三支、跨容器支、[resolveCells] 两趟都
+ * 借道这里），升级一处全部收口；否则 [cellDropOf] 拦住交换之后，兜底/跨容器支仍可能写出
+ * "块尾压别人锚点"的表。`span=1` 时与旧式逐字同值 ⇒ 老用例一条不动。
  */
 fun freeCellNear(
     wanted: GridCell,
@@ -1081,15 +1184,19 @@ fun freeCellNear(
 ): GridCell {
     val c = wanted.col.coerceIn(0, (cols - 1).coerceAtLeast(0))
     val r = wanted.row.coerceIn(0, (rows - 1).coerceAtLeast(0))
+    val rowSpan = cellRowSpan(contentHeightPx, rowPitchPx)
     // 候选可用的最底一档：块放不下就往上退，档数不够（带比这颗还矮）时只留第 0 档
-    val lastRow = (rows - cellRowSpan(contentHeightPx, rowPitchPx)).coerceAtLeast(0)
-    if (GridCell(c, r) !in occupied && r <= lastRow) return GridCell(c, r)
-    val span = (cols.coerceAtLeast(1) * rows.coerceAtLeast(1))
-    for (d in 1..span) {
+    val lastRow = (rows - rowSpan).coerceAtLeast(0)
+    // 候选判据：**整块**（锚点 + 它压住的跨度尾）都不与占位集相交。span=1 时 spannedCells 退化为
+    // 单格 ⇒ 与旧式"锚点不在 occupied"逐字同值，既有用例期望值一条没动。
+    fun fits(cell: GridCell) = spannedCells(cell, rowSpan).none { it in occupied }
+    if (fits(GridCell(c, r)) && r <= lastRow) return GridCell(c, r)
+    val maxD = (cols.coerceAtLeast(1) * rows.coerceAtLeast(1))
+    for (d in 1..maxD) {
         for (row in 0 until rows) {
             for (col in 0 until cols) {
                 if (row > lastRow) continue
-                if (GridCell(col, row) in occupied) continue
+                if (!fits(GridCell(col, row))) continue
                 if (abs(col - c) + abs(row - r) != d) continue
                 return GridCell(col, row)
             }
@@ -1117,6 +1224,19 @@ data class HudGridItem(val entry: HudEntry, val cell: GridCell)
  *
  * 同组两颗不必在这里"成组处理"：第 2 趟逐颗走就行——先落的那颗占了推导格，后落的那颗发现
  * "那一格里只有我的搭档"（[cellGroupMatesOf]），于是不算挡路、原地落进同一格。格内的先后 = [order] 的先后。
+ *
+ * ## 2026-10-02 补：第 2 趟与第 1 趟同一条"锚点优先"口径
+ * 第 2 趟**不许无条件调 [freeCellNear]**：`blocked` 是搭档感知的——搭档那一格的**锚点**对本颗是空的
+ * （"合回配对"的唯一入口，[blockingCells] 第 1 条），但搭档那一块的跨度尾 `row+1..` 算占（第 2 条）。
+ * 本颗落回那一格时它的块**就是**搭档那一块（同组共格），于是 [freeCellNear] "整块不与占位集相交"的
+ * 候选判据会把搭档也判成挡路 ⇒ 配对被甩到第 2 列（右 Dock 宽度账 172→352px、底板 94dp 翻倍）——
+ * 2026-10-02 `freeCellNear` 整块升级带进来的回归，`HudLayoutPairCellTest` /
+ * `HudLayoutRowPitchTest` 五条红全是它（还经 `pinned` 传染到写表侧：钉格那一步先把配对拆成两列，
+ * 交换时 `occupant` 就只剩一颗，搭档被甩去第 2 列）。所以第 2 趟与第 1 趟逐字同构：**推导格的锚点没被占就直接落**，
+ * 被占了才进 [freeCellNear] 的整块搜索（那一支照旧挡"块尾压别人锚点"）。
+ * `span=1` 时两条路逐字同值（锚点空 ⇒ freeCellNear 也原地返回）⇒ "老用例一条不动"照旧成立。
+ * 推导格天然在带内（[defaultCellsOf] 从第 0 档按 span 累加，用不满 [GridRowHardCap]）
+ * ⇒ 跳过 freeCellNear 不会放过"块尾出带"的候选。
  *
  * ## #75：被占的档由 [blockingCells] 按行跨度展开，本函数只看得到"某一格能不能落"
  * 高格压住的第 2、3 档已经在 [occupiedCells]/本函数的 blocked 集合里了，所以就近让位不会把一颗塞进
@@ -1152,9 +1272,12 @@ internal fun resolveCells(
     for (e in order) {
         if (out.containsKey(e)) continue
         val blocked = blockingCells(taken, self = e, mates = cellGroupMatesOf(derived, e), cellHeightPx, rowPitchPx)
-        val cell = freeCellNear(
-            derived[e] ?: GridCell(0, 0), blocked, cols, rows, cellHeightPx(e), rowPitchPx
-        )
+        val want = derived[e] ?: GridCell(0, 0)
+        // 与第 1 趟逐字同构的"锚点优先"：推导格的锚点没被占 ⇒ 原地落进同一格（同组共格/合对那一支）；
+        // 被占了才进 [freeCellNear] 的整块搜索（那一支照旧拒"块尾压别人锚点"的候选）。
+        // 为什么不能 unconditional 走 freeCellNear：见本函数 KDoc「2026-10-02 补」那一段——
+        // 搭档块的跨度尾在 blocked 里，整块判据会把搭档判成挡路，把配对视成甩去第 2 列
+        val cell = if (want in blocked) freeCellNear(want, blocked, cols, rows, cellHeightPx(e), rowPitchPx) else want
         taken.getOrPut(cell) { mutableListOf() }.add(e)
         out[e] = cell
     }

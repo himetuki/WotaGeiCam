@@ -828,7 +828,10 @@ fun CameraScreen(
                 }
                 HudItem.ISO -> if (aeAuto) "AUTO" else "${iso.value}"
                 HudItem.EV ->
-                    if (aeMode == AeMode.AUTO) evText(ev.value, ability?.evStep ?: 1f) else null
+                    // 补 ev.enabled 判据（EV 闪退诊断 P3 同类）：EV 能力缺失的机器上 applyEv 给
+                    // range=null+enabled=false，只判 aeMode 会显示假 "+0.0EV"——与 HudCycle 的
+                    // range 真源口径统一（enabled 由 applyAbility 从 ability.evRange.ok() 写入）
+                    if (aeMode == AeMode.AUTO && ev.enabled) evText(ev.value, ability?.evStep ?: 1f) else null
                 HudItem.WB -> wbShort(wbMode, kelvin.value)
                 HudItem.ZOOM -> String.format(java.util.Locale.US, "%.1fx", zoom.value)
                 HudItem.FPS ->

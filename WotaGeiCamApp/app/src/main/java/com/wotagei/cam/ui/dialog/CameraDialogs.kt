@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui.dialog
 
+import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -13,16 +14,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,12 +39,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wotagei.cam.R
@@ -67,7 +63,12 @@ import com.wotagei.cam.core.forcedShutterOutOfRange
 import com.wotagei.cam.core.shutterCeilingNs
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.WotaSettings
+import com.wotagei.cam.ui.design.SheetCenterBreakpoint
+import com.wotagei.cam.ui.design.SheetInnerPadding
+import com.wotagei.cam.ui.design.SheetMaxWidth
+import com.wotagei.cam.ui.design.SheetMinHeight
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.design.sheetMaxHeight
 import com.wotagei.cam.ui.theme.AcrylicScrim
 import com.wotagei.cam.ui.theme.TextScaleLayer
 import com.wotagei.cam.ui.theme.WotaDivider
@@ -217,40 +218,8 @@ internal fun <T> StateFlow<T>.observed(): State<T> = collectAsStateWithLifecycle
 
 // ------------------------------------------------------------------ 共用小件
 
-// ---- 半模态尺寸纪律（Top8 #8；来源 bindsheet.md 直板机/平板通用尺寸规格节，design-spec §8.2）----
-// 档位收成常量供本包（CurveSheet 等）共用，禁止逐面板手调；含窗口/inset 的量一律运行时取，
-// 禁止按方向写死（本机横屏挖孔在左右两侧，同一枚写死方向的常量在两个横屏方向必错一次）。
-//   宽 480dp 上限        ——「手机横屏时保持宽度 480vp 最大宽度」/ 平板「宽度默认为 480vp」
-//   最小高 320dp         ——「半模态最小高度为 320vp」
-//   最大高=短边 90%      ——「半模态最大高度为屏幕短边的 90% 高度」
-//   距信号栏 8dp         ——Size-Regular「高度距离信号栏保持 8vp 间距」（inset 运行时读）
-//   >600dp 短边转居中    ——「大于 600vp 设备断点以上时…屏幕居中显示」（断点输入是**短边**：
-//                          平板/折叠屏展开态才居中，手机横竖屏一律底贴屏；2026-10-02 用户裁决，
-//                          原「宽度>600」会让手机横屏常驻居中；短边运行时取，不按方向写死）
-internal val SheetMaxWidth = 480.dp
-internal val SheetMinHeight = 320.dp
-internal const val SheetMaxShortRatio = 0.9f
-internal val SheetSignalGap = 8.dp
-/** 弹窗内间距 12dp（⑤；design-spec §5.1 `ohos_id_default_padding_start/end`=12vp） */
-internal val SheetInnerPadding = 12.dp
-internal const val SheetCenterBreakpoint = 600
-
-/**
- * 半模态面板的最大高（dp）：短边 90% 与「窗口高 − 顶部避让」取小。
- * 顶部避让 = max(信号栏 inset + 8dp, [PanelTopKeep] 兜底)——inset 运行时读；本机横屏
- * 挖孔在左右两侧时 top inset 自然为 0，48dp 的顶栏兜底接手（PanelTopKeep 的已知债仍有效）。
- * 面板本体（[BottomPanel]）与曲线画布（`CurveSheet.canvasSide`）共用同一份口径，不许各算各的。
- */
-@Composable
-internal fun sheetMaxHeight(): Dp {
-    val config = LocalConfiguration.current
-    val density = LocalDensity.current
-    val shortSide = minOf(config.screenWidthDp, config.screenHeightDp).dp
-    val topInset = with(density) { WindowInsets.safeDrawing.getTop(density).toDp() }
-    val topKeep = maxOf(topInset + SheetSignalGap, PanelTopKeep)
-    return (minOf(shortSide * SheetMaxShortRatio, config.screenHeightDp.dp - topKeep))
-        .coerceAtLeast(0.dp)
-}
+// 半模态尺寸纪律的五枚常量与 sheetMaxHeight() 已上提到 `ui/design/SheetSpec.kt`：
+// 播放侧 CompareHistorySheet 换装同一套纪律时不能反过来 import 录制页包，design 层才是公共家。
 
 @Composable
 internal fun BottomPanel(
@@ -259,6 +228,10 @@ internal fun BottomPanel(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    // 钉底动作行槽位（不参与滚动）：只有 CurveSheet 一个调用方传。不给默认值的话
+    // 将来出现无动作行的面板会被迫传空块，这里允许 null 即可——漏挂动作行的后果是
+    // 功能缺失而不是布局炸裂，编译期拦截不了也不必拦
+    bottomBar: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val motion = LocalMotion.current
@@ -267,6 +240,13 @@ internal fun BottomPanel(
     // 会让手机横屏 800dp 命中常驻居中）
     val config = LocalConfiguration.current
     val centered = minOf(config.screenWidthDp, config.screenHeightDp) > SheetCenterBreakpoint
+    // BACK 收面板：本组件换掉的那枚 M3 ModalBottomSheet 自带这个语义，别丢——
+    // 对比页历史面板开着按 BACK 原先会连整个对比页一起退掉（对比会话两片全丢）。
+    // 放在 AnimatedVisibility **外**恒组合：enabled 跟着 visible 走，退出动画一开始就该放行，
+    // 否则那一小段窗口里 BACK 会再打一次 onDismiss（重复收面板），而用户想退的是页面。
+    // 录制页那几枚面板（CurveSheet 等）顺带获得同一语义；那一页没有任何既有的 BACK 处理器
+    // （全仓只有 GalleryScreen 的多选态挂过 BackHandler），所以不冲突、只是补上缺失的那一条。
+    BackHandler(enabled = visible) { onDismiss() }
     Box(modifier.fillMaxSize()) {
         AnimatedVisibility(
             visible = visible,
@@ -288,13 +268,26 @@ internal fun BottomPanel(
                 WotaSettings.KEY_TEXT_SCALE_DIALOG
             )
             TextScaleLayer(dialogScale) {
-                // 整块限高到「顶栏以下」并只让参数区滚：以前是整块 verticalScroll，
-                // 参数一多就撑满全高、标题被顶到屏幕最上沿压住录制页顶栏文字（真机截图核对）
+                // 整块限高到「顶栏以下」、只让参数区滚、动作行钉底：以前是整块 verticalScroll，
+                // 参数一多就撑满全高、标题被顶到屏幕最上沿压住录制页顶栏文字（真机截图核对）；
+                // 横屏真机再实测出动作行整行沉到 y≈700-719 零亮像素（t8_07），根因就是动作行
+                // 也躺在滚动区里被画布挤出屏——现在把「标题/滚动区/动作行」拆成三段，动作行
+                // 排在滚动区之后，结构上永远贴着面板底缘
                 val sheetMaxH = sheetMaxHeight()
                 Column(
                     Modifier
-                        .fillMaxWidth()
+                        // 宽度两件套的顺序不可换：foundation 1.5.4 的 SizeModifier 是把目标档
+                        // **收进传入约束**（target.coerceInto(incoming)），`fillMaxWidth().widthIn(max)`
+                        // 会先把 min 顶成窗口宽、widthIn 的 480 被 coerce 回窗口宽成了摆设
+                        // （真机横屏实测内容 742dp，t8_07）。先钳后铺：横屏窗口 766dp 被钳到 480
+                        // 并由 BottomCenter 水平居中；竖屏 360dp 可用宽用不满 480，fillMaxWidth
+                        // 铺满可用宽——「内容宽 = min(可用宽, 480)」就是规格允许的既定退化
                         .widthIn(max = SheetMaxWidth)
+                        .fillMaxWidth()
+                        // 高度口径：屏幕给得出 320dp 就给足最小高（竖屏 800dp 高 → max 短边 90%
+                        // =324 封顶、min=320 生效）；装不下（横屏 360dp 高窗口扣顶栏兜底后
+                        // sheetMaxH ≈278dp）时 min 让位于「不超出屏幕」，按可用高给满——
+                        // 这是**有意的退化**不是缺陷，此时面板高 = max = 278dp，如实记录
                         .heightIn(min = minOf(SheetMinHeight, sheetMaxH), max = sheetMaxH)
                         // WotaShape.dialog 是 Dp 件位值（24dp）不是 Shape，clip 要 Shape 就地包。
                         // 口径备注：官方底贴屏面板只圆**上缘** 24dp，这里仍是全形状四角皆圆（本轮改动最小）；
@@ -329,26 +322,22 @@ internal fun BottomPanel(
                     }
                     Spacer(Modifier.height(4.dp))
                     DividerLine()
-                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Column(
+                        Modifier
+                            // fill=false：内容矮时滚动区收着内容走（面板由 min 高兜底），
+                            // 内容高时把剩余空间全让给滚动区——bottomBar 永远排在其后不参与滚动。
+                            // （weight 必须挂在 verticalScroll 之前：先占位再滚，反了 weight 拿不到列约束）
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                    ) {
                         content()
                     }
+                    bottomBar?.invoke()
                 }
             }
         }
     }
 }
-
-/**
- * 面板顶部要给录制页顶栏留出的高度——**兜底近似，不是实测值**：
- * 顶栏设计高 44（`ui/HudLayer` 的 `TopBarSpace`：38 圆钮 + 上下 4+2）+ 4 的一次固定加成。
- *
- * 已知债：顶栏实测更高时本预留不足会压面板顶——能力/权限告警条约 22dp 出现、或字体缩放 120%
- * 把顶栏撑高，都是常见场景。正解是由录制页把 `topBarH` 实测（`CameraScreen` 里
- * `HudTopChrome.onSizeChanged` 回报、现只喂 `HudLayout` 的 `topAvoidDp` 那份）经 CompositionLocal
- * 传入本面板，待跨文件接线（provide 点在 `CameraScreen`，不属本轮可改文件；10-01 清查记录）。
- * 上账的「顶 inset」那一笔已由 [sheetMaxHeight] 运行时读掉（⑧ 距信号栏 8dp），这里只剩 topBarH 一笔。
- */
-private val PanelTopKeep = 48.dp
 
 @Composable
 internal fun DividerLine() {

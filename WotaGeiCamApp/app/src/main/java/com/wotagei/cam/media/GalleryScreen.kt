@@ -1,6 +1,7 @@
 package com.wotagei.cam.media
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -172,6 +173,14 @@ fun GalleryScreen(
 
     LaunchedEffect(filter, scope, mode) { selectedIds = emptySet() }
 
+    // 2026-10-02 真机实测交互缺陷修复：多选态没有独立出口——长按进多选后按系统 BACK 直接
+    // popBackStack 关掉整个媒体库，缺了通用相册惯例的「第一段退多选、第二段才退页面」两段式。
+    // 只在多选态启用回调：普通浏览态不注册，BACK 仍走 NavHost 默认 popBackStack，与旧版逐字节
+    // 等价，系统返回手势的预测性回退也不受影响（我们依旧不拦）。批量彻底删除确认框（purgeIds）
+    // 开着时 BACK 先落进 AlertDialog 自己的窗口（onDismissRequest），走不到这里；万一走到
+    // （跨窗口语义变化），也不能替用户把整个媒体库退出去，故维持只清多选态这一档。
+    BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds = emptySet() }
+
     // 这两条 Flow **必须 remember**：`repo.clips(...)` / `repo.customTags()` 每次调用都造一条新的
     // 冷管道，而 `collectAsState` 的 producer 以 **Flow 实例**为 key —— 不 remember 就等于
     // 「每重组一次就取消并重开一轮 MediaStore + Room 查询」（多选点一下、横幅变一次、切页签都算），
@@ -182,6 +191,10 @@ fun GalleryScreen(
     val customTags by tagsFlow.collectState(emptyList())
     val tabs = remember(customTags) { GalleryTabs.build(app, customTags) }
     val clips by clipsFlow.collectState(emptyList())
+    // 闸门押后列表下发的那一瞬间（播放器"彻底删除"返回媒体库时最多约 1.1s）：这时空列表是
+    // **编排的结果**而不是真相，照旧显示"这里还没有视频"会被读成"视频全没了"。
+    // 它不是持久化开关、不进 remember：闸门是仓库级进程状态，UI 只订阅。
+    val listRefreshing by repo.listRefreshing.collectState(false)
 
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -212,7 +225,11 @@ fun GalleryScreen(
                     gridColumns = n
                     prefs.edit().putInt(WotaSettings.KEY_GALLERY_COLUMNS, n).apply()
                 },
-                onBack = onBack
+                onBack = {
+                    // 2026-10-02 真机实测交互缺陷修复：与 BACK 同一条两段式契约——多选态下顶栏 X
+                    // 第一段只退出多选（恢复普通浏览），普通态才关掉整个媒体库。
+                    if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack()
+                }
             )
 
             GalleryTabStrip(
@@ -255,11 +272,12 @@ fun GalleryScreen(
             ) {
                 val isTrash = filter is ClipFilter.Trash
                 when (mode) {
-                    ListMode.Timeline -> TimelineList(clips, isTrash, onOpen) { menuClip = it }
+                    ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen) { menuClip = it }
                     ListMode.Grid -> ClipGrid(
                         clips = clips,
                         columns = gridColumns,
                         isTrash = isTrash,
+                        refreshing = listRefreshing,
                         selectedIds = selectedIds,
                         onOpen = onOpen,
                         onMenu = { menuClip = it },
@@ -267,7 +285,7 @@ fun GalleryScreen(
                             selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
                         }
                     )
-                    ListMode.Fullscreen -> FullscreenBrowse(clips, onOpen, onCompare, ops)
+                    ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, onOpen, onCompare, ops)
                 }
             }
 
@@ -347,7 +365,13 @@ fun GalleryScreen(
         }
     }
 
-    menuClip?.let { clip ->
+    // 2026-10-02 排查「多选操作后立刻打开的『更多操作』菜单，点菜单项无响应」：
+    // menuClip 钉的是图标按下那一刻的 VideoClip 快照，批量操作的 repo.invalidate() 重发可能在
+    // 菜单打开之后才落地，菜单就拿着旧快照干活——收藏项对旧状态取反，撞上刚生效的批量收藏
+    // 就是两次空写、零反馈（机理分析见下方 CardMenu 收藏项注释）。这里每次重组都解析当前列表
+    // 里的最新一份；条目已不在列表（极端时序）才回退快照，保证菜单仍可操作。
+    menuClip?.let { requested ->
+        val clip = clips.firstOrNull { it.id == requested.id } ?: requested
         CardMenu(clip = clip, ops = ops, onDismiss = { menuClip = null }, onCompare = { onCompare(clip.id) })
     }
 }
@@ -544,14 +568,21 @@ private fun SelectionBar(
 // region 时间线
 
 @Composable
-private fun TimelineList(clips: List<VideoClip>, isTrash: Boolean, onOpen: (Long) -> Unit, onMenu: (VideoClip) -> Unit) {
+private fun TimelineList(
+    clips: List<VideoClip>,
+    isTrash: Boolean,
+    refreshing: Boolean,
+    onOpen: (Long) -> Unit,
+    onMenu: (VideoClip) -> Unit
+) {
     val app = LocalContext.current.applicationContext
     val listState = rememberLazyListState()
     val scrolling by remember { derivedStateOf { listState.isScrollInProgress } }
     LaunchedEffect(scrolling) { ThumbLoader.paused = scrolling }
     DisposableEffect(Unit) { onDispose { ThumbLoader.paused = false } }
-    if (clips.isEmpty()) {
-        EmptyHint(stringResource(if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty))
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    if (emptyState != GalleryEmptyState.LIST) {
+        EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
     }
     val groups = remember(clips) { groupTimeline(clips, app) }
@@ -607,6 +638,7 @@ private fun ClipGrid(
     clips: List<VideoClip>,
     columns: Int,
     isTrash: Boolean,
+    refreshing: Boolean,
     selectedIds: Set<Long>,
     onOpen: (Long) -> Unit,
     onMenu: (VideoClip) -> Unit,
@@ -616,8 +648,9 @@ private fun ClipGrid(
     val scrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
     LaunchedEffect(scrolling) { ThumbLoader.paused = scrolling }
     DisposableEffect(Unit) { onDispose { ThumbLoader.paused = false } }
-    if (clips.isEmpty()) {
-        EmptyHint(stringResource(if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty))
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    if (emptyState != GalleryEmptyState.LIST) {
+        EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
     }
     LazyVerticalGrid(
@@ -704,7 +737,15 @@ private fun CardMenu(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit, onCo
         onDismiss = onDismiss,
         title = clip.name,
         entries = listOf(
-            WotaMenuEntry(stringResource(R.string.gallery_menu_like)) { ops.setLike(clip, !clip.liked) },
+            // 收藏曾是菜单里唯一「点了没有可见反馈」的条目：菜单不关、setLike 成功也不出横幅，
+            // 连点两次「收藏→取消收藏」净效果为零，观感就是「菜单项无响应」；若菜单开在批量
+            // 收藏的重发时序窗里，快照还是旧的，两次全落成空写（2026-10-02 排查结论）。
+            // 补 onDismiss 让第一次点击必有可见回应（菜单收起+卡片红心变化），语义对齐
+            // compare/restore/trash 这组即时生效条目。**不**跟着关的另有两族且是有意的：
+            // share 完留在原页等系统分享面板；tags/rename/purge 要先开二级弹窗——
+            // WotaMenuPopup 刻意不替调用方 dismiss，菜单先卸载会把二级弹窗的状态一起带走
+            // （design/Widgets.kt 那条注释）。
+            WotaMenuEntry(stringResource(R.string.gallery_menu_like)) { ops.setLike(clip, !clip.liked); onDismiss() },
             WotaMenuEntry(stringResource(R.string.gallery_menu_compare)) { onDismiss(); onCompare() },
             WotaMenuEntry(stringResource(R.string.gallery_menu_share)) { ops.share(listOf(clip)) },
             if (clip.isTrashed) {
@@ -806,12 +847,14 @@ fun MediaTagDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) {
 @Composable
 private fun FullscreenBrowse(
     clips: List<VideoClip>,
+    refreshing: Boolean,
     onOpen: (Long) -> Unit,
     onCompare: (Long) -> Unit,
     ops: MediaOps
 ) {
-    if (clips.isEmpty()) {
-        EmptyHint(stringResource(R.string.gallery_empty))
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    if (emptyState != GalleryEmptyState.LIST) {
+        EmptySlot(emptyState, R.string.gallery_empty)
         return
     }
     val engine = rememberPlayerEngine()
@@ -993,6 +1036,53 @@ fun VideoThumbnail(
         } else {
             CircularProgressIndicator(Modifier.size(18.dp), color = WotaAccent, strokeWidth = 2.dp)
         }
+    }
+}
+
+/**
+ * 内容区「空」那一刻的三种形态（**纯函数**，JVM 单测直接驱动，也是运行时的唯一判据）。
+ *
+ * 2026-10-02 真机观察项：播放器「彻底删除」的收尾是「关闸 → 清缓存 → 出栈 → 开闸 → 重查」，
+ * 那 1.1s 里 [MediaRepo.listRefreshing] 为 true、列表**故意**不下发。返回的媒体库是一次新组合，
+ * `collectAsState(emptyList())` 只有空列表可显示 ⇒ 照旧显示"这里还没有视频"就是让用户以为
+ * 自己十三条视频没了（刺眼且误导）。闸门一开真实快照自然替换，所以那一刻的真相是"刷新中"。
+ *
+ * 两条边界写在这里，因为它们是这条判据的全部语义：
+ * - **列表不为空时闸门不参与**（返回 [GalleryEmptyState.LIST]）：闸门期内 `collectAsState`
+ *   保留的是**上一份**列表（媒体库内批量删除就是这一形态），不能被判成"刷新中"而清空内容；
+ * - **闸门关着且列表为空** 才是真的空（返回 [GalleryEmptyState.EMPTY]）：首帧查询还没回来、
+ *   或这个库这个页签本来就没有视频，都走这一支。
+ */
+internal enum class GalleryEmptyState { LIST, REFRESHING, EMPTY }
+
+internal fun galleryEmptyState(clipsEmpty: Boolean, listRefreshing: Boolean): GalleryEmptyState = when {
+    !clipsEmpty -> GalleryEmptyState.LIST
+    listRefreshing -> GalleryEmptyState.REFRESHING
+    else -> GalleryEmptyState.EMPTY
+}
+
+/**
+ * 空槽位：三个列表形态（时间线 / 网格 / 全屏滑动）共用的唯一出口。
+ * "闸门期不显示『这里还没有视频』"这条只在**这一处**成立，改漏一个形态不会静默分叉。
+ */
+@Composable
+private fun EmptySlot(state: GalleryEmptyState, emptyTextRes: Int) {
+    when (state) {
+        GalleryEmptyState.REFRESHING -> RefreshHint()
+        GalleryEmptyState.EMPTY -> EmptyHint(stringResource(emptyTextRes))
+        GalleryEmptyState.LIST -> Unit
+    }
+}
+
+/**
+ * 「刷新中」提示：一只转圈，**不写字**。
+ * 文案要进 `strings_gallery.xml`，而本轮的改动清单里没有它——转圈本身就是"等一下"的世界语，
+ * 比空等一块空白更不容易读成"视频没了"（要与空态文案区分时再补 string，届时只改这一处）。
+ */
+@Composable
+private fun RefreshHint() {
+    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator(color = WotaAccent, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
     }
 }
 

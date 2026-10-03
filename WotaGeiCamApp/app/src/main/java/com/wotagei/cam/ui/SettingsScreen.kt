@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -45,10 +46,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -815,7 +818,15 @@ private fun SettingGroup(text: String) {
     Text(
         text = text,
         // 分组标题是标题不是正文，按 docs/plan/11 §2 用 title 字阶；卡内正文仍走 MaterialTheme.typography
-        style = WotaType.title,
+        //
+        // WCAG 大字档收口（2026-10-02）：17sp SemiBold **不构成** WCAG large text——bold 线要
+        // ≥14pt（18.66px）且字重到 bold（惯例 ≥700，SemiBold 600 两头都不达标；即便宽算它 bold，
+        // 17px 仍在线下 1.66px）→ 之前按 3.0 门槛放行缺依据。升 19sp Bold 进真 large 档
+        // （≥18.66px bold 线；也顺带贴 HDS 标题栏 19vp，design-spec §3.4「title 17 偏小，贴 HDS 升 19–20」），
+        // 行高按同一比例 22→24sp。accent 保留：accent×bg 4.86、accent×surface 4.48，均高于
+        // 真 large 档的 3.0 门槛（scripts/contrast-audit.py ACCENT_PAIRS accent×bg / accent×surface）。
+        // 不动 Tokens.kt 的 WotaType.title（令牌值本轮不许动；本文件已有 MonoStyle.copy 的局部派生先例）。
+        style = WotaType.title.copy(fontSize = 19.sp, lineHeight = 24.sp, fontWeight = FontWeight.Bold),
         color = WotaColor.accent,
         modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 6.dp)
     )
@@ -842,6 +853,14 @@ private fun Card(content: @Composable androidx.compose.foundation.layout.ColumnS
  *
  * 宽度**按内容自适应**，另给一个最短长度下限：3 个汉字。以前调用方用 `weight(1f)` 把每颗强行撑到
  * 半行宽，于是「网格」这种两字标签配上一条长胶囊，左右全是空底（2026-09-28 用户指出）。
+ *
+ * 高度对齐 HDS Chip 的 28vp（component-map §三「多选格 ChipCell → ChipGroup.Multiple，高 28vp」、
+ * design-spec §5.2 小件档 `ohos_id_piece_height`；Top 8 #3 点名「设置多选」同属 Chip 族）：
+ * 垂直内边距 8→4dp。实账（`ui/theme/Type.kt`）：bodyMedium = 13sp / **18sp 行高** ⇒ 自然高
+ * 18+2×4=**26dp，到不了 28**；差的那 2dp 是 `heightIn(min=)` 从下限托上去的，不是行高刚好凑出来的。
+ * **不写死 28**——与 [WotaChipImpl] 同一条纪律用 `heightIn(min=)` 兜底：「设置页文本高度」放大到
+ * 120% 时自然高 ≈29.6dp 才越过下限跟着行高长高，缩到 80% 时只剩 ≈22dp 仍由下限托住。
+ * 真机实测改前 36dp（72px@2x）正是这 16dp 垂直内边距垫出来的，改后 56px。
  *
  * 两个坑：① 下限要加在 **Text** 上而不是加在带 padding 的 Box 上——加在 Box 上会被左右 24dp 内边距
  * 吃掉，实测两字标签仍是 106px，压根没被抬到三字的 135px；② 别用 `TextUnit.toDp()` 换算，那个转换
@@ -874,7 +893,11 @@ private fun ChipCell(text: String, selected: Boolean, modifier: Modifier = Modif
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            // 高 28dp = HDS 小件档（ohos_id_piece_height，见上注）：bodyMedium 的自然高只有 26dp
+            // （18sp 行高 + 2×4dp 内边距），28 是下面这道 min 托上去的，**不是**行高自己凑出来的；
+            // heightIn(min=) 兜住「文本高度」缩到 80% 时自然高只剩 ≈22dp 的情形（与 WotaChipImpl 同一手法）
+            .heightIn(min = 28.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
