@@ -21,9 +21,9 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG_ARC_GL = "WotaArcRepairGl"
 
-/** 取样单元：0 = 当前解码帧（OES），1 = 上一帧的 2D 备份；与 `Shaders.ARC_REPAIR_FS` 的注释同源。 */
-private const val ARC_CUR_UNIT = 0
-private const val ARC_PREV_UNIT = 1
+/** 取样单元：0/1 = 取大合并的两路输入；与 `Shaders.ARC_MERGE_FS` 的注释同源。 */
+private const val ARC_UNIT_A = 0
+private const val ARC_UNIT_B = 1
 
 /** EGL14 未暴露该常量，取 Khronos 原值 `EGL_OPENGL_ES3_BIT_KHR`（与 GlRenderEngine 同一写法）。 */
 private const val EGL_OPENGL_ES3_BIT_KHR = 0x0040
@@ -35,42 +35,32 @@ private const val OP_WAIT_MS = 4_000L
 private const val FRAME_WAIT_MS = 2_000L
 
 /**
- * 光弧修复的 **GPU 路线独立小引擎**（用户需求第 7 项）。
+ * 光弧修复的 **GPU 路线独立小引擎**（用户需求第 7 项，v2 抽帧+补弧口径）。
  *
- * 为什么不复用 [com.wotagei.cam.camera.GlRenderEngine]：那个引擎的 OES 纹理**死绑相机 `SurfaceTexture`
- * 与预览 pass**，输入源、上屏目标、效果链全是为相机构造的；本引擎的输入是**解码器**、输出只有
- * 编码器一面、且要按"原帧/混合帧"交替 swap。硬塞进去只会在相机预览与离线修复之间挖一条互相污染的暗道。
- * 所以这里另起一套 EGL，但**逐段搬**了 GlRenderEngine 里已被真机验证的五段：
- * `initGl` 的 EGLConfig（WINDOW|PBUFFER）/ ES3→ES2 回退 / `eglCreateWindowSurface` 建编码器面 /
- * `EGLExt.eglPresentationTimeANDROID` 写**均匀 PTS** / `eglSwapBuffers`。
+ * 为什么不复用 [com.wotagei.cam.camera.GlRenderEngine]：那个引擎的 OES 纹理**死绑相机
+ * `SurfaceTexture` 与预览 pass**；本引擎的输入是**解码器**、输出只有编码器一面。所以这里
+ * 另起一套 EGL，但**逐段搬**了 GlRenderEngine 里已被真机验证的五段：`initGl` 的 EGLConfig
+ * （WINDOW|PBUFFER）/ ES3→ES2 回退 / `eglCreateWindowSurface` 建编码器面 /
+ * `EGLExt.eglPresentationTimeANDROID` 写 PTS / `eglSwapBuffers`。
  *
- * # 双帧获取方案：**单解码 Surface + 上一帧 2D 备份纹理**（另一条是 A/B 双 SurfaceTexture）
- * 选它的理由：A/B 双 SurfaceTexture 要做"这一帧落在 A 还是 B"的状态机，且两枚 `updateTexImage` 的
- * 消费时序一错就静默丢帧（表现为光弧在个别接缝处闪一下，极难归因）；单 Surface + 每帧把当前解码帧
- * 拷进一张普通 2D 纹理（FBO 拷贝趟，拓扑与 `camera/FrostBlurChain` 的 OES→2D 拷贝趟一致）
- * 时序是**确定**的：拷贝发生在原帧输出之后、下一帧到来之前，prev 纹理永远是"上一帧"。
- * 代价：每帧多一趟全分辨率离屏拷贝（1920×1080 一次 fill，GPU 上是皮秒级），换来彻底去掉丢帧状态机。
- *
- * # 输出节奏（2N−1 帧）
- * 第 k 帧（k≥1）到达时：先出 `Blend(f(k−1), f(k))`（权重来自 [ArcRepairPlan.blendWeight]），
- * 再出 `Original(f(k))`，然后把当前帧拷进 prev 纹理。k=0 只出 `Original`。
- * 于是输出 = 1 + 2(N−1) = 2N−1，与 [ArcRepairPlan] 的计划严格同构。
+ * # v2 的纹理拓扑（替换 v1 的"prev 备份 + cross-fade"）
+ * - `cur`：解码帧的 2D 拷贝（OES → 2D 拷贝趟，拓扑与 `camera/FrostBlurChain` 一致）；
+ * - `pending` A/B 乒乓：**待发保留帧**——决策权在 [ArcRepairFlow]（runner 侧），本引擎只认
+ *   指令原语：留（hold/merge）、并（fold/accumulate）、发（emit）；
+ * - `acc` A/B 乒乓：**补弧累积面**——连续多枚被抽帧先在 acc 里逐枚取大，再一并并进前后帧。
+ * - 全部合并走 [Shaders.ARC_MERGE_FS]（`max(a,b)`）；2D→2D 趟用恒等纹理矩阵，只有 OES 拷贝趟
+ *   带 SurfaceTexture 的 `stMatrix`。
  *
  * # 线程
  * EGL/SurfaceTexture 全在一条 `HandlerThread("WotaArcRepairGl")` 上活（EGL 上下文绑定线程）；
- * 管线线程通过 [start]/[attachEncoderSurface]/[renderFrame]/[release] 投递并**阻塞等完成**。
- * [awaitFrame] 等的是"解码器把帧推上来"的信号，通知方是**本 GL 线程**的 `onFrameAvailable`，
- * 等待方是管线线程——两个线程不同，所以不会自己等自己。
+ * 管线线程通过各指令方法投递并**阻塞等完成**。[awaitFrame] 等的是"解码器把帧推上来"的信号，
+ * 通知方是**本 GL 线程**的 `onFrameAvailable`，等待方是管线线程——两个线程不同，不会自己等自己。
  */
 internal class ArcRepairGl(
     private val widthPx: Int,
     private val heightPx: Int,
-    srcFps: Int,
     private val basePtsNs: Long = 0L
 ) {
-
-    /** 输出帧率 = 源帧率 × 2（插帧后），用于 [EGLExt.eglPresentationTimeANDROID] 的均匀步长 */
-    private val outputFps: Int = if (srcFps > 0) srcFps * 2 else 60
 
     private val thread = HandlerThread("WotaArcRepairGl").apply { start() }
     private val handler = Handler(thread.looper)
@@ -93,47 +83,50 @@ internal class ArcRepairGl(
 
     // --- 纹理 / program
     private var oesTextureId = 0
-    private var prevTex = 0
-    private var prevFbo = 0
+    private var curTex = 0
+    private var curFbo = 0
+    private val pendTex = IntArray(2)
+    private val pendFbo = IntArray(2)
+    private var pendIdx = 0
+    private val accTex = IntArray(2)
+    private val accFbo = IntArray(2)
+    private var accIdx = 0
+
     private var passProgram = 0
-    private var blendProgram = 0
+    private var mergeProgram = 0
 
     private var passAPosition = -1
     private var passATexCoord = -1
     private var passUTexMatrix = -1
     private var passUFrame = -1
-    private var blendAPosition = -1
-    private var blendATexCoord = -1
-    private var blendUTexMatrix = -1
-    private var blendUCur = -1
-    private var blendUPrev = -1
-    private var blendUPrevWeight = -1
+    private var mergeAPosition = -1
+    private var mergeATexCoord = -1
+    private var mergeUTexMatrix = -1
+    private var mergeUA = -1
+    private var mergeUB = -1
 
     private var texture: SurfaceTexture? = null
 
     // --- 构造期一次性分配（每帧零分配）
     private val stMatrix = FloatArray(16)
+    private val identityMatrix = floatArrayOf(
+        1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f
+    )
     private val positionBuffer = nativeFloatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
     private val texCoordBuffer = nativeFloatBuffer(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
 
     // --- 帧到达信号（GL 线程通知、管线线程等待）
     private val frameLock = Object()
-    private var framesQueued = 0
-    private var framesConsumed = 0
+    private var framesQueued = 0L
+    private var framesConsumed = 0L
 
-    // region 对外（管线线程调用）
-
-    /** 在 GL 线程建 EGL 与离屏资源；成功后 [decoderSurface] 可用 */
     fun start(): Boolean = postAndWait(OP_WAIT_MS) { initGl() }
 
-    /** 把编码器的输入面挂成 EGL 窗口面（`eglCreateWindowSurface`） */
+    /** 把编码器输入面挂上 EGL（必须在 enc.start() 之后调，时序理由见 runner 侧注释） */
     fun attachEncoderSurface(surface: Surface): Boolean =
         postAndWait(OP_WAIT_MS) { createEncoderSurface(surface) }
 
-    /**
-     * 等解码器把一帧推上 SurfaceTexture（`onFrameAvailable` 由本 GL 线程触发）。
-     * 超时返回 false —— 管线据此报错收尾，绝不无限等。
-     */
+    /** 等解码器把一帧推上 SurfaceTexture；超时 false */
     fun awaitFrame(timeoutMs: Long = FRAME_WAIT_MS): Boolean = synchronized(frameLock) {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (framesQueued <= framesConsumed) {
@@ -149,15 +142,62 @@ internal class ArcRepairGl(
         true
     }
 
+    // region 指令原语（与 ArcRepairFlow 的 ArcOp 一一同构）
+
     /**
-     * 把当前解码帧的产物画进编码器面：先（[blendPtsUs] 非空时）混合帧、再原帧，最后把当前帧拷进 prev 纹理。
-     *
-     * **PTS 沿源时间轴**（10-01 真机修正）：原帧用它的解码 PTS、混合帧用前后两帧 PTS 的中点——
-     * 于是输出时长严格等于源时长，且不依赖"预先数出源帧数"（那个统计在真机上被 extractor 的
-     * 遍历行为坑过：45 个包的片子数出 124）。旧的"输出帧号 × 1/outFps"口径会把时长拉长。
+     * 消费当前解码帧：`updateTexImage` → OES 带纹理矩阵拷进 cur 2D 纹理。
+     * 拷贝趟发生在原帧输出之后、下一帧到来之前，cur 永远是"这一帧"（v1 同一条时序论证）。
      */
-    fun renderFrame(origPtsUs: Long, blendPtsUs: Long?): Boolean =
-        postAndWait(OP_WAIT_MS) { renderOnGl(origPtsUs, blendPtsUs) }
+    fun acquire(): Boolean = postAndWait(OP_WAIT_MS) {
+        if (!glReady) return@postAndWait false
+        val st = texture ?: return@postAndWait false
+        st.updateTexImage()
+        st.getTransformMatrix(stMatrix)
+        val ok = copyOesToCur()
+        synchronized(frameLock) { framesConsumed++ }
+        ok
+    }
+
+    /**
+     * 处理被抽帧：[fresh] = true 时 acc 整帧换成本帧（清掉上一轮残留的复用内容），
+     * false 时 acc = max(acc, cur) 继续累积。乒乓读写不同体。
+     */
+    fun accumulate(fresh: Boolean): Boolean = postAndWait(OP_WAIT_MS) {
+        if (fresh) {
+            copyIntoAcc(curTex, identityMatrix)
+        } else {
+            mergeOnGl(curTex, accTex[accIdx], accFbo[1 - accIdx])
+                .also { if (it) accIdx = 1 - accIdx }
+        }
+    }
+
+    /** pending = max(pending, acc)：累积补弧并进**前**保留帧 */
+    fun foldAccIntoPending(): Boolean = postAndWait(OP_WAIT_MS) {
+        mergeOnGl(pendTex[pendIdx], accTex[accIdx], pendFbo[1 - pendIdx])
+            .also { if (it) pendIdx = 1 - pendIdx }
+    }
+
+    /** pending = cur：首枚保留帧滞留待发 */
+    fun holdCurAsPending(): Boolean = postAndWait(OP_WAIT_MS) {
+        copyToPending(curTex, identityMatrix, isOes = false)
+    }
+
+    /** pending = max(cur, acc)（[useAcc] = false 时即 pending = cur）：后保留帧带弧升级待发 */
+    fun mergeCurAsPending(useAcc: Boolean): Boolean = postAndWait(OP_WAIT_MS) {
+        if (!useAcc) {
+            copyToPending(curTex, identityMatrix, isOes = false)
+        } else {
+            mergeOnGl(curTex, accTex[accIdx], pendFbo[1 - pendIdx])
+                .also { if (it) pendIdx = 1 - pendIdx }
+        }
+    }
+
+    /** 把待发帧画进编码器面（[ptsUs] = 均匀目标帧率步长，微秒） */
+    fun emitPending(ptsUs: Long): Boolean = postAndWait(OP_WAIT_MS) {
+        emitOnGl(ptsUs)
+    }
+
+    // endregion
 
     /** 释放全部 GL/EGL 资源并退出 GL 线程；幂等 */
     fun release() {
@@ -191,7 +231,7 @@ internal class ArcRepairGl(
             latch.await(timeoutMs, TimeUnit.MILLISECONDS) && out[0]
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            false
+            return false
         }
     }
 
@@ -254,7 +294,14 @@ internal class ArcRepairGl(
         texture = st
         decoderSurface = Surface(st)
 
-        if (!createPrevTarget()) {
+        var ok = createRenderTarget().let { (t, f) -> curTex = t; curFbo = f; true } && curFbo != 0
+        for (i in 0..1) {
+            ok = ok && createRenderTarget().let { (t, f) -> pendTex[i] = t; pendFbo[i] = f; true } && pendFbo[i] != 0
+        }
+        for (i in 0..1) {
+            ok = ok && createRenderTarget().let { (t, f) -> accTex[i] = t; accFbo[i] = f; true } && accFbo[i] != 0
+        }
+        if (!ok) {
             releaseGl()
             return false
         }
@@ -264,7 +311,7 @@ internal class ArcRepairGl(
         }
         drainGlError("arcInit")
         glReady = true
-        Log.i(TAG_ARC_GL, "就绪 ${widthPx}x$heightPx outFps=$outputFps")
+        Log.i(TAG_ARC_GL, "就绪 ${widthPx}x$heightPx")
         return true
     }
 
@@ -349,11 +396,12 @@ internal class ArcRepairGl(
         return true
     }
 
-    private fun createPrevTarget(): Boolean {
-        val ids = IntArray(1)
-        GLES20.glGenTextures(1, ids, 0)
-        prevTex = ids[0]
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex)
+    /** 建一枚全分辨率 RGBA 纹理 + 绑定它的 FBO，返回 (tex, fbo)；cur / 乒乓 pending / 乒乓 acc 共用 */
+    private fun createRenderTarget(): Pair<Int, Int> {
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        val tex = texIds[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
@@ -366,18 +414,18 @@ internal class ArcRepairGl(
 
         val fboIds = IntArray(1)
         GLES20.glGenFramebuffers(1, fboIds, 0)
-        prevFbo = fboIds[0]
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo)
+        val fbo = fboIds[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
         GLES20.glFramebufferTexture2D(
-            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, prevTex, 0
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, tex, 0
         )
         val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-            Log.w(TAG_ARC_GL, "prev FBO 不完整 status=0x${Integer.toHexString(status)}")
-            return false
+            Log.w(TAG_ARC_GL, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}")
+            return 0 to 0
         }
-        return true
+        return tex to fbo
     }
 
     private fun buildPrograms(): Boolean {
@@ -388,75 +436,120 @@ internal class ArcRepairGl(
         passUTexMatrix = GLES20.glGetUniformLocation(passProgram, "uTexMatrix")
         passUFrame = GLES20.glGetUniformLocation(passProgram, "uFrame")
 
-        blendProgram = link(Shaders.TEXTURE_VS, Shaders.ARC_REPAIR_FS)
-        if (blendProgram == 0) return false
-        blendAPosition = GLES20.glGetAttribLocation(blendProgram, "aPosition")
-        blendATexCoord = GLES20.glGetAttribLocation(blendProgram, "aTexCoord")
-        blendUTexMatrix = GLES20.glGetUniformLocation(blendProgram, "uTexMatrix")
-        blendUCur = GLES20.glGetUniformLocation(blendProgram, "uCur")
-        blendUPrev = GLES20.glGetUniformLocation(blendProgram, "uPrev")
-        blendUPrevWeight = GLES20.glGetUniformLocation(blendProgram, "uPrevWeight")
+        mergeProgram = link(Shaders.TEXTURE_VS, Shaders.ARC_MERGE_FS)
+        if (mergeProgram == 0) return false
+        mergeAPosition = GLES20.glGetAttribLocation(mergeProgram, "aPosition")
+        mergeATexCoord = GLES20.glGetAttribLocation(mergeProgram, "aTexCoord")
+        mergeUTexMatrix = GLES20.glGetUniformLocation(mergeProgram, "uTexMatrix")
+        mergeUA = GLES20.glGetUniformLocation(mergeProgram, "uA")
+        mergeUB = GLES20.glGetUniformLocation(mergeProgram, "uB")
         drainGlError("arcBuildPrograms")
         return true
     }
 
-    private fun renderOnGl(origPtsUs: Long, blendPtsUs: Long?): Boolean {
-        if (!glReady) return false
-        val st = texture ?: return false
-        st.updateTexImage()
-        st.getTransformMatrix(stMatrix)
+    // endregion
 
-        var ok = true
-        if (blendPtsUs != null) {
-            ok = drawToEncoder(blendProgram, true, blendPtsUs) && ok
-        }
-        ok = drawToEncoder(passProgram, false, origPtsUs) && ok
+    // region 绘制原语
 
-        // 摘掉 prev 纹理的绑定：拷贝趟的写入目标就是它，某些驱动只查"这张纹理还挂在某个激活单元上"
-        // 就当 feedback loop 报警（与 FrostBlurChain.restoreState 那条保险同一条理由）
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_PREV_UNIT)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        ok = copyToPrev() && ok
-
-        synchronized(frameLock) { framesConsumed++ }
-        return ok
+    /** OES（带 SurfaceTexture 矩阵）→ cur 2D：解码帧落进可重复采样的普通纹理 */
+    private fun copyOesToCur(): Boolean {
+        if (passProgram == 0 || curFbo == 0) return false
+        makeCurrent(pbufferSurface)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, curFbo)
+        GLES20.glViewport(0, 0, widthPx, heightPx)
+        GLES20.glUseProgram(passProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
+        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
+        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, stMatrix, 0)
+        drawQuad(passAPosition, passATexCoord)
+        unbindUnits()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        return drainGlError("arcCopyCur") == 0
     }
 
-    /** 一次上屏：切到编码器面 → 绑定 program → 画满屏四边形 → 写均匀 PTS → swap */
-    private fun drawToEncoder(program: Int, blend: Boolean, ptsUs: Long): Boolean {
-        if (program == 0 || encoderEglSurface === EGL14.EGL_NO_SURFACE) return false
-        // ⚠ 必须先 makeCurrent(编码器面)：初始化后上下文一直挂在 pbuffer 上，不切面就画/换帧
-        // 会 eglSwapBuffers 报 EGL_BAD_SURFACE(0x300d)（真机实测）。GlRenderEngine 的
-        // drawEncoderPass 同样是先 makeCurrent(encoder) 再画
+    /** 2D 纹理 → pending 写入面（恒等矩阵）：hold/merge 的"普通拷贝"支 */
+    private fun copyToPending(src2D: Int, matrix: FloatArray, isOes: Boolean): Boolean {
+        if (passProgram == 0) return false
+        makeCurrent(pbufferSurface)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, pendFbo[1 - pendIdx])
+        GLES20.glViewport(0, 0, widthPx, heightPx)
+        GLES20.glUseProgram(passProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        if (isOes) GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, src2D)
+        else GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src2D)
+        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
+        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, matrix, 0)
+        drawQuad(passAPosition, passATexCoord)
+        unbindUnits()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        pendIdx = 1 - pendIdx
+        return drainGlError("arcHoldPending") == 0
+    }
+
+    /** 2D 纹理 → acc 写入面（恒等矩阵，整帧替换）：fresh 累积支 */
+    private fun copyIntoAcc(src2D: Int, matrix: FloatArray): Boolean {
+        if (passProgram == 0) return false
+        makeCurrent(pbufferSurface)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[1 - accIdx])
+        GLES20.glViewport(0, 0, widthPx, heightPx)
+        GLES20.glUseProgram(passProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src2D)
+        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
+        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, matrix, 0)
+        drawQuad(passAPosition, passATexCoord)
+        unbindUnits()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        accIdx = 1 - accIdx
+        return drainGlError("arcFreshAcc") == 0
+    }
+
+    /**
+     * 取大合并：`写入面 = max(texA, texB)`。写入目标是乒乓的另一面，读写不同体；
+     * 画完立即摘掉两个采样单元的绑定——某些驱动只查"纹理还挂在激活单元上"就当
+     * feedback loop 报警（与 FrostBlurChain.restoreState 那条保险同一条理由）。
+     */
+    private fun mergeOnGl(texA: Int, texB: Int, dstFbo: Int): Boolean {
+        if (mergeProgram == 0) return false
+        makeCurrent(pbufferSurface)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, dstFbo)
+        GLES20.glViewport(0, 0, widthPx, heightPx)
+        GLES20.glUseProgram(mergeProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_B)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB)
+        if (mergeUA >= 0) GLES20.glUniform1i(mergeUA, ARC_UNIT_A)
+        if (mergeUB >= 0) GLES20.glUniform1i(mergeUB, ARC_UNIT_B)
+        if (mergeUTexMatrix >= 0) GLES20.glUniformMatrix4fv(mergeUTexMatrix, 1, false, identityMatrix, 0)
+        drawQuad(mergeAPosition, mergeATexCoord)
+        unbindUnits()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        return drainGlError("arcMerge") == 0
+    }
+
+    /** 待发帧 → 编码器面：先 makeCurrent(编码器面) 再画（不切面 swap 会报 EGL_BAD_SURFACE，真机实测） */
+    private fun emitOnGl(ptsUs: Long): Boolean {
+        if (passProgram == 0 || encoderEglSurface === EGL14.EGL_NO_SURFACE) return false
         if (!makeCurrent(encoderEglSurface)) return false
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, widthPx, heightPx)
-        GLES20.glUseProgram(program)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_CUR_UNIT)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
-        if (blend) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_PREV_UNIT)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex)
-            if (blendUCur >= 0) GLES20.glUniform1i(blendUCur, ARC_CUR_UNIT)
-            if (blendUPrev >= 0) GLES20.glUniform1i(blendUPrev, ARC_PREV_UNIT)
-            if (blendUPrevWeight >= 0) GLES20.glUniform1f(blendUPrevWeight, ArcRepairPlan.blendWeight())
-            if (blendUTexMatrix >= 0) GLES20.glUniformMatrix4fv(blendUTexMatrix, 1, false, stMatrix, 0)
-            drawQuad(blendAPosition, blendATexCoord)
-        } else {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_CUR_UNIT)
-            if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_CUR_UNIT)
-            if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, stMatrix, 0)
-            drawQuad(passAPosition, passATexCoord)
-        }
+        GLES20.glUseProgram(passProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, pendTex[pendIdx])
+        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
+        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, identityMatrix, 0)
+        drawQuad(passAPosition, passATexCoord)
+        unbindUnits()
         stampPresentation(ptsUs)
         val swapped = EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
         if (!swapped) Log.w(TAG_ARC_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
-        drainGlError("arcDrawEncoder")
+        drainGlError("arcEmit")
         return swapped
     }
 
-    /** 呈现时间戳：直接用调用方给的**源时间轴 PTS**（微秒→纳秒），不再自算步长 */
+    /** 呈现时间戳：调用方给的均匀目标帧率 PTS（微秒→纳秒），叠上会话基址 */
     private fun stampPresentation(ptsUs: Long) {
         if (eglDisplay === EGL14.EGL_NO_DISPLAY || encoderEglSurface === EGL14.EGL_NO_SURFACE) return
         val ptsNs = basePtsNs + ptsUs * 1000L
@@ -464,19 +557,13 @@ internal class ArcRepairGl(
             .onFailure { Log.w(TAG_ARC_GL, "写呈现时间戳失败：${it.message}") }
     }
 
-    /** OES → prev 纹理（普通 2D）：不 swap、不写 PTS，只是把"上一帧"存下来给下一次混合用 */
-    private fun copyToPrev(): Boolean {
-        if (passProgram == 0 || prevFbo == 0) return false
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo)
-        GLES20.glViewport(0, 0, widthPx, heightPx)
-        GLES20.glUseProgram(passProgram)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_CUR_UNIT)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
-        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_CUR_UNIT)
-        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, stMatrix, 0)
-        drawQuad(passAPosition, passATexCoord)
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        return drainGlError("arcCopyPrev") == 0
+    /** 摘掉本引擎用到的两个采样单元（防 feedback loop 误报） */
+    private fun unbindUnits() {
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_B)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
     }
 
     private fun drawQuad(aPosition: Int, aTexCoord: Int) {
@@ -511,7 +598,7 @@ internal class ArcRepairGl(
         if (surface === EGL14.EGL_NO_SURFACE) return
         makeCurrent(pbufferSurface)
         if (!EGL14.eglDestroySurface(eglDisplay, surface)) {
-            Log.w(TAG_ARC_GL, "eglDestroySurface 失败 err=0x${eglErrorHex()}")
+            Log.w(TAG_ARC_GL, "eglDestroySurface 失败：${eglErrorHex()}")
         }
     }
 
@@ -527,18 +614,24 @@ internal class ArcRepairGl(
             GLES20.glDeleteProgram(passProgram)
             passProgram = 0
         }
-        if (blendProgram != 0) {
-            GLES20.glDeleteProgram(blendProgram)
-            blendProgram = 0
+        if (mergeProgram != 0) {
+            GLES20.glDeleteProgram(mergeProgram)
+            mergeProgram = 0
         }
-        if (prevFbo != 0) {
-            GLES20.glDeleteFramebuffers(1, intArrayOf(prevFbo), 0)
-            prevFbo = 0
+        for (i in 0..1) {
+            if (pendFbo[i] != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(pendFbo[i]), 0)
+            if (pendTex[i] != 0) GLES20.glDeleteTextures(1, intArrayOf(pendTex[i]), 0)
+            pendFbo[i] = 0
+            pendTex[i] = 0
+            if (accFbo[i] != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(accFbo[i]), 0)
+            if (accTex[i] != 0) GLES20.glDeleteTextures(1, intArrayOf(accTex[i]), 0)
+            accFbo[i] = 0
+            accTex[i] = 0
         }
-        if (prevTex != 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(prevTex), 0)
-            prevTex = 0
-        }
+        if (curFbo != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(curFbo), 0)
+        if (curTex != 0) GLES20.glDeleteTextures(1, intArrayOf(curTex), 0)
+        curFbo = 0
+        curTex = 0
         if (oesTextureId != 0) {
             GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
             oesTextureId = 0
@@ -566,10 +659,10 @@ internal class ArcRepairGl(
                 eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT
             )
             if (eglContext !== EGL14.EGL_NO_CONTEXT && !EGL14.eglDestroyContext(eglDisplay, eglContext)) {
-                Log.w(TAG_ARC_GL, "eglDestroyContext 失败 err=0x${eglErrorHex()}")
+                Log.w(TAG_ARC_GL, "eglDestroyContext 失败：${eglErrorHex()}")
             }
             if (!EGL14.eglTerminate(eglDisplay)) {
-                Log.w(TAG_ARC_GL, "eglTerminate 失败 err=0x${eglErrorHex()}")
+                Log.w(TAG_ARC_GL, "eglTerminate 失败")
             }
         }
         eglContext = EGL14.EGL_NO_CONTEXT

@@ -1,72 +1,60 @@
 package com.wotagei.cam.record
 
 /**
- * 光弧修复（用户需求第 7 项）的**插帧计划**：把源 [srcFrames] 帧插成 [dstFrames] 帧。
+ * 光弧修复（用户需求第 7 项）的**抽帧计划**：把实测 [srcFps] fps 的素材抽成 [dstFps] fps。
  *
- * v1 口径（主代理定，本文件是它的唯一真源）：
- * - 抽帧后的视频 PTS 是**均匀**的，容器里读不出"哪一帧被抽掉了"，所以"检测 PTS 间隙"这条路走不通；
- *   正解是**帧插值**——把 N fps 插成 2N fps，每对相邻原帧之间重建一帧；
- * - 光弧是**加性亮度**（光轨在长曝光里叠出来的亮线），所以重建帧取「相邻两原帧的加权混合」
- *   在物理上成立，而且比真光流稳（真光流在大面积暗场上极易把光弧 warp 断，反而更花）；
- * - 权重取 **居中（0.5）**：重建帧落在两原帧时间轴的正中，对称重建最不容易在光弧相邻段之间
- *   产生亮度台阶；若偏向任一侧，后续再插帧时会累积成亮度呼吸；
- * - 末帧**不插**（最后没有"下一帧"可混），所以输出 2N−1 帧。
+ * v2 口径（用户 2026-10-03 定版，本文件是它的唯一真源；v1 的"插帧"被判定为方向性错误废弃）：
+ * - 强制 24/25fps 在无固定档设备上传感器实际跑更高帧率（如 30），素材里**多出**的帧要**抽掉**，
+ *   输出只含保留帧——**绝不插帧**：抽帧再插帧帧数绕回原点，且混合帧会把运动中的光弧拆成
+ *   两道半亮重影，原帧/混合帧逐帧交替正是用户看到的"来回闪动"；
+ * - 保留集 = { ⌊j·srcFps/dstFps⌋ : j }（对 30→24 即"每 5 帧抽 1"，抽帧点分布均匀不扎堆）；
+ * - 光弧是**加性亮度**（光轨在长曝光里叠出来的亮线），被抽帧的画面用**逐样本亮度取大**并入
+ *   它前后两枚保留帧：暗场上取大即无损伤并集——被抽帧独有的弧段在两邻帧上都以**原亮度**
+ *   重现，弧在抽帧点上不断裂，也不像 0.5 平均那样把弧压暗出亮度呼吸；
+ * - 输出 PTS 取**均匀目标帧率步长**（第 j 帧 = j/ dstFps），容器是真 24/25fps；输出时长
+ *   = 保留帧数/dstFps = ⌈N·D/S⌉/D ≈ N/S = 源时长，音频直拷同步不受影响。
  *
- * v2 预留：把"混合"换成真光流 warp 只需替换 [FrameSource.Blend] 的消费端实现，
- * 计划本身不必改（[FrameSource.Blend] 已经同时给出左原帧下标与权重，warp 还需一路光流场，
- * 那是 v2 在引擎里额外产出的中间量，不是本纯逻辑类的职责）。
+ * 抽帧节奏（保留集推导）是"计划"；被抽帧怎么分桶进前后帧是"行为"——两者由 [ArcRepairFlow]
+ * 这座桥缝合（AGENTS 铁律：配置类纯函数必须配桥函数并测桥本身，否则删掉运行时判断分支测试仍绿）。
  */
-data class ArcRepairPlan(val srcFrames: Int, val dstFrames: Int) {
+data class ArcRepairPlan(val srcFps: Int, val dstFps: Int, val srcFrames: Int) {
 
-    /** 总输出帧数（= [dstFrames]），进度换算与引擎循环都用它 */
+    /** 输出（保留）帧数，进度换算与引擎循环都用它 */
+    val dstFrames: Int = ArcRepairPlan.dstFrameCount(srcFrames, srcFps, dstFps)
+
+    /** 总输出帧数（= [dstFrames]） */
     val totalFrames: Int get() = dstFrames
 
     companion object {
 
         /**
-         * 输出帧数：**2N−1**（每对相邻原帧插 1 帧、末帧不插）。
-         * - N ≤ 0 → 0（没有可处理的帧）
-         * - N == 1 → 1（只有末帧，没有相邻对）
+         * 输出帧数 = 保留帧数 = |{ j : ⌊j·S/D⌋ < N }| = ⌈N·D/S⌉。
+         * - N ≤ 0 → 0；S ≤ D（源不比目标快，没有帧可抽）→ N（恒等直通，调用方应提前拦）
+         * - 45@30→24 = 36（每 5 抽 1，抽 9 留 36）；时长账 36/24 = 45/30 严格恒等
          */
-        fun dstFrameCount(srcFrames: Int): Int = when {
+        fun dstFrameCount(srcFrames: Int, srcFps: Int, dstFps: Int): Int = when {
             srcFrames <= 0 -> 0
-            srcFrames == 1 -> 1
-            else -> 2 * srcFrames - 1
+            srcFps <= 0 || dstFps <= 0 || srcFps <= dstFps -> srcFrames
+            else -> ((srcFrames.toLong() * dstFps + srcFps - 1L) / srcFps).toInt()
         }
 
-        /** 由源帧数造计划；负值按 0 处理（后台线程不许因越界输入崩） */
-        fun of(srcFrames: Int): ArcRepairPlan {
-            val n = if (srcFrames < 0) 0 else srcFrames
-            return ArcRepairPlan(n, dstFrameCount(n))
-        }
+        /** 由源帧数与两档帧率造计划；负值帧数按 0 处理（后台线程不许因越界输入崩） */
+        fun of(srcFrames: Int, srcFps: Int, dstFps: Int): ArcRepairPlan =
+            ArcRepairPlan(srcFps, dstFps, if (srcFrames < 0) 0 else srcFrames)
 
         /**
-         * 输出第 [i] 帧的来源（`0 ≤ i < dstFrames`）：
-         * - 偶数位 `2k` → 原帧 k；
-         * - 奇数位 `2k+1` → 原帧 k 与 k+1 的混合。
-         *
-         * 因为 dstFrames = 2N−1 恒为奇数，最后一位 2N−2 是偶数 ⇒ **末帧必是原帧**，末帧不插自动成立。
-         *
-         * 越界输入不抛异常（后台线程的"绝不崩"纪律）：负数按第 0 位处理，超出上界按奇偶公式照算，
-         * 调用方（引擎循环）保证只喂合法下标。
+         * 源第 [srcIndex] 帧是否保留：s 保留 ⇔ ⌊⌈s·D/S⌉·S/D⌋ == s（存在输出下标 j 映到它）。
+         * 全程 Long 整数域，无浮点；负下标按不保留处理（不该出现，防御）。
          */
-        fun sourceAt(i: Int): FrameSource {
-            if (i <= 0) return FrameSource.Original(0)
-            return if (i % 2 == 0) FrameSource.Original(i / 2)
-            else FrameSource.Blend(i / 2, blendWeight())
+        fun isKept(srcIndex: Int, srcFps: Int, dstFps: Int): Boolean {
+            if (srcIndex < 0) return false
+            if (srcFps <= 0 || dstFps <= 0 || srcFps <= dstFps) return true
+            val s = srcIndex.toLong()
+            val bigS = srcFps.toLong()
+            val bigD = dstFps.toLong()
+            val j = (s * bigD + bigS - 1L) / bigS          // ⌈s·D/S⌉
+            return j * bigS / bigD == s
         }
-
-        /**
-         * 混合权重（前一帧所占比例）。v1 定版 **0.5**：重建帧在两原帧时间轴正中，
-         * 对称重建对加性光弧最稳（见类注释），且 0.5 在整数域可实现为 (a + b) / 2 的等价权重。
-         */
-        fun blendWeight(): Float = 0.5f
-
-        /** 原帧 k 在输出里的下标（引擎写均匀 PTS 时用它） */
-        fun originalOutIndex(srcIndex: Int): Int = 2 * srcIndex
-
-        /** 「原帧 [leftSrcIndex] 与它下一帧」的混合帧在输出里的下标；末帧没有混合帧，调用方保证 leftSrcIndex < N−1 */
-        fun blendOutIndex(leftSrcIndex: Int): Int = 2 * leftSrcIndex + 1
 
         /**
          * 总进度 0f..1f：已处理帧 / 总输出帧。
@@ -80,39 +68,107 @@ data class ArcRepairPlan(val srcFrames: Int, val dstFrames: Int) {
 }
 
 /**
- * CPU 路线的两帧平面混合（与 GPU 路线 `ARC_REPAIR_FS` 里的 `mix(., ., 0.5)` 同口径）。
+ * CPU 路线的**取大补弧**算子（与 GPU 路线 MAX_MERGE_FS 的 `max(., .)` 同口径）。
  *
- * **权重只认 [ArcRepairPlan.blendWeight] 这一个真源**（v1 定版 0.5）。之所以用整数 `(a+b+1) shr 1`
- * 而不是浮点乘法，是因为 CPU 路线逐样本跑：1920x1080 一帧要算 300 万个 Y 样本，浮点纯属浪费；
- * 而 `(a + b + 1) shr 1` 就是 0.5 的四舍五入整数实现，与 GPU 的 `(a+b)*0.5` 落在同一档。
- *
+ * **acc 就地更新**：`acc[i] = max(acc[i], src[i])`，按无符号字节比（`and 0xFF`，否则 0x80 以上
+ * 会被当成负数把亮度比反）。逐样本独立、无跨格依赖，acc 与 src 允许是同一数组。
  * 逐平面调用：调用方按 Y/U/V 分别传入（UV 尺寸是 (w/2)*(h/2)，本对象不关心平面语义）。
  */
-object ArcRepairBlend {
+object ArcRepairMerge {
 
-    /**
-     * `out[i] = round((a[i] + b[i]) * 0.5)`，共 [len] 个样本。
-     *
-     * `out` 允许与 `a`/`b` 是同一数组（就地可用）：每格只读本格、只写本格，无跨格依赖。
-     * 入参按无符号字节处理（`and 0xFF`），否则 0x80 以上会被当成负数把亮度压暗。
-     */
-    fun average(a: ByteArray, b: ByteArray, out: ByteArray, len: Int) {
+    /** `acc[i] = max(acc[i], src[i])`，共 [len] 个样本 */
+    fun mergeMax(acc: ByteArray, src: ByteArray, len: Int) {
         for (i in 0 until len) {
-            out[i] = (((a[i].toInt() and 0xFF) + (b[i].toInt() and 0xFF) + 1) shr 1).toByte()
+            val a = acc[i].toInt() and 0xFF
+            val b = src[i].toInt() and 0xFF
+            if (b > a) acc[i] = src[i]
         }
     }
 }
 
 /**
- * 输出帧的来源。[Original] = 原样送编码器的原帧；[Blend] = 由左原帧与其下一帧重建的插入帧。
+ * 流式状态机产出的**单帧处置指令**（计划→行为的桥，见 [ArcRepairFlow]）。
+ * 引擎（CPU 平面/GPU 纹理两条路）按指令驱动各自的等待原语，决策只在这里做一次。
  */
-sealed interface FrameSource {
-    /** 源第 [index] 帧原样输出 */
-    data class Original(val index: Int) : FrameSource
+sealed interface ArcOp {
+    /**
+     * 处理被抽帧：[fresh] = true 时 acc 整帧换成本帧（自上一保留帧以来第一枚被抽帧，必须
+     * **清掉上一轮残留**——acc 面是复用缓冲，带着旧内容取大会把上一次的补弧污染进来）；
+     * false 时 acc = max(acc, cur) 继续累积。
+     */
+    data class AccumulateCur(val fresh: Boolean) : ArcOp
+
+    /** pending = max(pending, acc)：累积补弧并进**前**保留帧 */
+    data object FoldAccIntoPending : ArcOp
+
+    /** pending = cur：首枚保留帧直接滞留待发 */
+    data object HoldCurAsPending : ArcOp
 
     /**
-     * 源第 [index] 帧与第 [index+1] 帧按 [weight] 混合（[weight] = **前一帧**的权重，
-     * 当前帧权重恒为 `1 − weight`）。v1 的 [weight] 一律 0.5。
+     * pending = max(cur, acc)（[useAcc] = 自上一保留帧以来有被抽帧）：**后**保留帧带弧升级，
+     * 成为新的待发帧。useAcc 由状态机在仍有 acc 语义的当下给出（执行方不自己判断）。
      */
-    data class Blend(val index: Int, val weight: Float) : FrameSource
+    data class MergeCurAsPending(val useAcc: Boolean) : ArcOp
+
+    /** 把待发帧写进编码器（[ptsUs] = 均匀目标帧率步长的时间戳，微秒） */
+    data class EmitPending(val ptsUs: Long) : ArcOp
+}
+
+/**
+ * 抽帧计划的**流式执行桥**（AGENTS：配置纯函数必须配桥并测桥）。
+ *
+ * 解码按源顺序逐帧到来，引擎每帧问一次 [onSourceFrame]、收尾问一次 [onSourceEos]，拿到的
+ * 指令序列保证：保留帧恰好发一次、被抽帧只经 acc 并入其前后两枚保留帧、EOS 时尾巴上的
+ * 被抽帧并进最后一枚保留帧。一帧滞留（pending）+ 一个累积面（acc）就是全部状态。
+ *
+ * @param stepUs 均匀 PTS 步长的分子基准：第 j 帧 PTS = j·1e6/dstFps（先乘后除不累积截断）
+ */
+class ArcRepairFlow(private val plan: ArcRepairPlan, private val dstFps: Int) {
+
+    /** 已发出的保留帧数 = 下一个输出下标（进度与 PTS 都由它派生） */
+    var keptCount: Int = 0
+        private set
+
+    /** 是否有一枚滞留待发的保留帧 */
+    var hasPending: Boolean = false
+        private set
+
+    /** 自上一保留帧以来是否累积了被抽帧 */
+    var hasAcc: Boolean = false
+        private set
+
+    fun onSourceFrame(srcIndex: Int): List<ArcOp> {
+        if (!ArcRepairPlan.isKept(srcIndex, plan.srcFps, plan.dstFps)) {
+            // 首枚保留帧之前的被抽帧没有"前帧"可并，直接弃（片头黑场语义不受损）
+            if (!hasPending) return emptyList()
+            val fresh = !hasAcc
+            hasAcc = true
+            return listOf(ArcOp.AccumulateCur(fresh))
+        }
+        if (!hasPending) {
+            hasPending = true
+            return listOf(ArcOp.HoldCurAsPending)
+        }
+        val ops = buildList {
+            if (hasAcc) add(ArcOp.FoldAccIntoPending)
+            add(ArcOp.EmitPending(keptCount.toLong() * 1_000_000L / dstFps))
+            add(ArcOp.MergeCurAsPending(hasAcc))
+        }
+        keptCount++
+        hasAcc = false
+        return ops
+    }
+
+    /** 解码 EOS：尾巴上的累积补弧并进最后一枚待发帧后发出 */
+    fun onSourceEos(): List<ArcOp> {
+        if (!hasPending) return emptyList()
+        val ops = buildList {
+            if (hasAcc) add(ArcOp.FoldAccIntoPending)
+            add(ArcOp.EmitPending(keptCount.toLong() * 1_000_000L / dstFps))
+        }
+        keptCount++
+        hasAcc = false
+        hasPending = false
+        return ops
+    }
 }

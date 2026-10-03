@@ -61,31 +61,29 @@ internal object Shaders {
         }
     """.trimIndent()
 
-    // region 光弧修复（用户需求第 7 项：后台插帧，不改任何既有 pass）
+    // region 光弧修复（用户需求第 7 项：v2 抽帧+补弧，不改任何既有 pass）
 
     /**
-     * 插帧混合（cross-fade）片元：重建帧 = 相邻两原帧的加权和。
+     * 取大合并（max-merge）片元：`out = max(a, b)` 逐样本亮度取大。
      *
-     * - `uCur` 是**当前解码帧**，落在 `SurfaceTexture` 的 `GL_TEXTURE_EXTERNAL_OES` 上，
-     *   所以必须 `#extension GL_OES_EGL_image_external : require`；`uPrev` 是**上一帧的 2D 备份**。
-     *   外置 OES 与普通 `sampler2D` 同处一条 program 是允许的（既有 [CURVE_FS] 就是这么写的），
-     *   前提是外置那枚声明成 `samplerExternalOES`、且 `#extension` 是首条指令。
-     * - 取样单元固定 **0 = uCur（OES）、1 = uPrev（2D）**（宿主 ArcRepairGl 同一份常量）。
-     * - `uPrevWeight` 是**前一帧权重**（v1 恒 0.5，来自 `record/ArcRepairPlan.blendWeight`），
-     *   当前帧权重恒为 `1 − uPrevWeight`，两者和为 1 ⇒ 电压/亮度域上不引入整体增益。
-     * - 强制不透明：与 [PASS_THROUGH_FS] 同一个理由——HAL/解码器给 alpha=0 时混出来会是半透明黑。
+     * - v2 口径（用户 2026-10-03 定版）：光弧修复是**抽帧+补弧**，不再有插帧混合——被抽帧的
+     *   画面以亮度取大并进前后保留帧。光弧是暗场上的加性亮线，取大即无损伤并集：被抽帧独有
+     *   的弧段在两邻帧上都以**原亮度**重现，弧在抽帧点上不断裂；v1 的 0.5 cross-fade 会把弧
+     *   拆成两道半亮重影（原帧/混合帧逐帧交替＝用户看到的"来回闪动"），已废弃。
+     * - 两个输入都是**普通 2D 纹理**（OES 帧先经拷贝趟落到 2D），所以不再需要 OES 扩展声明；
+     *   取样单元 **0 = uA、1 = uB**（宿主 ArcRepairGl 同一份常量），写入目标是第三枚 FBO
+     *   （乒乓），读写不同体、无 feedback loop。
+     * - 强制不透明：与 [PASS_THROUGH_FS] 同一个理由——HAL/解码器给 alpha=0 时会读出半透明。
      */
-    val ARC_REPAIR_FS = """
-        #extension GL_OES_EGL_image_external : require
+    val ARC_MERGE_FS = """
         precision mediump float;
         varying vec2 vUv;
-        uniform samplerExternalOES uCur;
-        uniform sampler2D uPrev;
-        uniform float uPrevWeight;
+        uniform sampler2D uA;
+        uniform sampler2D uB;
         void main() {
-            vec3 prev = texture2D(uPrev, vUv).rgb * uPrevWeight;
-            vec3 cur = texture2D(uCur, vUv).rgb * (1.0 - uPrevWeight);
-            gl_FragColor = vec4(prev + cur, 1.0);
+            vec3 a = texture2D(uA, vUv).rgb;
+            vec3 b = texture2D(uB, vUv).rgb;
+            gl_FragColor = vec4(max(a, b), 1.0);
         }
     """.trimIndent()
 
