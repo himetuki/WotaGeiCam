@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import com.wotagei.cam.BuildConfig
 import androidx.activity.ComponentActivity
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
@@ -158,9 +159,6 @@ object WotaSettings {
 
     /** 文本高度缩放的可选区间（%），100 = 工程默认排版 */
     val TEXT_SCALE_PCTS = listOf(80, 90, 100, 110, 120)
-
-    /** 关于页版本号，与 app/build.gradle.kts 的 versionName 同步 */
-    const val APP_VERSION = "0.0.1"
 
     @Volatile
     private var defaultsApplied = false
@@ -800,7 +798,9 @@ fun SettingsScreen(
 
         SettingGroup(stringResource(R.string.set_group_about))
         Card {
-            InfoRow(stringResource(R.string.set_version), WotaSettings.APP_VERSION)
+            // 版本号单一真源 = app/build.gradle.kts 的 appVersionName（经 BuildConfig.VERSION_NAME
+            // 直通）：打新 tag 前改脚本那两行是发版必经步骤，设置页/容器/产物名因此永远一致（2026-10-03）
+            InfoRow(stringResource(R.string.set_version), BuildConfig.VERSION_NAME)
             Line()
             InfoRow(stringResource(R.string.set_package), context.packageName)
             Line()
