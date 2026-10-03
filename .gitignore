@@ -52,9 +52,18 @@ tools/**/build-tools/
 Thumbs.db
 desktop.ini
 
-# ===== 公开仓库边界（github.com/himetuki/WotaGeiCam，2026-10-02 CI 轮划定）=====
+# ===== 公开仓库边界（github.com/himetuki/WotaGeiCam）=====
 # 签名材料只留本地，CI 从 Actions Secrets 还原（build.gradle.kts 缺失时回退 debug 签名的判据不变）
 keystore.properties
+# ===== 内部材料一律不进公开仓库（2026-10-03 用户指令，边界调整）=====
+/AGENTS.md
+/README.md
+/需求.md
+/deliverable/
+/research/
+/docs/
+/tools/
+/.zcodeignore
 
 # ===== 会话与工具本地状态 =====
 .mimosa/

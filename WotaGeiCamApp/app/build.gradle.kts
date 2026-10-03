@@ -6,9 +6,16 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
-// CI 传 -PapkBaseName=WotaGeiCam 时产物名为 WotaGeiCam-*.apk；本地默认 app-* 不动既有脚本
+// 版本单一来源：defaultConfig 与产物命名共用
+val appVersionCode = 4
+val appVersionName = "0.0.4"
+
+// 产物命名：CI 传 -PapkBaseName=WotaGeiCam 时产物名带版本号（用户 10-03 指令），
+// 如 WotaGeiCam-v0.0.4-release.apk；本地不传该属性保持 app-*.apk 旧名，
+// 不动既有脚本（scripts/verify-on-device.sh 引用 app-debugHook.apk 这类路径）。
+val apkBaseNameProp = project.findProperty("apkBaseName") as? String
 base {
-    archivesName.set((project.findProperty("apkBaseName") as? String) ?: "app")
+    archivesName.set(apkBaseNameProp?.let { "$it-v$appVersionName" } ?: "app")
 }
 
 android {
@@ -24,8 +31,8 @@ android {
         applicationId = "com.wotagei.cam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.0.4"
+        versionCode = appVersionCode
+        versionName = appVersionName
         if (!ciAbiSplits) {
             ndk { abiFilters += listOf("arm64-v8a") }
         }
