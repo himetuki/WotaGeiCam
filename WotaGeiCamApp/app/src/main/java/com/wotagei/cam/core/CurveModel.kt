@@ -233,11 +233,21 @@ object CurveEdit {
         return points.toMutableList().also { it[index] = ColorCurve.Point(nx, ny) }
     }
 
-    /** 在空白处新增控制点，返回新点集与选中下标；已到上限返回 null */
+    /**
+     * 在空白处新增控制点，返回新点集与选中下标；已到上限或**两邻居间没有合法插缝**返回 null。
+     *
+     * 插入 x 除贴边钳制外还要**避让邻居**（≥[MIN_DX]）：只做贴边钳制时，用户在已有控制点
+     * 纵向远处（超出命中半径、走不到 hitTest）横向落在边界上的点按会插出 x 重复的点——
+     * 零宽线段在采样里造成跳变，且重复点在 [moved] 里 lo>hi 永远"保持原位"、几乎无法选中。
+     * 邻居间距不足 2·[MIN_DX] 时无缝可插，同样返回 null（调用方的 null 分支就是"点不动"）。
+     */
     fun inserted(points: List<ColorCurve.Point>, x: Float, y: Float): Pair<List<ColorCurve.Point>, Int>? {
         if (points.size >= MAX_POINTS) return null
-        val v = x.coerceIn(MIN_DX, 1f - MIN_DX)      // 不许贴着端点插，否则中间点退化成端点
-        val at = points.indexOfFirst { it.x > v }.let { if (it < 0) points.size else it }
+        val at = points.indexOfFirst { it.x > x }.let { if (it < 0) points.size else it }
+        val lo = (if (at > 0) points[at - 1].x + MIN_DX else MIN_DX).coerceAtLeast(MIN_DX)
+        val hi = (if (at < points.size) points[at].x - MIN_DX else 1f - MIN_DX).coerceAtMost(1f - MIN_DX)
+        if (lo > hi) return null
+        val v = x.coerceIn(lo, hi)
         val next = points.toMutableList().also { it.add(at, ColorCurve.Point(v, y.coerceIn(0f, 1f))) }
         return next to at
     }
