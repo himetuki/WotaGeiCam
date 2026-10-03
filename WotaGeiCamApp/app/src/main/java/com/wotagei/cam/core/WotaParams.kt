@@ -80,7 +80,7 @@ class WotaParams(private val scope: CoroutineScope) {
         // 快门上限吃「实际生效的帧周期上界」= 上面 pick 到的 hi（无固定 [f,f] 时是设备的可变范围上界），
         // 不是用户档位本身：否则用户选 24fps、设备只给 [15,30]（非精确）时，列表会按 1/24 判可选，
         // 下发/回写却按 30fps 帧周期压回 1/30，露出一个点不住的死档位。
-        applyExposure(a, targetFps, pick?.hi)
+        applyExposure(a, targetFps)
         applyEv(a)
         applyZoom(a)
         applyFocus(a)
@@ -93,24 +93,25 @@ class WotaParams(private val scope: CoroutineScope) {
     }
 
     /**
-     * @param fpsHi 实际生效的帧率上界（`pickFpsRange` 的 `.hi`）；为 null（该档 fps 不可用）时
-     *              退回用户档位 [targetFps]，与改动前行为一致。帧周期一律吃这个量，不吃 [targetFps]。
+     * @param targetFps 帧率**档位**（用户选的那档）。快门上限的帧周期口径与它同源
+     *              （2026-10-04 r11 起与下发侧 `exposurePlan` 一致：都吃档位、不再吃 range.hi——
+     *              可变范围 [24,30] 上选 24，旧口径会把 1/24 压回 1/30，强制档成死档）。
      */
-    private fun applyExposure(a: CameraAbility, targetFps: Int, fpsHi: Int?) {
+    private fun applyExposure(a: CameraAbility, targetFps: Int) {
         iso.value = if (a.iso.ok()) {
             ParamState(clamped(iso.value.value, a.iso.lo, a.iso.hi), a.iso.lo..a.iso.hi)
         } else {
             ParamState(iso.value.value, null, enabled = false)
         }
 
-        // 三条硬规则：快门 ≤ 设备上限、≤ 1/10s 防手抖、≤ 1/fps 防丢帧。
-        // 上限的算法抽在 core 的 [shutterCeilingNs]（纯函数，有 JVM 单测）：它先把设备上限抬到
-        // 强制档 1/24、1/25，再过 1/10s 与 1/帧周期。帧周期吃的是**实际生效的 fps 上界**（[fpsHi]）：
-        // 25fps 下 1/24 被 40ms 帧周期压回；24fps 退化成非精确范围（如 [15,30]，上界 30）时，
-        // 1/24 同样会被 30fps 的帧周期压回——不能只看用户档位那个 24。
+        // 快门上限吃**帧率档位**（2026-10-04 r11 与下发侧同源）：r10 起下发/帧周期都按档位
+        // （可变范围 [24,30] 选 24 时帧周期 41.67ms 在合法域内、HAL 放到 24fps），UI 可选域
+        // 若仍按 hi=30 算，换镜头 applyAbility 一跑就会把用户选的 1/24 静默压回 1/30。
+        // 上限的算法抽在 core 的 [shutterCeilingNs]（纯函数，有 JVM 单测）：先把设备上限抬到
+        // 强制档 1/24、1/25，再过 1/10s 与 1/帧周期。
         if (a.exposureNs.ok()) {
             val lo = a.exposureNs.lo.toLong()
-            val hi = shutterCeilingNs(a.exposureNs.hi.toLong(), fpsHi ?: targetFps)
+            val hi = shutterCeilingNs(a.exposureNs.hi.toLong(), targetFps)
             shutter.value = if (hi >= lo) {
                 ParamState(clamped(shutter.value.value, lo, hi), lo..hi)
             } else {
