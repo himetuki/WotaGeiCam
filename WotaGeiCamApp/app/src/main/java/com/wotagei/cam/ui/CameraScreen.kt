@@ -121,7 +121,9 @@ import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
+import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
+import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
 import com.wotagei.cam.record.RecordError
@@ -227,6 +229,18 @@ fun CameraScreen(
     // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
     val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
     val levelBuzz = WotaSettings.levelBuzzEnabled(settingsPrefs)
+
+    /**
+     * 录制期转换是否激活：强制档 24/25 且本机无原生精确档（※ 档）时按设置给出模式
+     * （默认自动抽帧补弧）。设备有精确档时返回 null——原生帧率无需转换。
+     */
+    fun arcConvertNow(): ArcConvertMode? =
+        if (fps.value in WotaTiers.REQUIRED_FPS && !fps.exact) {
+            WotaSettings.arcConvertMode(settingsPrefs)
+        } else {
+            null
+        }
+
     // §59/§74：容量段取哪一档取决于顶栏真能给多宽。这条账放在 safeW 量到之后再算（见下面的 topBarRoomDp），
     // 因为它必须与顶栏胶囊组自己的布局上限 topBarMaxWidthDp **同一个来源**：套了 safeDrawingPadding()
     // 之后的安全区实测宽，而不是 configuration.screenWidthDp（本机横屏两者差 34dp，就是挖孔那条边）
@@ -469,6 +483,11 @@ fun CameraScreen(
             owner.lifecycle.removeObserver(observer)
             level.stop()
         }
+    }
+    // 会话重建（权限授予后 restartPreview / 换镜头 / 切渲染模式）时补一脚 start：
+    // 生命周期没走 ON_RESUME 也不至于让仪表哑掉（start 幂等，代价为零）
+    LaunchedEffect(ui.preview) {
+        if (ui.preview == PreviewStatus.ING) level.start()
     }
     DisposableEffect(bt) { onDispose { bt.close() } }
 
@@ -896,14 +915,26 @@ fun CameraScreen(
                 recStatus == RecordStatus.START -> runner.stopAsync()
                 recStatus != RecordStatus.IDLE -> Unit
                 ui.preview != PreviewStatus.ING -> showTip(app.getString(R.string.cam_wait_preview))
-                else -> runner.start(
-                    width = size.width,
-                    height = size.height,
-                    fps = fps.value,
-                    sensorOrientation = sensorOrientation,
-                    deviceDegrees = deviceDegrees,
-                    front = isFront
-                )
+                else -> {
+                    // 强制 24/25fps 且本机无原生精确档（※ 档）→ 录制期转换（抽帧/补弧）。
+                    // DIRECT 渲染没有 GL 编码支路、无法拒帧，按用户裁决自动切 GPU 并提示；
+                    // 切换会重建取景会话，本次录制放行到下一次按下（预览未就绪那道门也会拦）。
+                    val convert = arcConvertNow()
+                    if (convert != null && renderMode == RenderMode.DIRECT) {
+                        params.renderMode.value = RenderMode.GPU
+                        showTip(app.getString(R.string.cam_arc_switch_gpu))
+                    } else {
+                        runner.start(
+                            width = size.width,
+                            height = size.height,
+                            fps = fps.value,
+                            sensorOrientation = sensorOrientation,
+                            deviceDegrees = deviceDegrees,
+                            front = isFront,
+                            arcConvert = convert
+                        )
+                    }
+                }
             }
         },
         onThumbClick = { if (recording) lockTip() else onOpenGallery() },
@@ -1678,6 +1709,12 @@ private class RecordRunner(
     private var recorder: Recorder? = null
     private var polling = false
 
+    /** 本会话的录制期转换模式（start 时定，stop 写 sidecar 用） */
+    private var activeArcConvert: ArcConvertMode? = null
+
+    /** 本会话的转换目标帧率（sidecar 记账用） */
+    private var activeArcDstFps = 0
+
     val status = MutableStateFlow(RecordStatus.IDLE)
     val elapsedMs = MutableStateFlow(0L)
     val volumeDb = MutableStateFlow(MIN_DB - 40f)
@@ -1690,19 +1727,31 @@ private class RecordRunner(
      * 校验顺序：可重入守卫 → 建 pending → prepare → 取编码面 → 交给相机 → start。
      */
     @Suppress("LongParameterList")
-    fun start(width: Int, height: Int, fps: Int, sensorOrientation: Int, deviceDegrees: Int, front: Boolean) {
+    fun start(
+        width: Int,
+        height: Int,
+        fps: Int,
+        sensorOrientation: Int,
+        deviceDegrees: Int,
+        front: Boolean,
+        arcConvert: ArcConvertMode? = null
+    ) {
         handler.post {
             if (status.value != RecordStatus.IDLE) {
                 Log.i(TAG_UI, "录制已在 ${status.value}，忽略重复 start")
                 return@post
             }
             status.value = RecordStatus.PREPARE
+            activeArcConvert = arcConvert
+            activeArcDstFps = if (arcConvert != null) fps else 0
             val store = VideoStore(app)
             store.checkFreeSpace()?.let { code ->
                 failNow(code); return@post
             }
             val renderMode = params.renderMode.value
-            val profile = buildProfile(width, height, fps, sensorOrientation, deviceDegrees, front, renderMode)
+            val profile = buildProfile(
+                width, height, fps, sensorOrientation, deviceDegrees, front, renderMode, arcConvert
+            )
             val pending = store.createPending(0)
             if (pending == null) {
                 failNow(RecordError.NO_OUTPUT); return@post
@@ -1726,6 +1775,10 @@ private class RecordRunner(
                 ctrl.setRecordingTarget(surface)
                 awaitPreview(PreviewStatus.ING)
             } else {
+                // 转换模式先于编码面挂载配置（节奏锚点随面重挂复位）
+                if (profile.arcConvert != null) {
+                    glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
+                }
                 glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
                 awaitEncoderSurface()
             }
@@ -1791,6 +1844,21 @@ private class RecordRunner(
         val out = rec.stop()
         rec.release()
         recorder = null
+        // 被抽帧位次 sidecar（2026-10-03 定版：抽帧时把位置记下来）。纯档案/调试用途——
+        // 仅抽帧模式的画面已弃、播放器无法事后补弧；弧连续由 MEND 模式在录制时完成。
+        val convert = activeArcConvert
+        activeArcConvert = null
+        if (convert != null && out.error == null) {
+            val path = out.path
+            if (path != null) {
+                val drops = glProvider()?.drainArcDrops() ?: emptyList()
+                val written = ArcDropLog.writeTo(
+                    path,
+                    ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops)
+                )
+                Log.i(TAG_UI, "arc drops sidecar ok=$written drops=${drops.size} path=$path")
+            }
+        }
         // AOSP 顺序：先 stop 编码器，再把编码面从会话里摘掉
         if (params.renderMode.value == RenderMode.DIRECT) ctrl.setRecordingTarget(null)
         else glProvider()?.setOutputSurface(null, 0, 0)
@@ -1836,7 +1904,8 @@ private class RecordRunner(
         sensorOrientation: Int,
         deviceDegrees: Int,
         front: Boolean,
-        renderMode: RenderMode
+        renderMode: RenderMode,
+        arcConvert: ArcConvertMode?
     ): RecordProfile = RecordProfile(
         width = width,
         height = height,
@@ -1858,7 +1927,8 @@ private class RecordRunner(
             direct = renderMode == RenderMode.DIRECT
         ),
         mirrored = front,
-        useGpu = renderMode == RenderMode.GPU
+        useGpu = renderMode == RenderMode.GPU,
+        arcConvert = arcConvert
     )
 
     companion object {

@@ -123,6 +123,15 @@ enum class HudItem(val bit: Int, val labelRes: Int) {
 /** 需求「核心渲染模式」：GPU = 图像信号交 GPU 实时处理；DIRECT = 绕过 GPU 直连传感器与编码器 */
 enum class RenderMode { GPU, DIRECT }
 
+/**
+ * 强制 24/25fps 在**无原生精确档**设备上的录制期转换模式（用户 2026-10-03 定版）。
+ * 转换激活时录制强制走 GPU 渲染 + MediaCodec 引擎——MediaRecorder 面输入无法拒帧，这是硬约束。
+ *
+ * @property MEND 自动抽帧补弧：被抽帧以亮度取大并入前后保留帧，出片即真 24/25fps 且弧连续
+ * @property DROP 仅抽帧：只丢帧不补（弧在抽帧点断，用户自选的观感）；被抽帧位次记 sidecar
+ */
+enum class ArcConvertMode { MEND, DROP }
+
 /** AE 开关是枚举，手动档一次写全 ISO+快门+帧周期三件套，杜绝半手动中间态 */
 enum class AeMode { AUTO, MANUAL, LOCK }
 

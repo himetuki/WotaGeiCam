@@ -121,9 +121,26 @@ sealed interface ArcOp {
  * 指令序列保证：保留帧恰好发一次、被抽帧只经 acc 并入其前后两枚保留帧、EOS 时尾巴上的
  * 被抽帧并进最后一枚保留帧。一帧滞留（pending）+ 一个累积面（acc）就是全部状态。
  *
- * @param stepUs 均匀 PTS 步长的分子基准：第 j 帧 PTS = j·1e6/dstFps（先乘后除不累积截断）
+ * 两个入口同一台机器：
+ * - [onSourceFrame]（离线路）：保留与否由 [ArcRepairPlan.isKept] 按计划判；
+ * - [onClassification]（录制在线路）：保留与否由引擎的实时节奏判（到达时刻 vs 应到时刻），
+ *   录制侧没有"先知帧率"，计划公式用不上。
+ *
+ * @param dstFps 均匀 PTS 步长的分母：第 j 帧 PTS = j·1e6/dstFps（先乘后除不累积截断）
  */
-class ArcRepairFlow(private val plan: ArcRepairPlan, private val dstFps: Int) {
+class ArcRepairFlow private constructor(
+    private val dstFps: Int,
+    private val plannedKeep: ((Int) -> Boolean)?
+) {
+
+    /** 离线路：按抽帧计划逐源帧问询 */
+    constructor(plan: ArcRepairPlan) : this(
+        plan.dstFps,
+        { s -> ArcRepairPlan.isKept(s, plan.srcFps, plan.dstFps) }
+    )
+
+    /** 录制在线路：dstFps 只喂 PTS，保留决策走 [onClassification] */
+    constructor(dstFps: Int) : this(dstFps, null)
 
     /** 已发出的保留帧数 = 下一个输出下标（进度与 PTS 都由它派生） */
     var keptCount: Int = 0
@@ -137,8 +154,12 @@ class ArcRepairFlow(private val plan: ArcRepairPlan, private val dstFps: Int) {
     var hasAcc: Boolean = false
         private set
 
-    fun onSourceFrame(srcIndex: Int): List<ArcOp> {
-        if (!ArcRepairPlan.isKept(srcIndex, plan.srcFps, plan.dstFps)) {
+    /** 离线路：按抽帧计划逐源帧问询 */
+    fun onSourceFrame(srcIndex: Int): List<ArcOp> =
+        onClassification(plannedKeep?.invoke(srcIndex) ?: true)
+
+    fun onClassification(kept: Boolean): List<ArcOp> {
+        if (!kept) {
             // 首枚保留帧之前的被抽帧没有"前帧"可并，直接弃（片头黑场语义不受损）
             if (!hasPending) return emptyList()
             val fresh = !hasAcc
