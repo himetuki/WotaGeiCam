@@ -135,6 +135,9 @@ class LevelSensor(context: Context) : SensorEventListener {
     /** 停止采样；下次 [start] 从当前姿态重新收敛，不会用旧值做低通起点 */
     fun stop() {
         mainHandler.removeCallbacks(watchdog)
+        // 重挂预算随会话复位：两次重试耗尽只代表"这一次注册窗口"没救活，
+        // 用户离开再回来是新的传感器环境，该给新一轮预算（否则整个实例生命周期永久哑掉）
+        watchdogRetries = 0
         if (!registered) return
         registered = false
         runCatching { sensorManager?.unregisterListener(this) }
@@ -146,6 +149,7 @@ class LevelSensor(context: Context) : SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+        if (samplesSeen == 0) watchdogRetries = 0   // 自愈成功（或本就正常）：预算归零，下次异常重新计数
         samplesSeen++
         val values = event.values
         if (values.size < 3) return
