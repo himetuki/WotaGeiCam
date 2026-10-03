@@ -331,29 +331,58 @@ object RequestApplier {
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(pick.lo, pick.hi))
     }
 
-    private fun applyExposure(builder: CaptureRequest.Builder, state: State, p: Snapshot) {
+    /**
+     * 曝光组一次下发的完整键值计划（AE on/off 两档键集的**并集**，每个键都有确定值）。
+     *
+     * 为什么不按档分流各写各的（旧实现）：CaptureRequest.Builder 只有 set、没有单键 remove，
+     * 且引擎的 builder 每会话只建一次、跨 apply 复用——分流写法翻到 MANUAL 的那个请求仍带着
+     * 上次 auto 档写入的 AE_EXPOSURE_COMPENSATION（旧值），反向循环后 auto 请求残留 SENSOR
+     * 三键，下发的全是「混合键集请求」（EV 闪退诊断 §2 / 审查 P2）。键消不掉，只能让**值恒定
+     * 且自洽**：每键每次都按当前快照与当前档语义重算。
+     */
+    data class ExposurePlan(
+        /** AE 锁独立于 AE_MODE（锁定不改 AE_MODE 取值） */
+        val aeLock: Boolean,
+        /** manual → AE_MODE_OFF；否则 ON（闪光分支会按闪光语义再覆写成 ON_* 变体） */
+        val aeMode: Int,
+        /** manual → 0（AE OFF 下补偿无语义，非零值是矛盾信息）；auto → 钳制后的用户步数（EV 用户值不丢，在 params.ev） */
+        val aeComp: Int,
+        val sensitivity: Int,
+        val exposureNs: Long,
+        val frameDurationNs: Long
+    )
+
+    /**
+     * 曝光组键值计划（纯函数，可直接 JVM 单测）。
+     * SENSOR 三键在 auto 档也写（AE_ON 下 HAL 按官方契约忽略它们），值与 manual 档**同一套钳制**
+     * 算出：域内合法、帧周期与 TARGET_FPS_RANGE 自洽——翻转瞬间不会出现「带着上一档残值」的键，
+     * 这是「清残键」在 Camera2 无删键操作下唯一可执行的形态。
+     */
+    fun exposurePlan(state: State, p: Snapshot): ExposurePlan {
         val manual = p.aeMode == AeMode.MANUAL
-        // AE 锁独立于 AE_MODE（锁定不改 AE_MODE 取值）
-        builder.set(CaptureRequest.CONTROL_AE_LOCK, !manual && p.aeMode == AeMode.LOCK)
-        if (manual) {
-            // 三件套一次写全：AE OFF + ISO + 曝光时间 + 帧周期
-            val fps = p.fps?.hi ?: WotaTiers.HIGH_SPEED_FPS
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, state.clampIso(p.iso))
-            builder.set(
-                CaptureRequest.SENSOR_EXPOSURE_TIME,
-                clampShutterNs(
-                    p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
-                    // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
-                    forceDeviceRange = WotaTiers.isRequiredShutterNs(p.shutterNs)
-                )
-            )
-            builder.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDurationNs(fps))
-        } else {
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            // EV 以「步数 int」贯穿全链路
-            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, state.clampEv(p.evSteps))
-        }
+        val fps = p.fps?.hi ?: WotaTiers.HIGH_SPEED_FPS
+        return ExposurePlan(
+            aeLock = !manual && p.aeMode == AeMode.LOCK,
+            aeMode = if (manual) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON,
+            aeComp = if (manual) 0 else state.clampEv(p.evSteps),
+            sensitivity = state.clampIso(p.iso),
+            exposureNs = clampShutterNs(
+                p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
+                // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
+                forceDeviceRange = WotaTiers.isRequiredShutterNs(p.shutterNs)
+            ),
+            frameDurationNs = frameDurationNs(fps)
+        )
+    }
+
+    private fun applyExposure(builder: CaptureRequest.Builder, state: State, p: Snapshot) {
+        val plan = exposurePlan(state, p)
+        builder.set(CaptureRequest.CONTROL_AE_LOCK, plan.aeLock)
+        builder.set(CaptureRequest.CONTROL_AE_MODE, plan.aeMode)
+        builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, plan.aeComp)
+        builder.set(CaptureRequest.SENSOR_SENSITIVITY, plan.sensitivity)
+        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, plan.exposureNs)
+        builder.set(CaptureRequest.SENSOR_FRAME_DURATION, plan.frameDurationNs)
     }
 
     private fun applyAutoFocus(builder: CaptureRequest.Builder, state: State, p: Snapshot) {

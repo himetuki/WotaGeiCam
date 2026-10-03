@@ -42,6 +42,7 @@ import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
+import com.wotagei.cam.ui.design.sheetMaxHeight
 
 /**
  * RGB 曲线面板（需求「RGB 曲线（白、蓝、绿、红）」+ 00 文档 T5 的程序化色调档）。
@@ -89,7 +90,34 @@ fun CurveSheet(
         onDismiss = onDismiss,
         title = stringResource(R.string.cam_curve_title),
         subtitle = stringResource(if (gpuMode) R.string.cam_curve_tip else R.string.cam_monitor_need_gpu),
-        modifier = modifier
+        modifier = modifier,
+        // 动作行走 BottomPanel 的钉底槽位：排在滚动区之后、不参与滚动——以前它躺在滚动区末尾，
+        // 横屏默认态整行沉到 y≈700-719 零亮像素（t8_07），用户每次用曲线都得先上滑才够得着
+        bottomBar = {
+            // 三枚文字动作保持横排（间距对齐 hw_button 的 12vp）：它们是面板内容工具行、
+            // 不是弹窗按钮操作区，竖排会吃掉约 90dp 竖向空间——本面板竖向预算本就按 90% 短边封顶
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                SmallTextButton(stringResource(R.string.cam_curve_del_point)) {
+                    if (selected > 0 && selected < points.size - 1) {
+                        commit(CurveEdit.removed(points, selected), persist = true)
+                        selected = -1
+                    }
+                }
+                SmallTextButton(stringResource(R.string.cam_curve_reset_ch)) {
+                    commit(CurveEdit.pointsOf(ColorCurve.IDENTITY), persist = true)
+                    selected = -1
+                }
+                SmallTextButton(stringResource(R.string.cam_curve_reset_all)) {
+                    params.curve.value = CurveStack.IDENTITY
+                    WotaSettings.setCurveStack(prefs, CurveStack.IDENTITY)
+                    points = CurveEdit.pointsOf(ColorCurve.IDENTITY)
+                    selected = -1
+                }
+            }
+        }
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             channelNames.forEachIndexed { i, name ->
@@ -183,39 +211,16 @@ fun CurveSheet(
             text = if (points.size >= CurveEdit.MAX_POINTS) limitText
             else "${points.size}/${CurveEdit.MAX_POINTS}",
             style = MaterialTheme.typography.labelSmall,
-            color = WotaColor.textLo
+            // 计数压 AcrylicScrim(0xB3)：textLo worst ≈2.83 过不了 scrim 上 3.0 的审计线；
+            // scrim 上文字只准 textHi（worst 5.71），弱化语义交还给字号（labelSmall）本身
+            color = WotaColor.textHi
         )
-        // 三枚文字动作保持横排（间距对齐 hw_button 的 12vp）：它们是面板内容工具行、
-        // 不是弹窗按钮操作区，竖排会吃掉约 90dp 竖向空间——本面板竖向预算本就按 90% 短边封顶
-        Row(
-            Modifier.fillMaxWidth().padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            SmallTextButton(stringResource(R.string.cam_curve_del_point)) {
-                if (selected > 0 && selected < points.size - 1) {
-                    commit(CurveEdit.removed(points, selected), persist = true)
-                    selected = -1
-                }
-            }
-            SmallTextButton(stringResource(R.string.cam_curve_reset_ch)) {
-                commit(CurveEdit.pointsOf(ColorCurve.IDENTITY), persist = true)
-                selected = -1
-            }
-            SmallTextButton(stringResource(R.string.cam_curve_reset_all)) {
-                params.curve.value = CurveStack.IDENTITY
-                WotaSettings.setCurveStack(prefs, CurveStack.IDENTITY)
-                points = CurveEdit.pointsOf(ColorCurve.IDENTITY)
-                selected = -1
-            }
-        }
-        Spacer(Modifier.height(8.dp))
     }
 }
 
 /**
- * 画布边长：按「面板最大高 − 周边 chrome」让位。⑧ 半模态纪律后最大高=短边 90%（本机 324dp），
- * 旧的「按整屏算」口径（竖屏 800−190=230）会让画布把计数与动作行顶出面板；
- * 收进同一份预算后横竖屏都取下限档附近，超出预算的内容交给面板自身滚动。
+ * 画布边长：按「面板最大高 − 画布以外全部 chrome」让位（chrome 账见 [PanelChromeH]）。
+ * 超出预算的内容交给面板自身的滚动区兜底（动作行已钉底，滚动的只有档位/画布/计数）。
  */
 @Composable
 private fun canvasSide(): Dp {
@@ -223,9 +228,22 @@ private fun canvasSide(): Dp {
     return budget.coerceIn(MinCanvasH, MaxCanvasH)
 }
 
-/** 面板内画布以外的竖向开销（标题+两行档位+计数+动作行+内边距 12dp）的估算值 */
-private val PanelChromeH = 198.dp
-private val MinCanvasH = 120.dp
+/**
+ * 面板内画布以外的竖向开销（fontScale=1 估算，逐项对得上件）：
+ *   内边距 12×2=24 ＋ 标题行（titleMedium 24 ＋ 副标题 bodyMedium 两行 40，关闭钮 30 不绑定）
+ *   ＋ 分隔 4+1 ＋ 通道胶囊行 28（WotaChip 高 `heightIn(min=28)`）＋ 间距 6 ＋ 色调档行 28
+ *   ＋ 间距 8 ＋ 间距 6 ＋ 计数 labelSmall 16 ＋ 钉底动作行（上边距 4 ＋ SmallTextButton
+ *   labelMedium 16 + 竖边距 12 = 28）＝ **217dp**。
+ * 旧值 198 是漏账的估算（实际同结构 ≈218），正是「画布把动作行挤出屏」的账源之一。
+ */
+private val PanelChromeH = 217.dp
+
+/**
+ * 画布下限取 60dp：真机横屏（窗口 ≈766x360dp、挖孔列被扣）sheetMaxHeight 实测 ≈278dp，
+ * 278−217=61 ≥ 60——最差档画布仍装得下、内容不再超面板；再小的窗口由滚动区吸收，
+ * 动作行钉底不受影响。上限 230 供平板/竖屏大窗口用满。
+ */
+private val MinCanvasH = 60.dp
 private val MaxCanvasH = 230.dp
 
 /** 色调档是否正在生效：按编码串比对，比引用相等可靠（曲线从 prefs 恢复后仍是同一条） */

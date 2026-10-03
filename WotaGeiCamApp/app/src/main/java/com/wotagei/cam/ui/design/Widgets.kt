@@ -357,6 +357,14 @@ private fun WotaChipImpl(
 /**
  * 圆形图标钮（参考图右上角网格/亮度、右下 1x 都是这一枚）。
  * [frost] 同 [WotaChip]：只有取景 HUD 会传，圆形的半径就是短边一半（送负数哨兵，见 [HudFrostCard]）。
+ *
+ * 选中态分两种落点（accent 压霜板收口 2026-10-02）：
+ * - **霜真在屏幕上**（[frost] 非 null 且 `HudFrost.live`——与 [wotaHudCard] 让位 fill 的判据同一条）：
+ *   玻璃上不能再用 accent 作图标 tint——worst case（白墙透光）只有 1.49~1.79，图形档 3.0 都不过
+ *   （accentActive 同样 1.46~1.75；textHi 能过 4.80+ 但选中态就和常态不可区分了）。
+ *   改走与 [WotaChip] 选中同一套语言：accentSurface **实底** + onAccent 白图形——实底不透明，
+ *   霜动不到它（`HudInkLevel.PRIMARY` 注明的「自带实底的选中态」正是这条豁免），白图形压它 5.55。
+ * - **霜不在**（纸面页 / 实底兜底）：维持 accent tint——压 hudScrim 实底 4.79 ≥ 图形 3.0，观感不变。
  */
 @Composable
 fun WotaIconButton(
@@ -373,18 +381,31 @@ fun WotaIconButton(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
+    // 与 wotaHudCard 内部同一条判据：live 只在 GL 真画了板之后才为 true，
+    // 所以 onFrost 为真时玻璃必然在场，选中态的 accentSurface 实底正是给这块玻璃兜住图形的
+    val onFrost = frost != null && HudFrost.live
     Box(
         modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .size(size)
             .wotaHudCard(CircleShape, frost)
+            // 实底画在 wotaHudCard 内侧（链上更里一环）：clip 已是圆形，fill 跟着裁；霜的让位只发生在
+            // wotaHudCard 自己那层 background，这里的 fill 与 WotaChipImpl 选中底同一做法，霜动不到
+            .then(
+                if (selected && onFrost) Modifier.background(WotaColor.accentSurface, CircleShape)
+                else Modifier
+            )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             image,
             contentDescription = description,
-            tint = if (selected) WotaColor.accent else WotaColor.textHi,
+            tint = if (selected) {
+                if (onFrost) WotaColor.onAccent else WotaColor.accent
+            } else {
+                WotaColor.textHi
+            },
             modifier = Modifier.size(glyph)
         )
     }

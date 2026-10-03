@@ -642,7 +642,9 @@ private fun gatedClick(accepted: Boolean, onClick: () -> Unit): (() -> Unit)? =
  *   这种错在结构上没有入口，13 号计划第 5 条要的「锚点落在视觉位置上」只有一个落点。
  *   「同一个 PillKey 有两个候选写入方」（变焦的 Dock 那颗与读数那颗）由调用方在这条 lambda 里裁决；
  * - 读数条目「值变 null 就淡出」保留 B2 的上一次值 + [AnimatedVisibility]，只淡出 + 微沉，
- *   不用 expandIn/shrinkOut（MotionSpec 不许在预览层做布局参数动画）；
+ *   不用 expandIn/shrinkOut（MotionSpec 不许在预览层做布局参数动画）。**条目节点恒在**：
+ *   AnimatedVisibility 外面必须包一枚恒在的 [Box]，否则退场结束内容离组后父格网量到的节点数
+ *   与 items 清单错位（EV 闪退第 2 轮真机崩栈 `3 vs 2`，见读数分支内那条注释）；
  * - 点按与长按的分工照旧：竖 Dock 的胶囊点按开就近面板（没有点按循环的语义），
  *   底栏镜头那颗点按循环镜头 / 长按开面板，读数条目点按循环取值 / 长按开面板。
  *
@@ -744,26 +746,34 @@ fun HudEntryItem(
     val value = ctx.readoutValue(item)
     var lastValue by remember(item) { mutableStateOf(value) }
     if (value != null) lastValue = value
-    AnimatedVisibility(
-        visible = value != null,
-        enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it / 3 },
-        exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it / 3 },
-        modifier = modifier
-    ) {
-        // 「切到手动值即变蓝」只对本来有 AUTO 档的几项成立
-        val manual = item in HUD_AUTO_ITEMS && lastValue != "AUTO"
-        WotaChip(
-            label = lastValue.orEmpty(),
-            selected = false,
-            modifier = anchor,
-            secondary = stringResource(item.labelRes),
-            valueColor = if (manual) WotaColor.accent else null,
-            onClick = gatedClick(clicksAccepted) { ctx.onReadoutCycle(item) },
-            onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) },
-            // 传了也会被 WotaChipImpl 因 secondary 非空而摘掉（见那条注释）；留在这里是为了
-            // "哪天把次级标签换成 textHi，只需改一处判据"这件事在代码里看得见，而不是散落成一个洞
-            frost = frost
-        )
+    // EV 闪退第 2 轮（真机两次全新启动 100% 复现：`格网测量：颗数与尺寸数不等 3 vs 2`，点快门
+    // 胶囊翻 MANUAL 后 EV 读数淡出即炸）。旧写法把 [AnimatedVisibility] 本身当条目节点：它退场
+    // 动画结束、内容离开组合后**不再给父容器留任何 measurable**，而 [HudEntryGrid] 的 items 清单
+    // 仍含这颗 ⇒ 同一次 measure 里 measurables=2、items=3，[gridPlacementOf] 的 require 在主线程
+    // 炸出。所以外面补一枚**恒在**的 Box 承接条目位：颗数恒等于 items.size，可见性只由内层
+    // AnimatedVisibility 淡出/淡入——"节点有无"不再随读数值变。Box 淡完为 0×0，
+    // cellRowSpan(0)=1，格距账不受影响。
+    Box(modifier = modifier) {
+        AnimatedVisibility(
+            visible = value != null,
+            enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it / 3 },
+            exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it / 3 }
+        ) {
+            // 「切到手动值即变蓝」只对本来有 AUTO 档的几项成立
+            val manual = item in HUD_AUTO_ITEMS && lastValue != "AUTO"
+            WotaChip(
+                label = lastValue.orEmpty(),
+                selected = false,
+                modifier = anchor,
+                secondary = stringResource(item.labelRes),
+                valueColor = if (manual) WotaColor.accent else null,
+                onClick = gatedClick(clicksAccepted) { ctx.onReadoutCycle(item) },
+                onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) },
+                // 传了也会被 WotaChipImpl 因 secondary 非空而摘掉（见那条注释）；留在这里是
+                // "哪天把次级标签换成 textHi，只需改一处判据"这件事在代码里看得见，而不是散落成一个洞
+                frost = frost
+            )
+        }
     }
 }
 

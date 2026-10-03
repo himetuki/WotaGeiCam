@@ -604,7 +604,14 @@ fun PlayerScreen(
             confirmButton = {
                 TextButton(onClick = {
                     purgeDialog = false
-                    // 时序定版（删文件 → 250ms → pop → 900ms → 刷列表）在 MediaActions.finishDelete 内
+                    // 时序定版（删文件 → 250ms → pop → 900ms → 刷列表）在 MediaActions.finishDelete 内。
+                    // 「刷列表」= releaseListRefresh() 里的 invalidate，所以这里不必再传 refresh
+                    // （媒体库内两处批量删除传的 refresh = repo.invalidate()，与开闸那一下重复，
+                    // 属双保险，不是这条链成立的必要条件）。
+                    // 也**别**把 ops.deleteForever 挪到本屏的 scope 之外照旧想、或把收尾改回可取消：
+                    // onBack 一出栈，本屏 rememberCoroutineScope 连同收尾的 delay 一起被取消，
+                    // 少了 runDeleteFinish 里的 NonCancellable，MediaRepo 的刷新闸门就永久停在 true ——
+                    // 2026-10-02 真机两轮复现的「删完返回媒体库全页签空列表、只能杀进程恢复」就是这个。
                     ops.deleteForever(listOf(clip), pop = onBack)
                 }) { Text(stringResource(R.string.ok), color = WotaRec) }
             },

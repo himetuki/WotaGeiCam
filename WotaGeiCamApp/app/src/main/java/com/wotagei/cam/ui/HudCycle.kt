@@ -22,6 +22,19 @@ fun <T> nextInCycle(options: List<T>, current: T): T? {
 }
 
 /**
+ * 读数区「AE 自动 → 手动」翻转的闸（EV 闪退加固，审查 P3 修正版判据）。
+ *
+ * 判据与面板 [com.wotagei.cam.ui.CameraPills] 的 `AeModeRow` **同源**：那边判
+ * `ability.manualExposurePossible()`（= iso.ok() && exposureNs.ok()，core/CameraAbility.kt），
+ * params 的这两个 enabled 正是 `WotaParams.applyAbility` 从那两个 ok() 写进来的——且
+ * applyExposure 的「档位无解」（hi<lo）态也置 enabled=false，比 ability 判据更严、同向。
+ * 只查 shutter 一半不够：ISO 无能力但曝光时间有能力的机器上，点按循环仍会翻 MANUAL
+ * 而面板禁选，那才是口径分叉。
+ */
+internal fun manualExposureUsable(params: WotaParams): Boolean =
+    params.iso.value.enabled && params.shutter.value.enabled
+
+/**
  * 把某个读数胶囊推进一档。
  *
  * @return 有没有真的改动；false 时调用方给提示，绝不静默吞掉一次点击
@@ -38,6 +51,9 @@ fun hudCycleStep(item: HudItem, params: WotaParams): Boolean {
                 .sortedDescending()
             if (ns.isEmpty()) return false
             if (aeAuto) {
+                // 翻手动档前补与面板同源的闸：缺手动能力的机器不许从读数区下发 AE_OFF + SENSOR
+                // 三件套（HAL 未定义状态，还会把用户锁死在手动档出不来——点 ISO/快门全靠手动值）
+                if (!manualExposureUsable(params)) return false
                 params.aeMode.value = AeMode.MANUAL
                 params.shutter.value = params.shutter.value.copy(value = ns.first())
             } else if (params.shutter.value.value == ns.last()) {
@@ -54,6 +70,8 @@ fun hudCycleStep(item: HudItem, params: WotaParams): Boolean {
                 .filter { it in params.iso.value.range ?: IntRange.EMPTY }
             if (ladder.isEmpty()) return false
             if (aeAuto) {
+                // 与 SHUTTER 分支同一条闸（对称：翻 MANUAL 要 ISO 与快门都有能力）
+                if (!manualExposureUsable(params)) return false
                 params.aeMode.value = AeMode.MANUAL
                 params.iso.value = params.iso.value.copy(value = ladder.first())
             } else if (params.iso.value.value == ladder.last()) {

@@ -75,17 +75,19 @@ class ColorCurveTest {
 
     @Test
     fun `全直通时张量等于恒等表`() {
-        // size=4 ⇒ 每段采样 v = 0, 1/3, 2/3, 1；R 段 [0..3]、G 段 [4..7]、B 段 [8..11]
+        // 交错布局（texel i 连续放 R/G/B 三分量）下，恒等表应是 out[3i..3i+2] = i,i,i（按 1/(size-1) 步进）。
+        // 2026-10-03 真机花图缺陷：bake 字节布局从平面改交错（plan/17 前的取证 .tmp/curve-corruption.md），
+        // 旧断言钉的是 GL 从未按此消费过的平面布局。
+        // size=4 ⇒ 每段采样 v = 0, 1/3, 2/3, 1
         val baked = CurveStack().bake(4)
         assertTrue(CurveStack().isPassthrough)
         assertEquals(12, baked.size)
-        assertEquals(0f, baked[0], 1e-6f)
-        assertEquals(1f / 3f, baked[1], 1e-6f)
-        assertEquals(1f, baked[3], 1e-6f)
-        assertEquals(0f, baked[4], 1e-6f)
-        assertEquals(2f / 3f, baked[6], 1e-6f)
-        assertEquals(0f, baked[8], 1e-6f)
-        assertEquals(1f, baked[11], 1e-6f)
+        for (i in 0 until 4) {
+            val v = i / 3f
+            assertEquals(v, baked[3 * i], 1e-6f)         // texel i .r
+            assertEquals(v, baked[3 * i + 1], 1e-6f)     // texel i .g
+            assertEquals(v, baked[3 * i + 2], 1e-6f)     // texel i .b
+        }
     }
 
     @Test
@@ -110,7 +112,9 @@ class ColorCurveTest {
     }
 
     @Test
-    fun `字节纹理按 RGB 三段且量化到 0-255`() {
+    fun `字节纹理按RGB交错布局且量化到0-255`() {
+        // 2026-10-03 真机花图缺陷：bake 字节布局从平面改交错（plan/17 前的取证 .tmp/curve-corruption.md），
+        // 旧断言钉的是 GL 从未按此消费过的平面布局。
         val stack = CurveStack(
             red = curve(0f to 0f, 1f to 1f),
             green = curve(0f to 0.5f, 1f to 0.5f),
@@ -119,16 +123,22 @@ class ColorCurveTest {
         val bytes = stack.bakeBytes(4)
         assertEquals(12, bytes.size)
         fun u(i: Int) = bytes[i].toInt() and 0xFF
-        assertEquals(0, u(0))          // R 段起点
-        assertEquals(255, u(3))        // R 段终点
-        assertEquals(128, u(4))        // G 段恒 0.5
-        assertEquals(128, u(7))
-        assertEquals(255, u(8))        // B 段恒 1
-        assertEquals(255, u(11))
+        // 交错：texel i = (R[i], G[i], B[i]) = (i/3, 0.5, 1.0)，量化 (v*255+0.5) 截断
+        // ⇒ 字节序列 [0,128,255, 85,128,255, 170,128,255, 255,128,255]
+        val expected = listOf(
+            0 to 128, 85 to 128, 170 to 128, 255 to 128   // (r, g) 逐 texel；b 恒 255 单独断
+        )
+        expected.forEachIndexed { i, (r, g) ->
+            assertEquals("texel $i .r", r, u(3 * i))
+            assertEquals("texel $i .g", g, u(3 * i + 1))
+            assertEquals("texel $i .b", 255, u(3 * i + 2))
+        }
     }
 
     @Test
-    fun `张量按RGB三段连续存放`() {
+    fun `张量按RGB交错布局存放`() {
+        // 2026-10-03 真机花图缺陷：bake 字节布局从平面改交错（plan/17 前的取证 .tmp/curve-corruption.md），
+        // 旧断言钉的是 GL 从未按此消费过的平面布局。
         val size = 8
         val stack = CurveStack(
             red = curve(0f to 0.1f, 1f to 0.1f),
@@ -137,9 +147,13 @@ class ColorCurveTest {
         )
         val baked = stack.bake(size)
         assertEquals(size * 3, baked.size)
+        // 交错：每个 texel 三分量依次是 R=0.1、G=0.2、B=0.3
         assertEquals(0.1f, baked[0], 1e-6f)
-        assertEquals(0.2f, baked[size], 1e-6f)
-        assertEquals(0.3f, baked[2 * size], 1e-6f)
+        assertEquals(0.2f, baked[1], 1e-6f)
+        assertEquals(0.3f, baked[2], 1e-6f)
+        assertEquals(0.1f, baked[3 * (size - 1)], 1e-6f)
+        assertEquals(0.2f, baked[3 * (size - 1) + 1], 1e-6f)
+        assertEquals(0.3f, baked[3 * (size - 1) + 2], 1e-6f)
     }
 
     @Test

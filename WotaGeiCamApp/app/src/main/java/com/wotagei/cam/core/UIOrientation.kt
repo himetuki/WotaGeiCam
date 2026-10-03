@@ -38,27 +38,24 @@ enum class UIOrientation(val persistValue: String) {
             ALL.firstOrNull { it.persistValue.equals(raw, ignoreCase = true) } ?: DEFAULT
 
         /**
-         * 页面 → `Activity.requestedOrientation` 的映射（唯一真源）。
+         * 用户档位 → `Activity.requestedOrientation` 的映射（唯一真源）。**对所有页生效**
+         * （用户 2026-10-02 指令：「界面方向设置应当对所有页生效」）：横屏档 ⇒ `SENSOR_LANDSCAPE`、
+         * 竖屏档 ⇒ `SENSOR_PORTRAIT`，设置 / 媒体库 / 播放器 / 对比页不再例外。
          *
-         * - 录制页：按档位锁方向，不依赖系统自动旋转开关。**必须是 SENSOR_LANDSCAPE / SENSOR_PORTRAIT，
-         *   不是 LANDSCAPE / PORTRAIT** —— 后者把朝向钉死在单一方向，前者允许同一轴向的两个朝向随重力翻转。
-         *   「横竖都能录、且反向横屏也要能用」是既有需求（#21），并且正反向横屏切换时窗口尺寸不变、
-         *   Compose 的 `onSizeChanged` 不会触发，`ui/CameraScreen.kt` 那边专门挂了 DisplayListener 才跟着转
-         *   （该文件里 90↔270 的注释）；锁成单方向会把这条路堵死。
-         * - [hudPage] = 取景器那一圈控件的页面：录制页 **与「编辑控件」页**（13 号计划第 5 条）。
-         *   编辑页摆的就是录制页那五枚容器的坐标，两页必须同一套方向 + 同一套沉浸，
-         *   安全区才同名 —— 一个显示系统栏、一个隐藏，存进 hud_layout 的 (x, y) 就不是同一个位置。
-         * - 非 HUD 页（设置 / 相册 / 播放器 / 对比）：恒 `FULL_USER`，即继续跟随用户的系统旋转设置，
-         *   本设置不越界去锁它们。这里形参收下 [orientation] 是为调用方写起来对称，语义上刻意忽略其值。
+         * - **必须是 SENSOR_LANDSCAPE / SENSOR_PORTRAIT，不是 LANDSCAPE / PORTRAIT** —— 后者把朝向钉死在
+         *   单一方向，前者允许同一轴向的两个朝向随重力翻转。「横竖都能录、且反向横屏也要能用」是既有需求
+         *   （#21），并且正反向横屏切换时窗口尺寸不变、Compose 的 `onSizeChanged` 不会触发，
+         *   `ui/CameraScreen.kt` 那边专门挂了 DisplayListener 才跟着转（该文件里 90↔270 的注释）；
+         *   锁成单方向会把这条路堵死。
+         * - 改掉的旧语义（2026-10-02 前）：仅录制页与「编辑控件」页按档位锁，其余页恒 `FULL_USER`
+         *   「不越界锁它们」。按用户指令改为全页统一后，连带效果是 app 内任何页都不再随系统自动旋转
+         *   （这只影响本 app 前台时的朝向，退出 app 后系统旋转行为不受影响）；「编辑控件」页与录制页
+         *   同方向也就自动成立，无需再按页面区分。
          */
-        fun screenOrientationOf(hudPage: Boolean, orientation: UIOrientation): Int =
-            if (!hudPage) {
-                ActivityInfo.SCREEN_ORIENTATION_FULL_USER
-            } else {
-                when (orientation) {
-                    LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                    PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                }
+        fun screenOrientationOf(orientation: UIOrientation): Int =
+            when (orientation) {
+                LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
             }
     }
 }

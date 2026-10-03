@@ -54,7 +54,7 @@ import com.wotagei.cam.ui.theme.WotaTheme
 /** 本层新增的两条路由（其余路由用 media 包 [WotaNav] 常量，避免两处定义） */
 const val ROUTE_CAMERA = "camera"
 const val ROUTE_SETTINGS = "settings"
-/** 「编辑控件」页（13 号计划第 5 条）：方向与沉浸都跟着录制页，见 [UIOrientation.screenOrientationOf] */
+/** 「编辑控件」页（13 号计划第 5 条）：沉浸（隐藏系统栏）跟着录制页；方向自 2026-10-02 起所有页统一按设置锁 */
 const val ROUTE_HUD_EDITOR = "hudEditor"
 
 /**
@@ -143,14 +143,28 @@ private fun WotaRoot() {
         if (missing.isNotEmpty()) launcher.launch(missing)
     }
 
-    // 方向与沉浸随目的地切换：录制页按设置页「默认方向」锁（默认横屏），其余页跟随用户系统旋转设置；
-    // HUD 页（录制页 + 编辑控件页）隐藏系统栏沉浸
+    // 方向与沉浸随目的地切换：方向所有页都按设置页「默认方向」锁（用户 2026-10-02 指令）；
+    // HUD 页（录制页 + 编辑控件页）隐藏系统栏沉浸，其余页显示
     DisposableEffect(nav, activity) {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }
+    }
+
+    // 方向设置改档即时生效：换页监听只在 destination 变化时触发，用户此刻正停在设置页，
+    // 改完不换页也必须立刻转方向。与上面 WatchMotion 同一套 prefs 监听手法（设置页 commit 落盘
+    // 会回调这里），route 从当前栈顶回读，正好复用 applyPageMode 的整套逻辑，不新增架构。
+    DisposableEffect(nav, activity, prefs) {
+        @Suppress("DEPRECATION")
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == WotaSettings.KEY_UI_ORIENTATION) {
+                applyPageMode(activity, nav.currentBackStackEntry?.destination?.route)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     NavHost(
@@ -229,14 +243,16 @@ private fun WotaRoot() {
 
 private fun applyPageMode(activity: Activity?, route: String?) {
     val act = activity ?: return
-    // 录制页与「编辑控件」页共用一套方向 + 沉浸：两页的 (x, y) 必须落在同一个安全区里才谈得上"位置"
+    // 沉浸仍只属于取景器那一圈控件的页面：录制页与「编辑控件」页（13 号计划第 5 条）共用一套系统栏显隐，
+    // 两页的 (x, y) 必须落在同一个安全区里才谈得上"位置"
     val hudPage = route == ROUTE_CAMERA || route == ROUTE_HUD_EDITOR
-    // HUD 页方向由设置页「默认方向」决定（默认横屏使用，且不依赖系统自动旋转开关）；
-    // 其余页恒跟随用户的系统旋转设置。映射本体是 core/UIOrientation.screenOrientationOf（有 JVM 单测）。
-    // 这里必须直读 prefs：纯 UI 设置走参数总线的话会被 applyDefaultsOnce 的「进程内只套一次」挡住，
-    // 设置页改完回录制页就不生效了。每次换页都重读，所以改档立刻生效。
+    // 方向对所有页生效（用户 2026-10-02 指令；旧口径「HUD 页按档锁、其余页恒 FULL_USER 跟随系统旋转」已作废）：
+    // 任何页都按设置页「默认方向」锁（默认横屏使用，且不依赖系统自动旋转开关），
+    // 连带效果是设置/媒体库/播放器/对比页在 app 内不再随系统自动旋转。映射本体是
+    // core/UIOrientation.screenOrientationOf（有 JVM 单测）。这里必须直读 prefs：纯 UI 设置走参数总线的话
+    // 会被 applyDefaultsOnce 的「进程内只套一次」挡住。换页会重读一次，改档本身也由 prefs 监听即时重读（见 WotaRoot）。
     val orientation = WotaSettings.uiOrientation(WotaSettings.of(act))
-    act.requestedOrientation = UIOrientation.screenOrientationOf(hudPage, orientation)
+    act.requestedOrientation = UIOrientation.screenOrientationOf(orientation)
     val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
     if (hudPage) {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

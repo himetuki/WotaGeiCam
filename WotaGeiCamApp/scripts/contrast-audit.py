@@ -93,7 +93,7 @@ TEXT_BAR = {"textHi": 4.5, "textMid": 4.5, "textLo": 3.0}
 
 # 强调色对：(前景, 底, 门槛, 用途)。前景/底缺令牌时跳过并提示（旧版 Tokens 没有新令牌）。
 # 2026-10-02 审查收口：accent×surface 的 4.5 小字档没有数字能过（实测 4.48），而大字用法
-# （SettingGroup 17sp 标题）合法保留，所以这组钉在 3.0——小字残留（BtSpeakerPanel 设备名/
+# （SettingGroup 19sp Bold 标题）合法保留，所以这组钉在 3.0——小字残留（BtSpeakerPanel 设备名/
 # 动作钮、SmallTextButton、SettingsScreen 去系统设置/权限 granted）已全部清出，再出现即违例。
 ACCENT_PAIRS = [
     ("onAccent", "accent", 3.0, "白字 on brand 蓝 #007DFF：只准图形/大字（承载正文小字会跌破 4.5）"),
@@ -101,7 +101,7 @@ ACCENT_PAIRS = [
     ("onAccent", "accentActive", 3.0, "Switch 激活轨上的白 thumb（P3-4 深色控件激活档，图形 3:1）"),
     ("accent", "bg", 3.0, "强调色作图标 tint / 描边（非文字 3:1 档）"),
     ("accent", "hudScrim", 4.5, "强调色作小字文字色（如 HudLayer valueColor 13sp）"),
-    ("accent", "surface", 3.0, "强调色作大字文字色（SettingGroup 17sp 标题）；小字残留 2026-10-02 已清零，再出现即违例"),
+    ("accent", "surface", 3.0, "强调色作大字文字色（SettingGroup 19sp Bold 标题）；小字残留 2026-10-02 已清零，再出现即违例"),
     ("accentDim", "bg", 3.0, "深色强调变体：吸附预览描边（非文字 3:1 档）"),
 ]
 
