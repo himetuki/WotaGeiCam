@@ -30,6 +30,7 @@ import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.core.RefLineType
+import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.WbPreset
@@ -278,6 +279,13 @@ private fun FpsPill(
                     onUnsupported()
                 } else {
                     params.fps.value = fps.copy(value = opt.value)
+                    // 选定 ※ 档（24/25 无精确档）即预告转换：DIRECT 渲染没有 GL 编码支路、
+                    // 无法拒帧，当场切 GPU（会话重建立即可见），录制按下时的守卫只作后备
+                    if (opt.value in WotaTiers.REQUIRED_FPS && fps.exact == false &&
+                        params.renderMode.value == RenderMode.DIRECT
+                    ) {
+                        params.renderMode.value = RenderMode.GPU
+                    }
                     onClose()
                 }
             }
