@@ -1841,6 +1841,11 @@ private class RecordRunner(
         }
         polling = false
         status.value = RecordStatus.STOPPING
+        // MEND 滞留帧先冲刷（编码器还活着），否则停止瞬间必丢最后一枚输出帧
+        if (activeArcConvert == ArcConvertMode.MEND) {
+            val flushed = glProvider()?.flushArcPending() ?: 0
+            if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
+        }
         val out = rec.stop()
         rec.release()
         recorder = null
