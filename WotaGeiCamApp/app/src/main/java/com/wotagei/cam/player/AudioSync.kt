@@ -254,10 +254,16 @@ object AudioSync {
         }
     }
 
-    /** 线性插值重采样 + 截断到 maxSeconds */
+    /** 线性插值重采样 + 截断到 maxSeconds。
+     *  输出帧数 = 源帧数×dst/src（整段重采样的目标帧数）再被 maxSeconds 封顶——
+     *  旧实现拿 src.size（源帧数）与 dstRate·maxSeconds（目标帧数）直接取 min 是单位混用，
+     *  44.1k→8k 时会输出 44100 帧（=5.5s@8k，比真实时长多出 10% 的零填充尾巴）。 */
     internal fun resample(src: FloatArray, srcRate: Int, dstRate: Int, maxSeconds: Int): FloatArray {
         val rate = if (srcRate <= 0) dstRate else srcRate
-        val limitFrames = min(src.size, dstRate * maxSeconds)
+        val limitFrames = minOf(
+            src.size.toLong() * dstRate / rate,
+            dstRate.toLong() * maxSeconds
+        ).toInt().coerceAtLeast(0)
         if (rate == dstRate) return src.copyOfRange(0, limitFrames)
         val ratio = rate.toFloat() / dstRate.toFloat()
         val out = FloatArray(limitFrames)
