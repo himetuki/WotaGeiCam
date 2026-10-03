@@ -107,7 +107,8 @@ ACCENT_PAIRS = [
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else SRC_DEFAULT
+    # 2026-10-03 安全门：不再从 argv 收任意路径（工具只审 Tokens.kt 一个真源，写死即可）
+    src = SRC_DEFAULT
     try:
         t = parse_tokens(src)
     except FileNotFoundError:
