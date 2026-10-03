@@ -1,5 +1,6 @@
-# 打包四件套：WotaGeiCam-release.apk / WotaGeiCam-universal-release.apk /
-# WotaGeiCam-arm64-v8a-release.apk / WotaGeiCam-armeabi-v7a-release.apk
+# 打包四件套（产物名带版本号）：WotaGeiCam-v0.0.4-release.apk /
+# WotaGeiCam-v0.0.4-universal-release.apk / WotaGeiCam-v0.0.4-arm64-v8a-release.apk /
+# WotaGeiCam-v0.0.4-armeabi-v7a-release.apk（版本号取自 versionName，随版本走）
 # 触发：推送 v* 标签；也可在 Actions 页手动触发。
 # 签名：keystore 与密码不进 git（见 .gitignore），启动时从 Actions Secrets 还原——
 #   WOTA_KEYSTORE_BASE64 = keystore/wotageicam-release.jks 的 base64（单行）
