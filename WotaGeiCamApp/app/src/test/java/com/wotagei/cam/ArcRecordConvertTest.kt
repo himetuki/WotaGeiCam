@@ -196,6 +196,44 @@ class ArcRecordConvertTest {
 
     // region 引擎强制选型（Recorders.useCodecEngine）
 
+    @Test
+    fun `随机分类序列_不变量恒成立_种子固定可复现`() {
+        // 种子固定 = 失败可复现（非加密用途）；录制现实的保留序列是任意的（丢帧/VFR 断层），
+        // floor 计划序列只是其中一种——这里对任意 0/1 序列钉不变量
+        val rnd = java.util.Random(42)
+        repeat(200) { round ->
+            val len = rnd.nextInt(60)
+            val flow = ArcRepairFlow(dstFps = 24)
+            var kept = 0
+            var emitted = 0
+            var lastPts = -1L
+            for (s in 0 until len) {
+                val keep = rnd.nextBoolean()
+                for (op in flow.onClassification(keep)) {
+                    when (op) {
+                        is ArcOp.EmitPending -> {
+                            assertTrue("PTS 严格递增", op.ptsUs > lastPts)
+                            lastPts = op.ptsUs
+                            emitted++
+                        }
+                        else -> Unit
+                    }
+                }
+                if (keep) kept++
+            }
+            for (op in flow.onSourceEos()) {
+                if (op is ArcOp.EmitPending) {
+                    assertTrue("EOS 尾帧 PTS 仍递增", op.ptsUs > lastPts)
+                    lastPts = op.ptsUs
+                    emitted++
+                }
+            }
+            assertEquals("发出数 = 保留数（round=$round）", kept, emitted)
+        }
+    }
+
+    // endregion
+
     /** 最小可用 profile：只动 fps 与 arcConvert，其余给合法默认 */
     private fun profile(fps: Int, convert: ArcConvertMode?): RecordProfile = RecordProfile(
         width = 1920,
