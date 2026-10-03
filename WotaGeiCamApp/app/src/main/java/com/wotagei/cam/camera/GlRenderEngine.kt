@@ -27,6 +27,8 @@ import com.wotagei.cam.record.ArcRepairFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.cos
@@ -484,6 +486,44 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** 取走被抽帧位次账（录制收尾写 sidecar 用；取走即清空） */
     fun drainArcDrops(): List<Pair<Int, Int>> = synchronized(arcDropsLock) {
         arcDrops.toList().also { arcDrops.clear() }
+    }
+
+    /**
+     * 停录前冲刷 MEND 滞留帧：状态机会滞留一枚保留帧等"下一保留帧"来决定并弧，
+     * 而录制停止没有 EOS 通知——不冲刷它就必丢一枚输出帧（≤1/24s）。同步等 GL 完成
+     * （编码器此时还活着），必须在 `Recorder.stop()` **之前**调。返回冲刷的帧数（0/1）。
+     */
+    fun flushArcPending(): Int {
+        if (released.get() || arcConvert != ArcConvertMode.MEND) return 0
+        val h = handler ?: return 0
+        val latch = CountDownLatch(1)
+        var flushed = 0
+        h.post {
+            try {
+                if (!released.get() && arcConvert == ArcConvertMode.MEND && arcFlow.hasPending) {
+                    val encoder = encoderEglSurface
+                    val mend = arcMendPass
+                    if (encoder != null && mend != null && mend.ready &&
+                        makeCurrent(encoder) && mend.drawPending()
+                    ) {
+                        stampEncoderPresentation(encoder)
+                        if (swap(encoder)) {
+                            val idx = encoderFrameIndex - 1
+                            synchronized(arcDropsLock) {
+                                arcDrops += idx to arcRule.takeDrops()
+                            }
+                            flushed = 1
+                        }
+                    }
+                    arcFlow.onSourceEos()   // 滞留已出，状态机归零；此后到 stop 的来帧自然弃置
+                }
+            } finally {
+                latch.countDown()
+            }
+        }
+        runCatching { latch.await(1L, TimeUnit.SECONDS) }
+            .onFailure { Log.w(TAG_GL, "flushArcPending 等待失败：${it.message}") }
+        return flushed
     }
 
     // endregion
