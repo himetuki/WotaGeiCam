@@ -91,6 +91,24 @@ class ForcedShutterTest {
     }
 
     @Test
+    fun `无精确档设备上强制档按档位帧周期下发`() {
+        // [24,30] 可变范围（无固定 24 档，即帧率侧 ※ 档）：档位帧周期 41.67ms 落在合法域
+        // [1/30, 1/24] 内 ⇒ r10 起帧周期按档位下发（HAL 节奏放到 24fps），
+        // 强制 1/24 不再被 hi=30 的帧周期钳回 1/30（旧行为长曝光观感全失）。
+        // exposurePlan 的 fps 源 = p.fps.value（档位），本用例钉住它下游的两条纯函数口径。
+        assertEquals(ns24, RequestApplier.frameDurationNs(24))
+        assertEquals(
+            ns24,
+            RequestApplier.clampShutterNs(ns24, 24, 4_000_000L, 33_000_000L, forceDeviceRange = true)
+        )
+        assertEquals(ns25, RequestApplier.frameDurationNs(25))
+        assertEquals(
+            ns25,
+            RequestApplier.clampShutterNs(ns25, 25, 4_000_000L, 33_000_000L, forceDeviceRange = true)
+        )
+    }
+
+    @Test
     fun `档位列表把设备表外的强制档标成可选并打标`() {
         val mark = "※"
         // 实际生效 fps 上界 24（帧周期 41.67ms）：设备表外也要能选到 1/24
