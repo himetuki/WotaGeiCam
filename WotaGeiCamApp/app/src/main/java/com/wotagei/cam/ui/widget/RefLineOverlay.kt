@@ -168,18 +168,30 @@ private fun DrawScope.drawCenterMark(box: Rect) {
 }
 
 /**
- * 水平线：随设备横滚角旋转的过心线。
+ * 水平线两端点（过心线，画布 Y 轴向下）。
  * `LevelSensor.roll` 规定「正 = 屏幕右侧偏低」，右侧下沉时真实地平在画面里向右上方抬起；
- * 画布 Y 轴向下，故右端取 `cy - dy`。线长取对角线长度，保证任意角度都横跨画面。
+ * 故右端取 `cy - dy`。线长取对角线长度，保证任意角度都横跨画面。
+ * 抽成纯函数是为了让**符号约定**（roll 正负 ↔ 线的抬向）可被 JVM 单测钉住——
+ * 画反了地平线，取景的人看到的引导与仪表读数正好相反。
  */
-private fun DrawScope.drawHorizon(box: Rect, rollDegrees: Float) {
+internal fun horizonEndpoints(
+    cx: Float,
+    cy: Float,
+    half: Float,
+    rollDegrees: Float
+): Pair<Offset, Offset> {
     val rad = Math.toRadians(rollDegrees.toDouble())
+    val dx = (cos(rad).toFloat() * half)
+    val dy = (sin(rad).toFloat() * half)
+    return Offset(cx - dx, cy + dy) to Offset(cx + dx, cy - dy)
+}
+
+private fun DrawScope.drawHorizon(box: Rect, rollDegrees: Float) {
     val cx = box.left + box.width / 2f
     val cy = box.top + box.height / 2f
     val half = hypot(box.width, box.height) / 2f
-    val dx = (cos(rad).toFloat() * half)
-    val dy = (sin(rad).toFloat() * half)
-    drawLine(RefLineColor, Offset(cx - dx, cy + dy), Offset(cx + dx, cy - dy), strokeWidth = thin())
+    val (start, end) = horizonEndpoints(cx, cy, half, rollDegrees)
+    drawLine(RefLineColor, start, end, strokeWidth = thin())
 }
 
 /** 满宽横线，用于上/中/下红线（fraction 为距顶比例） */
