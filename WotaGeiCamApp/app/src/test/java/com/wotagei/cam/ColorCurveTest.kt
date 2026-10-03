@@ -259,13 +259,18 @@ class ColorCurveTest {
     @Test
     fun `编辑器模糊_混合操作后不变量恒成立`() {
         // UI 同构流（插入前先 hitTest）随机打 800 次组合拳，钉住编辑器契约：
-        // 点数 2..MAX、x 严格升序且相邻间距 ≥MIN_DX、端点 x 锁 0/1、y 全在 0..1
-        // 种子固定 = 失败可复现（非加密用途，弱随机告警不适用）；换种子等于换一套用例
-        val rnd = java.util.Random(42)
+        // 点数 2..MAX、x 严格升序且相邻间距 ≥MIN_DX、端点 x 锁 0/1、y 全在 0..1。
+        // 多种子各扫一遍扩覆盖面；种子固定 = 失败可复现（非加密用途，弱随机告警不适用）
+        for (seed in listOf(42L, 1337L, 20261004L)) fuzzOne(seed)
+    }
+
+    /** 单种子的组合拳序列（从 [ColorCurve.IDENTITY] 出发，每步断言不变量） */
+    private fun fuzzOne(seed: Long) {
+        val rnd = java.util.Random(seed)
         var pts = CurveEdit.pointsOf(ColorCurve.IDENTITY)
         var selected = -1
         repeat(800) {
-            when (val r = rnd.nextInt(100)) {
+            when (rnd.nextInt(100)) {
                 in 0 until 45 -> {                                  // 拖动（含端点纵移）
                     val idx = rnd.nextInt(pts.size)
                     pts = CurveEdit.moved(pts, idx, rnd.nextFloat(), rnd.nextFloat())
