@@ -2,7 +2,6 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.ColorCurve
 import com.wotagei.cam.core.CurveEdit
-import com.wotagei.cam.core.CurvePreset
 import com.wotagei.cam.core.CurveStack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -182,28 +181,6 @@ class ColorCurveTest {
         assertFalse(partial.isPassthrough)
         assertEquals(2, partial.master.points.size)
         assertEquals(0.75f, partial.master.evaluate(1f), 1e-6f)
-    }
-
-    @Test
-    fun `内置色调档烘出的表都在合法域且非直通`() {
-        assertEquals("原图", CurvePreset.NONE.label)
-        assertEquals(4, CurvePreset.values().size)
-        assertTrue(CurvePreset.NONE.stack.isPassthrough)
-        listOf(CurvePreset.FLAT, CurvePreset.CONTRAST, CurvePreset.TEAL_ORANGE).forEach { preset ->
-            val bytes = preset.stack.bakeBytes()
-            assertEquals(ColorCurve.TABLE_SIZE * 3, bytes.size)
-            assertFalse("${preset.label} 应改变画面", preset.stack.isPassthrough)
-            preset.stack.bake().forEach { v -> assertTrue("表值越界: $v", v in 0f..1f) }
-        }
-        // 灰调抬黑压白：端点必然偏离对角线
-        val flat = CurvePreset.FLAT.stack
-        assertTrue(flat.evaluate(ColorCurve.CHANNEL_GREEN, 0f) > 0f)
-        assertTrue(flat.evaluate(ColorCurve.CHANNEL_GREEN, 1f) < 1f)
-        // 青橙的阴影偏蓝、高光偏红：同输入下 B 抬 R 压
-        val teal = CurvePreset.TEAL_ORANGE.stack
-        assertTrue(
-            teal.evaluate(ColorCurve.CHANNEL_BLUE, 0.1f) > teal.evaluate(ColorCurve.CHANNEL_RED, 0.1f)
-        )
     }
 
     @Test

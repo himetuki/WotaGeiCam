@@ -40,8 +40,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -228,10 +226,6 @@ internal fun BottomPanel(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
-    // 钉底动作行槽位（不参与滚动）：只有 CurveSheet 一个调用方传。不给默认值的话
-    // 将来出现无动作行的面板会被迫传空块，这里允许 null 即可——漏挂动作行的后果是
-    // 功能缺失而不是布局炸裂，编译期拦截不了也不必拦
-    bottomBar: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val motion = LocalMotion.current
@@ -325,14 +319,13 @@ internal fun BottomPanel(
                     Column(
                         Modifier
                             // fill=false：内容矮时滚动区收着内容走（面板由 min 高兜底），
-                            // 内容高时把剩余空间全让给滚动区——bottomBar 永远排在其后不参与滚动。
+                            // 内容高时把剩余空间全让给滚动区。
                             // （weight 必须挂在 verticalScroll 之前：先占位再滚，反了 weight 拿不到列约束）
                             .weight(1f, fill = false)
                             .verticalScroll(rememberScrollState())
                     ) {
                         content()
                     }
-                    bottomBar?.invoke()
                 }
             }
         }
@@ -342,23 +335,6 @@ internal fun BottomPanel(
 @Composable
 internal fun DividerLine() {
     Box(Modifier.fillMaxWidth().height(1.dp).background(WotaDivider))
-}
-
-@Composable
-internal fun SmallTextButton(text: String, onClick: () -> Unit) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelMedium,
-        // 动作小字不压 AcrylicScrim 用 accent：亮画面 worst 只有 ≈2.2；改 textHi（scrim 上
-        // 最稳的一档，worst 5.71）+ 下划线保留「可点」语义，accent 强调交给需要时的图形件
-        color = WotaText,
-        textDecoration = TextDecoration.Underline,
-        textAlign = TextAlign.Center,
-        modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
-    )
 }
 
 /**
