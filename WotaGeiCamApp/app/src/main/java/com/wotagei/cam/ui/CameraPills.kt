@@ -359,10 +359,12 @@ private fun ShutterPill(anchor: IntRect, params: WotaParams, ability: CameraAbil
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_shutter)) {
         AeModeRow(params, ability)
         if (aeMode == AeMode.MANUAL) {
-            // 档位可选性吃「实际生效的 fps 上界」= pickFpsRange 的 hi，与下发/回写同一个帧周期口径；
+            // 档位可选性吃**帧率档位**（2026-10-04 r11/r10 口径）：下发帧周期与快门钳制都按档位
+            // （可变范围 [24,30] 选 24 时 41.67ms 在合法域内、HAL 放到 24fps），选档域与下发同源；
+            // 旧口径用 pick.hi=30 会把 1/24 灰显——那是 r10 之前"帧周期按 hi 钳"语义的产物。
             // 取不到（该档 fps 不可用）时退回用户档位，与 WotaParams.applyExposure 的退回一致。
             val ranges = ability?.fpsRangesFor(size, fps.value > WotaTiers.HIGH_SPEED_FPS) ?: emptyList()
-            val fpsHi = pickFpsRange(ranges, fps.value)?.hi ?: fps.value
+            val fpsHi = pickFpsRange(ranges, fps.value)?.lo ?: fps.value
             PillChoices(
                 // 强制档（1/24、1/25）：设备曝光范围没有也照样可选，标签上打 ※ 与帧率侧一致
                 options = shutterItems(ability?.exposureNs, fpsHi, stringResource(R.string.approx_mark))
