@@ -964,6 +964,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         encoderHeight = 0
         if (surface == null) {
             Log.i(TAG_GL, "编码器面已解除")
+            // 解绑即清转换账（节奏/位次）：半会话状态不许漏进下一次录制
+            // （今天的 stop 时序先 drain 再解绑，这里清是账本本位，不依赖调用顺序）
+            arcRule.reset()
+            if (arcDstFps > 0) arcFlow = ArcRepairFlow(arcDstFps)
+            synchronized(arcDropsLock) { arcDrops.clear() }
             return
         }
         val config = eglConfig
