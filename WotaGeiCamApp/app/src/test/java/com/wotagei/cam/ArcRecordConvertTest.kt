@@ -4,6 +4,7 @@ import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
+import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.ArcRepairPlan
 import com.wotagei.cam.record.ArcRepairFlow
 import com.wotagei.cam.record.RecordProfile
@@ -83,6 +84,44 @@ class ArcRecordConvertTest {
         val rule = ArcKeepRule(0L)
         for (n in 0 until 10) assertTrue(rule.onFrame(n.toLong()))
     }
+
+    // endregion
+
+    // region 源帧率实测（ArcRateProbe）
+
+    @Test
+    fun `中位数折算_奇偶样本数都对`() {
+        val e = List(90) { 33_333 }              // 全 30fps 帧距
+        assertEquals(30, ArcRateProbe.measuredFps(e, 24))
+        val odd = List(89) { 33_333 }
+        assertEquals(30, ArcRateProbe.measuredFps(odd, 24))
+    }
+
+    @Test
+    fun `重复样本与轨道断层被滤掉_不拖歪中位数`() {
+        // 90 个有效 33.3ms 帧距 + 50 个 0（重复样本）+ 2 个 2s（断层）：中位数只认有效档
+        val raw = buildList {
+            repeat(50) { add(0) }
+            repeat(45) { add(33_333) }
+            add(2_000_000)
+            repeat(45) { add(33_333) }
+            add(2_000_000)
+        }
+        assertEquals(30, ArcRateProbe.measuredFps(raw, 24))
+    }
+
+    @Test
+    fun `有效样本不足退回容器帧率`() {
+        assertEquals(24, ArcRateProbe.measuredFps(List(7) { 33_333 }, 24))
+        assertEquals(30, ArcRateProbe.measuredFps(emptyList(), 30))
+    }
+
+    @Test
+    fun `混档节奏取中位档_60fps实测回60`() {
+        assertEquals(60, ArcRateProbe.measuredFps(List(100) { 16_667 }, 24))
+    }
+
+    // endregion
 
     @Test
     fun `时间戳回退的陈旧帧按丢弃处理_等下次到点_不炸不死锁`() {

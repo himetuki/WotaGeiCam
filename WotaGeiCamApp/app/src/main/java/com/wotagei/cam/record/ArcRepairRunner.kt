@@ -37,12 +37,6 @@ private const val MAX_SRC_FRAMES = 2_000_000
 /** 源容器读不到帧率时的回退值（注释即口径：绝大多数手机录像 30fps 或更高，取 30 不会放大成慢动作） */
 private const val FALLBACK_SRC_FPS = 30
 
-/** 实测帧距样本少于这个数（极短视频）时中位数不可信，退回容器帧率 */
-private const val MIN_DELTAS_FOR_MEDIAN = 8
-
-/** 实测帧率上限（防畸变帧距把值算飞；产品最高档 240，留一倍余量） */
-private const val MAX_MEASURED_FPS = 480
-
 /**
  * CPU 路线等一枚空闲编码器输入缓冲的上限。
  * `dequeueInputBuffer(DEQUEUE_TIMEOUT_US)` 自身会阻塞到超时，所以循环不是热自旋；这个上限只是
@@ -313,32 +307,20 @@ private class ArcRepairSession(
         val hint = vf.intOr(MediaFormat.KEY_ROTATION, 0)
         if (width <= 0 || height <= 0) throw ArcFail(ArcRepairError.SOURCE)
 
-        // 源帧率**实测**（PTS 帧距中位数），不信容器 KEY_FRAME_RATE：强制 24/25fps 档在无固定
-        // 范围设备上传感器实际跑更高帧率（如 30），容器却被标成 24——按容器值造抽帧计划会得出
-        // "无需抽帧"的假结论。帧距中位数对重复/空样本免疫（它们的帧距≈0，被中位数滤掉），这正是
-        // "45 个有效包被数成 124 个样本"那次遍历教训的正确解法：不数个数，量间隔。
+        // 源帧率**实测**（ArcRateProbe 帧距中位数）：强制 24/25fps 档容器会标假 fps（标 24 实跑 30），
+        // 按容器值造抽帧计划会漏抽；中位数对重复/空样本免疫，是遍历计数教训的正确解法
         var srcFrames = 0
-        val deltas = ArrayList<Int>(512)
+        val rawDeltas = ArrayList<Int>(512)
         var prevSampleUs = -1L
         var scanned = 0
         while (scanned < MAX_SRC_FRAMES && videoEx.sampleTime >= 0L) {
             val t = videoEx.sampleTime
-            if (prevSampleUs >= 0L) {
-                val d = (t - prevSampleUs).toInt()
-                // 门槛 1ms 排重复样本；上限 1s 排轨道级断层（章节点），两者都不参与节奏统计
-                if (d in 1_001..1_000_000) deltas.add(d)
-            }
+            if (prevSampleUs >= 0L) rawDeltas.add((t - prevSampleUs).toInt())
             prevSampleUs = t
             scanned++
             if (!videoEx.advance()) break
         }
-        srcFps = if (deltas.size >= MIN_DELTAS_FOR_MEDIAN) {
-            deltas.sort()
-            val m = deltas[deltas.size / 2].toLong()
-            ((1_000_000L + m / 2L) / m).toInt().coerceIn(1, MAX_MEASURED_FPS)
-        } else {
-            containerFps
-        }
+        srcFps = ArcRateProbe.measuredFps(rawDeltas, containerFps)
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
         // 源帧数按时长 × 实测帧率估算，只喂进度分母与计划日志；输出由解码顺序驱动
         // （真机实测遍历计数不可靠，见 v1 注释；时长缺失时才退回数样本）
