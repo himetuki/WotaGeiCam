@@ -583,7 +583,8 @@ fun PlayerScreen(
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 168.dp)
                 )
             }
-            if (zoom.value > 1.01f) {
+            // 偏离 1x 即显示：缩小也是合法观感（下限 0.1x），缩着却没倍率读数等于盲调
+            if (zoom.value > 1.01f || zoom.value < 0.99f) {
                 Text(
                     text = stringResource(R.string.player_zoom, zoom.value),
                     style = MonoStyle,
@@ -849,10 +850,11 @@ private fun PlayerTopBar(
 
 // region 手势与进度条
 
-/** 双指缩放 1..4x：只在第二指按下后才消费，单指滑动不消费（因此画面滑动不会 seek）。
+/** 双指缩放 0.1..4x（用户 2026-10-03 裁决：下限从 0.1x 起，缩小也是合法观感）：
+ *  只在第二指按下后才消费，单指滑动不消费（因此画面滑动不会 seek）。
  *  提成 internal：对比播放页（#4，用户 2026-09-30 反馈「对比播放没有双指缩放」）复用同一份
  *  手势与同一档上下限，两边各抄一份迟早各改各的。 */
-internal fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 1f, max: Float = 4f): Modifier =
+internal fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 0.1f, max: Float = 4f): Modifier =
     pointerInput(min, max) {
         awaitEachGesture {
             var baseDist = 0f
