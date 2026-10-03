@@ -1,6 +1,32 @@
 package com.wotagei.cam.record
 
 /**
+ * 源帧率**实测**（帧距中位数，纯函数 JVM 可测）：强制 24/25fps 档的容器 `KEY_FRAME_RATE`
+ * 会标成目标值而传感器实际跑更高帧率，按容器值造抽帧计划会得出"无需抽帧"的假结论。
+ * 中位数对重复/空样本免疫（帧距≈0 被过滤），这是"45 个有效包被数成 124 个样本"那次
+ * 遍历教训的正确解法：不数个数，量间隔。
+ */
+object ArcRateProbe {
+
+    /** 有效帧距样本少于这个数（极短视频）时中位数不可信，退回容器帧率 */
+    const val MIN_DELTAS = 8
+
+    /** 实测帧率上限（防畸变帧距把值算飞；产品最高档 240，留一倍余量） */
+    const val MAX_MEASURED_FPS = 480
+
+    /**
+     * 由**原始**相邻样本帧距（微秒）测源帧率：先滤噪（<1ms 的重复样本、>1s 的轨道断层），
+     * 再取中位数折算 fps（四舍五入）；有效样本不足退回 [fallbackFps]。
+     */
+    fun measuredFps(rawDeltasUs: List<Int>, fallbackFps: Int): Int {
+        val clean = rawDeltasUs.filter { it in 1_001..1_000_000 }
+        if (clean.size < MIN_DELTAS) return fallbackFps
+        val median = clean.sorted()[clean.size / 2].toLong()
+        return (((1_000_000L + median / 2L) / median).toInt()).coerceIn(1, MAX_MEASURED_FPS)
+    }
+}
+
+/**
  * 录制在线路的**抽帧保留规则**（用户 2026-10-03 定版，2026-10-03 夜实现）。
  *
  * 录制侧没有"先知帧率"：传感器在无精确档范围里实际跑多快由 HAL 决定，所以这里不用
@@ -10,10 +36,9 @@ package com.wotagei.cam.record
  * 长期输出节奏收敛到恰为 D fps。
  *
  * 输出 PTS 不走本类：GL 编码支路的均匀帧序号时间戳（帧序号 × 1e9/fps）只在保留帧上推进，
- * 丢弃帧跳过 swap 即可，两套口径天然一致。
+ * 丢弃帧跳过 swap 即可，两套口径天然一致。源帧率实测见 [ArcRateProbe]。
  */
 class ArcKeepRule(private val slotNs: Long) {
-
     /** 下一输出帧的应到时刻；[NOT_STARTED] = 还没见到首帧 */
     private var nextDueNs = NOT_STARTED
 
