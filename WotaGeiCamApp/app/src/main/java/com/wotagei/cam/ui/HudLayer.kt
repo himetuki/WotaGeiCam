@@ -369,7 +369,7 @@ internal object HudFrost {
      * 那一页的可用性同样只能由 GL 的回报说了算，没有 GL 出图就没有板，fill 不让位。
      */
     @Composable
-    fun host() {
+    fun Host() {
         val context = LocalContext.current
         val view = LocalView.current
         DisposableEffect(context, view) {
@@ -884,7 +884,7 @@ fun BoxScope.HudZoneBox(
 ) {
     // 霜的宿主登记（#84 步骤 2）：五枚容器各登记一次，引用计数到 0 才撤定时器与 prefs 监听。
     // 挂在这里而不是某枚具体容器的理由是：只要 HUD 在屏幕上，就总得有人盯 GL 的可用回报。
-    HudFrost.host()
+    HudFrost.Host()
     val density = LocalDensity.current
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
