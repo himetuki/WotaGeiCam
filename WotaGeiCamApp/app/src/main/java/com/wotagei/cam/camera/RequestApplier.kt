@@ -360,7 +360,11 @@ object RequestApplier {
      */
     fun exposurePlan(state: State, p: Snapshot): ExposurePlan {
         val manual = p.aeMode == AeMode.MANUAL
-        val fps = p.fps?.hi ?: WotaTiers.HIGH_SPEED_FPS
+        // 帧周期/快门钳制一律吃**范围下界**（2026-10-04 r10 修正）：无精确档设备上 [24,30] 的
+        // hi=30 会把强制 1/24 钳回 1/30，长曝光观感全失。lo=24（即档位）的帧周期 41.67ms 恰在
+        // 可变范围的合法域 [1/30, 1/24] 内——HAL 据此把节奏放到 24fps，MANUAL 档两键都被尊重；
+        // AE_ON 下这些键本就被 HAL 忽略。精确档 [f,f] 的 lo==hi==f，逐字同旧行为。
+        val fps = p.fps?.lo ?: WotaTiers.HIGH_SPEED_FPS
         return ExposurePlan(
             aeLock = !manual && p.aeMode == AeMode.LOCK,
             aeMode = if (manual) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON,
