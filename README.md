@@ -72,4 +72,6 @@ cd WotaGeiCam/WotaGeiCamApp
 
 ## 许可
 
-本项目尚未附带开源许可证（默认保留所有权利）。
+本项目以 [GNU GPL v3](LICENSE)（SPDX: `GPL-3.0-only`）发布。
+
+Copyright © 2026 himetuki
