@@ -214,6 +214,7 @@ object WotaSettings {
      * `apply()` 只把改动排进异步落盘队列，`am force-stop` 这类强杀会连队列一起丢掉，于是"改了没生效"
      * （B4 那轮就是被这条误判成 S1 缺陷的）。低频点击，主线程这一次磁盘 IO 的代价可以接受。
      */
+    @Suppress("ApplySharedPref")
     fun setUiOrientation(prefs: SharedPreferences, orientation: UIOrientation) {
         prefs.edit().putString(KEY_UI_ORIENTATION, orientation.persistValue).commit()
     }
@@ -229,6 +230,7 @@ object WotaSettings {
      * @return `commit()` 的结果，也就是**这次改动是否真的写进了磁盘**。写入方必须把它当"保存回执"用：
      * 返回 false 就不许再对用户说"已保存"。低频拖动的松手/点保存，一次同步 IO 的代价可以接受。
      */
+    @Suppress("ApplySharedPref")
     fun setHudLayout(prefs: SharedPreferences, table: HudLayoutTable): Boolean =
         prefs.edit().putString(KEY_HUD_LAYOUT, table.encode()).commit()
 
@@ -237,6 +239,7 @@ object WotaSettings {
      * 「即时可重做」靠的是调用方留着重置前那一份串，写回 [setHudLayout] 就是撤销。
      * 与 [setHudLayout] 同理走同步 `commit()`，返回值是"这次删除是否真落盘"的回执。
      */
+    @Suppress("ApplySharedPref")
     fun clearHudLayout(prefs: SharedPreferences): Boolean =
         prefs.edit().remove(KEY_HUD_LAYOUT).commit()
 

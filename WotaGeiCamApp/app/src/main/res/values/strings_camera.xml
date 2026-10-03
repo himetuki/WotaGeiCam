@@ -147,18 +147,13 @@
     <string name="cam_pk_orange">橙</string>
     <string name="cam_pk_red">红</string>
 
-    <!-- RGB 曲线面板 -->
-    <string name="cam_curve_title">RGB 曲线</string>
-    <string name="cam_curve_tip">拖点改亮度，点空白处加控制点；仅 GPU 渲染生效，录出与所见一致</string>
+    <!-- RGB 曲线（2026-10-03 换装左侧小弹窗后仅剩通道名与重置两用语；
+         title/tip/del_point/reset_ch/custom/points_limit 随 CurveSheet 大底板一并废弃） -->
     <string name="cam_curve_ch_master">白</string>
     <string name="cam_curve_ch_red">红</string>
     <string name="cam_curve_ch_green">绿</string>
     <string name="cam_curve_ch_blue">蓝</string>
-    <string name="cam_curve_del_point">删除选中点</string>
-    <string name="cam_curve_reset_ch">复位本通道</string>
     <string name="cam_curve_reset_all">全部复位</string>
-    <string name="cam_curve_custom">已调</string>
-    <string name="cam_curve_points_limit">最多 %1$d 个控制点</string>
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案） -->
     <string name="cam_record_saved">已保存，时长 %1$s</string>
