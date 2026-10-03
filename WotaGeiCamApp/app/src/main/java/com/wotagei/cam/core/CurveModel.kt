@@ -177,38 +177,6 @@ data class CurveStack(
 }
 
 /**
- * 内置色调档（00 文档 T5：需求里的「LUT 滤镜」用程序化曲线替代，不引入外部 `.cube`）。
- *
- * 三点/四点折线足以近似常见色调形状，且每一档都能落到曲线编辑器里继续手改——
- * 所以档位不是黑盒贴图，用户看到的就是实际生效的那四条线。
- */
-enum class CurvePreset(val label: String, val stack: CurveStack) {
-
-    /** 原图：恒等，等于关掉曲线 */
-    NONE("原图", CurveStack.IDENTITY),
-
-    /** 灰调：抬黑、压白，给后期留空间，与 S-Log 的观感方向一致 */
-    FLAT("灰调", CurveStack(master = pts(0f to 0.12f, 0.5f to 0.5f, 1f to 0.88f))),
-
-    /** 强反差：经典 S 形 */
-    CONTRAST("强反差", CurveStack(master = pts(0f to 0f, 0.25f to 0.16f, 0.75f to 0.86f, 1f to 1f))),
-
-    /** 青橙：亮部推暖、暗部推冷，阴影抬一点蓝 */
-    TEAL_ORANGE(
-        "青橙",
-        CurveStack(
-            master = pts(0f to 0.02f, 0.5f to 0.46f, 1f to 1f),
-            red = pts(0f to 0f, 0.5f to 0.55f, 1f to 1f),
-            blue = pts(0f to 0.09f, 0.5f to 0.45f, 1f to 0.92f)
-        )
-    );
-}
-
-/** 枚举条目要在伴生对象初始化之前构造完，所以折线点在文件级私有函数里建 */
-private fun pts(vararg pairs: Pair<Float, Float>): ColorCurve =
-    ColorCurve(pairs.map { ColorCurve.Point(it.first, it.second) })
-
-/**
  * 曲线编辑器的纯逻辑：命中测试、增删改控制点。
  *
  * 端点（x=0 与 x=1）恒在且横向锁定，中间点只能插在两个邻居之间，所以点集永远严格升序——

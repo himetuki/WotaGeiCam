@@ -16,6 +16,7 @@ import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -138,7 +139,7 @@ import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.wotaCard
-import com.wotagei.cam.ui.dialog.CurveSheet
+import com.wotagei.cam.ui.dialog.CurvePopup
 import com.wotagei.cam.ui.dialog.evText
 import com.wotagei.cam.ui.dialog.lensLabelRes
 import com.wotagei.cam.ui.dialog.observed
@@ -864,7 +865,12 @@ fun CameraScreen(
         onRefLineClick = { pop = PillKey.REFLINE },
         onMonitorClick = { pop = PillKey.MONITOR },
         onFlashClick = { pop = PillKey.FLASH },
-        onCurveClick = { openSheet(Sheet.CURVE) },
+        onCurveClick = {
+            openSheet(Sheet.CURVE)
+            // 小弹窗没有副标题位：CPU 渲染档曲线不可拖，进弹窗第一时间用提示条说清
+            // （原 CurveSheet 面板的副标题「cam_monitor_need_gpu」语义挪到这一条）
+            if (renderMode != RenderMode.GPU) showTip(app.getString(R.string.cam_monitor_need_gpu))
+        },
         onZoomClick = { pop = PillKey.ZOOM },
         onFocusClick = { pop = PillKey.FOCUS },
         onStabClick = { pop = PillKey.STAB },
@@ -1012,43 +1018,61 @@ fun CameraScreen(
                 ) {
                     HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
                 }
+                // ---- 左右竖 Dock：面板打开时向各自外侧滑出、关闭滑回（不再随面板硬卸载）----
+                // 常驻组合是刻意的：zoneRects 的实测宽持续回报，dockBottomAvoidDp 那套避让账
+                // 不因滑出归零，回滑时布局不抖。位移走 HudZoneBox 的 graphicsLayer 通道
+                // （shiftXPx 只在 layer 块里读，动画不触发整页重组）；滑出到位后内容整体在屏外，
+                // 触摸自然不可达，无需再挂禁用开关。
+                val dockSlideMotion = LocalMotion.current
+                val docksOut = sheet != Sheet.NONE
+                val dockSlide = remember { Animatable(0f) }
+                LaunchedEffect(docksOut) {
+                    val target = if (docksOut) 1f else 0f
+                    if (dockSlide.value != target) dockSlide.animateTo(target, dockSlideMotion.float)
+                }
+                // 完全出屏的账 = 卡片实测宽 + 起始边那枚设计留白（两枚 Dock 同一令牌）
+                val hudEdgePadPx = with(hudDensity) { HudEdgePad.toPx() }
+                HudZoneBox(
+                    zone = HudZone.LEFT,
+                    placement = placementOf(HudZone.LEFT),
+                    // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
+                    area = leftArea,
+                    shiftXPx = { -dockSlide.value * ((zoneRects[HudZone.LEFT] ?: IntRect.Zero).width + hudEdgePadPx) },
+                    nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
+                    onCardRect = { putCardRect(HudZone.LEFT, it) }
+                ) {
+                    HudDockZone(
+                        HudZone.LEFT,
+                        hudLayout.gridItems(HudZone.LEFT, gridPlan),
+                        hudCtx,
+                        zoneBandHeight(HudZone.LEFT, leftArea),
+                        // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
+                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
+                    )
+                }
+                // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
+                // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
+                // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
+                // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
+                HudZoneBox(
+                    zone = HudZone.RIGHT,
+                    placement = placementOf(HudZone.RIGHT),
+                    area = rightArea,
+                    shiftXPx = { dockSlide.value * ((zoneRects[HudZone.RIGHT] ?: IntRect.Zero).width + hudEdgePadPx) },
+                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                    onCardRect = { putCardRect(HudZone.RIGHT, it) }
+                ) {
+                    HudDockZone(
+                        HudZone.RIGHT,
+                        hudLayout.gridItems(HudZone.RIGHT, gridPlan),
+                        hudCtx,
+                        zoneBandHeight(HudZone.RIGHT, rightArea),
+                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
+                    )
+                }
+                // READOUT/底栏/码率 chip 维持与面板互斥的硬卸载：读数与快门在录制语义里本就不该
+                // 和面板同屏，这轮只有两枚竖 Dock 换装成滑出动画
                 if (sheet == Sheet.NONE) {
-                    HudZoneBox(
-                        zone = HudZone.LEFT,
-                        placement = placementOf(HudZone.LEFT),
-                        // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
-                        area = leftArea,
-                        nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
-                        onCardRect = { putCardRect(HudZone.LEFT, it) }
-                    ) {
-                        HudDockZone(
-                            HudZone.LEFT,
-                            hudLayout.gridItems(HudZone.LEFT, gridPlan),
-                            hudCtx,
-                            zoneBandHeight(HudZone.LEFT, leftArea),
-                            // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
-                            hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
-                        )
-                    }
-                    // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
-                    // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
-                    // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
-                    // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
-                    HudZoneBox(
-                        zone = HudZone.RIGHT,
-                        placement = placementOf(HudZone.RIGHT),
-                        area = rightArea,
-                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                        onCardRect = { putCardRect(HudZone.RIGHT, it) }
-                    ) {
-                        HudDockZone(
-                            HudZone.RIGHT,
-                            hudLayout.gridItems(HudZone.RIGHT, gridPlan),
-                            hudCtx,
-                            zoneBandHeight(HudZone.RIGHT, rightArea),
-                            hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
-                        )
-                    }
                     // 六项第 4 条：快门速度 / 帧率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）；
                     // 码率已挪 Dock 外同带（10-01 布局批，见下面 BOTTOM 那枚 HudZoneBox 之后的 chip）。
                     // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
@@ -1153,7 +1177,7 @@ fun CameraScreen(
                 }
             }
 
-            CurveSheet(
+            CurvePopup(
                 params = params,
                 gpuMode = renderMode == RenderMode.GPU,
                 onDismiss = { sheet = Sheet.NONE },

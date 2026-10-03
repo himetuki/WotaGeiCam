@@ -52,8 +52,8 @@ private val PanelTopKeep = 48.dp
  * 半模态面板的最大高（dp）：短边 90% 与「窗口高 − 顶部避让」取小。
  * 顶部避让 = max(信号栏 inset + [SheetSignalGap]，[PanelTopKeep] 兜底)——inset 运行时读；
  * 本机横屏挖孔在左右两侧时 top inset 自然为 0，48dp 的顶栏兜底接手（PanelTopKeep 的已知债仍有效）。
- * 面板本体（录制页 `BottomPanel` 这类自绘半模态）与曲线画布（`CurveSheet.canvasSide`）
- * 共用同一份口径，不许各算各的。
+ * 面板本体（录制页 `BottomPanel` 这类自绘半模态）共用同一份口径，不许各算各的。
+ * （曲线已换装左侧小弹窗 `CurvePopup`，自带 200dp 设计档，不再吃这份半模态预算。）
  *
  * 真机实测（横屏 1600x720 density 2）：本函数返回 ≈278dp——窗口/配置把挖孔列扣掉后
  * `screenHeightDp` 只报 ≈326，短边 90%（293）不绑定，`screenHeightDp − 48` 这条先到。
