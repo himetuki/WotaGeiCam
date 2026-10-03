@@ -199,36 +199,35 @@ class ArcRecordConvertTest {
     @Test
     fun `随机分类序列_不变量恒成立_种子固定可复现`() {
         // 种子固定 = 失败可复现（非加密用途）；录制现实的保留序列是任意的（丢帧/VFR 断层），
-        // floor 计划序列只是其中一种——这里对任意 0/1 序列钉不变量
-        val rnd = java.util.Random(42)
-        repeat(200) { round ->
-            val len = rnd.nextInt(60)
-            val flow = ArcRepairFlow(dstFps = 24)
-            var kept = 0
-            var emitted = 0
-            var lastPts = -1L
-            for (s in 0 until len) {
-                val keep = rnd.nextBoolean()
-                for (op in flow.onClassification(keep)) {
-                    when (op) {
-                        is ArcOp.EmitPending -> {
-                            assertTrue("PTS 严格递增", op.ptsUs > lastPts)
+        // floor 计划序列只是其中一种——这里对任意 0/1 序列钉不变量。多种子各扫一遍扩覆盖面
+        for (seed in listOf(42L, 1337L, 20261004L)) {
+            val rnd = java.util.Random(seed)
+            repeat(200) { round ->
+                val len = rnd.nextInt(60)
+                val flow = ArcRepairFlow(dstFps = 24)
+                var kept = 0
+                var emitted = 0
+                var lastPts = -1L
+                for (s in 0 until len) {
+                    val keep = rnd.nextBoolean()
+                    for (op in flow.onClassification(keep)) {
+                        if (op is ArcOp.EmitPending) {
+                            assertTrue("PTS 严格递增（seed=$seed round=$round）", op.ptsUs > lastPts)
                             lastPts = op.ptsUs
                             emitted++
                         }
-                        else -> Unit
+                    }
+                    if (keep) kept++
+                }
+                for (op in flow.onSourceEos()) {
+                    if (op is ArcOp.EmitPending) {
+                        assertTrue("EOS 尾帧 PTS 仍递增", op.ptsUs > lastPts)
+                        lastPts = op.ptsUs
+                        emitted++
                     }
                 }
-                if (keep) kept++
+                assertEquals("发出数 = 保留数（seed=$seed round=$round）", kept, emitted)
             }
-            for (op in flow.onSourceEos()) {
-                if (op is ArcOp.EmitPending) {
-                    assertTrue("EOS 尾帧 PTS 仍递增", op.ptsUs > lastPts)
-                    lastPts = op.ptsUs
-                    emitted++
-                }
-            }
-            assertEquals("发出数 = 保留数（round=$round）", kept, emitted)
         }
     }
 
