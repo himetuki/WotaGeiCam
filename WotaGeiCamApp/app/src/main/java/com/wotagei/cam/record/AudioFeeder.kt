@@ -84,7 +84,8 @@ class AudioFeeder(
     val minBufferSize: Int
 ) {
 
-    /** 一段 PCM 与其 μs 时间戳；[data] 长度为 [EOS_SIZE] 即通道结束哨兵 */
+    /** 一段 PCM 与其 μs 时间戳；**ptsUs < 0 = 通道结束哨兵**（真实包时间戳恒为 nanoTime µs、恒正；
+     *  哨兵 data 取 [EOS_SIZE] 长只是历史形状——判定看 pts 不看长度，4 字节恰是双声道 2 帧的合法 PCM） */
     class Packet(val data: ByteArray, val ptsUs: Long)
 
     companion object {
