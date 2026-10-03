@@ -73,6 +73,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,12 +98,14 @@ import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.wotagei.cam.R
+import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.MediaOps
 import com.wotagei.cam.media.MediaTagDialog
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaOps
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.record.ArcRepairError
 import com.wotagei.cam.record.ArcRepairRunner
 import com.wotagei.cam.record.ArcRepairStatus
 import com.wotagei.cam.ui.anim.LocalMotion
@@ -263,6 +266,8 @@ fun PlayerScreen(
     val arcProgress by arcRunner.progress.collectState(0f)
     var arcMenu by remember { mutableStateOf(false) }
     var arcAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    // 抽帧目标帧率：产品口径 = 强制档两枚（24/25），默认 24；源实测帧率由管线自己量（容器会撒谎）
+    var arcDstFps by remember { mutableIntStateOf(WotaTiers.REQUIRED_FPS.min()) }
     // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
     // 置真并等 3s 收尾，等于丢掉用户已经发起的修复；这种情形下让它跑到结束自行写回相册
     // （run 返回前这条线程不会退，是一次性的、可容忍的驻留）。读 runner.status.value 而非外层
@@ -315,11 +320,17 @@ fun PlayerScreen(
     LaunchedEffect(playError) {
         if (playError) banner = R.string.player_error
     }
-    // 后台修复的终态提示走现成反馈条（2.6s 自动隐）；进行中的进度另给一行小字，见下面 Box
+    // 后台修复的终态提示走现成反馈条（2.6s 自动隐）；进行中的进度另给一行小字，见下面 Box。
+    // NO_NEED（源实测帧率不高于目标，没有帧可抽）不是故障，给专门文案避免吓到用户
     LaunchedEffect(arcStatus) {
         when (arcStatus) {
             ArcRepairStatus.DONE -> banner = R.string.player_arc_done
-            ArcRepairStatus.FAILED -> banner = R.string.player_arc_failed
+            ArcRepairStatus.FAILED ->
+                banner = if (arcRunner.result.value?.error == ArcRepairError.NO_NEED) {
+                    R.string.player_arc_no_need
+                } else {
+                    R.string.player_arc_failed
+                }
             else -> Unit
         }
     }
@@ -540,6 +551,8 @@ fun PlayerScreen(
             if (controlsVisible && arcMenu) {
                 ArcRepairPopup(
                     anchor = arcAnchor,
+                    dstFps = arcDstFps,
+                    onPickFps = { arcDstFps = it },
                     onPick = { useGpu ->
                         arcMenu = false
                         // 重复启动保护：管线本身同一时刻只跑一条（runner.busy 也会兜一层），
@@ -548,7 +561,7 @@ fun PlayerScreen(
                         if (arcStatus == ArcRepairStatus.RUNNING) {
                             banner = R.string.player_arc_busy
                         } else {
-                            arcRunner.start(clip.uri, useGpu)
+                            arcRunner.start(clip.uri, useGpu, arcDstFps)
                         }
                     },
                     onDismiss = { arcMenu = false }
@@ -753,19 +766,40 @@ internal fun SpeedTierPopup(
 }
 
 /**
- * 光弧修复的方式选择弹层（用户需求第 7 项）：写法照 [SpeedTierPopup]——就近弹在底栏那枚修复钮旁边。
+ * 光弧修复的方式选择弹层（用户需求第 7 项，v2 抽帧+补弧口径）：写法照 [SpeedTierPopup]——
+ * 就近弹在底栏那枚修复钮旁边。
  *
- * 两行是**二选一的动作**，不是选中态：所以不给对勾、不存 current，点完即关并在上层起后台任务。
- * 说明小字讲清代价与"不改原片"，避免用户以为它会把当前文件覆盖掉。
+ * 「目标帧率」两档是**选中态**（带对勾、点选切换）；下面两行是**二选一的动作**，不给对勾、
+ * 点完即关并在上层起后台任务。说明小字讲清抽帧+补弧语义与"不改原片"。
  */
 @Composable
 private fun ArcRepairPopup(
     anchor: androidx.compose.ui.unit.IntRect,
+    dstFps: Int,
+    onPickFps: (Int) -> Unit,
     onPick: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_arc_repair)) {
         Column(Modifier.width(ARC_POPUP_PANEL_WIDTH)) {
+            // 目标帧率：产品口径就是强制档那两枚（REQUIRED_FPS），不是任意档位表
+            Text(
+                stringResource(R.string.player_arc_target),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)
+            )
+            WotaTiers.REQUIRED_FPS.sorted().forEach { fps ->
+                Text(
+                    text = (if (fps == dstFps) "✓ " else "") + stringResource(R.string.player_arc_fps, fps),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (fps == dstFps) WotaAccent else WotaText,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPickFps(fps) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+            }
             // 行尾留空：一挂对勾就会被读成"当前选中项"，而这里点哪个是发起动作
             Text(
                 stringResource(R.string.player_arc_gpu),

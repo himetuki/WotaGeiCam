@@ -37,6 +37,12 @@ private const val MAX_SRC_FRAMES = 2_000_000
 /** 源容器读不到帧率时的回退值（注释即口径：绝大多数手机录像 30fps 或更高，取 30 不会放大成慢动作） */
 private const val FALLBACK_SRC_FPS = 30
 
+/** 实测帧距样本少于这个数（极短视频）时中位数不可信，退回容器帧率 */
+private const val MIN_DELTAS_FOR_MEDIAN = 8
+
+/** 实测帧率上限（防畸变帧距把值算飞；产品最高档 240，留一倍余量） */
+private const val MAX_MEASURED_FPS = 480
+
 /**
  * CPU 路线等一枚空闲编码器输入缓冲的上限。
  * `dequeueInputBuffer(DEQUEUE_TIMEOUT_US)` 自身会阻塞到超时，所以循环不是热自旋；这个上限只是
@@ -71,6 +77,9 @@ object ArcRepairError {
 
     /** 用户取消 */
     const val CANCELLED = "ARC_CANCELLED"
+
+    /** 源实测帧率不高于目标帧率：没有帧可抽，修复无意义（UI 给专门提示，不算故障） */
+    const val NO_NEED = "ARC_NO_NEED"
 
     /** 超时保护触发 */
     const val TIMEOUT = "ARC_TIMEOUT"
@@ -122,9 +131,10 @@ class ArcRepairRunner(private val ctx: Context) {
     /**
      * 启动一次修复。
      * @param srcUri 源视频（媒体库里的 content uri）
-     * @param useGpu true = GPU 路线（EGL 到编码器面）；false = CPU 路线（逐平面 YUV 混合后直写编码器输入缓冲）
+     * @param useGpu true = GPU 路线（EGL 到编码器面）；false = CPU 路线（逐平面 YUV 取大后直写编码器输入缓冲）
+     * @param dstFps 抽帧目标帧率（产品口径 = 强制档 24/25）；源实测帧率不高于它时任务以 NO_NEED 收场
      */
-    fun start(srcUri: Uri, useGpu: Boolean) {
+    fun start(srcUri: Uri, useGpu: Boolean, dstFps: Int) {
         handler.post {
             if (busy) {
                 Log.i(TAG_ARC, "已有任务在跑，忽略重复 start")
@@ -140,6 +150,7 @@ class ArcRepairRunner(private val ctx: Context) {
                     ctx = ctx,
                     src = srcUri,
                     useGpu = useGpu,
+                    dstFps = dstFps,
                     onProgress = { progress.value = it },
                     cancelled = { cancelRequested }
                 ).run()
@@ -186,13 +197,15 @@ private class ArcFail(val code: String) : Exception(code)
 /**
  * 一次修复会话：资源全在这里建、在这里收，[run] 无论成败都返回结果（不抛给外部）。
  *
- * 管线：源 `MediaExtractor`（视频轨）→ 解码 → 原帧/混合帧交替送编码器 → 另一条 `MediaExtractor`
- * （音频轨）直拷 → `MediaMuxer` 封装 → `VideoStore` 入库（`IS_PENDING` 两段式）。
+ * 管线（v2 抽帧+补弧口径）：源 `MediaExtractor`（视频轨）→ 解码 → 按 [ArcRepairFlow] 指令
+ * 抽帧/取大补弧 → 只把保留帧送编码器 → 另一条 `MediaExtractor`（音频轨）直拷 → `MediaMuxer`
+ * 封装 → `VideoStore` 入库（`IS_PENDING` 两段式）。
  */
 private class ArcRepairSession(
     private val ctx: Context,
     private val src: Uri,
     private val useGpu: Boolean,
+    private val dstFps: Int,
     private val onProgress: (Float) -> Unit,
     private val cancelled: () -> Boolean
 ) {
@@ -216,10 +229,10 @@ private class ArcRepairSession(
     private var encEosSent = false
     private var srcIndex = 0
 
-    /** 首帧解码 PTS：之后所有时间戳都相对它归一（输出时长因此与源严格一致） */
+    /** 首帧解码 PTS：之后所有时间戳都相对它归一（去重判距用，输出 PTS 不再走源时间轴） */
     private var decodePtsBase = -1L
 
-    /** 上一解码帧的归一化 PTS：混合帧 PTS 取它与当前帧的中点 */
+    /** 上一解码帧的归一化 PTS：去重判距用 */
     private var prevPtsUs = 0L
     private var outputsDone = 0
     private var dstTotal = 1
@@ -234,6 +247,9 @@ private class ArcRepairSession(
     private var audioPendingSize = 0
     private var note: String? = null
 
+    /** 抽帧计划与它的流式桥（open() 里建，主循环逐帧问指令） */
+    private lateinit var flow: ArcRepairFlow
+
     // --- 复用件
     private val vBufInfo = MediaCodec.BufferInfo()
     private val aBufInfo = MediaCodec.BufferInfo()
@@ -241,18 +257,18 @@ private class ArcRepairSession(
     private val audioBuf: ByteBuffer = ByteBuffer.allocateDirect(1 shl 20)
 
     // --- CPU 路线的平面缓冲（open() 里一次分配，逐帧复用，全为零分配）
-    // cur = 当前解码帧、prev = 上一解码帧（供下一帧混合）、mid = 混合中间量（写编码器用）。
+    // cur = 当前解码帧、pend = 滞留待发的保留帧、acc = 被抽帧的取大累积面。
     // 一律"紧打包"（Y 占 w*h，U/V 各占 (w/2)*(h/2)），与编码器输入 Image 的 rowStride 无耦合，
-    // 读入/写出时各自尊重对方的 stride——这样 Buffer 的布局差异不会污染混合算式的输入。
+    // 读入/写出时各自尊重对方的 stride——这样 Buffer 的布局差异不会污染合并算式的输入。
     private var curY: ByteArray = ByteArray(0)
     private var curU: ByteArray = ByteArray(0)
     private var curV: ByteArray = ByteArray(0)
-    private var prevY: ByteArray = ByteArray(0)
-    private var prevU: ByteArray = ByteArray(0)
-    private var prevV: ByteArray = ByteArray(0)
-    private var midY: ByteArray = ByteArray(0)
-    private var midU: ByteArray = ByteArray(0)
-    private var midV: ByteArray = ByteArray(0)
+    private var pendY: ByteArray = ByteArray(0)
+    private var pendU: ByteArray = ByteArray(0)
+    private var pendV: ByteArray = ByteArray(0)
+    private var accY: ByteArray = ByteArray(0)
+    private var accU: ByteArray = ByteArray(0)
+    private var accV: ByteArray = ByteArray(0)
 
     fun run(): ArcRepairResult {
         var code: String? = null
@@ -291,28 +307,59 @@ private class ArcRepairSession(
         val vf = videoEx.getTrackFormat(vTrack)
         width = vf.intOr(MediaFormat.KEY_WIDTH, 0)
         height = vf.intOr(MediaFormat.KEY_HEIGHT, 0)
-        srcFps = vf.intOr(MediaFormat.KEY_FRAME_RATE, FALLBACK_SRC_FPS)
+        val containerFps = vf.intOr(MediaFormat.KEY_FRAME_RATE, FALLBACK_SRC_FPS)
         durationMs = vf.longOr(MediaFormat.KEY_DURATION, 0L) / 1000L
         val mime = vf.getString(MediaFormat.KEY_MIME) ?: MediaFormat.MIMETYPE_VIDEO_AVC
         val hint = vf.intOr(MediaFormat.KEY_ROTATION, 0)
         if (width <= 0 || height <= 0) throw ArcFail(ArcRepairError.SOURCE)
 
-        // 源帧数：**按时长 × 帧率估算**，不遍历样本。真机实测遍历法不可靠（45 个包的片子被数成 124），
-        // 而它只用于进度分母与计划日志——输出帧数实际由解码顺序驱动（每帧出 1~2 帧），
-        // 时间戳沿源时间轴，所以即便这里估偏，产物时长与内容也不受影响
-        val srcFrames = if (durationMs > 0 && srcFps > 0) {
+        // 源帧率**实测**（PTS 帧距中位数），不信容器 KEY_FRAME_RATE：强制 24/25fps 档在无固定
+        // 范围设备上传感器实际跑更高帧率（如 30），容器却被标成 24——按容器值造抽帧计划会得出
+        // "无需抽帧"的假结论。帧距中位数对重复/空样本免疫（它们的帧距≈0，被中位数滤掉），这正是
+        // "45 个有效包被数成 124 个样本"那次遍历教训的正确解法：不数个数，量间隔。
+        var srcFrames = 0
+        val deltas = ArrayList<Int>(512)
+        var prevSampleUs = -1L
+        var scanned = 0
+        while (scanned < MAX_SRC_FRAMES && videoEx.sampleTime >= 0L) {
+            val t = videoEx.sampleTime
+            if (prevSampleUs >= 0L) {
+                val d = (t - prevSampleUs).toInt()
+                // 门槛 1ms 排重复样本；上限 1s 排轨道级断层（章节点），两者都不参与节奏统计
+                if (d in 1_001..1_000_000) deltas.add(d)
+            }
+            prevSampleUs = t
+            scanned++
+            if (!videoEx.advance()) break
+        }
+        srcFps = if (deltas.size >= MIN_DELTAS_FOR_MEDIAN) {
+            deltas.sort()
+            val m = deltas[deltas.size / 2].toLong()
+            ((1_000_000L + m / 2L) / m).toInt().coerceIn(1, MAX_MEASURED_FPS)
+        } else {
+            containerFps
+        }
+        videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+        // 源帧数按时长 × 实测帧率估算，只喂进度分母与计划日志；输出由解码顺序驱动
+        // （真机实测遍历计数不可靠，见 v1 注释；时长缺失时才退回数样本）
+        srcFrames = if (durationMs > 0 && srcFps > 0) {
             ((durationMs * srcFps + 500L) / 1000L).toInt().coerceAtLeast(1)
         } else {
             countSamples(videoEx)
         }
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-        val plan = ArcRepairPlan.of(srcFrames)
+        if (dstFps <= 0) throw ArcFail(ArcRepairError.SOURCE)
+        if (srcFps <= dstFps) throw ArcFail(ArcRepairError.NO_NEED)
+        val plan = ArcRepairPlan.of(srcFrames, srcFps, dstFps)
         if (plan.dstFrames <= 0) throw ArcFail(ArcRepairError.SOURCE)
         dstTotal = plan.dstFrames
+        flow = ArcRepairFlow(plan, dstFps)
+        note = "源实测≈${srcFps}fps（容器标 $containerFps）→ 目标 ${dstFps}fps，" +
+            "被抽帧画面已取大并入前后帧；不改原片"
         Log.i(
             TAG_ARC,
-            "源 ${width}x$height srcFps=$srcFps srcFrames=$srcFrames → outFps=${srcFps * 2} dstFrames=$dstTotal " +
-                "route=${if (useGpu) "GPU" else "CPU"} hint=$hint"
+            "源 ${width}x$height 容器fps=$containerFps 实测fps=$srcFps srcFrames=$srcFrames " +
+                "→ dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} route=${if (useGpu) "GPU" else "CPU"} hint=$hint"
         )
 
         // 音频轨（另开一条 extractor：同一 extractor 只能选一条轨）
@@ -366,10 +413,11 @@ private class ArcRepairSession(
         // 的专用件（Recorder 那条路才需要），拿它当 EGL 渲染目标在真机上 eglCreateWindowSurface 直接
         // 失败（EGL_BAD_ALLOC 0x3003，实测两轮）。createInputSurface 的合法窗口是 configure 之后、
         // start 之前——这里正好。CPU 路线不建面。
+        // v2 口径：容器按**目标帧率**建档（v1 是源×2 的插帧容器，已废弃）。
         val profile = RecordProfile(
             width = width,
             height = height,
-            fps = srcFps * 2,
+            fps = dstFps,
             captureRate = 0f,
             bitrate = 0,
             codec = if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC) RecordProfile.CODEC_HEVC else RecordProfile.CODEC_H264,
@@ -384,7 +432,7 @@ private class ArcRepairSession(
         val helper = CodecRecorder(ctx, st)
         // 两条路线的编码器输入方式不同：
         // - GPU：Surface 输入。surface 传 null = 只 configure、不绑面，随后用 codec.createInputSurface()
-        //   拿它自己的输入面（此路线的行为与产物已真机验收，逐字不变）；
+        //   拿它自己的输入面（此路线的 EGL 时序已真机验收）；
         // - CPU：ByteBuffer 输入，直写 YUV 平面，PTS 由 queueInputBuffer 显式给出——这正是修掉
         //   "Canvas 写输入面 → 时间戳由系统墙钟生成 → 21 倍慢放"那个真机缺陷的关键。
         val enc = if (useGpu) {
@@ -410,17 +458,17 @@ private class ArcRepairSession(
         }
         vDec = dec
         if (useGpu) {
-            val gl = ArcRepairGl(width, height, srcFps)
+            val gl = ArcRepairGl(width, height)
             arcGl = gl
             if (!gl.start()) throw ArcFail(ArcRepairError.GPU)
             val decSurface = gl.decoderSurface ?: throw ArcFail(ArcRepairError.GPU)
             dec.configure(vf, decSurface, null, 0)
         } else {
-            // CPU：ByteBuffer 模式拿 YUV（无输出面但 getOutputImage 可读），逐平面混合后直写编码器输入缓冲
+            // CPU：ByteBuffer 模式拿 YUV（无输出面但 getOutputImage 可读），逐平面取大后直写编码器输入缓冲
             dec.configure(vf, null, null, 0)
             allocPlanes()
-            note = "CPU 路线：逐平面（YUV420）混合后直写编码器输入缓冲；单帧成本随分辨率上升，" +
-                "长视频明显慢于 GPU。帧时间戳由 queueInputBuffer 显式给出，与 GPU 路线同一口径，成片时长与源一致"
+            note = "CPU 路线：逐平面（YUV420）取大合并后直写编码器输入缓冲；单帧成本随分辨率上升，" +
+                "长视频明显慢于 GPU。帧时间戳由 queueInputBuffer 显式给出，与 GPU 路线同一口径。$note"
         }
 
         dec.start()
@@ -442,12 +490,12 @@ private class ArcRepairSession(
         curY = ByteArray(yLen)
         curU = ByteArray(cLen)
         curV = ByteArray(cLen)
-        prevY = ByteArray(yLen)
-        prevU = ByteArray(cLen)
-        prevV = ByteArray(cLen)
-        midY = ByteArray(yLen)
-        midU = ByteArray(cLen)
-        midV = ByteArray(cLen)
+        pendY = ByteArray(yLen)
+        pendU = ByteArray(cLen)
+        pendV = ByteArray(cLen)
+        accY = ByteArray(yLen)
+        accU = ByteArray(cLen)
+        accV = ByteArray(cLen)
     }
 
     private fun findTrack(ex: MediaExtractor, prefix: String): Int {
@@ -508,28 +556,34 @@ private class ArcRepairSession(
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
-                    idx >= 0 -> {
-                        val eos = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        if (!eos && decInfo.size > 0) {
-                            // 该解码帧的源时间轴 PTS（归一化到首帧）。送帧与混合帧的时间戳都由它派生，
-                            // 输出时长因此严格等于源时长（10-01 真机修正：原先按"输出帧号 × 1/outFps"
-                            // 自算步长，一旦源帧数统计偏大就会把整片拉长）
-                            if (decodePtsBase < 0L) decodePtsBase = decInfo.presentationTimeUs
-                            val ptsUs = (decInfo.presentationTimeUs - decodePtsBase).coerceAtLeast(0L)
-                            // 去重：源容器里常有空/重复样本（真机实测：1.875s 的片子只有 45 个有效包，
-                            // 却有 124 个样本），解码器会把它们全吐出来。按"距上一个已采用帧不足半个源帧长"
-                            // 判重丢弃——否则输出帧数被灌水、成片时长被拉长（真机首版：1.875s 源出了 5.15s 片）
-                            val minGapUs = if (srcFps > 0) 500_000L / srcFps else 0L
-                            if (srcIndex > 0 && ptsUs - prevPtsUs < minGapUs) {
-                                runCatching { dec.releaseOutputBuffer(idx, false) }
-                            } else {
-                                if (useGpu) emitFrameGpu(dec, idx, ptsUs) else emitFrameCpu(dec, idx, ptsUs)
-                            }
-                        } else {
+                idx >= 0 -> {
+                    val eos = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    if (eos) {
+                        // 解码 EOS：先把尾巴上的滞留帧/补弧按计划发出（末帧也必须是保留帧），
+                        // 再交棒给编码器 EOS
+                        if (useGpu) execGpu(flow.onSourceEos()) else execCpu(flow.onSourceEos())
+                        runCatching { dec.releaseOutputBuffer(idx, false) }
+                        decOutDone = true
+                    } else if (decInfo.size > 0) {
+                        // 该解码帧的源时间轴 PTS（归一化到首帧），**只用于去重判距**——
+                        // v2 输出 PTS 取均匀目标帧率步长（第 j 帧 = j/dstFps），
+                        // 输出时长 = 保留帧数/dstFps ≈ 源时长，与源 PTS 抖动解耦
+                        if (decodePtsBase < 0L) decodePtsBase = decInfo.presentationTimeUs
+                        val ptsUs = (decInfo.presentationTimeUs - decodePtsBase).coerceAtLeast(0L)
+                        // 去重：源容器里常有空/重复样本（真机实测：1.875s 的片子只有 45 个有效包，
+                        // 却有 124 个样本），解码器会把它们全吐出来。按"距上一个已采用帧不足半个源帧长"
+                        // 判重丢弃——被灌水的帧会搅乱抽帧节奏（把该保留的位次占掉）
+                        val minGapUs = if (srcFps > 0) 500_000L / srcFps else 0L
+                        if (srcIndex > 0 && ptsUs - prevPtsUs < minGapUs) {
                             runCatching { dec.releaseOutputBuffer(idx, false) }
+                        } else {
+                            prevPtsUs = ptsUs
+                            processSourceFrame(dec, idx)
                         }
-                        if (eos) decOutDone = true
+                    } else {
+                        runCatching { dec.releaseOutputBuffer(idx, false) }
                     }
+                }
                 }
             } else if (!encEosSent) {
                 // 解码走完：给编码器发 EOS，之后只剩排空
@@ -570,89 +624,125 @@ private class ArcRepairSession(
 
     // endregion
 
-    // region GPU / CPU 送帧
-
-    private fun emitFrameGpu(dec: MediaCodec, idx: Int, ptsUs: Long) {
-        dec.releaseOutputBuffer(idx, true)
-        val gl = arcGl ?: throw ArcFail(ArcRepairError.GPU)
-        if (!gl.awaitFrame()) throw ArcFail(ArcRepairError.GPU)
-        // 一次调用会往编码器面 swap 1 帧（首帧）或 2 帧（混合帧 + 原帧），与 ArcRepairPlan 同构。
-        // 混合帧的 PTS = 前后两帧源 PTS 的中点（它夹在两者之间的时刻）
-        val blendPts = if (srcIndex > 0) (prevPtsUs + ptsUs) / 2L else null
-        if (!gl.renderFrame(ptsUs, blendPts)) throw ArcFail(ArcRepairError.GPU)
-        countOutput(if (srcIndex > 0) 2 else 1)
-        prevPtsUs = ptsUs
-        srcIndex++
-        drainEncoder(false)
-    }
-
-    private fun emitFrameCpu(dec: MediaCodec, idx: Int, ptsUs: Long) {
-        val image = dec.getOutputImage(idx)
-        if (image == null) {
-            // 该解码器不吐 Image（只支持 Surface 输出）：如实失败，不假装做了混合
-            runCatching { dec.releaseOutputBuffer(idx, false) }
-            throw ArcFail(ArcRepairError.CPU_YUV)
-        }
-        try {
-            if (image.width != width || image.height != height) {
-                Log.e(TAG_ARC, "解码输出尺寸 ${image.width}x${image.height} 与轨道 $width x $height 不符")
-                throw ArcFail(ArcRepairError.CPU_YUV)
-            }
-            readPlanes(image, curY, curU, curV)
-            // 混合帧 PTS = 前后两帧源 PTS 的中点（与 GPU 路线同一式子，口径不许改）
-            val blendPts = if (srcIndex > 0) (prevPtsUs + ptsUs) / 2L else null
-            if (blendPts != null) {
-                feedEncoder(blendPts, blend = true)
-                countOutput(1)
-                // 两份输出之间抽一次编码器：硬件编码器输入缓冲有限，不抽干可能让下一帧等不到空位
-                drainEncoder(false)
-            }
-            feedEncoder(ptsUs, blend = false)
-            countOutput(1)
-            // 当前帧升格为上一帧，供下一帧的混合帧使用（整段 arraycopy，零分配）
-            System.arraycopy(curY, 0, prevY, 0, curY.size)
-            System.arraycopy(curU, 0, prevU, 0, curU.size)
-            System.arraycopy(curV, 0, prevV, 0, curV.size)
-            prevPtsUs = ptsUs
-            srcIndex++
-            drainEncoder(false)
-        } finally {
-            image.close()
-            runCatching { dec.releaseOutputBuffer(idx, false) }
-        }
-    }
+    // region 抽帧/补弧的指令执行（CPU 平面 / GPU 纹理两条路共用同一台 ArcRepairFlow）
 
     /**
-     * 把当前帧（[blend]=false）或前/当前两帧的 0.5 混合帧（[blend]=true）写进编码器输入缓冲，
-     * 并显式附上 [ptsUs]。
+     * 每个被采用的非重复解码帧：读帧 → 问 [ArcRepairFlow] 要指令 → 按路线执行。
+     * 保留/抽掉的决策全在计划层（可 JVM 单测）；这里只忠实执行指令。
+     */
+    private fun processSourceFrame(dec: MediaCodec, idx: Int) {
+        if (useGpu) {
+            dec.releaseOutputBuffer(idx, true)
+            val gl = arcGl ?: throw ArcFail(ArcRepairError.GPU)
+            if (!gl.awaitFrame()) throw ArcFail(ArcRepairError.GPU)
+            if (!gl.acquire()) throw ArcFail(ArcRepairError.GPU)
+            execGpu(flow.onSourceFrame(srcIndex))
+        } else {
+            val image = dec.getOutputImage(idx)
+            if (image == null) {
+                // 该解码器不吐 Image（只支持 Surface 输出）：如实失败，不假装做了补弧
+                runCatching { dec.releaseOutputBuffer(idx, false) }
+                throw ArcFail(ArcRepairError.CPU_YUV)
+            }
+            try {
+                if (image.width != width || image.height != height) {
+                    Log.e(TAG_ARC, "解码输出尺寸 ${image.width}x${image.height} 与轨道 $width x $height 不符")
+                    throw ArcFail(ArcRepairError.CPU_YUV)
+                }
+                readPlanes(image, curY, curU, curV)
+                execCpu(flow.onSourceFrame(srcIndex))
+            } finally {
+                image.close()
+                runCatching { dec.releaseOutputBuffer(idx, false) }
+            }
+        }
+        srcIndex++
+    }
+
+    private fun execGpu(ops: List<ArcOp>) {
+        val gl = arcGl ?: throw ArcFail(ArcRepairError.GPU)
+        for (op in ops) {
+            when (op) {
+                is ArcOp.AccumulateCur -> if (!gl.accumulate(op.fresh)) throw ArcFail(ArcRepairError.GPU)
+                is ArcOp.FoldAccIntoPending -> if (!gl.foldAccIntoPending()) throw ArcFail(ArcRepairError.GPU)
+                is ArcOp.HoldCurAsPending -> if (!gl.holdCurAsPending()) throw ArcFail(ArcRepairError.GPU)
+                is ArcOp.MergeCurAsPending -> if (!gl.mergeCurAsPending(op.useAcc)) throw ArcFail(ArcRepairError.GPU)
+                is ArcOp.EmitPending -> {
+                    if (!gl.emitPending(op.ptsUs)) throw ArcFail(ArcRepairError.GPU)
+                    countOutput(1)
+                    // 编码器输入面缓冲有限，每出一帧抽一次：不抽干可能让下一枚等不到空位
+                    drainEncoder(false)
+                }
+            }
+        }
+    }
+
+    private fun execCpu(ops: List<ArcOp>) {
+        for (op in ops) {
+            when (op) {
+                is ArcOp.AccumulateCur -> {
+                    if (op.fresh) copyCurToAcc() else {
+                        ArcRepairMerge.mergeMax(accY, curY, curY.size)
+                        ArcRepairMerge.mergeMax(accU, curU, curU.size)
+                        ArcRepairMerge.mergeMax(accV, curV, curV.size)
+                    }
+                }
+                is ArcOp.FoldAccIntoPending -> {
+                    // P' = max(P, acc)：被抽帧的弧段并进**前**保留帧
+                    ArcRepairMerge.mergeMax(pendY, accY, pendY.size)
+                    ArcRepairMerge.mergeMax(pendU, accU, pendU.size)
+                    ArcRepairMerge.mergeMax(pendV, accV, pendV.size)
+                }
+                is ArcOp.HoldCurAsPending -> copyCurToPending()
+                is ArcOp.MergeCurAsPending -> {
+                    if (op.useAcc) {
+                        // B' = max(B, acc)：被抽帧的弧段并进**后**保留帧，带弧升格待发
+                        ArcRepairMerge.mergeMax(curY, accY, curY.size)
+                        ArcRepairMerge.mergeMax(curU, accU, curU.size)
+                        ArcRepairMerge.mergeMax(curV, accV, curV.size)
+                    }
+                    copyCurToPending()
+                }
+                is ArcOp.EmitPending -> {
+                    feedEncoder(pendY, pendU, pendV, op.ptsUs)
+                    countOutput(1)
+                    // 每出一帧抽一次编码器：硬件编码器输入缓冲有限，不抽干可能让下一帧等不到空位
+                    drainEncoder(false)
+                }
+            }
+        }
+    }
+
+    /** cur 平面整段拷进 acc（fresh 累积：清掉上一轮残留，整帧替换） */
+    private fun copyCurToAcc() {
+        System.arraycopy(curY, 0, accY, 0, curY.size)
+        System.arraycopy(curU, 0, accU, 0, curU.size)
+        System.arraycopy(curV, 0, accV, 0, curV.size)
+    }
+
+    /** cur 平面整段拷进 pending（滞留待发；零分配） */
+    private fun copyCurToPending() {
+        System.arraycopy(curY, 0, pendY, 0, curY.size)
+        System.arraycopy(curU, 0, pendU, 0, curU.size)
+        System.arraycopy(curV, 0, pendV, 0, curV.size)
+    }
+
+    // endregion
+
+    /**
+     * 把指定平面（[y]/[u]/[v]）写进编码器输入缓冲，并显式附上 [ptsUs]。
      *
      * **为什么必须逐帧显式给 PTS（本缺陷的修复点）**：旧实现用 `Surface.lockCanvas()` 往编码输入面
      * 画帧，时间戳由输入面生产者按系统墙钟生成、代码无法干预；真机 1.875s 素材 CPU 处理了 41s，
      * 容器里就被写成 21 倍慢放（帧步长 0.93s）。改成 `queueInputBuffer(…, ptsUs, 0)` 后时间戳完全
-     * 由调用方掌控，与 GPU 路线同一口径。
+     * 由调用方掌控，与 GPU 路线同一口径。v2 里 PTS 一律是均匀目标帧率步长（第 j 帧 = j/dstFps）。
      */
-    private fun feedEncoder(ptsUs: Long, blend: Boolean) {
+    private fun feedEncoder(y: ByteArray, u: ByteArray, v: ByteArray, ptsUs: Long) {
         val enc = vEnc ?: throw ArcFail(ArcRepairError.ENCODER)
         val idx = awaitEncoderInput(enc)
         if (idx < 0) {
-            Log.e(TAG_ARC, "等不到空闲编码器输入缓冲，pts=$ptsUs blend=$blend")
+            Log.e(TAG_ARC, "等不到空闲编码器输入缓冲，pts=$ptsUs")
             throw ArcFail(ArcRepairError.CPU_FEED)
-        }
-        // blend=true 时先逐平面算 0.5 平均（mid 为中间量），否则直接写当前帧平面
-        val y: ByteArray
-        val u: ByteArray
-        val v: ByteArray
-        if (blend) {
-            ArcRepairBlend.average(prevY, curY, midY, curY.size)
-            ArcRepairBlend.average(prevU, curU, midU, curU.size)
-            ArcRepairBlend.average(prevV, curV, midV, curV.size)
-            y = midY
-            u = midU
-            v = midV
-        } else {
-            y = curY
-            u = curU
-            v = curV
         }
         val buf = try {
             enc.getInputBuffer(idx)
@@ -795,7 +885,7 @@ private class ArcRepairSession(
         }
     }
 
-    /** 每真正输出一帧就 +1 并刷新进度（总输出帧数 = 2N−1，见 [ArcRepairPlan]） */
+    /** 每发出一枚保留帧就 +1 并刷新进度（总输出帧数 = 保留帧数，见 [ArcRepairPlan]） */
     private fun countOutput(n: Int) {
         outputsDone += n
         onProgress(ArcRepairPlan.progressOf(outputsDone, dstTotal))

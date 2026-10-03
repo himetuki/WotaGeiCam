@@ -12,13 +12,16 @@
     <string name="player_zoom_badge">x%1$.2f</string>
     <string name="player_error">播放失败，文件可能已损坏或格式不支持</string>
 
-    <!-- 光弧修复（用户需求第 7 项：可选按钮，绝不自动；GPU/CPU 二选一，后台处理不阻塞播放） -->
+    <!-- 光弧修复（用户需求第 7 项 v2 抽帧+补弧口径：可选按钮，绝不自动；先选目标帧率，GPU/CPU 二选一） -->
     <string name="player_arc_repair">光弧修复</string>
+    <string name="player_arc_target">目标帧率</string>
+    <string name="player_arc_fps">%1$d fps</string>
     <string name="player_arc_gpu">GPU 加速</string>
     <string name="player_arc_cpu">纯 CPU</string>
-    <string name="player_arc_note">后台处理，完成后生成新视频，不改原片；耗时随片长与所选方式变化</string>
+    <string name="player_arc_note">抽掉多余帧转到所选帧率，被抽帧的画面并入前后帧保持光弧连贯；后台处理生成新视频，不改原片</string>
     <string name="player_arc_done">修复完成，已存入相册</string>
     <string name="player_arc_failed">修复失败</string>
+    <string name="player_arc_no_need">源帧率不高于目标帧率，没有帧可抽</string>
     <string name="player_arc_running">修复中 %1$d%%</string>
     <string name="player_arc_busy">已有修复任务在跑</string>
 
