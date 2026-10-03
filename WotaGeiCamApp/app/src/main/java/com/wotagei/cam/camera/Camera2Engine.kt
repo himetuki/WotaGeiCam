@@ -681,7 +681,10 @@ class Camera2Engine(
             if (writeBack) {
                 // 总线保持用户档位（24 就是 24），不可用固定范围时用 exact 标记「※」
                 writeBackFps(target, normal.exact)
-                clampShutterToFrame(normal.hi)
+                // 帧周期钳制吃**范围下界**（2026-10-04 r26 与 r10/r11 同源）：lo=档位（[24,30] 的
+                // lo=24），1/24 的 41.67ms 在合法域 [1/30, 1/24] 内不再被 hi=30 钳回 1/30——
+                // 旧口径在回写时就把强制档改写掉，r10 的下发修正根本见不到 1/24
+                clampShutterToFrame(normal.lo)
             }
             return
         }
@@ -693,7 +696,7 @@ class Camera2Engine(
             Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围，退到 $ceiling")
             publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)
             writeBackFps(ceiling, fallback.exact)
-            clampShutterToFrame(fallback.hi)
+            clampShutterToFrame(fallback.lo)
             if (device != null) publishDevice(DeviceStatus.OPEN_SUCCEED)
         }
     }
