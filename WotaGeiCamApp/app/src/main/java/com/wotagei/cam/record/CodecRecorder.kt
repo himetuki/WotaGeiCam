@@ -696,7 +696,9 @@ class CodecRecorder(
             return
         }
         heldPkt = null
-        if (pkt.data.size == AudioFeeder.EOS_SIZE) {
+        // EOS 判定看 pts<0（真实包的时间戳恒为 nanoTime µs、恒正）：哨兵 data 恰 4 字节
+        // 与「双声道 2 帧的合法短读」同形，只看长度会把真 PCM 误判成 EOS 提前掐断音轨
+        if (pkt.ptsUs < 0 || pkt.data.size == AudioFeeder.EOS_SIZE) {
             queueEosOn(codec, idx, eosPts())
             return
         }
