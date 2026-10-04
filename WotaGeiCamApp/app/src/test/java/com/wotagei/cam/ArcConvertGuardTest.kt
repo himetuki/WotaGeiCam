@@ -95,4 +95,34 @@ class ArcConvertGuardTest {
             recorder.contains("arcConvert")
         )
     }
+
+    @Test
+    fun `档位接线与改名回查在位`() {
+        // 判定必须锁函数体（bodyOf）：整文件 contains 会被字段声明行
+        //（arcRule = ArcKeepRule(slotNs = 0L)）与辅助函数定义行自身满足——
+        // 删掉修复行后测试照样绿，那正是守卫要杜绝的假绿
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val setBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "setArcConvert"))
+        assertTrue(
+            "setArcConvert 必须在体内重建 ArcKeepRule 接入档位（slotNs 只构造不赋值 = 恒 0 = " +
+                "onFrame 恒真 = 抽帧整条失效而 PTS 照 dstFps 盖，成片时长被压缩）",
+            setBody.contains("ArcKeepRule(slotNs = if")
+        )
+        assertTrue(
+            "GL 实测源帧率必须四舍五入（截断把 29.97 打成 29，与修复路中位数四舍五入的前缀分叉）",
+            engine.contains("+ spanNs / 2) / spanNs")
+        )
+        val screen = maskedMain("ui/CameraScreen.kt")
+        assertFalse(
+            "setArcConvert 不得按「本段有转换」条件下发（引擎侧模式账不随停录自清，" +
+                "关掉转换后的录制会被上段残留模式暗改且无 sidecar 无前缀）",
+            screen.contains("if (profile.arcConvert != null)")
+        )
+        val stopBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(screen, "stopInternal"))
+        assertTrue(
+            "改名后必须在收尾体内回查真实 DISPLAY_NAME（MediaStore 撞名自行加序号仍报成功，" +
+                "拼装名与 sidecar 落点会分叉；只定义不调用等于没修）",
+            stopBody.contains("queryDisplayName(uri)")
+        )
+    }
 }

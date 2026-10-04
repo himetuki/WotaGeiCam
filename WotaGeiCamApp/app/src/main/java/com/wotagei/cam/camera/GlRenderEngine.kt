@@ -469,8 +469,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (released.get()) return
         postGl {
             arcConvert = mode?.takeIf { dstFps > 0 }
-            arcDstFps = dstFps
-            arcRule.reset()
+            // 档位与模式成对清零：mode 关掉后 arcDstFps 残留，编码面重挂处会拿旧值重建状态机
+            arcDstFps = if (arcConvert != null) dstFps else 0
+            // 档位必须在这里接进规则（ArcKeepRule.slotNs 是构造期 val，只 reset 不换实例）：
+            // slotNs 恒 0 → onFrame 恒真 → 抽帧整条失效，而 PTS/位次账按 dstFps 照跑，
+            // 成片时长被压缩、音画错位。自 7812e16 功能落地起就没接过线，2026-10-04 审计修复。
+            arcRule = ArcKeepRule(slotNs = if (arcConvert != null) 1_000_000_000L / dstFps else 0L)
             arcFlow = ArcRepairFlow(dstFps)
             synchronized(arcDropsLock) { arcDrops.clear() }
             arcMendPass?.release()
@@ -512,7 +516,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val frames = arcSrcFrames
         val spanNs = last - first
         if (frames < 2 || spanNs <= 0L) return 0
-        return (((frames - 1L) * 1_000_000_000L / spanNs).toInt()).coerceIn(1, 480)
+        // 四舍五入，与 ArcRateProbe.measuredFps（帧距中位数路）同一取整口径：
+        // 29.97fps 源在录制路才不会被打成 29，两条路对同一传感器给出的前缀一致
+        return (((frames - 1L) * 1_000_000_000L + spanNs / 2) / spanNs).toInt().coerceIn(1, 480)
     }
 
     /** 取走被抽帧位次账（录制收尾写 sidecar 用；取走即清空） */
