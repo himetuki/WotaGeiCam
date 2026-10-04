@@ -84,6 +84,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -191,7 +192,9 @@ fun rememberPlayerEngine(): PlayerEngine {
  * surface 类型只能通过 XML 的 app:surface_type 指定——本工程经 `view_player_surface.xml`
  * 指定为 texture_view，10-01 起弃默认 surface_view，理由见该 XML 与 factory 内注释）。
  * RESIZE_MODE_FIT 等价于旧的「保持宽高比」，超出部分由外层 graphicsLayer 缩放；
- * [mirror] 是同一层 graphicsLayer 上的水平翻转（scaleX 取负），与缩放正确复合。
+ * [mirror] 是同一层 graphicsLayer 上的水平翻转（scaleX 取负），与缩放正确复合；
+ * [pan] 是同一层上的双指平移量（px，父坐标），与缩放/镜像复合；绘制点按当帧图层尺寸经
+ * [clampPan] 兜底重夹，视口变化（自持旋转等）后的陈旧 pan 不会把画面拖出黑边。
  */
 // InflateParams 是有意为之：AndroidView 的 factory 里 root 必须为 null——
 // Compose 自己量尺寸并施加 LayoutParams，挂了 parent 反而带进错误的 LayoutParams
@@ -201,6 +204,7 @@ fun WotaPlayerSurface(
     engine: PlayerEngine,
     modifier: Modifier = Modifier,
     scale: Float = 1f,
+    pan: Offset = Offset.Zero,
     mirror: Boolean = false
 ) {
     AndroidView(
@@ -209,6 +213,18 @@ fun WotaPlayerSurface(
             // TextureView（见 factory）是普通 View，这类变换跨驱动确定；SurfaceView 做不到
             scaleX = if (mirror) -scale else scale
             scaleY = scale
+            // 双指平移（缩放同一手势）：translation 在 scale 之后按父坐标应用，不受 scaleX
+            // 取负影响——镜像开着时拖动方向依然是手的方向。
+            // 绘制点兜底重夹（P2，2026-10-04）：pan 态只在双指手势事件内被夹取，而本工程
+            // manifest 自持旋转（configChanges 不重建 Activity），旋转/分栏宽度变化后 viewport
+            // 变了、remember 的 pan 原样存活——仅靠手势夹取会露出最多半域差的底色条，直到
+            // 下一次捏合。这里用 graphicsLayer 自身 size（=调用方手势 Box 的当帧实际视口）再过
+            // 一次 clampPan，任何一帧的可见平移恒在域内，不依赖下一次手势；真源仍是 clampPan。
+            // 防退化点：删掉这行 clampPan 不会有任何 JVM 测试变红——graphicsLayer 的绘制期
+            // 行为属设备渲染路径，JVM 单测桩测不到，只能真机旋转验收实证
+            val p = clampPan(pan, scale, size)
+            translationX = p.x
+            translationY = p.y
         },
         factory = { ctx ->
             // 面从默认 SurfaceView 换成 TextureView（app:surface_type="texture_view"）：
@@ -296,6 +312,8 @@ fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var banner by remember { mutableStateOf<Int?>(null) }
     val zoom = remember { mutableStateOf(1f) }
+    // 双指平移（2026-10-04）：与缩放同一手势，域由 pinchZoom 内 clampPan 夹住，捏回 1x 自动归零
+    val pan = remember { mutableStateOf(Offset.Zero) }
     var dragFrac by remember { mutableStateOf<Float?>(null) }
     var tagDialog by remember { mutableStateOf(false) }
     var purgeDialog by remember { mutableStateOf(false) }
@@ -362,7 +380,7 @@ fun PlayerScreen(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .pinchZoom(zoom)
+                    .pinchZoom(zoom, pan)
                     .pointerInput(Unit) {
                         // 只注册 onTap：双击由 TapArbiter 自己判，避免库的延迟语义与挂起定时器打架
                         detectTapGestures(onTap = {
@@ -381,7 +399,7 @@ fun PlayerScreen(
                         })
                     }
             ) {
-                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value, mirror = mirrored)
+                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value, pan = pan.value, mirror = mirrored)
                 // 转圈只代表"还没画面"：IDLE（未起播）与 BUFFERING（缓冲中）。
                 // STATE_ENDED 是播完停在末帧，不是加载——判据漏了它就会在播完那一刻
                 // 凭空转圈且不消失（用户 2026-10-01 反馈的"播完后出现加载动画"即此）；
@@ -1024,26 +1042,58 @@ private fun PlayerTopBar(
 
 // region 手势与进度条
 
-/** 双指缩放 0.1..4x（用户 2026-10-03 裁决：下限从 0.1x 起，缩小也是合法观感）：
- *  只在第二指按下后才消费，单指滑动不消费（因此画面滑动不会 seek）。
+/**
+ * 平移夹取：平移域=仅放大态，逐轴 `±视口×(s−1)/2`——放大后的画面恒盖住视口，拖不出黑边；
+ * s≤1 时域为 0（自然禁用），捏回 1x 的过程中平移随夹取连续归零，无需专门复位动作。
+ * half≤0 直接给 0：s<1 时 `-half > half` 会让 coerceIn 域倒置抛异常，视口未量出（0）同理。
+ */
+internal fun clampPan(pan: Offset, scale: Float, viewport: Size): Offset =
+    Offset(
+        clampPanAxis(pan.x, viewport.width * (scale - 1f) / 2f),
+        clampPanAxis(pan.y, viewport.height * (scale - 1f) / 2f)
+    )
+
+private fun clampPanAxis(v: Float, half: Float): Float = if (half <= 0f) 0f else v.coerceIn(-half, half)
+
+/** 双指缩放 0.1..4x + 双指平移（用户 2026-10-04 需求）：缩放走双指张合、平移走双指整体位移，
+ *  同一手势并行；平移只在第二指按下后才开始消费——**单指行为零变化**（单击显隐、双击启停、
+ *  画面滑动不 seek 均不受影响）。
  *  提成 internal：对比播放页（#4，用户 2026-09-30 反馈「对比播放没有双指缩放」）复用同一份
- *  手势与同一档上下限，两边各抄一份迟早各改各的。 */
-internal fun Modifier.pinchZoom(zoomState: MutableState<Float>, min: Float = 0.1f, max: Float = 4f): Modifier =
+ *  手势与同一档上下限，两边各抄一份迟早各改各的。[panState] 无默认值必传：漏挂让编译期拦截，
+ *  避免出现"能缩放不能拖"的半实现调用点。 */
+internal fun Modifier.pinchZoom(
+    zoomState: MutableState<Float>,
+    panState: MutableState<Offset>,
+    min: Float = 0.1f,
+    max: Float = 4f
+): Modifier =
     pointerInput(min, max) {
         awaitEachGesture {
             var baseDist = 0f
             var baseZoom = zoomState.value
+            var baseCentroid = Offset.Zero
+            var basePan = panState.value
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val pressed = event.changes.filter { it.pressed }
                 when {
                     pressed.size >= 2 -> {
                         val d = (pressed[0].position - pressed[1].position).getDistance()
+                        val c = (pressed[0].position + pressed[1].position) / 2f
                         if (baseDist <= 0f) {
+                            // 第二指落下那一刻记基准：距离定缩放、质心定平移、平移取当下值
                             baseDist = d
                             baseZoom = zoomState.value
+                            baseCentroid = c
+                            basePan = panState.value
                         } else if (d > 0f) {
-                            zoomState.value = (baseZoom * (d / baseDist)).coerceIn(min, max)
+                            val scale = (baseZoom * (d / baseDist)).coerceIn(min, max)
+                            zoomState.value = scale
+                            panState.value = clampPan(
+                                basePan + (c - baseCentroid),
+                                scale,
+                                Size(size.width.toFloat(), size.height.toFloat())
+                            )
                             event.changes.forEach { it.consume() }
                         }
                     }
