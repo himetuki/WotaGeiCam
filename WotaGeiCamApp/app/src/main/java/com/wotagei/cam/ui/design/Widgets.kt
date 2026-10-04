@@ -173,11 +173,13 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
         // 恢复不能立刻落表：positionInWindow() **现算含祖先 graphicsLayer 位移**，visible 翻转
         // 那一刻滑出位移还没归零（实测写到了 x=-189），而 layer 归零不触发布局回调、coords 的
         // key 也不会变——表会永久停在带位移的位置。轮询到坐标稳定（滑回动画收尾）再写终值。
+        // 上限 40×40ms=1600ms：滑回动画 FLUENT 档 750ms、LIQUID 弹簧更长，24 次的旧上限会
+        // 在动画没走完时用尽、把表停在半路（用户报「动画切换过程中偏移」的一支）。
         var lastX = Long.MIN_VALUE
         var lastY = Long.MIN_VALUE
         var stable = 0
         var attempts = 0
-        while (attempts < 24 && stable < 4) {
+        while (attempts < 40 && stable < 4) {
             val p = c.positionInWindow()
             val size = c.size
             if (p.x.toLong() == lastX && p.y.toLong() == lastY) {
