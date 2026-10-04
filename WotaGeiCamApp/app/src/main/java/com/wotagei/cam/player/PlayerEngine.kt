@@ -334,7 +334,10 @@ class PlayerEngine(private val context: Context) {
     private fun restoreAb(uri: Uri) {
         val sp = prefs()
         val a = sp.getLong(key(KEY_A, uri), -1L)
-        val b = sp.getLong(key(KEY_B, uri), -1L)
+        var b = sp.getLong(key(KEY_B, uri), -1L)
+        // 损坏/旧版本残留的 A>B 数据按 markA 自身的修复口径收整（B ≤ A 即清 B）：
+        // UI 写侧永远造不出 A>B（markB 强制 pos > A），读侧收整后进度条不会画出交叉刻度
+        if (a >= 0 && b >= 0 && b <= a) b = -1L
         val loop = sp.getBoolean(key(KEY_LOOP, uri), false)
         _ab.value = AbRange(a, b, loop && a >= 0 && b > a)
         applyRepeat()

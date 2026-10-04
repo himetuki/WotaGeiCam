@@ -561,7 +561,17 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                 // WotaShape.card 是 Dp 件位值（24dp）不是 Shape，wotaCard 要 Shape 就地包
                                 .wotaCard(RoundedCornerShape(WotaShape.card))
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                // 有衬底的卡片必须自己是命中目标：「左片/右片」标签 Text 与卡片内边距
+                                // 原本不构成命中，点上去会穿透到画面层被当成单击（误切控制层显隐），
+                                // 两下凑成双击还会误启停。空 pointerInput 让整卡进入命中路径；
+                                // 卡内进度条自己的拖动手势在 Main pass 先于容器，不受影响。
+                                // 顶/底两条芯片 Row 不需要这行：horizontalScroll 注入的 scrollable
+                                // 本身就是 pointerInput，整行 bounds 已拦住穿透（芯片之间无缝隙衬底
+                                // 的空当落不到画面层，与浮层芯片设计一致）。
+                                // 防退化点：删掉这行不会有任何 JVM 测试变红——兄弟节点穿透属
+                                // Compose 命中测试路径，JVM 单测桩测不到，真机手动模式点「左片」标签实证。
+                                .pointerInput(Unit) {},
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
