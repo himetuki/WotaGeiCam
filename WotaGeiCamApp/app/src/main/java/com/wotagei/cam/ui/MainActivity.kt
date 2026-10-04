@@ -175,7 +175,9 @@ private fun WotaRoot() {
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) {
                 CameraScreen(
                     onOpenGallery = { nav.navigate(WotaNav.GALLERY) },
-                    onOpenSettings = { nav.navigate(ROUTE_SETTINGS) }
+                    onOpenSettings = { nav.navigate(ROUTE_SETTINGS) },
+                    // 对着左片练回程（2026-10-04 方向 4）：压栈的这枚录制页录完弹回对比页
+                    onPracticeFinish = { nav.popBackStack() }
                 )
             }
         }
@@ -204,7 +206,8 @@ private fun WotaRoot() {
         ) { entry ->
             CompareScreen(
                 leftMediaId = entry.arguments?.getLong(WotaNav.COMPARE_ARG_LEFT) ?: -1L,
-                onBack = { nav.popBackStack() }
+                onBack = { nav.popBackStack() },
+                onPractice = { nav.navigate(ROUTE_CAMERA) }
             )
         }
         composable(ROUTE_SETTINGS) {
