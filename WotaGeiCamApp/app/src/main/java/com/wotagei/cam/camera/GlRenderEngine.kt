@@ -541,16 +541,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 if (!released.get() && arcConvert == ArcConvertMode.MEND && arcFlow.hasPending) {
                     val encoder = encoderEglSurface
                     val mend = arcMendPass
-                    if (encoder != null && mend != null && mend.ready &&
-                        makeCurrent(encoder) && mend.drawPending()
-                    ) {
-                        stampEncoderPresentation(encoder)
-                        if (swap(encoder)) {
-                            val idx = encoderFrameIndex - 1
-                            synchronized(arcDropsLock) {
-                                arcDrops += idx to arcRule.takeDrops()
+                    if (encoder != null && mend != null && mend.ready && makeCurrent(encoder)) {
+                        // EOS 指令序的折叠步（onSourceEos 契约 = fold?→emit）：滞留帧之后还进过
+                        // 被抽帧（hasAcc）必须先并进 pending 再发，否则停录前最后积累的弧光
+                        // 整段丢在 acc 面里；fold 失败只降级成无补弧发出，不拦 emit（少补弧好过整帧丢失）
+                        if (arcFlow.hasAcc && !mend.foldAccIntoPending()) {
+                            Log.w(TAG_GL, "flush 折叠 acc 失败，退化为无补弧发出")
+                        }
+                        if (mend.drawPending()) {
+                            stampEncoderPresentation(encoder)
+                            if (swap(encoder)) {
+                                val idx = (encoderFrameIndex - 1).coerceAtLeast(0)
+                                synchronized(arcDropsLock) {
+                                    arcDrops += idx to arcRule.takeDrops()
+                                }
+                                flushed = 1
                             }
-                            flushed = 1
                         }
                     }
                     arcFlow.onSourceEos()   // 滞留已出，状态机归零；此后到 stop 的来帧自然弃置
@@ -1097,19 +1103,34 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
         // 录制期转换（抽帧/补弧）只动编码支路；预览/霜/上屏各走各的，一帧不丢。
         // skip=true 的帧跳过编码 swap（帧序号不推进 ⇒ 输出节奏均匀）；MEND 通道内部失败会
-        // 把自己降级并返回"需要直通补一帧"，所以这里的直通调用点恒一（FrostEncoderGuard 钉着）。
-        var keep = true
+        // 把自己降级并返回"需要直通补一帧"，所以调用方取反成 skip，直通调用点恒一（FrostEncoderGuard 钉着）。
+        // 转换账（保留判定/位次/实测帧率）只认**新到的相机帧**：状态刷新重画（dirty 无新帧）
+        // 拿旧时间戳再分类一轮会幻记丢弃、双计数源帧（实测前缀被打高）；转换模式下也不许往
+        // 均匀节奏里塞无账重复帧——stateOnly 的效果切换等下一个真帧落地（≤1 档位间隔）。
         var skip = false
-        when (arcConvert) {
-            ArcConvertMode.DROP -> skip = !arcRule.onFrame(lastDrawnTimestampNs)
-            ArcConvertMode.MEND -> {
-                keep = arcRule.onFrame(lastDrawnTimestampNs)
-                skip = drawEncoderMended(keep)
+        if (arcConvert != null) {
+            if (hasFrame) {
+                when (arcConvert) {
+                    ArcConvertMode.DROP -> skip = !arcRule.onFrame(lastDrawnTimestampNs)
+                    ArcConvertMode.MEND -> skip = !drawEncoderMended(arcRule.onFrame(lastDrawnTimestampNs))
+                    else -> Unit
+                }
+                noteArcFrame(lastDrawnTimestampNs)
+            } else {
+                skip = true
             }
-            else -> Unit
         }
-        if (arcConvert != null) noteArcFrame(lastDrawnTimestampNs)
-        if (!skip) drawEncoderPass()
+        if (!skip) {
+            drawEncoderPass()
+            // DROP 的保留帧经直通发出，位次账必须在这里落（与 MEND emit/flush 同一
+            // (输出位次, 丢弃数) 口径）：漏记则 DROP 的 sidecar drops 恒空，立档落空；
+            // 以编码面在位为前提——面已被摘时 drawEncoderPass 是空操作，记账会写假位次
+            if (arcConvert == ArcConvertMode.DROP && encoderEglSurface != null) {
+                synchronized(arcDropsLock) {
+                    arcDrops += (encoderFrameIndex - 1).coerceAtLeast(0) to arcRule.takeDrops()
+                }
+            }
+        }
         // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
         // 不许让它挡在编码器的 swap 前面（那是成片的一帧）
         adoptFrostIntentFromTable()
@@ -1169,9 +1190,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 return true
             }
             if (op is ArcOp.EmitPending) {
-                // 刚发出的输出位次 = 自增前的帧序号；伴随丢弃数在保留判定时已累计
+                // 刚发出的输出位次 = 自增前的帧序号；伴随丢弃数在保留判定时已累计。
+                // 帧号夹下界：frameRate=0 直注时 stamp 不推进序号，裸 -1 会写负位次
                 synchronized(arcDropsLock) {
-                    arcDrops += (encoderFrameIndex - 1) to arcRule.takeDrops()
+                    arcDrops += (encoderFrameIndex - 1).coerceAtLeast(0) to arcRule.takeDrops()
                 }
             }
         }
