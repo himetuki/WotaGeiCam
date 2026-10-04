@@ -157,10 +157,14 @@ class MediaRepo private constructor(private val app: Context) {
         }
 
     private fun queryMediaStore(scope: MediaScope): List<VideoClip> {
+        // IS_PENDING 门：写一半的 pending 记录对 owner 的查询默认可见（只对外部 app 隐藏），
+        // 不挡的话录制中/剪辑导出中回到媒体库，网格里会出现 0 字节幽灵条目，点开是半成品文件；
+        // 「commit 后相册立即可见」由该门 + 完成侧 invalidate 共同成立
+        val pendingGate = "${MediaStore.MediaColumns.IS_PENDING} = 0 AND "
         val selection = if (scope == MediaScope.WotaLibrary) {
-            "MIME_TYPE LIKE ? AND RELATIVE_PATH LIKE ?"
+            "${pendingGate}MIME_TYPE LIKE ? AND RELATIVE_PATH LIKE ?"
         } else {
-            "MIME_TYPE LIKE ?"
+            "${pendingGate}MIME_TYPE LIKE ?"
         }
         val args = if (scope == MediaScope.WotaLibrary) {
             arrayOf("video/%", "%$WOTA_DIR_KEYWORD%")

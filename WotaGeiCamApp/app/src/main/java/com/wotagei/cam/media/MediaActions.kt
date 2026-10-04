@@ -8,6 +8,7 @@ import android.app.RemoteAction
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -95,11 +96,14 @@ class MediaActions private constructor(
             if (rows > 0) {
                 repo.invalidate()
                 // MediaStore 改 DISPLAY_NAME 会连底层文件一起改名：sidecar（被抽帧位次档案）
-                // 必须跟着搬，否则改名后位次档案脱钩（旧名孤儿 + 新片无档案）
+                // 必须跟着搬，否则改名后位次档案脱钩（旧名孤儿 + 新片无档案）。
+                // 撞名时 MediaStore 自行加序号后缀且 update 仍报成功，请求名不可信——
+                // 与录制路（CameraScreen.stopInternal）同口径：回查真实名，回查失败退回请求名
                 if (oldPath != null) withContext(Dispatchers.IO) {
-                    val newName = values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val actualName = queryDisplayName(clip.uri)
+                        ?: values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
                     val dir = oldPath.substringBeforeLast('/', "")
-                    val newPath = if (dir.isEmpty()) newName else "$dir/$newName"
+                    val newPath = if (dir.isEmpty()) actualName else "$dir/$actualName"
                     com.wotagei.cam.record.ArcDropLog.renameFor(oldPath, newPath)
                 }
                 MediaOp.Done
@@ -116,6 +120,13 @@ class MediaActions private constructor(
         val ext = oldName.substringAfterLast('.', "")
         return if (ext.isEmpty() || name.endsWith(".$ext", ignoreCase = true)) name else "$name.$ext"
     }
+
+    /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，拼装名与落盘名可能分叉 */
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        app.contentResolver.query(
+            uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null
+        )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+    }.getOrNull()
 
     // endregion
 
@@ -234,7 +245,17 @@ class MediaActions private constructor(
             }
             if (err == null) {
                 // 连带删被抽帧位次 sidecar（2026-10-03 定版：sidecar 随视频生命周期走，不留残留）
-                clip.dataPath?.let { com.wotagei.cam.record.ArcDropLog.deleteFor(it) }
+                clip.dataPath?.let { p ->
+                    com.wotagei.cam.record.ArcDropLog.deleteFor(p)
+                    // API 30+ 系统回收站会把底层文件改名成 .trashed-<ts>-<原名>（DATA 列跟着变），
+                    // 而 sidecar 仍挂在原显示名下：按目录+原名补删一次，否则「回收站→彻底删除」
+                    // 留下孤儿档案；非回收站项两者同路径，不进这支
+                    if (clip.isTrashed) {
+                        val dir = p.substringBeforeLast('/', "")
+                        val originPath = if (dir.isEmpty()) clip.name else "$dir/${clip.name}"
+                        if (originPath != p) com.wotagei.cam.record.ArcDropLog.deleteFor(originPath)
+                    }
+                }
                 done += clip
                 continue
             }
