@@ -214,16 +214,17 @@ fun CurvePopup(
                             Box(
                                 Modifier
                                     .matchParentSize()
-                                    // key 只留 gpuMode：channel 变化会重启手势监听，换通道瞬间
-                                    // 的按压会被吞；层内状态全走 rememberUpdatedState 的 livePoints
-                                    .pointerInput(gpuMode) {
+                                    // key **必须含 channel**：手势闭包捕获的 points/selected/commit
+                                    // 都绑定在 remember(channel) 的 state 实例上，channel 换了而监听
+                                    // 不重启，拖动会写进旧通道的旧 state——总线被写（画面变）而画布
+                                    // 不动（显示绑的是新 state），正是用户报的「能调、画面变、曲线不动」
+                                    // （59931ab 把 channel 从 key 里去掉引入，2026-10-04 真机复现归因）。
+                                    // 代价是换通道瞬间的一次按压会被重启吞掉——点通道钮与画布操作
+                                    // 本就不同指不同时，这个代价远小于写错通道
+                                    .pointerInput(channel, gpuMode) {
                                         if (!gpuMode) return@pointerInput
                                         awaitEachGesture {
                                             val down = awaitFirstDown(requireUnconsumed = false)
-                                            android.util.Log.i(
-                                                "CurveDbg",
-                                                "canvas down pos=${down.position} consumed=${down.isConsumed}"
-                                            )
                                             // 扇面认领过的按压整手忽略：那一指属于通道钮，不在画布落点
                                             if (down.isConsumed) return@awaitEachGesture
                                             // 点画布**不再收扇**（用户 2026-10-04）：点卫星钮稍有偏差落在
