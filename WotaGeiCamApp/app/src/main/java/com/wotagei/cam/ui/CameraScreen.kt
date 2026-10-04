@@ -78,6 +78,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
@@ -1070,14 +1071,18 @@ fun CameraScreen(
                     val target = if (docksOut) 1f else 0f
                     if (dockSlide.value != target) dockSlide.animateTo(target, dockSlideMotion.float)
                 }
-                // 完全出屏的账 = 卡片实测宽 + 起始边那枚设计留白（两枚 Dock 同一令牌）
+                // 完全出屏的账：以**实测窗口缘**为锚——左 Dock 平移「卡片右缘 + 一枚设计留白」、
+                // 右 Dock 平移「窗口宽 − 卡片左缘 + 同一枚」。不再用“槽起点 8dp + 卡宽”反推：
+                // 霜板实际绘制宽含内边距账，反推量恒少一截，滑出后右缘永远留 ~20dp 残段压弹窗
+                // （2026-10-04 真机取证：残影 3 秒落定后仍在，非动画未完）。
                 val hudEdgePadPx = with(hudDensity) { HudEdgePad.toPx() }
+                val hudRootView = LocalView.current.rootView
                 HudZoneBox(
                     zone = HudZone.LEFT,
                     placement = placementOf(HudZone.LEFT),
                     // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
                     area = leftArea,
-                    shiftXPx = { -dockSlide.value * ((zoneRects[HudZone.LEFT] ?: IntRect.Zero).width + hudEdgePadPx) },
+                    shiftXPx = { -dockSlide.value * ((zoneRects[HudZone.LEFT] ?: IntRect.Zero).right.coerceAtLeast(0) + hudEdgePadPx) },
                     nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
                     onCardRect = { putCardRect(HudZone.LEFT, it) }
                 ) {
@@ -1098,7 +1103,7 @@ fun CameraScreen(
                     zone = HudZone.RIGHT,
                     placement = placementOf(HudZone.RIGHT),
                     area = rightArea,
-                    shiftXPx = { dockSlide.value * ((zoneRects[HudZone.RIGHT] ?: IntRect.Zero).width + hudEdgePadPx) },
+                    shiftXPx = { dockSlide.value * ((hudRootView.width - (zoneRects[HudZone.RIGHT] ?: IntRect.Zero).left.coerceAtLeast(0)) + hudEdgePadPx) },
                     nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                     onCardRect = { putCardRect(HudZone.RIGHT, it) }
                 ) {
