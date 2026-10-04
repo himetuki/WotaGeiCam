@@ -148,12 +148,14 @@
     <string name="cam_pk_red">红</string>
 
     <!-- RGB 曲线（2026-10-03 换装左侧小弹窗后仅剩通道名与重置两用语；
-         title/tip/del_point/reset_ch/custom/points_limit 随 CurveSheet 大底板一并废弃） -->
+         title/tip/del_point/reset_ch/custom/points_limit 随 CurveSheet 大底板一并废弃。
+         2026-10-04 二次改版：径向扇面移除（用户点不动小钮），点圆钮循环换通道、长按复位） -->
     <string name="cam_curve_ch_master">白</string>
     <string name="cam_curve_ch_red">红</string>
     <string name="cam_curve_ch_green">绿</string>
     <string name="cam_curve_ch_blue">蓝</string>
     <string name="cam_curve_reset_all">全部复位</string>
+    <string name="cam_curve_hint">点圆钮换通道 · 长按复位</string>
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案） -->
     <string name="cam_record_saved">已保存，时长 %1$s</string>
