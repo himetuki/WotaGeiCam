@@ -125,4 +125,66 @@ class ArcConvertGuardTest {
             stopBody.contains("queryDisplayName(uri)")
         )
     }
+
+    @Test
+    fun `MEND 返回极性取反与 flush 折叠步在位`() {
+        // 与上条同理锁函数体：整文件 contains 会被 drawEncoderMended 的声明/KDoc 自身满足，
+        // 锁住 drawFrame 体内才测得出调用点的极性
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val frameBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "drawFrame"))
+        assertTrue(
+            "drawFrame 的 MEND 支路必须取反 drawEncoderMended 返回值（契约：true=已降级需直通补发、" +
+                "false=已处理。直赋 skip 会把已处理帧当跳过再直通一遍——MEND 抽帧整条失效、成片时长" +
+                "膨胀音画错位；把降级帧当跳过则丢掉直通补发）",
+            frameBody.contains("skip = !drawEncoderMended(")
+        )
+        assertFalse(
+            "drawFrame 不许把 drawEncoderMended 返回值直赋 skip（极性反 = 每源帧双编一帧，见上条）",
+            frameBody.contains("skip = drawEncoderMended(")
+        )
+        assertTrue(
+            "转换账（保留判定/位次/实测帧率）必须只在新相机帧上进（无新帧的状态重画拿旧时间戳" +
+                "重复分类 = 幻记丢弃、源帧双计数、实测前缀偏高）",
+            frameBody.contains("if (hasFrame)")
+        )
+        assertTrue(
+            "转换模式下无新帧的重画必须跳过编码 pass（往均匀节奏塞无账重复帧 = 位次账错位）",
+            frameBody.contains("skip = true")
+        )
+        val flushBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "flushArcPending"))
+        assertTrue(
+            "flushArcPending 发 pending 前必须先折叠 acc（onSourceEos 契约 = fold?→emit；漏 fold " +
+                "= 停录前最后积累的补弧光整段丢在 acc 面）",
+            flushBody.contains("foldAccIntoPending()")
+        )
+    }
+
+    @Test
+    fun `DROP 位次账与帧号下界在位`() {
+        // 记账配对在 GL 侧、JVM 不可测：锁三处记账点的函数体形态，删行/改形即红
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val frameBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "drawFrame"))
+        assertTrue(
+            "DROP 保留帧直通发出后必须落位次账（与 MEND emit 同一 (输出位次, 丢弃数) 口径；" +
+                "漏记则 DROP 的 sidecar drops 恒空，被抽帧位次立档落空）",
+            frameBody.contains(
+                "arcDrops += (encoderFrameIndex - 1).coerceAtLeast(0) to arcRule.takeDrops()"
+            )
+        )
+        assertTrue(
+            "DROP 记账必须以编码面在位为前提（面已被摘时 drawEncoderPass 是空操作，" +
+                "记账会写入从未发出的假位次）",
+            frameBody.contains("encoderEglSurface != null")
+        )
+        val mendBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "drawEncoderMended"))
+        assertTrue(
+            "MEND emit 位次账帧号必须夹下界（frameRate=0 直注时 stamp 不推进序号，裸 -1 出负位次）",
+            mendBody.contains("coerceAtLeast(0)")
+        )
+        val flushBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "flushArcPending"))
+        assertTrue(
+            "flush 位次账帧号必须夹下界（同上）",
+            flushBody.contains("coerceAtLeast(0)")
+        )
+    }
 }
