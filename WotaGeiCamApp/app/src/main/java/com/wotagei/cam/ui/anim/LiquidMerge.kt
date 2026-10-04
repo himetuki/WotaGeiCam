@@ -635,7 +635,10 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     val live = HudFrost.live
     val intent = HudFrost.intent
     val frostSlot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
-    val frostLast = remember { FloatArray(4) }
+    // 比对缓存：left/top/w/h + **窗口原点 x/y**（六元）。原点必须进比对——页面往返/沉浸切换
+    // 会平移节点窗口位置而局部几何不变，漏比它就是「GL 板留在旧位置与 fill 分离」
+    // （2026-10-04 真机 56px 分离实证）
+    val frostLast = remember { FloatArray(6) }
     val frostOriginPx = remember { FloatArray(2) }
     val frostAlpha = frostScrimAlphaFor(HudInkLevel.SECONDARY)
     DisposableEffect(frostSlot) {
@@ -662,12 +665,21 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val top = DockShell.insetPx(boxH, h)
             if (intent && frostSlot >= 0) {
                 // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
-                // 只有轮廓真的动了才重报
-                if (frostLast[0] != left || frostLast[1] != top || frostLast[2] != w || frostLast[3] != h) {
+                // 只有轮廓真的动了才重报。⚠ 比对必须**含窗口原点**（frostOriginPx）：
+                // left/top/w/h 是节点局部量，页面往返/沉浸切换时节点窗口原点会平移而局部几何
+                // 一字不变——只比局部量就会漏报，GL 板永久停在旧窗口位置、与 Compose fill
+                // 错开整整一个状态栏高度（2026-10-04 用户报「底栏两层分离」的根因，56px 实测）
+                val ox = frostOriginPx[0]
+                val oy = frostOriginPx[1]
+                if (frostLast[0] != left || frostLast[1] != top || frostLast[2] != w || frostLast[3] != h ||
+                    frostLast[4] != ox || frostLast[5] != oy
+                ) {
                     frostLast[0] = left
                     frostLast[1] = top
                     frostLast[2] = w
                     frostLast[3] = h
+                    frostLast[4] = ox
+                    frostLast[5] = oy
                     HudFrost.refreshHeader()
                     FrostCardTable.writeCard(
                         slot = frostSlot,
