@@ -1086,6 +1086,18 @@ internal fun Modifier.pinchZoom(
                             baseZoom = zoomState.value
                             baseCentroid = c
                             basePan = panState.value
+                            // 落下即消费本枚事件：静置双指 touch（按下→抬起零移动）的 down/up
+                            // 若全程无 consumed 变更，Main pass 的 detectTapGestures 会把它判成
+                            // 一次单击——幽灵 tap（控制层误显隐 / 经 TapArbiter 误启停）。
+                            // 此处消费后 tap 观察在该事件即取消，与"有移动时首个 move 消费"
+                            // 的取消时点同效；后续 move 的消费仍由 d>0f 分支承担，逻辑不变；
+                            // 第一指的 up（pressed.size 回落 1，走 else 分支）不消费也不受影响
+                            // ——tap 早在本枚已被判死。单指路径不经本分支，零影响。
+                            // 防退化点：删掉这行 consume 不会有任何 JVM 测试变红——指针消费
+                            // 时序属设备输入路径，JVM 单测桩测不到，只能真机验收实证：
+                            // 静置双指按下即抬起，控制层显隐不得切换、播放不得启停（单播放页
+                            // 与对比页两处 pinchZoom 调用点各验一遍）。
+                            event.changes.forEach { it.consume() }
                         } else if (d > 0f) {
                             val scale = (baseZoom * (d / baseDist)).coerceIn(min, max)
                             zoomState.value = scale
