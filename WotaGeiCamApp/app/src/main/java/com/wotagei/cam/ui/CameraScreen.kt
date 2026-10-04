@@ -1092,7 +1092,8 @@ fun CameraScreen(
                         hudCtx,
                         zoneBandHeight(HudZone.LEFT, leftArea),
                         // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
-                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan)
+                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan),
+                        frostVisible = !docksOut
                     )
                 }
                 // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
@@ -1112,7 +1113,8 @@ fun CameraScreen(
                         hudLayout.gridItems(HudZone.RIGHT, gridPlan),
                         hudCtx,
                         zoneBandHeight(HudZone.RIGHT, rightArea),
-                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
+                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan),   // #80 锚定与预留的唯一来源
+                        frostVisible = !docksOut
                     )
                 }
                 // READOUT/底栏/码率 chip 维持与面板互斥的硬卸载：读数与快门在录制语义里本就不该

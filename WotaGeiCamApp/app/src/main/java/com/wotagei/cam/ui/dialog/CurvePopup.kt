@@ -2,10 +2,7 @@ package com.wotagei.cam.ui.dialog
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -17,14 +14,17 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,7 +39,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
@@ -57,21 +56,19 @@ import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
-import kotlinx.coroutines.delay
-import kotlin.math.cos
-import kotlin.math.sin
 
 /**
  * RGB 曲线**左侧小弹窗**（原 CurveSheet 大底板的换装，需求「边调曲线边看预览」批）。
  *
  * - 面板里**只有曲线框**：标题/副标题/通道胶囊行/色调档行/计数全部退场（色调档按用户裁决整个
- *   移除，[CurvePreset] 连同枚举一并删除）；「重置（回原图默认）」收进扇面当第五枚小钮。
- * - 通道选择是**径向菜单**：当前通道合成一枚圆钮，住在面板卡左侧的**专用槽**里（2026-10-04
- *   不重叠改版——原先钉在曲线框左缘内，圆环永久压住绘图区，用户点名修掉）；点开后四通道＋重置
- *   五枚小钮朝**右**半扇逐枚弹出（朝左出屏，这是几何约束不是口味），扫过画布属瞬态、选中即收回；
- *   中心钮再点一次也是收回。
- * - 弹窗本体是一枚**面板卡**（surface 底 + 描边 + 圆角），左缘在安全区外再加 [PanelBreath]
- *   呼吸——不再贴死屏缘（同日投诉"弹窗不够完整"的另一半：裸框贴边 + Dock 滑出残段叠压）。
+ *   移除，[CurvePreset] 连同枚举一并删除）。
+ * - 通道选择（2026-10-04 二次改版）：**点通道钮循环换通道**（白→红→绿→蓝→白）、**长按复位全部**。
+ *   初版是径向扇面（中心钮开扇＋五枚小钮错峰展开），真机上用户点小钮永远点空（展开动画期点
+ *   最终位落空、点空又落在画布上触发收扇），两段式瞄准太重——用户点名「轻易通过点击切换通道
+ *   或重置」⇒ 收敛为一颗钮两个手势，面板顶部一行小字写明用法。
+ * - 通道钮住在面板卡左侧的**专用槽**里（同日投诉"通道切换按钮与曲线框重叠"的落点），闭合态与
+ *   曲线绘图区零重叠；面板底/描边让弹窗读起来是一枚完整浮层，屏缘再留呼吸留白（同日投诉
+ *   "弹窗不够完整"的另一半：裸框贴边 + Dock 滑出残段叠压）。
  * - 删控制点不再占按钮位：**选中后再点一次同一点＝删点**（端点不可删），点错用重置兜底。
  * - 边拖边写参数总线、抬手落盘的口径不变；CPU 渲染档整块置灰不可拖（提示改由打开入口的
  *   提示条承担，弹窗里没有副标题位）。
@@ -95,9 +92,8 @@ fun CurvePopup(
         stringResource(R.string.cam_curve_ch_green),
         stringResource(R.string.cam_curve_ch_blue)
     )
-    val resetLabel = stringResource(R.string.cam_curve_reset_all)
+    val hint = stringResource(R.string.cam_curve_hint)
     var channel by remember { mutableStateOf(ColorCurve.CHANNEL_MASTER) }
-    var fanOpen by remember { mutableStateOf(false) }
 
     // 本通道的编辑态：只在换通道时重建。points 绝不能进 pointerInput 的 key——
     // 拖动每帧都在改 points，一改 key 手势就被重启，曲线会「拖不住」
@@ -111,6 +107,19 @@ fun CurvePopup(
         val merged = params.curve.value.withCurve(channel, asCurve(next))
         params.curve.value = merged
         if (persist) WotaSettings.setCurveStack(prefs, merged)
+    }
+
+    /** 点中心钮 = 循环换通道（白→红→绿→蓝→白）；换通道即换编辑态，不落盘（拖动/复位才落） */
+    fun cycleChannel() {
+        val next = when (channel) {
+            ColorCurve.CHANNEL_MASTER -> ColorCurve.CHANNEL_RED
+            ColorCurve.CHANNEL_RED -> ColorCurve.CHANNEL_GREEN
+            ColorCurve.CHANNEL_GREEN -> ColorCurve.CHANNEL_BLUE
+            else -> ColorCurve.CHANNEL_MASTER
+        }
+        channel = next
+        points = CurveEdit.pointsOf(params.curve.value.curveOf(next))
+        selected = -1
     }
 
     // 「重置」＝四通道全部回恒等（原图默认）；原面板「重置通道/重置全部」两枚合并成这一枚
@@ -164,12 +173,12 @@ fun CurvePopup(
                             maxHeight - PopupMargin.dp * 2
                         )
                     )
-                    // 面板卡 = [扇钮左槽 | 曲线框]：通道钮有了自己的格子，闭合态与曲线绘图区零重叠
-                    // （用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/描边让弹窗读起来
-                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸。
-                    // 叠层顺序刻意反直觉：曲线框先声明（画在下），扇钮后声明（画在上）——展开时朝右
-                    // 扫进画布区的小钮必须可见，反过来就会被曲线框整块盖掉（真机复验踩实过）。
-                    Box(
+                    // 面板卡 = 提示行 + [通道钮左槽 | 曲线框]：通道钮有自己的格子，闭合态与曲线
+                    // 绘图区零重叠（用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/
+                    // 描边让弹窗读起来是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸。
+                    // 叠层顺序刻意反直觉：曲线框先声明（画在下），通道钮后声明（画在上）——
+                    // 通道钮叠在槽内、不扫进画布，这里 z 序只保证钮的描边完整显示。
+                    Column(
                         Modifier
                             .clip(RoundedCornerShape(WotaShape.menu))
                             .background(WotaColor.surface.copy(alpha = 0.97f))
@@ -191,7 +200,16 @@ fun CurvePopup(
                             }
                             .padding(PanelPad.dp)
                     ) {
-                        // 曲线框：左让出扇钮槽位与缝，先声明居下层
+                        Text(
+                            hint,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = WotaColor.textLo,
+                            maxLines = 1
+                        )
+                        Spacer(Modifier.height(HintGap.dp))
+                        // 画布行内容区（BoxScope）：曲线框偏右让出左槽，通道钮 CenterStart 叠层
+                        Box(Modifier) {
+                        // 曲线框：左让出通道钮槽位与缝，先声明居下层
                         Box(
                             Modifier
                                 .padding(start = (CENTER_SIZE + FanGap).dp)
@@ -205,19 +223,16 @@ fun CurvePopup(
                                 enabled = gpuMode,
                                 modifier = Modifier.matchParentSize()
                             )
-                            Box(
-                                Modifier
-                                    .matchParentSize()
-                                    .pointerInput(channel, gpuMode) {
-                                        if (!gpuMode) return@pointerInput
-                                        awaitEachGesture {
-                                            val down = awaitFirstDown(requireUnconsumed = false)
-                                            // 扇面认领过的按压整手忽略：那一指属于通道钮，不在画布落点
-                                            if (down.isConsumed) return@awaitEachGesture
-                                            // 画布上的任何新按压都先收扇（点扇面外＝收扇），再认领给本层，
-                                            // 底下的关闭捕获层就不会把这一指当成「点外部」
-                                            fanOpen = false
-                                            down.consume()
+                        Box(
+                            Modifier
+                                .matchParentSize()
+                                .pointerInput(channel, gpuMode) {
+                                    if (!gpuMode) return@pointerInput
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        // 通道钮认领过的按压整手忽略：那一指属于通道钮，不在画布落点
+                                        if (down.isConsumed) return@awaitEachGesture
+                                        down.consume()
                                         if (size.width <= 0 || size.height <= 0) return@awaitEachGesture
                                         var working = livePoints.value
                                         val gx = down.position.x / size.width
@@ -268,29 +283,21 @@ fun CurvePopup(
                                 }
                         )
                         }
-                        // 扇钮：居上层，住面板左槽（48dp 恰好占满中心钮），垂直居中于面板
+                        // 通道钮：居上层，住面板左槽（48dp 恰好占满），垂直居中于画布行。
+                        // 点=循环换通道、长按=全部复位（用户 2026-10-04 二次改版：径向扇面点不动，
+                        // 移除五枚小钮，交互收敛到一颗钮上）
                         Box(
                             Modifier
                                 .align(Alignment.CenterStart)
                                 .size(CENTER_SIZE.dp)
                         ) {
-                            ChannelFan(
+                            ChannelButton(
                                 channel = channel,
-                                open = fanOpen,
-                                names = channelNames,
-                                resetLabel = resetLabel,
-                                onToggle = { fanOpen = !fanOpen },
-                                onChannel = { ch ->
-                                    channel = ch
-                                    points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
-                                    selected = -1
-                                    fanOpen = false   // 选完自动收回
-                                },
-                                onReset = {
-                                    resetAll()
-                                    fanOpen = false
-                                }
+                                description = channelNames[channel.coerceIn(0, channelNames.size - 1)],
+                                onCycle = ::cycleChannel,
+                                onReset = ::resetAll
                             )
+                        }
                         }
                     }
             }
@@ -301,16 +308,8 @@ fun CurvePopup(
 
 // ------------------------------------------------------------------ 径向通道菜单
 
-/** 中心钮（当前通道合成钮）边长 */
+/** 通道钮（当前通道合成钮）边长；面板左槽与曲线框的缝以它为基准 */
 private const val CENTER_SIZE = 48
-
-/** 扇面小钮边长 */
-private const val OPTION_SIZE = 40
-
-/** 小钮圆心到中心钮圆心的展开半径：四钮 45° 角距下弦距 ≈49dp，40dp 钮留缝充足 */
-private const val FAN_RADIUS = 64f
-
-/** 中心钮圆心到曲线框左缘的距离常量已废弃：扇钮改住面板左槽（2026-10-04 不重叠改版） */
 
 /** 曲线框设计边长与下限 */
 private const val CurveSide = 200
@@ -322,186 +321,80 @@ private const val PanelPad = 10
 /** 左槽与曲线框的缝 */
 private const val FanGap = 6
 
+/** 提示行与画布行的间距 */
+private const val HintGap = 4
+
 /** 面板左缘在安全区之外的呼吸留白（弹窗不再贴死屏缘，读起来是一枚完整浮层） */
 private const val PanelBreath = 12
 
 /** 弹窗与安全区边缘的呼吸留白 */
 private const val PopupMargin = 12
 
-/** 出场逐枚错峰（毫秒）；收回不 stagger，整扇一起收 */
-private const val FanStaggerMs = 28L
+// ------------------------------------------------------------------ 通道钮（点循环 / 长按复位）
 
 /**
- * 扇面小钮的出场弹簧（过冲后落位，承接参考径向件的「逐枚发出」手感）。
- * 不走 [androidx.compose.animation.core.tween]：时长红线归 MotionSpec 管弹簧没有时长；
- * 减少动效档由调用点按 `motion.durationMs == 0` 直达。
- */
-private val FanSpring = spring<Float>(
-    dampingRatio = 0.6f,
-    stiffness = Spring.StiffnessMediumLow
-)
-
-/**
- * 五枚小钮的方位角（度，0°＝朝画布内即向右）：自上而下＝白、红、绿、蓝、重置。
- * 半圆扇面只朝右开——中心钮贴画布左缘，朝左弹出直接出屏。
- */
-private val FanAngles = floatArrayOf(-90f, -45f, 0f, 45f, 90f)
-
-/**
- * 径向通道菜单：中心钮（当前通道）＋五枚扇出小钮（四通道＋重置）。
- * 宿主是面板卡左侧的 48dp 专用槽（[CENTER_SIZE] 恰好占满），与曲线框不再有布局交叠。
+ * 通道钮：边色＋芯点都取当前通道色，点一下循环换通道（白→红→绿→蓝→白）、长按复位全部。
  *
- * @param onToggle 中心钮点按（开/收扇）
- * @param onChannel 选定通道（调用方负责收扇——「选完自动收回」是需求语义，不在组件里隐藏）
+ * 2026-10-04 二次改版：径向扇面（五枚小钮错峰展开）整组移除——真机上用户点小钮永远点空
+ * （展开动画期点最终位落空、点空又落在画布上触发收扇），且"点中心钮开扇再瞄准 40dp 小钮"
+ * 两段式太重；用户诉求「轻易通过点击切换通道或重置」⇒ 收敛为一颗钮，点/长按两个手势直达。
+ *
+ * @param description 当前通道名（无障碍读出；视觉状态由颜色承担）
  */
 @Composable
-private fun ChannelFan(
+private fun ChannelButton(
     channel: Int,
-    open: Boolean,
-    names: List<String>,
-    resetLabel: String,
-    onToggle: () -> Unit,
-    onChannel: (Int) -> Unit,
+    description: String,
+    onCycle: () -> Unit,
     onReset: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier, contentAlignment = Alignment.Center) {
-        val channelKeys = listOf(
-            ColorCurve.CHANNEL_MASTER, ColorCurve.CHANNEL_RED,
-            ColorCurve.CHANNEL_GREEN, ColorCurve.CHANNEL_BLUE
-        )
-        // 小钮先组合（z 序在下），中心钮最后组合恒在扇面之上；
-        // 小钮用 graphicsLayer 平移/缩放/淡入（MotionSpec 只喂这三类变换的红线）
-        FanAngles.forEachIndexed { i, angle ->
-            val isReset = i == FanAngles.size - 1
-            val key = if (isReset) -1 else channelKeys[i]
-            val label = if (isReset) resetLabel else names[i]
-            FanOption(
-                index = i,
-                angleDeg = angle,
-                open = open,
-                selected = !isReset && channel == key,
-                description = label,
-                onTap = {
-                    when {
-                        isReset -> onReset()
-                        else -> onChannel(key)
-                    }
-                }
-            ) {
-                if (isReset) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = null,
-                        tint = WotaColor.textHi,
-                        modifier = Modifier.size(20.dp)
-                    )
-                } else {
-                    Box(
-                        Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(channelColor(key))
-                    )
-                }
-            }
-        }
-        // 中心钮：边色＋芯点都取当前通道色，开合状态一眼可读
-        val centerDesc = names[channel.coerceIn(0, names.size - 1)]
-        Box(
-            Modifier
-                .semantics { contentDescription = centerDesc }
-                .fanTap(enabled = true, onTap = onToggle)
-                .size(CENTER_SIZE.dp)
-                .clip(CircleShape)
-                .background(WotaColor.bg)
-                .border(2.dp, channelColor(channel), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                Modifier
-                    .size(18.dp)
-                    .clip(CircleShape)
-                    .background(channelColor(channel))
-            )
-        }
-    }
-}
-
-/** 单枚扇面小钮：按 [FanStaggerMs] 错峰弹出、过冲落位，收回整扇齐收 */
-@Composable
-private fun FanOption(
-    index: Int,
-    angleDeg: Float,
-    open: Boolean,
-    selected: Boolean,
-    description: String,
-    onTap: () -> Unit,
-    modifier: Modifier = Modifier,
-    face: @Composable () -> Unit
-) {
-    val motion = LocalMotion.current
-    val frac = remember { Animatable(0f) }
-    LaunchedEffect(open) {
-        val target = if (open) 1f else 0f
-        if (frac.value == target) return@LaunchedEffect
-        if (motion.durationMs == 0) {
-            frac.snapTo(target)
-            return@LaunchedEffect
-        }
-        if (open) delay(FanStaggerMs * index)
-        frac.animateTo(target, FanSpring)
-    }
-    val rad = Math.toRadians(angleDeg.toDouble())
     Box(
         modifier
             .semantics { contentDescription = description }
-            .graphicsLayer {
-                translationX = cos(rad).toFloat() * FAN_RADIUS.dp.toPx() * frac.value
-                translationY = sin(rad).toFloat() * FAN_RADIUS.dp.toPx() * frac.value
-                val s = 0.4f + 0.6f * frac.value
-                scaleX = s
-                scaleY = s
-                alpha = frac.value
-            }
-            // fanTap 必须在 graphicsLayer **内侧**：命中区域跟随视觉平移。挂在外侧时小钮
-            // 画在扇面位置、命中却留在布局原位（全叠在中心钮底下），点扇面位置永远点空——
-            // 真机复验实证过（2026-10-04，收扇其实是"点画布收扇"在兜底，通道从未切成功）
-            .fanTap(enabled = open, onTap = onTap)
-            .size(OPTION_SIZE.dp)
+            .channelTap(onTap = onCycle, onLongPress = onReset)
+            .size(CENTER_SIZE.dp)
             .clip(CircleShape)
             .background(WotaColor.bg)
-            .border(
-                width = if (selected) 2.dp else 1.dp,
-                color = if (selected) WotaColor.textHi else WotaColor.acrylicBorder,
-                shape = CircleShape
-            ),
+            .border(2.dp, channelColor(channel), CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        face()
+        Box(
+            Modifier
+                .size(18.dp)
+                .clip(CircleShape)
+                .background(channelColor(channel))
+        )
     }
 }
 
 /**
- * 扇面触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
- * 不依赖 foundation clickable 的消费口径；抬手时未超滑动阈值才算一次点按。
+ * 通道钮触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
+ * 不依赖 foundation clickable 的消费口径。点按（未超滑动阈值、未到长按时限）触发 [onTap]；
+ * 按住超过系统长按时限触发一次 [onLongPress]，之后抬手不再触发点按。
  */
-private fun Modifier.fanTap(enabled: Boolean, onTap: () -> Unit): Modifier =
-    pointerInput(enabled, onTap) {
-        if (!enabled) return@pointerInput
+private fun Modifier.channelTap(onTap: () -> Unit, onLongPress: () -> Unit): Modifier =
+    pointerInput(onTap, onLongPress) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
             down.consume()
             var moved = false
+            var longFired = false
             while (true) {
                 val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                 if (!moved && change.positionChange().getDistance() > viewConfiguration.touchSlop) {
                     moved = true
                 }
+                if (!longFired && !moved &&
+                    change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis
+                ) {
+                    longFired = true
+                    onLongPress()
+                }
                 change.consume()
                 if (!change.pressed) break
             }
-            if (!moved) onTap()
+            if (!moved && !longFired) onTap()
         }
     }
 

@@ -1212,6 +1212,13 @@ fun HudDockZone(
     bandHeightDp: Int,
     /** 该容器的默认表格子（#80，[HudLayoutTable.defaultGridOf]）：格长与预留档数的唯一来源，无默认值 */
     defaultCells: Map<HudEntry, GridCell>,
+    /**
+     * 霜板是否在屏（录制页：面板打开整枚 Dock 滑出屏外时为 false）。滑出期间内容已离屏，
+     * 但 GL 霜板矩形走布局期注册（[wotaHudCard] 的"已知不吃位移"注释）不随 graphicsLayer 位移——
+     * 不撤板就会留一块"背影"在原地（用户 2026-10-04 真机投诉）。false ⇒ 板切到吃父板模式
+     * （不注册矩形，GL 下一帧不再画，fill 让位无实底），滑回时自动恢复注册。编辑页恒 true。
+     */
+    frostVisible: Boolean,
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty()) return
@@ -1225,7 +1232,10 @@ fun HudDockZone(
     // 而它们的 fill 必须让位，否则 74.9% 不透明的药丸把底下的霜全盖死。
     // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）
     val plateRadiusPx = with(LocalDensity.current) { WotaShape.radiusCard.toPx() }
-    val plate = remember(plateRadiusPx) { hudFrostPlate(plateRadiusPx, HudInkLevel.PRIMARY) }
+    // 滑出屏外期间切"吃父板"：不注册矩形（GL 下一帧不画，背影消失）+ fill 让位（无实底）。
+    // 只剩描边且整体在屏外，视觉上就是"背影跟着内容一起收回"；滑回 frostVisible=true 恢复注册
+    val plate = if (frostVisible) remember(plateRadiusPx) { hudFrostPlate(plateRadiusPx, HudInkLevel.PRIMARY) }
+    else hudFrostInherit
     val motion = LocalMotion.current
     CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
         Column(

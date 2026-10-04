@@ -807,7 +807,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     draft.gridItems(HudZone.LEFT, gridPlan),
                     ctx,
                     zoneBandHeight(HudZone.LEFT, leftArea),
-                    draft.defaultGridOf(HudZone.LEFT, gridPlan)   // #80 锚定与预留的唯一来源
+                    draft.defaultGridOf(HudZone.LEFT, gridPlan),   // #80 锚定与预留的唯一来源
+                    frostVisible = true   // 编辑页拖拽位移另有壳层回报，无滑出撤板一回事
                 )
             }
             HudZoneBox(
@@ -824,7 +825,8 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     draft.gridItems(HudZone.RIGHT, gridPlan),
                     ctx,
                     zoneBandHeight(HudZone.RIGHT, rightArea),
-                    draft.defaultGridOf(HudZone.RIGHT, gridPlan)   // #80 锚定与预留的唯一来源
+                    draft.defaultGridOf(HudZone.RIGHT, gridPlan),   // #80 锚定与预留的唯一来源
+                    frostVisible = true
                 )
             }
             HudZoneBox(
