@@ -1059,13 +1059,22 @@ fun CameraScreen(
                 ) {
                     HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
                 }
-                // ---- 左右竖 Dock：面板打开时向各自外侧滑出、关闭滑回（不再随面板硬卸载）----
+                // ---- 左右竖 Dock：有浮层打开时向各自外侧滑出、关闭滑回（不再随面板硬卸载）----
                 // 常驻组合是刻意的：zoneRects 的实测宽持续回报，dockBottomAvoidDp 那套避让账
                 // 不因滑出归零，回滑时布局不抖。位移走 HudZoneBox 的 graphicsLayer 通道
                 // （shiftXPx 只在 layer 块里读，动画不触发整页重组）；滑出到位后内容整体在屏外，
                 // 触摸自然不可达，无需再挂禁用开关。
+                //
+                // 触发判据**只认浮层本身开着**，不记控件在哪枚容器里：就近胶囊（[pop]）与整块面板
+                // （[sheet]）都是"有弹窗的控件"开出来的——竖 Dock 内的条目、底栏左右侧那两颗
+                // （镜头 / 码率）、顶栏胶囊组全走这两条路。理由：本项目有「编辑控件位置」，
+                // 同颗控件可被挪到任意栏位，按栏位写死触发条件（"只有左 Dock 的才滑"）会在控件
+                // 被挪动后静默失配；按浮层态触发则与位置表无关，控件挪到哪都自动正确。
+                // 弹窗锚点取的是**布局期**回报的窗口矩形（pillAnchorReport → boundsInWindow），
+                // graphicsLayer 位移不触发 onGloballyPositioned 回调，所以滑出期间弹窗钉在原地
+                // 不动、不会跟着 Dock 一起被拖出屏外（霜板那条链是反过来的需求，另见 HudDockZone）。
                 val dockSlideMotion = LocalMotion.current
-                val docksOut = sheet != Sheet.NONE
+                val docksOut = sheet != Sheet.NONE || pop != null
                 val dockSlide = remember { Animatable(0f) }
                 LaunchedEffect(docksOut) {
                     val target = if (docksOut) 1f else 0f
