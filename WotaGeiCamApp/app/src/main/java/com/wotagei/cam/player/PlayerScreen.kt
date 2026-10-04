@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteForever
 import androidx.compose.material.icons.outlined.Favorite
@@ -61,6 +62,7 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -139,6 +141,9 @@ private val SPEED_POPUP_PANEL_WIDTH: Dp = 148.dp
 
 /** 光弧修复弹层定宽：要装下那句 30 字的说明小字，比倍速档（纯数字）宽一档 */
 private val ARC_POPUP_PANEL_WIDTH: Dp = 240.dp
+
+/** 剪辑导出弹层定宽：要装下「入点 xx:xx（自动向前对齐关键帧）」这类长读数 */
+private val CLIP_POPUP_PANEL_WIDTH: Dp = 264.dp
 
 /**
  * 播放页圆钮尺寸沿用 30/18dp，不复用 WotaHit.iconButton(38)/iconGlyph(19)：
@@ -297,6 +302,17 @@ fun PlayerScreen(
     var speedMenu by remember { mutableStateOf(false) }
     // 水平镜像（10-01 修订）：练习照镜用的会话态，不持久化——要不要记住偏好等用户提了再做
     var mirrored by remember { mutableStateOf(false) }
+
+    // 掐头去尾剪辑导出（2026-10-04 方向 3）：区间复用底栏 A/B 标记，不引入第二套设点手势；
+    // 执行走 ClipExporter 无损拷贝。进度/取消都是会话态。页面退出时组合级 scope 取消，
+    // 导出协程随之取消并删 pending 记录，不留半截文件
+    val clipExporter = remember(app) { ClipExporter(app) }
+    val clipRepo = rememberMediaRepo()
+    var clipMenu by remember { mutableStateOf(false) }
+    var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var clipExporting by remember { mutableStateOf(false) }
+    var clipProgress by remember { mutableStateOf(0f) }
+    var clipJob by remember { mutableStateOf<Job?>(null) }
 
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
     val tapArbiter = remember { TapArbiter(DOUBLE_TAP_WINDOW_MS) }
@@ -505,6 +521,15 @@ fun PlayerScreen(
                                     accent = arcStatus == ArcRepairStatus.RUNNING
                                 ) { arcMenu = !arcMenu }
                             }
+                            // 掐头去尾导出入口（2026-10-04 方向 3）：区间=A/B 标记。导出中亮 accent，
+                            // 与光弧的"在忙"记号同一套语义；面板只承担确认与进度，设点仍走 A/B
+                            Box(Modifier.pillAnchor { clipAnchor = it }) {
+                                BarIconSlot(
+                                    Icons.Outlined.ContentCut,
+                                    stringResource(R.string.player_clip),
+                                    accent = clipExporting
+                                ) { clipMenu = !clipMenu }
+                            }
                         }
                         // 倍速永远在最右：它是这一行里唯一带弹层的入口，弹窗就锚在这颗上面
                         WotaChip(
@@ -545,6 +570,48 @@ fun PlayerScreen(
                         speedMenu = false
                     },
                     onDismiss = { speedMenu = false }
+                )
+            }
+            // 剪辑导出就近弹层（2026-10-04 方向 3）：锚在底栏剪辑钮上，导出中重开面板可看进度
+            if (controlsVisible && clipMenu) {
+                ClipExportPopup(
+                    anchor = clipAnchor,
+                    aMs = ab.aMs,
+                    bMs = ab.bMs,
+                    durationMs = duration,
+                    exporting = clipExporting,
+                    progress = clipProgress,
+                    onExport = {
+                        engine.softPause(true)
+                        clipMenu = false
+                        clipExporting = true
+                        clipProgress = 0f
+                        clipJob = scope.launch {
+                            try {
+                                // 区间在起跑那一刻定版：导出期间用户再动 A/B 不影响这一轮
+                                when (val r = clipExporter.export(clip, ab.aMs, ab.bMs) { p -> clipProgress = p }) {
+                                    is ClipResult.Done -> {
+                                        banner = R.string.player_clip_done
+                                        clipRepo.invalidate()
+                                    }
+                                    is ClipResult.Fail ->
+                                        banner = if (r.reason == ClipError.RANGE) {
+                                            R.string.player_clip_too_short
+                                        } else {
+                                            R.string.player_clip_failed
+                                        }
+                                }
+                            } finally {
+                                clipExporting = false
+                                clipJob = null
+                            }
+                        }
+                    },
+                    onCancel = {
+                        clipJob?.cancel()
+                        clipJob = null
+                    },
+                    onDismiss = { clipMenu = false }
                 )
             }
 
@@ -760,6 +827,79 @@ internal fun SpeedTierPopup(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 剪辑导出就近弹层（2026-10-04 方向 3）：区间就是底栏 A/B 标记，这里只做**确认与进度**——
+ * 入点会自动向前对齐关键帧（无损剪的物理边界），读数行把它讲在明处。未圈满 A/B 时只给引导文案；
+ * 导出中换进度条与取消钮，重开面板同一状态（进度是共享 State，不是弹层的局部变量）。
+ */
+@Composable
+private fun ClipExportPopup(
+    anchor: androidx.compose.ui.unit.IntRect,
+    aMs: Long,
+    bMs: Long,
+    durationMs: Long,
+    exporting: Boolean,
+    progress: Float,
+    onExport: () -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val range = ClipRule.normalize(aMs, bMs, durationMs)
+    WotaPillPopup(
+        anchor = anchor,
+        onDismiss = onDismiss,
+        modifier = Modifier.width(CLIP_POPUP_PANEL_WIDTH),
+        title = stringResource(R.string.player_clip_title)
+    ) {
+        if (range == null) {
+            Text(
+                stringResource(R.string.player_clip_need_ab),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaTextDim
+            )
+        } else {
+            Text(
+                stringResource(R.string.player_clip_in, formatDuration(range.first)),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaText
+            )
+            Text(
+                stringResource(R.string.player_clip_out, formatDuration(range.second)),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaText
+            )
+            Text(
+                stringResource(
+                    R.string.player_clip_keep,
+                    formatDuration(range.second - range.first),
+                    formatDuration(durationMs)
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaTextDim
+            )
+            if (exporting) {
+                LinearProgressIndicator(
+                    progress = progress,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = WotaColor.accent,
+                    trackColor = WotaColor.outline
+                )
+                WotaChip(
+                    label = stringResource(R.string.player_clip_cancel),
+                    selected = false,
+                    onClick = onCancel
+                )
+            } else {
+                WotaChip(
+                    label = stringResource(R.string.player_clip_export),
+                    selected = true,
+                    onClick = onExport
+                )
             }
         }
     }
