@@ -1,6 +1,7 @@
 package com.wotagei.cam.ui
 
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -127,6 +128,7 @@ import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.ArcDropLog
+import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
 import com.wotagei.cam.record.RecordError
@@ -1921,6 +1923,31 @@ private class RecordRunner(
                     ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops)
                 )
                 Log.i(TAG_UI, "arc drops sidecar ok=$written drops=${drops.size} path=$path")
+            }
+            // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
+            // 容器标称会被强制档标假）：commit 后 update DISPLAY_NAME 连文件改名，
+            // sidecar 与成片一起更名（同 r28 的 renameFor 先例）。实测失败/过短退化为无前缀。
+            val uri = out.uri
+            if (uri != null) {
+                val srcFps = glProvider()?.measuredArcSrcFps() ?: 0
+                if (srcFps > 0 && activeArcDstFps > 0) {
+                    val old = out.path?.substringAfterLast('/') ?: ""
+                    val prefix = ArcRateProbe.convertNamePrefix(srcFps, activeArcDstFps)
+                    val newName = prefix + old
+                    val renamed = runCatching {
+                        app.contentResolver.update(
+                            uri,
+                            ContentValues().apply {
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, newName)
+                            },
+                            null, null
+                        )
+                    }.getOrDefault(0) > 0
+                    if (renamed && out.path != null) {
+                        ArcDropLog.renameFor(out.path!!, out.path!!.replaceAfterLast('/', prefix + out.path!!.substringAfterLast('/')))
+                    }
+                    Log.i(TAG_UI, "arc rename ok=$renamed -> $newName")
+                }
             }
         }
         // AOSP 顺序：先 stop 编码器，再把编码面从会话里摘掉

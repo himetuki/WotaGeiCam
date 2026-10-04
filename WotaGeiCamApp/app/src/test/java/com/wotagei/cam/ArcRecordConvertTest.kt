@@ -90,6 +90,18 @@ class ArcRecordConvertTest {
     // region 源帧率实测（ArcRateProbe）
 
     @Test
+    fun `处理前缀_源在前目标在后`() {
+        assertEquals("30fto24f_", ArcRateProbe.convertNamePrefix(30, 24))
+        assertEquals("60fto25f_", ArcRateProbe.convertNamePrefix(60, 25))
+    }
+
+    @Test
+    fun `处理前缀_同帧率也成形`() {
+        // 实测≈目标的边界（NO_NEED 档不会走到改名），前缀构造本身不特殊分支
+        assertEquals("24fto24f_", ArcRateProbe.convertNamePrefix(24, 24))
+    }
+
+    @Test
     fun `中位数折算_奇偶样本数都对`() {
         val e = List(90) { 33_333 }              // 全 30fps 帧距
         assertEquals(30, ArcRateProbe.measuredFps(e, 24))

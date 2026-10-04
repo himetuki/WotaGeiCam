@@ -8,6 +8,13 @@ package com.wotagei.cam.record
  */
 object ArcRateProbe {
 
+    /**
+     * 抽帧处理成片的**名称前缀**（用户 2026-10-04 定版："XXftoXXf"，源在前目标在后），
+     * 如 30fps 实测转 24fps → `30fto24f_`。光弧修复的成片与录制期转换的成片共用这一个构造，
+     * 名字上可辨"这条片被本软件抽过帧"。
+     */
+    fun convertNamePrefix(srcFps: Int, dstFps: Int): String = "${srcFps}fto${dstFps}f_"
+
     /** 有效帧距样本少于这个数（极短视频）时中位数不可信，退回容器帧率 */
     const val MIN_DELTAS = 8
 
