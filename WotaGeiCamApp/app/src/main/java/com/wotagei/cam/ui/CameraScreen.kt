@@ -1836,10 +1836,10 @@ private class RecordRunner(
                 ctrl.setRecordingTarget(surface)
                 awaitPreview(PreviewStatus.ING)
             } else {
-                // 转换模式先于编码面挂载配置（节奏锚点随面重挂复位）
-                if (profile.arcConvert != null) {
-                    glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
-                }
+                // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
+                // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
+                //（无 sidecar 无前缀，用户无从察觉）
+                glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
                 glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
                 awaitEncoderSurface()
             }
@@ -1930,8 +1930,10 @@ private class RecordRunner(
             val uri = out.uri
             if (uri != null) {
                 val srcFps = glProvider()?.measuredArcSrcFps() ?: 0
-                if (srcFps > 0 && activeArcDstFps > 0) {
-                    val old = out.path?.substringAfterLast('/') ?: ""
+                // path 查不到（VideoStore.pathOf 对 pending 项明示可能 null）时 old 为空串，
+                // 再拼前缀会把成片改名成裸前缀（如 "24fto24f_"，丢扩展名）——放弃改名保住原名
+                val old = out.path?.substringAfterLast('/') ?: ""
+                if (srcFps > 0 && activeArcDstFps > 0 && old.isNotEmpty()) {
                     val prefix = ArcRateProbe.convertNamePrefix(srcFps, activeArcDstFps)
                     val newName = prefix + old
                     val renamed = runCatching {
@@ -1943,10 +1945,14 @@ private class RecordRunner(
                             null, null
                         )
                     }.getOrDefault(0) > 0
-                    if (renamed && out.path != null) {
-                        ArcDropLog.renameFor(out.path!!, out.path!!.replaceAfterLast('/', prefix + out.path!!.substringAfterLast('/')))
+                    // MediaStore 撞名时会自行改成不重名（加 " (1)" 式序号）且 update 仍报成功，
+                    // 拼装名与真实落盘名可能分叉；sidecar 必须跟着回查到的真实名走
+                    //（回查失败才退回拼装名，与旧行为等价不会更差）
+                    val actualName = if (renamed) queryDisplayName(uri) ?: newName else null
+                    if (actualName != null && out.path != null) {
+                        ArcDropLog.renameFor(out.path!!, out.path!!.replaceAfterLast('/', actualName))
                     }
-                    Log.i(TAG_UI, "arc rename ok=$renamed -> $newName")
+                    Log.i(TAG_UI, "arc rename ok=$renamed -> ${actualName ?: newName}")
                 }
             }
         }
@@ -1958,6 +1964,13 @@ private class RecordRunner(
         status.value = if (out.error != null) RecordStatus.ERROR else RecordStatus.IDLE
         result.value = out
     }
+
+    /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        app.contentResolver.query(
+            uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null
+        )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+    }.getOrNull()
 
     private fun failNow(code: String) {
         polling = false
