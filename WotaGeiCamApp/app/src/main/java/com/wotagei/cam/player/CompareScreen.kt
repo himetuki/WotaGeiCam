@@ -100,11 +100,14 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.roundToLong
 
 /** 双引擎偏差检查周期：低频纠偏，每帧硬拉会听得出卡顿 */
-private const val RESYNC_INTERVAL_MS = 2_500L
+// 纠偏周期：软追赶要相对密才无感（800ms 一次 ±10% 内的速率微调，画面完全无感）；
+// 大漂移的硬 seek 由漂出邻域触发，不受此周期限制
+private const val RESYNC_INTERVAL_MS = 800L
+
+/** 硬 seek 阈值：漂出此邻域才动播放位置（seek 冲刷解码器=可见卡顿，rarity） */
+private const val HARD_RESYNC_MS = 250L
 
 /**
  * 圆钮尺寸与播放页取齐（30/18dp，播放键大一圈），不复用 WotaHit.iconButton(38)：
@@ -295,7 +298,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         onDispose { leftEngine.abWrapHook = null }
     }
 
-    // 两台 ExoPlayer 各跑各的音频时钟，低频纠偏：超过阈值才一次小幅 seek，不逐帧硬拉
+    // 两台 ExoPlayer 各跑各的音频时钟，低频纠偏（2026-10-04「同步后右片卡顿」重构）：
+    // 原方案 |漂移|≥40ms 就硬 seekTo——seek 冲刷解码器造成可见停顿，两播放器时钟漂移
+    // 十几秒就超阈 → 右片周期性跳帧，观感就是"卡顿"。改为**软追赶为主**：
+    // 邻域（±400ms）内不动播放位置，只微调右片实际速率 ±10% 悄悄追/放（右片在对比页
+    // 默认静音，变速无听觉影响，用户倍速档不受污染——见 nudgeSpeedForSync）；
+    // 只有漂出邻域才硬 seek 一次拉回。纠偏周期 2500→800ms：软追赶要相对密才无感。
+    // 拖动期间照旧让路；AB 回绕仍走 abWrapHook（hook 里两路都 seek，本循环随后重新收敛）。
     LaunchedEffect(r?.uri) {
         if (r == null) return@LaunchedEffect
         var prevLeft = leftEngine.livePositionMs()
@@ -309,12 +318,15 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             val desired = (leftLive + offsetMs.value).coerceAtLeast(0L)
             val rd = rightEngine.durationMs.value
             if (rd > 0L && desired > rd - 1L) continue
-            val frameMs = (1000.0 / leftEngine.fps.value.coerceAtLeast(1f)).roundToLong().coerceAtLeast(1L)
-            val drift = rightEngine.livePositionMs() - desired
             val ended = rightEngine.playbackState.value == Player.STATE_ENDED
-            // AB 循环的回绕由 hook 负责，这里别再补一次 seek，否则一次循环多点一下
-            if (ended || (wrapped && !leftEngine.ab.value.loopEnabled) || abs(drift) >= max(40L, frameMs)) {
-                rightEngine.seekTo(desired)
+            val drift = rightEngine.livePositionMs() - desired
+            when {
+                // 播完（等用户手动重播）或回绕（非循环态）：直接对齐
+                ended || (wrapped && !leftEngine.ab.value.loopEnabled) -> rightEngine.seekTo(desired)
+                // 漂出软追赶邻域：一次硬 seek 拉回邻域（seek 有解码器冲刷代价， rarity 才发生）
+                abs(drift) > HARD_RESYNC_MS -> rightEngine.seekTo(desired)
+                // 邻域内软追赶：drift>0 右片超前放慢、<0 落后加快，漂移归零回用户档
+                else -> rightEngine.nudgeSpeedForSync(drift)
             }
         }
     }

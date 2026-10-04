@@ -251,6 +251,28 @@ class PlayerEngine(private val context: Context) {
         player?.setPlaybackSpeed(tier)
     }
 
+    /**
+     * 对比播放纠偏专用（用户 2026-10-04「同步后右片卡顿」修复）：在**用户倍速档**的基础上
+     * 微调实际播放速率做软追赶——[driftMs] 是右片相对目标的超前量（正=超前应放慢、负=落后应加快），
+     * ±400ms 内线性折算 ±10% 速率、超出钳到端点；漂移归零自动回到用户档。
+     *
+     * 不碰 [speed] 状态：倍速胶囊显示的仍是用户档，这里只动底层实际速率。
+     * 与 [setSpeed] 的关系：setSpeed 把底层重置回用户档（纠偏自然失效，下一纠偏周期重新叠加），
+     * 两者不冲突。目标速率与当前实际速率差 ≤0.002 时不写——setPlaybackParameters 同值重写
+     * 也会触发音频缓冲重配，纠偏周期每 800ms 来一次就是可闻的嗒声。
+     */
+    fun nudgeSpeedForSync(driftMs: Long) {
+        val p = player ?: return
+        val base = _speed.value
+        val factor = 1.0 - driftMs.coerceIn(-400L, 400L) / 4000.0
+        val target = (base * factor).toFloat()
+        val current = p.playbackParameters.speed
+        if (kotlin.math.abs(current - target) > 0.002f) {
+            // 直接构造新 PlaybackParameters（media3 1.1.1 无 buildUpon；pitch 我们从未改过，恒 1.0）
+            p.playbackParameters = androidx.media3.common.PlaybackParameters(target)
+        }
+    }
+
     fun setVolume(v: Float) {
         player?.volume = v.coerceIn(0f, 1f)
     }
