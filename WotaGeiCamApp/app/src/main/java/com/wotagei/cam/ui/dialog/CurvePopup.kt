@@ -17,9 +17,12 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -66,9 +69,12 @@ import kotlin.math.sin
  *
  * - 面板里**只有曲线框**：标题/副标题/通道胶囊行/色调档行/计数全部退场（色调档按用户裁决整个
  *   移除，[CurvePreset] 连同枚举一并删除）；「重置（回原图默认）」收进扇面当第五枚小钮。
- * - 通道选择是**径向菜单**：当前通道合成一枚圆钮叠在曲线框左缘中点，点开后四通道＋重置五枚
- *   小钮朝**右**半扇逐枚弹出（朝左会出屏，这是几何约束不是口味），选中任意一枚后整扇自动收回；
+ * - 通道选择是**径向菜单**：当前通道合成一枚圆钮，住在面板卡左侧的**专用槽**里（2026-10-04
+ *   不重叠改版——原先钉在曲线框左缘内，圆环永久压住绘图区，用户点名修掉）；点开后四通道＋重置
+ *   五枚小钮朝**右**半扇逐枚弹出（朝左出屏，这是几何约束不是口味），扫过画布属瞬态、选中即收回；
  *   中心钮再点一次也是收回。
+ * - 弹窗本体是一枚**面板卡**（surface 底 + 描边 + 圆角），左缘在安全区外再加 [PanelBreath]
+ *   呼吸——不再贴死屏缘（同日投诉"弹窗不够完整"的另一半：裸框贴边 + Dock 滑出残段叠压）。
  * - 删控制点不再占按钮位：**选中后再点一次同一点＝删点**（端点不可删），点错用重置兜底。
  * - 边拖边写参数总线、抬手落盘的口径不变；CPU 渲染档整块置灰不可拖（提示改由打开入口的
  *   提示条承担，弹窗里没有副标题位）。
@@ -151,41 +157,85 @@ fun CurvePopup(
             )
             // 贴边避让交给系统（safeDrawingPadding，不按方向写死），弹窗本体再贴一枚设计留白
             Box(Modifier.matchParentSize().padding(HudEdgePad)) {
-                BoxWithConstraints(Modifier.align(Alignment.CenterStart)) {
+                BoxWithConstraints(Modifier.align(Alignment.CenterStart).padding(start = PanelBreath.dp)) {
                     // 曲线框设计档 200dp；安全区给不出就收进「边长−两侧留白」，下限 120dp 保最差档仍能拖点
                     val side = maxOf(
                         MinCurveSide.dp,
                         minOf(
                             CurveSide.dp,
-                            maxWidth - PopupMargin.dp * 2,
+                            maxWidth - PanelBreath.dp - PopupMargin.dp * 2,
                             maxHeight - PopupMargin.dp * 2
                         )
                     )
-                    Box(
+                    // 面板卡 = [扇钮左槽 | 曲线框]：通道钮有了自己的格子，闭合态与曲线绘图区零重叠
+                    // （用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/描边让弹窗读起来
+                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸
+                    Row(
                         Modifier
-                            .size(side)
                             .clip(RoundedCornerShape(WotaShape.menu))
+                            .background(WotaColor.surface.copy(alpha = 0.97f))
+                            .border(1.dp, WotaColor.acrylicBorder, RoundedCornerShape(WotaShape.menu))
+                            // 面板本体是吞噬层：落在内边距/缝隙上的按压不外溢给关闭捕获层
+                            // （子级钮/画布在 Main pass 先消费，这里只兜没人认领的）
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    if (down.isConsumed) return@awaitEachGesture
+                                    down.consume()
+                                    var swallowing = true
+                                    while (swallowing) {
+                                        val change = awaitPointerEvent()
+                                        change.changes.forEach { it.consume() }
+                                        swallowing = change.changes.any { it.pressed }
+                                    }
+                                }
+                            }
+                            .padding(PanelPad.dp)
                     ) {
-                        CurveCanvas(
-                            points = points,
-                            selected = selected,
-                            color = channelColor(channel),
-                            enabled = gpuMode,
-                            modifier = Modifier.matchParentSize()
+                        // 扇钮左槽：中心钮 48dp 恰好占满，垂直居中于面板
+                        ChannelFan(
+                            channel = channel,
+                            open = fanOpen,
+                            names = channelNames,
+                            resetLabel = resetLabel,
+                            onToggle = { fanOpen = !fanOpen },
+                            onChannel = { ch ->
+                                channel = ch
+                                points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
+                                selected = -1
+                                fanOpen = false   // 选完自动收回
+                            },
+                            onReset = {
+                                resetAll()
+                                fanOpen = false
+                            }
                         )
+                        Spacer(Modifier.width(FanGap.dp))
                         Box(
                             Modifier
-                                .matchParentSize()
-                                .pointerInput(channel, gpuMode) {
-                                    if (!gpuMode) return@pointerInput
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        // 扇面认领过的按压整手忽略：那一指属于通道钮，不在画布落点
-                                        if (down.isConsumed) return@awaitEachGesture
-                                        // 画布上的任何新按压都先收扇（点扇面外＝收扇），再认领给本层，
-                                        // 底下的关闭捕获层就不会把这一指当成「点外部」
-                                        fanOpen = false
-                                        down.consume()
+                                .size(side)
+                                .clip(RoundedCornerShape(WotaShape.menu))
+                        ) {
+                            CurveCanvas(
+                                points = points,
+                                selected = selected,
+                                color = channelColor(channel),
+                                enabled = gpuMode,
+                                modifier = Modifier.matchParentSize()
+                            )
+                            Box(
+                                Modifier
+                                    .matchParentSize()
+                                    .pointerInput(channel, gpuMode) {
+                                        if (!gpuMode) return@pointerInput
+                                        awaitEachGesture {
+                                            val down = awaitFirstDown(requireUnconsumed = false)
+                                            // 扇面认领过的按压整手忽略：那一指属于通道钮，不在画布落点
+                                            if (down.isConsumed) return@awaitEachGesture
+                                            // 画布上的任何新按压都先收扇（点扇面外＝收扇），再认领给本层，
+                                            // 底下的关闭捕获层就不会把这一指当成「点外部」
+                                            fanOpen = false
+                                            down.consume()
                                         if (size.width <= 0 || size.height <= 0) return@awaitEachGesture
                                         var working = livePoints.value
                                         val gx = down.position.x / size.width
@@ -235,27 +285,10 @@ fun CurvePopup(
                                     }
                                 }
                         )
-                        ChannelFan(
-                            channel = channel,
-                            open = fanOpen,
-                            names = channelNames,
-                            resetLabel = resetLabel,
-                            onToggle = { fanOpen = !fanOpen },
-                            onChannel = { ch ->
-                                channel = ch
-                                points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
-                                selected = -1
-                                fanOpen = false   // 选完自动收回
-                            },
-                            onReset = {
-                                resetAll()
-                                fanOpen = false
-                            },
-                            modifier = Modifier.align(Alignment.CenterStart).padding(start = FanInset.dp)
-                        )
                     }
                 }
             }
+        }
         }
     }
 }
@@ -271,12 +304,20 @@ private const val OPTION_SIZE = 40
 /** 小钮圆心到中心钮圆心的展开半径：四钮 45° 角距下弦距 ≈49dp，40dp 钮留缝充足 */
 private const val FAN_RADIUS = 64f
 
-/** 中心钮圆心到曲线框左缘的距离（小钮朝右展开不越过框右缘：34+64+20=118 < 200） */
-private const val FanInset = 10
+/** 中心钮圆心到曲线框左缘的距离常量已废弃：扇钮改住面板左槽（2026-10-04 不重叠改版） */
 
 /** 曲线框设计边长与下限 */
 private const val CurveSide = 200
 private const val MinCurveSide = 120
+
+/** 面板卡内边距（包住左槽与曲线框） */
+private const val PanelPad = 10
+
+/** 左槽与曲线框的缝 */
+private const val FanGap = 6
+
+/** 面板左缘在安全区之外的呼吸留白（弹窗不再贴死屏缘，读起来是一枚完整浮层） */
+private const val PanelBreath = 12
 
 /** 弹窗与安全区边缘的呼吸留白 */
 private const val PopupMargin = 12
@@ -302,6 +343,7 @@ private val FanAngles = floatArrayOf(-90f, -45f, 0f, 45f, 90f)
 
 /**
  * 径向通道菜单：中心钮（当前通道）＋五枚扇出小钮（四通道＋重置）。
+ * 宿主是面板卡左侧的 48dp 专用槽（[CENTER_SIZE] 恰好占满），与曲线框不再有布局交叠。
  *
  * @param onToggle 中心钮点按（开/收扇）
  * @param onChannel 选定通道（调用方负责收扇——「选完自动收回」是需求语义，不在组件里隐藏）
