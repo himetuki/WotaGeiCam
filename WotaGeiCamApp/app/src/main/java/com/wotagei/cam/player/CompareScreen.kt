@@ -61,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -174,11 +175,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     // #4（用户 2026-09-30 反馈；**10-01 修订：两窗分别单独缩放**，不做同倍率）：各一枚 zoom 态，
     // 手势挂**各自那一栏**的 Box 上——pointerInput 只收自己布局界内的事件，压哪栏就缩哪栏。
-    // 手势本体复用单播放页那条 pinchZoom（1..4x，第二指才消费，单指滑动不受影响）。
+    // 手势本体复用单播放页那条 pinchZoom（1..4x + 双指平移，第二指才消费，单指滑动不受影响）。
     // 一指各压一栏的双指手势两边都凑不齐两指、两栏都不动，这是自然语义，不需要特殊处理。
     // 左/右标签在 graphicsLayer 之外，缩放时保持原大不跟着糊。
     val zoomL = remember { mutableStateOf(1f) }
     val zoomR = remember { mutableStateOf(1f) }
+    // 双指平移（2026-10-04）：同样两窗各自独立；pane Box 已 clipToBounds，越界绘制天然裁掉
+    val panL = remember { mutableStateOf(Offset.Zero) }
+    val panR = remember { mutableStateOf(Offset.Zero) }
 
     // 沉浸式浮层（仿 HarmonyOS 6/7 / iOS 26，10-01）：单击显隐控制层、双击启停——
     // TapArbiter 与窗口常量复用单播放页的 internal 件，不各抄一份；不做自动隐藏，
@@ -407,13 +411,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         ) {
             // clipToBounds：镜像/缩放是绘制期变换（graphicsLayer 默认不裁剪），不裁会越过
             // 2dp 分隔线压到邻栏（审查 P2；单页全屏无感，分栏后任何一次捏合都可见）
-            Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL)) {
-                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, mirror = mirror == 1 || mirror == 3)
+            Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL, panL)) {
+                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, pan = panL.value, mirror = mirror == 1 || mirror == 3)
                 ZoomBadge(zoomL.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                 SideLabel(stringResource(R.string.compare_left, left.name), Modifier.align(Alignment.TopEnd))
             }
             Box(Modifier.width(2.dp).fillMaxHeight().background(WotaDivider)) {}
-            Box(Modifier.weight(1f - split).fillMaxHeight().clipToBounds().pinchZoom(zoomR)) {
+            Box(Modifier.weight(1f - split).fillMaxHeight().clipToBounds().pinchZoom(zoomR, panR)) {
                 if (r == null) {
                     // 占位底色与另一栏的信箱同色：用 WotaSurface 会让两栏"看起来一高一低"，
                     // 实际两栏 Box 都是 fillMaxHeight 等高的
@@ -427,7 +431,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         )
                     }
                 } else {
-                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, mirror = mirror == 2 || mirror == 3)
+                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, mirror = mirror == 2 || mirror == 3)
                     ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
                 }
