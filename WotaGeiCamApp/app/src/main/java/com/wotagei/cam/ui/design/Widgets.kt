@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui.design
 
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -9,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -148,10 +150,9 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
         }
     }
     LaunchedEffect(slot, coords, alpha, intent, visible) {
+        Log.i("FrostDock", "effect slot=$slot hasCoords=${coords != null} intent=$intent visible=$visible")
         val c = coords ?: return@LaunchedEffect
         if (slot < 0 || !intent) return@LaunchedEffect
-        val p = c.positionInWindow()
-        val size = c.size
         HudFrost.refreshHeader()
         if (!visible) {
             // 屏外哨兵：板画在视口外 = 视觉上消失。**注册必须常驻**——若靠离场撤槽让板消失，
@@ -166,17 +167,40 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
                 radiusPx = frost.radiusPx,
                 alpha = 0f
             )
+            Log.i("FrostDock", "sentinel slot=$slot")
             return@LaunchedEffect
         }
-        FrostCardTable.writeCard(
-            slot = slot,
-            leftPx = p.x,
-            topPx = p.y,
-            rightPx = p.x + size.width,
-            bottomPx = p.y + size.height,
-            radiusPx = frost.radiusPx,
-            alpha = alpha
-        )
+        // 恢复不能立刻落表：positionInWindow() **现算含祖先 graphicsLayer 位移**，visible 翻转
+        // 那一刻滑出位移还没归零（实测写到了 x=-189），而 layer 归零不触发布局回调、coords 的
+        // key 也不会变——表会永久停在带位移的位置。轮询到坐标稳定（滑回动画收尾）再写终值。
+        var lastX = Long.MIN_VALUE
+        var lastY = Long.MIN_VALUE
+        var stable = 0
+        var attempts = 0
+        while (attempts < 24 && stable < 4) {
+            val p = c.positionInWindow()
+            val size = c.size
+            if (p.x.toLong() == lastX && p.y.toLong() == lastY) {
+                stable++
+            } else {
+                stable = 0
+                lastX = p.x.toLong()
+                lastY = p.y.toLong()
+            }
+            FrostCardTable.writeCard(
+                slot = slot,
+                leftPx = p.x,
+                topPx = p.y,
+                rightPx = p.x + size.width,
+                bottomPx = p.y + size.height,
+                radiusPx = frost.radiusPx,
+                alpha = alpha
+            )
+            attempts++
+            Log.i("FrostDock", "poll slot=$slot x=${p.x} stable=$stable")
+            delay(40)
+        }
+        Log.i("FrostDock", "real slot=$slot rect=$lastX,$lastY ${c.size.width}x${c.size.height}")
     }
     return this.onGloballyPositioned { coords = it }
 }

@@ -427,7 +427,10 @@ internal object HudFrost {
         }
         refreshHeader()
         val drawn = FrostCardTable.isPlatesDrawn()
-        if (drawn != live) live = drawn
+        if (drawn != live) {
+            android.util.Log.i("FrostDock", "live -> $drawn")
+            live = drawn
+        }
     }
 
     /**
