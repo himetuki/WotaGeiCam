@@ -17,12 +17,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -169,8 +166,10 @@ fun CurvePopup(
                     )
                     // 面板卡 = [扇钮左槽 | 曲线框]：通道钮有了自己的格子，闭合态与曲线绘图区零重叠
                     // （用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/描边让弹窗读起来
-                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸
-                    Row(
+                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸。
+                    // 叠层顺序刻意反直觉：曲线框先声明（画在下），扇钮后声明（画在上）——展开时朝右
+                    // 扫进画布区的小钮必须可见，反过来就会被曲线框整块盖掉（真机复验踩实过）。
+                    Box(
                         Modifier
                             .clip(RoundedCornerShape(WotaShape.menu))
                             .background(WotaColor.surface.copy(alpha = 0.97f))
@@ -192,27 +191,10 @@ fun CurvePopup(
                             }
                             .padding(PanelPad.dp)
                     ) {
-                        // 扇钮左槽：中心钮 48dp 恰好占满，垂直居中于面板
-                        ChannelFan(
-                            channel = channel,
-                            open = fanOpen,
-                            names = channelNames,
-                            resetLabel = resetLabel,
-                            onToggle = { fanOpen = !fanOpen },
-                            onChannel = { ch ->
-                                channel = ch
-                                points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
-                                selected = -1
-                                fanOpen = false   // 选完自动收回
-                            },
-                            onReset = {
-                                resetAll()
-                                fanOpen = false
-                            }
-                        )
-                        Spacer(Modifier.width(FanGap.dp))
+                        // 曲线框：左让出扇钮槽位与缝，先声明居下层
                         Box(
                             Modifier
+                                .padding(start = (CENTER_SIZE + FanGap).dp)
                                 .size(side)
                                 .clip(RoundedCornerShape(WotaShape.menu))
                         ) {
@@ -285,8 +267,32 @@ fun CurvePopup(
                                     }
                                 }
                         )
+                        }
+                        // 扇钮：居上层，住面板左槽（48dp 恰好占满中心钮），垂直居中于面板
+                        Box(
+                            Modifier
+                                .align(Alignment.CenterStart)
+                                .size(CENTER_SIZE.dp)
+                        ) {
+                            ChannelFan(
+                                channel = channel,
+                                open = fanOpen,
+                                names = channelNames,
+                                resetLabel = resetLabel,
+                                onToggle = { fanOpen = !fanOpen },
+                                onChannel = { ch ->
+                                    channel = ch
+                                    points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
+                                    selected = -1
+                                    fanOpen = false   // 选完自动收回
+                                },
+                                onReset = {
+                                    resetAll()
+                                    fanOpen = false
+                                }
+                            )
+                        }
                     }
-                }
             }
         }
         }
@@ -450,7 +456,6 @@ private fun FanOption(
     Box(
         modifier
             .semantics { contentDescription = description }
-            .fanTap(enabled = open, onTap = onTap)
             .graphicsLayer {
                 translationX = cos(rad).toFloat() * FAN_RADIUS.dp.toPx() * frac.value
                 translationY = sin(rad).toFloat() * FAN_RADIUS.dp.toPx() * frac.value
@@ -459,6 +464,10 @@ private fun FanOption(
                 scaleY = s
                 alpha = frac.value
             }
+            // fanTap 必须在 graphicsLayer **内侧**：命中区域跟随视觉平移。挂在外侧时小钮
+            // 画在扇面位置、命中却留在布局原位（全叠在中心钮底下），点扇面位置永远点空——
+            // 真机复验实证过（2026-10-04，收扇其实是"点画布收扇"在兜底，通道从未切成功）
+            .fanTap(enabled = open, onTap = onTap)
             .size(OPTION_SIZE.dp)
             .clip(CircleShape)
             .background(WotaColor.bg)
