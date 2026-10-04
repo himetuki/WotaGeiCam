@@ -364,6 +364,8 @@ class MrRecorder(
         state = EngineState.ERROR
         releaseEngine()
         store.discard(sink)
+        // setupRecorder 失败走的就是这条：target 里还攥着打开的 fd，置空前必须关
+        target?.close()
         target = null
         currentSink = null
         state = EngineState.IDLE

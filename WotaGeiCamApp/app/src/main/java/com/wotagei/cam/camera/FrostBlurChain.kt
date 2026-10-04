@@ -326,6 +326,10 @@ internal class FrostBlurChain(
      * 拷贝那枚本来就是 mediump，编不出来就没有退路，直接停用。
      */
     private fun buildPrograms() {
+        // 幂等重建：上一轮 blur 链接失败会留下 copyProgram != 0 && blurProgram == 0 的半初始化态，
+        // 此时 prepare 的「两个都非 0 才短路」拦不住再次进入这里——先删旧件再编，
+        // 否则下面的无条件重链把旧 program 对象直接覆盖丢弃（GL program 泄漏，翻转一次漏一枚）
+        deletePrograms()
         copyProgram = linkProgram(Shaders.TEXTURE_VS, Shaders.FROST_COPY_FS)
         if (copyProgram == 0) return
         copyAPosition = GLES20.glGetAttribLocation(copyProgram, "aPosition")

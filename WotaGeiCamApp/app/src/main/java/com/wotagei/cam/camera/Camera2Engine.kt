@@ -142,6 +142,13 @@ class Camera2Engine(
     /** 关闭代数：异步回调只认最新一次开机的结果，防止旧回调写脏状态 */
     private var generation = 0
 
+    /**
+     * 会话配置代数：`createCaptureSession` 是异步的，配置回调到达可能晚于 closeSessionQuietly。
+     * 只认最新一次发起的配置——过期回调（stopPreview / 换面之后才配置完的那次）必须当场关闭，
+     * 否则会把刚停掉的预览在后台复活（旧 session 赋回字段并重发 repeating，相机持续推流）。
+     */
+    private var sessionAttempt = 0
+
     // 点按对焦上下文
     private var tapAfModeOverride: Int? = null
     private var tapAfRegions: List<MeteringRectangle>? = null
@@ -483,7 +490,7 @@ class Camera2Engine(
             else SessionConfiguration.SESSION_REGULAR,
             configs,
             workExecutor,
-            sessionCallback(highSpeed, targets)
+            sessionCallback(highSpeed, targets, ++sessionAttempt)
         )
         try {
             dev.createCaptureSession(config)
@@ -518,12 +525,14 @@ class Camera2Engine(
         publishDevice(DeviceStatus.CLOSE)
     }
 
-    private fun sessionCallback(highSpeed: Boolean, targets: List<Surface>) =
+    private fun sessionCallback(highSpeed: Boolean, targets: List<Surface>, attempt: Int) =
         object : CameraCaptureSession.StateCallback() {
             private val gen = generation
 
             override fun onConfigured(configured: CameraCaptureSession) {
-                if (gen != generation || !threadRunning) {
+                // attempt 检查堵住「配置发起后被 stopPreview/换面撤掉」的窗口：此时 session 字段
+                // 还是 null，closeSessionQuietly 无会话可关，回调若照常落地就会复活预览
+                if (gen != generation || attempt != sessionAttempt || !threadRunning) {
                     runCatching { configured.close() }
                     return
                 }
@@ -546,7 +555,7 @@ class Camera2Engine(
 
             override fun onConfigureFailed(failed: CameraCaptureSession) {
                 runCatching { failed.close() }
-                if (gen != generation) return
+                if (gen != generation || attempt != sessionAttempt) return
                 if (highSpeed) downgradeHighSpeed("高速会话 onConfigureFailed fps=${fpsValue()}")
                 else failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "普通会话 onConfigureFailed targets=${targets.size}")
             }
@@ -922,6 +931,8 @@ class Camera2Engine(
     }
 
     private fun closeSessionQuietly() {
+        // 先使配置中的在途回调作废（session 字段此刻可能是 null，下面的 close 关不到它）
+        sessionAttempt++
         val hs = highSpeedSession
         val normal = session
         highSpeedSession = null
