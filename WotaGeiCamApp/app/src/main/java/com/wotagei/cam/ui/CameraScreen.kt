@@ -118,6 +118,7 @@ import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
@@ -184,6 +185,7 @@ import kotlin.math.roundToInt
 fun CameraScreen(
     onOpenGallery: () -> Unit,
     onOpenSettings: () -> Unit,
+    onPracticeFinish: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -327,7 +329,14 @@ fun CameraScreen(
                 val savedRes = if (result.uncommitted > 0) R.string.cam_record_saved_uncommitted
                 else R.string.cam_record_saved
                 showTip(app.getString(savedRes, formatDuration(result.durationMs)))
+                // 练习闭环（2026-10-04 方向 4）：对比页发来的录制成功即弹栈回对比页，把新片
+                // 填右槽。pending uri 自带 MediaStore id，此刻 IS_PENDING 已清，回程查询即刻可见；
+                // deliver 只在桥 armed 时认账，普通录制的停止不受影响
+                val practiceId = result.uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
+                if (practiceId != null && ComparePractice.deliver(practiceId)) onPracticeFinish()
             } else {
+                // 录制失败清掉桥态（留在本页看错误），不弹栈
+                ComparePractice.armed = false
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
             runner.clearResult()

@@ -63,10 +63,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.wotagei.cam.R
 import com.wotagei.cam.media.MediaRepo
 import com.wotagei.cam.media.VideoClip
@@ -122,6 +125,7 @@ private val PlayGlyphSize = 26.dp
 fun CompareScreen(
     leftMediaId: Long,
     onBack: () -> Unit,
+    onPractice: () -> Unit,
     repo: MediaRepo = rememberMediaRepo()
 ) {
     val left by repo.clipById(leftMediaId).collectState(null)
@@ -131,12 +135,12 @@ fun CompareScreen(
             CircularProgressIndicator(color = WotaAccent)
         }
     } else {
-        CompareContent(left = c, onBack = onBack)
+        CompareContent(left = c, onBack = onBack, onPractice = onPractice)
     }
 }
 
 @Composable
-private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
+private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -> Unit) {
     val app = LocalContext.current.applicationContext
     val leftEngine = rememberPlayerEngine()
     val rightEngine = rememberPlayerEngine()
@@ -237,6 +241,34 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
         // 不加 FLAG_GRANT_READ_URI_PERMISSION：它只对启动 intent 自己的 uri 有意义，
         // 结果 uri 的读授权由相册在 result 里自行授予，我们的读数走 MediaStore 自带权限
         pickRight.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+    }
+
+    // 练习闭环回程消费（2026-10-04 方向 4）：本页 ON_RESUME 时先自愈清 armed（录制失败/
+    // 没录就退的尾巴），再收 pendingRightId 填右槽。不引 lifecycle-runtime-compose，
+    // LifecycleEventObserver 三行的事。收货后记进对比历史，与手动选右片同一待遇
+    val practiceOwner = LocalLifecycleOwner.current
+    DisposableEffect(practiceOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (ComparePractice.armed) {
+                ComparePractice.armed = false
+                ComparePractice.pendingRightId = null
+            }
+            val id = ComparePractice.pendingRightId
+            if (id != null) {
+                ComparePractice.pendingRightId = null
+                tapScope.launch {
+                    val clip = repo.clipById(id).first()
+                    if (clip != null) {
+                        right = clip
+                        offsetMs.value = 0L
+                        CompareHistory.record(prefs, clip.id, left.id)
+                    }
+                }
+            }
+        }
+        practiceOwner.lifecycle.addObserver(obs)
+        onDispose { practiceOwner.lifecycle.removeObserver(obs) }
     }
 
     LaunchedEffect(left.uri) {
@@ -644,6 +676,17 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit) {
                                 selected = mirror != 0,
                                 modifier = Modifier.pillAnchor { rect -> mirrorAnchor = rect },
                                 onClick = { mirrorMenu = !mirrorMenu }
+                            )
+                            // 对着左片练（2026-10-04 方向 4）：左路参考片 AB 循环先圈好段，
+                            // 这里一键压栈录制页；录完自动弹回来把新片填进右槽（桥见 ComparePractice）
+                            ComparePill(
+                                label = stringResource(R.string.compare_practice),
+                                selected = false,
+                                onClick = {
+                                    setPlaying(false)
+                                    ComparePractice.armed = true
+                                    onPractice()
+                                }
                             )
                         }
                     }
