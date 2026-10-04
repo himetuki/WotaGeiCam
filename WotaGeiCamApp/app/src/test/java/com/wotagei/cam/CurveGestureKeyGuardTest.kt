@@ -39,4 +39,23 @@ class CurveGestureKeyGuardTest {
             loneGpu < 0
         )
     }
+
+    @Test
+    fun `扇钮必须让路给已消费的down`() {
+        // 相邻卫星钮的 48dp **方形**命中盒在 45° 角距下真实相交（「弦距 ≈49dp 不相交」只对圆盒
+        // 成立，方盒按轴向判相邻圆心差 dx≈18.75 / dy≈45.25dp 都 <48；展开途中 frac<1 时交叠更大）。
+        // Compose 对相交的兄弟节点全部派发、命中序 = z 序：先测那枚消费 down 后，后来者不整手让路
+        // 就是同一指两枚都在抬手放行 currentTap——一指落进相交条点出两次选通道（z 序靠后者胜=选错）。
+        // 判据锁 fanTap 函数体（bodyOf，扩展函数带接收者限定名），别处同形文本喂不绿。
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(masked, "Modifier.fanTap"))
+        assertTrue(
+            "fanTap 体内缺少 isConsumed 整手让路：相邻卫星钮方形命中盒相交条上的一指会被两枚 " +
+                "fanTap 同时放行 currentTap，点一下选出两个通道",
+            body.contains("if (down.isConsumed) return@awaitEachGesture")
+        )
+        assertTrue(
+            "fanTap 体内缺少 down.consume() 认领：捕获层/吞噬层/画布层的整手让路判据会失去输入",
+            body.contains("down.consume()")
+        )
+    }
 }
