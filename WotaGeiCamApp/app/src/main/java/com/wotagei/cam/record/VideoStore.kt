@@ -44,10 +44,11 @@ class VideoStore(private val ctx: Context) {
 
     private val resolver get() = ctx.contentResolver
 
-    /** 成片文件名；每段用各自创建时刻，同秒碰撞由 3 位随机后缀吸收 */
-    fun displayName(createdAtMs: Long = System.currentTimeMillis()): String {
+    /** 成片文件名；每段用各自创建时刻，同秒碰撞由 3 位随机后缀吸收。
+     *  [namePrefix] 非空时置于时间戳前（如 "30fto24f_"：抽帧/编辑处理过的成片名上可辨，用户 2026-10-04 定版） */
+    fun displayName(createdAtMs: Long = System.currentTimeMillis(), namePrefix: String = ""): String {
         val stamp = SimpleDateFormat(NAME_STAMP, Locale.US).format(Date(createdAtMs))
-        return String.format(Locale.US, "VID_%s_%03d.mp4", stamp, Random.nextInt(1000))
+        return String.format(Locale.US, "%sVID_%s_%03d.mp4", namePrefix, stamp, Random.nextInt(1000))
     }
 
     /** 当前卷可用空间（MB）；取应用外部文件所在卷，避开已废弃的公共存储常量 */
@@ -72,13 +73,14 @@ class VideoStore(private val ctx: Context) {
         return null
     }
 
-    /** 插入 pending 记录；失败返回 null（调用方按 [RecordError.NO_OUTPUT] 处理） */
-    fun createPending(partIndex: Int): Uri? {
+    /** 插入 pending 记录；失败返回 null（调用方按 [RecordError.NO_OUTPUT] 处理）。
+     *  [namePrefix] 非空时置于成片名前（处理过片的可辨前缀，见 [displayName]） */
+    fun createPending(partIndex: Int, namePrefix: String = ""): Uri? {
         checkFreeSpace()?.let {
             Log.e(TAG, "createPending rejected: $it")
             return null
         }
-        val name = displayName()
+        val name = displayName(namePrefix = namePrefix)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)

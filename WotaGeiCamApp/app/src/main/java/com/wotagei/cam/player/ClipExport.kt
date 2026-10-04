@@ -72,11 +72,12 @@ object ClipRule {
     fun keyFrameIndexOf(baseUs: Long, dstFps: Int): Int =
         ((baseUs * dstFps + 500_000L) / 1_000_000L).toInt().coerceAtLeast(0)
 
-    /** 剪辑成片命名：`<源名去扩展名>-clip.mp4`（MediaStore 同名冲突自行追加序号） */
+    /** 剪辑成片命名：`edit_<源名去扩展名>.mp4`（用户 2026-10-04 定版：处理过的片名上前缀可辨；
+     *  MediaStore 同名冲突自行追加序号） */
     fun clipNameOf(srcName: String): String {
         val dot = srcName.lastIndexOf('.')
         val stem = if (dot > 0) srcName.substring(0, dot) else srcName
-        return "$stem-clip.mp4"
+        return "edit_$stem.mp4"
     }
 }
 

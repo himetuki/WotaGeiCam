@@ -120,22 +120,22 @@ class ClipExportTest {
 
     // endregion
 
-    // region clipNameOf：剪辑成片命名
+    // region clipNameOf：剪辑成片命名（用户 2026-10-04 定版：edit_ 前缀）
 
     @Test
-    fun `name 常规mp4换clip后缀`() {
-        assertEquals("VID_20261004_120000_001-clip.mp4", ClipRule.clipNameOf("VID_20261004_120000_001.mp4"))
+    fun `name 常规mp4加edit前缀`() {
+        assertEquals("edit_VID_20261004_120000_001.mp4", ClipRule.clipNameOf("VID_20261004_120000_001.mp4"))
     }
 
     @Test
-    fun `name 无扩展名直接追加`() {
-        assertEquals("take3-clip.mp4", ClipRule.clipNameOf("take3"))
+    fun `name 无扩展名直接加前缀`() {
+        assertEquals("edit_take3.mp4", ClipRule.clipNameOf("take3"))
     }
 
     @Test
     fun `name 隐藏文件按无扩展名处理`() {
         // dot 在 0 位不算扩展名分隔（stem 不能空）
-        assertEquals(".hidden-clip.mp4", ClipRule.clipNameOf(".hidden"))
+        assertEquals("edit_.hidden.mp4", ClipRule.clipNameOf(".hidden"))
     }
 
     // endregion

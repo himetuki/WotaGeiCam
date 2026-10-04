@@ -363,10 +363,11 @@ private class ArcRepairSession(
             audioDone = true
         }
 
-        // 输出与封装
+        // 输出与封装。成片名带抽帧前缀（"30fto24f_"，源=实测帧率）：名字上可辨本片被抽过帧
         val st = VideoStore(ctx)
         store = st
-        val pending = st.createPending(0) ?: throw ArcFail(RecordError.NO_OUTPUT)
+        val pending = st.createPending(0, namePrefix = ArcRateProbe.convertNamePrefix(srcFps, dstFps))
+            ?: throw ArcFail(RecordError.NO_OUTPUT)
         val sk = OutputSink.Pending(pending)
         sink = sk
         val t = OutputTarget.open(ctx, sk) ?: throw ArcFail(RecordError.NO_OUTPUT)

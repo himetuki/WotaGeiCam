@@ -479,8 +479,40 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             } else {
                 null
             }
+            // 源帧率实测账随转换开启复位（O(1) 内存的首尾时间戳法，见 noteArcFrame）
+            arcSrcFirstTsNs = Long.MIN_VALUE
+            arcSrcLastTsNs = Long.MIN_VALUE
+            arcSrcFrames = 0
             Log.i(TAG_GL, "arcConvert=$mode dstFps=$dstFps")
         }
+    }
+
+    // ---- 录制期转换的源帧率实测（O(1) 内存）：保留帧/丢弃帧的到达时间戳都在这记账，
+    // 首尾时间戳 + 帧数折算平均帧率。中位数法更抗畸变但需要 O(n) 样本（录制期帧数可达数十万），
+    // 平均值对"容器假 fps"的量级判断足够——成片名前缀只要量级对（30 vs 24）就达到可辨目的。
+    // GL 线程写、UI 线程读：三枚都 @Volatile（long 读写原子性）
+    @Volatile private var arcSrcFirstTsNs = Long.MIN_VALUE
+    @Volatile private var arcSrcLastTsNs = Long.MIN_VALUE
+    @Volatile private var arcSrcFrames = 0
+
+    /** 抽帧规则判定处调用（转换开启时每帧一次）；只记账不分配 */
+    private fun noteArcFrame(tsNs: Long) {
+        if (arcSrcFirstTsNs == Long.MIN_VALUE) arcSrcFirstTsNs = tsNs
+        arcSrcLastTsNs = tsNs
+        arcSrcFrames++
+    }
+
+    /**
+     * 录制收尾取实测源帧率（整数，容器标称会被强制档标假——这就是前缀要实测的原因）。
+     * 样本不足（<2 帧或时长 <1s）返回 0，调用方应退化为不带前缀。
+     */
+    fun measuredArcSrcFps(): Int {
+        val first = arcSrcFirstTsNs
+        val last = arcSrcLastTsNs
+        val frames = arcSrcFrames
+        val spanNs = last - first
+        if (frames < 2 || spanNs <= 0L) return 0
+        return (((frames - 1L) * 1_000_000_000L / spanNs).toInt()).coerceIn(1, 480)
     }
 
     /** 取走被抽帧位次账（录制收尾写 sidecar 用；取走即清空） */
@@ -1070,6 +1102,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             }
             else -> Unit
         }
+        if (arcConvert != null) noteArcFrame(lastDrawnTimestampNs)
         if (!skip) drawEncoderPass()
         // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
         // 不许让它挡在编码器的 swap 前面（那是成片的一帧）
