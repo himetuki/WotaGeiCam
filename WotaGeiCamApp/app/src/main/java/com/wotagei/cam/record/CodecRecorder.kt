@@ -109,6 +109,9 @@ class CodecRecorder(
         val mime = resolveVideoMime(p)
         val v = createVideoEncoder(mime, p, inSurf)
         if (v == null) {
+            // t 已打开（fd 在手）但 target 字段还没轮到赋值，reject 的 target?.close() 够不着它：
+            // 必须在这里先关，否则 openAssetFileDescriptor 的 fd 一直悬到进程结束
+            t.close()
             closeSegmentEngine()
             reject(sink, RecordError.PREPARE_FAILED)
             return false
@@ -508,7 +511,13 @@ class CodecRecorder(
         val p = profile ?: return false
         val inSurf = inputSurface ?: return false
         val t = OutputTarget.open(ctx, sink) ?: return false
-        val v = createVideoEncoder(resolveVideoMime(p), p, inSurf) ?: return false
+        val v = createVideoEncoder(resolveVideoMime(p), p, inSurf)
+        if (v == null) {
+            // 编码器重建失败：target 字段此刻还是上一段的 null（sealCurrent 已清），
+            // 调用方 nextSegment 的 target?.close() 关不到这枚 t，必须就地关
+            t.close()
+            return false
+        }
         vCodec = v
         if (aacMinBuf > 0) {
             val a = createAudioEncoder(p, aacMinBuf)
@@ -811,6 +820,8 @@ class CodecRecorder(
     private fun reject(sink: OutputSink, code: String) {
         Log.e(TAG, "codec prepare rejected: $code")
         engineError = code
+        // prepare 中途失败（openMuxer 失败走的就是这条）target 里还攥着打开的 fd，置空前必须关
+        target?.close()
         target = null
         currentSink = null
         store.discard(sink)
