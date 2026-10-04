@@ -17,12 +17,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -127,6 +124,11 @@ fun CurvePopup(
     // BACK 收弹窗：BottomPanel 时代就有的语义，换壳不丢——弹窗开着按 BACK 不该连页面一起退
     BackHandler(enabled = visible) { onDismiss() }
 
+    // onDismiss 走 rememberUpdatedState：捕获层 pointerInput 的 key 必须恒定（Unit），
+    // 若以调用点的内联 lambda 作 key，HUD 每秒刷读数的重组会不停重启手势监听，
+    // 按压落进重启窗口就被吞（与扇钮 fanTap 同族，见该处注释）
+    val currentDismiss by rememberUpdatedState(onDismiss)
+
     AnimatedVisibility(
         visible = visible,
         enter = slideInHorizontally(motion.offset) { -it } + fadeIn(motion.float),
@@ -140,7 +142,7 @@ fun CurvePopup(
             Box(
                 Modifier
                     .matchParentSize()
-                    .pointerInput(onDismiss) {
+                    .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             if (down.isConsumed) return@awaitEachGesture
@@ -151,7 +153,7 @@ fun CurvePopup(
                                 change.changes.forEach { it.consume() }
                                 dragging = change.changes.any { it.pressed }
                             }
-                            onDismiss()
+                            currentDismiss()
                         }
                     }
             )
@@ -169,8 +171,11 @@ fun CurvePopup(
                     )
                     // 面板卡 = [扇钮左槽 | 曲线框]：通道钮有了自己的格子，闭合态与曲线绘图区零重叠
                     // （用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/描边让弹窗读起来
-                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸
-                    Row(
+                    // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸。
+                    // 叠层顺序刻意反直觉：曲线框先声明（画在下），扇钮后声明（画在上）——展开时朝右
+                    // 扫进画布区的红/绿/蓝三枚必须可见，Row 布局里反过来会被曲线框整块盖掉
+                    // （真机复验踩实过两回：Row 版 + 回滚版）
+                    Box(
                         Modifier
                             .clip(RoundedCornerShape(WotaShape.menu))
                             .background(WotaColor.surface.copy(alpha = 0.97f))
@@ -192,27 +197,10 @@ fun CurvePopup(
                             }
                             .padding(PanelPad.dp)
                     ) {
-                        // 扇钮左槽：中心钮 48dp 恰好占满，垂直居中于面板
-                        ChannelFan(
-                            channel = channel,
-                            open = fanOpen,
-                            names = channelNames,
-                            resetLabel = resetLabel,
-                            onToggle = { fanOpen = !fanOpen },
-                            onChannel = { ch ->
-                                channel = ch
-                                points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
-                                selected = -1
-                                fanOpen = false   // 选完自动收回
-                            },
-                            onReset = {
-                                resetAll()
-                                fanOpen = false
-                            }
-                        )
-                        Spacer(Modifier.width(FanGap.dp))
+                        // 曲线框：左让出扇钮槽位与缝，先声明居下层
                         Box(
                             Modifier
+                                .padding(start = (CENTER_SIZE + FanGap).dp)
                                 .size(side)
                                 .clip(RoundedCornerShape(WotaShape.menu))
                         ) {
@@ -226,10 +214,16 @@ fun CurvePopup(
                             Box(
                                 Modifier
                                     .matchParentSize()
-                                    .pointerInput(channel, gpuMode) {
+                                    // key 只留 gpuMode：channel 变化会重启手势监听，换通道瞬间
+                                    // 的按压会被吞；层内状态全走 rememberUpdatedState 的 livePoints
+                                    .pointerInput(gpuMode) {
                                         if (!gpuMode) return@pointerInput
                                         awaitEachGesture {
                                             val down = awaitFirstDown(requireUnconsumed = false)
+                                            android.util.Log.i(
+                                                "CurveDbg",
+                                                "canvas down pos=${down.position} consumed=${down.isConsumed}"
+                                            )
                                             // 扇面认领过的按压整手忽略：那一指属于通道钮，不在画布落点
                                             if (down.isConsumed) return@awaitEachGesture
                                             // 点画布**不再收扇**（用户 2026-10-04）：点卫星钮稍有偏差落在
@@ -285,13 +279,38 @@ fun CurvePopup(
                                     }
                                 }
                         )
+                        }
+                        // 扇钮：居上层，住面板左槽（48dp 恰好占满），垂直居中于画布行；
+                        // 展开朝右扫进画布区的三枚因此盖在曲线框上可见
+                        Box(
+                            Modifier
+                                .align(Alignment.CenterStart)
+                                .size(CENTER_SIZE.dp)
+                        ) {
+                            ChannelFan(
+                                channel = channel,
+                                open = fanOpen,
+                                names = channelNames,
+                                resetLabel = resetLabel,
+                                onToggle = { fanOpen = !fanOpen },
+                                onChannel = { ch ->
+                                    channel = ch
+                                    points = CurveEdit.pointsOf(params.curve.value.curveOf(ch))
+                                    selected = -1
+                                    fanOpen = false   // 选完自动收回
+                                },
+                                onReset = {
+                                    resetAll()
+                                    fanOpen = false
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
         }
     }
-}
 
 // ------------------------------------------------------------------ 径向通道菜单
 
@@ -491,8 +510,21 @@ private fun FanOption(
  * 扇面触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
  * 不依赖 foundation clickable 的消费口径；抬手时未超滑动阈值才算一次点按。
  */
-private fun Modifier.fanTap(enabled: Boolean, onTap: () -> Unit): Modifier =
-    pointerInput(enabled, onTap) {
+/**
+ * 扇面触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
+ * 不依赖 foundation clickable 的消费口径；抬手时未超滑动阈值才算一次点按，按住超过
+ * 系统长按时限不重复触发。
+ *
+ * **key 只有 [enabled]，[onTap] 走 [rememberUpdatedState]**：取景页 HUD 每秒刷读数，
+ * 面板随之频繁重组，调用点的 lambda 每次重组都是新实例——若以 lambda 作 key，
+ * pointerInput 会在重组时重启，手指 down 正好落进重启窗口就被整个吞掉
+ * （用户 2026-10-04「卫星钮点不动」的根因；adb 偶尔成功只是没撞上重启窗口）。
+ */
+@android.annotation.SuppressLint("ComposableModifierFactory")
+@Composable
+private fun Modifier.fanTap(enabled: Boolean, onTap: () -> Unit): Modifier {
+    val currentTap by rememberUpdatedState(onTap)
+    return pointerInput(enabled) {
         if (!enabled) return@pointerInput
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
@@ -506,9 +538,10 @@ private fun Modifier.fanTap(enabled: Boolean, onTap: () -> Unit): Modifier =
                 change.consume()
                 if (!change.pressed) break
             }
-            if (!moved) onTap()
+            if (!moved) currentTap()
         }
     }
+}
 
 // ------------------------------------------------------------------ 画布与通道（自 CurveSheet 原样继承的部分）
 
