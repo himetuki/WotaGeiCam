@@ -677,14 +677,15 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                 modifier = Modifier.pillAnchor { rect -> mirrorAnchor = rect },
                                 onClick = { mirrorMenu = !mirrorMenu }
                             )
-                            // 对着左片练（2026-10-04 方向 4）：左路参考片 AB 循环先圈好段，
-                            // 这里一键压栈录制页；录完自动弹回来把新片填进右槽（桥见 ComparePractice）
+                            // 对着左片练（2026-10-04 方向 4）：左路参考视频 primeWith 记下后压栈
+                            // 录制页——录制页自动切分屏、右半屏循环播放这条左片，录完自动弹回来
+                            // 把新片填进右槽（桥见 ComparePractice）
                             ComparePill(
                                 label = stringResource(R.string.compare_practice),
                                 selected = false,
                                 onClick = {
                                     setPlaying(false)
-                                    ComparePractice.armed = true
+                                    ComparePractice.primeWith(left.id)
                                     onPractice()
                                 }
                             )

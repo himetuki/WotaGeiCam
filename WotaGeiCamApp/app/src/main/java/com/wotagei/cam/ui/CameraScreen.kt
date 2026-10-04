@@ -120,6 +120,7 @@ import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.ComparePractice
+import com.wotagei.cam.player.LoopMode
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
@@ -276,6 +277,17 @@ fun CameraScreen(
     // DisposableEffect 释放（切出分屏 / 返回模式列表 / 离开录制页三条出口共用这一条收尾）。
     var compareOn by remember { mutableStateOf(false) }
     LaunchedEffect(splitOn) { if (!splitOn) compareOn = false }
+
+    // 「对着左片练」动线（2026-10-04 增补）：对比页发起的这次压栈带着参考片 id——
+    // 取到即自动切进分屏对比模式，右半屏循环播放左片，边看参考边跳。
+    // remember 包住首取：重组不再重复读桥（那时恒为 null，读了也无意义）
+    val practiceLeftId = remember { ComparePractice.takeLeftId() }
+    LaunchedEffect(practiceLeftId) {
+        if (practiceLeftId != null) {
+            splitOn = true    // 先切分屏：compareOn 的复位 effect 以 splitOn 为闸，顺序不能反
+            compareOn = true
+        }
+    }
 
     // ---- 就近胶囊：锚点矩形由各控件在布局期回报，弹窗同一帧就能量到位置
     val pillAnchors = remember { mutableStateMapOf<PillKey, IntRect>() }
@@ -1277,7 +1289,8 @@ fun CameraScreen(
                 compareOn = compareOn,
                 onToggleCompare = { compareOn = it },
                 lensSupported = buddies.value.isNotEmpty(),
-                onLensClick = { showTip(app.getString(R.string.cam_split_lens_soon)) }
+                onLensClick = { showTip(app.getString(R.string.cam_split_lens_soon)) },
+                autoAttachId = practiceLeftId
             )
         }
 
@@ -1356,7 +1369,9 @@ private fun SplitPanel(
     compareOn: Boolean,
     onToggleCompare: (Boolean) -> Unit,
     lensSupported: Boolean,
-    onLensClick: () -> Unit
+    onLensClick: () -> Unit,
+    /** 「对着左片练」带进来的参考片：非空时对比播放器直接挂它循环播（不再让用户去相册选） */
+    autoAttachId: Long?
 ) {
     Column(
         Modifier
@@ -1384,7 +1399,7 @@ private fun SplitPanel(
                     color = WotaText
                 )
             }
-            SplitComparePlayer(Modifier.weight(1f))
+            SplitComparePlayer(autoAttachId, Modifier.weight(1f))
         } else {
             Text(
                 text = stringResource(R.string.cam_split),
@@ -1430,9 +1445,13 @@ private fun SplitPanel(
  * 参考视频**外放**（用 PlayerEngine 默认音量）：内录要 MediaProjection 授权，本批不做，
  * 只让用户听得见。选片走系统相册 ACTION_PICK（与对比页同一手法）：content Uri → mediaId → 仓库反查；
  * 选完默认暂停（[com.wotagei.cam.player.PlayerEngine.attach] 内置 playWhenReady=false），点播放才播。
+ *
+ * [autoAttachId]：「对着左片练」带进来的参考片（2026-10-04 增补）——非空且还没挂片时直接挂上，
+ * 单曲循环并**自动开播**（练习场景左片就是用来边看边跳的，不再让用户去相册里点一遍）；
+ * 挂上后即与手选片无异，用户仍可换片/暂停。
  */
 @Composable
-private fun SplitComparePlayer(modifier: Modifier = Modifier) {
+private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifier) {
     val app = LocalContext.current.applicationContext
     val repo = rememberMediaRepo()
     val engine = rememberPlayerEngine()
@@ -1445,6 +1464,21 @@ private fun SplitComparePlayer(modifier: Modifier = Modifier) {
     val pos by engine.positionMs.observed()
     val dur by engine.durationMs.observed()
     val playing by engine.isPlaying.observed()
+
+    // 练习参考片自动挂载：只挂一次（clipUri 已非空 = 用户换过片，别再拉回去）
+    LaunchedEffect(autoAttachId) {
+        val id = autoAttachId ?: return@LaunchedEffect
+        if (clipUri != null) return@LaunchedEffect
+        val clip = repo.clipById(id).first()
+        if (clip == null) {
+            banner = R.string.compare_pick_failed
+        } else {
+            engine.loopMode = LoopMode.ONE
+            engine.attach(clip.uri)
+            engine.softPause(false)
+            clipUri = clip.uri
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
