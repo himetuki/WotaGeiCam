@@ -266,7 +266,8 @@ fun PlayerScreen(
 /**
  * 单视频播放页（需求 27 行）。
  *
- * 手势：双击启停、双指缩放 1..4x、单击切控件显隐（3s 自动隐藏，DOWN 取消 / UP 重置）；
+ * 手势：双击启停、双指缩放 0.1..4x + 双指平移、单击切控件显隐（无自动隐藏——
+ * 显隐只由画面单击决定，静置/播放/拖动都不收起，2026-09-28 定版）；
  * 画面区滑动一律不 seek —— 只有进度条能拖。
  */
 @Composable
@@ -448,6 +449,11 @@ fun PlayerScreen(
                         .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.displayCutout))
                         .background(AcrylicScrim)
                         .padding(bottom = 2.dp)
+                        // 与顶栏同一口径：时间读数 Text、两行之间的间隙原本不构成命中，
+                        // 点上去会穿透到画面手势区误切显隐/误启停。空 pointerInput 只改
+                        // 命中归属，栏内控件（进度条拖动、按钮、AB 胶囊）事件照旧先于容器。
+                        // 防退化点同顶栏：JVM 测不到命中穿透，真机点时间读数实证。
+                        .pointerInput(Unit) {}
                 ) {
                     val timeStyle = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize)
                     Row(
@@ -600,28 +606,31 @@ fun PlayerScreen(
                     exporting = clipExporting,
                     progress = clipProgress,
                     onExport = {
-                        engine.softPause(true)
-                        clipMenu = false
-                        clipExporting = true
-                        clipProgress = 0f
-                        clipJob = scope.launch {
-                            try {
-                                // 区间在起跑那一刻定版：导出期间用户再动 A/B 不影响这一轮
-                                when (val r = clipExporter.export(clip, ab.aMs, ab.bMs) { p -> clipProgress = p }) {
-                                    is ClipResult.Done -> {
-                                        banner = R.string.player_clip_done
-                                        clipRepo.invalidate()
-                                    }
-                                    is ClipResult.Fail ->
-                                        banner = if (r.reason == ClipError.RANGE) {
-                                            R.string.player_clip_too_short
-                                        } else {
-                                            R.string.player_clip_failed
+                        // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层
+                        if (clipJob == null) {
+                            engine.softPause(true)
+                            clipMenu = false
+                            clipExporting = true
+                            clipProgress = 0f
+                            clipJob = scope.launch {
+                                try {
+                                    // 区间在起跑那一刻定版：导出期间用户再动 A/B 不影响这一轮
+                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs) { p -> clipProgress = p }) {
+                                        is ClipResult.Done -> {
+                                            banner = R.string.player_clip_done
+                                            clipRepo.invalidate()
                                         }
+                                        is ClipResult.Fail ->
+                                            banner = if (r.reason == ClipError.RANGE) {
+                                                R.string.player_clip_too_short
+                                            } else {
+                                                R.string.player_clip_failed
+                                            }
+                                    }
+                                } finally {
+                                    clipExporting = false
+                                    clipJob = null
                                 }
-                            } finally {
-                                clipExporting = false
-                                clipJob = null
                             }
                         }
                     },
@@ -874,13 +883,10 @@ private fun ClipExportPopup(
         modifier = Modifier.width(CLIP_POPUP_PANEL_WIDTH),
         title = stringResource(R.string.player_clip_title)
     ) {
-        if (range == null) {
-            Text(
-                stringResource(R.string.player_clip_need_ab),
-                style = MaterialTheme.typography.bodySmall,
-                color = WotaTextDim
-            )
-        } else {
+        // 区间读数行只在有合法区间时出现；「导出中」的进度与取消**优先于**区间判断——
+        // 否则导出中途用户清了 A/B 再重开面板，进度条会被"先圈 A/B"引导文案顶掉，
+        // 任务还在后台跑却无处可看进度、无处可取消（任务归属仍在本页 scope，退出页面才会终止）
+        if (range != null) {
             Text(
                 stringResource(R.string.player_clip_in, formatDuration(range.first)),
                 style = MaterialTheme.typography.bodySmall,
@@ -900,25 +906,31 @@ private fun ClipExportPopup(
                 style = MaterialTheme.typography.bodySmall,
                 color = WotaTextDim
             )
-            if (exporting) {
-                LinearProgressIndicator(
-                    progress = progress,
-                    modifier = Modifier.fillMaxWidth(),
-                    color = WotaColor.accent,
-                    trackColor = WotaColor.outline
-                )
-                WotaChip(
-                    label = stringResource(R.string.player_clip_cancel),
-                    selected = false,
-                    onClick = onCancel
-                )
-            } else {
-                WotaChip(
-                    label = stringResource(R.string.player_clip_export),
-                    selected = true,
-                    onClick = onExport
-                )
-            }
+        }
+        if (exporting) {
+            LinearProgressIndicator(
+                progress = progress,
+                modifier = Modifier.fillMaxWidth(),
+                color = WotaColor.accent,
+                trackColor = WotaColor.outline
+            )
+            WotaChip(
+                label = stringResource(R.string.player_clip_cancel),
+                selected = false,
+                onClick = onCancel
+            )
+        } else if (range != null) {
+            WotaChip(
+                label = stringResource(R.string.player_clip_export),
+                selected = true,
+                onClick = onExport
+            )
+        } else {
+            Text(
+                stringResource(R.string.player_clip_need_ab),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaTextDim
+            )
         }
     }
 }
@@ -1004,7 +1016,15 @@ private fun PlayerTopBar(
             .fillMaxWidth()
             .background(AcrylicScrim)
             .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
-            .padding(horizontal = 2.dp, vertical = 2.dp),
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+            // 控件条容器必须自己是命中目标：这一行原本只有 background（不构成命中），
+            // 文件名 Text 与四周内边距这些"裸区"的点按会穿透到底下的画面手势区，
+            // 被判成画面单击（误切控件显隐）甚至两下凑成双击（误启停）。空 pointerInput
+            // 让整条顶栏进入命中路径，底下画面收不到这些点；栏内按钮自带点击链，
+            // 事件在 Main pass 先于容器分发，不受影响。
+            // 防退化点：删掉这行不会有任何 JVM 测试变红——兄弟节点穿透属 Compose
+            // 命中测试路径，JVM 单测桩测不到，只能真机点按文件名空当实证（显隐不得切换）。
+            .pointerInput(Unit) {},
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 顶栏 7 枚圆钮压到 30dp：M3 IconButton 强制 ≥48dp，七个就把文件名挤成「…」
