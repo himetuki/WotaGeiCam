@@ -976,8 +976,21 @@ private class ArcRepairSession(
                 audioPendingPts = ex.sampleTime
                 audioPendingSize = size
             }
-            if (audioPtsBase < 0L) audioPtsBase = audioPendingPts
-            val norm = (audioPendingPts - audioPtsBase).coerceAtLeast(0L)
+            // 音频基取**视频首帧**而非音轨首样本：两轨 sampleTime 同一条容器时间轴，音轨晚启动
+            // 的源按自身首样本归一会把整条音轨往前挪（修复成片音画错位）。没有有效视频帧时退回旧口径。
+            if (audioPtsBase < 0L) {
+                audioPtsBase = if (decodePtsBase >= 0L) decodePtsBase else audioPendingPts
+            }
+            val norm = audioPendingPts - audioPtsBase
+            if (norm < 0L) {
+                // 视频起点之前的音频（音轨早启动的源）：丢弃，不挤在 0 点造成非单调/重播
+                audioPending = false
+                if (!ex.advance()) {
+                    audioDone = true
+                    return
+                }
+                continue
+            }
             if (norm > limitUs) return
             audioBuf.position(0)
             audioBuf.limit(audioPendingSize)

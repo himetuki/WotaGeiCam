@@ -90,7 +90,7 @@ class AudioFeeder(
 
     companion object {
         const val EOS_SIZE = 4
-        /** 队列上限：按 ~20ms/包算约 1.3s 音频；满了丢最旧并计数，绝不阻塞采集线程 */
+        /** 队列上限：按 ~20ms/包算约 1.3s 音频；满了 offer 等不到空位就丢**当前这枚新包**并计数（已入队旧包保留，PTS 仍单调），绝不长阻塞采集线程 */
         private const val QUEUE_CAPACITY = 64
         private const val OFFER_WAIT_MS = 20L
         /** 单次读块上限：约 40ms（48k 立体声 8KB），保证 stop 几十毫秒内生效 */

@@ -695,7 +695,7 @@ class CodecRecorder(
         }
     }
 
-    /** 消费 PCM 通道：取包 → 编码器输入；4 字节包即 EOS 哨兵（``） */
+    /** 消费 PCM 通道：取包 → 编码器输入；EOS 哨兵以 pts<0 识别（``） */
     private fun feedAudioInput(codec: MediaCodec) {
         val f = feeder ?: return
         val pkt = heldPkt ?: f.poll(0) ?: return
@@ -705,9 +705,10 @@ class CodecRecorder(
             return
         }
         heldPkt = null
-        // EOS 判定看 pts<0（真实包的时间戳恒为 nanoTime µs、恒正）：哨兵 data 恰 4 字节
-        // 与「双声道 2 帧的合法短读」同形，只看长度会把真 PCM 误判成 EOS 提前掐断音轨
-        if (pkt.ptsUs < 0 || pkt.data.size == AudioFeeder.EOS_SIZE) {
+        // EOS 判定只看 pts<0（真实包 pts 恒为 nanoTime µs、恒正，哨兵恒 -1）。长度不能并列成
+        // 第二判据：哨兵 data 恰 4 字节与「双声道 2 帧的合法短读」同形，size==4 支路（01028b9
+        // 加 pts<0 时留在 OR 里的旧判定）会把真 PCM 误判成 EOS 提前掐断音轨
+        if (pkt.ptsUs < 0) {
             queueEosOn(codec, idx, eosPts())
             return
         }
