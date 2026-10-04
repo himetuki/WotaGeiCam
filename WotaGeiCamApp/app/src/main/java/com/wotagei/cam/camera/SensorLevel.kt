@@ -197,10 +197,17 @@ class LevelSensor(context: Context) : SensorEventListener {
             _isLevel.value = rollValid && isLevelOf(rollDeg)
             return
         }
-        // 俯仰过 0° 与左右回正是两路独立提示，不能共用 roll 那条早退路径
-        val pitchWasLevel = isLevelOf(_pitch.value)
-        if (abs(pitchDeg - _pitch.value) >= EMIT_STEP_DEG) _pitch.value = pitchDeg
-        if (isLevelOf(pitchDeg) && !pitchWasLevel) buzz()
+        // 俯仰过 0° 与左右回正是两路独立提示，不能共用 roll 那条早退路径。
+        // 回正震动必须挂在「落值」闸门内侧（与 roll 走 _isLevel 边沿同一结构）：
+        // 被节流吞掉的帧不落值，存档值停在带外旧值上——若在闸门外拿它当"上一状态"，
+        // 俯仰以 <EMIT_STEP 的步距跨进容差带再停住时，「上帧未回正、本帧回正」逐帧成立，
+        // 100ms 单震就按 ~50Hz 重触发成连震不歇（2026-10-04 批次 D 修复，守卫见
+        // test 的 SensorBuzzGateGuardTest）
+        if (abs(pitchDeg - _pitch.value) >= EMIT_STEP_DEG) {
+            val pitchWasLevel = isLevelOf(_pitch.value)
+            _pitch.value = pitchDeg
+            if (!pitchWasLevel && isLevelOf(pitchDeg)) buzz()
+        }
         if (!rollValid || abs(rollDeg - _roll.value) < EMIT_STEP_DEG) return
         _roll.value = rollDeg
         val level = isLevelOf(rollDeg)
