@@ -72,4 +72,17 @@
     <string name="compare_mirror_left">左镜像</string>
     <string name="compare_mirror_right">右镜像</string>
     <string name="compare_mirror_all">全镜像</string>
+
+    <!-- 掐头去尾剪辑导出（2026-10-04 方向 3：区间复用 A/B 标记，无损拷贝不重编码） -->
+    <string name="player_clip">剪辑</string>
+    <string name="player_clip_title">按 A/B 段导出（无损剪）</string>
+    <string name="player_clip_need_ab">先用底栏 A/B 标出要保留的段落，再回到这里导出</string>
+    <string name="player_clip_in">入点 %1$s（自动向前对齐关键帧）</string>
+    <string name="player_clip_out">出点 %1$s</string>
+    <string name="player_clip_keep">保留 %1$s / 共 %2$s</string>
+    <string name="player_clip_too_short">保留段太短，圈长一点再导</string>
+    <string name="player_clip_export">导出到媒体库</string>
+    <string name="player_clip_cancel">取消导出</string>
+    <string name="player_clip_done">剪辑已导出到媒体库</string>
+    <string name="player_clip_failed">导出失败，请重试</string>
 </resources>
