@@ -8,13 +8,17 @@ import java.io.File
  * 文件与成片同目录同名，扩展名 `.drops.json`；纯档案/调试用途——**仅抽帧**模式下被抽帧的
  * 画面在录制时已弃，播放器无法事后补弧，弧连续由"自动抽帧补弧"模式在录制时一次完成。
  *
+ * **位次是跨段全局位次**：分段轮转（超过 MAX_FILE_BYTES 换段）沿用同一枚 GL 编码面，
+ * 帧位次计数不随换段归零，所以 [drops] 里的 k 对应的是整次录制的第 k 个输出帧，不是首段内的位次；
+ * sidecar 只随首段（parts[0]）落盘。按段拆分需要让 GL 感知换段边界并切账，当前未做。
+ *
  * 编解码是手写的最小 JSON（数组里全是整数），不走 org.json：本类要在 JVM 单测里全量跑
  * （android.jar 的 org.json 是 stub）。
  */
 data class ArcDropLog(
     val mode: String,
     val dstFps: Int,
-    /** (输出位次 k, 该位次之前丢弃的源帧数)；k 升序 */
+    /** (输出位次 k, 该位次之前丢弃的源帧数)；k 升序，且为跨段全局位次（见类注） */
     val drops: List<Pair<Int, Int>>
 ) {
 

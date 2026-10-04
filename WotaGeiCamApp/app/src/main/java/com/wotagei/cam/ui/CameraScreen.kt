@@ -1927,32 +1927,38 @@ private class RecordRunner(
             // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
             // 容器标称会被强制档标假）：commit 后 update DISPLAY_NAME 连文件改名，
             // sidecar 与成片一起更名（同 r28 的 renameFor 先例）。实测失败/过短退化为无前缀。
-            val uri = out.uri
-            if (uri != null) {
+            // 对 **全部分段** 统一改名：分段轮转建 pending 时引擎拿不到前缀值（前缀依赖
+            // GL 录制中才测得的实测源帧率），所以不给 nextSegment 另造一条命名通路，
+            // 而是沿用本处「commit 后改名」的唯一口径，把 parts[1..] 一起补上。
+            if (out.parts.isNotEmpty()) {
                 val srcFps = glProvider()?.measuredArcSrcFps() ?: 0
-                // path 查不到（VideoStore.pathOf 对 pending 项明示可能 null）时 old 为空串，
-                // 再拼前缀会把成片改名成裸前缀（如 "24fto24f_"，丢扩展名）——放弃改名保住原名
-                val old = out.path?.substringAfterLast('/') ?: ""
-                if (srcFps > 0 && activeArcDstFps > 0 && old.isNotEmpty()) {
+                if (srcFps > 0 && activeArcDstFps > 0) {
                     val prefix = ArcRateProbe.convertNamePrefix(srcFps, activeArcDstFps)
-                    val newName = prefix + old
-                    val renamed = runCatching {
-                        app.contentResolver.update(
-                            uri,
-                            ContentValues().apply {
-                                put(MediaStore.MediaColumns.DISPLAY_NAME, newName)
-                            },
-                            null, null
-                        )
-                    }.getOrDefault(0) > 0
-                    // MediaStore 撞名时会自行改成不重名（加 " (1)" 式序号）且 update 仍报成功，
-                    // 拼装名与真实落盘名可能分叉；sidecar 必须跟着回查到的真实名走
-                    //（回查失败才退回拼装名，与旧行为等价不会更差）
-                    val actualName = if (renamed) queryDisplayName(uri) ?: newName else null
-                    if (actualName != null && out.path != null) {
-                        ArcDropLog.renameFor(out.path!!, out.path!!.replaceAfterLast('/', actualName))
+                    for (part in out.parts) {
+                        val uri = part.uri ?: continue
+                        // path 查不到（VideoStore.pathOf 对 pending 项明示可能 null）时 old 为空串，
+                        // 再拼前缀会把成片改名成裸前缀（如 "24fto24f_"，丢扩展名）——放弃改名保住原名
+                        val old = part.path?.substringAfterLast('/') ?: ""
+                        if (old.isEmpty()) continue
+                        val newName = prefix + old
+                        val renamed = runCatching {
+                            app.contentResolver.update(
+                                uri,
+                                ContentValues().apply {
+                                    put(MediaStore.MediaColumns.DISPLAY_NAME, newName)
+                                },
+                                null, null
+                            )
+                        }.getOrDefault(0) > 0
+                        // MediaStore 撞名时会自行改成不重名（加 " (1)" 式序号）且 update 仍报成功，
+                        // 拼装名与真实落盘名可能分叉；sidecar（只在首段）必须跟着回查到的真实名走
+                        //（回查失败才退回拼装名，与旧行为等价不会更差）
+                        val actualName = if (renamed) queryDisplayName(uri) ?: newName else null
+                        if (part === out.parts.first() && actualName != null && part.path != null) {
+                            ArcDropLog.renameFor(part.path!!, part.path!!.replaceAfterLast('/', actualName))
+                        }
+                        Log.i(TAG_UI, "arc rename part=${part.partIndex} ok=$renamed -> ${actualName ?: newName}")
                     }
-                    Log.i(TAG_UI, "arc rename ok=$renamed -> ${actualName ?: newName}")
                 }
             }
         }
