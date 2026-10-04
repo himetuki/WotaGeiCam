@@ -48,13 +48,17 @@ private const val HORIZON_SIZE = 46
  * 中心那枚机标固定不动 —— 读的是"机体相对水平面偏了多少"，不是数字本身。
  *
  * 只画不判：容差带、到水平震动等判定仍在 `LevelSensor` 与上层开关里。
- * 旋转/平移走动画档，所以从 -17.8° 到 -16.3° 是滑过去的，不是跳过去的。
+ *
+ * **直接画、不叠动画**（2026-10-04「仪表更新延迟过高」修复）：数据源已是 50Hz+低通的平滑流，
+ * 原来在之上再套 animateFloatAsState（FLUENT 档 750ms tween / LIQUID 档低刚度弹簧）——
+ * 每次数值更新都重启一枚长缓动，仪表永远在"追"，叠加传感器低通后视觉滞后超过半秒。
+ * 实时仪表的数据链自带平滑，交互动画档只该管界面过渡，不该管数据跟随。
  */
 @Composable
 fun ArtificialHorizon(roll: Float, pitch: Float, modifier: Modifier = Modifier) {
-    val motion = LocalMotion.current
-    val smoothRoll by animateFloatAsState(roll.coerceIn(-ROLL_FULL_SCALE_DEG, ROLL_FULL_SCALE_DEG), motion.float)
-    val smoothPitch by animateFloatAsState(pitch.coerceIn(-PITCH_FULL_SCALE_DEG, PITCH_FULL_SCALE_DEG), motion.float)
+    // 保留原变量名：调用点无感，去掉的只是动画层
+    val smoothRoll = roll.coerceIn(-ROLL_FULL_SCALE_DEG, ROLL_FULL_SCALE_DEG)
+    val smoothPitch = pitch.coerceIn(-PITCH_FULL_SCALE_DEG, PITCH_FULL_SCALE_DEG)
     Canvas(modifier.size(HORIZON_SIZE.dp)) {
         val radius = size.minDimension / 2f
         val center = Offset(radius, radius)

@@ -20,8 +20,9 @@ import kotlin.math.sqrt
 /**
  * 水平仪 / 俯仰仪数据源（需求 24、25 行「必须」，03 文档 §5）。
  *
- * 只读 `TYPE_ACCELEROMETER`（拿静态重力即可，不用 TYPE_GRAVITY/旋转矢量，省一颗传感器），
- * 采样率 `SENSOR_DELAY_GAME`（约 50Hz：够跟手，又不到 `SENSOR_DELAY_FASTEST` 的功耗）。
+ * 采样源**优先 TYPE_GRAVITY（融合重力，低延迟）**、无融合回退 TYPE_ACCELEROMETER（只拿静态
+ * 重力即可，不碰旋转矢量），采样率 `SENSOR_DELAY_GAME`（约 50Hz：够跟手，又不到
+ * `SENSOR_DELAY_FASTEST` 的功耗）。
  *
  * 角度约定（**以显示方向为基准**，即观察者眼里的屏幕横平竖直，全部以「度」输出）：
  * - [roll]：绕取景光轴的左右倾角，`0 = 左右水平`，**正值 = 屏幕右侧偏低**，范围 -90..90。
@@ -44,10 +45,19 @@ class LevelSensor(context: Context) : SensorEventListener {
 
     private val appContext = context.applicationContext
     private val sensorManager = appContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-    private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-    /** 本机没有加速度计时为 false，UI 应据此隐藏仪表（[start] 也只打一行日志） */
-    val available: Boolean get() = accelerometer != null
+    /**
+     * 采样源**优先融合重力**（TYPE_GRAVITY，2026-10-04「仪表更新延迟过高」修复）：
+     * 融合源由系统按陀螺仪+加速度计解算，输出已平滑且**跟随延迟远小于纯加速度计**
+     * （加速度计在快速转动时混入线性加速度、又被低通压掉，体感就是"仪表追不上"）。
+     * 无融合能力的机型回退纯加速度计（原行为）。
+     */
+    private val gravitySensor = sensorManager?.getDefaultSensor(Sensor.TYPE_GRAVITY)
+    private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val sourceSensor = gravitySensor ?: accelerometer
+
+    /** 本机没有可用重力源计时为 false，UI 应据此隐藏仪表（[start] 也只打一行日志） */
+    val available: Boolean get() = sourceSensor != null
 
     /** 水平仪/俯仰仪过 0° 是否震动，由设置页 `level_buzz_enabled` 喂入；关掉后两路都不震 */
     @Volatile
@@ -111,9 +121,9 @@ class LevelSensor(context: Context) : SensorEventListener {
     /** 开始采样；重复调用无副作用 */
     fun start() {
         val manager = sensorManager
-        val sensor = accelerometer
+        val sensor = sourceSensor
         if (manager == null || sensor == null) {
-            Log.w(TAG, "no accelerometer, level meter unavailable")
+            Log.w(TAG, "no gravity/accelerometer sensor, level meter unavailable")
             return
         }
         if (registered) return
@@ -148,7 +158,8 @@ class LevelSensor(context: Context) : SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+        val type = event.sensor.type
+        if (type != Sensor.TYPE_ACCELEROMETER && type != Sensor.TYPE_GRAVITY) return
         if (samplesSeen == 0) watchdogRetries = 0   // 自愈成功（或本就正常）：预算归零，下次异常重新计数
         samplesSeen++
         val values = event.values
@@ -227,8 +238,9 @@ class LevelSensor(context: Context) : SensorEventListener {
         /** 水平判定容差（度）：UI 配色与 [isLevel] 共用这一个阈值，避免两处各写一份 */
         const val LEVEL_TOLERANCE_DEG = 1.5f
 
-        /** 低通系数：越小越稳但越钝，0.15 是 50Hz 下的手感折中值 */
-        const val SMOOTH_ALPHA = 0.15f
+        /** 低通系数：越小越稳但越钝。0.30（2026-10-04 从 0.15 提起——用户报「仪表更新延迟过高」，
+         *  0.15 在 50Hz 下到 90% 要约 300ms；融合重力源本身已平滑，兜底加速度计路径也减半滞后） */
+        const val SMOOTH_ALPHA = 0.30f
 
         /** 小于该角度变化不发布新值：50Hz 原始事件直接驱动 Compose 会白白重组发热 */
         const val EMIT_STEP_DEG = 0.1f
