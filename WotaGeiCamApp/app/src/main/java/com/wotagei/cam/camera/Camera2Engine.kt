@@ -264,20 +264,32 @@ class Camera2Engine(
     fun close() {
         collectJobs.forEach { it.cancel() }
         collectJobs.clear()
-        post {
-            stopImageReaders()
-            teardownDevice()
-            extraSurface = null
-            lens = null
-            ability = null
-            reqState = null
-            chosenFps = null
-            generation++
-        }
-        // 清理放在最后一个任务里：先跑完上面的拆除，再退出线程
+        // 先在调用方线程同步封口：置假后所有 post 的入队/执行守卫即刻生效，close 返回后旧引擎
+        // 上不会再有任何任务起跑（审查 D 项·补：quitSafely 对已到期的消息照发不误，只把拆除与
+        // quit 合并成单 post 还封不住「合并任务执行前入队」的 post——它会在 quit 之后被补发）
+        threadRunning = false
+        // 拆除与退线程必须是单个原子任务（审查 D 项）：原先两枚 post 之间有执行间隙，bind() 换
+        // 引擎时旧引擎 open 的 post 插进去的话 manager.openCamera 已发起而线程旋即退出，onOpened
+        // 投到已退出的 looper 被静默丢弃 ⇒ 相机句柄无人 close。合并后插队点不复存在。
+        // try/finally 保住「哪怕拆除抛异常也一定退出线程」（原先由 post 包装的 catch 与独立的
+        // quit 任务分别承担这两半语义，合并后必须一起兜住）。
+        // 诚实边界：openCamera 已在飞、onOpened 晚于 quit 到达的那一路（非本窗口）投递即丢，
+        // Camera2 无撤销打开的 API，只能靠 onOpened 自身的代数/threadRunning 守卫兜住 quit 前到达的情形。
         workHandler.post {
-            threadRunning = false
-            workThread.quitSafely()
+            try {
+                stopImageReaders()
+                teardownDevice()
+                extraSurface = null
+                lens = null
+                ability = null
+                reqState = null
+                chosenFps = null
+                generation++
+            } catch (e: Exception) {
+                Log.w(TAG, "终止拆除异常（线程仍退出）：${paramSnapshot()}", e)
+            } finally {
+                workThread.quitSafely()
+            }
         }
     }
 
