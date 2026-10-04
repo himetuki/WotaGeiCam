@@ -1967,7 +1967,16 @@ private class RecordRunner(
         else glProvider()?.setOutputSurface(null, 0, 0)
         elapsedMs.value = out.durationMs
         volumeDb.value = MIN_DB - 40f
-        status.value = if (out.error != null) RecordStatus.ERROR else RecordStatus.IDLE
+        if (out.error != null) {
+            status.value = RecordStatus.ERROR
+            // ERROR 只是中间态（04 §6）：收尾失败弹完错误提示必须放行快门——status 恒挂
+            // ERROR 时 onRecordClick 的重入守卫（非 IDLE 即忽略）把录制永久顶死，
+            // 只能靠下一次 ON_PAUSE 的二次 stop 早退顺带复位。80ms 与 failNow 同一口径：
+            // 给 UI 的 result collect 留一拍读错误态的窗口再回 IDLE
+            handler.postDelayed({ if (status.value == RecordStatus.ERROR) status.value = RecordStatus.IDLE }, 80L)
+        } else {
+            status.value = RecordStatus.IDLE
+        }
         result.value = out
     }
 
