@@ -119,6 +119,8 @@ import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
+import com.wotagei.cam.ui.design.WotaStroke
+import com.wotagei.cam.ui.design.hudFrostDockRegistrar
 import com.wotagei.cam.ui.design.hudFrostInherit
 import com.wotagei.cam.ui.design.hudFrostPlate
 import com.wotagei.cam.ui.design.pillAnchor
@@ -1232,22 +1234,37 @@ fun HudDockZone(
     // 而它们的 fill 必须让位，否则 74.9% 不透明的药丸把底下的霜全盖死。
     // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）
     val plateRadiusPx = with(LocalDensity.current) { WotaShape.radiusCard.toPx() }
-    // 滑出屏外期间切"吃父板"：不注册矩形（GL 下一帧不画，背影消失）+ fill 让位（无实底）。
-    // 只剩描边且整体在屏外，视觉上就是"背影跟着内容一起收回"；滑回 frostVisible=true 恢复注册
-    val plate = if (frostVisible) remember(plateRadiusPx) { hudFrostPlate(plateRadiusPx, HudInkLevel.PRIMARY) }
-    else hudFrostInherit
+    // 霜（#84 步骤 2）：底板注册一块玻璃，里面的条目一律改成"吃父板"——
+    // 它们再各注册一块就会与父板重叠（同一条 UV 上叠两层混色，白白多画一遍），
+    // 而它们的 fill 必须让位，否则 74.9% 不透明的药丸把底下的霜全盖死。
+    // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）。
+    //
+    // 这里**不走 wotaHudCard** 而是本地拼链（用户 2026-10-04「Dock 背影未收回」修复）：
+    // wotaHudCard 入口被 HudFrost.live 短路——滑出+面板期其他板退场把 GL 表清空、drew=0、
+    // live 翻 false，恢复时 registrar 被 live 挡在门外，板永久回不来（死锁真机实证）。
+    // 因此注册（hudFrostDockRegistrar）常驻且不读 live：滑出期写屏外哨兵让 GL 停画（背影修），
+    // 滑回写真矩形自愈；live 只用来决定 fill 让不让位（视觉）。
+    val dockShape = RoundedCornerShape(WotaShape.radiusCard)
     val motion = LocalMotion.current
     CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
         Column(
             modifier
                 // HUD 常驻小卡不接 24dp 件位大卡档（§4.4 建议 2），仍走 radiusCard 14dp——
-                // 与下面 GL 板的 plateRadiusPx 同一枚令牌，两处不会分叉
-                .wotaHudCard(RoundedCornerShape(WotaShape.radiusCard), plate)
+                // 与注册进 GL 的 plateRadiusPx 同一枚令牌，两处不会分叉
+                .clip(dockShape)
+                .border(WotaStroke.hairline, WotaColor.acrylicBorder, dockShape)
+                // fill 让位判据：霜真在屏上 **且** Dock 本身在屏内（滑出期写的是屏外哨兵，
+                // GL 没板可吃，fill 必须回来兜着——内容虽然整体离屏，滑回动画途中会路过屏内）
+                .then(
+                    if (HudFrost.live && frostVisible) Modifier
+                    else Modifier.background(WotaColor.hudScrim)
+                )
+                // 注册常驻（不读 live，防死锁）：frostVisible=false 写屏外哨兵，true 写实测矩形
+                .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible))
                 // 10-01 布局批：Dock 随内部控件数量平滑变化宽高（用户指令；Motion 例外 #2，
                 // 规格见 MotionSpec.intSize，PLAIN 档同样走 scaled、reduced 时 0 时长直达）。
-                // 位置必须排在 wotaHudCard **之后**（链上更内侧）：wotaHudCard 第一环是 clip、
-                // 它是外层节点，画的是内层上报的尺寸——animateContentSize 在它内侧，底板就跟着
-                // 动画后的尺寸走，clip 也裁在动画尺寸上，内容不会长出底板外；放它前面则底板直接
+                // 位置必须排在 clip/border **之后**（链上更内侧）：外层节点画的是内层上报的尺寸——
+                // animateContentSize 在它内侧，底板就跟着动画后的尺寸走；放它前面则底板直接
                 // 跳到终尺寸、只有外层盒在动，观感断裂。放 heightIn 之前＝"先按带高钳住内容、
                 // 再对钳完的实测尺寸做动画"，次序不能再换。编辑页复用同一容器，不用另改；
                 // READOUT/底栏/TOP 用户未点名，不加。

@@ -135,7 +135,7 @@ fun Modifier.wotaHudCard(
  * 所以观感上不会脱节；单个条目被飞出去的位移那几帧不在本轮覆盖范围，留给真机核。
  */
 @Composable
-private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard): Modifier {
+private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean = true): Modifier {
     val alpha = frostScrimAlphaFor(frost.ink)
     // 喂表只看"开关意图"，不看 live —— 用 live 当闸门会启动死锁：卡片要 live 才写、
     // live 要 GL 画过板才真、GL 要表里有卡片才画得出。分工见 HudFrost.intent 的注释。
@@ -147,12 +147,27 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard): Modifier {
             if (slot >= 0) FrostCardTable.releaseSlot(slot)
         }
     }
-    LaunchedEffect(slot, coords, alpha, intent) {
+    LaunchedEffect(slot, coords, alpha, intent, visible) {
         val c = coords ?: return@LaunchedEffect
         if (slot < 0 || !intent) return@LaunchedEffect
         val p = c.positionInWindow()
         val size = c.size
         HudFrost.refreshHeader()
+        if (!visible) {
+            // 屏外哨兵：板画在视口外 = 视觉上消失。**注册必须常驻**——若靠离场撤槽让板消失，
+            // 面板期其他板一并退场会把表清空 → GL drew=0 → live=false → wotaHudCard 被 live
+            // 短路成实底、registrar 永不回来 = 板永久回不来（2026-10-04 Dock 滑出真机死锁实证）
+            FrostCardTable.writeCard(
+                slot = slot,
+                leftPx = -99999f,
+                topPx = -99999f,
+                rightPx = -99998f,
+                bottomPx = -99998f,
+                radiusPx = frost.radiusPx,
+                alpha = 0f
+            )
+            return@LaunchedEffect
+        }
         FrostCardTable.writeCard(
             slot = slot,
             leftPx = p.x,
@@ -165,6 +180,17 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard): Modifier {
     }
     return this.onGloballyPositioned { coords = it }
 }
+
+/**
+ * 竖 Dock 滑出用的常驻注册（用户 2026-10-04「Dock 背影未收回」修复）：[frostVisible]=false 时
+ * 板写屏外哨兵而不是撤槽离场——离场会让 GL 表清空、live 翻 false，恢复被 [wotaHudCard] 的
+ * live 短路挡死（死锁机理见 [hudFrostRectRegistrar] 屏外哨兵分支注释）。
+ * 本包装与 [wotaHudCard] 霜分支的差别只有一条：**不读 [com.wotagei.cam.ui.HudFrost.live]**，
+ * 调用方（HudDockZone）自己决定 fill 是否让位。
+ */
+@Composable
+internal fun Modifier.hudFrostDockRegistrar(radiusPx: Float, frostVisible: Boolean): Modifier =
+    hudFrostRectRegistrar(hudFrostPlate(radiusPx, HudInkLevel.PRIMARY), frostVisible)
 
 /**
  * 胶囊的**两档内剂量**（任务 #70 B）。做成"档"而不是直接改 [WotaChip] 的理由写在字段注释里：
