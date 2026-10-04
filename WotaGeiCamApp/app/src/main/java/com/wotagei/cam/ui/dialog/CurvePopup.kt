@@ -473,8 +473,11 @@ private fun FanOption(
     }
     val rad = Math.toRadians(angleDeg.toDouble())
     // 命中盒 48dp（[OPTION_HIT_SIZE]）包住 40dp 视觉钮：手指按在圆钮边缘不滑出命中区。
-    // 相邻钮 45° 角距 64dp 的弦距 ≈49dp > 48dp，命中区两两不相交。fanTap 在 graphicsLayer
-    // **内侧**——外侧挂法命中留在布局原位、视觉/命中分离，点扇面位置永远点空（真机实证）
+    // 相邻钮 45° 角距 64dp 下，48dp **方形**命中盒按轴向判**相交**（相邻圆心差 dx≈45.25 /
+    // dy≈18.75dp，双双 <48）——命中条真实存在；「弦距 ≈49dp 不相交」那笔账只对圆盒成立，
+    // 别再拿它当方盒不相交的证据。同一指落进命中条时由 fanTap 的 isConsumed 整手让路兜底
+    // （见该处注释）。fanTap 在 graphicsLayer **内侧**——外侧挂法命中留在布局原位、
+    // 视觉/命中分离，点扇面位置永远点空（真机实证）
     Box(
         modifier
             .semantics { contentDescription = description }
@@ -509,10 +512,6 @@ private fun FanOption(
 
 /**
  * 扇面触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
- * 不依赖 foundation clickable 的消费口径；抬手时未超滑动阈值才算一次点按。
- */
-/**
- * 扇面触点：down 即消费认领——曲线手势层与关闭捕获层靠 `isConsumed` 整手让路，
  * 不依赖 foundation clickable 的消费口径；抬手时未超滑动阈值才算一次点按，按住超过
  * 系统长按时限不重复触发。
  *
@@ -529,6 +528,13 @@ private fun Modifier.fanTap(enabled: Boolean, onTap: () -> Unit): Modifier {
         if (!enabled) return@pointerInput
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
+            // 相邻卫星钮的 48dp 方形命中盒在 45° 角距下真实相交（上面"弦距 ≈49dp > 48dp 不相交"
+            // 那笔账只对圆盒成立，方盒要按轴向判：相邻圆心差 dx≈18.75 / dy≈45.25dp，双双 <48；
+            // 展开途中 frac<1 时交叠更大）。Compose 对相交的兄弟节点是**全部**派发，命中序 = z 序
+            // （后声明先测）⇒ 先测那枚已消费 down 时，后来者必须整手让路——不让路就是同一指
+            // 两枚都在抬手放行 currentTap，一指落进相交条点出两次选通道（z 序靠后执行者胜）。
+            // 本文件其余三层（捕获/吞噬/画布）靠的就是同一条 isConsumed 让路约定。
+            if (down.isConsumed) return@awaitEachGesture
             down.consume()
             var moved = false
             while (true) {

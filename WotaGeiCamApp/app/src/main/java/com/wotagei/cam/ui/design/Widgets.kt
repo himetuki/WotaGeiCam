@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -130,11 +131,15 @@ fun Modifier.wotaHudCard(
  *   出自同一次布局，两件事不会因为一个改了另一个没跟而错开一整代（跨线程不撕裂那一半由
  *   `FrostCardTable` 的双缓冲 + 引用交换保证，两处各司其职、不是重复保险）。
  *
- * ⚠ 已知不吃位移：这里量的是**布局**矩形（`positionInWindow`），祖先那层 `graphicsLayer` 的
- * translation（编辑页拖拽、#71 吸收态那颗的飞行）不反映在实测值里——与
- * `ui/anim/LiquidMerge` 为同一个坑写过的注释是一条族谱。底板本身跟着动的那一路（底栏换栏拖拽、
- * 录制态收拢）由 [com.wotagei.cam.ui.anim.wotaDockShell] 自己在绘制期回报**可见**矩形，
- * 所以观感上不会脱节；单个条目被飞出去的位移那几帧不在本轮覆盖范围，留给真机核。
+ * ⚠「量得到、但不跟」：这里量的是窗口矩形（`positionInWindow()` 现算，**含祖先那层
+ * `graphicsLayer` 的 translation**——滑回轮询机制本身就建立在这一点上，真机实测滑出途中
+ * 写到过 x=-189；与 `ui/anim/LiquidMerge` 写的"不反映 graphicsLayer.translationX"不矛盾，
+ * 那处说的是节点链更内侧的 layer，不是祖先）。真正的限制在**时序**：layer 位移不触发
+ * 布局回调 ⇒ rectX..H 这组 key 不变 ⇒ effect 不重启 ⇒ 表停在拖前矩形，直到下一次 key
+ * 翻转（visible / intent / 真实布局变化）才自愈。产品判断注记：编辑页拖拽期间霜板停在
+ * 拖前位置、等下次 key 翻转才跟上，是否可接受待真机取证。底板本身跟着动的那一路（底栏
+ * 换栏拖拽、录制态收拢）由 [com.wotagei.cam.ui.anim.wotaDockShell] 自己在绘制期回报
+ * **可见**矩形，不走这条链，观感上不会脱节。
  */
 @Composable
 private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean = true): Modifier {
@@ -144,12 +149,24 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
     val intent = HudFrost.intent
     val slot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    // 布局回调每次递的都是**同一个** LayoutCoordinates 实例（positionInWindow 是现算值），
+    // 只拿实例进 key 的话，注册稳定之后的任何纯布局变化都不会重启 effect ⇒ 表停在旧矩形、
+    // GL 板与 Compose 描边/fill 分离（与 frostLast 漏窗口原点是同族病）。真实触发路径：
+    // 旋转（本工程 manifest 配了 configChanges，Activity 不重建、组合活着）、状态栏/挖孔
+    // 避让 inset 变化、本容器自己的 animateContentSize 逐帧变高。
+    // 这里把这一刻的窗口矩形四个分量一并进 key：矩形真变了才重启、才落表（重启后首轮立即
+    // 写当前值，动画途中的每帧布局也因此逐帧跟手）。滑出/滑回走 graphicsLayer 位移，
+    // 不触发布局回调、不会误重启，滑回动画仍由下面的稳定性轮询收敛，两条机制各管各的。
+    var rectX by remember { mutableFloatStateOf(Float.NaN) }
+    var rectY by remember { mutableFloatStateOf(Float.NaN) }
+    var rectW by remember { mutableFloatStateOf(Float.NaN) }
+    var rectH by remember { mutableFloatStateOf(Float.NaN) }
     DisposableEffect(slot) {
         onDispose {
             if (slot >= 0) FrostCardTable.releaseSlot(slot)
         }
     }
-    LaunchedEffect(slot, coords, alpha, intent, visible) {
+    LaunchedEffect(slot, coords, rectX, rectY, rectW, rectH, alpha, intent, visible) {
         Log.i("FrostDock", "effect slot=$slot hasCoords=${coords != null} intent=$intent visible=$visible")
         val c = coords ?: return@LaunchedEffect
         if (slot < 0 || !intent) return@LaunchedEffect
@@ -204,7 +221,19 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
         }
         Log.i("FrostDock", "real slot=$slot rect=$lastX,$lastY ${c.size.width}x${c.size.height}")
     }
-    return this.onGloballyPositioned { coords = it }
+    return this.onGloballyPositioned { c ->
+        coords = c
+        val p = c.positionInWindow()
+        val s = c.size
+        if (rectX != p.x || rectY != p.y ||
+            rectW != s.width.toFloat() || rectH != s.height.toFloat()
+        ) {
+            rectX = p.x
+            rectY = p.y
+            rectW = s.width.toFloat()
+            rectH = s.height.toFloat()
+        }
+    }
 }
 
 /**
