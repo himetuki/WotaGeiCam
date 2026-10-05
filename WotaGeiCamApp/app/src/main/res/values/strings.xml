@@ -22,4 +22,7 @@
          wota_merge_hook 那枚 extra 才可能显示，release/debug 两个变体进不到这一支，用户看不到这两句 -->
     <string name="merge_hook_pinned">调试钉住 p=%1$.2f · 时长 ×%2$.0f</string>
     <string name="merge_hook_scale">调试倍率 ×%1$.0f（未钉进度）</string>
+
+    <!-- 播放观看辅助（会话态，不持久化） -->
+    <string name="player_rotate_ccw">逆时针旋转 90°</string>
 </resources>

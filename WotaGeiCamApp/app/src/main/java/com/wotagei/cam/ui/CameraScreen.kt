@@ -49,6 +49,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -68,6 +69,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as GeoSize
 import androidx.compose.ui.graphics.TransformOrigin
@@ -122,6 +124,8 @@ import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.LoopMode
+import com.wotagei.cam.player.nextCcwQuarter
+import com.wotagei.cam.player.pinchZoom
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
@@ -1463,6 +1467,12 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     var banner by remember { mutableStateOf<Int?>(null) }
     // 拖动中本地值覆盖轮询值（与单播放页同一条  手法）：松手才 seek，避免 seek 未完成时进度回跳
     var dragFrac by remember { mutableStateOf<Float?>(null) }
+    // 观看辅助（部分参考视频可能是竖屏的，转个角度看）：双指缩放+平移复用 PlayerScreen 的
+    // pinchZoom（默认 0.1..4x），旋转用四分之一圈计数（度数在 WotaPlayerSurface 调用点换算）。
+    // 全部会话态：不持久化、换片不清零（与镜像开关同口径）；自动挂片/循环/自动开播动线零影响
+    val zoom = remember { mutableFloatStateOf(1f) }
+    val pan = remember { mutableStateOf(Offset.Zero) }
+    var rotationQuarter by remember { mutableIntStateOf(0) }
 
     val pos by engine.positionMs.observed()
     val dur by engine.durationMs.observed()
@@ -1538,10 +1548,32 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
         }
     } else {
         Column(modifier, verticalArrangement = Arrangement.spacedBy(WotaSpace.s)) {
-            WotaPlayerSurface(
-                engine = engine,
-                modifier = Modifier.fillMaxWidth().weight(1f)
-            )
+            // clipToBounds：缩放/旋转是绘制期变换（graphicsLayer 默认不裁剪），不裁会越过
+            // 分栏边界压到左侧取景画面（与对比页同一手法）；pinchZoom 默认档 0.1..4x，
+            // 单指行为零变化（本播放面没有单击/双击手势，更不受影响）
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clipToBounds()
+                    .pinchZoom(zoom, pan)
+            ) {
+                WotaPlayerSurface(
+                    engine = engine,
+                    modifier = Modifier.fillMaxSize(),
+                    scale = zoom.floatValue,
+                    pan = pan.value,
+                    rotation = rotationQuarter * 90
+                )
+                // 逆时针旋转钮：右缘竖直居中（不遮画面主体、不与下方控制行/进度条重叠），
+                // 点按转 90°，四分之一圈循环
+                WotaIconButton(
+                    image = Icons.Outlined.RotateLeft,
+                    description = stringResource(R.string.player_rotate_ccw),
+                    onClick = { rotationQuarter = nextCcwQuarter(rotationQuarter) },
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
+                )
+            }
             // 极简控制行：一枚播放/暂停 + 一条时间读数；进度条是唯一可拖 seek 的入口
             Row(
                 verticalAlignment = Alignment.CenterVertically,

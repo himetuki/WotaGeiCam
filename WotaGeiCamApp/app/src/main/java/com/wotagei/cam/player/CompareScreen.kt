@@ -40,6 +40,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -183,6 +184,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 双指平移（2026-10-04）：同样两窗各自独立；pane Box 已 clipToBounds，越界绘制天然裁掉
     val panL = remember { mutableStateOf(Offset.Zero) }
     val panR = remember { mutableStateOf(Offset.Zero) }
+    // 右窗旋转（观看辅助，部分参考视频可能是竖屏的）：仅右窗一枚（左窗不加），四分之一圈计数
+    // 逆时针循环（度数在 WotaPlayerSurface 调用点换算）。会话态：不持久化、换片不清零（与
+    // [mirror] 同口径）；缩放/平移已各有其钮与手势，这里不叠加
+    var rotateR by remember { androidx.compose.runtime.mutableIntStateOf(0) }
 
     // 沉浸式浮层（仿 HarmonyOS 6/7 / iOS 26，10-01）：单击显隐控制层、双击启停——
     // TapArbiter 与窗口常量复用单播放页的 internal 件，不各抄一份；不做自动隐藏，
@@ -431,9 +436,19 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         )
                     }
                 } else {
-                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, mirror = mirror == 2 || mirror == 3)
+                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
                     ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
+                    // 右窗旋转钮（观看辅助，逆时针 90°/按）：计划原定右上角与左上 ZoomBadge 对称，
+                    // 但右上角已被片名标签 SideLabel 占着（叠放互相遮），按「避开已有控件」条款
+                    // 落右缘竖直居中——离上方芯片行/片名标签、下方控制层都最远。钮在 surface 层
+                    // 之外，ZoomBadge/片名标签这些角标天然不随旋转移动
+                    WotaIconButton(
+                        image = Icons.Outlined.RotateLeft,
+                        description = stringResource(R.string.player_rotate_ccw),
+                        onClick = { rotateR = nextCcwQuarter(rotateR) },
+                        modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
+                    )
                 }
             }
         }
