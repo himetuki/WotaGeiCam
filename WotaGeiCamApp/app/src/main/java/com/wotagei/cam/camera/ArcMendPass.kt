@@ -70,7 +70,11 @@ internal class ArcMendPass {
             Log.w(TAG_MEND, "离屏目标建不全")
             return false
         }
-        blitProgram = link(Shaders.TEXTURE_VS, Shaders.PASS_THROUGH_FS)
+        // blit 画笔必须是 sampler2D 版：copyInto/drawPending 采的 cur/pend/acc 全是普通 2D FBO
+        // 纹理（OES 采样只发生在引擎 drawPass 里：相机帧→cur，不经这条画笔）。曾链 OES 直通
+        // 画笔（samplerExternalOES）采 2D = 采样器类型错配 → 补弧帧恒黑，与离线 ArcRepairGl
+        // 同一处缺陷（2026-10-05 一起修）；批 F 极性修复后该支路已无直通兜底，黑帧会直接进成片。
+        blitProgram = link(Shaders.TEXTURE_VS, Shaders.PASS_THROUGH_2D_FS)
         mergeProgram = link(Shaders.TEXTURE_VS, Shaders.ARC_MERGE_FS)
         if (blitProgram == 0 || mergeProgram == 0) {
             release()

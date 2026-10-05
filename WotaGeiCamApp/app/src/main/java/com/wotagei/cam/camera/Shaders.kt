@@ -40,6 +40,30 @@ internal object Shaders {
     """.trimIndent()
 
     /**
+     * 直通的**普通 2D 纹理**变体，与 [PASS_THROUGH_FS] 唯一的差别是采样器类型。
+     *
+     * 为什么非有这条不可：GLSL 里采样器类型必须与纹理目标一致——规范上类型错配的 texture
+     * lookup 结果**未定义**；常见驱动行为是按采样器声明的目标去读单元上对应槽位的绑定，
+     * 于是 `samplerExternalOES` 采 `GL_TEXTURE_2D` 纹理时读到的 EXTERNAL 槽位是默认纹理
+     * （不完整）→ 本机实测恒采出 (0,0,0,1) 全黑，且 draw/swap 照常成功、无任何失败返回。
+     * 光弧修复 GPU 路的 cur/pend/acc 全是普通 2D FBO 纹理，曾把这条与 OES 版混用一条
+     * program，真机成片全程黑屏（2026-10-05 定位，`record/ArcRepairGl` 与
+     * `camera/ArcMendPass` 同一处缺陷一起修）——与 [FROST_COPY_FS] KDoc 里「OES 与 2D
+     * 混进同一个 program 直接链接失败」是同一条纪律的两面：类型相同才能共 program，
+     * 类型不同必须各备一条。
+     *
+     * 强制不透明：与 [PASS_THROUGH_FS] 同一个理由（解码/上游给的 alpha 不可信）。
+     */
+    val PASS_THROUGH_2D_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uFrame;
+        void main() {
+            gl_FragColor = vec4(texture2D(uFrame, vUv).rgb, 1.0);
+        }
+    """.trimIndent()
+
+    /**
      * 曲线单独一条着色器，不给 `PASS_THROUGH_FS` 加分支：直通是「链接失败就没图」的最后兜底，
      * 一个字节都不该被新特性污染；曲线 program 编不出来时退回它，只是色调不生效。
      */

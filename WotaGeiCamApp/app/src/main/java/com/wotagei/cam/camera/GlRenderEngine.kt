@@ -1185,7 +1185,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mend.curFbo())
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
         drawPass(encoderPass = true)
-
+        // cur 渲染完立刻恢复 FB=0（全引擎唯一一处 glBindFramebuffer，用后即还）：ArcMendPass 的
+        // copyInto/mergeInto 自绑自还，唯独 drawPending 契约是「画进当前已绑定的面」——而
+        // onClassification 在连续保留帧（kept&&hasPending&&!hasAcc）时 EmitPending 打头，不先还 FB
+        // 它就把待发帧画进 curFbo（待发帧覆盖 cur 源，MergeCurAsPending 再把污染的 cur 拷回
+        // pending = 鬼影逐帧复合），编码器 swap 到从未绘制的陈旧缓冲；片头被抽帧（!kept&&!hasPending
+        // → 空 op 列）时 curFbo 还会一路漏进霜关早退的 drawFrostPass 与 drawWindowPass 预览链，
+        // 并以脏 FB 跨帧污染下一段直通。drawPass 只 draw 不碰 FB，此处切换对特效链渲染零影响。
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         // 2) 状态机指令（保留决策已在 drawFrame 里交给 arcRule）
         for (op in arcFlow.onClassification(keep)) {
             val ok = when (op) {

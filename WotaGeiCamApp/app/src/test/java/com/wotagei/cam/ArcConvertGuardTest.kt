@@ -222,6 +222,38 @@ class ArcConvertGuardTest {
     }
 
     @Test
+    fun `MEND cur渲染后必须先恢复FB0再进指令环`() {
+        // P1（2026-10-05 采样器修复揭开）：drawEncoderMended 第 1 步绑 curFbo 渲特效链，
+        // ArcMendPass 的 copyInto/mergeInto 自绑自还、唯独 drawPending 契约是「画进当前已绑定的面」。
+        // onClassification 在连续保留帧（kept&&hasPending&&!hasAcc）时 EmitPending 打头——不先还
+        // FB=0，待发帧就画进 curFbo（待发帧覆盖 cur 源，MergeCurAsPending 再把污染的 cur 拷回
+        // pending = 鬼影逐帧复合），编码器 swap 到从未绘制的陈旧缓冲；片头被抽帧（!kept&&!hasPending
+        // → 空 op 列）时 curFbo 一路漏进霜关早退的 drawFrostPass 与 drawWindowPass 预览链，
+        // 并以脏 FB 状态跨帧污染下一段直通。恢复行必须落在 cur 渲染之后、指令环（drawPending
+        // 执行点）之前：drawPass 只 draw 不碰 FB，此处切换对特效链渲染零影响。
+        val body = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(maskedMain("camera/GlRenderEngine.kt"), "drawEncoderMended")
+        )
+        val curBind = body.indexOf("glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mend.curFbo())")
+        assertTrue(
+            "cur 渲染目标绑定失踪（drawEncoderMended 第 1 步被改走，特效链渲染目标不明）",
+            curBind >= 0
+        )
+        val restore = body.indexOf("glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)")
+        assertTrue(
+            "drawEncoderMended 内必须恢复 FB=0（缺 = EmitPending 打头时待发帧画进 curFbo 鬼影复合、" +
+                "swap 出陈旧缓冲；片头空 op 列时 curFbo 泄漏进预览链）",
+            restore >= 0
+        )
+        val loop = body.indexOf("onClassification(")
+        assertTrue(
+            "恢复行必须落在指令环之前（drawPending 不自绑 FB，EmitPending 打头的指令序靠调用点前态；" +
+                "放 op 之后盖不住空 op 列的片头泄漏）",
+            curBind < restore && restore in 0 until loop
+        )
+    }
+
+    @Test
     fun `sidecar段清单注入在位`() {
         // 2026-10-04 裁决：sidecar 加 segments 段清单（{segment,first,count}），排查者凭
         // first/count 把每段对上跨段全局位次。全链四处各锁一段函数体，删任何一处即红：
