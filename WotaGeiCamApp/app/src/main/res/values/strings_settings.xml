@@ -43,6 +43,11 @@
     <string name="set_level_buzz">水平仪、俯仰仪0°时震动</string>
     <string name="set_level_buzz_note">回正瞬间轻震一次提示；关闭后两者都不震动</string>
 
+    <!-- 对比播放（r02：编排节拍） -->
+    <string name="set_group_compare">对比播放</string>
+    <string name="set_compare_tick">同步检查节拍</string>
+    <string name="set_compare_tick_note">双视频对比时两轨对齐、跨段交接与循环回绕的检查间隔；越小跟得越紧，越大越省电。改完立即生效</string>
+
     <!-- 文本高度 -->
     <string name="set_group_text">文本高度</string>
     <string name="set_text_note">各屏独立调节，100% 为默认。小屏上文字过大挤掉取景窗时调低录制页一档</string>

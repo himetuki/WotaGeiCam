@@ -157,6 +157,20 @@ object WotaSettings {
     /** 网格列数允许的档位：小屏 2 列看得清，5 列用来快速翻找 */
     val GALLERY_COLUMN_TIERS = listOf(2, 3, 4, 5)
 
+    /**
+     * 对比播放编排节拍（r02）：两轨素材域判定/纠偏/回绕的 tick 间隔。
+     * 默认 200ms，允许 100–1000ms；越界值钳回区间（手写 prefs 的脏数据不炸）。
+     * 消费方（CompareScreen 编排循环）每拍重读，改完下一拍生效，不走 [applyDefaultsOnce]。
+     */
+    const val KEY_COMPARE_TICK_MS = "compare_tick_ms"
+    const val COMPARE_TICK_MIN_MS = 100
+    const val COMPARE_TICK_MAX_MS = 1000
+    val COMPARE_TICK_TIERS = listOf(100, 200, 500, 1000)
+
+    /** 编排节拍：缺键 200，越界钳回 [COMPARE_TICK_MIN_MS]..[COMPARE_TICK_MAX_MS] */
+    fun compareTickMs(prefs: SharedPreferences): Int =
+        prefs.getInt(KEY_COMPARE_TICK_MS, 200).coerceIn(COMPARE_TICK_MIN_MS, COMPARE_TICK_MAX_MS)
+
     /** 文本高度缩放的可选区间（%），100 = 工程默认排版 */
     val TEXT_SCALE_PCTS = listOf(80, 90, 100, 110, 120)
 
@@ -326,6 +340,8 @@ fun SettingsScreen(
     var defaultRefLines by remember { mutableStateOf(WotaSettings.defaultRefLines(prefs)) }
     var levelEnabled by remember { mutableStateOf(WotaSettings.levelEnabled(prefs)) }
     var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
+    // 对比播放编排节拍（r02）：越界脏值读侧已钳，这里只管展示选中档
+    var compareTick by remember { mutableStateOf(WotaSettings.compareTickMs(prefs)) }
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
     var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
     // 毛玻璃背板（#84 步骤 2）：默认关，只有这一颗 Switch 会把它打开（没有别的写入方）
@@ -719,6 +735,23 @@ fun SettingsScreen(
                     colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
                 )
             }
+        }
+
+        SettingGroup(stringResource(R.string.set_group_compare))
+        Card {
+            // 对比播放编排节拍（键 compare_tick_ms）：两轨同步/交接/回绕的检查间隔。
+            // 消费方每拍重读 prefs，改完下一次检查即生效
+            TierPicker(
+                label = stringResource(R.string.set_compare_tick),
+                selected = compareTick,
+                items = WotaSettings.COMPARE_TICK_TIERS.map { TierItem(it, "$it") },
+                format = { "$it ms" },
+                onPick = {
+                    compareTick = it
+                    prefs.edit().putInt(WotaSettings.KEY_COMPARE_TICK_MS, it).apply()
+                },
+                note = stringResource(R.string.set_compare_tick_note)
+            )
         }
 
         SettingGroup(stringResource(R.string.set_group_text))
