@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 设备内录（AudioPlaybackCapture）：前台服务承载 MediaProjection 会话。均为 normal 级权限 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
@@ -60,6 +64,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 内录前台服务：只承载 MediaProjection 会话存活。targetSdk 34 硬规则：
+             必须 foregroundServiceType="mediaProjection" 且先 startForeground(type) 才准 getMediaProjection -->
+        <service
+            android:name=".record.CaptureFgService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 
 </manifest>
