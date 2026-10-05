@@ -176,8 +176,14 @@ private fun WotaRoot() {
                 CameraScreen(
                     onOpenGallery = { nav.navigate(WotaNav.GALLERY) },
                     onOpenSettings = { nav.navigate(ROUTE_SETTINGS) },
-                    // 对着左片练回程（2026-10-04 方向 4）：压栈的这枚录制页录完弹回对比页
-                    onPracticeFinish = { nav.popBackStack() }
+                    // 练习动线回程（2026-10-04 方向 4 + 同日裁决）：录成后定向弹回对比页。
+                    // 用户可能录成前绕经媒体库/播放器——无差别 popBackStack() 只退一层会落错层
+                    // （数据不丢但人到媒体库）。这里定向弹到对比页 route，途中的绕行探索页被
+                    // 一并弹掉属预期；对比页不在栈内（异常动线）时保底回普通弹栈。该回调只在
+                    // ComparePractice.deliver 成功（练习桥 armed）时被调，普通录制路径零影响。
+                    onPracticeFinish = {
+                        if (!nav.popBackStack(WotaNav.COMPARE, false)) nav.popBackStack()
+                    }
                 )
             }
         }

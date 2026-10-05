@@ -464,6 +464,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /**
      * 配置录制期转换（强制 24/25fps 无精确档时的抽帧/补弧）。[mode] = null 关闭（直通）。
      * 必须在 [setOutputSurface] **之前**调：节奏锚点随编码面重挂一起复位。
+     * 体内只做投递，GL 线程内外都能调——录制中段补弧降级（[degradeArcConvert]）也从 GL
+     * 线程进这里复用同一份重建（postGl 排到本线程随后执行，context 常驻 current，安全）。
      */
     fun setArcConvert(mode: ArcConvertMode?, dstFps: Int) {
         if (released.get()) return
@@ -1121,6 +1123,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             }
         }
         if (!skip) {
+            val encoderBound = encoderEglSurface != null
             drawEncoderPass()
             // DROP 的保留帧经直通发出，位次账必须在这里落（与 MEND emit/flush 同一
             // (输出位次, 丢弃数) 口径）：漏记则 DROP 的 sidecar drops 恒空，立档落空；
@@ -1129,6 +1132,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 synchronized(arcDropsLock) {
                     arcDrops += (encoderFrameIndex - 1).coerceAtLeast(0) to arcRule.takeDrops()
                 }
+            }
+            // 两段降级的二段触发：DROP 模式下直通编码面在本帧中途掉链（makeCurrent/swap
+            // 失败已在 drawEncoderPass 内走 dropEncoderSurface）= 公共部件坏，抽帧也发不出
+            // 帧，按 [degradeArcConvert] 的三态退直通保底。面进出都发生在本函数单次执行内，
+            // posted 的重挂/解绑不会插进中间，encoderBound→null 即为本次失败，无歧义。
+            if (arcConvert == ArcConvertMode.DROP && encoderBound && encoderEglSurface == null) {
+                degradeArcConvert("直通编码面掉链")
             }
         }
         // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
@@ -1212,12 +1222,36 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         return true
     }
 
-    /** 转换链路失败的安全阀：本会话降级为直通编码，杜绝逐帧重试坏链 */
+    /**
+     * 转换链路失败的安全阀，三态两段：**MEND → DROP → 直通**（2026-10-04 裁决）。
+     *
+     * - 一段（MEND 失败）：降 **DROP（仅抽帧不补弧）**。补弧链专属部件（ArcMendPass 的
+     *   program/FBO）坏了不影响 DROP 分支——它不进补弧链，抽帧节奏、均匀 PTS、位次账全保留；
+     *   pending/acc 面里的半程补弧积累（状态机 + 像素面）随重建**作废**，不试图保留——
+     *   丢一两枚弧光好过整段慢放。
+     * - 二段（DROP 再失败，由 [drawFrame] 在直通编码面掉链时触发）：失败源于 makeCurrent/
+     *   编码面这类公共部件，抽帧也救不了，最后保底降**全速直通**（arcConvert=null）——
+     *   此时编码面已掉、只余上屏，录制本身大概率已中止，直通只是把状态账归零的出口。
+     *
+     * 全速直通**绝不作为第一响应**：转换模式下 PTS 仍按 dstFps 均匀盖，直通会让降级点之后
+     * 的成片段落慢放、音画渐进漂移到秒级（结构性坏片且静默，旧实现即在位的缺陷）。
+     */
     private fun degradeArcConvert(reason: String) {
-        Log.w(TAG_GL, "录制期转换降级为直通：$reason")
-        arcConvert = null
-        arcMendPass?.release()
-        arcMendPass = null
+        when (arcConvert) {
+            ArcConvertMode.MEND -> {
+                Log.w(TAG_GL, "录制期转换降级：补弧失败，改仅抽帧不补弧（$reason）")
+                // 复用 setArcConvert 的按档重建（含 slotNs 接线/状态机重建/位次账清点）：
+                // 此刻在 GL 线程，postGl 排队到本线程随后执行，不重入当前帧；重建落定前
+                // 的这枚帧按 drawEncoderMended 契约由调用方直通补发。重建会清掉降级前
+                // 已记的抽帧位次账（重建路径固有行为），此后 sidecar 只记降级点之后的位次。
+                setArcConvert(ArcConvertMode.DROP, arcDstFps)
+            }
+            ArcConvertMode.DROP -> {
+                Log.w(TAG_GL, "录制期转换降级：仅抽帧也失败，退直通保底（$reason）")
+                setArcConvert(null, 0)
+            }
+            null -> Unit
+        }
     }
 
     /**
