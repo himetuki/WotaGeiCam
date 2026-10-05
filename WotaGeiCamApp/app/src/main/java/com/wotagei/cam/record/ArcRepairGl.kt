@@ -50,6 +50,9 @@ private const val FRAME_WAIT_MS = 2_000L
  * - `acc` A/B 乒乓：**补弧累积面**——连续多枚被抽帧先在 acc 里逐枚取大，再一并并进前后帧。
  * - 全部合并走 [Shaders.ARC_MERGE_FS]（`max(a,b)`）；2D→2D 趟用恒等纹理矩阵，只有 OES 拷贝趟
  *   带 SurfaceTexture 的 `stMatrix`。
+ * - 直通画笔两条：OES 版（PASS_THROUGH_FS）只采解码帧，2D 版（PASS_THROUGH_2D_FS）采
+ *   cur/pend/acc——采样器类型必须与纹理目标一致，混用一条 program 在真机上恒黑
+ *   （2026-10-05 全程黑屏缺陷，守卫 ArcRepairGlSamplerGuardTest 钉死）。
  *
  * # 线程
  * EGL/SurfaceTexture 全在一条 `HandlerThread("WotaArcRepairGl")` 上活（EGL 上下文绑定线程）；
@@ -92,13 +95,26 @@ internal class ArcRepairGl(
     private val accFbo = IntArray(2)
     private var accIdx = 0
 
+    /** OES 直通画笔（samplerExternalOES）：只许采解码帧那枚 EXTERNAL_OES 纹理（copyOesToCur） */
     private var passProgram = 0
+
+    /**
+     * 2D 直通画笔（sampler2D，[Shaders.PASS_THROUGH_2D_FS]）：cur→pending/acc 拷贝与 emit 上
+     * 编码面采的都是普通 2D FBO 纹理，必须用它——拿 OES 画笔采 2D 是采样器类型错配（规范
+     * 结果未定义；常见驱动读 EXTERNAL 槽位上的默认纹理，本机实测恒黑）。2026-10-05 真机
+     * 「GPU 路全程黑屏」缺陷本体。
+     */
+    private var pass2dProgram = 0
     private var mergeProgram = 0
 
     private var passAPosition = -1
     private var passATexCoord = -1
     private var passUTexMatrix = -1
     private var passUFrame = -1
+    private var pass2dAPosition = -1
+    private var pass2dATexCoord = -1
+    private var pass2dUTexMatrix = -1
+    private var pass2dUFrame = -1
     private var mergeAPosition = -1
     private var mergeATexCoord = -1
     private var mergeUTexMatrix = -1
@@ -179,13 +195,13 @@ internal class ArcRepairGl(
 
     /** pending = cur：首枚保留帧滞留待发 */
     fun holdCurAsPending(): Boolean = postAndWait(OP_WAIT_MS) {
-        copyToPending(curTex, identityMatrix, isOes = false)
+        copyToPending(curTex, identityMatrix)
     }
 
     /** pending = max(cur, acc)（[useAcc] = false 时即 pending = cur）：后保留帧带弧升级待发 */
     fun mergeCurAsPending(useAcc: Boolean): Boolean = postAndWait(OP_WAIT_MS) {
         if (!useAcc) {
-            copyToPending(curTex, identityMatrix, isOes = false)
+            copyToPending(curTex, identityMatrix)
         } else {
             mergeOnGl(curTex, accTex[accIdx], pendFbo[1 - pendIdx])
                 .also { if (it) pendIdx = 1 - pendIdx }
@@ -436,6 +452,15 @@ internal class ArcRepairGl(
         passUTexMatrix = GLES20.glGetUniformLocation(passProgram, "uTexMatrix")
         passUFrame = GLES20.glGetUniformLocation(passProgram, "uFrame")
 
+        // 2D 直通画笔与 OES 直通画笔必须各一条：采样器类型不同不能共 program
+        //（samplerExternalOES 采 2D 绑定 = 类型错配恒黑，见 Shaders.PASS_THROUGH_2D_FS 的 KDoc）
+        pass2dProgram = link(Shaders.TEXTURE_VS, Shaders.PASS_THROUGH_2D_FS)
+        if (pass2dProgram == 0) return false
+        pass2dAPosition = GLES20.glGetAttribLocation(pass2dProgram, "aPosition")
+        pass2dATexCoord = GLES20.glGetAttribLocation(pass2dProgram, "aTexCoord")
+        pass2dUTexMatrix = GLES20.glGetUniformLocation(pass2dProgram, "uTexMatrix")
+        pass2dUFrame = GLES20.glGetUniformLocation(pass2dProgram, "uFrame")
+
         mergeProgram = link(Shaders.TEXTURE_VS, Shaders.ARC_MERGE_FS)
         if (mergeProgram == 0) return false
         mergeAPosition = GLES20.glGetAttribLocation(mergeProgram, "aPosition")
@@ -468,37 +493,39 @@ internal class ArcRepairGl(
         return drainGlError("arcCopyCur") == 0
     }
 
-    /** 2D 纹理 → pending 写入面（恒等矩阵）：hold/merge 的"普通拷贝"支 */
-    private fun copyToPending(src2D: Int, matrix: FloatArray, isOes: Boolean): Boolean {
-        if (passProgram == 0) return false
+    /**
+     * 2D 纹理 → pending 写入面（恒等矩阵）：hold/merge 的"普通拷贝"支。
+     * 只吃 2D 画笔——本引擎只有 copyOesToCur 采 OES 纹理，其余趟的源全是 2D FBO 纹理。
+     */
+    private fun copyToPending(src2D: Int, matrix: FloatArray): Boolean {
+        if (pass2dProgram == 0) return false
         makeCurrent(pbufferSurface)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, pendFbo[1 - pendIdx])
         GLES20.glViewport(0, 0, widthPx, heightPx)
-        GLES20.glUseProgram(passProgram)
+        GLES20.glUseProgram(pass2dProgram)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
-        if (isOes) GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, src2D)
-        else GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src2D)
-        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
-        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, matrix, 0)
-        drawQuad(passAPosition, passATexCoord)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src2D)
+        if (pass2dUFrame >= 0) GLES20.glUniform1i(pass2dUFrame, ARC_UNIT_A)
+        if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, matrix, 0)
+        drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         pendIdx = 1 - pendIdx
         return drainGlError("arcHoldPending") == 0
     }
 
-    /** 2D 纹理 → acc 写入面（恒等矩阵，整帧替换）：fresh 累积支 */
+    /** 2D 纹理 → acc 写入面（恒等矩阵，整帧替换）：fresh 累积支（2D 画笔，理由同 copyToPending） */
     private fun copyIntoAcc(src2D: Int, matrix: FloatArray): Boolean {
-        if (passProgram == 0) return false
+        if (pass2dProgram == 0) return false
         makeCurrent(pbufferSurface)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[1 - accIdx])
         GLES20.glViewport(0, 0, widthPx, heightPx)
-        GLES20.glUseProgram(passProgram)
+        GLES20.glUseProgram(pass2dProgram)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, src2D)
-        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
-        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, matrix, 0)
-        drawQuad(passAPosition, passATexCoord)
+        if (pass2dUFrame >= 0) GLES20.glUniform1i(pass2dUFrame, ARC_UNIT_A)
+        if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, matrix, 0)
+        drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         accIdx = 1 - accIdx
@@ -529,18 +556,22 @@ internal class ArcRepairGl(
         return drainGlError("arcMerge") == 0
     }
 
-    /** 待发帧 → 编码器面：先 makeCurrent(编码器面) 再画（不切面 swap 会报 EGL_BAD_SURFACE，真机实测） */
+    /**
+     * 待发帧 → 编码器面：先 makeCurrent(编码器面) 再画（不切面 swap 会报 EGL_BAD_SURFACE，真机实测）。
+     * 画笔必须用 2D 版（pending 是普通 2D FBO 纹理）：这趟是编码器看到的**最后一手**，
+     * 用 OES 画笔时整条成片黑屏而 swap 照常成功——2026-10-05 真机缺陷的成片落点。
+     */
     private fun emitOnGl(ptsUs: Long): Boolean {
-        if (passProgram == 0 || encoderEglSurface === EGL14.EGL_NO_SURFACE) return false
+        if (pass2dProgram == 0 || encoderEglSurface === EGL14.EGL_NO_SURFACE) return false
         if (!makeCurrent(encoderEglSurface)) return false
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, widthPx, heightPx)
-        GLES20.glUseProgram(passProgram)
+        GLES20.glUseProgram(pass2dProgram)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, pendTex[pendIdx])
-        if (passUFrame >= 0) GLES20.glUniform1i(passUFrame, ARC_UNIT_A)
-        if (passUTexMatrix >= 0) GLES20.glUniformMatrix4fv(passUTexMatrix, 1, false, identityMatrix, 0)
-        drawQuad(passAPosition, passATexCoord)
+        if (pass2dUFrame >= 0) GLES20.glUniform1i(pass2dUFrame, ARC_UNIT_A)
+        if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, identityMatrix, 0)
+        drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
         stampPresentation(ptsUs)
         val swapped = EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
@@ -613,6 +644,10 @@ internal class ArcRepairGl(
         if (passProgram != 0) {
             GLES20.glDeleteProgram(passProgram)
             passProgram = 0
+        }
+        if (pass2dProgram != 0) {
+            GLES20.glDeleteProgram(pass2dProgram)
+            pass2dProgram = 0
         }
         if (mergeProgram != 0) {
             GLES20.glDeleteProgram(mergeProgram)
