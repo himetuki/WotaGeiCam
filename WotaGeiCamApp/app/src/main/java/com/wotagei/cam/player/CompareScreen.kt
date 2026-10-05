@@ -160,6 +160,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     var domBlackL by remember { mutableStateOf(false) }
     var domBlackR by remember { mutableStateOf(false) }
     var timelineLoop by remember { mutableStateOf(true) }
+    // 会话播放意图（r05 修 r04「进页/选片后双黑」）：对比页进页即自动开播（需求 27 行
+    // 「左右同时播放」；单播放页同款 PlayerScreen attach 后 softPause(false)）。它与引擎
+    // isPlaying 的分工：ON_STOP 软暂停（切后台/选片器 round-trip）只压引擎、**不动它**——
+    // 选片回来 attach 右片时靠它区分「用户在播放途中（要续上）」与「用户显式暂停过（保持静）」；
+    // 只有 setPlaying（播放钮/双击/练习桥压栈）写它。背景往返不重跑任何 effect，
+    // 「回前台不自动续播」语义不受影响。
+    var wantPlaying by remember { mutableStateOf(true) }
 
     val leftPos by leftEngine.positionMs.collectState(0L)
     val leftDur by leftEngine.durationMs.collectState(left.durationMs)
@@ -286,6 +293,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     LaunchedEffect(left.uri) {
         leftEngine.attach(left.uri)
+        // 进页自动开播（r05 修 r04 双黑）：attach 固定 playWhenReady=false（PlayerEngine.attach），
+        // 必须在这里显式起播——编排拍的 resume 门是 blackXxx && userPlaying，userPlaying 只能由
+        // 已起的播放产生，「进页双静止」是 decide 的不动点，等不来第一拍起播（内核红线见
+        // CompareTimelineTest 入口态用例）。与单播放页 PlayerScreen 同款：attach 后 softPause(false)
+        leftEngine.softPause(false)
         // 不再设 LoopMode.ONE（r02 根源性改动）：EOS 从引擎无缝回绕变成可检测事件，
         // 时间线循环改由编排 tick 的 decide 统一回绕（TimelineLoop），左轨早尽时要能被
         // 域判定看见（REPEAT_ONE 会把位置缩回 0，域判定就永远读不出"左已尽"）
@@ -420,6 +432,9 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     }
 
     fun setPlaying(play: Boolean) {
+        // 会话播放意图落账：用户显式暂停后，选片/练习回填的 attach 起播门（wantPlaying）
+        // 关上，不会被自动唤醒；再点播放重新打开
+        wantPlaying = play
         if (play && currentTimelineMs() >= timelineGeo().tMax) {
             // 时间线末点播放（两轨素材都尽的 ENDED 态）：先统一回绕 Tmin 再起播。
             // 不走引擎 softPause 的 ENDED 自动回零——那个只回各引擎自己的 0，off≠0 时
@@ -430,6 +445,18 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         // 偷偷走钟（跨域唤醒交给编排拍，tick 侧重断言兜底）
         leftEngine.softPause(!play || domBlackL)
         rightEngine.softPause(!play || domBlackR)
+    }
+
+    // 选片/换片/练习回填完成 → 续上会话播放意图（r05 修 r04「选完右片双黑」的第二段）：
+    // 右引擎 attach 固定 playWhenReady=false，且编排拍的交接 resume 只认在册黑层——
+    // 中途挂上的右轨没有任何起播路径；左轨还可能被选片器 round-trip 的 ON_STOP 软暂停压着。
+    // 这里在 attach 之后补一发：用户没显式暂停过（wantPlaying 在册）就按 setPlaying 的
+    // 素材感知语义把整条时间线送进播放；显式暂停过则保持静止等手点。key 与 attach effect
+    // 同为 r?.uri 且声明序在后 ⇒ attach 落位后才跑（Compose effect 按声明序启动）。
+    // 选片是用户动作，把它唤起的播放与「回前台不自动续播」（无用户动作、无 effect 重跑）
+    // 区分开，两者不冲突。
+    LaunchedEffect(r?.uri) {
+        if (r != null && wantPlaying) setPlaying(true)
     }
 
     fun seekUnified(frac: Float) {

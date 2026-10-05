@@ -139,6 +139,55 @@ class CompareTimelineWiringGuardTest {
         )
     }
 
+    // ------------------------------------------------- 入口/选片起播（r05 修 r04 双黑）
+
+    /**
+     * r04 真机「进页左黑、选完右片双黑」的根因在**接线**不在内核：进页=两引擎 attach 后未起播
+     * （PlayerEngine.attach 固定 playWhenReady=false）、无在册黑层、userPlaying=false——decide
+     * 对这个态是不动点（resume 门=blackX && userPlaying，userPlaying 只能由已起的播放产生），
+     * 不接线显式起播就永远静止。这里钉三条接线红线（红绿：修复前三条全红，修复后全绿）。
+     */
+
+    @Test
+    fun `进页自动播_attach后立即起播左片`() {
+        val content = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "CompareContent"))
+        val attach = "leftEngine.attach(left.uri)"
+        val iAttach = content.indexOf(attach)
+        val iPlay = content.indexOf("leftEngine.softPause(false)", iAttach)
+        assertTrue(
+            "左片 attach 后必须紧跟 softPause(false) 进页自动开播（需求 27 行「左右同时播放」+ 单播放页" +
+                "PlayerScreen 同款；缺它 = 进页左片静止，且 decide 的 resume 门等不到 userPlaying，永久双黑）",
+            iAttach >= 0 && iPlay == iAttach + attach.length + 1
+        )
+    }
+
+    @Test
+    fun `会话播放意图_进页为真且由setPlaying写`() {
+        val content = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "CompareContent"))
+        assertTrue(
+            "会话播放意图 wantPlaying 必须进页为 true（进页/选片后自动播是对比页的既定口径）",
+            content.contains("var wantPlaying by remember { mutableStateOf(true) }")
+        )
+        val sp = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "setPlaying"))
+        assertTrue(
+            "setPlaying 必须写会话播放意图（用户显式暂停后，选片/练习回填不得自动唤醒）",
+            sp.contains("wantPlaying = play")
+        )
+    }
+
+    @Test
+    fun `选片回填后_wantPlaying在册则setPlaying起播`() {
+        val content = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "CompareContent"))
+        val iAttach = content.indexOf("rightEngine.attach(clip.uri)")
+        val iStart = content.indexOf("wantPlaying) setPlaying(true)")
+        assertTrue(
+            "右片 attach 之后必须有会话意图门下的 setPlaying(true)：中途挂上的右轨没有任何起播路径" +
+                "（交接 resume 只认在册黑层），选片器 round-trip 的 ON_STOP 软暂停也要靠这次用户动作续上；" +
+                "且必须声明在 attach effect 之后（Compose effect 按声明序启动，起播前 attach 必须已落位）",
+            iAttach in 0 until iStart
+        )
+    }
+
     // ------------------------------------------------------------------ 内核纯度
 
     @Test

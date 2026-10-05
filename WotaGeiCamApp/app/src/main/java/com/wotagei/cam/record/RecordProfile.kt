@@ -12,7 +12,9 @@ import com.wotagei.cam.core.ArcConvertMode
  * - [bitrate] ≤ 0 表示「用户未自设」，引擎按 [BitratePolicy.resolve] 的三段式取自动表/兜底公式；
  * - [sampleRate] 必须先经 [AudioProbe.isSampleRateSupported] 探测（32/44.1/48k 逐档判断）；
  * - [captureRate] 与 [fps] 不相等时走「延时摄影」语义（`setCaptureRate`），v0.0.1 只留通道不开放 UI；
- * - [audioEnabled] = false（静音）或缺 `RECORD_AUDIO` 权限时，两条引擎都完全不初始化音频通路。
+ * - [audioEnabled] = false（静音）或缺 `RECORD_AUDIO` 权限时，两条引擎都完全不初始化音频通路；
+ * - [captureAudio] = true 时追加设备内录第二音轨（P2：单 MP4 双 AAC），恒走 MediaCodec 引擎，
+ *   与静音互斥（内录×静音=纯视频）。
  */
 data class RecordProfile(
     val width: Int,
@@ -33,7 +35,15 @@ data class RecordProfile(
      * 非 null 时 [com.wotagei.cam.record.Recorders.useCodecEngine] 强制走 MediaCodec 引擎
      * （MediaRecorder 面输入无法拒帧），且 GL 编码支路按该模式抽帧/补弧。
      */
-    val arcConvert: ArcConvertMode? = null
+    val arcConvert: ArcConvertMode? = null,
+    /**
+     * 设备内录（AudioPlaybackCapture）第二音轨（P2：单 MP4 双 AAC，环境轨先 add、内录轨后 add）。
+     * true 时强制走 [com.wotagei.cam.record.Recorders.useCodecEngine] 的 MediaCodec 引擎
+     * （MediaRecorder 无多音轨能力）；与静音互斥——「内录×静音=纯视频」（audioEnabled 优先，
+     * 由 CameraScreen.buildProfile 落地）。会话健康与否在**录制开始时**由 controller 态决定，
+     * 录制中撤销=内录轨提前 EOS，不中断录制。
+     */
+    val captureAudio: Boolean = false
 ) {
     companion object {
         /** 参数表 `codec` 取值：与 MediaRecorder.VideoEncoder / MediaCodec mime 双向映射 */

@@ -995,7 +995,10 @@ fun CameraScreen(
                             sensorOrientation = sensorOrientation,
                             deviceDegrees = deviceDegrees,
                             front = isFront,
-                            arcConvert = convert
+                            arcConvert = convert,
+                            // 内录体系批 3：捕获源健康与否在**录制开始时**由 controller 态决定
+                            //（录制中撤销=内录轨提前 EOS 收尾，不中断录制，见 CodecRecorder）
+                            captureAudio = captureState is CaptureState.Active
                         )
                     }
                 }
@@ -1865,7 +1868,13 @@ private class RecordRunner(
         sensorOrientation: Int,
         deviceDegrees: Int,
         front: Boolean,
-        arcConvert: ArcConvertMode? = null
+        arcConvert: ArcConvertMode? = null,
+        /**
+         * 设备内录第二音轨（批 3）：调用方在**按下录制那刻**从 capture controller 态取
+         * （`captureState is CaptureState.Active`）。无默认值：漏挂编译不过（同锚点纪律），
+         * 内录接线不许静默丢失。
+         */
+        captureAudio: Boolean
     ) {
         handler.post {
             if (status.value != RecordStatus.IDLE) {
@@ -1881,7 +1890,8 @@ private class RecordRunner(
             }
             val renderMode = params.renderMode.value
             val profile = buildProfile(
-                width, height, fps, sensorOrientation, deviceDegrees, front, renderMode, arcConvert
+                width, height, fps, sensorOrientation, deviceDegrees, front, renderMode,
+                arcConvert, captureAudio
             )
             val pending = store.createPending(0)
             if (pending == null) {
@@ -1920,7 +1930,8 @@ private class RecordRunner(
             Log.i(
                 TAG_UI,
                 "record start ${profile.width}x${profile.height}@${profile.fps} gpu=${profile.useGpu} " +
-                    "hint=${profile.orientationHint} audio=${profile.audioEnabled}"
+                    "hint=${profile.orientationHint} audio=${profile.audioEnabled} " +
+                    "capture=${profile.captureAudio}"
             )
         }
     }
@@ -2105,31 +2116,36 @@ private class RecordRunner(
         deviceDegrees: Int,
         front: Boolean,
         renderMode: RenderMode,
-        arcConvert: ArcConvertMode?
-    ): RecordProfile = RecordProfile(
-        width = width,
-        height = height,
-        fps = fps,
-        captureRate = fps.toFloat(),
-        bitrate = params.bitrate.value,
-        codec = if (width.toLong() * height.toLong() >= HEVC_MIN_PIXELS) {
-            RecordProfile.CODEC_HEVC
-        } else {
-            RecordProfile.CODEC_H264
-        },
-        sampleRate = params.sampleRate.value,
-        channels = DEFAULT_AUDIO_CHANNELS,
-        audioEnabled = params.audioEnabled.value,
-        orientationHint = recordOrientationHint(
-            sensorOrientation = sensorOrientation,
-            deviceDegrees = deviceDegrees,
-            front = front,
-            direct = renderMode == RenderMode.DIRECT
-        ),
-        mirrored = front,
-        useGpu = renderMode == RenderMode.GPU,
-        arcConvert = arcConvert
-    )
+        arcConvert: ArcConvertMode?,
+        captureAudio: Boolean
+    ): RecordProfile {
+        return RecordProfile(
+            width = width,
+            height = height,
+            fps = fps,
+            captureRate = fps.toFloat(),
+            bitrate = params.bitrate.value,
+            codec = if (width.toLong() * height.toLong() >= HEVC_MIN_PIXELS) {
+                RecordProfile.CODEC_HEVC
+            } else {
+                RecordProfile.CODEC_H264
+            },
+            sampleRate = params.sampleRate.value,
+            channels = DEFAULT_AUDIO_CHANNELS,
+            audioEnabled = params.audioEnabled.value,
+            orientationHint = recordOrientationHint(
+                sensorOrientation = sensorOrientation,
+                deviceDegrees = deviceDegrees,
+                front = front,
+                direct = renderMode == RenderMode.DIRECT
+            ),
+            mirrored = front,
+            useGpu = renderMode == RenderMode.GPU,
+            arcConvert = arcConvert,
+            // 内录×静音=纯视频（audioEnabled 优先，用户裁决）：静音开着就不建内录轨
+            captureAudio = captureAudio && params.audioEnabled.value
+        )
+    }
 
     companion object {
         private const val POLL_MS = 200L

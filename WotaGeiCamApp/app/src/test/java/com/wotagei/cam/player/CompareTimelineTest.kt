@@ -248,6 +248,40 @@ class CompareTimelineTest {
         assertFalse(woke.blackRight)
     }
 
+    // ------------------------------------------------------------------ 入口态（r04 双黑定位）
+
+    @Test
+    fun `入口双暂停态_decide是静止单纯形_起播归接线层`() {
+        // r04 真机「进页/选片后双黑」的内核侧定位：进页=两引擎 attach 后未起播（attach 固定
+        // playWhenReady=false）、无在册黑层、userPlaying=false。decide 对这个态是**不动点**：
+        // resume 门=blackXxx && userPlaying，userPlaying 只能由已起的播放产生——内核永远等不到
+        // 第一拍起播，起播必须由接线层显式给出（attach 后 softPause(false) / 选片后 setPlaying(true)）。
+        // 这条把「内核不管入口起播」钉成红线：若有人让 decide 从全静止态自动 resume，会违背
+        // 「用户显式暂停不被编排自动唤醒」的裁决，这里必须转红。
+        val g = TimelineGeometry(leftDurMs = 10_000L, rightDurMs = 20_000L, offsetMs = 0L)
+        val idle = CompareTimeline.decide(
+            input(geo = g, leftLive = 0L, rightLive = 0L, userPlaying = false)
+        )
+        assertEquals(DUAL, CompareTimeline.domainOf(g, 0L, 0L, false, false))
+        assertFalse(idle.resumeLeft)
+        assertFalse(idle.resumeRight)
+        assertFalse(idle.pauseLeft)
+        assertFalse(idle.pauseRight)
+        assertFalse(idle.blackLeft)
+        assertFalse(idle.blackRight)
+        assertNull(idle.seekLeftMs)
+        assertNull(idle.seekRightMs)
+        // 纠偏照跑（paused 时与旧循环同口径），drift=0 只是零值软追赶（引擎同值不重写，无副作用）
+        assertEquals(0L, idle.nudgeRightDriftMs)
+        // 第一拍起播后（userPlaying=true、仍无在册黑层）：双素材域只纠偏，同样无 resume/pause——
+        // resume 是「独播域交接唤醒」专用，不是起播通道
+        val playing = CompareTimeline.decide(input(geo = g, leftLive = 0L, rightLive = 0L))
+        assertFalse(playing.resumeLeft)
+        assertFalse(playing.resumeRight)
+        assertFalse(playing.pauseLeft)
+        assertFalse(playing.pauseRight)
+    }
+
     // ------------------------------------------------------------------ 纠偏
 
     @Test
