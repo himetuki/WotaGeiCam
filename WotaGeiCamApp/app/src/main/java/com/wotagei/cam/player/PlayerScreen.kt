@@ -23,6 +23,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.navigationBars
@@ -60,11 +63,14 @@ import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -140,14 +146,15 @@ import kotlinx.coroutines.launch
  *  提成 internal：对比播放页的沉浸式控制层（10-01）复用同一套单击/双击仲裁，两处各抄一份迟早漂移。 */
 internal const val DOUBLE_TAP_WINDOW_MS = 280L
 
-/** 弹窗定宽：不固定的话每档按自身内容包裹，点击区参差 */
-private val SPEED_POPUP_PANEL_WIDTH: Dp = 148.dp
+/**
+ * 剪辑导出弹层最小宽（2026-10-05 紧凑化）：进度条与「导出」钮需要一段可用的行程/命中区，
+ * 内容（区间读数）比这窄时按这个下限走；其余弹层（倍速/光弧/镜像）一律内容定宽，
+ * 原 148/240/264 定宽已废——「两字按钮拉成二十字符长」的账就是定宽 + fillMaxWidth 记的。
+ */
+private val CLIP_POPUP_MIN_WIDTH: Dp = 200.dp
 
-/** 光弧修复弹层定宽：要装下那句 30 字的说明小字，比倍速档（纯数字）宽一档 */
-private val ARC_POPUP_PANEL_WIDTH: Dp = 240.dp
-
-/** 剪辑导出弹层定宽：要装下「入点 xx:xx（自动向前对齐关键帧）」这类长读数 */
-private val CLIP_POPUP_PANEL_WIDTH: Dp = 264.dp
+/** 「导出中」进度条定宽：= 弹层最小宽 200 − 壳左右内边距 20；见 ClipExportPopup 里那条 P1 注 */
+private val CLIP_POPUP_PROGRESS_WIDTH: Dp = 180.dp
 
 /**
  * 播放页圆钮尺寸沿用 30/18dp，不复用 WotaHit.iconButton(38)/iconGlyph(19)：
@@ -852,6 +859,9 @@ private fun BarIconSlot(
  * 2026-09-28 起改走 [WotaPillPopup] 就近弹在底栏最右那颗倍速胶囊旁边 —— 原来它浮在整条底栏上方，
  * 靠一个手算的 88dp 让位，底栏行数一变就对不上；壳、点外关闭、退场动画也都不用自己再写一份。
  * 提成 internal：对比播放页（10-01 沉浸式改造）的倍速入口复用同一枚弹层，五档与壳不各抄一份。
+ *
+ * 2026-10-05 紧凑化：废 148dp 定宽，行宽由「档位文字 + 选中对勾」决定——弹窗面积由
+ * 最宽行（含壳的标题/「收起」）决定，不再给两三字符的档位拉一整条可点空白。
  */
 @Composable
 internal fun SpeedTierPopup(
@@ -861,12 +871,14 @@ internal fun SpeedTierPopup(
     onDismiss: () -> Unit
 ) {
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_speed_title)) {
-        Column(Modifier.width(SPEED_POPUP_PANEL_WIDTH)) {
+        Column(
+            // 下限只兜「最短档 + 对勾」仍有一点命中余量，上限交给壳的 400dp max
+            Modifier.widthIn(min = 96.dp)
+        ) {
             PlayerSpeedTiers.TIERS.forEach { tier ->
                 val picked = tier == current
                 Row(
                     Modifier
-                        .fillMaxWidth()
                         .clickable { onPick(tier) }
                         .padding(horizontal = 10.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -878,7 +890,7 @@ internal fun SpeedTierPopup(
                         // 蓝字压 WotaSurface 小字 CR≈3.37 过不了正文档 4.5；选中语义由旁边那枚
                         // accent 对勾承担（图形件过 3.0 大字/图形档即可，contrast-audit 实测）
                         color = WotaText,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.padding(end = 8.dp)
                     )
                     if (picked) {
                         Icon(
@@ -915,7 +927,8 @@ private fun ClipExportPopup(
     WotaPillPopup(
         anchor = anchor,
         onDismiss = onDismiss,
-        modifier = Modifier.width(CLIP_POPUP_PANEL_WIDTH),
+        // 定宽废（2026-10-05 紧凑化）：只给进度条/导出钮留一个下限，读数行按内容走
+        modifier = Modifier.widthIn(min = CLIP_POPUP_MIN_WIDTH),
         title = stringResource(R.string.player_clip_title)
     ) {
         // 区间读数行只在有合法区间时出现；「导出中」的进度与取消**优先于**区间判断——
@@ -945,7 +958,10 @@ private fun ClipExportPopup(
         if (exporting) {
             LinearProgressIndicator(
                 progress = progress,
-                modifier = Modifier.fillMaxWidth(),
+                // 定宽（修复轮 1/3 P1）：fillMaxWidth 会把弹层顶到 400dp 上限——「未导出」时 200dp
+                // 的弹窗在「导出中」当场加宽一倍、place() 重居中横向跳位，正是本批要消灭的
+                // 「fill 撑满最大宽」根因的漏网行。账：弹层 min 宽 200 − 壳左右内边距 20 = 180
+                modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
                 color = WotaColor.accent,
                 trackColor = WotaColor.outline
             )
@@ -971,11 +987,12 @@ private fun ClipExportPopup(
 }
 
 /**
- * 光弧修复的方式选择弹层（用户需求第 7 项，v2 抽帧+补弧口径）：写法照 [SpeedTierPopup]——
- * 就近弹在底栏那枚修复钮旁边。
+ * 光弧修复的方式选择弹层（用户需求第 7 项，v2 抽帧+补弧口径）：就近弹在底栏那枚修复钮旁边。
  *
- * 「目标帧率」两档是**选中态**（带对勾、点选切换）；下面两行是**二选一的动作**，不给对勾、
- * 点完即关并在上层起后台任务。说明小字讲清抽帧+补弧语义与"不改原片"。
+ * 2026-10-05 分组重设计（用户裁决「分不清 4 个控件」）：上面是**设置项**——「目标帧率」两档，
+ * ✓ 对勾点选切换；分隔线之下是**动作项**——GPU/CPU 两枚并排按钮（填充/描边，主文字 + 一行小注），
+ * 与文本行彻底区分，点哪个当场开工并关窗（行为不变）。说明小字讲清抽帧+补弧语义与"不改原片"。
+ * GPU 路径的已知黑屏问题随后一批修，按钮不加「实验」标注（同批交付）。
  */
 @Composable
 private fun ArcRepairPopup(
@@ -986,7 +1003,13 @@ private fun ArcRepairPopup(
     onDismiss: () -> Unit
 ) {
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_arc_repair)) {
-        Column(Modifier.width(ARC_POPUP_PANEL_WIDTH)) {
+        Column(
+            // 内容定宽（紧凑化）：宽度 = max(200dp 下限, 最宽子项)。IntrinsicSize.Min 让
+            // fillMaxWidth 的分隔线拿到「按钮行」那份宽；说明小字 widthIn 封 200dp 只往下折行
+            Modifier
+                .width(IntrinsicSize.Min)
+                .widthIn(min = 200.dp)
+        ) {
             // 目标帧率：产品口径就是强制档那两枚（REQUIRED_FPS），不是任意档位表
             Text(
                 stringResource(R.string.player_arc_target),
@@ -1000,35 +1023,70 @@ private fun ArcRepairPopup(
                     style = MaterialTheme.typography.labelMedium,
                     color = if (fps == dstFps) WotaAccent else WotaText,
                     modifier = Modifier
-                        .fillMaxWidth()
                         .clickable { onPickFps(fps) }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }
-            // 行尾留空：一挂对勾就会被读成"当前选中项"，而这里点哪个是发起动作
-            Text(
-                stringResource(R.string.player_arc_gpu),
-                style = MaterialTheme.typography.labelMedium,
-                color = WotaText,
-                modifier = Modifier
+            // 分组分隔线：线上改设置、线下发起动作——两种语义一眼分开
+            Box(
+                Modifier
                     .fillMaxWidth()
-                    .clickable { onPick(true) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .padding(vertical = 4.dp)
+                    .height(1.dp)
+                    .background(WotaColor.outline)
             )
             Text(
-                stringResource(R.string.player_arc_cpu),
-                style = MaterialTheme.typography.labelMedium,
-                color = WotaText,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick(false) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                stringResource(R.string.player_arc_start_group),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)
             )
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 行尾留空的旧文本行废了：一挂对勾就会被读成"当前选中项"，而这里点哪个是发起动作——
+                // 改成填充/描边两枚按钮，主文字 + 小注，点完即关并在上层起后台任务
+                Button(
+                    onClick = { onPick(true) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = WotaColor.accentSurface,
+                        contentColor = WotaColor.onAccent
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(stringResource(R.string.player_arc_gpu), style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            stringResource(R.string.player_arc_gpu_note),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = WotaColor.onAccent.copy(alpha = 0.78f)
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = { onPick(false) },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = WotaText),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(stringResource(R.string.player_arc_cpu), style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            stringResource(R.string.player_arc_cpu_note),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = WotaTextDim
+                        )
+                    }
+                }
+            }
             Text(
                 stringResource(R.string.player_arc_note),
                 style = MaterialTheme.typography.labelSmall,
                 color = WotaTextDim,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                // 封宽只折行不顶宽：30+ 字的说明不把弹窗推向 400dp 上限
+                modifier = Modifier
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .widthIn(max = 200.dp)
             )
         }
     }

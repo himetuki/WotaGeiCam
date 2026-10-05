@@ -18,6 +18,10 @@
     <string name="player_arc_fps">%1$d fps</string>
     <string name="player_arc_gpu">GPU 加速</string>
     <string name="player_arc_cpu">纯 CPU</string>
+    <!-- 2026-10-05 分组重设计：动作组标题与两枚按钮的小注（与设置项视觉分组） -->
+    <string name="player_arc_start_group">开始修复</string>
+    <string name="player_arc_gpu_note">速度快·推荐</string>
+    <string name="player_arc_cpu_note">兼容模式</string>
     <string name="player_arc_note">抽掉多余帧转到所选帧率，被抽帧的画面并入前后帧保持光弧连贯；后台处理生成新视频，不改原片</string>
     <string name="player_arc_done">修复完成，已存入相册</string>
     <string name="player_arc_failed">修复失败</string>

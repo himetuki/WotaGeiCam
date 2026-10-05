@@ -5,6 +5,7 @@ import android.hardware.camera2.CameraManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -324,7 +325,8 @@ private fun FpsPill(
                                 WotaSettings.setArcConvertMode(settingsPrefs, mode)
                             }
                         },
-                        modifier = Modifier.weight(1f)
+                        // fill = false：与 PillChoices 同一条紧凑化裁决，不把弹窗撑到最大宽
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
             }
@@ -335,7 +337,8 @@ private fun FpsPill(
                 ),
                 style = MaterialTheme.typography.labelSmall,
                 color = WotaTextDim,
-                modifier = Modifier.padding(top = 4.dp)
+                // 与 NoteText 同一条封宽账：说明句在 220dp 内折行，不顶宽弹窗
+                modifier = Modifier.padding(top = 4.dp).widthIn(max = 220.dp)
             )
         }
     }
@@ -863,7 +866,10 @@ private fun NoteText(text: String) {
     Text(
         text = text,
         style = WotaType.caption,
-        color = WotaColor.textLo
+        color = WotaColor.textLo,
+        // 封宽（2026-10-05 紧凑化）：长说明句不封宽会把弹窗顶到 400dp 上限，
+        // 改成在 220dp 内折行——弹窗面积由档位行决定，说明文字只往下加行
+        modifier = Modifier.widthIn(max = 220.dp)
     )
 }
 
