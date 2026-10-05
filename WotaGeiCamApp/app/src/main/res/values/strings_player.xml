@@ -91,4 +91,19 @@
     <string name="player_clip_cancel">取消导出</string>
     <string name="player_clip_done">剪辑已导出到媒体库</string>
     <string name="player_clip_failed">导出失败，请重试</string>
+
+    <!-- 内录选轨（批 4）：双音轨片才有音轨 chip/同步/导出三控件；音轨识别口径见 TrackSync 头注 -->
+    <string name="player_track_env">环境音</string>
+    <string name="player_track_cap">内录</string>
+    <string name="player_track_pick_title">选择音轨</string>
+    <string name="player_track_sync">同步音轨</string>
+    <string name="player_track_sync_done_fmt">已同步 %1$s ms</string>
+    <string name="player_track_sync_low">未能自动校正，已按录制起点对齐</string>
+    <string name="player_track_sync_failed">同步失败，请重试</string>
+    <string name="player_track_sync_none">未同步，按录制起点对齐</string>
+    <string name="player_track_export">导出音轨</string>
+    <string name="player_track_export_title">导出选中音轨（全片）</string>
+    <string name="player_track_export_track">导出音轨：%1$s</string>
+    <string name="player_track_export_done">音轨成片已导出到媒体库</string>
+    <string name="player_track_export_failed">导出失败，请重试</string>
 </resources>

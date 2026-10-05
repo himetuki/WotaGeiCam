@@ -11,6 +11,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -95,6 +96,15 @@ class PlayerEngine(private val context: Context) {
     private val _loopModeState = MutableStateFlow(LoopMode.OFF)
     val loopModeState: StateFlow<LoopMode> = _loopModeState.asStateFlow()
 
+    /**
+     * 当前媒体的全部**音频** TrackGroup（内录体系批 4）：下标即容器轨序——双轨内录片
+     * groups[0]=环境轨、groups[1]=内录轨（env<cap 轨序由 CodecRecorder 门序结构保证；
+     * env 零样本废弃后的 cap-only 单轨段无法与普通录像区分，批 4 口径=三控件静默不显）。
+     * 换片即清空，等 onTracksChanged 重报。
+     */
+    private val _audioGroups = MutableStateFlow<List<Tracks.Group>>(emptyList())
+    val audioGroups: StateFlow<List<Tracks.Group>> = _audioGroups.asStateFlow()
+
     var released: Boolean = false
         private set
 
@@ -127,6 +137,7 @@ class PlayerEngine(private val context: Context) {
 
         override fun onTracksChanged(tracks: Tracks) {
             readFrameRate(tracks)
+            readAudioGroups(tracks)
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -148,6 +159,10 @@ class PlayerEngine(private val context: Context) {
         _error.value = false
         _positionMs.value = 0L
         pendingStepMs = null
+        // 换片必须先清上一片的音频 override 与轨读数：TrackGroup 以格式为等价键，
+        // 跨片残留的 override 指向已不存在的组（选轨态由 UI 会话态持有，引擎只留原生层）
+        _audioGroups.value = emptyList()
+        clearAudioOverride()
         p.setMediaItem(MediaItem.fromUri(uri))
         p.playWhenReady = false
         restoreAb(uri)
@@ -276,6 +291,36 @@ class PlayerEngine(private val context: Context) {
     fun setVolume(v: Float) {
         player?.volume = v.coerceIn(0f, 1f)
     }
+
+    // region 音轨选择（内录体系批 4）
+
+    /**
+     * 强制选中第 [groupIndex] 个音频组的第 [trackIndex] 条轨道（Media3 1.1.1：
+     * TrackSelectionOverride + setOverrideForType，覆盖 AUDIO 类型默认选择）。
+     * 组下标越界/播放器已释放一律空操作——UI 侧按 [audioGroups] 的当下快照发号，
+     * 换片竞态在这里兜底。
+     */
+    fun setAudioTrackOverride(groupIndex: Int, trackIndex: Int) {
+        val p = player ?: return
+        val group = _audioGroups.value.getOrNull(groupIndex) ?: return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
+            .build()
+    }
+
+    /** 清除音频选轨 override，回到默认选择（默认即容器第一条音轨=环境轨） */
+    fun clearAudioOverride() {
+        val p = player ?: return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .build()
+    }
+
+    private fun readAudioGroups(tracks: Tracks) {
+        _audioGroups.value = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+    }
+
+    // endregion
 
     private fun applyRepeat() {
         val p = player ?: return
@@ -459,7 +504,9 @@ class PlayerEngine(private val context: Context) {
         /** 步进目标迟迟不落地时的兜底轮询数（约 360ms），防止 AB 回绕被长期抑制 */
         private const val STEP_PENDING_MAX_TICKS = 3
         private const val DEFAULT_FPS = 25f
-        private const val PREFS = "wota_player_ab"
+
+        /** 播放器持久化文件：AB 段与批 4 的 TrackSync 偏移共用（均按 uri 记键） */
+        internal const val PREFS = "wota_player_ab"
         private const val KEY_A = "ab_a"
         private const val KEY_B = "ab_b"
         private const val KEY_LOOP = "ab_loop"
