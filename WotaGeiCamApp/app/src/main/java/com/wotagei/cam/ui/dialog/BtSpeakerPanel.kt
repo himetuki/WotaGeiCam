@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -100,7 +101,12 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
     }
 
     Column(
-        Modifier.fillMaxWidth(),
+        // 先钳后铺（2026-10-05 紧凑化，顺序纪律见 CameraDialogs.BottomPanel 的 widthIn 注）：
+        // 不钳的话 fillMaxWidth 会把整枚音源弹窗顶到 400dp 上限；240dp 够放下
+        // 「设备行 + 音量滑杆 + 三枚传输键」，弹窗宽度改由各页签最宽内容决定
+        Modifier
+            .widthIn(max = 240.dp)
+            .fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         // 标题与「收起」由外层 WotaPillPopup 提供，这里只把搜索开关靠右留着

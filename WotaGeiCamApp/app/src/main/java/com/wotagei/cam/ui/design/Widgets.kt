@@ -574,7 +574,9 @@ fun WotaMenuPopup(
                 .padding(horizontal = 10.dp, vertical = 10.dp)
                 .widthIn(max = 300.dp)
                 .clip(menuShape)
-                .background(WotaColor.surface.copy(alpha = 0.97f))
+                // 底透明度与 WotaPillPopup 同一轮透明化裁决（2026-10-05）：0.97 → 0.88，
+                // 真机可调点同（PillPopup.kt 那条注释）；RGB 曲线弹窗是独立容器，豁免
+                .background(WotaColor.surface.copy(alpha = 0.88f))
                 .border(1.dp, WotaColor.acrylicBorder, menuShape)
                 .padding(vertical = 4.dp)
         ) {

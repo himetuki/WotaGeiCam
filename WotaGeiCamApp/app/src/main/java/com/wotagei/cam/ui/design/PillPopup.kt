@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -54,6 +53,14 @@ import com.wotagei.cam.ui.anim.LocalMotion
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内 */
 private const val MAX_HEIGHT_RATIO = 0.62f
+
+/**
+ * 弹窗内滑杆的最大宽（2026-10-05 紧凑化裁决）：滑杆要一段可用的拖动行程，不能像档位 chip 那样
+ * 收成内容宽，但也不该把整枚弹窗顶到 400dp——封顶后滑杆行只在这段宽里铺，弹窗宽度改由
+ * 「最宽的档位行/读数行」与它一起决定。
+ * **真机可调点**：嫌行程短就加大，上限是 400dp 的弹窗 max。
+ */
+private val PILL_SLIDER_MAX_WIDTH = 220.dp
 
 /**
  * HDS 阴影 md 档（Toast/气泡/菜单默认档）落 Compose 的 elevation：令牌
@@ -147,11 +154,15 @@ fun PillChoices(
                         // （真机事故：24※ 下点 1/24 被钳成 1/30）。灰显还必须点不动
                         enabled = opt.enabled,
                         onClick = { onPick(opt) },
-                        modifier = Modifier.weight(1f)
+                        // fill = false（2026-10-05 紧凑化裁决）：weight 的 fill 默认 true 会把整行
+                        // 撑满弹窗最大可用宽（400dp），「1/24」三个字符被拉成二十多个字符长的按钮——
+                        // 弹窗面积也跟着翻倍。改内容定宽后弹窗宽度由最宽的行决定
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
-                // 末行不满时补位，保证每个 chip 同宽
-                repeat(max(0, columns - row.size)) { Box(Modifier.weight(1f)) }
+                // 末行补位（不可见）：fill=false 后它量 0 宽、行宽仍由内容决定，作用只剩把末行
+                // chip 的 weight 槽位上限钳到与其他行同格（内容超出槽位才被压），不再负责对齐
+                repeat(max(0, columns - row.size)) { Box(Modifier.weight(1f, fill = false)) }
             }
         }
     }
@@ -182,10 +193,11 @@ fun PillToggles(
                         // 与 PillChoices 同一条：灰显不许只是调暗文字，点击也要关掉
                         enabled = opt.enabled,
                         onClick = { onToggle(opt) },
-                        modifier = Modifier.weight(1f)
+                        // fill = false：与 PillChoices 同一条紧凑化裁决，行宽由内容决定
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
-                repeat(max(0, columns - row.size)) { Box(Modifier.weight(1f)) }
+                repeat(max(0, columns - row.size)) { Box(Modifier.weight(1f, fill = false)) }
             }
         }
     }
@@ -206,7 +218,8 @@ fun PillRowList(
         rows.forEach { row ->
             Column(
                 Modifier
-                    .fillMaxWidth()
+                    // 不 fillMaxWidth（2026-10-05 紧凑化）：行宽由「镜头名 + 焦距读数」自身决定，
+                    // 撑满弹窗只会把弹窗顶到最大宽、行尾留一大段点不着的空白
                     .clip(WotaShape.small)
                     .clickable { onPick(row) }
                     .padding(horizontal = 8.dp, vertical = 6.dp)
@@ -283,7 +296,13 @@ fun PillSlider(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Row(Modifier.height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+        // 滑杆行封顶见 [PILL_SLIDER_MAX_WIDTH]：不封顶时 weight(fill=true) 的滑杆会把弹窗撑到最大宽
+        Row(
+            Modifier
+                .height(40.dp)
+                .widthIn(max = PILL_SLIDER_MAX_WIDTH),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Slider(
                 value = shown,
                 onValueChange = { raw ->
@@ -343,8 +362,12 @@ fun WotaPillPopup(
      * 锚点旁边，看着像"跳出来"。走动画档之后，锚定跳变被量框那一帧的透明期吃掉，出现动作是连续的。
      */
     val motion = LocalMotion.current
+    // 锚点有效性闸（2026-10-05）：IntRect.Zero = 写入方还没量到（首帧 / 条目刚被显隐收掉）。
+    // 此时 place() 会把弹窗按「margin,margin」摆到屏幕左上角——老缺陷族 §69 的闪现路径。
+    // 量框完成但锚点无效时**不显形**，等下一帧锚点到位再从终位淡入：首帧即终位，左上角闪框灭绝
+    val anchorOk = anchor != IntRect.Zero
     var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(measured) { if (measured) shown = true }
+    LaunchedEffect(measured, anchorOk) { if (measured && anchorOk) shown = true }
     val appearAlpha by animateFloatAsState(if (shown) 1f else 0f, motion.float)
     val appearScale by animateFloatAsState(if (shown) 1f else 0.94f, motion.float)
 
@@ -361,7 +384,8 @@ fun WotaPillPopup(
             modifier
                 // 最大宽 400dp 封顶：HDS「最大拉伸到 400vp 宽度时不再跟随放大」
                 // （.tmp/hw_popup-0000001956975269.md 指向型气泡节；component-map Top 8 #6）。
-                // 上限只是 max，调用点显式传宽的（镜像 120dp、倍速 148、光弧 240）不受影响
+                // 上限只是 max：内容一律内容定宽（weight(fill=false) / 行不撑满），
+                // 弹窗面积由最宽的行决定（2026-10-05 紧凑化裁决）；唯一显式传宽的是镜像三选 120dp
                 .widthIn(max = 400.dp)
                 .onSizeChanged { popupSize = it }
                 .graphicsLayer {
@@ -378,7 +402,11 @@ fun WotaPillPopup(
                     spotColor = Color.Black
                 )
                 .clip(menuShape)
-                .background(WotaColor.surface.copy(alpha = 0.97f))
+                // 底透明度（2026-10-05 透明化裁决）：0.97 → 0.88，弹窗更透、画面占用量观感更轻。
+                // **真机可调点**：亮背景场景文字发虚就把这里往回调大（0.88 → 0.92 档）；
+                // scripts/contrast-audit.py 的「弹层底组」从本文件现抓这个字面量，别改成命名常量。
+                // RGB 曲线弹窗（CurvePopup）自带独立容器与自己的 0.97，豁免不动
+                .background(WotaColor.surface.copy(alpha = 0.88f))
                 .border(1.dp, WotaColor.acrylicBorder, menuShape)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -398,13 +426,15 @@ fun WotaPillPopup(
             ) {
                 content()
             }
-            // 取景页上"点外面"很容易被误当成点按对焦，所以再给一个明确的收起命中区
+            // 取景页上"点外面"很容易被误当成点按对焦，所以再给一个明确的收起命中区。
+            // 不 fillMaxWidth（2026-10-05 紧凑化）：fill 会把这行顶到弹窗最大宽，
+            // 反过来把整枚弹窗钉死在 400dp——改内容定宽 + 左右 10dp 命中加宽
             Box(
                 Modifier
-                    .fillMaxWidth()
                     .height(26.dp)
                     .clip(WotaShape.pill)
-                    .clickable(onClick = onDismiss),
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(

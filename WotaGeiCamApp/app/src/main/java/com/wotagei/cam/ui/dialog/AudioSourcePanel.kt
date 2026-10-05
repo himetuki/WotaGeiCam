@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -78,7 +79,9 @@ fun AudioSourcePanel(
                     label = spec.title,
                     selected = spec.key == selected,
                     onClick = { selected = spec.key },
-                    modifier = Modifier.weight(1f)
+                    // fill = false（2026-10-05 紧凑化）：weight 的 fill 默认 true 会把页签行
+                    // 撑到弹窗最大宽（400dp），弹窗面积跟着翻倍；改内容定宽
+                    modifier = Modifier.weight(1f, fill = false)
                 )
             }
         }
@@ -169,11 +172,14 @@ private fun AudioSourceTab(
     }
 }
 
-/** 一行开关：整行可点（toggleable 挂行上），Switch 本体只显状态——与设置页同一套观感 */
+/** 一行开关：整行可点（toggleable 挂行上），Switch 本体只显状态——与设置页同一套观感。
+ *  行宽封顶 220dp（2026-10-05 紧凑化）：SpaceBetween 需要一段确定宽度才分得出「标签 | 开关」，
+ *  但不封顶时 fillMaxWidth 会把整枚弹窗顶到 400dp 上限。 */
 @Composable
 private fun AudioSourceRow(label: String, checked: Boolean, onClick: () -> Unit) {
     Row(
         Modifier
+            .widthIn(max = 220.dp)
             .fillMaxWidth()
             .toggleable(value = checked, role = Role.Switch, onValueChange = { onClick() }),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -205,6 +211,8 @@ private fun AudioStateHint(state: CaptureState) {
     Text(
         text = text,
         style = WotaType.caption,
-        color = WotaColor.textLo
+        color = WotaColor.textLo,
+        // 与开关行同一条封宽账（220dp）：状态说明在行宽内折行，不顶宽弹窗
+        modifier = Modifier.widthIn(max = 220.dp)
     )
 }

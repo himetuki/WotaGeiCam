@@ -59,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -1345,11 +1346,43 @@ fun CameraScreen(
         // 真量不到的只有两种：首帧还没测完、以及那颗控件刚被显隐开关收掉——这两种都下一帧就修正。
         // 「有触发点但没有写入方」这一种已经由 pillAnchorWriters 登记表 + PillAnchorRegistryTest 封死：
         // 蓝牙那颗当初就是没人写锚点，弹窗于是永远按 IntRect.Zero 钉在左上角（审查 S2-2，§69 缺陷族）
+        //
+        // 锚点快照冻结（2026-10-05 闪跳裁决）：开弹窗瞬间把「矩形 + 是否右竖 Dock 条目」定格成
+        // [pillAnchorSnap]，弹窗存续期不再跟踪。dock 滑出是 graphicsLayer 平移、本就不回报布局；
+        // 这道闸挡的是另一条账：弹窗开着时控件文本/状态变化 → chip 重排 → 锚点跟着动 → 弹窗横跳。
+        // 首帧还没量到时先按 live 值走、量到即冻（WotaPillPopup 侧有「锚点无效不显形」闸兜首帧，
+        // 不会闪左上角空框）。右 Dock 条目的弹窗改**贴屏幕右缘**：锚点换成 x 钉在窗口右缘的
+        // [rightEdgeAnchorOf] 合成矩形，place() 的居中策略下弹窗右缘自然贴「屏幕右缘 − margin」，
+        // 不再因「宽弹窗被 clamp 到 x = 右缘−宽」从右下跳看去像闪到左上（旧症状：右下弹→左上闪）。
+        // 左 Dock / 顶栏 / 底栏条目的锚点不落在右 Dock 卡片矩形内，定位路径一字不变（回归口径）。
         val popped = pop
         if (popped != null && sheet == Sheet.NONE) {
+            val liveAnchor = pillAnchors[popped]
+            var anchorSnap by remember(popped) {
+                mutableStateOf<Pair<IntRect, Boolean>?>(null)
+            }
+            SideEffect {
+                val live = pillAnchors[popped]
+                if (anchorSnap == null && live != null && live != IntRect.Zero) {
+                    // 右 Dock 判定与矩形同帧冻结：锚点中心落在右 Dock 卡片的**实测布局矩形**内
+                    // （zoneRects 布局期回报，不随滑出位移变化——见上面 dockSlide 的注释）。
+                    // 控件被挪到别的容器时自动失配，判定永远跟着实际摆位走
+                    val right = zoneRects[HudZone.RIGHT]
+                    anchorSnap = live to (right != null && right.contains(live.center))
+                }
+            }
+            val snap = anchorSnap
+            val anchor = (snap?.first ?: liveAnchor) ?: IntRect.Zero
+            // 贴右换算要**窗口像素宽**：与锚点同一坐标系（pillAnchorReport 是 boundsInWindow）。
+            // 弹窗挂在压图层之外（见上），这里自取 rootView，别拿布局层的什么宽度来折算
+            val windowWidthPx = LocalView.current.rootView.width
             PillHost(
                 key = popped,
-                anchor = pillAnchors[popped] ?: IntRect.Zero,
+                anchor = if (snap?.second == true) {
+                    rightEdgeAnchorOf(anchor, windowWidthPx)
+                } else {
+                    anchor
+                },
                 params = params,
                 slot = slot,
                 recording = recording,
@@ -1392,6 +1425,17 @@ fun CameraScreen(
 
 /** 面板互斥态（就近胶囊不占这里：它可以和顶栏共存，只跟整块面板互斥） */
 private enum class Sheet { NONE, CURVE }
+
+/**
+ * 右竖 Dock 弹窗的贴右合成锚点（2026-10-05 闪跳裁决）：x 钉在窗口右缘、纵向沿用原锚点。
+ *
+ * 喂给 `PillAnchor.place` 后其居中算式 `x = (left+right)/2 − popup.width/2` 变成
+ * 「右缘 − 弹宽」，再被 `coerceIn(margin, right)` 收进屏内——弹窗右缘恰落在「屏幕右缘 − margin」，
+ * 弹窗多宽都贴右，横向不再随宽度在右下与左中之间跳。纵向（above/below/bottom 三段）原样保留。
+ * 纯函数、单位 px，JVM 可测（PopupCompactGuardTest 锁「贴右缘 − margin」这条行为桥）。
+ */
+internal fun rightEdgeAnchorOf(anchor: IntRect, areaWidth: Int): IntRect =
+    IntRect(areaWidth, anchor.top, areaWidth, anchor.bottom)
 
 /**
  * 分屏时整页的压缩比例：`scale = 1 − SPLIT_SQUEEZE · splitP`，1f 那一帧恰好压到半宽/半高。
