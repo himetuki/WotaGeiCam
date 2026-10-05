@@ -187,4 +187,37 @@ class ArcConvertGuardTest {
             flushBody.contains("coerceAtLeast(0)")
         )
     }
+
+    @Test
+    fun `补弧降级两段阀在位`() {
+        // 2026-10-04 裁决：补弧失败降「仅抽帧不补弧」，不再全速直通（直通当第一响应 =
+        // 降级点后成片段落慢放、音画渐进漂移到秒级）。锁 degradeArcConvert 函数体：
+        // 删掉两段链改回「arcConvert = null」旧形态必红。
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val degradeBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "degradeArcConvert"))
+        assertTrue(
+            "MEND 失败必须经 setArcConvert 降 DROP（仅抽帧不补弧；直改 arcConvert 字段 = 绕过 " +
+                "slotNs 接线/状态机/位次账的按档重建，节奏锚点残留）",
+            degradeBody.contains("setArcConvert(ArcConvertMode.DROP")
+        )
+        assertTrue(
+            "阀必须保留 DROP→直通的二段保底分支（失败源于 makeCurrent/编码面这类公共部件时抽帧也救不了）",
+            degradeBody.contains("ArcConvertMode.DROP ->")
+        )
+        assertFalse(
+            "阀体内不许直接把 arcConvert 置 null（全速直通当第一响应 = 降级点后按 dstFps 均匀盖 " +
+                "PTS 照跑，成片段落慢放、音画漂移）",
+            degradeBody.contains("arcConvert = null")
+        )
+        // 二段触发点锁在 drawFrame 体内：没有它，DROP→直通分支是死代码
+        val frameBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "drawFrame"))
+        assertTrue(
+            "drawFrame 必须检测 DROP 直通编码面帧中掉链并触发二段降级（无触发点则保底分支永远走不到）",
+            frameBody.contains("degradeArcConvert(")
+        )
+        assertTrue(
+            "掉链判定必须以「帧前在位 → 帧后为 null」为据（只看当前 null 会把面本来就未挂的帧误判成失败）",
+            frameBody.contains("encoderBound && encoderEglSurface == null")
+        )
+    }
 }
