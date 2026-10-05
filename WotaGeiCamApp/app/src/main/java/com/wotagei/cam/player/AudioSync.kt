@@ -38,13 +38,15 @@ object AudioSync {
         val reasonRes: Int? = null
     )
 
-    private const val TARGET_SR = 8000
+    /** 目标采样率：TrackSync 判"至少 1 秒 PCM"同口径复用，故 internal 单一真源 */
+    internal const val TARGET_SR = 8000
     private const val MAX_SECONDS = 30
     private const val ENV_WIN_MS = 10
     private const val SEARCH_MS = 10_000L
     private const val REFINE_MS = 50L
     private const val PEAK_GUARD_MS = 150L
-    private const val MIN_CONFIDENCE = 1.5f
+    /** 低置信度门槛（主峰/次峰比）：TrackSync 同口径复用，故 internal 单一真源 */
+    internal const val MIN_CONFIDENCE = 1.5f
 
     suspend fun align(context: Context, left: Uri, right: Uri): Result = withContext(Dispatchers.Default) {
         val pcmL = decodeMono(context, left) ?: return@withContext Result(false, reasonRes = R.string.player_sync_no_audio)
@@ -69,22 +71,35 @@ object AudioSync {
 
     /**
      * 解出单声道 Float PCM（重采样到 [TARGET_SR]，只取前 [MAX_SECONDS] 秒）。
-     * 无音轨 / 解码失败返回 null。
+     * 无音轨 / 解码失败返回 null。委托轨序版第 0 轨（对比页双文件对齐行为零变化）。
      */
     internal fun decodeMono(context: Context, uri: Uri): FloatArray? {
+        return decodeMono(context, uri, 0)
+    }
+
+    /**
+     * 同上，但按**容器轨序**取第 [audioIndex] 条音轨（0 起）：内录双轨片 0=环境、1=内录
+     * （识别口径见 [TrackSync] 头注）。旧单参签名原样保留（委托本函数、默认 0），
+     * 对比页双文件对齐走的仍是"每文件第一条音轨"，行为零变化。
+     */
+    internal fun decodeMono(context: Context, uri: Uri, audioIndex: Int): FloatArray? {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
             extractor.setDataSource(context, uri, null)
             var trackIndex = -1
             var mime: String? = null
+            var nth = 0
             for (i in 0 until extractor.trackCount) {
                 val t = extractor.getTrackFormat(i)
                 val m = t.getString(MediaFormat.KEY_MIME) ?: continue
                 if (m.startsWith("audio/")) {
-                    trackIndex = i
-                    mime = m
-                    break
+                    if (nth == audioIndex) {
+                        trackIndex = i
+                        mime = m
+                        break
+                    }
+                    nth++
                 }
             }
             if (trackIndex < 0 || mime == null) return null

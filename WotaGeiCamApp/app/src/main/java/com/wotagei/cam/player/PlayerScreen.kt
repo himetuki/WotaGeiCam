@@ -50,6 +50,7 @@ import androidx.compose.material.icons.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Flip
@@ -61,6 +62,7 @@ import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -107,6 +109,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.wotagei.cam.R
@@ -138,9 +141,11 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import android.os.SystemClock
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 双击判定窗口：单击要等满这么久才落地显隐，否则「双击启停」会顺带闪一下控件栏。
  *  提成 internal：对比播放页的沉浸式控制层（10-01）复用同一套单击/双击仲裁，两处各抄一份迟早漂移。 */
@@ -375,6 +380,26 @@ fun PlayerScreen(
     var clipProgress by remember { mutableStateOf(0f) }
     var clipJob by remember { mutableStateOf<Job?>(null) }
 
+    // 内录选轨（批 4）：双音轨片才亮的「音轨 chip / 同步 / 导出」三控件。dualAudio 由打开时的
+    // MediaExtractor 探测（IO 线程）——单音轨片与外来视频静默不显（回归红线，守卫钉住）；
+    // cap-only 单音轨段（环境轨零样本废弃后）无法与普通录像区分，同一条红线覆盖：不显、不误标
+    val trackExporter = remember(app) { TrackExporter(app) }
+    var dualAudio by remember(clip.uri) { mutableStateOf(false) }
+    // 选轨是会话态：换片回环境轨（引擎 override 由 attach 清掉，两侧口径一致）
+    var selectedAudio by remember(clip.uri) { mutableStateOf(SelectedTrack.ENV) }
+    // 非 null = 已跑过同步（含低置信度按起点落 0），导出弹窗读数与导出平移共用它
+    var syncedOffsetMs by remember(clip.uri) { mutableStateOf<Long?>(null) }
+    var syncRunning by remember(clip.uri) { mutableStateOf(false) }
+    var trackPickMenu by remember { mutableStateOf(false) }
+    var trackPickAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var trackSyncAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var trackExportMenu by remember { mutableStateOf(false) }
+    var trackExportAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var trackExporting by remember { mutableStateOf(false) }
+    var trackExportProgress by remember { mutableStateOf(0f) }
+    var trackExportJob by remember { mutableStateOf<Job?>(null) }
+    val audioGroups by engine.audioGroups.collectState(emptyList<Tracks.Group>())
+
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
     val tapArbiter = remember { TapArbiter(DOUBLE_TAP_WINDOW_MS) }
     var toggleJob by remember { mutableStateOf<Job?>(null) }
@@ -383,6 +408,12 @@ fun PlayerScreen(
     LaunchedEffect(clip.uri) {
         engine.attach(clip.uri)
         engine.softPause(false)
+    }
+    // 打开时探测音轨数（IO 线程，MediaExtractor）：>=2 才亮三控件；顺带读上次同步的
+    // 持久化偏移（keyed-by-uri），导出弹窗的「已同步 +Xms」读数不因退出页面丢失
+    LaunchedEffect(clip.uri) {
+        syncedOffsetMs = TrackSync.cachedOffsetMs(app, clip.uri)
+        dualAudio = withContext(Dispatchers.IO) { TrackSync.countAudioTracks(app, clip.uri) >= 2 }
     }
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -596,6 +627,56 @@ fun PlayerScreen(
                                     accent = clipExporting
                                 ) { clipMenu = !clipMenu }
                             }
+                            // 内录选轨三控件（批 4，仅双音轨片渲染）：chip 选轨就近弹窗、同步跑
+                            // TrackSync、导出就近弹窗。同步中/导出中亮 accent（"在忙"记号同前语义）
+                            if (dualAudio) {
+                                WotaChip(
+                                    label = stringResource(
+                                        if (selectedAudio == SelectedTrack.ENV) R.string.player_track_env else R.string.player_track_cap
+                                    ),
+                                    selected = selectedAudio == SelectedTrack.CAP,
+                                    modifier = Modifier.pillAnchor { trackPickAnchor = it },
+                                    onClick = { trackPickMenu = !trackPickMenu }
+                                )
+                                Box(Modifier.pillAnchor { trackSyncAnchor = it }) {
+                                    BarIconSlot(
+                                        Icons.Outlined.Sync,
+                                        stringResource(R.string.player_track_sync),
+                                        accent = syncRunning
+                                    ) {
+                                        if (!syncRunning) {
+                                            syncRunning = true
+                                            scope.launch {
+                                                try {
+                                                    val r = TrackSync.run(app, clip.uri)
+                                                    when {
+                                                        r.ok && !r.lowConfidence -> {
+                                                            syncedOffsetMs = r.offsetMs
+                                                            banner = R.string.player_sync_done
+                                                        }
+                                                        // 低置信度不硬凑数字：偏移已按录制起点落 0，讲明即可
+                                                        r.ok -> {
+                                                            syncedOffsetMs = r.offsetMs
+                                                            banner = R.string.player_track_sync_low
+                                                        }
+                                                        !r.dualAudio -> banner = R.string.player_sync_no_audio
+                                                        else -> banner = r.reasonRes ?: R.string.player_track_sync_failed
+                                                    }
+                                                } finally {
+                                                    syncRunning = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Box(Modifier.pillAnchor { trackExportAnchor = it }) {
+                                    BarIconSlot(
+                                        Icons.Outlined.FileDownload,
+                                        stringResource(R.string.player_track_export),
+                                        accent = trackExporting
+                                    ) { trackExportMenu = !trackExportMenu }
+                                }
+                            }
                         }
                         // 倍速永远在最右：它是这一行里唯一带弹层的入口，弹窗就锚在这颗上面
                         WotaChip(
@@ -681,6 +762,64 @@ fun PlayerScreen(
                         clipJob = null
                     },
                     onDismiss = { clipMenu = false }
+                )
+            }
+
+            // 音轨选择就近弹层（批 4）：锚在音轨 chip 上；内录项在引擎尚未上报第二条音频组时置灰
+            if (controlsVisible && trackPickMenu) {
+                TrackPickPopup(
+                    anchor = trackPickAnchor,
+                    selected = selectedAudio,
+                    dualReady = audioGroups.size >= 2,
+                    onPick = { track ->
+                        selectedAudio = track
+                        // 环境=容器第一条音轨=ExoPlayer 默认选择（清 override 回默认）；
+                        // 内录=强制选中第二条音频组（组内单轨，trackIndex 恒 0）
+                        if (track == SelectedTrack.CAP) engine.setAudioTrackOverride(1, 0) else engine.clearAudioOverride()
+                        trackPickMenu = false
+                    },
+                    onDismiss = { trackPickMenu = false }
+                )
+            }
+            // 选轨导出就近弹层（批 4）：选轨结果 + 同步读数 + 导出/取消 + 进度；导出中重开可看进度
+            if (controlsVisible && trackExportMenu) {
+                TrackExportPopup(
+                    anchor = trackExportAnchor,
+                    track = selectedAudio,
+                    syncedOffsetMs = syncedOffsetMs,
+                    exporting = trackExporting,
+                    progress = trackExportProgress,
+                    onExport = {
+                        // 重入防护与选轨/偏移定版同剪辑导出口径：起跑那一刻锁快照，
+                        // 导出期间切轨/重跑同步不影响这一轮
+                        if (trackExportJob == null) {
+                            engine.softPause(true)
+                            trackExportMenu = false
+                            trackExporting = true
+                            trackExportProgress = 0f
+                            val track = selectedAudio
+                            val offset = syncedOffsetMs ?: 0L
+                            trackExportJob = scope.launch {
+                                try {
+                                    when (val r = trackExporter.export(clip, track, offset) { p -> trackExportProgress = p }) {
+                                        is ClipResult.Done -> {
+                                            banner = R.string.player_track_export_done
+                                            clipRepo.invalidate()
+                                        }
+                                        is ClipResult.Fail -> banner = R.string.player_track_export_failed
+                                    }
+                                } finally {
+                                    trackExporting = false
+                                    trackExportJob = null
+                                }
+                            }
+                        }
+                    },
+                    onCancel = {
+                        trackExportJob?.cancel()
+                        trackExportJob = null
+                    },
+                    onDismiss = { trackExportMenu = false }
                 )
             }
 
@@ -981,6 +1120,113 @@ private fun ClipExportPopup(
                 stringResource(R.string.player_clip_need_ab),
                 style = MaterialTheme.typography.bodySmall,
                 color = WotaTextDim
+            )
+        }
+    }
+}
+
+/**
+ * 音轨选择就近弹层（批 4）：环境/内录两项，当前选中带 ✓。入口被 dualAudio 门住，
+ * 只在双音轨片可达；内录项在引擎尚未上报第二条音频组（prepare 未完）时置灰——
+ * override 无从挂靠，置灰比点了没反应诚实。锚点无默认值必传（锚点纪律）。
+ */
+@Composable
+private fun TrackPickPopup(
+    anchor: androidx.compose.ui.unit.IntRect,
+    selected: SelectedTrack,
+    dualReady: Boolean,
+    onPick: (SelectedTrack) -> Unit,
+    onDismiss: () -> Unit
+) {
+    WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_track_pick_title)) {
+        listOf(
+            SelectedTrack.ENV to R.string.player_track_env,
+            SelectedTrack.CAP to R.string.player_track_cap
+        ).forEach { (track, labelRes) ->
+            val picked = track == selected
+            val enabled = track == SelectedTrack.ENV || dualReady
+            Row(
+                Modifier
+                    .clickable(enabled = enabled) { onPick(track) }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(labelRes),
+                    style = MaterialTheme.typography.labelMedium,
+                    // 选中态不用 accent 当文字色（对比度不达标，同 SpeedTierPopup 口径），✓ 承担选中语义
+                    color = if (enabled) WotaText else WotaTextDim,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+                if (picked) {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        tint = WotaColor.accent,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 选轨导出就近弹层（批 4）：选轨结果 + 同步读数 + 导出/取消 + 进度，壳与进度条宽度口径同
+ * [ClipExportPopup]（min 200 / progress 180）。「已同步 +Xms」读数来自 TrackSync 持久化偏移，
+ * 导出时原样应用（选内录轨平移、选环境轨恒 0）；未同步（含低置信度按起点对齐落 0）给平实文案不讲数字。
+ */
+@Composable
+private fun TrackExportPopup(
+    anchor: androidx.compose.ui.unit.IntRect,
+    track: SelectedTrack,
+    syncedOffsetMs: Long?,
+    exporting: Boolean,
+    progress: Float,
+    onExport: () -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    WotaPillPopup(
+        anchor = anchor,
+        onDismiss = onDismiss,
+        modifier = Modifier.widthIn(min = CLIP_POPUP_MIN_WIDTH),
+        title = stringResource(R.string.player_track_export_title)
+    ) {
+        Text(
+            stringResource(
+                R.string.player_track_export_track,
+                stringResource(if (track == SelectedTrack.ENV) R.string.player_track_env else R.string.player_track_cap)
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaText
+        )
+        Text(
+            if (syncedOffsetMs != null) {
+                stringResource(R.string.player_track_sync_done_fmt, TrackSync.signedMs(syncedOffsetMs))
+            } else {
+                stringResource(R.string.player_track_sync_none)
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+        if (exporting) {
+            LinearProgressIndicator(
+                progress = progress,
+                modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
+                color = WotaColor.accent,
+                trackColor = WotaColor.outline
+            )
+            WotaChip(
+                label = stringResource(R.string.player_clip_cancel),
+                selected = false,
+                onClick = onCancel
+            )
+        } else {
+            WotaChip(
+                label = stringResource(R.string.player_clip_export),
+                selected = true,
+                onClick = onExport
             )
         }
     }
