@@ -73,16 +73,69 @@ object AudioProbe {
  *
  * - 生产端：本类线程读 PCM 并算 RMS；消费端：编码器循环取包喂 AAC，两者不共享编码器句柄；
  * - 时间戳统一 `System.nanoTime() / 1000`（μs），与视频 PTS 同源时钟，避免音画漂移；
- * - 停止时投递 4 字节哨兵包（同通道 EOS），消费端据此给编码器打 `BUFFER_FLAG_END_OF_STREAM`。
+ * - 停止时投递 4 字节哨兵包（同通道 EOS），消费端据此给编码器打 `BUFFER_FLAG_END_OF_STREAM`；
+ * - 双轨泛化（内录体系批 3）：泵循环/队列/EOS 哨兵/RMS **只有这一份**，环境与捕获两路各建一个
+ *   实例，唯一分叉点是 AudioRecord 的构造路径（[openRecord]）——环境路照旧自查权限/参数后构造，
+ *   捕获路拿 [PlaybackCaptureController] 在 Active 态建的 AudioRecord（P2：双轨并存，不是换源）。
  */
-class AudioFeeder(
-    private val ctx: Context,
+class AudioFeeder private constructor(
     val sampleRate: Int,
     val channels: Int,
     val source: Int,
     /** = `MediaFormat.KEY_MAX_INPUT_SIZE` 的来源（`` 参数表：max-input-size = minBufferSize） */
-    val minBufferSize: Int
+    val minBufferSize: Int,
+    /** AudioRecord 构造路径（唯一分叉点）：入参=整缓冲字节数；null = 本源不可用，静默降级纯视频 */
+    private val openRecord: (bufferBytes: Int) -> AudioRecord?,
+    /** 捕获源健康度外部判据（null = 无此判据，环境源恒 null）。投影撤销后部分机型 read 只回静音
+     *  不回错、EOS 判据探不到——用 controller 的 Active 与否兜底保证「撤销即内录轨收尾」的确定语义 */
+    private val healthy: (() -> Boolean)? = null
 ) {
+
+    /**
+     * 环境音（麦克风）路径：构造签名与行为与泛化前逐字一致，权限/minBuffer 检查也留在这一路。
+     */
+    @Suppress("MissingPermission")
+    constructor(
+        ctx: Context,
+        sampleRate: Int,
+        channels: Int,
+        source: Int,
+        minBufferSize: Int
+    ) : this(sampleRate, channels, source, minBufferSize, { bufferBytes ->
+        // 权限检查点 2/2：创建 AudioRecord 前再查一次（原 start() 逐字搬入，行为不变）
+        if (!AudioProbe.hasRecordPermission(ctx)) {
+            Log.i(TAG, "feeder skipped: RECORD_AUDIO denied, video only")
+            null
+        } else if (AudioProbe.minBufferSize(sampleRate, channels) <= 0) {
+            Log.i(TAG, "feeder skipped: sr=$sampleRate ch=$channels unsupported")
+            null
+        } else try {
+            AudioRecord(
+                source, sampleRate, AudioProbe.channelConfig(channels),
+                AudioFormat.ENCODING_PCM_16BIT, bufferBytes
+            )
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "AudioRecord bad args: ${e.message}")
+            null
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "AudioRecord init failed: ${e.message}")
+            null
+        }
+    })
+
+    /**
+     * 捕获（AudioPlaybackCapture）路径：AudioRecord 由 controller 在 Active 态建
+     * （buffer 口径同环境路，见 [PlaybackCaptureController.createCaptureAudioRecord]）。
+     * 健康判据挂 controller 态：录制中会话被撤销/重授权 → [captureActive] 变 false。
+     */
+    constructor(
+        capture: PlaybackCaptureController,
+        sampleRate: Int,
+        channels: Int,
+        minBufferSize: Int
+    ) : this(sampleRate, channels, SOURCE_CAPTURE, minBufferSize, { _ ->
+        capture.createCaptureAudioRecord(sampleRate, channels)
+    }, healthy = { capture.state.value is CaptureState.Active })
 
     /** 一段 PCM 与其 μs 时间戳；**ptsUs < 0 = 通道结束哨兵**（真实包时间戳恒为 nanoTime µs、恒正；
      *  哨兵 data 取 [EOS_SIZE] 长只是历史形状——判定看 pts 不看长度，4 字节恰是双声道 2 帧的合法 PCM） */
@@ -95,6 +148,8 @@ class AudioFeeder(
         private const val OFFER_WAIT_MS = 20L
         /** 单次读块上限：约 40ms（48k 立体声 8KB），保证 stop 几十毫秒内生效 */
         private const val CHUNK_MAX = 8192
+        /** 捕获路径的音源占位（AudioPlaybackCapture 无传统音源语义，仅日志可辨） */
+        const val SOURCE_CAPTURE = -1
     }
 
     private val queue = LinkedBlockingQueue<Packet>(QUEUE_CAPACITY)
@@ -109,36 +164,31 @@ class AudioFeeder(
     @Volatile private var running = false
     @Volatile private var rms = 0
     @Volatile private var dropped = 0
-    private var record: AudioRecord? = null
+    /** 已建的 AudioRecord；captureActive/stop 跨线程读，@Volatile 保证可见性 */
+    @Volatile private var record: AudioRecord? = null
+    /** 泵已到 EOS（通道关闭）：captureActive 的第二判据 */
+    @Volatile private var eosSeen = false
+    /** 本源第一枚真正入队的 PCM 包 PTS（启动记账：批 4 双轨对齐校正的数据基础） */
+    @Volatile var firstPtsUs: Long = 0L
+        private set
     private var thread: Thread? = null
 
     /**
-     * 权限检查点 2/2：创建 AudioRecord 前再查一次。
+     * 捕获源健康度：AudioRecord 已建 且 通道未到 EOS 且（无外部判据 或 判据通过）。
+     * 引擎只在**捕获源**实例上查询（内录体系批 3：录制中投影撤销 → false → 内录轨提前 EOS 收尾，
+     * 环境+视频继续）；环境源实例不查（三条件对它同样成立，语义无害）。
+     */
+    fun captureActive(): Boolean {
+        return record != null && !eosSeen && healthy?.invoke() != false
+    }
+
+    /**
+     * 建 AudioRecord（构造路径分叉点）→ 起泵线程。环境路的权限/参数检查在 [openRecord] 内。
      * @return false = 无权限或初始化失败，调用方静默降级为纯视频（不录了再丢）
      */
-    @Suppress("MissingPermission")
     fun start(): Boolean {
         if (running) return true
-        if (!AudioProbe.hasRecordPermission(ctx)) {
-            Log.i(TAG, "feeder skipped: RECORD_AUDIO denied, video only")
-            return false
-        }
-        if (AudioProbe.minBufferSize(sampleRate, channels) <= 0) {
-            Log.i(TAG, "feeder skipped: sr=$sampleRate ch=$channels unsupported")
-            return false
-        }
-        val rec = try {
-            AudioRecord(
-                source, sampleRate, AudioProbe.channelConfig(channels),
-                AudioFormat.ENCODING_PCM_16BIT, max(minBufferSize, chunkBytes)
-            )
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "AudioRecord bad args: ${e.message}")
-            null
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "AudioRecord init failed: ${e.message}")
-            null
-        } ?: return false
+        val rec = openRecord(max(minBufferSize, chunkBytes)) ?: return false
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "AudioRecord not initialized (state=${rec.state})")
             rec.release()
@@ -148,6 +198,8 @@ class AudioFeeder(
         record = rec
         running = true
         dropped = 0
+        eosSeen = false
+        firstPtsUs = 0L
         try {
             rec.startRecording()
         } catch (e: IllegalStateException) {
@@ -167,6 +219,13 @@ class AudioFeeder(
     private fun pump(rec: AudioRecord) {
         val buf = ByteArray(chunkBytes)
         while (running) {
+            // 捕获源健康检查（环境源 healthy=null 恒跳过）：会话撤销→立刻退出投 EOS 哨兵，
+            // 消费端据此给内录轨收尾（撤销后 read 只回静音不回错的机型靠这条兜住）
+            val health = healthy
+            if (health != null && !health()) {
+                Log.i(TAG, "capture source inactive, pump exit src=$source")
+                break
+            }
             val n = try {
                 rec.read(buf, 0, buf.size)
             } catch (e: RuntimeException) {
@@ -190,15 +249,20 @@ class AudioFeeder(
                 if (!ok) {
                     dropped++
                     if (dropped == 1 || dropped % 50 == 0) Log.e(TAG, "pcm queue full, dropped=$dropped")
+                } else if (firstPtsUs == 0L) {
+                    // 启动记账：本源第一枚真正入队的 PCM 包（与另一轨首包差 = 启动偏移）
+                    firstPtsUs = pkt.ptsUs
+                    Log.i(TAG, "首包记账 src=$source pts=$firstPtsUs")
                 }
             }
         }
+        eosSeen = true
         try {
             rec.stop()
         } catch (e: IllegalStateException) {
             Log.i(TAG, "feeder rec.stop ignored: ${e.message}")
         }
-        // EOS 哨兵与 PCM 走同一通道，消费端见 size==4 即停
+        // EOS 哨兵与 PCM 走同一通道，消费端按 pts<0 识别（J 批口径：不看包长）
         try {
             val sent = queue.offer(Packet(ByteArray(EOS_SIZE), -1L), 200L, TimeUnit.MILLISECONDS)
             if (!sent) {

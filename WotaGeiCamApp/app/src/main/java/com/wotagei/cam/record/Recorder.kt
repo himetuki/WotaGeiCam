@@ -137,14 +137,18 @@ interface Recorder {
  * fps ≤ 60 → [MrRecorder]（DIRECT 与 GPU 都一样，GPU 时 GL 画进编码器面）；
  * fps > 60（120/240 高速会话）→ [CodecRecorder]。
  * **例外**：24/25fps 录制期转换（强制档无原生精确档的抽帧/补弧）恒走 [CodecRecorder]——
- * MediaRecorder 的面输入来帧即编、没有拒帧能力，抽帧只在 GL 编码支路做得了（用户 2026-10-03 定版）。
+ * MediaRecorder 的面输入来帧即编、没有拒帧能力，抽帧只在 GL 编码支路做得了（用户 2026-10-03 定版）；
+ * 设备内录第二音轨（captureAudio）同理恒走 [CodecRecorder]——MediaRecorder 无多音轨能力
+ * （内录体系批 3，与 arcConvert 同款强制先例）。
  */
 object Recorders {
 
     /** MediaRecorder 路径的最高帧率档，超过即必须自研管线 */
     const val MR_MAX_FPS = 60
 
-    fun useCodecEngine(p: RecordProfile): Boolean = p.fps > MR_MAX_FPS || p.arcConvert != null
+    fun useCodecEngine(p: RecordProfile): Boolean {
+        return p.fps > MR_MAX_FPS || p.arcConvert != null || p.captureAudio
+    }
 
     /** 供 UI 灰显高速档时用：本机高速码率建议值 */
     fun recommendedTier(p: RecordProfile): Int =
