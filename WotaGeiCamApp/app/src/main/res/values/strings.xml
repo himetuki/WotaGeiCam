@@ -25,6 +25,24 @@
     <string name="capture_notification_text">正在采集设备内播放的音频，停止投屏后结束</string>
     <string name="capture_notification_stop">停止内录</string>
 
+    <!-- 音源管理弹窗（ui/dialog/AudioSourcePanel.kt，内录体系批 2） -->
+    <string name="audio_panel_title">音源管理</string>
+    <string name="audio_tab_source">音源</string>
+    <string name="audio_tab_bluetooth">蓝牙</string>
+    <string name="audio_capture_label">捕获设备内音频</string>
+    <string name="audio_ambient_label">默认环境音</string>
+    <string name="audio_state_authorizing">正在等待系统授权…</string>
+    <string name="audio_state_active">正在捕获设备内播放的音频</string>
+    <string name="audio_state_failed">内录建立失败：%1$s（可重试）</string>
+    <string name="audio_state_revoked">内录已被撤销，已回退环境音，可重新开启</string>
+    <string name="audio_state_idle">当前采集环境音（麦克风）</string>
+    <string name="audio_capture_cancelled">已取消内录授权，回退环境音</string>
+    <string name="audio_capture_unavailable">本机不支持设备内录</string>
+    <string name="audio_chip_label">音频</string>
+    <string name="audio_chip_capture_on">内录中</string>
+    <string name="audio_chip_bt_on">蓝牙已连接</string>
+    <string name="audio_chip_bt_off">蓝牙未连接</string>
+
     <!-- #73 取证钩子生效时的顶栏标识：只有 debugHook 变体（BuildConfig.MERGE_HOOK=true）且 adb 带了
          wota_merge_hook 那枚 extra 才可能显示，release/debug 两个变体进不到这一支，用户看不到这两句 -->
     <string name="merge_hook_pinned">调试钉住 p=%1$.2f · 时长 ×%2$.0f</string>

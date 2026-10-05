@@ -78,7 +78,8 @@
     <string name="set_storage_on">已开启</string>
     <string name="cam_pill_level">水平仪</string>
     <string name="cam_pill_volume">音量表</string>
-    <string name="cam_pill_bt">蓝牙音箱</string>
+    <!-- 键名 cam_pill_bt 沿用：这颗原是蓝牙胶囊，内录批 2 换「音频」chip，位掩码按 bit 持久化不许改键 -->
+    <string name="cam_pill_bt">音频</string>
     <string name="cam_pill_zoom">变焦</string>
     <string name="cam_pill_focus">对焦</string>
     <string name="cam_pill_stab">防抖</string>

@@ -129,7 +129,7 @@ import com.wotagei.cam.ui.design.wotaHudCard
 import com.wotagei.cam.ui.dialog.flashLabelRes
 import com.wotagei.cam.ui.dialog.wbLabelRes
 import com.wotagei.cam.ui.widget.AttitudeCard
-import com.wotagei.cam.ui.widget.BtChip
+import com.wotagei.cam.ui.widget.AudioChip
 import kotlin.math.roundToInt
 
 /**
@@ -516,6 +516,8 @@ data class HudCtx(
     val lensLabel: String,
     val btConnected: Boolean,
     val btVolumePct: Int,
+    /** 设备内录会话激活（`PlaybackCaptureController.state is Active`）：「音频」chip 的高亮层 */
+    val captureActive: Boolean,
     val levelEnabled: Boolean,
     val roll: Float,
     val pitch: Float,
@@ -661,7 +663,7 @@ private fun gatedClick(accepted: Boolean, onClick: () -> Unit): (() -> Unit)? =
  * [clicksAccepted] 同理**没有默认值**（#73 命中权交接）：底栏 Dock 在吸收期传进来的是
  * `chipClicksAccepted(progress)`，false 时这一颗的点击/长按动作经 [gatedClick] 摘成 null，
  * [WotaChip] 连 `clip + clickable` 都不 install。其余四枚容器没有吸收态，显式传 true。
- * ⚠ 覆盖范围只有胶囊族（TierChip 与读数那颗）：`WotaIconButton` / `BtChip` / 姿态仪那三类的
+ * ⚠ 覆盖范围只有胶囊族（TierChip 与读数那颗）：`WotaIconButton` / `AudioChip` / 姿态仪那三类的
  * `onClick` 现在不可空，底栏 Dock 里也不可能出现它们（[HudBottomZone] 只渲染缩略图 + 键 + LENS 那颗）；
  * 谁把它们搬进底栏，就得同轮把那几处的 `onClick` 也改成可空，否则这条闸门会漏掉那颗。
  */
@@ -682,8 +684,9 @@ fun HudEntryItem(
         when (pill) {
             CamPill.LEVEL -> AttitudeCard(ctx.roll, ctx.pitch, ctx.levelEnabled, card = false)
             CamPill.VOLUME -> VolumeLeds(ctx.db, card = false)
-            CamPill.BT -> BtChip(
-                connected = ctx.btConnected,
+            CamPill.BT -> AudioChip(
+                captureActive = ctx.captureActive,
+                btConnected = ctx.btConnected,
                 volumePct = ctx.btVolumePct,
                 modifier = anchor.then(modifier),
                 card = false,
@@ -1381,7 +1384,7 @@ fun HudReadoutZone(
 /**
  * 音量表：`amplitude()` → dB 后 6 格 LED，仅录制中显示（06 文档 §4）。
  *
- * [card] 与 [AttitudeCard]、[BtChip] 同一条规则（S3-4）：单独摆的时候自带一层底，
+ * [card] 与 [AttitudeCard]、[AudioChip] 同一条规则（S3-4）：单独摆的时候自带一层底，
  * 放进竖 Dock 时传 false，免得底板 + 内层底两层 hudScrim 叠成"卡中卡"。
  */
 @Composable
