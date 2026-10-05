@@ -10,19 +10,31 @@ import java.io.File
  *
  * **位次是跨段全局位次**：分段轮转（超过 MAX_FILE_BYTES 换段）沿用同一枚 GL 编码面，
  * 帧位次计数不随换段归零，所以 [drops] 里的 k 对应的是整次录制的第 k 个输出帧，不是首段内的位次；
- * sidecar 只随首段（parts[0]）落盘。按段拆分需要让 GL 感知换段边界并切账，当前未做。
+ * sidecar 只随首段（parts[0]）落盘。段与位次的对应关系由 [segments] 段清单补上（2026-10-04 裁决）：
+ * 每段一条 `{segment,first,count}`，数据源是录制器逐段已写视频样本数——排查者凭 first/count
+ * 把每段对上全局位次，GL 侧账本无需感知换段边界。**当前无读取方**，纯增量档案信息；
+ * 空表不落键，旧档案（无 segments）解析结果不变。
  *
  * 编解码是手写的最小 JSON（数组里全是整数），不走 org.json：本类要在 JVM 单测里全量跑
  * （android.jar 的 org.json 是 stub）。
  */
+
+/** 段清单单条：[segment] 段序号（与 VideoSegment.partIndex 同源）、[first] 该段首个输出位次、[count] 该段输出帧数 */
+data class ArcDropSegment(val segment: Int, val first: Int, val count: Int)
+
 data class ArcDropLog(
     val mode: String,
     val dstFps: Int,
     /** (输出位次 k, 该位次之前丢弃的源帧数)；k 升序，且为跨段全局位次（见类注） */
-    val drops: List<Pair<Int, Int>>
+    val drops: List<Pair<Int, Int>>,
+    /** 段清单（可选增量字段，见类注）：按段序升序；空表 = 未记录/旧档案 */
+    val segments: List<ArcDropSegment> = emptyList()
 ) {
 
-    /** 紧凑 JSON：`{"mode":"mend","dstFps":24,"drops":[[1,1],[6,1]]}` */
+    /**
+     * 紧凑 JSON：`{"mode":"mend","dstFps":24,"drops":[[1,1],[6,1]]}`；
+     * 有段清单时追加 `"segments":[{"segment":0,"first":0,"count":72},…]`（空表不落键，保持旧形）。
+     */
     fun encode(): String = buildString {
         append("{\"mode\":\"").append(mode).append("\",\"dstFps\":").append(dstFps)
         append(",\"drops\":[")
@@ -30,7 +42,19 @@ data class ArcDropLog(
             if (i > 0) append(',')
             append('[').append(out).append(',').append(n).append(']')
         }
-        append("]}")
+        append(']')
+        if (segments.isNotEmpty()) {
+            append(",\"segments\":[")
+            segments.forEachIndexed { i, s ->
+                if (i > 0) append(',')
+                append("{\"segment\":").append(s.segment)
+                    .append(",\"first\":").append(s.first)
+                    .append(",\"count\":").append(s.count)
+                    .append('}')
+            }
+            append(']')
+        }
+        append("}")
     }
 
     companion object {
@@ -52,14 +76,19 @@ data class ArcDropLog(
         fun decode(raw: String): ArcDropLog? {
             val mode = Regex("\"mode\"\\s*:\\s*\"([a-z]+)\"").find(raw)?.groupValues?.get(1) ?: return null
             val dstFps = Regex("\"dstFps\"\\s*:\\s*(\\d+)").find(raw)?.groupValues?.get(1)?.toIntOrNull() ?: return null
+            // segments（可选）按 encode 顺序恒落在 drops 之后：先整键切掉，drops 按旧形状解，
+            // 旧档案没有该键时原文直进下面流程（行为逐字不变——否则 lastIndexOf(']') 会咬到
+            // segments 数组的收括号，把 drops 解坏）
+            val segAnchor = raw.indexOf("\"segments\":[")
+            val dropsRaw = if (segAnchor >= 0) raw.substring(0, segAnchor).trimEnd(',', ' ') + "]" else raw
             // drops 的捕获不能用 [^]] —— 成对括号里的 ] 会把捕获截断在第一对上；
             // 改用定位法：取 `"drops":[` 之后、最后一个 `]` 之前的全部（`[]` 时两位置重合 = 空）
-            val anchor = raw.indexOf("\"drops\":[")
+            val anchor = dropsRaw.indexOf("\"drops\":[")
             if (anchor < 0) return null
             val start = anchor + "\"drops\":[".length
-            val end = raw.lastIndexOf(']')
+            val end = dropsRaw.lastIndexOf(']')
             if (end < start) return null
-            val body = raw.substring(start, end)
+            val body = dropsRaw.substring(start, end)
             val drops = if (body.isBlank()) {
                 emptyList()
             } else {
@@ -71,7 +100,29 @@ data class ArcDropLog(
                 }
                 list
             }
-            return ArcDropLog(mode, dstFps, drops)
+            val segments = if (segAnchor < 0) emptyList() else parseSegments(raw.substring(segAnchor)) ?: return null
+            return ArcDropLog(mode, dstFps, drops, segments)
+        }
+
+        /**
+         * 解 `"segments":[{…},{…}]}` 尾段：与 drops 同一口径——按 `},{` 缝拆开、剥掉缝上残留
+         * 的括号后逐格严格对整数对，任何一格不合形整单判坏（返回 null）。
+         * encode 从不写空表，键在表空 = 损坏。
+         */
+        private fun parseSegments(tail: String): List<ArcDropSegment>? {
+            val start = tail.indexOf('[')
+            val end = tail.lastIndexOf(']')
+            if (start < 0 || end < start) return null
+            val body = tail.substring(start + 1, end).trim()
+            if (body.isEmpty()) return null
+            val list = ArrayList<ArcDropSegment>()
+            for (part in body.split("},{")) {
+                // 首格缺收 `}`、尾格缺起 `{`（都被缝吃掉），trim 后统一成裸字段形再严格对
+                val m = Regex("^\"segment\":(\\d+),\"first\":(\\d+),\"count\":(\\d+)$")
+                    .find(part.trim('{', '}', ' ')) ?: return null
+                list += ArcDropSegment(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+            }
+            return list
         }
 
         fun readFrom(videoPath: String): ArcDropLog? = runCatching {

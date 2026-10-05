@@ -220,4 +220,32 @@ class ArcConvertGuardTest {
             frameBody.contains("encoderBound && encoderEglSurface == null")
         )
     }
+
+    @Test
+    fun `sidecar段清单注入在位`() {
+        // 2026-10-04 裁决：sidecar 加 segments 段清单（{segment,first,count}），排查者凭
+        // first/count 把每段对上跨段全局位次。全链四处各锁一段函数体，删任何一处即红：
+        val recorder = maskedMain("record/CodecRecorder.kt")
+        val segBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(recorder, "runSegment"))
+        assertTrue(
+            "视频写样本处必须计数（segVideoWritten 缺 = 段清单恒 0，first/count 对不上位次）",
+            segBody.contains("if (wrote > 0) segVideoWritten++")
+        )
+        val pumpBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(recorder, "pumpLoop"))
+        assertTrue(
+            "段闭必须落账归零（不落账 = 账索引与 partIndex 错位，段清单整体偏移）",
+            pumpBody.contains("segSampleCounts.add(segVideoWritten)") &&
+                pumpBody.contains("segVideoWritten = 0")
+        )
+        val buildBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(recorder, "buildResult"))
+        assertTrue(
+            "stop 结果必须带逐段样本数（segVideoSamples 缺 = CameraScreen 拿不到账，sidecar 退回无 segments）",
+            buildBody.contains("segVideoSamples = segSampleCounts.toList()")
+        )
+        val stopBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(maskedMain("ui/CameraScreen.kt"), "stopInternal"))
+        assertTrue(
+            "sidecar 写入必须注入段清单（segments 缺 = 排查者仍对不上段与位次）",
+            stopBody.contains("ArcDropSegment(") && stopBody.contains("segments = segs")
+        )
+    }
 }

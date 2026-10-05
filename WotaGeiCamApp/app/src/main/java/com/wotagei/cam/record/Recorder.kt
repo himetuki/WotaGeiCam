@@ -75,7 +75,14 @@ data class RecordResult(
     val seriesId: String = "",
     val parts: List<VideoSegment> = emptyList(),
     /** 有几段没能在 MediaStore 登记成可见；>0 时 UI 要在「已保存」里额外提示 */
-    val uncommitted: Int = 0
+    val uncommitted: Int = 0,
+    /**
+     * 逐段已写**视频**样本数（索引=段序号，与 [parts] 的 partIndex 对应）。纯内存计数的排查
+     * 增量信息：转换录制 sidecar 的段清单（[ArcDropLog] 的 segments）凭它把每段对上跨段全局
+     * 输出位次——位次只数视频帧，音频样本不入账。MediaRecorder 路线不参与位次账
+     * （转换会话恒走 Codec 引擎），恒空表。
+     */
+    val segVideoSamples: List<Int> = emptyList()
 ) {
     /** 有可用产物且无错误 */
     val ok: Boolean get() = error == null && (uri != null || path != null)
