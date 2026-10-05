@@ -60,8 +60,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -95,18 +97,11 @@ import com.wotagei.cam.ui.theme.WotaDivider
 import com.wotagei.cam.ui.theme.WotaSurface
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
-import androidx.media3.common.Player
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlin.math.abs
-
-/** 双引擎偏差检查周期：低频纠偏，每帧硬拉会听得出卡顿 */
-// 纠偏周期：软追赶要相对密才无感（800ms 一次 ±10% 内的速率微调，画面完全无感）；
-// 大漂移的硬 seek 由漂出邻域触发，不受此周期限制
-private const val RESYNC_INTERVAL_MS = 800L
 
 /** 硬 seek 阈值：漂出此邻域才动播放位置（seek 冲刷解码器=可见卡顿，rarity） */
 private const val HARD_RESYNC_MS = 250L
@@ -159,6 +154,12 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     var dragUnified by remember { mutableStateOf<Float?>(null) }
     var dragLeft by remember { mutableStateOf<Float?>(null) }
     var dragRight by remember { mutableStateOf<Float?>(null) }
+    // PR 式双轨时间线（r02）的会话态：两窗黑层位是 decide 上一拍输出/seekTimeline 写入的
+    // 回灌（纯位置区分不了「park 在域边界」与「真在双素材域」，见 CompareTimeline 类注释）；
+    // 全程循环开关默认开（T≥Tmax 统一回绕 Tmin），关=末帧停驻
+    var domBlackL by remember { mutableStateOf(false) }
+    var domBlackR by remember { mutableStateOf(false) }
+    var timelineLoop by remember { mutableStateOf(true) }
 
     val leftPos by leftEngine.positionMs.collectState(0L)
     val leftDur by leftEngine.durationMs.collectState(left.durationMs)
@@ -285,59 +286,108 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     LaunchedEffect(left.uri) {
         leftEngine.attach(left.uri)
-        leftEngine.loopMode = LoopMode.ONE
+        // 不再设 LoopMode.ONE（r02 根源性改动）：EOS 从引擎无缝回绕变成可检测事件，
+        // 时间线循环改由编排 tick 的 decide 统一回绕（TimelineLoop），左轨早尽时要能被
+        // 域判定看见（REPEAT_ONE 会把位置缩回 0，域判定就永远读不出"左已尽"）
     }
     val r = right
     LaunchedEffect(r?.uri) {
         val clip = r ?: return@LaunchedEffect
         rightEngine.attach(clip.uri)
-        // 右引擎不开 REPEAT_ONE：它会先于左视频绕回导致错位，绕回改由下面的低频纠偏跟随左轴
+        // 右引擎不开 REPEAT_ONE：它会先于左视频绕回导致错位，绕回改由低频编排 tick 跟随主钟
         rightEngine.loopMode = LoopMode.OFF
         rightEngine.seekTo(leftEngine.positionMs.value + offsetMs.value)
     }
 
-    // AB 回绕：统一轴回到 A 时右视频同步到 A+offset（hook 返回 true，左引擎不再自己 seek）
-    DisposableEffect(rightEngine, offsetMs) {
+    // ---- PR 式双轨时间线：几何、统一 seek、当前时刻（片 2/片 3 的落点都在这三枚上） ----
+
+    /** 效果/协程语境的几何快照：时长直读引擎（轮询态），没量到时回落 Clip 元数据 */
+    fun timelineGeo(): TimelineGeometry =
+        TimelineGeometry(
+            leftDurMs = leftEngine.durationMs.value.takeIf { it > 0L } ?: left.durationMs,
+            rightDurMs = rightEngine.durationMs.value.takeIf { it > 0L } ?: (right?.durationMs ?: 0L),
+            offsetMs = offsetMs.value
+        )
+
+    /** 当前时间线时刻：按素材域取主钟（双素材/左独播=左钟，右独播=右钟−off，末=Tmax） */
+    fun currentTimelineMs(): Long {
+        val g = timelineGeo()
+        return CompareTimeline.resolveT(
+            g,
+            leftEngine.livePositionMs(),
+            rightEngine.livePositionMs(),
+            domBlackL,
+            domBlackR
+        )
+    }
+
+    /**
+     * 统一时间线 seek：T∈[Tmin,Tmax]，有素材一侧精确落位，无素材一侧 park（早头 park 0、
+     * 越尾 park 到素材尽头=ENDED 停末帧）并就地暂停（不许 park 完自己播走，黑层遮住）；
+     * 黑层会话位同步写——下一拍域判定靠它消歧，不会把停在边界的主钟误判成双素材域。
+     * AB 回绕（abWrapHook）与时间线末重播（setPlaying）都走这里：A+off<0 时右轨不再被
+     * 引擎 coerce 到 0 误播（旧 seekTo 直呼的边角），park+黑层接管无素材段。
+     */
+    fun seekTimeline(tMs: Long) {
+        val g = timelineGeo()
+        leftEngine.seekTo(g.leftTarget(tMs))
+        rightEngine.seekTo(g.rightTarget(tMs))
+        val atEnd = tMs >= g.tMax
+        if (!g.leftCovers(tMs)) leftEngine.softPause(true)
+        if (!g.rightCovers(tMs)) rightEngine.softPause(true)
+        domBlackL = !atEnd && !g.leftCovers(tMs)
+        domBlackR = !atEnd && !g.rightCovers(tMs)
+    }
+
+    // AB 回绕：统一轴回到 A 时两轨经 seekTimeline 落位（hook 返回 true，左引擎不再自己 seek）
+    DisposableEffect(rightEngine) {
         leftEngine.abWrapHook = { aMs, _ ->
-            val left2 = aMs
-            leftEngine.seekTo(left2)
-            rightEngine.seekTo(left2 + offsetMs.value)
+            seekTimeline(aMs)
             true
         }
         onDispose { leftEngine.abWrapHook = null }
     }
 
-    // 两台 ExoPlayer 各跑各的音频时钟，低频纠偏（2026-10-04「同步后右片卡顿」重构）：
-    // 原方案 |漂移|≥40ms 就硬 seekTo——seek 冲刷解码器造成可见停顿，两播放器时钟漂移
-    // 十几秒就超阈 → 右片周期性跳帧，观感就是"卡顿"。改为**软追赶为主**：
-    // 邻域（±400ms）内不动播放位置，只微调右片实际速率 ±10% 悄悄追/放（右片在对比页
-    // 默认静音，变速无听觉影响，用户倍速档不受污染——见 nudgeSpeedForSync）；
-    // 只有漂出邻域才硬 seek 一次拉回。纠偏周期 2500→800ms：软追赶要相对密才无感。
-    // 拖动期间照旧让路；AB 回绕仍走 abWrapHook（hook 里两路都 seek，本循环随后重新收敛）。
-    LaunchedEffect(r?.uri) {
-        if (r == null) return@LaunchedEffect
-        var prevLeft = leftEngine.livePositionMs()
+    // PR 式双轨时间线的编排拍（r02 重构，取代旧纠偏循环）：每拍把两引擎实时位置交
+    // [CompareTimeline.decide] 判素材域，再按固定顺序应用指令——先停/走（幂等断言）、
+    // 再 seek、最后软追赶。旧循环的 `ended ||`、`wrapped &&`、`desired > rd-1 continue`
+    // 三分支由 decide 的素材域判定与交接语义取代（右轨 ENDED ⟹ 不再覆盖 ⟹ 不进纠偏分支）。
+    // 纠偏三层原样保留：节流=本拍间隔（设置页可调）、250ms 硬 seek、邻域 nudgeSpeedForSync。
+    // 拖动让路由 decide 承担（dragging 压 seek/nudge/wrap，素材域 pause/黑层照做）。
+    // 抽成具名局部函数：守卫测试用 bodyOf 锁循环体（红绿突变实证），无名块锁不住
+    suspend fun orchestrateLoop() {
+        if (right == null) return
         while (true) {
-            delay(RESYNC_INTERVAL_MS)
-            // 拖轨期间把控制权让给用户，别让纠偏 seek 抢手
-            if (dragLeft != null || dragRight != null || dragUnified != null) continue
-            val leftLive = leftEngine.livePositionMs()
-            val wrapped = leftLive < prevLeft - 1L
-            prevLeft = leftLive
-            val desired = (leftLive + offsetMs.value).coerceAtLeast(0L)
-            val rd = rightEngine.durationMs.value
-            if (rd > 0L && desired > rd - 1L) continue
-            val ended = rightEngine.playbackState.value == Player.STATE_ENDED
-            val drift = rightEngine.livePositionMs() - desired
-            when {
-                // 播完（等用户手动重播）或回绕（非循环态）：直接对齐
-                ended || (wrapped && !leftEngine.ab.value.loopEnabled) -> rightEngine.seekTo(desired)
-                // 漂出软追赶邻域：一次硬 seek 拉回邻域（seek 有解码器冲刷代价， rarity 才发生）
-                abs(drift) > HARD_RESYNC_MS -> rightEngine.seekTo(desired)
-                // 邻域内软追赶：drift>0 右片超前放慢、<0 落后加快，漂移归零回用户档
-                else -> rightEngine.nudgeSpeedForSync(drift)
-            }
+            // 节拍从设置页读（默认 200ms，范围 100–1000）：每次循环重读，改完下一拍生效
+            delay(WotaSettings.compareTickMs(prefs).toLong())
+            val cmd = CompareTimeline.decide(
+                DecideInput(
+                    geo = timelineGeo(),
+                    leftLiveMs = leftEngine.livePositionMs(),
+                    rightLiveMs = rightEngine.livePositionMs(),
+                    userPlaying = leftEngine.isPlaying.value || rightEngine.isPlaying.value,
+                    abLoopActive = leftEngine.ab.value.let { it.loopEnabled && it.valid },
+                    timelineLoop = timelineLoop,
+                    dragging = dragLeft != null || dragRight != null || dragUnified != null,
+                    blackLeft = domBlackL,
+                    blackRight = domBlackR,
+                    hardResyncMs = HARD_RESYNC_MS
+                )
+            )
+            if (cmd.pauseLeft) leftEngine.softPause(true)
+            if (cmd.pauseRight) rightEngine.softPause(true)
+            if (cmd.resumeLeft) leftEngine.softPause(false)
+            if (cmd.resumeRight) rightEngine.softPause(false)
+            cmd.seekLeftMs?.let(leftEngine::seekTo)
+            cmd.seekRightMs?.let(rightEngine::seekTo)
+            cmd.nudgeRightDriftMs?.let(rightEngine::nudgeSpeedForSync)
+            // 黑层位写回会话态：驱动两窗黑层 Box，也给下一拍域判定做回灌
+            domBlackL = cmd.blackLeft
+            domBlackR = cmd.blackRight
         }
+    }
+    LaunchedEffect(r?.uri) {
+        orchestrateLoop()
     }
 
     // Side A/B 落音量：切边或右片换片后重下一次（另一边压成 0，选中的一边全量）
@@ -347,26 +397,60 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     }
 
     val leftDuration = if (leftDur > 0L) leftDur else left.durationMs
-    val unifiedFrac = dragUnified ?: if (leftDuration > 0L) leftPos.toFloat() / leftDuration.toFloat() else 0f
-    val aFrac = if (ab.aMs >= 0 && leftDuration > 0) ab.aMs.toFloat() / leftDuration.toFloat() else null
-    val bFrac = if (ab.bMs >= 0 && leftDuration > 0) ab.bMs.toFloat() / leftDuration.toFloat() else null
+    // 统一轴全部时间线化（r02）：进度条 fraction、A/B 刻度都是 (x−Tmin)/(Tmax−Tmin)，
+    // 当前时刻按素材域取主钟。off=0 时 Tmin=0、Tmax=max(L,R)，双素材段观感与旧单左轴一致
+    val rDur = if (rightDur > 0L) rightDur else r?.durationMs ?: 0L
+    val geoNow = TimelineGeometry(leftDuration, rDur, offsetMs.value)
+    val timelineSpan = geoNow.tMax - geoNow.tMin
+    val timelineNow = CompareTimeline.resolveT(geoNow, leftPos, rightPos, domBlackL, domBlackR)
+    val unifiedFrac = dragUnified ?: if (timelineSpan > 0L) {
+        (timelineNow - geoNow.tMin).toFloat() / timelineSpan.toFloat()
+    } else {
+        0f
+    }
+    val aFrac = if (ab.aMs >= 0 && timelineSpan > 0) {
+        (ab.aMs - geoNow.tMin).toFloat() / timelineSpan.toFloat()
+    } else {
+        null
+    }
+    val bFrac = if (ab.bMs >= 0 && timelineSpan > 0) {
+        (ab.bMs - geoNow.tMin).toFloat() / timelineSpan.toFloat()
+    } else {
+        null
+    }
 
     fun setPlaying(play: Boolean) {
-        leftEngine.softPause(!play)
-        rightEngine.softPause(!play)
+        if (play && currentTimelineMs() >= timelineGeo().tMax) {
+            // 时间线末点播放（两轨素材都尽的 ENDED 态）：先统一回绕 Tmin 再起播。
+            // 不走引擎 softPause 的 ENDED 自动回零——那个只回各引擎自己的 0，off≠0 时
+            // 右轨的 0 不是时间线 Tmin 处该有的素材位
+            seekTimeline(timelineGeo().tMin)
+        }
+        // 素材感知：dormant 轨保持 softPause(true)——否则恢复播放会让黑层后的轨道
+        // 偷偷走钟（跨域唤醒交给编排拍，tick 侧重断言兜底）
+        leftEngine.softPause(!play || domBlackL)
+        rightEngine.softPause(!play || domBlackR)
     }
 
     fun seekUnified(frac: Float) {
-        val t = (frac * leftDuration).toLong().coerceAtLeast(0L)
-        leftEngine.seekTo(t)
-        rightEngine.seekTo((t + offsetMs.value).coerceAtLeast(0L))
+        val g = timelineGeo()
+        // 拖动落点映射到时间线：T = Tmin + frac·(Tmax−Tmin)，无素材段由 seekTimeline park
+        seekTimeline(g.tMin + (frac.coerceIn(0f, 1f) * (g.tMax - g.tMin)).toLong())
     }
 
     fun stepBoth(fwd: Boolean) {
-        rightEngine.softPause(true)
-        // 步进后 positionMs 要等轮询才跟上，右引擎必须用 stepFrame 返回的目标值平移
-        val target = leftEngine.stepFrame(fwd)
-        rightEngine.seekTo((target + offsetMs.value).coerceAtLeast(0L))
+        if (domBlackL) {
+            // 右独播域：主钟=右，步进右引擎（stepFrame 内部 softPause(true)）再把素材位
+            // 换算回时间线 T′=素材位−off；跨域另一轨的 park/唤醒交给编排拍
+            val target = rightEngine.stepFrame(fwd)
+            seekTimeline(target - offsetMs.value)
+        } else {
+            // 双素材域/左独播域：主钟=左。步进=暂停态逐帧看，从钟也要就地停住，
+            // 否则它继续走钟、画面两半一动一静（旧实现先 softPause 右引擎同款）
+            rightEngine.softPause(true)
+            val target = leftEngine.stepFrame(fwd)
+            seekTimeline(target)
+        }
     }
 
     fun runAudioSync(clip: VideoClip) {
@@ -418,6 +502,9 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 2dp 分隔线压到邻栏（审查 P2；单页全屏无感，分栏后任何一次捏合都可见）
             Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL, panL)) {
                 WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, pan = panL.value, mirror = mirror == 1 || mirror == 3)
+                // dormant 轨黑层：常驻节点 alpha 0/1 切换（增删节点会闪帧）。Box 无指针
+                // 处理器不构成命中目标，事件照旧落到画面层；角标在它之后组合、不被盖住
+                Box(Modifier.fillMaxSize().background(Color.Black).alpha(if (domBlackL) 1f else 0f))
                 ZoomBadge(zoomL.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                 SideLabel(stringResource(R.string.compare_left, left.name), Modifier.align(Alignment.TopEnd))
             }
@@ -437,6 +524,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     }
                 } else {
                     WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
+                    Box(Modifier.fillMaxSize().background(Color.Black).alpha(if (domBlackR) 1f else 0f))
                     ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
                     // 右窗旋转钮（观看辅助，逆时针 90°/按）：计划原定右上角与左上 ZoomBadge 对称，
@@ -684,7 +772,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                 glyph = BarGlyphSize
                             )
                         }
-                        // 第二段：统一轴读数（左=当前、中=右偏移、右=总时长）。
+                        // 第二段：统一轴读数（左=当前、中=右偏移、右=时间线总长 Tmax−Tmin）。
                         // 三个读数从原来独立一行搬进来，功能一个不少；偏移仍在中间，
                         // 与统一轴「以左片为基准、右片按 offsetMs 平移」的语义对位。
                         Row(
@@ -693,18 +781,28 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         ) {
                             TimePill(formatDuration(leftPos))
                             TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.value)))
-                            TimePill(formatDuration(leftDuration))
+                            // 第三格=时间线总长（off=0 且右片不长于左片时数值与旧口径一致）
+                            TimePill(formatDuration(timelineSpan))
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
+                            // pre-roll（T<0）不可打 AB 点：AB 数值是左片时间，pre-roll 区左片
+                            // 停在 park 位、位置无意义，打点钮给横幅提示（复用 player_ab_invalid 通道）
                             AbRow(
                                 ab = ab,
-                                onA = { leftEngine.markA() },
-                                onB = { if (!leftEngine.markB()) banner = R.string.player_ab_invalid },
+                                onA = { if (currentTimelineMs() < 0L) banner = R.string.player_ab_invalid else leftEngine.markA() },
+                                onB = { if (currentTimelineMs() < 0L || !leftEngine.markB()) banner = R.string.player_ab_invalid },
                                 onLoop = { if (!leftEngine.toggleAbLoop()) banner = R.string.player_ab_invalid },
                                 onClear = { leftEngine.clearAb() }
+                            )
+                            // 全程循环（时间线开关，r02）：开=T≥Tmax 双轨统一回绕 Tmin；关=末帧停驻，
+                            // ENDED 后点播放重播。语义与单页循环钮同族，A/B 段循环仍归 AbRow 那颗「循环」
+                            ComparePill(
+                                label = stringResource(R.string.compare_loop_full),
+                                selected = timelineLoop,
+                                onClick = { timelineLoop = !timelineLoop }
                             )
                             WotaChip(
                                 label = stringResource(speedLabelRes(speed)),
