@@ -173,5 +173,20 @@ class PlaybackCaptureController(context: Context) {
     companion object {
         /** 同 [AudioFeeder] 读块上限口径 */
         private const val CHUNK_MAX = 8192
+
+        @Volatile
+        private var singleton: PlaybackCaptureController? = null
+
+        /**
+         * 单例宿主（批 1 交接约束 P3-2）：控制器状态机与投影会话的生命周期归属 **app** 而非
+         * 录制页——旋转/重建组合、离页再回，[state] 都必须是同一份（会话还在，开关就还亮着）。
+         * 挂在 [WotaApp] 式服务定位器（同 `MediaRepo.get(app)` 先例）还是 Activity 级 remember？
+         * 选单例：MediaProjection 会话由前台服务持有、独立于任何 Activity 存活，控制器跟着
+         * Activity 重建反而会出现"会话在、状态丢了"的孤儿态。
+         */
+        fun get(context: Context): PlaybackCaptureController =
+            singleton ?: synchronized(this) {
+                singleton ?: PlaybackCaptureController(context.applicationContext).also { singleton = it }
+            }
     }
 }

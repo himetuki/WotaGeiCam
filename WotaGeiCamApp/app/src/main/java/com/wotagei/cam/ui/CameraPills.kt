@@ -117,7 +117,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.ZOOM to "HudLayer.HudEntryItem(ZOOM)：右竖 Dock 那颗为主，HudReadoutZone 里的变焦读数在那颗被关掉或被挪出可见集时顶上（裁决在 CameraScreen 的 anchorOf）",
     PillKey.FOCUS to "HudLayer.HudEntryItem(FOCUS) ← 任意竖 Dock / 顶栏 / 底栏，条目被挪到哪枚就锚在哪枚",
     PillKey.STAB to "HudLayer.HudEntryItem(STAB) ← 同上，位置由 hud_layout 的条目归属决定",
-    PillKey.BT to "HudLayer.HudEntryItem(BT) → widget.BtChip(modifier)",
+    PillKey.BT to "HudLayer.HudEntryItem(BT) → widget.AudioChip(modifier)，批 2 起这颗是「音频」chip（键名 BT 沿用：原蓝牙位，位掩码按 bit 持久化不许改名）",
     PillKey.REFLINE to "HudLayer.HudEntryItem(REFLINE) → design.WotaIconButton(modifier)",
     PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
     PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
@@ -151,7 +151,9 @@ fun PillHost(
     onFocusCenter: () -> Unit,
     onPickLens: (LensSlot) -> Unit,
     freeMb: Long,
-    bt: com.wotagei.cam.bt.BtSpeakerController
+    bt: com.wotagei.cam.bt.BtSpeakerController,
+    capture: com.wotagei.cam.record.PlaybackCaptureController,
+    onEnableCapture: () -> Unit
 ) {
     val ability = slot?.ability
     when (key) {
@@ -170,7 +172,7 @@ fun PillHost(
         PillKey.FLASH -> FlashPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STAB -> StabPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STORAGE -> StoragePill(anchor, params, freeMb, onClose)
-        PillKey.BT -> BtPill(anchor, bt, onClose)
+        PillKey.BT -> AudioPill(anchor, capture, recording, onEnableCapture, onLockTip, bt, onClose)
     }
 }
 
@@ -868,16 +870,29 @@ private fun NoteText(text: String) {
 private fun fmtX(v: Float): String = String.format(Locale.US, "%.1fx", v)
 
 /**
- * 蓝牙音箱的就近面板（#53）：标题与「收起」由 `WotaPillPopup` 提供，
- * 正文与原来的底部抽屉版共用同一个 [BtSpeakerPanel]，所以两处行为不会分叉。
+ * 「音频」音源管理就近面板（内录体系批 2）：标题与「收起」由 `WotaPillPopup` 提供，
+ * 内容是音源选择 + 蓝牙双页签（蓝牙页原样复用 [com.wotagei.cam.ui.dialog.BtSpeakerPanel]，零行为变化）。
+ *
+ * 键名历史：触发位原是蓝牙胶囊（`PillKey.BT`/`CamPill.BT`），批 2 换「音频」chip；
+ * 键名保留——位掩码按 bit 持久化在 `hud_pills`，改键名等于改存量配置语义（P5 裁决）。
  */
 @Composable
-private fun BtPill(
+private fun AudioPill(
     anchor: IntRect,
+    capture: com.wotagei.cam.record.PlaybackCaptureController,
+    recording: Boolean,
+    onEnableCapture: () -> Unit,
+    onLockTip: () -> Unit,
     controller: com.wotagei.cam.bt.BtSpeakerController,
     onClose: () -> Unit
 ) {
-    WotaPillPopup(anchor, onClose, title = stringResource(R.string.bt_title)) {
-        com.wotagei.cam.ui.dialog.BtSpeakerPanel(controller)
-    }
+    com.wotagei.cam.ui.dialog.AudioSourcePanel(
+        anchor = anchor,
+        capture = capture,
+        recording = recording,
+        onEnableCapture = onEnableCapture,
+        onLockTip = onLockTip,
+        bt = controller,
+        onDismiss = onClose
+    )
 }

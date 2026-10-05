@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui
 
+import android.app.Activity
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -15,6 +16,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -134,6 +136,7 @@ import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
+import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
 import com.wotagei.cam.record.RecordError
@@ -141,6 +144,7 @@ import com.wotagei.cam.record.RecordProfile
 import com.wotagei.cam.record.RecordResult
 import com.wotagei.cam.record.Recorder
 import com.wotagei.cam.record.Recorders
+import com.wotagei.cam.record.PlaybackCaptureController
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.ui.anim.LocalMotion
@@ -520,6 +524,36 @@ fun CameraScreen(
     }
     DisposableEffect(bt) { onDispose { bt.close() } }
 
+    // ---- 内录（内录体系批 2）：授权时序接线 开关→授权→FGS→Active
+    // controller 宿主是单例（PlaybackCaptureController.get，P3-2）：投影会话由前台服务持有、
+    // 独立于 Activity 存活，页面重建后状态必须还在，开关才不会"会话在、灯灭了"。
+    val capture = remember(app) { PlaybackCaptureController.get(app) }
+    val captureState by capture.state.observed()
+    // consent launcher（同 CompareScreen.pickRight 的 StartActivityForResult 先例）：
+    // 发射 createConsentIntent() 的回执原样交 controller.onConsentResult
+    val captureConsent = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        capture.onConsentResult(result.resultCode, result.data)
+        // RESULT_OK 之外（用户取消/返回）一律已回滚 Idle，这里补一句提示；建链失败是异步回执
+        // （startForegroundService 之后才发生），走下面 LaunchedEffect 的 Failed 分支提示
+        if (capture.state.value is CaptureState.Idle) {
+            showTip(app.getString(R.string.audio_capture_cancelled))
+        }
+    }
+    /** 切内录的入口（弹窗开关用）：走 [launchCaptureConsent]，置态与发射原子 + 拉框异常回滚（P3-1） */
+    val enableCapture: () -> Unit = { launchCaptureConsent(capture, captureConsent, showTip, app) }
+    // 撤销链与建链失败链：用户状态栏停止投屏 / 通知停止钮 → ProjectionStopped → Revoked，
+    // FGS 建链任一步失败 → Failed(原因)。开关态派生自 captureState，弹回环境音是自动的，
+    // 这里只补提示小字（失败原因同时留在弹窗状态小字里，P3-3：撤销态给重新授权入口）
+    LaunchedEffect(captureState) {
+        when (val s = captureState) {
+            is CaptureState.Revoked -> showTip(app.getString(R.string.audio_state_revoked))
+            is CaptureState.Failed -> showTip(app.getString(R.string.audio_state_failed, s.reason))
+            else -> Unit
+        }
+    }
+
     val canFlash = ability?.flashAvailable == true
     // 控件条一律浮在预览之上（不再各占一条黑带）：画面吃满整屏，25% 透明的材质才透得出内容
     val hudItems = HudItem.typesOf(hudMask)
@@ -858,6 +892,7 @@ fun CameraScreen(
         lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
         btConnected = btActive?.connected == true,
         btVolumePct = btVolumePct,
+        captureActive = captureState is CaptureState.Active,
         levelEnabled = levelEnabled,
         roll = roll,
         pitch = pitch,
@@ -1323,6 +1358,8 @@ fun CameraScreen(
                 onPickLens = { picked -> ctrl.switchLens(picked) },
                 freeMb = freeMb,
             bt = bt,
+            capture = capture,
+            onEnableCapture = enableCapture,
             )
         }
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，
@@ -2136,5 +2173,35 @@ private fun recordResultText(res: Resources, code: String?): String? {
         code == RecordError.STOP_FAILED -> res.getString(R.string.cam_record_stop_failed)
         code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
         else -> res.getString(R.string.cam_record_failed_generic)
+    }
+}
+
+/**
+ * 发射内录授权（P3-1 回滚闸）：[PlaybackCaptureController.createConsentIntent] 已把状态置成
+ * Authorizing、`launch` 才真正拉起系统授权框——两步之间若 launch 抛系统异常（个别 ROM 的
+ * ActivityNotFoundException / 前台弹窗限制），Authorizing 会悬在"没有授权框可应答"的死态。
+ * 捕获后按**等价用户取消**回执（RESULT_CANCELED → ConsentCancelled，转移表里只从
+ * Authorizing 回滚到 Idle，恰好清掉已置的授权中态），并给提示小字。
+ *
+ * 拆成文件级函数不是风格偏好：守卫（AudioSourceWiringGuardTest `launch异常有Authorizing回滚`）
+ * 用 bodyOf 锁本函数体的 try/发射/回执三件，lambda 里的局部 try-catch 没有可摘取的花括号体。
+ */
+private fun launchCaptureConsent(
+    capture: PlaybackCaptureController,
+    consentLauncher: ActivityResultLauncher<Intent>,
+    showTip: (String) -> Unit,
+    app: Context
+) {
+    val intent = capture.createConsentIntent()
+    if (intent == null) {
+        showTip(app.getString(R.string.audio_capture_unavailable))
+        return
+    }
+    try {
+        consentLauncher.launch(intent)
+    } catch (e: Exception) {
+        Log.w(TAG_UI, "拉起内录授权框失败：${e.message}")
+        capture.onConsentResult(Activity.RESULT_CANCELED, null)
+        showTip(app.getString(R.string.audio_capture_cancelled))
     }
 }

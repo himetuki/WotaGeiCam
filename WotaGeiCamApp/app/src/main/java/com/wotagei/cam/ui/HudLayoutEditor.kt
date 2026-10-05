@@ -1268,6 +1268,7 @@ private fun editorCtx(
         lensLabel = stringResource(lensLabelRes(LensType.WIDE)),
         btConnected = false,
         btVolumePct = 0,
+        captureActive = false,
         levelEnabled = WotaSettings.levelEnabled(prefs),
         roll = 0f,
         pitch = 0f,

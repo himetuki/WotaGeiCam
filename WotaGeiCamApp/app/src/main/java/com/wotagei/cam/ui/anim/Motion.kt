@@ -41,9 +41,11 @@ enum class MotionMode { PLAIN, FLUENT, LIQUID }
  * 「不参与布局参数动画」的例外都在这里登记，一个一个具名，不许散落在调用点各说各话。
  * 守卫（MotionHygieneTest）拦的是 animateColorAsState / animateDpAsState / expandIn( / shrinkOut( /
  * tween( 直调，不拦 animateContentSize——所以例外的落地形态只有"调用点用本类具名规格"这一种。
- * - **例外 #2 = Dock 尺寸自适应动画**（[intSize]，10-01 布局批）：用户 2026-10-01 指令明确要求
- *   左右侧 Dock「根据内部控件数量平滑地显示变化宽高」，与 AnimatedContent 那类"容器随内容过渡"
- *   的例外同性质——动的是 Dock 底板自己的测量尺寸，条目在格网里的坐标不受影响；
+ * - **例外 #2 = 容器随内容过渡的尺寸动画**（[intSize]，10-01 布局批）：用户 2026-10-01 指令明确要求
+ *   左右侧 Dock「根据内部控件数量平滑地显示变化宽高」——动的是 Dock 底板自己的测量尺寸，
+ *   条目在格网里的坐标不受影响。同族还有内录批 2 的音源管理弹窗（`AnimatedContent` +
+ *   `SizeTransform(clip = false)` 接同一份 [intSize]，切页签时弹窗大小随内容量平滑变化），
+ *   同性质、共用同一份规格，不另立例外；
  *   tween( 直调只发生在本文件。
  */
 class MotionSpec(val mode: MotionMode, private val timeScale: Float, private val reduced: Boolean = false) {
