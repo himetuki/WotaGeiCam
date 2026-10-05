@@ -128,6 +128,7 @@ import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.ArcDropLog
+import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
@@ -1918,11 +1919,22 @@ private class RecordRunner(
             val path = out.path
             if (path != null) {
                 val drops = glProvider()?.drainArcDrops() ?: emptyList()
+                // 段清单（2026-10-04 裁决）：录制器逐段已写视频样本数 → {segment,first,count}，
+                // 排查者凭 first/count 把每段对上跨段全局位次（drops 的 k 是全局编号，首段 first 恒 0）。
+                // first 按段账前缀和取（丢弃段恒在尾段，前缀和即真实全局起点）。只加字段：
+                // sidecar 仍在首段原名旁写入，写/搬/删时序一字不动，也不新增文件
+                val segs = out.parts.map { part ->
+                    ArcDropSegment(
+                        segment = part.partIndex,
+                        first = out.segVideoSamples.take(part.partIndex).sum(),
+                        count = out.segVideoSamples.getOrNull(part.partIndex) ?: 0
+                    )
+                }
                 val written = ArcDropLog.writeTo(
                     path,
-                    ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops)
+                    ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops, segments = segs)
                 )
-                Log.i(TAG_UI, "arc drops sidecar ok=$written drops=${drops.size} path=$path")
+                Log.i(TAG_UI, "arc drops sidecar ok=$written drops=${drops.size} segs=${segs.size} path=$path")
             }
             // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
             // 容器标称会被强制档标假）：commit 后 update DISPLAY_NAME 连文件改名，

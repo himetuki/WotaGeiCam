@@ -2,6 +2,7 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.ArcDropLog
+import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
 import com.wotagei.cam.record.ArcRateProbe
@@ -163,6 +164,41 @@ class ArcRecordConvertTest {
         val log = ArcDropLog("drop", 25, emptyList())
         assertEquals(log, ArcDropLog.decode(log.encode()))
         assertEquals(ArcDropLog("drop", 25, listOf(0 to 0)), ArcDropLog.decode(ArcDropLog("drop", 25, listOf(0 to 0)).encode()))
+    }
+
+    @Test
+    fun `segments随encode往返无损`() {
+        // 段清单（2026-10-04 裁决）：{segment,first,count} 凭 first/count 把每段对上跨段全局位次
+        val log = ArcDropLog(
+            "mend", 24, listOf(0 to 1, 120 to 2),
+            listOf(ArcDropSegment(0, 0, 120), ArcDropSegment(1, 120, 48))
+        )
+        assertEquals(log, ArcDropLog.decode(log.encode()))
+    }
+
+    @Test
+    fun `无segments的旧样例兼容_新样例两字段并存`() {
+        // 旧档案（segments 字段引入前落盘）没有该键：必须原样解出、segments 空
+        val legacy = "{\"mode\":\"mend\",\"dstFps\":24,\"drops\":[[1,1],[6,1]]}"
+        assertEquals(ArcDropLog("mend", 24, listOf(1 to 1, 6 to 1)), ArcDropLog.decode(legacy))
+        // 新样例逐字给出（encode 的形状）：drops 的 lastIndexOf(']') 不许咬到 segments 的收括号
+        val sample = "{\"mode\":\"drop\",\"dstFps\":25,\"drops\":[[3,2]]," +
+            "\"segments\":[{\"segment\":0,\"first\":0,\"count\":3},{\"segment\":1,\"first\":3,\"count\":9}]}"
+        assertEquals(
+            ArcDropLog(
+                "drop", 25, listOf(3 to 2),
+                listOf(ArcDropSegment(0, 0, 3), ArcDropSegment(1, 3, 9))
+            ),
+            ArcDropLog.decode(sample)
+        )
+    }
+
+    @Test
+    fun `segments损坏判null_不抛`() {
+        // encode 从不写空表：键在表空 = 损坏；对象缺字段同样判坏
+        assertNull(ArcDropLog.decode("{\"mode\":\"mend\",\"dstFps\":24,\"drops\":[[1,1]],\"segments\":[]}"))
+        assertNull(ArcDropLog.decode("{\"mode\":\"mend\",\"dstFps\":24,\"drops\":[[1,1]],\"segments\":[{\"segment\":0}]}"))
+        assertNull(ArcDropLog.decode("{\"mode\":\"mend\",\"dstFps\":24,\"drops\":[[1,1]],\"segments\":[{\"segment\":x,\"first\":0,\"count\":1}]}"))
     }
 
     @Test

@@ -77,6 +77,16 @@ class CodecRecorder(
     private var partIndex = 0
     private var partStartMs = 0L
 
+    /** 当前段已写视频样本数（纯内存计数，不碰任何 I/O 时序）；段闭时落进 [segSampleCounts] 并归零 */
+    private var segVideoWritten = 0
+
+    /**
+     * 逐段视频样本数账（索引=partIndex）：位次账（arcDrops）里的 k 是跨段全局视频帧序号，
+     * 段与位次靠这份账对上。只在泵线程读写，stop 收尾时随 [RecordResult.segVideoSamples] 交给
+     * sidecar 段清单（CameraScreen → ArcDropLog.segments）。
+     */
+    private val segSampleCounts = ArrayList<Int>()
+
     /** prepare 成功后即稳定可用：Camera2 录像面 / GL outputSurface 的写入目标 */
     override val surface: Any? get() = inputSurface
 
@@ -94,6 +104,8 @@ class CodecRecorder(
         parts.clear()
         partIndex = 0
         partStartMs = 0L
+        segVideoWritten = 0
+        segSampleCounts.clear()
         heldPkt = null
         clock.reset()
         store.checkFreeSpace()?.let {
@@ -454,6 +466,8 @@ class CodecRecorder(
         parts.clear()
         partIndex = 0
         partStartMs = 0L
+        segVideoWritten = 0
+        segSampleCounts.clear()
         Log.i(TAG, "codec released")
     }
 
@@ -476,6 +490,10 @@ class CodecRecorder(
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:LOOP"
                 false
             }
+            // 段闭落账（泵线程单写者，无竞争）：无论本段成废都要落，索引才与 partIndex 一一对齐；
+            // 落完归零，下一段从 0 重新计
+            segSampleCounts.add(segVideoWritten)
+            segVideoWritten = 0
             val dur = clock.closeSegment()
             // 先拆 codec/muxer（moov 写完）再封段提交，顺序反了相册会拿到半截文件
             closeSegmentEngine()
@@ -587,7 +605,10 @@ class CodecRecorder(
                     idx >= 0 -> {
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                         if (muxStarted && !eos && bi.size > 0) {
-                            writtenBytes += writeSample(mx, videoTrack, v.getOutputBuffer(idx), bi)
+                            // 位次账只认视频帧：写成功才计数（writeSample 失败返回 0），音频轨不入账
+                            val wrote = writeSample(mx, videoTrack, v.getOutputBuffer(idx), bi)
+                            writtenBytes += wrote
+                            if (wrote > 0) segVideoWritten++
                             vPtsLastUs = bi.presentationTimeUs
                         }
                         v.releaseOutputBuffer(idx, false)
@@ -860,7 +881,8 @@ class CodecRecorder(
             error = err,
             seriesId = store.seriesId,
             parts = parts.toList(),
-            uncommitted = parts.count { !it.committed }
+            uncommitted = parts.count { !it.committed },
+            segVideoSamples = segSampleCounts.toList()
         )
     }
 
@@ -874,6 +896,8 @@ class CodecRecorder(
         parts.clear()
         partIndex = 0
         partStartMs = 0L
+        segVideoWritten = 0
+        segSampleCounts.clear()
         return out
     }
 

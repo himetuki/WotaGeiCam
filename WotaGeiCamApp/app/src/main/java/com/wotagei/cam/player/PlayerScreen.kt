@@ -92,11 +92,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -176,11 +179,27 @@ internal fun speedLabelRes(tier: Float): Int = when (tier) {
     else -> R.string.player_speed_10
 }
 
-/** 引擎生命周期：dispose 时 releasePlayer（此后引擎所有方法都是空操作，不会再触到已释放的 player） */
+/**
+ * 引擎生命周期：dispose 时 releasePlayer（此后引擎所有方法都是空操作，不会再触到已释放的 player）。
+ *
+ * 切后台自动暂停（2026-10-04 产品裁决，翻案旧 R6「ON_STOP 不暂停」）：ON_STOP 一律
+ * [PlayerEngine.softPause] 暂停——只收 playWhenReady，进度/AB/循环/倍速设置全保留，
+ * **回前台不自动续播**（用户手点播放恢复）。挂在引擎工厂而不是各播放面各挂一份：
+ * 单播放页、对比页（双引擎）、分屏练习播放器三面都经本工厂取引擎，一处挂齐全覆盖；
+ * 录制不在此列——CameraScreen 的停录走它自己的 ON_PAUSE 观察处，语义一字不动。
+ */
 @Composable
 fun rememberPlayerEngine(): PlayerEngine {
     val ctx = LocalContext.current.applicationContext
     val engine = remember(ctx) { PlayerEngine(ctx) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(engine, owner) {
+        val onStopPause = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) engine.softPause(true)
+        }
+        owner.lifecycle.addObserver(onStopPause)
+        onDispose { owner.lifecycle.removeObserver(onStopPause) }
+    }
     DisposableEffect(engine) { onDispose { engine.releasePlayer() } }
     return engine
 }
