@@ -213,7 +213,11 @@ fun rememberPlayerEngine(): PlayerEngine {
  * RESIZE_MODE_FIT 等价于旧的「保持宽高比」，超出部分由外层 graphicsLayer 缩放；
  * [mirror] 是同一层 graphicsLayer 上的水平翻转（scaleX 取负），与缩放正确复合；
  * [pan] 是同一层上的双指平移量（px，父坐标），与缩放/镜像复合；绘制点按当帧图层尺寸经
- * [clampPan] 兜底重夹，视口变化（自持旋转等）后的陈旧 pan 不会把画面拖出黑边。
+ * [clampPan] 兜底重夹，视口变化（自持旋转等）后的陈旧 pan 不会把画面拖出黑边；
+ * [rotation] 是同一层上的旋转（度数，观看辅助只用 0/90/180/270）。graphicsLayer 的应用次序
+ * 使 translation 在最外层——平移始终按屏幕方向跟手，不受旋转影响。镜像（scaleX 取负）翻转
+ * 坐标系后，用户感知的旋转方向会跟着翻（钮叫逆时针、镜像下看着像顺时针）——属变换数学，
+ * 不做方向补偿，按到画面正了为止。
  */
 // InflateParams 是有意为之：AndroidView 的 factory 里 root 必须为 null——
 // Compose 自己量尺寸并施加 LayoutParams，挂了 parent 反而带进错误的 LayoutParams
@@ -224,6 +228,7 @@ fun WotaPlayerSurface(
     modifier: Modifier = Modifier,
     scale: Float = 1f,
     pan: Offset = Offset.Zero,
+    rotation: Int = 0,
     mirror: Boolean = false
 ) {
     AndroidView(
@@ -232,6 +237,9 @@ fun WotaPlayerSurface(
             // TextureView（见 factory）是普通 View，这类变换跨驱动确定；SurfaceView 做不到
             scaleX = if (mirror) -scale else scale
             scaleY = scale
+            // 旋转（观看辅助，竖屏参考片转个角度看）：纯视图变换，绕图层中心转，不碰播放状态。
+            // 会话态由调用方持有（不持久化、换片不清零，与镜像开关同口径）——这里只管画
+            rotationZ = rotation.toFloat()
             // 双指平移（缩放同一手势）：translation 在 scale 之后按父坐标应用，不受 scaleX
             // 取负影响——镜像开着时拖动方向依然是手的方向。
             // 绘制点兜底重夹（P2，2026-10-04）：pan 态只在双指手势事件内被夹取，而本工程
@@ -261,6 +269,14 @@ fun WotaPlayerSurface(
         update = { view -> engine.bind(view) }
     )
 }
+
+/**
+ * 逆时针旋转的四分之一圈计数（0/1/2/3 ↔ 0°/90°/180°/270°，度数 = 计数 × 90，调用方换算）。
+ * 0→3→2→1→0 循环，连按 4 次必回原角。负数/超界输入先按 4 折回等价角再走一步
+ * （Kotlin 的 % 保留被除数符号，这里先 q%4 归一再加 3 再取模，保证结果恒在 [0,3]）。
+ * 会话态观看辅助：不持久化、换片不清零（与镜像开关同口径）。
+ */
+internal fun nextCcwQuarter(q: Int): Int = ((q % 4) + 3) % 4
 
 /** 路由版：/player/{mediaId} —— UI 层只需传 id */
 @Composable
