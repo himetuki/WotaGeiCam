@@ -312,6 +312,19 @@ class CompareTimelineTest {
         assertFalse(w2.resumeRight)
         assertTrue(w2.pauseRight)
         assertTrue(w2.blackRight)
+        // off=0 回绕臂（回归红线钉死）：Tmin=0 处两轨都有素材——seek 双 0、resume 双真、
+        // pause/黑层双假，与旧单左轴回绕行为逐位一致（材料感知臂在 off=0 必须退化成
+        // 「两边都醒」；这条把「off=0 与旧行为一致」从读代码变成测试断言）
+        val off0 = TimelineGeometry(leftDurMs = 10_000L, rightDurMs = 6_000L, offsetMs = 0L)
+        val w3 = CompareTimeline.decide(input(geo = off0, leftLive = 10_000L, rightLive = 6_000L))
+        assertEquals(0L, w3.seekLeftMs)
+        assertEquals(0L, w3.seekRightMs)
+        assertTrue(w3.resumeLeft)
+        assertTrue(w3.resumeRight)
+        assertFalse(w3.pauseLeft)
+        assertFalse(w3.pauseRight)
+        assertFalse(w3.blackLeft)
+        assertFalse(w3.blackRight)
     }
 
     @Test

@@ -144,7 +144,7 @@ object CompareTimeline {
         // 这个判定必须排在黑层在册分支之前——末态本来就要撤黑层
         if (tL >= geo.leftDurMs && tR >= geo.rightDurMs - geo.offsetMs) return CompareDomain.TIMELINE_END
         return when {
-            blackLeft -> if (tR >= 0L && geo.leftCovers(tR) && geo.rightCovers(tR)) {
+            blackLeft -> if (geo.leftCovers(tR) && geo.rightCovers(tR)) {
                 CompareDomain.DUAL
             } else {
                 CompareDomain.RIGHT_SOLO

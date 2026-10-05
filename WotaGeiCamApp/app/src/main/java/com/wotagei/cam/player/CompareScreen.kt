@@ -459,7 +459,12 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             syncing = false
             if (res.ok) {
                 offsetMs.value = res.offsetMs
-                rightEngine.seekTo((leftEngine.positionMs.value + res.offsetMs).coerceAtLeast(0L))
+                // r03 重锚：旧形态 seekTo(leftPos+offset) 隐含 T=leftLive，只在双素材域成立，
+                // 独播域发起对齐会把左 park 位错当锚点（负值 coerce 0 的老边角同族）。改走
+                // 统一轴重锚：T 取回调时刻的 currentTimelineMs()（对齐期间时间线在走也不跳，
+                // 双素材域 T=左钟天然连续），两轨各落新 offset 下的映射位，无素材一侧由
+                // seekTimeline 正确 park+黑层，不再手写 coerce
+                seekTimeline(currentTimelineMs())
                 manual = false
                 banner = if (res.lowConfidence) R.string.player_sync_low_confidence else R.string.player_sync_done
             } else {
