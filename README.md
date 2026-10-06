@@ -2,14 +2,14 @@
 
 [![Build Release APKs](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-apk.yml/badge.svg)](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-apk.yml)
 
-一款为 **WOTA 艺 / 演出现场拍摄**打造的 Android 录制相机：低光环境下的电影机式手动控制、完整的取景辅助，以及一套针对灯轨拍摄的工具链——强制低速快门、抽帧间隙的光弧修复、A/B 对比播放。
+一款为 **WOTA 艺 / 演出现场拍摄**打造的 Android 录制相机：电影机式手动控制、实时 RGB 曲线调色、完整的取景辅助，以及一套针对光弧拍摄的工具链——强制低速快门、抽帧间隙的光弧修复、A/B 对比播放。
 
 > 项目处于早期开发阶段，功能与界面迭代很快，最新版本以 [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest) 页为准。
 
 ## 功能特性
 
 ### 拍摄控制
-- 手动曝光：ISO / 快门 / EV，快门支持强制 1/24、1/25 低速档（长曝光保证灯轨连贯）
+- 手动曝光：ISO / 快门 / EV，快门支持强制 1/24、1/25 低速档（长曝光保证光弧连贯）
 - 帧率控制、白平衡色温、手动对焦与变焦
 - 白平衡与 RGB 曲线调整
 - 相机参数一律从 `CameraCharacteristics` 运行时读取，按设备能力自适应，不写死机型数值
