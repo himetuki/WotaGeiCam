@@ -343,16 +343,12 @@ class MrRecorder(
 
     // region 分段
     override fun onInfo(rec: MediaRecorder?, what: Int, extra: Int) {
-        if (what != MediaRecorder.MEDIA_RECORDER_INFO_UNKNOWN) {
-            Log.i(TAG, "mr info what=$what extra=$extra")
-            return
-        }
-        when (extra) {
-            // 802 逼近上限即换段（801 兜底，部分 ROM 只报到达）
-            MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING,
-            MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED -> rotateSegment(extra)
-            else -> Log.i(TAG, "mr info extra=$extra")
-        }
+        // 先打日志再判定：日志里保留 what/extra 原值是修复后的自证手段——真机上看到
+        // what=802/801（或 what=1 且 extra 带码）后紧跟 "file size event … restartRecord"，
+        // 才能证明换段链路活着。历史缺陷：这里曾要求 what==UNKNOWN 才往下走、却在 extra 里找
+        // 801/802，判定序反转 ⇒ 只打日志不换段。判定本体在 mrRotateRequested（纯函数，可 JVM 测）。
+        Log.i(TAG, "mr info what=$what extra=$extra")
+        if (mrRotateRequested(what, extra)) rotateSegment(extra)
     }
 
     override fun onError(rec: MediaRecorder?, what: Int, extra: Int) {

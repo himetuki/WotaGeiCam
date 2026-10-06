@@ -61,6 +61,7 @@
     <string name="gallery_share_title">分享视频</string>
 
     <!-- 写操作提示（media/MediaActions.kt、media/Share.kt） -->
+    <string name="media_op_failed">操作失败</string>
     <string name="media_tag_invalid">标签不能为空且不超过 24 字</string>
     <string name="media_name_empty">名称不能为空</string>
     <string name="media_rename_failed">重命名失败或未获授权</string>

@@ -345,4 +345,37 @@ class RecordHealthTest {
         assertEquals("两源都有数 ⇒ 取大（fd 大）", 9L, resolveOutputBytes(9L, 3L))
         assertEquals("fd 已够量时取 fd", 65_536L, resolveOutputBytes(65_536L, -1L))
     }
+
+    // ------------------------------------------------------------------ mrRotateRequested
+
+    /**
+     * MR 路换段事件判定全表（手写数字字面量，防"用实现证明实现"）。
+     *
+     * 字面量与 MediaRecorder 常量的对应（android-34 jar javap 实测）：
+     * MEDIA_RECORDER_INFO_UNKNOWN=1、MEDIA_RECORDER_INFO_MAX_DURATION_REACHED=800、
+     * MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED=801、APPROACHING=802、NEXT_OUTPUT_FILE_STARTED=803。
+     * AOSP 契约：801/802 是 **what** 的取值、extra 恒 0——历史缺陷正是把这两条塞进了 extra 判定
+     * （且门槛写成 what==UNKNOWN），导致换段永不触发。突变：删掉 AOSP 分支（只留 ROM 兜底）→
+     * 本用例 (802,0)/(801,0) 必红；把兜底写成 `what != UNKNOWN` 一票否决 → (1,801) 必红。
+     */
+    @Test
+    fun `mrRotateRequested AOSP 形态 what 带 801 802 即换段`() {
+        assertTrue("what=801（到达上限）extra=0 ⇒ 换段", mrRotateRequested(801, 0))
+        assertTrue("what=802（逼近上限）extra=0 ⇒ 换段", mrRotateRequested(802, 0))
+    }
+
+    @Test
+    fun `mrRotateRequested ROM 兜底 what UNKNOWN 且 extra 带码即换段`() {
+        assertTrue("what=1(UNKNOWN) extra=801 ⇒ 换段（部分 ROM 把 info 码塞进 extra）", mrRotateRequested(1, 801))
+        assertTrue("what=1(UNKNOWN) extra=802 ⇒ 同上", mrRotateRequested(1, 802))
+    }
+
+    @Test
+    fun `mrRotateRequested 其余事件一律不换段`() {
+        assertFalse("what=1 extra=0：普通 info 不换段", mrRotateRequested(1, 0))
+        assertFalse("what=0 不是任何 info 码", mrRotateRequested(0, 0))
+        assertFalse("what=800 时长触顶：本应用只按文件大小换段", mrRotateRequested(800, 0))
+        assertFalse("what=803 下一文件已开始：不换段", mrRotateRequested(803, 0))
+        assertFalse("负值组合一律不换段", mrRotateRequested(-1, -1))
+    }
 }

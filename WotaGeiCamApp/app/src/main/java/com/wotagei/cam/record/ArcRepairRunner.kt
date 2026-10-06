@@ -99,6 +99,20 @@ data class ArcRepairResult(
 )
 
 /**
+ * 修复成功判据（纯函数，JVM 全表单测；`ArcRepairSession.run` 收尾唯一入口）：
+ * muxer 已 start + 视频轨已 addTrack + **至少写出一个视频样本**。
+ *
+ * 【为什么必须数样本】存储写满时 `writeSampleData` 会逐样本抛错（修复管线把异常吞掉只记日志），
+ * 而 moov 在 muxer stop 之前没写出去 ⇒ 成片只剩 ftyp 头；只看前两格会把这份废片判成成功并
+ * commit 进相册。零样本整废是必须拦的形态。
+ * 【为什么只拦零样本】部分样本失败（可播但缺帧）不判失败：把整段白修的产物改判失败代价不对称；
+ * 写失败已有日志与 [ArcRepairSession.writeFailCode]（ENGINE:MUX）留痕，这里只把"一个样本都没
+ * 写出去"从成功里剔掉。
+ */
+fun arcRepairOk(muxStarted: Boolean, videoTrackAdded: Boolean, writtenVideoSamples: Int): Boolean =
+    muxStarted && videoTrackAdded && writtenVideoSamples > 0
+
+/**
  * 光弧修复的**后台执行器**（用户需求第 7 项）：把一段视频处理成"插帧后"的新文件并入库。
  *
  * 形态克隆自 `ui/CameraScreen.kt` 的 `RecordRunner`：自己的 `HandlerThread` + 若干
@@ -219,6 +233,9 @@ private class ArcRepairSession(
     private var videoTrack = -1
     private var audioTrack = -1
     private var muxStarted = false
+
+    /** 本会话已**成功**写出的视频样本数（写失败不计数）：成功判据第三格，见 [arcRepairOk] */
+    private var writtenVideoSamples = 0
     private var videoDone = false
     private var audioDone = true
     private var encEosSent = false
@@ -241,6 +258,9 @@ private class ArcRepairSession(
     private var audioPendingPts = 0L
     private var audioPendingSize = 0
     private var note: String? = null
+
+    /** muxer 写样本失败的失败码：run() 收尾时优先于 NO_VIDEO（与 CodecRecorder.writeSample 的 :MUX 映射同语义） */
+    private var writeFailCode: String? = null
 
     /** 抽帧计划与它的流式桥（open() 里建，主循环逐帧问指令） */
     private lateinit var flow: ArcRepairFlow
@@ -271,8 +291,11 @@ private class ArcRepairSession(
         try {
             open()
             mainLoop()
-            ok = muxStarted && videoTrack >= 0
-            if (!ok) code = code ?: ArcRepairError.NO_VIDEO
+            // 成功判据走纯函数 arcRepairOk（JVM 全表单测）：muxer 启动 + 视频轨已建 + 视频样本
+            // 真的写出去过。只拦"零样本整废"（盘满时逐样本写失败 ⇒ 成片只剩 ftyp 头也曾被报成功），
+            // "部分样本失败"仍算成功（可播但缺帧的产物改判失败代价不对称，取舍见 arcRepairOk 注释）。
+            ok = arcRepairOk(muxStarted, videoTrack >= 0, writtenVideoSamples)
+            if (!ok) code = code ?: writeFailCode ?: ArcRepairError.NO_VIDEO
         } catch (e: ArcFail) {
             code = e.code
             Log.i(TAG_ARC, "修复中止：${e.code}")
@@ -975,8 +998,13 @@ private class ArcRepairSession(
         vBufInfo.set(bi.offset, bi.size, norm, bi.flags)
         try {
             m.writeSampleData(videoTrack, buf, vBufInfo)
+            // 只认写成功：盘满等失败不计数（成功判据 arcRepairOk 的第三格）
+            writtenVideoSamples++
         } catch (e: Exception) {
+            // 吞异常是既有口径（逐样本失败不中断修复），但必须留痕：零样本时 run() 靠这个码
+            // 把失败归因到 MUX 而不是误报 NO_VIDEO（与 CodecRecorder.writeSample 同语义）
             Log.e(TAG_ARC, "写视频样本失败：${e.message}")
+            writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
         }
         drainAudioUpTo(norm)
     }
@@ -1025,7 +1053,9 @@ private class ArcRepairSession(
             try {
                 m.writeSampleData(tr, audioBuf, aBufInfo)
             } catch (e: Exception) {
+                // 与视频写失败同口径：吞异常不中断，但留 MUX 失败码（音轨整废时归因不误报）
                 Log.e(TAG_ARC, "写音频样本失败：${e.message}")
+                writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
             }
             audioPending = false
             if (!ex.advance()) {

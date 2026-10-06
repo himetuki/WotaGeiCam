@@ -1,7 +1,9 @@
 package com.wotagei.cam.record
 
+import android.media.MediaRecorder
+
 /**
- * 起录自检（纯 Kotlin，无 Android 依赖，JVM 可直接测）。
+ * 起录自检（纯 Kotlin，JVM 可直接测）。
  *
  * 存在的理由（可观测性缺口，非某个 bug）：引擎历来只在**停止/收尾**时判产出是否成立——
  * [CodecRecorder] 在 `runSegment` 结尾判 `videoTrack < 0`、`stop` 时判 `!muxStarted`，
@@ -184,3 +186,29 @@ fun segmentKeepDecision(
     durationMs: Long,
     minKeepMs: Long
 ): Boolean = !abandoned && errorCode == null && durationMs >= minKeepMs
+
+/**
+ * MR 路（[MrRecorder]）"这条 info 事件是换段请求吗"的判定（纯函数，JVM 全表单测）。
+ *
+ * 【AOSP 契约】`MediaRecorder` 的 `EventHandler.handleMessage` 把 `MEDIA_RECORDER_EVENT_INFO`
+ * 分发成 `onInfo(mr, what = info 码, extra = 0)`——**801/802 是 `what` 的取值，`extra` 恒 0**
+ * （android-34 jar 实测常量：UNKNOWN=1、MAX_FILESIZE_REACHED=801、APPROACHING=802）。
+ * 历史缺陷：`onInfo` 曾要求 `what == UNKNOWN` 才往下走、却在 `extra` 里找 801/802，判定序正好
+ * 反转 ⇒ 真机只会打日志、`rotateSegment` 不可达，触顶后 MediaRecorder 停写而 App 计时照走。
+ * 判定序：
+ * 1. `what` 是 801（到达上限）或 802（逼近上限）⇒ true（AOSP 标准形态，802 先到即换段）；
+ * 2. 兜底：`what == UNKNOWN`(1) 且 `extra` 是 801/802 ⇒ true——保留旧意图，兼容把 info 码
+ *    塞进 `extra` 的定制 ROM；
+ * 3. 其余（800 时长触顶、803 下一文件已开始等事件，`what`/`extra` 的任意别的组合）⇒ false，
+ *    本应用只按文件大小换段。
+ *
+ * 【JVM 可测的原因】`MediaRecorder.MEDIA_RECORDER_*` 是 Java 编译期常量，编译时按值内联进
+ * 本函数字节码，测试进程不触碰任何 Android 运行时。
+ */
+fun mrRotateRequested(what: Int, extra: Int): Boolean =
+    what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
+        what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING ||
+        (what == MediaRecorder.MEDIA_RECORDER_INFO_UNKNOWN && (
+            extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
+                extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING
+            ))

@@ -11,6 +11,7 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,12 +25,16 @@ import com.wotagei.cam.core.WotaStorage
 import com.wotagei.cam.R
 import com.wotagei.cam.ui.findActivity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** 媒体库写操作日志锚点（launchOp 的失败兜底记日志用） */
+private const val TAG = "WotaMedia"
 
 /**
  * 媒体库写操作（收藏 / tag / 回收站 / 删除 / 重命名 / 分享入口）。
@@ -428,7 +433,17 @@ class MediaOps internal constructor(
     }
 
     private fun launchOp(block: suspend () -> MediaOp) {
-        scope.launch { dispatch(block()) }
+        scope.launch {
+            // 协程里冒出的异常（盘满的 SQLiteFullException、非 SecurityException 的 IO 失败等）
+            // 没人接就是进程崩溃（SupervisorJob 不改未捕获即崩）：这里统一兜底，失败记日志并给
+            // 一条横幅文案。取消不算失败——离开屏幕的正常取消原样抛回，不弹"操作失败"。
+            val op = runCatching { block() }.getOrElse { e ->
+                if (e is CancellationException) throw e
+                Log.w(TAG, "media op failed: ${e.javaClass.simpleName}", e)
+                MediaOp.Message(R.string.media_op_failed)
+            }
+            dispatch(op)
+        }
     }
 
     /** 授权回路中途再冒出的请求也走同一入口（MediaActions.opSink） */
