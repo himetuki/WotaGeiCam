@@ -297,4 +297,36 @@ class RecordHealthWiringGuardTest {
         assertFalse("stopInternal 不许出现 healthVerdict", body.contains("healthVerdict"))
         assertFalse("stopInternal 不许出现 retryActionOf", body.contains("retryActionOf"))
     }
+
+    /**
+     * MR 路换段接线（P1 缺陷修复守卫）：onInfo 曾要求 `what == MEDIA_RECORDER_INFO_UNKNOWN`
+     * 才往下走、却在 `extra` 里找 801/802——AOSP 契约里 801/802 是 **what** 的取值（extra 恒 0），
+     * 判定序反转 ⇒ 真机只打日志、`rotateSegment` 永不可达，触顶后静默停写。这里钉住：
+     * - 判定必须走纯函数 [mrRotateRequested]（本体与全表单测在 RecordHealthTest，这里锁接线）；
+     * - **先打日志后判定**：日志保留 what/extra 原值是修复后的自证手段（判定写反时日志先红）；
+     * - 体内不得再出现裸 `when (extra)` 换段判定（旧写法回潮即红）。
+     */
+    @Test
+    fun `MrRecorder onInfo 必须走 mrRotateRequested 且先打日志`() {
+        val src = codeOnly(mainSourceText("record/MrRecorder.kt"))
+        val body = bodyOf(src, "onInfo")
+        val judge = body.indexOf("mrRotateRequested(")
+        val log = body.indexOf("Log.i(")
+        assertTrue("onInfo 必须调纯函数 mrRotateRequested（判定不许内联回回调里）", judge >= 0)
+        assertTrue("锚点丢失：onInfo 没截到日志调用", log >= 0)
+        assertTrue(
+            "必须先打日志再判定（what/extra 原值进日志是修复后的自证手段）",
+            log < judge
+        )
+        assertTrue("日志必须带 what= 与 extra= 两个值", mainSourceText("record/MrRecorder.kt").contains("mr info what=\$what extra=\$extra"))
+        assertTrue("判定为真必须调 rotateSegment（换段动作不许丢）", body.contains("rotateSegment("))
+        assertFalse(
+            "不得再用裸 when (extra) 判换段（AOSP 里 801/802 是 what 的取值，旧判定是反转的根因）",
+            body.contains("when (extra)")
+        )
+        assertFalse(
+            "不得再以 what==UNKNOWN 作换段门槛（那正是判定反转的旧写法）",
+            body.contains("MEDIA_RECORDER_INFO_UNKNOWN")
+        )
+    }
 }

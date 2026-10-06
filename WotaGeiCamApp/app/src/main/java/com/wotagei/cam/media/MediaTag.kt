@@ -68,6 +68,26 @@ object GalleryTabs {
         }
         return tabs
     }
+
+    /**
+     * 页签收窄后的选中态矫正（纯函数，JVM 全表单测；调用方 GalleryScreen 的 `LaunchedEffect(tabs)`）。
+     *
+     * 【为什么需要】customTags 来自 media_tag 行（按 clip 删/清标签而缩），tabs 随之缩短后：
+     * 1. `tabIndex` 越界——显示处 coerce 了高亮，`filter` 却仍指向已消失的 [ClipFilter.Tagged]，
+     *    高亮与内容区失配（高亮跳到"回收站"、内容恒空）；
+     * 2. index 仍合法但 filter 失效——删掉的是**更靠前**的自定义 tag 时，原 index 落在别的页签上，
+     *    高亮看着正常，内容区却在查已删的 tag，恒空且不可自愈。
+     * 两条都是"选中态 (index, filter) 与页签表不一致"，统一矫正：夹回 `index.coerceIn(0, lastIndex)`
+     * 并同步该页签的 filter。
+     *
+     * @return 矫正后的 (index, filter)；选中态本来一致（含 tabs 为空的极端）时原样返回
+     */
+    fun clampedSelection(tabs: List<GalleryTab>, index: Int, filter: ClipFilter): Pair<Int, ClipFilter> {
+        if (tabs.isEmpty()) return index to filter
+        val i = index.coerceIn(0, tabs.lastIndex)
+        val tabFilter = tabs[i].filter
+        return if (tabFilter == filter) index to filter else i to tabFilter
+    }
 }
 
 /** 时间线分组（今天 / 昨天 / 某月某日） */

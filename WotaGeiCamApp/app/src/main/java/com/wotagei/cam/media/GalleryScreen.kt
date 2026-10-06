@@ -190,6 +190,16 @@ fun GalleryScreen(
     val tagsFlow = remember(repo) { repo.customTags() }
     val customTags by tagsFlow.collectState(emptyList())
     val tabs = remember(customTags) { GalleryTabs.build(app, customTags) }
+    // 自定义 tag 页签随删视频/删 tag 收窄后，选中态 (tabIndex, filter) 会与页签表失配：
+    // index 越界时高亮被显示处 coerce 而内容区恒空；index 合法但 filter 指向已删 tag 同样恒空。
+    // tabs 一变就矫正一次（判定在 GalleryTabs.clampedSelection，纯函数 + JVM 单测）；一致时不回写。
+    LaunchedEffect(tabs) {
+        val (i, f) = GalleryTabs.clampedSelection(tabs, tabIndex, filter)
+        if (i != tabIndex || f != filter) {
+            tabIndex = i
+            filter = f
+        }
+    }
     val clips by clipsFlow.collectState(emptyList())
     // 闸门押后列表下发的那一瞬间（播放器"彻底删除"返回媒体库时最多约 1.1s）：这时空列表是
     // **编排的结果**而不是真相，照旧显示"这里还没有视频"会被读成"视频全没了"。
