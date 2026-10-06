@@ -8,7 +8,8 @@ import java.io.File
 
 /**
  * 内录平台骨架（批 1）的**源码/清单守卫**。行为（授权框、FGS 通知、真会话）JVM 测不到，这里钉结构红线：
- * - manifest：FGS 两权限在位、`CaptureFgService` 声明与 `mediaProjection` type 在位、**INTERNET 红线不出现**；
+ * - manifest：FGS 两权限在位、`CaptureFgService` 声明与 `mediaProjection` type 在位
+ *   （INTERNET 红线 2026-10-06 已按用户裁决解除，联网守卫移交 update/UpdateNetworkGuardTest）；
  * - API 34 顺序链：`onCreate` 内 `startForeground(..., FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)`，
  *   `getMediaProjection` 只准在 `onStartCommand` 且先拿会话后 `registerCallback`
  *   （targetSdk 34 下先 getMediaProjection 抛 SecurityException）；
@@ -45,7 +46,7 @@ class CapturePlatformGuardTest {
     // ------------------------------------------------------------------ manifest
 
     @Test
-    fun `manifest_内录FGS权限与服务声明在位_且不引入INTERNET`() {
+    fun `manifest_内录FGS权限与服务声明在位`() {
         val m = manifestText()
         assertTrue(
             "缺 FOREGROUND_SERVICE（normal，FGS 启动前置）",
@@ -62,10 +63,6 @@ class CapturePlatformGuardTest {
         assertTrue(
             "服务必须标 foregroundServiceType=\"mediaProjection\"（targetSdk 34：缺它 startForeground 崩）",
             Regex("foregroundServiceType\\s*=\\s*\"mediaProjection\"").containsMatchIn(m)
-        )
-        assertFalse(
-            "INTERNET 红线：本工程 manifest 不许出现联网权限",
-            m.contains("android.permission.INTERNET")
         )
     }
 

@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 联网权限（2026-10-06 用户批准解除原「无 INTERNET」红线）：仅限「检查更新」功能使用——
+         探测 GitHub latest release + 镜像下载 APK。网络代码只允许出现在 update/ 包
+         （UpdateNetworkGuardTest 钉住：全源码 grep 网络符号只许命中 update/），且只许用户手动点击触发 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- 设备内录（AudioPlaybackCapture）：前台服务承载 MediaProjection 会话。均为 normal 级权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />

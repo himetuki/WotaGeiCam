@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -41,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -83,6 +87,14 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.widget.TierItem
 import com.wotagei.cam.ui.widget.TierPicker
+import com.wotagei.cam.update.ProbeResult
+import com.wotagei.cam.update.UpdateDownloader
+import com.wotagei.cam.update.UpdateInstaller
+import com.wotagei.cam.update.probeLatestRelease
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -838,6 +850,10 @@ fun SettingsScreen(
             // 直通）：打新 tag 前改脚本那两行是发版必经步骤，设置页/容器/产物名因此永远一致（2026-10-03）
             InfoRow(stringResource(R.string.set_version), BuildConfig.VERSION_NAME)
             Line()
+            // 「检查更新」（纯手动版）：探测/下载只由行内点击触发，不挂任何生命周期观察者
+            // （UpdateNetworkGuardTest 钉住：入口必须全部活在 UpdateSection 函数体内）
+            UpdateSection()
+            Line()
             InfoRow(stringResource(R.string.set_package), context.packageName)
             Line()
             Text(
@@ -1005,3 +1021,315 @@ private fun hasBluetoothPermission(context: Context): Boolean =
 
 private fun granted(context: Context, permission: String): Boolean =
     ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+// ------------------------------------------------------------------ 检查更新（纯手动）
+
+/** 「检查更新」行的行内状态：Idle → Checking →（Cancelling）→ Latest/Failed（有新版转对话框流，行回 Idle） */
+private enum class UpdateRowState { Idle, Checking, Cancelling, Latest, Failed }
+
+/** 下载对话框状态（进度由 IO 线程的 onProgress 回调写入；完成/失败后换动作行） */
+private data class UpdateDownloadState(
+    val bytesRead: Long = 0,
+    val totalBytes: Long = -1L,
+    val done: Boolean = false,
+    val failed: Boolean = false,
+    val installFailed: Boolean = false,
+    val file: java.io.File? = null
+)
+
+/**
+ * 「检查更新」区块（关于卡内、版本行下方）。
+ *
+ * **纯手动纪律**：联网探测与下载只由下面这颗行的点击触发，本函数体内不许出现任何
+ * 生命周期观察者 / 重组自动触发（LaunchedEffect、DisposableEffect、LifecycleObserver…）——
+ * 这是用户裁决的功能语义，UpdateNetworkGuardTest 钉住（入口必须全部活在 [UpdateSection] 体内）。
+ */
+@Composable
+private fun UpdateSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var rowState by remember { mutableStateOf(UpdateRowState.Idle) }
+    var available by remember { mutableStateOf<ProbeResult.UpdateAvailable?>(null) }
+    var download by remember { mutableStateOf<UpdateDownloadState?>(null) }
+    // 探测取消探针（检查中点行 = 取消）。下载取消标志**按代隔离**（修复轮 P2）：每轮下载在
+    // onDownload 里新建 AtomicBoolean 捕获进协程闭包，取消钮只操作该代标志（downloadGenFlag），
+    // 行点击（检查）永不触碰下载标志——共享标志被新一轮复位会让旧下载协程复活/迟到回执弹框
+    val probeCancelled = remember { AtomicBoolean(false) }
+    var downloadGenFlag by remember { mutableStateOf<AtomicBoolean?>(null) }
+
+    val statusRes = when (rowState) {
+        UpdateRowState.Idle -> R.string.set_update_idle
+        UpdateRowState.Checking -> R.string.set_update_checking
+        UpdateRowState.Cancelling -> R.string.set_update_cancelling
+        UpdateRowState.Latest -> R.string.set_update_latest
+        UpdateRowState.Failed -> R.string.set_update_failed
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            // 修复轮 P2-2：检查中点行 = 取消（置位取消探针）；Cancelling 期间行不可点，
+            // 等编排把剩余节点跳完回来（节点内最坏一个探测超时周期），防旧探测的回执污染新一轮
+            .clickable(enabled = download == null && rowState != UpdateRowState.Cancelling) {
+                if (rowState == UpdateRowState.Checking) {
+                    probeCancelled.set(true)
+                    rowState = UpdateRowState.Cancelling
+                } else {
+                    probeCancelled.set(false)
+                    rowState = UpdateRowState.Checking
+                    scope.launch(Dispatchers.IO) {
+                        when (
+                            val r = probeLatestRelease(
+                                BuildConfig.VERSION_NAME,
+                                // 探测专用短读超时（P2-2）：最坏 5 节点 × (10s 连接 + 10s 读) ≈ 100s，不再挂数分钟
+                                { url -> UpdateDownloader.fetchJson(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS) },
+                                { url -> UpdateDownloader.fetchRedirectLocation(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS) },
+                                isCancelled = { probeCancelled.get() }
+                            )
+                        ) {
+                            is ProbeResult.UpdateAvailable -> {
+                                // 修复轮 P3-2：取消落在最后一个在飞探测请求窗口内 → 丢弃回执，
+                                // 与下载回执同一纪律（取消后不许凭空弹「发现新版本」）
+                                if (!probeCancelled.get()) available = r
+                                rowState = UpdateRowState.Idle
+                            }
+                            // 修复轮 P3-2：UpToDate/Failed 同一把尺——取消后迟到的回执不写
+                            // 「已是最新/检查失败」，统一回 Idle
+                            ProbeResult.UpToDate ->
+                                rowState = if (probeCancelled.get()) UpdateRowState.Idle else UpdateRowState.Latest
+                            ProbeResult.Cancelled -> rowState = UpdateRowState.Idle
+                            ProbeResult.Failed ->
+                                rowState = if (probeCancelled.get()) UpdateRowState.Idle else UpdateRowState.Failed
+                        }
+                    }
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = stringResource(R.string.set_update),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaText,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = stringResource(statusRes),
+            style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
+            // 失败用 WotaRec 红强调（与权限「未授权」同语义）；其余小字灰安静态
+            color = if (rowState == UpdateRowState.Failed) WotaRec else WotaTextDim
+        )
+    }
+
+    available?.let { avail ->
+        UpdatePromptDialog(
+            tag = avail.latestTag,
+            sizeText = apkSizeText(avail.sizeBytes),
+            onDownload = {
+                available = null
+                // 修复轮 P2：取消标志按代隔离——每轮下载新建 AtomicBoolean 捕获进协程闭包，
+                // 迟到的旧代回执以本代标志判生死，跨代复位从此不可能
+                val genCancelled = AtomicBoolean(false)
+                downloadGenFlag = genCancelled
+                download = UpdateDownloadState()
+                scope.launch(Dispatchers.IO) {
+                    val outcome = UpdateDownloader.downloadApk(
+                        context = context,
+                        directUrl = avail.downloadUrl,
+                        expectedSize = avail.sizeBytes,
+                        onProgress = { read, total ->
+                            // 修复轮 P3-1（末轮）：进度只许「本代仍是当前可见代」时写——
+                            // 旧代迟到的进度不许碰新一代的进度对话框
+                            if (downloadGenFlag === genCancelled) {
+                                download = download?.copy(bytesRead = read, totalBytes = total)
+                            }
+                        },
+                        isCancelled = { genCancelled.get() }
+                    )
+                    // 修复轮 P3-1（末轮）：回执写回前判代——旧代（已被新一代顶替）一律整体丢弃，
+                    // 不许无条件清 download（那会把新一代的对话框清掉、令其隐形下载且不可取消）
+                    if (downloadGenFlag !== genCancelled) return@launch
+                    when (outcome) {
+                        is UpdateDownloader.DownloadOutcome.Done ->
+                            // 本代已取消 → 回执丢弃（取消钮已关对话框，不许凭空弹回）
+                            if (!genCancelled.get()) {
+                                download = UpdateDownloadState(
+                                    bytesRead = outcome.sizeBytes,
+                                    totalBytes = outcome.sizeBytes,
+                                    done = true,
+                                    file = outcome.file
+                                )
+                            }
+                        UpdateDownloader.DownloadOutcome.Cancelled -> download = null
+                        UpdateDownloader.DownloadOutcome.Failed ->
+                            // 同上：已取消的失败回执丢弃（对话框已关，别翻出来）
+                            if (!genCancelled.get()) download = UpdateDownloadState(failed = true)
+                    }
+                }
+            },
+            onDismiss = { available = null }
+        )
+    }
+
+    download?.let { dl ->
+        UpdateDownloadDialog(
+            state = dl,
+            onCancel = {
+                // 只操作本代下载标志（修复轮 P2：按代隔离，行点击/新一轮探测永不触碰它）
+                downloadGenFlag?.set(true)
+                download = null
+            },
+            onClose = { download = null },
+            onInstall = {
+                val file = dl.file
+                if (file != null && UpdateInstaller.install(context, file)) {
+                    download = null
+                    rowState = UpdateRowState.Idle
+                } else {
+                    download = dl.copy(installFailed = true)
+                }
+            }
+        )
+    }
+}
+
+/** 提示更新对话框：新版本号 + APK 大小 + 下载/取消（系统安装确认属安装器职责，这里只管到「安装」） */
+@Composable
+private fun UpdatePromptDialog(tag: String, sizeText: String, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(WotaShape.dialog))
+                .background(WotaColor.surface)
+                .padding(20.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.set_update_available_title),
+                style = MaterialTheme.typography.titleMedium,
+                color = WotaText
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.set_update_available_body, tag, sizeText),
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaColor.textMid
+            )
+            Spacer(Modifier.height(18.dp))
+            UpdateDialogActions(
+                listOf(
+                    stringResource(R.string.set_update_cancel) to onDismiss,
+                    stringResource(R.string.set_update_download) to onDownload
+                )
+            )
+        }
+    }
+}
+
+/** 下载进度对话框：n% + 已下/总 MB + 取消；完成换「安装」，失败换「关闭」 */
+@Composable
+private fun UpdateDownloadDialog(
+    state: UpdateDownloadState,
+    onCancel: () -> Unit,
+    onClose: () -> Unit,
+    onInstall: () -> Unit
+) {
+    // 修复轮 P3-1：下载中外部点击/返回键不再触发取消（误触会丢掉整个下载），
+    // onDismissRequest 置空，取消只走显式「取消」钮；完成/失败态保留外部关闭
+    Dialog(onDismissRequest = { if (state.done || state.failed || state.installFailed) onClose() }) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(WotaShape.dialog))
+                .background(WotaColor.surface)
+                .padding(20.dp)
+        ) {
+            val title = when {
+                state.done -> stringResource(R.string.set_update_ready_to_install)
+                state.failed -> stringResource(R.string.set_update_download_failed)
+                state.installFailed -> stringResource(R.string.set_update_install_failed)
+                else -> stringResource(R.string.set_update_downloading)
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (state.failed || state.installFailed) WotaRec else WotaText
+            )
+            Spacer(Modifier.height(10.dp))
+            when {
+                state.done -> {
+                    UpdateDialogActions(
+                        listOf(stringResource(R.string.set_update_install) to onInstall)
+                    )
+                }
+                state.failed || state.installFailed -> {
+                    UpdateDialogActions(
+                        listOf(stringResource(R.string.set_update_close) to onClose)
+                    )
+                }
+                else -> {
+                    val total = state.totalBytes
+                    val pct = if (total > 0) {
+                        ((state.bytesRead * 100) / total).toInt().coerceIn(0, 100)
+                    } else {
+                        null
+                    }
+                    Text(
+                        text = if (pct != null) {
+                            stringResource(
+                                R.string.set_update_progress,
+                                pct, downloadedMb(state.bytesRead), downloadedMb(total)
+                            )
+                        } else {
+                            stringResource(R.string.set_update_progress_unknown, downloadedMb(state.bytesRead))
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = WotaColor.textMid
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (total > 0) {
+                        LinearProgressIndicator(
+                            progress = (state.bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    UpdateDialogActions(
+                        listOf(stringResource(R.string.set_update_cancel) to onCancel)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 对话框动作行（右对齐；末位主操作加粗。色按设置页惯例：surface 上 accent 不过 AA，用 textHi/textMid） */
+@Composable
+private fun UpdateDialogActions(actions: List<Pair<String, () -> Unit>>) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        actions.forEachIndexed { i, (label, action) ->
+            if (i > 0) Spacer(Modifier.width(16.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (i == actions.lastIndex) WotaText else WotaColor.textMid,
+                fontWeight = if (i == actions.lastIndex) FontWeight.Bold else null,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = action)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+    }
+}
+
+/** 字节 → "12.3MB"（进度与提示共用一套口径） */
+private fun downloadedMb(bytes: Long): String = String.format(Locale.US, "%.1fMB", bytes / 1024f / 1024f)
+
+/** 探测给的 APK 大小 → 展示文案（段 3 探测拿不到 size，下载时才有 Content-Length） */
+@Composable
+private fun apkSizeText(bytes: Long?): String =
+    if (bytes != null && bytes > 0) downloadedMb(bytes) else stringResource(R.string.set_update_size_unknown)
