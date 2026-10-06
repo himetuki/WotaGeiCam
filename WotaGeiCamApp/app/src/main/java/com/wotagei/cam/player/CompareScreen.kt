@@ -261,20 +261,24 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         if (result.resultCode == Activity.RESULT_OK) {
             // 坏 Uri / 解析失败一律按没选成处理：给错误横幅而不是静默吞。
             // parseId 只认数字末段（media uri）；个别相册/文件管理器会回私有 provider uri，
-            // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）
+            // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
+            // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
+            // （clipById 的 flowOn(IO) 管不到协程体里的直接调用），横幅/右槽仍是主线程写
             val uri = result.data?.data
             var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
-            if (id <= 0L && uri != null) {
-                id = runCatching {
-                    app.contentResolver.query(
-                        uri, arrayOf(android.provider.MediaStore.Video.Media._ID), null, null, null
-                    )?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
-                }.getOrNull() ?: 0L
-            }
-            if (id <= 0L) {
-                banner = R.string.compare_pick_failed
-            } else {
-                tapScope.launch {
+            tapScope.launch {
+                if (id <= 0L && uri != null) {
+                    id = withContext(Dispatchers.IO) {
+                        runCatching {
+                            app.contentResolver.query(
+                                uri, arrayOf(android.provider.MediaStore.Video.Media._ID), null, null, null
+                            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                        }.getOrNull() ?: 0L
+                    }
+                }
+                if (id <= 0L) {
+                    banner = R.string.compare_pick_failed
+                } else {
                     val clip = repo.clipById(id).first()
                     if (clip == null) {
                         banner = R.string.compare_pick_failed
