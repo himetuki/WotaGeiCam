@@ -70,7 +70,28 @@
     <string name="set_group_about">关于</string>
     <string name="set_version">版本</string>
     <string name="set_package">包名</string>
-    <string name="set_about_note">全部数据保存在本机，应用不联网</string>
+    <!-- 2026-10-06「检查更新」上线后原「应用不联网」不再属实：联网只发生在用户点「检查更新」那一下 -->
+    <string name="set_about_note">全部数据保存在本机；仅点「检查更新」时联网</string>
+    <!-- 检查更新（纯手动：仅点击时联网，无自动检查） -->
+    <string name="set_update">检查更新</string>
+    <string name="set_update_idle">点此联网检查 GitHub 最新版</string>
+    <string name="set_update_checking">检查中…</string>
+    <string name="set_update_cancelling">取消中…</string>
+    <string name="set_update_latest">已是最新版本</string>
+    <string name="set_update_failed">检查失败，请稍后重试</string>
+    <string name="set_update_available_title">发现新版本</string>
+    <string name="set_update_available_body">新版本 %1$s · APK %2$s</string>
+    <string name="set_update_download">下载更新</string>
+    <string name="set_update_cancel">取消</string>
+    <string name="set_update_downloading">正在下载更新</string>
+    <string name="set_update_progress">%1$d%% · 已下 %2$s / %3$s</string>
+    <string name="set_update_progress_unknown">已下 %1$s</string>
+    <string name="set_update_ready_to_install">下载完成，可以安装</string>
+    <string name="set_update_install">安装</string>
+    <string name="set_update_download_failed">下载失败，请稍后重试</string>
+    <string name="set_update_install_failed">无法启动系统安装</string>
+    <string name="set_update_close">关闭</string>
+    <string name="set_update_size_unknown">大小未知</string>
     <!-- 所有文件访问：删改本机任何视频都不弹系统英文确认框的前提 -->
     <string name="set_group_storage">所有文件访问</string>
     <string name="set_storage_note">打开后，删除、移入回收站、还原、重命名对本机所有视频直接生效，不会再出现系统的英文确认框；不开则只能改动本应用自己录的视频。</string>
