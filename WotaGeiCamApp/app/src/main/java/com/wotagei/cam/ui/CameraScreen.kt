@@ -1676,19 +1676,23 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     ) { result ->
         if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
         // 坏 Uri / 解析失败一律按没选成处理：parseId 只认 media uri，个别相册会回私有 provider uri，
-        // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）
+        // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
+        // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
+        // （clipById 的 flowOn(IO) 管不到协程体里的直接调用），横幅仍主线程写
         val uri = result.data?.data
         var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
-        if (id <= 0L && uri != null) {
-            id = runCatching {
-                app.contentResolver.query(uri, arrayOf(MediaStore.Video.Media._ID), null, null, null)
-                    ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
-            }.getOrNull() ?: 0L
-        }
-        if (id <= 0L) {
-            banner = R.string.compare_pick_failed
-        } else {
-            scope.launch {
+        scope.launch {
+            if (id <= 0L && uri != null) {
+                id = withContext(Dispatchers.IO) {
+                    runCatching {
+                        app.contentResolver.query(uri, arrayOf(MediaStore.Video.Media._ID), null, null, null)
+                            ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                    }.getOrNull() ?: 0L
+                }
+            }
+            if (id <= 0L) {
+                banner = R.string.compare_pick_failed
+            } else {
                 val clip = repo.clipById(id).first()
                 if (clip == null) {
                     banner = R.string.compare_pick_failed
@@ -2279,6 +2283,12 @@ private class RecordRunner(
                 RetryAction.RESTART -> abandonAndRestart()
                 RetryAction.GIVE_UP -> {
                     Log.w(TAG_UI, "录制自检未过且重录触顶（attempt=$attempt code=${h.errorCode}）")
+                    // 入口守卫（rec = recorder ?: return）保证此刻引擎必然还在 START 态录着：
+                    // 必须先走与自动重录同一套收尾（停引擎/弃段账目/摘面）再宣告失败。裸调 failNow
+                    // 只清 polling/recorder 两个引用位，引擎会继续编码收音、pending 永不 discard、
+                    // 之后的 MAX_FILE_BYTES 轮转还会按"errorCode=null 够长即 keep"把这个废会话的
+                    // 后续段 commit 进相册。顺序不许反（先 failNow 再收尾 = 收尾撞早退失守）。
+                    teardownAbandonedSession(rec)
                     failNow(RecordError.SELF_CHECK_FAILED)
                 }
                 RetryAction.NONE -> Unit
@@ -2289,12 +2299,9 @@ private class RecordRunner(
     /**
      * 丢弃当前未成形的段、从零重启一次录制会话（不是续录、不是修补）。
      *
-     * 拆解顺序**逐条复刻 [stopInternal] 的既有纪律**：停止期先置位 → MEND 滞留帧冲刷 →
-     * `rec.stop()`（引擎 discardCurrent 删 pending）→ `rec.release()` → discard 兜底
-     * （**只删未进停录产物 parts 的那枚 sink**，闸门理由见 `shouldDiscardAbandonedSink`）→
-     * **摘编码面**（GL 不许再往已释放的面上画，晚到 runnable 撞死面是修过的竞态）→
-     * attempt++ → [beginSession] 重放同一束会话接线（`setArcConvert`/`setOutputSurface`
-     * 每段必发，GPU/capture 轨随新会话重建）。
+     * 停录+弃段账目+摘面交给 [teardownAbandonedSession]（与自检触顶的 GIVE_UP 分支共用同一套，
+     * 禁止两处各写一份漂移）；这里只留重录侧的会话账目：attempt++ → [beginSession] 重放同一束
+     * 会话接线（`setArcConvert`/`setOutputSurface` 每段必发，GPU/capture 轨随新会话重建）。
      */
     private fun abandonAndRestart() {
         val rec = recorder
@@ -2302,6 +2309,23 @@ private class RecordRunner(
             failNow(RecordError.SELF_CHECK_FAILED); return
         }
         Log.i(TAG_UI, "录制自检未过，丢弃本段并自动重录（第 ${attempt + 1} 次重录）")
+        teardownAbandonedSession(rec)
+        attempt++
+        retryNotice.value = R.string.record_auto_retry
+        beginSession()
+    }
+
+    /**
+     * 停掉还在录的引擎并清账摘面——判废后的**共用收尾**，[abandonAndRestart]（自动重录）与
+     * `healthCheckLoop` 的 GIVE_UP 分支（触顶宣告失败）两处调用，逐字同一顺序。
+     *
+     * 拆解顺序**逐条复刻 [stopInternal] 的既有纪律**：停止期先置位 → MEND 滞留帧冲刷 →
+     * `rec.stop()`（引擎 discardCurrent 删 pending）→ `rec.release()` → discard 兜底
+     * （**只删未进停录产物 parts 的那枚 sink**，闸门理由见 `shouldDiscardAbandonedSink`）→
+     * **摘编码面**（GL 不许再往已释放的面上画，晚到 runnable 撞死面是修过的竞态）。
+     * 不含重录侧账目（attempt/notice/beginSession），也不改 status——调方各按己意收尾。
+     */
+    private fun teardownAbandonedSession(rec: Recorder) {
         glProvider()?.markRecordTearingDown()
         if (activeArcConvert == ArcConvertMode.MEND) {
             val flushed = glProvider()?.flushArcPending() ?: 0
@@ -2330,9 +2354,6 @@ private class RecordRunner(
         // 摘面与 stopInternal 同口径：新会话起来前 GL 不得再碰旧编码面
         if (params.renderMode.value == RenderMode.DIRECT) ctrl.setRecordingTarget(null)
         else glProvider()?.setOutputSurface(null, 0, 0)
-        attempt++
-        retryNotice.value = R.string.record_auto_retry
-        beginSession()
     }
 
     private fun stopInternal() {

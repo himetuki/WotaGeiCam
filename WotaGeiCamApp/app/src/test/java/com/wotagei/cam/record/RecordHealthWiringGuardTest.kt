@@ -18,7 +18,11 @@ import org.junit.Test
  *   且必须读 `h.outputBytes`；旧的 [weakHealthVerdict] 已删除，全仓不得再出现该名字；
  * - MR 路读数源必须落在 [MrRecorder.health()]：含 `Os.fstat` 与 `-1L` 兜底（量不到不许当 0）；
  * - `abandonAndRestart` 必须丢弃被弃段的 pending（`discard`，且过 `shouldDiscardAbandonedSink`
- *   闸门——只删未进产物的那枚）并重放会话；
+ *   闸门——只删未进产物的那枚）并重放会话；收尾本体抽在 `teardownAbandonedSession`，
+ *   与自检触顶的 GIVE_UP 分支**共用同一套**（两处各写一份必漂移）；
+ * - GIVE_UP（触顶宣告失败）时引擎必然还在录（入口守卫 `rec = recorder ?: return`）：
+ *   必须**先**走共用收尾停引擎、**后** `failNow`——裸调 failNow 只清引用位，引擎继续编码收音、
+ *   pending 永不 discard，后续 MAX_FILE_BYTES 轮转还会把废会话的段 commit 进相册；
  * - `MAX_RESTART_ATTEMPTS` 被**函数体**引用（不存在无限重试；不锁整文件，避免 import 行喂绿）；
  * - 自检失败走明确失败（`SELF_CHECK_FAILED`），**不许**闪 ERROR：`abandonAndRestart` 体内
  *   不得出现 `RecordStatus.ERROR`（status 全程保持 START）；
@@ -96,18 +100,10 @@ class RecordHealthWiringGuardTest {
     @Test
     fun `abandonAndRestart 必须丢弃被弃段并重放会话`() {
         val body = bodyOf(masked, "abandonAndRestart")
-        // 复刻 stopInternal 的拆解纪律（顺序在源码里，注释遮蔽后可判的形态）
-        assertTrue("停止期必须先置位（GL 侧抑制拆解伪影）", body.contains("markRecordTearingDown()"))
-        assertTrue("MEND 滞留帧必须先冲刷", body.contains("flushArcPending()"))
-        assertTrue("必须先停引擎再释放", body.contains("rec.stop()") && body.contains("rec.release()"))
+        // 停录+弃段账目+摘面的纪律本体抽到了 teardownAbandonedSession（与 GIVE_UP 共用），必须委托它
         assertTrue(
-            "必须 discard 被弃段的 sink（幽灵 pending 兜底）",
-            body.contains(".discard(")
-        )
-        assertTrue(
-            "discard 必须过 shouldDiscardAbandonedSink 闸门（sessionSink 只在 beginSession 赋值，" +
-                "分段轮转后它指向已 commit 的首段，无条件删会删用户成片）",
-            body.contains("shouldDiscardAbandonedSink(")
+            "必须委托共用收尾 teardownAbandonedSession（两处各写一份必漂移）",
+            body.contains("teardownAbandonedSession(rec)")
         )
         assertTrue("必须 attempt++ 记录已用机会", body.contains("attempt++"))
         assertTrue("必须重放 beginSession", body.contains("beginSession()"))
@@ -115,15 +111,34 @@ class RecordHealthWiringGuardTest {
             "自动重录不许闪 ERROR（status 全程保持 START），只许 failNow 走失败",
             body.contains("RecordStatus.ERROR")
         )
+        // 原拆解纪律逐条保留，只换靶子到共用收尾函数体
+        val t = bodyOf(masked, "teardownAbandonedSession")
+        assertTrue("停止期必须先置位（GL 侧抑制拆解伪影）", t.contains("markRecordTearingDown()"))
+        assertTrue("MEND 滞留帧必须先冲刷", t.contains("flushArcPending()"))
+        assertTrue("必须先停引擎再释放", t.contains("rec.stop()") && t.contains("rec.release()"))
+        assertTrue(
+            "必须 discard 被弃段的 sink（幽灵 pending 兜底）",
+            t.contains(".discard(")
+        )
+        assertTrue(
+            "discard 必须过 shouldDiscardAbandonedSink 闸门（sessionSink 只在 beginSession 赋值，" +
+                "分段轮转后它指向已 commit 的首段，无条件删会删用户成片）",
+            t.contains("shouldDiscardAbandonedSink(")
+        )
+        assertTrue(
+            "收尾必须摘编码面（DIRECT 摘 recordingTarget，GL 摘 outputSurface）",
+            t.contains("setRecordingTarget(null)") && t.contains("setOutputSurface(null, 0, 0)")
+        )
     }
 
     /**
      * P1 顺序红线：弃段意图必须在 `rec.stop()` **之前**声明。顺序反了（先停后弃）引擎已按旧的 keep
      * 语义判过，弃段意图来不及生效，坏段照样 commit 进相册。位置序断言防止有人把两行写反。
+     * （红线随收尾本体一起搬进了共用收尾函数。）
      */
     @Test
-    fun `abandonAndRestart 必须先声明弃段再停录`() {
-        val body = bodyOf(masked, "abandonAndRestart")
+    fun `共用收尾必须先声明弃段再停录`() {
+        val body = bodyOf(masked, "teardownAbandonedSession")
         val abandon = body.indexOf("abandonCurrentSegment()")
         val stop = body.indexOf("rec.stop()")
         assertTrue("必须调 rec.abandonCurrentSegment 声明弃段", abandon >= 0)
@@ -131,6 +146,37 @@ class RecordHealthWiringGuardTest {
         assertTrue(
             "弃段声明必须出现在 rec.stop() 之前（顺序反了引擎已按 keep 判过，弃段来不及生效）",
             abandon < stop
+        )
+    }
+
+    /**
+     * 触顶 GIVE_UP 的收尾红线：入口守卫（`rec = recorder ?: return`）保证此刻引擎必然还在 START 态
+     * 录着，`failNow` 只清 `polling`/`recorder` 两个引用位、`stopInternal` 见 `recorder == null` 会
+     * 早退——裸调 failNow 等于让引擎带着没人管的 fd 继续编码收音。位置序断言：先共用收尾、后 failNow。
+     */
+    @Test
+    fun `自检触顶 GIVE_UP 必须先走共用收尾再宣告失败`() {
+        val body = bodyOf(masked, "healthCheckLoop")
+        val teardown = body.indexOf("teardownAbandonedSession(rec)")
+        val fail = body.indexOf("failNow(")
+        assertTrue("锚点丢失：GIVE_UP 分支没截到共用收尾调用", teardown >= 0)
+        assertTrue("锚点丢失：GIVE_UP 分支没截到 failNow", fail >= 0)
+        assertTrue(
+            "触顶宣告失败前必须先停掉还在录的引擎（先 failNow 后收尾 = 收尾撞 stopInternal 早退失守）",
+            teardown < fail
+        )
+    }
+
+    /** 防两套收尾漂移：自动重录与触顶失败都必须调用同一个共用收尾函数（不存在第二份手抄）。 */
+    @Test
+    fun `自动重录与自检触顶必须共用同一收尾函数`() {
+        assertTrue(
+            "abandonAndRestart 必须调 teardownAbandonedSession",
+            bodyOf(masked, "abandonAndRestart").contains("teardownAbandonedSession(")
+        )
+        assertTrue(
+            "healthCheckLoop 的 GIVE_UP 分支必须调同一 teardownAbandonedSession",
+            bodyOf(masked, "healthCheckLoop").contains("teardownAbandonedSession(")
         )
     }
 
