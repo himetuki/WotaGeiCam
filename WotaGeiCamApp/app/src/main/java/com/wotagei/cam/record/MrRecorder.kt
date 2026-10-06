@@ -3,9 +3,11 @@ package com.wotagei.cam.record
 import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaRecorder
+import android.system.Os
 import android.util.Log
 import android.view.Surface
 import com.wotagei.cam.core.WotaTiers
+import java.io.File
 import java.io.IOException
 
 /**
@@ -33,12 +35,27 @@ class MrRecorder(
 
     private var mr: MediaRecorder? = null
     private var profile: RecordProfile? = null
-    private var target: OutputTarget? = null
+
+    /**
+     * 当前段输出目标。只在**控制线程**（与 [prepare]/[start]/[stop] 同线程）读写——[health] 也只在
+     * 该线程被调用（线程口径见 [health]），**今天没有跨线程读者**。标 `@Volatile` 因此非必需，纯属
+     * 零成本保险：防御将来有人把自检挪出该线程后，这里才会出现"读到的 target 已换代"这一隐性前提。
+     */
+    @Volatile private var target: OutputTarget? = null
     private var currentSink: OutputSink? = null
 
     @Volatile private var state = EngineState.IDLE
     @Volatile private var engineError: String? = null
     @Volatile private var rotating = false
+
+    /** 显式弃段意图（[abandonCurrentSegment] 置位，新会话/新段起始复位）：见 [segmentKeepDecision] */
+    @Volatile private var abandonSegment = false
+
+    /**
+     * 会话级错误残留：换段成功清 [engineError] 前，把旧段的失败码挪到这里，最终 [RecordResult]
+     * 用它兜底（清错只让**新段**恢复判活，绝不把"旧段确实失败过"从结果里抹掉）。
+     */
+    @Volatile private var sessionError: String? = null
 
     private val clock = ElapsedClock()
     private val parts = ArrayList<VideoSegment>()
@@ -72,6 +89,8 @@ class MrRecorder(
         }
         state = EngineState.PREPARE
         engineError = null
+        sessionError = null
+        abandonSegment = false
         parts.clear()
         partIndex = 0
         partStartMs = 0L
@@ -186,6 +205,7 @@ class MrRecorder(
             return
         }
         partStartMs = clock.elapsedMs()
+        abandonSegment = false // 新会话起始：弃段意图不复用（一次判废不许拖累之后每一段）
         try {
             mr?.start()
             state = EngineState.START
@@ -213,17 +233,23 @@ class MrRecorder(
         }
         val err = engineError
         if (prev == EngineState.START) {
-            sealCurrent(dur, err == null && dur >= RecordProfile.MIN_KEEP_MS)
+            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision
+            sealCurrent(dur, segmentKeepDecision(abandonSegment, err, dur, RecordProfile.MIN_KEEP_MS))
         } else {
             discardCurrent(err ?: RecordError.BAD_STATE)
         }
         releaseEngine()
         val total = clock.elapsedMs()
-        val out = if (parts.isEmpty()) RecordResult.fail(err ?: RecordError.TOO_SHORT, total)
-        else buildResult(err)
+        // 段级错误优先；没有时用会话级残留兜底（换段清错过旧段失败码，见 sessionError，
+        // 保证"旧段确实失败过"不会从最终 RecordResult 里消失）
+        val effective = err ?: sessionError
+        val out = if (parts.isEmpty()) RecordResult.fail(effective ?: RecordError.TOO_SHORT, total)
+        else buildResult(effective)
         Log.i(TAG, "mr stop total=${total}ms parts=${parts.size} code=${out.error}")
         state = EngineState.IDLE
         engineError = null
+        sessionError = null
+        abandonSegment = false
         clock.reset()
         parts.clear()
         partIndex = 0
@@ -231,12 +257,22 @@ class MrRecorder(
         return out
     }
 
+    /**
+     * 显式弃段（[Recorder.abandonCurrentSegment] 契约）：置位后下一次停录（[stop]/[release]）
+     * 一律按废片丢弃当前段，不看错误码与时长——静默零帧的段正是"无错误码但没写出数据"的形态。
+     */
+    override fun abandonCurrentSegment() {
+        abandonSegment = true
+        Log.i(TAG, "mr abandon current segment requested")
+    }
+
     override fun release() {
         when (state) {
             EngineState.START -> {
                 stopEngine()
                 val dur = clock.closeSegment()
-                sealCurrent(dur, engineError == null && dur >= RecordProfile.MIN_KEEP_MS)
+                // 弃段意图同 stop()：release 也是"停录"，弃段一律不 commit
+                sealCurrent(dur, segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
                 releaseEngine()
             }
             EngineState.PREPARE -> {
@@ -250,6 +286,8 @@ class MrRecorder(
         inputSurfaceAccepted = false
         state = EngineState.IDLE
         engineError = null
+        sessionError = null
+        abandonSegment = false
         clock.reset()
         parts.clear()
         partIndex = 0
@@ -268,17 +306,38 @@ class MrRecorder(
     }
 
     /**
-     * 弱口径健康读数：**MediaRecorder 路只能发现硬错误、判废靠 [engineError]，没有首样本信号**。
-     * MediaRecorder 不暴露逐缓冲的输出回调（不像 MediaCodec 的 dequeueOutputBuffer），
-     * 因此本路拿不到"建轨 / muxer 启动 / 首样本落地"三格中的任何一格——**不许假装有**：
-     * 三格恒 false、[RecorderHealth.milestonesObservable] 恒 false，UI 侧据此只认 [engineError]
-     * （`MEDIA_ERROR` 回调落在这里），不拿三格去套超窗。
+     * 产出活性健康读数（[streamHealthVerdict] 的输入源）：MediaRecorder 不暴露逐缓冲回调，
+     * 三格对它恒 false、[RecorderHealth.milestonesObservable] 恒 false；但它攥着**真实输出 fd**
+     * （`applyConfig` 里 `rec.setOutputFile(t.fileDescriptor)`），于是拿"输出文件已落盘字节数"作
+     * 产出活性信号——`Os.fstat(fd).st_size` 不需要新权限、不产生额外 IPC，比查 MediaStore 的 SIZE 便宜。
      *
-     * 【自检覆盖边界】UI 侧起录自检的**完整三格判据只覆盖 [CodecRecorder] 路**；本路（MediaRecorder，
-     * 30/60fps 常规档）只做错误码弱判，**不做产出健全性自检**——首拍无错误码即 [healthVerdict] 意义下的
-     * 健康，之后静默零帧抓不到。这是既定边界，不是遗漏。
+     * 【fd 生命周期】当前段的 `target` 在 prepare/换段时赋值，sealCurrent/discardCurrent/reject
+     * 里关 fd 并置空；这里只读它的 fd/路径，不持有、不关闭。
+     *
+     * 读不到（未挂 target／无 fd 且无真实路径／`Os.fstat` 抛错）一律回 **-1L = 不可观测**，
+     * 判定侧据此退回只认错误码（[streamHealthVerdict]），**绝不许当 0 字节判废**——那是误杀。
+     *
+     * 【线程口径】当前 [health] **只在控制线程**调用：唯一调用方 `RecordRunner.healthCheckLoop` 的
+     * 拍子由 `RecordRunner.handler` 投递，与 [prepare]/[start]/[stop] 同在一条 HandlerThread 的
+     * 消息队列上。这是**事实（今天就是同线程），不是约定**，所以 [target] 的 `@Volatile` 并非必需；
+     * 保留它只是零成本保险——防御将来有人把自检（或别的读者）挪出该线程后，"读到换代 target"
+     * 这个隐性前提才会重新出现。
      */
-    override fun health(): RecorderHealth = RecorderHealth(errorCode = engineError)
+    override fun health(): RecorderHealth {
+        val t = target
+        val fd = t?.fileDescriptor
+        val path = t?.path
+        val bytes: Long = when {
+            fd != null -> runCatching { Os.fstat(fd).st_size }.getOrDefault(-1L)
+            path != null -> runCatching { File(path).length() }.getOrDefault(-1L)
+            else -> -1L
+        }
+        return RecorderHealth(
+            errorCode = engineError,
+            elapsedMs = if (state == EngineState.START) clock.segmentElapsedMs() else 0L,
+            outputBytes = bytes
+        )
+    }
 
     // endregion
 
@@ -311,7 +370,8 @@ class MrRecorder(
             Log.i(TAG, "file size event extra=$extra, restartRecord")
             stopEngine()
             val dur = clock.closeSegment()
-            sealCurrent(dur, engineError == null && dur >= RecordProfile.MIN_KEEP_MS)
+            // 弃段意图同 stop()：轮转前若被要求弃段，旧段也不 commit
+            sealCurrent(dur, segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
             Thread.sleep(SEGMENT_GAP_MS)
             val next = store.createPending(partIndex + 1)
                 ?: return failNow("${RecordError.ENGINE_ERROR}:ROTATE_NO_OUTPUT", dropOutput = false)
@@ -329,11 +389,24 @@ class MrRecorder(
                 store.discard(sink)
                 return failNow("${RecordError.ENGINE_ERROR}:ROTATE_PREPARE", dropOutput = false)
             }
+            // 换段成功：新 target 接管本段 fd 的生命周期（本段 stop/discard 时由 sealCurrent/
+            // discardCurrent 关闭）。原先这里漏赋值 → 轮转后 target 恒 null、新段 fd 无人关闭（泄漏）；
+            // 旧 target 已在上面 sealCurrent 里关闭并置空，这里直接覆写不双关。
+            target = t
             partIndex++
             partStartMs = clock.elapsedMs()
             mr?.start()
             state = EngineState.START
             clock.startSegment()
+            // P2：新段成功 start 之后清段级错误，否则换段时 stop 抛过一次（如 801 后 MediaRecorder
+            // 已自停、再 stop 抛 IllegalState）会把 STOP_FAILED 一直挂着 ⇒ 此后每一拍 health() 都回
+            // 非空 errorCode ⇒ MR 路被误判 UNHEALTHY 而把仍在正常录的新段整场重启，且该残留错误还会
+            // 让 sealCurrent 把后续已写好的成品段按废片删。清错只影响**新段**的判活：旧段此刻已按
+            // keep 语义封好（该弃的已弃）。旧段失败码先挪进 sessionError（会话级账），最终
+            // RecordResult 用它兜底——"旧段确实失败过"不会因清错而从结果里消失。
+            if (engineError != null) sessionError = engineError
+            engineError = null
+            abandonSegment = false // 新段起始复位弃段意图（一次判废不许拖累之后每一段）
             Log.i(TAG, "segment $partIndex started at ${partStartMs}ms")
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()

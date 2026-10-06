@@ -43,19 +43,29 @@ object RecordError {
 }
 
 /**
- * 引擎的起录健康读数（[Recorder.health]）。三格语义与判定见 [healthVerdict]。
+ * 引擎的起录健康读数（[Recorder.health]）。**两个独立通道**，各自服务一路引擎：
+ * - 三格（[videoTrackAdded]／[muxStarted]／[firstVideoSample]）+ [milestonesObservable]：
+ *   逐缓冲观测，只有 [CodecRecorder] 具备（见 [healthVerdict]）；
+ * - [outputBytes]：输出文件产出活性，[MrRecorder] 用（见 [streamHealthVerdict]）。
  *
- * [milestonesObservable] 是**引擎能力的诚实声明**：false = 三格恒无意义（引擎根本没有逐缓冲
- * 观测点），UI 侧只认 [errorCode]（[weakHealthVerdict]）；漏看这一位会在该类引擎上拿恒 false 的
- * 三格去判超窗，把正常录制误判重录。
+ * [milestonesObservable] 描述的是**三格里程碑是否可见**（Codec 路 true / MR 路 false），
+ * 与 [outputBytes] 不是一回事：它 false 只说明"别拿恒 false 的三格去套超窗"，不代表 [outputBytes]
+ * 也无意义——两通道互不蕴含。UI 侧按它分流：true 走 [healthVerdict]，false 走 [streamHealthVerdict]。
  */
 data class RecorderHealth(
     val videoTrackAdded: Boolean = false,
     val muxStarted: Boolean = false,
     val firstVideoSample: Boolean = false,
     val errorCode: String? = null,
-    /** start() 至今的墙钟经过 ms；未 start 或引擎不报时为 0 */
+    /** start() 至今的墙钟经过 ms（当前段）；未 start 或引擎不报时为 0 */
     val elapsedMs: Long = 0L,
+    /**
+     * 当前段输出文件已落盘字节数（[MrRecorder] 路经 `Os.fstat(fd).st_size`）。
+     * **-1L = 不可观测**（拿不到 fd/真实路径、或 fstat/读路径抛错）——判定侧必须把它当"没信号"
+     * 而非"0 字节"（见 [streamHealthVerdict]，误把量不到当 0 会误杀正常录制）。默认 -1 = 未覆写。
+     */
+    val outputBytes: Long = -1L,
+    /** 三格里程碑是否可见（Codec 路 true / MR 路 false）；与 [outputBytes] 是两个独立通道 */
     val milestonesObservable: Boolean = false
 )
 
@@ -153,6 +163,16 @@ interface Recorder {
     /** 停引擎 + 收尾入库（成功清 IS_PENDING，失败/废片删记录），任何状态都可调、幂等 */
     fun stop(): RecordResult
 
+    /**
+     * 显式声明「放弃当前段」：**下一次停录必须丢弃当前段**（keep=false、不 commit、不进 parts、
+     * 记录连同 pending 一并删除），无论错误码是否为空、时长是否够。
+     *
+     * 只给自检判废这类"这段本就没有可用内容"的场景调用（[Recorder] 契约里弃段意图不许靠停录的
+     * keep 语义反推，见 `segmentKeepDecision`）。默认无操作——引擎不实现该通路时行为与旧版一致。
+     * 新会话/新段起始必须复位该意图，否则一次判废会把之后每一段都拖成废段。
+     */
+    fun abandonCurrentSegment() {}
+
     fun release()
 
     /** 累计录制时长（跨分段），UI 以 200ms 轮询读取（04 文件 §6） */
@@ -163,7 +183,9 @@ interface Recorder {
 
     /**
      * 起录自检读数（录制中轮询）。默认实现返回「未就绪」（`milestonesObservable=false` →
-     * UI 侧走 [weakHealthVerdict]，即无信号时不误判）。能逐格观测的引擎（[CodecRecorder]）覆写它。
+     * UI 侧走 [streamHealthVerdict]，但默认 [RecorderHealth.outputBytes] 也是 -1 = 不可观测，
+     * 即无信号时不误判）。两个引擎各自覆写：能逐格观测的 [CodecRecorder] 填三格 + 写入字节，
+     * [MrRecorder] 填 `Os.fstat` 读到的 [RecorderHealth.outputBytes]。
      */
     fun health(): RecorderHealth = RecorderHealth()
 }

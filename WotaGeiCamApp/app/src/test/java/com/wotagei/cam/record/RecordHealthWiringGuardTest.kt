@@ -1,5 +1,6 @@
 package com.wotagei.cam.record
 
+import com.wotagei.cam.source.KotlinSourceScan.mainSourceFile
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
@@ -13,7 +14,9 @@ import org.junit.Test
  * 纯函数判定再好，接线断了就白搭：自检拍子没挂 → 永不重录；丢弃没兜底 → 幽灵 pending；
  * 触顶没引用上限 → 无限重启。这里逐条钉住：
  * - `healthCheckLoop` 存在且真调了 [healthVerdict]/[retryActionOf]（不是空拍）；
- * - 无逐格信号的引擎走 [weakHealthVerdict]（不许拿三格套超窗误重录）；
+ * - 无三格信号的引擎（MR 路）走 [streamHealthVerdict] 的产出活性判据（**不是**只认错误码），
+ *   且必须读 `h.outputBytes`；旧的 [weakHealthVerdict] 已删除，全仓不得再出现该名字；
+ * - MR 路读数源必须落在 [MrRecorder.health()]：含 `Os.fstat` 与 `-1L` 兜底（量不到不许当 0）；
  * - `abandonAndRestart` 必须丢弃被弃段的 pending（`discard`，且过 `shouldDiscardAbandonedSink`
  *   闸门——只删未进产物的那枚）并重放会话；
  * - `MAX_RESTART_ATTEMPTS` 被**函数体**引用（不存在无限重试；不锁整文件，避免 import 行喂绿）；
@@ -39,8 +42,16 @@ class RecordHealthWiringGuardTest {
             body.contains("retryActionOf(")
         )
         assertTrue(
-            "healthCheckLoop 必须按 milestonesObservable 分流到 weakHealthVerdict",
-            body.contains("milestonesObservable") && body.contains("weakHealthVerdict(")
+            "healthCheckLoop 必须按 milestonesObservable 分流到 streamHealthVerdict",
+            body.contains("milestonesObservable") && body.contains("streamHealthVerdict(")
+        )
+        assertTrue(
+            "MR 路产出活性判据必须读 h.outputBytes（不许拿三格去套）",
+            body.contains("h.outputBytes")
+        )
+        assertFalse(
+            "旧弱判 weakHealthVerdict 已删除，healthCheckLoop 不得再引用",
+            body.contains("weakHealthVerdict")
         )
         assertTrue(
             "WAIT 必须重投自检拍（否则一次 WAIT 后永不再问）",
@@ -50,6 +61,36 @@ class RecordHealthWiringGuardTest {
             "触顶必须走明确失败 SELF_CHECK_FAILED",
             body.contains("RecordError.SELF_CHECK_FAILED")
         )
+    }
+
+    @Test
+    fun `MrRecorder 的产出活性读数必须读 fd 且量不到回 -1`() {
+        val src = codeOnly(mainSourceText("record/MrRecorder.kt"))
+        val body = bodyOf(src, "health")
+        assertTrue("MR 路读数源必须含 Os.fstat（读真实 fd 的 st_size）", body.contains("Os.fstat"))
+        assertTrue("MR 路读不到必须回 -1L（不可观测，不许当 0 字节判废）", body.contains("-1L"))
+        assertTrue("MR 路读数必须落进 RecorderHealth.outputBytes", body.contains("outputBytes"))
+    }
+
+    @Test
+    fun `CodecRecorder 的 outputBytes 必须来自已有写入账`() {
+        val src = codeOnly(mainSourceText("record/CodecRecorder.kt"))
+        val body = bodyOf(src, "health")
+        assertTrue("Codec 路 health 必须如实填 outputBytes", body.contains("outputBytes"))
+        assertTrue("Codec 路 outputBytes 必须复用已写字节账 segWrittenBytes", body.contains("segWrittenBytes"))
+    }
+
+    @Test
+    fun `weakHealthVerdict 已删除 全仓零命中`() {
+        // 该判定已被产出活性判据取代：任何一处残留都是"说了谎"的死代码，必须 0 命中。
+        val root = mainSourceFile("ui/CameraScreen.kt").parentFile?.parentFile
+            ?: error("定位主源码根失败")
+        val hits = root.walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".kt") }
+            .filter { it.readText(Charsets.UTF_8).contains("weakHealthVerdict") }
+            .map { it.name }
+            .toList()
+        assertTrue("weakHealthVerdict 必须全仓 0 命中，实际命中：$hits", hits.isEmpty())
     }
 
     @Test
@@ -73,6 +114,105 @@ class RecordHealthWiringGuardTest {
         assertFalse(
             "自动重录不许闪 ERROR（status 全程保持 START），只许 failNow 走失败",
             body.contains("RecordStatus.ERROR")
+        )
+    }
+
+    /**
+     * P1 顺序红线：弃段意图必须在 `rec.stop()` **之前**声明。顺序反了（先停后弃）引擎已按旧的 keep
+     * 语义判过，弃段意图来不及生效，坏段照样 commit 进相册。位置序断言防止有人把两行写反。
+     */
+    @Test
+    fun `abandonAndRestart 必须先声明弃段再停录`() {
+        val body = bodyOf(masked, "abandonAndRestart")
+        val abandon = body.indexOf("abandonCurrentSegment()")
+        val stop = body.indexOf("rec.stop()")
+        assertTrue("必须调 rec.abandonCurrentSegment 声明弃段", abandon >= 0)
+        assertTrue("锚点丢失：切片没截到 rec.stop()", stop >= 0)
+        assertTrue(
+            "弃段声明必须出现在 rec.stop() 之前（顺序反了引擎已按 keep 判过，弃段来不及生效）",
+            abandon < stop
+        )
+    }
+
+    /**
+     * MR 路的弃段与换段清错接线：
+     * - stop 与换段的 keep 判定都必须走 [segmentKeepDecision]（弃段意图压过"看着正常"）；
+     * - 换段成功（`state = START`）之后必须清 `engineError`，否则 801 后 stop 抛过一次就会把
+     *   STOP_FAILED 一直挂着、此后每一拍都误判 UNHEALTHY 而整场重启；
+     * - 清错前必须把旧段失败码挪进 `sessionError`（不把"旧段确实失败过"从最终结果里抹掉）；
+     * - 新段起始复位弃段意图（一次判废不许拖累之后每一段）；`prepare`/`start` 的新会话复位也一并钉住
+     *   （冗余防御，防复用引擎实例时陈旧弃段意图拖垮新会话）。
+     */
+    @Test
+    fun `MrRecorder 弃段与换段清错必须接线`() {
+        val src = codeOnly(mainSourceText("record/MrRecorder.kt"))
+        val stop = bodyOf(src, "stop")
+        assertTrue(
+            "stop 的 keep 判定必须走 segmentKeepDecision（弃段意图压过正常判定）",
+            stop.contains("segmentKeepDecision(")
+        )
+        val rot = bodyOf(src, "rotateSegment")
+        assertTrue("换段的旧段封段也要走 segmentKeepDecision", rot.contains("segmentKeepDecision("))
+        val startIdx = rot.indexOf("state = EngineState.START")
+        val clearIdx = rot.indexOf("engineError = null")
+        assertTrue(
+            "换段成功（state=START）之后必须清 engineError（否则残留错误把仍在正常录的新段整场重启）",
+            startIdx >= 0 && clearIdx > startIdx
+        )
+        assertTrue(
+            "清错前必须把旧段失败码挪进 sessionError（结果口径不丢信息）",
+            rot.contains("sessionError = engineError")
+        )
+        assertTrue("新段起始复位弃段意图", rot.contains("abandonSegment = false"))
+        // 新会话起始也各有一处复位（prepare 与 start）。属冗余防御、删掉运行时不会红，但一旦日后
+        // 改成复用引擎实例，漏掉这处就会让"上一会话的弃段意图"拖垮新会话的每一段——故由守卫钉住。
+        assertTrue(
+            "prepare 新会话起始必须复位弃段意图（复用引擎实例时旧会话弃段意图不许拖累新会话）",
+            bodyOf(src, "prepare").contains("abandonSegment = false")
+        )
+        assertTrue(
+            "start 新会话起始必须复位弃段意图（同上，防复用引擎时的陈旧弃段意图）",
+            bodyOf(src, "start").contains("abandonSegment = false")
+        )
+        val abandon = bodyOf(src, "abandonCurrentSegment")
+        assertTrue("abandonCurrentSegment 必须置位 abandonSegment", abandon.contains("abandonSegment = true"))
+    }
+
+    /** CodecRecorder 同族接线：本路存在"无错误码但三格不全"的 keep=true 态，故也接弃段通路。 */
+    @Test
+    fun `CodecRecorder 也接弃段通路`() {
+        val src = codeOnly(mainSourceText("record/CodecRecorder.kt"))
+        val abandon = bodyOf(src, "abandonCurrentSegment")
+        assertTrue("CodecRecorder 必须实现弃段置位", abandon.contains("abandonSegment = true"))
+        val pump = bodyOf(src, "pumpLoop")
+        assertTrue("pumpLoop 的封段 keep 必须走 segmentKeepDecision", pump.contains("segmentKeepDecision("))
+        val seg = bodyOf(src, "runSegment")
+        assertTrue("runSegment 段起始必须复位弃段意图", seg.contains("abandonSegment = false"))
+    }
+
+    /**
+     * MR 路产出活性的双源交叉核对：`Os.fstat` 便宜但依赖 FUSE 行为，读数可疑（< 门槛）时须再查
+     * MediaStore `SIZE` 交叉核对；用 `sizeOfOrUnknown`（量不到回 -1）而非 `sizeOf`（量不到回 0），
+     * 否则一次查询失败会被误译成"零字节"而在窗口末误杀。
+     */
+    @Test
+    fun `MR 路产出活性必须做双源交叉核对`() {
+        val body = bodyOf(masked, "healthCheckLoop")
+        assertTrue("必须调 resolveOutputBytes 合成两源", body.contains("resolveOutputBytes("))
+        assertTrue(
+            "交叉核对必须读 provider 权威读数（sizeOfOrUnknown，量不到回 -1）",
+            body.contains("sizeOfOrUnknown(")
+        )
+        assertTrue("可疑判据必须是 fstat 读数 < 门槛", body.contains("h.outputBytes") && body.contains("MIN_OUTPUT_BYTES"))
+    }
+
+    /** MrRecorder.target 标 @Volatile：health 今天与控制线程同线程读它，此标注是防御未来把自检挪出该线程的零成本保险。 */
+    @Test
+    fun `MrRecorder 的 target 必须标 Volatile`() {
+        val src = codeOnly(mainSourceText("record/MrRecorder.kt"))
+        assertTrue(
+            "target 必须 @Volatile（今天 health 与控制线程同线程，此为防御未来跨线程读的零成本保险）",
+            src.contains("@Volatile private var target")
         )
     }
 
