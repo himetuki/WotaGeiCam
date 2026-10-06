@@ -84,6 +84,18 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
         /** 峰值对焦邻域取样步长（UV 空间，03 文档 §3.6 的 texel≈0.002 档位） */
         private const val PEAKING_TEXEL = 0.002f
+
+        /**
+         * 停录冲刷屏障（[flushArcPending]）的等待上限。r09 实测 GL 线程会被 >1s 的长任务
+         * 占用（编码面 swap 背压/着色器编译），旧值 1s 必超时；上限只防 GL 线程彻底卡死
+         * （那此时上屏也已冻结，多等无益），5s 对实测长任务留 5 倍余量。
+         *
+         * 与 `RecordRunner.shutdown()` 3s 外层 latch 的数值关系：极端卡顿下外层先超时——
+         * 那只影响「退出页要不要等收尾」（收尾线程仍会把 stopInternal 跑完并记
+         * 「录制收尾超时」），本值才决定 flush 是否落地、末帧补弧保不保得住；
+         * 两个超时各管各的语义，故意不取齐。
+         */
+        private const val FLUSH_BARRIER_TIMEOUT_MS = 5_000L
     }
 
     // region 线程与生命周期
@@ -225,6 +237,29 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** 被抽帧位次账（GL 线程写、主线程 stop 时快照取走；配对 = 输出位次 to 丢弃数） */
     private val arcDrops = ArrayList<Pair<Int, Int>>()
     private val arcDropsLock = Any()
+
+    /**
+     * 停止期标志：RecordRunner 进入停止序列（冲刷滞留帧 → 拆编码器/muxer → 解绑编码面）前置位，
+     * [degradeArcConvert] 看到它就不再清账换模式。停止窗口内任何 GL 编码失败都是「面已死」的
+     * 拆解伪影（codec.stop 即输入面失效 → swap 必 EGL_BAD_ALLOC）而非会话中真失败，此时降级
+     * 只会把已记好的位次账/实测帧率清掉——sidecar drops 归零、成片名丢前缀（r09 实测）。
+     * 置位：录制线程在拆任何东西之前经 [markRecordTearingDown] 写（@Volatile 直写即可，
+     * GL 线程随后每帧读它）；复位：下一段录制 start 必发 [setArcConvert]（含 null），在其 GL 体里解除。
+     */
+    @Volatile
+    private var recordTearingDown = false
+
+    /**
+     * 抑制期日志闩（与 [recordTearingDown] 同在 [setArcConvert] GL 体复位）：停录后空闲预览
+     * 每枚相机帧都会撞一次「补弧链未就绪」的抑制分支（引擎 arcConvert 不随停录自清、编码面
+     * 已解绑，直到下一段 start 必发的 setArcConvert 才翻篇），不闩就是 ~30 行/秒的日志刷屏——
+     * 首条记日志，其后静默 return。只被 GL 线程读写（degradeArcConvert/setArcConvert 体），
+     * 无跨线程访问，不需要 @Volatile。
+     */
+    private var teardownSuppressLogged = false
+
+    /** 停录冲刷的弃冲标志（录制线程等待超时置位、GL 线程的 flush runnable 读；见 [flushArcPending]） */
+    private val flushGiveUp = AtomicBoolean(false)
 
     // endregion
 
@@ -470,6 +505,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     fun setArcConvert(mode: ArcConvertMode?, dstFps: Int) {
         if (released.get()) return
         postGl {
+            // 新会话重挂必经此路（录制 start「转换配置每段必发」）：上一段的停止期抑制到此解除
+            recordTearingDown = false
+            teardownSuppressLogged = false
             arcConvert = mode?.takeIf { dstFps > 0 }
             // 档位与模式成对清零：mode 关掉后 arcDstFps 残留，编码面重挂处会拿旧值重建状态机
             arcDstFps = if (arcConvert != null) dstFps else 0
@@ -532,14 +570,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 停录前冲刷 MEND 滞留帧：状态机会滞留一枚保留帧等"下一保留帧"来决定并弧，
      * 而录制停止没有 EOS 通知——不冲刷它就必丢一枚输出帧（≤1/24s）。同步等 GL 完成
      * （编码器此时还活着），必须在 `Recorder.stop()` **之前**调。返回冲刷的帧数（0/1）。
+     *
+     * 屏障语义（r09 竞态修复）：latch 在 runnable 的 finally 里 countDown，所以等待返回 =
+     * runnable **真正执行完**。GL 线程被长任务占用时 runnable 只会排队晚跑，必须等满
+     * [FLUSH_BARRIER_TIMEOUT_MS] 才允许放弃——放弃即置 [flushGiveUp] 撤销本次冲刷，晚到的
+     * runnable 见标志整段不跑（滞留帧连同状态机留给下一段 [setArcConvert] 重建），绝不在
+     * 已被 rec.stop 拆死的编码面（codec.stop 即输入面失效）上画/swap 撞 EGL_BAD_ALLOC。
      */
     fun flushArcPending(): Int {
         if (released.get() || arcConvert != ArcConvertMode.MEND) return 0
         val h = handler ?: return 0
         val latch = CountDownLatch(1)
+        flushGiveUp.set(false)
         var flushed = 0
         h.post {
             try {
+                if (flushGiveUp.get()) return@post   // 等待方已超时撤销，编码器此刻可能已拆：什么都不许碰
                 if (!released.get() && arcConvert == ArcConvertMode.MEND && arcFlow.hasPending) {
                     val encoder = encoderEglSurface
                     val mend = arcMendPass
@@ -567,9 +613,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 latch.countDown()
             }
         }
-        runCatching { latch.await(1L, TimeUnit.SECONDS) }
-            .onFailure { Log.w(TAG_GL, "flushArcPending 等待失败：${it.message}") }
+        val deadline = System.nanoTime() + FLUSH_BARRIER_TIMEOUT_MS * 1_000_000L
+        val landed = runCatching { latch.await(deadline - System.nanoTime(), TimeUnit.NANOSECONDS) }
+            .onFailure { Log.w(TAG_GL, "flushArcPending 等待被打断：${it.message}") }
+            .getOrDefault(false)
+        if (!landed) {
+            flushGiveUp.set(true)
+            Log.w(
+                TAG_GL,
+                "flushArcPending ${FLUSH_BARRIER_TIMEOUT_MS}ms 未落地（GL 线程被长任务占用），" +
+                    "撤销滞留帧冲刷，末帧补弧放弃"
+            )
+        }
         return flushed
+    }
+
+    /**
+     * 标记进入停止序列：**必须在冲刷/拆编码器任何动作之前**由录制线程调（见
+     * [recordTearingDown]）。下一段录制 start 必发 [setArcConvert]，那里复位。
+     */
+    fun markRecordTearingDown() {
+        recordTearingDown = true
     }
 
     // endregion
@@ -1244,6 +1308,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 的成片段落慢放、音画渐进漂移到秒级（结构性坏片且静默，旧实现即在位的缺陷）。
      */
     private fun degradeArcConvert(reason: String) {
+        // 停止期一切编码失败都是「面已死」的拆解伪影（见 recordTearingDown），清账换模式只会
+        // 毁掉已记好的位次账/实测帧率——首条记日志、其后静默（空闲预览每帧都撞一次抑制），
+        // 会话中段（录制中）的真失败不受影响照旧降级
+        if (recordTearingDown) {
+            if (!teardownSuppressLogged) {
+                teardownSuppressLogged = true
+                Log.i(TAG_GL, "停止期抑制转换降级（$reason）——拆解伪影不清账（后续同类静默）")
+            }
+            return
+        }
         when (arcConvert) {
             ArcConvertMode.MEND -> {
                 Log.w(TAG_GL, "录制期转换降级：补弧失败，改仅抽帧不补弧（$reason）")
