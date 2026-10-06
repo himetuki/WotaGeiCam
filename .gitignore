@@ -65,6 +65,10 @@ keystore.properties
 /tools/
 /.zcodeignore
 
+# ===== adb 调试取证产物 =====
+repro_log.txt
+repro_screen*.png
+
 # ===== 会话与工具本地状态 =====
 .mimosa/
 .zcode/
