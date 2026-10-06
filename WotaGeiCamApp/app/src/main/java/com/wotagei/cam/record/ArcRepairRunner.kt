@@ -5,6 +5,7 @@ import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Handler
@@ -304,7 +305,13 @@ private class ArcRepairSession(
         val containerFps = vf.intOr(MediaFormat.KEY_FRAME_RATE, FALLBACK_SRC_FPS)
         durationMs = vf.longOr(MediaFormat.KEY_DURATION, 0L) / 1000L
         val mime = vf.getString(MediaFormat.KEY_MIME) ?: MediaFormat.MIMETYPE_VIDEO_AVC
-        val hint = vf.intOr(MediaFormat.KEY_ROTATION, 0)
+        // 容器旋转角双源：retriever 的 METADATA_KEY_VIDEO_ROTATION（= 显示所需旋转角）才是权威口径，
+        // 以它为准；extractor 的 KEY_ROTATION 兜住"部分机型/容器给 0"。⚠ 双源只决定"读出多少度"：
+        // 2026-10-06 成片差 180° 的读数**本就正确**，真因是像素被平台多转一次（见 decoderFormatOf）。
+        val hintExtractor = vf.intOr(MediaFormat.KEY_ROTATION, 0)
+        val hintRetriever = readRetrieverRotation(ctx, src)
+        val hint = matchDecision(hintExtractor, hintRetriever, hintRetriever >= 0)
+        val hintWritten = exportOrientationHint(hint, ORIENTATION_MUXER_CCW)
         if (width <= 0 || height <= 0) throw ArcFail(ArcRepairError.SOURCE)
 
         // 源帧率**实测**（ArcRateProbe 帧距中位数）：强制 24/25fps 档容器会标假 fps（标 24 实跑 30），
@@ -341,7 +348,8 @@ private class ArcRepairSession(
         Log.i(
             TAG_ARC,
             "源 ${width}x$height 容器fps=$containerFps 实测fps=$srcFps srcFrames=$srcFrames " +
-                "→ dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} route=${if (useGpu) "GPU" else "CPU"} hint=$hint"
+                "→ dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} route=${if (useGpu) "GPU" else "CPU"} " +
+                "hintExtractor=$hintExtractor hintRetriever=$hintRetriever hintWritten=$hintWritten"
         )
 
         // 音频轨（另开一条 extractor：同一 extractor 只能选一条轨）
@@ -440,15 +448,32 @@ private class ArcRepairSession(
             throw ArcFail(ArcRepairError.DECODER)
         }
         vDec = dec
+        // 喂解码器的 format **必须剥掉容器旋转角**（KEY_ROTATION）：平台把"带旋转的 format + 有输出面"
+        // 解释成"把旋转烘进输出缓冲"（Surface 的缓冲变换 → SurfaceTexture 变换矩阵 → ArcRepairGl 的
+        // OES 拷贝趟照单全收），落进编码器的像素于是已转过一次，而 muxer 又写了同一个 hint
+        // ⇒ 双重旋转 —— 2026-10-06 真机成片相对源片恰差 180° 的根因（CPU 路无输出面，故只有 GPU 路出事）。
+        // 剥离后像素保持原始朝向、与写出的 hint 一致；width/height 原样带过去，尺寸不变（90° 源不会被压扁）。
+        // 两路都过同一个 decFmt（同一纯函数、同一实例）：CPU 路无面时剥离无副作用，但保持一致，
+        // 避免将来有人只改一路。三条 hint* 日志照旧，另打一条剥离自证（见下）。
+        val decFmt = decoderFormatOf(vf)
+        Log.i(
+            TAG_ARC,
+            "解码器 format 旋转剥离：route=${if (useGpu) "GPU" else "CPU"} surfaceOutput=$useGpu " +
+                "源KEY_ROTATION=$hintExtractor 需剥=${bakedRotationNeedsStrip(hintExtractor, useGpu)} " +
+                "decFmt仍含KEY_ROTATION=${decFmt.containsKey(MediaFormat.KEY_ROTATION)} " +
+                "decFmt=${decFmt.intOr(MediaFormat.KEY_WIDTH, 0)}x${decFmt.intOr(MediaFormat.KEY_HEIGHT, 0)} " +
+                "mime=${decFmt.getString(MediaFormat.KEY_MIME)} csd0=${decFmt.containsKey("csd-0")} " +
+                "入参vf仍含KEY_ROTATION=${vf.containsKey(MediaFormat.KEY_ROTATION)}（须 true=未污染入参）"
+        )
         if (useGpu) {
             val gl = ArcRepairGl(width, height)
             arcGl = gl
             if (!gl.start()) throw ArcFail(ArcRepairError.GPU)
             val decSurface = gl.decoderSurface ?: throw ArcFail(ArcRepairError.GPU)
-            dec.configure(vf, decSurface, null, 0)
+            dec.configure(decFmt, decSurface, null, 0)
         } else {
             // CPU：ByteBuffer 模式拿 YUV（无输出面但 getOutputImage 可读），逐平面取大后直写编码器输入缓冲
-            dec.configure(vf, null, null, 0)
+            dec.configure(decFmt, null, null, 0)
             allocPlanes()
             note = "CPU 路线：逐平面（YUV420）取大合并后直写编码器输入缓冲；单帧成本随分辨率上升，" +
                 "长视频明显慢于 GPU。帧时间戳由 queueInputBuffer 显式给出，与 GPU 路线同一口径。$note"
@@ -509,7 +534,9 @@ private class ArcRepairSession(
             throw ArcFail(ArcRepairError.NO_OUTPUT)
         }
         try {
-            m.setOrientationHint(hint)
+            // 写出值统一经 exportOrientationHint（与 CodecRecorder 同一约定，见 ORIENTATION_MUXER_CCW）：
+            // 不直喂裸 hint，避免修复路/录制路旋转约定各自为政
+            m.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
         } catch (e: IllegalStateException) {
             Log.i(TAG_ARC, "orientation hint 忽略：${e.message}")
         }
@@ -1066,4 +1093,22 @@ private class ArcRepairSession(
 
     private fun MediaFormat.longOr(key: String, fallback: Long): Long =
         if (containsKey(key)) getLong(key) else fallback
+}
+
+/**
+ * 读外部视频的"显示所需旋转角"（`METADATA_KEY_VIDEO_ROTATION`，相册/播放器都按它转的权威口径）；
+ * 读不到返回 **-1**（调用方据此降级单源）。必须在后台线程调用——本函数只在 ArcRepairSession.open()
+ * 里被调，而 open() 跑在 ArcRepairRunner 自己的 HandlerThread 上，故不在主线程做这枚阻塞 IO。
+ */
+private fun readRetrieverRotation(ctx: Context, uri: Uri): Int {
+    val r = MediaMetadataRetriever()
+    return try {
+        r.setDataSource(ctx, uri)
+        r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: -1
+    } catch (e: Exception) {
+        Log.i(TAG_ARC, "读 retriever 旋转角失败，降级单源：${e.message}")
+        -1
+    } finally {
+        runCatching { r.release() }
+    }
 }

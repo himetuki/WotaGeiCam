@@ -23,11 +23,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.ui.HudFrost
+import com.wotagei.cam.ui.LocalPreviewCoords
 import com.wotagei.cam.ui.design.HudInkLevel
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMotion
 import com.wotagei.cam.ui.design.WotaStroke
 import com.wotagei.cam.ui.design.frostScrimAlphaFor
+import com.wotagei.cam.ui.viewLocalOriginInto
+import com.wotagei.cam.ui.windowOriginInto
 import kotlin.math.hypot
 import kotlin.math.pow
 
@@ -634,10 +637,14 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     // 用 live 去闸注册会启动死锁（卡片要 live 才写、live 要画过板才真、画板要卡片才有）。
     val live = HudFrost.live
     val intent = HudFrost.intent
+    // 承载预览盒坐标（录制页由 CameraScreen provide）：非空 ⇒ 可见矩形在**视图局部坐标**里量，
+    // 分屏那层祖先 graphicsLayer 缩放被 localPositionOf 抵消；为空（编辑控件页）⇒ 回退窗口系。
+    val preview = LocalPreviewCoords.current
     val frostSlot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
-    // 比对缓存：left/top/w/h + **窗口原点 x/y**（六元）。原点必须进比对——页面往返/沉浸切换
-    // 会平移节点窗口位置而局部几何不变，漏比它就是「GL 板留在旧位置与 fill 分离」
-    // （2026-10-04 真机 56px 分离实证）
+    // 比对缓存：left/top/w/h + **节点原点 x/y**（六元）。原点必须进比对——页面往返/沉浸切换
+    // 会平移节点而未动局部几何，漏比它就是「GL 板留在旧位置与 fill 分离」
+    // （2026-10-04 真机 56px 分离实证）。视图局部系口径下这个原点是**视图局部**原点：
+    // 它随节点在页面里移动而变（底栏换栏拖拽照样被这条捕获），分屏那层祖先缩放则天然不进它。
     val frostLast = remember { FloatArray(6) }
     val frostOriginPx = remember { FloatArray(2) }
     val frostAlpha = frostScrimAlphaFor(HudInkLevel.SECONDARY)
@@ -648,9 +655,10 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     }
     return this then Modifier
         .onGloballyPositioned { coords ->
-            val p = coords.positionInWindow()
-            frostOriginPx[0] = p.x
-            frostOriginPx[1] = p.y
+            // 节点原点：视图局部系优先（与注册矩形同一坐标系），预览盒未登记时回退旧窗口系。
+            // 体内刻意不出现 positionInWindow（守卫锁着）：那条路一律走 FrostSpace 里的统一换算。
+            if (preview != null) viewLocalOriginInto(frostOriginPx, coords, preview)
+            else windowOriginInto(frostOriginPx, coords)
         }
         .drawWithCache {
         onDrawBehind {
@@ -665,9 +673,9 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val top = DockShell.insetPx(boxH, h)
             if (intent && frostSlot >= 0) {
                 // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
-                // 只有轮廓真的动了才重报。⚠ 比对必须**含窗口原点**（frostOriginPx）：
-                // left/top/w/h 是节点局部量，页面往返/沉浸切换时节点窗口原点会平移而局部几何
-                // 一字不变——只比局部量就会漏报，GL 板永久停在旧窗口位置、与 Compose fill
+                // 只有轮廓真的动了才重报。⚠ 比对必须**含节点原点**（frostOriginPx）：
+                // left/top/w/h 是节点局部量，页面往返/沉浸切换时节点原点会平移而局部几何
+                // 一字不变——只比局部量就会漏报，GL 板永久停在旧位置、与 Compose fill
                 // 错开整整一个状态栏高度（2026-10-04 用户报「底栏两层分离」的根因，56px 实测）
                 val ox = frostOriginPx[0]
                 val oy = frostOriginPx[1]

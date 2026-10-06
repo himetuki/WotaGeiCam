@@ -85,6 +85,10 @@ data class RecordProfile(
  * 文件里存的是未镜像的原样帧，所以不需要另一套角度。
  * 真机 WIKO GAR-AN60 横屏（sensor=90、显示=90）录出 1920x1080 + 容器角 0，成片容器不带 rotation。
  *
+ * 本函数输出的是**显示所需旋转角**语义（与 `MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION` 同口径）；
+ * 它与 `MediaMuxer.setOrientationHint` 的约定关系由 `exportOrientationHint` 单一承载——真机实测若为
+ * CCW（`θ` 与 `360−θ`）约定，只改 `ORIENTATION_MUXER_CCW` 一个常量即可，本函数不受影响。
+ *
  * @param sensorOrientation `SENSOR_ORIENTATION`
  * @param deviceDegrees     当前显示旋转（0/90/180/270）
  * @param front             前置镜头（不参与取值，保留形参以兼容既有调用与单测）

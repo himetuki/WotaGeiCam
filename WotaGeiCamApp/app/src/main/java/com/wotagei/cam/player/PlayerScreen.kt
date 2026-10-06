@@ -277,6 +277,11 @@ fun WotaPlayerSurface(
                 setShutterBackgroundColor(Color.TRANSPARENT)
                 setBackgroundColor(Color.TRANSPARENT)
             }
+            // 绑定契约的**登记点**：inflate 后立刻 bind 一次，把视图登记进引擎的 boundViews。
+            // 此刻 engine 的 player 多半还是 null（attach 在 LaunchedEffect 里懒建），但登记之后
+            // 引擎 build() 会回推 player；不依赖 update 是否重跑，面必然拿到 player。
+            engine.bind(view)
+            view
         },
         update = { view -> engine.bind(view) }
     )
@@ -774,8 +779,10 @@ fun PlayerScreen(
                     onPick = { track ->
                         selectedAudio = track
                         // 环境=容器第一条音轨=ExoPlayer 默认选择（清 override 回默认）；
-                        // 内录=强制选中第二条音频组（组内单轨，trackIndex 恒 0）
-                        if (track == SelectedTrack.CAP) engine.setAudioTrackOverride(1, 0) else engine.clearAudioOverride()
+                        // 内录=强制选中第二条音频组（组内单轨，trackIndex 恒 0）。
+                        // 组下标一律经 CompareAudio.audioGroupIndexOf（环境=0/内录=1）——禁止再裸写 (1, 0)
+                        // 字面量：那是「选了没效果」的温床（TrackToolsGuardTest 钉着三处都不许出现该字面量）
+                        if (track == SelectedTrack.CAP) engine.setAudioTrackOverride(audioGroupIndexOf(AudioTrackKind.CAP), 0) else engine.clearAudioOverride()
                         trackPickMenu = false
                     },
                     onDismiss = { trackPickMenu = false }

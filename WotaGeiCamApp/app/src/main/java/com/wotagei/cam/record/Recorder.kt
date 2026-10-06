@@ -37,7 +37,27 @@ object RecordError {
 
     /** 未 start 就 release：pending 记录直接回收 */
     const val RELEASED = "RELEASED"
+
+    /** 起录自检窗口内三格未立齐/引擎已报错，重录次数触顶：明确失败（文案见 strings.xml） */
+    const val SELF_CHECK_FAILED = "SELF_CHECK_FAILED"
 }
+
+/**
+ * 引擎的起录健康读数（[Recorder.health]）。三格语义与判定见 [healthVerdict]。
+ *
+ * [milestonesObservable] 是**引擎能力的诚实声明**：false = 三格恒无意义（引擎根本没有逐缓冲
+ * 观测点），UI 侧只认 [errorCode]（[weakHealthVerdict]）；漏看这一位会在该类引擎上拿恒 false 的
+ * 三格去判超窗，把正常录制误判重录。
+ */
+data class RecorderHealth(
+    val videoTrackAdded: Boolean = false,
+    val muxStarted: Boolean = false,
+    val firstVideoSample: Boolean = false,
+    val errorCode: String? = null,
+    /** start() 至今的墙钟经过 ms；未 start 或引擎不报时为 0 */
+    val elapsedMs: Long = 0L,
+    val milestonesObservable: Boolean = false
+)
 
 /**
  * 输出目标（``）：优先 MediaStore pending content uri；私有目录/调试用真实文件。
@@ -140,6 +160,12 @@ interface Recorder {
 
     /** 0..32767 量程振幅：MR 走 `getMaxAmplitude()`，自采走 PCM RMS；dB 换算用 [AudioProbe.dbOf] */
     fun amplitude(): Int
+
+    /**
+     * 起录自检读数（录制中轮询）。默认实现返回「未就绪」（`milestonesObservable=false` →
+     * UI 侧走 [weakHealthVerdict]，即无信号时不误判）。能逐格观测的引擎（[CodecRecorder]）覆写它。
+     */
+    fun health(): RecorderHealth = RecorderHealth()
 }
 
 /**

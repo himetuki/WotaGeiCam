@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         applyMergeHook(intent)
         applyFrostProbe(intent)
+        applyCompareProbe(intent)
         setContent {
             WotaTheme {
                 val prefs = remember { WotaSettings.of(this) }
@@ -89,6 +90,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         applyMergeHook(intent)
         applyFrostProbe(intent)
+        applyCompareProbe(intent)
     }
 
     /**
@@ -106,6 +108,11 @@ class MainActivity : ComponentActivity() {
     /** #84 霜探针的唯一写入入口：与 [applyMergeHook] 同一套纪律（见 [FrostProbe] 的类注释） */
     private fun applyFrostProbe(intent: Intent?) {
         FrostProbe.apply(intent?.getBooleanExtra(EXTRA_FROST_PROBE, false) == true)
+    }
+
+    /** 对比播放黑屏探针的唯一写入入口：与 [applyFrostProbe] 同一套纪律（见 [CompareProbe] 的类注释） */
+    private fun applyCompareProbe(intent: Intent?) {
+        CompareProbe.apply(intent?.getBooleanExtra(EXTRA_COMPARE_PROBE, false) == true)
     }
 }
 

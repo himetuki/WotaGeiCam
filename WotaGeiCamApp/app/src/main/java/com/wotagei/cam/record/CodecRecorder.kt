@@ -121,6 +121,17 @@ class CodecRecorder(
     /** 当前段已写视频样本数（纯内存计数，不碰任何 I/O 时序）；段闭时落进 [segSampleCounts] 并归零 */
     private var segVideoWritten = 0
 
+    // ---- 起录自检三格（泵线程单写者，UI 线程经 health() 读，故一律 @Volatile）----
+    // 三格的定义与判定见 RecordHealth.kt：建轨 / muxer 启动 / 首个视频样本落地。
+    /** INFO_OUTPUT_FORMAT_CHANGED 后 addTrack 成功（videoTrack ≥ 0） */
+    @Volatile private var healthVideoTrackAdded = false
+    /** startMuxerIfReady 内 mx.start() 成功 */
+    @Volatile private var healthMuxStarted = false
+    /** 首个视频样本 writeSampleData 成功（writeSample 返回 >0） */
+    @Volatile private var healthFirstVideoSample = false
+    /** start() 时刻（自检窗口计时基准；未 start 为 0） */
+    @Volatile private var healthStartMs = 0L
+
     /**
      * 逐段视频样本数账（索引=partIndex）：位次账（arcDrops）里的 k 是跨段全局视频帧序号，
      * 段与位次靠这份账对上。只在泵线程读写，stop 收尾时随 [RecordResult.segVideoSamples] 交给
@@ -149,6 +160,10 @@ class CodecRecorder(
         engineError = null
         stopping = false
         rotatePending = false
+        healthVideoTrackAdded = false
+        healthMuxStarted = false
+        healthFirstVideoSample = false
+        healthStartMs = 0L
         parts.clear()
         partIndex = 0
         partStartMs = 0L
@@ -461,9 +476,11 @@ class CodecRecorder(
             Log.e(TAG, "muxer open failed: ${e.message}")
             null
         } ?: return false
-        // MediaMuxer 侧的旋转标记（旋转节）；GL 已按方向画，所以这里只做容器元数据
+        // MediaMuxer 侧的旋转标记（旋转节）；GL 已按方向画，所以这里只做容器元数据。
+        // 写出值统一经 exportOrientationHint，与 ArcRepairRunner 同一约定（见 ORIENTATION_MUXER_CCW），
+        // 避免"修了修复路、录制路还错"
         try {
-            m.setOrientationHint(hint)
+            m.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
         } catch (e: IllegalStateException) {
             Log.i(TAG, "muxer orientation hint ignored: ${e.message}")
         }
@@ -500,6 +517,7 @@ class CodecRecorder(
         }
         segBaseUs = System.nanoTime() / 1000L
         state = EngineState.START
+        healthStartMs = SystemClock.elapsedRealtime() // 自检窗口从这里起算
         partStartMs = clock.elapsedMs()
         clock.startSegment()
         stopping = false
@@ -614,6 +632,20 @@ class CodecRecorder(
     }
 
     override val elapsedMs: Long get() = clock.elapsedMs()
+
+    /**
+     * 起录自检读数：三格在泵循环里已有对应内部状态（建轨 / muxer 启动 / 首样本），这里只提升成
+     * 可读快照。errorCode 与 [engineError] **同源**（不另立一份会漂移的镜像）——写入点分布在
+     * 泵循环/收尾多处，任何一处漏镜像都会让 UI 读到过期的"健康"。
+     */
+    override fun health(): RecorderHealth = RecorderHealth(
+        videoTrackAdded = healthVideoTrackAdded,
+        muxStarted = healthMuxStarted,
+        firstVideoSample = healthFirstVideoSample,
+        errorCode = engineError,
+        elapsedMs = if (healthStartMs > 0L) SystemClock.elapsedRealtime() - healthStartMs else 0L,
+        milestonesObservable = true
+    )
 
     /** PCM 均方根；量程与 MediaRecorder.getMaxAmplitude 一致，UI 音量表两引擎通用。
      *  只读**环境**源（P6 裁决：内录模式下音量条仍显环境音 RMS，不加第二根，内录源不入表） */
@@ -777,6 +809,10 @@ class CodecRecorder(
         val ef = feeder
         val cf = capFeeder
         val mx = muxer ?: return false
+        // 段起始清自检三格：换段后新编码器/muxer 从零起算，上一段的真值不能冒充本段健康
+        healthVideoTrackAdded = false
+        healthMuxStarted = false
+        healthFirstVideoSample = false
         val bi = MediaCodec.BufferInfo()
         // 逐通道状态各一套（批 3：heldPkt/lastPts/EOS 标志环境、内录分开）。状态生命周期本就
         // 只在单段内（pumpLoop 每段重建编码器并清 held 包），段内局部比实例字段更不容易串轨
@@ -830,6 +866,7 @@ class CodecRecorder(
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         videoTrack = mx.addTrack(v.getOutputFormat())
+                        healthVideoTrackAdded = true // 自检第一格：编码器产出格式、muxer 建轨成功
                         if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                         Log.i(TAG, "video track=$videoTrack fmt=${v.getOutputFormat()}")
                     }
@@ -842,6 +879,8 @@ class CodecRecorder(
                             val wrote = writeSample(mx, videoTrack, v.getOutputBuffer(idx), bi)
                             writtenBytes += wrote
                             if (wrote > 0) segVideoWritten++
+                            // 自检第三格：首个视频样本真写进 muxer（writeSample 失败返回 0，不计）
+                            if (wrote > 0) healthFirstVideoSample = true
                             vPtsLastUs = bi.presentationTimeUs
                         }
                         v.releaseOutputBuffer(idx, false)
@@ -1035,6 +1074,7 @@ class CodecRecorder(
         if (capCh != null && !capCh.dropped && capCh.track < 0) return false
         return try {
             mx.start()
+            healthMuxStarted = true // 自检第二格：muxer 真启动（此后样本落盘）
             Log.i(TAG, "muxer start video=$videoTrack env=${envCh?.track ?: "none"} cap=${capCh?.track ?: "none"}")
             true
         } catch (e: IllegalStateException) {

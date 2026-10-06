@@ -57,7 +57,15 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import kotlin.math.roundToInt
 
-/** 一档药丸：[value] 是写回参数总线的原始值，[label] 是展示文案，[supported]=false 即本机不支持（灰显） */
+/**
+ * 一档药丸：[value] 是写回参数总线的原始值，[label] 是展示文案，[supported]=false 即本机不支持（灰显）。
+ *
+ * 【`supported` 的灰化目前是死路，别误当成在用】没有任何 [TierPicker] 调用点传 `supported=false`
+ * （SettingsScreen 各档全是默认 true，唯一显式传参的 TEXT_SCALE_PCTS 也传 `true`），所以本控件里
+ * 吃它的 [TierPill] 灰化分支尚无活消费方、`tierAlpha` 恒 1f。注意：`shutterItems` 也会构造
+ * `supported=false` 的 [TierItem]，但那份列表的消费方是 `CameraPills.ShutterPill` 转成 `PillOption`
+ * 走 `PillChoices`/`WotaChip`，**不经过本控件**——带 supported 语义的快门档是那条路，不是这条。
+ */
 data class TierItem(val value: Int, val label: String, val supported: Boolean = true)
 
 /** 长按药丸后出现的连续滑杆域；[max] <= [min] 表示该参数没有连续域 */
@@ -249,6 +257,9 @@ private fun TierPill(
     )
     // 借 WotaChip 的配色语义而不直接用它：它内部写死 WotaType.chip，「文本高度」设置会对档位失效
     // #81 第 1 条：选中底色与文字色即时切换（禁动画颜色）；"本机不支持"的灰化走下面的 alpha（允许档）
+    // ⚠ alpha 必须排在绘制类 modifier（wotaCard 的描边/background 的选中底）**之前**：modifier 链左为外、
+    // 右为内，`alpha` 只作用在它右边的绘制上——排在 background 之后时只淡了文字，整档并没灰化
+    // （与本轮 CompareScreen 双黑真因同族）。这里 alpha 紧跟 graphicsLayer(scale)，覆盖描边+底+文字。
     // 选中底走 accentSurface：选中胶囊上压的是 onAccent 白字小字，白字对 #007DFF(accent)
     // 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过（见 WotaColor.accentSurface 注）
     val tierFill = if (selected) WotaColor.accentSurface else Color.Transparent
@@ -260,10 +271,10 @@ private fun TierPill(
     Row(
         modifier = Modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
+            .alpha(tierAlpha)
             .wotaCard(WotaShape.pill)
             .background(tierFill)
             .clip(WotaShape.pill)
-            .alpha(tierAlpha)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongPress,

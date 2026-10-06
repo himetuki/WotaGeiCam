@@ -8,6 +8,7 @@ import com.wotagei.cam.camera.FrostCardTable.CARD_PRESENT
 import com.wotagei.cam.camera.FrostCardTable.CARD_RADIUS
 import com.wotagei.cam.camera.FrostCardTable.CARD_RIGHT
 import com.wotagei.cam.camera.FrostCardTable.CARD_TOP
+import com.wotagei.cam.camera.FrostCardTable.HEADER_CARD_SPACE
 import com.wotagei.cam.camera.FrostCardTable.HEADER_FLOATS
 import com.wotagei.cam.camera.FrostCardTable.HEADER_ROOT_HEIGHT
 import com.wotagei.cam.camera.FrostCardTable.HEADER_ROOT_LEFT
@@ -46,7 +47,7 @@ import java.util.concurrent.atomic.AtomicReference
  *    还回来的槽必须可复用、且**还槽必须清掉在场位**（不清就是给 GL 留一块幽灵板）、
  *    迟到/重复的释放与写入一律按在场位（租约）拒绝；
  * 2. **退化账**：四边反序/零面积的写入必须当"这帧没有这块板"，与 [frostUvInto] 的退化口径同一条；
- * 3. **布局账**：[FrostCardTable.tryReadInto] 读到的必须是「表头 8 个 float + **压实后**的卡片块」。
+ * 3. **布局账**：[FrostCardTable.tryReadInto] 读到的必须是「表头 9 个 float + **压实后**的卡片块」。
  *    压实偏移算错，GL 就会拿第 3 格的矩形去画第 1 块板，而 JVM 之外没人知道；表头/卡片的字段偏移
  *    由 [FrostCardTable.HEADER_ROOT_LEFT] 那一组常量说了算，所以另有一条"常量值 = 线上排布"的冻结用例；
  * 4. **并发账**：GL 线程读、UI 线程写，读方一次拿到的**每一格**都必须出自同一次写入事务
@@ -61,10 +62,11 @@ class FrostCardTableTest {
 
     private val out = FloatArray(TABLE_FLOATS)
 
-    /** 表头八项各写一个互不相同的值：读出来逐位对得上，才算"偏移常量与写入顺序没分叉" */
-    private fun header(uiEnabled: Boolean = true) = FrostCardTable.writeHeader(
+    /** 表头九项各写一个互不相同的值：读出来逐位对得上，才算"偏移常量与写入顺序没分叉" */
+    private fun header(uiEnabled: Boolean = true, cardSpace: Boolean = true) = FrostCardTable.writeHeader(
         rootLeftPx = 11f, rootTopPx = 22f, rootWidthPx = 33f, rootHeightPx = 44f,
-        tintRed = 0.5f, tintGreen = 0.25f, tintBlue = 0.125f, uiEnabled = uiEnabled
+        tintRed = 0.5f, tintGreen = 0.25f, tintBlue = 0.125f, uiEnabled = uiEnabled,
+        cardSpace = cardSpace
     )
 
     private fun slotOffset(slot: Int) = HEADER_FLOATS + slot * SLOT_FLOATS
@@ -214,7 +216,7 @@ class FrostCardTableTest {
         assertTrue(FrostCardTable.writeCard(highSlot, 201f, 202f, 299f, 260f, -1f, 0.65f))
         out.fill(0f)
         assertEquals(2, FrostCardTable.tryReadInto(out))
-        // 表头恒在 out[0 until 8]
+        // 表头恒在 out[0 until 9]
         assertEquals(11f, out[0], 0f)
         assertEquals(22f, out[1], 0f)
         assertEquals(33f, out[2], 0f)
@@ -223,6 +225,9 @@ class FrostCardTableTest {
         assertEquals(0.25f, out[5], 0f)
         assertEquals(0.125f, out[6], 0f)
         assertEquals(1f, out[7], 0f)
+        // 卡片坐标系位（0=窗口系 / 1=视图局部系）：默认 header() 写 true ⇒ 1f；
+        // 这一格错了读方就会拿"根矩形反推的原点"去配已经是视图局部的卡片，板整体错一圈
+        assertEquals(1f, out[8], 0f)
         // 压实：第 0 块紧跟表头，第 1 块在 HEADER+SLOT_FLOATS 处（**不是**按槽位下标摆）
         assertEquals(101f, out[HEADER_FLOATS + CARD_LEFT], 0f)
         assertEquals(102f, out[HEADER_FLOATS + CARD_TOP], 0f)
@@ -263,7 +268,8 @@ class FrostCardTableTest {
         assertEquals(5, HEADER_TINT_GREEN)
         assertEquals(6, HEADER_TINT_BLUE)
         assertEquals(7, HEADER_UI_ENABLED)
-        assertEquals(HEADER_FLOATS, HEADER_UI_ENABLED + 1)
+        assertEquals(8, HEADER_CARD_SPACE)
+        assertEquals(HEADER_FLOATS, HEADER_CARD_SPACE + 1)
         assertEquals(0, CARD_LEFT)
         assertEquals(6, CARD_PRESENT)
         assertEquals(SLOT_FLOATS, CARD_PRESENT + 1)
@@ -470,7 +476,8 @@ class FrostCardTableTest {
             rootWidthPx = 720f,
             rootHeightPx = 1600f,
             tintRed = 0.5f, tintGreen = 0.5f, tintBlue = 0.5f,
-            uiEnabled = true
+            uiEnabled = true,
+            cardSpace = true
         )
         // 一次表头事务 + 逐格卡片事务 = 注册点（`ui/design/hudFrostRectRegistrar`）真实形状：
         // 先 refreshHeader()，再 writeCard 自己那一格。
@@ -547,7 +554,7 @@ class FrostCardTableTest {
         )
         assertEquals("停用后不再发槽", -1, FrostCardTable.acquireSlot())
         assertFalse("停用后写卡片一律拒绝", FrostCardTable.writeCard(0, 1f, 1f, 9f, 9f, 0f, 0.5f))
-        FrostCardTable.writeHeader(1f, 2f, 720f, 1600f, 0f, 0f, 0f, true)
+        FrostCardTable.writeHeader(1f, 2f, 720f, 1600f, 0f, 0f, 0f, true, true)
         assertFalse("停用后写表头也拒绝（开关不许自己又翻回 true）", FrostCardTable.hasUiEnabled())
         assertEquals("占用数必须停在停用那一刻的账上，不许继续涨", 1, FrostCardTable.usedSlotCount())
     }
@@ -563,6 +570,11 @@ class FrostCardTableTest {
         // 正向锚点（缺了锚点的否定断言就是空转）：表头与卡片两侧都必须真的在按常量取数
         assertTrue("画板已经不按 HEADER_* 常量读表头了（锚点丢失）", masked.contains("table[FrostCardTable.HEADER_ROOT_LEFT]"))
         assertTrue("画板已经不按 CARD_* 常量读卡片了（锚点丢失）", masked.contains("table[base + FrostCardTable.CARD_LEFT]"))
+        // 卡片坐标系位必须按常量读：写死一边（恒 0 或恒 1）就会拿错口径的原点去画板，板整体错一圈
+        assertTrue(
+            "画板必须按 table[FrostCardTable.HEADER_CARD_SPACE] 区分卡片坐标系（写死就退化成旧缺陷）",
+            masked.contains("table[FrostCardTable.HEADER_CARD_SPACE]")
+        )
         val raw = Regex("table\\[\\s*\\d").findAll(masked).map { it.value }.toList()
         assertTrue("画板里出现了裸下标读表（表头一加字段就静默错位）：$raw", raw.isEmpty())
     }

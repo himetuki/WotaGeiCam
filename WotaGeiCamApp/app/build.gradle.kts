@@ -86,6 +86,7 @@ android {
             // 免得以后有人以为"debug 包能装"就等于"钩子能验"（本机装不了 debug 包，见 docs/plan/13 §14.3）
             buildConfigField("boolean", "MERGE_HOOK", "false")
             buildConfigField("boolean", "FROST_PROBE", "false")
+            buildConfigField("boolean", "COMPARE_PROBE", "false")
         }
         /**
          * #73 的取证变体：**release 同签名 + debuggable=true**。
@@ -111,6 +112,8 @@ android {
             buildConfigField("boolean", "MERGE_HOOK", "true")
             // #84 霜探针：与 MERGE_HOOK 同一条纪律（debugHook 出证据，release/debug 恒关，见 ui/FrostProbe.kt）
             buildConfigField("boolean", "FROST_PROBE", "true")
+            // 对比播放黑屏探针：同一纪律（debugHook 出证据，release/debug 恒关，见 ui/CompareProbe.kt）
+            buildConfigField("boolean", "COMPARE_PROBE", "true")
         }
         /**
          * #74 加的**取证构建**：release 同签名 + debuggable + **不混淆**，并且是 `testBuildType`。
@@ -134,6 +137,7 @@ android {
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
             buildConfigField("boolean", "FROST_PROBE", "true")
+            buildConfigField("boolean", "COMPARE_PROBE", "true")
         }
         release {
             isMinifyEnabled = true
@@ -142,6 +146,7 @@ android {
             signingConfig = wotaSign
             buildConfigField("boolean", "MERGE_HOOK", "false")
             buildConfigField("boolean", "FROST_PROBE", "false")
+            buildConfigField("boolean", "COMPARE_PROBE", "false")
         }
     }
 

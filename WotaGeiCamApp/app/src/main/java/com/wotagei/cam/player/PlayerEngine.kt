@@ -173,7 +173,7 @@ class PlayerEngine(private val context: Context) {
     private fun build(): ExoPlayer {
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val selector = DefaultTrackSelector(context)
-        return ExoPlayer.Builder(context)
+        val p = ExoPlayer.Builder(context)
             .setRenderersFactory(renderers)
             .setTrackSelector(selector)
             .build()
@@ -183,6 +183,12 @@ class PlayerEngine(private val context: Context) {
                 addListener(listener)
                 repeatMode = Player.REPEAT_MODE_OFF
             }
+        // player 是 attach 里懒建的，晚于首帧：AndroidView 的 factory/update 先跑，bind 只把视图
+        // 登记进 boundViews（此时 view.player = null）。这里建好后**补挂**一次，登记过的视图当场
+        // 拿到 player；此后 update 的重绑是幂等增益（PlayerView.setPlayer 同实例自带短路，不闪帧）。
+        // 快照遍历：防遍历期间 boundViews 被增删（bind/unbind）。
+        boundViews.toList().forEach { runCatching { it.player = p } }
+        return p
     }
 
     /**
@@ -494,6 +500,42 @@ class PlayerEngine(private val context: Context) {
     fun unbind(view: PlayerView) {
         boundViews.remove(view)
         runCatching { if (view.player === player) view.player = null }
+    }
+
+    // endregion
+
+    // region 探针只读（ui/CompareProbe 专用；只读不参与任何播放判断）
+
+    /** 是否已建出 ExoPlayer（探针/守卫：区分「没建播放器」与「建了但面没绑上」） */
+    val hasPlayer: Boolean get() = !released && player != null
+
+    /** 已登记视图数（探针：0 = update/factory 一次都没 bind 上） */
+    val boundViewCount: Int get() = boundViews.size
+
+    /** 首个登记视图的 TextureView 是否 isAvailable（探针：面还没就绪时恒黑） */
+    fun boundSurfaceAvailable(): Boolean =
+        (boundViews.firstOrNull()?.videoSurfaceView as? android.view.TextureView)?.isAvailable == true
+
+    /** 首个登记视图的当帧尺寸（探针：0x0 = 布局没量出来 / 被裁掉） */
+    fun boundViewSize(): Pair<Int, Int> {
+        val v = boundViews.firstOrNull() ?: return 0 to 0
+        return v.width to v.height
+    }
+
+    // endregion
+
+    // region 对比页音频命令落地点
+
+    /**
+     * 对比页音频计划（[CompareAudio] 的幂等命令序列）的落地点：集中在此，对比页不裸调
+     * 选轨/音量 API（组下标一律由 [audioGroupIndexOf] 决定，组内 trackIndex 恒 0）。
+     */
+    fun applyAudioCommand(cmd: EngineCommand) {
+        when (cmd) {
+            is EngineCommand.SetVolume -> setVolume(cmd.volume)
+            is EngineCommand.SetAudioOverride -> setAudioTrackOverride(cmd.groupIndex, 0)
+            is EngineCommand.ClearAudioOverride -> clearAudioOverride()
+        }
     }
 
     // endregion
