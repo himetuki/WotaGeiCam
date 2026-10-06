@@ -280,4 +280,75 @@ class ArcConvertGuardTest {
             stopBody.contains("ArcDropSegment(") && stopBody.contains("segments = segs")
         )
     }
+
+    @Test
+    fun `停录冲刷屏障与停止期降级抑制在位`() {
+        // r09 竞态修复（2026-10-06）的结构红线。竞态：flush 的 GL runnable 被 >1s 的长任务压住
+        // 排队，旧实现 latch 等 1s 就放弃返回 0，stopInternal 继续拆编码器（codec.stop 即输入面
+        // 失效），晚到的 runnable swap 撞死面（EGL_BAD_ALLOC），随后来帧在 drawEncoderMended 里
+        // EmitPending 失败触发 degradeArcConvert——位次账/实测帧率被清，sidecar drops=0、成片名
+        // 丢前缀。四条线各钉一处，删任何一处即红：
+        // ① stopInternal 顺序：置位停止期标志 → flush → rec.stop；
+        // ② flushArcPending 按屏障上限等待（旧固定 1s 必超时）；
+        // ③ 超时置弃冲标志 + 晚到 runnable 见标志整段放弃；
+        // ④ degradeArcConvert 先查停止期标志再进两段降级，setArcConvert GL 体里复位。
+        val screen = maskedMain("ui/CameraScreen.kt")
+        val stopBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(screen, "stopInternal"))
+        val mark = stopBody.indexOf("markRecordTearingDown()")
+        val flush = stopBody.indexOf("flushArcPending(")
+        val stop = stopBody.indexOf("rec.stop()")
+        assertTrue(
+            "stopInternal 必须置位停止期标志（缺 = 停止窗口的拆解伪影失败仍会触发降级清账）",
+            mark >= 0
+        )
+        assertTrue(
+            "停止期置位必须先于冲刷（先冲刷后置位 = 冲刷/随后来帧的失败窗口不被抑制）",
+            mark in 0 until flush
+        )
+        assertTrue(
+            "冲刷必须先于 rec.stop（滞后 = 滞留帧落在已停编码器上必丢）",
+            flush in 0 until stop
+        )
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val flushBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "flushArcPending"))
+        assertTrue(
+            "flushArcPending 的等待必须以屏障上限为界（锁计算式而非任意引用：只锁常量名会被" +
+                "超时日志行自身满足——旧固定 1s 撞上 GL 长任务 = 屏障失效，滞留帧留死面）",
+            flushBody.contains("FLUSH_BARRIER_TIMEOUT_MS * 1_000_000L")
+        )
+        assertTrue(
+            "latch.await 必须吃进 deadline 计算（await 改回固定时长、deadline 行只喂日志时" +
+                "上一条守卫仍绿——屏障名存实亡）",
+            flushBody.contains("latch.await(deadline")
+        )
+        assertTrue(
+            "屏障上限声明值必须保持 5s 量级（r09 实测长任务 >1s；改小即重新暴露 1s 竞态，" +
+                "要改必须连本断言一起有意识地改）",
+            engine.contains("FLUSH_BARRIER_TIMEOUT_MS = 5_000L")
+        )
+        assertTrue(
+            "等待超时必须置弃冲标志（不置 = 晚到 runnable 照跑，在已拆编码面上 swap 撞 EGL_BAD_ALLOC）",
+            flushBody.contains("flushGiveUp.set(true)")
+        )
+        assertTrue(
+            "flush runnable 必须见弃冲标志即整段放弃（晚到不再碰编码面/状态机）",
+            flushBody.contains("if (flushGiveUp.get()) return@post")
+        )
+        val degradeBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "degradeArcConvert"))
+        val suppress = degradeBody.indexOf("recordTearingDown")
+        val twoStage = degradeBody.indexOf("setArcConvert(ArcConvertMode.DROP")
+        assertTrue(
+            "degradeArcConvert 必须先查停止期标志再进两段降级（缺查/顺序反 = 拆解伪影清账）",
+            suppress >= 0 && twoStage >= 0 && suppress < twoStage
+        )
+        val setBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "setArcConvert"))
+        assertTrue(
+            "setArcConvert GL 体必须复位停止期标志（不复位 = 下一会话真失败也被抑制，降级链整条哑火）",
+            setBody.contains("recordTearingDown = false")
+        )
+        assertTrue(
+            "抑制日志闩必须随停止期标志一并复位（不复位 = 下一段的首条拆解伪影被静默吞掉）",
+            setBody.contains("teardownSuppressLogged = false")
+        )
+    }
 }

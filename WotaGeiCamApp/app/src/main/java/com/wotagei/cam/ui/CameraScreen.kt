@@ -2064,7 +2064,13 @@ private class RecordRunner(
         }
         polling = false
         status.value = RecordStatus.STOPPING
-        // MEND 滞留帧先冲刷（编码器还活着），否则停止瞬间必丢最后一枚输出帧
+        // 停止期先于一切拆解动作置位：此后 GL 侧任何编码失败都是「面已死」的拆解伪影而非
+        // 会话中真失败，引擎侧 degradeArcConvert 看到该位不再清账换模式——否则晚到的帧撞死面
+        // （codec.stop 即输入面失效 → swap EGL_BAD_ALLOC）会触发降级，把已记好的位次账/实测帧率
+        // 清掉（sidecar drops 归零、成片名丢前缀，r09 实测）。下一段录制 start 必发 setArcConvert 复位。
+        glProvider()?.markRecordTearingDown()
+        // MEND 滞留帧先冲刷（编码器还活着），否则停止瞬间必丢最后一枚输出帧。
+        // flushArcPending 是真同步屏障：runnable 执行完才返回，超时则自行撤销冲刷
         if (activeArcConvert == ArcConvertMode.MEND) {
             val flushed = glProvider()?.flushArcPending() ?: 0
             if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
