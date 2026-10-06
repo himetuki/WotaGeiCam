@@ -1993,6 +1993,15 @@ private class RecordRunner(
                 //（无 sidecar 无前缀，用户无从察觉）
                 glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
                 glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
+                // 换段重挂：GPU 路 per-codec 输入面随分段轮转换代（引擎在泵线程建好新面后
+                // 同步回调），这里与首段同一口径「下发 + 等挂好」，GL 挂好前新段不 start；
+                // MrRecorder / DIRECT 路面跨段不变，引擎永不回调（空挂无害）
+                rec.onInputSurfaceRecreated = { newSurface ->
+                    (newSurface as? Surface)?.let { s ->
+                        glProvider()?.setOutputSurface(s, profile.width, profile.height, profile.fps)
+                        awaitEncoderSurface()
+                    }
+                }
                 awaitEncoderSurface()
             }
             rec.start()
@@ -2177,6 +2186,10 @@ private class RecordRunner(
         while (waited < WAIT_MS && !gl.isOutputSurfaceBound()) {
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
+        }
+        // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行
+        if (!gl.isOutputSurfaceBound()) {
+            Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
         }
     }
 

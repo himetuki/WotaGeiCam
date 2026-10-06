@@ -115,6 +115,16 @@ interface Recorder {
      */
     val surface: Any?
 
+    /**
+     * GPU 路换段重挂钩（默认无操作）：分段轮转若换了 per-codec 输入面（[CodecRecorder] GPU 路
+     * 专用——per-codec 面不能跨编码器实例复用），泵线程在新面建好、`codec.start()` 之前
+     * **同步**回调；接线方（UI 层）做「下发 GL 重挂 + 等挂好」。面跨段不变的引擎
+     * （[MrRecorder]、DIRECT 路的 persistent 面）永不回调，接线对它们是无害的空挂。
+     */
+    var onInputSurfaceRecreated: ((Any) -> Unit)?
+        get() = null
+        set(_) {}
+
     /** @return false = 失败（内部已回 IDLE 并记日志），调用方不进 START */
     fun prepare(p: RecordProfile, sink: OutputSink): Boolean
 

@@ -18,8 +18,10 @@ import java.nio.ByteBuffer
  * 内录体系批 3 起也是双轨路径——arcConvert / captureAudio / 高帧率三者任一命中都走本引擎）。
  *
  * 关键点：
- * - 输入面用 `MediaCodec.createPersistentInputSurface()`（API 29 起），跨分段复用不重建，GL 只认同一面；
- *   编码器用 `configure(format, surface, …)` 绑定（`setInputSurface` 是 API 30，minSdk 29 不依赖它）；
+ * - 输入面：DIRECT 路（Camera2 当 producer）用 `MediaCodec.createPersistentInputSurface()`
+ *   （API 29 起）跨分段复用不重建；GPU 路（EGL 当 producer）必须 per-codec
+ *   `codec.createInputSurface()`（persistent 面挂 EGL 真机 EGL_BAD_ALLOC，见 [prepareGpuVideoEncoder]），
+ *   换段重挂经 [onInputSurfaceRecreated] 同步通知；
  * - 视频参数：COLOR_FormatSurface + BITRATE_MODE_VBR + KEY_I_FRAME_INTERVAL=1 + KEY_FRAME_RATE=fps；
  * - 音频参数：`audio/mp4a-latm` + AAC-LC + 128k + CHANNEL_COUNT + KEY_MAX_INPUT_SIZE=minBufferSize，
  *   PTS 用 `System.nanoTime()/1000`，EOS 走 PCM 同一通道的 4 字节哨兵（``）；
@@ -129,6 +131,13 @@ class CodecRecorder(
     /** prepare 成功后即稳定可用：Camera2 录像面 / GL outputSurface 的写入目标 */
     override val surface: Any? get() = inputSurface
 
+    /**
+     * GPU 路换段重挂钩（[Recorder] 契约）：GPU 路输入面 per-codec（见 [prepareGpuVideoEncoder]），
+     * 分段轮转换编码器必须换面，泵线程在建好新面后同步回调、等 GL 挂好才继续。
+     * DIRECT 路面是 persistent surface 跨段复用，本钩子不置位（永不回调）。
+     */
+    @Volatile override var onInputSurfaceRecreated: ((Any) -> Unit)? = null
+
     // region 准备
 
     override fun prepare(p: RecordProfile, sink: OutputSink): Boolean {
@@ -157,9 +166,16 @@ class CodecRecorder(
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
-        val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
         val mime = resolveVideoMime(p)
-        val v = createVideoEncoder(mime, p, inSurf)
+        // GPU 路（EGL 当 producer）输入面必须 per-codec（[prepareGpuVideoEncoder]，真机实测
+        // persistent surface 挂 EGL 会 EGL_BAD_ALLOC）；DIRECT 路（Camera2 当 producer）保持
+        // persistent surface 跨会话复用的既有口径，行为不变。
+        val v: MediaCodec? = if (p.useGpu) {
+            prepareGpuVideoEncoder(mime, p)
+        } else {
+            val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
+            createVideoEncoder(mime, p, inSurf)
+        }
         if (v == null) {
             // t 已打开（fd 在手）但 target 字段还没轮到赋值，reject 的 target?.close() 够不着它：
             // 必须在这里先关，否则 openAssetFileDescriptor 的 fd 一直悬到进程结束
@@ -339,15 +355,39 @@ class CodecRecorder(
     }
 
     /**
+     * GPU 路的视频编码器 + 输入面建立：configure 传 null 只建不绑，随后用
+     * [MediaCodec.createInputSurface] 取 **per-codec** 输入面（合法窗口 = configure 之后、
+     * start 之前）。**不用** [MediaCodec.createPersistentInputSurface]：那是「MediaRecorder 与
+     * MediaCodec 共享同一输入面」的专用件，拿它当 EGL 渲染目标在真机 `eglCreateWindowSurface`
+     * 直接失败（EGL_BAD_ALLOC 0x3003，实测三处：ArcRepairRunner 两轮 + 24※ 录制期转换首轮——
+     * 强制档恒走本引擎，这是它在本机 GPU 路的第一次真机运行，普通 30fps 走 MrRecorder 不进这里）。
+     * per-codec 面随编码器实例换代，分段轮转的重挂经 [onInputSurfaceRecreated] 同步通知。
+     * @return null = 编码器或输入面建立失败（内部已清理，调用方按 PREPARE_FAILED 收场）
+     */
+    private fun prepareGpuVideoEncoder(mime: String, p: RecordProfile): MediaCodec? {
+        val v = createVideoEncoder(mime, p, null) ?: return null
+        return try {
+            inputSurface = v.createInputSurface()
+            v
+        } catch (e: Exception) {
+            Log.e(TAG, "createInputSurface failed: ${e.javaClass.simpleName} ${e.message}")
+            inputSurface = null
+            releaseQuietly(v)
+            null
+        }
+    }
+
+    /**
      * 建一枚 Surface 输入的编码器（能力探测走 [findSurfaceEncoder]，参数表与录制逐字相同）。
      * `internal` 供 ArcRepair 复用：光弧修复的插帧编码器与录制必须同一套能力探测与参数口径，
      * 复制一份迟早与录制分叉（AGENTS.md：不为同一件事写第二份）。
      *
      * @param surface 输入面；**传 null = 只 configure 不绑面**，调用方随后自行
-     *   `codec.createInputSurface()` 取它自己的输入面。ArcRepair 走这条：MediaCodec 的
-     *   `createPersistentInputSurface()` 是给 MediaRecorder 共享输入面的专用件，拿它当 EGL 渲染
-     *   目标在真机上 `eglCreateWindowSurface` 直接失败（EGL_BAD_ALLOC 0x3003，实测）。录制路照旧
-     *   传自己的输入面，行为逐字不变。
+     *   `codec.createInputSurface()` 取它自己的输入面。GPU 录制路（[prepareGpuVideoEncoder]）与
+     *   ArcRepair 走这条：MediaCodec 的 `createPersistentInputSurface()` 是给 MediaRecorder 共享
+     *   输入面的专用件，拿它当 EGL 渲染目标在真机上 `eglCreateWindowSurface` 直接失败
+     *   （EGL_BAD_ALLOC 0x3003，实测）。DIRECT 录制路（Camera2 当 producer）照旧传 persistent
+     *   输入面，行为逐字不变。
      */
     internal fun createVideoEncoder(mime: String, p: RecordProfile, surface: Surface?): MediaCodec? {
         val name = findSurfaceEncoder(mime, p.width, p.height)
@@ -630,14 +670,55 @@ class CodecRecorder(
 
     private fun openNextSegment(sink: OutputSink.Pending): Boolean {
         val p = profile ?: return false
-        val inSurf = inputSurface ?: return false
         val t = OutputTarget.open(ctx, sink) ?: return false
-        val v = createVideoEncoder(resolveVideoMime(p), p, inSurf)
-        if (v == null) {
-            // 编码器重建失败：target 字段此刻还是上一段的 null（sealCurrent 已清），
-            // 调用方 nextSegment 的 target?.close() 关不到这枚 t，必须就地关
-            t.close()
-            return false
+        // GPU 路：per-codec 输入面随编码器实例换代——新面建好后**同步**让 GL 重挂（[Recorder]
+        // 的 onInputSurfaceRecreated 契约，等挂好才 start），旧面在 GL 解绑后再释放；
+        // 不重挂的话新段帧全落旧面（旧 codec 已停），GL 侧还持有已 release 的 native 面。
+        // DIRECT 路（Camera2 当 producer）：persistent surface 跨段复用，行为不变。
+        val v: MediaCodec?
+        if (p.useGpu) {
+            v = createVideoEncoder(resolveVideoMime(p), p, null)
+            if (v == null) {
+                // 编码器重建失败：target 字段此刻还是上一段的 null（sealCurrent 已清），
+                // 调用方 nextSegment 的 target?.close() 关不到这枚 t，必须就地关
+                t.close()
+                return false
+            }
+            val newSurf = try {
+                v.createInputSurface()
+            } catch (e: Exception) {
+                Log.e(TAG, "segment createInputSurface failed: ${e.javaClass.simpleName} ${e.message}")
+                releaseQuietly(v)
+                t.close()
+                return false
+            }
+            val old = inputSurface
+            inputSurface = newSurf
+            // 回调跑在泵线程 try/catch 之外（pumpLoop 只兜 runSegment）：接线方抛异常会烧掉
+            // 这枚 t 的 fd + 留幽灵 pending。公开契约不许假设实现不抛——就地折断换段
+            //（返回 false 走 nextSegment 的 discard 收口），engineError 让 pumpLoop 退出
+            // 而不是带着没挂好的面续录
+            val rebindOk = runCatching { onInputSurfaceRecreated?.invoke(newSurf) }
+                .onFailure { Log.e(TAG, "input surface rebind threw: ${it.message}") }
+                .isSuccess
+            if (!rebindOk) {
+                engineError = engineError ?: "${RecordError.ENGINE_ERROR}:REBIND"
+                t.close()
+                return false
+            }
+            runCatching { old?.release() }
+                .onFailure { Log.w(TAG, "old input surface release failed: ${it.message}") }
+        } else {
+            val inSurf = inputSurface
+            if (inSurf == null) {
+                t.close()
+                return false
+            }
+            v = createVideoEncoder(resolveVideoMime(p), p, inSurf)
+            if (v == null) {
+                t.close()
+                return false
+            }
         }
         vCodec = v
         // 重建闸按 profile 改写判定（P0-b/P3：feeder 首启失败/捕获失效都已改写 profile，
