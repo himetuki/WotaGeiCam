@@ -188,6 +188,22 @@ class CompareTimelineWiringGuardTest {
         )
     }
 
+    // ------------------------------------------------------------------ 音频剪辑模型
+
+    @Test
+    fun `音频选择必须经CompareAudio_不得裸调选轨API`() {
+        val content = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "CompareContent"))
+        assertTrue(
+            "对比页音频必须经 CompareAudio（会话态 → audioPlanOf → applyOrderOf → applyAudioCommand），" +
+                "组下标单一映射（audioGroupIndexOf），禁止各处各写 (1, 0) 字面量",
+            content.contains("CompareAudio.audioPlanOf(") && content.contains("CompareAudio.applyOrderOf(")
+        )
+        assertFalse(
+            "CompareScreen 不得裸调 setAudioTrackOverride（唯一映射函数之外写死组下标 = 迟早选轨失效）",
+            content.contains("setAudioTrackOverride(")
+        )
+    }
+
     // ------------------------------------------------------------------ 内核纯度
 
     @Test

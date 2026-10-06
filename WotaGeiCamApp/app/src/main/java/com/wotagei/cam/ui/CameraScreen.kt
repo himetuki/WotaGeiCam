@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -58,6 +60,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -80,6 +83,8 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -126,10 +131,13 @@ import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.player.AudioTrackKind
 import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.LoopMode
 import com.wotagei.cam.player.nextCcwQuarter
 import com.wotagei.cam.player.pinchZoom
+import com.wotagei.cam.player.splitAudioPlanOf
+import com.wotagei.cam.player.TrackSync
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
@@ -142,13 +150,23 @@ import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
 import com.wotagei.cam.record.RecordError
+import com.wotagei.cam.record.RecordHealthWindow
 import com.wotagei.cam.record.RecordProfile
 import com.wotagei.cam.record.RecordResult
 import com.wotagei.cam.record.Recorder
 import com.wotagei.cam.record.Recorders
+import com.wotagei.cam.record.RetryAction
+import com.wotagei.cam.record.HealthVerdict
+import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
 import com.wotagei.cam.record.PlaybackCaptureController
+import com.wotagei.cam.record.VIDEO_WINDOW_MS
+import com.wotagei.cam.record.FULL_WINDOW_MS
 import com.wotagei.cam.record.VideoStore
+import com.wotagei.cam.record.healthVerdict
 import com.wotagei.cam.record.recordOrientationHint
+import com.wotagei.cam.record.retryActionOf
+import com.wotagei.cam.record.shouldDiscardAbandonedSink
+import com.wotagei.cam.record.weakHealthVerdict
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeDebugBadge
 import com.wotagei.cam.ui.design.WotaChip
@@ -171,10 +189,12 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.RefLineOverlay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -366,6 +386,15 @@ fun CameraScreen(
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
             runner.clearResult()
+        }
+    }
+    // 自检自动重录提示：走既有 hint 通道（含淡出约 2.6s），不弹错误窗、status 全程 START。
+    // 读走即清：StateFlow 对相等值去重，第二次重录置同一资源 id 若不清就再也不会发出来
+    LaunchedEffect(runner) {
+        runner.retryNotice.collect { id ->
+            if (id == null) return@collect
+            showTip(app.getString(id))
+            runner.clearRetryNotice()
         }
     }
     LaunchedEffect(recStatus) { freeMb = runner.probeFreeSpace() }
@@ -831,12 +860,20 @@ fun CameraScreen(
         }
     }
 
+    // 承载预览的那枚 aspectRatio 盒子的坐标：HUD 各注册点用它把卡片矩形换算到**承载视图局部坐标**，
+    // 分屏那层祖先 graphicsLayer 的缩放因而被 localPositionOf 抵消（霜板不再错位/偏大）。
+    // 首帧还没量到时为 null，注册点据此不写表（沿用原有 coords==null 早退）。
+    var previewCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val previewStage: @Composable (Modifier) -> Unit = { stageModifier ->
         Box(stageModifier, contentAlignment = Alignment.Center) {
             Box(
                 // aspectRatio 不能写在 fillMaxSize 之后：先被撑满再按比例就完全失效，
                 // 预览会退化成「按视图比例拉伸、无信箱黑边」（真机 DIRECT 实测过）
                 Modifier.aspectRatio(previewAspect, matchHeightConstraintsFirst = previewAspect < 1f)
+                    // 承载视图 = 这枚盒子（CameraSurface 以 matchParentSize 填满它），它的坐标就是
+                    // 「预览视图局部坐标系」的原点。**必须在分屏 graphicsLayer 图层的内侧**：这枚盒子
+                    // 与 HUD 各容器同在那层缩放之下，localPositionOf 才能把共同的祖先变换抵消。
+                    .onGloballyPositioned { previewCoords = it }
             ) {
                 CameraSurface(
                     mode = renderMode,
@@ -1084,236 +1121,238 @@ fun CameraScreen(
                 }
         ) {
             previewStage(Modifier.fillMaxSize())
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .safeDrawingPadding()
-                    .onSizeChanged {
-                        val w = with(hudDensity) { it.width.toDp().value.roundToInt() }
-                        val h = with(hudDensity) { it.height.toDp().value.roundToInt() }
-                        if (w != safeW) safeW = w
-                        if (h != safeH) safeH = h
-                    }
-            ) {
-                // 顶栏那排的固定件（设置入口 + 告警条）实测高回报给竖 Dock 当上边界（S2-1）
-                HudTopChrome(
-                    audioDegraded = ui.audioDegraded,
-                    legacy = ability?.isLegacy() == true,
-                    deviceFailedHighFps = ui.device == DeviceStatus.OPEN_FAILED_HIGH_FPS,
-                    effect = frameEffect,
-                    renderMode = renderMode,
-                    onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
-                    onHeightChanged = { if (topBarH != it) topBarH = it }
-                )
-                // 分屏入口：与设置齿轮**同级**的固定件（同一排右端）。它是"开/关分屏"的开关，
-                // 不是可拖动/可隐藏的胶囊 ⇒ 不进 hud_pills 掩码、不进位置表、不进 pillAnchorWriters。
-                // 与齿轮同一道录制锁：录制中只给锁提示，不切分屏（会话与文件已经开写，不能中途改版面）。
-                WotaIconButton(
-                    image = Icons.Outlined.Splitscreen,
-                    description = stringResource(R.string.cam_split),
-                    selected = splitOn,
-                    onClick = { if (recording) lockTip() else splitOn = !splitOn },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        // 让到齿轮左侧：右缘按「设计留白 + 齿轮宽 + 同排间距」退，令牌全部来自同一套
-                        // （HudEdgePad/TopRowGap 是 HudTopChrome 那排自己的令牌，不新造间距数字）
-                        .padding(end = HudEdgePad + WotaHit.iconButton + TopRowGap, top = TopTopPad)
-                )
-                // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
-                // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
-                // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。
-                // 位置只吃 safeDrawingPadding()（贴边避让交系统），不写任何方向常量。
-                MergeDebugBadge(Modifier.align(Alignment.TopCenter).padding(top = WotaSpace.xs))
-                // #84 霜探针：debugHook 变体 + adb extra 才组合（见 FrostProbe 的类注释）。
-                // 挂 TopStart：默认横屏下左上角不与顶栏（居中）或左 Dock（中段）相压；只画不收指
-                FrostProbeOverlay(glEngine, Modifier.align(Alignment.TopStart))
-                // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
-                // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
-                // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
-                // 凭证，跟着四周一起收掉就等于把录制指示藏了，所以这里与 [HudTopChrome] 同进同出。
-                // 宽度上限补回抽取前那条 fillMaxWidth Row 给的硬约束（见 topBarMaxWidthDp）：胶囊组一旦
-                // 脱离那行 Row 就没有布局兜底了，字宽估算是纯算术，估算偏了只会从右缘溢出去。
-                HudZoneBox(
-                    zone = HudZone.TOP,
-                    placement = placementOf(HudZone.TOP),
-                    area = baseArea,
-                    modifier = Modifier.widthIn(max = topBarMaxWidthDp),
-                    // 录制页顶栏本来就贴顶（原生对齐只让一枚 TopTopPad）⇒ 0 = 与改前逐字同值；
-                    // 这条下限只有编辑页那条操作栏需要（#79，见 chromeBandBottomDp）
-                    nativeTopMinDp = 0,
-                    onCardRect = { putCardRect(HudZone.TOP, it) }
+            CompositionLocalProvider(LocalPreviewCoords provides previewCoords) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .safeDrawingPadding()
+                        .onSizeChanged {
+                            val w = with(hudDensity) { it.width.toDp().value.roundToInt() }
+                            val h = with(hudDensity) { it.height.toDp().value.roundToInt() }
+                            if (w != safeW) safeW = w
+                            if (h != safeH) safeH = h
+                        }
                 ) {
-                    HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
-                }
-                // ---- 左右竖 Dock：有浮层打开时向各自外侧滑出、关闭滑回（不再随面板硬卸载）----
-                // 常驻组合是刻意的：zoneRects 的实测宽持续回报，dockBottomAvoidDp 那套避让账
-                // 不因滑出归零，回滑时布局不抖。位移走 HudZoneBox 的 graphicsLayer 通道
-                // （shiftXPx 只在 layer 块里读，动画不触发整页重组）；滑出到位后内容整体在屏外，
-                // 触摸自然不可达，无需再挂禁用开关。
-                //
-                // 触发判据**只认浮层本身开着**，不记控件在哪枚容器里：就近胶囊（[pop]）与整块面板
-                // （[sheet]）都是"有弹窗的控件"开出来的——竖 Dock 内的条目、底栏左右侧那两颗
-                // （镜头 / 码率）、顶栏胶囊组全走这两条路。理由：本项目有「编辑控件位置」，
-                // 同颗控件可被挪到任意栏位，按栏位写死触发条件（"只有左 Dock 的才滑"）会在控件
-                // 被挪动后静默失配；按浮层态触发则与位置表无关，控件挪到哪都自动正确。
-                // 弹窗锚点取的是**布局期**回报的窗口矩形（pillAnchorReport → boundsInWindow），
-                // graphicsLayer 位移不触发 onGloballyPositioned 回调，所以滑出期间弹窗钉在原地
-                // 不动、不会跟着 Dock 一起被拖出屏外（霜板那条链是反过来的需求，另见 HudDockZone）。
-                val dockSlideMotion = LocalMotion.current
-                val docksOut = sheet != Sheet.NONE || pop != null
-                val dockSlide = remember { Animatable(0f) }
-                LaunchedEffect(docksOut) {
-                    val target = if (docksOut) 1f else 0f
-                    if (dockSlide.value != target) dockSlide.animateTo(target, dockSlideMotion.float)
-                }
-                // 完全出屏的账：以**实测窗口缘**为锚——左 Dock 平移「卡片右缘 + 一枚设计留白」、
-                // 右 Dock 平移「窗口宽 − 卡片左缘 + 同一枚」。不再用“槽起点 8dp + 卡宽”反推：
-                // 霜板实际绘制宽含内边距账，反推量恒少一截，滑出后右缘永远留 ~20dp 残段压弹窗
-                // （2026-10-04 真机取证：残影 3 秒落定后仍在，非动画未完）。
-                val hudEdgePadPx = with(hudDensity) { HudEdgePad.toPx() }
-                val hudRootView = LocalView.current.rootView
-                HudZoneBox(
-                    zone = HudZone.LEFT,
-                    placement = placementOf(HudZone.LEFT),
-                    // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
-                    area = leftArea,
-                    shiftXPx = { -dockSlide.value * ((zoneRects[HudZone.LEFT] ?: IntRect.Zero).right.coerceAtLeast(0) + hudEdgePadPx) },
-                    nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
-                    onCardRect = { putCardRect(HudZone.LEFT, it) }
-                ) {
-                    HudDockZone(
-                        HudZone.LEFT,
-                        hudLayout.gridItems(HudZone.LEFT, gridPlan),
-                        hudCtx,
-                        zoneBandHeight(HudZone.LEFT, leftArea),
-                        // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
-                        hudLayout.defaultGridOf(HudZone.LEFT, gridPlan),
-                        frostVisible = !docksOut
+                    // 顶栏那排的固定件（设置入口 + 告警条）实测高回报给竖 Dock 当上边界（S2-1）
+                    HudTopChrome(
+                        audioDegraded = ui.audioDegraded,
+                        legacy = ability?.isLegacy() == true,
+                        deviceFailedHighFps = ui.device == DeviceStatus.OPEN_FAILED_HIGH_FPS,
+                        effect = frameEffect,
+                        renderMode = renderMode,
+                        onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
+                        onHeightChanged = { if (topBarH != it) topBarH = it }
                     )
-                }
-                // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
-                // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
-                // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
-                // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
-                HudZoneBox(
-                    zone = HudZone.RIGHT,
-                    placement = placementOf(HudZone.RIGHT),
-                    area = rightArea,
-                    shiftXPx = { dockSlide.value * ((hudRootView.width - (zoneRects[HudZone.RIGHT] ?: IntRect.Zero).left.coerceAtLeast(0)) + hudEdgePadPx) },
-                    nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                    onCardRect = { putCardRect(HudZone.RIGHT, it) }
-                ) {
-                    HudDockZone(
-                        HudZone.RIGHT,
-                        hudLayout.gridItems(HudZone.RIGHT, gridPlan),
-                        hudCtx,
-                        zoneBandHeight(HudZone.RIGHT, rightArea),
-                        hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan),   // #80 锚定与预留的唯一来源
-                        frostVisible = !docksOut
+                    // 分屏入口：与设置齿轮**同级**的固定件（同一排右端）。它是"开/关分屏"的开关，
+                    // 不是可拖动/可隐藏的胶囊 ⇒ 不进 hud_pills 掩码、不进位置表、不进 pillAnchorWriters。
+                    // 与齿轮同一道录制锁：录制中只给锁提示，不切分屏（会话与文件已经开写，不能中途改版面）。
+                    WotaIconButton(
+                        image = Icons.Outlined.Splitscreen,
+                        description = stringResource(R.string.cam_split),
+                        selected = splitOn,
+                        onClick = { if (recording) lockTip() else splitOn = !splitOn },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            // 让到齿轮左侧：右缘按「设计留白 + 齿轮宽 + 同排间距」退，令牌全部来自同一套
+                            // （HudEdgePad/TopRowGap 是 HudTopChrome 那排自己的令牌，不新造间距数字）
+                            .padding(end = HudEdgePad + WotaHit.iconButton + TopRowGap, top = TopTopPad)
                     )
-                }
-                // READOUT/底栏/码率 chip 维持与面板互斥的硬卸载：读数与快门在录制语义里本就不该
-                // 和面板同屏，这轮只有两枚竖 Dock 换装成滑出动画
-                if (sheet == Sheet.NONE) {
-                    // 六项第 4 条：快门速度 / 帧率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）；
-                    // 码率已挪 Dock 外同带（10-01 布局批，见下面 BOTTOM 那枚 HudZoneBox 之后的 chip）。
-                    // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
-                    // 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
-                    // #70 A：这块的底边与带高读的是 readoutArea（planReadoutRow 那次决策），不再读 baseArea——
-                    // 后者带的是"底栏那一排的带高"，把它当 padding(bottom=) 用就是把读数手算抬到 Dock 上方，
-                    // 那是 §14.2 里被点名第二次的写法。绝对落位那一支（placementOf）也走同一个 areaOf 出口，
-                    // 所以钳制带与原生对齐带不会分叉。
+                    // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
+                    // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
+                    // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。
+                    // 位置只吃 safeDrawingPadding()（贴边避让交系统），不写任何方向常量。
+                    MergeDebugBadge(Modifier.align(Alignment.TopCenter).padding(top = WotaSpace.xs))
+                    // #84 霜探针：debugHook 变体 + adb extra 才组合（见 FrostProbe 的类注释）。
+                    // 挂 TopStart：默认横屏下左上角不与顶栏（居中）或左 Dock（中段）相压；只画不收指
+                    FrostProbeOverlay(glEngine, Modifier.align(Alignment.TopStart))
+                    // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
+                    // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
+                    // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
+                    // 凭证，跟着四周一起收掉就等于把录制指示藏了，所以这里与 [HudTopChrome] 同进同出。
+                    // 宽度上限补回抽取前那条 fillMaxWidth Row 给的硬约束（见 topBarMaxWidthDp）：胶囊组一旦
+                    // 脱离那行 Row 就没有布局兜底了，字宽估算是纯算术，估算偏了只会从右缘溢出去。
                     HudZoneBox(
-                        zone = HudZone.READOUT,
-                        placement = placementOf(HudZone.READOUT),
-                        area = readoutArea,
-                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                        onCardRect = { putCardRect(HudZone.READOUT, it) }
-                    ) {
-                        HudReadoutZone(
-                            hudLayout.gridItems(HudZone.READOUT, gridPlan),
-                            hudCtx,
-                            zoneBandHeight(HudZone.READOUT, readoutArea),
-                            // #80：读数块只预留**列数**（透明底板 ⇒ 不花观感钱），纵向那一轴是有意留的缺口，
-                            // 理由与两条出路都写在 GridAnchor 的文件头
-                            hudLayout.defaultGridOf(HudZone.READOUT, gridPlan)
-                        )
-                    }
-                    // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
-                    // 可视窗口水平中心，挖孔落到左短边还是右短边都跟着中心走。旧写法在这里又扣一笔写死的 34dp
-                    // （外层已经避过让位了，等于双重让位），于是两个横屏姿态都往**左**偏 34px：带在左时中心落在
-                    // 800px（应为 834px）、带在右时 732px（应为 766px）。任务 #68 已删那笔扣减。
-                    // S2-2 C：整排实测高回报给三处下边界。第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进
-                    // graphicsLayer）→ 松手落上栏/下栏，**只有 y 进表**（x 恒哨兵，见 onDrop 那段）。
-                    // 镜头那颗被挪去别的容器时这枚 Dock 只留等宽空槽（右槽实测宽归 0，槽宽回到 34dp 那一档）
-                    HudZoneBox(
-                        zone = HudZone.BOTTOM,
-                        placement = placementOf(HudZone.BOTTOM),
+                        zone = HudZone.TOP,
+                        placement = placementOf(HudZone.TOP),
                         area = baseArea,
-                        shiftYPx = { if (dockDragging) dockShiftPx else 0f },
-                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                        onCardRect = { putCardRect(HudZone.BOTTOM, it) }
+                        modifier = Modifier.widthIn(max = topBarMaxWidthDp),
+                        // 录制页顶栏本来就贴顶（原生对齐只让一枚 TopTopPad）⇒ 0 = 与改前逐字同值；
+                        // 这条下限只有编辑页那条操作栏需要（#79，见 chromeBandBottomDp）
+                        nativeTopMinDp = 0,
+                        onCardRect = { putCardRect(HudZone.TOP, it) }
                     ) {
-                        HudBottomZone(
-                            showLens = lensInBottomDock,
-                            ctx = hudCtx,
-                            drag = dockDrag
+                        HudTopZone(hudLayout.visibleOrderOf(HudZone.TOP, visibleEntries), hudCtx)
+                    }
+                    // ---- 左右竖 Dock：有浮层打开时向各自外侧滑出、关闭滑回（不再随面板硬卸载）----
+                    // 常驻组合是刻意的：zoneRects 的实测宽持续回报，dockBottomAvoidDp 那套避让账
+                    // 不因滑出归零，回滑时布局不抖。位移走 HudZoneBox 的 graphicsLayer 通道
+                    // （shiftXPx 只在 layer 块里读，动画不触发整页重组）；滑出到位后内容整体在屏外，
+                    // 触摸自然不可达，无需再挂禁用开关。
+                    //
+                    // 触发判据**只认浮层本身开着**，不记控件在哪枚容器里：就近胶囊（[pop]）与整块面板
+                    // （[sheet]）都是"有弹窗的控件"开出来的——竖 Dock 内的条目、底栏左右侧那两颗
+                    // （镜头 / 码率）、顶栏胶囊组全走这两条路。理由：本项目有「编辑控件位置」，
+                    // 同颗控件可被挪到任意栏位，按栏位写死触发条件（"只有左 Dock 的才滑"）会在控件
+                    // 被挪动后静默失配；按浮层态触发则与位置表无关，控件挪到哪都自动正确。
+                    // 弹窗锚点取的是**布局期**回报的窗口矩形（pillAnchorReport → boundsInWindow），
+                    // graphicsLayer 位移不触发 onGloballyPositioned 回调，所以滑出期间弹窗钉在原地
+                    // 不动、不会跟着 Dock 一起被拖出屏外（霜板那条链是反过来的需求，另见 HudDockZone）。
+                    val dockSlideMotion = LocalMotion.current
+                    val docksOut = sheet != Sheet.NONE || pop != null
+                    val dockSlide = remember { Animatable(0f) }
+                    LaunchedEffect(docksOut) {
+                        val target = if (docksOut) 1f else 0f
+                        if (dockSlide.value != target) dockSlide.animateTo(target, dockSlideMotion.float)
+                    }
+                    // 完全出屏的账：以**实测窗口缘**为锚——左 Dock 平移「卡片右缘 + 一枚设计留白」、
+                    // 右 Dock 平移「窗口宽 − 卡片左缘 + 同一枚」。不再用“槽起点 8dp + 卡宽”反推：
+                    // 霜板实际绘制宽含内边距账，反推量恒少一截，滑出后右缘永远留 ~20dp 残段压弹窗
+                    // （2026-10-04 真机取证：残影 3 秒落定后仍在，非动画未完）。
+                    val hudEdgePadPx = with(hudDensity) { HudEdgePad.toPx() }
+                    val hudRootView = LocalView.current.rootView
+                    HudZoneBox(
+                        zone = HudZone.LEFT,
+                        placement = placementOf(HudZone.LEFT),
+                        // 10-01 第 5 项：左 Dock 也读自己的 area（只避真横向重叠的邻居，见 leftArea）
+                        area = leftArea,
+                        shiftXPx = { -dockSlide.value * ((zoneRects[HudZone.LEFT] ?: IntRect.Zero).right.coerceAtLeast(0) + hudEdgePadPx) },
+                        nativeTopMinDp = 0,   // 只有 TOP 的原生对齐读它（#69：无默认值必传）
+                        onCardRect = { putCardRect(HudZone.LEFT, it) }
+                    ) {
+                        HudDockZone(
+                            HudZone.LEFT,
+                            hudLayout.gridItems(HudZone.LEFT, gridPlan),
+                            hudCtx,
+                            zoneBandHeight(HudZone.LEFT, leftArea),
+                            // #80：默认表格子 = 格长与预留档数的唯一来源（不看谁摆到哪一格），所以拖一颗不动别颗
+                            hudLayout.defaultGridOf(HudZone.LEFT, gridPlan),
+                            frostVisible = !docksOut
                         )
                     }
-                    // ---- 码率读数 chip（10-01 布局批第 1 条）：底栏 Dock 左侧、同一带 ----
-                    // 选 b 案（HUD 根盒上加 sibling）不选 a 案（Row 包 BOTTOM 的 HudZoneBox）：BOTTOM
-                    // 槽位是 `align(BottomCenter) + fillMaxWidth`（HudZoneBox），Row 里先摆 chip 再摆 Dock
-                    // 会把 Dock 的居中基准从"整宽安全区"改成"扣掉 chip 的剩余宽"，录制键中心≠可视水平
-                    // 中心，不变量②当场崩；且 HudZoneBox 是 BoxScope 扩展，Row 作用域里编译不过。
-                    // 横向用 offset 反推而不用 padding(end=)：padding 会把左半带剩余宽压成 chip 的测量
-                    // 上限（竖屏 360dp 那档只有 ≈64dp，chip 自然宽 ≈90dp 被迫裁字——§58/§73 那族坑）；
-                    // offset 只平移不改测量约束，chip 永远按自然宽量。左半带真装不下（竖屏）时先退贴屏幕
-                    // 左缘；若那样仍压到 Dock（fallback 右缘越过 Dock 左缘）则再上移退出这条带
-                    // （见 bitrateYOffPx）——分两步退，第一步保持同带、第二步才是离带。chip 宽实测
-                    // 两轮收敛（与 topBarH/dockStripH 同一套手法），首帧按退避位画、第二帧贴上 Dock 左缘。
-                    // 已知边界：第 8 条把 Dock 长按换到上栏后这颗留在底带——跟 y 需要安全区盒的窗口原点
-                    // 这个新机制，用户未要求，不做。
-                    if (HudItem.BITRATE in hudItems) {
-                        val bitrateLabel = hudCtx.readoutValue(HudItem.BITRATE)
-                        if (bitrateLabel != null) {
-                            var bitrateChipWpx by remember { mutableIntStateOf(0) }
-                            val bitrateGapPx = with(hudDensity) { WotaSpace.s.toPx() }
-                            val bitrateEdgePx = with(hudDensity) { HudEdgePad.toPx() }
-                            val bitrateDockW =
-                                if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt()
-                            // Dock 居中于整宽安全区（不变量②），左缘 = (safeW − dockW)/2；
-                            // chip 右缘目标 = Dock 左缘 − 一枚 WotaSpace.s（与 planReadoutRow 的 dockGapDp 同一枚令牌）
-                            val bitrateDockLeftPx =
-                                with(hudDensity) { ((safeW - bitrateDockW).coerceAtLeast(0) / 2f).dp.toPx() }
-                            val bitrateHugX = bitrateDockLeftPx - bitrateGapPx - bitrateChipWpx
-                            val bitrateFits = bitrateChipWpx > 0 && bitrateHugX >= bitrateEdgePx
-                            val bitrateX = if (bitrateFits) bitrateHugX else bitrateEdgePx
-                            // 审查 P1（10-01 布局批）：竖屏窄带（safeW <≈434dp）时 fallback 位（贴屏幕左缘）
-                            // 的右缘会越过 Dock 左缘、压上底板 26dp——fallback 必须真正退出这条带：上移一档
-                            // （dockStripH + 一枚间隙），与 READOUT 退化档"装不下就退到带上方"真正同族
-                            // （原注释称同族是错的，两者的退法并不同族）。首帧 chipW=0 不判重叠，第二帧实测接管
-                            val bitrateYOffPx =
-                                if (!bitrateFits && bitrateEdgePx + bitrateChipWpx > bitrateDockLeftPx) {
-                                    with(hudDensity) { (dockStripH.dp + WotaSpace.s).toPx() }.roundToInt()
-                                } else 0
-                            WotaChip(
-                                label = bitrateLabel,
-                                selected = false,
-                                modifier = Modifier
-                                    .align(Alignment.BottomStart)
-                                    // 与底板可见底边齐平（BottomBarOuterPadV 那一档），即与 READOUT 那行
-                                    // 同一条底缘线——"同带"的纵向口径与 #70 A 一致；上移档由 bitrateYOffPx 承担
-                                    .padding(bottom = BottomBarOuterPadV)
-                                    .offset { IntOffset(bitrateX.roundToInt(), -bitrateYOffPx) }
-                                    .onSizeChanged { if (it.width != bitrateChipWpx) bitrateChipWpx = it.width }
-                                    // BITRATE 就近浮层的锚点写入方从 HudEntryItem 换到这颗：不挂的话
-                                    // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
-                                    .pillAnchorReport(pillAnchors, PillKey.BITRATE),
-                                secondary = stringResource(HudItem.BITRATE.labelRes),
-                                onClick = { hudCtx.onReadoutCycle(HudItem.BITRATE) },
-                                onLongClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
-                                frost = hudFrostPillPlate
+                    // 右缘只留 HudEdgePad 那枚 8dp 设计留白（与左竖 Dock 的起始边同一枚令牌），贴边避让全在
+                    // 外层那层 safeDrawingPadding()：挖孔落到哪条边它就避哪条，本层不再按方向补让位量
+                    // （任务 #68 删掉的就是那笔写死的 34dp，出处见 docs/plan/13 §九·补）。
+                    // 上下夹在顶栏与底栏之间：整栏占满全高时，录制中出现音量表会把姿态仪顶到设置钮上。
+                    HudZoneBox(
+                        zone = HudZone.RIGHT,
+                        placement = placementOf(HudZone.RIGHT),
+                        area = rightArea,
+                        shiftXPx = { dockSlide.value * ((hudRootView.width - (zoneRects[HudZone.RIGHT] ?: IntRect.Zero).left.coerceAtLeast(0)) + hudEdgePadPx) },
+                        nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                        onCardRect = { putCardRect(HudZone.RIGHT, it) }
+                    ) {
+                        HudDockZone(
+                            HudZone.RIGHT,
+                            hudLayout.gridItems(HudZone.RIGHT, gridPlan),
+                            hudCtx,
+                            zoneBandHeight(HudZone.RIGHT, rightArea),
+                            hudLayout.defaultGridOf(HudZone.RIGHT, gridPlan),   // #80 锚定与预留的唯一来源
+                            frostVisible = !docksOut
+                        )
+                    }
+                    // READOUT/底栏/码率 chip 维持与面板互斥的硬卸载：读数与快门在录制语义里本就不该
+                    // 和面板同屏，这轮只有两枚竖 Dock 换装成滑出动画
+                    if (sheet == Sheet.NONE) {
+                        // 六项第 4 条：快门速度 / 帧率这几颗常驻读数搬到**录制键右侧**（横屏右手拇指可达）；
+                        // 码率已挪 Dock 外同带（10-01 布局批，见下面 BOTTOM 那枚 HudZoneBox 之后的 chip）。
+                        // 它不进底栏那枚 Dock：Dock 内左右两槽必须等宽快门才居中，读数进去就把整枚 Dock 撑到
+                        // 500dp 以上，横屏 800dp 宽都嫌挤、竖屏直接溢出。
+                        // #70 A：这块的底边与带高读的是 readoutArea（planReadoutRow 那次决策），不再读 baseArea——
+                        // 后者带的是"底栏那一排的带高"，把它当 padding(bottom=) 用就是把读数手算抬到 Dock 上方，
+                        // 那是 §14.2 里被点名第二次的写法。绝对落位那一支（placementOf）也走同一个 areaOf 出口，
+                        // 所以钳制带与原生对齐带不会分叉。
+                        HudZoneBox(
+                            zone = HudZone.READOUT,
+                            placement = placementOf(HudZone.READOUT),
+                            area = readoutArea,
+                            nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                            onCardRect = { putCardRect(HudZone.READOUT, it) }
+                        ) {
+                            HudReadoutZone(
+                                hudLayout.gridItems(HudZone.READOUT, gridPlan),
+                                hudCtx,
+                                zoneBandHeight(HudZone.READOUT, readoutArea),
+                                // #80：读数块只预留**列数**（透明底板 ⇒ 不花观感钱），纵向那一轴是有意留的缺口，
+                                // 理由与两条出路都写在 GridAnchor 的文件头
+                                hudLayout.defaultGridOf(HudZone.READOUT, gridPlan)
                             )
+                        }
+                        // 这枚 Dock 的居中父区域 = 套了 safeDrawingPadding() 之后的**整宽安全区** ⇒ 快门中心就是
+                        // 可视窗口水平中心，挖孔落到左短边还是右短边都跟着中心走。旧写法在这里又扣一笔写死的 34dp
+                        // （外层已经避过让位了，等于双重让位），于是两个横屏姿态都往**左**偏 34px：带在左时中心落在
+                        // 800px（应为 834px）、带在右时 732px（应为 766px）。任务 #68 已删那笔扣减。
+                        // S2-2 C：整排实测高回报给三处下边界。第 8 条：长按这枚底板 → 吸收两颗 → 上下拖（只进
+                        // graphicsLayer）→ 松手落上栏/下栏，**只有 y 进表**（x 恒哨兵，见 onDrop 那段）。
+                        // 镜头那颗被挪去别的容器时这枚 Dock 只留等宽空槽（右槽实测宽归 0，槽宽回到 34dp 那一档）
+                        HudZoneBox(
+                            zone = HudZone.BOTTOM,
+                            placement = placementOf(HudZone.BOTTOM),
+                            area = baseArea,
+                            shiftYPx = { if (dockDragging) dockShiftPx else 0f },
+                            nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                            onCardRect = { putCardRect(HudZone.BOTTOM, it) }
+                        ) {
+                            HudBottomZone(
+                                showLens = lensInBottomDock,
+                                ctx = hudCtx,
+                                drag = dockDrag
+                            )
+                        }
+                        // ---- 码率读数 chip（10-01 布局批第 1 条）：底栏 Dock 左侧、同一带 ----
+                        // 选 b 案（HUD 根盒上加 sibling）不选 a 案（Row 包 BOTTOM 的 HudZoneBox）：BOTTOM
+                        // 槽位是 `align(BottomCenter) + fillMaxWidth`（HudZoneBox），Row 里先摆 chip 再摆 Dock
+                        // 会把 Dock 的居中基准从"整宽安全区"改成"扣掉 chip 的剩余宽"，录制键中心≠可视水平
+                        // 中心，不变量②当场崩；且 HudZoneBox 是 BoxScope 扩展，Row 作用域里编译不过。
+                        // 横向用 offset 反推而不用 padding(end=)：padding 会把左半带剩余宽压成 chip 的测量
+                        // 上限（竖屏 360dp 那档只有 ≈64dp，chip 自然宽 ≈90dp 被迫裁字——§58/§73 那族坑）；
+                        // offset 只平移不改测量约束，chip 永远按自然宽量。左半带真装不下（竖屏）时先退贴屏幕
+                        // 左缘；若那样仍压到 Dock（fallback 右缘越过 Dock 左缘）则再上移退出这条带
+                        // （见 bitrateYOffPx）——分两步退，第一步保持同带、第二步才是离带。chip 宽实测
+                        // 两轮收敛（与 topBarH/dockStripH 同一套手法），首帧按退避位画、第二帧贴上 Dock 左缘。
+                        // 已知边界：第 8 条把 Dock 长按换到上栏后这颗留在底带——跟 y 需要安全区盒的窗口原点
+                        // 这个新机制，用户未要求，不做。
+                        if (HudItem.BITRATE in hudItems) {
+                            val bitrateLabel = hudCtx.readoutValue(HudItem.BITRATE)
+                            if (bitrateLabel != null) {
+                                var bitrateChipWpx by remember { mutableIntStateOf(0) }
+                                val bitrateGapPx = with(hudDensity) { WotaSpace.s.toPx() }
+                                val bitrateEdgePx = with(hudDensity) { HudEdgePad.toPx() }
+                                val bitrateDockW =
+                                    if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt()
+                                // Dock 居中于整宽安全区（不变量②），左缘 = (safeW − dockW)/2；
+                                // chip 右缘目标 = Dock 左缘 − 一枚 WotaSpace.s（与 planReadoutRow 的 dockGapDp 同一枚令牌）
+                                val bitrateDockLeftPx =
+                                    with(hudDensity) { ((safeW - bitrateDockW).coerceAtLeast(0) / 2f).dp.toPx() }
+                                val bitrateHugX = bitrateDockLeftPx - bitrateGapPx - bitrateChipWpx
+                                val bitrateFits = bitrateChipWpx > 0 && bitrateHugX >= bitrateEdgePx
+                                val bitrateX = if (bitrateFits) bitrateHugX else bitrateEdgePx
+                                // 审查 P1（10-01 布局批）：竖屏窄带（safeW <≈434dp）时 fallback 位（贴屏幕左缘）
+                                // 的右缘会越过 Dock 左缘、压上底板 26dp——fallback 必须真正退出这条带：上移一档
+                                // （dockStripH + 一枚间隙），与 READOUT 退化档"装不下就退到带上方"真正同族
+                                // （原注释称同族是错的，两者的退法并不同族）。首帧 chipW=0 不判重叠，第二帧实测接管
+                                val bitrateYOffPx =
+                                    if (!bitrateFits && bitrateEdgePx + bitrateChipWpx > bitrateDockLeftPx) {
+                                        with(hudDensity) { (dockStripH.dp + WotaSpace.s).toPx() }.roundToInt()
+                                    } else 0
+                                WotaChip(
+                                    label = bitrateLabel,
+                                    selected = false,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        // 与底板可见底边齐平（BottomBarOuterPadV 那一档），即与 READOUT 那行
+                                        // 同一条底缘线——"同带"的纵向口径与 #70 A 一致；上移档由 bitrateYOffPx 承担
+                                        .padding(bottom = BottomBarOuterPadV)
+                                        .offset { IntOffset(bitrateX.roundToInt(), -bitrateYOffPx) }
+                                        .onSizeChanged { if (it.width != bitrateChipWpx) bitrateChipWpx = it.width }
+                                        // BITRATE 就近浮层的锚点写入方从 HudEntryItem 换到这颗：不挂的话
+                                        // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
+                                        .pillAnchorReport(pillAnchors, PillKey.BITRATE),
+                                    secondary = stringResource(HudItem.BITRATE.labelRes),
+                                    onClick = { hudCtx.onReadoutCycle(HudItem.BITRATE) },
+                                    onLongClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
+                                    frost = hudFrostPillPlate
+                                )
+                            }
                         }
                     }
                 }
@@ -1564,11 +1603,13 @@ private fun SplitPanel(
  * 参考视频**外放**（用 PlayerEngine 默认音量）：内录要 MediaProjection 授权，本批不做，
  * 只让用户听得见。选片走系统相册 ACTION_PICK（与对比页同一手法）：content Uri → mediaId → 仓库反查；
  * 选完默认暂停（[com.wotagei.cam.player.PlayerEngine.attach] 内置 playWhenReady=false），点播放才播。
+ * （上面这句说的是**采集**外放，不是选轨：内录出产片——容器双音轨——的选轨播放已支持，见下。）
  *
  * [autoAttachId]：「对着左片练」带进来的参考片（2026-10-04 增补）——非空且还没挂片时直接挂上，
  * 单曲循环并**自动开播**（练习场景左片就是用来边看边跳的，不再让用户去相册里点一遍）；
  * 挂上后即与手选片无异，用户仍可换片/暂停。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifier) {
     val app = LocalContext.current.applicationContext
@@ -1586,9 +1627,15 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     val pan = remember { mutableStateOf(Offset.Zero) }
     var rotationQuarter by remember { mutableIntStateOf(0) }
 
+    // 内录选轨（本轮）：双音轨片才亮音轨 chip。audioPick 是会话态，remember(clipUri) 让换片复位 ENV
+    // （引擎侧 override 由 attach 内置的 clearAudioOverride 兜底）；dualAudio 由挂片时 MediaExtractor 探测。
+    var audioPick by remember(clipUri) { mutableStateOf(AudioTrackKind.ENV) }
+    var dualAudio by remember(clipUri) { mutableStateOf(false) }
+
     val pos by engine.positionMs.observed()
     val dur by engine.durationMs.observed()
     val playing by engine.isPlaying.observed()
+    val audioGroups by engine.audioGroups.observed()
 
     // 练习参考片自动挂载：只挂一次（clipUri 已非空 = 用户换过片，别再拉回去）
     LaunchedEffect(autoAttachId) {
@@ -1603,6 +1650,23 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
             engine.softPause(false)
             clipUri = clip.uri
         }
+    }
+
+    // 挂片时探测音轨数（IO 线程，MediaExtractor；与单播放页 PlayerScreen 同口径）：>=2 才亮音轨 chip，
+    // 单音轨片与外来视频静默不显；cap-only 单音轨段同样不显（内录轨零样本废弃后与普通录像不可分）
+    LaunchedEffect(clipUri) {
+        val uri = clipUri ?: return@LaunchedEffect
+        dualAudio = withContext(Dispatchers.IO) { TrackSync.countAudioTracks(app, uri) >= 2 }
+    }
+
+    // 音轨 override 重放（**必须**）：attach 会 clearAudioOverride()，而轨读数要等 onTracksChanged 才到——
+    // 只在「选轨那一刻」下发 override 会在换片/首帧时丢掉（"选完没效果"的经典坑），所以把 audioGroups.size
+    // 也做 key，轨读数到位后自动补一次。组下标单一映射真源 = CompareAudio.splitAudioPlanOf（禁止裸写 (1,0)）。
+    LaunchedEffect(audioPick, audioGroups.size, clipUri) {
+        if (clipUri == null) return@LaunchedEffect
+        val plan = splitAudioPlanOf(dualAudio, audioPick)
+        if (plan.overrideGroupIndex == null) engine.clearAudioOverride()
+        else engine.setAudioTrackOverride(plan.overrideGroupIndex, 0)
     }
 
     val picker = rememberLauncherForActivityResult(
@@ -1686,9 +1750,11 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                     modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
                 )
             }
-            // 极简控制行：一枚播放/暂停 + 一条时间读数；进度条是唯一可拖 seek 的入口
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            // 极简控制行：一枚播放/暂停 + 一条时间读数 +（双音轨片才有的）音轨选择 chip；
+            // 进度条是唯一可拖 seek 的入口。用 FlowRow 而非 Row：分屏右窗只有半屏宽，窄机窄分屏下
+            // 播放键+读数+chip 允许拥挤换行（沿用设置页 FlowRow 先例，不写死宽度）。
+            FlowRow(
+                verticalArrangement = Arrangement.spacedBy(WotaSpace.xs),
                 horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
             ) {
                 WotaIconButton(
@@ -1701,6 +1767,21 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                     style = MaterialTheme.typography.labelSmall,
                     color = WotaColor.textLo
                 )
+                // 音轨选择 chip（本轮）：**只在双音轨片渲染**（单音轨片/cap-only 单轨段静默不显，
+                // 与单播放页同一条回归红线）。只做「选择音频轨」——分屏没有导出动线，需求也只要求选轨，
+                // 别顺手补齐「同步/导出」控件（它们要的正规时间轴在对比页 PlayerScreen/CompareScreen 那边）。
+                // 选中态 = 当前 pick；点击在环境/内录间切换，override 由上面 LaunchedEffect 统一下发。
+                if (dualAudio) {
+                    WotaChip(
+                        label = stringResource(
+                            if (audioPick == AudioTrackKind.ENV) R.string.player_track_env else R.string.player_track_cap
+                        ),
+                        selected = audioPick == AudioTrackKind.CAP,
+                        onClick = {
+                            audioPick = if (audioPick == AudioTrackKind.ENV) AudioTrackKind.CAP else AudioTrackKind.ENV
+                        }
+                    )
+                }
             }
             WotaSeekBar(
                 fraction = dragFrac ?: if (dur > 0) (pos.toFloat() / dur.toFloat()) else 0f,
@@ -1921,16 +2002,55 @@ private class RecordRunner(
     /** 本会话的转换目标帧率（sidecar 记账用） */
     private var activeArcDstFps = 0
 
+    /** 本会话（含自检重录）的起录参数：重录要重放**逐字同一套**会话接线，故与 attempt 分开存 */
+    private var sessionArgs: SessionArgs? = null
+
+    /** 本会话的输出库（重录沿用同一实例：seriesId 稳定，不因重录换系列） */
+    private var sessionStore: VideoStore? = null
+
+    /**
+     * 当前尝试创建的输出 sink：重录时作为丢弃兜底（引擎 discardCurrent 已删，重复删幂等）。
+     *
+     * ⚠ **只在 [beginSession] 赋值一次**，引擎发生分段轮转后它指向的仍是**首段**——那时首段已封段
+     * commit，不能无条件删。删除闸门见 `shouldDiscardAbandonedSink`（只删未进停录产物 parts 的那枚）。
+     */
+    private var sessionSink: OutputSink? = null
+
+    /** 自检已自动重录次数（0 = 首次尝试）；触顶 [MAX_RESTART_ATTEMPTS] 即明确失败 */
+    private var attempt = 0
+
     val status = MutableStateFlow(RecordStatus.IDLE)
     val elapsedMs = MutableStateFlow(0L)
     val volumeDb = MutableStateFlow(MIN_DB - 40f)
     val result = MutableStateFlow<RecordResult?>(null)
 
+    /**
+     * 自检触发的自动重录文案（资源 id）。UI 侧 collect 后走既有 hint 通道，读走即清——
+     * StateFlow 对相等值去重，不清的话同一次会话里的第二次重录置同一 id 再也不会发出来。
+     */
+    val retryNotice = MutableStateFlow<Int?>(null)
+
+    /** 起录参数的整束（[SessionArgs]）：start 收一次，自检重录按它整束重放 */
+    private class SessionArgs(
+        val width: Int,
+        val height: Int,
+        val fps: Int,
+        val sensorOrientation: Int,
+        val deviceDegrees: Int,
+        val front: Boolean,
+        val arcConvert: ArcConvertMode?,
+        val captureAudio: Boolean
+    )
+
+    fun clearRetryNotice() {
+        retryNotice.value = null
+    }
+
     fun probeFreeSpace(): Long = runCatching { VideoStore(app).freeSpaceMb() }.getOrDefault(0L)
 
     /**
-     * 起录状态机：IDLE → PREPARE →（等会话/编码面就绪）→ START。
-     * 校验顺序：可重入守卫 → 建 pending → prepare → 取编码面 → 交给相机 → start。
+     * 起录状态机：IDLE → PREPARE →（等会话/编码面就绪）→ START。会话体在 [beginSession]，
+     * 自检重录按同一束 [SessionArgs] 重放它（**会话参数不许在重录时重读**：重放同一套才是"从零重启"）。
      */
     @Suppress("LongParameterList")
     fun start(
@@ -1956,65 +2076,85 @@ private class RecordRunner(
             status.value = RecordStatus.PREPARE
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
-            val store = VideoStore(app)
-            store.checkFreeSpace()?.let { code ->
-                failNow(code); return@post
-            }
-            val renderMode = params.renderMode.value
-            val profile = buildProfile(
-                width, height, fps, sensorOrientation, deviceDegrees, front, renderMode,
-                arcConvert, captureAudio
-            )
-            val pending = store.createPending(0)
-            if (pending == null) {
-                failNow(RecordError.NO_OUTPUT); return@post
-            }
-            val sink = OutputSink.Pending(pending)
-            val rec = Recorders.create(app, profile, store)
-            recorder = rec
-            if (!rec.prepare(profile, sink)) {
-                rec.release()
-                // prepare 内部已按原因码记日志；这里把余量不足与通用失败区分给 UI
-                failNow(store.checkFreeSpace() ?: RecordError.PREPARE_FAILED)
-                return@post
-            }
-            val surface = rec.surface as? Surface
-            if (surface == null) {
-                rec.stop()
-                rec.release()
-                failNow(RecordError.NO_OUTPUT); return@post
-            }
-            if (renderMode == RenderMode.DIRECT) {
-                ctrl.setRecordingTarget(surface)
-                awaitPreview(PreviewStatus.ING)
-            } else {
-                // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
-                // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
-                //（无 sidecar 无前缀，用户无从察觉）
-                glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
-                glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
-                // 换段重挂：GPU 路 per-codec 输入面随分段轮转换代（引擎在泵线程建好新面后
-                // 同步回调），这里与首段同一口径「下发 + 等挂好」，GL 挂好前新段不 start；
-                // MrRecorder / DIRECT 路面跨段不变，引擎永不回调（空挂无害）
-                rec.onInputSurfaceRecreated = { newSurface ->
-                    (newSurface as? Surface)?.let { s ->
-                        glProvider()?.setOutputSurface(s, profile.width, profile.height, profile.fps)
-                        awaitEncoderSurface()
-                    }
+            attempt = 0
+            sessionArgs = SessionArgs(width, height, fps, sensorOrientation, deviceDegrees, front, arcConvert, captureAudio)
+            sessionStore = VideoStore(app)
+            beginSession()
+        }
+    }
+
+    /**
+     * 一次起录会话体（首录与自检重录共用）：建 pending → prepare → 取编码面 → 交给相机 → start。
+     * 校验顺序：可重入守卫（在 [start]）→ 余量 → 建 pending → prepare → 取编码面 → 交给相机 → start。
+     *
+     * 轮询与自检只在**首次尝试**（attempt==0）挂拍：重录时 status 全程保持 START，
+     * 既有的 pollTask 自续链与 healthCheckTask 不会因重录而双挂（重录全在同一个 handler 消息里跑完）。
+     */
+    private fun beginSession() {
+        val args = sessionArgs ?: return
+        val store = sessionStore ?: return
+        store.checkFreeSpace()?.let { code ->
+            failNow(code); return
+        }
+        val renderMode = params.renderMode.value
+        val profile = buildProfile(
+            args.width, args.height, args.fps, args.sensorOrientation, args.deviceDegrees,
+            args.front, renderMode, args.arcConvert, args.captureAudio
+        )
+        val pending = store.createPending(0)
+        if (pending == null) {
+            failNow(RecordError.NO_OUTPUT); return
+        }
+        val sink = OutputSink.Pending(pending)
+        sessionSink = sink
+        val rec = Recorders.create(app, profile, store)
+        recorder = rec
+        if (!rec.prepare(profile, sink)) {
+            rec.release()
+            // prepare 内部已按原因码记日志；这里把余量不足与通用失败区分给 UI
+            failNow(store.checkFreeSpace() ?: RecordError.PREPARE_FAILED)
+            return
+        }
+        val surface = rec.surface as? Surface
+        if (surface == null) {
+            rec.stop()
+            rec.release()
+            failNow(RecordError.NO_OUTPUT); return
+        }
+        if (renderMode == RenderMode.DIRECT) {
+            ctrl.setRecordingTarget(surface)
+            awaitPreview(PreviewStatus.ING)
+        } else {
+            // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
+            // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
+            //（无 sidecar 无前缀，用户无从察觉）。重录也是"新会话"，同样必发
+            glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
+            glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
+            // 换段重挂：GPU 路 per-codec 输入面随分段轮转换代（引擎在泵线程建好新面后
+            // 同步回调），这里与首段同一口径「下发 + 等挂好」，GL 挂好前新段不 start；
+            // MrRecorder / DIRECT 路面跨段不变，引擎永不回调（空挂无害）
+            rec.onInputSurfaceRecreated = { newSurface ->
+                (newSurface as? Surface)?.let { s ->
+                    glProvider()?.setOutputSurface(s, profile.width, profile.height, profile.fps)
+                    awaitEncoderSurface()
                 }
-                awaitEncoderSurface()
             }
-            rec.start()
-            status.value = RecordStatus.START
+            awaitEncoderSurface()
+        }
+        rec.start()
+        status.value = RecordStatus.START
+        // 轮询只挂一次：重录(attempt>0)复用已在跑的 pollTask 自续链，重挂会让时长/音量条翻倍刷新
+        if (attempt == 0) {
             polling = true
             handler.post(pollTask)
-            Log.i(
-                TAG_UI,
-                "record start ${profile.width}x${profile.height}@${profile.fps} gpu=${profile.useGpu} " +
-                    "hint=${profile.orientationHint} audio=${profile.audioEnabled} " +
-                    "capture=${profile.captureAudio}"
-            )
         }
+        handler.post(healthCheckTask)
+        Log.i(
+            TAG_UI,
+            "record start attempt=$attempt ${profile.width}x${profile.height}@${profile.fps} gpu=${profile.useGpu} " +
+                "hint=${profile.orientationHint} audio=${profile.audioEnabled} " +
+                "capture=${profile.captureAudio}"
+        )
     }
 
     /** 非阻塞停止（ON_PAUSE 用）：投递到工作线程，避免卡主线程 */
@@ -2053,6 +2193,108 @@ private class RecordRunner(
             volumeDb.value = AudioProbe.dbOf(rec.amplitude())
             if (status.value == RecordStatus.START) handler.postDelayed(this, POLL_MS)
         }
+    }
+
+    /**
+     * 自检拍（约 180ms 一拍）。与 [pollTask] 同款匿名对象体：重投时自引用，不撞递归类型检查。
+     */
+    private val healthCheckTask: Runnable = object : Runnable {
+        override fun run() {
+            healthCheckLoop()
+        }
+    }
+
+    /**
+     * 起录自检：起录后**两档窗口**内问引擎"真在产出吗"（三格见 [com.wotagei.cam.record.healthVerdict]）。
+     * 判废且还有机会就 [abandonAndRestart] 从零重录；触顶走 [RecordError.SELF_CHECK_FAILED]。
+     * 健康即停检查（attempt 归零）。全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
+     *
+     * 【窗口口径】视频路（`videoTrackAdded`）吃短窗 [VIDEO_WINDOW_MS]：编码器 1.2s 都没建起来
+     * （EGL_BAD_ALLOC 那次）短窗即抓。含音轨就绪的完整三格吃长窗 [FULL_WINDOW_MS]：`muxer` 启动要等
+     * 环境/内录轨 addTrack，音轨首包晚（部分机型 playback capture 无音频在播时不回缓冲）只是"慢"，
+     * **不许拿视频窗误杀**——本窗口只在"确实没起来"时弃段，不对慢启动做惩罚。
+     *
+     * 【覆盖边界（不许含糊）】完整三格判据**只覆盖 CodecRecorder 路**（fps>MR 上限 / 光弧修复 /
+     * 内录 三类）；MediaRecorder 路（30/60fps 常规档）只走 [weakHealthVerdict] 的错误码弱判，
+     * **不做产出健全性自检**（无逐缓冲回调，三格恒 false，套超窗只会反复重录）。
+     *
+     * 副作用核对：HEALTHY 前会多跑约 2 秒（3s 内每 [HEALTH_TICK_MS] 一拍），但这只是读引擎的
+     * `@Volatile` 字段快照，**不触碰录制本身**（不写文件、不调引擎、不改会话）。
+     */
+    private fun healthCheckLoop() {
+        if (!polling || status.value != RecordStatus.START) return
+        val rec = recorder ?: return
+        val h = rec.health()
+        val window = RecordHealthWindow(VIDEO_WINDOW_MS, FULL_WINDOW_MS, MAX_RESTART_ATTEMPTS)
+        val verdict = if (h.milestonesObservable) {
+            healthVerdict(
+                firstVideoSample = h.firstVideoSample,
+                muxStarted = h.muxStarted,
+                videoTrackAdded = h.videoTrackAdded,
+                errorCode = h.errorCode,
+                elapsedInWindowMs = h.elapsedMs,
+                window = window
+            )
+        } else {
+            // 引擎自报无逐格信号（MediaRecorder 路）：只认硬错误码，不许拿三格去套超窗
+            weakHealthVerdict(h.errorCode)
+        }
+        when (verdict) {
+            HealthVerdict.WAIT -> handler.postDelayed(healthCheckTask, HEALTH_TICK_MS)
+            HealthVerdict.HEALTHY -> attempt = 0
+            HealthVerdict.UNHEALTHY -> when (retryActionOf(attempt, window, verdict)) {
+                RetryAction.RESTART -> abandonAndRestart()
+                RetryAction.GIVE_UP -> {
+                    Log.w(TAG_UI, "录制自检未过且重录触顶（attempt=$attempt code=${h.errorCode}）")
+                    failNow(RecordError.SELF_CHECK_FAILED)
+                }
+                RetryAction.NONE -> Unit
+            }
+        }
+    }
+
+    /**
+     * 丢弃当前未成形的段、从零重启一次录制会话（不是续录、不是修补）。
+     *
+     * 拆解顺序**逐条复刻 [stopInternal] 的既有纪律**：停止期先置位 → MEND 滞留帧冲刷 →
+     * `rec.stop()`（引擎 discardCurrent 删 pending）→ `rec.release()` → discard 兜底
+     * （**只删未进停录产物 parts 的那枚 sink**，闸门理由见 `shouldDiscardAbandonedSink`）→
+     * **摘编码面**（GL 不许再往已释放的面上画，晚到 runnable 撞死面是修过的竞态）→
+     * attempt++ → [beginSession] 重放同一束会话接线（`setArcConvert`/`setOutputSurface`
+     * 每段必发，GPU/capture 轨随新会话重建）。
+     */
+    private fun abandonAndRestart() {
+        val rec = recorder
+        if (rec == null) {
+            failNow(RecordError.SELF_CHECK_FAILED); return
+        }
+        Log.i(TAG_UI, "录制自检未过，丢弃本段并自动重录（第 ${attempt + 1} 次重录）")
+        glProvider()?.markRecordTearingDown()
+        if (activeArcConvert == ArcConvertMode.MEND) {
+            val flushed = glProvider()?.flushArcPending() ?: 0
+            if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
+        }
+        val stopped = rec.stop()
+        rec.release()
+        recorder = null
+        // 兜底：被弃段的 pending 引擎已删（丢段不产 sidecar），这里重复删一次是幂等的。
+        // **但有闸门**（见 shouldDiscardAbandonedSink 的注释）：sessionSink 只在 beginSession 赋值一次，
+        // 引擎一旦分段轮转，它指向的已是**已 commit 的首段**——那时再删就是删用户成片。
+        // 所以只删「不在本次停录产物 parts 里」的那一枚（未成形/被引擎判废的那种）。
+        val sinkKey = when (val s = sessionSink) {
+            is OutputSink.Pending -> s.uri.toString()
+            is OutputSink.File -> s.f.absolutePath
+            null -> null
+        }
+        val producedKeys = stopped.parts.mapNotNull { it.uri?.toString() ?: it.path }
+        if (shouldDiscardAbandonedSink(sinkKey, producedKeys)) sessionStore?.discard(sessionSink)
+        sessionSink = null
+        // 摘面与 stopInternal 同口径：新会话起来前 GL 不得再碰旧编码面
+        if (params.renderMode.value == RenderMode.DIRECT) ctrl.setRecordingTarget(null)
+        else glProvider()?.setOutputSurface(null, 0, 0)
+        attempt++
+        retryNotice.value = R.string.record_auto_retry
+        beginSession()
     }
 
     private fun stopInternal() {
@@ -2242,6 +2484,11 @@ private class RecordRunner(
         private const val POLL_MS = 200L
         private const val POLL_SLICE_MS = 20L
         private const val WAIT_MS = 1_500L
+        /**
+         * 自检拍点（约 180ms）：视频路通常 <300ms 建轨，一拍即止；含音轨的完整三格最长等
+         * [FULL_WINDOW_MS]（3s 内约 17 拍），未齐则窗口内再问几次。
+         */
+        private const val HEALTH_TICK_MS = 180L
     }
 }
 
@@ -2279,6 +2526,7 @@ private fun recordResultText(res: Resources, code: String?): String? {
         code == RecordError.TOO_SHORT -> res.getString(R.string.cam_record_too_short)
         code == RecordError.STOP_FAILED -> res.getString(R.string.cam_record_stop_failed)
         code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
+        code == RecordError.SELF_CHECK_FAILED -> res.getString(R.string.record_self_check_failed)
         else -> res.getString(R.string.cam_record_failed_generic)
     }
 }

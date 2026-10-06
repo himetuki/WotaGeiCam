@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,7 +39,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -333,7 +336,6 @@ object WotaSettings {
         else Manifest.permission.READ_EXTERNAL_STORAGE
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
@@ -342,28 +344,550 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val prefs = remember(context) { WotaSettings.of(context) }
-    var motionMode by remember { mutableStateOf(WotaSettings.motionMode(prefs)) }
+
+    // 两栏分区的宽度真源：BoxWithConstraints 的 maxWidth 是「本页可用宽度」（已扣系统栏内边距），
+    // 比 LocalConfiguration.screenWidthDp 更贴近实际排版宽度；横竖屏切换会重算分区
+    BoxWithConstraints(
+        modifier
+            .fillMaxSize()
+            .background(WotaBg)
+            .statusBarsPadding()
+    ) {
+        val plan = layoutPlanOf(maxWidth.value.toInt())
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Outlined.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
+                }
+                Text(
+                    text = stringResource(R.string.set_title),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = WotaText,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Line()
+            SettingsBody(plan, prefs, onOpenHudEditor)
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * 设置主体：按 [SettingsLayoutPlan] 决定单栏还是两栏。**顶栏不在这里**——它跨两栏、不参与分区。
+ *
+ * 单栏走 [SettingsLayoutPlan.left]（此时它就是 [blocksOf] 全表，顺序 = 改造前的视觉顺序）；
+ * 两栏时左右各一个 weight(1f) 的 Column，整体仍在同一个 verticalScroll 里（单滚动）。
+ */
+@Composable
+private fun SettingsBody(
+    plan: SettingsLayoutPlan,
+    prefs: SharedPreferences,
+    onOpenHudEditor: () -> Unit
+) {
+    // 两栏时卡片外距收到 6dp（左右两块各 6dp，合计仍是约 12dp 的视觉间距）；单栏维持 12dp 不动
+    val cardPad = if (plan.columns == 2) 6.dp else 12.dp
+    CompositionLocalProvider(LocalSettingsCardPad provides cardPad) {
+        if (plan.columns == 1) {
+            plan.left.forEach { BlockHost(it, prefs, onOpenHudEditor) }
+        } else {
+            Row(Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    plan.left.forEach { BlockHost(it, prefs, onOpenHudEditor) }
+                }
+                Column(Modifier.weight(1f)) {
+                    plan.right.forEach { BlockHost(it, prefs, onOpenHudEditor) }
+                }
+            }
+        }
+    }
+}
+
+/** 区块枚举 → 具名 composable 的派发口：[SettingsBody] 只认 [SettingsBlock]，具体挂载点收在这里 */
+@Composable
+private fun BlockHost(block: SettingsBlock, prefs: SharedPreferences, onOpenHudEditor: () -> Unit) {
+    when (block) {
+        SettingsBlock.DEFAULT -> BlockDefault(prefs)
+        SettingsBlock.ORIENTATION -> BlockOrientation(prefs)
+        SettingsBlock.MOTION -> BlockMotion(prefs)
+        SettingsBlock.HUD -> BlockHud(prefs, onOpenHudEditor)
+        SettingsBlock.STORAGE -> BlockStorage()
+        SettingsBlock.REFLINE -> BlockRefline(prefs)
+        SettingsBlock.LEVEL -> BlockLevel(prefs)
+        SettingsBlock.COMPARE -> BlockCompare(prefs)
+        SettingsBlock.TEXT -> BlockText(prefs)
+        SettingsBlock.PERM -> BlockPerm()
+        SettingsBlock.ABOUT -> BlockAbout()
+    }
+}
+
+/**
+ * 设置卡左右外距（单栏 12dp / 两栏 6dp）。走 CompositionLocal 传而不是给 [Card] 加必传参，
+ * 是为了让 11 个 Block 里的 `Card { ... }` 调用点**逐字保持搬动前的样子**（本刀只做搬动）。
+ */
+private val LocalSettingsCardPad = compositionLocalOf { 12.dp }
+
+@Composable
+private fun BlockDefault(prefs: SharedPreferences) {
     var defaultFps by remember { mutableStateOf(WotaSettings.defaultFps(prefs)) }
     var defaultShutter by remember { mutableStateOf(WotaSettings.defaultShutterNs(prefs)) }
     var defaultBitrate by remember { mutableStateOf(WotaSettings.defaultBitrate(prefs)) }
     var defaultSampleRate by remember { mutableStateOf(WotaSettings.defaultSampleRate(prefs)) }
     var defaultRender by remember { mutableStateOf(WotaSettings.defaultRenderMode(prefs)) }
     var defaultMuted by remember { mutableStateOf(WotaSettings.defaultAudioMuted(prefs)) }
-    var defaultRefLines by remember { mutableStateOf(WotaSettings.defaultRefLines(prefs)) }
-    var levelEnabled by remember { mutableStateOf(WotaSettings.levelEnabled(prefs)) }
-    var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
-    // 对比播放编排节拍（r02）：越界脏值读侧已钳，这里只管展示选中档
-    var compareTick by remember { mutableStateOf(WotaSettings.compareTickMs(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_default))
+    // 本页所有 bodyMedium 说明统一升 textMid（下面各卡同）：textLo 压 surface 只有 3.82，
+    // 过不了正文 4.5，Tokens 口径「正文与数值一律 textMid 以上」
+    Text(
+        text = stringResource(R.string.set_default_note),
+        style = MaterialTheme.typography.bodyMedium,
+        color = WotaColor.textMid,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+    )
+    Card {
+        val fpsItems = WotaTiers.FPS.map { TierItem(it, "$it") }
+        TierPicker(
+            label = stringResource(R.string.set_default_fps),
+            selected = defaultFps,
+            items = fpsItems,
+            format = { "$it" },
+            onPick = { defaultFps = it; prefs.edit().putInt(WotaSettings.KEY_DEFAULT_FPS, it).apply() }
+        )
+        TierPicker(
+            label = stringResource(R.string.set_default_shutter),
+            selected = defaultShutter,
+            items = WotaTiers.SHUTTER_DENOM.map {
+                TierItem((WotaTiers.NS_PER_SECOND / it).toInt(), "1/$it")
+            },
+            format = { shutterText(it.toLong()) },
+            onPick = {
+                defaultShutter = it
+                prefs.edit().putInt(WotaSettings.KEY_DEFAULT_SHUTTER_NS, it).apply()
+            }
+        )
+        TierPicker(
+            label = stringResource(R.string.set_default_bitrate),
+            selected = defaultBitrate / 1_000_000,
+            items = WotaTiers.BITRATES.map { TierItem(it / 1_000_000, bitrateText(it)) },
+            format = { "${it}M" },
+            onPick = {
+                defaultBitrate = it * 1_000_000
+                prefs.edit().putInt(WotaSettings.KEY_DEFAULT_BITRATE, defaultBitrate).apply()
+            }
+        )
+        TierPicker(
+            label = stringResource(R.string.set_default_sample),
+            selected = defaultSampleRate,
+            items = WotaTiers.SAMPLE_RATES.map { TierItem(it, sampleRateText(it)) },
+            format = { sampleRateText(it) },
+            onPick = {
+                defaultSampleRate = it
+                prefs.edit().putInt(WotaSettings.KEY_DEFAULT_SAMPLE_RATE, it).apply()
+            }
+        )
+        val gpuLabel = stringResource(R.string.cam_render_gpu)
+        val directLabel = stringResource(R.string.cam_render_direct)
+        val renderNames = listOf(gpuLabel, directLabel)
+        TierPicker(
+            label = stringResource(R.string.set_default_render),
+            selected = defaultRender.ordinal,
+            items = RenderMode.values().map { TierItem(it.ordinal, renderNames.getOrElse(it.ordinal) { "" }) },
+            format = { renderNames.getOrElse(it) { "" } },
+            onPick = { idx ->
+                val mode = if (idx == RenderMode.DIRECT.ordinal) RenderMode.DIRECT else RenderMode.GPU
+                defaultRender = mode
+                prefs.edit().putString(WotaSettings.KEY_DEFAULT_RENDER, mode.name).apply()
+            }
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.set_default_mute),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WotaText
+                )
+                Text(
+                    text = stringResource(R.string.set_default_mute_note),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WotaTextDim
+                )
+            }
+            Switch(
+                checked = defaultMuted,
+                onCheckedChange = {
+                    defaultMuted = it
+                    prefs.edit().putBoolean(WotaSettings.KEY_DEFAULT_AUDIO_MUTE, it).apply()
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlockOrientation(prefs: SharedPreferences) {
+    var uiOrientation by remember { mutableStateOf(WotaSettings.uiOrientation(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_orientation))
+    Text(
+        text = stringResource(R.string.set_orientation_note),
+        style = MaterialTheme.typography.bodyMedium,
+        color = WotaColor.textMid,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+    )
+    Card {
+        val landscapeLabel = stringResource(R.string.set_orientation_landscape)
+        val portraitLabel = stringResource(R.string.set_orientation_portrait)
+        val options = UIOrientation.ALL
+        // 标签按枚举本身取，不用 ordinal 去索引定长列表（同上面动效档那条教训：加档时会显示空标签）
+        val nameOf = { o: UIOrientation ->
+            when (o) {
+                UIOrientation.LANDSCAPE -> landscapeLabel
+                UIOrientation.PORTRAIT -> portraitLabel
+            }
+        }
+        TierPicker(
+            label = stringResource(R.string.set_orientation_style),
+            selected = uiOrientation.ordinal,
+            items = options.map { TierItem(it.ordinal, nameOf(it)) },
+            format = { nameOf(options.getOrElse(it) { UIOrientation.DEFAULT }) },
+            onPick = { idx ->
+                val next = options.getOrElse(idx) { UIOrientation.DEFAULT }
+                uiOrientation = next
+                WotaSettings.setUiOrientation(prefs, next)
+            }
+        )
+    }
+}
+
+@Composable
+private fun BlockMotion(prefs: SharedPreferences) {
+    var motionMode by remember { mutableStateOf(WotaSettings.motionMode(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_motion))
+    Card {
+        val plainLabel = stringResource(R.string.set_motion_plain)
+        val fluentLabel = stringResource(R.string.set_motion_fluent)
+        val liquidLabel = stringResource(R.string.set_motion_liquid)
+        val modes = MotionMode.values()
+        // 名称按枚举本身取，不用 ordinal 去索引定长列表：加档位时曾因此显示空标签并把 FLUENT 选回 PLAIN
+        val nameOf = { m: MotionMode ->
+            when (m) {
+                MotionMode.PLAIN -> plainLabel
+                MotionMode.FLUENT -> fluentLabel
+                MotionMode.LIQUID -> liquidLabel
+            }
+        }
+        TierPicker(
+            label = stringResource(R.string.set_motion_style),
+            selected = motionMode.ordinal,
+            items = modes.map { TierItem(it.ordinal, nameOf(it)) },
+            format = { nameOf(modes.getOrElse(it) { MotionMode.FLUENT }) },
+            onPick = { idx ->
+                val mode = modes.getOrElse(idx) { MotionMode.FLUENT }
+                motionMode = mode
+                WotaSettings.setMotionMode(prefs, mode)
+            },
+            note = stringResource(R.string.set_motion_note)
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BlockHud(prefs: SharedPreferences, onOpenHudEditor: () -> Unit) {
     var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
     var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
     // 毛玻璃背板（#84 步骤 2）：默认关，只有这一颗 Switch 会把它打开（没有别的写入方）
     var frostBlur by remember { mutableStateOf(WotaSettings.frostBlurEnabled(prefs)) }
-    var uiOrientation by remember { mutableStateOf(WotaSettings.uiOrientation(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_hud))
+    Card {
+        Text(
+            text = stringResource(R.string.set_hud_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            HudItem.ALL.forEach { item ->
+                val on = hudMask and item.bit != 0
+                ChipCell(
+                    text = stringResource(item.labelRes),
+                    selected = on,
+                    onClick = {
+                        val next = if (on) hudMask and item.bit.inv() else hudMask or item.bit
+                        hudMask = next
+                        prefs.edit().putInt(WotaSettings.KEY_HUD_ITEMS, next).apply()
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.set_pill_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CamPill.ALL.forEach { item ->
+                val on = pillMask and item.bit != 0
+                ChipCell(
+                    text = stringResource(item.labelRes),
+                    selected = on,
+                    onClick = {
+                        val next = if (on) pillMask and item.bit.inv() else pillMask or item.bit
+                        pillMask = next
+                        prefs.edit().putInt(WotaSettings.KEY_HUD_PILLS, next).apply()
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        // 位置编辑入口（键 hud_layout）：只列上面开着显示的控件，入口文案必须把这条说清楚
+        Text(
+            text = stringResource(R.string.set_hud_editor_note),
+            style = MaterialTheme.typography.labelSmall,
+            color = WotaTextDim
+        )
+        Spacer(Modifier.height(6.dp))
+        ChipCell(
+            text = stringResource(R.string.set_hud_editor),
+            selected = false,
+            onClick = onOpenHudEditor
+        )
+        Spacer(Modifier.height(10.dp))
+        // 毛玻璃背板开关（键 hud_frost_blur，#84 步骤 2 · A2 混合）。
+        // ⚠ 本轮**唯一**没走 `res/values/strings_settings.xml` 的两条 UI 文案：那个文件不在本刀的
+        // 可改清单里。下一轮把它换成 `R.string.set_frost_blur` / `set_frost_blur_note` 两个 key，
+        // 与本文件其余行一致（记在这儿免得被当成"本来就该硬编码"）。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "HUD 毛玻璃背板",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WotaText
+                )
+                Text(
+                    text = "取景控件底板透出被模糊的实时画面。仅 GPU 模式生效；关掉即回到现在的观感。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WotaTextDim
+                )
+            }
+            Switch(
+                checked = frostBlur,
+                onCheckedChange = {
+                    frostBlur = it
+                    WotaSettings.setFrostBlurEnabled(prefs, it)
+                    // 顺手把这一位当场送进矩形表：设置页翻完不用等一次布局回调才带上表头，
+                    // GL 在下一帧把它搬进引擎那枚门（UI 拿不到引擎实例，这是唯一一条生产路）
+                    FrostCardTable.setUiEnabled(it)
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlockStorage() {
+    SettingGroup(stringResource(R.string.set_group_storage))
+    Card {
+        Text(
+            text = stringResource(R.string.set_storage_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        val storageCtx = androidx.compose.ui.platform.LocalContext.current
+        // 从系统设置页回来时不会自动重组合，所以挂一个 ON_RESUME 计数：
+        // 不这么做的话他开完权限回到设置页，这颗还写着"去系统设置打开"（状态是假的）
+        val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        var resumeTick by remember { mutableIntStateOf(0) }
+        androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+        val granted = remember(resumeTick) { com.wotagei.cam.core.WotaStorage.hasAllFilesAccess() }
+        ChipCell(
+            text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
+            selected = granted,
+            onClick = {
+                com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BlockRefline(prefs: SharedPreferences) {
+    var defaultRefLines by remember { mutableStateOf(WotaSettings.defaultRefLines(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_refline))
+    Card {
+        Text(
+            text = stringResource(R.string.set_refline_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        // 用 FlowRow 而不是 chunked(2)+weight(1f)：后者会把每颗强行撑到半行宽，短标签就变成"长胶囊配短字"
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            RefLineType.ALL.forEach { type ->
+                val on = defaultRefLines and type.bit != 0
+                ChipCell(
+                    text = type.label,
+                    selected = on,
+                    onClick = {
+                        val next = if (on) defaultRefLines and type.bit.inv() else defaultRefLines or type.bit
+                        defaultRefLines = next
+                        prefs.edit().putInt(WotaSettings.KEY_DEFAULT_REF_LINES, next).apply()
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BlockLevel(prefs: SharedPreferences) {
+    var levelEnabled by remember { mutableStateOf(WotaSettings.levelEnabled(prefs)) }
+    var levelBuzz by remember { mutableStateOf(WotaSettings.levelBuzzEnabled(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_level))
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = stringResource(R.string.set_level_enable),
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaText,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = levelEnabled,
+                onCheckedChange = {
+                    levelEnabled = it
+                    prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_ENABLED, it).apply()
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.set_level_buzz),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WotaText
+                )
+                Text(
+                    text = stringResource(R.string.set_level_buzz_note),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WotaTextDim
+                )
+            }
+            Switch(
+                checked = levelBuzz,
+                onCheckedChange = {
+                    levelBuzz = it
+                    prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_BUZZ, it).apply()
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlockCompare(prefs: SharedPreferences) {
+    // 对比播放编排节拍（r02）：越界脏值读侧已钳，这里只管展示选中档
+    var compareTick by remember { mutableStateOf(WotaSettings.compareTickMs(prefs)) }
+
+    SettingGroup(stringResource(R.string.set_group_compare))
+    Card {
+        // 对比播放编排节拍（键 compare_tick_ms）：两轨同步/交接/回绕的检查间隔。
+        // 消费方每拍重读 prefs，改完下一次检查即生效
+        TierPicker(
+            label = stringResource(R.string.set_compare_tick),
+            selected = compareTick,
+            items = WotaSettings.COMPARE_TICK_TIERS.map { TierItem(it, "$it") },
+            format = { "$it ms" },
+            onPick = {
+                compareTick = it
+                prefs.edit().putInt(WotaSettings.KEY_COMPARE_TICK_MS, it).apply()
+            },
+            note = stringResource(R.string.set_compare_tick_note)
+        )
+    }
+}
+
+@Composable
+private fun BlockText(prefs: SharedPreferences) {
     var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
         mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
     }
     var scaleDialog by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_DIALOG)) }
+
+    SettingGroup(stringResource(R.string.set_group_text))
+    Card {
+        Text(
+            text = stringResource(R.string.set_text_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        TextScalePicker(
+            label = stringResource(R.string.set_text_camera),
+            scale = scaleCamera,
+            onPick = { pct ->
+                scaleCamera = pct / 100f
+                prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_CAMERA, pct).apply()
+            }
+        )
+        TextScalePicker(
+            label = stringResource(R.string.set_text_dialog),
+            scale = scaleDialog,
+            onPick = { pct ->
+                scaleDialog = pct / 100f
+                prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_DIALOG, pct).apply()
+            }
+        )
+        TextScalePicker(
+            label = stringResource(R.string.set_text_settings),
+            scale = scaleSettings,
+            onPick = { pct ->
+                scaleSettings = pct / 100f
+                prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_SETTINGS, pct).apply()
+            }
+        )
+    }
+}
+
+@Composable
+private fun BlockPerm() {
+    val context = LocalContext.current
     var permTick by remember { mutableStateOf(0) }
     val perms = remember(context, permTick) { permissionRows(context) }
 
@@ -381,489 +905,72 @@ fun SettingsScreen(
         onDispose { lifecycle?.removeObserver(resume) }
     }
 
-    Column(
-        modifier
-            .fillMaxSize()
-            .background(WotaBg)
-            .statusBarsPadding()
-            .verticalScroll(rememberScrollState())
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Outlined.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
-            }
-            Text(
-                text = stringResource(R.string.set_title),
-                style = MaterialTheme.typography.titleLarge,
-                color = WotaText,
-                modifier = Modifier.weight(1f)
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Line()
-
-        SettingGroup(stringResource(R.string.set_group_default))
-        // 本页所有 bodyMedium 说明统一升 textMid（下面各卡同）：textLo 压 surface 只有 3.82，
-        // 过不了正文 4.5，Tokens 口径「正文与数值一律 textMid 以上」
-        Text(
-            text = stringResource(R.string.set_default_note),
-            style = MaterialTheme.typography.bodyMedium,
-            color = WotaColor.textMid,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-        )
-        Card {
-            val fpsItems = WotaTiers.FPS.map { TierItem(it, "$it") }
-            TierPicker(
-                label = stringResource(R.string.set_default_fps),
-                selected = defaultFps,
-                items = fpsItems,
-                format = { "$it" },
-                onPick = { defaultFps = it; prefs.edit().putInt(WotaSettings.KEY_DEFAULT_FPS, it).apply() }
-            )
-            TierPicker(
-                label = stringResource(R.string.set_default_shutter),
-                selected = defaultShutter,
-                items = WotaTiers.SHUTTER_DENOM.map {
-                    TierItem((WotaTiers.NS_PER_SECOND / it).toInt(), "1/$it")
-                },
-                format = { shutterText(it.toLong()) },
-                onPick = {
-                    defaultShutter = it
-                    prefs.edit().putInt(WotaSettings.KEY_DEFAULT_SHUTTER_NS, it).apply()
-                }
-            )
-            TierPicker(
-                label = stringResource(R.string.set_default_bitrate),
-                selected = defaultBitrate / 1_000_000,
-                items = WotaTiers.BITRATES.map { TierItem(it / 1_000_000, bitrateText(it)) },
-                format = { "${it}M" },
-                onPick = {
-                    defaultBitrate = it * 1_000_000
-                    prefs.edit().putInt(WotaSettings.KEY_DEFAULT_BITRATE, defaultBitrate).apply()
-                }
-            )
-            TierPicker(
-                label = stringResource(R.string.set_default_sample),
-                selected = defaultSampleRate,
-                items = WotaTiers.SAMPLE_RATES.map { TierItem(it, sampleRateText(it)) },
-                format = { sampleRateText(it) },
-                onPick = {
-                    defaultSampleRate = it
-                    prefs.edit().putInt(WotaSettings.KEY_DEFAULT_SAMPLE_RATE, it).apply()
-                }
-            )
-            val gpuLabel = stringResource(R.string.cam_render_gpu)
-            val directLabel = stringResource(R.string.cam_render_direct)
-            val renderNames = listOf(gpuLabel, directLabel)
-            TierPicker(
-                label = stringResource(R.string.set_default_render),
-                selected = defaultRender.ordinal,
-                items = RenderMode.values().map { TierItem(it.ordinal, renderNames.getOrElse(it.ordinal) { "" }) },
-                format = { renderNames.getOrElse(it) { "" } },
-                onPick = { idx ->
-                    val mode = if (idx == RenderMode.DIRECT.ordinal) RenderMode.DIRECT else RenderMode.GPU
-                    defaultRender = mode
-                    prefs.edit().putString(WotaSettings.KEY_DEFAULT_RENDER, mode.name).apply()
-                }
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.set_default_mute),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = WotaText
-                    )
-                    Text(
-                        text = stringResource(R.string.set_default_mute_note),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = WotaTextDim
-                    )
-                }
-                Switch(
-                    checked = defaultMuted,
-                    onCheckedChange = {
-                        defaultMuted = it
-                        prefs.edit().putBoolean(WotaSettings.KEY_DEFAULT_AUDIO_MUTE, it).apply()
-                    },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
-                )
-            }
-        }
-
-        SettingGroup(stringResource(R.string.set_group_orientation))
-        Text(
-            text = stringResource(R.string.set_orientation_note),
-            style = MaterialTheme.typography.bodyMedium,
-            color = WotaColor.textMid,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-        )
-        Card {
-            val landscapeLabel = stringResource(R.string.set_orientation_landscape)
-            val portraitLabel = stringResource(R.string.set_orientation_portrait)
-            val options = UIOrientation.ALL
-            // 标签按枚举本身取，不用 ordinal 去索引定长列表（同上面动效档那条教训：加档时会显示空标签）
-            val nameOf = { o: UIOrientation ->
-                when (o) {
-                    UIOrientation.LANDSCAPE -> landscapeLabel
-                    UIOrientation.PORTRAIT -> portraitLabel
-                }
-            }
-            TierPicker(
-                label = stringResource(R.string.set_orientation_style),
-                selected = uiOrientation.ordinal,
-                items = options.map { TierItem(it.ordinal, nameOf(it)) },
-                format = { nameOf(options.getOrElse(it) { UIOrientation.DEFAULT }) },
-                onPick = { idx ->
-                    val next = options.getOrElse(idx) { UIOrientation.DEFAULT }
-                    uiOrientation = next
-                    WotaSettings.setUiOrientation(prefs, next)
-                }
-            )
-        }
-
-        SettingGroup(stringResource(R.string.set_group_motion))
-        Card {
-            val plainLabel = stringResource(R.string.set_motion_plain)
-            val fluentLabel = stringResource(R.string.set_motion_fluent)
-            val liquidLabel = stringResource(R.string.set_motion_liquid)
-            val modes = MotionMode.values()
-            // 名称按枚举本身取，不用 ordinal 去索引定长列表：加档位时曾因此显示空标签并把 FLUENT 选回 PLAIN
-            val nameOf = { m: MotionMode ->
-                when (m) {
-                    MotionMode.PLAIN -> plainLabel
-                    MotionMode.FLUENT -> fluentLabel
-                    MotionMode.LIQUID -> liquidLabel
-                }
-            }
-            TierPicker(
-                label = stringResource(R.string.set_motion_style),
-                selected = motionMode.ordinal,
-                items = modes.map { TierItem(it.ordinal, nameOf(it)) },
-                format = { nameOf(modes.getOrElse(it) { MotionMode.FLUENT }) },
-                onPick = { idx ->
-                    val mode = modes.getOrElse(idx) { MotionMode.FLUENT }
-                    motionMode = mode
-                    WotaSettings.setMotionMode(prefs, mode)
-                },
-                note = stringResource(R.string.set_motion_note)
-            )
-        }
-
-        SettingGroup(stringResource(R.string.set_group_hud))
-        Card {
-            Text(
-                text = stringResource(R.string.set_hud_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(6.dp))
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+    SettingGroup(stringResource(R.string.set_group_perm))
+    Card {
+        perms.forEach { row ->
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                HudItem.ALL.forEach { item ->
-                    val on = hudMask and item.bit != 0
-                    ChipCell(
-                        text = stringResource(item.labelRes),
-                        selected = on,
-                        onClick = {
-                            val next = if (on) hudMask and item.bit.inv() else hudMask or item.bit
-                            hudMask = next
-                            prefs.edit().putInt(WotaSettings.KEY_HUD_ITEMS, next).apply()
-                        }
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = stringResource(R.string.set_pill_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(6.dp))
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                CamPill.ALL.forEach { item ->
-                    val on = pillMask and item.bit != 0
-                    ChipCell(
-                        text = stringResource(item.labelRes),
-                        selected = on,
-                        onClick = {
-                            val next = if (on) pillMask and item.bit.inv() else pillMask or item.bit
-                            pillMask = next
-                            prefs.edit().putInt(WotaSettings.KEY_HUD_PILLS, next).apply()
-                        }
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            // 位置编辑入口（键 hud_layout）：只列上面开着显示的控件，入口文案必须把这条说清楚
-            Text(
-                text = stringResource(R.string.set_hud_editor_note),
-                style = MaterialTheme.typography.labelSmall,
-                color = WotaTextDim
-            )
-            Spacer(Modifier.height(6.dp))
-            ChipCell(
-                text = stringResource(R.string.set_hud_editor),
-                selected = false,
-                onClick = onOpenHudEditor
-            )
-            Spacer(Modifier.height(10.dp))
-            // 毛玻璃背板开关（键 hud_frost_blur，#84 步骤 2 · A2 混合）。
-            // ⚠ 本轮**唯一**没走 `res/values/strings_settings.xml` 的两条 UI 文案：那个文件不在本刀的
-            // 可改清单里。下一轮把它换成 `R.string.set_frost_blur` / `set_frost_blur_note` 两个 key，
-            // 与本文件其余行一致（记在这儿免得被当成"本来就该硬编码"）。
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "HUD 毛玻璃背板",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = WotaText
-                    )
-                    Text(
-                        text = "取景控件底板透出被模糊的实时画面。仅 GPU 模式生效；关掉即回到现在的观感。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = WotaTextDim
-                    )
-                }
-                Switch(
-                    checked = frostBlur,
-                    onCheckedChange = {
-                        frostBlur = it
-                        WotaSettings.setFrostBlurEnabled(prefs, it)
-                        // 顺手把这一位当场送进矩形表：设置页翻完不用等一次布局回调才带上表头，
-                        // GL 在下一帧把它搬进引擎那枚门（UI 拿不到引擎实例，这是唯一一条生产路）
-                        FrostCardTable.setUiEnabled(it)
-                    },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
-                )
-            }
-        }
-
-        SettingGroup(stringResource(R.string.set_group_storage))
-        Card {
-            Text(
-                text = stringResource(R.string.set_storage_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(6.dp))
-            val storageCtx = androidx.compose.ui.platform.LocalContext.current
-            // 从系统设置页回来时不会自动重组合，所以挂一个 ON_RESUME 计数：
-            // 不这么做的话他开完权限回到设置页，这颗还写着"去系统设置打开"（状态是假的）
-            val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-            var resumeTick by remember { mutableIntStateOf(0) }
-            androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
-                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
-                }
-                lifecycleOwner.lifecycle.addObserver(observer)
-                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-            }
-            val granted = remember(resumeTick) { com.wotagei.cam.core.WotaStorage.hasAllFilesAccess() }
-            ChipCell(
-                text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
-                selected = granted,
-                onClick = {
-                    com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)
-                }
-            )
-        }
-
-        SettingGroup(stringResource(R.string.set_group_refline))
-        Card {
-            Text(
-                text = stringResource(R.string.set_refline_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(6.dp))
-            // 用 FlowRow 而不是 chunked(2)+weight(1f)：后者会把每颗强行撑到半行宽，短标签就变成"长胶囊配短字"
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                RefLineType.ALL.forEach { type ->
-                    val on = defaultRefLines and type.bit != 0
-                    ChipCell(
-                        text = type.label,
-                        selected = on,
-                        onClick = {
-                            val next = if (on) defaultRefLines and type.bit.inv() else defaultRefLines or type.bit
-                            defaultRefLines = next
-                            prefs.edit().putInt(WotaSettings.KEY_DEFAULT_REF_LINES, next).apply()
-                        }
-                    )
-                }
-            }
-        }
-
-        SettingGroup(stringResource(R.string.set_group_level))
-        Card {
-            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = stringResource(R.string.set_level_enable),
+                    text = stringResource(row.labelRes),
                     style = MaterialTheme.typography.bodyMedium,
                     color = WotaText,
                     modifier = Modifier.weight(1f)
                 )
-                Switch(
-                    checked = levelEnabled,
-                    onCheckedChange = {
-                        levelEnabled = it
-                        prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_ENABLED, it).apply()
-                    },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.set_level_buzz),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = WotaText
-                    )
-                    Text(
-                        text = stringResource(R.string.set_level_buzz_note),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = WotaTextDim
-                    )
-                }
-                Switch(
-                    checked = levelBuzz,
-                    onCheckedChange = {
-                        levelBuzz = it
-                        prefs.edit().putBoolean(WotaSettings.KEY_LEVEL_BUZZ, it).apply()
-                    },
-                    colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
-                )
-            }
-        }
-
-        SettingGroup(stringResource(R.string.set_group_compare))
-        Card {
-            // 对比播放编排节拍（键 compare_tick_ms）：两轨同步/交接/回绕的检查间隔。
-            // 消费方每拍重读 prefs，改完下一次检查即生效
-            TierPicker(
-                label = stringResource(R.string.set_compare_tick),
-                selected = compareTick,
-                items = WotaSettings.COMPARE_TICK_TIERS.map { TierItem(it, "$it") },
-                format = { "$it ms" },
-                onPick = {
-                    compareTick = it
-                    prefs.edit().putInt(WotaSettings.KEY_COMPARE_TICK_MS, it).apply()
-                },
-                note = stringResource(R.string.set_compare_tick_note)
-            )
-        }
-
-        SettingGroup(stringResource(R.string.set_group_text))
-        Card {
-            Text(
-                text = stringResource(R.string.set_text_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(6.dp))
-            TextScalePicker(
-                label = stringResource(R.string.set_text_camera),
-                scale = scaleCamera,
-                onPick = { pct ->
-                    scaleCamera = pct / 100f
-                    prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_CAMERA, pct).apply()
-                }
-            )
-            TextScalePicker(
-                label = stringResource(R.string.set_text_dialog),
-                scale = scaleDialog,
-                onPick = { pct ->
-                    scaleDialog = pct / 100f
-                    prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_DIALOG, pct).apply()
-                }
-            )
-            TextScalePicker(
-                label = stringResource(R.string.set_text_settings),
-                scale = scaleSettings,
-                onPick = { pct ->
-                    scaleSettings = pct / 100f
-                    prefs.edit().putInt(WotaSettings.KEY_TEXT_SCALE_SETTINGS, pct).apply()
-                }
-            )
-        }
-
-        SettingGroup(stringResource(R.string.set_group_perm))
-        Card {
-            perms.forEach { row ->
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = stringResource(row.labelRes),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = WotaText,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = stringResource(if (row.granted) R.string.set_perm_granted else R.string.set_perm_denied),
-                        style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
-                        // 状态小字不用 accent（压 surface 4.48 < 4.5）：已授权降为 textMid 安静态，
-                        // 未授权保留 WotaRec 红作强调——需要突出的只有「未授权」
-                        color = if (row.granted) WotaColor.textMid else WotaRec
-                    )
-                }
-                Line()
-            }
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = stringResource(R.string.set_perm_note),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = WotaColor.textMid,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = stringResource(R.string.set_open_system_settings),
-                    style = MaterialTheme.typography.labelMedium,
-                    // 可点动作小字：accent 压 surface 4.48 过不了 AA，改 textHi + 下划线（链接惯例）表达可点
-                    color = WotaText,
-                    textDecoration = TextDecoration.Underline,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { context.openAppSettings() }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                    text = stringResource(if (row.granted) R.string.set_perm_granted else R.string.set_perm_denied),
+                    style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
+                    // 状态小字不用 accent（压 surface 4.48 < 4.5）：已授权降为 textMid 安静态，
+                    // 未授权保留 WotaRec 红作强调——需要突出的只有「未授权」
+                    color = if (row.granted) WotaColor.textMid else WotaRec
                 )
             }
+            Line()
         }
-
-        SettingGroup(stringResource(R.string.set_group_about))
-        Card {
-            // 版本号单一真源 = app/build.gradle.kts 的 appVersionName（经 BuildConfig.VERSION_NAME
-            // 直通）：打新 tag 前改脚本那两行是发版必经步骤，设置页/容器/产物名因此永远一致（2026-10-03）
-            InfoRow(stringResource(R.string.set_version), BuildConfig.VERSION_NAME)
-            Line()
-            // 「检查更新」（纯手动版）：探测/下载只由行内点击触发，不挂任何生命周期观察者
-            // （UpdateNetworkGuardTest 钉住：入口必须全部活在 UpdateSection 函数体内）
-            UpdateSection()
-            Line()
-            InfoRow(stringResource(R.string.set_package), context.packageName)
-            Line()
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = stringResource(R.string.set_about_note),
+                text = stringResource(R.string.set_perm_note),
                 style = MaterialTheme.typography.bodyMedium,
                 color = WotaColor.textMid,
-                modifier = Modifier.padding(top = 8.dp)
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = stringResource(R.string.set_open_system_settings),
+                style = MaterialTheme.typography.labelMedium,
+                // 可点动作小字：accent 压 surface 4.48 过不了 AA，改 textHi + 下划线（链接惯例）表达可点
+                color = WotaText,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { context.openAppSettings() }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
             )
         }
-        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun BlockAbout() {
+    val context = LocalContext.current
+    SettingGroup(stringResource(R.string.set_group_about))
+    Card {
+        // 版本号单一真源 = app/build.gradle.kts 的 appVersionName（经 BuildConfig.VERSION_NAME
+        // 直通）：打新 tag 前改脚本那两行是发版必经步骤，设置页/容器/产物名因此永远一致（2026-10-03）
+        InfoRow(stringResource(R.string.set_version), BuildConfig.VERSION_NAME)
+        Line()
+        // 「检查更新」（纯手动版）：探测/下载只由行内点击触发，不挂任何生命周期观察者
+        // （UpdateNetworkGuardTest 钉住：入口必须全部活在 UpdateSection 函数体内）
+        UpdateSection()
+        Line()
+        InfoRow(stringResource(R.string.set_package), context.packageName)
+        Line()
+        Text(
+            text = stringResource(R.string.set_about_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 
@@ -907,7 +1014,7 @@ private fun Card(content: @Composable androidx.compose.foundation.layout.ColumnS
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp)
+            .padding(horizontal = LocalSettingsCardPad.current)
             // 接件位档：设置卡属「大卡」类（design-spec §4.2 card=24dp），不用旧的浮层级 radiusLarge
             .clip(RoundedCornerShape(WotaShape.card))
             .background(WotaColor.surface)

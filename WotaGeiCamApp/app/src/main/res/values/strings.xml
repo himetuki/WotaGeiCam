@@ -50,4 +50,8 @@
 
     <!-- 播放观看辅助（会话态，不持久化） -->
     <string name="player_rotate_ccw">逆时针旋转 90°</string>
+
+    <!-- 起录自检（record/RecordHealth.kt）：起录后发现引擎没在产出即自动重录，全程不弹错误 -->
+    <string name="record_auto_retry">已自动重新录制</string>
+    <string name="record_self_check_failed">录制自检失败，请重试</string>
 </resources>

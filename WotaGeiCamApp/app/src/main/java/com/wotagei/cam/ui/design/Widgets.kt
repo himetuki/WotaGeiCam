@@ -45,7 +45,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -53,7 +52,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.ui.HudFrost
+import com.wotagei.cam.ui.LocalPreviewCoords
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.viewLocalRectInto
+import com.wotagei.cam.ui.windowRectInto
 
 /**
  * 参考图语言里的四类基础控件：胶囊 chip、圆形图标钮、标签在上数值在下的参数卡、白描边角标。
@@ -131,42 +133,57 @@ fun Modifier.wotaHudCard(
  *   出自同一次布局，两件事不会因为一个改了另一个没跟而错开一整代（跨线程不撕裂那一半由
  *   `FrostCardTable` 的双缓冲 + 引用交换保证，两处各司其职、不是重复保险）。
  *
- * ⚠「量得到、但不跟」：这里量的是窗口矩形（`positionInWindow()` 现算，**含祖先那层
- * `graphicsLayer` 的 translation**——滑回轮询机制本身就建立在这一点上，真机实测滑出途中
- * 写到过 x=-189；与 `ui/anim/LiquidMerge` 写的"不反映 graphicsLayer.translationX"不矛盾，
+ * ⚠「量得到、但不跟」：矩形现算（视图局部系走 `localPositionOf`，窗口系走 `positionInWindow()`——
+ * 后者**含祖先那层 `graphicsLayer` 的 translation**，滑回轮询机制本身就建立在这一点上，真机实测滑出
+ * 途中写到过 x=-189；与 `ui/anim/LiquidMerge` 写的"不反映 graphicsLayer.translationX"不矛盾，
  * 那处说的是节点链更内侧的 layer，不是祖先）。真正的限制在**时序**：layer 位移不触发
  * 布局回调 ⇒ rectX..H 这组 key 不变 ⇒ effect 不重启 ⇒ 表停在拖前矩形，直到下一次 key
  * 翻转（visible / intent / 真实布局变化）才自愈。产品判断注记：编辑页拖拽期间霜板停在
  * 拖前位置、等下次 key 翻转才跟上，是否可接受待真机取证。底板本身跟着动的那一路（底栏
  * 换栏拖拽、录制态收拢）由 [com.wotagei.cam.ui.anim.wotaDockShell] 自己在绘制期回报
  * **可见**矩形，不走这条链，观感上不会脱节。
+ *
+ * 坐标系：录制页把 [LocalPreviewCoords]（承载预览的 `aspectRatio` 盒）provide 下来，本注册点据此
+ * 在**承载视图局部坐标**里量矩形（分屏那层祖先缩放被 `localPositionOf` 抵消）；编辑控件页没有预览盒，
+ * 自动回退旧的窗口系，观感不变。
  */
 @Composable
 private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean = true): Modifier {
     val alpha = frostScrimAlphaFor(frost.ink)
+    // 预览盒坐标（CameraScreen 在录制页 provide）：非空 ⇒ 卡片矩形在**承载视图局部坐标**里量，
+    // 分屏那层祖先 graphicsLayer 的缩放被 localPositionOf 抵消；为空（编辑控件页）⇒ 回退旧窗口系。
+    val preview = LocalPreviewCoords.current
     // 喂表只看"开关意图"，不看 live —— 用 live 当闸门会启动死锁：卡片要 live 才写、
     // live 要 GL 画过板才真、GL 要表里有卡片才画得出。分工见 HudFrost.intent 的注释。
     val intent = HudFrost.intent
     val slot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    // 布局回调每次递的都是**同一个** LayoutCoordinates 实例（positionInWindow 是现算值），
+    // 矩形临时数组：布局回调与轮询复用同一枚（两者都在主线程，不会重叠）
+    val rectScratch = remember { FloatArray(4) }
+    // 布局回调每次递的都是**同一个** LayoutCoordinates 实例（坐标是现算值），
     // 只拿实例进 key 的话，注册稳定之后的任何纯布局变化都不会重启 effect ⇒ 表停在旧矩形、
     // GL 板与 Compose 描边/fill 分离（与 frostLast 漏窗口原点是同族病）。真实触发路径：
     // 旋转（本工程 manifest 配了 configChanges，Activity 不重建、组合活着）、状态栏/挖孔
     // 避让 inset 变化、本容器自己的 animateContentSize 逐帧变高。
-    // 这里把这一刻的窗口矩形四个分量一并进 key：矩形真变了才重启、才落表（重启后首轮立即
+    // 这里把这一刻量到的矩形四个分量一并进 key：矩形真变了才重启、才落表（重启后首轮立即
     // 写当前值，动画途中的每帧布局也因此逐帧跟手）。滑出/滑回走 graphicsLayer 位移，
     // 不触发布局回调、不会误重启，滑回动画仍由下面的稳定性轮询收敛，两条机制各管各的。
+    // preview 一并进 key：预览盒从 null 到有值那一刻是**坐标系切换**，必须重启重写矩形。
     var rectX by remember { mutableFloatStateOf(Float.NaN) }
     var rectY by remember { mutableFloatStateOf(Float.NaN) }
     var rectW by remember { mutableFloatStateOf(Float.NaN) }
     var rectH by remember { mutableFloatStateOf(Float.NaN) }
+    // 量当前矩形（视图局部优先；预览盒未登记时窗口系）。false = 坐标还没量到/未 attached/跨树/矩形退化，
+    // 调用方须**写零面积哨兵**（不是"不写表"——不写会让表停在上一代矩形 = 残板）。
+    // 这是"统一换算"的唯一入口：里面用 localPositionOf 抵消共同祖先变换，故体内不出现 positionInWindow。
+    fun measure(card: LayoutCoordinates): Boolean =
+        if (preview != null) viewLocalRectInto(rectScratch, card, preview) else windowRectInto(rectScratch, card)
     DisposableEffect(slot) {
         onDispose {
             if (slot >= 0) FrostCardTable.releaseSlot(slot)
         }
     }
-    LaunchedEffect(slot, coords, rectX, rectY, rectW, rectH, alpha, intent, visible) {
+    LaunchedEffect(slot, coords, preview, rectX, rectY, rectW, rectH, alpha, intent, visible) {
         Log.i("FrostDock", "effect slot=$slot hasCoords=${coords != null} intent=$intent visible=$visible")
         val c = coords ?: return@LaunchedEffect
         if (slot < 0 || !intent) return@LaunchedEffect
@@ -187,9 +204,9 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
             Log.i("FrostDock", "sentinel slot=$slot")
             return@LaunchedEffect
         }
-        // 恢复不能立刻落表：positionInWindow() **现算含祖先 graphicsLayer 位移**，visible 翻转
-        // 那一刻滑出位移还没归零（实测写到了 x=-189），而 layer 归零不触发布局回调、coords 的
-        // key 也不会变——表会永久停在带位移的位置。轮询到坐标稳定（滑回动画收尾）再写终值。
+        // 恢复不能立刻落表：坐标**现算含祖先 graphicsLayer 位移**（旧窗口系口径下实测写到了 x=-189），
+        // visible 翻转那一刻滑出位移还没归零，而 layer 归零不触发布局回调、coords 的 key 也不会变——
+        // 表会永久停在带位移的位置。轮询到坐标稳定（滑回动画收尾）再写终值。
         // 上限 40×40ms=1600ms：滑回动画 FLUENT 档 750ms、LIQUID 弹簧更长，24 次的旧上限会
         // 在动画没走完时用尽、把表停在半路（用户报「动画切换过程中偏移」的一支）。
         var lastX = Long.MIN_VALUE
@@ -197,41 +214,56 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
         var stable = 0
         var attempts = 0
         while (attempts < 40 && stable < 4) {
-            val p = c.positionInWindow()
-            val size = c.size
-            if (p.x.toLong() == lastX && p.y.toLong() == lastY) {
+            // 坐标还没量到（首帧）或矩形退化时**写零面积哨兵**：writeCard 的退化口径
+            // （right<=left || bottom<=top）会把该槽在场位清 0 = "这帧没有这块板"。
+            // 不许只 continue——那会让表里留着上一代的合法矩形，GL 继续按旧矩形贴板 = 残板
+            // （新口径下 measure 会 return false，与旧口径"无条件写、由 GL 退化判据丢弃"的差别正在这里）。
+            if (!measure(c)) {
+                FrostCardTable.writeCard(slot, 0f, 0f, 0f, 0f, frost.radiusPx, 0f)
+                attempts++
+                delay(40)
+                continue
+            }
+            val x = rectScratch[0]
+            val y = rectScratch[1]
+            if (x.toLong() == lastX && y.toLong() == lastY) {
                 stable++
             } else {
                 stable = 0
-                lastX = p.x.toLong()
-                lastY = p.y.toLong()
+                lastX = x.toLong()
+                lastY = y.toLong()
             }
             FrostCardTable.writeCard(
                 slot = slot,
-                leftPx = p.x,
-                topPx = p.y,
-                rightPx = p.x + size.width,
-                bottomPx = p.y + size.height,
+                leftPx = x,
+                topPx = y,
+                rightPx = rectScratch[2],
+                bottomPx = rectScratch[3],
                 radiusPx = frost.radiusPx,
                 alpha = alpha
             )
             attempts++
-            Log.i("FrostDock", "poll slot=$slot x=${p.x} stable=$stable")
+            Log.i("FrostDock", "poll slot=$slot x=$x stable=$stable")
             delay(40)
         }
-        Log.i("FrostDock", "real slot=$slot rect=$lastX,$lastY ${c.size.width}x${c.size.height}")
+        Log.i("FrostDock", "real slot=$slot rect=$lastX,$lastY")
     }
     return this.onGloballyPositioned { c ->
         coords = c
-        val p = c.positionInWindow()
-        val s = c.size
-        if (rectX != p.x || rectY != p.y ||
-            rectW != s.width.toFloat() || rectH != s.height.toFloat()
+        if (!measure(c)) {
+            // 同族防线：布局回调量不到时也把表写空（零面积哨兵），别让表停在上一代矩形（残板）
+            FrostCardTable.writeCard(slot, 0f, 0f, 0f, 0f, frost.radiusPx, 0f)
+            return@onGloballyPositioned
+        }
+        val w = rectScratch[2] - rectScratch[0]
+        val h = rectScratch[3] - rectScratch[1]
+        if (rectX != rectScratch[0] || rectY != rectScratch[1] ||
+            rectW != w || rectH != h
         ) {
-            rectX = p.x
-            rectY = p.y
-            rectW = s.width.toFloat()
-            rectH = s.height.toFloat()
+            rectX = rectScratch[0]
+            rectY = rectScratch[1]
+            rectW = w
+            rectH = h
         }
     }
 }

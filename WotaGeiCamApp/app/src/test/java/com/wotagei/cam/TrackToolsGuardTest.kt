@@ -5,6 +5,7 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.regionsOf
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -61,7 +62,8 @@ class TrackToolsGuardTest {
             "双音轨判定必须来自打开时的 MediaExtractor 探测（数音轨 >=2）",
         body.contains("TrackSync.cachedOffsetMs(app, clip.uri)") to
             "打开时必须读上次同步的持久化偏移（导出读数不因退出页面丢失）",
-        body.contains("engine.setAudioTrackOverride(1, 0)") to "选内录必须强制第二条音频组（组内单轨 trackIndex=0）",
+        body.contains("engine.setAudioTrackOverride(audioGroupIndexOf(AudioTrackKind.CAP), 0)") to
+            "选内录必须强制第二条音频组，且组下标经 audioGroupIndexOf 单一映射（禁止裸写 (1,0) 字面量）",
         body.contains("engine.clearAudioOverride()") to "选环境必须清 override 回默认（默认即第一条音轨=环境）",
         body.contains("TrackSync.run(app, clip.uri)") to "同步钮必须跑 TrackSync.run",
         body.contains("R.string.player_track_sync_low") to "低置信度必须有「按录制起点对齐」提示（复用低置信口径）",
@@ -97,8 +99,38 @@ class TrackToolsGuardTest {
         assertTrue("探测恒真突变体必须报红", missingUiWires(mutantProbe).isNotEmpty())
         // 红绿突变 3：选内录不挂 override（点了没反应的半实现），同一把尺必须报红
         val mutantOverride = playerScreenBody()
-            .replace("engine.setAudioTrackOverride(1, 0)", "Unit")
+            .replace("engine.setAudioTrackOverride(audioGroupIndexOf(AudioTrackKind.CAP), 0)", "Unit")
         assertTrue("选轨断线突变体必须报红", missingUiWires(mutantOverride).isNotEmpty())
+    }
+
+    /**
+     * 本轮红线：单播放页 / 对比页 / 分屏右窗三处的选轨**都不得**裸写组下标字面量 `setAudioTrackOverride(1, 0)`
+     * ——组下标真源是 `CompareAudio.audioGroupIndexOf`（环境=0/内录=1）。三处各自必须走统一入口
+     * （PlayerScreen→audioGroupIndexOf、CompareScreen→CompareAudio.audioPlanOf、分屏→splitAudioPlanOf），
+     * 否则"漏改一处就是选了没效果"。正反双断言：既禁字面量，又要求统一入口在位（防整段删掉照样绿）。
+     */
+    @Test
+    fun `三处选轨都不得裸写组下标字面量`() {
+        val literal = "setAudioTrackOverride(1, 0)"
+        val player = KotlinSourceScan.flatten(playerScreenBody())
+        val compare = KotlinSourceScan.flatten(bodyOf(masked("player/CompareScreen.kt"), "CompareContent"))
+        val split = KotlinSourceScan.flatten(bodyOf(masked("ui/CameraScreen.kt"), "SplitComparePlayer"))
+        listOf(
+            "PlayerScreen" to player,
+            "CompareScreen" to compare,
+            "SplitComparePlayer" to split
+        ).forEach { (name, b) ->
+            assertFalse(
+                "$name 不得裸写组下标的 $literal（组下标必须经单一映射函数，禁止各写字面量）",
+                b.contains(literal)
+            )
+        }
+        assertTrue("PlayerScreen 选轨必须经 audioGroupIndexOf 单一映射", player.contains("audioGroupIndexOf("))
+        assertTrue(
+            "CompareScreen 选轨必须经 CompareAudio.audioPlanOf",
+            compare.contains("CompareAudio.audioPlanOf(")
+        )
+        assertTrue("分屏右窗选轨必须经 splitAudioPlanOf", split.contains("splitAudioPlanOf("))
     }
 
     // endregion

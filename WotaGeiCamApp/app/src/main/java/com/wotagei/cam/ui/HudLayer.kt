@@ -343,6 +343,21 @@ internal object HudFrost {
     var intent by mutableStateOf(false)
         private set
 
+    /**
+     * 承载预览盒的坐标是否已登记（由 [Host] 从 [LocalPreviewCoords] 抄下来）。
+     *
+     * 表头里"卡片是哪套坐标系"那一位（`HEADER_CARD_SPACE`）只认它：录制页登记了预览盒 ⇒ 卡片走
+     * 视图局部系；编辑控件页没有预览盒（`LocalPreviewCoords` 为 null）⇒ 走旧窗口系，观感不变。
+     * 与 [intent] 一样是普通字段而不是 Compose state——它不参与任何绘制判断，只被 [refreshHeader]
+     * 读一次写进表头，读者是 GL。
+     */
+    private var previewProvided = false
+
+    /** [LocalPreviewCoords] 的登记口，只在 [Host] 的副作用里调 */
+    private fun setPreviewProvided(provided: Boolean) {
+        previewProvided = provided
+    }
+
     private val locationInWindow = IntArray(2)
     private val tintScratch = FloatArray(3)
 
@@ -374,9 +389,18 @@ internal object HudFrost {
     fun Host() {
         val context = LocalContext.current
         val view = LocalView.current
+        // 预览盒坐标登记：录制页把它包在 HUD 各容器外侧 provide 下来（CameraScreen），编辑页没有 ⇒ null。
+        // 这里只抄"有没有"给 [refreshHeader] 决定表头那一位；坐标本身由注册点自己读 CompositionLocal。
+        val previewCoords = LocalPreviewCoords.current
         DisposableEffect(context, view) {
             attach(context.applicationContext, view)
             onDispose { detach() }
+        }
+        DisposableEffect(previewCoords) {
+            setPreviewProvided(previewCoords != null)
+            // 坐标系换了一整套 ⇒ 表头那一位要立刻跟上，否则 GL 会按旧口径读新矩形（或反过来）画错一圈
+            if (intent) refreshHeader()
+            onDispose { setPreviewProvided(false) }
         }
     }
 
@@ -434,7 +458,10 @@ internal object HudFrost {
     }
 
     /**
-     * 把「组合根在窗口里的矩形 + 底板色 + 开关位」写进矩形表表头（主线程）。
+     * 把「组合根在窗口里的矩形 + 底板色 + 开关位 + 卡片坐标系位」写进矩形表表头（主线程）。
+     *
+     * ⚠ `root*` 四数在**视图局部系**口径下只供探针诊断（GL 那时把原点当 0），窗口系口径下仍是
+     * GL 反推承载视图原点的输入——两个口径都把它照常写进去，读侧按 `HEADER_CARD_SPACE` 决定用不用。
      *
      * 表头与卡片矩形是两次事务，`FrostCardTable` 的读方一次只认一块已发布的数组
      * （写方改私有 scratch、发布时换个 `@Volatile` 引用），所以 GL 那一侧永远读得到一整代；
@@ -454,7 +481,8 @@ internal object HudFrost {
             tintRed = tintScratch[0],
             tintGreen = tintScratch[1],
             tintBlue = tintScratch[2],
-            uiEnabled = intent
+            uiEnabled = intent,
+            cardSpace = frostSpaceIsViewLocal(previewProvided)
         )
     }
 }

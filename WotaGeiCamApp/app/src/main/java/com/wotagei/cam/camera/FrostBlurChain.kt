@@ -525,11 +525,18 @@ internal class FrostPlatePass(
             broken = true
             return 0
         }
-        // 表头：根在窗口里的矩形 + 底板色。视图原点由这两个数与 GL 自己知道的视图尺寸现算
-        // （推断量与前提见 frostViewOriginInto 的注释），前提不成立就一块都不画。
+        // 表头：根在窗口里的矩形 + 底板色 + 卡片坐标系位。卡片坐标系有两种口径：
+        // - 视图局部（HEADER_CARD_SPACE = 1f）：卡片四边已经是承载视图局部坐标，[viewOriginScratch] 就是
+        //   视图自己的原点 (0,0)，不需要任何反推；
+        // - 窗口系（0f，编辑控件页那条路）：视图原点由根矩形与 GL 自己知道的视图尺寸现算
+        //   （推断量与前提见 [frostViewOriginInto] 的注释），前提不成立就一块都不画。
         // 偏移一律走 FrostCardTable.HEADER_*：卡片那侧一直是用 CARD_* 常量取的，表头这两套写法并存
         // 的时候，表头加一个字段就会让下面这七行整体错一位（读到"底色"其实是别人），且不报错。
-        if (!frostViewOriginInto(
+        val viewLocalSpace = table[FrostCardTable.HEADER_CARD_SPACE] != 0f
+        if (viewLocalSpace) {
+            originScratch[0] = 0f
+            originScratch[1] = 0f
+        } else if (!frostViewOriginInto(
                 originScratch,
                 rootLeftPx = table[FrostCardTable.HEADER_ROOT_LEFT],
                 rootTopPx = table[FrostCardTable.HEADER_ROOT_TOP],

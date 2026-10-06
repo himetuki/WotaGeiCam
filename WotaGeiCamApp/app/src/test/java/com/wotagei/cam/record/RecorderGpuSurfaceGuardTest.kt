@@ -102,12 +102,19 @@ class RecorderGpuSurfaceGuardTest {
     @Test
     fun `UI 必须接线换段重挂并等 GL 挂好`() {
         val screen = maskedMain("ui/CameraScreen.kt")
+        // 会话体自 2026-10-06 起抽成 beginSession（起录与自检重录共用同一套接线），
+        // start 只负责可重入守卫 + 参数整束后转交；两处都要锁，抽取不许把接线丢掉
         val start = bodyOf(screen, "start")
+        val begin = bodyOf(screen, "beginSession")
         assertTrue(
-            "RecordRunner.start 必须接 onInputSurfaceRecreated（下发 setOutputSurface + awaitEncoderSurface）",
-            start.contains("rec.onInputSurfaceRecreated = ") &&
-                start.contains("setOutputSurface(s, profile.width, profile.height, profile.fps)") &&
-                start.contains("awaitEncoderSurface()")
+            "RecordRunner.start 必须转交 beginSession（起录与重录共用同一套会话接线）",
+            start.contains("beginSession()")
+        )
+        assertTrue(
+            "RecordRunner.beginSession 必须接 onInputSurfaceRecreated（下发 setOutputSurface + awaitEncoderSurface）",
+            begin.contains("rec.onInputSurfaceRecreated = ") &&
+                begin.contains("setOutputSurface(s, profile.width, profile.height, profile.fps)") &&
+                begin.contains("awaitEncoderSurface()")
         )
         // 等面超时不许静默放行（P3-3，与 awaitPreview 口径对齐）；字面量被遮蔽，
         // 锚定「未挂载即 if + Log.w(TAG_UI…)」的代码形态
@@ -116,6 +123,35 @@ class RecorderGpuSurfaceGuardTest {
             "awaitEncoderSurface 超时必须留 Log.w（对齐 awaitPreview 口径）",
             await.contains("if (!gl.isOutputSurfaceBound())") &&
                 await.contains("Log.w(TAG_UI")
+        )
+    }
+
+    @Test
+    fun `CodecRecorder 的自检三格必须在泵循环里落地`() {
+        val src = maskedMain("record/CodecRecorder.kt")
+        val seg = bodyOf(src, "runSegment")
+        // 段起始清三格：换段后新编码器/muxer 从零起算，上一段真值不能冒充本段健康
+        assertTrue(
+            "runSegment 段起始必须清自检三格（videoTrackAdded/muxStarted/firstVideoSample）",
+            seg.contains("healthVideoTrackAdded = false") &&
+                seg.contains("healthMuxStarted = false") &&
+                seg.contains("healthFirstVideoSample = false")
+        )
+        // 建轨（FORMAT_CHANGED 后）与首样本（writeSample > 0 后）两个写点必须在 runSegment 内
+        assertTrue(
+            "runSegment 必须在 addTrack 之后置 healthVideoTrackAdded",
+            seg.contains("videoTrack = mx.addTrack(v.getOutputFormat())") &&
+                seg.contains("healthVideoTrackAdded = true")
+        )
+        assertTrue(
+            "runSegment 必须在 writeSample 返回 >0 后置 healthFirstVideoSample",
+            seg.contains("if (wrote > 0)") && seg.contains("healthFirstVideoSample = true")
+        )
+        // 第二格在启动闸内：mx.start() 成功后置位（谁把写点挪出启动闸，muxer 没真起也报健康）
+        val mux = bodyOf(src, "startMuxerIfReady")
+        assertTrue(
+            "startMuxerIfReady 必须在 mx.start() 成功后置 healthMuxStarted",
+            mux.contains("mx.start()") && mux.contains("healthMuxStarted = true")
         )
     }
 

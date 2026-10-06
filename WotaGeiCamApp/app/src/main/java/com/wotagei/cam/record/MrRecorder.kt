@@ -267,6 +267,19 @@ class MrRecorder(
         0
     }
 
+    /**
+     * 弱口径健康读数：**MediaRecorder 路只能发现硬错误、判废靠 [engineError]，没有首样本信号**。
+     * MediaRecorder 不暴露逐缓冲的输出回调（不像 MediaCodec 的 dequeueOutputBuffer），
+     * 因此本路拿不到"建轨 / muxer 启动 / 首样本落地"三格中的任何一格——**不许假装有**：
+     * 三格恒 false、[RecorderHealth.milestonesObservable] 恒 false，UI 侧据此只认 [engineError]
+     * （`MEDIA_ERROR` 回调落在这里），不拿三格去套超窗。
+     *
+     * 【自检覆盖边界】UI 侧起录自检的**完整三格判据只覆盖 [CodecRecorder] 路**；本路（MediaRecorder，
+     * 30/60fps 常规档）只做错误码弱判，**不做产出健全性自检**——首拍无错误码即 [healthVerdict] 意义下的
+     * 健康，之后静默零帧抓不到。这是既定边界，不是遗漏。
+     */
+    override fun health(): RecorderHealth = RecorderHealth(errorCode = engineError)
+
     // endregion
 
     // region 分段

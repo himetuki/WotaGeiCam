@@ -74,11 +74,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import com.wotagei.cam.R
 import com.wotagei.cam.media.MediaRepo
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.ui.CompareProbe
+import com.wotagei.cam.ui.CompareProbeOverlay
+import com.wotagei.cam.ui.CompareProbeState
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.dialog.BottomPanel
@@ -98,10 +103,12 @@ import com.wotagei.cam.ui.theme.WotaSurface
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 硬 seek 阈值：漂出此邻域才动播放位置（seek 冲刷解码器=可见卡顿，rarity） */
 private const val HARD_RESYNC_MS = 250L
@@ -159,6 +166,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 全程循环开关默认开（T≥Tmax 统一回绕 Tmin），关=末帧停驻
     var domBlackL by remember { mutableStateOf(false) }
     var domBlackR by remember { mutableStateOf(false) }
+    // 编排本拍下发的黑层决定（只给探针读数用，不参与任何播放判断）：与 domBlack（会话位）对照，
+    // 能一眼看出「seekTimeline 写的会话位」与「decide 每拍的决定」是否打架
+    var cmdBlackL by remember { mutableStateOf(false) }
+    var cmdBlackR by remember { mutableStateOf(false) }
     var timelineLoop by remember { mutableStateOf(true) }
     // 会话播放意图（r05 修 r04「进页/选片后双黑」）：对比页进页即自动开播（需求 27 行
     // 「左右同时播放」；单播放页同款 PlayerScreen attach 后 softPause(false)）。它与引擎
@@ -172,6 +183,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     val leftDur by leftEngine.durationMs.collectState(left.durationMs)
     val rightPos by rightEngine.positionMs.collectState(0L)
     val rightDur by rightEngine.durationMs.collectState(0L)
+    // 两引擎上报的音频组（onTracksChanged）：切边/换片后判「当前音频侧是不是双音轨片」，
+    // 并做重放 override 的 key（attach 会 clearAudioOverride，轨读数到位要补一次）
+    val leftAudioGroups by leftEngine.audioGroups.collectState(emptyList<Tracks.Group>())
+    val rightAudioGroups by rightEngine.audioGroups.collectState(emptyList<Tracks.Group>())
+    // 探针只读的播放态（不参与判断）
+    val leftState by leftEngine.playbackState.collectState(Player.STATE_IDLE)
+    val rightState by rightEngine.playbackState.collectState(Player.STATE_IDLE)
     // 启停态取两引擎并集：只读左引擎会在右引擎自己播完/绕回后把按钮状态显示错
     val leftPlaying by leftEngine.isPlaying.collectState(false)
     val rightPlaying by rightEngine.isPlaying.collectState(false)
@@ -206,8 +224,21 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     val tapScope = rememberCoroutineScope()
     val motion = LocalMotion.current
     // 音频源（参考图 Side A/B）：此前两台引擎全音量齐播（PlayerEngine.setVolume 全工程零
-    // 调用方），对比场景双声混音没法听；选定一边、另一边静音，默认 Side A
-    var audioSide by remember { mutableStateOf(0) }
+    // 调用方），对比场景双声混音没法听；选定一边、另一边静音，默认 Side A。
+    // r06 剪辑模型：音频会话态 = 「哪一侧」+「哪条轨（环境/内录）」，经 CompareAudio 落两引擎，
+    // 页内不再裸调 setVolume/setAudioTrackOverride（组下标单一映射见 CompareAudio.audioGroupIndexOf）
+    var audioSide by remember { mutableStateOf(Side.LEFT) }
+    // 当前音频侧那一侧的片 uri（右槽为空时空 → 探测关）
+    val audioSideUri = if (audioSide == Side.LEFT) left.uri else right?.uri
+    // 选轨是会话态：换片（含切边）复位回环境轨，口径与单播放页一致
+    var audioTrack by remember(audioSideUri) { mutableStateOf(AudioTrackKind.ENV) }
+    // 当前音频侧的容器音轨数（MediaExtractor 探测，IO 线程，按 uri 记忆）：>=2 才亮音轨选 pill
+    var audioSideTrackCount by remember(audioSideUri) { mutableStateOf(0) }
+    // 「当前音频侧是不是双音轨片」的**唯一真源**（MediaExtractor 探测）：UI 的 chip 门与
+    // CompareAudio 的行为门同吃这一位。旧实现 UI 门用 countAudioTracks、行为门却用引擎上报的
+    // audioGroups.size —— 两源不一致时会「UI 能选、点了没效果」或「双音轨片看不到 chip」。
+    // audioGroups.size 保留只作**重放 effect 的 key**（表示轨读数已到达，见下），不再作行为门。
+    val audioSideDual = audioSideTrackCount >= 2
     // 倍速就近弹层（复用单播放页 SpeedTierPopup），锚点与开关两枚状态
     var speedMenu by remember { mutableStateOf(false) }
     // 水平镜像（10-01 修订）：0=关 1=左片 2=右片 3=双片都翻。会话态不持久化；
@@ -396,16 +427,40 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 黑层位写回会话态：驱动两窗黑层 Box，也给下一拍域判定做回灌
             domBlackL = cmd.blackLeft
             domBlackR = cmd.blackRight
+            // 探针只读：本拍 decide 的黑层决定（与上面会话位对照，见 ui/CompareProbe 判读表）
+            cmdBlackL = cmd.blackLeft
+            cmdBlackR = cmd.blackRight
         }
     }
     LaunchedEffect(r?.uri) {
         orchestrateLoop()
     }
 
-    // Side A/B 落音量：切边或右片换片后重下一次（另一边压成 0，选中的一边全量）
-    LaunchedEffect(audioSide, r?.uri) {
-        leftEngine.setVolume(if (audioSide == 0) 1f else 0f)
-        rightEngine.setVolume(if (audioSide == 1 && r != null) 1f else 0f)
+    // 探测当前音频侧的容器音轨数（IO，MediaExtractor）：>=2 才亮音轨选 pill；换片/切边重探
+    LaunchedEffect(audioSideUri) {
+        val uri = audioSideUri
+        audioSideTrackCount = if (uri == null) 0 else withContext(Dispatchers.IO) { TrackSync.countAudioTracks(app, uri) }
+    }
+
+    fun engineFor(s: Side): PlayerEngine = if (s == Side.LEFT) leftEngine else rightEngine
+
+    // Side A/B + 音轨落两引擎：切边、换片、选轨、以及引擎上报的音频组数任一变化都重下发。
+    // **重放是必须的**：attach 会 clearAudioOverride()，而轨读数要等 onTracksChanged 才到——
+    // 只在「选轨那一刻」下发 override 会在换片/首帧时丢掉（"选完没效果"的经典坑），
+    // 所以把 audioGroups.size 也做 key（只作"轨读数已到达"的重放触发器，**不再作行为门**），
+    // 轨读数到位后自动补一次。行为门的唯一真源是 audioSideDual（= UI chip 门同一枚 countAudioTracks）。
+    //
+    // 【为什么 audioSideDual 不做 key（审查判定当前不可达，不是漏了）】它确实影响 plan 的落点，但它一变，
+    // 本 effect 的 key 里必有一项同步变，故不存在"该重下发却没重跑"的时刻：
+    // - 由假变真（探测完成）：audioTrack 初始恒 ENV，音轨 chip 只有 audioSideDual 为真才出现 ⇒ 用户能把
+    //   audioTrack 切到 CAP 的一刻，探测必然已完成；而 audioTrack 本身是 key，选中即重跑、此拍读到的
+    //   audioSideDual 已为真。此前 audioTrack 恒 ENV，plan 对假/真两位产出同一条（CAP 被兜底成 ENV）。
+    // - 由真变假（换片/切边）：audioSideUri 变 ⇒ audioTrack 被 remember(audioSideUri) 复位成 ENV、
+    //   audioSideTrackCount 归 0；这条路径同时改了 r?.uri 或 audioSide 这两个 key，照样重跑。
+    // 加它进 key 只会让 ComparePlaybackGuardTest 里锁整条 key 串的断言一起改，收益为零。
+    LaunchedEffect(audioSide, audioTrack, r?.uri, leftAudioGroups.size, rightAudioGroups.size) {
+        val plan = CompareAudio.audioPlanOf(audioSide, audioTrack, audioSideDual)
+        CompareAudio.applyOrderOf(plan).forEach { cmd -> engineFor(cmd.side).applyAudioCommand(cmd) }
     }
 
     val leftDuration = if (leftDur > 0L) leftDur else left.durationMs
@@ -535,8 +590,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL, panL)) {
                 WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, pan = panL.value, mirror = mirror == 1 || mirror == 3)
                 // dormant 轨黑层：常驻节点 alpha 0/1 切换（增删节点会闪帧）。Box 无指针
-                // 处理器不构成命中目标，事件照旧落到画面层；角标在它之后组合、不被盖住
-                Box(Modifier.fillMaxSize().background(Color.Black).alpha(if (domBlackL) 1f else 0f))
+                // 处理器不构成命中目标，事件照旧落到画面层；角标在它之后组合、不被盖住。
+                // **alpha 必须在 background 之前**：modifier 链左为外、右为内，`alpha` 只会作用在
+                // 它右边的绘制上；写成 `.background(Black).alpha(x)` 时黑底在黑层之外恒不透明，
+                // 两窗就被常驻纯黑永久盖死（2026-10-06 双黑真因，与 domBlack 位无关）。
+                Box(Modifier.fillMaxSize().alpha(if (domBlackL) 1f else 0f).background(Color.Black))
                 ZoomBadge(zoomL.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                 SideLabel(stringResource(R.string.compare_left, left.name), Modifier.align(Alignment.TopEnd))
             }
@@ -556,7 +614,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     }
                 } else {
                     WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
-                    Box(Modifier.fillMaxSize().background(Color.Black).alpha(if (domBlackR) 1f else 0f))
+                    // alpha 在 background 之前（同上：反过来黑底恒不透明 → 右窗永久黑）
+                    Box(Modifier.fillMaxSize().alpha(if (domBlackR) 1f else 0f).background(Color.Black))
                     ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
                     // 右窗旋转钮（观看辅助，逆时针 90°/按）：计划原定右上角与左上 ZoomBadge 对称，
@@ -624,17 +683,31 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         ) {
                             ComparePill(
                                 label = stringResource(R.string.compare_side_a),
-                                selected = audioSide == 0,
-                                onClick = { audioSide = 0 }
+                                selected = audioSide == Side.LEFT,
+                                onClick = { audioSide = Side.LEFT }
                             )
                             ComparePill(
                                 label = stringResource(R.string.compare_side_b),
-                                selected = audioSide == 1,
+                                selected = audioSide == Side.RIGHT,
                                 onClick = {
                                     val clip = r
-                                    if (clip == null) banner = R.string.compare_need_right else audioSide = 1
+                                    if (clip == null) banner = R.string.compare_need_right else audioSide = Side.RIGHT
                                 }
                             )
+                            // 音轨选 pill（剪辑模型）：只在当前音频侧的片是双音轨片时出现，环境/内录二选一。
+                            // 门与行为门同源（audioSideDual）——两处各写一份判据会「UI 能选、点了没效果」。
+                            // 文案复用既有资源（任务 3 独占 strings.xml，不新增文案）
+                            if (audioSideDual) {
+                                ComparePill(
+                                    label = stringResource(
+                                        if (audioTrack == AudioTrackKind.ENV) R.string.player_track_env else R.string.player_track_cap
+                                    ),
+                                    selected = audioTrack == AudioTrackKind.CAP,
+                                    onClick = {
+                                        audioTrack = if (audioTrack == AudioTrackKind.ENV) AudioTrackKind.CAP else AudioTrackKind.ENV
+                                    }
+                                )
+                            }
                             ComparePill(
                                 label = stringResource(R.string.compare_sync),
                                 selected = syncing,
@@ -815,6 +888,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                             TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.value)))
                             // 第三格=时间线总长（off=0 且右片不长于左片时数值与旧口径一致）
                             TimePill(formatDuration(timelineSpan))
+                            // 剪辑语义：当前在播的音频在哪条视频轨的哪条音轨（两条视频轨由左右两窗表达）。
+                            // 只用既有资源拼接，不新增 strings
+                            TimePill(
+                                stringResource(if (audioSide == Side.LEFT) R.string.compare_left_tag else R.string.compare_right_tag) +
+                                    "·" +
+                                    stringResource(if (audioTrack == AudioTrackKind.ENV) R.string.player_track_env else R.string.player_track_cap)
+                            )
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -948,6 +1028,41 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                 }
             )
         }
+
+        // 黑屏取证探针（只在带 extra 的进程里存在，见 ui/CompareProbe）：挂根 Box 的 TopStart，
+        // 只画不收指。读数每 200ms 现读，用 live 位置不用轮询快照
+        CompareProbeOverlay(
+            snapshot = {
+                val g = timelineGeo()
+                val lL = leftEngine.livePositionMs()
+                val lR = rightEngine.livePositionMs()
+                CompareProbeState(
+                    playerL = leftEngine.hasPlayer,
+                    playerR = rightEngine.hasPlayer,
+                    boundViewsL = leftEngine.boundViewCount,
+                    boundViewsR = rightEngine.boundViewCount,
+                    surfaceAvailL = leftEngine.boundSurfaceAvailable(),
+                    surfaceAvailR = rightEngine.boundSurfaceAvailable(),
+                    viewSizeL = leftEngine.boundViewSize(),
+                    viewSizeR = rightEngine.boundViewSize(),
+                    domBlackL = domBlackL,
+                    domBlackR = domBlackR,
+                    cmdBlackL = cmdBlackL,
+                    cmdBlackR = cmdBlackR,
+                    playingL = leftPlaying,
+                    playingR = rightPlaying,
+                    tL = lL,
+                    tR = lR,
+                    off = g.offsetMs,
+                    t = CompareTimeline.resolveT(g, lL, lR, domBlackL, domBlackR),
+                    tMin = g.tMin,
+                    tMax = g.tMax,
+                    stateL = leftState,
+                    stateR = rightState
+                )
+            },
+            modifier = Modifier.align(Alignment.TopStart)
+        )
     }
 }
 

@@ -61,7 +61,8 @@ import kotlinx.coroutines.delay
  *   glEngine、链 broken、上屏节流都会这样）；
  * - `drew`：最近一个窗口帧实画的板数（[GlRenderEngine.frostDiagDrewPlates]）。
  *   cards>0 且 avail=1 而 drew=0 ⇒ 断点在画板 pass 内部：`chainBrk/plateBrk` 看着色器，
- *   `geo` 行看视图原点推断（`frostViewOriginInto` 不成立时一块都不画）；
+ *   `geo` 行看卡片坐标系与视图原点（`space=local` 时原点恒 (0,0)、不会 fail；`space=window` 时
+ *   由 [frostViewOriginInto] 现推，推不出才一块都不画）；
  * - `rep/live`：GL 回报位与 UI 让位位。drew>0 而 live=0 ⇒ 200ms 轮询没跑（[HudFrost] 的 bug）。
  *
  * ⚠ `cards/drew` 是"最近一个窗口帧"的值：上屏被 `windowThrottled()` 节流的帧不刷新（与
@@ -128,11 +129,20 @@ internal fun frostProbeText(glEngine: GlRenderEngine?): String {
         .append(" avail=").append(if (glEngine.isFrostBlurAvailable()) 1 else 0)
     sb.append("\nbrk chain=").append(if (glEngine.frostChainBrokenForDiagnostics()) 1 else 0)
         .append(" plate=").append(if (glEngine.frostPlateBrokenForDiagnostics()) 1 else 0)
-    // 几何自查：拿探针自己读到的表头 + GL 的视图尺寸，把画板 pass 那次原点推断在 UI 侧重算一遍。
-    // 两边吃同一份表头与同一对视图尺寸 ⇒ 结果应与 GL 帧内一致；ok=0 就是"一块都不画"的直接成因
+    // 几何自查：卡片坐标系有两种口径（表头 HEADER_CARD_SPACE）。
+    // - 视图局部（local）：卡片四边已是承载视图局部坐标，原点恒 (0,0)，不可能 fail；
+    // - 窗口系（window，编辑控件页那条路）：拿探针自己读到的表头 + GL 的视图尺寸，把画板 pass
+    //   那次原点推断在 UI 侧重算一遍（ok=0 就是"一块都不画"的直接成因）。
+    val viewLocalSpace = copy[FrostCardTable.HEADER_CARD_SPACE] != 0f
     val view = glEngine.windowSize()
-    val geoOk = if (cards >= 0 && view.first > 0 && view.second > 0) {
-        frostViewOriginInto(
+    val geoOk = when {
+        cards < 0 || view.first <= 0 || view.second <= 0 -> null
+        viewLocalSpace -> {
+            origin[0] = 0f
+            origin[1] = 0f
+            true
+        }
+        else -> frostViewOriginInto(
             origin,
             rootLeftPx = copy[FrostCardTable.HEADER_ROOT_LEFT],
             rootTopPx = copy[FrostCardTable.HEADER_ROOT_TOP],
@@ -141,10 +151,9 @@ internal fun frostProbeText(glEngine: GlRenderEngine?): String {
             viewWidthPx = view.first,
             viewHeightPx = view.second
         )
-    } else {
-        null
     }
     sb.append("\ngeo view=").append(view.first).append('x').append(view.second)
+        .append(" space=").append(if (viewLocalSpace) "local" else "window")
         .append(" origin=").append(
             when {
                 geoOk == null -> "n/a"

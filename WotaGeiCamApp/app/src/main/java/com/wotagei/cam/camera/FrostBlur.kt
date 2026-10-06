@@ -305,6 +305,11 @@ fun frostUvOfCard(cardInWindowPx: FrostRectPx, geometry: FrostGeometry): FrostUv
  * 口径、取整方向、Double 计算顺序全部与 [frostUvOfCard] 的文档逐字同一条（两者是同一份实现，
  * 不存在"UI 侧与 GL 侧各算一套"的分叉）。
  *
+ * [viewOriginXInWindowPx] / [viewOriginYInWindowPx] 的语义是「承载视图原点，与该函数收到的卡片矩形
+ * **同一坐标系**」：卡片走窗口系（[FrostCardTable.HEADER_CARD_SPACE] = 0f）时它是视图在窗口里的原点；
+ * 卡片走视图局部系（= 1f）时卡片已是视图局部坐标、视图原点在这个坐标系里恒为 (0,0)，传 0 即可。
+ * 名字里的 InWindow 沿用历史，别读成"恒为窗口坐标"。
+ *
  * @return false = 这帧这块卡片没有可用模糊（几何退化、零面积、与画面不相交、RT 还没建好）
  */
 fun frostUvInto(
@@ -604,8 +609,8 @@ fun frostCoverOfSdf(signedDistancePx: Float, aaPx: Float): Float {
  */
 object FrostCardTable {
 
-    /** 表头 float 数：根左上 X/Y、根宽、根高、底板色 R/G/B、UI 开关意图（1f/0f） */
-    const val HEADER_FLOATS = 8
+    /** 表头 float 数：根左上 X/Y、根宽、根高、底板色 R/G/B、UI 开关意图（1f/0f）、卡片坐标系位 */
+    const val HEADER_FLOATS = 9
 
     /** 一枚卡片的 float 数：窗口 px 的四边、圆角半径（负数=短边一半）、底板色不透明度、在场位 */
     const val SLOT_FLOATS = 7
@@ -635,6 +640,16 @@ object FrostCardTable {
     const val HEADER_TINT_GREEN = 5
     const val HEADER_TINT_BLUE = 6
     const val HEADER_UI_ENABLED = 7
+
+    /**
+     * 卡片矩形所在的坐标系（0f = 旧口径「app 窗口系」，1f = 新口径「承载视图局部系」）。
+     *
+     * 为什么要这一位：分屏把整页套在祖先那层 `graphicsLayer{scale}` 里，旧口径的 `positionInWindow()`
+     * 会把卡片位置缩掉而尺寸不缩 ⇒ 板与卡片错开且偏大（两条注册链同族缺陷）。改成在承载视图局部
+     * 坐标系里量矩形之后，GL 侧不再需要由根尺寸反推视图原点（那一整条推断在 [frostViewOriginInto]
+     * 里），原点恒为视图自己的 (0,0)；旧口径仍要它，所以两个口径必须能被读方区分开。
+     */
+    const val HEADER_CARD_SPACE = 8
 
     /** 表内偏移：卡片块从 HEADER_FLOATS 起，第 i 格在 [cardBase] */
     const val CARD_LEFT = 0
@@ -763,7 +778,13 @@ object FrostCardTable {
         }
     }
 
-    /** 写表头（主线程）：组合根矩形 + 底板色 + UI 开关意图。与卡片各是一次事务，一次发布一块板 */
+    /**
+     * 写表头（主线程）：组合根矩形 + 底板色 + UI 开关意图 + 卡片坐标系位。与卡片各是一次事务，一次发布一块板。
+     *
+     * [cardSpace] **无默认值必传**（AGENTS 铁律）：漏传会让"表里的卡片是哪套坐标"与"GL 侧按哪套读"
+     * 静默错位一整代——旧口径要由根尺寸反推视图原点，新口径原点恒 0，读错了板就整体错一圈。
+     * 这一个 bit 由 [com.wotagei.cam.ui.frostSpaceIsViewLocal] 一条真源产出。
+     */
     fun writeHeader(
         rootLeftPx: Float,
         rootTopPx: Float,
@@ -772,7 +793,8 @@ object FrostCardTable {
         tintRed: Float,
         tintGreen: Float,
         tintBlue: Float,
-        uiEnabled: Boolean
+        uiEnabled: Boolean,
+        cardSpace: Boolean
     ) {
         synchronized(monitor) {
             if (disabled) return@synchronized
@@ -787,6 +809,7 @@ object FrostCardTable {
             d[HEADER_TINT_GREEN] = tintGreen
             d[HEADER_TINT_BLUE] = tintBlue
             d[HEADER_UI_ENABLED] = if (uiEnabled) 1f else 0f
+            d[HEADER_CARD_SPACE] = if (cardSpace) 1f else 0f
             publishLocked()
         }
     }
@@ -903,7 +926,7 @@ object FrostCardTable {
     /**
      * 开一次写事务：先把已发布的那份**整表抄进 scratch**，写方才开始改自己那几格。
      *
-     * 为什么必须抄：一块板是一次事务、表头另算一次，写方每次只改 7~8 个 float。
+     * 为什么必须抄：一块板是一次事务、表头另算一次，写方每次只改 7~9 个 float。
      * 若直接往 scratch 里改，交换出去的那份就只带这一笔的字段、其余全是上上代的（甚至是最初的 0），
      * 于是"写了 2 块板只读到 1 块"——这是双缓冲最容易踩的那脚空，[FrostCardTableTest] 里
      * 「读出来的是表头加压实后的卡片块」就是它的探针。
