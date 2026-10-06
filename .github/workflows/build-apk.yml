@@ -1,7 +1,10 @@
 # 打包四件套（产物名带版本号）：WotaGeiCam-v0.0.4-release.apk /
 # WotaGeiCam-v0.0.4-universal-release.apk / WotaGeiCam-v0.0.4-arm64-v8a-release.apk /
 # WotaGeiCam-v0.0.4-armeabi-v7a-release.apk（版本号取自 versionName，随版本走）
-# 触发：推送 v* 标签；也可在 Actions 页手动触发。
+# r 号：tag 格式 v<版本>-r<检查点>（如 v0.0.7-r08）时，r 段经 -Prbuild 传给 Gradle，
+#   产物名与设置页"版本"显示携带 r 号（如 WotaGeiCam-v0.0.7-r08-release.apk）；
+#   tag 无 -r 后缀或不填 dispatch input → 不传该属性，保持旧行为（向后兼容）。
+# 触发：推送 v* 标签；也可在 Actions 页手动触发（可选输入 rbuild）。
 # 签名：keystore 与密码不进 git（见 .gitignore），启动时从 Actions Secrets 还原——
 #   WOTA_KEYSTORE_BASE64 = keystore/wotageicam-release.jks 的 base64（单行）
 #   WOTA_KEYSTORE_PROPS  = keystore.properties 的完整文本
@@ -11,6 +14,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      rbuild:
+        description: "r 检查点号（如 08；留空=版本名不带 r 后缀）"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -52,13 +61,34 @@ jobs:
           sed -i '/^org.gradle.java.home/d' WotaGeiCamApp/gradle.properties
           chmod +x WotaGeiCamApp/gradlew
 
+      # r 段提取：tag v0.0.7-r08 → EXTRA_PROPS="-Prbuild=08"；tag 无 -r 后缀 → 不传（旧行为）；
+      # 手动触发用 input rbuild。EXTRA_PROPS 为空串时两遍构建命令里展开为无。
+      - name: Derive -Prbuild from tag r-segment or dispatch input
+        env:
+          RBUILD_INPUT: ${{ inputs.rbuild }}
+        run: |
+          RBUILD=""
+          if [ "${GITHUB_REF_TYPE:-branch}" = "tag" ]; then
+            case "$GITHUB_REF_NAME" in
+              *-r*) RBUILD="${GITHUB_REF_NAME##*-r}" ;;
+            esac
+          else
+            RBUILD="$RBUILD_INPUT"
+          fi
+          if [ -n "$RBUILD" ]; then
+            echo "EXTRA_PROPS=-Prbuild=$RBUILD" >> "$GITHUB_ENV"
+          else
+            echo "EXTRA_PROPS=" >> "$GITHUB_ENV"
+          fi
+          echo "EXTRA_PROPS='$EXTRA_PROPS'"
+
       # 第一遍：ABI 分包（universal + arm64-v8a + armeabi-v7a 三枚）
       # 注意：两遍配置不同（分包开/关），后一遍会把前一遍的产物从 outputs 里清掉，
       # 所以每遍跑完立刻拷进 apk-out 暂存，最后统一校验。
       - name: Build split APKs (universal / arm64-v8a / armeabi-v7a)
         working-directory: WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam --stacktrace
+          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           mkdir -p ../apk-out
           cp app/build/outputs/apk/release/*.apk ../apk-out/
 
@@ -66,7 +96,7 @@ jobs:
       - name: Build plain release APK
         working-directory: WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam --stacktrace
+          ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           cp app/build/outputs/apk/release/*.apk ../apk-out/
 
       - name: Verify four APKs staged
