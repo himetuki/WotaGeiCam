@@ -23,10 +23,11 @@ class RecordHealthTest {
     @Test
     fun `常量档位是既定设计值`() {
         // 视频路 1200ms（首帧正常 <300ms 留 4 倍余量）；完整含音轨 3000ms；
-        // 最多重启 2 次（含首个共 3 次机会）
+        // 最多重启 2 次（含首个共 3 次机会）；MR 路产出活性门槛 64KiB（挡"只写容器头"的假活）
         assertEquals(1_200L, VIDEO_WINDOW_MS)
         assertEquals(3_000L, FULL_WINDOW_MS)
         assertEquals(2, MAX_RESTART_ATTEMPTS)
+        assertEquals(65_536L, MIN_OUTPUT_BYTES)
     }
 
     @Test
@@ -163,9 +164,112 @@ class RecordHealthTest {
     }
 
     @Test
-    fun `弱口径只认硬错误码`() {
-        assertEquals(HealthVerdict.HEALTHY, weakHealthVerdict(null))
-        assertEquals(HealthVerdict.UNHEALTHY, weakHealthVerdict(RecordError.ENGINE_ERROR))
+    fun `产出活性 字节够量即健康`() {
+        // 恰好门槛即健康（边界取 >= 而非 >）
+        assertEquals(
+            HealthVerdict.HEALTHY,
+            streamHealthVerdict(bytesWritten = 65_536L, errorCode = null, elapsedMs = 0L, window = window)
+        )
+        assertEquals(
+            HealthVerdict.HEALTHY,
+            streamHealthVerdict(bytesWritten = 999_999L, errorCode = null, elapsedMs = 3_000L, window = window)
+        )
+    }
+
+    @Test
+    fun `产出活性 差一字节即未够量 窗口未到则等待`() {
+        // 65_536 是门槛，差 1 就是"不足量"；此时窗口未到只能等（不是判废）
+        assertEquals(
+            HealthVerdict.WAIT,
+            streamHealthVerdict(bytesWritten = 65_535L, errorCode = null, elapsedMs = 180L, window = window)
+        )
+    }
+
+    @Test
+    fun `产出活性 只写容器头的假活不算健康`() {
+        // <1KB 是"一帧都没写、只剩 ftyp/moov 头"的形态：窗口内等、窗口末判废。
+        // 把 MIN_OUTPUT_BYTES 改成 0 会让这一格变 HEALTHY（假绿），本断言当场红。
+        assertEquals(
+            HealthVerdict.WAIT,
+            streamHealthVerdict(bytesWritten = 1_000L, errorCode = null, elapsedMs = 180L, window = window)
+        )
+        assertEquals(
+            HealthVerdict.UNHEALTHY,
+            streamHealthVerdict(bytesWritten = 1_000L, errorCode = null, elapsedMs = 3_000L, window = window)
+        )
+    }
+
+    @Test
+    fun `产出活性 窗口末字节不足即判废 恰好到窗算超窗`() {
+        val atWindow: (Long) -> HealthVerdict = { elapsed ->
+            streamHealthVerdict(bytesWritten = 65_535L, errorCode = null, elapsedMs = elapsed, window = window)
+        }
+        assertEquals(HealthVerdict.WAIT, atWindow(2_999L))
+        assertEquals(HealthVerdict.UNHEALTHY, atWindow(3_000L))
+        assertEquals(HealthVerdict.UNHEALTHY, atWindow(3_001L))
+    }
+
+    @Test
+    fun `产出活性 errorCode 非空即使字节足量也判废`() {
+        assertEquals(
+            HealthVerdict.UNHEALTHY,
+            streamHealthVerdict(
+                bytesWritten = 10_000_000L,
+                errorCode = RecordError.ENGINE_ERROR,
+                elapsedMs = 0L,
+                window = window
+            )
+        )
+    }
+
+    /**
+     * 不可观测态护栏（本任务核心，绝不许变成误杀）：`Os.fstat` 拿不到可信值时引擎传 -1L，
+     * 判定必须退回"只认错误码"——无错即 [HealthVerdict.WAIT]，两个时刻都不得因"字节看着像 0"
+     * 在窗口末判废。删掉 `bytesWritten < 0 → WAIT` 这条会让窗口末那格落进 UNHEALTHY，本断言红。
+     */
+    @Test
+    fun `产出活性 不可观测时两个时刻都等待 不误杀`() {
+        assertEquals(
+            HealthVerdict.WAIT,
+            streamHealthVerdict(bytesWritten = -1L, errorCode = null, elapsedMs = 180L, window = window)
+        )
+        assertEquals(
+            HealthVerdict.WAIT,
+            streamHealthVerdict(bytesWritten = -1L, errorCode = null, elapsedMs = 3_000L, window = window)
+        )
+        assertEquals(
+            HealthVerdict.WAIT,
+            streamHealthVerdict(bytesWritten = -1L, errorCode = null, elapsedMs = 99_999L, window = window)
+        )
+    }
+
+    /** 优先级：errorCode 与字节同时异常（含不可观测）时，errorCode 先判废——不因量不到而漏判真错误。 */
+    @Test
+    fun `产出活性 errorCode 与字节同时异常时 errorCode 优先`() {
+        assertEquals(
+            HealthVerdict.UNHEALTHY,
+            streamHealthVerdict(
+                bytesWritten = -1L, errorCode = RecordError.STOP_FAILED, elapsedMs = 100L, window = window
+            )
+        )
+        assertEquals(
+            HealthVerdict.UNHEALTHY,
+            streamHealthVerdict(
+                bytesWritten = 0L, errorCode = "${RecordError.ENGINE_ERROR}:1:2", elapsedMs = 100L, window = window
+            )
+        )
+    }
+
+    /**
+     * 桥函数在产出活性路上的行为（计划→行为）：连续多拍量到"没在写"，长窗到点判废后，
+     * 重录上界仍由 [retryActionOf] 统一把关。直接断言"判定→动作"的组合，避免只测单侧。
+     */
+    @Test
+    fun `桥函数 产出活性判废也走同一重录上界`() {
+        val verdict = streamHealthVerdict(bytesWritten = 0L, errorCode = null, elapsedMs = 3_000L, window = window)
+        assertEquals(HealthVerdict.UNHEALTHY, verdict)
+        assertEquals(RetryAction.RESTART, retryActionOf(attempts = 0, window = window, verdict = verdict))
+        assertEquals(RetryAction.GIVE_UP, retryActionOf(attempts = 2, window = window, verdict = verdict))
     }
 
     /**
@@ -187,5 +291,58 @@ class RecordHealthTest {
             "产物为空且是本段 sink ⇒ 允许",
             shouldDiscardAbandonedSink("content://media/3", emptyList())
         )
+    }
+
+    /**
+     * 停录 keep 判定的**桥测试**（审查点名：现有守卫只是 `.contains(".discard(")` 形态断言，
+     * 对"自检判废后坏段仍被 commit"这个场景恒绿）。这里直断言四种组合，尤其
+     * `abandoned=true, errorCode=null, dur 足够 ⇒ false`——**这就是 P1 的形态**：MR 路判废的主形态
+     * 正是"一直在录但没写出数据、errorCode 仍为 null"，旧的 `errorCode==null && dur>=min` 判定会把
+     * 它当正常段 commit。突变：把判定里的 `!abandoned &&` 去掉 → 这一格变 true，必红。
+     */
+    @Test
+    fun `弃段意图压过停录的正常判定`() {
+        val minKeep = 500L
+        // P1 核心：无错误码、时长足够，但已声明弃段 ⇒ 必须不 keep
+        assertFalse(
+            "abandoned=true + 无错 + 够长 ⇒ 必须弃（旧判定会 commit 坏片）",
+            segmentKeepDecision(abandoned = true, errorCode = null, durationMs = 60_000L, minKeepMs = minKeep)
+        )
+        // 未弃 + 无错 + 恰好够长 ⇒ keep（边界取 >= 而非 >）
+        assertTrue(
+            "abandoned=false + 无错 + 恰够长 ⇒ keep",
+            segmentKeepDecision(abandoned = false, errorCode = null, durationMs = minKeep, minKeepMs = minKeep)
+        )
+        // 未弃 + 无错 + 差 1ms ⇒ 不 keep（过短按废片）
+        assertFalse(
+            "abandoned=false + 无错 + 差 1ms ⇒ 不 keep",
+            segmentKeepDecision(abandoned = false, errorCode = null, durationMs = minKeep - 1, minKeepMs = minKeep)
+        )
+        // 有错误码：即便未弃、够长也对 keep 说否（引擎已判废的段不能放行）
+        assertFalse(
+            "有错误码即便未弃也弃",
+            segmentKeepDecision(abandoned = false, errorCode = RecordError.ENGINE_ERROR, durationMs = 60_000L, minKeepMs = minKeep)
+        )
+        // 弃段意图是最高优先：有错误码 + 已弃 仍 false
+        assertFalse(
+            "弃段意图是最高优先",
+            segmentKeepDecision(abandoned = true, errorCode = RecordError.ENGINE_ERROR, durationMs = 60_000L, minKeepMs = minKeep)
+        )
+    }
+
+    /**
+     * 产出字节双源交叉核对。**手写期望值**，尤其覆盖 -1（量不到）语义：两个都量不到才算不可观测；
+     * 只要有一源给得出数（哪怕 0），就取可用源里的最大值。突变：把 `maxOf` 写成 `minOf` → 取大用例必红。
+     */
+    @Test
+    fun `产出字节双源取可用源最大值`() {
+        assertEquals("两源都量不到 ⇒ 不可观测 -1", -1L, resolveOutputBytes(-1L, -1L))
+        assertEquals("fd 量不到、provider 说 0 ⇒ 0（不是 -1）", 0L, resolveOutputBytes(-1L, 0L))
+        assertEquals("fd 说 0、provider 量不到 ⇒ 0", 0L, resolveOutputBytes(0L, -1L))
+        assertEquals("只有 fd 有数 ⇒ 取 fd", 5L, resolveOutputBytes(5L, -1L))
+        assertEquals("只有 provider 有数 ⇒ 取 provider", 7L, resolveOutputBytes(-1L, 7L))
+        assertEquals("两源都有数 ⇒ 取大（provider 大）", 9L, resolveOutputBytes(3L, 9L))
+        assertEquals("两源都有数 ⇒ 取大（fd 大）", 9L, resolveOutputBytes(9L, 3L))
+        assertEquals("fd 已够量时取 fd", 65_536L, resolveOutputBytes(65_536L, -1L))
     }
 }

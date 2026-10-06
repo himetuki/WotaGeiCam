@@ -137,6 +137,12 @@ class RecorderGpuSurfaceGuardTest {
                 seg.contains("healthMuxStarted = false") &&
                 seg.contains("healthFirstVideoSample = false")
         )
+        // 段起始同处复位本段写入字节账（segWrittenBytes）：漏了它，换段后 health() 会拿上一段的
+        // 累计字节冒充本段"在写"，产出活性判据被喂绿。删掉这行必须红。
+        assertTrue(
+            "runSegment 段起始必须把 segWrittenBytes 归零（与三格同处复位）",
+            seg.contains("segWrittenBytes = 0L")
+        )
         // 建轨（FORMAT_CHANGED 后）与首样本（writeSample > 0 后）两个写点必须在 runSegment 内
         assertTrue(
             "runSegment 必须在 addTrack 之后置 healthVideoTrackAdded",

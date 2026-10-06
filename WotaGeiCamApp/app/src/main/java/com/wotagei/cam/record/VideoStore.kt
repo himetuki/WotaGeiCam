@@ -140,6 +140,19 @@ class VideoStore(private val ctx: Context) {
         is OutputSink.File -> if (sink.f.exists()) sink.f.length() else 0L
     }
 
+    /**
+     * 与 [sizeOf] 同一条读取路径，但**量不到回 -1L**（sink 为空 / 查询失败 / 值非数字）。
+     *
+     * 产出活性判定（`resolveOutputBytes` / `streamHealthVerdict`）必须能区分"provider 说不清"
+     * 与"provider 说 0 字节"——前者是不可观测（不许当 0 判废，会误杀正常录制），后者才是真信号。
+     * [sizeOf] 对两种情形都回 0，用在这里会把一次查询失败误译成"零字节"，故另开此名。
+     */
+    fun sizeOfOrUnknown(sink: OutputSink?): Long = when (sink) {
+        null -> -1L
+        is OutputSink.Pending -> queryStr(sink.uri, MediaStore.MediaColumns.SIZE)?.toLongOrNull() ?: -1L
+        is OutputSink.File -> if (sink.f.exists()) sink.f.length() else -1L
+    }
+
     /** 真实路径（只用于回看兜底与调试；pending 项可能查不到，返回 null 即可） */
     fun pathOf(sink: OutputSink?): String? = when (sink) {
         null -> null

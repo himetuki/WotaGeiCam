@@ -20,10 +20,11 @@ package com.wotagei.cam.record
  * 所以：**视频路**（`videoTrackAdded` 有没有）吃短窗 [videoWindowMs]，1.2s 内毫无音讯即判废
  * （历史上那次 EGL_BAD_ALLOC 的真实形态）；**含音轨就绪的完整三格**吃长窗 [fullWindowMs]。
  *
- * 【覆盖边界（不许含糊）】本自检的**完整三格判据只覆盖 [CodecRecorder] 路**（`fps > MR 上限`
- * ／光弧修复／内录 三类走它的会话）；[MrRecorder] 路（MediaRecorder，30/60fps 常规档）只做
- * **错误码弱判**（[weakHealthVerdict]），不做产出健全性自检——MediaRecorder 没有逐缓冲回调，
- * 三格恒 false，拿它们套超窗只会把正常录制反复重录。
+ * 【两路判据（各用各的信号，不许混套）】[CodecRecorder] 路（`fps > MR 上限`／光弧修复／内录）
+ * 有逐缓冲回调，吃**完整三格**（[healthVerdict]）；[MrRecorder] 路（MediaRecorder，30/60fps
+ * 常规档）没有逐缓冲回调（三格恒 false），但它攥着真实输出 fd，可读"文件是否在长大"——吃
+ * **产出活性**判据（[streamHealthVerdict]：`Os.fstat(fd).st_size` 是否长到 [MIN_OUTPUT_BYTES]）。
+ * 两路各自翻成同一个 [HealthVerdict]，再汇进同一个 [retryActionOf]。
  */
 
 /**
@@ -95,17 +96,56 @@ fun retryActionOf(attempts: Int, window: RecordHealthWindow, verdict: HealthVerd
 }
 
 /**
- * 弱口径判定：只认硬错误码，三格无信号。供 [RecorderHealth.milestonesObservable] = false 的引擎
- * （[MrRecorder]，MediaRecorder 没有逐缓冲回调）使用——**不许拿三格去套**，否则正常录制会在窗口
- * 到点时被误判超窗、反复重录。
- *
- * 【边界必须显式声明】这条弱判等价于「起录瞬间没有硬错误码」，**不是**产出健全性自检：首拍即
- * [HealthVerdict.HEALTHY] 且不再重投，之后 MediaRecorder 若静默零帧也抓不到。完整三格判据只覆盖
- * [CodecRecorder] 路（见文件头 KDoc）；MR 路（30/60fps 常规档）刻意不做（无真机数据，加"文件字节
- * 增长"这类未验证信号误判起来比现状更糟——会让录制反复重来）。这一位不是遗漏，是既定边界。
+ * 常规档（[MrRecorder] 路）的产出活性门槛：一帧都没写时容器里最多只有 ftyp/moov 头（<1KB 量级）；
+ * 顶档码率下 64KiB 在数十毫秒内就会写满 ⇒ 到窗口末仍"不足这个量"就是真没在写。
+ * **取 64KiB 而非 `>0`**：`>0` 会被"只写了容器头"的假活喂绿——那份文件同样不能播。
  */
-fun weakHealthVerdict(errorCode: String?): HealthVerdict =
-    if (errorCode != null) HealthVerdict.UNHEALTHY else HealthVerdict.HEALTHY
+const val MIN_OUTPUT_BYTES = 64L * 1024L
+
+/**
+ * 产出字节数的**双源交叉核对**（纯函数）：把 fd 直读与 provider 权威读数合成一个"可用信号"。
+ *
+ * 【为什么要两源】[MrRecorder.health] 走 `Os.fstat(fd).st_size`——便宜、无额外 IPC，但 fd 是
+ * MediaStore pending content uri 经 `openAssetFileDescriptor("rw")` 拿到的，Android 11+ 落
+ * FUSE/MediaProvider：某些 ROM 的 `st_size` 滞后、或该 provider 给管道式 fd 恒 0，**唯一判据失效
+ * 就会把正常录制误杀**。所以只在中招可疑（`fstat` 读数 < [MIN_OUTPUT_BYTES]）时，再花一次便宜 IPC
+ * 查 MediaStore `SIZE` 列做交叉核对：一条是 fd 直读、便宜但依赖 FUSE 行为；一条是 provider 权威、
+ * 稍贵。**两条都量不到（都 < 0）才算不可观测**（返回 -1L）。
+ *
+ * @param fstatBytes `Os.fstat` 读数；**-1L = 量不到**（拿不到 fd/抛错），不是 0 字节
+ * @param providerBytes MediaStore `SIZE` 读数；**-1L = 量不到**，不是 0 字节
+ * @return 可用源里的最大值；两源都 -1 → -1L（不可观测，判定侧退回只认错误码，绝不当 0 判废）
+ */
+fun resolveOutputBytes(fstatBytes: Long, providerBytes: Long): Long =
+    if (fstatBytes < 0L && providerBytes < 0L) -1L else maxOf(fstatBytes, providerBytes)
+
+/**
+ * 产出活性判定（[MrRecorder] 路；`bytesWritten` = 当前段输出文件已落盘字节数）。判定序即优先级：
+ * 1. [errorCode] 非空 ⇒ 立刻判废（即便字节已足量——引擎已判废的段不能因为"当时看着好"放行）；
+ * 2. `bytesWritten < 0` ⇒ **不可观测**（[MrRecorder] 拿不到 fd/真实路径、或 `Os.fstat` 抛错时传
+ *    -1L），退回"只认错误码"的既有口径：无错即等（[HealthVerdict.WAIT]）——**绝不许当 0 字节判废**，
+ *    那会把"量不到"误杀成"没在写"；
+ * 3. 字节已长到 [MIN_OUTPUT_BYTES] ⇒ 健康（文件真在长大，产出成立）；
+ * 4. 到/超过长窗 [RecordHealthWindow.fullWindowMs] 仍不足量 ⇒ 判废（整个长窗都没写出足量数据，
+ *    不是慢启动而是没在写）；恰好到窗算超窗，不无限等；
+ * 5. 否则继续等。
+ *
+ * 【为何读文件字节而非三格】MediaRecorder 不暴露逐缓冲回调（没有 MediaCodec 那样的
+ * dequeueOutputBuffer），三格对它恒 false；但引擎握着的 fd 是真实 OS fd，`Os.fstat(fd).st_size`
+ * 能直接量到产出是否落地——不需要新权限、不产生额外 IPC，比查 MediaStore 的 SIZE 便宜得多。
+ */
+fun streamHealthVerdict(
+    bytesWritten: Long,
+    errorCode: String?,
+    elapsedMs: Long,
+    window: RecordHealthWindow
+): HealthVerdict {
+    if (errorCode != null) return HealthVerdict.UNHEALTHY
+    if (bytesWritten < 0L) return HealthVerdict.WAIT
+    if (bytesWritten >= MIN_OUTPUT_BYTES) return HealthVerdict.HEALTHY
+    if (elapsedMs >= window.fullWindowMs) return HealthVerdict.UNHEALTHY
+    return HealthVerdict.WAIT
+}
 
 /**
  * 被弃段的**兜底删除闸门**（纯函数）：[abandonSinkKey] 是本次 attempt 首段 sink 的标识
@@ -123,3 +163,24 @@ fun weakHealthVerdict(errorCode: String?): HealthVerdict =
  */
 fun shouldDiscardAbandonedSink(abandonSinkKey: String?, producedKeys: List<String>): Boolean =
     abandonSinkKey != null && abandonSinkKey !in producedKeys
+
+/**
+ * 停录时"这一段要不要留"的判定（[MrRecorder]/[CodecRecorder] 的 keep 计算共用，纯函数）。
+ *
+ * 【弃段意图必须压过"看着正常"】起录自检判废后，UI 调 [Recorder.abandonCurrentSegment] 再停录——
+ * 此时段形态恰恰是"**一直在录但没写出数据、[RecorderHealth.errorCode] 仍为 null**"（这正是静默零帧
+ * 的形态），旧的 `errorCode == null && dur >= minKeep` 判定会把它当正常段 commit 进相册：
+ * 近空/不可播的坏片混进成片，且之后 `shouldDiscardAbandonedSink` 因它已进 parts 而不再兜底删。
+ * 所以弃段是**显式意图**，不靠停录的 keep 语义去反推。
+ *
+ * 四个入参的语义（判定即优先级）：
+ * - [abandoned] true ⇒ 一律 false（**弃段意图是最高优先**，段本就没有可用内容）；
+ * - [errorCode] 非空 ⇒ false（引擎已判废的段不能因"当时看着好"放行）；
+ * - [durationMs] >= [minKeepMs] 且无错且未弃 ⇒ true；否则 false（过短按废片删）。
+ */
+fun segmentKeepDecision(
+    abandoned: Boolean,
+    errorCode: String?,
+    durationMs: Long,
+    minKeepMs: Long
+): Boolean = !abandoned && errorCode == null && durationMs >= minKeepMs

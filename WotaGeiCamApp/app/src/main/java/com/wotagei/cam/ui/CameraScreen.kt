@@ -158,15 +158,17 @@ import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.RetryAction
 import com.wotagei.cam.record.HealthVerdict
 import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
+import com.wotagei.cam.record.MIN_OUTPUT_BYTES
 import com.wotagei.cam.record.PlaybackCaptureController
 import com.wotagei.cam.record.VIDEO_WINDOW_MS
 import com.wotagei.cam.record.FULL_WINDOW_MS
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.healthVerdict
 import com.wotagei.cam.record.recordOrientationHint
+import com.wotagei.cam.record.resolveOutputBytes
 import com.wotagei.cam.record.retryActionOf
 import com.wotagei.cam.record.shouldDiscardAbandonedSink
-import com.wotagei.cam.record.weakHealthVerdict
+import com.wotagei.cam.record.streamHealthVerdict
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeDebugBadge
 import com.wotagei.cam.ui.design.WotaChip
@@ -2214,9 +2216,16 @@ private class RecordRunner(
      * 环境/内录轨 addTrack，音轨首包晚（部分机型 playback capture 无音频在播时不回缓冲）只是"慢"，
      * **不许拿视频窗误杀**——本窗口只在"确实没起来"时弃段，不对慢启动做惩罚。
      *
-     * 【覆盖边界（不许含糊）】完整三格判据**只覆盖 CodecRecorder 路**（fps>MR 上限 / 光弧修复 /
-     * 内录 三类）；MediaRecorder 路（30/60fps 常规档）只走 [weakHealthVerdict] 的错误码弱判，
-     * **不做产出健全性自检**（无逐缓冲回调，三格恒 false，套超窗只会反复重录）。
+     * 【覆盖边界（不许含糊）】两路引擎各吃各的信号、汇进同一个判定动作：
+     * - **CodecRecorder 路**（fps>MR 上限 / 光弧修复 / 内录）有逐缓冲回调 → [healthVerdict] 的完整三格；
+     * - **MediaRecorder 路**（30/60fps 常规档）无逐缓冲回调（三格恒 false）→ [streamHealthVerdict] 的
+     *   产出活性（`Os.fstat(fd).st_size` 是否长到 `MIN_OUTPUT_BYTES`）——正是"跳完一整段才发现录废了"
+     *   那条路，现在也有健全性自检（此前只认错误码，静默零帧抓不到）。
+     *
+     * 【覆盖边界（说清"自检管到哪"）】自检只覆盖**起录窗口内"确实在写"这件事**：`fstat` 读数可疑
+     * （< `MIN_OUTPUT_BYTES`）时另查一次 MediaStore `SIZE` 交叉核对，两源都量不到才认不可观测。
+     * **过了窗口后停帧不在自检范围**——HEALTHY 即停止轮询是既定设计（若无谓地全程轮询，只会白白
+     * 占用 IPC 与线程，并不能救回已经录进去的画面）。
      *
      * 副作用核对：HEALTHY 前会多跑约 2 秒（3s 内每 [HEALTH_TICK_MS] 一拍），但这只是读引擎的
      * `@Volatile` 字段快照，**不触碰录制本身**（不写文件、不调引擎、不改会话）。
@@ -2236,8 +2245,32 @@ private class RecordRunner(
                 window = window
             )
         } else {
-            // 引擎自报无逐格信号（MediaRecorder 路）：只认硬错误码，不许拿三格去套超窗
-            weakHealthVerdict(h.errorCode)
+            // MediaRecorder 路：无三格信号，改判产出活性。fd 直读（Os.fstat）便宜但依赖 FUSE 行为，
+            // 只在读数可疑（< 门槛）时才多花一次便宜 IPC 查 MediaStore SIZE 交叉核对——健康路径
+            // （早已 >=64KiB）不多花任何 IPC。两源都量不到才算不可观测（resolveOutputBytes → -1）。
+            // 用 sizeOfOrUnknown（量不到回 -1）而非 sizeOf（量不到回 0）：后者会把一次查询失败
+            // 误译成"零字节"，在窗口末把"量不到"误杀成"没在写"。
+            var bytes = h.outputBytes
+            if (bytes < MIN_OUTPUT_BYTES) {
+                // 【待复核前提·不是恒等式】这行交叉核对**假设"首段即当前段"**：它查的是 sessionSink 的
+                // provider 尺寸，而 sessionSink 只在 beginSession 赋值一次、恒指本 attempt 的**首段**。
+                // 若引擎发生分段轮转且自检仍在跑，provider 源读到的是**已 commit 首段的大尺寸**，会把
+                // "当前段没在写"误喂成 HEALTHY。此前提成立的边界 = 自检窗口 ≪ 分段轮转耗时。
+                // **当前不可达**：窗口 3s vs 轮转数百秒（MR 阈值 = MAX_FILE_BYTES 3.5GiB，逼近上限才回调
+                // 换段；顶档 50Mbps 也要约 10 分钟）。**调大窗口或调小轮转阈值时必须重新审视这一处**。
+                // （同类"sessionSink 恒指首段"的坑另见 shouldDiscardAbandonedSink 的显式闸门。）
+                // 【性能留意】可疑路径上每拍（HEALTH_TICK_MS=180ms）一次 ContentResolver.query，3s 窗口最
+                // 多约 17 次，跑在 RecordRunner.handler 控制线程（与 stop/beginSession 同一消息队列）；正常
+                // 路径（fstat 已 >= MIN_OUTPUT_BYTES）0 次 IPC。设备 provider 慢时这些查询会给排在后面的
+                // stop 等消息带来排队延迟——只记事实，不为此改代码。
+                bytes = resolveOutputBytes(bytes, sessionStore?.sizeOfOrUnknown(sessionSink) ?: -1L)
+            }
+            streamHealthVerdict(
+                bytesWritten = bytes,
+                errorCode = h.errorCode,
+                elapsedMs = h.elapsedMs,
+                window = window
+            )
         }
         when (verdict) {
             HealthVerdict.WAIT -> handler.postDelayed(healthCheckTask, HEALTH_TICK_MS)
@@ -2274,6 +2307,11 @@ private class RecordRunner(
             val flushed = glProvider()?.flushArcPending() ?: 0
             if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
         }
+        // **先声明弃段意图，再停录**：MR 路判废的主形态是"一直在录但没写出数据、errorCode 仍为 null"，
+        // 只靠停录的 keep 语义（errorCode==null && 够长即 keep）会把这段近空/不可播的坏片 commit 进
+        // 相册，且它一旦进 parts，下面的 shouldDiscardAbandonedSink 就再也兜不到。顺序不许反——先停
+        // 后弃的话引擎已按 keep 判过、弃段意图来不及生效。详见 Recorder.abandonCurrentSegment
+        rec.abandonCurrentSegment()
         val stopped = rec.stop()
         rec.release()
         recorder = null
