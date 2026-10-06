@@ -1,6 +1,7 @@
 package com.wotagei.cam.update
 
 import android.content.Context
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -18,7 +19,9 @@ import java.net.URL
  * 1. 连接超时 10s / 读超时 30s——**停滞的兜底就是 30s 读超时**（修复轮 P2-1：应用层「8s 无新字节」
  *    检查在 read() 阻塞语义下循环顶永不可达，属死代码，已删除；诚实记录，不装作有 8s 停滞检测）；
  * 2. Content-Length 与实际字节数一致性校验（探测段给了 size 时）；
- * 3. 落盘后首字节 `PK` 魔数校验（防镜像塞回 HTML 错误页当 APK）。
+ * 3. 落盘后首字节 `PK` 魔数校验（防镜像塞回 HTML 错误页当 APK）；
+ * 4. 响应体上限：探测 JSON 帽 [MAX_PROBE_BYTES]（头判据 + 限流读取双保险）、APK 磁盘帽
+ *    [MAX_APK_BYTES]（头判据 + 读循环累计）——镜像不可信，内存与磁盘两侧都不许无界。
  *
  * 探测（[fetchJson] / [fetchRedirectLocation]）用 [PROBE_READ_TIMEOUT_MS] 短读超时：
  * 「检查中…」不可挂数分钟，配合取消探针（检查中点行 = 取消）最坏 5×20s 内返回。
@@ -33,12 +36,38 @@ object UpdateDownloader {
     /** 探测专用短读超时（修复轮 P2-2）：「检查中…」必须可取消、不可挂数分钟 */
     const val PROBE_READ_TIMEOUT_MS = 10_000
 
+    /**
+     * 探测响应体的宽上限（2026-10-07）：GitHub releases/latest JSON 实际几十 KB，这里放宽到 4MiB。
+     * 探测链上有 4 枚第三方镜像前缀（不可信，PK 魔数就是为它们设的）——无帽读响应体，
+     * 镜像回数 GB 的"JSON"就是 OOM。超帽按该节点失败处理，走既有 fallback 切下一节点。
+     */
+    const val MAX_PROBE_BYTES = 4L * 1024 * 1024
+
+    /**
+     * APK 下载的磁盘侧上限（2026-10-07）：无 Content-Length 且探测未给 size 时，读循环对
+     * 响应体长度一无所知，同一批不可信镜像可以无限流写盘。2GiB 远超真实 APK 体量，
+     * 超帽按该节点失败处理（.part 由下轮重写覆盖、终途 delete 清理）。
+     */
+    const val MAX_APK_BYTES = 2L * 1024 * 1024 * 1024
+
     private const val BUFFER_SIZE = 64 * 1024
+
+    // ------------------------------------------------------------------ 响应体上限（纯判定，JVM 全测）
+
+    /**
+     * Content-Length 头判据（纯函数）：**未知长度（<=0）放行**、交给限流读取兜住；
+     * 显式声明超帽即拒。上限值本身必须钉死具体字面量单测（突变 Long.MAX_VALUE 必红）。
+     */
+    internal fun probeBytesAllowed(contentLength: Long): Boolean =
+        contentLength <= 0 || contentLength <= MAX_PROBE_BYTES
+
+    /** 限流读取的越帽判定（纯函数）：累计已读是否超出 [limit]，读取方据此断开按节点失败处理 */
+    internal fun bytesOverLimit(totalRead: Long, limit: Long): Boolean = totalRead > limit
 
     // ------------------------------------------------------------------ 探测真身（注入 probeLatestRelease）
 
     /**
-     * GET JSON 正文；任何失败（连不上/非 2xx/超时）返回 null——编排靠 null 快速跳过下一节点。
+     * GET JSON 正文；任何失败（连不上/非 2xx/超时/超帽）返回 null——编排靠 null 快速跳过下一节点。
      * 探测调用方传 [PROBE_READ_TIMEOUT_MS] 短读超时（P2-2），下载目录之外不共用 30s。
      */
     fun fetchJson(url: String, readTimeoutMs: Int = READ_TIMEOUT_MS): String? {
@@ -46,7 +75,23 @@ object UpdateDownloader {
         try {
             conn.setRequestProperty("Accept", "application/vnd.github+json")
             if (conn.responseCode !in 200..299) return null
-            return conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            // 响应体必须有帽：显式超帽直接拒；无 Content-Length 时靠限流读取兜（镜像不可信）
+            if (!probeBytesAllowed(conn.contentLengthLong)) return null
+            val body = ByteArrayOutputStream()
+            conn.inputStream.use { input ->
+                val buf = ByteArray(BUFFER_SIZE)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    if (n > 0) {
+                        total += n
+                        if (bytesOverLimit(total, MAX_PROBE_BYTES)) return null
+                        body.write(buf, 0, n)
+                    }
+                }
+            }
+            return body.toString("UTF-8")
         } catch (e: Exception) {
             return null
         } finally {
@@ -163,6 +208,10 @@ object UpdateDownloader {
             if (expectedSize != null && declared != null && declared != expectedSize) {
                 return DownloadOutcome.Failed
             }
+            // 磁盘侧帽也先查头：显式声明超限就不必开流写盘
+            if (declared != null && bytesOverLimit(declared, MAX_APK_BYTES)) {
+                return DownloadOutcome.Failed
+            }
             val total = declared ?: expectedSize ?: -1L
             var read = 0L
             conn.inputStream.use { input ->
@@ -174,8 +223,11 @@ object UpdateDownloader {
                         val n = input.read(buf)
                         if (n < 0) break
                         if (n > 0) {
-                            out.write(buf, 0, n)
                             read += n
+                            // 无 Content-Length 且探测未给 size 时响应体长度未知：磁盘侧同样要帽
+                            //（超帽按该节点失败处理，半截 .part 由下轮覆盖/终途 delete 清理）
+                            if (bytesOverLimit(read, MAX_APK_BYTES)) return DownloadOutcome.Failed
+                            out.write(buf, 0, n)
                             onProgress(read, total)
                         }
                     }

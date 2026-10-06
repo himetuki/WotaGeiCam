@@ -129,6 +129,16 @@ class BtSpeakerController(context: Context) {
     private val serviceListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
             if (profile != BluetoothProfile.A2DP) return
+            // close() 先于绑定回调到达（进录制页立刻退出的毫秒级窗口）时，close 的
+            // a2dp==null 短路已经跳过了 closeProfileProxy——晚到的代理必须在这里当场解绑，
+            // 否则赋值给 a2dp 后无人再释放，代理与服务绑定驻留到进程死
+            if (closed) {
+                if (proxy != null) {
+                    runCatching { adapter?.closeProfileProxy(BluetoothProfile.A2DP, proxy) }
+                        .onFailure { Log.w(TAG, "late proxy closeProfileProxy failed: ${it.message}") }
+                }
+                return
+            }
             a2dp = proxy as? BluetoothA2dp
             refresh()
         }

@@ -245,7 +245,19 @@ private fun SizePill(
             onPick = { opt ->
                 if (recording) onLockTip()
                 else if (!opt.enabled) onUnsupported()
-                else params.fps.value = fps.copy(value = opt.value)
+                else {
+                    // 换档必须**按目标档重查**精确性（与 FpsPill 同一支口径）：裸 copy(value=)
+                    // 会沿用旧档的 exact——"有原生 [25,25] 但无 [24,24]"的机型从 ※24 切到 25
+                    // 会把 exact=false 带过去，arcConvertNow() 误把原生 25 当 ※ 档抽帧
+                    //（白抽帧 + HUD 假 ※）
+                    val highSpeed = opt.value > WotaTiers.HIGH_SPEED_FPS
+                    val pick = pickFpsRange(
+                        ability?.fpsRangesFor(size, highSpeed) ?: emptyList(), opt.value
+                    )
+                    params.fps.value = pick
+                        ?.let { ParamState(opt.value, it.lo..it.hi, enabled = true, exact = it.exact) }
+                        ?: fps.copy(value = opt.value, enabled = false, exact = false)
+                }
             }
         )
         rangeNote?.let { NoteText(it) }

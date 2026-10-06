@@ -8,11 +8,14 @@ import java.io.File
  * 文件与成片同目录同名，扩展名 `.drops.json`；纯档案/调试用途——**仅抽帧**模式下被抽帧的
  * 画面在录制时已弃，播放器无法事后补弧，弧连续由"自动抽帧补弧"模式在录制时一次完成。
  *
- * **位次是跨段全局位次**：分段轮转（超过 MAX_FILE_BYTES 换段）沿用同一枚 GL 编码面，
- * 帧位次计数不随换段归零，所以 [drops] 里的 k 对应的是整次录制的第 k 个输出帧，不是首段内的位次；
- * sidecar 只随首段（parts[0]）落盘。段与位次的对应关系由 [segments] 段清单补上（2026-10-04 裁决）：
- * 每段一条 `{segment,first,count}`，数据源是录制器逐段已写视频样本数——排查者凭 first/count
- * 把每段对上全局位次，GL 侧账本无需感知换段边界。**当前无读取方**，纯增量档案信息；
+ * **位次的跨段口径（2026-10-07 订正，原注释与实现不符）**：GPU 路换段（超过 MAX_FILE_BYTES
+ * 轮转）会重挂 GL 编码面，重挂处把帧序号归零并清空位次账（GlRenderEngine.replaceEncoderSurface）
+ * ——所以 [drops] 里的 k 是**当前段内的位次**，且只含**最后一段**的丢弃记录，前面各段的丢弃
+ * 记录已随换段清掉。这与 [segments] 段清单的全局 first/count 口径（录制器逐段真实样本数前缀和）
+ * 不一致，是**已知失真**：要修需把 GL 账本按段持久化并跨段续号，因 sidecar 当前无读取方，
+ * 暂记失真不改行为。排查者对不上前段位次时，以本失真为第一怀疑对象。
+ * sidecar 只随首段（parts[0]）落盘。每段一条 `{segment,first,count}`，数据源是录制器逐段
+ * 已写视频样本数。**当前无读取方**，纯增量档案信息；
  * 空表不落键，旧档案（无 segments）解析结果不变。
  *
  * 编解码是手写的最小 JSON（数组里全是整数），不走 org.json：本类要在 JVM 单测里全量跑
@@ -25,7 +28,7 @@ data class ArcDropSegment(val segment: Int, val first: Int, val count: Int)
 data class ArcDropLog(
     val mode: String,
     val dstFps: Int,
-    /** (输出位次 k, 该位次之前丢弃的源帧数)；k 升序，且为跨段全局位次（见类注） */
+    /** (输出位次 k, 该位次之前丢弃的源帧数)；k 升序，段内位次起算（跨段失真见类注） */
     val drops: List<Pair<Int, Int>>,
     /** 段清单（可选增量字段，见类注）：按段序升序；空表 = 未记录/旧档案 */
     val segments: List<ArcDropSegment> = emptyList()
