@@ -2141,8 +2141,18 @@ private class RecordRunner(
             // MrRecorder / DIRECT 路面跨段不变，引擎永不回调（空挂无害）
             rec.onInputSurfaceRecreated = { newSurface ->
                 (newSurface as? Surface)?.let { s ->
-                    glProvider()?.setOutputSurface(s, profile.width, profile.height, profile.fps)
-                    awaitEncoderSurface()
+                    // 换段抑制窗口：mark 必须在 setOutputSurface 之前——旧编码面已死（codec.stop）
+                    // 而旧绑定还没解，await 的旧谓词此时首查恒真，等它 = 零等待后旧面先于 GL 解绑
+                    // 被 release。窗口内 GL 撞死面的失败是拆解伪影，丢几帧可接受（换段点附近丢帧
+                    // 好过降级把后半段变成慢放/清掉位次账）；await 落定或超时都必须 clear。
+                    val gl = glProvider()
+                    gl?.markSegmentRotating()
+                    try {
+                        gl?.setOutputSurface(s, profile.width, profile.height, profile.fps)
+                        awaitEncoderSurface(s)
+                    } finally {
+                        gl?.clearSegmentRotating()
+                    }
                 }
             }
             awaitEncoderSurface()
@@ -2388,7 +2398,8 @@ private class RecordRunner(
             if (path != null) {
                 val drops = glProvider()?.drainArcDrops() ?: emptyList()
                 // 段清单（2026-10-04 裁决）：录制器逐段已写视频样本数 → {segment,first,count}，
-                // 排查者凭 first/count 把每段对上跨段全局位次（drops 的 k 是全局编号，首段 first 恒 0）。
+                // 排查者凭 first/count 对段与位次（注意：drops 的 k 是段内位次、只含最后一段，
+                // 换段清账的跨段失真见 ArcDropLog 类注——first/count 才是跨段真实口径）。
                 // first 按段账前缀和取（丢弃段恒在尾段，前缀和即真实全局起点）。只加字段：
                 // sidecar 仍在首段原名旁写入，写/搬/删时序一字不动，也不新增文件
                 val segs = out.parts.map { part ->
@@ -2487,15 +2498,22 @@ private class RecordRunner(
         Log.w(TAG_UI, "等待预览会话重建超时，继续 start")
     }
 
-    private fun awaitEncoderSurface() {
+    /**
+     * 等编码面挂好（GL 挂面是 postGl 异步）。[expected] 传重挂路径的新面：必须等「新面已绑定」
+     * ——换段时旧绑定还在，isOutputSurfaceBound 首查恒真、零等待，旧面会先于 GL 解绑被 release；
+     * 首段无旧绑定，null 保持既有「任意面已绑定」谓词不变。
+     */
+    private fun awaitEncoderSurface(expected: Surface? = null) {
         val gl = glProvider() ?: return
+        fun arrived(): Boolean =
+            if (expected == null) gl.isOutputSurfaceBound() else gl.isEncoderSurfaceNative(expected)
         var waited = 0L
-        while (waited < WAIT_MS && !gl.isOutputSurfaceBound()) {
+        while (waited < WAIT_MS && !arrived()) {
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
         // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行
-        if (!gl.isOutputSurfaceBound()) {
+        if (!arrived()) {
             Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
         }
     }

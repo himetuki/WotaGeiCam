@@ -250,6 +250,26 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     private var recordTearingDown = false
 
     /**
+     * 换段重挂窗口抑制位：GPU 路分段轮转时旧编码面已死（codec.stop）而新面尚未挂好，窗口内
+     * GL 撞死面的 swap 失败与停止期同属拆解伪影（degradeSuppressed 并列判定）。**不复用**
+     * [recordTearingDown]：会话内轮转不会重发 [setArcConvert]，没有「下次必发」的复位点——
+     * 这里由重挂回调 mark、await 落定（成功或超时）后 clear，try/finally 成对保证。
+     * 置位在泵线程（重挂回调）、读取在 GL 线程（degradeArcConvert），跨线程必须 @Volatile。
+     */
+    @Volatile
+    private var segmentRotating = false
+
+    /** 进入换段重挂窗口（必须在 [setOutputSurface] 下发新面**之前**，见 [segmentRotating]） */
+    fun markSegmentRotating() {
+        segmentRotating = true
+    }
+
+    /** 离开换段重挂窗口（await 成功或超时都要调，重挂回调用 try/finally 保证） */
+    fun clearSegmentRotating() {
+        segmentRotating = false
+    }
+
+    /**
      * 抑制期日志闩（与 [recordTearingDown] 同在 [setArcConvert] GL 体复位）：停录后空闲预览
      * 每枚相机帧都会撞一次「补弧链未就绪」的抑制分支（引擎 arcConvert 不随停录自清、编码面
      * 已解绑，直到下一段 start 必发的 setArcConvert 才翻篇），不闩就是 ~30 行/秒的日志刷屏——
@@ -492,6 +512,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     /** 编码器面是否已绑定（录制侧可据此决定何时 start） */
     fun isOutputSurfaceBound(): Boolean = encoderEglSurface != null
+
+    /**
+     * 传入的 native 面是否就是**当前绑定**的编码面。换段重挂路径专用：轮转时旧绑定还没解，
+     * [isOutputSurfaceBound] 首查恒真、await 零等待——必须等「新面已绑定」才行。
+     */
+    fun isEncoderSurfaceNative(s: Surface?): Boolean = encoderNative === s
 
     /** 编码器面尺寸（px），未绑定为 0x0 */
     fun outputSurfaceSize(): Pair<Int, Int> = encoderWidth to encoderHeight
@@ -1308,13 +1334,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 的成片段落慢放、音画渐进漂移到秒级（结构性坏片且静默，旧实现即在位的缺陷）。
      */
     private fun degradeArcConvert(reason: String) {
-        // 停止期一切编码失败都是「面已死」的拆解伪影（见 recordTearingDown），清账换模式只会
-        // 毁掉已记好的位次账/实测帧率——首条记日志、其后静默（空闲预览每帧都撞一次抑制），
-        // 会话中段（录制中）的真失败不受影响照旧降级
-        if (recordTearingDown) {
+        // 停止期/换段窗口一切编码失败都是「面已死」的拆解伪影（见 degradeSuppressed：
+        // recordTearingDown 与 segmentRotating 并列），清账换模式只会毁掉已记好的位次账/
+        // 实测帧率——首条记日志、其后静默（空闲预览每帧都撞一次抑制），窗口外的真失败
+        // 不受影响照旧降级
+        if (degradeSuppressed(recordTearingDown, segmentRotating)) {
             if (!teardownSuppressLogged) {
                 teardownSuppressLogged = true
-                Log.i(TAG_GL, "停止期抑制转换降级（$reason）——拆解伪影不清账（后续同类静默）")
+                Log.i(TAG_GL, "抑制转换降级（停止/换段窗口，$reason）——拆解伪影不清账（后续同类静默）")
             }
             return
         }

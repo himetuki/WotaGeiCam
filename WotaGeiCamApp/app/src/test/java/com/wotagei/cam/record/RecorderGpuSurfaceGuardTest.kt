@@ -121,8 +121,19 @@ class RecorderGpuSurfaceGuardTest {
         val await = bodyOf(screen, "awaitEncoderSurface")
         assertTrue(
             "awaitEncoderSurface 超时必须留 Log.w（对齐 awaitPreview 口径）",
-            await.contains("if (!gl.isOutputSurfaceBound())") &&
+            await.contains("if (!arrived())") &&
                 await.contains("Log.w(TAG_UI")
+        )
+        // 2026-10-07 换段窗口修复：轮转时旧绑定还在，isOutputSurfaceBound 首查恒真 =
+        // 零等待 + 旧面未解绑先 release。重挂路径必须等「传入的新面」，首段路径保持旧谓词
+        assertTrue(
+            "awaitEncoderSurface 重挂路径必须等传入的新面（isEncoderSurfaceNative）；" +
+                "改回 isOutputSurfaceBound = 换段等待名存实亡",
+            await.contains("gl.isEncoderSurfaceNative(expected)")
+        )
+        assertTrue(
+            "awaitEncoderSurface 首段路径必须保持既有谓词（无旧绑定，任意面已绑定语义正确）",
+            await.contains("gl.isOutputSurfaceBound()")
         )
     }
 
