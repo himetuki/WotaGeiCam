@@ -51,9 +51,12 @@ import com.wotagei.cam.ui.design.WotaType
  * 「容器随内容过渡」规格，两页签内容量/文案长短不同时弹窗大小跟随动画而不是硬跳。
  * 动画通道纪律（MotionHygieneTest）：不用 animateContentSize 之外的布局动画，不直调 tween。
  *
- * 开关真源：左开关（内录）的选中态派生自 `controller.state is Active`（状态真源是
- * controller，见 CameraScreen 的接线），面板只渲染状态、发意图（[onEnableCapture] 由
- * 调用方接授权 launcher），不自己持有会话态。
+ * 开关真源（音源双开定版 2026-10-07）：左开关（内录）的选中态派生自
+ * `controller.state is Active`（状态真源是 controller，见 CameraScreen 的接线）；右开关
+ * （环境音）的真源是 [ambientEnabled]（WotaParams.audioEnabled，录制成片的环境音通道位）。
+ * **两开关独立、可任意组合**（双轨并存，见 audioTrackPlan 桥）——旧「内录激活即环境音关」
+ * 的互斥派生是批 2 单源时代的视觉遗留，已废（真机实证：面板显示环境音关、成片仍双轨）。
+ * 面板只渲染状态、发意图，不自己持有会话态。
  *
  * @param anchor 无默认值必传（§69 锚点纪律）：这枚弹窗锚在触发它的那颗「音频」chip 上，
  *   漏挂锚点浮层就会按 IntRect.Zero 钉在屏幕左上角。
@@ -66,10 +69,12 @@ fun AudioSourcePanel(
     onEnableCapture: () -> Unit,
     onLockTip: () -> Unit,
     bt: BtSpeakerController,
+    ambientEnabled: Boolean,
+    onToggleAmbient: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val captureState by capture.state.observed()
-    val tabs = audioSourceTabs(captureState, recording, onEnableCapture, capture, onLockTip, bt)
+    val tabs = audioSourceTabs(captureState, recording, onEnableCapture, capture, onLockTip, bt, ambientEnabled, onToggleAmbient)
     var selected by remember { mutableStateOf(tabs.first().key) }
     val motion = LocalMotion.current
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.audio_panel_title)) {
@@ -107,7 +112,7 @@ data class AudioTabSpec(
     val content: @Composable () -> Unit
 )
 
-/** 音源管理的内容表：批 2 = 音源选择 + 蓝牙（原面板整块迁入，零行为变化） */
+/** 音源管理的内容表：批 2 = 音源选择 + 蓝牙（原面板整块迁入）；双开定版后音源行双独立开关 */
 @Composable
 private fun audioSourceTabs(
     captureState: CaptureState,
@@ -115,13 +120,18 @@ private fun audioSourceTabs(
     onEnableCapture: () -> Unit,
     capture: PlaybackCaptureController,
     onLockTip: () -> Unit,
-    bt: BtSpeakerController
+    bt: BtSpeakerController,
+    ambientEnabled: Boolean,
+    onToggleAmbient: () -> Unit
 ): List<AudioTabSpec> {
     // 块体不是风格偏好：守卫（AudioSourceWiringGuardTest）用 bodyOf 锁这张表的表达式，
     // 表达式体让 bodyOf 失去输入、守卫假绿（KotlinSourceScanTest 钉过的坑）
     return listOf(
         AudioTabSpec(key = "source", title = stringResource(R.string.audio_tab_source)) {
-            AudioSourceTab(captureState, recording, onEnableCapture, capture::shutdown, onLockTip)
+            AudioSourceTab(
+                captureState, recording, onEnableCapture, capture::shutdown, onLockTip,
+                ambientEnabled, onToggleAmbient
+            )
         },
         AudioTabSpec(key = "bt", title = stringResource(R.string.audio_tab_bluetooth)) {
             BtSpeakerPanel(bt)
@@ -131,8 +141,9 @@ private fun audioSourceTabs(
 
 /**
  * 音源选择：左右开关（左 = 捕获设备内音频、右 = 默认环境音）+ 开关下的状态提示小字。
- * 两边互斥：内录激活时环境音侧自动弹回，反过来也是——开关态由 [captureState] 派生，
- * 撤销链（Revoked）不需要面板做任何事就自然回到环境音侧。
+ * **两开关独立**（音源双开定版 2026-10-07）：内录开关 toggle 捕获会话（开=授权、关=拆会话），
+ * 环境音开关 toggle 环境音通道位（下次起录生效），互不弹回——四组合都合法（audioTrackPlan 桥）。
+ * 录制中两边都锁（照 SizePill/LensPill 的 onLockTip 先例）：音源组合在起录那刻定格。
  */
 @Composable
 private fun AudioSourceTab(
@@ -140,7 +151,9 @@ private fun AudioSourceTab(
     recording: Boolean,
     onEnableCapture: () -> Unit,
     onDisableCapture: () -> Unit,
-    onLockTip: () -> Unit
+    onLockTip: () -> Unit,
+    ambientEnabled: Boolean,
+    onToggleAmbient: () -> Unit
 ) {
     val active = captureState is CaptureState.Active
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -151,20 +164,20 @@ private fun AudioSourceTab(
                 when {
                     // 录制中音源锁定（照 SizePill/LensPill 的 onLockTip 先例）
                     recording -> onLockTip()
-                    active -> Unit                       // 已在内录：无动作
                     captureState is CaptureState.Authorizing -> Unit   // 系统授权框已在场
+                    active -> onDisableCapture()         // 已在内录：再点=关闭（开关语义）
                     else -> onEnableCapture()            // Idle/Failed/Revoked 都可（重）授权
                 }
             }
         )
         AudioSourceRow(
             label = stringResource(R.string.audio_ambient_label),
-            checked = !active,
+            checked = ambientEnabled,
             onClick = {
                 when {
+                    // 录制中音源锁定（与内录开关同一判据形态，守卫按出现次数锁两条）
                     recording -> onLockTip()
-                    active -> onDisableCapture()         // 关内录 = 拆会话回环境音
-                    else -> Unit                         // 已在环境音
+                    else -> onToggleAmbient()            // 独立 toggle 环境音通道位
                 }
             }
         )

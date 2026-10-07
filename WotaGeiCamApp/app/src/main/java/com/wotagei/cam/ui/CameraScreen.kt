@@ -143,6 +143,7 @@ import com.wotagei.cam.player.WotaSeekBar
 import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
+import com.wotagei.cam.record.AudioTrack
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
@@ -150,6 +151,7 @@ import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.CaptureTrackLostReason
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
+import com.wotagei.cam.record.PendingName
 import com.wotagei.cam.record.RecordError
 import com.wotagei.cam.record.RecordHealthWindow
 import com.wotagei.cam.record.RecordProfile
@@ -164,6 +166,7 @@ import com.wotagei.cam.record.PlaybackCaptureController
 import com.wotagei.cam.record.VIDEO_WINDOW_MS
 import com.wotagei.cam.record.FULL_WINDOW_MS
 import com.wotagei.cam.record.VideoStore
+import com.wotagei.cam.record.audioTrackPlan
 import com.wotagei.cam.record.healthVerdict
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.record.resolveOutputBytes
@@ -1063,6 +1066,9 @@ fun CameraScreen(
         onRecordClick = {
             when {
                 recStatus == RecordStatus.START -> runner.stopAsync()
+                // 准备期（insert+prepare+挂面窗 1~2s）点停止不许静默吞：挂 pendingStop，
+                // 会话进 START 后立即停（2026-10-07 真机"一次停止点击未生效"的根因）
+                recStatus == RecordStatus.PREPARE -> runner.requestStopWhenReady()
                 recStatus != RecordStatus.IDLE -> Unit
                 ui.preview != PreviewStatus.ING -> showTip(app.getString(R.string.cam_wait_preview))
                 else -> {
@@ -2070,6 +2076,21 @@ private class RecordRunner(
         retryNotice.value = null
     }
 
+    /**
+     * PREPARE 期的停止请求（2026-10-07 真机：起录准备需 1~2s——MediaStore insert + 编码器
+     * prepare + 挂面等待窗，期间用户点"停止"会落进 onRecordClick 的非 START 守卫被静默吞掉，
+     * 表现为"点了一次没反应"）。挂上标记，会话进 START 后立即停——产出 < [RecordProfile.MIN_KEEP_MS]
+     * 的按废片删，用户意图（"我不想录了"）照常成立。UI 线程置位、handler 线程消费，@Volatile。
+     */
+    @Volatile
+    private var pendingStop = false
+
+    /** PREPARE 期点停止：不吞，记下等会话就绪后立刻停（见 [pendingStop]） */
+    fun requestStopWhenReady() {
+        pendingStop = true
+        Log.i(TAG_UI, "准备期收到停止请求，录制态就绪后立即停")
+    }
+
     fun probeFreeSpace(): Long = runCatching { VideoStore(app).freeSpaceMb() }.getOrDefault(0L)
 
     /**
@@ -2098,6 +2119,7 @@ private class RecordRunner(
                 return@post
             }
             status.value = RecordStatus.PREPARE
+            pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
@@ -2177,6 +2199,13 @@ private class RecordRunner(
         }
         rec.start()
         status.value = RecordStatus.START
+        // 准备期挂着的停止请求在此消费：先让按钮走完"进录制态"的一拍再立即停，
+        // 比在 PREPARE 里中断半成品会话（拆 pending/编码器）安全且语义等价
+        if (pendingStop) {
+            pendingStop = false
+            stopInternal()
+            return
+        }
         // 轮询只挂一次：重录(attempt>0)复用已在跑的 pollTask 自续链，重挂会让时长/音量条翻倍刷新
         if (attempt == 0) {
             polling = true
@@ -2449,7 +2478,10 @@ private class RecordRunner(
                         // 再拼前缀会把成片改名成裸前缀（如 "24fto24f_"，丢扩展名）——放弃改名保住原名
                         val old = part.path?.substringAfterLast('/') ?: ""
                         if (old.isEmpty()) continue
-                        val newName = prefix + old
+                        // commit 后 provider 复原 `.pending-<id>-` 临时名是异步的，old 可能还带着
+                        // 临时段——直接拼会把烂名烙进成片（真机三连实证）。所有出口统一走
+                        // PendingName.commitRenameTarget 剥段（sidecar 回查名同口径，见下）
+                        val newName = PendingName.commitRenameTarget(prefix, old)
                         val renamed = runCatching {
                             app.contentResolver.update(
                                 uri,
@@ -2461,8 +2493,11 @@ private class RecordRunner(
                         }.getOrDefault(0) > 0
                         // MediaStore 撞名时会自行改成不重名（加 " (1)" 式序号）且 update 仍报成功，
                         // 拼装名与真实落盘名可能分叉；sidecar（只在首段）必须跟着回查到的真实名走
-                        //（回查失败才退回拼装名，与旧行为等价不会更差）
-                        val actualName = if (renamed) queryDisplayName(uri) ?: newName else null
+                        //（回查失败才退回拼装名，与旧行为等价不会更差）。回查名同样可能取到
+                        // 未复原完的临时名，与成片名同走一遍剥段——两边名字永远同一套规则
+                        val actualName =
+                            if (renamed) queryDisplayName(uri)?.let(PendingName::stripPendingJunk) ?: newName
+                            else null
                         if (part === out.parts.first() && actualName != null && part.path != null) {
                             ArcDropLog.renameFor(part.path!!, part.path!!.replaceAfterLast('/', actualName))
                         }
@@ -2547,6 +2582,10 @@ private class RecordRunner(
         arcConvert: ArcConvertMode?,
         captureAudio: Boolean
     ): RecordProfile {
+        // 音源双开定版（2026-10-07）：环境音与内录是两个独立开关，通道位统一从
+        // audioTrackPlan 桥取——面板四组合（双开/仅内录/仅环境/全关）原样落两轨，
+        // 旧「内录×静音=纯视频」的互斥掐死废除（它只对批 2 单源时代成立）
+        val plan = audioTrackPlan(params.audioEnabled.value, captureAudio)
         return RecordProfile(
             width = width,
             height = height,
@@ -2560,7 +2599,7 @@ private class RecordRunner(
             },
             sampleRate = params.sampleRate.value,
             channels = DEFAULT_AUDIO_CHANNELS,
-            audioEnabled = params.audioEnabled.value,
+            audioEnabled = AudioTrack.AMBIENT in plan,
             orientationHint = recordOrientationHint(
                 sensorOrientation = sensorOrientation,
                 deviceDegrees = deviceDegrees,
@@ -2570,8 +2609,7 @@ private class RecordRunner(
             mirrored = front,
             useGpu = renderMode == RenderMode.GPU,
             arcConvert = arcConvert,
-            // 内录×静音=纯视频（audioEnabled 优先，用户裁决）：静音开着就不建内录轨
-            captureAudio = captureAudio && params.audioEnabled.value
+            captureAudio = AudioTrack.CAPTURE in plan
         )
     }
 

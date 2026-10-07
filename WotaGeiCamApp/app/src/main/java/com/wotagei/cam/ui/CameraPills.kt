@@ -173,7 +173,16 @@ fun PillHost(
         PillKey.FLASH -> FlashPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STAB -> StabPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STORAGE -> StoragePill(anchor, params, freeMb, onClose)
-        PillKey.BT -> AudioPill(anchor, capture, recording, onEnableCapture, onLockTip, bt, onClose)
+        PillKey.BT -> {
+            // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
+            // 下次起录按它落音轨），与内录开关（controller 态）互相独立
+            val ambientEnabled by params.audioEnabled.observed()
+            AudioPill(
+                anchor, capture, recording, onEnableCapture, onLockTip, bt, onClose,
+                ambientEnabled = ambientEnabled,
+                onToggleAmbient = { params.audioEnabled.value = !params.audioEnabled.value }
+            )
+        }
     }
 }
 
@@ -902,7 +911,10 @@ private fun AudioPill(
     onEnableCapture: () -> Unit,
     onLockTip: () -> Unit,
     controller: com.wotagei.cam.bt.BtSpeakerController,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** 环境音开关态（真源 params.audioEnabled）：与内录独立，无默认值必传（双开定版 2026-10-07） */
+    ambientEnabled: Boolean,
+    onToggleAmbient: () -> Unit
 ) {
     com.wotagei.cam.ui.dialog.AudioSourcePanel(
         anchor = anchor,
@@ -911,6 +923,8 @@ private fun AudioPill(
         onEnableCapture = onEnableCapture,
         onLockTip = onLockTip,
         bt = controller,
+        ambientEnabled = ambientEnabled,
+        onToggleAmbient = onToggleAmbient,
         onDismiss = onClose
     )
 }

@@ -219,6 +219,26 @@ object Recorders {
 }
 
 /**
+ * 成片的音轨类别（音源双开定版 2026-10-07）：环境音（麦克风）与内录（设备内播放）两条
+ * AAC 轨，可独立在场（单 MP4 双 AAC 批 4 的「双轨并存」落地语义）。
+ */
+enum class AudioTrack { AMBIENT, CAPTURE }
+
+/**
+ * 面板双开关组合 → 成片预期音轨集合（纯函数桥，音源双开定版 2026-10-07）。
+ *
+ * 「捕获设备内音频」与「默认环境音」是**两个独立开关**：任一组合都合法——
+ * 双开=双轨、仅内录=单内录轨、仅环境=单环境轨、全关=纯视频。
+ * 旧「内录激活即环境音关」的互斥是批 2 单源时代的视觉遗留（引擎从来没互斥过，真机实证
+ * 面板显示环境音关、成片却双轨），此处用本桥把「两开关独立映射两轨」钉成唯一口径：
+ * buildProfile 的通道位从这里取，测试锁桥本身——谁把桥改回互斥，全表测试立刻红。
+ */
+fun audioTrackPlan(ambientEnabled: Boolean, captureActive: Boolean): Set<AudioTrack> = buildSet {
+    if (ambientEnabled) add(AudioTrack.AMBIENT)
+    if (captureActive) add(AudioTrack.CAPTURE)
+}
+
+/**
  * 跨分段累计的录制时钟：`elapsedMs = 已封段累计 + 当前段经过时间`。
  * 用 `elapsedRealtime()` 而非 `System.currentTimeMillis()`，避免用户改系统时间导致计时跳变。
  */
