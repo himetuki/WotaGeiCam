@@ -87,11 +87,14 @@ class AudioSourceWiringGuardTest {
             "撤销态必须有提示（audio_state_revoked）",
             screen.contains("CaptureState.Revoked") && screen.contains("audio_state_revoked")
         )
-        // 弹窗参数链：PillHost 把 capture 与授权入口传进音频面板
+        // 弹窗参数链：PillHost 把 capture 与授权入口传进音频面板（双开定版后 AudioPill
+        // 另转传 ambientEnabled/onToggleAmbient，真源=params.audioEnabled——
+        // 详见 RealDeviceFixWiringGuardTest 的双开接线锁）
         val pills = maskedMain("ui/CameraPills.kt")
         assertTrue(
             "PillHost 的 BT 分支必须接 AudioPill（锚点纪律：就近弹窗锚在触发它的那颗 chip 上）",
-            pills.contains("AudioPill(anchor, capture, recording, onEnableCapture, onLockTip, bt, onClose)")
+            bodyOf(pills, "PillHost").contains("AudioPill(") &&
+                pills.contains("ambientEnabled = ambientEnabled")
         )
         assertTrue(
             "PillHost 必须把 capture/onEnableCapture 转传给 AudioSourcePanel",

@@ -247,24 +247,30 @@ class CodecRecorder(
             return false
         }
         vCodec = v
-        // 静音 / 无权限 / 采样率不支持 → 完全不初始化音频通路（环境、内录两轨一起关）
-        val minBuf = if (p.audioUsable && AudioProbe.hasRecordPermission(ctx))
+        // 静音 / 无权限 / 采样率不支持 → 完全不初始化音频通路（环境、内录两轨一起关）；
+        // 音源双开定版（2026-10-07）：内录轨不再挂在环境编码器之下，「仅内录」（环境音关）
+        // 也吃同一套音频通路参数（AudioRecord minBufferSize 两源同值），minBuf 按「任一轨要建」起算
+        val minBuf = if ((p.audioUsable || p.captureAudio) && AudioProbe.hasRecordPermission(ctx))
             AudioProbe.minBufferSize(p.sampleRate, p.channels) else 0
         aacMinBuf = if (minBuf > 0) minBuf else 0
         audioSource = AudioProbe.pickSource(ctx)
-        val a = if (minBuf > 0) createAudioEncoder(p, minBuf) else null
+        val a = if (minBuf > 0 && p.audioEnabled) createAudioEncoder(p, minBuf) else null
         if (a == null && p.audioUsable)
             Log.i(TAG, "audio dropped on codec path: sr=${p.sampleRate} ch=${p.channels} minBuf=$minBuf")
         aCodec = a
-        // 内录第二音轨（P2：单 MP4 双 AAC）：参数与钟域同环境轨；前置条件=环境编码器已建
-        //（buildProfile 已裁决「内录×静音=纯视频」——audioEnabled 优先，这里再兜一道）
-        val c = if (minBuf > 0 && p.captureAudio && a != null) createAudioEncoder(p, minBuf) else null
+        // 内录第二音轨（P2：单 MP4 双 AAC）：参数与钟域同环境轨；两轨编码器**独立**创建
+        //（2026-10-07 双开定版：环境音关不连坐内录，仅内录组合合法）
+        val c = if (minBuf > 0 && p.captureAudio) createAudioEncoder(p, minBuf) else null
         if (c == null && p.captureAudio)
             Log.i(TAG, "capture track dropped on codec path: sr=${p.sampleRate} ch=${p.channels} minBuf=$minBuf")
         capCodec = c
-        if (a == null) aacMinBuf = 0 // 分段重启时不再尝试音频，避免空转
+        // 两轨全没建起来才清：仅内录（a=null 合法）时 aacMinBuf 还要留给分段轮转重建 cap 编码器
+        if (a == null && c == null) aacMinBuf = 0
+        // 两轨**独立**降级（双开定版 2026-10-07）：环境编码器建失败只关环境（内录不连坐，
+        // 反之亦然），与 833 行重建闸「环境路降级不该连坐健康的内录路」同一口径。
+        // 旧「a 失败两条全关」只在 cap 前置=env 已建的时代必要，现在 c 自己判自己
         profile = when {
-            a == null && (p.audioEnabled || p.captureAudio) -> p.copy(audioEnabled = false, captureAudio = false)
+            a == null && p.audioEnabled -> p.copy(audioEnabled = false)
             c == null && p.captureAudio -> p.copy(captureAudio = false)
             else -> p
         }

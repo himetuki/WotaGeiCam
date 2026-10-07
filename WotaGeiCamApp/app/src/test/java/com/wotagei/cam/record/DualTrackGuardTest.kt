@@ -19,7 +19,7 @@ import org.junit.Test
  * - 轨序红线：环境轨先 addTrack、内录轨后 addTrack（轨序即 tkhd track_ID 顺序，批 4 播放器识别用）；
  * - 捕获源失效路径：录制中 captureActive() 变 false → 内录轨 EOS 收尾、环境+视频继续；
  * - 引擎选型：captureAudio 强制 Codec（含 转换×内录、内录×高帧率 组合），MrRecorder 路径恒不见 captureAudio；
- * - 录制页接线：captureAudio = controller 态（录制开始时决定）且静音优先（内录×静音=纯视频）。
+ * - 录制页接线：captureAudio = controller 态（录制开始时决定）；通道位走 audioTrackPlan 桥（音源双开定版 2026-10-07，旧静音优先互斥已废）。
  *
  * 「尺子自己能红」：每条 bodyOf 守卫配突变体自证——拆掉被判据的行，同一把尺必须立刻报红。
  */
@@ -494,12 +494,20 @@ class DualTrackGuardTest {
     // ------------------------------------------------------------------ 录制页接线
 
     @Test
-    fun `录制页接线_内录态入profile且静音优先`() {
+    fun `录制页接线_内录态入profile且通道位走双开桥`() {
         val screen = maskedMain("ui/CameraScreen.kt")
         val build = body("ui/CameraScreen.kt", "buildProfile")
+        // 音源双开定版（2026-10-07）：旧「内录×静音=纯视频」的互斥掐死废除，
+        // 两个通道位统一走 audioTrackPlan 桥（面板四组合原样落两轨，全表见 AudioTrackPlanTest）
         assertTrue(
-            "buildProfile 必须带静音优先裁决：内录×静音=纯视频（audioEnabled 优先）",
-            build.contains("captureAudio = captureAudio && params.audioEnabled.value")
+            "buildProfile 的通道位必须从 audioTrackPlan 桥取（音源双开唯一口径）",
+            build.contains("audioTrackPlan(params.audioEnabled.value, captureAudio)") &&
+                build.contains("AudioTrack.AMBIENT in plan") &&
+                build.contains("AudioTrack.CAPTURE in plan")
+        )
+        assertTrue(
+            "旧静音优先互斥（captureAudio && audioEnabled 掐死）必须已废除",
+            !build.contains("captureAudio && params.audioEnabled.value")
         )
         assertTrue(
             "起录必须传内录态（controller.state is Active，录制开始时决定；漏挂 = 内录永不生效）",
@@ -509,19 +517,19 @@ class DualTrackGuardTest {
             "RecordRunner.start 的 captureAudio 形参必须无默认值（漏挂让它编译不过，同 #69 锚点纪律）",
             screen.contains("captureAudio: Boolean")
         )
-        // 突变自证：静音优先改成无条件内录，同一把尺必须报红
+        // 突变自证：退回旧互斥掐死（内录被静音位连乘），同一把尺必须报红
         val mutatedBuild = KotlinSourceScan.flatten(
             bodyOf(
                 screen.replace(
-                    "captureAudio = captureAudio && params.audioEnabled.value",
-                    "captureAudio = captureAudio"
+                    "val plan = audioTrackPlan(params.audioEnabled.value, captureAudio)",
+                    "val plan = if (captureAudio) audioTrackPlan(params.audioEnabled.value, captureAudio) else emptySet()"
                 ),
                 "buildProfile"
             )
         )
         assertFalse(
-            "拆掉静音优先判据后守卫必须报红（内录×静音=纯视频是用户裁决口径）",
-            mutatedBuild.contains("captureAudio && params.audioEnabled.value")
+            "退回互斥连乘后守卫必须报红（双开定版：内录只随捕获会话态）",
+            mutatedBuild.contains("val plan = audioTrackPlan(params.audioEnabled.value, captureAudio)")
         )
     }
 }
