@@ -5,6 +5,7 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -62,5 +63,30 @@ class BtProxyLeakGuardTest {
             "closed 闸失效后尺子必须红",
             lateProxyViolations(mutant).isNotEmpty()
         )
+    }
+
+    /** closed 字段的可见性闸：@Volatile 必须紧贴字段（允许中间隔被遮蔽成空白的注释行） */
+    private fun closedIsVolatile(src: String): Boolean {
+        val at = src.indexOf("private var closed")
+        if (at < 0) return false
+        return src.substring(0, at).trimEnd().endsWith("@Volatile")
+    }
+
+    @Test
+    fun `closed 字段必须volatile_主线程写binder线程读`() {
+        val src = codeOnly(mainSourceText("bt/BtSpeakerController.kt"))
+        assertTrue(
+            "closed 必须 @Volatile（close() 主线程写 / onServiceConnected binder 线程读，无 happens-before 可读到过期 false 复现泄漏）",
+            closedIsVolatile(src)
+        )
+    }
+
+    @Test
+    fun `突变自证_删closed的volatile必报红`() {
+        val src = codeOnly(mainSourceText("bt/BtSpeakerController.kt"))
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", closedIsVolatile(src))
+        // 突变：精确抹掉 closed 字段前的 @Volatile（不动文件里其他字段）
+        val mutant = src.replace("@Volatile\n    private var closed", "            private var closed")
+        assertFalse("删 @Volatile 后尺子必须红", closedIsVolatile(mutant))
     }
 }

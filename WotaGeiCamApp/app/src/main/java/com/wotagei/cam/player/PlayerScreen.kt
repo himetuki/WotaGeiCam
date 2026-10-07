@@ -295,6 +295,9 @@ fun WotaPlayerSurface(
  */
 internal fun nextCcwQuarter(q: Int): Int = ((q % 4) + 3) % 4
 
+/** clipById 查询尚未回包的哨兵（collectState 的 initial）：与"查过且没有"（收到 null）区分开 */
+private object ClipQueryPending
+
 /** 路由版：/player/{mediaId} —— UI 层只需传 id */
 @Composable
 fun PlayerScreen(
@@ -304,14 +307,26 @@ fun PlayerScreen(
     repo: com.wotagei.cam.media.MediaRepo = rememberMediaRepo(),
     ops: MediaOps = rememberMediaOps()
 ) {
-    val clip by repo.clipById(mediaId).collectState(null)
-    val c = clip
-    if (c == null) {
-        Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = WotaAccent)
+    // 契约：clipById 对"查过且没有"（片被外部删掉/回收站清掉）会发射一次 null（MediaRepo.clipById
+    // 专用管道直接 emit 可空结果，不走吞 null 的 gated）。首次发射（片在 → VideoClip、片没了 → null）
+    // 顶掉哨兵：借它区分"还在查"与"片已消失"，后者必须给空态出口，不许停在转圈；也不许自动返回/自动重试
+    val state by repo.clipById(mediaId).collectState(ClipQueryPending)
+    val c = state as? VideoClip
+    when {
+        state === ClipQueryPending -> {
+            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = WotaAccent)
+            }
         }
-    } else {
-        PlayerScreen(clip = c, onBack = onBack, onCompare = onCompare, ops = ops)
+        c == null -> {
+            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                Text(
+                    stringResource(R.string.player_clip_missing),
+                    color = WotaText
+                )
+            }
+        }
+        else -> PlayerScreen(clip = c, onBack = onBack, onCompare = onCompare, ops = ops)
     }
 }
 

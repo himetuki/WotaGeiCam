@@ -167,6 +167,10 @@ class LevelSensor(context: Context) : SensorEventListener {
         val x = values[0]
         val y = values[1]
         val z = values[2]
+        // 单帧吐 NaN/Infinity 时 magnitude 的比较恒为 false，走不到下面的"读数不可信丢帧"路径：
+        // NaN 首帧还会经 primed 分支直落 _pitch，此后 emit 闸的 NaN 比较全为 false，_pitch 永久钉死。
+        // 读数入口就按无效帧丢弃（与下方 magnitude 丢帧同语义）
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return
         // 低通加在重力分量上而不是角度上：角度在 ±90 处会绕回，直接滤角度会在两端抖出跳变
         if (sx.isNaN()) {
             sx = x

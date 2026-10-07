@@ -121,6 +121,10 @@ class BtSpeakerController(context: Context) {
     private var a2dp: BluetoothA2dp? = null
     private var proxyRequested = false
     private var receiverRegistered = false
+    // close() 主线程写、onServiceConnected 在 binder 线程读：无同步就无 happens-before，
+    // 理论上可读到过期 false 把晚到代理重新赋值（泄漏复现）。@Volatile 收口
+    // （与 GlRenderEngine.segmentRotating 同口径）
+    @Volatile
     private var closed = false
 
     /** 本次扫描到的未配对设备，按地址去重，保持发现顺序 */

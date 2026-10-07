@@ -79,6 +79,9 @@
     <string name="compare_practice">对着左片练</string>
     <string name="compare_loop_full">全程循环</string>
 
+    <!-- 路由版播放器：mediaId 查完无此片（外部删掉/回收站清掉）的空态，不许停在转圈（2026-10-07） -->
+    <string name="player_clip_missing">视频不存在或已删除</string>
+
     <!-- 掐头去尾剪辑导出（2026-10-04 方向 3：区间复用 A/B 标记，无损拷贝不重编码） -->
     <string name="player_clip">剪辑</string>
     <string name="player_clip_title">按 A/B 段导出（无损剪）</string>

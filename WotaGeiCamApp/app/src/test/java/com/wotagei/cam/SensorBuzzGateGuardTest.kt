@@ -87,4 +87,33 @@ class SensorBuzzGateGuardTest {
             KotlinSourceScan.regionsOf(masked, "onSensorChanged").size
         )
     }
+
+    @Test
+    fun `单帧NaN必须在读数入口丢弃_不许进低通与落值`() {
+        val body = sensorChangedBody()
+        val gateAt = body.indexOf("!x.isFinite()")
+        assertTrue(
+            "读数入口必须有非有限值丢帧闸（NaN 帧 magnitude 比较恒 false 走不到既有丢帧路径，首帧还会把 _pitch 永久钉死）",
+            gateAt >= 0
+        )
+        val lpfAt = body.indexOf("if (sx.isNaN())")
+        val magnitudeAt = body.indexOf("val magnitude = sqrt(")
+        assertTrue("NaN 闸必须先于低通（脏值不许进 sx/sy/sz）", lpfAt > gateAt)
+        assertTrue("NaN 闸必须先于 magnitude 判定（NaN 的 < 比较恒 false 拦不住）", magnitudeAt > gateAt)
+    }
+
+    @Test
+    fun `突变自证_删NaN闸必报红`() {
+        val masked = codeOnly(KotlinSourceScan.mainSourceText("camera/SensorLevel.kt"))
+        val good = flatten(bodyOf(masked, "onSensorChanged"))
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", good.contains("!x.isFinite()"))
+        // 突变：闸短路（文本级突变不编译，保持花括号配平让遮蔽器继续解函数体）
+        val mutant = flatten(
+            bodyOf(
+                masked.replace("if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return", "if (false) return"),
+                "onSensorChanged"
+            )
+        )
+        assertFalse("删 NaN 闸后尺子必须红", mutant.contains("!x.isFinite()"))
+    }
 }

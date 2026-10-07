@@ -185,6 +185,21 @@ class ColorCurveTest {
     }
 
     @Test
+    fun `含NaN或Infinity记号的畸形点被丢弃且曲线仍可解`() {
+        // 外部损坏的持久串：toFloatOrNull 接受 NaN/Infinity 记号，coerceIn 对 NaN 原样放行，
+        // NaN 控制点会把 LUT 烘成全黑。好点保留、两个畸形点丢弃，曲线按剩余点求解
+        val c = ColorCurve.decode("0.000:0.000,NaN:0.500,0.500:Infinity,1.000:1.000")
+        assertEquals(2, c.points.size)
+        assertEquals(0f, c.points[0].x, 1e-6f)
+        assertEquals(0f, c.points[0].y, 1e-6f)
+        assertEquals(1f, c.points[1].x, 1e-6f)
+        assertEquals(1f, c.points[1].y, 1e-6f)
+        // 剩余 (0,0)-(1,1)：中点插值回到恒等，全表有限且落在 0..1
+        assertEquals(0.5f, c.evaluate(0.5f), 1e-6f)
+        c.table().forEach { v -> assertTrue("表值必须有限: $v", v.isFinite() && v in 0f..1f) }
+    }
+
+    @Test
     fun `编辑器补齐端点且恒等曲线判为直通`() {
         val pts = CurveEdit.pointsOf(ColorCurve.IDENTITY)
         assertEquals(2, pts.size)

@@ -58,6 +58,10 @@ data class ColorCurve(val points: List<Point>) {
                 if (kv.size != 2) return@mapNotNull null
                 val x = kv[0].toFloatOrNull() ?: return@mapNotNull null
                 val y = kv[1].toFloatOrNull() ?: return@mapNotNull null
+                // 防御：外部损坏的持久串可能带 NaN/Infinity 记号（toFloatOrNull 接受它们），
+                // coerceIn 对 NaN 原样放行 ⇒ NaN 控制点会烘出全黑 LUT。唯一写入方 encode() 永不
+                // 产出这些记号，这里只拦畸形输入
+                if (!x.isFinite() || !y.isFinite()) return@mapNotNull null
                 Point(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
             }
             return ColorCurve(pts.sortedBy { it.x })
