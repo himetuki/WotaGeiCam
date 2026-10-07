@@ -38,6 +38,14 @@
     <string name="audio_state_idle">当前采集环境音（麦克风）</string>
     <string name="audio_capture_cancelled">已取消内录授权，回退环境音</string>
     <string name="audio_capture_unavailable">本机不支持设备内录</string>
+    <!-- 内录轨丢失可见化（引擎层静默降级 → hint 通道，PlaybackCaptureController.trackLost 事件驱动）：
+         此前这些降级只留日志——"开了内录却没内录轨"用户毫无感知，缺轨报告的核心痛点 -->
+    <string name="audio_track_lost_init">内录不可用（%1$s），本次仅录环境音</string>
+    <!-- detail 为 null 时的占位兜底（渲染处 evt.detail ?: 本条），否则 %1$s 原样渲染出字面量 -->
+    <string name="audio_track_lost_reason_unknown">未知原因</string>
+    <string name="audio_track_lost_inactive">内录已中断，本次仅录环境音</string>
+    <string name="audio_track_lost_no_samples">内录未采集到声音，本次仅录环境音</string>
+    <string name="audio_track_lost_encoder">内录音轨建立失败，本次仅录环境音</string>
     <string name="audio_chip_label">音频</string>
     <string name="audio_chip_capture_on">内录中</string>
     <string name="audio_chip_bt_on">蓝牙已连接</string>

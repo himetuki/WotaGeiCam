@@ -147,6 +147,7 @@ import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.CaptureState
+import com.wotagei.cam.record.CaptureTrackLostReason
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
 import com.wotagei.cam.record.OutputSink
 import com.wotagei.cam.record.RecordError
@@ -612,6 +613,23 @@ fun CameraScreen(
             is CaptureState.Failed -> showTip(app.getString(R.string.audio_state_failed, s.reason))
             else -> Unit
         }
+    }
+    // 引擎层内录轨丢失的可见化（采集器建不起来/录制中失效/整段无样本/轨建立失败）：
+    // 这些场景此前只留日志静默降级——"开了内录却没内录轨"用户毫无感知，是缺轨报告的核心痛点。
+    // 读走即清：提示后 clearTrackLost 置回 null，同因再次发生仍能提示；会话已不 Active 时
+    // 不提示（撤销/建链失败各有独立提示，见 [captureTrackLostTipRes] 的过滤理由）
+    val trackLost by capture.trackLost.observed()
+    LaunchedEffect(trackLost) {
+        val evt = trackLost ?: return@LaunchedEffect
+        val res = captureTrackLostTipRes(evt.reason, capture.state.value is CaptureState.Active)
+        if (res != null) {
+            // detail 可为 null（AudioRecord 建立成功但 startRecording 抛 ISE → INIT_FAILED + null）：
+            // 必须兜底，否则带占位的 audio_track_lost_init 会原样渲染出字面量 "%1$s"。
+            // 无占位的其余三条文案多传一个 formatArgs 无副作用（String.format 忽略多余参数）
+            val detail = evt.detail ?: app.getString(R.string.audio_track_lost_reason_unknown)
+            showTip(app.getString(res, detail))
+        }
+        capture.clearTrackLost()
     }
 
     val canFlash = ability?.flashAvailable == true
@@ -2605,6 +2623,22 @@ private fun recordResultText(res: Resources, code: String?): String? {
         code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
         code == RecordError.SELF_CHECK_FAILED -> res.getString(R.string.record_self_check_failed)
         else -> res.getString(R.string.cam_record_failed_generic)
+    }
+}
+
+/**
+ * 内录轨丢失事件 → 提示文案资源 id（纯函数）。
+ * 仅内录会话仍 Active 时提示：撤销（Revoked）/建链失败（Failed）各有独立提示
+ * （audio_state_revoked / audio_state_failed），引擎层失效若照报会双报打扰——
+ * 那两类失效走这里恒 null，用户只看到状态机那条。
+ */
+internal fun captureTrackLostTipRes(reason: CaptureTrackLostReason, captureActive: Boolean): Int? {
+    if (!captureActive) return null
+    return when (reason) {
+        CaptureTrackLostReason.INIT_FAILED -> R.string.audio_track_lost_init
+        CaptureTrackLostReason.SOURCE_INACTIVE -> R.string.audio_track_lost_inactive
+        CaptureTrackLostReason.NO_SAMPLES -> R.string.audio_track_lost_no_samples
+        CaptureTrackLostReason.ENCODER_REBUILD_FAILED -> R.string.audio_track_lost_encoder
     }
 }
 
