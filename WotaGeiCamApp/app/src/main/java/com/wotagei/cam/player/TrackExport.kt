@@ -10,6 +10,8 @@ import android.media.MediaMuxer
 import android.provider.MediaStore
 import android.util.Log
 import com.wotagei.cam.media.VideoClip
+import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
+import com.wotagei.cam.record.exportOrientationHint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -100,6 +102,11 @@ class TrackExporter(private val ctx: Context) {
             afd.use {
                 val muxer = MediaMuxer(afd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 try {
+                    // 纯 remux 不动像素：源带容器旋转时方向只能靠 metadata 透传，不写 hint 成片方向错；
+                    // 源 hint=0 时写出 0、行为不变。读数走双源（readSourceRotationHint），
+                    // 写出必须经 exportOrientationHint 统一口径（与 ClipExporter 同一套）
+                    val hint = readSourceRotationHint(ctx, src.uri)
+                    muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
                     copy(src, track, TrackRule.shiftUsFor(track, offsetMs), job, muxer, onProgress)
                     muxer.stop()
                     commit(pendingUri)

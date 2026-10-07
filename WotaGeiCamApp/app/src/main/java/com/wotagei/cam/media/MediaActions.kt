@@ -303,7 +303,14 @@ class MediaActions private constructor(
 
     // region 授权回路工具
 
-    fun share(clips: List<VideoClip>): Int? = WotaShare.share(app, clips)
+    /**
+     * 分享（resolve 的逐项磁盘 stat 在 WotaShare.share 内部走 IO 线程，chooser 回主线程起）。
+     * 改成挂起返回 MediaOp 后，调用方（MediaOps.share）才能借 launchOp 的统一兜底：失败横幅 + 取消透传。
+     */
+    suspend fun share(clips: List<VideoClip>): MediaOp {
+        val res = WotaShare.share(app, clips)
+        return if (res == null) MediaOp.Done else MediaOp.Message(res)
+    }
 
     /** 直写被拒就是缺「所有文件访问」：让他去系统设置开一次，而不是每回都弹那个英文框 */
     private fun deniedRes(fallback: Int): Int =
@@ -420,6 +427,10 @@ class MediaOps internal constructor(
      * #46 定版：回收站态的行**不分享**。FileProvider 递出去的是真实路径，而系统回收站会把文件
      * 改名成 `.trashed-<ts>-<原名>`，接收端拿到的就是这个带前缀的怪名字（实测走 content Uri 更糟：
      * 接收方查 DISPLAY_NAME 得到 null）。所以这里把 trashed 项剔掉并提示先还原。
+     *
+     * 整个调用走 [launchOp]：share 内部要逐项 `file.exists()`（磁盘 stat），批量多选几十个时
+     * 直接在组合期线程跑就是主线程 N 次 stat —— 线程切换在 WotaShare.share 内部完成，这里只借
+     * launchOp 的统一兜底（失败记日志 + 横幅文案，取消原样透传）。
      */
     fun share(clips: List<VideoClip>) {
         if (clips.isEmpty()) return
@@ -428,8 +439,7 @@ class MediaOps internal constructor(
             onMessage?.invoke(R.string.media_share_trashed)
             return
         }
-        val res = actions.share(shippable)
-        if (res != null) onMessage?.invoke(res)
+        launchOp { actions.share(shippable) }
     }
 
     private fun launchOp(block: suspend () -> MediaOp) {

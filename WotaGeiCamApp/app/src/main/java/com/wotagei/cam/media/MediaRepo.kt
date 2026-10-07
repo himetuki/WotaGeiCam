@@ -115,11 +115,22 @@ class MediaRepo private constructor(private val app: Context) {
             }
             .flowOn(Dispatchers.IO)
 
+    /**
+     * 单条查询。**不能复用 [gated]**：gated 的 builder 返回 null 时零发射，而"查无此片"必须作为
+     * 一次 null 下发——吞掉 null 的话，消费侧（路由播放页）的"尚未回包"哨兵永远顶不掉，
+     * "片已消失"空态不可达，页面停在转圈。闸门语义与 [gated] 相同：关闸期间不下发
+     * （删除编排期不闪空态），开闸后按最新快照重查。
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
-    fun clipById(id: Long): Flow<VideoClip?> =
-        triggers()
-            .flatMapLatest { s -> gated { queryById(id)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) } } }
+    fun clipById(id: Long): Flow<VideoClip?> {
+        return triggers()
+            .flatMapLatest { s ->
+                refreshGate.flatMapLatest { open ->
+                    if (open) flow<VideoClip?> { } else flow { emit(queryById(id)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) }) }
+                }
+            }
             .flowOn(Dispatchers.IO)
+    }
 
     /** 自定义 tag 列表（按首次使用时间） */
     fun customTags(): Flow<List<String>> =

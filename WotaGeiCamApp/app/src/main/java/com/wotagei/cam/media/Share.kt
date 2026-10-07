@@ -8,6 +8,9 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import com.wotagei.cam.R
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -22,9 +25,11 @@ object WotaShare {
 private const val TAG = "WotaShare"
 
     /** @return 失败时的提示文案 res id；成功返回 null */
-    fun share(context: Context, clips: List<VideoClip>): Int? {
+    suspend fun share(context: Context, clips: List<VideoClip>): Int? {
         if (clips.isEmpty()) return R.string.media_share_failed
-        val pairs = clips.mapNotNull { resolve(context, it) }
+        // resolve 里的 file.exists() 是逐项磁盘 stat：多选几十个视频在主线程就是 N 次 stat（点分享卡顿），
+        // 必须挪到 IO 线程；本函数只在 MediaOps.share → launchOp 的协程里被调，取消能正常传播
+        val pairs = withContext(Dispatchers.IO) { clips.mapNotNull { resolve(context, it) } }
         if (pairs.isEmpty()) return R.string.media_share_failed
         val mime = pairs.first().second
         return try {
@@ -47,8 +52,12 @@ private const val TAG = "WotaShare"
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(chooser)
+            // 起 chooser 回主线程：resolve 已在 IO 完成，这里只剩一次界面启动的调度
+            withContext(Dispatchers.Main) { context.startActivity(chooser) }
             null
+        } catch (e: CancellationException) {
+            // 取消不是失败（离开屏幕的正常取消），不许被下面的 catch 吞成「分享失败」横幅
+            throw e
         } catch (e: ActivityNotFoundException) {
             Log.i(TAG, "share: 无可接收的应用 ${e.message}")
             R.string.media_share_no_app
