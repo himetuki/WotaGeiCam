@@ -52,6 +52,40 @@ class CodecRecorder(
         private const val KEY_CAPTURE_RATE = "capture-rate"
         /** BufferQueue 模式下的历史返回值，仍需吞掉（API 29 起标废弃，故不引用常量） */
         private const val INFO_OUTPUT_BUFFERS_CHANGED = -3
+        /**
+         * 内录样本等待窗：muxer 启动被"启用但无样本"的内录通道卡住时的有界放弃时限。
+         * 部分机型 playback capture 无媒体在播时不回缓冲——无界等待会让 muxer 永不启动，
+         * 停止时按 NO_VIDEO_TRACK 整段作废（用户连视频都拿不到）。窗满按废弃放行：
+         * 环境+视频照常出片，内录轨丢失经 reportTrackLost 可见化。
+         *
+         * 【必须短于起录自检长窗 RecordHealth.FULL_WINDOW_MS(3000)——这不是取值口味，是可达性】
+         * cap 无样本时自检三格恒不满（muxStarted 被 cap 闸卡死），healthVerdict 会在 3000ms
+         * 判废 abandonAndRestart、3 次后 GIVE_UP 整段失败。两窗同在 elapsedRealtime 域起算，
+         * 等待窗若 ≥ 长窗（历史取 5000ms 即如此），窗满放行永远轮不到、自检先动手——"防整段
+         * 作废"形同虚设，不回缓冲机型（华为系）表现为"开内录必 SELF_CHECK_FAILED"。
+         * 预算：窗起点（视频 addTrack ≤800ms）+ 本窗 1500 + muxer 启动到首视频样本再被自检
+         * 读到（≤2 拍 360ms）< 3000。正常双轨机型有媒体播放时内录首样本（PCM 20~40ms/包 +
+         * AAC 首输出）远快于 1500ms，不触发（成功路径零改变）。
+         */
+        internal const val CAP_SAMPLE_WAIT_MS = 1_500L
+
+        /**
+         * 内录样本等待窗的一拍推进（纯函数，"计划→行为"桥：起窗/清窗/窗满三态各有真实语义）。
+         * @param waitStartMs 窗起点（0 = 未起窗），elapsedRealtime 域
+         * @param nowMs       本拍时刻，elapsedRealtime 域
+         * @param waiting     本拍是否仍需等内录样本（视频+环境都就绪、内录启用且未废弃、
+         *                    仍无首个真实样本、且未走失效收尾）
+         * @return (新窗起点, 是否窗满放弃)：不再等待恒清窗；首拍起窗不判超时（起窗即满窗
+         *         会把 0 长窗误判成超时）
+         */
+        internal fun capSampleWaitTick(waitStartMs: Long, nowMs: Long, waiting: Boolean): Pair<Long, Boolean> {
+            // 花括号体不是风格偏好：结构守卫用 bodyOf 抓函数体做突变自证，表达式体让守卫失去输入
+            return when {
+                !waiting -> 0L to false
+                waitStartMs == 0L -> nowMs to false
+                else -> waitStartMs to (nowMs - waitStartMs > CAP_SAMPLE_WAIT_MS)
+            }
+        }
     }
 
     /** 单条音频通道的逐段状态（批 3：heldPkt / 末包 PTS / EOS 标志环境、内录各一套）。 */
@@ -591,6 +625,10 @@ class CodecRecorder(
             capFeederStartUs = System.nanoTime() / 1000L
             return
         }
+        // 失败原因可见化（此前只留日志）：采集器建不起来的机型上用户只会看到"没内录轨"，
+        // detail 取 controller 在 createCaptureAudioRecord 各失败分支记下的中文短因
+        val ctrl = PlaybackCaptureController.get(ctx)
+        ctrl.reportTrackLost(CaptureTrackLostReason.INIT_FAILED, ctrl.lastInitFailure)
         f.stop()
         releaseQuietly(capCodec)
         capCodec = null
@@ -807,6 +845,9 @@ class CodecRecorder(
             if (c2 == null) {
                 stopCapFeeder()
                 profile = p.copy(captureAudio = false)
+                // 重建失败可见化：本段起内录轨退出，环境+视频继续录
+                val ctl = PlaybackCaptureController.get(ctx)
+                ctl.reportTrackLost(CaptureTrackLostReason.ENCODER_REBUILD_FAILED, null)
                 Log.i(TAG, "capture encoder rebuild failed, drop capture track for rest of series")
             }
         }
@@ -859,6 +900,8 @@ class CodecRecorder(
         val capCh = if (c != null) AudioChannel() else null
         // P1：捕获源失效的一次性贯穿收尾标志（teardown 幂等，恒只做一次）
         var capTornDown = false
+        // 内录样本等待窗起点（0 = 未起窗；[capSampleWaitTick] 单写者推进）
+        var capWaitStartMs = 0L
         var videoTrack = -1
         var muxStarted = false
         var videoDone = false
@@ -890,6 +933,10 @@ class CodecRecorder(
                     // 短轨；无样本走 dropped，见内录输出支路），环境+视频不受影响继续录。
                     if (!capTornDown) {
                         capTornDown = true
+                        // 失效可见化（此前只留日志）：read 错误/静默死亡导致的失效用户毫无感知；
+                        // 投影撤销场景 UI 层会按 captureState 过滤（Revoked 已有独立提示）
+                        val ctl = PlaybackCaptureController.get(ctx)
+                        ctl.reportTrackLost(CaptureTrackLostReason.SOURCE_INACTIVE, null)
                         stopCapFeeder()
                         profile = profile?.copy(captureAudio = false)
                         Log.i(TAG, "capture source inactive, tear down capture track part=$partIndex")
@@ -988,6 +1035,12 @@ class CodecRecorder(
                                 // P1：废弃=未启用——可能正是内录轨挡着 muxer start，
                                 // 就地重评启动闸（dropped 通道此后恒按未启用处理，无重入问题）
                                 if (!capCh.hasSample) {
+                                    // 防重上报：窗满放弃已置 dropped 并报过 NO_SAMPLES，EOS 收尾不再重复；
+                                    // 失效收尾（capTornDown）已报 SOURCE_INACTIVE，废弃原因以更准的那条为准
+                                    if (!capCh.dropped && !capTornDown) {
+                                        val ctl = PlaybackCaptureController.get(ctx)
+                                        ctl.reportTrackLost(CaptureTrackLostReason.NO_SAMPLES, null)
+                                    }
                                     capCh.dropped = true
                                     if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                                 }
@@ -1053,6 +1106,26 @@ class CodecRecorder(
                 segWrittenBytes += writeSample(mx, capCh.track, c.getOutputBuffer(capCh.heldOutIdx), bi)
                 c.releaseOutputBuffer(capCh.heldOutIdx, false)
                 capCh.heldOutIdx = -1
+            }
+            // 内录样本等待窗（E6 防整段作废）：muxer 启动被"启用但无样本"的内录通道卡住时，
+            // 从其余轨就绪那拍起等 [CAP_SAMPLE_WAIT_MS]；窗满按废弃放行（dropped + 重评启动闸 +
+            // NO_SAMPLES 可见化），环境+视频照常出片。部分机型 playback capture 无媒体在播时
+            // 不回缓冲，无界等待会让 muxer 永不启动 → 停止时整段作废、用户连视频都拿不到。
+            // 正常双轨机型有媒体播放时内录首样本远快于窗，此分支不触发（成功路径零改变）。
+            // 窗条件含 !capTornDown：失效收尾的原因码以 SOURCE_INACTIVE 为准，不叠报 NO_SAMPLES。
+            val capWaiting = !muxStarted && videoTrack >= 0 &&
+                (envCh == null || envCh.dropped || envCh.track >= 0) &&
+                capCh != null && !capCh.dropped && !capCh.hasSample && !capTornDown
+            val (capWaitStart, capWaitExpired) = capSampleWaitTick(
+                capWaitStartMs, SystemClock.elapsedRealtime(), capWaiting
+            )
+            capWaitStartMs = capWaitStart
+            if (capWaitExpired && capCh != null) {
+                capCh.dropped = true
+                val ctl = PlaybackCaptureController.get(ctx)
+                ctl.reportTrackLost(CaptureTrackLostReason.NO_SAMPLES, null)
+                if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
+                Log.i(TAG, "capture sample wait window expired, drop capture track part=$partIndex")
             }
             if (stopping || rotatePending) {
                 if (deadline == 0L) {
