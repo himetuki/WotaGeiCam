@@ -1,5 +1,6 @@
 package com.wotagei.cam.record
 
+import com.wotagei.cam.source.KotlinSourceScan
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceFile
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
@@ -296,6 +297,65 @@ class RecordHealthWiringGuardTest {
         assertFalse("stopInternal 不许出现 abandonAndRestart", body.contains("abandonAndRestart"))
         assertFalse("stopInternal 不许出现 healthVerdict", body.contains("healthVerdict"))
         assertFalse("stopInternal 不许出现 retryActionOf", body.contains("retryActionOf"))
+    }
+
+    /**
+     * 录制中途「引擎判废看门狗」的接线（2026-10-08 真机缺陷的次生缺陷）。
+     *
+     * 现场：引擎在录制中途判废（第二次换段失败）时，UI 侧 status 仍是 START、计时冻结在 00:14、
+     * 屏幕上一个字都没有——用户既不知道录废了也没有收尾。看门狗把这个"死在录制里"的态变成
+     * 可见失败：判定走纯函数 [engineWatchdogTrips]（全表在 `RecordHealthTest`），收尾走
+     * `stopInternal`（把引擎错误码写进 result 并带上已提交分段，UI 走既有失败提示通道）。
+     *
+     * 定位说明：本文件里 `override fun run()` 有三处（pollTask / healthCheckTask / 看门狗），
+     * 所以按"体内出现看门狗判据"摘出唯一那一个；摘不到即失败（被删/被改名不许静默算过）。
+     */
+    private fun watchdogRunBody(): String {
+        val bodies = KotlinSourceScan.regionsOf(masked, "run")
+            .map { masked.substring(it.start + 1, it.end - 1) }
+            .filter { it.contains("engineWatchdogTrips(") }
+        assertTrue("必须恰好一个 run 体走引擎看门狗判据，实际 ${bodies.size} 个", bodies.size == 1)
+        return bodies[0]
+    }
+
+    @Test
+    fun `录制中途引擎判废看门狗必须接线`() {
+        val body = watchdogRunBody()
+        assertTrue("看门狗必须读引擎健康读数的错误码", body.contains("rec.health().errorCode"))
+        assertTrue(
+            "看门狗判定必须走纯函数 engineWatchdogTrips（不许内联判空）",
+            body.contains("engineWatchdogTrips(")
+        )
+        assertTrue(
+            "看门狗必须按录制态把门（非录制态的错误码归停止收尾路径）",
+            body.contains("status.value == RecordStatus.START")
+        )
+        assertTrue("看门狗必须自续（录制中每拍重投，否则一次判废后再无人问）", body.contains("handler.postDelayed(this, POLL_MS)"))
+        assertTrue("看门狗收尾必须走 stopInternal（带上已提交分段 + 把错误码交给 UI）", body.contains("stopInternal()"))
+        assertFalse(
+            "看门狗收尾不许走 failNow（只造一个无产物的失败结果，用户已录好的分段信息全丢）",
+            body.contains("failNow(")
+        )
+    }
+
+    /**
+     * 挂载时机红线：看门狗只许在起录自检确认健康（HEALTHY）之后挂。
+     * 起录窗口内的失败归自检管（那里有"自动重录"语义、attempt 有上界）；看门狗若从起录就挂，
+     * 首拍就能读到错误码并抢先 `stopInternal`，把自检的自动重录整条挤掉（信号可从首拍起就有错）。
+     */
+    @Test
+    fun `自检确认健康后必须挂上引擎看门狗`() {
+        val body = bodyOf(masked, "healthCheckLoop")
+        val healthy = body.indexOf("HealthVerdict.HEALTHY")
+        val arm = body.indexOf("handler.post(engineWatchdogTask)")
+        assertTrue("锚点丢失：healthCheckLoop 没截到 HEALTHY 分支", healthy >= 0)
+        assertTrue("锚点丢失：healthCheckLoop 没截到看门狗挂载", arm >= 0)
+        assertTrue("看门狗必须在 HEALTHY 分支挂（判定顺序不许前移）", arm > healthy)
+        assertTrue("HEALTHY 仍须归零 attempt（下一次起录从满机会算）", body.contains("attempt = 0"))
+        assertFalse(
+            "起录路径不许直接挂看门狗（会挤掉自检的自动重录）",
+            bodyOf(masked, "beginSession").contains("engineWatchdogTask")
+        )
     }
 
     /**

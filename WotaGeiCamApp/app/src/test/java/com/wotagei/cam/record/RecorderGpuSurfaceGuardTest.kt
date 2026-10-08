@@ -137,6 +137,38 @@ class RecorderGpuSurfaceGuardTest {
         )
     }
 
+    /**
+     * DIRECT 路的换段重挂（2026-10-08）：换段会销毁旧引擎实例，而 DIRECT 的编码面来自实例
+     * （`getSurface()` 的 producer 属实例）⇒ 面随换代而换，相机会话必须改指新面；不改指的话相机
+     * 把帧写进已释放实例的 producer，**下一段静默零帧**。首段口径（下发 + 等预览回 ING）不变。
+     */
+    @Test
+    fun `DIRECT 路换段必须改指相机会话目标并等预览回来`() {
+        val screen = maskedMain("ui/CameraScreen.kt")
+        val begin = bodyOf(screen, "beginSession")
+        val directAt = begin.indexOf("ctrl.setRecordingTarget(surface)")
+        val gpuAt = begin.indexOf("glProvider()?.setArcConvert(")
+        assertTrue("锚点丢失：beginSession 没截到 DIRECT 支路的面交接", directAt >= 0)
+        assertTrue("锚点丢失：beginSession 没截到 GPU 支路", gpuAt > directAt)
+        val directBranch = begin.substring(directAt, gpuAt)
+        val hookAt = directBranch.indexOf("rec.onInputSurfaceRecreated = ")
+        assertTrue(
+            "DIRECT 支路必须接 onInputSurfaceRecreated（换代后相机会话要改指新面）",
+            hookAt >= 0
+        )
+        val rehand = directBranch.indexOf("setRecordingTarget(", hookAt)
+        assertTrue(
+            "DIRECT 换段钩子体内必须改指相机会话目标（setRecordingTarget）",
+            rehand > hookAt
+        )
+        // 预览等待：DIRECT 支路应有**两处**（首段挂牌一处、换段钩子一处），少一处即换段没等会话回来
+        assertEquals(
+            "DIRECT 支路的 awaitPreview(ING) 必须恰好两处（首段 + 换段钩子）",
+            2,
+            KotlinSourceScan.occurrences(directBranch, "awaitPreview(PreviewStatus.ING)").size
+        )
+    }
+
     @Test
     fun `CodecRecorder 的自检三格必须在泵循环里落地`() {
         val src = maskedMain("record/CodecRecorder.kt")

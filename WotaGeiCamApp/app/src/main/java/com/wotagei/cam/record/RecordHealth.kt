@@ -212,3 +212,48 @@ fun mrRotateRequested(what: Int, extra: Int): Boolean =
             extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
                 extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING
             ))
+
+/**
+ * 换段「编码输入面交接」判定（纯函数）：新实例的对外编码面是不是**另一个对象**。
+ *
+ * 【为什么换段要判这件事】2026-10-08 起 [MrRecorder] 换段走「stop → 销毁旧实例 → 新实例
+ * re-prepare → start」，而**面的归属**分两种：
+ * - GPU 路 + `setInputSurface` 被接受：面是引擎自持的 persistent surface，跨实例**同一个对象**
+ *   ⇒ 无需交接（GL 的渲染目标没变，相机侧不参与）；
+ * - DIRECT 路（面来自 `getSurface()`，producer 属于实例）与 GPU 的 `setInputSurface` 退回路
+ *   （个别 ROM 拒绝 persistent 面 ⇒ 退回实例自建面）：面**随实例换代** ⇒ 必须让接线方重新挂好，
+ *   否则相机会话还绑在旧实例的 producer / GL 还画在旧面上 —— 新段静默零帧。
+ *
+ * 【判据取对象身份而不是"模式 + setInputSurface 是否被接受"这套配置】配置只是成因，真正决定
+ * "帧进不进得去"的是接线方手里那一个面还在不在新实例上；配置推到身份是三条分支（GPU 接受 ⇒
+ * 同对象；GPU 拒绝、DIRECT ⇒ 换对象），身份判据把这三种情形**一次**覆盖。三条分支的对应关系由
+ * `RecordHealthTest` 手写字面量钉住（同对象不交接、换代必交接）。
+ *
+ * @param previous 上一段对外暴露的编码面（首段由 prepare 记下；换段前后对比）
+ * @param current 新实例准备就绪后对外暴露的编码面
+ * @return true = 必须调 `Recorder.onInputSurfaceRecreated` 让接线方重挂（新面非空且与旧的不是同一个）
+ */
+fun rotateSurfaceHandoffNeeded(previous: Any?, current: Any?): Boolean =
+    current != null && current !== previous
+
+/**
+ * 录制中途「引擎判废看门狗」判定（纯函数，[com.wotagei.cam.ui.CameraScreen] 的 `RecordRunner`）。
+ *
+ * 存在理由（2026-10-08 真机缺陷的次生缺陷）：引擎在录制**中途**判废时只在自己内部记账
+ * （`MrRecorder.failNow` 置 errorCode/state=ERROR、`CodecRecorder` 泵循环退出），UI 侧的
+ * status 仍是 START、计时冻结、屏幕上一个字都没有——真机「第二次换段失败」现场正是
+ * "计时恒 00:14、文件数不涨、无任何提示"，用户既不知道录废了、也没有任何收尾。
+ *
+ * 策略表（判定即策略，四行全表单测）：
+ * | recording | errorCode | 动作 |
+ * | --- | --- | --- |
+ * | true | 非空 | 看门狗收尾（stopInternal）+ 把错误码亮给用户 |
+ * | true | 空/空白 | 什么都不做，继续下一拍 |
+ * | false | 任意 | 不动作——非录制态的错误码由停止/失败收尾路径自己写进 RecordResult，
+ * 看门狗此时插手会与 stop 抢着拆引擎 |
+ *
+ * @param recording 当前是否处于录制态（status == START）
+ * @param errorCode 引擎健康读数的错误码（[RecorderHealth.errorCode]）
+ */
+fun engineWatchdogTrips(recording: Boolean, errorCode: String?): Boolean =
+    recording && !errorCode.isNullOrBlank()

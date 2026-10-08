@@ -378,4 +378,71 @@ class RecordHealthTest {
         assertFalse("what=803 下一文件已开始：不换段", mrRotateRequested(803, 0))
         assertFalse("负值组合一律不换段", mrRotateRequested(-1, -1))
     }
+
+    // ------------------------------------------------------------------ rotateSurfaceHandoffNeeded
+
+    /**
+     * 换段面交接判定全表（对象身份字面量，防"用实现证明实现"）。
+     *
+     * 三种配置在身份上的落点：
+     * - **GPU + setInputSurface 被接受**：面是引擎自持 persistent 面，跨实例**同一对象** ⇒ 不交接；
+     * - **GPU 退回路（persistent 被 ROM 拒绝）/ DIRECT**：面随实例换代 ⇒ 必交接；
+     * - 取不到面（null）⇒ 不交接（无人可挂，失败交给录制中途看门狗去报）。
+     *
+     * 突变：把 `!==` 写成 `==`/`!=`（**按相等而非身份**判）——下面那对"结构相等、身份不同"的
+     * [FakeSurfaceLike] 正是为此准备的：`!=` 版本会判成"没换代"、本用例第二条必红。
+     * 判据退化成恒 true/false 同样必红。
+     */
+    @Test
+    fun `rotateSurfaceHandoffNeeded 按对象身份判定换代`() {
+        val persistent = FakeSurfaceLike(1) // 模拟引擎自持的 persistent 面（同一对象跨实例）
+        val samePersistent = persistent
+        val instanceSurfaceA = FakeSurfaceLike(7) // 模拟实例自建面（getSurface()，随实例换代）
+        val instanceSurfaceB = FakeSurfaceLike(7) // 结构相等（== 为真）但**不是同一个对象**
+
+        assertEquals("前置：这对替身必须结构相等（否则本用例测不出身份/相等的区别）", instanceSurfaceA, instanceSurfaceB)
+        assertFalse(
+            "GPU 接受：persistent 面跨实例同一对象 ⇒ 不交接",
+            rotateSurfaceHandoffNeeded(persistent, samePersistent)
+        )
+        assertTrue(
+            "DIRECT / GPU 退回路：面随实例换代 ⇒ 必须交接（同 id 但不同对象也算换代）",
+            rotateSurfaceHandoffNeeded(instanceSurfaceA, instanceSurfaceB)
+        )
+        assertTrue("首段未记录（null）→ 有面就要交接", rotateSurfaceHandoffNeeded(null, instanceSurfaceA))
+        assertFalse("新面取不到 ⇒ 不交接（无人可挂）", rotateSurfaceHandoffNeeded(instanceSurfaceA, null))
+        assertFalse("两面都取不到 ⇒ 不交接", rotateSurfaceHandoffNeeded(null, null))
+    }
+
+    // ------------------------------------------------------------------ engineWatchdogTrips
+
+    /**
+     * 录制中途看门狗判定全表：只有「录制中 + 引擎报了错误码」才动作。
+     *
+     * 干的活是**策略**而不是恒等式：非录制态的错误码归停止/失败收尾路径自己写进 RecordResult，
+     * 看门狗若在收尾窗口插手动引擎，会与 stop 抢着拆同一台引擎（同一线程的消息队列，先到先拆）。
+     * 突变：把 `recording` 那一项去掉（只看 errorCode）→ 第 3~5 行必红；
+     * 把 `isNullOrBlank` 收成 `!= null` → 空白码那行必红（真机上空白码会被当成"有错"而误收尾）。
+     */
+    @Test
+    fun `engineWatchdogTrips 只在录制中认错误码`() {
+        assertTrue(
+            "录制中 + 引擎判废 ⇒ 收尾并报错",
+            engineWatchdogTrips(recording = true, errorCode = "ENGINE_ERROR:ROTATE_PREPARE")
+        )
+        assertFalse("录制中 + 无错 ⇒ 继续录", engineWatchdogTrips(recording = true, errorCode = null))
+        assertFalse("录制中 + 空白码 ⇒ 不动作（不是判废）", engineWatchdogTrips(recording = true, errorCode = "  "))
+        assertFalse(
+            "非录制态（停止收尾窗口）+ 有错码 ⇒ 不动作（收尾路径自己写 result）",
+            engineWatchdogTrips(recording = false, errorCode = "STOP_FAILED")
+        )
+        assertFalse("非录制态 + 无错 ⇒ 不动作", engineWatchdogTrips(recording = false, errorCode = null))
+    }
 }
+
+/**
+ * 面替身：**结构相等但身份不同**（data class 的 equals 按字段比）。
+ * 专用来钉住 [rotateSurfaceHandoffNeeded] 的判据必须是**对象身份**（`!==`）而不是相等（`==`）——
+ * 两个 `FakeSurfaceLike(7)` 用 `==` 判会判成"没换代"，本文件的用例当场红。
+ */
+private data class FakeSurfaceLike(val id: Int)

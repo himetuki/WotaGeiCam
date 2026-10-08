@@ -19,9 +19,17 @@ import java.io.IOException
  * setCaptureRate(延时) → setOrientationHint → setInputSurface(GPU) → prepare。
  *
  * 分段：`setMaxFileSize(WotaTiers.MAX_FILE_BYTES)` + 802 回调 →
- * stop → sleep 500ms → 新 pending uri → re-prepare → start。
- * 分段是在 MediaRecorder 回调线程里同步做的，会占住该线程约 500ms，
+ * stop → 销毁旧实例（release + 置空，下一段由 [ensureRecorder] 新建）→ sleep 500ms →
+ * 新 pending uri → 新实例 re-prepare（GPU 路重挂**同一个** persistent 输入面）→ start。
+ * 分段是在 MediaRecorder 回调线程里同步做的，会占住该线程约 1s（含 500ms 间隔），
  * 因此 [prepare] 必须在带 Looper 的工作线程调用（不要放主线程）。
+ *
+ * 【为什么换段必须换实例（2026-10-08 真机根因）】原实现让同一实例反复
+ * reset→configure→prepare→start。真机（WIKO GAR-AN60 / Android 11、32MiB 测试阈值 + 50Mbps）
+ * 实测：第一段正常、**第二次换段之后彻底停摆**——第 2 次换段在 createPending 之后失败
+ * （createPending / open / applyConfig / start 四者之一），旧段已封段 commit、新段连 pending
+ * 都没留下，UI 计时冻结且无提示。出货应用 StaCam 的同款分段流程是 stop → release（字段置 null）
+ * → 500ms → 新实例 → 重挂输入面 → prepare → start（smali `x5/b.e()`），本类照此口径换代。
  */
 class MrRecorder(
     private val ctx: Context,
@@ -44,6 +52,12 @@ class MrRecorder(
     @Volatile private var target: OutputTarget? = null
     private var currentSink: OutputSink? = null
 
+    /**
+     * 当前段的**对外编码面**（[surface] 的取值快照）：首段在 [prepare] 成功后记下，换段在
+     * `applyConfig` 成功后与新实例的面比对（见 [rotateSurfaceHandoffNeeded]）。只在控制线程读写。
+     */
+    private var exposedSurface: Any? = null
+
     @Volatile private var state = EngineState.IDLE
     @Volatile private var engineError: String? = null
     @Volatile private var rotating = false
@@ -62,7 +76,12 @@ class MrRecorder(
     private var partIndex = 0
     private var partStartMs = 0L
 
-    /** GPU 模式的持久输入面（API 29 起可用，跨分段复用不重建） */
+    /**
+     * GPU 模式的持久输入面（API 29 起可用）。**跨分段复用、换段销毁实例也不重建**：
+     * 面的 producer 归本类所有，接线方（GPU 的 GL / DIRECT 的相机会话）持有的是同一个对象；
+     * 只有会话级 [release] 会释放它。换段时新实例靠 `applyConfig` → [applyInputSurface]
+     * 重新把它挂成编码器的输入（挂不上的机型退回报废实例自建面，见 [rotateSurfaceHandoffNeeded]）。
+     */
     private var inputSurface: Surface? = null
     private var inputSurfaceAccepted = false
 
@@ -76,6 +95,13 @@ class MrRecorder(
         null
     }
 
+    /**
+     * 实例的**唯一创建点**（全类只有这里 `MediaRecorder()`）。
+     *
+     * 线程契约：MediaRecorder 的事件回调走"创建它的那条 Looper"（无参构造取 `Looper.myLooper()`），
+     * 所以本函数只能在控制线程（与 prepare/start/stop 同一条 HandlerThread）被调用——换段销毁
+     * 实例后 [rotateSegment] 就在该线程上重建，802/801 回调因此仍回到控制线程，单线程口径不变。
+     */
     @Suppress("DEPRECATION") // MediaRecorder(Context) 是 API 31，minSdk 29 只能用无参构造
     private fun ensureRecorder(): MediaRecorder =
         mr ?: MediaRecorder().also { mr = it }
@@ -91,6 +117,7 @@ class MrRecorder(
         engineError = null
         sessionError = null
         abandonSegment = false
+        exposedSurface = null
         parts.clear()
         partIndex = 0
         partStartMs = 0L
@@ -113,6 +140,8 @@ class MrRecorder(
             return false
         }
         profile = effective
+        // 首段的对外编码面：换段时与新一代实例的面比对，判要不要让接线方重挂（见 rotateSurfaceHandoffNeeded）
+        exposedSurface = surface
         Log.i(TAG, "mr prepared part=$partIndex ${effective.width}x${effective.height}@${effective.fps} " +
             "bps=${effective.effectiveBitrate()} codec=${if (effective.hevc) "hevc" else "avc"} " +
             "audio=${audioDesc(effective)} hint=${effective.orientationHint} gpu=${effective.useGpu} maxFile=${WotaTiers.MAX_FILE_BYTES}")
@@ -284,6 +313,7 @@ class MrRecorder(
         inputSurface?.release()
         inputSurface = null
         inputSurfaceAccepted = false
+        exposedSurface = null
         state = EngineState.IDLE
         engineError = null
         sessionError = null
@@ -317,9 +347,11 @@ class MrRecorder(
      * 读不到（未挂 target／无 fd 且无真实路径／`Os.fstat` 抛错）一律回 **-1L = 不可观测**，
      * 判定侧据此退回只认错误码（[streamHealthVerdict]），**绝不许当 0 字节判废**——那是误杀。
      *
-     * 【线程口径】当前 [health] **只在控制线程**调用：唯一调用方 `RecordRunner.healthCheckLoop` 的
-     * 拍子由 `RecordRunner.handler` 投递，与 [prepare]/[start]/[stop] 同在一条 HandlerThread 的
-     * 消息队列上。这是**事实（今天就是同线程），不是约定**，所以 [target] 的 `@Volatile` 并非必需；
+     * 【线程口径】当前 [health] **只在控制线程**调用，有两处调用方：`RecordRunner.healthCheckLoop`
+     * （起录自检拍）与 `RecordRunner.engineWatchdogTask`（录制中途引擎判废看门狗），两者的拍子都由
+     * `RecordRunner.handler` 投递，与 [prepare]/[start]/[stop] 同在一条 HandlerThread 的消息队列上
+     * ——这也是"看门狗看不见换段途中 engineError 瞬时值"的依据。这是**事实（今天就是同线程），
+     * 不是约定**，所以 [target] 的 `@Volatile` 并非必需；
      * 保留它只是零成本保险——防御将来有人把自检（或别的读者）挪出该线程后，"读到换代 target"
      * 这个隐性前提才会重新出现。
      */
@@ -357,7 +389,14 @@ class MrRecorder(
         state = EngineState.ERROR
     }
 
-    /**  restartRecord：stop → 500ms → 新 pending → re-prepare → start，全程在本回调线程 */
+    /**
+     * restartRecord：stop → **销毁旧实例** → 500ms → 新 pending → 新实例 re-prepare
+     * （GPU 路重挂同一个 persistent 输入面）→ start，全程在本回调线程。
+     *
+     * 换代是 2026-10-08 真机缺陷（第二段之后停摆）的根因修复：同一实例反复
+     * reset→configure→prepare→start 在真机上第二轮不可靠，换段一律从零起算；[inputSurface]
+     * 是**跨实例**复用的面（producer 归本类），[applyConfig] 会把它重挂到新实例上。
+     */
     private fun rotateSegment(extra: Int) {
         if (rotating) return
         rotating = true
@@ -365,6 +404,10 @@ class MrRecorder(
             if (state != EngineState.START) return
             Log.i(TAG, "file size event extra=$extra, restartRecord")
             stopEngine()
+            // 销毁旧实例（release + 置空）：下一段由 ensureRecorder 新建。release 异常吞在
+            // releaseEngine 里——清理失败不该把换段打断，下一段的成败由 prepare/start 自己报。
+            // 顺序不许反：必须在本段 stop 落定之后（文件已完整）、在 applyConfig 之前。
+            releaseEngine()
             val dur = clock.closeSegment()
             // 弃段意图同 stop()：轮转前若被要求弃段，旧段也不 commit
             sealCurrent(dur, segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
@@ -391,6 +434,20 @@ class MrRecorder(
             target = t
             partIndex++
             partStartMs = clock.elapsedMs()
+            // 【换段面交接】新实例的对外编码面若与上一段不是同一个对象，接线方必须重新挂好，
+            // 否则帧进不去、下一段静默零帧：
+            // - DIRECT：面来自实例（getSurface()，producer 属实例），换代后相机会话还绑在旧实例上；
+            // - GPU 的 setInputSurface 退回路（个别 ROM 拒绝 persistent 面）：面同样随实例换代，
+            //   GL 还画在旧面上。
+            // 默认档（GPU + persistent 面被接受）面跨实例不变 ⇒ 恒不回调 ⇒ GL/相机侧零改动。
+            // 必须早于 mr?.start()（与首段"先挂牌再 start"同口径），回调异常就地吞掉不折断换段。
+            val exposed = surface
+            if (rotateSurfaceHandoffNeeded(exposedSurface, exposed) && exposed != null) {
+                Log.i(TAG, "segment surface changed, handoff to caller")
+                runCatching { onInputSurfaceRecreated?.invoke(exposed) }
+                    .onFailure { Log.w(TAG, "segment surface handoff threw: ${it.message}") }
+            }
+            exposedSurface = exposed
             mr?.start()
             state = EngineState.START
             clock.startSegment()
@@ -462,7 +519,11 @@ class MrRecorder(
         releaseEngine()
     }
 
-    /** 只 stop+reset，不 release：stop 之后该文件即完整可播（分段与停止共用） */
+    /**
+     * 只 stop+reset，不 release：stop 之后该文件即完整可播（分段与停止共用）。
+     * **实例生死由调用方紧跟处理**：停止与换段都在本函数之后调 [releaseEngine]——
+     * 换段必须换代（同一实例第二轮 reset→configure→prepare 在真机上不可靠，见类注）。
+     */
     private fun stopEngine() {
         val rec = mr ?: return
         try {
