@@ -65,6 +65,22 @@ const val ROUTE_HUD_EDITOR = "hudEditor"
  */
 class MainActivity : ComponentActivity() {
 
+    /**
+     * 窗口级「常亮 + 高亮」的驱动（唯一真源，见 [WindowKeepOnDriver]）。
+     * 放在 Activity 这一层：窗口归它所有，且驱动时机是 NavController 的目的地回调，
+     * 与任何页面的组合/重组生命周期无关。
+     */
+    private val windowKeepOn = WindowKeepOnDriver()
+
+    /**
+     * 目的地变化时驱动窗口常亮/高亮（由 [WotaRoot] 注册的 OnDestinationChangedListener 回调）：
+     * `navigate` / `popBackStack` / `setGraph` 都会同步走到这里，注册时还会立刻回放当前目的地，
+     * 所以冷启与"媒体库/设置/编辑页往返"都覆盖得到。
+     */
+    internal fun onRouteForWindowKeepOn(route: String?) {
+        windowKeepOn.apply(window, route)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -153,8 +169,12 @@ private fun WotaRoot() {
     // 方向与沉浸随目的地切换：方向所有页都按设置页「默认方向」锁（用户 2026-10-02 指令）；
     // HUD 页（录制页 + 编辑控件页）隐藏系统栏沉浸，其余页显示
     DisposableEffect(nav, activity) {
+        // 窗口归 MainActivity 所有：常亮/高亮也走这一条目的地回调（单一真源见 ui/WindowKeepOn.kt），
+        // 与「某个页面何时重组/何时离开组合」彻底解耦
+        val windowOwner = activity as? MainActivity
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
+            windowOwner?.onRouteForWindowKeepOn(destination.route)
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }

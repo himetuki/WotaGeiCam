@@ -15,7 +15,6 @@ import android.os.HandlerThread
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
-import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -407,31 +406,12 @@ fun CameraScreen(
     LaunchedEffect(Unit) { freeMb = runner.probeFreeSpace() }
 
     // ---- 常亮 + 高亮（产品裁决：进录制页 = 屏幕常亮 + 窗口亮度拉满，离开页面恢复进页前原状）。
-    // 常亮只挂在本页 View 上（keepScreenOn），亮度走 WindowManager.LayoutParams.screenBrightness
-    // 的逐窗口覆写（1.0f，无需任何系统权限），都不碰 Settings.System 的全局亮度。
-    // 恢复口径：进页前记下原值——原值是具体数值就还原数值；原值是 NONE（-1，跟随系统）
-    // 就原样写回 -1（等价于恢复 NONE）。
-    // 真机验证路径（JVM 测不到窗口属性）：进录制页屏幕应保持常亮且最亮；退到媒体库/设置页后
-    // 亮度回到进页前的档位、闲置能正常自动熄屏。
-    val keepOnView = LocalView.current
-    DisposableEffect(keepOnView) {
-        val window = keepOnView.context.findActivity()?.window
-        val savedBrightness = window?.attributes?.screenBrightness
-            ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        keepOnView.keepScreenOn = true
-        if (window != null) {
-            // attributes 是可变对象：改完必须整体再赋回 window 才会下发到 WindowManager
-            window.attributes = window.attributes.apply {
-                screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
-            }
-        }
-        onDispose {
-            keepOnView.keepScreenOn = false
-            if (window != null) {
-                window.attributes = window.attributes.apply { screenBrightness = savedBrightness }
-            }
-        }
-    }
+    // 已于 2026-10-07 搬到「拥有窗口的那一层」：MainActivity.onRouteForWindowKeepOn → ui/WindowKeepOn.kt。
+    // 旧写法（本页 View.keepScreenOn + 同条效果里的 window.attributes 整份赋值）在页面往返后会静默失效：
+    // 视图 flag 合并进窗口 flag 是**边沿触发**的，而整份赋值会把窗口 flags 换回客户端快照（里面没有
+    // KEEP_SCREEN_ON），此后 `View.setFlags` 又因"值没变"短路 ⇒ 直到冷启动才会恢复（#103）。
+    // 真机验证路径（JVM 测不到窗口属性）：进录制页常亮且最亮；退到媒体库/设置页后亮度回原档、可正常熄屏；
+    // 再从媒体库/设置/编辑页返回录制页，常亮与高亮都必须重新成立。
 
     // ---- 权限：页面进入时补缺失权限，回调里让门面重查（缺麦克风只降级纯视频）
     val permissionLauncher = rememberLauncherForActivityResult(
