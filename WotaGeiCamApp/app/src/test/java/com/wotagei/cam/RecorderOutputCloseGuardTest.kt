@@ -46,9 +46,11 @@ class RecorderOutputCloseGuardTest {
     fun `CodecRecorder 换段时编码器重建失败也要就地关 t`() {
         val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(codecMasked, "openNextSegment"))
         assertTrue("锚点丢失：没截到换段建编码器", body.contains("createVideoEncoder(resolveVideoMime(p), p, inSurf)"))
-        val close = body.indexOf("t.close()")
-        val open = body.indexOf("OutputTarget.open(ctx, sink)")
-        assertTrue("openNextSegment 缺少失败分支的 t.close()——此时 target 字段是上一段的 null，兜底关不到", close >= 0)
+        // 2026-10-08 换段有界化：就地关 t 改走有界封装 closeBounded(t)（关 fd 也走 MediaProvider，
+        // 泵线程上无界等=静默丢内容），语义不变且更严——仍然必须"就地关"，只是不许无限等
+        val close = body.indexOf("closeBounded(t)")
+        val open = body.indexOf("openTargetBounded(sink)")
+        assertTrue("openNextSegment 缺少失败分支的 closeBounded(t)——此时 target 字段是上一段的 null，兜底关不到", close >= 0)
         assertTrue("close 必须在 open 之后（open=$open close=$close）", close > open)
     }
 

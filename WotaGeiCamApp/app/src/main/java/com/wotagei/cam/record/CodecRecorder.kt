@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -52,6 +53,10 @@ class CodecRecorder(
         private const val KEY_CAPTURE_RATE = "capture-rate"
         /** BufferQueue 模式下的历史返回值，仍需吞掉（API 29 起标废弃，故不引用常量） */
         private const val INFO_OUTPUT_BUFFERS_CHANGED = -3
+        /** muxer 写失败的现场快照里"这笔来自哪条轨"（见 [muxFailDiagnostic]） */
+        private const val TRACK_VIDEO = "V"
+        private const val TRACK_ENV = "A"
+        private const val TRACK_CAP = "C"
         /**
          * 内录样本等待窗：muxer 启动被"启用但无样本"的内录通道卡住时的有界放弃时限。
          * 部分机型 playback capture 无媒体在播时不回缓冲——无界等待会让 muxer 永不启动，
@@ -131,6 +136,28 @@ class CodecRecorder(
 
     /** 本段两轨共用的 PTS 基准（μs，与 nanoTime 同域），避免分段后时间戳倒退 */
     private var segBaseUs = 0L
+
+    /**
+     * 逐 muxer 轨"已写出的 pts"（μs，已减去本段基准）：-1 = 本段该轨还没写过。
+     *
+     * 【为什么需要这本账（2026-10-08 真机根因收敛）】同一轨的 pts **倒退**会让 MPEG4Writer
+     * 走失败路径——`writeSampleData` 抛 `IllegalStateException`，泵循环退出 ⇒ **整场录制当场结束**
+     * （现场 `rotate-fail.log` 的 `trk=A;started=1;field=same;st=0` 那族，6/6 都是它）。
+     * 换段期"暂存首样本补写"（[AudioChannel.heldOutIdx]）天然存在结构性顺序风险：那枚**较早**的样本
+     * 可能在**较新**的样本之后才写出（补写点排在音频 dequeue 之后）。上游时序假设不能当保证，
+     * 所以这里就地兜住：等值/倒退一律推进到 `last+1`，把致命错误降级成一枚微秒级修正，
+     * 并把**次数与最大倒退量**记进失败快照（下次复现时能直接看出是不是这条机制）。
+     */
+    private val muxLastPtsUs = LongArray(8) { -1L }
+    private var muxPtsFixes = 0
+    private var muxPtsMaxBackUs = 0L
+
+    /** 逐轨 pts 账复位（新段起算：换段后是新 muxer，没有历史） */
+    private fun resetMuxPtsBooks() {
+        java.util.Arrays.fill(muxLastPtsUs, -1L)
+        muxPtsFixes = 0
+        muxPtsMaxBackUs = 0L
+    }
     private var aacMinBuf = 0
     private var audioSource = 0
     /** 双 feeder 的 start 时刻（μs，nanoTime 域）：启动记账（批 4 校正的数据基础） */
@@ -184,6 +211,75 @@ class CodecRecorder(
      */
     private val segSampleCounts = ArrayList<Int>()
 
+    // ---- 换段腿的有界化与丢帧账（2026-10-08 真机缺陷修复，判定/记账见 RotateGuard.kt）----
+
+    /**
+     * 换段腿起点（`elapsedRealtime`；0 = 当前不在换段腿里）。**编码器被拆的那一刻**起钟——
+     * 此后进来的帧写不进任何容器 = 丢帧窗口开启。泵线程写、停止路径（控制线程）读 ⇒ @Volatile。
+     */
+    @Volatile
+    private var rotateLegStartMs = 0L
+
+    /** 本腿里是否有入库调用撞了有界上限（泵线程与停止路径都可能置位 ⇒ @Volatile） */
+    @Volatile
+    private var rotateStoreTimedOut = false
+
+    /** 上一次换段腿的丢失（ms）：[settleRotateLeg] 写入、下一轮循环顶部随段账落地（见 [segLostMs]） */
+    private var pendingLegLostMs = 0L
+
+    /**
+     * 本段是否请求"重开本段"（新段的 muxer 首笔就写不进 ⇒ 有界重建，见 [muxRecoverDecision]）。
+     * 泵线程写、泵线程读，@Volatile 只是防御未来挪出该线程。
+     */
+    @Volatile
+    private var segmentRestartRequested = false
+
+    /** 本会话已重建本段的次数（上界见 [muxRecoverDecision]） */
+    private var segmentRestarts = 0
+
+    /** 最近一次 muxer 写失败的现场快照（随失败码进结果/账目，见 [muxFailDiagnostic]） */
+    @Volatile
+    private var muxFailDetail = ""
+
+    /**
+     * 本腿**第一个**失败的环节游标（见 [RotateStage]；空串 = 还没失败）。只记第一次：
+     * 后续环节的失败多半是前面卡住后的连锁反应，第一个才是根。随失败码进结果/账目——
+     * 这台 ROM 吞掉应用日志，环节游标是唯一能在真机上分辨"卡在哪一步"的通道。
+     */
+    private var rotateFailStage = ""
+
+    /**
+     * 逐段换段丢失账（索引=partIndex，与 [segSampleCounts] **同处、同口径**追加）：
+     * 记的是"这一段开始之前那次换段腿里丢掉的画面时长"。泵线程单写者，随
+     * [RecordResult.segLostMs] 进 sidecar 段清单，用户事后可查"这段丢了 N 秒"。
+     */
+    private val segLostMs = ArrayList<Long>()
+
+    /** 跨段丢帧累加账（泵线程 + 停止路径都会记 ⇒ 账本内部加锁） */
+    private val rotateLoss = RotateLossLedger()
+
+    /** 有界入库执行器：把走 MediaProvider/FUSE 的同步调用挪出泵线程并按预算等（见 [BoundedStore]） */
+    private val storeIo = BoundedStore()
+
+    /**
+     * 判超时后迟到落地的 pending 计数（见 [OneShotHandoff]）：回收动作本身要能在账里看见
+     * （"幽灵候选"有多少条），泵线程 + 入库线程都可能自增 ⇒ @Volatile。
+     */
+    @Volatile
+    private var latePendingReaped = 0L
+
+    /** 新 pending 的交接闸：判停摆时稳住**晚到**的那一枚（见 [OneShotHandoff]，防幽灵条目） */
+    private val pendingHandoff = OneShotHandoff<Uri> { late ->
+        latePendingReaped++
+        Log.e(TAG, "迟到落地的 pending 就地回收（第 $latePendingReaped 枚）")
+        discardBounded(late)
+    }
+
+    /** 新输出目标的交接闸：晚到的那枚自己关掉（fd 不许悬到进程结束） */
+    private val targetHandoff = OneShotHandoff<OutputTarget> { t ->
+        runCatching { t.close() }.onFailure { Log.w(TAG, "晚到的 output target 关闭失败：${it.message}") }
+    }
+
     /** prepare 成功后即稳定可用：Camera2 录像面 / GL outputSurface 的写入目标 */
     override val surface: Any? get() = inputSurface
 
@@ -216,6 +312,7 @@ class CodecRecorder(
         segVideoWritten = 0
         segWrittenBytes = 0L
         segSampleCounts.clear()
+        resetRotateBooks()
         envFeederStartUs = 0L
         capFeederStartUs = 0L
         clock.reset()
@@ -569,6 +666,7 @@ class CodecRecorder(
             return
         }
         segBaseUs = System.nanoTime() / 1000L
+        resetMuxPtsBooks()
         state = EngineState.START
         healthStartMs = SystemClock.elapsedRealtime() // 自检窗口从这里起算
         partStartMs = clock.elapsedMs()
@@ -659,7 +757,11 @@ class CodecRecorder(
         }
         state = EngineState.STOPPING
         stopping = true
-        joinLoop() // 循环内完成 EOS → 抽干 → 封段 → 提交
+        // 循环内完成 EOS → 抽干 → 封段 → 提交。泵线程若还在换段腿里（这一步现在有界，见
+        // ROTATE_LEG_BUDGET_MS），停止等待就可能超时——**不许当"没什么事"放行**：
+        // 那正是真机上"用户按了停止、内容已经丢了几十秒、结果却报已保存"的形态，
+        // 所以超时即按换段受阻结算（明确失败 + 丢帧账进结果）
+        if (!joinLoop()) settleRotateLegAtStop()
         closeSegmentEngine()
         // AudioRecord 的 stop/release 固定排在 codec、muxer 之后（环境、内录两个 feeder）
         stopFeeder()
@@ -703,7 +805,22 @@ class CodecRecorder(
         segVideoWritten = 0
         segWrittenBytes = 0L
         segSampleCounts.clear()
+        resetRotateBooks()
         Log.i(TAG, "codec released")
+    }
+
+    /** 换段腿/丢帧账复位（新会话、新段序列与释放三处共用同一份口径，不许各写一份） */
+    private fun resetRotateBooks() {
+        rotateLegStartMs = 0L
+        rotateStoreTimedOut = false
+        pendingLegLostMs = 0L
+        rotateFailStage = ""
+        latePendingReaped = 0L
+        segmentRestartRequested = false
+        segmentRestarts = 0
+        muxFailDetail = ""
+        segLostMs.clear()
+        rotateLoss.clear()
     }
 
     override val elapsedMs: Long get() = clock.elapsedMs()
@@ -745,45 +862,262 @@ class CodecRecorder(
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:LOOP"
                 false
             }
+            // 本段要不要"重开"（muxer 首笔写不进的有限重建，见 writeSample）：与换段共用同一条腿
+            val restart = segmentRestartRequested
+            segmentRestartRequested = false
             // 段闭落账（泵线程单写者，无竞争）：无论本段成废都要落，索引才与 partIndex 一一对齐；
-            // 落完归零，下一段从 0 重新计
+            // 落完归零，下一段从 0 重新计。换段丢帧账与段账同处落地（首段前没有换段腿 ⇒ 恒 0）
             segSampleCounts.add(segVideoWritten)
             segVideoWritten = 0
+            segLostMs.add(pendingLegLostMs)
+            pendingLegLostMs = 0L
             val dur = clock.closeSegment()
+            // 这一轮到底要不要换段（判据必须在拆编码器**之前**取好：换段腿的起钟与结算都以它为准，
+            // 否则停止时的最后一段封段会被算进"换段腿"——那份慢不该被说成"丢了内容"）
+            val willRotate = (ok && engineError == null && rotatePending) || (restart && engineError == null)
+            // 换段腿起钟：**编码器即将被拆**那一刻（此后进来的帧写不进任何容器 = 丢帧窗口开启）
+            if (willRotate) beginRotateLeg()
             // 先拆 codec/muxer（moov 写完）再封段提交，顺序反了相册会拿到半截文件
             closeSegmentEngine()
             // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision
             sealCurrent(dur, ok && segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
-            keepGoing = when {
-                !ok || engineError != null -> false
-                !rotatePending -> false
-                else -> {
-                    rotatePending = false
-                    val ready = nextSegment()
-                    if (!ready) engineError = engineError ?: "${RecordError.ENGINE_ERROR}:ROTATE"
-                    ready
+            // 停录途中不再换段：`stopping` 置位后 rotatePending 往往恰好也为真（阈值刚触顶就被停），
+            // 照旧换段会白建一枚 pending 再按 NO_VIDEO_TRACK 丢掉（附带一个假错误码落进结果）
+            val wantRotate = willRotate && !stopping
+            var rotated = false
+            if (wantRotate) {
+                // 重建本段时换段意图可能没置过：这里补清（下一次阈值触顶照常换段）
+                rotatePending = false
+                rotated = nextSegment()
+                // 换段腿失败：一律走带丢帧账+环节游标的明确失败码（可见、可事后分辨环节）。
+                // 真机现场就是这条把整场录制当场结束掉（r18 后可见，此前只有一行日志）
+                if (!rotated) engineError = engineError ?: rotateStallError(rotateLoss.totalMs, rotateFailStage)
+                if (rotated && restart) {
+                    segmentRestarts++
+                    noteSegmentRestartLoss(dur)
+                    Log.e(TAG, "本段已重建（第 $segmentRestarts 次）：丢失 $dur ms + 换段腿")
                 }
             }
+            // 本腿结算：入库撞上限或腿超预算 ⇒ ROTATE_STALL（明确失败，看门狗/收尾把原因亮给用户）；
+            // 没越界但有损失也记账（[segLostMs] → sidecar，用户事后可查"这段丢了 N 秒"）
+            settleRotateLeg(judgeStall = wantRotate)
+            keepGoing = wantRotate && rotated && engineError == null
         }
         if (engineError != null) Log.i(TAG, "codec loop end with ${engineError}")
     }
 
-    /** 分段：换 pending uri、重建 codec+muxer（输入面与采集线程沿用），并在本线程内重启 */
-    private fun nextSegment(): Boolean {
-        val uri = store.createPending(partIndex + 1) ?: return false
-        val sink = OutputSink.Pending(uri)
-        val ready = openNextSegment(sink)
-        if (!ready) {
-            store.discard(sink) // 没写进去的 pending 立刻回收，避免幽灵条目
-            target?.close()
-            target = null
+    /**
+     * 换段腿起钟（泵线程）。腿的定义：从编码器被拆到新段 `codec.start()` 返回（见 [ROTATE_LEG_BUDGET_MS]）。
+     */
+    private fun beginRotateLeg() {
+        rotateLegStartMs = SystemClock.elapsedRealtime()
+        rotateStoreTimedOut = false
+        rotateFailStage = ""
+    }
+
+    /** 记下本腿第一个失败的环节（后续失败不覆盖：第一个才是根因，见 [rotateFailStage]） */
+    private fun noteRotateStage(stage: String) {
+        if (rotateFailStage.isEmpty()) rotateFailStage = stage
+    }
+
+    /**
+     * 换段腿的剩余预算（ms）：腿内按 [ROTATE_LEG_BUDGET_MS] 递减，腿外（停止封段等）用
+     * [STORE_CALL_BUDGET_MS]。<=0 = 预算已尽 ⇒ 下一次有界调用直接判超时（不许再发无预算的调用）。
+     */
+    private fun rotateBudgetLeftMs(): Long {
+        val start = rotateLegStartMs
+        if (start == 0L) return STORE_CALL_BUDGET_MS
+        return ROTATE_LEG_BUDGET_MS - (SystemClock.elapsedRealtime() - start)
+    }
+
+    /** 入库调用撞上限（或无预算可发）时的记账：本腿结算会据此判明确失败 */
+    private fun noteStoreTimeout(what: String) {
+        rotateStoreTimedOut = true
+        Log.e(TAG, "换段整备受阻：$what 超过有界上限（本腿剩余预算已算尽），按有界结果继续")
+    }
+
+    /**
+     * 重建本段的丢失记账：失败的本段一笔都没写成，但它占掉的那段墙钟确实没内容
+     * （[durMs] = 该段从 startSegment 到失败那一刻），必须与换段腿的丢失一起进账。
+     */
+    private fun noteSegmentRestartLoss(durMs: Long) {
+        if (durMs <= 0L) return
+        pendingLegLostMs += durMs
+        rotateLoss.add(durMs)
+    }
+
+    /**
+     * 换段腿结算（泵线程）：把腿耗时折成丢帧账，越界即判明确失败 [RecordError.ROTATE_STALL]。
+     * 记账只落 [pendingLegLostMs]（由下一轮循环顶部随段账落地，索引才对得上 partIndex）；
+     * 停止路径的腿由 [settleRotateLegAtStop] 单独结算（那条路的泵线程还卡在腿里没出来）。
+     *
+     * @param judgeStall 本腿是否真的走到了轮转（false = 停止途中取消了轮转，腿里只有最后一段的
+     *   封段：那份耗时该记进丢失账、但**不许**判失败——封段慢不等于录制受阻）
+     */
+    private fun settleRotateLeg(judgeStall: Boolean) {
+        val start = rotateLegStartMs
+        if (start == 0L) return
+        rotateLegStartMs = 0L
+        val legMs = SystemClock.elapsedRealtime() - start
+        val lost = rotateLostMs(legMs)
+        pendingLegLostMs = lost
+        rotateLoss.add(lost)
+        if (lost > 0L) {
+            Log.e(
+                TAG,
+                "换段受阻：本腿 ${legMs}ms（良性开销 ${ROTATE_BENIGN_MS}ms），丢帧约 ${lost}ms；" +
+                    "累计 ${rotateLoss.totalMs}ms/${rotateLoss.count} 次"
+            )
         }
-        return ready
+        if (!judgeStall) return
+        if (rotateStallDecision(rotateStoreTimedOut, legMs)) {
+            Log.e(TAG, "换段受阻超过上限 ${ROTATE_LEG_BUDGET_MS}ms（腿 ${legMs}ms），明确失败并保留已录分段")
+            engineError = engineError ?: rotateStallError(rotateLoss.totalMs, rotateFailStage)
+        }
+    }
+
+    /**
+     * 停止路径的换段腿结算（控制线程；泵线程此刻仍卡在腿里）。判据收严（[rotateStopStallDecision]）：
+     * 停止时最后一段封段本身就可能慢，误报"丢了 N 秒"比漏报更糟。只写此时已经安全的量：
+     * 账本内部加锁、错误码 @Volatile——**不碰**泵线程单写者的段账表（那边可能同时在校验/写）。
+     */
+    private fun settleRotateLegAtStop() {
+        val start = rotateLegStartMs
+        if (start == 0L) return
+        val legMs = SystemClock.elapsedRealtime() - start
+        val lost = rotateLostMs(legMs)
+        rotateLoss.add(lost)
+        val stall = rotateStopStallDecision(rotateStoreTimedOut, legMs)
+        Log.e(
+            TAG,
+            "停止时换段腿仍未返回（已 ${legMs}ms，丢帧约 ${lost}ms）：" +
+                if (stall) "按换段受阻明确失败，已录分段照常保留" else "只记账（未达兜底判据，不误报失败）"
+        )
+        if (stall) engineError = engineError ?: rotateStallError(rotateLoss.totalMs, rotateFailStage)
+    }
+
+    // ---- 有界入库调用（2026-10-08 真机缺陷修复）：会走 MediaProvider/FUSE 的同步调用一律经这里 ----
+    // 为什么必须挪出泵线程：泵线程是唯一的产出线程，这一腿里任何一步无界等待都等于"整机静默丢内容"
+    // （真机 30~45s 空洞、无错误码、计时冻结）。上限见 ROTATE_LEG_BUDGET_MS / STORE_CALL_BUDGET_MS。
+
+    /** 关当前段的输出句柄（有界）：晚到的 close 幂等，超时只记账 */
+    private fun closeTargetBounded() {
+        val t = target
+        target = null
+        closeBounded(t)
+    }
+
+    /** 关一枚输出目标（有界）：失败路径也不许在泵线程上无界等；收摊类调用保底 [CLEANUP_MIN_BUDGET_MS] */
+    private fun closeBounded(t: OutputTarget?) {
+        if (t == null) return
+        val r = storeIo.run(cleanupBudgetMs(rotateBudgetLeftMs())) { t.close() }
+        if (r is Bounded.TimedOut) noteStoreTimeout("target.close")
+    }
+
+    /** 建一枚新 pending（有界）：超时/失败回 null；晚到的那枚经 [pendingHandoff] 就地回收 */
+    private fun createPendingBounded(partIndex: Int): Uri? {
+        pendingHandoff.reset()
+        val r = storeIo.run(rotateBudgetLeftMs()) {
+            pendingHandoff.publish(store.createPending(partIndex))
+        }
+        return when (r) {
+            is Bounded.Done -> if (r.value) {
+                pendingHandoff.claim()
+            } else {
+                // insert 当场返回空（真机那条"第 1~2 次换段就死"的死法）：也是 INSERT 环节
+                noteRotateStage(RotateStage.INSERT)
+                null
+            }
+            Bounded.TimedOut -> {
+                noteStoreTimeout("createPending")
+                noteRotateStage(RotateStage.INSERT)
+                discardBounded(pendingHandoff.abandon())
+                null
+            }
+        }
+    }
+
+    /** 回收一枚 pending（有界、幂等）：泵线程不许在回收上再等一次无界调用 */
+    private fun discardBounded(uri: Uri?) {
+        if (uri == null) return
+        val r = storeIo.run(STORE_CALL_BUDGET_MS) { store.discard(OutputSink.Pending(uri)) }
+        if (r is Bounded.TimedOut) Log.e(TAG, "pending 回收超时（记录只能留给系统兜底）：$uri")
+    }
+
+    /** 打开输出目标（有界）：超时回 null；晚到的那枚自己关掉（fd 不许悬到进程结束） */
+    private fun openTargetBounded(sink: OutputSink): OutputTarget? {
+        targetHandoff.reset()
+        val r = storeIo.run(rotateBudgetLeftMs()) { targetHandoff.publish(OutputTarget.open(ctx, sink)) }
+        return when (r) {
+            is Bounded.Done -> if (r.value) targetHandoff.claim() else null
+            Bounded.TimedOut -> {
+                noteStoreTimeout("OutputTarget.open")
+                noteRotateStage(RotateStage.OPEN)
+                // 交接闸里已落地的那枚由我们自己关（晚到的由 discard 回调关）
+                targetHandoff.abandon()?.let { closeBounded(it) }
+                null
+            }
+        }
+    }
+
+    /** 封一段并入库（有界）：超时回 null（晚到的 commit 仍会把文件落地，内容不丢） */
+    private fun sealBounded(sink: OutputSink, durationMs: Long, keep: Boolean): VideoSegment? {
+        val r = storeIo.run(rotateBudgetLeftMs()) {
+            store.seal(sink, partIndex, partStartMs, durationMs, keep)
+        }
+        return when (r) {
+            is Bounded.Done -> r.value
+            Bounded.TimedOut -> {
+                noteStoreTimeout("store.seal")
+                noteRotateStage(RotateStage.SEAL)
+                null
+            }
+        }
+    }
+
+    /**
+     * 分段：换 pending uri、重建 codec+muxer（输入面与采集线程沿用），并在本线程内重启。
+     *
+     * **有界重试**（2026-10-08 真机缺陷）：这台 ROM 在上一段 33MB pending 文件的异步收尾期间，
+     * 建新 pending / 开新输出的入库调用会久等甚至直接失败，一次失败就返回 false = 整场录制当场
+     * 结束（真机现场正是"第 1~2 次换段后整轮无段"）。重试仍在换段腿预算内（[rotateRetryDecision]），
+     * 不许把有界做成无界；失败的 pending 每轮就地回收，不留幽灵。
+     */
+    private fun nextSegment(): Boolean {
+        var attempt = 0
+        while (true) {
+            attempt++
+            val uri = createPendingBounded(partIndex + 1)
+            if (uri != null) {
+                val sink = OutputSink.Pending(uri)
+                if (openNextSegment(sink)) return true
+                discardBounded(uri) // 没写进去的 pending 立刻回收，避免幽灵条目
+                closeTargetBounded()
+                // 行已回收：当前段句柄一并清空（否则后续收尾会去封一条已被删掉的记录）
+                currentSink = null
+            }
+            if (!rotateRetryDecision(attempt, rotateBudgetLeftMs())) {
+                rotateFailStage = if (rotateFailStage.isEmpty()) RotateStage.ROTATE else rotateFailStage
+                Log.e(TAG, "换段失败（第 $attempt 次尝试后放弃，剩预算 ${rotateBudgetLeftMs()}ms）")
+                return false
+            }
+            Log.i(TAG, "换段受阻：第 $attempt 次尝试失败，退让 ${ROTATE_RETRY_BACKOFF_MS}ms 后重试")
+            SystemClock.sleep(ROTATE_RETRY_BACKOFF_MS)
+        }
     }
 
     private fun openNextSegment(sink: OutputSink.Pending): Boolean {
         val p = profile ?: return false
-        val t = OutputTarget.open(ctx, sink) ?: return false
+        // 腿预算已被前面的入库调用吃光就不再往下走：后面全是编码器/muxer 的 native 重建（无上限可给），
+        // 预算既尽就该交回 pumpLoop 按 ROTATE_STALL 明确失败，而不是带着没预算的腿继续赌
+        if (rotateLegStartMs != 0L && rotateBudgetLeftMs() <= 0L) {
+            noteStoreTimeout("rotate budget spent")
+            return false
+        }
+        val t = openTargetBounded(sink) ?: run {
+            noteRotateStage(RotateStage.OPEN)
+            return false
+        }
         // GPU 路：per-codec 输入面随编码器实例换代——新面建好后**同步**让 GL 重挂（[Recorder]
         // 的 onInputSurfaceRecreated 契约，等挂好才 start），旧面在 GL 解绑后再释放；
         // 不重挂的话新段帧全落旧面（旧 codec 已停），GL 侧还持有已 release 的 native 面。
@@ -794,7 +1128,8 @@ class CodecRecorder(
             if (v == null) {
                 // 编码器重建失败：target 字段此刻还是上一段的 null（sealCurrent 已清），
                 // 调用方 nextSegment 的 target?.close() 关不到这枚 t，必须就地关
-                t.close()
+                noteRotateStage(RotateStage.ENCODE)
+                closeBounded(t)
                 return false
             }
             val newSurf = try {
@@ -802,7 +1137,7 @@ class CodecRecorder(
             } catch (e: Exception) {
                 Log.e(TAG, "segment createInputSurface failed: ${e.javaClass.simpleName} ${e.message}")
                 releaseQuietly(v)
-                t.close()
+                closeBounded(t)
                 return false
             }
             val old = inputSurface
@@ -816,7 +1151,7 @@ class CodecRecorder(
                 .isSuccess
             if (!rebindOk) {
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:REBIND"
-                t.close()
+                closeBounded(t)
                 return false
             }
             runCatching { old?.release() }
@@ -824,12 +1159,14 @@ class CodecRecorder(
         } else {
             val inSurf = inputSurface
             if (inSurf == null) {
-                t.close()
+                noteRotateStage(RotateStage.ENCODE)
+                closeBounded(t)
                 return false
             }
             v = createVideoEncoder(resolveVideoMime(p), p, inSurf)
             if (v == null) {
-                t.close()
+                noteRotateStage(RotateStage.ENCODE)
+                closeBounded(t)
                 return false
             }
         }
@@ -858,7 +1195,8 @@ class CodecRecorder(
             }
         }
         if (!openMuxer(t, p.orientationHint)) {
-            t.close()
+            noteRotateStage(RotateStage.MUX)
+            closeBounded(t)
             return false
         }
         target = t
@@ -870,6 +1208,7 @@ class CodecRecorder(
             aCodec?.start()
             capCodec?.start()
             segBaseUs = System.nanoTime() / 1000L
+            resetMuxPtsBooks()
             partIndex++
             partStartMs = clock.elapsedMs()
             clock.startSegment()
@@ -877,6 +1216,7 @@ class CodecRecorder(
             true
         } catch (e: Exception) {
             Log.e(TAG, "segment restart failed: ${e.message}")
+            noteRotateStage(RotateStage.START)
             false
         }
     }
@@ -922,6 +1262,31 @@ class CodecRecorder(
         val segStartNs = System.nanoTime()
 
         while (true) {
+            // 本段请求重建（新段首笔就写不进 muxer，见 writeSample）：立刻收口，**不置错误码**，
+            // 交 pumpLoop 按"重开一段"处理（engineError 一置，录制中途看门狗就会抢先把整场停掉）
+            if (segmentRestartRequested) {
+                Log.e(TAG, "本段按重建收口（muxer 首笔写不进），part=$partIndex")
+                return false
+            }
+            // 【暂存首样本补写必须排在"新样本直写"之前】换段后头几拍里，先到的音频输出缓冲
+            // 会因"轨未 add / muxer 未 start"被暂存（heldOutIdx），等门开了再写回。原实现把补写
+            // 放在音频 dequeue **之后**：若 muxer 恰在内录轨那道门才启动（`startMuxerIfReady`
+            // 要求内录轨也就绪），下一拍就会先直写一枚**较新**的样本、再把**较早**的暂存样本补写
+            // 上去 ⇒ 同一轨 pts 倒退 ⇒ MPEG4Writer 抛 IllegalStateException ⇒ **整场录制当场结束**
+            // （2026-10-08 真机现场 `trk=A;started=1;field=same;st=0` 那族）。放到循环开头即结构性消除。
+            // writeSample 里另有逐轨单调兜底（[muxLastPtsUs]），两层都在：一层保序、一层保不死。
+            if (a != null && envCh != null && envCh.heldOutIdx >= 0 && envCh.track >= 0 && muxStarted) {
+                bi.set(0, envCh.heldSize, envCh.heldPts, envCh.heldFlags)
+                segWrittenBytes += writeSample(mx, TRACK_ENV, envCh.track, a.getOutputBuffer(envCh.heldOutIdx), bi)
+                a.releaseOutputBuffer(envCh.heldOutIdx, false)
+                envCh.heldOutIdx = -1
+            }
+            if (c != null && capCh != null && capCh.heldOutIdx >= 0 && capCh.track >= 0 && muxStarted) {
+                bi.set(0, capCh.heldSize, capCh.heldPts, capCh.heldFlags)
+                segWrittenBytes += writeSample(mx, TRACK_CAP, capCh.track, c.getOutputBuffer(capCh.heldOutIdx), bi)
+                c.releaseOutputBuffer(capCh.heldOutIdx, false)
+                capCh.heldOutIdx = -1
+            }
             // 喂 PCM：环境/内录各自独立通道（feedAudioInput 单份共用，EOS 判定逐字沿用）
             if (a != null && ef != null && envCh != null && !envCh.done && !envCh.eosQueued)
                 feedAudioInput(a, ef, envCh)
@@ -969,7 +1334,7 @@ class CodecRecorder(
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                         if (muxStarted && !eos && bi.size > 0) {
                             // 位次账只认视频帧：写成功才计数（writeSample 失败返回 0），音频轨不入账
-                            val wrote = writeSample(mx, videoTrack, v.getOutputBuffer(idx), bi)
+                            val wrote = writeSample(mx, TRACK_VIDEO, videoTrack, v.getOutputBuffer(idx), bi)
                             segWrittenBytes += wrote
                             if (wrote > 0) segVideoWritten++
                             // 自检第三格：首个视频样本真写进 muxer（writeSample 失败返回 0，不计）
@@ -1005,7 +1370,7 @@ class CodecRecorder(
                             envCh.track >= 0 && muxStarted -> {
                                 // 正常路：muxer 已接纳本轨，照写
                                 if (bi.size > 0) {
-                                    segWrittenBytes += writeSample(mx, envCh.track, a.getOutputBuffer(idx), bi)
+                                    segWrittenBytes += writeSample(mx, TRACK_ENV, envCh.track, a.getOutputBuffer(idx), bi)
                                     aPtsLastUs = bi.presentationTimeUs
                                 }
                                 a.releaseOutputBuffer(idx, false)
@@ -1055,7 +1420,7 @@ class CodecRecorder(
                             capCh.track >= 0 && muxStarted -> {
                                 // 正常路：muxer 已接纳本轨，照写
                                 if (bi.size > 0) {
-                                    segWrittenBytes += writeSample(mx, capCh.track, c.getOutputBuffer(idx), bi)
+                                    segWrittenBytes += writeSample(mx, TRACK_CAP, capCh.track, c.getOutputBuffer(idx), bi)
                                     cPtsLastUs = bi.presentationTimeUs
                                 }
                                 c.releaseOutputBuffer(idx, false)
@@ -1085,13 +1450,7 @@ class CodecRecorder(
                 if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                 Log.i(TAG, "env audio track=${envCh.track}")
             }
-            // 门开（addTrack + muxer start）后补写环境轨暂存的首个样本
-            if (a != null && envCh != null && envCh.heldOutIdx >= 0 && envCh.track >= 0 && muxStarted) {
-                bi.set(0, envCh.heldSize, envCh.heldPts, envCh.heldFlags)
-                segWrittenBytes += writeSample(mx, envCh.track, a.getOutputBuffer(envCh.heldOutIdx), bi)
-                a.releaseOutputBuffer(envCh.heldOutIdx, false)
-                envCh.heldOutIdx = -1
-            }
+            // 暂存补写已上移到本拍开头（保序；见那里注释），此处不再补
             // 内录轨 addTrack 门（每轮幂等尝试）+ 零样本防线（P0-a）：必须晚于环境轨
             //（环境轨本就不存在=编码器缺席，或已废弃 dropped——两者都不再有「先于谁」可言，
             // 才允许内录轨自由 add；env 轨废弃仍挡门的话会复现 P1 同款 muxStarted 恒 false），
@@ -1106,13 +1465,7 @@ class CodecRecorder(
                 if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                 Log.i(TAG, "capture audio track=${capCh.track}")
             }
-            // 门开（addTrack + muxer start）后补写内录轨暂存的首个样本
-            if (c != null && capCh != null && capCh.heldOutIdx >= 0 && capCh.track >= 0 && muxStarted) {
-                bi.set(0, capCh.heldSize, capCh.heldPts, capCh.heldFlags)
-                segWrittenBytes += writeSample(mx, capCh.track, c.getOutputBuffer(capCh.heldOutIdx), bi)
-                c.releaseOutputBuffer(capCh.heldOutIdx, false)
-                capCh.heldOutIdx = -1
-            }
+            // 暂存补写已上移到本拍开头（保序；见那里注释），此处不再补
             // 内录样本等待窗（E6 防整段作废）：muxer 启动被"启用但无样本"的内录通道卡住时，
             // 从其余轨就绪那拍起等 [CAP_SAMPLE_WAIT_MS]；窗满按废弃放行（dropped + 重评启动闸 +
             // NO_SAMPLES 可见化），环境+视频照常出片。部分机型 playback capture 无媒体在播时
@@ -1203,7 +1556,7 @@ class CodecRecorder(
     }
 
     /** PTS 统一到本段基准（两轨同一时钟，分段后不出现倒退） */
-    private fun writeSample(mx: MediaMuxer, track: Int, buf: ByteBuffer?, info: MediaCodec.BufferInfo): Int {
+    private fun writeSample(mx: MediaMuxer, kind: String, track: Int, buf: ByteBuffer?, info: MediaCodec.BufferInfo): Int {
         if (track < 0 || buf == null) return 0
         val shifted = info.presentationTimeUs - segBaseUs
         if (shifted < 0L) {
@@ -1214,12 +1567,43 @@ class CodecRecorder(
         } else {
             info.presentationTimeUs = shifted
         }
+        // 逐轨单调保证（判定走 [monotonicPts] 桥，见 [muxLastPtsUs] 注释）：等值/倒退就地推进到
+        // last+1，绝不把倒退交给 MPEG4Writer（它会抛 IllegalStateException 让整场录制结束）。
+        // 计次与最大倒退量进失败快照——用途是**证明**下一次现场是不是这条机制，没有读数就只能继续猜。
+        val ti = if (track in muxLastPtsUs.indices) track else -1
+        if (ti >= 0) {
+            val fix = monotonicPts(muxLastPtsUs[ti], info.presentationTimeUs)
+            if (fix.advanced) {
+                muxPtsFixes++
+                if (fix.backUs > muxPtsMaxBackUs) muxPtsMaxBackUs = fix.backUs
+                Log.w(TAG, "轨 $track pts 未单调（cur=${info.presentationTimeUs}）⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us）")
+            }
+            info.presentationTimeUs = fix.ptsUs
+            muxLastPtsUs[ti] = fix.ptsUs
+        }
         return try {
             mx.writeSampleData(track, buf, info)
             info.size
         } catch (e: IllegalStateException) {
-            Log.e(TAG, "writeSampleData failed: ${e.message}")
-            engineError = engineError ?: "${RecordError.ENGINE_ERROR}:MUX"
+            // 现场快照（这台 ROM 无日志：这是唯一能分辨"写超停"与"写先于 start"的通道）
+            val diag = muxFailDiagnostic(
+                kind = kind, started = true, fieldSame = muxer === mx,
+                partIndex = partIndex, track = track, size = info.size,
+                ptsUs = info.presentationTimeUs, flags = info.flags, segBaseUs = segBaseUs,
+                writtenBytes = segWrittenBytes, videoSamples = segVideoWritten,
+                restarts = segmentRestarts, stopping = stopping, rotatePending = rotatePending
+            ) + ";ptsfix=${muxPtsFixes};back=${muxPtsMaxBackUs}us"
+            muxFailDetail = diag
+            Log.e(TAG, "writeSampleData failed: ${e.message} [$diag]")
+            if (muxRecoverDecision(freshSegmentMuxFailure(segVideoWritten, segWrittenBytes), segmentRestarts)) {
+                // 本段一笔都没写成 ⇒ 重建本段（换一套 fd/编码器/muxer 再试），不判废整场。
+                // **不置 engineError**：置了录制中途看门狗会抢先 stopInternal（r18 那条可见失败通道
+                // 留给"重建也不成"的终局），丢失与现场快照照记
+                segmentRestartRequested = true
+                Log.e(TAG, "新段首笔样本就写不进 muxer，重建本段（第 ${segmentRestarts + 1} 次）")
+            } else {
+                engineError = engineError ?: muxFailError(diag)
+            }
             0
         }
     }
@@ -1282,16 +1666,25 @@ class CodecRecorder(
 
     // region 收尾
 
-    private fun joinLoop() {
+    /**
+     * 等泵循环收尾。
+     * @return true = 循环已退出（收尾完整）；false = 超时仍未退出（泵线程还卡在换段腿/收尾里，
+     *   调用方必须按"这一段可能丢内容"处理，见 [stop]）
+     */
+    private fun joinLoop(): Boolean {
         val t = loop
         loop = null
-        if (t == null) return
+        if (t == null) return true
         try {
             t.join(LOOP_JOIN_MS)
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
         }
-        if (t.isAlive) Log.e(TAG, "mux loop alive after ${LOOP_JOIN_MS}ms")
+        if (t.isAlive) {
+            Log.e(TAG, "mux loop alive after ${LOOP_JOIN_MS}ms")
+            return false
+        }
+        return true
     }
 
     private fun stopFeeder() {
@@ -1388,23 +1781,27 @@ class CodecRecorder(
 
     private fun sealCurrent(durationMs: Long, keep: Boolean) {
         val sink = currentSink ?: return
-        // 输出句柄先关，再 commit/discard（写完才清 IS_PENDING）
-        target?.close()
-        target = null
+        // 输出句柄先关，再 commit/discard（写完才清 IS_PENDING）。**两步都有界**：关 fd / 查 SIZE、DATA /
+        // 清 IS_PENDING 全走 MediaProvider，这台机在 33MB 级 pending 文件收尾上会长时间不返回（真机
+        // 现场：段已写满 31.5MB、计时冻结、无新文件、无残留——正是卡在这两步之间的形态）
+        closeTargetBounded()
         currentSink = null
-        val seg = store.seal(sink, partIndex, partStartMs, durationMs, keep)
+        val seg = sealBounded(sink, durationMs, keep) ?: return
         // 废片不能进 parts：seal 已经把这条 MediaStore 记录删掉了，列进去就会让
         // buildResult 拿到一个不存在的 uri，out.ok 成立 → UI 报「已保存」而文件其实没了
+        // （超时的情况下 seg 为 null：晚到的 commit 仍会把文件落地，只是不进 parts 清单）
         if (keep) parts.add(seg)
     }
 
     private fun discardCurrent(code: String) {
         val sink = currentSink ?: return
         Log.i(TAG, "discard unusable output: $code")
-        target?.close()
-        target = null
+        closeTargetBounded()
         currentSink = null
-        store.seal(sink, partIndex, partStartMs, 0L, keep = false)
+        val r = storeIo.run(rotateBudgetLeftMs()) {
+            store.seal(sink, partIndex, partStartMs, 0L, keep = false)
+        }
+        if (r is Bounded.TimedOut) noteStoreTimeout("discardCurrent")
     }
 
     private fun buildResult(err: String?): RecordResult {
@@ -1418,14 +1815,24 @@ class CodecRecorder(
             seriesId = store.seriesId,
             parts = parts.toList(),
             uncommitted = parts.count { !it.committed },
-            segVideoSamples = segSampleCounts.toList()
+            segVideoSamples = segSampleCounts.toList(),
+            segLostMs = segLostMs.toList(),
+            lostMs = rotateLoss.totalMs,
+            rotateStalls = rotateLoss.count,
+            latePending = latePendingReaped,
+            segmentRestarts = segmentRestarts,
+            muxDiag = muxFailDetail
         )
     }
 
     /** ERROR 只是中间态：清完废片必回 IDLE（04 §6） */
     private fun finish(error: String?): RecordResult {
+        // 无产物也要把换段丢帧账带上（"整段丢了 N 秒"是用户唯一能看到的解释，
+        // 见 RecordError.ROTATE_STALL 与 recordResultText 的文案映射）
+        val lost = rotateLoss.totalMs
         val out = if (parts.isEmpty())
-            RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs()) else buildResult(error)
+            RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+        else buildResult(error)
         state = EngineState.IDLE
         engineError = null
         clock.reset()
@@ -1434,6 +1841,7 @@ class CodecRecorder(
         partStartMs = 0L
         segVideoWritten = 0
         segSampleCounts.clear()
+        resetRotateBooks()
         return out
     }
 
