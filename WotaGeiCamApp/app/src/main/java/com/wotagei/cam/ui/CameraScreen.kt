@@ -2514,6 +2514,9 @@ private class RecordRunner(
         activeArcConvert = null
         if (convert != null && out.error == null) {
             val path = out.path
+            // sidecar 是否真写出去了：写成功才谈"归位"（提到外层作用域——归位块在前缀改名之后，
+            // 必须能看见这个标志，而不是嵌进内层 if 里各管一段）
+            var sidecarWritten = false
             if (path != null) {
                 val drops = glProvider()?.drainArcDrops() ?: emptyList()
                 // 段清单（2026-10-04 裁决）：录制器逐段已写视频样本数 → {segment,first,count}，
@@ -2532,11 +2535,11 @@ private class RecordRunner(
                         lostMs = out.segLostMs.getOrNull(part.partIndex) ?: 0L
                     )
                 }
-                val written = ArcDropLog.writeTo(
+                sidecarWritten = ArcDropLog.writeTo(
                     path,
                     ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops, segments = segs)
                 )
-                Log.i(TAG_UI, "arc drops sidecar ok=$written drops=${drops.size} segs=${segs.size} path=$path")
+                Log.i(TAG_UI, "arc drops sidecar ok=$sidecarWritten drops=${drops.size} segs=${segs.size} path=$path")
             }
             // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
             // 容器标称会被强制档标假）：commit 后 update DISPLAY_NAME 连文件改名，
@@ -2568,17 +2571,26 @@ private class RecordRunner(
                             )
                         }.getOrDefault(0) > 0
                         // MediaStore 撞名时会自行改成不重名（加 " (1)" 式序号）且 update 仍报成功，
-                        // 拼装名与真实落盘名可能分叉；sidecar（只在首段）必须跟着回查到的真实名走
-                        //（回查失败才退回拼装名，与旧行为等价不会更差）。回查名同样可能取到
-                        // 未复原完的临时名，与成片名同走一遍剥段——两边名字永远同一套规则
+                        // 拼装名与真实落盘名可能分叉；回查名同样可能取到未复原完的临时名，与成片名
+                        // 同走一遍剥段——两边名字永远同一套规则。sidecar 的搬运**不在这里**：
+                        // 归位与"是否加前缀"无关，统一走下面那个无条件出口（否则不加前缀的会话会漏搬）
                         val actualName =
                             if (renamed) queryDisplayName(uri)?.let(PendingName::stripPendingJunk) ?: newName
                             else null
-                        if (part === out.parts.first() && actualName != null && part.path != null) {
-                            ArcDropLog.renameFor(part.path!!, part.path!!.replaceAfterLast('/', actualName))
-                        }
                         Log.i(TAG_UI, "arc rename part=${part.partIndex} ok=$renamed -> ${actualName ?: newName}")
                     }
+                }
+            }
+            // sidecar 归位（**唯一出口**，与"是否加前缀"无关）：录制期 sidecar 是按当时的文件名落的，
+            // 而 commit 后 provider 把 `.pending-<id>-` 复原成片名是**异步**的；不加前缀的会话
+            //（源实测帧率 == 目标帧率，或拿不到实测值）走不到上面那块 ⇒ 旧代码直接漏搬，
+            // sidecar 永久留在 pending 名下（真机每会话一条 `.pending-<id>-….drops.json` 幽灵，
+            // 成片从此找不到自己的位次档案）。目标名走 [PendingName.sidecarConvergeTarget] 单一出口。
+            if (sidecarWritten && path != null) {
+                val queriedName = out.parts.firstOrNull()?.uri?.let { queryDisplayName(it) }
+                val target = PendingName.sidecarConvergeTarget(path, queriedName)
+                if (target != null) {
+                    Log.i(TAG_UI, "arc sidecar 归位 ok=${ArcDropLog.renameFor(path, target)} -> $target")
                 }
             }
         }

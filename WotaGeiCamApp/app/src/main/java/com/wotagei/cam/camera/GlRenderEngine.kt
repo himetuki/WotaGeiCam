@@ -205,8 +205,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     @Volatile
     private var encoderFps = 0
 
-    /** 已交给编码器的帧序号，用于算均匀时间戳 */
+    /** 已交给编码器的帧序号，用于算**网格**时间戳与抽帧位次账 */
     private var encoderFrameIndex = 0
+
+    /**
+     * 本段已写出的最后一枚呈现时间戳（ns，0 = 还没写过）。
+     *
+     * 只用来防时钟回退：新戳**小于**它时退回去（容器对同轨时间戳倒退会直接判失败），
+     * 相等允许（源帧率高于目标帧率时同一网格会落进多帧，见 [encoderSlotPtsNs]）。
+     */
+    private var encoderLastPtsNs = 0L
 
     /**
      * 均匀时间戳的基准（ns）。必须留在 `System.nanoTime()` 同一时间域：
@@ -1127,6 +1135,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         encoderHeight = heightPx
         encoderFrameIndex = 0
         encoderBaseNs = System.nanoTime()
+        encoderLastPtsNs = 0L
         // 转换会话：新文件新节奏（分段/重挂都从这里走），位次账随文件清零
         arcRule.reset()
         if (arcDstFps > 0) arcFlow = ArcRepairFlow(arcDstFps)
@@ -1363,16 +1372,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     }
 
     /**
-     * 给编码器面写**均匀**呈现时间戳（帧序号 × 1e9/fps）。
-     * 不写的话 EGL 用换帧瞬间的系统时钟当 PTS，而相机帧到达本身有抖动，
-     * 容器里就凑不出公共帧长 —— 真机表现为成片 `r_frame_rate` 被报成 90000/1。
+     * 给编码器面写**网格化**呈现时间戳（网格取真实时钟，见 [encoderSlotPtsNs]）。
+     *
+     * 为什么不是纯"帧序号 × 1e9/fps"（2026-10-08 真机缺陷）：那个口径隐含假设"源实到帧率 =
+     * 目标帧率"，而半精确档（24※）恰恰不满足——真机秒表对照实测：一轮 31.85s 的真实录制里
+     * 视频轨合计 34.21s（每段恒 ~180 帧 / 7.45s），音频轨合计 30.01s（音频戳取自真实
+     * nanoTime ⇒ 它才是真实时长）⇒ 成片被匀速拉长 8~14%、与音轨逐渐错位（亮场景源实到
+     * 26~31 帧/秒，戳却按 24 帧/秒走）。写成"帧序号 × 网格"看不出这个问题，写成"真实时钟
+     * 落网格"两头都要：帧长齐（不出现 90000/1）且总时长 = 真实时长。
      */
     private fun stampEncoderPresentation(encoder: EGLSurface) {
         val fps = encoderFps
         if (fps <= 0) return
         val display = eglDisplay
         if (display === EGL14.EGL_NO_DISPLAY) return
-        val ptsNs = encoderBaseNs + encoderFrameIndex * (1_000_000_000L / fps)
+        val ptsNs = encoderSlotPtsNs(encoderBaseNs, System.nanoTime(), fps, encoderLastPtsNs)
+        encoderLastPtsNs = ptsNs
         runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
             .onFailure { Log.w(TAG_GL, "写呈现时间戳失败：${it.message}") }
         encoderFrameIndex++
@@ -1950,6 +1965,33 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     }
 
     // endregion
+}
+
+/**
+ * 帧呈现时间戳的"真实时钟落网格"口径（纯函数；另见 [GlRenderEngine.stampEncoderPresentation] 的调用点）。
+ *
+ * 两头都要，缺一头就是真机缺陷：
+ * - **落网格**（`slot × 1e9/fps`）：容器里帧长齐。不落网格、直接用换帧瞬间的系统时钟，会因为相机
+ *   帧到达抖动凑不出公共帧长，真机表现为成片 `r_frame_rate` 被报成 90000/1（原注释记录的坑）。
+ * - **网格位置取自真实时钟**（`(now - base) / step`）：总时长 = 真实时长。原先按**帧序号**取网格，
+ *   隐含"源实到帧率 = 目标帧率"；半精确档（24※）不满足该假设——真机秒表对照：一轮 31.85s 的真实
+ *   录制，视频轨合计 34.21s（每段恒 ~180 帧）、音频轨（真实 nanoTime 打戳）合计 30.01s ⇒ 成片匀速
+ *   拉长 8~14% 且与音轨逐渐错位。源帧率高于目标时同一网格落进多帧（时间戳相等，播放取最后一枚，
+ *   节奏与真相机一致），源端漏帧时网格自然拉出空档（真实缺口如实反映，不压缩）。
+ *
+ * @param baseNs 本段基准（与帧序号账同时复位）
+ * @param nowNs 换取瞬间的真实时钟（`System.nanoTime()` 同域）
+ * @param fps 目标帧率（<=0 视为不可用，原样返回 [lastPtsNs]）
+ * @param lastPtsNs 本段已写出的最后一枚戳（0 = 还没有）
+ * @return 应写进编码器面的戳（ns）；**允许与上一枚相等**（同网格多帧），但绝不小于它
+ */
+internal fun encoderSlotPtsNs(baseNs: Long, nowNs: Long, fps: Int, lastPtsNs: Long): Long {
+    if (fps <= 0) return lastPtsNs
+    val step = 1_000_000_000L / fps
+    if (step <= 0L) return lastPtsNs
+    val elapsed = nowNs - baseNs
+    val pts = if (elapsed <= 0L) baseNs else baseNs + (elapsed / step) * step
+    return if (pts > lastPtsNs) pts else lastPtsNs
 }
 
 /**
