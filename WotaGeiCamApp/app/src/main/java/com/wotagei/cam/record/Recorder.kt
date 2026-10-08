@@ -40,6 +40,15 @@ object RecordError {
 
     /** 起录自检窗口内三格未立齐/引擎已报错，重录次数触顶：明确失败（文案见 strings.xml） */
     const val SELF_CHECK_FAILED = "SELF_CHECK_FAILED"
+
+    /**
+     * 换段受阻超上限：分段轮转这一腿（拆旧编码器/muxer + 关输出 fd + 查 SIZE/DATA + 清 IS_PENDING
+     * + 建新 pending + 重建编码器）里的某一步长时间不返回，超过 [ROTATE_LEG_BUDGET_MS]。
+     * 附 `:丢失ms` 载荷（见 `rotateStallError`/`rotateStallLostMs`），UI 侧按码映射成
+     * 「换段受阻，已停止…丢失约 N 秒」。**必须明确失败**：这条腿卡住时画面在持续丢，
+     * 静默陪它丢几十秒正是 2026-10-08 真机缺陷的形态。
+     */
+    const val ROTATE_STALL = "ROTATE_STALL"
 }
 
 /**
@@ -112,14 +121,44 @@ data class RecordResult(
      * 输出位次——位次只数视频帧，音频样本不入账。MediaRecorder 路线不参与位次账
      * （转换会话恒走 Codec 引擎），恒空表。
      */
-    val segVideoSamples: List<Int> = emptyList()
+    val segVideoSamples: List<Int> = emptyList(),
+    /**
+     * 逐段的**换段丢失时长**（ms，索引=段序号）：该段开始之前那次换段腿里丢掉的画面。
+     * 口径与 [segVideoSamples] 同款（索引=partIndex、0 值不落键、MR 路恒空表）——
+     * 差别只在它记载的是"这段前面丢了多久"，用户事后可查（sidecar 段清单的 `lostMs`）。
+     */
+    val segLostMs: List<Long> = emptyList(),
+    /** 本次录制因换段受阻丢掉的总时长（ms；[segLostMs] 之和，0 = 一次都没丢） */
+    val lostMs: Long = 0L,
+    /** 发生过丢失的换段次数（良性开销不计；配合 [lostMs] 判"是否踩到换段受阻"） */
+    val rotateStalls: Int = 0,
+    /**
+     * 被判超时后**迟到落地**的 pending 行数（`Resolver.insert` 不可取消：泵线程早已判超时、
+     * 回收、甚至重试成功，那条入库线程才把行插进去）。这些行由 [OneShotHandoff] 就地回收，
+     * 计在这里是为了"能不能看见"——>0 说明本场踩到过迟到插入（幽灵候选），MR 路恒 0。
+     */
+    val latePending: Long = 0L,
+    /**
+     * 本会话"重建本段"（新段首笔写不进 muxer 的有限恢复）发生了几次。>0 说明踩到过 muxer 写失败，
+     * 但被有界重建接住了、录制继续（每一次的现场快照都在失败码/账目里，见 `muxFailDiagnostic`）。
+     */
+    val segmentRestarts: Int = 0,
+    /**
+     * 本会话最近一次 muxer 写失败的现场快照（"" = 没踩过）。**已被有界重建接住的那次也在**：
+     * `error == null` 时它靠 `muxRecoveredCode` 进账目，用户看到"这次没问题"而排查者能看到"踩过"。
+     */
+    val muxDiag: String = ""
 ) {
     /** 有可用产物且无错误 */
     val ok: Boolean get() = error == null && (uri != null || path != null)
 
     companion object {
-        fun fail(code: String, durationMs: Long = 0L) =
-            RecordResult(null, null, 0L, durationMs, code)
+        /**
+         * 无产物的失败结果（[failNow] 与引擎收尾共用）。[lostMs] 只给"换段受阻"这类
+         * 有内容丢失但没成片的场景带上账目，默认 0 = 无丢失（旧调用点行为逐字不变）。
+         */
+        fun fail(code: String, durationMs: Long = 0L, lostMs: Long = 0L, muxDiag: String = "") =
+            RecordResult(null, null, 0L, durationMs, code, lostMs = lostMs, muxDiag = muxDiag)
     }
 }
 

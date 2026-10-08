@@ -22,8 +22,15 @@ import java.io.File
  * （android.jar 的 org.json 是 stub）。
  */
 
-/** 段清单单条：[segment] 段序号（与 VideoSegment.partIndex 同源）、[first] 该段首个输出位次、[count] 该段输出帧数 */
-data class ArcDropSegment(val segment: Int, val first: Int, val count: Int)
+/** 段清单单条：[segment] 段序号（与 VideoSegment.partIndex 同源）、[first] 该段首个输出位次、
+ *  [count] 该段输出帧数、[lostMs] 该段开始之前那次换段腿里**丢掉的画面时长**（ms；0 = 没丢，
+ *  2026-10-08 换段停摆缺陷的账目，编码时 0 不落键 ⇒ 旧档案形状不变）。 */
+data class ArcDropSegment(
+    val segment: Int,
+    val first: Int,
+    val count: Int,
+    val lostMs: Long = 0L
+)
 
 data class ArcDropLog(
     val mode: String,
@@ -36,7 +43,9 @@ data class ArcDropLog(
 
     /**
      * 紧凑 JSON：`{"mode":"mend","dstFps":24,"drops":[[1,1],[6,1]]}`；
-     * 有段清单时追加 `"segments":[{"segment":0,"first":0,"count":72},…]`（空表不落键，保持旧形）。
+     * 有段清单时追加 `"segments":[{"segment":0,"first":0,"count":72},…]`（空表不落键，保持旧形）；
+     * 某段有换段丢失时该格追加 `,"lostMs":N`（**0 不落键**，与"空表不落键"同一口径：
+     * 旧样例逐字不变，新样例只在真丢过内容时才多一个键）。
      */
     fun encode(): String = buildString {
         append("{\"mode\":\"").append(mode).append("\",\"dstFps\":").append(dstFps)
@@ -53,7 +62,8 @@ data class ArcDropLog(
                 append("{\"segment\":").append(s.segment)
                     .append(",\"first\":").append(s.first)
                     .append(",\"count\":").append(s.count)
-                    .append('}')
+                if (s.lostMs > 0L) append(",\"lostMs\":").append(s.lostMs)
+                append('}')
             }
             append(']')
         }
@@ -120,10 +130,16 @@ data class ArcDropLog(
             if (body.isEmpty()) return null
             val list = ArrayList<ArcDropSegment>()
             for (part in body.split("},{")) {
-                // 首格缺收 `}`、尾格缺起 `{`（都被缝吃掉），trim 后统一成裸字段形再严格对
-                val m = Regex("^\"segment\":(\\d+),\"first\":(\\d+),\"count\":(\\d+)$")
+                // 首格缺收 `}`、尾格缺起 `{`（都被缝吃掉），trim 后统一成裸字段形再严格对；
+                // lostMs 可选（0 不落键，见 encode）——缺席即 0，其余字段一字不许少
+                val m = Regex("^\"segment\":(\\d+),\"first\":(\\d+),\"count\":(\\d+)(?:,\"lostMs\":(\\d+))?$")
                     .find(part.trim('{', '}', ' ')) ?: return null
-                list += ArcDropSegment(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+                list += ArcDropSegment(
+                    m.groupValues[1].toInt(),
+                    m.groupValues[2].toInt(),
+                    m.groupValues[3].toInt(),
+                    m.groupValues[4].toLongOrNull() ?: 0L
+                )
             }
             return list
         }

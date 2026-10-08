@@ -158,7 +158,10 @@ import com.wotagei.cam.record.RecordResult
 import com.wotagei.cam.record.Recorder
 import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.RetryAction
+import com.wotagei.cam.record.RotateFailLog
 import com.wotagei.cam.record.HealthVerdict
+import com.wotagei.cam.record.LOSS_NOTICE_MIN_MS
+import com.wotagei.cam.record.muxRecoveredCode
 import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
 import com.wotagei.cam.record.MIN_OUTPUT_BYTES
 import com.wotagei.cam.record.PlaybackCaptureController
@@ -171,6 +174,9 @@ import com.wotagei.cam.record.healthVerdict
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.record.resolveOutputBytes
 import com.wotagei.cam.record.retryActionOf
+import com.wotagei.cam.record.rotateFailLedgerLine
+import com.wotagei.cam.record.rotateStallLostMs
+import com.wotagei.cam.record.rotateStallLostSeconds
 import com.wotagei.cam.record.shouldDiscardAbandonedSink
 import com.wotagei.cam.record.streamHealthVerdict
 import com.wotagei.cam.ui.anim.LocalMotion
@@ -201,6 +207,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -378,9 +388,20 @@ fun CameraScreen(
                 lastUri = result.uri ?: lastUri
                 repo.invalidate()
                 // 登记失败不推翻「已保存」：文件确实在盘上，只是相册可能暂时看不见，得另外说
-                val savedRes = if (result.uncommitted > 0) R.string.cam_record_saved_uncommitted
-                else R.string.cam_record_saved
-                showTip(app.getString(savedRes, formatDuration(result.durationMs)))
+                // 换段受阻的丢失（2026-10-08 真机缺陷）：实时自检判废的段会被删掉、不在这份结果里，
+                // 但"换段腿卡住期间画面在丢"这件事必须让用户看见——提示里带上丢了多少秒
+                val savedText = when {
+                    result.uncommitted > 0 ->
+                        app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
+                    result.lostMs >= LOSS_NOTICE_MIN_MS ->
+                        app.getString(
+                            R.string.cam_record_saved_loss,
+                            formatDuration(result.durationMs),
+                            rotateStallLostSeconds(result.lostMs)
+                        )
+                    else -> app.getString(R.string.cam_record_saved, formatDuration(result.durationMs))
+                }
+                showTip(savedText)
                 // 练习闭环（2026-10-04 方向 4）：对比页发来的录制成功即弹栈回对比页，把新片
                 // 填右槽。pending uri 自带 MediaStore id，此刻 IS_PENDING 已清，回程查询即刻可见；
                 // deliver 只在桥 armed 时认账，普通录制的停止不受影响
@@ -2469,6 +2490,24 @@ private class RecordRunner(
         val out = rec.stop()
         rec.release()
         recorder = null
+        // 换段受阻账（2026-10-08 真机缺陷）：这台 ROM 吞掉应用日志，"哪一环卡住、丢了多久"只能靠
+        // 落盘账目分辨。只在真出事时写（失败码或丢过内容），与成片同目录，adb 直接 pull
+        val muxDiag = out.muxDiag
+        if (RotateFailLog.shouldLog(out.error, out.lostMs) || muxDiag.isNotEmpty()) {
+            val dir = out.path?.let { File(it).parentFile } ?: app.getExternalFilesDir(null)
+            val line = rotateFailLedgerLine(
+                stamp = SimpleDateFormat("yyyy-MM-dd_HH:mm:ss", Locale.US).format(Date()),
+                parts = out.parts.size,
+                durationMs = out.durationMs,
+                lostMs = out.lostMs,
+                // 已重建接住的 muxer 写失败也要带快照（否则"成功了"就什么线索都没了）
+                code = out.error
+                    ?: if (muxDiag.isNotEmpty()) muxRecoveredCode(muxDiag) else "OK_WITH_LOSS",
+                latePending = out.latePending,
+                restarts = out.segmentRestarts
+            )
+            if (dir != null && RotateFailLog.append(dir, line)) Log.i(TAG_UI, "换段受阻账：$line")
+        }
         // 被抽帧位次 sidecar（2026-10-03 定版：抽帧时把位置记下来）。纯档案/调试用途——
         // 仅抽帧模式的画面已弃、播放器无法事后补弧；弧连续由 MEND 模式在录制时完成。
         val convert = activeArcConvert
@@ -2486,7 +2525,11 @@ private class RecordRunner(
                     ArcDropSegment(
                         segment = part.partIndex,
                         first = out.segVideoSamples.take(part.partIndex).sum(),
-                        count = out.segVideoSamples.getOrNull(part.partIndex) ?: 0
+                        count = out.segVideoSamples.getOrNull(part.partIndex) ?: 0,
+                        // 换段丢帧账（2026-10-08 真机缺陷修复）：这一段开始之前那次换段腿里丢掉的
+                        // 时长（引擎逐段记账，索引同 segVideoSamples）。0 = 没丢（不落键）。
+                        // 用户事后可查"这段前面丢了 N 秒"，与 UI 侧的 ROTATE_STALL 提示互补
+                        lostMs = out.segLostMs.getOrNull(part.partIndex) ?: 0L
                     )
                 }
                 val written = ArcDropLog.writeTo(
@@ -2693,6 +2736,15 @@ private fun recordResultText(res: Resources, code: String?): String? {
         code == RecordError.STOP_FAILED -> res.getString(R.string.cam_record_stop_failed)
         code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
         code == RecordError.SELF_CHECK_FAILED -> res.getString(R.string.record_self_check_failed)
+        // 换段受阻（2026-10-08 真机缺陷）：码里带"丢失了多少毫秒"的载荷，文案要把它翻成秒——
+        // 用户必须知道"内容丢了多久"，这正是此前静默丢几十秒时唯一缺的那条信息。
+        // 载荷为 0 = 这一腿不是"慢慢等"而是直接失败（建新段失败），文案改说"后续画面未能录下"：
+        // 两种出口（慢 / 败）对用户的含义不同，也不能让"丢失约 1 秒"误导成"只丢了一秒"
+        code.startsWith(RecordError.ROTATE_STALL) -> {
+            val lost = rotateStallLostMs(code) ?: 0L
+            if (lost <= 0L) res.getString(R.string.cam_record_rotate_stall_short)
+            else res.getString(R.string.cam_record_rotate_stall, rotateStallLostSeconds(lost))
+        }
         else -> res.getString(R.string.cam_record_failed_generic)
     }
 }

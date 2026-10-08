@@ -157,6 +157,7 @@
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案） -->
     <string name="cam_record_saved">已保存，时长 %1$s</string>
+    <string name="cam_record_saved_loss">已保存 %1$s（其中约 %2$d 秒因换段受阻丢失）</string>
     <string name="cam_record_saved_uncommitted">已保存 %1$s，但相册登记未成功，重进相册或重启后再看</string>
     <string name="cam_record_low_storage">存储空间不足：可用 %1$d MB，录制至少需要 %2$d MB</string>
     <string name="cam_record_low_storage_short">存储空间不足，无法开始录制</string>
@@ -164,6 +165,10 @@
     <string name="cam_record_prepare_failed">编码器准备失败，请重试</string>
     <string name="cam_record_start_failed">启动录制失败，请重试</string>
     <string name="cam_record_engine_error">录制引擎报错，已停止并保留已录内容</string>
+    <!-- 换段受阻（2026-10-08 真机缺陷）：分段轮转这一腿超过有界上限时明确失败，并把丢失时长亮出来。
+         两种出口分开说：慢（腿走完但丢了 N 秒）与败（建新段直接失败、后续画面没录下） -->
+    <string name="cam_record_rotate_stall">换段受阻，已停止并保留已录内容（丢失约 %1$d 秒画面）</string>
+    <string name="cam_record_rotate_stall_short">换段受阻，已停止并保留已录内容（后续画面未能录下）</string>
     <string name="cam_record_too_short">录制不足一秒，按废片丢弃</string>
     <string name="cam_record_stop_failed">停止录制失败，文件可能不完整</string>
     <string name="cam_record_released">录制已取消</string>

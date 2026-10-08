@@ -78,7 +78,9 @@ class RecorderGpuSurfaceGuardTest {
             next.contains("val rebindOk = runCatching { onInputSurfaceRecreated?.invoke(newSurf) }") &&
                 next.contains("if (!rebindOk)") &&
                 next.contains("RecordError.ENGINE_ERROR") &&
-                next.contains("t.close()")
+                // 2026-10-08 换段有界化：就地关 t 改走 closeBounded(t)（关 fd 也走 MediaProvider，
+                // 泵线程上无界等=静默丢内容）——"必须就地关"的语义不变，只是有界了
+                next.contains("closeBounded(t)")
         )
         assertTrue(
             "换段必须释放旧输入面（GL 解绑之后），否则 native Surface 泄漏",
