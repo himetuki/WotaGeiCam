@@ -166,6 +166,7 @@ import com.wotagei.cam.record.VIDEO_WINDOW_MS
 import com.wotagei.cam.record.FULL_WINDOW_MS
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.audioTrackPlan
+import com.wotagei.cam.record.engineWatchdogTrips
 import com.wotagei.cam.record.healthVerdict
 import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.record.resolveOutputBytes
@@ -2149,6 +2150,15 @@ private class RecordRunner(
         }
         if (renderMode == RenderMode.DIRECT) {
             ctrl.setRecordingTarget(surface)
+            // 换段重挂（2026-10-08）：换段会销毁旧引擎实例，而 DIRECT 的编码面来自实例本身
+            //（`getSurface()` 的 producer 属实例）⇒ 面随换代而换，相机会话必须改指新面；不改指的话
+            // 相机把帧写进已释放实例的 producer，下一段静默零帧。首段口径不变（下发 + 等预览回 ING）
+            rec.onInputSurfaceRecreated = { newSurface ->
+                (newSurface as? Surface)?.let { s ->
+                    ctrl.setRecordingTarget(s)
+                    awaitPreview(PreviewStatus.ING)
+                }
+            }
             awaitPreview(PreviewStatus.ING)
         } else {
             // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
@@ -2158,7 +2168,8 @@ private class RecordRunner(
             glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
             // 换段重挂：GPU 路 per-codec 输入面随分段轮转换代（引擎在泵线程建好新面后
             // 同步回调），这里与首段同一口径「下发 + 等挂好」，GL 挂好前新段不 start；
-            // MrRecorder / DIRECT 路面跨段不变，引擎永不回调（空挂无害）
+            // MrRecorder 默认档（persistent 面被接受）面跨实例不变，引擎永不回调（空挂无害）；
+            // 只有 setInputSurface 被 ROM 拒绝的退回路才会随换代回调到这里（面变成实例自建面）
             rec.onInputSurfaceRecreated = { newSurface ->
                 (newSurface as? Surface)?.let { s ->
                     // 换段抑制窗口：mark 必须在 setOutputSurface 之前——旧编码面已死（codec.stop）
@@ -2248,6 +2259,41 @@ private class RecordRunner(
     }
 
     /**
+     * 录制中途「引擎判废看门狗」（每 [POLL_MS] 一拍，**起录自检确认健康之后**才挂）。
+     *
+     * 存在理由（2026-10-08 真机缺陷的次生缺陷）：引擎在录制**中途**判废时只在自己内部记账
+     * （[com.wotagei.cam.record.MrRecorder] 的 failNow 置错误码 + ERROR 态、
+     * [com.wotagei.cam.record.CodecRecorder] 的泵循环退出），UI 侧 status 仍是 START、计时冻结、
+     * 屏幕上一个字都没有。真机「第二次换段失败」现场正是"计时恒 00:14、文件数不涨、无任何提示"，
+     * 用户既不知道录废了、也没有任何收尾（本次根因已修，但同类静默失败不该再无声）。
+     *
+     * 【判定走纯函数】[engineWatchdogTrips]：只有录制态 + 引擎报了错误码才动作；非录制态的错误码
+     * 归停止/失败收尾路径自己写进 RecordResult，看门狗插手会与 stop 抢着拆引擎。
+     * 【收尾走 stopInternal 而不是 failNow】stopInternal 会把引擎错误码写进 result 并**带上本会话
+     * 已提交的分段**，UI 侧走既有失败提示通道（recordResultText）把原因亮出来；failNow 只造一个
+     * 无产物的失败结果，用户已录好的段落信息全丢。
+     * 【为什么只挂在 HEALTHY 之后】起录窗口内的失败归自检管（那里有"自动重录"语义，attempt 有上界），
+     * 看门狗抢在自检前面收尾会把自动重录挤掉（信号可从首拍起就带错误码）。
+     * 【为什么不会误杀换段】三者同在 handler 控制线程的消息队列上：换段途中 engineError 的瞬时值
+     * （stop 抛过一次 STOP_FAILED、新段起始又清掉）在两拍之间根本不可见——这正是"事实同线程"的用法。
+     * 【只读不碰】每拍只读引擎的 @Volatile 字段快照（MR 加一次 `Os.fstat`），不写文件、不调引擎。
+     */
+    private val engineWatchdogTask: Runnable = object : Runnable {
+        override fun run() {
+            val rec = recorder
+            if (!polling || rec == null) return
+            val recording = status.value == RecordStatus.START
+            val err = if (recording) rec.health().errorCode else null
+            if (engineWatchdogTrips(recording, err)) {
+                Log.w(TAG_UI, "录制中途引擎判废（$err），立即收尾并把失败亮给用户")
+                stopInternal()
+                return
+            }
+            if (recording) handler.postDelayed(this, POLL_MS)
+        }
+    }
+
+    /**
      * 起录自检：起录后**两档窗口**内问引擎"真在产出吗"（三格见 [com.wotagei.cam.record.healthVerdict]）。
      * 判废且还有机会就 [abandonAndRestart] 从零重录；触顶走 [RecordError.SELF_CHECK_FAILED]。
      * 健康即停检查（attempt 归零）。全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
@@ -2266,7 +2312,9 @@ private class RecordRunner(
      * 【覆盖边界（说清"自检管到哪"）】自检只覆盖**起录窗口内"确实在写"这件事**：`fstat` 读数可疑
      * （< `MIN_OUTPUT_BYTES`）时另查一次 MediaStore `SIZE` 交叉核对，两源都量不到才认不可观测。
      * **过了窗口后停帧不在自检范围**——HEALTHY 即停止轮询是既定设计（若无谓地全程轮询，只会白白
-     * 占用 IPC 与线程，并不能救回已经录进去的画面）。
+     * 占用 IPC 与线程，并不能救回已经录进去的画面）。窗口之后仍有一条[engineWatchdogTask]在跑，
+     * 但它只认**引擎自报的错误码**（换段准备失败、引擎回调报错、自研泵循环退出），同样不追"还在录
+     * 但不长个"的停帧态——那条边界没变，别把两者混成一句"全程都有自检"。
      *
      * 副作用核对：HEALTHY 前会多跑约 2 秒（3s 内每 [HEALTH_TICK_MS] 一拍），但这只是读引擎的
      * `@Volatile` 字段快照，**不触碰录制本身**（不写文件、不调引擎、不改会话）。
@@ -2315,7 +2363,12 @@ private class RecordRunner(
         }
         when (verdict) {
             HealthVerdict.WAIT -> handler.postDelayed(healthCheckTask, HEALTH_TICK_MS)
-            HealthVerdict.HEALTHY -> attempt = 0
+            HealthVerdict.HEALTHY -> {
+                attempt = 0
+                // 起录窗口内的健全性已确认：从这里起交给录制中途看门狗（引擎中途判废不再无声）。
+                // 自检链自身到此结束（不再重投），看门狗是**另一条**自续链，只认错误码。
+                handler.post(engineWatchdogTask)
+            }
             HealthVerdict.UNHEALTHY -> when (retryActionOf(attempt, window, verdict)) {
                 RetryAction.RESTART -> abandonAndRestart()
                 RetryAction.GIVE_UP -> {
