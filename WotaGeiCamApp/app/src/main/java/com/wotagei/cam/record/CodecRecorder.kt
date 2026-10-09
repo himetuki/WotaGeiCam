@@ -116,6 +116,10 @@ class CodecRecorder(
         var dropped = false
         /** 废弃后编码器迟到的真实样本被 release 的枚数（记账用，段收尾行打印；不进任何判定） */
         var lateDrops = 0
+        /** 喂码时 getInputBuffer 拿不到缓冲、已出队包无处可送（静默丢弃记账；不进任何判定） */
+        var feedDropped = 0
+        /** 喂码时数据长于输入缓冲被截断的枚数（记账；不进任何判定） */
+        var feedTruncated = 0
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
         var heldOutIdx = -1
         var heldPts = 0L
@@ -1541,6 +1545,8 @@ class CodecRecorder(
             TAG,
             "segment $partIndex drained video=$videoDone env=${envCh?.done ?: "off"} cap=${capCh?.done ?: "off"} " +
                 "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
+                "喂码丢弃=${envCh?.feedDropped ?: 0}/${capCh?.feedDropped ?: 0} " +
+                "截断=${envCh?.feedTruncated ?: 0}/${capCh?.feedTruncated ?: 0} " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms"
         )
@@ -1642,8 +1648,11 @@ class CodecRecorder(
             queueEosOn(codec, idx, ch)
             return
         }
-        val buf = codec.getInputBuffer(idx) ?: return
+        // 这枚已从队列消费、heldPkt 也已清（丢了就真没了）→ 原来 `?: return` 静默吞掉，计数留痕
+        val buf = codec.getInputBuffer(idx) ?: run { ch.feedDropped++; return }
         val len = minOf(pkt.data.size, buf.capacity())
+        // 容量不足导致截断：原来只有 len 一个数字，看不出是不是被砍过
+        if (len < pkt.data.size) ch.feedTruncated++
         buf.clear()
         buf.put(pkt.data, 0, len)
         try {
