@@ -224,6 +224,34 @@ class DualTrackGuardTest {
         assertFalse("拆掉 captureAudio 判据后守卫必须报红", mutated.contains("p.captureAudio"))
     }
 
+    /**
+     * 双音轨的**调度类别**（2026-10-09）：两路采集线程与编码泵线程都必须按**音频类**调度。
+     *
+     * 为什么值得单列一条守卫：两路 PCM 采集 + 两路 AAC 编码 + GL 渲染 + 相机同时在跑；采集/泵线程若停在
+     * 默认 nice 值，负载尖峰会把它们饿到 → AudioRecord 缓冲溢出、PCM 队列堆积 = **录音断续**
+     * （用户口中的"卡顿"落在声音上就是掉字）。而 `Thread.priority`（Java 优先级）**不映射到 Linux nice
+     * 值**，设了等于没设 ⇒ 必须用 `Process.setThreadPriority(THREAD_PRIORITY_AUDIO)`（Android 自家采集
+     * 线程就是这一档，且无需权限）。
+     */
+    @Test
+    fun `两路采集与编码泵线程必须按音频类调度`() {
+        val feeder = maskedMain("record/AudioFeeder.kt")
+        assertTrue(
+            "采集线程必须设 Linux 音频类优先级（Java 的 Thread.priority 不映射 nice）",
+            feeder.contains("Process.setThreadPriority") && feeder.contains("THREAD_PRIORITY_AUDIO")
+        )
+        assertFalse(
+            "不许再靠 Thread.priority 调采集线程的音（设了等于没设）",
+            feeder.contains("priority = Thread.NORM_PRIORITY")
+        )
+        val codec = maskedMain("record/CodecRecorder.kt")
+        assertTrue(
+            "编码泵线程（同时喂两路 PCM、排空编码器写 muxer）同样要音频类",
+            codec.contains("Process.setThreadPriority") && codec.contains("THREAD_PRIORITY_AUDIO")
+        )
+        assertFalse("泵线程也不许退回 Thread.priority", codec.contains("priority = Thread.NORM_PRIORITY"))
+    }
+
     // ------------------------------------------------------------------ P0 失效贯穿生命周期（修复轮 1）
 
     @Test
