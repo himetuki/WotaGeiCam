@@ -178,7 +178,11 @@ class VideoStore(private val ctx: Context) {
      * @param keep false = 废片/失败（04 文件 §5.4）
      */
     fun seal(sink: OutputSink?, partIndex: Int, startMs: Long, durationMs: Long, keep: Boolean): VideoSegment {
-        val bytes = sizeOf(sink)
+        // 单次查询出两套口径：日志要能分辨「量不到」与「真 0 字节」，数据口径必须仍与 sizeOf 逐字等价
+        //（恒等式 sizeOf(s) ≡ max(0, sizeOfOrUnknown(s))：两者同一条读取路径，只差失败回值 0/-1）。
+        // 绝不把 -1 灌进 VideoSegment.bytes——那是数据路径（buildResult 求和、MrRecorder 汇总）都在消费的口径。
+        val bytesUnknown = sizeOfOrUnknown(sink)
+        val bytes = bytesUnknown.coerceAtLeast(0L)
         val path = pathOf(sink)
         val pending = sink as? OutputSink.Pending
         val committed = when {
@@ -197,7 +201,7 @@ class VideoStore(private val ctx: Context) {
         }
         Log.i(
             TAG,
-            "seal part=$partIndex keep=$keep bytes=$bytes dur=${durationMs}ms " +
+            "seal part=$partIndex keep=$keep bytes=${if (bytesUnknown < 0) "量不到" else bytesUnknown} dur=${durationMs}ms " +
                 "uri=${pending?.uri} committed=$committed"
         )
         return VideoSegment(pending?.uri, path, partIndex, bytes, startMs, durationMs, committed)
