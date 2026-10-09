@@ -114,6 +114,8 @@ class CodecRecorder(
         var hasSample = false
         /** 通道废弃（收尾仍无真实样本）：startMuxerIfReady 按「未启用」处理 */
         var dropped = false
+        /** 废弃后编码器迟到的真实样本被 release 的枚数（记账用，段收尾行打印；不进任何判定） */
+        var lateDrops = 0
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
         var heldOutIdx = -1
         var heldPts = 0L
@@ -1374,7 +1376,9 @@ class CodecRecorder(
                                     if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                                 }
                             }
-                            envCh.dropped -> a.releaseOutputBuffer(idx, false)
+                            // 通道废弃后编码器迟到的真实样本照 release（既有行为）；这里只补记账：
+                            // 「废弃那一刻编码器还吐了多少」原来完全无迹，成片丢了多少无从判断
+                            envCh.dropped -> { envCh.lateDrops++; a.releaseOutputBuffer(idx, false) }
                             envCh.track >= 0 && muxStarted -> {
                                 // 正常路：muxer 已接纳本轨，照写
                                 if (bi.size > 0) {
@@ -1424,7 +1428,8 @@ class CodecRecorder(
                                     if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                                 }
                             }
-                            capCh.dropped -> c.releaseOutputBuffer(idx, false)
+                            // 与环境通道同族：迟到样本照 release，只补记账（零样本废弃轨的丢弃量需要可查）
+                            capCh.dropped -> { capCh.lateDrops++; c.releaseOutputBuffer(idx, false) }
                             capCh.track >= 0 && muxStarted -> {
                                 // 正常路：muxer 已接纳本轨，照写
                                 if (bi.size > 0) {
@@ -1535,6 +1540,7 @@ class CodecRecorder(
         Log.i(
             TAG,
             "segment $partIndex drained video=$videoDone env=${envCh?.done ?: "off"} cap=${capCh?.done ?: "off"} " +
+                "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms"
         )
