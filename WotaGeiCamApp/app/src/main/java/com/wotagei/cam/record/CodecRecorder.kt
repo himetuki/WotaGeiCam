@@ -1801,7 +1801,15 @@ class CodecRecorder(
         target?.close()
         target = null
         currentSink = null
+        // 【观测】prepare 失败路径上这枚 discard 同样是无界的（不经 discardBounded/BoundedStore）：
+        // 控制线程同步等 MediaProvider，"卡了多久"原来无痕（discard 内部只有一条结果日志）。
+        // 本轮只留痕，不改成有界（有界化=行为变更）。
+        val t0 = SystemClock.elapsedRealtime()
         store.discard(sink)
+        val costMs = SystemClock.elapsedRealtime() - t0
+        if (costMs > STORE_CALL_BUDGET_MS) {
+            Log.w(TAG, "prepare 失败回收输出记录耗时 ${costMs}ms（MediaProvider 同步调用无界，阈值同引擎有界预算）")
+        }
         state = EngineState.IDLE
     }
 
