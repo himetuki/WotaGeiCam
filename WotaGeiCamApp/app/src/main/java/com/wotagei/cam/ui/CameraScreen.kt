@@ -12,6 +12,7 @@ import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
@@ -159,6 +160,7 @@ import com.wotagei.cam.record.Recorder
 import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.RetryAction
 import com.wotagei.cam.record.RotateFailLog
+import com.wotagei.cam.record.STORE_CALL_BUDGET_MS
 import com.wotagei.cam.record.HealthVerdict
 import com.wotagei.cam.record.LOSS_NOTICE_MIN_MS
 import com.wotagei.cam.record.muxRecoveredCode
@@ -2149,7 +2151,20 @@ private class RecordRunner(
             args.width, args.height, args.fps, args.sensorOrientation, args.deviceDegrees,
             args.front, renderMode, args.arcConvert, args.captureAudio
         )
+        // 【观测】首枚 pending insert 是本录制 handler 线程上唯一的**无界** MediaProvider 调用
+        // （引擎侧同类调用都走 BoundedStore / STORE_CALL_BUDGET_MS=3s），这台机有 30-45s 级卡顿前科。
+        // 本轮只做耗时留痕，不改调用本身（有界化=行为变更）。
+        val t0 = SystemClock.elapsedRealtime()
         val pending = store.createPending(0)
+        val costMs = SystemClock.elapsedRealtime() - t0
+        Log.i(TAG_UI, "首枚 pending insert 耗时=${costMs}ms 结果=${if (pending != null) "ok" else "null"}")
+        if (costMs > STORE_CALL_BUDGET_MS) {
+            Log.w(
+                TAG_UI,
+                "首枚 pending insert 慢于${STORE_CALL_BUDGET_MS}ms（=STORE_CALL_BUDGET_MS 对照引擎有界预算，阈值真机可调）：" +
+                    "MediaProvider 同步调用无界，本次 ${costMs}ms"
+            )
+        }
         if (pending == null) {
             failNow(RecordError.NO_OUTPUT); return
         }
