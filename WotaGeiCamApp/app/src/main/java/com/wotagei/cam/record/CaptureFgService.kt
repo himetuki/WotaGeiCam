@@ -189,7 +189,9 @@ class CaptureFgService : Service() {
 
     private fun buildNotification(): Notification {
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_app)
+            // 状态栏剪影用图标包里的专用白色小图标（彩色图标会被系统压成剪影，细节全丢）；
+            // 通知动作的图标同理走剪影（见下）
+            .setSmallIcon(R.drawable.ic_stat_rec)
             .setContentTitle(getString(R.string.capture_notification_title))
             .setContentText(getString(R.string.capture_notification_text))
             .setOngoing(true)
@@ -197,7 +199,7 @@ class CaptureFgService : Service() {
             // 没有稳定的系统级「停止投屏」，用户在通知上必须能一键终止。
             .addAction(
                 Notification.Action.Builder(
-                    Icon.createWithResource(this, R.drawable.ic_app),
+                    Icon.createWithResource(this, R.drawable.ic_stat_rec),
                     getString(R.string.capture_notification_stop),
                     stopPendingIntent(this)
                 ).build()
