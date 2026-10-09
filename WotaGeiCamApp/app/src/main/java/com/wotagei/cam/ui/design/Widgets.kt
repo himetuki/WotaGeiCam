@@ -243,7 +243,10 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
                 alpha = alpha
             )
             attempts++
-            Log.i("FrostDock", "poll slot=$slot x=$x stable=$stable")
+            // 逐拍轮询降到 d 级（2026-10-09）：它每 40ms 一行，实测把默认日志刷掉近八成
+            // （243 行里 191 行是它）——降级后**常开日志能覆盖的窗口长了一个数量级**，
+            // 排障要的"事发前后上下文"才留得住；要看它时开「详细日志」就全回来了。
+            Log.d("FrostDock", "poll slot=$slot x=$x stable=$stable")
             delay(40)
         }
         Log.i("FrostDock", "real slot=$slot rect=$lastX,$lastY")
