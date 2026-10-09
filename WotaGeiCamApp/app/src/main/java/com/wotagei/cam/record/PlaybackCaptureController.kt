@@ -167,7 +167,9 @@ class PlaybackCaptureController(context: Context) {
             apply(CaptureEvent.EstablishFailed("buildCaptureConfig"))
             return
         }
-        Log.i(TAG, "内录建链成功：usages=${captureUsages()} 会话已注册回调")
+        // IntArray 直接拼进字符串打出来是 "[I@1a2b3c"（只有地址、没有元素），排查时看不到具体是哪几个 usage；
+        // 与 Diag.deviceSummary 里的 Build.SUPPORTED_ABIS.joinToString(",") 同风格
+        Log.i(TAG, "内录建链成功：usages=${captureUsages().joinToString(",")} 会话已注册回调")
         apply(CaptureEvent.Established)
     }
 
