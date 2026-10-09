@@ -8,6 +8,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.core.WotaTiers
 import java.util.concurrent.LinkedBlockingQueue
@@ -150,6 +151,10 @@ class AudioFeeder private constructor(
         private const val CHUNK_MAX = 8192
         /** 捕获路径的音源占位（AudioPlaybackCapture 无传统音源语义，仅日志可辨） */
         const val SOURCE_CAPTURE = -1
+        /** 空读告警节流：每累计这么多次数再记一条（真机可调点） */
+        private const val ZERO_LOG_EVERY = 100
+        /** 空读告警节流：距上次告警超过这么久也记一条（真机可调点） */
+        private const val ZERO_LOG_INTERVAL_MS = 5_000L
     }
 
     private val queue = LinkedBlockingQueue<Packet>(QUEUE_CAPACITY)
@@ -164,6 +169,14 @@ class AudioFeeder private constructor(
     @Volatile private var running = false
     @Volatile private var rms = 0
     @Volatile private var dropped = 0
+    /**
+     * 空读/短读计数（`0 <= n < frameBytes`）：这类读不产生样本、循环却照跑，
+     * 不记账的话「采集器活着但拿不到整帧样本」与「采集器根本没起」在日志里长得一模一样
+     * （后者 start 失败路径有 `feeder skipped`/`feeder start` 日志，前者一条都没有）。
+     */
+    @Volatile private var zeroReads = 0
+    /** 上次空读告警的墙钟毫秒（[ZERO_LOG_INTERVAL_MS] 节流用） */
+    @Volatile private var lastZeroLogMs = 0L
     /** 已建的 AudioRecord；captureActive/stop 跨线程读，@Volatile 保证可见性 */
     @Volatile private var record: AudioRecord? = null
     /** 泵已到 EOS（通道关闭）：captureActive 的第二判据 */
@@ -198,6 +211,8 @@ class AudioFeeder private constructor(
         record = rec
         running = true
         dropped = 0
+        zeroReads = 0
+        lastZeroLogMs = 0L
         eosSeen = false
         firstPtsUs = 0L
         try {
@@ -261,6 +276,18 @@ class AudioFeeder private constructor(
                     firstPtsUs = pkt.ptsUs
                     Log.i(TAG, "首包记账 src=$source pts=$firstPtsUs")
                 }
+            } else {
+                // 空读/短读（0 <= n < frameBytes）：不产样本但循环照跑，留痕才能与「采集器没起」区分
+                zeroReads++
+                val now = SystemClock.elapsedRealtime()
+                if (zeroReads == 1 || zeroReads % ZERO_LOG_EVERY == 0 || now - lastZeroLogMs >= ZERO_LOG_INTERVAL_MS) {
+                    lastZeroLogMs = now
+                    Log.w(
+                        TAG,
+                        "pcm 空/短读 src=$source n=$n frameBytes=$frameBytes 累计 $zeroReads 次" +
+                            "（采集在跑但拿不到整帧样本，检查源是否活着/无声播放）"
+                    )
+                }
             }
         }
         eosSeen = true
@@ -323,7 +350,9 @@ class AudioFeeder private constructor(
             // 已停止/未启动，忽略
         }
         rec?.release()
-        if (dropped > 0) Log.i(TAG, "feeder stopped, pcm dropped=$dropped")
+        if (dropped > 0 || zeroReads > 0) {
+            Log.i(TAG, "feeder stopped src=$source pcm dropped=$dropped zeroReads=$zeroReads")
+        }
     }
 
     private fun rmsOf(pcm: ByteArray): Int {
