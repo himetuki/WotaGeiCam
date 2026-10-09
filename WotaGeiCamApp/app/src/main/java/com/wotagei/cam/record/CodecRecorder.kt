@@ -673,8 +673,16 @@ class CodecRecorder(
         clock.startSegment()
         stopping = false
         rotatePending = false
-        loop = Thread({ pumpLoop() }, "WotaCodecMux").apply {
-            priority = Thread.NORM_PRIORITY + 1
+        loop = Thread({
+            // 【音频类优先级（2026-10-09）】这条线程同时干两件对时延敏感的事：把两路 PCM 喂进编码器、
+            // 把编码器输出排空写进 muxer。GL 渲染 + 相机 + 两路编码同时跑时，它若停在默认 nice 值
+            // （`Thread.priority` 是 Java 优先级，**不映射到 Linux nice**，等于没设），就会在负载尖峰
+            // 被饿到 → PCM 队列堆积/丢包 = 录音断续（"卡顿"在声音上就是掉字）。
+            // 用 `Process.setThreadPriority(THREAD_PRIORITY_AUDIO)` 提到音频类（Android 自家采集线程
+            // 就是这一档），是音视频管线里标准且无权限要求的做法。
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+            pumpLoop()
+        }, "WotaCodecMux").apply {
             start()
         }
         // 启动记账（批 4 双轨对齐校正的数据基础）：双 feeder 的 start 时刻与间隔都在 nanoTime 钟域，

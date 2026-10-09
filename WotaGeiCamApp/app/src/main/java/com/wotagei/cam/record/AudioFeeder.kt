@@ -208,8 +208,15 @@ class AudioFeeder private constructor(
             record = null
             return false
         }
-        thread = Thread({ pump(rec) }, "WotaAudioFeeder").apply {
-            priority = Thread.NORM_PRIORITY + 2
+        thread = Thread({
+            // 【音频类优先级（2026-10-09）】采集线程按音频类调度（Android 自家 AudioRecord 回调线程
+            // 就是这一档）：原来设的是 `priority = NORM_PRIORITY + 2`——那是 **Java 线程优先级**，
+            // 不映射到 Linux nice 值，等于没设；在"GL 渲染 + 相机 + 两路编码"同时跑的真机上，
+            // 负载尖峰会把采集线程饿到 → AudioRecord 缓冲溢出/丢包 = 录音断续。
+            // 两路（环境 + 内录）各自一条本线程，都走这一处。
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+            pump(rec)
+        }, "WotaAudioFeeder").apply {
             start()
         }
         Log.i(TAG, "feeder start sr=$sampleRate ch=$channels src=$source chunk=$chunkBytes")
