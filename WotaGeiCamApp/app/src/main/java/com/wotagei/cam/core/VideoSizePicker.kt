@@ -2,7 +2,7 @@ package com.wotagei.cam.core
 
 import android.graphics.ImageFormat
 import android.hardware.camera2.params.StreamConfigurationMap
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import kotlin.math.abs
 
 /** 需求表里的一档分辨率（比例沿用需求文档给的字面标签） */

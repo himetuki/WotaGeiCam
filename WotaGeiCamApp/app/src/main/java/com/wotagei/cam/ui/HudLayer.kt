@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import com.wotagei.cam.diag.Diag
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloat
@@ -452,7 +453,7 @@ internal object HudFrost {
         refreshHeader()
         val drawn = FrostCardTable.isPlatesDrawn()
         if (drawn != live) {
-            android.util.Log.i("FrostDock", "live -> $drawn")
+            Diag.i("FrostDock", "live -> $drawn")
             live = drawn
         }
     }

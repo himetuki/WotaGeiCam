@@ -8,7 +8,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
 import android.os.SystemClock
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.WotaTiers
 import java.io.IOException

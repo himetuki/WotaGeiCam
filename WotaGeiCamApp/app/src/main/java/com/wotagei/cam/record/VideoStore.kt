@@ -6,7 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.StatFs
 import android.provider.MediaStore
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.core.WotaTiers
 import java.io.Closeable
 import java.io.File

@@ -8,7 +8,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.core.WotaTiers
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit

@@ -5,7 +5,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.record.matchDecision
 
 private const val TAG_REMUX_ORIENT = "WotaRemuxOrient"

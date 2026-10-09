@@ -3,7 +3,7 @@ package com.wotagei.cam.record
 import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.core.WotaTiers
 
 /** 全模块统一日志锚点（07 文件：`WotaRecord` 覆盖 prepare/start/stop/分段/失败码） */

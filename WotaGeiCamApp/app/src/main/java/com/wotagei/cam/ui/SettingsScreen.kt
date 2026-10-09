@@ -1,10 +1,15 @@
 package com.wotagei.cam.ui
 
 import android.Manifest
+import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import com.wotagei.cam.BuildConfig
+import com.wotagei.cam.diag.Diag
+import kotlinx.coroutines.withContext
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
@@ -61,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -122,6 +128,9 @@ object WotaSettings {
     const val KEY_DEFAULT_RENDER = "default_render_mode"
     /** 静音录制的初始值：录制页已不再有「更多」胶囊放它，所以归到设置页（§37 第 3 条） */
     const val KEY_DEFAULT_AUDIO_MUTE = "default_audio_muted"
+
+    /** 详细诊断日志（默认关）：开启后 `d/v` 级也写进日志文件，供用户配合复现时用 */
+    const val KEY_DIAG_VERBOSE = "diag_verbose"
     const val KEY_DEFAULT_REF_LINES = "default_ref_lines"
     const val KEY_LEVEL_ENABLED = "level_enabled"
     const val KEY_LEVEL_BUZZ = "level_buzz_enabled"
@@ -219,6 +228,13 @@ object WotaSettings {
         prefs.getInt(KEY_DEFAULT_SAMPLE_RATE, WotaTiers.DEFAULT_SAMPLE_RATE)
 
     fun defaultAudioMuted(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DEFAULT_AUDIO_MUTE, false)
+
+    /** 详细诊断日志（见 [com.wotagei.cam.diag.Diag]）：默认关，只记关键事件；开启后连 d/v 一起记 */
+    fun diagVerbose(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DIAG_VERBOSE, false)
+
+    fun setDiagVerbose(prefs: SharedPreferences, on: Boolean) {
+        prefs.edit().putBoolean(KEY_DIAG_VERBOSE, on).apply()
+    }
 
     fun defaultRenderMode(prefs: SharedPreferences): RenderMode =
         if (prefs.getString(KEY_DEFAULT_RENDER, RenderMode.GPU.name) == RenderMode.DIRECT.name) {
@@ -422,6 +438,7 @@ private fun BlockHost(block: SettingsBlock, prefs: SharedPreferences, onOpenHudE
         SettingsBlock.TEXT -> BlockText(prefs)
         SettingsBlock.PERM -> BlockPerm()
         SettingsBlock.ABOUT -> BlockAbout()
+        SettingsBlock.DIAG -> BlockDiag(prefs)
     }
 }
 
@@ -975,6 +992,126 @@ private fun BlockAbout() {
 }
 
 // ------------------------------------------------------------------ 小件
+
+/**
+ * 诊断日志区块（2026-10-09 用户指令「把日志功能加上」）：
+ * - **详细档开关**：默认关（只记 i/w/e 关键事件），复现问题时打开（连 d/v 一起记）；
+ * - **一键导出**：把全部日志（当前件 + 轮转件 + 崩溃件）合并成一份 txt 放到公共
+ *   `Documents/WotaGeiCam/`，并立刻拉起系统分享面板，用户想发给谁就发给谁；
+ * - 导出走**本地文件 + FileProvider + 系统分享**，全程不联网（网络只允许出现在 update/ 包，
+ *   由 `UpdateNetworkGuardTest` 与 `DiagGuardTest` 两条守卫钉住）。
+ */
+@Composable
+private fun BlockDiag(prefs: SharedPreferences) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var verbose by remember { mutableStateOf(WotaSettings.diagVerbose(prefs)) }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+
+    SettingGroup(stringResource(R.string.set_group_diag))
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = stringResource(R.string.set_diag_verbose),
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaText,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = verbose,
+                onCheckedChange = {
+                    verbose = it
+                    WotaSettings.setDiagVerbose(prefs, it)
+                    // 运行期立即生效（日志器不用重启应用）
+                    com.wotagei.cam.diag.Diag.setVerbose(it)
+                },
+                colors = SwitchDefaults.colors(
+                    checkedTrackColor = WotaColor.accentActive,
+                    checkedThumbColor = WotaColor.onAccent
+                )
+            )
+        }
+        Text(
+            text = stringResource(R.string.set_diag_verbose_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        Line()
+        InfoRow(stringResource(R.string.set_diag_size), formatBytes(Diag.usedBytes()))
+        Line()
+        InfoRow(stringResource(R.string.set_diag_path), Diag.workingDir()?.absolutePath ?: "—")
+        Spacer(Modifier.height(8.dp))
+        ChipCell(
+            text = stringResource(if (busy) R.string.set_diag_export_busy else R.string.set_diag_export),
+            selected = false,
+            onClick = {
+                if (busy) return@ChipCell
+                busy = true
+                status = null
+                scope.launch {
+                    // 导出要读多个文件、写公共目录：必须切 IO（探针/导出都不许占主线程）
+                    val res = withContext(Dispatchers.IO) {
+                        (context.applicationContext as? Application)?.let { Diag.export(it) }
+                    }
+                    busy = false
+                    if (res == null) {
+                        status = context.getString(R.string.set_diag_export_failed)
+                    } else {
+                        status = context.getString(
+                            R.string.set_diag_export_done,
+                            res.file.name,
+                            res.file.parent ?: ""
+                        )
+                        shareLogFile(context, res.file)
+                    }
+                }
+            }
+        )
+        status?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaColor.accentActive,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+        Text(
+            text = stringResource(R.string.set_diag_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaColor.textMid,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+    }
+}
+
+/** 字节数 → 人类可读（只用于设置页显示，不做本地化差异） */
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+    bytes >= 1024L -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+/**
+ * 分享导出的日志：`FileProvider` content Uri + `ACTION_SEND`（与 `media/Share.kt`、
+ * `update/UpdateInstaller.kt` 同一枚 provider，`file_paths` 的 `external-path path="."` 已覆盖导出目录）。
+ * 走本地文件、不联网；分享目标由用户选。
+ */
+private fun shareLogFile(context: Context, file: File) {
+    runCatching {
+        val uri = FileProvider.getUriForFile(context, "com.wotagei.cam.provider", file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, file.name)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(
+            Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }.onFailure { Diag.w("WotaSettings", "分享日志失败：${it.message}") }
+}
 
 /** 一屏的「文本高度」档位：100% 即工程默认排版，各屏互不影响 */
 @Composable

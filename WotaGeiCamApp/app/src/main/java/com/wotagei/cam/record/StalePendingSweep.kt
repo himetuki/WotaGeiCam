@@ -6,7 +6,7 @@ import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 

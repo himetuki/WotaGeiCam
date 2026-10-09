@@ -43,6 +43,9 @@ enum class SettingsBlock(val id: String) {
 
     /** 关于（版本号/包名/检查更新） */
     ABOUT("about"),
+
+    /** 诊断日志（详细档开关 + 一键导出，2026-10-09） */
+    DIAG("diag"),
 }
 
 /** 全部区块，顺序 = [SettingsBlock] 声明顺序 = 改造前的单列视觉顺序 */
@@ -65,6 +68,7 @@ private val RIGHT_COLUMN = listOf(
     SettingsBlock.TEXT,
     SettingsBlock.PERM,
     SettingsBlock.ABOUT,
+    SettingsBlock.DIAG,
 )
 
 /** 区块 → 栏号：0 = 左栏，1 = 右栏（表里没登记的区块按右栏处理，但 [layoutPlanOf] 会用两栏表直接摆位，漏登记会被并集断言抓出） */

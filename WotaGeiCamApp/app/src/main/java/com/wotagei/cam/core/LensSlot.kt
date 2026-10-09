@@ -5,7 +5,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.os.Build
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 
 /** 产品语义的镜头档位；AUTO 是「由 App 自行选档」的伪档位，不出现在枚举表里 */
 enum class LensType { SUPER_WIDE, WIDE, TELEPHOTO, SUPER_TELEPHOTO, AUTO, FRONT }

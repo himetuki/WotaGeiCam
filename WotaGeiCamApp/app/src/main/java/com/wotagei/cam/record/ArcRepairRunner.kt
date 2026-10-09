@@ -11,7 +11,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.IOException

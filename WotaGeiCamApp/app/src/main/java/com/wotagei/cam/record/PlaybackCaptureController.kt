@@ -9,7 +9,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -86,12 +86,23 @@ class PlaybackCaptureController(context: Context) {
     private var captureConfig: AudioPlaybackCaptureConfiguration? = null
 
     /**
-     * 批 2 的授权框入口：`createScreenCaptureIntent()` 合约封装。
+     * 授权框入口：`createScreenCaptureIntent()` 合约封装。
      * 返回 null = 本机拿不到 MediaProjectionManager（理论外；状态保持 Idle，调用方按 Failed 处理）。
      * 拿到 intent 才置 Authorizing：置态与发射原子，不出现"卡在授权中却没有框"的态。
      */
     fun createConsentIntent(): Intent? {
-        val intent = projectionManager?.createScreenCaptureIntent() ?: return null
+        // 【诊断】用户报「系统拒绝内录」时，第一条要能回答的就是"这里到底缺什么"：
+        // 鸿蒙容器的卓易通最常见的形态是 MediaProjectionManager 直接拿不到（容器没实现媒体投影）。
+        // 拿不到时只给用户一句"本机不支持设备内录"，谁也无从下手——所以把探测结果与异常原文都留下。
+        val mgr = projectionManager
+        Log.i(TAG, "createConsentIntent: api=${android.os.Build.VERSION.SDK_INT} projectionManager=${mgr != null}")
+        val intent = if (mgr == null) null else runCatching { mgr.createScreenCaptureIntent() }
+            .onFailure { Log.e(TAG, "createScreenCaptureIntent 抛异常：${it.javaClass.name}: ${it.message}") }
+            .getOrNull()
+        if (intent == null) {
+            Log.e(TAG, "内录授权不可用：拿不到 MediaProjectionManager / 拿不到授权 intent（容器或 ROM 未实现媒体投影）")
+            return null
+        }
         apply(CaptureEvent.ConsentRequested)
         return intent
     }
@@ -101,6 +112,7 @@ class PlaybackCaptureController(context: Context) {
      * 调用时机约束：Activity 前台收到授权回执时（此时 startForegroundService 合法）。
      */
     fun onConsentResult(resultCode: Int, data: Intent?) {
+        Log.i(TAG, "onConsentResult: resultCode=$resultCode data=${data != null}")
         if (resultCode != Activity.RESULT_OK || data == null) {
             apply(CaptureEvent.ConsentCancelled)
             return
@@ -136,6 +148,7 @@ class PlaybackCaptureController(context: Context) {
     /** 服务建链回执：成功 → 暂存配置 → Active；失败 → Failed(原因) */
     private fun onEstablishResult(proj: MediaProjection?, error: String?) {
         if (proj == null) {
+            Log.e(TAG, "内录建链失败：${error ?: "unknown"}（服务侧 getMediaProjection/registerCallback 阶段）")
             clearServiceHooks()
             apply(CaptureEvent.EstablishFailed(error ?: "unknown"))
             return
@@ -147,7 +160,14 @@ class PlaybackCaptureController(context: Context) {
         // usage 白名单取自 [captureUsages]：官方仅允许捕获这三个 usage 的播放，
         // 集合必须在守卫测试锁死——漏一个就是"该类播放整类收不到"的静默缩圈
         for (usage in captureUsages()) builder.addMatchingUsage(usage)
-        captureConfig = builder.build()
+        captureConfig = runCatching { builder.build() }
+            .onFailure { Log.e(TAG, "捕获配置构建失败：${it.javaClass.name}: ${it.message}") }
+            .getOrNull()
+        if (captureConfig == null) {
+            apply(CaptureEvent.EstablishFailed("buildCaptureConfig"))
+            return
+        }
+        Log.i(TAG, "内录建链成功：usages=${captureUsages()} 会话已注册回调")
         apply(CaptureEvent.Established)
     }
 
@@ -199,7 +219,16 @@ class PlaybackCaptureController(context: Context) {
                 rec
             }
         } catch (e: RuntimeException) {
-            Log.e(TAG, "capture AudioRecord build failed: ${e.message}")
+            // 【诊断】"系统拒绝创建内录采集器"这句提示背后的现场必须留全（鸿蒙容器里最常见的一族）：
+            // 异常**类名**区分病因（SecurityException=权限/容器策略拒绝，IllegalArgumentException/
+            // UnsupportedOperationException=容器不接受捕获配置），再带上请求的参数与设备信息
+            Log.e(
+                TAG,
+                "capture AudioRecord build failed: ${e.javaClass.name}: ${e.message}" +
+                    " | req rate=$sampleRate ch=$channels enc=PCM16 mask=${AudioProbe.channelConfig(channels)}" +
+                    " buf=${max(minBuf, chunk)} minBuf=$minBuf" +
+                    " | api=${android.os.Build.VERSION.SDK_INT} 机型=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}"
+            )
             lastInitFailure = "系统拒绝创建内录采集器"
             null
         }
@@ -225,7 +254,15 @@ class PlaybackCaptureController(context: Context) {
     }
 
     private fun apply(event: CaptureEvent) {
-        _state.update { transition(it, event) }
+        // 【诊断】状态迁移全程留痕（用户报"内录被系统拒绝"时，"卡在哪一态、被哪条事件推过去"是
+        // 唯一的定位线索——这台机器上 logcat 看不到）。仍在 update 的原子语义里算，只在真变过态时记。
+        var from: CaptureState = _state.value
+        var to: CaptureState = from
+        _state.update { cur ->
+            from = cur
+            transition(cur, event).also { to = it }
+        }
+        if (to != from) Log.i(TAG, "capture 状态 $from --$event--> $to")
     }
 
     companion object {

@@ -1,6 +1,6 @@
 package com.wotagei.cam.ui.design
 
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
