@@ -22,6 +22,20 @@ class DiagGuardTest {
 
     private val diag = codeOnly(mainSourceText("diag/Diag.kt"))
 
+    /**
+     * 读 `res/` 下的资源文件（如 `xml/file_paths.xml`）：[mainSourceText] 只认 `src/main/java/...` 下的
+     * 源码路径，资源文件得从源码位置向上找（与 `RotateStallGuardTest` 找 strings 资源同一手法）。
+     */
+    private fun resFile(rel: String): String {
+        var d = com.wotagei.cam.source.KotlinSourceScan.mainSourceFile("diag/Diag.kt").parentFile
+        while (d != null) {
+            val f = java.io.File(d, "res/$rel")
+            if (f.isFile) return f.readText(Charsets.UTF_8)
+            d = d.parentFile
+        }
+        throw AssertionError("找不到 res/$rel（资源被挪走/改名，守卫失去输入）")
+    }
+
     @Test
     fun `全工程只有 diag 包可以用 android_util_Log`() {
         // 直接扫源码树：除 diag/Diag.kt 外，任何文件出现 import android.util.Log 都判失败
@@ -75,6 +89,26 @@ class DiagGuardTest {
         val diagRaw = mainSourceText("diag/Diag.kt")
         assertTrue("导出件写公共 Documents（用户能自己找）", diagRaw.contains("\"Documents/"))
         assertTrue("公共目录不可写时要退到应用私有目录", diagRaw.contains("File(dir, name)"))
+    }
+
+    /**
+     * 用户 2026-10-09 追加：「不用去文件管理器找文件，直接分享给我」。
+     * 钉的是**分享这条路不许被"公共目录能不能写"卡住**：分享件落应用缓存目录，且 `FileProvider` 的
+     * 路径表必须覆盖 `cache-path`——否则 URI 授不出去、面板弹不出来（这正是"点了没反应"的那类坑）。
+     */
+    @Test
+    fun `直接分享必须走缓存目录且 FileProvider 覆盖缓存`() {
+        val diagRaw = mainSourceText("diag/Diag.kt")
+        val shareFn = diagRaw.substringAfter("fun exportForShare(")
+        assertTrue("分享件落应用缓存目录", shareFn.contains("app.cacheDir"))
+        assertTrue("分享件是一次性的：先清上次的", shareFn.contains("listFiles()?.forEach"))
+        assertTrue("分享与导出共用同一份报告正文", diagRaw.contains("buildReport(app)"))
+        val exportFn = diagRaw.substringAfter("fun export(")
+        assertTrue("导出那条路仍写公共 Documents（两条路分工不同）", exportFn.contains("\"Documents/"))
+        assertTrue("provider 路径表必须覆盖 cache-path", resFile("xml/file_paths.xml").contains("<cache-path"))
+        val block = codeOnly(mainSourceText("ui/SettingsScreen.kt")).substringAfter("private fun BlockDiag(")
+        assertTrue("必须有「直接分享」入口", block.contains("Diag.exportForShare("))
+        assertTrue("两颗按钮各有忙态、互不串台", block.contains("ACTION_SHARE") && block.contains("ACTION_EXPORT"))
     }
 
     @Test

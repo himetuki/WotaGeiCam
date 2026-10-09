@@ -1006,8 +1006,11 @@ private fun BlockDiag(prefs: SharedPreferences) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var verbose by remember { mutableStateOf(WotaSettings.diagVerbose(prefs)) }
-    var busy by remember { mutableStateOf(false) }
+    // 正在跑的动作（null = 空闲）：两颗按钮各自显示忙态，互不串台
+    var busy by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
+    val ACTION_SHARE = "share"
+    val ACTION_EXPORT = "export"
 
     SettingGroup(stringResource(R.string.set_group_diag))
     Card {
@@ -1043,32 +1046,57 @@ private fun BlockDiag(prefs: SharedPreferences) {
         Line()
         InfoRow(stringResource(R.string.set_diag_path), Diag.workingDir()?.absolutePath ?: "—")
         Spacer(Modifier.height(8.dp))
-        ChipCell(
-            text = stringResource(if (busy) R.string.set_diag_export_busy else R.string.set_diag_export),
-            selected = false,
-            onClick = {
-                if (busy) return@ChipCell
-                busy = true
-                status = null
-                scope.launch {
-                    // 导出要读多个文件、写公共目录：必须切 IO（探针/导出都不许占主线程）
-                    val res = withContext(Dispatchers.IO) {
-                        (context.applicationContext as? Application)?.let { Diag.export(it) }
-                    }
-                    busy = false
-                    if (res == null) {
-                        status = context.getString(R.string.set_diag_export_failed)
-                    } else {
-                        status = context.getString(
-                            R.string.set_diag_export_done,
-                            res.file.name,
-                            res.file.parent ?: ""
-                        )
-                        shareLogFile(context, res.file)
+        // 两颗按钮各干一件事（用户 2026-10-09 追加："不用去文件管理器找文件，直接分享"）：
+        //   分享 = 一步直达系统分享面板（落点在应用缓存，**不受公共目录可写性影响**，点了必弹面板）；
+        //   导出 = 只把文件落到公共 Documents 并显示位置（给"我想留着/自己找"的那条路）。
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChipCell(
+                text = stringResource(if (busy == ACTION_SHARE) R.string.set_diag_share_busy else R.string.set_diag_share),
+                selected = true,
+                onClick = {
+                    if (busy != null) return@ChipCell
+                    busy = ACTION_SHARE
+                    status = null
+                    scope.launch {
+                        // 读多个文件 + 写盘：必须切 IO（不许占主线程）
+                        val res = withContext(Dispatchers.IO) {
+                            (context.applicationContext as? Application)?.let { Diag.exportForShare(it) }
+                        }
+                        busy = null
+                        if (res == null) {
+                            status = context.getString(R.string.set_diag_share_failed)
+                        } else {
+                            status = context.getString(R.string.set_diag_share_done, res.file.name)
+                            shareLogFile(context, res.file)
+                        }
                     }
                 }
-            }
-        )
+            )
+            ChipCell(
+                text = stringResource(if (busy == ACTION_EXPORT) R.string.set_diag_export_busy else R.string.set_diag_export),
+                selected = false,
+                onClick = {
+                    if (busy != null) return@ChipCell
+                    busy = ACTION_EXPORT
+                    status = null
+                    scope.launch {
+                        val res = withContext(Dispatchers.IO) {
+                            (context.applicationContext as? Application)?.let { Diag.export(it) }
+                        }
+                        busy = null
+                        status = if (res == null) {
+                            context.getString(R.string.set_diag_export_failed)
+                        } else {
+                            context.getString(
+                                R.string.set_diag_export_done,
+                                res.file.name,
+                                res.file.parent ?: ""
+                            )
+                        }
+                    }
+                }
+            )
+        }
         status?.let {
             Text(
                 text = it,
