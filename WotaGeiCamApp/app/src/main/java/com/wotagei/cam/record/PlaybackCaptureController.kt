@@ -264,7 +264,9 @@ class PlaybackCaptureController(context: Context) {
             from = cur
             transition(cur, event).also { to = it }
         }
-        if (to != from) Log.i(TAG, "capture 状态 $from --$event--> $to")
+        if (to != from) {
+            Log.i(TAG, "capture 状态 ${captureStateLabel(from)} --${captureEventLabel(event)}--> ${captureStateLabel(to)}")
+        }
     }
 
     companion object {
@@ -299,4 +301,29 @@ class PlaybackCaptureController(context: Context) {
                 singleton ?: PlaybackCaptureController(context.applicationContext).also { singleton = it }
             }
     }
+}
+
+/**
+ * 状态短名映射（R3 观测修复）：sealed class 的 toString 在 R8 后是 `com.wotagei.cam.record.CaptureState$Idle`
+ * 之类的混淆名，日志行当场不可读。改成固定短名——R8 改不动字符串常量。
+ *
+ * **刻意不写 `else` 分支**：编译期完备性由 sealed when 兜底，将来 `CaptureStateMachine.kt` 加一个状态/事件
+ * 而忘了补映射，这里直接编译红，不会有"新状态打出来是 null"的静默退化。
+ */
+internal fun captureStateLabel(s: CaptureState): String = when (s) {
+    CaptureState.Idle -> "未授权"
+    CaptureState.Authorizing -> "授权中"
+    CaptureState.Active -> "已激活"
+    is CaptureState.Failed -> "失败"
+    CaptureState.Revoked -> "已撤销"
+}
+
+/** 事件短名映射；与 [captureStateLabel] 同理（`EstablishFailed` 的 reason 码不进短名，详见日志原文） */
+internal fun captureEventLabel(e: CaptureEvent): String = when (e) {
+    CaptureEvent.ConsentRequested -> "请求授权"
+    CaptureEvent.ConsentCancelled -> "用户取消授权"
+    CaptureEvent.Established -> "建链成功"
+    is CaptureEvent.EstablishFailed -> "建链失败"
+    CaptureEvent.ProjectionStopped -> "会话被撤销"
+    CaptureEvent.Shutdown -> "主动关停"
 }
