@@ -284,8 +284,10 @@ object Diag {
             return@runCatching null
         }
         target.writeText(buildReport(app))
-        ExportResult(target, target.parentFile == publicDir)
-    }.getOrNull()
+        val res = ExportResult(target, target.parentFile == publicDir)
+        i("WotaDiag", "日志已导出 path=${target.absolutePath} bytes=${target.length()} 公共=${res.inPublicDir}")
+        res
+    }.onFailure { e("WotaDiag", "日志导出失败", it) }.getOrNull()
 
     /**
      * 生成一份**专供分享**的报告（2026-10-09 用户追加：「不用去文件管理器找文件，直接分享」）。
@@ -302,8 +304,9 @@ object Diag {
         runCatching { dir.listFiles()?.forEach { it.delete() } }
         val target = File(dir, diagExportName(diagFileStamp(System.currentTimeMillis())))
         target.writeText(buildReport(app))
+        i("WotaDiag", "日志已导出 path=${target.absolutePath} bytes=${target.length()} 公共=${false}（分享件）")
         ExportResult(target, inPublicDir = false)
-    }.getOrNull()
+    }.onFailure { e("WotaDiag", "日志导出失败", it) }.getOrNull()
 
     /** 报告正文：头部 + 崩溃件（新→旧）+ 日志件（老→新），总量受 [DIAG_EXPORT_MAX_BYTES] 约束 */
     private fun buildReport(app: Application): String {
@@ -333,6 +336,12 @@ object Diag {
             body.append("\n=== 日志件 ${f.name} ===\n")
             body.append(readBounded(f, DIAG_EXPORT_MAX_BYTES - body.length))
         }
+        // 尾标记：导出件被截断时，只有头部的行尾没有"结束"可对——用户/我们判断"这份报告完整吗"
+        // 只能猜。这里补一行行数/字节数/时间，风格与 diagHeader 的 === 段一致
+        body.append(
+            "=== 结束 行数=${body.lineSequence().count()} 字节=${body.length} " +
+                "时间=${diagStamp(System.currentTimeMillis())} ===\n"
+        )
         return body.toString()
     }
 
@@ -350,8 +359,15 @@ object Diag {
         if (max <= 0L) return "（已达导出上限，省略）\n"
         return runCatching {
             val len = f.length()
-            if (len <= max) f.readText() else f.readText().takeLast(max.toInt())
-        }.getOrDefault("（读取失败）\n")
+            // 截断与读取失败原来都只留一行占位文本，导出件里看不出"丢了多少/为什么丢"——自记一条
+            if (len <= max) f.readText() else {
+                i("WotaDiag", "日志导出截断：件 ${f.name} 总长${len}B 预算${max}B，只带尾部 ${max}B")
+                f.readText().takeLast(max.toInt())
+            }
+        }.getOrElse { tr ->
+            e("WotaDiag", "日志导出读取失败 件 ${f.name} 预算${max}B", tr)
+            "（读取失败）\n"
+        }
     }
 
     // endregion
