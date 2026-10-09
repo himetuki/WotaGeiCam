@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WotaGeiCam 图标背景：深空蓝渐变 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#0B1A33"
+        android:endColor="#040A16"
+        android:type="linear" />
+</shape>
