@@ -14,7 +14,7 @@ import android.opengl.GLUtils
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.ColorCurve

@@ -12,7 +12,7 @@ import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer

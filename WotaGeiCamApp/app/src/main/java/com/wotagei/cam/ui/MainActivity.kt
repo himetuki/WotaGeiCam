@@ -9,7 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -81,6 +81,13 @@ class MainActivity : ComponentActivity() {
      */
     internal fun onRouteForWindowKeepOn(route: String?) {
         windowKeepOn.apply(window, route)
+    }
+
+    override fun onDestroy() {
+        // 诊断日志的「上一会话结束于」留痕：正常退出与"被系统杀/崩溃"因此可区分
+        // （下次冷启会把这行写进日志——排障时第一个要回答的就是"上次是正常退出的吗"）
+        if (isFinishing) com.wotagei.cam.diag.Diag.markCleanExit()
+        super.onDestroy()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

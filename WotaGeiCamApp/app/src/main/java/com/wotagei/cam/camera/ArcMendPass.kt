@@ -2,7 +2,7 @@ package com.wotagei.cam.camera
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.camera.nativeFloatBuffer
 
 private const val TAG_MEND = "ArcMendPass"

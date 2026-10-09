@@ -1,6 +1,6 @@
 package com.wotagei.cam.ui
 
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.positionInWindow

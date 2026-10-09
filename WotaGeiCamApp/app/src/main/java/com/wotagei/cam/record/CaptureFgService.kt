@@ -12,7 +12,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import androidx.core.content.IntentCompat
 import com.wotagei.cam.R
 

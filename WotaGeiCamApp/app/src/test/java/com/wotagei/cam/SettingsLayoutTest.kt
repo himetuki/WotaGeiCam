@@ -31,12 +31,14 @@ class SettingsLayoutTest {
         SettingsBlock.TEXT,
         SettingsBlock.PERM,
         SettingsBlock.ABOUT,
+        // 2026-10-09 新增：诊断日志（详细档开关 + 一键导出），排在最后 = 仍是"改造前单列顺序"的追加
+        SettingsBlock.DIAG,
     )
 
     @Test
-    fun `blocksOf恰好11项且顺序与改造前单列视觉顺序一致`() {
+    fun `blocksOf恰好12项且顺序与改造前单列视觉顺序一致`() {
         assertEquals(expectedOrder, blocksOf())
-        assertEquals(11, blocksOf().size)
+        assertEquals(12, blocksOf().size)
     }
 
     @Test
@@ -52,6 +54,7 @@ class SettingsLayoutTest {
         assertEquals(1, columnOfBlock(SettingsBlock.TEXT))
         assertEquals(1, columnOfBlock(SettingsBlock.PERM))
         assertEquals(1, columnOfBlock(SettingsBlock.ABOUT))
+        assertEquals(1, columnOfBlock(SettingsBlock.DIAG))
     }
 
     @Test
@@ -77,8 +80,8 @@ class SettingsLayoutTest {
         val plan = layoutPlanOf(766)
         assertEquals(2, plan.columns)
         val union = plan.left + plan.right
-        // 无重复：并集条数必须正好是全部区块数（重一项会变 12）
-        assertEquals(11, union.size)
+        // 无重复：并集条数必须正好是全部区块数（重一项会变 13）
+        assertEquals(12, union.size)
         // 并集真断言：不只大小相同，元素集合也必须等于全表（漏一项会变 10 且集合不等）
         assertEquals(expectedOrder.toSet(), union.toSet())
     }
@@ -112,6 +115,7 @@ class SettingsLayoutTest {
                 SettingsBlock.TEXT,
                 SettingsBlock.PERM,
                 SettingsBlock.ABOUT,
+                SettingsBlock.DIAG,
             ),
             plan.right,
         )

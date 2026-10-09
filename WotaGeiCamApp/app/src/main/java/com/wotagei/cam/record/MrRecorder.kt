@@ -4,7 +4,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaRecorder
 import android.system.Os
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.WotaTiers
 import java.io.File

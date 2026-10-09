@@ -8,7 +8,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.provider.MediaStore
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
 import com.wotagei.cam.record.exportOrientationHint

@@ -15,7 +15,7 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow

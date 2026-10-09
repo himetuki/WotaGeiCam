@@ -5,7 +5,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.params.StreamConfigurationMap
 import android.os.Build
-import android.util.Log
+import com.wotagei.cam.diag.Diag as Log
 import java.util.Locale
 
 /** 整数能力范围；缺失能力用 CLOSED 标记，不伪造范围（02 文件第 4 节） */
