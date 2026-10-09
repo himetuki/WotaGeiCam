@@ -24,11 +24,15 @@
     <string name="set_diag_verbose_note">默认只记关键事件；打开后连调试细节一起记，日志会变多，平时可关。</string>
     <string name="set_diag_size">日志占用</string>
     <string name="set_diag_path">日志目录</string>
+    <string name="set_diag_share">直接分享</string>
+    <string name="set_diag_share_busy">正在准备…</string>
+    <string name="set_diag_share_done">已生成 %1$s，请在分享面板里选择发送对象</string>
+    <string name="set_diag_share_failed">分享失败：无法生成日志</string>
     <string name="set_diag_export">导出日志</string>
     <string name="set_diag_export_busy">正在导出…</string>
     <string name="set_diag_export_done">已导出：%1$s\n位置：%2$s</string>
     <string name="set_diag_export_failed">导出失败：日志目录不可写</string>
-    <string name="set_diag_note">日志只在本机生成，只有你点「导出」时才会写出文件；内容不含画面与声音，也不会上传。\n遇到功能异常（例如内录被系统拒绝）时：打开详细日志 → 复现一次 → 导出后把文件发给开发者。</string>
+    <string name="set_diag_note">日志只在本机生成，只有你点「直接分享」或「导出日志」时才会写出文件；内容不含画面与声音，也不会上传。\n遇到功能异常（例如内录被系统拒绝）时：打开详细日志 → 复现一次 → 点「直接分享」发出去即可。</string>
 
     <!-- 设备内录（AudioPlaybackCapture）前台服务 -->
     <string name="capture_channel_name">设备内录</string>

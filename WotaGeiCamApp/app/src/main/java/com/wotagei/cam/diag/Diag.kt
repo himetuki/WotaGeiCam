@@ -267,16 +267,52 @@ object Diag {
     data class ExportResult(val file: File, val inPublicDir: Boolean)
 
     /**
-     * 把全部日志（轮转件 + 当前件 + 崩溃件 + 头部信息）合并导出成一份 txt。
+     * 把全部日志（轮转件 + 当前件 + 崩溃件 + 头部信息）合并导出成一份 txt 落到**公共**目录
+     * `Documents/WotaGeiCam/`（写不进去退应用私有目录）。**只写文件、不弹分享**——
+     * 要给用户"文件在这儿、留着/自己找"这条路；一步直达分享走 [exportForShare]。
      * **必须在后台线程调用**（会读多个文件、写公共目录）。
      */
     fun export(app: Application): ExportResult? = runCatching {
+        val name = diagExportName(diagFileStamp(System.currentTimeMillis()))
+        val publicDir = File(Environment.getExternalStorageDirectory(), "Documents/$EXPORT_DIR_NAME")
+        val dir = logDir
+        val target = if (runCatching { publicDir.mkdirs() }.getOrDefault(false) || publicDir.isDirectory) {
+            File(publicDir, name)
+        } else if (dir != null) {
+            File(dir, name)
+        } else {
+            return@runCatching null
+        }
+        target.writeText(buildReport(app))
+        ExportResult(target, target.parentFile == publicDir)
+    }.getOrNull()
+
+    /**
+     * 生成一份**专供分享**的报告（2026-10-09 用户追加：「不用去文件管理器找文件，直接分享」）。
+     *
+     * 落点用**应用缓存目录**（`cacheDir/…`）而不是公共 Documents，两个理由：
+     * 1. 分享这条路**不该被"公共目录能不能写"卡住**（个别 ROM/容器不给 Documents 写权限，
+     *    而缓存目录永远可写）——用户点「分享」就必须弹出分享面板；
+     * 2. `@xml/file_paths` 里 `cache-path path="."` 已覆盖它，`FileProvider` 直接可授 URI。
+     * 缓存件会被系统在空间紧张时自动清掉，正合"分享完就没用了"的语义。
+     */
+    fun exportForShare(app: Application): ExportResult? = runCatching {
+        val dir = File(app.cacheDir, "share-out").apply { mkdirs() }
+        // 清掉上次的分享件，避免缓存目录里越攒越多（分享件是一次性的）
+        runCatching { dir.listFiles()?.forEach { it.delete() } }
+        val target = File(dir, diagExportName(diagFileStamp(System.currentTimeMillis())))
+        target.writeText(buildReport(app))
+        ExportResult(target, inPublicDir = false)
+    }.getOrNull()
+
+    /** 报告正文：头部 + 崩溃件（新→旧）+ 日志件（老→新），总量受 [DIAG_EXPORT_MAX_BYTES] 约束 */
+    private fun buildReport(app: Application): String {
         drainToFile()
-        val dir = logDir ?: return@runCatching null
+        val dir = logDir
         val body = StringBuilder()
         body.append(diagHeader(deviceSummary(app), app.packageName))
         // 崩溃件（新→旧）：最常被问到的就是"崩的时候发生了什么"
-        val crashes = dir.listFiles { f -> f.name.startsWith(CRASH_PREFIX) }
+        val crashes = dir?.listFiles { f -> f.name.startsWith(CRASH_PREFIX) }
             ?.sortedByDescending { it.lastModified() }.orEmpty()
         for (c in crashes) {
             body.append("\n=== 崩溃件 ${c.name} ===\n")
@@ -285,9 +321,11 @@ object Diag {
         }
         // 日志：老 → 新（.2 .1 当前），读起来就是时间顺序
         val logs = ArrayList<File>()
-        for (i in DIAG_FILE_KEEP - 1 downTo 1) {
-            val f = File(dir, diagRotatedName(BASE_NAME, i))
-            if (f.isFile) logs.add(f)
+        if (dir != null) {
+            for (i in DIAG_FILE_KEEP - 1 downTo 1) {
+                val f = File(dir, diagRotatedName(BASE_NAME, i))
+                if (f.isFile) logs.add(f)
+            }
         }
         current?.takeIf { it.isFile }?.let { logs.add(it) }
         for (f in logs) {
@@ -295,16 +333,8 @@ object Diag {
             body.append("\n=== 日志件 ${f.name} ===\n")
             body.append(readBounded(f, DIAG_EXPORT_MAX_BYTES - body.length))
         }
-        val name = diagExportName(diagFileStamp(System.currentTimeMillis()))
-        val publicDir = File(Environment.getExternalStorageDirectory(), "Documents/$EXPORT_DIR_NAME")
-        val target = if (runCatching { publicDir.mkdirs() }.getOrDefault(false) || publicDir.isDirectory) {
-            File(publicDir, name)
-        } else {
-            File(dir, name)
-        }
-        target.writeText(body.toString())
-        ExportResult(target, target.parentFile == publicDir)
-    }.getOrNull()
+        return body.toString()
+    }
 
     /** 导出件与工作日志的目录（设置页显示用） */
     fun workingDir(): File? = logDir
