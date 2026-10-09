@@ -1026,6 +1026,9 @@ class CodecRecorder(
         if (t == null) return
         val r = storeIo.run(cleanupBudgetMs(rotateBudgetLeftMs())) { t.close() }
         if (r is Bounded.TimedOut) noteStoreTimeout("target.close")
+        // 库内成功原路径全静默（只有超时分支有日志）→ 媒体库入库成功这件事在日志里完全无痕；补一条 i 级留痕。
+        // 每段一次（closeBounded 经 closeTargetBounded 调用），不刷屏
+        else Log.i(TAG, "output target closed，有界内完成 part=$partIndex")
     }
 
     /** 建一枚新 pending（有界）：超时/失败回 null；晚到的那枚经 [pendingHandoff] 就地回收 */
