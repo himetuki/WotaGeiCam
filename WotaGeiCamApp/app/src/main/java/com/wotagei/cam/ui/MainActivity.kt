@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -44,6 +45,7 @@ import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
+import com.wotagei.cam.record.StalePendingSweep
 import com.wotagei.cam.ui.anim.EXTRA_MERGE_HOOK
 import com.wotagei.cam.ui.anim.MergeDebugHook
 import com.wotagei.cam.ui.anim.MotionMode
@@ -87,6 +89,16 @@ class MainActivity : ComponentActivity() {
         applyMergeHook(intent)
         applyFrostProbe(intent)
         applyCompareProbe(intent)
+        // 冷启维护清扫（一次性、后台线程）：把历史遗留的 `.pending-<id>-` 条目收干净——成片去掉
+        // pending 段（它还带着难看名字挂在相册里）、无主/重复的 sidecar 档案删除。三条安全边界
+        // （只认自己的命名形态 / 只碰 1 小时以上的 / 进程内只跑一次）与「成片永不删」红线见
+        // [StalePendingSweep] 类注。只在真冷启跑：配置变更重建复用同一进程，没必要再扫一遍。
+        if (savedInstanceState == null) {
+            Thread({
+                runCatching { StalePendingSweep.runOnce(applicationContext, StalePendingSweep.outputDir()) }
+                    .onFailure { Log.w("WotaSweep", "维护清扫失败：${it.message}") }
+            }, "wota-sweep").apply { isDaemon = true }.start()
+        }
         setContent {
             WotaTheme {
                 val prefs = remember { WotaSettings.of(this) }
