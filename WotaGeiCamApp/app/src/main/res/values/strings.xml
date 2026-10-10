@@ -13,7 +13,9 @@
     <string name="capability_limited_tip">本机相机能力受限（LEGACY 等级），部分手动参数不可用</string>
 
     <!-- 权限 -->
-    <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱</string>
+    <!-- Android 10/11 上缺的是位置权限（蓝牙设备发现被平台硬绑），文案必须点明，
+         否则用户按「蓝牙权限」去系统设置里找一圈也找不到开关 -->
+    <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱；Android 10/11 搜索附近设备还需位置权限</string>
     <string name="perm_denied_settings">权限被拒绝，请到系统设置中开启</string>
     <string name="perm_open_settings">去设置</string>
     <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>

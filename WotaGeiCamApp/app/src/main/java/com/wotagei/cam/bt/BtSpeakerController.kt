@@ -51,7 +51,9 @@ data class BtDevice(
  * - 电量：`BluetoothDevice.getBatteryLevel()` 是平台 @hide 方法（公开桩里没有），只能反射取；
  *   取不到就是 null（未知），UI 自己决定隐藏。
  *
- * 权限：API 31+ 需 `BLUETOOTH_CONNECT`（读写设备名/电量/连接态）与 `BLUETOOTH_SCAN`（扫描）。
+ * 权限：API 31+ 需 `BLUETOOTH_CONNECT`（读写设备名/电量/连接态）与 `BLUETOOTH_SCAN`（扫描）；
+ * API 29/30（Android 10/11）设备发现走 `startDiscovery`，平台在这两档硬依赖 `ACCESS_FINE_LOCATION`，
+ * 缺位时扫描静默无结果，必须进 [missingPermissions] 才有一条可见的授权引导（见 [startScan]）。
  * 缺权限时不抛异常，只列不出东西并置 [hasPermission] = false，UI 据此引导授权（见 `ui/dialog/BtSpeakerSheet.kt`）。
  * 蓝牙未开启时同样置 [openSettings]，[adapterEnabled] 供 UI 显示提示。
  *
@@ -97,7 +99,12 @@ class BtSpeakerController(context: Context) {
 
     private val _hasPermission = MutableStateFlow(true)
 
-    /** API 31+ 的两个蓝牙运行时权限是否齐；false 时 UI 应引导授权 */
+    /**
+     * [missingPermissions] 是否全齐；false 时 UI 应引导授权。
+     *
+     * S 以下这一位尤其关键：那里缺的是位置权限，缺了**不会报错、不会抛异常**，只是「附近设备」
+     * 永远空着——没有它用户根本不知道有权限这回事（见 `ui/dialog/BtSpeakerPanel.kt` 的授权引导面）。
+     */
     val hasPermission: StateFlow<Boolean> = _hasPermission
 
     private val _isScanning = MutableStateFlow(false)
@@ -293,7 +300,14 @@ class BtSpeakerController(context: Context) {
 
     // ------------------------------------------------- 扫描
 
-    /** 开始系统级设备发现（约 12s 后系统自动结束）；缺权限或蓝牙未开时只更新状态流 */
+    /**
+     * 开始系统级设备发现（约 12s 后系统自动结束）；缺权限或蓝牙未开时只更新状态流。
+     *
+     * 缺权限时**必须早退**：Android 10/11 上 `startDiscovery` 在缺 `ACCESS_FINE_LOCATION` 时
+     * 不抛异常也不发起扫描（只留空列表 + 下面这条日志），属"静默无结果"。
+     * 早退前 [refresh] 已把 [hasPermission] 置 false，UI 的授权引导面（HintCard + 授予权限）
+     * 随之亮出，用户点「授予权限」再回来重试——这条链路就是 S 以下唯一的可见出口。
+     */
     fun startScan() {
         val bluetooth = adapter ?: return
         refresh()
@@ -368,9 +382,30 @@ class BtSpeakerController(context: Context) {
 
     // ------------------------------------------------- 权限与生命周期
 
-    /** 需要用户授予的蓝牙权限（API 30 及以下走清单里的 install 期权限，恒为空） */
+    /**
+     * 需要用户授予的、当前档位真缺的运行时权限（空 = 扫描可用）。
+     *
+     * - **API 31+**：`BLUETOOTH_CONNECT`（读设备名/电量/连接态）+ `BLUETOOTH_SCAN`（扫描）；
+     * - **API 29/30（Android 10/11）**：蓝牙权限本身走清单里 `maxSdkVersion="30"` 的
+     *   `BLUETOOTH`/`BLUETOOTH_ADMIN`（安装即授予），但**设备发现**（`startDiscovery`）
+     *   在这两档被平台硬绑 `ACCESS_FINE_LOCATION`——缺它扫描静默无结果，用户只看到
+     *   「附近设备」空着。故这一档单列位置权限。
+     *
+     * 本列表同时喂三处：`_hasPermission`（[refresh] 重算）、`startScan` 的前置早退、
+     * 以及 UI 的 `RequestMultiplePermissions` 申请入参——新增一档权限只需改这里。
+     *
+     * 两档互斥：**S 以上绝不夹带位置权限**（那里由 `BLUETOOTH_SCAN` + `neverForLocation` 承接，
+     * 多要一个位置权限就是把权限面白摊出去）；S 以下也绝不夹带 `BLUETOOTH_CONNECT/SCAN`
+     *（31 才引入的权限串，低版本上恒 DENIED，混进去会让引导面永远亮着）。
+     */
     fun missingPermissions(): Array<String> {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return emptyArray()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return if (granted(Manifest.permission.ACCESS_FINE_LOCATION)) {
+                emptyArray()
+            } else {
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
         return buildList {
             if (!granted(Manifest.permission.BLUETOOTH_CONNECT)) add(Manifest.permission.BLUETOOTH_CONNECT)
             if (!granted(Manifest.permission.BLUETOOTH_SCAN)) add(Manifest.permission.BLUETOOTH_SCAN)
