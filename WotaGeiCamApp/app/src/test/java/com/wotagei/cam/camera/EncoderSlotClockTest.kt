@@ -214,15 +214,26 @@ class EncoderSlotClockTest {
         return max
     }
 
-    /** 突变自证：把 `> 1L` 改成 `> 0L`（同格多帧被误判成空一格）必须被上表测出来 */
+    /**
+     * 突变自证：把生产 [encoderSlotGap] 的**扣减量**改坏（`- 1L` 改成 `- 2L`）必须被上表测出来。
+     *
+     * 上一轮这里放的是把判定改成 `jumped > 0L` 的突变体——**那是语义空操作**：真品与突变体在
+     * `jumped <= 0` 都返 0、`jumped == 1` 都返 0（真品走 else、突变体被 `> 1L` 之外的分支兜住后同样返 0）、
+     * `jumped >= 2` 都返 `jumped - 1`，逐点相等 ⇒ 下面那条 `any { mutant != expect }` 恒 false，
+     * 这条"突变自证"永远绿、什么也证明不了。**判据：突变体必须在真值表上真的偏离，否则尺子是空的。**
+     * 现在这个突变体与真身只差一个 `- 2L`（`if (step <= 0L) 0L` 那道守卫也照样抄进来，保证差异只有这一处），
+     * 在第 4 行（跳两格，期望 1 / 实得 0）与第 5 行（跳五格，期望 4 / 实得 3）同时偏离 ⇒ 尺子有两颗牙。
+     */
     @Test
-    fun `尺子自己能红_空格判定被改成同格也计数必报红`() {
+    fun `尺子自己能红_空格扣减量被改坏必报红`() {
         val mutant: (Long, Long, Int) -> Long = { last, pts, fps ->
             if (fps <= 0 || last <= 0L || pts < last) 0L
             else {
                 val step = 1_000_000_000L / fps
-                val jumped = (pts - last) / step
-                if (jumped > 0L) jumped - 1L else 0L   // 突变：> 1L 被改成 > 0L
+                if (step <= 0L) 0L else {
+                    val jumped = (pts - last) / step
+                    if (jumped > 1L) jumped - 2L else 0L   // 突变：`- 1L` 被改成 `- 2L`（多扣一格）
+                }
             }
         }
         val cases = listOf(
@@ -232,9 +243,11 @@ class EncoderSlotClockTest {
             Triple(base, base + 2 * step24, 1L),
             Triple(base, base + 5 * step24, 4L)
         )
-        assertTrue(
-            "突变体必须至少在一行上偏离真值表（否则尺子测不出该突变）",
-            cases.any { (l, p, expect) -> mutant(l, p, 24) != expect }
+        val deviatedAt = cases.indices.filter { i -> mutant(cases[i].first, cases[i].second, 24) != cases[i].third }
+        assertEquals(
+            "突变体必须恰好在第 4、5 行（跳两格/跳五格）偏离真值表；偏离 0 行 = 语义空操作，尺子什么也测不到。" +
+                "实际偏离行号：$deviatedAt",
+            listOf(3, 4), deviatedAt
         )
         // 良品在同一张表上必须全对（否则"突变体报红"没有意义）
         cases.forEach { (l, p, expect) -> assertEquals(expect, encoderSlotGap(l, p, 24)) }
