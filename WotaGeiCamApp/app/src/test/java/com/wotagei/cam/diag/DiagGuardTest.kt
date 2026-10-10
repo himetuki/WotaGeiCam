@@ -3,9 +3,13 @@ package com.wotagei.cam.diag
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.source.KotlinSourceScan.regionOf
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.lang.reflect.Modifier
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 诊断日志的**接线与红线守卫**（2026-10-09）。
@@ -153,5 +157,56 @@ class DiagGuardTest {
         assertTrue("请求参数（采样率/声道/编码/缓冲）要记", capture.contains("req rate="))
         val apply = capture.substringAfter("private fun apply(")
         assertTrue("状态迁移要留痕（卡在哪一态是唯一线索）", apply.contains("capture 状态"))
+    }
+
+    /**
+     * 跨线程状态不许裸奔（2026-10-10 r31·S2-M8-01）。
+     *
+     * Diag 有四个线程碰它：主线程（install/导出）、写盘线程（writerLoop）、崩溃线程（uncaught handler）、
+     * 导出线程（IO）。漏可见性的后果不是"偶尔读到旧值一次"，而是**永久卡在旧值**——
+     * install 刚写完 appRef，崩溃线程可能一直读到 null，崩溃件整个不落盘，而那正是最该留的证据。
+     *
+     * 判据用**反射读 ACC_VOLATILE 位**，不是文本匹配：源码里随便哪行写个 `@Volatile` 就能喂绿文本匹配。
+     * lastPruneMs 走读-改-写（先 get 再 set），@Volatile 只保证可见不保证原子 ⇒ 只能是 AtomicLong。
+     */
+    @Test
+    fun `五个跨线程字段必须收口（四个 Volatile 加一个 AtomicLong）`() {
+        for (name in listOf("appRef", "logDir", "current", "writer")) {
+            val f = Diag::class.java.getDeclaredField(name)
+            assertTrue("$name 漏 @Volatile：别的线程可能永久读到旧值", Modifier.isVolatile(f.modifiers))
+        }
+        val prune = Diag::class.java.getDeclaredField("lastPruneMs")
+        assertEquals("lastPruneMs 必须 AtomicLong（读-改-写会丢更新）", AtomicLong::class.java, prune.type)
+    }
+
+    /**
+     * 待落盘队列必须封顶（2026-10-10 r31·S2-M8-02）。
+     *
+     * 写盘线程被系统 IO 卡住时 pending 只进不出，是无界队列；每行几百字节，吃穿内存比丢日志严重。
+     * 丢了还得**在导出件头部自曝**——否则用户把"这段现场不全"当成"本来就没发生"。
+     */
+    @Test
+    fun `待落盘队列要封顶且丢弃数要进导出头`() {
+        assertTrue("队列上限常量必须存在", diag.contains("DIAG_PENDING_MAX_LINES"))
+        // 判据必须**按函数体**取：substringAfter 会一路读到文件尾，把 dropOldestPending 自己的定义
+        // 也算进 record 的证据里——那样"把 record 里那行删掉"照样全绿（本项目踩过的假绿同族）。
+        val record = bodyOf(diag, "record")
+        assertTrue("记录路径每次入队后都要走封顶处理", record.contains("dropOldestPending()"))
+        val drop = bodyOf(diag, "dropOldestPending")
+        assertTrue("丢多少要走判据（纯函数，不是拍脑袋的魔数）", drop.contains("diagPendingOverflow("))
+        assertTrue("丢的必须是最老的（poll 从队头取）", drop.contains("pending.poll()"))
+        assertTrue("丢掉的行必须计数（不计数就自曝不了）", drop.contains("droppedPending.incrementAndGet()"))
+        val report = bodyOf(diag, "buildReport")
+        assertTrue("丢弃计数要写进导出头", report.contains("diagDroppedNote(droppedPending.get())"))
+        // 位置也要钉：自曝行必须紧跟头部信息，埋到末尾等于没有（用户从上往下读）。
+        // 偏移取自遮蔽文本（与原文逐位等长），"=== 结束" 是字面量 ⇒ 回原文比对
+        val raw = mainSourceText("diag/Diag.kt")
+        val region = regionOf(diag, "buildReport")
+        val reportRaw = raw.substring(region.start, region.end)
+        val noteAt = reportRaw.indexOf("diagDroppedNote(droppedPending.get())")
+        val endAt = reportRaw.indexOf("=== 结束")
+        assertTrue("找不到丢弃自曝调用点", noteAt >= 0)
+        assertTrue("找不到结束标记", endAt >= 0)
+        assertTrue("丢弃自曝必须排在结束标记之前（不能埋到末尾）", noteAt < endAt)
     }
 }

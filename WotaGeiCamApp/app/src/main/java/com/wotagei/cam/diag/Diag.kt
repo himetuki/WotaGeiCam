@@ -11,6 +11,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 应用内**诊断日志**（2026-10-09，用户指令「把搁置已久的日志功能加上」）。
@@ -44,6 +45,17 @@ object Diag {
     /** 内存环形缓冲行数上限（导出时会带上；够覆盖"从冷启到复现"的上下文） */
     internal const val DIAG_RING_LINES = 3_000
 
+    /**
+     * 待落盘队列行数上限（2026-10-10 r31·S2-M8-02）。
+     *
+     * 写盘线程每 1 秒醒一次、一次最多搬 500 行；一旦它被系统 IO 卡住（慢盘、
+     * 大目录、空间紧张），[pending] 就是**只进不出**的无界队列，每行几百字节，几十秒就能吃掉几十 MB
+     * ——日志把 app 的内存吃穿，比丢日志严重得多。所以必须封顶：超了就丢**最老**的。
+     * 丢掉的条数记在 [droppedPending] 里并写进导出件头部（见 [diagDroppedNote]），否则用户会把
+     * "这段时间现场不全"误当成"本来就没发生"。
+     */
+    internal const val DIAG_PENDING_MAX_LINES = 3_000
+
     /** 单个日志文件上限，超过即轮转 */
     internal const val DIAG_FILE_MAX_BYTES = 512L * 1024L
 
@@ -72,11 +84,26 @@ object Diag {
     var verbose: Boolean = false
         private set
 
+    // 以下五枚字段都被"主线程 / 写盘线程 / 崩溃线程 / 导出线程"交叉读写（2026-10-10 r31·S2-M8-01）。
+    // 漏 @Volatile 的真实后果不是"读到旧值一次"，而是**永久卡在旧值**：主线程 install() 刚写完 appRef，
+    // 崩溃线程可能一直读到 null ⇒ 崩溃件整个不落盘；current/logDir 同理会让导出件永远少一个最新日志件。
+    // lastPruneMs 是"读-改-写"（先 get 再 set），@Volatile 只保证可见不保证原子 ⇒ 必须用 AtomicLong。
+    @Volatile
     private var appRef: Application? = null
+
+    @Volatile
     private var logDir: File? = null
+
+    @Volatile
     private var current: File? = null
+
+    @Volatile
     private var writer: Thread? = null
-    private var lastPruneMs = 0L
+
+    private val lastPruneMs = AtomicLong(0L)
+
+    /** 待落盘队列被封顶丢掉的总行数（导出件头部要自曝，见 [diagDroppedNote]） */
+    private val droppedPending = AtomicLong(0L)
 
     // region 生命周期
 
@@ -162,8 +189,8 @@ object Diag {
     /** 顺带清掉过期的崩溃件（只留最近 3 份，避免导出越攒越大） */
     private fun pruneOldFiles(dir: File) {
         val now = System.currentTimeMillis()
-        if (now - lastPruneMs < 60_000L) return
-        lastPruneMs = now
+        if (now - lastPruneMs.get() < 60_000L) return
+        lastPruneMs.set(now)
         runCatching {
             dir.listFiles { f -> f.name.startsWith(CRASH_PREFIX) }
                 ?.sortedByDescending { it.lastModified() }
@@ -256,7 +283,15 @@ object Diag {
                 while (ring.size > DIAG_RING_LINES) ring.removeFirst()
             }
             pending.add(line)
+            // 队列必须封顶：写盘线程被系统 IO 卡住时这里只进不出（见 DIAG_PENDING_MAX_LINES 的病根说明）
+            dropOldestPending()
         }
+    }
+
+    /** 待落盘队列封顶处理：超 [DIAG_PENDING_MAX_LINES] 就丢最老的，并累加丢弃条数 */
+    private fun dropOldestPending() {
+        val drop = diagPendingOverflow(pending.size, DIAG_PENDING_MAX_LINES)
+        for (i in 0 until drop) if (pending.poll() != null) droppedPending.incrementAndGet()
     }
 
     // endregion
@@ -314,6 +349,8 @@ object Diag {
         val dir = logDir
         val body = StringBuilder()
         body.append(diagHeader(deviceSummary(app), app.packageName))
+        // 丢弃自曝紧跟头部：用户读导出件是从上往下的，等翻到末尾才发现前面缺了一整段，现场早没了
+        body.append(diagDroppedNote(droppedPending.get()))
         // 崩溃件（新→旧）：最常被问到的就是"崩的时候发生了什么"
         val crashes = dir?.listFiles { f -> f.name.startsWith(CRASH_PREFIX) }
             ?.sortedByDescending { it.lastModified() }.orEmpty()
@@ -418,6 +455,24 @@ internal fun diagLevelEnabled(level: Char, verbose: Boolean): Boolean = when (le
 /** 当前文件是否该轮转 */
 internal fun diagShouldRotate(currentBytes: Long, max: Long = Diag.DIAG_FILE_MAX_BYTES): Boolean =
     currentBytes >= max
+
+/**
+ * 待落盘队列当前[size]、上限[max]时要丢几行（丢**最老**的）；未超限返回 0。
+ *
+ * 纯函数便于表测，也便于 [Diag] 里那条调用点一眼看出"丢多少"是算出来的而非拍脑袋的。
+ */
+internal fun diagPendingOverflow(size: Int, max: Int): Int = (size - max).coerceAtLeast(0)
+
+/**
+ * 导出件头部的**丢弃自曝行**（2026-10-10 r31·S2-M8-02）。
+ *
+ * 没有它，被封顶丢掉的行就是**静默消失**——用户会把"这段时间没记录"当成"什么都没发生"，
+ * 而丢的那些恰恰是崩溃/被系统拒绝发生前的最早几行。丢过才占一行；没丢过返回空串，
+ * 保证正常路径的导出行数与之前完全一致。
+ */
+internal fun diagDroppedNote(dropped: Long): String =
+    if (dropped <= 0L) ""
+    else "注意：待落盘队列超 ${Diag.DIAG_PENDING_MAX_LINES} 行封顶，有 $dropped 行未落盘（丢的是最老的）。\n"
 
 /** 轮转件名：`wotagei.log.1`（index 从 1 起） */
 internal fun diagRotatedName(base: String, index: Int): String = "$base.$index"

@@ -59,6 +59,29 @@ class DiagFormatTest {
         assertTrue("超了当然轮转", diagShouldRotate(max + 1, max))
     }
 
+    // ---- 待落盘队列封顶（2026-10-10 r31·S2-M8-02）----
+
+    @Test
+    fun `待落盘队列超上限才丢，且丢的行数等于超出量`() {
+        assertEquals("空队列不丢", 0, diagPendingOverflow(0, 500))
+        assertEquals("没到上限不丢", 0, diagPendingOverflow(499, 500))
+        assertEquals("刚好到上限不丢（封顶是 > 不是 >=）", 0, diagPendingOverflow(500, 500))
+        assertEquals("超一行丢一行", 1, diagPendingOverflow(501, 500))
+        assertEquals("超三行丢三行（丢最老的三行）", 3, diagPendingOverflow(503, 500))
+        assertEquals("骤涨一大截要丢一大截", 700, diagPendingOverflow(1200, 500))
+    }
+
+    @Test
+    fun `丢弃自曝行：丢过才出现，说清丢了多少与丢的是最老的`() {
+        assertEquals("正常路径不留痕（导出头不多占一行）", "", diagDroppedNote(0L))
+        assertEquals("负数也不该出现", "", diagDroppedNote(-1L))
+        val note = diagDroppedNote(128L)
+        assertTrue("要写出丢了多少行", note.contains("128"))
+        assertTrue("要说明丢的是最老的", note.contains("最老"))
+        assertTrue("要带队列上限（用户才对得上是哪一档封顶）", note.contains("${Diag.DIAG_PENDING_MAX_LINES}"))
+        assertEquals("自曝行自带换行（否则会和后面的 === 段粘在一行）", 1, note.length - note.trimEnd('\n').length)
+    }
+
     @Test
     fun `轮转件名递增且带序号`() {
         assertEquals("wotagei.log.1", diagRotatedName("wotagei.log", 1))
@@ -103,5 +126,6 @@ class DiagFormatTest {
         assertTrue("保留件数 2~5", Diag.DIAG_FILE_KEEP in 2..5)
         assertTrue("导出件上限不超过 8MB", Diag.DIAG_EXPORT_MAX_BYTES <= 8L * 1024 * 1024)
         assertTrue("崩溃件上下文至少 100 行", Diag.DIAG_CRASH_TAIL_LINES >= 100)
+        assertTrue("待落盘队列上限 500~20000 行（太小丢太勤、太大挡不住内存）", Diag.DIAG_PENDING_MAX_LINES in 500..20_000)
     }
 }
