@@ -89,7 +89,19 @@ class AudioFeeder private constructor(
     private val openRecord: (bufferBytes: Int) -> AudioRecord?,
     /** 捕获源健康度外部判据（null = 无此判据，环境源恒 null）。投影撤销后部分机型 read 只回静音
      *  不回错、EOS 判据探不到——用 controller 的 Active 与否兜底保证「撤销即内录轨收尾」的确定语义 */
-    private val healthy: (() -> Boolean)? = null
+    private val healthy: (() -> Boolean)? = null,
+    /**
+     * 是否需要逐块算 PCM 幅度（RMS）。默认 true = 环境源，行为与泛化前逐字一致。
+     *
+     * 为什么要有这个开关（2026-10-09）：**内录源的幅度没有任何读者**。唯一读者链是
+     * `CodecRecorder.amplitude()` → `ui/CameraScreen` 的音量表，而它按 P6 裁决**只读环境源**
+     * （内录模式音量条仍显环境音 RMS）。可 RMS 是逐样本 Double 累加 + 每块一次 `sqrt`，
+     * 48kHz 立体体每秒约 4.8 万次乘加，跑在**要跟 AudioRecord 内部缓冲赛跑的采集线程**上，
+     * 纯浪费。内录实例关掉它，省下的正是这条线程最缺的东西（音频不丢）。
+     *
+     * 关掉后 [amplitude] 恒返 0——这是被接受的：没人读它，且比让调用方去判「本源有没有幅度」更不易错。
+     */
+    private val needsAmplitude: Boolean = true
 ) {
 
     /**
@@ -136,7 +148,7 @@ class AudioFeeder private constructor(
         minBufferSize: Int
     ) : this(sampleRate, channels, SOURCE_CAPTURE, minBufferSize, { _ ->
         capture.createCaptureAudioRecord(sampleRate, channels)
-    }, healthy = { capture.state.value is CaptureState.Active })
+    }, healthy = { capture.state.value is CaptureState.Active }, needsAmplitude = false)
 
     /** 一段 PCM 与其 μs 时间戳；**ptsUs < 0 = 通道结束哨兵**（真实包时间戳恒为 nanoTime µs、恒正；
      *  哨兵 data 取 [EOS_SIZE] 长只是历史形状——判定看 pts 不看长度，4 字节恰是双声道 2 帧的合法 PCM） */
@@ -261,7 +273,9 @@ class AudioFeeder private constructor(
             }
             if (n >= frameBytes) {
                 val copy = buf.copyOf(n - n % frameBytes)
-                rms = rmsOf(copy)
+                // 只有环境源需要幅度（内录源无读者，见 needsAmplitude 的说明）：跳过逐样本 RMS，
+                // 省给采集线程的时间就是要留给 AudioRecord 缓冲的时间
+                if (needsAmplitude) rms = rmsOf(copy)
                 val pkt = Packet(copy, System.nanoTime() / 1000L)
                 val ok = try {
                     queue.offer(pkt, OFFER_WAIT_MS, TimeUnit.MILLISECONDS)
