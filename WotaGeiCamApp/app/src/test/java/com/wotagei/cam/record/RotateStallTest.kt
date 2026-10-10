@@ -279,6 +279,51 @@ class RotateStallTest {
         assertEquals("入库炸了", thrown?.message)
     }
 
+    /**
+     * 交接口径（S2-M4-02）：工作线程写完 value/failure 之后必须 `countDown`，谓词侧只认
+     * `await(timeout)` 的返回值。旧写法是 `join(timeout)` + 普通 `finished` 标志，而 `join`
+     * **超时返回时线程还活着** ⇒ 那条路上三枚字段没有任何写序屏障，调用方可能读到
+     * value=null / failure=null，按 `Done(null)` 交出去（泛型擦除让 cast 不做检查），
+     * 消费点对 Boolean 拆箱即 NPE。
+     *
+     * **分工（勿夸大本用例）**：它证明的是「`await` 返回 true ⇒ 工作线程写下的值一定读得到」
+     * 这条语义，因而能咬住「`countDown` 不许被删」（删掉后 `await` 恒超时、整条退化成 TimedOut）；
+     * 但它在**旧 `join` 实现下同样会绿**——`join` 在线程已结束时本就提供 happens-before，
+     * 所以它**不能**用来证伪 `join`。防 `join` 复活靠的是 `RotateStallGuardTest` 的结构守卫。
+     *
+     * 预算留足余量（2000ms vs 60ms）：本轮把迭代数与预算一起放大，是为了在内存饥饿的机器上
+     * 不 flaky——原来 120ms 预算 / 100ms 工作只有 20ms 余量，一次 GC 停顿就误报。
+     */
+    @Test
+    fun `有界执行器_临界窗口内写完的值必须可见`() {
+        val io = BoundedStore("TestStoreIo")
+        repeat(50) {
+            // 工作线程：先干活再写值，调用侧必须仍能读到真值（而不是 null）
+            val r = io.run(2_000L) {
+                Thread.sleep(60L)
+                "v$it"
+            }
+            assertTrue("第 $it 轮：预算内跑完必须拿到 Done（不许判超时）", r is Bounded.Done)
+            assertEquals("第 $it 轮：工作线程写完的值必须可见（null = 屏障缺失）", "v$it", (r as Bounded.Done).value)
+        }
+    }
+
+    /** 超时边界的另一半：值与异常都**可能**在 await 返回之后才写，两者都不许被误当成"成功拿到" */
+    @Test
+    fun `有界执行器_超时边界上值与异常都不许被误读`() {
+        val io = BoundedStore("TestStoreIo")
+        // 1) 慢调用：超时返回（此时工作线程仍在跑，不许把它的 value 当成 Done 交出去）
+        val slow = io.run(20L) { Thread.sleep(400L); "late" }
+        assertTrue("慢调用必须判超时", slow is Bounded.TimedOut)
+        // 2) 慢调用里抛异常：同样只判超时，异常由后台线程自个儿了结（不回抛到调用方）
+        val slowFail = io.run(20L) { Thread.sleep(400L); throw IllegalStateException("late boom") }
+        assertTrue("慢调用的异常不许回抛（调用方已判超时，只认 TimedOut）", slowFail is Bounded.TimedOut)
+        // 3) 快调用里的 null 是合法值（泛型 T 本身可空），不许与"没拿到"混为一谈
+        val nullOk = io.run(2_000L) { null as String? }
+        assertTrue("null 必须是 Done(null) 而不是 TimedOut", nullOk is Bounded.Done)
+        assertNull("值必须原样为 null", (nullOk as Bounded.Done).value)
+    }
+
     // endregion
 
     // region pending 交接闸（无竞态泄漏）

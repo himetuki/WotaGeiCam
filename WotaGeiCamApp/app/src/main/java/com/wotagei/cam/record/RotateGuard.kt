@@ -1,5 +1,7 @@
 package com.wotagei.cam.record
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -354,6 +356,11 @@ internal sealed interface Bounded<out T> {
  * 卡住的线程后面（那正是"停摆后本会话再不复原"的形态）；每调用一枚线程则让后续步骤照常拿到机会，
  * 卡住的那枚留在后台自生自灭——它做的事要么是幂等的（close/commit/query），要么被交接闸管住。
  * 代价是每段最多漏一枚守护线程（阻塞在 binder 上，占一个线程栈），量级可接受。
+ *
+ * 【交接口径】工作线程把 [value]/[failure] 写完之后才 `countDown` 一枚 [CountDownLatch]，
+ * 谓词侧只认 `await` 的返回值（范本：`ArcRepairGl.postAndWait`）。**不许**退回
+ * `join(timeout)` + 普通 `finished` 标志的写法：`join` 超时返回时线程还活着，那条路上
+ * 没有任何写序屏障，而超时判定本身也读着同一批字段。
  */
 internal class BoundedStore(private val tag: String = "WotaStoreIo") {
 
@@ -362,23 +369,28 @@ internal class BoundedStore(private val tag: String = "WotaStoreIo") {
     fun <T> run(timeoutMs: Long, block: () -> T): Bounded<T> {
         // 预算已被吃光：不许再发一次无预算的调用（那是把有界化做回无界）
         if (timeoutMs <= 0L) return Bounded.TimedOut
-        var finished = false
         var value: T? = null
         var failure: Throwable? = null
+        // 【可见性】写完 value/failure 之后才 countDown：谓词侧 await 返回即 happens-before，
+        // 下面两枚读（以及 await 返回 true 这件事本身）都安全。
+        // 旧写法靠 `join(timeout)` 的"线程已结束"充当屏障，但 `join` **超时返回时线程还活着**，
+        // 那条路上三枚普通字段没有任何写序屏障 ⇒ 调用方可能读到 value=null 而 failure=null，
+        // 按 `Done(null)` 交出去（泛型擦除让这个 cast 不做任何检查），
+        // 消费点对 Boolean 拆箱即 NPE（见 RotateLossLedger 同文件的判读约定）。
+        val done = CountDownLatch(1)
         val t = Thread({
             try {
                 value = block()
             } catch (e: Throwable) {
                 failure = e
             } finally {
-                finished = true
+                done.countDown()
             }
         }, "$tag-${seq.incrementAndGet()}")
         t.isDaemon = true
         t.start()
-        t.join(timeoutMs)
-        // join 返回即 happens-before：线程真跑完时下面三枚读都是安全的；超时则一律按 TimedOut
-        if (!finished) return Bounded.TimedOut
+        // 超时则一律按 TimedOut（不取消那枚调用，由调用方按 OneShotHandoff 回收）
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) return Bounded.TimedOut
         failure?.let { throw it }
         @Suppress("UNCHECKED_CAST")
         return Bounded.Done(value as T)
