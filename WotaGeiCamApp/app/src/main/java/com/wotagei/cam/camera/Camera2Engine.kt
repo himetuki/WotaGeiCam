@@ -15,6 +15,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.CameraAbility
@@ -137,7 +138,7 @@ class Camera2Engine(
     private var sinkWaitRetries = 0
     private var reopenRetries = 0
     private var flashResetStage = false
-    private var lastWbKeepAliveMs = 0L
+    private var lastWbKeepAliveMs = 0L   // 单调钟（SystemClock.elapsedRealtime）读数，不是墙钟
 
     /** 关闭代数：异步回调只认最新一次开机的结果，防止旧回调写脏状态 */
     private var generation = 0
@@ -672,7 +673,7 @@ class Camera2Engine(
         }
     }
 
-    /** 手动色温需周期重发维持，按 500ms 节流 */
+    /** 手动色温需周期重发维持，按 500ms 节流（单调钟，见下） */
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
@@ -680,7 +681,10 @@ class Camera2Engine(
             result: TotalCaptureResult
         ) {
             if (!RequestApplier.isManualWhiteBalance(params.wbMode.value)) return
-            val now = System.currentTimeMillis()
+            // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
+            // `now - lastWbKeepAliveMs` 变负、`< WB_KEEP_ALIVE_MS` 恒真 ⇒ 手动白平衡保活永久停摆，
+            // 颜色慢慢漂回自动且无错误码。同族先例：record/Recorder.kt 的 ElapsedClock。
+            val now = SystemClock.elapsedRealtime()
             if (now - lastWbKeepAliveMs < WB_KEEP_ALIVE_MS) return
             lastWbKeepAliveMs = now
             markDirty()
@@ -711,6 +715,12 @@ class Camera2Engine(
         }
         // target 完全不在设备能力内（多为 120/240 无高帧率）：退到可达上限并报一次高帧率失败
         val ceiling = ceilingFps(state)
+        if (ceiling <= 0) {
+            // 无退档目标：cap 之下一个可用范围都没有，保持总线原值（随便退到一个数只会写回
+            // 设备给不出的帧率）。2026-10-10 S3-S3-01：旧兜底 minOfOrNull{hi} 正是这条的来源。
+            Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围且无退档目标，保持 $target")
+            return
+        }
         val fallback = RequestApplier.pickFps(state.fpsRanges, ceiling, false) ?: return
         chosenFps = fallback
         if (writeBack) {
@@ -734,15 +744,16 @@ class Camera2Engine(
         if (current.value != clamped) params.shutter.value = current.copy(value = clamped)
     }
 
-    /** 设备可达的最高帧率（无高帧率能力时压到 60） */
+    /**
+     * 设备可达的最高帧率（无高帧率能力时压到 60）；算式在纯函数 [FrameRateFallback.ceilingFps] 里。
+     *
+     * 返回 0 = cap 之下一个可用范围都没有（无退档目标），[syncFpsPick] 据此保持总线原值——
+     * 旧口径在这里退到 `minOfOrNull { it.hi }`，那是全表**最小**上界，等于绕开 cap 写回一个设备
+     * 根本给不出的帧率；同时固定档因 `usable > r.lo` 恒假而被全排除（2026-10-10 S3-S3-01）。
+     */
     private fun ceilingFps(state: RequestApplier.State): Int {
         val cap = if (ability?.highSpeedCapable == true) Int.MAX_VALUE else WotaTiers.HIGH_SPEED_FPS
-        var best = 0
-        for (r in state.fpsRanges) {
-            val usable = minOf(r.hi, cap)
-            if (usable > r.lo && usable > best) best = usable
-        }
-        return if (best > 0) best else (state.fpsRanges.minOfOrNull { it.hi } ?: 25)
+        return FrameRateFallback.ceilingFps(state.fpsRanges, cap)
     }
 
     /** 只在引擎确实拿到了可用范围时回写，顺带把换挡时可能被置灰的档位恢复可用 */
