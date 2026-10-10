@@ -102,8 +102,8 @@ class RulesTest {
 
     @Test
     fun `常驻 HUD 位掩码可持久化往返`() {
-        // 默认档必须是「快门 / 帧率 / 码率」三项，且掩码能原样读回（存的是 SharedPreferences 里的 Int）
-        assertEquals(3, HudItem.typesOf(HudItem.DEFAULT_MASK).size)
+        // 默认档必须是「快门 / 帧率 / 码率 / 感光度」四项，且掩码能原样读回（存的是 SharedPreferences 里的 Int）
+        assertEquals(4, HudItem.typesOf(HudItem.DEFAULT_MASK).size)
         assertEquals(HudItem.DEFAULT_MASK, HudItem.maskOf(HudItem.typesOf(HudItem.DEFAULT_MASK)))
         assertEquals(emptyList<HudItem>(), HudItem.typesOf(0))
         val all = HudItem.ALL.fold(0) { acc, t -> acc or t.bit }
