@@ -40,8 +40,16 @@ class CodecRecorder(
 ) : Recorder {
 
     companion object {
-        /** 输出侧轮询粒度 */
-        private const val DEQUEUE_TIMEOUT_US = 10_000L
+        /**
+         * 输出侧轮询粒度。
+         *
+         * 【10ms → 2ms（2026-10-09）】这段超时是**泵线程一轮的最坏阻塞时长**：内录开启时每拍串行
+         * 3 次（环境音频排空 / 内录音频排空 / 视频排空），最坏 30ms；而视频排水排在两次音频喂码
+         * **之后**（:1308-1338 喂完才到 :1339），泵一旦慢下来就先顶住编码面 → 背压一路回压到 GL
+         * 渲染线程 → GL 错过 24fps 名义网格的落点 = 成片空档（真机实测每 4 秒一个空格）。
+         * 2ms 仍远大于一次 dequeue 的正常往返（亚毫秒级），不会把泵变成空转；真正的兜底是队列深度。
+         */
+        private const val DEQUEUE_TIMEOUT_US = 2_000L
         /** EOS 之后允许编码器吐完缓存的上限，超了就强拆（防 stop 卡死） */
         private const val DRAIN_LIMIT_MS = 1_200L
         private const val LOOP_JOIN_MS = 2_500L
@@ -680,13 +688,16 @@ class CodecRecorder(
         stopping = false
         rotatePending = false
         loop = Thread({
-            // 【音频类优先级（2026-10-09）】这条线程同时干两件对时延敏感的事：把两路 PCM 喂进编码器、
-            // 把编码器输出排空写进 muxer。GL 渲染 + 相机 + 两路编码同时跑时，它若停在默认 nice 值
-            // （`Thread.priority` 是 Java 优先级，**不映射到 Linux nice**，等于没设），就会在负载尖峰
-            // 被饿到 → PCM 队列堆积/丢包 = 录音断续（"卡顿"在声音上就是掉字）。
-            // 用 `Process.setThreadPriority(THREAD_PRIORITY_AUDIO)` 提到音频类（Android 自家采集线程
-            // 就是这一档），是音视频管线里标准且无权限要求的做法。
-            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+            // 【泵线程降级 2026-10-09】原为 THREAD_PRIORITY_AUDIO(-16)，现改回 THREAD_PRIORITY_DEFAULT(0)。
+            // 为什么反向：这条线程 **90% 时间阻塞在 `dequeueOutputBuffer(2ms)`**（等编码器吐数据），
+            // 还兼做 MediaMuxer 的文件 IO——典型的「让出 CPU 型」负载，抬到 -16 是把让出者当成抢占者。
+            // 更要命的是：GL 渲染线程要吃 CPU 时，nice -16 的泵排在它前面；而 GL 是成片帧的**唯一
+            // 生产者**，它错过 24fps 名义网格的落点 = 成片空一帧（真机实测每 4 秒一个空格），
+            // 泵慢则是背压回传到编码面 → GL，同样烧成片。**烧成片的链条更短、更贵。**
+            // 音频侧不吃亏：两枚 AudioFeeder 采集线程仍留在 -16（要跟 AudioRecord 内部缓冲赛跑），
+            // 且 PCM 队列有 ~1.3s 深度冗余（QUEUE_CAPACITY=64），泵晚 10ms 起步根本追不上队列。
+            // 故此处的调度档与采集档**故意不再相同**（原守卫钉死「两处都音频类」已随之作废）。
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT) }
             pumpLoop()
         }, "WotaCodecMux").apply {
             start()
