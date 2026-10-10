@@ -179,20 +179,39 @@ class EncoderSlotClockTest {
     /** 与本文件既有口径的**一致性**守卫：encoderSlotPtsNs 拉出的空档，encoderSlotGap 必须如实数出来 */
     @Test
     fun `空格数与既有落格口径自洽（不改戳只数数）`() {
-        // 源实到 23.75fps（每帧 ≈ 4/95 s ≈ 42.1ms < 一格 41.67ms 的两倍）持续 10s：
-        // 每约 4 秒累计满 5 格 ⇒ 真实缺口按 4 格一记，累计 10s ≈ 23 个空档。
+        // 期望值手推，不由实现反推：目标 24fps ⇒ step = 1e9/24 = 41666666ns（整除截断）
+        // - 源 12fps：帧距 83333333ns = 2×step+1 ⇒ 每帧跨 2 格 ⇒ 每帧空 1 格；首帧无上一枚戳不计
+        //   120 帧 ⇒ 119 次跳转 ⇒ 空格 119 格、最大跨距 1
+        // - 源 8fps：帧距 125000000ns = 3×step+2 ⇒ 每帧跨 3 格 ⇒ 每帧空 2 格
+        //   80 帧 ⇒ 79 次跳转 ⇒ 空格 158 格、最大跨距 2
+        assertEquals(119L, gapTotalOver(srcFps = 12, frames = 120))
+        assertEquals(158L, gapTotalOver(srcFps = 8, frames = 80))
+        assertEquals(1L, gapMaxOver(srcFps = 12, frames = 120))
+        assertEquals(2L, gapMaxOver(srcFps = 8, frames = 80))
+    }
+
+    /** 按源实到帧率跑一段，逐帧走「既有落格口径 → 空格桥」，返回累计空格格数 */
+    private fun gapTotalOver(srcFps: Int, frames: Int): Long {
         var last = 0L
-        var gapTotal = 0L
-        var n = 0
-        val nowOf = { i: Int -> base + i * 1_000_000_000L / 95 * 4 }
-        while (n < 238) {
-            val pts = encoderSlotPtsNs(base, nowOf(n), 24, last)
-            gapTotal += encoderSlotGap(last, pts, 24)
+        var total = 0L
+        for (i in 0 until frames) {
+            val pts = encoderSlotPtsNs(base, base + i * sec / srcFps, 24, last)
+            total += encoderSlotGap(last, pts, 24)
             last = pts
-            n++
         }
-        assertEquals("逐帧戳序列逐格相邻（最大跨距必为 1），故累计空档 = 末戳跨距 − 已用格数", 4L, encoderSlotGap(base, last, 24))
-        assertTrue("10s@23.75fps 的空档数应在 20~30 量级，实际 $gapTotal", gapTotal in 20..30)
+        return total
+    }
+
+    private fun gapMaxOver(srcFps: Int, frames: Int): Long {
+        var last = 0L
+        var max = 0L
+        for (i in 0 until frames) {
+            val pts = encoderSlotPtsNs(base, base + i * sec / srcFps, 24, last)
+            val g = encoderSlotGap(last, pts, 24)
+            if (g > max) max = g
+            last = pts
+        }
+        return max
     }
 
     /** 突变自证：把 `> 1L` 改成 `> 0L`（同格多帧被误判成空一格）必须被上表测出来 */
