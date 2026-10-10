@@ -413,7 +413,10 @@ class EncoderSlotClockTest {
             Triple("段尾漏清一枚账", gl.replace("stampGapMaxSlots = 0L", ""), true),
             Triple("段尾内联成文不走纯函数", gl.replace("stampObsLine(", "inlineLine("), true),
             // 对照组：改注释/空白不许引发红（尺子不许对无害改动过敏）
-            Triple("对照组：只改注释", gl.replace("private fun drainStampObs", "private fun drainStampObs  // 观测"), false),
+            // 注释必须落在**声明之前**：masked 文本上再插的 `//`/`/* */` 不会二次遮蔽，
+            // 插在名字与 `(` 之间会把 `\bfun\s+drainStampObs\s*\(` 这条声明正则打断，
+            // bodyOf 直接抛「找不到函数体」——尺子对无害改动过敏，还把整条用例变成红。
+            Triple("对照组：只改注释", gl.replace("private fun drainStampObs(", "/*观测*/ private fun drainStampObs("), false),
             Triple("对照组：只改空白", gl.replace("private fun stampEncoderPresentation", "private  fun  stampEncoderPresentation"), false)
         )
         mutants.forEach { (name, mutated, shouldBeRed) ->
