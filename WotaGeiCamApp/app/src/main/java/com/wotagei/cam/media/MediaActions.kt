@@ -235,6 +235,10 @@ class MediaActions private constructor(
     ): MediaOp {
         val done = ArrayList<VideoClip>()
         var failed = 0
+        // 「删不掉」有两种完全不同的原因：缺「所有文件访问」去改别人录的行（SecurityException），
+        // 与其它异常（行已被移走、provider 报错等）。混着只报一句「删除失败」既没法对症，
+        // 事后也无从复盘——逐条留痕，并单独记住是不是权限问题，文案才敢据此分岔。
+        var permissionDenied = false
         for (clip in pending) {
             val err: Exception? = withContext(Dispatchers.IO) {
                 try {
@@ -267,10 +271,16 @@ class MediaActions private constructor(
 
             // 删不掉就是缺「所有文件访问」去改别人录的行。绝不退回去弹系统那个英文框：
             // 计数后继续删剩余项，收尾统一按权限状态给一句我们自己的文案（deniedRes）
+            Log.e(TAG, "彻底删除失败 uri=${clip.uri} ${err.javaClass.simpleName}: ${err.message}", err)
+            if (err is SecurityException) permissionDenied = true
             failed++
         }
         finishDelete(done, pop, refresh)
-        return if (failed > 0) MediaOp.Message(deniedRes(R.string.media_delete_failed)) else MediaOp.Done
+        return if (failed > 0) {
+            // 只有真是 SecurityException 才提「去开权限」；其它失败原因给通用失败文案，
+            // 否则用户会被引导去开一个跟本次失败无关的权限
+            MediaOp.Message(deniedRes(R.string.media_delete_failed, permissionDenied))
+        } else MediaOp.Done
     }
 
     /**
@@ -312,9 +322,18 @@ class MediaActions private constructor(
         return if (res == null) MediaOp.Done else MediaOp.Message(res)
     }
 
-    /** 直写被拒就是缺「所有文件访问」：让他去系统设置开一次，而不是每回都弹那个英文框 */
-    private fun deniedRes(fallback: Int): Int =
-        if (WotaStorage.hasAllFilesAccess()) fallback else R.string.media_need_all_files
+    /**
+     * 直写被拒就是缺「所有文件访问」：让他去系统设置开一次，而不是每回都弹那个英文框。
+     *
+     * [permissionDenied] 由调用方给出「这次失败是不是 SecurityException」这一事实：
+     * 只有真被权限拒了才提「去开权限」，别的失败原因照给 [fallback] —— 否则用户会被
+     * 引导去开一个跟本次失败无关的权限。默认为 `true` 是给**拿不到异常类型**的老调用点
+     * （rename 的 0 行、回收站直写只回布尔）保持既有口径，本轮不改变它们的行为。
+     */
+    private fun deniedRes(fallback: Int, permissionDenied: Boolean = true): Int =
+        if (!permissionDenied) fallback
+        else if (WotaStorage.hasAllFilesAccess()) fallback
+        else R.string.media_need_all_files
 
     // endregion
 

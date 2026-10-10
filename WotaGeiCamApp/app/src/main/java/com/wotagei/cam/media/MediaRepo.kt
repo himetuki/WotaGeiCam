@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
 import com.wotagei.cam.R
+import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +26,9 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Locale
+
+/** 媒体库读查询的日志锚点（查询失败的现场取证用） */
+private const val TAG = "WotaMediaRepo"
 
 /**
  * 媒体库条目。tags 来自 Room 标签表，isTrashed 来自 MediaStore（API 30+）或本地回收站记录。
@@ -222,6 +226,10 @@ class MediaRepo private constructor(private val app: Context) {
             resolver.query(contentUri, projection, selection, args, sort)?.use { c ->
                 readRows(c, out)
             }
+        }.onFailure {
+            // 语义不变：失败仍返回（可能是空的）out。补日志只为把"媒体库列表空"从
+            // 「本来就没视频」和「查询炸了」这两种现场里区分出来——不记就永远无从判断。
+            Log.e(TAG, "查询失败 uri=$contentUri selection=$selection → 按空/半截列表返回", it)
         }
         return out
     }
@@ -251,6 +259,10 @@ class MediaRepo private constructor(private val app: Context) {
                 queryArgs,
                 null
             )?.use { c -> readRows(c, out) }
+        }.onFailure {
+            // 同上：失败仍返回空列表（回收站页签显示空），只是把失败现场留下来。
+            // 不记的话「回收站是空的」与「系统回收站查询炸了」在界面上长得一模一样。
+            Log.e(TAG, "回收站查询失败（API ${Build.VERSION.SDK_INT}）→ 按空列表返回", it)
         }
         return out
     }
