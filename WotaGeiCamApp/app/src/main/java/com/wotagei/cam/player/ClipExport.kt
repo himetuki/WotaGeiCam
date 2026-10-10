@@ -59,6 +59,21 @@ object ClipRule {
     }
 
     /**
+     * 平移后相对 PTS 为负的样本该不该写进 Muxer：**不写**（丢弃）。导出侧单一真源，
+     * 剪辑/选轨导出的视频轨与音频轨共用同一条判据。
+     *
+     * 丢负 PTS 是对的：负 rel 的样本是开放 GOP（源带 B 帧）里入点关键帧**之前**的那批前导 B 帧，
+     * 它们引用的是剪辑起点之前的画面，本就不该出现在切片里；与音频轨"早于公共基准的样本丢弃"
+     * 是同一口径（负时长丢失 = 偏移量本身，属对齐的物理代价），也不能 clip 到 0——同刻多样本会把 Muxer 顶回去。
+     *
+     * 这条守卫防的是（2026-10-09 真机解盒实证）：直写负 pts 后 MediaMuxer 给**整条视频轨**
+     * `baseMediaDecodeTime` 加了 162000000 个 90k-tick（=1800s）偏移，并写出 `sample_count=0`
+     * 的畸形 `ctts`；忽略 `elst` 或拒绝畸形 `ctts` 的播放器（QQ 内嵌核、部分系统相册核）把视频错锚、
+     * 把音频判空 ⇒ 用户看到的"我这播放就正常，QQ 里无声/音画不同步"。
+     */
+    fun keepSample(relUs: Long): Boolean = relUs >= 0L
+
+    /**
      * sidecar 平移重映射：剪辑保留输出帧序号 `shift` 及其之后的部分，位次整体前移 [shift]。
      * n 是增量（"该帧之前丢了几个源帧"），与全局序号无关，平移后原样保留；
      * shift 之前的账目随被剪掉的画面一起丢弃。
@@ -222,6 +237,7 @@ class ClipExporter(private val ctx: Context) {
             var readTotal = 0L
             var lastReported = 0f
             var videoWritten = 0
+            var videoDropped = 0
             var vTail = 0
             var aTail = 0
             var videoClosed = false
@@ -242,17 +258,23 @@ class ClipExporter(private val ctx: Context) {
                         if (++vTail >= VIDEO_TAIL_TOLERANCE) videoClosed = true
                     } else {
                         vTail = 0
-                        // flags 直传 extractor 的 sampleFlags：SAMPLE_FLAG_SYNC(1) 与
-                        // BUFFER_FLAG_SYNC_FRAME(1) 同值同义，Extractor→Muxer 转写的通行做法
-                        @Suppress("WrongConstant")
-                        info.set(0, size.toInt(), rel, ex.sampleFlags)
-                        muxer.writeSampleData(vIdx, buf, info)
-                        videoWritten++
+                        // 负 rel（开放 GOP 的前导 B 帧）丢弃：与音频分支同口径。直写负 pts 会让
+                        // Muxer 给整条视频轨加巨大 baseMediaDecodeTime 偏移 + 畸形 ctts（见 ClipRule.keepSample）
+                        if (ClipRule.keepSample(rel)) {
+                            // flags 直传 extractor 的 sampleFlags：SAMPLE_FLAG_SYNC(1) 与
+                            // BUFFER_FLAG_SYNC_FRAME(1) 同值同义，Extractor→Muxer 转写的通行做法
+                            @Suppress("WrongConstant")
+                            info.set(0, size.toInt(), rel, ex.sampleFlags)
+                            muxer.writeSampleData(vIdx, buf, info)
+                            videoWritten++
+                        } else {
+                            videoDropped++
+                        }
                     }
                 } else if (!audioClosed) {
                     if (rel > endRel) {
                         if (++aTail >= AUDIO_TAIL_TOLERANCE) audioClosed = true
-                    } else if (rel >= 0L) {
+                    } else if (ClipRule.keepSample(rel)) {
                         // 早于公共基准的音频样本（AAC 帧界早于视频关键帧）丢弃：负 PTS 会崩 Muxer
                         @Suppress("WrongConstant") // 同上：sampleFlags 与 BUFFER_FLAG_* 同值体系
                         info.set(0, size.toInt(), rel, ex.sampleFlags)
@@ -268,6 +290,10 @@ class ClipExporter(private val ctx: Context) {
                 }
             }
             onProgress(1f)
+            // 丢弃必须可见：静默丢样本无从判断是源没有 B 帧还是守卫在起作用
+            if (videoDropped > 0) {
+                Log.i(TAG, "视频负PTS样本丢弃=$videoDropped（开放GOP前导B帧，丢弃为保 Muxer 时间轴合规）")
+            }
             if (videoWritten == 0) throw IllegalStateException("empty range: no video sample")
             return baseUs
         } finally {
