@@ -124,8 +124,9 @@ data class RecordResult(
     val segVideoSamples: List<Int> = emptyList(),
     /**
      * 逐段的**换段丢失时长**（ms，索引=段序号）：该段开始之前那次换段腿里丢掉的画面。
-     * 口径与 [segVideoSamples] 同款（索引=partIndex、0 值不落键、MR 路恒空表）——
-     * 差别只在它记载的是"这段前面丢了多久"，用户事后可查（sidecar 段清单的 `lostMs`）。
+     * 口径与 [segVideoSamples] 同款（索引=partIndex、0 值不落键）——差别只在它记载的是
+     * "这段前面丢了多久"，用户事后可查（sidecar 段清单的 `lostMs`）。
+     * 两个引擎都填（2026-10-10 S2-M4-01 之前 MR 路恒空表 ⇒ MR 换段慢时零证据）。
      */
     val segLostMs: List<Long> = emptyList(),
     /** 本次录制因换段受阻丢掉的总时长（ms；[segLostMs] 之和，0 = 一次都没丢） */
