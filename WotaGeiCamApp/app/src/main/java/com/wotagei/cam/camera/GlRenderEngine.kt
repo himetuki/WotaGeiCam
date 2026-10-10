@@ -428,7 +428,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** 幂等启动；[release] 之后调用无效。 */
     fun start() {
         if (released.get() || !started.compareAndSet(false, true)) return
-        val t = HandlerThread("WotaGlRender", Process.THREAD_PRIORITY_DISPLAY)
+        // 【GL 渲染线程提级 2026-10-09】DISPLAY(-4) → URGENT_DISPLAY(-8)。
+        // 理由：这条线程是**成片帧的唯一生产者**（相机帧消费 + 编码面 swap），成片有没有空洞完全由它决定。
+        // 成片 PTS 按「名义 24fps 网格 + 每格取 GL 换帧瞬间真实时钟」打点（:1389 + :1988-1995），
+        // 本机实际有效帧率 ≈23.75fps < 名义 24 ⇒ 每 ~96 帧必有一格填不上 = 每 4 秒一个空格。
+        // 任何一次调度延迟让这一拍错过网格，成片就缺一帧——所以它该高于音频采集档（-16）：
+        // producer 的时序抖动会**直接烧成片空档**，而采集侧有 ~1.3s 队列深度兜底，抖动可吸收。
+        // URGENT_DISPLAY 是 Android 给渲染线程的正式档位，无需任何权限。
+        val t = HandlerThread("WotaGlRender", Process.THREAD_PRIORITY_URGENT_DISPLAY)
         thread = t
         t.start()
         val h = Handler(t.looper)
