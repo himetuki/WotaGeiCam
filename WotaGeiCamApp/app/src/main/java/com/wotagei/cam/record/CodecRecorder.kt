@@ -163,14 +163,28 @@ class CodecRecorder(
      * 并把**次数与最大倒退量**记进失败快照（下次复现时能直接看出是不是这条机制）。
      */
     private val muxLastPtsUs = LongArray(8) { -1L }
+
+    /**
+     * **真倒退**（候选戳 < 上一戳）被就地推进的次数；[muxPtsMaxBackUs] 是其中最大的一枚倒退量。
+     * 这两枚是失败快照里 `ptsfix=`/`back=` 的唯一来源——它的用途是"下次复现时能不能一眼看出是不是
+     * 这条机制"，所以**只许装真倒退**（同格等值另计 [muxPtsEqualFixes]，混进来这把尺子就废了）。
+     */
     private var muxPtsFixes = 0
     private var muxPtsMaxBackUs = 0L
+
+    /**
+     * **同格等值**（候选戳 == 上一戳，GL 侧契约明写「允许与上一枚相等」）被推进 1μs 的次数。
+     * 属**设计内**、不是异常：单独计数、降 d 级（[Diag] 的 D 档默认关），并只并进段尾汇总行，
+     * 不逐帧刷 w——否则源快于名义率时按帧级刷屏，还会把真倒退的读数淹掉。
+     */
+    private var muxPtsEqualFixes = 0
 
     /** 逐轨 pts 账复位（新段起算：换段后是新 muxer，没有历史） */
     private fun resetMuxPtsBooks() {
         java.util.Arrays.fill(muxLastPtsUs, -1L)
         muxPtsFixes = 0
         muxPtsMaxBackUs = 0L
+        muxPtsEqualFixes = 0
     }
     private var aacMinBuf = 0
     private var audioSource = 0
@@ -1179,6 +1193,11 @@ class CodecRecorder(
                 .isSuccess
             if (!rebindOk) {
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:REBIND"
+                // 【同族漏修补齐】这枚 v 已 configure、也建过面，但 `vCodec = v` 排在下面（本分支先 return），
+                // closeSegmentEngine() 够不着它 ⇒ 必须就地放掉。漏放的代价不是内存：手机并发 codec
+                // 实例数有限，泄漏到 GC finalizer 才回收，之后的录制可能直接建不出编码器。
+                // （面 newSurf 不在此列：`inputSurface = newSurf` 已把它挂上字段，release() 收得住。）
+                releaseQuietly(v)
                 closeBounded(t)
                 return false
             }
@@ -1561,6 +1580,8 @@ class CodecRecorder(
                 "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
                 "喂码丢弃=${envCh?.feedDropped ?: 0}/${capCh?.feedDropped ?: 0} " +
                 "截断=${envCh?.feedTruncated ?: 0}/${capCh?.feedTruncated ?: 0} " +
+                // pts 单调兜底的两枚账（见 [muxPtsFixes]）：等值是设计内同格多帧，真倒退才是异常
+                "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms"
         )
@@ -1603,14 +1624,26 @@ class CodecRecorder(
         }
         // 逐轨单调保证（判定走 [monotonicPts] 桥，见 [muxLastPtsUs] 注释）：等值/倒退就地推进到
         // last+1，绝不把倒退交给 MPEG4Writer（它会抛 IllegalStateException 让整场录制结束）。
-        // 计次与最大倒退量进失败快照——用途是**证明**下一次现场是不是这条机制，没有读数就只能继续猜。
+        // 【两枚账】同格等值（候选 == 上一戳）是 GL 侧明写的设计内契约、不是异常，单独计数并降 d 级；
+        // 真倒退保留 w 级并进失败快照。两者混记会让快照里 `ptsfix=` 这把尺子读不出真倒退。
         val ti = if (track in muxLastPtsUs.indices) track else -1
         if (ti >= 0) {
-            val fix = monotonicPts(muxLastPtsUs[ti], info.presentationTimeUs)
+            val lastUs = muxLastPtsUs[ti]
+            val fix = monotonicPts(lastUs, info.presentationTimeUs)
             if (fix.advanced) {
-                muxPtsFixes++
-                if (fix.backUs > muxPtsMaxBackUs) muxPtsMaxBackUs = fix.backUs
-                Log.w(TAG, "轨 $track pts 未单调（cur=${info.presentationTimeUs}）⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us）")
+                if (info.presentationTimeUs == lastUs) {
+                    // 同格等值：只计数 + d 级留痕，逐帧刷 w 是本条要治的洪泛
+                    muxPtsEqualFixes++
+                    Log.d(TAG, "轨 $track pts 与上一枚同格相等（$lastUs）⇒ 推进 1µs（同格设计内，不计异常）")
+                } else {
+                    muxPtsFixes++
+                    if (fix.backUs > muxPtsMaxBackUs) muxPtsMaxBackUs = fix.backUs
+                    Log.w(
+                        TAG,
+                        "轨 $track pts 倒退（cur=${info.presentationTimeUs} last=$lastUs）" +
+                            "⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us）"
+                    )
+                }
             }
             info.presentationTimeUs = fix.ptsUs
             muxLastPtsUs[ti] = fix.ptsUs
