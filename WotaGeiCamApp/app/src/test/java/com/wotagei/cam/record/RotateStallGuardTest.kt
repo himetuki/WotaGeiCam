@@ -29,6 +29,7 @@ class RotateStallGuardTest {
 
     private val codec = codeOnly(mainSourceText("record/CodecRecorder.kt"))
     private val screen = codeOnly(mainSourceText("ui/CameraScreen.kt"))
+    private val guard = codeOnly(mainSourceText("record/RotateGuard.kt"))
 
     /**
      * 文案资源文件（`res/values/strings_camera.xml`）：从主源码定位到模块目录后逐级上溯查找。
@@ -306,5 +307,43 @@ class RotateStallGuardTest {
         assertTrue("复位必须清段账", reset.contains("segLostMs.clear()"))
         assertTrue("复位必须清累计账", reset.contains("rotateLoss.clear()"))
         assertTrue("复位必须清重建请求位与次数", reset.contains("segmentRestartRequested = false") && reset.contains("segmentRestarts = 0"))
+    }
+
+    /**
+     * 有界执行器的**交接口径**（S2-M4-02）：工作线程写完 `value`/`failure` 之后才 `countDown`，
+     * 谓词侧只认 `await(timeoutMs, …)` 的返回值（范本 `ArcRepairGl.postAndWait`）。
+     *
+     * 为什么必须是结构守卫而不是只靠行为用例：`join(timeout)` + 普通 `finished` 标志的旧写法
+     * **跑起来几乎总是对的**（JIT 与内存模型给了实践上的可见性），行为用例命中率太低；
+     * 但 JMM 只在被 join 的线程**已结束**时才给出 happens-before，`join` 超时返回的那条路上
+     * 三枚字段没有任何屏障，理论上能读到 `Done(null)` ⇒ 消费点对 Boolean 拆箱 NPE。
+     * 钉住形状才拦得住"有人顺手改回更短的那一版"。
+     */
+    @Test
+    fun `有界执行器必须用 latch 交接而不是 join 加普通标志`() {
+        // `fun <T> run(...)` 带类型参数，KotlinSourceScan 的函数名正则认不出它 ⇒ 按类区间取
+        // （与 `codec`/`screen` 同一套遮蔽文本；端点找不到必须抛，不许静默放行）
+        val from = guard.indexOf("internal class BoundedStore")
+        val to = guard.indexOf("internal class OneShotHandoff")
+        assertTrue("锚点丢失：找不到 BoundedStore 的声明", from >= 0)
+        assertTrue("锚点丢失：找不到 OneShotHandoff 的声明（BoundedStore 区间判据失效）", to > from)
+        val run = guard.substring(from, to)
+        assertTrue("必须建一枚 CountDownLatch", run.contains("CountDownLatch(1)"))
+        assertTrue("工作线程必须在 finally 里 countDown（值/异常写完之后才交接）", run.contains("done.countDown()"))
+        assertTrue("谓词侧必须读 await 的返回值", run.contains("done.await(timeoutMs, TimeUnit.MILLISECONDS)"))
+        // 顺序：countDown 之前必须先把两枚结果写掉
+        val valueAt = run.indexOf("value = block()")
+        val failAt = run.indexOf("failure = e")
+        val downAt = run.indexOf("done.countDown()")
+        assertTrue("锚点丢失：没截到写值", valueAt >= 0)
+        assertTrue("锚点丢失：没截到写异常", failAt >= 0)
+        assertTrue("锚点丢失：没截到 countDown", downAt >= 0)
+        assertTrue("countDown 必须晚于写值", valueAt < downAt)
+        assertTrue("countDown 必须晚于写异常", failAt < downAt)
+        // 旧写法整体不许复活（join 的屏障只在"线程已结束"时成立，超时那条路没有）
+        assertFalse("不许用 join 的结束当屏障（超时返回时线程还活着，字段无 happens-before）", run.contains("t.join("))
+        assertFalse("不许用普通 finished 标志当完成判据", run.contains("finished"))
+        // 泛型语义不许被"顺手收紧"：Done 的值仍是不检查的 cast（与旧行为逐字一致）
+        assertTrue("泛型语义不变：仍按 value as T 交出", run.contains("value as T"))
     }
 }

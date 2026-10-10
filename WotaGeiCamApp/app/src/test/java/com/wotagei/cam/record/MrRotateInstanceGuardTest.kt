@@ -6,6 +6,7 @@ import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.enclosingOf
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import com.wotagei.cam.source.KotlinSourceScan.occurrences
+import com.wotagei.cam.source.KotlinSourceScan.regionOf
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -29,6 +30,10 @@ import org.junit.Test
  * 2. `MediaRecorder()` 全类只在 `ensureRecorder` 里构造一次（单一起源）；
  * 3. persistent 输入面只在 `applyInputSurface` 建、只在会话级 `release` 释放，换段路径一个字都不许碰；
  * 4. 换段面交接必须走纯函数 [rotateSurfaceHandoffNeeded]、包 `runCatching`、且早于 `mr?.start()`。
+ *
+ * 第五条（M4-09 补的承重行红线）：`mr = null` 只许出现在 `releaseEngine`、且必须晚于 `rec.release()`；
+ * 前四条只看得到调用点与顺序，锁不到这一行本身。第六条（S2-M4-01）：换段腿四步必须逐步留痕，
+ * 且 `buildResult` 必须带齐换段丢帧账三字段（与 `CodecRecorder` 同口径）。
  */
 class MrRotateInstanceGuardTest {
 
@@ -134,5 +139,80 @@ class MrRotateInstanceGuardTest {
         assertTrue("锚点丢失：原文里找不到 ensureRecorder 的声明", decl >= 0)
         val head = text.substring((decl - 1_500).coerceAtLeast(0), decl)
         assertTrue("ensureRecorder 的 KDoc 必须写明回调 Looper 跟随创建线程（换段重建也在控制线程）", head.contains("Looper"))
+    }
+
+    /**
+     * 承重行红线（M4-09）：上面五条断言锁的全是**调用点与顺序**，`mr = null` 那一行谁都没锁到。
+     * 事实：`ensureRecorder = mr ?: MediaRecorder()`——**只有 `mr` 被置空，换段才真的新建实例**。
+     * 若有人把 `releaseEngine` 重构成"只 release 不置空"，前五条逐条仍然成立
+     * （调用在、顺序对、`MediaRecorder()` 仍只出现 1 次），而 2026-10-08 那个
+     * "第二段之后彻底停摆"的真机缺陷原地复活且门禁全绿。
+     *
+     * 两条断言：
+     * 1. `releaseEngine` 体内 `rec.release()` 必须**早于** `mr = null`（反了 = 先丢引用再释放，
+     *    抛出的清理异常就再也拿不到那枚实例，native 句柄悬空）；
+     * 2. `stopEngine` 体内**不含** `mr = null`——实例生死只归 `releaseEngine` 一处，
+     *    两处都能置空会分叉出"关两次/漏关"的新形态。
+     */
+    @Test
+    fun `实例置空只许在 releaseEngine 且必须晚于 release`() {
+        val rel = bodyOf(src, "releaseEngine")
+        val releaseAt = rel.indexOf("rec.release()")
+        val nullAt = rel.indexOf("mr = null")
+        assertTrue("锚点丢失：releaseEngine 没截到 rec.release()", releaseAt >= 0)
+        assertTrue(
+            "releaseEngine 必须置空 mr（否则 ensureRecorder 的 mr ?: MediaRecorder() 永远命中旧实例，" +
+                "换段根本换不了——这正是 2026-10-08 真机停摆缺陷的承重行）",
+            nullAt >= 0
+        )
+        assertTrue("必须先 release 再置空（反了 = 先丢引用，清理异常就无从处理）", releaseAt < nullAt)
+
+        val stop = bodyOf(src, "stopEngine")
+        assertFalse(
+            "stopEngine 不许置空 mr（实例生死只归 releaseEngine 一处：两处都能置空会分叉出关两次/漏关）",
+            stop.contains("mr = null")
+        )
+    }
+
+    /**
+     * 换段腿取证红线（S2-M4-01）：MR 路四步（封段入库 / 建 pending / 开输出 fd / prepare）都是
+     * **无上限**的 MediaProvider / FUSE / native 同步调用，而这条路**没有** `BoundedStore`
+     * 那层有界化（本轮只留痕、不改执行）。真机现场是 30~45s 量级的停顿，没有逐腿耗时与
+     * 丢帧账就分辨不出"卡在哪一步、丢了多久"，`CodecRecorder.buildResult` 早已把这三个字段
+     * 填满，MR 路原先一个都不填。
+     *
+     * 三条断言：
+     * 1. 四步各自被 [timedLegStep] 包住（不留痕 = 这条腿又变成零证据）；
+     * 2. 腿必须起钟并结算（[settleRotateLeg] 在 `finally` 里，失败腿也要记账）；
+     * 3. `buildResult` 带齐 `segLostMs` / `lostMs` / `rotateStalls` 三个字段。
+     */
+    @Test
+    fun `换段腿四步必须逐步留痕且结果带换段丢帧账`() {
+        // 步名是字符串字面量，遮蔽文本里已被抹成空白 ⇒ 按遮蔽区间切**原文**（两者等长，偏移通用）
+        val rawRot = mainSourceText("record/MrRecorder.kt").let { raw ->
+            val r = regionOf(src, "rotateSegment")
+            raw.substring(r.start + 1, r.end - 1)
+        }
+        for (step in listOf("seal", "insert", "open", "prepare")) {
+            assertTrue("换段腿的 $step 步必须被 timedLegStep 包住（无上限调用不留痕就没有现场）",
+                rawRot.contains("timedLegStep(\"$step\")"))
+        }
+        val rot = bodyOf(src, "rotateSegment")
+        assertTrue("换段腿必须起钟（elapsedRealtime，与 Codec 路同一时基域）",
+            rot.contains("legStart = SystemClock.elapsedRealtime()"))
+        assertTrue("腿结算必须在 finally 里（失败腿丢掉的时间同样是没录到的画面）",
+            rot.contains("settleRotateLeg(legStart, legRotated)"))
+
+        val build = bodyOf(src, "buildResult")
+        assertTrue("结果必须带逐段丢帧账（与 CodecRecorder 同口径）", build.contains("segLostMs = segLostMs.toList()"))
+        assertTrue("结果必须带累计丢失", build.contains("lostMs = rotateLoss.totalMs"))
+        assertTrue("结果必须带换段次数", build.contains("rotateStalls = rotateLoss.count"))
+        // 账必须能被复位，否则上一次录制的账会漏进下一次（与 parts 的清账点同处）
+        val reset = bodyOf(src, "resetRotateBooks")
+        assertTrue("复位必须清逐段账", reset.contains("segLostMs.clear()"))
+        assertTrue("复位必须清累计账", reset.contains("rotateLoss.clear()"))
+        assertTrue("新会话（prepare）必须复位", bodyOf(src, "prepare").contains("resetRotateBooks()"))
+        assertTrue("收尾（stop）必须复位", bodyOf(src, "stop").contains("resetRotateBooks()"))
+        assertTrue("释放（release）必须复位", bodyOf(src, "release").contains("resetRotateBooks()"))
     }
 }
