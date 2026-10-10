@@ -3,12 +3,16 @@ package com.wotagei.cam
 import com.wotagei.cam.player.ClipRule
 import com.wotagei.cam.record.ArcDropLog
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 剪辑导出纯逻辑（ClipRule）单测：入出点规范化、sidecar 平移重映射、关键帧位次反推、命名。
- * 拷贝本体（MediaExtractor/MediaMuxer）依赖 Android framework，真机验收归真机验证清单。
+ * 剪辑导出纯逻辑（ClipRule）单测：入出点规范化、负 PTS 样本丢弃判据、sidecar 平移重映射、
+ * 关键帧位次反推、命名。
+ * 拷贝本体（MediaExtractor/MediaMuxer）依赖 Android framework，真机验收归真机验证清单；
+ * 两个 copy() 里的守卫分支是否真的调了 [ClipRule.keepSample] 由 ExportNegPtsGuardTest 结构守卫兜底。
  */
 class ClipExportTest {
 
@@ -50,6 +54,26 @@ class ClipExportTest {
             0L to ClipRule.MIN_KEEP_MS,
             ClipRule.normalize(0L, ClipRule.MIN_KEEP_MS, 10_000L)
         )
+    }
+
+    // endregion
+
+    // region keepSample：负 rel 样本丢弃（导出侧单一真源，视频/音频两轨共用）
+
+    @Test
+    fun `负rel样本丢弃_开放GOP前导B帧`() {
+        // 直写负 pts 会让 Muxer 给整条视频轨加巨大 baseMediaDecodeTime 偏移并生成畸形 ctts
+        assertFalse(ClipRule.keepSample(-1L))
+        assertFalse(ClipRule.keepSample(-33_334L)) // 30fps 一帧
+        assertFalse(ClipRule.keepSample(-1_800_000_000L))
+    }
+
+    @Test
+    fun `零与正rel样本保留`() {
+        // 0 是合法 PTS（非负），保留；判据只砍负前导、不动界内样本
+        assertTrue(ClipRule.keepSample(0L))
+        assertTrue(ClipRule.keepSample(1L))
+        assertTrue(ClipRule.keepSample(33_334L))
     }
 
     // endregion

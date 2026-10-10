@@ -47,10 +47,11 @@ object TrackRule {
     /**
      * 平移后的输出 PTS（µs）；早于 0（负 PTS，MP4 不收）返回 null = 丢弃该前导样本。
      * [baseUs] 是视频首样本 PTS（输出 0 点），与 ClipExporter 的公共偏移基准同义。
+     * 丢弃判据委托 [ClipRule.keepSample]（导出侧单一真源，与视频轨同一条规则）。
      */
     fun shiftedPts(srcPtsUs: Long, baseUs: Long, shiftUs: Long): Long? {
         val v = srcPtsUs - baseUs + shiftUs
-        return if (v < 0L) null else v
+        return if (ClipRule.keepSample(v)) v else null
     }
 
     /** 选轨成片命名：`inau_<源名去扩展名>.mp4`（用户裁决前缀，Internal Audio 可辨） */
@@ -177,6 +178,7 @@ class TrackExporter(private val ctx: Context) {
             var readTotal = 0L
             var lastReported = 0f
             var videoWritten = 0
+            var videoDropped = 0
             var audioWritten = 0
             while (true) {
                 // 取消检查挂在每个样本上（与 ClipExporter 同一检查密度）
@@ -186,11 +188,19 @@ class TrackExporter(private val ctx: Context) {
                 if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleTrackIndex == videoTrack) {
-                    val rel = ex.sampleTime - baseUs // baseUs 是首样本：rel 恒 ≥ 0
-                    @Suppress("WrongConstant") // sampleFlags 与 BUFFER_FLAG_* 同值体系（同 ClipExporter）
-                    info.set(0, size.toInt(), rel, ex.sampleFlags)
-                    muxer.writeSampleData(vIdx, buf, info)
-                    videoWritten++
+                    // baseUs 是"首个**读到**的样本"，全片导出从 0 读起它必是同步帧——但它**不等于**首样本：
+                    // 外部源的开放 GOP（带 B 帧）里，关键帧之后那批前导 B 帧的 PTS 早于它，rel 为负
+                    // （closed GOP 才恒 ≥ 0）。负 pts 直写会让 Muxer 给整轨加巨大 baseMediaDecodeTime
+                    // 偏移并生成畸形 ctts，故与音频轨同口径丢弃。
+                    val rel = ex.sampleTime - baseUs
+                    if (ClipRule.keepSample(rel)) {
+                        @Suppress("WrongConstant") // sampleFlags 与 BUFFER_FLAG_* 同值体系（同 ClipExporter）
+                        info.set(0, size.toInt(), rel, ex.sampleFlags)
+                        muxer.writeSampleData(vIdx, buf, info)
+                        videoWritten++
+                    } else {
+                        videoDropped++
+                    }
                 } else {
                     // 选内录轨：PTS 平移 −offset 对齐环境轨；负 PTS 前导丢弃（TrackRule 裁决）
                     val outPts = TrackRule.shiftedPts(ex.sampleTime, baseUs, shiftUs)
@@ -211,6 +221,10 @@ class TrackExporter(private val ctx: Context) {
             }
             onProgress(1f)
             if (videoWritten == 0) throw IllegalStateException("empty source: no video sample")
+            // 丢弃必须可见：静默丢样本无从判断是源没有 B 帧还是守卫在起作用
+            if (videoDropped > 0) {
+                Log.i(TAG, "视频负PTS样本丢弃=$videoDropped（开放GOP前导B帧，丢弃为保 Muxer 时间轴合规）")
+            }
             Log.i(TAG, "video=$videoWritten audio=$audioWritten shiftUs=$shiftUs")
         } finally {
             runCatching { ex.release() }
