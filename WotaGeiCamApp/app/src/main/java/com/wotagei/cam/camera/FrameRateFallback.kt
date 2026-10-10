@@ -32,7 +32,7 @@ object FrameRateFallback {
         var best = 0
         for (r in ranges) {
             val usable = minOf(r.hi, cap)
-            if (usable > r.lo && usable > best) best = usable
+            if (usable >= r.lo && usable > best) best = usable
         }
         return best
     }
