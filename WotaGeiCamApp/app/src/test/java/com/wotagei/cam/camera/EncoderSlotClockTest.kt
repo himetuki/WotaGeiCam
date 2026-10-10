@@ -322,11 +322,22 @@ class EncoderSlotClockTest {
         listOf("stampAgeSumNs", "stampAgeCount", "stampAgeMaxNs", "stampGapSlots", "stampGapMaxSlots", "stampFailCount")
             .forEach { if (!drain.contains("$it = 0")) bad.add("段尾必须清零 $it（漏一枚就跨段串账）") }
         val rebind = flatten(bodyOf(maskedGl, "replaceEncoderSurface"))
-        val n = occurrences(rebind, "drainStampObs(").size
+        // needle 必须止于标识符：`occurrences` 的词边界判定看的是 needle **后面**那个字符，
+        // needle 带尾括号时其后紧跟实参首字母（`drainStampObs(if (...)` ⇒ 后面是 `i`）会被判成标识符字符、
+        // 命中被丢弃，计数恒 0（本轮门禁 3 红就是踩在这里，属守卫自身缺陷而非生产缺陷）。
+        // `drainStampObs` 在本函数体内只有 1141 那一处调用点，词边界天然成立 ⇒ 计数即调用点数。
+        val n = occurrences(rebind, "drainStampObs").size
         if (n != 1) bad.add("换面/解面必须共用同一出口且调用点唯一，实际 $n 处")
+        // 顺序闸门**无条件生效**：上一轮写成 `if (n == 1 && ...)`，而 n 因上面的词边界误判恒为 0，
+        // 整条顺序断言被短路、从未执行过一次（假绿比红更危险）。这里拆成三枚互不依赖的判定。
         val drainAt = rebind.indexOf("drainStampObs(")
         val destroyAt = rebind.indexOf("destroyEglSurface(encoderEglSurface)")
-        if (n == 1 && !(drainAt in 0 until destroyAt)) {
+        if (drainAt < 0) bad.add("锚点丢失：没截到 drainStampObs 调用点（被删或改名，顺序无从谈起）")
+        if (destroyAt < 0) bad.add("锚点丢失：没截到销毁旧编码面")
+        if (occurrences(rebind, "destroyEglSurface(encoderEglSurface)").size != 1) {
+            bad.add("销毁旧编码面必须只有一处（多处意味着换面途中还有别的销毁点，账会悬空）")
+        }
+        if (drainAt >= 0 && destroyAt >= 0 && drainAt >= destroyAt) {
             bad.add("落行必须早于销毁旧编码面（新面绑定失败会就地 return，放在后面账就悬着混进下一段）")
         }
         return bad
