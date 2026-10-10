@@ -100,7 +100,7 @@ enum class RefLineType(val bit: Int, val label: String) {
 
 /**
  * 录制页常驻 HUD 可选项，位掩码可组合（与 [RefLineType] 同一套持久化惯例，键 `hud_items`）。
- * 默认只放快门/帧率/码率三档，其余由用户在设置页自选上屏哪几项；每格点开是自己的就近胶囊。
+ * 默认只放快门/帧率/码率/感光度四档，其余由用户在设置页自选上屏哪几项；每格点开是自己的就近胶囊。
  */
 enum class HudItem(val bit: Int, val labelRes: Int) {
     SHUTTER(1, com.wotagei.cam.R.string.cam_hud_shutter),
@@ -113,7 +113,17 @@ enum class HudItem(val bit: Int, val labelRes: Int) {
 
     companion object {
         val ALL: List<HudItem> = values().toList()
-        val DEFAULT_MASK: Int = SHUTTER.bit or FPS.bit or BITRATE.bit
+
+        /**
+         * 出厂默认上屏四档：快门 / 帧率 / 码率 / **感光度**。
+         *
+         * 感光度是录制期最常被问到的读数（用户 2026-10-09 要求默认显示），码率自 10-01 布局批起
+         * 已移出网格、单独钉在底栏外侧，所以这两颗虽然都留在掩码里，只有感光度进读数块那一排。
+         *
+         * ⚠ 这条只决定**没存过** `hud_items` 的新装用户；已存过掩码的老用户读自己的那一份，
+         * 刻意不给他们补感光度（补了就等于"顺手"改掉用户自己选过的界面）。
+         */
+        val DEFAULT_MASK: Int = SHUTTER.bit or FPS.bit or BITRATE.bit or ISO.bit
 
         fun typesOf(mask: Int): List<HudItem> = ALL.filter { mask and it.bit != 0 }
         fun maskOf(types: List<HudItem>): Int = types.fold(0) { acc, t -> acc or t.bit }
