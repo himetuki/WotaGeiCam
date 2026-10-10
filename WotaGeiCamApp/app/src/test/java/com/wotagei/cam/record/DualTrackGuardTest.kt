@@ -225,19 +225,27 @@ class DualTrackGuardTest {
     }
 
     /**
-     * 双音轨的**调度类别**（2026-10-09）：两路采集线程与编码泵线程都必须按**音频类**调度。
+     * 三档调度契约（2026-10-09 内录丢帧轮修订）：**采集=音频类(-16) / 编码泵=默认档(0) / GL 渲染=紧急渲染档(-8)**。
      *
-     * 为什么值得单列一条守卫：两路 PCM 采集 + 两路 AAC 编码 + GL 渲染 + 相机同时在跑；采集/泵线程若停在
-     * 默认 nice 值，负载尖峰会把它们饿到 → AudioRecord 缓冲溢出、PCM 队列堆积 = **录音断续**
-     * （用户口中的"卡顿"落在声音上就是掉字）。而 `Thread.priority`（Java 优先级）**不映射到 Linux nice
-     * 值**，设了等于没设 ⇒ 必须用 `Process.setThreadPriority(THREAD_PRIORITY_AUDIO)`（Android 自家采集
-     * 线程就是这一档，且无需权限）。
+     * 为什么单列一条守卫：两路 PCM 采集 + 两路 AAC 编码 + GL 渲染 + 相机同时在跑，三条线程的
+     * **优先级排序本身就是正确性的一部分**：
+     * - 采集线程留 `THREAD_PRIORITY_AUDIO`：它要跟 AudioRecord 内部缓冲赛跑，被饿到就溢出丢包 = 录音断续。
+     *   （`Thread.priority`（Java 优先级）**不映射到 Linux nice 值**，设了等于没设 ⇒ 必须用
+     *   `Process.setThreadPriority`，Android 自家采集线程就是这一档，且无需权限。）
+     * - 编码泵**降回** `THREAD_PRIORITY_DEFAULT`：它 90% 时间阻塞在 `dequeueOutputBuffer`、还兼做
+     *   MediaMuxer 文件 IO，是「让出 CPU 型」负载，抬到 -16 等于把让出者当抢占者；更要命的是它压在
+     *   GL 前面，而 GL 是成片帧的**唯一生产者**，GL 错过 24fps 名义网格落点 = 成片空档（每 4 秒一个）。
+     *   音频侧不吃亏：PCM 队列有 ~1.3s 深度（QUEUE_CAPACITY=64）兜底。
+     * - GL 渲染提 `THREAD_PRIORITY_URGENT_DISPLAY`：成片帧唯一生产者，调度抖动直接烧成片空档。
+     *
+     * 注意「泵不许再用音频类」与旧版口径相反：旧版把三处钉成同一档，是因为那时不知道谁才是
+     * producer。音频侧的保护改由采集档 + 队列深度承担。
      */
     @Test
-    fun `两路采集与编码泵线程必须按音频类调度`() {
+    fun `三档调度契约_采集音频类_泵默认档_GL紧急渲染档`() {
         val feeder = maskedMain("record/AudioFeeder.kt")
         assertTrue(
-            "采集线程必须设 Linux 音频类优先级（Java 的 Thread.priority 不映射 nice）",
+            "两枚采集线程（环境 + 内录）必须设 Linux 音频类优先级（Java 的 Thread.priority 不映射 nice）",
             feeder.contains("Process.setThreadPriority") && feeder.contains("THREAD_PRIORITY_AUDIO")
         )
         assertFalse(
@@ -246,10 +254,71 @@ class DualTrackGuardTest {
         )
         val codec = maskedMain("record/CodecRecorder.kt")
         assertTrue(
-            "编码泵线程（同时喂两路 PCM、排空编码器写 muxer）同样要音频类",
-            codec.contains("Process.setThreadPriority") && codec.contains("THREAD_PRIORITY_AUDIO")
+            "编码泵必须钉死为 THREAD_PRIORITY_DEFAULT（0）——它让出 CPU 且兼做 muxer 文件 IO，" +
+                "抬到音频类只会压在成片帧唯一生产者 GL 上面",
+            codec.contains("Process.setThreadPriority") && codec.contains("THREAD_PRIORITY_DEFAULT")
+        )
+        assertFalse(
+            "编码泵**必须不是**音频类（-16 的让出者排在 -4 的 GL 前面 = 泵慢 → 背压 → GL 错过网格 → 成片空档）",
+            codec.contains("THREAD_PRIORITY_AUDIO")
         )
         assertFalse("泵线程也不许退回 Thread.priority", codec.contains("priority = Thread.NORM_PRIORITY"))
+        val gl = maskedMain("camera/GlRenderEngine.kt")
+        assertEquals(
+            "GL 渲染线程必须恰好一处提到 THREAD_PRIORITY_URGENT_DISPLAY（-8）：成片帧唯一生产者",
+            1,
+            occurrences(gl, "THREAD_PRIORITY_URGENT_DISPLAY").size
+        )
+        assertTrue(
+            // 判据写成正则：遮蔽文本里线程名是字符串字面量（已被抹成空格），只有逗号前的参数位是真的
+            "GL 渲染线程必须把 URGENT_DISPLAY 传进 HandlerThread 的第二参（真去调度），不是嘴上说说",
+            Regex("HandlerThread\\(\\s*, Process\\.THREAD_PRIORITY_URGENT_DISPLAY\\)").containsMatchIn(gl)
+        )
+        assertTrue(
+            "GL 渲染线程不许退回 DISPLAY(-4) 档（这一行是本轮丢帧修复的核心调度改动）",
+            occurrences(gl, "THREAD_PRIORITY_DISPLAY").isEmpty()
+        )
+    }
+
+    /**
+     * 变更自证：把三处档位各自改回旧值，同一把尺必须立刻报红。
+     *
+     * 为什么必须自证：上面那条守卫判据落在**遮蔽文本**上（`codeOnly` 已把注释与字面量抹成空格），
+     * 这本身就是「防注释喂绿」的机制——把 `setThreadPriority(...)` 那一行注掉、只在大段解释里
+     * 留个 `THREAD_PRIORITY_DEFAULT` 字样，尺子照样报红。但「遮蔽后仍判得到」不等于「真咬在值上」：
+     * 断言写错（比如把 DEFAULT 写成别的）时它会恒真。这条突变体只改字面量、不碰断言，证明尺子
+     * 确实咬在这三个新档位上，而不是恰好恒真。
+     */
+    @Test
+    fun `三档调度契约_把新档位改回旧值必须报红`() {
+        fun maskedWith(rel: String, from: String, to: String): String =
+            codeOnly(KotlinSourceScan.mainSourceText(rel).replace(from, to))
+
+        // 泵改回音频类：默认档判据失去证据 + 「不得为音频类」判据成立 → 必红
+        assertFalse(
+            "泵改回 THREAD_PRIORITY_AUDIO 后，默认档判据必须失去证据",
+            maskedWith("record/CodecRecorder.kt", "THREAD_PRIORITY_DEFAULT", "THREAD_PRIORITY_AUDIO")
+                .contains("THREAD_PRIORITY_DEFAULT")
+        )
+        assertTrue(
+            "泵改回 THREAD_PRIORITY_AUDIO 后，「泵不得为音频类」判据必须被触发",
+            maskedWith("record/CodecRecorder.kt", "THREAD_PRIORITY_DEFAULT", "THREAD_PRIORITY_AUDIO")
+                .contains("THREAD_PRIORITY_AUDIO")
+        )
+        // GL 降回 DISPLAY：URGENT_DISPLAY 判据失去证据，且落回「不许退回 DISPLAY」的红区 → 必红
+        val glBack = maskedWith(
+            "camera/GlRenderEngine.kt",
+            "THREAD_PRIORITY_URGENT_DISPLAY",
+            "THREAD_PRIORITY_DISPLAY"
+        )
+        assertTrue("GL 降回 DISPLAY 后，URGENT_DISPLAY 判据必须失去证据", occurrences(glBack, "THREAD_PRIORITY_URGENT_DISPLAY").isEmpty())
+        assertTrue("GL 降回 DISPLAY 后，必须落进「不许退回 DISPLAY(-4)」的红区", occurrences(glBack, "THREAD_PRIORITY_DISPLAY").isNotEmpty())
+        // 采集降回默认档：音频类判据失去证据 → 必红
+        assertFalse(
+            "采集线程改回 THREAD_PRIORITY_DEFAULT 后，音频类判据必须失去证据",
+            maskedWith("record/AudioFeeder.kt", "THREAD_PRIORITY_AUDIO", "THREAD_PRIORITY_DEFAULT")
+                .contains("THREAD_PRIORITY_AUDIO")
+        )
     }
 
     // ------------------------------------------------------------------ P0 失效贯穿生命周期（修复轮 1）
