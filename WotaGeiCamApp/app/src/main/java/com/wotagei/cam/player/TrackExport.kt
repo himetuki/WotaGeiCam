@@ -110,7 +110,13 @@ class TrackExporter(private val ctx: Context) {
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
                     copy(src, track, TrackRule.shiftUsFor(track, offsetMs), job, muxer, onProgress)
                     muxer.stop()
-                    commit(pendingUri)
+                    // 清 pending 失败必须改口上报（与 ClipExporter 同一处置）：IS_PENDING 残留时
+                    // MediaStore 对外隐藏该行，用户看到"导出成功"却在相册里找不到成片且无锚点可归因；
+                    // 失败多半是 Provider 瞬时忙，重试一次（同 VideoStore.seal 的口径）
+                    if (!commit(pendingUri) && !commit(pendingUri)) {
+                        Log.e(TAG, "commit 失败（已重试一次）uri=$pendingUri，相册可能看不到该成片")
+                        return@withContext fail(pendingUri, ClipError.COMMIT)
+                    }
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id track=$track offsetMs=$offsetMs")
                     ClipResult.Done(id, TrackRule.nameOf(src.name))
@@ -245,14 +251,20 @@ class TrackExporter(private val ctx: Context) {
         }.getOrNull()
     }
 
-    private fun commit(uri: android.net.Uri) {
-        runCatching {
-            ctx.contentResolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                null, null
-            )
-        }
+    /**
+     * 清 IS_PENDING（两段式的第二段）。true = 相册里立刻可见。
+     * 判据取 update 的受影响行数，与 [com.wotagei.cam.record.VideoStore.commit] 同口径：
+     * 不抛异常也可能一行没改（URI 已失效），把"没清掉"当成功就会继续瞒着用户。
+     */
+    private fun commit(uri: android.net.Uri): Boolean = runCatching {
+        ctx.contentResolver.update(
+            uri,
+            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+            null, null
+        ) > 0
+    }.getOrElse {
+        Log.e(TAG, "commit 抛异常 uri=$uri: ${it.message}")
+        false
     }
 
     /** 失败/取消收尾：删 pending 记录，不留 0 字节幽灵条目 */

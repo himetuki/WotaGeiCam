@@ -104,7 +104,11 @@ sealed interface ClipResult {
     data class Fail(val reason: ClipError) : ClipResult
 }
 
-enum class ClipError { RANGE, OPEN, MUX, CANCELLED }
+/**
+ * [ClipError.COMMIT]：Muxer 已封轨成片、**只是清 IS_PENDING 没清掉**（Provider 瞬时忙/抛异常）。
+ * 与 [MUX] 分开是因为二者归因完全不同——MUX 是没写出来，COMMIT 是写出来了但相册看不见。
+ */
+enum class ClipError { RANGE, OPEN, MUX, CANCELLED, COMMIT }
 
 /**
  * 执行器（录制管线之外的第二条"读源→写库"链路，入库走与 VideoStore 同一套
@@ -160,7 +164,13 @@ class ClipExporter(private val ctx: Context) {
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
                     val baseUs = copy(src, sMs * 1000L, eMs * 1000L, job, muxer, onProgress)
                     muxer.stop()
-                    commit(pendingUri)
+                    // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
+                    // 用户会看到"导出成功"却在相册里找不到成片，且事后无锚点可归因。
+                    // 失败多半是 Provider 瞬时忙，重试一次（同 VideoStore.seal 的处置口径）
+                    if (!commit(pendingUri) && !commit(pendingUri)) {
+                        Log.e(TAG, "commit 失败（已重试一次）uri=$pendingUri，相册可能看不到该成片")
+                        return@withContext fail(pendingUri, ClipError.COMMIT)
+                    }
                     // sidecar 平移：成片 PTS = 帧序号 × 1e6/dstFps，闭式反推关键帧位次
                     val srcLog = src.dataPath?.let { ArcDropLog.readFrom(it) }
                     val outPath = queryData(pendingUri)
@@ -313,14 +323,22 @@ class ClipExporter(private val ctx: Context) {
         ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
     }.getOrNull()
 
-    private fun commit(uri: android.net.Uri) {
-        runCatching {
-            ctx.contentResolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                null, null
-            )
-        }
+    /**
+     * 清 IS_PENDING（两段式的第二段）。true = 相册里立刻可见。
+     *
+     * 判据取 update 的**受影响行数**，判据与 [com.wotagei.cam.record.VideoStore.commit] 逐字同口径：
+     * `update` 不抛异常也可能一行没改（URI 已失效），把这种"没清掉"当成功，等于把
+     * "导出成功但相册里没有"继续瞒下去。抛异常与 0 行一律归 false，由调用方重试并改口上报。
+     */
+    private fun commit(uri: android.net.Uri): Boolean = runCatching {
+        ctx.contentResolver.update(
+            uri,
+            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+            null, null
+        ) > 0
+    }.getOrElse {
+        Log.e(TAG, "commit 抛异常 uri=$uri: ${it.message}")
+        false
     }
 
     /** pending 记录的真实路径（DATA 列）；sidecar 与它同目录同名 */
