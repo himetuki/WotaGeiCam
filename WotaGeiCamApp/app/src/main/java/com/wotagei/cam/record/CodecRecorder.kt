@@ -787,7 +787,12 @@ class CodecRecorder(
         if (prev != EngineState.START) {
             // PREPARE / ERROR：一帧都没写，直接回收 pending
             stopping = true
-            joinLoop()
+            // 同样走「超时即只记账」闸：PREPARE/ERROR 下泵线程本就没起（loop==null，闸恒放行），
+            // 但闸放在这里是为了**只有一处**决定"泵线程还活着时能不能拆"，不许各分支各写一份
+            if (!joinLoop()) {
+                settleRotateLegAtStop()
+                return finishWithoutTeardown()
+            }
             closeSegmentEngine()
             stopFeeder()
             stopCapFeeder()
@@ -799,8 +804,15 @@ class CodecRecorder(
         // 循环内完成 EOS → 抽干 → 封段 → 提交。泵线程若还在换段腿里（这一步现在有界，见
         // ROTATE_LEG_BUDGET_MS），停止等待就可能超时——**不许当"没什么事"放行**：
         // 那正是真机上"用户按了停止、内容已经丢了几十秒、结果却报已保存"的形态，
-        // 所以超时即按换段受阻结算（明确失败 + 丢帧账进结果）
-        if (!joinLoop()) settleRotateLegAtStop()
+        // 所以超时即按换段受阻结算（明确失败 + 丢帧账进结果）。
+        // 【但只记账，不拆资源】：泵线程还活着时，它才是 vCodec/aCodec/capCodec/muxer/target/
+        // currentSink/parts 的单写者（完整双触名单见 [settleRotateLegAtStop] 的 KDoc）。
+        // 控制线程在这时候抢拆，就是同一枚 MediaMuxer 被两线程 stop/release（native 释放后
+        // 另一线程还在写样本 = 崩溃路径）、同一枚 pending 被两路 seal、parts.add 与 clear 撞车。
+        if (!joinLoop()) {
+            settleRotateLegAtStop()
+            return finishWithoutTeardown()
+        }
         closeSegmentEngine()
         // AudioRecord 的 stop/release 固定排在 codec、muxer 之后（环境、内录两个 feeder）
         stopFeeder()
@@ -827,7 +839,14 @@ class CodecRecorder(
     override fun release() {
         if (state == EngineState.START || state == EngineState.STOPPING) stop()
         stopping = true
-        joinLoop()
+        // 泵线程还活着时不许拆资源（stop() 的双触名单）：它会照常走 pumpLoop 的
+        // closeSegmentEngine/sealCurrent 把 codec/muxer 拆掉、把本段封掉。抢拆就是两线程同拆。
+        // 本对象每个会话新建一个（CameraScreen 收尾即 `recorder = null`），不复用 ⇒ 这里直接返回，
+        // 不必把它复位成 IDLE；真拆不掉时也已经只剩进程退出这一条兜底。
+        if (!joinLoop()) {
+            Log.e(TAG, "release 时泵线程仍未退出：只记账不拆资源（资源与封段由泵线程收尾自己完成）")
+            return
+        }
         closeSegmentEngine()
         stopFeeder()
         stopCapFeeder()
@@ -916,6 +935,9 @@ class CodecRecorder(
             val willRotate = (ok && engineError == null && rotatePending) || (restart && engineError == null)
             // 换段腿起钟：**编码器即将被拆**那一刻（此后进来的帧写不进任何容器 = 丢帧窗口开启）
             if (willRotate) beginRotateLeg()
+            // 【单写者】下面这两步是 codec/muxer/target/currentSink/parts 的**唯一**拆除与封段入口：
+            // 控制线程（stop/release）在 joinLoop 超时时只记账、绝不进来抢（双触名单见
+            // settleRotateLegAtStop 的 KDoc）。正常停录由 Thread.join 提供 happens-before，不受影响。
             // 先拆 codec/muxer（moov 写完）再封段提交，顺序反了相册会拿到半截文件
             closeSegmentEngine()
             // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision
@@ -1019,6 +1041,27 @@ class CodecRecorder(
      * 停止路径的换段腿结算（控制线程；泵线程此刻仍卡在腿里）。判据收严（[rotateStopStallDecision]）：
      * 停止时最后一段封段本身就可能慢，误报"丢了 N 秒"比漏报更糟。只写此时已经安全的量：
      * 账本内部加锁、错误码 @Volatile——**不碰**泵线程单写者的段账表（那边可能同时在校验/写）。
+     *
+     * 【双触名单：joinLoop 超时那一刻，控制线程与泵线程会同时触碰的字段】
+     * 前提：`stop()`/`release()` 里的 [joinLoop] 有界等待（[LOOP_JOIN_MS]）可能超时，而泵线程
+     * 还卡在换段腿里（类注在 stop() 上写明这是真机形态：腿预算 [ROTATE_LEG_BUDGET_MS] 本就
+     * 比 join 窗口长）。这些字段全是普通 `private var`，无 @Volatile、无锁（唯一例外是
+     * @Volatile 的 stopping/abandonSegment/engineError 与内部加锁的 [rotateLoss]）：
+     *
+     * | 字段 | 泵线程在哪写 | 控制线程原本在哪写 | 后果 | 现在的处置 |
+     * |---|---|---|---|---|
+     * | `vCodec`/`aCodec`/`capCodec` | pumpLoop→[closeSegmentEngine]、openNextSegment 建/降级 | stop/release→closeSegmentEngine | 同一枚 MediaCodec 两线程 stop/release；更糟的是 native 释放后泵线程还在 `writeSampleData` ⇒ 崩溃 | **闸拦下**：超时只记账，泵线程自己收 |
+     * | `muxer` | 同上 + openMuxer | 同上 | 同上（`field=gone` 那族快照就是它的指纹） | 同上 |
+     * | `target`/`currentSink` | [sealCurrent]/[discardCurrent]/openNextSegment | stop 的 discardCurrent、closeTargetBounded | 同一枚 pending 被两路 seal/commit ⇒ 双提交或"提交又被丢弃" | 同上 |
+     * | `parts`（ArrayList） | [sealCurrent]→add | [finish] 的 toList/clear、[release] 的 clear | 并发 add 与 clear ⇒ 结构性异常，或**丢一条已封段**（文件已 commit 但不在结果里） | 同上（[finishWithoutTeardown] 连 finish 都不调） |
+     * | `feeder`/`capFeeder` | openNextSegment→stopFeeder/stopCapFeeder | stop/release→stopFeeder/stopCapFeeder | AudioRecord 两线程 stop（幂等，代价小） | 同上 |
+     * | `profile` | openNextSegment 降级改写 | 只读 | 读半旧值 ⇒ 本段轨组合判错 | 只读，且降级写发生在腿内、超时闸不涉及写 |
+     * | `segSampleCounts`/`segLostMs`/`segVideoWritten` | pumpLoop 每轮段闭落账 | finish/release 复位 | 索引与 partIndex 错位 | 同上（finish 不调） |
+     *
+     * **为什么不用「加锁」**：锁只能让两边的**收尾**互斥，挡不住泵线程正在 runSegment 里往
+     * muxer 写样本——控制线程照样能在它写到一半时把 muxer 释放掉。所以选的是"只记账不拆资源"。
+     * 剩下的窗口（控制线程读 `clock.elapsedMs()`/`muxFailDetail` 造失败快照）只是只读，
+     * 最坏是读到略旧的值，不产生写写冲突。
      */
     private fun settleRotateLegAtStop() {
         val start = rotateLegStartMs
@@ -1738,23 +1781,51 @@ class CodecRecorder(
 
     /**
      * 等泵循环收尾。
-     * @return true = 循环已退出（收尾完整）；false = 超时仍未退出（泵线程还卡在换段腿/收尾里，
-     *   调用方必须按"这一段可能丢内容"处理，见 [stop]）
+     *
+     * 【超时即只记账的闸】返回 false 表示泵线程仍卡在换段腿/收尾里：调用方**必须**按
+     * "泵线程单写者"处理，只记账、**不许**去碰 codec/muxer/target/currentSink/parts
+     * （双触名单与后果见 [settleRotateLegAtStop] 的 KDoc）。
+     *
+     * 【线程句柄不许在超时时丢掉】只在确认线程已退出时才置空 [loop]：丢早了，调用方随后
+     * 紧接着的 [release] 里第二次 joinLoop 会拿到 null、直接判"已退出"，于是在泵线程**仍然活着**
+     * 的情况下又去拆一遍资源——超时闸就被绕过去了。
+     *
+     * @return true = 循环已退出（收尾完整）；false = 超时仍未退出
      */
     private fun joinLoop(): Boolean {
-        val t = loop
-        loop = null
-        if (t == null) return true
+        val t = loop ?: return true
         try {
             t.join(LOOP_JOIN_MS)
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
         }
         if (t.isAlive) {
-            Log.e(TAG, "mux loop alive after ${LOOP_JOIN_MS}ms")
+            Log.e(TAG, "mux loop alive after ${LOOP_JOIN_MS}ms（只记账不拆资源）")
             return false
         }
+        loop = null
         return true
+    }
+
+    /**
+     * 泵线程还没退出时的停止结果：**只读已经安全的量**造一份失败快照就返回，
+     * **不拆资源、不封段、不清状态**。
+     *
+     * 【为什么不调 [finish]】finish 会 `parts.clear()` / `segSampleCounts.clear()` 并置 IDLE，
+     * 而 parts 正是泵线程 [sealCurrent] 的写入目标（ArrayList）——并发 add 与 clear 撞车要么抛
+     * 结构性异常、要么把刚封好的那一段从结果里抹掉（文件已 commit 但用户看不到）。
+     *
+     * 【谁来收尾】泵线程从换段腿里出来后照常走 [pumpLoop] 的 closeSegmentEngine/sealCurrent，
+     * 资源与封段都是它自己做；本对象停在 STOPPING，调用方紧接着的 [release] 会**再 join 一次**，
+     * 那时泵线程通常已自己收干净，控制线程再拆全是空操作（[joinLoop] 超时不丢句柄就是为了这个）。
+     */
+    private fun finishWithoutTeardown(): RecordResult {
+        val lost = rotateLoss.totalMs
+        // 错误码：已有原因码就保留；否则按"停止时换段腿未返回"记换段受阻（带丢失账与环节游标，
+        // UI 侧 recordResultText 已有映射）。绝不返回"成功但零产物"——那会让用户以为白录了。
+        val err = engineError ?: rotateStallError(lost, rotateFailStage)
+        Log.e(TAG, "停止时泵线程未退出：只记账不拆资源（已录分段由泵线程自己封），失败码 $err")
+        return RecordResult.fail(err, clock.elapsedMs(), lost, muxFailDetail)
     }
 
     private fun stopFeeder() {
