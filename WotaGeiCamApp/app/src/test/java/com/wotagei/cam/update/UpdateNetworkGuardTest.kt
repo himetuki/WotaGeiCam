@@ -90,6 +90,10 @@ class UpdateNetworkGuardTest {
             "android.permission.BLUETOOTH_ADMIN",
             "android.permission.BLUETOOTH_SCAN",
             "android.permission.BLUETOOTH_CONNECT",
+            // 蓝牙设备发现在 Android 10/11（API 29/30）被平台硬绑位置权限，缺它扫描静默无结果
+            // （r31 任务 10 / S4-M5-01）。这是**位置**运行时权限、不是联网权限，所以它进白名单、
+            // 绝不进下面的 networkDeny 名单——联网红线的语义一个字没动，仍是「只许 INTERNET 一条」。
+            "android.permission.ACCESS_FINE_LOCATION",
             "android.permission.READ_MEDIA_VIDEO",
             "android.permission.MANAGE_EXTERNAL_STORAGE",
             "android.permission.READ_EXTERNAL_STORAGE",
@@ -353,6 +357,37 @@ class UpdateNetworkGuardTest {
             manifestIssues(real + "\n<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />").isNotEmpty()
         )
         assertTrue("未过审的杂权限进 manifest 必须红", manifestIssues(real + "\n<uses-permission android:name=\"android.permission.NFC\" />").isNotEmpty())
+        // 突变 4（r31 任务 10 / S4-M5-01）：把蓝牙发现前置的 ACCESS_FINE_LOCATION 换成同族的
+        // ACCESS_COARSE_LOCATION。白名单是**逐条**过审的，不是"位置类一整族放行"——
+        // 这条同时证明 FINE_LOCATION 命中的是白名单分支，不是 networkDeny 分支（COARSE 不在禁令表里）
+        assertTrue(
+            "位置权限换成未过审的 ACCESS_COARSE_LOCATION 后尺子必须红",
+            manifestIssues(real.replace("android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION")).isNotEmpty()
+        )
+    }
+
+    /** 联网红线的语义守卫：位置权限是**白名单放行**而非联网放行，两个集合必须各归各（r31 任务 10） */
+    @Test
+    fun `位置权限只进白名单不进联网禁令表_联网红线语义未改写`() {
+        val m = manifestText()
+        // 守卫必须有输入：manifest 真的声明了这条位置权限
+        assertTrue(
+            "manifest 缺 ACCESS_FINE_LOCATION——Android 10/11 的蓝牙设备发现会静默无结果，守卫失去输入",
+            m.contains("android.permission.ACCESS_FINE_LOCATION")
+        )
+        // 白名单逐条命中 + 网络禁令表逐条未命中 ⇒ 两个集合没有串味
+        assertEquals(
+            "ACCESS_FINE_LOCATION 应被白名单放行（蓝牙发现前置），且不该触发任何联网禁令",
+            emptyList<String>(),
+            manifestIssues(m)
+        )
+        // 反证：位置权限串本身不会撞联网禁令表（禁令表只含 NETWORK/WIFI 四条），红线语义一字未动
+        listOf("ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION").forEach { p ->
+            val hit = manifestIssues(
+                m + "\n<uses-permission android:name=\"android.permission.$p\" />"
+            ).filter { it.contains("网络类权限") }
+            assertEquals("位置权限 $p 不该被判成联网权限（联网禁令表被改写了？）", emptyList<String>(), hit)
+        }
     }
 
     @Test
