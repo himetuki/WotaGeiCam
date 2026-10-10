@@ -223,6 +223,33 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      */
     private var encoderBaseNs = 0L
 
+    // ---- 打戳观测账（S1-M2-02 / M2-03 / M2-06 三联，2026-10-10）----
+    //
+    // 只观测、不改口径：三枚都进段收尾行（[drainStampObs]），一格数字定案是「源真慢」
+    // 「两时基有速率差」「管线延迟单调增长」还是「驱动写不进戳」。此前应用内部一个数字都没有，
+    // 用户报「掉帧」时只能靠外部 ffprobe 反推。O(1) 内存：只留和/计数/极值，不留样本
+    // （与 CodecRecorder 的 muxPtsFixes/muxPtsMaxBackUs 同一记账口径）。
+    // 全部由 GL 线程独占写（写点在 [stampEncoderPresentation]，读点在 [replaceEncoderSurface]），
+    // 不需要 @Volatile。
+
+    /** 帧龄累计和（ns）：换帧墙钟 − 相机 SOF 戳 */
+    private var stampAgeSumNs = 0L
+
+    /** 帧龄样本数（相机 SOF 戳还没到的那几帧不计入） */
+    private var stampAgeCount = 0L
+
+    /** 帧龄峰值（ns）：最坏管线延迟 */
+    private var stampAgeMaxNs = 0L
+
+    /** 网格空格数（格）：相邻两枚戳跳格数 >1 的部分累计（M2-01 单侧残余的投影） */
+    private var stampGapSlots = 0L
+
+    /** 最大空格跨距（格）：单次跳跃空掉多少格 */
+    private var stampGapMaxSlots = 0L
+
+    /** EGL 写呈现时间戳失败次数（该扩展在部分驱动上不可用） */
+    private var stampFailCount = 0
+
     // region 录制期转换（强制 24/25fps 无精确档时的抽帧/补弧，2026-10-03 定版）
 
     /** 转换模式；null = 不转换（编码支路照旧整帧直通） */
@@ -1108,6 +1135,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (surface != null && surface === encoderNative && widthPx == encoderWidth && heightPx == encoderHeight) {
             return
         }
+        // 打戳观测账的段尾（帧龄均值/峰值、空格数与最大跨距、写戳失败数）：放在销毁旧面**之前**，
+        // 换面与解面两条出口一次收干净——旧面在此之后就不存在了，而新面若绑定失败会就地 return，
+        // 放在后面会让上一段的账一直悬着，混进下一段成功的段收尾行里。
+        drainStampObs(if (surface == null) "解面" else "换面")
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
@@ -1387,17 +1418,71 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * nanoTime ⇒ 它才是真实时长）⇒ 成片被匀速拉长 8~14%、与音轨逐渐错位（亮场景源实到
      * 26~31 帧/秒，戳却按 24 帧/秒走）。写成"帧序号 × 网格"看不出这个问题，写成"真实时钟
      * 落网格"两头都要：帧长齐（不出现 90000/1）且总时长 = 真实时长。
+     *
+     * 打戳失败即**不推进**位次账与最后一枚戳（S1-M2-06）：`eglPresentationTimeANDROID` 是这枚
+     * 网格戳的唯一落点，失败后容器里那枚是 EGL 默认的换帧瞬间墙钟——它不落网格，成片整条退回
+     * 「r_frame_rate 被报成 90000/1」的老坑。账却先推进（`encoderLastPtsNs`/`encoderFrameIndex`）
+     * 的话，位次 sidecar 从此宣称某个位次带网格戳，而容器内容里没有 ⇒ 账与容器永久不一致。
+     * 失败次数照实计（段收尾行可查），且**不影响成片时间轴口径**：不推进 [encoderLastPtsNs]
+     * 只是撤掉防回退的地板，下一帧仍由 `System.nanoTime()` 落自己的格（墙钟单调 ⇒ 戳仍单调）。
      */
     private fun stampEncoderPresentation(encoder: EGLSurface) {
         val fps = encoderFps
         if (fps <= 0) return
         val display = eglDisplay
         if (display === EGL14.EGL_NO_DISPLAY) return
-        val ptsNs = encoderSlotPtsNs(encoderBaseNs, System.nanoTime(), fps, encoderLastPtsNs)
+        val nowNs = System.nanoTime()
+        val ptsNs = encoderSlotPtsNs(encoderBaseNs, nowNs, fps, encoderLastPtsNs)
+        // 观测 S1-M2-02：帧龄 = 换帧墙钟 − 相机 SOF 戳。抽帧节奏吃相机戳、成片戳吃墙钟，
+        // 中间那段不恒定的管线延迟此前全仓零读数，"源真慢 / 两时基速率差 / 延迟单调增长"
+        // 三种成因分不开。相机戳还没到（0）不记——那会把墙钟全量算成帧龄。
+        val frameTsNs = lastDrawnTimestampNs
+        if (frameTsNs > 0L) {
+            val ageNs = nowNs - frameTsNs
+            stampAgeSumNs += ageNs
+            stampAgeCount++
+            if (ageNs > stampAgeMaxNs) stampAgeMaxNs = ageNs
+        }
+        // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderSlotPtsNs]
+        // 把 slot 序号丢掉了，这里从两枚戳反推跨距，计空格总数与最大单次跨距。
+        val gap = encoderSlotGap(encoderLastPtsNs, ptsNs, fps)
+        if (gap > 0L) {
+            stampGapSlots += gap
+            if (gap > stampGapMaxSlots) stampGapMaxSlots = gap
+        }
+        val written = runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
+            .onFailure {
+                stampFailCount++
+                Log.w(TAG_GL, "写呈现时间戳失败：${it.message}")
+            }
+            .isSuccess
+        if (!written) return
         encoderLastPtsNs = ptsNs
-        runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
-            .onFailure { Log.w(TAG_GL, "写呈现时间戳失败：${it.message}") }
         encoderFrameIndex++
+    }
+
+    /**
+     * 段收尾观测行并清账（S1-M2-02/03/06 三联的唯一出口）。
+     *
+     * 两个段尾都要走它：换面重挂（分段轮转）与解面（停录）。没打过一帧戳的段不刷行，
+     * 但账一律清干净——半会话状态漏进下一次录制比少一行日志坏得多。
+     */
+    private fun drainStampObs(why: String) {
+        if (stampAgeCount > 0L || stampGapSlots > 0L || stampFailCount > 0) {
+            Log.i(
+                TAG_GL,
+                stampObsLine(
+                    why, stampAgeSumNs, stampAgeCount, stampAgeMaxNs,
+                    stampGapSlots, stampGapMaxSlots, stampFailCount
+                )
+            )
+        }
+        stampAgeSumNs = 0L
+        stampAgeCount = 0L
+        stampAgeMaxNs = 0L
+        stampGapSlots = 0L
+        stampGapMaxSlots = 0L
+        stampFailCount = 0
     }
 
     /**
@@ -1999,6 +2084,51 @@ internal fun encoderSlotPtsNs(baseNs: Long, nowNs: Long, fps: Int, lastPtsNs: Lo
     val elapsed = nowNs - baseNs
     val pts = if (elapsed <= 0L) baseNs else baseNs + (elapsed / step) * step
     return if (pts > lastPtsNs) pts else lastPtsNs
+}
+
+/**
+ * 相邻两枚网格戳之间的**空档格数**（纯函数；S1-M2-03 观测，调用点 [GlRenderEngine.stampEncoderPresentation]）。
+ *
+ * [encoderSlotPtsNs] 只交出戳、把 slot 序号丢了，空档在 App 侧因此不留痕：用户报「掉帧」时
+ * 内部没有一个数字能证实或证伪，只能靠外部 ffprobe。这里把「本次跳了几格 − 1」还原出来，
+ * 与 `CodecRecorder` 的 `muxPtsFixes`/`muxPtsMaxBackUs` 同一记账口径（计次 + 最大量）。
+ *
+ * 口径与 M2-01 的定版裁决一致：**如实反映真实缺口，不压缩**——所以本函数只数，不改戳。
+ *
+ * @param lastPtsNs 上一枚已写出的戳（`<= 0` = 本段首帧，没有上一枚 ⇒ 0）
+ * @param ptsNs 本次应写出的戳（小于上一枚 = 未前进 ⇒ 0）
+ * @param fps 目标帧率（`<= 0` 不可用 ⇒ 0）
+ * @return 空掉的网格格数；无空档（同格多帧 / 满一格 / 首帧 / 档位不可用）一律 0
+ */
+internal fun encoderSlotGap(lastPtsNs: Long, ptsNs: Long, fps: Int): Long {
+    if (fps <= 0 || lastPtsNs <= 0L || ptsNs < lastPtsNs) return 0L
+    val step = 1_000_000_000L / fps
+    if (step <= 0L) return 0L
+    val jumped = (ptsNs - lastPtsNs) / step
+    return if (jumped > 1L) jumped - 1L else 0L
+}
+
+/**
+ * 段收尾观测行的成文（纯函数；S1-M2-02/03/06 三联的唯一出口 [GlRenderEngine.drainStampObs] 只调它）。
+ *
+ * 抽成纯函数是为了让「均值/峰值/空格/跨距/失败数**真的落在那一行里**」可被 JVM 断言——
+ * 内联在 `Log.i` 的字符串里时，删掉任一字段测试仍全绿，正是本工程吃过多次的假绿。
+ * 均值口径：先按样本数求平均再换算成 ms（不先换算再平均，否则每帧截断误差会累积）。
+ *
+ * @param ageCount 帧龄样本数；0 时均值报 0（无样本不是 0 延迟，日志里靠 `样本=0` 自明）
+ */
+internal fun stampObsLine(
+    why: String,
+    ageSumNs: Long,
+    ageCount: Long,
+    ageMaxNs: Long,
+    gapSlots: Long,
+    gapMaxSlots: Long,
+    failCount: Int
+): String {
+    val meanMs = if (ageCount > 0L) ageSumNs / ageCount / 1_000_000L else 0L
+    return "打戳观测[$why] 帧龄 均值=${meanMs}ms 峰值=${ageMaxNs / 1_000_000L}ms 样本=$ageCount " +
+        "空格=${gapSlots}格 最大跨距=${gapMaxSlots}格 写戳失败=$failCount"
 }
 
 /**
