@@ -26,7 +26,8 @@
          用户看到的是「附近设备」永远空着）。API 31 起改由上面的 BLUETOOTH_SCAN + neverForLocation 承接，
          所以这条按 maxSdkVersion="30" 声明：把位置权限面死死收在真正需要它的那两档，不铺到 S 以上。
          注意：这是**位置**运行时权限，与 INTERNET 无关（UpdateNetworkGuardTest 的联网禁令表不含它）。 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"
+        tools:ignore="CoarseFineLocation" />
 
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <!-- 删/回收站别的 app 录的视频时不弹系统英文授权框的唯一正当途径：所有文件访问（用户在系统设置里开一次） -->
