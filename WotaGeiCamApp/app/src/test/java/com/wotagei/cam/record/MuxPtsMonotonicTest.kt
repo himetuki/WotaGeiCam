@@ -146,4 +146,69 @@ class MuxPtsMonotonicTest {
             held < direct
         )
     }
+
+    // ---- ④ 分账层：同格等值（设计内）与真倒退（异常）不许混记（S1-M3-04）----
+    //
+    // 为什么钉结构而不新增纯函数行：等值 ⇔ `backUs == 1`、真倒退 ⇔ `backUs >= 2` 已由上面 ①② 的
+    // 表测逐字覆盖（`等值必须推进一微秒` 记 1、`倒退一微秒记 2` 记 2），再加一行只是把定义抄一遍
+    // （AGENTS：由定义直接推出的等式测不出任何实现退化）。真正会退的是**接线**：把等值当异常
+    // 计数、或把两枚账又合回去，纯函数全绿也照样漏。突变 M1/M2 就打在这两处。
+
+    @Test
+    fun `同格等值与真倒退必须分两枚计数`() {
+        val w = bodyOf(codec, "writeSample")
+        val eq = w.indexOf("if (info.presentationTimeUs == lastUs)")
+        assertTrue("锚点丢失：writeSample 里没有「候选 == 上一戳 ⇒ 等值」的分叉判定", eq >= 0)
+        val elseAt = w.indexOf("} else {", eq)
+        assertTrue("锚点丢失：等值分支没有配 else（两枚账必须真的分开，不许共用一支）", elseAt > eq)
+
+        // 等值分支：只许计数 + d 级留痕
+        val eqBranch = w.substring(eq, elseAt)
+        assertTrue("等值必须单独计数", eqBranch.contains("muxPtsEqualFixes++"))
+        assertFalse(
+            "等值分支不许自增真倒退计数（混记＝把设计内同格多帧当异常，快照这把尺子就废了）",
+            eqBranch.contains("muxPtsFixes++")
+        )
+        assertFalse("等值分支不许动最大倒退量", eqBranch.contains("muxPtsMaxBackUs"))
+        assertFalse("等值分支不许打 w（逐帧刷屏正是本条要治的）", eqBranch.contains("Log.w("))
+        assertTrue(
+            "等值必须降到 d 级留痕（D 档默认关，见 Diag.diagLevelEnabled；否则仍按帧级刷屏）",
+            eqBranch.contains("Log.d(")
+        )
+
+        // 真倒退分支：保留 w + 两枚读数
+        val backBranch = w.substring(elseAt)
+        assertTrue("真倒退必须自增 ptsfix 计数", backBranch.contains("muxPtsFixes++"))
+        assertTrue("真倒退必须更新最大倒退量", backBranch.contains("muxPtsMaxBackUs"))
+        assertTrue("真倒退必须保留 w 级日志", backBranch.contains("Log.w("))
+    }
+
+    @Test
+    fun `两枚计数都要进段尾汇总行并逐段复位`() {
+        val seg = bodyOf(codec, "runSegment")
+        assertTrue("段尾汇总行必须带真倒退计数（不逐帧刷就得有汇总出口）", seg.contains("muxPtsFixes"))
+        assertTrue("段尾汇总行必须带等值计数", seg.contains("muxPtsEqualFixes"))
+        val reset = bodyOf(codec, "resetMuxPtsBooks")
+        assertTrue("复位必须清真倒退计数", reset.contains("muxPtsFixes = 0"))
+        assertTrue("复位必须清等值计数（否则跨段串味，汇总行读不出本段）", reset.contains("muxPtsEqualFixes = 0"))
+    }
+
+    // ---- ⑤ 换段重挂失败分支的资源释放（S1-M3-02）----
+
+    @Test
+    fun `重挂失败分支必须就地释放新建的编码器实例`() {
+        val open = bodyOf(codec, "openNextSegment")
+        val br = open.indexOf("if (!rebindOk)")
+        assertTrue("锚点丢失：openNextSegment 里没有 !rebindOk 分支", br >= 0)
+        val end = open.indexOf("return false", br)
+        assertTrue("锚点丢失：!rebindOk 分支没有 return false", end > br)
+        val branch = open.substring(br, end)
+        assertTrue(
+            "接线回调抛异常时这枚 MediaCodec 还没进 vCodec（vCodec = v 排在本分支之后），" +
+                "closeSegmentEngine 够不着它 ⇒ 必须就地 releaseQuietly(v)" +
+                "（漏放不是内存问题：并发 codec 实例有限，后续录制可能直接建不出编码器）",
+            branch.contains("releaseQuietly(v)")
+        )
+        assertTrue("输出句柄仍要照原样关（补释放不许顺手漏掉 fd）", branch.contains("closeBounded(t)"))
+    }
 }
