@@ -307,6 +307,10 @@ class MediaActions private constructor(
                     val ids = clips.map { it.id }
                     dao.clearFor(ids)
                     seriesDao.clearFor(ids)
+                    // 成员被清干净后收掉没人指的系列空壳头（#5 Step 4d）：
+                    // clearFor 只删 series_part，media_series 的头会留下一个谁也不指的 seriesId，
+                    // 不清的话表会无界增长。读侧本来就按「成员 ≥ 2 才成组」忽略它，这纯粹是收尾。
+                    seriesDao.pruneOrphans()
                     trashDao.removeAll(clips.map { it.uri.toString() })
                     clips.forEach { ThumbLoader.evict(it.uri) }
                 }
