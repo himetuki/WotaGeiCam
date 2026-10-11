@@ -188,6 +188,23 @@ class MediaRepo private constructor(private val app: Context) {
             .flowOn(Dispatchers.IO)
     }
 
+    /**
+     * 一次性明确查询：不受列表刷新闸门约束（闸门只护列表/播放页两条流）。
+     *
+     * 为什么有了 [clipById] 还要它：关闸期 [clipById] 的闸门分支**零发射**，散点的单次反查
+     * （对比页选右片 / 练习回程 / 历史面板）用 `.first()` 收流会在零发射流上**挂起整个关闸期**
+     * （约 1.15s）——挂起不是异常，但一样是缺陷。这里一次查完即返回，语义与 [clipById]
+     * 开闸后的单次发射相同：null = 查过且没有。调用点见 CompareScreen / CameraScreen 的五处反查。
+     */
+    suspend fun clipByIdOnce(id: Long): VideoClip? {
+        // 块体而非 `= withContext(...)` 表达式体：源码守卫（ClipByIdOnceGateGuardTest）按花括号体
+        // 定位本函数，表达式体会让守卫失去输入
+        return withContext(Dispatchers.IO) {
+            val clip = queryById(id)
+            clip?.copy(tags = tagDao.tagsOf(id).toSet())
+        }
+    }
+
     /** 自定义 tag 列表（按首次使用时间） */
     fun customTags(): Flow<List<String>> =
         tagDao.observeAll()
