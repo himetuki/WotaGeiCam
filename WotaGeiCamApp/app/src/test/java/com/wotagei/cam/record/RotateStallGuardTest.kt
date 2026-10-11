@@ -107,7 +107,8 @@ class RotateStallGuardTest {
         assertTrue("越界判定必须走桥函数", settleBody.contains("rotateStallDecision("))
         assertTrue("越界必须置 ROTATE_STALL 失败码", settleBody.contains("rotateStallError("))
         assertTrue("腿耗时必须折成丢帧账", settleBody.contains("rotateLostMs("))
-        assertTrue("腿起点必须复位（否则下一次结算算成两倍）", settleBody.contains("rotateLegStartMs = 0L"))
+        // 锚串随 2026-10-11 #16 的 AtomicLong 化迁移：读清必须是一次 CAS（getAndSet），不是裸读裸清
+        assertTrue("腿起点必须原子读清（裸读裸清会与控制线程抢成双加）", settleBody.contains("rotateLegStartMs.getAndSet(0L)"))
         assertTrue("非轮转腿必须早退（不许判失败）", settleBody.contains("if (!judgeStall) return"))
 
         assertTrue(
@@ -302,7 +303,7 @@ class RotateStallGuardTest {
         assertTrue("release 必须复位", bodyOf(codec, "release").contains("resetRotateBooks()"))
         assertTrue("finish 必须复位（结果已取出，账不能漏进下一次）", bodyOf(codec, "finish").contains("resetRotateBooks()"))
         val reset = bodyOf(codec, "resetRotateBooks")
-        assertTrue("复位必须清腿起点", reset.contains("rotateLegStartMs = 0L"))
+        assertTrue("复位必须清腿起点（AtomicLong 化后走 set）", reset.contains("rotateLegStartMs.set(0L)"))
         assertTrue("复位必须清入库超时位", reset.contains("rotateStoreTimedOut = false"))
         assertTrue("复位必须清段账", reset.contains("segLostMs.clear()"))
         assertTrue("复位必须清累计账", reset.contains("rotateLoss.clear()"))
