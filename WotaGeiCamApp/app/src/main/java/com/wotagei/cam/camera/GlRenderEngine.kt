@@ -1479,7 +1479,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 TAG_GL,
                 stampObsLine(
                     why, stampAgeSumNs, stampAgeCount, stampAgeMaxNs,
-                    stampGapSlots, stampGapMaxSlots, stampFailCount
+                    stampGapSlots, stampGapMaxSlots,
+                    // 实到帧率 = 本段打戳成功的帧数 / 本段时长。与「空格」互补：
+                    // 空格答「网格有没有被跳空」，实到答「源到底交了多少帧」。
+                    // 读点在 encoderBaseNs 复位（换面末尾）**之前** —— 本函数就调在那一段里。
+                    stampAchievedCentiFps(encoderFrameIndex, System.nanoTime() - encoderBaseNs),
+                    stampFailCount
                 )
             )
         }
@@ -2186,13 +2191,28 @@ internal fun encoderSlotGap(lastPtsNs: Long, ptsNs: Long, fps: Int): Long {
 }
 
 /**
- * 段收尾观测行的成文（纯函数；S1-M2-02/03/06 三联的唯一出口 [GlRenderEngine.drainStampObs] 只调它）。
+ * 段内**实测帧率**（纯函数，单位「厘帧/秒」，成文时除 100 取两位小数）。
  *
- * 抽成纯函数是为了让「均值/峰值/空格/跨距/失败数**真的落在那一行里**」可被 JVM 断言——
+ * 为什么单独一个纯函数而不是内联在 [stampObsLine] 前面算：它是 `n / span` 的除法，
+ * `n = 0` 或 `span <= 0`（时钟回退、段还没起走）必须各报 0 而不是崩或报天文数字，
+ * 这条边界要在 JVM 里能断。同段的口径提醒见 [stampObsLine]。
+ *
+ * ⚠ 读数比「源真实帧率」**偏高约一帧的量**（≈0.04fps @23.75）：`span` 盖的是第 0 帧到第 n−1 帧的
+ * 到达时刻，末帧的曝光不在跨度里，所以 `n / span` 比 `n / (n/fps)` 大。不是 bug，是"帧数除以跨度"
+ * 的固有形态——守卫按这个事实写，不许把它当成恒等式。
+ */
+internal fun stampAchievedCentiFps(frameIndex: Int, spanNs: Long): Long =
+    if (frameIndex <= 0 || spanNs <= 0L) 0L else frameIndex.toLong() * 100_000_000_000L / spanNs
+
+/**
+ * 段收尾观测行的成文（纯函数；S1-M2-02/03/06 三联 + 实到帧率的唯一出口 [GlRenderEngine.drainStampObs] 只调它）。
+ *
+ * 抽成纯函数是为了让「均值/峰值/空格/跨距/失败数/实到**真的落在那一行里**」可被 JVM 断言——
  * 内联在 `Log.i` 的字符串里时，删掉任一字段测试仍全绿，正是本工程吃过多次的假绿。
  * 均值口径：先按样本数求平均再换算成 ms（不先换算再平均，否则每帧截断误差会累积）。
  *
  * @param ageCount 帧龄样本数；0 时均值报 0（无样本不是 0 延迟，日志里靠 `样本=0` 自明）
+ * @param achievedCentiFps 实到帧率（厘帧/秒，整数传入以免浮点格式化踩到 locale：小数点会变逗号）
  */
 internal fun stampObsLine(
     why: String,
@@ -2201,11 +2221,13 @@ internal fun stampObsLine(
     ageMaxNs: Long,
     gapSlots: Long,
     gapMaxSlots: Long,
+    achievedCentiFps: Long,
     failCount: Int
 ): String {
     val meanMs = if (ageCount > 0L) ageSumNs / ageCount / 1_000_000L else 0L
+    val fpsText = "${achievedCentiFps / 100}.${(achievedCentiFps % 100).toString().padStart(2, '0')}"
     return "打戳观测[$why] 帧龄 均值=${meanMs}ms 峰值=${ageMaxNs / 1_000_000L}ms 样本=$ageCount " +
-        "空格=${gapSlots}格 最大跨距=${gapMaxSlots}格 写戳失败=$failCount"
+        "实到=${fpsText}fps 空格=${gapSlots}格 最大跨距=${gapMaxSlots}格 写戳失败=$failCount"
 }
 
 /**

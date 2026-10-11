@@ -257,7 +257,7 @@ class EncoderSlotClockTest {
 
     @Test
     fun `段收尾行必须含帧龄均值与峰值`() {
-        val line = stampObsLine("换面", 200 * ms, 4, 80 * ms, 0, 0, 0)
+        val line = stampObsLine("换面", 200 * ms, 4, 80 * ms, 0, 0, 2375, 0)
         assertTrue("帧龄均值必须进段收尾行：$line", line.contains("均值=50ms"))
         assertTrue("帧龄峰值必须进段收尾行：$line", line.contains("峰值=80ms"))
         assertTrue("样本数必须进段收尾行（均值无样本时要自明）：$line", line.contains("样本=4"))
@@ -265,7 +265,7 @@ class EncoderSlotClockTest {
 
     @Test
     fun `段收尾行必须含空格数与最大跨距与写戳失败数`() {
-        val line = stampObsLine("解面", 0, 0, 0, 23, 4, 2)
+        val line = stampObsLine("解面", 0, 0, 0, 23, 4, 0, 2)
         assertTrue("空格数必须进段收尾行：$line", line.contains("空格=23格"))
         assertTrue("最大跨距必须进段收尾行：$line", line.contains("最大跨距=4格"))
         assertTrue("写戳失败数必须进段收尾行：$line", line.contains("写戳失败=2"))
@@ -273,20 +273,59 @@ class EncoderSlotClockTest {
 
     @Test
     fun `段收尾行无样本时均值报零而不是除零崩`() {
-        val line = stampObsLine("换面", 0, 0, 0, 0, 0, 0)
+        val line = stampObsLine("换面", 0, 0, 0, 0, 0, 0, 0)
         assertTrue("无样本必须是 均值=0ms 且 样本=0：$line", line.contains("均值=0ms") && line.contains("样本=0"))
     }
 
     /** 突变自证：把均值字段从行里删掉（内联字符串时被手滑改掉的形态）必红 */
     @Test
     fun `尺子自己能红_段收尾行删掉任一字段必报红`() {
-        val good = stampObsLine("换面", 200 * ms, 4, 80 * ms, 23, 4, 2)
+        val good = stampObsLine("换面", 200 * ms, 4, 80 * ms, 23, 4, 2375, 2)
         // 断言本身能看出缺字段（供突变体吃）
-        fun violated(s: String) = !s.contains("均值=50ms") || !s.contains("空格=23格") || !s.contains("写戳失败=2")
+        fun violated(s: String) =
+            !s.contains("均值=50ms") || !s.contains("空格=23格") || !s.contains("写戳失败=2") || !s.contains("实到=23.75fps")
         assertFalse("良品必须先真的绿", violated(good))
         assertTrue("删掉均值字段必红", violated(good.replace("均值=50ms", "均值=")))
         assertTrue("删掉空格字段必红", violated(good.replace("空格=23格", "空格=")))
         assertTrue("删掉失败数字段必红", violated(good.replace("写戳失败=2", "写戳失败=")))
+        assertTrue("删掉实到字段必红", violated(good.replace("实到=23.75fps", "")))
+    }
+
+    /** 实到帧率必须**直报**，用户报「成片帧率不对」时 logcat 一行就能读出来 */
+    @Test
+    fun `段收尾行必须直报实到帧率`() {
+        val line = stampObsLine("换面", 200 * ms, 4, 80 * ms, 23, 4, 2375, 2)
+        assertTrue("实到帧率必须进段收尾行（两位小数）：$line", line.contains("实到=23.75fps"))
+        // 两位小数必须补零：23.05 不能打成 23.5
+        val padded = stampObsLine("换面", 0, 0, 0, 0, 0, 2305, 0)
+        assertTrue("不足一位小数必须补零：$padded", padded.contains("实到=23.05fps"))
+        // 不可算时必须报 0.00 而不是天文数字或崩
+        assertTrue(
+            stampObsLine("换面", 0, 0, 0, 0, 0, 0, 0).contains("实到=0.00fps")
+        )
+    }
+
+    /** 实到帧率纯函数的边界：没帧 / 跨度非正 一律报零 */
+    @Test
+    fun `实到帧率_无帧或跨度非正报零`() {
+        assertEquals(0L, stampAchievedCentiFps(0, 1_000L))
+        assertEquals(0L, stampAchievedCentiFps(-3, 1_000L))
+        assertEquals(0L, stampAchievedCentiFps(683, 0L))
+        assertEquals(0L, stampAchievedCentiFps(683, -1_000L))
+    }
+
+    /**
+     * 实到读数与「源真实帧率」的偏差是**一帧量**，不是零。
+     *
+     * `span` 盖的是第 0 帧到第 n−1 帧的到达时刻，末帧曝光不在跨度里 ⇒ `n/span` 比 `n/(n/fps)` 大。
+     * 本仓有「恒等式假证明」前科，所以这里把两个端点都写死，不写成任何形式的等式断言。
+     */
+    @Test
+    fun `实到帧率_读数只偏高约一帧`() {
+        // span 取 n 个帧距（末帧曝光刚好在跨度外）⇒ 读数 ≈ 23.75
+        assertEquals(2375L, stampAchievedCentiFps(683, 683 * srcStep2375))
+        // span 只取 n−1 个帧距 ⇒ 读数偏高约一帧（≈0.03fps @23.75）
+        assertEquals(2378L, stampAchievedCentiFps(683, 682 * srcStep2375))
     }
 
     // ---- ③-3 接线守卫：打戳处记账 + 段尾落行 + M2-06 不推进位次 ----
@@ -331,6 +370,9 @@ class EncoderSlotClockTest {
         val bad = ArrayList<String>()
         val drain = flatten(bodyOf(maskedGl, "drainStampObs"))
         if (!drain.contains("stampObsLine(")) bad.add("段尾行必须走纯函数 stampObsLine 成文（内联字符串 = 删字段仍全绿）")
+        if (!drain.contains("stampAchievedCentiFps(")) bad.add("实到帧率必须走纯函数 stampAchievedCentiFps 算（内联除法 = 边界无人断）")
+        if (!drain.contains("encoderFrameIndex")) bad.add("实到帧率的分子必须取本段帧号 encoderFrameIndex")
+        if (!drain.contains("encoderBaseNs")) bad.add("实到帧率的分母必须用本段基准 encoderBaseNs 算时长")
         if (!drain.contains("Log.i(")) bad.add("段尾行必须真的发出去")
         listOf("stampAgeSumNs", "stampAgeCount", "stampAgeMaxNs", "stampGapSlots", "stampGapMaxSlots", "stampFailCount")
             .forEach { if (!drain.contains("$it = 0")) bad.add("段尾必须清零 $it（漏一枚就跨段串账）") }
@@ -412,6 +454,10 @@ class EncoderSlotClockTest {
             ),
             Triple("段尾漏清一枚账", gl.replace("stampGapMaxSlots = 0L", ""), true),
             Triple("段尾内联成文不走纯函数", gl.replace("stampObsLine(", "inlineLine("), true),
+            // 实到帧率（2026-10-11）：分子写死 / 内联除法，两种退化形态都必须报红
+            Triple("实到帧率内联算术不走纯函数", gl.replace("stampAchievedCentiFps(", "inlineFps("), true),
+            Triple("实到帧率分子不取本段帧号", gl.replace("stampAchievedCentiFps(encoderFrameIndex,", "stampAchievedCentiFps(0,"), true),
+            Triple("实到帧率分母不用本段基准", gl.replace("System.nanoTime() - encoderBaseNs", "System.nanoTime() - stampAgeSumNs"), true),
             // 对照组：改注释/空白不许引发红（尺子不许对无害改动过敏）
             // 注释必须落在**声明之前**：masked 文本上再插的 `//`/`/* */` 不会二次遮蔽，
             // 插在名字与 `(` 之间会把 `\bfun\s+drainStampObs\s*\(` 这条声明正则打断，
