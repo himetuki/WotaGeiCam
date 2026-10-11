@@ -764,10 +764,12 @@ fun PlayerScreen(
                                             clipRepo.invalidate()
                                         }
                                         is ClipResult.Fail ->
-                                            banner = if (r.reason == ClipError.RANGE) {
-                                                R.string.player_clip_too_short
-                                            } else {
-                                                R.string.player_clip_failed
+                                            banner = when (r.reason) {
+                                                ClipError.RANGE -> R.string.player_clip_too_short
+                                                // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，
+                                                // 文案与"导出失败"分开——东西没丢，重启后自动恢复
+                                                ClipError.COMMIT -> R.string.player_clip_commit_kept
+                                                else -> R.string.player_clip_failed
                                             }
                                     }
                                 } finally {
@@ -828,7 +830,14 @@ fun PlayerScreen(
                                             banner = R.string.player_track_export_done
                                             clipRepo.invalidate()
                                         }
-                                        is ClipResult.Fail -> banner = R.string.player_track_export_failed
+                                        is ClipResult.Fail ->
+                                            // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，
+                                            // 文案与"导出失败"分开；RANGE 不在选轨的失败域（无出点截断）
+                                            banner = if (r.reason == ClipError.COMMIT) {
+                                                R.string.player_track_commit_kept
+                                            } else {
+                                                R.string.player_track_export_failed
+                                            }
                                     }
                                 } finally {
                                     trackExporting = false
