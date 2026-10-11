@@ -3,6 +3,7 @@ package com.wotagei.cam.record
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaExtractor
 import android.media.MediaScannerConnection
 import android.os.Environment
 import android.provider.MediaStore
@@ -27,6 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 3. **进程内只跑一次**、只扫成片目录（[VideoStore.RELATIVE_PATH]），不做全盘遍历。
  * 另有一条**数据红线**：成片永不删除——剥段后同名的**成片**已存在时只记录不动手（宁可留一条难看名字，
  * 也绝不误删用户成片）；只有"无主/重复的 sidecar 档案"才允许删（它是纯档案，类注见 [ArcDropLog]）。
+ *
+ * #4 起新增 [rescuePendingRows]：导出链 commit 全败留下的 IS_PENDING=1 行的救援通道
+ * （按行查、不认文件名，与上面的按文件清扫互不重叠；数据红线见其 KDoc）。
  */
 internal object StalePendingSweep {
 
@@ -219,6 +223,109 @@ internal object StalePendingSweep {
     /** 成片目录（公共 Movies 下的固定相对路径，同 [VideoStore.RELATIVE_PATH]） */
     @Suppress("DEPRECATION") // 公共目录定位：本工程持 MANAGE_EXTERNAL_STORAGE，走这条最稳
     fun outputDir(): File = File(Environment.getExternalStorageDirectory(), VideoStore.RELATIVE_PATH)
+
+    /**
+     * #4 导出链 pending 行救援：导出在 `muxer.stop()` 之后 commit 全败时**保留行不删**
+     * （成片字节已在盘上，删行 = MediaStore 连带删文件 = 丢成片，与 VideoStore.seal 同口径），
+     * 留下的 IS_PENDING=1 行对外不可见（相册隐藏）、本应用列表也不查（IS_PENDING=0 门），
+     * 只有这里能在冷启把它们收进来。
+     *
+     * **目录参数由调用方（ui 层）传入**——record 包不得反向依赖 player 包，剪辑/选轨的
+     * 相对路径（ClipRule.RELATIVE_PATH / TrackRule.RELATIVE_PATH）只能由上层喂进来。
+     *
+     * **数据红线（三条，缺一不可）**：
+     * 1. 年龄 ≥ [SWEEP_STALE_MS]：在飞的导出是分钟级，绝不动；
+     * 2. 「文件在盘」的行**永不删**：MediaExtractor 打得开且有轨 → 只 update 清 IS_PENDING
+     *    （救援）；打不开 → Log.w 留原状（宁可留给下一轮/人工，也不猜）；
+     * 3. 唯一删行分支在「文件确认缺失」：行指向的文件已不在，删坏行无数据可损失
+     *    （复用 [deleteRow] 语义）。
+     *
+     * 单轮上限 [SWEEP_MAX_INDEX]（收敛于多轮，不阻塞启动）。
+     * @return 实际救援/清理的行数
+     */
+    fun rescuePendingRows(app: Context, dirs: List<File>): Int {
+        val now = System.currentTimeMillis()
+        var acted = 0
+        for (dir in dirs) {
+            if (acted >= SWEEP_MAX_INDEX) break
+            val relPath = relativePathOf(dir) ?: continue
+            for (row in queryPendingRows(app, relPath)) {
+                if (acted >= SWEEP_MAX_INDEX) break
+                if (now - row.addedMs < SWEEP_STALE_MS) continue
+                val f = row.dataPath?.let { File(it) }
+                if (f == null || !f.exists()) {
+                    // 唯一删行分支：文件确认缺失，删坏行（无数据可损失）
+                    if (deleteRow(app, row.id)) {
+                        Log.i(TAG, "救援：删坏行（文件已不在）${row.displayName}")
+                        acted++
+                    }
+                } else if (extractable(f)) {
+                    // 文件在盘且是完整合法的容器：只清 IS_PENDING 收进相册，绝不删
+                    if (unpendRow(app, row.id)) {
+                        Log.i(TAG, "救援：pending 成片收录 ${row.displayName}")
+                        acted++
+                    }
+                } else {
+                    // 打不开（半截文件/容器损坏）：留原状
+                    Log.w(TAG, "救援：pending 文件打不开，留原状 ${row.displayName} path=${row.dataPath}")
+                }
+            }
+        }
+        if (acted > 0) {
+            Log.i(TAG, "pending 行救援：本轮处置 $acted 条")
+        }
+        return acted
+    }
+
+    /** 查某相对路径下 owner 可见的 pending 行（IS_PENDING=1 对 owner 默认可见，只对外部 app 隐藏） */
+    private fun queryPendingRows(app: Context, relPath: String): List<Row> = runCatching {
+        val out = ArrayList<Row>()
+        app.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.DATA,
+                MediaStore.MediaColumns.DATE_ADDED
+            ),
+            "${MediaStore.MediaColumns.IS_PENDING}=1 AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+            arrayOf("$relPath/"),
+            null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                out += Row(c.getLong(0), c.getString(1), c.getString(2), c.getLong(3) * 1000L)
+            }
+        }
+        out
+    }.getOrDefault(emptyList())
+
+    /** 目录 File → MediaStore RELATIVE_PATH（与 [outputDir] 的构造互逆）；不在外部存储根下返回 null */
+    private fun relativePathOf(dir: File): String? = runCatching {
+        @Suppress("DEPRECATION")
+        dir.relativeTo(Environment.getExternalStorageDirectory()).invariantSeparatorsPath
+    }.getOrNull()
+
+    /** 救援判据：MediaExtractor 打得开且有轨（只有完整合法的容器才值得清 IS_PENDING 收进相册） */
+    private fun extractable(f: File): Boolean {
+        val ex = MediaExtractor()
+        return try {
+            ex.setDataSource(f.absolutePath)
+            ex.trackCount > 0
+        } catch (e: Exception) {
+            false
+        } finally {
+            runCatching { ex.release() }
+        }
+    }
+
+    /** 救援动作本体：只 update 清 IS_PENDING，绝不 delete */
+    private fun unpendRow(app: Context, id: Long): Boolean = runCatching {
+        app.contentResolver.update(
+            ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id),
+            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+            null, null
+        ) > 0
+    }.getOrDefault(false)
 }
 
 /** 清扫处置（见 [sweepPlan] 的表） */
