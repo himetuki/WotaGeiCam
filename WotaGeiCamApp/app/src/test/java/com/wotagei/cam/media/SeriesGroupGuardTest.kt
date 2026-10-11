@@ -4,6 +4,7 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.source.KotlinSourceScan.regionOf
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,6 +45,27 @@ class SeriesGroupGuardTest {
         val body = src.substringAfter(decl).substringBefore(until)
         if (body.length >= src.length) throw AssertionError("切片没有缩短（终点在声明之前？）")
         return flatten(body)
+    }
+
+    private fun maskedBody(src: String, fn: String) = flatten(bodyOf(codeOnly(src), fn))
+
+    /**
+     * 只在某个函数的**花括号体**内替换，供末尾的「突变自证」按视图切片用。
+     *
+     * 为什么要按函数体切而不是对整文件 `replace`：网格与时间线两处调的是**逐字相同**的
+     * `SeriesGroup.galleryEntries(clips)`，整文件替换会把两处一起改掉 —— 那样「摘掉网格归组」
+     * 这条突变就分不清是网格判据翻了红，还是时间线那侧被牵连，互不代偿那一栏会永远绿。
+     * 遮蔽文本与原文逐位等长（见 KotlinSourceScan.codeOnly），所以偏移能直接回原文做拼接。
+     *
+     * 没改到东西时**抛**而不是返回原文：语义空操作的突变体在本仓被点过名（恒绿的那种），
+     * 这里当场炸掉比留一条什么都没证明的断言强。
+     */
+    private fun replaceInBody(src: String, fn: String, from: String, to: String): String {
+        val r = regionOf(codeOnly(src), fn)
+        val seg = src.substring(r.start, r.end)
+        val out = seg.replace(from, to)
+        if (out == seg) throw AssertionError("突变体没有改动 fun $fn 的函数体：`$from` 不在里面")
+        return src.substring(0, r.start) + out + src.substring(r.end)
     }
 
     // ------------------------------------------------------------------ 红线：schema
@@ -180,7 +202,160 @@ class SeriesGroupGuardTest {
         assertTrue("prune 必须排在 clearFor 之后（反了就 prune 不掉刚清空的头）", pruneAt > clearAt)
     }
 
+    // ------------------------------------------------------------------ 第2轮返修·甲：卡片菜单作用域
+
+    @Test
+    fun `卡片菜单必须在入口处经扇出展开否则只动首段`() {
+        val screen = body("media/GalleryScreen.kt", "GalleryScreen")
+        assertTrue(
+            "卡片的 [⋯] 必须经 SeriesGroup.expandSeriesTargets 展开（不展开 = 分享/回收站/彻底删除只动首段）",
+            screen.contains("SeriesGroup.expandSeriesTargets(listOf(clip), clips)")
+        )
+        assertTrue("菜单状态必须存列表而不是单片", screen.contains("mutableStateOf<List<VideoClip>?>(null)"))
+        assertTrue("时间线与网格共用同一个菜单入口 openMenu（两处各抄一遍扇出会分叉）", screen.contains("onMenu = openMenu"))
+        assertTrue("CardMenu 必须收展开后的 targets", screen.contains("targets = targets,"))
+        assertFalse("旧的单片菜单状态不许复活", screen.contains("menuClip"))
+    }
+
+    @Test
+    fun `菜单的批量动作必须吃展开后的列表且单片语义族留在代表段`() {
+        val menu = body("media/GalleryScreen.kt", "CardMenu")
+        assertTrue("代表段必须取 targets.first()", menu.contains("clip = targets.first()"))
+        assertTrue("分享必须扇出到 targets", menu.contains("ops.share(targets)"))
+        assertTrue("移入回收站必须扇出到 targets", menu.contains("ops.moveToTrash(targets)"))
+        assertTrue("还原必须扇出到 targets", menu.contains("ops.restoreFromTrash(targets)"))
+        assertTrue("彻底删除必须扇出到 targets", menu.contains("ops.deleteForever(targets,"))
+        assertFalse("分享不许退回单片", menu.contains("ops.share(listOf(clip))"))
+        assertFalse("移入回收站不许退回单片", menu.contains("ops.moveToTrash(listOf(clip))"))
+        assertFalse("还原不许退回单片", menu.contains("ops.restoreFromTrash(listOf(clip))"))
+        assertFalse("彻底删除不许退回单片", menu.contains("ops.deleteForever(listOf(clip)"))
+        // 单片语义族：收藏是**取反**开关（对全组取反会给出互相矛盾的结果）；
+        // 对比 / 重命名 / 分类标签在 MediaActions 里是单片签名，上一轮已裁决不新增批量重载
+        assertTrue("收藏仍只作用在代表段", menu.contains("ops.setLike(clip, !clip.liked)"))
+        assertFalse("不许把收藏扇出到 targets", menu.contains("setLike(targets"))
+        // 整组删除的确认框必须报条数，否则 3 个文件的删除藏在「彻底删除该视频？」后面
+        assertTrue("整组删除的确认框必须报条数", menu.contains("gallery_purge_title_many, targets.size"))
+    }
+
+    // ------------------------------------------------------------------ 第2轮返修·乙：网格归组
+
+    @Test
+    fun `网格与时间线必须走同一条归组且collapse旋钮只在SeriesGroup一处`() {
+        val grid = body("media/GalleryScreen.kt", "ClipGrid")
+        val tl = body("media/GalleryScreen.kt", "TimelineList")
+        for ((name, seg) in listOf("时间线" to tl, "网格" to grid)) {
+            assertTrue("$name 必须调 SeriesGroup.galleryEntries（不调 = 归组永远建不起来）", seg.contains("SeriesGroup.galleryEntries("))
+            assertFalse(
+                "$name 不许自己传 collapse：旋钮只在 SeriesGroup 一处，改一处两个视图一起回退",
+                Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(seg)
+            )
+        }
+        assertTrue(
+            "网格只保留代表段占格（组内其余成员交给子段弹层，否则一次录制在网格里出现两遍）",
+            grid.contains("clips.filter { entryByRep.containsKey(it.id) }")
+        )
+        assertTrue("组卡角标必须走 stringResource（Compose 里不许出现面向用户的中文串）", grid.contains("R.string.gallery_series_count"))
+        assertTrue("组卡点开必须走子段弹层而不是直接进播放页", grid.contains("onOpenSeries(sid)"))
+        assertTrue("单片卡仍照旧进播放页", grid.contains("onOpen(clip.id)"))
+    }
+
+    @Test
+    fun `网格组卡走底部弹层且弹层顶部是整组操作子段不许扇出`() {
+        val sheet = body("media/GalleryScreen.kt", "SeriesSheet")
+        assertTrue("弹层必须复用本仓既有的 BottomPanel（不许新造容器）", sheet.contains("BottomPanel("))
+        assertTrue("弹层顶部那行必须是整组操作", sheet.contains("onGroupMenu(entry.rep)"))
+        assertTrue("弹层必须逐段列出行", sheet.contains("entry.parts.forEach") && sheet.contains("SeriesPartRow("))
+        assertTrue(
+            "弹层只钉 seriesId、按当前 clips 重新解析（钉快照 = 整组删掉后面板还挂着）",
+            sheet.contains("SeriesGroup.galleryEntries(clips).firstOrNull { it.seriesId == seriesId }")
+        )
+        assertTrue("弹层的整组操作文案必须走 stringResource", sheet.contains("R.string.gallery_group_ops"))
+
+        val screen = body("media/GalleryScreen.kt", "GalleryScreen")
+        assertTrue(
+            "整组操作必须经 expandSeriesTargets 扇出",
+            screen.contains("onGroupMenu = { rep -> menuTargets = SeriesGroup.expandSeriesTargets(listOf(rep), clips) }")
+        )
+        assertTrue(
+            "子段自己的 [⋯] 只管那一段：不许扇出（否则点第 2 段的菜单会动整组）",
+            screen.contains("onPartMenu = { part -> menuTargets = listOf(part) }")
+        )
+        assertFalse(
+            "弹层的子段菜单不许走扇出",
+            screen.contains("onPartMenu = { part -> menuTargets = SeriesGroup.expandSeriesTargets(")
+        )
+    }
+
     // ------------------------------------------------------------------ 突变自证
+
+    /**
+     * 突变自证：逐条破坏本轮的接线，判据必须真的翻红，且**互不代偿**。
+     *
+     * 每个突变都先断言「它确实改动了源码」——没改动的突变体在这条自证里等于什么都没证明
+     * （本仓踩过的语义空操作突变坑）。四个突变分别是**真偏离**：
+     * ① 摘掉入口扇出；② 分享退回单片；③ 网格自己把 collapse 传成 false
+     * （那一组就不折了、网格真的回到今天的样子）；④ 子段菜单误走整组扇出。
+     */
+    @Test
+    fun `突变自证二：摘掉本轮接线判据必红且互不代偿`() {
+        val screen = mainSourceText("media/GalleryScreen.kt")
+
+        // ① 菜单入口的扇出
+        val noFan = screen.replace(
+            "menuTargets = SeriesGroup.expandSeriesTargets(listOf(clip), clips)",
+            "menuTargets = listOf(clip)"
+        )
+        assertTrue("突变体①必须真的改了源码", noFan != screen)
+        assertFalse(
+            "摘掉扇出后菜单作用域判据必须翻假",
+            maskedBody(noFan, "GalleryScreen").contains("SeriesGroup.expandSeriesTargets(listOf(clip), clips)")
+        )
+        assertTrue("互不代偿：摘掉扇出不得牵动 CardMenu 的批量动作", maskedBody(noFan, "CardMenu").contains("ops.share(targets)"))
+        assertTrue("互不代偿：摘掉扇出不得牵动网格归组", maskedBody(noFan, "ClipGrid").contains("SeriesGroup.galleryEntries("))
+
+        // ② 菜单的分享动作退回单片
+        val noShare = screen.replace("ops.share(targets)", "ops.share(listOf(clip))")
+        assertTrue("突变体②必须真的改了源码", noShare != screen)
+        assertTrue("突变体②确实把分享改成了单片", maskedBody(noShare, "CardMenu").contains("ops.share(listOf(clip))"))
+        assertFalse("分享退回单片后动作族判据必须翻假", maskedBody(noShare, "CardMenu").contains("ops.share(targets)"))
+        assertTrue("互不代偿：摘掉分享扇出不得牵动回收站扇出", maskedBody(noShare, "CardMenu").contains("ops.moveToTrash(targets)"))
+
+        // ③ 网格自己把 collapse 传成 false（真偏离：那一组不再折，网格回到今天的样子）
+        val noCollapse = replaceInBody(
+            screen, "ClipGrid",
+            "SeriesGroup.galleryEntries(clips)",
+            "SeriesGroup.galleryEntries(clips, collapse = false)"
+        )
+        assertTrue("突变体③必须真的改了源码", noCollapse != screen)
+        assertTrue(
+            "突变体③只动了网格那一处",
+            maskedBody(noCollapse, "TimelineList").contains("SeriesGroup.galleryEntries(") &&
+                !Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(maskedBody(noCollapse, "TimelineList"))
+        )
+        assertFalse(
+            "网格自己传 collapse 后旋钮判据必须翻假",
+            Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(maskedBody(noCollapse, "ClipGrid"))
+        )
+        assertTrue("互不代偿：网格关 collapse 不得牵动弹层", maskedBody(noCollapse, "SeriesSheet").contains("onGroupMenu(entry.rep)"))
+
+        // ④ 子段菜单误走整组扇出
+        val partFans = screen.replace(
+            "onPartMenu = { part -> menuTargets = listOf(part) }",
+            "onPartMenu = { part -> menuTargets = SeriesGroup.expandSeriesTargets(listOf(part), clips) }"
+        )
+        assertTrue("突变体④必须真的改了源码", partFans != screen)
+        assertFalse(
+            "子段误扇出后弹层判据必须翻假",
+            maskedBody(partFans, "GalleryScreen").contains("onPartMenu = { part -> menuTargets = listOf(part) }")
+        )
+        assertTrue(
+            "互不代偿：子段误扇出不得牵动整组操作那一行",
+            maskedBody(partFans, "GalleryScreen")
+                .contains("onGroupMenu = { rep -> menuTargets = SeriesGroup.expandSeriesTargets(listOf(rep), clips) }")
+        )
+    }
+
+    // ------------------------------------------------------------------ 突变自证（上）
 
     /**
      * 突变自证：逐条破坏接线，判据必须真的翻红。
