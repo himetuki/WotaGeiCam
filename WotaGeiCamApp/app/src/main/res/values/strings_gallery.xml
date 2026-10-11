@@ -72,4 +72,10 @@
     <string name="media_share_no_app">没有可用于分享的应用</string>
     <string name="media_need_all_files">到设置页打开「所有文件访问」，之后删改本机任何视频都不再弹系统框</string>
     <string name="media_share_trashed">回收站里的视频要先还原才能分享</string>
+
+    <!-- 分段系列（#5 Step 4c）：归组只是视觉折叠，不做任何媒体字节拼接 -->
+    <string name="gallery_series_count">共 %1$d 段</string>
+    <string name="gallery_desc_expand_series">展开这一次的全部分段</string>
+    <string name="gallery_desc_collapse_series">收起分段</string>
+    <string name="gallery_part_prefix">第 %1$d 段</string>
 </resources>
