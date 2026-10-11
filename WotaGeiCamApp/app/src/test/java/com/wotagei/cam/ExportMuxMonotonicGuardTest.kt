@@ -196,9 +196,9 @@ class ExportMuxMonotonicGuardTest {
             KotlinSourceScan.bodyOf(
                 KotlinSourceScan.codeOnly(
                     raw.replace(Regex.fromLiteral("vMuxLastPtsUs = fix.ptsUs"), "vMuxLastPtsUs = norm")
-                )
-            ),
-            "writeVideo"
+                ),
+                "writeVideo"
+            )
         )
         assertFalse("删 lastPts 回写后守卫必须报红", mutant.contains("vMuxLastPtsUs = fix.ptsUs"))
     }
