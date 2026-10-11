@@ -170,8 +170,10 @@ class SeriesGroupGuardTest {
     @Test
     fun `多选条必须经扇出展开否则只动首段`() {
         assertTrue(
-            "多选必须经 SeriesGroup.expandSeriesTargets 展开（否则「只把首段移进回收站、其余还在原地」）",
-            masked("media/GalleryScreen.kt").contains("SeriesGroup.expandSeriesTargets(")
+            "多选必须经 SeriesGroup.expandSeriesTargets 展开（否则「只把首段移进回收站、其余还在原地」）。" +
+                "锚串必须钉到多选这一处完整调用：第 2 轮返修·甲之后卡片菜单/组卡菜单各有自己的扇出，" +
+                "整文件找符号会漏掉「多选被摘掉」这一种退化（门禁 #1c 实测）",
+            masked("media/GalleryScreen.kt").contains("SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)")
         )
         val fan = exprBody(
             mainSourceText("media/SeriesGroup.kt"),
@@ -375,7 +377,11 @@ class SeriesGroupGuardTest {
             "clips.filter { it.id in selectedIds }"
         )
         assertTrue("突变体①必须真的改了源码", noFan != screenRaw)
-        assertFalse("摘掉扇出后扇出接线判据必须翻假", codeOnly(noFan).contains("SeriesGroup.expandSeriesTargets("))
+        assertFalse(
+            "摘掉扇出后扇出接线判据必须翻假（判据钉的是多选这一处完整调用；" +
+                "文件里卡片菜单/组卡菜单的扇出与此无关，不许拿它们顶数）",
+            codeOnly(noFan).contains("SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)")
+        )
 
         // ② 收尾：摘掉 pruneOrphans
         val noPrune = actionsRaw.replace("seriesDao.pruneOrphans()", "")
@@ -396,15 +402,17 @@ class SeriesGroupGuardTest {
             exprBody(noSeries, "fun clips(scope: MediaScope", "单条查询").contains("s.series")
         )
 
-        // ④ 互不代偿：摘掉收尾不得牵连接线；摘掉扇出不得牵连收尾
-        // （否则"必红"可能只是某一条恒红 —— 那样三条断言里有一半是摆设）
+        // ④ 互不代偿：每条突变只翻**自己那一条**判据的半边，其余半边必须仍绿
+        // （否则"必红"可能只是某一条恒红 —— 那样三条断言里有一半是摆设。
+        //   旧写法把 noPrune 喂给读侧切片、noFan 喂给 finishDelete 的 bodyOf——
+        //   两个输入都在对方文件里，判据没等到就已炸「失去输入」，门禁 #1c 实测红）
         assertTrue(
-            "摘掉 pruneOrphans 不得牵连读侧接线",
-            exprBody(noPrune, "fun clips(scope: MediaScope", "单条查询").contains("s.series")
+            "摘掉 pruneOrphans 后收尾判据的另半边（先 clearFor）必须仍绿",
+            flatten(bodyOf(codeOnly(noPrune), "finishDelete")).contains("seriesDao.clearFor(ids)")
         )
         assertTrue(
-            "摘掉扇出不得牵连收尾",
-            flatten(bodyOf(codeOnly(noFan), "finishDelete")).contains("seriesDao.pruneOrphans()")
+            "摘掉多选扇出后卡片菜单的扇出必须仍绿（同一判据族里的另一处接线不许被同一突变带走）",
+            codeOnly(noFan).contains("SeriesGroup.expandSeriesTargets(listOf(clip), clips)")
         )
     }
 }
