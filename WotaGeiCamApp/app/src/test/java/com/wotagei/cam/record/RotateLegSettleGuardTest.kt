@@ -30,6 +30,10 @@ class RotateLegSettleGuardTest {
      * 腿结算的本地同构模型：两处结算各自「`getAndSet(0L)` 消费 → 算 lost → `rotateLoss.add`」。
      * 生产侧形状由下面的「结构体检」钉住，这份模型不会悄悄漂走。
      *
+     * 控制线程那侧拆成 [controlRead]/[controlAdd] 两相：读与入账之间的缝隙正是裸读不清位
+     * 形态的**竞态窗口**所在，[settleAtStop] 背靠背调两相 = 无并发，runRace 里把泵线程
+     * 插进缝里 = 真实交错的确定性模拟。
+     *
      * @param rawAtStop true = 把控制线程那侧退回成旧形态（裸读不清位），用于突变自证
      */
     private class LegModel(private val rawAtStop: Boolean = false) {
@@ -45,12 +49,17 @@ class RotateLegSettleGuardTest {
             loss.add(now - s)
         }
 
-        /** 控制线程侧：与生产 [CodecRecorder.settleRotateLegAtStop] 同构 */
-        fun settleAtStop(now: Long) {
-            val s = if (rawAtStop) start.get() else start.getAndSet(0L)
-            if (s == 0L) return
-            loss.add(now - s)
+        /** 控制线程侧第 1 相「读+清」：真身 = getAndSet 原子读清；突变体 = 裸读不清 */
+        fun controlRead(): Long = if (rawAtStop) start.get() else start.getAndSet(0L)
+
+        /** 控制线程侧第 2 相「入账」：读到 0 = 别人已消费，早退 */
+        fun controlAdd(read: Long, now: Long) {
+            if (read == 0L) return
+            loss.add(now - read)
         }
+
+        /** 控制线程侧：与生产 [CodecRecorder.settleRotateLegAtStop] 同构（两相背靠背 = 无并发） */
+        fun settleAtStop(now: Long) = controlAdd(controlRead(), now)
     }
 
     private val legMs = 5_000L
@@ -76,32 +85,66 @@ class RotateLegSettleGuardTest {
     }
 
     /**
-     * 突变自证：把控制线程那侧退回成**裸读不清位**（旧缺陷形态），两种顺序都必须多记一份。
+     * 突变自证：把控制线程那侧退回**裸读不清位**（旧缺陷形态），在真实竞态的交错下必须双加。
      *
-     * 上一轮的坑是「突变体与真身逐点相等」——那叫语义空操作，尺子永远绿。这里断言的是
-     * **真身记一份、突变体记两份**，两条断言彼此独立成立。
+     * 双加的窗口在「读」与「入账」**之间**：控制线程裸读到腿起点后被打断，泵线程整段结算
+     * （getAndSet 消费掉同一枚），控制线程再拿陈旧读数入账。整体调用的顺序模拟里：
+     * - 控制线程先完整结算 ⇒ 裸读不清位，泵线程后到仍消费同一枚 ⇒ 双加（缺陷可见）；
+     * - 泵线程先完整结算 ⇒ 控制线程再裸读读到的已是 0、早退 ⇒ **不**双加——那不是尺子钝，
+     *   是该顺序下缺陷本就不发生（旧版把两种整体顺序都断言成双加，是期望写错，
+     *   门禁 #1c 实测 stopFirst=false 红成 expected:<10000> but was:<5000>）。
+     *
+     * 所以突变体的自证在**交错形态**下做，并配上「真身在同一交错下不双加」的对照——
+     * 同一把交错尺，只有裸读会双加，这才是真牙齿（真身那相 getAndSet 原子读清，
+     * 泵线程插进来只能读到 0 早退）。
      */
     @Test
     fun `尺子自己能红_控制线程裸读不清位必双加`() {
-        /** 每次都新建模型：账本跨调用累加，复用实例会把两次结算叠成两份（假红） */
-        fun run(rawAtStop: Boolean, stopFirst: Boolean): Pair<Long, Int> {
+        val now = 1_000L + legMs
+
+        /** 整体调用（无并发）：控制线程读+入账背靠背。每次都新建模型：账本跨调用累加（假红） */
+        fun runWhole(rawAtStop: Boolean, stopFirst: Boolean): Pair<Long, Int> {
             val m = LegModel(rawAtStop = rawAtStop)
             m.begin(1_000L)
             if (stopFirst) {
-                m.settleAtStop(1_000L + legMs); m.settlePump(1_000L + legMs)
+                m.settleAtStop(now); m.settlePump(now)
             } else {
-                m.settlePump(1_000L + legMs); m.settleAtStop(1_000L + legMs)
+                m.settlePump(now); m.settleAtStop(now)
             }
             return m.loss.totalMs to m.loss.count
         }
+
+        /** 真实竞态的交错模拟：控制线程裸读 → 泵线程整段结算 → 控制线程拿陈旧读数入账 */
+        fun runRace(rawAtStop: Boolean): Pair<Long, Int> {
+            val m = LegModel(rawAtStop = rawAtStop)
+            m.begin(1_000L)
+            val read = m.controlRead()
+            m.settlePump(now)
+            m.controlAdd(read, now)
+            return m.loss.totalMs to m.loss.count
+        }
+
+        // 真身：两种整体顺序都只记一份（谁先消费谁独得，另一侧必得 0 早退）
         listOf(true, false).forEach { stopFirst ->
-            val (gTotal, gCount) = run(false, stopFirst)
-            val (bTotal, bCount) = run(true, stopFirst)
+            val (gTotal, gCount) = runWhole(false, stopFirst)
             assertEquals("stopFirst=$stopFirst 真身总量必须一份", legMs, gTotal)
             assertEquals("stopFirst=$stopFirst 真身次数必须一次", 1, gCount)
-            assertEquals("stopFirst=$stopFirst 突变体必须多记一份", 2 * legMs, bTotal)
-            assertEquals("stopFirst=$stopFirst 突变体次数必须变两次", 2, bCount)
         }
+        // 突变体（裸读不清位）在整体调用下：控制线程先结算的顺序双加；
+        // 泵先到的顺序不双加——窗口没赶上，这正是缺陷的边界，要钉住而不是假装它恒现
+        val (b1Total, b1Count) = runWhole(true, stopFirst = true)
+        assertEquals("控制线程先结算时裸读不清位必须双加", 2 * legMs, b1Total)
+        assertEquals("次数必须变两次", 2, b1Count)
+        val (b2Total, b2Count) = runWhole(true, stopFirst = false)
+        assertEquals("泵线程先结算时控制线程裸读读到的已是 0——本顺序下双加本就不发生", legMs, b2Total)
+        assertEquals("次数仍是一次", 1, b2Count)
+        // 交错形态（真实竞态）：同一把尺，真身不双加、突变体双加
+        val (gTotal, gCount) = runRace(false)
+        assertEquals("同一交错下真身仍只记一份（getAndSet 把读清做成一步，泵线程必得 0 早退）", legMs, gTotal)
+        assertEquals("真身次数一次", 1, gCount)
+        val (bTotal, bCount) = runRace(true)
+        assertEquals("裸读不清位在真实交错下必须双加", 2 * legMs, bTotal)
+        assertEquals("突变体次数两次", 2, bCount)
     }
 
     // ---- 结构体检（真身与突变体同吃） ----
