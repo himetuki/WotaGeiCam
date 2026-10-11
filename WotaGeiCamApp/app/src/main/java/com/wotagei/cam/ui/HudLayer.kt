@@ -1519,7 +1519,7 @@ fun BoxScope.HudTopChrome(
                 onClick = onSettingsClick
             )
         }
-        // 能力/权限告警条：纵向多行、全量显示，行序 = 固定优先级（见 [warnRows]）。
+        // 能力/权限告警条：纵向多行、全量显示，行序 = 固定优先级（见 [warnRows]）；无告警时整块不组合。
         // 外层 padding 沿用改前单条 Text 的 `start=10,end=10,top=2`（挪到组合体头上）：
         // 单条时与改前**逐像素一致**，多条时行间只多一枚 2dp 缝（改前 0——那时尚无第二行可言）。
         val warns = warnRows(
@@ -1529,6 +1529,10 @@ fun BoxScope.HudTopChrome(
             effect = effect,
             renderMode = renderMode
         )
+        // 这枚分叉是「无告警时整块不组合」的唯一保证，**别删**：Column 的 padding 在零子元素时
+        // 照样参与测量，拆掉它会量出一枚 20×2dp 的隐形盒——干净态下 topBarH 静默 +2dp、
+        // 竖 Dock 上界与 HintBar 整体下移 2dp，用户看不出但整条实测链偏了。
+        // （WarnRowsRenderGuardTest 判据 3 钉着这枚分叉，删了当场红）
         if (warns.isNotEmpty()) {
             Column(
                 Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp),
