@@ -129,6 +129,7 @@ import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.media.SeriesStore
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.AudioTrackKind
@@ -203,6 +204,7 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.RefLineOverlay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -389,6 +391,20 @@ fun CameraScreen(
             if (result.ok) {
                 lastUri = result.uri ?: lastUri
                 repo.invalidate()
+                // 分段归组落库（#5）：一次录制的多段写进 media_series/series_part，媒体库据此
+                // 把它们归成一组。必须在 invalidate **之后**落：invalidate 触发的重查与写库并发，
+                // 写完的 observe 流会再触发一次，届时成员关系已在库里。
+                // 重录沿用同一 seriesId，upsert 是 REPLACE ⇒ 只保留最终 attempt 的 parts。
+                // 整段 NonCancellable（SeriesStore 内部）：用户在写库途中离场不许把归组漏掉。
+                // 取消必须原样抛回（同 launchOp 口径）：runCatching 会把 CancellationException 一并吞掉，
+                // 吞掉之后这个协程会在已取消的作用域里继续 collect，闸门与后续逻辑全乱。
+                try {
+                    SeriesStore.record(repo.db(), result.seriesId, runner.sessionStartedAtMs, result.parts)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Throwable) {
+                    Log.e(TAG_UI, "分段归组落库调用失败 seriesId=${result.seriesId}", e)
+                }
                 // 登记失败不推翻「已保存」：文件确实在盘上，只是相册可能暂时看不见，得另外说
                 // 换段受阻的丢失（2026-10-08 真机缺陷）：实时自检判废的段会被删掉、不在这份结果里，
                 // 但"换段腿卡住期间画面在丢"这件事必须让用户看见——提示里带上丢了多少秒
@@ -2043,6 +2059,15 @@ private class RecordRunner(
     private var sessionStore: VideoStore? = null
 
     /**
+     * 本会话的起录时刻（`MediaSeries.startedAt` 那一列）。
+     *
+     * 与 [sessionStore] 同处打点、重录不刷新：它记的是"这次录制什么时候开始的"，
+     * 而不是"最后一次 attempt 什么时候开始的"。落库在录制页 `result.collect` 里读它。
+     */
+    var sessionStartedAtMs: Long = 0L
+        private set
+
+    /**
      * 当前尝试创建的输出 sink：重录时作为丢弃兜底（引擎 discardCurrent 已删，重复删幂等）。
      *
      * ⚠ **只在 [beginSession] 赋值一次**，引擎发生分段轮转后它指向的仍是**首段**——那时首段已封段
@@ -2129,6 +2154,8 @@ private class RecordRunner(
             attempt = 0
             sessionArgs = SessionArgs(width, height, fps, sensorOrientation, deviceDegrees, front, arcConvert, captureAudio)
             sessionStore = VideoStore(app)
+            // 系列起始时刻：与 sessionStore 同一刻打点（重录沿用同一会话，不刷新）
+            sessionStartedAtMs = System.currentTimeMillis()
             beginSession()
         }
     }
@@ -2201,7 +2228,7 @@ private class RecordRunner(
             // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
             //（无 sidecar 无前缀，用户无从察觉）。重录也是"新会话"，同样必发
             glProvider()?.setArcConvert(profile.arcConvert, profile.fps)
-            glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps)
+            glProvider()?.setOutputSurface(surface, profile.width, profile.height, profile.fps, profile.fpsNtsc)
             // 换段重挂：GPU 路 per-codec 输入面随分段轮转换代（引擎在泵线程建好新面后
             // 同步回调），这里与首段同一口径「下发 + 等挂好」，GL 挂好前新段不 start；
             // MrRecorder 默认档（persistent 面被接受）面跨实例不变，引擎永不回调（空挂无害）；
@@ -2215,7 +2242,7 @@ private class RecordRunner(
                     val gl = glProvider()
                     gl?.markSegmentRotating()
                     try {
-                        gl?.setOutputSurface(s, profile.width, profile.height, profile.fps)
+                        gl?.setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)
                         awaitEncoderSurface(s)
                     } finally {
                         gl?.clearSegmentRotating()
@@ -2712,6 +2739,9 @@ private class RecordRunner(
             mirrored = front,
             useGpu = renderMode == RenderMode.GPU,
             arcConvert = arcConvert,
+            // ※ 档（相机给不出该 fps 的固定档）按 NTSC 非整数网格落戳：链上 fps 仍是 Int，
+            // 只有网格步长改查 ntscGridStepNs（见 record/RecordProfile.fpsNtsc）
+            fpsNtsc = !params.fps.value.exact,
             captureAudio = AudioTrack.CAPTURE in plan
         )
     }
