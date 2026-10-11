@@ -605,7 +605,8 @@ internal class ArcRepairGl(
      */
     private fun stampPresentation(ptsUs: Long): Boolean {
         if (eglDisplay === EGL14.EGL_NO_DISPLAY || encoderEglSurface === EGL14.EGL_NO_SURFACE) {
-            Log.w(TAG_ARC_GL, "写呈现时间戳失败：EGL display/surface 无效，本次 emit 作废")
+            stampFailCount++
+            Log.w(TAG_ARC_GL, "写呈现时间戳失败（累计 ${stampFailCount} 次）：EGL display/surface 无效，本次 emit 作废")
             return false
         }
         val ptsNs = basePtsNs + ptsUs * 1000L
