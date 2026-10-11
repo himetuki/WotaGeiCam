@@ -10,6 +10,7 @@ import android.media.MediaMuxer
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
+import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
 import com.wotagei.cam.record.exportOrientationHint
 import kotlinx.coroutines.CancellationException
@@ -75,6 +76,11 @@ object TrackRule {
  *
  * 复用 [ClipResult]：Done 带 mediaId/name；选轨缺失（如 cap-only 段选内录）归 MUX 失败——
  * 三控件在单音轨片上根本不显示，这条路径只是防御性兜底。
+ *
+ * sidecar（#6）：选轨导出是**同轨全片 remux**——不裁帧、输出 0 点 = 视频首样本（baseUs 平移
+ * 对位次无影响），源片带 `.drops.json` 时档案**逐字直写**成片同名 sidecar，不做
+ * [ClipRule.remapDrops]（shift=0 的重映射是语义空操作，直写才是口径）。commit 成功与
+ * "全败保留"两条路径都写（与 ClipExporter 同一套纪律）。
  */
 class TrackExporter(private val ctx: Context) {
 
@@ -135,10 +141,13 @@ class TrackExporter(private val ctx: Context) {
                     }
                     if (!committed) {
                         // 全败：成片字节已在盘上，删行 = 丢成片（MediaStore 删行连带删文件）。
-                        // 保留 pending 行，冷启由 StalePendingSweep.rescuePendingRows 收录
+                        // 保留 pending 行，冷启由 StalePendingSweep.rescuePendingRows 收录；
+                        // sidecar 照成功路径同款写（#6：全片直写无平移），被救援回的成片档案要完整
                         Log.e(TAG, "commit 全败（共 4 次）uri=$pendingUri，成片保留待冷启救援")
+                        writeSidecar(src, pendingUri)
                         return@withContext ClipResult.Fail(ClipError.COMMIT)
                     }
+                    writeSidecar(src, pendingUri)
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id track=$track offsetMs=$offsetMs")
                     ClipResult.Done(id, TrackRule.nameOf(src.name))
@@ -280,6 +289,20 @@ class TrackExporter(private val ctx: Context) {
         return false
     }
 
+    /**
+     * sidecar 携带（#6）：全片 remux 无位次平移，源档案**逐字直写**成片同名 sidecar
+     * （[ArcDropLog] 自拼 `.drops.json`，落点参数是成片路径）。写失败只少一份补弧档案，
+     * 不牵连导出成败。
+     */
+    private fun writeSidecar(src: VideoClip, pendingUri: android.net.Uri) {
+        val srcLog = src.dataPath?.let { ArcDropLog.readFrom(it) }
+        val outPath = queryData(pendingUri)
+        if (srcLog != null && outPath != null) {
+            val ok = ArcDropLog.writeTo(outPath, srcLog)
+            Log.i(TAG, "sidecar direct ok=$ok")
+        }
+    }
+
     private fun insertPending(name: String): android.net.Uri? {
         return runCatching {
             val values = ContentValues().apply {
@@ -317,6 +340,13 @@ class TrackExporter(private val ctx: Context) {
         Log.i(TAG, "failed reason=$reason")
         return ClipResult.Fail(reason)
     }
+
+    /** pending 记录的真实路径（DATA 列）；sidecar 与它同目录同名（照抄 ClipExporter 同名实现） */
+    private fun queryData(uri: android.net.Uri): String? = runCatching {
+        ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
+        }
+    }.getOrNull()
 
     // endregion
 }
