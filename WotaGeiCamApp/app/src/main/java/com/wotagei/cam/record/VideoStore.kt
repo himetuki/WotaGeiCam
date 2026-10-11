@@ -39,8 +39,14 @@ class VideoStore(private val ctx: Context) {
         private const val MB = 1024L * 1024L
     }
 
-    /** 一次录制的分段归属标识（媒体库 Room 表用它把分段串成同一段落） */
-    val seriesId: String = "S" + System.currentTimeMillis() + "_" + Random.nextInt(1000)
+    /**
+     * 一次录制的分段归属标识（媒体库 Room 表用它把分段串成同一段落）。
+     *
+     * 类型是 [Long] 而非 String：Room 侧 `MediaSeries.seriesId` 是 Long 主键，
+     * 生成端归一到 Long 后实体一字不改 ⇒ 不改 schema ⇒ 不触发破坏性重建库（用户收藏/标签/回收站会清空）。
+     * id 由 [SeriesIds] 生成（时间基 + 进程内单调序号），不再用「同毫秒 1/1000 随机」那种会撞的写法。
+     */
+    val seriesId: Long = SeriesIds.nextSeriesId()
 
     private val resolver get() = ctx.contentResolver
 

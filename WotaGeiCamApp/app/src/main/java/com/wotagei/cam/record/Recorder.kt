@@ -111,7 +111,8 @@ data class RecordResult(
     val bytes: Long,
     val durationMs: Long,
     val error: String?,
-    val seriesId: String = "",
+    /** [Long] 与 Room 侧 `MediaSeries.seriesId`（Long 主键）对齐；0 = 本次没有系列归属 */
+    val seriesId: Long = 0L,
     val parts: List<VideoSegment> = emptyList(),
     /** 有几段没能在 MediaStore 登记成可见；>0 时 UI 要在「已保存」里额外提示 */
     val uncommitted: Int = 0,
