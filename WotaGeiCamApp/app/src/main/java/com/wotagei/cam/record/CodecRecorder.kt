@@ -30,6 +30,16 @@ import java.nio.ByteBuffer
  *   （[AudioChannel]，heldPkt/lastPts/EOS 标志互不串扰），addTrack 顺序 = 环境轨先、内录轨后
  *   （轨序即 tkhd track_ID 顺序，批 4 播放器按此识别）；Muxer 只在「视频就绪 且 环境轨就绪
  *   且（未启用捕获 或 捕获轨就绪）」时 start()（[startMuxerIfReady]）；
+ * - **NTSC 帧率的容器声明取舍（定案 2026-10-11）**：`KEY_FRAME_RATE` 是 int，**保持写整数
+ *   24/30/60 不变**，不因为新增 NTSC 网格而改成 24000/1001 或浮点。理由三条：
+ *   1. 容器帧率声明只是**播放器 UI 显示与时长预估的 hint**，AV 同步一律以 PTS 为准——
+ *      PTS 由 GL 侧按 `ntscGridStepNs` 的真步长逐帧写入（见 `camera/GlRenderEngine`），
+ *      声明写 24 不会让成片真值变回 24；
+ *   2. `ffprobe` 的 `r_frame_rate` 由 `stts`（真实帧长表）**反推**，会如实报出 23.976 量级，
+ *      不依赖我们写进容器的那个整数；
+ *   3. 播放器侧用 `MediaFormat.frameRate`(int) 显示「24.0」，差 0.1% 可接受，非整数的
+ *      两位小数文案已备好；把它改成 Volume 形态对**显示**零收益，副作用是播放器整条链回归。
+ *   一句话：**网格要真、声明可以粗**——这两件事在本工程里必须分开看。
  * - **录制中捕获源失效**（投影撤销 → [AudioFeeder.captureActive] 变 false）：内录轨就地 EOS 收尾、
  *   环境+视频继续录——成片仍是合法 MP4（内录轨比另两轨短，播放器按轨长对齐），不中断录制；
  * - 停止顺序：codec.stop/release → muxer.stop/release → AudioRecord.stop/release。
@@ -532,6 +542,7 @@ class CodecRecorder(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
             )
             setInteger(MediaFormat.KEY_BIT_RATE, p.effectiveBitrate())
+            // 整数声明：NTSC 非整数档也照写整数，理由见本文件头「NTSC 帧率的容器声明取舍」
             setInteger(MediaFormat.KEY_FRAME_RATE, p.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SEC)
             if (p.timeLapse) setFloat(KEY_CAPTURE_RATE, p.captureRate)
@@ -603,6 +614,7 @@ class CodecRecorder(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
             )
             setInteger(MediaFormat.KEY_BIT_RATE, p.effectiveBitrate())
+            // 整数声明：NTSC 非整数档也照写整数，理由见本文件头「NTSC 帧率的容器声明取舍」
             setInteger(MediaFormat.KEY_FRAME_RATE, p.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_SEC)
             if (p.timeLapse) setFloat(KEY_CAPTURE_RATE, p.captureRate)

@@ -269,7 +269,8 @@ class RecordHealthWiringGuardTest {
         assertTrue("会话体必须每段必发 setArcConvert", begin.contains("setArcConvert(profile.arcConvert, profile.fps)"))
         assertTrue(
             "会话体必须下发编码面并等挂好（首录与重录同一口径）",
-            begin.contains("setOutputSurface(surface, profile.width, profile.height, profile.fps)") &&
+            // 锚串随 2026-10-11 #2 的 NTSC 参数迁移（setOutputSurface 新增 ntsc 形参）
+            begin.contains("setOutputSurface(surface, profile.width, profile.height, profile.fps, profile.fpsNtsc)") &&
                 begin.contains("awaitEncoderSurface()")
         )
         assertTrue("会话体必须重建 pending（partIndex=0 起头）", begin.contains("createPending(0)"))
