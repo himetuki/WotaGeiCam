@@ -6,7 +6,9 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.source.KotlinSourceScan.regionOf
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -179,7 +181,8 @@ class FrameRateFallbackTest {
         assertTrue("良品必须先真的绿，否则后面突变体的红没有意义", engineViolations(engine).isEmpty())
         // 突变 1：把纯函数调用换回内联算式（保留旧谓词）
         val inlined = engine.replace(
-            "return FrameRateFallback.ceilingFps(state.fpsRanges, cap)",
+            // 锚串随 2026-10-11 #15 迁移：cap 算式抽成 fpsCap() 单一真源（供退档日志复用）
+            "return FrameRateFallback.ceilingFps(state.fpsRanges, fpsCap())",
             "var best = 0\n        for (r in state.fpsRanges) {\n            val usable = minOf(r.hi, cap)\n" +
                 "            if (usable > r.lo && usable > best) best = usable\n        }\n" +
                 "        return if (best > 0) best else (state.fpsRanges.minOfOrNull { it.hi } ?: 25)"
@@ -209,6 +212,105 @@ class FrameRateFallbackTest {
             "ceiling<=0 早退分支被删后尺子必须红",
             engineViolations(noGuard).any { it.contains("ceiling<=0") }
         )
+    }
+
+    // ------------------------------------------------- #15 无退档目标早退：行为固化 + 可观测化
+    //
+    // 2026-10-11：r31 的 `acc4c42`+`29c4bca` 把退档口径改成 [FrameRateFallback.ceilingFps]，
+    // 复核后**现行口径是正确的**（旧判据 `usable > r.lo` 对固定档 `[f,f]` 恒 false ⇒ 所有固定档被
+    // 排除 ⇒ LEGACY 设备必然走兜底 minOfOrNull{hi}，用户选 120fps、设备能到 60 却被退到 15fps）。
+    // 本项是「改了但没装机验」，不是「改错了」。所以**行为一字不改**，只把早退分支固化下来并让
+    // 它可判读：真机抽验卡见 `docs/LEGACY退档抽验卡-v1.md`。
+
+    /**
+     * 从**原文**的 `syncFpsPick` 体里切出 `if (ceiling <= 0) { … return }` 这一支。
+     *
+     * 为什么用原文而不是 [maskedMain]：这一支的判据大半在**字符串字面量**里（`fps=$target`、
+     * `ceiling=$ceiling`），`codeOnly` 会把字面量内容遮成空格，切出来什么也断不了。
+     * 函数体的边界仍按遮蔽文本的区间取——`codeOnly` 输出与原文**逐位等长**（换行位置不变），
+     * 所以同一组偏移量在原文上直接可用（`KotlinSourceScan` 的既有契约）。
+     */
+    private fun noCeilingBranch(rawEngine: String): String {
+        val r = regionOf(codeOnly(rawEngine), "syncFpsPick")
+        val sync = flatten(rawEngine.substring(r.start, r.end))
+        val at = sync.indexOf("if (ceiling <= 0) {")
+        val end = sync.indexOf("return }", at)
+        assertTrue("锚点丢失：没截到 ceiling<=0 早退分支（分支形态改了或被删）", at >= 0 && end > at)
+        return sync.substring(at, end + "return }".length)
+    }
+
+    /** [fpsCap] 的函数体（原文切片，同上口径） */
+    private fun fpsCapBody(rawEngine: String): String {
+        val r = regionOf(codeOnly(rawEngine), "fpsCap")
+        return flatten(rawEngine.substring(r.start, r.end))
+    }
+
+    @Test
+    fun `无退档目标时早退分支不许回写也不许发高帧率失败态`() {
+        val branch = noCeilingBranch(mainSourceText("camera/Camera2Engine.kt"))
+        assertFalse(
+            "无退档目标时必须保持总线原值：早退分支里出现 writeBackFps = 把设备给不出的帧率写回了总线",
+            branch.contains("writeBackFps(")
+        )
+        assertFalse(
+            "无退档目标时不得发 OPEN_FAILED_HIGH_FPS：那是「已退档」的信号，此刻并没有退档",
+            branch.contains("publishDevice(")
+        )
+    }
+
+    @Test
+    fun `无退档目标日志必须一行读得完（ranges加target加cap加ceiling判定）`() {
+        val raw = mainSourceText("camera/Camera2Engine.kt")
+        val branch = noCeilingBranch(raw)
+        assertTrue("日志必须报 ranges 摘要（判读要看设备到底报了什么）", branch.contains("rangesSummary(state.fpsRanges)"))
+        assertTrue("日志必须报 target", branch.contains("fps=\$target"))
+        assertTrue("日志必须报 cap", branch.contains("cap="))
+        assertTrue("日志必须报 ceiling 判定", branch.contains("ceiling=\$ceiling"))
+        assertTrue(
+            "日志必须仍是同一 TAG 的一次 Log.w（logcat 一行 grep）",
+            Regex("Log\\.w\\(\\s*TAG,").containsMatchIn(branch)
+        )
+        // cap 的算式必须只有一份（ceilingFps 与日志共用），抄两份就会让「日志说的 cap」与
+        // 「实际算的 cap」分叉 —— 分叉出来的日志比没日志更坏
+        val cap = fpsCapBody(raw)
+        assertTrue("cap 算式必须集中在 fpsCap 里", cap.contains("highSpeedCapable") && cap.contains("WotaTiers.HIGH_SPEED_FPS"))
+    }
+
+    @Test
+    fun `尺子自己能红_早退分支被塞回写回或删掉必报红`() {
+        val raw = mainSourceText("camera/Camera2Engine.kt")
+        val branch = noCeilingBranch(raw)
+        // 良品先真的绿：早退分支只有日志 + return
+        assertFalse("良品早退分支必须先不含 writeBackFps", branch.contains("writeBackFps("))
+        assertFalse("良品早退分支必须先不含 publishDevice", branch.contains("publishDevice("))
+
+        // 突变 1：往早退分支里塞回总线回写（旧兜底形态：随便退到一个数）
+        val wroteBack = raw.replace(
+            "if (ceiling <= 0) {",
+            "if (ceiling <= 0) {\n            writeBackFps(ceiling, false)"
+        )
+        assertTrue(
+            "早退分支被塞回 writeBackFps 后尺子必须红",
+            noCeilingBranch(wroteBack).contains("writeBackFps(")
+        )
+        // 突变 2：往早退分支里塞回高帧率失败态
+        val published = raw.replace(
+            "if (ceiling <= 0) {",
+            "if (ceiling <= 0) {\n            publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)"
+        )
+        assertTrue(
+            "早退分支被塞回 publishDevice 后尺子必须红",
+            noCeilingBranch(published).contains("publishDevice(")
+        )
+        // 突变 3：把早退分支删掉（沿既有 mutation 4 范式），切片断言必须当场红而不是给半份文本
+        val noBranch = raw.replace("if (ceiling <= 0) {", "if (false) {")
+        val threw = try {
+            noCeilingBranch(noBranch)
+            false
+        } catch (e: AssertionError) {
+            true
+        }
+        assertTrue("ceiling<=0 早退分支被删后切片断言必须报红（不许静默放行）", threw)
     }
 
     // ------------------------------------------------------------------ S3-03 单调钟守卫
