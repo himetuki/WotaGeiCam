@@ -5,7 +5,6 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotopei.cam.source.KotlinSourceScan.codeOnly
 import com.wotopei.cam.source.KotlinSourceScan.flatten
 import com.wotopei.cam.source.KotlinSourceScan.mainSourceText
-import com.wotagei.cam.source.KotlinSourceScan.regionOf
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -103,19 +102,29 @@ class SeriesStoreGuardTest {
         )
     }
 
-    /** 纯函数那道「有效段 < 2 ⇒ 返回空」的门槛也钉一道源码锁（值本身在 SeriesStoreTest 里） */
+    /**
+     * 纯函数那道「有效段 < 2 ⇒ 返回空」的门槛也钉一道源码锁（行为在 `SeriesStoreTest`）。
+     *
+     * 行为用例与源码锁各管一半：`SeriesStoreTest` 证明**现在是对的**，这条锁证明**它写在
+     * 对的地方**——门槛被挪回 `record` 里时行为用例仍全绿（`record` 要 Room，测不了），
+     * 只有这条会红。
+     */
     @Test
     fun `纯函数的成系列门槛必须是2且写在纯函数里`() {
         val store = masked("media/SeriesStore.kt")
         assertTrue("门槛常量必须存在且是 2", store.contains("MIN_SERIES_PARTS = 2"))
-        val pure = flatten(bodyOf(store, "seriesPartsToRecord"))
         assertTrue(
-            "门槛必须落在纯函数里（放 record 里就 JVM 测不到，改成 <1 也不会红）",
-            pure.contains("rows.size < MIN_SERIES_PARTS")
+            "门槛必须落在纯函数里（挪回 record 里就 JVM 测不到，改成 <1 也不会红）",
+            flatten(bodyOf(store, "seriesPartsToRecord")).contains("rows.size < MIN_SERIES_PARTS")
         )
-        // 定位自检：确保拿到的是纯函数体而不是别的函数
-        assertTrue("必须真的落在纯函数内", KotlinSourceScan.flatten(bodyOf(store, "seriesPartsToRecord")).isNotEmpty())
-        val r = regionOf(store, "seriesPartsToRecord")
-        assertTrue("纯函数体必须能定位到", r.end > r.start)
+
+        // 突变自证：把 < MIN_SERIES_PARTS 改成 < 1，判据必须翻红
+        val raw = mainSourceText("media/SeriesStore.kt")
+        val mutant = raw.replace("rows.size < MIN_SERIES_PARTS", "rows.size < 1")
+        assertTrue("突变体必须真的改了源码（没改动 = 这条自证什么也证明不了）", mutant != raw)
+        assertFalse(
+            "门槛被改成 < 1 后判据必须翻假",
+            flatten(bodyOf(codeOnly(mutant), "seriesPartsToRecord")).contains("rows.size < MIN_SERIES_PARTS")
+        )
     }
 }
