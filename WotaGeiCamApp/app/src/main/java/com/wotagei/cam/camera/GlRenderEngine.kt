@@ -2175,7 +2175,8 @@ internal fun encoderAdaptivePtsNs(
     lastPtsNs: Long,
     frameIndex: Int
 ): Long {
-    // 档位不可用：与旧口径逐字相同（fps<=0 / step<=0 两道守卫在旧函数里的原样保留）
+    // 档位不可用：与旧口径逐字相同（step<=0 守卫在此原样保留；fps<=0 守卫在调用方
+    // stampEncoderPresentation 的入口早退——两处合计等价于旧函数的那两道）
     if (stepNs <= 0L) return lastPtsNs
     // 段首没有样本：与旧口径逐字相同。**必须**早于接管判定——frameIndex=0 时接管谓词
     // `elapsed > 0·step` 对任何正 elapsed 恒真，不挡住就会把首帧推到 base+elapsed（=nowNs）。
