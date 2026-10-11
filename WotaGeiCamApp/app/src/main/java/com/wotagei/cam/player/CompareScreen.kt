@@ -106,7 +106,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -263,7 +262,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // parseId 只认数字末段（media uri）；个别相册/文件管理器会回私有 provider uri，
             // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
             // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
-            // （clipById 的 flowOn(IO) 管不到协程体里的直接调用），横幅/右槽仍是主线程写
+            // （一次性反查 clipByIdOnce 是挂起调用、自带 IO 切换），横幅/右槽仍是主线程写
             val uri = result.data?.data
             var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
             tapScope.launch {
@@ -279,7 +278,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                 if (id <= 0L) {
                     banner = R.string.compare_pick_failed
                 } else {
-                    val clip = repo.clipById(id).first()
+                    val clip = repo.clipByIdOnce(id)
                     if (clip == null) {
                         banner = R.string.compare_pick_failed
                     } else {
@@ -313,7 +312,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             if (id != null) {
                 ComparePractice.pendingRightId = null
                 tapScope.launch {
-                    val clip = repo.clipById(id).first()
+                    val clip = repo.clipByIdOnce(id)
                     if (clip != null) {
                         right = clip
                         offsetMs.value = 0L
@@ -1071,7 +1070,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 }
 
 /**
- * 「历史」面板**内容**：把 [CompareHistory] 的记录逐条经 [MediaRepo.clipById] 反查成视频——
+ * 「历史」面板**内容**：把 [CompareHistory] 的记录逐条经 [MediaRepo.clipByIdOnce] 反查成视频——
  * 还在的显示片名 + 时长（整行点选直接设为右侧视频，并把这条记回队首再收面板），
  * 已不存在的（删了/换库）显示灰色占位行，行尾删除钮把这条记录摘掉后就地刷新。
  *
@@ -1091,14 +1090,14 @@ private fun CompareHistorySheet(
     // 记录 → (记录, 反查结果)；反查 null = 视频已不存在。面板由 BottomPanel 的
     // AnimatedVisibility 承载：隐藏时不组合、打开瞬间才进组合，LaunchedEffect 首组合必跑；
     // 行内删除后靠 refresh 换 key 重解析。
-    // 解析直接用 LaunchedEffect 自己的协程（查询本体在 flowOn(IO)），不丢进外部 scope：
+    // 解析直接用 LaunchedEffect 自己的协程（一次性反查 clipByIdOnce 自带 IO 切换），不丢进外部 scope：
     // 外部 scope 在换 key 重解析时不会取消上一个任务，旧结果可能反过来盖掉刚删完的新列表。
     var items by remember { mutableStateOf<List<Pair<CompareHistory.Entry, VideoClip?>>>(emptyList()) }
     var refresh by remember { mutableStateOf(0) }
     LaunchedEffect(refresh) {
         val resolved = ArrayList<Pair<CompareHistory.Entry, VideoClip?>>()
         CompareHistory.entries(prefs).forEach { entry ->
-            resolved += entry to repo.clipById(entry.rightId).first()
+            resolved += entry to repo.clipByIdOnce(entry.rightId)
         }
         items = resolved
     }

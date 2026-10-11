@@ -87,6 +87,14 @@ interface MediaTagDao {
     @Query("SELECT tag FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
     fun observeTagsOf(mediaId: Long): Flow<List<String>>
 
+    /**
+     * 一次性查询某片的标签（#7 [com.wotagei.cam.media.MediaRepo.clipByIdOnce] 用）：
+     * 与 [observeTagsOf] 同一条 SQL，只是非 Flow。⚠ 只加方法、不动实体、不加 @Index
+     * （schema 变更 = 撞 fallbackToDestructiveMigration 清空用户标签，绝对红线）。
+     */
+    @Query("SELECT tag FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
+    suspend fun tagsOf(mediaId: Long): List<String>
+
     @Query("DELETE FROM media_tag")
     suspend fun clearAll()
 }

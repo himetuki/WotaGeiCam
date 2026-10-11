@@ -208,7 +208,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -1687,7 +1686,7 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     LaunchedEffect(autoAttachId) {
         val id = autoAttachId ?: return@LaunchedEffect
         if (clipUri != null) return@LaunchedEffect
-        val clip = repo.clipById(id).first()
+        val clip = repo.clipByIdOnce(id)
         if (clip == null) {
             banner = R.string.compare_pick_failed
         } else {
@@ -1737,7 +1736,7 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
             if (id <= 0L) {
                 banner = R.string.compare_pick_failed
             } else {
-                val clip = repo.clipById(id).first()
+                val clip = repo.clipByIdOnce(id)
                 if (clip == null) {
                     banner = R.string.compare_pick_failed
                 } else {
