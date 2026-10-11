@@ -164,10 +164,20 @@ class MediaActions private constructor(
     private suspend fun trashDirect(clips: List<VideoClip>, toTrash: Boolean): Boolean {
         val done = writeTrashed(clips, toTrash)
         if (done.size == clips.size) return true
+        // 一次失败静默截断在 takeWhile 的边界上，事后没有任何数字能区分「用户只选了一条」
+        // 与「第 3 条写失败、后面根本没写」—— 这条锚点把位次与总数都留下来。
+        // takeWhile 保证成功段是前缀 ⇒ done.size 就是失败位次，clips[done.size] 就是第一条失败行。
+        Log.e(TAG, "回收站直写失败：已写 ${done.size}/${clips.size} 条，失败位次=${done.size} uri=${clips[done.size].uri} toTrash=$toTrash")
         // 半途失败必须先回滚已改的行：调用方接下来会去弹系统授权框，用户一取消就留下
         // 「一部分已经进回收站、本地却没有 trash_item 记录」的状态，
         // 而 IS_TRASHED=1 的行不会出现在常规查询里 —— 文件在所有页签上都看不见
-        if (done.isNotEmpty()) writeTrashed(done, !toTrash)
+        if (done.isNotEmpty()) {
+            // 回滚失败才是真会坏数据的那种（进了回收站却没有本地记录），原来返回值被丢弃、整条不可见
+            val back = writeTrashed(done, !toTrash)
+            if (back.size != done.size) {
+                Log.e(TAG, "回收站直写回滚失败：已回滚 ${back.size}/${done.size} 条，失败位次=${back.size} uri=${done[back.size].uri} toTrash=${!toTrash}")
+            }
+        }
         return false
     }
 
@@ -180,7 +190,12 @@ class MediaActions private constructor(
             put(MediaStore.Video.Media.IS_TRASHED, if (toTrash) 1 else 0)
         }
         app.contentResolver.update(clip.uri, values, null, null) > 0
-    }.getOrDefault(false)
+    }
+        // 只记异常现场（留栈）；语义不动，仍是 getOrDefault(false) —— 媒体库整屏不许因写库异常崩。
+        // 注意这**盖不住「update 返回 0 行」**：那不是异常、不走 onFailure，所以位次锚点必须挂在
+        // trashDirect 上（那里才同时看得到两种失败）。
+        .onFailure { Log.e(TAG, "回收站直写异常 uri=${clip.uri} toTrash=$toTrash : ${it.javaClass.simpleName}", it) }
+        .getOrDefault(false)
 
     private suspend fun recordTrashRows(clips: List<VideoClip>) = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
