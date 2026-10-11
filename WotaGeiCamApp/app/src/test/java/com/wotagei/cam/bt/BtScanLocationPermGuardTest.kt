@@ -10,7 +10,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * 蓝牙「设备发现」的位置权限守卫（r31 任务 10 / S4-M5-01）。
+ * 蓝牙「设备发现」的位置权限守卫（r31 任务 10 / S4-M5-01 立，本轮 **S4-M5-01 续 / #10+#18 契约反转**）。
  *
  * 缺陷：`BtSpeakerController.missingPermissions()` 原先 `SDK < S` 一律 `return emptyArray()`，
  * 理由是"API 30 及以下走清单里的 install 期权限"。前半句对**连接态**成立，后半句对**扫描**不成立——
@@ -27,27 +27,61 @@ import java.io.File
  * 4. `startScan()` 的权限闸**先于** `startDiscovery`，闸内必须 `return`，且 `refresh()` 先于闸
  *    （`_hasPermission` 置 false 早于早退，UI 的授权引导面才有东西可亮）。
  *
- * 另钉「权限面不外扩」：`ACCESS_FINE_LOCATION` 只许出现在本控制器里，
- * 启动权限申请（`ui/MainActivity.kt`）与设置页权限行（`ui/SettingsScreen.kt`）都不许夹带——
- * 否则位置授权框会跑到首启弹窗里，与"只服务蓝牙扫描"的设计决策相反。
+ * # 设计决策反转（2026-10-11，#10 任务的必要前置，不是可选项）
+ *
+ * **谁**：本片（#10 设置页蓝牙权限行加位置子行 / #18 位置权限框文案重写）。
+ * **什么时候**：紧接 `7666e95`（给 `startDiscovery` 在 API 29/30 补 `ACCESS_FINE_LOCATION`）之后。
+ *
+ * **为什么反转**：`7666e95` 立的原契约是「位置权限只服务蓝牙扫描，**不进** `ui/SettingsScreen.kt`」
+ * （当时的第 9/10 号突变专门打这条：混进设置页 → 红）。可那条契约的判据是"权限申请面不外扩"，
+ * 而 #10 要做的是**展示**该权限的状态——`7666e95` 之后设置页若不画这行，用户会看到「蓝牙已就绪」
+ * 而首启又弹位置框，权限状态与系统实际声明/可能弹出的授权框对不上。所以契约从「文件级禁入」反转成
+ * **权限面白名单**：
+ * - `bt/BtSpeakerController.kt` —— 申请真源（<S / ≥S 两档判据见上面第 2、3 条）；
+ * - `ui/SettingsScreen.kt` —— 展示面，**必须带 `<S` 版本闸**（闸先于 `ACCESS_FINE_LOCATION`），
+ *   阈值真源是 `SettingsScreen.btLocationRowVisible`（= manifest `maxSdkVersion="30"` 同档）；
+ * - `ui/MainActivity.kt` —— 首启权限申请面。**本片一字未动**（#18 范围更正：合并首启权限面已否决），
+ *   故它当前零位置权限，这条状态被单独钉住：谁往里加 `ACCESS_FINE_LOCATION` 谁红。
+ *
+ * **没动的东西**：manifest 的 `maxSdkVersion="30"` 判据**保留原文**；`MainActivity` 的权限面一字未动；
+ * 申请真源（`missingPermissions()` 的两档分支）逐字未动。白名单**之外**的任何主源码文件含
+ * `ACCESS_FINE_LOCATION` → 红（泄漏面至少覆盖 `camera/CameraController.kt`、`ui/CameraScreen.kt`，
+ * 突变自证里各打一次）。
  *
  * 「尺子自己能红」：每条判据都有对应突变体打同一把尺（见各突变注释）。
  */
 class BtScanLocationPermGuardTest {
 
-    /** 版本闸的字面锚：分档判据就写在这枚字符串上，改写法即视为失去输入（守卫直接红） */
+    /** 版本闸的字面锚（控制器侧）：分档判据就写在这枚字符串上，改写法即视为失去输入（守卫直接红） */
     private val sGuard = "if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S)"
+
+    /**
+     * 权限面白名单（含特殊裁定的面）：允许出现 `ACCESS_FINE_LOCATION` 的主源码文件。
+     * 白名单**内**还要各自过自己的判据（控制器过两档分支、设置页过版本闸、MainActivity 过"零位置权限"），
+     * 白名单**外**一律不许出现。
+     */
+    private val locationWhitelist = setOf(
+        "bt/BtSpeakerController.kt",
+        "ui/SettingsScreen.kt",
+        "ui/MainActivity.kt"
+    )
+
+    /** `SettingsScreen` 的版本闸字面锚（`<S` 档的唯一入口；阈值真源是 `btLocationRowVisible`） */
+    private val settingsGateAnchor = "if (btLocationRowVisible(android.os.Build.VERSION.SDK_INT)"
 
     // ------------------------------------------------------------------ 输入
 
     /** 主源码（遮蔽 + 折叠空白：结构判定不受换行缩进影响，也让突变体写法收敛成单行） */
     private fun controllerSrc(): String = flatten(codeOnly(mainSourceText("bt/BtSpeakerController.kt")))
 
-    /** 位置权限的三个「唯一真源面」，突变自证时喂变异字典 */
+    /** 位置权限的**白名单 + 守卫靶子**面，突变自证时喂变异字典 */
     private fun locationSurfaces(): Map<String, String> = mapOf(
         "bt/BtSpeakerController.kt" to controllerSrc(),
+        "ui/SettingsScreen.kt" to codeOnly(mainSourceText("ui/SettingsScreen.kt")),
         "ui/MainActivity.kt" to codeOnly(mainSourceText("ui/MainActivity.kt")),
-        "ui/SettingsScreen.kt" to codeOnly(mainSourceText("ui/SettingsScreen.kt"))
+        // 泄漏靶子：白名单外的两个高危面（相机参数链 / 取景页），良品里它们零位置权限
+        "camera/CameraController.kt" to codeOnly(mainSourceText("camera/CameraController.kt")),
+        "ui/CameraScreen.kt" to codeOnly(mainSourceText("ui/CameraScreen.kt"))
     )
 
     /** 源 manifest（不遮蔽——判据要看属性与原文串） */
@@ -129,15 +163,43 @@ class BtScanLocationPermGuardTest {
         return bad
     }
 
-    /** 权限面不外扩判据：位置权限只许住在蓝牙控制器里 */
+    /**
+     * **权限面白名单**判据（本轮反转后的真身）：见类 KDoc 的「设计决策反转」一节。
+     * 空列表 = 面干净且闸到位。
+     */
     private fun surfaceIssues(sources: Map<String, String>): List<String> {
         val bad = ArrayList<String>()
-        if (!sources.getValue("bt/BtSpeakerController.kt").contains("ACCESS_FINE_LOCATION")) {
+
+        // 申请真源必须还在（不在就整把尺失去输入）
+        if (!flatten(sources.getValue("bt/BtSpeakerController.kt")).contains("ACCESS_FINE_LOCATION")) {
             bad.add("bt/BtSpeakerController.kt 里找不到 ACCESS_FINE_LOCATION——扫描前置被拆了（守卫失去输入）")
         }
-        for (path in listOf("ui/MainActivity.kt", "ui/SettingsScreen.kt")) {
-            if (sources.getValue(path).contains("ACCESS_FINE_LOCATION")) {
-                bad.add("$path 夹带 ACCESS_FINE_LOCATION：位置权限只服务蓝牙扫描，不许进首启权限申请/设置页权限行")
+
+        // 白名单 · 展示面：设置页位置子行必须带版本闸，且闸先于权限取值
+        val settings = flatten(sources.getValue("ui/SettingsScreen.kt"))
+        val gateAt = settings.indexOf(settingsGateAnchor)
+        val fineAt = settings.indexOf("ACCESS_FINE_LOCATION")
+        if (fineAt < 0) {
+            bad.add("ui/SettingsScreen.kt 找不到 ACCESS_FINE_LOCATION——#10 的位置子行被删（守卫失去输入）")
+        } else if (gateAt < 0) {
+            bad.add("ui/SettingsScreen.kt 有位置权限却没版本闸「$settingsGateAnchor」——子行在 API 31+ 也会亮")
+        } else if (gateAt > fineAt) {
+            bad.add("ui/SettingsScreen.kt 的版本闸必须先于 ACCESS_FINE_LOCATION")
+        }
+
+        // 白名单 · 首启申请面：#18 范围更正钉住「首启权限面一字不动」⇒ 它零位置权限
+        if (flatten(sources.getValue("ui/MainActivity.kt")).contains("ACCESS_FINE_LOCATION")) {
+            bad.add(
+                "ui/MainActivity.kt 出现 ACCESS_FINE_LOCATION——#18 范围更正：首启权限面一字未动，" +
+                    "位置权限不许进首启申请（它本片不在白名单的开口范围内）"
+            )
+        }
+
+        // 白名单外一律禁入
+        for ((path, src) in sources) {
+            if (path in locationWhitelist) continue
+            if (flatten(src).contains("ACCESS_FINE_LOCATION")) {
+                bad.add("$path 夹带 ACCESS_FINE_LOCATION：位置权限只服务蓝牙扫描，白名单外一律不许")
             }
         }
         return bad
@@ -164,9 +226,9 @@ class BtScanLocationPermGuardTest {
     }
 
     @Test
-    fun `位置权限面只住在蓝牙控制器`() {
+    fun `位置权限面白名单契约_展示面带闸_首启面零权限_白名单外禁入`() {
         val issues = surfaceIssues(locationSurfaces())
-        assertEquals("位置权限面外扩：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
+        assertEquals("位置权限面回归（白名单契约，2026-10-11 反转）：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
     }
 
     // ------------------------------------------------------------------ 突变自证（尺子自己能红）
@@ -202,6 +264,12 @@ class BtScanLocationPermGuardTest {
         assertTrue(
             "位置权限换成 ACCESS_COARSE_LOCATION 后尺子必须红",
             permIssues(real.replace("Manifest.permission.ACCESS_FINE_LOCATION", "Manifest.permission.ACCESS_COARSE_LOCATION")).isNotEmpty()
+        )
+        // 突变 4b：<S 分支把 FINE 整枚删掉（权限前置名存实亡）
+        assertTrue(
+            "<S 分支删掉 FINE 后尺子必须红",
+            permIssues(real.replace("Manifest.permission.ACCESS_FINE_LOCATION", "Manifest.permission.CAMERA"))
+                .any { it.contains("<S 分支缺") }
         )
         // 突变 5：把位置权限挪到 ≥S 侧（把「S 以上零变化」破掉）
         val movedToModern = real.replace(
@@ -254,26 +322,44 @@ class BtScanLocationPermGuardTest {
     }
 
     @Test
-    fun `尺子自己能红_位置权限外扩必报红`() {
+    fun `尺子自己能红_位置权限漏进白名单外必报红`() {
         val real = locationSurfaces()
         assertTrue("良品必须先真的绿，否则突变体的红没有意义", surfaceIssues(real).isEmpty())
-        // 突变 9：位置权限进首启权限申请（首启就弹位置框，与「只服务蓝牙扫描」相反）
+        // 突变 9：位置权限漏进相机参数链（白名单外）
+        val controllerLeak = real.toMutableMap().apply {
+            this["camera/CameraController.kt"] = this["camera/CameraController.kt"]!! +
+                "\nprivate fun mutantLeak() = Manifest.permission.ACCESS_FINE_LOCATION"
+        }
+        assertTrue(
+            "位置权限漏进 CameraController 后尺子必须红",
+            surfaceIssues(controllerLeak).any { it.contains("CameraController") }
+        )
+        // 突变 10：位置权限漏进取景页（白名单外）
+        val screenLeak = real.toMutableMap().apply {
+            this["ui/CameraScreen.kt"] = this["ui/CameraScreen.kt"]!! +
+                "\nprivate fun mutantLeak() = Manifest.permission.ACCESS_FINE_LOCATION"
+        }
+        assertTrue(
+            "位置权限漏进 CameraScreen 后尺子必须红",
+            surfaceIssues(screenLeak).any { it.contains("CameraScreen") }
+        )
+        // 突变 11：白名单文件里删版本闸（设置页子行无条件出现，与 manifest maxSdkVersion=30 相反）
+        val gateStripped = real.toMutableMap().apply {
+            this["ui/SettingsScreen.kt"] = this["ui/SettingsScreen.kt"]!!
+                .replace("if (btLocationRowVisible(android.os.Build.VERSION.SDK_INT)) {", "")
+        }
+        assertTrue(
+            "设置页删掉版本闸后尺子必须红",
+            surfaceIssues(gateStripped).any { it.contains("没版本闸") }
+        )
+        // 突变 12：首启权限申请面混进位置权限（#18 范围更正明令「首启权限面一字不动」）
         val startupLeak = real.toMutableMap().apply {
-            this["ui/MainActivity.kt"] = this["ui/MainActivity.kt"]!!
-                .replace("val list = mutableListOf<String>()", "val list = mutableListOf<String>(); list += Manifest.permission.ACCESS_FINE_LOCATION")
+            this["ui/MainActivity.kt"] = this["ui/MainActivity.kt"]!! +
+                "\nprivate fun mutantLeak() = Manifest.permission.ACCESS_FINE_LOCATION"
         }
         assertTrue(
             "位置权限混进首启权限申请后尺子必须红",
             surfaceIssues(startupLeak).any { it.contains("MainActivity") }
-        )
-        // 突变 10：位置权限进设置页权限行（设置页报「已授权」而扫描其实不可用）
-        val settingsLeak = real.toMutableMap().apply {
-            this["ui/SettingsScreen.kt"] = this["ui/SettingsScreen.kt"]!!
-                .replace("private fun granted(", "private fun leaked() = Manifest.permission.ACCESS_FINE_LOCATION\nprivate fun granted(")
-        }
-        assertTrue(
-            "位置权限混进设置页后尺子必须红",
-            surfaceIssues(settingsLeak).any { it.contains("SettingsScreen") }
         )
     }
 }

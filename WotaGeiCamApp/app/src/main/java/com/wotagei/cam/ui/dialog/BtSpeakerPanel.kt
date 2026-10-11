@@ -4,6 +4,7 @@ package com.wotagei.cam.ui.dialog
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import com.wotagei.cam.diag.Diag as Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -152,7 +153,13 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
         }
 
         if (!hasPermission) {
-            HintCard(stringResource(R.string.perm_bluetooth_rationale))
+            // 文案按 SDK 分档（见 strings.xml 的注释）：≤30 档先讲清「是搜音箱、系统要求、不读位置」，
+            // 31+ 档只有一句蓝牙权限——不再把两件权限塞进同一句话。分档字面锚由
+            // BtRationaleSplitGuardTest 钉住，删掉分档只留一条会当场红
+            val rationaleRes =
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) R.string.perm_bluetooth_rationale_low
+                else R.string.perm_bluetooth_rationale
+            HintCard(stringResource(rationaleRes))
             // 双按钮左右排间距 12vp（hw_button 响应式布局节；面板本身是气泡族、不套 ⑧ 半模态尺寸）
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton(onClick = { permissionLauncher.launch(controller.missingPermissions()) }) {

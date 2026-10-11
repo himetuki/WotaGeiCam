@@ -87,6 +87,7 @@ import com.wotagei.cam.ui.dialog.sampleRateText
 import com.wotagei.cam.ui.dialog.shutterText
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.WotaType
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.theme.MonoStyle
@@ -924,9 +925,13 @@ private fun BlockPerm() {
 
     SettingGroup(stringResource(R.string.set_group_perm))
     Card {
-        perms.forEach { row ->
+        perms.forEachIndexed { index, row ->
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                Modifier
+                    .fillMaxWidth()
+                    // 子行缩进：只取既有 WotaSpace 令牌（12dp），不新造裸 dp；父行不缩进
+                    .then(if (row.indent) Modifier.padding(start = WotaSpace.m) else Modifier)
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -939,11 +944,13 @@ private fun BlockPerm() {
                     text = stringResource(if (row.granted) R.string.set_perm_granted else R.string.set_perm_denied),
                     style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
                     // 状态小字不用 accent（压 surface 4.48 < 4.5）：已授权降为 textMid 安静态，
-                    // 未授权保留 WotaRec 红作强调——需要突出的只有「未授权」
+                    // 未授权保留 WotaRec 红作强调——需要突出的只有「未授权」（子行沿用同一对两色，不新建色）
                     color = if (row.granted) WotaColor.textMid else WotaRec
                 )
             }
-            Line()
+            // 分隔线规则：下一行是子行时不插（子行紧跟父行，视觉上是一组），子行之后恢复一条——
+            // 整卡节奏与加子行之前一致，「打开系统设置」行上方仍恰好一条
+            if (perms.getOrNull(index + 1)?.indent != true) Line()
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1270,15 +1277,52 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
-/** 权限行：`permTick` 参与重算，从系统设置返回后状态会刷新 */
-private data class PermRow(@StringRes val labelRes: Int, val granted: Boolean)
-
-private fun permissionRows(context: Context): List<PermRow> = listOf(
-    PermRow(R.string.set_perm_camera, granted(context, Manifest.permission.CAMERA)),
-    PermRow(R.string.set_perm_audio, granted(context, Manifest.permission.RECORD_AUDIO)),
-    PermRow(R.string.set_perm_media, granted(context, WotaSettings.mediaReadPermission())),
-    PermRow(R.string.set_perm_bluetooth, hasBluetoothPermission(context))
+/**
+ * 权限行：`permTick` 参与重算，从系统设置返回后状态会刷新。
+ *
+ * [indent] = 子行标记（缩进量取既有 [WotaSpace] 令牌，见 [BlockPerm]）：子行的父行之后**不**插分隔线，
+ * 子行自己之后才恢复一条，整卡的分隔线节奏与加子行之前一致。
+ */
+private data class PermRow(
+    @StringRes val labelRes: Int,
+    val granted: Boolean,
+    val indent: Boolean = false
 )
+
+/**
+ * 蓝牙位置子行的**唯一阈值**（纯函数，JVM 可测，见 `BtPermRowGateTest`）。
+ *
+ * 与 manifest 里 `ACCESS_FINE_LOCATION` 的 `android:maxSdkVersion="30"` 同档：API 31 起设备发现改走
+ * `BLUETOOTH_SCAN + neverForLocation`，平台不再给 discovery 结果加位置闸门，那一档就不该出现这行。
+ * 阈值只写在这一处，消费方（[permissionRows]）只认这个函数，不各自抄 `<31`/`≤30`。
+ */
+internal fun btLocationRowVisible(sdkInt: Int): Boolean = sdkInt < 31
+
+/**
+ * 设置页「权限状态」的行列表。
+ *
+ * 蓝牙行下方那枚位置子行的判据**逐字**是 `BtSpeakerController.missingPermissions()` 的 `<S` 分支
+ * （同枚 `ACCESS_FINE_LOCATION`）——`7666e95` 给 `startDiscovery` 在 API 29/30 补了位置权限之后，
+ * 设置页若不把这行画出来，用户会看到「蓝牙已就绪」而首启又弹位置框，状态与系统实际声明对不上。
+ * **蓝牙主行的 [hasBluetoothPermission] 分毫未动**（它与 `BtSpeakerController.hasConnectPermission()`
+ * 同一条规则，见下方 KDoc）。
+ */
+private fun permissionRows(context: Context): List<PermRow> = buildList {
+    add(PermRow(R.string.set_perm_camera, granted(context, Manifest.permission.CAMERA)))
+    add(PermRow(R.string.set_perm_audio, granted(context, Manifest.permission.RECORD_AUDIO)))
+    add(PermRow(R.string.set_perm_media, granted(context, WotaSettings.mediaReadPermission())))
+    add(PermRow(R.string.set_perm_bluetooth, hasBluetoothPermission(context)))
+    // 版本闸（源码守卫的字面锚）：只有 API ≤ 30 才把位置子行放进列表
+    if (btLocationRowVisible(android.os.Build.VERSION.SDK_INT)) {
+        add(
+            PermRow(
+                R.string.set_perm_bt_location,
+                granted(context, Manifest.permission.ACCESS_FINE_LOCATION),
+                indent = true
+            )
+        )
+    }
+}
 
 /**
  * 蓝牙权限行的显示判据，必须与 `BtSpeakerController.hasConnectPermission()` 同一条规则。
