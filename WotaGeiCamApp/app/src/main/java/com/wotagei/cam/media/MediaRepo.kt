@@ -65,10 +65,10 @@ data class VideoClip(
  * 把 Room 的系列成员关系盖到 MediaStore 读出来的行上。
  *
  * 为什么在**联表这一层**做而不是在 `readRows` 里查：`readRows` 只认得 Cursor，
- * 系列信息在另一张表里；放这里就一处出口，`clips()` 与 `clipById()` 共用同一把尺。
+ * 系列信息在另一张表里；放这里就一处出口，`clips()` 与 `joinTags()` 并列在同一条管道上。
  *
  * 键是 `mediaId`（Room 里 `series_part.mediaId` 指向 MediaStore `_ID`）。
- * 命中不了的行保持默认：单段片逐字不变。
+ * 命中不了的行原样返回：单段片逐字不变。
  */
 internal fun annotateSeries(
     clips: List<VideoClip>,
