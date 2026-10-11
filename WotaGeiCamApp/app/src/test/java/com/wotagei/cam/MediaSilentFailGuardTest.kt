@@ -146,4 +146,109 @@ class MediaSilentFailGuardTest {
         )
         assertTrue("权限判定仍读 hasAllFilesAccess（未换成别的事实来源）", src.contains("WotaStorage.hasAllFilesAccess()"))
     }
+
+    // ------------------------------------------------------------------ MediaActions：回收站直写
+
+    /**
+     * 回收站直写失败必须记**位次与条数**（#12）。
+     *
+     * 被治的病：`writeTrashedOne` 把「抛异常」与「update 返回 0 行」一起收敛成 `false`、
+     * 零日志，而 `writeTrashed` 用 `takeWhile` 遇第一个失败就停 —— 一次失败静默截断在
+     * `takeWhile` 的边界上，事后**没有任何数字**能区分「用户只选了一条」与「第 3 条写失败、
+     * 后面根本没写」。该路径已有回滚，所以这是可观测性缺口、不是坏数据。
+     *
+     * 三个锚点缺一不可：
+     * 1. `trashDirect` 的**汇总锚点**：覆盖「0 行」与「异常」两种（`takeWhile` 保证成功段是前缀，
+     *    `done.size` 就是失败位次）；
+     * 2. `writeTrashedOne` 的 `onFailure`：只覆盖抛异常那一支（`0 行` 不走 `onFailure`）——
+     *    所以 ① 少不得，② 也不得；
+     * 3. 回滚返回值比对：回滚失败才是真会坏数据的那种，原来返回值被丢弃、整条不可见。
+     */
+    @Test
+    fun `回收站直写失败必须记位次与条数`() {
+        // 汇总锚点挂 trashDirect（块体，bodyOf 可用）
+        val direct = rawBody("media/MediaActions.kt", "trashDirect")
+        assertTrue("失败必须落 Log.e（只报一个布尔，事后无从复盘）", direct.contains("Log.e(TAG,"))
+        assertTrue("日志要带失败位次（否则分不出是第几条断的）", direct.contains("失败位次=\${done.size}"))
+        assertTrue("日志要带成功/总数两个数（否则分不出『只选了一条』与『第 3 条就断了』）", direct.contains("\${done.size}/\${clips.size}"))
+        assertTrue("日志要指向第一条失败行", direct.contains("uri=\${clips[done.size].uri}"))
+
+        // writeTrashedOne 是表达式体，bodyOf 定位不到，按声明切片
+        val one = writeTrashedOneBody()
+        assertTrue("异常现场必须留锚点", one.contains("onFailure"))
+        assertTrue("异常必须落 Log.e", one.contains("Log.e(TAG,"))
+        assertTrue("日志要带异常类名（不同原因药方不同）", one.contains("\${it.javaClass.simpleName}"))
+        assertTrue("栈要传下去（只有类名没有栈，取证价值为零）", one.contains("\${it.javaClass.simpleName}\", it)"))
+        assertTrue("红线：仍然收敛成 false（媒体库整屏不许因写库异常崩）", one.contains("getOrDefault(false)"))
+
+        // 回滚失败的锚点：返回值原本被丢弃，不比对就整条不可见
+        assertTrue("回滚也必须比对返回值", direct.contains("back.size != done.size"))
+        assertTrue("回滚失败必须留锚点", direct.contains("回收站直写回滚失败"))
+    }
+
+    /**
+     * 突变自证：把锚点摘掉或掏空，判据必须真的翻红。
+     *
+     * 三个突变**各自单飞**、各证一件事（不搞一把摘两处的合并突变——那样任一处判据失守都会被另一处盖住）：
+     * - ① 整条删掉 `trashDirect` 的汇总锚点 → 汇总判据翻假、异常判据**不动**。
+     *   这正是"只留 `onFailure`"的形态：证明「`update` 返回 0 行」那条路确实靠汇总锚点兜住，
+     *   `onFailure` 盖不住它（0 行不是异常，不走 `onFailure`）。
+     * - ② 汇总锚点**在**，但把位次字段掏成常量 → 汇总判据翻假。
+     *   证明判据读的是位次本身，不是"块体里恰好有个 `Log.e`"这种恒真式。
+     * - ③ 摘掉 `onFailure` → 异常判据翻假、汇总判据**不动**（两条锚点互不代偿）。
+     *
+     * 每个突变都先断言**它真的改动了源码**：不改动就等于什么都没证明（本仓踩过的空操作突变坑）。
+     */
+    @Test
+    fun `突变自证：摘掉回收站锚点判据必红`() {
+        val raw = mainSourceText("media/MediaActions.kt")
+        assertTrue("对照组：真源码上汇总锚点必须为真", hasDirectAnchor(rawBodyOf(raw, "trashDirect")))
+        assertTrue("对照组：真源码上异常锚点必须为真", hasOneAnchor(writeTrashedOneBodyOf(raw)))
+
+        // ① 整行删掉汇总锚点（按行删，不能只删片段：留下半个字符串会让遮蔽器读到下一个引号，
+        //    花括号配平随之失真，守卫就会因为"解析炸了"而不是因为"锚点没了"变红——那是假红）
+        val noSummary = raw.replace(SUMMARY_LINE, "")
+        assertTrue("突变体①必须真的改了源码", noSummary != raw)
+        assertFalse("删掉汇总锚点后汇总判据必须翻假", hasDirectAnchor(rawBodyOf(noSummary, "trashDirect")))
+        assertTrue("①不得牵连异常锚点", hasOneAnchor(writeTrashedOneBodyOf(noSummary)))
+
+        // ② 锚点在、位次字段被掏成常量
+        val noSeq = raw.replace("失败位次=\${done.size}", "失败位次=未知")
+        assertTrue("突变体②必须真的改了源码", noSeq != raw)
+        assertFalse("位次字段被掏空后汇总判据必须翻假", hasDirectAnchor(rawBodyOf(noSeq, "trashDirect")))
+
+        // ③ 摘掉 onFailure（整段链式调用，连它的花括号一起摘，免得配平失真）
+        val noOnFailure = raw.replace(ON_FAILURE_LINE, "")
+        assertTrue("突变体③必须真的改了源码", noOnFailure != raw)
+        assertFalse("删掉 onFailure 后异常判据必须翻假", hasOneAnchor(writeTrashedOneBodyOf(noOnFailure)))
+        assertTrue("③不得牵连汇总锚点", hasDirectAnchor(rawBodyOf(noOnFailure, "trashDirect")))
+    }
+
+    /** 汇总锚点那一行（整行删：只删片段会留下半个字符串让遮蔽器配平失真 ⇒ 假红） */
+    private val SUMMARY_LINE = Regex(".*Log\\.e\\(TAG, \"回收站直写失败.*\\R")
+    private val ON_FAILURE_LINE = Regex(".*\\.onFailure \\{[^\\n]*\\}\\R")
+
+    /** 判据：块体里是否带了「位次 + 条数」的汇总锚点 */
+    private fun hasDirectAnchor(body: String): Boolean =
+        body.contains("Log.e(TAG,") && body.contains("失败位次=\${done.size}") &&
+            body.contains("\${done.size}/\${clips.size}") && body.contains("uri=\${clips[done.size].uri}")
+
+    /** 判据：表达式体切片里是否带了异常锚点（含栈） */
+    private fun hasOneAnchor(body: String): Boolean =
+        body.contains("onFailure") && body.contains("Log.e(TAG,") && body.contains("\${it.javaClass.simpleName}\", it")
+
+    /** `writeTrashedOne` 是表达式体（`bodyOf` 定位不到），按声明切片到下一个声明 */
+    private fun writeTrashedOneBody(): String = writeTrashedOneBodyOf(mainSourceText("media/MediaActions.kt"))
+
+    private fun writeTrashedOneBodyOf(src: String): String {
+        val anchor = "private fun writeTrashedOne("
+        if (!src.contains(anchor)) throw AssertionError("找不到 $anchor —— 函数被改名/挪走，本守卫失去输入")
+        return flatten(src.substringAfter(anchor).substringBefore("private suspend fun recordTrashRows("))
+    }
+
+    /** [rawBody] 的泛化版：可对**任意**源码文本取函数体（突变自证要拿突变体喂同一把尺） */
+    private fun rawBodyOf(src: String, fn: String): String {
+        val r = com.wotagei.cam.source.KotlinSourceScan.regionOf(codeOnly(src), fn)
+        return flatten(src.substring(r.start + 1, r.end - 1))
+    }
 }
