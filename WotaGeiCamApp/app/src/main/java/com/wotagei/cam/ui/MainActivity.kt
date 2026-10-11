@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import com.wotagei.cam.diag.Diag as Log
 import androidx.activity.ComponentActivity
@@ -43,8 +44,10 @@ import androidx.navigation.navArgument
 import com.wotagei.cam.R
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
+import com.wotagei.cam.player.ClipRule
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
+import com.wotagei.cam.player.TrackRule
 import com.wotagei.cam.record.StalePendingSweep
 import com.wotagei.cam.ui.anim.EXTRA_MERGE_HOOK
 import com.wotagei.cam.ui.anim.MergeDebugHook
@@ -104,6 +107,18 @@ class MainActivity : ComponentActivity() {
             Thread({
                 runCatching { StalePendingSweep.runOnce(applicationContext, StalePendingSweep.outputDir()) }
                     .onFailure { Log.w("WotaSweep", "维护清扫失败：${it.message}") }
+                // #4 导出链 pending 行救援：剪辑/选轨 commit 全败保留的成片行在这里收录进相册。
+                // 目录由 ui 层传入（record 包不得反向依赖 player 包的 ClipRule/TrackRule）
+                runCatching {
+                    StalePendingSweep.rescuePendingRows(
+                        applicationContext,
+                        listOf(
+                            externalVideoDir(ClipRule.RELATIVE_PATH),
+                            externalVideoDir(TrackRule.RELATIVE_PATH),
+                            StalePendingSweep.outputDir()
+                        )
+                    )
+                }.onFailure { Log.w("WotaSweep", "pending 行救援失败：${it.message}") }
             }, "wota-sweep").apply { isDaemon = true }.start()
         }
         setContent {
@@ -329,6 +344,11 @@ private fun missingStartupPermissions(context: Context): Array<String> {
 
 private fun hasPermission(context: Context, permission: String): Boolean =
     ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+/** 公共 Movies 下的导出成片目录（与 [StalePendingSweep.outputDir] 同一构造口径） */
+@Suppress("DEPRECATION") // 公共目录定位：本工程持 MANAGE_EXTERNAL_STORAGE，走这条最稳
+private fun externalVideoDir(relativePath: String): java.io.File =
+    java.io.File(Environment.getExternalStorageDirectory(), relativePath)
 
 /** 从 Compose 的 Context 回溯到 Activity（LocalContext 在 NavHost 里已是 Activity，但包了 wrapper） */
 internal fun Context.findActivity(): Activity? {
