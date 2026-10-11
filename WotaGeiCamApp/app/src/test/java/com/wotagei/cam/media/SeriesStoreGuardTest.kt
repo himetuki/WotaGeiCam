@@ -1,10 +1,10 @@
 package com.wotagei.cam.media
 
-import com.wotopei.cam.source.KotlinSourceScan
+import com.wotagei.cam.source.KotlinSourceScan
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
-import com.wotopei.cam.source.KotlinSourceScan.codeOnly
-import com.wotopei.cam.source.KotlinSourceScan.flatten
-import com.wotopei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.source.KotlinSourceScan.codeOnly
+import com.wotagei.cam.source.KotlinSourceScan.flatten
+import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
