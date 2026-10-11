@@ -143,4 +143,63 @@ class ExportMuxMonotonicGuardTest {
         val branch = audioBranchOf(mutant, "if (ex.sampleTrackIndex == videoTrack)", "else {", "ex.advance()")
         assertFalse("删 lastPts 回写后守卫必须报红", branchHolds(branch, "aLastPts = fix.ptsUs"))
     }
+
+    // ---- 修复链（record/ArcRepairRunner.kt）：writeVideo / drainAudioUpTo 两条写入支 ----
+    // 与导出链不同，这里两条支各是独立函数体，bodyOf 直接定位、天然互不遮蔽
+
+    @Test
+    fun `修复链视频写前过单调桥`() {
+        val body = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "writeVideo")
+        )
+        assertTrue(
+            "ArcRepairRunner.writeVideo 必须过 monotonicPts 桥（重编码输出 PTS 也可能非严格递增，同轨倒退照样抛 Muxer 异常）",
+            body.contains("monotonicPts(") &&
+                body.contains("vMuxLastPtsUs = fix.ptsUs") &&
+                body.contains("vBufInfo.set(bi.offset, bi.size, fix.ptsUs, bi.flags)")
+        )
+    }
+
+    @Test
+    fun `修复链音频写前过单调桥`() {
+        val body = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "drainAudioUpTo")
+        )
+        assertTrue(
+            "ArcRepairRunner.drainAudioUpTo 必须过 monotonicPts 桥（穿插/封轨判据不动，只改写出的戳）",
+            body.contains("monotonicPts(") &&
+                body.contains("aMuxLastPtsUs = fix.ptsUs") &&
+                body.contains("aBufInfo.set(0, audioPendingSize, fix.ptsUs, 0)")
+        )
+    }
+
+    @Test
+    fun `修复链终止汇总带修正计数与maxBack账`() {
+        val body = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "run")
+        )
+        assertTrue(
+            "ArcRepairSession.run() 终止必须带两轨修正计数与最大倒退量（不逐样本刷就得有汇总出口）",
+            body.contains("vPtsFixes") && body.contains("aPtsFixes") &&
+                body.contains("vPtsMaxBackUs") && body.contains("aPtsMaxBackUs")
+        )
+    }
+
+    @Test
+    fun `突变_删修复链视频轨lastPts回写必红`() {
+        val raw = KotlinSourceScan.mainSourceText("record/ArcRepairRunner.kt")
+        val good = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(KotlinSourceScan.codeOnly(raw), "writeVideo")
+        )
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", good.contains("vMuxLastPtsUs = fix.ptsUs"))
+        val mutant = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(
+                KotlinSourceScan.codeOnly(
+                    raw.replace(Regex.fromLiteral("vMuxLastPtsUs = fix.ptsUs"), "vMuxLastPtsUs = norm")
+                )
+            ),
+            "writeVideo"
+        )
+        assertFalse("删 lastPts 回写后守卫必须报红", mutant.contains("vMuxLastPtsUs = fix.ptsUs"))
+    }
 }
