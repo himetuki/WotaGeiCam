@@ -24,6 +24,7 @@ import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.ParamState
+import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.WotaParams
@@ -718,7 +719,16 @@ class Camera2Engine(
         if (ceiling <= 0) {
             // 无退档目标：cap 之下一个可用范围都没有，保持总线原值（随便退到一个数只会写回
             // 设备给不出的帧率）。2026-10-10 S3-S3-01：旧兜底 minOfOrNull{hi} 正是这条的来源。
-            Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围且无退档目标，保持 $target")
+            // **行为一字未动**（早退、不发 OPEN_FAILED_HIGH_FPS、不回写帧率），本轮只把这行
+            // 扩成可判读的一行：ranges + target + cap + ceiling 判定，logcat 一行 grep 得完。
+            // 判读口径见 docs/LEGACY退档抽验卡-v1.md。
+            val capText = if (fpsCap() == Int.MAX_VALUE) "MAX" else fpsCap().toString()
+            Log.w(
+                TAG,
+                "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围且无退档目标，保持 $target；" +
+                    "ranges=[${rangesSummary(state.fpsRanges)}] cap=$capText ceiling=$ceiling " +
+                    "判定=保持总线原值·不回写帧率·不发高帧率失败态"
+            )
             return
         }
         val fallback = RequestApplier.pickFps(state.fpsRanges, ceiling, false) ?: return
@@ -751,10 +761,26 @@ class Camera2Engine(
      * 旧口径在这里退到 `minOfOrNull { it.hi }`，那是全表**最小**上界，等于绕开 cap 写回一个设备
      * 根本给不出的帧率；同时固定档因 `usable > r.lo` 恒假而被全排除（2026-10-10 S3-S3-01）。
      */
+    // 保持**花括号体**：既有接线守卫用 bodyOf 定位本函数体，改成表达式体会让守卫直接失去输入。
     private fun ceilingFps(state: RequestApplier.State): Int {
-        val cap = if (ability?.highSpeedCapable == true) Int.MAX_VALUE else WotaTiers.HIGH_SPEED_FPS
-        return FrameRateFallback.ceilingFps(state.fpsRanges, cap)
+        return FrameRateFallback.ceilingFps(state.fpsRanges, fpsCap())
     }
+
+    /**
+     * 高帧率封顶（ms 无关，纯帧率）：无高帧率能力时压到 [WotaTiers.HIGH_SPEED_FPS]。
+     *
+     * 单一真源：算式**只**在这里。退档口径与退档日志都要报这个值，抄第二份就会让
+     * 「日志说的 cap」与「实际算的 cap」分叉，而分叉出来的日志比没日志更坏（判读被带偏）。
+     */
+    // 保持**花括号体**：接线守卫用 bodyOf 定位本函数体（`#15` 新增的 cap 单一真源守卫），
+    // 改成表达式体会让守卫直接失去输入。
+    private fun fpsCap(): Int {
+        return if (ability?.highSpeedCapable == true) Int.MAX_VALUE else WotaTiers.HIGH_SPEED_FPS
+    }
+
+    /** 能力帧率表的行内摘要（`15-15,24-24,…`）：退档日志要能一行读完设备到底报了什么 */
+    private fun rangesSummary(ranges: List<RangeI>): String =
+        if (ranges.isEmpty()) "空" else ranges.joinToString(",") { "${it.lo}-${it.hi}" }
 
     /** 只在引擎确实拿到了可用范围时回写，顺带把换挡时可能被置灰的档位恢复可用 */
     private fun writeBackFps(value: Int, exact: Boolean) {
