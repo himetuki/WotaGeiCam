@@ -26,7 +26,7 @@ data class GalleryEntry(
      * 仓库层不许出现面向用户的中文串（与 `groupTimeline` 同一纪律）。
      */
     val seriesCount: Int?
-        get() = if (seriesId == null || parts.size < MIN_GROUP_SIZE) null else parts.size
+        get() = if (seriesId == null || parts.size < SeriesGroup.MIN_GROUP_SIZE) null else parts.size
 }
 
 /** 归组判定要用的三个字段（把 Android 类型挡在纯逻辑之外，JVM 单测才跑得动） */
