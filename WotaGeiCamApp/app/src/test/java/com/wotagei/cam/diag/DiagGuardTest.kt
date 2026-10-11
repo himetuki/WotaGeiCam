@@ -209,4 +209,64 @@ class DiagGuardTest {
         assertTrue("找不到结束标记", endAt >= 0)
         assertTrue("丢弃自曝必须排在结束标记之前（不能埋到末尾）", noteAt < endAt)
     }
+
+    /**
+     * `appVersionCode` 不许再留版本分支（#14：清掉 `ObsoleteSdkInt`）。
+     *
+     * 本工程 minSdk 29 ≥ 28，`PackageInfo.longVersionCode` 自 API 28 起就有 ⇒ 原来那句
+     * `if (SDK_INT >= VERSION_CODES.P)` 是**恒真**判断，Lint 报 `ObsoleteSdkInt`
+     * （r31 十条 warning 里唯一由本轮引入的一条）。清掉后 10→9，防掩盖后续新增告警。
+     *
+     * 它是表达式体（`= runCatching { … }.getOrDefault(0L)`），`bodyOf` 定位不到，按声明切片。
+     * 切片判据含 `getOrDefault(0L)` 作落点自检：切错了立刻红，不给半份文本当证据。
+     */
+    @Test
+    fun `版本号取longVersionCode且不许有恒真的版本分支`() {
+        val b = appVersionCodeBody(diag)
+        assertTrue("拿不到 PackageInfo 仍要回 0L（切片必须落在 appVersionCode 上）", b.contains("getOrDefault(0L)"))
+        assertTrue("必须读 longVersionCode", b.contains("longVersionCode"))
+        assertFalse("minSdk 29 下 SDK_INT >= VERSION_CODES.P 是恒真判断（ObsoleteSdkInt）", b.contains("VERSION_CODES.P"))
+        assertFalse("不许再有 SDK_INT 版本分支", b.contains("SDK_INT"))
+        assertFalse("不许回退到已废弃的 versionCode", b.contains("versionCode.toLong()"))
+        assertTrue("取不到 PackageInfo 的兜底不许去掉（设备摘要整段会炸）", b.contains("runCatching"))
+    }
+
+    /**
+     * 突变自证：把恒真分支改回去（= 恢复 `ObsoleteSdkInt`），判据必须红。
+     *
+     * 突变体是**真偏离**而非语义空操作：改回去后 `SDK_INT` 与 `VERSION_CODES.P` 两个符号
+     * 真重新出现在该函数切片里，而它们在真值表上原本是「不存在」。
+     */
+    @Test
+    fun `突变自证：把恒真版本分支改回去必红`() {
+        val real = appVersionCodeBody(diag)
+        assertFalse("对照组：真源码上判据必须为假（否则下面证明不了什么）", versionBranchIn(real))
+        val mutant = real.replace(
+            "appRef!!.packageManager.getPackageInfo(appRef!!.packageName, 0).longVersionCode",
+            "val ai = appRef!!.packageManager.getPackageInfo(appRef!!.packageName, 0) " +
+                "if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) ai.longVersionCode " +
+                "else @Suppress(\"DEPRECATION\") ai.versionCode.toLong()"
+        )
+        assertFalse("对照组突变体必须真的改动了源码（没改动 = 这条自证什么也证明不了）", mutant == real)
+        assertTrue("改回恒真版本分支后判据必须报出来", versionBranchIn(mutant))
+    }
+
+    /**
+     * `appVersionCode` 是表达式体，按声明切片到下一个顶层 `}`。
+     *
+     * 声明没了必须抛：`substringAfter` 找不到定界符时**原样返回整篇源码**，那样切片会一路读到
+     * 第一个 `\n}`，里面照样找得到 `runCatching`/`getOrDefault` —— 守卫就变成了"文件里哪都行"，
+     * 函数被改名或挪走时它照样全绿。定位不到输入的守卫是最坏的一种守卫。
+     */
+    private fun appVersionCodeBody(src: String): String {
+        val anchor = "private fun appVersionCode("
+        if (!src.contains(anchor)) throw AssertionError("找不到 $anchor —— 函数被改名/挪走，本守卫失去输入")
+        return com.wotagei.cam.source.KotlinSourceScan.flatten(
+            src.substringAfter(anchor).substringBefore("\n}")
+        )
+    }
+
+    /** 判据本体：该切片里是否又出现了恒真的版本分支（`VERSION_CODES.P` 或 `SDK_INT`） */
+    private fun versionBranchIn(body: String): Boolean =
+        body.contains("VERSION_CODES.P") || body.contains("SDK_INT")
 }
