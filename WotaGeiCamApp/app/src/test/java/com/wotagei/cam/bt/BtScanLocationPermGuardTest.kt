@@ -65,7 +65,10 @@ import java.nio.file.Files
  * **`.mimosa` 整目录跳过**（hook 工具留的旧版源码副本，对它断言＝拿历史文本打分）、
  * **只认 `.kt`**（`.source`/`.json` 等工具产物）。
  *
- * 「尺子自己能红」：每条判据都有对应突变体打同一把尺（见各突变注释）。
+ * 「尺子自己能红」：每条判据都有对应突变体打同一把尺（见各突变注释）——**共 14 枚**，即
+ * `// 突变 N` 标注逐个点名的 1 / 2 / 3 / 4 / **4b** / 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13：
+ * 权限分档那组在 4 之外还带一枚 4b，所以编号只到 13 而**枚数是 14**。核对办法就是数
+ * `// 突变 ` 标注的条数，与本行数字对不上时以标注为准。
  */
 class BtScanLocationPermGuardTest {
 
@@ -426,6 +429,10 @@ class BtScanLocationPermGuardTest {
             outside.any { it.startsWith("media/") } && outside.any { it.startsWith("player/") }
         )
         // 三条排除规则
+        // ⚠ 现场注释：下面**这四条在本方法里恒真**——真树上 `.mimosa` 下没有 `.kt`、没有 `build/`、
+        //   没有 `.source`、也没有测试目录，被挡的样本压根不存在 ⇒ 它们是结构性哨兵，**不是有效覆盖**。
+        //   排除断言的**真牙齿在桥二**（下面那个 hermetic 临时包根：四类样本真的造出来，删任一规则当场红）。
+        //   谁要删桥二，先读那边的 KDoc——别以为删了这边还有覆盖，那正是本轮 M1 修的「看起来比实际强」。
         assertTrue("混进了 .mimosa 路径（旧版源码副本）", all.keys.none { it.contains(".mimosa") })
         assertTrue("混进了非 .kt 工具产物", all.keys.all { it.endsWith(".kt") })
         assertTrue("混进了 .source 副本", all.keys.none { it.endsWith(".source") })
