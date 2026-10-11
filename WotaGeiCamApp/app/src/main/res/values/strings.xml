@@ -13,9 +13,15 @@
     <string name="capability_limited_tip">本机相机能力受限（LEGACY 等级），部分手动参数不可用</string>
 
     <!-- 权限 -->
-    <!-- Android 10/11 上缺的是位置权限（蓝牙设备发现被平台硬绑），文案必须点明，
-         否则用户按「蓝牙权限」去系统设置里找一圈也找不到开关 -->
-    <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱；Android 10/11 搜索附近设备还需位置权限</string>
+    <!-- 蓝牙权限提示**按 SDK 分档**，消费点只有 ui/dialog/BtSpeakerPanel.kt 的 HintCard 一处：
+         · perm_bluetooth_rationale_low —— API ≤ 30（Android 10/11）：这两档 `startDiscovery` 被平台硬绑
+           位置权限。文案先点明具体功能（搜音箱）→ 再解释权限来源（系统要求）→ 随即打消疑虑（不读位置），
+           不像旧句那样把两件权限塞进一句话；否则用户按「位置权限」四个字去猜用途、也找不到开关。
+         · perm_bluetooth_rationale —— API 31+：只有 BLUETOOTH_CONNECT/SCAN 运行时权限，
+           原句去掉「顺带位置」半句，一句话说清即可，不在 S+ 档平白多提一句用不上的权限。
+         两条各自独立、无拼接串，i18n 不引入拼串风险。 -->
+    <string name="perm_bluetooth_rationale_low">搜索附近的音箱时，这台设备的系统（Android 10/11）要求一次位置权限。WotaGeiCam 不会读取或记录你的位置，也不会将位置权限用于其他任何功能。</string>
+    <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱。</string>
     <string name="perm_denied_settings">权限被拒绝，请到系统设置中开启</string>
     <string name="perm_open_settings">去设置</string>
     <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>

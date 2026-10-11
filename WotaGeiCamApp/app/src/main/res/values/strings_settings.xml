@@ -61,6 +61,10 @@
     <string name="set_perm_audio">麦克风</string>
     <string name="set_perm_media">视频读取</string>
     <string name="set_perm_bluetooth">蓝牙连接</string>
+    <!-- 蓝牙行的子行（仅 API ≤ 30 出现，阈值真源是 SettingsScreen.btLocationRowVisible）：
+         7666e95 给 startDiscovery 在 Android 10/11 补了位置权限，设置页不画这行的话
+         用户会看到「蓝牙已就绪」而首启又弹位置框 -->
+    <string name="set_perm_bt_location">位置（仅用于搜索附近音箱）</string>
     <string name="set_perm_granted">已授予</string>
     <string name="set_perm_denied">未授予</string>
     <string name="set_perm_note">缺麦克风只录画面，缺视频读取时媒体库看不到成片</string>
