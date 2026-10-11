@@ -97,8 +97,11 @@ class SeriesStoreGuardTest {
             flatten(bodyOf(codeOnly(noNc), "record")).contains("if (seriesId == 0L) return")
         )
         assertTrue(
-            "摘掉 0 归属门槛不得牵连接线",
-            collectBlock(codeOnly(noZero)).contains("SeriesStore.record(")
+            "摘掉 0 归属门槛不得牵连接线。门槛住在 media/SeriesStore.kt、接线判据吃的是 " +
+                "ui/CameraScreen.kt——两个判据的输入互不相干，所以这里对 CameraScreen 原文校验；" +
+                "旧写法把 noZero（SeriesStore 的突变体）喂给 collectBlock，" +
+                "在 SeriesStore.kt 里找 runner.result.collect 必然炸「失去输入」（门禁 #1c 实测）",
+            collectBlock(codeOnly(screenRaw)).contains("SeriesStore.record(")
         )
     }
 
