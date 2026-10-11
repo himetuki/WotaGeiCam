@@ -16,6 +16,7 @@ import com.wotagei.cam.record.exportOrientationHint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -107,14 +108,22 @@ sealed interface ClipResult {
 /**
  * [ClipError.COMMIT]：Muxer 已封轨成片、**只是清 IS_PENDING 没清掉**（Provider 瞬时忙/抛异常）。
  * 与 [MUX] 分开是因为二者归因完全不同——MUX 是没写出来，COMMIT 是写出来了但相册看不见。
+ * COMMIT 路径**保留 pending 行不删**（#4 定版，对齐 VideoStore.seal 的"只报不删"口径），
+ * 冷启由 [com.wotagei.cam.record.StalePendingSweep.rescuePendingRows] 收录。
  */
 enum class ClipError { RANGE, OPEN, MUX, CANCELLED, COMMIT }
 
 /**
- * 执行器（录制管线之外的第二条"读源→写库"链路，入库走与 VideoStore 同一套
- * IS_PENDING 两段式——写完清 0 相册立即可见，失败/取消删记录不留 0 字节幽灵条目）。
- * sidecar 刻意放在 commit 成功**之后**写：成片已落定，sidecar 写失败只少一份补弧档案，
- * 不牵连导出成败；失败路径的 fail() 也就不需要清理 sidecar。
+ * 执行器（录制管线之外的第二条"读源→写库"链路，入库走与 VideoStore 同一套 IS_PENDING 两段式
+ * ——写完清 0 相册立即可见）。
+ *
+ * 失败语义（#4 定版，对齐录制路 VideoStore.seal 的"只报不删"）：**muxer.stop() 之前**的失败/
+ * 取消照旧删 pending 记录（写一半的废段该删，不留 0 字节幽灵条目）；**muxer.stop() 之后**
+ * （成片字节已在盘上）commit 全败或取消一律**保留行不删**——MediaStore 删行会连带删文件，
+ * 删记录就是把用户的成片丢掉。留下的 pending 行对外不可见（相册、本应用自己的列表都查不到），
+ * 冷启由 [com.wotagei.cam.record.StalePendingSweep.rescuePendingRows] 收录。
+ * sidecar 在「commit 成功」与「全败保留」两条路径都写：被救援回的成片档案要完整；
+ * sidecar 写失败只少一份补弧档案，不牵连导出成败。
  */
 class ClipExporter(private val ctx: Context) {
 
@@ -130,6 +139,10 @@ class ClipExporter(private val ctx: Context) {
 
         /** 样本缓冲初始容量（4K 码率的视频帧可以远超 1MB，不够时按需翻倍） */
         private const val INITIAL_BUF = 1 shl 20
+
+        /** commit 延时重试两档（#4：Provider 瞬时忙多半秒级恢复，共 4 次尝试 = 立即 2 + 延时 2） */
+        private const val COMMIT_RETRY_DELAY_1_MS = 1500L
+        private const val COMMIT_RETRY_DELAY_2_MS = 3000L
     }
 
     /**
@@ -151,6 +164,8 @@ class ClipExporter(private val ctx: Context) {
         // 循环在非 suspend 的 copy() 里跑，取消检查靠把 Job 递进去（coroutineContext 是 suspend 属性，
         // 在 copy() 里直接摸不到）
         val job = coroutineContext[Job]
+        // muxer.stop() 已过 = 容器里是完整合法 MP4：此后的失败一律保留行不删（#4，救援通道回收）
+        var bytesComplete = false
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)
@@ -164,21 +179,29 @@ class ClipExporter(private val ctx: Context) {
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
                     val baseUs = copy(src, sMs * 1000L, eMs * 1000L, job, muxer, onProgress)
                     muxer.stop()
+                    bytesComplete = true
                     // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
                     // 用户会看到"导出成功"却在相册里找不到成片，且事后无锚点可归因。
-                    // 失败多半是 Provider 瞬时忙，重试一次（同 VideoStore.seal 的处置口径）
-                    if (!commit(pendingUri) && !commit(pendingUri)) {
-                        Log.e(TAG, "commit 失败（已重试一次）uri=$pendingUri，相册可能看不到该成片")
-                        return@withContext fail(pendingUri, ClipError.COMMIT)
+                    // 失败多半是 Provider 瞬时忙：立即重试 1 次（现状口径）+ 延时 1.5s/3s 各再试 1 次
+                    var committed = commit(pendingUri)
+                    if (!committed) committed = commit(pendingUri)
+                    if (!committed) {
+                        Log.w(TAG, "commit 立即两连败，转延时重试 uri=$pendingUri")
+                        committed = delayedCommit(pendingUri, job, COMMIT_RETRY_DELAY_1_MS)
                     }
-                    // sidecar 平移：成片 PTS = 帧序号 × 1e6/dstFps，闭式反推关键帧位次
-                    val srcLog = src.dataPath?.let { ArcDropLog.readFrom(it) }
-                    val outPath = queryData(pendingUri)
-                    if (srcLog != null && outPath != null) {
-                        val shift = ClipRule.keyFrameIndexOf(baseUs, srcLog.dstFps)
-                        val ok = ArcDropLog.writeTo(outPath, ClipRule.remapDrops(srcLog, shift))
-                        Log.i(TAG, "sidecar remap shift=$shift ok=$ok")
+                    if (!committed) {
+                        committed = delayedCommit(pendingUri, job, COMMIT_RETRY_DELAY_2_MS)
                     }
+                    if (!committed) {
+                        // 全败（共 4 次）：成片字节已在盘上（muxer.stop 已过），删行 = 丢成片
+                        //（MediaStore 删行连带删文件，与 VideoStore.seal 同口径只报不删）。
+                        // 保留 pending 行，冷启由 StalePendingSweep.rescuePendingRows 收录；
+                        // sidecar 按成功路径同款写——被救援回的成片档案要完整。
+                        Log.e(TAG, "commit 全败（共 4 次）uri=$pendingUri，成片保留待冷启救援")
+                        writeSidecar(src, pendingUri, baseUs)
+                        return@withContext ClipResult.Fail(ClipError.COMMIT)
+                    }
+                    writeSidecar(src, pendingUri, baseUs)
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id $sMs..$eMs ms baseUs=$baseUs")
                     ClipResult.Done(id, ClipRule.clipNameOf(src.name))
@@ -187,7 +210,12 @@ class ClipExporter(private val ctx: Context) {
                 }
             }
         } catch (e: CancellationException) {
-            fail(pendingUri, ClipError.CANCELLED)
+            if (bytesComplete) {
+                // 成片已封轨：取消也不删行（同全败口径），留待冷启救援
+                Log.i(TAG, "取消但成片已封轨，保留 pending 行待冷启救援 uri=$pendingUri")
+            } else {
+                fail(pendingUri, ClipError.CANCELLED)
+            }
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "export failed: ${e.message}")
@@ -313,6 +341,33 @@ class ClipExporter(private val ctx: Context) {
 
     // region MediaStore pending 两段式（与 VideoStore 同一模式，目录换成 Clip 子目录）
 
+    /**
+     * commit 延时重试一档：等 [delayMs] 后再清一次 IS_PENDING。
+     * 醒后先 ensureActive（用户已取消就向上抛走 cancel 分支按 bytesComplete 处置，不白等）；
+     * 每次失败只落一条 [Log.w]（全败另有 [Log.e] 锚点，不逐次刷屏）。
+     */
+    private suspend fun delayedCommit(uri: android.net.Uri, job: Job?, delayMs: Long): Boolean {
+        delay(delayMs)
+        job?.ensureActive()
+        if (commit(uri)) return true
+        Log.w(TAG, "commit 延时重试仍败 uri=$uri delayMs=$delayMs")
+        return false
+    }
+
+    /**
+     * sidecar 平移落盘（commit 成功与"全败保留"两条路径共用）：成片 PTS = 帧序号 × 1e6/dstFps，
+     * 闭式反推关键帧位次。写失败只少一份补弧档案，不牵连导出成败。
+     */
+    private fun writeSidecar(src: VideoClip, pendingUri: android.net.Uri, baseUs: Long) {
+        val srcLog = src.dataPath?.let { ArcDropLog.readFrom(it) }
+        val outPath = queryData(pendingUri)
+        if (srcLog != null && outPath != null) {
+            val shift = ClipRule.keyFrameIndexOf(baseUs, srcLog.dstFps)
+            val ok = ArcDropLog.writeTo(outPath, ClipRule.remapDrops(srcLog, shift))
+            Log.i(TAG, "sidecar remap shift=$shift ok=$ok")
+        }
+    }
+
     private fun insertPending(name: String): android.net.Uri? = runCatching {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -348,7 +403,10 @@ class ClipExporter(private val ctx: Context) {
         }
     }.getOrNull()
 
-    /** 失败/取消收尾：删 pending 记录（sidecar 此时尚未写，无需清理） */
+    /**
+     * 写一半（muxer.stop 之前）的失败/取消收尾：删 pending 记录。sidecar 尚未写，无需清理；
+     * muxer.stop 之后的失败**不走这里**（成片字节在盘上，删行 = 丢成片，见类注）。
+     */
     private fun fail(uri: android.net.Uri, reason: ClipError): ClipResult {
         runCatching { ctx.contentResolver.delete(uri, null, null) }
         Log.i(TAG, "failed reason=$reason")
