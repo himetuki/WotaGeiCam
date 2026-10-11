@@ -79,10 +79,12 @@ class ArcRepairGlStampGuardTest {
     /**
      * 突变自证：把各处退回缺陷形态必报红。
      *
-     * 四个突变体分别对应四种真实退化：**删返回值检查**、**把检查挪到 swap 之后**、
-     * **吞掉 runCatching 的失败**、**删计次**。另配一条对照组（只改注释），
-     * 保证尺子不对无害改动过敏。上一轮的坑是语义空操作突变体——这里的每个突变体都
-     * 改变了可观测行为（坏帧是否被换出去 / 失败是否被吞），不可能与真身等价。
+     * 五枚 gl 侧突变体对应五种真实退化：**删返回值检查**、**把检查挪到 swap 之后**、
+     * **吞掉 runCatching 的失败**、**删计次**、**退回返回 Unit**；另有一条 **runner 侧**
+     * 的 countOutput 位次突变（必须喂给 [stampViolations] 的 runner 参数，见下）。
+     * 再配一条对照组（只改注释），保证尺子不对无害改动过敏。上一轮的坑是语义空操作突变体
+     * ——这里的每个突变体都改变了可观测行为（坏帧是否被换出去 / 失败是否被吞 /
+     * 进度是否照推），不可能与真身等价。
      */
     @Test
     fun `尺子自己能红_打戳失败接线突变体必报红`() {
@@ -109,7 +111,6 @@ class ArcRepairGlStampGuardTest {
             Triple("吞掉 runCatching 的失败（恒返回 true）", gl.replace("        return ok\n", "        return true\n"), true),
             Triple("删掉打戳失败计次", gl.replace("stampFailCount++", ""), true),
             Triple("stampPresentation 退回返回 Unit", gl.replace("private fun stampPresentation(ptsUs: Long): Boolean {", "private fun stampPresentation(ptsUs: Long) {"), true),
-            Triple("countOutput 被挪到失败抛异常之前", runner.replace("if (!gl.emitPending(op.ptsUs)) throw ArcFail(ArcRepairError.GPU)", "countOutput(1); if (!gl.emitPending(op.ptsUs)) throw ArcFail(ArcRepairError.GPU)"), true),
             // 对照组：只改注释不许引发红
             Triple("对照组：只改注释", gl.replace("private fun emitOnGl(ptsUs: Long): Boolean {", "private fun emitOnGl(ptsUs: Long): Boolean { // 注释"), false)
         )
@@ -121,5 +122,21 @@ class ArcRepairGlStampGuardTest {
                 assertEquals("对照组「$name」不该报红（实际违规：${red.joinToString("；")}）", 0, red.size)
             }
         }
+
+        // ⑥ runner 侧：countOutput 被挪到失败抛异常之前——喂的是 **runner** 槽位。
+        // （门禁 #1c 的教训：这枚突变体曾被放进 gl 槽名单，forEach 把它当 maskedGl 传进去，
+        //   regionOf 在 ArcRepairRunner.kt 里找 fun stampPresentation 找到 0 个函数体直接炸
+        //   「失去输入」——突变体本身没问题，是喂错了参数。execGpu 现序是 throw(:721) →
+        //   countOutput(:722)，把 countOutput 注到 throw 之前，顺序判据必红。）
+        val runnerMut = runner.replace(
+            "if (!gl.emitPending(op.ptsUs)) throw ArcFail(ArcRepairError.GPU)",
+            "countOutput(1); if (!gl.emitPending(op.ptsUs)) throw ArcFail(ArcRepairError.GPU)"
+        )
+        assertTrue("突变锚点丢失：没截到 emitPending 失败即抛 ArcFail(GPU) 行", runnerMut != runner)
+        val red6 = stampViolations(gl, runnerMut)
+        assertTrue(
+            "突变体「countOutput 被挪到失败抛异常之前」必须报红（实际违规：${red6.joinToString("；")}）",
+            red6.isNotEmpty()
+        )
     }
 }
