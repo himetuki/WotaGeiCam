@@ -167,7 +167,8 @@ fun GalleryScreen(
     var filter by remember { mutableStateOf<ClipFilter>(ClipFilter.All) }
     var tabIndex by remember { mutableStateOf(0) }
     var banner by remember { mutableStateOf<Int?>(null) }
-    var menuClip by remember { mutableStateOf<VideoClip?>(null) }
+    // 菜单作用域：存的是「这次要真正动到的片」的**展开结果**，不是那一枚代表段
+    var menuTargets by remember { mutableStateOf<List<VideoClip>?>(null) }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var purgeIds by remember { mutableStateOf(setOf<Long>()) }
 
@@ -215,6 +216,15 @@ fun GalleryScreen(
             delay(2600)
             banner = null
         }
+    }
+
+    // ⚠ **组级动作扇出**（#5 第 2 轮返修·甲）：卡片 [⋯] 的作用域是**整组**，不是第 1 段。
+    // 展开只发生在**入口处**（这里），动作面一个字不改：既有的 share / moveToTrash /
+    // restoreFromTrash / deleteForever 全都是「收一个 List」，不需要为归组另开批量重载
+    // （上一轮裁决：不新增 MediaActions 批量重载）。
+    // 退化单片的卡与单段录制用户的卡走同一条路，`expandSeriesTargets` 原样返回它 ⇒ 逐字不变。
+    val openMenu: (VideoClip) -> Unit = { clip ->
+        menuTargets = SeriesGroup.expandSeriesTargets(listOf(clip), clips)
     }
 
     // 屏上没有 M3 Surface/Scaffold 兜底，环境色在根上给一次，裸 Text/Icon 才不会落回黑色
@@ -282,7 +292,7 @@ fun GalleryScreen(
             ) {
                 val isTrash = filter is ClipFilter.Trash
                 when (mode) {
-                    ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen) { menuClip = it }
+                    ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen, onMenu = openMenu)
                     ListMode.Grid -> ClipGrid(
                         clips = clips,
                         columns = gridColumns,
@@ -290,7 +300,7 @@ fun GalleryScreen(
                         refreshing = listRefreshing,
                         selectedIds = selectedIds,
                         onOpen = onOpen,
-                        onMenu = { menuClip = it },
+                        onMenu = openMenu,
                         onToggleSelect = { c ->
                             selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
                         }
@@ -382,13 +392,19 @@ fun GalleryScreen(
     }
 
     // 2026-10-02 排查「多选操作后立刻打开的『更多操作』菜单，点菜单项无响应」：
-    // menuClip 钉的是图标按下那一刻的 VideoClip 快照，批量操作的 repo.invalidate() 重发可能在
-    // 菜单打开之后才落地，菜单就拿着旧快照干活——收藏项对旧状态取反，撞上刚生效的批量收藏
-    // 就是两次空写、零反馈（机理分析见下方 CardMenu 收藏项注释）。这里每次重组都解析当前列表
-    // 里的最新一份；条目已不在列表（极端时序）才回退快照，保证菜单仍可操作。
-    menuClip?.let { requested ->
-        val clip = clips.firstOrNull { it.id == requested.id } ?: requested
-        CardMenu(clip = clip, ops = ops, onDismiss = { menuClip = null }, onCompare = { onCompare(clip.id) })
+    // menuTargets 钉的是图标按下那一刻的片快照（组卡是多片的快照），批量操作的 repo.invalidate()
+    // 重发可能在菜单打开之后才落地，菜单就拿着旧快照干活——收藏项对旧状态取反，撞上刚生效的
+    // 批量收藏就是两次空写、零反馈（机理分析见下方 CardMenu 收藏项注释）。这里每个 id 都重新
+    // 解析当前列表里的最新一份；整组都不在了（极端时序）才回退快照，保证菜单仍可操作。
+    menuTargets?.takeIf { it.isNotEmpty() }?.let { requested ->
+        val targets = requested.mapNotNull { r -> clips.firstOrNull { it.id == r.id } }
+            .ifEmpty { requested }
+        CardMenu(
+            targets = targets,
+            ops = ops,
+            onDismiss = { menuTargets = null },
+            onCompare = { onCompare(targets.first().id) }
+        )
     }
 }
 
@@ -849,9 +865,20 @@ private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, on
     }
 }
 
-/** 卡片操作：收藏 / 对比 / 分享 / 进回收站 / 还原 / 彻底删除 / tag / 重命名 */
+/**
+ * 卡片操作：收藏 / 对比 / 分享 / 进回收站 / 还原 / 彻底删除 / tag / 重命名。
+ *
+ * [targets] 是**这次菜单真正要动到的片**：调用方已在入口处经 [SeriesGroup.expandSeriesTargets]
+ * 展开成列表（组卡传整组、退化成单片与单段片的卡传单片），本函数只负责按目标列表发动作。
+ * 分成两族的理由：
+ * - **扇出到 [targets] 全部**：分享 / 移入回收站 / 还原 / 彻底删除。否则会出现「只把首段移进
+ *   回收站、其余段还在原地」的半截状态；[MediaOps] 这四项本来就收 List，动作面零改动。
+ * - **只作用在代表段** `targets.first()`：收藏是**取反**开关（对全组取反会给出互相矛盾的结果），
+ *   对比 / 重命名 / 分类标签在 [MediaActions] 里都是单片签名，上一轮已裁决**不新增**批量重载。
+ */
 @Composable
-private fun CardMenu(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit, onCompare: () -> Unit) {
+private fun CardMenu(targets: List<VideoClip>, ops: MediaOps, onDismiss: () -> Unit, onCompare: () -> Unit) {
+    val clip = targets.first()
     val repo = rememberMediaRepo()
     var tagDialog by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
@@ -872,11 +899,11 @@ private fun CardMenu(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit, onCo
             // （design/Widgets.kt 那条注释）。
             WotaMenuEntry(stringResource(R.string.gallery_menu_like)) { ops.setLike(clip, !clip.liked); onDismiss() },
             WotaMenuEntry(stringResource(R.string.gallery_menu_compare)) { onDismiss(); onCompare() },
-            WotaMenuEntry(stringResource(R.string.gallery_menu_share)) { ops.share(listOf(clip)) },
+            WotaMenuEntry(stringResource(R.string.gallery_menu_share)) { ops.share(targets) },
             if (clip.isTrashed) {
-                WotaMenuEntry(stringResource(R.string.gallery_menu_restore)) { ops.restoreFromTrash(listOf(clip)); onDismiss() }
+                WotaMenuEntry(stringResource(R.string.gallery_menu_restore)) { ops.restoreFromTrash(targets); onDismiss() }
             } else {
-                WotaMenuEntry(stringResource(R.string.gallery_menu_trash)) { ops.moveToTrash(listOf(clip)); onDismiss() }
+                WotaMenuEntry(stringResource(R.string.gallery_menu_trash)) { ops.moveToTrash(targets); onDismiss() }
             },
             WotaMenuEntry(stringResource(R.string.gallery_menu_tags)) { tagDialog = true },
             WotaMenuEntry(stringResource(R.string.gallery_menu_rename)) { renameDialog = true },
@@ -889,13 +916,20 @@ private fun CardMenu(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit, onCo
     if (purgeDialog) {
         AlertDialog(
             onDismissRequest = { purgeDialog = false },
-            title = { Text(stringResource(R.string.gallery_purge_title)) },
+            // 整组删除时确认框必须报**条数**：沿用单片那句「彻底删除该视频？」会把 3 个文件
+            // 的删除藏在一个片子的说法后面（复用多选条已有的 gallery_purge_title_many）
+            title = {
+                Text(
+                    if (targets.size > 1) stringResource(R.string.gallery_purge_title_many, targets.size)
+                    else stringResource(R.string.gallery_purge_title)
+                )
+            },
             text = { Text(stringResource(R.string.gallery_purge_body)) },
             confirmButton = {
                 TextButton(onClick = {
                     purgeDialog = false
                     onDismiss()
-                    ops.deleteForever(listOf(clip), pop = onDismiss, refresh = { repo.invalidate() })
+                    ops.deleteForever(targets, pop = onDismiss, refresh = { repo.invalidate() })
                 }) { Text(stringResource(R.string.ok), color = WotaRec) }
             },
             dismissButton = { TextButton(onClick = { purgeDialog = false }) { Text(stringResource(R.string.cancel)) } },
