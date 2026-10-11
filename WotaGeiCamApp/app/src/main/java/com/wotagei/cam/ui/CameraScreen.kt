@@ -1721,7 +1721,7 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
         // 坏 Uri / 解析失败一律按没选成处理：parseId 只认 media uri，个别相册会回私有 provider uri，
         // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
         // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
-        // （clipById 的 flowOn(IO) 管不到协程体里的直接调用），横幅仍主线程写
+        // （这段裸 query 不经 repo，clipByIdOnce 的自带 IO 覆盖不到它），横幅仍主线程写
         val uri = result.data?.data
         var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
         scope.launch {
