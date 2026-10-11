@@ -205,6 +205,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     @Volatile
     private var encoderFps = 0
 
+    /**
+     * 本段是否按 NTSC 非整数档落网格（23.976/29.97/59.94）。
+     *
+     * 只影响**网格步长**这一个算术点（`ntscGridStepNs(fps)` vs `1e9/fps`），不碰 fps 本身、
+     * 不碰相机请求、不碰容器声明——链上其余部分仍是 Int，这是选「Int + 映射表」而不是
+     * 「全链升浮点」的原因（见 [ntscGridStepNs]）。
+     */
+    @Volatile
+    private var encoderNtsc = false
+
     /** 已交给编码器的帧序号，用于算**网格**时间戳与抽帧位次账 */
     private var encoderFrameIndex = 0
 
@@ -545,10 +555,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 否则 MediaCodec 报尺寸不匹配（03 文档 §3.8）；尺寸变化即重建其 EGLSurface。
      *
      * @param surface null 表示解除绑定（只上屏）
+     * @param frameRate 目标帧率（Int；`<=0` 视为不可用，压根不打戳）
+     * @param ntsc 该档是否是真 NTSC 非整数帧率（23.976/29.97/59.94，即相机只能给※近似档）。
+     *   true 时网格步长改查 [ntscGridStepNs]；默认 false ⇒ 整数档调用点零改动。
      */
-    fun setOutputSurface(surface: Surface?, widthPx: Int, heightPx: Int, frameRate: Int = 0) {
+    fun setOutputSurface(surface: Surface?, widthPx: Int, heightPx: Int, frameRate: Int = 0, ntsc: Boolean = false) {
         if (released.get()) return
         encoderFps = if (surface == null) 0 else frameRate.coerceAtLeast(0)
+        // 解面必须连 NTSC 一起清：残留 true 会让下一段的整数档落成非整数网格
+        encoderNtsc = if (surface == null) false else ntsc
         postGl { replaceEncoderSurface(surface, widthPx, heightPx) }
     }
 
@@ -1437,7 +1452,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val display = eglDisplay
         if (display === EGL14.EGL_NO_DISPLAY) return
         val nowNs = System.nanoTime()
-        val stepNs = 1_000_000_000L / fps
+        // 网格步长：NTSC 非整数档查表（见 ntscGridStepNs），其余走 1e9/fps。
+        // 查表落空（该 fps 不在映射表里）时**退回整数步长**，绝不把 0 当步长传下去——
+        // 0 会让 encoderAdaptivePtsNs 把整段的戳并成同一枚，成片等于只有一帧。
+        val ntscStep = if (encoderNtsc) ntscGridStepNs(fps) else 0L
+        val stepNs = if (ntscStep > 0L) ntscStep else 1_000_000_000L / fps
         val ptsNs = encoderAdaptivePtsNs(encoderBaseNs, nowNs, stepNs, encoderLastPtsNs, encoderFrameIndex)
         // 观测 S1-M2-02：帧龄 = 换帧墙钟 − 相机 SOF 戳。抽帧节奏吃相机戳、成片戳吃墙钟，
         // 中间那段不恒定的管线延迟此前全仓零读数，"源真慢 / 两时基速率差 / 延迟单调增长"

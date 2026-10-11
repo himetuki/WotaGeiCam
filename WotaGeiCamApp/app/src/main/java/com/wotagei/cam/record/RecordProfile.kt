@@ -31,6 +31,14 @@ data class RecordProfile(
     val mirrored: Boolean,
     val useGpu: Boolean,
     /**
+     * 该档是不是 NTSC 非整数帧率（23.976/29.97/59.94，相机只给得到※近似档）。
+     *
+     * 链上 fps 仍是 Int（本字段默认 false ⇒ 既有构造点零影响）；它只告诉 GL 编码支路
+     * 「网格步长改查 [com.wotagei.cam.camera.ntscGridStepNs]」，不碰相机请求、不碰容器帧率声明。
+     * 由 CameraScreen 建 profile 时按 `!fps.exact` 填（无固定档 ⇒ 走 NTSC 近似）。
+     */
+    val fpsNtsc: Boolean = false,
+    /**
      * 强制 24/25fps 在无原生精确档设备上的录制期转换（null = 不转换，按既有口径）。
      * 非 null 时 [com.wotagei.cam.record.Recorders.useCodecEngine] 强制走 MediaCodec 引擎
      * （MediaRecorder 面输入无法拒帧），且 GL 编码支路按该模式抽帧/补弧。

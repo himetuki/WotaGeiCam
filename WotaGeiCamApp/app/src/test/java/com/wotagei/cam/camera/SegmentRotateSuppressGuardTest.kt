@@ -103,7 +103,8 @@ class SegmentRotateSuppressGuardTest {
         val bad = ArrayList<String>()
         val begin = flatten(bodyOf(screen, "beginSession"))
         val mark = begin.indexOf("markSegmentRotating()")
-        val setOut = begin.indexOf("setOutputSurface(s, profile.width, profile.height, profile.fps)")
+        // 锚串随 2026-10-11 #2 的 NTSC 参数迁移（setOutputSurface 新增 ntsc 形参）
+        val setOut = begin.indexOf("setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)")
         val awaitNew = begin.indexOf("awaitEncoderSurface(s)")
         val finallyKw = begin.indexOf("finally")
         val clear = begin.indexOf("clearSegmentRotating()")

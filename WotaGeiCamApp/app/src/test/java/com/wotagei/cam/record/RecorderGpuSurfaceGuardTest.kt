@@ -115,7 +115,8 @@ class RecorderGpuSurfaceGuardTest {
         assertTrue(
             "RecordRunner.beginSession 必须接 onInputSurfaceRecreated（下发 setOutputSurface + awaitEncoderSurface）",
             begin.contains("rec.onInputSurfaceRecreated = ") &&
-                begin.contains("setOutputSurface(s, profile.width, profile.height, profile.fps)") &&
+                // 锚串随 2026-10-11 #2 的 NTSC 参数迁移（setOutputSurface 新增 ntsc 形参）
+                begin.contains("setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)") &&
                 begin.contains("awaitEncoderSurface()")
         )
         // 等面超时不许静默放行（P3-3，与 awaitPreview 口径对齐）；字面量被遮蔽，
