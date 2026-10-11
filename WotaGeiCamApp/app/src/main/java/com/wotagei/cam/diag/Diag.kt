@@ -423,9 +423,16 @@ object Diag {
         appRef!!.packageManager.getPackageInfo(appRef!!.packageName, 0).versionName ?: "?"
     }.getOrDefault("?")
 
+    /**
+     * 版本号取 [android.content.pm.PackageInfo.longVersionCode]。
+     *
+     * 本工程 minSdk 29 ≥ 28（`longVersionCode` 自 API 28 起可用），所以不需要版本分支：
+     * 原来的 `SDK_INT >= VERSION_CODES.P` 是**恒真**判断，Lint 报 `ObsoleteSdkInt`
+     * （r31 十条 warning 里唯一由本轮引入的那条）。`runCatching` 外壳保留：
+     * 拿不到 PackageInfo 时仍回 0L，不许让设备摘要整段炸掉。
+     */
     private fun appVersionCode(): Long = runCatching {
-        val ai = appRef!!.packageManager.getPackageInfo(appRef!!.packageName, 0)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) ai.longVersionCode else @Suppress("DEPRECATION") ai.versionCode.toLong()
+        appRef!!.packageManager.getPackageInfo(appRef!!.packageName, 0).longVersionCode
     }.getOrDefault(0L)
 }
 
