@@ -77,6 +77,9 @@ internal class ArcRepairGl(
     private var released = false
     private var glReady = false
 
+    /** 打戳失败累计次数（本链不产 sidecar，日志就是全部痕迹，故必须计次而不是只留一行） */
+    private var stampFailCount = 0
+
     // --- EGL
     private var eglDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext = EGL14.EGL_NO_CONTEXT
@@ -559,7 +562,20 @@ internal class ArcRepairGl(
     /**
      * 待发帧 → 编码器面：先 makeCurrent(编码器面) 再画（不切面 swap 会报 EGL_BAD_SURFACE，真机实测）。
      * 画笔必须用 2D 版（pending 是普通 2D FBO 纹理）：这趟是编码器看到的**最后一手**，
-     * 用 OES 画笔时整条成片黑屏而 swap 照常成功——2026-10-05 真机缺陷的成片落点。
+     * 用 OES 画笔时整条成片黑屏而 swap 照常成功——2026-10-05 全程黑屏缺陷的成片落点。
+     *
+     * **打戳失败即整任务失败**（2026-10-11，与录制路 M2-06 同判据、但理由链不同）：
+     * - 与录制路的差异：① 本链**不产 `.drops.json` sidecar**（`ArcDropLog` 的写入方只有 `CodecRecorder`），
+     *   没有「账与容器分家」那一重；② [basePtsNs] 硬编码 0，没有可被污染的「上一戳地板」；
+     * - 但危害被 basePtsNs = 0 **放大**：正常戳是从 0 起的小数值，打戳失败时 EGL 回落到换帧墙钟
+     *   （`System.nanoTime()` 量级），会在两枚小值戳之间插入一枚量级完全不同的戳；
+     * - 坏戳一旦进容器就**无法自愈且用户不可见**（成片仍能播，只有逐帧比对才看得出），
+     *   而离线任务重跑成本低、坏片不可逆 ⇒ 宁可整任务失败；
+     * - 与扫描判据的关系：`docs/scan/S5` 对本链判「合规」看的是「有没有日志」，
+     *   `S1-M2-06` 判「缺陷」看的是「账与容器是否一致」——本修复以 M2-06 判据为准，两者不冲突。
+     *
+     * 调用方 [ArcRepairRunner.execGpu] 已逐字按 `!emitPending(...) → throw ArcFail(GPU)` 消费返回值，
+     * 不必改它。
      */
     private fun emitOnGl(ptsUs: Long): Boolean {
         if (pass2dProgram == 0 || encoderEglSurface === EGL14.EGL_NO_SURFACE) return false
@@ -567,26 +583,42 @@ internal class ArcRepairGl(
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, widthPx, heightPx)
         GLES20.glUseProgram(pass2dProgram)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ARC_UNIT_A)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE_UNIT_A)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, pendTex[pendIdx])
-        if (pass2dUFrame >= 0) GLES20.glUniform1i(pass2dUFrame, ARC_UNIT_A)
+        if (pass2dUFrame >= 0) GLES20.glUniform1i(pass2dUFrame, GLES20.GL_TEXTURE_UNIT_A)
         if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, identityMatrix, 0)
         drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
-        stampPresentation(ptsUs)
+        // 失败检查**必须早于** eglSwapBuffers：不 swap 才有「这一帧根本没进容器」这个性质
+        if (!stampPresentation(ptsUs)) return false
         val swapped = EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
         if (!swapped) Log.w(TAG_ARC_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
         drainGlError("arcEmit")
         return swapped
     }
 
-    /** 呈现时间戳：调用方给的均匀目标帧率 PTS（微秒→纳秒），叠上会话基址 */
-    private fun stampPresentation(ptsUs: Long) {
-        if (eglDisplay === EGL14.EGL_NO_DISPLAY || encoderEglSurface === EGL14.EGL_NO_SURFACE) return
+    /**
+     * 呈现时间戳：调用方给的均匀目标帧率 PTS（微秒→纳秒），叠上会话基址。
+     *
+     * @return true = 戳真的写进了容器；false = display/surface 无效或 EGL 调用失败，
+     *   调用方必须把这一帧当**没发出去**处理（见 [emitOnGl] 的判定理由）。
+     */
+    private fun stampPresentation(ptsUs: Long): Boolean {
+        if (eglDisplay === EGL14.EGL_NO_DISPLAY || encoderEglSurface === EGL14.EGL_NO_SURFACE) {
+            Log.w(TAG_ARC_GL, "写呈现时间戳失败：EGL display/surface 无效，本次 emit 作废")
+            return false
+        }
         val ptsNs = basePtsNs + ptsUs * 1000L
-        runCatching { EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderEglSurface, ptsNs) }
-            .onFailure { Log.w(TAG_ARC_GL, "写呈现时间戳失败：${it.message}") }
+        val ok = runCatching { EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderEglSurface, ptsNs) }
+            .onFailure {
+                stampFailCount++
+                Log.w(TAG_ARC_GL, "写呈现时间戳失败（累计 ${stampFailCount} 次）：${it.message}")
+            }
+            .isSuccess
+        if (!ok) Log.e(TAG_ARC_GL, "打戳失败 ⇒ 本次 emit 判失败，整任务终止（坏戳进容器不可自愈且用户不可见）")
+        return ok
     }
+
 
     /** 摘掉本引擎用到的两个采样单元（防 feedback loop 误报） */
     private fun unbindUnits() {
