@@ -94,6 +94,8 @@
     <string name="player_clip_cancel">取消导出</string>
     <string name="player_clip_done">剪辑已导出到媒体库</string>
     <string name="player_clip_failed">导出失败，请重试</string>
+    <!-- #4：commit 全败但成片字节已在盘上，保留待冷启救援（文案与"导出失败"分开，不吓用户） -->
+    <string name="player_clip_commit_kept">导出完成但未收录，成片已保留，重启应用后自动恢复</string>
 
     <!-- 内录选轨（批 4）：双音轨片才有音轨 chip/同步/导出三控件；音轨识别口径见 TrackSync 头注 -->
     <string name="player_track_env">环境音</string>
@@ -109,4 +111,5 @@
     <string name="player_track_export_track">导出音轨：%1$s</string>
     <string name="player_track_export_done">音轨成片已导出到媒体库</string>
     <string name="player_track_export_failed">导出失败，请重试</string>
+    <string name="player_track_commit_kept">导出完成但未收录，成片已保留，重启应用后自动恢复</string>
 </resources>
