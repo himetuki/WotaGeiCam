@@ -1303,7 +1303,11 @@ internal fun btLocationRowVisible(sdkInt: Int): Boolean = sdkInt < 31
  *
  * 蓝牙行下方那枚位置子行的判据**逐字**是 `BtSpeakerController.missingPermissions()` 的 `<S` 分支
  * （同枚 `ACCESS_FINE_LOCATION`）——`7666e95` 给 `startDiscovery` 在 API 29/30 补了位置权限之后，
- * 设置页若不把这行画出来，用户会看到「蓝牙已就绪」而首启又弹位置框，状态与系统实际声明对不上。
+ * **设置页此前从未呈现这项权限**：用户在这里看到「蓝牙连接已就绪」，而系统实际声明的权限面里
+ * 还多着一枚没被算进来的位置权限，两处口径不一致——这才是补这行的动机。
+ * （**首启不会弹位置权限框**：`MainActivity.missingStartupPermissions()` 只申请相机/麦克风/媒体读取
+ * 三项，位置权限的 `RequestMultiplePermissions` 只在蓝牙面板里由用户点按钮触发。2026-10-11 口径订正，
+ * 此前本段误写成「首启又弹位置框」。）
  * **蓝牙主行的 [hasBluetoothPermission] 分毫未动**（它与 `BtSpeakerController.hasConnectPermission()`
  * 同一条规则，见下方 KDoc）。
  */

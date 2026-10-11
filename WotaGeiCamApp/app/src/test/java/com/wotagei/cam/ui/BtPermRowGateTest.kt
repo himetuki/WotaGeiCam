@@ -12,9 +12,11 @@ import org.junit.Test
  * 设置页「蓝牙权限行下的位置子行」的版本闸守卫（#10）。
  *
  * 背景：`7666e95` 给 `startDiscovery` 在 API 29/30 补了 `ACCESS_FINE_LOCATION`（manifest 按
- * `maxSdkVersion="30"` 收口）。设置页不画这行时，用户看到「蓝牙已就绪」而首启又弹位置框——
- * 权限状态与系统实际声明对不上。子行的判据**逐字**是 `BtSpeakerController.missingPermissions()`
- * 的 `<S` 分支（同枚 `ACCESS_FINE_LOCATION`）。
+ * `maxSdkVersion="30"` 收口）。设置页此前**从未呈现**这枚权限——用户在这里看到「蓝牙连接已就绪」，
+ * 而系统实际声明的权限面里还多着一枚没被算进来的位置权限，两处口径不一致（**首启不会弹位置权限框**：
+ * `missingStartupPermissions()` 只要相机/麦克风/媒体读取三项，位置权限的申请只在蓝牙面板里由用户
+ * 点按钮触发；2026-10-11 口径订正，此前本段误写成「首启又弹位置框」）。子行的判据**逐字**是
+ * `BtSpeakerController.missingPermissions()` 的 `<S` 分支（同枚 `ACCESS_FINE_LOCATION`）。
  *
  * 三条判据：
  * 1. **纯函数行为** [visibleOnlyBelowApi31]：29/30 可见、31/33 不可见（阈值真源只有一处）；
