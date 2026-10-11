@@ -4,10 +4,12 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.source.KotlinSourceScan.walkMainSources
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 
 /**
  * 蓝牙「设备发现」的位置权限守卫（r31 任务 10 / S4-M5-01 立，本轮 **S4-M5-01 续 / #10+#18 契约反转**）。
@@ -39,14 +41,26 @@ import java.io.File
  * **权限面白名单**：
  * - `bt/BtSpeakerController.kt` —— 申请真源（<S / ≥S 两档判据见上面第 2、3 条）；
  * - `ui/SettingsScreen.kt` —— 展示面，**必须带 `<S` 版本闸**（闸先于 `ACCESS_FINE_LOCATION`），
- *   阈值真源是 `SettingsScreen.btLocationRowVisible`（= manifest `maxSdkVersion="30"` 同档）；
- * - `ui/MainActivity.kt` —— 首启权限申请面。**本片一字未动**（#18 范围更正：合并首启权限面已否决），
- *   故它当前零位置权限，这条状态被单独钉住：谁往里加 `ACCESS_FINE_LOCATION` 谁红。
+ *   阈值真源是 `SettingsScreen.btLocationRowVisible`（= manifest `maxSdkVersion="30"` 同档）。
+ *
+ * 白名单**只有上面这两枚**。`ui/MainActivity.kt` 曾被本守卫首版列进白名单，**M2 已把它移除**：
+ * 首启权限申请面语义上是**禁入面**（#18 范围更正「首启权限面一字不动」⇒ 它零位置权限），
+ * 列进白名单会让人误读成「可以往里加」。它的零权限要求由下面那条**专属判据**独立覆盖，
+ * 白名单外的通用禁入也会兜住它——两条路都红，不存在抵消路径。
  *
  * **没动的东西**：manifest 的 `maxSdkVersion="30"` 判据**保留原文**；`MainActivity` 的权限面一字未动；
- * 申请真源（`missingPermissions()` 的两档分支）逐字未动。白名单**之外**的任何主源码文件含
- * `ACCESS_FINE_LOCATION` → 红（泄漏面至少覆盖 `camera/CameraController.kt`、`ui/CameraScreen.kt`，
- * 突变自证里各打一次）。
+ * 申请真源（`missingPermissions()` 的两档分支）逐字未动。
+ *
+ * # 扫描面（M1 升级）：白名单外**任何**主源码文件含 `ACCESS_FINE_LOCATION` → 红
+ * 输入从「硬编码五枚文件名」换成 `KotlinSourceScan.walkMainSources()` 枚举的**整棵主源码树**。
+ * 早先那版下，漏进第 6 枚文件的违规守卫全绿——这句话因此是没有实现支撑的空话；现在它成立，
+ * 且配了两座自证：① 遍历结果必须**远超**那五枚（`walkMainSources_覆盖全项目`），② 把 FINE 塞进
+ * 一枚**不在旧清单里**的文件 → 红（跨文件突变）。
+ *
+ * 扫描面的**三条排除规则**（缺哪条都会假绿，理由写在 `walkMainSources` 的 KDoc 里）：
+ * **只扫 `src/main/java`**（由遍历根保证，`src/test`/`src/androidTest` 结构上够不着）、
+ * **`.mimosa` 整目录跳过**（hook 工具留的旧版源码副本，对它断言＝拿历史文本打分）、
+ * **只认 `.kt`**（`.source`/`.json` 等工具产物）。
  *
  * 「尺子自己能红」：每条判据都有对应突变体打同一把尺（见各突变注释）。
  */
@@ -56,14 +70,17 @@ class BtScanLocationPermGuardTest {
     private val sGuard = "if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S)"
 
     /**
-     * 权限面白名单（含特殊裁定的面）：允许出现 `ACCESS_FINE_LOCATION` 的主源码文件。
-     * 白名单**内**还要各自过自己的判据（控制器过两档分支、设置页过版本闸、MainActivity 过"零位置权限"），
-     * 白名单**外**一律不许出现。
+     * 权限面白名单：**允许**出现 `ACCESS_FINE_LOCATION` 的主源码文件，只有两枚。
+     *
+     * 白名单**内**各过自己的判据（控制器过 <S / ≥S 两档分支、设置页过版本闸）；
+     * 白名单**外**一律不许出现（扫描面 = [walkMainSources] 的整棵树）。
+     *
+     * **M2：`ui/MainActivity.kt` 已移出白名单**——首启申请面是**禁入面**，列进来会被读成
+     * 「可以往里加」；它零位置权限这条由 `surfaceIssues` 里的专属判据单独钉住。
      */
     private val locationWhitelist = setOf(
         "bt/BtSpeakerController.kt",
-        "ui/SettingsScreen.kt",
-        "ui/MainActivity.kt"
+        "ui/SettingsScreen.kt"
     )
 
     /** `SettingsScreen` 的版本闸字面锚（`<S` 档的唯一入口；阈值真源是 `btLocationRowVisible`） */
@@ -74,15 +91,16 @@ class BtScanLocationPermGuardTest {
     /** 主源码（遮蔽 + 折叠空白：结构判定不受换行缩进影响，也让突变体写法收敛成单行） */
     private fun controllerSrc(): String = flatten(codeOnly(mainSourceText("bt/BtSpeakerController.kt")))
 
-    /** 位置权限的**白名单 + 守卫靶子**面，突变自证时喂变异字典 */
-    private fun locationSurfaces(): Map<String, String> = mapOf(
-        "bt/BtSpeakerController.kt" to controllerSrc(),
-        "ui/SettingsScreen.kt" to codeOnly(mainSourceText("ui/SettingsScreen.kt")),
-        "ui/MainActivity.kt" to codeOnly(mainSourceText("ui/MainActivity.kt")),
-        // 泄漏靶子：白名单外的两个高危面（相机参数链 / 取景页），良品里它们零位置权限
-        "camera/CameraController.kt" to codeOnly(mainSourceText("camera/CameraController.kt")),
-        "ui/CameraScreen.kt" to codeOnly(mainSourceText("ui/CameraScreen.kt"))
-    )
+    /**
+     * 位置权限的**全项目扫描面**（M1）：`walkMainSources()` 枚举到的每一枚主源码 `.kt`，逐个 `codeOnly` 遮蔽。
+     *
+     * 改前是**硬编码五枚文件名**的 `mapOf(...)`——白名单外的第 6 枚文件漏进来，守卫全绿。
+     * 现在吃整棵树；`by lazy` 是因为一枚测试类例里要连喂好几个突变体（112 枚文件 × 每次重新读盘遮蔽太贵）。
+     * 遮蔽放在本函数里做，`walkMainSources` 只回**原文**（与 `mainSourceText` 的语义对齐）。
+     */
+    private val locationSurfaces: Map<String, String> by lazy {
+        walkMainSources().mapValues { (_, text) -> codeOnly(text) }
+    }
 
     /** 源 manifest（不遮蔽——判据要看属性与原文串） */
     private fun manifestText(): String {
@@ -191,7 +209,7 @@ class BtScanLocationPermGuardTest {
         if (flatten(sources.getValue("ui/MainActivity.kt")).contains("ACCESS_FINE_LOCATION")) {
             bad.add(
                 "ui/MainActivity.kt 出现 ACCESS_FINE_LOCATION——#18 范围更正：首启权限面一字未动，" +
-                    "位置权限不许进首启申请（它本片不在白名单的开口范围内）"
+                    "首启申请面是禁入面（它已移出白名单，白名单外的通用禁入也会同时报这条）"
             )
         }
 
@@ -227,7 +245,7 @@ class BtScanLocationPermGuardTest {
 
     @Test
     fun `位置权限面白名单契约_展示面带闸_首启面零权限_白名单外禁入`() {
-        val issues = surfaceIssues(locationSurfaces())
+        val issues = surfaceIssues(locationSurfaces)
         assertEquals("位置权限面回归（白名单契约，2026-10-11 反转）：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
     }
 
@@ -323,7 +341,7 @@ class BtScanLocationPermGuardTest {
 
     @Test
     fun `尺子自己能红_位置权限漏进白名单外必报红`() {
-        val real = locationSurfaces()
+        val real = locationSurfaces
         assertTrue("良品必须先真的绿，否则突变体的红没有意义", surfaceIssues(real).isEmpty())
         // 突变 9：位置权限漏进相机参数链（白名单外）
         val controllerLeak = real.toMutableMap().apply {
@@ -361,5 +379,110 @@ class BtScanLocationPermGuardTest {
             "位置权限混进首启权限申请后尺子必须红",
             surfaceIssues(startupLeak).any { it.contains("MainActivity") }
         )
+        // 突变 13（M1 的意义所在）：把 FINE 塞进一枚**不在旧硬编码五文件清单里**的文件。
+        // 旧实现下清单外的文件**压根不在输入里**（locationSurfaces() 是写死的 5 键 mapOf），
+        // 「漏进第 6 枚文件」对守卫完全不可见；现在输入 = walkMainSources() 整棵树，清单外的文件
+        // 天然在场，塞进去立刻红。这条要与下面那座 `walkMainSources` 桥**成对读**：
+        // 桥证「输入真的覆盖整棵树 + 新文件会被枚举到」，这条证「覆盖到了就会红」。
+        val sixthFile = real.toMutableMap().apply {
+            this["ui/FakeNewFile.kt"] = "private fun leak() = Manifest.permission.ACCESS_FINE_LOCATION"
+        }
+        assertTrue(
+            "位置权限漏进第 6 个文件（不在旧五文件清单里）后尺子必须红——覆盖面从 5 枚扩到整棵树的自证",
+            surfaceIssues(sixthFile).any { it.contains("FakeNewFile") }
+        )
+    }
+
+    // ------------------------------------------------------------------ 扫描面（M1）的两座桥
+
+    /**
+     * 桥一（真树）：`walkMainSources()` 对**真实**主源码枚举出的集合必须是「整棵树」。
+     *
+     * 为什么单靠突变 13 不够：那枚突变只是往**传进去的 map** 里加键，`surfaceIssues` 本来就遍历入参；
+     * 真正要证的是**输入本身**来自遍历、且遍历没退化成小清单、也没把 `.mimosa` 的旧版副本算进来。
+     */
+    @Test
+    fun `walkMainSources_覆盖全项目且排除mimosa与非kt`() {
+        val all = walkMainSources()
+        assertTrue(
+            "只枚举到 ${all.size} 枚 .kt——遍历退化成小清单，清单外的违规文件会漏",
+            all.size >= 50
+        )
+        // 旧硬编码清单只有这五枚；遍历必须枚举到大量清单外的文件（覆盖面真的外扩）
+        val oldHardcodedFive = setOf(
+            "bt/BtSpeakerController.kt",
+            "ui/SettingsScreen.kt",
+            "ui/MainActivity.kt",
+            "camera/CameraController.kt",
+            "ui/CameraScreen.kt"
+        )
+        val outside = all.keys - oldHardcodedFive
+        assertTrue("五枚之外一枚都没枚举到——覆盖面没有外扩", outside.size >= 30)
+        assertTrue(
+            "至少要覆盖到与蓝牙完全不相干的包（media/ 与 player/），否则等于只扫了熟面孔",
+            outside.any { it.startsWith("media/") } && outside.any { it.startsWith("player/") }
+        )
+        // 三条排除规则
+        assertTrue("混进了 .mimosa 路径（旧版源码副本）", all.keys.none { it.contains(".mimosa") })
+        assertTrue("混进了非 .kt 工具产物", all.keys.all { it.endsWith(".kt") })
+        assertTrue("混进了 .source 副本", all.keys.none { it.endsWith(".source") })
+        assertTrue("混进了测试目录", all.keys.none { it.startsWith("test/") || it.contains("/test/") })
+        // 桥中桥：与既有单文件读取器**同一根、同一份内容**（两张表不会各说各话）
+        assertEquals(
+            "同一枚文件两条读取路径的全文必须逐字一致",
+            mainSourceText("ui/HudLayer.kt"), all["ui/HudLayer.kt"]
+        )
+        assertEquals(
+            mainSourceText("bt/BtSpeakerController.kt"), all["bt/BtSpeakerController.kt"]
+        )
+    }
+
+    /**
+     * 桥二（hermetic，临时包根）：把「新文件会被枚举到 / `.mimosa`、`build`、非 `.kt` 被排除」
+     * 这两条**遍历规则本身**放进一个临时目录里测，不碰真实源码树。
+     *
+     * 存在的理由（AGENTS.md：计划→行为要测桥本身）：真树上那三条排除规则一条都没被真正触发过——
+     * 本仓 `.mimosa` 下恰好没有 `.kt`、也没有 `build/`，只看真树会得到一条**测不出退化**的空断言。
+     * 临时包根把三种「本该被排除」的样本造出来，规则被删就当场红。
+     */
+    @Test
+    fun `walkMainSources_临时包根里新文件会被枚举且mimosa与build被排除`() {
+        val root = Files.createTempDirectory("kss_walk").toFile()
+        try {
+            // 一枚**只存在于临时目录**的「新文件」：真树里没有它，旧的五文件清单永远读不到
+            File(root, "ui").mkdirs()
+            File(root, "ui/FakeNewFile.kt").writeText(
+                "package com.wotagei.cam.ui private fun leak() = Manifest.permission.ACCESS_FINE_LOCATION",
+                Charsets.UTF_8
+            )
+            File(root, "core").mkdirs()
+            File(root, "core/Ok.kt").writeText("package com.wotagei.cam.core", Charsets.UTF_8)
+            // 三类必须被排除的样本
+            File(root, ".mimosa/hook-state").mkdirs()
+            File(root, ".mimosa/hook-state/stale.source").writeText(
+                "private fun stale() = Manifest.permission.ACCESS_FINE_LOCATION", Charsets.UTF_8
+            )
+            File(root, ".mimosa/hook-state/leaked.kt").writeText(
+                "private fun stale2() = Manifest.permission.ACCESS_FINE_LOCATION", Charsets.UTF_8
+            )
+            File(root, "build/generated").mkdirs()
+            File(root, "build/generated/Gen.kt").writeText("private fun gen() = 1", Charsets.UTF_8)
+
+            val got = walkMainSources(root)
+            assertTrue(
+                "新文件必须被枚举到——否则「漏进第 6 个文件守卫全绿」这件事根本没被堵上",
+                got.containsKey("ui/FakeNewFile.kt")
+            )
+            assertTrue("正常主源码文件必须被枚举到", got.containsKey("core/Ok.kt"))
+            assertTrue(
+                "`.mimosa` 必须整目录跳过（里面的 .kt 与 .source 都不许出现）",
+                got.keys.none { it.contains(".mimosa") }
+            )
+            assertTrue("`build/` 必须跳过", got.keys.none { it.startsWith("build/") })
+            assertTrue("只认 .kt：.source 等工具产物挡在门外", got.keys.none { it.endsWith(".source") })
+            assertEquals("临时包根里应恰好两枚 .kt", setOf("ui/FakeNewFile.kt", "core/Ok.kt"), got.keys)
+        } finally {
+            root.deleteRecursively()
+        }
     }
 }
