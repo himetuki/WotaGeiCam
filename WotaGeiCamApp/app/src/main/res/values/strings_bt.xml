@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 蓝牙音箱（bt/BtSpeakerController.kt、ui/dialog/BtSpeakerPanel.kt，就近面板正文由 ui/dialog/AudioSourcePanel.kt 承载） -->
-    <!-- 权限提示与「去设置」复用 strings.xml 的 perm_bluetooth_rationale / perm_open_settings -->
+    <!-- 权限提示按 SDK 分档，两条都在 strings.xml、消费点是 ui/dialog/BtSpeakerPanel.kt 的 HintCard：
+         API ≤ 30（Android 10/11）走 perm_bluetooth_rationale_low（解释"搜音箱为什么弹位置框"），
+         API 31+ 走 perm_bluetooth_rationale；「去设置」两档共用 perm_open_settings -->
     <string name="bt_start_scan">搜索附近设备</string>
     <string name="bt_stop_scan">停止搜索</string>
 
