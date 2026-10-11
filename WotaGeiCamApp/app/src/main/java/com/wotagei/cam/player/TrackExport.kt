@@ -71,7 +71,8 @@ object TrackRule {
  * 与 ClipExporter 同源技法照抄口径：PTS 平移到 0 起、B 帧容忍（全片导出无出点截断，
  * 封轨只看 EOF，容忍数实际用不上但循环结构保持一致）、IS_PENDING 两段式入库。
  * 失败/取消语义随 #4 与 ClipExporter 同轮对齐：muxer.stop 之前的失败/取消删 pending 记录
- * （写一半的废段该删），muxer.stop 之后（成片字节在盘上）commit 全败或取消**保留行不删**，
+ * （写一半的废段该删），muxer.stop 之后（成片字节在盘上）commit 全败、取消或后续异常一律
+ * **保留行不删**（catch 按 bytesComplete 分岔，封轨后异常改道 Fail(COMMIT) 与全败同口径），
  * 冷启由 [com.wotagei.cam.record.StalePendingSweep.rescuePendingRows] 收录——口径逐字同
  * ClipExporter，详见其类注。
  *
@@ -165,8 +166,14 @@ class TrackExporter(private val ctx: Context) {
             }
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "export failed: ${e.message}")
-            fail(pendingUri, ClipError.MUX)
+            if (bytesComplete) {
+                // 封轨后异常：成片字节已在盘上，删行 = 丢成片；与 commit 全败同口径保留待救援
+                Log.e(TAG, "封轨后异常，成片已保留待救援 uri=$pendingUri: ${e.message}")
+                return@withContext ClipResult.Fail(ClipError.COMMIT)
+            } else {
+                Log.e(TAG, "export failed: ${e.message}")
+                fail(pendingUri, ClipError.MUX)
+            }
         }
     }
 
