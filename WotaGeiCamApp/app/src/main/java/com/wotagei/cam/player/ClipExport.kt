@@ -13,6 +13,7 @@ import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
 import com.wotagei.cam.record.exportOrientationHint
+import com.wotagei.cam.record.monotonicPts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -225,6 +226,9 @@ class ClipExporter(private val ctx: Context) {
 
     /**
      * 拷贝主体：从入点关键帧读到出点，样本原样写进 [muxer]，PTS 平移到 0 起。
+     * B 帧源的 PTS 会在界内界外来回跳（见上）：**判据**（越界封轨/负值丢弃）仍吃 raw 值，
+     * **写出的戳**再过逐轨单调桥 [monotonicPts]——同轨倒退会让 MPEG4Writer 抛
+     * IllegalStateException 结束导出，录制链在 CodecRecorder.writeSample 有同一层兜底。
      * @return 公共偏移基准（入点关键帧的源 PTS，微秒）——sidecar 平移反推要用
      */
     private fun copy(
@@ -280,6 +284,14 @@ class ClipExporter(private val ctx: Context) {
             var aTail = 0
             var videoClosed = false
             var audioClosed = audioTrack < 0
+            // B 帧源的单调兜底账本（#8）：两轨各一枚 lastPts + 修正计数 + 最大倒退量。
+            // 同轨倒退会让 MPEG4Writer 抛 IllegalStateException 让导出当场结束，写前过桥兜底
+            var vLastPts = -1L
+            var aLastPts = -1L
+            var vPtsFixes = 0
+            var aPtsFixes = 0
+            var vPtsMaxBackUs = 0L
+            var aPtsMaxBackUs = 0L
             val endRel = endUs - baseUs
             while (!videoClosed || !audioClosed) {
                 // 取消检查挂在每个样本上：这一步很轻，是循环里最密的检查点
@@ -297,12 +309,20 @@ class ClipExporter(private val ctx: Context) {
                     } else {
                         vTail = 0
                         // 负 rel（开放 GOP 的前导 B 帧）丢弃：与音频分支同口径。直写负 pts 会让
-                        // Muxer 给整条视频轨加巨大 baseMediaDecodeTime 偏移 + 畸形 ctts（见 ClipRule.keepSample）
+                        // Muxer 给整轨加巨大 baseMediaDecodeTime 偏移 + 畸形 ctts（见 ClipRule.keepSample）
                         if (ClipRule.keepSample(rel)) {
+                            // 写出前过单调桥：修正属 B 帧源预期行为，逐样本只记 d 级（默认关）不刷屏
+                            val fix = monotonicPts(vLastPts, rel)
+                            if (fix.advanced) {
+                                vPtsFixes++
+                                if (fix.backUs > vPtsMaxBackUs) vPtsMaxBackUs = fix.backUs
+                                Log.d(TAG, "视频轨 pts 修正 cur=$rel → ${fix.ptsUs}（back=${fix.backUs}us）")
+                            }
+                            vLastPts = fix.ptsUs
                             // flags 直传 extractor 的 sampleFlags：SAMPLE_FLAG_SYNC(1) 与
                             // BUFFER_FLAG_SYNC_FRAME(1) 同值同义，Extractor→Muxer 转写的通行做法
                             @Suppress("WrongConstant")
-                            info.set(0, size.toInt(), rel, ex.sampleFlags)
+                            info.set(0, size.toInt(), fix.ptsUs, ex.sampleFlags)
                             muxer.writeSampleData(vIdx, buf, info)
                             videoWritten++
                         } else {
@@ -313,9 +333,17 @@ class ClipExporter(private val ctx: Context) {
                     if (rel > endRel) {
                         if (++aTail >= AUDIO_TAIL_TOLERANCE) audioClosed = true
                     } else if (ClipRule.keepSample(rel)) {
-                        // 早于公共基准的音频样本（AAC 帧界早于视频关键帧）丢弃：负 PTS 会崩 Muxer
+                        // 早于公共基准的音频样本（AAC 帧界早于视频关键帧）丢弃：负 PTS 会崩 Muxer。
+                        // 单调桥与视频轨同口径（两轨独立账本）
+                        val fix = monotonicPts(aLastPts, rel)
+                        if (fix.advanced) {
+                            aPtsFixes++
+                            if (fix.backUs > aPtsMaxBackUs) aPtsMaxBackUs = fix.backUs
+                            Log.d(TAG, "音频轨 pts 修正 cur=$rel → ${fix.ptsUs}（back=${fix.backUs}us）")
+                        }
+                        aLastPts = fix.ptsUs
                         @Suppress("WrongConstant") // 同上：sampleFlags 与 BUFFER_FLAG_* 同值体系
-                        info.set(0, size.toInt(), rel, ex.sampleFlags)
+                        info.set(0, size.toInt(), fix.ptsUs, ex.sampleFlags)
                         muxer.writeSampleData(aIdx, buf, info)
                     }
                 }
@@ -328,6 +356,10 @@ class ClipExporter(private val ctx: Context) {
                 }
             }
             onProgress(1f)
+            // 修正汇总（B 帧源预期行为）：逐样本明细在 d 档（默认关），收尾只落一条 i 级
+            if (vPtsFixes > 0 || aPtsFixes > 0) {
+                Log.i(TAG, "pts修正=v$vPtsFixes(back=$vPtsMaxBackUs) a$aPtsFixes(back=$aPtsMaxBackUs)")
+            }
             // 丢弃必须可见：静默丢样本无从判断是源没有 B 帧还是守卫在起作用
             if (videoDropped > 0) {
                 Log.i(TAG, "视频负PTS样本丢弃=$videoDropped（开放GOP前导B帧，丢弃为保 Muxer 时间轴合规）")

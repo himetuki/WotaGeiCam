@@ -13,6 +13,7 @@ import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
 import com.wotagei.cam.record.exportOrientationHint
+import com.wotagei.cam.record.monotonicPts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -222,6 +223,15 @@ class TrackExporter(private val ctx: Context) {
             var videoWritten = 0
             var videoDropped = 0
             var audioWritten = 0
+            // B 帧源的单调兜底账本（#8，与 ClipExporter.copy 同构）：两轨各一枚 lastPts +
+            // 修正计数 + 最大倒退量。同轨倒退会让 MPEG4Writer 抛 IllegalStateException 让导出
+            // 当场结束，写前过桥兜底（丢弃判据仍吃 raw 值，只改写出的戳）
+            var vLastPts = -1L
+            var aLastPts = -1L
+            var vPtsFixes = 0
+            var aPtsFixes = 0
+            var vPtsMaxBackUs = 0L
+            var aPtsMaxBackUs = 0L
             while (true) {
                 // 取消检查挂在每个样本上（与 ClipExporter 同一检查密度）
                 job?.ensureActive()
@@ -236,19 +246,35 @@ class TrackExporter(private val ctx: Context) {
                     // 偏移并生成畸形 ctts，故与音频轨同口径丢弃。
                     val rel = ex.sampleTime - baseUs
                     if (ClipRule.keepSample(rel)) {
+                        // 写出前过单调桥（#8）：B 帧源预期行为，逐样本只记 d 级（默认关）不刷屏
+                        val fix = monotonicPts(vLastPts, rel)
+                        if (fix.advanced) {
+                            vPtsFixes++
+                            if (fix.backUs > vPtsMaxBackUs) vPtsMaxBackUs = fix.backUs
+                            Log.d(TAG, "视频轨 pts 修正 cur=$rel → ${fix.ptsUs}（back=${fix.backUs}us）")
+                        }
+                        vLastPts = fix.ptsUs
                         @Suppress("WrongConstant") // sampleFlags 与 BUFFER_FLAG_* 同值体系（同 ClipExporter）
-                        info.set(0, size.toInt(), rel, ex.sampleFlags)
+                        info.set(0, size.toInt(), fix.ptsUs, ex.sampleFlags)
                         muxer.writeSampleData(vIdx, buf, info)
                         videoWritten++
                     } else {
                         videoDropped++
                     }
                 } else {
-                    // 选内录轨：PTS 平移 −offset 对齐环境轨；负 PTS 前导丢弃（TrackRule 裁决）
+                    // 选内录轨：PTS 平移 −offset 对齐环境轨；负 PTS 前导丢弃（TrackRule 裁决）。
+                    // 丢弃判据吃 shiftedPts 的 raw 值，写出的戳再过单调桥（两轨独立账本）
                     val outPts = TrackRule.shiftedPts(ex.sampleTime, baseUs, shiftUs)
                     if (outPts != null) {
+                        val fix = monotonicPts(aLastPts, outPts)
+                        if (fix.advanced) {
+                            aPtsFixes++
+                            if (fix.backUs > aPtsMaxBackUs) aPtsMaxBackUs = fix.backUs
+                            Log.d(TAG, "音频轨 pts 修正 cur=$outPts → ${fix.ptsUs}（back=${fix.backUs}us）")
+                        }
+                        aLastPts = fix.ptsUs
                         @Suppress("WrongConstant")
-                        info.set(0, size.toInt(), outPts, ex.sampleFlags)
+                        info.set(0, size.toInt(), fix.ptsUs, ex.sampleFlags)
                         muxer.writeSampleData(aIdx, buf, info)
                         audioWritten++
                     }
@@ -263,6 +289,10 @@ class TrackExporter(private val ctx: Context) {
             }
             onProgress(1f)
             if (videoWritten == 0) throw IllegalStateException("empty source: no video sample")
+            // 修正汇总（B 帧源预期行为）：逐样本明细在 d 档（默认关），收尾只落一条 i 级
+            if (vPtsFixes > 0 || aPtsFixes > 0) {
+                Log.i(TAG, "pts修正=v$vPtsFixes(back=$vPtsMaxBackUs) a$aPtsFixes(back=$aPtsMaxBackUs)")
+            }
             // 丢弃必须可见：静默丢样本无从判断是源没有 B 帧还是守卫在起作用
             if (videoDropped > 0) {
                 Log.i(TAG, "视频负PTS样本丢弃=$videoDropped（开放GOP前导B帧，丢弃为保 Muxer 时间轴合规）")
