@@ -197,8 +197,8 @@ internal val BottomBarSpaceFallback = WotaHit.recordTouch + DockInnerPadV * 2 + 
 
 /**
  * 顶栏避让量的**首帧兜底值**：只到第一行那排（38dp 圆形设置钮 + 上下内边距 4+2 = 44dp）。
- * 真值由 [HudTopChrome] 那层 `onSizeChanged` 回报：第二行还有能力/权限告警条约 22dp
- * （DIRECT + 斑马纹、缺麦克风、LEGACY 都会触发，是常见组合），只让 44dp 时竖 Dock 顶颗会压在它上面。
+ * 真值由 [HudTopChrome] 那层 `onSizeChanged` 回报：告警条可多行（行数×约 22dp），
+ * 首帧前总高未知，仍以实测回报为准——只让 44dp 时竖 Dock 顶颗会压在它上面。
  * 这里只是量到之前的占位，别再往这里加第二段常量。
  */
 internal val TopBarSpace = 44.dp
@@ -1454,11 +1454,38 @@ internal fun VolumeLeds(db: Float, card: Boolean = true) {
 }
 
 /**
+ * 顶栏告警条要画**哪几行**（纯函数，JVM 可测，见 `WarnRowsTest`）。
+ *
+ * 改前是 `when { … }` 取**第一个**命中项、只画一条：多条降级并存时优先级低的那条被整个吞掉，
+ * 典型如「高帧率降级 + 缺麦克风」同现时用户看不到「本次仅录制画面」。这里改成**纵向多行、全量显示、
+ * 无上限、无折叠**——四条就是自然上限，顶部空间由既有实测链消化（`onSizeChanged → topBarH` 增长 →
+ * 左右竖 Dock 上边界与 `HintBar` 自动下移），没有任何硬编码高度会被撑破。
+ *
+ * 返回顺序 = 行序 = 优先级，**逐字保持改前那道 `when` 的分支顺序**（高帧率 > 缺麦克风 > LEGACY >
+ * DIRECT 特效），不做降序重排——改优先级是另一件裁决，不在本条改动范围内。
+ */
+internal fun warnRows(
+    deviceFailedHighFps: Boolean,
+    audioDegraded: Boolean,
+    legacy: Boolean,
+    effect: FrameEffect,
+    renderMode: RenderMode
+): List<Int> = buildList {
+    if (deviceFailedHighFps) add(R.string.cam_state_high_fps)
+    if (audioDegraded) add(R.string.no_audio_record_tip)
+    if (legacy) add(R.string.capability_limited_tip)
+    if (effect != FrameEffect.NONE && renderMode == RenderMode.DIRECT) add(R.string.cam_direct_no_effect)
+}
+
+/**
  * 顶栏那排**不可拖动**的固定件：设置入口 + 能力/权限告警条。它整块的实测高就是顶栏避让量（S2-1）。
  *
  * 为什么设置钮不跟着走：它不可隐藏（`set_pill_note` 写的「快门、缩略图与设置入口不可隐藏」），
  * 所以也不是 [HudEntry]，进不了位置表。它留原位、告警条也留原位，顶栏避让量继续吃实测值，
  * 竖 Dock 的上边界与 §59 的容量段宽度账都不受影响。
+ *
+ * 告警条自本版起**纵向多行全量显示**（行序即优先级，见 [warnRows]）：行数变多只会让整块实测高变大，
+ * 消化它的正是这条 `onSizeChanged → topBarH` 实测链，本层不引入任何按行数写死的高度。
  */
 @Composable
 fun BoxScope.HudTopChrome(
@@ -1492,26 +1519,35 @@ fun BoxScope.HudTopChrome(
                 onClick = onSettingsClick
             )
         }
-        // 能力/权限告警条：高帧率降级 > 缺麦克风 > LEGACY > DIRECT 下特效失效
-        val warnRes = when {
-            deviceFailedHighFps -> R.string.cam_state_high_fps
-            audioDegraded -> R.string.no_audio_record_tip
-            legacy -> R.string.capability_limited_tip
-            effect != FrameEffect.NONE && renderMode == RenderMode.DIRECT -> R.string.cam_direct_no_effect
-            else -> null
-        }
-        warnRes?.let {
-            Text(
-                text = stringResource(it),
-                style = MaterialTheme.typography.labelSmall,
-                color = WotaColor.warn,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .padding(start = 10.dp, end = 10.dp, top = 2.dp)
-                    .wotaCard(WotaShape.pill)
-                    .padding(horizontal = 10.dp, vertical = 3.dp)
-            )
+        // 能力/权限告警条：纵向多行、全量显示，行序 = 固定优先级（见 [warnRows]）。
+        // 外层 padding 沿用改前单条 Text 的 `start=10,end=10,top=2`（挪到组合体头上）：
+        // 单条时与改前**逐像素一致**，多条时行间只多一枚 2dp 缝（改前 0——那时尚无第二行可言）。
+        val warns = warnRows(
+            deviceFailedHighFps = deviceFailedHighFps,
+            audioDegraded = audioDegraded,
+            legacy = legacy,
+            effect = effect,
+            renderMode = renderMode
+        )
+        if (warns.isNotEmpty()) {
+            Column(
+                Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // 每行一枚独立 Text 节点：TalkBack 按视觉顺序逐行朗读，长文案各自 ellipsis、互不挤压
+                warns.forEach { res ->
+                    Text(
+                        text = stringResource(res),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WotaColor.warn,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .wotaCard(WotaShape.pill)
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                    )
+                }
+            }
         }
     }
 }
