@@ -334,9 +334,12 @@ class SeriesGroupGuardTest {
             maskedBody(noCollapse, "TimelineList").contains("SeriesGroup.galleryEntries(") &&
                 !Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(maskedBody(noCollapse, "TimelineList"))
         )
-        assertFalse(
-            "网格自己传 collapse 后旋钮判据必须翻假",
-            Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(maskedBody(noCollapse, "ClipGrid"))
+        assertTrue(
+            "网格自己传 collapse 后旋钮判据必须翻假（判据 = 不许出现 galleryEntries(..., 形式；" +
+                "突变体把 collapse 传进 ClipGrid 后，旋钮正则就该在这份函数体里命中——" +
+                "上一版把符号写反成 assertFalse，突变体越真它越红，门禁 #1c 实测）",
+            Regex("galleryEntries\\s*\\([^)]*,").containsMatchIn(maskedBody(noCollapse, "ClipGrid")) &&
+                maskedBody(noCollapse, "ClipGrid").contains("collapse = false")
         )
         assertTrue("互不代偿：网格关 collapse 不得牵动弹层", maskedBody(noCollapse, "SeriesSheet").contains("onGroupMenu(entry.rep)"))
 
