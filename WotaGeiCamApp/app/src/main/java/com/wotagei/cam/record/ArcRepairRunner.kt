@@ -262,6 +262,18 @@ private class ArcRepairSession(
     /** muxer 写样本失败的失败码：run() 收尾时优先于 NO_VIDEO（与 CodecRecorder.writeSample 的 :MUX 映射同语义） */
     private var writeFailCode: String? = null
 
+    /**
+     * #8 单调兜底账本（桥见 [monotonicPts]，与录制链 CodecRecorder.writeSample 同口径）：
+     * 两轨各一枚 lastPts + 修正计数 + 最大倒退量。修复链虽走重编码，但 B 帧源按解码序喂入时
+     * 编码器输出 PTS 仍可能非严格递增（部分 ROM 编码器行为），同轨倒退照样抛 Muxer 异常。
+     */
+    private var vMuxLastPtsUs = -1L
+    private var aMuxLastPtsUs = -1L
+    private var vPtsFixes = 0
+    private var aPtsFixes = 0
+    private var vPtsMaxBackUs = 0L
+    private var aPtsMaxBackUs = 0L
+
     /** 抽帧计划与它的流式桥（open() 里建，主循环逐帧问指令） */
     private lateinit var flow: ArcRepairFlow
 
@@ -296,6 +308,11 @@ private class ArcRepairSession(
             // "部分样本失败"仍算成功（可播但缺帧的产物改判失败代价不对称，取舍见 arcRepairOk 注释）。
             ok = arcRepairOk(muxStarted, videoTrack >= 0, writtenVideoSamples)
             if (!ok) code = code ?: writeFailCode ?: ArcRepairError.NO_VIDEO
+            // 修正汇总（#8，B 帧源预期行为）：逐样本明细在 d 档（默认关），终止只落一条 i 级。
+            // 插值用 ${} 花括号形式（与 CodecRecorder 段尾汇总同款）：源码守卫只认花括号里的代码
+            if (vPtsFixes > 0 || aPtsFixes > 0) {
+                Log.i(TAG_ARC, "pts修正=v${vPtsFixes}(back=${vPtsMaxBackUs}) a${aPtsFixes}(back=${aPtsMaxBackUs})")
+            }
         } catch (e: ArcFail) {
             code = e.code
             Log.i(TAG_ARC, "修复中止：${e.code}")
@@ -992,10 +1009,18 @@ private class ArcRepairSession(
         val buf = enc.getOutputBuffer(idx) ?: return
         if (videoPtsBase < 0L) videoPtsBase = bi.presentationTimeUs
         val norm = (bi.presentationTimeUs - videoPtsBase).coerceAtLeast(0L)
+        // 写出前过单调桥（#8）：修正属 B 帧源预期行为，逐样本只记 d 级（默认关），不重蹈逐帧刷屏
+        val fix = monotonicPts(vMuxLastPtsUs, norm)
+        if (fix.advanced) {
+            vPtsFixes++
+            if (fix.backUs > vPtsMaxBackUs) vPtsMaxBackUs = fix.backUs
+            Log.d(TAG_ARC, "视频轨 pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
+        }
+        vMuxLastPtsUs = fix.ptsUs
         // ⚠ flags 必须跟着样本走：MediaMuxer 靠 BufferInfo.flags 里的 BUFFER_FLAG_KEY_FRAME 标同步帧。
         // 真机实测传 0 会让容器里一个关键帧都没有，产物连流参数都解析不出（ffprobe: width=0/height=0/
         // codec_name=unknown）。CODEC_CONFIG 帧在上游已跳过，这里的 flags 只可能是关键帧位或 0。
-        vBufInfo.set(bi.offset, bi.size, norm, bi.flags)
+        vBufInfo.set(bi.offset, bi.size, fix.ptsUs, bi.flags)
         try {
             m.writeSampleData(videoTrack, buf, vBufInfo)
             // 只认写成功：盘满等失败不计数（成功判据 arcRepairOk 的第三格）
@@ -1049,7 +1074,15 @@ private class ArcRepairSession(
             if (norm > limitUs) return
             audioBuf.position(0)
             audioBuf.limit(audioPendingSize)
-            aBufInfo.set(0, audioPendingSize, norm, 0)
+            // 单调桥与视频轨同口径（两轨独立账本）：穿插/封轨判据不动，只改写出的戳
+            val fix = monotonicPts(aMuxLastPtsUs, norm)
+            if (fix.advanced) {
+                aPtsFixes++
+                if (fix.backUs > aPtsMaxBackUs) aPtsMaxBackUs = fix.backUs
+                Log.d(TAG_ARC, "音频轨 pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
+            }
+            aMuxLastPtsUs = fix.ptsUs
+            aBufInfo.set(0, audioPendingSize, fix.ptsUs, 0)
             try {
                 m.writeSampleData(tr, audioBuf, aBufInfo)
             } catch (e: Exception) {

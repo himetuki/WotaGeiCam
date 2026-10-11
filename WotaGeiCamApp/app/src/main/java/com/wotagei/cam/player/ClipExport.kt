@@ -356,9 +356,10 @@ class ClipExporter(private val ctx: Context) {
                 }
             }
             onProgress(1f)
-            // 修正汇总（B 帧源预期行为）：逐样本明细在 d 档（默认关），收尾只落一条 i 级
+            // 修正汇总（B 帧源预期行为）：逐样本明细在 d 档（默认关），收尾只落一条 i 级。
+            // 插值用 ${} 花括号形式（与 CodecRecorder 段尾汇总同款）：源码守卫只认花括号里的代码
             if (vPtsFixes > 0 || aPtsFixes > 0) {
-                Log.i(TAG, "pts修正=v$vPtsFixes(back=$vPtsMaxBackUs) a$aPtsFixes(back=$aPtsMaxBackUs)")
+                Log.i(TAG, "pts修正=v${vPtsFixes}(back=${vPtsMaxBackUs}) a${aPtsFixes}(back=${aPtsMaxBackUs})")
             }
             // 丢弃必须可见：静默丢样本无从判断是源没有 B 帧还是守卫在起作用
             if (videoDropped > 0) {
