@@ -119,7 +119,7 @@ class EncoderSlotClockTest {
     fun `呈现时间戳必须走真实时钟落网格`() {
         val gl = codeOnly(mainSourceText("camera/GlRenderEngine.kt"))
         val body = bodyOf(gl, "stampEncoderPresentation")
-        assertTrue("必须调 encoderSlotPtsNs 桥", body.contains("encoderSlotPtsNs("))
+        assertTrue("必须调 encoderAdaptivePtsNs 桥（源慢接管口径）", body.contains("encoderAdaptivePtsNs("))
         assertTrue("必须传真实时钟", body.contains("System.nanoTime()"))
         assertTrue("必须更新'最后一枚戳'账（防回退要它）", body.contains("encoderLastPtsNs ="))
         assertFalse(
@@ -398,8 +398,8 @@ class EncoderSlotClockTest {
             Triple(
                 "先推进位次再写戳（M2-06 缺陷形态）",
                 gl.replace(
-                    "val ptsNs = encoderSlotPtsNs(encoderBaseNs, nowNs, fps, encoderLastPtsNs)",
-                    "val ptsNs = encoderSlotPtsNs(encoderBaseNs, nowNs, fps, encoderLastPtsNs); encoderLastPtsNs = ptsNs; encoderFrameIndex++"
+                    "val ptsNs = encoderAdaptivePtsNs(encoderBaseNs, nowNs, stepNs, encoderLastPtsNs, encoderFrameIndex)",
+                    "val ptsNs = encoderAdaptivePtsNs(encoderBaseNs, nowNs, stepNs, encoderLastPtsNs, encoderFrameIndex); encoderLastPtsNs = ptsNs; encoderFrameIndex++"
                 ),
                 true
             ),
