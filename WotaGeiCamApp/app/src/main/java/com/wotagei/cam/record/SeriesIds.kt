@@ -21,20 +21,34 @@ import java.util.concurrent.atomic.AtomicLong
  * - 跨进程/重启：时间基不同 ⇒ 不撞；
  * - 同毫秒内并发：`AtomicLong.updateAndGet { max(it + 1, pack(now, 0)) }` 里的 `it + 1`
  *   保证进程内**严格单调、绝不重复**，哪怕时钟回拨；
- * - 数值安全：`nowMs * 1000` 上界约 1.7e15，远小于 Long 上限 9.2e18，不溢出。
+ * - 数值安全：真实时钟下 `nowMs * 1000` 上界约 1.7e15，远小于 Long 上限 9.2e18；
+ *   极端输入由 [packSeriesId] 的 [TIME_CAP_MS] 夹住（门禁 #1c 实测：`Long.MAX_VALUE / 1000`
+ *   的极端时刻下 `nowMs * 1000 + 999` 曾越过 Long.MAX_VALUE 回绕成负数）。
  */
 internal object SeriesIds {
 
     /** 序号占的位数：低位留给进程内序号，高位是时间基 */
     private const val SEQ_SPAN = 1000L
 
+    /**
+     * [packSeriesId] 的时间基安全上界：`TIME_CAP_MS * 1000 + 999 = 9_000_000_000_000_000_999`
+     * < Long.MAX_VALUE（9_223_372_036_854_775_807），任意输入下打包结果恒正、绝不回绕。
+     * 距真实时钟（约 1.8e12）还有约 28 万年的毫秒余量。
+     */
+    private const val TIME_CAP_MS = 9_000_000_000_000_000L
+
     private val last = AtomicLong(0L)
 
     /**
      * 打包：时间基占高位、同毫秒内序号占低位。
      * 固定 [nowMs] 下 [seq] 递增 ⇒ 结果严格递增（真断言，见 `SeriesIdTest`）。
+     *
+     * [nowMs] 先夹进 `[1, TIME_CAP_MS]`：下界 1 是因为 0 是「无归属」哨兵值
+     * （`SeriesStore.record` 见 0 即弃），打包结果不许是 0；上界防 `* SEQ_SPAN` 溢出成负。
+     * 夹住后同上界的多次生成仍由 `nextSeriesId` 的 `max(prev + 1, …)` 保序。
      */
-    fun packSeriesId(nowMs: Long, seq: Long): Long = nowMs * SEQ_SPAN + (seq % SEQ_SPAN)
+    fun packSeriesId(nowMs: Long, seq: Long): Long =
+        nowMs.coerceIn(1L, TIME_CAP_MS) * SEQ_SPAN + (seq % SEQ_SPAN)
 
     /**
      * 取下一个系列 id：严格单调，进程内绝不重复。
