@@ -94,6 +94,8 @@ import com.wotagei.cam.ui.design.WotaMenuEntry
 import com.wotagei.cam.ui.design.WotaMenuPopup
 import com.wotagei.cam.ui.design.WotaOutlineIcon
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.dialog.BottomPanel
+import com.wotagei.cam.ui.dialog.DividerLine
 import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
 import com.wotagei.cam.ui.theme.WotaBg
@@ -169,6 +171,8 @@ fun GalleryScreen(
     var banner by remember { mutableStateOf<Int?>(null) }
     // 菜单作用域：存的是「这次要真正动到的片」的**展开结果**，不是那一枚代表段
     var menuTargets by remember { mutableStateOf<List<VideoClip>?>(null) }
+    // 网格组卡展开的子段弹层：只钉 seriesId，面板自己按当前 clips 重新解析（理由同 menuTargets）
+    var seriesSheet by remember { mutableStateOf<Long?>(null) }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var purgeIds by remember { mutableStateOf(setOf<Long>()) }
 
@@ -218,176 +222,196 @@ fun GalleryScreen(
         }
     }
 
-    // ⚠ **组级动作扇出**（#5 第 2 轮返修·甲）：卡片 [⋯] 的作用域是**整组**，不是第 1 段。
+    // ⚠ **组级动作扇出**（#5 第 2 轮返修·甲/乙）：卡片 [⋯] 的作用域是**整组**，不是第 1 段。
     // 展开只发生在**入口处**（这里），动作面一个字不改：既有的 share / moveToTrash /
     // restoreFromTrash / deleteForever 全都是「收一个 List」，不需要为归组另开批量重载
     // （上一轮裁决：不新增 MediaActions 批量重载）。
     // 退化单片的卡与单段录制用户的卡走同一条路，`expandSeriesTargets` 原样返回它 ⇒ 逐字不变。
+    // 子段自己的 [⋯] 不走这里（那一条只管那一段），见网格弹层的 `onPartMenu`。
     val openMenu: (VideoClip) -> Unit = { clip ->
         menuTargets = SeriesGroup.expandSeriesTargets(listOf(clip), clips)
     }
 
     // 屏上没有 M3 Surface/Scaffold 兜底，环境色在根上给一次，裸 Text/Icon 才不会落回黑色
     CompositionLocalProvider(LocalContentColor provides WotaText) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .background(WotaBg)
-                .safeDrawingPadding()
-        ) {
-            GalleryTopBar(
-                scope = scope,
-                mode = mode,
-                gridColumns = gridColumns,
-                onScope = { scope = it },
-                onMode = { mode = it },
-                onColumns = { n ->
-                    gridColumns = n
-                    prefs.edit().putInt(WotaSettings.KEY_GALLERY_COLUMNS, n).apply()
-                },
-                onBack = {
-                    // 2026-10-02 真机实测交互缺陷修复：与 BACK 同一条两段式契约——多选态下顶栏 X
-                    // 第一段只退出多选（恢复普通浏览），普通态才关掉整个媒体库。
-                    if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack()
-                }
-            )
-
-            GalleryTabStrip(
-                tabs = tabs,
-                selected = tabIndex.coerceIn(0, (tabs.size - 1).coerceAtLeast(0)),
-                onSelect = { i, tab -> tabIndex = i; filter = tab.filter }
-            )
-
-            // 页签 / 布局切换：整块内容侧滑淡入。BOM 2023.10.01 落在 foundation 1.5.4，
-            // 没有 animateItemPlacement，逐行位移动不了；这里只加 graphicsLayer，
-            // 不重建 LazyGrid，免得两副网格同时解码缩略图。
-            val motion = LocalMotion.current
-            val density = LocalDensity.current
-            val enterShift = remember { Animatable(0f) }
-            val enterAlpha = remember { Animatable(1f) }
-            var lastTabMode by remember { mutableStateOf<Pair<Int, ListMode>?>(null) }
-            LaunchedEffect(tabIndex, mode) {
-                val prev = lastTabMode
-                lastTabMode = tabIndex to mode
-                // 进页首帧不入场，否则一打开媒体库就自己闪一下
-                if (prev == null) return@LaunchedEffect
-                val sign = when {
-                    tabIndex > prev.first -> 1f
-                    tabIndex < prev.first -> -1f
-                    else -> 0f // 只换布局：没有左右语义，退化成纯淡入
-                }
-                enterShift.snapTo(sign * with(density) { GALLERY_ENTER_SLIDE_DP.dp.toPx() })
-                enterAlpha.snapTo(if (sign == 0f) 0.3f else 0.55f)
-                launch { enterAlpha.animateTo(1f, motion.float) }
-                enterShift.animateTo(0f, motion.float)
-            }
-
-            Box(
+        // 根上多包一层 Box：网格组卡的子段弹层是**同层覆盖件**，必须挂在铺满整屏的根上。
+        // 放进下面那个 `Box(weight(1f).graphicsLayer{...})` 会继承它的 alpha / 位移入场动画，
+        // 面板跟着内容区一起淡入淡出（那不是面板该有的行为），也不满屏。
+        Box(Modifier.fillMaxSize()) {
+            Column(
                 Modifier
-                    .weight(1f)
-                    .graphicsLayer {
-                        alpha = enterAlpha.value
-                        translationX = enterShift.value
+                    .fillMaxSize()
+                    .background(WotaBg)
+                    .safeDrawingPadding()
+            ) {
+                GalleryTopBar(
+                    scope = scope,
+                    mode = mode,
+                    gridColumns = gridColumns,
+                    onScope = { scope = it },
+                    onMode = { mode = it },
+                    onColumns = { n ->
+                        gridColumns = n
+                        prefs.edit().putInt(WotaSettings.KEY_GALLERY_COLUMNS, n).apply()
+                    },
+                    onBack = {
+                        // 2026-10-02 真机实测交互缺陷修复：与 BACK 同一条两段式契约——多选态下顶栏 X
+                        // 第一段只退出多选（恢复普通浏览），普通态才关掉整个媒体库。
+                        if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack()
                     }
-            ) {
-                val isTrash = filter is ClipFilter.Trash
-                when (mode) {
-                    ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen, onMenu = openMenu)
-                    ListMode.Grid -> ClipGrid(
-                        clips = clips,
-                        columns = gridColumns,
-                        isTrash = isTrash,
-                        refreshing = listRefreshing,
-                        selectedIds = selectedIds,
-                        onOpen = onOpen,
-                        onMenu = openMenu,
-                        onToggleSelect = { c ->
-                            selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
-                        }
-                    )
-                    ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, onOpen, onCompare, ops)
+                )
+
+                GalleryTabStrip(
+                    tabs = tabs,
+                    selected = tabIndex.coerceIn(0, (tabs.size - 1).coerceAtLeast(0)),
+                    onSelect = { i, tab -> tabIndex = i; filter = tab.filter }
+                )
+
+                // 页签 / 布局切换：整块内容侧滑淡入。BOM 2023.10.01 落在 foundation 1.5.4，
+                // 没有 animateItemPlacement，逐行位移动不了；这里只加 graphicsLayer，
+                // 不重建 LazyGrid，免得两副网格同时解码缩略图。
+                val motion = LocalMotion.current
+                val density = LocalDensity.current
+                val enterShift = remember { Animatable(0f) }
+                val enterAlpha = remember { Animatable(1f) }
+                var lastTabMode by remember { mutableStateOf<Pair<Int, ListMode>?>(null) }
+                LaunchedEffect(tabIndex, mode) {
+                    val prev = lastTabMode
+                    lastTabMode = tabIndex to mode
+                    // 进页首帧不入场，否则一打开媒体库就自己闪一下
+                    if (prev == null) return@LaunchedEffect
+                    val sign = when {
+                        tabIndex > prev.first -> 1f
+                        tabIndex < prev.first -> -1f
+                        else -> 0f // 只换布局：没有左右语义，退化成纯淡入
+                    }
+                    enterShift.snapTo(sign * with(density) { GALLERY_ENTER_SLIDE_DP.dp.toPx() })
+                    enterAlpha.snapTo(if (sign == 0f) 0.3f else 0.55f)
+                    launch { enterAlpha.animateTo(1f, motion.float) }
+                    enterShift.animateTo(0f, motion.float)
                 }
-            }
 
-            // 多选条从底边升起。退出动画期间 selectedIds 已清空，动作数据钉在最后一次的
-            // 快照上，否则滑出过程中会闪一帧「已选 0 个」。
-            //
-            // ⚠ **组级动作扇出**（#5 Step 4c）：多选里点中的是代表段，但分享 / 收藏 / 移入回收站 /
-            // 还原 / 彻底删除这些动作必须落到**该系列的每一个成员**上 —— 否则会出现
-            // 「只把首段移进回收站、其余段还在原地」的半截状态。
-            // 扇出靠 `picked` 展开即可：既有的 ops 全都是「收一个 List」或「逐项调用」的形状，
-            // 不需要为归组另开一套批量重载。
-            val picked = SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)
-            var barSnapshot by remember { mutableStateOf(picked) }
-            if (picked.isNotEmpty()) barSnapshot = picked
-            AnimatedVisibility(
-                visible = picked.isNotEmpty(),
-                enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it },
-                exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it }
-            ) {
-                SelectionBar(
-                    count = barSnapshot.size,
-                    trashedOnly = barSnapshot.all { it.isTrashed },
-                    onShare = { ops.share(barSnapshot) },
-                    onLike = { barSnapshot.forEach { ops.setLike(it, true) } },
-                    onTrash = { ops.moveToTrash(barSnapshot) },
-                    onRestore = { ops.restoreFromTrash(barSnapshot) },
-                    onPurge = { purgeIds = barSnapshot.map { it.id }.toSet() },
-                    onClear = { selectedIds = emptySet() }
-                )
-            }
-
-            // 批量彻底删除必须先过我们自己的确认框：改成直删之后没有系统授权框兜着了，
-            // 少这一层就是「误触一次 = 不可恢复地删掉整批」（2026-09-27 真机误删过 19 个测试片）
-            if (purgeIds.isNotEmpty()) {
-                val doomed = clips.filter { it.id in purgeIds }
-                AlertDialog(
-                    onDismissRequest = { purgeIds = emptySet() },
-                    title = { Text(stringResource(R.string.gallery_purge_title_many, doomed.size)) },
-                    text = {
-                        Text(
-                            stringResource(R.string.gallery_purge_body),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            purgeIds = emptySet()
-                            ops.deleteForever(
-                                doomed,
-                                pop = { selectedIds = emptySet() },
-                                refresh = { repo.invalidate() }
-                            )
-                        }) { Text(stringResource(R.string.ok), color = WotaRec) }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { purgeIds = emptySet() }) { Text(stringResource(R.string.cancel)) }
-                    },
-                    containerColor = WotaSurface
-                )
-            }
-
-            // 操作反馈条：出现/2.6s 后消失都走动画。它在 Column 里，出现/消失会占/让高度，
-            // 上方 weight(1f) 的内容随之瞬移一帧——expandIn/shrinkOut 是**布局尺寸动画**（#81 第 1 条
-            // 定版禁掉），换 alpha+scale（允许档）后瞬移仍在；要免掉得给这行常驻高度槽，观感取舍
-            // 留真机看过再定，别悄悄把尺寸动画加回来
-            val msg = banner
-            var msgSnapshot by remember { mutableStateOf<Int?>(null) }
-            if (msg != null) msgSnapshot = msg
-            AnimatedVisibility(
-                visible = msg != null,
-                enter = fadeIn(motion.float) + scaleIn(motion.float, initialScale = 0.9f),
-                exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.9f)
-            ) {
                 Box(
                     Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(WotaSurface)
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                ) { Text(stringResource(msgSnapshot ?: 0), style = MaterialTheme.typography.bodyMedium) }
+                        .weight(1f)
+                        .graphicsLayer {
+                            alpha = enterAlpha.value
+                            translationX = enterShift.value
+                        }
+                ) {
+                    val isTrash = filter is ClipFilter.Trash
+                    when (mode) {
+                        ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen, onMenu = openMenu)
+                        ListMode.Grid -> ClipGrid(
+                            clips = clips,
+                            columns = gridColumns,
+                            isTrash = isTrash,
+                            refreshing = listRefreshing,
+                            selectedIds = selectedIds,
+                            onOpen = onOpen,
+                            onMenu = openMenu,
+                            onOpenSeries = { sid -> seriesSheet = sid },
+                            onToggleSelect = { c ->
+                                selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
+                            }
+                        )
+                        ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, onOpen, onCompare, ops)
+                    }
+                }
+
+                // 多选条从底边升起。退出动画期间 selectedIds 已清空，动作数据钉在最后一次的
+                // 快照上，否则滑出过程中会闪一帧「已选 0 个」。
+                //
+                // ⚠ **组级动作扇出**（#5 Step 4c）：多选里点中的是代表段，但分享 / 收藏 / 移入回收站 /
+                // 还原 / 彻底删除这些动作必须落到**该系列的每一个成员**上 —— 否则会出现
+                // 「只把首段移进回收站、其余段还在原地」的半截状态。
+                // 扇出靠 `picked` 展开即可：既有的 ops 全都是「收一个 List」或「逐项调用」的形状，
+                // 不需要为归组另开一套批量重载。
+                val picked = SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)
+                var barSnapshot by remember { mutableStateOf(picked) }
+                if (picked.isNotEmpty()) barSnapshot = picked
+                AnimatedVisibility(
+                    visible = picked.isNotEmpty(),
+                    enter = fadeIn(motion.float) + slideInVertically(motion.offset) { it },
+                    exit = fadeOut(motion.float) + slideOutVertically(motion.offset) { it }
+                ) {
+                    SelectionBar(
+                        count = barSnapshot.size,
+                        trashedOnly = barSnapshot.all { it.isTrashed },
+                        onShare = { ops.share(barSnapshot) },
+                        onLike = { barSnapshot.forEach { ops.setLike(it, true) } },
+                        onTrash = { ops.moveToTrash(barSnapshot) },
+                        onRestore = { ops.restoreFromTrash(barSnapshot) },
+                        onPurge = { purgeIds = barSnapshot.map { it.id }.toSet() },
+                        onClear = { selectedIds = emptySet() }
+                    )
+                }
+
+                // 批量彻底删除必须先过我们自己的确认框：改成直删之后没有系统授权框兜着了，
+                // 少这一层就是「误触一次 = 不可恢复地删掉整批」（2026-09-27 真机误删过 19 个测试片）
+                if (purgeIds.isNotEmpty()) {
+                    val doomed = clips.filter { it.id in purgeIds }
+                    AlertDialog(
+                        onDismissRequest = { purgeIds = emptySet() },
+                        title = { Text(stringResource(R.string.gallery_purge_title_many, doomed.size)) },
+                        text = {
+                            Text(
+                                stringResource(R.string.gallery_purge_body),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                purgeIds = emptySet()
+                                ops.deleteForever(
+                                    doomed,
+                                    pop = { selectedIds = emptySet() },
+                                    refresh = { repo.invalidate() }
+                                )
+                            }) { Text(stringResource(R.string.ok), color = WotaRec) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { purgeIds = emptySet() }) { Text(stringResource(R.string.cancel)) }
+                        },
+                        containerColor = WotaSurface
+                    )
+                }
+
+                // 操作反馈条：出现/2.6s 后消失都走动画。它在 Column 里，出现/消失会占/让高度，
+                // 上方 weight(1f) 的内容随之瞬移一帧——expandIn/shrinkOut 是**布局尺寸动画**（#81 第 1 条
+                // 定版禁掉），换 alpha+scale（允许档）后瞬移仍在；要免掉得给这行常驻高度槽，观感取舍
+                // 留真机看过再定，别悄悄把尺寸动画加回来
+                val msg = banner
+                var msgSnapshot by remember { mutableStateOf<Int?>(null) }
+                if (msg != null) msgSnapshot = msg
+                AnimatedVisibility(
+                    visible = msg != null,
+                    enter = fadeIn(motion.float) + scaleIn(motion.float, initialScale = 0.9f),
+                    exit = fadeOut(motion.float) + scaleOut(motion.float, targetScale = 0.9f)
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(WotaSurface)
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) { Text(stringResource(msgSnapshot ?: 0), style = MaterialTheme.typography.bodyMedium) }
+                }
             }
+
+        // 网格组卡的子段弹层（#5 第 2 轮返修·乙）：整组操作走扇出，子段自己的 [⋯] 只管那一段。
+        // 两条都复用上面那枚根级 CardMenu —— 弹层里不再另造一套菜单动作。
+        seriesSheet?.let { sid ->
+            SeriesSheet(
+                seriesId = sid,
+                clips = clips,
+                onOpen = onOpen,
+                onDismiss = { seriesSheet = null },
+                onPartMenu = { part -> menuTargets = listOf(part) },
+                onGroupMenu = { rep -> menuTargets = SeriesGroup.expandSeriesTargets(listOf(rep), clips) }
+            )
+        }
         }
     }
 
@@ -783,6 +807,7 @@ private fun ClipGrid(
     selectedIds: Set<Long>,
     onOpen: (Long) -> Unit,
     onMenu: (VideoClip) -> Unit,
+    onOpenSeries: (Long) -> Unit,
     onToggleSelect: (VideoClip) -> Unit
 ) {
     val gridState = rememberLazyGridState()
@@ -794,6 +819,15 @@ private fun ClipGrid(
         EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
     }
+
+    // 分段系列（#5 第 2 轮返修·乙）：网格与时间线**走同一条归组**（同一个 collapse 旋钮，
+    // 不许各视图自己折一遍），折叠同样只是视觉折叠、不做任何媒体字节拼接。
+    // 只保留代表段那一行：组内其余成员已经在 parts 里（网格里由子段弹层列出），不许再单独占格。
+    // 归组算在 LazyVerticalGrid 之外：LazyGridScope.forEach 的 lambda 不是 @Composable，里面调 remember 编译不过。
+    val entries = remember(clips) { SeriesGroup.galleryEntries(clips) }
+    val entryByRep = remember(entries) { entries.associateBy { it.clip.id } }
+    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(it.id) } }
+
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         state = gridState,
@@ -802,11 +836,23 @@ private fun ClipGrid(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        items(clips, key = { "c_${it.id}" }) { clip ->
+        items(reps, key = { "c_${it.id}" }) { clip ->
+            val entry = entryByRep[clip.id]
+            val sid = entry?.seriesId
+            // seriesCount 是带自定义 getter 的属性，Kotlin 不会对它 smart cast ⇒ 提到局部 val
+            val count = entry?.seriesCount
             ClipCard(
                 clip = clip,
                 selected = clip.id in selectedIds,
-                onClick = { if (selectedIds.isEmpty()) onOpen(clip.id) else onToggleSelect(clip) },
+                // 角标与时间线同一套令牌与文案（strings_gallery.xml 的 gallery_series_count）
+                subtitle = if (entry != null && count != null) {
+                    stringResource(R.string.gallery_series_count, count) + " · " + formatDuration(entry.totalDurationMs)
+                } else null,
+                onClick = {
+                    if (selectedIds.isNotEmpty()) onToggleSelect(clip)
+                    // 组卡点开列子段（网格里没有内联展开的余地）；单片卡照旧去播放
+                    else if (sid != null) onOpenSeries(sid) else onOpen(clip.id)
+                },
                 onLongClick = { onToggleSelect(clip) },
                 onMenu = { onMenu(clip) }
             )
@@ -816,7 +862,14 @@ private fun ClipGrid(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, onMenu: () -> Unit) {
+private fun ClipCard(
+    clip: VideoClip,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onMenu: () -> Unit,
+    subtitle: String? = null
+) {
     // 描边层**常驻**（透明占位，保住"挂/卸 border 会改测量路径"那条原诉求），
     // 颜色即时切换（#81 第 1 条：禁动画颜色）——只去掉渐变，层不动。
     // 圆角走件位档 24dp（WotaShape.card = ohos_id_corner_radius_card，Top 8 #2 的本文件落点）
@@ -834,7 +887,8 @@ private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, on
             Column(Modifier.padding(8.dp)) {
                 Text(clip.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    formatDuration(clip.durationMs),
+                    // 组卡走「共N段 · 总时长」角标；单片卡仍是今天那行时长，两者共用这一个 Text
+                    subtitle ?: formatDuration(clip.durationMs),
                     style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
                     color = WotaTextDim
                 )
@@ -862,6 +916,103 @@ private fun ClipCard(clip: VideoClip, selected: Boolean, onClick: () -> Unit, on
             )
             WotaOutlineIcon(Icons.Outlined.Tune, stringResource(R.string.gallery_desc_menu), onClick = onMenu)
         }
+    }
+}
+
+/**
+ * 网格组卡的子段弹层（#5 第 2 轮返修·乙）。容器复用本仓既有的 [BottomPanel]（录制页/对比页同一枚
+ * 自绘半模态，不新造）；本函数只管内容：**顶部一行动作是整组操作**，下面每段一行。
+ *
+ * 只钉 [seriesId] 进状态、不钉 [GalleryEntry] 快照，面板每次重组按**当前** [clips] 重新解析：
+ * 整组被移入回收站 / 删除后这一组会从列表里消失，`visible` 随之落回 false，面板自己收起。
+ *
+ * 两条动作出口都不在这里展开，交给调用方（[GalleryScreen] 根部，与根级 [CardMenu] 共用）：
+ * - [onGroupMenu] 收**代表段**，调用方经 [SeriesGroup.expandSeriesTargets] 扇出到整组；
+ * - [onPartMenu] 收**该段**，调用方只包一层 `listOf` —— 子段的 [⋯] 只管它自己。
+ */
+@Composable
+private fun SeriesSheet(
+    seriesId: Long,
+    clips: List<VideoClip>,
+    onOpen: (Long) -> Unit,
+    onDismiss: () -> Unit,
+    onPartMenu: (VideoClip) -> Unit,
+    onGroupMenu: (VideoClip) -> Unit
+) {
+    val entry = remember(clips, seriesId) { SeriesGroup.galleryEntries(clips).firstOrNull { it.seriesId == seriesId } }
+    val count = entry?.seriesCount
+    // 副标题与网格组卡的角标同一套令牌与文案。判据写成 `entry != null && count != null` 而不是
+    // 只判 count：seriesCount 有自己的 getter 语义，两者不等价，写在一起编译器才给得出两条 smart cast
+    val badge = if (entry != null && count != null) {
+        stringResource(R.string.gallery_series_count, count) + " · " + formatDuration(entry.totalDurationMs)
+    } else null
+    BottomPanel(
+        visible = entry != null,
+        onDismiss = onDismiss,
+        title = entry?.title.orEmpty(),
+        subtitle = badge
+    ) {
+        if (entry != null && count != null) {
+            // 顶部：整组操作（与时间线大卡 [⋯] 同一串菜单，作用范围扩到全部段）
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onGroupMenu(entry.rep) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Outlined.Tune, null, tint = WotaTextDim, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    stringResource(R.string.gallery_group_ops, count),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WotaText,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            DividerLine()
+            entry.parts.forEach { part ->
+                SeriesPartRow(part = part, onOpen = { onOpen(part.id) }, onMenu = { onPartMenu(part) })
+            }
+        }
+    }
+}
+
+/** 弹层里的子段行：缩略图 / 名字 / 时长 + 这一段自己的 [⋯]（只管这一段，不扇出） */
+@Composable
+private fun SeriesPartRow(part: VideoClip, onOpen: () -> Unit, onMenu: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        VideoThumbnail(part.uri, Modifier.size(width = 52.dp, height = 38.dp).clip(RoundedCornerShape(4.dp)))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                stringResource(R.string.gallery_part_prefix, part.partIndex ?: 0) + " · " + part.name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaText
+            )
+            Text(
+                "${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}",
+                style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                color = WotaTextDim
+            )
+        }
+        if (part.liked) {
+            Icon(
+                Icons.Outlined.Favorite,
+                contentDescription = stringResource(R.string.gallery_desc_liked),
+                tint = WotaRec,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        ToolIcon(Icons.Outlined.Tune, stringResource(R.string.gallery_desc_menu), onMenu)
     }
 }
 

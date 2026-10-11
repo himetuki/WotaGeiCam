@@ -78,4 +78,6 @@
     <string name="gallery_desc_expand_series">展开这一次的全部分段</string>
     <string name="gallery_desc_collapse_series">收起分段</string>
     <string name="gallery_part_prefix">第 %1$d 段</string>
+    <!-- 网格组卡的子段弹层（#5 第 2 轮返修·乙）：顶部那行动作的作用范围是整组 -->
+    <string name="gallery_group_ops">整组操作（全部 %1$d 段）</string>
 </resources>
