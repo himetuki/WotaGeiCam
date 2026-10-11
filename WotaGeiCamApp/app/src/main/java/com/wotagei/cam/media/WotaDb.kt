@@ -124,6 +124,33 @@ interface SeriesDao {
 
     @Query("DELETE FROM series_part WHERE mediaId IN (:mediaIds)")
     suspend fun clearFor(mediaIds: List<Long>)
+
+    /**
+     * 读侧归组用的两条全表流（#5 Step 4c）。
+     *
+     * ⚠ **只加查询、绝不碰实体、绝不加 `@Index`**：加索引会改 schema ⇒ 撞
+     * `fallbackToDestructiveMigration()` ⇒ 升级即清空用户的收藏 / 标签 / 回收站 / 系列。
+     * 全表扫在小体量媒体库里不是问题（一次只读、Room 自己有 in-memory 缓存兜底）。
+     *
+     * 读侧不 JOIN、不做联表查询：`media_series` 与 `series_part` 分两次发射、在
+     * `MediaRepo` 里按 `mediaId` 归组成 Map——这样任一张表变化都能独立触发重算，
+     * 也不必为一个新 JOIN 在 schema 上加东西。
+     */
+    @Query("SELECT * FROM media_series")
+    fun observeAllSeries(): Flow<List<MediaSeries>>
+
+    @Query("SELECT * FROM series_part")
+    fun observeAllParts(): Flow<List<SeriesPart>>
+
+    /**
+     * 收掉没有成员系列的空壳头（#5 Step 4d）。
+     *
+     * 成员全被 `clearFor` 删掉后，`media_series` 里会留下一行 `seriesId` 谁也不指的记录；
+     * 读侧按「成员数 ≥ 2 才成组」本来就会忽略它，但留着会让表无界增长。
+     * 紧跟在 `clearFor` 之后调用（见 `MediaActions.finishDelete`）。
+     */
+    @Query("DELETE FROM media_series WHERE seriesId NOT IN (SELECT DISTINCT seriesId FROM series_part)")
+    suspend fun pruneOrphans()
 }
 
 @Database(

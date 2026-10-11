@@ -33,6 +33,9 @@ private const val TAG = "WotaMediaRepo"
 /**
  * 媒体库条目。tags 来自 Room 标签表，isTrashed 来自 MediaStore（API 30+）或本地回收站记录。
  * 名称刻意用 VideoClip 而非 MediaItem，避免与 media3 的 MediaItem 混淆。
+ *
+ * 后三个 series 字段**全部带默认值**（#5 Step 4c）：`readRows` 的构造点一个字都不用改，
+ * 单段片的语义与改动前逐字相同；分组信息由 [annotateSeries] 在联表那一层统一补。
  */
 data class VideoClip(
     val id: Long,
@@ -47,9 +50,43 @@ data class VideoClip(
     val height: Int,
     val mimeType: String,
     val tags: Set<String>,
-    val isTrashed: Boolean
+    val isTrashed: Boolean,
+    /** 分段归组：所属系列 id（Room `series_part`）；null = 单段片 */
+    val seriesId: Long? = null,
+    /** 组内段序（Room `series_part.partIndex`） */
+    val partIndex: Int? = null,
+    /** 该系列在库里的总段数（`media_series.partCount`），仅作展示 */
+    val seriesParts: Int = 1
 ) {
     val liked: Boolean get() = tags.contains(TagSpace.LIKE)
+}
+
+/**
+ * 把 Room 的系列成员关系盖到 MediaStore 读出来的行上。
+ *
+ * 为什么在**联表这一层**做而不是在 `readRows` 里查：`readRows` 只认得 Cursor，
+ * 系列信息在另一张表里；放这里就一处出口，`clips()` 与 `clipById()` 共用同一把尺。
+ *
+ * 键是 `mediaId`（Room 里 `series_part.mediaId` 指向 MediaStore `_ID`）。
+ * 命中不了的行保持默认：单段片逐字不变。
+ */
+internal fun annotateSeries(
+    clips: List<VideoClip>,
+    series: List<MediaSeries>,
+    parts: List<SeriesPart>
+): List<VideoClip> {
+    if (series.isEmpty() && parts.isEmpty()) return clips
+    val partCount = series.associate { it.seriesId to it.partCount }
+    val byMedia = HashMap<Long, SeriesPart>(parts.size)
+    parts.forEach { byMedia[it.mediaId] = it }
+    return clips.map { c ->
+        val p = byMedia[c.id] ?: return@map c
+        c.copy(
+            seriesId = p.seriesId,
+            partIndex = p.partIndex,
+            seriesParts = partCount[p.seriesId] ?: 1
+        )
+    }
 }
 
 /**
@@ -61,6 +98,7 @@ class MediaRepo private constructor(private val app: Context) {
     private val db = WotaDb.get(app)
     private val tagDao = db.tagDao()
     private val trashDao = db.trashDao()
+    private val seriesDao = db.seriesDao()
 
     private val version = MutableStateFlow(0L)
 
@@ -99,10 +137,18 @@ class MediaRepo private constructor(private val app: Context) {
 
     fun db(): WotaDb = db
 
-    private data class Snapshot(val version: Long, val tags: List<MediaTag>, val local: List<TrashItem>)
+    private data class Snapshot(
+        val version: Long,
+        val tags: List<MediaTag>,
+        val local: List<TrashItem>,
+        val series: List<MediaSeries>,
+        val parts: List<SeriesPart>
+    )
 
-    private fun triggers(): Flow<Snapshot> =
-        combine(version, tagDao.observeAll(), trashDao.observeAll()) { v, tags, local -> Snapshot(v, tags, local) }
+    private fun triggers(): Flow<Snapshot> = combine(
+        version, tagDao.observeAll(), trashDao.observeAll(),
+        seriesDao.observeAllSeries(), seriesDao.observeAllParts()
+    ) { v, tags, local, series, parts -> Snapshot(v, tags, local, series, parts) }
 
     /** 关闸期间不下发任何列表，开闸后用最新快照重算 */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -115,7 +161,13 @@ class MediaRepo private constructor(private val app: Context) {
     fun clips(scope: MediaScope, filter: ClipFilter): Flow<List<VideoClip>> =
         triggers()
             .flatMapLatest { s ->
-                gated { filterByTab(joinTags(queryMediaStore(scope), s.tags), filter, s.local) }
+                gated {
+                    filterByTab(
+                        annotateSeries(joinTags(queryMediaStore(scope), s.tags), s.series, s.parts),
+                        filter,
+                        s.local
+                    )
+                }
             }
             .flowOn(Dispatchers.IO)
 

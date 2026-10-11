@@ -301,7 +301,13 @@ fun GalleryScreen(
 
             // 多选条从底边升起。退出动画期间 selectedIds 已清空，动作数据钉在最后一次的
             // 快照上，否则滑出过程中会闪一帧「已选 0 个」。
-            val picked = clips.filter { it.id in selectedIds }
+            //
+            // ⚠ **组级动作扇出**（#5 Step 4c）：多选里点中的是代表段，但分享 / 收藏 / 移入回收站 /
+            // 还原 / 彻底删除这些动作必须落到**该系列的每一个成员**上 —— 否则会出现
+            // 「只把首段移进回收站、其余段还在原地」的半截状态。
+            // 扇出靠 `picked` 展开即可：既有的 ops 全都是「收一个 List」或「逐项调用」的形状，
+            // 不需要为归组另开一套批量重载。
+            val picked = SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)
             var barSnapshot by remember { mutableStateOf(picked) }
             if (picked.isNotEmpty()) barSnapshot = picked
             AnimatedVisibility(
@@ -595,7 +601,20 @@ private fun TimelineList(
         EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
     }
-    val groups = remember(clips) { groupTimeline(clips, app) }
+
+    // 分段系列（#5 Step 4c）：同一次录制的多段折成一行，点开内联列出子项。
+    // 折叠是**纯视觉**的 —— 不做任何媒体字节拼接（那要解码 + 重编码时间线，本仓没有这能力）。
+    // 展开态只活在屏内 remember 里，不持久化。
+    val entries = remember(clips) { SeriesGroup.galleryEntries(clips) }
+    val entryByRep = remember(entries) { entries.associateBy { it.clip.id } }
+    var expandedSeries by remember { mutableStateOf(emptySet<Long>()) }
+
+    // 每天只保留**代表段**那一行：组内其余成员已经在 parts 里，不许再单独出行
+    // （否则一次录制会在列表里重复出现两遍）。这一步必须在 LazyColumn 之外算：
+    // LazyListScope.forEach 的 lambda 不是 @Composable，里面调 remember 编译不过。
+    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(it.id) } }
+    val groups = remember(reps, app) { groupTimeline(reps, app) }
+
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -611,30 +630,126 @@ private fun TimelineList(
                 )
             }
             items(g.clips, key = { "c_${it.id}" }) { clip ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpen(clip.id) }
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    VideoThumbnail(clip.uri, Modifier.size(width = 78.dp, height = 58.dp).clip(RoundedCornerShape(6.dp)))
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(clip.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)}",
-                            style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
-                            color = WotaTextDim
+                val entry = entryByRep[clip.id]
+                val sid = entry?.seriesId
+                val count = entry?.seriesCount
+                val isSeries = count != null
+                // 提到局部 val：seriesCount 是带自定义 getter 的属性，Kotlin 不会对它 smart cast，
+                // 直接把 Int? 传给 stringResource 的 Any 形参编译不过。
+                val open = sid != null && sid in expandedSeries
+                Column {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                // 系列行：第一次点开内联展开，再点收起；单片行照旧去播放
+                                if (sid != null) {
+                                    expandedSeries =
+                                        if (open) expandedSeries - sid else expandedSeries + sid
+                                } else onOpen(clip.id)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        VideoThumbnail(
+                            clip.uri,
+                            Modifier
+                                .size(width = 78.dp, height = 58.dp)
+                                .clip(RoundedCornerShape(6.dp))
                         )
-                        TagPills(clip.tags)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                // 组标题取代表段（首段）的名字，不发明新名
+                                entry?.title ?: clip.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = if (isSeries) {
+                                    // 角标：共 N 段 · 总时长
+                                    stringResource(R.string.gallery_series_count, count!!) +
+                                        " · " + formatDuration(entry!!.totalDurationMs)
+                                } else {
+                                    "${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)}"
+                                },
+                                style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                                color = WotaTextDim
+                            )
+                            TagPills(entry?.rep?.tags ?: clip.tags)
+                        }
+                        if (isSeries) {
+                            Icon(
+                                imageVector = if (open) Icons.Outlined.Close else Icons.Outlined.Add,
+                                contentDescription = stringResource(
+                                    if (open) R.string.gallery_desc_collapse_series
+                                    else R.string.gallery_desc_expand_series
+                                ),
+                                tint = WotaTextDim,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        if (entry?.rep?.liked == true) {
+                            Icon(
+                                Icons.Outlined.Favorite,
+                                contentDescription = stringResource(R.string.gallery_desc_liked),
+                                tint = WotaRec,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        IconButton(onClick = { onMenu(entry?.rep ?: clip) }) {
+                            Icon(
+                                Icons.Outlined.Tune,
+                                contentDescription = stringResource(R.string.gallery_desc_menu),
+                                tint = WotaTextDim,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
-                    if (clip.liked) Icon(Icons.Outlined.Favorite, contentDescription = stringResource(R.string.gallery_desc_liked), tint = WotaRec, modifier = Modifier.size(16.dp))
-                    IconButton(onClick = { onMenu(clip) }) {
-                        Icon(Icons.Outlined.Tune, contentDescription = stringResource(R.string.gallery_desc_menu), tint = WotaTextDim, modifier = Modifier.size(18.dp))
+                    // 展开：子段内联缩进列出（网格不能套网格，故只有时间线走内联展开）
+                    if (open && entry != null) {
+                        entry.parts.drop(1).forEach { part -> TimelinePartRow(part, onOpen) }
                     }
                 }
             }
+        }
+    }
+}
+
+/** 展开态下的子段行：缩进一档 + 前缀序号，视觉上明确是「属于上面那一次录制」 */
+@Composable
+private fun TimelinePartRow(part: VideoClip, onOpen: (Long) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onOpen(part.id) }
+            .padding(start = 44.dp, end = 14.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            stringResource(R.string.gallery_part_prefix, part.partIndex ?: 0),
+            style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+            color = WotaTextDim
+        )
+        Spacer(Modifier.width(10.dp))
+        VideoThumbnail(part.uri, Modifier.size(width = 52.dp, height = 38.dp).clip(RoundedCornerShape(4.dp)))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(part.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            Text(
+                "${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}",
+                style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                color = WotaTextDim
+            )
+        }
+        if (part.liked) {
+            Icon(
+                Icons.Outlined.Favorite,
+                contentDescription = stringResource(R.string.gallery_desc_liked),
+                tint = WotaRec,
+                modifier = Modifier.size(16.dp)
+            )
         }
     }
 }
