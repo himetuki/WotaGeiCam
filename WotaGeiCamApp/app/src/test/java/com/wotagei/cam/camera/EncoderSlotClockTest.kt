@@ -611,7 +611,8 @@ class EncoderSlotClockTest {
         val rows = ArrayList<Pair<String, Long>>()
         // 慢源 23.75：逐帧 6 帧的末戳（相邻差恒 42105263 ⇒ 5·42105263 + base）
         rows.add("慢源6帧" to traceWith(pts, srcStep2375, 6))
-        // 快源 31fps：6 帧仍全落在名义网格的第 0 格上（旧口径 = base）
+        // 快源 31fps：逐帧仍被名义网格吸住（源快 ⇒ 接管谓词永不触发），但 6 帧的到达时刻
+        // 0/1/2/3/4/5 × 32258064ns 落在第 0/0/1/2/3/3 格 ⇒ 末戳 = base + 3·step（不是 base）
         rows.add("快源31fps_6帧" to traceWith(pts, 1_000_000_000L / 31, 6))
         rows.add("frameIndex=0" to pts(base, base + 7 * fps24Step, fps24Step, 0L, 0))
         rows.add("frameIndex=-1" to pts(base, base + 7 * fps24Step, fps24Step, 12_345L, -1))
@@ -658,7 +659,9 @@ class EncoderSlotClockTest {
         val good = truthTable(adaptiveCopy())
         // 良品必须先真的绿（否则"突变体报红"没有意义）
         assertEquals("慢源6帧应落在 base+5·42105263", base + 5 * srcStep2375, good[0].second)
-        assertEquals("快源31fps_6帧全落在名义网格第 0 格", base, good[1].second)
+        // 快源 31fps 逐帧仍被名义网格吸住：6 帧的到达时刻 0/1/2/3/4/5 × 32258064 全部落进
+        // 第 0/0/1/2/3/3 格 ⇒ 末戳 = base + 3·step（**不是** base：第 4 帧起已经进到第 3 格）
+        assertEquals("快源31fps_6帧应落在 base+3·网格步长", base + 3 * fps24Step, good[1].second)
         val mutants = listOf(
             "接管谓词反写（> 改 <=）" to adaptiveCopy(invertPredicate = true),
             "接管步长翻倍（base+elapsed 改 base+2·elapsed）" to adaptiveCopy(doubleStep = true)
