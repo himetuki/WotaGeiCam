@@ -55,7 +55,12 @@ data class VideoClip(
     val seriesId: Long? = null,
     /** 组内段序（Room `series_part.partIndex`） */
     val partIndex: Int? = null,
-    /** 该系列在库里的总段数（`media_series.partCount`），仅作展示 */
+    /**
+     * 该系列在库里的总段数（`media_series.partCount`）。**预留字段**：UI 角标实际消费
+     * [GalleryEntry.seriesCount]（SeriesGroup 的呈现层投影），本字段当前在 main source
+     * 零消费点，但 SeriesGroupGuardTest 钉住了这条声明与 annotateSeries 的填充——它是
+     * 「系列元数据随 VideoClip 下发」的预留通道，删它得连守卫一起拆，故保留不删。
+     */
     val seriesParts: Int = 1
 ) {
     val liked: Boolean get() = tags.contains(TagSpace.LIKE)
