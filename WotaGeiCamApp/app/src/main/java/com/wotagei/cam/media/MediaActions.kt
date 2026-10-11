@@ -2,28 +2,21 @@ package com.wotagei.cam.media
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.PendingIntent
 import android.app.RecoverableSecurityException
 import android.app.RemoteAction
 import android.content.ContentValues
 import android.content.Context
-import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.wotagei.cam.core.WotaStorage
 import com.wotagei.cam.R
-import com.wotagei.cam.ui.findActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
