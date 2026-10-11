@@ -62,8 +62,10 @@
     <string name="set_perm_media">视频读取</string>
     <string name="set_perm_bluetooth">蓝牙连接</string>
     <!-- 蓝牙行的子行（仅 API ≤ 30 出现，阈值真源是 SettingsScreen.btLocationRowVisible）：
-         7666e95 给 startDiscovery 在 Android 10/11 补了位置权限，设置页不画这行的话
-         用户会看到「蓝牙已就绪」而首启又弹位置框 -->
+         7666e95 给 startDiscovery 在 Android 10/11 补了位置权限，而设置页此前从未呈现这项权限——
+         用户在这里看到「蓝牙连接已就绪」，与系统实际声明的权限面不一致。
+         注：首启不会弹位置权限框，那条申请只在蓝牙面板里由用户点按钮触发（2026-10-11 口径订正，
+         此前本注释误写成「首启又弹位置框」） -->
     <string name="set_perm_bt_location">位置（仅用于搜索附近音箱）</string>
     <string name="set_perm_granted">已授予</string>
     <string name="set_perm_denied">未授予</string>
