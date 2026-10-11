@@ -2081,9 +2081,80 @@ internal fun encoderSlotPtsNs(baseNs: Long, nowNs: Long, fps: Int, lastPtsNs: Lo
     if (fps <= 0) return lastPtsNs
     val step = 1_000_000_000L / fps
     if (step <= 0L) return lastPtsNs
+    return slotGridPtsNs(baseNs, nowNs, step, lastPtsNs)
+}
+
+/**
+ * 网格落戳的**共同内核**（文件私有；[encoderSlotPtsNs] 与 [encoderAdaptivePtsNs] 都走它）。
+ *
+ * 为什么必须共用：本工程吃过「恒等式假证明」的亏——两份网格算术各写一遍，改一处忘一处，
+ * 两条口径就会在某天分叉，而任何「两条口径在真值表上相等」的守卫都测不出那种分叉。
+ * 网格算术**只有这一份**是本文件的事实源。
+ *
+ * 前置条件：调用方保证 [stepNs] > 0（两个调用点各自的不可用分支都已经先把 `step <= 0` 挡掉）。
+ * 收 [baseNs]/[nowNs] 而不是收算好的 elapsed，是为了让「退基准」与「夹地板」这两条兜底
+ * 和 [encoderSlotPtsNs] 的旧行为**同处一条**——旧函数里它们也在一起，拆开就是分叉的起点。
+ */
+private fun slotGridPtsNs(baseNs: Long, nowNs: Long, stepNs: Long, lastPtsNs: Long): Long {
     val elapsed = nowNs - baseNs
-    val pts = if (elapsed <= 0L) baseNs else baseNs + (elapsed / step) * step
+    val pts = if (elapsed <= 0L) baseNs else baseNs + (elapsed / stepNs) * stepNs
     return if (pts > lastPtsNs) pts else lastPtsNs
+}
+
+/**
+ * PTS 网格的**源慢接管**口径（纯函数；调用点 [GlRenderEngine.stampEncoderPresentation]）。
+ *
+ * # 缺陷（2026-10-11 真机量化，ALN-AL00）
+ * 名义 24fps 的档上，源实到 ≈23.75fps。[encoderSlotPtsNs] 让槽位按**名义速率**推进、帧按**实到速率**
+ * 到达，于是每约 95 帧累计欠一格 ⇒ **每 4.00s 成片一个空洞**（实测 28.79s 片 683 帧 vs 应有 691，
+ * 末帧 PTS 落在 689 格 = 28.708s，7 个假空档）。同一个模型解释两台机：WIKO 源 24.48fps > 24 ⇒ 零空洞。
+ * 导出是纯 remux，无罪。
+ *
+ * ⚠ **那个「空洞」不是源的缺口**，是网格锚错速率的失真——源实况是「连续每秒交 23.75 帧、无缺口」。
+ * 照实数缺口的 `encoderSlotGap` 因此会把这 7 格记成真实掉帧，而用户看到的是一段没掉帧却打不出
+ * 均匀帧长的成片。
+ *
+ * # 形态 B（采纳）：逐帧自适应，不锁 step'
+ * 接管分支即 `PTS = max(base + elapsed, lastPtsNs)`，源 ≥ 名义时**逐字复用旧内核**（不是复制逻辑）。
+ * 四条性质同时成立：
+ * 1. 相邻差 = `1/23.75` = 42105263ns **恒定**（帧长均匀）；
+ * 2. 逐帧 [encoderSlotGap] 恒 0（**无洞**）；
+ * 3. 末帧跨度 = 真实时长（见下面的「两处必须写实的修正」第 2 条）；
+ * 4. 源快于名义（31fps/24 档、48fps/24 档）时 `frameIndex·step >= elapsed` 恒真 ⇒ 走名义网格
+ *    ⇒ **与现行逐字相同**（0 行为变化）。
+ *
+ * # 形态 A（拒绝）：跑前锁定一个 `step'`、对后续所有帧生效
+ * 那需要新状态，且源缓慢漂移时会逐渐失调（锁于开跑时的速率，漂移不跟随）。
+ * 本函数是**逐帧**重新判定，接管/不接管随源快慢自然切换，没有任何跨帧状态。
+ *
+ * # 两处必须写实的修正（本仓有「恒等式假证明」前科，守卫按这两句严格表述写）
+ * 1. 「段首样本不足时退化与现行口径逐字相同」**只在 `frameIndex <= 0` 严格成立**（首帧 / 帧率不可用 /
+ *    时钟回退三种情形逐字同旧）。早段抖动帧是**同性质**不是**逐字相同**——`frameIndex = 1` 时
+ *    只要 `elapsed > step`（源慢过哪怕一格）就已经接管。
+ * 2. 「末帧跨度 = 真实时长」严格是 `(n−1)/实际fps + 末帧曝光`，与 `n/实际fps` **差一帧**
+ *    （约 42ms 量级）。所以端到端断言必须落在**容差带**（±1 帧长）上，不许把等号当恒等式。
+ *
+ * @param stepNs 网格步长（ns）>0；整数档是 `1e9/fps`，NTSC 档是 [ntscGridStepNs] 的实数近似步长。
+ *   **本函数不认 fps**：NTSC 档的步长不是 `1e9/24`，把 fps 传进来会在该档退回整数网格（本项 #2 的坑）。
+ * @param frameIndex 本段已写出的帧数（打戳成功才自增，所以它就是「名义网格应当已到达的格数」判据的来源）
+ */
+internal fun encoderAdaptivePtsNs(
+    baseNs: Long,
+    nowNs: Long,
+    stepNs: Long,
+    lastPtsNs: Long,
+    frameIndex: Int
+): Long {
+    // 档位不可用：与旧口径逐字相同（fps<=0 / step<=0 两道守卫在旧函数里的原样保留）
+    if (stepNs <= 0L) return lastPtsNs
+    // 段首没有样本：与旧口径逐字相同。**必须**早于接管判定——frameIndex=0 时接管谓词
+    // `elapsed > 0·step` 对任何正 elapsed 恒真，不挡住就会把首帧推到 base+elapsed（=nowNs）。
+    if (frameIndex <= 0) return slotGridPtsNs(baseNs, nowNs, stepNs, lastPtsNs)
+    val elapsed = nowNs - baseNs
+    // 时钟回退 / 还没起走：退基准再夹地板，与旧口径逐字相同
+    if (elapsed <= 0L) return slotGridPtsNs(baseNs, nowNs, stepNs, lastPtsNs)
+    val candidate = if (elapsed > frameIndex * stepNs) baseNs + elapsed else slotGridPtsNs(baseNs, nowNs, stepNs, lastPtsNs)
+    return if (candidate > lastPtsNs) candidate else lastPtsNs
 }
 
 /**

@@ -428,4 +428,209 @@ class EncoderSlotClockTest {
             }
         }
     }
+
+    // ---- ④ PTS 网格自适应（形态 B：逐帧接管，源慢时 PTS = max(base+elapsed, last)）----
+    //
+    // 背景（2026-10-11 真机量化，ALN-AL00）：名义 24fps 档上源实到 ≈23.75fps ⇒ 槽位按名义速率推进、
+    // 帧按实到速率到达 ⇒ 每约 95 帧累计欠一格 ⇒ 每 4.00s 成片一个空洞（28.79s 片 683 帧 vs 应有 691，
+    // 末帧 PTS 落在 689 格 = 28.708s，7 个假空档）。WIKO 源 24.48fps > 24 ⇒ 零空洞，同一模型两台机。
+    // **那 7 格不是源的缺口**，是网格锚错速率的失真——源实况是「连续每秒交 23.75 帧、无缺口」。
+
+    /** 23.75fps 恒源的帧距（ns）：`1e9/23.75 = 42105263.157…` 截断。与真机那台同源。 */
+    private val srcStep2375 = 1_000_000_000L * 1000L / 23_750L
+
+    /** 逐帧跑一段，返回 [pts 序列, 相邻空格累计, 末帧戳] */
+    private data class Trace(val pts: List<Long>, val gaps: Long, val last: Long)
+
+    private fun trace(
+        srcStepNs: Long,
+        frames: Int,
+        adaptive: Boolean,
+        skipFrames: Int = 0,
+        skipAt: Int = Int.MAX_VALUE
+    ): Trace {
+        var last = 0L
+        var gaps = 0L
+        val pts = ArrayList<Long>(frames)
+        for (i in 0 until frames) {
+            // skipFrames：模拟源端**真漏帧**（到达时刻跳过若干帧距）
+            val idx = if (i >= skipAt) i + skipFrames else i
+            val now = base + idx * srcStepNs
+            val p = if (adaptive) {
+                encoderAdaptivePtsNs(base, now, fps24Step, last, i)
+            } else {
+                encoderSlotPtsNs(base, now, 24, last)
+            }
+            gaps += encoderSlotGap(last, p, 24)
+            last = p
+            pts.add(p)
+        }
+        return Trace(pts, gaps, last)
+    }
+
+    @Test
+    fun `自适应口径_23点75恒源逐帧无洞且帧长恒定`() {
+        val t = trace(srcStep2375, frames = 683, adaptive = true)
+        assertEquals("慢源逐帧空格必须恒 0（否则就是那每 4.00s 一个的假空档）", 0L, t.gaps)
+        val diffs = (1 until t.pts.size).map { t.pts[it] - t.pts[it - 1] }.toSet()
+        assertEquals(
+            "相邻差必须恒为 1/23.75（帧长均匀），实测出现了 ${diffs.size} 种取值：${diffs.sorted().take(4)}",
+            setOf(srcStep2375), diffs
+        )
+        // 「末帧跨度 = 真实时长」**不是恒等式**：严格是 (n−1)/实际fps + 末帧曝光，与 n/实际fps 差一帧
+        // （约 42ms 量级）。所以这里断言落在 ±1 帧长的容差带上，不把等号当恒等式。
+        val span = t.last - base
+        val oneFrame = srcStep2375
+        assertTrue(
+            "末帧跨度应 ≈ 683/23.75 ≈ 28.75s，实际 ${span / 1e9}s",
+            span in 683L * srcStep2375 - oneFrame..683L * srcStep2375 + oneFrame
+        )
+        assertTrue("容差带必须真的容得下（28.7s..28.8s）", span in 28_700_000_000L..28_800_000_000L)
+    }
+
+    @Test
+    fun `自适应口径_同一输入下旧口径7洞新口径0洞`() {
+        val oldT = trace(srcStep2375, frames = 683, adaptive = false)
+        val newT = trace(srcStep2375, frames = 683, adaptive = true)
+        assertEquals("旧口径在 683 帧上必须数出 7 格假空档（钉住这条缺陷事实）", 7L, oldT.gaps)
+        assertEquals("新口径必须归零", 0L, newT.gaps)
+    }
+
+    @Test
+    fun `自适应口径_源快于名义时逐帧与旧口径逐字相同`() {
+        for (srcFps in listOf(31, 48)) {
+            val t = trace(1_000_000_000L / srcFps, frames = 400, adaptive = true)
+            val oldT = trace(1_000_000_000L / srcFps, frames = 400, adaptive = false)
+            val firstDiff = t.pts.indices.firstOrNull { t.pts[it] != oldT.pts[it] }
+            assertTrue("源 ${srcFps}fps > 名义 24 时必须逐帧与旧口径逐字相同，首个不一致帧：$firstDiff", firstDiff == null)
+        }
+    }
+
+    @Test
+    fun `自适应口径_首帧与档位不可用与时钟回退逐字退旧口径`() {
+        // frameIndex = 0 / 负：段首没有样本，整体走旧口径（接管谓词此时对任何正 elapsed 恒真，必须早退挡掉）
+        for (fi in listOf(0, -1, -7)) {
+            assertEquals(
+                "frameIndex=$fi 必须与旧口径逐字相同",
+                encoderSlotPtsNs(base, base + 7 * step24, 24, 0L),
+                encoderAdaptivePtsNs(base, base + 7 * step24, step24, 0L, fi)
+            )
+        }
+        // 档位不可用：生产侧 fps<=0 早退、压根不进本函数；等价于传进来的 stepNs 不可用
+        for (fps in listOf(0, -1)) {
+            assertEquals(
+                "fps=$fps 时旧口径原样退回上一枚",
+                encoderSlotPtsNs(base, base + sec, fps, 12_345L),
+                encoderAdaptivePtsNs(base, base + sec, 0L, 12_345L, 5)
+            )
+        }
+        // 时钟回退 / 未起走：退基准再夹地板
+        assertEquals(
+            encoderSlotPtsNs(base, base - sec, 24, base + 3 * step24),
+            encoderAdaptivePtsNs(base, base - sec, step24, base + 3 * step24, 4)
+        )
+    }
+
+    @Test
+    fun `自适应口径_源端真漏3帧时空档如实反映不压缩`() {
+        // 接管分支不认「源有没有真的漏帧」，它只判「慢没慢」：真漏 3 帧就该数出 3 格
+        val t = trace(srcStep2375, frames = 683, adaptive = true, skipFrames = 3, skipAt = 300)
+        assertEquals("真漏 3 帧必须如实记 3 格（压缩就等于把真实缺口藏起来）", 3L, t.gaps)
+    }
+
+    // ---- ④-1 形态守卫：生产实现不许偏离「形态 B」 ----
+
+    @Test
+    fun `形态B守卫_接管分支逐帧重判且源快时走旧内核`() {
+        val body = flatten(bodyOf(codeOnly(mainSourceText("camera/GlRenderEngine.kt")), "encoderAdaptivePtsNs"))
+        assertTrue("必须早于接管判定的段首早退：frameIndex <= 0", body.contains("if (frameIndex <= 0) return"))
+        assertTrue("档位不可用必须原样退回上一枚", body.contains("if (stepNs <= 0L) return lastPtsNs"))
+        assertTrue("接管谓词必须是「elapsed 越过名义网格位置」", body.contains("elapsed > frameIndex * stepNs"))
+        assertTrue("接管分支必须是 base + elapsed", body.contains("baseNs + elapsed"))
+        assertTrue("不接管分支必须复用旧内核（不许复制一份网格算术）", body.contains("slotGridPtsNs("))
+        assertTrue("最终必须夹住地板", body.contains("if (candidate > lastPtsNs) candidate else lastPtsNs"))
+        assertFalse("不许锁 step'（形态 A 需要跨帧状态，源漂移会逐渐失调）", body.contains("val step'"))
+    }
+
+    // ---- ④-2 突变自证 ----
+
+    /**
+     * 本文件产出的**真值表**（慢源/快源逐帧 + 三条退化行），突变体与良品同吃这张表。
+     *
+     * 表是手推的：慢源 6 帧的相邻差恒 42105263、快源 31fps 6 帧仍在名义网格上、
+     * 三条退化行各自退旧口径。上一轮的坑是「突变体在真值表上逐点相等」——那是语义空操作，
+     * 尺子永远绿、什么也测不到。这里每条突变体都必须至少偏离 1 行，否则直接判红。
+     */
+    private fun truthTable(pts: (Long, Long, Long, Long, Int) -> Long): List<Pair<String, Long>> {
+        val rows = ArrayList<Pair<String, Long>>()
+        // 慢源 23.75：逐帧 6 帧的末戳（相邻差恒 42105263 ⇒ 5·42105263 + base）
+        rows.add("慢源6帧" to traceWith(pts, srcStep2375, 6))
+        // 快源 31fps：6 帧仍全落在名义网格的第 0 格上（旧口径 = base）
+        rows.add("快源31fps_6帧" to traceWith(pts, 1_000_000_000L / 31, 6))
+        rows.add("frameIndex=0" to pts(base, base + 7 * fps24Step, fps24Step, 0L, 0))
+        rows.add("frameIndex=-1" to pts(base, base + 7 * fps24Step, fps24Step, 12_345L, -1))
+        rows.add("档位不可用" to pts(base, base + 7 * fps24Step, 0L, 12_345L, 5))
+        rows.add("时钟回退" to pts(base, base - sec, fps24Step, base + 3 * fps24Step, 4))
+        return rows
+    }
+
+    private fun traceWith(pts: (Long, Long, Long, Long, Int) -> Long, srcStepNs: Long, frames: Int): Long {
+        var last = 0L
+        for (i in 0 until frames) last = pts(base, base + i * srcStepNs, fps24Step, last, i)
+        return last
+    }
+
+    /** 网格算术的本地复刻（与生产 [slotGridPtsNs] 同一形态；生产形状由「形态B守卫」钉住） */
+    private fun gridCore(b: Long, now: Long, step: Long, lastPts: Long): Long {
+        val elapsed = now - b
+        val grid = if (elapsed <= 0L) b else b + (elapsed / step) * step
+        return if (grid > lastPts) grid else lastPts
+    }
+
+    /** 本地复刻生产实现（可突变）；生产侧形状由上面的「形态B守卫」钉住，防止这份复刻漂走 */
+    private fun adaptiveCopy(invertPredicate: Boolean = false, doubleStep: Boolean = false): (Long, Long, Long, Long, Int) -> Long =
+        { baseNs, nowNs, stepNs, last, frameIndex ->
+            if (stepNs <= 0L) last
+            else if (frameIndex <= 0) gridCore(baseNs, nowNs, stepNs, last)
+            else {
+                val elapsed = nowNs - baseNs
+                if (elapsed <= 0L) gridCore(baseNs, nowNs, stepNs, last)
+                else {
+                    val takeOver = if (invertPredicate) elapsed <= frameIndex * stepNs else elapsed > frameIndex * stepNs
+                    val candidate = if (takeOver) {
+                        baseNs + elapsed * (if (doubleStep) 2L else 1L)
+                    } else {
+                        gridCore(baseNs, nowNs, stepNs, last)
+                    }
+                    if (candidate > last) candidate else last
+                }
+            }
+        }
+
+    @Test
+    fun `尺子自己能红_接管谓词反写与步长翻倍必偏离真值表`() {
+        val good = truthTable(adaptiveCopy())
+        // 良品必须先真的绿（否则"突变体报红"没有意义）
+        assertEquals("慢源6帧应落在 base+5·42105263", base + 5 * srcStep2375, good[0].second)
+        assertEquals("快源31fps_6帧全落在名义网格第 0 格", base, good[1].second)
+        val mutants = listOf(
+            "接管谓词反写（> 改 <=）" to adaptiveCopy(invertPredicate = true),
+            "接管步长翻倍（base+elapsed 改 base+2·elapsed）" to adaptiveCopy(doubleStep = true)
+        )
+        mutants.forEach { (name, bad) ->
+            val rows = truthTable(bad)
+            val deviated = good.indices.filter { good[it].second != rows[it].second }
+            assertTrue(
+                "突变体「$name」必须至少偏离真值表 1 行（偏离 0 行 = 语义空操作，尺子什么也测不到）。实际偏离：$deviated",
+                deviated.isNotEmpty()
+            )
+        }
+        // 钉住谓词反写必须连**快源行**一起带偏：只偏慢源行的话，
+        // 「接管条件写反」与「接管条件恒真」就分不开，这条尺子测不出前者的退化
+        val invRows = truthTable(adaptiveCopy(invertPredicate = true))
+        assertTrue(
+            "接管谓词反写必须连快源行一起偏离（实测偏离：${good.indices.filter { good[it].second != invRows[it].second }}）",
+            good.indices.any { good[it].second != invRows[it].second && it == 1 }
+        )
+    }
 }
