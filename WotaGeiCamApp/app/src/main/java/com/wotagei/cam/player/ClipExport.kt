@@ -120,8 +120,10 @@ enum class ClipError { RANGE, OPEN, MUX, CANCELLED, COMMIT }
  *
  * 失败语义（#4 定版，对齐录制路 VideoStore.seal 的"只报不删"）：**muxer.stop() 之前**的失败/
  * 取消照旧删 pending 记录（写一半的废段该删，不留 0 字节幽灵条目）；**muxer.stop() 之后**
- * （成片字节已在盘上）commit 全败或取消一律**保留行不删**——MediaStore 删行会连带删文件，
- * 删记录就是把用户的成片丢掉。留下的 pending 行对外不可见（相册、本应用自己的列表都查不到），
+ * （成片字节已在盘上）commit 全败、取消或任何后续异常一律**保留行不删**：收尾 catch 也按
+ * [bytesComplete] 分岔，封轨后异常改道 Fail(COMMIT)（与 commit 全败同口径）。MediaStore 删行
+ * 会连带删文件，删记录就是把用户的成片丢掉。留下的 pending 行对外不可见（相册、本应用自己的
+ * 列表都查不到），
  * 冷启由 [com.wotagei.cam.record.StalePendingSweep.rescuePendingRows] 收录。
  * sidecar 在「commit 成功」与「全败保留」两条路径都写：被救援回的成片档案要完整；
  * sidecar 写失败只少一份补弧档案，不牵连导出成败。
@@ -219,8 +221,14 @@ class ClipExporter(private val ctx: Context) {
             }
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "export failed: ${e.message}")
-            fail(pendingUri, ClipError.MUX)
+            if (bytesComplete) {
+                // 封轨后异常：成片字节已在盘上，删行 = 丢成片；与 commit 全败同口径保留待救援
+                Log.e(TAG, "封轨后异常，成片已保留待救援 uri=$pendingUri: ${e.message}")
+                return@withContext ClipResult.Fail(ClipError.COMMIT)
+            } else {
+                Log.e(TAG, "export failed: ${e.message}")
+                fail(pendingUri, ClipError.MUX)
+            }
         }
     }
 
