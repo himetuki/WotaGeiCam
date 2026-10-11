@@ -13,6 +13,7 @@ import android.view.Surface
 import com.wotagei.cam.core.WotaTiers
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 自研管线：`MediaCodec + MediaMuxer + AudioRecord`（04 文件 §3：fps > 60 的高速路径；
@@ -253,10 +254,19 @@ class CodecRecorder(
 
     /**
      * 换段腿起点（`elapsedRealtime`；0 = 当前不在换段腿里）。**编码器被拆的那一刻**起钟——
-     * 此后进来的帧写不进任何容器 = 丢帧窗口开启。泵线程写、停止路径（控制线程）读 ⇒ @Volatile。
+     * 此后进来的帧写不进任何容器 = 丢帧窗口开启。泵线程写、停止路径（控制线程）读。
+     *
+     * 为什么是 [AtomicLong] 而不是 @Volatile Long：结算有**两处**——泵线程的 [settleRotateLeg]
+     * 与控制线程的 [settleRotateLegAtStop]。@Volatile 只保证「读到的值新」，不保证
+     * 「读-算-清-加」这四步原子：控制线程读出 start、泵线程抢先结算清 0、控制线程再 add
+     * ⇒ 同一条腿记两遍，[rotateLoss] 读数虚高约一份部分腿（用户可见的失败结果里的丢失量也会多算）。
+     * `getAndSet(0L)` 把「读 + 清」做成**一次 CAS**：谁先消费谁拿到 start，另一侧必得 0 早退，
+     * 双加在结构上不可能发生，零窗口零锁。
+     *
+     * 「控制线程那一笔不能删」：[rotateLoss.totalMs] 被 [finishWithoutTeardown] 拿去生成
+     * **用户可见**的失败结果，删掉用户看到的丢失量就少算一份。
      */
-    @Volatile
-    private var rotateLegStartMs = 0L
+    private val rotateLegStartMs = AtomicLong(0L)
 
     /** 本腿里是否有入库调用撞了有界上限（泵线程与停止路径都可能置位 ⇒ @Volatile） */
     @Volatile
@@ -881,7 +891,7 @@ class CodecRecorder(
 
     /** 换段腿/丢帧账复位（新会话、新段序列与释放三处共用同一份口径，不许各写一份） */
     private fun resetRotateBooks() {
-        rotateLegStartMs = 0L
+        rotateLegStartMs.set(0L)
         rotateStoreTimedOut = false
         pendingLegLostMs = 0L
         rotateFailStage = ""
@@ -983,7 +993,7 @@ class CodecRecorder(
      * 换段腿起钟（泵线程）。腿的定义：从编码器被拆到新段 `codec.start()` 返回（见 [ROTATE_LEG_BUDGET_MS]）。
      */
     private fun beginRotateLeg() {
-        rotateLegStartMs = SystemClock.elapsedRealtime()
+        rotateLegStartMs.set(SystemClock.elapsedRealtime())
         rotateStoreTimedOut = false
         rotateFailStage = ""
     }
@@ -998,7 +1008,7 @@ class CodecRecorder(
      * [STORE_CALL_BUDGET_MS]。<=0 = 预算已尽 ⇒ 下一次有界调用直接判超时（不许再发无预算的调用）。
      */
     private fun rotateBudgetLeftMs(): Long {
-        val start = rotateLegStartMs
+        val start = rotateLegStartMs.get()
         if (start == 0L) return STORE_CALL_BUDGET_MS
         return ROTATE_LEG_BUDGET_MS - (SystemClock.elapsedRealtime() - start)
     }
@@ -1028,9 +1038,9 @@ class CodecRecorder(
      *   封段：那份耗时该记进丢失账、但**不许**判失败——封段慢不等于录制受阻）
      */
     private fun settleRotateLeg(judgeStall: Boolean) {
-        val start = rotateLegStartMs
+        // 读 + 清一次做完：泵线程与控制线程的结算只有一方能拿到非零 start（见字段 KDoc）
+        val start = rotateLegStartMs.getAndSet(0L)
         if (start == 0L) return
-        rotateLegStartMs = 0L
         val legMs = SystemClock.elapsedRealtime() - start
         val lost = rotateLostMs(legMs)
         pendingLegLostMs = lost
@@ -1076,7 +1086,10 @@ class CodecRecorder(
      * 最坏是读到略旧的值，不产生写写冲突。
      */
     private fun settleRotateLegAtStop() {
-        val start = rotateLegStartMs
+        // 与 [settleRotateLeg] 互斥：腿起点由双方 `getAndSet(0L)` **消费**，先到者独得，后到者必得 0 早退。
+        // 下面这一笔 `rotateLoss.add(lost)` **不许删**（用户可见失败结果里的丢失量靠它），
+        // 也不许再加第二笔——双加已被上面的原子读清结构性地排除。
+        val start = rotateLegStartMs.getAndSet(0L)
         if (start == 0L) return
         val legMs = SystemClock.elapsedRealtime() - start
         val lost = rotateLostMs(legMs)
@@ -1207,7 +1220,7 @@ class CodecRecorder(
         val p = profile ?: return false
         // 腿预算已被前面的入库调用吃光就不再往下走：后面全是编码器/muxer 的 native 重建（无上限可给），
         // 预算既尽就该交回 pumpLoop 按 ROTATE_STALL 明确失败，而不是带着没预算的腿继续赌
-        if (rotateLegStartMs != 0L && rotateBudgetLeftMs() <= 0L) {
+        if (rotateLegStartMs.get() != 0L && rotateBudgetLeftMs() <= 0L) {
             noteStoreTimeout("rotate budget spent")
             return false
         }
