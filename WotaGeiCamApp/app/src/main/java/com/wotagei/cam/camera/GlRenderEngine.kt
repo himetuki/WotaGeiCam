@@ -1410,7 +1410,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     }
 
     /**
-     * 给编码器面写**网格化**呈现时间戳（网格取真实时钟，见 [encoderSlotPtsNs]）。
+     * 给编码器面写**网格化**呈现时间戳（网格取真实时钟、源慢时逐帧接管，见 [encoderAdaptivePtsNs]）。
      *
      * 为什么不是纯"帧序号 × 1e9/fps"（2026-10-08 真机缺陷）：那个口径隐含假设"源实到帧率 =
      * 目标帧率"，而半精确档（24※）恰恰不满足——真机秒表对照实测：一轮 31.85s 的真实录制里
@@ -1418,6 +1418,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * nanoTime ⇒ 它才是真实时长）⇒ 成片被匀速拉长 8~14%、与音轨逐渐错位（亮场景源实到
      * 26~31 帧/秒，戳却按 24 帧/秒走）。写成"帧序号 × 网格"看不出这个问题，写成"真实时钟
      * 落网格"两头都要：帧长齐（不出现 90000/1）且总时长 = 真实时长。
+     *
+     * 为什么还要**接管**（2026-10-11 量化）：网格按名义速率锚、帧按实到速率到达时，源慢一丁点
+     * 也会逐段欠格（ALN-AL00 实到 23.75 vs 名义 24 ⇒ 每 4.00s 一个假空档）。[encoderAdaptivePtsNs]
+     * 在源慢过名义网格时逐帧改用 `base+elapsed`，四性质同时成立（帧长恒定、无洞、时长不变、
+     * 源快时逐字同旧）。
      *
      * 打戳失败即**不推进**位次账与最后一枚戳（S1-M2-06）：`eglPresentationTimeANDROID` 是这枚
      * 网格戳的唯一落点，失败后容器里那枚是 EGL 默认的换帧瞬间墙钟——它不落网格，成片整条退回
@@ -1432,7 +1437,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val display = eglDisplay
         if (display === EGL14.EGL_NO_DISPLAY) return
         val nowNs = System.nanoTime()
-        val ptsNs = encoderSlotPtsNs(encoderBaseNs, nowNs, fps, encoderLastPtsNs)
+        val stepNs = 1_000_000_000L / fps
+        val ptsNs = encoderAdaptivePtsNs(encoderBaseNs, nowNs, stepNs, encoderLastPtsNs, encoderFrameIndex)
         // 观测 S1-M2-02：帧龄 = 换帧墙钟 − 相机 SOF 戳。抽帧节奏吃相机戳、成片戳吃墙钟，
         // 中间那段不恒定的管线延迟此前全仓零读数，"源真慢 / 两时基速率差 / 延迟单调增长"
         // 三种成因分不开。相机戳还没到（0）不记——那会把墙钟全量算成帧龄。
@@ -1443,7 +1449,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             stampAgeCount++
             if (ageNs > stampAgeMaxNs) stampAgeMaxNs = ageNs
         }
-        // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderSlotPtsNs]
+        // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderAdaptivePtsNs]
         // 把 slot 序号丢掉了，这里从两枚戳反推跨距，计空格总数与最大单次跨距。
         val gap = encoderSlotGap(encoderLastPtsNs, ptsNs, fps)
         if (gap > 0L) {
