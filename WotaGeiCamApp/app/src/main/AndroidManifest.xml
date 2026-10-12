@@ -12,6 +12,11 @@
          （UpdateNetworkGuardTest 钉住：全源码 grep 网络符号只许命中 update/），且只许用户手动点击触发 -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 安装更新包：Android 8+ 从应用内把 APK 交给系统包安装器，调用方必须声明本权限——
+         缺它时 startActivity 返回 true 但安装器静默终止（无界面、无报错），即「点安装没反应」。
+         normal 级权限（安装即授予）；「允许安装未知应用」开关与安装确认仍是系统安装器的职责 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- 设备内录（AudioPlaybackCapture）：前台服务承载 MediaProjection 会话。均为 normal 级权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
