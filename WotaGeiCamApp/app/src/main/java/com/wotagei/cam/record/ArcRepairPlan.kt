@@ -1,7 +1,11 @@
 package com.wotagei.cam.record
 
 /**
- * 光弧修复（用户需求第 7 项）的**抽帧计划**：把实测 [srcFps] fps 的素材抽成 [dstFps] fps。
+ * 光弧修复（用户需求第 7 项）的**抽帧计划**：把实测 srcNum/srcDen（有理数源帧率，见
+ * [ArcRateProbe.measuredSrcFps]）的素材抽成 [ArcRepairPlan.dstFps] fps。
+ * M6-01（2026-10-12）：源帧率从 Int 换成有理数——整数口径把 29.97 整成 30，保留位次会漂一位
+ * （NTSC 案：抽帧点 {4,9,…} → {5,10,…}），把 25.4 整成 25 会误判"无需抽帧"；整数源
+ * （den=1）走旧 Int 签名委托，逐点行为零变化（有独立 oracle 扫描钉住）。
  *
  * v2 口径（用户 2026-10-03 定版，本文件是它的唯一真源；v1 的"插帧"被判定为方向性错误废弃）：
  * - 强制 24/25fps 在无固定档设备上传感器实际跑更高帧率（如 30），素材里**多出**的帧要**抽掉**，
@@ -17,10 +21,15 @@ package com.wotagei.cam.record
  * 抽帧节奏（保留集推导）是"计划"；被抽帧怎么分桶进前后帧是"行为"——两者由 [ArcRepairFlow]
  * 这座桥缝合（AGENTS 铁律：配置类纯函数必须配桥函数并测桥本身，否则删掉运行时判断分支测试仍绿）。
  */
-data class ArcRepairPlan(val srcFps: Int, val dstFps: Int, val srcFrames: Int) {
+data class ArcRepairPlan(
+    val srcNum: Long,
+    val srcDen: Long,
+    val dstFps: Int,
+    val srcFrames: Int
+) {
 
     /** 输出（保留）帧数，进度换算与引擎循环都用它 */
-    val dstFrames: Int = ArcRepairPlan.dstFrameCount(srcFrames, srcFps, dstFps)
+    val dstFrames: Int = ArcRepairPlan.dstFrameCount(srcFrames, srcNum, srcDen, dstFps)
 
     /** 总输出帧数（= [dstFrames]） */
     val totalFrames: Int get() = dstFrames
@@ -28,33 +37,50 @@ data class ArcRepairPlan(val srcFps: Int, val dstFps: Int, val srcFrames: Int) {
     companion object {
 
         /**
-         * 输出帧数 = 保留帧数 = |{ j : ⌊j·S/D⌋ < N }| = ⌈N·D/S⌉。
-         * - N ≤ 0 → 0；S ≤ D（源不比目标快，没有帧可抽）→ N（恒等直通，调用方应提前拦）
+         * 输出帧数 = 保留帧数 = |{ j : ⌊j·S/D⌋ < N }| = ⌈N·D/S⌉（有理数版：S = [srcNum]/[srcDen]）。
+         * - N ≤ 0 → 0；S ≤ D（源不比目标快，没有帧可抽）→ N（恒等直通，调用方应提前拦），
+         *   判据 `num ≤ D·den` 整数域无浮点
          * - 45@30→24 = 36（每 5 抽 1，抽 9 留 36）；时长账 36/24 = 45/30 严格恒等
+         * - 溢出账：`s·D·den ≤ 2e6(MAX_SRC_FRAMES)×25×10⁶ = 5e13 ≪ Long.MAX(9.2e18)`，
+         *   `+ num − 1` 的一阶尾差（num ≤ 10⁶）同样无害
          */
-        fun dstFrameCount(srcFrames: Int, srcFps: Int, dstFps: Int): Int = when {
+        fun dstFrameCount(srcFrames: Int, srcNum: Long, srcDen: Long, dstFps: Int): Int = when {
             srcFrames <= 0 -> 0
-            srcFps <= 0 || dstFps <= 0 || srcFps <= dstFps -> srcFrames
-            else -> ((srcFrames.toLong() * dstFps + srcFps - 1L) / srcFps).toInt()
+            srcNum <= 0L || srcDen <= 0L || dstFps <= 0 ||
+                srcNum <= dstFps.toLong() * srcDen -> srcFrames
+            else -> ((srcFrames.toLong() * dstFps * srcDen + srcNum - 1L) / srcNum).toInt()
         }
 
-        /** 由源帧数与两档帧率造计划；负值帧数按 0 处理（后台线程不许因越界输入崩） */
+        /** 旧整数签名（v2 口径，只作兼容外壳）：整数源零变化，见有理数版同目标档逐点扫描 */
+        fun dstFrameCount(srcFrames: Int, srcFps: Int, dstFps: Int): Int =
+            dstFrameCount(srcFrames, srcFps.toLong(), 1L, dstFps)
+
+        /** 由源帧数与两档帧率（有理数源帧率）造计划；负值帧数按 0 处理（后台线程不许因越界输入崩） */
+        fun of(srcFrames: Int, srcNum: Long, srcDen: Long, dstFps: Int): ArcRepairPlan =
+            ArcRepairPlan(srcNum, srcDen, dstFps, if (srcFrames < 0) 0 else srcFrames)
+
+        /** 旧整数签名（v2 口径，只作兼容外壳）：整数源零变化 */
         fun of(srcFrames: Int, srcFps: Int, dstFps: Int): ArcRepairPlan =
-            ArcRepairPlan(srcFps, dstFps, if (srcFrames < 0) 0 else srcFrames)
+            of(srcFrames, srcFps.toLong(), 1L, dstFps)
 
         /**
-         * 源第 [srcIndex] 帧是否保留：s 保留 ⇔ ⌊⌈s·D/S⌉·S/D⌋ == s（存在输出下标 j 映到它）。
-         * 全程 Long 整数域，无浮点；负下标按不保留处理（不该出现，防御）。
+         * 源第 [srcIndex] 帧是否保留：s 保留 ⇔ ⌊⌈s·D/S⌉·S/D⌋ == s（存在输出下标 j 映到它）；
+         * S = [srcNum]/[srcDen] 有理数。全程 Long 整数域，无浮点；负下标按不保留处理（不该出现，防御）。
+         * 溢出账同 [dstFrameCount]：`s·D·den ≤ 5e13`，`j·num ≤ s·D·den + num ≤ 5.1e13 ≪ Long.MAX`。
          */
-        fun isKept(srcIndex: Int, srcFps: Int, dstFps: Int): Boolean {
+        fun isKept(srcIndex: Int, srcNum: Long, srcDen: Long, dstFps: Int): Boolean {
             if (srcIndex < 0) return false
-            if (srcFps <= 0 || dstFps <= 0 || srcFps <= dstFps) return true
+            if (srcNum <= 0L || srcDen <= 0L || dstFps <= 0 ||
+                srcNum <= dstFps.toLong() * srcDen) return true
             val s = srcIndex.toLong()
-            val bigS = srcFps.toLong()
             val bigD = dstFps.toLong()
-            val j = (s * bigD + bigS - 1L) / bigS          // ⌈s·D/S⌉
-            return j * bigS / bigD == s
+            val j = (s * bigD * srcDen + srcNum - 1L) / srcNum     // ⌈s·D/S⌉
+            return j * srcNum / (bigD * srcDen) == s
         }
+
+        /** 旧整数签名（v2 口径，只作兼容外壳）：整数源零变化 */
+        fun isKept(srcIndex: Int, srcFps: Int, dstFps: Int): Boolean =
+            isKept(srcIndex, srcFps.toLong(), 1L, dstFps)
 
         /**
          * 总进度 0f..1f：已处理帧 / 总输出帧。
@@ -133,10 +159,10 @@ class ArcRepairFlow private constructor(
     private val plannedKeep: ((Int) -> Boolean)?
 ) {
 
-    /** 离线路：按抽帧计划逐源帧问询 */
+    /** 离线路：按抽帧计划逐源帧问询（保留判定吃有理数真值，见 M6-01） */
     constructor(plan: ArcRepairPlan) : this(
         plan.dstFps,
-        { s -> ArcRepairPlan.isKept(s, plan.srcFps, plan.dstFps) }
+        { s -> ArcRepairPlan.isKept(s, plan.srcNum, plan.srcDen, plan.dstFps) }
     )
 
     /** 录制在线路：dstFps 只喂 PTS，保留决策走 [onClassification] */
