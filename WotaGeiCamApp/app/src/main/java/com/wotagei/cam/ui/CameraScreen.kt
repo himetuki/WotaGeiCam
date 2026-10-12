@@ -5,6 +5,8 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.hardware.camera2.CameraManager
@@ -148,6 +150,7 @@ import com.wotagei.cam.record.AudioTrack
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
+import com.wotagei.cam.record.AutoStopRules
 import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.CaptureTrackLostReason
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
@@ -408,6 +411,11 @@ fun CameraScreen(
                 // 换段受阻的丢失（2026-10-08 真机缺陷）：实时自检判废的段会被删掉、不在这份结果里，
                 // 但"换段腿卡住期间画面在丢"这件事必须让用户看见——提示里带上丢了多少秒
                 val savedText = when {
+                    // 自动停录原因排最前：用户必须先知道"为什么自己停了"（丢失账另有 sidecar 可查）
+                    result.autoStopReason == AutoStopRules.REASON_BATTERY ->
+                        app.getString(R.string.cam_record_saved_auto_battery, formatDuration(result.durationMs))
+                    result.autoStopReason == AutoStopRules.REASON_STORAGE ->
+                        app.getString(R.string.cam_record_saved_auto_storage, formatDuration(result.durationMs))
                     result.uncommitted > 0 ->
                         app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
                     result.lostMs >= LOSS_NOTICE_MIN_MS ->
@@ -2113,6 +2121,16 @@ private class RecordRunner(
     @Volatile
     private var pendingStop = false
 
+    /** 上次自动停录巡检时刻（`SystemClock.elapsedRealtime()`；0 = 本会话还没查过）。控制线程单写者。 */
+    private var lastAutoStopCheckAt = 0L
+
+    /**
+     * 非空 = 自动停录巡检已判定触发、等待 [stopInternal] 消费进 [RecordResult.autoStopReason]
+     * （[AutoStopRules.REASON_BATTERY]/[AutoStopRules.REASON_STORAGE]）。控制线程单写者；
+     * 置位后巡检短路、[beginSession] 复位，保证一次会话至多触发一次。
+     */
+    private var autoStopReason: String? = null
+
     /** PREPARE 期点停止：不吞，记下等会话就绪后立刻停（见 [pendingStop]） */
     fun requestStopWhenReady() {
         pendingStop = true
@@ -2169,6 +2187,9 @@ private class RecordRunner(
     private fun beginSession() {
         val args = sessionArgs ?: return
         val store = sessionStore ?: return
+        // 自动停录巡检按会话复位：上一场的触发原因/节流时刻不许带进这一场
+        autoStopReason = null
+        lastAutoStopCheckAt = 0L
         store.checkFreeSpace()?.let { code ->
             failNow(code); return
         }
@@ -2253,10 +2274,12 @@ private class RecordRunner(
         rec.start()
         status.value = RecordStatus.START
         // 准备期挂着的停止请求在此消费：先让按钮走完"进录制态"的一拍再立即停，
-        // 比在 PREPARE 里中断半成品会话（拆 pending/编码器）安全且语义等价
+        // 比在 PREPARE 里中断半成品会话（拆 pending/编码器）安全且语义等价。
+        // 走 stopAsync（带宽限）：此处 elapsed≈0 是「stop 过快废片」的最典型现场，宽限凑满
+        // 再收尾；同 looper post 按序执行，"让一拍"的原语义不变
         if (pendingStop) {
             pendingStop = false
-            stopInternal()
+            stopAsync()
             return
         }
         // 轮询只挂一次：重录(attempt>0)复用已在跑的 pollTask 自续链，重挂会让时长/音量条翻倍刷新
@@ -2275,7 +2298,30 @@ private class RecordRunner(
 
     /** 非阻塞停止（ON_PAUSE 用）：投递到工作线程，避免卡主线程 */
     fun stopAsync() {
-        handler.post { stopInternal() }
+        handler.post { stopWithGrace() }
+    }
+
+    /**
+     * 带宽限的停止收尾（判据 [AutoStopRules.stopGraceDelayMs]）：START 态且已录时长不足
+     * [AutoStopRules.STOP_GRACE_MS] 时，把真正的 [stopInternal] 推迟到宽限线再执行——
+     * MediaRecorder/MediaCodec 起跑后极快 stop 会抛异常废片（OpenCamera 实证 + 本仓 MR 路
+     * stop 抛 RuntimeException 现状），用户「点录又秒点停」得到的是正常收尾（极短成片或按
+     * 既有 keep 判据判废），而不是一条 STOP_FAILED。
+     * 状态读取全部留在控制线程（本函数只在 handler looper 上跑）；宽限窗口内重复点停安全：
+     * stopInternal 对 `recorder == null` 幂等早退。巡检触发的自动停录时长必然超限，不经此路。
+     * [shutdown]（退页同步收尾）**不**走宽限——3s latch 预算吃不起延迟。
+     */
+    private fun stopWithGrace() {
+        val rec = recorder
+        val grace = if (rec != null && status.value == RecordStatus.START) {
+            AutoStopRules.stopGraceDelayMs(rec.elapsedMs)
+        } else 0L
+        if (grace > 0L) {
+            Log.i(TAG_UI, "停止宽限：再等 ${grace}ms 收尾（stop 过快防废片）")
+            handler.postDelayed({ stopInternal() }, grace)
+        } else {
+            stopInternal()
+        }
     }
 
     /** 退出页面：同步收尾，保证文件写完、pending 清掉之后再让相机释放 */
@@ -2307,8 +2353,51 @@ private class RecordRunner(
             if (!polling || rec == null) return
             elapsedMs.value = rec.elapsedMs
             volumeDb.value = AudioProbe.dbOf(rec.amplitude())
+            maybeAutoStop()
             if (status.value == RecordStatus.START) handler.postDelayed(this, POLL_MS)
         }
+    }
+
+    /**
+     * 自动停录巡检（OpenCamera 机制，2026-10-12，判据核见 [AutoStopRules]）：每
+     * [AutoStopRules.CHECK_INTERVAL_MS] 查一次电量与当前卷可用空间，任一判据命中 →
+     * 置 [autoStopReason] 并走 [stopAsync] **正常收尾**——trailer/sidecar/入库全走既有通道，
+     * 宁早停出一个完整文件，不赌「设备关机/磁盘被写满那一刻还能收尾」（那两种收不了尾的
+     * 场景都是整段废片）。
+     * 只活在 [pollTask]（本就只在 START 态自续）；触发一次即短路，[beginSession] 复位。
+     */
+    private fun maybeAutoStop() {
+        if (autoStopReason != null) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAutoStopCheckAt < AutoStopRules.CHECK_INTERVAL_MS) return
+        lastAutoStopCheckAt = now
+        val batteryPct = readBatteryPct()
+        if (AutoStopRules.batteryStopNeeded(batteryPct)) {
+            autoStopReason = AutoStopRules.REASON_BATTERY
+            Log.w(TAG_UI, "自动停录：电量 ${batteryPct}% ≤ ${AutoStopRules.BATTERY_STOP_PCT}%")
+        } else {
+            val freeMb = sessionStore?.freeSpaceMb() ?: Long.MAX_VALUE
+            if (AutoStopRules.storageStopNeeded(freeMb)) {
+                autoStopReason = AutoStopRules.REASON_STORAGE
+                Log.w(TAG_UI, "自动停录：可用 ${freeMb}MB < ${WotaTiers.MIN_FREE_MB}MB")
+            }
+        }
+        if (autoStopReason != null) stopAsync()
+    }
+
+    /**
+     * 电量读数（%）：粘性 ACTION_BATTERY_CHANGED 广播（注册即回、不持 receiver、无权限需求）。
+     * 读不出（广播未到 / EXTRA 缺失）返回 -1，判据侧按「不停」处理——宁可漏一次巡检，
+     * 不拿无效读数误停正在录的内容。
+     */
+    private fun readBatteryPct(): Int {
+        return runCatching {
+            val intent = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                ?: return -1
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level < 0 || scale <= 0) -1 else level * 100 / scale
+        }.getOrDefault(-1)
     }
 
     /**
@@ -2650,7 +2739,11 @@ private class RecordRunner(
         } else {
             status.value = RecordStatus.IDLE
         }
-        result.value = out
+        // 自动停录原因随结果交 UI（一次会话至多一次，取走即清）；手动停路径 reason 为 null，
+        // out 逐字原样（copy 会生成等值新实例，白造一次）
+        val reason = autoStopReason
+        autoStopReason = null
+        result.value = if (reason != null) out.copy(autoStopReason = reason) else out
     }
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */
