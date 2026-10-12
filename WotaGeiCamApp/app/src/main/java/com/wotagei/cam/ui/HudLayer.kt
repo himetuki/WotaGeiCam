@@ -1486,6 +1486,10 @@ internal fun warnRows(
  *
  * 告警条自本版起**纵向多行全量显示**（行序即优先级，见 [warnRows]）：行数变多只会让整块实测高变大，
  * 消化它的正是这条 `onSizeChanged → topBarH` 实测链，本层不引入任何按行数写死的高度。
+ *
+ * V7 起：行数变化（含 DIRECT 模式开关特效那条的实时增删）时整块高度走 `animateContentSize` 平滑
+ * 过渡，壳挂在函数体里那枚常驻外层 Column 上——链序与零占位约束见该处注释，判据由
+ * `WarnRowsRenderGuardTest` 看管。
  */
 @Composable
 fun BoxScope.HudTopChrome(
@@ -1499,11 +1503,25 @@ fun BoxScope.HudTopChrome(
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
+    val motion = LocalMotion.current
     Column(
         modifier
             .align(Alignment.TopStart)
             .fillMaxWidth()
+            // V7：告警条行数变化时整块高度平滑过渡。动画挂在**本枚常驻外层 Column**上、
+            // 不挂告警 Column 自己——0→1 行时告警 Column 是整枚新节点进组合，animateContentSize
+            // 管不到「从无到有」；常驻壳只做动画、不带告警专属 padding（那枚 padding 留在下面
+            // 的 isNotEmpty 分叉内层），零告警时实测高仍只有设置钮那排，+2dp 幽灵盒不回归。
+            // **链序钉死**：onSizeChanged 必须排在 animateContentSize **外侧**（链上更前）——
+            // 外层吃的是 animateContentSize 向外回报的动画中间尺寸，topBarH 逐帧刷新，竖 Dock
+            // 上边界与 HintBar 自然逐帧跟随；放反了 onSizeChanged 量到的是终值，Dock/HintBar
+            // 瞬跳、只有告警区自己在动，观感断裂（同 HudDockZone「必须排在 clip/border 之后」
+            // 的同一套链序道理）。规格用 MotionSpec.intSize（Motion 例外 #2 具名规格，与 Dock
+            // 共用；reduced 档 0 时长直达、状态照常切换，MotionHygieneTest 不拦这枚原语）。
+            // 验收纪律（AGENTS.md）：引入动画后「视觉落定」要等动画结束再取证（≥3s），别把
+            // 「动画未完」误判成位移残段或复原失败。
             .onSizeChanged { onHeightChanged(with(density) { it.height.toDp() }.value.roundToInt()) }
+            .animateContentSize(motion.intSize)
     ) {
         Row(
             // 左右两端同一枚令牌（HudEdgePad），不再散写 8.dp：改一枚两端一起变，对称不脱链

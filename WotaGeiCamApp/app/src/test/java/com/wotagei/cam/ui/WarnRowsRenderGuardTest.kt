@@ -26,14 +26,28 @@ import org.junit.Test
  *    但 #3 承诺过「无告警时组合体为空、不占位」，承诺了就得有人看管；
  * 4. **不得**出现取单条的形态：`.firstOrNull(` / `.lastOrNull(` / 按索引取一条。
  *
- * # 覆盖边界（本尺是启发式：说清它抓得到什么、抓不到什么、以及会误报什么）
- * 判据 2/3 的遍历锚是**字面** `warns.forEach`，判据 4 只禁上面三种字面形态。三块分开列。
+ * V7 增补两条（同体、同法）：
+ * 5. **尺寸过渡动画壳必须在场**（锚 `animateContentSize(motion.intSize)`），且 `onSizeChanged`
+ *    必须排在它**外侧**（文本在前）——动画壳挂在常驻外层 Column 上，0→1 行的整节点进场才有得动画；
+ *    链序翻了（animateContentSize 到外层去）则 onSizeChanged 直接量到终值，topBarH 与竖 Dock
+ *    上界 / HintBar 瞬跳、只有告警区自己在动，观感断裂（同 HudDockZone「外层吃内层上报尺寸」
+ *    的同一套链序道理）；
+ * 6. **告警专属 padding 必须排在 isNotEmpty() 分叉之内**——常驻动画壳若带上了内层专属 padding，
+ *    零告警时照样按 padding 量出隐形盒：判据 3 防的是「分叉被删」，这条防的是「分叉还在、
+ *    padding 被提到壳上」的 +2dp 幽灵盒同义重排。
  *
- * **抓得到**（正面清单，三类实测红）：
+ * # 覆盖边界（本尺是启发式：说清它抓得到什么、抓不到什么、以及会误报什么）
+ * 判据 2/3 的遍历锚是**字面** `warns.forEach`，判据 4 只禁上面三种字面形态，判据 5/6 各绑一枚
+ * 字面锚（`animateContentSize(motion.intSize)` / `padding(start = 10.dp`）。分块列。
+ *
+ * **抓得到**（正面清单，实测红）：
  * - `Text(stringResource(warns.first()))`（整个丢掉遍历）→ 判据 2 红；
  * - `warns.take(1).forEach { … }`（遍历一个被篡改过的列表）→ 字面断成 `warns.take(1).forEach`，
  *   判据 2 红——同族的 `warns.filter{…}` / `.drop` 也一并红，这是锚收窄顺带闭合的老盲区；
- * - 删掉 `if (warns.isNotEmpty())` 分叉 → 判据 3 红（突变 4）。
+ * - 删掉 `if (warns.isNotEmpty())` 分叉 → 判据 3 红（突变 4）；
+ * - 摘掉 `animateContentSize(motion.intSize)` → 判据 5 红（突变 5，行数变化退回瞬跳）；
+ * - 动画壳翻到 `onSizeChanged` 外侧 → 判据 5 次序红（突变 6，topBarH 瞬跳不跟动画）；
+ * - 告警专属 padding 提到分叉之外（壳上）→ 判据 6 红（突变 7，幽灵盒换形）。
  *
  * **抓不到（盲区 = 假绿）**：
  * - `warns.forEachIndexed { i, _ -> if (i == 0) Text(…) }` → `warns.forEach` 是它的**前缀**，
@@ -43,10 +57,13 @@ import org.junit.Test
  *   ⇒ 判据 1/2/3/4 **全绿**。根因是**先序 ≠ 包含**——判据 3 比的是两枚字面在文本里的**先后**，
  *   而不是「遍历真的落在分叉花括号内」，所以它只防「遍历被提拉出分叉」那一型（突变 4 实测红），
  *   防不住「分叉被掏空、遍历本来就在外面」这一型。这恰是判据 3 声称要防的 +2dp 隐形盒回归换个
- *   同义重排就漏过去。
+ *   同义重排就漏过去。判据 6 与此同构（比的是 padding 锚与分叉锚的先后），同样防不住掏空型；
+ * - 判据 5 绑死**具名规格**这一种写法：换 `animateContentSize()` 默认 spring 或另造规格，字面
+ *   断掉即红——这属**误红面**（Motion 例外 #2 的具名规格纪律要求调用点用 `motion.intSize`，
+ *   真要换规格的人本就该回来看这把尺）。
  *
  * **会误红（假红 = 合法改写被判违规）**：判据 2/3 的锚绑死**局部变量名 `warns` 与写法形态**，
- * 下列语义等价的写法会被判红（逐条实测）：
+ * 判据 5/6 绑死 modifier 链的字面形态，下列语义等价的写法会被判红（逐条实测）：
  * - `val texts = warns.map { stringResource(it) }` 预计算、再 `texts.forEach` 渲染 → 判据 2 红
  *   （老锚 `contains("forEach")` 下是绿的，**这是锚收窄新增的最大代价**）；
  * - `warnRows(…).forEach { }` 内联调用 + `if (warns)` 这类简写分叉 → 判据 2 红（`warns` 字面没了）；
@@ -55,14 +72,16 @@ import org.junit.Test
  * - **预遍历写在分叉之前**（`warns.forEach { stash.add(it) }` 排在 `if` 之前，真正的渲染遍历仍乖乖
  *   待在分叉内）→ 判据 3 次序红，且 message 写「遍历在分叉外」**与事实相反**——已知误导，
  *   红了不要拿这条 message 当结构证据；
- * - 改名局部变量 `warns` → 判据 2/3 一起红（**有意的**：改名者必须回来更新这把尺与本节）。
+ * - 改名局部变量 `warns` → 判据 2/3 一起红（**有意的**：改名者必须回来更新这把尺与本节）；
+ * - 改 `motion` 局部名 / 动画规格改写 / padding 数值微调 → 判据 5/6 红（**有意的**：改者必须
+ *   回来更新锚字面与本节）。
  *
  * **处置约定**：守卫红了**先读本节**——属误红面则把锚字面改到新写法上（锚常量与本节清单在
  * 同一次提交里一起改，别只改一半）；属盲区则加一枚防突变体钉住它、或另加判据，两种都要留下
  * 可追溯的说明。不为盲区**当场**叠解析器（AGENTS.md：静态"证明"要分清恒等式与真断言，
  * 宁可把边界写明白，也不写一条测不出退化的空断言；而解析器一旦引入就再难拆掉）。
  *
- * 「尺子自己能红」：四条突变体打同一把尺（见各突变注释）。
+ * 「尺子自己能红」：七枚突变体打同一把尺（见各突变注释）。
  */
 class WarnRowsRenderGuardTest {
 
@@ -79,6 +98,12 @@ class WarnRowsRenderGuardTest {
 
     /** 遍历锚：判据 2 的字面，也是判据 3 次序比对的落点（见 KDoc 覆盖边界） */
     private val loopAnchor = "warns.forEach"
+
+    /** 动画壳锚：判据 5 的字面——Motion 例外 #2 的具名规格，与 HudDockZone 同源（改规格回本尺） */
+    private val animAnchor = ".animateContentSize(motion.intSize)"
+
+    /** 告警专属 padding 锚：判据 6 的字面——只许活在 isNotEmpty() 分叉之内（改值回本尺） */
+    private val padAnchor = "padding(start = 10.dp"
 
     // ------------------------------------------------------------------ 判据（纯函数，真身与突变体同吃）
 
@@ -117,6 +142,26 @@ class WarnRowsRenderGuardTest {
         }
         if (Regex("""\[\s*\d+\s*\]""").containsMatchIn(body)) {
             bad.add("体内出现按下标取单条的形态（[n]）——同 firstOrNull，只画一条")
+        }
+        // 判据 5：尺寸过渡动画壳在场，且 onSizeChanged 排在它外侧（文本在前＝链上更外层）。
+        // 链序的语义：onSizeChanged 吃的是 animateContentSize 向外回报的**动画中间尺寸**，topBarH
+        // 才能逐帧刷新、Dock/HintBar 跟着动画走；翻过来 onSizeChanged 量到的就是终值——告警区还在
+        // 动、Dock/HintBar 已瞬跳，观感断裂。
+        val animAt = body.indexOf(animAnchor)
+        val sizeAt = body.indexOf(".onSizeChanged")
+        if (animAt < 0) {
+            bad.add("告警容器丢了 animateContentSize 尺寸过渡壳——行数变化（含 DIRECT 特效增删）退回 22dp/行瞬跳，V7 平滑承诺失效")
+        } else if (sizeAt >= 0 && animAt < sizeAt) {
+            bad.add("animateContentSize 排到了 onSizeChanged 外侧——onSizeChanged 直接量到终值，topBarH 与 Dock/HintBar 瞬跳、不跟动画")
+        }
+        // 判据 6：告警专属 padding 必须排在 isNotEmpty() 分叉之内（branchAt < 0 时判据 3 已红，这里不重复计）。
+        // 常驻动画壳若带上了这枚 padding，零告警时壳照样按 padding 量出 20×2dp 隐形盒——判据 3 防
+        // 「分叉被删」，这条防「分叉还在、padding 被提到壳上」的幽灵盒同义重排。
+        val padAt = body.indexOf(padAnchor)
+        if (padAt < 0) {
+            bad.add("体内找不到 $padAnchor——告警条专属 padding 形态变了，回本尺更新锚字面")
+        } else if (branchAt >= 0 && padAt < branchAt) {
+            bad.add("告警专属 padding 排到 isNotEmpty() 分叉之外——常驻壳带内层专属 padding，零告警时照样量出隐形盒，+2dp 幽灵盒回归")
         }
         return bad
     }
@@ -187,6 +232,53 @@ class WarnRowsRenderGuardTest {
             renderIssues(mutant).none {
                 it.contains("warnRows( 调用——") || it.contains("渲染不是遍历") || it.contains("firstOrNull")
             }
+        )
+    }
+
+    @Test
+    fun `尺子自己能红_摘掉尺寸过渡动画壳必报红`() {
+        val real = realMasked
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", renderIssues(real).isEmpty())
+        // 突变 5：把 animateContentSize 摘掉——行数变化回到 22dp/行瞬跳，V7 的平滑承诺整个失效
+        //（真语义变化：体内没了动画壳字面，判据 5 独自红，其余判据不受牵连）
+        val mutant = real.replace(animAnchor, "")
+        assertTrue(
+            "摘掉动画壳后尺子必须红",
+            renderIssues(mutant).any { it.contains("animateContentSize 尺寸过渡壳") }
+        )
+        assertTrue(
+            "突变体的红要落在判据 5 上（其余判据照常绿，说明锚没绑歪）",
+            renderIssues(mutant).size == 1
+        )
+    }
+
+    @Test
+    fun `尺子自己能红_动画壳翻到onSizeChanged外侧必报红`() {
+        val real = realMasked
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", renderIssues(real).isEmpty())
+        // 突变 6：链序翻面——animateContentSize 挪到 onSizeChanged 外侧，onSizeChanged 直接量到
+        // 终值：告警区还在动画、topBarH 与 Dock/HintBar 已瞬跳到位（观感断裂，真语义变化非空操作）
+        val report = ".onSizeChanged { onHeightChanged(with(density) { it.height.toDp() }.value.roundToInt()) }"
+        val mutant = real.replace("$report $animAnchor", "$animAnchor $report")
+        assertTrue(
+            "动画壳翻到 onSizeChanged 外侧后尺子必须红",
+            renderIssues(mutant).any { it.contains("排到了 onSizeChanged 外侧") }
+        )
+    }
+
+    @Test
+    fun `尺子自己能红_告警专属padding提到分叉之外必报红`() {
+        val real = realMasked
+        assertTrue("良品必须先真的绿，否则突变体的红没有意义", renderIssues(real).isEmpty())
+        // 突变 7：常驻动画壳带上告警专属 padding、内层分叉里摘掉——零告警时壳照样按 padding 量出
+        // 20×2dp 隐形盒（+2dp 幽灵盒换了个同义重排）。判据 3 的分叉还在、防不住这型，判据 6 专职盯它
+        val pad = "Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp)"
+        val mutant = real
+            .replace("Column( $pad,", "Column( Modifier,")
+            .replace(animAnchor, "$animAnchor$pad")
+        assertTrue(
+            "告警专属 padding 出了分叉后尺子必须红",
+            renderIssues(mutant).any { it.contains("幽灵盒回归") }
         )
     }
 }
