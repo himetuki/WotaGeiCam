@@ -33,7 +33,9 @@ class RecordStopStatusGuardTest {
         val body = KotlinSourceScan.bodyOf(masked, "stopInternal")
         // 正向锚点：先证明切到的是收尾真身，否则下面的断言全是空转
         assertTrue("锚点丢失：切片没截到 rec.stop()", body.contains("rec.stop()"))
-        assertTrue("锚点丢失：没截到结果落流", body.contains("result.value = out"))
+        // 锚点只钉「结果落流」行为本身（2026-10-12 起落流可带自动停录原因拷贝，
+        // 具体表达式由 AutoStopWiringGuardTest 钉，这里不重复钉实现字面）
+        assertTrue("锚点丢失：没截到结果落流", body.contains("result.value ="))
         assertTrue("锚点丢失：没截到摘面分支", body.contains("setOutputSurface(null, 0, 0)"))
         // 错误分支本体：ERROR 落表 + postDelayed 复位，两件都在 stopInternal 体内
         assertTrue("收尾错误必须落 ERROR 态（错误提示的窗口）", body.contains("status.value = RecordStatus.ERROR"))

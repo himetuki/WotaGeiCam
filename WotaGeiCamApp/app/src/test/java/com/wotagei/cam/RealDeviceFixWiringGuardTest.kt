@@ -181,9 +181,11 @@ class RealDeviceFixWiringGuardTest {
             req.contains("pendingStop = true")
         )
         val begin = screenBody("beginSession")
+        // 消费通道（2026-10-12 升级）：走 stopAsync（带宽限）而非直调 stopInternal——
+        // 此处 elapsed≈0 恰是「stop 过快废片」最典型现场，直调已被宽限路径取代
         assertTrue(
-            "beginSession 进 START 后必须消费 pendingStop（立即 stopInternal）",
-            begin.contains("if (pendingStop)") && begin.contains("stopInternal()")
+            "beginSession 进 START 后必须消费 pendingStop（走 stopAsync 带宽限收尾）",
+            begin.contains("if (pendingStop)") && begin.contains("stopAsync()")
         )
         // 消费后清账：残留标记不许漏进轮转/重录路径
         assertTrue(
@@ -207,11 +209,11 @@ class RealDeviceFixWiringGuardTest {
     @Test
     fun `尺子自己能红_停止`() {
         val begin = screenBody("beginSession")
-        val mutated = begin.replace("stopInternal()", "Unit")
+        val mutated = begin.replace("stopAsync()", "Unit")
         assertTrue(
             "突变体（拆掉消费侧停止调用）必须踩中判据",
-            !mutated.contains("stopInternal()")
+            !mutated.contains("stopAsync()")
         )
-        assertTrue(begin.contains("stopInternal()"))
+        assertTrue(begin.contains("stopAsync()"))
     }
 }

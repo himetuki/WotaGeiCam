@@ -149,7 +149,14 @@ data class RecordResult(
      * 本会话最近一次 muxer 写失败的现场快照（"" = 没踩过）。**已被有界重建接住的那次也在**：
      * `error == null` 时它靠 `muxRecoveredCode` 进账目，用户看到"这次没问题"而排查者能看到"踩过"。
      */
-    val muxDiag: String = ""
+    val muxDiag: String = "",
+    /**
+     * 非空 = 本次停止由**应用自动停录巡检**触发（[AutoStopRules.REASON_BATTERY] 电量过低 /
+     * [AutoStopRules.REASON_STORAGE] 存储不足），收尾通道与手动停完全同一条（stopAsync），
+     * 只是 UI 的「已保存」文案要换成带原因的版本——用户必须知道"为什么自己停了"。
+     * null = 用户手动停（默认，旧构造点行为逐字不变）。
+     */
+    val autoStopReason: String? = null
 ) {
     /** 有可用产物且无错误 */
     val ok: Boolean get() = error == null && (uri != null || path != null)
