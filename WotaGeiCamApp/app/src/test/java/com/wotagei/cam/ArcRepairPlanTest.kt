@@ -1,6 +1,7 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.record.ArcOp
+import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.ArcRepairFlow
 import com.wotagei.cam.record.ArcRepairMerge
 import com.wotagei.cam.record.ArcRepairPlan
@@ -295,6 +296,102 @@ class ArcRepairPlanTest {
         assertTrue(tail.any { it is ArcOp.EmitPending })
         emitted += tail.count { it is ArcOp.EmitPending }
         assertEquals(ArcRepairPlan.dstFrameCount(45, 30, 24), emitted)
+    }
+
+    // endregion
+
+    // region 有理数源帧率（M6-01：非整数源与整数源同链不分叉）
+
+    /** v2 旧 Int 口径的**独立参照**（逐字抄写历史公式；对拍同源委托是恒等式假证明，AGENTS 点名的坑） */
+    private fun legacyDstFrameCount(n: Int, S: Int, D: Int): Int = when {
+        n <= 0 -> 0
+        S <= 0 || D <= 0 || S <= D -> n
+        else -> ((n.toLong() * D + S - 1L) / S).toInt()
+    }
+
+    /** v2 旧 Int 口径的独立参照（isKept） */
+    private fun legacyIsKept(s: Int, S: Int, D: Int): Boolean {
+        if (s < 0) return false
+        if (S <= 0 || D <= 0 || S <= D) return true
+        val bigS = S.toLong()
+        val bigD = D.toLong()
+        val j = (s.toLong() * bigD + bigS - 1L) / bigS
+        return j * bigS / bigD == s.toLong()
+    }
+
+    @Test
+    fun `整数源逐点等于旧口径_独立oracle扫描`() {
+        // S 覆盖全部整数档 + 480（钳制上限），s 扫到 20 万（远超最长修复素材）：
+        // 8×2×200001×2 个断言逐点相等 ⇒ den=1 时新旧公式完全同值（整数源零变化）
+        for (S in listOf(24, 25, 30, 50, 60, 120, 240, 480)) {
+            for (D in listOf(24, 25)) {
+                for (s in 0..200_000) {
+                    assertEquals(
+                        "S=$S D=$D n=$s",
+                        legacyDstFrameCount(s, S, D),
+                        ArcRepairPlan.dstFrameCount(s, S.toLong(), 1L, D)
+                    )
+                    assertEquals(
+                        "S=$S D=$D s=$s",
+                        legacyIsKept(s, S, D),
+                        ArcRepairPlan.isKept(s, S.toLong(), 1L, D)
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `NTSC源30000比1001转24_帧数721_前9保留位次漂移被钉住`() {
+        // 29.97 的真值位次：抽帧点从整数口径的 {4,9,14,…} 推到 {5,10,15,…}——位次集合才是
+        // 分叉的本体，只断帧数测不出（整数 30fps 的旧口径前 9 保留是 {0,1,2,3,5,6,7,8,10}）
+        val plan = ArcRepairPlan.of(900, 30_000L, 1_001L, 24)
+        assertEquals(721, plan.dstFrames)
+        val kept = (0 until 900).filter { ArcRepairPlan.isKept(it, 30_000L, 1_001L, 24) }
+        assertEquals(721, kept.size)
+        assertEquals(listOf(0, 1, 2, 3, 4, 6, 7, 8, 9), kept.take(9))
+        // 对照：整数 30fps 口径在这两处与真值分叉
+        assertEquals(listOf(0, 1, 2, 3, 5, 6, 7, 8, 10), (0 until 900).filter {
+            ArcRepairPlan.isKept(it, 30, 24)
+        }.take(9))
+    }
+
+    @Test
+    fun `25点4fps案_真值口径可修_整数口径误判NO_NEED`() {
+        val rate = ArcRateProbe.MeasuredSrcFps(254, 10)   // 25.4fps
+        // D=24：两口径都判"需修"，但帧数按真值 720（=30s×24；整数 25fps 口径会出 732）
+        assertEquals(720, ArcRepairPlan.dstFrameCount(762, 254L, 10L, 24))
+        assertEquals(732, ArcRepairPlan.dstFrameCount(762, 25, 24))
+        assertFalse(rate.atMostInt(24))
+        // D=25：整数口径 round(25.4)=25 ≤ 25 → 恒等直通（假阴性 NO_NEED）；
+        // 真值 25.4 > 25 → atMostInt(25)=false，可修
+        assertEquals(762, ArcRepairPlan.dstFrameCount(762, 25, 25))
+        assertFalse("25.4 ≤ 25 不成立（不再误判 NO_NEED）", rate.atMostInt(25))
+        assertEquals(750, ArcRepairPlan.dstFrameCount(762, 254L, 10L, 25))
+    }
+
+    @Test
+    fun `桥_NTSC源整流_发出721帧末PTS对齐目标步长`() {
+        val plan = ArcRepairPlan.of(900, 30_000L, 1_001L, 24)
+        val flow = ArcRepairFlow(plan)
+        var emitted = 0
+        var lastPts = -1L
+        for (s in 0 until 900) {
+            for (op in flow.onSourceFrame(s)) {
+                if (op is ArcOp.EmitPending) {
+                    emitted++
+                    lastPts = op.ptsUs
+                }
+            }
+        }
+        for (op in flow.onSourceEos()) {
+            if (op is ArcOp.EmitPending) {
+                emitted++
+                lastPts = op.ptsUs
+            }
+        }
+        assertEquals(721, emitted)
+        assertEquals("末帧 PTS = 第 720 位 × 1e6/24", 720 * 1_000_000L / 24, lastPts)
     }
 
     // endregion
