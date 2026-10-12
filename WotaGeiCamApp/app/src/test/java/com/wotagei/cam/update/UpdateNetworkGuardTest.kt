@@ -99,6 +99,10 @@ class UpdateNetworkGuardTest {
             "android.permission.READ_EXTERNAL_STORAGE",
             "android.permission.WRITE_EXTERNAL_STORAGE",
             "android.permission.INTERNET",
+            // 检查更新功能的安装环节必需（2026-10-12 修复）：Android 8+ 把 APK 交给系统包安装器，
+            // 调用方没声明 REQUEST_INSTALL_PACKAGES 时 startActivity 返回 true 但安装器静默终止
+            // ——「点安装没反应」。它是 normal 级权限、不是联网权限，联网红线语义未动。
+            "android.permission.REQUEST_INSTALL_PACKAGES",
         )
         val issues = ArrayList<String>()
         if (!m.contains("android.permission.INTERNET")) issues.add("缺 INTERNET：检查更新功能的联网前提")
@@ -388,6 +392,26 @@ class UpdateNetworkGuardTest {
             ).filter { it.contains("网络类权限") }
             assertEquals("位置权限 $p 不该被判成联网权限（联网禁令表被改写了？）", emptyList<String>(), hit)
         }
+    }
+
+    /**
+     * 安装权限正向锚（2026-10-12 修复）：REQUEST_INSTALL_PACKAGES 必须常驻 manifest——
+     * 删了它「点安装」静默无反应（startActivity 不抛错、UI 不报失败，用户只能干等），
+     * 必须让守卫当场红，而不是等真机验收才发现回潮。
+     */
+    @Test
+    fun `安装权限常驻manifest_删除即红`() {
+        val m = manifestText()
+        assertTrue(
+            "manifest 缺 REQUEST_INSTALL_PACKAGES——Android 8+ 点「安装」会静默无反应（2026-10-12 修复项回潮）",
+            m.contains("android.permission.REQUEST_INSTALL_PACKAGES")
+        )
+        // 它也不许串味成联网禁令：常驻 = 白名单放行，且不触发任何联网判据
+        assertEquals(
+            "REQUEST_INSTALL_PACKAGES 应被白名单放行，且不该触发任何联网禁令",
+            emptyList<String>(),
+            manifestIssues(m)
+        )
     }
 
     @Test
