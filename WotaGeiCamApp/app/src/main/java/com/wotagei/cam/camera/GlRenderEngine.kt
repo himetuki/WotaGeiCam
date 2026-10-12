@@ -639,8 +639,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val frames = arcSrcFrames
         val spanNs = last - first
         if (frames < 2 || spanNs <= 0L) return 0
-        // 四舍五入，与 ArcRateProbe.measuredFps（帧距中位数路）同一取整口径：
-        // 29.97fps 源在录制路才不会被打成 29，两条路对同一传感器给出的前缀一致
+        // 四舍五入，与离线修复路探测核的整数视图（ArcRateProbe.measuredSrcFps(...).roundedInt()；
+        // M6-01 前的旧名 measuredFps）同一取整口径：29.97fps 源在录制路才不会被打成 29，
+        // 两条路对同一传感器给出的前缀一致
         return (((frames - 1L) * 1_000_000_000L + spanNs / 2) / spanNs).toInt().coerceIn(1, 480)
     }
 

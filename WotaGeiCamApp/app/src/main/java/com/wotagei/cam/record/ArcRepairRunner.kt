@@ -251,6 +251,12 @@ private class ArcRepairSession(
     private var width = 0
     private var height = 0
     private var srcFps = FALLBACK_SRC_FPS
+
+    /**
+     * 实测源帧率**有理数真值**（M6-01）：抽帧计划、源帧数估算、NO_NEED 门槛、去重阈值都吃它；
+     * [srcFps] 只是它的整数视图（roundedInt），仅配给日志/进度/成片名前缀这类只看量级的点。
+     */
+    private var srcRate = ArcRateProbe.MeasuredSrcFps(FALLBACK_SRC_FPS.toLong(), 1L)
     private var durationMs = 0L
     private var videoPtsBase = -1L
     private var audioPtsBase = -1L
@@ -354,8 +360,10 @@ private class ArcRepairSession(
         val hintWritten = exportOrientationHint(hint, ORIENTATION_MUXER_CCW)
         if (width <= 0 || height <= 0) throw ArcFail(ArcRepairError.SOURCE)
 
-        // 源帧率**实测**（ArcRateProbe 帧距中位数）：强制 24/25fps 档容器会标假 fps（标 24 实跑 30），
-        // 按容器值造抽帧计划会漏抽；中位数对重复/空样本免疫，是遍历计数教训的正确解法
+        // 源帧率**实测**（ArcRateProbe 帧距中位数，有理数真值链）：强制 24/25fps 档容器会标假 fps
+        // （标 24 实跑 30），按容器值造抽帧计划会漏抽；中位数对重复/空样本免疫，是遍历计数教训的
+        // 正确解法。M6-01：计划/门槛/估算/去重阈值全吃有理数真值（29.97 整成 30 会让保留位次漂
+        // 一位、25.4 整成 25 会误判无需抽帧），整数视图只喂日志/进度/成片名前缀
         var srcFrames = 0
         val rawDeltas = ArrayList<Int>(512)
         var prevSampleUs = -1L
@@ -367,28 +375,30 @@ private class ArcRepairSession(
             scanned++
             if (!videoEx.advance()) break
         }
-        srcFps = ArcRateProbe.measuredFps(rawDeltas, containerFps)
+        srcRate = ArcRateProbe.measuredSrcFps(rawDeltas, containerFps.toLong(), 1L)
+        srcFps = srcRate.roundedInt()
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
         // 源帧数按时长 × 实测帧率估算，只喂进度分母与计划日志；输出由解码顺序驱动
         // （真机实测遍历计数不可靠，见 v1 注释；时长缺失时才退回数样本）
-        srcFrames = if (durationMs > 0 && srcFps > 0) {
-            ((durationMs * srcFps + 500L) / 1000L).toInt().coerceAtLeast(1)
+        srcFrames = if (durationMs > 0 && srcRate.num > 0) {
+            ((durationMs * srcRate.num + 500L * srcRate.den) / (1000L * srcRate.den)).toInt().coerceAtLeast(1)
         } else {
             countSamples(videoEx)
         }
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
         if (dstFps <= 0) throw ArcFail(ArcRepairError.SOURCE)
-        if (srcFps <= dstFps) throw ArcFail(ArcRepairError.NO_NEED)
-        val plan = ArcRepairPlan.of(srcFrames, srcFps, dstFps)
+        if (srcRate.atMostInt(dstFps)) throw ArcFail(ArcRepairError.NO_NEED)
+        val plan = ArcRepairPlan.of(srcFrames, srcRate.num, srcRate.den, dstFps)
         if (plan.dstFrames <= 0) throw ArcFail(ArcRepairError.SOURCE)
         dstTotal = plan.dstFrames
         flow = ArcRepairFlow(plan)
-        note = "源实测≈${srcFps}fps（容器标 $containerFps）→ 目标 ${dstFps}fps，" +
-            "被抽帧画面已取大并入前后帧；不改原片"
+        note = "源实测≈${srcFps}fps（真值 ${srcRate.num}/${srcRate.den}，容器标 $containerFps）→ " +
+            "目标 ${dstFps}fps，被抽帧画面已取大并入前后帧；不改原片"
         Log.i(
             TAG_ARC,
-            "源 ${width}x$height 容器fps=$containerFps 实测fps=$srcFps srcFrames=$srcFrames " +
-                "→ dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} route=${if (useGpu) "GPU" else "CPU"} " +
+            "源 ${width}x$height 容器fps=$containerFps 实测fps=$srcFps 实测=${srcRate.num}/${srcRate.den} " +
+                "srcFrames=$srcFrames → dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} " +
+                "route=${if (useGpu) "GPU" else "CPU"} " +
                 "hintExtractor=$hintExtractor hintRetriever=$hintRetriever hintWritten=$hintWritten"
         )
 
@@ -622,8 +632,9 @@ private class ArcRepairSession(
                         val ptsUs = (decInfo.presentationTimeUs - decodePtsBase).coerceAtLeast(0L)
                         // 去重：源容器里常有空/重复样本（真机实测：1.875s 的片子只有 45 个有效包，
                         // 却有 124 个样本），解码器会把它们全吐出来。按"距上一个已采用帧不足半个源帧长"
-                        // 判重丢弃——被灌水的帧会搅乱抽帧节奏（把该保留的位次占掉）
-                        val minGapUs = if (srcFps > 0) 500_000L / srcFps else 0L
+                        // 判重丢弃——被灌水的帧会搅乱抽帧节奏（把该保留的位次占掉）。
+                        // M6-01：阈值跟有理数真值（它决定"哪些源帧被采用"；整数视图会带偏）
+                        val minGapUs = if (srcRate.num > 0) 500_000L * srcRate.den / srcRate.num else 0L
                         if (srcIndex > 0 && ptsUs - prevPtsUs < minGapUs) {
                             runCatching { dec.releaseOutputBuffer(idx, false) }
                         } else {
