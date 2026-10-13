@@ -364,15 +364,22 @@ class CodecRecorder(
         envFeederStartUs = 0L
         capFeederStartUs = 0L
         clock.reset()
+        // 分步耗时打点（2026-10-12，纯观测）：注册表 REG-10「起录 1~2s 延迟（低端机 insert+prepare
+        // 串行链正常量级）」从未有过分步读数，这行给将来动起录链攒第一手数据。零行为变更。
+        val pt0 = SystemClock.elapsedRealtime()
         store.checkFreeSpace()?.let {
             reject(sink, it)
             return false
         }
-        val t = OutputTarget.open(ctx, sink)
+        // 2026-10-12 有界化：openAssetFileDescriptor 同样走 MediaProvider（与 insert 同族卡顿前科），
+        // prepare 期不在换段腿（rotateLegStartMs=0）→ rotateBudgetLeftMs() 自动给 STORE_CALL_BUDGET_MS；
+        // 超时回 null → 下方 reject(NO_OUTPUT) 判起录失败，与泵路/换段腿同一套 BoundedStore 体系
+        val t = openTargetBounded(sink)
         if (t == null || !t.usable) {
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
+        val ptOpen = SystemClock.elapsedRealtime()
         val mime = resolveVideoMime(p)
         // GPU 路（EGL 当 producer）输入面必须 per-codec（[prepareGpuVideoEncoder]，真机实测
         // persistent surface 挂 EGL 会 EGL_BAD_ALLOC）；DIRECT 路（Camera2 当 producer）保持
@@ -391,6 +398,7 @@ class CodecRecorder(
             reject(sink, RecordError.PREPARE_FAILED)
             return false
         }
+        val ptVenc = SystemClock.elapsedRealtime()
         vCodec = v
         // 静音 / 无权限 / 采样率不支持 → 完全不初始化音频通路（环境、内录两轨一起关）；
         // 音源双开定版（2026-10-07）：内录轨不再挂在环境编码器之下，「仅内录」（环境音关）
@@ -419,6 +427,7 @@ class CodecRecorder(
             c == null && p.captureAudio -> p.copy(captureAudio = false)
             else -> p
         }
+        val ptAudio = SystemClock.elapsedRealtime()
         target = t
         currentSink = sink
         if (!openMuxer(t, p.orientationHint)) {
@@ -426,6 +435,9 @@ class CodecRecorder(
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
+        val ptMux = SystemClock.elapsedRealtime()
+        Log.i(TAG, "prepare steps: open=${ptOpen - pt0} venc=${ptVenc - ptOpen} " +
+            "audio=${ptAudio - ptVenc} mux=${ptMux - ptAudio} total=${ptMux - pt0}ms（REG-10 起录延迟观测）")
         Log.i(TAG, "codec prepared part=$partIndex ${p.width}x${p.height}@${p.fps} mime=$mime " +
             "bps=${p.effectiveBitrate()} audio=${if (a == null) "off" else "${p.sampleRate}Hz/${p.channels}ch"} " +
             "capture=${if (c == null) "off" else "on"} " +
@@ -1941,14 +1953,16 @@ class CodecRecorder(
         target?.close()
         target = null
         currentSink = null
-        // 【观测】prepare 失败路径上这枚 discard 同样是无界的（不经 discardBounded/BoundedStore）：
-        // 控制线程同步等 MediaProvider，"卡了多久"原来无痕（discard 内部只有一条结果日志）。
-        // 本轮只留痕，不改成有界（有界化=行为变更）。
+        // 2026-10-12 有界化（原注释只留痕）：回收同样会撞 MediaProvider 卡顿（与 insert 同族），
+        // 走固定 STORE_CALL_BUDGET_MS 预算；超时只记账——晚到的 delete 由 StalePendingSweep
+        // （IS_PENDING=1 + 龄 ≥1h + 文件不在盘 → 冷启清）兜底，调用方 reject 照常返回
         val t0 = SystemClock.elapsedRealtime()
-        store.discard(sink)
+        val r = storeIo.run(STORE_CALL_BUDGET_MS) { store.discard(sink) }
         val costMs = SystemClock.elapsedRealtime() - t0
-        if (costMs > STORE_CALL_BUDGET_MS) {
-            Log.w(TAG, "prepare 失败回收输出记录耗时 ${costMs}ms（MediaProvider 同步调用无界，阈值同引擎有界预算）")
+        if (r is Bounded.TimedOut) {
+            Log.e(TAG, "prepare 失败回收输出记录超时（${STORE_CALL_BUDGET_MS}ms 预算，记录留给系统兜底清扫）")
+        } else if (costMs > STORE_CALL_BUDGET_MS) {
+            Log.w(TAG, "prepare 失败回收输出记录耗时 ${costMs}ms（库内完成，慢于预算留痕）")
         }
         state = EngineState.IDLE
     }
