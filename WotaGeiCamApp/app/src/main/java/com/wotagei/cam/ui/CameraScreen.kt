@@ -151,6 +151,8 @@ import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.AutoStopRules
+import com.wotagei.cam.record.Bounded
+import com.wotagei.cam.record.BoundedStore
 import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.CaptureTrackLostReason
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
@@ -2198,19 +2200,30 @@ private class RecordRunner(
             args.width, args.height, args.fps, args.sensorOrientation, args.deviceDegrees,
             args.front, renderMode, args.arcConvert, args.captureAudio
         )
-        // 【观测】首枚 pending insert 是本录制 handler 线程上唯一的**无界** MediaProvider 调用
-        // （引擎侧同类调用都走 BoundedStore / STORE_CALL_BUDGET_MS=3s），这台机有 30-45s 级卡顿前科。
-        // 本轮只做耗时留痕，不改调用本身（有界化=行为变更）。
+        // 首枚 pending insert **有界化**（2026-10-12：此前是本 handler 线程上唯一的无界 MediaProvider
+        // 调用，这台机有 30-45s 级卡顿前科——"点录制后卡半分钟才起录/没反应"。同一能力在引擎换段腿
+        // 已铺满（BoundedStore），这里是最后一条尾巴）：超 [STORE_CALL_BUDGET_MS] 判起录失败、快门
+        // 立即放行，不再无界死等。超时那枚 insert 晚到仍会插进 MediaStore（binder 无取消），
+        // 它是 IS_PENDING=1 且文件永远不在盘的孤儿——由既有 StalePendingSweep（龄 ≥1h 冷启清）兜底，
+        // 本处不造新回收机制（beginSession 是一次性流程，没有泵路 OneShotHandoff 的常驻消费者）。
         val t0 = SystemClock.elapsedRealtime()
-        val pending = store.createPending(0)
+        val insert = BoundedStore("WotaBeginStore").run(STORE_CALL_BUDGET_MS) { store.createPending(0) }
         val costMs = SystemClock.elapsedRealtime() - t0
-        Log.i(TAG_UI, "首枚 pending insert 耗时=${costMs}ms 结果=${if (pending != null) "ok" else "null"}")
-        if (costMs > STORE_CALL_BUDGET_MS) {
-            Log.w(
-                TAG_UI,
-                "首枚 pending insert 慢于${STORE_CALL_BUDGET_MS}ms（=STORE_CALL_BUDGET_MS 对照引擎有界预算，阈值真机可调）：" +
-                    "MediaProvider 同步调用无界，本次 ${costMs}ms"
-            )
+        val pending: Uri? = when (insert) {
+            is Bounded.Done -> insert.value
+            Bounded.TimedOut -> null
+        }
+        Log.i(TAG_UI, "首枚 pending insert 耗时=${costMs}ms 结果=${if (pending != null) "ok" else if (insert is Bounded.TimedOut) "timeout" else "null"}")
+        when {
+            pending == null && insert is Bounded.TimedOut ->
+                Log.e(TAG_UI, "首枚 pending insert 超时（${STORE_CALL_BUDGET_MS}ms 预算）判起录失败；" +
+                    "晚到的那行由 StalePendingSweep 兜底清扫")
+            costMs > STORE_CALL_BUDGET_MS ->
+                Log.w(
+                    TAG_UI,
+                    "首枚 pending insert 慢于${STORE_CALL_BUDGET_MS}ms（=STORE_CALL_BUDGET_MS 对照引擎有界预算，阈值真机可调）：" +
+                        "MediaProvider 同步调用无界，本次 ${costMs}ms"
+                )
         }
         if (pending == null) {
             failNow(RecordError.NO_OUTPUT); return
