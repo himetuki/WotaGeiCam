@@ -1,11 +1,13 @@
 package com.wotagei.cam.update
 
 import android.content.Context
+import com.wotagei.cam.diag.Diag as Log
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 /**
  * 「检查更新」的**网络执行层**（update 包唯一允许出现 HttpURLConnection 的地方，守卫钉住）。
@@ -22,6 +24,9 @@ import java.net.URL
  * 3. 落盘后首字节 `PK` 魔数校验（防镜像塞回 HTML 错误页当 APK）；
  * 4. 响应体上限：探测 JSON 帽 [MAX_PROBE_BYTES]（头判据 + 限流读取双保险）、APK 磁盘帽
  *    [MAX_APK_BYTES]（头判据 + 读循环累计）——镜像不可信，内存与磁盘两侧都不许无界。
+ * 5. SHA-256 端到端校验（v0.0.8）：探测段 1 从 GitHub 官方端点的 Release 说明提取发版者写入的
+ *    universal 包哈希，落盘后本地重算比对——不匹配即镜像污染实锤，删包判失败。镜像改不走
+ *    官方端点的说明文本，这是「镜像污染最坏后果=更新失败」的核心保证（见 UpdateConfig 安全模型）。
  *
  * 探测（[fetchJson] / [fetchRedirectLocation]）用 [PROBE_READ_TIMEOUT_MS] 短读超时：
  * 「检查中…」不可挂数分钟，配合取消探针（检查中点行 = 取消）最坏 5×20s 内返回。
@@ -29,6 +34,8 @@ import java.net.URL
  * HTTP 明文镜像（用户点名的 toolwa.com/github）不在链里：中间人可替换 APK，见 UpdateConfig。
  */
 object UpdateDownloader {
+
+    private const val TAG = "WotaUpdate"
 
     const val CONNECT_TIMEOUT_MS = 10_000
     const val READ_TIMEOUT_MS = 30_000
@@ -140,7 +147,8 @@ object UpdateDownloader {
         directUrl: String,
         expectedSize: Long?,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        expectedSha256: String? = null
     ): DownloadOutcome {
         val dir = File(context.applicationContext.cacheDir, "updates")
         dir.mkdirs()
@@ -167,7 +175,15 @@ object UpdateDownloader {
                     // 重下同一资产时旧包还在：Windows 语义下 renameTo 对已存在目标会失败，必须先删旧再改名
                     //（此刻删的是刚下完的新包要顶掉的旧包，与 P3-3 保留旧包给安装器读不冲突——重下即用户已弃旧包）
                     if ((if (target.exists()) target.delete() else true) && part.renameTo(target)) {
-                        return DownloadOutcome.Done(target, r.sizeBytes)
+                        // SHA-256 端到端校验（v0.0.8）：哈希来自段 1 官方端点的 Release 说明（发版者写入）。
+                        // 探测没给（段 2/3、旧版 notes）→ null 恒过，退回既有防线（PK+size+安装签名网）；
+                        // 给了且不匹配 → 镜像污染实锤，删包判失败，绝不让它进安装器。
+                        if (sha256Matches(expectedSha256, sha256Hex(target))) {
+                            return DownloadOutcome.Done(target, r.sizeBytes)
+                        }
+                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），判镜像污染，删包")
+                        target.delete()
+                        return DownloadOutcome.Failed
                     } else {
                         part.delete()
                         return DownloadOutcome.Failed
@@ -190,6 +206,36 @@ object UpdateDownloader {
      */
     internal fun staleFilesOf(dirNames: List<String>, assetName: String): List<String> =
         dirNames.filter { it.endsWith(".part") || it != assetName }
+
+    // ------------------------------------------------------------------ SHA-256 端到端校验（v0.0.8）
+
+    /**
+     * 校验判据（纯函数，JVM 全测）：[expectedSha256] 为 null（探测没给可信哈希：段 2/3 或旧版
+     * notes）恒放行——退回既有防线（PK 魔数 + size 一致性 + 安装签名网）；给了则必须与实际哈希
+     * **忽略大小写**相等（说明文本里是大写 hex 也合法，见 ReleaseJson.parseSha256FromNotes 的
+     * 小写化约定，这里再容一道大写输入）。
+     */
+    internal fun sha256Matches(expectedSha256: String?, actualHex: String): Boolean {
+        expectedSha256 ?: return true
+        return expectedSha256.equals(actualHex, ignoreCase = true)
+    }
+
+    /**
+     * 文件的 SHA-256（流式 64KB，全量读一遍；纯 JVM——java.security.MessageDigest 是 JDK 面）。
+     * 只在校验分支调用（探测给了哈希时一次 ~5MB 的读盘开销，毫秒级），不碰正常路径。
+     */
+    internal fun sha256Hex(file: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { ins ->
+            val buf = ByteArray(BUFFER_SIZE)
+            while (true) {
+                val n = ins.read(buf)
+                if (n < 0) break
+                if (n > 0) md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
 
     /** 单节点尝试：成功落 part / 取消 / 失败三态，任何异常都折算成失败（换下一个节点） */
     private fun tryNode(

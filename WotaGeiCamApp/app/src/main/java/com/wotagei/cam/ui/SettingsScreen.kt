@@ -1463,7 +1463,8 @@ private fun UpdateSection() {
                                 download = download?.copy(bytesRead = read, totalBytes = total)
                             }
                         },
-                        isCancelled = { genCancelled.get() }
+                        isCancelled = { genCancelled.get() },
+                        expectedSha256 = avail.sha256
                     )
                     // 修复轮 P3-1（末轮）：回执写回前判代——旧代（已被新一代顶替）一律整体丢弃，
                     // 不许无条件清 download（那会把新一代的对话框清掉、令其隐形下载且不可取消）
