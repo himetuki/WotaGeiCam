@@ -273,8 +273,8 @@ class UpdateLogicTest {
             localVersionName = "0.0.7-r09",
             fetchJson = { url ->
                 hit.add(url)
-                // 段 1 直连挂；段 2 第 2 个镜像（ghp.ci）活
-                if (url.startsWith("https://ghp.ci/")) mirrorJson else null
+                // 段 1 直连挂；段 2 第 2 个镜像活（假身按常量表成员匹配——钉「按表逐个试」而非钉某个 host）
+                if (url.startsWith(UpdateConfig.MIRROR_PREFIXES[1])) mirrorJson else null
             },
             fetchRedirectLocation = { null }
         )

@@ -29,12 +29,21 @@ object UpdateConfig {
     /**
      * 镜像前缀（前缀 + 完整原始 URL）。用户点名的 `toolwa.com/github` 被排除：它是 HTTP 明文
      * （无 TLS），中间人可替换 APK 二进制；targetSdk 34 默认禁明文流量，也不为它开 usesCleartextTraffic 例外。
+     *
+     * 安全模型（2026-10-13，v0.0.8）：公共代理的运营方理论上都能替换字节，「不会被污染」不靠
+     * 信任代理，靠三层兜底——① 全表 HTTPS（防链路篡改）；② 下载后 SHA-256 端到端校验（哈希由
+     * 发版者写进 GitHub Release 说明，只有段 1 的 api.github.com 官方端点读取它，代理改不走；
+     * 见 [ReleaseJson.parseSha256FromNotes] 与 UpdateDownloader 的消费点）；③ 系统安装器的签名
+     * 强校验（与已装应用不同签名的包根本装不上）。代理被污染的最坏后果 = 更新失败，不是装上恶意软件。
+     *
+     * 节点存活实测（2026-10-13，releases/download 路径 curl 直连）：gh-proxy.com=206、
+     * ghproxy.net=206、ghproxy.link=307→200。此前链上的 ghp.ci（连接失败）、github.akams.cn 与
+     * moeyy.cn（均 404）已死节点清退——死节点让 fallback 多等一轮超时，白拖 fallback 时间。
      */
     val MIRROR_PREFIXES = listOf(
         "https://gh-proxy.com/",
-        "https://ghp.ci/",
-        "https://github.akams.cn/",
-        "https://moeyy.cn/gh-proxy/",
+        "https://ghproxy.net/",
+        "https://ghproxy.link/",
     )
 
     fun directDownloadUrl(tag: String, assetName: String): String = "$DOWNLOAD_BASE/$tag/$assetName"
@@ -140,8 +149,13 @@ class MirrorChain(private val nodes: List<MirrorNode>) {
 /** release 附件（JSON assets[] 里的一枚，或段 3 推导出来的） */
 data class ReleaseAsset(val name: String, val url: String, val sizeBytes: Long?)
 
-/** latest release 的最小结论：tag + 挑出来的 APK 附件 */
-data class ReleaseInfo(val tag: String, val asset: ReleaseAsset?)
+/**
+ * latest release 的最小结论：tag + 挑出来的 APK 附件。
+ * [sha256] = 发版者写在 Release 说明里的 universal 包 SHA-256（十六进制小写）。只有**段 1
+ * （api.github.com 官方端点）**才提取——镜像转发的 body 不可信；null = 无可信哈希，下载退回
+ * 现有防线（PK 魔数 + size 一致性 + 安装签名网）。
+ */
+data class ReleaseInfo(val tag: String, val asset: ReleaseAsset?, val sha256: String? = null)
 
 /** GitHub releases/latest JSON 的免依赖提取器（手写，只认我们关心的三个键，够用即可） */
 object ReleaseJson {
@@ -176,9 +190,29 @@ object ReleaseJson {
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }
 
-    fun parse(json: String): ReleaseInfo? {
+    fun parse(json: String): ReleaseInfo? = parse(json, extractSha256 = false)
+
+    /**
+     * [extractSha256]=true 时从 Release 说明（body）提取发版者写入的 universal 包 SHA-256。
+     * **只允许段 1（api.github.com 官方端点）开**：镜像转发的 body 代理可改，提取出来的哈希
+     * 没有可信度。说明文本的书写约定见发版流程：一行 `SHA256: <64位十六进制>`。
+     */
+    fun parse(json: String, extractSha256: Boolean): ReleaseInfo? {
         val tag = parseTag(json) ?: return null
-        return ReleaseInfo(tag, pickApkAsset(parseAssets(json)))
+        val sha256 = if (extractSha256) {
+            stringValueAfterKey(json, "body")?.let { parseSha256FromNotes(it) }
+        } else null
+        return ReleaseInfo(tag, pickApkAsset(parseAssets(json)), sha256)
+    }
+
+    /**
+     * 从 Release 说明文本提取 SHA-256（纯函数）：找 `SHA256` 后跟冒号（中英文皆容）与空白、
+     * 再跟**恰好 64** 位十六进制的第一处（尾随不能再是 hex，防 65 位串误命中前 64 位）；
+     * 命中返回**小写** hex，否则 null。
+     */
+    fun parseSha256FromNotes(notes: String): String? {
+        val m = Regex("SHA256\\s*[:：]\\s*([0-9a-fA-F]{64})(?![0-9a-fA-F])").find(notes) ?: return null
+        return m.groupValues[1].lowercase()
     }
 
     // ------------------------------------------------------------------ 手写 JSON 提取
@@ -305,12 +339,16 @@ object RedirectProbe {
 
 /** 探测结论：UI 只消费这个，不再自己比版本 */
 sealed interface ProbeResult {
-    /** 远端有新版：tag + 直连下载 URL（镜像链在下载时走）+ 资产名 + 大小（段 3 无 → null，下载时用 Content-Length） */
+    /**
+     * 远端有新版：tag + 直连下载 URL（镜像链在下载时走）+ 资产名 + 大小（段 3 无 → null，下载时用 Content-Length）。
+     * [sha256] 仅段 1 携带（官方端点的 Release 说明哈希，见 [ReleaseInfo.sha256]）；null = 下载退回现有防线。
+     */
     data class UpdateAvailable(
         val latestTag: String,
         val assetName: String,
         val downloadUrl: String,
-        val sizeBytes: Long?
+        val sizeBytes: Long?,
+        val sha256: String? = null
     ) : ProbeResult
 
     /** 已是最新 */
@@ -337,14 +375,15 @@ fun probeLatestRelease(
     fetchRedirectLocation: (String) -> String?,
     isCancelled: () -> Boolean = { false }
 ): ProbeResult {
-    // 段 1：直连 GitHub API
+    // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信，提取 SHA-256 供下载后校验）
     if (isCancelled()) return ProbeResult.Cancelled
-    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName)?.let { return it }
-    // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）
+    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, trustedNotes = true)?.let { return it }
+    // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）。
+    // trustedNotes=false：镜像可改写 body，转发来的哈希没有可信度，宁可不校验也不拿假哈希当真。
     val chain = MirrorChain.probeChain()
     while (!chain.exhausted) {
         if (isCancelled()) return ProbeResult.Cancelled
-        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName)?.let { return it }
+        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, trustedNotes = false)?.let { return it }
         chain.advance()
     }
     // 段 3：302 → tag → 推导 universal 资产名（无 size，下载时用 Content-Length）
@@ -364,14 +403,15 @@ fun probeLatestRelease(
 /**
  * 一个 JSON 节点的结论：null = 该节点无结论（解析失败，或「有新版但拿不到 .apk 附件」——继续下一段）；
  * 非 null = 终局结论（UpToDate / UpdateAvailable），编排立即返回。
+ * [trustedNotes] 只在段 1（api.github.com 官方端点）为 true：只有那时 body 里的 SHA-256 才可信。
  */
-private fun jsonNode(json: String?, localVersionName: String): ProbeResult? {
+private fun jsonNode(json: String?, localVersionName: String, trustedNotes: Boolean = false): ProbeResult? {
     json ?: return null
-    val info = ReleaseJson.parse(json) ?: return null
+    val info = ReleaseJson.parse(json, extractSha256 = trustedNotes) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
         info.asset != null ->
-            ProbeResult.UpdateAvailable(info.tag, info.asset.name, info.asset.url, info.asset.sizeBytes)
+            ProbeResult.UpdateAvailable(info.tag, info.asset.name, info.asset.url, info.asset.sizeBytes, info.sha256)
         else -> null
     }
 }
