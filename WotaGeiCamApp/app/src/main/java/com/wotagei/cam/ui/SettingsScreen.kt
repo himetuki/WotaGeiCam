@@ -130,6 +130,9 @@ object WotaSettings {
     /** 静音录制的初始值：录制页已不再有「更多」胶囊放它，所以归到设置页（§37 第 3 条） */
     const val KEY_DEFAULT_AUDIO_MUTE = "default_audio_muted"
 
+    /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
+    const val KEY_DIAG_ENABLED = "diag_enabled"
+
     /** 详细诊断日志（默认关）：开启后 `d/v` 级也写进日志文件，供用户配合复现时用 */
     const val KEY_DIAG_VERBOSE = "diag_verbose"
     const val KEY_DEFAULT_REF_LINES = "default_ref_lines"
@@ -229,6 +232,13 @@ object WotaSettings {
         prefs.getInt(KEY_DEFAULT_SAMPLE_RATE, WotaTiers.DEFAULT_SAMPLE_RATE)
 
     fun defaultAudioMuted(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DEFAULT_AUDIO_MUTE, false)
+
+    /** 诊断日志总开关（见 [com.wotagei.cam.diag.Diag]）：默认关，关着时不写常规日志（崩溃件除外） */
+    fun diagEnabled(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DIAG_ENABLED, false)
+
+    fun setDiagEnabled(prefs: SharedPreferences, on: Boolean) {
+        prefs.edit().putBoolean(KEY_DIAG_ENABLED, on).apply()
+    }
 
     /** 详细诊断日志（见 [com.wotagei.cam.diag.Diag]）：默认关，只记关键事件；开启后连 d/v 一起记 */
     fun diagVerbose(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DIAG_VERBOSE, false)
@@ -1001,8 +1011,10 @@ private fun BlockAbout() {
 // ------------------------------------------------------------------ 小件
 
 /**
- * 诊断日志区块（2026-10-09 用户指令「把日志功能加上」）：
- * - **详细档开关**：默认关（只记 i/w/e 关键事件），复现问题时打开（连 d/v 一起记）；
+ * 诊断日志区块（2026-10-09 用户指令「把日志功能加上」；2026-10-13 用户裁决「总开关默认关 + 清除」）：
+ * - **总开关「记录日志」**：默认关（省空间；关闭期间功能异常不落现场，崩溃件除外——崩溃取证不受开关影响）；
+ * - **详细档开关**：总开关开着时才可切，默认只记 i/w/e 关键事件，复现问题时打开（连 d/v 一起记）；
+ * - **清除日志**：删净当前件/轮转件/崩溃件并清内存缓冲（日志可再生，不弹确认框）；
  * - **一键导出**：把全部日志（当前件 + 轮转件 + 崩溃件）合并成一份 txt 放到公共
  *   `Documents/WotaGeiCam/`，并立刻拉起系统分享面板，用户想发给谁就发给谁；
  * - 导出走**本地文件 + FileProvider + 系统分享**，全程不联网（网络只允许出现在 update/ 包，
@@ -1012,22 +1024,54 @@ private fun BlockAbout() {
 private fun BlockDiag(prefs: SharedPreferences) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 总开关（默认关）在前：关着时详细档置灰不可切（层级：先能记，才谈记多细）
+    var diagOn by remember { mutableStateOf(WotaSettings.diagEnabled(prefs)) }
     var verbose by remember { mutableStateOf(WotaSettings.diagVerbose(prefs)) }
-    // 正在跑的动作（null = 空闲）：两颗按钮各自显示忙态，互不串台
+    // 正在跑的动作（null = 空闲）：三颗按钮各自显示忙态，互不串台
     var busy by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
     val ACTION_SHARE = "share"
     val ACTION_EXPORT = "export"
+    val ACTION_CLEAR = "clear"
 
     SettingGroup(stringResource(R.string.set_group_diag))
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = stringResource(R.string.set_diag_verbose),
+                text = stringResource(R.string.set_diag_enabled),
                 style = MaterialTheme.typography.bodyMedium,
                 color = WotaText,
                 modifier = Modifier.weight(1f)
             )
+            Switch(
+                checked = diagOn,
+                onCheckedChange = {
+                    diagOn = it
+                    WotaSettings.setDiagEnabled(prefs, it)
+                    // 运行期立即生效（日志器不用重启应用）
+                    com.wotagei.cam.diag.Diag.setEnabled(it)
+                },
+                colors = SwitchDefaults.colors(
+                    checkedTrackColor = WotaColor.accentActive,
+                    checkedThumbColor = WotaColor.onAccent
+                )
+            )
+        }
+        Text(
+            text = stringResource(R.string.set_diag_enabled_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        Line()
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = stringResource(R.string.set_diag_verbose),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (diagOn) WotaText else WotaColor.textMid,
+                modifier = Modifier.weight(1f)
+            )
+            // 总开关关 ⇒ 详细档置灰不可切（没开着记录，"记多细"无从谈起）
             Switch(
                 checked = verbose,
                 onCheckedChange = {
@@ -1036,6 +1080,7 @@ private fun BlockDiag(prefs: SharedPreferences) {
                     // 运行期立即生效（日志器不用重启应用）
                     com.wotagei.cam.diag.Diag.setVerbose(it)
                 },
+                enabled = diagOn,
                 colors = SwitchDefaults.colors(
                     checkedTrackColor = WotaColor.accentActive,
                     checkedThumbColor = WotaColor.onAccent
@@ -1053,9 +1098,11 @@ private fun BlockDiag(prefs: SharedPreferences) {
         Line()
         InfoRow(stringResource(R.string.set_diag_path), Diag.workingDir()?.absolutePath ?: "—")
         Spacer(Modifier.height(8.dp))
-        // 两颗按钮各干一件事（用户 2026-10-09 追加："不用去文件管理器找文件，直接分享"）：
+        // 三颗按钮各干一件事（用户 2026-10-09 追加："不用去文件管理器找文件，直接分享"；
+        // 2026-10-13 用户裁决：补「清除日志」）：
         //   分享 = 一步直达系统分享面板（落点在应用缓存，**不受公共目录可写性影响**，点了必弹面板）；
-        //   导出 = 只把文件落到公共 Documents 并显示位置（给"我想留着/自己找"的那条路）。
+        //   导出 = 只把文件落到公共 Documents 并显示位置（给"我想留着/自己找"的那条路）；
+        //   清除 = 删净当前件/轮转件/崩溃件并清内存缓冲（日志可再生，**不弹确认框**）。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ChipCell(
                 text = stringResource(if (busy == ACTION_SHARE) R.string.set_diag_share_busy else R.string.set_diag_share),
@@ -1100,6 +1147,22 @@ private fun BlockDiag(prefs: SharedPreferences) {
                                 res.file.parent ?: ""
                             )
                         }
+                    }
+                }
+            )
+            // 清除（2026-10-13 用户裁决）：删净文件 + 清内存缓冲；清完 status 变更触发重组，
+            // 上方「日志占用」InfoRow 在重组时重读 Diag.usedBytes()，数字随之归零
+            ChipCell(
+                text = stringResource(R.string.set_diag_clear),
+                selected = false,
+                onClick = {
+                    if (busy != null) return@ChipCell
+                    busy = ACTION_CLEAR
+                    status = null
+                    scope.launch {
+                        withContext(Dispatchers.IO) { Diag.clear() }
+                        busy = null
+                        status = context.getString(R.string.set_diag_cleared)
                     }
                 }
             )

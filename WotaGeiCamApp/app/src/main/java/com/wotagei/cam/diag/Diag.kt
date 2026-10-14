@@ -23,11 +23,15 @@ import java.util.concurrent.atomic.AtomicLong
  * 完全无从下手，正是因为**现场没有留下任何可导出的证据**。所以这里做的是「应用自持、用户可导出」的日志。
  *
  * # 模式（为"小项目、少用户、问题往往事后才报"设计）
- * - **默认常开、轻量**：环形缓冲（内存 [DIAG_RING_LINES] 行）+ 后台线程落盘，单文件滚到
+ * - **总开关默认关（2026-10-13 用户裁决：避免不必要的空间占用）**：关着时常规记录（i/w/e/d/v）一行都不写；
+ *   开启后环形缓冲（内存 [DIAG_RING_LINES] 行）+ 后台线程落盘，单文件滚到
  *   [DIAG_FILE_MAX_BYTES] 就轮转，最多留 [DIAG_FILE_KEEP] 个 ⇒ 常驻占用个位数 MB 以内。
- *   之所以不是"崩溃时才写"：本类要治的是**功能被系统拒绝**这类**不崩溃**的问题——崩溃日志帮不上忙，
- *   必须留得住事发前后的上下文。
- * - **详细档（用户可开）**：默认只记 `i/w/e`（关键事件），开启后连 `d/v` 一起记——配合用户复现时用。
+ *   之所以保留"边用边记"而不是"崩溃时才写"：本类要治的是**功能被系统拒绝**这类**不崩溃**的问题——
+ *   崩溃日志帮不上忙，必须留得住事发前后的上下文。
+ *   **代价要如实说**：默认关着时功能异常不会留下现场，出了问题必须先开日志再复现才能拿到证据。
+ * - **崩溃件不受总开关影响**：进程要死时同步直写 `crash-*.txt`（见 [installCrashHandler]，不走
+ *   [record] 的开关门）——崩溃取证量小、价值极高、零常态占用，不许被开关卡住。
+ * - **详细档（用户可开）**：总开关开着时默认只记 `i/w/e`（关键事件），详细档开启后连 `d/v` 一起记。
  * - **导出由用户触发**：设置页一键把全部日志合并成一份 txt 放到公共 `Documents/WotaGeiCam/`，
  *   再拉起系统分享面板，用户想发给谁就发给谁。**日志只在本机、永不上传**（本包不含任何网络调用）。
  *
@@ -75,6 +79,9 @@ object Diag {
     private const val EXPORT_DIR_NAME = "WotaGeiCam"
 
     private val lock = Any()
+
+    /** 落盘/清空的互斥锁：写盘线程每拍 [drainToFile] 与用户点「清除」都抢它，清空才不会被在途批复活 */
+    private val drainLock = Any()
     private val ring = ArrayDeque<String>()
     private val pending = ConcurrentLinkedQueue<String>()
     private val installed = AtomicBoolean(false)
@@ -82,6 +89,14 @@ object Diag {
     /** 详细档：开启后 `d/v` 也记（用户复现问题时用，持久化由设置页负责） */
     @Volatile
     var verbose: Boolean = false
+        private set
+
+    /**
+     * 总开关：**默认关**（2026-10-13 用户裁决）。关 = 常规记录（i/w/e/d/v）一行都不写；
+     * **崩溃件不归它管**（取证不许被开关卡住，见 [installCrashHandler]）。持久化由设置页负责。
+     */
+    @Volatile
+    var enabled: Boolean = false
         private set
 
     // 以下五枚字段都被"主线程 / 写盘线程 / 崩溃线程 / 导出线程"交叉读写（2026-10-10 r31·S2-M8-01）。
@@ -108,10 +123,12 @@ object Diag {
     // region 生命周期
 
     /**
-     * 装日志（冷启调一次；重复调用只更新 [verbose]）。**必须在写第一条日志之前调用**才能收全上下文。
+     * 装日志（冷启调一次；重复调用只更新 [enabled] / [verbose]）。**必须在写第一条日志之前调用**才能收全上下文。
+     * @param enabled 总开关初值（设置页持久化的那份；默认关）
      * @param verbose 详细档初值（设置页持久化的那份）
      */
-    fun install(app: Application, verbose: Boolean = false) {
+    fun install(app: Application, verbose: Boolean = false, enabled: Boolean = false) {
+        this.enabled = enabled
         this.verbose = verbose
         if (!installed.compareAndSet(false, true)) return
         appRef = app
@@ -131,6 +148,42 @@ object Diag {
     fun setVerbose(on: Boolean) {
         verbose = on
         i("WotaDiag", if (on) "详细日志已开启（含 d/v 级）" else "详细日志已关闭（只记 i/w/e）")
+    }
+
+    /**
+     * 用户切总开关（设置页调用）。开/关各写一条状态行，且**关的那条必须在置 false 之前写**——
+     * 否则会被自己的门拦掉；告别行让导出件能看出"从哪一刻起没现场了"。
+     * 崩溃件不归本开关管（语义见类头），所以告别行写明"崩溃件除外"。
+     */
+    fun setEnabled(on: Boolean) {
+        if (enabled == on) return
+        if (on) {
+            enabled = true
+            i("WotaDiag", "日志已开启")
+        } else {
+            i("WotaDiag", "日志已关闭（此后不记录，崩溃件除外）")
+            enabled = false
+        }
+    }
+
+    /**
+     * 清空全部诊断日志（设置页「清除日志」调用；**必须在后台线程调用**）：
+     * 删掉日志目录下当前件 + 轮转件 + 崩溃件（删除判据在纯函数 [diagClearLogFiles]，JVM 可测），
+     * 清空内存环形缓冲与待落盘队列，重置丢弃/巡检计数（轮转天然随文件删除归零）。
+     * 收尾那句「日志已清除」走常规记录门：总开关开着才落盘；关着就"清了就是清了"。
+     */
+    fun clear() = runCatching {
+        synchronized(drainLock) {
+            // 在途的一拍先落盘再一并删掉；随后清队列——写盘线程与本函数同抢 [drainLock]，
+            // 不会出现"删完又被删前捞走的旧批复活"（新记录进来的行是清后新日志，复活无妨）
+            drainToFile()
+            pending.clear()
+            val removed = logDir?.let { diagClearLogFiles(it, BASE_NAME, CRASH_PREFIX) } ?: 0
+            synchronized(lock) { ring.clear() }
+            droppedPending.set(0L)
+            lastPruneMs.set(0L)
+            i("WotaDiag", "日志已清除 件数=$removed")
+        }
     }
 
     private fun startWriter() {
@@ -156,19 +209,21 @@ object Diag {
     }
 
     private fun drainToFile() {
-        val dir = logDir ?: return
-        val batch = ArrayList<String>()
-        while (true) {
-            val line = pending.poll() ?: break
-            batch.add(line)
-            if (batch.size >= 500) break
-        }
-        if (batch.isEmpty()) return
-        runCatching {
-            rotateIfNeeded(dir)
-            val f = current ?: File(dir, BASE_NAME).also { current = it }
-            f.appendText(batch.joinToString(separator = ""))
-            pruneOldFiles(dir)
+        synchronized(drainLock) {
+            val dir = logDir ?: return
+            val batch = ArrayList<String>()
+            while (true) {
+                val line = pending.poll() ?: break
+                batch.add(line)
+                if (batch.size >= 500) break
+            }
+            if (batch.isEmpty()) return
+            runCatching {
+                rotateIfNeeded(dir)
+                val f = current ?: File(dir, BASE_NAME).also { current = it }
+                f.appendText(batch.joinToString(separator = ""))
+                pruneOldFiles(dir)
+            }
         }
     }
 
@@ -260,6 +315,9 @@ object Diag {
 
     private fun record(level: Char, tag: String, msg: String, tr: Throwable?) {
         runCatching {
+            // 总开关（默认关）：关 = 常规记录一行都不写，必须在级别档位判定**之前**短路。
+            // 崩溃件不走这里（见 installCrashHandler 同步直写）——崩溃取证不许被开关卡住。
+            if (diagRecordGated(level, enabled, verbose)) return
             if (!installed.get()) {
                 // 未装（单测/JVM）时保持旧行为：仍旧只走系统日志
                 when (level) {
@@ -457,6 +515,34 @@ internal fun diagLine(stamp: String, level: Char, tag: String, thread: String, m
 internal fun diagLevelEnabled(level: Char, verbose: Boolean): Boolean = when (level) {
     'V', 'D' -> verbose
     else -> true
+}
+
+/**
+ * 常规记录的总闸（总开关 × 级别档位合成一个判据，纯函数便于表测）：
+ * 总开关**关 ⇒ 全拒**（2026-10-13 用户裁决：默认关闭省空间）；
+ * 开 ⇒ 再按级别档位判（[diagLevelEnabled]）。**崩溃件不走本判据**——它同步直写文件（取证语义）。
+ * 判定顺序钉死为"先总开关后级别"：开关关着时连 verbose 都不必看。
+ */
+internal fun diagRecordGated(level: Char, enabled: Boolean, verbose: Boolean): Boolean {
+    if (!enabled) return true
+    return !diagLevelEnabled(level, verbose)
+}
+
+/**
+ * 「清除日志」的删除判据（纯 JVM，只碰 java.io）：删掉目录下**本系统**写的全部日志件——
+ * 当前件（[baseName] 精确名）、轮转件（`baseName.N`）、崩溃件（[crashPrefix] 前缀）；
+ * 目录里的无关文件（如私有目录兜底的导出件）一律不动。返回实际删掉的件数。
+ */
+internal fun diagClearLogFiles(dir: File, baseName: String, crashPrefix: String): Int {
+    if (!dir.isDirectory) return 0
+    var removed = 0
+    dir.listFiles()?.forEach { f ->
+        val hit = f.isFile && (
+            f.name == baseName || f.name.startsWith("$baseName.") || f.name.startsWith(crashPrefix)
+            )
+        if (hit && f.delete()) removed++
+    }
+    return removed
 }
 
 /** 当前文件是否该轮转 */

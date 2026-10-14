@@ -136,4 +136,17 @@ class SettingsDefaultsTest {
         assertTrue(p.curve.value.isPassthrough)
         assertEquals(CurveStack.IDENTITY, p.curve.value)
     }
+
+    @Test
+    fun `诊断日志两枚开关的键名与默认值（缺键都=false，2026-10-13 总开关默认关）`() {
+        val prefs = FakePrefs()
+        assertFalse("总开关默认关（省空间；崩溃件不受它影响）", WotaSettings.diagEnabled(prefs))
+        assertFalse("详细档也默认关", WotaSettings.diagVerbose(prefs))
+        WotaSettings.setDiagEnabled(prefs, true)
+        WotaSettings.setDiagVerbose(prefs, true)
+        assertTrue(WotaSettings.diagEnabled(prefs))
+        assertTrue(WotaSettings.diagVerbose(prefs))
+        assertEquals("diag_enabled", WotaSettings.KEY_DIAG_ENABLED)
+        assertEquals("diag_verbose", WotaSettings.KEY_DIAG_VERBOSE)
+    }
 }
