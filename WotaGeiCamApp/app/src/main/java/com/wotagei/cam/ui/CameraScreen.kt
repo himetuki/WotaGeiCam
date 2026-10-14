@@ -2134,14 +2134,6 @@ private class RecordRunner(
     @Volatile
     private var stopRequested = false
 
-    /**
-     * 计时显示基线（重录不跳回零，2026-10-13）：自检放弃旧 attempt 时把它已录的时长累加进来，
-     * pollTask 显示 `elapsedBaseMs + rec.elapsedMs`——重录的新引擎实例时钟从零起算，显示不许跟着
-     * 归零。结果结算（stopInternal 的 `out.durationMs`）用引擎真实值，不掺基线；新会话
-     * （attempt==0 的 beginSession 与 stopInternal 收尾）归零。
-     */
-    private var elapsedBaseMs = 0L
-
     /** 上次自动停录巡检时刻（`SystemClock.elapsedRealtime()`；0 = 本会话还没查过）。控制线程单写者。 */
     private var lastAutoStopCheckAt = 0L
 
@@ -2218,8 +2210,6 @@ private class RecordRunner(
         // 自动停录巡检按会话复位：上一场的触发原因/节流时刻不许带进这一场
         autoStopReason = null
         lastAutoStopCheckAt = 0L
-        // 计时基线随新会话归零（重录 attempt>0 保留基线，累加在 abandonAndRestart）
-        if (attempt == 0) elapsedBaseMs = 0L
         store.checkFreeSpace()?.let { code ->
             failNow(code); return true
         }
@@ -2415,8 +2405,9 @@ private class RecordRunner(
         override fun run() {
             val rec = recorder
             if (!polling || rec == null) return
-            // 显示值带重录基线：旧 attempt 被弃后新实例时钟归零，计时不能跟着跳回 00:00
-            elapsedMs.value = elapsedBaseMs + rec.elapsedMs
+            // 取引擎当前 attempt 的真实时长——重录跳回 00:00 是**有意为之**（2026-10-14 用户裁决）：
+            // 被弃段不进成片，显示值必须与最终成片时长同口径，不掺任何跨 attempt 基线
+            elapsedMs.value = rec.elapsedMs
             volumeDb.value = AudioProbe.dbOf(rec.amplitude())
             maybeAutoStop()
             if (status.value == RecordStatus.START) handler.postDelayed(this, POLL_MS)
@@ -2618,8 +2609,6 @@ private class RecordRunner(
         if (rec == null) {
             failNow(RecordError.SELF_CHECK_FAILED); return
         }
-        // 计时连续性：旧 attempt 已录时长并入显示基线——必须在停引擎（时钟复位）前读
-        elapsedBaseMs += rec.elapsedMs
         // 停止检查点（判废后、重录前）：见类注。teardownAbandonedSession 不改 status，
         // 收尾由 stopInternal 完成（此刻 recorder 已 null，走幂等早退把 START 收回 IDLE）
         if (stopRequested) {
@@ -2826,10 +2815,8 @@ private class RecordRunner(
         val reason = autoStopReason
         autoStopReason = null
         result.value = if (reason != null) out.copy(autoStopReason = reason) else out
-        // 停止收尾完成：取消信号清账；计时基线归零（显示值 out.durationMs 是引擎结算值，
-        // 下一场 start 从零起算）
+        // 停止收尾完成：取消信号清账（显示值 out.durationMs 是引擎结算值，下一场 start 从零起算）
         stopRequested = false
-        elapsedBaseMs = 0L
     }
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */

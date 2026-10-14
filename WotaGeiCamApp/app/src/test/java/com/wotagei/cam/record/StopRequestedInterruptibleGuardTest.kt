@@ -22,7 +22,8 @@ import org.junit.Test
  * - `stopRequested` 即时取消标志：stopAsync 在 UI 线程先置位再排队，链上检查点见它即让出
  *   （abandonAndRestart 早退 / beginSession 检查点①②③ / await 轮询条件提前打断）；
  * - 预览重开触顶归 Camera2Engine（另见 camera/PreviewReopenCapGuardTest）；
- * - `elapsedBaseMs` 计时基线：弃段重录时累加旧 attempt 时长，显示不跳回 00:00。
+ * - 计时口径：显示直接取引擎真实值，重录跳回 00:00 是有意为之（与成片同口径，2026-10-14
+ *   用户裁决；曾试过"基线累加防跳零"，会显示比成片长的数字，已回滚并钉成红线）。
  *
  * 「尺子自己能红」：每条判据配突变自证（对遮蔽后文本做替换再断言；替换不中 = 结构本就不在）。
  */
@@ -144,31 +145,33 @@ class StopRequestedInterruptibleGuardTest {
         assertFalse("stopInternal 清账被拆后尺子必须红", mutated.contains("stopRequested = false"))
     }
 
-    // ------------------------------------------------------------------ 计时不跳回零
+    // ------------------------------------------------------------------ 计时口径（用户裁决：与成片同口径）
 
     @Test
-    fun `计时基线_显示加基线_弃段处累加_收尾归零`() {
-        // pollTask 显示值必须带基线（窗口截法同 AutoStopWiringGuardTest）
+    fun `计时显示直接取引擎真实值_不掺跨attempt基线`() {
+        // pollTask 显示值必须是裸 rec.elapsedMs（窗口截法同 AutoStopWiringGuardTest）。
+        // 2026-10-14 用户裁决：重录跳回 00:00 是**有意为之**——被弃段不进成片，显示必须与
+        // 最终成片时长同口径；曾经的"基线累加防跳零"方案会显示比成片长的数字，用户对不上账
+        // 必然再报障，已回滚。这条判据把「显示=成片同口径」钉成红线。
         val pollWindow = masked.substringAfter("val pollTask", missingDelimiterValue = "")
             .substringBefore("private fun maybeAutoStop", missingDelimiterValue = "")
         assertTrue(
-            "pollTask 显示必须为 elapsedBaseMs + rec.elapsedMs——重录新实例时钟归零，显示不许跳回 00:00",
-            pollWindow.contains("elapsedBaseMs + rec.elapsedMs")
+            "pollTask 显示必须为 rec.elapsedMs（引擎真实值，与成片同口径）",
+            pollWindow.contains("elapsedMs.value = rec.elapsedMs")
         )
-        val restart = body("abandonAndRestart")
-        val add = restart.indexOf("elapsedBaseMs += rec.elapsedMs")
-        val teardown = restart.indexOf("teardownAbandonedSession(rec)")
-        assertTrue(
-            "abandonAndRestart 必须在弃段收尾前累加旧 attempt 时长（add=$add teardown=$teardown）——" +
-                "收尾会停引擎复位时钟，读晚了拿到的是 0",
-            add in 0 until teardown
+        assertFalse(
+            "计时显示不许掺任何跨 attempt 基线（elapsedBaseMs 回潮即红——显示会比成片长）",
+            pollWindow.contains("elapsedBaseMs")
         )
-        assertTrue("stopInternal 收尾必须把计时基线归零（结算用引擎真实值，下一场从零起算）", body("stopInternal").contains("elapsedBaseMs = 0L"))
-        assertTrue("beginSession 新会话（attempt==0）必须把计时基线归零", body("beginSession").contains("elapsedBaseMs = 0L"))
-        // 突变自证：显示回退成裸 rec.elapsedMs（跳回零缺陷回潮）后尺子必须红
-        val mutated = masked.replace("elapsedBaseMs + rec.elapsedMs", "rec.elapsedMs")
+        // 全文件层面也不许再有基线字段（含弃段处累加、收尾归零的死代码残留）
+        assertFalse("elapsedBaseMs 不许回潮", masked.contains("elapsedBaseMs"))
+        // 突变自证：有人把显示改成掺基线 → 尺子必须红
+        val mutated = masked.replace(
+            "elapsedMs.value = rec.elapsedMs",
+            "elapsedMs.value = 123L + rec.elapsedMs"
+        )
         val mutatedWindow = mutated.substringAfter("val pollTask", "").substringBefore("private fun maybeAutoStop", "")
-        assertFalse("显示值拆掉基线后尺子必须红", mutatedWindow.contains("elapsedBaseMs"))
+        assertTrue("显示掺了基线后尺子必须红", !mutatedWindow.contains("elapsedMs.value = rec.elapsedMs"))
     }
 
     // ------------------------------------------------------------------ 语义红线
