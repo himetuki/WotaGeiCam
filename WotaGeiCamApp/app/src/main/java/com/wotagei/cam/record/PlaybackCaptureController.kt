@@ -179,15 +179,6 @@ class PlaybackCaptureController(context: Context) {
      * 失败原因不许只留日志：采集器建不起来的机型上用户只会看到"没内录轨"。
      * buffer 口径对齐 [AudioFeeder]：半最小缓冲为读块（下限 16 帧、上限 8192、整帧对齐），
      * 整缓冲 = max(minBufferSize, chunk)。
-     *
-     * # 探针变体链（2026-10-13，华为 Mate 60 Pro 鸿蒙容器内录被拒的实验替代）
-     * 该机型授权链全通（内录建链成功），但构造 AudioRecord 时 audio policy 拒绝投影捕获注册
-     * （`UnsupportedOperationException: could not register audio policy`），且拒绝连 ADB——
-     * 参数实验做不成就做进 app 里：baseline 失败后按 [captureVariantLabels] 顺序自动依次试变体，
-     * 每个变体尝试前/成功/异常/跳过都逐个留痕。用户复现一次内录开关，导出的诊断日志即可回答
-     * 「哪个变体能活 / 全死」（全死 = 容器硬缺投影捕获的铁证）。
-     * 约束：变体**不许改采样率/声道**（[AudioFeeder] 按 createCaptureAudioRecord 的传入参数口径
-     * 读帧），只变构造方式与捕获配置；哪个变体成功就返回哪个的实例，全失败才给 null。
      */
     @Suppress("MissingPermission") // 内录路径本不需要 RECORD_AUDIO；工程 manifest 已声明并做运行时检查
     fun createCaptureAudioRecord(sampleRate: Int, channels: Int): AudioRecord? {
@@ -209,97 +200,45 @@ class PlaybackCaptureController(context: Context) {
             val raw = max(minBuf / 2, frameBytes * 16).coerceAtMost(CHUNK_MAX)
             (raw / frameBytes) * frameBytes
         }
-        val channelMask = AudioProbe.channelConfig(channels)
         val format = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
             .setSampleRate(sampleRate)
-            .setChannelMask(channelMask)
+            .setChannelMask(AudioProbe.channelConfig(channels))
             .build()
-        val fullBuf = max(minBuf, chunk)
-        val labels = captureVariantLabels()
-        for (i in labels.indices) {
-            val label = labels[i]
-            val n = i + 1
-            // media-only 变体要拿活会话重建捕获配置：会话不在（已撤销/收尾竞态）只能跳过并留痕
-            if (label == "media-only-config" && CaptureFgService.projection == null) {
-                Log.i(TAG, "capture 变体[$n] $label：跳过（会话不在）")
-                continue
-            }
-            val buf = when (label) {
-                "min-buffer" -> "$minBuf"
-                // 平台自选缓冲：日志如实记 default，不冒充字节数
-                "default-buffer" -> "platform-default"
-                else -> "$fullBuf"
-            }
-            Log.i(
-                TAG,
-                "capture 变体[$n] $label：尝试（req rate=$sampleRate ch=$channels enc=PCM16 mask=$channelMask" +
-                    " buf=$buf minBuf=$minBuf）"
-            )
-            val rec = try {
-                when (label) {
-                    // baseline：现行 Builder 写法（整缓冲），历史行为原样保留为第 1 变体
-                    "baseline" -> AudioRecord.Builder()
-                        .setAudioFormat(format)
-                        .setAudioPlaybackCaptureConfig(config)
-                        .setBufferSizeInBytes(fullBuf)
-                        .build()
-                    // 同 baseline 但**不设缓冲**，让平台自己合成整个缓冲（「绕过显式参数、由系统
-                    // 合成」变量）。原 direct-constructor 方案作废：AudioRecord(config, ...) 直接
-                    // 构造器在公开 SDK 里不存在（android-34 stub 仅暴露麦克风源五 int 构造器，
-                    // 捕获路只能走 Builder）——2026-10-13 编译期实证，保守替换并如实留痕
-                    "default-buffer" -> AudioRecord.Builder()
-                        .setAudioFormat(format)
-                        .setAudioPlaybackCaptureConfig(config)
-                        .build()
-                    // 同 baseline 但缓冲取 minBufferSize：排除「缓冲区大小不被接受」这个变量
-                    "min-buffer" -> AudioRecord.Builder()
-                        .setAudioFormat(format)
-                        .setAudioPlaybackCaptureConfig(config)
-                        .setBufferSizeInBytes(minBuf)
-                        .build()
-                    // 捕获配置只含 USAGE_MEDIA 一个 usage 重建：排除「多 usage 混合注册不被接受」。
-                    // 会话在则必非 null（循环头已跳过 null 会话），兜底 ISE 交逐变体 catch 留痕
-                    "media-only-config" -> {
-                        val proj = CaptureFgService.projection
-                            ?: throw IllegalStateException("projection 会话已失效")
-                        val mediaConfig = AudioPlaybackCaptureConfiguration.Builder(proj)
-                            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                            .build()
-                        AudioRecord.Builder()
-                            .setAudioFormat(format)
-                            .setAudioPlaybackCaptureConfig(mediaConfig)
-                            .setBufferSizeInBytes(fullBuf)
-                            .build()
-                    }
-                    // 表与分支漂移的兜底：新变体进了表没写构造分支 → 逐变体 catch 留痕，不静默
-                    else -> throw IllegalStateException("未知内录探针变体：$label")
-                }
-            } catch (e: RuntimeException) {
-                // 【诊断】异常**类名**区分病因（SecurityException=权限/容器策略拒绝，
-                // UnsupportedOperationException=容器不接受捕获配置），逐变体留异常原文
-                Log.e(TAG, "capture 变体[$n] $label：${e.javaClass.name}: ${e.message}")
-                null
-            }
-            if (rec == null) continue
+        // 【已探明结论 2026-10-14】华为 Mate 60 Pro（ALN-AL00，鸿蒙容器固件升 Android 16/API 36）上
+        // 这段构造必被 audio policy 拒绝（UnsupportedOperationException: could not register audio
+        // policy）。当时做过 4 种构造变体探针（缓冲策略×捕获配置组合）全部同异常——系统层拒绝，
+        // 非参数可绕，应用侧无解；该机型内录暂不可用，降级路径保视频+环境音正常。此结论留档防止
+        // 将来对着同一台机器重复排查（探针代码已随 v0.0.8-r03 移除，过程证据在诊断日志导出件）。
+        return try {
+            val rec = AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setAudioPlaybackCaptureConfig(config)
+                .setBufferSizeInBytes(max(minBuf, chunk))
+                .build()
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "capture 变体[$n] $label：state=${rec.state}（未初始化，视为该变体失败）")
+                Log.e(TAG, "capture AudioRecord not initialized (state=${rec.state})")
                 lastInitFailure = "采集器初始化失败"
                 rec.release()
-                continue
+                null
+            } else {
+                lastInitFailure = null
+                rec
             }
-            Log.i(TAG, "capture 变体[$n] $label：成功（选中该构造 buf=$buf）")
-            lastInitFailure = null
-            return rec
+        } catch (e: RuntimeException) {
+            // 【诊断】"系统拒绝创建内录采集器"这句提示背后的现场必须留全（鸿蒙容器里最常见的一族）：
+            // 异常**类名**区分病因（SecurityException=权限/容器策略拒绝，IllegalArgumentException/
+            // UnsupportedOperationException=容器不接受捕获配置），再带上请求的参数与设备信息
+            Log.e(
+                TAG,
+                "capture AudioRecord build failed: ${e.javaClass.name}: ${e.message}" +
+                    " | req rate=$sampleRate ch=$channels enc=PCM16 mask=${AudioProbe.channelConfig(channels)}" +
+                    " buf=${max(minBuf, chunk)} minBuf=$minBuf" +
+                    " | api=${android.os.Build.VERSION.SDK_INT} 机型=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}"
+            )
+            lastInitFailure = "系统拒绝创建内录采集器"
+            null
         }
-        // 全失败汇总行：带上设备信息（鸿蒙容器里 logcat 看不到，诊断导出件是唯一现场）
-        Log.e(
-            TAG,
-            "capture 内录采集器全部 ${labels.size} 种构造均失败 | req rate=$sampleRate ch=$channels" +
-                " | api=${android.os.Build.VERSION.SDK_INT} 机型=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}"
-        )
-        lastInitFailure = "系统拒绝创建内录采集器（已试 ${labels.size} 种构造）"
-        return null
     }
 
     /**
@@ -338,25 +277,6 @@ class PlaybackCaptureController(context: Context) {
     companion object {
         /** 同 [AudioFeeder] 读块上限口径 */
         private const val CHUNK_MAX = 8192
-
-        /**
-         * 内录探针变体表（顺序即尝试序；纯函数供守卫单测钉死顺序与标签）：
-         * 1. `baseline`——现行 Builder 写法（整缓冲）；
-         * 2. `default-buffer`——同 baseline 但不设缓冲，让平台自己合成（原 direct-constructor
-         *    直接构造器在公开 SDK 不存在，编译期实证后保守替换，见体内分支注释）；
-         * 3. `min-buffer`——同 baseline 但缓冲取 minBufferSize；
-         * 4. `media-only-config`——捕获配置只含 USAGE_MEDIA 重建。
-         * 只许尾部追加，不许改既有顺序/标签：真机诊断日志按「变体[N] <label>」对号入座，
-         * 表乱一处，导出件的结论就对不上。
-         */
-        internal fun captureVariantLabels(): List<String> {
-            return listOf(
-                "baseline",
-                "default-buffer",
-                "min-buffer",
-                "media-only-config"
-            )
-        }
 
         /**
          * 捕获 usage 白名单（纯函数，供守卫单测锁集合）：官方 `addMatchingUsage` 仅接受
