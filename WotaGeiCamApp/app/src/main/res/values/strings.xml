@@ -26,10 +26,15 @@
     <string name="perm_open_settings">去设置</string>
     <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>
 
-    <!-- 诊断日志（ui/SettingsScreen.kt BlockDiag，2026-10-09 用户指令「把日志功能加上」） -->
+    <!-- 诊断日志（ui/SettingsScreen.kt BlockDiag，2026-10-09 用户指令「把日志功能加上」；
+         2026-10-13 用户裁决：总开关默认关（省空间）+ 清除按钮；崩溃件不受总开关影响） -->
     <string name="set_group_diag">诊断日志</string>
+    <string name="set_diag_enabled">记录日志</string>
+    <string name="set_diag_enabled_note">默认关闭以节省空间。关闭期间功能异常不会留下现场，排查问题请先打开此开关再复现；崩溃记录不受此开关影响（崩溃时始终写入）。</string>
     <string name="set_diag_verbose">详细日志（复现问题时打开）</string>
-    <string name="set_diag_verbose_note">默认只记关键事件；打开后连调试细节一起记，日志会变多，平时可关。</string>
+    <string name="set_diag_verbose_note">只对「记录日志」生效：开着时默认只记关键事件，再打开此项连调试细节一起记，日志会变多。</string>
+    <string name="set_diag_clear">清除日志</string>
+    <string name="set_diag_cleared">已清除</string>
     <string name="set_diag_size">日志占用</string>
     <string name="set_diag_path">日志目录</string>
     <string name="set_diag_share">直接分享</string>
@@ -40,7 +45,7 @@
     <string name="set_diag_export_busy">正在导出…</string>
     <string name="set_diag_export_done">已导出：%1$s\n位置：%2$s</string>
     <string name="set_diag_export_failed">导出失败：日志目录不可写</string>
-    <string name="set_diag_note">日志只在本机生成，只有你点「直接分享」或「导出日志」时才会写出文件；内容不含画面与声音，也不会上传。\n遇到功能异常（例如内录被系统拒绝）时：打开详细日志 → 复现一次 → 点「直接分享」发出去即可。</string>
+    <string name="set_diag_note">日志只在本机生成，只有你点「直接分享」或「导出日志」时才会写出文件；内容不含画面与声音，也不会上传。\n遇到功能异常（例如内录被系统拒绝）时：先打开「记录日志」（需要细节再开「详细日志」）→ 复现一次 → 点「直接分享」发出去即可；开关关闭期间不会留下现场。</string>
 
     <!-- 设备内录（AudioPlaybackCapture）前台服务 -->
     <string name="capture_channel_name">设备内录</string>

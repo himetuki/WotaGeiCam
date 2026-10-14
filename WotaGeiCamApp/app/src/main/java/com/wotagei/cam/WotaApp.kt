@@ -17,9 +17,13 @@ class WotaApp : Application() {
         createCaptureChannel()
         // 诊断日志（2026-10-09）：**必须在任何业务代码之前装**，否则冷启到页面就绪这段的日志收不到。
         // 只做三件事——建目录、起后台落盘线程、装崩溃处理器，都是轻量操作（不违反"冷启不做重活"）。
-        // 详细档从设置读（默认关，只记 i/w/e）。
+        // 总开关与详细档都从设置读（总开关默认关：关着时不写常规日志，崩溃件不受影响）。
         runCatching {
-            Diag.install(this, verbose = WotaSettings.diagVerbose(WotaSettings.of(this)))
+            Diag.install(
+                this,
+                verbose = WotaSettings.diagVerbose(WotaSettings.of(this)),
+                enabled = WotaSettings.diagEnabled(WotaSettings.of(this))
+            )
         }
     }
 

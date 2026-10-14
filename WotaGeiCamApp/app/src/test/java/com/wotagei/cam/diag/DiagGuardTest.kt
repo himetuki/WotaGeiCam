@@ -76,6 +76,7 @@ class DiagGuardTest {
         val app = codeOnly(mainSourceText("WotaApp.kt"))
         val create = bodyOf(app, "onCreate")
         assertTrue("冷启必须装", create.contains("Diag.install("))
+        assertTrue("总开关初值要从设置读（2026-10-13 默认关）", create.contains("diagEnabled("))
         assertTrue("详细档要从设置读", create.contains("diagVerbose("))
     }
 
@@ -131,6 +132,65 @@ class DiagGuardTest {
         assertTrue("要立即生效（不必重启应用）", block.contains("Diag.setVerbose("))
     }
 
+    /**
+     * 总开关（2026-10-13 用户裁决：默认关）的两条**语义锚**：
+     * 1. 常规记录的 enabled 短路必须发生在级别档位判定**之前**（关 = 全拒，连 verbose 都不看）；
+     * 2. **崩溃写入路径不许出现 enabled 短路**——本日志系统存在的理由就是"被系统拒绝类问题必须留现场"，
+     *    默认关闭后崩溃取证是唯一零常态占用的兜底，量小、价值极高，绝不能被开关卡住。
+     * 判据全部走函数体定位 + 突变自证，防"文本在哪都行"的假绿。
+     */
+    @Test
+    fun `总开关短路必须在级别判定之前且常规记录入口必须走这道门`() {
+        assertTrue("对照组：真源码必须通过", gateOrderOk(diag) && recordGatedOk(diag))
+        // 突变 1：把总开关判定摘掉（只剩级别档位）⇒ 顺序判据必红
+        val m1 = diag.replace("if (!enabled) return true", "")
+        assertFalse("对照突变体必须真的改动", m1 == diag)
+        assertFalse("摘掉总开关短路后必须红", gateOrderOk(m1))
+        // 突变 2：常规记录入口摘掉这道门 ⇒ 接线判据必红
+        val m2 = diag.replace("if (diagRecordGated(level, enabled, verbose)) return", "")
+        assertFalse("对照突变体必须真的改动", m2 == diag)
+        assertFalse("记录入口不走总开关后必须红", recordGatedOk(m2))
+    }
+
+    @Test
+    fun `崩溃写入路径不受总开关影响（取证语义锚）`() {
+        val crash = bodyOf(diag, "installCrashHandler")
+        assertFalse("崩溃写入函数体内不许出现 enabled 短路（崩溃件必须无条件落盘）", crash.contains("enabled"))
+        // 突变自证：往崩溃路径塞一道总开关 ⇒ 判据必红（证明判据真看得见这个函数体）
+        val mutant = diag.replace(
+            "File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)",
+            "if (!enabled) return\n" +
+                "File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)"
+        )
+        assertFalse("对照突变体必须真的改动", mutant == diag)
+        assertTrue("崩溃路径被开关卡住后判据必须报出来", bodyOf(mutant, "installCrashHandler").contains("enabled"))
+    }
+
+    @Test
+    fun `总开关必须落库即时生效关时详细档置灰且清除走Diag_clear`() {
+        val block = codeOnly(mainSourceText("ui/SettingsScreen.kt")).substringAfter("private fun BlockDiag(")
+        assertTrue("总开关要持久化", block.contains("WotaSettings.setDiagEnabled("))
+        assertTrue("总开关要立即生效（不必重启应用）", block.contains("Diag.setEnabled("))
+        assertTrue(
+            "总开关接线必须排在详细档之前（UI 层级：先能记，才谈记多细）",
+            block.indexOf("diagEnabled(prefs)") in 0 until block.indexOf("diagVerbose(prefs)")
+        )
+        assertTrue("总开关关时详细档 Switch 必须置灰（enabled = diagOn）", block.contains("enabled = diagOn"))
+        assertTrue("必须有清除按钮且走 Diag.clear(", block.contains("Diag.clear("))
+    }
+
+    /** 判据本体：总开关短路（`if (!enabled)`）在该纯函数里先于级别档位判定（[diagLevelEnabled]） */
+    private fun gateOrderOk(src: String): Boolean {
+        val gate = bodyOf(src, "diagRecordGated")
+        val on = gate.indexOf("if (!enabled)")
+        val lvl = gate.indexOf("diagLevelEnabled(")
+        return on in 0 until lvl
+    }
+
+    /** 判据本体：常规记录入口真的把总开关判据接进了调用链 */
+    private fun recordGatedOk(src: String): Boolean =
+        bodyOf(src, "record").contains("diagRecordGated(level, enabled, verbose)")
+
     @Test
     fun `记录动作不许把主流程带崩（全程吞异常）`() {
         val record = diag.substringAfter("private fun record(")
@@ -170,8 +230,9 @@ class DiagGuardTest {
      * lastPruneMs 走读-改-写（先 get 再 set），@Volatile 只保证可见不保证原子 ⇒ 只能是 AtomicLong。
      */
     @Test
-    fun `五个跨线程字段必须收口（四个 Volatile 加一个 AtomicLong）`() {
-        for (name in listOf("appRef", "logDir", "current", "writer")) {
+    fun `七个跨线程字段必须收口（六个 Volatile 加一个 AtomicLong）`() {
+        // 2026-10-13：总开关 enabled 与详细档 verbose 一样由主线程写、任意记录线程读，同入本表
+        for (name in listOf("appRef", "logDir", "current", "writer", "enabled", "verbose")) {
             val f = Diag::class.java.getDeclaredField(name)
             assertTrue("$name 漏 @Volatile：别的线程可能永久读到旧值", Modifier.isVolatile(f.modifiers))
         }
