@@ -2123,6 +2123,25 @@ private class RecordRunner(
     @Volatile
     private var pendingStop = false
 
+    /**
+     * 停止请求的**即时取消标志**（2026-10-13 真机：判废自动重录链是一条不可抢占的单 handler 消息，
+     * 链上阻塞步依次是 createPending(≤3s) → prepare → 挂面等待(≤1.5s×2) → 自检窗口(≤3s) → 再重录，
+     * 排队的 stopWithGrace 只能等整条链走完——用户点"停止"最长 ~10s 无响应）。stopAsync 在 UI 线程
+     * **先置位再排队**，链上检查点见它即让出：重录放弃（abandonAndRestart 开头）、起录中止
+     * （beginSession 检查点①②③）、等待窗提前打断（awaitPreview/awaitEncoderSurface）。
+     * UI 线程写、控制线程读，@Volatile。清零点：stopInternal 收尾完成 / start() 起新会话 / shutdown()。
+     */
+    @Volatile
+    private var stopRequested = false
+
+    /**
+     * 计时显示基线（重录不跳回零，2026-10-13）：自检放弃旧 attempt 时把它已录的时长累加进来，
+     * pollTask 显示 `elapsedBaseMs + rec.elapsedMs`——重录的新引擎实例时钟从零起算，显示不许跟着
+     * 归零。结果结算（stopInternal 的 `out.durationMs`）用引擎真实值，不掺基线；新会话
+     * （attempt==0 的 beginSession 与 stopInternal 收尾）归零。
+     */
+    private var elapsedBaseMs = 0L
+
     /** 上次自动停录巡检时刻（`SystemClock.elapsedRealtime()`；0 = 本会话还没查过）。控制线程单写者。 */
     private var lastAutoStopCheckAt = 0L
 
@@ -2168,6 +2187,7 @@ private class RecordRunner(
             }
             status.value = RecordStatus.PREPARE
             pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
+            stopRequested = false // 同上：上一会话的停止取消信号不带进新会话
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
@@ -2175,7 +2195,8 @@ private class RecordRunner(
             sessionStore = VideoStore(app)
             // 系列起始时刻：与 sessionStore 同一刻打点（重录沿用同一会话，不刷新）
             sessionStartedAtMs = System.currentTimeMillis()
-            beginSession()
+            // 返回 false = 起录途中被停止请求打断（半成品已由检查点收走），这里补状态收尾
+            if (!beginSession()) stopInternal()
         }
     }
 
@@ -2185,15 +2206,22 @@ private class RecordRunner(
      *
      * 轮询与自检只在**首次尝试**（attempt==0）挂拍：重录时 status 全程保持 START，
      * 既有的 pollTask 自续链与 healthCheckTask 不会因重录而双挂（重录全在同一个 handler 消息里跑完）。
+     *
+     * 【可中断化（2026-10-13）】返回 `false` = 途中撞上 [stopRequested]（用户已点停）放弃起录：
+     * 半成品已由检查点收走（弃 pending / 共用判废收尾），调用方（[start]/[abandonAndRestart]）
+     * 据此补一句 [stopInternal] 把状态收回 IDLE。其余出口（含各类 failNow 失败）返回 `true`——
+     * 失败路径自会收尾，调用方再补 stopInternal 只会砸掉 ERROR 提示窗。
      */
-    private fun beginSession() {
-        val args = sessionArgs ?: return
-        val store = sessionStore ?: return
+    private fun beginSession(): Boolean {
+        val args = sessionArgs ?: return true
+        val store = sessionStore ?: return true
         // 自动停录巡检按会话复位：上一场的触发原因/节流时刻不许带进这一场
         autoStopReason = null
         lastAutoStopCheckAt = 0L
+        // 计时基线随新会话归零（重录 attempt>0 保留基线，累加在 abandonAndRestart）
+        if (attempt == 0) elapsedBaseMs = 0L
         store.checkFreeSpace()?.let { code ->
-            failNow(code); return
+            failNow(code); return true
         }
         val renderMode = params.renderMode.value
         val profile = buildProfile(
@@ -2226,7 +2254,13 @@ private class RecordRunner(
                 )
         }
         if (pending == null) {
-            failNow(RecordError.NO_OUTPUT); return
+            failNow(RecordError.NO_OUTPUT); return true
+        }
+        // 停止检查点①：pending 已建、引擎未建——用户意图立即生效，弃掉这枚 pending 即走
+        if (stopRequested) {
+            store.discard(OutputSink.Pending(pending))
+            Log.i(TAG_UI, "起录准备期收到停止请求：弃 pending 收场，不再起录")
+            return false
         }
         val sink = OutputSink.Pending(pending)
         sessionSink = sink
@@ -2236,13 +2270,19 @@ private class RecordRunner(
             rec.release()
             // prepare 内部已按原因码记日志；这里把余量不足与通用失败区分给 UI
             failNow(store.checkFreeSpace() ?: RecordError.PREPARE_FAILED)
-            return
+            return true
+        }
+        // 停止检查点②：引擎已 prepare、面未交相机——走共用判废收尾（停引擎/弃段账目/摘面，
+        // 与 abandonAndRestart/GIVE_UP 同一套，禁止另写一份）
+        if (stopRequested) {
+            teardownAbandonedSession(rec)
+            return false
         }
         val surface = rec.surface as? Surface
         if (surface == null) {
             rec.stop()
             rec.release()
-            failNow(RecordError.NO_OUTPUT); return
+            failNow(RecordError.NO_OUTPUT); return true
         }
         if (renderMode == RenderMode.DIRECT) {
             ctrl.setRecordingTarget(surface)
@@ -2284,6 +2324,12 @@ private class RecordRunner(
             }
             awaitEncoderSurface()
         }
+        // 停止检查点③：面已下发、等待窗结束（含被停止提前打断）——rec.start 前最后一道闸，
+        // 收尾与检查点②同一套共用判废收尾
+        if (stopRequested) {
+            teardownAbandonedSession(rec)
+            return false
+        }
         rec.start()
         status.value = RecordStatus.START
         // 准备期挂着的停止请求在此消费：先让按钮走完"进录制态"的一拍再立即停，
@@ -2293,7 +2339,7 @@ private class RecordRunner(
         if (pendingStop) {
             pendingStop = false
             stopAsync()
-            return
+            return true
         }
         // 轮询只挂一次：重录(attempt>0)复用已在跑的 pollTask 自续链，重挂会让时长/音量条翻倍刷新
         if (attempt == 0) {
@@ -2307,10 +2353,14 @@ private class RecordRunner(
                 "hint=${profile.orientationHint} audio=${profile.audioEnabled} " +
                 "capture=${profile.captureAudio}"
         )
+        return true
     }
 
     /** 非阻塞停止（ON_PAUSE 用）：投递到工作线程，避免卡主线程 */
     fun stopAsync() {
+        // 先置即时信号再排队：重录链在阻塞步之间看 [stopRequested] 让位（点停止不再等整条链），
+        // 正常宽限收尾仍由排队的 stopWithGrace 完成（宽限语义不变，maybeAutoStop 同样受益）
+        stopRequested = true
         handler.post { stopWithGrace() }
     }
 
@@ -2341,6 +2391,7 @@ private class RecordRunner(
     fun shutdown() {
         val latch = CountDownLatch(1)
         handler.post {
+            stopRequested = false // 退页收尾：清掉取消信号（本路不走检查点，直接完整停录）
             runCatching { stopInternal() }
             latch.countDown()
             thread.quitSafely()
@@ -2364,7 +2415,8 @@ private class RecordRunner(
         override fun run() {
             val rec = recorder
             if (!polling || rec == null) return
-            elapsedMs.value = rec.elapsedMs
+            // 显示值带重录基线：旧 attempt 被弃后新实例时钟归零，计时不能跟着跳回 00:00
+            elapsedMs.value = elapsedBaseMs + rec.elapsedMs
             volumeDb.value = AudioProbe.dbOf(rec.amplitude())
             maybeAutoStop()
             if (status.value == RecordStatus.START) handler.postDelayed(this, POLL_MS)
@@ -2556,17 +2608,32 @@ private class RecordRunner(
      * 停录+弃段账目+摘面交给 [teardownAbandonedSession]（与自检触顶的 GIVE_UP 分支共用同一套，
      * 禁止两处各写一份漂移）；这里只留重录侧的会话账目：attempt++ → [beginSession] 重放同一束
      * 会话接线（`setArcConvert`/`setOutputSurface` 每段必发，GPU/capture 轨随新会话重建）。
+     *
+     * 【停止检查点（2026-10-13）】进函数先问 [stopRequested]：用户已点停就不再重录——本段按判废
+     * 语义丢弃、立即收尾回 IDLE。这是重录链上最重要的让位点：真机上"判废循环里点停止 ~10s 无响应"
+     * 的主出口就是它（否则要等 beginSession 全链 + 下一轮自检窗口走完）。
      */
     private fun abandonAndRestart() {
         val rec = recorder
         if (rec == null) {
             failNow(RecordError.SELF_CHECK_FAILED); return
         }
+        // 计时连续性：旧 attempt 已录时长并入显示基线——必须在停引擎（时钟复位）前读
+        elapsedBaseMs += rec.elapsedMs
+        // 停止检查点（判废后、重录前）：见类注。teardownAbandonedSession 不改 status，
+        // 收尾由 stopInternal 完成（此刻 recorder 已 null，走幂等早退把 START 收回 IDLE）
+        if (stopRequested) {
+            Log.i(TAG_UI, "自检未过且用户已请求停止：丢弃本段并收尾，不再自动重录")
+            teardownAbandonedSession(rec)
+            stopInternal()
+            return
+        }
         Log.i(TAG_UI, "录制自检未过，丢弃本段并自动重录（第 ${attempt + 1} 次重录）")
         teardownAbandonedSession(rec)
         attempt++
         retryNotice.value = R.string.record_auto_retry
-        beginSession()
+        // 返回 false = 重录途中被停止请求打断（检查点①②③已收走半成品），补状态收尾
+        if (!beginSession()) stopInternal()
     }
 
     /**
@@ -2615,6 +2682,8 @@ private class RecordRunner(
         if (rec == null) {
             polling = false
             if (status.value != RecordStatus.IDLE) status.value = RecordStatus.IDLE
+            // 幂等早退也是"停止收尾完成"：取消信号在此清账（调用方多为检查点让出后的补收尾）
+            stopRequested = false
             return
         }
         polling = false
@@ -2757,6 +2826,10 @@ private class RecordRunner(
         val reason = autoStopReason
         autoStopReason = null
         result.value = if (reason != null) out.copy(autoStopReason = reason) else out
+        // 停止收尾完成：取消信号清账；计时基线归零（显示值 out.durationMs 是引擎结算值，
+        // 下一场 start 从零起算）
+        stopRequested = false
+        elapsedBaseMs = 0L
     }
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */
@@ -2775,15 +2848,20 @@ private class RecordRunner(
         Log.w(TAG_UI, "录制失败：$code")
     }
 
-    /** 会话重建是异步的（DIRECT 换了输出面），等预览回到 ING 再 start，避免编码器拿不到帧 */
+    /**
+     * 会话重建是异步的（DIRECT 换了输出面），等预览回到 ING 再 start，避免编码器拿不到帧。
+     * 轮询条件带 [stopRequested]：停止请求把等待窗立即打断（≤ 一个 POLL_SLICE_MS），
+     * 未就绪返回后由 beginSession 检查点③走停止分支。
+     */
     private fun awaitPreview(target: PreviewStatus) {
         var waited = 0L
-        while (waited < WAIT_MS) {
+        while (waited < WAIT_MS && !stopRequested) {
             if (ctrl.state.value.preview == target) return
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        Log.w(TAG_UI, "等待预览会话重建超时，继续 start")
+        // 被停止提前打断不算超时，不告警（正常超时仍按既有口径留一行）
+        if (!stopRequested) Log.w(TAG_UI, "等待预览会话重建超时，继续 start")
     }
 
     /**
@@ -2796,13 +2874,17 @@ private class RecordRunner(
         fun arrived(): Boolean =
             if (expected == null) gl.isOutputSurfaceBound() else gl.isEncoderSurfaceNative(expected)
         var waited = 0L
-        while (waited < WAIT_MS && !arrived()) {
+        // 轮询条件带 [stopRequested]：停止请求把等待窗立即打断，未挂好返回后由检查点③走停止分支
+        while (waited < WAIT_MS && !arrived() && !stopRequested) {
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行
+        // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行。
+        // 被停止提前打断不算超时（检查点③会收走半成品），不告警
         if (!arrived()) {
-            Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
+            if (!stopRequested) {
+                Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
+            }
         }
     }
 

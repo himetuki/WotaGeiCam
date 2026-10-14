@@ -573,6 +573,10 @@ class Camera2Engine(
                 }
                 session = configured
                 prepareBuilder(dev, targets)
+                // 重开计数归零点（自 onOpened 挪来，2026-10-13）：只有会话真正配置成功才算
+                // "重开成功"——configure 连续失败的设备上 reopenRetries 得以累积到 REOPEN_MAX，
+                // scheduleReopen 触顶后停在失败态交 UI 恢复，不再无限重开
+                reopenRetries = 0
                 publishPreview(PreviewStatus.ING)
                 applyRepeatingNow()
             }
@@ -879,7 +883,9 @@ class Camera2Engine(
                 return
             }
             device = opened
-            reopenRetries = 0
+            // 注意：重开计数**不在这里归零**（2026-10-13 真机缺陷已修）。归零点挪到了
+            // onConfigured 成功侧——否则「open 成功 → configure 反复失败」的设备上每轮重开
+            // 都会把计数清零，REOPEN_MAX 永不可达 ⇒ 黑屏无限重开循环
             publishDevice(DeviceStatus.OPEN_SUCCEED)
             if (desiredPreview) ensureSession()
         }
@@ -954,7 +960,10 @@ class Camera2Engine(
 
     private fun scheduleReopen() {
         if (reopenRetries >= REOPEN_MAX) {
-            Log.w(TAG, "自动重开次数用尽，停在失败态等用户操作")
+            // 终态（2026-10-13）：不再排下一轮重开。device/preview 状态由 failDevice 已发布，
+            // 预览停在失败态交 UI 遮罩 / 重进页面恢复——计数归零点已挪到 onConfigured 成功侧，
+            // 这里的触顶在「configure 反复失败」的真机形态下真正可达
+            Log.w(TAG, "自动重开次数用尽（多次重开失败），停在失败态等用户操作")
             return
         }
         reopenRetries++
