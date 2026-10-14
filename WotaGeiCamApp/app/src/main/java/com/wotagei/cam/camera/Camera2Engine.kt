@@ -488,16 +488,26 @@ class Camera2Engine(
         publishPreview(PreviewStatus.START)
 
         val physicalId = lens?.physicalId
-        val configs = targets.map { surface ->
-            OutputConfiguration(surface).apply {
-                if (physicalId != null) {
-                    try {
-                        setPhysicalCameraId(physicalId)
-                    } catch (e: IllegalArgumentException) {
-                        Log.w(TAG, "物理镜头 $physicalId 未登记，退回逻辑相机下发")
+        // 输出面构造的崩溃防护（2026-10-13 真机 P0）：OutputConfiguration(surface) 构造内部会查
+        // surface 尺寸（SurfaceUtils.getSurfaceSize），录制重试期间 GL/编码侧已 release 旧输出面时
+        // 直接抛 IllegalArgumentException("Surface was abandoned")——原先裸在 try 外，异常沿
+        // WotaCamEngine 线程未捕获即终止进程。收进 try 后走既有 failDevice 收尾（与下方
+        // createCaptureSession 的 IAE 同一失败码），自动重开/用户重试接管。
+        val configs = try {
+            targets.map { surface ->
+                OutputConfiguration(surface).apply {
+                    if (physicalId != null) {
+                        try {
+                            setPhysicalCameraId(physicalId)
+                        } catch (e: IllegalArgumentException) {
+                            Log.w(TAG, "物理镜头 $physicalId 未登记，退回逻辑相机下发")
+                        }
                     }
                 }
             }
+        } catch (e: IllegalArgumentException) {
+            failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "输出面已失效（Surface abandoned 或参数非法）")
+            return
         }
         val config = SessionConfiguration(
             if (highSpeed) SessionConfiguration.SESSION_HIGH_SPEED
