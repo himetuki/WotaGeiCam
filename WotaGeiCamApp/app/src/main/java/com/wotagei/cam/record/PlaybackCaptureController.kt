@@ -66,6 +66,42 @@ class PlaybackCaptureController(context: Context) {
      */
     val trackLost: StateFlow<CaptureTrackLost?> = _trackLost.asStateFlow()
 
+    private val _captureSilent = MutableStateFlow(false)
+
+    /**
+     * 内录纯静音告警（2026-10-14 数字静音流）：部分固件的投影音频捕获会整段给出全零 PCM——
+     * 轨在、样本在、播放却没声。与 [trackLost] 的「轨丢失」语义不同（那种会触发降级收尾），
+     * 静音流的内录轨是完整的，只差一句提醒，所以走这条独立轻提示流，不借道降级通道。
+     * UI 提示后调 [clearCaptureSilence] 读走即清；是否再触发由 [silenceLatch] 按**捕获会话**
+     * 去重——同一会话（一次投影授权周期，可跨多次录制/多个分段）只提示一次，重新授权进入
+     * 新会话（[apply] 里进入 Active）才复位。
+     */
+    val captureSilent: StateFlow<Boolean> = _captureSilent.asStateFlow()
+
+    /** 会话级去重锁存（纯状态 [OnceLatch]）：本会话已提示过就不再触发 */
+    private val silenceLatch = OnceLatch()
+
+    /**
+     * 引擎段收尾静音判据命中（`CodecRecorder.captureSilenceVerdict`）的出口：
+     * W 级日志一条 + 事件置位，会话内去重（引擎每个静音段照常判读计数进段收尾行）。
+     */
+    fun reportCaptureSilence() {
+        if (!silenceLatch.tryFire()) return
+        Log.w(TAG, "内录轨为纯静音（系统捕获未放行，本段内录轨无声）")
+        _captureSilent.value = true
+    }
+
+    /** UI 读走事件后清槽：只清可见位，去重锁存不动——同会话后续静音段不重复提示 */
+    fun clearCaptureSilence() {
+        _captureSilent.value = false
+    }
+
+    /** 捕获会话复位（进入 Active 即新会话）：锁存与可见位一并清，新会话重新可提示 */
+    private fun resetCaptureSilence() {
+        silenceLatch.reset()
+        _captureSilent.value = false
+    }
+
     /** 最近一次 [createCaptureAudioRecord] 失败的中文短因（提示文案参数；成功创建即清空） */
     @Volatile
     var lastInitFailure: String? = null
@@ -271,6 +307,9 @@ class PlaybackCaptureController(context: Context) {
         }
         if (to != from) {
             Log.i(TAG, "capture 状态 ${captureStateLabel(from)} --${captureEventLabel(event)}--> ${captureStateLabel(to)}")
+            // 新捕获会话开始（进入 Active）：静音告警的会话级去重随之复位——重授权后的新会话
+            // 要能重新提示；同一会话内（含跨多次录制）只提示一次
+            if (to is CaptureState.Active && from !is CaptureState.Active) resetCaptureSilence()
         }
     }
 
@@ -331,4 +370,24 @@ internal fun captureEventLabel(e: CaptureEvent): String = when (e) {
     is CaptureEvent.EstablishFailed -> "建链失败"
     CaptureEvent.ProjectionStopped -> "会话被撤销"
     CaptureEvent.Shutdown -> "主动关停"
+}
+
+/**
+ * 一次性触发锁存（纯状态，零 android 引用，JVM 可测——静音告警的去重语义在单测里锁死）。
+ * [PlaybackCaptureController] 用它把「内录纯静音」提示收敛到每捕获会话一次。
+ */
+internal class OnceLatch {
+    private var fired = false
+
+    /** 首次调用返回 true 并置位；已触发则返回 false */
+    fun tryFire(): Boolean {
+        if (fired) return false
+        fired = true
+        return true
+    }
+
+    /** 复位（新捕获会话开始）：下一次 [tryFire] 重新返回 true */
+    fun reset() {
+        fired = false
+    }
 }

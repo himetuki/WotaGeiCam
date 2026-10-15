@@ -75,6 +75,9 @@
     <string name="audio_track_lost_inactive">内录已中断，本次仅录环境音</string>
     <string name="audio_track_lost_no_samples">内录未采集到声音，本次仅录环境音</string>
     <string name="audio_track_lost_encoder">内录音轨建立失败，本次仅录环境音</string>
+    <!-- 内录纯静音告警（数字静音流 2026-10-14）：轨在、样本在、全程无声——与上面 audio_track_lost_*
+         （轨不在）语义不同，独立 StateFlow（PlaybackCaptureController.captureSilent）提示，会话内去重 -->
+    <string name="capture_silent_hint">内录为静音，本机系统未放行音频捕获</string>
     <string name="audio_chip_label">音频</string>
     <string name="audio_chip_capture_on">内录中</string>
     <string name="audio_chip_bt_on">蓝牙已连接</string>

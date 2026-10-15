@@ -14,6 +14,8 @@ import com.wotagei.cam.core.WotaTiers
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.log10
+import kotlin.math.roundToInt
 
 /**
  * 自研管线：`MediaCodec + MediaMuxer + AudioRecord`（04 文件 §3：fps > 60 的高速路径；
@@ -110,7 +112,36 @@ class CodecRecorder(
                 else -> waitStartMs to (nowMs - waitStartMs > CAP_SAMPLE_WAIT_MS)
             }
         }
-    }
+
+    /**
+     * 内录静音判读的时长门槛：本段内录有效样本超过 2s 才判读。太短不判——启动窗口内的
+     * 短暂静音（会话刚建立、媒体还没出声）不该告警。
+     */
+    internal const val CAPTURE_SILENCE_MIN_MS = 2_000L
+
+    /**
+     * 数字静音阈值（dB，口径同 [rmsToDb]）：整段逐块 RMS 峰值 ≤ 此值视为纯零样本流。
+     * 真机实证（Android 16 固件）：内录轨 7.76s、371 包、全程恒定零样本——正常录音（哪怕
+     * 极安静）的 RMS 峰值也远在此阈值之上，全零 PCM 才落得进来。
+     */
+    internal const val CAPTURE_SILENCE_PEAK_DB = -80
+
+    /**
+     * RMS→dB 取整（口径对齐 `AudioProbe.dbOf` 的既有换算 `amp ≤ 0 → -160`，
+     * `20×log10(amp/0.1)`）：静音判读与段收尾行共用这一份，不另立第二把尺。
+     * 取整是为了判据与日志可读，量程与 dbOf 一致。
+     */
+    internal fun rmsToDb(amplitude: Int): Int =
+        if (amplitude <= 0) -160 else (20.0 * log10(amplitude.toDouble() / 0.1)).roundToInt()
+
+    /**
+     * 内录纯静音判据（纯函数，段收尾一次性调用，不在热循环做 dB 换算）：
+     * 轨有真实样本产出、有效时长过 [CAPTURE_SILENCE_MIN_MS]、整段 RMS 峰值 ≤
+     * [CAPTURE_SILENCE_PEAK_DB]，三者同时成立才告警。
+     */
+    internal fun captureSilenceVerdict(hasSamples: Boolean, durationMs: Long, peakDb: Int): Boolean =
+        hasSamples && durationMs >= CAPTURE_SILENCE_MIN_MS && peakDb <= CAPTURE_SILENCE_PEAK_DB
+}
 
     /** 单条音频通道的逐段状态（批 3：heldPkt / 末包 PTS / EOS 标志环境、内录各一套）。 */
     private class AudioChannel {
@@ -139,6 +170,8 @@ class CodecRecorder(
         var feedDropped = 0
         /** 喂码时数据长于输入缓冲被截断的枚数（记账；不进任何判定） */
         var feedTruncated = 0
+        /** 本段已成功喂进编码器的真实 PCM 字节账（EOS 哨兵/喂码失败不计）：内录静音判读的有效时长来源 */
+        var fedBytes = 0L
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
         var heldOutIdx = -1
         var heldPts = 0L
@@ -1652,6 +1685,21 @@ class CodecRecorder(
             engineError = engineError ?: RecordError.NO_VIDEO_TRACK
             return false
         }
+        // 内录纯静音判读（段收尾一次性，2026-10-14 数字静音流）：逐块 RMS 由采集线程现算并记峰值
+        // （AudioFeeder.peakAmplitude，drain 复位与段对齐），dB 换算与判读都不在热循环。
+        // 门：内录轨真实在场（hasSample 且未废弃）且未走失效收尾——轨不在场时 NO_SAMPLES /
+        // SOURCE_INACTIVE 各有语义，静音判读不叠报。命中 → W 级告警（控制器按捕获会话去重），
+        // 判读结果照常进下面的段收尾行
+        var capRmsInfo = "off"
+        if (cf != null && capCh != null && capCh.hasSample && !capCh.dropped && !capTornDown) {
+            val capPeakRms = cf.peakAmplitude()
+            val capPeakDb = rmsToDb(capPeakRms)
+            // 有效时长 = 实喂编码器的 PCM 字节 ÷（采样率 × 帧字节数）：EOS 哨兵/喂码失败/段界丢弃都不计
+            val capFedMs = capCh.fedBytes * 1000L / (cf.sampleRate.toLong() * cf.channels * 2)
+            val capSilent = captureSilenceVerdict(capCh.hasSample, capFedMs, capPeakDb)
+            if (capSilent) PlaybackCaptureController.get(ctx).reportCaptureSilence()
+            capRmsInfo = "峰值=$capPeakRms(${capPeakDb}dB) 有效=${capFedMs}ms 静音=${if (capSilent) "是" else "否"}"
+        }
         // 三轨时长并排给出一行即可判定漂移：视频/环境/内录互为轨间偏移，与墙钟差即整体滑移
         // （本机无 >60fps 能力，这条路径的音画同步只能靠日志取证，见 docs/plan/10 §19 与任务 #33）
         Log.i(
@@ -1663,7 +1711,8 @@ class CodecRecorder(
                 // pts 单调兜底的两枚账（见 [muxPtsFixes]）：等值是设计内同格多帧，真倒退才是异常
                 "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
-                "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms"
+                "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms " +
+                "内录RMS[$capRmsInfo]"
         )
         return true
     }
@@ -1785,6 +1834,7 @@ class CodecRecorder(
         try {
             codec.queueInputBuffer(idx, 0, len, pkt.ptsUs, 0)
             ch.lastPtsUs = pkt.ptsUs
+            ch.fedBytes += len // 有效样本字节账（静音判读的时长来源；入队失败不计）
         } catch (e: IllegalStateException) {
             Log.e(TAG, "audio queueInput failed: ${e.message}")
         }

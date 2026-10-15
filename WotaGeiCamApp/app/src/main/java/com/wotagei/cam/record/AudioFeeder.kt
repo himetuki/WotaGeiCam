@@ -91,15 +91,15 @@ class AudioFeeder private constructor(
      *  不回错、EOS 判据探不到——用 controller 的 Active 与否兜底保证「撤销即内录轨收尾」的确定语义 */
     private val healthy: (() -> Boolean)? = null,
     /**
-     * 是否需要逐块算 PCM 幅度（RMS）。默认 true = 环境源，行为与泛化前逐字一致。
+     * 是否需要逐块算 PCM 幅度（RMS）。两路（环境/内录）现在**都开着**：
+     * - 环境源：`CodecRecorder.amplitude()` → `ui/CameraScreen` 音量表（P6：内录模式下音量条仍显环境音 RMS）；
+     * - 内录源：段收尾静音判读（2026-10-14 数字静音流：部分固件的投影捕获整段给全零 PCM，
+     *   用户录完播放才发现没声——`CodecRecorder.captureSilenceVerdict` 在段收尾一次性判读）。
      *
-     * 为什么要有这个开关（2026-10-09）：**内录源的幅度没有任何读者**。唯一读者链是
-     * `CodecRecorder.amplitude()` → `ui/CameraScreen` 的音量表，而它按 P6 裁决**只读环境源**
-     * （内录模式音量条仍显环境音 RMS）。可 RMS 是逐样本 Double 累加 + 每块一次 `sqrt`，
-     * 48kHz 立体体每秒约 4.8 万次乘加，跑在**要跟 AudioRecord 内部缓冲赛跑的采集线程**上，
-     * 纯浪费。内录实例关掉它，省下的正是这条线程最缺的东西（音频不丢）。
-     *
-     * 关掉后 [amplitude] 恒返 0——这是被接受的：没人读它，且比让调用方去判「本源有没有幅度」更不易错。
+     * 代价账（2026-10-09 记过一轮）：RMS 是逐样本 Double 累加 + 每块一次 `sqrt`，48kHz 立体声
+     * 每秒约 4.8 万次乘加，跑在**要跟 AudioRecord 内部缓冲赛跑的采集线程**上。内录源当时因
+     * 「没有读者」关掉过；现在有了读者（静音判读）且真机实证数字静音流真实存在（7.76s、371 包
+     * 全程恒定零样本），重新付账——环境路同款实现，代价可忽略。
      */
     private val needsAmplitude: Boolean = true
 ) {
@@ -148,7 +148,9 @@ class AudioFeeder private constructor(
         minBufferSize: Int
     ) : this(sampleRate, channels, SOURCE_CAPTURE, minBufferSize, { _ ->
         capture.createCaptureAudioRecord(sampleRate, channels)
-    }, healthy = { capture.state.value is CaptureState.Active }, needsAmplitude = false)
+        // needsAmplitude = true（与环境路同款逐块 RMS）：段收尾静音判读的数据基础，
+        // 见 [needsAmplitude] 的说明（2026-10-14 数字静音流）
+    }, healthy = { capture.state.value is CaptureState.Active }, needsAmplitude = true)
 
     /** 一段 PCM 与其 μs 时间戳；**ptsUs < 0 = 通道结束哨兵**（真实包时间戳恒为 nanoTime µs、恒正；
      *  哨兵 data 取 [EOS_SIZE] 长只是历史形状——判定看 pts 不看长度，4 字节恰是双声道 2 帧的合法 PCM） */
@@ -180,6 +182,12 @@ class AudioFeeder private constructor(
 
     @Volatile private var running = false
     @Volatile private var rms = 0
+    /**
+     * 逐块 RMS 峰值（与 [rms] 同点更新，一次比较）：内录段收尾静音判读的数据基础
+     * （`CodecRecorder` 在 drained 行读 [peakAmplitude] 做一次性判读）。
+     * 分段边界由 [drain] 复位，使峰值账与段对齐。
+     */
+    @Volatile private var peakRms = 0
     @Volatile private var dropped = 0
     /**
      * 空读/短读计数（`0 <= n < frameBytes`）：这类读不产生样本、循环却照跑，
@@ -224,6 +232,7 @@ class AudioFeeder private constructor(
         running = true
         dropped = 0
         zeroReads = 0
+        peakRms = 0
         lastZeroLogMs = 0L
         eosSeen = false
         firstPtsUs = 0L
@@ -273,9 +282,11 @@ class AudioFeeder private constructor(
             }
             if (n >= frameBytes) {
                 val copy = buf.copyOf(n - n % frameBytes)
-                // 只有环境源需要幅度（内录源无读者，见 needsAmplitude 的说明）：跳过逐样本 RMS，
-                // 省给采集线程的时间就是要留给 AudioRecord 缓冲的时间
-                if (needsAmplitude) rms = rmsOf(copy)
+                // 两路都要幅度（见 needsAmplitude 的说明）：环境路喂音量表，内录路喂段收尾静音判读
+                if (needsAmplitude) {
+                    rms = rmsOf(copy)
+                    if (rms > peakRms) peakRms = rms
+                }
                 val pkt = Packet(copy, System.nanoTime() / 1000L)
                 val ok = try {
                     queue.offer(pkt, OFFER_WAIT_MS, TimeUnit.MILLISECONDS)
@@ -334,13 +345,17 @@ class AudioFeeder private constructor(
     /** PCM 均方根，量程对齐 `MediaRecorder.getMaxAmplitude()`（0..32767），UI 音量表两引擎通用 */
     fun amplitude(): Int = rms
 
+    /** 自通道建立（或上次分段边界 [drain]）以来的逐块 RMS 峰值（0..32767）：内录静音判读的数据基础 */
+    fun peakAmplitude(): Int = peakRms
+
     /** 队列内未喂给编码器的包数：stop 前尽量排空，减少尾音丢失 */
     fun pending(): Int = queue.size
 
-    /** 分段边界丢弃积压：上一段的 PCM 不能落进新文件，否则 PTS 倒退 */
+    /** 分段边界丢弃积压：上一段的 PCM 不能落进新文件，否则 PTS 倒退；峰值账同点复位与段对齐 */
     fun drain() {
         val n = queue.size
         queue.clear()
+        peakRms = 0
         if (n > 0) Log.i(TAG, "pcm queue drained at segment boundary, dropped=$n")
     }
 
