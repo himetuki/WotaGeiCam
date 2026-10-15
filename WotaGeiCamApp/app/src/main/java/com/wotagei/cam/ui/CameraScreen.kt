@@ -663,6 +663,18 @@ fun CameraScreen(
         }
         capture.clearTrackLost()
     }
+    // 内录纯静音告警（2026-10-14 数字静音流）：部分固件的投影捕获整段给全零 PCM——内录轨在、
+    // 样本在，播放却没声。独立于 trackLost 通道（那是"轨丢失"语义、会触发降级收尾）：引擎段
+    // 收尾判据命中后置位，这里走既有 hint 通道提示；读走即清，同会话重复静音由控制器锁存去重。
+    // 段收尾（尤其单段录制的停止）常与「已保存」提示同拍：让 saved 提示先占满 hint 窗，
+    // 静音告警延后一拍补播——同一条槽只能先后，不能互相覆盖
+    val captureSilent by capture.captureSilent.observed()
+    LaunchedEffect(captureSilent) {
+        if (!captureSilent) return@LaunchedEffect
+        delay(HINT_MS + 400)
+        showTip(app.getString(R.string.capture_silent_hint))
+        capture.clearCaptureSilence()
+    }
 
     val canFlash = ability?.flashAvailable == true
     // 控件条一律浮在预览之上（不再各占一条黑带）：画面吃满整屏，25% 透明的材质才透得出内容
