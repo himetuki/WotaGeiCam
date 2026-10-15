@@ -207,7 +207,8 @@ private class ArcFail(val code: String) : Exception(code)
  * 一次修复会话：资源全在这里建、在这里收，[run] 无论成败都返回结果（不抛给外部）。
  *
  * 管线（v2 抽帧+补弧口径）：源 `MediaExtractor`（视频轨）→ 解码 → 按 [ArcRepairFlow] 指令
- * 抽帧/取大补弧 → 只把保留帧送编码器 → 另一条 `MediaExtractor`（音频轨）直拷 → `MediaMuxer`
+ * 抽帧/取大补弧 → 只把保留帧送编码器 → **每条音频轨各自的** `MediaExtractor`（源里全部
+ * audio/ 轨逐轨直拷，录制端双 AAC：环境麦克 + 内录 AudioPlaybackCapture）→ `MediaMuxer`
  * 封装 → `VideoStore` 入库（`IS_PENDING` 两段式）。
  */
 private class ArcRepairSession(
@@ -226,20 +227,24 @@ private class ArcRepairSession(
     private var vDec: MediaCodec? = null
     private var vEnc: MediaCodec? = null
     private var vEx: MediaExtractor? = null
-    private var aEx: MediaExtractor? = null
     private var arcGl: ArcRepairGl? = null
     private var encSurface: Surface? = null
 
     private var videoTrack = -1
-    private var audioTrack = -1
     private var muxStarted = false
 
     /** 本会话已**成功**写出的视频样本数（写失败不计数）：成功判据第三格，见 [arcRepairOk] */
     private var writtenVideoSamples = 0
     private var videoDone = false
-    private var audioDone = true
     private var encEosSent = false
     private var srcIndex = 0
+
+    /**
+     * 音频直拷 lane：源里**每条** audio/ 轨一条（录制端双 AAC 体系 = track1 环境麦克 +
+     * track2 内录 AudioPlaybackCapture，见 CodecRecorder）。单轨时代只拷第一条、内录轨被整体
+     * 丢掉（本缺陷点）；现在逐轨各建一条、互不串扰。空表 = 源无音频轨（聚合口径恒 done）。
+     */
+    private var audioLanes: List<AudioCopyLane> = emptyList()
 
     /** 首帧解码 PTS：之后所有时间戳都相对它归一（去重判距用，输出 PTS 不再走源时间轴） */
     private var decodePtsBase = -1L
@@ -259,10 +264,6 @@ private class ArcRepairSession(
     private var srcRate = ArcRateProbe.MeasuredSrcFps(FALLBACK_SRC_FPS.toLong(), 1L)
     private var durationMs = 0L
     private var videoPtsBase = -1L
-    private var audioPtsBase = -1L
-    private var audioPending = false
-    private var audioPendingPts = 0L
-    private var audioPendingSize = 0
     private var note: String? = null
 
     /** muxer 写样本失败的失败码：run() 收尾时优先于 NO_VIDEO（与 CodecRecorder.writeSample 的 :MUX 映射同语义） */
@@ -270,24 +271,20 @@ private class ArcRepairSession(
 
     /**
      * #8 单调兜底账本（桥见 [monotonicPts]，与录制链 CodecRecorder.writeSample 同口径）：
-     * 两轨各一枚 lastPts + 修正计数 + 最大倒退量。修复链虽走重编码，但 B 帧源按解码序喂入时
-     * 编码器输出 PTS 仍可能非严格递增（部分 ROM 编码器行为），同轨倒退照样抛 Muxer 异常。
+     * 视频一枚 + 每条音频 lane 各一枚（lastPts/修正计数/最大倒退量随 lane 走，见 [AudioCopyLane]）。
+     * 修复链虽走重编码，但 B 帧源按解码序喂入时编码器输出 PTS 仍可能非严格递增（部分 ROM
+     * 编码器行为），同轨倒退照样抛 Muxer 异常。
      */
     private var vMuxLastPtsUs = -1L
-    private var aMuxLastPtsUs = -1L
     private var vPtsFixes = 0
-    private var aPtsFixes = 0
     private var vPtsMaxBackUs = 0L
-    private var aPtsMaxBackUs = 0L
 
     /** 抽帧计划与它的流式桥（open() 里建，主循环逐帧问指令） */
     private lateinit var flow: ArcRepairFlow
 
-    // --- 复用件
+    // --- 复用件（音频 lane 的 bufInfo/缓冲在 lane 自带，多轨不共用）
     private val vBufInfo = MediaCodec.BufferInfo()
-    private val aBufInfo = MediaCodec.BufferInfo()
     private val encBufInfo = MediaCodec.BufferInfo()
-    private val audioBuf: ByteBuffer = ByteBuffer.allocateDirect(1 shl 20)
 
     // --- CPU 路线的平面缓冲（open() 里一次分配，逐帧复用，全为零分配）
     // cur = 当前解码帧、pend = 滞留待发的保留帧、acc = 被抽帧的取大累积面。
@@ -316,6 +313,8 @@ private class ArcRepairSession(
             if (!ok) code = code ?: writeFailCode ?: ArcRepairError.NO_VIDEO
             // 修正汇总（#8，B 帧源预期行为）：逐样本明细在 d 档（默认关），终止只落一条 i 级。
             // 插值用 ${} 花括号形式（与 CodecRecorder 段尾汇总同款）：源码守卫只认花括号里的代码
+            val aPtsFixes = audioLanes.sumOf { it.ptsFixes }
+            val aPtsMaxBackUs = audioLanes.maxOfOrNull { it.ptsMaxBackUs } ?: 0L
             if (vPtsFixes > 0 || aPtsFixes > 0) {
                 Log.i(TAG_ARC, "pts修正=v${vPtsFixes}(back=${vPtsMaxBackUs}) a${aPtsFixes}(back=${aPtsMaxBackUs})")
             }
@@ -402,24 +401,11 @@ private class ArcRepairSession(
                 "hintExtractor=$hintExtractor hintRetriever=$hintRetriever hintWritten=$hintWritten"
         )
 
-        // 音频轨（另开一条 extractor：同一 extractor 只能选一条轨）
-        val audioEx = MediaExtractor()
-        aEx = audioEx
-        var aFormat: MediaFormat? = null
-        try {
-            audioEx.setDataSource(ctx, src, null)
-            val aTrack = findTrack(audioEx, "audio/")
-            if (aTrack >= 0) {
-                audioEx.selectTrack(aTrack)
-                aFormat = audioEx.getTrackFormat(aTrack)
-                audioDone = false
-            }
-        } catch (e: IOException) {
-            Log.i(TAG_ARC, "音频轨打开失败，按无音频继续：${e.message}")
-            audioEx.release()
-            aEx = null
-            audioDone = true
-        }
+        // 音频直拷**双轨化**：源里全部 audio/ 轨各建一条 lane（录制端双 AAC = track1 环境麦克、
+        // track2 内录 AudioPlaybackCapture）。单轨时代 findTrack 命中即返回，内录轨被整体丢掉
+        // ——本缺陷点。枚举复用视频 extractor（数轨不动样本游标）；建 lane 时每轨**各配一枚新
+        // extractor**：同一 extractor 只能 select 一条轨（约束不变，×N）。
+        audioLanes = openAudioLanes(audioTrackIndices(videoEx))
 
         // 输出与封装。成片名带抽帧前缀（"30fto24f_"，源=实测帧率）：名字上可辨本片被抽过帧
         val st = VideoStore(ctx)
@@ -431,20 +417,20 @@ private class ArcRepairSession(
         val t = OutputTarget.open(ctx, sk) ?: throw ArcFail(RecordError.NO_OUTPUT)
         target = t
         muxer = openMuxer(t, hint)
-        if (aFormat != null) {
-            // 源音频不是封装器认识的格式（或 csd 缺失）时，宁可没有音轨也不整单失败
-            audioTrack = try {
-                muxer!!.addTrack(aFormat)
+        for (lane in audioLanes) {
+            // 源音频不是封装器认识的格式（或 csd 缺失）时，宁可没有该音轨也不整单失败；
+            // addTrack 失败只降级本 lane（done + 释放），不连坐其他音轨
+            lane.muxTrack = try {
+                muxer!!.addTrack(lane.format)
             } catch (e: Exception) {
-                Log.i(TAG_ARC, "音频轨加入失败，改出无音轨成片：${e.message}")
+                Log.i(TAG_ARC, "音频轨 ${lane.label} 加入失败，该轨改无音轨继续：${e.message}")
                 -1
             }
-            if (audioTrack >= 0) {
-                Log.i(TAG_ARC, "音频轨已加（直拷）track=$audioTrack")
+            if (lane.muxTrack >= 0) {
+                Log.i(TAG_ARC, "音频轨已加（直拷）label=${lane.label} srcTrack=${lane.trackIndex} muxTrack=${lane.muxTrack}")
             } else {
-                audioDone = true
-                runCatching { aEx?.release() }
-                aEx = null
+                lane.done = true
+                lane.release()
             }
         }
 
@@ -564,6 +550,33 @@ private class ArcRepairSession(
         return -1
     }
 
+    /** 源容器里**全部** audio/ 轨号（升序 = 容器轨序；录制端写入序为环境先、内录后，lane 顺序沿用） */
+    private fun audioTrackIndices(ex: MediaExtractor): List<Int> {
+        val out = ArrayList<Int>()
+        for (i in 0 until ex.trackCount) {
+            val m = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+            if (m.startsWith("audio/")) out.add(i)
+        }
+        return out
+    }
+
+    /** 每条 audio/ 轨建一条 lane、各配一枚新 extractor；单轨打开失败只弃该轨，按无音频继续 */
+    private fun openAudioLanes(idxs: List<Int>): List<AudioCopyLane> {
+        val lanes = ArrayList<AudioCopyLane>(idxs.size)
+        idxs.forEachIndexed { li, ti ->
+            val ex = MediaExtractor()
+            try {
+                ex.setDataSource(ctx, src, null)
+                ex.selectTrack(ti)
+                lanes.add(AudioCopyLane("audio$li", ex, ex.getTrackFormat(ti), ti))
+            } catch (e: IOException) {
+                Log.i(TAG_ARC, "音频轨 ti=$ti 建 lane 失败，该轨按无音频继续：${e.message}")
+                runCatching { ex.release() }
+            }
+        }
+        return lanes
+    }
+
     /** 数视频轨样本数（索引式 advance，不解码）；数完必须 seek 回起点 */
     private fun countSamples(ex: MediaExtractor): Int {
         var n = 0
@@ -605,7 +618,7 @@ private class ArcRepairSession(
         val deadline = SystemClock.elapsedRealtime() +
             (if (durationMs > 0) durationMs * DEADLINE_FACTOR else DEADLINE_EXTRA_MS) + DEADLINE_EXTRA_MS
 
-        while (!videoDone || !audioDone) {
+        while (!videoDone || !audioAllDone()) {
             if (cancelled()) throw ArcFail(ArcRepairError.CANCELLED)
             if (SystemClock.elapsedRealtime() > deadline) throw ArcFail(ArcRepairError.TIMEOUT)
 
@@ -659,7 +672,7 @@ private class ArcRepairSession(
                 drainEncoder(true)
                 if (!muxStarted) throw ArcFail(ArcRepairError.NO_VIDEO)
             }
-            if (videoDone && !audioDone) drainAudioUpTo(Long.MAX_VALUE)
+            if (videoDone && !audioAllDone()) drainAudioUpTo(Long.MAX_VALUE)
         }
 
         // 收尾：把音频尾巴也写进去
@@ -1008,7 +1021,11 @@ private class ArcRepairSession(
         try {
             m.start()
             muxStarted = true
-            Log.i(TAG_ARC, "muxer 已启动 video=$videoTrack audio=$audioTrack")
+            Log.i(
+                TAG_ARC,
+                "muxer 已启动 video=$videoTrack " +
+                    audioLanes.joinToString(" ") { "audio(${it.label})=src${it.trackIndex}/mux${it.muxTrack}" }
+            )
         } catch (e: IllegalStateException) {
             Log.e(TAG_ARC, "muxer start 失败：${e.message}")
         }
@@ -1045,67 +1062,108 @@ private class ArcRepairSession(
         drainAudioUpTo(norm)
     }
 
-    /** 音频直拷：源已是 AAC，格式（含 csd）直接 addTrack，样本原样写出去 */
+    /** 音频直拷聚合口：全部 lane 各自推进到 limitUs（视频穿插点与收尾统一走这里） */
     private fun drainAudioUpTo(limitUs: Long) {
-        val ex = aEx ?: return
-        val m = muxer ?: return
-        val tr = audioTrack
-        if (tr < 0 || audioDone || !muxStarted) return
-        while (true) {
-            if (!audioPending) {
-                audioBuf.clear()
-                val size = try {
-                    ex.readSampleData(audioBuf, 0)
+        for (lane in audioLanes) lane.drainUpTo(limitUs)
+    }
+
+    /** 聚合口径：全部音频 lane 都拷完（空集恒 true = 无音频，与单轨时代 audioDone 同语义） */
+    private fun audioAllDone(): Boolean {
+        return audioLanes.all { it.done }
+    }
+
+    /**
+     * 单条音频轨的直拷状态机（每条 audio/ 轨一枚：extractor/format/账本/缓冲全在 lane 自带，
+     * 多轨互不串扰）。[drainUpTo] 逻辑与单轨时代逐字同口径：PTS 基锚视频首帧、负 norm 丢弃、
+     * monotonicPts 独立账本、写失败归因 MUX——只是从 ×1 变 ×N。
+     */
+    private inner class AudioCopyLane(
+        val label: String,
+        val ex: MediaExtractor,
+        val format: MediaFormat,
+        val trackIndex: Int
+    ) {
+        /** muxer 侧轨号（addTrack 失败 = -1：该 lane 降级 done 不连坐） */
+        var muxTrack = -1
+        var done = false
+        var ptsBase = -1L
+        var pending = false
+        var pendingPts = 0L
+        var pendingSize = 0
+
+        /** 本 lane 的单调兜底账本（#8，与视频轨/其他 lane 各记各的） */
+        var muxLastPtsUs = -1L
+        var ptsFixes = 0
+        var ptsMaxBackUs = 0L
+
+        private val bufInfo = MediaCodec.BufferInfo()
+        private val buf: ByteBuffer = ByteBuffer.allocateDirect(1 shl 20)
+
+        /** 音频直拷：源已是 AAC，格式（含 csd）已直接 addTrack，样本原样写出去 */
+        fun drainUpTo(limitUs: Long) {
+            val m = muxer ?: return
+            if (muxTrack < 0 || done || !muxStarted) return
+            while (true) {
+                if (!pending) {
+                    buf.clear()
+                    val size = try {
+                        ex.readSampleData(buf, 0)
+                    } catch (e: Exception) {
+                        -1
+                    }
+                    if (size < 0) {
+                        done = true
+                        return
+                    }
+                    pending = true
+                    pendingPts = ex.sampleTime
+                    pendingSize = size
+                }
+                // 音频基取**视频首帧**而非音轨首样本：两轨 sampleTime 同一条容器时间轴，音轨晚启动
+                // 的源按自身首样本归一会把整条音轨往前挪（修复成片音画错位）。没有有效视频帧时退回旧口径。
+                if (ptsBase < 0L) {
+                    ptsBase = if (decodePtsBase >= 0L) decodePtsBase else pendingPts
+                }
+                val norm = pendingPts - ptsBase
+                if (norm < 0L) {
+                    // 视频起点之前的音频（音轨早启动的源）：丢弃，不挤在 0 点造成非单调/重播
+                    pending = false
+                    if (!ex.advance()) {
+                        done = true
+                        return
+                    }
+                    continue
+                }
+                if (norm > limitUs) return
+                buf.position(0)
+                buf.limit(pendingSize)
+                // 单调桥与视频轨同口径（各轨独立账本）：穿插/封轨判据不动，只改写出的戳
+                val fix = monotonicPts(muxLastPtsUs, norm)
+                if (fix.advanced) {
+                    ptsFixes++
+                    if (fix.backUs > ptsMaxBackUs) ptsMaxBackUs = fix.backUs
+                    Log.d(TAG_ARC, "音频轨${label} pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
+                }
+                muxLastPtsUs = fix.ptsUs
+                bufInfo.set(0, pendingSize, fix.ptsUs, 0)
+                try {
+                    m.writeSampleData(muxTrack, buf, bufInfo)
                 } catch (e: Exception) {
-                    -1
+                    // 与视频写失败同口径：吞异常不中断，但留 MUX 失败码（音轨整废时归因不误报）
+                    Log.e(TAG_ARC, "写音频样本失败（${label}）：${e.message}")
+                    writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
                 }
-                if (size < 0) {
-                    audioDone = true
-                    return
-                }
-                audioPending = true
-                audioPendingPts = ex.sampleTime
-                audioPendingSize = size
-            }
-            // 音频基取**视频首帧**而非音轨首样本：两轨 sampleTime 同一条容器时间轴，音轨晚启动
-            // 的源按自身首样本归一会把整条音轨往前挪（修复成片音画错位）。没有有效视频帧时退回旧口径。
-            if (audioPtsBase < 0L) {
-                audioPtsBase = if (decodePtsBase >= 0L) decodePtsBase else audioPendingPts
-            }
-            val norm = audioPendingPts - audioPtsBase
-            if (norm < 0L) {
-                // 视频起点之前的音频（音轨早启动的源）：丢弃，不挤在 0 点造成非单调/重播
-                audioPending = false
+                pending = false
                 if (!ex.advance()) {
-                    audioDone = true
+                    done = true
                     return
                 }
-                continue
             }
-            if (norm > limitUs) return
-            audioBuf.position(0)
-            audioBuf.limit(audioPendingSize)
-            // 单调桥与视频轨同口径（两轨独立账本）：穿插/封轨判据不动，只改写出的戳
-            val fix = monotonicPts(aMuxLastPtsUs, norm)
-            if (fix.advanced) {
-                aPtsFixes++
-                if (fix.backUs > aPtsMaxBackUs) aPtsMaxBackUs = fix.backUs
-                Log.d(TAG_ARC, "音频轨 pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
-            }
-            aMuxLastPtsUs = fix.ptsUs
-            aBufInfo.set(0, audioPendingSize, fix.ptsUs, 0)
-            try {
-                m.writeSampleData(tr, audioBuf, aBufInfo)
-            } catch (e: Exception) {
-                // 与视频写失败同口径：吞异常不中断，但留 MUX 失败码（音轨整废时归因不误报）
-                Log.e(TAG_ARC, "写音频样本失败：${e.message}")
-                writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
-            }
-            audioPending = false
-            if (!ex.advance()) {
-                audioDone = true
-                return
-            }
+        }
+
+        /** finish/异常路径释放（runCatching 兜底，可重复调） */
+        fun release() {
+            runCatching { ex.release() }
         }
     }
 
@@ -1137,8 +1195,8 @@ private class ArcRepairSession(
         t?.close()
         runCatching { vEx?.release() }
         vEx = null
-        runCatching { aEx?.release() }
-        aEx = null
+        for (lane in audioLanes) lane.release()
+        audioLanes = emptyList()
 
         val st = store
         val sk = sink

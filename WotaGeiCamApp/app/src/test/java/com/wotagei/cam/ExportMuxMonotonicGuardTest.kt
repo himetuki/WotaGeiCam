@@ -144,7 +144,7 @@ class ExportMuxMonotonicGuardTest {
         assertFalse("删 lastPts 回写后守卫必须报红", branchHolds(branch, "aLastPts = fix.ptsUs"))
     }
 
-    // ---- 修复链（record/ArcRepairRunner.kt）：writeVideo / drainAudioUpTo 两条写入支 ----
+    // ---- 修复链（record/ArcRepairRunner.kt）：writeVideo / drainUpTo（每条音频 lane）两条写入支 ----
     // 与导出链不同，这里两条支各是独立函数体，bodyOf 直接定位、天然互不遮蔽
 
     @Test
@@ -163,13 +163,14 @@ class ExportMuxMonotonicGuardTest {
     @Test
     fun `修复链音频写前过单调桥`() {
         val body = KotlinSourceScan.flatten(
-            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "drainAudioUpTo")
+            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "drainUpTo")
         )
         assertTrue(
-            "ArcRepairRunner.drainAudioUpTo 必须过 monotonicPts 桥（穿插/封轨判据不动，只改写出的戳）",
+            "ArcRepairRunner 每条音频 lane 的 drainUpTo 必须过 monotonicPts 桥（穿插/封轨判据不动，" +
+                "只改写出的戳；lastPts/计数账本随 lane 各持一份）",
             body.contains("monotonicPts(") &&
-                body.contains("aMuxLastPtsUs = fix.ptsUs") &&
-                body.contains("aBufInfo.set(0, audioPendingSize, fix.ptsUs, 0)")
+                body.contains("muxLastPtsUs = fix.ptsUs") &&
+                body.contains("bufInfo.set(0, pendingSize, fix.ptsUs, 0)")
         )
     }
 
