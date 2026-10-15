@@ -60,8 +60,8 @@ class ArcRepairOkTest {
         assertTrue("视频样本必须写成功才计数", wv.contains("writtenVideoSamples++"))
         assertTrue("视频写失败必须记 writeFailCode（ENGINE:MUX）", wv.contains("writeFailCode") && wv.contains("ArcRepairError.ENGINE"))
 
-        val da = bodyOf(src, "drainAudioUpTo")
-        assertTrue("音频写失败也要留 MUX 失败码（音轨整废时归因不误报）", da.contains("writeFailCode"))
+        val da = bodyOf(src, "drainUpTo")
+        assertTrue("音频写失败也要留 MUX 失败码（音轨整废时归因不误报；每条音频 lane 各自留痕）", da.contains("writeFailCode"))
 
         val fin = bodyOf(src, "finish")
         assertTrue("finish 必须按 ok 决定 keep（keep=false 只回收新输出，不动源片）", fin.contains("keep = ok"))
