@@ -2,6 +2,7 @@ package com.wotagei.cam.ui
 
 import android.content.Context
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
@@ -155,6 +156,12 @@ fun PillHost(
     onLockTip: () -> Unit,
     onUnsupported: () -> Unit,
     onFocusCenter: () -> Unit,
+    /**
+     * 对焦锁定态与切换回执（用户反馈第 2 条，副控制入口）。两个都无默认值必传——
+     * 与锚点同一条纪律：漏挂 = 胶囊里的「锁定对焦」变假开关，编译期就该挡。
+     */
+    focusLocked: Boolean,
+    onToggleFocusLock: () -> Unit,
     onPickLens: (LensSlot) -> Unit,
     freeMb: Long,
     bt: com.wotagei.cam.bt.BtSpeakerController,
@@ -170,7 +177,17 @@ fun PillHost(
         PillKey.EV -> EvPill(anchor, params, ability, onClose, onPersist)
         PillKey.WB -> WbPill(anchor, params, ability, onClose, onUnsupported, onPersist)
         PillKey.ZOOM -> ZoomPill(anchor, params, onClose, onPersist)
-        PillKey.FOCUS -> FocusPill(anchor, params, ability, onClose, onUnsupported, onFocusCenter, onPersist)
+        PillKey.FOCUS -> FocusPill(
+            anchor = anchor,
+            params = params,
+            ability = ability,
+            focusLocked = focusLocked,
+            onToggleFocusLock = onToggleFocusLock,
+            onClose = onClose,
+            onUnsupported = onUnsupported,
+            onFocusCenter = onFocusCenter,
+            onPersist = onPersist
+        )
         PillKey.BITRATE -> BitratePill(anchor, params, onClose)
         PillKey.LENS -> LensPill(anchor, slot, recording, onClose, onLockTip, onPickLens)
         PillKey.REFLINE -> RefLinePill(anchor, params, onClose)
@@ -597,6 +614,9 @@ private fun FocusPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    /** 对焦锁定态与切换回执（无默认值必传，见 [PillHost]） */
+    focusLocked: Boolean,
+    onToggleFocusLock: () -> Unit,
     onClose: () -> Unit,
     onUnsupported: () -> Unit,
     onFocusCenter: () -> Unit,
@@ -607,6 +627,11 @@ private fun FocusPill(
     val names = AfMode.values().map { stringResource(afLabelRes(it)) }
     val lo = mf.range?.start ?: 0f
     val hi = mf.range?.endInclusive ?: 0f
+    // 锁定以「单次自动对焦」（AF_MODE_AUTO）为载体：能力不含它的镜头锁不了——条目灰显 + 说明，
+    // 不做假开关（R3a；引擎 engageFocusLock 侧还有第二道守卫）。ability 未就绪时按既有惯例
+    // 给可用（与上面 AF 模式条的 `!= false` 同口径）。
+    val autoFocusSupported = ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) != false
+    val lockUsable = afMode != AfMode.MANUAL && autoFocusSupported
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_af)) {
         PillChoices(
             options = AfMode.values().mapIndexed { i, m ->
@@ -615,7 +640,14 @@ private fun FocusPill(
             selected = afMode.ordinal,
             columns = 2,
             onPick = { opt ->
-                if (opt.enabled) params.afMode.value = AfMode.values()[opt.value] else onUnsupported()
+                when {
+                    !opt.enabled -> onUnsupported()
+                    else -> {
+                        // 切换 AF 模式 = 隐式解锁（用户明确要求换策略，锁必须先让位；解除路径之三）
+                        if (params.focusLocked.value) params.focusLocked.value = false
+                        params.afMode.value = AfMode.values()[opt.value]
+                    }
+                }
             }
         )
         if (afMode == AfMode.MANUAL) {
@@ -635,12 +667,31 @@ private fun FocusPill(
                 Note(R.string.cam_af_fixed_focus)
             }
         }
+        // 底部行两枚（用户反馈第 2 条）：中心点按对焦（合同不变）+ 锁定对焦/解除锁定（副控制，
+        // 以最近点按处/中心对焦一次并保持；selected 反映锁态）
         PillChoices(
-            options = listOf(PillOption(0, stringResource(R.string.cam_tap_center))),
-            selected = -1,
-            columns = 1,
-            onPick = { onFocusCenter() }
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_tap_center)),
+                PillOption(
+                    1,
+                    stringResource(if (focusLocked) R.string.cam_focus_unlock else R.string.cam_focus_lock),
+                    enabled = lockUsable
+                )
+            ),
+            selected = if (focusLocked) 1 else -1,
+            columns = 2,
+            onPick = { opt ->
+                when {
+                    opt.value == 0 -> onFocusCenter()
+                    !lockUsable -> onUnsupported()
+                    else -> onToggleFocusLock()
+                }
+            }
         )
+        when {
+            afMode == AfMode.MANUAL -> Note(R.string.cam_focus_manual_locked)
+            !autoFocusSupported -> Note(R.string.cam_focus_lock_unsupported)
+        }
         Note(R.string.cam_tap_hint)
     }
 }
