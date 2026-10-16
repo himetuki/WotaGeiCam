@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlin.math.max
 
 /** 内录轨丢失原因（引擎层降级的可见化出口；UI 据此映射提示文案，事件本身不携带文案） */
 enum class CaptureTrackLostReason {
@@ -216,11 +215,16 @@ class PlaybackCaptureController(context: Context) {
     }
 
     /**
-     * Active 态建设备内录 AudioRecord；非 Active / 无会话 / 参数本机不支持 → null。
+     * Active 态建设备内录 AudioRecord；非 Active / 无会话 / 参数本机不支持 / **档位体检不通过** → null。
      * 每个 null 分支都写 [lastInitFailure]（引擎层 INIT_FAILED 提示的文案参数）——
      * 失败原因不许只留日志：采集器建不起来的机型上用户只会看到"没内录轨"。
-     * buffer 口径对齐 [AudioFeeder]：半最小缓冲为读块（下限 16 帧、上限 8192、整帧对齐），
-     * 整缓冲 = max(minBufferSize, chunk)。
+     * 读块/整缓冲口径的唯一真源是 [AudioProbe.chunkBytes] / [AudioProbe.recordBufferBytes]
+     * （与 [AudioFeeder] 两路共用同一函数；改口径只改那里）。
+     *
+     * 档位体检（2026-10-16）：`getMinBufferSize` 是**麦克风口径**的预判（默认输入源），与 playback
+     * capture 链能否吃下该档没有因果关系——唯一实证闸是建好后回读 `sampleRate` / `channelCount`
+     * 与请求值比对（[captureParamMismatch]）；不一致就 release 并降级，绝不让"AAC 按请求档配置、
+     * 喂进去的却是另一档 PCM"的静默错配流出去（音调漂移/截断且全程无感知）。
      */
     @Suppress("MissingPermission") // 内录路径本不需要 RECORD_AUDIO；工程 manifest 已声明并做运行时检查
     fun createCaptureAudioRecord(sampleRate: Int, channels: Int): AudioRecord? {
@@ -237,11 +241,9 @@ class PlaybackCaptureController(context: Context) {
             lastInitFailure = "采样参数本机不支持"
             return null
         }
-        val frameBytes = max(channels, 1) * 2
-        val chunk = run {
-            val raw = max(minBuf / 2, frameBytes * 16).coerceAtMost(CHUNK_MAX)
-            (raw / frameBytes) * frameBytes
-        }
+        // 整缓冲口径单源：内部即 max(minBuf, chunkBytes(minBuf, channels))，与 AudioFeeder 的
+        // openRecord 形参、泵读块同函数（原两份同式代码，见 AudioProbe.chunkBytes 的说明）
+        val bufferBytes = AudioProbe.recordBufferBytes(minBuf, channels)
         val format = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
             .setSampleRate(sampleRate)
@@ -256,7 +258,7 @@ class PlaybackCaptureController(context: Context) {
             val rec = AudioRecord.Builder()
                 .setAudioFormat(format)
                 .setAudioPlaybackCaptureConfig(config)
-                .setBufferSizeInBytes(max(minBuf, chunk))
+                .setBufferSizeInBytes(bufferBytes)
                 .build()
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "capture AudioRecord not initialized (state=${rec.state})")
@@ -264,8 +266,25 @@ class PlaybackCaptureController(context: Context) {
                 rec.release()
                 null
             } else {
-                lastInitFailure = null
-                rec
+                // 【档位体检 2026-10-16】建好后回读实际档再放行：系统可能静默重采样/改声道（内录链
+                // 无契约保证），不对照就会带着"名义格式"往下走——AAC 编码器按请求档配置、喂进去的
+                // 却是另一档 PCM ⇒ 音调漂移/截断且全程无感知。不符即 release 降级（可见链路同其它
+                // null 分支：lastInitFailure → INIT_FAILED 提示 + profile 改写）。
+                val mismatch = captureParamMismatch(sampleRate, channels, rec.sampleRate, rec.channelCount)
+                if (mismatch != null) {
+                    Log.e(
+                        TAG,
+                        "capture AudioRecord 参数回读不符：req rate=$sampleRate ch=$channels" +
+                            " 实际 rate=${rec.sampleRate} ch=${rec.channelCount}" +
+                            " | api=${android.os.Build.VERSION.SDK_INT} 机型=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}"
+                    )
+                    lastInitFailure = mismatch
+                    rec.release()
+                    null
+                } else {
+                    lastInitFailure = null
+                    rec
+                }
             }
         } catch (e: RuntimeException) {
             // 【诊断】"系统拒绝创建内录采集器"这句提示背后的现场必须留全（鸿蒙容器里最常见的一族）：
@@ -275,7 +294,7 @@ class PlaybackCaptureController(context: Context) {
                 TAG,
                 "capture AudioRecord build failed: ${e.javaClass.name}: ${e.message}" +
                     " | req rate=$sampleRate ch=$channels enc=PCM16 mask=${AudioProbe.channelConfig(channels)}" +
-                    " buf=${max(minBuf, chunk)} minBuf=$minBuf" +
+                    " buf=$bufferBytes minBuf=$minBuf" +
                     " | api=${android.os.Build.VERSION.SDK_INT} 机型=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}"
             )
             lastInitFailure = "系统拒绝创建内录采集器"
@@ -319,9 +338,6 @@ class PlaybackCaptureController(context: Context) {
     }
 
     companion object {
-        /** 同 [AudioFeeder] 读块上限口径 */
-        private const val CHUNK_MAX = 8192
-
         /**
          * 捕获 usage 白名单（纯函数，供守卫单测锁集合）：官方 `addMatchingUsage` 仅接受
          * MEDIA / GAME / UNKNOWN 三个 usage，传其它值抛 IllegalArgumentException；
@@ -350,6 +366,18 @@ class PlaybackCaptureController(context: Context) {
                 singleton ?: PlaybackCaptureController(context.applicationContext).also { singleton = it }
             }
     }
+}
+
+/**
+ * 内录档位体检判据（纯函数，全表单测见 CaptureParamAuditTest）：请求档与回读的实际档逐项相等
+ * → null（照常放行）；任一不等（含实际读出 0 = 系统未按档配置）→ 返回中文短因（含请求与实际）。
+ *
+ * 返回值直接进 [PlaybackCaptureController.lastInitFailure]——「内录不可用（%1$s），本次仅录环境音」
+ * 的文案参数，用户可见；成功路径（全等）零行为变化，由调用点的 else 分支原样返回采集器。
+ */
+internal fun captureParamMismatch(reqRate: Int, reqChannels: Int, actualRate: Int, actualChannels: Int): String? {
+    if (reqRate == actualRate && reqChannels == actualChannels) return null
+    return "本机内录不支持该档（请求 ${reqRate}Hz/${reqChannels}ch，系统改为 ${actualRate}Hz/${actualChannels}ch）"
 }
 
 /**

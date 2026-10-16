@@ -64,6 +64,27 @@ object AudioProbe {
     fun channelConfig(channels: Int): Int =
         if (channels >= 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
 
+    /** 单次读块上限：约 40ms（48k 立体声 8KB），保证 stop 几十毫秒内生效（原 [AudioFeeder] 的私有常量搬入单源） */
+    const val CHUNK_MAX = 8192
+
+    /** 一帧 PCM16 字节数：`max(channels, 1) × 2`（0/负按单声道兜底；帧对齐与读块换算共用） */
+    fun frameBytes(channels: Int): Int = max(channels, 1) * 2
+
+    /**
+     * 单次读块字节数：半个最小缓冲为基准、下限 16 帧、上限 [CHUNK_MAX]、向下对齐到整帧。
+     * **[AudioFeeder] 泵读块与 [PlaybackCaptureController] 建内录 AudioRecord 的读块计算共用这一份**
+     * ——原先是两处同式的私有算式（声称同口径却各写一份），改动只许改这里。
+     */
+    fun chunkBytes(minBufferSize: Int, channels: Int): Int {
+        val frame = frameBytes(channels)
+        val raw = max(minBufferSize / 2, frame * 16).coerceAtMost(CHUNK_MAX)
+        return (raw / frame) * frame
+    }
+
+    /** AudioRecord 构造的整缓冲字节数 = `max(minBufferSize, chunkBytes(...))`（环境/内录两路建路共用口径） */
+    fun recordBufferBytes(minBufferSize: Int, channels: Int): Int =
+        max(minBufferSize, chunkBytes(minBufferSize, channels))
+
     /** 振幅 → 分贝：`20 × log10(amp / 0.1)`（`` 音量表）；amp ≤ 0 给下限，UI 直接显示 */
     fun dbOf(amplitude: Int): Float =
         if (amplitude <= 0) -160f else (20.0 * log10(amplitude.toDouble() / 0.1)).toFloat()
@@ -145,6 +166,10 @@ class AudioFeeder private constructor(
         channels: Int,
         minBufferSize: Int
     ) : this(sampleRate, channels, SOURCE_CAPTURE, minBufferSize, { _ ->
+        // 整缓冲形参在捕获路无消费点：AudioRecord 的整缓冲由 controller 内部自算，但计算式已并归
+        // [AudioProbe.recordBufferBytes] 单源（与这里 openRecord 的口径同函数；输入 aacMinBuf 与
+        // controller 的 minBuf 同出 AudioProbe.minBufferSize，见 CodecRecorder 的「两源同值」注释）
+        // ⇒ 丢弃形参与 controller 自算恒等，等效性表在 CaptureParamAuditTest 钉住
         capture.createCaptureAudioRecord(sampleRate, channels)
         // needsAmplitude = false：内录路不做逐样本 Double RMS（见 [needsAmplitude] 的代价账）；
         // 静音判读的数据基础改由 [sawNonZero] 锁存提供（录制中巡检与段收尾共用）
@@ -159,8 +184,6 @@ class AudioFeeder private constructor(
         /** 队列上限：按 ~20ms/包算约 1.3s 音频；满了 offer 等不到空位就丢**当前这枚新包**并计数（已入队旧包保留，PTS 仍单调），绝不长阻塞采集线程 */
         private const val QUEUE_CAPACITY = 64
         private const val OFFER_WAIT_MS = 20L
-        /** 单次读块上限：约 40ms（48k 立体声 8KB），保证 stop 几十毫秒内生效 */
-        private const val CHUNK_MAX = 8192
         /** 捕获路径的音源占位（AudioPlaybackCapture 无传统音源语义，仅日志可辨） */
         const val SOURCE_CAPTURE = -1
         /** 空读告警节流：每累计这么多次数再记一条（真机可调点） */
@@ -170,13 +193,11 @@ class AudioFeeder private constructor(
     }
 
     private val queue = LinkedBlockingQueue<Packet>(QUEUE_CAPACITY)
-    private val frameBytes = max(channels, 1) * 2
+    /** 帧宽的唯一真源在 [AudioProbe.frameBytes]（与读块/整缓冲换算同源） */
+    private val frameBytes = AudioProbe.frameBytes(channels)
 
-    /** 半个最小缓冲区为读块，下限 16 帧、上限 [CHUNK_MAX]，并向下对齐到整帧 */
-    private val chunkBytes = run {
-        val raw = max(minBufferSize / 2, frameBytes * 16).coerceAtMost(CHUNK_MAX)
-        (raw / frameBytes) * frameBytes
-    }
+    /** 读块字节数：口径唯一真源在 [AudioProbe.chunkBytes]（泵读块与内录建路共用；改口径只改那里） */
+    private val chunkBytes = AudioProbe.chunkBytes(minBufferSize, channels)
 
     @Volatile private var running = false
     @Volatile private var rms = 0
@@ -240,7 +261,7 @@ class AudioFeeder private constructor(
      */
     fun start(): Boolean {
         if (running) return true
-        val rec = openRecord(max(minBufferSize, chunkBytes)) ?: return false
+        val rec = openRecord(AudioProbe.recordBufferBytes(minBufferSize, channels)) ?: return false
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "AudioRecord not initialized (state=${rec.state})")
             rec.release()
