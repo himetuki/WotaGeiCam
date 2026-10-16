@@ -142,6 +142,18 @@ class CodecRecorder(
         }
 
         /**
+         * 环境采集源"可继续喂码"判据（纯函数，"计划→行为"桥：`runSegment` 每拍问一次；判 false
+         * 即走一次性收口）。在场 **且** 采集线程未退出（[AudioFeeder.alive]）才为真。
+         *
+         * 【为什么"缺失"也算不活】feeder==null 而环境编码器在（"幽灵通道"形态——历史上由换段
+         * 编码器重建失败但 profile 未改写而来）时通道永远没有喂入端：不在这里一并收口，envCh
+         * 永不 hasSample、永不 dropped ⇒ muxer 启动门恒假 ⇒ 视频样本全被丢弃（黑洞）。
+         * 缺失与死亡对通道的后果同型，判据一并覆盖；R4 的 profile 改写再把它挡在结构层。
+         */
+        internal fun ambientSourceLive(feederPresent: Boolean, feederAlive: Boolean): Boolean =
+            feederPresent && feederAlive
+
+        /**
          * 抽干窗口的一拍推进（纯函数，"计划→行为"桥：起窗 / 推进顺延 / 超时三态各有真实语义）。
          *
          * 【为什么要进度感知】收尾抽干原来只有一条绝对 deadline（起钟即定 [DRAIN_LIMIT_MS]），
@@ -317,6 +329,16 @@ class CodecRecorder(
      */
     @Volatile private var degradedCode: String? = null
 
+    /**
+     * 本会话环境音（麦克风）路丢失（S1-M3-05 收口）：起录采集器建不起来 / prepare 期环境编码器
+     * 建失败 / 录制中采集源死亡 / 换段环境编码器重建失败，四路任一命中经 [reportAmbientLost] 置位。
+     *
+     * 泵线程（runSegment 收口）与 prepare 所在线程都可能写 ⇒ @Volatile；读侧两处：[health] 供
+     * 录制页巡检提示一次、[buildResult] 进 [RecordResult.ambientLost] 供结果文案附注。
+     * prepare/release 复位（会话级标志不许跨会话残留，同 [degradedCode] 口径）。
+     */
+    @Volatile private var ambientLost = false
+
     /** stop() 置位：循环给两轨发 EOS 后收尾 */
     @Volatile private var stopping = false
 
@@ -476,6 +498,7 @@ class CodecRecorder(
         state = EngineState.PREPARE
         engineError = null
         degradedCode = null
+        ambientLost = false
         abandonSegment = false
         stopping = false
         rotatePending = false
@@ -541,6 +564,11 @@ class CodecRecorder(
         val a = if (minBuf > 0 && p.audioEnabled) createAudioEncoder(p, minBuf) else null
         if (a == null && p.audioUsable)
             Log.i(TAG, "audio dropped on codec path: sr=${p.sampleRate} ch=${p.channels} minBuf=$minBuf")
+        // 环境编码器建失败且能力面本应可行 ⇒ 上报可见化（S1-M3-05 第二路）。判据读清：
+        // **只在 minBuf>0 && p.audioEnabled（= 真尝试建过编码器）时**报——minBuf=0 的两种成因
+        // （无 RECORD_AUDIO 权限 / 采样率组合不支持）是产品明确的纯视频降级，走上面那行既有日志
+        // 与面板侧提示，从这里上报会把"有意降级"误报成"丢轨"。
+        if (a == null && minBuf > 0 && p.audioEnabled) reportAmbientLost("prepare 期环境编码器建失败")
         aCodec = a
         // 内录第二音轨（P2：单 MP4 双 AAC）：参数与钟域同环境轨；两轨编码器**独立**创建
         //（2026-10-07 双开定版：环境音关不连坐内录，仅内录组合合法）
@@ -897,6 +925,21 @@ class CodecRecorder(
         )
     }
 
+    /**
+     * 环境音（麦克风）路丢失的**唯一上报口**（S1-M3-05 收口）：置会话级标志（[health] 供录制页
+     * 提示一次、[buildResult] 供结果文案附注）并留一条 E 级日志。标志是布尔或 ⇒ 幂等。
+     *
+     * 调用边界（"该报才报"由调用方保证）：只在「用户要求了环境音、能力面本应可行却没成」时报
+     * ——有意降级不算：权限缺失 / 采样率组合不支持（`minBuf=0` 一族）走既有日志与面板提示，
+     * **不**从这里上报（那两种是产品明确的纯视频降级，用户已被告知）。
+     *
+     * @param why 中文短因（环境音丢在哪一环；只进日志，不进 UI——文案在资源文件里按语义统一）
+     */
+    private fun reportAmbientLost(why: String) {
+        ambientLost = true
+        Log.e(TAG, "环境音轨丢失：$why（视频照常，本会话不再录环境音）")
+    }
+
     private fun startFeederOrDropAudio() {
         val p = profile ?: return
         val f = AudioFeeder(ctx, p.sampleRate, p.channels, audioSource, aacMinBuf)
@@ -912,6 +955,10 @@ class CodecRecorder(
         releaseQuietly(aCodec)
         aCodec = null
         profile = p.copy(audioEnabled = false)
+        // 能走到这里 = prepare 已把环境编码器建出来（aCodec != null ⇒ minBuf>0 = 权限在、参数
+        // 支持，用户要了环境音），采集器却在启动一刻失败——"能力面本应可行却没成"，与内录
+        // INIT_FAILED 对称上报（有意降级不在此列：那些在 prepare 就因 minBuf=0 不进本函数）
+        reportAmbientLost("环境采集器启动失败")
         Log.i(TAG, "audio feeder unavailable, continue video only")
     }
 
@@ -1021,6 +1068,7 @@ class CodecRecorder(
         state = EngineState.IDLE
         engineError = null
         degradedCode = null
+        ambientLost = false
         abandonSegment = false
         clock.reset()
         parts.clear()
@@ -1066,7 +1114,9 @@ class CodecRecorder(
             errorCode = engineError,
             elapsedMs = if (healthStartMs > 0L) SystemClock.elapsedRealtime() - healthStartMs else 0L,
             outputBytes = segWrittenBytes,
-            milestonesObservable = true
+            milestonesObservable = true,
+            // 环境音丢失（S1-M3-05 可见化）：录制页巡检读到即提示一次（结果文案另有附注，见 buildResult）
+            ambientLost = ambientLost
         )
     }
 
@@ -1455,7 +1505,19 @@ class CodecRecorder(
         if (aacMinBuf > 0 && p.audioEnabled) {
             val a = createAudioEncoder(p, aacMinBuf)
             aCodec = a
-            if (a == null) stopFeeder() // 环境编码器重建失败：同步停采集，避免 PCM 队列空转
+            if (a == null) {
+                // 环境编码器重建失败：同步停采集，避免 PCM 队列空转。**profile 一并改写**：
+                // 保留 audioEnabled 的话，下段编码器一旦重建成功就出现 `a != null` 而 feeder == null
+                // 的幽灵通道——envCh 永不喂样本、永不 dropped ⇒ muxer 启动不变式恒卡死 ⇒ 后续段
+                // 视频样本全被丢弃（黑洞），直到用户停止按 NO_VIDEO_TRACK 判废整段。
+                // 【取舍已定】瞬时性编码器创建失败（实例池被占等）从此结束本会话环境音，换取
+                // 不再黑洞；与捕获路 ENCODER_REBUILD_FAILED 支同款（profile 改写 + 上报），
+                // 成片是"前段有环境音、后段纯视频"的合法 MP4
+                stopFeeder()
+                profile = p.copy(audioEnabled = false)
+                reportAmbientLost("换段环境编码器重建失败")
+                Log.e(TAG, "env encoder rebuild failed, drop ambient track for rest of series")
+            }
         }
         if (aacMinBuf > 0 && p.captureAudio) {
             // 内录编码器重建（captureAudio 恒走本引擎，profile 已带标志）。重建失败=内录轨从
@@ -1524,6 +1586,9 @@ class CodecRecorder(
         val capCh = if (c != null) AudioChannel() else null
         // P1：捕获源失效的一次性贯穿收尾标志（teardown 幂等，恒只做一次）
         var capTornDown = false
+        // 环境采集源不活的一次性贯穿收尾标志（S1-M3-05 收口，与 capTornDown 同款幂等）：标志后
+        // 照常消费残留包/哨兵，profile 改写使后续段不再重建环境编码器，本段内重复进入只做消费
+        var envTornDown = false
         // 内录样本等待窗起点（0 = 未起窗；[capSampleWaitTick] 单写者推进）
         var capWaitStartMs = 0L
         var videoTrack = -1
@@ -1575,8 +1640,38 @@ class CodecRecorder(
                 capCh.heldOutIdx = -1
             }
             // 喂 PCM：环境/内录各自独立通道（feedAudioInput 单份共用，EOS 判定逐字沿用）
-            if (a != null && ef != null && envCh != null && !envCh.done && !envCh.eosQueued)
-                feedAudioInput(a, ef, envCh)
+            // 环境源活性每拍问桥（[ambientSourceLive]）：在场（含 ef==null 的幽灵通道形态）且
+            // 采集线程未退出才可继续喂码。判不活 ⇒ 走下面的同构收口；判据不依赖队列里还有没有
+            // 哨兵——段间死亡（上一段已消费哨兵 / openNextSegment 的 drain() 清掉未消费哨兵）
+            // 由它在**新段第一拍**发现，喂完残留走兜底 EOS，通道按 dropped 放行 muxer。
+            val envLive = ambientSourceLive(ef != null, ef?.alive() == true)
+            if (a != null && envCh != null && !envCh.done) {
+                if (envLive && ef != null) {
+                    // 活：原样喂。eosQueued 后不再喂（停止路 EOS 已入队，残留留段界丢弃，口径不变）
+                    if (!envCh.eosQueued) feedAudioInput(a, ef, envCh)
+                } else {
+                    // 环境采集源不活（ef==null 的幽灵通道 / 采集线程死亡）。【为什么必须收口而不是
+                    // 只跳过】死 feeder 的队列永远为空 ⇒ envCh 永不 hasSample、永不 dropped ⇒
+                    // startMuxerIfReady 的环境轨门恒假 ⇒ muxer 永不启动 ⇒ 视频样本全被 release
+                    // 丢弃（到用户停止才按 NO_VIDEO_TRACK 判废删整段）。收口与内录失效支同构：
+                    // 一次性（上报 + 拆 feeder + profile 改写——不改写的话下段编码器一旦重建成功，
+                    // 幽灵通道原地复现）；随后照常喂残留包与哨兵，通道按 EOS 分支的 dropped 收尾
+                    if (!envTornDown) {
+                        envTornDown = true
+                        reportAmbientLost("环境采集源不活 part=$partIndex")
+                        stopFeeder()
+                        profile = profile?.copy(audioEnabled = false)
+                        Log.i(TAG, "env source inactive, tear down ambient track part=$partIndex")
+                    }
+                    // 残留包与哨兵照常消费（ef==null 的幽灵形态跳过喂码）；不消费的话编码器
+                    // 拿不到 EOS，抽干窗口要白等一个预算
+                    if (ef != null && !envCh.eosQueued) feedAudioInput(a, ef, envCh)
+                    if (!envCh.eosQueued && (ef == null || ef.pending() == 0) && envCh.heldPkt == null) {
+                        // 队列已排空仍未收尾：哨兵没进队（死亡与 drain() 竞态 / offer 超时）→ 兜底直发
+                        queueAudioEos(a, envCh)
+                    }
+                }
+            }
             if (c != null && cf != null && capCh != null && !capCh.done) {
                 if (cf.captureActive()) {
                     feedAudioInput(c, cf, capCh)
@@ -2216,7 +2311,10 @@ class CodecRecorder(
             rotateStalls = rotateLoss.count,
             latePending = latePendingReaped,
             segmentRestarts = segmentRestarts,
-            muxDiag = muxFailDetail
+            muxDiag = muxFailDetail,
+            // 环境音丢失进结果（S1-M3-05）：ok 时 UI 在「已保存」上附注；与 degradedCode 同时命中
+            // 走组合文案（两件事互不矛盾）。失败结果（parts 为空）文案由错误码承担，不带本注
+            ambientLost = ambientLost
         )
     }
 

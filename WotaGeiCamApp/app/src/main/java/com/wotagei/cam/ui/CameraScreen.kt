@@ -424,10 +424,18 @@ fun CameraScreen(
                     // 相机被系统收回同样是一次"已保存"的正常收尾（不是失败）：说清为什么停
                     result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
                         app.getString(R.string.cam_record_saved_auto_camera_lost, formatDuration(result.durationMs))
-                    // 降级段（容器已确认收尾、文件可播，只是收尾阶段出过错，如抽干超时）：也走"已保存"，
-                    // 只补一句末尾可能不完整——诊断码进日志与落盘账目，不吓用户、不许说"失败"
+                    // 环境音丢失（S1-M3-05）与降级段（degradedCode）可同时命中：两句注互不矛盾
+                    // （一个说环境音没了、一个说末尾可能不完整），谁也不盖谁——组合场景走独立文案
+                    // 把两件事都带上，组合、单因、无因三种形态各自一条，规避"选一个丢一个"的信息损失
+                    result.ambientLost && result.degradedCode != null ->
+                        app.getString(
+                            R.string.cam_record_saved_degraded_ambient_lost,
+                            formatDuration(result.durationMs)
+                        )
                     result.degradedCode != null ->
                         app.getString(R.string.cam_record_saved_degraded, formatDuration(result.durationMs))
+                    result.ambientLost ->
+                        app.getString(R.string.cam_record_saved_ambient_lost, formatDuration(result.durationMs))
                     result.uncommitted > 0 ->
                         app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
                     result.lostMs >= LOSS_NOTICE_MIN_MS ->
@@ -459,6 +467,15 @@ fun CameraScreen(
             if (id == null) return@collect
             showTip(app.getString(id))
             runner.clearRetryNotice()
+        }
+    }
+    // 环境音丢失提示（S1-M3-05 可见化）：录制中巡检读到引擎置位即推一次，同款 hint 通道。
+    // 提示是"这一刻没有环境音"的信息，结果层的「已保存 + 附注」是另一条通道（两条各自可见）
+    LaunchedEffect(runner) {
+        runner.ambientLostNotice.collect { id ->
+            if (id == null) return@collect
+            showTip(app.getString(id))
+            runner.clearAmbientLostNotice()
         }
     }
     // 录制中相机设备被系统收回（2026-10-16 M1-01）：唯一 CLOSE 发布点 Camera2Engine.handleDeviceLost
@@ -2133,6 +2150,20 @@ private class RecordRunner(
      */
     val retryNotice = MutableStateFlow<Int?>(null)
 
+    /**
+     * 环境音丢失提示（资源 id，S1-M3-05 收口的可见化出口）：录制中巡检读到引擎
+     * [RecorderHealth.ambientLost] 置位即推一次——独立于内录轨的 CaptureTrackLost（那是内录
+     * 语义，文案不同），也不占失败通道（录制照常，只是没有环境声音）。
+     * UI 侧 collect 后走既有 hint 通道，读走即清（同 [retryNotice] 的 StateFlow 去重口径）。
+     */
+    val ambientLostNotice = MutableStateFlow<Int?>(null)
+
+    /**
+     * 同一次录制只提示一次环境音丢失（在录制中巡检里置位）。会话级：[start] 起新录制时复位；
+     * 自检重录（attempt++）不复位——用户看到的是"这一次录制"的一条提示，不是每次 attempt 一条。
+     */
+    private var ambientLostNotified = false
+
     /** 起录参数的整束（[SessionArgs]）：start 收一次，自检重录按它整束重放 */
     private class SessionArgs(
         val width: Int,
@@ -2147,6 +2178,11 @@ private class RecordRunner(
 
     fun clearRetryNotice() {
         retryNotice.value = null
+    }
+
+    /** UI 读走环境音丢失提示后清槽（StateFlow 相等去重：清了才收得到下一次同因事件） */
+    fun clearAmbientLostNotice() {
+        ambientLostNotice.value = null
     }
 
     /**
@@ -2215,6 +2251,7 @@ private class RecordRunner(
             status.value = RecordStatus.PREPARE
             pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
             stopRequested = false // 同上：上一会话的停止取消信号不带进新会话
+            ambientLostNotified = false // 环境音提示按"一次录制一条"复位（重录 attempt 间不去重）
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
@@ -2549,6 +2586,15 @@ private class RecordRunner(
                 Log.w(TAG_UI, "录制中途引擎判废（$err），立即收尾并把失败亮给用户")
                 stopInternal()
                 return
+            }
+            // 环境音丢失提示（S1-M3-05 收口的可见化出口）：引擎 [RecorderHealth.ambientLost] 置位
+            // （起录没建起来/中途死亡/换段重建失败）即推一条提示，同一次录制只推一次。排在判废
+            // 之后：那一拍引擎已判废时收尾优先（结果层自带文案），提示不再叠发。
+            // 健康读数在 Codec 路只是 @Volatile 字段快照（本拍第二次读，与上面那次同帧）
+            if (recording && !ambientLostNotified && rec.health().ambientLost) {
+                ambientLostNotified = true
+                ambientLostNotice.value = R.string.cam_ambient_lost_tip
+                Log.w(TAG_UI, "环境音轨丢失（引擎置位）：提示一次，结果文案另有附注")
             }
             if (recording) handler.postDelayed(this, POLL_MS)
         }
