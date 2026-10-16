@@ -147,6 +147,11 @@ fun PillHost(
     recording: Boolean,
     gpuMode: Boolean,
     onClose: () -> Unit,
+    /**
+     * 滑杆「松手回执」（R4/用户反馈第 1 条）：拖动中每拍只写总线，松手这一刻让调用方落盘。
+     * 无默认值必传（与锚点同一条纪律）：漏挂 = 有滑杆拖完被 force-stop 丢值，编译期就该挡。
+     */
+    onPersist: () -> Unit,
     onLockTip: () -> Unit,
     onUnsupported: () -> Unit,
     onFocusCenter: () -> Unit,
@@ -160,16 +165,16 @@ fun PillHost(
     when (key) {
         PillKey.SIZE -> SizePill(anchor, params, ability, recording, onClose, onLockTip, onUnsupported)
         PillKey.FPS -> FpsPill(anchor, params, ability, recording, onClose, onLockTip, onUnsupported)
-        PillKey.SHUTTER -> ShutterPill(anchor, params, ability, onClose)
-        PillKey.ISO -> IsoPill(anchor, params, ability, onClose)
-        PillKey.EV -> EvPill(anchor, params, ability, onClose)
-        PillKey.WB -> WbPill(anchor, params, ability, onClose, onUnsupported)
-        PillKey.ZOOM -> ZoomPill(anchor, params, onClose)
-        PillKey.FOCUS -> FocusPill(anchor, params, ability, onClose, onUnsupported, onFocusCenter)
+        PillKey.SHUTTER -> ShutterPill(anchor, params, ability, onClose, onPersist)
+        PillKey.ISO -> IsoPill(anchor, params, ability, onClose, onPersist)
+        PillKey.EV -> EvPill(anchor, params, ability, onClose, onPersist)
+        PillKey.WB -> WbPill(anchor, params, ability, onClose, onUnsupported, onPersist)
+        PillKey.ZOOM -> ZoomPill(anchor, params, onClose, onPersist)
+        PillKey.FOCUS -> FocusPill(anchor, params, ability, onClose, onUnsupported, onFocusCenter, onPersist)
         PillKey.BITRATE -> BitratePill(anchor, params, onClose)
         PillKey.LENS -> LensPill(anchor, slot, recording, onClose, onLockTip, onPickLens)
         PillKey.REFLINE -> RefLinePill(anchor, params, onClose)
-        PillKey.MONITOR -> MonitorPill(anchor, params, gpuMode, onClose)
+        PillKey.MONITOR -> MonitorPill(anchor, params, gpuMode, onClose, onPersist)
         PillKey.FLASH -> FlashPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STAB -> StabPill(anchor, params, ability, onClose, onUnsupported)
         PillKey.STORAGE -> StoragePill(anchor, params, freeMb, onClose)
@@ -377,7 +382,13 @@ private fun fpsOptions(ability: CameraAbility?, size: Size, highSpeed: Boolean):
 }
 
 @Composable
-private fun ShutterPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?, onClose: () -> Unit) {
+private fun ShutterPill(
+    anchor: IntRect,
+    params: WotaParams,
+    ability: CameraAbility?,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
     val aeMode by params.aeMode.observed()
     val shutter by params.shutter.observed()
     val size by params.size.observed()
@@ -416,7 +427,8 @@ private fun ShutterPill(anchor: IntRect, params: WotaParams, ability: CameraAbil
                     hi = hi.toFloat(),
                     step = 1000f,
                     onValueChange = { params.shutter.value = shutter.copy(value = it.toLong()) },
-                    format = { shutterText(it.toLong()) }
+                    format = { shutterText(it.toLong()) },
+                    onValueChangeFinished = onPersist
                 )
             }
         } else {
@@ -426,7 +438,13 @@ private fun ShutterPill(anchor: IntRect, params: WotaParams, ability: CameraAbil
 }
 
 @Composable
-private fun IsoPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?, onClose: () -> Unit) {
+private fun IsoPill(
+    anchor: IntRect,
+    params: WotaParams,
+    ability: CameraAbility?,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
     val aeMode by params.aeMode.observed()
     val iso by params.iso.observed()
     val lo = iso.range?.start ?: 0
@@ -441,7 +459,8 @@ private fun IsoPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?
                 step = 1f,
                 enabled = aeMode == AeMode.MANUAL,
                 onValueChange = { params.iso.value = iso.copy(value = it.roundToInt()) },
-                format = { "${it.roundToInt()}" }
+                format = { "${it.roundToInt()}" },
+                onValueChangeFinished = onPersist
             )
         } else {
             Note(R.string.unsupported_by_device)
@@ -450,7 +469,13 @@ private fun IsoPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?
 }
 
 @Composable
-private fun EvPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?, onClose: () -> Unit) {
+private fun EvPill(
+    anchor: IntRect,
+    params: WotaParams,
+    ability: CameraAbility?,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
     val aeMode by params.aeMode.observed()
     val ev by params.ev.observed()
     val evStep = ability?.evStep ?: 1f
@@ -470,7 +495,8 @@ private fun EvPill(anchor: IntRect, params: WotaParams, ability: CameraAbility?,
                 step = 1f,
                 enabled = aeMode != AeMode.MANUAL,
                 onValueChange = { params.ev.value = ev.copy(value = it.roundToInt()) },
-                format = { evText(it.roundToInt(), evStep) }
+                format = { evText(it.roundToInt(), evStep) },
+                onValueChangeFinished = onPersist
             )
         }
     }
@@ -482,7 +508,8 @@ private fun WbPill(
     params: WotaParams,
     ability: CameraAbility?,
     onClose: () -> Unit,
-    onUnsupported: () -> Unit
+    onUnsupported: () -> Unit,
+    onPersist: () -> Unit
 ) {
     val wbMode by params.wbMode.observed()
     val kelvin by params.kelvin.observed()
@@ -507,7 +534,8 @@ private fun WbPill(
                 step = 50f,
                 label = stringResource(R.string.cam_p_kelvin),
                 onValueChange = { params.kelvin.value = kelvin.copy(value = it.roundToInt()) },
-                format = { "${it.roundToInt()}K" }
+                format = { "${it.roundToInt()}K" },
+                onValueChangeFinished = onPersist
             )
             PillSlider(
                 value = tint.value.toFloat(),
@@ -516,14 +544,20 @@ private fun WbPill(
                 step = 1f,
                 label = stringResource(R.string.cam_p_tint),
                 onValueChange = { params.tint.value = tint.copy(value = it.roundToInt()) },
-                format = { String.format(Locale.US, "%+d", it.roundToInt()) }
+                format = { String.format(Locale.US, "%+d", it.roundToInt()) },
+                onValueChangeFinished = onPersist
             )
         }
     }
 }
 
 @Composable
-private fun ZoomPill(anchor: IntRect, params: WotaParams, onClose: () -> Unit) {
+private fun ZoomPill(
+    anchor: IntRect,
+    params: WotaParams,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
     val zoom by params.zoom.observed()
     val lo = zoom.range?.start ?: 1f
     val hi = zoom.range?.endInclusive ?: 1f
@@ -549,7 +583,8 @@ private fun ZoomPill(anchor: IntRect, params: WotaParams, onClose: () -> Unit) {
                 hi = hi,
                 step = 0.1f,
                 onValueChange = { params.zoom.value = zoom.copy(value = it) },
-                format = { fmtX(it) }
+                format = { fmtX(it) },
+                onValueChangeFinished = onPersist
             )
         } else {
             Note(R.string.unsupported_by_device)
@@ -564,7 +599,8 @@ private fun FocusPill(
     ability: CameraAbility?,
     onClose: () -> Unit,
     onUnsupported: () -> Unit,
-    onFocusCenter: () -> Unit
+    onFocusCenter: () -> Unit,
+    onPersist: () -> Unit
 ) {
     val afMode by params.afMode.observed()
     val mf by params.manualFocusDiopter.observed()
@@ -590,7 +626,8 @@ private fun FocusPill(
                     hi = hi,
                     label = stringResource(R.string.cam_p_mf),
                     onValueChange = { params.manualFocusDiopter.value = mf.copy(value = it) },
-                    format = { String.format(Locale.US, "%.2fD", it) }
+                    format = { String.format(Locale.US, "%.2fD", it) },
+                    onValueChangeFinished = onPersist
                 )
             } else {
                 // 定焦镜头（前摄常见）落到手动档是核心的兜底；说清楚"没有可调对焦距离"，
@@ -682,7 +719,13 @@ private fun RefLinePill(anchor: IntRect, params: WotaParams, onClose: () -> Unit
 
 /** 屏幕监看：效果互斥 + 斑马纹阈值/密度 + 峰值强度/颜色。DIRECT 下效果本来不生效，整组禁用要说得清 */
 @Composable
-private fun MonitorPill(anchor: IntRect, params: WotaParams, gpuMode: Boolean, onClose: () -> Unit) {
+private fun MonitorPill(
+    anchor: IntRect,
+    params: WotaParams,
+    gpuMode: Boolean,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
     val effect by params.frameEffect.observed()
     val zebraThreshold by params.zebraThreshold.observed()
     val zebraDensity by params.zebraDensity.observed()
@@ -714,7 +757,8 @@ private fun MonitorPill(anchor: IntRect, params: WotaParams, gpuMode: Boolean, o
                 enabled = gpuMode,
                 label = stringResource(R.string.cam_zebra_threshold),
                 onValueChange = { params.zebraThreshold.value = zebraThresholdOfUi(it.roundToInt()) },
-                format = { "${it.roundToInt()}%" }
+                format = { "${it.roundToInt()}%" },
+                onValueChangeFinished = onPersist
             )
             PillChoices(
                 label = stringResource(R.string.cam_zebra_density),
@@ -733,7 +777,8 @@ private fun MonitorPill(anchor: IntRect, params: WotaParams, gpuMode: Boolean, o
                 enabled = gpuMode,
                 label = stringResource(R.string.cam_peaking_strength),
                 onValueChange = { params.peakingStrength.value = (it / 100f).coerceIn(0f, 1f) },
-                format = { "${it.roundToInt()}%" }
+                format = { "${it.roundToInt()}%" },
+                onValueChangeFinished = onPersist
             )
             PillChoices(
                 label = stringResource(R.string.cam_peaking_color),
