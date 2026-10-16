@@ -75,7 +75,15 @@ data class RecorderHealth(
      */
     val outputBytes: Long = -1L,
     /** 三格里程碑是否可见（Codec 路 true / MR 路 false）；与 [outputBytes] 是两个独立通道 */
-    val milestonesObservable: Boolean = false
+    val milestonesObservable: Boolean = false,
+    /**
+     * 本次录制**环境音（麦克风）路丢失**（S1-M3-05 收口）：起录建不起来 / prepare 期编码器建
+     * 失败 / 录制中采集源死亡 / 换段重建失败，四路任一命中 ⇒ true = 本次成片没有环境声音。
+     * 录制页录制中巡检读到即经提示通道报一次；结果层另有 [RecordResult.ambientLost] 在
+     * 「已保存」文案上附注（两条通道各自可见，互不替代）。
+     * 默认 false：MR 路（无环境轨降级语义）与旧构造点行为逐字不变。
+     */
+    val ambientLost: Boolean = false
 )
 
 /**
@@ -164,7 +172,15 @@ data class RecordResult(
      * 专门文案（"末尾可能不完整"）而不是失败文案；诊断原文照旧留在日志与落盘账目里。
      * null = 一切正常（默认，旧构造点行为逐字不变）。
      */
-    val degradedCode: String? = null
+    val degradedCode: String? = null,
+    /**
+     * true = 本次录制**环境音（麦克风）路丢失**（起录没建起来 / prepare 期编码器建失败 / 录制中
+     * 采集源死亡 / 换段重建失败）：成片没有环境声音。[ok] 时 UI 在「已保存」文案上附注；与
+     * [degradedCode] 同时命中走组合文案（两件事互不矛盾，谁也不盖谁）；录制中另有一次巡检提示
+     * （[RecorderHealth.ambientLost] 通道）。
+     * false = 正常或引擎不报（默认，MR 路与旧构造点行为逐字不变）。
+     */
+    val ambientLost: Boolean = false
 ) {
     /** 有可用产物且无错误 */
     val ok: Boolean get() = error == null && (uri != null || path != null)

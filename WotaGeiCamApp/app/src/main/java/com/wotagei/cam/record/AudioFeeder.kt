@@ -216,6 +216,25 @@ class AudioFeeder private constructor(
     }
 
     /**
+     * 环境源活性判据（S1-M3-05 收口：引擎段循环每拍问一次）：AudioRecord 已建 且 通道未到 EOS
+     * ——即**采集线程未退出且未到 EOS**。与 [captureActive] 的**前两判据同口径**，但不含外部
+     * 健康判据（healthy 对环境源恒 null，语义无害，无需重复）。
+     *
+     * 三种收场都落 false，语义不许含混：
+     * - read 返回负值/抛异常（采集线程死亡）：pump 退出即置 [eosSeen] ⇒ 恒 false。**不能只看
+     *   [record]**：死亡并不置空 record 字段（那要等引擎收尾调 [stop]），只看它会把死源判成活；
+     * - [stop] 整段停机：record 置空 ⇒ false；
+     * - 死亡是**事后**发现（没有事件回调）：引擎下一拍问到时才为 false——段间死亡的收口靠引擎
+     *   每段第一拍问一次，不依赖队列里还有没有 EOS 哨兵（哨兵可能已被上一段消费或被 drain 清掉）。
+     *
+     * 花括号体不是风格偏好：结构守卫用 bodyOf 抓函数体做突变自证，表达式体让守卫失去输入
+     * （同 `CodecRecorder.capSampleWaitTick` 先例）。
+     */
+    fun alive(): Boolean {
+        return record != null && !eosSeen
+    }
+
+    /**
      * 建 AudioRecord（构造路径分叉点）→ 起泵线程。环境路的权限/参数检查在 [openRecord] 内。
      * @return false = 无权限或初始化失败，调用方静默降级为纯视频（不录了再丢）
      */
