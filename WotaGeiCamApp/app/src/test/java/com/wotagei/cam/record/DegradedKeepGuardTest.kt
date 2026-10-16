@@ -198,9 +198,10 @@ class DegradedKeepGuardTest {
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue("资源 cam_record_saved_degraded 必须存在", xml.contains("name=\"cam_record_saved_degraded\""))
         assertTrue(
-            "资源文案与占位符逐字钉住（丢占位符 = 时长读不出来；措辞不许出现「失败」二字）",
+            "资源文案逐字钉住（P3-1 起是附注**后缀**：时长由原因句带一次，本条不许再带 %1\$s 占位符；" +
+                "措辞不许出现「失败」二字）",
             xml.contains(
-                "name=\"cam_record_saved_degraded\">已保存 %1\$s；本次收尾未完整结束，成片末尾可能不完整</string>"
+                "name=\"cam_record_saved_degraded\">；本次收尾未完整结束，成片末尾可能不完整</string>"
             )
         )
         // 突变自证：文案分派条件拆掉（降级段退回普通「已保存」文案，提示丢失）

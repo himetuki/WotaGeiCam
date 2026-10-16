@@ -296,45 +296,41 @@ class AmbientTrackLostGuardTest {
         val collectBlock = m.substringAfter("runner.ambientLostNotice.collect", "")
             .substringBefore("LaunchedEffect", "")
         assertTrue("collect 里必须调 showTip（接了资源 id 却没接 hint 通道 = 提示不可见）", collectBlock.contains("showTip("))
-        // 结果文案分派：单因与组合两分支都必须在场，且**组合分支排在两个单因分支之前**
-        // （排后的话组合场景会被单因分支遮蔽 = 两件事丢一件）
-        val saved = m.substringAfter("val savedText = when", "").substringBefore("showTip(savedText)")
-        val combinedAt = saved.indexOf("result.ambientLost && result.degradedCode != null")
-        val degradedAt = saved.indexOf("R.string.cam_record_saved_degraded,")
-        val ambientAt = saved.indexOf("R.string.cam_record_saved_ambient_lost,")
+        // 结果文案分派（P3-1 起是"原因句 + 附注句叠加"结构，组合遮蔽守卫在 SavedTextDispatchGuardTest）：
+        // 环境音附注挂在附注叠加器里——条件仍是 result.ambientLost（判定语义逐字不变），
+        // 与降级/登记/丢失的附注并列，谁也不盖谁
+        val notes = m.substringAfter("val noteText = buildString", "")
+            .substringBefore("showTip(", "")
+        val ambientCondAt = notes.indexOf("if (result.ambientLost) append(")
+        val ambientResAt = notes.indexOf("R.string.cam_record_saved_ambient_lost")
         assertTrue(
-            "结果分派必须带组合判据与两个单因分支（ambientLost 单独命中、degradedCode 单独命中各有出口）",
-            combinedAt >= 0 && degradedAt >= 0 && ambientAt >= 0
+            "附注叠加器必须含环境音附注（if (result.ambientLost) 条件 + 资源接线；偏移 $ambientCondAt/$ambientResAt）",
+            ambientCondAt >= 0 && ambientResAt > ambientCondAt
         )
-        assertTrue(
-            "组合分支必须排在两个单因分支之前——组合场景两件事都带上，谁也不盖谁",
-            combinedAt < degradedAt && combinedAt < ambientAt
-        )
-        // 文案资源逐字钉住（丢了占位符 = 时长读不出来）
+        // 文案资源逐字钉住（P3-3 措辞修正：提示与结果两条都不再绝对化，对「起录就没有」与
+        // 「中途中断/换段重建失败」两种成因都成立；"本次录制没有环境声音"对后者不成立——前段有）
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue(
-            "提示文案 cam_ambient_lost_tip 必须存在且逐字钉住（对「起录就没有」与「中途中断」两种成因都成立）",
+            "提示文案 cam_ambient_lost_tip 必须存在且逐字钉住（两种成因都成立）",
             xml.contains(
-                "name=\"cam_ambient_lost_tip\">环境音不可用或已中断，本次录制没有环境声音</string>"
+                "name=\"cam_ambient_lost_tip\">环境音不可用或已中断，后段没有环境声音</string>"
             )
         )
         assertTrue(
-            "结果文案 cam_record_saved_ambient_lost 必须存在且逐字钉住",
+            "结果附注 cam_record_saved_ambient_lost 必须存在且逐字钉住（后缀形态，可并列叠加）",
             xml.contains(
-                "name=\"cam_record_saved_ambient_lost\">已保存 %1\$s（本次录制没有环境声音）</string>"
+                "name=\"cam_record_saved_ambient_lost\">；环境声音缺失或中断（后段没有环境声音）</string>"
             )
         )
-        assertTrue(
-            "组合文案 cam_record_saved_degraded_ambient_lost 必须存在且逐字钉住（末尾可能不完整 + 没有环境声音）",
-            xml.contains(
-                "name=\"cam_record_saved_degraded_ambient_lost\">已保存 %1\$s；本次收尾未完整结束，成片末尾可能不完整；本次录制没有环境声音</string>"
-            )
+        assertFalse(
+            "绝对化旧措辞「本次录制没有环境声音」必须绝迹（中途中断时前段是有环境音的合法 MP4）",
+            xml.contains("本次录制没有环境声音")
         )
         // 突变自证：拆掉 UI collect（提示发了没人看）
         val mutated = m.replace("runner.ambientLostNotice.collect", "Unit")
         assertFalse("拆掉 UI collect 后守卫必须报红", mutated.contains("runner.ambientLostNotice.collect"))
-        // 突变自证：组合判据拆掉（两件事同时命中的场景被单因分支盖住一件）
-        val m2 = saved.replace("result.ambientLost && result.degradedCode != null", "false")
-        assertFalse("拆掉组合判据后守卫必须报红", m2.contains("result.ambientLost && result.degradedCode != null"))
+        // 突变自证：环境音附注被摘（结果层这件信息丢了）
+        val m2 = notes.replace("if (result.ambientLost) append(", "if (false) append(")
+        assertFalse("摘掉环境音附注后守卫必须红", m2.contains("if (result.ambientLost) append("))
     }
 }
