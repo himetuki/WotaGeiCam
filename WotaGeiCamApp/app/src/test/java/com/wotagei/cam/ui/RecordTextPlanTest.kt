@@ -7,6 +7,7 @@ import com.wotagei.cam.record.RecordResult
 import com.wotagei.cam.record.VideoSegment
 import com.wotagei.cam.record.rotateStallLostSeconds
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -280,5 +281,45 @@ class RecordTextPlanTest {
         )) {
             assertEquals("其余码 → 收尾未完成（不吓人的兜底）：$code", R.string.cam_record_saved_note_tail, partialSavedNote(code))
         }
+    }
+
+    // ------------------------------------------------------------------ 自动停录原因 → 短附注 枚举守卫
+
+    /**
+     * 枚举式覆盖（反射枚举 `AutoStopRules` 的 `REASON_*` 静态字段——`const val` 在 Kotlin object
+     * 上就是 `public static final String`，与 `DiagGuardTest` 同手法）：**每个已知自动停录原因
+     * 都必须能配到一条短附注资源**。将来新增第 4 个原因却忘配 `cam_record_saved_auto_*_short`
+     * 时，该原因会在 partial 文案里静默消失而界面不报错——本断言必须红，是这一角唯一的看门人。
+     * 反射枚举让新常量自动进表，无需手工同步本测试。
+     */
+    @Test
+    fun `已知自动停录原因枚举_每枚都必须出短附注`() {
+        val fields = AutoStopRules::class.java.fields.filter { it.name.startsWith("REASON_") }
+        // 尺子自己能红：反射若捞空（字段改名/修饰符变化），下面的循环会空转全绿——挡在门口
+        assertTrue("反射枚举须至少捞到现存三枚常量（捞空 = 守卫输入失守）", fields.size >= 3)
+        assertTrue(
+            "现存三枚必须都在枚举里（漏枚 = 过滤条件失守，守卫输入不完整）",
+            fields.map { it.get(null) }.containsAll(
+                listOf(AutoStopRules.REASON_BATTERY, AutoStopRules.REASON_STORAGE, AutoStopRules.REASON_CAMERA_LOST)
+            )
+        )
+        for (f in fields) {
+            val reason = f.get(null) as String
+            assertNotNull(
+                "自动停录原因 $reason 漏配短附注资源（autoStopNote 必须覆盖每个 REASON_*）",
+                autoStopNote(reason)
+            )
+        }
+    }
+
+    /**
+     * 负例：无原因与未知原因都返回 null。未知原因正是"新原因漏配"的输入形态，null 是约定；
+     * 这同时堵住"用兜底 else 一劳永逸"的偷懒修法（那样 `autoStopNote("FUTURE_REASON")` 非 null，
+     * 上游会把某条不相干的短附注错配给新原因，本断言翻红）。
+     */
+    @Test
+    fun `短附注负例_无原因与未知原因都返回null`() {
+        assertNull("无原因 = 没有该说的", autoStopNote(null))
+        assertNull("未知原因不许硬塞兜底附注", autoStopNote("FUTURE_REASON"))
     }
 }
