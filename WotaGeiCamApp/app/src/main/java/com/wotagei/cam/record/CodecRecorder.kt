@@ -63,9 +63,37 @@ class CodecRecorder(
          * 2ms 仍远大于一次 dequeue 的正常往返（亚毫秒级），不会把泵变成空转；真正的兜底是队列深度。
          */
         private const val DEQUEUE_TIMEOUT_US = 2_000L
-        /** EOS 之后允许编码器吐完缓存的上限，超了就强拆（防 stop 卡死） */
-        private const val DRAIN_LIMIT_MS = 1_200L
-        private const val LOOP_JOIN_MS = 2_500L
+
+        /**
+         * 抽干窗口的**静默预算**（idle budget）：窗口内**没有任何推进**时才按它判超时。
+         *
+         * 【原是一刀切 1200ms 绝对 deadline（起钟即定），超时即 `ENGINE_ERROR:DRAIN` + 整段删】——
+         * 那条判据分不清"编码器只是慢"与"编码器已死"：真机形态是收尾抽干超时，而 muxer 早已写
+         * 完 moov、整段（最长约 20 分钟）可播，用户却看到"失败"且文件被删。现在由 [drainWaitTick]
+         * 在抽干窗口里观测到推进时顺延本预算；**无任何推进 ⇒ 与原实现逐字一致**（起窗后 1200ms
+         * 毫无音讯仍判超时）——真卡死的停止不许被拖长。
+         */
+        internal const val DRAIN_LIMIT_MS = 1_200L
+
+        /**
+         * 抽干总时长**硬上限**（[drainWaitTick] 到线强制超时，推进也不救）。
+         *
+         * 【与 [LOOP_JOIN_MS] 的关系：这不是取值口味，是可达性】stop() 的 joinLoop 只等
+         * [LOOP_JOIN_MS](2500ms)，超了就走 finishWithoutTeardown（只记账不拆资源，用户看到的是
+         * 失败）；而抽干之后泵线程还要跑完「closeSegmentEngine（codec/muxer stop + moov 落盘）
+         * + sealCurrent（关 fd + commit）」，典型本机是数十~数百 ms 量级。预算分解：
+         * 硬上限 1900 + 预留封段收尾 500 = 2400 < 2500（留 100ms 给线程调度与 join 粒度）。
+         * 顺延最多把抽干从 1200 放宽到 1900（"慢而不死"多拿 700ms 宽限），一旦吃到 join 线，
+         * 「保下已录内容」就变成「连收尾都交不出去」——顺延只在"仍赶得上 join"的前提下才有意义。
+         * 常量关系由测试钉住（DrainWaitGuardTest 的预算分解，同 CAP_SAMPLE_WAIT_MS 先例）。
+         *
+         * 【轮转路径同样吃这条上限】抽干起点就发了 EOS，窗口内相机新帧进不了编码器 = 丢帧；
+         * 而轮转丢帧账（rotateLegStartMs）从 beginRotateLeg 起算、**不含抽干段**——抽干拖多久，
+         * 就有多久的丢帧不入账。不许为了"多等"把轮转丢帧窗口拉大。
+         */
+        internal const val DRAIN_HARD_LIMIT_MS = 1_900L
+
+        internal const val LOOP_JOIN_MS = 2_500L
         /** 分段阈值余量：估算写量不含容器结构开销，提前 2% 换段 */
         private const val ROTATE_SAFETY = 0.98
         /** MediaFormat KEY_I_FRAME_INTERVAL 单位是秒 */
@@ -110,6 +138,44 @@ class CodecRecorder(
                 !waiting -> 0L to false
                 waitStartMs == 0L -> nowMs to false
                 else -> waitStartMs to (nowMs - waitStartMs > CAP_SAMPLE_WAIT_MS)
+            }
+        }
+
+        /**
+         * 抽干窗口的一拍推进（纯函数，"计划→行为"桥：起窗 / 推进顺延 / 超时三态各有真实语义）。
+         *
+         * 【为什么要进度感知】收尾抽干原来只有一条绝对 deadline（起钟即定 [DRAIN_LIMIT_MS]），
+         * "编码器只是慢"与"编码器已死"同判——真机形态是一条 drain timeout 把已经写完 moov、
+         * 可播的整段判废删掉。本桥只对**仍在推进**的抽干放宽：观测到推进（任一轨 done 翻转 /
+         * dequeue 返回过 idx>=0 或 FORMAT_CHANGED / 有样本写进 muxer）就把超时时钟顺延一个
+         * 静默预算；推进一停，仍按同一条预算判超时。
+         *
+         * 【无推进 ⇒ 与原实现逐字一致】`nowMs > deadlineMs` 严格大于，与旧判 `now > deadline` 同口径。
+         * 【顺延有界】总时长到 [DRAIN_HARD_LIMIT_MS] 即强制超时（推进也不救）——它要留住 stop()
+         * 的 [LOOP_JOIN_MS] join 预算（见该常量 KDoc，是可达性不是口味）。
+         *
+         * @param openedAtMs 窗起点（0 = 未起窗），elapsedRealtime 域
+         * @param deadlineMs 当前超时时刻（0 = 未起窗），elapsedRealtime 域
+         * @param nowMs      本拍时刻，elapsedRealtime 域
+         * @param progressed 本拍是否观测到推进（[CodecRecorder.runSegment] 的 drainProgress）
+         * @return 三态快照：起窗本拍只记起点与首枚 deadline、不判超时（起窗即判会把 0 长窗误判成
+         *         超时）；推进顺延只挪 deadline、绝不越过硬上限；无推进按静默预算判超时
+         */
+        internal fun drainWaitTick(
+            openedAtMs: Long,
+            deadlineMs: Long,
+            nowMs: Long,
+            progressed: Boolean
+        ): DrainTick {
+            // 花括号体不是风格偏好：结构守卫用 bodyOf 抓函数体做突变自证（同 capSampleWaitTick）
+            val opened = if (openedAtMs == 0L) nowMs else openedAtMs
+            val hardAt = opened + DRAIN_HARD_LIMIT_MS
+            return when {
+                openedAtMs == 0L -> DrainTick(opened, nowMs + DRAIN_LIMIT_MS, false)
+                // 硬上限先于推进顺延判定：到线即超时，推进也不许把它拖过 join 预算
+                nowMs >= hardAt -> DrainTick(opened, hardAt, true)
+                progressed -> DrainTick(opened, minOf(nowMs + DRAIN_LIMIT_MS, hardAt), false)
+                else -> DrainTick(opened, deadlineMs, nowMs > deadlineMs)
             }
         }
 
@@ -1415,6 +1481,12 @@ class CodecRecorder(
         // 段起始归零本段写入字节账（复用实例字段，供 health() 读产出活性；见 segWrittenBytes）
         segWrittenBytes = 0L
         var deadline = 0L
+        // 抽干窗口的进度感知状态（[drainWaitTick] 单写者推进）：窗起点 / 顺延次数（只进一条汇总
+        // 日志，不刷屏）/ 本拍推进观测（循环末尾读走即清、三路 dequeue 见真东西即置位）/ 本拍超时判定
+        var drainOpenedAtMs = 0L
+        var drainExtensions = 0
+        var drainProgress = false
+        var drainTimedOut = false
         // 各轨最后样本的媒体时长（已按段基准归一），用来在一行日志里看出轨间与墙钟的漂移
         var vPtsLastUs = 0L
         var aPtsLastUs = 0L
@@ -1481,6 +1553,8 @@ class CodecRecorder(
             }
             if (!videoDone) {
                 val idx = v.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
+                // 抽干推进观测（见 [drainWaitTick]）：吐了任何东西（数据/格式/EOS）即算这一拍有推进
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         videoTrack = mx.addTrack(v.getOutputFormat())
@@ -1508,6 +1582,7 @@ class CodecRecorder(
             }
             if (a != null && envCh != null && !envCh.done) {
                 val idx = a.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> envCh.fmtReady = true
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
@@ -1553,6 +1628,7 @@ class CodecRecorder(
             }
             if (c != null && capCh != null && !capCh.done) {
                 val idx = c.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> capCh.fmtReady = true
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
@@ -1656,21 +1732,29 @@ class CodecRecorder(
                         engineError = engineError ?: RecordError.NO_VIDEO_TRACK
                         break
                     }
-                    deadline = SystemClock.elapsedRealtime() + DRAIN_LIMIT_MS
                     if (!videoEosQueued) {
                         v.signalEndOfInputStream() // 4 字节哨兵只在音频通道，视频走 input surface 的 EOS
                         videoEosQueued = true
                     }
                 }
+                // 抽干窗口推进（纯函数三态桥，见 [drainWaitTick]）：起窗 / 推进顺延（至多到硬上限）/
+                // 超时。起点由首拍记下——硬上限与汇总日志都以它为基准
+                val tick = drainWaitTick(
+                    drainOpenedAtMs, deadline, SystemClock.elapsedRealtime(), drainProgress
+                )
+                if (drainOpenedAtMs != 0L && tick.deadlineMs > deadline) drainExtensions++
+                drainOpenedAtMs = tick.openedAtMs
+                deadline = tick.deadlineMs
+                drainTimedOut = tick.timedOut
                 // P2：双通道 EOS 兜底**每轮重试**（置位=真正入队，那一拍 dequeueInputBuffer(0)
                 // 返回 -1 就下一轮再来）——锁进 deadline==0L 单发门的话，满负荷拍点 EOS 丢失、
-                // done 恒不置位 → 1200ms DRAIN 超时误废整段（单段录制即整条丢失）。
-                // 重试上界仍是 deadline（DRAIN_LIMIT_MS）
+                // done 恒不置位 → 抽干超时误废整段（单段录制即整条丢失）。
+                // 重试上界仍是 deadline（静默预算 DRAIN_LIMIT_MS 顺延后的当前值）
                 if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)
                 if (c != null && capCh != null && !capCh.eosQueued) queueAudioEos(c, capCh)
             }
             if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true)) break
-            if (deadline > 0L && SystemClock.elapsedRealtime() > deadline) {
+            if (drainTimedOut) {
                 Log.e(TAG, "drain timeout video=$videoDone env=${envCh?.done ?: "off"} cap=${capCh?.done ?: "off"}")
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:DRAIN"
                 break
@@ -1679,6 +1763,9 @@ class CodecRecorder(
                 Log.i(TAG, "written=$segWrittenBytes reached MAX_FILE_BYTES limit, rotate")
                 rotatePending = true
             }
+            // 本拍推进观测读走即清（见 [drainWaitTick]）：抽干窗口的顺延只看"刚过去的这一拍有没有动"，
+            // 清晚了会把窗口开启前的老活动误算成推进（清在循环末尾与清在下一拍开头等价）
+            drainProgress = false
         }
         if (videoTrack < 0) {
             Log.e(TAG, "no video track produced in segment $partIndex")
@@ -1699,6 +1786,15 @@ class CodecRecorder(
             val capSilent = captureSilenceVerdict(capCh.hasSample, capFedMs, capPeakDb)
             if (capSilent) PlaybackCaptureController.get(ctx).reportCaptureSilence()
             capRmsInfo = "峰值=$capPeakRms(${capPeakDb}dB) 有效=${capFedMs}ms 静音=${if (capSilent) "是" else "否"}"
+        }
+        // 抽干汇总（一条，不刷屏）：顺延次数与总等待是分辨"编码器慢"与"编码器死"的两枚读数
+        //（超时路径也走到这里：上面 break 出循环后照常落这条账）
+        if (drainOpenedAtMs > 0L) {
+            Log.i(
+                TAG,
+                "抽干 part=$partIndex 共等 ${SystemClock.elapsedRealtime() - drainOpenedAtMs}ms" +
+                    "（顺延 $drainExtensions 次，静默预算 ${DRAIN_LIMIT_MS}ms，硬上限 ${DRAIN_HARD_LIMIT_MS}ms）"
+            )
         }
         // 三轨时长并排给出一行即可判定漂移：视频/环境/内录互为轨间偏移，与墙钟差即整体滑移
         // （本机无 >60fps 能力，这条路径的音画同步只能靠日志取证，见 docs/plan/10 §19 与任务 #33）
@@ -2085,3 +2181,16 @@ class CodecRecorder(
 
     // endregion
 }
+
+/**
+ * [CodecRecorder.drainWaitTick] 的三态快照（起窗 / 顺延 / 超时各自只改一个字段）。
+ * [openedAtMs] 是硬的：它只作硬上限基准（起点 + [CodecRecorder.DRAIN_HARD_LIMIT_MS]），不随顺延移动。
+ */
+internal data class DrainTick(
+    /** 窗起点（0 = 未起窗），elapsedRealtime 域 */
+    val openedAtMs: Long,
+    /** 当前超时时刻（顺延后）；判硬上限超时时是硬上限线本身 */
+    val deadlineMs: Long,
+    /** 本拍是否判超时 */
+    val timedOut: Boolean
+)
