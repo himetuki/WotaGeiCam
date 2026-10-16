@@ -75,8 +75,10 @@ class SavedTextDispatchGuardTest {
         // 混合如实化：非干净成功且多段 ⇒ 原因句走「已保存 N 段（单段沿用现有措辞）」
         if (!reason.contains("partial && result.parts.size > 1")) return false
         if (!reason.contains("R.string.cam_record_saved_parts")) return false
-        // 附注反过来也不许盖原因句
-        if (notes.contains("autoStopReason")) return false
+        // 附注里的自动停录消费只许是"非干净成功时的短附注"单源（partial 限定 + autoStopNote 调用）：
+        // 2026-10-16 收尾批拍板——partial 时原因句讲计数/时长，自动停录原因降为并列短附注；
+        // 干净成功的原因句分流不许被附注重复（用户看到两遍"为什么停了"），散装消费 = 分派分叉
+        if (!notes.contains("if (partial) autoStopNote(result.autoStopReason)")) return false
         // 附注必须是"条件 add"而非整句选择（两件同时命中各自出场）
         if (!notes.contains("if (result.degradedCode != null) add(")) return false
         if (!notes.contains("if (result.ambientLost) add(")) return false
@@ -118,6 +120,12 @@ class SavedTextDispatchGuardTest {
             "false ->"
         )
         assertFalse("拆掉混合计数句后尺子必须红", composeHolds(codeOnly(m4), screenMasked()))
+        // 突变自证 5（2026-10-16 收尾批）：partial 的自动停录短附注被摘（"该提醒的照旧"失效）
+        val m5 = planRaw.replace(
+            "if (partial) autoStopNote(result.autoStopReason)?.let { add(RecordTextLine(it)) }",
+            "Unit"
+        )
+        assertFalse("摘掉 partial 短附注后尺子必须红", composeHolds(codeOnly(m5), screenMasked()))
     }
 
     /**
@@ -129,13 +137,15 @@ class SavedTextDispatchGuardTest {
         if (!notes.contains("if (result.uncommitted > 0) add(RecordTextLine(R.string.cam_record_saved_uncommitted))")) return false
         val at = notes.indexOf("R.string.cam_record_saved_uncommitted")
         // 非干净成功的软附注经 partialSavedNote(result.error) 在场（两枚资源名住在它体内，
-        // 不在附注块的字面里——按调用点判在场）
+        // 不在附注块的字面里——按调用点判在场）；短原因附注（autoStopNote 调用点）同样须排在
+        // uncommitted 之后——uncommitted 是唯一"这条成片可能暂时看不见"的提醒，永远最前
         val partial = notes.indexOf("partialSavedNote(")
+        val auto = notes.indexOf("autoStopNote(")
         val degraded = notes.indexOf("R.string.cam_record_saved_degraded")
         val ambient = notes.indexOf("R.string.cam_record_saved_ambient_lost")
         val loss = notes.indexOf("R.string.cam_record_saved_loss")
-        if (partial < 0 || degraded < 0 || ambient < 0 || loss < 0) return false
-        return at < partial && at < degraded && at < ambient && at < loss
+        if (partial < 0 || auto < 0 || degraded < 0 || ambient < 0 || loss < 0) return false
+        return at < partial && at < auto && at < degraded && at < ambient && at < loss
     }
 
     @Test
@@ -175,7 +185,11 @@ class SavedTextDispatchGuardTest {
             "cam_record_saved_ambient_lost",
             // 混合如实化的两条软附注：无实参消费（附注是 add(RecordTextLine(id)) 形态）
             "cam_record_saved_note_tail",
-            "cam_record_saved_note_rotate"
+            "cam_record_saved_note_rotate",
+            // 2026-10-16 收尾批的三条自动停录短附注：同为零占位符的附注后缀（时长由原因句带）
+            "cam_record_saved_auto_battery_short",
+            "cam_record_saved_auto_storage_short",
+            "cam_record_saved_auto_camera_lost_short"
         )) {
             assertFalse(
                 "无实参附注 $name 不许带占位符（单参 getString 不格式化，% 会原样显示给用户）",

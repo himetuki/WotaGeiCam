@@ -40,6 +40,8 @@ internal data class RecordTextPlan(val reason: RecordTextLine, val notes: List<R
  *    多段走「已保存 N 段」（[R.string.cam_record_saved_parts]）；单段**沿用现有「已保存 %1$s」
  *    措辞**（不许出现"已保存 1 段"这类口语倒退）；失败码语义转成不吓人的附注
  *    （[partialSavedNote]），诊断原文仍在 [RecordResult.error] 与落盘账目里（可查）；
+ *    自动停录原因**降为一条并列短附注**（[autoStopNote]，2026-10-16 收尾批拍板：原因句被计数/
+ *    时长占用时"该提醒的照旧"，用户仍能看到"为什么自己停了"，且短句不带时长、不与原因句重复）；
  * 3. 无产物失败：null（既有失败文案通道）。
  */
 internal fun recordTextPlan(result: RecordResult): RecordTextPlan? {
@@ -52,12 +54,13 @@ internal fun recordTextPlan(result: RecordResult): RecordTextPlan? {
         // 有已保存分段但非干净成功且不止一段：原因句只为"存了几段"（单段落 else，沿用现有措辞）
         partial && result.parts.size > 1 ->
             RecordTextLine(R.string.cam_record_saved_parts, listOf(result.parts.size, dur))
-        // 自动停录原因优先（用户必须先知道"为什么自己停了"；四条现有原因句都含「已保存 %1$s」）
-        result.autoStopReason == AutoStopRules.REASON_BATTERY ->
+        // 自动停录原因句只在**干净成功**时占原因句（用户必须先知道"为什么自己停了"；三条整句
+        // 都含「已保存 %1$s」）；非干净成功时它降为短附注（见 notes 里 autoStopNote 那节）
+        !partial && result.autoStopReason == AutoStopRules.REASON_BATTERY ->
             RecordTextLine(R.string.cam_record_saved_auto_battery, listOf(dur))
-        result.autoStopReason == AutoStopRules.REASON_STORAGE ->
+        !partial && result.autoStopReason == AutoStopRules.REASON_STORAGE ->
             RecordTextLine(R.string.cam_record_saved_auto_storage, listOf(dur))
-        result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
+        !partial && result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
             RecordTextLine(R.string.cam_record_saved_auto_camera_lost, listOf(dur))
         else -> RecordTextLine(R.string.cam_record_saved, listOf(dur))
     }
@@ -65,7 +68,11 @@ internal fun recordTextPlan(result: RecordResult): RecordTextPlan? {
         // 拼接次序即契约（P3-2）：登记失败排最前——它是唯一"这条成片可能暂时看不见"的提醒，
         // 不许被任何并列附注盖掉；其余并列叠加，谁也不盖谁
         if (result.uncommitted > 0) add(RecordTextLine(R.string.cam_record_saved_uncommitted))
-        // 非干净成功：失败码语义转成不吓人的附注（片已在相册，用户只需知道末尾这段没保住）
+        // 非干净成功且有自动停录原因：原因句已被计数/时长占用，"为什么自己停了"降为短附注
+        //（排在任何质量类附注之前——它与登记失败同属"必须让用户看见"的停录原因，不属于质量描述）
+        if (partial) autoStopNote(result.autoStopReason)?.let { add(RecordTextLine(it)) }
+        // 非干净成功：失败码语义转成不吓人的附注（片已在相册，用户只需知道末尾这段**可能**没保住；
+        // 抽干吃满 join 线后泵仍可能正常封段 commit——措辞两头都成立，见 note_tail 资源注释）
         if (partial) partialSavedNote(result.error)?.let { add(RecordTextLine(it)) }
         if (result.degradedCode != null) add(RecordTextLine(R.string.cam_record_saved_degraded))
         if (result.ambientLost) add(RecordTextLine(R.string.cam_record_saved_ambient_lost))
@@ -78,8 +85,9 @@ internal fun recordTextPlan(result: RecordResult): RecordTextPlan? {
 
 /**
  * 失败码 → 不吓人的**附注**资源（只用于"有已保存分段但非干净成功"；全表测试见 `RecordTextPlanTest`）。
- * 片已经在相册里，用户只需要知道末尾这段没保住；诊断原文仍在 [RecordResult.error]、日志与
- * 换段受阻落盘账目里可查。换段受阻单列：丢失秒数由 loss 附注承担，这里说"后续画面未能录下"
+ * 片已经在相册里，用户只需要知道末尾这段**可能**没保住（抽干吃满 join 线后泵仍可能正常封段
+ * commit，"未能保存"会是假话——措辞对两种结局都成立）；诊断原文仍在 [RecordResult.error]、
+ * 日志与换段受阻落盘账目里可查。换段受阻单列：丢失秒数由 loss 附注承担，这里说"后续画面未能录下"
  * （与失败短文案 `cam_record_rotate_stall_short` 同口径）；其余码（ENGINE_ERROR/STOP_FAILED 等）
  * 一律归"收尾未完成"。null = 没有该说的（本函数只会被非空 error 调到）。
  */
@@ -88,6 +96,21 @@ internal fun partialSavedNote(code: String?): Int? = when {
     code == null -> null
     code.startsWith(RecordError.ROTATE_STALL) -> R.string.cam_record_saved_note_rotate
     else -> R.string.cam_record_saved_note_tail
+}
+
+/**
+ * 自动停录原因 → **短附注**资源（只用于"有已保存分段但非干净成功"；全表测试见 `RecordTextPlanTest`）。
+ * 该角的原因句已被「已保存 N 段」/「已保存，时长」占用，"为什么自己停了"降为一条并列短附注——
+ * 用户 2026-10-16 拍板"该提醒的照旧"（收尾批）：干净成功时仍走三条整句资源，本函数不会被调到；
+ * 短句不带时长（时长只由原因句带一次）、无占位符。null = 没有该说的（只会被非空原因调到）。
+ */
+@StringRes
+internal fun autoStopNote(reason: String?): Int? = when (reason) {
+    null -> null
+    AutoStopRules.REASON_BATTERY -> R.string.cam_record_saved_auto_battery_short
+    AutoStopRules.REASON_STORAGE -> R.string.cam_record_saved_auto_storage_short
+    AutoStopRules.REASON_CAMERA_LOST -> R.string.cam_record_saved_auto_camera_lost_short
+    else -> null
 }
 
 /**
