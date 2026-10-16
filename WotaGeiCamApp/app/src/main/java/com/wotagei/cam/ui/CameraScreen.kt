@@ -153,6 +153,7 @@ import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.AutoStopRules
 import com.wotagei.cam.record.Bounded
 import com.wotagei.cam.record.BoundedStore
+import com.wotagei.cam.record.CameraLostWatch
 import com.wotagei.cam.record.CaptureState
 import com.wotagei.cam.record.CaptureTrackLostReason
 import com.wotagei.cam.record.DEFAULT_AUDIO_CHANNELS
@@ -311,6 +312,8 @@ fun CameraScreen(
     val audioEnabled by params.audioEnabled.observed()
 
     val runner = remember(ctrl) { RecordRunner(app, params, ctrl) }
+    // 设备丢失转移检测器（跨重组保活）：观察钩子的"上一拍设备态"住在这里，纯函数折叠见 CameraLostWatch
+    val cameraLostWatch = remember { CameraLostWatch() }
     val recStatus by runner.status.observed()
     val recElapsed by runner.elapsedMs.observed()
     val recDb by runner.volumeDb.observed()
@@ -418,6 +421,9 @@ fun CameraScreen(
                         app.getString(R.string.cam_record_saved_auto_battery, formatDuration(result.durationMs))
                     result.autoStopReason == AutoStopRules.REASON_STORAGE ->
                         app.getString(R.string.cam_record_saved_auto_storage, formatDuration(result.durationMs))
+                    // 相机被系统收回同样是一次"已保存"的正常收尾（不是失败）：说清为什么停
+                    result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
+                        app.getString(R.string.cam_record_saved_auto_camera_lost, formatDuration(result.durationMs))
                     result.uncommitted > 0 ->
                         app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
                     result.lostMs >= LOSS_NOTICE_MIN_MS ->
@@ -449,6 +455,19 @@ fun CameraScreen(
             if (id == null) return@collect
             showTip(app.getString(id))
             runner.clearRetryNotice()
+        }
+    }
+    // 录制中相机设备被系统收回（2026-10-16 M1-01）：唯一 CLOSE 发布点 Camera2Engine.handleDeviceLost
+    // （onDisconnected 与建会话撞已关闭）之后引擎不自动重开，而录制侧此前无人观察——画面定格却一路
+    // 录到用户停止，成片是定格画面还报「已保存」。这里订阅设备态总线，只认「录制中由非 CLOSE → CLOSE」
+    // 的转移（CLOSE 同时是设备态初值，快照判定会把进页首拍误当丢失），命中即走既有 stopAsync 收尾：
+    // 已录部分按正常产物保存（不许走 error 通道——那会让 RecordResult.ok=false，用户以为整场白录）。
+    LaunchedEffect(runner, ctrl) {
+        ctrl.state.collect { s ->
+            if (cameraLostWatch.onSample(runner.status.value == RecordStatus.START, s.device)) {
+                Log.w(TAG_UI, "相机设备被系统收回（device=${s.device}），录制走自动停录收尾")
+                runner.onCameraLost()
+            }
         }
     }
     LaunchedEffect(recStatus) { freeMb = runner.probeFreeSpace() }
@@ -2364,6 +2383,25 @@ private class RecordRunner(
         // 正常宽限收尾仍由排队的 stopWithGrace 完成（宽限语义不变，maybeAutoStop 同样受益）
         stopRequested = true
         handler.post { stopWithGrace() }
+    }
+
+    /**
+     * 相机设备被系统收回时的自动停录入口（观察钩子见录制页 composable 的设备态订阅）。
+     * 与电量/存储巡检**同一条收尾通道**：置 [autoStopReason] 后走 [stopAsync] 正常停录，
+     * 「已录部分已保存」由结果文案分派（`cam_record_saved_auto_camera_lost`）表达。
+     *
+     * **不许走 error 通道**：error 非空会让 [RecordResult.ok] = false，用户以为整场什么都没留下。
+     * 重入双层：观察侧转移检测保证单发（命中即把上一拍更新为 CLOSE），这里再按 [autoStopReason]
+     * 短路兜底——电量/存储先触发时相机丢失不再改写原因（同类收尾不叠两个原因）。
+     * 投到控制线程执行：[autoStopReason] 是控制线程单写者（与巡检同纪律）。
+     */
+    fun onCameraLost() {
+        handler.post {
+            if (status.value != RecordStatus.START || autoStopReason != null) return@post
+            autoStopReason = AutoStopRules.REASON_CAMERA_LOST
+            Log.w(TAG_UI, "自动停录：相机设备被系统收回（已录部分按正常产物收尾）")
+            stopAsync()
+        }
     }
 
     /**
