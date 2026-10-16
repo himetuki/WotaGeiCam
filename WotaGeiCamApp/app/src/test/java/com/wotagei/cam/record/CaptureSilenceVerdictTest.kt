@@ -159,6 +159,45 @@ class CaptureSilenceVerdictTest {
         return masked.substring(at, minOf(masked.length, at + 400))
     }
 
+    /**
+     * 录制中巡检窗（结构切片）：起点 = 巡检块自己的时钟读数 `val probeNowMs`，终点 = 停录/换段
+     * 分支 `if (stopping || rotatePending)`（= 巡检窗的自然上界，runSegment 里首处即它）。
+     *
+     * 起点**不许**取 `SILENCE_PROBE_INTERVAL_MS`：它住在节流条件行内，会把时钟读数那一行以及
+     * 任何人塞在其后的调用划在窗外（2026-10-16 复核）；收尾兜底里的同形在场表达式落在本窗口
+     * 之外——这就是判据必须按窗口切片、不许对全文 contains 的原因。
+     */
+    private fun probeWindow(seg: String): String {
+        val from = seg.indexOf("val probeNowMs")
+        assertTrue("找不到巡检窗起点锚点 val probeNowMs（守卫失去输入，不许算通过）", from >= 0)
+        val to = seg.indexOf("if (stopping || rotatePending)")
+        assertTrue("找不到巡检窗终点锚点（停录/换段分支），或落在了起点之前", to > from)
+        return seg.substring(from, to)
+    }
+
+    /**
+     * 词边界赋值判定：`stopping = …` 与 `stopping=…`（无空格）都必须命中；`stopping == …` 这种
+     * 只读比较不算写入（带空格字面量 "stopping =" 的判法对无空格写法有盲区，2026-10-16 复核）。
+     */
+    private fun assigns(window: String, name: String): Boolean =
+        Regex("\\b$name\\b\\s*=(?!=)").containsMatchIn(window)
+
+    /** 巡检窗（纯提示）里不许出现的字面：停录/置错/文件与账目路径 */
+    private val probeForbidden = listOf(
+        "engineError", "RecordError", "abandonSegment", "closeSegment", "discardCurrent",
+        "stopFeeder", "stopCapFeeder", "releaseQuietly",
+        "writeSample", "signalEndOfInputStream", "queueAudioEos"
+    )
+
+    /** 「巡检窗只许提示」的判定本体（良品与突变体共用同一把尺） */
+    private fun probePurityHolds(segText: String): Boolean {
+        val w = probeWindow(segText)
+        if (!w.contains("reportCaptureSilence()")) return false // 反向对照：不许是空窗口空转
+        if (probeForbidden.any { w.contains(it) }) return false
+        // 在场状态是巡检的只读输入：赋值一律红（词边界判定，`stopping=true` 同样命中）
+        return !assigns(w, "stopping") && !assigns(w, "rotatePending")
+    }
+
     @Test
     fun `内录路不得路由到逐样本RMS_锁存扫描必须早停`() {
         val feeder = maskedMain("record/AudioFeeder.kt")
@@ -279,20 +318,75 @@ class CaptureSilenceVerdictTest {
     @Test
     fun `巡检窗内不得引入任何停录或置错调用`() {
         val seg = body("record/CodecRecorder.kt", "runSegment")
-        val probeAt = seg.indexOf("SILENCE_PROBE_INTERVAL_MS")
-        val stopAt = seg.indexOf("if (stopping || rotatePending)")
-        assertTrue("找不到巡检窗锚点（守卫失去输入）", probeAt in 0 until stopAt)
-        val window = seg.substring(probeAt, stopAt)
+        assertTrue("良品：巡检窗必须过（只提示、不写在场状态、不碰文件与账目）", probePurityHolds(seg))
+        // 突变自证 1（起点锚点）：把一枚停录调用塞在 `val probeNowMs` 之后、节流条件之前——
+        // 这一段正是旧锚点（首个 SILENCE_PROBE_INTERVAL_MS，住在节流条件行内）划在窗外的部分
+        val anchorMut = flatten(
+            bodyOf(
+                maskedMain("record/CodecRecorder.kt").replace(
+                    "val probeNowMs = SystemClock.elapsedRealtime()",
+                    "val probeNowMs = SystemClock.elapsedRealtime(); stopCapFeeder()"
+                ),
+                "runSegment"
+            )
+        )
+        assertFalse("锚点上方塞入停录调用后同一把尺必须报红", probePurityHolds(anchorMut))
+        val oldAnchorWindow = anchorMut.substring(
+            anchorMut.indexOf("SILENCE_PROBE_INTERVAL_MS"),
+            anchorMut.indexOf("if (stopping || rotatePending)")
+        )
+        assertFalse(
+            "（对照）旧锚点窗看不见塞进去的停录调用——这正是换锚点的理由，不是等价改写",
+            oldAnchorWindow.contains("stopCapFeeder()")
+        )
+        // 突变自证 2（词边界）：在巡检体内写 `stopping=true`（无空格）——旧字面量判法会放它过去
+        val assignMut = flatten(
+            bodyOf(
+                maskedMain("record/CodecRecorder.kt").replace(
+                    "if (probeNowMs - lastSilenceProbeMs >= SILENCE_PROBE_INTERVAL_MS) {",
+                    "if (probeNowMs - lastSilenceProbeMs >= SILENCE_PROBE_INTERVAL_MS) { stopping=true"
+                ),
+                "runSegment"
+            )
+        )
+        assertFalse("无空格写法 stopping=true 后同一把尺必须报红", probePurityHolds(assignMut))
+        assertFalse(
+            "（对照）带空格字面量判法对 stopping=true 有盲区，所以必须改词边界",
+            probeWindow(assignMut).contains("stopping =")
+        )
+    }
+
+    @Test
+    fun `录制中巡检窗必须在轨在场门`() {
+        val seg = body("record/CodecRecorder.kt", "runSegment")
+        val window = probeWindow(seg)
         // 反向对照：窗口确实包着巡检上报（不是空窗口空转）
         assertTrue("巡检窗必须真的包含上报调用", window.contains("reportCaptureSilence()"))
-        // 静音告警只许走"提示"这一件事：不停录、不置错、不碰文件与账目路径
-        for (bad in listOf(
-            "engineError", "RecordError", "stopping =", "rotatePending =", "abandonSegment",
-            "closeSegment", "discardCurrent", "stopFeeder", "stopCapFeeder", "releaseQuietly",
-            "writeSample", "signalEndOfInputStream", "queueAudioEos"
-        )) {
-            assertFalse("巡检（纯提示）窗内不得出现 $bad——视频/数据零影响是本轮改动的硬约束", window.contains(bad))
-        }
+        // 在轨在场门（已见真实样本、未废弃、未走失效收尾）必须住在巡检窗内。收尾兜底里有一份
+        // **同形表达式**顶着，所以判据只能按窗口切片定位——对全文 contains 的话，删掉巡检里这份
+        // 兜底那份照旧命中，尺子恒绿（2026-10-16 复核揪出的正是这条守卫空缺）
+        assertTrue(
+            "巡检必须在场门内才判读：capCh.hasSample && !capCh.dropped && !capTornDown 必须在巡检窗内",
+            window.contains("capCh.hasSample && !capCh.dropped && !capTornDown")
+        )
+        // 突变自证：把在场门从巡检条件里删掉（条件只剩非空判断）——只动首处（巡检），兜底那份留下
+        val mutated = flatten(
+            bodyOf(
+                maskedMain("record/CodecRecorder.kt").replaceFirst(
+                    "if (cf != null && capCh != null && capCh.hasSample && !capCh.dropped && !capTornDown) {",
+                    "if (cf != null && capCh != null) {"
+                ),
+                "runSegment"
+            )
+        )
+        assertFalse(
+            "删掉巡检里的在场门后守卫必须报红（兜底那份同形表达式不许替它顶）",
+            probeWindow(mutated).contains("capCh.hasSample && !capCh.dropped && !capTornDown")
+        )
+        assertTrue(
+            "（对照）全文 contains 判法对同一突变体充耳不闻——证明按窗口切片是这条守卫的承重设计",
+            mutated.contains("capCh.hasSample && !capCh.dropped && !capTornDown")
+        )
     }
 
     @Test

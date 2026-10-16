@@ -72,8 +72,10 @@ internal object StalePendingSweep {
             // Q6：改名**之前**先探容器可播（判据归一：复用导出链救援的 extractable()，同一份
             // 数据不许第二把尺）。打不开 = 半截 MP4（录制中被杀/断电，moov 没写成）——旧行为
             // 会照样去 pending 段把它"洗白"成相册里点开即坏的条目，现在连名字都不动。
-            val playable = extractable(f)
-            if (!playable && ageMs >= SWEEP_STALE_MS) {
+            // 探测受年龄门约束（2026-10-16 复核）：比 SWEEP_STALE_MS 新的条目计划内本就 LEAVE
+            //（见 sweepPlan 的年龄门），没必要也不许去戳它（null = 未探，计划侧按不可播处理）
+            val playable = if (ageMs >= SWEEP_STALE_MS) extractable(f) else null
+            if (playable == false) {
                 // 留据给将来人工清理（含条目名与大小）。保持 marker 名 = 不产生任何可见化：
                 // 补入库趟的 isOurClipName 不认这种形态，扫不到它
                 Log.i(TAG, "清扫：残片打不开，保持原状（未改名未登记）：${f.name} ${f.length() / 1_048_576}MB")

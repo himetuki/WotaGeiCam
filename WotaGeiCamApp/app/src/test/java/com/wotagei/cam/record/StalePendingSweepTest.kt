@@ -292,10 +292,16 @@ class StalePendingSweepTest {
             probeWiringHolds(raw)
         )
         // 突变自证 1：探测被摘（计划拿不到可播性 ⇒ 半截 MP4 照旧被改名洗白）
-        val m1 = raw.replace("val playable = extractable(f)", "val playable = true")
+        val m1 = raw.replace(
+            "val playable = if (ageMs >= SWEEP_STALE_MS) extractable(f) else null",
+            "val playable: Boolean? = true"
+        )
         assertFalse("摘掉探测后尺子必须红", probeWiringHolds(m1))
         // 突变自证 2：探测挪到改名**之后**（现场已被动过才发现打不开）——只动成片趟那一处
-        val m2 = raw.replace("val playable = extractable(f)", "val playable = true")
+        val m2 = raw.replace(
+            "val playable = if (ageMs >= SWEEP_STALE_MS) extractable(f) else null",
+            "val playable: Boolean? = true"
+        )
             .replace(
                 "if (apply(app, dir, f, plan)) acted++\n        }\n        for (f in archives) {",
                 "if (apply(app, dir, f, plan)) acted++\n            extractable(f)\n        }\n        for (f in archives) {"

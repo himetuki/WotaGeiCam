@@ -2006,7 +2006,9 @@ private fun HintBar(text: String, shown: Boolean, modifier: Modifier = Modifier)
             text = text,
             style = MaterialTheme.typography.bodyMedium,
             color = WotaText,
-            maxLines = 2,
+            // 三行：组合文案（原因句 + 附注后缀，P3-1 起可叠加）两行放不下会被省略号吃掉尾巴，
+            // 而这条提示就是告警通道本身——短文案观感不变，多余行只在长文案时出现
+            maxLines = 3,
             overflow = TextOverflow.Ellipsis
         )
     }

@@ -127,9 +127,11 @@ class SavedTextDispatchGuardTest {
     }
 
     /**
-     * 占位符-实参一一对应（P3-1 结构变更后的新风险面）：附注是 `append(getString(id))` **无实参**
-     * 消费的，字符串里只要出现任意 `%` 占位符，getString 就抛 IllegalArgumentException，整条提示
-     * 丢掉（比没有提示更糟）——三条无参附注必须零占位符；loss 恰好一个秒数占位符。
+     * 占位符-实参一一对应（P3-1 结构变更后的新风险面）：附注是 `append(app.getString(id))`
+     * **无实参**消费的——单参 getString(id) 不做 String.format，资源里的占位符不会被替换，而是
+     * **原样渲染成字面量**给用户看（不会抛异常；抛 IllegalArgumentException 的是"带实参而资源
+     * 占位符不够"那一类）。所以三条无参附注必须零占位符；loss 附注恰好一个秒数占位符
+     *（append 侧恰好一个实参，两边一一对应）。
      */
     @Test
     fun `附注占位符与实参一一对应`() {
@@ -146,7 +148,7 @@ class SavedTextDispatchGuardTest {
             "cam_record_saved_ambient_lost"
         )) {
             assertFalse(
-                "无实参附注 $name 不许带占位符（% 会让 getString 抛掉整条提示）",
+                "无实参附注 $name 不许带占位符（单参 getString 不格式化，% 会原样显示给用户）",
                 valueOf(name).contains('%')
             )
         }
