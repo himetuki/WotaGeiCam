@@ -5,16 +5,22 @@ import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 冷启维护清扫的**判断表**与接线守卫（2026-10-08）。
+ * 冷启维护清扫的**判断表**与接线守卫（2026-10-08；Q6 判据归一 2026-10-16）。
  *
  * 真机遗留形态（清扫前的实际盘点）：①10 条名字带 `.pending-<id>-` 的**有效成片**（命名 race 时代产物，
  * `is_pending=0`、在相册里就带着烂名显示）；②5 条 `.pending-<id>-….drops.json` 无主档案（对应成片
  * 已按干净名提交）；③2 条档案与成片成对带烂名。清扫要做的是"成片去 pending 段、无主档案删掉"，
  * 而红线是**成片绝不删**。
+ *
+ * Q6 判据归一：成片改名之前必须先探容器可播（复用导出链救援的 `extractable()` 同一把尺）——
+ * 录制中被杀/断电留下的半截 MP4（无 moov）旧行为会被"洗白"成相册里点开即坏的条目。本文件用
+ * 全表枚举钉住"**不可播/未探的成片在任何组合下都到不了 RENAME_CLIP**"，并配接线守卫钉住
+ * 探测发生在改名之前、且只落在成片趟。
  */
 class StalePendingSweepTest {
 
@@ -27,20 +33,20 @@ class StalePendingSweepTest {
 
     @Test
     fun `非 pending 形态一律不动`() {
-        val p = sweepPlan("VID_20261008_172951_262.mp4", ageMs = old, cleanTwinExists = false, clipName = null)
+        val p = sweepPlan("VID_20261008_172951_262.mp4", ageMs = old, cleanTwinExists = false, clipName = null, clipPlayable = true)
         assertEquals(SweepAction.LEAVE, p.action)
         assertEquals(null, p.to)
         // 名字里恰好含 "pending" 但不是临时名形态（正则只认 .pending-<纯数字>-）
-        assertEquals(SweepAction.LEAVE, sweepPlan("my.pending-file.mp4", old, false, null).action)
-        assertEquals(SweepAction.LEAVE, sweepPlan(".pending-abc-VID_1.mp4", old, false, null).action)
+        assertEquals(SweepAction.LEAVE, sweepPlan("my.pending-file.mp4", old, false, null, true).action)
+        assertEquals(SweepAction.LEAVE, sweepPlan(".pending-abc-VID_1.mp4", old, false, null, true).action)
     }
 
     @Test
     fun `比门槛新的条目不动（可能正在录的那一段）`() {
-        val p = sweepPlan(".pending-9-VID_1.mp4", ageMs = fresh, cleanTwinExists = false, clipName = null)
+        val p = sweepPlan(".pending-9-VID_1.mp4", ageMs = fresh, cleanTwinExists = false, clipName = null, clipPlayable = true)
         assertEquals(SweepAction.LEAVE, p.action)
         // 门槛这一刻刚好放行（>= 门槛）
-        val ok = sweepPlan(".pending-9-VID_1.mp4", StalePendingSweep.SWEEP_STALE_MS, false, null)
+        val ok = sweepPlan(".pending-9-VID_1.mp4", StalePendingSweep.SWEEP_STALE_MS, false, null, true)
         assertEquals(SweepAction.RENAME_CLIP, ok.action)
     }
 
@@ -48,7 +54,7 @@ class StalePendingSweepTest {
     fun `成片去 pending 段`() {
         val p = sweepPlan(
             "30fto24f_.pending-1791986302-VID_20261007_215822_240.mp4",
-            ageMs = old, cleanTwinExists = false, clipName = null
+            ageMs = old, cleanTwinExists = false, clipName = null, clipPlayable = true
         )
         assertEquals(SweepAction.RENAME_CLIP, p.action)
         assertEquals("30fto24f_VID_20261007_215822_240.mp4", p.to)
@@ -56,14 +62,14 @@ class StalePendingSweepTest {
 
     @Test
     fun `成片同内容双份时只记录不动手（成片永不删红线）`() {
-        val p = sweepPlan(".pending-9-VID_1.mp4", ageMs = old, cleanTwinExists = true, clipName = null)
+        val p = sweepPlan(".pending-9-VID_1.mp4", ageMs = old, cleanTwinExists = true, clipName = null, clipPlayable = true)
         assertEquals("剥段后同名成片已在 ⇒ 绝不删成片（宁可留一条难看名字）", SweepAction.LEAVE, p.action)
         assertEquals(null, p.to)
     }
 
     @Test
     fun `无主档案删掉`() {
-        val p = sweepPlan(".pending-1792056591-VID_20261008_172951_262.drops.json", old, false, null)
+        val p = sweepPlan(".pending-1792056591-VID_20261008_172951_262.drops.json", old, false, null, null)
         assertEquals(SweepAction.DELETE_ARCHIVE, p.action)
         assertEquals(null, p.to)
     }
@@ -74,7 +80,7 @@ class StalePendingSweepTest {
         // （落盘时路径就少扩展名）⇒ 目标必须取"成片真实名 + 扩展名"，否则 App 永远读不到这份档案
         val p = sweepPlan(
             ".pending-1792056591-VID_20261008_172951_262.drops.json",
-            ageMs = old, cleanTwinExists = false, clipName = "VID_20261008_172951_262.mp4"
+            ageMs = old, cleanTwinExists = false, clipName = "VID_20261008_172951_262.mp4", clipPlayable = null
         )
         assertEquals(SweepAction.RENAME_ARCHIVE, p.action)
         assertEquals("VID_20261008_172951_262.mp4.drops.json", p.to)
@@ -83,7 +89,7 @@ class StalePendingSweepTest {
     @Test
     fun `档案同名双份时删重复的那条（纯档案无数据损失）`() {
         val p = sweepPlan(
-            ".pending-9-VID_1.mp4.drops.json", old, cleanTwinExists = true, clipName = "VID_1.mp4"
+            ".pending-9-VID_1.mp4.drops.json", old, cleanTwinExists = true, clipName = "VID_1.mp4", clipPlayable = null
         )
         assertEquals(SweepAction.DELETE_ARCHIVE, p.action)
     }
@@ -94,13 +100,13 @@ class StalePendingSweepTest {
         // 档案那一趟才找得到它，所以这里按"两趟之后"的输入断言。
         val clip = sweepPlan(
             "30fto24f_.pending-1791985960-VID_20261007_215240_909.mp4",
-            old, cleanTwinExists = false, clipName = null
+            old, cleanTwinExists = false, clipName = null, clipPlayable = true
         )
         assertEquals(SweepAction.RENAME_CLIP, clip.action)
         assertEquals("30fto24f_VID_20261007_215240_909.mp4", clip.to)
         val archive = sweepPlan(
             "30fto24f_.pending-1791985960-VID_20261007_215240_909.drops.json",
-            old, cleanTwinExists = false, clipName = "30fto24f_VID_20261007_215240_909.mp4"
+            old, cleanTwinExists = false, clipName = "30fto24f_VID_20261007_215240_909.mp4", clipPlayable = null
         )
         assertEquals(SweepAction.RENAME_ARCHIVE, archive.action)
         assertEquals("30fto24f_VID_20261007_215240_909.mp4.drops.json", archive.to)
@@ -108,9 +114,85 @@ class StalePendingSweepTest {
 
     @Test
     fun `空名字与纯段名不放行`() {
-        assertEquals(SweepAction.LEAVE, sweepPlan("", old, false, null).action)
+        assertEquals(SweepAction.LEAVE, sweepPlan("", old, false, null, true).action)
         // 剥段后为空 ⇒ 没有合法目标名，不动手
-        assertEquals(SweepAction.LEAVE, sweepPlan(".pending-9-", old, false, null).action)
+        assertEquals(SweepAction.LEAVE, sweepPlan(".pending-9-", old, false, null, true).action)
+    }
+
+    // ---- Q6：成片趟的容器可播判据（判据归一，复用导出链救援的 extractable()） ----
+
+    @Test
+    fun `不可播的成片一动不动_连名字都不动`() {
+        // 无同名 + 不可播：旧行为会在这格 RENAME_CLIP（把半截 MP4 洗白成相册可见坏条目）
+        assertEquals(
+            "不可播 × 无同名 ⇒ LEAVE（不 provider 改名、不 fs 改名、不碰 IS_PENDING）",
+            SweepAction.LEAVE,
+            sweepPlan(".pending-9-VID_1.mp4", old, cleanTwinExists = false, clipName = null, clipPlayable = false).action
+        )
+        // 有同名 + 不可播：红线依旧 ⇒ LEAVE（与旧行为一致，理由叠加）
+        assertEquals(
+            "不可播 × 有同名 ⇒ LEAVE（红线不变）",
+            SweepAction.LEAVE,
+            sweepPlan(".pending-9-VID_1.mp4", old, cleanTwinExists = true, clipName = null, clipPlayable = false).action
+        )
+        // 未探（null，如调用侧漏了探测）也绝不放行：RENAME_CLIP 只认"探过且可播"的正向确认
+        assertEquals(
+            "未探 ⇒ LEAVE（正向确认，漏探不许改名）",
+            SweepAction.LEAVE,
+            sweepPlan(".pending-9-VID_1.mp4", old, cleanTwinExists = false, clipName = null, clipPlayable = null).action
+        )
+        // 可播 × 无同名 ⇒ 一切照旧（对照组：防止"一刀切全 LEAVE"这种假绿）
+        val ok = sweepPlan(".pending-9-VID_1.mp4", old, cleanTwinExists = false, clipName = null, clipPlayable = true)
+        assertEquals("可播 × 无同名 ⇒ RENAME_CLIP（旧行为不变）", SweepAction.RENAME_CLIP, ok.action)
+        assertEquals("该格改名目标照旧", "VID_1.mp4", ok.to)
+    }
+
+    @Test
+    fun `不可播的成片在任何组合下都不可能到达 RENAME_CLIP`() {
+        val names = listOf(
+            ".pending-9-VID_1.mp4",
+            "30fto24f_.pending-1791986302-VID_20261007_215822_240.mp4",
+            ".pending-1792056591-VID_20261008_172951_262.drops.json", // 档案形态（本就不产 RENAME_CLIP）
+            "VID_20261008_172951_262.mp4", // 非 pending 形态
+            ".pending-9-" // 剥段后为空
+        )
+        val ages = listOf(0L, fresh, StalePendingSweep.SWEEP_STALE_MS, old)
+        val twins = listOf(false, true)
+        val clipNames = listOf(null, "VID_1.mp4")
+        val playables = listOf<Boolean?>(true, false, null)
+        var clipped = 0
+        for (n in names) for (a in ages) for (t in twins) for (c in clipNames) for (p in playables) {
+            val plan = sweepPlan(n, a, t, c, p)
+            if (p == true) {
+                if (plan.action == SweepAction.RENAME_CLIP) clipped++
+            } else {
+                assertNotEquals(
+                    "不可播/未探的条目到达 RENAME_CLIP：name=$n age=$a twin=$t clip=$c playable=$p",
+                    SweepAction.RENAME_CLIP, plan.action
+                )
+            }
+        }
+        // 反向对照：全表里必须仍存在可到达 RENAME_CLIP 的格（否则"全 LEAVE"的突变体也能骗过上面）。
+        // 计数 = 2 个成片形态 × 2 个放行年龄档（门槛本身与更老）× 1 个无同名 × 2 个 clipName 取值
+        // （成片分支不读 clipName，两种取值都放行）= 8；成片形态的其余组合（新年龄/有同名/不可播/未探）恒 LEAVE
+        assertEquals("可播格必须仍能改名（表不许退化成全 LEAVE）", 8, clipped)
+    }
+
+    @Test
+    fun `档案趟不吃可播判据_三种探测值下处置一致`() {
+        // 探测只属于成片趟：档案（JSON）不是媒体容器，关于它的处置不许随 clipPlayable 漂移
+        for (p in listOf<Boolean?>(true, false, null)) {
+            assertEquals(
+                "档案 × 对应成片在 ⇒ RENAME_ARCHIVE（与 clipPlayable=$p 无关）",
+                SweepAction.RENAME_ARCHIVE,
+                sweepPlan(".pending-9-VID_1.mp4.drops.json", old, false, "VID_1.mp4", p).action
+            )
+            assertEquals(
+                "档案 × 无主 ⇒ DELETE_ARCHIVE（与 clipPlayable=$p 无关）",
+                SweepAction.DELETE_ARCHIVE,
+                sweepPlan(".pending-9-VID_1.drops.json", old, false, null, p).action
+            )
+        }
     }
 
     // ---- ② 接线与安全边界守卫 ----
@@ -174,5 +256,74 @@ class StalePendingSweepTest {
         assertTrue("补入库只认我们自己的成片名（别人的文件一个都不碰）", rec.contains("isOurClipName("))
         assertTrue("必须有单轮上限（收敛于多轮，别让冷启扫全库）", sweep.contains("SWEEP_MAX_INDEX"))
         assertTrue("补入库走系统扫描 API（文件已在磁盘、行还没有的正解）", sweep.contains("MediaScannerConnection.scanFile("))
+    }
+
+    // ---- Q6 接线守卫与"残片不会被换个方式洗白"的复核 ----
+
+    /**
+     * Q6 接线守卫的判定本体（良品与突变体共用同一把尺）：成片趟必须探、探测在改名之前、探测结果
+     * 喂进计划；档案趟一律不探。切片法：`for (f in clips)` 到 `for (f in archives)` 之间是成片趟，
+     * 其后到 `reconcileLibrary` 调用之间是档案趟。
+     */
+    private fun probeWiringHolds(raw: String): Boolean {
+        val sweep = codeOnly(raw)
+        val run = bodyOf(sweep, "runOnce")
+        val clipsLoop = run.substringAfter("for (f in clips)", "").substringBefore("for (f in archives)", "")
+        val archivesLoop = run.substringAfter("for (f in archives)", "").substringBefore("reconcileLibrary", "")
+        if (clipsLoop.isEmpty() || archivesLoop.isEmpty()) return false
+        // ① 成片趟必须探容器可播（extractable() 单一判据），且发生在改名动作（apply）之前
+        if (!clipsLoop.contains("extractable(")) return false
+        if (clipsLoop.indexOf("extractable(") >= clipsLoop.indexOf("apply(")) return false
+        // ② 探测结果必须喂进计划（漏喂 = 判据悬空，计划永远拿不到可播性）
+        if (!clipsLoop.contains("clipPlayable = playable")) return false
+        // ③ 探测只属于成片趟：档案趟不许出现 extractable，且显式声明未探
+        if (archivesLoop.contains("extractable(")) return false
+        if (!archivesLoop.contains("clipPlayable = null")) return false
+        // ④ 不可播的残片必须留据（i 级日志，含条目名与大小）
+        if (!clipsLoop.contains("Log.i(TAG,")) return false
+        return clipsLoop.contains("f.length()")
+    }
+
+    @Test
+    fun `成片趟先探可播再改名_档案趟不探`() {
+        val raw = mainSourceText("record/StalePendingSweep.kt")
+        assertTrue(
+            "成片趟探测（改名之前、结果喂进计划）+ 档案趟不探 + 残片留据，缺一即红",
+            probeWiringHolds(raw)
+        )
+        // 突变自证 1：探测被摘（计划拿不到可播性 ⇒ 半截 MP4 照旧被改名洗白）
+        val m1 = raw.replace("val playable = extractable(f)", "val playable = true")
+        assertFalse("摘掉探测后尺子必须红", probeWiringHolds(m1))
+        // 突变自证 2：探测挪到改名**之后**（现场已被动过才发现打不开）——只动成片趟那一处
+        val m2 = raw.replace("val playable = extractable(f)", "val playable = true")
+            .replace(
+                "if (apply(app, dir, f, plan)) acted++\n        }\n        for (f in archives) {",
+                "if (apply(app, dir, f, plan)) acted++\n            extractable(f)\n        }\n        for (f in archives) {"
+            )
+        assertFalse("探测挪到改名之后尺子必须红", probeWiringHolds(m2))
+        // 突变自证 3：档案趟也去探（判据漂到档案上）
+        val m3 = raw.replace("clipPlayable = null", "clipPlayable = extractable(f)")
+        assertFalse("档案趟引入探测后尺子必须红", probeWiringHolds(m3))
+    }
+
+    /**
+     * Q6 的另一半（复核）：不可播的残片保持 marker 名 ⇒ 第三趟（补入库）的 `isOurClipName` 必须
+     * 认不出它——否则改名虽然没做，登记照旧发生，等于换个方式把残片洗成可见条目。两种真机
+     * marker 形态（裸前缀 / 带转换前缀）逐个复核对，并用干净名做反向对照（补入库通道本身
+     * 不许被这轮改动掐掉）。
+     */
+    @Test
+    fun `marker名残片不会被补入库趟扫到_isOurClipName复核`() {
+        assertFalse(
+            "裸前缀 marker 形态认不出（substringBefore(VID_) 带 .pending-<数字>- 段）",
+            StalePendingSweep.isOurClipName(".pending-1791986302-VID_20261007_215822_240.mp4")
+        )
+        assertFalse(
+            "带转换前缀的真机形态也认不出（真机第①③类的那 10 条就是它）",
+            StalePendingSweep.isOurClipName("30fto24f_.pending-1791986302-VID_20261007_215822_240.mp4")
+        )
+        // 反向对照：干净名照旧认（这轮改动没掐掉补入库通道本身）
+        assertTrue(StalePendingSweep.isOurClipName("VID_20261007_215822_240.mp4"))
+        assertTrue(StalePendingSweep.isOurClipName("30fto24f_VID_20261007_215822_240.mp4"))
     }
 }
