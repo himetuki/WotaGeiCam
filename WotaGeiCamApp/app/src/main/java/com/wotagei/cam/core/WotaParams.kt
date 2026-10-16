@@ -44,6 +44,17 @@ class WotaParams(private val scope: CoroutineScope) {
     val afMode = MutableStateFlow(AfMode.CONTINUOUS_VIDEO)
     val manualFocusDiopter = MutableStateFlow(ParamState(0f))
     val focusPoint = MutableStateFlow<TapPoint?>(null)
+
+    /**
+     * 对焦锁定（用户反馈第 2 条）：锁定的唯一真源 + 锁定锚点（最近一次点按处，缺省画面中心）。
+     *
+     * **刻意不持久化**：这两个字段不进 `ParamsPersist.KEYS` 键白名单——锁定是瞬时拍摄态，
+     * 冷启/清后台回来不该自动锁焦；存活范围与清锁规则见 [applyAbility]（会话重建保持、
+     * 相机整套重开清除），引擎按本字段的流事件做保持/解除。
+     */
+    val focusLocked = MutableStateFlow(false)
+    val focusLockPoint = MutableStateFlow<TapPoint?>(null)
+
     val zoom = MutableStateFlow(ParamState(1f))
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
@@ -89,6 +100,13 @@ class WotaParams(private val scope: CoroutineScope) {
 
         // activeArray 随镜头变化，旧点按坐标语义失效（换算依赖 activeArray）
         focusPoint.value = null
+        // 对焦锁定清锁（Q4）：换镜头/切渲染模式/离开取景页再回/权限重开等一切经本函数的
+        // 「相机整套重开」都要解锁，锚点随锁一起失效（未锁定时不触碰——解锁后的残留锚点
+        // 没有任何读取方，下一次上锁由 UI 整份覆盖）。这是清锁的唯一落点。
+        if (focusLocked.value) {
+            focusLocked.value = false
+            focusLockPoint.value = null
+        }
         a.dump(lens.value.name)
     }
 
