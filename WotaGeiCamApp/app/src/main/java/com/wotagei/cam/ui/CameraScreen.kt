@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.os.BatteryManager
 import android.content.res.Configuration
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Handler
@@ -53,6 +54,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.RotateLeft
@@ -72,6 +74,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,9 +83,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as GeoSize
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -316,6 +322,9 @@ fun CameraScreen(
     // 之后的安全区实测宽，而不是 configuration.screenWidthDp（本机横屏两者差 34dp，就是挖孔那条边）
     val configuration = LocalConfiguration.current
     val focusPoint by params.focusPoint.observed()
+    // 对焦锁定（用户反馈第 2 条）：锁定态 + 锁定锚点（常显框与锁标的数据源）
+    val focusLocked by params.focusLocked.observed()
+    val focusLockPoint by params.focusLockPoint.observed()
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
 
@@ -384,6 +393,21 @@ fun CameraScreen(
     val approxTipText = stringResource(R.string.approx_mark_tip)
     val showTip: (String) -> Unit = { hint = it }
     val lockTip: () -> Unit = { showTip(lockTipText) }
+    // 对焦锁定（用户反馈第 2 条）的文案与「首次轻触」节流：
+    // 锁定成功一句；锁定期间轻触/双击/按中心对焦条目都走同一条"被挡"提示，每次上锁最多给一次
+    val focusLockedTipText = stringResource(R.string.cam_focus_locked_tip)
+    val focusTapLockedTipText = stringResource(R.string.cam_focus_tap_locked_tip)
+    val focusManualLockedText = stringResource(R.string.cam_focus_manual_locked)
+    val focusLockUnsupportedText = stringResource(R.string.cam_focus_lock_unsupported)
+    var lockedTapTipShown by remember { mutableStateOf(false) }
+    val showLockedTapTip: () -> Unit = {
+        if (!lockedTapTipShown) {
+            lockedTapTipShown = true
+            showTip(focusTapLockedTipText)
+        }
+    }
+    // 解锁后重置"已提示"标志（下次上锁重新给一次）
+    LaunchedEffect(focusLocked) { if (!focusLocked) lockedTapTipShown = false }
 
     // 两阶段撤提示：先翻 shown=false 让 HintBar 跑完淡出，再撤掉 Popup。
     // 只有一阶段的话 Popup 窗口会跟着 hint 一起消失，淡出动画根本没机会画
@@ -547,6 +571,50 @@ fun CameraScreen(
     val ability = slot?.ability
     // #44：定焦镜头上「对焦」这件事整体没有意义 —— 胶囊入口与点按对焦一起收掉
     val focusUsable = ability?.hasAdjustableFocus() ?: true
+    // ---- 对焦锁定（用户反馈第 2 条）：锁定锚点取最近一次点按处（无则画面中心，供胶囊「锁定对焦」
+    // 入口复用）；换镜头（槽位变化）清空——activeArray 换了，旧坐标语义失效
+    var lastFocusTap by remember { mutableStateOf<TapPoint?>(null) }
+    LaunchedEffect(slot?.key) { lastFocusTap = null }
+    // 手势层只捕获首帧一次（pointerInput(Unit)），所以可用性判据不能吃组合期快照：
+    // 把「当前镜头槽位」装进稳定持有者，锁定时现读（槽位/能力会随换镜头与枚举完成变化）
+    val slotNow by rememberUpdatedState(slot)
+    /** 普通点焦三处写点共用：记最近点按处 + 先置 null 再写（StateFlow 去重会吞同一点重触） */
+    val focusTapAt: (TapPoint) -> Unit = { point ->
+        lastFocusTap = point
+        writeFocusPoint(params, point)
+    }
+    /**
+     * 锁定入口（双击取景与胶囊条目共用）：**先写锚点再置锁定态**——引擎按总线事件回执时
+     * 读到的是新锚点；锁定成功给一句提示。
+     *
+     * 可用性闸（R3a + 手动档语义，两处入口共用、**进闸时现读**）：① 手动对焦档本身即锁定、
+     * 无需再锁；② 镜头能力不含单次自动对焦（AF_MODE_AUTO）就锁不了。命中时只给说明、
+     * 不置锁定态——拒绝假开关（与胶囊条目灰显同一条判据；引擎 engageFocusLock 侧还有第二道）。
+     */
+    val lockFocusAt: (TapPoint) -> Unit = { point ->
+        val blockedTip = when {
+            params.afMode.value == AfMode.MANUAL -> focusManualLockedText
+            slotNow?.ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == false ->
+                focusLockUnsupportedText
+            else -> null
+        }
+        if (blockedTip != null) {
+            showTip(blockedTip)
+        } else {
+            lastFocusTap = point
+            params.focusLockPoint.value = point
+            params.focusLocked.value = true
+            showTip(focusLockedTipText)
+        }
+    }
+    /** 胶囊「锁定对焦/解除锁定」：继续从最近点按处/中心锁定；已锁则解除 */
+    val toggleFocusLock: () -> Unit = {
+        if (params.focusLocked.value) {
+            params.focusLocked.value = false
+        } else {
+            lockFocusAt(lastFocusTap ?: TapPoint(0.5f, 0.5f))
+        }
+    }
     val isFront = (slot?.type ?: lens) == LensType.FRONT
     val sensorOrientation = ability?.sensorOrientation ?: 0
     // ---- 双摄并发探测（用户第 3 项后半）：决定「另镜头录制」的可用态。
@@ -985,15 +1053,37 @@ fun CameraScreen(
                     showLevelLine = levelEnabled,
                     modifier = Modifier.matchParentSize()
                 )
-                FocusBox(point = focusPoint)
+                FocusBox(
+                    // 锁定期的数据源切换成锁定锚点（缺省画面中心，与引擎同一口径）；未锁路径一字不动
+                    point = if (focusLocked) (focusLockPoint ?: TapPoint(0.5f, 0.5f)) else focusPoint,
+                    locked = focusLocked
+                )
                 Box(
                     Modifier
                         .matchParentSize()
                         .tapFocus(
-                            onTap = { point -> if (focusUsable) writeFocusPoint(params, point) },
+                            onTap = { point ->
+                                when {
+                                    !focusUsable -> Unit
+                                    // 锁定期轻触不重焦（防误触字面要求）：首次轻触给一句提示
+                                    focusLocked -> showLockedTapTip()
+                                    else -> focusTapAt(point)
+                                }
+                            },
+                            onDoubleTap = { point ->
+                                when {
+                                    !focusUsable -> Unit
+                                    // 锁定期双击按轻触同款处理（不重焦、给提示）；未锁时是该点锁定入口
+                                    focusLocked -> showLockedTapTip()
+                                    else -> lockFocusAt(point)
+                                }
+                            },
                             onLongPress = { point ->
+                                // 锁定期长按 = 快速解链（Q2）：先解锁（引擎回执恢复用户 AF 模式），
+                                // 再按原语义在该点重新对焦 + 切 AE 锁；未锁定时这一行是空操作
+                                if (params.focusLocked.value) params.focusLocked.value = false
                                 // 组合动作：点按对焦 + 锁 AE；再长按解锁。直接读总线避免闭包取到旧值
-                                writeFocusPoint(params, point)
+                                focusTapAt(point)
                                 when (params.aeMode.value) {
                                     AeMode.AUTO -> params.aeMode.value = AeMode.LOCK
                                     AeMode.LOCK -> params.aeMode.value = AeMode.AUTO
@@ -1044,7 +1134,7 @@ fun CameraScreen(
         focusLabel = stringResource(R.string.pill_focus),
         stabLabel = stringResource(R.string.cam_p_stab),
         stabActive = stabilize != Stabilize.OFF,
-        focusActive = afMode == AfMode.MANUAL,
+        focusActive = afMode == AfMode.MANUAL || focusLocked,
         refLineOn = refLines != 0,
         monitorLabel = stringResource(
             if (frameEffect == FrameEffect.NONE) R.string.cam_p_monitor else effectShortRes(frameEffect)
@@ -1566,7 +1656,17 @@ fun CameraScreen(
                 onPersist = { persist.flush() },
                 onLockTip = lockTip,
                 onUnsupported = { showTip(unsupportedText) },
-                onFocusCenter = { if (focusUsable) writeFocusPoint(params, TapPoint(0.5f, 0.5f)) },
+                onFocusCenter = {
+                    when {
+                        !focusUsable -> Unit
+                        // R3b：锁定期按「中心点按对焦」不静默——同款提示、不重焦（不隐式解锁；
+                        // 解锁后此条恢复原语义）
+                        params.focusLocked.value -> showLockedTapTip()
+                        else -> focusTapAt(TapPoint(0.5f, 0.5f))
+                    }
+                },
+                focusLocked = focusLocked,
+                onToggleFocusLock = toggleFocusLock,
                 onPickLens = { picked -> ctrl.switchLens(picked) },
                 freeMb = freeMb,
             bt = bt,
@@ -1959,13 +2059,17 @@ internal fun rememberCapacityTextWidths(
 /**
  * 点按对焦框：黄框 + 中心点，出现时由大到小回弹（06 文档 §4 跟手动画）。
  * 带 [BoxScope] 接收者：覆盖层要与预览同尺寸，只能在 Box 内容作用域里取 `matchParentSize()`。
+ *
+ * [locked]（用户反馈第 2 条）：锁定态下框常显（数据源已是锁定锚点）并在右下角叠一枚小锁标；
+ * 解锁后点变 null，框与锁标一起走既有淡出——零新色板、零布局改动（Q8）。
  */
 @Composable
-private fun BoxScope.FocusBox(point: TapPoint?) {
+private fun BoxScope.FocusBox(point: TapPoint?, locked: Boolean) {
     val motion = LocalMotion.current
     val visible = point != null
     val alpha by animateFloatAsState(if (visible) 1f else 0f, motion.float)
     val scale by animateFloatAsState(if (visible) 1f else 1.6f, motion.float)
+    val lockIcon = rememberVectorPainter(Icons.Filled.Lock)
     Canvas(Modifier.matchParentSize().alpha(alpha)) {
         val p = point ?: return@Canvas
         if (size.width <= 0f || size.height <= 0f) return@Canvas
@@ -1980,6 +2084,16 @@ private fun BoxScope.FocusBox(point: TapPoint?) {
             style = Stroke(width = stroke)
         )
         drawCircle(color = WotaWarn, radius = 2.5.dp.toPx(), center = Offset(cx, cy))
+        if (locked) {
+            // 小锁标钉在框的右下角（与框同色的告警黄，随 alpha 一起淡出）。
+            // Painter.draw 是「成员扩展」：扩展接收者就是当前 DrawScope，故在 with 里直接 draw(size=…)
+            val icon = 16.dp.toPx()
+            translate(cx + half - icon, cy + half - icon) {
+                with(lockIcon) {
+                    draw(size = GeoSize(icon, icon), colorFilter = ColorFilter.tint(WotaWarn))
+                }
+            }
+        }
     }
 }
 
@@ -2062,11 +2176,20 @@ private fun GateButton(text: String, onClick: () -> Unit) {
     )
 }
 
-/** 点按/长按预览区：容器已按画面比例布局，故视图坐标即画面归一化坐标 */
-private fun Modifier.tapFocus(onTap: (TapPoint) -> Unit, onLongPress: (TapPoint) -> Unit): Modifier =
+/**
+ * 点按/双击/长按预览区：容器已按画面比例布局，故视图坐标即画面归一化坐标。
+ * 提供 `onDoubleTap` 后轻触的派发会等双击窗口结束才落（Compose 手势判定口径）——
+ * 这是「双击锁定」主入口的固有代价，未锁路径的语义（4.5s 恢复/框 1.5s 淡出/长按切 AE）不变。
+ */
+private fun Modifier.tapFocus(
+    onTap: (TapPoint) -> Unit,
+    onDoubleTap: (TapPoint) -> Unit,
+    onLongPress: (TapPoint) -> Unit
+): Modifier =
     pointerInput(Unit) {
         detectTapGestures(
             onTap = { offset -> onTap(toTapPoint(offset, size.width, size.height)) },
+            onDoubleTap = { offset -> onDoubleTap(toTapPoint(offset, size.width, size.height)) },
             onLongPress = { offset -> onLongPress(toTapPoint(offset, size.width, size.height)) }
         )
     }
