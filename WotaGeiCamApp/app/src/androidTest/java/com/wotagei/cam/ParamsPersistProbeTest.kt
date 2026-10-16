@@ -63,39 +63,58 @@ class ParamsPersistProbeTest {
 
     private fun freshParams() = WotaParams(CoroutineScope(Dispatchers.Unconfined))
 
-    /** 第 1 步：用生产类写 23 项全非默认（AS IS：不跑 applyAbility，写什么就是什么） */
+    /**
+     * 把 23 项全调一遍（值全与出厂默认不同）——**必须在会话影子冻结之后调用**，
+     * 模拟"进录制页后用户逐项调出这些值"（与 JVM 用例 `ParamsPersistSessionTest.makeBusy` 同值同形）。
+     */
+    private fun WotaParams.makeBusy() = apply {
+        fps.value = fps.value.copy(value = FPS)
+        shutter.value = shutter.value.copy(value = SHUTTER_NS)
+        bitrate.value = BITRATE
+        refLines.value = REF_MASK
+        levelEnabled.value = false
+        iso.value = iso.value.copy(value = ISO)
+        aeMode.value = AeMode.MANUAL
+        ev.value = ev.value.copy(value = -2)
+        wbMode.value = WbPreset.DAYLIGHT
+        kelvin.value = kelvin.value.copy(value = KELVIN)
+        tint.value = tint.value.copy(value = TINT)
+        zoom.value = zoom.value.copy(value = ZOOM)
+        flash.value = Flash.AUTO
+        stabilize.value = Stabilize.EIS
+        afMode.value = AfMode.MANUAL
+        manualFocusDiopter.value = manualFocusDiopter.value.copy(value = DIOPTER)
+        requestSize(SIZE)
+        frameEffect.value = FrameEffect.PEAKING
+        zebraThreshold.value = ZEBRA_THRESHOLD
+        zebraDensity.value = ZEBRA_DENSITY
+        peakingStrength.value = PEAKING_STRENGTH
+        peakingColor.value = PeakingColor.BLUE
+        lens.value = LensType.TELEPHOTO
+    }
+
+    /**
+     * 第 1 步：用生产类写 23 项全非默认（AS IS：不跑 applyAbility，写什么就是什么）。
+     *
+     * 时序铁律（与 JVM 用例 `ParamsPersistSessionTest.kt:48-50` 一致）：**先建会话冻结影子、再 makeBusy**。
+     * 反过来的话影子=现值，flush 逐字段 diff 全为 0、走无差异早退，一个 commit 都不会发生——
+     * 失败形态是"落盘为空"，极易被误读成"持久化功能坏了"。
+     */
     @Test
     fun step1_writeProbe() {
-        val bus = freshParams().apply {
-            fps.value = fps.value.copy(value = FPS)
-            shutter.value = shutter.value.copy(value = SHUTTER_NS)
-            bitrate.value = BITRATE
-            refLines.value = REF_MASK
-            levelEnabled.value = false
-            iso.value = iso.value.copy(value = ISO)
-            aeMode.value = AeMode.MANUAL
-            ev.value = ev.value.copy(value = -2)
-            wbMode.value = WbPreset.DAYLIGHT
-            kelvin.value = kelvin.value.copy(value = KELVIN)
-            tint.value = tint.value.copy(value = TINT)
-            zoom.value = zoom.value.copy(value = ZOOM)
-            flash.value = Flash.AUTO
-            stabilize.value = Stabilize.EIS
-            afMode.value = AfMode.MANUAL
-            manualFocusDiopter.value = manualFocusDiopter.value.copy(value = DIOPTER)
-            requestSize(SIZE)
-            frameEffect.value = FrameEffect.PEAKING
-            zebraThreshold.value = ZEBRA_THRESHOLD
-            zebraDensity.value = ZEBRA_DENSITY
-            peakingStrength.value = PEAKING_STRENGTH
-            peakingColor.value = PeakingColor.BLUE
-            lens.value = LensType.TELEPHOTO
-        }
-        val session = ParamsPersistSession(probePrefs(), bus)
+        val bus = freshParams()
+        val session = ParamsPersistSession(probePrefs(), bus)   // 影子先冻结（进录制页）
+        bus.makeBusy()                                          // 再逐项调出 23 个非默认值（用户动作）
         line("STEP1_WRITE pid=${android.os.Process.myPid()}")
+        // flush() 无差异时也返回 true（该路径根本不调 commit），所以 true 只是前提、不是"写了"的证据：
+        // 「真写了」由紧邻的 contains 锚点与随后的逐键常数复验钉死
         assertTrue(
-            "flush() 的 commit 返回 false ⇒ 真机上根本没落成盘",
+            "flush() 有差异却返回 false ⇒ commit 在真机上没落成盘",
             session.flush()
+        )
+        assertTrue(
+            "flush 后 ${WotaSettings.KEY_DEFAULT_FPS} 必须真的在盘上（无差异早退的假通过形态在此焊死）",
+            probePrefs().contains(WotaSettings.KEY_DEFAULT_FPS)
         )
         // 落盘值用手写常数逐键复验（不拿写方自算值比）
         val prefs = probePrefs()

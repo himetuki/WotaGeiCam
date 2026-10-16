@@ -77,7 +77,8 @@ object ParamsPersist {
             value = prefs.getInt(WotaSettings.KEY_DEFAULT_FPS, 25)
                 .coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
         )
-        // ② 快门（ns）：>0 才套，坏值跳过（保持出厂默认）
+        // ② 快门（ns）：>0 才套；坏值跳过 = 维持 applyDefaults 刚无条件套上的出厂默认
+        //    （本函数自身不做钳制；最终设备域由后续 applyAbility 收口）
         val shutterNs = prefs.getInt(WotaSettings.KEY_DEFAULT_SHUTTER_NS, 40_000_000).toLong()
         if (shutterNs > 0) params.shutter.value = params.shutter.value.copy(value = shutterNs)
         // ③ 码率（档位域由档表管，坏值原样交给 UI/引擎；与 applyDefaults 一致不做钳）
