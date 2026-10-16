@@ -74,10 +74,16 @@ class AutoStopWiringGuardTest {
             masked.contains("out.copy(autoStopReason = reason)")
         )
         // 文案分派自 2026-10-16 起住在呈现计划纯函数里（ui/RecordResultNotice.kt 的 recordTextPlan，
-        // CameraScreen 只做渲染）——同一条"资源必须接线"断言换真源文件，不是弱化
-        val plan = mainSourceText("ui/RecordResultNotice.kt")
-        assertTrue("电量停录文案必须接线", plan.contains("cam_record_saved_auto_battery"))
-        assertTrue("存储停录文案必须接线", plan.contains("cam_record_saved_auto_storage"))
+        // CameraScreen 只做渲染）——同一条"资源必须接线"断言换真源文件；**必须走遮蔽文本**
+        //（codeOnly）：原文判定一句注释就能喂绿（复核 P3-2），遮蔽后只认真代码里出现的资源名。
+        // 含子串陷阱：整句名是短附注名的前缀（cam_record_saved_auto_battery ⊂ ..._short），
+        // 原因句一侧的断言带尾随逗号（资源调用的实参位），短附注一侧查全名，互不假阳。
+        val plan = codeOnly(mainSourceText("ui/RecordResultNotice.kt"))
+        assertTrue("电量停录原因句必须接线", plan.contains("cam_record_saved_auto_battery,"))
+        assertTrue("存储停录原因句必须接线", plan.contains("cam_record_saved_auto_storage,"))
+        assertTrue("电量停录短附注必须接线", plan.contains("cam_record_saved_auto_battery_short"))
+        assertTrue("存储停录短附注必须接线", plan.contains("cam_record_saved_auto_storage_short"))
+        assertTrue("相机收回停录短附注必须接线", plan.contains("cam_record_saved_auto_camera_lost_short"))
         // 突变自证：结果不带原因（UI 文案分支死掉）
         val mutated = masked.replace("out.copy(autoStopReason = reason)", "out")
         assertTrue("结果不带自动停录原因后尺子必须红", !mutated.contains("autoStopReason = reason)"))
@@ -167,8 +173,12 @@ class AutoStopWiringGuardTest {
             lost.contains("failNow(")
         )
         // 文案：结果分派必须接新资源，资源必须存在且带时长占位符
-        // （分派住在呈现计划纯函数里：ui/RecordResultNotice.kt，2026-10-16 起）
-        assertTrue("已保存路径必须分派相机丢失文案", mainSourceText("ui/RecordResultNotice.kt").contains("cam_record_saved_auto_camera_lost"))
+        // （分派住在呈现计划纯函数里：ui/RecordResultNotice.kt，2026-10-16 起；
+        //   遮蔽文本判定——注释不算接线，见上一条测试的说明）
+        assertTrue(
+            "已保存路径必须分派相机丢失文案",
+            codeOnly(mainSourceText("ui/RecordResultNotice.kt")).contains("cam_record_saved_auto_camera_lost,")
+        )
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue(
             "资源 cam_record_saved_auto_camera_lost 必须存在",

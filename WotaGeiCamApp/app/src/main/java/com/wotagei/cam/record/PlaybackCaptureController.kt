@@ -222,9 +222,16 @@ class PlaybackCaptureController(context: Context) {
      * （与 [AudioFeeder] 两路共用同一函数；改口径只改那里）。
      *
      * 档位体检（2026-10-16）：`getMinBufferSize` 是**麦克风口径**的预判（默认输入源），与 playback
-     * capture 链能否吃下该档没有因果关系——唯一实证闸是建好后回读 `sampleRate` / `channelCount`
-     * 与请求值比对（[captureParamMismatch]）；不一致就 release 并降级，绝不让"AAC 按请求档配置、
+     * capture 链能否吃下该档没有因果关系——回读 `sampleRate` / `channelCount` 与请求值比对
+     * （[captureParamMismatch]）是当前唯一实证闸；不一致就 release 并降级，绝不让"AAC 按请求档配置、
      * 喂进去的却是另一档 PCM"的静默错配流出去（音调漂移/截断且全程无感知）。
+     *
+     * 【回读闸的边界，2026-10-16 收尾批】它命中"在构造时就改写字段"的 ROM（回读拿到的就是被改
+     * 后的真实值）；对"字段仍回显请求值、AudioFlinger 在链路后端静默重采样"的 ROM 无能为力——
+     * 那是内录链无契约保证的固有盲区，不在本闸能力范围（只能靠成片听感/诊断日志另立证据）。
+     * 另一面：回读为 0（或明显异常）而内录实际可用，属**误杀**嫌疑——真机上先取 e 级日志
+     * （"capture AudioRecord 参数回读不符：req ... 实际 ..."那条）作实证；确认误杀可一行回滚：
+     * 把判据里 `actual <= 0` 视为"不可读"放行（不把 0 当不符），只比对双方均 >0 的字段。
      */
     @Suppress("MissingPermission") // 内录路径本不需要 RECORD_AUDIO；工程 manifest 已声明并做运行时检查
     fun createCaptureAudioRecord(sampleRate: Int, channels: Int): AudioRecord? {
@@ -373,11 +380,13 @@ class PlaybackCaptureController(context: Context) {
  * → null（照常放行）；任一不等（含实际读出 0 = 系统未按档配置）→ 返回中文短因（含请求与实际）。
  *
  * 返回值直接进 [PlaybackCaptureController.lastInitFailure]——「内录不可用（%1$s），本次仅录环境音」
- * 的文案参数，用户可见；成功路径（全等）零行为变化，由调用点的 else 分支原样返回采集器。
+ * 的文案参数，用户可见；**短因自身不带括号**（外层资源已带一对），句式用冒号 + 逗号分段，
+ * 避免嵌进去成双层括号（2026-10-16 收尾批 P3-5）。成功路径（全等）零行为变化，由调用点的
+ * else 分支原样返回采集器。
  */
 internal fun captureParamMismatch(reqRate: Int, reqChannels: Int, actualRate: Int, actualChannels: Int): String? {
     if (reqRate == actualRate && reqChannels == actualChannels) return null
-    return "本机内录不支持该档（请求 ${reqRate}Hz/${reqChannels}ch，系统改为 ${actualRate}Hz/${actualChannels}ch）"
+    return "本机内录不支持该档：请求 ${reqRate}Hz/${reqChannels}ch，系统改为 ${actualRate}Hz/${actualChannels}ch"
 }
 
 /**

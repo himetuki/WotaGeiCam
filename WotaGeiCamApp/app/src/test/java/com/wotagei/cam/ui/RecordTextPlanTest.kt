@@ -135,15 +135,45 @@ class RecordTextPlanTest {
     }
 
     @Test
-    fun `多段混合加自动停录_原因句只讲段数_拍板口径`() {
-        // 拍板原文："任何「有已保存分段但非干净成功」：原因句走「已保存 N 段」"——多段时
-        // 计数句压过自动停录原因句（自动停录原因只在单段/干净成功时占原因句；本角无组合资源，
-        // 未获授权不加）。钉在这里防"顺手"改成另一种优先序。
-        val plan = planOf(
-            result(parts = 2, error = "${RecordError.ENGINE_ERROR}:LOOP", autoStopReason = AutoStopRules.REASON_CAMERA_LOST)
+    fun `多段加错误加自动停录_原因句只讲段数_短附注讲为什么停`() {
+        // 拍板原文（2026-10-16 收尾批）：任何「有已保存分段但非干净成功」的结果如实呈现 +
+        // 该提醒的照旧提醒——原因句保持计数/时长（旧形态"计数句压过自动停录原因"会让用户
+        // 看不到"为什么自己停了"），自动停录原因降为一条并列短附注；三枚原因各一格。
+        val cases = listOf(
+            AutoStopRules.REASON_BATTERY to R.string.cam_record_saved_auto_battery_short,
+            AutoStopRules.REASON_STORAGE to R.string.cam_record_saved_auto_storage_short,
+            AutoStopRules.REASON_CAMERA_LOST to R.string.cam_record_saved_auto_camera_lost_short
         )
-        assertEquals(R.string.cam_record_saved_parts, plan.reason.res)
-        assertEquals(listOf<Any>(2, "00:42"), plan.reason.args)
+        for ((reason, shortRes) in cases) {
+            val plan = planOf(
+                result(parts = 2, error = "${RecordError.ENGINE_ERROR}:LOOP", autoStopReason = reason)
+            )
+            assertEquals("原因句只为段数（$reason）", R.string.cam_record_saved_parts, plan.reason.res)
+            assertEquals(listOf<Any>(2, "00:42"), plan.reason.args)
+            assertEquals(
+                "短附注必须能见（$reason）；次序：短原因 → 失败码附注（谁也不盖谁）",
+                listOf(shortRes, R.string.cam_record_saved_note_tail),
+                noteRes(plan)
+            )
+        }
+    }
+
+    @Test
+    fun `单段加错误加自动停录_沿用已保存措辞_短附注讲为什么停`() {
+        val plan = planOf(
+            result(parts = 1, error = "${RecordError.ENGINE_ERROR}:LOOP", autoStopReason = AutoStopRules.REASON_BATTERY)
+        )
+        assertEquals(
+            "单段沿用现有「已保存 %1\$s」措辞（不走计数句，也不被自动停录整句顶掉）",
+            R.string.cam_record_saved,
+            plan.reason.res
+        )
+        assertEquals(listOf<Any>("00:42"), plan.reason.args)
+        assertEquals(
+            "短附注 + 失败码附注并列",
+            listOf(R.string.cam_record_saved_auto_battery_short, R.string.cam_record_saved_note_tail),
+            noteRes(plan)
+        )
     }
 
     // ------------------------------------------------------------------ 干净成功（文案不变）
@@ -171,19 +201,21 @@ class RecordTextPlanTest {
     }
 
     @Test
-    fun `自动停录原因在干净成功时占原因句`() {
-        assertEquals(
-            R.string.cam_record_saved_auto_battery,
-            planOf(result(parts = 1, autoStopReason = AutoStopRules.REASON_BATTERY)).reason.res
+    fun `自动停录原因在干净成功时占原因句_三句整句不变`() {
+        val cases = listOf(
+            Triple(1, AutoStopRules.REASON_BATTERY, R.string.cam_record_saved_auto_battery),
+            Triple(1, AutoStopRules.REASON_STORAGE, R.string.cam_record_saved_auto_storage),
+            Triple(2, AutoStopRules.REASON_CAMERA_LOST, R.string.cam_record_saved_auto_camera_lost)
         )
-        assertEquals(
-            R.string.cam_record_saved_auto_storage,
-            planOf(result(parts = 1, autoStopReason = AutoStopRules.REASON_STORAGE)).reason.res
-        )
-        assertEquals(
-            R.string.cam_record_saved_auto_camera_lost,
-            planOf(result(parts = 2, autoStopReason = AutoStopRules.REASON_CAMERA_LOST)).reason.res
-        )
+        for ((parts, reason, res) in cases) {
+            val plan = planOf(result(parts = parts, autoStopReason = reason))
+            assertEquals("干净成功三条整句逐字不变（$reason）", res, plan.reason.res)
+            assertEquals(
+                "整句已带时长（时长只带一次），短附注不许出现在干净成功路径",
+                emptyList<Int>(),
+                noteRes(plan)
+            )
+        }
     }
 
     @Test

@@ -157,13 +157,20 @@
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案）。
          结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口，分派见 ui/RecordResultNotice.kt 的
-         recordTextPlan 纯函数）：前四条 + 混合结果的 parts 条是原因句（为什么停了/存了几段；
-         时长只在这里带一次），其余是附注句（保存质量），附注一律写成带前置"；"的**后缀**、
-         可任意并列，两件同时命中谁也不盖谁 -->
+         recordTextPlan 纯函数）：cam_record_saved + 三条 auto 整句 + 混合结果的 parts 条是原因句
+         （为什么停了/存了几段；时长只在这里带一次），其余是附注句（保存质量与"为什么停"短原因），
+         附注一律写成带前置"；"的**后缀**、可任意并列，两件同时命中谁也不盖谁 -->
     <string name="cam_record_saved">已保存，时长 %1$s</string>
     <string name="cam_record_saved_auto_battery">电量过低已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_storage">存储空间不足已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_camera_lost">相机被其它应用占用或被系统收回，录制已停止，已保存 %1$s</string>
+    <!-- 短原因附注（2026-10-16 收尾批）：有已保存分段但非干净成功（partial）时，原因句被
+         「已保存 N 段」/「已保存，时长」占用，"为什么自己停了"降为一条并列短附注——用户拍板
+         "该提醒的照旧"；不带时长（时长只由原因句带一次）、无占位符。干净成功路径仍走上面三条
+         整句（逐字不变），本组不会被调到 -->
+    <string name="cam_record_saved_auto_battery_short">；因电量过低自动停止</string>
+    <string name="cam_record_saved_auto_storage_short">；因存储空间不足自动停止</string>
+    <string name="cam_record_saved_auto_camera_lost_short">；因相机被收回而停止</string>
     <!-- 混合/join 超时如实化（2026-10-16）：有已保存分段但非干净成功时，原因句只为"存了几段"——
          旧形态是整句「录制失败」，而片其实已在相册。%1$d=段数、%2$s=时长（时长只由原因句带一次）；
          单段**不**走本条（沿用上面「已保存 %1$s」措辞："已保存 1 段"是口语倒退，不许出现） -->
@@ -173,8 +180,10 @@
     <string name="cam_record_saved_uncommitted">；相册登记未成功，重进相册或重启后再看</string>
     <string name="cam_record_saved_degraded">；本次收尾未完整结束，成片末尾可能不完整</string>
     <!-- 失败码语义转成的软附注（只用于"有已保存分段但非干净成功"）：片已在相册，只要说末尾这段
-         没保住；诊断原文仍在结果 error 字段、日志与换段受阻落盘账目里（可查）。无占位符 -->
-    <string name="cam_record_saved_note_tail">；收尾未完成，末段未能保存</string>
+         **可能**没保住；诊断原文仍在结果 error 字段、日志与换段受阻落盘账目里（可查）。无占位符。
+         措辞对两种结局都成立（收尾批 P3-1）：抽干吃满 join 线后泵仍可能正常封段 commit——
+         "末段未能保存"是假话，"可能未能保存（以相册为准）"两头都不冤 -->
+    <string name="cam_record_saved_note_tail">；收尾未完成，末段可能未能保存（以相册为准）</string>
     <string name="cam_record_saved_note_rotate">；换段受阻，后续画面未能录下</string>
     <!-- 环境音丢失（S1-M3-05 收口；P3-3 措辞修正）：成因两种——起录没建起来（全程没有）与
          中途中断/换段重建失败（前段有、后段没有），旧文案把"整场没有"写绝对了、对后者不成立；
