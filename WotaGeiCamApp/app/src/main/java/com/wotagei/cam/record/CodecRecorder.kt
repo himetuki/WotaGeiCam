@@ -308,6 +308,15 @@ class CodecRecorder(
     /** 显式弃段意图（[abandonCurrentSegment] 置位，新会话/新段起始复位）：见 [segmentKeepDecision] */
     @Volatile private var abandonSegment = false
 
+    /**
+     * 会话级降级码：某段**被保留**（keep=true）却带错误码时记下该错误码的原文（典型=抽干超时
+     * `ENGINE_ERROR:DRAIN`，而后 muxer 照样正常收尾、moov 已写完、整段可播）。
+     *
+     * 结果呈现见 [finish]：有产物 + 降级码 ⇒ 按成功呈现（error 置空、ok==true）+ UI 提示
+     * "末尾可能不完整"，而不是把用户的成片说成"录制失败"。prepare 复位（新会话不带旧账）。
+     */
+    @Volatile private var degradedCode: String? = null
+
     /** stop() 置位：循环给两轨发 EOS 后收尾 */
     @Volatile private var stopping = false
 
@@ -329,6 +338,26 @@ class CodecRecorder(
      * 复用原 `runSegment` 内的局部账本（**不新开计数**），段起始归零，供 [RecorderHealth.outputBytes]。
      */
     @Volatile private var segWrittenBytes = 0L
+
+    /**
+     * 本段 muxer 是否**确认收尾**（[closeSegmentEngine] 里 `m.stop()` **正常返回**的那一刻置 true）。
+     *
+     * 【独立信号，不许从错误码反推】closeSegmentEngine 的置错是"首个错误码优先"
+     * （`engineError = engineError ?: ...MUX_CLOSE`）：DRAIN 已置时，muxer.stop() 抛出的 MUX_CLOSE
+     * 会被吞掉——拿错误码判断会把"坏容器"当"好容器"。容器能不能用必须问"stop() 到底正常返回没有"。
+     * `MediaMuxer.stop()` 未 start 恒抛，正常返回本身就蕴含"本段曾 start"。
+     * 段起始 / prepare / release 复位（逐段信号不许跨段残留）。
+     */
+    @Volatile private var muxFinalized = false
+
+    /**
+     * 本段是否真有视频样本写进 muxer（writeSample 返回 >0 时置位；与逐段账同处复位）。
+     *
+     * 【为什么不能复用 segVideoWritten】pumpLoop 顶部 `segSampleCounts.add(segVideoWritten);
+     * segVideoWritten = 0` 排在 closeSegmentEngine/sealCurrent **之前**——keep 判据若读它，
+     * 所有段都会被判成"零样本"（见 [segmentKeepDecision] 的 containerFinalized）。
+     */
+    private var segHadVideoSample = false
 
     // ---- 起录自检三格（泵线程单写者，[health] 今天只在控制线程读，故一律 @Volatile 是防御未来把
     // 自检挪出该线程的零成本保险）----
@@ -446,6 +475,7 @@ class CodecRecorder(
         }
         state = EngineState.PREPARE
         engineError = null
+        degradedCode = null
         abandonSegment = false
         stopping = false
         rotatePending = false
@@ -458,6 +488,8 @@ class CodecRecorder(
         partStartMs = 0L
         segVideoWritten = 0
         segWrittenBytes = 0L
+        muxFinalized = false
+        segHadVideoSample = false
         segSampleCounts.clear()
         resetRotateBooks()
         envFeederStartUs = 0L
@@ -988,6 +1020,7 @@ class CodecRecorder(
         s?.release()
         state = EngineState.IDLE
         engineError = null
+        degradedCode = null
         abandonSegment = false
         clock.reset()
         parts.clear()
@@ -995,6 +1028,8 @@ class CodecRecorder(
         partStartMs = 0L
         segVideoWritten = 0
         segWrittenBytes = 0L
+        muxFinalized = false
+        segHadVideoSample = false
         segSampleCounts.clear()
         resetRotateBooks()
         Log.i(TAG, "codec released")
@@ -1073,8 +1108,25 @@ class CodecRecorder(
             // settleRotateLegAtStop 的 KDoc）。正常停录由 Thread.join 提供 happens-before，不受影响。
             // 先拆 codec/muxer（moov 写完）再封段提交，顺序反了相册会拿到半截文件
             closeSegmentEngine()
-            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision
-            sealCurrent(dur, ok && segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
+            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision。
+            // containerFinalized 由两个**独立**信号合成：muxFinalized（muxer.stop() 正常返回）与
+            // segHadVideoSample（本段确有视频样本）——都不许从错误码反推（那个置错是首错优先，
+            // MUX_CLOSE 会被 DRAIN 吞掉），也不许读 segVideoWritten（上面几行刚把它清零）
+            val keep = segmentKeepDecision(
+                abandoned = abandonSegment,
+                ok = ok,
+                errorCode = engineError,
+                durationMs = dur,
+                minKeepMs = RecordProfile.MIN_KEEP_MS,
+                containerFinalized = muxFinalized && segHadVideoSample
+            )
+            // 降级呈现：段被保留却带错误码（典型=抽干超时而后容器正常收尾）⇒ 会话记降级码，
+            // 结果按"已保存 + 末尾可能不完整"呈现（见 [finish]），原始诊断码同时留日志
+            if (keep && engineError != null) {
+                degradedCode = engineError
+                Log.w(TAG, "本段带错误码但容器已收尾，保留并按降级呈现：$engineError")
+            }
+            sealCurrent(dur, keep)
             // 停录途中不再换段：`stopping` 置位后 rotatePending 往往恰好也为真（阈值刚触顶就被停），
             // 照旧换段会白建一枚 pending 再按 NO_VIDEO_TRACK 丢掉（附带一个假错误码落进结果）
             val wantRotate = willRotate && !stopping
@@ -1478,8 +1530,11 @@ class CodecRecorder(
         var muxStarted = false
         var videoDone = false
         var videoEosQueued = false
-        // 段起始归零本段写入字节账（复用实例字段，供 health() 读产出活性；见 segWrittenBytes）
+        // 段起始归零本段写入字节账（复用实例字段，供 health() 读产出活性；见 segWrittenBytes），
+        // 逐段容器收尾信号同处复位：muxFinalized/segHadVideoSample 只描述**本段**（见各自 KDoc）
         segWrittenBytes = 0L
+        muxFinalized = false
+        segHadVideoSample = false
         var deadline = 0L
         // 抽干窗口的进度感知状态（[drainWaitTick] 单写者推进）：窗起点 / 顺延次数（只进一条汇总
         // 日志，不刷屏）/ 本拍推进观测（循环末尾读走即清、三路 dequeue 见真东西即置位）/ 本拍超时判定
@@ -1573,6 +1628,9 @@ class CodecRecorder(
                             if (wrote > 0) segVideoWritten++
                             // 自检第三格：首个视频样本真写进 muxer（writeSample 失败返回 0，不计）
                             if (wrote > 0) healthFirstVideoSample = true
+                            // 容器收尾判据的另一半（见 [segmentKeepDecision] 的 containerFinalized）：
+                            // 与 muxFinalized 合成"容器已确认收尾"，只能由写成功置位
+                            if (wrote > 0) segHadVideoSample = true
                             vPtsLastUs = bi.presentationTimeUs
                         }
                         v.releaseOutputBuffer(idx, false)
@@ -2063,6 +2121,9 @@ class CodecRecorder(
         if (m != null) {
             try {
                 m.stop()
+                // 容器正常收尾（moov 写完）＝"本段可播"的独立信号：只由 stop() 正常返回置位，
+                // 供 segmentKeepDecision 判"删不删"用——绝不由错误码反推（见 muxFinalized 字段注）
+                muxFinalized = true
             } catch (e: IllegalStateException) {
                 // P0-c：不仅「没 start 过」会抛——start 过但某轨零样本（幽灵轨）一样抛。
                 // 这两种状态下容器必然缺 moov/轨不完整，本段按废片处理：置 engineError 让
@@ -2164,16 +2225,27 @@ class CodecRecorder(
         // 无产物也要把换段丢帧账带上（"整段丢了 N 秒"是用户唯一能看到的解释，
         // 见 RecordError.ROTATE_STALL 与 recordResultText 的文案映射）
         val lost = rotateLoss.totalMs
-        val out = if (parts.isEmpty())
-            RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
-        else buildResult(error)
+        val degraded = degradedCode
+        val out = when {
+            parts.isEmpty() ->
+                RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+            // 降级呈现：有产物 + 降级码 ⇒ 按成功呈现（error 置空、ok==true、degradedCode 带诊断原文），
+            // UI 走"已保存 + 末尾可能不完整"文案——文件确实在盘上、moov 已写完，说成"失败"是骗人。
+            // **只在错误就是那条降级码时成立**：engineError 是首错优先、不会换码，相等即同一回事；
+            // 万一不等（将来引入并行的第二错误源）宁可回落失败呈现，绝不拿降级码盖住更硬的失败
+            degraded != null && degraded == error -> buildResult(null).copy(degradedCode = degraded)
+            else -> buildResult(error)
+        }
         state = EngineState.IDLE
         engineError = null
+        degradedCode = null
         clock.reset()
         parts.clear()
         partIndex = 0
         partStartMs = 0L
         segVideoWritten = 0
+        muxFinalized = false
+        segHadVideoSample = false
         segSampleCounts.clear()
         resetRotateBooks()
         return out

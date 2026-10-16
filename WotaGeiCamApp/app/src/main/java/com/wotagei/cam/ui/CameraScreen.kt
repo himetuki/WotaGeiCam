@@ -424,6 +424,10 @@ fun CameraScreen(
                     // 相机被系统收回同样是一次"已保存"的正常收尾（不是失败）：说清为什么停
                     result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
                         app.getString(R.string.cam_record_saved_auto_camera_lost, formatDuration(result.durationMs))
+                    // 降级段（容器已确认收尾、文件可播，只是收尾阶段出过错，如抽干超时）：也走"已保存"，
+                    // 只补一句末尾可能不完整——诊断码进日志与落盘账目，不吓用户、不许说"失败"
+                    result.degradedCode != null ->
+                        app.getString(R.string.cam_record_saved_degraded, formatDuration(result.durationMs))
                     result.uncommitted > 0 ->
                         app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
                     result.lostMs >= LOSS_NOTICE_MIN_MS ->
@@ -2742,17 +2746,21 @@ private class RecordRunner(
         rec.release()
         recorder = null
         // 换段受阻账（2026-10-08 真机缺陷）：这台 ROM 吞掉应用日志，"哪一环卡住、丢了多久"只能靠
-        // 落盘账目分辨。只在真出事时写（失败码或丢过内容），与成片同目录，adb 直接 pull
+        // 落盘账目分辨。只在真出事时写（失败码或丢过内容），与成片同目录，adb 直接 pull。
+        // 降级段（error 已置空、degradedCode 有值，如收尾抽干超时但容器收尾正常）同样落账：
+        // UI 那句"末尾可能不完整"背后到底出了什么，只有这条账目留得住
         val muxDiag = out.muxDiag
-        if (RotateFailLog.shouldLog(out.error, out.lostMs) || muxDiag.isNotEmpty()) {
+        if (RotateFailLog.shouldLog(out.error, out.lostMs) || muxDiag.isNotEmpty() || out.degradedCode != null) {
             val dir = out.path?.let { File(it).parentFile } ?: app.getExternalFilesDir(null)
             val line = rotateFailLedgerLine(
                 stamp = SimpleDateFormat("yyyy-MM-dd_HH:mm:ss", Locale.US).format(Date()),
                 parts = out.parts.size,
                 durationMs = out.durationMs,
                 lostMs = out.lostMs,
-                // 已重建接住的 muxer 写失败也要带快照（否则"成功了"就什么线索都没了）
+                // 已重建接住的 muxer 写失败也要带快照（否则"成功了"就什么线索都没了）；
+                // 降级码排在它之前：段被保留过、诊断码就是它
                 code = out.error
+                    ?: out.degradedCode
                     ?: if (muxDiag.isNotEmpty()) muxRecoveredCode(muxDiag) else "OK_WITH_LOSS",
                 latePending = out.latePending,
                 restarts = out.segmentRestarts
