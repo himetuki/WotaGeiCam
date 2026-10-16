@@ -27,6 +27,7 @@ import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.Size
+import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import kotlinx.coroutines.CoroutineScope
@@ -203,6 +204,12 @@ class Camera2Engine(
         collectJobs += params.flash.drop(1)
             .onEach { post { onFlashChanged() } }
             .launchIn(scope)
+
+        // 对焦锁定（用户反馈第 2 条）：总线是唯一真源——锁定/解除在这里回执到引擎。
+        // drop(1) 跳过订阅时的现状（引擎整套重开会经 applyAbility 先清锁，不欠历史账）
+        collectJobs += params.focusLocked.drop(1)
+            .onEach { locked -> post { if (locked) engageFocusLock("bus") else releaseFocusLock() } }
+            .launchIn(scope)
     }
 
     /** 只改下发内容、不改会话形状的参数源；merge 要变参数组，故这里直接给 Array */
@@ -316,7 +323,9 @@ class Camera2Engine(
     fun stopPreview() {
         post {
             desiredPreview = false
-            restoreTapFocusNow("stopPreview")
+            // 锁定期跨停预览存活（Q4：ON_PAUSE→ON_RESUME 不丢锁，恢复时会话重建会复扫一次）；
+            // 未锁时照旧复位点按覆写（原语义一字不变）
+            if (!params.focusLocked.value) restoreTapFocusNow("stopPreview")
             workHandler.removeCallbacks(flushTask)
             dirty = false
             stopRepeatingQuietly()
@@ -363,6 +372,9 @@ class Camera2Engine(
      */
     fun tapToFocus(normX: Float, normY: Float) {
         post {
+            // 对焦锁定期拒绝一切点按重焦（引擎级权威第二层，UI 已挡一层）——
+            // 「锁定后轻触不重焦」这条防误触语义不能只靠 UI（R6）
+            if (params.focusLocked.value) return@post
             val state = reqState ?: return@post
             if (session == null && highSpeedSession == null) return@post
             val array = state.activeArray
@@ -383,6 +395,52 @@ class Camera2Engine(
             applyRepeatingNow()                                     // 段 3
             scheduleTapRestore()
         }
+    }
+
+    /**
+     * 锁定对焦（用户反馈第 2 条）：以锚点（[WotaParams.focusLockPoint]，缺省画面中心）做一次
+     * 单次自动对焦后**不排超时恢复**——repeating 保持 `AF_MODE=AUTO + 区域 + TRIGGER_IDLE`，
+     * 镜头停在合焦位直到显式解除（[releaseFocusLock]）。
+     *
+     * 幂等：会话重建（起录/停录/换段/恢复/错误重开）后由 `onConfigured` 反复重放。
+     * 与 [tapToFocus] 的两处差别：① 不排 4.5s 恢复；② AUTO 覆写与区域支持**解耦**
+     * （能写 AUTO 就写，区域能力为 0 就不写区——R10）。无会话时安全早退（由 onConfigured 补）。
+     */
+    private fun engageFocusLock(reason: String) {
+        // R3a：锁定以「单次自动对焦」（AF_MODE_AUTO）为载体，能力不含它的镜头不做假开关
+        // （UI 侧同步禁用锁定条目）；能力未就绪（镜头还没开）同样不动
+        val slotAbility = ability ?: return
+        if (!slotAbility.afModes.contains(CaptureRequest.CONTROL_AF_MODE_AUTO)) {
+            Log.w(TAG, "锁定对焦不可用（$reason）：afModes=${slotAbility.afModes} 不含 AUTO")
+            return
+        }
+        val state = reqState ?: return
+        if (session == null && highSpeedSession == null) return
+        val array = state.activeArray
+        if (array.isEmpty()) return
+        cancelTapRestore()
+        val anchor = params.focusLockPoint.value ?: TapPoint(0.5f, 0.5f)
+        val box = RequestApplier.meteringBox(array.arrayWidth, array.arrayHeight, anchor.x, anchor.y)
+        val region = listOf(RequestApplier.meteringRect(box))
+        // AUTO 覆写与区域解耦：写 AUTO 不依赖 maxRegionsAf（区域上限为 0 时只发模式 + 触发）
+        tapAfModeOverride = CaptureRequest.CONTROL_AF_MODE_AUTO
+        if (state.maxRegionsAf > 0) tapAfRegions = region
+        if (state.maxRegionsAe > 0) tapAeRegions = region
+        applyRepeatingNow()                                     // 段 1：AUTO + 区域
+        tapTrigger = CaptureRequest.CONTROL_AF_TRIGGER_START
+        singleCapture("af-lock-start")                          // 段 2：单发 START（高速会话由 singleCapture 包列表）
+        tapTrigger = CaptureRequest.CONTROL_AF_TRIGGER_IDLE
+        applyRepeatingNow()                                     // 段 3：保持（不排恢复）
+        Log.i(
+            TAG,
+            "对焦已锁定（$reason）：锚点=(${anchor.x}, ${anchor.y}) afModes=${slotAbility.afModes} " +
+                "maxRegionsAf=${state.maxRegionsAf}"
+        )
+    }
+
+    /** 解除对焦锁定：恢复用户原 AF 模式 + 全幅测光（与点按超时恢复共用同一支） */
+    private fun releaseFocusLock() {
+        restoreTapFocusNow("unlock")
     }
 
     /** 拍照/静帧单次通道（与 repeating 分离）；v0.0.1 无 UI 入口，接口先留好 */
@@ -579,6 +637,9 @@ class Camera2Engine(
                 reopenRetries = 0
                 publishPreview(PreviewStatus.ING)
                 applyRepeatingNow()
+                // 会话重建复锁（Q4）：起录/停录/换段/暂停恢复/错误重开都会换一条会话，
+                // 锁定态必须重放一次扫描，否则镜头被 HAL 停在重启后的未知位（R3 的观感代价）
+                if (params.focusLocked.value) engageFocusLock("session-restart")
             }
 
             override fun onConfigureFailed(failed: CameraCaptureSession) {
@@ -831,6 +892,8 @@ class Camera2Engine(
 
     private fun scheduleTapRestore() {
         cancelTapRestore()
+        // 竞态双保险：锁定在 4.5s 窗口内开启时，超时恢复不许把锁定拉回连续模式
+        if (params.focusLocked.value) return
         val task = Runnable { restoreTapFocusNow("timeout") }
         tapRestoreTask = task
         workHandler.postDelayed(task, TAP_RESTORE_MS)
