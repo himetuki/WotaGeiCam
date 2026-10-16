@@ -84,7 +84,6 @@ import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.dialog.bitrateText
 import com.wotagei.cam.ui.dialog.sampleRateText
-import com.wotagei.cam.ui.dialog.shutterText
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
@@ -129,6 +128,47 @@ object WotaSettings {
     const val KEY_DEFAULT_RENDER = "default_render_mode"
     /** 静音录制的初始值：录制页已不再有「更多」胶囊放它，所以归到设置页（§37 第 3 条） */
     const val KEY_DEFAULT_AUDIO_MUTE = "default_audio_muted"
+
+    /**
+     * 录制页参数持久化的一套键（用户反馈第 1 条；2026-10-16 用户拍板口径）。
+     *
+     * 语义 = **键即启动档位**（上次用过就是下次启动值）：本组 18 键与上面 5 个存量键
+     * （[KEY_DEFAULT_FPS] / [KEY_DEFAULT_SHUTTER_NS] / [KEY_DEFAULT_BITRATE] /
+     * [KEY_DEFAULT_REF_LINES] / [KEY_LEVEL_ENABLED]）构成入档白名单，见 [ParamsPersist.KEYS]。
+     *
+     * - 恢复侧 [ParamsPersist.restore]（由 [applyDefaults] 末尾调用）读键 → 坏值回默认 → 写总线；
+     * - 写入侧 [ParamsPersistSession.flush] 只在用户动作完成点（关弹窗/点按循环/长按锁 AE/切镜头/
+     *   退后台/滑杆松手）把「本次会话真的动过」的字段批量 `commit()` 落盘。
+     *
+     * [KEY_DEFAULT_FPS] / [KEY_DEFAULT_SHUTTER_NS] 为**复用存量键**（R1/2026-10-16 拍板：设置页的
+     * 「默认帧率」「默认快门」两行已删，改由录制页 flush 写入；键不动、恢复链不动）。
+     *
+     * **刻意不入档**的字段（防后人"补齐"）：
+     * - `default_render_mode` / `default_sample_rate`：设置页独占——录制页对 renderMode 的两处写
+     *   全是「※ 档自动切 GPU」的**自动降级**，入档会把降级静默写成用户默认；
+     * - `default_audio_muted`：**音源不持久化**（R3/2026-10-16 拍板）——录制页音源双开关
+     *   （内录/环境音）任何路径都不写 prefs、不跨进程恢复；冷启动内录恒为关、环境音按出厂默认
+     *   进入（否则开过内录的用户每次启动都要重新申请投屏授权）。该键仍归设置页「静音录制」独占；
+     * - 对焦框（瞬时点按态）、`curve` / `arc_convert_mode`（各有专属直写链，避免第二写入方）。
+     */
+    const val KEY_DEFAULT_ISO = "default_iso"
+    const val KEY_DEFAULT_AE_MODE = "default_ae_mode"
+    const val KEY_DEFAULT_EV = "default_ev"
+    const val KEY_DEFAULT_WB_PRESET = "default_wb_preset"
+    const val KEY_DEFAULT_WB_KELVIN = "default_wb_kelvin"
+    const val KEY_DEFAULT_WB_TINT = "default_wb_tint"
+    const val KEY_DEFAULT_ZOOM = "default_zoom"
+    const val KEY_DEFAULT_FLASH = "default_flash"
+    const val KEY_DEFAULT_STABILIZE = "default_stabilize"
+    const val KEY_DEFAULT_AF_MODE = "default_af_mode"
+    const val KEY_DEFAULT_MF_DIOPTER = "default_mf_diopter"
+    const val KEY_DEFAULT_SIZE = "default_size"
+    const val KEY_DEFAULT_FRAME_EFFECT = "default_frame_effect"
+    const val KEY_DEFAULT_ZEBRA_THRESHOLD = "default_zebra_threshold"
+    const val KEY_DEFAULT_ZEBRA_DENSITY = "default_zebra_density"
+    const val KEY_DEFAULT_PEAKING_STRENGTH = "default_peaking_strength"
+    const val KEY_DEFAULT_PEAKING_COLOR = "default_peaking_color"
+    const val KEY_DEFAULT_LENS = "default_lens"
 
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
@@ -343,6 +383,10 @@ object WotaSettings {
      * 套用逻辑本体，不做进程内去重：这样 JVM 单测可以用一份假 SharedPreferences
      * 直接验「设置页改过默认档 → 参数总线真的跟过去」（#20 的核心命题），
      * 不必等真机杀进程重进。
+     *
+     * 末尾接 [ParamsPersist.restore]（用户反馈第 1 条）：把录制页存档的 23 项键一次读回总线
+     * （上面那批与它重叠的几项幂等）。此即"设置页默认档"与"录制页上次用过的值"合流的那一处——
+     * 语义统一为「键即启动档位」。
      */
     fun applyDefaults(prefs: SharedPreferences, params: WotaParams) {
         val fps = defaultFps(prefs).coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
@@ -355,6 +399,7 @@ object WotaSettings {
         params.refLines.value = defaultRefLines(prefs)
         params.levelEnabled.value = levelEnabled(prefs)
         params.curve.value = curveStack(prefs)
+        ParamsPersist.restore(prefs, params)
     }
 
     /** 媒体库读取权限：33+ 走细分权限，以下回退旧存储权限 */
@@ -461,8 +506,8 @@ private val LocalSettingsCardPad = compositionLocalOf { 12.dp }
 
 @Composable
 private fun BlockDefault(prefs: SharedPreferences) {
-    var defaultFps by remember { mutableStateOf(WotaSettings.defaultFps(prefs)) }
-    var defaultShutter by remember { mutableStateOf(WotaSettings.defaultShutterNs(prefs)) }
+    // 帧率/快门两行已删（R1/2026-10-16 拍板）：这两项只在录制页改，由 ParamsPersistSession
+    // 落盘到同一个 default_fps / default_shutter_ns 键（键与恢复链都没动），设置页不再重复出档
     var defaultBitrate by remember { mutableStateOf(WotaSettings.defaultBitrate(prefs)) }
     var defaultSampleRate by remember { mutableStateOf(WotaSettings.defaultSampleRate(prefs)) }
     var defaultRender by remember { mutableStateOf(WotaSettings.defaultRenderMode(prefs)) }
@@ -478,26 +523,6 @@ private fun BlockDefault(prefs: SharedPreferences) {
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
     )
     Card {
-        val fpsItems = WotaTiers.FPS.map { TierItem(it, "$it") }
-        TierPicker(
-            label = stringResource(R.string.set_default_fps),
-            selected = defaultFps,
-            items = fpsItems,
-            format = { "$it" },
-            onPick = { defaultFps = it; prefs.edit().putInt(WotaSettings.KEY_DEFAULT_FPS, it).apply() }
-        )
-        TierPicker(
-            label = stringResource(R.string.set_default_shutter),
-            selected = defaultShutter,
-            items = WotaTiers.SHUTTER_DENOM.map {
-                TierItem((WotaTiers.NS_PER_SECOND / it).toInt(), "1/$it")
-            },
-            format = { shutterText(it.toLong()) },
-            onPick = {
-                defaultShutter = it
-                prefs.edit().putInt(WotaSettings.KEY_DEFAULT_SHUTTER_NS, it).apply()
-            }
-        )
         TierPicker(
             label = stringResource(R.string.set_default_bitrate),
             selected = defaultBitrate / 1_000_000,

@@ -3,13 +3,11 @@
     <string name="set_title">设置</string>
     <string name="set_back">返回</string>
 
-    <!-- 录制默认档位 -->
+    <!-- 录制默认档位（R1/2026-10-16 拍板：帧率/快门两行已删，只在录制页改并落同一个键） -->
     <string name="set_group_default">开机初始值</string>
-    <string name="set_default_note">只决定每次冷启动的起点；取景中经就近胶囊改的是当前值，不会写回这里</string>
+    <string name="set_default_note">只决定每次冷启动的起点；录制页改过的同类参数会被记住，不随后台清理回归默认</string>
     <string name="set_default_mute">静音录制</string>
     <string name="set_default_mute_note">初始是否不带音轨；缺麦克风权限时一律降级为纯视频</string>
-    <string name="set_default_fps">默认帧率</string>
-    <string name="set_default_shutter">默认快门</string>
     <string name="set_default_bitrate">默认码率</string>
     <string name="set_default_sample">默认采样率</string>
     <string name="set_default_render">默认渲染模式</string>
