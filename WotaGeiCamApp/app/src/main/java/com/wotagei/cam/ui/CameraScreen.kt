@@ -283,6 +283,18 @@ fun CameraScreen(
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
+    // 配置持久化会话（用户反馈第 1 条）：进页冻结影子=当前总线（applyDefaultsOnce 之后），
+    // 五个动作完成点（H1-H5）与滑杆松手只 flush「本次会话真的动过」的字段，无差异不写盘。
+    // 声明位置必须先于 :closePill 与 previewStage（局部声明先于使用）
+    val persist = remember(params) { ParamsPersistSession(settingsPrefs, params) }
+    // H5 兜底：滑杆拖完没关弹窗就按 Home / 从最近任务划掉——退后台这一刻补一次落盘
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) persist.flush()
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
     val hudMask = WotaSettings.hudItems(settingsPrefs)
     // #54：控件胶囊的显隐位掩码，默认全开；关掉的那几颗整颗不出现（不是变灰）
     val hiddenPills = CamPill.hiddenOf(WotaSettings.hudPills(settingsPrefs))
@@ -354,7 +366,11 @@ fun CameraScreen(
         sheet = s
     }
     /** 只读一次总线现值，弹窗内的判据不依赖组合期的 observed 快照 */
-    val closePill: () -> Unit = { pop = null }
+    val closePill: () -> Unit = {
+        pop = null
+        // H1：关弹窗 = 用户动作完成点，把本次会话真正改过的参数落盘（用户反馈第 1 条）
+        persist.flush()
+    }
     /**
      * 进入录制态就收掉就近胶囊（S3-2，与 [openSheet] 里那句 `pop = null` 同语义）。
      * 三个"开面板"的触发点都 gate 了录制中，但 `onRecordClick` 不清 pop ⇒ 长按开镜头面板后再按快门，
@@ -983,6 +999,8 @@ fun CameraScreen(
                                     AeMode.LOCK -> params.aeMode.value = AeMode.AUTO
                                     else -> Unit
                                 }
+                                // H3：长按锁 AE 后落盘（用户反馈第 1 条；LOCK 存为 AUTO，见 ParamsPersist）
+                                persist.flush()
                             }
                         )
                 )
@@ -1115,7 +1133,11 @@ fun CameraScreen(
                     // 相机还没枚举完就点：说"等预览"而不是"只有一颗镜头"，后者是假信息
                     keys.isEmpty() -> showTip(app.getString(R.string.cam_wait_preview))
                     target == null -> showTip(app.getString(R.string.cam_lens_only_one))
-                    else -> ctrl.switchLens(target)
+                    else -> {
+                        ctrl.switchLens(target)
+                        // H4：点按切镜头后落盘（用户反馈第 1 条；面板选中那条走 H1 的 closePill）
+                        persist.flush()
+                    }
                 }
             }
         },
@@ -1158,6 +1180,8 @@ fun CameraScreen(
             // 录制中一律不改档（与面板同一条锁），改不动时给"本机不支持"而不是静默无反应
             if (recording) lockTip()
             else if (!hudCycleStep(item, params)) showTip(unsupportedText)
+            // H2：点按循环真的改了值 = 用户动作完成点，落盘（用户反馈第 1 条）
+            else persist.flush()
         },
         onReadoutOpen = { item ->
             // 近似帧率先说明再让改：点上去弹一个"这档其实是 23.976"的浮层比直接改值有用
@@ -1538,6 +1562,8 @@ fun CameraScreen(
                 recording = recording,
                 gpuMode = renderMode == RenderMode.GPU,
                 onClose = closePill,
+                // R4：滑杆「松手即落盘」通道——拖着滑杆没关弹窗就被 force-stop 也不丢值
+                onPersist = { persist.flush() },
                 onLockTip = lockTip,
                 onUnsupported = { showTip(unsupportedText) },
                 onFocusCenter = { if (focusUsable) writeFocusPoint(params, TapPoint(0.5f, 0.5f)) },

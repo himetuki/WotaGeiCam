@@ -271,6 +271,10 @@ private fun PillGroupLabel(text: String) {
 /**
  * 弹窗内的连续量滑杆：量化与上下限回钳复用 `snap`（同一套已单测过的边界规则）。
  * [label] 只在同一个弹窗里出现两根滑杆时才需要（如白平衡的色温 + 色度），否则标题已经说明白了。
+ *
+ * [onValueChangeFinished] 是「松手回执」通道（R4/用户反馈第 1 条）：拖动中的每一拍照旧只写
+ * 参数总线，松手这一刻才让调用方做落盘等重动作。可选（null = 松手时不通知），
+ * 录制页的全部滑杆调用点都补传了 flush——拖着滑杆没关弹窗就被 `am force-stop` 也不丢值。
  */
 @Composable
 fun PillSlider(
@@ -282,7 +286,8 @@ fun PillSlider(
     step: Float = 0f,
     format: (Float) -> String = { it.toString() },
     enabled: Boolean = true,
-    label: String? = null
+    label: String? = null,
+    onValueChangeFinished: (() -> Unit)? = null
 ) {
     val usable = hi > lo
     val shown = if (usable) value.coerceIn(lo, hi) else value
@@ -313,6 +318,7 @@ fun PillSlider(
                 },
                 valueRange = if (usable) lo..hi else 0f..1f,
                 enabled = enabled && usable,
+                onValueChangeFinished = onValueChangeFinished,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(
                     thumbColor = WotaColor.accent,
