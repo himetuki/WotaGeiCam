@@ -23,6 +23,7 @@ import android.util.Size
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.wotagei.cam.camera.RequestApplier
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -96,7 +97,10 @@ class FocusLockDeviceProbeTest {
             return
         }
         val maxRegionsAf = cc.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
-        // 尺寸与区域一律从 characteristics 现取（不写死机型值）：最小 PRIVATE 档最省带宽
+        // 计量区坐标基准 = activeArray（引擎口径，见 centerRegion 注释）
+        val activeArray = cc.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        assertTrue("缺 SENSOR_INFO_ACTIVE_ARRAY_SIZE，无法按引擎口径换算计量区", activeArray != null)
+        // 尺寸一律从 characteristics 现取（不写死机型值）：最小 PRIVATE 档最省带宽
         val outSize = map!!.getOutputSizes(ImageFormat.PRIVATE)?.minByOrNull { it.width * it.height }
         assertTrue("本机没有 PRIVATE 输出档", outSize != null)
         val size = outSize!!
@@ -122,7 +126,10 @@ class FocusLockDeviceProbeTest {
             req.addTarget(reader.surface)
             req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
             if (maxRegionsAf > 0) {
-                req.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(centerRegion(size)))
+                req.set(
+                    CaptureRequest.CONTROL_AF_REGIONS,
+                    arrayOf(centerRegion(activeArray!!.width(), activeArray.height()))
+                )
             }
             req.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
 
@@ -198,8 +205,12 @@ class FocusLockDeviceProbeTest {
             .firstNotNullOfOrNull { s ->
                 map.getHighSpeedVideoFpsRangesFor(s)?.firstOrNull()?.let { it to s }
             }
-        assertTrue("高速尺寸都没有帧率范围，跳过", picked != null)
-        val (fpsRange, size) = picked!!
+        if (picked == null) {
+            // 能力表里"有高速度量却没一档带帧率范围" ⇒ 该档建不出会话：如实报告不适用，不制造假红
+            line("camera=$id 高速尺寸均无帧率范围：高速档不可用，跳过（Q6 结论=该档不适用）")
+            return
+        }
+        val (fpsRange, size) = picked
         val afModes = cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toSet() ?: emptySet()
         val maxRegionsAf = cc.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
         line("高速档：size=${size.width}x${size.height} fps=[${fpsRange.lower},${fpsRange.upper}] " +
@@ -208,6 +219,9 @@ class FocusLockDeviceProbeTest {
             line("高速档同理不支持 AUTO：锁定条目在该档禁用（R2/Q6 的禁用路径成立）")
             return
         }
+        // 计量区坐标基准 = activeArray（引擎口径，见 centerRegion 注释）
+        val activeArray = cc.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        assertTrue("缺 SENSOR_INFO_ACTIVE_ARRAY_SIZE，无法按引擎口径换算计量区", activeArray != null)
 
         val thread = HandlerThread("wota-focus-hs").apply { start() }
         val handler = Handler(thread.looper)
@@ -227,7 +241,9 @@ class FocusLockDeviceProbeTest {
             req.addTarget(reader.surface)
             req.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
             req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-            if (maxRegionsAf > 0) req.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(centerRegion(size)))
+            if (maxRegionsAf > 0) {
+                req.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(centerRegion(activeArray!!.width(), activeArray.height())))
+            }
             req.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
 
             val session = configureHighSpeed(device, reader.surface, handler)
@@ -265,13 +281,13 @@ class FocusLockDeviceProbeTest {
 
     // ------------------------------------------------------------------ 工具
 
-    private fun centerRegion(size: Size): MeteringRectangle {
-        // 引擎 meteringBox 的中央等价形态（1000×1000 框、权重最大），坐标按当前输出尺寸折中
-        val half = 1000
-        val x = (size.width / 2 - half).coerceAtLeast(0)
-        val y = (size.height / 2 - half).coerceAtLeast(0)
-        return MeteringRectangle(x, y, half * 2, half * 2, MeteringRectangle.METERING_WEIGHT_MAX)
-    }
+    /**
+     * 引擎 meteringBox 的中央等价形态（1000×1000 框、权重最大）：直接复用生产纯函数换算，
+     * 与 `camera/Camera2Engine.kt:419-424` 的锁定链同口径。坐标基准是 **activeArray**，
+     * 不是输出尺寸——输出尺寸只是消费面，按它算会得出规格外的区域坐标。
+     */
+    private fun centerRegion(activeWidth: Int, activeHeight: Int): MeteringRectangle =
+        RequestApplier.meteringRect(RequestApplier.meteringBox(activeWidth, activeHeight, 0.5f, 0.5f))
 
     private fun openDevice(mgr: CameraManager, id: String, handler: Handler): CameraDevice {
         val opened = CountDownLatch(1)
