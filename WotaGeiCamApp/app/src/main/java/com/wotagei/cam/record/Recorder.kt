@@ -196,6 +196,53 @@ data class RecordResult(
 }
 
 /**
+ * 已封段快照 → [RecordResult] 的**桥函数**（纯 JVM 可测；快照→结果字段映射的唯一落点）。
+ *
+ * 用途：收尾被迫「只记账不拆资源」的路径（`CodecRecorder.finishWithoutTeardown()`——joinLoop
+ * 超时、泵线程仍活着）。那份结果必须**如实**带出"此刻已封段"：泵线程随后照常 sealCurrent 把
+ * 它们 commit 进相册，用户看到的必须与相册一致——旧行为返回无产物的失败结果，用户被告知全丢，
+ * 相册里却躺着 N 段。
+ *
+ * 【哪些账能带（宁缺勿假）】[sealed] 由调用方用线程安全容器的快照给出（`CodecRecorder.parts`
+ * 已 CopyOnWriteArrayList）；逐段样本/逐段丢失账（`segSampleCounts`/`segLostMs`）是泵线程单写者
+ * 的普通账本，取快照那一刻可能正在被写 ⇒ **一律不带**（缺的账由泵线程自己的收尾正常落盘）。
+ * [lostMs]/[rotateStalls] 来自内部加锁的账本、[muxDiag]/[ambientLost] 是 @Volatile 字段、
+ * [seriesId] 是构造期常量——这几枚可安全带出。
+ *
+ * @param sealed 已封段快照（空 = 退回 [RecordResult.fail] 的旧形态，字段逐字不变）
+ * @param err 非空失败/降级诊断码（调用方保证非空；用户面文案由 UI 侧呈现计划按"已保存 N 段"重写）
+ */
+internal fun sealedPartsResult(
+    sealed: List<VideoSegment>,
+    err: String,
+    durationMs: Long,
+    seriesId: Long,
+    lostMs: Long,
+    rotateStalls: Int,
+    muxDiag: String,
+    ambientLost: Boolean,
+    latePending: Long
+): RecordResult {
+    val first = sealed.firstOrNull()
+        ?: return RecordResult.fail(err, durationMs, lostMs, muxDiag)
+    return RecordResult(
+        uri = first.uri,
+        path = first.path,
+        bytes = sealed.sumOf { it.bytes },
+        durationMs = durationMs,
+        error = err,
+        seriesId = seriesId,
+        parts = sealed,
+        uncommitted = sealed.count { !it.committed },
+        lostMs = lostMs,
+        rotateStalls = rotateStalls,
+        latePending = latePending,
+        muxDiag = muxDiag,
+        ambientLost = ambientLost
+    )
+}
+
+/**
  * 引擎内部状态（04 文件 §6）。对外状态机由 `camera/Camera2Engine` 的 `RecordStatus` 承载，
  * 本包只用它守住 prepare/start/stop 的调用顺序。
  */

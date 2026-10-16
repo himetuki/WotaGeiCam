@@ -156,17 +156,26 @@
     <string name="cam_curve_reset_all">全部复位</string>
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案）。
-         结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口，分派见 CameraScreen 的 reasonText/noteText）：
-         前四条是原因句（为什么自己停了；时长只在这里带一次），其余是附注句（保存质量），
-         附注一律写成带前置"；"的**后缀**、可任意并列，两件同时命中谁也不盖谁 -->
+         结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口，分派见 ui/RecordResultNotice.kt 的
+         recordTextPlan 纯函数）：前四条 + 混合结果的 parts 条是原因句（为什么停了/存了几段；
+         时长只在这里带一次），其余是附注句（保存质量），附注一律写成带前置"；"的**后缀**、
+         可任意并列，两件同时命中谁也不盖谁 -->
     <string name="cam_record_saved">已保存，时长 %1$s</string>
     <string name="cam_record_saved_auto_battery">电量过低已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_storage">存储空间不足已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_camera_lost">相机被其它应用占用或被系统收回，录制已停止，已保存 %1$s</string>
+    <!-- 混合/join 超时如实化（2026-10-16）：有已保存分段但非干净成功时，原因句只为"存了几段"——
+         旧形态是整句「录制失败」，而片其实已在相册。%1$d=段数、%2$s=时长（时长只由原因句带一次）；
+         单段**不**走本条（沿用上面「已保存 %1$s」措辞："已保存 1 段"是口语倒退，不许出现） -->
+    <string name="cam_record_saved_parts">已保存 %1$d 段，时长 %2$s</string>
     <!-- 附注族（拼接次序即下方声明次序）：uncommitted 排最前——它是唯一"这条成片可能暂时看不见"
          的提醒，uncommitted > 0 时必须永远可见，不许被任何并列附注盖掉（P3-2） -->
     <string name="cam_record_saved_uncommitted">；相册登记未成功，重进相册或重启后再看</string>
     <string name="cam_record_saved_degraded">；本次收尾未完整结束，成片末尾可能不完整</string>
+    <!-- 失败码语义转成的软附注（只用于"有已保存分段但非干净成功"）：片已在相册，只要说末尾这段
+         没保住；诊断原文仍在结果 error 字段、日志与换段受阻落盘账目里（可查）。无占位符 -->
+    <string name="cam_record_saved_note_tail">；收尾未完成，末段未能保存</string>
+    <string name="cam_record_saved_note_rotate">；换段受阻，后续画面未能录下</string>
     <!-- 环境音丢失（S1-M3-05 收口；P3-3 措辞修正）：成因两种——起录没建起来（全程没有）与
          中途中断/换段重建失败（前段有、后段没有），旧文案把"整场没有"写绝对了、对后者不成立；
          新措辞对两种成因都成立（缺失/中断 + 后段没有环境声音），不再绝对化 -->

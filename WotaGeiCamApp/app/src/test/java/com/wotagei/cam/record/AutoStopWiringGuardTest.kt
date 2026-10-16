@@ -73,8 +73,11 @@ class AutoStopWiringGuardTest {
             "stopInternal 必须把 autoStopReason 带进 RecordResult（否则 UI 永远不知道为什么停）",
             masked.contains("out.copy(autoStopReason = reason)")
         )
-        assertTrue("电量停录文案必须接线", masked.contains("cam_record_saved_auto_battery"))
-        assertTrue("存储停录文案必须接线", masked.contains("cam_record_saved_auto_storage"))
+        // 文案分派自 2026-10-16 起住在呈现计划纯函数里（ui/RecordResultNotice.kt 的 recordTextPlan，
+        // CameraScreen 只做渲染）——同一条"资源必须接线"断言换真源文件，不是弱化
+        val plan = mainSourceText("ui/RecordResultNotice.kt")
+        assertTrue("电量停录文案必须接线", plan.contains("cam_record_saved_auto_battery"))
+        assertTrue("存储停录文案必须接线", plan.contains("cam_record_saved_auto_storage"))
         // 突变自证：结果不带原因（UI 文案分支死掉）
         val mutated = masked.replace("out.copy(autoStopReason = reason)", "out")
         assertTrue("结果不带自动停录原因后尺子必须红", !mutated.contains("autoStopReason = reason)"))
@@ -164,7 +167,8 @@ class AutoStopWiringGuardTest {
             lost.contains("failNow(")
         )
         // 文案：结果分派必须接新资源，资源必须存在且带时长占位符
-        assertTrue("已保存路径必须分派相机丢失文案", masked.contains("cam_record_saved_auto_camera_lost"))
+        // （分派住在呈现计划纯函数里：ui/RecordResultNotice.kt，2026-10-16 起）
+        assertTrue("已保存路径必须分派相机丢失文案", mainSourceText("ui/RecordResultNotice.kt").contains("cam_record_saved_auto_camera_lost"))
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue(
             "资源 cam_record_saved_auto_camera_lost 必须存在",

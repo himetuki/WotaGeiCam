@@ -296,15 +296,16 @@ class AmbientTrackLostGuardTest {
         val collectBlock = m.substringAfter("runner.ambientLostNotice.collect", "")
             .substringBefore("LaunchedEffect", "")
         assertTrue("collect 里必须调 showTip（接了资源 id 却没接 hint 通道 = 提示不可见）", collectBlock.contains("showTip("))
-        // 结果文案分派（P3-1 起是"原因句 + 附注句叠加"结构，组合遮蔽守卫在 SavedTextDispatchGuardTest）：
-        // 环境音附注挂在附注叠加器里——条件仍是 result.ambientLost（判定语义逐字不变），
-        // 与降级/登记/丢失的附注并列，谁也不盖谁
-        val notes = m.substringAfter("val noteText = buildString", "")
-            .substringBefore("showTip(", "")
-        val ambientCondAt = notes.indexOf("if (result.ambientLost) append(")
+        // 结果文案分派（P3-1 起是"原因句 + 附注句叠加"结构，组合遮蔽守卫在 SavedTextDispatchGuardTest；
+        // 2026-10-16 起判定搬进呈现计划纯函数 ui/RecordResultNotice.kt）：环境音附注挂在附注列表里
+        // ——条件仍是 result.ambientLost（判定语义逐字不变），与降级/登记/丢失的附注并列，谁也不盖谁
+        val notes = codeOnly(mainSourceText("ui/RecordResultNotice.kt"))
+            .substringAfter("val notes = buildList", "")
+            .substringBefore("return RecordTextPlan", "")
+        val ambientCondAt = notes.indexOf("if (result.ambientLost) add(")
         val ambientResAt = notes.indexOf("R.string.cam_record_saved_ambient_lost")
         assertTrue(
-            "附注叠加器必须含环境音附注（if (result.ambientLost) 条件 + 资源接线；偏移 $ambientCondAt/$ambientResAt）",
+            "附注列表必须含环境音附注（if (result.ambientLost) 条件 + 资源接线；偏移 $ambientCondAt/$ambientResAt）",
             ambientCondAt >= 0 && ambientResAt > ambientCondAt
         )
         // 文案资源逐字钉住（P3-3 措辞修正：提示与结果两条都不再绝对化，对「起录就没有」与
@@ -330,7 +331,7 @@ class AmbientTrackLostGuardTest {
         val mutated = m.replace("runner.ambientLostNotice.collect", "Unit")
         assertFalse("拆掉 UI collect 后守卫必须报红", mutated.contains("runner.ambientLostNotice.collect"))
         // 突变自证：环境音附注被摘（结果层这件信息丢了）
-        val m2 = notes.replace("if (result.ambientLost) append(", "if (false) append(")
-        assertFalse("摘掉环境音附注后守卫必须红", m2.contains("if (result.ambientLost) append("))
+        val m2 = notes.replace("if (result.ambientLost) add(", "if (false) add(")
+        assertFalse("摘掉环境音附注后守卫必须红", m2.contains("if (result.ambientLost) add("))
     }
 }

@@ -29,6 +29,9 @@ class RotateStallGuardTest {
 
     private val codec = codeOnly(mainSourceText("record/CodecRecorder.kt"))
     private val screen = codeOnly(mainSourceText("ui/CameraScreen.kt"))
+
+    /** 结果提示的呈现计划纯函数（2026-10-16 起失败码/附注/原因句判定都住在这里） */
+    private val notice = codeOnly(mainSourceText("ui/RecordResultNotice.kt"))
     private val guard = codeOnly(mainSourceText("record/RotateGuard.kt"))
 
     /**
@@ -158,7 +161,8 @@ class RotateStallGuardTest {
 
     @Test
     fun `停摆必须给用户带秒数的中文提示`() {
-        val text = bodyOf(screen, "recordResultText")
+        // 映射本体自 2026-10-16 起住在 ui/RecordResultNotice.kt（同一条断言换真源文件，不是弱化）
+        val text = bodyOf(notice, "recordResultText")
         assertTrue("失败码必须映射到文案", text.contains("RecordError.ROTATE_STALL"))
         assertTrue("文案必须带上丢失秒数（码里的毫秒载荷要翻成秒）", text.contains("rotateStallLostSeconds("))
         // 资源必须存在且带 %1$d 占位符：漏占位符 getString 会抛 IllegalArgumentException，
@@ -179,10 +183,12 @@ class RotateStallGuardTest {
     @Test
     fun `已保存的成功路径也要把丢失秒数报出来`() {
         // 用户按停止时那一腿还没结算 = 泵线程仍卡在腿里（真机每一轮停摆都是这么结束的）：
-        // 结果走 ok 分支也必须带上丢失时长，否则用户只看到"已保存"而不知道丢了几十秒
-        assertTrue("成功路径必须按 lostMs 条件带上丢帧附注", screen.contains("result.lostMs >= LOSS_NOTICE_MIN_MS"))
-        assertTrue("必须用资源 cam_record_saved_loss 报秒数", screen.contains("R.string.cam_record_saved_loss"))
-        assertTrue("秒数必须同一套换算（至少 1 秒、四舍五入）", screen.contains("rotateStallLostSeconds(result.lostMs)"))
+        // 结果走"已保存"分支也必须带上丢失时长，否则用户只看到"已保存"而不知道丢了几十秒。
+        // 判定自 2026-10-16 起住在呈现计划（ui/RecordResultNotice.kt 的 recordTextPlan 附注列表）：
+        // 干净成功与混合结果（有已保存分段但带错误码）两条路共用同一条 loss 附注
+        assertTrue("必须按 lostMs 条件带上丢帧附注", notice.contains("result.lostMs >= LOSS_NOTICE_MIN_MS"))
+        assertTrue("必须用资源 cam_record_saved_loss 报秒数", notice.contains("R.string.cam_record_saved_loss"))
+        assertTrue("秒数必须同一套换算（至少 1 秒、四舍五入）", notice.contains("rotateStallLostSeconds(result.lostMs)"))
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue("资源 cam_record_saved_loss 必须存在", xml.contains("name=\"cam_record_saved_loss\""))
         // P3-1 起是附注**后缀**（带前置"；"）：时长由原因句带一次，本条只带丢失秒数一个占位符——
