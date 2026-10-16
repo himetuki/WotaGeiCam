@@ -161,6 +161,7 @@
     <string name="cam_record_saved_auto_storage">存储空间不足已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_camera_lost">相机被其它应用占用或被系统收回，录制已停止，已保存 %1$s</string>
     <string name="cam_record_saved_loss">已保存 %1$s（其中约 %2$d 秒因换段受阻丢失）</string>
+    <string name="cam_record_saved_degraded">已保存 %1$s；本次收尾未完整结束，成片末尾可能不完整</string>
     <string name="cam_record_saved_uncommitted">已保存 %1$s，但相册登记未成功，重进相册或重启后再看</string>
     <string name="cam_record_low_storage">存储空间不足：可用 %1$d MB，录制至少需要 %2$d MB</string>
     <string name="cam_record_low_storage_short">存储空间不足，无法开始录制</string>

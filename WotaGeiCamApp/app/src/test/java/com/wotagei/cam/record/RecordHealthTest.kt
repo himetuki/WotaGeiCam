@@ -295,39 +295,154 @@ class RecordHealthTest {
 
     /**
      * 停录 keep 判定的**桥测试**（审查点名：现有守卫只是 `.contains(".discard(")` 形态断言，
-     * 对"自检判废后坏段仍被 commit"这个场景恒绿）。这里直断言四种组合，尤其
+     * 对"自检判废后坏段仍被 commit"这个场景恒绿）。这里直断言组合，尤其
      * `abandoned=true, errorCode=null, dur 足够 ⇒ false`——**这就是 P1 的形态**：MR 路判废的主形态
      * 正是"一直在录但没写出数据、errorCode 仍为 null"，旧的 `errorCode==null && dur>=min` 判定会把
      * 它当正常段 commit。突变：把判定里的 `!abandoned &&` 去掉 → 这一格变 true，必红。
+     *
+     * 【新增维度 containerFinalized】弃段意图与时长边界这两维的语义**逐格不变**（弃段仍最高优先、
+     * 时长不足仍删）；容器已确认收尾只影响"有错误码"那一族。全组合表见下一条用例。
      */
     @Test
     fun `弃段意图压过停录的正常判定`() {
         val minKeep = 500L
-        // P1 核心：无错误码、时长足够，但已声明弃段 ⇒ 必须不 keep
+        // P1 核心：无错误码、时长足够，但已声明弃段 ⇒ 必须不 keep（两种情况：容器收尾与否都不许放行）
         assertFalse(
             "abandoned=true + 无错 + 够长 ⇒ 必须弃（旧判定会 commit 坏片）",
-            segmentKeepDecision(abandoned = true, errorCode = null, durationMs = 60_000L, minKeepMs = minKeep)
+            segmentKeepDecision(
+                abandoned = true, ok = true, errorCode = null,
+                durationMs = 60_000L, minKeepMs = minKeep, containerFinalized = false
+            )
+        )
+        assertFalse(
+            "abandoned=true + 容器已确认收尾 ⇒ 仍弃（弃段意图压过一切）",
+            segmentKeepDecision(
+                abandoned = true, ok = true, errorCode = null,
+                durationMs = 60_000L, minKeepMs = minKeep, containerFinalized = true
+            )
         )
         // 未弃 + 无错 + 恰好够长 ⇒ keep（边界取 >= 而非 >）
         assertTrue(
             "abandoned=false + 无错 + 恰够长 ⇒ keep",
-            segmentKeepDecision(abandoned = false, errorCode = null, durationMs = minKeep, minKeepMs = minKeep)
+            segmentKeepDecision(
+                abandoned = false, ok = true, errorCode = null,
+                durationMs = minKeep, minKeepMs = minKeep, containerFinalized = false
+            )
         )
         // 未弃 + 无错 + 差 1ms ⇒ 不 keep（过短按废片）
         assertFalse(
             "abandoned=false + 无错 + 差 1ms ⇒ 不 keep",
-            segmentKeepDecision(abandoned = false, errorCode = null, durationMs = minKeep - 1, minKeepMs = minKeep)
+            segmentKeepDecision(
+                abandoned = false, ok = true, errorCode = null,
+                durationMs = minKeep - 1, minKeepMs = minKeep, containerFinalized = false
+            )
         )
-        // 有错误码：即便未弃、够长也对 keep 说否（引擎已判废的段不能放行）
+        // 有错误码且容器未确认收尾：即便未弃、够长也对 keep 说否（坏容器不能进相册）
         assertFalse(
-            "有错误码即便未弃也弃",
-            segmentKeepDecision(abandoned = false, errorCode = RecordError.ENGINE_ERROR, durationMs = 60_000L, minKeepMs = minKeep)
+            "有错误码且容器未收尾（如 muxer.stop 也抛）即便未弃也弃",
+            segmentKeepDecision(
+                abandoned = false, ok = true, errorCode = RecordError.ENGINE_ERROR,
+                durationMs = 60_000L, minKeepMs = minKeep, containerFinalized = false
+            )
         )
         // 弃段意图是最高优先：有错误码 + 已弃 仍 false
         assertFalse(
             "弃段意图是最高优先",
-            segmentKeepDecision(abandoned = true, errorCode = RecordError.ENGINE_ERROR, durationMs = 60_000L, minKeepMs = minKeep)
+            segmentKeepDecision(
+                abandoned = true, ok = true, errorCode = RecordError.ENGINE_ERROR,
+                durationMs = 60_000L, minKeepMs = minKeep, containerFinalized = false
+            )
         )
+    }
+
+    /**
+     * 容器收尾维度的**全组合表**（本轮拆分：容器已确认收尾的段不再因 DRAIN/LOOP 这类时序/内部
+     * 异常被删；删除只留给"容器确认不可用"、显式弃段、时长不足）。期望值一律手写字面量，
+     * 每格在注释里标出与旧判据（`!abandoned && err==null && dur>=min`）的异同。
+     *
+     * 关键格：`LOOP 且容器已收尾` 是 **ok=false** 的组合——旧判据里 keep 被 `ok &&` 整个挡掉，
+     * 新判据靠 containerFinalized 单独放行（删掉 `containerFinalized ||` 会连 DRAIN 那格一起红）。
+     */
+    @Test
+    fun `容器已确认收尾的段不被时序异常删_全组合表`() {
+        val minKeep = 500L
+        data class KeepCase(
+            val why: String,
+            val abandoned: Boolean,
+            val ok: Boolean,
+            val errorCode: String?,
+            val durationMs: Long,
+            val containerFinalized: Boolean,
+            val expected: Boolean
+        )
+
+        val cases = listOf(
+            KeepCase(
+                "正常停止（ok、无错、够长、容器未标注）", false, true, null, 60_000L, false, true
+            ),
+            KeepCase(
+                "零样本段但无错（旧口径：ok && err==null ⇒ keep，不变）", false, true, null, 60_000L, false, true
+            ),
+            KeepCase(
+                "DRAIN（ok、有错）且容器已确认收尾 ⇒ 新：keep（旧判据在这里删整段）",
+                false, true, "${RecordError.ENGINE_ERROR}:DRAIN", 20 * 60_000L, true, true
+            ),
+            KeepCase(
+                "DRAIN 且 muxer.stop 也抛（容器未收尾）⇒ 删（不变）",
+                false, true, "${RecordError.ENGINE_ERROR}:DRAIN", 60_000L, false, false
+            ),
+            KeepCase(
+                "LOOP 中途抛异常但容器已收尾（ok=false）⇒ 新：keep（旧判据被 ok && 挡掉）",
+                false, false, "${RecordError.ENGINE_ERROR}:LOOP", 60_000L, true, true
+            ),
+            KeepCase(
+                "LOOP 且容器未收尾（ok=false）⇒ 删（不变）",
+                false, false, "${RecordError.ENGINE_ERROR}:LOOP", 60_000L, false, false
+            ),
+            KeepCase(
+                "重启请求（段循环提前退出、无错、ok=false）⇒ 删（不变）",
+                false, false, null, 60_000L, false, false
+            ),
+            KeepCase(
+                "未 start / 无视频轨（NO_VIDEO_TRACK）⇒ 删（不变）",
+                false, false, RecordError.NO_VIDEO_TRACK, 60_000L, false, false
+            ),
+            KeepCase(
+                "时长不足（差 1ms）⇒ 删（不变）",
+                false, true, null, minKeep - 1, false, false
+            ),
+            KeepCase(
+                "时长恰好够（边界取 >=）⇒ keep（不变）",
+                false, true, null, minKeep, false, true
+            ),
+            KeepCase(
+                "时长不足且容器已收尾（LOOP + 差 1ms）⇒ 删（时长维度先拦，不变）",
+                false, false, "${RecordError.ENGINE_ERROR}:LOOP", minKeep - 1, true, false
+            ),
+            KeepCase(
+                "显式弃段 + 容器已收尾 ⇒ 删（弃段最高优先，不变）",
+                true, false, "${RecordError.ENGINE_ERROR}:LOOP", 60_000L, true, false
+            ),
+            KeepCase(
+                "显式弃段 + 无错 + 够长 ⇒ 删（P1 形态，不变）",
+                true, true, null, 60_000L, false, false
+            )
+        )
+
+        for (c in cases) {
+            assertEquals(
+                "「${c.why}」这一格判反了",
+                c.expected,
+                segmentKeepDecision(
+                    abandoned = c.abandoned,
+                    ok = c.ok,
+                    errorCode = c.errorCode,
+                    durationMs = c.durationMs,
+                    minKeepMs = minKeep,
+                    containerFinalized = c.containerFinalized
+                )
+            )
+        }
     }
 
     /**

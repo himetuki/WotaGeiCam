@@ -276,8 +276,16 @@ class MrRecorder(
         }
         val err = engineError
         if (prev == EngineState.START) {
-            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision
-            sealCurrent(dur, segmentKeepDecision(abandonSegment, err, dur, RecordProfile.MIN_KEEP_MS))
+            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision。
+            // MR 路没有 Codec 路的"段循环提前退出"信号（ok）⇒ 恒传 true；"容器已确认收尾"是
+            // Codec 路 muxer.stop() 正常返回的专有信号 ⇒ 恒 false——本路判据与旧四参形态逐字等价
+            sealCurrent(
+                dur,
+                segmentKeepDecision(
+                    abandoned = abandonSegment, ok = true, errorCode = err,
+                    durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                )
+            )
         } else {
             discardCurrent(err ?: RecordError.BAD_STATE)
         }
@@ -317,8 +325,15 @@ class MrRecorder(
             EngineState.START -> {
                 stopEngine()
                 val dur = clock.closeSegment()
-                // 弃段意图同 stop()：release 也是"停录"，弃段一律不 commit
-                sealCurrent(dur, segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS))
+                // 弃段意图同 stop()：release 也是"停录"，弃段一律不 commit。
+                // ok/containerFinalized 两枚与 stop() 同口径（MR 路无段循环失败信号、无 muxer 收尾信号）
+                sealCurrent(
+                    dur,
+                    segmentKeepDecision(
+                        abandoned = abandonSegment, ok = true, errorCode = engineError,
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                    )
+                )
                 releaseEngine()
             }
             EngineState.PREPARE -> {
@@ -433,8 +448,17 @@ class MrRecorder(
             // 顺序不许反：必须在本段 stop 落定之后（文件已完整）、在 applyConfig 之前。
             releaseEngine()
             val dur = clock.closeSegment()
-            // 弃段意图同 stop()：轮转前若被要求弃段，旧段也不 commit
-            timedLegStep("seal") { sealCurrent(dur, segmentKeepDecision(abandonSegment, engineError, dur, RecordProfile.MIN_KEEP_MS)) }
+            // 弃段意图同 stop()：轮转前若被要求弃段，旧段也不 commit。
+            // ok/containerFinalized 两枚与 stop() 同口径（MR 路无段循环失败信号、无 muxer 收尾信号）
+            timedLegStep("seal") {
+                sealCurrent(
+                    dur,
+                    segmentKeepDecision(
+                        abandoned = abandonSegment, ok = true, errorCode = engineError,
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                    )
+                )
+            }
             Thread.sleep(SEGMENT_GAP_MS)
             val next = timedLegStep("insert") { store.createPending(partIndex + 1) }
                 ?: return failNow("${RecordError.ENGINE_ERROR}:ROTATE_NO_OUTPUT", dropOutput = false)

@@ -175,17 +175,31 @@ fun shouldDiscardAbandonedSink(abandonSinkKey: String?, producedKeys: List<Strin
  * 近空/不可播的坏片混进成片，且之后 `shouldDiscardAbandonedSink` 因它已进 parts 而不再兜底删。
  * 所以弃段是**显式意图**，不靠停录的 keep 语义去反推。
  *
- * 四个入参的语义（判定即优先级）：
+ * 【容器已确认收尾的段不再因时序/内部异常被删（本判据拆分，2026-10-16）】旧判据"有错误码即弃"
+ * 把 [RecordError.ENGINE_ERROR] 一类**收尾时序异常**（典型：抽干窗口超时 `DRAIN`，而 muxer 随后
+ * 照样正常 stop、moov 已写完、整段可播）与"容器真坏了"同判——用户的整段成片被删。删除只留给
+ * **容器确认不可用**（muxer 从未正常收尾 / 本段零视频样本）、显式弃段、时长不足。
+ *
+ * 入参语义（判定即优先级）：
  * - [abandoned] true ⇒ 一律 false（**弃段意图是最高优先**，段本就没有可用内容）；
- * - [errorCode] 非空 ⇒ false（引擎已判废的段不能因"当时看着好"放行）；
- * - [durationMs] >= [minKeepMs] 且无错且未弃 ⇒ true；否则 false（过短按废片删）。
+ * - [durationMs] < [minKeepMs] ⇒ false（过短按废片删）；
+ * - [containerFinalized] true ⇒ **放行**（容器已确认收尾：muxer 本段曾 start 且 stop() 正常返回、
+ *   且本段确实写入过视频样本——`ok`/`errorCode` 在这条路上不再拦，LOOP 这类中途异常只要容器
+ *   收尾正常、内容也在，就不该删）；
+ * - 否则退回旧口径：`ok && errorCode == null` ⇒ true（看着正常且没有段循环失败信号）。
+ *
+ * [containerFinalized] 必须是**独立信号**（`CodecRecorder.muxFinalized && segHadVideoSample`）：
+ * 不许从错误码反推——closeSegmentEngine 的置错是"首个错误码优先"（`?:`），DRAIN 已置时
+ * muxer.stop() 抛出的 MUX_CLOSE 会被吞掉，拿错误码判会把坏容器当成好的。
  */
 fun segmentKeepDecision(
     abandoned: Boolean,
+    ok: Boolean,
     errorCode: String?,
     durationMs: Long,
-    minKeepMs: Long
-): Boolean = !abandoned && errorCode == null && durationMs >= minKeepMs
+    minKeepMs: Long,
+    containerFinalized: Boolean
+): Boolean = !abandoned && durationMs >= minKeepMs && (containerFinalized || (ok && errorCode == null))
 
 /**
  * MR 路（[MrRecorder]）"这条 info 事件是换段请求吗"的判定（纯函数，JVM 全表单测）。

@@ -156,7 +156,15 @@ data class RecordResult(
      * 只是 UI 的「已保存」文案要换成带原因的版本——用户必须知道"为什么自己停了"。
      * null = 用户手动停（默认，旧构造点行为逐字不变）。
      */
-    val autoStopReason: String? = null
+    val autoStopReason: String? = null,
+    /**
+     * 非空 = 本次有段"**被保留但带错误码**"（容器已确认收尾：muxer 正常 stop、moov 已写完、
+     * 本段有视频样本，只是收尾阶段出过错，如 `ENGINE_ERROR:DRAIN`）。语义是**已保存 + 提示**：
+     * [error] 已被清空、[ok] == true（不这么做用户会把完好的成片当成"录制失败"），UI 走
+     * 专门文案（"末尾可能不完整"）而不是失败文案；诊断原文照旧留在日志与落盘账目里。
+     * null = 一切正常（默认，旧构造点行为逐字不变）。
+     */
+    val degradedCode: String? = null
 ) {
     /** 有可用产物且无错误 */
     val ok: Boolean get() = error == null && (uri != null || path != null)
