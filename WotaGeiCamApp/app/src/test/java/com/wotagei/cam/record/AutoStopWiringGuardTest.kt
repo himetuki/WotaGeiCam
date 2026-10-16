@@ -3,9 +3,12 @@ package com.wotagei.cam.record
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
+import com.wotagei.cam.source.KotlinSourceScan.mainSourceFile
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * 自动停录巡检与停止宽限的**接线守卫**（2026-10-12，OpenCamera 健壮性三件套）。
@@ -104,5 +107,74 @@ class AutoStopWiringGuardTest {
         val read = body("ui/CameraScreen.kt", "readBatteryPct")
         assertTrue("电量必须读 ACTION_BATTERY_CHANGED 粘性广播（无权限需求）", read.contains("ACTION_BATTERY_CHANGED"))
         assertTrue("读不出必须给 -1（判据侧按不停处理），不许给 0（0 会误停）", read.contains("-1"))
+    }
+
+    // ------------------------------------------------------------------ 相机设备丢失接线
+
+    /**
+     * 文案资源文件（`res/values/strings_camera.xml`）：主源码定位到模块目录后逐级上溯查找，
+     * 与 RotateStallGuardTest 同一手法。找不到**必须抛**：守卫不能在没有输入的情况下算通过。
+     */
+    private fun stringsCamera(): File {
+        var d: File? = mainSourceFile("ui/CameraScreen.kt").parentFile
+        while (d != null) {
+            val f = File(d, "res/values/strings_camera.xml")
+            if (f.isFile) return f
+            d = d.parentFile
+        }
+        throw AssertionError("找不到 res/values/strings_camera.xml（文案资源被挪走/改名，守卫失去输入）")
+    }
+
+    /**
+     * 录制中相机设备被收回的观察钩子（2026-10-16 M1-01）：订阅设备态总线 → 转移折叠
+     * （[CameraLostWatch]，采样计划的触发拍号由 AutoStopRulesTest 直断言）→ 命中调
+     * `RecordRunner.onCameraLost` → 置独立原因 + 走既有 stopAsync 收尾 → 结果文案分派新资源。
+     *
+     * 判据再对，钩子没挂上（或挂了不调入口）这一整条机制就是空转——真机形态正是"画面定格
+     * 却报已保存"。钩子本体按 `ctrl.state.collect` 到下一枚 LaunchedEffect 之间切片，
+     * 防止断言被 import 行喂绿（AGENTS 点名的"声明行喂绿"）。
+     */
+    @Test
+    fun `录制态设备丢失观察钩子必须接线到自动停录入口`() {
+        val masked = maskedMain()
+        assertTrue("必须存在设备态订阅 effect（LaunchedEffect(runner, ctrl)）", masked.contains("LaunchedEffect(runner, ctrl)"))
+        val hook = masked.substringAfter("ctrl.state.collect", missingDelimiterValue = "")
+            .substringBefore("LaunchedEffect(recStatus)", missingDelimiterValue = "")
+        assertTrue("锚点丢失：切片没截到观察钩子（订阅被删/挪走）", hook.contains("onSample("))
+        assertTrue(
+            "转移折叠必须走 CameraLostWatch（快照/重复触发防护在它的折叠里）",
+            masked.contains("remember { CameraLostWatch() }") && hook.contains("cameraLostWatch.onSample(")
+        )
+        assertTrue(
+            "采样时的录制态必须现读录制控制器（status == START 才接受，非录制态的 CLOSE 归停止路径）",
+            hook.contains("runner.status.value == RecordStatus.START")
+        )
+        assertTrue("命中必须调 runner.onCameraLost()", hook.contains("runner.onCameraLost()"))
+        // 突变自证：摘掉入口调用（钩子照旧收采样但无人停录）
+        val mutated = masked.replace("runner.onCameraLost()", "Unit")
+        val mutatedHook = mutated.substringAfter("ctrl.state.collect", "").substringBefore("LaunchedEffect(recStatus)", "")
+        assertTrue("摘掉 onCameraLost 调用后尺子必须红", !mutatedHook.contains("runner.onCameraLost()"))
+
+        // 入口本体：置独立原因 + 走既有 stopAsync + 不许走 error 通道
+        val lost = body("ui/CameraScreen.kt", "onCameraLost")
+        assertTrue("入口必须置独立原因常量（复用自动停录文案分派）", lost.contains("AutoStopRules.REASON_CAMERA_LOST"))
+        assertTrue("置原因后必须走既有 stopAsync 正常收尾（保 trailer/sidecar/入库）", lost.contains("stopAsync()"))
+        assertFalse(
+            "不许走 error 通道（failNow 会让 RecordResult.ok=false，用户以为整场白录）",
+            lost.contains("failNow(")
+        )
+        // 文案：结果分派必须接新资源，资源必须存在且带时长占位符
+        assertTrue("已保存路径必须分派相机丢失文案", masked.contains("cam_record_saved_auto_camera_lost"))
+        val xml = stringsCamera().readText(Charsets.UTF_8)
+        assertTrue(
+            "资源 cam_record_saved_auto_camera_lost 必须存在",
+            xml.contains("name=\"cam_record_saved_auto_camera_lost\"")
+        )
+        assertTrue(
+            "资源文案与占位符逐字钉住（丢占位符 = 时长读不出来）",
+            xml.contains(
+                "name=\"cam_record_saved_auto_camera_lost\">相机被其它应用占用或被系统收回，录制已停止，已保存 %1\$s</string>"
+            )
+        )
     }
 }
