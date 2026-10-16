@@ -91,15 +91,13 @@ class AudioFeeder private constructor(
      *  不回错、EOS 判据探不到——用 controller 的 Active 与否兜底保证「撤销即内录轨收尾」的确定语义 */
     private val healthy: (() -> Boolean)? = null,
     /**
-     * 是否需要逐块算 PCM 幅度（RMS）。两路（环境/内录）现在**都开着**：
+     * 是否需要逐块算 PCM 幅度（RMS）。**只有环境路开着**：
      * - 环境源：`CodecRecorder.amplitude()` → `ui/CameraScreen` 音量表（P6：内录模式下音量条仍显环境音 RMS）；
-     * - 内录源：段收尾静音判读（2026-10-14 数字静音流：部分固件的投影捕获整段给全零 PCM，
-     *   用户录完播放才发现没声——`CodecRecorder.captureSilenceVerdict` 在段收尾一次性判读）。
-     *
-     * 代价账（2026-10-09 记过一轮）：RMS 是逐样本 Double 累加 + 每块一次 `sqrt`，48kHz 立体声
-     * 每秒约 4.8 万次乘加，跑在**要跟 AudioRecord 内部缓冲赛跑的采集线程**上。内录源当时因
-     * 「没有读者」关掉过；现在有了读者（静音判读）且真机实证数字静音流真实存在（7.76s、371 包
-     * 全程恒定零样本），重新付账——环境路同款实现，代价可忽略。
+     * - 内录源：**关**（2026-10-16 改回 r30 口径）。代价账（2026-10-09 记过）：RMS 是逐样本 Double
+     *   累加 + 每块一次 `sqrt`，48kHz 立体声每秒约 4.8 万次乘加，跑在**要跟 AudioRecord 内部
+     *   缓冲赛跑的采集线程**上——r30（05f0742）当初正因掉帧把它关掉过；后来为段收尾静音判读
+     *   又打开（3bc1acd）。静音判读现已改低成本判据（[sawNonZero]：按字节扫"任一非零、命中
+     *   断扫"），逐样本 RMS 在内录路没有读者——不得回退。
      */
     private val needsAmplitude: Boolean = true
 ) {
@@ -148,9 +146,9 @@ class AudioFeeder private constructor(
         minBufferSize: Int
     ) : this(sampleRate, channels, SOURCE_CAPTURE, minBufferSize, { _ ->
         capture.createCaptureAudioRecord(sampleRate, channels)
-        // needsAmplitude = true（与环境路同款逐块 RMS）：段收尾静音判读的数据基础，
-        // 见 [needsAmplitude] 的说明（2026-10-14 数字静音流）
-    }, healthy = { capture.state.value is CaptureState.Active }, needsAmplitude = true)
+        // needsAmplitude = false：内录路不做逐样本 Double RMS（见 [needsAmplitude] 的代价账）；
+        // 静音判读的数据基础改由 [sawNonZero] 锁存提供（录制中巡检与段收尾共用）
+    }, healthy = { capture.state.value is CaptureState.Active }, needsAmplitude = false)
 
     /** 一段 PCM 与其 μs 时间戳；**ptsUs < 0 = 通道结束哨兵**（真实包时间戳恒为 nanoTime µs、恒正；
      *  哨兵 data 取 [EOS_SIZE] 长只是历史形状——判定看 pts 不看长度，4 字节恰是双声道 2 帧的合法 PCM） */
@@ -183,11 +181,13 @@ class AudioFeeder private constructor(
     @Volatile private var running = false
     @Volatile private var rms = 0
     /**
-     * 逐块 RMS 峰值（与 [rms] 同点更新，一次比较）：内录段收尾静音判读的数据基础
-     * （`CodecRecorder` 在 drained 行读 [peakAmplitude] 做一次性判读）。
-     * 分段边界由 [drain] 复位，使峰值账与段对齐。
+     * 本场（feeder 一次 [start] 到 [stop]）是否见过任一非零 int16 样本：内录静音判读的低成本
+     * 数据基础（2026-10-16 灵敏化，替代逐样本 RMS）。数字静音流 = 全程恒定零样本（真机实证），
+     * 见过一次非零即永久置位——**段界（[drain]）不复位**，语义是"整场"；[start] 复位
+     * （feeder 随每场录制新建/重启 ⇒ "见过非零"按场计）。写入在采集线程、读在引擎泵线程。
      */
-    @Volatile private var peakRms = 0
+    @Volatile var sawNonZero: Boolean = false
+        private set
     @Volatile private var dropped = 0
     /**
      * 空读/短读计数（`0 <= n < frameBytes`）：这类读不产生样本、循环却照跑，
@@ -251,7 +251,7 @@ class AudioFeeder private constructor(
         running = true
         dropped = 0
         zeroReads = 0
-        peakRms = 0
+        sawNonZero = false
         lastZeroLogMs = 0L
         eosSeen = false
         firstPtsUs = 0L
@@ -301,11 +301,11 @@ class AudioFeeder private constructor(
             }
             if (n >= frameBytes) {
                 val copy = buf.copyOf(n - n % frameBytes)
-                // 两路都要幅度（见 needsAmplitude 的说明）：环境路喂音量表，内录路喂段收尾静音判读
-                if (needsAmplitude) {
-                    rms = rmsOf(copy)
-                    if (rms > peakRms) peakRms = rms
-                }
+                // 本场"见过非零"锁存（见 [sawNonZero]）：见到任一非零字节即永久置位并**跳过后续
+                // 所有块的扫描**（早停）。恒定零流才会整块扫完——一块几千次整数比较，可忽略。
+                if (!sawNonZero && hasNonZeroByte(copy)) sawNonZero = true
+                // 幅度只有环境路要（音量表；见 needsAmplitude 的说明）
+                if (needsAmplitude) rms = rmsOf(copy)
                 val pkt = Packet(copy, System.nanoTime() / 1000L)
                 val ok = try {
                     queue.offer(pkt, OFFER_WAIT_MS, TimeUnit.MILLISECONDS)
@@ -364,17 +364,17 @@ class AudioFeeder private constructor(
     /** PCM 均方根，量程对齐 `MediaRecorder.getMaxAmplitude()`（0..32767），UI 音量表两引擎通用 */
     fun amplitude(): Int = rms
 
-    /** 自通道建立（或上次分段边界 [drain]）以来的逐块 RMS 峰值（0..32767）：内录静音判读的数据基础 */
-    fun peakAmplitude(): Int = peakRms
-
     /** 队列内未喂给编码器的包数：stop 前尽量排空，减少尾音丢失 */
     fun pending(): Int = queue.size
 
-    /** 分段边界丢弃积压：上一段的 PCM 不能落进新文件，否则 PTS 倒退；峰值账同点复位与段对齐 */
+    /**
+     * 分段边界丢弃积压：上一段的 PCM 不能落进新文件，否则 PTS 倒退。
+     * **不复位 [sawNonZero]**（段界只清队列）：它的语义是"本场是否见过非零样本"，
+     * 段收尾判读与跨段静音巡检共用的就是这份整场账面。
+     */
     fun drain() {
         val n = queue.size
         queue.clear()
-        peakRms = 0
         if (n > 0) Log.i(TAG, "pcm queue drained at segment boundary, dropped=$n")
     }
 
@@ -401,6 +401,15 @@ class AudioFeeder private constructor(
         if (dropped > 0 || zeroReads > 0) {
             Log.i(TAG, "feeder stopped src=$source pcm dropped=$dropped zeroReads=$zeroReads")
         }
+    }
+
+    /**
+     * 本块 PCM 里是否存在非零样本。int16 小端下"样本为 0 ⇔ 两字节全零"，所以按字节查
+     * "任一非 0"与逐样本判等完全等价、且更快；见到第一个非零字节即返回（早停）。
+     */
+    private fun hasNonZeroByte(pcm: ByteArray): Boolean {
+        for (b in pcm) if (b.toInt() != 0) return true
+        return false
     }
 
     private fun rmsOf(pcm: ByteArray): Int {

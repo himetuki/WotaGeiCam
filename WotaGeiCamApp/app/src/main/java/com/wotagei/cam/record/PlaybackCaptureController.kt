@@ -9,6 +9,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -69,36 +70,41 @@ class PlaybackCaptureController(context: Context) {
     private val _captureSilent = MutableStateFlow(false)
 
     /**
-     * 内录纯静音告警（2026-10-14 数字静音流）：部分固件的投影音频捕获会整段给出全零 PCM——
-     * 轨在、样本在、播放却没声。与 [trackLost] 的「轨丢失」语义不同（那种会触发降级收尾），
-     * 静音流的内录轨是完整的，只差一句提醒，所以走这条独立轻提示流，不借道降级通道。
-     * UI 提示后调 [clearCaptureSilence] 读走即清；是否再触发由 [silenceLatch] 按**捕获会话**
-     * 去重——同一会话（一次投影授权周期，可跨多次录制/多个分段）只提示一次，重新授权进入
-     * 新会话（[apply] 里进入 Active）才复位。
+     * 内录纯静音告警（2026-10-14 数字静音流，2026-10-16 灵敏化）：部分固件的投影音频捕获会给出
+     * 全零 PCM——轨在、样本在、播放却没声。与 [trackLost] 的「轨丢失」语义不同（那种会触发降级
+     * 收尾），静音流的内录轨是完整的，只差一句提醒，所以走这条独立轻提示流，不借道降级通道。
+     *
+     * 触发点两处、同一出口：录制中低频巡检（`CodecRecorder.runSegment`，起录累计已喂 ≥5s 且
+     * 仍无任何非零样本）与段收尾兜底判读（短录音/漏检）。提示频次由 [silenceGate] 按**场**
+     * 节流：每场首次恒放行、同场 ≥[SILENCE_REPROMPT_MS] 才允许再弹（防漏看、防刷屏）；
+     * 每次录制开始由引擎调 [resetCaptureSilenceTake] 复位（连录两场都要能提示）。
+     * 「见过非零后本场永久不再提示」由判据侧保证（`AudioFeeder.sawNonZero` 进判据，见
+     * `CodecRecorder.captureSilenceVerdict`）——见过非零后两处触发点都判 false。
+     * UI 提示后调 [clearCaptureSilence] 读走即清。
      */
     val captureSilent: StateFlow<Boolean> = _captureSilent.asStateFlow()
 
-    /** 会话级去重锁存（纯状态 [OnceLatch]）：本会话已提示过就不再触发 */
-    private val silenceLatch = OnceLatch()
+    /** 按场节流锁存（纯状态 [SilencePromptGate]）：本场已提示过则同场 60s 内不再触发 */
+    private val silenceGate = SilencePromptGate()
 
     /**
-     * 引擎段收尾静音判据命中（`CodecRecorder.captureSilenceVerdict`）的出口：
-     * W 级日志一条 + 事件置位，会话内去重（引擎每个静音段照常判读计数进段收尾行）。
+     * 引擎静音判据命中的出口（录制中巡检与段收尾兜底**共用**）：W 级日志一条 + 可见位置位；
+     * 同场 60s 节流（[SilencePromptGate]），每场录制开始按 [resetCaptureSilenceTake] 复位。
+     * 本函数只动提示一途——不停录、不置错、不碰任何文件与账目路径。
      */
     fun reportCaptureSilence() {
-        if (!silenceLatch.tryFire()) return
-        Log.w(TAG, "内录轨为纯静音（系统捕获未放行，本段内录轨无声）")
+        if (!silenceGate.tryFire(SystemClock.elapsedRealtime())) return
+        Log.w(TAG, "内录轨为纯静音（本段仍无任何非零样本，内录轨无声）")
         _captureSilent.value = true
     }
 
-    /** UI 读走事件后清槽：只清可见位，去重锁存不动——同会话后续静音段不重复提示 */
-    fun clearCaptureSilence() {
-        _captureSilent.value = false
+    /** 每场录制开始复位（`CodecRecorder.start()` 调用）：上场已提示/已节流的状态不带进本场 */
+    fun resetCaptureSilenceTake() {
+        silenceGate.resetTake()
     }
 
-    /** 捕获会话复位（进入 Active 即新会话）：锁存与可见位一并清，新会话重新可提示 */
-    private fun resetCaptureSilence() {
-        silenceLatch.reset()
+    /** UI 读走事件后清槽：只清可见位，节流账不动——同场 60s 内的后续静音判读不重复提示 */
+    fun clearCaptureSilence() {
         _captureSilent.value = false
     }
 
@@ -307,9 +313,8 @@ class PlaybackCaptureController(context: Context) {
         }
         if (to != from) {
             Log.i(TAG, "capture 状态 ${captureStateLabel(from)} --${captureEventLabel(event)}--> ${captureStateLabel(to)}")
-            // 新捕获会话开始（进入 Active）：静音告警的会话级去重随之复位——重授权后的新会话
-            // 要能重新提示；同一会话内（含跨多次录制）只提示一次
-            if (to is CaptureState.Active && from !is CaptureState.Active) resetCaptureSilence()
+            // 静音告警的复位点不在会话入口：去重粒度已改按**场**录制（引擎 start 调
+            // resetCaptureSilenceTake），重新授权不需要单独的锁存复位——一切以开录为起点
         }
     }
 
@@ -373,21 +378,34 @@ internal fun captureEventLabel(e: CaptureEvent): String = when (e) {
 }
 
 /**
- * 一次性触发锁存（纯状态，零 android 引用，JVM 可测——静音告警的去重语义在单测里锁死）。
- * [PlaybackCaptureController] 用它把「内录纯静音」提示收敛到每捕获会话一次。
+ * 内录静音提示的**按场**节流锁存（纯状态，零 android 引用，JVM 可测——三条语义在单测里锁死）。
+ * [PlaybackCaptureController] 用它把「内录纯静音」提示收敛到：
+ * - 每场首次恒放行（[resetTake] 后回到"本场未提示"——连录两场都静音要能各提示一次）；
+ * - 同场距上次不足 [SILENCE_REPROMPT_MS] 一律拦下（防刷屏），达到即再放行（防漏看）。
+ *
+ * 「见过非零后本场永久停」不在这一层：由判据侧（`AudioFeeder.sawNonZero` 进
+ * `CodecRecorder.captureSilenceVerdict`）保证——见过非零后两个触发点都判 false，本锁存只管时间。
  */
-internal class OnceLatch {
+internal class SilencePromptGate {
+    /** 本场是否已提示过（独立于时刻：nowMs 传 0 也要语义正确） */
     private var fired = false
+    /** 上次放行时刻（调用方时钟，elapsedRealtime 域） */
+    private var lastFireMs = 0L
 
-    /** 首次调用返回 true 并置位；已触发则返回 false */
-    fun tryFire(): Boolean {
-        if (fired) return false
+    /** 本拍是否允许提示：本场首触恒放行；距上次不足 [SILENCE_REPROMPT_MS] 拦下，≥ 再放行 */
+    fun tryFire(nowMs: Long): Boolean {
+        if (fired && nowMs - lastFireMs < SILENCE_REPROMPT_MS) return false
         fired = true
+        lastFireMs = nowMs
         return true
     }
 
-    /** 复位（新捕获会话开始）：下一次 [tryFire] 重新返回 true */
-    fun reset() {
+    /** 复位（每场录制开始）：下一次 [tryFire] 重新按"本场首触"放行 */
+    fun resetTake() {
         fired = false
+        lastFireMs = 0L
     }
 }
+
+/** 同场静音提示的重弹节流窗：≥60s 才允许再弹（防漏看：录 20 分钟不能只弹一条；防刷屏：不能每拍都弹） */
+internal const val SILENCE_REPROMPT_MS = 60_000L
