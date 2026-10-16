@@ -14,8 +14,6 @@ import com.wotagei.cam.core.WotaTiers
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.log10
-import kotlin.math.roundToInt
 
 /**
  * 自研管线：`MediaCodec + MediaMuxer + AudioRecord`（04 文件 §3：fps > 60 的高速路径；
@@ -192,33 +190,47 @@ class CodecRecorder(
         }
 
     /**
-     * 内录静音判读的时长门槛：本段内录有效样本超过 2s 才判读。太短不判——启动窗口内的
-     * 短暂静音（会话刚建立、媒体还没出声）不该告警。
+     * 内录静音判读的时长门槛（**收尾兜底版**）：本段内录有效样本超过 2s 才判读。太短不判——
+     * 启动窗口内的短暂静音（会话刚建立、媒体还没出声）不该告警。录制中巡检用更长的
+     * [CAPTURE_SILENCE_LIVE_MIN_MS]；本门槛留给"没跑满巡检门槛就停止"的短录音兜底。
      */
     internal const val CAPTURE_SILENCE_MIN_MS = 2_000L
 
     /**
-     * 数字静音阈值（dB，口径同 [rmsToDb]）：整段逐块 RMS 峰值 ≤ 此值视为纯零样本流。
-     * 真机实证（Android 16 固件）：内录轨 7.76s、371 包、全程恒定零样本——正常录音（哪怕
-     * 极安静）的 RMS 峰值也远在此阈值之上，全零 PCM 才落得进来。
+     * 内录静音巡检的时长门槛（**录制中版**，2026-10-16 灵敏化：录制中就要能提示，不让用户
+     * 录完才发现）：本段累计实喂内录 PCM ≥ 5s 且仍未见非零样本才判读。为何 5s：比
+     * [CAP_SAMPLE_WAIT_MS]（1.5s，内录样本等待窗）与 `RecordHealth.FULL_WINDOW_MS`（3s，
+     * 起录自检长窗）都长——巡检点排在"内录轨还没起来"的两个窗口之后起步，不与它们的形态
+     * 叠报；同时是用户能等住的发现延迟（真机实证的静音段有 7.76s，5s 门槛必能覆盖）。
      */
-    internal const val CAPTURE_SILENCE_PEAK_DB = -80
+    internal const val CAPTURE_SILENCE_LIVE_MIN_MS = 5_000L
 
     /**
-     * RMS→dB 取整（口径对齐 `AudioProbe.dbOf` 的既有换算 `amp ≤ 0 → -160`，
-     * `20×log10(amp/0.1)`）：静音判读与段收尾行共用这一份，不另立第二把尺。
-     * 取整是为了判据与日志可读，量程与 dbOf 一致。
+     * 录制中静音巡检的节拍：泵循环每拍都问判据太密也无意义，约此间隔巡检一拍（发现延迟
+     * ≤ 门槛 + 一拍；巡检本身只做几次 Long 运算与一次布尔读，不在热循环做重活）。
      */
-    internal fun rmsToDb(amplitude: Int): Int =
-        if (amplitude <= 0) -160 else (20.0 * log10(amplitude.toDouble() / 0.1)).roundToInt()
+    internal const val SILENCE_PROBE_INTERVAL_MS = 1_000L
 
     /**
-     * 内录纯静音判据（纯函数，段收尾一次性调用，不在热循环做 dB 换算）：
-     * 轨有真实样本产出、有效时长过 [CAPTURE_SILENCE_MIN_MS]、整段 RMS 峰值 ≤
-     * [CAPTURE_SILENCE_PEAK_DB]，三者同时成立才告警。
+     * 内录有效时长（ms）= 实喂编码器的 PCM 字节 ÷（采样率 × 帧字节）：录制中巡检与段收尾
+     * 兜底共用同一换算（两处各写一份必漂移）。EOS 哨兵/喂码失败/段界丢弃都不计。
      */
-    internal fun captureSilenceVerdict(hasSamples: Boolean, durationMs: Long, peakDb: Int): Boolean =
-        hasSamples && durationMs >= CAPTURE_SILENCE_MIN_MS && peakDb <= CAPTURE_SILENCE_PEAK_DB
+    internal fun fedMsOf(fedBytes: Long, sampleRate: Int, channels: Int): Long =
+        fedBytes * 1000L / (sampleRate.toLong() * channels * 2)
+
+    /**
+     * 内录纯静音判据（纯函数）：轨有真实样本产出、有效时长过 `minMs`、且**本场仍没见过任一
+     * 非零样本**（数字静音流 = 全程恒定零，真机实证）三者同时成立才告警。
+     * 非零锁存由 `AudioFeeder.sawNonZero` 提供——见过一次非零 ⇒ 本场永久判 false（两个触发点
+     * 都拿不到 true），这就是"一旦见到非零、本场永久不再提示"的判据侧落地。
+     * `minMs` 缺省 = 收尾兜底门槛；录制中巡检显式传 [CAPTURE_SILENCE_LIVE_MIN_MS]。
+     */
+    internal fun captureSilenceVerdict(
+        hasSamples: Boolean,
+        durationMs: Long,
+        sawNonZero: Boolean,
+        minMs: Long = CAPTURE_SILENCE_MIN_MS
+    ): Boolean = hasSamples && durationMs >= minMs && !sawNonZero
 }
 
     /** 单条音频通道的逐段状态（批 3：heldPkt / 末包 PTS / EOS 标志环境、内录各一套）。 */
@@ -868,6 +880,9 @@ class CodecRecorder(
             Log.e(TAG, "codec start ignored, state=$state")
             return
         }
+        // 内录静音告警的"按场复位"（2026-10-16 灵敏化：去重粒度从捕获会话改为每场录制）：
+        // 连录两场都全静音要能各提示一次；上场的节流账不带进本场。此处是每场录制唯一入口
+        PlaybackCaptureController.get(ctx).resetCaptureSilenceTake()
         // 音频采集与编码器同刻启动，避免 PCM 积压落到下一个 PTS 基准上（环境、内录两个 feeder）
         if (aCodec != null && feeder == null) startFeederOrDropAudio()
         if (capCodec != null && capFeeder == null) startCapFeederOrDropAudio()
@@ -1591,6 +1606,8 @@ class CodecRecorder(
         var envTornDown = false
         // 内录样本等待窗起点（0 = 未起窗；[capSampleWaitTick] 单写者推进）
         var capWaitStartMs = 0L
+        // 录制中静音巡检的节拍起点（0 = 本段未巡过；elapsedRealtime 域，单写者推进）
+        var lastSilenceProbeMs = 0L
         var videoTrack = -1
         var muxStarted = false
         var videoDone = false
@@ -1878,6 +1895,21 @@ class CodecRecorder(
                 if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
                 Log.i(TAG, "capture sample wait window expired, drop capture track part=$partIndex")
             }
+            // 内录纯静音**低频巡检**（2026-10-16 灵敏化：录制中就要能提示，不让用户录完才发现）。
+            // 与拍子同线程、约 [SILENCE_PROBE_INTERVAL_MS] 一拍；条件 = 内录轨在场（已见真实样本、
+            // 未废弃、未走失效收尾）且本段已喂足 [CAPTURE_SILENCE_LIVE_MIN_MS] 且仍未见非零样本。
+            // 命中走与收尾兜底同一出口（reportCaptureSilence：按场节流、提示位与 UI 通道全复用）。
+            // 本拍只读账（fedBytes/sawNonZero）——不停录、不置错、不碰文件与账目路径。
+            val probeNowMs = SystemClock.elapsedRealtime()
+            if (probeNowMs - lastSilenceProbeMs >= SILENCE_PROBE_INTERVAL_MS) {
+                lastSilenceProbeMs = probeNowMs
+                if (cf != null && capCh != null && capCh.hasSample && !capCh.dropped && !capTornDown) {
+                    val fedMs = fedMsOf(capCh.fedBytes, cf.sampleRate, cf.channels)
+                    if (captureSilenceVerdict(capCh.hasSample, fedMs, cf.sawNonZero, CAPTURE_SILENCE_LIVE_MIN_MS)) {
+                        PlaybackCaptureController.get(ctx).reportCaptureSilence()
+                    }
+                }
+            }
             if (stopping || rotatePending) {
                 if (deadline == 0L) {
                     if (!muxStarted) {
@@ -1925,20 +1957,17 @@ class CodecRecorder(
             engineError = engineError ?: RecordError.NO_VIDEO_TRACK
             return false
         }
-        // 内录纯静音判读（段收尾一次性，2026-10-14 数字静音流）：逐块 RMS 由采集线程现算并记峰值
-        // （AudioFeeder.peakAmplitude，drain 复位与段对齐），dB 换算与判读都不在热循环。
-        // 门：内录轨真实在场（hasSample 且未废弃）且未走失效收尾——轨不在场时 NO_SAMPLES /
-        // SOURCE_INACTIVE 各有语义，静音判读不叠报。命中 → W 级告警（控制器按捕获会话去重），
-        // 判读结果照常进下面的段收尾行
-        var capRmsInfo = "off"
+        // 内录纯静音判读（段收尾兜底，2026-10-16 灵敏化后仍在）：录制中巡检因故漏检（没跑满
+        // 巡检门槛就停止的短录音、或巡检窗内轨状态未就绪）时在这里补判一次；与录制中提示共用
+        // 同一按场节流锁存——同场 60s 内不会因收尾再叠一条。门：内录轨真实在场（hasSample 且
+        // 未废弃）且未走失效收尾——轨不在场时 NO_SAMPLES / SOURCE_INACTIVE 各有语义，静音判读
+        // 不叠报。判据数据基础 = AudioFeeder.sawNonZero（整场锁存，段界不复位）+ 实喂字节换算时长
+        var capSilenceInfo = "off"
         if (cf != null && capCh != null && capCh.hasSample && !capCh.dropped && !capTornDown) {
-            val capPeakRms = cf.peakAmplitude()
-            val capPeakDb = rmsToDb(capPeakRms)
-            // 有效时长 = 实喂编码器的 PCM 字节 ÷（采样率 × 帧字节数）：EOS 哨兵/喂码失败/段界丢弃都不计
-            val capFedMs = capCh.fedBytes * 1000L / (cf.sampleRate.toLong() * cf.channels * 2)
-            val capSilent = captureSilenceVerdict(capCh.hasSample, capFedMs, capPeakDb)
+            val capFedMs = fedMsOf(capCh.fedBytes, cf.sampleRate, cf.channels)
+            val capSilent = captureSilenceVerdict(capCh.hasSample, capFedMs, cf.sawNonZero)
             if (capSilent) PlaybackCaptureController.get(ctx).reportCaptureSilence()
-            capRmsInfo = "峰值=$capPeakRms(${capPeakDb}dB) 有效=${capFedMs}ms 静音=${if (capSilent) "是" else "否"}"
+            capSilenceInfo = "见过非零=${if (cf.sawNonZero) "是" else "否"} 有效=${capFedMs}ms 静音=${if (capSilent) "是" else "否"}"
         }
         // 抽干汇总（一条，不刷屏）：顺延次数与总等待是分辨"编码器慢"与"编码器死"的两枚读数
         //（超时路径也走到这里：上面 break 出循环后照常落这条账）
@@ -1961,7 +1990,7 @@ class CodecRecorder(
                 "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms " +
-                "内录RMS[$capRmsInfo]"
+                "内录静音[$capSilenceInfo]"
         )
         return true
     }
