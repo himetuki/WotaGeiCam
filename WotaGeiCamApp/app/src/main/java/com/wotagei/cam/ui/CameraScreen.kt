@@ -8,7 +8,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.content.res.Configuration
-import android.content.res.Resources
 import android.hardware.camera2.CameraManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -169,7 +168,6 @@ import com.wotagei.cam.record.RetryAction
 import com.wotagei.cam.record.RotateFailLog
 import com.wotagei.cam.record.STORE_CALL_BUDGET_MS
 import com.wotagei.cam.record.HealthVerdict
-import com.wotagei.cam.record.LOSS_NOTICE_MIN_MS
 import com.wotagei.cam.record.muxRecoveredCode
 import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
 import com.wotagei.cam.record.MIN_OUTPUT_BYTES
@@ -184,8 +182,6 @@ import com.wotagei.cam.record.recordOrientationHint
 import com.wotagei.cam.record.resolveOutputBytes
 import com.wotagei.cam.record.retryActionOf
 import com.wotagei.cam.record.rotateFailLedgerLine
-import com.wotagei.cam.record.rotateStallLostMs
-import com.wotagei.cam.record.rotateStallLostSeconds
 import com.wotagei.cam.record.shouldDiscardAbandonedSink
 import com.wotagei.cam.record.streamHealthVerdict
 import com.wotagei.cam.ui.anim.LocalMotion
@@ -395,8 +391,13 @@ fun CameraScreen(
     LaunchedEffect(runner) {
         runner.result.collect { result ->
             if (result == null) return@collect
-            if (result.ok) {
+            // 提示计划（纯函数，见 ui/RecordResultNotice.kt）：非 null = 本次结果**含已保存分段**
+            //（干净成功、降级、混合、join 超时快照），一律走"已保存 + 附注"；null = 无产物失败。
+            val plan = recordTextPlan(result)
+            if (plan != null) {
                 lastUri = result.uri ?: lastUri
+                // 凡结果含已保存分段就刷新相册（含失败/降级/join 超时路径，2026-10-16 "录制结果
+                // 如实化"）：旧实现只认 ok，失败/混合路径下已 commit 的片段要等退出重进才可见。
                 repo.invalidate()
                 // 分段归组落库（#5）：一次录制的多段写进 media_series/series_part，媒体库据此
                 // 把它们归成一组。必须在 invalidate **之后**落：invalidate 触发的重查与写库并发，
@@ -412,43 +413,22 @@ fun CameraScreen(
                 } catch (e: Throwable) {
                     Log.e(TAG_UI, "分段归组落库调用失败 seriesId=${result.seriesId}", e)
                 }
-                // 登记失败不推翻「已保存」：文件确实在盘上，只是相册可能暂时看不见，得另外说
-                // 换段受阻的丢失（2026-10-08 真机缺陷）：实时自检判废的段会被删掉、不在这份结果里，
-                // 但"换段腿卡住期间画面在丢"这件事必须让用户看见——提示里带上丢了多少秒
-                val dur = formatDuration(result.durationMs)
-                // 结果文案 = **原因句 + 附注句叠加**（P3-1/P3-2 收口）：原因（为什么自己停了，时长
-                // 只在这里带一次）与附注（保存质量）各成一族、任两件同时命中谁也不许盖谁——旧写法
-                // 是一条互斥 when，"相机丢失 + 收尾超时"这种真机常同场的组合里，相机丢失一句会把
-                // 降级/环境音/登记附注整句盖掉。
-                val reasonText = when (result.autoStopReason) {
-                    // 自动停录原因排最前：用户必须先知道"为什么自己停了"（丢失账另有 sidecar 可查）
-                    AutoStopRules.REASON_BATTERY ->
-                        app.getString(R.string.cam_record_saved_auto_battery, dur)
-                    AutoStopRules.REASON_STORAGE ->
-                        app.getString(R.string.cam_record_saved_auto_storage, dur)
-                    // 相机被系统收回同样是一次"已保存"的正常收尾（不是失败）：说清为什么停
-                    AutoStopRules.REASON_CAMERA_LOST ->
-                        app.getString(R.string.cam_record_saved_auto_camera_lost, dur)
-                    else -> app.getString(R.string.cam_record_saved, dur)
+                // 结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口）：判定（哪个标志出哪件事、
+                // 混合结果走「已保存 N 段」）全在 recordTextPlan 纯函数里，这里只做资源渲染——
+                // 理由与附注各成一族、任两件同时命中谁也不许盖谁。
+                showTip(app.recordText(plan))
+                // 练习闭环（2026-10-04 方向 4）：对比页发来的录制**干净成功**才弹栈回对比页，把新片
+                // 填右槽；非干净成功（半场成片）不交付、清桥态（同失败路：留在本页），不许把
+                // 上次练习的尾巴错配到本次半场录上。pending uri 自带 MediaStore id，此刻 IS_PENDING
+                // 已清，回程查询即刻可见；deliver 只在桥 armed 时认账，普通录制不受影响
+                if (result.ok) {
+                    val practiceId = result.uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
+                    if (practiceId != null && ComparePractice.deliver(practiceId)) onPracticeFinish()
+                } else {
+                    ComparePractice.armed = false
                 }
-                // 附注族（拼接次序即此处顺序）：相册登记未成功排最前——它是唯一"这条成片可能暂时
-                // 看不见"的提醒，uncommitted > 0 时必须永远可见，不许被任何并列附注盖掉（P3-2）
-                val noteText = buildString {
-                    if (result.uncommitted > 0) append(app.getString(R.string.cam_record_saved_uncommitted))
-                    if (result.degradedCode != null) append(app.getString(R.string.cam_record_saved_degraded))
-                    if (result.ambientLost) append(app.getString(R.string.cam_record_saved_ambient_lost))
-                    if (result.lostMs >= LOSS_NOTICE_MIN_MS) {
-                        append(app.getString(R.string.cam_record_saved_loss, rotateStallLostSeconds(result.lostMs)))
-                    }
-                }
-                showTip(reasonText + noteText)
-                // 练习闭环（2026-10-04 方向 4）：对比页发来的录制成功即弹栈回对比页，把新片
-                // 填右槽。pending uri 自带 MediaStore id，此刻 IS_PENDING 已清，回程查询即刻可见；
-                // deliver 只在桥 armed 时认账，普通录制的停止不受影响
-                val practiceId = result.uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
-                if (practiceId != null && ComparePractice.deliver(practiceId)) onPracticeFinish()
             } else {
-                // 录制失败清掉桥态（留在本页看错误），不弹栈
+                // 无产物失败清掉桥态（留在本页看错误），不弹栈
                 ComparePractice.armed = false
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
@@ -3051,35 +3031,6 @@ private fun readDeviceDegrees(context: Context): Int = try {
 } catch (e: Exception) {
     Log.w(TAG_UI, "读取显示旋转失败：${e.message}")
     0
-}
-
-/** 录制失败码 → 中文提示：机器码在 record 包，文案按码在此映射 */
-private fun recordResultText(res: Resources, code: String?): String? {
-    if (code == null) return null
-    val freeMb = code.substringAfter(':', "").toLongOrNull()
-    return when {
-        code.startsWith(RecordError.LOW_STORAGE) && freeMb != null ->
-            res.getString(R.string.cam_record_low_storage, freeMb, WotaTiers.MIN_FREE_MB)
-        code.startsWith(RecordError.LOW_STORAGE) -> res.getString(R.string.cam_record_low_storage_short)
-        code == RecordError.NO_OUTPUT -> res.getString(R.string.cam_record_no_output)
-        code == RecordError.PREPARE_FAILED -> res.getString(R.string.cam_record_prepare_failed)
-        code == RecordError.START_FAILED -> res.getString(R.string.cam_record_start_failed)
-        code.startsWith(RecordError.ENGINE_ERROR) -> res.getString(R.string.cam_record_engine_error)
-        code == RecordError.TOO_SHORT -> res.getString(R.string.cam_record_too_short)
-        code == RecordError.STOP_FAILED -> res.getString(R.string.cam_record_stop_failed)
-        code == RecordError.RELEASED -> res.getString(R.string.cam_record_released)
-        code == RecordError.SELF_CHECK_FAILED -> res.getString(R.string.record_self_check_failed)
-        // 换段受阻（2026-10-08 真机缺陷）：码里带"丢失了多少毫秒"的载荷，文案要把它翻成秒——
-        // 用户必须知道"内容丢了多久"，这正是此前静默丢几十秒时唯一缺的那条信息。
-        // 载荷为 0 = 这一腿不是"慢慢等"而是直接失败（建新段失败），文案改说"后续画面未能录下"：
-        // 两种出口（慢 / 败）对用户的含义不同，也不能让"丢失约 1 秒"误导成"只丢了一秒"
-        code.startsWith(RecordError.ROTATE_STALL) -> {
-            val lost = rotateStallLostMs(code) ?: 0L
-            if (lost <= 0L) res.getString(R.string.cam_record_rotate_stall_short)
-            else res.getString(R.string.cam_record_rotate_stall, rotateStallLostSeconds(lost))
-        }
-        else -> res.getString(R.string.cam_record_failed_generic)
-    }
 }
 
 /**

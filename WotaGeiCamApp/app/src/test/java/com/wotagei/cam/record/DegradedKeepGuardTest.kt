@@ -188,9 +188,12 @@ class DegradedKeepGuardTest {
 
     @Test
     fun `降级会话文案与落盘账目必须接线`() {
+        // 文案分派自 2026-10-16 起住在呈现计划纯函数里（ui/RecordResultNotice.kt 的 recordTextPlan；
+        // CameraScreen 只做渲染）——同一条断言换真源文件，不是弱化
+        val plan = mainSourceText("ui/RecordResultNotice.kt")
+        assertTrue("结果分派必须接降级文案资源", plan.contains("R.string.cam_record_saved_degraded"))
+        assertTrue("降级文案分派必须以 degradedCode 非空为条件", plan.contains("result.degradedCode != null"))
         val screen = mainSourceText("ui/CameraScreen.kt")
-        assertTrue("结果分派必须接降级文案资源", screen.contains("R.string.cam_record_saved_degraded"))
-        assertTrue("降级文案分派必须以 degradedCode 非空为条件", screen.contains("result.degradedCode != null"))
         assertTrue(
             "降级会话必须落换段受阻账（这台 ROM 吞日志，诊断码只有账目这条路留得住）",
             screen.contains("out.degradedCode != null")
@@ -205,7 +208,7 @@ class DegradedKeepGuardTest {
             )
         )
         // 突变自证：文案分派条件拆掉（降级段退回普通「已保存」文案，提示丢失）
-        val mutated = screen.replace("result.degradedCode != null", "false")
+        val mutated = plan.replace("result.degradedCode != null", "false")
         assertFalse("拆掉降级文案分派条件后守卫必须报红", mutated.contains("result.degradedCode != null"))
     }
 }
