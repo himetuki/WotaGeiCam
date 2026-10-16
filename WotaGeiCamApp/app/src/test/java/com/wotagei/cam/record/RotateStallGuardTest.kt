@@ -180,12 +180,17 @@ class RotateStallGuardTest {
     fun `已保存的成功路径也要把丢失秒数报出来`() {
         // 用户按停止时那一腿还没结算 = 泵线程仍卡在腿里（真机每一轮停摆都是这么结束的）：
         // 结果走 ok 分支也必须带上丢失时长，否则用户只看到"已保存"而不知道丢了几十秒
-        assertTrue("成功路径必须按 lostMs 分流到带丢失的文案", screen.contains("result.lostMs >= LOSS_NOTICE_MIN_MS"))
+        assertTrue("成功路径必须按 lostMs 条件带上丢帧附注", screen.contains("result.lostMs >= LOSS_NOTICE_MIN_MS"))
         assertTrue("必须用资源 cam_record_saved_loss 报秒数", screen.contains("R.string.cam_record_saved_loss"))
         assertTrue("秒数必须同一套换算（至少 1 秒、四舍五入）", screen.contains("rotateStallLostSeconds(result.lostMs)"))
         val xml = stringsCamera().readText(Charsets.UTF_8)
         assertTrue("资源 cam_record_saved_loss 必须存在", xml.contains("name=\"cam_record_saved_loss\""))
-        assertTrue("资源必须带两个占位符（时长 + 丢失秒数）", xml.contains("已保存 %1\$s（其中约 %2\$d 秒因换段受阻丢失）"))
+        // P3-1 起是附注**后缀**（带前置"；"）：时长由原因句带一次，本条只带丢失秒数一个占位符——
+        // 占位符与实参仍必须一一对应（getString 实参不对会抛 IllegalArgumentException，提示整条丢掉）
+        assertTrue(
+            "资源必须是带 %1\$d 的附注后缀（且只此一个占位符）",
+            xml.contains("name=\"cam_record_saved_loss\">；其中约 %1\$d 秒因换段受阻丢失</string>")
+        )
     }
 
     @Test

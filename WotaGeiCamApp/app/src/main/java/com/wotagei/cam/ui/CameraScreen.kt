@@ -415,38 +415,33 @@ fun CameraScreen(
                 // 登记失败不推翻「已保存」：文件确实在盘上，只是相册可能暂时看不见，得另外说
                 // 换段受阻的丢失（2026-10-08 真机缺陷）：实时自检判废的段会被删掉、不在这份结果里，
                 // 但"换段腿卡住期间画面在丢"这件事必须让用户看见——提示里带上丢了多少秒
-                val savedText = when {
+                val dur = formatDuration(result.durationMs)
+                // 结果文案 = **原因句 + 附注句叠加**（P3-1/P3-2 收口）：原因（为什么自己停了，时长
+                // 只在这里带一次）与附注（保存质量）各成一族、任两件同时命中谁也不许盖谁——旧写法
+                // 是一条互斥 when，"相机丢失 + 收尾超时"这种真机常同场的组合里，相机丢失一句会把
+                // 降级/环境音/登记附注整句盖掉。
+                val reasonText = when (result.autoStopReason) {
                     // 自动停录原因排最前：用户必须先知道"为什么自己停了"（丢失账另有 sidecar 可查）
-                    result.autoStopReason == AutoStopRules.REASON_BATTERY ->
-                        app.getString(R.string.cam_record_saved_auto_battery, formatDuration(result.durationMs))
-                    result.autoStopReason == AutoStopRules.REASON_STORAGE ->
-                        app.getString(R.string.cam_record_saved_auto_storage, formatDuration(result.durationMs))
+                    AutoStopRules.REASON_BATTERY ->
+                        app.getString(R.string.cam_record_saved_auto_battery, dur)
+                    AutoStopRules.REASON_STORAGE ->
+                        app.getString(R.string.cam_record_saved_auto_storage, dur)
                     // 相机被系统收回同样是一次"已保存"的正常收尾（不是失败）：说清为什么停
-                    result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
-                        app.getString(R.string.cam_record_saved_auto_camera_lost, formatDuration(result.durationMs))
-                    // 环境音丢失（S1-M3-05）与降级段（degradedCode）可同时命中：两句注互不矛盾
-                    // （一个说环境音没了、一个说末尾可能不完整），谁也不盖谁——组合场景走独立文案
-                    // 把两件事都带上，组合、单因、无因三种形态各自一条，规避"选一个丢一个"的信息损失
-                    result.ambientLost && result.degradedCode != null ->
-                        app.getString(
-                            R.string.cam_record_saved_degraded_ambient_lost,
-                            formatDuration(result.durationMs)
-                        )
-                    result.degradedCode != null ->
-                        app.getString(R.string.cam_record_saved_degraded, formatDuration(result.durationMs))
-                    result.ambientLost ->
-                        app.getString(R.string.cam_record_saved_ambient_lost, formatDuration(result.durationMs))
-                    result.uncommitted > 0 ->
-                        app.getString(R.string.cam_record_saved_uncommitted, formatDuration(result.durationMs))
-                    result.lostMs >= LOSS_NOTICE_MIN_MS ->
-                        app.getString(
-                            R.string.cam_record_saved_loss,
-                            formatDuration(result.durationMs),
-                            rotateStallLostSeconds(result.lostMs)
-                        )
-                    else -> app.getString(R.string.cam_record_saved, formatDuration(result.durationMs))
+                    AutoStopRules.REASON_CAMERA_LOST ->
+                        app.getString(R.string.cam_record_saved_auto_camera_lost, dur)
+                    else -> app.getString(R.string.cam_record_saved, dur)
                 }
-                showTip(savedText)
+                // 附注族（拼接次序即此处顺序）：相册登记未成功排最前——它是唯一"这条成片可能暂时
+                // 看不见"的提醒，uncommitted > 0 时必须永远可见，不许被任何并列附注盖掉（P3-2）
+                val noteText = buildString {
+                    if (result.uncommitted > 0) append(app.getString(R.string.cam_record_saved_uncommitted))
+                    if (result.degradedCode != null) append(app.getString(R.string.cam_record_saved_degraded))
+                    if (result.ambientLost) append(app.getString(R.string.cam_record_saved_ambient_lost))
+                    if (result.lostMs >= LOSS_NOTICE_MIN_MS) {
+                        append(app.getString(R.string.cam_record_saved_loss, rotateStallLostSeconds(result.lostMs)))
+                    }
+                }
+                showTip(reasonText + noteText)
                 // 练习闭环（2026-10-04 方向 4）：对比页发来的录制成功即弹栈回对比页，把新片
                 // 填右槽。pending uri 自带 MediaStore id，此刻 IS_PENDING 已清，回程查询即刻可见；
                 // deliver 只在桥 armed 时认账，普通录制的停止不受影响
