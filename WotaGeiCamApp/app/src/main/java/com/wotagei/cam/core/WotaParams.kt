@@ -150,8 +150,14 @@ class WotaParams(private val scope: CoroutineScope) {
             ParamState(0f, null, enabled = false)   // 定焦镜头（前摄常见）无手动对焦能力
         }
 
-        afMode.value = if (a.afModes.isEmpty()) AfMode.MANUAL else {
-            AfMode.PREFERENCE.firstOrNull { a.afModes.contains(it.cam2Mode) } ?: AfMode.MANUAL
+        // 换挡口径（用户反馈第 1 条 · 拍板 Q3）：AF 模式**能力含当前档就保留**，只在能力不含时
+        // 才回落 PREFERENCE 首档。旧口径无条件回填连续档，会把「持久化 AF 模式」恢复的值当场
+        // 覆盖掉（恢复 MANUAL 的用户换一次镜头/冷启一次就变回连续）；定焦镜头（afModes 只含
+        // OFF）仍按 MANUAL 兜底不变。
+        afMode.value = when {
+            a.afModes.isEmpty() -> AfMode.MANUAL
+            a.afModes.contains(afMode.value.cam2Mode) -> afMode.value
+            else -> AfMode.PREFERENCE.firstOrNull { a.afModes.contains(it.cam2Mode) } ?: AfMode.MANUAL
         }
     }
 
