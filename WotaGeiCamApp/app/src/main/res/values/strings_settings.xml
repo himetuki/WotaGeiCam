@@ -33,7 +33,7 @@
 
     <!-- 参考线默认 -->
     <string name="set_group_refline">参考线默认</string>
-    <string name="set_refline_note">进入录制页时默认勾选的参考线，可在参考线面板里临时改</string>
+    <string name="set_refline_note">只决定每次冷启动时默认勾选的参考线；录制页改过的参考线会被记住，不随后台清理回归默认</string>
 
     <!-- 取景辅助 -->
     <string name="set_group_level">取景辅助</string>
