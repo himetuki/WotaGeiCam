@@ -107,7 +107,11 @@ class ArcConvertGuardTest {
         assertTrue(
             "setArcConvert 必须在体内重建 ArcKeepRule 接入档位（slotNs 只构造不赋值 = 恒 0 = " +
                 "onFrame 恒真 = 抽帧整条失效而 PTS 照 dstFps 盖，成片时长被压缩）",
-            setBody.contains("ArcKeepRule(slotNs = if")
+            setBody.contains("ArcKeepRule(") && setBody.contains("slotNs = arcSlotNs")
+        )
+        assertTrue(
+            "相位容差必须按槽宽的运行时比例显式传入（写死毫秒 = 换档位就漂）",
+            setBody.contains("toleranceNs = arcKeepToleranceNs(arcSlotNs)")
         )
         assertTrue(
             "GL 实测源帧率必须四舍五入（截断把 29.97 打成 29，与修复路中位数四舍五入的前缀分叉）",
