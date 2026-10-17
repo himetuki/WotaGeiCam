@@ -345,8 +345,8 @@ class FocusLockGuardTest {
         val silentCenter = maskedScreen.replace("params.focusLocked.value -> showLockedTapTip()", "Unused42 -> Unit42")
         assertTrue("拆掉中心对焦的锁态分支后判据必须红", uiWiringIssues(silentCenter, flatten(silentCenter)).isNotEmpty())
         val anchorAfter = maskedScreen.replace(
-            "params.focusLockPoint.value = point\n            params.focusLocked.value = true",
-            "params.focusLocked.value = true\n            params.focusLockPoint.value = point"
+            "params.focusLockPoint.value = point\n                params.focusLocked.value = true",
+            "params.focusLocked.value = true\n                params.focusLockPoint.value = point"
         )
         assertTrue("把『先锚点后锁定』倒过来后判据必须红", uiWiringIssues(anchorAfter, flatten(anchorAfter)).isNotEmpty())
         val noGate = maskedScreen.replace(

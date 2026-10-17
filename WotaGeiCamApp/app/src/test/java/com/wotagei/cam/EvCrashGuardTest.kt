@@ -6,21 +6,13 @@ import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FpsPick
-import com.wotagei.cam.core.HudItem
-import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.Rect as WotaRect
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.WbPreset
-import com.wotagei.cam.core.WotaParams
-import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.source.KotlinSourceScan
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
-import com.wotagei.cam.ui.hudCycleStep
-import com.wotagei.cam.ui.manualExposureUsable
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -40,9 +32,9 @@ import org.junit.Test
  *    引擎线程无 UncaughtExceptionHandler ⇒ 未捕获即进程死亡。源码钉扎锁 try 覆盖与分流；
  * 3. **IAE 按会话分流**（审查 P2）：普通会话的 IAE 原先被误路由进 downgradeHighSpeed，
  *    静默把用户 fps 改写成 30 并重建会话；
- * 4. **AE 翻转闸**（审查 P3 修正版判据）：`hudCycleStep` 的 AUTO→MANUAL 翻转原先不查
- *    手动曝光能力（面板 `AeModeRow` 判 `manualExposurePossible() = iso.ok() && exposureNs.ok()`），
- *    点按循环只查 shutter 一半——本条用行为测试锁判据、用扫描锁两个分支都挂闸。
+ * 4. **AE 翻转闸**（审查 P3 修正版判据）：原 `hudCycleStep` 的 AUTO→MANUAL 翻转只查 shutter
+ *    一半。2026-10-17 点按循环整体删除后该闸随函数消失；本文件保留 EV 显示等不相关断言，
+ *    循环相关用例已删（`PillInteractionGuardTest` 锁"循环残留必须为零"）。
  */
 class EvCrashGuardTest {
 
@@ -108,72 +100,7 @@ class EvCrashGuardTest {
         assertEquals(2, auto.aeComp)
     }
 
-    // -------------------------------------------------- 行为测试：AE 翻转闸（判据与面板同源）
-
-    private fun params(isoOk: Boolean, shutterOk: Boolean): WotaParams {
-        val p = WotaParams(CoroutineScope(Dispatchers.Unconfined))
-        // 与 applyAbility 缺能力产物同形：range=null 时 enabled=false（无解态 ParamState(lo,null,false) 同形）。
-        // 快门 range 给全域宽档：ns 候选非空由 range 保证，不依赖 SHUTTER_DENOM 具体表——
-        // 本组测的是「闸拦不拦」，候选空早退是既有用例（missingCapabilityReportsFailure）的事
-        p.iso.value = if (isoOk) ParamState(100, 100..16000) else ParamState(100, null, enabled = false)
-        p.shutter.value = if (shutterOk) ParamState(40_000_000L, 1L..100_000_000_000L)
-        else ParamState(40_000_000L, null, enabled = false)
-        return p
-    }
-
-    @Test
-    fun gateMatchesPanelSemantics() {
-        // 对照 AeModeRow 的 ability.manualExposurePossible() = iso.ok() && exposureNs.ok()：
-        // 审查 P3 修正——只查 shutter 一半不够，iso 缺能力但曝光时间有的机器上点按循环
-        // 会翻 MANUAL 而面板禁选，那正是要堵的口径分叉
-        assertTrue("ISO+快门都有能力：放行", manualExposureUsable(params(isoOk = true, shutterOk = true)))
-        assertFalse("ISO 缺能力必须拦（旧判据只查 shutter，这条红）", manualExposureUsable(params(isoOk = false, shutterOk = true)))
-        assertFalse("快门缺能力必须拦", manualExposureUsable(params(isoOk = true, shutterOk = false)))
-        assertFalse("双缺必须拦", manualExposureUsable(params(isoOk = false, shutterOk = false)))
-    }
-
-    @Test
-    fun shutterTapIsRefusedWhenIsoCapabilityMissing() {
-        val p = params(isoOk = false, shutterOk = true)
-        assertFalse("缺手动能力时点快门不许翻 AE（返回 false 让 UI 出提示）", hudCycleStep(HudItem.SHUTTER, p))
-        assertEquals("aeMode 不许被改走（退回旧实现这里变 MANUAL，红）", AeMode.AUTO, p.aeMode.value)
-        assertEquals(40_000_000L, p.shutter.value.value)
-    }
-
-    @Test
-    fun isoTapIsRefusedWhenShutterCapabilityMissing() {
-        val p = params(isoOk = true, shutterOk = false)
-        assertFalse("缺快门能力时点 ISO 同样不许翻 AE（闸对两个分支对称）", hudCycleStep(HudItem.ISO, p))
-        assertEquals(AeMode.AUTO, p.aeMode.value)
-        assertEquals(100, p.iso.value.value)
-    }
-
-    @Test
-    fun wrapBackToAutoIsNotBlockedByTheGate() {
-        // 护栏：闸只拦 AUTO→MANUAL 翻转，走完一圈回 AUTO 不经过闸——写反了（闸住整条链）
-        // 会把用户锁死在手动档，这条红
-        val p = params(isoOk = false, shutterOk = true)
-        p.aeMode.value = AeMode.MANUAL
-        val fastest = WotaTiers.SHUTTER_DENOM.map { WotaTiers.NS_PER_SECOND / it }.sortedDescending().last()
-        p.shutter.value = ParamState(fastest, 1L..100_000_000_000L)
-        assertTrue("走完一圈回 AUTO 不该被闸挡住", hudCycleStep(HudItem.SHUTTER, p))
-        assertEquals(AeMode.AUTO, p.aeMode.value)
-    }
-
     // -------------------------------------------------- 源码钉扎（判定只作用在 codeOnly 遮蔽后的文本上）
-
-    @Test
-    fun cycleFlipBranchesCarryTheGate() {
-        // 证伪：删掉任一分支的闸调用 → occurrences < 2 红；把闸挪到赋值之后 → 顺序断言红。
-        // 定位串用赋值形态 "value = AeMode.MANUAL"：函数体开头的 `!= AeMode.MANUAL`（aeAuto 判定）
-        // 不含它，避免把"翻转赋值"定位到开头那行造成假红
-        val body = bodyOf(codeOnly(KotlinSourceScan.mainSourceText("ui/HudCycle.kt")), "hudCycleStep")
-        val gates = KotlinSourceScan.occurrences(body, "manualExposureUsable")
-        assertTrue("SHUTTER 与 ISO 两个翻转分支都必须挂闸（缺一即混合口径回归）", gates.size >= 2)
-        val firstFlip = body.indexOf("value = AeMode.MANUAL")
-        assertTrue("闸必须出现在第一次翻 MANUAL 赋值之前（写在赋值之后等于没闸）",
-            gates[0] < firstFlip && firstFlip >= 0)
-    }
 
     @Test
     fun applyExposureReplaysTheWholeExposureKeySet() {
@@ -265,13 +192,7 @@ class EvCrashGuardTest {
 
     @Test
     fun rulerItselfCanTurnRed() {
-        // 良品先绿，mutate 后必红——三把尺各验一次（写法对照 PillEnabledGuardTest.尺子自己能红）
-        val cycle = codeOnly(KotlinSourceScan.mainSourceText("ui/HudCycle.kt"))
-        val gates = KotlinSourceScan.occurrences(bodyOf(cycle, "hudCycleStep"), "manualExposureUsable")
-        assertTrue(gates.size >= 2)
-        val mutated = bodyOf(cycle.replace("if (!manualExposureUsable(params)) return false", "Unit"), "hudCycleStep")
-        assertEquals("闸调用被删必须红", 0, KotlinSourceScan.occurrences(mutated, "manualExposureUsable").size)
-
+        // 良品先绿，mutate 后必红——两把尺各验一次（循环那组已随 hudCycleStep 删除）
         val flat = KotlinSourceScan.flatten(codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt")))
         assertTrue(flat.contains("aeMode == AeMode.AUTO && ev.enabled"))
         assertFalse(

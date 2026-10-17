@@ -13,7 +13,7 @@ import org.junit.Test
 
 /**
  * 配置持久化（用户反馈第 1 条）的**源码接线守卫**：Compose 点击行为在 JVM 单测里跑不到，
- * 五处动作完成点是不是真的接了 flush、恢复链是不是真的挂在 applyDefaults 上、键表有没有
+ * 四处动作完成点是不是真的接了 flush、恢复链是不是真的挂在 applyDefaults 上、键表有没有
  * 多写/漏写、排他字段（音源/自动降级）有没有被顺手持久化——全部用 [KotlinSourceScan] 钉住。
  *
  * 判据全部写成吃 `masked: String` 的纯函数，真身与合成突变体同吃一把尺（每条配「尺子自己能红」）。
@@ -63,7 +63,7 @@ class ParamsPersistWiringGuardTest {
 
     // ------------------------------------------------------------------ 判据（纯函数）
 
-    /** 五钩子（H1-H5）缺 flush 的问题列表；空 = 接线完整 */
+    /** 四个钩子（H1/H3/H5 + PillHost 透传）缺 flush 的问题列表；空 = 接线完整 */
     private fun flushHookIssues(masked: String): List<String> {
         val issues = ArrayList<String>()
         fun check(label: String, anchor: String) {
@@ -75,9 +75,7 @@ class ParamsPersistWiringGuardTest {
             }
         }
         check("H1 closePill", "val closePill")
-        check("H2 onReadoutCycle", "onReadoutCycle = {")
         check("H3 onLongPress", "onLongPress = {")
-        check("H4 onLensCycle", "onLensCycle = {")
         // H5：ON_STOP 观察者要在 DisposableEffect 里，且分支里调 flush（窗口双向各取 400 字符）
         val at = masked.indexOf("Lifecycle.Event.ON_STOP")
         if (at < 0) {
@@ -87,9 +85,10 @@ class ParamsPersistWiringGuardTest {
             if (occurrences(window, "persist.flush()").isEmpty()) issues.add("H5：ON_STOP 分支没接 persist.flush()")
             if (!window.contains("DisposableEffect")) issues.add("H5：ON_STOP 观察者必须挂在 DisposableEffect（防重复注册）")
         }
-        // flush 恰好 6 处：H1-H5 五处 + PillHost 透传一处；多一处（散落别处）少一处（钩子掉了）都红
+        // 2026-10-17：点按循环（H2 onReadoutCycle / H4 onLensCycle）随功能删除，
+        // flush 恰好 4 处 = H1/H3/H5 三钩子 + PillHost 透传；多一处（散落别处）少一处（钩子掉了）都红
         val n = occurrences(masked, "persist.flush()").size
-        if (n != 6) issues.add("persist.flush() 出现 $n 次，应为恰好 6 处（H1-H5 五钩子 + PillHost 透传）")
+        if (n != 4) issues.add("persist.flush() 出现 $n 次，应为恰好 4 处（H1/H3/H5 三钩子 + PillHost 透传）")
         return issues
     }
 
@@ -123,7 +122,7 @@ class ParamsPersistWiringGuardTest {
     // ------------------------------------------------------------------ 真身断言
 
     @Test
-    fun `录制页五处动作完成点都接了flush`() {
+    fun `录制页四处动作完成点都接了flush`() {
         assertEquals("钩子接线缺件：", emptyList<String>(), flushHookIssues(maskedScreen))
     }
 
@@ -213,7 +212,7 @@ class ParamsPersistWiringGuardTest {
     @Test
     fun `尺子自己能红_拆掉任一钩子必报红`() {
         assertTrue("真身必须绿", flushHookIssues(maskedScreen).isEmpty())
-        // 拆掉第一处（H1 closePill 里的）flush：钩子体检查与"恰好 5 处"两道都要踩中
+        // 拆掉第一处（H1 closePill 里的）flush：钩子体检查与"恰好 4 处"两道都要踩中
         val mutant = maskedScreen.replaceFirst("persist.flush()", "Unit")
         assertTrue("拆掉 H1 的 flush 后钩子判据必须红", flushHookIssues(mutant).isNotEmpty())
     }

@@ -590,11 +590,9 @@ data class HudCtx(
     val onFocusClick: () -> Unit,
     val onStabClick: () -> Unit,
     val onBtClick: () -> Unit,
-    val onLensCycle: () -> Unit,
     val onOpenLensPanel: () -> Unit,
     val onRecordClick: () -> Unit,
     val onThumbClick: () -> Unit,
-    val onReadoutCycle: (HudItem) -> Unit,
     val onReadoutOpen: (HudItem) -> Unit,
     /**
      * 编辑页正被拖起来的那一颗：原位只留**空壳**（alpha 0，几何与占位不变所以容器不重排），
@@ -760,10 +758,10 @@ fun HudEntryItem(
             )
             CamPill.LENS -> TierChip(
                 tier, ctx.lensLabel, false,
-                // 点按循环镜头、长按开就近面板（六项第 7 条把顶栏那段并到这颗）；
+                // 2026-10-17 需求：点按与长按都开就近镜头面板（点按不再切下一颗镜头）；
                 // 吸收期这两条动作一起摘掉（#73：底栏那两颗越靠后越压着录制键，谁都不许吃那一指）
                 modifier = anchor.then(modifier),
-                onClick = gatedClick(clicksAccepted, ctx.onLensCycle),
+                onClick = gatedClick(clicksAccepted, ctx.onOpenLensPanel),
                 frost = frost,
                 onLongClick = if (clicksAccepted) ctx.onOpenLensPanel else null
             )
@@ -804,7 +802,8 @@ fun HudEntryItem(
                 modifier = anchor,
                 secondary = stringResource(item.labelRes),
                 valueColor = if (manual) WotaColor.accent else null,
-                onClick = gatedClick(clicksAccepted) { ctx.onReadoutCycle(item) },
+                // 点按与长按同一动作：开就近弹窗（2026-10-17 需求，点按不再循环改值）
+                onClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) },
                 onLongClick = gatedClick(clicksAccepted) { ctx.onReadoutOpen(item) },
                 // 传了也会被 WotaChipImpl 因 secondary 非空而摘掉（见那条注释）；留在这里是
                 // "哪天把次级标签换成 textHi，只需改一处判据"这件事在代码里看得见，而不是散落成一个洞
