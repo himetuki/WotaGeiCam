@@ -3,7 +3,6 @@ package com.wotagei.cam
 import com.wotagei.cam.record.ArcOp
 import com.wotagei.cam.record.ArcRateProbe
 import com.wotagei.cam.record.ArcRepairFlow
-import com.wotagei.cam.record.ArcRepairMerge
 import com.wotagei.cam.record.ArcRepairPlan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,7 +12,8 @@ import org.junit.Test
 /**
  * 光弧修复 **v2 抽帧+补弧计划**的 JVM 全覆盖（用户 2026-10-03 定版口径，v1 插帧已废弃）。
  *
- * 本文件只钉纯逻辑层：保留集/帧数、取大算子、流式状态机的指令序列。解码/编码/EGL 只能在真机验
+ * 本文件只钉纯逻辑层：保留集/帧数、流式状态机的指令序列。合并算子与不造色断言在
+ * `ArcRepairMergeParityTest`；解码/编码/EGL 只能在真机验
  * （MediaCodec、EGL14 在 JVM 里都不存在），那一半的证据来自 `ArcRepairRunner`/`ArcRepairGl`
  * 的日志与成片。
  *
@@ -129,46 +129,8 @@ class ArcRepairPlanTest {
 
     // endregion
 
-    // region 取大合并算子
-
-    private fun b(v: Int): Byte = v.toByte()
-
-    @Test
-    fun `取大按无符号比_0x80不当负数`() {
-        val acc = byteArrayOf(b(0x10), b(0x80), b(0x7F))
-        ArcRepairMerge.mergeMax(acc, byteArrayOf(b(0x20), b(0x7F), b(0x80)), 3)
-        // 0x80(128) > 0x7F(127)：结果 0x80 必须赢，而不是按有符号被 0x7F 反超
-        assertEquals(b(0x20), acc[0])
-        assertEquals(b(0x80), acc[1])
-        assertEquals(b(0x80), acc[2])
-    }
-
-    @Test
-    fun `黑帧并入是恒等_不改动保留帧`() {
-        val acc = byteArrayOf(1, 2, 3, 4)
-        ArcRepairMerge.mergeMax(acc, ByteArray(4), 4)
-        assertEquals(byteArrayOf(1, 2, 3, 4).toList(), acc.toList())
-    }
-
-    @Test
-    fun `并集语义_两次取大等于三分最大`() {
-        val acc = byteArrayOf(10, 0, b(200))
-        ArcRepairMerge.mergeMax(acc, byteArrayOf(0, 30, 50), 3)
-        ArcRepairMerge.mergeMax(acc, byteArrayOf(5, 5, 5), 3)
-        assertEquals(listOf(10, 30, 200), acc.map { it.toInt() and 0xFF })
-    }
-
-    @Test
-    fun `len边界与就地可用`() {
-        val acc = byteArrayOf(9, 9, 9, 9)
-        ArcRepairMerge.mergeMax(acc, acc, 4)   // acc 与 src 同一数组（就地）
-        assertEquals(byteArrayOf(9, 9, 9, 9).toList(), acc.toList())
-        val src = byteArrayOf(1, 99, 1, 1)
-        ArcRepairMerge.mergeMax(acc, src, 2)   // len 只作用前两格
-        assertEquals(byteArrayOf(9, 99, 9, 9).toList(), acc.toList())
-    }
-
-    // endregion
+    // 合并算子本身（整像素选择 / 2×2 块整体性 / 不造色 / shader 源扫描）在
+    // `ArcRepairMergeParityTest` 里对账；本文件只钉流式桥的指令顺序与结果。
 
     // region 流式状态机（计划→行为的桥）
 
@@ -231,7 +193,7 @@ class ArcRepairPlanTest {
         val flow = ArcRepairFlow(ArcRepairPlan.of(60, 60, 24))
         val accs = mutableListOf<ArcOp.AccumulateCur>()
         for (s in 0 until 60) accs += flow.onSourceFrame(s).filterIsInstance<ArcOp.AccumulateCur>()
-        // 60→24 的连续抽帧对（源 3,4 等）：第一枚 fresh 清残留、第二枚接着取大
+        // 60→24 的连续抽帧对（源 3,4 等）：第一枚 fresh 清残留、第二枚接着累积
         assertTrue(accs.first().fresh)
         val consecutive = accs.zipWithNext().filter { (a, b) -> a.fresh && !b.fresh }
         assertTrue("60→24 必有连续抽帧的 fresh→非fresh 序列", consecutive.isNotEmpty())

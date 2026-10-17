@@ -1,5 +1,7 @@
 package com.wotagei.cam.record
 
+import com.wotagei.cam.core.ArcMergeDeadband
+
 /**
  * 光弧修复（用户需求第 7 项）的**抽帧计划**：把实测 srcNum/srcDen（有理数源帧率，见
  * [ArcRateProbe.measuredSrcFps]）的素材抽成 [ArcRepairPlan.dstFps] fps。
@@ -12,16 +14,19 @@ package com.wotagei.cam.record
  *   输出只含保留帧——**绝不插帧**：抽帧再插帧帧数绕回原点，且混合帧会把运动中的光弧拆成
  *   两道半亮重影，原帧/混合帧逐帧交替正是用户看到的"来回闪动"；
  * - 保留集 = { ⌊j·srcFps/dstFps⌋ : j }（对 30→24 即"每 5 帧抽 1"，抽帧点分布均匀不扎堆）；
- * - 光弧是**加性亮度**（光轨在长曝光里叠出来的亮线），被抽帧的画面用**逐样本取大**并入
- *   它前后两枚保留帧：暗场上取大即无损伤并集——被抽帧独有的弧段在两邻帧上都以**原亮度**
- *   重现，弧在抽帧点上不断裂，也不像 0.5 平均那样把弧压暗出亮度呼吸；
- * - **口径（颜色域，2026-10-17 订正）**：CPU 路（本文件的 [ArcRepairMerge.mergeMax]，按
- *   Y/U/V **逐平面**传入）在 **YUV 逐平面**取大；GPU 路（`Shaders.ARC_MERGE_FS`）在
- *   **RGB 逐通道**取大。两者**同语义、不同颜色空间**——灰白弧（中性色度 U≈V≈128）下等值；
- *   彩色内容下两条口径**不等价**。并列对账测试见 `ArcRepairMergeParityTest`（CPU 侧）。
+ * - 光弧是**加性亮度**（光轨在长曝光里叠出来的亮线），被抽帧的画面用**整像素选择 + 差分
+ *   死区**并入它前后两枚保留帧：`Δluma = luma(被抽帧) − luma(保留帧)`，`Δluma > D` 时整颗
+ *   像素取被抽帧，否则保持保留帧。被抽帧独有的弧段在两邻帧上重现，弧在抽帧点上不断裂；
+ *   D 默认 12（0..32 可调），是差分死区而非绝对亮度阈值，相同亮度的地面/受光不叠加。
+ * - **不造色（2026-10-17 缺陷修复）**：CPU 路（本文件的 [ArcRepairMerge.selectInPlace]）按
+ *   4:2:0 的 2×2 块整体决策，命中则 4Y+U+V 整块取自被抽帧、否则整块保持保留帧；GPU 路
+ *   （`Shaders.ARC_MERGE_FS`）按 RGB 整像素同一规则选择。两路**同口径**，输出每个像素
+ *   严格等于某一输入帧的原值。旧口径"CPU 按 YUV 逐平面取大 / GPU 按 RGB 逐通道取大"
+ *   会把两个色相拼成原片不存在的颜色（橙+黑→珊瑚粉），已废弃；对账见
+ *   `ArcRepairMergeParityTest`。
  * - **已知边界**：① 片头首枚保留帧之前的被抽帧无"前帧"可并，直接弃；② 尾部被抽帧只并入
- *   前邻帧（EOS 折叠）；③ 逐样本取大对非弧场景会抬高亮度底、运动亮物会出双影——这三条
- *   均**未实测**（真机像素验证待做）。
+ *   前邻帧（EOS 折叠）；③ 旧取大对非弧场景抬高亮度底、运动亮物出双影的问题由死区收敛，
+ *   但高光运动物仍可能整像素过门——真机像素验证待做。
  * - 输出 PTS 取**均匀目标帧率步长**（第 j 帧 = j/ dstFps），容器是真 24/25fps；输出时长
  *   = 保留帧数/dstFps = ⌈N·D/S⌉/D ≈ N/S = 源时长，音频直拷同步不受影响。
  *
@@ -101,26 +106,64 @@ data class ArcRepairPlan(
 }
 
 /**
- * CPU 路线的**取大补弧**算子。
+ * CPU 路线的**整像素选择**算子（4:2:0）；与 GPU 路 `Shaders.ARC_MERGE_FS` 同一口径。
  *
- * **口径（颜色域，2026-10-17 订正）**：本算子按**无符号字节**取大，只做「取大」这一件事，
- * 本身不讲颜色域——调用方按 **Y/U/V 逐平面**分别传入，故 CPU 路的合成口径是 **YUV 逐平面取大**。
- * 与 GPU 路（`Shaders.ARC_MERGE_FS`，**RGB 逐通道**取大）是**同语义、不同颜色空间**，并非
- * "同口径"：灰白弧（中性色度 U≈V≈128）下等值；彩色内容下**不等价**。并列对账见
- * [ArcRepairMergeParityTest]。
+ * 判据：`Δluma = Y_b − Y_a`；块内取 4 个 Y 的最大 Δ（2~4px 细弧不被块平均吃掉），
+ * `maxΔ > D` 时整块（4 个 Y + 1 个 U + 1 个 V）取自 `b`，否则整块保持 `a`。死区 D 为
+ * [ArcMergeDeadband] 归一的 0..32；**绝不 Y 逐点选、U/V 按块选**——跨帧拼合会造色。
  *
- * **acc 就地更新**：`acc[i] = max(acc[i], src[i])`，按无符号字节比（`and 0xFF`，否则 0x80 以上
- * 会被当成负数把亮度比反）。逐样本独立、无跨格依赖，acc 与 src 允许是同一数组。
- * 逐平面调用：调用方按 Y/U/V 分别传入（UV 尺寸是 (w/2)*(h/2)，本对象不关心平面语义）。
+ * **a 就地更新**：输出写回 `aY/aU/aV`。a 与 b 必须是不同数组（四个真实调用点都是复用缓冲
+ * 两两不同）；逐块独立、无跨格权重，整块搬运保证输出三元组严格等于某一帧原值。
+ * 调用方负责保证 `width/height` 为偶数（CPU 路线在 `allocPlanes` 里显式报 `ARC_CPU_YUV`）。
  */
 object ArcRepairMerge {
 
-    /** `acc[i] = max(acc[i], src[i])`，共 [len] 个样本 */
-    fun mergeMax(acc: ByteArray, src: ByteArray, len: Int) {
-        for (i in 0 until len) {
-            val a = acc[i].toInt() and 0xFF
-            val b = src[i].toInt() and 0xFF
-            if (b > a) acc[i] = src[i]
+    /**
+     * `a = select(a, b)`，按 2×2 块整体决策；共 `(width/2)*(height/2)` 个色度样本。
+     * @throws IllegalArgumentException 宽高非正/非偶数或平面长度不足（防御性断言，生产路径先验过）
+     */
+    fun selectInPlace(
+        aY: ByteArray, aU: ByteArray, aV: ByteArray,
+        bY: ByteArray, bU: ByteArray, bV: ByteArray,
+        width: Int, height: Int, deadband: Int
+    ) {
+        require(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0) {
+            "4:2:0 整像素选择要求正偶数宽高，实际 ${width}x$height"
+        }
+        val cw = width / 2
+        val ch = height / 2
+        require(aY.size >= width * height && bY.size >= width * height) { "Y 平面长度不足" }
+        require(aU.size >= cw * ch && aV.size >= cw * ch) { "a 色度平面长度不足" }
+        require(bU.size >= cw * ch && bV.size >= cw * ch) { "b 色度平面长度不足" }
+        val d = ArcMergeDeadband.clamp(deadband)
+
+        var c = 0
+        var rowStart = 0
+        for (by in 0 until ch) {
+            var i = rowStart
+            for (bx in 0 until cw) {
+                val i1 = i + 1
+                val i2 = i + width
+                val i3 = i2 + 1
+                val delta = maxOf(
+                    (bY[i].toInt() and 0xFF) - (aY[i].toInt() and 0xFF),
+                    (bY[i1].toInt() and 0xFF) - (aY[i1].toInt() and 0xFF),
+                    (bY[i2].toInt() and 0xFF) - (aY[i2].toInt() and 0xFF),
+                    (bY[i3].toInt() and 0xFF) - (aY[i3].toInt() and 0xFF)
+                )
+                if (delta > d) {
+                    // 整块同帧搬运：4Y + U + V 一起取自 b，杜绝跨帧拼合造色
+                    aY[i] = bY[i]
+                    aY[i1] = bY[i1]
+                    aY[i2] = bY[i2]
+                    aY[i3] = bY[i3]
+                    aU[c] = bU[c]
+                    aV[c] = bV[c]
+                }
+                i += 2
+                c++
+            }
+            rowStart += width * 2
         }
     }
 }
@@ -132,7 +175,7 @@ object ArcRepairMerge {
 sealed interface ArcOp {
     /**
      * 处理被抽帧：[fresh] = true 时 acc 整帧换成本帧（自上一保留帧以来第一枚被抽帧，必须
-     * **清掉上一轮残留**——acc 面是复用缓冲，带着旧内容取大会把上一次的补弧污染进来）；
+     * **清掉上一轮残留**——acc 面是复用缓冲，带着旧内容参与选择会把上一次的补弧污染进来）；
      * false 时 acc = max(acc, cur) 继续累积。
      */
     data class AccumulateCur(val fresh: Boolean) : ArcOp

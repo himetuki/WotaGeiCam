@@ -13,6 +13,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
+import com.wotagei.cam.core.ArcMergeDeadband
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -140,10 +141,16 @@ class ArcRepairRunner(private val ctx: Context) {
     /**
      * 启动一次修复。
      * @param srcUri 源视频（媒体库里的 content uri）
-     * @param useGpu true = GPU 路线（EGL 到编码器面）；false = CPU 路线（逐平面 YUV 取大后直写编码器输入缓冲）
+     * @param useGpu true = GPU 路线（EGL 到编码器面）；false = CPU 路线（4:2:0 2×2 块整像素选择后直写编码器输入缓冲）
      * @param dstFps 抽帧目标帧率（产品口径 = 强制档 24/25）；源实测帧率不高于它时任务以 NO_NEED 收场
+     * @param deadband 补弧合并差分死区 D（0..32）；缺省取参数总线发布的只读快照（默认 12）
      */
-    fun start(srcUri: Uri, useGpu: Boolean, dstFps: Int) {
+    fun start(
+        srcUri: Uri,
+        useGpu: Boolean,
+        dstFps: Int,
+        deadband: Int = ArcMergeDeadband.deadband
+    ) {
         handler.post {
             if (busy) {
                 Log.i(TAG_ARC, "已有任务在跑，忽略重复 start")
@@ -160,6 +167,7 @@ class ArcRepairRunner(private val ctx: Context) {
                     src = srcUri,
                     useGpu = useGpu,
                     dstFps = dstFps,
+                    deadband = ArcMergeDeadband.clamp(deadband),
                     onProgress = { progress.value = it },
                     cancelled = { cancelRequested }
                 ).run()
@@ -207,7 +215,7 @@ private class ArcFail(val code: String) : Exception(code)
  * 一次修复会话：资源全在这里建、在这里收，[run] 无论成败都返回结果（不抛给外部）。
  *
  * 管线（v2 抽帧+补弧口径）：源 `MediaExtractor`（视频轨）→ 解码 → 按 [ArcRepairFlow] 指令
- * 抽帧/取大补弧 → 只把保留帧送编码器 → **每条音频轨各自的** `MediaExtractor`（源里全部
+ * 抽帧/整像素选择补弧 → 只把保留帧送编码器 → **每条音频轨各自的** `MediaExtractor`（源里全部
  * audio/ 轨逐轨直拷，录制端双 AAC：环境麦克 + 内录 AudioPlaybackCapture）→ `MediaMuxer`
  * 封装 → `VideoStore` 入库（`IS_PENDING` 两段式）。
  */
@@ -216,6 +224,7 @@ private class ArcRepairSession(
     private val src: Uri,
     private val useGpu: Boolean,
     private val dstFps: Int,
+    private val deadband: Int,
     private val onProgress: (Float) -> Unit,
     private val cancelled: () -> Boolean
 ) {
@@ -287,7 +296,7 @@ private class ArcRepairSession(
     private val encBufInfo = MediaCodec.BufferInfo()
 
     // --- CPU 路线的平面缓冲（open() 里一次分配，逐帧复用，全为零分配）
-    // cur = 当前解码帧、pend = 滞留待发的保留帧、acc = 被抽帧的取大累积面。
+    // cur = 当前解码帧、pend = 滞留待发的保留帧、acc = 被抽帧的整像素选择累积面。
     // 一律"紧打包"（Y 占 w*h，U/V 各占 (w/2)*(h/2)），与编码器输入 Image 的 rowStride 无耦合，
     // 读入/写出时各自尊重对方的 stride——这样 Buffer 的布局差异不会污染合并算式的输入。
     private var curY: ByteArray = ByteArray(0)
@@ -394,12 +403,12 @@ private class ArcRepairSession(
         dstTotal = plan.dstFrames
         flow = ArcRepairFlow(plan)
         note = "源实测≈${srcFps}fps（真值 ${srcRate.num}/${srcRate.den}，容器标 $containerFps）→ " +
-            "目标 ${dstFps}fps，被抽帧画面已取大并入前后帧；不改原片"
+            "目标 ${dstFps}fps，被抽帧画面已按整像素选择（差分死区 D=$deadband）并入前后帧；不改原片"
         Log.i(
             TAG_ARC,
             "源 ${width}x$height 容器fps=$containerFps 实测fps=$srcFps 实测=${srcRate.num}/${srcRate.den} " +
                 "srcFrames=$srcFrames → dstFps=$dstFps dstFrames=$dstTotal 抽≈${srcFrames - dstTotal} " +
-                "route=${if (useGpu) "GPU" else "CPU"} " +
+                "route=${if (useGpu) "GPU" else "CPU"} deadband=$deadband " +
                 "hintExtractor=$hintExtractor hintRetriever=$hintRetriever hintWritten=$hintWritten"
         )
 
@@ -504,17 +513,19 @@ private class ArcRepairSession(
                 "入参vf仍含KEY_ROTATION=${vf.containsKey(MediaFormat.KEY_ROTATION)}（须 true=未污染入参）"
         )
         if (useGpu) {
-            val gl = ArcRepairGl(width, height)
+            val gl = ArcRepairGl(width, height, deadband = deadband)
             arcGl = gl
             if (!gl.start()) throw ArcFail(ArcRepairError.GPU)
             val decSurface = gl.decoderSurface ?: throw ArcFail(ArcRepairError.GPU)
             dec.configure(decFmt, decSurface, null, 0)
         } else {
-            // CPU：ByteBuffer 模式拿 YUV（无输出面但 getOutputImage 可读），逐平面取大后直写编码器输入缓冲
+            // CPU：ByteBuffer 模式拿 YUV（无输出面但 getOutputImage 可读），按 2×2 块整像素选择后
+            // 直写编码器输入缓冲；4:2:0 要求偶数宽高，allocPlanes 里显式报 ARC_CPU_YUV。
             dec.configure(decFmt, null, null, 0)
             allocPlanes()
-            note = "CPU 路线：逐平面（YUV420）取大合并后直写编码器输入缓冲；单帧成本随分辨率上升，" +
-                "长视频明显慢于 GPU。帧时间戳由 queueInputBuffer 显式给出，与 GPU 路线同一口径。$note"
+            note = "CPU 路线：4:2:0 2×2 块整像素选择（差分死区 D=$deadband）后直写编码器输入缓冲；" +
+                "单帧成本随分辨率上升，长视频明显慢于 GPU。帧时间戳由 queueInputBuffer 显式给出，" +
+                "与 GPU 路线同一口径。$note"
         }
 
         dec.start()
@@ -531,6 +542,12 @@ private class ArcRepairSession(
 
     /** CPU 路线的平面缓冲：open() 里一次分配，之后逐帧复用（尺寸口径见字段注释） */
     private fun allocPlanes() {
+        // 4:2:0 的 U/V 是每 2×2 块一个样本：奇数宽高若静默 width/2 会截掉最后一列/行，
+        // 整像素选择就会漏掉边缘块。CPU 路线无面输出，先验尺寸并如实失败（不猜裁切口径）。
+        if (width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0) {
+            Log.e(TAG_ARC, "CPU 路线 4:2:0 要求正偶数宽高，实际 ${width}x$height")
+            throw ArcFail(ArcRepairError.CPU_YUV)
+        }
         val yLen = width * height
         val cLen = (width / 2) * (height / 2)
         curY = ByteArray(yLen)
@@ -757,25 +774,18 @@ private class ArcRepairSession(
         for (op in ops) {
             when (op) {
                 is ArcOp.AccumulateCur -> {
-                    if (op.fresh) copyCurToAcc() else {
-                        ArcRepairMerge.mergeMax(accY, curY, curY.size)
-                        ArcRepairMerge.mergeMax(accU, curU, curU.size)
-                        ArcRepairMerge.mergeMax(accV, curV, curV.size)
-                    }
+                    if (op.fresh) copyCurToAcc() else selectInto(accY, accU, accV, curY, curU, curV)
                 }
                 is ArcOp.FoldAccIntoPending -> {
-                    // P' = max(P, acc)：被抽帧的弧段并进**前**保留帧
-                    ArcRepairMerge.mergeMax(pendY, accY, pendY.size)
-                    ArcRepairMerge.mergeMax(pendU, accU, pendU.size)
-                    ArcRepairMerge.mergeMax(pendV, accV, pendV.size)
+                    // P' = select(P, acc)：被抽帧的弧段并进**前**保留帧（a=P、b=acc）
+                    selectInto(pendY, pendU, pendV, accY, accU, accV)
                 }
                 is ArcOp.HoldCurAsPending -> copyCurToPending()
                 is ArcOp.MergeCurAsPending -> {
                     if (op.useAcc) {
-                        // B' = max(B, acc)：被抽帧的弧段并进**后**保留帧，带弧升格待发
-                        ArcRepairMerge.mergeMax(curY, accY, curY.size)
-                        ArcRepairMerge.mergeMax(curU, accU, curU.size)
-                        ArcRepairMerge.mergeMax(curV, accV, curV.size)
+                        // B' = select(B, acc)：被抽帧的弧段并进**后**保留帧，带弧升格待发
+                        // （a=cur、b=acc；就地改 cur 后再整帧拷进 pending）
+                        selectInto(curY, curU, curV, accY, accU, accV)
                     }
                     copyCurToPending()
                 }
@@ -787,6 +797,14 @@ private class ArcRepairSession(
                 }
             }
         }
+    }
+
+    /** `a = select(a, b)`：复用缓冲就地更新，不新建数组（2×2 块整像素选择，差分死区 D=[deadband]） */
+    private fun selectInto(
+        aY: ByteArray, aU: ByteArray, aV: ByteArray,
+        bY: ByteArray, bU: ByteArray, bV: ByteArray
+    ) {
+        ArcRepairMerge.selectInPlace(aY, aU, aV, bY, bU, bV, width, height, deadband)
     }
 
     /** cur 平面整段拷进 acc（fresh 累积：清掉上一轮残留，整帧替换） */

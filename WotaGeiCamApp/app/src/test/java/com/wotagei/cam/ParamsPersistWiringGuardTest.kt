@@ -32,7 +32,8 @@ class ParamsPersistWiringGuardTest {
         "default_iso", "default_ae_mode", "default_ev", "default_wb_preset", "default_wb_kelvin",
         "default_wb_tint", "default_zoom", "default_flash", "default_stabilize", "default_af_mode",
         "default_mf_diopter", "default_size", "default_frame_effect", "default_zebra_threshold",
-        "default_zebra_density", "default_peaking_strength", "default_peaking_color", "default_lens"
+        "default_zebra_density", "default_peaking_strength", "default_peaking_color", "default_lens",
+        "default_arc_merge_deadband"
     )
 
     // ------------------------------------------------------------------ 取 lambda 体（PillEnabledGuardTest 同款花括号配对）
@@ -114,7 +115,7 @@ class ParamsPersistWiringGuardTest {
         return issues
     }
 
-    /** 23 个键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
+    /** 24 个键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
     private fun keyWiringIssues(masked: String, keyNames: List<String>): List<String> =
         keyNames.filter { occurrences(masked, it).size < 3 }
             .map { "$it 在 ParamsPersist.kt 里引用不足 3 处（KEYS 表/restore/flush 三者缺一）" }
@@ -147,7 +148,8 @@ class ParamsPersistWiringGuardTest {
                     "KEY_DEFAULT_FLASH", "KEY_DEFAULT_STABILIZE", "KEY_DEFAULT_AF_MODE",
                     "KEY_DEFAULT_MF_DIOPTER", "KEY_DEFAULT_SIZE", "KEY_DEFAULT_FRAME_EFFECT",
                     "KEY_DEFAULT_ZEBRA_THRESHOLD", "KEY_DEFAULT_ZEBRA_DENSITY",
-                    "KEY_DEFAULT_PEAKING_STRENGTH", "KEY_DEFAULT_PEAKING_COLOR", "KEY_DEFAULT_LENS"
+                    "KEY_DEFAULT_PEAKING_STRENGTH", "KEY_DEFAULT_PEAKING_COLOR", "KEY_DEFAULT_LENS",
+                    "KEY_DEFAULT_ARC_MERGE_DEADBAND"
                 )
             )
         )

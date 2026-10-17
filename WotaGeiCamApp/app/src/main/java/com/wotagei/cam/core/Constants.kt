@@ -77,6 +77,36 @@ object WotaTiers {
     const val TINT_MAX = 50
 }
 
+/**
+ * 光弧补弧合并的**差分死区**（8bit luma 级）——CPU/GPU 两路共用的唯一档位真源。
+ *
+ * 判据：`Δluma = luma(被抽帧) − luma(保留帧)`；`Δluma > D` 时整颗像素取被抽帧，否则保持保留帧。
+ * 这是**差分**死区，不是"多亮才算弧"的绝对亮度阈值；D=0 退化为纯整像素选择，仍不造色。
+ *
+ * [deadband] 是参数总线（[WotaParams.arcMergeDeadband]）对**非 UI 消费方**的只读快照：
+ * GL 引擎拿不到参数总线实例、离线修复服务也不该依赖 `ui/`，由总线 setter 统一发布，
+ * 录制启动（`setArcConvert`）与离线修复启动各读一次。改值只走 [WotaParams.setArcMergeDeadband]。
+ */
+object ArcMergeDeadband {
+    const val DEFAULT = 12
+    const val MIN = 0
+    const val MAX = 32
+
+    fun clamp(value: Int): Int = value.coerceIn(MIN, MAX)
+
+    /** 归一到 GLSL 的 0..1 亮度差（uniform `uDeadbandLuma`） */
+    fun luma(value: Int): Float = clamp(value) / 255f
+
+    /** 最近一次由参数总线发布的值（@Volatile：UI 线程写、GL/修复线程读） */
+    @Volatile
+    var deadband: Int = DEFAULT
+        private set
+
+    fun publish(value: Int) {
+        deadband = clamp(value)
+    }
+}
+
 /** 需求参考线 11 档，位掩码可组合 */
 enum class RefLineType(val bit: Int, val label: String) {
     GRID_3X3(1, "三分法网格"), DIAGONAL(2, "对角线"), CROSSHAIR(4, "十字准线"),

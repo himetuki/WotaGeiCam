@@ -70,6 +70,19 @@ class WotaParams(private val scope: CoroutineScope) {
     val peakingStrength = MutableStateFlow(0.6f)
     val peakingColor = MutableStateFlow(PeakingColor.RED)
 
+    /**
+     * 补弧合并差分死区 D（8bit luma 级）：`Δluma > D` 时整颗像素取被抽帧，否则保持保留帧。
+     * 默认 12；写入必须走 [setArcMergeDeadband]（同步发布到 [ArcMergeDeadband] 供 GL/离线
+     * 修复等无参数总线实例的消费方读取），直接改 `.value` 会让两处读数分叉。
+     */
+    val arcMergeDeadband = MutableStateFlow(ArcMergeDeadband.DEFAULT)
+
+    fun setArcMergeDeadband(value: Int) {
+        val clamped = ArcMergeDeadband.clamp(value)
+        arcMergeDeadband.value = clamped
+        ArcMergeDeadband.publish(clamped)
+    }
+
     /** RGB 曲线：只走 GPU 渲染链（DIRECT 无片元 pass），恒等即关闭 */
     val curve = MutableStateFlow(CurveStack.IDENTITY)
     val refLines = MutableStateFlow(0)                                // RefLineType 位掩码
