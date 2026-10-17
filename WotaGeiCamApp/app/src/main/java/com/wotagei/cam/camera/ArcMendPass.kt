@@ -2,12 +2,13 @@ package com.wotagei.cam.camera
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.camera.nativeFloatBuffer
 
 private const val TAG_MEND = "ArcMendPass"
 
-/** 采样单元：0/1 = 取大合并的两路输入（与 Shaders.ARC_MERGE_FS 同源） */
+/** 采样单元：0 = 保留帧/累积面（a），1 = 被抽帧（b）（与 Shaders.ARC_MERGE_FS 同源） */
 private const val MEND_UNIT_A = 0
 private const val MEND_UNIT_B = 1
 
@@ -18,7 +19,7 @@ private const val MEND_UNIT_B = 1
  * 拓扑与离线版 `record/ArcRepairGl`（v2）同构：
  * - `cur`：本帧特效链的渲染目标（引擎把 OES 帧按编码口径画进来）；
  * - `pending` A/B 乒乓：滞留待发的保留帧；
- * - `acc` A/B 乒乓：被抽帧的取大累积面（fresh 语义 = 整帧替换，防复用残留污染）。
+ * - `acc` A/B 乒乓：被抽帧的整像素选择累积面（fresh 语义 = 整帧替换，防复用残留污染）。
  * 决策在 `record.ArcRepairFlow`（onClassification 在线路），本类只忠实执行绘制指令。
  */
 internal class ArcMendPass {
@@ -46,6 +47,10 @@ internal class ArcMendPass {
     private var mergeUTexMatrix = -1
     private var mergeUA = -1
     private var mergeUB = -1
+    private var mergeUDeadband = -1
+
+    /** 差分死区归一值（`D/255.0`）：换档只改这一枚，uniform 在每次合并绘制时下发 */
+    private var deadbandLuma = ArcMergeDeadband.luma(ArcMergeDeadband.DEFAULT)
 
     private val identity = floatArrayOf(
         1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f
@@ -55,6 +60,11 @@ internal class ArcMendPass {
 
     val ready: Boolean
         get() = blitProgram != 0 && mergeProgram != 0 && curFbo != 0
+
+    /** 设定差分死区 D（0..32，8bit luma 级）；在 GL 线程调用（引擎 setter 已投递到 GL 线程） */
+    fun setDeadband(deadband: Int) {
+        deadbandLuma = ArcMergeDeadband.luma(deadband)
+    }
 
     /** 惰性建资源；尺寸变化即重建（编码面尺寸在会话里恒定，这里只是防呆） */
     fun ensure(w: Int, h: Int): Boolean {
@@ -89,6 +99,7 @@ internal class ArcMendPass {
         mergeUTexMatrix = GLES20.glGetUniformLocation(mergeProgram, "uTexMatrix")
         mergeUA = GLES20.glGetUniformLocation(mergeProgram, "uA")
         mergeUB = GLES20.glGetUniformLocation(mergeProgram, "uB")
+        mergeUDeadband = GLES20.glGetUniformLocation(mergeProgram, "uDeadbandLuma")
         drainGlError("mendEnsure")
         return true
     }
@@ -122,7 +133,9 @@ internal class ArcMendPass {
     fun accumulate(fresh: Boolean): Boolean =
         if (fresh) copyInto(accFbo[1 - accIdx], curTex)
             .also { if (it) accIdx = 1 - accIdx }
-        else mergeInto(curTex, accTex[accIdx], accFbo[1 - accIdx])
+        // a = 已有累积面、b = 本枚被抽帧：acc = select(acc, cur)。顺序反了会变成
+        // select(cur, acc)，差分方向反过来，等于回到"更亮者胜"的旧语义。
+        else mergeInto(accTex[accIdx], curTex, accFbo[1 - accIdx])
             .also { if (it) accIdx = 1 - accIdx }
 
     fun foldAccIntoPending(): Boolean =
@@ -174,7 +187,10 @@ internal class ArcMendPass {
         return drainGlError("mendCopy") == 0
     }
 
-    /** `写入面 = max(a, b)`；写读不同体（乒乓），画完摘掉采样单元防 feedback 误报 */
+    /**
+     * `写入面 = select(a, b)`（a = 保留帧/累积面、b = 被抽帧；整像素选择 + 差分死区）。
+     * 写读不同体（乒乓），画完摘掉采样单元防 feedback 误报。
+     */
     private fun mergeInto(a: Int, b: Int, dstFbo: Int): Boolean {
         if (mergeProgram == 0) return false
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, dstFbo)
@@ -186,6 +202,7 @@ internal class ArcMendPass {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, b)
         if (mergeUA >= 0) GLES20.glUniform1i(mergeUA, MEND_UNIT_A)
         if (mergeUB >= 0) GLES20.glUniform1i(mergeUB, MEND_UNIT_B)
+        if (mergeUDeadband >= 0) GLES20.glUniform1f(mergeUDeadband, deadbandLuma)
         if (mergeUTexMatrix >= 0) GLES20.glUniformMatrix4fv(mergeUTexMatrix, 1, false, identity, 0)
         drawQuad(mergeAPosition, mergeATexCoord)
         unbindUnits()

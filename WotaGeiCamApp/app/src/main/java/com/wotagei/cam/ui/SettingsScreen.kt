@@ -72,6 +72,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.FrostCardTable
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.CurveStack
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.CamPill
@@ -132,9 +133,9 @@ object WotaSettings {
     /**
      * 录制页参数持久化的一套键（用户反馈第 1 条；2026-10-16 用户拍板口径）。
      *
-     * 语义 = **键即启动档位**（上次用过就是下次启动值）：本组 18 键与上面 5 个存量键
+     * 语义 = **键即启动档位**（上次用过就是下次启动值）：本组 19 键与上面 5 个存量键
      * （[KEY_DEFAULT_FPS] / [KEY_DEFAULT_SHUTTER_NS] / [KEY_DEFAULT_BITRATE] /
-     * [KEY_DEFAULT_REF_LINES] / [KEY_LEVEL_ENABLED]）构成入档白名单，见 [ParamsPersist.KEYS]。
+     * [KEY_DEFAULT_REF_LINES] / [KEY_LEVEL_ENABLED]）构成入档白名单（24 项），见 [ParamsPersist.KEYS]。
      *
      * - 恢复侧 [ParamsPersist.restore]（由 [applyDefaults] 末尾调用）读键 → 坏值回默认 → 写总线；
      * - 写入侧 [ParamsPersistSession.flush] 只在用户动作完成点（关弹窗/长按锁 AE/退后台/滑杆松手）
@@ -170,6 +171,12 @@ object WotaSettings {
     const val KEY_DEFAULT_PEAKING_COLOR = "default_peaking_color"
     const val KEY_DEFAULT_LENS = "default_lens"
 
+    /**
+     * 补弧合并差分死区 D（8bit luma 级，0..32，默认 12）：`Δluma > D` 的整颗像素取被抽帧，
+     * 否则保持保留帧。只影响整像素选择，不是绝对亮度阈值；0 = 纯整像素选择（仍不造色）。
+     */
+    const val KEY_DEFAULT_ARC_MERGE_DEADBAND = "default_arc_merge_deadband"
+
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
 
@@ -204,7 +211,7 @@ object WotaSettings {
 
     /**
      * 强制 24/25fps 在无原生精确档设备上的录制期转换模式（2026-10-03 定版）：
-     * `MEND`（默认，抽帧+取大补弧）/ `DROP`（仅抽帧）。只在帧率弹层选中 24/25 且设备无
+     * `MEND`（默认，抽帧+整像素选择补弧）/ `DROP`（仅抽帧）。只在帧率弹层选中 24/25 且设备无
      * 精确档时生效；设备有原生档时该控件不显示、值不参与录制。
      */
     const val KEY_ARC_CONVERT = "arc_convert_mode"
@@ -270,6 +277,11 @@ object WotaSettings {
     fun defaultBitrate(prefs: SharedPreferences) = prefs.getInt(KEY_DEFAULT_BITRATE, 10_000_000)
     fun defaultSampleRate(prefs: SharedPreferences) =
         prefs.getInt(KEY_DEFAULT_SAMPLE_RATE, WotaTiers.DEFAULT_SAMPLE_RATE)
+
+    /** 补弧合并差分死区：缺键默认 12，手改 prefs 的越界值钳回 0..32 */
+    fun arcMergeDeadband(prefs: SharedPreferences): Int =
+        prefs.getInt(KEY_DEFAULT_ARC_MERGE_DEADBAND, ArcMergeDeadband.DEFAULT)
+            .coerceIn(ArcMergeDeadband.MIN, ArcMergeDeadband.MAX)
 
     fun defaultAudioMuted(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DEFAULT_AUDIO_MUTE, false)
 
@@ -384,7 +396,7 @@ object WotaSettings {
      * 直接验「设置页改过默认档 → 参数总线真的跟过去」（#20 的核心命题），
      * 不必等真机杀进程重进。
      *
-     * 末尾接 [ParamsPersist.restore]（用户反馈第 1 条）：把录制页存档的 23 项键一次读回总线
+     * 末尾接 [ParamsPersist.restore]（用户反馈第 1 条）：把录制页存档的 24 项键一次读回总线
      * （上面那批与它重叠的几项幂等）。此即"设置页默认档"与"录制页上次用过的值"合流的那一处——
      * 语义统一为「键即启动档位」。
      */

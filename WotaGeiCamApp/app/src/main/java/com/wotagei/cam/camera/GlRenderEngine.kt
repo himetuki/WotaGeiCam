@@ -17,6 +17,7 @@ import android.os.Process
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.ArcConvertMode
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.ColorCurve
 import com.wotagei.cam.core.CurveStack
 import com.wotagei.cam.core.FrameEffect
@@ -276,8 +277,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** 抽帧/补弧状态机（录制在线路：保留决策走 onClassification） */
     private var arcFlow = ArcRepairFlow(dstFps = 24)
 
-    /** MEND 模式的离屏通道（pending/acc 乒乓 + 取大合并），GL 线程内使用 */
+    /** MEND 模式的离屏通道（pending/acc 乒乓 + 整像素选择），GL 线程内使用 */
     private var arcMendPass: ArcMendPass? = null
+
+    /**
+     * 补弧合并差分死区（0..32，8bit luma 级）。默认吃参数总线发布的只读快照；
+     * [setArcMergeDeadband] 可运行期改档（GL 线程随后下发给 ArcMendPass 的 uniform）。
+     */
+    @Volatile
+    private var wantArcMergeDeadband = ArcMergeDeadband.deadband
 
     /** 被抽帧位次账（GL 线程写、主线程 stop 时快照取走；配对 = 输出位次 to 丢弃数） */
     private val arcDrops = ArrayList<Pair<Int, Int>>()
@@ -600,9 +608,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             arcRule = ArcKeepRule(slotNs = if (arcConvert != null) 1_000_000_000L / dstFps else 0L)
             arcFlow = ArcRepairFlow(dstFps)
             synchronized(arcDropsLock) { arcDrops.clear() }
+            // 每段录制启动读一次参数总线发布的死区快照：持久化值在进录制页时已由 restore 写回。
+            // 运行期 setArcMergeDeadband 只覆盖本段后续的 uniform，下一段重新回到总线口径。
+            wantArcMergeDeadband = ArcMergeDeadband.deadband
             arcMendPass?.release()
             arcMendPass = if (arcConvert == ArcConvertMode.MEND && encoderWidth > 0) {
-                ArcMendPass().also { it.ensure(encoderWidth, encoderHeight) }
+                ArcMendPass().also {
+                    it.setDeadband(wantArcMergeDeadband)
+                    it.ensure(encoderWidth, encoderHeight)
+                }
             } else {
                 null
             }
@@ -751,6 +765,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         wantPeakingStrength = strength.coerceIn(0f, 1f)
         wantPeakingColor = color
         requestRender()
+    }
+
+    /**
+     * 补弧合并差分死区 D（0..32，8bit luma 级）：`Δluma > D` 时整颗像素取被抽帧，否则保持保留帧。
+     * 只动补弧合并的 uniform，不碰打戳/帧率/抽帧节奏。显式改档只在本段录制有效；
+     * 下一段 `setArcConvert` 会重新读参数总线发布的持久化口径（真源仍在 [WotaParams]）。
+     */
+    fun setArcMergeDeadband(deadband: Int) {
+        if (released.get()) return
+        val clamped = ArcMergeDeadband.clamp(deadband)
+        wantArcMergeDeadband = clamped
+        postGl {
+            arcMendPass?.setDeadband(clamped)
+            Log.i(TAG_GL, "arcMergeDeadband=$clamped")
+        }
     }
 
     /**

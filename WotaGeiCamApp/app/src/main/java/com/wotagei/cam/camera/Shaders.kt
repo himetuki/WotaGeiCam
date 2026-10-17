@@ -88,31 +88,37 @@ internal object Shaders {
     // region 光弧修复（用户需求第 7 项：v2 抽帧+补弧，不改任何既有 pass）
 
     /**
-     * 取大合并（max-merge）片元：`out = max(a, b)`，在 **RGB 逐通道**上取大（不是半透明/加权混合）。
+     * 补弧**整像素选择**片元（2026-10-17 定版）：
+     * `Δluma = luma(b) − luma(a)`；`Δluma > uDeadbandLuma` 时整颗像素取 `b`，否则取 `a`。
      *
-     * - v2 口径（用户 2026-10-03 定版）：光弧修复是**抽帧+补弧**，不再有插帧混合——被抽帧的
-     *   画面以取大并进前后保留帧。光弧是暗场上的加性亮线，取大即无损伤并集：被抽帧独有的
-     *   弧段在两邻帧上都以**原亮度**重现，弧在抽帧点上不断裂；v1 的 0.5 cross-fade 会把弧
-     *   拆成两道半亮重影（原帧/混合帧逐帧交替＝用户看到的"来回闪动"），已废弃。
-     * - **口径（颜色域，2026-10-17 订正）**：本条在 **RGB 逐通道**取大；CPU 路
-     *   （`ArcRepairMerge.mergeMax`，按 Y/U/V 逐平面传入）在 **YUV 逐平面**取大。两者是
-     *   **同语义、不同颜色空间**，并非"同口径"——灰白弧（中性色度 U≈V≈128）下等值；彩色内容
-     *   下 RGB 逐通道取大与 YUV 逐平面取大**不等价**（同一层空间内取大不可跨空间交换）。
-     *   对应并列对账测试见 `ArcRepairMergeParityTest`。
-     * - 两个输入都是**普通 2D 纹理**（OES 帧先经拷贝趟落到 2D），所以不再需要 OES 扩展声明；
-     *   取样单元 **0 = uA、1 = uB**（宿主 ArcRepairGl 同一份常量），写入目标是第三枚 FBO
-     *   （乒乓），读写不同体、无 feedback loop。
+     * - **不造色的唯一保证是整像素搬运**：输出的 RGB 三元组必须整体来自 `a` 或整体来自 `b`，
+     *   绝不做逐通道 `max`/加权混合。逐通道取大会把两个不同色相拼成原片没有的颜色
+     *   （实测：极橙 (255,140,0) 与黑合并 → 珊瑚粉 (255,109,158)，蓝通道凭空 +158）；
+     *   这条缺陷在 CPU 路的 YUV 逐平面取大上真机像素验证过，GPU 路同族，一起改。
+     * - **死区 `uDeadbandLuma` 是差分阈值**（`D/255.0`，D 默认 12、钳 0..32），不是"多亮才算弧"
+     *   的绝对亮度阈值：相同亮度的地面/人体受光不叠加，只有真正新增的光才改变像素。
+     *   `D=0` 退化为纯整像素选择，仍不造色。
+     * - v2 抽帧+补弧语义不变：被抽帧独有的弧段在两邻帧上重现，弧不在抽帧点断裂；
+     *   v1 的 0.5 cross-fade 会把弧拆成两道半亮重影（原帧/混合帧逐帧交替＝用户看到的
+     *   "来回闪动"），已废弃。
+     * - 两个输入都是**普通 2D 纹理**（OES 帧先经拷贝趟落到 2D），所以不需要 OES 扩展声明；
+     *   取样单元 **0 = uA（保留帧/累积面）、1 = uB（被抽帧）**（宿主 ArcMendPass/ArcRepairGl
+     *   同一份常量），写入目标是乒乓的另一面，读写不同体、无 feedback loop。
      * - 强制不透明：与 [PASS_THROUGH_FS] 同一个理由——HAL/解码器给 alpha=0 时会读出半透明。
+     *   **`alpha = 1.0` 是载重不变量**，`ArcRepairMergeParityTest` 的源扫描钉着。
      */
     val ARC_MERGE_FS = """
         precision mediump float;
         varying vec2 vUv;
         uniform sampler2D uA;
         uniform sampler2D uB;
+        uniform float uDeadbandLuma;
         void main() {
             vec3 a = texture2D(uA, vUv).rgb;
             vec3 b = texture2D(uB, vUv).rgb;
-            gl_FragColor = vec4(max(a, b), 1.0);
+            float la = dot(a, vec3(0.299, 0.587, 0.114));
+            float lb = dot(b, vec3(0.299, 0.587, 0.114));
+            gl_FragColor = vec4((lb - la) > uDeadbandLuma ? b : a, 1.0);
         }
     """.trimIndent()
 

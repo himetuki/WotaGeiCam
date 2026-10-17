@@ -16,12 +16,13 @@ import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
+import com.wotagei.cam.core.ArcMergeDeadband
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 private const val TAG_ARC_GL = "WotaArcRepairGl"
 
-/** 取样单元：0/1 = 取大合并的两路输入；与 `Shaders.ARC_MERGE_FS` 的注释同源。 */
+/** 取样单元：0 = 保留帧/累积面（a），1 = 被抽帧（b）；与 `Shaders.ARC_MERGE_FS` 同一口径。 */
 private const val ARC_UNIT_A = 0
 private const val ARC_UNIT_B = 1
 
@@ -47,9 +48,10 @@ private const val FRAME_WAIT_MS = 2_000L
  * - `cur`：解码帧的 2D 拷贝（OES → 2D 拷贝趟，拓扑与 `camera/FrostBlurChain` 一致）；
  * - `pending` A/B 乒乓：**待发保留帧**——决策权在 [ArcRepairFlow]（runner 侧），本引擎只认
  *   指令原语：留（hold/merge）、并（fold/accumulate）、发（emit）；
- * - `acc` A/B 乒乓：**补弧累积面**——连续多枚被抽帧先在 acc 里逐枚取大，再一并并进前后帧。
- * - 全部合并走 [Shaders.ARC_MERGE_FS]（`max(a,b)`）；2D→2D 趟用恒等纹理矩阵，只有 OES 拷贝趟
- *   带 SurfaceTexture 的 `stMatrix`。
+ * - `acc` A/B 乒乓：**补弧累积面**——连续多枚被抽帧先在 acc 里按同一规则整像素选择，
+ *   再一并并进前后帧。
+ * - 全部合并走 [Shaders.ARC_MERGE_FS]（整像素选择 + 差分死区，`a` = 保留帧/累积面、
+ *   `b` = 被抽帧）；2D→2D 趟用恒等纹理矩阵，只有 OES 拷贝趟带 SurfaceTexture 的 `stMatrix`。
  * - 直通画笔两条：OES 版（PASS_THROUGH_FS）只采解码帧，2D 版（PASS_THROUGH_2D_FS）采
  *   cur/pend/acc——采样器类型必须与纹理目标一致，混用一条 program 在真机上恒黑
  *   （2026-10-05 全程黑屏缺陷，守卫 ArcRepairGlSamplerGuardTest 钉死）。
@@ -62,8 +64,12 @@ private const val FRAME_WAIT_MS = 2_000L
 internal class ArcRepairGl(
     private val widthPx: Int,
     private val heightPx: Int,
-    private val basePtsNs: Long = 0L
+    private val basePtsNs: Long = 0L,
+    deadband: Int = ArcMergeDeadband.deadband
 ) {
+
+    /** 差分死区归一值（`D/255.0`），离线会话内恒定：uniform 在每次合并绘制时下发 */
+    private val deadbandLuma = ArcMergeDeadband.luma(deadband)
 
     private val thread = HandlerThread("WotaArcRepairGl").apply { start() }
     private val handler = Handler(thread.looper)
@@ -123,6 +129,7 @@ internal class ArcRepairGl(
     private var mergeUTexMatrix = -1
     private var mergeUA = -1
     private var mergeUB = -1
+    private var mergeUDeadband = -1
 
     private var texture: SurfaceTexture? = null
 
@@ -206,18 +213,19 @@ internal class ArcRepairGl(
 
     /**
      * 处理被抽帧：[fresh] = true 时 acc 整帧换成本帧（清掉上一轮残留的复用内容），
-     * false 时 acc = max(acc, cur) 继续累积。乒乓读写不同体。
+     * false 时 acc = select(acc, cur) 继续累积（a = acc、b = cur）。乒乓读写不同体。
      */
     fun accumulate(fresh: Boolean): Boolean = postAndWait(OP_WAIT_MS) {
         if (fresh) {
             copyIntoAcc(curTex, identityMatrix)
         } else {
-            mergeOnGl(curTex, accTex[accIdx], accFbo[1 - accIdx])
+            // 参数顺序是语义的一部分：a 必须是已有累积面，差分方向才是 acc→cur
+            mergeOnGl(accTex[accIdx], curTex, accFbo[1 - accIdx])
                 .also { if (it) accIdx = 1 - accIdx }
         }
     }
 
-    /** pending = max(pending, acc)：累积补弧并进**前**保留帧 */
+    /** pending = select(pending, acc)：累积补弧并进**前**保留帧 */
     fun foldAccIntoPending(): Boolean = postAndWait(OP_WAIT_MS) {
         mergeOnGl(pendTex[pendIdx], accTex[accIdx], pendFbo[1 - pendIdx])
             .also { if (it) pendIdx = 1 - pendIdx }
@@ -228,7 +236,7 @@ internal class ArcRepairGl(
         copyToPending(curTex, identityMatrix)
     }
 
-    /** pending = max(cur, acc)（[useAcc] = false 时即 pending = cur）：后保留帧带弧升级待发 */
+    /** pending = select(cur, acc)（[useAcc] = false 时即 pending = cur）：后保留帧带弧升级待发 */
     fun mergeCurAsPending(useAcc: Boolean): Boolean = postAndWait(OP_WAIT_MS) {
         if (!useAcc) {
             copyToPending(curTex, identityMatrix)
@@ -498,6 +506,7 @@ internal class ArcRepairGl(
         mergeUTexMatrix = GLES20.glGetUniformLocation(mergeProgram, "uTexMatrix")
         mergeUA = GLES20.glGetUniformLocation(mergeProgram, "uA")
         mergeUB = GLES20.glGetUniformLocation(mergeProgram, "uB")
+        mergeUDeadband = GLES20.glGetUniformLocation(mergeProgram, "uDeadbandLuma")
         drainGlError("arcBuildPrograms")
         return true
     }
@@ -563,7 +572,8 @@ internal class ArcRepairGl(
     }
 
     /**
-     * 取大合并：`写入面 = max(texA, texB)`。写入目标是乒乓的另一面，读写不同体；
+     * 补弧整像素选择：`写入面 = select(texA, texB)`（texA = 保留帧/累积面，texB = 被抽帧；
+     * 差分死区 uniform 每次绘制下发）。写入目标是乒乓的另一面，读写不同体；
      * 画完立即摘掉两个采样单元的绑定——某些驱动只查"纹理还挂在激活单元上"就当
      * feedback loop 报警（与 FrostBlurChain.restoreState 那条保险同一条理由）。
      */
@@ -579,6 +589,7 @@ internal class ArcRepairGl(
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB)
         if (mergeUA >= 0) GLES20.glUniform1i(mergeUA, ARC_UNIT_A)
         if (mergeUB >= 0) GLES20.glUniform1i(mergeUB, ARC_UNIT_B)
+        if (mergeUDeadband >= 0) GLES20.glUniform1f(mergeUDeadband, deadbandLuma)
         if (mergeUTexMatrix >= 0) GLES20.glUniformMatrix4fv(mergeUTexMatrix, 1, false, identityMatrix, 0)
         drawQuad(mergeAPosition, mergeATexCoord)
         unbindUnits()

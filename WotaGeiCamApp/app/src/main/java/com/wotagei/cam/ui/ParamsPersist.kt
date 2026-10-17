@@ -2,6 +2,7 @@ package com.wotagei.cam.ui
 
 import android.content.SharedPreferences
 import com.wotagei.cam.core.AeMode
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
@@ -18,9 +19,9 @@ import com.wotagei.cam.core.WotaTiers
  * 「只要在录制页改的设置都要做持久化，不随后台清理而回归默认」。
  *
  * 语义 = **键即启动档位**（上次用过就是下次启动值）——与设置页默认档共用同一套键，
- * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 18 个新键与
+ * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 19 个新键与
  * 5 个存量键（`default_fps`/`default_shutter_ns`/`default_bitrate`/`default_ref_lines`/
- * `level_enabled`）共同构成入档白名单 [KEYS]（23 项）。
+ * `level_enabled`）共同构成入档白名单 [KEYS]（24 项）。
  *
  * 两条链：
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
@@ -63,7 +64,8 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_ZEBRA_DENSITY,
         WotaSettings.KEY_DEFAULT_PEAKING_STRENGTH,
         WotaSettings.KEY_DEFAULT_PEAKING_COLOR,
-        WotaSettings.KEY_DEFAULT_LENS
+        WotaSettings.KEY_DEFAULT_LENS,
+        WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND
     )
 
     /**
@@ -125,6 +127,10 @@ object ParamsPersist {
         params.peakingColor.value = enumOrDefault(prefs, WotaSettings.KEY_DEFAULT_PEAKING_COLOR, PeakingColor.RED)
         // ⑮ 镜头：按 LensType 名落档；找不到该档时 CameraController.pickSlot 已兜底退 WIDE
         params.lens.value = enumOrDefault(prefs, WotaSettings.KEY_DEFAULT_LENS, LensType.WIDE)
+        // ⑯ 补弧差分死区：走总线 setter（同步发布给 GL/离线修复的只读快照），坏值/越界钳回 0..32
+        params.setArcMergeDeadband(
+            prefs.getInt(WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND, ArcMergeDeadband.DEFAULT)
+        )
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -188,6 +194,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shPeakS = params.peakingStrength.value
     private var shPeakC = params.peakingColor.value
     private var shLens = params.lens.value
+    private var shArcDeadband = params.arcMergeDeadband.value
     private var shBitrate = params.bitrate.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
@@ -214,6 +221,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val peakS = params.peakingStrength.value
         val peakC = params.peakingColor.value
         val lens = params.lens.value
+        val arcDeadband = params.arcMergeDeadband.value
         val bitrate = params.bitrate.value
         val refLines = params.refLines.value
         val level = params.levelEnabled.value
@@ -243,6 +251,9 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (peakS != shPeakS) { editor.putFloat(WotaSettings.KEY_DEFAULT_PEAKING_STRENGTH, peakS); dirty = true }
         if (peakC != shPeakC) { editor.putString(WotaSettings.KEY_DEFAULT_PEAKING_COLOR, peakC.name); dirty = true }
         if (lens != shLens) { editor.putString(WotaSettings.KEY_DEFAULT_LENS, lens.name); dirty = true }
+        if (arcDeadband != shArcDeadband) {
+            editor.putInt(WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND, arcDeadband); dirty = true
+        }
 
         if (!dirty) return true
         val ok = editor.commit()
@@ -268,6 +279,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shPeakS = peakS
             shPeakC = peakC
             shLens = lens
+            shArcDeadband = arcDeadband
             shBitrate = bitrate
             shRefLines = refLines
             shLevel = level
