@@ -132,6 +132,16 @@ class CodecRecorder(
         internal const val CAP_SAMPLE_WAIT_MS = 1_500L
 
         /**
+         * 起录缓冲的**字节上限**（2026-10-17）：muxer 启动前已编码的视频样本先复制进
+         * [PreMuxVideoBuffer]，容器可写后按 PTS 补写，不再直接丢。
+         *
+         * 量级依据：最长等待窗 = [CAP_SAMPLE_WAIT_MS] 1.5s；本工程自动码率最高档 4K/60 为
+         * 64Mbps ⇒ 1.5s ≈ 12MB，关键帧峰值再留一倍余量 ⇒ 32MiB。固定上限而不是按堆比例，
+         * 是为了让"最多占多少内存"在代码里可一眼读出（任何设备都不会超过 32MiB）。
+         */
+        internal const val PRE_MUX_BUFFER_MAX_BYTES = 32L * 1024L * 1024L
+
+        /**
          * 内录样本等待窗的一拍推进（纯函数，"计划→行为"桥：起窗/清窗/窗满三态各有真实语义）。
          * @param waitStartMs 窗起点（0 = 未起窗），elapsedRealtime 域
          * @param nowMs       本拍时刻，elapsedRealtime 域
@@ -387,6 +397,15 @@ class CodecRecorder(
     /** 当前段已写视频样本数（纯内存计数，不碰任何 I/O 时序）；段闭时落进 [segSampleCounts] 并归零 */
     private var segVideoWritten = 0
 
+    /** 起录缓冲（muxer 启动前已编码视频样本；段内生命周期，见 [PRE_MUX_BUFFER_MAX_BYTES]） */
+    private var preMuxBuffer: PreMuxVideoBuffer? = null
+
+    /** 本段起录缓冲**成功补写**进 muxer 的视频样本数（段尾帧账「起录补写」） */
+    private var preMuxBuffered = 0L
+
+    /** 本段起录缓冲的**丢失**样本数（溢出淘汰 + 缓冲释放时仍未补写；段尾帧账「起录丢弃」） */
+    private var preMuxDropped = 0L
+
     /**
      * 当前段已写 muxer 字节数（段内累加，泵线程单写者；[health] 今天只在控制线程读它，故 @Volatile
      * 是防御未来把自检挪出该线程的零成本保险）。
@@ -563,6 +582,9 @@ class CodecRecorder(
         partStartMs = 0L
         segVideoWritten = 0
         segWrittenBytes = 0L
+        preMuxBuffer = null
+        preMuxBuffered = 0L
+        preMuxDropped = 0L
         muxFinalized = false
         segHadVideoSample = false
         segSampleCounts.clear()
@@ -1133,6 +1155,8 @@ class CodecRecorder(
         partStartMs = 0L
         segVideoWritten = 0
         segWrittenBytes = 0L
+        preMuxBuffer?.clear()
+        preMuxBuffer = null
         muxFinalized = false
         segHadVideoSample = false
         segSampleCounts.clear()
@@ -1690,8 +1714,11 @@ class CodecRecorder(
         // 帧账基线：本段只结算"从 runSegment 起走到段尾"的增量（跨组件计数器是单调的，
         // 段首段尾各取一次快照；快照非事务，只作观测）
         val frameBase = FrameLedger.snapshot()
-        // 起录丢弃（第 1 笔口径）：muxer 启动前已编码、但容器还不可写而被 release 的视频样本数
-        var preMuxDropped = 0L
+        // 起录缓冲（第 2 笔）：muxer 启动前编码器吐出的视频样本先复制进来，容器可写后补写。
+        // 旧实现此处直接 release 丢样本（见 PreMuxVideoBuffer 类注）
+        preMuxBuffer = PreMuxVideoBuffer(PRE_MUX_BUFFER_MAX_BYTES)
+        preMuxBuffered = 0L
+        preMuxDropped = 0L
 
         while (true) {
             // 本段请求重建（新段首笔就写不进 muxer，见 writeSample）：立刻收口，**不置错误码**，
@@ -1699,6 +1726,12 @@ class CodecRecorder(
             if (segmentRestartRequested) {
                 Log.e(TAG, "本段按重建收口（muxer 首笔写不进），part=$partIndex")
                 return false
+            }
+            // 起录补写（第 2 笔）：muxer 启动后先把"启动前已编码"的旧样本按 PTS 补写，再处理新样本。
+            // 补写失败由 writeSample 走既有重建/失败通路；缓冲为空时只做一次空读，不分配
+            if (muxStarted && preMuxBuffer?.size != 0) {
+                val lastFlushedPts = flushPreMuxSamples(mx, videoTrack)
+                if (lastFlushedPts > 0L) vPtsLastUs = lastFlushedPts
             }
             // 【暂存首样本补写必须排在"新样本直写"之前】换段后头几拍里，先到的音频输出缓冲
             // 会因"轨未 add / muxer 未 start"被暂存（heldOutIdx），等门开了再写回。原实现把补写
@@ -1796,21 +1829,40 @@ class CodecRecorder(
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     idx >= 0 -> {
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        if (muxStarted && !eos && bi.size > 0) {
-                            // 位次账只认视频帧：写成功才计数（writeSample 失败返回 0），音频轨不入账
-                            val wrote = writeSample(mx, TRACK_VIDEO, videoTrack, v.getOutputBuffer(idx), bi)
-                            segWrittenBytes += wrote
-                            if (wrote > 0) segVideoWritten++
-                            // 自检第三格：首个视频样本真写进 muxer（writeSample 失败返回 0，不计）
-                            if (wrote > 0) healthFirstVideoSample = true
-                            // 容器收尾判据的另一半（见 [segmentKeepDecision] 的 containerFinalized）：
-                            // 与 muxFinalized 合成"容器已确认收尾"，只能由写成功置位
-                            if (wrote > 0) segHadVideoSample = true
-                            vPtsLastUs = bi.presentationTimeUs
-                        } else if (!muxStarted && !eos && bi.size > 0) {
-                            // 帧账（纯观测）：muxer 启动前编码器已经吐出的视频样本只能 release。
-                            // 第 2 笔会把这里换成有界缓冲（起录补写），当前先如实计数，别让它继续隐形
-                            preMuxDropped++
+                        if (!eos && bi.size > 0) {
+                            if (muxStarted) {
+                                // 本拍容器刚启动（同拍更早的 startMuxerIfReady）：旧样本必须先补写，
+                                // 再写当前这枚较新的样本（同一轨 PTS 保序）
+                                if (preMuxBuffer?.size != 0) {
+                                    // 返回值不在这里回填 vPtsLastUs：本拍随后会写当前样本并覆盖它
+                                    flushPreMuxSamples(mx, videoTrack)
+                                }
+                                // 位次账只认视频帧：写成功才计数（writeSample 失败返回 0），音频轨不入账
+                                val wrote = writeSample(mx, TRACK_VIDEO, videoTrack, v.getOutputBuffer(idx), bi)
+                                segWrittenBytes += wrote
+                                if (wrote > 0) segVideoWritten++
+                                // 自检第三格：首个视频样本真写进 muxer（writeSample 失败返回 0，不计）
+                                if (wrote > 0) healthFirstVideoSample = true
+                                // 容器收尾判据的另一半（见 [segmentKeepDecision] 的 containerFinalized）：
+                                // 与 muxFinalized 合成"容器已确认收尾"，只能由写成功置位
+                                if (wrote > 0) segHadVideoSample = true
+                                vPtsLastUs = bi.presentationTimeUs
+                            } else {
+                                // muxer 尚未启动：把已编码样本复制进有界缓冲，容器可写后按 PTS 补写。
+                                // 复制是必要的——MediaCodec 的 output buffer release 后内容失效
+                                val src = v.getOutputBuffer(idx)
+                                if (src == null) {
+                                    preMuxDropped++
+                                } else {
+                                    val copy = ByteArray(bi.size)
+                                    src.position(bi.offset)
+                                    src.get(copy, 0, bi.size)
+                                    val evicted = preMuxBuffer?.offer(
+                                        PreMuxVideoBuffer.Sample(bi.presentationTimeUs, bi.flags, copy)
+                                    ) ?: 1L
+                                    preMuxDropped += evicted
+                                }
+                            }
                         }
                         v.releaseOutputBuffer(idx, false)
                         if (eos) videoDone = true
@@ -2005,7 +2057,14 @@ class CodecRecorder(
                 if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)
                 if (c != null && capCh != null && !capCh.eosQueued) queueAudioEos(c, capCh)
             }
-            if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true)) break
+            if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true)) {
+                // 收尾前最后一笔补写：muxer 刚启动就赶上视频 EOS 时，上一拍顶部还没轮到补写
+                if (muxStarted && preMuxBuffer?.size != 0) {
+                    val lastFlushedPts = flushPreMuxSamples(mx, videoTrack)
+                    if (lastFlushedPts > 0L) vPtsLastUs = lastFlushedPts
+                }
+                break
+            }
             if (drainTimedOut) {
                 Log.e(TAG, "drain timeout video=$videoDone env=${envCh?.done ?: "off"} cap=${capCh?.done ?: "off"}")
                 engineError = engineError ?: "${RecordError.ENGINE_ERROR}:DRAIN"
@@ -2062,6 +2121,17 @@ class CodecRecorder(
         // 帧账独立一行（2026-10-17）：回答"相机给了多少 → GL 收/合了多少 → 提交编码器多少 →
         // 写进 muxer 多少 → 有意抽帧多少 → 起录/换段丢多少"。不并入上面两行（向后可读），
         // 同时进诊断导出的结构化段（Diag.frameAccount，独立于日志总开关，见该函数 KDoc）
+        // 段尾兜底：抽干超时等 break 出口可能错过顶部补写；容器已启动就再补一次，未启动则
+        // 把仍在缓冲里的样本计入丢失（它们已离开编码器，不能静默消失）
+        if (muxStarted && preMuxBuffer?.size != 0) {
+            // 上面那段日志已经读过 vPtsLastUs，这里补写只为把样本落进容器
+            flushPreMuxSamples(mx, videoTrack)
+        }
+        val preMuxLeft = preMuxBuffer?.clear() ?: 0
+        if (preMuxLeft > 0) {
+            preMuxDropped += preMuxLeft
+            Log.w(TAG, "起录缓冲段尾未补写：part=$partIndex 丢弃 $preMuxLeft 笔（muxStarted=$muxStarted）")
+        }
         val frameEnd = FrameLedger.snapshot()
         val ledgerLine = frameLedgerLine(
             FrameLedgerReport(
@@ -2074,7 +2144,7 @@ class CodecRecorder(
                 encoderSwaps = (frameEnd.encoderSwapOk - frameBase.encoderSwapOk).coerceAtLeast(0L),
                 swapFails = (frameEnd.encoderSwapFail - frameBase.encoderSwapFail).coerceAtLeast(0L),
                 muxSamples = segVideoWritten.toLong(),
-                preMuxBuffered = 0L,
+                preMuxBuffered = preMuxBuffered,
                 preMuxDropped = preMuxDropped,
                 arcDrops = (frameEnd.arcDropped - frameBase.arcDropped).coerceAtLeast(0L),
                 rotateLostMs = currentSegLostMs,
@@ -2084,6 +2154,45 @@ class CodecRecorder(
         Log.i(TAG, ledgerLine)
         Log.frameAccount(ledgerLine)
         return true
+    }
+
+    /**
+     * 把起录缓冲里的样本按 PTS 补写进 muxer（第 2 笔）。返回最后一枚**写成功**样本的原始
+     * PTS（与 `vPtsLastUs` 同域；0 = 没写成任何一枚）。
+     *
+     * 排序由 [PreMuxVideoBuffer.drainPtsOrdered] 保证（乱序输入也按 PTS 升序写出）；
+     * 同 PTS 的推进由 [writeSample] 的既有逐轨单调兜底处理。写失败/本段被要求重建时，
+     * 未写出的样本计入 [preMuxDropped]——它们已经离开编码器，不补写就是永久丢失。
+     */
+    private fun flushPreMuxSamples(mx: MediaMuxer, track: Int): Long {
+        val buf = preMuxBuffer ?: return 0L
+        val pending = buf.drainPtsOrdered()
+        if (pending.isEmpty()) return 0L
+        val info = MediaCodec.BufferInfo()
+        var lastPts = 0L
+        var written = 0
+        for (i in pending.indices) {
+            if (segmentRestartRequested) {
+                preMuxDropped += (pending.size - i).toLong()
+                break
+            }
+            val sample = pending[i]
+            info.set(0, sample.bytes.size, sample.ptsUs, sample.flags)
+            val wrote = writeSample(mx, TRACK_VIDEO, track, ByteBuffer.wrap(sample.bytes), info)
+            segWrittenBytes += wrote
+            if (wrote > 0) {
+                segVideoWritten++
+                preMuxBuffered++
+                healthFirstVideoSample = true
+                segHadVideoSample = true
+                lastPts = sample.ptsUs
+                written++
+            } else {
+                preMuxDropped++
+            }
+        }
+        if (written > 0) Log.d(TAG, "起录补写 part=$partIndex 写出=$written 丢弃=$preMuxDropped")
+        return lastPts
     }
 
     /**
@@ -2314,6 +2423,16 @@ class CodecRecorder(
 
     /** 固定停止顺序（04 文件 §3）：codec.stop/release → muxer.stop/release */
     private fun closeSegmentEngine() {
+        // 起录缓冲随段释放：正常段尾已补写/清空；异常路径（runSegment 早退、muxer 始终没起来）
+        // 里剩下的样本在这里计入丢失，保证"已编码却未入库"的帧有账可查，也避免跨段残留
+        preMuxBuffer?.let { buf ->
+            val left = buf.clear()
+            if (left > 0) {
+                preMuxDropped += left
+                Log.w(TAG, "起录缓冲随段释放：part=$partIndex 丢弃 $left 笔")
+            }
+        }
+        preMuxBuffer = null
         val v = vCodec
         if (v != null) {
             try {

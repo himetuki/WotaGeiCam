@@ -92,9 +92,15 @@ class DegradedKeepGuardTest {
             "segHadVideoSample 只能由视频样本写成功（wrote > 0）置位——无条件置位会把零样本段放行",
             seg.contains("if (wrote > 0) segHadVideoSample = true")
         )
+        // 第 2 笔起录补写（flushPreMuxSamples）也写视频样本，是第二个合法置真点：
+        // 它同样必须被 wrote > 0 包住，且整份源码只允许这两处
+        val flush = codecBody("flushPreMuxSamples")
+        val guardAt = flush.indexOf("if (wrote > 0)")
+        val setAt = flush.indexOf("segHadVideoSample = true")
+        assertTrue("补写路径必须写样本成功才置位", guardAt >= 0 && setAt > guardAt)
         assertEquals(
-            "置真点必须唯一",
-            1,
+            "置真点必须唯一（runSegment 直写 + flushPreMuxSamples 补写各一处）",
+            2,
             occurrences(codecMasked(), "segHadVideoSample = true").size
         )
         assertTrue("段起始必须复位（逐段信号）", seg.contains("segHadVideoSample = false"))
