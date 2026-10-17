@@ -92,7 +92,6 @@
     <!-- 镜头面板 -->
     <string name="cam_lens_tip">等效焦距与视场角按本机 characteristics 现算</string>
     <string name="cam_lens_empty">没有可用镜头</string>
-    <string name="cam_lens_only_one">本机只有一颗镜头，无从切换</string>
     <string name="cam_lens_using">正在使用</string>
     <string name="cam_lens_fov">等效 %1$s mm · 水平视场角 %2$s°</string>
     <string name="cam_lens_fov_only">等效 %1$s mm</string>
