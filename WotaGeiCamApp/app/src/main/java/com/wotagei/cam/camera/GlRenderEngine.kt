@@ -25,6 +25,7 @@ import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
 import com.wotagei.cam.record.ArcRepairFlow
+import com.wotagei.cam.record.FrameLedger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -907,6 +908,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     /** 相机帧到达（构造 SurfaceTexture 时已把回调 handler 设为 GL 线程） */
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
         if (released.get()) return
+        // 帧账：回调数与 newFrames 同点自增（newFrames 语义不变；两枚都在 GL 线程写）
+        FrameLedger.onGlCallback()
         newFrames++
         scheduleDraw()
     }
@@ -1122,7 +1125,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     }
 
     private fun swap(surface: EGLSurface): Boolean {
-        if (EGL14.eglSwapBuffers(eglDisplay, surface)) return true
+        // 只给编码面记账：窗口/pbuffer 的 swap 不属于"提交编码器"这一级
+        val encoder = surface === encoderEglSurface
+        if (EGL14.eglSwapBuffers(eglDisplay, surface)) {
+            if (encoder) FrameLedger.onEncoderSwap(true)
+            return true
+        }
+        if (encoder) FrameLedger.onEncoderSwap(false)
         Log.w(TAG_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
         return false
     }
@@ -1294,9 +1303,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         var skip = false
         if (arcConvert != null) {
             if (hasFrame) {
+                // 保留判定只算一次；帧账的"有意抽帧"与 DROP/MEND 共用同一枚判定结果
+                // （不得把计数反过来参与 skip/PTS：见 stampEncoderPresentation 的源码守卫）
+                val keepFrame = arcRule.onFrame(lastDrawnTimestampNs)
+                if (!keepFrame) FrameLedger.onArcDrop()
                 when (arcConvert) {
-                    ArcConvertMode.DROP -> skip = !arcRule.onFrame(lastDrawnTimestampNs)
-                    ArcConvertMode.MEND -> skip = !drawEncoderMended(arcRule.onFrame(lastDrawnTimestampNs))
+                    ArcConvertMode.DROP -> skip = !keepFrame
+                    ArcConvertMode.MEND -> skip = !drawEncoderMended(keepFrame)
                     else -> Unit
                 }
                 noteArcFrame(lastDrawnTimestampNs)
@@ -1706,6 +1719,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val st = inputTexture ?: return false
         return try {
             st.updateTexImage()
+            FrameLedger.onGlConsumed()
             st.getTransformMatrix(stMatrix)
             // 矩阵自带的旋转分量决定「抵消多少」，变了就必须重算两路纹理坐标（真机首帧才拿得到矩阵）
             if (orientation.setStMatrix(stMatrix)) {

@@ -30,6 +30,7 @@ import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.record.FrameLedger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -708,7 +709,7 @@ class Camera2Engine(
             val request = builder.build()
             val hs = highSpeedSession
             val normal = session
-            if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), null, workHandler)
+            if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
             else normal?.setRepeatingRequest(request, captureCallback, workHandler)
         } catch (e: CameraAccessException) {
             Log.w(TAG, "repeating 下发失败：${paramSnapshot()}", e)
@@ -749,8 +750,37 @@ class Camera2Engine(
         }
     }
 
+    /**
+     * 高速会话的帧计数回调（2026-10-17 帧账）：高速路原先传 `null` 回调，若直接复用
+     * [captureCallback] 会把「手动白平衡 500ms 保活」带进高速路（行为变更）。这里只做
+     * `onCaptureStarted` 自增，其余一概不碰，保证既有 request/callback 语义逐字不变。
+     */
+    private val frameCountCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureStarted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            timestamp: Long,
+            frameNumber: Long
+        ) {
+            FrameLedger.onCameraStarted()
+        }
+    }
+
     /** 手动色温需周期重发维持，按 500ms 节流（单调钟，见下） */
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        /**
+         * 相机帧到达计数（2026-10-17 帧账）：**只自增一枚原子计数**，不读参数、不重发请求、
+         * 不改任何回调语义。单发请求不带本回调（见 [singleCapture]），不会混进手动 AF 的额外帧。
+         */
+        override fun onCaptureStarted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            timestamp: Long,
+            frameNumber: Long
+        ) {
+            FrameLedger.onCameraStarted()
+        }
+
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
             request: CaptureRequest,
