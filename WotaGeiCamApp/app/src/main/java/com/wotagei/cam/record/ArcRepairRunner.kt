@@ -114,6 +114,16 @@ fun arcRepairOk(muxStarted: Boolean, videoTrackAdded: Boolean, writtenVideoSampl
     muxStarted && videoTrackAdded && writtenVideoSamples > 0
 
 /**
+ * 修复产物"可保留"的最终判据：写样本成功（[ok]）**且** `MediaMuxer.stop()` 正常返回。
+ *
+ * 为什么 stop 必须单列一格：`stop()` 是写 moov 的步骤；它抛异常时文件通常只有 ftyp 头。
+ * 旧 `finish` 把 stop 异常吞成一行日志，随后仍 `seal(keep = ok)` 把坏容器 commit 进相册并报成功
+ * ——与 CodecRecorder 把 stop 失败当 `MUX_CLOSE` 独立信号的做法相反。零样本音轨、盘满等都会
+ * 让 stop 抛（见 [arcRepairOk] 的零样本说明），这条判据把"容器没封口"从成功里剔出去。
+ */
+internal fun arcRepairKeep(ok: Boolean, muxStopOk: Boolean): Boolean = ok && muxStopOk
+
+/**
  * 光弧修复的**后台执行器**（用户需求第 7 项）：把一段视频处理成"插帧后"的新文件并入库。
  *
  * 形态克隆自 `ui/CameraScreen.kt` 的 `RecordRunner`：自己的 `HandlerThread` + 若干
@@ -133,6 +143,15 @@ class ArcRepairRunner(private val ctx: Context) {
     /** 同一时刻只允许一个任务（管线本身占满这条线程） */
     @Volatile
     private var busy = false
+
+    /**
+     * 页面已离开、任务跑完后自行退线程。**不取消**正在跑的任务（用户已发起的修复要让它写完），
+     * 只把"线程何时退"从"必须有人再次调 shutdown()"改成"任务收尾时自己退"。
+     * 旧实现里 RUNNING 时 onDispose 跳过 shutdown()，任务结束后没有任何 quitSafely 调用，
+     * 每次"运行中离开播放页"都会永久多一条 WotaArcRepair 线程。
+     */
+    @Volatile
+    private var quitAfterTask = false
 
     val status = MutableStateFlow(ArcRepairStatus.IDLE)
     val progress = MutableStateFlow(0f)
@@ -181,6 +200,9 @@ class ArcRepairRunner(private val ctx: Context) {
             status.value = if (out.ok) ArcRepairStatus.DONE else ArcRepairStatus.FAILED
             progress.value = if (out.ok) 1f else progress.value
             Log.i(TAG_ARC, "任务结束 ok=${out.ok} err=${out.error} uri=${out.uri} note=${out.note}")
+            // 页面已离开：结果已写回 StateFlow，本线程没有后续任务，收尾后自行退出。
+            // 从 handler 线程调用 quitSafely() 是合法的（当前消息处理完后终止 Looper）。
+            if (quitAfterTask) thread.quitSafely()
         }
     }
 
@@ -199,6 +221,20 @@ class ArcRepairRunner(private val ctx: Context) {
         }
         val ok = runCatching { latch.await(3, TimeUnit.SECONDS) }.getOrDefault(false)
         if (!ok) Log.w(TAG_ARC, "收尾超时，交给线程自行结束")
+    }
+
+    /**
+     * 退出页面（**不取消**正在跑的任务）：空闲则立即退线程，忙碌则等任务收尾后自行退。
+     * 与 [shutdown] 的分工：取消并同步等收尾用 shutdown；组合离开时用本方法，既不丢用户
+     * 已发起的修复，也不让 HandlerThread 永久驻留。
+     */
+    fun shutdownAfterTask() {
+        quitAfterTask = true
+        handler.post {
+            // 若 start 任务还在跑，这里看到 busy=true 就先退让；start 任务末尾会读 quitAfterTask
+            // 并自行 quitSafely。空闲时本消息就是队尾，直接退线程。
+            if (!busy) thread.quitSafely()
+        }
     }
 
     fun clearResult() {
@@ -591,6 +627,13 @@ private class ArcRepairSession(
             } catch (e: IOException) {
                 Log.i(TAG_ARC, "音频轨 ti=$ti 建 lane 失败，该轨按无音频继续：${e.message}")
                 runCatching { ex.release() }
+            } catch (e: Throwable) {
+                // 非 IOException（SecurityException/IllegalState/参数异常）会让整个 open() 抛出：
+                // 此时 lanes 只在局部变量里，finish() 的 audioLanes 还看不到它们——当前 extractor
+                // 与已建 lane 都会漏。先在异常路径里全部归还，再把异常原样抛给会话收尾。
+                runCatching { ex.release() }
+                lanes.forEach { it.release() }
+                throw e
             }
         }
         return lanes
@@ -1200,10 +1243,17 @@ private class ArcRepairSession(
 
         val m = muxer
         muxer = null
-        if (m != null) {
-            runCatching { m.stop() }.onFailure { Log.i(TAG_ARC, "muxer stop 忽略：${it.message}") }
-            runCatching { m.release() }
+        // stop 是写 moov 的收尾：正常返回才代表容器封口成功。旧实现把异常吞成日志后仍按
+        // ok 提交，坏容器（尤其零样本音轨导致 stop 抛）会被当成功产物写进相册。
+        val muxStopOk = if (m != null && muxStarted) {
+            runCatching { m.stop() }
+                .onFailure { Log.e(TAG_ARC, "muxer stop 失败（容器未封口，产物将回收）：${it.message}") }
+                .isSuccess
+        } else {
+            // 从未 start 的 muxer 没有 moov 可写，stop() 必抛——直接 release，不把它当收尾失败刷日志
+            false
         }
+        if (m != null) runCatching { m.release() }
         arcGl?.release()
         arcGl = null
         val es = encSurface
@@ -1224,11 +1274,20 @@ private class ArcRepairSession(
         if (st == null || sk == null) {
             return ArcRepairResult(false, null, null, 0L, code ?: ArcRepairError.NO_OUTPUT, note)
         }
-        val seg = st.seal(sk, 0, 0L, if (ok) durationMs else 0L, keep = ok)
-        return if (ok) {
+        // 保留判据必须同时含「样本写成功」与「muxer 封口成功」：只过前者会把无 moov 的坏容器
+        // commit 进相册（零样本音轨/盘满时 stop 会抛）。失败时 keep=false 由 seal 回收 pending，
+        // 源片不在这条路上，不受影响。
+        val keep = arcRepairKeep(ok, muxStopOk)
+        val failCode = when {
+            keep -> null
+            ok && !muxStopOk -> "${ArcRepairError.ENGINE}:MUX_CLOSE"
+            else -> code ?: ArcRepairError.ENGINE
+        }
+        val seg = st.seal(sk, 0, 0L, if (keep) durationMs else 0L, keep = keep)
+        return if (keep) {
             ArcRepairResult(true, seg.uri, seg.path, seg.bytes, null, note)
         } else {
-            ArcRepairResult(false, null, null, 0L, code ?: ArcRepairError.ENGINE, note)
+            ArcRepairResult(false, null, null, 0L, failCode ?: ArcRepairError.ENGINE, note)
         }
     }
 

@@ -1,5 +1,6 @@
 package com.wotagei.cam
 
+import com.wotagei.cam.record.arcRepairKeep
 import com.wotagei.cam.record.arcRepairOk
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
@@ -46,6 +47,19 @@ class ArcRepairOkTest {
     }
 
     /**
+     * 最终保留判据：样本写出成功之外，muxer.stop() 正常返回（moov 已写）也是硬门槛。
+     * 旧 finish 把 stop 异常吞成日志后仍按 ok 提交，零样本音轨/盘满时会把无 moov 的坏容器
+     * commit 进相册；这组表钉住"stop 失败 ⇒ 不保留"。
+     */
+    @Test
+    fun `muxer stop 失败不得保留坏容器`() {
+        assertTrue("样本成功 + stop 正常 ⇒ 保留", arcRepairKeep(ok = true, muxStopOk = true))
+        assertFalse("样本成功但 stop 抛（moov 未写）⇒ 不保留", arcRepairKeep(ok = true, muxStopOk = false))
+        assertFalse("样本失败 ⇒ 不保留（stop 结果不再有决定权）", arcRepairKeep(ok = false, muxStopOk = true))
+        assertFalse("双失败 ⇒ 不保留", arcRepairKeep(ok = false, muxStopOk = false))
+    }
+
+    /**
      * 接线守卫：判据必须由 `run` 收尾统一调用（不许旁路回写两格判据），写失败必须留 MUX 失败码，
      * `finish` 必须按 ok 决定 keep（keep=false 只回收新 pending 的 sink，源片本就不在这条路上）。
      */
@@ -64,6 +78,10 @@ class ArcRepairOkTest {
         assertTrue("音频写失败也要留 MUX 失败码（音轨整废时归因不误报；每条音频 lane 各自留痕）", da.contains("writeFailCode"))
 
         val fin = bodyOf(src, "finish")
-        assertTrue("finish 必须按 ok 决定 keep（keep=false 只回收新输出，不动源片）", fin.contains("keep = ok"))
+        assertTrue(
+            "finish 的 keep 必须由 arcRepairKeep(ok, muxStopOk) 合成（stop 失败 = 坏容器不提交）",
+            fin.contains("arcRepairKeep(") && fin.contains("muxStopOk")
+        )
+        assertTrue("finish 必须按最终 keep 决定落库（keep=false 只回收新输出，不动源片）", fin.contains("keep = keep"))
     }
 }

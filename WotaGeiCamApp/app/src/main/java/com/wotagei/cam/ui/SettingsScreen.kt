@@ -827,14 +827,24 @@ private fun BlockStorage() {
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
-        val granted = remember(resumeTick) { com.wotagei.cam.core.WotaStorage.hasAllFilesAccess() }
-        ChipCell(
-            text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
-            selected = granted,
-            onClick = {
-                com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)
-            }
-        )
+        val supported = remember { com.wotagei.cam.core.WotaStorage.supportsAllFilesAccess() }
+        if (!supported) {
+            // API 29 没有「所有文件访问」系统页：如实说明能力边界，不渲染一颗点了没反应的按钮
+            Text(
+                text = stringResource(R.string.set_storage_unsupported),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaTextDim
+            )
+        } else {
+            val granted = remember(resumeTick) { com.wotagei.cam.core.WotaStorage.hasAllFilesAccess() }
+            ChipCell(
+                text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
+                selected = granted,
+                onClick = {
+                    com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)
+                }
+            )
+        }
     }
 }
 
@@ -1267,7 +1277,7 @@ private fun formatBytes(bytes: Long): String = when {
 
 /**
  * 分享导出的日志：`FileProvider` content Uri + `ACTION_SEND`（与 `media/Share.kt`、
- * `update/UpdateInstaller.kt` 同一枚 provider，`file_paths` 的 `external-path path="."` 已覆盖导出目录）。
+ * `update/UpdateInstaller.kt` 同一枚 provider，`file_paths` 的 `cache/share-out` 已覆盖导出目录）。
  * 走本地文件、不联网；分享目标由用户选。
  */
 private fun shareLogFile(context: Context, file: File) {

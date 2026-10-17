@@ -228,6 +228,23 @@ fun mrRotateRequested(what: Int, extra: Int): Boolean =
             ))
 
 /**
+ * MR 路「文件已达上限、MediaRecorder 已自行停录」的独立信号（纯函数，JVM 全表测）。
+ *
+ * 为什么必须和 [mrRotateRequested] 分开：802（APPROACHING）只是"快到了"，实例仍在录，
+ * 随后的 `stop()` 正常返回；801（REACHED）则是平台**已经停录并收尾**，此时再 `stop()` 会抛
+ * `IllegalStateException`（[MrRecorder.stopEngine] 会把它记成 `STOP_FAILED`）。若把 801 的
+ * `STOP_FAILED` 当成"容器坏了"，`segmentKeepDecision(containerFinalized = false)` 会把刚写完的
+ * 整段有效文件按废片删掉——这是 2026-10-16 拆 keep 判据时漏掉的 MR 分支。
+ *
+ * 801 就是 MR 路的"容器已确认收尾"信号：它由平台在文件封口后发出，不需要 `stop()` 的返回值
+ * 再确认。802 不满足这个语义，绝不能混进来（否则会把仍在写的段提前当 finalized）。
+ */
+fun mrReachedMaxFilesize(what: Int, extra: Int): Boolean =
+    what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
+        (what == MediaRecorder.MEDIA_RECORDER_INFO_UNKNOWN &&
+            extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED)
+
+/**
  * 换段「编码输入面交接」判定（纯函数）：新实例的对外编码面是不是**另一个对象**。
  *
  * 【为什么换段要判这件事】2026-10-08 起 [MrRecorder] 换段走「stop → 销毁旧实例 → 新实例

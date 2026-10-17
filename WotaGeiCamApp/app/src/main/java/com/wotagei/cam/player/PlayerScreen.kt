@@ -375,11 +375,11 @@ fun PlayerScreen(
     }
     val arcPersist = remember(prefs, arcParams) { ParamsPersistSession(prefs, arcParams) }
     // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
-    // 置真并等 3s 收尾，等于丢掉用户已经发起的修复；这种情形下让它跑到结束自行写回相册
-    // （run 返回前这条线程不会退，是一次性的、可容忍的驻留）。读 runner.status.value 而非外层
-    // 那个 by 值，后者在 onDispose 时已经是组合初值、读到的是陈旧快照。
+    // 置真并等 3s 收尾，等于丢掉用户已经发起的修复。shutdownAfterTask() 只登记"任务结束后退线程"：
+    // 空闲立即退，忙碌则由 start 任务末尾自行 quitSafely。旧实现在 RUNNING 时直接跳过 shutdown()，
+    // 任务结束后再无 quit 调用 ⇒ 每次"运行中离开播放页"都永久多一条 WotaArcRepair 线程。
     DisposableEffect(arcRunner) {
-        onDispose { if (arcRunner.status.value != ArcRepairStatus.RUNNING) arcRunner.shutdown() }
+        onDispose { arcRunner.shutdownAfterTask() }
     }
 
     val pos by engine.positionMs.collectState(0L)

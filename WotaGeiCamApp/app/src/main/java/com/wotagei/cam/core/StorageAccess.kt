@@ -20,10 +20,27 @@ import android.provider.Settings
  */
 object WotaStorage {
 
-    /** API 29 走 legacy 外部存储，本来就能直删；30+ 才需要这个特殊访问权限 */
+    /**
+     * 「所有文件访问」是否真的可用。**API 30+ 才存在这枚特殊权限**；API 29 虽然可以读全库，
+     * 但跨应用写/删仍受 scoped storage 约束，且没有 `Environment.isExternalStorageManager()`。
+     * 旧实现把 API 29 恒判 true，导致删除别人视频失败时给通用文案而不是"去开权限"，
+     * 设置页也显示"已开启"（用户点了却无处可开）。这里把平台事实收成纯函数，JVM 可测。
+     */
+    internal fun hasAllFilesAccessFor(sdk: Int, isExternalStorageManager: Boolean): Boolean =
+        sdk >= Build.VERSION_CODES.R && isExternalStorageManager
+
+    /** 当前设备是否提供「所有文件访问」这项能力（API 30+） */
+    fun supportsAllFilesAccess(): Boolean = supportsAllFilesAccessFor(Build.VERSION.SDK_INT)
+
+    internal fun supportsAllFilesAccessFor(sdk: Int): Boolean = sdk >= Build.VERSION_CODES.R
+
     fun hasAllFilesAccess(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
-            runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
+        // 版本闸必须**先**短路：isExternalStorageManager 是 API 30 才有的静态方法，
+        // API 29 上求值参数本身就会 NoSuchMethodError（不是返回 false）。
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            runCatching {
+                hasAllFilesAccessFor(Build.VERSION.SDK_INT, Environment.isExternalStorageManager())
+            }.getOrDefault(false)
 
     /**
      * 跳系统「所有文件访问权限」页，优先带上自己包名，ROM 不认这条就退回总页。
@@ -35,6 +52,8 @@ object WotaStorage {
      */
     @SuppressLint("InlinedApi")
     fun openSettings(context: Context): Boolean {
+        // API 29 没有这个系统页：两个 action 都起不来，直接返回 false，别让 UI 以为跳成功了
+        if (!supportsAllFilesAccess()) return false
         val candidates = listOf(
             Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
                 .setData(Uri.parse("package:${context.packageName}")),

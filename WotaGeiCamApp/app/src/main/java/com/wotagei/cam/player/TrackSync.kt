@@ -129,9 +129,18 @@ object TrackSync {
 
     // region extractor 辅助
 
-    private fun openExtractor(context: Context, uri: Uri): MediaExtractor? = runCatching {
-        MediaExtractor().apply { setDataSource(context, uri, null) }
-    }.getOrNull()
+    private fun openExtractor(context: Context, uri: Uri): MediaExtractor? {
+        val ex = MediaExtractor()
+        return try {
+            ex.setDataSource(context, uri, null)
+            ex
+        } catch (e: Exception) {
+            // setDataSource 抛错时临时 extractor 只在这里有引用：调用方的 finally 只收得到
+            // 成功返回的实例，这里不 release 就是每次坏 URI 泄漏一枚原生 extractor。
+            runCatching { ex.release() }
+            null
+        }
+    }
 
     /** 容器音轨下标表（出现顺序；与 Media3 音频组序同源——都来自容器轨序） */
     private fun audioTrackIndexes(context: Context, uri: Uri): List<Int> {

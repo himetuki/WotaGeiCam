@@ -1522,6 +1522,11 @@ class CodecRecorder(
             if (uri != null) {
                 val sink = OutputSink.Pending(uri)
                 if (openNextSegment(sink)) return true
+                // openNextSegment 的失败出口可能在 vCodec/aCodec/capCodec/muxer 已经写进字段之后
+                // （start() 抛异常、openMuxer 失败）。这里必须先拆掉本轮已建的 native 资源，再重试：
+                // 下一轮 openNextSegment 会直接覆盖字段，旧实例从此没有引用，stop/release 永远不会发生。
+                // 手机并发 codec 实例数有限，泄漏会累积到之后建不出编码器（本类换段注释的同一风险）。
+                releaseFailedNextSegmentResources()
                 discardBounded(uri) // 没写进去的 pending 立刻回收，避免幽灵条目
                 closeTargetBounded()
                 // 行已回收：当前段句柄一并清空（否则后续收尾会去封一条已被删掉的记录）
@@ -1667,6 +1672,50 @@ class CodecRecorder(
             noteRotateStage(RotateStage.START)
             false
         }
+    }
+
+    /**
+     * 换段失败出口的 native 资源收尾：只释放字段里**本轮新建**的 codec/muxer，不改 engineError
+     * （失败阶段已经由 [noteRotateStage] 记录，这里再置错误码会把"可重试的换段受阻"误升级成
+     * 场级失败）。与 [closeSegmentEngine] 的差别是：不碰 target/currentSink/feeder/输入面，
+     * 那些由 [nextSegment] 的既有路径处理；也不读 muxer.stop() 的异常来判坏容器——本轮 muxer
+     * 可能根本没 start 过，这里只回收。
+     *
+     * 幂等：字段先置空再释放，重复调用不会二次 stop/release。
+     */
+    private fun releaseFailedNextSegmentResources() {
+        val v = vCodec
+        vCodec = null
+        releaseStartedCodecQuietly(v)
+        val a = aCodec
+        aCodec = null
+        releaseStartedCodecQuietly(a)
+        val c = capCodec
+        capCodec = null
+        releaseStartedCodecQuietly(c)
+        val m = muxer
+        muxer = null
+        if (m != null) {
+            try {
+                m.stop()
+            } catch (e: RuntimeException) {
+                // 本轮 muxer 没 start 过是常态（openNextSegment 里 openMuxer 只 configure）；
+                // 这里只是回收，不把 stop 异常当容器失败信号
+                Log.i(TAG, "换段失败回收 muxer：stop ignored (${e.javaClass.simpleName})")
+            }
+            releaseQuietly(m)
+        }
+    }
+
+    /** 只回收本轮已建的 codec：stop 失败也继续 release（release 才是 native 句柄的最终归还） */
+    private fun releaseStartedCodecQuietly(c: MediaCodec?) {
+        if (c == null) return
+        try {
+            c.stop()
+        } catch (e: RuntimeException) {
+            Log.i(TAG, "换段失败回收 codec：stop ignored (${e.javaClass.simpleName})")
+        }
+        releaseQuietly(c)
     }
 
     /**

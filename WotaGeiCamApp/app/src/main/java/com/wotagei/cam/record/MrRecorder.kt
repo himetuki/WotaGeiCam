@@ -67,6 +67,14 @@ class MrRecorder(
     @Volatile private var abandonSegment = false
 
     /**
+     * 当前段是否收到 801（`MAX_FILESIZE_REACHED`）：平台已自行停录并封口，再 `stop()` 会抛
+     * `IllegalStateException`。它是 MR 路**独立的"容器已确认收尾"信号**（见
+     * [mrReachedMaxFilesize]），封段时喂给 [segmentKeepDecision]，避免把完整成片按废片删掉。
+     * 新会话/新段起始/收尾后复位。
+     */
+    @Volatile private var reachedMaxFilesize = false
+
+    /**
      * 会话级错误残留：换段成功清 [engineError] 前，把旧段的失败码挪到这里，最终 [RecordResult]
      * 用它兜底（清错只让**新段**恢复判活，绝不把"旧段确实失败过"从结果里抹掉）。
      */
@@ -130,6 +138,7 @@ class MrRecorder(
         engineError = null
         sessionError = null
         abandonSegment = false
+        reachedMaxFilesize = false
         exposedSurface = null
         parts.clear()
         partIndex = 0
@@ -249,6 +258,7 @@ class MrRecorder(
         }
         partStartMs = clock.elapsedMs()
         abandonSegment = false // 新会话起始：弃段意图不复用（一次判废不许拖累之后每一段）
+        reachedMaxFilesize = false // 新会话起始：801 收尾信号不复用
         try {
             mr?.start()
             state = EngineState.START
@@ -274,16 +284,17 @@ class MrRecorder(
         } else {
             clock.closeSegment()
         }
-        val err = engineError
+        val err = stopErrorForKeep()
         if (prev == EngineState.START) {
             // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision。
-            // MR 路没有 Codec 路的"段循环提前退出"信号（ok）⇒ 恒传 true；"容器已确认收尾"是
-            // Codec 路 muxer.stop() 正常返回的专有信号 ⇒ 恒 false——本路判据与旧四参形态逐字等价
+            // 801 自停是 MR 路真实的"容器已确认收尾"信号（平台已封口，再 stop 必抛），
+            // 必须传进判据；传恒 false 会把完整段按 STOP_FAILED 删掉。
             sealCurrent(
                 dur,
                 segmentKeepDecision(
                     abandoned = abandonSegment, ok = true, errorCode = err,
-                    durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                    durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                    containerFinalized = reachedMaxFilesize
                 )
             )
         } else {
@@ -303,6 +314,7 @@ class MrRecorder(
         engineError = null
         sessionError = null
         abandonSegment = false
+        reachedMaxFilesize = false
         clock.reset()
         parts.clear()
         partIndex = 0
@@ -326,12 +338,14 @@ class MrRecorder(
                 stopEngine()
                 val dur = clock.closeSegment()
                 // 弃段意图同 stop()：release 也是"停录"，弃段一律不 commit。
-                // ok/containerFinalized 两枚与 stop() 同口径（MR 路无段循环失败信号、无 muxer 收尾信号）
+                // 801 自停是 MR 路真实的"容器已确认收尾"信号，与 stop() 同口径传入。
                 sealCurrent(
                     dur,
                     segmentKeepDecision(
-                        abandoned = abandonSegment, ok = true, errorCode = engineError,
-                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                        abandoned = abandonSegment, ok = true,
+                        errorCode = stopErrorForKeep(),
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                        containerFinalized = reachedMaxFilesize
                     )
                 )
                 releaseEngine()
@@ -350,6 +364,7 @@ class MrRecorder(
         engineError = null
         sessionError = null
         abandonSegment = false
+        reachedMaxFilesize = false
         clock.reset()
         parts.clear()
         partIndex = 0
@@ -413,7 +428,11 @@ class MrRecorder(
         // 才能证明换段链路活着。历史缺陷：这里曾要求 what==UNKNOWN 才往下走、却在 extra 里找
         // 801/802，判定序反转 ⇒ 只打日志不换段。判定本体在 mrRotateRequested（纯函数，可 JVM 测）。
         Log.i(TAG, "mr info what=$what extra=$extra")
-        if (mrRotateRequested(what, extra)) rotateSegment(extra)
+        if (mrRotateRequested(what, extra)) {
+            // 801 = 平台已自行停录并封口：先记下这个收尾事实，封段判据据此放行完整段
+            if (mrReachedMaxFilesize(what, extra)) reachedMaxFilesize = true
+            rotateSegment(extra)
+        }
     }
 
     override fun onError(rec: MediaRecorder?, what: Int, extra: Int) {
@@ -431,7 +450,11 @@ class MrRecorder(
      * 是**跨实例**复用的面（producer 归本类），[applyConfig] 会把它重挂到新实例上。
      */
     private fun rotateSegment(extra: Int) {
-        if (rotating) return
+        if (rotating) {
+            // 重入时本腿不处理；801 信号只服务本次封段，不许留到之后的 stop/release
+            reachedMaxFilesize = false
+            return
+        }
         rotating = true
         // 换段腿起钟（`elapsedRealtime`，与 CodecRecorder.beginRotateLeg 同一时基域）：
         // **旧实例被拆的那一刻**就是丢帧窗口的起点（此后进来的帧写不进任何容器），腿里另有
@@ -449,13 +472,16 @@ class MrRecorder(
             releaseEngine()
             val dur = clock.closeSegment()
             // 弃段意图同 stop()：轮转前若被要求弃段，旧段也不 commit。
-            // ok/containerFinalized 两枚与 stop() 同口径（MR 路无段循环失败信号、无 muxer 收尾信号）
+            // 801 自停是 MR 路真实的"容器已确认收尾"信号：它由平台封口后发出，此时 stop()
+            // 必抛 STOP_FAILED；不把它传进判据就会把刚写完的整段有效文件按废片删掉。
             timedLegStep("seal") {
                 sealCurrent(
                     dur,
                     segmentKeepDecision(
-                        abandoned = abandonSegment, ok = true, errorCode = engineError,
-                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+                        abandoned = abandonSegment, ok = true,
+                        errorCode = stopErrorForKeep(),
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                        containerFinalized = reachedMaxFilesize
                     )
                 )
             }
@@ -504,9 +530,10 @@ class MrRecorder(
             // 已自停、再 stop 抛 IllegalState）会把 STOP_FAILED 一直挂着 ⇒ 此后每一拍 health() 都回
             // 非空 errorCode ⇒ MR 路被误判 UNHEALTHY 而把仍在正常录的新段整场重启，且该残留错误还会
             // 让 sealCurrent 把后续已写好的成品段按废片删。清错只影响**新段**的判活：旧段此刻已按
-            // keep 语义封好（该弃的已弃）。旧段失败码先挪进 sessionError（会话级账），最终
-            // RecordResult 用它兜底——"旧段确实失败过"不会因清错而从结果里消失。
-            if (engineError != null) sessionError = engineError
+            // keep 语义封好（该弃的已弃）。801 自停产生的 STOP_FAILED 是正常收尾，不算旧段失败，
+            // 其余旧段失败码仍先挪进 sessionError（会话级账），最终 RecordResult 用它兜底。
+            val oldError = stopErrorForKeep()
+            if (oldError != null) sessionError = oldError
             engineError = null
             abandonSegment = false // 新段起始复位弃段意图（一次判废不许拖累之后每一段）
             Log.i(TAG, "segment $partIndex started at ${partStartMs}ms")
@@ -520,9 +547,18 @@ class MrRecorder(
             // 无论本腿成功还是中途失败都结算：失败腿丢掉的时间同样是"用户没录到的画面"，
             // 不记账就等于把现场抹掉（S2-M4-01 的取证缺口正是这里）。
             settleRotateLeg(legStart, legRotated)
+            // 801 信号只服务本腿封段：无论成败都在腿末复位，不许泄漏到下一条腿/下一次 stop
+            reachedMaxFilesize = false
             rotating = false
         }
     }
+
+    /**
+     * 封段判据使用的错误码：801 自停后的 `STOP_FAILED` 是平台正常收尾（不是坏容器），
+     * 对判据按"无错误"处理；其余错误码原样透传。
+     */
+    private fun stopErrorForKeep(): String? =
+        if (reachedMaxFilesize && engineError == RecordError.STOP_FAILED) null else engineError
 
     /**
      * 换段腿里一步**无上限**调用的耗时留痕（`elapsedRealtime`）。

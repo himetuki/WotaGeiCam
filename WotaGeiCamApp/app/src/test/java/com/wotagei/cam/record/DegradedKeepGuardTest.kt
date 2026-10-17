@@ -139,18 +139,24 @@ class DegradedKeepGuardTest {
     }
 
     /**
-     * MR 路（[MrRecorder]）行为逐字不变的**结构钉**：它没有 Codec 路的"段循环提前退出"信号
-     * （ok）也没有 muxer 收尾信号（containerFinalized），三个封段点必须显式传 `ok = true` +
-     * `containerFinalized = false`——等于旧四参判据。谁把这两枚改成别的值（哪怕只是"看起来更严格"），
-     * MR 路的保留/删除行为当场变，这条守卫必须红。
+     * MR 路（[MrRecorder]）三个封段点：`ok = true` 不变（MR 没有 Codec 路的段循环失败信号），
+     * 但 `containerFinalized` 不能再恒 false——801（MAX_FILESIZE_REACHED）是平台已停录并封口的
+     * **真实收尾信号**，必须传 `reachedMaxFilesize`。恒 false 会把 801 后 stop() 抛出的
+     * STOP_FAILED 当坏容器，删掉刚写完的整段有效文件。谁把它改回恒 false（或放宽成恒 true），
+     * 这条守卫必须红。
      */
     @Test
-    fun `MrRecorder 三个封段点必须显式传 ok_true 与 containerFinalized_false`() {
+    fun `MrRecorder 三个封段点必须把 801 收尾信号传给 containerFinalized`() {
         for (fn in listOf("stop", "release", "rotateSegment")) {
             val b = mrBody(fn)
             assertTrue("$fn 必须走 segmentKeepDecision", b.contains("segmentKeepDecision("))
             assertTrue("$fn 的 ok 必须恒 true（MR 路无段循环失败信号，与旧四参判据等价）", b.contains("ok = true"))
-            assertTrue("$fn 的 containerFinalized 必须恒 false（MR 路无 muxer 收尾信号）", b.contains("containerFinalized = false"))
+            assertTrue(
+                "$fn 的 containerFinalized 必须由 reachedMaxFilesize 给出（恒 false = 801 自停后删掉完整段）",
+                b.contains("containerFinalized = reachedMaxFilesize")
+            )
+            assertFalse("$fn 的 containerFinalized 不得写死 false", b.contains("containerFinalized = false"))
+            assertFalse("$fn 的 containerFinalized 不得写死 true（坏容器也会被放行）", b.contains("containerFinalized = true"))
         }
     }
 

@@ -494,6 +494,46 @@ class RecordHealthTest {
         assertFalse("负值组合一律不换段", mrRotateRequested(-1, -1))
     }
 
+    // ------------------------------------------------------------------ mrReachedMaxFilesize
+
+    /**
+     * 801 自停信号全表：只有"到达上限"才是平台已停录并封口；802 只是"逼近"，实例仍在写，
+     * 不能当 containerFinalized（否则封段判据会把仍在写的段提前当收尾，掩盖真错误）。
+     */
+    @Test
+    fun `mrReachedMaxFilesize 只认 801 到达上限`() {
+        assertTrue("what=801（AOSP 标准形态）⇒ 已自停", mrReachedMaxFilesize(801, 0))
+        assertTrue("what=1/extra=801（ROM 兜底形态）⇒ 已自停", mrReachedMaxFilesize(1, 801))
+        assertFalse("what=802 逼近上限：实例仍在录，不是自停", mrReachedMaxFilesize(802, 0))
+        assertFalse("what=1/extra=802 同上", mrReachedMaxFilesize(1, 802))
+        assertFalse("普通 info 不是自停", mrReachedMaxFilesize(1, 0))
+        assertFalse("800 时长触顶不是文件大小自停", mrReachedMaxFilesize(800, 0))
+        assertFalse("803 下一文件开始不是自停", mrReachedMaxFilesize(803, 0))
+    }
+
+    /**
+     * 回归题面（2026-10-16 拆 keep 判据时漏掉的 MR 分支）：801 后 MediaRecorder 已自停，
+     * 再 stop() 抛 IllegalState 被记成 STOP_FAILED；此时容器其实已封口，判据必须靠独立的
+     * 801 信号放行，而不是把 STOP_FAILED 当坏容器删掉整段。
+     */
+    @Test
+    fun `801 自停后 STOP_FAILED 仍须保留完整段`() {
+        assertTrue(
+            "containerFinalized=true 时 STOP_FAILED 不得阻止保留",
+            segmentKeepDecision(
+                abandoned = false, ok = true, errorCode = RecordError.STOP_FAILED,
+                durationMs = 60_000L, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = true
+            )
+        )
+        assertFalse(
+            "同一个 STOP_FAILED 在容器未确认收尾时仍应按废片处理（不能放宽成一律保留）",
+            segmentKeepDecision(
+                abandoned = false, ok = true, errorCode = RecordError.STOP_FAILED,
+                durationMs = 60_000L, minKeepMs = RecordProfile.MIN_KEEP_MS, containerFinalized = false
+            )
+        )
+    }
+
     // ------------------------------------------------------------------ rotateSurfaceHandoffNeeded
 
     /**

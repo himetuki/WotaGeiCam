@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 只暴露实际会递出的最小目录（安全边界）：
+  - Movies/WotaGeiCam：本应用录制/剪辑/抽帧/选轨导出的成片（Camera、Clip、Inau 三个子目录）；
+  - cache/updates：检查更新下载的 APK（UpdateInstaller 交系统安装器）；
+  - cache/share-out：诊断日志导出件（SettingsScreen 的系统分享）。
+  不再使用把整盘/整 cache 当根的写法：FileProvider 虽不导出，但任何未来调用方一旦把
+  任意 DATA 路径喂进来，过宽根就会为共享存储里的敏感文件铸出可读 URI。媒体库里非本应用目录
+  的视频由 WotaShare 自动退回原 content Uri（同样带读授权），分享功能不受影响。
+-->
 <paths>
-    <external-files-path name="app_files" path="." />
-    <external-path name="external" path="." />
-    <cache-path name="cache" path="." />
-    <files-path name="files" path="." />
+    <external-path name="movies" path="Movies/WotaGeiCam/" />
+    <cache-path name="updates" path="updates/" />
+    <cache-path name="share_out" path="share-out/" />
 </paths>

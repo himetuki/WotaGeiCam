@@ -184,9 +184,23 @@ object ReleaseJson {
         return out
     }
 
+    /**
+     * 资产名是否可安全拼进下载 URL（纯函数）。镜像转发的 JSON 不可信：`browser_download_url`
+     * 可以指向任意主机，`name` 也可以带路径分隔符/`..`。本工程只接受**纯文件名 + .apk**：
+     * 不含 `/`、`\`、连续点，长度有上限。真正的下载 URL 一律由 [UpdateConfig.directDownloadUrl]
+     * 用可信的 tag + 校验过的资产名重建，**不再信 JSON 里的 URL 字段**。
+     */
+    internal fun isSafeReleaseAssetName(name: String?): Boolean {
+        if (name == null || name.length !in 1..255) return false
+        if (!name.endsWith(".apk", ignoreCase = true)) return false
+        if (name.contains('/') || name.contains('\\')) return false
+        if (name.contains("..")) return false
+        return true
+    }
+
     /** 挑 APK 附件：优先 universal（四件套里的通用包），没有则第一个 .apk；无 .apk 返回 null */
     fun pickApkAsset(assets: List<ReleaseAsset>): ReleaseAsset? {
-        val apks = assets.filter { it.name.endsWith(".apk", ignoreCase = true) }
+        val apks = assets.filter { isSafeReleaseAssetName(it.name) }
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }
 
@@ -410,8 +424,11 @@ private fun jsonNode(json: String?, localVersionName: String, trustedNotes: Bool
     val info = ReleaseJson.parse(json, extractSha256 = trustedNotes) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
-        info.asset != null ->
-            ProbeResult.UpdateAvailable(info.tag, info.asset.name, info.asset.url, info.asset.sizeBytes, info.sha256)
+        info.asset != null -> {
+            // 段 2 的 JSON 可能被镜像改写：URL 字段一律不信，用可信仓库常量 + 已校验资产名重建
+            val url = UpdateConfig.directDownloadUrl(info.tag, info.asset.name)
+            ProbeResult.UpdateAvailable(info.tag, info.asset.name, url, info.asset.sizeBytes, info.sha256)
+        }
         else -> null
     }
 }
@@ -422,6 +439,8 @@ private fun decide(info: ReleaseInfo, localVersionName: String): ProbeResult {
     return if (!CompareVersions.isNewerAvailable(localVersionName, info.tag)) {
         ProbeResult.UpToDate
     } else {
-        ProbeResult.UpdateAvailable(info.tag, asset.name, asset.url, asset.sizeBytes)
+        ProbeResult.UpdateAvailable(
+            info.tag, asset.name, UpdateConfig.directDownloadUrl(info.tag, asset.name), asset.sizeBytes
+        )
     }
 }
