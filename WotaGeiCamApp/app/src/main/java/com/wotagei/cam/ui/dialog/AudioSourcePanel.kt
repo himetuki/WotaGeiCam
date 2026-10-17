@@ -65,19 +65,25 @@ import com.wotagei.cam.ui.design.WotaType
 fun AudioSourcePanel(
     anchor: IntRect,
     capture: PlaybackCaptureController,
-    recording: Boolean,
+    editable: Boolean,
     onEnableCapture: () -> Unit,
-    onLockTip: () -> Unit,
     bt: BtSpeakerController,
     ambientEnabled: Boolean,
     onToggleAmbient: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val captureState by capture.state.observed()
-    val tabs = audioSourceTabs(captureState, recording, onEnableCapture, capture, onLockTip, bt, ambientEnabled, onToggleAmbient)
+    val tabs = audioSourceTabs(captureState, editable, onEnableCapture, capture, bt, ambientEnabled, onToggleAmbient)
     var selected by remember { mutableStateOf(tabs.first().key) }
     val motion = LocalMotion.current
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.audio_panel_title)) {
+        // A4 录制中只读：弹窗可开，两个开关禁用（BT 不在可调白名单）
+        if (!editable) Text(
+            text = stringResource(R.string.cam_recording_readonly),
+            style = WotaType.caption,
+            color = WotaColor.textLo,
+            modifier = Modifier.widthIn(max = 220.dp)
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             tabs.forEach { spec ->
                 WotaChip(
@@ -116,10 +122,9 @@ data class AudioTabSpec(
 @Composable
 private fun audioSourceTabs(
     captureState: CaptureState,
-    recording: Boolean,
+    editable: Boolean,
     onEnableCapture: () -> Unit,
     capture: PlaybackCaptureController,
-    onLockTip: () -> Unit,
     bt: BtSpeakerController,
     ambientEnabled: Boolean,
     onToggleAmbient: () -> Unit
@@ -129,7 +134,7 @@ private fun audioSourceTabs(
     return listOf(
         AudioTabSpec(key = "source", title = stringResource(R.string.audio_tab_source)) {
             AudioSourceTab(
-                captureState, recording, onEnableCapture, capture::shutdown, onLockTip,
+                captureState, editable, onEnableCapture, capture::shutdown,
                 ambientEnabled, onToggleAmbient
             )
         },
@@ -143,15 +148,14 @@ private fun audioSourceTabs(
  * 音源选择：左右开关（左 = 捕获设备内音频、右 = 默认环境音）+ 开关下的状态提示小字。
  * **两开关独立**（音源双开定版 2026-10-07）：内录开关 toggle 捕获会话（开=授权、关=拆会话），
  * 环境音开关 toggle 环境音通道位（下次起录生效），互不弹回——四组合都合法（audioTrackPlan 桥）。
- * 录制中两边都锁（照 SizePill/LensPill 的 onLockTip 先例）：音源组合在起录那刻定格。
+ * 录制中两个开关只读（A4：BT 不在可调白名单），弹窗本身照常可开、页签可切。
  */
 @Composable
 private fun AudioSourceTab(
     captureState: CaptureState,
-    recording: Boolean,
+    editable: Boolean,
     onEnableCapture: () -> Unit,
     onDisableCapture: () -> Unit,
-    onLockTip: () -> Unit,
     ambientEnabled: Boolean,
     onToggleAmbient: () -> Unit
 ) {
@@ -160,10 +164,9 @@ private fun AudioSourceTab(
         AudioSourceRow(
             label = stringResource(R.string.audio_capture_label),
             checked = active,
+            enabled = editable,
             onClick = {
                 when {
-                    // 录制中音源锁定（照 SizePill/LensPill 的 onLockTip 先例）
-                    recording -> onLockTip()
                     captureState is CaptureState.Authorizing -> Unit   // 系统授权框已在场
                     active -> onDisableCapture()         // 已在内录：再点=关闭（开关语义）
                     else -> onEnableCapture()            // Idle/Failed/Revoked 都可（重）授权
@@ -173,12 +176,10 @@ private fun AudioSourceTab(
         AudioSourceRow(
             label = stringResource(R.string.audio_ambient_label),
             checked = ambientEnabled,
+            enabled = editable,
             onClick = {
-                when {
-                    // 录制中音源锁定（与内录开关同一判据形态，守卫按出现次数锁两条）
-                    recording -> onLockTip()
-                    else -> onToggleAmbient()            // 独立 toggle 环境音通道位
-                }
+                // 独立 toggle 环境音通道位
+                onToggleAmbient()
             }
         )
         AudioStateHint(captureState)
@@ -189,23 +190,24 @@ private fun AudioSourceTab(
  *  行宽封顶 220dp（2026-10-05 紧凑化）：SpaceBetween 需要一段确定宽度才分得出「标签 | 开关」，
  *  但不封顶时 fillMaxWidth 会把整枚弹窗顶到 400dp 上限。 */
 @Composable
-private fun AudioSourceRow(label: String, checked: Boolean, onClick: () -> Unit) {
+private fun AudioSourceRow(label: String, checked: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     Row(
         Modifier
             .widthIn(max = 220.dp)
             .fillMaxWidth()
-            .toggleable(value = checked, role = Role.Switch, onValueChange = { onClick() }),
+            .toggleable(value = checked, role = Role.Switch, enabled = enabled, onValueChange = { onClick() }),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.bodyMedium,
-            color = WotaColor.textHi
+            color = if (enabled) WotaColor.textHi else WotaColor.textLo
         )
         Switch(
             checked = checked,
             onCheckedChange = null,
+            enabled = enabled,
             colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
         )
     }
