@@ -62,16 +62,16 @@ class PillInteractionGuardTest {
     }
 
     /**
-     * 九根滑杆必须全部接梯（A2）：任一根漏传 `ladder` 就会退回连续滑杆，而纯函数测试仍全绿
-     * （审查 P3 的假绿口）。空 = 干净。
+     * 十根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛滑杆）：任一根漏传 `ladder` 就会退回连续滑杆，
+     * 而纯函数测试仍全绿（审查 P3 的假绿口）。空 = 干净。
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 9) bad.add("PillSlider 调用点不是 9 处")
+        if (occurrences(src, "PillSlider(").size != 10) bad.add("PillSlider 调用点不是 10 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 9) bad.add("ladder = 参数不是 9 处（有滑杆退回连续模式）")
-        val panels = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill")
+        if (ladderArgs != 10) bad.add("ladder = 参数不是 10 处（有滑杆退回连续模式）")
+        val panels = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill", "FpsPill")
         panels.forEach { fn ->
             val body = runCatching { bodyOf(src, fn) }.getOrNull()
             if (body == null || occurrences(body, "ladder =").isEmpty()) bad.add("$fn 没有 ladder")
@@ -181,7 +181,7 @@ class PillInteractionGuardTest {
     }
 
     @Test
-    fun `九根滑杆都接刻度梯`() {
+    fun `十根滑杆都接刻度梯`() {
         assertEquals("滑杆梯接线缺件：\n${ladderIssues(pills).joinToString("\n")}", emptyList<String>(), ladderIssues(pills))
     }
 

@@ -186,14 +186,14 @@ class ParamsPersistWiringGuardTest {
     }
 
     @Test
-    fun `R4_九个滑杆调用点全接松手落盘`() {
-        assertEquals("PillSlider 调用点数（拍板以实查 9 处为准）", 9, occurrences(maskedPills, "PillSlider(").size)
+    fun `R4_十个滑杆调用点全接松手落盘`() {
+        assertEquals("PillSlider 调用点数（拍板以实查 10 处为准）", 10, occurrences(maskedPills, "PillSlider(").size)
         assertEquals(
             "补传 onValueChangeFinished 的调用点数",
-            9, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
+            10, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
         )
-        // 七个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
-        val pillFns = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill")
+        // 八个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
+        val pillFns = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill", "FpsPill")
         val misses = pillFns.filter { fn ->
             val body = runCatching { bodyOf(maskedPills, fn) }.getOrNull()
             body == null || occurrences(body, "onValueChangeFinished = onPersist").isEmpty()

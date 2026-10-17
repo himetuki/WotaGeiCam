@@ -113,6 +113,8 @@ import androidx.media3.common.Tracks
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.wotagei.cam.R
+import com.wotagei.cam.core.ArcMergeDeadband
+import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.MediaOps
 import com.wotagei.cam.media.MediaTagDialog
@@ -123,7 +125,10 @@ import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.record.ArcRepairError
 import com.wotagei.cam.record.ArcRepairRunner
 import com.wotagei.cam.record.ArcRepairStatus
+import com.wotagei.cam.ui.ParamsPersistSession
+import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaIconButton
@@ -139,13 +144,16 @@ import com.wotagei.cam.ui.theme.WotaRec
 import com.wotagei.cam.ui.theme.WotaSurface
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
+import com.wotagei.cam.ui.widget.deadbandLadder
 import android.os.SystemClock
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /** 双击判定窗口：单击要等满这么久才落地显隐，否则「双击启停」会顺带闪一下控件栏。
  *  提成 internal：对比播放页的沉浸式控制层（10-01）复用同一套单击/双击仲裁，两处各抄一份迟早漂移。 */
@@ -357,6 +365,15 @@ fun PlayerScreen(
     var arcAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     // 抽帧目标帧率：产品口径 = 强制档两枚（24/25），默认 24；源实测帧率由管线自己量（容器会撒谎）
     var arcDstFps by remember { mutableIntStateOf(WotaTiers.REQUIRED_FPS.min()) }
+    // 光弧「并入门槛」（补弧差分死区 D，0..32，默认 12）：离线修复在 start(...) 那一刻读
+    // ArcMergeDeadband 的只读快照，所以滑杆必须在按「GPU 加速 / 纯 CPU」**之前**写进参数总线。
+    // 播放页本来不接相机，这里只造一份本地总线走同一个 setter（发布快照），别处都不读它；
+    // 落盘仍走会话影子 flush 这一条既有路径，不另造第二条。
+    val prefs = remember(app) { WotaSettings.of(app) }
+    val arcParams = remember(prefs) {
+        WotaParams(CoroutineScope(Dispatchers.Unconfined)).also { WotaSettings.applyDefaults(prefs, it) }
+    }
+    val arcPersist = remember(prefs, arcParams) { ParamsPersistSession(prefs, arcParams) }
     // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
     // 置真并等 3s 收尾，等于丢掉用户已经发起的修复；这种情形下让它跑到结束自行写回相册
     // （run 返回前这条线程不会退，是一次性的、可容忍的驻留）。读 runner.status.value 而非外层
@@ -858,6 +875,8 @@ fun PlayerScreen(
                 ArcRepairPopup(
                     anchor = arcAnchor,
                     dstFps = arcDstFps,
+                    params = arcParams,
+                    onPersist = { arcPersist.flush() },
                     onPickFps = { arcDstFps = it },
                     onPick = { useGpu ->
                         arcMenu = false
@@ -1275,10 +1294,13 @@ private fun TrackExportPopup(
 private fun ArcRepairPopup(
     anchor: androidx.compose.ui.unit.IntRect,
     dstFps: Int,
+    params: WotaParams,
+    onPersist: () -> Unit,
     onPickFps: (Int) -> Unit,
     onPick: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val deadband by params.arcMergeDeadband.collectAsState()
     WotaPillPopup(anchor, onDismiss, title = stringResource(R.string.player_arc_repair)) {
         Column(
             // 内容定宽（紧凑化）：宽度 = max(200dp 下限, 最宽子项)。IntrinsicSize.Min 让
@@ -1304,6 +1326,30 @@ private fun ArcRepairPopup(
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }
+            // 并入门槛（补弧差分死区 D，0..32，默认 12）：与录制页同一量纲，摆在分隔线之上的
+            // **设置区**——离线修复在按下面两枚按钮那一刻读快照，之后再改不影响本次任务。
+            // 写入走 params.setArcMergeDeadband（发布只读快照给 ArcRepairRunner.start 的默认参数）。
+            PillSlider(
+                value = deadband.toFloat(),
+                lo = ArcMergeDeadband.MIN.toFloat(),
+                hi = ArcMergeDeadband.MAX.toFloat(),
+                step = 1f,
+                label = stringResource(R.string.player_arc_deadband),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                onValueChange = { params.setArcMergeDeadband(it.roundToInt()) },
+                format = { "${it.roundToInt()}" },
+                onValueChangeFinished = onPersist,
+                ladder = deadbandLadder()
+            )
+            Text(
+                stringResource(R.string.player_arc_deadband_note),
+                style = MaterialTheme.typography.labelSmall,
+                color = WotaTextDim,
+                // 封宽只折行不顶宽：与下面那条说明同一本账
+                modifier = Modifier
+                    .padding(horizontal = 10.dp, vertical = 2.dp)
+                    .widthIn(max = 200.dp)
+            )
             // 分组分隔线：线上改设置、线下发起动作——两种语义一眼分开
             Box(
                 Modifier
