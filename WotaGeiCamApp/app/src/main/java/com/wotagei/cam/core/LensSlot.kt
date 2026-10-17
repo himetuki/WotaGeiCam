@@ -4,7 +4,6 @@ import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
-import android.os.Build
 import com.wotagei.cam.diag.Diag as Log
 
 /** 产品语义的镜头档位；AUTO 是「由 App 自行选档」的伪档位，不出现在枚举表里 */
@@ -41,9 +40,11 @@ private data class LensEntry(
  * 枚举镜头（第 3 步）：
  * 1. 镜头 id 用 [discoverCameraIds] 取，**不只信 `cameraIdList`**——真机取证：某 ROM 的 cameraIdList
  *    只给 2 颗，而 dumpsys 报 4 台 HAL 设备，按数字 id 仍能读能力并打开（隐藏了超广角子头与逻辑头）；
- * 2. 逻辑多摄（能力位 11，SDK≥30）按 `physicalCameraIds` 展开：子头若已被单独列出就不再重复，
+ * 2. 逻辑多摄（能力位 11，API 28+）按 `physicalCameraIds` 展开：子头若已被单独列出就不再重复，
  *    否则把没暴露的子头各自补成一颗镜头；子头全部已暴露时逻辑头本身不再占档
- *    （同一颗传感器列两遍会让档位互相打架，还会把组合头误标成某个焦段档）；
+ *    （同一颗传感器列两遍会让档位互相打架，还会把组合头误标成某个焦段档）。
+ *    **读不到 physicalCameraIds 时保留逻辑头本身**——不能因为展开失败就把这颗摄像头整颗丢掉
+ *    （Android 10 上曾因 `SDK_INT >= R` 闸门让 hiddenPhysicals 恒空，逻辑后摄全部消失）；
  * 3. 后摄按物理焦距升序整组归档（超广角→广角→长焦→超长焦），**多颗后摄各自成档，不只取第一个**；
  *    前摄统一 [LensType.FRONT]，靠 [LensSlot.key] 区分具体哪一颗；
  * 4. 能力按「这颗镜头自己」的 characteristics 收，切镜头整套换挡。
@@ -62,13 +63,14 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
             ?: IntArray(0)
         val logical = capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
 
-        val hiddenPhysicals: List<String> =
-            if (logical && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                (tryOrNullLens { cc.physicalCameraIds } ?: emptySet())
-                    .sorted()
-                    .filterNot { openable.contains(it) } // 已是独立镜头，不再当子头列一遍
-            } else emptyList()
-        if (logical && hiddenPhysicals.isEmpty()) continue
+        // physicalCameraIds 自 API 28 起可用；minSdk 29 不需要版本闸。读取失败返回空集，
+        // 交给 shouldHideLogicalHead 的"没有可展开子头 ⇒ 保留逻辑头"分支兜底。
+        val physicalIds: Set<String> =
+            if (logical) tryOrNullLens { cc.physicalCameraIds } ?: emptySet() else emptySet()
+        val hiddenPhysicals: List<String> = physicalIds
+            .sorted()
+            .filterNot { openable.contains(it) } // 已是独立镜头，不再当子头列一遍
+        if (shouldHideLogicalHead(logical, physicalIds, hiddenPhysicals)) continue
 
         entries += hiddenPhysicals.mapNotNull { pid ->
             val pcc = tryOrNullLens { mgr.getCameraCharacteristics(pid) } ?: return@mapNotNull null
@@ -137,6 +139,22 @@ private fun LensEntry.toSlot(type: LensType): LensSlot = LensSlot(
     eqFocal = if (eqFocal > 0f) eqFocal else focalMm,
     ability = ability
 )
+
+/**
+ * 纯函数：逻辑多摄头是否该从档位表里隐藏。
+ *
+ * 只有一种情形能隐藏：它确实是逻辑头、`physicalCameraIds` 读到了非空集合、且所有子头都已作为
+ * 独立镜头暴露（hiddenPhysicals 为空）。其余情形——尤其 `physicalCameraIds` 为空（读取失败、
+ * HAL 不报、API 29 旧行为）——必须**保留逻辑头本身**，否则这颗摄像头会从 `cameraIdList` 里
+ * 整颗消失（Android 10 上曾因此让所有逻辑后摄被跳过，只剩前摄或直接打不开相机）。
+ *
+ * JVM 可直接测：参数只是布尔/集合，不碰 CameraManager。
+ */
+internal fun shouldHideLogicalHead(
+    logical: Boolean,
+    physicalIds: Set<String>,
+    hiddenPhysicals: List<String>
+): Boolean = logical && physicalIds.isNotEmpty() && hiddenPhysicals.isEmpty()
 
 /**
  * 纯函数：后摄颗数 → 档位分配（表），按「物理焦距升序」逐位对应，返回表长度恒等于颗数；

@@ -345,6 +345,8 @@ class MediaActions private constructor(
     private fun deniedRes(fallback: Int, permissionDenied: Boolean = true): Int =
         if (!permissionDenied) fallback
         else if (WotaStorage.hasAllFilesAccess()) fallback
+        // API 29 没有「所有文件访问」页：引导用户去开一个不存在的权限只会白跑，给通用失败文案
+        else if (!WotaStorage.supportsAllFilesAccess()) fallback
         else R.string.media_need_all_files
 
     // endregion

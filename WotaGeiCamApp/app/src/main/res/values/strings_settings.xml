@@ -104,6 +104,8 @@
     <string name="set_storage_note">打开后，删除、移入回收站、还原、重命名对本机所有视频直接生效，不会再出现系统的英文确认框；不开则只能改动本应用自己录的视频。</string>
     <string name="set_storage_open">去系统设置打开</string>
     <string name="set_storage_on">已开启</string>
+    <!-- API 29 没有「所有文件访问」系统页：如实说明只能管理本应用媒体，别引导去开不存在的权限 -->
+    <string name="set_storage_unsupported">当前系统（Android 10）没有「所有文件访问」；删除、回收站、重命名只对本应用录制/导出的视频生效。</string>
     <string name="cam_pill_level">水平仪</string>
     <string name="cam_pill_volume">音量表</string>
     <!-- 键名 cam_pill_bt 沿用：这颗原是蓝牙胶囊，内录批 2 换「音频」chip，位掩码按 bit 持久化不许改键 -->

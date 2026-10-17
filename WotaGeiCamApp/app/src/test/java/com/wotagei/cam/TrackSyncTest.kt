@@ -1,7 +1,9 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.player.TrackSync
+import com.wotagei.cam.source.KotlinSourceScan
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -90,6 +92,20 @@ class TrackSyncTest {
         assertEquals(false, r.ok)
         assertEquals(true, r.dualAudio)
         assertEquals(R.string.player_track_sync_failed, r.reasonRes)
+    }
+
+    /**
+     * extractor 打开失败必须自我回收：`runCatching { MediaExtractor().apply { setDataSource } }`
+     * 在 setDataSource 抛错时只返回 null，临时实例没有任何引用；调用方的 finally 只收得到
+     * 成功返回的实例 ⇒ 每次坏 URI 泄漏一枚原生 extractor。这里钉显式变量 + catch 内 release。
+     */
+    @Test
+    fun `extractor打开失败必须release临时实例`() {
+        val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/TrackSync.kt"))
+        val open = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "openExtractor"))
+        assertTrue("openExtractor 必须有 catch 分支", open.contains("catch (e: Exception)"))
+        assertTrue("catch 内必须 release 临时 extractor", open.contains("ex.release()"))
+        assertTrue("不得再退回无引用的 MediaExtractor().apply 写法", !src.contains("MediaExtractor().apply"))
     }
 
     // endregion

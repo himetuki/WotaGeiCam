@@ -207,8 +207,8 @@ class RecordHealthWiringGuardTest {
             startIdx >= 0 && clearIdx > startIdx
         )
         assertTrue(
-            "清错前必须把旧段失败码挪进 sessionError（结果口径不丢信息）",
-            rot.contains("sessionError = engineError")
+            "清错前必须把旧段失败码挪进 sessionError（结果口径不丢信息；801 自停的 STOP_FAILED 已由 stopErrorForKeep 排除）",
+            rot.contains("sessionError = oldError") && rot.contains("val oldError = stopErrorForKeep()")
         )
         assertTrue("新段起始复位弃段意图", rot.contains("abandonSegment = false"))
         // 新会话起始也各有一处复位（prepare 与 start）。属冗余防御、删掉运行时不会红，但一旦日后

@@ -216,6 +216,21 @@ class UpdateLogicTest {
         assertEquals("v0.9.9-r77", ReleaseJson.parseTag(mutant))
     }
 
+    @Test
+    fun `资产名安全判据_只接受纯文件名apk`() {
+        assertTrue("正常 CI 产物名", ReleaseJson.isSafeReleaseAssetName("WotaGeiCam-v0.0.9-r03-universal-release.apk"))
+        assertFalse("路径分隔符", ReleaseJson.isSafeReleaseAssetName("../evil.apk"))
+        assertFalse("反斜杠", ReleaseJson.isSafeReleaseAssetName("dir\\evil.apk"))
+        assertFalse("绝对路径", ReleaseJson.isSafeReleaseAssetName("/sdcard/evil.apk"))
+        assertFalse("非 apk", ReleaseJson.isSafeReleaseAssetName("mapping.txt"))
+        assertFalse("空名", ReleaseJson.isSafeReleaseAssetName(""))
+        assertFalse("null", ReleaseJson.isSafeReleaseAssetName(null))
+        assertFalse("超长名", ReleaseJson.isSafeReleaseAssetName("a".repeat(256) + ".apk"))
+        // 不可信资产名不得被 pickApkAsset 选中（否则会拼进下载 URL）
+        val unsafe = listOf(ReleaseAsset("../evil.apk", "https://x/e.apk", 1L))
+        assertNull(ReleaseJson.pickApkAsset(unsafe))
+    }
+
     // ------------------------------------------------------------------ 段 3：302 解析与资产名推导
 
     @Test
@@ -286,6 +301,42 @@ class UpdateLogicTest {
                 hit[1].startsWith(UpdateConfig.MIRROR_PREFIXES[0]) &&
                 hit[2].startsWith(UpdateConfig.MIRROR_PREFIXES[1])
         )
+    }
+
+    /**
+     * 镜像 body 不可信：即使 `browser_download_url` 指向攻击者主机，下载 URL 也必须由仓库常量 +
+     * 已校验资产名重建。旧实现直接采信 JSON 里的 URL，镜像可把 app 引向任意 HTTPS 端点（SSRF/
+     * 投递非本仓库 APK）；sha256 在段 2 恒 null，挡不住这条路。
+     */
+    @Test
+    fun `编排_镜像JSON的下载URL不得被采信_一律重建为仓库直连`() {
+        val evil = """
+            {"tag_name": "v0.0.9", "assets": [
+              {"name": "WotaGeiCam-v0.0.9-universal-release.apk",
+               "browser_download_url": "https://evil.example/payload.apk", "size": 5}
+            ]}
+        """.trimIndent()
+        val result = probeLatestRelease(
+            localVersionName = "0.0.7-r09",
+            fetchJson = { url -> if (url.startsWith(UpdateConfig.MIRROR_PREFIXES[0])) evil else null },
+            fetchRedirectLocation = { null }
+        )
+        val avail = result as ProbeResult.UpdateAvailable
+        assertEquals(
+            "下载 URL 必须由可信仓库常量重建，不能采信镜像 JSON 的 browser_download_url",
+            UpdateConfig.directDownloadUrl("v0.0.9", "WotaGeiCam-v0.0.9-universal-release.apk"),
+            avail.downloadUrl
+        )
+        assertFalse("不得出现攻击者主机", avail.downloadUrl.contains("evil.example"))
+    }
+
+    @Test
+    fun `下载传输只允许 HTTPS`() {
+        assertTrue("GitHub releases 是 HTTPS", UpdateDownloader.isHttpsUrl("https://github.com/a.apk"))
+        assertTrue("镜像前缀也是 HTTPS", UpdateDownloader.isHttpsUrl(UpdateConfig.MIRROR_PREFIXES[0] + "x"))
+        assertFalse("明文 HTTP 必须拒", UpdateDownloader.isHttpsUrl("http://example.com/a.apk"))
+        assertFalse("FTP 必须拒", UpdateDownloader.isHttpsUrl("ftp://example.com/a.apk"))
+        assertFalse("非 URL 必须拒", UpdateDownloader.isHttpsUrl("not a url"))
     }
 
     @Test

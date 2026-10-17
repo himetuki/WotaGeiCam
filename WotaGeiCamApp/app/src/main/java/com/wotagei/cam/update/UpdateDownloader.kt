@@ -303,14 +303,26 @@ object UpdateDownloader {
         }
     }
 
+    /**
+     * 只允许 HTTPS（纯函数，JVM 全测）。targetSdk 34 的明文默认禁网是平台行为，不是本模块的
+     * 契约；这里把"下载/探测永不走明文"写成自己可验证的判据，镜像前缀或未来改表都不会悄悄降级。
+     */
+    internal fun isHttpsUrl(url: String): Boolean =
+        runCatching { URL(url).protocol.equals("https", ignoreCase = true) }.getOrDefault(false)
+
     private fun openConnection(url: String, followRedirects: Boolean, readTimeoutMs: Int): HttpURLConnection? = try {
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = CONNECT_TIMEOUT_MS
-        c.readTimeout = readTimeoutMs
-        c.instanceFollowRedirects = followRedirects
-        // GitHub API 硬要求带 User-Agent；顺带让镜像日志能认出我们
-        c.setRequestProperty("User-Agent", "WotaGeiCam-UpdateCheck")
-        c
+        val parsed = URL(url)
+        if (!parsed.protocol.equals("https", ignoreCase = true)) {
+            null
+        } else {
+            val c = parsed.openConnection() as HttpURLConnection
+            c.connectTimeout = CONNECT_TIMEOUT_MS
+            c.readTimeout = readTimeoutMs
+            c.instanceFollowRedirects = followRedirects
+            // GitHub API 硬要求带 User-Agent；顺带让镜像日志能认出我们
+            c.setRequestProperty("User-Agent", "WotaGeiCam-UpdateCheck")
+            c
+        }
     } catch (e: Exception) {
         null
     }
