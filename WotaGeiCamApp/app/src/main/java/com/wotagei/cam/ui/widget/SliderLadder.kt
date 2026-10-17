@@ -50,11 +50,12 @@ internal fun zoomLadder(lo: Float, hi: Float): List<Float> =
         .filter { it >= lo && it <= hi }
 
 /**
- * 手动对焦屈光度：`0..hi` 等分 10 段共 11 点（`hi<=0` 表示定焦镜头，没有可调对焦距离）。
- * 这是本轮唯一从连续变分档的对焦量。
+ * 手动对焦屈光度：`lo..hi` 等分 10 段共 11 点（`hi<=lo` 表示定焦镜头，没有可调对焦距离）。
+ * 这是本轮唯一从连续变分档的对焦量。下限吃运行时 `range.start`——少数镜头的最小屈光度不为 0，
+ * 梯若从 0 起会造出滑杆可达、参数域外的刻度。
  */
-internal fun diopterLadder(hi: Float): List<Float> =
-    if (hi <= 0f) emptyList() else (0..10).map { hi * it / 10f }
+internal fun diopterLadder(lo: Float, hi: Float): List<Float> =
+    if (hi <= lo) emptyList() else (0..10).map { lo + (hi - lo) * it / 10f }
 
 /** 百分比梯（斑马阈值 80..100 步 1、峰值强度 5..95 步 5） */
 internal fun percentLadder(lo: Int, hi: Int, step: Int): List<Float> = steppedLadder(lo, hi, step)

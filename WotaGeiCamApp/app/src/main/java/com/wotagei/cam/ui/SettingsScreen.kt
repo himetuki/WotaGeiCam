@@ -137,8 +137,8 @@ object WotaSettings {
      * [KEY_DEFAULT_REF_LINES] / [KEY_LEVEL_ENABLED]）构成入档白名单，见 [ParamsPersist.KEYS]。
      *
      * - 恢复侧 [ParamsPersist.restore]（由 [applyDefaults] 末尾调用）读键 → 坏值回默认 → 写总线；
-     * - 写入侧 [ParamsPersistSession.flush] 只在用户动作完成点（关弹窗/点按循环/长按锁 AE/切镜头/
-     *   退后台/滑杆松手）把「本次会话真的动过」的字段批量 `commit()` 落盘。
+     * - 写入侧 [ParamsPersistSession.flush] 只在用户动作完成点（关弹窗/长按锁 AE/退后台/滑杆松手）
+     *   把「本次会话真的动过」的字段批量 `commit()` 落盘。
      *
      * [KEY_DEFAULT_FPS] / [KEY_DEFAULT_SHUTTER_NS] 为**复用存量键**（R1/2026-10-16 拍板：设置页的
      * 「默认帧率」「默认快门」两行已删，改由录制页 flush 写入；键不动、恢复链不动）。

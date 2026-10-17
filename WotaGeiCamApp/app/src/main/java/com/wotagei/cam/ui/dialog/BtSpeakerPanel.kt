@@ -119,8 +119,9 @@ fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
+                // 录制中允许停掉已经在跑的扫描（只是收手，不改任何配置）；起扫仍走 editable 闸
                 onClick = { if (scanning) controller.stopScan() else controller.startScan() },
-                enabled = editable
+                enabled = editable || scanning
             ) {
                 Icon(
                     if (scanning) Icons.Filled.BluetoothSearching else Icons.Filled.Bluetooth,

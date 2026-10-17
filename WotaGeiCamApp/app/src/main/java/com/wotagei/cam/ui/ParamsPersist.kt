@@ -26,7 +26,7 @@ import com.wotagei.cam.core.WotaTiers
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
  *   机型域钳制交给既有 [WotaParams.applyAbility]）；由 [WotaSettings.applyDefaults] 末尾调用。
  * - **落盘**：[ParamsPersistSession] 在进录制页时冻结一份"影子"（当前总线快照），只在用户动作
- *   完成点（关弹窗/点按循环/长按锁 AE/切镜头/退后台/滑杆松手）调 [ParamsPersistSession.flush]，
+ *   完成点（关弹窗/长按锁 AE/退后台/滑杆松手）调 [ParamsPersistSession.flush]，
  *   且**只写与影子不同的字段**——用户在设置页刚改的值不会被录制页的陈旧总线静默覆盖。
  *
  * **排除清单**（防后人"补齐"，语义论述见 [WotaSettings] 键表 KDoc）：
