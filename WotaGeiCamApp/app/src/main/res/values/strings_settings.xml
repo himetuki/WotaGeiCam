@@ -11,6 +11,9 @@
     <string name="set_default_bitrate">默认码率</string>
     <string name="set_default_sample">默认采样率</string>
     <string name="set_default_render">默认渲染模式</string>
+    <!-- 并入门槛（补弧差分死区 D，0..32，默认 12）：冷启动默认值，与录制页/播放器同一 key -->
+    <string name="set_default_deadband">并入门槛</string>
+    <string name="set_default_deadband_note">亮度差不超过它的画面不并入。调大更保守、调小会把噪点也并进去</string>
 
     <!-- 界面方向（键 ui_orientation，默认横屏使用） -->
     <string name="set_group_orientation">界面方向</string>

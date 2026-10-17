@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
 import com.wotagei.cam.core.ArcConvertMode
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
@@ -56,6 +57,7 @@ import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaType
+import com.wotagei.cam.ui.widget.deadbandLadder
 import com.wotagei.cam.ui.widget.diopterLadder
 import com.wotagei.cam.ui.widget.evLadder
 import com.wotagei.cam.ui.widget.isoLadder
@@ -190,7 +192,7 @@ fun PillHost(
     val editable = !recording || pillEditableDuringRecording(key)
     when (key) {
         PillKey.SIZE -> SizePill(anchor, params, ability, editable, onClose, onUnsupported)
-        PillKey.FPS -> FpsPill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.FPS -> FpsPill(anchor, params, ability, editable, onClose, onUnsupported, onPersist)
         PillKey.SHUTTER -> ShutterPill(anchor, params, ability, editable, onClose, onPersist)
         PillKey.ISO -> IsoPill(anchor, params, ability, editable, onClose, onPersist)
         PillKey.EV -> EvPill(anchor, params, ability, editable, onClose, onPersist)
@@ -324,12 +326,14 @@ private fun FpsPill(
     ability: CameraAbility?,
     editable: Boolean,
     onClose: () -> Unit,
-    onUnsupported: () -> Unit
+    onUnsupported: () -> Unit,
+    onPersist: () -> Unit
 ) {
     val app = LocalContext.current
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
     val size by params.size.observed()
     val fps by params.fps.observed()
+    val deadband by params.arcMergeDeadband.observed()
     // 强制 24/25fps 在无原生精确档（※ 档）设备上的录制期转换模式（2026-10-03 定版）：
     // MEND=抽帧+取大补弧（弧连续）/ DROP=仅抽帧（弧在抽帧点断，用户自选）。有精确档时不显示。
     val convertActive = fps.value in WotaTiers.REQUIRED_FPS && !fps.exact
@@ -403,6 +407,23 @@ private fun FpsPill(
                 // 与 NoteText 同一条封宽账：说明句在 220dp 内折行，不顶宽弹窗
                 modifier = Modifier.padding(top = 4.dp).widthIn(max = 220.dp)
             )
+            // 并入门槛（补弧差分死区 D，0..32，默认 12）：只在抽帧补弧真正生效时有意义，所以挂这一栏下面。
+            // 写入必须走 params.setArcMergeDeadband——直接改 `.value` 不同步发布 ArcMergeDeadband 快照，
+            // 引擎/离线修复读到的还是旧值（本条的守卫见 ArcMergeDeadbandUiWiringTest）。
+            PillSlider(
+                value = deadband.toFloat(),
+                lo = ArcMergeDeadband.MIN.toFloat(),
+                hi = ArcMergeDeadband.MAX.toFloat(),
+                step = 1f,
+                // 录制中与档位/转换模式同一把总闸（FPS 不在录制可调白名单里）
+                enabled = editable,
+                label = stringResource(R.string.cam_fps_deadband),
+                onValueChange = { params.setArcMergeDeadband(it.roundToInt()) },
+                format = { "${it.roundToInt()}" },
+                onValueChangeFinished = onPersist,
+                ladder = deadbandLadder()
+            )
+            NoteText(stringResource(R.string.cam_fps_deadband_note))
         }
     }
 }

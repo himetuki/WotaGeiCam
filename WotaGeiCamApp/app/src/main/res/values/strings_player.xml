@@ -18,6 +18,9 @@
     <string name="player_arc_fps">%1$d fps</string>
     <string name="player_arc_gpu">GPU 加速</string>
     <string name="player_arc_cpu">纯 CPU</string>
+    <!-- 并入门槛（补弧差分死区 D，0..32，默认 12）：与录制页同一量纲；必须在按下面两枚按钮之前设好 -->
+    <string name="player_arc_deadband">并入门槛</string>
+    <string name="player_arc_deadband_note">亮度差不超过它的画面不并入。调大更保守、调小会把噪点也并进去；按住开始修复前设好</string>
     <!-- 2026-10-05 分组重设计：动作组标题与两枚按钮的小注（与设置项视觉分组） -->
     <string name="player_arc_start_group">开始修复</string>
     <string name="player_arc_gpu_note">速度快·推荐</string>

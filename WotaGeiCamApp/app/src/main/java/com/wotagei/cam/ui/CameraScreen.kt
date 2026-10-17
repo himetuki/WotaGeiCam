@@ -285,6 +285,7 @@ fun CameraScreen(
     val bitrate by params.bitrate.observed()
     val refLines by params.refLines.observed()
     val levelEnabled by params.levelEnabled.observed()
+    val arcMergeDeadband by params.arcMergeDeadband.observed()
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
@@ -552,7 +553,8 @@ fun CameraScreen(
 
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
     LaunchedEffect(
-        glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack
+        glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack,
+        arcMergeDeadband
     ) {
         val gl = glEngine ?: return@LaunchedEffect
         gl.setEffect(if (renderMode == RenderMode.DIRECT) FrameEffect.NONE else frameEffect)
@@ -560,6 +562,9 @@ fun CameraScreen(
         gl.setPeakingParameters(peakingStrength, peakingColor)
         // 换渲染模式会 new 一个新引擎：曲线要在同一处补发，否则切回 GPU 就丢调色
         gl.setCurve(curveStack)
+        // 补弧「并入门槛」同理：只下发给当前引擎的本段 uniform，下一段 setArcConvert 仍回落到
+        // 参数总线发布的快照（真源在 WotaParams.setArcMergeDeadband）——这里不改打戳/抽帧节奏
+        gl.setArcMergeDeadband(arcMergeDeadband)
     }
 
     // ---- 方向：显示角喂给两条 sink，sink 内部再叠自己读到的缓冲矩阵旋转分量（见 camera/PreviewOrientation）

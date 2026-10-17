@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.diag.Diag
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
 import androidx.activity.ComponentActivity
@@ -85,6 +86,7 @@ import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.dialog.bitrateText
 import com.wotagei.cam.ui.dialog.sampleRateText
+import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
@@ -97,6 +99,7 @@ import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.widget.TierItem
 import com.wotagei.cam.ui.widget.TierPicker
+import com.wotagei.cam.ui.widget.deadbandLadder
 import com.wotagei.cam.update.ProbeResult
 import com.wotagei.cam.update.UpdateDownloader
 import com.wotagei.cam.update.UpdateInstaller
@@ -524,6 +527,14 @@ private fun BlockDefault(prefs: SharedPreferences) {
     var defaultSampleRate by remember { mutableStateOf(WotaSettings.defaultSampleRate(prefs)) }
     var defaultRender by remember { mutableStateOf(WotaSettings.defaultRenderMode(prefs)) }
     var defaultMuted by remember { mutableStateOf(WotaSettings.defaultAudioMuted(prefs)) }
+    var defaultDeadband by remember { mutableStateOf(WotaSettings.arcMergeDeadband(prefs)) }
+    // 并入门槛要写**同一个**总线 setter（参数域钳制 + 同步发布 ArcMergeDeadband 快照都在里面）：
+    // 设置页本来不持有参数总线，照 HudLayoutEditor 的惯例造一份本地总线（开机默认档照常套上），别处不读它。
+    val settingsParams = remember(prefs) {
+        WotaParams(CoroutineScope(Dispatchers.Unconfined)).also {
+            WotaSettings.applyDefaults(prefs, it)
+        }
+    }
 
     SettingGroup(stringResource(R.string.set_group_default))
     // 本页所有 bodyMedium 说明统一升 textMid（下面各卡同）：textLo 压 surface 只有 3.82，
@@ -568,6 +579,32 @@ private fun BlockDefault(prefs: SharedPreferences) {
                 defaultRender = mode
                 prefs.edit().putString(WotaSettings.KEY_DEFAULT_RENDER, mode.name).apply()
             }
+        )
+        // 并入门槛（补弧差分死区 D，0..32，默认 12）：冷启动默认值，与录制页/播放器共用同一个键。
+        // 拖动即写总线（快照同步），松手才落盘——与录制页滑杆同一条账
+        PillSlider(
+            value = defaultDeadband.toFloat(),
+            lo = ArcMergeDeadband.MIN.toFloat(),
+            hi = ArcMergeDeadband.MAX.toFloat(),
+            step = 1f,
+            label = stringResource(R.string.set_default_deadband),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            onValueChange = {
+                val v = it.roundToInt()
+                defaultDeadband = v
+                settingsParams.setArcMergeDeadband(v)
+            },
+            format = { "${it.roundToInt()}" },
+            onValueChangeFinished = {
+                prefs.edit().putInt(WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND, defaultDeadband).apply()
+            },
+            ladder = deadbandLadder()
+        )
+        Text(
+            text = stringResource(R.string.set_default_deadband_note),
+            style = MaterialTheme.typography.labelSmall,
+            color = WotaTextDim,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {

@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui.widget
 
+import com.wotagei.cam.core.ArcMergeDeadband
 import kotlin.math.abs
 
 /**
@@ -59,6 +60,13 @@ internal fun diopterLadder(lo: Float, hi: Float): List<Float> =
 
 /** 百分比梯（斑马阈值 80..100 步 1、峰值强度 5..95 步 5） */
 internal fun percentLadder(lo: Int, hi: Int, step: Int): List<Float> = steppedLadder(lo, hi, step)
+
+/**
+ * 补弧「并入门槛」（差分死区 D）：整数逐档一格，共 [ArcMergeDeadband.MAX]-[ArcMergeDeadband.MIN]+1 档。
+ * 域来自 [ArcMergeDeadband]（参数域常量，非机型数值），所以这里不接任何运行时入参。
+ */
+internal fun deadbandLadder(): List<Float> =
+    steppedLadder(ArcMergeDeadband.MIN, ArcMergeDeadband.MAX, 1)
 
 /**
  * 快门梯：调用方传入 `shutterItems(...).filter { it.supported }.map { it.value.toFloat() }`，
