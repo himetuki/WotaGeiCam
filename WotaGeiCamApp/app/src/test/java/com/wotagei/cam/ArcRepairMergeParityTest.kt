@@ -1,6 +1,8 @@
 package com.wotagei.cam
 
+import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.record.ArcRepairMerge
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
@@ -23,6 +25,12 @@ import kotlin.math.abs
  * 且必须有"尺子能红"的自证（[尺子能红_桥突变自证_取大改取小后灰白等价立刻失败]）与
  * "差异归因"的反证（[彩色差异源于色度_抹平UV后两口径又等价]），否则"等价/非等价"断言可能
  * 是 fixture 巧合或恒等式。
+ *
+ * **GPU 口径与真 shader 的连接（2026-10-17 审查订正）**：[mergeInRgb] 是 Kotlin **离线复刻**，
+ * 与生产 `ARC_MERGE_FS` 没有任何连接——把 shader 的 `max` 改成 `min`/加权混合，本文件前三条断言
+ * 全绿。故区域④另立**生产字符串守卫**：把 `Shaders.ARC_MERGE_FS` 的真值喂进纯判据函数
+ * [arcMergeFsViolations]（逐分量 `max(a, b)` / `.rgb` 采样 / 不含 `min(`/`mix(`/`* 0.5`），
+ * shader 被改坏即红，并用 mutate 过的文本做"尺子能红"自证。这样"GPU 口径"才真的钉在 shader 上。
  *
  * 说明：真实 CPU 路按整幅平面逐样本取大，本测试用**单像素模型**——`mergeMax` 逐样本独立、无
  * 跨格依赖（见其 KDoc），故一像素的等价性结论对整幅成立；本文件不重复测逐样本语义（那是
@@ -159,6 +167,69 @@ class ArcRepairMergeParityTest {
             abs(mutated.g - gpu.g) > 1f)
         // 对照：真桥在同样输入下仍等价（防止本用例只证明了"突变版坏了"而真桥也坏）
         assertRgbClose("中性色度", mergeInYuvThenRgb(a, b), gpu)
+    }
+
+    // endregion
+
+    // region ④ GPU 口径的真身：ARC_MERGE_FS 生产字符串必须逐分量取大
+
+    /**
+     * `Shaders.ARC_MERGE_FS` 的**生产字符串**判据：逐分量 `max(a, b)`、两个输入都按 `.rgb` 采样、
+     * 且不含任何非取大算子（`min(` / `mix(` / `* 0.5`）。返回违规清单（空 = 合规）。
+     *
+     * 为什么必须补这条：上面的 [mergeInRgb] 是 Kotlin **离线复刻**，与真 shader 无任何连接
+     * ——把 `ARC_MERGE_FS` 的 `max` 改成 `min`/加权混合，本文件前三条断言全绿（审查点名的"表述
+     * 过头"）。这里把**生产常量**真值喂进来，shader 被改坏即红。
+     *
+     * 直接读生产常量而非切 `Shaders.kt` 源码文本：`ARC_MERGE_FS` 的值本身就是**着色器体**
+     * （纯 GLSL，无 KDoc/注释混入的余地），比源码切片更紧（本仓 `ArcRepairGlSamplerGuardTest` 同法）。
+     */
+    private fun arcMergeFsViolations(shader: String): List<String> {
+        val bad = ArrayList<String>()
+        if (!shader.contains("vec3 a = texture2D(uA, vUv).rgb")) {
+            bad.add("uA 必须按 .rgb 采样（缺 vec3 a = texture2D(uA, vUv).rgb）")
+        }
+        if (!shader.contains("vec3 b = texture2D(uB, vUv).rgb")) {
+            bad.add("uB 必须按 .rgb 采样（缺 vec3 b = texture2D(uB, vUv).rgb）")
+        }
+        if (Regex("max\\s*\\(\\s*a\\s*,\\s*b\\s*\\)").find(shader) == null) {
+            bad.add("必须逐分量取大 max(a, b)（GLSL 逐分量 max 即 RGB 逐通道取大）")
+        }
+        listOf("min(", "mix(", "* 0.5", "0.5 *").forEach { op ->
+            if (shader.contains(op)) {
+                bad.add("ARC_MERGE_FS 出现非取大算子「$op」（v1 的 0.5 混合/取小已废弃）")
+            }
+        }
+        return bad
+    }
+
+    @Test
+    fun `真身ARC_MERGE_FS_逐分量取大且按rgb采样`() {
+        val bad = arcMergeFsViolations(Shaders.ARC_MERGE_FS)
+        assertEquals("生产 ARC_MERGE_FS 违反取大口径：\n${bad.joinToString("\n")}", 0, bad.size)
+    }
+
+    /**
+     * 突变自证：把**生产 shader 文本**改坏必报红——这是"GPU 口径"这条判据的靶子：
+     * 取大改取小、改加权混合、改半亮缩放、或去掉 `.rgb`（整 vec4 采样）都要红。
+     */
+    @Test
+    fun `尺子自己能红_ARC_MERGE_FS被改坏必报红`() {
+        val good = Shaders.ARC_MERGE_FS
+        assertEquals("良品必须先真的绿", 0, arcMergeFsViolations(good).size)
+        val mutants = listOf(
+            "max 改 min" to good.replace("max(a, b)", "min(a, b)"),
+            "改成加权混合" to good.replace("max(a, b)", "mix(a, b, 0.5)"),
+            "改成 0.5 缩放（v1 半亮重影）" to good.replace("max(a, b)", "a * 0.5"),
+            "uA 去掉 .rgb（采样整 vec4）" to good.replace("texture2D(uA, vUv).rgb", "texture2D(uA, vUv)"),
+        )
+        mutants.forEach { (name, mutated) ->
+            assertTrue("突变锚点丢失：$name 未改动 shader 文本", mutated != good)
+            assertTrue(
+                "突变体「$name」必须报红，实际违规为空 ⇒ 源扫描对生产件不敏感",
+                arcMergeFsViolations(mutated).isNotEmpty()
+            )
+        }
     }
 
     // endregion

@@ -82,7 +82,8 @@ class ArcRepairGlStampGuardTest {
 
     /**
      * M6-05 观测接线体检：`acquire()` 里的"被 SurfaceTexture 合帧数"必须**纯观测**——只增、
-     * 不改戳、不进抽帧判定，且既有帧账（`framesConsumed++`）与既有调用次序逐字不变。
+     * 不改戳、不进抽帧判定（落 WARN 只在积压创新高/首次命中时，避免管线长期慢于解码器时按
+     * 帧率刷屏），且既有帧账（`framesConsumed++`）与既有调用次序逐字不变。
      *
      * 为什么必须钉住"不改戳"：`updateTexImage` 吞掉的中间帧不进任何既有计数，抽帧计划的
      * `srcIndex` 因此可能错位——这条观测就是为它留痕的。但它一旦反过来去改 PTS / 干预抽取，
@@ -98,8 +99,24 @@ class ArcRepairGlStampGuardTest {
         }
         // ② 计数只增 + 峰值只增
         if (!acq.contains("mergedFrames += merged")) bad.add("合帧计数必须只增（缺 mergedFrames +=）")
-        if (!acq.contains("if (merged > mergedMaxBack) mergedMaxBack = merged")) {
-            bad.add("单次最大积压必须按峰值更新（缺 if (merged > mergedMaxBack) mergedMaxBack = merged）")
+        if (!acq.contains("if (merged > mergedMaxBack) { mergedMaxBack = merged")) {
+            bad.add("单次最大积压必须按峰值更新（缺 if (merged > mergedMaxBack) { mergedMaxBack = merged）")
+        }
+        // ②′ 日志必须被「创新高」分支包住：管线长期慢于解码器时 backlog>1 几乎每帧成立
+        //     （正是本观测要抓的场景），日志若落在 if 之外就以帧率频率刷 WARN（长片数万行）
+        //     淹掉有用诊断。计数语义不变（只增），只把落日志收敛到首次命中/创新高。
+        val peakOpen = acq.indexOf("if (merged > mergedMaxBack) {")
+        val logAt = acq.indexOf("Log.w(")
+        if (logAt < 0) bad.add("合帧观测失去痕迹：WARN 日志被整个删掉")
+        if (peakOpen >= 0 && logAt >= 0 && peakOpen > logAt) {
+            bad.add("合帧日志必须落在「创新高」分支内（现落在 if 之前 = 命中即每帧落一条）")
+        }
+        if (peakOpen >= 0) {
+            val peakClose = acq.indexOf('}', peakOpen)
+            val guarded = if (peakClose > peakOpen) acq.substring(peakOpen, peakClose) else ""
+            if (!guarded.contains("Log.w(")) {
+                bad.add("合帧日志必须与峰值更新同处「创新高」分支（落在分支外 = 命中即每帧落一条）")
+            }
         }
         listOf("mergedFrames -=", "mergedFrames--", "mergedMaxBack -=", "mergedMaxBack--").forEach { dec ->
             if (acq.contains(dec)) bad.add("合帧计数出现递减 $dec（观测只增，不许回落）")
@@ -138,9 +155,10 @@ class ArcRepairGlStampGuardTest {
     }
 
     /**
-     * 突变自证：把观测退回"会改行为"或"消失"的形态必报红。五枚突变体各对应一种真实退化——
+     * 突变自证：把观测退回"会改行为"或"消失"的形态必报红。六枚突变体各对应一种真实退化——
      * **计数递减**（不再是单调账）、**观测块写戳**（第二真相源）、**计数门控抽帧**（观测变干预）、
-     * **删掉积压读取**（观测失去输入）、**帧账次序被改**（既有节拍被动）；另配一组只加注释的对照。
+     * **删掉积压读取**（观测失去输入）、**帧账次序被改**（既有节拍被动）、**日志挪出创新高分支**
+     * （命中即每帧落一条 WARN = 长片刷屏）；另配一组只加注释的对照。
      */
     @Test
     fun `尺子自己能红_合帧观测突变体必报红`() {
@@ -148,7 +166,7 @@ class ArcRepairGlStampGuardTest {
         assertEquals("良品必须先真的绿", 0, mergeObsViolations(gl).size)
 
         val countLine = "            mergedFrames += merged\n"
-        val peakLine = "            if (merged > mergedMaxBack) mergedMaxBack = merged\n"
+        val peakLine = "            if (merged > mergedMaxBack) {\n"
         val backlogLine = "        val backlog = synchronized(frameLock) { framesQueued - framesConsumed }\n"
         val consumeLine = "        synchronized(frameLock) { framesConsumed++ }\n"
         val copyLine = "        val ok = copyOesToCur()\n"
@@ -162,6 +180,12 @@ class ArcRepairGlStampGuardTest {
             Triple("计数门控抽帧（观测变干预）", gl.replace(peakLine, "            if (mergedFrames > 5L) return@postAndWait false\n"), true),
             Triple("删掉积压读取（观测失去输入）", gl.replace(backlogLine, ""), true),
             Triple("帧账次序被改（自增挪到拷贝之前）", gl.replace(copyLine + consumeLine, consumeLine + copyLine), true),
+            // 日志节流退化：把「创新高」分支拆掉，日志退回命中即每帧落一条（真机长片刷屏场景）
+            Triple(
+                "日志挪出创新高分支（命中即每帧落一条）",
+                gl.replace(peakLine, "            if (merged > mergedMaxBack) mergedMaxBack = merged\n"),
+                true
+            ),
             // 对照组：只在观测行尾加注释，不许引发红
             Triple("对照组：只加注释", gl.replace(backlogLine, backlogLine.trimEnd() + " // 观测\n"), false)
         )

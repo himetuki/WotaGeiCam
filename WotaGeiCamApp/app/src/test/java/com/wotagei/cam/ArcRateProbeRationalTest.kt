@@ -126,27 +126,193 @@ class ArcRateProbeRationalTest {
     }
 
     /**
-     * M6-05 守卫：整数源**逐点零变化**——旧 `List<Int>` 外壳必须与显式 `List<Long>` 核在同一
-     * 物理输入上逐点同值（Int 值恒在 Long 域内，滤噪窗与中位数逐点等价，故旧调用点行为不变）。
+     * M6-05 守卫：整数源**逐点零变化**——旧 `List<Int>` 外壳的每一步决策（滤噪窗界、中位数位次、
+     * 样本门槛、退档）都必须与**旧 Int 算法**逐点同值，故旧调用点行为不变。
+     *
+     * 为什么不能拿 Long 核当参照：Int 外壳的实现**就是** `measuredSrcFps(ints.map { it.toLong() }, …)`
+     * ——拿它当"旧算法"是**同源委托恒等式**（本文件 [goldRound] 那条老教训：对拍同源委托才是恒等式
+     * 假证明），删掉 Long 核里的判断分支它也照绿。故此处的参照是**独立参考实现** [LegacyIntRef]：
+     * 滤噪窗、中位数位次、档位快照表、±2µs 吸附窗、约分全在测试侧另写，**不调用 `ArcRateProbe`
+     * 的任何函数**（连 `snapToKnownRate`、`MeasuredSrcFps.of` 都不用）。
      */
     @Test
-    fun `整数源逐点零变化_Int外壳与Long核同值`() {
-        // 三段混合：重复样本（0）+ 有效 NTSC 样本 + 断层（2_000_000）——同时走滤噪与中位数两条路
-        val intRaw = buildList {
-            repeat(10) { add(0) }
-            repeat(45) { add(41_708) }
-            add(2_000_000)
-            repeat(45) { add(41_708) }
-        }
+    fun `整数源逐点零变化_Int外壳与旧Int参考实现同值`() {
+        val bad = parityViolations(LegacyIntRef())
         assertEquals(
-            "Int 外壳必须与显式 Long 核逐点同值（含中位数位次）",
-            ArcRateProbe.measuredSrcFps(intRaw.map { it.toLong() }, 24),
-            ArcRateProbe.measuredSrcFps(intRaw, 24)
+            "Int 外壳与旧 Int 算法的独立参考对拍出现分歧：\n${bad.joinToString("\n")}",
+            0,
+            bad.size
         )
-        // 回退路（有效样本不足）也必须同值
+    }
+
+    /**
+     * 尺子能红：把参考实现的**窗界 / 中位数位次 / 吸附窗**任一处改错，对拍必须报红——否则上面
+     * 那条"逐点同值"只是 fixture 巧合或恒等式。四枚突变体各改一处判据；另配一枚"无害放宽"
+     * （吸附窗 2µs → 3µs，fixture 未触及该边界）的对照，证明尺子不过敏。
+     */
+    @Test
+    fun `尺子自己能红_参考实现判据改错后对拍必失败`() {
+        assertEquals("良品必须先真的绿", 0, parityViolations(LegacyIntRef()).size)
+        val mutants = listOf(
+            "中位数位次取低半（size/2 → (size-1)/2）" to LegacyIntRef(medianRank = { (it - 1) / 2 }),
+            "滤噪窗下缘放宽到 1000" to LegacyIntRef(cleanLo = 1_000),
+            "滤噪窗上缘放宽到 1_000_001" to LegacyIntRef(cleanHi = 1_000_001),
+            "吸附窗收到 0µs（±2µs 判据失效）" to LegacyIntRef(snapWindowUs = 0L),
+        )
+        mutants.forEach { (name, ref) ->
+            val red = parityViolations(ref)
+            assertTrue("突变体「$name」必须让对拍报红，实际 0 分歧 ⇒ 上面的尺子测不到该判据", red.isNotEmpty())
+        }
+        // 对照组：只把吸附窗从 2µs 无害放宽到 3µs（fixture 不在该边界上），不许报红
+        assertEquals("对照组（无害放宽吸附窗）不该报红", 0, parityViolations(LegacyIntRef(snapWindowUs = 3L)).size)
+    }
+
+    /**
+     * 对拍 fixture：三条分别覆盖滤噪（窗内外）、中位数位次（偶数样本双峰）、样本门槛
+     * （恰 7 枚 < [ArcRateProbe.MIN_DELTAS]）。第 2/3 条是**为突变体量身**的——它们让
+     * "窗界改错"与"位次改错"必然翻转结果，否则突变体可能悄悄与良品同值。
+     */
+    private val parityFixtures: List<Triple<String, List<Int>, Long>> = listOf(
+        Triple(
+            "混合：10 枚重复(0) + 90 枚有效 NTSC(41708) + 1 枚断层(2000000)",
+            buildList<Int> {
+                repeat(10) { add(0) }
+                repeat(45) { add(41_708) }
+                add(2_000_000)
+                repeat(45) { add(41_708) }
+            },
+            24L
+        ),
+        Triple(
+            "偶数样本双峰（4×33333 + 4×41708）+ 窗下沿外样本 1000",
+            listOf(1_000) + List(4) { 33_333 } + List(4) { 41_708 },
+            24L
+        ),
+        Triple(
+            "有效样本恰 7 枚（<MIN_DELTAS）+ 窗上沿外样本 1_000_001",
+            List(7) { 41_708 } + listOf(1_000_001),
+            30L
+        ),
+    )
+
+    /** Int 外壳（被测）与旧 Int 算法独立参考的**逐点对拍**，返回分歧清单（空 = 一致） */
+    private fun parityViolations(ref: LegacyIntRef): List<String> {
+        val bad = ArrayList<String>()
+        for ((tag, raw, fallbackFps) in parityFixtures) {
+            val shell = ArcRateProbe.measuredSrcFps(raw, fallbackFps)   // 被测：Int 外壳
+            val legacy = ref.measure(raw, fallbackFps)                  // 参照：独立参考实现
+            if (shell != legacy) bad.add("$tag：Int 外壳=$shell 旧 Int 参考=$legacy")
+        }
+        return bad
+    }
+
+    /**
+     * 旧 Int 算法（父提交 `cca21be^` 的 `measuredSrcFps(List<Int>, …)`）的**独立参考实现**。
+     *
+     * 判据全部由构造参数给出，默认值 = v1 冻结口径；[medianRank] / [cleanLo] / [cleanHi] /
+     * [snapWindowUs] 是留给"尺子能红"突变体的旋钮（改一处 → 对拍必红），**不是**生产配置。
+     *
+     * 只借用 [MeasuredSrcFps] 这枚值类型当返回值（它未被 M6-05 改动，`data class` 的 equals
+     * 正合逐点比较）。档位表是 v1 的**冻结抄本**：生产 `KNOWN_RATES` 若扩充会一并红——那是有意的，
+     * 扩充档位会改变旧 Int 调用点的输出，属需人裁决的行为变更。
+     */
+    private class LegacyIntRef(
+        private val cleanLo: Int = 1_001,
+        private val cleanHi: Int = 1_000_000,
+        private val minDeltas: Int = 8,
+        private val medianRank: (Int) -> Int = { it / 2 },
+        private val snapWindowUs: Long = 2L,
+    ) {
+        fun measure(raw: List<Int>, fallbackNum: Long, fallbackDen: Long = 1L): MeasuredSrcFps {
+            val clean = raw.filter { it in cleanLo..cleanHi }
+            if (clean.size < minDeltas) return reduce(fallbackNum, fallbackDen)
+            return snap(clean.sorted()[medianRank(clean.size)].toLong())
+        }
+
+        /** ±[snapWindowUs]µs 的纯整数交叉相乘吸附；未命中退原始有理数 10⁶/d */
+        private fun snap(dUs: Long): MeasuredSrcFps {
+            for ((num, den) in RATES) {
+                val diff = dUs * num - 1_000_000L * den
+                if (diff <= snapWindowUs * num && diff >= -snapWindowUs * num) {
+                    return MeasuredSrcFps(num, den)
+                }
+            }
+            return reduce(1_000_000L, dUs)
+        }
+
+        /** 约分（非正数按 (0,1) 哨兵）——与生产同语义，但本函数自写、不复用生产的 gcd */
+        private fun reduce(num: Long, den: Long): MeasuredSrcFps {
+            if (num <= 0L || den <= 0L) return MeasuredSrcFps(0L, 1L)
+            val g = gcd(num, den)
+            return MeasuredSrcFps(num / g, den / g)
+        }
+
+        private fun gcd(a: Long, b: Long): Long {
+            var x = a
+            var y = b
+            while (y != 0L) {
+                val t = x % y
+                x = y
+                y = t
+            }
+            return x
+        }
+
+        private companion object {
+            /** v1 档位表冻结抄本（与生产同序，但**不引用**它） */
+            val RATES: List<Pair<Long, Long>> = listOf(
+                24L to 1L, 25L to 1L, 30L to 1L, 50L to 1L, 60L to 1L, 120L to 1L, 240L to 1L,
+                24_000L to 1_001L, 30_000L to 1_001L, 60_000L to 1_001L,
+            )
+        }
+    }
+
+    // endregion
+
+    // region P3-1 滤噪窗单一事实源（Int 视图由 Long 版派生）
+
+    /**
+     * P3-1：`CLEAN_RANGE`（Int）与 `CLEAN_RANGE_LONG` 曾是**两份字面量**，任一处被单独改动都会让
+     * 两条路径的窗界背离。现由 Long 版派生 ⇒ 按定义相等。末尾那条相等断言本身是**构造不变量（弱）**，
+     * 只防"有人把派生改回两份不同字面量"，不构成行为证明——真正钉窗界的是中间四条**行为**断言
+     * （窗内外各取一对样本：改窗界必翻转结果）。
+     */
+    @Test
+    fun `滤噪窗单一事实源_两视图同界且窗沿行为相符`() {
+        // 行为①：窗下沿 1001 入窗、1000 出窗。若 1000 被收进窗，中位数位次从 41708 落到 33333，
+        // 结果会从 24/1.001 翻成 30 —— 窗界被改必红。
+        val belowLoInt = listOf(1_000) + List(4) { 33_333 } + List(4) { 41_708 }
         assertEquals(
-            ArcRateProbe.measuredSrcFps(List(7) { 33_333L }, 24),
-            ArcRateProbe.measuredSrcFps(List<Int>(7) { 33_333 }, 24)
+            "窗下沿 1000 必须出窗（否则中位数被翻转成 30）",
+            rate(24_000, 1_001),
+            ArcRateProbe.measuredSrcFps(belowLoInt, 24)
+        )
+        // 行为②：窗上沿 1_000_000 入窗、1_000_001 出窗。出窗则 7 枚有效样本不足 8，仍退 fallback。
+        val aboveHiInt = List(7) { 41_708 } + listOf(1_000_001)
+        assertEquals(
+            "窗上沿 1_000_001 必须出窗（否则样本门槛被凑满、fallback 被绕过）",
+            rate(30, 1),
+            ArcRateProbe.measuredSrcFps(aboveHiInt, 30)
+        )
+        // 行为③：窗沿**内**两枚必须真被收下（防窗被整体收窄）：1001 → 10⁶/1001、1_000_000 → 1fps
+        // （`List(8) { 1_001 }` 的元素类型对 Int/Long 两个重载都可行 ⇒ 必须点名 `List<Int>`，
+        //   否则重载解析歧义——本文件开头同类坑的老教训）
+        assertEquals(rate(1_000_000, 1_001), ArcRateProbe.measuredSrcFps(List<Int>(8) { 1_001 }, 24))
+        assertEquals(rate(1, 1), ArcRateProbe.measuredSrcFps(List<Int>(8) { 1_000_000 }, 24))
+        // 行为④：Long 核跑同一批样本必须同值（Int 值恒在 Int 域内，两视图窗界只能同界）
+        assertEquals(
+            ArcRateProbe.measuredSrcFps(belowLoInt.map { it.toLong() }, 24),
+            ArcRateProbe.measuredSrcFps(belowLoInt, 24)
+        )
+        assertEquals(
+            ArcRateProbe.measuredSrcFps(aboveHiInt.map { it.toLong() }, 30),
+            ArcRateProbe.measuredSrcFps(aboveHiInt, 30)
+        )
+        // 弱不变量（构造）：派生后两者按定义同界，此处只作"别改回两份字面量"的哨兵
+        assertEquals(
+            "P3-1：Int 滤噪窗必须由 Long 版派生（同界）",
+            ArcRateProbe.CLEAN_RANGE_LONG.first.toInt()..ArcRateProbe.CLEAN_RANGE_LONG.last.toInt(),
+            ArcRateProbe.CLEAN_RANGE
         )
     }
 
