@@ -578,6 +578,9 @@ fun CameraScreen(
     // 手势层只捕获首帧一次（pointerInput(Unit)），所以可用性判据不能吃组合期快照：
     // 把「当前镜头槽位」装进稳定持有者，锁定时现读（槽位/能力会随换镜头与枚举完成变化）
     val slotNow by rememberUpdatedState(slot)
+    // 同一条纪律：录制态也是组合期 Boolean，而双击入口由 pointerInput(Unit) 首帧闭包捕获——
+    // 直接读 `recording` 会把首帧值固化，录制中双击仍能上锁（审查 P1）。装进稳定持有者现读。
+    val recordingNow by rememberUpdatedState(recording)
     /** 普通点焦三处写点共用：记最近点按处 + 先置 null 再写（StateFlow 去重会吞同一点重触） */
     val focusTapAt: (TapPoint) -> Unit = { point ->
         lastFocusTap = point
@@ -587,31 +590,29 @@ fun CameraScreen(
      * 锁定入口（双击取景与胶囊条目共用）：**先写锚点再置锁定态**——引擎按总线事件回执时
      * 读到的是新锚点；锁定成功给一句提示。
      *
-     * 录制门（A4，2026-10-17）：录制中一律不置锁、只提示——放在能力闸之前，双击与胶囊共用；
-     * 已锁时解锁不经过这里（`toggleFocusLock` 直接清态），所以"已锁可解锁"不受影响。
-     *
      * 可用性闸（R3a + 手动档语义，两处入口共用、**进闸时现读**）：① 手动对焦档本身即锁定、
      * 无需再锁；② 镜头能力不含单次自动对焦（AF_MODE_AUTO）就锁不了。命中时只给说明、
      * 不置锁定态——拒绝假开关（与胶囊条目灰显同一条判据；引擎 engageFocusLock 侧还有第二道）。
+     *
+     * 录制门（A4，2026-10-17）：录制中一律不置锁、只提示——双击与胶囊共用；已锁时解锁不经过这里
+     * （`toggleFocusLock` 直接清态），所以"已锁可解锁"不受影响。排在能力闸**之后**：手动档/不支持
+     * 自动对焦时给的是更准确的那一条说明（审查 P3）。`recordingNow` 现读，不吃首帧闭包快照（P1）。
      */
     val lockFocusAt: (TapPoint) -> Unit = { point ->
-        if (recording) {
-            showTip(focusLockRecordingText)
+        val blockedTip = when {
+            params.afMode.value == AfMode.MANUAL -> focusManualLockedText
+            slotNow?.ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == false ->
+                focusLockUnsupportedText
+            recordingNow -> focusLockRecordingText
+            else -> null
+        }
+        if (blockedTip != null) {
+            showTip(blockedTip)
         } else {
-            val blockedTip = when {
-                params.afMode.value == AfMode.MANUAL -> focusManualLockedText
-                slotNow?.ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == false ->
-                    focusLockUnsupportedText
-                else -> null
-            }
-            if (blockedTip != null) {
-                showTip(blockedTip)
-            } else {
-                lastFocusTap = point
-                params.focusLockPoint.value = point
-                params.focusLocked.value = true
-                showTip(focusLockedTipText)
-            }
+            lastFocusTap = point
+            params.focusLockPoint.value = point
+            params.focusLocked.value = true
+            showTip(focusLockedTipText)
         }
     }
     /** 胶囊「锁定对焦/解除锁定」：继续从最近点按处/中心锁定；已锁则解除 */
@@ -1174,8 +1175,8 @@ fun CameraScreen(
                 HudItem.ISO -> if (aeAuto) "AUTO" else "${iso.value}"
                 HudItem.EV ->
                     // 补 ev.enabled 判据（EV 闪退诊断 P3 同类）：EV 能力缺失的机器上 applyEv 给
-                    // range=null+enabled=false，只判 aeMode 会显示假 "+0.0EV"——与 HudCycle 的
-                    // range 真源口径统一（enabled 由 applyAbility 从 ability.evRange.ok() 写入）
+                    // range=null+enabled=false，只判 aeMode 会显示假 "+0.0EV"
+                    // （enabled 由 applyAbility 从 ability.evRange.ok() 写入，range 单一真源）
                     if (aeMode == AeMode.AUTO && ev.enabled) evText(ev.value, ability?.evStep ?: 1f) else null
                 HudItem.WB -> wbShort(wbMode, kelvin.value)
                 HudItem.ZOOM -> String.format(java.util.Locale.US, "%.1fx", zoom.value)

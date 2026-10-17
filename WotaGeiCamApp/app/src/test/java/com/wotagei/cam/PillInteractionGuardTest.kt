@@ -26,6 +26,9 @@ class PillInteractionGuardTest {
 
     private val hud by lazy { codeOnly(KotlinSourceScan.mainSourceText("ui/HudLayer.kt")) }
     private val pills by lazy { codeOnly(KotlinSourceScan.mainSourceText("ui/CameraPills.kt")) }
+    private val screen by lazy { codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt")) }
+    private val audioPanel by lazy { codeOnly(KotlinSourceScan.mainSourceText("ui/dialog/AudioSourcePanel.kt")) }
+    private val btPanel by lazy { codeOnly(KotlinSourceScan.mainSourceText("ui/dialog/BtSpeakerPanel.kt")) }
 
     /** HudLayer 里点按/长按的接线问题；空 = 干净 */
     private fun hudTapIssues(src: String): List<String> {
@@ -58,9 +61,66 @@ class PillInteractionGuardTest {
         }.map { "$it 没有 enabled = editable 只读总闸" }
     }
 
+    /**
+     * 九根滑杆必须全部接梯（A2）：任一根漏传 `ladder` 就会退回连续滑杆，而纯函数测试仍全绿
+     * （审查 P3 的假绿口）。空 = 干净。
+     */
+    private fun ladderIssues(src: String): List<String> {
+        val bad = ArrayList<String>()
+        if (occurrences(src, "PillSlider(").size != 9) bad.add("PillSlider 调用点不是 9 处")
+        // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
+        val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
+        if (ladderArgs != 9) bad.add("ladder = 参数不是 9 处（有滑杆退回连续模式）")
+        val panels = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill")
+        panels.forEach { fn ->
+            val body = runCatching { bodyOf(src, fn) }.getOrNull()
+            if (body == null || occurrences(body, "ladder =").isEmpty()) bad.add("$fn 没有 ladder")
+        }
+        return bad
+    }
+
+    /** 录制中只读必须覆盖 BT 页签（A4，审查 P1）：扫描/连接/音量/传输全部吃 editable。空 = 干净 */
+    private fun btIssues(panel: String, audio: String): List<String> {
+        val bad = ArrayList<String>()
+        if (!audio.contains("BtSpeakerPanel(bt, editable)")) {
+            bad.add("AudioSourcePanel 没有把 editable 传给 BtSpeakerPanel")
+        }
+        if (!panel.contains("editable: Boolean")) bad.add("BtSpeakerPanel 没有 editable 形参")
+        if (occurrences(panel, "enabled = editable").size < 6) {
+            bad.add("BtSpeakerPanel 的扫描/连接/传输键没有全部吃 editable（至少 6 处）")
+        }
+        if (!panel.contains("enabled = maxVolume > 0 && editable")) {
+            bad.add("BtSpeakerPanel 音量滑杆没有吃 editable")
+        }
+        return bad
+    }
+
+    /** 取 [from] 到 [to] 之间的源码片（局部 val lambda 没有 fun 体，bodyOf 定位不到） */
+    private fun sliceBetween(src: String, from: String, to: String): String {
+        val a = src.indexOf(from)
+        if (a < 0) return ""
+        val b = src.indexOf(to, a)
+        if (b < 0) return ""
+        return flatten(src.substring(a, b))
+    }
+
+    /**
+     * 对焦锁定录制门必须**现读**录制态（审查 P1）：`pointerInput(Unit)` 首帧闭包会把组合期
+     * `recording` 固化，录制中双击仍能上锁。空 = 干净。
+     */
+    private fun focusGateIssues(src: String): List<String> {
+        val block = sliceBetween(src, "val lockFocusAt", "val toggleFocusLock")
+        if (block.isEmpty()) return listOf("lockFocusAt 区块定位失败（守卫失去输入，不许算通过）")
+        val bad = ArrayList<String>()
+        if (!block.contains("recordingNow")) {
+            bad.add("lockFocusAt 录制门不吃 recordingNow：首帧闭包会固化录制态，录制中双击仍能上锁")
+        }
+        if (block.contains("if (recording)")) bad.add("lockFocusAt 仍直接读组合期 recording（首帧快照）")
+        return bad
+    }
+
     @Test
-    fun `读数与镜头点按长按都开弹窗`() {
-        assertEquals("HudLayer 点按接线断点：\n${hudTapIssues(hud).joinToString("\n")}", emptyList<String>(), hudTapIssues(hud))
+    fun `读数与镜头点按长按都开弹窗`() {        assertEquals("HudLayer 点按接线断点：\n${hudTapIssues(hud).joinToString("\n")}", emptyList<String>(), hudTapIssues(hud))
     }
 
     @Test
@@ -116,6 +176,25 @@ class PillInteractionGuardTest {
     }
 
     @Test
+    fun `九根滑杆都接刻度梯`() {
+        assertEquals("滑杆梯接线缺件：\n${ladderIssues(pills).joinToString("\n")}", emptyList<String>(), ladderIssues(pills))
+    }
+
+    @Test
+    fun `录制中 BT 页签也只读`() {
+        assertEquals("BT 页签只读缺口：\n${btIssues(btPanel, audioPanel).joinToString("\n")}", emptyList<String>(), btIssues(btPanel, audioPanel))
+    }
+
+    @Test
+    fun `对焦锁定录制门现读录制态`() {
+        assertEquals("锁焦录制门问题：\n${focusGateIssues(screen).joinToString("\n")}", emptyList<String>(), focusGateIssues(screen))
+        assertTrue(
+            "CameraScreen 必须把录制态装进 rememberUpdatedState",
+            screen.contains("val recordingNow by rememberUpdatedState(recording)")
+        )
+    }
+
+    @Test
     fun `尺子自己能红`() {
         assertEquals("良品先绿", emptyList<String>(), hudTapIssues(hud))
         // 突变 1：读数长按改回别的回调 -> 必红
@@ -134,6 +213,23 @@ class PillInteractionGuardTest {
         assertTrue(
             "只读总闸被拆必须红",
             readOnlyIssues(pills.replace("enabled = editable", "enabled = true")).isNotEmpty()
+        )
+        // 突变 4：任一根滑杆的梯被拆 -> 必红（防止删一处 ladder 退回连续滑杆而全绿）
+        assertTrue(
+            "滑杆梯被拆必须红",
+            ladderIssues(pills.replace("ladder = isoLadder(lo, hi)", "ladderX = isoLadder(lo, hi)"))
+                .isNotEmpty()
+        )
+        // 突变 5：BT 页签不再吃 editable -> 必红
+        assertTrue(
+            "BT 只读总闸被拆必须红",
+            btIssues(btPanel.replace("enabled = editable", "enabled = true"), audioPanel).isNotEmpty()
+        )
+        // 突变 6：锁焦录制门改回首帧快照 -> 必红
+        assertTrue(
+            "锁焦录制门被拆必须红",
+            focusGateIssues(screen.replace("recordingNow -> focusLockRecordingText", "recording -> focusLockRecordingText"))
+                .isNotEmpty()
         )
     }
 }

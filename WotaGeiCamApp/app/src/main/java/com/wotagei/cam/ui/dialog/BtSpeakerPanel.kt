@@ -75,9 +75,11 @@ import kotlin.math.roundToInt
  * 「去设置」跳系统蓝牙页 —— A2DP 主动连接不可编程，所以列表里的「连接」按钮也走这条路。
  *
  * @param controller 由调用方 `remember { BtSpeakerController(context) }` 持有并在 onDispose 里 close
+ * @param editable 录制中只读（A4 白名单不含 BT）：false 时搜索/连接/音量/传输键全部禁用。
+ *   无默认值必传——漏传 = 录制中还能调音箱，编译期就该挡。
  */
 @Composable
-fun BtSpeakerPanel(controller: BtSpeakerController) {
+fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
     val context = LocalContext.current
     val devices by controller.devices.collectAsState()
     val active by controller.active.collectAsState()
@@ -116,7 +118,10 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { if (scanning) controller.stopScan() else controller.startScan() }) {
+            IconButton(
+                onClick = { if (scanning) controller.stopScan() else controller.startScan() },
+                enabled = editable
+            ) {
                 Icon(
                     if (scanning) Icons.Filled.BluetoothSearching else Icons.Filled.Bluetooth,
                     contentDescription = stringResource(
@@ -162,7 +167,10 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
             HintCard(stringResource(rationaleRes))
             // 双按钮左右排间距 12vp（hw_button 响应式布局节；面板本身是气泡族、不套 ⑧ 半模态尺寸）
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton(onClick = { permissionLauncher.launch(controller.missingPermissions()) }) {
+                TextButton(
+                    onClick = { permissionLauncher.launch(controller.missingPermissions()) },
+                    enabled = editable
+                ) {
                     // 可点动作保语义不保 accent：小字 accent 压面板底 4.48 过不了 AA，
                     // 改 textHi（压底 4.5+ 达标）+ 下划线（链接惯例）表达「可点」
                     Text(
@@ -171,7 +179,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
                         textDecoration = TextDecoration.Underline
                     )
                 }
-                TextButton(onClick = { openBluetoothSettings(context) }) {
+                TextButton(onClick = { openBluetoothSettings(context) }, enabled = editable) {
                     Text(stringResource(R.string.perm_open_settings))
                 }
             }
@@ -195,7 +203,9 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
             if (paired.isNotEmpty()) {
                 SectionLabel(stringResource(R.string.bt_group_paired))
                 paired.forEach { device ->
-                    DeviceRow(device, device.address == active?.address, battery) { controller.connect(device) }
+                    DeviceRow(device, device.address == active?.address, battery, editable) {
+                        controller.connect(device)
+                    }
                 }
             }
             if (nearby.isNotEmpty() || scanning) {
@@ -204,7 +214,9 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
                     else stringResource(R.string.bt_group_nearby)
                 )
                 nearby.forEach { device ->
-                    DeviceRow(device, device.address == active?.address, battery) { controller.connect(device) }
+                    DeviceRow(device, device.address == active?.address, battery, editable) {
+                        controller.connect(device)
+                    }
                 }
             }
         }
@@ -218,7 +230,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
             Slider(
                 value = fraction,
                 onValueChange = { controller.setVolume((it * maxVolume).roundToInt()) },
-                enabled = maxVolume > 0,
+                enabled = maxVolume > 0 && editable,
                 modifier = Modifier.weight(1f)
             )
             Text(
@@ -234,10 +246,10 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(28.dp)
             ) {
-                IconButton(onClick = { controller.prev() }) {
+                IconButton(onClick = { controller.prev() }, enabled = editable) {
                     Icon(Icons.Filled.SkipPrevious, contentDescription = stringResource(R.string.bt_prev), tint = WotaText)
                 }
-                IconButton(onClick = { controller.playPause() }) {
+                IconButton(onClick = { controller.playPause() }, enabled = editable) {
                     Icon(
                         Icons.Filled.PlayArrow,
                         contentDescription = stringResource(R.string.bt_play_pause),
@@ -245,7 +257,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController) {
                         modifier = Modifier.size(36.dp)
                     )
                 }
-                IconButton(onClick = { controller.next() }) {
+                IconButton(onClick = { controller.next() }, enabled = editable) {
                     Icon(Icons.Filled.SkipNext, contentDescription = stringResource(R.string.bt_next), tint = WotaText)
                 }
             }
@@ -278,7 +290,13 @@ private fun HintCard(text: String, warn: Boolean = false) {
 }
 
 @Composable
-private fun DeviceRow(device: BtDevice, isActive: Boolean, battery: Int?, onConnect: () -> Unit) {
+private fun DeviceRow(
+    device: BtDevice,
+    isActive: Boolean,
+    battery: Int?,
+    editable: Boolean,
+    onConnect: () -> Unit
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -317,7 +335,7 @@ private fun DeviceRow(device: BtDevice, isActive: Boolean, battery: Int?, onConn
         }
         if (!device.connected) {
             // 同「授予权限」：动作小字用 textHi + 下划线表达可点，不用过不了 AA 的 accent
-            TextButton(onClick = onConnect) {
+            TextButton(onClick = onConnect, enabled = editable) {
                 Text(
                     stringResource(R.string.bt_connect),
                     color = WotaText,

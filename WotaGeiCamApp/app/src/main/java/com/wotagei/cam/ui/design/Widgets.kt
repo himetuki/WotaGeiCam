@@ -417,7 +417,7 @@ private fun WotaChipImpl(
     val clickable = if (onClick == null) modifier else modifier
         .clip(chipShape)
         .then(
-            // 长按开面板、点按循环取值是取景器参数胶囊的一对动作（鸿蒙化第 2 条），
+            // 点按与长按都开同一个就近面板（2026-10-17 用户拍板：点按出弹窗更顺手），
             // 共用同一枚 interactionSource，按压缩放才不会只认其中一个手势
             // enabled 走 Compose 的 Disabled 语义：点击/长按都不回调，无障碍树如实报 enabled=false。
             // 灰显视觉不在这里做——调用方用 valueColor=textLo 表达（见 WotaChip 的 [enabled] 注）
