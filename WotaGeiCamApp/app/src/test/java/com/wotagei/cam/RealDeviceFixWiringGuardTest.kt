@@ -109,8 +109,9 @@ class RealDeviceFixWiringGuardTest {
             "内录开关激活态再点必须走 onDisableCapture（开关语义完整）",
             tab.contains("active -> onDisableCapture()")
         )
-        // 录制中两开关都锁（既有红线不回退）
-        assertEquals(2, occurrences(tab, "recording -> onLockTip()").size)
+        // 录制中两开关只读（A4：整行 enabled = editable，既有只读红线不回退）
+        assertEquals(2, occurrences(tab, "enabled = editable").size)
+        assertTrue("录制中只读不再走 onLockTip 早退", occurrences(tab, "recording -> onLockTip()").isEmpty())
     }
 
     @Test

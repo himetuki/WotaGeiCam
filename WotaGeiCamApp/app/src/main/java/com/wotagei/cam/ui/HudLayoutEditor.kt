@@ -1304,11 +1304,9 @@ private fun editorCtx(
         onFocusClick = { },
         onStabClick = { },
         onBtClick = { },
-        onLensCycle = { },
         onOpenLensPanel = { },
         onRecordClick = { },
         onThumbClick = { },
-        onReadoutCycle = { },
         onReadoutOpen = { },
         hiddenEntry = hiddenEntry
     )

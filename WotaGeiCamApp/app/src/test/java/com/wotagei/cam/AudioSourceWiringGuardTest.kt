@@ -18,7 +18,7 @@ import org.junit.Test
  * - 开关→授权→回执链（enableCapture → launchCaptureConsent → onConsentResult）一条不许断；
  * - launch 异常必须有等价取消回执把 Authorizing 滚回 Idle（审查修复 P3-1 回滚闸）；
  * - controller 宿主必须是单例 `PlaybackCaptureController.get`（批 1 交接约束 P3-2）；
- * - 录制中左右开关都必须先过锁定判据（照 SizePill/LensPill 的 onLockTip 先例）；
+ * - 录制中左右开关都必须只读（A4：整行 `enabled = editable`，不再走 onLockTip 早退）；
  * - 撤销链在录制页有提示（批 1 交接 P3-3：Revoked 态给重新授权入口，弹窗小字由此提供）。
  *
  * 「尺子自己能红」一测拿同一把尺打突变体，防"删空判据照样绿"。
@@ -129,12 +129,16 @@ class AudioSourceWiringGuardTest {
     }
 
     @Test
-    fun `录制中开关锁定与状态派生判据`() {
+    fun `录制中开关只读与状态派生判据`() {
         val tab = bodyOf(panelMain(), "AudioSourceTab")
         assertEquals(
-            "左右开关都必须先过录制锁定判据（照 SizePill/LensPill 的 onLockTip 先例）",
+            "左右开关都必须接录制只读总闸（A4：enabled = editable）",
             2,
-            occurrences(tab, "recording -> onLockTip()").size
+            occurrences(tab, "enabled = editable").size
+        )
+        assertTrue(
+            "录制中只读改为控件禁用，不再有 onLockTip 早退（弹窗可开、可查看）",
+            occurrences(tab, "recording -> onLockTip()").isEmpty()
         )
         assertTrue(
             "内录开关的选中态必须派生自 controller 状态（状态真源是 controller）",
@@ -164,12 +168,12 @@ class AudioSourceWiringGuardTest {
             "突变体必须至少断一条链",
             missingConsentWires(screenBody(), mutatedLaunch).isNotEmpty()
         )
-        // 突变自证 2：录制锁定判据拆掉后必须数不出 2 处
+        // 突变自证 2：录制只读总闸拆掉后必须数不出 2 处
         val tab = bodyOf(panelMain(), "AudioSourceTab")
-        val mutatedTab = tab.replace("recording -> onLockTip()", "recording -> Unit")
-        assertEquals(0, occurrences(mutatedTab, "recording -> onLockTip()").size)
+        val mutatedTab = tab.replace("enabled = editable", "enabled = true")
+        assertEquals(0, occurrences(mutatedTab, "enabled = editable").size)
         // 真身上同一把尺必须绿（保证上面两条红不是尺子坏了）
-        assertEquals(2, occurrences(tab, "recording -> onLockTip()").size)
+        assertEquals(2, occurrences(tab, "enabled = editable").size)
         assertTrue(missingConsentWires(screenBody(), realLaunch).isEmpty())
         assertTrue(missingRollbackWires(realLaunch).isEmpty())
     }

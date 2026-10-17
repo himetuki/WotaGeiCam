@@ -130,7 +130,6 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.RenderMode
-import com.wotagei.cam.core.nextLensKey
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
@@ -397,6 +396,7 @@ fun CameraScreen(
     // 锁定成功一句；锁定期间轻触/双击/按中心对焦条目都走同一条"被挡"提示，每次上锁最多给一次
     val focusLockedTipText = stringResource(R.string.cam_focus_locked_tip)
     val focusTapLockedTipText = stringResource(R.string.cam_focus_tap_locked_tip)
+    val focusLockRecordingText = stringResource(R.string.cam_focus_lock_recording)
     val focusManualLockedText = stringResource(R.string.cam_focus_manual_locked)
     val focusLockUnsupportedText = stringResource(R.string.cam_focus_lock_unsupported)
     var lockedTapTipShown by remember { mutableStateOf(false) }
@@ -587,24 +587,31 @@ fun CameraScreen(
      * 锁定入口（双击取景与胶囊条目共用）：**先写锚点再置锁定态**——引擎按总线事件回执时
      * 读到的是新锚点；锁定成功给一句提示。
      *
+     * 录制门（A4，2026-10-17）：录制中一律不置锁、只提示——放在能力闸之前，双击与胶囊共用；
+     * 已锁时解锁不经过这里（`toggleFocusLock` 直接清态），所以"已锁可解锁"不受影响。
+     *
      * 可用性闸（R3a + 手动档语义，两处入口共用、**进闸时现读**）：① 手动对焦档本身即锁定、
      * 无需再锁；② 镜头能力不含单次自动对焦（AF_MODE_AUTO）就锁不了。命中时只给说明、
      * 不置锁定态——拒绝假开关（与胶囊条目灰显同一条判据；引擎 engageFocusLock 侧还有第二道）。
      */
     val lockFocusAt: (TapPoint) -> Unit = { point ->
-        val blockedTip = when {
-            params.afMode.value == AfMode.MANUAL -> focusManualLockedText
-            slotNow?.ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == false ->
-                focusLockUnsupportedText
-            else -> null
-        }
-        if (blockedTip != null) {
-            showTip(blockedTip)
+        if (recording) {
+            showTip(focusLockRecordingText)
         } else {
-            lastFocusTap = point
-            params.focusLockPoint.value = point
-            params.focusLocked.value = true
-            showTip(focusLockedTipText)
+            val blockedTip = when {
+                params.afMode.value == AfMode.MANUAL -> focusManualLockedText
+                slotNow?.ability?.afModes?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == false ->
+                    focusLockUnsupportedText
+                else -> null
+            }
+            if (blockedTip != null) {
+                showTip(blockedTip)
+            } else {
+                lastFocusTap = point
+                params.focusLockPoint.value = point
+                params.focusLocked.value = true
+                showTip(focusLockedTipText)
+            }
         }
     }
     /** 胶囊「锁定对焦/解除锁定」：继续从最近点按处/中心锁定；已锁则解除 */
@@ -1212,26 +1219,8 @@ fun CameraScreen(
         onFocusClick = { pop = PillKey.FOCUS },
         onStabClick = { pop = PillKey.STAB },
         onBtClick = { pop = PillKey.BT },
-        onLensCycle = {
-            if (recording) {
-                lockTip()
-            } else {
-                // 顺序与颗数全从运行时枚举出的镜头表取，不写死「广角↔前置」这种两档假设
-                val keys = ui.lenses.map { it.key }
-                val target = ui.lenses.firstOrNull { it.key == nextLensKey(keys, slot?.key) }
-                when {
-                    // 相机还没枚举完就点：说"等预览"而不是"只有一颗镜头"，后者是假信息
-                    keys.isEmpty() -> showTip(app.getString(R.string.cam_wait_preview))
-                    target == null -> showTip(app.getString(R.string.cam_lens_only_one))
-                    else -> {
-                        ctrl.switchLens(target)
-                        // H4：点按切镜头后落盘（用户反馈第 1 条；面板选中那条走 H1 的 closePill）
-                        persist.flush()
-                    }
-                }
-            }
-        },
-        onOpenLensPanel = { if (recording) lockTip() else pop = PillKey.LENS },
+        // 2026-10-17：点按/长按都开镜头面板（点按不再切下一颗镜头）；录制中也能开，弹窗内只读
+        onOpenLensPanel = { pop = PillKey.LENS },
         onRecordClick = {
             when {
                 recStatus == RecordStatus.START -> runner.stopAsync()
@@ -1266,13 +1255,7 @@ fun CameraScreen(
             }
         },
         onThumbClick = { if (recording) lockTip() else onOpenGallery() },
-        onReadoutCycle = { item ->
-            // 录制中一律不改档（与面板同一条锁），改不动时给"本机不支持"而不是静默无反应
-            if (recording) lockTip()
-            else if (!hudCycleStep(item, params)) showTip(unsupportedText)
-            // H2：点按循环真的改了值 = 用户动作完成点，落盘（用户反馈第 1 条）
-            else persist.flush()
-        },
+        // 点按与长按共用：开读数对应弹窗（近似帧率先说明再开）；录制中同样可开，弹窗内按 A4 只读/可调
         onReadoutOpen = { item ->
             // 近似帧率先说明再让改：点上去弹一个"这档其实是 23.976"的浮层比直接改值有用
             if (item == HudItem.FPS && !fps.exact) {
@@ -1545,7 +1528,7 @@ fun CameraScreen(
                                         // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
                                         .pillAnchorReport(pillAnchors, PillKey.BITRATE),
                                     secondary = stringResource(HudItem.BITRATE.labelRes),
-                                    onClick = { hudCtx.onReadoutCycle(HudItem.BITRATE) },
+                                    onClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
                                     onLongClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
                                     frost = hudFrostPillPlate
                                 )
@@ -1654,7 +1637,6 @@ fun CameraScreen(
                 onClose = closePill,
                 // R4：滑杆「松手即落盘」通道——拖着滑杆没关弹窗就被 force-stop 也不丢值
                 onPersist = { persist.flush() },
-                onLockTip = lockTip,
                 onUnsupported = { showTip(unsupportedText) },
                 onFocusCenter = {
                     when {
