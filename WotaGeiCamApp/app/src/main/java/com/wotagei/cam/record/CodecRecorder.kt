@@ -133,11 +133,12 @@ class CodecRecorder(
 
         /**
          * 起录缓冲的**字节上限**（2026-10-17）：muxer 启动前已编码的视频样本先复制进
-         * [PreMuxVideoBuffer]，容器可写后按 PTS 补写，不再直接丢。
+         * [PreMuxVideoBuffer]，容器可写后按**到达顺序**补写，不再直接丢。
          *
-         * 量级依据：最长等待窗 = [CAP_SAMPLE_WAIT_MS] 1.5s；本工程自动码率最高档 4K/60 为
-         * 64Mbps ⇒ 1.5s ≈ 12MB，关键帧峰值再留一倍余量 ⇒ 32MiB。固定上限而不是按堆比例，
-         * 是为了让"最多占多少内存"在代码里可一眼读出（任何设备都不会超过 32MiB）。
+         * 量级依据：最长等待窗 = [CAP_SAMPLE_WAIT_MS] 1.5s；本工程自动码率最高档 = 产品档位
+         * 上限 50Mbps（[com.wotagei.cam.core.WotaTiers.BITRATES] 末项）⇒ 1.5s ≈ 9.4MB，
+         * 关键帧峰值再留约 3 倍余量 ⇒ 32MiB。固定上限而不是按堆比例，是为了让"最多占多少内存"
+         * 在代码里可一眼读出（任何设备都不会超过 32MiB）。
          */
         internal const val PRE_MUX_BUFFER_MAX_BYTES = 32L * 1024L * 1024L
 
@@ -474,7 +475,12 @@ class CodecRecorder(
     @Volatile
     private var rotateStoreTimedOut = false
 
-    /** 上一次换段腿的丢失（ms）：[settleRotateLeg] 写入、下一轮循环顶部随段账落地（见 [segLostMs]） */
+    /**
+     * 上一次换段腿的丢失（ms）：[settleRotateLeg] 写入；下一轮循环顶部先抄进 sidecar [segLostMs]，
+     * 随后（本字段归零）由 [currentSegLostMs] 供下一段段行读取。**顺序**：段行帧账的
+     * currentSegLost* 必须在 settleRotateLeg 之后赋值——写在它之前会读到上上条腿，导致第 2 段行
+     * 恒 0、最后一条腿永不进段行（[FrameLedgerTest] 的三腿桥钉着）。
+     */
     private var pendingLegLostMs = 0L
 
     /**
@@ -1227,13 +1233,12 @@ class CodecRecorder(
             val restart = segmentRestartRequested
             segmentRestartRequested = false
             // 段闭落账（泵线程单写者，无竞争）：无论本段成废都要落，索引才与 partIndex 一一对齐；
-            // 落完归零，下一段从 0 重新计。换段丢帧账与段账同处落地（首段前没有换段腿 ⇒ 恒 0）
+            // 落完归零，下一段从 0 重新计。换段丢帧账与段账同处落地（首段前没有换段腿 ⇒ 恒 0）。
+            // 这里落地的是**上一轮**轮转结算的腿（sidecar segLostMs 与段行同一口径）；本轮结算的
+            // 新腿在 settleRotateLeg 之后才写 currentSegLost*（下一轮 runSegment 的段行读到它）
             segSampleCounts.add(segVideoWritten)
             segVideoWritten = 0
             segLostMs.add(pendingLegLostMs)
-            // 当前段（下一轮 runSegment）要读的那条腿的账：帧上界与时间账同处落地
-            currentSegLostMs = pendingLegLostMs
-            currentSegLostFrames = pendingLegLostFrames
             pendingLegLostMs = 0L
             pendingLegLostFrames = 0L
             val dur = clock.closeSegment()
@@ -1287,6 +1292,12 @@ class CodecRecorder(
             // 本腿结算：入库撞上限或腿超预算 ⇒ ROTATE_STALL（明确失败，看门狗/收尾把原因亮给用户）；
             // 没越界但有损失也记账（[segLostMs] → sidecar，用户事后可查"这段丢了 N 秒"）
             settleRotateLeg(judgeStall = wantRotate)
+            // 本轮结算的腿账要等 settleRotateLeg 返回才存在：现在写进 currentSegLost*，下一轮
+            // runSegment 的段行才读到**紧邻它之前**那条腿（旧位置读的是上上条 ⇒ 第 2 段行恒 0、
+            // 最后一条腿永不出现在段行）。pending 留给下一轮顶部落进 sidecar segLostMs，
+            // 两个口径同源同值。
+            currentSegLostMs = pendingLegLostMs
+            currentSegLostFrames = pendingLegLostFrames
             keepGoing = wantRotate && rotated && engineError == null
         }
         if (engineError != null) Log.i(TAG, "codec loop end with ${engineError}")
@@ -1727,8 +1738,8 @@ class CodecRecorder(
                 Log.e(TAG, "本段按重建收口（muxer 首笔写不进），part=$partIndex")
                 return false
             }
-            // 起录补写（第 2 笔）：muxer 启动后先把"启动前已编码"的旧样本按 PTS 补写，再处理新样本。
-            // 补写失败由 writeSample 走既有重建/失败通路；缓冲为空时只做一次空读，不分配
+            // 起录补写（第 2 笔）：muxer 启动后先把"启动前已编码"的旧样本按**到达顺序**补写，
+            // 再处理新样本。补写失败由 writeSample 走既有重建/失败通路；缓冲为空时只做一次空读，不分配
             if (muxStarted && preMuxBuffer?.size != 0) {
                 val lastFlushedPts = flushPreMuxSamples(mx, videoTrack)
                 if (lastFlushedPts > 0L) vPtsLastUs = lastFlushedPts
@@ -1848,10 +1859,11 @@ class CodecRecorder(
                                 if (wrote > 0) segHadVideoSample = true
                                 vPtsLastUs = bi.presentationTimeUs
                             } else {
-                                // muxer 尚未启动：把已编码样本复制进有界缓冲，容器可写后按 PTS 补写。
-                                // 复制是必要的——MediaCodec 的 output buffer release 后内容失效
+                                // muxer 尚未启动：把已编码样本复制进有界缓冲，容器可写后按到达顺序补写。
+                                // 复制是必要的——MediaCodec 的 output buffer release 后内容失效。
+                                // 先 canAccept 再分配：注定拒收的超大样本不许做一次瞬时大分配。
                                 val src = v.getOutputBuffer(idx)
-                                if (src == null) {
+                                if (src == null || preMuxBuffer?.canAccept(bi.size) != true) {
                                     preMuxDropped++
                                 } else {
                                     val copy = ByteArray(bi.size)
@@ -2157,16 +2169,17 @@ class CodecRecorder(
     }
 
     /**
-     * 把起录缓冲里的样本按 PTS 补写进 muxer（第 2 笔）。返回最后一枚**写成功**样本的原始
+     * 把起录缓冲里的样本按**到达顺序**补写进 muxer（第 2 笔）。返回最后一枚**写成功**样本的原始
      * PTS（与 `vPtsLastUs` 同域；0 = 没写成任何一枚）。
      *
-     * 排序由 [PreMuxVideoBuffer.drainPtsOrdered] 保证（乱序输入也按 PTS 升序写出）；
-     * 同 PTS 的推进由 [writeSample] 的既有逐轨单调兜底处理。写失败/本段被要求重建时，
+     * **不排序**：编码器输出的是码流访问单元顺序，含 B 帧或 PTS 非单调时按 PTS 重排会变成解码
+     * 顺序错乱（离线修复链 [ArcRepairRunner] 同样只靠单调兜底、不排序）。同 PTS/倒退的推进由
+     * [writeSample] 的既有逐轨单调兜底处理（[monotonicPts]）。写失败/本段被要求重建时，
      * 未写出的样本计入 [preMuxDropped]——它们已经离开编码器，不补写就是永久丢失。
      */
     private fun flushPreMuxSamples(mx: MediaMuxer, track: Int): Long {
         val buf = preMuxBuffer ?: return 0L
-        val pending = buf.drainPtsOrdered()
+        val pending = buf.drainArrivalOrder()
         if (pending.isEmpty()) return 0L
         val info = MediaCodec.BufferInfo()
         var lastPts = 0L

@@ -1,5 +1,8 @@
 package com.wotagei.cam.record
 
+import com.wotagei.cam.source.KotlinSourceScan.bodyOf
+import com.wotagei.cam.source.KotlinSourceScan.codeOnly
+import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -102,6 +105,8 @@ class FrameLedgerTest {
     fun `DIRECT 路显式标注 GL 字段只描述预览链`() {
         val line = frameLedgerLine(report(gpu = false))
         assertTrue(line.contains("路径=DIRECT(GL仅预览)"))
+        assertTrue("DIRECT 无编码 swap，GL→swap/swap→mux 必须显式不适用", line.contains("GL→swap 不适用(DIRECT无编码swap)"))
+        assertTrue(line.contains("swap→mux 不适用"))
     }
 
     @Test
@@ -128,5 +133,44 @@ class FrameLedgerTest {
         assertEquals("", frameSessionSummary(emptyList(), emptyList()))
         val s = frameSessionSummary(listOf(10), emptyList())
         assertTrue(s.contains("lost=0ms"))
+    }
+
+    // ---- ④ 换段腿 → 段行时序：三条腿必须进三个后续段行，sidecar 与段行同值 ----
+
+    @Test
+    fun `三条腿三个段行值与sidecar逐项对齐_旧位置会让第2段恒0`() {
+        val codec = codeOnly(mainSourceText("record/CodecRecorder.kt"))
+        val pump = bodyOf(codec, "pumpLoop")
+        val sidecarAt = pump.indexOf("segLostMs.add(pendingLegLostMs)")
+        val settleAt = pump.indexOf("settleRotateLeg(judgeStall = wantRotate)")
+        val currentAt = pump.indexOf("currentSegLostMs = pendingLegLostMs")
+        assertTrue("pumpLoop 必须落 sidecar 段账", sidecarAt >= 0)
+        assertTrue("pumpLoop 必须结算换段腿", settleAt >= 0)
+        assertTrue(
+            "段行帧账必须在 settleRotateLeg **之后**取 currentSegLost（旧位置读上上腿 ⇒ 第2段恒0、末腿丢失）",
+            currentAt > settleAt
+        )
+        assertTrue("sidecar 段账取的是本轮之前已结算的 pending（在 settle 之前落地）", sidecarAt < settleAt)
+
+        data class Row(val ms: Long, val frames: Long)
+
+        val legs = listOf(Row(1_200, 30), Row(300, 8), Row(900, 22))
+        val segRows = ArrayList<Row>()
+        val sidecarRows = ArrayList<Row>()
+        var pending = Row(0, 0)
+        var current = Row(0, 0)
+        // 生产时序同构：段行读 current（settle 后的下一腿）→ 段尾 sidecar 取 pending → settle 写新腿
+        for (seg in 0..legs.size) {
+            segRows += current
+            sidecarRows += pending
+            pending = Row(0, 0)
+            if (seg < legs.size) {
+                pending = legs[seg]
+                current = legs[seg]
+            }
+        }
+        assertEquals("首段之前没有换段腿，段行必须为 0", Row(0, 0), segRows[0])
+        assertEquals("三条腿必须各进一个后续段行（最后一条腿不许消失）", legs, segRows.drop(1))
+        assertEquals("sidecar segLostMs 与段行帧账必须逐项同值（否则两账对不上）", segRows, sidecarRows)
     }
 }
