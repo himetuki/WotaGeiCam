@@ -6,6 +6,7 @@ import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.core.forcedShutterOutOfRange
 import com.wotagei.cam.core.shutterCeilingNs
 import com.wotagei.cam.ui.dialog.shutterItems
+import com.wotagei.cam.ui.widget.shutterLadder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -124,6 +125,33 @@ class ForcedShutterTest {
         val none = shutterItems(null, fpsHi = 24, approxMark = mark)
         assertEquals("1/24", none.first { it.value == ns24.toInt() }.label)
         assertFalse("能力缺失时 1/24 不许可选", none.first { it.value == ns24.toInt() }.supported)
+    }
+
+    /**
+     * 2026-10-17 刻度化迁移：快门快捷 chip 删除后，梯是唯一档位入口。
+     * - 不支持的档**不进梯**（替代原「灰 chip 点不动」的语义）；
+     * - 强制档的 `※` 标签仍由 `shutterItems` 提供，梯化不得把它弄丢。
+     */
+    @Test
+    fun `快门梯只收支持档且强制档标签带标`() {
+        val mark = "※"
+        // 30fps 帧周期容不下 1/24、1/25 ⇒ 两档都不进梯
+        val at30 = shutterItems(RangeI(4_000_000, 33_000_000), fpsHi = 30, approxMark = mark)
+            .filter { it.supported }
+        val ladder30 = shutterLadder(at30.map { it.value.toFloat() }, 4_000_000f, 33_333_333f)
+        assertEquals("梯只收支持档", at30.size, ladder30.size)
+        assertFalse("1/24 不得进梯", ladder30.any { it == ns24.toFloat() })
+        assertFalse("1/25 不得进梯", ladder30.any { it == ns25.toFloat() })
+
+        // 24fps 帧周期容得下：1/24、1/25 进梯，标签仍带 ※（由 shutterItems 生成）
+        val at24 = shutterItems(RangeI(4_000_000, 33_000_000), fpsHi = 24, approxMark = mark)
+            .filter { it.supported }
+        val ladder24 = shutterLadder(at24.map { it.value.toFloat() }, 4_000_000f, 41_666_666f)
+        assertEquals(at24.size, ladder24.size)
+        assertTrue("1/24 必须进梯", ladder24.any { it == ns24.toFloat() })
+        assertTrue("1/25 必须进梯", ladder24.any { it == ns25.toFloat() })
+        assertEquals("1/24$mark", at24.first { it.value == ns24.toInt() }.label)
+        assertEquals("1/25$mark", at24.first { it.value == ns25.toInt() }.label)
     }
 
     /**

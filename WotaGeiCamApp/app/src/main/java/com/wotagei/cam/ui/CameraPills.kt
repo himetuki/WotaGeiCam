@@ -56,6 +56,14 @@ import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaType
+import com.wotagei.cam.ui.widget.diopterLadder
+import com.wotagei.cam.ui.widget.evLadder
+import com.wotagei.cam.ui.widget.isoLadder
+import com.wotagei.cam.ui.widget.kelvinLadder
+import com.wotagei.cam.ui.widget.percentLadder
+import com.wotagei.cam.ui.widget.shutterLadder
+import com.wotagei.cam.ui.widget.tintLadder
+import com.wotagei.cam.ui.widget.zoomLadder
 import com.wotagei.cam.ui.theme.WotaTextDim
 import com.wotagei.cam.ui.dialog.afLabelRes
 import com.wotagei.cam.ui.dialog.aeLabelRes
@@ -86,6 +94,16 @@ import kotlin.math.roundToInt
  * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
 enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT }
+
+/**
+ * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
+ * 单点定义——弹窗控件闸与守卫测试都读这一张表，别在别处再写一份。
+ */
+internal val RECORDING_EDITABLE_PILLS =
+    setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS)
+
+/** 录制中该弹窗是否可调（非录制态一律可调，含调用方尚未拿到能力时的初始化阶段） */
+internal fun pillEditableDuringRecording(key: PillKey): Boolean = key in RECORDING_EDITABLE_PILLS
 
 /**
  * `PillKey` → 锚点写入方 登记表（审查 S2-2：把 §69「浮层甩到屏幕原点」这一族从结构上封死）。
@@ -153,7 +171,6 @@ fun PillHost(
      * 无默认值必传（与锚点同一条纪律）：漏挂 = 有滑杆拖完被 force-stop 丢值，编译期就该挡。
      */
     onPersist: () -> Unit,
-    onLockTip: () -> Unit,
     onUnsupported: () -> Unit,
     onFocusCenter: () -> Unit,
     /**
@@ -169,18 +186,22 @@ fun PillHost(
     onEnableCapture: () -> Unit
 ) {
     val ability = slot?.ability
+    // A4 录制中矩阵：所有弹窗都能开，只有白名单内的可调；其余控件禁用 + 顶部只读提示。
+    val editable = !recording || pillEditableDuringRecording(key)
     when (key) {
-        PillKey.SIZE -> SizePill(anchor, params, ability, recording, onClose, onLockTip, onUnsupported)
-        PillKey.FPS -> FpsPill(anchor, params, ability, recording, onClose, onLockTip, onUnsupported)
-        PillKey.SHUTTER -> ShutterPill(anchor, params, ability, onClose, onPersist)
-        PillKey.ISO -> IsoPill(anchor, params, ability, onClose, onPersist)
-        PillKey.EV -> EvPill(anchor, params, ability, onClose, onPersist)
-        PillKey.WB -> WbPill(anchor, params, ability, onClose, onUnsupported, onPersist)
-        PillKey.ZOOM -> ZoomPill(anchor, params, onClose, onPersist)
+        PillKey.SIZE -> SizePill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.FPS -> FpsPill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.SHUTTER -> ShutterPill(anchor, params, ability, editable, onClose, onPersist)
+        PillKey.ISO -> IsoPill(anchor, params, ability, editable, onClose, onPersist)
+        PillKey.EV -> EvPill(anchor, params, ability, editable, onClose, onPersist)
+        PillKey.WB -> WbPill(anchor, params, ability, editable, onClose, onUnsupported, onPersist)
+        PillKey.ZOOM -> ZoomPill(anchor, params, editable, onClose, onPersist)
         PillKey.FOCUS -> FocusPill(
             anchor = anchor,
             params = params,
             ability = ability,
+            editable = editable,
+            recording = recording,
             focusLocked = focusLocked,
             onToggleFocusLock = onToggleFocusLock,
             onClose = onClose,
@@ -188,19 +209,19 @@ fun PillHost(
             onFocusCenter = onFocusCenter,
             onPersist = onPersist
         )
-        PillKey.BITRATE -> BitratePill(anchor, params, onClose)
-        PillKey.LENS -> LensPill(anchor, slot, recording, onClose, onLockTip, onPickLens)
-        PillKey.REFLINE -> RefLinePill(anchor, params, onClose)
-        PillKey.MONITOR -> MonitorPill(anchor, params, gpuMode, onClose, onPersist)
-        PillKey.FLASH -> FlashPill(anchor, params, ability, onClose, onUnsupported)
-        PillKey.STAB -> StabPill(anchor, params, ability, onClose, onUnsupported)
-        PillKey.STORAGE -> StoragePill(anchor, params, freeMb, onClose)
+        PillKey.BITRATE -> BitratePill(anchor, params, editable, onClose)
+        PillKey.LENS -> LensPill(anchor, slot, editable, onClose, onPickLens)
+        PillKey.REFLINE -> RefLinePill(anchor, params, editable, onClose)
+        PillKey.MONITOR -> MonitorPill(anchor, params, gpuMode, editable, onClose, onPersist)
+        PillKey.FLASH -> FlashPill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.STAB -> StabPill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.STORAGE -> StoragePill(anchor, params, freeMb, editable, onClose)
         PillKey.BT -> {
             // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
             // 下次起录按它落音轨），与内录开关（controller 态）互相独立
             val ambientEnabled by params.audioEnabled.observed()
             AudioPill(
-                anchor, capture, recording, onEnableCapture, onLockTip, bt, onClose,
+                anchor, capture, editable, onEnableCapture, bt, onClose,
                 ambientEnabled = ambientEnabled,
                 onToggleAmbient = { params.audioEnabled.value = !params.audioEnabled.value }
             )
@@ -208,9 +229,9 @@ fun PillHost(
     }
 }
 
-/** AE 模式行：曝光三件套共用，手动档只在真的能手动时才给选 */
+/** AE 模式行：曝光三件套共用，手动档只在真的能手动时才给选；[enabled] 供录制中只读弹窗整行禁用 */
 @Composable
-private fun AeModeRow(params: WotaParams, ability: CameraAbility?) {
+private fun AeModeRow(params: WotaParams, ability: CameraAbility?, enabled: Boolean = true) {
     val aeMode by params.aeMode.observed()
     val names = AeMode.values().map { stringResource(aeLabelRes(it)) }
     PillChoices(
@@ -219,7 +240,8 @@ private fun AeModeRow(params: WotaParams, ability: CameraAbility?) {
         },
         selected = aeMode.ordinal,
         label = stringResource(R.string.cam_p_ae),
-        onPick = { params.aeMode.value = AeMode.values()[it.value] }
+        onPick = { params.aeMode.value = AeMode.values()[it.value] },
+        enabled = enabled
     )
 }
 
@@ -228,9 +250,8 @@ private fun SizePill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
-    recording: Boolean,
+    editable: Boolean,
     onClose: () -> Unit,
-    onLockTip: () -> Unit,
     onUnsupported: () -> Unit
 ) {
     val size by params.size.observed()
@@ -251,6 +272,7 @@ private fun SizePill(
         null
     }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_size)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         if (options.isEmpty()) Note(R.string.unsupported_by_device)
         PillChoices(
             options = options.mapIndexed { i, o -> PillOption(i, sizeText(o.size), o.supported) },
@@ -259,14 +281,14 @@ private fun SizePill(
             onPick = { opt ->
                 val target = options.getOrNull(opt.value)
                 when {
-                    recording -> onLockTip()
                     target == null || !target.supported -> onUnsupported()
                     else -> {
                         params.requestSize(target.size)
                         onClose()
                     }
                 }
-            }
+            },
+            enabled = editable
         )
         // 分辨率与帧率是同一件事的两半（换分辨率后帧率档可能失效），放一个弹窗里免得来回点
         PillChoices(
@@ -274,8 +296,7 @@ private fun SizePill(
             selected = fps.value,
             label = stringResource(R.string.cam_p_fps),
             onPick = { opt ->
-                if (recording) onLockTip()
-                else if (!opt.enabled) onUnsupported()
+                if (!opt.enabled) onUnsupported()
                 else {
                     // 换档必须**按目标档重查**精确性（与 FpsPill 同一支口径）：裸 copy(value=)
                     // 会沿用旧档的 exact——"有原生 [25,25] 但无 [24,24]"的机型从 ※24 切到 25
@@ -289,7 +310,8 @@ private fun SizePill(
                         ?.let { ParamState(opt.value, it.lo..it.hi, enabled = true, exact = it.exact) }
                         ?: fps.copy(value = opt.value, enabled = false, exact = false)
                 }
-            }
+            },
+            enabled = editable
         )
         rangeNote?.let { NoteText(it) }
     }
@@ -300,9 +322,8 @@ private fun FpsPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
-    recording: Boolean,
+    editable: Boolean,
     onClose: () -> Unit,
-    onLockTip: () -> Unit,
     onUnsupported: () -> Unit
 ) {
     val app = LocalContext.current
@@ -316,13 +337,12 @@ private fun FpsPill(
         mutableStateOf(WotaSettings.arcConvertMode(settingsPrefs))
     }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_fps)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = fpsOptions(ability, size, fps.value > WotaTiers.HIGH_SPEED_FPS),
             selected = fps.value,
             onPick = { opt ->
-                if (recording) {
-                    onLockTip()
-                } else if (!opt.enabled) {
+                if (!opt.enabled) {
                     onUnsupported()
                 } else {
                     // 换档必须**按目标档重查**精确性：copy(value=) 会沿用旧档的 exact——
@@ -344,7 +364,8 @@ private fun FpsPill(
                     }
                     onClose()
                 }
-            }
+            },
+            enabled = editable
         )
         if (convertActive) {
             Text(
@@ -361,12 +382,11 @@ private fun FpsPill(
                             else R.string.cam_fps_convert_drop
                         ),
                         selected = convertMode == mode,
-                        // 录制中只看不改（与档位选择同一把锁）
+                        // 录制中只读（与档位选择同一把总闸）
+                        enabled = editable,
                         onClick = {
-                            if (!recording) {
-                                convertMode = mode
-                                WotaSettings.setArcConvertMode(settingsPrefs, mode)
-                            }
+                            convertMode = mode
+                            WotaSettings.setArcConvertMode(settingsPrefs, mode)
                         },
                         // fill = false：与 PillChoices 同一条紧凑化裁决，不把弹窗撑到最大宽
                         modifier = Modifier.weight(1f, fill = false)
@@ -403,6 +423,7 @@ private fun ShutterPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onPersist: () -> Unit
 ) {
@@ -411,7 +432,9 @@ private fun ShutterPill(
     val size by params.size.observed()
     val fps by params.fps.observed()
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_shutter)) {
-        AeModeRow(params, ability)
+        // 快门不在录制中可调白名单（A4）：能开窗看档位，但控件全部禁用
+        if (!editable) Note(R.string.cam_recording_readonly)
+        AeModeRow(params, ability, enabled = editable)
         if (aeMode == AeMode.MANUAL) {
             // 档位可选性吃**帧率档位**（2026-10-04 r11/r10 口径）：下发帧周期与快门钳制都按档位
             // （可变范围 [24,30] 选 24 时 41.67ms 在合法域内、HAL 放到 24fps），选档域与下发同源；
@@ -419,33 +442,31 @@ private fun ShutterPill(
             // 取不到（该档 fps 不可用）时退回用户档位，与 WotaParams.applyExposure 的退回一致。
             val ranges = ability?.fpsRangesFor(size, fps.value > WotaTiers.HIGH_SPEED_FPS) ?: emptyList()
             val fpsHi = pickFpsRange(ranges, fps.value)?.lo ?: fps.value
-            PillChoices(
-                // 强制档（1/24、1/25）：设备曝光范围没有也照样可选，标签上打 ※ 与帧率侧一致
-                options = shutterItems(ability?.exposureNs, fpsHi, stringResource(R.string.approx_mark))
-                    .map { PillOption(it.value, it.label, it.supported) },
-                selected = shutter.value.toInt(),
-                onPick = { opt ->
-                    // 灰显档必须挡在参数总线之外。为什么必须查 enabled：真机实测（2026-10-02 02:29 包），
-                    // 本机 24※（24fps 判非精确档、实际 fps 上界 30）下点 1/24——此前这条回调是全工程
-                    // 唯一不查 enabled 就直写总线的（对照 SizePill/FpsPill），引擎 5ms 合并后
-                    // clampShutterToFrame 按帧周期把 41,666,666 钳成 33,333,333，"选了 1/24 当场变 1/30"。
-                    // 视觉灰显（valueColor→textLo）没有执行力；chip 的 clickable(enabled=false) 是第一道闸，
-                    // 这里的守卫是第二道（对照 SizePill:target.supported / FpsPill:!opt.enabled 同一条纪律）。
-                    if (!opt.enabled) return@PillChoices
-                    params.shutter.value = shutter.copy(value = opt.value.toLong())
-                }
-            )
+            // 2026-10-17 需求：快门 7 档快捷 chip 删除，档位改由刻度滑杆承担。
+            // 梯只收 supported 档（被设备否决的档消失而不是灰 chip）；标签仍来自 shutterItems，
+            // 所以强制档 1/24、1/25 的 ※ 保留。
+            val items = shutterItems(ability?.exposureNs, fpsHi, stringResource(R.string.approx_mark))
+                .filter { it.supported }
             val lo = shutter.range?.start?.toLong()
             val hi = shutter.range?.endInclusive?.toLong()
             if (lo != null && hi != null && hi > lo) {
+                val ladder = shutterLadder(items.map { it.value.toFloat() }, lo.toFloat(), hi.toFloat())
+                // ns 值经 Float 往返会丢低位精度（41,666,666 → 41,666,664），写回/查标签都用
+                // 梯值反查原始档，避免强制档判据（isRequiredShutterNs）与 ※ 标签一起失效。
+                val byTierFloat = items.associateBy { it.value.toFloat() }
                 PillSlider(
                     value = shutter.value.toFloat(),
                     lo = lo.toFloat(),
                     hi = hi.toFloat(),
                     step = 1000f,
-                    onValueChange = { params.shutter.value = shutter.copy(value = it.toLong()) },
-                    format = { shutterText(it.toLong()) },
-                    onValueChangeFinished = onPersist
+                    onValueChange = { tick ->
+                        val exactNs = byTierFloat[tick]?.value?.toLong() ?: tick.toLong()
+                        params.shutter.value = shutter.copy(value = exactNs)
+                    },
+                    format = { tick -> byTierFloat[tick]?.label ?: shutterText(tick.toLong()) },
+                    enabled = editable,
+                    onValueChangeFinished = onPersist,
+                    ladder = ladder
                 )
             }
         } else {
@@ -459,6 +480,7 @@ private fun IsoPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onPersist: () -> Unit
 ) {
@@ -467,17 +489,18 @@ private fun IsoPill(
     val lo = iso.range?.start ?: 0
     val hi = iso.range?.endInclusive ?: 0
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_iso)) {
-        AeModeRow(params, ability)
+        AeModeRow(params, ability, enabled = editable)
         if (hi > lo) {
             PillSlider(
                 value = iso.value.toFloat(),
                 lo = lo.toFloat(),
                 hi = hi.toFloat(),
                 step = 1f,
-                enabled = aeMode == AeMode.MANUAL,
+                enabled = editable && aeMode == AeMode.MANUAL,
                 onValueChange = { params.iso.value = iso.copy(value = it.roundToInt()) },
                 format = { "${it.roundToInt()}" },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = isoLadder(lo, hi)
             )
         } else {
             Note(R.string.unsupported_by_device)
@@ -490,6 +513,7 @@ private fun EvPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onPersist: () -> Unit
 ) {
@@ -499,7 +523,7 @@ private fun EvPill(
     val lo = ev.range?.start ?: 0
     val hi = ev.range?.endInclusive ?: 0
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_ev)) {
-        AeModeRow(params, ability)
+        AeModeRow(params, ability, enabled = editable)
         if (hi <= lo) {
             Note(R.string.unsupported_by_device)
         } else if (aeMode == AeMode.MANUAL) {
@@ -510,10 +534,11 @@ private fun EvPill(
                 lo = lo.toFloat(),
                 hi = hi.toFloat(),
                 step = 1f,
-                enabled = aeMode != AeMode.MANUAL,
+                enabled = editable && aeMode != AeMode.MANUAL,
                 onValueChange = { params.ev.value = ev.copy(value = it.roundToInt()) },
                 format = { evText(it.roundToInt(), evStep) },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = evLadder(lo, hi)
             )
         }
     }
@@ -524,6 +549,7 @@ private fun WbPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onUnsupported: () -> Unit,
     onPersist: () -> Unit
@@ -533,6 +559,7 @@ private fun WbPill(
     val tint by params.tint.observed()
     val names = WbPreset.values().map { stringResource(wbLabelRes(it)) }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_wb)) {
+        // 白平衡属录制中可调白名单（A4）：预设行保持可选，否则手动组（色温/色调）不可达
         PillChoices(
             options = WbPreset.values().mapIndexed { i, p ->
                 PillOption(p.ordinal, names[i], p == WbPreset.MANUAL || ability?.awbModes?.contains(p.awbMode) != false)
@@ -541,28 +568,37 @@ private fun WbPill(
             columns = 4,
             onPick = { opt ->
                 if (opt.enabled) params.wbMode.value = WbPreset.values()[opt.value] else onUnsupported()
-            }
+            },
+            enabled = editable
         )
         if (wbMode == WbPreset.MANUAL) {
+            val kelvinLo = (kelvin.range?.start ?: WotaTiers.KELVIN_MIN)
+            val kelvinHi = (kelvin.range?.endInclusive ?: WotaTiers.KELVIN_MAX)
             PillSlider(
                 value = kelvin.value.toFloat(),
-                lo = (kelvin.range?.start ?: WotaTiers.KELVIN_MIN).toFloat(),
-                hi = (kelvin.range?.endInclusive ?: WotaTiers.KELVIN_MAX).toFloat(),
+                lo = kelvinLo.toFloat(),
+                hi = kelvinHi.toFloat(),
                 step = 50f,
+                enabled = editable,
                 label = stringResource(R.string.cam_p_kelvin),
                 onValueChange = { params.kelvin.value = kelvin.copy(value = it.roundToInt()) },
                 format = { "${it.roundToInt()}K" },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = kelvinLadder(kelvinLo, kelvinHi)
             )
+            val tintLo = (tint.range?.start ?: 0)
+            val tintHi = (tint.range?.endInclusive ?: 0)
             PillSlider(
                 value = tint.value.toFloat(),
-                lo = (tint.range?.start ?: 0).toFloat(),
-                hi = (tint.range?.endInclusive ?: 0).toFloat(),
+                lo = tintLo.toFloat(),
+                hi = tintHi.toFloat(),
                 step = 1f,
+                enabled = editable,
                 label = stringResource(R.string.cam_p_tint),
                 onValueChange = { params.tint.value = tint.copy(value = it.roundToInt()) },
                 format = { String.format(Locale.US, "%+d", it.roundToInt()) },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = tintLadder(tintLo, tintHi)
             )
         }
     }
@@ -572,36 +608,26 @@ private fun WbPill(
 private fun ZoomPill(
     anchor: IntRect,
     params: WotaParams,
+    editable: Boolean,
     onClose: () -> Unit,
     onPersist: () -> Unit
 ) {
     val zoom by params.zoom.observed()
     val lo = zoom.range?.start ?: 1f
     val hi = zoom.range?.endInclusive ?: 1f
-    // 快捷档与「点按循环」共用一份真源（审查 S3-6）：这里曾内联过一张不含 0.5× 的表，
-    // 于是同一台机点按能到 0.5×、面板里却没有那颗，两处倍率梯各说各话
-    val quick = zoomPanelTiers(lo, hi)
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_zoom)) {
-        if (quick.isNotEmpty()) {
-            PillChoices(
-                options = quick.map { PillOption((it * 10).roundToInt(), fmtX(it)) },
-                selected = (zoom.value * 10).roundToInt(),
-                columns = 4,
-                onPick = { opt ->
-                    params.zoom.value = zoom.copy(value = opt.value / 10f)
-                    onClose()
-                }
-            )
-        }
+        // 2026-10-17 需求：变焦快捷倍率 chip 删除，档位全部由刻度滑杆承担
         if (hi > lo) {
             PillSlider(
                 value = zoom.value,
                 lo = lo,
                 hi = hi,
                 step = 0.1f,
+                enabled = editable,
                 onValueChange = { params.zoom.value = zoom.copy(value = it) },
                 format = { fmtX(it) },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = zoomLadder(lo, hi)
             )
         } else {
             Note(R.string.unsupported_by_device)
@@ -614,6 +640,8 @@ private fun FocusPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
+    recording: Boolean,
     /** 对焦锁定态与切换回执（无默认值必传，见 [PillHost]） */
     focusLocked: Boolean,
     onToggleFocusLock: () -> Unit,
@@ -648,7 +676,8 @@ private fun FocusPill(
                         params.afMode.value = AfMode.values()[opt.value]
                     }
                 }
-            }
+            },
+            enabled = editable
         )
         if (afMode == AfMode.MANUAL) {
             if (hi > lo) {
@@ -657,9 +686,11 @@ private fun FocusPill(
                     lo = lo,
                     hi = hi,
                     label = stringResource(R.string.cam_p_mf),
+                    enabled = editable,
                     onValueChange = { params.manualFocusDiopter.value = mf.copy(value = it) },
                     format = { String.format(Locale.US, "%.2fD", it) },
-                    onValueChangeFinished = onPersist
+                    onValueChangeFinished = onPersist,
+                    ladder = diopterLadder(hi)
                 )
             } else {
                 // 定焦镜头（前摄常见）落到手动档是核心的兜底；说清楚"没有可调对焦距离"，
@@ -668,14 +699,15 @@ private fun FocusPill(
             }
         }
         // 底部行两枚（用户反馈第 2 条）：中心点按对焦（合同不变）+ 锁定对焦/解除锁定（副控制，
-        // 以最近点按处/中心对焦一次并保持；selected 反映锁态）
+        // 以最近点按处/中心对焦一次并保持；selected 反映锁态）。
+        // A4：录制中未锁时锁定条目禁用（已锁则可点解除），其余对焦控件照常可用。
         PillChoices(
             options = listOf(
                 PillOption(0, stringResource(R.string.cam_tap_center)),
                 PillOption(
                     1,
                     stringResource(if (focusLocked) R.string.cam_focus_unlock else R.string.cam_focus_lock),
-                    enabled = lockUsable
+                    enabled = lockUsable && (!recording || focusLocked)
                 )
             ),
             selected = if (focusLocked) 1 else -1,
@@ -686,20 +718,23 @@ private fun FocusPill(
                     !lockUsable -> onUnsupported()
                     else -> onToggleFocusLock()
                 }
-            }
+            },
+            enabled = editable
         )
         when {
             afMode == AfMode.MANUAL -> Note(R.string.cam_focus_manual_locked)
             !autoFocusSupported -> Note(R.string.cam_focus_lock_unsupported)
         }
+        if (recording && !focusLocked) Note(R.string.cam_focus_lock_recording)
         Note(R.string.cam_tap_hint)
     }
 }
 
 @Composable
-private fun BitratePill(anchor: IntRect, params: WotaParams, onClose: () -> Unit) {
+private fun BitratePill(anchor: IntRect, params: WotaParams, editable: Boolean, onClose: () -> Unit) {
     val bitrate by params.bitrate.observed()
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_bitrate)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = WotaTiers.BITRATES.map { PillOption(it / 1_000_000, bitrateText(it)) },
             selected = bitrate / 1_000_000,
@@ -707,7 +742,8 @@ private fun BitratePill(anchor: IntRect, params: WotaParams, onClose: () -> Unit
             onPick = { opt ->
                 params.bitrate.value = opt.value * 1_000_000
                 onClose()
-            }
+            },
+            enabled = editable
         )
     }
 }
@@ -718,6 +754,7 @@ private fun FlashPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onUnsupported: () -> Unit
 ) {
@@ -725,6 +762,7 @@ private fun FlashPill(
     val names = Flash.values().map { stringResource(flashLabelRes(it)) }
     val available = ability?.flashAvailable == true
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_flash)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         if (!available) Note(R.string.unsupported_by_device)
         PillChoices(
             options = Flash.values().mapIndexed { i, f -> PillOption(f.ordinal, names[i], available) },
@@ -736,17 +774,19 @@ private fun FlashPill(
                     params.flash.value = Flash.values()[opt.value]
                     onClose()
                 }
-            }
+            },
+            enabled = editable
         )
     }
 }
 
 /** 参考线：11 种线型多选，位掩码即时写回总线，取景器跟着变（面板时代就是边改边看） */
 @Composable
-private fun RefLinePill(anchor: IntRect, params: WotaParams, onClose: () -> Unit) {
+private fun RefLinePill(anchor: IntRect, params: WotaParams, editable: Boolean, onClose: () -> Unit) {
     val mask by params.refLines.observed()
     val types = RefLineType.ALL
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_refline_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = listOf(
                 PillOption(0, stringResource(R.string.cam_refline_all)),
@@ -756,14 +796,16 @@ private fun RefLinePill(anchor: IntRect, params: WotaParams, onClose: () -> Unit
             columns = 2,
             onPick = { opt ->
                 params.refLines.value = if (opt.value == 0) RefLineType.FULL_MASK else 0
-            }
+            },
+            enabled = editable
         )
         PillToggles(
             options = types.mapIndexed { i, t -> PillOption(i, t.label) },
             isOn = { RefLineType.isOn(mask, types[it.value]) },
             columns = 2,
             label = stringResource(R.string.cam_refline_count, RefLineType.typesOf(mask).size),
-            onToggle = { opt -> types.getOrNull(opt.value)?.let { params.refLines.value = RefLineType.toggle(mask, it) } }
+            onToggle = { opt -> types.getOrNull(opt.value)?.let { params.refLines.value = RefLineType.toggle(mask, it) } },
+            enabled = editable
         )
     }
 }
@@ -774,6 +816,7 @@ private fun MonitorPill(
     anchor: IntRect,
     params: WotaParams,
     gpuMode: Boolean,
+    editable: Boolean,
     onClose: () -> Unit,
     onPersist: () -> Unit
 ) {
@@ -790,11 +833,13 @@ private fun MonitorPill(
         stringResource(R.string.cam_zebra_d3)
     )
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_monitor_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = FrameEffect.values().mapIndexed { i, e -> PillOption(e.ordinal, effectNames[i]) },
             selected = effect.ordinal,
             columns = 2,
-            onPick = { opt -> params.frameEffect.value = FrameEffect.values()[opt.value] }
+            onPick = { opt -> params.frameEffect.value = FrameEffect.values()[opt.value] },
+            enabled = editable
         )
         if (!gpuMode) {
             Note(R.string.cam_direct_no_effect)
@@ -805,18 +850,20 @@ private fun MonitorPill(
                 lo = 80f,
                 hi = 100f,
                 step = 1f,
-                enabled = gpuMode,
+                enabled = editable && gpuMode,
                 label = stringResource(R.string.cam_zebra_threshold),
                 onValueChange = { params.zebraThreshold.value = zebraThresholdOfUi(it.roundToInt()) },
                 format = { "${it.roundToInt()}%" },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = percentLadder(80, 100, 1)
             )
             PillChoices(
                 label = stringResource(R.string.cam_zebra_density),
                 options = (1..3).map { PillOption(it, densityNames.getOrElse(it - 1) { "" }) },
                 selected = zebraDensity,
                 columns = 3,
-                onPick = { params.zebraDensity.value = it.value }
+                onPick = { params.zebraDensity.value = it.value },
+                enabled = editable
             )
         }
         if (effect == FrameEffect.PEAKING) {
@@ -825,18 +872,20 @@ private fun MonitorPill(
                 lo = 5f,
                 hi = 95f,
                 step = 1f,
-                enabled = gpuMode,
+                enabled = editable && gpuMode,
                 label = stringResource(R.string.cam_peaking_strength),
                 onValueChange = { params.peakingStrength.value = (it / 100f).coerceIn(0f, 1f) },
                 format = { "${it.roundToInt()}%" },
-                onValueChangeFinished = onPersist
+                onValueChangeFinished = onPersist,
+                ladder = percentLadder(5, 95, 5)
             )
             PillChoices(
                 label = stringResource(R.string.cam_peaking_color),
                 options = PeakingColor.values().mapIndexed { i, c -> PillOption(c.ordinal, colorNames[i]) },
                 selected = peakingColor.ordinal,
                 columns = 3,
-                onPick = { params.peakingColor.value = PeakingColor.values()[it.value] }
+                onPick = { params.peakingColor.value = PeakingColor.values()[it.value] },
+                enabled = editable
             )
         }
     }
@@ -851,9 +900,8 @@ private fun MonitorPill(
 private fun LensPill(
     anchor: IntRect,
     current: LensSlot?,
-    recording: Boolean,
+    editable: Boolean,
     onClose: () -> Unit,
-    onLockTip: () -> Unit,
     onPickLens: (LensSlot) -> Unit
 ) {
     val app = LocalContext.current.applicationContext
@@ -862,6 +910,7 @@ private fun LensPill(
     val using = stringResource(R.string.cam_lens_using)
     val names = LensType.values().map { stringResource(lensLabelRes(it)) }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_lens)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         if (items.isEmpty()) {
             Note(R.string.cam_lens_empty)
         } else {
@@ -877,13 +926,10 @@ private fun LensPill(
                 },
                 label = stringResource(R.string.cam_lens_tip),
                 onPick = { row ->
-                    if (recording) {
-                        onLockTip()
-                    } else {
-                        items.firstOrNull { it.slot.key == row.key }?.let { onPickLens(it.slot) }
-                        onClose()
-                    }
-                }
+                    items.firstOrNull { it.slot.key == row.key }?.let { onPickLens(it.slot) }
+                    onClose()
+                },
+                enabled = editable
             )
         }
     }
@@ -921,12 +967,14 @@ private fun StabPill(
     anchor: IntRect,
     params: WotaParams,
     ability: CameraAbility?,
+    editable: Boolean,
     onClose: () -> Unit,
     onUnsupported: () -> Unit
 ) {
     val stabilize by params.stabilize.observed()
     val names = Stabilize.values().map { stringResource(stabLabelRes(it)) }
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_stab)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = Stabilize.values().mapIndexed { i, m ->
                 val ok = when (m) {
@@ -946,7 +994,8 @@ private fun StabPill(
                     params.stabilize.value = Stabilize.values()[opt.value]
                     onClose()
                 }
-            }
+            },
+            enabled = editable
         )
     }
 }
@@ -957,17 +1006,19 @@ private fun StabPill(
  * 让这颗胶囊点开有实际意义（§37 第 4 条：不能再拿分辨率胶囊顶替）。
  */
 @Composable
-private fun StoragePill(anchor: IntRect, params: WotaParams, freeMb: Long, onClose: () -> Unit) {
+private fun StoragePill(anchor: IntRect, params: WotaParams, freeMb: Long, editable: Boolean, onClose: () -> Unit) {
     val bitrate by params.bitrate.observed()
     val minutes = StorageEstimate.minutesOf(freeMb, bitrate)
     val unit = if (StorageEstimate.unitOf(minutes)) R.string.pill_hours_unit else R.string.pill_minutes_unit
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_free_space_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             label = stringResource(R.string.pill_record_minutes, stringResource(unit), StorageEstimate.humanize(minutes)),
             options = WotaTiers.BITRATES.map { PillOption(it / 1_000_000, bitrateText(it)) },
             selected = bitrate / 1_000_000,
             columns = 3,
-            onPick = { opt -> params.bitrate.value = opt.value * 1_000_000 }
+            onPick = { opt -> params.bitrate.value = opt.value * 1_000_000 },
+            enabled = editable
         )
         Note(R.string.pill_storage_note)
     }
@@ -1003,9 +1054,8 @@ private fun fmtX(v: Float): String = String.format(Locale.US, "%.1fx", v)
 private fun AudioPill(
     anchor: IntRect,
     capture: com.wotagei.cam.record.PlaybackCaptureController,
-    recording: Boolean,
+    editable: Boolean,
     onEnableCapture: () -> Unit,
-    onLockTip: () -> Unit,
     controller: com.wotagei.cam.bt.BtSpeakerController,
     onClose: () -> Unit,
     /** 环境音开关态（真源 params.audioEnabled）：与内录独立，无默认值必传（双开定版 2026-10-07） */
@@ -1015,9 +1065,8 @@ private fun AudioPill(
     com.wotagei.cam.ui.dialog.AudioSourcePanel(
         anchor = anchor,
         capture = capture,
-        recording = recording,
+        editable = editable,
         onEnableCapture = onEnableCapture,
-        onLockTip = onLockTip,
         bt = controller,
         ambientEnabled = ambientEnabled,
         onToggleAmbient = onToggleAmbient,

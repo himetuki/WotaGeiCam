@@ -45,11 +45,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.wotagei.cam.R
+import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.widget.nearestLadderIndex
 import kotlin.math.max
 import kotlin.math.roundToInt
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.LaunchedEffect
-import com.wotagei.cam.ui.anim.LocalMotion
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内 */
 private const val MAX_HEIGHT_RATIO = 0.62f
@@ -129,7 +130,12 @@ data class PillOption(
     val disabledTip: String? = null
 )
 
-/** 弹窗内的档位行：横向铺开、当前档 accent 实底，与顶栏胶囊同一套视觉。[label] 非空时给一行小标题 */
+/**
+ * 弹窗内的档位行：横向铺开、当前档 accent 实底，与顶栏胶囊同一套视觉。[label] 非空时给一行小标题。
+ *
+ * [enabled] 是整行总闸（2026-10-17 录制中只读矩阵）：false 时每个 chip 都灰显且点不动，
+ * 与单档的 [PillOption.enabled] 取与——能力否决与录制只读各管一段，谁都不许被另一段覆盖。
+ */
 @Composable
 fun PillChoices(
     options: List<PillOption>,
@@ -137,22 +143,24 @@ fun PillChoices(
     onPick: (PillOption) -> Unit,
     modifier: Modifier = Modifier,
     columns: Int = 3,
-    label: String? = null
+    label: String? = null,
+    enabled: Boolean = true
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (label != null) PillGroupLabel(label)
         options.chunked(columns).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 row.forEach { opt ->
+                    val on = opt.enabled && enabled
                     WotaChip(
                         label = opt.label,
                         selected = opt.value == selected,
                         // 不支持的档位必须看得出「灰着」：抽屉时代 TierPicker 自带淡显，
                         // 胶囊里若不淡显，点上去只弹一句「本机不支持」，等于让用户试错（真机 7680x4320 踩过）
-                        valueColor = if (opt.enabled) null else WotaColor.textLo,
+                        valueColor = if (on) null else WotaColor.textLo,
                         // 2026-10-02 补通道：此前只调暗文字，chip 仍可点、onPick 照收
                         // （真机事故：24※ 下点 1/24 被钳成 1/30）。灰显还必须点不动
-                        enabled = opt.enabled,
+                        enabled = on,
                         onClick = { onPick(opt) },
                         // fill = false（2026-10-05 紧凑化裁决）：weight 的 fill 默认 true 会把整行
                         // 撑满弹窗最大可用宽（400dp），「1/24」三个字符被拉成二十多个字符长的按钮——
@@ -171,6 +179,8 @@ fun PillChoices(
 /**
  * 多选档（参考线那类「同时开好几项」的控件）：与 [PillChoices] 同一套视觉，
  * 但选中态由调用方的 [isOn] 判定而不是比单个 selected 值。
+ *
+ * [enabled] 与 [PillChoices] 同一条整行总闸（录制中只读弹窗用）。
  */
 @Composable
 fun PillToggles(
@@ -179,19 +189,21 @@ fun PillToggles(
     onToggle: (PillOption) -> Unit,
     modifier: Modifier = Modifier,
     columns: Int = 2,
-    label: String? = null
+    label: String? = null,
+    enabled: Boolean = true
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (label != null) PillGroupLabel(label)
         options.chunked(columns).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 row.forEach { opt ->
+                    val on = opt.enabled && enabled
                     WotaChip(
                         label = opt.label,
                         selected = isOn(opt),
-                        valueColor = if (opt.enabled) null else WotaColor.textLo,
+                        valueColor = if (on) null else WotaColor.textLo,
                         // 与 PillChoices 同一条：灰显不许只是调暗文字，点击也要关掉
-                        enabled = opt.enabled,
+                        enabled = on,
                         onClick = { onToggle(opt) },
                         // fill = false：与 PillChoices 同一条紧凑化裁决，行宽由内容决定
                         modifier = Modifier.weight(1f, fill = false)
@@ -211,7 +223,8 @@ fun PillRowList(
     rows: List<PillRow>,
     onPick: (PillRow) -> Unit,
     modifier: Modifier = Modifier,
-    label: String? = null
+    label: String? = null,
+    enabled: Boolean = true
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (label != null) PillGroupLabel(label)
@@ -221,7 +234,7 @@ fun PillRowList(
                     // 不 fillMaxWidth（2026-10-05 紧凑化）：行宽由「镜头名 + 焦距读数」自身决定，
                     // 撑满弹窗只会把弹窗顶到最大宽、行尾留一大段点不着的空白
                     .clip(WotaShape.small)
-                    .clickable { onPick(row) }
+                    .clickable(enabled = enabled) { onPick(row) }
                     .padding(horizontal = 8.dp, vertical = 6.dp)
             ) {
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -240,7 +253,7 @@ fun PillRowList(
                     Text(
                         text = row.label,
                         style = WotaType.chip,
-                        color = WotaColor.textHi,
+                        color = if (enabled) WotaColor.textHi else WotaColor.textLo,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -269,8 +282,13 @@ private fun PillGroupLabel(text: String) {
 }
 
 /**
- * 弹窗内的连续量滑杆：量化与上下限回钳复用 `snap`（同一套已单测过的边界规则）。
+ * 弹窗内的滑杆：量化与上下限回钳复用 `snap`（同一套已单测过的边界规则）。
  * [label] 只在同一个弹窗里出现两根滑杆时才需要（如白平衡的色温 + 色度），否则标题已经说明白了。
+ *
+ * [ladder] 是 2026-10-17 的刻度梯（升序、已按运行时范围过滤）：有效时滑杆在**索引空间**
+ * `0f..(size-1)` 内运行，`steps = size - 2` 让 Material3 画出可见刻度点并吸附；
+ * 回调换回梯值，所以写进参数总线的值必为刻度值。梯无效/为空时退回原连续行为
+ * （`coerceIn` + `snap`），兼容没有梯的调用点。
  *
  * [onValueChangeFinished] 是「松手回执」通道（R4/用户反馈第 1 条）：拖动中的每一拍照旧只写
  * 参数总线，松手这一刻才让调用方做落盘等重动作。可选（null = 松手时不通知），
@@ -287,10 +305,15 @@ fun PillSlider(
     format: (Float) -> String = { it.toString() },
     enabled: Boolean = true,
     label: String? = null,
-    onValueChangeFinished: (() -> Unit)? = null
+    onValueChangeFinished: (() -> Unit)? = null,
+    ladder: List<Float>? = null
 ) {
     val usable = hi > lo
     val shown = if (usable) value.coerceIn(lo, hi) else value
+    val ticks = ladder?.takeIf { it.size >= 2 }
+    val tickRange = if (ticks != null) 0f..(ticks.size - 1).toFloat() else if (usable) lo..hi else 0f..1f
+    // 当前值不在梯上（旧版本持久化恢复）时滑杆停在最近刻度，读数仍显示真实值；首次拖动后落梯
+    val sliderValue = if (ticks != null) nearestLadderIndex(shown, ticks).toFloat() else shown
     Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (label != null) {
             Text(
@@ -309,15 +332,19 @@ fun PillSlider(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Slider(
-                value = shown,
+                value = sliderValue,
                 onValueChange = { raw ->
-                    if (usable) {
+                    if (ticks != null) {
+                        val i = raw.roundToInt().coerceIn(0, ticks.lastIndex)
+                        onValueChange(ticks[i])
+                    } else if (usable) {
                         val v = raw.coerceIn(lo, hi)
                         onValueChange(com.wotagei.cam.ui.widget.snap(v, step, lo, hi))
                     }
                 },
-                valueRange = if (usable) lo..hi else 0f..1f,
-                enabled = enabled && usable,
+                valueRange = tickRange,
+                steps = if (ticks != null) ticks.size - 2 else 0,
+                enabled = enabled && (ticks != null || usable),
                 onValueChangeFinished = onValueChangeFinished,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(
