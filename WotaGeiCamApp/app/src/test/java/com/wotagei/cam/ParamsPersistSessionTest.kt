@@ -2,6 +2,7 @@ package com.wotagei.cam
 
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
+import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
@@ -23,6 +24,7 @@ import com.wotagei.cam.ui.ParamsPersistSession
 import com.wotagei.cam.ui.WotaSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -38,6 +40,16 @@ import org.junit.Test
  * 不直接摸私有编解码——否则删掉运行时的判断分支测试仍全绿。
  */
 class ParamsPersistSessionTest {
+
+    /**
+     * [WotaParams.makeBusy] 里的 `setArcMergeDeadband(25)` 会发布**进程级**快照
+     * ([ArcMergeDeadband.deadband])，没有 teardown 就会污染同 JVM 后续任何读默认死区的用例；
+     * 每个用例后复位出厂默认值。
+     */
+    @After
+    fun resetProcessWideDeadband() {
+        ArcMergeDeadband.publish(ArcMergeDeadband.DEFAULT)
+    }
 
     private fun params() = WotaParams(CoroutineScope(Dispatchers.Unconfined))
 

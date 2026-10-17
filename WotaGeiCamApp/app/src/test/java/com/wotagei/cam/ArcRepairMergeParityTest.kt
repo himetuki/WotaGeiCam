@@ -3,6 +3,9 @@ package com.wotagei.cam
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.record.ArcRepairMerge
+import com.wotagei.cam.source.KotlinSourceScan.codeOnly
+import com.wotagei.cam.source.KotlinSourceScan.flatten
+import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -248,6 +251,92 @@ class ArcRepairMergeParityTest {
     }
 
     @Test
+    fun `CPU_无符号比较_10与200必须按200更大处理`() {
+        val aY = byteArrayOf(10, 10, 10, 10)
+        val bY = byteArrayOf(200.toByte(), 200.toByte(), 200.toByte(), 200.toByte())
+        val aU = byteArrayOf(50)
+        val aV = byteArrayOf(60)
+        val bU = byteArrayOf(210.toByte())
+        val bV = byteArrayOf(220.toByte())
+        ArcRepairMerge.selectInPlace(aY, aU, aV, bY, bU, bV, 2, 2, 12)
+        // signed 比较下 200.toByte()=-56，Δ=-66 永远不过门；去掉 and 0xFF 必红
+        assertArrayEquals("无符号 Δ=190 必须过门并整块取 b", bY, aY)
+        assertArrayEquals(bU, aU)
+        assertArrayEquals(bV, aV)
+    }
+
+    @Test
+    fun `CPU_块内最大Δ过门_平均值不过门时仍整块取被抽帧`() {
+        val aY = byteArrayOf(10, 10, 10, 10)
+        val aU = byteArrayOf(50)
+        val aV = byteArrayOf(60)
+        // Δ 分布 (20,0,0,0)：最大 20>12 过门，平均 5≤12 不过门 ⇒ 改成平均判定必红
+        val bY = byteArrayOf(30, 10, 10, 10)
+        val bU = byteArrayOf(210.toByte())
+        val bV = byteArrayOf(220.toByte())
+        ArcRepairMerge.selectInPlace(aY, aU, aV, bY, bU, bV, 2, 2, 12)
+        assertArrayEquals("块内最大值才是判据（平均会把细弧吃掉）", bY, aY)
+        assertArrayEquals(bU, aU)
+        assertArrayEquals(bV, aV)
+    }
+
+    /** 独立参考：按 4:2:0 的 2×2 块逐块取 4 个 Y 的无符号最大 Δ，命中则整块搬运 */
+    private fun referenceBlockSelect(
+        aY: ByteArray, aU: ByteArray, aV: ByteArray,
+        bY: ByteArray, bU: ByteArray, bV: ByteArray,
+        width: Int, height: Int, deadband: Int
+    ): Triple<ByteArray, ByteArray, ByteArray> {
+        val y = aY.copyOf()
+        val u = aU.copyOf()
+        val v = aV.copyOf()
+        val cw = width / 2
+        val ch = height / 2
+        for (by in 0 until ch) {
+            for (bx in 0 until cw) {
+                val idx = intArrayOf(bx * 2 + by * 2 * width, bx * 2 + 1 + by * 2 * width,
+                    bx * 2 + (by * 2 + 1) * width, bx * 2 + 1 + (by * 2 + 1) * width)
+                val delta = idx.maxOf { (bY[it].toInt() and 0xFF) - (aY[it].toInt() and 0xFF) }
+                if (delta > deadband) {
+                    idx.forEach { y[it] = bY[it] }
+                    val c = bx + by * cw
+                    u[c] = bU[c]
+                    v[c] = bV[c]
+                }
+            }
+        }
+        return Triple(y, u, v)
+    }
+
+    @Test
+    fun `CPU_多块索引与独立参考逐块一致_4x2与2x4`() {
+        // 4×2：横向 2 块（行跨度 = width），块 0 过门、块 1 不过门
+        val aY42 = byteArrayOf(10, 10, 200.toByte(), 200.toByte(), 10, 10, 200.toByte(), 200.toByte())
+        val bY42 = byteArrayOf(30, 30, 100, 100, 30, 30, 100, 100)
+        val aU42 = byteArrayOf(50, 60)
+        val bU42 = byteArrayOf(210.toByte(), 220.toByte())
+        val aV42 = byteArrayOf(70, 80)
+        val bV42 = byteArrayOf(230.toByte(), 240.toByte())
+        val exp42 = referenceBlockSelect(aY42, aU42, aV42, bY42, bU42, bV42, 4, 2, 12)
+        ArcRepairMerge.selectInPlace(aY42, aU42, aV42, bY42, bU42, bV42, 4, 2, 12)
+        assertArrayEquals("4×2 的 Y 必须与逐块参考一致", exp42.first, aY42)
+        assertArrayEquals("4×2 的 U 必须按块跟随决策", exp42.second, aU42)
+        assertArrayEquals("4×2 的 V 必须按块跟随决策", exp42.third, aV42)
+
+        // 2×4：纵向 2 块（块步进 = width*2），块 0 过门、块 1 不过门
+        val aY24 = byteArrayOf(10, 10, 10, 10, 200.toByte(), 200.toByte(), 200.toByte(), 200.toByte())
+        val bY24 = byteArrayOf(30, 30, 30, 30, 100, 100, 100, 100)
+        val aU24 = byteArrayOf(50, 60)
+        val bU24 = byteArrayOf(210.toByte(), 220.toByte())
+        val aV24 = byteArrayOf(70, 80)
+        val bV24 = byteArrayOf(230.toByte(), 240.toByte())
+        val exp24 = referenceBlockSelect(aY24, aU24, aV24, bY24, bU24, bV24, 2, 4, 12)
+        ArcRepairMerge.selectInPlace(aY24, aU24, aV24, bY24, bU24, bV24, 2, 4, 12)
+        assertArrayEquals("2×4 的 Y 必须与逐块参考一致", exp24.first, aY24)
+        assertArrayEquals("2×4 的 U 必须按块跟随决策", exp24.second, aU24)
+        assertArrayEquals("2×4 的 V 必须按块跟随决策", exp24.third, aV24)
+    }
+
+    @Test
     fun `CPU_奇数宽高明确拒绝而不是静默截断`() {
         val y = ByteArray(3)
         val uv = ByteArray(1)
@@ -347,6 +436,43 @@ class ArcRepairMergeParityTest {
         assertEquals(
             "容空白等价写法必须仍绿，实际：\n${arcMergeFsViolations(compact).joinToString("\n")}",
             0, arcMergeFsViolations(compact).size
+        )
+    }
+
+    // endregion
+
+    // region ⑤ 死区归一化与两路 uniform / a-b 实参顺序的源扫描
+
+    @Test
+    fun `死区归一化到0到1且在线与离线两路uniform都真下发`() {
+        assertEquals("D=12 的 GLSL 归一值必须是 12/255", 12f / 255f, ArcMergeDeadband.luma(12), 0f)
+        assertEquals("钳制后 D=32 ⇒ 32/255", 32f / 255f, ArcMergeDeadband.luma(99), 0f)
+        assertEquals("D=0 ⇒ 0", 0f, ArcMergeDeadband.luma(-3), 0f)
+
+        val uniform = Regex("""glUniform1f\s*\(\s*mergeUDeadband\s*,\s*deadbandLuma\s*\)""")
+        val mend = codeOnly(mainSourceText("camera/ArcMendPass.kt"))
+        val gl = codeOnly(mainSourceText("record/ArcRepairGl.kt"))
+        assertTrue("在线 MEND 必须真下发 mergeUDeadband（删掉即回默认死区）", uniform.containsMatchIn(mend))
+        assertTrue("离线修复 GL 必须真下发 mergeUDeadband", uniform.containsMatchIn(gl))
+    }
+
+    @Test
+    fun `三处累积调用的ab实参顺序必须保持_a为保留累积面_b为新帧`() {
+        // 选择式不对称：顺序反了会变成 select(cur, acc)（差分方向反转 = 回到更亮者胜）
+        val mend = flatten(codeOnly(mainSourceText("camera/ArcMendPass.kt")))
+        assertTrue(
+            "ArcMendPass.accumulate 必须 mergeInto(a=acc, b=cur)",
+            mend.contains("mergeInto(accTex[accIdx], curTex, accFbo[1 - accIdx])")
+        )
+        val gl = flatten(codeOnly(mainSourceText("record/ArcRepairGl.kt")))
+        assertTrue(
+            "ArcRepairGl.accumulate 必须 mergeOnGl(a=acc, b=cur)",
+            gl.contains("mergeOnGl(accTex[accIdx], curTex, accFbo[1 - accIdx])")
+        )
+        val runner = flatten(codeOnly(mainSourceText("record/ArcRepairRunner.kt")))
+        assertTrue(
+            "execCpu 的累积必须 selectInto(a=acc, b=cur)",
+            runner.contains("selectInto(accY, accU, accV, curY, curU, curV)")
         )
     }
 
