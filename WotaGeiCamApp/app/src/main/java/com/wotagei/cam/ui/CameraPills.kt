@@ -690,7 +690,7 @@ private fun FocusPill(
                     onValueChange = { params.manualFocusDiopter.value = mf.copy(value = it) },
                     format = { String.format(Locale.US, "%.2fD", it) },
                     onValueChangeFinished = onPersist,
-                    ladder = diopterLadder(hi)
+                    ladder = diopterLadder(lo, hi)
                 )
             } else {
                 // 定焦镜头（前摄常见）落到手动档是核心的兜底；说清楚"没有可调对焦距离"，

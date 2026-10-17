@@ -86,9 +86,10 @@ class PillInteractionGuardTest {
             bad.add("AudioSourcePanel 没有把 editable 传给 BtSpeakerPanel")
         }
         if (!panel.contains("editable: Boolean")) bad.add("BtSpeakerPanel 没有 editable 形参")
-        if (occurrences(panel, "enabled = editable").size < 6) {
-            bad.add("BtSpeakerPanel 的扫描/连接/传输键没有全部吃 editable（至少 6 处）")
-        }
+        if (panel.contains("editable: Boolean =")) bad.add("BtSpeakerPanel 的 editable 不许给默认值（漏传应编译不过）")
+        // 逐控件点名：扫描/权限/去设置/DeviceRow 连接/prev/playPause/next 恰 7 处（拆掉任一处必红）
+        val gated = occurrences(panel, "enabled = editable").size
+        if (gated != 7) bad.add("BtSpeakerPanel 吃 editable 的控件不是 7 处（实际 $gated）")
         if (!panel.contains("enabled = maxVolume > 0 && editable")) {
             bad.add("BtSpeakerPanel 音量滑杆没有吃 editable")
         }
@@ -116,6 +117,10 @@ class PillInteractionGuardTest {
             bad.add("lockFocusAt 录制门不吃 recordingNow：首帧闭包会固化录制态，录制中双击仍能上锁")
         }
         if (block.contains("if (recording)")) bad.add("lockFocusAt 仍直接读组合期 recording（首帧快照）")
+        // 能力闸必须排在录制门之前：手动档/不支持 AUTO 时优先给更准确的那条说明（审查 P3）
+        val gateAt = block.indexOf("focusLockUnsupportedText")
+        val recAt = block.indexOf("recordingNow")
+        if (gateAt < 0 || recAt < 0 || gateAt > recAt) bad.add("能力闸必须排在录制门之前（提示准确性）")
         return bad
     }
 

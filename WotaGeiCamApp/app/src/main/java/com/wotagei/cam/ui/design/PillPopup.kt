@@ -310,6 +310,9 @@ fun PillSlider(
 ) {
     val usable = hi > lo
     val shown = if (usable) value.coerceIn(lo, hi) else value
+    // 传了梯就是"只许在刻度上取值"：梯不足 2 点时**不许静默退回连续滑杆**（否则拖动可写出非刻度值，
+    // 违反"拖动必落刻度"的验收口径）——禁用比假连续诚实（审查 P3）
+    val ladderOnly = ladder != null
     val ticks = ladder?.takeIf { it.size >= 2 }
     val tickRange = if (ticks != null) 0f..(ticks.size - 1).toFloat() else if (usable) lo..hi else 0f..1f
     // 当前值不在梯上（旧版本持久化恢复）时滑杆停在最近刻度，读数仍显示真实值；首次拖动后落梯
@@ -336,7 +339,9 @@ fun PillSlider(
                 onValueChange = { raw ->
                     if (ticks != null) {
                         val i = raw.roundToInt().coerceIn(0, ticks.lastIndex)
-                        onValueChange(ticks[i])
+                        // 梯值也必须落在参数域内：梯构造一般已按 range 过滤，这里是最后一道闸
+                        // （少数镜头的最小屈光度不为 0 这类情形，不能让滑杆造出域外刻度）
+                        onValueChange(if (usable) ticks[i].coerceIn(lo, hi) else ticks[i])
                     } else if (usable) {
                         val v = raw.coerceIn(lo, hi)
                         onValueChange(com.wotagei.cam.ui.widget.snap(v, step, lo, hi))
@@ -344,7 +349,7 @@ fun PillSlider(
                 },
                 valueRange = tickRange,
                 steps = if (ticks != null) ticks.size - 2 else 0,
-                enabled = enabled && (ticks != null || usable),
+                enabled = enabled && (ticks != null || (usable && !ladderOnly)),
                 onValueChangeFinished = onValueChangeFinished,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(

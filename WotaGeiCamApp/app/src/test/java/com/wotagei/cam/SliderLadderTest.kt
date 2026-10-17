@@ -90,14 +90,18 @@ class SliderLadderTest {
     }
 
     @Test
-    fun `屈光度 0到hi等分10段共11点`() {
-        val d = diopterLadder(10f)
+    fun `屈光度 lo到hi等分10段共11点`() {
+        val d = diopterLadder(0f, 10f)
         assertEquals(11, d.size)
         assertEquals(0f, d.first())
         assertEquals(10f, d.last())
         assertEquals("等距 1.0/段", 1f, d[1], 1e-6f)
-        assertTrue("定焦镜头（hi<=0）没有梯", diopterLadder(0f).isEmpty())
-        assertTrue(diopterLadder(-1f).isEmpty())
+        assertTrue("定焦镜头（hi<=lo）没有梯", diopterLadder(0f, 0f).isEmpty())
+        assertTrue(diopterLadder(0f, -1f).isEmpty())
+        // 下限不为 0 的镜头：梯必须以运行时 range.start 起，不能造出域外刻度
+        val offset = diopterLadder(2f, 12f)
+        assertEquals(2f, offset.first(), 1e-6f)
+        assertEquals(12f, offset.last(), 1e-6f)
     }
 
     @Test
