@@ -72,6 +72,9 @@ object Diag {
     /** 崩溃件里带多少行上下文 */
     internal const val DIAG_CRASH_TAIL_LINES = 400
 
+    /** 结构帧账最多留多少行（段收尾一行 + 会话清单一行；64 段≈19KB 量级，远小于导出上限） */
+    internal const val FRAME_ACCOUNT_MAX_LINES = 64
+
     private const val BASE_NAME = "wotagei.log"
     private const val CRASH_PREFIX = "crash-"
     private const val EXPORT_PREFIX = "wotagei-log-"
@@ -119,6 +122,32 @@ object Diag {
 
     /** 待落盘队列被封顶丢掉的总行数（导出件头部要自曝，见 [diagDroppedNote]） */
     private val droppedPending = AtomicLong(0L)
+
+    /**
+     * **结构帧账**（2026-10-17）：录制段收尾的"相机→GL→编码器→muxer"一行汇总 + 会话段清单。
+     *
+     * 为什么不走 [record] 的总开关：它是**结构化诊断数据**，用户点「导出日志」时应当看到
+     * 帧账，即使常规日志总开关处于默认关（[enabled] 默认 false 的裁决不变）。写入点只在
+     * 段收尾/会话收尾（分钟级），不在逐帧热路径；容量封顶 [FRAME_ACCOUNT_MAX_LINES] 行。
+     */
+    private val frameAccountLines = ArrayDeque<String>()
+    private val frameAccountLock = Any()
+
+    /** 追加一行结构帧账（线程安全；超出上限丢最老的一行） */
+    fun frameAccount(line: String) {
+        synchronized(frameAccountLock) {
+            frameAccountLines.addLast(line)
+            while (frameAccountLines.size > FRAME_ACCOUNT_MAX_LINES) frameAccountLines.removeFirst()
+        }
+    }
+
+    /** 新录制会话开始时清空帧账（只清结构段，不动常规日志环形缓冲） */
+    fun clearFrameAccount() {
+        synchronized(frameAccountLock) { frameAccountLines.clear() }
+    }
+
+    private fun frameAccountSnapshot(): List<String> =
+        synchronized(frameAccountLock) { frameAccountLines.toList() }
 
     // region 生命周期
 
@@ -409,6 +438,8 @@ object Diag {
         body.append(diagHeader(deviceSummary(app), app.packageName))
         // 丢弃自曝紧跟头部：用户读导出件是从上往下的，等翻到末尾才发现前面缺了一整段，现场早没了
         body.append(diagDroppedNote(droppedPending.get()))
+        // 结构帧账：与常规日志开关无关（见 [frameAccount] KDoc），放在日志件之前先给结论
+        body.append(diagFrameAccountSection(frameAccountSnapshot()))
         // 崩溃件（新→旧）：最常被问到的就是"崩的时候发生了什么"
         val crashes = dir?.listFiles { f -> f.name.startsWith(CRASH_PREFIX) }
             ?.sortedByDescending { it.lastModified() }.orEmpty()
@@ -566,6 +597,22 @@ internal fun diagPendingOverflow(size: Int, max: Int): Int = (size - max).coerce
 internal fun diagDroppedNote(dropped: Long): String =
     if (dropped <= 0L) ""
     else "注意：待落盘队列超 ${Diag.DIAG_PENDING_MAX_LINES} 行封顶，有 $dropped 行未落盘（丢的是最老的）。\n"
+
+/**
+ * 导出件里的**结构帧账**段（纯函数，便于 JVM 断言"行真的进正文"）。
+ *
+ * 空表也留一行占位说明：用户导出后看不到这一段时，能区分"本次没录/没到段尾"与
+ * "导出逻辑把帧账丢了"。段名与首尾标记同 `diagHeader` 的 `===` 风格。
+ */
+internal fun diagFrameAccountSection(lines: List<String>): String = buildString {
+    append("\n=== 录制帧账 ===\n")
+    if (lines.isEmpty()) {
+        append("（本次会话没有段收尾帧账：未录制或尚未到段尾）\n")
+    } else {
+        lines.forEach { append(it).append('\n') }
+    }
+    append("=== 录制帧账结束 ===\n")
+}
 
 /** 轮转件名：`wotagei.log.1`（index 从 1 起） */
 internal fun diagRotatedName(base: String, index: Int): String = "$base.$index"

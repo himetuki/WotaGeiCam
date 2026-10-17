@@ -459,6 +459,23 @@ class CodecRecorder(
     private var pendingLegLostMs = 0L
 
     /**
+     * 上一次换段腿内**相机/预览帧到达数**（上界，非"精确丢帧"）：腿从编码器被拆到新段 start，
+     * 这段时间进来的帧可能一部分仍写进旧段（旧编码器拆前）或新段（start 前不算），无法逐帧
+     * 归属，所以只报「这条腿内到达了多少帧」作为丢帧上界，口径与 [rotateLostMs] 的时间账并列。
+     */
+    private var pendingLegLostFrames = 0L
+
+    /** 换段腿起点的帧计快照（[beginRotateLeg] 写、[settleRotateLeg] 读） */
+    private var rotateLegFramesBase = 0L
+
+    /**
+     * 当前段开始之前那条换段腿的账（ms / 帧上界）：泵循环顶部随段账一起落地，
+     * [runSegment] 段收尾行读取。首段恒 0（没有换段腿）。
+     */
+    private var currentSegLostMs = 0L
+    private var currentSegLostFrames = 0L
+
+    /**
      * 本段是否请求"重开本段"（新段的 muxer 首笔就写不进 ⇒ 有界重建，见 [muxRecoverDecision]）。
      * 泵线程写、泵线程读，@Volatile 只是防御未来挪出该线程。
      */
@@ -535,6 +552,8 @@ class CodecRecorder(
         abandonSegment = false
         stopping = false
         rotatePending = false
+        // 帧账从新会话起算（诊断导出只留本次录制的段账，不混上一场）
+        Log.clearFrameAccount()
         healthVideoTrackAdded = false
         healthMuxStarted = false
         healthFirstVideoSample = false
@@ -1126,6 +1145,10 @@ class CodecRecorder(
         rotateLegStartMs.set(0L)
         rotateStoreTimedOut = false
         pendingLegLostMs = 0L
+        pendingLegLostFrames = 0L
+        rotateLegFramesBase = 0L
+        currentSegLostMs = 0L
+        currentSegLostFrames = 0L
         rotateFailStage = ""
         latePendingReaped = 0L
         segmentRestartRequested = false
@@ -1184,7 +1207,11 @@ class CodecRecorder(
             segSampleCounts.add(segVideoWritten)
             segVideoWritten = 0
             segLostMs.add(pendingLegLostMs)
+            // 当前段（下一轮 runSegment）要读的那条腿的账：帧上界与时间账同处落地
+            currentSegLostMs = pendingLegLostMs
+            currentSegLostFrames = pendingLegLostFrames
             pendingLegLostMs = 0L
+            pendingLegLostFrames = 0L
             val dur = clock.closeSegment()
             // 这一轮到底要不要换段（判据必须在拆编码器**之前**取好：换段腿的起钟与结算都以它为准，
             // 否则停止时的最后一段封段会被算进"换段腿"——那份慢不该被说成"丢了内容"）
@@ -1246,6 +1273,8 @@ class CodecRecorder(
      */
     private fun beginRotateLeg() {
         rotateLegStartMs.set(SystemClock.elapsedRealtime())
+        // 帧账上界起点：腿内的相机/预览回调数（不是精确丢帧，见 pendingLegLostFrames）
+        rotateLegFramesBase = FrameLedger.snapshot().glCallbacks
         rotateStoreTimedOut = false
         rotateFailStage = ""
     }
@@ -1296,6 +1325,11 @@ class CodecRecorder(
         val legMs = SystemClock.elapsedRealtime() - start
         val lost = rotateLostMs(legMs)
         pendingLegLostMs = lost
+        // 帧上界：这条腿内 GL 回调到达数（相机可能在腿里也在出帧；DIRECT 路 GL 仅预览，
+        // 口径仍是"这段时间相机交了多少帧"，不是"精确丢了多少"）
+        val legFrames = FrameLedger.snapshot().glCallbacks - rotateLegFramesBase
+        pendingLegLostFrames = legFrames.coerceAtLeast(0L)
+        rotateLegFramesBase = 0L
         rotateLoss.add(lost)
         if (lost > 0L) {
             Log.e(
@@ -1653,6 +1687,11 @@ class CodecRecorder(
         var aPtsLastUs = 0L
         var cPtsLastUs = 0L
         val segStartNs = System.nanoTime()
+        // 帧账基线：本段只结算"从 runSegment 起走到段尾"的增量（跨组件计数器是单调的，
+        // 段首段尾各取一次快照；快照非事务，只作观测）
+        val frameBase = FrameLedger.snapshot()
+        // 起录丢弃（第 1 笔口径）：muxer 启动前已编码、但容器还不可写而被 release 的视频样本数
+        var preMuxDropped = 0L
 
         while (true) {
             // 本段请求重建（新段首笔就写不进 muxer，见 writeSample）：立刻收口，**不置错误码**，
@@ -1768,6 +1807,10 @@ class CodecRecorder(
                             // 与 muxFinalized 合成"容器已确认收尾"，只能由写成功置位
                             if (wrote > 0) segHadVideoSample = true
                             vPtsLastUs = bi.presentationTimeUs
+                        } else if (!muxStarted && !eos && bi.size > 0) {
+                            // 帧账（纯观测）：muxer 启动前编码器已经吐出的视频样本只能 release。
+                            // 第 2 笔会把这里换成有界缓冲（起录补写），当前先如实计数，别让它继续隐形
+                            preMuxDropped++
                         }
                         v.releaseOutputBuffer(idx, false)
                         if (eos) videoDone = true
@@ -2016,6 +2059,30 @@ class CodecRecorder(
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms " +
                 "内录静音[$capSilenceInfo]"
         )
+        // 帧账独立一行（2026-10-17）：回答"相机给了多少 → GL 收/合了多少 → 提交编码器多少 →
+        // 写进 muxer 多少 → 有意抽帧多少 → 起录/换段丢多少"。不并入上面两行（向后可读），
+        // 同时进诊断导出的结构化段（Diag.frameAccount，独立于日志总开关，见该函数 KDoc）
+        val frameEnd = FrameLedger.snapshot()
+        val ledgerLine = frameLedgerLine(
+            FrameLedgerReport(
+                partIndex = partIndex,
+                gpu = profile?.useGpu == true,
+                durationMs = (System.nanoTime() - segStartNs) / 1_000_000L,
+                cameraFrames = (frameEnd.cameraStarted - frameBase.cameraStarted).coerceAtLeast(0L),
+                glCallbacks = (frameEnd.glCallbacks - frameBase.glCallbacks).coerceAtLeast(0L),
+                glConsumed = (frameEnd.glConsumed - frameBase.glConsumed).coerceAtLeast(0L),
+                encoderSwaps = (frameEnd.encoderSwapOk - frameBase.encoderSwapOk).coerceAtLeast(0L),
+                swapFails = (frameEnd.encoderSwapFail - frameBase.encoderSwapFail).coerceAtLeast(0L),
+                muxSamples = segVideoWritten.toLong(),
+                preMuxBuffered = 0L,
+                preMuxDropped = preMuxDropped,
+                arcDrops = (frameEnd.arcDropped - frameBase.arcDropped).coerceAtLeast(0L),
+                rotateLostMs = currentSegLostMs,
+                rotateFramesUpper = currentSegLostFrames
+            )
+        )
+        Log.i(TAG, ledgerLine)
+        Log.frameAccount(ledgerLine)
         return true
     }
 
@@ -2409,6 +2476,10 @@ class CodecRecorder(
         engineError = null
         degradedCode = null
         clock.reset()
+        // 会话段清单摘要进诊断导出正文（与 .drops.json 的 segments 同源：先取 out 里的快照，
+        // 再清泵线程单写者的段账，顺序不许反）
+        val sessionLine = frameSessionSummary(out.segVideoSamples, out.segLostMs)
+        if (sessionLine.isNotEmpty()) Log.frameAccount(sessionLine)
         parts.clear()
         partIndex = 0
         partStartMs = 0L
