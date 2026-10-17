@@ -139,7 +139,8 @@ private fun audioSourceTabs(
             )
         },
         AudioTabSpec(key = "bt", title = stringResource(R.string.audio_tab_bluetooth)) {
-            BtSpeakerPanel(bt)
+            // A4 录制中只读同样覆盖音箱页签：扫描/连接/音量/传输键都吃 editable（审查 P1）
+            BtSpeakerPanel(bt, editable)
         }
     )
 }

@@ -69,7 +69,7 @@ class AudioSourceWiringGuardTest {
         assertTrue("必须有蓝牙页（audio_tab_bluetooth）", tabs.contains("audio_tab_bluetooth"))
         assertTrue(
             "蓝牙页必须整块复用 BtSpeakerPanel（迁入零行为变化的回归红线）",
-            tabs.contains("BtSpeakerPanel(bt)")
+            tabs.contains("BtSpeakerPanel(bt, editable)")
         )
     }
 

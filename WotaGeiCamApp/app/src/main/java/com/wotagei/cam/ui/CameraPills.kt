@@ -725,7 +725,8 @@ private fun FocusPill(
             afMode == AfMode.MANUAL -> Note(R.string.cam_focus_manual_locked)
             !autoFocusSupported -> Note(R.string.cam_focus_lock_unsupported)
         }
-        if (recording && !focusLocked) Note(R.string.cam_focus_lock_recording)
+        // 只在"本来锁得上、只是录制中被拦"时给这条；手动档/能力不支持已有更准确的说明（审查 P3）
+        if (recording && !focusLocked && lockUsable) Note(R.string.cam_focus_lock_recording)
         Note(R.string.cam_tap_hint)
     }
 }
