@@ -11,7 +11,9 @@ import java.util.concurrent.atomic.AtomicLong
  * **热路径零分配、零字符串拼接**；只在段收尾 `snapshot()` 一次。
  *
  * 口径警示：
- * - [FrameCounterSnapshot.cameraStarted] 数的是 `onCaptureStarted` 回调（含会话内的单发请求）；
+ * - [FrameCounterSnapshot.cameraStarted] 数的是**重复请求**（预览/录制）的 `onCaptureStarted`
+ *   回调；会话内单发 capture 刻意传 `null` 回调（见 `Camera2Engine.singleCapture`），**不计**；
+ *   `onCaptureStarted` 含"帧开始曝光"语义，可能领先于实际出帧，故只作到达上界；
  * - [FrameCounterSnapshot.glCallbacks] 是 SurfaceTexture 的 `onFrameAvailable`；DIRECT 路的 GL
  *   只做预览、不喂编码器，这两个数字在 DIRECT 下只描述预览链；
  * - [FrameCounterSnapshot.encoderSwapOk] 只数换到**编码面**的 `eglSwapBuffers`，窗口面不计；
@@ -139,13 +141,20 @@ internal fun frameLedgerLine(report: FrameLedgerReport): String {
     val cameraFps = frameCentiText(frameCentiFps(report.cameraFrames, report.durationMs))
     val muxFps = frameCentiText(frameCentiFps(report.muxSamples, report.durationMs))
     val path = if (report.gpu) "GPU" else "DIRECT(GL仅预览)"
+    // DIRECT 路没有编码 swap（相机面直连编码器），"GL→swap / swap→mux" 两级差没有语义：
+    // 打印数字会被读成"丢了这么多帧"，这里显式写不适用。
+    val stageText = if (report.gpu) {
+        "逐级差=相机→GL ${stage.cameraToGl}/GL→swap ${stage.glToSwap}/swap→mux ${stage.swapToMux}"
+    } else {
+        "逐级差=相机→GL ${stage.cameraToGl}/GL→swap 不适用(DIRECT无编码swap)/swap→mux 不适用"
+    }
     return "帧账 part=${report.partIndex} 路径=$path 墙钟=${report.durationMs}ms " +
         "相机到达=${report.cameraFrames} GL回调=${report.glCallbacks} GL消费=${report.glConsumed} " +
         "GL合帧=$merged 编码swap=${report.encoderSwaps} swap失败=${report.swapFails} " +
         "muxer视频=${report.muxSamples} 起录补写=${report.preMuxBuffered} 起录丢弃=${report.preMuxDropped} " +
         "有意抽帧=${report.arcDrops} " +
         "换段丢=${report.rotateLostMs}ms/${report.rotateFramesUpper}帧(上界) " +
-        "逐级差=相机→GL ${stage.cameraToGl}/GL→swap ${stage.glToSwap}/swap→mux ${stage.swapToMux} " +
+        stageText + " " +
         "实测相机=${cameraFps}fps 成片=${muxFps}fps"
 }
 
