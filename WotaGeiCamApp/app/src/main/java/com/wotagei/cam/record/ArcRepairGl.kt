@@ -139,6 +139,15 @@ internal class ArcRepairGl(
     private var framesQueued = 0L
     private var framesConsumed = 0L
 
+    /**
+     * M6-05 观测：`updateTexImage` 只保留**最新**一帧，管线慢于解码器时积压的中间帧被静默合并——
+     * 它们不进任何既有计数，抽帧计划的 `srcIndex` 因此可能与解码器真实吐出的帧数错位。
+     * 这里只**计次**（与 `CodecRecorder` 的 `feedDropped`/`lateDrops` 同族形态：只增、不改戳）。
+     * 读取方式为 `awaitFrame` 沿用同一把 [frameLock]，计数只增，不动 PTS 与抽帧判定。
+     */
+    private var mergedFrames = 0L
+    private var mergedMaxBack = 0L
+
     fun start(): Boolean = postAndWait(OP_WAIT_MS) { initGl() }
 
     /** 把编码器输入面挂上 EGL（必须在 enc.start() 之后调，时序理由见 runner 侧注释） */
@@ -170,10 +179,23 @@ internal class ArcRepairGl(
     fun acquire(): Boolean = postAndWait(OP_WAIT_MS) {
         if (!glReady) return@postAndWait false
         val st = texture ?: return@postAndWait false
+        // M6-05 观测：进 updateTexImage 前先量积压（framesQueued − framesConsumed）。SurfaceTexture
+        // 只保最新一帧，积压 >1 时中间帧被静默合并——它们不进任何既有计数，抽帧计划的 srcIndex 因此
+        // 可能错位。这里只计次 + 落日志，**绝不碰 PTS 与抽帧判定**（只增不改戳，同 feedDropped 族）。
+        val backlog = synchronized(frameLock) { framesQueued - framesConsumed }
         st.updateTexImage()
         st.getTransformMatrix(stMatrix)
         val ok = copyOesToCur()
         synchronized(frameLock) { framesConsumed++ }
+        if (backlog > 1L) {
+            val merged = backlog - 1L
+            mergedFrames += merged
+            if (merged > mergedMaxBack) mergedMaxBack = merged
+            Log.w(
+                TAG_ARC_GL,
+                "解码合帧：积压 $backlog 帧被 updateTexImage 吞到最新（累计 $mergedFrames，单次最多 $mergedMaxBack）"
+            )
+        }
         ok
     }
 

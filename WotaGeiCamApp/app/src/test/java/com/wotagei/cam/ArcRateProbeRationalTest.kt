@@ -63,10 +63,13 @@ class ArcRateProbeRationalTest {
 
     @Test
     fun `有效样本不足退回fallback有理数`() {
-        assertEquals(rate(24, 1), ArcRateProbe.measuredSrcFps(List(7) { 33_333 }, 24))
-        assertEquals(rate(30, 1), ArcRateProbe.measuredSrcFps(emptyList(), 30))
+        // measuredSrcFps 现有 Int/Long 两个重载（M6-05）；整数**字面量**列表对两者都可行 ⇒ 必须点名
+        // 元素类型（`33_333L` → Long 核；`List<Int>(…)` → Int 外壳；`emptyList<Int>()` 同理）
+        assertEquals(rate(24, 1), ArcRateProbe.measuredSrcFps(List(7) { 33_333L }, 24))
+        assertEquals(rate(24, 1), ArcRateProbe.measuredSrcFps(List<Int>(7) { 33_333 }, 24))
+        assertEquals(rate(30, 1), ArcRateProbe.measuredSrcFps(emptyList<Int>(), 30))
         // fallback 同为有理数形态（NTSC 容器标称 30000/1001 原样带出，不再先整成 30）
-        assertEquals(rate(30_000, 1_001), ArcRateProbe.measuredSrcFps(emptyList(), 30_000, 1_001))
+        assertEquals(rate(30_000, 1_001), ArcRateProbe.measuredSrcFps(emptyList<Int>(), 30_000, 1_001))
     }
 
     @Test
@@ -88,6 +91,63 @@ class ArcRateProbeRationalTest {
         assertEquals(480, ArcRateProbe.snapToKnownRate(1_000).roundedInt())
         // 下缘：3fps 的超慢畸变也只到 1
         assertEquals(1, rate(1, 3).roundedInt())
+    }
+
+    // endregion
+
+    // region M6-05 帧距 Long 保精度（>2³¹µs 的断层不得降位混进滤噪窗）
+
+    /**
+     * M6-05 守卫：**`> 2³¹µs` 的轨道断层在滤噪前不得降位**——一旦先 `.toInt()`，回卷值可能恰好
+     * 落进滤噪窗（`1_001..1_000_000`）而被当中位样本收下，毒化源帧率、放大 M6-01 的整数误差。
+     *
+     * 靶子：`(1L shl 32) + 16_667L`（约 71.6 分钟量级的 Long 帧距）降 Int 后回卷成 `16_667`，
+     * 而 `16_667` 恰在窗内、且吸附到 60fps——旧口径会把它算进去。真值：Long 核按 Long 比窗，
+     * 断层原样挡在窗外。第二条断言是**对照**（旧口径的降位路径必真毒化），防本守卫变成恒等式。
+     */
+    @Test
+    fun `超2的31次方帧距不进滤噪窗也不毒化中位数`() {
+        val overflow = (1L shl 32) + 16_667L
+        assertEquals("前提：降位回卷值恰在滤噪窗内（这正是本守卫的靶子）", 16_667, overflow.toInt())
+        // 9 枚断层 + 8 枚真样本（41_708 → NTSC 23.976）。中位数位上若混进回卷值，结果会被翻成 60。
+        val raw = List(9) { overflow } + List(8) { 41_708L }
+        assertEquals(
+            "Long 核必须把断层挡在窗外、中位数仍只取真样本",
+            rate(24_000, 1_001),
+            ArcRateProbe.measuredSrcFps(raw, 30)
+        )
+        // 对照：同一物理输入若先降 Int 再喂（旧口径的降位路径），中位数必被回卷值翻成 60
+        // ——证明"不保 Long 就会真的毒化"，即本守卫不是恒等式。
+        assertEquals(
+            "降位路径（旧口径）必须真的毒化中位数，否则本守卫什么都没测到",
+            rate(60, 1),
+            ArcRateProbe.measuredSrcFps(raw.map { it.toInt() }, 30)
+        )
+    }
+
+    /**
+     * M6-05 守卫：整数源**逐点零变化**——旧 `List<Int>` 外壳必须与显式 `List<Long>` 核在同一
+     * 物理输入上逐点同值（Int 值恒在 Long 域内，滤噪窗与中位数逐点等价，故旧调用点行为不变）。
+     */
+    @Test
+    fun `整数源逐点零变化_Int外壳与Long核同值`() {
+        // 三段混合：重复样本（0）+ 有效 NTSC 样本 + 断层（2_000_000）——同时走滤噪与中位数两条路
+        val intRaw = buildList {
+            repeat(10) { add(0) }
+            repeat(45) { add(41_708) }
+            add(2_000_000)
+            repeat(45) { add(41_708) }
+        }
+        assertEquals(
+            "Int 外壳必须与显式 Long 核逐点同值（含中位数位次）",
+            ArcRateProbe.measuredSrcFps(intRaw.map { it.toLong() }, 24),
+            ArcRateProbe.measuredSrcFps(intRaw, 24)
+        )
+        // 回退路（有效样本不足）也必须同值
+        assertEquals(
+            ArcRateProbe.measuredSrcFps(List(7) { 33_333L }, 24),
+            ArcRateProbe.measuredSrcFps(List<Int>(7) { 33_333 }, 24)
+        )
     }
 
     // endregion
@@ -123,7 +183,7 @@ class ArcRateProbeRationalTest {
 
     @Test
     fun `25点4fps探出真值有理数_整数视图只作量级`() {
-        val rate = ArcRateProbe.measuredSrcFps(List(90) { 39_370 }, 24)  // 10⁶/39370 ≈ 25.4（约分 100000/3937）
+        val rate = ArcRateProbe.measuredSrcFps(List(90) { 39_370L }, 24)  // 10⁶/39370 ≈ 25.4（约分 100000/3937）
         assertEquals(rate(100_000, 3_937), rate)
         assertEquals(25, rate.roundedInt())                              // 整数视图整成 25——分叉的来源
         assertFalse("25.4 ≤ 25 不成立（整数口径会把 25.4 打成 25 误判 NO_NEED）", rate.atMostInt(25))

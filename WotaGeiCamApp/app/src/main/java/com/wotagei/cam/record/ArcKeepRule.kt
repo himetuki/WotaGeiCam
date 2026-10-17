@@ -1,5 +1,7 @@
 package com.wotagei.cam.record
 
+import kotlin.jvm.JvmName
+
 /**
  * 源帧率**实测**（帧距中位数，纯函数 JVM 可测）：强制 24/25fps 档的容器 `KEY_FRAME_RATE`
  * 会标成目标值而传感器实际跑更高帧率，按容器值造抽帧计划会得出"无需抽帧"的假结论。
@@ -23,6 +25,9 @@ object ArcRateProbe {
 
     /** 滤噪带（v1 同口径）：帧距 <1ms 是重复样本、>1s 是轨道断层 */
     private val CLEAN_RANGE = 1_001..1_000_000
+
+    /** [CLEAN_RANGE] 的 Long 孪生（M6-05：帧距在滤噪前不得降位，滤噪判据本身也得吃 Long） */
+    private val CLEAN_RANGE_LONG = 1_001L..1_000_000L
 
     /**
      * 实测源帧率的**有理数**视图（num/den，已约分）：整数 fps 会把 30.0 与 29.97（30000/1001）
@@ -87,18 +92,36 @@ object ArcRateProbe {
     }
 
     /**
-     * 由**原始**相邻样本帧距（微秒）测源帧率（有理数版）：先按 [CLEAN_RANGE] 滤噪，再取中位数
-     * 吸附已知档位（[snapToKnownRate]）；有效样本不足退回 [fallbackNum]/[fallbackDen]。
+     * 由**原始**相邻样本帧距（微秒，[Long] **真值**）测源帧率（有理数版）：先按 [CLEAN_RANGE_LONG]
+     * 滤噪，再取中位数吸附已知档位（[snapToKnownRate]）；有效样本不足退回 [fallbackNum]/[fallbackDen]。
+     *
+     * **M6-05**：帧距在**滤噪之前不得降位**。旧实现由调用方先 `(t - prevUs).toInt()`，>2³¹µs 的轨道
+     * 断层回卷后可能恰好落进 `1_001..1_000_000` 合法窗、毒化中位数（进而放大 M6-01 的整数误差）。
+     * 收 [Long] 后滤噪判据也用 Long，回卷值原样被挡在窗外。整数源逐点行为与旧签名逐字相同（见下）。
      */
+    fun measuredSrcFps(
+        rawDeltasUs: List<Long>,
+        fallbackNum: Long,
+        fallbackDen: Long = 1L
+    ): MeasuredSrcFps {
+        val clean = rawDeltasUs.filter { it in CLEAN_RANGE_LONG }
+        if (clean.size < MIN_DELTAS) return MeasuredSrcFps.of(fallbackNum, fallbackDen)
+        return snapToKnownRate(clean.sorted()[clean.size / 2])
+    }
+
+    /**
+     * 旧整数签名（兼容外壳）：Int 帧距逐点等值升为 Long 后走上面同一核——Int 值恒在 Long 域内，
+     * 滤噪窗与中位数逐点等价，故所有旧调用点（含 v1 手算金标对拍）行为零变化。
+     *
+     * `@JvmName`：与 [List] 版 [measuredSrcFps] 只差泛型实参，JVM 签名会撞成同一个
+     * `(Ljava/util/List;JJ)`（平台声明冲突），故显式改名隔开；Kotlin 侧名字不变，调用点零改动。
+     */
+    @JvmName("measuredSrcFpsOfInts")
     fun measuredSrcFps(
         rawDeltasUs: List<Int>,
         fallbackNum: Long,
         fallbackDen: Long = 1L
-    ): MeasuredSrcFps {
-        val clean = rawDeltasUs.filter { it in CLEAN_RANGE }
-        if (clean.size < MIN_DELTAS) return MeasuredSrcFps.of(fallbackNum, fallbackDen)
-        return snapToKnownRate(clean.sorted()[clean.size / 2].toLong())
-    }
+    ): MeasuredSrcFps = measuredSrcFps(rawDeltasUs.map { it.toLong() }, fallbackNum, fallbackDen)
 
     /**
      * 旧整数签名（v1 口径，只作兼容外壳）：样本不足时 [fallbackFps] **原样**返回（与 v1 逐字
@@ -120,8 +143,9 @@ object ArcRateProbe {
  * 规则自追平（停滞后来帧不从落后账里连发）、自纠偏（传感器快慢漂移直接反映到丢弃分布），
  * 长期输出节奏收敛到恰为 D fps。
  *
- * 输出 PTS 不走本类：GL 编码支路的均匀帧序号时间戳（帧序号 × 1e9/fps）只在保留帧上推进，
- * 丢弃帧跳过 swap 即可，两套口径天然一致。源帧率实测见 [ArcRateProbe]。
+ * 输出 PTS 不走本类：GL 编码支路按**真实时钟落名义网格、源慢时逐帧接管**打戳（纯函数
+ * `GlRenderEngine.encoderAdaptivePtsNs`；名义网格内核 `encoderSlotPtsNs` 原样保留），只在保留帧
+ * 上推进——丢弃帧跳过 swap 即不产戳。源帧率实测见 [ArcRateProbe]。
  */
 class ArcKeepRule(private val slotNs: Long) {
     /** 下一输出帧的应到时刻；[NOT_STARTED] = 还没见到首帧 */
