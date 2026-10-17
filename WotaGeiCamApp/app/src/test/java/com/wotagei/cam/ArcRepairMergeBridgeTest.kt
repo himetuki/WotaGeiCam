@@ -45,10 +45,19 @@ class ArcRepairMergeBridgeTest {
         )
     }
 
-    /** 60 帧递增光源：每帧整块往 b 方向抬，保证连续抽帧时会真的发生多次选择 */
-    private fun frames(n: Int): List<Block> = (0 until n).map { i ->
-        val y = i * 4
-        Block(listOf(y, y + 1, y, y + 1), (i * 11 + 7) % 256, (i * 23 + 3) % 256)
+    /**
+     * 60 帧光源：保留帧按 i*4 递增；**两枚被抽帧里放一枚高于两侧保留帧的亮尖峰**（Y=255）。
+     * 单调 i*4 时被抽帧的 luma 永远夹在前后保留帧之间，`select(cur, acc)` 恒为 cur ⇒
+     * “后保留帧吃弧”分支等于空操作；尖峰逼出真正的 b→a 选择。
+     */
+    private fun frames(n: Int): List<Block> {
+        val kept = (0 until n).filter { ArcRepairPlan.isKept(it, 60, 24) }
+        val spikeFrom = (kept.getOrNull(1) ?: 0) + 1
+        val spikeUntil = kept.getOrNull(2) ?: n
+        return (0 until n).map { i ->
+            val y = if (i in spikeFrom until spikeUntil) 250 else i * 4
+            Block(listOf(y, y + 1, y, y + 1), (i * 11 + 7) % 256, (i * 23 + 3) % 256)
+        }
     }
 
     /** 把 [from, until) 的 dropped 帧逐枚折进 acc（首枚 fresh，其余 select(acc, frame)） */
@@ -119,8 +128,14 @@ class ArcRepairMergeBridgeTest {
         assertEquals("输出帧数必须等于保留集大小", expected.size, fromFlow.size)
         assertEquals("60→24 的保留帧数", ArcRepairPlan.dstFrameCount(60, 60, 24), fromFlow.size)
         assertEquals("桥输出必须与逐帧枚举参考逐帧相等", expected, fromFlow)
-        // 敏感性：完全忽略 acc 的坏参考必须与桥不同（否则本测试证明不了折叠真的发生）
+        // “后保留帧吃弧”不是空操作：尖峰位于两枚保留帧之间的被抽帧里，前后两枚保留帧
+        // 的输出都必须变成该尖峰（select(cur, acc) 的 b 侧真的被选走）。
         val kept = all.indices.filter { ArcRepairPlan.isKept(it, 60, 24) }
+        val spikeAt = kept.getOrNull(1)!! + 1
+        assertTrue("尖峰必须落在被抽帧里（构造前提）", !ArcRepairPlan.isKept(spikeAt, 60, 24))
+        assertEquals("前保留帧必须整块吃进尖峰", all[spikeAt], fromFlow[1])
+        assertEquals("后保留帧必须整块吃进尖峰", all[spikeAt], fromFlow[2])
+        // 敏感性：完全忽略 acc 的坏参考必须与桥不同（否则本测试证明不了折叠真的发生）
         val ignoredAcc = kept.map { all[it] }
         assertNotEquals("忽略被抽帧的坏参考必须与桥不同", ignoredAcc, fromFlow)
         assertTrue("至少一帧必须因折叠被抽帧而发生整像素变化", fromFlow.indices.any { fromFlow[it] != all[kept[it]] })

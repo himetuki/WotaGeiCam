@@ -24,6 +24,14 @@ import com.wotagei.cam.core.ArcMergeDeadband
  *   严格等于某一输入帧的原值。旧口径"CPU 按 YUV 逐平面取大 / GPU 按 RGB 逐通道取大"
  *   会把两个色相拼成原片不存在的颜色（橙+黑→珊瑚粉），已废弃；对账见
  *   `ArcRepairMergeParityTest`。
+ * - **已知残差（真机待验）**：GPU 是逐像素整像素选择，但输出经 Surface 交给 H.264 编码器时
+ *   默认 4:2:0；一个 2×2 块内可能同时含来自 a 与 b 的像素，编码器做色度抽样时会把两帧的
+ *   色度平均 ⇒ **弧边缘仍可能出现 1~2px 的色度混色**（非全画面）。CPU 路按 2×2 块整体搬运，
+ *   没有这一层。本轮不把 GPU 改成按块输出（luma 会变块状，得不偿失），按已知残差验收。
+ * - **量纲近似（刻意，不是同量纲）**：CPU 用解码器原始 Y 平面（H.264 常见 limited range
+ *   16..235、HD 常 BT.709），GPU 用 SurfaceTexture 解码后的 full-range RGB 再按 BT.601 权重
+ *   算 luma。中性内容 `ΔGPU ≈ 1.164 × ΔY`，同一 D 在两条路上的**有效门槛约差 1.16 倍**；
+ *   彩色内容还叠加矩阵差异。统一量纲要动解码路径，本轮保持近似并在真机验收里观察。
  * - **已知边界**：① 片头首枚保留帧之前的被抽帧无"前帧"可并，直接弃；② 尾部被抽帧只并入
  *   前邻帧（EOS 折叠）；③ 旧取大对非弧场景抬高亮度底、运动亮物出双影的问题由死区收敛，
  *   但高光运动物仍可能整像素过门——真机像素验证待做。
@@ -106,11 +114,15 @@ data class ArcRepairPlan(
 }
 
 /**
- * CPU 路线的**整像素选择**算子（4:2:0）；与 GPU 路 `Shaders.ARC_MERGE_FS` 同一口径。
+ * CPU 路线的**整像素选择**算子（4:2:0）；与 GPU 路 `Shaders.ARC_MERGE_FS` 同一规则。
  *
  * 判据：`Δluma = Y_b − Y_a`；块内取 4 个 Y 的最大 Δ（2~4px 细弧不被块平均吃掉），
- * `maxΔ > D` 时整块（4 个 Y + 1 个 U + 1 个 V）取自 `b`，否则整块保持 `a`。死区 D 为
- * [ArcMergeDeadband] 归一的 0..32；**绝不 Y 逐点选、U/V 按块选**——跨帧拼合会造色。
+ * `maxΔ > D`（**严格大于**）时整块（4 个 Y + 1 个 U + 1 个 V）取自 `b`，否则整块保持 `a`。
+ * 死区 D 为 [ArcMergeDeadband] 归一的 0..32；**绝不 Y 逐点选、U/V 按块选**——跨帧拼合会造色。
+ *
+ * **量纲**：`Δ` 直接来自解码器原始 Y（limited range 16..235、HD 常 BT.709），GPU 路则是
+ * full-range RGB 的 BT.601 luma；同一 D 在两路的有效门槛约差 1.16 倍，见 [ArcRepairPlan] 的
+ * "量纲近似"。这是刻意的近似，不是同量纲。
  *
  * **a 就地更新**：输出写回 `aY/aU/aV`。a 与 b 必须是不同数组（四个真实调用点都是复用缓冲
  * 两两不同）；逐块独立、无跨格权重，整块搬运保证输出三元组严格等于某一帧原值。
@@ -176,18 +188,18 @@ sealed interface ArcOp {
     /**
      * 处理被抽帧：[fresh] = true 时 acc 整帧换成本帧（自上一保留帧以来第一枚被抽帧，必须
      * **清掉上一轮残留**——acc 面是复用缓冲，带着旧内容参与选择会把上一次的补弧污染进来）；
-     * false 时 acc = max(acc, cur) 继续累积。
+     * false 时 acc = select(acc, cur) 继续累积（`Δluma > D` 严格大于时取 cur，否则保持 acc）。
      */
     data class AccumulateCur(val fresh: Boolean) : ArcOp
 
-    /** pending = max(pending, acc)：累积补弧并进**前**保留帧 */
+    /** pending = select(pending, acc)：累积补弧并进**前**保留帧 */
     data object FoldAccIntoPending : ArcOp
 
     /** pending = cur：首枚保留帧直接滞留待发 */
     data object HoldCurAsPending : ArcOp
 
     /**
-     * pending = max(cur, acc)（[useAcc] = 自上一保留帧以来有被抽帧）：**后**保留帧带弧升级，
+     * pending = select(cur, acc)（[useAcc] = 自上一保留帧以来有被抽帧）：**后**保留帧带弧升级，
      * 成为新的待发帧。useAcc 由状态机在仍有 acc 语义的当下给出（执行方不自己判断）。
      */
     data class MergeCurAsPending(val useAcc: Boolean) : ArcOp

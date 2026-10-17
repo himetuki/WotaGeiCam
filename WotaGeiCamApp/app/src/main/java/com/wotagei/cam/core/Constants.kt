@@ -167,7 +167,8 @@ enum class RenderMode { GPU, DIRECT }
  * 强制 24/25fps 在**无原生精确档**设备上的录制期转换模式（用户 2026-10-03 定版）。
  * 转换激活时录制强制走 GPU 渲染 + MediaCodec 引擎——MediaRecorder 面输入无法拒帧，这是硬约束。
  *
- * @property MEND 自动抽帧补弧：被抽帧以亮度取大并入前后保留帧，出片即真 24/25fps 且弧连续
+ * @property MEND 自动抽帧补弧：被抽帧以**整像素选择 + 差分死区**并入前后保留帧
+ *   （`Δluma > D` 严格大于时整块/整像素取被抽帧，否则保持保留帧），出片即真 24/25fps 且弧连续
  * @property DROP 仅抽帧：只丢帧不补（弧在抽帧点断，用户自选的观感）；被抽帧位次记 sidecar
  */
 enum class ArcConvertMode { MEND, DROP }

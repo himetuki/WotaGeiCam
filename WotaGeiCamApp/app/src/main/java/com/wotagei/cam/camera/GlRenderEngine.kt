@@ -1239,7 +1239,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (arcDstFps > 0) arcFlow = ArcRepairFlow(arcDstFps)
         synchronized(arcDropsLock) { arcDrops.clear() }
         if (arcConvert == ArcConvertMode.MEND && widthPx > 0 && heightPx > 0) {
-            if (arcMendPass == null) arcMendPass = ArcMendPass()
+            // 正常起录顺序是 setArcConvert → setOutputSurface：setArcConvert 执行时编码面尺寸
+            // 还是 0，ArcMendPass 不会被创建，真正建在下面这条惰性路径上。死区必须在这里补上，
+            // 否则它取构造默认值 12——运行期把 D 改成非 12 时，在线 MEND 忽略、离线修复生效，
+            // "三路同规则"当场破产（ArcMendDeadbandWiringGuardTest 钉着）。
+            if (arcMendPass == null) {
+                arcMendPass = ArcMendPass().also { it.setDeadband(wantArcMergeDeadband) }
+            }
             arcMendPass?.ensure(widthPx, heightPx)
         }
         dirty = true
