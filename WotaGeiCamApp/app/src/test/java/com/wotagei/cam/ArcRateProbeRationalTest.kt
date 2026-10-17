@@ -274,8 +274,9 @@ class ArcRateProbeRationalTest {
     /**
      * P3-1：`CLEAN_RANGE`（Int）与 `CLEAN_RANGE_LONG` 曾是**两份字面量**，任一处被单独改动都会让
      * 两条路径的窗界背离。现由 Long 版派生 ⇒ 按定义相等。末尾那条相等断言本身是**构造不变量（弱）**，
-     * 只防"有人把派生改回两份不同字面量"，不构成行为证明——真正钉窗界的是中间四条**行为**断言
-     * （窗内外各取一对样本：改窗界必翻转结果）。
+     * 只防"有人把派生改回两份不同字面量"，不构成行为证明——真正钉窗界的是中间**三条行为断言**
+     * （窗内外各取一对样本：改窗界必翻转结果），外加 ④ **一条委托不变量**（弱，见其行内注释：它
+     * 只钉"Int 外壳仍委托 Long 核"，对窗界行为零敏感，**不算**窗界证明）。
      */
     @Test
     fun `滤噪窗单一事实源_两视图同界且窗沿行为相符`() {
@@ -299,7 +300,10 @@ class ArcRateProbeRationalTest {
         //   否则重载解析歧义——本文件开头同类坑的老教训）
         assertEquals(rate(1_000_000, 1_001), ArcRateProbe.measuredSrcFps(List<Int>(8) { 1_001 }, 24))
         assertEquals(rate(1, 1), ArcRateProbe.measuredSrcFps(List<Int>(8) { 1_000_000 }, 24))
-        // 行为④：Long 核跑同一批样本必须同值（Int 值恒在 Int 域内，两视图窗界只能同界）
+        // ④ 委托不变量（弱，等价于**同源恒等式**）：Int 外壳的实现**就是**
+        // `measuredSrcFps(ints.map { it.toLong() }, …)`（`ArcKeepRule.kt`），两侧同源 ⇒ 本条只钉
+        // "Int 外壳仍委托 Long 核"，改窗界两侧同步变化、对本条**零敏感**，**不是**窗界证明
+        // （上一轮 P2-1 删掉的同源恒等式，此处如实降格标注，绝不冒充行为断言）。
         assertEquals(
             ArcRateProbe.measuredSrcFps(belowLoInt.map { it.toLong() }, 24),
             ArcRateProbe.measuredSrcFps(belowLoInt, 24)
