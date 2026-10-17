@@ -28,9 +28,10 @@ import kotlin.math.abs
  *
  * **GPU 口径与真 shader 的连接（2026-10-17 审查订正）**：[mergeInRgb] 是 Kotlin **离线复刻**，
  * 与生产 `ARC_MERGE_FS` 没有任何连接——把 shader 的 `max` 改成 `min`/加权混合，本文件前三条断言
- * 全绿。故区域④另立**生产字符串守卫**：把 `Shaders.ARC_MERGE_FS` 的真值喂进纯判据函数
- * [arcMergeFsViolations]（逐分量 `max(a, b)` / `.rgb` 采样 / 不含 `min(`/`mix(`/`* 0.5`），
- * shader 被改坏即红，并用 mutate 过的文本做"尺子能红"自证。这样"GPU 口径"才真的钉在 shader 上。
+     * 全绿。故区域④另立**生产字符串守卫**：把 `Shaders.ARC_MERGE_FS` 的真值喂进纯判据函数
+     * [arcMergeFsViolations]（逐分量 `max(a, b)` / `.rgb` 采样 / 赋值强制 alpha=`1.0` 不透明 /
+     * 不含 `min(`/`mix(`/`* 0.5`/`0.5 *`/`/2`，鉴别式**全部容空白**），shader 被改坏即红，并用
+     * mutate 过的文本做"尺子能红"自证。这样"GPU 口径"才真的钉在 shader 上。
  *
  * 说明：真实 CPU 路按整幅平面逐样本取大，本测试用**单像素模型**——`mergeMax` 逐样本独立、无
  * 跨格依赖（见其 KDoc），故一像素的等价性结论对整幅成立；本文件不重复测逐样本语义（那是
@@ -173,9 +174,45 @@ class ArcRepairMergeParityTest {
 
     // region ④ GPU 口径的真身：ARC_MERGE_FS 生产字符串必须逐分量取大
 
+    /** 采样赋值锚点（容空白）：`.rgb` 必须在——整 `vec4` 采样会把 alpha 带进取大 */
+    private val uaRgbSample = Regex("""vec3\s+a\s*=\s*texture2D\s*\(\s*uA\s*,\s*vUv\s*\)\s*\.rgb""")
+    private val ubRgbSample = Regex("""vec3\s+b\s*=\s*texture2D\s*\(\s*uB\s*,\s*vUv\s*\)\s*\.rgb""")
+
+    /** 逐分量取大锚点（容空白） */
+    private val maxAbRegex = Regex("""max\s*\(\s*a\s*,\s*b\s*\)""")
+
+    /** 赋值整体锚点（容空白）：`vec4(max(a, b), 1.0)`——第四分量掉出 `1.0` 即违规（alpha 载重不变量） */
+    private val maxAbOpaqueRegex = Regex("""vec4\s*\(\s*max\s*\(\s*a\s*,\s*b\s*\)\s*,\s*1\.0\s*\)""")
+
+    /** 突变锚点（容空白）：整句 `vec4(max(a, b), 1.0)`，用于只替 `1.0` 分量 */
+    private val maxAbAlphaAnchor = Regex("""(vec4\s*\(\s*max\s*\(\s*a\s*,\s*b\s*\)\s*,\s*)1\.0(\s*\))""")
+
+    /** 取 `.rgb` 的采样锚点（容空白），用于去掉 `.rgb` 的突变 */
+    private val uaRgbAnchor = Regex("""texture2D\s*\(\s*uA\s*,\s*vUv\s*\)\s*\.rgb""")
+
+    /** v1 已废弃的非取大算子：**容空白**正则（欠敏写法 `*0.5`/`/ 2.0` 也须命中） */
+    private val forbiddenMergeOps = listOf(
+        Regex("""min\s*\(""") to "min(",
+        Regex("""mix\s*\(""") to "mix(",
+        Regex("""\*\s*0\.5""") to "* 0.5",
+        Regex("""0\.5\s*\*""") to "0.5 *",
+        Regex("""/\s*2(\.0)?\s*""") to "/2（半亮缩放）",
+    )
+
     /**
      * `Shaders.ARC_MERGE_FS` 的**生产字符串**判据：逐分量 `max(a, b)`、两个输入都按 `.rgb` 采样、
-     * 且不含任何非取大算子（`min(` / `mix(` / `* 0.5`）。返回违规清单（空 = 合规）。
+     * 赋值强制 `vec4(…, 1.0)`（不透明），且不含任何非取大/半亮算子
+     * （`min(` / `mix(` / `* 0.5` / `0.5 *` / `/2`）。返回违规清单（空 = 合规）。
+     *
+     * **钉住的不变量清单**（本判据是当前**唯一**能碰到生产 shader 的尺子，逐条都要钉）：
+     * 1. 逐分量取大 `max(a, b)`——GLSL 逐分量 max 即 RGB 逐通道取大；改成 `min`/加权混合即红。
+     * 2. 两个输入按 `.rgb` 采样——整 `vec4` 采样会把 alpha 带进取大（半透明来源之一）。
+     * 3. **alpha 强制 `1.0`（第四分量）**——这是**有意的载重不变量**，不是偶然：生产
+     *    `camera/Shaders.kt` 的 `ARC_MERGE_FS` KDoc 明写"强制不透明：与 [PASS_THROUGH_FS] 同一个
+     *    理由——HAL/解码器给 alpha=0 时会读出半透明"。若把 `vec4(max(a, b), 1.0)` 写成
+     *    `vec4(max(a, b), 0.0)`，被抽帧的合并结果会读出半透明，**而本文件其它断言全无察觉**
+     *    （离线复刻 [mergeInRgb] 只算 RGB 三通道，压根没有 alpha 位），故必须在此逐字钉住。
+     * 4. 不含 v1 的 0.5 混合/半亮缩放（`min(`/`mix(`/`* 0.5`/`0.5 *`/`/2`）。
      *
      * 为什么必须补这条：上面的 [mergeInRgb] 是 Kotlin **离线复刻**，与真 shader 无任何连接
      * ——把 `ARC_MERGE_FS` 的 `max` 改成 `min`/加权混合，本文件前三条断言全绿（审查点名的"表述
@@ -183,21 +220,30 @@ class ArcRepairMergeParityTest {
      *
      * 直接读生产常量而非切 `Shaders.kt` 源码文本：`ARC_MERGE_FS` 的值本身就是**着色器体**
      * （纯 GLSL，无 KDoc/注释混入的余地），比源码切片更紧（本仓 `ArcRepairGlSamplerGuardTest` 同法）。
+     *
+     * 格式脆加固（P3-3）：上述四条鉴别式**全部走容空白正则**，生产把 `max(a, b)` 写成 `max(a,b)`、
+     * 把 `texture2D(uA, vUv).rgb` 调空格都不得误炸（过严），而 `*0.5`/`/ 2.0` 这类欠敏写法照样红。
      */
     private fun arcMergeFsViolations(shader: String): List<String> {
         val bad = ArrayList<String>()
-        if (!shader.contains("vec3 a = texture2D(uA, vUv).rgb")) {
-            bad.add("uA 必须按 .rgb 采样（缺 vec3 a = texture2D(uA, vUv).rgb）")
+        if (uaRgbSample.find(shader) == null) {
+            bad.add("uA 必须按 .rgb 采样（缺 vec3 a = texture2D(uA, vUv).rgb，容空白）")
         }
-        if (!shader.contains("vec3 b = texture2D(uB, vUv).rgb")) {
-            bad.add("uB 必须按 .rgb 采样（缺 vec3 b = texture2D(uB, vUv).rgb）")
+        if (ubRgbSample.find(shader) == null) {
+            bad.add("uB 必须按 .rgb 采样（缺 vec3 b = texture2D(uB, vUv).rgb，容空白）")
         }
-        if (Regex("max\\s*\\(\\s*a\\s*,\\s*b\\s*\\)").find(shader) == null) {
+        if (maxAbRegex.find(shader) == null) {
             bad.add("必须逐分量取大 max(a, b)（GLSL 逐分量 max 即 RGB 逐通道取大）")
         }
-        listOf("min(", "mix(", "* 0.5", "0.5 *").forEach { op ->
-            if (shader.contains(op)) {
-                bad.add("ARC_MERGE_FS 出现非取大算子「$op」（v1 的 0.5 混合/取小已废弃）")
+        if (maxAbOpaqueRegex.find(shader) == null) {
+            bad.add(
+                "必须强制不透明 vec4(max(a, b), 1.0)：alpha=1.0 是有意载重不变量" +
+                    "（同 PASS_THROUGH_FS 理由——HAL/解码器 alpha=0 会读出半透明）"
+            )
+        }
+        forbiddenMergeOps.forEach { (re, label) ->
+            if (re.containsMatchIn(shader)) {
+                bad.add("ARC_MERGE_FS 出现非取大算子「$label」（v1 的 0.5 混合/取小已废弃）")
             }
         }
         return bad
@@ -211,17 +257,21 @@ class ArcRepairMergeParityTest {
 
     /**
      * 突变自证：把**生产 shader 文本**改坏必报红——这是"GPU 口径"这条判据的靶子：
-     * 取大改取小、改加权混合、改半亮缩放、或去掉 `.rgb`（整 vec4 采样）都要红。
+     * 取大改取小、改加权混合、改半亮缩放、去掉 `.rgb`（整 vec4 采样）、**或把 alpha 由 1.0 改 0.0**
+     * 都要红。突变锚点一律**容空白正则**驱动（见 [maxAbRegex]/[uaRgbAnchor]/[maxAbAlphaAnchor]），
+     * 附件一条"无空格等价写法必须仍绿"的反证，防判据对格式过严误炸。
      */
     @Test
     fun `尺子自己能红_ARC_MERGE_FS被改坏必报红`() {
         val good = Shaders.ARC_MERGE_FS
         assertEquals("良品必须先真的绿", 0, arcMergeFsViolations(good).size)
         val mutants = listOf(
-            "max 改 min" to good.replace("max(a, b)", "min(a, b)"),
-            "改成加权混合" to good.replace("max(a, b)", "mix(a, b, 0.5)"),
-            "改成 0.5 缩放（v1 半亮重影）" to good.replace("max(a, b)", "a * 0.5"),
-            "uA 去掉 .rgb（采样整 vec4）" to good.replace("texture2D(uA, vUv).rgb", "texture2D(uA, vUv)"),
+            "max 改 min" to good.replace(maxAbRegex, "min(a, b)"),
+            "改成加权混合" to good.replace(maxAbRegex, "mix(a, b, 0.5)"),
+            "改成 0.5 缩放（v1 半亮重影）" to good.replace(maxAbRegex, "a * 0.5"),
+            "uA 去掉 .rgb（采样整 vec4）" to good.replace(uaRgbAnchor, "texture2D(uA, vUv)"),
+            "alpha 由 1.0 改 0.0（透出 HAL/解码器的半透明）" to
+                good.replace(maxAbAlphaAnchor) { it.groupValues[1] + "0.0" + it.groupValues[2] },
         )
         mutants.forEach { (name, mutated) ->
             assertTrue("突变锚点丢失：$name 未改动 shader 文本", mutated != good)
@@ -230,6 +280,13 @@ class ArcRepairMergeParityTest {
                 arcMergeFsViolations(mutated).isNotEmpty()
             )
         }
+        // 反格式脆（P3-3）：把生产文本压成"无空格等价写法"仍须全绿——否则生产合法改写会误炸
+        val compact = good
+            .replace(maxAbRegex, "max(a,b)")
+            .replace(uaRgbAnchor, "texture2D(uA,vUv).rgb")
+        assertTrue("等价的容空白写法（max(a,b)/无空格采样）不该误炸", compact != good)
+        assertEquals("容空白等价写法必须仍绿，实际：\n${arcMergeFsViolations(compact).joinToString("\n")}",
+            0, arcMergeFsViolations(compact).size)
     }
 
     // endregion
