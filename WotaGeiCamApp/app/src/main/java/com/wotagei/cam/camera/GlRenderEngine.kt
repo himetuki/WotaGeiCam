@@ -26,6 +26,7 @@ import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
 import com.wotagei.cam.record.ArcRepairFlow
 import com.wotagei.cam.record.FrameLedger
+import com.wotagei.cam.record.arcKeepToleranceNs
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -606,7 +607,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             // 档位必须在这里接进规则（ArcKeepRule.slotNs 是构造期 val，只 reset 不换实例）：
             // slotNs 恒 0 → onFrame 恒真 → 抽帧整条失效，而 PTS/位次账按 dstFps 照跑，
             // 成片时长被压缩、音画错位。自 7812e16 功能落地起就没接过线，2026-10-04 审计修复。
-            arcRule = ArcKeepRule(slotNs = if (arcConvert != null) 1_000_000_000L / dstFps else 0L)
+            // 相位容差（2026-10-17）按槽宽的运行时比例显式传入，不在判定里写毫秒常量。
+            val arcSlotNs = if (arcConvert != null) 1_000_000_000L / dstFps else 0L
+            arcRule = ArcKeepRule(
+                slotNs = arcSlotNs,
+                toleranceNs = arcKeepToleranceNs(arcSlotNs)
+            )
             arcFlow = ArcRepairFlow(dstFps)
             synchronized(arcDropsLock) { arcDrops.clear() }
             // 每段录制启动读一次参数总线发布的死区快照：持久化值在进录制页时已由 restore 写回。

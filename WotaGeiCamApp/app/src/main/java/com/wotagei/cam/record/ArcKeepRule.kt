@@ -141,6 +141,22 @@ object ArcRateProbe {
     }
 }
 
+/** 相位容差占槽宽的比例（%）：运行时参数，不在判定里写毫秒常量（10% @24fps ≈ 4.17ms） */
+internal const val ARC_KEEP_TOLERANCE_PERCENT = 10L
+
+/**
+ * 槽宽 → 相位容差（纯函数；`slotNs <= 0` 或比例为 0 ⇒ 0，保持"关闭转换"路径零等待）。
+ * 比例钳在 0..100：超过一整个槽的"容差"等于把上一条槽也放进来，语义已不是相位容差。
+ */
+internal fun arcKeepToleranceNs(
+    slotNs: Long,
+    percent: Long = ARC_KEEP_TOLERANCE_PERCENT
+): Long {
+    if (slotNs <= 0L) return 0L
+    val p = percent.coerceIn(0L, 100L)
+    return slotNs * p / 100L
+}
+
 /**
  * 录制在线路的**抽帧保留规则**（用户 2026-10-03 定版，2026-10-03 夜实现）。
  *
@@ -150,11 +166,25 @@ object ArcRateProbe {
  * 规则自追平（停滞后来帧不从落后账里连发）、自纠偏（传感器快慢漂移直接反映到丢弃分布），
  * 长期输出节奏收敛到恰为 D fps。
  *
+ * **相位容差（2026-10-17）**：SurfaceTexture 时间戳带调度抖动，零容差会把"刚好早到 1ms"的正常帧
+ * 判成抽帧；更硬的一条是 25fps 源转 24fps——源帧距 40ms < 槽宽 41.667ms，零容差每 25 帧会
+ * 多抽一两帧（真机抽帧率系统性偏高）。所以保留判据改为 `ts >= nextDue - toleranceNs`：
+ * 容差只吸收"早到不超过槽宽 10%"的相位抖动，[nextDueNs] 仍按 `+= slotNs` 推进（不是从 ts 重算），
+ * 停滞追平分支原样保留。长期输出帧数仍收敛到 `⌈N·D/S⌉`（见 ArcKeepToleranceTest 的 10 万帧
+ * 三源不变量；容差改到 50% 时 60→24 会多出一帧，测试必红）。
+ *
  * 输出 PTS 不走本类：GL 编码支路按**真实时钟落名义网格、源慢时逐帧接管**打戳（纯函数
  * `GlRenderEngine.encoderAdaptivePtsNs`；名义网格内核 `encoderSlotPtsNs` 原样保留），只在保留帧
  * 上推进——丢弃帧跳过 swap 即不产戳。源帧率实测见 [ArcRateProbe]。
  */
-class ArcKeepRule(private val slotNs: Long) {
+class ArcKeepRule(
+    private val slotNs: Long,
+    /**
+     * 相位容差（ns）；默认 = 槽宽的 [ARC_KEEP_TOLERANCE_PERCENT]%（约 4.2ms @24fps）。
+     * 形参无魔法数字：调用方可传运行时值（GlRenderEngine 显式用 [arcKeepToleranceNs] 算好传入）。
+     */
+    private val toleranceNs: Long = arcKeepToleranceNs(slotNs)
+) {
     /** 下一输出帧的应到时刻；[NOT_STARTED] = 还没见到首帧 */
     private var nextDueNs = NOT_STARTED
 
@@ -172,7 +202,7 @@ class ArcKeepRule(private val slotNs: Long) {
             nextDueNs = tsNs + slotNs
             return true
         }
-        return if (tsNs >= nextDueNs) {
+        return if (tsNs >= nextDueNs - toleranceNs) {
             // 注意：保留帧**不**清 pendingDrops——"自上一保留帧以来丢了几个"要在发出那一帧时
             // 才被记账方 takeDrops() 取走，这里清了会把区间账抹成 0
             nextDueNs += slotNs
