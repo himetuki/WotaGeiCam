@@ -363,13 +363,15 @@ private class ArcRepairSession(
         // （标 24 实跑 30），按容器值造抽帧计划会漏抽；中位数对重复/空样本免疫，是遍历计数教训的
         // 正确解法。M6-01：计划/门槛/估算/去重阈值全吃有理数真值（29.97 整成 30 会让保留位次漂
         // 一位、25.4 整成 25 会误判无需抽帧），整数视图只喂日志/进度/成片名前缀
+        // M6-05：帧距保 **Long** 精度——>2³¹µs 的轨道断层若先降 Int 再进滤噪窗，回卷值可能恰好
+        // 落进合法窗、毒化中位数；Long 判据把它原样挡在窗外（整数源逐点行为不变，见 ArcRateProbe）
         var srcFrames = 0
-        val rawDeltas = ArrayList<Int>(512)
+        val rawDeltas = ArrayList<Long>(512)
         var prevSampleUs = -1L
         var scanned = 0
         while (scanned < MAX_SRC_FRAMES && videoEx.sampleTime >= 0L) {
             val t = videoEx.sampleTime
-            if (prevSampleUs >= 0L) rawDeltas.add((t - prevSampleUs).toInt())
+            if (prevSampleUs >= 0L) rawDeltas.add(t - prevSampleUs)
             prevSampleUs = t
             scanned++
             if (!videoEx.advance()) break

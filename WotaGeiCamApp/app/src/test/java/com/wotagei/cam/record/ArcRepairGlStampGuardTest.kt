@@ -67,6 +67,115 @@ class ArcRepairGlStampGuardTest {
         return bad
     }
 
+    /**
+     * 截出 `acquire` 的文本片段。**不能用 [bodyOf]**：`acquire` 是表达式体
+     * （`fun acquire(): Boolean = postAndWait(OP_WAIT_MS) { … }`），
+     * [com.wotagei.cam.source.KotlinSourceScan] 的 `regionAfterDecl` 撞上 `=` 即判"无花括号体"并抛。
+     * 这里按"下一个 `fun ` 之前"切片——`acquire` 体内没有嵌套函数声明，切片边界稳定。
+     */
+    private fun acquireSlice(maskedGl: String): String {
+        val start = maskedGl.indexOf("fun acquire(")
+        if (start < 0) throw AssertionError("源码里找不到 fun acquire(——守卫失去输入，不许算通过")
+        val next = maskedGl.indexOf("fun ", start + "fun acquire(".length)
+        return maskedGl.substring(start, if (next < 0) maskedGl.length else next)
+    }
+
+    /**
+     * M6-05 观测接线体检：`acquire()` 里的"被 SurfaceTexture 合帧数"必须**纯观测**——只增、
+     * 不改戳、不进抽帧判定，且既有帧账（`framesConsumed++`）与既有调用次序逐字不变。
+     *
+     * 为什么必须钉住"不改戳"：`updateTexImage` 吞掉的中间帧不进任何既有计数，抽帧计划的
+     * `srcIndex` 因此可能错位——这条观测就是为它留痕的。但它一旦反过来去改 PTS / 干预抽取，
+     * 就从"留痕"变成"第二个真相源"，与 `stampPresentation` 的单一时基口径分家（本仓最怕的分叉）。
+     */
+    private fun mergeObsViolations(maskedGl: String): List<String> {
+        val bad = ArrayList<String>()
+        val acq = flatten(acquireSlice(maskedGl))
+
+        // ① 观测必须存在且是**只读**取证：积压 = framesQueued − framesConsumed（不改任一计数）
+        if (!acq.contains("val backlog = synchronized(frameLock) { framesQueued - framesConsumed }")) {
+            bad.add("观测失去输入：acquire 必须只读取积压 framesQueued − framesConsumed")
+        }
+        // ② 计数只增 + 峰值只增
+        if (!acq.contains("mergedFrames += merged")) bad.add("合帧计数必须只增（缺 mergedFrames +=）")
+        if (!acq.contains("if (merged > mergedMaxBack) mergedMaxBack = merged")) {
+            bad.add("单次最大积压必须按峰值更新（缺 if (merged > mergedMaxBack) mergedMaxBack = merged）")
+        }
+        listOf("mergedFrames -=", "mergedFrames--", "mergedMaxBack -=", "mergedMaxBack--").forEach { dec ->
+            if (acq.contains(dec)) bad.add("合帧计数出现递减 $dec（观测只增，不许回落）")
+        }
+        // ③ 计数器不得门控抽帧（只许出现在观测/日志里，不许进 if 条件）
+        if (acq.contains("if (mergedFrames")) bad.add("合帧计数进了控制流（if (mergedFrames…)）——观测不得干预抽帧")
+        if (acq.contains("if (mergedMaxBack")) bad.add("峰值计数进了控制流（if (mergedMaxBack…)）——观测不得干预抽帧")
+        // ④ 绝不碰 PTS：观测块里不许出现任何打戳/换面符号
+        listOf("eglPresentationTimeANDROID", "stampPresentation", "eglSwapBuffers", "ptsUs").forEach { pts ->
+            if (acq.contains(pts)) bad.add("观测块碰了 PTS（出现 $pts）——合帧观测只许计次落日志")
+        }
+        // ⑤ 既有帧账与调用次序逐字不变：backlog 取在读帧之前，帧账自增在拷贝之后
+        val backlogAt = acq.indexOf("val backlog = synchronized(frameLock)")
+        val updateAt = acq.indexOf("st.updateTexImage()")
+        val copyAt = acq.indexOf("copyOesToCur()")
+        val consumeAt = acq.indexOf("synchronized(frameLock) { framesConsumed++ }")
+        if (updateAt < 0) bad.add("锚点丢失：没截到 st.updateTexImage()")
+        if (copyAt < 0) bad.add("锚点丢失：没截到 copyOesToCur()")
+        if (consumeAt < 0) bad.add("锚点丢失：没截到 framesConsumed++（既有帧账被挪走/删掉）")
+        if (backlogAt >= 0 && updateAt >= 0 && backlogAt > updateAt) {
+            bad.add("积压必须在 updateTexImage 之前取（之后再读就不是被吞前的积压了）")
+        }
+        if (copyAt >= 0 && consumeAt >= 0 && copyAt > consumeAt) {
+            bad.add("既有次序被改：framesConsumed++ 必须在拷贝之后（提前自增会与既有抽帧节拍分家）")
+        }
+        // ⑥ 计数声明必须在类属性处按 0 起（不许挂在别处初始化成非零）
+        if (!maskedGl.contains("private var mergedFrames = 0L")) bad.add("缺声明 private var mergedFrames = 0L")
+        if (!maskedGl.contains("private var mergedMaxBack = 0L")) bad.add("缺声明 private var mergedMaxBack = 0L")
+        return bad
+    }
+
+    @Test
+    fun `合帧观测只增不改戳接线完整`() {
+        val bad = mergeObsViolations(codeOnly(mainSourceText("record/ArcRepairGl.kt")))
+        assertEquals("合帧观测接线发现断点：\n${bad.joinToString("\n")}", 0, bad.size)
+    }
+
+    /**
+     * 突变自证：把观测退回"会改行为"或"消失"的形态必报红。五枚突变体各对应一种真实退化——
+     * **计数递减**（不再是单调账）、**观测块写戳**（第二真相源）、**计数门控抽帧**（观测变干预）、
+     * **删掉积压读取**（观测失去输入）、**帧账次序被改**（既有节拍被动）；另配一组只加注释的对照。
+     */
+    @Test
+    fun `尺子自己能红_合帧观测突变体必报红`() {
+        val gl = codeOnly(mainSourceText("record/ArcRepairGl.kt"))
+        assertEquals("良品必须先真的绿", 0, mergeObsViolations(gl).size)
+
+        val countLine = "            mergedFrames += merged\n"
+        val peakLine = "            if (merged > mergedMaxBack) mergedMaxBack = merged\n"
+        val backlogLine = "        val backlog = synchronized(frameLock) { framesQueued - framesConsumed }\n"
+        val consumeLine = "        synchronized(frameLock) { framesConsumed++ }\n"
+        val copyLine = "        val ok = copyOesToCur()\n"
+        listOf(countLine, peakLine, backlogLine, consumeLine, copyLine).forEach {
+            assertTrue("突变锚点丢失：没截到\n$it", gl.contains(it))
+        }
+
+        val mutants = listOf(
+            Triple("计数递减（不再是单调账）", gl.replace(countLine, "            mergedFrames -= merged\n"), true),
+            Triple("观测块写戳（第二真相源）", gl.replace(countLine, "            stampPresentation(0L)\n$countLine"), true),
+            Triple("计数门控抽帧（观测变干预）", gl.replace(peakLine, "            if (mergedFrames > 5L) return@postAndWait false\n"), true),
+            Triple("删掉积压读取（观测失去输入）", gl.replace(backlogLine, ""), true),
+            Triple("帧账次序被改（自增挪到拷贝之前）", gl.replace(copyLine + consumeLine, consumeLine + copyLine), true),
+            // 对照组：只在观测行尾加注释，不许引发红
+            Triple("对照组：只加注释", gl.replace(backlogLine, backlogLine.trimEnd() + " // 观测\n"), false)
+        )
+        mutants.forEach { (name, mutated, shouldBeRed) ->
+            assertTrue("突变锚点丢失（$name 未改动源码文本）", mutated != gl)
+            val red = mergeObsViolations(mutated)
+            if (shouldBeRed) {
+                assertTrue("突变体「$name」必须报红（实际违规：${red.joinToString("；")}）", red.isNotEmpty())
+            } else {
+                assertEquals("对照组「$name」不该报红（实际违规：${red.joinToString("；")}）", 0, red.size)
+            }
+        }
+    }
+
     @Test
     fun `打戳失败接线完整`() {
         val bad = stampViolations(
