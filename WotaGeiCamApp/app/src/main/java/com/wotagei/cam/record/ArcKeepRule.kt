@@ -23,11 +23,18 @@ object ArcRateProbe {
     /** 实测帧率上限（防畸变帧距把值算飞；产品最高档 240，留一倍余量） */
     const val MAX_MEASURED_FPS = 480
 
-    /** 滤噪带（v1 同口径）：帧距 <1ms 是重复样本、>1s 是轨道断层 */
-    private val CLEAN_RANGE = 1_001..1_000_000
+    /**
+     * 滤噪带**唯一字面量**（v1 同口径）：帧距 <1ms 是重复样本、>1s 是轨道断层。
+     * M6-05 收 Long 后滤噪判据本身也得吃 Long，故本行是 Long 域的真身。
+     */
+    internal val CLEAN_RANGE_LONG = 1_001L..1_000_000L
 
-    /** [CLEAN_RANGE] 的 Long 孪生（M6-05：帧距在滤噪前不得降位，滤噪判据本身也得吃 Long） */
-    private val CLEAN_RANGE_LONG = 1_001L..1_000_000L
+    /**
+     * [CLEAN_RANGE_LONG] 的 Int 视图（**由 Long 版派生**，不再另立字面量）。
+     * 并存两份字面量（M6-05 的旧形态）时，任一处被单独改动都会让两条路径的窗界背离——
+     * 单一事实源把这种背离从"可能"变成"写不出来"。
+     */
+    internal val CLEAN_RANGE = CLEAN_RANGE_LONG.first.toInt()..CLEAN_RANGE_LONG.last.toInt()
 
     /**
      * 实测源帧率的**有理数**视图（num/den，已约分）：整数 fps 会把 30.0 与 29.97（30000/1001）

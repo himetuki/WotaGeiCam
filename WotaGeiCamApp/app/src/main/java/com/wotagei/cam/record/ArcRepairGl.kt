@@ -143,7 +143,8 @@ internal class ArcRepairGl(
      * M6-05 观测：`updateTexImage` 只保留**最新**一帧，管线慢于解码器时积压的中间帧被静默合并——
      * 它们不进任何既有计数，抽帧计划的 `srcIndex` 因此可能与解码器真实吐出的帧数错位。
      * 这里只**计次**（与 `CodecRecorder` 的 `feedDropped`/`lateDrops` 同族形态：只增、不改戳）。
-     * 读取方式为 `awaitFrame` 沿用同一把 [frameLock]，计数只增，不动 PTS 与抽帧判定。
+     * 读取方式：[acquire] 读积压时与 [awaitFrame] 共用同一把 [frameLock]；计数本身在锁**外**自增，
+     * 仅供日志（不改戳、不进抽帧判定）。
      */
     private var mergedFrames = 0L
     private var mergedMaxBack = 0L
@@ -190,11 +191,15 @@ internal class ArcRepairGl(
         if (backlog > 1L) {
             val merged = backlog - 1L
             mergedFrames += merged
-            if (merged > mergedMaxBack) mergedMaxBack = merged
-            Log.w(
-                TAG_ARC_GL,
-                "解码合帧：积压 $backlog 帧被 updateTexImage 吞到最新（累计 $mergedFrames，单次最多 $mergedMaxBack）"
-            )
+            // 只在积压创新高（首帧命中必然创新高）时落一条 WARN：管线长期慢于解码器时 backlog>1
+            // 几乎每帧成立，逐帧落日志会以帧率频率刷屏（长片数万行）淹掉有用诊断。计数语义不变。
+            if (merged > mergedMaxBack) {
+                mergedMaxBack = merged
+                Log.w(
+                    TAG_ARC_GL,
+                    "解码合帧：积压 $backlog 帧被 updateTexImage 吞到最新（累计 $mergedFrames，单次最多 $mergedMaxBack）"
+                )
+            }
         }
         ok
     }
