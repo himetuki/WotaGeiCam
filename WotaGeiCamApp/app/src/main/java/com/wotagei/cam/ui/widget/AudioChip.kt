@@ -22,7 +22,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wotagei.cam.R
+import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
+import com.wotagei.cam.ui.design.WotaStroke
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.theme.MonoStyle
 import com.wotagei.cam.ui.theme.WotaAccent
@@ -42,6 +44,10 @@ import com.wotagei.cam.ui.theme.WotaWarn
  * - 蓝牙 → 既有圆点（accent=已连 / warn=未连）+ 媒体音量百分比：连接态的读数层。
  * 两个信号各占一层，内录亮不抹蓝牙点、蓝牙连不抢内录高亮，同时在场都能读出来。
  *
+ * **常态另有一层 [WotaColor.accentHint] 淡蓝描边**（2026-10-18 用户反馈：多数用户不知道这颗能点）。
+ * 它说"能点"、内录那枚不透明 accent 说"正亮着"，激活时前者让位。描边挂在本颗自己的 modifier 链上，
+ * 随布局/拖动一起移动，不是按屏幕坐标另画的浮层。
+ *
  * @param captureActive 设备内录会话是否激活（`PlaybackCaptureController.state is Active`）
  * @param btConnected A2DP 是否已连上（取 `BtSpeakerController.active != null`）
  * @param volumePct 媒体音量百分比，取 `BtSpeakerController.volumePercent`
@@ -60,6 +66,10 @@ fun AudioChip(
     onClick: () -> Unit
 ) {
     val lit = captureActive || btConnected
+    // 常驻描边（2026-10-18 用户反馈）：这颗被多数用户当成纯读数，不知道能点开音源/蓝牙面板。
+    // 常态给一层淡淡的 accentHint（"能点"）；内录激活时换成不透明 accent（"正亮着"）——
+    // 两层语义互斥，不叠两道，内录高亮仍独占"激活"这个信号。
+    val outline = if (captureActive) WotaAccent else WotaColor.accentHint
     // 读屏描述按态拼接（P3-2）：「音频」+ 内录态 + 蓝牙态一整句交给 TalkBack；
     // 图标自己的 contentDescription 置空（装饰件），避免合并后念两遍
     val desc = listOf(
@@ -73,9 +83,10 @@ fun AudioChip(
         modifier
             .semantics { contentDescription = desc }
             .then(if (card) Modifier.wotaCard(WotaShape.medium) else Modifier)
-            .then(
-                if (captureActive) Modifier.border(1.dp, WotaAccent, WotaShape.medium) else Modifier
-            )
+            // 描边必须挂在这颗**自己的** modifier 链上（形参 modifier 的后继）：Dock 重排、
+            // 编辑页拖动/ghost 跟手、底栏滑入滑出时它都只是这颗的绘制层，跟着控件一起走。
+            // 不要去外面另画一层 Canvas/drawBehind——那种按坐标画的描边会留在原位。
+            .border(WotaStroke.hairline, outline, WotaShape.medium)
             .clickable(onClick = onClick)
             .padding(horizontal = 6.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
