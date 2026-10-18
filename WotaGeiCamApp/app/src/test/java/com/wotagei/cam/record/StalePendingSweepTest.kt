@@ -2,6 +2,7 @@ package com.wotagei.cam.record
 
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
+import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -331,5 +332,87 @@ class StalePendingSweepTest {
         // 反向对照：干净名照旧认（这轮改动没掐掉补入库通道本身）
         assertTrue(StalePendingSweep.isOurClipName("VID_20261007_215822_240.mp4"))
         assertTrue(StalePendingSweep.isOurClipName("30fto24f_VID_20261007_215822_240.mp4"))
+    }
+
+    // ---- 档案归位的覆盖/误删红线（2026-10-18） ----
+
+    /**
+     * 档案"重复件"判据：必须对**真实归位目标**（`成片名 + .drops.json`）判，不能只看剥段后的
+     * 档案名。真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，归位目标是
+     * `VID_x.mp4.drops.json`；旧判据查的是 `VID_x.drops.json`，目标已存在时查不到 ⇒
+     * `renameTo` 直接覆盖，有效档案被旧幽灵件顶掉。
+     */
+    @Test
+    fun `档案重复判据必须看真实归位目标`() {
+        assertTrue(
+            "目标名已在目录里 ⇒ 重复（删待归位件，绝不覆盖目标）",
+            archiveTwinExists(
+                archiveName = ".pending-9-VID_1.drops.json",
+                targetName = "VID_1.mp4.drops.json",
+                dirNames = setOf("VID_1.mp4.drops.json", ".pending-9-VID_1.drops.json")
+            )
+        )
+        assertTrue(
+            "剥段后的同名条目已在 ⇒ 也是重复（旧判据覆盖的情形）",
+            archiveTwinExists(
+                archiveName = ".pending-9-VID_1.drops.json",
+                targetName = null,
+                dirNames = setOf("VID_1.drops.json", ".pending-9-VID_1.drops.json")
+            )
+        )
+        assertFalse(
+            "目录里既没有目标也没有剥段同名条目 ⇒ 不是重复，应该归位",
+            archiveTwinExists(
+                archiveName = ".pending-9-VID_1.drops.json",
+                targetName = "VID_1.mp4.drops.json",
+                dirNames = setOf(".pending-9-VID_1.drops.json", ".pending-9-VID_1.mp4")
+            )
+        )
+        assertFalse(
+            "只有自己这一条（目标名等于自己）⇒ 不算重复",
+            archiveTwinExists(
+                archiveName = "VID_1.mp4.drops.json",
+                targetName = "VID_1.mp4.drops.json",
+                dirNames = setOf("VID_1.mp4.drops.json")
+            )
+        )
+    }
+
+    /**
+     * 成片趟 provider 改名失败时成片仍带 pending 名：档案趟必须还能找到它，否则会把仍有效的
+     * sidecar 当无主档案删掉（旧 `clipFor` 只找干净名与 `名.mp4`）。
+     */
+    @Test
+    fun `成片仍带pending名时档案仍能找到它`() {
+        val dir = java.nio.file.Files.createTempDirectory("wota-sweep").toFile()
+        try {
+            java.io.File(dir, ".pending-9-VID_1.mp4").writeText("x")
+            assertEquals(
+                "档案必须挂回 pending 名成片旁（`.pending-9-VID_1.mp4.drops.json`）",
+                ".pending-9-VID_1.mp4",
+                StalePendingSweep.clipFor(".pending-9-VID_1.drops.json", dir)
+            )
+            // 反向对照：没有成片时仍是 null（无主档案照旧可删）
+            assertEquals(null, StalePendingSweep.clipFor(".pending-9-VID_2.drops.json", dir))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `档案归位目标已存在时不得覆盖`() {
+        val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
+        val archive = sweep.substringAfter("SweepAction.RENAME_ARCHIVE ->").substringBefore("SweepAction.RENAME_CLIP ->")
+        assertTrue("归位前必须判目标是否已存在", archive.contains("if (to.exists())"))
+        assertTrue(
+            "目标已存在必须原地放弃（不许 renameTo 覆盖）",
+            archive.indexOf("if (to.exists())") < archive.indexOf("f.renameTo(to)")
+        )
+        // 接线：档案趟必须把真实目标名喂进重复判据（喂剥段名 = 回到旧缺陷）
+        val runOnce = flatten(bodyOf(sweep, "runOnce"))
+        assertTrue(
+            "档案趟重复判据必须吃 targetName（成片名 + .drops.json）",
+            runOnce.contains("archiveTwinExists(f.name, clipName?.let { it + ArcDropLog.EXTENSION }")
+        )
     }
 }

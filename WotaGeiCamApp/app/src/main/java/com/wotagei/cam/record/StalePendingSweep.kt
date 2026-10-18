@@ -84,12 +84,16 @@ internal object StalePendingSweep {
             if (apply(app, dir, f, plan)) acted++
         }
         for (f in archives) {
-            val clean = PendingName.stripPendingJunk(f.name)
+            val clipName = clipFor(f.name, dir)
+            // 重复判据必须对**真实归位目标**（clipName + .drops.json），不能只看"剥段后的档案名"：
+            // 两者不一致（真机幽灵档案少 `.mp4` 段）时，旧判据查不到目标已存在，
+            // `renameTo` 会把有效档案直接覆盖掉。目标已存在 ⇒ 本档案是重复件，删掉。
+            val twin = archiveTwinExists(f.name, clipName?.let { it + ArcDropLog.EXTENSION }, entries.map { it.name }.toHashSet())
             // 档案趟不探容器（JSON 不是媒体容器）：clipPlayable 显式传 null = 未探，计划里档案
             // 分支也不读它——探测只属于成片趟这一条结构由 StalePendingSweepTest 钉住
             val plan = sweepPlan(
-                f.name, now - f.lastModified(), File(dir, clean).exists(),
-                clipFor(f.name, dir), clipPlayable = null
+                f.name, now - f.lastModified(), twin,
+                clipName, clipPlayable = null
             )
             if (apply(app, dir, f, plan)) acted++
         }
@@ -172,18 +176,24 @@ internal object StalePendingSweep {
     private class Row(val id: Long, val displayName: String?, val dataPath: String?, val addedMs: Long)
 
     /**
-     * 档案对应的成片文件名（null = 找不到）。名字形态**两种都要试**：真机的幽灵档案是
-     * `…-VID_20261008_172951_262.drops.json`（脱离成片名时少了 `.mp4` 那一段），而正常档案是
-     * `VID_….mp4.drops.json` ⇒ 先按"剥段去扩展名"原样找，再补 `.mp4` 找一次。
+     * 档案对应的成片文件名（null = 找不到）。名字形态**三种都要试**：
+     * ① 剥段后原样（`…-VID_x` 这种少了 `.mp4` 的幽灵档案能找到同名条目）；
+     * ② 补 `.mp4`（正常档案 `VID_x.drops.json` 配 `VID_x.mp4`）；
+     * ③ **成片仍带 pending 名**（成片趟 provider 改名失败的那一类：`.pending-9-VID_x.mp4`）——
+     *    按"剥段后去掉 `.mp4`"与档案基名比对。旧实现只有 ①②，成片趟改名失败时档案趟
+     *    找不到成片，会把仍有效的 sidecar 当无主档案删掉。
      */
-    private fun clipFor(archiveName: String, dir: File): String? {
+    internal fun clipFor(archiveName: String, dir: File): String? {
         val base = PendingName.stripPendingJunk(archiveName).removeSuffix(ArcDropLog.EXTENSION)
         if (base.isEmpty()) return null
         val direct = File(dir, base)
         if (direct.isFile) return direct.name
         val withExt = File(dir, "$base.mp4")
         if (withExt.isFile) return withExt.name
-        return null
+        return dir.listFiles()?.firstOrNull { f ->
+            f.isFile && f.name.endsWith(".mp4") &&
+                PendingName.stripPendingJunk(f.name).removeSuffix(".mp4") == base
+        }?.name
     }
 
     private fun apply(app: Context, dir: File, f: File, plan: SweepPlan): Boolean = runCatching {
@@ -193,6 +203,13 @@ internal object StalePendingSweep {
                 f.delete().also { if (it) Log.i(TAG, "清扫：删无主/重复档案 ${f.name}") }
             SweepAction.RENAME_ARCHIVE -> {
                 val to = File(dir, plan.to ?: return@runCatching false)
+                // 双保险：目标已存在就**绝不** rename——Linux rename 语义是替换，会把有效档案
+                // 直接覆盖掉。计划侧 archiveTwinExists 已把这种形态判成 DELETE_ARCHIVE，
+                // 这里再挡一次，防未来判据漂移（宁可留原名等下一轮，也不许丢档案）。
+                if (to.exists()) {
+                    Log.w(TAG, "清扫：档案归位目标已存在，不覆盖（留原名待下轮）：${f.name} -> ${plan.to}")
+                    return@runCatching false
+                }
                 f.renameTo(to).also { if (it) Log.i(TAG, "清扫：档案归位 ${f.name} -> ${plan.to}") }
             }
             SweepAction.RENAME_CLIP -> {
@@ -360,6 +377,27 @@ internal enum class SweepAction { LEAVE, RENAME_CLIP, RENAME_ARCHIVE, DELETE_ARC
 
 /** @param to 目标**条目名**（不含目录）；LEAVE/DELETE 时为 null */
 internal data class SweepPlan(val action: SweepAction, val to: String?)
+
+/**
+ * 档案"重复件"判据（纯函数，JVM 全测）：目录里是否已有这条档案的**真实归位目标**，
+ * 或剥段后的同名条目。
+ *
+ * 为什么必须看 [targetName]：真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，
+ * 归位目标是 `VID_x.mp4.drops.json`。旧判据只查剥段后的档案名（`VID_x.drops.json`），
+ * 目标已存在时查不到 ⇒ `renameTo` 直接覆盖，有效档案被旧幽灵件顶掉。
+ *
+ * 只有这两种情形算重复：两种名字指向同一份数据（档案只是"该成片的补弧账"），
+ * 删掉待归位件不会少任何账目。
+ */
+internal fun archiveTwinExists(
+    archiveName: String,
+    targetName: String?,
+    dirNames: Set<String>
+): Boolean {
+    if (targetName != null && targetName != archiveName && targetName in dirNames) return true
+    val stripped = PendingName.stripPendingJunk(archiveName)
+    return stripped != archiveName && stripped != targetName && stripped in dirNames
+}
 
 /**
  * 逐条处置计划。**这是清扫的全部判断**（纯函数，全表测试在 `StalePendingSweepTest`）：

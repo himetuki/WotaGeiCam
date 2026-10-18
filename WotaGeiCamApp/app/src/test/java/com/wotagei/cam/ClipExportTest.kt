@@ -78,6 +78,28 @@ class ClipExportTest {
 
     // endregion
 
+    // region remuxAudioSampleWritable：音轨样本"是否会被写出"的单一判据（预扫与写出共用）
+
+    @Test
+    fun `音轨可写判据_剪辑导出零平移与出点边界`() {
+        // 剪辑导出：shiftUs=0、endRel=10_000
+        assertTrue("区间内正常样本", ClipRule.remuxAudioSampleWritable(5_000L, 0L, 10_000L))
+        assertTrue("恰在出点仍写", ClipRule.remuxAudioSampleWritable(10_000L, 0L, 10_000L))
+        assertFalse("越过出点不写", ClipRule.remuxAudioSampleWritable(10_001L, 0L, 10_000L))
+        assertFalse("负 PTS（入点前导）不写", ClipRule.remuxAudioSampleWritable(-1L, 0L, 10_000L))
+    }
+
+    @Test
+    fun `音轨可写判据_选轨导出负平移与无出点`() {
+        // 选轨导出：无出点，内录轨按 −offset 平移 50ms
+        assertTrue("平移后非负", ClipRule.remuxAudioSampleWritable(60_000L, -50_000L, null))
+        assertTrue("平移后恰为 0", ClipRule.remuxAudioSampleWritable(50_000L, -50_000L, null))
+        assertFalse("平移后为负（前导全丢 = 零样本轨，不得建轨）", ClipRule.remuxAudioSampleWritable(40_000L, -50_000L, null))
+        assertTrue("无出点时再晚的样本也写", ClipRule.remuxAudioSampleWritable(99_999_999L, 0L, null))
+    }
+
+    // endregion
+
     // region remapDrops：sidecar 平移（n 是增量，平移后原样保留）
 
     private fun log(vararg pairs: Pair<Int, Int>) = ArcDropLog("mend", 24, pairs.toList())

@@ -1,17 +1,20 @@
 package com.wotagei.cam.ui
 
 import android.app.Activity
+import android.Manifest
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.content.res.Configuration
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -746,8 +749,28 @@ fun CameraScreen(
             showTip(app.getString(R.string.audio_capture_cancelled))
         }
     }
+    /**
+     * 内录前置（2026-10-18）：Android 13+ 先要通知权限，再发投影授权框。
+     *
+     * 前台服务通知是内录会话唯一的常驻可见入口（含「停止内录」钮）；没有通知权限时服务照常
+     * 运行，但通知在抽屉里不可见，用户只能靠系统投影状态条停止。权限**只在这里**问一次，
+     * 不扩首启权限面；拒绝也继续走授权链（功能不因通知不可见而被阻断）。
+     */
+    val notifPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> launchCaptureConsent(capture, captureConsent, showTip, app) }
     /** 切内录的入口（弹窗开关用）：走 [launchCaptureConsent]，置态与发射原子 + 拉框异常回滚（P3-1） */
-    val enableCapture: () -> Unit = { launchCaptureConsent(capture, captureConsent, showTip, app) }
+    val enableCapture: () -> Unit = {
+        val needsNotifPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                app, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        if (needsNotifPermission) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            launchCaptureConsent(capture, captureConsent, showTip, app)
+        }
+    }
     // 撤销链与建链失败链：用户状态栏停止投屏 / 通知停止钮 → ProjectionStopped → Revoked，
     // FGS 建链任一步失败 → Failed(原因)。开关态派生自 captureState，弹回环境音是自动的，
     // 这里只补提示小字（失败原因同时留在弹窗状态小字里，P3-3：撤销态给重新授权入口）

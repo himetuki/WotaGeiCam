@@ -20,6 +20,10 @@
     <!-- 设备内录（AudioPlaybackCapture）：前台服务承载 MediaProjection 会话。均为 normal 级权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Android 13+ 的通知运行时权限：只服务内录前台服务的常驻通知（含「停止内录」钮）。
+         缺少它时服务仍能启动，但通知在抽屉里不可见、用户失去自建停止入口。
+         申请点只有一处：用户打开内录开关时（不扩首启权限面），拒绝也不阻断内录。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />

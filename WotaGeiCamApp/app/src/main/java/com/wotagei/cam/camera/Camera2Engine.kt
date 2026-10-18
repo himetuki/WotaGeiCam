@@ -97,6 +97,20 @@ class Camera2Engine(
         /** 占用/内部错误后的自动重开 */
         private const val REOPEN_DELAY_MS = 800L
         private const val REOPEN_MAX = 2
+
+        /**
+         * 设备状态回调专用 Looper：**进程内单例、永不 quit**。
+         *
+         * 为什么不用引擎自己的 workHandler：`close()` 收尾会 `quitSafely()`，此后迟到的
+         * `onOpened` 投递即丢——已经打开的 CameraDevice 没人 close，相机句柄泄漏到进程结束，
+         * 再次进相机页可能直接 CAMERA_IN_USE。Camera2 没有"撤销打开"的 API，唯一能做的是
+         * 保证回调**一定有人收**：收到后按代数判定，过期就当场 close。
+         *
+         * 回调本体只做「判代 + 投回引擎线程」，不碰引擎状态；投递失败（workHandler 已退）
+         * 也当场 close——这是兜底的兜底（[deviceCallback]）。
+         */
+        private val callbackThread: HandlerThread by lazy { HandlerThread("WotaCamCallback").apply { start() } }
+        private val callbackHandler: Handler by lazy { Handler(callbackThread.looper) }
     }
 
     private val manager = context.applicationContext
@@ -256,7 +270,7 @@ class Camera2Engine(
                 // 真机坑（WIKO GAR-AN60 / Android 11）：屏幕锁定或进程在后台时相机服务直接拒开
                 // （`cannot open camera "0" from background`），回调成 CAMERA_DISABLED →
                 // 表现为 OPEN_FAILED_PERMISSION，与运行时权限无关；adb 自动化须先亮屏解锁再 am start。
-                manager.openCamera(slot.logicId, deviceCallback(gen), workHandler)
+                manager.openCamera(slot.logicId, deviceCallback(gen), callbackHandler)
             } catch (e: SecurityException) {
                 failDevice(DeviceStatus.OPEN_FAILED_PERMISSION, "缺少相机权限")
             } catch (e: CameraAccessException) {
@@ -283,8 +297,8 @@ class Camera2Engine(
         // 投到已退出的 looper 被静默丢弃 ⇒ 相机句柄无人 close。合并后插队点不复存在。
         // try/finally 保住「哪怕拆除抛异常也一定退出线程」（原先由 post 包装的 catch 与独立的
         // quit 任务分别承担这两半语义，合并后必须一起兜住）。
-        // 诚实边界：openCamera 已在飞、onOpened 晚于 quit 到达的那一路（非本窗口）投递即丢，
-        // Camera2 无撤销打开的 API，只能靠 onOpened 自身的代数/threadRunning 守卫兜住 quit 前到达的情形。
+        // 迟到的 onOpened：改投进程级 [callbackHandler] 后**一定有人收**——收到先判代，
+        // 过期就 close；投回本线程失败（本 looper 已退）也当场 close。已无"投递即丢"的窗口。
         workHandler.post {
             try {
                 stopImageReaders()
@@ -969,38 +983,64 @@ class Camera2Engine(
 
     // ------------------------------------------------- 设备回调与错误映射
 
+    /**
+     * 设备状态回调：跑在进程级 [callbackHandler] 上（永不 quit），**不直接改引擎状态**——
+     * 一律投回 workHandler；`Handler.post` 在 looper 已退时返回 false，此时就地把句柄 close。
+     * 这条"投递失败也 close"是"迟到 onOpened 泄漏相机句柄"的根治点（旧实现投到 workHandler，
+     * close() 之后投递即丢）。
+     */
     private fun deviceCallback(gen: Int) = object : CameraDevice.StateCallback() {
         override fun onOpened(opened: CameraDevice) {
-            if (gen != generation || !threadRunning) {
-                runCatching { opened.close() }
-                return
+            val queued = workHandler.post {
+                if (gen != generation || !threadRunning) {
+                    runCatching { opened.close() }
+                    return@post
+                }
+                // 并发重开兜底：新设备已就位时这枚过期句柄必须关掉；绝不能覆盖字段
+                //（覆盖 = 旧句柄再也没人 close）
+                val cur = device
+                if (cur != null && cur !== opened) {
+                    runCatching { opened.close() }
+                    return@post
+                }
+                device = opened
+                // 注意：重开计数**不在这里归零**（2026-10-13 真机缺陷已修）。归零点挪到了
+                // onConfigured 成功侧——否则「open 成功 → configure 反复失败」的设备上每轮重开
+                // 都会把计数清零，REOPEN_MAX 永不可达 ⇒ 黑屏无限重开循环
+                publishDevice(DeviceStatus.OPEN_SUCCEED)
+                if (desiredPreview) ensureSession()
             }
-            device = opened
-            // 注意：重开计数**不在这里归零**（2026-10-13 真机缺陷已修）。归零点挪到了
-            // onConfigured 成功侧——否则「open 成功 → configure 反复失败」的设备上每轮重开
-            // 都会把计数清零，REOPEN_MAX 永不可达 ⇒ 黑屏无限重开循环
-            publishDevice(DeviceStatus.OPEN_SUCCEED)
-            if (desiredPreview) ensureSession()
+            if (!queued) runCatching { opened.close() }
         }
 
         override fun onDisconnected(disconnected: CameraDevice) {
-            Log.w(TAG, "设备被上层收回（onDisconnected），停预览并等待重开")
-            handleDeviceLost(disconnected, stale = gen != generation)
+            val queued = workHandler.post {
+                if (!threadRunning) {
+                    runCatching { disconnected.close() }
+                    return@post
+                }
+                Log.w(TAG, "设备被上层收回（onDisconnected），停预览并等待重开")
+                handleDeviceLost(disconnected, stale = gen != generation)
+            }
+            if (!queued) runCatching { disconnected.close() }
         }
 
         override fun onError(errored: CameraDevice, error: Int) {
+            // 错误路径先关设备，不依赖投递是否成功
             runCatching { errored.close() }
-            if (gen != generation) return
-            val status = when (error) {
-                CameraDevice.StateCallback.ERROR_CAMERA_IN_USE,
-                CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> DeviceStatus.OPEN_FAILED_IN_USED
+            workHandler.post {
+                if (!threadRunning || gen != generation) return@post
+                val status = when (error) {
+                    CameraDevice.StateCallback.ERROR_CAMERA_IN_USE,
+                    CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> DeviceStatus.OPEN_FAILED_IN_USED
 
-                CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> DeviceStatus.OPEN_FAILED_PERMISSION
+                    CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> DeviceStatus.OPEN_FAILED_PERMISSION
 
-                else -> if (highSpeedActive) DeviceStatus.OPEN_FAILED_HIGH_FPS
-                else DeviceStatus.OPEN_FAILED_INNER_ERROR
+                    else -> if (highSpeedActive) DeviceStatus.OPEN_FAILED_HIGH_FPS
+                    else DeviceStatus.OPEN_FAILED_INNER_ERROR
+                }
+                failDevice(status, "device onError code=$error")
             }
-            failDevice(status, "device onError code=$error")
         }
     }
 

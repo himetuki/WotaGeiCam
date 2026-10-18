@@ -416,6 +416,10 @@ fun PlayerScreen(
     var clipExporting by remember { mutableStateOf(false) }
     var clipProgress by remember { mutableStateOf(0f) }
     var clipJob by remember { mutableStateOf<Job?>(null) }
+    // 剪辑导出的音轨选择（2026-10-18 用户定版）：只导**用户选中的那一条**，默认环境音；
+    // 不再"只认第一条"（双轨素材的内录被静默丢）也不再"多轨全导"。与播放选轨（selectedAudio）
+    // 分开：换播放轨不该偷偷改导出内容，反之亦然。
+    var clipTrack by remember(clip.uri) { mutableStateOf(SelectedTrack.ENV) }
 
     // 内录选轨（批 4）：双音轨片才亮的「音轨 chip / 同步 / 导出」三控件。dualAudio 由打开时的
     // MediaExtractor 探测（IO 线程）——单音轨片与外来视频静默不显（回归红线，守卫钉住）；
@@ -765,6 +769,9 @@ fun PlayerScreen(
                     durationMs = duration,
                     exporting = clipExporting,
                     progress = clipProgress,
+                    track = clipTrack,
+                    dualReady = audioGroups.size >= 2,
+                    onPickTrack = { clipTrack = it },
                     onExport = {
                         // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层
                         if (clipJob == null) {
@@ -774,8 +781,8 @@ fun PlayerScreen(
                             clipProgress = 0f
                             clipJob = scope.launch {
                                 try {
-                                    // 区间在起跑那一刻定版：导出期间用户再动 A/B 不影响这一轮
-                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs) { p -> clipProgress = p }) {
+                                    // 区间与选轨都在起跑那一刻定版：导出期间用户再动 A/B / 换轨不影响这一轮
+                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack) { p -> clipProgress = p }) {
                                         is ClipResult.Done -> {
                                             banner = R.string.player_clip_done
                                             clipRepo.invalidate()
@@ -1096,9 +1103,12 @@ internal fun SpeedTierPopup(
 }
 
 /**
- * 剪辑导出就近弹层（2026-10-04 方向 3）：区间就是底栏 A/B 标记，这里只做**确认与进度**——
+ * 剪辑导出就近弹层（2026-10-04 方向 3）：区间就是底栏 A/B 标记，这里做**确认、选音轨与进度**——
  * 入点会自动向前对齐关键帧（无损剪的物理边界），读数行把它讲在明处。未圈满 A/B 时只给引导文案；
  * 导出中换进度条与取消钮，重开面板同一状态（进度是共享 State，不是弹层的局部变量）。
+ *
+ * 音轨选择（2026-10-18 用户定版）：只导用户选中的那一条（默认环境音）。单音轨片只亮环境音，
+ * 内录项在引擎尚未上报第二条音频组时置灰（与 [TrackPickPopup] 同一口径）。
  */
 @Composable
 private fun ClipExportPopup(
@@ -1108,6 +1118,9 @@ private fun ClipExportPopup(
     durationMs: Long,
     exporting: Boolean,
     progress: Float,
+    track: SelectedTrack,
+    dualReady: Boolean,
+    onPickTrack: (SelectedTrack) -> Unit,
     onExport: () -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit
@@ -1160,6 +1173,29 @@ private fun ClipExportPopup(
                 onClick = onCancel
             )
         } else if (range != null) {
+            // 音轨选择：只导选中的那一条。单音轨片只亮环境音；内录项在引擎尚未上报第二条
+            // 音频组时置灰（与 TrackPickPopup 同口径——点了没反应比置灰更糟）
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    stringResource(R.string.player_track_export),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WotaTextDim
+                )
+                WotaChip(
+                    label = stringResource(R.string.player_track_env),
+                    selected = track == SelectedTrack.ENV,
+                    onClick = { onPickTrack(SelectedTrack.ENV) }
+                )
+                WotaChip(
+                    label = stringResource(R.string.player_track_cap),
+                    selected = track == SelectedTrack.CAP,
+                    enabled = dualReady,
+                    onClick = { onPickTrack(SelectedTrack.CAP) }
+                )
+            }
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
                 selected = true,

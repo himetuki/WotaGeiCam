@@ -86,6 +86,10 @@ class UpdateNetworkGuardTest {
             "android.permission.VIBRATE",
             "android.permission.FOREGROUND_SERVICE",
             "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+            // 内录前台服务的常驻通知（含「停止内录」钮）在 Android 13+ 需运行时授权；申请点
+            // 只有"用户打开内录开关"一处，不扩首启权限面。它是**通知**权限、不是联网权限，
+            // 联网红线语义未动（仍只有 INTERNET 一条）。
+            "android.permission.POST_NOTIFICATIONS",
             "android.permission.BLUETOOTH",
             "android.permission.BLUETOOTH_ADMIN",
             "android.permission.BLUETOOTH_SCAN",

@@ -177,7 +177,11 @@ class TrackExporter(private val ctx: Context) {
         }
     }
 
-    /** 全片拷贝：视频 + 选中单音轨，读到底为止（无出点截断，B 帧容忍不需判界） */
+    /**
+     * 全片拷贝：视频 + 选中单音轨，读到底为止（无出点截断，B 帧容忍不需判界）。
+     * 音轨建轨前先过 [audioTrackWritable] 预扫：平移后全为负的轨（零样本）不进 muxer——
+     * 零样本轨会让 `muxer.stop()` 抛异常，从而把整份（视频完好的）输出判废删掉。
+     */
     private fun copy(
         src: VideoClip,
         track: SelectedTrack,
@@ -218,9 +222,21 @@ class TrackExporter(private val ctx: Context) {
                 else ex.advance()
             }
 
-            if (audioTrack >= 0) ex.selectTrack(audioTrack)
+            // 零样本音轨防线（2026-10-18）：addTrack 之后一个样本都没写出去，muxer.stop() 会抛
+            // （MPEG4Writer 对零样本轨的硬约束），而导出链的异常路径会删掉整份输出——视频明明
+            // 完好却被判失败。选内录轨时按 −offset 平移，若整条音轨都早于 0（前导全被丢）就会命中；
+            // 预扫后不建该轨，本片按纯视频导出，不牵连视频。
+            val audioWritable = audioTrack >= 0 &&
+                audioTrackWritable(ex, audioTrack, baseUs, shiftUs, endRelUs = null)
+            if (audioTrack >= 0 && !audioWritable) {
+                Log.w(TAG, "选轨音频平移后没有可写样本，本片只导出视频（track=$audioTrack shiftUs=$shiftUs）")
+            }
+            // 预扫挪走了 extractor 的选择与游标：恢复「视频 +（可写）音轨」并从 0 点重新定位
+            ex.selectTrack(videoTrack)
+            if (audioWritable) ex.selectTrack(audioTrack)
+            ex.seekTo(baseUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val vIdx = muxer.addTrack(ex.getTrackFormat(videoTrack))
-            val aIdx = muxer.addTrack(ex.getTrackFormat(audioTrack))
+            val aIdx = if (audioWritable) muxer.addTrack(ex.getTrackFormat(audioTrack)) else -1
             muxer.start()
 
             val info = MediaCodec.BufferInfo()
@@ -268,7 +284,7 @@ class TrackExporter(private val ctx: Context) {
                     } else {
                         videoDropped++
                     }
-                } else {
+                } else if (aIdx >= 0) {
                     // 选内录轨：PTS 平移 −offset 对齐环境轨；负 PTS 前导丢弃（TrackRule 裁决）。
                     // 丢弃判据吃 shiftedPts 的 raw 值，写出的戳再过单调桥（两轨独立账本）
                     val outPts = TrackRule.shiftedPts(ex.sampleTime, baseUs, shiftUs)

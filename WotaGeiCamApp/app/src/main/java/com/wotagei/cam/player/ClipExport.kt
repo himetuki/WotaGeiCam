@@ -31,6 +31,10 @@ import kotlin.coroutines.coroutineContext
  * 音画同步靠"两轨同减一个公共偏移"保住——偏移取视频首样本（关键帧）的 PTS，早于它的音频样本
  * 直接丢弃（那段画面本来就多出来了，丢掉对应音频才不会整体错位）。
  *
+ * **音轨由用户选**（2026-10-18 用户定版）：只导选中的那一条（默认环境音、可选内录），
+ * 不再"只认第一条"（双轨素材的内录被静默丢）也不再"多轨全导"。选中的轨在区间内没有可写样本时
+ * 按纯视频导出——零样本轨会让 `muxer.stop()` 抛异常，把视频完好的整份输出判废删掉。
+ *
  * B 帧容错：按 PTS 判"越界"在有 B 帧的流里会提前停（解码序靠后的 B 帧 PTS 反而小），
  * 所以每轨都按"连续越界样本数"封轨（视频 32 / 音频 8，典型 B 帧深度 ≤ 4），界内迟到样本照写。
  *
@@ -98,6 +102,59 @@ object ClipRule {
         val stem = if (dot > 0) srcName.substring(0, dot) else srcName
         return "edit_$stem.mp4"
     }
+
+    /**
+     * 音轨样本"是否会被写出"的单一判据（纯函数，JVM 全测）。两处必须吃同一条：
+     * ① 建 muxer 轨之前的预扫（决定这条轨进不进容器）；② 拷贝循环里真正写样本。
+     *
+     * 为什么预扫与写出必须同口径：muxer 的轨在 `addTrack` 时就定型，之后一个样本都没写进去，
+     * `muxer.stop()` 必抛（MPEG4Writer 对零样本轨的硬约束）；而导出链的异常路径会删掉整份输出
+     * ——视频完好却被判失败。剪辑导出传 `shiftUs = 0` 并带出点 [endRelUs]；选轨导出无出点
+     * （[endRelUs] = null）并带对齐平移。
+     */
+    fun remuxAudioSampleWritable(relUs: Long, shiftUs: Long, endRelUs: Long?): Boolean {
+        if (relUs + shiftUs < 0L) return false
+        return endRelUs == null || relUs <= endRelUs
+    }
+}
+
+/**
+ * 预扫一条音轨：在 `[baseUs, baseUs + endRelUs]` 内是否至少有**一枚**会被写出的样本。
+ *
+ * 调用方约束：本函数会把 extractor 的选择与游标全部挪走（只留这一条轨、seek 到 [baseUs]），
+ * 返回后必须重新 `selectTrack` 并从 [baseUs] 重新定位。
+ *
+ * 条件封轨与拷贝循环同口径：连续 [tailTolerance] 枚越界样本判该轨已结束（B 帧重排容忍）。
+ */
+internal fun audioTrackWritable(
+    ex: MediaExtractor,
+    track: Int,
+    baseUs: Long,
+    shiftUs: Long,
+    endRelUs: Long?,
+    tailTolerance: Int = 8
+): Boolean {
+    for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
+    ex.selectTrack(track)
+    ex.seekTo(baseUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+    var outOfRange = 0
+    try {
+        while (outOfRange < tailTolerance) {
+            val size = ex.sampleSize
+            if (size < 0L) return false
+            val rel = ex.sampleTime - baseUs
+            if (endRelUs != null && rel > endRelUs) {
+                outOfRange++
+            } else {
+                outOfRange = 0
+                if (ClipRule.remuxAudioSampleWritable(rel, shiftUs, endRelUs)) return true
+            }
+            if (!ex.advance()) return false
+        }
+        return false
+    } finally {
+        runCatching { ex.unselectTrack(track) }
+    }
 }
 
 /** 导出结果：[Done] 带 MediaStore 媒体 id（pending uri 自带，commit 前已定） */
@@ -150,6 +207,7 @@ class ClipExporter(private val ctx: Context) {
 
     /**
      * 把 [src] 的 `[startMs, endMs]` 段无损导出成新入库条目。
+     * [track] = 用户选中的音轨（ENV=容器第一条环境音、CAP=第二条内录）；只写这一条，不默认全导。
      * [onProgress] 0..1（IO 线程回调，写 Compose State 是线程安全的）。
      * 取消 = 调用方 cancel 协程；本函数在取消路径上删 pending 记录后原样重抛。
      */
@@ -157,6 +215,7 @@ class ClipExporter(private val ctx: Context) {
         src: VideoClip,
         startMs: Long,
         endMs: Long,
+        track: SelectedTrack,
         onProgress: (Float) -> Unit
     ): ClipResult = withContext(Dispatchers.IO) {
         val range = ClipRule.normalize(startMs, endMs, src.durationMs)
@@ -180,7 +239,7 @@ class ClipExporter(private val ctx: Context) {
                     // 读数走双源（readSourceRotationHint），写出必须经 exportOrientationHint 统一口径
                     val hint = readSourceRotationHint(ctx, src.uri)
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
-                    val baseUs = copy(src, sMs * 1000L, eMs * 1000L, job, muxer, onProgress)
+                    val baseUs = copy(src, sMs * 1000L, eMs * 1000L, track, job, muxer, onProgress)
                     muxer.stop()
                     bytesComplete = true
                     // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
@@ -234,6 +293,7 @@ class ClipExporter(private val ctx: Context) {
 
     /**
      * 拷贝主体：从入点关键帧读到出点，样本原样写进 [muxer]，PTS 平移到 0 起。
+     * 音轨只写用户选中的那一条（[track]：ENV=容器第一条、CAP=第二条），不默认全导。
      * B 帧源的 PTS 会在界内界外来回跳（见上）：**判据**（越界封轨/负值丢弃）仍吃 raw 值，
      * **写出的戳**再过逐轨单调桥 [monotonicPts]——同轨倒退会让 MPEG4Writer 抛
      * IllegalStateException 结束导出，录制链在 CodecRecorder.writeSample 有同一层兜底。
@@ -243,6 +303,7 @@ class ClipExporter(private val ctx: Context) {
         src: VideoClip,
         startUs: Long,
         endUs: Long,
+        track: SelectedTrack,
         job: Job?,
         muxer: MediaMuxer,
         onProgress: (Float) -> Unit
@@ -251,12 +312,14 @@ class ClipExporter(private val ctx: Context) {
         try {
             ex.setDataSource(ctx, src.uri, null)
             var videoTrack = -1
-            var audioTrack = -1
+            // 全部 audio/ 轨按容器轨序收：ENV = 第一条、CAP = 第二条（与 TrackSync 的识别口径同源）。
+            // 实际写哪一条由**用户选**（[track]），不再"只认第一条"、也不"全部导出"。
+            val audioTracks = ArrayList<Int>()
             for (i in 0 until ex.trackCount) {
                 val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
                 when {
                     videoTrack < 0 && mime.startsWith("video/") -> videoTrack = i
-                    audioTrack < 0 && mime.startsWith("audio/") -> audioTrack = i
+                    mime.startsWith("audio/") -> audioTracks.add(i)
                 }
             }
             if (videoTrack < 0) throw IllegalStateException("no video track")
@@ -274,12 +337,29 @@ class ClipExporter(private val ctx: Context) {
                 if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) baseUs = ex.sampleTime
                 else ex.advance()
             }
+            val endRel = endUs - baseUs
 
-            // 第二步：音频此刻才选中并 seek，两轨同位（baseUs）起读，相对关系不破坏
-            if (audioTrack >= 0) ex.selectTrack(audioTrack)
+            // 第二步：只对**用户选中的那条**音轨做预扫。两条理由：
+            // ① 用户选了哪条就只导哪条（不再默认全导，也不再只认第一条）；
+            // ② 选中的轨在区间内没有可写样本（或源里没有第二条）时不建轨——零样本轨会让
+            //    muxer.stop() 抛异常，而导出链的异常路径会删掉整份输出（视频明明完好）。
+            val audioOrdinal = if (track == SelectedTrack.ENV) 0 else 1
+            val requested = audioTracks.getOrNull(audioOrdinal)
+            val audioTrack = requested?.takeIf {
+                audioTrackWritable(ex, it, baseUs, shiftUs = 0L, endRelUs = endRel, tailTolerance = AUDIO_TAIL_TOLERANCE)
+            }
+            if (requested == null) {
+                Log.i(TAG, "源只有 ${audioTracks.size} 条音轨，选中轨#$audioOrdinal 不存在，本片只导出视频")
+            } else if (audioTrack == null) {
+                Log.w(TAG, "选中轨#$audioOrdinal 在剪辑区间内没有可写样本，本片只导出视频")
+            }
+
+            // 第三步：视频 +（可写的）选中音轨一起选中，两轨同位（baseUs）起读，相对关系不破坏
+            ex.selectTrack(videoTrack)
+            if (audioTrack != null) ex.selectTrack(audioTrack)
             ex.seekTo(baseUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val vIdx = muxer.addTrack(ex.getTrackFormat(videoTrack))
-            val aIdx = if (audioTrack >= 0) muxer.addTrack(ex.getTrackFormat(audioTrack)) else -1
+            val aIdx = audioTrack?.let { muxer.addTrack(ex.getTrackFormat(it)) } ?: -1
             muxer.start()
 
             val info = MediaCodec.BufferInfo()
@@ -291,7 +371,7 @@ class ClipExporter(private val ctx: Context) {
             var vTail = 0
             var aTail = 0
             var videoClosed = false
-            var audioClosed = audioTrack < 0
+            var audioClosed = aIdx < 0
             // B 帧源的单调兜底账本（#8）：两轨各一枚 lastPts + 修正计数 + 最大倒退量。
             // 同轨倒退会让 MPEG4Writer 抛 IllegalStateException 让导出当场结束，写前过桥兜底
             var vLastPts = -1L
@@ -300,7 +380,6 @@ class ClipExporter(private val ctx: Context) {
             var aPtsFixes = 0
             var vPtsMaxBackUs = 0L
             var aPtsMaxBackUs = 0L
-            val endRel = endUs - baseUs
             while (!videoClosed || !audioClosed) {
                 // 取消检查挂在每个样本上：这一步很轻，是循环里最密的检查点
                 job?.ensureActive()
@@ -340,7 +419,7 @@ class ClipExporter(private val ctx: Context) {
                 } else if (!audioClosed) {
                     if (rel > endRel) {
                         if (++aTail >= AUDIO_TAIL_TOLERANCE) audioClosed = true
-                    } else if (ClipRule.keepSample(rel)) {
+                    } else if (aIdx >= 0 && ClipRule.keepSample(rel)) {
                         // 早于公共基准的音频样本（AAC 帧界早于视频关键帧）丢弃：负 PTS 会崩 Muxer。
                         // 单调桥与视频轨同口径（两轨独立账本）
                         val fix = monotonicPts(aLastPts, rel)
@@ -373,6 +452,7 @@ class ClipExporter(private val ctx: Context) {
             if (videoDropped > 0) {
                 Log.i(TAG, "视频负PTS样本丢弃=$videoDropped（开放GOP前导B帧，丢弃为保 Muxer 时间轴合规）")
             }
+            Log.i(TAG, "音轨写入：选中轨#$audioOrdinal ${if (aIdx >= 0) "已建轨" else "未建轨(纯视频)"} 容器音轨 ${audioTracks.size} 条")
             if (videoWritten == 0) throw IllegalStateException("empty range: no video sample")
             return baseUs
         } finally {
