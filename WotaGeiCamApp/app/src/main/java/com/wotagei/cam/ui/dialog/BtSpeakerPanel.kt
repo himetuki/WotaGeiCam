@@ -89,6 +89,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
     val scanning by controller.isScanning.collectAsState()
     val adapterEnabled by controller.adapterEnabled.collectAsState()
     val openSettings by controller.openSettings.collectAsState()
+    val locationOff by controller.locationServiceOff.collectAsState()
     val maxVolume = controller.maxVolume
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -187,6 +188,18 @@ fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
         }
         if (!adapterEnabled) {
             HintCard(stringResource(R.string.bt_adapter_off), warn = true)
+        }
+        if (locationOff) {
+            // S 以下的另一半门槛：位置权限授了、系统定位开关没开时扫描"成功"但结果恒空，
+            // 权限引导面发现不了这种"授权了却搜不到"——单独亮"开定位"引导（两条门槛分开展示）
+            HintCard(stringResource(R.string.bt_location_off), warn = true)
+            TextButton(onClick = { openLocationSettings(context) }, enabled = editable) {
+                Text(
+                    stringResource(R.string.bt_open_location),
+                    color = WotaText,
+                    textDecoration = TextDecoration.Underline
+                )
+            }
         }
 
         val paired = devices.filter { it.bonded }
@@ -354,4 +367,10 @@ private fun openBluetoothSettings(context: Context) {
     val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(intent) }
         .onFailure { Log.w("WotaBt", "start bluetooth settings failed: ${it.message}") }
+}
+
+private fun openLocationSettings(context: Context) {
+    val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+        .onFailure { Log.w("WotaBt", "start location settings failed: ${it.message}") }
 }

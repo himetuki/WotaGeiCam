@@ -14,8 +14,10 @@ import org.junit.Test
  * 删行连带删文件，文件还在时删行 = 丢成片）。年龄门槛 SWEEP_STALE_MS 与单轮上限
  * SWEEP_MAX_INDEX 必须真的在救援体内（否则在飞的导出会被误碰）。
  *
- * 切片法：missing 锚点（`if (f == null || !f.exists())`）到 rescue 锚点（`} else if (extractable(f))`）
- * 之间是「文件缺失」分支，其后是救援/留原状两支——逐段判定 deleteRow 只许出现在前一支。
+ * 切片法（2026-10-20 收口后三段）：missing 锚点（`if (f != null && !f.exists())`）到 unknown 锚点
+ * （`} else if (f == null)`）之间是「文件确认缺失」分支（唯一删行处）；unknown 到 rescue 锚点
+ * （`} else if (extractable(f))`）之间是「路径未知」分支（DATA 查不到 ≠ 文件不在盘，只许留原状）；
+ * 其后是救援/留原状两支——逐段判定 deleteRow 只许出现在第一支。
  */
 class PendingRowRescueGuardTest {
 
@@ -26,15 +28,20 @@ class PendingRowRescueGuardTest {
     /** 「删行只许在文件缺失分支、救援只许 update、门槛上限在体内」的判定本体 */
     private fun holds(body: String): Boolean {
         if (!body.contains("SWEEP_STALE_MS") || !body.contains("SWEEP_MAX_INDEX")) return false
-        val missing = body.indexOf("if (f == null || !f.exists())")
+        val missing = body.indexOf("if (f != null && !f.exists())")
+        val unknown = body.indexOf("} else if (f == null)")
         val rescue = body.indexOf("} else if (extractable(f))")
-        if (missing < 0 || rescue <= missing) return false
-        val missingBranch = body.substring(missing, rescue)
+        if (missing < 0 || unknown <= missing || rescue <= unknown) return false
+        val missingBranch = body.substring(missing, unknown)
+        val unknownBranch = body.substring(unknown, rescue)
         val tail = body.substring(rescue)
-        // 删行只许出现在「文件缺失」分支内（体内其余位置出现即红）
+        // 删行只许出现在「文件确认缺失」分支内（体内其余位置出现即红）
         val total = KotlinSourceScan.occurrences(body, "deleteRow").size
         val inMissing = KotlinSourceScan.occurrences(missingBranch, "deleteRow").size
         if (inMissing < 1 || inMissing != total) return false
+        // 路径未知分支只许留原状（2026-10-20 收口：DATA 查不到 ≠ 文件不在盘，删行 = 可能丢成片）
+        if (unknownBranch.contains("deleteRow")) return false
+        if (!unknownBranch.contains("Log.w(")) return false
         // 文件在盘的两支（救援/打不开）只许 update 与留原状，不许删
         if (!tail.contains("unpendRow(app, row.id)")) return false
         if (tail.contains("deleteRow")) return false

@@ -39,13 +39,15 @@
         tools:ignore="CoarseFineLocation" />
 
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14+ 权限框的「选择照片和视频」档：用户选它时系统授本条而不授 READ_MEDIA_VIDEO；
+         未声明本条时那一档等于什么都没授（媒体库只剩自录内容、权限行还误报"未授予"）。
+         与 READ_MEDIA_VIDEO 互斥生效：全量=READ_MEDIA_VIDEO，部分=本条 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <!-- 删/回收站别的 app 录的视频时不弹系统英文授权框的唯一正当途径：所有文件访问（用户在系统设置里开一次） -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />

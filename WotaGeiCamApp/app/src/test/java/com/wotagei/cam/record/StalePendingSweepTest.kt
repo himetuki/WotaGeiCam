@@ -415,4 +415,33 @@ class StalePendingSweepTest {
             runOnce.contains("archiveTwinExists(f.name, clipName?.let { it + ArcDropLog.EXTENSION }")
         )
     }
+
+    // ---- ⑦ 2026-10-20 数据丢失收口：未知 ≠ 缺失 ----
+
+    @Test
+    fun `救援删行判据必须把路径未知与文件确认缺失分开`() {
+        val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
+        val rescue = sweep.substringAfter("fun rescuePendingRows(")
+            .substringBefore("private fun queryPendingRows(")
+        assertFalse(
+            "dataPath 为 null 是『路径未知』不是『文件缺失』——并进删行分支会在 provider 抖动时误删成片",
+            rescue.contains("f == null || !f.exists()")
+        )
+        assertTrue("删行分支必须钉住「路径可查且不在盘」", rescue.contains("f != null && !f.exists()"))
+        assertTrue("路径未知必须有留原状的显式分支", rescue.contains("else if (f == null)"))
+    }
+
+    @Test
+    fun `行查询失败必须当未知处理_不许落到 fs rename`() {
+        val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
+        val rowExists = sweep.substringAfter("private fun rowExists(").substringBefore("\n    }")
+        assertTrue("rowExists 必须三值（Boolean?，null=查不出）", rowExists.contains("): Boolean? = runCatching {"))
+        val clip = sweep.substringAfter("private fun apply(")
+            .substringBefore("\n    private fun ")
+            .substringAfter("RENAME_CLIP ->")
+        assertTrue(
+            "查不出有无行必须保持不动（走 fs rename 赌错就是坏行事故重演）",
+            clip.contains("hasRow == null")
+        )
+    }
 }

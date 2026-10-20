@@ -219,7 +219,14 @@ internal object StalePendingSweep {
                 // 10 条成片就这样变成了坏行）。所以：
                 //   有行 ⇒ 走 provider，失败就**不动**（留原名，等下一轮/人工）；
                 //   无行 ⇒ 本来就没人索引它，自己 rename 才是对的。
-                if (rowExists(app, f.name)) {
+                //   **查不出有无行（provider 查询失败）⇒ 同"有行"处理：不动**——
+                //   fs rename 赌"无行"赌错就是坏行事故重演，宁可留原名等下一轮。
+                val hasRow = rowExists(app, f.name)
+                if (hasRow == null) {
+                    Log.w(TAG, "清扫：行查询失败无法判定有无行，保持不动 ${f.name}")
+                    return@runCatching false
+                }
+                if (hasRow) {
                     if (!renameRow(app, f.name, to.name)) {
                         Log.w(TAG, "清扫：有行的成片 provider 改名失败，保持原名不动 ${f.name}")
                         return@runCatching false
@@ -235,16 +242,21 @@ internal object StalePendingSweep {
         }
     }.getOrDefault(false)
 
-    /** 目录内是否已有这一行的成片（`renameRow` 的前置判据：**有行才必须走 provider**） */
-    private fun rowExists(app: Context, name: String): Boolean = runCatching {
+    /**
+     * 目录内是否已有这一行的成片（`renameRow` 的前置判据：**有行才必须走 provider**）。
+     * 三值：true=有行 / false=确无行 / **null=查不出**（provider 异常/忙，含 query 回空 cursor）。
+     * 查不出时调用方必须按"可能有行"处理，绝不能落到 fs rename——赌错方向就是
+     * 2026-10-08 坏行事故（provider 失败回退 fs rename、10 条成片变坏行）的重演
+     */
+    private fun rowExists(app: Context, name: String): Boolean? = runCatching {
         app.contentResolver.query(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             arrayOf(MediaStore.MediaColumns._ID),
             "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
             arrayOf(name, "${VideoStore.RELATIVE_PATH}/"),
             null
-        )?.use { it.count > 0 } ?: false
-    }.getOrDefault(false)
+        )?.use { it.count > 0 }
+    }.getOrNull()
 
     /**
      * 经 MediaStore 去掉 pending 段（顺带 `IS_PENDING=0` 兜一次：历史上"insert 在飞时被杀"的残留
@@ -297,12 +309,17 @@ internal object StalePendingSweep {
                 if (acted >= SWEEP_MAX_INDEX) break
                 if (now - row.addedMs < SWEEP_STALE_MS) continue
                 val f = row.dataPath?.let { File(it) }
-                if (f == null || !f.exists()) {
-                    // 唯一删行分支：文件确认缺失，删坏行（无数据可损失）
+                if (f != null && !f.exists()) {
+                    // 唯一删行分支：文件**确认**缺失（路径查得到且不在盘），删坏行无数据可损失
                     if (deleteRow(app, row.id)) {
                         Log.i(TAG, "救援：删坏行（文件已不在）${row.displayName}")
                         acted++
                     }
+                } else if (f == null) {
+                    // 路径未知（DATA 列为空/查不到）：确认不了文件在不在盘，删行 = MediaStore 连带
+                    // 删文件 = 可能丢成片（红线 3 只认"确认缺失"）。留原状待下一轮或人工，
+                    // 与 reconcileLibrary 的 dataPath ?: continue 同一条口径
+                    Log.w(TAG, "救援：行路径未知，不动（防误删）${row.displayName} id=${row.id}")
                 } else if (extractable(f)) {
                     // 文件在盘且是完整合法的容器：只清 IS_PENDING 收进相册，绝不删
                     if (unpendRow(app, row.id)) {

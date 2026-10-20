@@ -1,12 +1,14 @@
 package com.wotagei.cam.ui
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
@@ -192,8 +194,14 @@ private fun WotaRoot() {
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
-        // 任一权限被拒即给「去设置」出口（06 文档 §1 权限策略）
-        if (grants.values.any { !it }) showPermissionPrompt = true
+        // 任一权限被拒即给「去设置」出口（06 文档 §1 权限策略）——但媒体读取是「全量或部分」
+        // 二选一：Android 14+ 用户选「选择照片和视频」时 READ_MEDIA_VIDEO=false 而
+        // READ_MEDIA_VISUAL_USER_SELECTED=true，这两条都拿到 false 才算拒；只认前一条
+        // 会把用户明确选过的部分授权当场误判成拒绝
+        val mediaKeys = grants.keys.filter { it in MEDIA_PERMISSION_KEYS }
+        val otherDenied = grants.entries.filter { it.key !in mediaKeys }.any { !it.value }
+        val mediaDenied = mediaKeys.isNotEmpty() && mediaKeys.all { grants.getValue(it) == false }
+        if (otherDenied || mediaDenied) showPermissionPrompt = true
     }
     LaunchedEffect(Unit) {
         val missing = missingStartupPermissions(context)
@@ -332,18 +340,38 @@ private fun applyPageMode(activity: Activity?, route: String?) {
     }
 }
 
-/** 启动即要的三项权限：相机必需，麦克风影响音轨，视频读取只服务媒体库（缺录音权限走降级） */
+/**
+ * 启动即要的权限：相机必需，麦克风影响音轨，视频读取只服务媒体库（缺录音权限走降级）。
+ * Android 14+ 媒体读取按「全量或部分」二选一：部分授权（READ_MEDIA_VISUAL_USER_SELECTED）
+ * 也视为已满足并成对请求两条——用户上次选过「选择照片和视频」后 READ_MEDIA_VIDEO 恒为拒，
+ * 只看那一条会每次冷启都重弹权限框
+ */
 private fun missingStartupPermissions(context: Context): Array<String> {
     val list = mutableListOf<String>()
     if (!hasPermission(context, Manifest.permission.CAMERA)) list += Manifest.permission.CAMERA
     if (!hasPermission(context, Manifest.permission.RECORD_AUDIO)) list += Manifest.permission.RECORD_AUDIO
     val media = WotaSettings.mediaReadPermission()
-    if (!hasPermission(context, media)) list += media
+    // 单点版本闸（34 以下 VISUAL_USER_SELECTED 是未知权限，请求必拒，不能进请求清单）
+    val api34 = Build.VERSION.SDK_INT >= 34
+    val partialGranted = api34 && hasPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+    if (!hasPermission(context, media) && !partialGranted) {
+        list += media
+        if (api34) list += Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+    }
     return list.toTypedArray()
 }
 
 private fun hasPermission(context: Context, permission: String): Boolean =
     ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+/** 媒体读取的「全量/部分」二选一权限对。InlinedApi 抑制理由：Manifest.permission 里的这两条
+ *  只是编译期内联的字符串常量，拿来**比较** grants 的键在任何 API 上都安全（低版本上根本
+ *  不会出现在请求清单里）；真正受版本闸保护的是 missingStartupPermissions 的请求侧 */
+@SuppressLint("InlinedApi")
+private val MEDIA_PERMISSION_KEYS = setOf(
+    Manifest.permission.READ_MEDIA_VIDEO,
+    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+)
 
 /** 公共 Movies 下的导出成片目录（与 [StalePendingSweep.outputDir] 同一构造口径） */
 @Suppress("DEPRECATION") // 公共目录定位：本工程持 MANAGE_EXTERNAL_STORAGE，走这条最稳

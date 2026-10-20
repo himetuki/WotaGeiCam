@@ -1461,7 +1461,11 @@ internal fun btLocationRowVisible(sdkInt: Int): Boolean = sdkInt < 31
 private fun permissionRows(context: Context): List<PermRow> = buildList {
     add(PermRow(R.string.set_perm_camera, granted(context, Manifest.permission.CAMERA)))
     add(PermRow(R.string.set_perm_audio, granted(context, Manifest.permission.RECORD_AUDIO)))
-    add(PermRow(R.string.set_perm_media, granted(context, WotaSettings.mediaReadPermission())))
+    // Android 14+ 的部分授权（READ_MEDIA_VISUAL_USER_SELECTED）也算已授予：用户明确选过「选择照片和视频」
+    val mediaGranted = granted(context, WotaSettings.mediaReadPermission()) ||
+        (android.os.Build.VERSION.SDK_INT >= 34 &&
+            granted(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED))
+    add(PermRow(R.string.set_perm_media, mediaGranted))
     add(PermRow(R.string.set_perm_bluetooth, hasBluetoothPermission(context)))
     // 版本闸（源码守卫的字面锚）：只有 API ≤ 30 才把位置子行放进列表
     if (btLocationRowVisible(android.os.Build.VERSION.SDK_INT)) {

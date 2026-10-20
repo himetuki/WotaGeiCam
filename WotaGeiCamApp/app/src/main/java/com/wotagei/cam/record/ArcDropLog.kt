@@ -154,12 +154,18 @@ data class ArcDropLog(
             File(sidecarFor(videoPath)).delete()
         }.getOrDefault(false)
 
-        /** 成片改名时连带搬 sidecar（位次档案与成片的对应关系不能断）；无可搬文件返回 false */
+        /**
+         * 成片改名时连带搬 sidecar（位次档案与成片的对应关系不能断）；无可搬文件返回 false。
+         * 目标已存在时**绝不覆盖**：Linux rename 语义是静默替换，会把目标处已有的别片档案吃掉
+         * （与清扫侧 RENAME_ARCHIVE 的双保险同一条红线）。改名回查失败退回请求名恰好撞上
+         * 他片时，宁可留着不搬也不能覆盖。
+         */
         fun renameFor(oldVideoPath: String, newVideoPath: String): Boolean = runCatching {
             val from = File(sidecarFor(oldVideoPath))
             if (!from.isFile) return@runCatching false
             val to = File(sidecarFor(newVideoPath))
             if (to.absolutePath == from.absolutePath) return@runCatching true
+            if (to.exists()) return@runCatching false
             to.parentFile?.mkdirs()
             from.renameTo(to)
         }.getOrDefault(false)

@@ -34,4 +34,10 @@
     <!-- 状态提示 -->
     <string name="bt_grant">授予权限</string>
     <string name="bt_adapter_off">系统蓝牙未开启，请先在设置中打开</string>
+
+    <!-- Android 10/11 扫描的另一半门槛：位置权限之外，系统定位服务开关也必须开着（平台对
+         discovery 结果的过滤是两者同时成立，缺开关与缺权限一样都是静默空结果）。
+         权限是什么、为什么弹框见 strings.xml 的 perm_bluetooth_rationale_low；这里只管开关 -->
+    <string name="bt_location_off">系统定位服务未开启：这台设备的系统（Android 10/11）搜索蓝牙设备时要求定位服务保持开启。WotaGeiCam 不会读取你的位置。</string>
+    <string name="bt_open_location">去开启定位服务</string>
 </resources>

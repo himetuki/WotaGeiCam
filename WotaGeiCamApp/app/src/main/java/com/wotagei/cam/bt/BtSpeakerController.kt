@@ -120,6 +120,16 @@ class BtSpeakerController(context: Context) {
     /** 系统蓝牙开关状态 */
     val adapterEnabled: StateFlow<Boolean> = _adapterEnabled
 
+    private val _locationServiceOff = MutableStateFlow(false)
+
+    /**
+     * 系统定位服务开关是否关着（仅 S 以下有意义）。Android 10/11 上设备发现的结果被平台按
+     * 「位置权限已授 **且** 定位服务开着」双重过滤——权限授了、定位开关没开时 startDiscovery
+     * 照样报成功但结果恒空，且 [hasPermission] 恒 true、授权引导面永不亮，用户只看到
+     * 「附近设备」空着。这一位专门把「开关没开」从那种静默里捞出来给面板亮引导。
+     */
+    val locationServiceOff: StateFlow<Boolean> = _locationServiceOff
+
     /** `STREAM_MUSIC` 的最大档位（机型各异，一律运行时读取） */
     val maxVolume: Int = runCatching {
         audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
@@ -196,6 +206,8 @@ class BtSpeakerController(context: Context) {
         if (closed) return
         _hasPermission.value = missingPermissions().isEmpty()
         _adapterEnabled.value = runCatching { adapter?.isEnabled }.getOrNull() == true
+        _locationServiceOff.value =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S && locationServiceDisabled()
         syncVolume()
         rebuild()
     }
@@ -306,7 +318,9 @@ class BtSpeakerController(context: Context) {
      * 缺权限时**必须早退**：Android 10/11 上 `startDiscovery` 在缺 `ACCESS_FINE_LOCATION` 时
      * 不抛异常也不发起扫描（只留空列表 + 下面这条日志），属"静默无结果"。
      * 早退前 [refresh] 已把 [hasPermission] 置 false，UI 的授权引导面（HintCard + 授予权限）
-     * 随之亮出，用户点「授予权限」再回来重试——这条链路就是 S 以下唯一的可见出口。
+     * 随之亮出，用户点「授予权限」再回来重试——这条链路是 S 以下**权限侧**的可见出口；
+     * 还有另一半门槛由 [locationServiceOff] 单独亮引导：系统定位服务开关没开时结果同样
+     * 恒空（权限引导发现不了，见该字段注释）。
      */
     fun startScan() {
         val bluetooth = adapter ?: return
@@ -317,6 +331,13 @@ class BtSpeakerController(context: Context) {
         }
         if (missingPermissions().isNotEmpty()) {
             Log.w(TAG, "startScan skipped: missing ${missingPermissions().joinToString()}")
+            return
+        }
+        // S 以下的另一半门槛：定位服务开关没开时扫描"成功"但结果恒空（见 locationServiceOff
+        // 注释），发起也是白发——置位引导面，等用户开了开关再扫
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && locationServiceDisabled()) {
+            _locationServiceOff.value = true
+            Log.w(TAG, "startScan skipped: system location service off (pre-S discovery filter)")
             return
         }
         if (runCatching { bluetooth.isDiscovering }.getOrDefault(false)) return
@@ -414,6 +435,14 @@ class BtSpeakerController(context: Context) {
 
     private fun hasConnectPermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S || granted(Manifest.permission.BLUETOOTH_CONNECT)
+
+    /** 系统定位服务开关是否关着（`LocationManager.isLocationEnabled`，API 28+；读开关本身
+     *  不需要权限）。读不出来时按"开着"算——不让探测失败把扫描一票否决 */
+    private fun locationServiceDisabled(): Boolean {
+        val lm = app.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+            ?: return false
+        return runCatching { !lm.isLocationEnabled }.getOrDefault(false)
+    }
 
     private fun granted(permission: String): Boolean =
         ContextCompat.checkSelfPermission(app, permission) == PackageManager.PERMISSION_GRANTED

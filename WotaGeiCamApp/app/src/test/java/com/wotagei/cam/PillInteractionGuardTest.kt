@@ -87,9 +87,10 @@ class PillInteractionGuardTest {
         }
         if (!panel.contains("editable: Boolean")) bad.add("BtSpeakerPanel 没有 editable 形参")
         if (panel.contains("editable: Boolean =")) bad.add("BtSpeakerPanel 的 editable 不许给默认值（漏传应编译不过）")
-        // 逐控件点名：扫描/权限/去设置/DeviceRow 连接/prev/playPause/next 恰 7 处（拆掉任一处必红）
+        // 逐控件点名：扫描/权限/去设置/DeviceRow 连接/prev/playPause/next/开定位（2026-10-20
+        // pre-S 扫描门槛引导钮，与权限/蓝牙设置同族，录制中只读）恰 8 处（拆掉任一处必红）
         val gated = occurrences(panel, "enabled = editable").size
-        if (gated != 7) bad.add("BtSpeakerPanel 吃 editable 的控件不是 7 处（实际 $gated）")
+        if (gated != 8) bad.add("BtSpeakerPanel 吃 editable 的控件不是 8 处（实际 $gated）")
         if (!panel.contains("enabled = maxVolume > 0 && editable")) {
             bad.add("BtSpeakerPanel 音量滑杆没有吃 editable")
         }

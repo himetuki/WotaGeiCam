@@ -99,9 +99,11 @@ class UpdateNetworkGuardTest {
             // 绝不进下面的 networkDeny 名单——联网红线的语义一个字没动，仍是「只许 INTERNET 一条」。
             "android.permission.ACCESS_FINE_LOCATION",
             "android.permission.READ_MEDIA_VIDEO",
+            // Android 14+「选择照片和视频」部分授权档（2026-10-20）：与 READ_MEDIA_VIDEO 互斥生效，
+            // 用户选那一档时系统只授这条。不声明它，那一档等于什么都没授。是媒体读取权限、不是联网权限
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
             "android.permission.MANAGE_EXTERNAL_STORAGE",
             "android.permission.READ_EXTERNAL_STORAGE",
-            "android.permission.WRITE_EXTERNAL_STORAGE",
             "android.permission.INTERNET",
             // 检查更新功能的安装环节必需（2026-10-12 修复）：Android 8+ 把 APK 交给系统包安装器，
             // 调用方没声明 REQUEST_INSTALL_PACKAGES 时 startActivity 返回 true 但安装器静默终止

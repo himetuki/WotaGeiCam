@@ -417,7 +417,7 @@ object Diag {
      * 落点用**应用缓存目录**（`cacheDir/…`）而不是公共 Documents，两个理由：
      * 1. 分享这条路**不该被"公共目录能不能写"卡住**（个别 ROM/容器不给 Documents 写权限，
      *    而缓存目录永远可写）——用户点「分享」就必须弹出分享面板；
-     * 2. `@xml/file_paths` 里 `cache-path path="."` 已覆盖它，`FileProvider` 直接可授 URI。
+     * 2. `@xml/file_paths` 里的 `cache-path path="share-out"` 已覆盖它，`FileProvider` 直接可授 URI。
      * 缓存件会被系统在空间紧张时自动清掉，正合"分享完就没用了"的语义。
      */
     fun exportForShare(app: Application): ExportResult? = runCatching {
