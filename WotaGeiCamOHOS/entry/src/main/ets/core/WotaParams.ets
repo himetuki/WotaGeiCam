@@ -8,11 +8,11 @@
  * - 上游经 ParamsPersist 持久化的键与值域不变（持久化层在 ui/ 侧，另行移植）。
  */
 import {
-  AeMode, AfMode, AfModes, ArcMergeDeadband, Flash, FrameEffect, LensType,
+  AeMode, AfMode, AfModes, ArcMergeDeadband, Flash, FrameEffect,
   PeakingColor, RenderMode, Stabilize, TapPoint, WotaTiers, WbPreset, WbPresets, Size
 } from './Constants';
 import { CameraAbility, FpsPick, RangeF, shutterCeilingNs, pickFpsRange } from './CameraAbility';
-import { lensTypeName } from './LensSlot';
+import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
 import { resolveSizeFor, sizeCloseTo, VideoSizeCandidates } from './VideoSizePicker';
 

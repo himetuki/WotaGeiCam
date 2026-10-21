@@ -16,6 +16,12 @@
 // 移植编译图锚点：把 record 纯逻辑锚点模块拉进 CompileArkTS 检查（未被入口引用的 .ets 不参与编译检查，构建会假绿）。
 // 符号本身未被页面使用；录制引擎批次落地后移除（见 record/RecordAnchors.ets 头注释）。
 import { ArcKeepRule } from '../record/RecordAnchors';
+// 同上：core 直译批次七个文件的编译图锚点（见 core/CoreAnchors.ets 头注释）。
+import { WotaParams } from '../core/CoreAnchors';
+// 探测版适配层的页面真实消费者：点击即 getCameraManager → 枚举镜头 → dump（camera/KitProbe.ets）。
+// KitProbe 传递引用 KitLens/KitAbility/VideoSizeKit，探测适配层四个文件均在编译图内。
+import { probeAndDump } from '../camera/KitProbe';
+import { common } from '@kit.AbilityKit';
 
 @Entry
 @Component
@@ -33,7 +39,13 @@ struct Index {
           middle: { anchor: '__container__', align: HorizontalAlign.Center }
         })
         .onClick(() => {
-          this.message = 'Welcome';
+          // 探测版：无 CAMERA 权限时 probeAndDump 内部走 catch 兜底，页面显示错误摘要（预期行为）
+          const ctx: common.Context | undefined = this.getUIContext().getHostContext() as common.Context | undefined;
+          if (ctx === undefined) {
+            this.message = 'no host context';
+            return;
+          }
+          this.message = probeAndDump(ctx);
         })
     }
     .height('100%')

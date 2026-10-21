@@ -61,6 +61,7 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] DevEco 工程骨架生成（deveco CLI，API 20–24，assembleHap 构建验证通过）
 - [x] core 纯逻辑包移植（2026-10-21：Constants/WotaParams/CurveModel/LensSlot/CameraAbility/VideoSizePicker/UIOrientation + diag 最小版，编译通过；相机适配层待后续）
 - [x] record 纯逻辑锚点（ArcKeepRule/ArcDropLog/BitratePolicy/AutoStopRules/FrameLedger/SeriesIds/PendingName）（2026-10-20：七件直译 + camera/DeviceStatus 支撑枚举，编译通过；RecordHealth 及引擎类待后续）
+- [x] 相机能力探测适配层（探测版，2026-10-21）：camera/KitAbility+KitLens+VideoSizeKit+KitProbe（对齐上游 38d712a；会话期能力字段与 XComponent 预览留待预览批，CAMERA 权限申请流随预览批）
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
 - [ ] 播放器 / 媒体库 / 剪辑导出

@@ -354,8 +354,9 @@ export function buildVideoSizeTable(
   if (usable.length === 0) {
     usable = sorted.filter((o: VideoSizeOption): boolean => o.supported);
   }
-  const maxSize: Size | undefined = maxPixelsSize(usable);
-  const minSize: Size | undefined = minPixelsSize(usable);
+  const usableSizes: Array<Size> = usable.map((o: VideoSizeOption): Size => o.size);
+  const maxSize: Size | undefined = maxPixelsSize(usableSizes);
+  const minSize: Size | undefined = minPixelsSize(usableSizes);
   const supportedAspects: Array<string> =
     sorted.filter((o: VideoSizeOption): boolean => o.supported)
       .map((o: VideoSizeOption): string => o.aspect)
