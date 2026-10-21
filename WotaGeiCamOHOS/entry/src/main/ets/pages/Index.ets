@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+// 移植编译图锚点：把 record 纯逻辑锚点模块拉进 CompileArkTS 检查（未被入口引用的 .ets 不参与编译检查，构建会假绿）。
+// 符号本身未被页面使用；录制引擎批次落地后移除（见 record/RecordAnchors.ets 头注释）。
+import { ArcKeepRule } from '../record/RecordAnchors';
+
 @Entry
 @Component
 struct Index {

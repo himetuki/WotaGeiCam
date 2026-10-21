@@ -473,8 +473,8 @@ export class CamPills {
   }
 }
 
-/** Locale.US 等价的定点格式化（值域非负，手写实现保证逐字符一致） */
-function fixed1(v: number): string {
+/** Locale.US 等价的定点格式化（值域非负，手写实现保证逐字符一致）；导出供 record/BitratePolicy 复用 */
+export function fixed1(v: number): string {
   const t: number = Math.round(v * 10);
   return `${Math.floor(t / 10)}.${Math.abs(t % 10)}`;
 }
