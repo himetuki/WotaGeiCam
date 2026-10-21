@@ -28,7 +28,7 @@ static void OnSurfaceCreatedCB(OH_NativeXComponent* component, void* window)
     uint64_t height = 0;
     OH_NativeXComponent_GetXComponentSize(component, window, &width, &height);
     bool ok = WotaGlInit(window, width, height);
-    // 覆盖「Init 只在库加载时跑一次、页面重进是新 XComponent 实例」的边界
+    // 防御层：按实例指针差异补注册（契约见 EnsureFrameCallback 注释，不依赖 Init 一定重跑）
     EnsureFrameCallback(component);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "surface created %{public}llux%{public}llu gl=%{public}d",
@@ -69,8 +69,10 @@ static void OnFrameCB(OH_NativeXComponent* component, uint64_t timestamp, uint64
 }
 
 /**
- * 保证「当前 XComponent 实例」持有 OnFrame 注册：
- * Init 只在库加载时跑一次；页面重进是新实例（component 指针不同），Created 时按指针差异补注册。
+ * 保证「当前 XComponent 实例」持有 OnFrame 注册。
+ * 契约（单一来源）：XComponent 每次创建（首进/重进）都走加载路径并以带 OH_NATIVE_XCOMPONENT_OBJ
+ * 的 exports 调 Init 完成 surface/OnFrame 注册；本函数在 Created 里按指针差异补注册是**防御层**，
+ * 不依赖 Init 一定重跑（两种时序下都不会漏注册/重复注册）。
  */
 static void EnsureFrameCallback(OH_NativeXComponent* component)
 {
@@ -107,14 +109,111 @@ static napi_value GetNativeImageError(napi_env env, napi_callback_info info)
     return result;
 }
 
+// ---------------------------------------------------------------- GL-2 参数入口（只写状态，渲染线程内生效）
+
+static napi_value SetDisplayGeometry(napi_env env, napi_callback_info info)
+{
+    size_t argc = 3;
+    napi_value argv[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t sensorDeg = 0;
+    int32_t displayDeg = 0;
+    bool mirrored = false;
+    if (argc >= 3) {
+        napi_get_value_int32(env, argv[0], &sensorDeg);
+        napi_get_value_int32(env, argv[1], &displayDeg);
+        napi_get_value_bool(env, argv[2], &mirrored);
+    }
+    WotaGlSetDisplayGeometry(sensorDeg, displayDeg, mirrored);
+    return nullptr;
+}
+
+static napi_value SetEffect(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t effect = 0;
+    if (argc >= 1) {
+        napi_get_value_int32(env, argv[0], &effect);
+    }
+    WotaGlSetEffect(effect);
+    return nullptr;
+}
+
+static napi_value SetCurveEnabled(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool on = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, argv[0], &on);
+    }
+    WotaGlSetCurveEnabled(on);
+    return nullptr;
+}
+
+static napi_value SetZebraParams(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    double threshold = 0.6;
+    int32_t density = 1;
+    if (argc >= 2) {
+        napi_get_value_double(env, argv[0], &threshold);
+        napi_get_value_int32(env, argv[1], &density);
+    }
+    WotaGlSetZebraParams(static_cast<float>(threshold), density);
+    return nullptr;
+}
+
+static napi_value SetPeakingParams(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    double strength = 0.6;
+    int32_t colorIndex = 4;
+    if (argc >= 2) {
+        napi_get_value_double(env, argv[0], &strength);
+        napi_get_value_int32(env, argv[1], &colorIndex);
+    }
+    WotaGlSetPeakingParams(static_cast<float>(strength), colorIndex);
+    return nullptr;
+}
+
+/** 曲线 LUT：ArrayBuffer（768B = 256×1 交错 RGB）→ 原生静态缓冲，渲染线程内上传纹理 */
+static napi_value UploadCurveLut(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool accepted = false;
+    if (argc >= 1) {
+        void* data = nullptr;
+        size_t length = 0;
+        if (napi_get_arraybuffer_info(env, argv[0], &data, &length) == napi_ok) {
+            accepted = WotaGlUploadCurveLut(data, length);
+        }
+    }
+    napi_value result = nullptr;
+    napi_get_boolean(env, accepted, &result);
+    return result;
+}
+
 /*
  * 模块初始化契约（P2 顺序风险修复）：
  * - XComponent 带 libraryname 创建时会加载本库，并以**带 OH_NATIVE_XCOMPONENT_OBJ 的 exports**
  *   调用 Init —— 这条路径完成 surface 回调 + OnFrame 注册（首进/重进页皆由 XComponent 触发加载）；
  * - ArkTS 侧**不得在页面顶层静态 import 本模块**：那会让本模块先以"无 XComponent 对象"的 exports
  *   完成初始化并进模块缓存，XComponent 再创建时不再重跑 Init，surface 回调就永远不注册；
- * - GlPreview 在 XComponent onLoad 之后才 dynamic import（届时 XComponent 的加载路径已完成注册），
- *   再轮询 getInputSurfaceId；两条路径在代码与日志上均可论证。
+ * - GlPreview 在 XComponent onLoad 之后才 dynamic import 桥模块（camera/GlLibBridge，内含 .so 静态导入），
+ *   届时 XComponent 的加载路径已完成注册，再轮询 getInputSurfaceId；两条路径在代码与日志上均可论证。
+ *
+ * 线程契约（登记，P3）：下面的 setter 与 OnFrame 回调在 OHOS XComponent 下同为 UI 线程回调，
+ * setter 只写请求态、渲染在下一帧消费，无并发；独立渲染线程（GL-3）需先做原子/双缓冲交接。
  */
 static napi_value Init(napi_env env, napi_value exports)
 {
@@ -124,6 +223,12 @@ static napi_value Init(napi_env env, napi_value exports)
     napi_property_descriptor desc[] = {
         {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDisplayGeometry", nullptr, SetDisplayGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setEffect", nullptr, SetEffect, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setCurveEnabled", nullptr, SetCurveEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setZebraParams", nullptr, SetZebraParams, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setPeakingParams", nullptr, SetPeakingParams, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"uploadCurveLut", nullptr, UploadCurveLut, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

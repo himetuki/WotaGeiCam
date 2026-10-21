@@ -5,3 +5,9 @@
  */
 export const getInputSurfaceId: () => string;
 export const getNativeImageError: () => string;
+export const setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
+export const setEffect: (effect: number) => void;
+export const setCurveEnabled: (on: boolean) => void;
+export const setZebraParams: (threshold: number, density: number) => void;
+export const setPeakingParams: (strength: number, colorIndex: number) => void;
+export const uploadCurveLut: (data: ArrayBuffer) => boolean;

@@ -13,8 +13,20 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { Size, WotaTag } from '../core/Constants';
+import { LensType } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
+
+/** 当前镜头方向信息（GL 页 setDisplayGeometry 的输入：前置镜像 + 传感器角度） */
+export class GlLensInfo {
+  front: boolean;
+  sensorDeg: number;
+
+  constructor(front: boolean, sensorDeg: number) {
+    this.front = front;
+    this.sensorDeg = sensorDeg;
+  }
+}
 
 /** 预览档优先 1920×1080（与 Index 预览口径一致），未命中退首档 */
 function previewProfileFor(profiles: Array<camera.Profile>): camera.Profile | undefined {
@@ -31,6 +43,13 @@ export class GlCameraEngine {
   private session: camera.PhotoSession | undefined = undefined;
   private preview: camera.PreviewOutput | undefined = undefined;
   private input: camera.CameraInput | undefined = undefined;
+  /** 起镜成功时落值的镜头方向信息（供页面 setDisplayGeometry；stop 清空） */
+  private lensInfo: GlLensInfo | undefined = undefined;
+
+  /** 当前镜头方向信息（未起镜返回 undefined） */
+  lastLensInfo(): GlLensInfo | undefined {
+    return this.lensInfo;
+  }
 
   /** 把相机帧接到 native 输出面；返回人读摘要/错误串（页面直接显示） */
   async start(ctx: common.Context, nativeSurfaceId: string): Promise<string> {
@@ -70,6 +89,7 @@ export class GlCameraEngine {
       session.addOutput(preview);
       await session.commitConfig();
       await session.start();
+      this.lensInfo = new GlLensInfo(slot.type === LensType.FRONT, slot.ability.sensorOrientation);
       Diag.i(WotaTag.ABILITY,
         `gl camera started lens=${slot.key} profile=${profile.size.width}x${profile.size.height}`);
       return `gl camera started\nlens=${slot.key}\nprofile=${profile.size.width}x${profile.size.height}`;
@@ -113,5 +133,6 @@ export class GlCameraEngine {
     this.session = undefined;
     this.preview = undefined;
     this.input = undefined;
+    this.lensInfo = undefined;
   }
 }
