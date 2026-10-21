@@ -17,6 +17,7 @@ import { LensType } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { FrameLedger } from '../record/FrameLedger';
+import { DeviceStatus } from './DeviceStatus';
 
 /** 当前镜头方向信息（GL 页 setDisplayGeometry 的输入：前置镜像 + 传感器角度） */
 export class GlLensInfo {
@@ -46,10 +47,22 @@ export class GlCameraEngine {
   private input: camera.CameraInput | undefined = undefined;
   /** 起镜成功时落值的镜头方向信息（供页面 setDisplayGeometry；stop 清空） */
   private lensInfo: GlLensInfo | undefined = undefined;
+  /** 设备态：AutoStop 的相机丢失检测按非 CLOSE → CLOSE 转移判定 */
+  private status: DeviceStatus = DeviceStatus.CLOSE;
+  private lostListener: (() => void) | undefined = undefined;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
     return this.lensInfo;
+  }
+
+  deviceStatus(): DeviceStatus {
+    return this.status;
+  }
+
+  /** 相机丢失（未录制时页面仅提示；录制中由 AutoStopMonitor 消费） */
+  setOnCameraLost(listener: (() => void) | undefined): void {
+    this.lostListener = listener;
   }
 
   /** 把相机帧接到 native 输出面；返回人读摘要/错误串（页面直接显示） */
@@ -81,7 +94,12 @@ export class GlCameraEngine {
       const session: camera.PhotoSession = mgr.createSession<camera.PhotoSession>(camera.SceneMode.NORMAL_PHOTO);
       this.session = session;
       session.on('error', (err: BusinessError): void => {
+        this.status = DeviceStatus.CLOSE;
+        this.lensInfo = undefined; // 相机已丢失：起录门控（lastLensInfo/deviceStatus）必须失效
         Diag.e(WotaTag.ABILITY, `gl camera session error: ${err.code} ${err.message}`);
+        if (this.lostListener !== undefined) {
+          this.lostListener();
+        }
       });
       session.beginConfig();
       session.addInput(input);
@@ -90,6 +108,7 @@ export class GlCameraEngine {
       session.addOutput(preview);
       await session.commitConfig();
       await session.start();
+      this.status = DeviceStatus.OPEN_SUCCEED;
       // 帧账相机到达格：commit/start 成功后才注册（此前 PreviewOutput 可能还没流）。
       // 线程声明（登记）：CameraKit 的 AsyncCallback 在本注册线程的事件循环派发；本引擎
       // 只从 ArkTS UI 主线程 start/stop，故 FrameLedger.cameraStarted 保持单线程累加语义。
@@ -154,5 +173,6 @@ export class GlCameraEngine {
     this.preview = undefined;
     this.input = undefined;
     this.lensInfo = undefined;
+    this.status = DeviceStatus.CLOSE;
   }
 }

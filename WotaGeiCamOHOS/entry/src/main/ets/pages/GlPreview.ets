@@ -16,11 +16,14 @@
 import { common } from '@kit.AbilityKit';
 import { display } from '@kit.ArkUI';
 import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
+import { DeviceStatus } from '../camera/DeviceStatus';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { ArcMergeDeadband, FrameEffect, PeakingColor } from '../core/Constants';
 import { BitratePolicy } from '../record/BitratePolicy';
+import { AutoStopMonitor } from '../record/AutoStopMonitor';
+import { AutoStopRules } from '../record/AutoStopRules';
 
 /** libentry.so 的动态加载桥视图（camera/GlLibBridge 的导出签名） */
 interface GlLibApi extends GlRecordLib {
@@ -42,6 +45,21 @@ const GPU_RECORD_WIDTH: number = 1920;
 const GPU_RECORD_HEIGHT: number = 1080;
 const GPU_RECORD_FPS: number = 30;
 
+function autoReasonText(reason: string, saved: boolean): string {
+  const suffix: string = saved ? '成片已保存' : '自动停录，但收尾/落盘可能失败';
+  if (reason === AutoStopRules.REASON_BATTERY) {
+    return `电量过低，${suffix}`;
+  }
+  if (reason === AutoStopRules.REASON_STORAGE) {
+    return `存储不足，${suffix}`;
+  }
+  if (reason === AutoStopRules.REASON_CAMERA_LOST) {
+    return saved ? '相机被收回，成片已保存（需重新进入本页恢复相机）'
+      : '相机被收回，自动停录，但收尾/落盘可能失败（需重新进入本页恢复相机）';
+  }
+  return reason === '' ? '' : (saved ? '自动停录，成片已保存' : '自动停录，但收尾/落盘可能失败');
+}
+
 @Entry
 @Component
 struct GlPreview {
@@ -54,11 +72,22 @@ struct GlPreview {
   @State glFatal: string = '';
   /** 光弧转换档：0=关 / 1=补弧24（MEND）/ 2=抽帧24（DROP） */
   @State arcMode: number = 0;
+  /** 手动停录宽限收尾中（按钮防重入） */
+  @State stopPending: boolean = false;
   private engine: GlCameraEngine = new GlCameraEngine();
   private recorder: GlRecorder = new GlRecorder();
   private pollTimer: number = -1;
   /** 录制期监视定时器：native 端写失败自中止（isGpuRecording=false）时页面据此收尾并显示原因 */
   private recordTimer: number = -1;
+  private autoStopMonitor: AutoStopMonitor | undefined = undefined;
+  private recordStartedAtMs: number = 0;
+  private stopGraceTimer: number = -1;
+  /** 首个停录原因（自动/宽限/native 并发时合并进最终文案） */
+  private stopReason: string = '';
+  /** 最近一次收尾摘要（防止迟到回调重复 stop/覆盖文案） */
+  private lastStopSummary: string = '';
+  private lastStopAtMs: number = 0;
+  private lastStopHadReason: boolean = false;
   private glLib: GlLibApi | undefined = undefined;
   /** 页面销毁后取消所有异步链（轮询/权限/起镜 then 回调不得越过返回继续跑） */
   private disposed: boolean = false;
@@ -67,6 +96,22 @@ struct GlPreview {
 
   aboutToAppear(): void {
     this.disposed = false;
+    // 相机丢失第二道兜底：录制中直接走自动停录；非录制态只提示
+    this.engine.setOnCameraLost((): void => {
+      if (this.disposed) {
+        return;
+      }
+      if (this.recording || this.stopPending) {
+        // 统一停止请求：起录 <500ms 也要走 STOP_GRACE_MS 宽限，reason 作为延迟收尾原因
+        this.requestStop(AutoStopRules.REASON_CAMERA_LOST);
+        return;
+      }
+      if (this.message.indexOf('相机被收回') >= 0 || this.message.indexOf('CAMERA_LOST') >= 0) {
+        return; // 摘要已含相机丢失原因，不重复追加
+      }
+      this.message = this.message.indexOf('GPU record:') >= 0
+        ? `${this.message}（相机已断开）` : '相机已断开';
+    });
     try {
       // display.rotation 变化（转屏）→ 立即重算几何；off 不传 callback 表示移除本页全部监听
       display.on('change', (_displayId: number): void => {
@@ -80,8 +125,13 @@ struct GlPreview {
   aboutToDisappear(): void {
     this.disposed = true;
     // 顺序（契约）：先停录（GL 编码面仍可用、fd 归本类）→ 关相机会话 → 停轮询
+    if (this.stopGraceTimer >= 0) {
+      clearTimeout(this.stopGraceTimer);
+      this.stopGraceTimer = -1;
+    }
+    this.stopAutoStopMonitor();
     if (this.recorder.isRecording()) {
-      this.finishGpuRecord();
+      this.finishGpuRecord(); // 页面销毁不等宽限
     }
     this.stopRecordMonitor();
     this.engine.stop();
@@ -335,6 +385,9 @@ struct GlPreview {
    * 尺寸/码率固定档，失败显示 native 机器码（页面不做重试编排）。
    */
   private toggleGpuRecord(): void {
+    if (this.stopPending) {
+      return; // 宽限收尾中忽略再次点击
+    }
     const lib: GlLibApi | undefined = this.glLib;
     if (this.glFatal !== '') {
       this.message = this.glFatal;
@@ -345,11 +398,17 @@ struct GlPreview {
       return;
     }
     if (this.recorder.isRecording()) {
-      this.finishGpuRecord();
+      this.requestManualStop();
       return;
     }
-    if (this.engine.lastLensInfo() === undefined) {
-      this.message = 'GPU record: camera not ready (no native surface)';
+    if (this.lastStopAtMs > 0 && Date.now() - this.lastStopAtMs < 400) {
+      // 停录后到达的迟到点击：识别为已停录，不误起新录/不覆盖摘要
+      this.message = '已停录（如需再录请稍后点击）';
+      return;
+    }
+    if (this.engine.lastLensInfo() === undefined ||
+      this.engine.deviceStatus() !== DeviceStatus.OPEN_SUCCEED) {
+      this.message = '相机未就绪/已断开：请返回后重新进入本页恢复相机';
       return;
     }
     // 起录前刷新显示几何：muxer 旋转 hint 读 native 的 sensor/display，快速转屏后不得用旧值/0
@@ -369,18 +428,107 @@ struct GlPreview {
       return;
     }
     this.recording = true;
+    this.stopPending = false;
+    this.lastStopSummary = '';
+    this.lastStopHadReason = false;
+    this.recordStartedAtMs = Date.now();
     const arcName: string = this.arcMode === 0 ? 'off' : (this.arcMode === 1 ? 'mend' : 'drop');
     this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${recordFps}` +
       ` bitrate=${bitrate} arc=${arcName}`;
     this.startRecordMonitor();
+    this.startAutoStopMonitor(ctx);
   }
 
-  /** 停录：native 摘要 + 落盘大小/时长（失败/中止原因含在摘要里） */
-  private finishGpuRecord(): string {
+  private startAutoStopMonitor(ctx: common.Context): void {
+    this.stopAutoStopMonitor();
+    this.autoStopMonitor = new AutoStopMonitor(ctx,
+      (): boolean => this.recording && !this.stopPending,
+      () => this.engine.deviceStatus(),
+      (reason: string): void => {
+        this.onAutoStop(reason);
+      });
+    this.autoStopMonitor.start();
+  }
+
+  private stopAutoStopMonitor(): void {
+    if (this.autoStopMonitor !== undefined) {
+      this.autoStopMonitor.stop();
+      this.autoStopMonitor = undefined;
+    }
+  }
+
+  private onAutoStop(reason: string): void {
+    if (this.disposed || !this.recording) {
+      return;
+    }
+    this.requestStop(reason);
+  }
+
+  /** 统一停止请求：带原因、尊重 STOP_GRACE_MS，首个原因保留 */
+  private requestStop(reason: string = ''): void {
+    if (this.stopPending) {
+      if (reason !== '') {
+        this.stopReason = this.stopReason === '' ? reason : this.stopReason;
+      }
+      return;
+    }
+    if (!this.recording) {
+      if (reason === '') {
+        this.message = '已停录';
+      } else if (reason === AutoStopRules.REASON_CAMERA_LOST) {
+        this.stopReason = this.stopReason === '' ? reason : this.stopReason;
+      }
+      return;
+    }
+    if (reason !== '') {
+      this.stopReason = this.stopReason === '' ? reason : this.stopReason;
+    }
+    const delay: number = AutoStopRules.stopGraceDelayMs(Date.now() - this.recordStartedAtMs);
+    if (delay > 0) {
+      this.stopPending = true;
+      this.stopAutoStopMonitor();
+      this.message = 'GPU record: 收尾中…';
+      this.stopGraceTimer = setTimeout((): void => {
+        this.stopGraceTimer = -1;
+        this.finishGpuRecord(); // stopReason 已记录（含宽限期间新到的 lost）
+      }, delay);
+      return;
+    }
+    this.finishGpuRecord(reason);
+  }
+
+  /** 手动停录入口（按钮）：无原因，统一走宽限 */
+  private requestManualStop(): void {
+    this.requestStop();
+  }
+
+
+  /** 停录：native 摘要 + 落盘大小/时长；autoReason 非空时附“已保存”文案 */
+  private finishGpuRecord(autoReason: string = ''): string {
+    if (!this.recording && this.lastStopSummary !== '') {
+      return this.lastStopSummary; // 迟到回调不得重复 stop/覆盖摘要
+    }
+    if (this.stopGraceTimer >= 0) {
+      clearTimeout(this.stopGraceTimer);
+      this.stopGraceTimer = -1;
+    }
+    this.stopAutoStopMonitor();
     this.stopRecordMonitor();
     const summary: string = this.recorder.stop();
     this.recording = false;
-    this.message = `GPU record: ${summary}`;
+    this.stopPending = false;
+    this.recordStartedAtMs = 0;
+    if (autoReason !== '') {
+      this.stopReason = this.stopReason === '' ? autoReason : this.stopReason;
+    }
+    const reason: string = this.stopReason;
+    this.stopReason = '';
+    const saved: boolean = summary.indexOf('status=ok') >= 0;
+    const reasonText: string = autoReasonText(reason, saved);
+    this.message = `GPU record: ${summary}${reasonText === '' ? '' : `（${reasonText}）`}`;
+    this.lastStopSummary = summary;
+    this.lastStopHadReason = reason !== '';
+    this.lastStopAtMs = Date.now();
     return summary;
   }
 
@@ -474,9 +622,9 @@ struct GlPreview {
             })
         }
         Row({ space: 8 }) {
-          Button(this.recording ? '停录' : '录 GPU')
+          Button(this.stopPending ? '收尾中…' : (this.recording ? '停录' : '录 GPU'))
             .fontSize(12)
-            .enabled(this.glFatal === '')
+            .enabled(!this.stopPending && this.glFatal === '')
             .onClick(() => {
               this.toggleGpuRecord();
             })

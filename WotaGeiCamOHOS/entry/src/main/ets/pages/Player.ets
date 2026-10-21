@@ -31,6 +31,8 @@ struct Player {
   @State fatalError: string = '';
   /** 瞬时提示（A/B 校验、surface 等），可自愈/可点掉 */
   @State hint: string = '';
+  /** findById 期间的探测满载提示（独立于 attach 提示，attach 成功不覆盖） */
+  @State metaNotice: string = '';
   @State positionMs: number = 0;
   @State durationMs: number = 0;
   @State sliderValue: number = 0;
@@ -61,7 +63,7 @@ struct Player {
   private restoreAb: AbRange | undefined = undefined;
   private restoreSpeed: number = PlayerSpeedTiers.DEFAULT;
   private restorePlaying: boolean = false;
-  private queuedStepDir: number = 0;
+  private stepQueue: Array<boolean> = [];
   private pageTimer: number = -1;
   private tapTimer: number = -1;
   private tapArbiter: TapArbiter = new TapArbiter(TAP_WINDOW_MS);
@@ -89,6 +91,7 @@ struct Player {
     }
     const params: PlayerParams = raw as PlayerParams;
     this.repo = new MediaRepo(ctx);
+    MediaRepo.resetProbeCapHit();
     this.repo.findById(params.id, params.path ?? '').then((clip: VideoClip | undefined): void => {
       if (this.disposed) {
         return;
@@ -100,6 +103,9 @@ struct Player {
       }
       this.videoClip = clip;
       this.clipName = clip.name;
+      if (MediaRepo.probeCapHit()) {
+        this.metaNotice = '部分视频元数据暂不可用（探测繁忙），可返回后刷新';
+      }
       this.durationMs = clip.durationMs;
       let fpsHint: number = 30;
       const drops: ArcDropLog | null = ArcDropLog.readFrom(clip.path);
@@ -133,6 +139,7 @@ struct Player {
     // 拖动中隐藏可能收不到 End：强制清拖动态，回页后位置与 AB 回绕不被锁死
     this.sliderDragging = false;
     this.engine.setSeeking(false);
+    this.stepQueue = [];
     // surface 重建待恢复的播放意图在隐藏期间必须作废（隐藏页不得后台起播）
     this.restorePlaying = false;
     if (this.engine.playing) {
@@ -145,6 +152,7 @@ struct Player {
     this.pageVisible = false;
     this.stopPageTimer();
     this.cancelTapTimer();
+    this.stepQueue = [];
     this.engine.release();
   }
 
@@ -216,6 +224,29 @@ struct Player {
       this.loading = false;
       this.fatalError = `播放器启动失败: ${e}`;
     });
+  }
+
+  private canRetryAttach(): boolean {
+    return this.fatalError.indexOf('attach-failed') === 0 ||
+      this.fatalError.indexOf('播放器启动失败') === 0;
+  }
+
+  private retryAttach(): void {
+    if (this.disposed || this.loading) {
+      return;
+    }
+    this.engine.release();
+    this.engine = new PlayerEngine();
+    this.attachStarted = false;
+    this.stepQueue = [];
+    this.fatalError = '';
+    this.loading = true;
+    if (this.surfaceId === '') {
+      this.loading = false;
+      this.hint = 'surface 未就绪';
+      return;
+    }
+    this.tryAttach();
   }
 
   private startPageTimer(): void {
@@ -298,6 +329,7 @@ struct Player {
       this.engine.release();
       this.engine = new PlayerEngine();
       this.attachStarted = false;
+      this.stepQueue = [];
       this.loading = true;
       this.sliderDragging = false;
       this.engine.setSeeking(false);
@@ -341,8 +373,10 @@ struct Player {
 
   private async stepFrame(fwd: boolean): Promise<void> {
     if (this.stepping) {
-      // 连点排队：记录最后一次方向，当前 step 完成后继续消费（不丢点击）
-      this.queuedStepDir = fwd ? 1 : -1;
+      // 连点排队（上限 8）：FIFO 消费，当前 step 完成后继续推进
+      if (this.stepQueue.length < 8) {
+        this.stepQueue.push(fwd);
+      }
       return;
     }
     this.stepping = true;
@@ -355,13 +389,14 @@ struct Player {
       this.positionMs = Math.round(target);
       this.sliderValue = this.positionMs;
       this.playing = false;
+    } catch (e) {
+      this.stepQueue = []; // 异常后不再消费积压方向
     } finally {
       this.stepping = false;
     }
-    const queued: number = this.queuedStepDir;
-    this.queuedStepDir = 0;
-    if (queued !== 0 && !this.disposed && this.engine === engine) {
-      this.stepFrame(queued > 0);
+    const queued: boolean | undefined = this.stepQueue.shift();
+    if (queued !== undefined && !this.disposed && this.engine === engine) {
+      this.stepFrame(queued);
     }
   }
 
@@ -573,6 +608,13 @@ struct Player {
       if (this.controlsVisible) {
         Column() {
           this.topBar()
+          if (this.metaNotice !== '') {
+            Text(this.metaNotice)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .maxLines(2)
+              .padding({ left: 10, right: 10, top: 2 })
+          }
           Blank()
           Button(this.playing ? '⏸' : '▶')
             .fontSize(28)
@@ -624,13 +666,22 @@ struct Player {
       }
 
       if (this.fatalError !== '') {
-        Text(this.fatalError)
-          .fontSize(12)
-          .fontColor('#FF8A80')
-          .maxLines(4)
-          .padding(16)
-          .backgroundColor('#66000000')
-          .borderRadius(8)
+        Column({ space: 8 }) {
+          Text(this.fatalError)
+            .fontSize(12)
+            .fontColor('#FF8A80')
+            .maxLines(4)
+          if (this.canRetryAttach()) {
+            Button('重试播放')
+              .fontSize(12)
+              .onClick((): void => {
+                this.retryAttach();
+              })
+          }
+        }
+        .padding(16)
+        .backgroundColor('#66000000')
+        .borderRadius(8)
       }
     }
     .width('100%')

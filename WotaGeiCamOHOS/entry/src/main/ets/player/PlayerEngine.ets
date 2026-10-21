@@ -109,10 +109,15 @@ export class PlayerEngine {
       const wasPlaying: boolean = this.playing;
       this.state = state;
       this.playing = state === 'playing';
+      const seekStale: boolean = this.seekInFlight && (Date.now() - this.seekInFlightAt > 800);
       if (state === 'completed' && wasPlaying && !this.suspended && !this.seeking &&
-        this.pendingStepMs === undefined && !this.abWrapInFlight && !this.seekInFlight &&
+        this.pendingStepMs === undefined && !this.abWrapInFlight &&
+        (!this.seekInFlight || seekStale) &&
         this.ab.valid && this.ab.loopEnabled) {
         // 仅自然播放到片尾时回 A；暂停/逐帧/拖动/隐藏/已在回绕中一律不自动拉起
+        if (seekStale) {
+          this.seekInFlight = false; // 事件丢失兜底：超过 800ms 视为旧 seek 已失效
+        }
         this.wrapToA();
         this.playing = true;
         player.play().catch((e: Object): void => {

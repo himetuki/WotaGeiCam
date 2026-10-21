@@ -140,6 +140,27 @@ export class WotaDb {
    * 供 MediaRepo 重试：先自增代际作废旧在途 open，等待旧的 opening 落定（其内部会 close 自己），
    * 再关闭已打开实例并清空单例，让下一次 get() 重新打开/建表。
    */
+  /** 等待 Promise 最多 ms；超时只 Diag.w 并继续（代际已自增，旧 open 晚到自行 close） */
+  private static async waitOrTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<void> {
+    let timer: number = -1;
+    let timedOut: boolean = false;
+    const timeout: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      timer = setTimeout((): void => {
+        timedOut = true;
+        resolve();
+      }, ms);
+    });
+    await Promise.race([p.then((): void => {
+    }, (): void => {
+    }), timeout]);
+    if (timer >= 0) {
+      clearTimeout(timer);
+    }
+    if (timedOut) {
+      Diag.w(TAG, `waitOrTimeout ${label} ${ms}ms exceeded (generation advanced)`);
+    }
+  }
+
   static async resetForRetry(): Promise<void> {
     WotaDb.generation++;
     const inst: WotaDb | undefined = WotaDb.instance;
@@ -147,15 +168,11 @@ export class WotaDb {
     WotaDb.instance = undefined;
     WotaDb.opening = undefined;
     if (pending !== undefined) {
-      try {
-        await pending;
-      } catch (e) {
-        // 旧 open 已失败/作废；其 catch 已 close 自己的 store
-      }
+      await WotaDb.waitOrTimeout(pending, 2000, 'old-opening');
     }
     if (inst !== undefined) {
       try {
-        await inst.store.close();
+        await WotaDb.waitOrTimeout(inst.store.close(), 2000, 'close');
       } catch (e) {
       }
     }
@@ -291,10 +308,23 @@ export class WotaDb {
       return;
     }
     try {
-      await this.store.executeSql(
-        `DELETE FROM media_tag WHERE id IN (${placeholders(ids.length)})`, ids);
+      for (let i = 0; i < ids.length; i += 500) {
+        const chunk: Array<number> = ids.slice(i, i + 500);
+        await this.store.executeSql(
+          `DELETE FROM media_tag WHERE id IN (${placeholders(chunk.length)})`, chunk);
+      }
     } catch (e) {
       Diag.e(TAG, `deleteTagsByIds failed n=${ids.length}: ${e}`);
+      throw e as Error;
+    }
+  }
+
+  /** 按成片相对路径清标签（删除单条成片；videos/xxx.mp4） */
+  async clearTagsForPath(path: string): Promise<void> {
+    try {
+      await this.store.executeSql('DELETE FROM media_tag WHERE path = ?', [path]);
+    } catch (e) {
+      Diag.e(TAG, `clearTagsForPath failed ${path}: ${e}`);
       throw e as Error;
     }
   }
@@ -329,8 +359,11 @@ export class WotaDb {
       return;
     }
     try {
-      await this.store.executeSql(
-        `DELETE FROM media_tag WHERE mediaId IN (${placeholders(mediaIds.length)})`, mediaIds);
+      for (let i = 0; i < mediaIds.length; i += 500) {
+        const chunk: Array<number> = mediaIds.slice(i, i + 500);
+        await this.store.executeSql(
+          `DELETE FROM media_tag WHERE mediaId IN (${placeholders(chunk.length)})`, chunk);
+      }
     } catch (e) {
       Diag.e(TAG, `clearTagsFor failed n=${mediaIds.length}: ${e}`);
       throw e as Error;
@@ -366,8 +399,11 @@ export class WotaDb {
       return;
     }
     try {
-      await this.store.executeSql(
-        `DELETE FROM trash_item WHERE uri IN (${placeholders(uris.length)})`, uris);
+      for (let i = 0; i < uris.length; i += 500) {
+        const chunk: Array<string> = uris.slice(i, i + 500);
+        await this.store.executeSql(
+          `DELETE FROM trash_item WHERE uri IN (${placeholders(chunk.length)})`, chunk);
+      }
     } catch (e) {
       Diag.e(TAG, `removeTrashAll failed n=${uris.length}: ${e}`);
       throw e as Error;
@@ -510,10 +546,23 @@ export class WotaDb {
       return;
     }
     try {
-      await this.store.executeSql(
-        `DELETE FROM series_part WHERE mediaId IN (${placeholders(mediaIds.length)})`, mediaIds);
+      for (let i = 0; i < mediaIds.length; i += 500) {
+        const chunk: Array<number> = mediaIds.slice(i, i + 500);
+        await this.store.executeSql(
+          `DELETE FROM series_part WHERE mediaId IN (${placeholders(chunk.length)})`, chunk);
+      }
     } catch (e) {
       Diag.e(TAG, `clearSeriesFor failed: ${e}`);
+      throw e as Error;
+    }
+  }
+
+  /** 按成片绝对 uri 清系列成员（删除单条成片） */
+  async clearSeriesForUri(uri: string): Promise<void> {
+    try {
+      await this.store.executeSql('DELETE FROM series_part WHERE uri = ?', [uri]);
+    } catch (e) {
+      Diag.e(TAG, `clearSeriesForUri failed ${uri}: ${e}`);
       throw e as Error;
     }
   }

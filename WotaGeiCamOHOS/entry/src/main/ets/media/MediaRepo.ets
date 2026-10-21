@@ -56,6 +56,8 @@ const PROBE_IN_FLIGHT: Map<string, ProbePending> = new Map<string, ProbePending>
  * 因此真正挂起的 open/fetch 最多 4 个（fd/extractor 泄漏上界，登记）；任务 settle 后归还。
  */
 let PROBE_OUTSTANDING: number = 0;
+/** 本次 refresh 是否撞到探测并发上限（页面据此提示“元数据暂不可用”） */
+let PROBE_CAP_HIT: boolean = false;
 
 /** 媒体条目（对应上游 VideoClip 的最小字段集） */
 export class VideoClip {
@@ -146,6 +148,14 @@ export class MediaRepo {
 
   constructor(ctx: common.Context) {
     this.ctx = ctx;
+  }
+
+  static resetProbeCapHit(): void {
+    PROBE_CAP_HIT = false;
+  }
+
+  static probeCapHit(): boolean {
+    return PROBE_CAP_HIT;
   }
 
   /** 最近一次 DB 是否可用（false = 仅文件列表降级模式） */
@@ -251,6 +261,7 @@ export class MediaRepo {
       }
       if (PROBE_OUTSTANDING >= PROBE_MAX_PENDING) {
         // 仍满：本次跳过并写短负缓存（避免反复撞上限空转）
+        PROBE_CAP_HIT = true;
         this.setProbeNegative(key, PROBE_GENERATION);
         Diag.w(TAG, `probe outstanding cap reached (${PROBE_OUTSTANDING}), skip ${path}`);
         return new ProbeMeta(0, 0, 0);
@@ -588,9 +599,25 @@ export class MediaRepo {
     if (full === GlRecorder.getActiveRecordingPath()) {
       return undefined;
     }
-    // pathHint 必须落在私有 videos 目录且为 .mp4（防路由伪造任意文件）
+    // pathHint 严格规范化：父目录必须等于 videosDir、文件名单一、无 ./..、且为 .mp4
     const videosDir: string = VideoStore.videosDir(this.ctx);
-    if (!full.startsWith(`${videosDir}/`) || !full.toLowerCase().endsWith(EXTENSION)) {
+    const slash: number = full.lastIndexOf('/');
+    if (slash <= 0) {
+      return undefined;
+    }
+    const parent: string = full.substring(0, slash);
+    const name: string = full.substring(slash + 1);
+    if (parent !== videosDir) {
+      return undefined;
+    }
+    if (name.length === 0 || name === '.' || name === '..' ||
+      name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+      return undefined;
+    }
+    if (full.indexOf('/../') >= 0 || full.indexOf('/./') >= 0) {
+      return undefined;
+    }
+    if (!name.toLowerCase().endsWith(EXTENSION)) {
       return undefined;
     }
     let size: number = 0;
@@ -605,8 +632,8 @@ export class MediaRepo {
     } catch (e) {
       return undefined;
     }
-    const name: string = full.substring(full.lastIndexOf('/') + 1);
-    const rel: string = `${VideoStore.VIDEO_DIR_NAME}/${name}`;
+    const fileName: string = full.substring(full.lastIndexOf('/') + 1);
+    const rel: string = `${VideoStore.VIDEO_DIR_NAME}/${fileName}`;
     const id: number = MediaIds.ofRelativePath(rel);
     const meta: ProbeMeta = await this.probeMeta(full, size, mtime);
     let tags: Set<string> = new Set<string>();
@@ -757,9 +784,9 @@ export class MediaRepo {
       return false;
     }
     try {
-      await db.clearTagsFor([clip.id]);
+      await db.clearTagsForPath(clip.relativePath);
       await db.removeTrash(clip.path);
-      await db.clearSeriesFor([clip.id]);
+      await db.clearSeriesForUri(clip.path);
       await db.pruneOrphanSeries();
       return complete;
     } catch (e) {

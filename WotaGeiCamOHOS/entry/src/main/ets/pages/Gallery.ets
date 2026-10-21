@@ -100,6 +100,7 @@ struct Gallery {
     }
     const seq: number = ++this.requestSeq;
     this.loading = true;
+    MediaRepo.resetProbeCapHit();
     try {
       const all: Array<VideoClip> = await repo.load(ClipFilter.all());
       if (this.disposed || seq !== this.requestSeq) {
@@ -124,6 +125,7 @@ struct Gallery {
       } else {
         this.message = notice;
       }
+      this.message = this.withProbeCapNotice(this.message);
     } catch (e) {
       if (!this.disposed && seq === this.requestSeq) {
         this.message = `加载失败: ${e}`;
@@ -155,6 +157,7 @@ struct Gallery {
     }
     const seq: number = ++this.requestSeq;
     this.loading = true;
+    MediaRepo.resetProbeCapHit();
     try {
       const list: Array<VideoClip> = await repo.load(this.currentTab().filter);
       if (this.disposed || seq !== this.requestSeq) {
@@ -172,6 +175,7 @@ struct Gallery {
         this.counts[2] = list.length;
       }
       this.clips = list;
+      this.message = this.withProbeCapNotice(this.message);
     } catch (e) {
       if (!this.disposed && seq === this.requestSeq) {
         // 失败回退到原页签与原列表，避免空列表/错位
@@ -215,6 +219,14 @@ struct Gallery {
         this.loading = false;
       }
     }
+  }
+
+  private withProbeCapNotice(base: string): string {
+    if (!MediaRepo.probeCapHit()) {
+      return base;
+    }
+    const capMsg: string = '部分视频元数据暂不可用（探测繁忙），可稍后刷新';
+    return base === '' ? capMsg : `${base}；${capMsg}`;
   }
 
   private tabLabel(tab: GalleryTab, index: number): string {
