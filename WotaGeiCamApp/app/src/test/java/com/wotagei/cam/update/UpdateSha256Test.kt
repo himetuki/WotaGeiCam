@@ -15,7 +15,7 @@ import java.io.File
  * 发版者把 universal 包哈希写进 GitHub Release 说明、app 只信段 1（api.github.com
  * 官方端点）读出的哈希、落盘后本地重算比对。三个环节各自可测：
  * - [ReleaseJson.parseSha256FromNotes]：说明文本 → 哈希（表驱动含边界）；
- * - [ReleaseJson.parse] 的 trustedNotes 开关：段 1 开、段 2 关（镜像 body 不可信）；
+ * - [ReleaseJson.parse] 的 extractSha256 开关：段 1 开、段 2 关（镜像 body 的哈希不可信）；
  * - [UpdateDownloader.sha256Matches]/[sha256Hex]：判据与真实摘要。
  * 接线（downloadApk 真的调校验、UI 真的传哈希）用源文结构守卫钉——防校验被静默拆掉。
  */
@@ -60,13 +60,15 @@ class UpdateSha256Test {
         val hex = ("deadbeefcafebabe0123456789abcdef").repeat(2).substring(0, 64)
         assertEquals(64, hex.length)
         val json = jsonWithBody("更新说明\\nSHA256: $hex\\n安装段")
-        // 段 1（trustedNotes=true）：body 里的哈希被提取
-        assertEquals(hex, ReleaseJson.parse(json, trustedNotes = true)?.sha256)
+        // 段 1（extractSha256=true）：body 里的哈希被提取
+        assertEquals(hex, ReleaseJson.parse(json, extractSha256 = true)?.sha256)
         // 段 2（镜像转发 body 可被代理改写）：同样的 JSON 也**不提取**——宁可不校验，不拿假哈希当真
-        assertNull(ReleaseJson.parse(json, trustedNotes = false)?.sha256)
+        assertNull(ReleaseJson.parse(json, extractSha256 = false)?.sha256)
         assertNull("默认参数 = 不提取（旧调用点行为不变）", ReleaseJson.parse(json)?.sha256)
+        // 说明原文（notes）两段都读：它只用于弹窗展示，不参与判断
+        assertEquals("更新说明\nSHA256: $hex\n安装段", ReleaseJson.parse(json, extractSha256 = false)?.notes)
         // JSON 字符串里的 \n 转义要在解转义后仍能命中
-        assertNull("body 无哈希时恒 null", ReleaseJson.parse(jsonWithBody("普通说明"), trustedNotes = true)?.sha256)
+        assertNull("body 无哈希时恒 null", ReleaseJson.parse(jsonWithBody("普通说明"), extractSha256 = true)?.sha256)
     }
 
     // ------------------------------------------------------------------ 判据与摘要

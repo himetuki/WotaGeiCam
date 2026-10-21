@@ -87,32 +87,54 @@ class UpdateLogicTest {
         return issues
     }
 
-    @Test
-    fun `下载链_直连优先后接四个镜像_顺序与变换正确`() {
-        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release.apk"
-        val expected = listOf("direct") + UpdateConfig.MIRROR_PREFIXES
-        assertEquals(
-            "下载链行为退化：${chainIssues(MirrorChain.downloadChain(), expected, raw).joinToString()}",
-            emptyList<String>(),
-            chainIssues(MirrorChain.downloadChain(), expected, raw)
-        )
-        // 直连 URL 本体不动过（无前缀）
-        assertEquals(raw, MirrorChain.downloadChain().urlFor(raw))
+    /**
+     * 下载候选的判据（真身与突变体同打一把尺）：直连必须在首位、每个镜像前缀恰好出现一次、
+     * 镜像候选 = 前缀 + 直连 URL（不做任何改写）。**不是**「结果等于构造式」那种恒等式。
+     */
+    private fun candidateIssues(candidates: List<String>, directUrl: String): List<String> {
+        val issues = ArrayList<String>()
+        if (candidates.firstOrNull() != directUrl) issues.add("直连不在首位：${candidates.firstOrNull()}")
+        if (candidates.size != 1 + UpdateConfig.MIRROR_PREFIXES.size) {
+            issues.add("候选数 ${candidates.size} != 1 直连 + ${UpdateConfig.MIRROR_PREFIXES.size} 镜像")
+        }
+        if (candidates.toSet().size != candidates.size) issues.add("候选里有重复 URL：$candidates")
+        UpdateConfig.MIRROR_PREFIXES.forEachIndexed { i, prefix ->
+            val url = candidates.getOrNull(i + 1)
+            if (url != prefix + directUrl) issues.add("镜像候选 ${i + 1} 不是「前缀 + 直连」：$url")
+        }
+        return issues
     }
 
     @Test
-    fun `探测镜像链_无直连_逐个镜像代理API`() {
+    fun `下载候选_直连在首位_后接每个镜像前缀`() {
+        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.9-r06/WotaGeiCam-v0.0.9-r06-universal-release.apk"
+        val issues = candidateIssues(UpdateDownloader.downloadCandidates(raw), raw)
+        assertEquals("下载候选行为退化：${issues.joinToString()}", emptyList<String>(), issues)
+        // 镜像表必须全部 HTTPS（明文代理等于让中间人换包）
+        assertTrue(
+            "镜像表里有非 HTTPS 前缀：${UpdateConfig.MIRROR_PREFIXES.filterNot { UpdateDownloader.isHttpsUrl(it + "x") }}",
+            UpdateConfig.MIRROR_PREFIXES.all { UpdateDownloader.isHttpsUrl(it + "x") }
+        )
+    }
+
+    @Test
+    fun `探测镜像链_无直连_只走确认能代理API的前缀`() {
         val raw = UpdateConfig.REPO_API_LATEST
         assertEquals(
-            "探测链行为退化：${chainIssues(MirrorChain.probeChain(), UpdateConfig.MIRROR_PREFIXES, raw).joinToString()}",
+            "探测链行为退化：${chainIssues(MirrorChain.probeChain(), UpdateConfig.API_MIRROR_PREFIXES, raw).joinToString()}",
             emptyList<String>(),
-            chainIssues(MirrorChain.probeChain(), UpdateConfig.MIRROR_PREFIXES, raw)
+            chainIssues(MirrorChain.probeChain(), UpdateConfig.API_MIRROR_PREFIXES, raw)
+        )
+        // API 前缀必须是镜像表的子集（不许凭空多出没经过下载实测的域名）
+        assertTrue(
+            "API 镜像链出现镜像表外的前缀：${UpdateConfig.API_MIRROR_PREFIXES - UpdateConfig.MIRROR_PREFIXES.toSet()}",
+            UpdateConfig.MIRROR_PREFIXES.containsAll(UpdateConfig.API_MIRROR_PREFIXES)
         )
     }
 
     @Test
     fun `镜像链_reset后从头再试`() {
-        val chain = MirrorChain.downloadChain()
+        val chain = MirrorChain.probeChain()
         chain.advance(); chain.advance()
         val before = chain.cursor
         chain.reset()
@@ -122,22 +144,22 @@ class UpdateLogicTest {
     /** 突变自证：把镜像链节点调换顺序，同尺必红 */
     @Test
     fun `镜像链尺子自己能红_调序突变体必报红`() {
-        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/a.apk"
-        val reversed = MirrorChain(UpdateConfig.MIRROR_PREFIXES.reversed().map { p -> MirrorNode(p) { u -> p + u } })
+        val raw = UpdateConfig.REPO_API_LATEST
+        val reversed = MirrorChain(UpdateConfig.API_MIRROR_PREFIXES.reversed().map { p -> MirrorNode(p) { u -> p + u } })
         assertTrue(
             "调换镜像顺序后尺子必须红（否则顺序判据空转）",
-            chainIssues(reversed, UpdateConfig.MIRROR_PREFIXES, raw).isNotEmpty()
+            chainIssues(reversed, UpdateConfig.API_MIRROR_PREFIXES, raw).isNotEmpty()
         )
     }
 
-    /** 突变自证：丢掉直连节点（变成"永远走镜像"），同尺必红 */
+    /** 突变自证：丢掉直连候选（变成"永远走镜像"），同尺必红 */
     @Test
-    fun `镜像链尺子自己能红_丢直连突变体必报红`() {
-        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/a.apk"
-        val noDirect = MirrorChain(UpdateConfig.MIRROR_PREFIXES.map { p -> MirrorNode(p) { u -> p + u } })
+    fun `下载候选尺子自己能红_丢直连突变体必报红`() {
+        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.9-r06/a.apk"
+        val noDirect = UpdateConfig.MIRROR_PREFIXES.map { it + raw }
         assertTrue(
-            "丢掉直连节点后尺子必须红（fallback 首选必须是直连）",
-            chainIssues(noDirect, listOf("direct") + UpdateConfig.MIRROR_PREFIXES, raw).isNotEmpty()
+            "丢掉直连候选后尺子必须红（测速前兜底首选必须是直连）",
+            candidateIssues(noDirect, raw).isNotEmpty()
         )
     }
 

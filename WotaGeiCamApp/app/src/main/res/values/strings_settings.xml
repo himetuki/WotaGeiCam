@@ -93,6 +93,8 @@
     <string name="set_update_download">下载更新</string>
     <string name="set_update_cancel">取消</string>
     <string name="set_update_downloading">正在下载更新</string>
+    <!-- 下载前的渠道测速选路（直连 + 各镜像并发采样，按实测速度挑最快） -->
+    <string name="set_update_selecting_channel">正在选择最快的下载通道…</string>
     <string name="set_update_progress">%1$d%% · 已下 %2$s / %3$s</string>
     <string name="set_update_progress_unknown">已下 %1$s</string>
     <string name="set_update_ready_to_install">下载完成，可以安装</string>

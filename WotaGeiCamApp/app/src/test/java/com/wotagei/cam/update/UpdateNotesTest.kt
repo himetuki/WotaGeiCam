@@ -11,8 +11,8 @@ import org.junit.Test
  * 更新弹窗展示 GitHub Release 说明（notes）的**纯函数单测 + 接线守卫**（2026-10-21）。
  *
  * 三条被测线：
- * - 探测层：`body` 只有段 1（api.github.com 官方端点）才读，镜像转发的说明一律不采信
- *   （与 SHA-256 同一道信任门槛——弹窗文字同样是 app 代替发版者说的话）；
+ * - 探测层：`body` 段 1/段 2 都读（2026-10-21 用户裁决：说明只用于展示，不参与安装判断），
+ *   但前缀段 3 只有 Location，说明恒 null；
  * - 展示层 [ReleaseNotes.forDisplay]：去 Markdown 标记、隐去机器用的 SHA256 行、超长按行截断；
  * - 接线：探测结果真的把 notes 带进弹窗，且弹窗真的整形后再展示。
  *
@@ -30,22 +30,23 @@ class UpdateNotesTest {
     // ------------------------------------------------------------------ 探测层：说明只在段 1
 
     @Test
-    fun `parse_段1读取说明原文_镜像段与默认调用不读`() {
+    fun `parse_说明原文两段都读_哈希仍只信段1`() {
         val json = jsonWithBody("第一行\\n第二行")
-        assertEquals("第一行\n第二行", ReleaseJson.parse(json, trustedNotes = true)?.notes)
-        assertNull(
-            "镜像转发 body 可被代理改写，说明同样不采信",
-            ReleaseJson.parse(json, trustedNotes = false)?.notes
+        assertEquals("第一行\n第二行", ReleaseJson.parse(json, extractSha256 = true)?.notes)
+        assertEquals(
+            "镜像段也读说明（2026-10-21 用户裁决：只用于展示，不参与判断）",
+            "第一行\n第二行",
+            ReleaseJson.parse(json, extractSha256 = false)?.notes
         )
-        assertNull("默认参数 = 不读 body（旧调用点行为不变）", ReleaseJson.parse(json)?.notes)
+        assertEquals("默认调用同样读说明", "第一行\n第二行", ReleaseJson.parse(json)?.notes)
         // 说明里没有正文（body 为 null）时不能凭空造出 notes
         assertNull(
-            ReleaseJson.parse("""{"tag_name": "v0.0.9-r07", "body": null}""", trustedNotes = true)?.notes
+            ReleaseJson.parse("""{"tag_name": "v0.0.9-r07", "body": null}""", extractSha256 = true)?.notes
         )
     }
 
     @Test
-    fun `编排_段1新版带说明_镜像段新版无说明`() {
+    fun `编排_段1与镜像段的新版都带说明`() {
         val json = jsonWithBody("说明正文\\n- 条目")
         val direct = probeLatestRelease(
             localVersionName = "0.0.9-r06",
@@ -60,7 +61,7 @@ class UpdateNotesTest {
             fetchJson = { url -> if (url != UpdateConfig.REPO_API_LATEST) json else null },
             fetchRedirectLocation = { null }
         ) as ProbeResult.UpdateAvailable
-        assertNull("镜像段的新版不得带说明（弹窗文字不能由中间代理决定）", viaMirror.notes)
+        assertEquals("镜像段的新版同样带说明（只展示、不参与安装判断）", "说明正文\n- 条目", viaMirror.notes)
     }
 
     @Test

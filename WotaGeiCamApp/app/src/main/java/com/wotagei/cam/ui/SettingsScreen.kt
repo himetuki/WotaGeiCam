@@ -1506,7 +1506,9 @@ private data class UpdateDownloadState(
     val done: Boolean = false,
     val failed: Boolean = false,
     val installFailed: Boolean = false,
-    val file: java.io.File? = null
+    val file: java.io.File? = null,
+    /** 正在给各渠道测速选路（还没开始真正下载，进度数字尚无意义） */
+    val measuring: Boolean = false
 )
 
 /**
@@ -1603,7 +1605,7 @@ private fun UpdateSection() {
                 // 迟到的旧代回执以本代标志判生死，跨代复位从此不可能
                 val genCancelled = AtomicBoolean(false)
                 downloadGenFlag = genCancelled
-                download = UpdateDownloadState()
+                download = UpdateDownloadState(measuring = true)
                 scope.launch(Dispatchers.IO) {
                     val outcome = UpdateDownloader.downloadApk(
                         context = context,
@@ -1617,7 +1619,13 @@ private fun UpdateSection() {
                             }
                         },
                         isCancelled = { genCancelled.get() },
-                        expectedSha256 = avail.sha256
+                        expectedSha256 = avail.sha256,
+                        // 测速选路结束（开始真正下载）：同一条按代隔离纪律
+                        onSpeedTested = {
+                            if (downloadGenFlag === genCancelled) {
+                                download = download?.copy(measuring = false)
+                            }
+                        }
                     )
                     // 修复轮 P3-1（末轮）：回执写回前判代——旧代（已被新一代顶替）一律整体丢弃，
                     // 不许无条件清 download（那会把新一代的对话框清掉、令其隐形下载且不可取消）
@@ -1752,6 +1760,7 @@ private fun UpdateDownloadDialog(
                 .padding(20.dp)
         ) {
             val title = when {
+                state.measuring -> stringResource(R.string.set_update_selecting_channel)
                 state.done -> stringResource(R.string.set_update_ready_to_install)
                 state.failed -> stringResource(R.string.set_update_download_failed)
                 state.installFailed -> stringResource(R.string.set_update_install_failed)
@@ -1764,6 +1773,18 @@ private fun UpdateDownloadDialog(
             )
             Spacer(Modifier.height(10.dp))
             when {
+                state.measuring -> {
+                    // 测速选路：各渠道并发采样（每路至多 256KiB / 共约 1~6s），还没有可报的进度
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = WotaColor.textMid,
+                        trackColor = WotaColor.surface
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    UpdateDialogActions(
+                        listOf(stringResource(R.string.set_update_cancel) to onCancel)
+                    )
+                }
                 state.done -> {
                     UpdateDialogActions(
                         listOf(stringResource(R.string.set_update_install) to onInstall)

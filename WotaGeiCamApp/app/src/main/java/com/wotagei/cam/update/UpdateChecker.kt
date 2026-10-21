@@ -30,20 +30,42 @@ object UpdateConfig {
      * 镜像前缀（前缀 + 完整原始 URL）。用户点名的 `toolwa.com/github` 被排除：它是 HTTP 明文
      * （无 TLS），中间人可替换 APK 二进制；targetSdk 34 默认禁明文流量，也不为它开 usesCleartextTraffic 例外。
      *
-     * 安全模型（2026-10-13，v0.0.8）：公共代理的运营方理论上都能替换字节，「不会被污染」不靠
-     * 信任代理，靠三层兜底——① 全表 HTTPS（防链路篡改）；② 下载后 SHA-256 端到端校验（哈希由
-     * 发版者写进 GitHub Release 说明，只有段 1 的 api.github.com 官方端点读取它，代理改不走；
-     * 见 [ReleaseJson.parseSha256FromNotes] 与 UpdateDownloader 的消费点）；③ 系统安装器的签名
-     * 强校验（与已装应用不同签名的包根本装不上）。代理被污染的最坏后果 = 更新失败，不是装上恶意软件。
+     * 安全模型（2026-10-13，v0.0.8；2026-10-21 扩表后不变）：公共代理的运营方理论上都能替换字节，
+     * 「不会被污染」不靠信任代理，靠三层兜底——① 全表 HTTPS（防链路篡改）；② 下载后 SHA-256 端到端
+     * 校验（哈希由发版者写进 GitHub Release 说明，只有段 1 的 api.github.com 官方端点读取它，代理改不走；
+     * 见 [ReleaseJson.parseSha256FromNotes] 与 UpdateDownloader 的消费点）；③ 系统安装器的签名强校验
+     * （与已装应用不同签名的包根本装不上）。代理被污染的最坏后果 = 更新失败，不是装上恶意软件。
      *
-     * 节点存活实测（2026-10-13，releases/download 路径 curl 直连）：gh-proxy.com=206、
-     * ghproxy.net=206、ghproxy.link=307→200。此前链上的 ghp.ci（连接失败）、github.akams.cn 与
-     * moeyy.cn（均 404）已死节点清退——死节点让 fallback 多等一轮超时，白拖 fallback 时间。
+     * 节点存活实测（2026-10-21，本机 curl：api 路径 + releases/download 全量 5.46MB）：
+     * - `gh-proxy.com`      API 200 ✓ / 下载 ✓（约 156KB/s）
+     * - `gh-proxy.org`      API 200 ✓ / 下载 ✓（约 1.9MB/s）
+     * - `gh.monlor.com`     API 404 ✗ / 下载 ✓（约 2.3MB/s）
+     * - `ghproxy.imciel.com` API 404 ✗ / 下载 ✓（约 1.8MB/s）
+     * - `ghproxy.net`       API 403 ✗ / 下载 ✓（约 182KB/s）
+     *
+     * 清退：ghproxy.link（307 后回 HTML 落地页，下载必失败）、ghfast.top / github.moeyy.xyz /
+     * ghproxy.cc / gh.llkk.cc / ghps.cc / gh.api.99988866.xyz / ghproxy.cfd / gh-proxy.net 等实测
+     * 连不上或只回落地页；gh.ddlc.top 恒 429。教育网方向（同日实测）：`mirrors.cernet.edu.cn` 与
+     * 清华/中科大/南大镜像站的 `github-release` 目录只收录白名单仓库（本仓库 404），各校
+     * `ghproxy.*.edu.cn` 域名全部不存在——CERNET 没有可代理任意仓库的通道，无法落地。
+     *
+     * 顺序 = **测速前的兜底顺序**；下载时按实测速度重排（见 [UpdateDownloader.rankChannelsBySpeed]）。
      */
     val MIRROR_PREFIXES = listOf(
         "https://gh-proxy.com/",
+        "https://gh-proxy.org/",
+        "https://gh.monlor.com/",
+        "https://ghproxy.imciel.com/",
         "https://ghproxy.net/",
-        "https://ghproxy.link/",
+    )
+
+    /**
+     * 能代理 **api.github.com** 的镜像（探测段 2 专用）：下载能用 ≠ API 能用。实测
+     * gh.monlor.com / ghproxy.imciel.com 的 API 路径 404、ghproxy.net 403，放进探测链只会白等超时。
+     */
+    val API_MIRROR_PREFIXES = listOf(
+        "https://gh-proxy.com/",
+        "https://gh-proxy.org/",
     )
 
     fun directDownloadUrl(tag: String, assetName: String): String = "$DOWNLOAD_BASE/$tag/$assetName"
@@ -133,15 +155,12 @@ class MirrorChain(private val nodes: List<MirrorNode>) {
     }
 
     companion object {
-        /** 下载链：直连优先，失败再逐个走镜像前缀 */
-        fun downloadChain(): MirrorChain = MirrorChain(
-            listOf(MirrorNode("direct") { it }) +
-                UpdateConfig.MIRROR_PREFIXES.map { p -> MirrorNode(p) { url -> p + url } }
-        )
-
-        /** 探测段 2 的镜像链（无直连——直连是段 1 专职） */
+        /**
+         * 探测段 2 的镜像链（无直连——直连是段 1 专职）。只放**确认能代理 api.github.com** 的前缀：
+         * 下载能用的镜像未必代理 API，放进来只会白等一轮超时。
+         */
         fun probeChain(): MirrorChain = MirrorChain(
-            UpdateConfig.MIRROR_PREFIXES.map { p -> MirrorNode(p) { url -> p + url } }
+            UpdateConfig.API_MIRROR_PREFIXES.map { p -> MirrorNode(p) { url -> p + url } }
         )
     }
 }
@@ -152,11 +171,11 @@ data class ReleaseAsset(val name: String, val url: String, val sizeBytes: Long?)
 /**
  * latest release 的最小结论：tag + 挑出来的 APK 附件 + 说明原文。
  * [sha256] = 发版者写在 Release 说明里的 universal 包 SHA-256（十六进制小写）。只有**段 1
- * （api.github.com 官方端点）**才提取——镜像转发的 body 不可信；null = 无可信哈希，下载退回
- * 现有防线（PK 魔数 + size 一致性 + 安装签名网）。
- * [notes] = 同一份说明原文（Markdown，未加工），供更新弹窗展示。与 [sha256] 共用同一道信任
- * 门槛：**只有段 1 有**，镜像转发的一律不采信——弹窗里的文字是 app 代替发版者说的话，
- * 不能由中间代理决定。
+ * （api.github.com 官方端点）**才提取——镜像转发的 body 不可信，拿假哈希当真会把合法更新判废；
+ * null = 无可信哈希，下载退回现有防线（PK 魔数 + size 一致性 + 安装签名网）。
+ * [notes] = 同一份说明原文（Markdown，未加工），供更新弹窗展示。**段 1/段 2 都读**（2026-10-21
+ * 用户裁决：都走镜像了，安装包本就可能被换，一段说明文字不必再设门槛）；它只用于展示，
+ * 不参与任何判断——装不装得上仍由 SHA-256（段 1）与系统安装签名决定。
  */
 data class ReleaseInfo(
     val tag: String,
@@ -212,23 +231,23 @@ object ReleaseJson {
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }
 
-    fun parse(json: String): ReleaseInfo? = parse(json, trustedNotes = false)
+    fun parse(json: String): ReleaseInfo? = parse(json, extractSha256 = false)
 
     /**
-     * [trustedNotes]=true 时才读 Release 说明（body）：从中提取发版者写入的 universal 包 SHA-256，
-     * 并把说明原文交给 [ReleaseInfo.notes]（更新弹窗展示）。
-     * **只允许段 1（api.github.com 官方端点）开**：镜像转发的 body 代理可改，提取出来的哈希
-     * 没有可信度，弹窗里的文字也会变成代理说了算。说明文本的书写约定见发版流程：
-     * 一行 `SHA256: <64位十六进制>`。
+     * 说明原文（body）**总是**读出来交给 [ReleaseInfo.notes]（弹窗展示，段 1/2 都有）；
+     * [extractSha256]=true 时额外从同一段文本提取发版者写入的 universal 包 SHA-256。
+     * **哈希只允许段 1（api.github.com 官方端点）开**：镜像转发的 body 代理可改，拿假哈希
+     * 当真会把合法更新判废；说明文字没有这个顾虑（只展示、不参与判断）。
+     * 说明文本的书写约定见发版流程：一行 `SHA256: <64位十六进制>`。
      */
-    fun parse(json: String, trustedNotes: Boolean): ReleaseInfo? {
+    fun parse(json: String, extractSha256: Boolean): ReleaseInfo? {
         val tag = parseTag(json) ?: return null
         // body 只读一次：sha256 与 notes 取自同一段文本
-        val body = if (trustedNotes) stringValueAfterKey(json, "body") else null
+        val body = stringValueAfterKey(json, "body")
         return ReleaseInfo(
             tag = tag,
             asset = pickApkAsset(parseAssets(json)),
-            sha256 = body?.let { parseSha256FromNotes(it) },
+            sha256 = if (extractSha256) body?.let { parseSha256FromNotes(it) } else null,
             notes = body
         )
     }
@@ -439,7 +458,7 @@ sealed interface ProbeResult {
     /**
      * 远端有新版：tag + 直连下载 URL（镜像链在下载时走）+ 资产名 + 大小（段 3 无 → null，下载时用 Content-Length）。
      * [sha256] 仅段 1 携带（官方端点的 Release 说明哈希，见 [ReleaseInfo.sha256]）；null = 下载退回现有防线。
-     * [notes] 同样仅段 1 携带（说明原文，弹窗展示时交给 [ReleaseNotes.forDisplay]）；段 2/3 恒 null。
+     * [notes] 段 1/2 都携带（说明原文，弹窗展示时交给 [ReleaseNotes.forDisplay]）；段 3 只有 Location，恒 null。
      */
     data class UpdateAvailable(
         val latestTag: String,
@@ -477,14 +496,14 @@ fun probeLatestRelease(
     // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信——提取 SHA-256 供下载后校验，
     // 同时把说明原文带给更新弹窗）
     if (isCancelled()) return ProbeResult.Cancelled
-    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, trustedNotes = true)?.let { return it }
+    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, extractSha256 = true)?.let { return it }
     // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）。
-    // trustedNotes=false：镜像可改写 body，转发来的哈希没有可信度、说明文字也不采信，
-    // 宁可不校验/不展示也不拿代理给的文本当真。
+    // extractSha256=false：镜像可改写 body，转发来的哈希没有可信度，宁可不校验也不拿假哈希当真；
+    // 说明原文照读（只用于弹窗展示，装不装得上仍由哈希与系统签名决定）。
     val chain = MirrorChain.probeChain()
     while (!chain.exhausted) {
         if (isCancelled()) return ProbeResult.Cancelled
-        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, trustedNotes = false)?.let { return it }
+        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, extractSha256 = false)?.let { return it }
         chain.advance()
     }
     // 段 3：302 → tag → 推导 universal 资产名（无 size，下载时用 Content-Length）
@@ -504,11 +523,12 @@ fun probeLatestRelease(
 /**
  * 一个 JSON 节点的结论：null = 该节点无结论（解析失败，或「有新版但拿不到 .apk 附件」——继续下一段）；
  * 非 null = 终局结论（UpToDate / UpdateAvailable），编排立即返回。
- * [trustedNotes] 只在段 1（api.github.com 官方端点）为 true：只有那时 body 里的 SHA-256 才可信。
+ * [extractSha256] 只在段 1（api.github.com 官方端点）为 true：只有那时 body 里的 SHA-256 才可信；
+ * 说明原文（notes）两段都读，只用于弹窗展示。
  */
-private fun jsonNode(json: String?, localVersionName: String, trustedNotes: Boolean = false): ProbeResult? {
+private fun jsonNode(json: String?, localVersionName: String, extractSha256: Boolean = false): ProbeResult? {
     json ?: return null
-    val info = ReleaseJson.parse(json, trustedNotes = trustedNotes) ?: return null
+    val info = ReleaseJson.parse(json, extractSha256 = extractSha256) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
         info.asset != null -> {

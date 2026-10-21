@@ -8,6 +8,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 
 /**
  * 「检查更新」的**网络执行层**（update 包唯一允许出现 HttpURLConnection 的地方，守卫钉住）。
@@ -15,9 +17,13 @@ import java.security.MessageDigest
  *
  * 职责：
  * - [fetchJson] / [fetchRedirectLocation]：探测三段编排（[probeLatestRelease]）注入的网络真身；
- * - [downloadApk]：下载 fallback 链 + 进度回调 + 落盘 `cacheDir/updates/`（app 私有，无需存储权限）。
+ * - [downloadApk]：**测速选路** + 下载 fallback + 进度回调 + 落盘 `cacheDir/updates/`（app 私有，无需存储权限）。
  *
- * 每个下载节点的防线（失败自动切下一个节点）：
+ * 请求目标的统一门槛（2026-10-21）：只允许 HTTPS，且主机名不得是 localhost / 环回 / 私有 /
+ * 链路本地 / 保留地址。**重定向由本模块手写跟随**（[HttpURLConnection] 自动跟随不校验目标，
+ * 恶意镜像可以用 302 把我们引到 `https://127.0.0.1:8443/` 或内网地址），每一跳都重新过门槛。
+ *
+ * 每个下载渠道的防线（失败自动切下一渠道）：
  * 1. 连接超时 10s / 读超时 30s——**停滞的兜底就是 30s 读超时**（修复轮 P2-1：应用层「8s 无新字节」
  *    检查在 read() 阻塞语义下循环顶永不可达，属死代码，已删除；诚实记录，不装作有 8s 停滞检测）；
  * 2. Content-Length 与实际字节数一致性校验（探测段给了 size 时）；
@@ -29,7 +35,7 @@ import java.security.MessageDigest
  *    官方端点的说明文本，这是「镜像污染最坏后果=更新失败」的核心保证（见 UpdateConfig 安全模型）。
  *
  * 探测（[fetchJson] / [fetchRedirectLocation]）用 [PROBE_READ_TIMEOUT_MS] 短读超时：
- * 「检查中…」不可挂数分钟，配合取消探针（检查中点行 = 取消）最坏 5×20s 内返回。
+ * 「检查中…」不可挂数分钟，配合取消探针（检查中点行 = 取消）最坏两枚镜像 ×20s 内返回。
  *
  * HTTP 明文镜像（用户点名的 toolwa.com/github）不在链里：中间人可替换 APK，见 UpdateConfig。
  */
@@ -42,6 +48,29 @@ object UpdateDownloader {
 
     /** 探测专用短读超时（修复轮 P2-2）：「检查中…」必须可取消、不可挂数分钟 */
     const val PROBE_READ_TIMEOUT_MS = 10_000
+
+    // ------------------------------------------------------------------ 下载渠道测速（2026-10-21）
+
+    /**
+     * 每渠道测速最多读的字节数（绝对字面量，单测钉死）：256KiB 足够把「连接 + 首字节」的
+     * 固定开销摊薄，又不至于把测速本身变成一次完整下载（全量 5.4MB）。
+     */
+    const val SPEED_TEST_BYTES = 256 * 1024
+
+    /** 测速的连接超时：测速不是下载，连不上就认输，别陪它等满 10s */
+    const val SPEED_TEST_CONNECT_TIMEOUT_MS = 4_000
+
+    /** 测速的读超时：单次 read 阻塞上限 */
+    const val SPEED_TEST_READ_TIMEOUT_MS = 3_000
+
+    /** 测速单渠道的整段预算（含重定向）：各渠道并发跑，整体等待 ≈ 这个值 */
+    const val SPEED_TEST_BUDGET_MS = 6_000
+
+    /** 测速读缓冲（小一点，取消与预算检查才落得及时） */
+    private const val SPEED_TEST_BUFFER = 16 * 1024
+
+    /** 重定向最多跟几跳（手写跟随，每跳都重过安全门槛） */
+    private const val MAX_REDIRECTS = 5
 
     /**
      * 探测响应体的宽上限（2026-10-07）：GitHub releases/latest JSON 实际几十 KB，这里放宽到 4MiB。
@@ -71,6 +100,29 @@ object UpdateDownloader {
     /** 限流读取的越帽判定（纯函数）：累计已读是否超出 [limit]，读取方据此断开按节点失败处理 */
     internal fun bytesOverLimit(totalRead: Long, limit: Long): Boolean = totalRead > limit
 
+    // ------------------------------------------------------------------ 测速排序（纯函数，JVM 全测）
+
+    /** 单个渠道的测速结论：url + 实测字节/秒（0 = 连不上 / 非 APK 响应 / 超预算） */
+    internal data class ChannelSpeed(val url: String, val bytesPerSec: Long)
+
+    /**
+     * 下载候选（直连 + 各镜像前缀）：顺序 = **测速前的兜底顺序**（直连优先、镜像按配置表序）。
+     * 纯函数——「直连一定在第一位」「每个镜像恰好出现一次」都能单测钉死。
+     */
+    internal fun downloadCandidates(directUrl: String): List<String> =
+        listOf(directUrl) + UpdateConfig.MIRROR_PREFIXES.map { it + directUrl }
+
+    /**
+     * 测速排序（纯函数，JVM 全测）：实测速度降序；速度 <= 0 的渠道**垫底但不丢**（保持输入顺序）。
+     * 全部测速失败时输出与输入完全一致——等价于回到「直连优先 + 镜像表序」的旧 fallback，
+     * 绝不会出现「测速失败就一个渠道都不试」。同速保持输入顺序（sortedByDescending 是稳定排序）。
+     */
+    internal fun rankChannelsBySpeed(speeds: List<ChannelSpeed>): List<String> {
+        val fast = speeds.filter { it.bytesPerSec > 0 }.sortedByDescending { it.bytesPerSec }
+        val rest = speeds.filter { it.bytesPerSec <= 0 }
+        return (fast + rest).map { it.url }
+    }
+
     // ------------------------------------------------------------------ 探测真身（注入 probeLatestRelease）
 
     /**
@@ -78,9 +130,12 @@ object UpdateDownloader {
      * 探测调用方传 [PROBE_READ_TIMEOUT_MS] 短读超时（P2-2），下载目录之外不共用 30s。
      */
     fun fetchJson(url: String, readTimeoutMs: Int = READ_TIMEOUT_MS): String? {
-        val conn = openConnection(url, followRedirects = true, readTimeoutMs = readTimeoutMs) ?: return null
+        // Accept 必须在连接建立前挂上：openFollowing 内部会先读 responseCode 判重定向，
+        // 请求那时候就发出去了，之后再 setRequestProperty 不生效
+        val conn = openFollowing(
+            url, readTimeoutMs, accept = "application/vnd.github+json"
+        ) ?: return null
         try {
-            conn.setRequestProperty("Accept", "application/vnd.github+json")
             if (conn.responseCode !in 200..299) return null
             // 响应体必须有帽：显式超帽直接拒；无 Content-Length 时靠限流读取兜（镜像不可信）
             if (!probeBytesAllowed(conn.contentLengthLong)) return null
@@ -108,7 +163,7 @@ object UpdateDownloader {
 
     /** GET 不跟随重定向，返回 3xx 的 Location 头；失败返回 null（段 3 专用，读超时同上） */
     fun fetchRedirectLocation(url: String, readTimeoutMs: Int = READ_TIMEOUT_MS): String? {
-        val conn = openConnection(url, followRedirects = false, readTimeoutMs = readTimeoutMs) ?: return null
+        val conn = openRaw(url, readTimeoutMs) ?: return null
         try {
             if (conn.responseCode !in 300..399) return null
             return conn.getHeaderField("Location") ?: return null
@@ -135,12 +190,18 @@ object UpdateDownloader {
 
     /**
      * 下载 APK。落盘前写 `<名字>.part`，全部校验通过后改名——中断/失败不会留下半截文件
-     * 被当成完整 APK 交安装器。链上节点顺序由 [MirrorChain.downloadChain] 决定（直连优先）。
+     * 被当成完整 APK 交安装器。
      *
-     * @param directUrl 直连下载 URL（探测结果携带；链上节点各自做前缀变换）
+     * **测速选路（2026-10-21 用户裁决）**：每次下载前先给「直连 + 各镜像」并发测速
+     * （各读最多 [SPEED_TEST_BYTES]、整段预算 [SPEED_TEST_BUDGET_MS]），按实测速度降序下载；
+     * 测速全失败时保持候选原序（直连优先 + 镜像表序），与旧版 fallback 完全一致。
+     *
+     * @param directUrl 直连下载 URL（探测结果携带；各渠道各自做前缀变换）
      * @param expectedSize 探测段 1/2 给的资产大小（段 3 为 null → 只信响应 Content-Length）
      * @param onProgress 进度回调（已下字节, 总字节；总未知时为 -1，UI 退化为只显示已下 MB）
      * @param isCancelled 取消探针（取消按钮置位），每次读循环检查
+     * @param expectedSha256 段 1 说明里的哈希（null = 无可信哈希，退回 PK+size+签名三层防线）
+     * @param onSpeedTested 测速排序完成、开始真正下载时回调（UI 把「正在选路」切成进度态）
      */
     fun downloadApk(
         context: Context,
@@ -148,7 +209,8 @@ object UpdateDownloader {
         expectedSize: Long?,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
         isCancelled: () -> Boolean,
-        expectedSha256: String? = null
+        expectedSha256: String? = null,
+        onSpeedTested: () -> Unit = {}
     ): DownloadOutcome {
         val dir = File(context.applicationContext.cacheDir, "updates")
         dir.mkdirs()
@@ -164,13 +226,19 @@ object UpdateDownloader {
         // 绝不与新一代下载交错写同一文件；旧代残留由下轮 staleFilesOf 清掉
         val part = File(dir, "$assetName.part${System.nanoTime()}")
 
-        val chain = MirrorChain.downloadChain()
-        while (!chain.exhausted) {
+        // 测速选路：并发测完再下（测速失败/超预算的渠道垫底仍保留，见 rankChannelsBySpeed）
+        val ordered = measureAndRank(downloadCandidates(directUrl), isCancelled)
+        if (isCancelled()) {
+            part.delete()
+            return DownloadOutcome.Cancelled
+        }
+        onSpeedTested()
+        for (url in ordered) {
             if (isCancelled()) {
                 part.delete()
                 return DownloadOutcome.Cancelled
             }
-            when (val r = tryNode(chain.urlFor(directUrl), part, expectedSize, onProgress, isCancelled)) {
+            when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled)) {
                 is DownloadOutcome.Done ->
                     // 重下同一资产时旧包还在：Windows 语义下 renameTo 对已存在目标会失败，必须先删旧再改名
                     //（此刻删的是刚下完的新包要顶掉的旧包，与 P3-3 保留旧包给安装器读不冲突——重下即用户已弃旧包）
@@ -192,11 +260,77 @@ object UpdateDownloader {
                     part.delete()
                     return DownloadOutcome.Cancelled
                 }
-                is DownloadOutcome.Failed -> chain.advance()
+                // 该渠道失败：试下一个（顺序已按测速从快到慢）
+                is DownloadOutcome.Failed -> Unit
             }
         }
         part.delete()
         return DownloadOutcome.Failed
+    }
+
+    // ------------------------------------------------------------------ 测速真身（并发）
+
+    /**
+     * 各渠道并发测速并按速度排序；返回的列表已是下载顺序。
+     * 线程池按渠道数开（上限 6）、daemon 线程，`finally` 里 shutdownNow——取消/异常都不留线程。
+     */
+    private fun measureAndRank(candidates: List<String>, isCancelled: () -> Boolean): List<String> {
+        if (candidates.isEmpty()) return emptyList()
+        val pool = Executors.newFixedThreadPool(minOf(candidates.size, 6)) { r ->
+            Thread(r, "wota-update-speed").apply { isDaemon = true }
+        }
+        return try {
+            val futures = candidates.map { url ->
+                url to pool.submit(Callable { measureOne(url, isCancelled) })
+            }
+            rankChannelsBySpeed(
+                futures.map { (url, f) -> ChannelSpeed(url, runCatching { f.get() }.getOrDefault(0L)) }
+            )
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    /**
+     * 单渠道测速：读到 [SPEED_TEST_BYTES] / 预算耗尽 / 流结束为止，返回字节每秒。
+     * 以下一律记 0（排序垫底但仍会尝试）：连不上、非 2xx、首块不是 APK 魔数（HTML 落地页）、没读到数据。
+     * 计时从**发请求之前**算起，连接与首字节的延迟也计入——真实下载同样要付这笔钱。
+     */
+    private fun measureOne(url: String, isCancelled: () -> Boolean): Long {
+        if (isCancelled()) return 0
+        val started = System.nanoTime()
+        val deadline = started + SPEED_TEST_BUDGET_MS * 1_000_000L
+        val conn = openFollowing(
+            url,
+            SPEED_TEST_READ_TIMEOUT_MS,
+            SPEED_TEST_CONNECT_TIMEOUT_MS,
+            deadline
+        ) ?: return 0
+        try {
+            if (conn.responseCode !in 200..299) return 0
+            var read = 0L
+            conn.inputStream.use { input ->
+                val buf = ByteArray(SPEED_TEST_BUFFER)
+                while (read < SPEED_TEST_BYTES) {
+                    if (isCancelled() || System.nanoTime() > deadline) break
+                    val want = minOf(buf.size.toLong(), SPEED_TEST_BYTES - read).toInt()
+                    val n = input.read(buf, 0, want)
+                    if (n <= 0) break
+                    // 首块必须是 APK 的 PK 魔数：镜像回 HTML 落地页（ghproxy.link 2026-10-21 实测形态）不算快渠道
+                    if (read == 0L && !(n >= 2 && buf[0] == 'P'.code.toByte() && buf[1] == 'K'.code.toByte())) {
+                        return 0
+                    }
+                    read += n
+                }
+            }
+            if (read <= 0) return 0
+            val elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
+            return read * 1000L / elapsedMs
+        } catch (e: Exception) {
+            return 0
+        } finally {
+            conn.disconnect()
+        }
     }
 
     /**
@@ -245,7 +379,7 @@ object UpdateDownloader {
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
         isCancelled: () -> Boolean
     ): DownloadOutcome {
-        val conn = openConnection(url, followRedirects = true, readTimeoutMs = READ_TIMEOUT_MS) ?: return DownloadOutcome.Failed
+        val conn = openFollowing(url, READ_TIMEOUT_MS) ?: return DownloadOutcome.Failed
         try {
             if (isCancelled()) return DownloadOutcome.Cancelled
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return DownloadOutcome.Failed
@@ -310,20 +444,126 @@ object UpdateDownloader {
     internal fun isHttpsUrl(url: String): Boolean =
         runCatching { URL(url).protocol.equals("https", ignoreCase = true) }.getOrDefault(false)
 
-    private fun openConnection(url: String, followRedirects: Boolean, readTimeoutMs: Int): HttpURLConnection? = try {
-        val parsed = URL(url)
-        if (!parsed.protocol.equals("https", ignoreCase = true)) {
-            null
-        } else {
-            val c = parsed.openConnection() as HttpURLConnection
-            c.connectTimeout = CONNECT_TIMEOUT_MS
+    /**
+     * 请求目标的安全判据（纯函数，JVM 全测）：只允许 https、必须有主机名，且拒绝 localhost /
+     * 环回 / 私有 / 链路本地 / 保留地址的**字面量 IP**。镜像返回的 302 目标也走这条——本模块
+     * 手写重定向的本意就是不让代理把请求引到内网。域名不做 DNS 预解析（那本身是一次网络请求，
+     * 还有 DNS rebinding 的坑），真正的门是 HTTPS 证书校验。
+     */
+    internal fun isSafeRemoteUrl(url: String): Boolean {
+        val parsed = runCatching { URL(url) }.getOrNull() ?: return false
+        if (!parsed.protocol.equals("https", ignoreCase = true)) return false
+        val host = parsed.host ?: return false
+        return isPublicHost(host)
+    }
+
+    /** 主机名判据（纯函数，JVM 全测）：localhost / 环回 / 私有 / 链路本地 / 保留地址 → false */
+    internal fun isPublicHost(host: String): Boolean {
+        val h = host.trim().trimEnd('.').lowercase()
+        if (h.isEmpty()) return false
+        if (h == "localhost" || h.endsWith(".localhost")) return false
+        return if (h.startsWith("[") || h.contains(':')) isPublicIpv6(h) else isPublicIpv4OrDomain(h)
+    }
+
+    /**
+     * IPv4 字面量按段判断；**不是字面量（域名）一律放行**。拒：0/8、10/8、100.64/10、127/8、
+     * 169.254/16、172.16/12、192.168/16、192.0.0.0/16（含 192.0.2.0/24）、198.18/15、
+     * 198.51.100/24、203.0.113/24、224/4 与 240/4（组播/保留）。
+     */
+    private fun isPublicIpv4OrDomain(h: String): Boolean {
+        val parts = h.split('.')
+        if (parts.size != 4) return true
+        val octets = IntArray(4)
+        for (i in 0 until 4) {
+            val s = parts[i]
+            if (s.isEmpty() || s.length > 3 || !s.all { it.isDigit() }) return true
+            octets[i] = s.toIntOrNull() ?: return true
+            if (octets[i] !in 0..255) return true
+        }
+        val a = octets[0]
+        val b = octets[1]
+        val c = octets[2]
+        val blocked = a == 0 || a == 10 || a == 127 ||
+            (a == 100 && b in 64..127) ||
+            (a == 169 && b == 254) ||
+            (a == 172 && b in 16..31) ||
+            (a == 192 && b == 168) ||
+            (a == 192 && b == 0) ||
+            (a == 198 && (b == 18 || b == 19)) ||
+            (a == 198 && b == 51 && c == 100) ||
+            (a == 203 && b == 0 && c == 113) ||
+            a >= 224
+        return !blocked
+    }
+
+    /** IPv6 字面量：拒 `::`、`::1`、fc00::/7（ULA）、fe80::/10（链路本地）与 ::ffff: 映射的私网/环回 */
+    private fun isPublicIpv6(host: String): Boolean {
+        val h = host.removePrefix("[").removeSuffix("]").lowercase()
+        if (h == "::" || h == "::1") return false
+        if (h.startsWith("fc") || h.startsWith("fd")) return false
+        if (h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false
+        if (h.startsWith("::ffff:")) return isPublicIpv4OrDomain(h.removePrefix("::ffff:"))
+        return true
+    }
+
+    /** 原始连接（**不跟随重定向**）；URL 不过 [isSafeRemoteUrl] 直接 null */
+    private fun openRaw(
+        url: String,
+        readTimeoutMs: Int,
+        connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
+        accept: String? = null
+    ): HttpURLConnection? {
+        if (!isSafeRemoteUrl(url)) return null
+        return try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = connectTimeoutMs
             c.readTimeout = readTimeoutMs
-            c.instanceFollowRedirects = followRedirects
+            // 重定向由 openFollowing 手写跟随：平台默认跟随**不校验目标主机**，
+            // 恶意镜像能用 302 把请求引到 https://127.0.0.1:8443/ 或内网地址
+            c.instanceFollowRedirects = false
             // GitHub API 硬要求带 User-Agent；顺带让镜像日志能认出我们
             c.setRequestProperty("User-Agent", "WotaGeiCam-UpdateCheck")
+            if (accept != null) c.setRequestProperty("Accept", accept)
             c
+        } catch (e: Exception) {
+            null
         }
-    } catch (e: Exception) {
-        null
+    }
+
+    /**
+     * 跟随重定向的连接：最多 [MAX_REDIRECTS] 跳，**每一跳都重新过** [isSafeRemoteUrl]
+     * （`https → http` 降级、跳内网/环回一律中止）。[deadlineNanos] 非 null 时每跳前查预算。
+     * 返回的连接已停在非 3xx 响应上（2xx 或 4xx/5xx 由调用方判）；任何失败返回 null。
+     */
+    private fun openFollowing(
+        url: String,
+        readTimeoutMs: Int,
+        connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
+        deadlineNanos: Long? = null,
+        accept: String? = null
+    ): HttpURLConnection? {
+        var current = url
+        var hops = 0
+        while (hops <= MAX_REDIRECTS) {
+            if (deadlineNanos != null && System.nanoTime() > deadlineNanos) return null
+            val conn = openRaw(current, readTimeoutMs, connectTimeoutMs, accept) ?: return null
+            val code = try {
+                conn.responseCode
+            } catch (e: Exception) {
+                conn.disconnect()
+                return null
+            }
+            if (code !in 300..399) return conn
+            val location = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (location.isNullOrBlank()) return null
+            current = try {
+                URL(URL(current), location).toString()
+            } catch (e: Exception) {
+                return null
+            }
+            hops++
+        }
+        return null
     }
 }
