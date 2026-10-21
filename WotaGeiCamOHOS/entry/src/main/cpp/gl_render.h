@@ -81,7 +81,10 @@ int WotaGlEncoderRotation();
 
 // ---------------------------------------------------------------- GL-4 光弧链在线版
 
-/** 录制期转换：mode 0=off / 1=MEND（补弧）/ 2=DROP（仅抽帧）；dstFps<=0 时拒斥回落 off；deadband 钳 0..32 */
+/**
+ * 录制期转换：mode 0=off / 1=MEND（补弧）/ 2=DROP（仅抽帧）；dstFps<=0 时拒斥回落 off；deadband 钳 0..32。
+ * 仅服务起录前的参数下发（MEND 的 pass 延迟到编码面 attach 时构建）；运行期切换弧档不支持（登记）。
+ */
 void WotaGlSetArcConvert(int mode, int dstFps, int deadband);
 
 /** 停录前同步冲刷 MEND 滞留帧（返回 1 = 成功发出末帧，0 = 无滞留/失败）；须在 stop 编码器之前调用 */

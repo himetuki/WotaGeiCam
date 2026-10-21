@@ -110,6 +110,13 @@ function delta(now: number, start: number): number {
 }
 
 export class GlRecorder {
+  /** 活动录制文件（全进程至多一段）：媒体库据此排除半成品，动作层拒绝删除/移动 */
+  private static activePath: string = '';
+
+  static getActiveRecordingPath(): string {
+    return GlRecorder.activePath;
+  }
+
   private fd: number = -1;
   private path: string = '';
   private startedAtMs: number = 0;
@@ -170,12 +177,14 @@ export class GlRecorder {
     }
     this.fd = file.fd;
     this.path = path;
+    GlRecorder.activePath = path;
     this.startedAtMs = Date.now();
     this.lib = lib;
     this.arcMode = arcMode;
     this.arcDstFps = arcDstFps;
     // 帧账起账：只清结构段计数，相机到达格来自 PreviewOutput.frameStart
     Diag.clearFrameAccount();
+    FrameLedger.beginRecordingEpoch(); // 纪元开始于取 start 快照之前
     this.ledgerStart = FrameLedger.snapshot();
     try {
       this.countersStart = parseCounters(lib.getGpuFrameCounters());
@@ -211,6 +220,9 @@ export class GlRecorder {
       endSnap = FrameLedger.snapshot();
     } catch (e) {
       endSnap = undefined;
+    } finally {
+      // 纪元在冻结 end 快照后立即关闭（早于阻塞式 stopGpuRecord）
+      FrameLedger.endRecordingEpoch();
     }
     try {
       endCounters = parseCounters(lib.getGpuFrameCounters());
@@ -225,16 +237,20 @@ export class GlRecorder {
     }
     // 诊断逐项取：任一异常不吞后续项；失败记入 diagError 并进摘要
     let diagError: string = '';
+    let errorReadOk: boolean = true;
+    let dropsReadOk: boolean = true;
     let nativeError: string = '';
     try {
       nativeError = lib.getGpuRecordError();
     } catch (e) {
+      errorReadOk = false;
       diagError = diagError === '' ? `getGpuRecordError:${e}` : diagError;
     }
     let dropsRaw: string = '';
     try {
       dropsRaw = lib.drainArcDrops();
     } catch (e) {
+      dropsReadOk = false;
       diagError = diagError === '' ? `drainArcDrops:${e}` : diagError;
     }
     let measuredSrcFps: number = 0;
@@ -257,6 +273,9 @@ export class GlRecorder {
     const startCounters: GpuCounters | undefined = this.countersStart;
     const durationMs: number = Date.now() - this.startedAtMs;
     this.fd = -1;
+    if (GlRecorder.activePath === path) {
+      GlRecorder.activePath = '';
+    }
     this.path = '';
     this.startedAtMs = 0;
     this.lib = undefined;
@@ -280,8 +299,8 @@ export class GlRecorder {
       try {
         const cameraDelta: number = delta(endSnap.cameraStarted, startSnap.cameraStarted);
         const glCbDelta: number = delta(endCounters.glCallbacks, startCounters.glCallbacks);
-        // frameStart 不可用（注册失败/平台未派发）时以原生 GL 回调为上界（登记口径）
-        const cameraFrames: number = cameraDelta > 0 ? cameraDelta : glCbDelta;
+        // frameStart 不可用（注册失败/平台未派发）时由录制纪元门控兜底；上界取两者较大值
+        const cameraFrames: number = Math.max(cameraDelta, glCbDelta);
         const report: FrameLedgerReport = new FrameLedgerReport(
           0, true, durationMs,
           cameraFrames,
@@ -304,7 +323,12 @@ export class GlRecorder {
     // ---- .drops.json sidecar：请求弧模式 + native 无错误 + 成片 ok 才写 ----
     const marks: Array<DropMark> = parseDrops(dropsRaw);
     let sidecar: string = 'na';
-    if (arcMode !== 0 && nativeError === '' && status.startsWith('ok') && path !== '') {
+    if (arcMode !== 0 && (!errorReadOk || !dropsReadOk)) {
+      // 诊断读取失败：不写可能缺项的 sidecar（避免把"没读到"写成"没有抽帧"）
+      if (arcMode !== 0) {
+        sidecar = 'skipped(diag)';
+      }
+    } else if (arcMode !== 0 && nativeError === '' && status.startsWith('ok') && path !== '') {
       try {
         const modeName: string = arcMode === 1 ? 'mend' : 'drop';
         const segments: Array<ArcDropSegment> = [new ArcDropSegment(0, 0, glOutFrames)];

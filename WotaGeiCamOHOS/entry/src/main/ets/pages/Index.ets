@@ -194,6 +194,11 @@ struct Index {
               // 用 UIContext.getRouter()（模块级 router.pushUrl 自 API 18 弃用）
               this.getUIContext().getRouter().pushUrl({ url: 'pages/GlPreview' });
             })
+          Button('媒体库')
+            .fontSize(14)
+            .onClick(() => {
+              this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
+            })
           Button('参数自检')
             .fontSize(14)
             .onClick(() => {

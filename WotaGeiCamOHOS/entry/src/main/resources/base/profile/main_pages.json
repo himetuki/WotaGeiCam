@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
-    "pages/GlPreview"
+    "pages/GlPreview",
+    "pages/Gallery"
   ]
 }

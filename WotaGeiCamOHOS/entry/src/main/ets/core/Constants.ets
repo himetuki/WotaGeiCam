@@ -399,6 +399,8 @@ export class WotaTag {
   static readonly LENS: string = 'WotaLens';
   static readonly PARAMS: string = 'WotaParams';
   static readonly VIDEO_SIZE: string = 'WotaVideoSize';
+  static readonly MEDIA: string = 'WotaMedia';
+  static readonly MEDIA_REPO: string = 'WotaMediaRepo';
 }
 
 /**

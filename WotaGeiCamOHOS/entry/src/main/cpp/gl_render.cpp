@@ -955,11 +955,8 @@ void DegradeArc(const char* reason)
     g_arcRule = ArcKeepRule(slotNs, ArcKeepToleranceNs(slotNs));
     g_arcFlow = ArcRepairFlow(g_arcDstFps > 0 ? g_arcDstFps : 24);
     g_arcDrops.clear();
-    // 与上游 setArcConvert 降级重建一致：实测源帧率账从降级点重新累计
-    g_arcSrcFirstTsNs = INT64_MIN;
-    g_arcSrcLastTsNs = INT64_MIN;
-    g_arcSrcFrames = 0;
-    g_arcTsLogCount = 0;
+    // 实测源帧率账**不重置**：本批采用整场会话口径（登记偏离上游的降级点重启）；
+    // 降级只重置 rule/flow/drops。
 }
 
 /**
@@ -986,9 +983,10 @@ void MaybeDrawEncoderPass(bool newFrameConsumed, int64_t frameTs)
     if (!keep) {
         g_arcDropped++;
     }
+    // 实测源帧率记整场会话口径（保留帧与丢弃帧都算，且每枚新帧只记一次）
+    NoteArcFrame(frameTs);
     if (g_arcEffectiveMode == kArcModeDrop) {
         if (!keep) {
-            NoteArcFrame(frameTs);
             return;
         }
         if (DrawEncoderPass()) {
@@ -1001,7 +999,6 @@ void MaybeDrawEncoderPass(bool newFrameConsumed, int64_t frameTs)
         // 写进 sidecar 会多一条 {out,0}（审查 P3）。
         DrawEncoderPass();
     }
-    NoteArcFrame(frameTs);
 }
 
 // ---------------------------------------------------------------- Frost 全屏高斯链（GL-3）
@@ -2053,13 +2050,22 @@ bool WotaGlAttachEncoderWindow(OHNativeWindow* window, int width, int height)
     g_arcTsLogCount = 0;
     g_arcActive = g_arcEffectiveMode != kArcModeOff;
     if (g_arcEffectiveMode == kArcModeMend) {
-        if (g_arcMend == nullptr) {
+        // 每次释放旧 pass 后重建；最多 2 次（惰性 attach 阶段偶发 GL 资源瞬时失败）
+        bool ensured = false;
+        for (int attempt = 1; attempt <= 2 && !ensured; attempt++) {
+            if (g_arcMend != nullptr) {
+                g_arcMend->Release();
+                g_arcMend.reset();
+            }
             g_arcMend = std::make_unique<ArcMendPass>();
+            g_arcMend->SetDeadband(g_arcDeadband);
+            ensured = g_arcMend->Ensure(g_encW, g_encH, g_useVao);
+            if (!ensured) {
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "arc mend pass ensure failed on attach attempt=%{public}d", attempt);
+            }
         }
-        g_arcMend->SetDeadband(g_arcDeadband);
-        if (!g_arcMend->Ensure(g_encW, g_encH, g_useVao)) {
-            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "arc mend pass ensure failed on attach, degrade to drop");
+        if (!ensured) {
             g_arcMend.reset();
             DegradeArc("mend-ensure");
         }
@@ -2168,20 +2174,12 @@ void WotaGlSetArcConvert(int mode, int dstFps, int deadband)
     g_lastArcTsNs = INT64_MIN;
     g_arcTsLogCount = 0;
 
-    // 编码面已挂（运行时切换）时立即建；正常起录顺序 setArcConvert → attach，attach 内惰性建
-    if (m == kArcModeMend && g_encW > 0 && g_encH > 0) {
-        g_arcMend = std::make_unique<ArcMendPass>();
-        g_arcMend->SetDeadband(db);
-        if (!g_arcMend->Ensure(g_encW, g_encH, g_useVao)) {
-            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "arc mend pass ensure failed in setArcConvert, degrade to drop");
-            g_arcMend.reset();
-            DegradeArc("mend-setup");
-        }
-    }
+    // 只配置状态：MEND 的 pass 一律延迟到编码面 attach 时构建（此时才有编码尺寸）。
+    // 运行期切换弧档不支持（登记）：本入口仅服务起录前的参数下发。
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "arc convert requested=%{public}d effective=%{public}d dstFps=%{public}d deadband=%{public}d",
-        g_arcRequestedMode, g_arcEffectiveMode, dstFps, db);
+        "arc convert requested=%{public}d effective=%{public}d dstFps=%{public}d deadband=%{public}d mend=%{public}s",
+        g_arcRequestedMode, g_arcEffectiveMode, dstFps, db,
+        m == kArcModeMend ? "deferred-attach" : "none");
 }
 
 int WotaGlFlushArcPending()
@@ -2218,6 +2216,7 @@ int WotaGlFlushArcPending()
                 "flush arc pending: swap failed err=%{public}d", static_cast<int>(eglGetError()));
         }
     } else {
+        g_encoderSwapFail++;
         OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
             "flush arc pending: DrawPending failed, last frame dropped");
     }

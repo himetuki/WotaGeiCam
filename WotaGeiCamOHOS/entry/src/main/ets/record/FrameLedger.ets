@@ -31,10 +31,29 @@ export class FrameLedger {
   private static encoderSwapOk: number = 0;
   private static encoderSwapFail: number = 0;
   private static arcDropped: number = 0;
+  /**
+   * 录制纪元：仅录制窗口内的 frameStart 计入 cameraStarted。
+   * 已登记观测偏差：begin 之前已入队、begin 之后才执行的 frameStart 仍会计入；GlRecorder
+   * 以 Math.max(cameraDelta, glCbDelta) 取到达上界（native 计数为下界），不做事件时间排序。
+   * 该值是**到达上界**，不得当作精确丢帧数（逐级差只作量级诊断）。
+   */
+  private static recordingEpoch: boolean = false;
 
-  /** 相机 onCaptureStarted 帧到达（每拍一次自增，无分配） */
+  /** 起录成功、取帧账 start 快照之前调用 */
+  static beginRecordingEpoch(): void {
+    FrameLedger.recordingEpoch = true;
+  }
+
+  /** 冻结 end 快照之后、阻塞式 stop 之前调用 */
+  static endRecordingEpoch(): void {
+    FrameLedger.recordingEpoch = false;
+  }
+
+  /** 相机 onCaptureStarted 帧到达（仅录制纪元内自增，无分配） */
   static onCameraStarted(): void {
-    FrameLedger.cameraStarted++;
+    if (FrameLedger.recordingEpoch) {
+      FrameLedger.cameraStarted++;
+    }
   }
 
   /** SurfaceTexture 回调（相机线程→GL handler；newFrames 之外单独计数，不改其语义） */

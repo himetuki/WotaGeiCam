@@ -50,6 +50,8 @@ struct GlPreview {
   @State curveOverlay: boolean = false;
   @State frostEnabled: boolean = false;
   @State recording: boolean = false;
+  /** GL 致命态（display-context-lost）：录制按钮禁用直到页面重建（不做 EGL 原地重建，登记） */
+  @State glFatal: string = '';
   /** 光弧转换档：0=关 / 1=补弧24（MEND）/ 2=抽帧24（DROP） */
   @State arcMode: number = 0;
   private engine: GlCameraEngine = new GlCameraEngine();
@@ -334,6 +336,10 @@ struct GlPreview {
    */
   private toggleGpuRecord(): void {
     const lib: GlLibApi | undefined = this.glLib;
+    if (this.glFatal !== '') {
+      this.message = this.glFatal;
+      return;
+    }
     if (lib === undefined) {
       this.message = 'GL module not ready';
       return;
@@ -370,11 +376,12 @@ struct GlPreview {
   }
 
   /** 停录：native 摘要 + 落盘大小/时长（失败/中止原因含在摘要里） */
-  private finishGpuRecord(): void {
+  private finishGpuRecord(): string {
     this.stopRecordMonitor();
     const summary: string = this.recorder.stop();
     this.recording = false;
     this.message = `GPU record: ${summary}`;
+    return summary;
   }
 
   /**
@@ -407,8 +414,12 @@ struct GlPreview {
       } catch (e) {
         reason = '';
       }
-      this.finishGpuRecord();
-      if (reason !== '') {
+      const summary: string = this.finishGpuRecord();
+      if (reason.indexOf('display-context-lost') >= 0 ||
+        summary.indexOf('display-context-lost') >= 0) {
+        this.glFatal = 'GL 上下文丢失，录制已中止；请返回后重新进入本页';
+        this.message = this.glFatal;
+      } else if (reason !== '') {
         this.message = `${this.message} (${reason})`;
       }
     }, 500);
@@ -465,6 +476,7 @@ struct GlPreview {
         Row({ space: 8 }) {
           Button(this.recording ? '停录' : '录 GPU')
             .fontSize(12)
+            .enabled(this.glFatal === '')
             .onClick(() => {
               this.toggleGpuRecord();
             })
@@ -473,6 +485,12 @@ struct GlPreview {
             .enabled(!this.recording)
             .onClick(() => {
               this.cycleArcMode();
+            })
+          Button('媒体库')
+            .fontSize(12)
+            .enabled(!this.recording)
+            .onClick(() => {
+              this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
             })
         }
       }
