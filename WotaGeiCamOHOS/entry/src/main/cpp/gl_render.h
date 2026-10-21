@@ -79,4 +79,24 @@ void WotaGlDetachEncoder();
  */
 int WotaGlEncoderRotation();
 
+// ---------------------------------------------------------------- GL-4 光弧链在线版
+
+/** 录制期转换：mode 0=off / 1=MEND（补弧）/ 2=DROP（仅抽帧）；dstFps<=0 时拒斥回落 off；deadband 钳 0..32 */
+void WotaGlSetArcConvert(int mode, int dstFps, int deadband);
+
+/** 停录前同步冲刷 MEND 滞留帧（返回 1 = 成功发出末帧，0 = 无滞留/失败）；须在 stop 编码器之前调用 */
+int WotaGlFlushArcPending();
+
+/** 取走被抽帧位次（紧凑串 "k,n;k,n"，取走即清） */
+std::string WotaGlDrainArcDrops();
+
+/** 实测源帧率（首尾时间戳法；样本不足返回 0） */
+int WotaGlMeasuredArcSrcFps();
+
+/** 原生帧账计数（"glCallbacks,glConsumed,swapOk,swapFail,arcDropped"；不清零，调用方做差） */
+std::string WotaGlGetFrameCounters();
+
+/** 当前实际运行档（0/1/2；MEND 失败降 DROP 后为 2） */
+int WotaGlGetArcEffectiveMode();
+
 #endif // WOTA_GL_RENDER_H

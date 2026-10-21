@@ -12,7 +12,7 @@ set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 
 include_directories(${NATIVERENDER_ROOT_PATH})
 
-add_library(entry SHARED napi_init.cpp gl_render.cpp codec_recorder.cpp)
+add_library(entry SHARED napi_init.cpp gl_render.cpp codec_recorder.cpp arc_flow.cpp arc_mend_pass.cpp)
 # libace_ndk.z.so 提供 OH_NativeXComponent_*（RegisterCallback/GetXComponentSize 等，native XComponent 接口）
 # libnative_image.so 提供 OH_NativeImage_*（相机帧 → GL_TEXTURE_EXTERNAL_OES）
 # libnative_media_{venc,avmuxer,codecbase,core}.so：OH_VideoEncoder(surface)+OH_AVMuxer(fd, MPEG_4)（GL-4 GPU 录制）

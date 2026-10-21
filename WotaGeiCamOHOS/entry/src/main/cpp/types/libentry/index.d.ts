@@ -22,8 +22,22 @@ export const setFrostEnabled: (on: boolean) => void;
  * - isGpuRecording：可继续送帧 = RECORDING 且无写失败（STARTING/writeFailed/STOPPING/IDLE 均为 false）；
  *   记录仍活跃但已写失败时，页面应据 false 收尾并读 getGpuRecordError；
  * - getGpuRecordError：最近一次录制错误（空串 = 无）。
+ *
+ * GL-4 光弧链在线版（本批新增）：
+ * - startGpuRecord 追加 arcMode（0=off/1=MEND/2=DROP）、arcDstFps、deadband（0..32）；
+ * - flushArcPending：停录前同步冲刷 MEND 滞留帧（1 = 发出末帧）；
+ * - drainArcDrops：被抽帧位次紧凑串 "k,n;k,n"（取走即清）；
+ * - measuredArcSrcFps：实测源帧率（0 = 样本不足）；
+ * - getGpuFrameCounters："glCallbacks,glConsumed,swapOk,swapFail,arcDropped"（不清零，调用方做差）；
+ * - getArcEffectiveMode：实际运行档（MEND 失败降 DROP 后为 2）。
  */
-export const startGpuRecord: (fd: number, width: number, height: number, fps: number, bitrate: number) => string;
+export const startGpuRecord: (fd: number, width: number, height: number, fps: number, bitrate: number,
+  arcMode: number, arcDstFps: number, deadband: number) => string;
 export const stopGpuRecord: () => string;
 export const isGpuRecording: () => boolean;
 export const getGpuRecordError: () => string;
+export const flushArcPending: () => number;
+export const drainArcDrops: () => string;
+export const measuredArcSrcFps: () => number;
+export const getGpuFrameCounters: () => string;
+export const getArcEffectiveMode: () => number;

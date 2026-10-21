@@ -70,7 +70,8 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] GL 相机帧入 GL（GL-1，2026-10-21）：OH_NativeImage→external OES 纹理→上游 TEXTURE_VS/PASS_THROUGH_FS 逐字上屏；napi getInputSurfaceId；ES3→ES2 退避与去 alpha fallback；GlCameraEngine+GlPreview 闭环（方向校正/剩余着色器族留待 GL-2）
 - [x] GL 监视类效果（GL-2，2026-10-21）：旋转/镜像烘 UV（buildTexCoords+stRotation）、CURVE_FS+CurveStack LUT、斑马纹/峰值单趟效果（含曲线叠加与上游退避链）、ZebraPattern 瓦片、四态切换页；FBO 链（ARC_MERGE/Frost/NtscGrid）留待 GL-3
 - [x] GL 离屏基础设施与毛玻璃（GL-3，2026-10-21）：FBO/RT（尺寸/offset 纯函数逐行）、OES→2D 拷贝→横向→纵向高斯三趟链（weights 逐值、highp 退避、错误连击停链）、PASS_THROUGH_2D 上屏、全屏毛玻璃开关；ARC_MERGE/画板几何/NtscGrid 留待后续批
-- [x] GL 编码面与 GPU 录制最小切片（GL-4，2026-10-21）：EGL 第二编码面（复用缓存 config）+ 每帧第二趟编码 pass（编码 UV deg=stRotDeg 不镜像、**不碰 frost**）、OH_VideoEncoder(surface)+OH_AVMuxer(fd, MPEG_4) 直写视频-only MP4（PTS wall-clock 相对段基准 µs）、muxer SetRotation((sensor−display+360)%360) 容器旋转、GlRecorder（fd 归 ArkTS/VideoStore 落盘与余量预检/停录摘要）、页面「录 GPU/停录」闭环（500ms 监视 native 录制态）；上批 P3 ×4（frost 停链释放与开关复位、半成功纹理不泄漏、首开预编、曲线失败用户动作重试）。留白：音频轨/分段/抽帧/FrameLedger/.drops.json/参数下发
+- [x] GL 编码面与 GPU 录制最小切片（GL-4，2026-10-21）：EGL 第二编码面（复用缓存 config）+ 每帧第二趟编码 pass（编码 UV deg=stRotDeg 不镜像、**不碰 frost**）、OH_VideoEncoder(surface)+OH_AVMuxer(fd, MPEG_4) 直写视频-only MP4（PTS wall-clock 相对段基准 µs）、muxer SetRotation(normalizeQuarter(sensor−display)) 容器旋转（四舍五入到 0/90/180/270）；编码 pass 恢复上屏上下文失败 1 次即中止，g_displayCtxLost 帧级守卫重试上限 60 帧、GlRecorder（fd 归 ArkTS/VideoStore 落盘与余量预检/停录摘要）、页面「录 GPU/停录」闭环（500ms 监视 native 录制态）；上批 P3 ×4（frost 停链释放与开关复位、半成功纹理不泄漏、首开预编、曲线失败用户动作重试）。留白：音频轨/分段/抽帧/FrameLedger/.drops.json/参数下发
+- [x] GL-4 光弧链在线版（2026-10-21）：ARC_MERGE_FS（整像素选择+差分死区）与 ArcMendPass（cur+pending×2+acc×2）、ArcKeepRule/ArcRepairFlow C++ 逐行对拍、MEND/DROP 只吃新相机帧、停录 flush 滞留帧、MEND→DROP 降级、`.drops.json` sidecar、原生五格帧账 + camera frameStart 合成、页面三态转换（关/补弧24/抽帧24）；上批 P3 ×4（旋转角共享归一/STOP 竞态/活跃判据/上下文恢复与 60 帧重试上限）。留白：音频轨/分段/参数下发/PTS 网格化/成片名前缀/离线修复
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
 - [ ] 播放器 / 媒体库 / 剪辑导出

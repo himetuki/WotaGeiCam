@@ -227,13 +227,13 @@ static napi_value MakeString(napi_env env, const std::string& text)
     return result;
 }
 
-/** 起录：fd 归 ArkTS（native 不 close）；空串 = 成功，非空 = 机器码 */
+/** 起录：fd 归 ArkTS（native 不 close）；空串 = 成功，非空 = 机器码。arcMode 0=off/1=MEND/2=DROP */
 static napi_value StartGpuRecord(napi_env env, napi_callback_info info)
 {
-    size_t argc = 5;
-    napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    size_t argc = 8;
+    napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-    if (argc < 5) {
+    if (argc < 8) {
         return MakeString(env, "bad-args");
     }
     int32_t fd = -1;
@@ -241,20 +241,29 @@ static napi_value StartGpuRecord(napi_env env, napi_callback_info info)
     int32_t height = 0;
     int32_t fps = 0;
     int32_t bitrate = 0;
+    int32_t arcMode = 0;
+    int32_t arcDstFps = 0;
+    int32_t deadband = 12;
     napi_get_value_int32(env, argv[0], &fd);
     napi_get_value_int32(env, argv[1], &width);
     napi_get_value_int32(env, argv[2], &height);
     napi_get_value_int32(env, argv[3], &fps);
     napi_get_value_int32(env, argv[4], &bitrate);
+    napi_get_value_int32(env, argv[5], &arcMode);
+    napi_get_value_int32(env, argv[6], &arcDstFps);
+    napi_get_value_int32(env, argv[7], &deadband);
+    // 先 Start：busy 时不得改写 active 录制的弧状态（审查 P3）；成功后再配置弧档
     std::string error = CodecRecorder::Instance().Start(fd, width, height, fps, bitrate,
         WotaGlEncoderRotation());
     if (!error.empty()) {
         return MakeString(env, error);
     }
+    WotaGlSetArcConvert(arcMode, arcDstFps, deadband);
     // 编码器原生窗口 → EGL 编码面（失败即中止录制；预览/效果不受影响）
     OHNativeWindow* window = CodecRecorder::Instance().EncoderWindow();
     if (window == nullptr || !WotaGlAttachEncoderWindow(window, width, height)) {
         CodecRecorder::Instance().Abort("encoder-surface");
+        WotaGlSetArcConvert(0, 0, 0);
         return MakeString(env, "encoder-surface");
     }
     return MakeString(env, "");
@@ -280,6 +289,49 @@ static napi_value GetGpuRecordError(napi_env env, napi_callback_info info)
 {
     (void)info;
     return MakeString(env, CodecRecorder::Instance().LastError());
+}
+
+// ---------------------------------------------------------------- GL-4 光弧链在线版
+
+/** 停录前冲刷 MEND 滞留帧（1 = 已发出末帧） */
+static napi_value FlushArcPending(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_int32(env, WotaGlFlushArcPending(), &result);
+    return result;
+}
+
+/** 被抽帧位次紧凑串 "k,n;k,n"（取走即清） */
+static napi_value DrainArcDrops(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, WotaGlDrainArcDrops());
+}
+
+/** 实测源帧率（0 = 样本不足） */
+static napi_value MeasuredArcSrcFps(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_int32(env, WotaGlMeasuredArcSrcFps(), &result);
+    return result;
+}
+
+/** 原生帧账计数 "glCallbacks,glConsumed,swapOk,swapFail,arcDropped" */
+static napi_value GetGpuFrameCounters(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, WotaGlGetFrameCounters());
+}
+
+/** 当前实际运行档（0/1/2；MEND 降级后为 2） */
+static napi_value GetArcEffectiveMode(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_int32(env, WotaGlGetArcEffectiveMode(), &result);
+    return result;
 }
 
 /*
@@ -313,6 +365,11 @@ static napi_value Init(napi_env env, napi_value exports)
         {"stopGpuRecord", nullptr, StopGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isGpuRecording", nullptr, IsGpuRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuRecordError", nullptr, GetGpuRecordError, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"flushArcPending", nullptr, FlushArcPending, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"drainArcDrops", nullptr, DrainArcDrops, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"measuredArcSrcFps", nullptr, MeasuredArcSrcFps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getGpuFrameCounters", nullptr, GetGpuFrameCounters, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getArcEffectiveMode", nullptr, GetArcEffectiveMode, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

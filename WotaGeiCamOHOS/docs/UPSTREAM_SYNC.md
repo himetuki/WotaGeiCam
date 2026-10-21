@@ -51,6 +51,9 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | --- | --- |
 | `record/ArcDropLog.kt` | `.drops.json` 文件格式，鸿蒙侧读写与其对齐 |
 | `record/ArcKeepRule.kt` | 补弧合并判据（整像素选择 + 差分死区、并入门槛默认 12 / 0–32） |
+| `record/ArcRepairPlan.kt`（ArcRepairFlow 在线路） | 抽帧状态机指令序 Hold/Fold/Emit/Merge（C++ `cpp/arc_flow.*` 逐行对拍） |
+| `camera/Shaders.kt`（ARC_MERGE_FS） | 补弧整像素选择片元（严格大于死区取被抽帧；`cpp/shaders.h` 逐 token） |
+| `camera/ArcMendPass.kt` | 补弧离屏拓扑 cur+pending×2+acc×2 与指令原语（`cpp/arc_mend_pass.*`） |
 | `record/FrameLedger.kt` | 录制帧账输出格式 |
 | `record/BitratePolicy.kt`、`record/AutoStopRules.kt` | 码率策略、3.5 GiB 分段轮转与自停判据 |
 | `record/SeriesIds.kt`、`record/PendingName.kt` | 段命名/系列命名规则，跨平台素材互认的关键 |

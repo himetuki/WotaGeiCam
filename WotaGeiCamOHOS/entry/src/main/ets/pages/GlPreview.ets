@@ -19,7 +19,7 @@ import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
-import { FrameEffect, PeakingColor } from '../core/Constants';
+import { ArcMergeDeadband, FrameEffect, PeakingColor } from '../core/Constants';
 import { BitratePolicy } from '../record/BitratePolicy';
 
 /** libentry.so 的动态加载桥视图（camera/GlLibBridge 的导出签名） */
@@ -50,6 +50,8 @@ struct GlPreview {
   @State curveOverlay: boolean = false;
   @State frostEnabled: boolean = false;
   @State recording: boolean = false;
+  /** 光弧转换档：0=关 / 1=补弧24（MEND）/ 2=抽帧24（DROP） */
+  @State arcMode: number = 0;
   private engine: GlCameraEngine = new GlCameraEngine();
   private recorder: GlRecorder = new GlRecorder();
   private pollTimer: number = -1;
@@ -303,6 +305,25 @@ struct GlPreview {
     this.message = `frost: ${next ? 'on' : 'off'}`;
   }
 
+  /** 光弧三态：关 → 补弧24 → 抽帧24 → 关（录制中禁用） */
+  private cycleArcMode(): void {
+    if (this.recording) {
+      return;
+    }
+    this.arcMode = (this.arcMode + 1) % 3;
+    this.message = `转换: ${this.arcLabel()}`;
+  }
+
+  private arcLabel(): string {
+    if (this.arcMode === 1) {
+      return '补弧24';
+    }
+    if (this.arcMode === 2) {
+      return '抽帧24';
+    }
+    return '关';
+  }
+
   private hostContext(): common.Context | undefined {
     return this.getUIContext().getHostContext() as common.Context | undefined;
   }
@@ -332,15 +353,19 @@ struct GlPreview {
       this.message = 'no host context';
       return;
     }
-    const bitrate: number = BitratePolicy.resolve(0, GPU_RECORD_WIDTH, GPU_RECORD_HEIGHT, GPU_RECORD_FPS, false);
+    // 光弧档固定 24fps（25fps 由参数支持但本批无页面入口）；弧关保持 30fps
+    const recordFps: number = this.arcMode !== 0 ? 24 : GPU_RECORD_FPS;
+    const bitrate: number = BitratePolicy.resolve(0, GPU_RECORD_WIDTH, GPU_RECORD_HEIGHT, recordFps, false);
     const error: string = this.recorder.start(ctx, lib, GPU_RECORD_WIDTH, GPU_RECORD_HEIGHT,
-      GPU_RECORD_FPS, bitrate);
+      recordFps, bitrate, this.arcMode, recordFps, ArcMergeDeadband.deadband);
     if (error !== '') {
       this.message = `GPU record failed: ${error}`;
       return;
     }
     this.recording = true;
-    this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${GPU_RECORD_FPS} bitrate=${bitrate}`;
+    const arcName: string = this.arcMode === 0 ? 'off' : (this.arcMode === 1 ? 'mend' : 'drop');
+    this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${recordFps}` +
+      ` bitrate=${bitrate} arc=${arcName}`;
     this.startRecordMonitor();
   }
 
@@ -442,6 +467,12 @@ struct GlPreview {
             .fontSize(12)
             .onClick(() => {
               this.toggleGpuRecord();
+            })
+          Button(`转换: ${this.arcLabel()}`)
+            .fontSize(12)
+            .enabled(!this.recording)
+            .onClick(() => {
+              this.cycleArcMode();
             })
         }
       }

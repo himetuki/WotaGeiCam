@@ -207,4 +207,24 @@ static std::string WotaPeakingFragment(bool curveOn)
     return src;
 }
 
+/**
+ * 上游 Shaders.ARC_MERGE_FS（2026-10-17 定版，逐 token）：
+ * Δluma = luma(b) − luma(a)，严格大于 uDeadbandLuma 时整颗像素取 b，否则取 a。
+ * 整像素搬运是"不造色"的唯一保证（不做逐通道 max/混合）；a = 保留帧/累积面，
+ * b = 被抽帧；两个输入都是普通 2D FBO 纹理（OES 帧先经特效链落到 cur）。
+ */
+static const char* WOTA_ARC_MERGE_FS =
+    "precision mediump float;\n"
+    "varying vec2 vUv;\n"
+    "uniform sampler2D uA;\n"
+    "uniform sampler2D uB;\n"
+    "uniform float uDeadbandLuma;\n"
+    "void main() {\n"
+    "    vec3 a = texture2D(uA, vUv).rgb;\n"
+    "    vec3 b = texture2D(uB, vUv).rgb;\n"
+    "    float la = dot(a, vec3(0.299, 0.587, 0.114));\n"
+    "    float lb = dot(b, vec3(0.299, 0.587, 0.114));\n"
+    "    gl_FragColor = vec4((lb - la) > uDeadbandLuma ? b : a, 1.0);\n"
+    "}\n";
+
 #endif // WOTA_SHADERS_H

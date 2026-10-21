@@ -18,6 +18,9 @@
 #include "gl_render.h"
 #include "shaders.h"
 #include "codec_recorder.h"
+#include "wota_math.h"
+#include "arc_flow.h"
+#include "arc_mend_pass.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -25,10 +28,14 @@
 #include <hilog/log.h>
 #include <native_image/native_image.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
 #define WOTA_LOG_DOMAIN 0x0000
 #define WOTA_LOG_TAG "WotaGL"
@@ -78,6 +85,112 @@ int g_encFailStreak = 0;
 bool g_encFirstFrameLogged = false;
 /** 编码 pass 恢复上屏 makeCurrent 失败：下一帧开头先重试绑定，未成功前禁止任何绘制 */
 bool g_displayCtxLost = false;
+constexpr int kDisplayCtxRetryCap = 60;
+int g_displayCtxLostRetries = 0;
+bool g_displayCtxAbortIssued = false;
+
+// ---- GL-4 光弧链在线版（ARC_MERGE 补弧 + 抽帧 + sidecar/帧账）----
+constexpr int kArcModeOff = 0;
+constexpr int kArcModeMend = 1;
+constexpr int kArcModeDrop = 2;
+constexpr int kArcDeadbandMax = 32;
+constexpr int64_t kTsUnitToleranceNs = 10LL * 1000 * 1000 * 1000; // 10s
+
+struct ArcDropMark {
+    int32_t out;
+    int32_t n;
+};
+
+int g_arcRequestedMode = kArcModeOff; // 用户请求档（sidecar 按它写 mend/drop）
+int g_arcEffectiveMode = kArcModeOff; // 实际运行档（MEND 失败降 DROP）
+int g_arcDstFps = 0;
+int g_arcDeadband = 12;
+bool g_arcActive = false;
+ArcKeepRule g_arcRule;
+ArcRepairFlow g_arcFlow(24);
+std::unique_ptr<ArcMendPass> g_arcMend;
+std::vector<ArcDropMark> g_arcDrops;
+int32_t g_encoderFrameIndex = 0;
+int64_t g_arcSrcFirstTsNs = INT64_MIN;
+int64_t g_arcSrcLastTsNs = INT64_MIN;
+int64_t g_arcSrcFrames = 0;
+int64_t g_lastArcTsNs = INT64_MIN;
+int g_arcTsLogCount = 0;
+
+// 原生帧账计数器（T6；不清零，ArkTS 起停两次快照做差）
+std::atomic<int32_t> g_glCallbacks{0};
+std::atomic<int32_t> g_glConsumed{0};
+std::atomic<int32_t> g_encoderSwapOk{0};
+std::atomic<int32_t> g_encoderSwapFail{0};
+std::atomic<int32_t> g_arcDropped{0};
+
+int64_t NowSteadyNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool NearBy10s(int64_t a, int64_t b)
+{
+    const int64_t diff = a > b ? a - b : b - a;
+    return diff <= kTsUnitToleranceNs;
+}
+
+/**
+ * 相机帧时间戳归一：NativeImage → OnFrame 入参 → steady clock 三级回退；
+ * 与 steady clock 相差 >10s 但 ×1000 后回到 10s 内时按微秒解释（打一条日志）。
+ */
+int64_t NormalizeArcTimestamp(int64_t nativeTs, uint64_t onFrameTs)
+{
+    static bool unitLogged = false;
+    int64_t ts = nativeTs;
+    if (ts <= 0) {
+        ts = static_cast<int64_t>(onFrameTs);
+    }
+    if (ts <= 0) {
+        ts = NowSteadyNs();
+    }
+    const int64_t now = NowSteadyNs();
+    if (!NearBy10s(ts, now)) {
+        // 单位探测：ns → µs(×1000) → ms(×1_000_000)；上界护栏避免乘溢出
+        if (ts < 9000000000000000LL && NearBy10s(ts * 1000, now)) {
+            if (!unitLogged) {
+                unitLogged = true;
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "arc timestamp appears microsecond-based, scale x1000 (ts=%{public}lld)",
+                    static_cast<long long>(ts));
+            }
+            ts *= 1000;
+        } else if (ts < 9000000000000LL && NearBy10s(ts * 1000000, now)) {
+            if (!unitLogged) {
+                unitLogged = true;
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "arc timestamp appears millisecond-based, scale x1e6 (ts=%{public}lld)",
+                    static_cast<long long>(ts));
+            }
+            ts *= 1000000;
+        } else {
+            // 量级/时基不可解释：退 steady clock（保证单调与 ns 口径），只记一条
+            if (!unitLogged) {
+                unitLogged = true;
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "arc timestamp implausible (ts=%{public}lld), fallback steady clock",
+                    static_cast<long long>(ts));
+            }
+            ts = now;
+        }
+    }
+    return ts;
+}
+
+void NoteArcFrame(int64_t tsNs)
+{
+    if (g_arcSrcFirstTsNs == INT64_MIN) {
+        g_arcSrcFirstTsNs = tsNs;
+    }
+    g_arcSrcLastTsNs = tsNs;
+    g_arcSrcFrames++;
+}
 
 /** 程序槽与 location 缓存（单效果槽：同一时刻只有一个效果 program） */
 struct ProgramLocs {
@@ -135,17 +248,6 @@ std::string g_inputSurfaceId;
 /** NativeImage 失败原因（空 = 正常）；页面按它区分「未就绪」与「创建失败」 */
 std::string g_nativeImageError;
 
-int NormalizeDeg(int deg)
-{
-    return ((deg % 360) + 360) % 360;
-}
-
-/** 0/90/180/270 四舍五入（上游 OrientationExport.normalizeQuarter）：45→90、359→0 */
-int NormalizeQuarter(int deg)
-{
-    return ((NormalizeDeg(deg) + 45) / 90 % 4) * 90;
-}
-
 bool NearF(float actual, float expected)
 {
     return std::fabs(actual - expected) < 1e-2f;
@@ -157,7 +259,7 @@ bool NearF(float actual, float expected)
  */
 void RotationMap(int degrees, float rot[6])
 {
-    switch (NormalizeDeg(degrees)) {
+    switch (WotaNormalizeDeg(degrees)) {
         case 90:
             rot[0] = 0.0f; rot[1] = -1.0f; rot[2] = 1.0f;
             rot[3] = 1.0f; rot[4] = 0.0f; rot[5] = 0.0f;
@@ -226,7 +328,7 @@ int StRotationFromMatrix(const float matrix[16])
  */
 void RebuildTexCoords()
 {
-    const int deg = NormalizeDeg(g_sensorDeg - g_displayDeg + g_stRotDeg);
+    const int deg = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + g_stRotDeg);
     const int key = (deg << 1) | (g_mirrored ? 1 : 0);
     if (key == g_geomKey) {
         return;
@@ -617,14 +719,14 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk)
 
 /**
  * 编码 UV 重建：deg = stRotDeg、mirror = false —— 上游 buildTexCoords(encoderPass = true) 语义
- * （只抵消缓冲矩阵分量、不转正、不镜像；容器方向交给 orientationHint，本批留白）。
+ * （只抵消缓冲矩阵分量、不转正、不镜像；容器方向由 muxer SetRotation(normalizeQuarter) 写入）。
  */
 void RebuildEncoderTexCoords()
 {
     if (g_encUvVbo == 0) {
         return;
     }
-    const int deg = NormalizeDeg(g_stRotDeg);
+    const int deg = WotaNormalizeDeg(g_stRotDeg);
     if (deg == g_encGeomKey) {
         return;
     }
@@ -679,6 +781,12 @@ bool DrawEncoderPass()
         drawn = true;
     }
     const EGLBoolean swapped = drawn ? eglSwapBuffers(g_display, g_encSurface) : EGL_FALSE;
+    if (drawn && swapped == EGL_TRUE) {
+        g_encoderSwapOk++;
+        g_encoderFrameIndex++; // 仅成功送帧推进输出序号（抽帧丢弃帧不推进）
+    } else {
+        g_encoderSwapFail++;
+    }
     // 恢复上屏上下文：失败视一次即中止（若上下文仍绑在编码面，下一帧上屏会画错面）。
     // 置 g_displayCtxLost，WotaGlRender 下一帧开头先重试绑定，未成功前跳过全部绘制。
     const EGLBoolean restored = eglMakeCurrent(g_display, g_surface, g_surface, g_context);
@@ -711,12 +819,155 @@ bool DrawEncoderPass()
     return true;
 }
 
+bool DrawEncoderMended(bool keep);
+void DegradeArc(const char* reason);
+
+/** 恢复上屏上下文（编码 pass / MEND / flush 共用出口）：失败置帧级守卫并中止录制 */
+bool RestoreDisplayContext()
+{
+    if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) != EGL_TRUE) {
+        g_displayCtxLost = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "restore display context failed err=%{public}d, abort recording",
+            static_cast<int>(eglGetError()));
+        CodecRecorder::Instance().Abort("encoder-pass-failed");
+        return false;
+    }
+    g_displayCtxLost = false;
+    g_displayCtxLostRetries = 0;
+    g_displayCtxAbortIssued = false;
+    glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+    return true;
+}
+
+/** MEND 发帧：待发帧 → 编码面 swap；成功推进帧序号并记（输出位次, 丢弃数） */
+bool EmitMendedPending()
+{
+    if (g_arcMend == nullptr || !g_arcMend->DrawPending()) {
+        return false;
+    }
+    const EGLBoolean swapped = eglSwapBuffers(g_display, g_encSurface);
+    if (swapped != EGL_TRUE) {
+        g_encoderSwapFail++;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "mend emit swap failed err=%{public}d", static_cast<int>(eglGetError()));
+        return false;
+    }
+    g_encoderSwapOk++;
+    g_encFailStreak = 0;
+    g_encoderFrameIndex++;
+    g_arcDrops.push_back({static_cast<int32_t>(std::max(0, g_encoderFrameIndex - 1)),
+        g_arcRule.TakeDrops()});
+    return true;
+}
+
+/**
+ * MEND（自动抽帧补弧）路的编码支路：特效链先渲进离屏 cur，再由 ArcRepairFlow 的指令
+ * 决定滞留/并弧/发出。**红线：函数内不得出现 RunFrostChain / frost 分支**（霜面是上屏专属）。
+ * @return true = 本帧已处理（发出/滞留/丢弃）；false = 失败已降级 DROP，调用方按 DROP 口径补发。
+ */
+bool DrawEncoderMended(bool keep)
+{
+    if (g_encSurface == EGL_NO_SURFACE || g_arcMend == nullptr || !g_arcMend->Ready() ||
+        g_encW <= 0 || g_encH <= 0) {
+        DegradeArc("mend-not-ready");
+        return false;
+    }
+    if (eglMakeCurrent(g_display, g_encSurface, g_encSurface, g_context) != EGL_TRUE) {
+        g_encFailStreak++;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "mend makeCurrent failed err=%{public}d streak=%{public}d",
+            static_cast<int>(eglGetError()), g_encFailStreak);
+        DegradeArc("mend-makecurrent");
+        if (g_encFailStreak >= 3) {
+            CodecRecorder::Instance().Abort("encoder-pass-failed");
+        }
+        return false;
+    }
+    // 清掉上一帧可能残留的 GL 错误，避免 ArcMendPass 的 DrainGlError 误判本帧失败
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    SyncEffect();
+    RebuildEncoderTexCoords();
+    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    if (locs.program == 0) {
+        RestoreDisplayContext();
+        DegradeArc("mend-program");
+        return false;
+    }
+    // 1) 特效链 → 离屏 cur（编码口径；只 draw 不 swap）
+    glBindFramebuffer(GL_FRAMEBUFFER, g_arcMend->CurFbo());
+    glViewport(0, 0, g_encW, g_encH);
+    glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    DrawScene(locs, g_encUvVbo, false);
+    // 立刻还 FB=0：ArcMendPass 的 copy/merge 自绑自还，DrawPending 契约是画进当前绑定面
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // 2) 状态机指令（保留决策已由调用方 ArcKeepRule 给出）
+    const std::vector<ArcOp> ops = g_arcFlow.OnClassification(keep);
+    for (const ArcOp& op : ops) {
+        bool ok = true;
+        switch (op.kind) {
+            case ArcOpKind::AccumulateCur:
+                ok = g_arcMend->Accumulate(op.flag);
+                break;
+            case ArcOpKind::FoldAccIntoPending:
+                ok = g_arcMend->FoldAccIntoPending();
+                break;
+            case ArcOpKind::HoldCurAsPending:
+                ok = g_arcMend->HoldCurAsPending();
+                break;
+            case ArcOpKind::MergeCurAsPending:
+                ok = g_arcMend->MergeCurAsPending(op.flag);
+                break;
+            case ArcOpKind::EmitPending:
+                ok = EmitMendedPending();
+                break;
+        }
+        if (!ok) {
+            RestoreDisplayContext();
+            DegradeArc("mend-op");
+            return false;
+        }
+    }
+    return RestoreDisplayContext();
+}
+
+/**
+ * MEND 失败安全阀（上游三态两段的第一段）：MEND → DROP。补弧专属部件（pass/program/FBO）
+ * 随重建作废，pending/acc 半程积累不保；抽帧节奏/位次账重置（登记：降级前位次账丢失）。
+ * g_arcRequestedMode 保持用户请求（sidecar 仍按 mend 写，上游 activeArcConvert 口径）。
+ */
+void DegradeArc(const char* reason)
+{
+    if (g_arcEffectiveMode != kArcModeMend) {
+        return;
+    }
+    OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "arc mend degraded to drop (%{public}s)", reason);
+    g_arcEffectiveMode = kArcModeDrop;
+    g_arcActive = true;
+    if (g_arcMend != nullptr) {
+        g_arcMend->Release();
+        g_arcMend.reset();
+    }
+    const int64_t slotNs = g_arcDstFps > 0 ? 1000000000LL / g_arcDstFps : 0;
+    g_arcRule = ArcKeepRule(slotNs, ArcKeepToleranceNs(slotNs));
+    g_arcFlow = ArcRepairFlow(g_arcDstFps > 0 ? g_arcDstFps : 24);
+    g_arcDrops.clear();
+    // 与上游 setArcConvert 降级重建一致：实测源帧率账从降级点重新累计
+    g_arcSrcFirstTsNs = INT64_MIN;
+    g_arcSrcLastTsNs = INT64_MIN;
+    g_arcSrcFrames = 0;
+    g_arcTsLogCount = 0;
+}
+
 /**
  * 每帧第二趟：仅当**本 tick 消费到新相机帧**、编码面已挂且 CodecRecorder 处于 RECORDING 时送帧
- * （vsync 重绘不重复送帧，避免 30fps 相机在 60/120Hz 屏上产生 2–4 倍重复帧）。
- * 编码 pass 不进入 frost 分支（上屏专属），效果链与上屏共用。
+ * （vsync 重绘不重复送帧）。弧关闭时行为与上批完全一致；弧开启时保留判定只吃新帧：
+ * DROP 抽帧，MEND 走离屏补弧；分类/丢弃账/实测源帧率只在这里记账。
  */
-void MaybeDrawEncoderPass(bool newFrameConsumed)
+void MaybeDrawEncoderPass(bool newFrameConsumed, int64_t frameTs)
 {
     if (!newFrameConsumed) {
         return;
@@ -727,7 +978,30 @@ void MaybeDrawEncoderPass(bool newFrameConsumed)
     if (!CodecRecorder::Instance().IsRecording()) {
         return;
     }
-    DrawEncoderPass();
+    if (!g_arcActive || g_arcEffectiveMode == kArcModeOff) {
+        DrawEncoderPass();
+        return;
+    }
+    const bool keep = g_arcRule.OnFrame(frameTs);
+    if (!keep) {
+        g_arcDropped++;
+    }
+    if (g_arcEffectiveMode == kArcModeDrop) {
+        if (!keep) {
+            NoteArcFrame(frameTs);
+            return;
+        }
+        if (DrawEncoderPass()) {
+            g_arcDrops.push_back({static_cast<int32_t>(std::max(0, g_encoderFrameIndex - 1)),
+                g_arcRule.TakeDrops()});
+        }
+    } else if (!DrawEncoderMended(keep)) {
+        // 已降级 DROP：按上游安全阀**无条件直通补发本帧**（keep=false 的降级点也不丢画面），
+        // 且不记位次账——DegradeArc 已重建 rule，此处 TakeDrops 属于新 rule（恒 0），
+        // 写进 sidecar 会多一条 {out,0}（审查 P3）。
+        DrawEncoderPass();
+    }
+    NoteArcFrame(frameTs);
 }
 
 // ---------------------------------------------------------------- Frost 全屏高斯链（GL-3）
@@ -1236,6 +1510,7 @@ bool BuildPassPipeline()
 void OnFrameAvailableCB(void* context)
 {
     (void)context;
+    g_glCallbacks++;
     g_frameAvailable.store(true);
 }
 
@@ -1470,6 +1745,8 @@ bool WotaGlInit(void* window, uint64_t width, uint64_t height)
     g_ready = true;
     g_firstFrameLogged = false;
     g_displayCtxLost = false;
+    g_displayCtxLostRetries = 0;
+    g_displayCtxAbortIssued = false;
     // 上下文就绪后才建 NativeImage（顺序：上下文 → image；Destroy 反之）
     if (!CreateNativeImage()) {
         OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
@@ -1500,16 +1777,29 @@ void WotaGlRender(uint64_t timestamp)
     // 防止把上屏几何画到编码面（审查 P3）。
     if (g_displayCtxLost) {
         if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) != EGL_TRUE) {
-            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "display context still lost, skip frame err=%{public}d", static_cast<int>(eglGetError()));
+            g_displayCtxLostRetries++;
+            if (g_displayCtxLostRetries == 1) {
+                OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "display context lost, retry each frame (cap=%{public}d) err=%{public}d",
+                    kDisplayCtxRetryCap, static_cast<int>(eglGetError()));
+            } else if (g_displayCtxLostRetries >= kDisplayCtxRetryCap && !g_displayCtxAbortIssued) {
+                // 不每帧刷同一条：首帧一条 + 达上限一条
+                g_displayCtxAbortIssued = true;
+                OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "display context lost beyond %{public}d retries, abort recording", kDisplayCtxRetryCap);
+                CodecRecorder::Instance().Abort("display-context-lost");
+            }
             return;
         }
         g_displayCtxLost = false;
+        g_displayCtxLostRetries = 0;
+        g_displayCtxAbortIssued = false;
         glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
         OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "display context restored");
     }
     // 帧可用才拉起新帧（回调里只置位）；无帧时仅清屏（不画未完成纹理）
     bool newFrameConsumed = false;
+    int64_t frameTs = 0;
     if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
         if (OH_NativeImage_UpdateSurfaceImage(g_nativeImage) == 0) {
             OH_NativeImage_GetTransformMatrix(g_nativeImage, g_texMatrix);
@@ -1520,6 +1810,20 @@ void WotaGlRender(uint64_t timestamp)
             }
             g_hasFrame = true;
             newFrameConsumed = true;
+            g_glConsumed++;
+            // 弧链时间戳：NativeImage → OnFrame 入参 → steady clock（单位异常按微秒归一）
+            frameTs = NormalizeArcTimestamp(OH_NativeImage_GetTimestamp(g_nativeImage), timestamp);
+            if (g_arcActive && g_arcEffectiveMode != kArcModeOff) {
+                if (frameTs < g_lastArcTsNs) {
+                    frameTs = g_lastArcTsNs + 1; // 防倒退
+                }
+                g_lastArcTsNs = frameTs;
+                if (g_arcTsLogCount < 3) {
+                    g_arcTsLogCount++;
+                    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "arc frame ts=%{public}lld ns", static_cast<long long>(frameTs));
+                }
+            }
         } else {
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
                 "UpdateSurfaceImage failed");
@@ -1554,7 +1858,7 @@ void WotaGlRender(uint64_t timestamp)
                 frostSwapped == EGL_TRUE ? 1 : 0);
         }
         // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧；frost 是上屏专属）
-        MaybeDrawEncoderPass(newFrameConsumed);
+        MaybeDrawEncoderPass(newFrameConsumed, frameTs);
         return;
     }
     SyncEffect();
@@ -1638,7 +1942,7 @@ void WotaGlRender(uint64_t timestamp)
             swapped == EGL_TRUE ? 1 : 0);
     }
     // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧、同一效果链）
-    MaybeDrawEncoderPass(newFrameConsumed);
+    MaybeDrawEncoderPass(newFrameConsumed, frameTs);
 }
 
 void WotaGlDestroy()
@@ -1685,6 +1989,8 @@ void WotaGlDestroy()
     g_ready = false;
     g_firstFrameLogged = false;
     g_displayCtxLost = false;
+    g_displayCtxLostRetries = 0;
+    g_displayCtxAbortIssued = false;
     g_nativeImageError.clear();
     g_window = nullptr;
     // 新会话干净重试（P3）：黑名单/请求态/几何在页面上次会话后不得残留
@@ -1733,8 +2039,34 @@ bool WotaGlAttachEncoderWindow(OHNativeWindow* window, int width, int height)
     g_encGeomKey = -1;
     g_encFailStreak = 0;
     g_encFirstFrameLogged = false;
+    g_displayCtxLost = false;
+    g_displayCtxLostRetries = 0;
+    g_displayCtxAbortIssued = false;
+    // 弧会话账随编码面重挂复位（drops/实测帧率由 setArcConvert 在起录前清零，这里只复位节奏）
+    g_encoderFrameIndex = 0;
+    g_arcRule.Reset();
+    g_arcFlow = ArcRepairFlow(g_arcDstFps > 0 ? g_arcDstFps : 24);
+    g_arcSrcFirstTsNs = INT64_MIN;
+    g_arcSrcLastTsNs = INT64_MIN;
+    g_arcSrcFrames = 0;
+    g_lastArcTsNs = INT64_MIN;
+    g_arcTsLogCount = 0;
+    g_arcActive = g_arcEffectiveMode != kArcModeOff;
+    if (g_arcEffectiveMode == kArcModeMend) {
+        if (g_arcMend == nullptr) {
+            g_arcMend = std::make_unique<ArcMendPass>();
+        }
+        g_arcMend->SetDeadband(g_arcDeadband);
+        if (!g_arcMend->Ensure(g_encW, g_encH, g_useVao)) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "arc mend pass ensure failed on attach, degrade to drop");
+            g_arcMend.reset();
+            DegradeArc("mend-ensure");
+        }
+    }
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "encoder surface attached %{public}dx%{public}d", width, height);
+        "encoder surface attached %{public}dx%{public}d arc=%{public}d",
+        width, height, g_arcEffectiveMode);
     return true;
 }
 
@@ -1746,6 +2078,8 @@ void WotaGlDetachEncoder()
             if (g_surface != EGL_NO_SURFACE && g_context != EGL_NO_CONTEXT) {
                 if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) == EGL_TRUE) {
                     g_displayCtxLost = false;
+                    g_displayCtxLostRetries = 0;
+                    g_displayCtxAbortIssued = false;
                 } else {
                     // 绑定失败：置帧级守卫，WotaGlRender 在恢复前不绘制
                     g_displayCtxLost = true;
@@ -1762,6 +2096,12 @@ void WotaGlDetachEncoder()
         g_encSurface = EGL_NO_SURFACE;
         OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "encoder surface detached");
     }
+    // 释放补弧离屏资源；保留 drops/实测帧率供停录后 drain，g_arcActive 置 false（下一段 attach 重开）
+    if (g_arcMend != nullptr) {
+        g_arcMend->Release();
+        g_arcMend.reset();
+    }
+    g_arcActive = false;
     g_encW = 0;
     g_encH = 0;
     g_encGeomKey = -1;
@@ -1792,11 +2132,147 @@ int WotaGlEncoderRotation()
     // 与显示几何同一输入源：sensor 来自镜头信息，display 来自 display.rotation×90。
     // muxer 只接受 0/90/180/270：按上游 normalizeQuarter 四舍五入（45→90、359→0），
     // 非 90 倍数 sensorOrientation 不得让起录直接失败（审查 P2）。
-    const int raw = NormalizeDeg(g_sensorDeg - g_displayDeg);
-    const int rounded = NormalizeQuarter(raw);
+    const int raw = WotaNormalizeDeg(g_sensorDeg - g_displayDeg);
+    const int rounded = WotaNormalizeQuarter(raw);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "encoder rotation raw=%{public}d rounded=%{public}d", raw, rounded);
     return rounded;
+}
+
+// ---------------------------------------------------------------- GL-4 光弧链在线版（napi 调用）
+
+void WotaGlSetArcConvert(int mode, int dstFps, int deadband)
+{
+    int m = mode < 0 ? kArcModeOff : (mode > kArcModeDrop ? kArcModeDrop : mode);
+    if (m != kArcModeOff && dstFps <= 0) {
+        m = kArcModeOff; // dstFps 非法：拒斥回落关闭
+    }
+    const int db = std::min(kArcDeadbandMax, std::max(0, deadband));
+    g_arcRequestedMode = m;
+    g_arcEffectiveMode = m;
+    g_arcDstFps = (m != kArcModeOff) ? dstFps : 0;
+    g_arcDeadband = db;
+    g_arcActive = m != kArcModeOff;
+
+    if (g_arcMend != nullptr) {
+        g_arcMend->Release();
+        g_arcMend.reset();
+    }
+    const int64_t slotNs = m != kArcModeOff ? 1000000000LL / dstFps : 0;
+    g_arcRule = ArcKeepRule(slotNs, ArcKeepToleranceNs(slotNs));
+    g_arcFlow = ArcRepairFlow(m != kArcModeOff ? dstFps : 24);
+    g_arcDrops.clear();
+    g_arcSrcFirstTsNs = INT64_MIN;
+    g_arcSrcLastTsNs = INT64_MIN;
+    g_arcSrcFrames = 0;
+    g_lastArcTsNs = INT64_MIN;
+    g_arcTsLogCount = 0;
+
+    // 编码面已挂（运行时切换）时立即建；正常起录顺序 setArcConvert → attach，attach 内惰性建
+    if (m == kArcModeMend && g_encW > 0 && g_encH > 0) {
+        g_arcMend = std::make_unique<ArcMendPass>();
+        g_arcMend->SetDeadband(db);
+        if (!g_arcMend->Ensure(g_encW, g_encH, g_useVao)) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "arc mend pass ensure failed in setArcConvert, degrade to drop");
+            g_arcMend.reset();
+            DegradeArc("mend-setup");
+        }
+    }
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "arc convert requested=%{public}d effective=%{public}d dstFps=%{public}d deadband=%{public}d",
+        g_arcRequestedMode, g_arcEffectiveMode, dstFps, db);
+}
+
+int WotaGlFlushArcPending()
+{
+    if (g_arcEffectiveMode != kArcModeMend || g_arcMend == nullptr ||
+        g_encSurface == EGL_NO_SURFACE || !g_arcFlow.HasPending()) {
+        return 0;
+    }
+    if (eglMakeCurrent(g_display, g_encSurface, g_encSurface, g_context) != EGL_TRUE) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "flush arc pending: encoder makeCurrent failed err=%{public}d",
+            static_cast<int>(eglGetError()));
+        g_arcFlow.OnSourceEos();
+        RestoreDisplayContext(); // 统一守卫：恢复失败置帧级丢失标志并中止录制
+        return 0;
+    }
+    int flushed = 0;
+    glViewport(0, 0, g_encW, g_encH); // DrawPending 画进当前编码面（flush 路径不经过 cur 渲染）
+    if (g_arcFlow.HasAcc() && !g_arcMend->FoldAccIntoPending()) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "flush arc pending: fold acc failed, emit without arc");
+    }
+    if (g_arcMend->DrawPending()) {
+        const EGLBoolean swapped = eglSwapBuffers(g_display, g_encSurface);
+        if (swapped == EGL_TRUE) {
+            g_encoderSwapOk++;
+            g_encoderFrameIndex++;
+            g_arcDrops.push_back({static_cast<int32_t>(std::max(0, g_encoderFrameIndex - 1)),
+                g_arcRule.TakeDrops()});
+            flushed = 1;
+        } else {
+            g_encoderSwapFail++;
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "flush arc pending: swap failed err=%{public}d", static_cast<int>(eglGetError()));
+        }
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "flush arc pending: DrawPending failed, last frame dropped");
+    }
+    g_arcFlow.OnSourceEos(); // 无论成败清状态
+    RestoreDisplayContext();
+    return flushed;
+}
+
+std::string WotaGlDrainArcDrops()
+{
+    if (g_arcDrops.empty()) {
+        return std::string();
+    }
+    std::string out;
+    for (size_t i = 0; i < g_arcDrops.size(); i++) {
+        if (i > 0) {
+            out += ';';
+        }
+        out += std::to_string(g_arcDrops[i].out);
+        out += ',';
+        out += std::to_string(g_arcDrops[i].n);
+    }
+    g_arcDrops.clear();
+    return out;
+}
+
+int WotaGlMeasuredArcSrcFps()
+{
+    if (g_arcSrcFrames < 2 || g_arcSrcFirstTsNs == INT64_MIN ||
+        g_arcSrcLastTsNs <= g_arcSrcFirstTsNs) {
+        return 0;
+    }
+    const int64_t span = g_arcSrcLastTsNs - g_arcSrcFirstTsNs;
+    int64_t fps = ((g_arcSrcFrames - 1) * 1000000000LL + span / 2) / span;
+    if (fps < 1) {
+        fps = 1;
+    }
+    if (fps > 480) {
+        fps = 480;
+    }
+    return static_cast<int>(fps);
+}
+
+std::string WotaGlGetFrameCounters()
+{
+    return std::to_string(g_glCallbacks.load()) + "," +
+        std::to_string(g_glConsumed.load()) + "," +
+        std::to_string(g_encoderSwapOk.load()) + "," +
+        std::to_string(g_encoderSwapFail.load()) + "," +
+        std::to_string(g_arcDropped.load());
+}
+
+int WotaGlGetArcEffectiveMode()
+{
+    return g_arcEffectiveMode;
 }
 
 // ---------------------------------------------------------------- GL-2 外部入口（napi 调用，只写状态）

@@ -16,6 +16,7 @@ import { Size, WotaTag } from '../core/Constants';
 import { LensType } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
+import { FrameLedger } from '../record/FrameLedger';
 
 /** 当前镜头方向信息（GL 页 setDisplayGeometry 的输入：前置镜像 + 传感器角度） */
 export class GlLensInfo {
@@ -89,6 +90,19 @@ export class GlCameraEngine {
       session.addOutput(preview);
       await session.commitConfig();
       await session.start();
+      // 帧账相机到达格：commit/start 成功后才注册（此前 PreviewOutput 可能还没流）。
+      // 线程声明（登记）：CameraKit 的 AsyncCallback 在本注册线程的事件循环派发；本引擎
+      // 只从 ArkTS UI 主线程 start/stop，故 FrameLedger.cameraStarted 保持单线程累加语义。
+      // 若未来在其他线程起停会话，需改为 native/atomic 或主线程转发（FrameLedger 头注释同）。
+      try {
+        preview.on('frameStart', (err: BusinessError): void => {
+          if (!err) {
+            FrameLedger.onCameraStarted();
+          }
+        });
+      } catch (e) {
+        Diag.w(WotaTag.ABILITY, `gl camera frameStart listener failed: ${e}`);
+      }
       this.lensInfo = new GlLensInfo(slot.type === LensType.FRONT, slot.ability.sensorOrientation);
       Diag.i(WotaTag.ABILITY,
         `gl camera started lens=${slot.key} profile=${profile.size.width}x${profile.size.height}`);
@@ -115,6 +129,12 @@ export class GlCameraEngine {
       }
     } catch (e) {
       Diag.w(WotaTag.ABILITY, `gl session release: ${e}`);
+    }
+    try {
+      if (this.preview !== undefined) {
+        this.preview.off('frameStart');
+      }
+    } catch (e) {
     }
     try {
       if (this.preview !== undefined) {

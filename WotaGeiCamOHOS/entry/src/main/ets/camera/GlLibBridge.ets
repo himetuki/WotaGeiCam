@@ -47,8 +47,9 @@ export function setFrostEnabled(on: boolean): void {
 
 // ---------------------------------------------------------------- GL-4 GPU 录制（视频-only 最小切片）
 
-export function startGpuRecord(fd: number, width: number, height: number, fps: number, bitrate: number): string {
-  return glLib.startGpuRecord(fd, width, height, fps, bitrate);
+export function startGpuRecord(fd: number, width: number, height: number, fps: number, bitrate: number,
+  arcMode: number, arcDstFps: number, deadband: number): string {
+  return glLib.startGpuRecord(fd, width, height, fps, bitrate, arcMode, arcDstFps, deadband);
 }
 
 export function stopGpuRecord(): string {
@@ -61,4 +62,26 @@ export function isGpuRecording(): boolean {
 
 export function getGpuRecordError(): string {
   return glLib.getGpuRecordError();
+}
+
+// ---------------------------------------------------------------- GL-4 光弧链在线版
+
+export function flushArcPending(): number {
+  return glLib.flushArcPending();
+}
+
+export function drainArcDrops(): string {
+  return glLib.drainArcDrops();
+}
+
+export function measuredArcSrcFps(): number {
+  return glLib.measuredArcSrcFps();
+}
+
+export function getGpuFrameCounters(): string {
+  return glLib.getGpuFrameCounters();
+}
+
+export function getArcEffectiveMode(): number {
+  return glLib.getArcEffectiveMode();
 }

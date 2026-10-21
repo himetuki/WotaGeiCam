@@ -6,6 +6,7 @@
  */
 #include "codec_recorder.h"
 #include "gl_render.h"
+#include "wota_math.h"
 
 #include <hilog/log.h>
 #include <multimedia/player_framework/native_avbuffer.h>
@@ -27,16 +28,6 @@ int64_t NowUs()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-int32_t NormalizeDegrees(int32_t deg)
-{
-    return ((deg % 360) + 360) % 360;
-}
-
-/** 0/90/180/270 四舍五入（上游 OrientationExport.normalizeQuarter）：45→90、359→0 */
-int32_t NormalizeQuarter(int32_t deg)
-{
-    return ((NormalizeDegrees(deg) + 45) / 90 % 4) * 90;
-}
 } // namespace
 
 CodecRecorder& CodecRecorder::Instance()
@@ -128,11 +119,11 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     // 容器旋转 hint（须在 muxer Start 前）：编码 UV 只送缓冲原样帧（stRotDeg、不镜像），
     // 竖屏转正靠这里（上游 orientationHint 同义）。muxer 只接受 0/90/180/270，按上游
     // normalizeQuarter 四舍五入（45→90、359→0），非 90 倍数 sensor 不得让起录失败。
-    const int32_t rawRotation = NormalizeDegrees(rotation);
-    const int32_t safeRotation = NormalizeQuarter(rawRotation);
+    const int32_t rawRotation = WotaNormalizeDeg(rotation);
+    const int32_t safeRotation = WotaNormalizeQuarter(rawRotation);
     if (OH_AVMuxer_SetRotation(muxer_, safeRotation) != AV_ERR_OK) {
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_RECORD_TAG,
-            "muxer set rotation failed raw=%{public}d rounded=%{public}d",
+            "muxer set rotation failed rotation=%{public}d rounded=%{public}d",
             rawRotation, safeRotation);
         return fail("muxer-rotation");
     }
@@ -146,8 +137,8 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     }
     state_ = State::RECORDING;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_RECORD_TAG,
-        "gpu record started %{public}dx%{public}d@%{public}d bitrate=%{public}d rotation raw=%{public}d rounded=%{public}d",
-        width, height, fps, bitrate, rawRotation, safeRotation);
+        "gpu record started %{public}dx%{public}d@%{public}d bitrate=%{public}d rotation=%{public}d (normalized; raw in WotaGl log)",
+        width, height, fps, bitrate, safeRotation);
     return "";
 }
 
