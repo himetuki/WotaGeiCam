@@ -72,9 +72,10 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] GL 离屏基础设施与毛玻璃（GL-3，2026-10-21）：FBO/RT（尺寸/offset 纯函数逐行）、OES→2D 拷贝→横向→纵向高斯三趟链（weights 逐值、highp 退避、错误连击停链）、PASS_THROUGH_2D 上屏、全屏毛玻璃开关；ARC_MERGE/画板几何/NtscGrid 留待后续批
 - [x] GL 编码面与 GPU 录制最小切片（GL-4，2026-10-21）：EGL 第二编码面（复用缓存 config）+ 每帧第二趟编码 pass（编码 UV deg=stRotDeg 不镜像、**不碰 frost**）、OH_VideoEncoder(surface)+OH_AVMuxer(fd, MPEG_4) 直写视频-only MP4（PTS wall-clock 相对段基准 µs）、muxer SetRotation(normalizeQuarter(sensor−display)) 容器旋转（四舍五入到 0/90/180/270）；编码 pass 恢复上屏上下文失败 1 次即中止，g_displayCtxLost 帧级守卫重试上限 60 帧、GlRecorder（fd 归 ArkTS/VideoStore 落盘与余量预检/停录摘要）、页面「录 GPU/停录」闭环（500ms 监视 native 录制态）；上批 P3 ×4（frost 停链释放与开关复位、半成功纹理不泄漏、首开预编、曲线失败用户动作重试）。留白：音频轨/分段/抽帧/FrameLedger/.drops.json/参数下发
 - [x] GL-4 光弧链在线版（2026-10-21）：ARC_MERGE_FS（整像素选择+差分死区）与 ArcMendPass（cur+pending×2+acc×2）、ArcKeepRule/ArcRepairFlow C++ 逐行对拍、MEND/DROP 只吃新相机帧、停录 flush 滞留帧、MEND→DROP 降级、`.drops.json` sidecar、原生五格帧账 + camera frameStart 合成、页面三态转换（关/补弧24/抽帧24）；上批 P3 ×4（旋转角共享归一/STOP 竞态/活跃判据/上下文恢复与 60 帧重试上限）。留白：音频轨/分段/参数下发/PTS 网格化/成片名前缀/离线修复
-- [x] 媒体库最小版（2026-10-21）：`media/WotaDb.ets`（RDB 四表：media_tag/trash_item/media_series/series_part，version 1）、`MediaRepo`（私有 videos 扫描 + AVMetadata 1.5s 超时 + FNV-1a ID + 标签/回收站联表 + 收藏/入回收站/还原/彻底删除）、`MediaTag`/`MediaFormat`（TagSpace/页签/clampedSelection/时间线/时长/大小）、`pages/Gallery`（全部/收藏/回收站三页签、二次确认删除、元信息面板）、Index/GlPreview 入口；上批 P3×6（帧账录制纪元/sidecar 诊断门控/flush swapFail/上下文丢失提示/实测账整场口径/MEND attach 重试）。留白：播放器/缩略图/相册入库/分享/重命名/自定义标签/系列折叠/自定义页签
+- [x] 媒体库最小版（2026-10-21）：`media/WotaDb.ets`（RDB 四表：media_tag/trash_item/media_series/series_part，version 1）、`MediaRepo`（私有 videos 扫描 + AVMetadata 1.5s 超时 + FNV-1a ID + 标签/回收站联表 + 收藏/入回收站/还原/彻底删除）、`MediaTag`/`MediaFormat`（TagSpace/页签/clampedSelection/时间线/时长/大小）、`pages/Gallery`（全部/收藏/回收站三页签、二次确认删除、元信息面板）、Index/GlPreview 入口；上批 P3×6（帧账录制纪元/sidecar 诊断门控/flush swapFail/上下文丢失提示/实测账整场口径/MEND attach 重试）。留白：缩略图/相册入库/分享/重命名/自定义标签/系列折叠/自定义页签
+- [x] 播放器最小版（2026-10-21）：AVPlayer+XComponent(SURFACE) 播放、进度/暂停、逐帧（FrameStep+SEEK_CLOSEST）、A/B 会话循环、平台倍速档、帧率侧车/默认/手动、镜像与双指缩放平移；Gallery 卡片进播放页、返回刷新；媒体库 P3×5（探测缓存模块化/重试 DB/页签失败回退/sidecar 错误区分/open 进超时）。平台偏离：倍速 0.125/0.25/0.5/0.75/1.0（无 0.1/0.3）；帧率来自 .drops.json→30→手动。留白：对比播放/选轨/剪辑导出/AB 持久化/旋转观看/缩略图
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
-- [ ] 播放器 / 媒体库 / 剪辑导出
+- [x] 媒体库 + 播放器最小版（剪辑导出仍留白）
 - [ ] 双音轨（内录）与蓝牙面板
 - [ ] 更新检查（GitHub Releases）

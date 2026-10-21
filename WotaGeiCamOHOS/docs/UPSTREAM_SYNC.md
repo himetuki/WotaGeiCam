@@ -54,6 +54,10 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | `record/ArcRepairPlan.kt`（ArcRepairFlow 在线路） | 抽帧状态机指令序 Hold/Fold/Emit/Merge（C++ `cpp/arc_flow.*` 逐行对拍） |
 | `camera/Shaders.kt`（ARC_MERGE_FS） | 补弧整像素选择片元（严格大于死区取被抽帧；`cpp/shaders.h` 逐 token） |
 | `camera/ArcMendPass.kt` | 补弧离屏拓扑 cur+pending×2+acc×2 与指令原语（`cpp/arc_mend_pass.*`） |
+| `player/FrameStep.kt` | 帧步进纯帧号算术（1.5ms 吸附/floor+1/ceil−1；`player/FrameStep.ets`） |
+| `player/TapArbiter.kt` | 单击/双击 280ms 仲裁（`player/TapArbiter.ets`） |
+| `player/PlayerEngine.kt` | AVPlayer 封装/AB 会话循环/倍速/120ms 轮询（`player/PlayerEngine.ets`） |
+| `player/PlayerScreen.kt` | 播放页控制层/手势/缩放平移（`pages/Player.ets`） |
 | `record/FrameLedger.kt` | 录制帧账输出格式 |
 | `record/BitratePolicy.kt`、`record/AutoStopRules.kt` | 码率策略、3.5 GiB 分段轮转与自停判据 |
 | `record/SeriesIds.kt`、`record/PendingName.kt` | 段命名/系列命名规则，跨平台素材互认的关键 |

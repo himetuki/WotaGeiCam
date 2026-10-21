@@ -48,19 +48,19 @@
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 38d712a。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
-| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize。落地 2026-10-21，对齐上游 38d712a。留白：SeriesStore/SeriesGroup 归组 UI、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记） | ☑ 部分 |
+| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize。落地 2026-10-21，对齐上游 38d712a。留白：SeriesStore/SeriesGroup 归组 UI、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
-| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板（提示播放器下一批）。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。留白：缩略图、播放/全屏、时间线/网格/全屏滑动切换、自定义标签页、系列折叠、分享、重命名、MediaStore 相册 | ☑ 部分 |
+| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。留白：缩略图、对比播放、全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、系列折叠、分享、重命名、MediaStore 相册 | ☑ 部分 |
 
 ## player — 播放器 / 对比 / 剪辑
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `PlayerEngine.kt` | 平台绑定 | `@ohos.multimedia.media` AVPlayer + XComponent(Surface) | ☐ |
+| `PlayerEngine.kt` | 平台绑定 | `player/PlayerEngine.ets` + `pages/Player.ets` 最小版：AVPlayer + XComponent(SURFACE) + fdSrc、prepare/play/pause/seek、逐帧（SEEK_CLOSEST + FrameStep 栅格/pending 锚点）、A/B 会话内循环（position 轮询回绕 + abWrapInFlight）、倍速（平台档 0.125/0.25/0.5/0.75/1.0，上游 0.1/0.3 偏离登记）、120ms 位置轮询、释放先 off 再 release。落地 2026-10-21，对齐上游 38d712a。平台偏离：AVPlayer 无帧率读数（.drops.json dstFps→30→页面 24/25/30 手动）、无 SeekParameters（SEEK_CLOSEST，真机若落同步帧退 SEEK_PREV_SYNC 登记）。留白：对比播放、双轨/选轨、剪辑导出、AB 持久化、旋转观看、缩略图、音轨菜单 | ☑ 部分 |
 | `AudioSync.kt`、`CompareAudio.kt`（对齐数学） | 纯逻辑 | 直译 | ☐ |
-| `FrameStep.kt`、`TapArbiter.kt`、`CompareTimeline.kt`、`ComparePractice.kt`、`CompareHistory.kt` | 纯逻辑为主 | 直译 | ☐ |
+| `FrameStep.kt`、`TapArbiter.kt`、`CompareTimeline.kt`、`ComparePractice.kt`、`CompareHistory.kt` | 纯逻辑为主 | `player/FrameStep.ets`（SNAP_TOL_MS=1.5、floor+1/ceil−1、duration 钳制）、`player/PlayerModel.ets`（AbRange valid、倍速档/最近档、clampPan 半域）、`player/TapArbiter.ets`（280ms 双击窗口）逐行直译；CompareTimeline/ComparePractice/CompareHistory 随对比播放批 | ☑ 部分 |
 | `ClipExport.kt`、`RemuxOrientation.kt` | 平台绑定（封装逻辑纯） | NDK demux/remux 或 `@ohos.multimedia.media` AVMuxer/AVExtractor | ☐ |
-| `PlayerScreen.kt`、`CompareScreen.kt` | UI | ArkUI 重写（AB 循环/逐帧/倍速/双轨对比交互照搬） | ☐ |
+| `PlayerScreen.kt`、`CompareScreen.kt` | UI | `pages/Player.ets` 最小版：播放画面/进度条/播放暂停/逐帧/A-B/倍速/帧率/镜像、单击显隐、双击启停、双指缩放平移（clampPan）；Gallery 卡片进入、返回刷新。落地 2026-10-21。CompareScreen 对比播放留待后续批；全屏手势锁定/字幕/音轨菜单/AB 持久化留白 | ☑ 部分 |
 
 ## record — 录制链路（移植重心）
 

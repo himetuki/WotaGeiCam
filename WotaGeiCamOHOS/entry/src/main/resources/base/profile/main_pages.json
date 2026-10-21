@@ -2,6 +2,7 @@
   "src": [
     "pages/Index",
     "pages/GlPreview",
-    "pages/Gallery"
+    "pages/Gallery",
+    "pages/Player"
   ]
 }

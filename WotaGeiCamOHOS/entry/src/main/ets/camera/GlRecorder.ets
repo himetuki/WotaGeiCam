@@ -299,7 +299,8 @@ export class GlRecorder {
       try {
         const cameraDelta: number = delta(endSnap.cameraStarted, startSnap.cameraStarted);
         const glCbDelta: number = delta(endCounters.glCallbacks, startCounters.glCallbacks);
-        // frameStart 不可用（注册失败/平台未派发）时由录制纪元门控兜底；上界取两者较大值
+        // 相机帧是**到达上界**：frameStart 队列偏差/注册失败/平台未派发都会让计数偏大或退化，
+        // 故取 max(cameraDelta, glCbDelta)；仅作量级诊断，不得当精确丢帧数（PORT_MAP 登记）
         const cameraFrames: number = Math.max(cameraDelta, glCbDelta);
         const report: FrameLedgerReport = new FrameLedgerReport(
           0, true, durationMs,

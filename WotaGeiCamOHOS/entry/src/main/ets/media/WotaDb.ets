@@ -123,11 +123,42 @@ function placeholders(n: number): string {
 export class WotaDb {
   private static instance: WotaDb | undefined = undefined;
   private static opening: Promise<WotaDb> | undefined = undefined;
+  /** 单例代际：reset/get 自增；只有当前代 open 能写 instance/opening，防旧 open 复活 */
+  private static generation: number = 0;
 
   private store: relationalStore.RdbStore;
 
   private constructor(store: relationalStore.RdbStore) {
     this.store = store;
+  }
+
+  static currentGeneration(): number {
+    return WotaDb.generation;
+  }
+
+  /**
+   * 供 MediaRepo 重试：先自增代际作废旧在途 open，等待旧的 opening 落定（其内部会 close 自己），
+   * 再关闭已打开实例并清空单例，让下一次 get() 重新打开/建表。
+   */
+  static async resetForRetry(): Promise<void> {
+    WotaDb.generation++;
+    const inst: WotaDb | undefined = WotaDb.instance;
+    const pending: Promise<WotaDb> | undefined = WotaDb.opening;
+    WotaDb.instance = undefined;
+    WotaDb.opening = undefined;
+    if (pending !== undefined) {
+      try {
+        await pending;
+      } catch (e) {
+        // 旧 open 已失败/作废；其 catch 已 close 自己的 store
+      }
+    }
+    if (inst !== undefined) {
+      try {
+        await inst.store.close();
+      } catch (e) {
+      }
+    }
   }
 
   static get(ctx: common.Context): Promise<WotaDb> {
@@ -137,14 +168,29 @@ export class WotaDb {
     if (WotaDb.opening !== undefined) {
       return WotaDb.opening;
     }
-    WotaDb.opening = WotaDb.open(ctx);
-    return WotaDb.opening;
+    const gen: number = ++WotaDb.generation;
+    const tracked: Promise<WotaDb> = WotaDb.open(ctx, gen).then((db: WotaDb): WotaDb => {
+      if (WotaDb.opening === tracked) {
+        WotaDb.opening = undefined;
+      }
+      return db;
+    }, (e: Object): WotaDb => {
+      if (WotaDb.opening === tracked) {
+        WotaDb.opening = undefined;
+      }
+      throw e as Error;
+    });
+    WotaDb.opening = tracked;
+    return tracked;
   }
 
-  private static async open(ctx: common.Context): Promise<WotaDb> {
+  private static async open(ctx: common.Context, gen: number): Promise<WotaDb> {
     let store: relationalStore.RdbStore | undefined = undefined;
     try {
       store = await relationalStore.getRdbStore(ctx, STORE_CONFIG);
+      if (gen !== WotaDb.generation) {
+        throw new Error('stale-open'); // 代际已变：本次结果作废
+      }
       // 上游 Room fallbackToDestructiveMigration 的等价物：版本不匹配时先 close 再删库重建
       // （收藏/标签/回收站会一起丢，登记于 PORT_MAP）
       if (store.version !== 0 && store.version !== DB_VERSION) {
@@ -154,9 +200,15 @@ export class WotaDb {
         await relationalStore.deleteRdbStore(ctx, DB_NAME);
         store = await relationalStore.getRdbStore(ctx, STORE_CONFIG);
       }
+      if (gen !== WotaDb.generation) {
+        throw new Error('stale-open');
+      }
       const active: relationalStore.RdbStore = store;
       const db: WotaDb = new WotaDb(active);
       await db.ensureSchema();
+      if (gen !== WotaDb.generation) {
+        throw new Error('stale-open'); // 建表期间被 reset：不写 instance
+      }
       WotaDb.instance = db;
       Diag.i(TAG, `rdb opened ${DB_NAME} v${active.version}`);
       return db;
@@ -169,7 +221,6 @@ export class WotaDb {
         store = undefined;
       }
       Diag.e(TAG, `rdb open/schema failed: ${e}`);
-      WotaDb.opening = undefined;
       throw e as Error;
     }
   }
@@ -206,6 +257,44 @@ export class WotaDb {
       await this.store.executeSql('DELETE FROM media_tag WHERE mediaId = ? AND tag = ?', [mediaId, tag]);
     } catch (e) {
       Diag.e(TAG, `deleteTag failed mediaId=${mediaId} tag=${tag}: ${e}`);
+      throw e as Error;
+    }
+  }
+
+  /** 单条标签（播放页轻量定位用；与 allTags 同表） */
+  async tagsOf(mediaId: number): Promise<Array<string>> {
+    const tags: Array<string> = [];
+    let rs: relationalStore.ResultSet | undefined = undefined;
+    try {
+      rs = await this.store.querySql(
+        'SELECT tag FROM media_tag WHERE mediaId = ? ORDER BY createdAt', [mediaId]);
+      while (rs.goToNextRow()) {
+        tags.push(rs.getString(0));
+      }
+      return tags;
+    } catch (e) {
+      Diag.e(TAG, `tagsOf failed mediaId=${mediaId}: ${e}`);
+      throw e as Error;
+    } finally {
+      if (rs !== undefined) {
+        try {
+          rs.close();
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  /** 按行主键删除标签（孤儿清理专用：不得按 mediaId 全删，避免 FNV 碰撞误删有效成片标签） */
+  async deleteTagsByIds(ids: Array<number>): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    try {
+      await this.store.executeSql(
+        `DELETE FROM media_tag WHERE id IN (${placeholders(ids.length)})`, ids);
+    } catch (e) {
+      Diag.e(TAG, `deleteTagsByIds failed n=${ids.length}: ${e}`);
       throw e as Error;
     }
   }
@@ -282,6 +371,30 @@ export class WotaDb {
     } catch (e) {
       Diag.e(TAG, `removeTrashAll failed n=${uris.length}: ${e}`);
       throw e as Error;
+    }
+  }
+
+  /** 单条回收站记录（uri=成片绝对路径） */
+  async trashByUri(uri: string): Promise<TrashItemRow | undefined> {
+    let rs: relationalStore.ResultSet | undefined = undefined;
+    try {
+      rs = await this.store.querySql(
+        'SELECT uri, mediaId, name, deletedAt, origin FROM trash_item WHERE uri = ?', [uri]);
+      if (rs.goToNextRow()) {
+        return new TrashItemRow(rs.getString(0), rs.getLong(1), rs.getString(2), rs.getLong(3),
+          rs.getString(4));
+      }
+      return undefined;
+    } catch (e) {
+      Diag.e(TAG, `trashByUri failed ${uri}: ${e}`);
+      throw e as Error;
+    } finally {
+      if (rs !== undefined) {
+        try {
+          rs.close();
+        } catch (e) {
+        }
+      }
     }
   }
 
@@ -378,6 +491,17 @@ export class WotaDb {
         } catch (e) {
         }
       }
+    }
+  }
+
+  /** 按 (seriesId,partIndex) 主键删除系列成员（孤儿清理；不用 mediaId 防碰撞误删） */
+  async deleteSeriesPart(seriesId: number, partIndex: number): Promise<void> {
+    try {
+      await this.store.executeSql(
+        'DELETE FROM series_part WHERE seriesId = ? AND partIndex = ?', [seriesId, partIndex]);
+    } catch (e) {
+      Diag.e(TAG, `deleteSeriesPart failed ${seriesId}/${partIndex}: ${e}`);
+      throw e as Error;
     }
   }
 

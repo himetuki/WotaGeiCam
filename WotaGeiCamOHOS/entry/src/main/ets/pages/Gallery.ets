@@ -2,7 +2,7 @@
  * 媒体库最小版（对应上游 media/GalleryScreen.kt 的列表/页签/动作子集，对齐上游 38d712a）：
  * - 三页签：全部 / 收藏 / 回收站（自定义标签页留待标签管理批）；
  * - 卡片：文件名、时长、大小、日期、收藏星标、动作按钮；占位块不做缩略图；
- * - 点击卡片只显示元信息并提示"播放器将在下一批接入"，不启动播放；
+ * - 点击卡片进入播放页；「信息」按钮显示元信息面板；
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
@@ -41,6 +41,8 @@ struct Gallery {
   /** 异步竞态：只接受最新一次加载；页面销毁后丢弃所有回包 */
   private requestSeq: number = 0;
   private disposed: boolean = false;
+  /** 从播放页返回（onPageShow）时刷新；首次进入不重复（aboutToAppear 已加载） */
+  private pageShownOnce: boolean = false;
 
   aboutToAppear(): void {
     this.disposed = false;
@@ -53,6 +55,16 @@ struct Gallery {
     }
     this.repo = new MediaRepo(ctx);
     this.refreshAll();
+  }
+
+  onPageShow(): void {
+    if (!this.pageShownOnce) {
+      this.pageShownOnce = true;
+      return;
+    }
+    if (!this.disposed) {
+      this.refreshAll();
+    }
   }
 
   aboutToDisappear(): void {
@@ -133,6 +145,8 @@ struct Gallery {
     if (this.tabs.length === 0) {
       return;
     }
+    const prevIndex: number = this.selectedTab;
+    const prevClips: Array<VideoClip> = this.clips;
     const sel = GalleryTabs.clampedSelection(this.tabs, index, this.currentTab().filter);
     this.selectedTab = sel.index;
     const repo: MediaRepo | undefined = this.repo;
@@ -160,11 +174,43 @@ struct Gallery {
       this.clips = list;
     } catch (e) {
       if (!this.disposed && seq === this.requestSeq) {
+        // 失败回退到原页签与原列表，避免空列表/错位
+        this.selectedTab = prevIndex;
+        this.clips = prevClips;
         this.applyDbAvailability(repo);
-        this.message = `加载失败: ${e}`;
+        this.message = `加载失败（已回退）: ${e}`;
       }
     } finally {
       // 页签切换也收尾 loading（刷新在途被新请求顶掉时，旧请求不会清）
+      if (!this.disposed && seq === this.requestSeq) {
+        this.loading = false;
+      }
+    }
+  }
+
+  private async retryDb(): Promise<void> {
+    const repo: MediaRepo | undefined = this.repo;
+    if (repo === undefined || this.loading) {
+      return;
+    }
+    const seq: number = ++this.requestSeq;
+    this.loading = true;
+    try {
+      const ok: boolean = await repo.retryDb();
+      if (this.disposed || seq !== this.requestSeq) {
+        return;
+      }
+      this.applyDbAvailability(repo);
+      if (ok) {
+        await this.refreshAll('数据库已恢复');
+      } else {
+        this.message = '数据库仍不可用：保持仅文件列表';
+      }
+    } catch (e) {
+      if (!this.disposed && seq === this.requestSeq) {
+        this.message = `数据库重试失败: ${e}`;
+      }
+    } finally {
       if (!this.disposed && seq === this.requestSeq) {
         this.loading = false;
       }
@@ -198,12 +244,20 @@ struct Gallery {
     return '先在 GL 试验页录制一段 GPU 视频';
   }
 
+  private openPlayer(clip: VideoClip): void {
+    try {
+      this.getUIContext().getRouter().pushUrl({ url: 'pages/Player', params: { id: clip.id, path: clip.path } });
+    } catch (e) {
+      this.message = `打开播放页失败: ${e}`;
+    }
+  }
+
   private showDetailOf(clip: VideoClip): void {
     const tags: string = clip.tags.size === 0 ? '无' : Array.from(clip.tags).join(', ');
     this.detailName = clip.name;
     this.detailMeta = `${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)} · ` +
       `${formatDate(clip.dateAddedSec)}\n${clip.width}x${clip.height} · ${clip.mimeType}\n` +
-      `标签: ${tags}\n路径: ${clip.relativePath}\n播放器将在下一批接入`;
+      `标签: ${tags}\n路径: ${clip.relativePath}\n`;
     this.showDetail = true;
   }
 
@@ -289,6 +343,12 @@ struct Gallery {
   @Builder
   private actionRow(clip: VideoClip) {
     Row({ space: 6 }) {
+      Button('信息')
+        .fontSize(11)
+        .height(26)
+        .onClick((): void => {
+          this.showDetailOf(clip);
+        })
       if (this.selectedTab === 2) {
         Button('还原')
           .fontSize(11)
@@ -360,11 +420,24 @@ struct Gallery {
       .padding({ left: 12, right: 12 })
 
       if (this.message !== '') {
-        Text(this.message)
-          .fontSize(11)
-          .fontColor('#FFCC80')
-          .maxLines(2)
-          .padding({ left: 12, right: 12 })
+        Row({ space: 8 }) {
+          Text(this.message)
+            .fontSize(11)
+            .fontColor('#FFCC80')
+            .maxLines(2)
+            .layoutWeight(1)
+          if (!this.dbOk) {
+            Button('重试数据库')
+              .fontSize(11)
+              .height(26)
+              .enabled(!this.loading)
+              .onClick((): void => {
+                this.retryDb();
+              })
+          }
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12 })
       }
 
       if (this.loading) {
@@ -409,7 +482,7 @@ struct Gallery {
                   .backgroundColor('#37474F')
                   .borderRadius(6)
                   .onClick((): void => {
-                    this.showDetailOf(clip);
+                    this.openPlayer(clip);
                   })
 
                   Column({ space: 2 }) {
@@ -431,7 +504,7 @@ struct Gallery {
                   .layoutWeight(1)
                   .alignItems(HorizontalAlign.Start)
                   .onClick((): void => {
-                    this.showDetailOf(clip);
+                    this.openPlayer(clip);
                   })
                 }
                 this.actionRow(clip)
