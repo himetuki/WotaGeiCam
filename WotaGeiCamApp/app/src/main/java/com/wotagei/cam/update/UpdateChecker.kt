@@ -150,12 +150,20 @@ class MirrorChain(private val nodes: List<MirrorNode>) {
 data class ReleaseAsset(val name: String, val url: String, val sizeBytes: Long?)
 
 /**
- * latest release 的最小结论：tag + 挑出来的 APK 附件。
+ * latest release 的最小结论：tag + 挑出来的 APK 附件 + 说明原文。
  * [sha256] = 发版者写在 Release 说明里的 universal 包 SHA-256（十六进制小写）。只有**段 1
  * （api.github.com 官方端点）**才提取——镜像转发的 body 不可信；null = 无可信哈希，下载退回
  * 现有防线（PK 魔数 + size 一致性 + 安装签名网）。
+ * [notes] = 同一份说明原文（Markdown，未加工），供更新弹窗展示。与 [sha256] 共用同一道信任
+ * 门槛：**只有段 1 有**，镜像转发的一律不采信——弹窗里的文字是 app 代替发版者说的话，
+ * 不能由中间代理决定。
  */
-data class ReleaseInfo(val tag: String, val asset: ReleaseAsset?, val sha256: String? = null)
+data class ReleaseInfo(
+    val tag: String,
+    val asset: ReleaseAsset?,
+    val sha256: String? = null,
+    val notes: String? = null
+)
 
 /** GitHub releases/latest JSON 的免依赖提取器（手写，只认我们关心的三个键，够用即可） */
 object ReleaseJson {
@@ -204,19 +212,25 @@ object ReleaseJson {
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }
 
-    fun parse(json: String): ReleaseInfo? = parse(json, extractSha256 = false)
+    fun parse(json: String): ReleaseInfo? = parse(json, trustedNotes = false)
 
     /**
-     * [extractSha256]=true 时从 Release 说明（body）提取发版者写入的 universal 包 SHA-256。
+     * [trustedNotes]=true 时才读 Release 说明（body）：从中提取发版者写入的 universal 包 SHA-256，
+     * 并把说明原文交给 [ReleaseInfo.notes]（更新弹窗展示）。
      * **只允许段 1（api.github.com 官方端点）开**：镜像转发的 body 代理可改，提取出来的哈希
-     * 没有可信度。说明文本的书写约定见发版流程：一行 `SHA256: <64位十六进制>`。
+     * 没有可信度，弹窗里的文字也会变成代理说了算。说明文本的书写约定见发版流程：
+     * 一行 `SHA256: <64位十六进制>`。
      */
-    fun parse(json: String, extractSha256: Boolean): ReleaseInfo? {
+    fun parse(json: String, trustedNotes: Boolean): ReleaseInfo? {
         val tag = parseTag(json) ?: return null
-        val sha256 = if (extractSha256) {
-            stringValueAfterKey(json, "body")?.let { parseSha256FromNotes(it) }
-        } else null
-        return ReleaseInfo(tag, pickApkAsset(parseAssets(json)), sha256)
+        // body 只读一次：sha256 与 notes 取自同一段文本
+        val body = if (trustedNotes) stringValueAfterKey(json, "body") else null
+        return ReleaseInfo(
+            tag = tag,
+            asset = pickApkAsset(parseAssets(json)),
+            sha256 = body?.let { parseSha256FromNotes(it) },
+            notes = body
+        )
     }
 
     /**
@@ -329,6 +343,75 @@ object ReleaseJson {
     }
 }
 
+/**
+ * Release 说明 → 更新弹窗里的纯文本（2026-10-21，用户要求「更新弹窗展示 notes」）。
+ *
+ * 说明由发版者手写 Markdown（`###` 标题、`**粗体**`、`- ` 条目，末尾还有一行给自动校验用的
+ * `SHA256: <hex>`）。工程里没有 Markdown 渲染器，也不为它引依赖，所以这里只做**去标记、不重排内容**：
+ * - 标题/条目/粗体/行内代码的标记去掉，正文文字一字不改；
+ * - 机器用的 SHA-256 行、以及它上面只有标签的那一行（`- universal 包 SHA256：`）整行隐去——
+ *   哈希由 app 静默校验，弹窗里 64 位十六进制只是噪声；
+ * - 超过 [MAX_DISPLAY_CHARS] 截断并补省略号：说明来自 GitHub（单条上限 12.5 万字符），
+ *   整段塞进 Compose Text 会把弹窗排版拖垮。
+ *
+ * 纯函数、零 android import（与 [UpdateChecker] 其余部分同一条 JVM 可测线）。
+ */
+object ReleaseNotes {
+
+    /** 弹窗最多展示的字数（绝对字面量；约 100 行，远超本项目单次发布说明的实际长度） */
+    const val MAX_DISPLAY_CHARS = 4000
+
+    /** 机器用的哈希行：`SHA256: <64 位十六进制>`（整行隐去） */
+    private val HASH_LINE = Regex("SHA256\\s*[:：]\\s*[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+
+    /** 只有标签、哈希在下一行的写法（发版说明的真实形态：`- universal 包 SHA256：`） */
+    private val HASH_LABEL_ONLY = Regex("^.*SHA256\\s*[:：]\\s*$")
+
+    /** `### 标题` → `标题` */
+    private val HEADING = Regex("^\\s*#{1,6}\\s+")
+
+    /** `- 条目` / `* 条目` / `+ 条目` → `• 条目`（保留缩进层级） */
+    private val BULLET = Regex("^(\\s*)[-*+]\\s+")
+
+    /** Markdown 分隔线（`---` / `***` / `___`）：没有任何信息 */
+    private val RULE = Regex("^[-*_]{3,}$")
+
+    /** 说明原文 → 弹窗可展示的纯文本；全空 / 只剩哈希行时返回 null（弹窗不显示说明区） */
+    fun forDisplay(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        val out = ArrayList<String>()
+        for (line in raw.replace("\r\n", "\n").replace('\r', '\n').split('\n')) {
+            val trimmed = line.trim()
+            if (HASH_LINE.containsMatchIn(trimmed) || HASH_LABEL_ONLY.matches(trimmed)) continue
+            if (trimmed.isEmpty()) {
+                out.add("")
+                continue
+            }
+            if (RULE.matches(trimmed)) continue
+            var s = line.trimEnd()
+            s = HEADING.replace(s, "")
+            s = BULLET.replace(s, "$1• ")
+            // 成对的粗体/行内代码标记去掉，文字本身一字不改
+            s = s.replace("**", "").replace("__", "").replace("`", "")
+            out.add(s)
+        }
+        val text = out.joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trim()
+        if (text.isEmpty()) return null
+        return if (text.length <= MAX_DISPLAY_CHARS) text else truncateAtLine(text)
+    }
+
+    /** 截断：优先退到行边界（不留半句话）；退得太远（不足一半）就地硬截，末尾补一行省略号 */
+    private fun truncateAtLine(text: String): String {
+        var cut = MAX_DISPLAY_CHARS
+        val lineBreak = text.lastIndexOf('\n', cut - 1)
+        if (lineBreak > cut / 2) cut = lineBreak
+        var head = text.substring(0, cut).trimEnd()
+        // 硬截可能落在代理对中间（emoji 被劈成半个），退一格
+        if (head.isNotEmpty() && Character.isHighSurrogate(head.last())) head = head.dropLast(1)
+        return head + "\n…"
+    }
+}
+
 /** 段 3：releases/latest 页 302 → tag 解析与资产名推导 */
 object RedirectProbe {
 
@@ -356,13 +439,15 @@ sealed interface ProbeResult {
     /**
      * 远端有新版：tag + 直连下载 URL（镜像链在下载时走）+ 资产名 + 大小（段 3 无 → null，下载时用 Content-Length）。
      * [sha256] 仅段 1 携带（官方端点的 Release 说明哈希，见 [ReleaseInfo.sha256]）；null = 下载退回现有防线。
+     * [notes] 同样仅段 1 携带（说明原文，弹窗展示时交给 [ReleaseNotes.forDisplay]）；段 2/3 恒 null。
      */
     data class UpdateAvailable(
         val latestTag: String,
         val assetName: String,
         val downloadUrl: String,
         val sizeBytes: Long?,
-        val sha256: String? = null
+        val sha256: String? = null,
+        val notes: String? = null
     ) : ProbeResult
 
     /** 已是最新 */
@@ -389,11 +474,13 @@ fun probeLatestRelease(
     fetchRedirectLocation: (String) -> String?,
     isCancelled: () -> Boolean = { false }
 ): ProbeResult {
-    // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信，提取 SHA-256 供下载后校验）
+    // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信——提取 SHA-256 供下载后校验，
+    // 同时把说明原文带给更新弹窗）
     if (isCancelled()) return ProbeResult.Cancelled
     jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, trustedNotes = true)?.let { return it }
     // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）。
-    // trustedNotes=false：镜像可改写 body，转发来的哈希没有可信度，宁可不校验也不拿假哈希当真。
+    // trustedNotes=false：镜像可改写 body，转发来的哈希没有可信度、说明文字也不采信，
+    // 宁可不校验/不展示也不拿代理给的文本当真。
     val chain = MirrorChain.probeChain()
     while (!chain.exhausted) {
         if (isCancelled()) return ProbeResult.Cancelled
@@ -421,13 +508,15 @@ fun probeLatestRelease(
  */
 private fun jsonNode(json: String?, localVersionName: String, trustedNotes: Boolean = false): ProbeResult? {
     json ?: return null
-    val info = ReleaseJson.parse(json, extractSha256 = trustedNotes) ?: return null
+    val info = ReleaseJson.parse(json, trustedNotes = trustedNotes) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
         info.asset != null -> {
             // 段 2 的 JSON 可能被镜像改写：URL 字段一律不信，用可信仓库常量 + 已校验资产名重建
             val url = UpdateConfig.directDownloadUrl(info.tag, info.asset.name)
-            ProbeResult.UpdateAvailable(info.tag, info.asset.name, url, info.asset.sizeBytes, info.sha256)
+            ProbeResult.UpdateAvailable(
+                info.tag, info.asset.name, url, info.asset.sizeBytes, info.sha256, info.notes
+            )
         }
         else -> null
     }

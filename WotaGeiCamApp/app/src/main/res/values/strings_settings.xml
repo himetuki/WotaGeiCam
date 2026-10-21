@@ -88,6 +88,8 @@
     <string name="set_update_failed">检查失败，请稍后重试</string>
     <string name="set_update_available_title">发现新版本</string>
     <string name="set_update_available_body">新版本 %1$s · APK %2$s</string>
+    <!-- 版本说明（GitHub Release notes 原文，去 Markdown 标记后展示） -->
+    <string name="set_update_notes_title">更新内容</string>
     <string name="set_update_download">下载更新</string>
     <string name="set_update_cancel">取消</string>
     <string name="set_update_downloading">正在下载更新</string>

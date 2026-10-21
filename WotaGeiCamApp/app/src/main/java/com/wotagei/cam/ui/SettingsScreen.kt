@@ -101,6 +101,7 @@ import com.wotagei.cam.ui.widget.TierItem
 import com.wotagei.cam.ui.widget.TierPicker
 import com.wotagei.cam.ui.widget.deadbandLadder
 import com.wotagei.cam.update.ProbeResult
+import com.wotagei.cam.update.ReleaseNotes
 import com.wotagei.cam.update.UpdateDownloader
 import com.wotagei.cam.update.UpdateInstaller
 import com.wotagei.cam.update.probeLatestRelease
@@ -1595,6 +1596,7 @@ private fun UpdateSection() {
         UpdatePromptDialog(
             tag = avail.latestTag,
             sizeText = apkSizeText(avail.sizeBytes),
+            notes = avail.notes,
             onDownload = {
                 available = null
                 // 修复轮 P2：取消标志按代隔离——每轮下载新建 AtomicBoolean 捕获进协程闭包，
@@ -1664,35 +1666,69 @@ private fun UpdateSection() {
     }
 }
 
-/** 提示更新对话框：新版本号 + APK 大小 + 下载/取消（系统安装确认属安装器职责，这里只管到「安装」） */
+/**
+ * 提示更新对话框：新版本号 + APK 大小 + 版本说明 + 下载/取消
+ * （系统安装确认属安装器职责，这里只管到「安装」）。
+ * [notes] 是 Release 说明原文（仅官方源探测才有，镜像段恒 null）；整形交给 [ReleaseNotes]，
+ * 原文为空时整块说明区不出现。
+ */
 @Composable
-private fun UpdatePromptDialog(tag: String, sizeText: String, onDownload: () -> Unit, onDismiss: () -> Unit) {
+private fun UpdatePromptDialog(
+    tag: String,
+    sizeText: String,
+    notes: String?,
+    onDownload: () -> Unit,
+    onDismiss: () -> Unit
+) {
     Dialog(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(WotaShape.dialog))
-                .background(WotaColor.surface)
-                .padding(20.dp)
-        ) {
-            Text(
-                text = stringResource(R.string.set_update_available_title),
-                style = MaterialTheme.typography.titleMedium,
-                color = WotaText
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = stringResource(R.string.set_update_available_body, tag, sizeText),
-                style = MaterialTheme.typography.bodyMedium,
-                color = WotaColor.textMid
-            )
-            Spacer(Modifier.height(18.dp))
-            UpdateDialogActions(
-                listOf(
-                    stringResource(R.string.set_update_cancel) to onDismiss,
-                    stringResource(R.string.set_update_download) to onDownload
+        BoxWithConstraints {
+            // 说明区限高：最多占窗口高度 40%（上限 260dp）——横屏小窗 + 上百行说明也不把按钮顶出屏幕
+            val notesMaxHeight = minOf(maxHeight * 0.4f, 260.dp)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(WotaShape.dialog))
+                    .background(WotaColor.surface)
+                    .padding(20.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.set_update_available_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = WotaText
                 )
-            )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.set_update_available_body, tag, sizeText),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WotaColor.textMid
+                )
+                val notesText = remember(notes) { ReleaseNotes.forDisplay(notes) }
+                if (notesText != null) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        text = stringResource(R.string.set_update_notes_title),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WotaTextDim
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = notesText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WotaColor.textMid,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = notesMaxHeight)
+                            .verticalScroll(rememberScrollState())
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
+                UpdateDialogActions(
+                    listOf(
+                        stringResource(R.string.set_update_cancel) to onDismiss,
+                        stringResource(R.string.set_update_download) to onDownload
+                    )
+                )
+            }
         }
     }
 }
