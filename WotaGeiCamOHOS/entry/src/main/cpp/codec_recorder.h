@@ -32,6 +32,13 @@ typedef struct OH_AVMuxer OH_AVMuxer;
 typedef struct OH_AVFormat OH_AVFormat;
 typedef struct OH_AVBuffer OH_AVBuffer;
 
+/** 录制健康三格单锁快照（trackAdded/muxStarted/samples） */
+struct HealthSnapshot {
+    bool trackAdded = false;
+    bool muxStarted = false;
+    int32_t samples = 0;
+};
+
 class CodecRecorder {
 public:
     static CodecRecorder& Instance();
@@ -58,6 +65,9 @@ public:
     bool IsVideoTrackAdded();
     bool IsMuxStarted();
     int32_t SampleCount();
+
+    /** 一次加锁读取三格（NAPI getGpuHealth 用） */
+    HealthSnapshot GetHealthSnapshot();
 
     /** 以指定原因中止录制（surface 丢失/编码 pass 连续失败/muxer 写失败）；内部走 Stop 清理 */
     void Abort(const std::string& reason);

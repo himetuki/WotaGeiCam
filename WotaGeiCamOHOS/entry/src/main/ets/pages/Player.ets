@@ -19,6 +19,12 @@ interface PlayerParams {
   path?: string;
 }
 
+/** Compare 页入参：左片 id + 路径提示（路径命中时 findById 不扫全库） */
+interface CompareRouteParams {
+  leftId: number;
+  leftPath: string;
+}
+
 const FPS_OPTIONS: Array<number> = [24, 25, 30];
 const TAP_WINDOW_MS: number = 280;
 
@@ -445,6 +451,17 @@ struct Player {
         .maxLines(1)
         .layoutWeight(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Button('对比')
+        .fontSize(11)
+        .enabled(this.videoClip !== undefined)
+        .onClick((): void => {
+          const clip: VideoClip | undefined = this.videoClip;
+          if (clip === undefined) {
+            return;
+          }
+          const params: CompareRouteParams = { leftId: clip.id, leftPath: clip.path };
+          this.getUIContext().getRouter().pushUrl({ url: 'pages/Compare', params: params });
+        })
       Button(`帧率:${this.fps}`)
         .fontSize(11)
         .onClick((): void => {

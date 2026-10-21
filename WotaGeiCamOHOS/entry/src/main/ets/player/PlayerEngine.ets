@@ -372,6 +372,24 @@ export class PlayerEngine {
     }
   }
 
+  /** 音量 0..1（夹紧）；对比播放左侧=1、右侧=0，静音=0 */
+  setVolume(volume: number): void {
+    const player: media.AVPlayer | undefined = this.av;
+    if (this.released || player === undefined) {
+      return;
+    }
+    const v: number = Math.min(1, Math.max(0, volume));
+    try {
+      player.setVolume(v);
+    } catch (e) {
+      Diag.w(TAG, `setVolume ${v} failed: ${e}`);
+    }
+  }
+
+  setMuted(muted: boolean): void {
+    this.setVolume(muted ? 0 : 1);
+  }
+
   setSpeed(tier: number): void {
     const normalized: number = PlayerSpeedTiers.normalize(tier);
     this.speed = normalized;

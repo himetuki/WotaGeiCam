@@ -20,7 +20,8 @@ import { ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Const
 import { AutoStopMonitor } from '../record/AutoStopMonitor';
 import { AutoStopRules } from '../record/AutoStopRules';
 import {
-  HealthVerdict, RecordHealthWindow, RetryAction, defaultRecordHealthWindow, healthVerdict, retryActionOf
+  FULL_WINDOW_MS, HealthVerdict, MAX_RESTART_ATTEMPTS, RecordHealthWindow, RetryAction,
+  defaultRecordHealthWindow, healthVerdict, retryActionOf
 } from '../record/RecordHealth';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
@@ -120,6 +121,7 @@ struct CameraPage {
   private healthAttempts: number = 0;
   private healthWindow: RecordHealthWindow = defaultRecordHealthWindow();
   private healthHealthy: boolean = false;
+  private healthPausedByHide: boolean = false;
   private lastReadoutMs: number = 0;
   private recordStartedAtMs: number = 0;
   private stopGraceTimer: number = -1;
@@ -158,6 +160,7 @@ struct CameraPage {
       return;
     }
     this.setKeepScreenOn(true);
+    this.resumeHealthAfterShow();
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
       return;
@@ -188,6 +191,9 @@ struct CameraPage {
   onPageHide(): void {
     this.pageVisible = false;
     this.cancelTapTimers();
+    if (this.recording && !this.healthHealthy && this.healthTimer >= 0) {
+      this.healthPausedByHide = true;
+    }
     this.stopHealthMonitor(); // 页面隐藏统一停健康巡检（录制中亦不后台读 native）
     if (!this.recording) {
       this.stopStatusTimer();
@@ -791,7 +797,22 @@ struct CameraPage {
     this.startRecordMonitor();
     this.startAutoStopMonitor(ctx);
     this.healthAttempts = 0;
+    this.healthPausedByHide = false;
     this.startHealthMonitor();
+  }
+
+  /** 页面恢复时续跑未完成的健康巡检（保留 healthStartMs，elapsed 继续累计） */
+  private resumeHealthAfterShow(): void {
+    if (!this.healthPausedByHide) {
+      return;
+    }
+    this.healthPausedByHide = false;
+    if (!this.recording || this.healthHealthy || this.stopPending || this.healthTimer >= 0) {
+      return;
+    }
+    this.healthTimer = setInterval((): void => {
+      this.checkHealth();
+    }, 500);
   }
 
   private startHealthMonitor(): void {
@@ -869,7 +890,8 @@ struct CameraPage {
     }
     const summary: string = this.finishRecord();
     this.discardEmptySegment(summary);
-    this.appendNotice('录制启动失败：3 秒内无视频样本（已重试 2 次）');
+    this.appendNotice(`录制启动失败：${Math.floor(FULL_WINDOW_MS / 1000)} 秒内无视频样本` +
+      `（已重试 ${MAX_RESTART_ATTEMPTS} 次）`);
   }
 
   private restartSegmentAfterHealthFailure(attempt: number): void {
@@ -898,18 +920,25 @@ struct CameraPage {
     this.startHealthMonitor();
   }
 
-  /** 仅当 samples=0 且 bytes<=0 才删空段；解析失败/有样本一律保留 */
+  /** 仅当 samples=0 且 bytes===0 才删空段；bytes<0 保留 triage；解析失败/有样本一律保留 */
   private discardEmptySegment(summary: string): void {
     const pathM: RegExpExecArray | null = new RegExp('path=([^ ]+)').exec(summary);
-    const bytesM: RegExpExecArray | null = new RegExp('bytes=(-?\d+)').exec(summary);
-    const samplesM: RegExpExecArray | null = new RegExp('samples=(\d+)').exec(summary);
+    const bytesM: RegExpExecArray | null = new RegExp('bytes=(-?\\d+)').exec(summary);
+    const samplesM: RegExpExecArray | null = new RegExp('samples=(\\d+)').exec(summary);
     if (pathM === null || bytesM === null || samplesM === null) {
       return;
     }
     const path: string = pathM[1];
     const bytes: number = Number(bytesM[1]);
     const samples: number = Number(samplesM[1]);
-    if (path === '' || samples > 0 || bytes > 0) {
+    if (path === '' || samples > 0) {
+      return;
+    }
+    if (bytes < 0) {
+      Diag.w(WOTA_RECORD_TAG, `segment bytes unobservable, keep for triage: ${path}`);
+      return;
+    }
+    if (bytes > 0) {
       return;
     }
     VideoStore.discard(path);
@@ -1041,6 +1070,7 @@ struct CameraPage {
     this.stopAutoStopMonitor();
     this.stopRecordMonitor();
     this.stopHealthMonitor();
+    this.healthPausedByHide = false;
     const summary: string = this.recorder.stop();
     this.recording = false;
     this.stopPending = false;

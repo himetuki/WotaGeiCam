@@ -331,9 +331,9 @@ static napi_value GetGpuWrittenBytes(napi_env env, napi_callback_info info)
 static napi_value GetGpuHealth(napi_env env, napi_callback_info info)
 {
     (void)info;
-    std::string health = std::string(CodecRecorder::Instance().IsVideoTrackAdded() ? "1" : "0") + "," +
-        (CodecRecorder::Instance().IsMuxStarted() ? "1" : "0") + "," +
-        std::to_string(CodecRecorder::Instance().SampleCount());
+    const HealthSnapshot snapshot = CodecRecorder::Instance().GetHealthSnapshot();
+    std::string health = std::string(snapshot.trackAdded ? "1" : "0") + "," +
+        (snapshot.muxStarted ? "1" : "0") + "," + std::to_string(snapshot.samples);
     return MakeString(env, health);
 }
 

@@ -460,11 +460,13 @@ export class GlRecorder {
     const counts: Array<number> = [];
     const losts: Array<number> = [];
     let totalBytes: number = 0;
+    let totalSamples: number = 0;
     for (const part of parts) {
       // segments/frameSessionSummary 口径 = muxer 视频样本数（上游 VideoSegment.count）
       counts.push(part.samples);
       losts.push(part.lostMs);
       totalBytes += part.bytes;
+      totalSamples += part.samples;
     }
     try {
       const sessionLine: string = frameSessionSummary(counts, losts);
@@ -501,7 +503,7 @@ export class GlRecorder {
       ? 'off' : (params.arcMode === 1 ? 'mend' : 'drop');
     const tail: string = this.lastNativeError !== '' && status.indexOf(this.lastNativeError) < 0
       ? ` nativeError=${this.lastNativeError}` : '';
-    const summary: string = `path=${firstPath} bytes=${totalBytes} duration=${durationMs}ms status=${status}` +
+    const summary: string = `path=${firstPath} bytes=${totalBytes} samples=${totalSamples} duration=${durationMs}ms status=${status}` +
       ` parts=${parts.length} totalBytes=${totalBytes} arc=${arcName} effective=${this.lastEffectiveMode}` +
       ` flushed=${this.lastFlushed} drops=${lastPart.drops.length} sidecar=${sidecar}` +
       ` measuredSrcFps=${this.lastMeasuredSrcFps}(lastSegment) segments=${SegmentPolicy.segmentSummary(counts)}${tail}`;

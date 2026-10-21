@@ -300,6 +300,16 @@ int32_t CodecRecorder::SampleCount()
     return samples_;
 }
 
+HealthSnapshot CodecRecorder::GetHealthSnapshot()
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    HealthSnapshot snapshot;
+    snapshot.trackAdded = track_ >= 0;
+    snapshot.muxStarted = muxStarted_;
+    snapshot.samples = samples_;
+    return snapshot;
+}
+
 void CodecRecorder::Abort(const std::string& reason)
 {
     {

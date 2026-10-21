@@ -5,6 +5,7 @@
     "pages/Index",
     "pages/GlPreview",
     "pages/Gallery",
-    "pages/Player"
+    "pages/Player",
+    "pages/Compare"
   ]
 }
