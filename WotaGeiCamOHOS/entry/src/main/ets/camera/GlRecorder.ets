@@ -252,7 +252,8 @@ export class GlRecorder {
       error = lib.startGpuRecord(file.fd, params.width, params.height, params.fps, params.bitrate,
         params.arcMode, params.arcDstFps, params.deadband);
     } catch (e) {
-      error = `napi-failed:${e}`;
+      error = `napi-failed:${e} path=${path}`;
+      Diag.e(WOTA_RECORD_TAG, `napi start failed, keep for triage: ${path}: ${e}`);
     }
     if (error !== '') {
       const napiFailed: boolean = error.indexOf('napi-failed') === 0;

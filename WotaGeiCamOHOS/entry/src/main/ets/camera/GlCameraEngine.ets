@@ -13,7 +13,7 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { Size, WotaTag } from '../core/Constants';
-import { LensType } from '../core/LensSlot';
+import { LensSlot, LensType } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { FrameLedger } from '../record/FrameLedger';
@@ -30,15 +30,24 @@ export class GlLensInfo {
   }
 }
 
-/** 预览档优先 1920×1080（与 Index 预览口径一致），未命中退首档 */
-function previewProfileFor(profiles: Array<camera.Profile>): camera.Profile | undefined {
+/**
+ * 预览档选择：有 wantSize 先按容差命中；未命中优先 1080p；再退首档。
+ * 默认 wantSize=1920×1080（与 Index 预览口径一致，GlPreview 两参 start 行为不变）。
+ */
+function previewProfileFor(profiles: Array<camera.Profile>,
+  wantSize: Size = new Size(1920, 1080)): camera.Profile | undefined {
   if (profiles.length === 0) {
     return undefined;
   }
-  const want: Size = new Size(1920, 1080);
   const hit: camera.Profile | undefined = profiles.find((p: camera.Profile): boolean =>
-    sizeCloseTo(new Size(p.size.width, p.size.height), want, VideoSizeCandidates.TOLERANCE_PX));
-  return hit ?? profiles[0];
+    sizeCloseTo(new Size(p.size.width, p.size.height), wantSize, VideoSizeCandidates.TOLERANCE_PX));
+  if (hit !== undefined) {
+    return hit;
+  }
+  const fallback1080: Size = new Size(1920, 1080);
+  const hit1080: camera.Profile | undefined = profiles.find((p: camera.Profile): boolean =>
+    sizeCloseTo(new Size(p.size.width, p.size.height), fallback1080, VideoSizeCandidates.TOLERANCE_PX));
+  return hit1080 ?? profiles[0];
 }
 
 export class GlCameraEngine {
@@ -50,6 +59,14 @@ export class GlCameraEngine {
   /** 设备态：AutoStop 的相机丢失检测按非 CLOSE → CLOSE 转移判定 */
   private status: DeviceStatus = DeviceStatus.CLOSE;
   private lostListener: (() => void) | undefined = undefined;
+  /** 镜头缓存（stop 不清，供胶囊循环/设置页） */
+  private slots: Array<LensSlot> = [];
+  private currentSlot: LensSlot | undefined = undefined;
+  private chosenSize: Size | undefined = undefined;
+  private zoomRange: Array<number> = [1, 1];
+  private previewSizes: Array<Size> = [];
+  private lastZoom: number = 1;
+  private previewFps: number = 0;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
@@ -60,21 +77,67 @@ export class GlCameraEngine {
     return this.status;
   }
 
+  /** 枚举镜头（缓存）；失败返回空表 */
+  async listLenses(ctx: common.Context): Promise<Array<LensSlot>> {
+    try {
+      const mgr: camera.CameraManager = camera.getCameraManager(ctx);
+      this.slots = enumerateKitLenses(mgr);
+      return this.slots;
+    } catch (e) {
+      Diag.e(WotaTag.ABILITY, `gl camera list lenses failed: ${e}`);
+      return [];
+    }
+  }
+
+  currentSize(): Size | undefined {
+    return this.chosenSize;
+  }
+
+  currentLens(): LensSlot | undefined {
+    return this.currentSlot;
+  }
+
+  supportedPreviewSizes(): Array<Size> {
+    return this.previewSizes;
+  }
+
+  /** 最近一次 applyZoom 实际生效倍率（1 = 未设置/失败） */
+  currentZoom(): number {
+    return this.lastZoom;
+  }
+
+  /** 实际预览帧率（0 = 未设置/平台拒绝；登记可能仍为默认 30fps） */
+  currentPreviewFps(): number {
+    return this.previewFps;
+  }
+
   /** 相机丢失（未录制时页面仅提示；录制中由 AutoStopMonitor 消费） */
   setOnCameraLost(listener: (() => void) | undefined): void {
     this.lostListener = listener;
   }
 
-  /** 把相机帧接到 native 输出面；返回人读摘要/错误串（页面直接显示） */
-  async start(ctx: common.Context, nativeSurfaceId: string): Promise<string> {
+  /**
+   * 把相机帧接到 native 输出面；返回人读摘要/错误串。
+   * slotKey 缺省 = pickDefaultLens；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
+   */
+  async start(ctx: common.Context, nativeSurfaceId: string, slotKey?: string,
+    wantSize?: Size, fps?: number): Promise<string> {
     try {
       await this.stop();
       if (nativeSurfaceId === '') {
         return 'gl camera failed: no native surface';
       }
       const mgr: camera.CameraManager = camera.getCameraManager(ctx);
-      const slots = enumerateKitLenses(mgr);
-      const slot = pickDefaultLens(slots);
+      if (this.slots.length === 0) {
+        this.slots = enumerateKitLenses(mgr);
+      }
+      let slot: LensSlot | undefined = undefined;
+      if (slotKey !== undefined) {
+        slot = this.slots.find((s: LensSlot): boolean => s.key === slotKey);
+      }
+      if (slot === undefined) {
+        slot = pickDefaultLens(this.slots);
+      }
       if (slot === undefined) {
         return 'gl camera failed: no camera';
       }
@@ -84,7 +147,9 @@ export class GlCameraEngine {
       }
       const capability: camera.CameraOutputCapability =
         mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_PHOTO);
-      const profile: camera.Profile | undefined = previewProfileFor(capability.previewProfiles ?? []);
+      const profiles: Array<camera.Profile> = capability.previewProfiles ?? [];
+      const profile: camera.Profile | undefined = previewProfileFor(profiles,
+        wantSize === undefined ? new Size(1920, 1080) : wantSize);
       if (profile === undefined) {
         return 'gl camera failed: no preview profile';
       }
@@ -95,7 +160,11 @@ export class GlCameraEngine {
       this.session = session;
       session.on('error', (err: BusinessError): void => {
         this.status = DeviceStatus.CLOSE;
-        this.lensInfo = undefined; // 相机已丢失：起录门控（lastLensInfo/deviceStatus）必须失效
+        this.lensInfo = undefined;
+        this.currentSlot = undefined;
+        this.chosenSize = undefined;
+        this.previewSizes = [];
+        this.zoomRange = [1, 1];
         Diag.e(WotaTag.ABILITY, `gl camera session error: ${err.code} ${err.message}`);
         if (this.lostListener !== undefined) {
           this.lostListener();
@@ -106,13 +175,16 @@ export class GlCameraEngine {
       const preview: camera.PreviewOutput = mgr.createPreviewOutput(profile, nativeSurfaceId);
       this.preview = preview;
       session.addOutput(preview);
+      // 登记偏离：PhotoSession 预览无 setFrameRate（该 API 属 VideoOutput），预览源可能仍为 30fps；
+      // 录制帧率仅编码器侧生效，光弧抽帧按编码器输出节奏。previewFps 保持 0 = 未设置。
+      this.previewFps = 0;
+      if (fps !== undefined && fps > 0) {
+        Diag.i(WotaTag.ABILITY,
+          `gl camera preview fps set not supported (requested ${fps}), encoder-side only`);
+      }
       await session.commitConfig();
       await session.start();
       this.status = DeviceStatus.OPEN_SUCCEED;
-      // 帧账相机到达格：commit/start 成功后才注册（此前 PreviewOutput 可能还没流）。
-      // 线程声明（登记）：CameraKit 的 AsyncCallback 在本注册线程的事件循环派发；本引擎
-      // 只从 ArkTS UI 主线程 start/stop，故 FrameLedger.cameraStarted 保持单线程累加语义。
-      // 若未来在其他线程起停会话，需改为 native/atomic 或主线程转发（FrameLedger 头注释同）。
       try {
         preview.on('frameStart', (err: BusinessError): void => {
           if (!err) {
@@ -122,6 +194,19 @@ export class GlCameraEngine {
       } catch (e) {
         Diag.w(WotaTag.ABILITY, `gl camera frameStart listener failed: ${e}`);
       }
+      this.previewSizes = [];
+      for (const p of profiles) {
+        this.previewSizes.push(new Size(p.size.width, p.size.height));
+      }
+      this.currentSlot = slot;
+      this.chosenSize = new Size(profile.size.width, profile.size.height);
+      try {
+        const range: Array<number> = session.getZoomRatioRange();
+        this.zoomRange = range.length >= 2 ? [range[0], range[1]] : [1, 1];
+      } catch (e) {
+        this.zoomRange = [1, 1];
+      }
+      this.lastZoom = 1;
       this.lensInfo = new GlLensInfo(slot.type === LensType.FRONT, slot.ability.sensorOrientation);
       Diag.i(WotaTag.ABILITY,
         `gl camera started lens=${slot.key} profile=${profile.size.width}x${profile.size.height}`);
@@ -130,6 +215,40 @@ export class GlCameraEngine {
       Diag.e(WotaTag.ABILITY, `gl camera failed: ${e}`);
       await this.stop();
       return `gl camera failed: ${e}`;
+    }
+  }
+
+  /** 变焦：钳到会话 zoomRange 并返回实际生效倍率；失败 -1 */
+  applyZoom(ratio: number): number {
+    const session: camera.PhotoSession | undefined = this.session;
+    if (session === undefined) {
+      return -1;
+    }
+    const lo: number = this.zoomRange.length >= 2 ? this.zoomRange[0] : 1;
+    const hi: number = this.zoomRange.length >= 2 ? this.zoomRange[1] : 1;
+    const target: number = Math.min(hi, Math.max(lo, ratio));
+    try {
+      session.setZoomRatio(target);
+      this.lastZoom = target;
+      return target;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl camera zoom ${target} failed: ${e}`);
+      return -1;
+    }
+  }
+
+  /** 闪光：CLOSE / ALWAYS_OPEN（TORCH 语义）；失败 false */
+  applyFlash(mode: camera.FlashMode): boolean {
+    const session: camera.PhotoSession | undefined = this.session;
+    if (session === undefined) {
+      return false;
+    }
+    try {
+      session.setFlashMode(mode);
+      return true;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl camera flash failed: ${e}`);
+      return false;
     }
   }
 
@@ -173,6 +292,12 @@ export class GlCameraEngine {
     this.preview = undefined;
     this.input = undefined;
     this.lensInfo = undefined;
+    this.currentSlot = undefined;
+    this.chosenSize = undefined;
+    this.zoomRange = [1, 1];
+    this.previewSizes = [];
+    this.lastZoom = 1;
+    this.previewFps = 0;
     this.status = DeviceStatus.CLOSE;
   }
 }

@@ -125,6 +125,13 @@ struct GlPreview {
     }
   }
 
+  onPageHide(): void {
+    if (!this.recording) {
+      GlRecorder.resetSegmentLimitBytes();
+      this.segmentTestOn = false;
+    }
+  }
+
   aboutToDisappear(): void {
     this.disposed = true;
     // 顺序（契约）：先停录（GL 编码面仍可用、fd 归本类）→ 关相机会话 → 停轮询
@@ -137,8 +144,9 @@ struct GlPreview {
       this.finishGpuRecord(); // 页面销毁不等宽限
     }
     this.stopRecordMonitor();
-    // 8MB 测试阈值为进程级静态值：离开页面恢复生产默认
+    // 8MB 测试阈值为进程级静态值：离开页面/隐藏页面恢复生产默认
     GlRecorder.resetSegmentLimitBytes();
+    this.segmentTestOn = false;
     this.engine.stop();
     this.stopPolling();
     try {
@@ -455,6 +463,7 @@ struct GlPreview {
     this.stopPending = false;
     this.stopReason = '';
     this.lastStopSummary = '';
+    this.lastStopAtMs = 0;
     this.recordStartedAtMs = Date.now();
     const arcName: string = this.arcMode === 0 ? 'off' : (this.arcMode === 1 ? 'mend' : 'drop');
     this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${recordFps}` +
@@ -552,6 +561,9 @@ struct GlPreview {
     this.message = `GPU record: ${summary}${reasonText === '' ? '' : `（${reasonText}）`}`;
     this.lastStopSummary = summary;
     this.lastStopAtMs = Date.now();
+    // 测试阈值只服务单次验证：停录收尾后统一恢复生产默认
+    GlRecorder.resetSegmentLimitBytes();
+    this.segmentTestOn = false;
     return summary;
   }
 
@@ -584,9 +596,8 @@ struct GlPreview {
         // 先确认 native 仍存活再轮转；native 已失败时走下方停止路径，不得静默开新段
         const rotateResult: string = this.recorder.maybeRotate(ctx, lib);
         if (rotateResult.indexOf('error:') === 0) {
-          const base: string = this.message;
-          this.finishGpuRecord();
-          this.message = `${base}（分段轮转失败，已停止，保留已完成段：${rotateResult}）`;
+          this.finishGpuRecord(); // 先落 parts=N 摘要，再追加错误（不得被旧 base 覆盖）
+          this.message = `${this.message}（分段轮转失败，已停止，保留已完成段：${rotateResult}）`;
           return;
         }
         if (rotateResult.indexOf('rotated:') === 0) {
