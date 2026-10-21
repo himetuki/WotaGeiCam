@@ -56,6 +56,16 @@
           ],
           "when": "inuse"
         }
+      },
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:mic_perm_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
       }
     ]
   }

@@ -17,26 +17,16 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { Size, WotaTag, WotaTiers } from '../core/Constants';
-import { LensSlot, LensType } from '../core/LensSlot';
+import { LensSlot } from '../core/LensSlot';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
 import { pickDirectPreviewSize, sizeCloseTo, VideoSizeCandidates } from '../core/VideoSizePicker';
-import { enumerateKitLenses, findDeviceById } from './KitLens';
+import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
 import { ApplyReport, State, applySnapshot, snapshotOf, stateOf } from './RequestApplier';
 
-/** 默认档：归档结果里第一个 WIDE（多后摄按焦距归档后广角稳定在 WIDE）；无 WIDE 则第一个非前摄 */
-function pickDefaultLens(slots: Array<LensSlot>): LensSlot | undefined {
-  if (slots.length === 0) {
-    return undefined;
-  }
-  const wide: LensSlot | undefined = slots.find((s: LensSlot): boolean => s.type === LensType.WIDE);
-  if (wide !== undefined) {
-    return wide;
-  }
-  const nonFront: LensSlot | undefined = slots.find((s: LensSlot): boolean => s.type !== LensType.FRONT);
-  return nonFront ?? slots[0];
-}
+/** 默认档：归档结果里第一个 WIDE（多后摄按焦距归档后广角稳定在 WIDE）；无 WIDE 则第一个非前摄。
+ * 预览与录制两个引擎共用，实现落在 KitLens（镜头归档语义归属）。 */
 
 /** 预览档反查：pickDirectPreviewSize 选中的 Size → 命中的 previewProfile（±TOLERANCE_PX） */
 function profileForSize(profiles: Array<camera.Profile>, size: Size | undefined): camera.Profile | undefined {
@@ -45,6 +35,24 @@ function profileForSize(profiles: Array<camera.Profile>, size: Size | undefined)
   }
   return profiles.find((p: camera.Profile): boolean =>
     sizeCloseTo(new Size(p.size.width, p.size.height), size, VideoSizeCandidates.TOLERANCE_PX));
+}
+
+/**
+ * 会话口径帧率代理：预览 profile 无 fps 字段，取**同一尺寸**视频档 frameRateRange.max 的最大值；
+ * 无匹配档返回 0（applyParams 回退 params.fps 档位）。
+ */
+function sessionFpsMaxOf(capability: camera.CameraOutputCapability | undefined, size: Size): number {
+  let maxFps: number = 0;
+  const profiles: Array<camera.VideoProfile> = capability?.videoProfiles ?? [];
+  for (const p of profiles) {
+    if (!sizeCloseTo(new Size(p.size.width, p.size.height), size, VideoSizeCandidates.TOLERANCE_PX)) {
+      continue;
+    }
+    if (p.frameRateRange !== undefined && p.frameRateRange.max > maxFps) {
+      maxFps = p.frameRateRange.max;
+    }
+  }
+  return maxFps;
 }
 
 /**
@@ -57,6 +65,13 @@ export class PreviewEngine {
   private input: camera.CameraInput | undefined = undefined;
   /** 会话期能力真值快照（applyParams 的 State 来源；随会话生命周期存续） */
   private refinedAbility: CameraAbility | undefined = undefined;
+  /** 实际生效的预览尺寸（applyParams 的 size 口径；stop 清空） */
+  private chosenSize: Size | undefined = undefined;
+  /**
+   * 会话口径帧率代理（applyParams 的 fps 口径；stop 清零）：
+   * 预览 profile 无 fps 字段，取同尺寸视频档 frameRateRange.max 的最大值作实际会话口径。
+   */
+  private sessionFpsMax: number = 0;
 
   /**
    * 开预览。返回人读状态摘要（页面直接显示）；失败不抛——Diag 落错 + 返回 "preview failed: ..."。
@@ -119,6 +134,8 @@ export class PreviewEngine {
       // 会话期能力真值化（zoom/ev/iso/af/awb/flash/exposure，见 KitAbility.abilityRefineWithSession）后 dump
       const refined: CameraAbility = abilityRefineWithSession(slot.ability, session);
       this.refinedAbility = refined;
+      this.chosenSize = chosen;
+      this.sessionFpsMax = sessionFpsMaxOf(capability, chosen);
       refined.dump(slot.key);
       Diag.i(WotaTag.ABILITY,
         `preview started: lens=${slot.key} profile=${chosen.width}x${chosen.height} of ${previewProfiles.length}`);
@@ -138,9 +155,12 @@ export class PreviewEngine {
       if (this.session === undefined || this.refinedAbility === undefined) {
         return 'param apply skipped: no session';
       }
-      const highSpeed: boolean = params.fps.value.value > WotaTiers.HIGH_SPEED_FPS;
+      // 会话实际口径：size 用本会话选中的预览尺寸，fps 用同尺寸视频档 max（预览 profile 无 fps 字段）
+      const effectiveSize: Size = this.chosenSize ?? params.size.value;
+      const effectiveFps: number = this.sessionFpsMax > 0 ? this.sessionFpsMax : params.fps.value.value;
+      const highSpeed: boolean = effectiveFps > WotaTiers.HIGH_SPEED_FPS;
       const state: State = stateOf(
-        this.refinedAbility, params.size.value, highSpeed, this.refinedAbility.evStep);
+        this.refinedAbility, effectiveSize, highSpeed, this.refinedAbility.evStep);
       const report: ApplyReport = applySnapshot(this.session, state, snapshotOf(params, state));
       return report.summary();
     } catch (e) {
@@ -183,6 +203,8 @@ export class PreviewEngine {
     this.preview = undefined;
     this.input = undefined;
     this.refinedAbility = undefined;
+    this.chosenSize = undefined;
+    this.sessionFpsMax = 0;
   }
 }
 

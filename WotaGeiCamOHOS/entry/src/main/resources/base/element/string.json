@@ -15,6 +15,10 @@
     {
       "name": "camera_perm_reason",
       "value": "Used for camera preview and recording"
+    },
+    {
+      "name": "mic_perm_reason",
+      "value": "Used to record audio with video"
     }
   ]
 }

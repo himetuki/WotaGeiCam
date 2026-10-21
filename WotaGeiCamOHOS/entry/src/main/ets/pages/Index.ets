@@ -28,6 +28,10 @@ import { requestCameraPermission } from '../camera/PermGate';
 import { PreviewEngine } from '../camera/KitPreview';
 // diag 完整版的页面真实消费者（开关/导出/清除三按钮）
 import { Diag, ExportResult } from '../diag/Diag';
+// 录制批真实消费者：录制引擎 + 双权限申请 + 结果契约（KitRecorder 传递引用 VideoStore/RecordProfile）
+import { RecordingEngine } from '../camera/KitRecorder';
+import { RecordPermResult, requestRecordPermissions } from '../camera/PermGate';
+import { RecordResult } from '../record/RecordResult';
 import { common } from '@kit.AbilityKit';
 
 @Entry
@@ -39,6 +43,11 @@ struct Index {
   @State diagSummary: string = '';
   private xhc: XComponentController = new XComponentController();
   private engine: PreviewEngine = new PreviewEngine();
+  /** 录制引擎（独立 VideoSession；起录前停预览、停录后恢复预览） */
+  private recorder: RecordingEngine = new RecordingEngine();
+  @State recording: boolean = false;
+  /** 录制按钮防重复：权限/起录/停录异步链进行中禁用按钮 */
+  @State recordingBusy: boolean = false;
   /** 参数总线：参数自检八档的输入（也是后续 HUD 的同一实例来源） */
   private params: WotaParams = new WotaParams();
 
@@ -49,8 +58,10 @@ struct Index {
   }
 
   aboutToDisappear(): void {
-    // 关页收尾：stop 逐项清理不抛；fire-and-forget（页面生命周期内完成主要清理即可）
-    this.engine.stop();
+    // 先停录制再停预览（录制占用相机；recorder.stop 幂等，未录制返回 BAD_STATE 无副作用）
+    this.recorder.stop().then((): void => {
+      this.engine.stop();
+    });
   }
 
   private refreshDiagSummary(): void {
@@ -118,11 +129,67 @@ struct Index {
                   });
               });
             })
+          Button(this.recording ? '停录' : '录制')
+            .fontSize(14)
+            .enabled(!this.recordingBusy)
+            .onClick(() => {
+              const ctx: common.Context | undefined =
+                this.getUIContext().getHostContext() as common.Context | undefined;
+              if (ctx === undefined) {
+                this.message = 'no host context';
+                return;
+              }
+              if (this.surfaceId === '') {
+                this.message = 'preview pending: surface not ready, reopen page';
+                return;
+              }
+              if (!this.recording) {
+                // 起录：双权限 → 停预览 → 独立 VideoSession 录制；mic 拒绝退视频-only
+                this.recordingBusy = true;
+                requestRecordPermissions(ctx).then((perm: RecordPermResult): void => {
+                  if (!perm.camera) {
+                    this.message = 'camera permission denied (tap to retry)';
+                    this.recordingBusy = false;
+                    return;
+                  }
+                  this.message = 'starting recording...';
+                  this.engine.stop().then((): void => {
+                    this.recorder.start(ctx, this.surfaceId, this.params, perm.mic)
+                      .then((summary: string): void => {
+                        this.recording = this.recorder.isRecording();
+                        const micNote: string = perm.mic ? '' : '\n(mic denied: video-only)';
+                        if (!this.recording) {
+                          // 起录失败：恢复预览（失败仅提示）
+                          this.message = `${summary}${micNote}`;
+                          this.engine.start(ctx, this.surfaceId, 0, 0)
+                            .then((s: string): void => {
+                              this.message += `\n${s}`;
+                              this.recordingBusy = false;
+                            });
+                        } else {
+                          this.message = `${summary}${micNote}`;
+                          this.recordingBusy = false;
+                        }
+                      });
+                  });
+                });
+              } else {
+                // 停录：结束录制 → 显示结果 → 恢复预览
+                this.recordingBusy = true;
+                this.recorder.stop().then((res: RecordResult): void => {
+                  this.recording = false;
+                  this.message = res.summary();
+                  this.engine.start(ctx, this.surfaceId, 0, 0)
+                    .then((s: string): void => {
+                      this.message += `\n${s}`;
+                      this.recordingBusy = false;
+                    });
+                });
+              }
+            })
           Button('参数自检')
             .fontSize(14)
             .onClick(() => {
-              // 八档演示（不含 manual 曝光/ISO，避免黑屏）：变焦 2 档 → EV 两向 → 色温 2 档 → 补光 2 档。
-              // 每档改参数总线后立即 applyParams，报告进 message（全文在 hilog WotaAbility 的 apply 行）。
               try {
                 const lines: Array<string> = [];
                 this.params.zoom.value = ParamState.of(1);

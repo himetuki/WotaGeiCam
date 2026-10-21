@@ -457,9 +457,9 @@ function flashModeOfPlan(plan: FlashPlan, manualAe: boolean): camera.FlashMode {
 
 /**
  * 把一帧参数快照写进会话（逐键 try/catch：单键失败进 failed 桶，不中断其余键）。
- * 曝光组按上游「并集」语义写全：manual/LOCK 都把 SENSOR 键（时长 µs + ISO）写齐，
- * manual 额外把 EV 归零（aeComp=0，AE 关闭下补偿无语义）；AUTO 只写补偿（d.ts：setIso 仅
- * EXPOSURE_MODE_LOCKED 生效，AUTO 档 SENSOR 键无效——无 Camera2 builder 残值问题，登记）。
+ * 曝光组按档语义：**仅 MANUAL 写 SENSOR 键**（时长 µs + ISO）并把 EV 归零；
+ * LOCK 只写 ExposureMode=LOCKED（冻结当前 AE 曝光——OHOS LOCKED 下 setIso 实际生效，
+ * 写快照值会跳档，故不写，登记）；AUTO 只写补偿。
  * 单位：plan.exposureNs 是 ns（core 契约），setExposureDuration 要 µs → /1000。
  * 不移植键名以 skipped 自曝：tint（无 RGB 增益接口）、eis（PhotoSession 无接口，按用户意图判定）。
  */

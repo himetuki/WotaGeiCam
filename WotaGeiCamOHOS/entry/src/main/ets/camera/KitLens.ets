@@ -45,9 +45,25 @@ export function discoverKitCameraIds(mgr: camera.CameraManager): Array<string> {
 }
 
 /**
+ * 默认档：归档结果里第一个 WIDE（多后摄按焦距归档后广角稳定在 WIDE）；无 WIDE 则第一个非前摄。
+ * 预览引擎（KitPreview）与录制引擎（KitRecorder）共用，不写死任何 cameraId。
+ */
+export function pickDefaultLens(slots: Array<LensSlot>): LensSlot | undefined {
+  if (slots.length === 0) {
+    return undefined;
+  }
+  const wide: LensSlot | undefined = slots.find((s: LensSlot): boolean => s.type === LensType.WIDE);
+  if (wide !== undefined) {
+    return wide;
+  }
+  const nonFront: LensSlot | undefined = slots.find((s: LensSlot): boolean => s.type !== LensType.FRONT);
+  return nonFront ?? slots[0];
+}
+
+/**
  * 按 cameraId 找回设备对象：先匹配 getSupportedCameras 本体，再匹配逻辑设备的子设备。
  * 镜头枚举后会话/输出要用 device 本体开输入（LensSlot 只存 id 不存设备引用），
- * KitProbe 取能力与 KitPreview 开会话共用这一份查找，不复制遍历。
+ * KitProbe 取能力与 KitPreview/KitRecorder 开会话共用这一份查找，不复制遍历。
  */
 export function findDeviceById(mgr: camera.CameraManager, id: string): camera.CameraDevice | undefined {
   let devices: Array<camera.CameraDevice> = [];

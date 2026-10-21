@@ -15,6 +15,10 @@
     {
       "name": "camera_perm_reason",
       "value": "用于相机预览与录制"
+    },
+    {
+      "name": "mic_perm_reason",
+      "value": "用于录制视频时记录声音"
     }
   ]
 }
