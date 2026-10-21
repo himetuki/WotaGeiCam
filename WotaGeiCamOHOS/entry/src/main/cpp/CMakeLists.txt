@@ -14,4 +14,5 @@ include_directories(${NATIVERENDER_ROOT_PATH})
 
 add_library(entry SHARED napi_init.cpp gl_render.cpp)
 # libace_ndk.z.so 提供 OH_NativeXComponent_*（RegisterCallback/GetXComponentSize 等，native XComponent 接口）
-target_link_libraries(entry PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so EGL GLESv3)
+# libnative_image.so 提供 OH_NativeImage_*（相机帧 → GL_TEXTURE_EXTERNAL_OES）
+target_link_libraries(entry PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libnative_image.so EGL GLESv3)

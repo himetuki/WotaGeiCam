@@ -7,6 +7,7 @@
 #define WOTA_GL_RENDER_H
 
 #include <cstdint>
+#include <string>
 
 /** 创建 EGL display/context/window surface 并编译试验着色器（window = OHNativeWindow*） */
 bool WotaGlInit(void* window, uint64_t width, uint64_t height);
@@ -14,13 +15,25 @@ bool WotaGlInit(void* window, uint64_t width, uint64_t height);
 /** surface 尺寸变化：更新 viewport */
 void WotaGlResize(uint64_t width, uint64_t height);
 
-/** 每次 vsync（XComponent OnFrame）：清屏 → uTime 推进 → 绘制 → swap */
+/** 每次 vsync（XComponent OnFrame）：拉取 NativeImage 帧 → 绘制 → swap */
 void WotaGlRender(uint64_t timestamp);
 
-/** surface 销毁：拆除 GL 对象与 EGL 资源 */
+/** surface 销毁：拆除 NativeImage、GL 对象与 EGL 资源 */
 void WotaGlDestroy();
 
 /** 是否已就绪（未就绪时帧回调直接跳过） */
 bool WotaGlReady();
+
+/**
+ * 相机输出面 surfaceId（OH_NativeImage_GetSurfaceId 的十进制串，供 ArkTS 建 PreviewOutput）。
+ * EGL/NativeImage 未就绪时返回空串（ArkTS 侧轮询）。
+ */
+std::string WotaGlGetInputSurfaceId();
+
+/**
+ * NativeImage 失败原因（空串 = 正常/尚未失败）：create-failed / set-listener-failed /
+ * get-surface-id-failed。供 ArkTS 侧结束轮询并显示明确原因（区分"未就绪"与"创建失败"）。
+ */
+std::string WotaGlGetNativeImageError();
 
 #endif // WOTA_GL_RENDER_H

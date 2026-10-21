@@ -130,7 +130,8 @@ struct Index {
               });
             })
           Button(this.recording ? '停录' : '录制')
-            .fontSize(14)            .enabled(!this.recordingBusy)
+            .fontSize(14)
+            .enabled(!this.recordingBusy)
             .onClick(() => {
               const ctx: common.Context | undefined =
                 this.getUIContext().getHostContext() as common.Context | undefined;

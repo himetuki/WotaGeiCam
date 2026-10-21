@@ -10,10 +10,17 @@
 #include <ace/xcomponent/native_interface_xcomponent.h>
 #include <hilog/log.h>
 
+#include <string>
+
 #include "gl_render.h"
 
 #define WOTA_LOG_DOMAIN 0x0000
 #define WOTA_LOG_TAG "WotaGL"
+
+/** 当前持有 OnFrame 注册的 XComponent 实例（页面重进 = 新实例，Created 时按指针差异补注册） */
+static OH_NativeXComponent* g_frameComponent = nullptr;
+
+static void EnsureFrameCallback(OH_NativeXComponent* component);
 
 static void OnSurfaceCreatedCB(OH_NativeXComponent* component, void* window)
 {
@@ -21,6 +28,8 @@ static void OnSurfaceCreatedCB(OH_NativeXComponent* component, void* window)
     uint64_t height = 0;
     OH_NativeXComponent_GetXComponentSize(component, window, &width, &height);
     bool ok = WotaGlInit(window, width, height);
+    // 覆盖「Init 只在库加载时跑一次、页面重进是新 XComponent 实例」的边界
+    EnsureFrameCallback(component);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "surface created %{public}llux%{public}llu gl=%{public}d",
         static_cast<unsigned long long>(width), static_cast<unsigned long long>(height), ok ? 1 : 0);
@@ -39,24 +48,85 @@ static void OnSurfaceChangedCB(OH_NativeXComponent* component, void* window)
 
 static void OnSurfaceDestroyedCB(OH_NativeXComponent* component, void* window)
 {
-    (void)component;
     (void)window;
+    // OnFrame 随 surface 销毁注销（重进页是新 XComponent 实例：Created 时补注册）
+    OH_NativeXComponent_UnregisterOnFrameCallback(component);
+    if (component == g_frameComponent) {
+        g_frameComponent = nullptr;
+    }
     WotaGlDestroy();
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "surface destroyed");
 }
 
 static void OnFrameCB(OH_NativeXComponent* component, uint64_t timestamp, uint64_t targetTimestamp)
 {
-    (void)component;
     (void)targetTimestamp;
+    // 守卫：旧实例的迟到帧不驱动新实例的 GL
+    if (component != g_frameComponent) {
+        return;
+    }
     WotaGlRender(timestamp);
+}
+
+/**
+ * 保证「当前 XComponent 实例」持有 OnFrame 注册：
+ * Init 只在库加载时跑一次；页面重进是新实例（component 指针不同），Created 时按指针差异补注册。
+ */
+static void EnsureFrameCallback(OH_NativeXComponent* component)
+{
+    if (component == g_frameComponent) {
+        return;
+    }
+    if (OH_NativeXComponent_RegisterOnFrameCallback(component, OnFrameCB) != 0) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "register frame callback failed");
+        return;
+    }
+    g_frameComponent = component;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "frame callback registered");
 }
 
 static OH_NativeXComponent_Callback g_surfaceCallback;
 
+/** ArkTS 出口：相机 PreviewOutput 用的 native surfaceId（未就绪返回空串，调用方轮询） */
+static napi_value GetInputSurfaceId(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string surfaceId = WotaGlGetInputSurfaceId();
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, surfaceId.c_str(), surfaceId.size(), &result);
+    return result;
+}
+
+/** ArkTS 出口：NativeImage 失败原因（空串 = 正常/尚未失败；页面据此结束轮询并显示原因） */
+static napi_value GetNativeImageError(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string error = WotaGlGetNativeImageError();
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, error.c_str(), error.size(), &result);
+    return result;
+}
+
+/*
+ * 模块初始化契约（P2 顺序风险修复）：
+ * - XComponent 带 libraryname 创建时会加载本库，并以**带 OH_NATIVE_XCOMPONENT_OBJ 的 exports**
+ *   调用 Init —— 这条路径完成 surface 回调 + OnFrame 注册（首进/重进页皆由 XComponent 触发加载）；
+ * - ArkTS 侧**不得在页面顶层静态 import 本模块**：那会让本模块先以"无 XComponent 对象"的 exports
+ *   完成初始化并进模块缓存，XComponent 再创建时不再重跑 Init，surface 回调就永远不注册；
+ * - GlPreview 在 XComponent onLoad 之后才 dynamic import（届时 XComponent 的加载路径已完成注册），
+ *   再轮询 getInputSurfaceId；两条路径在代码与日志上均可论证。
+ */
 static napi_value Init(napi_env env, napi_value exports)
 {
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "module init");
+    // 先导出 napi 能力：ArkTS 侧 import from 'entry' 的模块实例可能没有 XComponent 对象，
+    // 不能因为 unwrap 失败就把 getInputSurfaceId 一起丢掉
+    napi_property_descriptor desc[] = {
+        {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
+    };
+    napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+
     napi_value exportInstance = nullptr;
     if (napi_get_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, &exportInstance) != napi_ok) {
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
@@ -76,9 +146,7 @@ static napi_value Init(napi_env env, napi_value exports)
     if (OH_NativeXComponent_RegisterCallback(component, &g_surfaceCallback) != 0) {
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "register surface callback failed");
     }
-    if (OH_NativeXComponent_RegisterOnFrameCallback(component, OnFrameCB) != 0) {
-        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "register frame callback failed");
-    }
+    EnsureFrameCallback(component);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "xcomponent callbacks registered");
     return exports;
 }
