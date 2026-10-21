@@ -378,16 +378,12 @@ export class PlayerEngine {
     if (this.released || player === undefined) {
       return;
     }
-    const v: number = Math.min(1, Math.max(0, volume));
+    const v: number = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0;
     try {
       player.setVolume(v);
     } catch (e) {
       Diag.w(TAG, `setVolume ${v} failed: ${e}`);
     }
-  }
-
-  setMuted(muted: boolean): void {
-    this.setVolume(muted ? 0 : 1);
   }
 
   setSpeed(tier: number): void {

@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "clip_exporter.h"
 #include "codec_recorder.h"
 #include "gl_render.h"
 
@@ -344,6 +345,7 @@ static napi_value GetGpuFrameCounters(napi_env env, napi_callback_info info)
     return MakeString(env, WotaGlGetFrameCounters());
 }
 
+
 /** 当前实际运行档（0/1/2；MEND 降级后为 2） */
 static napi_value GetArcEffectiveMode(napi_env env, napi_callback_info info)
 {
@@ -351,6 +353,64 @@ static napi_value GetArcEffectiveMode(napi_env env, napi_callback_info info)
     napi_value result = nullptr;
     napi_create_int32(env, WotaGlGetArcEffectiveMode(), &result);
     return result;
+}
+
+// ---------------------------------------------------------------- T20 A/B 无损剪辑导出
+
+/** 启动 remux：fd 归 ArkTS（native 不 close）；空串 = 已入队，busy/args/worker = 立即失败 */
+static napi_value StartClipExport(napi_env env, napi_callback_info info)
+{
+    size_t argc = 6;
+    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 6) {
+        return MakeString(env, "args");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    int32_t outFd = -1;
+    int64_t startMs = 0;
+    int64_t endMs = 0;
+    int32_t audioOrdinal = -1;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    napi_get_value_int32(env, argv[2], &outFd);
+    napi_get_value_int64(env, argv[3], &startMs);
+    napi_get_value_int64(env, argv[4], &endMs);
+    napi_get_value_int32(env, argv[5], &audioOrdinal);
+    return MakeString(env, ClipExporter::Instance().Start(inFd, inSize, outFd, startMs, endMs,
+        audioOrdinal));
+}
+
+/** idle | running:<pct> | done:<base>:<v>:<a>[:audio=skipped] | failed:<code> | cancelled */
+static napi_value GetClipExportStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, ClipExporter::Instance().Status());
+}
+
+static napi_value CancelClipExport(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    (void)env;
+    ClipExporter::Instance().Cancel();
+    return nullptr;
+}
+
+/** 只读轨探测："videoCount,audioCount"；失败 "err:<code>" */
+static napi_value ProbeClipTracks(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        return MakeString(env, "err:source");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    return MakeString(env, ClipExporter::Instance().ProbeTracks(inFd, inSize));
 }
 
 /*
@@ -391,6 +451,10 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getGpuWrittenBytes", nullptr, GetGpuWrittenBytes, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuHealth", nullptr, GetGpuHealth, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getArcEffectiveMode", nullptr, GetArcEffectiveMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startClipExport", nullptr, StartClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getClipExportStatus", nullptr, GetClipExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelClipExport", nullptr, CancelClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"probeClipTracks", nullptr, ProbeClipTracks, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

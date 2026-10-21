@@ -9,10 +9,12 @@
 import { common } from '@kit.AbilityKit';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
-import { formatDuration } from '../media/MediaFormat';
+import { formatDuration, formatSize } from '../media/MediaFormat';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { AbRange, clampPan, Pan, PlayerSpeedTiers } from '../player/PlayerModel';
 import { TapArbiter, TapDecision } from '../player/TapArbiter';
+import { ClipExportResult, ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
+import { audioOrdinalOf, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
 
 interface PlayerParams {
   id: number;
@@ -55,11 +57,26 @@ struct Player {
   @State abA: number = -1;
   @State abB: number = -1;
   @State abLoop: boolean = false;
+  @State exportPanelVisible: boolean = false;
+  @State exportBusy: boolean = false;
+  @State exportProbing: boolean = false;
+  @State exportProgress: number = 0;
+  @State exportError: string = '';
+  @State exportNote: string = '';
+  @State exportDonePath: string = '';
+  @State exportDoneSize: number = 0;
+  @State exportAudioCount: number = 0;
+  @State exportTrack: TrackChoice = TrackChoice.NO_AUDIO;
+  @State exportProbeBlocked: boolean = false;
 
   private engine: PlayerEngine = new PlayerEngine();
   private xc: XComponentController = new XComponentController();
   private repo: MediaRepo | undefined = undefined;
   private videoClip: VideoClip | undefined = undefined;
+  private ctx: common.Context | undefined = undefined;
+  private exportAbA: number = -1;
+  private exportAbB: number = -1;
+  private exportProbeSeq: number = 0;
   private surfaceId: string = '';
   private attachStarted: boolean = false;
   private disposed: boolean = false;
@@ -96,6 +113,7 @@ struct Player {
       return;
     }
     const params: PlayerParams = raw as PlayerParams;
+    this.ctx = ctx;
     this.repo = new MediaRepo(ctx);
     MediaRepo.resetProbeCapHit();
     this.repo.findById(params.id, params.path ?? '').then((clip: VideoClip | undefined): void => {
@@ -156,10 +174,26 @@ struct Player {
   aboutToDisappear(): void {
     this.disposed = true;
     this.pageVisible = false;
+    if (this.exportBusy) {
+      ClipExporter.cancel(); // 页面销毁不得让 native worker 继续持有已关的 fd
+    }
     this.stopPageTimer();
     this.cancelTapTimer();
     this.stepQueue = [];
     this.engine.release();
+  }
+
+  /** 导出中拦住返回；面板打开时先关面板 */
+  onBackPress(): boolean {
+    if (this.exportBusy) {
+      this.hint = '导出中，请先取消';
+      return true;
+    }
+    if (this.exportPanelVisible) {
+      this.closeExportPanel();
+      return true;
+    }
+    return false;
   }
 
   /** 侧车 fps 吸附到页面三档（29.97/60 等非标值取最近档；实际使用档由按钮显示） */
@@ -437,6 +471,144 @@ struct Player {
     this.abLoop = this.engine.ab.loopEnabled;
   }
 
+  private canExportAb(): boolean {
+    return this.abA >= 0 && this.abB > this.abA && this.abB - this.abA >= MIN_KEEP_MS;
+  }
+
+  private openExportPanel(): void {
+    const clip: VideoClip | undefined = this.videoClip;
+    const ctx: common.Context | undefined = this.ctx;
+    if (clip === undefined || ctx === undefined) {
+      this.hint = '片源未就绪';
+      return;
+    }
+    if (!this.canExportAb()) {
+      this.hint = `保留段至少 ${MIN_KEEP_MS}ms`;
+      return;
+    }
+    if (this.engine.playing) {
+      this.engine.playPause(); // 导出期间保持暂停；不动物理 A/B
+    }
+    this.exportAbA = this.abA;
+    this.exportAbB = this.abB;
+    this.exportPanelVisible = true;
+    this.exportBusy = false;
+    this.exportProbing = true;
+    this.exportProbeBlocked = false;
+    this.exportProgress = 0;
+    this.exportError = '';
+    this.exportNote = '';
+    this.exportDonePath = '';
+    this.exportDoneSize = 0;
+    this.exportAudioCount = 0;
+    this.exportTrack = TrackChoice.NO_AUDIO;
+    const probeSeq: number = ++this.exportProbeSeq;
+    ClipExporter.probe(ctx, clip).then((info: ClipTrackInfo):void => {
+      if (this.disposed || probeSeq !== this.exportProbeSeq) {
+        return;
+      }
+      this.exportProbing = false;
+      if (info.error !== '') {
+        this.exportProbeBlocked = true;
+        this.exportError = `轨道探测失败: ${info.error}`;
+        return;
+      }
+      if (info.videoCount <= 0) {
+        this.exportProbeBlocked = true;
+        this.exportError = '源无视频轨';
+        return;
+      }
+      this.exportAudioCount = info.audioCount;
+      this.exportTrack = info.audioCount > 0 ? TrackChoice.ENV : TrackChoice.NO_AUDIO;
+    }).catch((e: Object): void => {
+      if (this.disposed || probeSeq !== this.exportProbeSeq) {
+        return;
+      }
+      this.exportProbing = false;
+      this.exportProbeBlocked = true;
+      this.exportError = `轨道探测失败: ${e}`;
+    });
+  }
+
+  private closeExportPanel(): void {
+    if (this.exportBusy) {
+      return;
+    }
+    this.exportProbeSeq++;
+    this.exportPanelVisible = false;
+  }
+
+  private startExport(): void {
+    const clip: VideoClip | undefined = this.videoClip;
+    const ctx: common.Context | undefined = this.ctx;
+    if (this.exportBusy || this.exportProbing || this.exportProbeBlocked || clip === undefined ||
+      ctx === undefined) {
+      return;
+    }
+    const range: ClipRange = new ClipRange(this.exportAbA, this.exportAbB);
+    this.exportBusy = true;
+    this.exportProgress = 0;
+    this.exportError = '';
+    this.exportNote = '';
+    this.exportDonePath = '';
+    this.exportDoneSize = 0;
+    ClipExporter.exportClip(ctx, clip, range, audioOrdinalOf(this.exportTrack),
+      (percent: number): void => {
+        if (!this.disposed) {
+          this.exportProgress = percent;
+        }
+      }).then((result: ClipExportResult): void => {
+        if (this.disposed) {
+          return;
+        }
+        this.exportBusy = false;
+        if (result.ok) {
+          this.exportDonePath = result.path;
+          this.exportDoneSize = result.sizeBytes;
+          const audioSkipped: boolean = result.audioSkipped && this.exportTrack !== TrackChoice.NO_AUDIO;
+          let note: string = '';
+          if (audioSkipped) {
+            note = '所选音轨区间内无样本，已导出纯视频';
+          }
+          if (!result.sidecarOk) {
+            note = note === '' ? '.drops.json 平移写失败（成片不受影响）' :
+              `${note}；.drops.json 平移写失败（成片不受影响）`;
+          }
+          this.exportNote = note;
+        } else if (result.cancelled) {
+          this.exportNote = '';
+          this.exportError = '已取消，半成品已删除';
+        } else {
+          this.exportNote = '';
+          this.exportError = `导出失败: ${result.error}`;
+        }
+      }).catch((e: Object): void => {
+        if (this.disposed) {
+          return;
+        }
+        this.exportBusy = false;
+        this.exportError = `导出失败: ${e}`;
+      });
+  }
+
+  private cancelExport(): void {
+    if (!this.exportBusy) {
+      return;
+    }
+    ClipExporter.cancel();
+    this.exportNote = '正在取消…';
+  }
+
+  private openExportGallery(): void {
+    if (this.exportBusy) {
+      return;
+    }
+    this.exportPanelVisible = false;
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' }).catch((e: Object): void => {
+      this.hint = `打开媒体库失败: ${e}`;
+    });
+  }
+
   @Builder
   private topBar() {
     Row({ space: 8 }) {
@@ -547,6 +719,13 @@ struct Player {
           .onClick((): void => {
             this.clearAb();
           })
+        if (this.canExportAb()) {
+          Button('导出 A/B')
+            .fontSize(11)
+            .onClick((): void => {
+              this.openExportPanel();
+            })
+        }
         Button(`倍速:${this.speed}/${this.actualSpeed}`)
           .fontSize(11)
           .onClick((): void => {
@@ -561,6 +740,159 @@ struct Player {
     }
     .width('100%')
     .padding({ left: 10, right: 10, bottom: 10 })
+  }
+
+  @Builder
+  private exportPanel() {
+    Column({ space: 8 }) {
+      Row({ space: 8 }) {
+        Text('导出 A/B')
+          .fontSize(14)
+          .fontColor(Color.White)
+          .layoutWeight(1)
+        Button('关闭')
+          .fontSize(11)
+          .enabled(!this.exportBusy)
+          .onClick((): void => {
+            this.closeExportPanel();
+          })
+      }
+      .width('100%')
+
+      Text(`${formatDuration(this.exportAbA)} - ${formatDuration(this.exportAbB)}`)
+        .fontSize(11)
+        .fontColor('#B0BEC5')
+        .width('100%')
+
+      if (this.exportProbing) {
+        Row({ space: 8 }) {
+          LoadingProgress()
+            .width(22)
+            .height(22)
+          Text('探测音轨…')
+            .fontSize(11)
+            .fontColor('#AAAAAA')
+        }
+        .width('100%')
+      } else if (this.exportProbeBlocked) {
+        Text(this.exportError)
+          .fontSize(11)
+          .fontColor('#FF8A80')
+          .maxLines(3)
+          .width('100%')
+      } else {
+        Text('音轨')
+          .fontSize(10)
+          .fontColor('#90A4AE')
+          .width('100%')
+        Row({ space: 6 }) {
+          Button('无音轨')
+            .fontSize(11)
+            .backgroundColor(this.exportTrack === TrackChoice.NO_AUDIO ? '#FF3D71' : '#333333')
+            .enabled(!this.exportBusy)
+            .onClick((): void => {
+              this.exportTrack = TrackChoice.NO_AUDIO;
+            })
+          if (this.exportAudioCount >= 1) {
+            Button('音轨 1')
+              .fontSize(11)
+              .backgroundColor(this.exportTrack === TrackChoice.ENV ? '#FF3D71' : '#333333')
+              .enabled(!this.exportBusy)
+              .onClick((): void => {
+                this.exportTrack = TrackChoice.ENV;
+              })
+          }
+          if (this.exportAudioCount >= 2) {
+            Button('音轨 2')
+              .fontSize(11)
+              .backgroundColor(this.exportTrack === TrackChoice.CAP ? '#FF3D71' : '#333333')
+              .enabled(!this.exportBusy)
+              .onClick((): void => {
+                this.exportTrack = TrackChoice.CAP;
+              })
+          }
+        }
+        .width('100%')
+
+        if (this.exportBusy) {
+          Progress({ value: this.exportProgress, total: 100, type: ProgressType.Linear })
+            .width('100%')
+          Text(`导出中 ${this.exportProgress}%`)
+            .fontSize(11)
+            .fontColor('#FFCC80')
+            .width('100%')
+          if (this.exportNote !== '') {
+            Text(this.exportNote)
+              .fontSize(10)
+              .fontColor('#90A4AE')
+              .width('100%')
+          }
+          Button('取消导出')
+            .fontSize(11)
+            .onClick((): void => {
+              this.cancelExport();
+            })
+        } else if (this.exportDonePath !== '') {
+          Text('导出成功')
+            .fontSize(12)
+            .fontColor('#81C784')
+            .width('100%')
+          Text(this.exportDonePath)
+            .fontSize(10)
+            .fontColor(Color.White)
+            .maxLines(3)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+          Text(formatSize(this.exportDoneSize))
+            .fontSize(10)
+            .fontColor('#90A4AE')
+            .width('100%')
+          if (this.exportNote !== '') {
+            Text(this.exportNote)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .maxLines(2)
+              .width('100%')
+          }
+          Row({ space: 8 }) {
+            Button('打开媒体库')
+              .fontSize(11)
+              .onClick((): void => {
+                this.openExportGallery();
+              })
+            Button('完成')
+              .fontSize(11)
+              .onClick((): void => {
+                this.exportPanelVisible = false;
+              })
+          }
+          .width('100%')
+        } else {
+          Button('开始导出')
+            .fontSize(12)
+            .onClick((): void => {
+              this.startExport();
+            })
+          if (this.exportError !== '') {
+            Text(this.exportError)
+              .fontSize(10)
+              .fontColor('#FF8A80')
+              .maxLines(3)
+              .width('100%')
+          }
+          if (this.exportNote !== '') {
+            Text(this.exportNote)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .width('100%')
+          }
+        }
+      }
+    }
+    .width('90%')
+    .padding(14)
+    .backgroundColor('#F0202020')
+    .borderRadius(12)
   }
 
   build() {
@@ -703,6 +1035,16 @@ struct Player {
         .padding(16)
         .backgroundColor('#66000000')
         .borderRadius(8)
+      }
+
+      if (this.exportPanelVisible) {
+        Column() {
+          this.exportPanel()
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#88000000')
       }
     }
     .width('100%')

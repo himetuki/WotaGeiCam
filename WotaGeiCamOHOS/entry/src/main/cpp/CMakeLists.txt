@@ -12,11 +12,13 @@ set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 
 include_directories(${NATIVERENDER_ROOT_PATH})
 
-add_library(entry SHARED napi_init.cpp gl_render.cpp codec_recorder.cpp arc_flow.cpp arc_mend_pass.cpp)
+add_library(entry SHARED napi_init.cpp gl_render.cpp codec_recorder.cpp clip_exporter.cpp arc_flow.cpp arc_mend_pass.cpp)
 # libace_ndk.z.so 提供 OH_NativeXComponent_*（RegisterCallback/GetXComponentSize 等，native XComponent 接口）
 # libnative_image.so 提供 OH_NativeImage_*（相机帧 → GL_TEXTURE_EXTERNAL_OES）
 # libnative_media_{venc,avmuxer,codecbase,core}.so：OH_VideoEncoder(surface)+OH_AVMuxer(fd, MPEG_4)（GL-4 GPU 录制）
+# libnative_media_{avsource,avdemuxer}.so：OH_AVSource/OH_AVDemuxer 逐样本 demux（T20 无损剪辑）
 # libnative_window.so：OH_NativeWindow_DestroyNativeWindow（编码器输入面回收）
 target_link_libraries(entry PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libnative_image.so
-    libnative_media_venc.so libnative_media_avmuxer.so libnative_media_codecbase.so libnative_media_core.so
+    libnative_media_venc.so libnative_media_avmuxer.so libnative_media_avsource.so
+    libnative_media_avdemuxer.so libnative_media_codecbase.so libnative_media_core.so
     libnative_window.so EGL GLESv3)

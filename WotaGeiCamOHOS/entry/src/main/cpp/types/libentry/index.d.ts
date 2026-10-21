@@ -45,3 +45,17 @@ export const getGpuWrittenBytes: () => number;
 /** 健康三格："trackAdded,muxStarted,samples"（1/0/整数） */
 export const getGpuHealth: () => string;
 export const getArcEffectiveMode: () => number;
+
+/**
+ * T20 A/B 无损剪辑导出（remux）：fd 由 ArkTS 打开并归其所有（native 不 close）。
+ * startClipExport：空串 = 已入队；busy（已有导出）/args/worker。
+ * getClipExportStatus：idle | running:<pct> | done:<basePtsUs>:<videoSamples>:<audioSamples>[:audio=skipped]
+ *   | failed:<code> | cancelled。failed 机器码：source/track-format/no-video/no-sync/muxer/add-track/
+ *   rotation/muxer-start/read/sample-too-large/write/empty-range。
+ * probeClipTracks：只读 "videoCount,audioCount" 或 "err:<code>"。
+ */
+export const startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
+  endMs: number, audioOrdinal: number) => string;
+export const getClipExportStatus: () => string;
+export const cancelClipExport: () => void;
+export const probeClipTracks: (inFd: number, inSize: number) => string;

@@ -93,3 +93,22 @@ export function getGpuHealth(): string {
 export function getArcEffectiveMode(): number {
   return glLib.getArcEffectiveMode();
 }
+
+// ---------------------------------------------------------------- T20 A/B 无损剪辑导出
+
+export function startClipExport(inFd: number, inSize: number, outFd: number, startMs: number,
+  endMs: number, audioOrdinal: number): string {
+  return glLib.startClipExport(inFd, inSize, outFd, startMs, endMs, audioOrdinal);
+}
+
+export function getClipExportStatus(): string {
+  return glLib.getClipExportStatus();
+}
+
+export function cancelClipExport(): void {
+  glLib.cancelClipExport();
+}
+
+export function probeClipTracks(inFd: number, inSize: number): string {
+  return glLib.probeClipTracks(inFd, inSize);
+}
