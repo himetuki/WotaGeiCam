@@ -11,14 +11,39 @@
 
 ```
 WotaGeiCamOHOS/
-├── AppScope/ entry/ ...     # DevEco 工程骨架（待生成）
+├── AppScope/                 # 应用级配置与资源（app.json5：bundleName com.wotagei.cam）
+├── entry/                    # 主模块（EntryAbility + pages/Index）
+├── hvigor/                   # hvigor 构建配置（modelVersion 6.1.1）
+├── hvigorw / hvigorw.bat     # 构建入口（见下方「构建」：委托 DevEco 自带 wrapper）
+├── build-profile.json5       # compatibleSdkVersion 6.0.0(20)，targetSdkVersion 6.1.1(24)
 ├── docs/
-│   ├── UPSTREAM_SYNC.md     # 上游同步流程（黄金规则 + 检查清单）
-│   └── PORT_MAP.md          # Android 模块 → 鸿蒙落点映射表
+│   ├── UPSTREAM_SYNC.md      # 上游同步流程（黄金规则 + 检查清单）
+│   └── PORT_MAP.md           # Android 模块 → 鸿蒙落点映射表
 ├── scripts/
-│   └── sync-upstream.sh     # 一条命令同步上游 main
-└── .gitignore               # DevEco/hvigor 构建产物忽略规则
+│   └── sync-upstream.sh      # 一条命令同步上游 main
+├── AGENT.md                  # 给 AI 代理的工程导览（改哪些文件、跳过哪些）
+└── .gitignore                # DevEco/hvigor 构建产物忽略规则
 ```
+
+## 构建
+
+前置条件：本机安装 DevEco Studio 并设置 `DEVECO_HOME` 指向安装目录
+（引擎与 wrapper 都在 `%DEVECO_HOME%\tools\hvigor\` 下），`node` 在 PATH 中。
+
+```bash
+cd WotaGeiCamOHOS
+export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
+./hvigorw --mode module -p product=default assembleHap   # 或 cmd: hvigorw.bat ...
+```
+
+产物：`entry/build/default/outputs/default/entry-default-unsigned.hap`（未签名；
+签名需在 `build-profile.json5` 的 `signingConfigs` 配置证书，或用 DevEco Studio 自动签名）。
+
+> **为什么工程里没有 hvigorw.js**：DevEco 自带 wrapper 按「自身位于
+> `tools/hvigor/bin/`」的布局解析引擎路径；把它的副本放进工程根会导致引擎链接
+> 指向工程根的上一级目录（ENOENT: hvigor.js）。因此 `hvigorw` / `hvigorw.bat`
+> 通过 `DEVECO_HOME`（或 `HVIGOR_WRAPPER_MODULE`）直接调用安装目录中的原版。
+> 用 DevEco Studio 打开工程构建不受影响。
 
 ## 与上游的关系
 
@@ -33,7 +58,7 @@ WotaGeiCamOHOS/
 
 - [x] 克隆上游、建立 `harmony` 分支（基于上游 38d712a，v0.0.9-r05 之后）
 - [x] 建立同步机制与移植映射文档
-- [ ] DevEco 工程骨架生成
+- [x] DevEco 工程骨架生成（deveco CLI，API 20–24，assembleHap 构建验证通过）
 - [ ] core 纯逻辑包移植
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
