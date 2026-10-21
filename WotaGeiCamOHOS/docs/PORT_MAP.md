@@ -24,13 +24,15 @@
 | `DirectSink.kt`、`GlRenderSuppression.kt`、`FrameRateFallback.kt` | 纯逻辑为主 | 直译 + 适配相机回调签名 | ☐ |
 | `LevelMath.kt`（水平仪/俯仰数学） | 纯逻辑 | 直译；传感器输入改 `@ohos.sensor` | ☐ |
 
-## core — 参数与常量（全部直译）
+## core — 参数与常量（第一轮直译完成 2026-10-21，对齐上游 38d712a）
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `Constants.kt`、`WotaParams.kt`、`CurveModel.kt`、`LensSlot.kt`、`UIOrientation.kt`、`VideoSizePicker.kt` | 纯逻辑 | `common/` 共享模块，逐文件直译 | ☐ |
-| `CameraAbility.kt` | 纯逻辑 + 薄适配 | 判据逻辑直译，能力来源换成鸿蒙相机格式描述 | ☐ |
-| `StorageAccess.kt` | 平台绑定 | `@ohos.file.fs` + `photoAccessHelper`（媒体库写入用安全控件/授权） | ☐ |
+| `Constants.kt`、`WotaParams.kt`、`CurveModel.kt`、`UIOrientation.kt` | 纯逻辑 | `entry/src/main/ets/core/` 同名 .ets，StateFlow 用轻量等价类，UIOrientation 的方向映射换 `window.Orientation.AUTO_ROTATION_*`（语义对齐 SENSOR_*） | ☑ |
+| `LensSlot.kt` | 纯逻辑 + 平台绑定 | `core/LensSlot.ets`：LensType/LensSlot/assignRearTiers/shouldHideLogicalHead/dumpLenses 已直译；`enumerateLenses/discoverCameraIds`（CameraManager 绑定）待相机适配层 | ☑ 部分 |
+| `CameraAbility.kt` | 纯逻辑 + 薄适配 | `core/CameraAbility.ets`：RangeI/RangeF/能力快照/纯函数族（pickFpsRange、shutterCeilingNs、eqFocalMm、hFovDeg…）已直译；`from(CameraCharacteristics)` 待相机适配层从 CameraKit 现算填充 | ☑ 部分 |
+| `VideoSizePicker.kt` | 纯逻辑 + 薄适配 | `core/VideoSizePicker.ets`：候选表/求交/落档/直显预览挑选已直译；`minFrameDurationNs(map)` 帧周期查询待相机适配层注入 | ☑ 部分 |
+| `StorageAccess.kt` | 平台绑定 | `@ohos.file.fs` + `photoAccessHelper`（媒体库写入用安全控件/授权），与文件层一起移植 | ☐ |
 
 ## diag — 诊断日志
 
@@ -88,7 +90,7 @@
 
 ## 建议移植顺序
 
-1. `core` + 各包纯逻辑（锚点文件优先，`record` 纯逻辑组最优先）——打下语义地基；
+1. ~~`core` + 各包纯逻辑~~（core 第一轮 ☑ 2026-10-21，`diag` 最小移植 ☑；`record` 锚点组下一批）——打下语义地基；
 2. DevEco 骨架 + `diag`；
 3. 相机预览（XComponent）→ `ui` 基础 HUD；
 4. `MrRecorder`（AVRecorder）最小可用录制 → `CodecRecorder`（GL + AVCodec）；

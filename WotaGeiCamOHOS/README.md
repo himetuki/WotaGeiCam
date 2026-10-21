@@ -59,7 +59,8 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] 克隆上游、建立 `harmony` 分支（基于上游 38d712a，v0.0.9-r05 之后）
 - [x] 建立同步机制与移植映射文档
 - [x] DevEco 工程骨架生成（deveco CLI，API 20–24，assembleHap 构建验证通过）
-- [ ] core 纯逻辑包移植
+- [x] core 纯逻辑包移植（2026-10-21：Constants/WotaParams/CurveModel/LensSlot/CameraAbility/VideoSizePicker/UIOrientation + diag 最小版，编译通过；相机适配层待后续）
+- [ ] record 纯逻辑锚点（ArcKeepRule/ArcDropLog/BitratePolicy/AutoStopRules/FrameLedger/SeriesIds/PendingName）
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
 - [ ] 播放器 / 媒体库 / 剪辑导出
