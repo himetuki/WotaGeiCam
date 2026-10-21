@@ -11,3 +11,4 @@ export const setCurveEnabled: (on: boolean) => void;
 export const setZebraParams: (threshold: number, density: number) => void;
 export const setPeakingParams: (strength: number, colorIndex: number) => void;
 export const uploadCurveLut: (data: ArrayBuffer) => boolean;
+export const setFrostEnabled: (on: boolean) => void;

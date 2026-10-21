@@ -63,6 +63,67 @@ static const char* WOTA_CURVE_DECL =
     "        texture2D(uCurve, vec2(c.b, 0.5)).b);\n"
     "}\n";
 
+/** 上游 Shaders.PASS_THROUGH_2D_FS（普通 2D 纹理直通；无 OES 扩展，强制不透明） */
+static const char* WOTA_PASS_THROUGH_2D_FS =
+    "precision mediump float;\n"
+    "varying vec2 vUv;\n"
+    "uniform sampler2D uFrame;\n"
+    "void main() {\n"
+    "    gl_FragColor = vec4(texture2D(uFrame, vUv).rgb, 1.0);\n"
+    "}\n";
+
+/** 上游 Shaders.FROST_COPY_FS（Frost 第①趟：OES → 2D RT 拷贝，强制不透明） */
+static const char* WOTA_FROST_COPY_FS =
+    "#extension GL_OES_EGL_image_external : require\n"
+    "precision mediump float;\n"
+    "varying vec2 vUv;\n"
+    "uniform samplerExternalOES uFrame;\n"
+    "void main() {\n"
+    "    // 强制不透明：与 PASS_THROUGH_FS 同一个理由——HAL 给 alpha=0 时这里会连着糊出一张全黑\n"
+    "    gl_FragColor = vec4(texture2D(uFrame, vUv).rgb, 1.0);\n"
+    "}\n";
+
+/** 上游 Shaders.FROST_QUAD_VS（恒等映射，不乘 uTexMatrix：RT 朝向已在拷贝趟烘好） */
+static const char* WOTA_FROST_QUAD_VS =
+    "attribute vec4 aPosition;\n"
+    "attribute vec2 aTexCoord;\n"
+    "varying vec2 vUv;\n"
+    "void main() {\n"
+    "    gl_Position = aPosition;\n"
+    "    vUv = aTexCoord;\n"
+    "}\n";
+
+/**
+ * 上游 Shaders.frostGaussianFragment(weightCount, highp) 的逐字生成器：
+ * 可分离高斯一趟（横向/纵向共用一条 program，靠 uOffset 区分）；uWeight 定长常量下标数组；
+ * 抽头展开 2N-1 次取样；highp 失败时调用方以 mediump 重编一次。
+ */
+static std::string WotaFrostGaussianFragment(int weightCount, bool highp)
+{
+    const char* precision = highp ? "highp" : "mediump";
+    std::string src = "precision ";
+    src += precision;
+    src +=
+        " float;\n"
+        "varying vec2 vUv;\n"
+        "uniform sampler2D uSrc;\n"
+        "uniform vec2 uOffset;\n";
+    src += "uniform float uWeight[" + std::to_string(weightCount) + "];\n";
+    src +=
+        "void main() {\n"
+        "        vec3 sum = texture2D(uSrc, vUv).rgb * uWeight[0];";
+    for (int i = 1; i < weightCount; i++) {
+        src += "\n        sum += (texture2D(uSrc, vUv + uOffset * " + std::to_string(i) + ".0).rgb";
+        src += " + texture2D(uSrc, vUv - uOffset * " + std::to_string(i) + ".0).rgb) * uWeight[";
+        src += std::to_string(i) + "];";
+    }
+    src +=
+        "\n"
+        "    gl_FragColor = vec4(sum, 1.0);\n"
+        "}\n";
+    return src;
+}
+
 /**
  * 上游 Shaders.zebraFragment(curveOn) 的逐字生成器：
  * 逐像素亮度比较（uThreshold），超阈值处叠 GL_REPEAT 平铺条纹贴图（fract(vUv * uTile)），

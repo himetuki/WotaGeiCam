@@ -101,6 +101,8 @@ uint8_t g_curveData[768] = {0};
 bool g_curveDirty = false;
 bool g_curveUploaded = false;
 GLuint g_curveTexId = 0;
+/** 曲线 program 在本 surface 内已失败：不再每帧重编（上游「引擎实例内持久」语义；surface 重建重置） */
+bool g_curveFailed = false;
 
 // 斑马纹瓦片
 GLuint g_stripeTexId = 0;
@@ -315,11 +317,19 @@ void EnsureCurveTexture()
     if (!g_curveDirty && g_curveUploaded && g_curveTexId != 0) {
         return;
     }
-    if (!g_curveDirty) {
-        return; // 无待上传数据：不建空 LUT（避免未初始化纹理被采样成黑图）
+    if (!g_curveDirty || g_curveFailed) {
+        return; // 无待上传数据 / 本 surface 已失败：不建空 LUT、不每帧重试
     }
     if (g_curveTexId == 0) {
-        glGenTextures(1, &g_curveTexId);
+        GLuint ids[1] = {0};
+        glGenTextures(1, ids);
+        if (ids[0] == 0) {
+            g_curveFailed = true;
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "curve LUT glGenTextures failed, curve disabled until surface recreate");
+            return;
+        }
+        g_curveTexId = ids[0];
     }
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, g_curveTexId);
@@ -327,7 +337,21 @@ void EnsureCurveTexture()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // 上传前清一次遗留错误，上传后校验（P3：错误检测与透明退化）
+    while (glGetError() != GL_NO_ERROR) {
+    }
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, g_curveData);
+    const GLenum err = glGetError();
+    if (err != GL_NO_ERROR || glIsTexture(g_curveTexId) != GL_TRUE) {
+        g_curveFailed = true;
+        g_curveDirty = true; // 数据仍在，surface 重建后重试
+        glDeleteTextures(1, &g_curveTexId);
+        g_curveTexId = 0;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "curve LUT upload failed err=%{public}u, curve disabled until surface recreate",
+            static_cast<unsigned>(err));
+        return;
+    }
     g_curveDirty = false;
     g_curveUploaded = true;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "curve LUT uploaded 256x1");
@@ -386,28 +410,6 @@ void EnsureStripeTexture(int density)
         "stripe tile %{public}dp period=32 line=%{public}d", 64, lineWidth);
 }
 
-/**
- * 新会话复位请求态（P3）：黑名单/效果请求/曲线开关/参数/几何都不得跨页面残留，
- * 让重进的页面拥有一次干净重试（例如瞬态驱动失败导致的黑名单）。
- */
-void ResetSessionState()
-{
-    g_effectBlacklisted = -1;
-    g_effectRequested = kEffectNone;
-    g_curveEnabled = false;
-    g_curveDirty = false;
-    g_curveUploaded = false;
-    g_zebraThreshold = 0.6f;
-    g_zebraDensity = 1;
-    g_peakingStrength = 0.6f;
-    g_peakingColor = 4;
-    g_sensorDeg = 0;
-    g_displayDeg = 0;
-    g_stRotDeg = 0;
-    g_mirrored = false;
-    g_geomKey = -1;
-}
-
 /** 峰值色表（上游 peakingRgb 逐值） */
 void PeakingRgbOf(int colorIndex, float rgb[3])
 {
@@ -439,7 +441,7 @@ void SyncEffect()
     if (g_curveEnabled) {
         EnsureCurveTexture();
     }
-    const bool wantCurve = g_curveEnabled && g_curveUploaded && g_curveTexId != 0;
+    const bool wantCurve = g_curveEnabled && !g_curveFailed && g_curveUploaded && g_curveTexId != 0;
     // 纹理生命周期照上游 syncEffect：目标不再用 zebra 时删条纹瓦片；曲线关闭时删曲线纹理
     // （数据仍在 g_curveData，重开时置 dirty 重新上传，不重复占显存）。
     if (target != kEffectZebra && g_stripeTexId != 0) {
@@ -472,6 +474,12 @@ void SyncEffect()
     bool built = false;
     if (target == kEffectNone) {
         built = BuildProgramLocs(WOTA_TEXTURE_VS, WOTA_CURVE_FS, g_slotLocs);
+        if (!built) {
+            // CURVE_FS 直链失败：本 surface 内不再重试曲线（避免每帧重编）
+            g_curveFailed = true;
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "curve program failed, disabled until surface recreate");
+        }
     } else if (target == kEffectZebra) {
         built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(curve), g_slotLocs);
         if (!built && curve) {
@@ -479,6 +487,7 @@ void SyncEffect()
                 "zebra+curve failed, retry without curve");
             curve = false;
             built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(false), g_slotLocs);
+            g_curveFailed = true; // 曲线变体失败：本 surface 内曲线不再尝试
         }
     } else {
         built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(curve), g_slotLocs);
@@ -487,6 +496,7 @@ void SyncEffect()
                 "peaking+curve failed, retry without curve");
             curve = false;
             built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(false), g_slotLocs);
+            g_curveFailed = true; // 曲线变体失败：本 surface 内曲线不再尝试
         }
     }
     if (!built) {
@@ -512,6 +522,447 @@ void SyncEffect()
         "program slot effect=%{public}d curve=%{public}d", g_slotEffect, g_slotCurve ? 1 : 0);
 }
 
+// ---------------------------------------------------------------- Frost 全屏高斯链（GL-3）
+
+constexpr int kFrostDownscale = 4;
+constexpr int kFrostRtMaxEdge = 512;
+constexpr int kFrostMaxErrorStreak = 8;
+constexpr int kFrostWeightCount = 4;
+static const float kFrostWeights[kFrostWeightCount] = {0.17524f, 0.16577f, 0.14032f, 0.10629f};
+
+struct FrostProgram {
+    GLuint program = 0;
+    GLint aPosition = -1;
+    GLint aTexCoord = -1;
+    GLint uFrame = -1;
+    GLint uTexMatrix = -1;
+    GLint uSrc = -1;
+    GLint uOffset = -1;
+    GLint uWeight = -1;
+};
+
+FrostProgram g_frostCopy;
+FrostProgram g_frostBlur;
+FrostProgram g_frostDisplay;
+bool g_frostBuilt = false;
+bool g_frostBuildFailed = false;
+GLuint g_idUvVbo = 0;
+GLuint g_frostResultTex = 0;
+GLuint g_frostScratchTex = 0;
+GLuint g_frostResultFbo = 0;
+GLuint g_frostScratchFbo = 0;
+int g_frostW = 0;
+int g_frostH = 0;
+bool g_frostRequested = false;
+bool g_frostBroken = false;
+int g_frostErrorStreak = 0;
+
+int CeilDiv(int a, int b)
+{
+    return (a + b - 1) / b;
+}
+
+/** frostRtSizeInto 逐行：÷4 向上取整；最长边 >512 时等比 round 缩到 512；最小 1 */
+bool FrostRtSizeInto(int out[2], int contentW, int contentH)
+{
+    if (contentW <= 0 || contentH <= 0) {
+        return false;
+    }
+    int w = CeilDiv(contentW, kFrostDownscale);
+    int h = CeilDiv(contentH, kFrostDownscale);
+    const int longest = w > h ? w : h;
+    if (longest > kFrostRtMaxEdge) {
+        const double k = static_cast<double>(kFrostRtMaxEdge) / static_cast<double>(longest);
+        w = static_cast<int>(std::lround(static_cast<double>(w) * k));
+        h = static_cast<int>(std::lround(static_cast<double>(h) * k));
+        if (w < 1) {
+            w = 1;
+        }
+        if (h < 1) {
+            h = 1;
+        }
+    }
+    out[0] = w;
+    out[1] = h;
+    return true;
+}
+
+/** frostRtNeedsRebuild 逐行：目标非法返回 false（不拆已建资源） */
+bool FrostRtNeedsRebuild(int curW, int curH, int targetW, int targetH)
+{
+    if (targetW <= 0 || targetH <= 0) {
+        return false;
+    }
+    return curW != targetW || curH != targetH;
+}
+
+/** fillFrostBlurOffset 逐行：横向 (1/w,0)，纵向 (0,1/h)；非法尺寸不写并返回 false */
+bool FillFrostBlurOffset(float out[2], bool horizontal, int texWidth, int texHeight)
+{
+    if (texWidth <= 0 || texHeight <= 0) {
+        return false;
+    }
+    if (horizontal) {
+        out[0] = 1.0f / static_cast<float>(texWidth);
+        out[1] = 0.0f;
+    } else {
+        out[0] = 0.0f;
+        out[1] = 1.0f / static_cast<float>(texHeight);
+    }
+    return true;
+}
+
+/** 清空并计数当前 GL 错误（连击停链的输入） */
+int DrainGlErrors()
+{
+    int count = 0;
+    while (glGetError() != GL_NO_ERROR) {
+        count++;
+    }
+    return count;
+}
+
+/** 全屏 quad 绘制（离屏趟不用 VAO：逐趟指定 pos/uv 两条 VBO，避免改 VAO 状态） */
+void DrawFullscreenQuad(GLint aPosition, GLint aTexCoord, GLuint posVbo, GLuint uvVbo)
+{
+    if (g_useVao) {
+        glBindVertexArray(0);
+    }
+    if (aPosition >= 0) {
+        glEnableVertexAttribArray(static_cast<GLuint>(aPosition));
+        glBindBuffer(GL_ARRAY_BUFFER, posVbo);
+        glVertexAttribPointer(static_cast<GLuint>(aPosition), 2, GL_FLOAT, GL_FALSE,
+            2 * sizeof(float), reinterpret_cast<const void*>(0));
+    }
+    if (aTexCoord >= 0) {
+        glEnableVertexAttribArray(static_cast<GLuint>(aTexCoord));
+        glBindBuffer(GL_ARRAY_BUFFER, uvVbo);
+        glVertexAttribPointer(static_cast<GLuint>(aTexCoord), 2, GL_FLOAT, GL_FALSE,
+            2 * sizeof(float), reinterpret_cast<const void*>(0));
+    }
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/** 编一枚离屏 program；失败打印 info log 返回 false */
+bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram& out, bool needWeight)
+{
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, vsSrc);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fsSrc.c_str());
+    if (vs == 0 || fs == 0) {
+        if (vs != 0) {
+            glDeleteShader(vs);
+        }
+        if (fs != 0) {
+            glDeleteShader(fs);
+        }
+        return false;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char info[512] = {0};
+        glGetProgramInfoLog(program, sizeof(info), nullptr, info);
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost program link failed log=%{public}s", info);
+        glDeleteProgram(program);
+        return false;
+    }
+    out.program = program;
+    out.aPosition = glGetAttribLocation(program, "aPosition");
+    out.aTexCoord = glGetAttribLocation(program, "aTexCoord");
+    out.uFrame = glGetUniformLocation(program, "uFrame");
+    out.uTexMatrix = glGetUniformLocation(program, "uTexMatrix");
+    out.uSrc = glGetUniformLocation(program, "uSrc");
+    out.uOffset = glGetUniformLocation(program, "uOffset");
+    out.uWeight = needWeight ? glGetUniformLocation(program, "uWeight[0]") : -1;
+    return true;
+}
+
+void DeleteFrostProgram(FrostProgram& p)
+{
+    if (p.program != 0) {
+        glDeleteProgram(p.program);
+    }
+    p = FrostProgram();
+}
+
+/** 建三枚 offscreen program：拷贝（mediump）/高斯（highp→mediump 退避）/2D 直通上屏 */
+bool BuildFrostPrograms()
+{
+    if (g_frostBuilt) {
+        return true;
+    }
+    if (g_frostBuildFailed) {
+        return false;
+    }
+    if (!BuildFrostProgram(WOTA_TEXTURE_VS, WOTA_FROST_COPY_FS, g_frostCopy, false)) {
+        g_frostBuildFailed = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost copy program failed, chain disabled");
+        return false;
+    }
+    bool blurOk = BuildFrostProgram(WOTA_FROST_QUAD_VS, WotaFrostGaussianFragment(kFrostWeightCount, true),
+        g_frostBlur, true);
+    if (!blurOk) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost gaussian highp failed, retry mediump");
+        blurOk = BuildFrostProgram(WOTA_FROST_QUAD_VS, WotaFrostGaussianFragment(kFrostWeightCount, false),
+            g_frostBlur, true);
+    }
+    if (!blurOk || !BuildFrostProgram(WOTA_FROST_QUAD_VS, WOTA_PASS_THROUGH_2D_FS, g_frostDisplay, false)) {
+        DeleteFrostProgram(g_frostCopy);
+        DeleteFrostProgram(g_frostBlur);
+        DeleteFrostProgram(g_frostDisplay);
+        g_frostBuildFailed = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost program build failed, chain disabled");
+        return false;
+    }
+    if (g_frostBlur.uWeight >= 0) {
+        glUseProgram(g_frostBlur.program);
+        glUniform1fv(g_frostBlur.uWeight, kFrostWeightCount, kFrostWeights);
+    }
+    g_frostBuilt = true;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "frost programs ready (gaussian taps=%{public}d)", kFrostWeightCount);
+    return true;
+}
+
+void DeleteFrostTargets()
+{
+    if (g_frostResultFbo != 0) {
+        glDeleteFramebuffers(1, &g_frostResultFbo);
+        g_frostResultFbo = 0;
+    }
+    if (g_frostScratchFbo != 0) {
+        glDeleteFramebuffers(1, &g_frostScratchFbo);
+        g_frostScratchFbo = 0;
+    }
+    if (g_frostResultTex != 0) {
+        glDeleteTextures(1, &g_frostResultTex);
+        g_frostResultTex = 0;
+    }
+    if (g_frostScratchTex != 0) {
+        glDeleteTextures(1, &g_frostScratchTex);
+        g_frostScratchTex = 0;
+    }
+    g_frostW = 0;
+    g_frostH = 0;
+}
+
+bool AttachFrostTexture(GLuint fbo, GLuint texture)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+}
+
+/** 建/重建离屏 RT 与 FBO（RGBA8 + LINEAR + CLAMP；完整性只认 glCheckFramebufferStatus） */
+bool EnsureFrostTargets(int w, int h)
+{
+    DeleteFrostTargets();
+    GLuint texIds[2] = {0, 0};
+    glGenTextures(2, texIds);
+    if (texIds[0] == 0 || texIds[1] == 0) {
+        g_frostBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost glGenTextures failed, chain disabled");
+        return false;
+    }
+    g_frostResultTex = texIds[0];
+    g_frostScratchTex = texIds[1];
+    const GLuint textures[2] = {g_frostResultTex, g_frostScratchTex};
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // 只占位不填数据：内容全靠三趟画出来
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    GLuint fboIds[2] = {0, 0};
+    glGenFramebuffers(2, fboIds);
+    g_frostResultFbo = fboIds[0];
+    g_frostScratchFbo = fboIds[1];
+    bool complete = g_frostResultFbo != 0 && g_frostScratchFbo != 0;
+    if (complete) {
+        complete = AttachFrostTexture(g_frostResultFbo, g_frostResultTex) &&
+            AttachFrostTexture(g_frostScratchFbo, g_frostScratchTex);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    const bool hadGlError = DrainGlErrors() > 0;
+    if (!complete || hadGlError) {
+        g_frostBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost FBO incomplete, chain disabled (complete=%{public}d glError=%{public}d)",
+            complete ? 1 : 0, hadGlError ? 1 : 0);
+        DeleteFrostTargets();
+        return false;
+    }
+    g_frostW = w;
+    g_frostH = h;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "frost RT %{public}dx%{public}d (downscale 1/%{public}d)", w, h, kFrostDownscale);
+    return true;
+}
+
+/**
+ * 三趟链：① OES → result（拷贝趟沿用上屏 UV：RT 与屏幕同朝向）② result → scratch（横向）
+ * ③ scratch → result（纵向）。返回本帧是否产出可用 RT；错误连击 ≥8 停链（本 surface 内）。
+ */
+bool RunFrostChain()
+{
+    if (!g_frostRequested || g_frostBroken || !g_hasFrame || g_nativeImage == nullptr) {
+        return false;
+    }
+    if (g_width <= 0 || g_height <= 0) {
+        return false;
+    }
+    if (!BuildFrostPrograms()) {
+        return false;
+    }
+    int size[2] = {0, 0};
+    if (!FrostRtSizeInto(size, static_cast<int>(g_width), static_cast<int>(g_height))) {
+        return false;
+    }
+    if (FrostRtNeedsRebuild(g_frostW, g_frostH, size[0], size[1])) {
+        if (!EnsureFrostTargets(size[0], size[1])) {
+            return false;
+        }
+    }
+    if (g_frostResultFbo == 0 || g_frostScratchFbo == 0) {
+        return false;
+    }
+    const int w = g_frostW;
+    const int h = g_frostH;
+    int errors = 0;
+
+    // ① 拷贝：OES → result（uTexMatrix + 上屏 UV）
+    glBindFramebuffer(GL_FRAMEBUFFER, g_frostResultFbo);
+    glViewport(0, 0, w, h);
+    glUseProgram(g_frostCopy.program);
+    if (g_frostCopy.uTexMatrix >= 0) {
+        glUniformMatrix4fv(g_frostCopy.uTexMatrix, 1, GL_FALSE, g_texMatrix);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    if (g_frostCopy.uFrame >= 0) {
+        glUniform1i(g_frostCopy.uFrame, 0);
+    }
+    DrawFullscreenQuad(g_frostCopy.aPosition, g_frostCopy.aTexCoord, g_posVbo, g_uvVbo);
+    errors += DrainGlErrors();
+
+    // ② 横向高斯：result → scratch（恒等 UV）
+    float offset[2] = {0.0f, 0.0f};
+    if (FillFrostBlurOffset(offset, true, w, h)) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frostScratchFbo);
+        glUseProgram(g_frostBlur.program);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_frostResultTex);
+        if (g_frostBlur.uSrc >= 0) {
+            glUniform1i(g_frostBlur.uSrc, 0);
+        }
+        if (g_frostBlur.uOffset >= 0) {
+            glUniform2f(g_frostBlur.uOffset, offset[0], offset[1]);
+        }
+        if (g_frostBlur.uWeight >= 0) {
+            glUniform1fv(g_frostBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        DrawFullscreenQuad(g_frostBlur.aPosition, g_frostBlur.aTexCoord, g_posVbo, g_idUvVbo);
+        errors += DrainGlErrors();
+    } else {
+        errors++;
+    }
+
+    // ③ 纵向高斯：scratch → result（恒等 UV）
+    if (FillFrostBlurOffset(offset, false, w, h)) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frostResultFbo);
+        glUseProgram(g_frostBlur.program);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_frostScratchTex);
+        if (g_frostBlur.uSrc >= 0) {
+            glUniform1i(g_frostBlur.uSrc, 0);
+        }
+        if (g_frostBlur.uOffset >= 0) {
+            glUniform2f(g_frostBlur.uOffset, offset[0], offset[1]);
+        }
+        if (g_frostBlur.uWeight >= 0) {
+            glUniform1fv(g_frostBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        DrawFullscreenQuad(g_frostBlur.aPosition, g_frostBlur.aTexCoord, g_posVbo, g_idUvVbo);
+        errors += DrainGlErrors();
+    } else {
+        errors++;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+
+    if (errors > 0) {
+        g_frostErrorStreak += 1;
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "frost chain errors=%{public}d streak=%{public}d", errors, g_frostErrorStreak);
+        if (g_frostErrorStreak >= kFrostMaxErrorStreak) {
+            g_frostBroken = true;
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "frost chain disabled after %{public}d error frames", kFrostMaxErrorStreak);
+        }
+        return false; // 错误帧不显示 RT（如实退回正常效果）
+    }
+    g_frostErrorStreak = 0;
+    return true;
+}
+
+void DeleteFrostResources()
+{
+    DeleteFrostTargets();
+    DeleteFrostProgram(g_frostCopy);
+    DeleteFrostProgram(g_frostBlur);
+    DeleteFrostProgram(g_frostDisplay);
+    if (g_idUvVbo != 0) {
+        glDeleteBuffers(1, &g_idUvVbo);
+        g_idUvVbo = 0;
+    }
+    g_frostBuilt = false;
+    g_frostBuildFailed = false;
+    g_frostBroken = false;
+    g_frostErrorStreak = 0;
+}
+
+/**
+ * 新会话复位请求态（P3）：黑名单/效果请求/曲线开关/参数/几何/毛玻璃都不得跨页面残留，
+ * 让重进的页面拥有一次干净重试（例如瞬态驱动失败导致的黑名单）。
+ */
+void ResetSessionState()
+{
+    g_effectBlacklisted = -1;
+    g_effectRequested = kEffectNone;
+    g_curveEnabled = false;
+    g_curveDirty = false;
+    g_curveUploaded = false;
+    g_curveFailed = false;
+    g_zebraThreshold = 0.6f;
+    g_zebraDensity = 1;
+    g_peakingStrength = 0.6f;
+    g_peakingColor = 4;
+    g_sensorDeg = 0;
+    g_displayDeg = 0;
+    g_stRotDeg = 0;
+    g_mirrored = false;
+    g_geomKey = -1;
+    g_frostRequested = false;
+    g_frostErrorStreak = 0;
+}
+
 bool BuildPassPipeline()
 {
     if (!BuildProgramLocs(WOTA_TEXTURE_VS, WOTA_PASS_THROUGH_FS, g_passLocs)) {
@@ -533,6 +984,11 @@ bool BuildPassPipeline()
     glGenBuffers(1, &g_uvVbo);
     glBindBuffer(GL_ARRAY_BUFFER, g_uvVbo);
     glBufferData(GL_ARRAY_BUFFER, 4 * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    // 离屏链恒等 UV（拷贝趟已烘朝向；高斯/2D 直通趟不再旋转）
+    static const float kIdUv[8] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+    glGenBuffers(1, &g_idUvVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, g_idUvVbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kIdUv), kIdUv, GL_STATIC_DRAW);
     if (g_passLocs.aPosition >= 0) {
         glEnableVertexAttribArray(static_cast<GLuint>(g_passLocs.aPosition));
         glBindBuffer(GL_ARRAY_BUFFER, g_posVbo);
@@ -665,6 +1121,7 @@ bool TryInitWithVersion(void* window, int clientVersion)
 
 void DestroyGlObjects()
 {
+    DeleteFrostResources();
     DeleteProgramLocs(g_slotLocs);
     DeleteProgramLocs(g_passLocs);
     if (g_curveTexId != 0) {
@@ -821,6 +1278,30 @@ void WotaGlRender(uint64_t timestamp)
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (!g_hasFrame || g_nativeImage == nullptr) {
+        return;
+    }
+    // Frost 全屏链（毛玻璃）：成功产出 RT 则直接走 2D 直通上屏，跳过效果程序绘制
+    // （登记：全屏版毛玻璃与监视效果互斥一帧；上游是「模糊 RT + 画板」叠加，画板几何随 HUD 批）
+    if (g_frostRequested && RunFrostChain()) {
+        glUseProgram(g_frostDisplay.program);
+        if (g_frostDisplay.uFrame >= 0) {
+            glUniform1i(g_frostDisplay.uFrame, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_frostResultTex);
+        DrawFullscreenQuad(g_frostDisplay.aPosition, g_frostDisplay.aTexCoord, g_posVbo, g_idUvVbo);
+        const EGLBoolean frostSwapped = eglSwapBuffers(g_display, g_surface);
+        if (frostSwapped != EGL_TRUE) {
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "eglSwapBuffers (frost) failed err=%{public}d", static_cast<int>(eglGetError()));
+        }
+        if (!g_firstFrameLogged) {
+            g_firstFrameLogged = true;
+            OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "first frame (frost) %{public}ux%{public}u swap=%{public}d",
+                static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
+                frostSwapped == EGL_TRUE ? 1 : 0);
+        }
         return;
     }
     SyncEffect();
@@ -1001,6 +1482,12 @@ void WotaGlSetPeakingParams(float strength, int colorIndex)
 {
     g_peakingStrength = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
     g_peakingColor = colorIndex < 0 ? 0 : (colorIndex > 4 ? 4 : colorIndex);
+}
+
+void WotaGlSetFrostEnabled(bool on)
+{
+    g_frostRequested = on;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "frost requested=%{public}d", on ? 1 : 0);
 }
 
 bool WotaGlUploadCurveLut(const void* data, size_t length)

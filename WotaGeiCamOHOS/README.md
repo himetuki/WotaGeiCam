@@ -69,6 +69,7 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] GL 基础设施（GL-0，2026-10-21）：entry/src/main/cpp 原生构建骨架（CMake+napi entry 模块）+ XComponent 原生 surface 回调 + EGL/GLES3 上下文与 OnFrame 渲染循环 + GlPreview 动画试验页；相机输入/上游着色器族留待 GL-1
 - [x] GL 相机帧入 GL（GL-1，2026-10-21）：OH_NativeImage→external OES 纹理→上游 TEXTURE_VS/PASS_THROUGH_FS 逐字上屏；napi getInputSurfaceId；ES3→ES2 退避与去 alpha fallback；GlCameraEngine+GlPreview 闭环（方向校正/剩余着色器族留待 GL-2）
 - [x] GL 监视类效果（GL-2，2026-10-21）：旋转/镜像烘 UV（buildTexCoords+stRotation）、CURVE_FS+CurveStack LUT、斑马纹/峰值单趟效果（含曲线叠加与上游退避链）、ZebraPattern 瓦片、四态切换页；FBO 链（ARC_MERGE/Frost/NtscGrid）留待 GL-3
+- [x] GL 离屏基础设施与毛玻璃（GL-3，2026-10-21）：FBO/RT（尺寸/offset 纯函数逐行）、OES→2D 拷贝→横向→纵向高斯三趟链（weights 逐值、highp 退避、错误连击停链）、PASS_THROUGH_2D 上屏、全屏毛玻璃开关；ARC_MERGE/画板几何/NtscGrid 留待后续批
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
 - [ ] 播放器 / 媒体库 / 剪辑导出

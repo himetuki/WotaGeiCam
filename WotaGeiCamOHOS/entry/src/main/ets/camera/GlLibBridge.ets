@@ -40,3 +40,7 @@ export function setPeakingParams(strength: number, colorIndex: number): void {
 export function uploadCurveLut(data: ArrayBuffer): boolean {
   return glLib.uploadCurveLut(data);
 }
+
+export function setFrostEnabled(on: boolean): void {
+  glLib.setFrostEnabled(on);
+}

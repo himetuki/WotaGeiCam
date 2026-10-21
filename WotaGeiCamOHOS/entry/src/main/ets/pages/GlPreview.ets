@@ -28,6 +28,7 @@ interface GlLibApi {
   setZebraParams: (threshold: number, density: number) => void;
   setPeakingParams: (strength: number, colorIndex: number) => void;
   uploadCurveLut: (data: ArrayBuffer) => boolean;
+  setFrostEnabled: (on: boolean) => void;
 }
 
 const POLL_INTERVAL_MS: number = 100;
@@ -39,6 +40,7 @@ struct GlPreview {
   @State message: string = 'waiting for GL surface...';
   @State effectLabel: string = '直通';
   @State curveOverlay: boolean = false;
+  @State frostEnabled: boolean = false;
   private engine: GlCameraEngine = new GlCameraEngine();
   private pollTimer: number = -1;
   private glLib: GlLibApi | undefined = undefined;
@@ -266,6 +268,24 @@ struct GlPreview {
     this.message = `effect: ${this.effectLabel}${this.curveOverlay ? ' + curve' : ''}`;
   }
 
+  /** 毛玻璃开关（GL-3）：全屏高斯链与监视效果互斥一帧（关闭即回效果态） */
+  private toggleFrost(): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      this.message = 'GL module not ready';
+      return;
+    }
+    const next: boolean = !this.frostEnabled;
+    try {
+      lib.setFrostEnabled(next);
+    } catch (e) {
+      this.message = `GL frost failed: ${e}`;
+      return;
+    }
+    this.frostEnabled = next;
+    this.message = `frost: ${next ? 'on' : 'off'}`;
+  }
+
   build() {
     Stack() {
       // libraryname 与 cpp/CMakeLists.txt 的 add_library(entry ...) 及 napi nm_modname 三者一致
@@ -293,6 +313,11 @@ struct GlPreview {
             .enabled(this.effectIndex === 2 || this.effectIndex === 3)
             .onClick(() => {
               this.toggleCurveOverlay();
+            })
+          Button(`毛玻璃: ${this.frostEnabled ? '开' : '关'}`)
+            .fontSize(12)
+            .onClick(() => {
+              this.toggleFrost();
             })
           Button('返回')
             .fontSize(12)

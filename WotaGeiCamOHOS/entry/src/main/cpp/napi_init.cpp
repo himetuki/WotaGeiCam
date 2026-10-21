@@ -203,6 +203,20 @@ static napi_value UploadCurveLut(napi_env env, napi_callback_info info)
     return result;
 }
 
+/** 毛玻璃全屏链开关（GL-3） */
+static napi_value SetFrostEnabled(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool on = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, argv[0], &on);
+    }
+    WotaGlSetFrostEnabled(on);
+    return nullptr;
+}
+
 /*
  * 模块初始化契约（P2 顺序风险修复）：
  * - XComponent 带 libraryname 创建时会加载本库，并以**带 OH_NATIVE_XCOMPONENT_OBJ 的 exports**
@@ -229,6 +243,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setZebraParams", nullptr, SetZebraParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPeakingParams", nullptr, SetPeakingParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"uploadCurveLut", nullptr, UploadCurveLut, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

@@ -54,6 +54,9 @@ void WotaGlSetZebraParams(float threshold, int density);
 /** 峰值参数：strength 0..1、colorIndex 0..4（PeakingColor） */
 void WotaGlSetPeakingParams(float strength, int colorIndex);
 
+/** 毛玻璃全屏链开关（GL-3：OES→2D 拷贝→横向高斯→纵向高斯→2D 直通上屏） */
+void WotaGlSetFrostEnabled(bool on);
+
 /** 曲线 LUT：256×1 交错 RGB，768 字节（core CurveStack.bakeBytes 同一契约）；返回长度校验结果 */
 bool WotaGlUploadCurveLut(const void* data, size_t length);
 
