@@ -6,6 +6,8 @@
 #ifndef WOTA_GL_RENDER_H
 #define WOTA_GL_RENDER_H
 
+#include <native_window/external_window.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -59,5 +61,22 @@ void WotaGlSetFrostEnabled(bool on);
 
 /** 曲线 LUT：256×1 交错 RGB，768 字节（core CurveStack.bakeBytes 同一契约）；返回长度校验结果 */
 bool WotaGlUploadCurveLut(const void* data, size_t length);
+
+// ---------------------------------------------------------------- GL-4 编码面（GPU 录制）
+
+/**
+ * 把编码器输入面（OH_VideoEncoder_GetSurface 取得）挂成第二个 EGL window surface。
+ * 返回 false = EGL 面创建失败（GPU 录制不可用，预览/效果不受影响）。
+ */
+bool WotaGlAttachEncoderWindow(OHNativeWindow* window, int width, int height);
+
+/** 解绑编码面（幂等）：恢复上屏 makeCurrent 并销毁 EGL 编码 surface（不销毁 native window，归 CodecRecorder） */
+void WotaGlDetachEncoder();
+
+/**
+ * 容器旋转元数据（muxer SetRotation 输入）：(sensor − display + 360) % 360。
+ * 编码 UV 只送缓冲原样帧（stRotDeg、不镜像），竖屏转正靠该容器 hint（上游 orientationHint 同义）。
+ */
+int WotaGlEncoderRotation();
 
 #endif // WOTA_GL_RENDER_H

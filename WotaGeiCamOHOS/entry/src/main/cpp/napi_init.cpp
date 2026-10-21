@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "codec_recorder.h"
 #include "gl_render.h"
 
 #define WOTA_LOG_DOMAIN 0x0000
@@ -217,6 +218,70 @@ static napi_value SetFrostEnabled(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+// ---------------------------------------------------------------- GL-4 GPU 录制（封装归 CodecRecorder，编码面归 gl_render）
+
+static napi_value MakeString(napi_env env, const std::string& text)
+{
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, text.c_str(), text.size(), &result);
+    return result;
+}
+
+/** 起录：fd 归 ArkTS（native 不 close）；空串 = 成功，非空 = 机器码 */
+static napi_value StartGpuRecord(napi_env env, napi_callback_info info)
+{
+    size_t argc = 5;
+    napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 5) {
+        return MakeString(env, "bad-args");
+    }
+    int32_t fd = -1;
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t fps = 0;
+    int32_t bitrate = 0;
+    napi_get_value_int32(env, argv[0], &fd);
+    napi_get_value_int32(env, argv[1], &width);
+    napi_get_value_int32(env, argv[2], &height);
+    napi_get_value_int32(env, argv[3], &fps);
+    napi_get_value_int32(env, argv[4], &bitrate);
+    std::string error = CodecRecorder::Instance().Start(fd, width, height, fps, bitrate,
+        WotaGlEncoderRotation());
+    if (!error.empty()) {
+        return MakeString(env, error);
+    }
+    // 编码器原生窗口 → EGL 编码面（失败即中止录制；预览/效果不受影响）
+    OHNativeWindow* window = CodecRecorder::Instance().EncoderWindow();
+    if (window == nullptr || !WotaGlAttachEncoderWindow(window, width, height)) {
+        CodecRecorder::Instance().Abort("encoder-surface");
+        return MakeString(env, "encoder-surface");
+    }
+    return MakeString(env, "");
+}
+
+/** 停录：返回摘要（ok samples=N eos=0/1 或错误串）；native 不 close fd */
+static napi_value StopGpuRecord(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, CodecRecorder::Instance().Stop());
+}
+
+static napi_value IsGpuRecording(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_get_boolean(env, CodecRecorder::Instance().IsRecording(), &result);
+    return result;
+}
+
+/** 最近一次录制错误（空串 = 无）；surface 销毁路径的 surface-lost 可在此取回 */
+static napi_value GetGpuRecordError(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, CodecRecorder::Instance().LastError());
+}
+
 /*
  * 模块初始化契约（P2 顺序风险修复）：
  * - XComponent 带 libraryname 创建时会加载本库，并以**带 OH_NATIVE_XCOMPONENT_OBJ 的 exports**
@@ -244,6 +309,10 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setPeakingParams", nullptr, SetPeakingParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"uploadCurveLut", nullptr, UploadCurveLut, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startGpuRecord", nullptr, StartGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopGpuRecord", nullptr, StopGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isGpuRecording", nullptr, IsGpuRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getGpuRecordError", nullptr, GetGpuRecordError, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

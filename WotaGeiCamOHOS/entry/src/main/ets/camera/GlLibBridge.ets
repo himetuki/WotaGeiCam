@@ -44,3 +44,21 @@ export function uploadCurveLut(data: ArrayBuffer): boolean {
 export function setFrostEnabled(on: boolean): void {
   glLib.setFrostEnabled(on);
 }
+
+// ---------------------------------------------------------------- GL-4 GPU 录制（视频-only 最小切片）
+
+export function startGpuRecord(fd: number, width: number, height: number, fps: number, bitrate: number): string {
+  return glLib.startGpuRecord(fd, width, height, fps, bitrate);
+}
+
+export function stopGpuRecord(): string {
+  return glLib.stopGpuRecord();
+}
+
+export function isGpuRecording(): boolean {
+  return glLib.isGpuRecording();
+}
+
+export function getGpuRecordError(): string {
+  return glLib.getGpuRecordError();
+}

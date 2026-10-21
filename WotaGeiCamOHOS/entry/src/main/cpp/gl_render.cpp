@@ -17,6 +17,7 @@
  */
 #include "gl_render.h"
 #include "shaders.h"
+#include "codec_recorder.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -66,6 +67,17 @@ int g_displayDeg = 0;
 int g_stRotDeg = 0;
 bool g_mirrored = false;
 int g_geomKey = -1;
+
+// ---- GL-4 编码面（GPU 录制）：第二个 EGL window surface + 编码专用 UV ----
+EGLSurface g_encSurface = EGL_NO_SURFACE;
+int g_encW = 0;
+int g_encH = 0;
+GLuint g_encUvVbo = 0;
+int g_encGeomKey = -1;
+int g_encFailStreak = 0;
+bool g_encFirstFrameLogged = false;
+/** 编码 pass 恢复上屏 makeCurrent 失败：下一帧开头先重试绑定，未成功前禁止任何绘制 */
+bool g_displayCtxLost = false;
 
 /** 程序槽与 location 缓存（单效果槽：同一时刻只有一个效果 program） */
 struct ProgramLocs {
@@ -126,6 +138,12 @@ std::string g_nativeImageError;
 int NormalizeDeg(int deg)
 {
     return ((deg % 360) + 360) % 360;
+}
+
+/** 0/90/180/270 四舍五入（上游 OrientationExport.normalizeQuarter）：45→90、359→0 */
+int NormalizeQuarter(int deg)
+{
+    return ((NormalizeDeg(deg) + 45) / 90 % 4) * 90;
 }
 
 bool NearF(float actual, float expected)
@@ -522,6 +540,196 @@ void SyncEffect()
         "program slot effect=%{public}d curve=%{public}d", g_slotEffect, g_slotCurve ? 1 : 0);
 }
 
+/**
+ * 上屏与编码 pass 共用的绘制（同一套 uniform/纹理绑定）：
+ * @param uvVbo  朝向来源（上屏 = 显示 UV；编码 = 编码 UV）
+ * @param vaoOk  是否允许走上屏的 VAO 快路（编码面用独立 UV VBO，必须手动绑指针）
+ */
+void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk)
+{
+    glUseProgram(locs.program);
+    if (locs.uTexMatrix >= 0) {
+        glUniformMatrix4fv(locs.uTexMatrix, 1, GL_FALSE, g_texMatrix);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    if (locs.uFrame >= 0) {
+        glUniform1i(locs.uFrame, 0);
+    }
+    if (locs.program == g_slotLocs.program) {
+        if (g_slotEffect == kEffectZebra) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, g_stripeTexId);
+            if (locs.uStripe >= 0) {
+                glUniform1i(locs.uStripe, 1);
+            }
+            if (locs.uThreshold >= 0) {
+                glUniform1f(locs.uThreshold, g_zebraThreshold);
+            }
+            const float repeat = TileRepeatOf(g_zebraDensity);
+            if (locs.uTile >= 0) {
+                glUniform2f(locs.uTile, repeat, repeat);
+            }
+        } else if (g_slotEffect == kEffectPeaking) {
+            if (locs.uTexel >= 0) {
+                glUniform2f(locs.uTexel, 0.002f, 0.002f);
+            }
+            if (locs.uStrength >= 0) {
+                glUniform1f(locs.uStrength, g_peakingStrength);
+            }
+            float rgb[3];
+            PeakingRgbOf(g_peakingColor, rgb);
+            if (locs.uColor >= 0) {
+                glUniform3f(locs.uColor, rgb[0], rgb[1], rgb[2]);
+            }
+        }
+        if (g_slotCurve) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, g_curveTexId);
+            if (locs.uCurve >= 0) {
+                glUniform1i(locs.uCurve, 2);
+            }
+        }
+    }
+    if (vaoOk && g_useVao) {
+        // ES3 每帧重绑 VAO（防后续 GL 状态改动把绘制落到未绑定/旧 VAO）
+        glBindVertexArray(g_vao);
+    } else {
+        if (g_useVao) {
+            glBindVertexArray(0);
+        }
+        // 无 VAO（ES2 / 编码面独立 UV）：手动绑 pos + uv 两条 VBO
+        if (locs.aPosition >= 0) {
+            glEnableVertexAttribArray(static_cast<GLuint>(locs.aPosition));
+            glBindBuffer(GL_ARRAY_BUFFER, g_posVbo);
+            glVertexAttribPointer(static_cast<GLuint>(locs.aPosition), 2, GL_FLOAT, GL_FALSE,
+                2 * sizeof(float), reinterpret_cast<const void*>(0));
+        }
+        if (locs.aTexCoord >= 0) {
+            glEnableVertexAttribArray(static_cast<GLuint>(locs.aTexCoord));
+            glBindBuffer(GL_ARRAY_BUFFER, uvVbo);
+            glVertexAttribPointer(static_cast<GLuint>(locs.aTexCoord), 2, GL_FLOAT, GL_FALSE,
+                2 * sizeof(float), reinterpret_cast<const void*>(0));
+        }
+    }
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/**
+ * 编码 UV 重建：deg = stRotDeg、mirror = false —— 上游 buildTexCoords(encoderPass = true) 语义
+ * （只抵消缓冲矩阵分量、不转正、不镜像；容器方向交给 orientationHint，本批留白）。
+ */
+void RebuildEncoderTexCoords()
+{
+    if (g_encUvVbo == 0) {
+        return;
+    }
+    const int deg = NormalizeDeg(g_stRotDeg);
+    if (deg == g_encGeomKey) {
+        return;
+    }
+    g_encGeomKey = deg;
+    const float rad = static_cast<float>(deg) * kPi / 180.0f;
+    const float c = std::cos(rad);
+    const float s = std::sin(rad);
+    float uv[8];
+    for (int i = 0; i < 4; i++) {
+        const float x = kQuadPositions[i * 2] * 0.5f;
+        const float y = -kQuadPositions[i * 2 + 1] * 0.5f;
+        // 编码 pass 不镜像（mirror 只作用于屏幕空间）
+        const float sx = c * x + s * y;
+        const float sy = -s * x + c * y;
+        uv[i * 2] = sx + 0.5f;
+        uv[i * 2 + 1] = 0.5f - sy;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, g_encUvVbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uv), uv, GL_DYNAMIC_DRAW);
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "encoder texcoords deg=%{public}d", deg);
+}
+
+/**
+ * 编码 pass：在编码器输入面上绘一帧。**绝不进入 frost 分支**（上游红线：霜面是上屏专属）；
+ * 效果链与上屏共用同一槽位 program（直通/曲线/斑马/峰值）。
+ */
+bool DrawEncoderPass()
+{
+    if (g_encSurface == EGL_NO_SURFACE || g_encW <= 0 || g_encH <= 0) {
+        return false;
+    }
+    SyncEffect();
+    RebuildEncoderTexCoords();
+    if (eglMakeCurrent(g_display, g_encSurface, g_encSurface, g_context) != EGL_TRUE) {
+        g_encFailStreak++;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder makeCurrent failed err=%{public}d streak=%{public}d",
+            static_cast<int>(eglGetError()), g_encFailStreak);
+        if (g_encFailStreak >= 3) {
+            CodecRecorder::Instance().Abort("encoder-pass-failed");
+        }
+        return false;
+    }
+    glViewport(0, 0, g_encW, g_encH);
+    glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    bool drawn = false;
+    if (locs.program != 0) {
+        DrawScene(locs, g_encUvVbo, false);
+        drawn = true;
+    }
+    const EGLBoolean swapped = drawn ? eglSwapBuffers(g_display, g_encSurface) : EGL_FALSE;
+    // 恢复上屏上下文：失败视一次即中止（若上下文仍绑在编码面，下一帧上屏会画错面）。
+    // 置 g_displayCtxLost，WotaGlRender 下一帧开头先重试绑定，未成功前跳过全部绘制。
+    const EGLBoolean restored = eglMakeCurrent(g_display, g_surface, g_surface, g_context);
+    if (restored == EGL_TRUE) {
+        glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+    } else {
+        g_displayCtxLost = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder pass restore display context failed err=%{public}d, abort recording",
+            static_cast<int>(eglGetError()));
+        CodecRecorder::Instance().Abort("encoder-pass-failed");
+        return false;
+    }
+    if (!drawn || swapped != EGL_TRUE) {
+        g_encFailStreak++;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder pass failed drawn=%{public}d swap=%{public}d streak=%{public}d",
+            drawn ? 1 : 0, swapped == EGL_TRUE ? 1 : 0, g_encFailStreak);
+        if (g_encFailStreak >= 3) {
+            CodecRecorder::Instance().Abort("encoder-pass-failed");
+        }
+        return false;
+    }
+    g_encFailStreak = 0;
+    if (!g_encFirstFrameLogged) {
+        g_encFirstFrameLogged = true;
+        OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder pass first frame %{public}dx%{public}d", g_encW, g_encH);
+    }
+    return true;
+}
+
+/**
+ * 每帧第二趟：仅当**本 tick 消费到新相机帧**、编码面已挂且 CodecRecorder 处于 RECORDING 时送帧
+ * （vsync 重绘不重复送帧，避免 30fps 相机在 60/120Hz 屏上产生 2–4 倍重复帧）。
+ * 编码 pass 不进入 frost 分支（上屏专属），效果链与上屏共用。
+ */
+void MaybeDrawEncoderPass(bool newFrameConsumed)
+{
+    if (!newFrameConsumed) {
+        return;
+    }
+    if (g_encSurface == EGL_NO_SURFACE) {
+        return;
+    }
+    if (!CodecRecorder::Instance().IsRecording()) {
+        return;
+    }
+    DrawEncoderPass();
+}
+
 // ---------------------------------------------------------------- Frost 全屏高斯链（GL-3）
 
 constexpr int kFrostDownscale = 4;
@@ -770,6 +978,13 @@ bool EnsureFrostTargets(int w, int h)
     GLuint texIds[2] = {0, 0};
     glGenTextures(2, texIds);
     if (texIds[0] == 0 || texIds[1] == 0) {
+        // 半成功不泄漏：先删已生成的那个纹理再置 broken
+        if (texIds[0] != 0) {
+            glDeleteTextures(1, &texIds[0]);
+        }
+        if (texIds[1] != 0) {
+            glDeleteTextures(1, &texIds[1]);
+        }
         g_frostBroken = true;
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
             "frost glGenTextures failed, chain disabled");
@@ -913,8 +1128,15 @@ bool RunFrostChain()
             "frost chain errors=%{public}d streak=%{public}d", errors, g_frostErrorStreak);
         if (g_frostErrorStreak >= kFrostMaxErrorStreak) {
             g_frostBroken = true;
+            // 停链即释放：离屏资源 + 三枚 program 一并拆掉（下一轮开关给干净重试）
+            DeleteFrostTargets();
+            DeleteFrostProgram(g_frostCopy);
+            DeleteFrostProgram(g_frostBlur);
+            DeleteFrostProgram(g_frostDisplay);
+            g_frostBuilt = false;
             OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "frost chain disabled after %{public}d error frames", kFrostMaxErrorStreak);
+                "frost chain disabled after %{public}d error frames (resources released)",
+                kFrostMaxErrorStreak);
         }
         return false; // 错误帧不显示 RT（如实退回正常效果）
     }
@@ -928,10 +1150,9 @@ void DeleteFrostResources()
     DeleteFrostProgram(g_frostCopy);
     DeleteFrostProgram(g_frostBlur);
     DeleteFrostProgram(g_frostDisplay);
-    if (g_idUvVbo != 0) {
-        glDeleteBuffers(1, &g_idUvVbo);
-        g_idUvVbo = 0;
-    }
+    // g_idUvVbo 是整条 2D/高斯链共用的基础 UV（BuildPassPipeline 建），不随 frost 开关释放：
+    // 否则关→开时 WotaGlSetFrostEnabled(true) 不重建它，高斯/上屏会在 uvVbo==0 上绑指针导致
+    // GL_INVALID_OPERATION 且 8 帧后停链（审查 P1）。其生命周期只属于 EGL 管线（DestroyGlObjects）。
     g_frostBuilt = false;
     g_frostBuildFailed = false;
     g_frostBroken = false;
@@ -984,6 +1205,11 @@ bool BuildPassPipeline()
     glGenBuffers(1, &g_uvVbo);
     glBindBuffer(GL_ARRAY_BUFFER, g_uvVbo);
     glBufferData(GL_ARRAY_BUFFER, 4 * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    // GL-4：编码面独立 UV（deg=stRotDeg、不镜像），与上屏 UV 分开缓存/更新
+    glGenBuffers(1, &g_encUvVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, g_encUvVbo);
+    glBufferData(GL_ARRAY_BUFFER, 4 * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    g_encGeomKey = -1;
     // 离屏链恒等 UV（拷贝趟已烘朝向；高斯/2D 直通趟不再旋转）
     static const float kIdUv[8] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
     glGenBuffers(1, &g_idUvVbo);
@@ -1137,6 +1363,15 @@ void DestroyGlObjects()
         glDeleteBuffers(1, &g_uvVbo);
         g_uvVbo = 0;
     }
+    if (g_encUvVbo != 0) {
+        glDeleteBuffers(1, &g_encUvVbo);
+        g_encUvVbo = 0;
+    }
+    if (g_idUvVbo != 0) {
+        // 基础 UV 归 EGL 管线生命周期：只在这里删（frost 开关只释放离屏资源/program）
+        glDeleteBuffers(1, &g_idUvVbo);
+        g_idUvVbo = 0;
+    }
     if (g_posVbo != 0) {
         glDeleteBuffers(1, &g_posVbo);
         g_posVbo = 0;
@@ -1148,6 +1383,7 @@ void DestroyGlObjects()
     g_slotEffect = kEffectNone;
     g_slotCurve = false;
     g_geomKey = -1;
+    g_encGeomKey = -1;
 }
 } // namespace
 
@@ -1233,6 +1469,7 @@ bool WotaGlInit(void* window, uint64_t width, uint64_t height)
         reinterpret_cast<const char*>(glGetString(GL_VERSION)));
     g_ready = true;
     g_firstFrameLogged = false;
+    g_displayCtxLost = false;
     // 上下文就绪后才建 NativeImage（顺序：上下文 → image；Destroy 反之）
     if (!CreateNativeImage()) {
         OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
@@ -1259,7 +1496,20 @@ void WotaGlRender(uint64_t timestamp)
     if (!g_ready) {
         return;
     }
+    // 编码 pass 恢复上屏上下文失败后的守卫：先重试绑定，未成功前跳过本帧全部绘制，
+    // 防止把上屏几何画到编码面（审查 P3）。
+    if (g_displayCtxLost) {
+        if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) != EGL_TRUE) {
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "display context still lost, skip frame err=%{public}d", static_cast<int>(eglGetError()));
+            return;
+        }
+        g_displayCtxLost = false;
+        glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+        OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "display context restored");
+    }
     // 帧可用才拉起新帧（回调里只置位）；无帧时仅清屏（不画未完成纹理）
+    bool newFrameConsumed = false;
     if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
         if (OH_NativeImage_UpdateSurfaceImage(g_nativeImage) == 0) {
             OH_NativeImage_GetTransformMatrix(g_nativeImage, g_texMatrix);
@@ -1269,6 +1519,7 @@ void WotaGlRender(uint64_t timestamp)
                 g_geomKey = -1;
             }
             g_hasFrame = true;
+            newFrameConsumed = true;
         } else {
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
                 "UpdateSurfaceImage failed");
@@ -1302,6 +1553,8 @@ void WotaGlRender(uint64_t timestamp)
                 static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
                 frostSwapped == EGL_TRUE ? 1 : 0);
         }
+        // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧；frost 是上屏专属）
+        MaybeDrawEncoderPass(newFrameConsumed);
         return;
     }
     SyncEffect();
@@ -1384,10 +1637,19 @@ void WotaGlRender(uint64_t timestamp)
             static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
             swapped == EGL_TRUE ? 1 : 0);
     }
+    // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧、同一效果链）
+    MaybeDrawEncoderPass(newFrameConsumed);
 }
 
 void WotaGlDestroy()
 {
+    // 录制资源仍活跃（含 writeFailed_ 但尚未 Stop 的态）：surface 不可续，先中止
+    if (CodecRecorder::Instance().IsActive()) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "gl destroy while recorder active, aborting gpu record (surface-lost)");
+        CodecRecorder::Instance().AbortOnSurfaceLost();
+    }
+    WotaGlDetachEncoder();
     if (g_display == EGL_NO_DISPLAY) {
         g_ready = false;
         return;
@@ -1422,6 +1684,7 @@ void WotaGlDestroy()
     g_display = EGL_NO_DISPLAY;
     g_ready = false;
     g_firstFrameLogged = false;
+    g_displayCtxLost = false;
     g_nativeImageError.clear();
     g_window = nullptr;
     // 新会话干净重试（P3）：黑名单/请求态/几何在页面上次会话后不得残留
@@ -1429,6 +1692,81 @@ void WotaGlDestroy()
     // 释放本线程 EGL 绑定（surface 反复重建/页面反复进出不留线程级残留）
     eglReleaseThread();
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "gl destroyed");
+}
+
+// ---------------------------------------------------------------- GL-4 编码面（GPU 录制）
+
+bool WotaGlAttachEncoderWindow(OHNativeWindow* window, int width, int height)
+{
+    if (!g_ready || g_display == EGL_NO_DISPLAY || g_context == EGL_NO_CONTEXT ||
+        window == nullptr || width <= 0 || height <= 0) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder attach rejected ready=%{public}d window=%{public}d %{public}dx%{public}d",
+            g_ready ? 1 : 0, window == nullptr ? 0 : 1, width, height);
+        return false;
+    }
+    if (g_encSurface != EGL_NO_SURFACE) {
+        WotaGlDetachEncoder(); // 幂等：旧编码面先拆（重录/重挂）
+    }
+    // 复用初始化时缓存的 EGLConfig（g_eglConfig），不重新 chooseConfig
+    const EGLint surfaceAttribs[] = {EGL_NONE};
+    g_encSurface = eglCreateWindowSurface(g_display, g_eglConfig,
+        reinterpret_cast<EGLNativeWindowType>(window), surfaceAttribs);
+    if (g_encSurface == EGL_NO_SURFACE) {
+        g_encW = 0;
+        g_encH = 0;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder eglCreateWindowSurface failed err=%{public}d (gpu record unavailable)",
+            static_cast<int>(eglGetError()));
+        return false;
+    }
+    if (g_encUvVbo == 0) {
+        // 管线未就绪（BuildPassPipeline 未建编码 UV）：不可用
+        eglDestroySurface(g_display, g_encSurface);
+        g_encSurface = EGL_NO_SURFACE;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder attach failed: pipeline not ready (uv vbo missing)");
+        return false;
+    }
+    g_encW = width;
+    g_encH = height;
+    g_encGeomKey = -1;
+    g_encFailStreak = 0;
+    g_encFirstFrameLogged = false;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "encoder surface attached %{public}dx%{public}d", width, height);
+    return true;
+}
+
+void WotaGlDetachEncoder()
+{
+    if (g_encSurface != EGL_NO_SURFACE) {
+        if (g_display != EGL_NO_DISPLAY) {
+            // 恢复上屏 makeCurrent 再销毁编码面（幂等；上下文已拆时只清指针）
+            if (g_surface != EGL_NO_SURFACE && g_context != EGL_NO_CONTEXT) {
+                if (eglMakeCurrent(g_display, g_surface, g_surface, g_context) == EGL_TRUE) {
+                    g_displayCtxLost = false;
+                } else {
+                    // 绑定失败：置帧级守卫，WotaGlRender 在恢复前不绘制
+                    g_displayCtxLost = true;
+                    OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "detach: restore display context failed err=%{public}d (frame guard armed)",
+                        static_cast<int>(eglGetError()));
+                }
+            }
+            if (eglDestroySurface(g_display, g_encSurface) != EGL_TRUE) {
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "encoder eglDestroySurface failed err=%{public}d", static_cast<int>(eglGetError()));
+            }
+        }
+        g_encSurface = EGL_NO_SURFACE;
+        OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "encoder surface detached");
+    }
+    g_encW = 0;
+    g_encH = 0;
+    g_encGeomKey = -1;
+    g_encFailStreak = 0;
+    g_encFirstFrameLogged = false;
 }
 
 bool WotaGlReady()
@@ -1447,6 +1785,18 @@ std::string WotaGlGetInputSurfaceId()
 std::string WotaGlGetNativeImageError()
 {
     return g_nativeImageError;
+}
+
+int WotaGlEncoderRotation()
+{
+    // 与显示几何同一输入源：sensor 来自镜头信息，display 来自 display.rotation×90。
+    // muxer 只接受 0/90/180/270：按上游 normalizeQuarter 四舍五入（45→90、359→0），
+    // 非 90 倍数 sensorOrientation 不得让起录直接失败（审查 P2）。
+    const int raw = NormalizeDeg(g_sensorDeg - g_displayDeg);
+    const int rounded = NormalizeQuarter(raw);
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "encoder rotation raw=%{public}d rounded=%{public}d", raw, rounded);
+    return rounded;
 }
 
 // ---------------------------------------------------------------- GL-2 外部入口（napi 调用，只写状态）
@@ -1469,6 +1819,10 @@ void WotaGlSetEffect(int effect)
 
 void WotaGlSetCurveEnabled(bool on)
 {
+    if (on && !g_curveEnabled) {
+        // 用户动作（关→开）：给曲线一次干净重试（不在帧循环里复位，避免每帧重编）
+        g_curveFailed = false;
+    }
     g_curveEnabled = on;
 }
 
@@ -1484,10 +1838,28 @@ void WotaGlSetPeakingParams(float strength, int colorIndex)
     g_peakingColor = colorIndex < 0 ? 0 : (colorIndex > 4 ? 4 : colorIndex);
 }
 
+/**
+ * 毛玻璃开关（GL-3/开关=重试语义，登记）：
+ * - false→true：复位 broken/buildFailed/errorStreak（用户动作给一次干净重试），并就绪时**当场预编**
+ *   三枚 program（UI 线程上下文 current；失败登记，OnFrame 懒建仍兜底）；
+ * - true→false：释放离屏 targets 与三枚 program（LUT/条纹等效果资源不动）。
+ */
 void WotaGlSetFrostEnabled(bool on)
 {
+    const bool was = g_frostRequested;
     g_frostRequested = on;
-    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "frost requested=%{public}d", on ? 1 : 0);
+    if (on && !was) {
+        g_frostBroken = false;
+        g_frostBuildFailed = false;
+        g_frostErrorStreak = 0;
+        if (g_ready && !g_frostBuilt && !g_frostBuildFailed) {
+            BuildFrostPrograms();
+        }
+    } else if (!on && was) {
+        DeleteFrostResources();
+    }
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "frost requested=%{public}d (switch=retry semantics)", on ? 1 : 0);
 }
 
 bool WotaGlUploadCurveLut(const void* data, size_t length)
@@ -1499,6 +1871,8 @@ bool WotaGlUploadCurveLut(const void* data, size_t length)
     }
     std::memcpy(g_curveData, data, sizeof(g_curveData));
     g_curveDirty = true;
+    // 用户动作（新 LUT 到达）：清掉上次的失败标记，允许重试（另一处复位在 SetCurveEnabled 关→开）
+    g_curveFailed = false;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "curve LUT queued 256x1 RGB");
     return true;
 }

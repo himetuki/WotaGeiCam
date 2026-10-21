@@ -9,17 +9,21 @@
  * GL-2 接线：display 旋转（rotation×90）+ 前置镜像 → setDisplayGeometry（buildTexCoords 烘 UV）；
  * CurveStack.bakeBytes（256×1 交错 RGB）→ uploadCurveLut；效果槽四态循环（直通/曲线/斑马/峰值）+
  * 曲线叠加（仅斑马/峰值）；斑马/峰值参数取上游默认（0.6/1 与 0.6/RED）。
- * 已知：identity LUT 下曲线模式视觉与直通相同（曲线编辑随 HUD 批）；FBO 链/渲染线程留待 GL-3。
+ * GL-4 接线：录 GPU/停录（视频-only 最小切片）——固定 1920×1080@30、BitratePolicy.resolve 取码率，
+ * 文件经 VideoStore 落 filesDir/videos，fd 归 ArkTS（GlRecorder），native 直写 MP4；编码 pass 不碰 frost。
+ * 已知：identity LUT 下曲线模式视觉与直通相同（曲线编辑随 HUD 批）；音频/分段/抽帧/参数下发留待后续批。
  */
 import { common } from '@kit.AbilityKit';
 import { display } from '@kit.ArkUI';
 import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
+import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { FrameEffect, PeakingColor } from '../core/Constants';
+import { BitratePolicy } from '../record/BitratePolicy';
 
 /** libentry.so 的动态加载桥视图（camera/GlLibBridge 的导出签名） */
-interface GlLibApi {
+interface GlLibApi extends GlRecordLib {
   getInputSurfaceId: () => string;
   getNativeImageError: () => string;
   setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
@@ -33,6 +37,10 @@ interface GlLibApi {
 
 const POLL_INTERVAL_MS: number = 100;
 const POLL_TIMEOUT_MS: number = 5000;
+// GPU 录制固定档（参数总线接线留待 HUD 批；登记 PORT_MAP）
+const GPU_RECORD_WIDTH: number = 1920;
+const GPU_RECORD_HEIGHT: number = 1080;
+const GPU_RECORD_FPS: number = 30;
 
 @Entry
 @Component
@@ -41,8 +49,12 @@ struct GlPreview {
   @State effectLabel: string = '直通';
   @State curveOverlay: boolean = false;
   @State frostEnabled: boolean = false;
+  @State recording: boolean = false;
   private engine: GlCameraEngine = new GlCameraEngine();
+  private recorder: GlRecorder = new GlRecorder();
   private pollTimer: number = -1;
+  /** 录制期监视定时器：native 端写失败自中止（isGpuRecording=false）时页面据此收尾并显示原因 */
+  private recordTimer: number = -1;
   private glLib: GlLibApi | undefined = undefined;
   /** 页面销毁后取消所有异步链（轮询/权限/起镜 then 回调不得越过返回继续跑） */
   private disposed: boolean = false;
@@ -63,12 +75,17 @@ struct GlPreview {
 
   aboutToDisappear(): void {
     this.disposed = true;
+    // 顺序（契约）：先停录（GL 编码面仍可用、fd 归本类）→ 关相机会话 → 停轮询
+    if (this.recorder.isRecording()) {
+      this.finishGpuRecord();
+    }
+    this.stopRecordMonitor();
+    this.engine.stop();
     this.stopPolling();
     try {
       display.off('change');
     } catch (e) {
     }
-    this.engine.stop();
   }
 
   /** XComponent onLoad 之后再加载原生模块（见文件头「加载顺序」） */
@@ -286,6 +303,99 @@ struct GlPreview {
     this.message = `frost: ${next ? 'on' : 'off'}`;
   }
 
+  private hostContext(): common.Context | undefined {
+    return this.getUIContext().getHostContext() as common.Context | undefined;
+  }
+
+  /**
+   * 录 GPU/停录（GL-4 最小切片）：前置 = 原生模块已加载、相机会话已起（native surface 就绪）、未在录制；
+   * 尺寸/码率固定档，失败显示 native 机器码（页面不做重试编排）。
+   */
+  private toggleGpuRecord(): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      this.message = 'GL module not ready';
+      return;
+    }
+    if (this.recorder.isRecording()) {
+      this.finishGpuRecord();
+      return;
+    }
+    if (this.engine.lastLensInfo() === undefined) {
+      this.message = 'GPU record: camera not ready (no native surface)';
+      return;
+    }
+    // 起录前刷新显示几何：muxer 旋转 hint 读 native 的 sensor/display，快速转屏后不得用旧值/0
+    this.applyGeometry();
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined) {
+      this.message = 'no host context';
+      return;
+    }
+    const bitrate: number = BitratePolicy.resolve(0, GPU_RECORD_WIDTH, GPU_RECORD_HEIGHT, GPU_RECORD_FPS, false);
+    const error: string = this.recorder.start(ctx, lib, GPU_RECORD_WIDTH, GPU_RECORD_HEIGHT,
+      GPU_RECORD_FPS, bitrate);
+    if (error !== '') {
+      this.message = `GPU record failed: ${error}`;
+      return;
+    }
+    this.recording = true;
+    this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${GPU_RECORD_FPS} bitrate=${bitrate}`;
+    this.startRecordMonitor();
+  }
+
+  /** 停录：native 摘要 + 落盘大小/时长（失败/中止原因含在摘要里） */
+  private finishGpuRecord(): void {
+    this.stopRecordMonitor();
+    const summary: string = this.recorder.stop();
+    this.recording = false;
+    this.message = `GPU record: ${summary}`;
+  }
+
+  /**
+   * 录制期监视（500ms）：消费 native 真实的 isGpuRecording/getGpuRecordError。
+   * muxer 写失败/编码 pass 中止会使 native 侧自行置为不可录制；此处收尾停录并显示机器码。
+   */
+  private startRecordMonitor(): void {
+    this.stopRecordMonitor();
+    this.recordTimer = setInterval((): void => {
+      if (this.disposed || !this.recording) {
+        this.stopRecordMonitor();
+        return;
+      }
+      const lib: GlLibApi | undefined = this.glLib;
+      if (lib === undefined) {
+        return;
+      }
+      let alive: boolean = false;
+      try {
+        alive = lib.isGpuRecording();
+      } catch (e) {
+        alive = false;
+      }
+      if (alive) {
+        return;
+      }
+      let reason: string = '';
+      try {
+        reason = lib.getGpuRecordError();
+      } catch (e) {
+        reason = '';
+      }
+      this.finishGpuRecord();
+      if (reason !== '') {
+        this.message = `${this.message} (${reason})`;
+      }
+    }, 500);
+  }
+
+  private stopRecordMonitor(): void {
+    if (this.recordTimer >= 0) {
+      clearInterval(this.recordTimer);
+      this.recordTimer = -1;
+    }
+  }
+
   build() {
     Stack() {
       // libraryname 与 cpp/CMakeLists.txt 的 add_library(entry ...) 及 napi nm_modname 三者一致
@@ -325,6 +435,13 @@ struct GlPreview {
               // 先置 disposed 再返回：轮询/权限/起镜回调立即失效（aboutToDisappear 再兜底收尾）
               this.disposed = true;
               this.getUIContext().getRouter().back();
+            })
+        }
+        Row({ space: 8 }) {
+          Button(this.recording ? '停录' : '录 GPU')
+            .fontSize(12)
+            .onClick(() => {
+              this.toggleGpuRecord();
             })
         }
       }
