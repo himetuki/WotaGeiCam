@@ -46,6 +46,7 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     state_ = State::STARTING;
     lastError_.clear();
     samples_ = 0;
+    writtenBytes_ = 0;
     eosSeen_ = false;
     lastPtsUs_ = -1;
     writeFailed_ = false;
@@ -153,6 +154,7 @@ std::string CodecRecorder::FailStart(std::unique_lock<std::mutex>& lock, const c
     window_ = nullptr;
     track_ = -1;
     samples_ = 0;
+    writtenBytes_ = 0;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -219,6 +221,7 @@ std::string CodecRecorder::Stop()
     window_ = nullptr;
     track_ = -1;
     samples_ = 0;
+    writtenBytes_ = 0;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -267,6 +270,12 @@ std::string CodecRecorder::LastError()
 {
     std::lock_guard<std::mutex> lock(mtx_);
     return lastError_;
+}
+
+int64_t CodecRecorder::GetWrittenBytes()
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return writtenBytes_;
 }
 
 void CodecRecorder::Abort(const std::string& reason)
@@ -391,5 +400,6 @@ void CodecRecorder::HandleOutputBuffer(uint32_t index, OH_AVBuffer* buffer)
     }
     lastPtsUs_ = ptsUs;
     samples_++; // 仅成功写入自增
+    writtenBytes_ += static_cast<int64_t>(attr.size);
     OH_VideoEncoder_FreeOutputBuffer(codec_, index);
 }

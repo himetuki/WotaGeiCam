@@ -608,13 +608,6 @@ struct Player {
       if (this.controlsVisible) {
         Column() {
           this.topBar()
-          if (this.metaNotice !== '') {
-            Text(this.metaNotice)
-              .fontSize(10)
-              .fontColor('#FFCC80')
-              .maxLines(2)
-              .padding({ left: 10, right: 10, top: 2 })
-          }
           Blank()
           Button(this.playing ? '⏸' : '▶')
             .fontSize(28)
@@ -631,6 +624,17 @@ struct Player {
         .width('100%')
         .height('100%')
         .hitTestBehavior(HitTestMode.Transparent)
+      }
+
+      if (this.metaNotice !== '') {
+        Text(this.metaNotice)
+          .fontSize(10)
+          .fontColor('#FFCC80')
+          .maxLines(2)
+          .textAlign(TextAlign.Center)
+          .width('100%')
+          .padding({ top: 64, left: 12, right: 12 })
+          .position({ x: 0, y: 0 })
       }
 
       if (this.loading) {

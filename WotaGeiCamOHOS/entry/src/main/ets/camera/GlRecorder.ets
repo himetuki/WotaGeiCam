@@ -1,22 +1,26 @@
 /**
- * GL-4 GPU 录制门面（CodecRecorder + 光弧链在线版的 ArkTS 侧）：
- * 文件句柄归 ArkTS（fileIo.openSync 取 fd 传 native；native 绝不 close，停录后本类关闭并 stat 大小），
- * native 侧 OH_VideoEncoder(surface 输入) + OH_AVMuxer(fd, MPEG_4) 直写，视频-only、单段。
+ * GL-4 GPU 录制门面（CodecRecorder + 光弧链在线版 + 3.5GiB 分段轮转的 ArkTS 侧）：
+ * 文件句柄归 ArkTS（fileIo.openSync 取 fd 传 native；native 绝不 close，停录后本类关闭并 stat），
+ * native 侧 OH_VideoEncoder(surface 输入) + OH_AVMuxer(fd, MPEG_4) 直写，视频-only。
  *
- * 光弧链（本批）：起录时把 arcMode/arcDstFps/deadband 交给 native；停录严格顺序 =
- * flushArcPending（MEND 滞留帧）→ stopGpuRecord → drainArcDrops/帧计数/实测源帧率 →
- * close fd + stat → FrameLedger 成文进 diag → 写 .drops.json sidecar。
- * 旋转元数据由 native muxer SetRotation(normalizeQuarter(sensor−display)) 写入容器。
+ * 分段语义（登记）：
+ * - 轮转 = 停当前段（EOS 收尾）→ 新文件 → 重建编码器/EGL 编码面 → 新段独立 MP4/独立时间轴；
+ * - 段间短停摆按 lostMs 记账；每段独立 VideoStore.displayName()，段序号只进 parts/segments/日志；
+ * - .drops.json 只写首段旁，segments 覆盖全部段；drops 只保留最后一段位次（上游已知跨段失真）；
+ * - FrameLedger 逐段成文（partIndex），cameraFrames 仍为到达上界；
+ * - 阈值默认 floor(3.5GiB × 0.98)，提供 8MB 测试阈值入口；AVRecorder 分段留白。
  *
- * 边界（登记）：无音频轨、无分段轮转、无参数下发（尺寸/码率由页面固定档传入）、无 PTS 网格化；
- * 输出落应用私有 filesDir/videos（VideoStore），sidecar 同目录同名 .drops.json。
+ * 单段路径与上一版行为一致：不轮转时 parts 恒 1，sidecar segments 一条 segment=0/first=0/count。
  */
 import { fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { Diag } from '../diag/Diag';
 import { ArcDropLog, ArcDropSegment, DropMark } from '../record/ArcDropLog';
-import { FrameCounterSnapshot, FrameLedger, FrameLedgerReport, frameLedgerLine } from '../record/FrameLedger';
+import {
+  FrameCounterSnapshot, FrameLedger, FrameLedgerReport, frameLedgerLine, frameSessionSummary
+} from '../record/FrameLedger';
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
+import { SegmentPolicy } from '../record/SegmentPolicy';
 import { VideoStore } from '../record/VideoStore';
 
 /** libentry.so 录制出口（camera/GlLibBridge 的导出子集） */
@@ -31,9 +35,9 @@ export interface GlRecordLib {
   measuredArcSrcFps: () => number;
   getGpuFrameCounters: () => string;
   getArcEffectiveMode: () => number;
+  getGpuWrittenBytes: () => number;
 }
 
-/** 原生五格计数快照（getGpuFrameCounters 的解析结果） */
 class GpuCounters {
   glCallbacks: number;
   glConsumed: number;
@@ -50,7 +54,6 @@ class GpuCounters {
   }
 }
 
-/** "a,b,c,d,e" → 五格；任何一格缺失/非整数返回 undefined（解析失败不得抛） */
 function parseCounters(raw: string): GpuCounters | undefined {
   try {
     const parts: Array<string> = raw.split(',');
@@ -71,7 +74,6 @@ function parseCounters(raw: string): GpuCounters | undefined {
   }
 }
 
-/** "k,n;k,n" → DropMark[]；空串 = []; 坏格跳过（sidecar 解析失败不得抛） */
 function parseDrops(raw: string): Array<DropMark> {
   const marks: Array<DropMark> = [];
   if (raw === '') {
@@ -95,7 +97,6 @@ function parseDrops(raw: string): Array<DropMark> {
   return marks;
 }
 
-/** stop 摘要里的 "samples=N"（无则 0） */
 function parseSamples(status: string): number {
   try {
     const m: RegExpExecArray | null = new RegExp('samples=(\\d+)').exec(status);
@@ -109,36 +110,130 @@ function delta(now: number, start: number): number {
   return now > start ? now - start : 0;
 }
 
+class StartParams {
+  width: number;
+  height: number;
+  fps: number;
+  bitrate: number;
+  arcMode: number;
+  arcDstFps: number;
+  deadband: number;
+
+  constructor(width: number, height: number, fps: number, bitrate: number, arcMode: number,
+    arcDstFps: number, deadband: number) {
+    this.width = width;
+    this.height = height;
+    this.fps = fps;
+    this.bitrate = bitrate;
+    this.arcMode = arcMode;
+    this.arcDstFps = arcDstFps;
+    this.deadband = deadband;
+  }
+}
+
+class GpuPart {
+  partIndex: number;
+  path: string;
+  bytes: number;
+  durationMs: number;
+  samples: number;
+  glOutFrames: number;
+  drops: Array<DropMark>;
+  lostMs: number;
+
+  constructor(partIndex: number, path: string, bytes: number, durationMs: number, samples: number,
+    glOutFrames: number, drops: Array<DropMark>, lostMs: number) {
+    this.partIndex = partIndex;
+    this.path = path;
+    this.bytes = bytes;
+    this.durationMs = durationMs;
+    this.samples = samples;
+    this.glOutFrames = glOutFrames;
+    this.drops = drops;
+    this.lostMs = lostMs;
+  }
+}
+
 export class GlRecorder {
-  /** 活动录制文件（全进程至多一段）：媒体库据此排除半成品，动作层拒绝删除/移动 */
   private static activePath: string = '';
+  private static segmentLimit: number = SegmentPolicy.segmentLimitBytes();
 
   static getActiveRecordingPath(): string {
     return GlRecorder.activePath;
   }
 
+  static setSegmentLimitBytesForTest(bytes: number): void {
+    GlRecorder.segmentLimit = bytes > 0 ? Math.floor(bytes) : SegmentPolicy.segmentLimitBytes();
+  }
+
+  static getSegmentLimitBytes(): number {
+    return GlRecorder.segmentLimit;
+  }
+
+  static resetSegmentLimitBytes(): void {
+    GlRecorder.segmentLimit = SegmentPolicy.segmentLimitBytes();
+  }
+
   private fd: number = -1;
   private path: string = '';
-  private startedAtMs: number = 0;
   private lib: GlRecordLib | undefined = undefined;
-  private arcMode: number = 0;
-  private arcDstFps: number = 0;
+  private startParams: StartParams | undefined = undefined;
+  private parts: Array<GpuPart> = [];
+  private partIndex: number = 0;
+  private currentLostMs: number = 0;
+  private segmentStartedAtMs: number = 0;
+  private sessionStartedAtMs: number = 0;
+  private lastSegmentEndMs: number = 0;
   private ledgerStart: FrameCounterSnapshot | undefined = undefined;
   private countersStart: GpuCounters | undefined = undefined;
+  private lastStatus: string = '';
+  private lastNativeError: string = '';
+  private lastErrorReadOk: boolean = true;
+  private lastDropsReadOk: boolean = true;
+  private lastEffectiveMode: number = 0;
+  private lastMeasuredSrcFps: number = 0;
+  private lastFlushed: number = 0;
+  private sessionError: string = '';
 
-  /**
-   * 起录：空串 = 成功；非空 = 机器码（LOW_STORAGE:<mb> / open-failed / napi-failed / native 各步机器码）。
-   * 失败路径：native 已内部回收（native 错误码）→ close fd + discard 空文件；
-   * napi 异常（start 可能已部分执行）→ 先 best-effort stop 再 close，文件保留待 triage。
-   */
   start(ctx: common.Context, lib: GlRecordLib, width: number, height: number, fps: number,
     bitrate: number, arcMode: number, arcDstFps: number, deadband: number): string {
     if (this.fd >= 0) {
       return 'busy';
     }
-    // 起录余量预检（VideoStore 现成能力；探测失败不拦录制，同上游口径）
+    this.parts = [];
+    this.partIndex = 0;
+    this.currentLostMs = 0;
+    this.sessionError = '';
+    this.lastStatus = '';
+    this.lastNativeError = '';
+    this.lastErrorReadOk = true;
+    this.lastDropsReadOk = true;
+    this.lastEffectiveMode = arcMode;
+    this.lastMeasuredSrcFps = 0;
+    this.lastFlushed = 0;
+    this.startParams = new StartParams(width, height, fps, bitrate, arcMode, arcDstFps, deadband);
+    this.lib = lib;
+    this.sessionStartedAtMs = Date.now();
+    Diag.clearFrameAccount();
+    FrameLedger.beginRecordingEpoch();
+    const error: string = this.openSegment(ctx, lib, 0, 0);
+    if (error !== '') {
+      FrameLedger.endRecordingEpoch();
+      const detail: string = error;
+      this.clearSession();
+      return detail;
+    }
+    return '';
+  }
+
+  private openSegment(ctx: common.Context, lib: GlRecordLib, index: number, lostMs: number): string {
+    if (this.startParams === undefined) {
+      this.sessionError = 'no-start-params';
+      return this.sessionError;
+    }
     const low: string | undefined = VideoStore.checkFreeSpace(ctx);
     if (low !== undefined) {
+      this.sessionError = low;
       return low;
     }
     const name: string = VideoStore.displayName();
@@ -148,43 +243,40 @@ export class GlRecorder {
       file = fileIo.openSync(path,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     } catch (e) {
-      return `open-failed:${e}`;
+      this.sessionError = `open-failed:${e}`;
+      return this.sessionError;
     }
+    const params: StartParams = this.startParams;
     let error: string = '';
     try {
-      error = lib.startGpuRecord(file.fd, width, height, fps, bitrate, arcMode, arcDstFps, deadband);
+      error = lib.startGpuRecord(file.fd, params.width, params.height, params.fps, params.bitrate,
+        params.arcMode, params.arcDstFps, params.deadband);
     } catch (e) {
       error = `napi-failed:${e}`;
     }
     if (error !== '') {
       const napiFailed: boolean = error.indexOf('napi-failed') === 0;
-      if (napiFailed) {
-        // 无法确认 native 是否已起录：先 best-effort 停（幂等），避免编码器继续写已关闭的 fd
-        try {
-          lib.stopGpuRecord();
-        } catch (e) {
-        }
+      try {
+        lib.stopGpuRecord();
+      } catch (e) {
       }
       try {
         fileIo.closeSync(file.fd);
       } catch (e) {
       }
-      // 仅 native 明确失败（已自清理、未产出样本）时删除空文件；napi-failed 保留待 triage
+      // 契约恢复：napi-failed 保留文件待 triage；native 明确失败才 discard
       if (!napiFailed) {
         VideoStore.discard(path);
       }
+      this.sessionError = error;
       return error;
     }
     this.fd = file.fd;
     this.path = path;
     GlRecorder.activePath = path;
-    this.startedAtMs = Date.now();
-    this.lib = lib;
-    this.arcMode = arcMode;
-    this.arcDstFps = arcDstFps;
-    // 帧账起账：只清结构段计数，相机到达格来自 PreviewOutput.frameStart
-    Diag.clearFrameAccount();
-    FrameLedger.beginRecordingEpoch(); // 纪元开始于取 start 快照之前
+    this.partIndex = index;
+    this.currentLostMs = lostMs;
+    this.segmentStartedAtMs = Date.now();
     this.ledgerStart = FrameLedger.snapshot();
     try {
       this.countersStart = parseCounters(lib.getGpuFrameCounters());
@@ -194,36 +286,35 @@ export class GlRecorder {
     return '';
   }
 
-  /**
-   * 停录（顺序契约）：flush MEND 滞留帧 → 起停快照在阻塞式 stop 前冻结 → native stop →
-   * 逐项取诊断（错误/drops/实测帧率/实际档）→ close fd + stat → FrameLedger 成文 → sidecar。
-   * 帧账窗口：end 快照必须在 stopGpuRecord 之前取（EOS 等待期间 UI 阻塞，之后取会把尾段
-   * 入队帧算进下一窗口/丢掉）；相机帧与 GL 计数因此同窗口对齐（审查 P3）。
-   */
-  stop(): string {
-    const lib: GlRecordLib | undefined = this.lib;
-    if (lib === undefined || this.fd < 0) {
-      return 'idle';
+  private captureSegment(lib: GlRecordLib): GpuPart | undefined {
+    if (this.fd < 0 || this.startParams === undefined) {
+      return undefined;
     }
+    const params: StartParams = this.startParams;
+    const fd: number = this.fd;
+    const path: string = this.path;
+    const partIndex: number = this.partIndex;
+    const lostMs: number = this.currentLostMs;
+    const segmentStart: number = this.segmentStartedAtMs;
+    const ledgerStart: FrameCounterSnapshot | undefined = this.ledgerStart;
+    const countersStart: GpuCounters | undefined = this.countersStart;
+    this.lastSegmentEndMs = Date.now();
+
     let flushed: number = 0;
-    if (this.arcMode === 1) {
+    if (params.arcMode === 1) {
       try {
         flushed = lib.flushArcPending();
       } catch (e) {
         flushed = 0;
       }
     }
-    // 阻塞 stop 前冻结 end 快照（cameraStarted 与 native 五格）
     let endSnap: FrameCounterSnapshot | undefined = undefined;
-    let endCounters: GpuCounters | undefined = undefined;
     try {
       endSnap = FrameLedger.snapshot();
     } catch (e) {
       endSnap = undefined;
-    } finally {
-      // 纪元在冻结 end 快照后立即关闭（早于阻塞式 stopGpuRecord）
-      FrameLedger.endRecordingEpoch();
     }
+    let endCounters: GpuCounters | undefined = undefined;
     try {
       endCounters = parseCounters(lib.getGpuFrameCounters());
     } catch (e) {
@@ -235,8 +326,6 @@ export class GlRecorder {
     } catch (e) {
       status = `napi-failed:${e}`;
     }
-    // 诊断逐项取：任一异常不吞后续项；失败记入 diagError 并进摘要
-    let diagError: string = '';
     let errorReadOk: boolean = true;
     let dropsReadOk: boolean = true;
     let nativeError: string = '';
@@ -244,43 +333,30 @@ export class GlRecorder {
       nativeError = lib.getGpuRecordError();
     } catch (e) {
       errorReadOk = false;
-      diagError = diagError === '' ? `getGpuRecordError:${e}` : diagError;
     }
     let dropsRaw: string = '';
     try {
       dropsRaw = lib.drainArcDrops();
     } catch (e) {
       dropsReadOk = false;
-      diagError = diagError === '' ? `drainArcDrops:${e}` : diagError;
     }
     let measuredSrcFps: number = 0;
     try {
       measuredSrcFps = lib.measuredArcSrcFps();
     } catch (e) {
-      diagError = diagError === '' ? `measuredArcSrcFps:${e}` : diagError;
+      measuredSrcFps = 0;
     }
-    let effectiveMode: number = this.arcMode;
+    let effectiveMode: number = params.arcMode;
     try {
       effectiveMode = lib.getArcEffectiveMode();
     } catch (e) {
-      diagError = diagError === '' ? `getArcEffectiveMode:${e}` : diagError;
+      effectiveMode = params.arcMode;
     }
-    const fd: number = this.fd;
-    const path: string = this.path;
-    const arcMode: number = this.arcMode;
-    const arcDstFps: number = this.arcDstFps;
-    const startSnap: FrameCounterSnapshot | undefined = this.ledgerStart;
-    const startCounters: GpuCounters | undefined = this.countersStart;
-    const durationMs: number = Date.now() - this.startedAtMs;
     this.fd = -1;
     if (GlRecorder.activePath === path) {
       GlRecorder.activePath = '';
     }
     this.path = '';
-    this.startedAtMs = 0;
-    this.lib = undefined;
-    this.arcMode = 0;
-    this.arcDstFps = 0;
     this.ledgerStart = undefined;
     this.countersStart = undefined;
     try {
@@ -289,72 +365,174 @@ export class GlRecorder {
     }
     const bytes: number = VideoStore.sizeOf(path);
     const samples: number = parseSamples(status);
-    // GL 输出帧数（编码 swap 差值；不含 muxer CSD，sidecar segments.count 用它）
-    const glOutFrames: number = (endCounters !== undefined && startCounters !== undefined)
-      ? delta(endCounters.swapOk, startCounters.swapOk) : samples;
-
-    // ---- 帧账（混合口径）：cameraStarted 取 ArkTS 快照差；其余取原生五格差 ----
-    if (startSnap !== undefined && startCounters !== undefined &&
+    const glOutFrames: number = (endCounters !== undefined && countersStart !== undefined)
+      ? delta(endCounters.swapOk, countersStart.swapOk) : samples;
+    const drops: Array<DropMark> = parseDrops(dropsRaw);
+    const durationMs: number = this.lastSegmentEndMs - segmentStart;
+    const part: GpuPart = new GpuPart(partIndex, path, bytes, durationMs, samples, glOutFrames,
+      drops, lostMs);
+    this.parts.push(part);
+    if (ledgerStart !== undefined && countersStart !== undefined &&
       endSnap !== undefined && endCounters !== undefined) {
       try {
-        const cameraDelta: number = delta(endSnap.cameraStarted, startSnap.cameraStarted);
-        const glCbDelta: number = delta(endCounters.glCallbacks, startCounters.glCallbacks);
-        // 相机帧是**到达上界**：frameStart 队列偏差/注册失败/平台未派发都会让计数偏大或退化，
-        // 故取 max(cameraDelta, glCbDelta)；仅作量级诊断，不得当精确丢帧数（PORT_MAP 登记）
+        const cameraDelta: number = delta(endSnap.cameraStarted, ledgerStart.cameraStarted);
+        const glCbDelta: number = delta(endCounters.glCallbacks, countersStart.glCallbacks);
         const cameraFrames: number = Math.max(cameraDelta, glCbDelta);
         const report: FrameLedgerReport = new FrameLedgerReport(
-          0, true, durationMs,
-          cameraFrames,
-          glCbDelta,
-          delta(endCounters.glConsumed, startCounters.glConsumed),
-          delta(endCounters.swapOk, startCounters.swapOk),
-          delta(endCounters.swapFail, startCounters.swapFail),
-          samples,
-          0, 0,
-          delta(endCounters.arcDropped, startCounters.arcDropped),
-          0, 0);
+          partIndex, true, durationMs, cameraFrames, glCbDelta,
+          delta(endCounters.glConsumed, countersStart.glConsumed),
+          delta(endCounters.swapOk, countersStart.swapOk),
+          delta(endCounters.swapFail, countersStart.swapFail),
+          samples, 0, 0,
+          delta(endCounters.arcDropped, countersStart.arcDropped),
+          lostMs, SegmentPolicy.rotateFramesUpper(lostMs, params.fps));
         const line: string = frameLedgerLine(report);
         Diag.i(WOTA_RECORD_TAG, line);
         Diag.frameAccount(line);
       } catch (e) {
-        Diag.w(WOTA_RECORD_TAG, `frame ledger failed: ${e}`);
+        Diag.w(WOTA_RECORD_TAG, `frame ledger failed part=${partIndex}: ${e}`);
       }
     }
+    this.lastStatus = status;
+    this.lastNativeError = nativeError;
+    this.lastErrorReadOk = errorReadOk;
+    this.lastDropsReadOk = dropsReadOk;
+    this.lastEffectiveMode = effectiveMode;
+    this.lastMeasuredSrcFps = measuredSrcFps;
+    this.lastFlushed = flushed;
+    return part;
+  }
 
-    // ---- .drops.json sidecar：请求弧模式 + native 无错误 + 成片 ok 才写 ----
-    const marks: Array<DropMark> = parseDrops(dropsRaw);
-    let sidecar: string = 'na';
-    if (arcMode !== 0 && (!errorReadOk || !dropsReadOk)) {
-      // 诊断读取失败：不写可能缺项的 sidecar（避免把"没读到"写成"没有抽帧"）
-      if (arcMode !== 0) {
-        sidecar = 'skipped(diag)';
+  /** 页面 500ms 轮询：达到阈值 → 收当前段 → 新段；返回 ''/rotated:N/error:<code> */
+  maybeRotate(ctx: common.Context, lib: GlRecordLib): string {
+    if (this.fd < 0 || this.startParams === undefined) {
+      return '';
+    }
+    let written: number = 0;
+    try {
+      written = lib.getGpuWrittenBytes();
+    } catch (e) {
+      return '';
+    }
+    if (!SegmentPolicy.shouldRotate(written, GlRecorder.segmentLimit)) {
+      return '';
+    }
+    const endMs: number = Date.now();
+    const part: GpuPart | undefined = this.captureSegment(lib);
+    if (part === undefined) {
+      this.sessionError = 'rotate-capture';
+      return 'error:rotate-capture';
+    }
+    // 收段失败（写失败/引擎错误）不得静默开新段：保留已完成段并让页面走停止路径
+    if (!this.lastStatus.startsWith('ok') || this.lastNativeError !== '') {
+      this.sessionError = this.lastNativeError !== ''
+        ? `native-${this.lastNativeError}` : `native-${this.lastStatus}`;
+      return `error:${this.sessionError}`;
+    }
+    this.currentLostMs = Math.max(0, Date.now() - endMs);
+    const nextIndex: number = this.parts.length;
+    const error: string = this.openSegment(ctx, lib, nextIndex, this.currentLostMs);
+    if (error !== '') {
+      return `error:${error}`;
+    }
+    return `rotated:${this.parts.length}`;
+  }
+
+  stop(): string {
+    const lib: GlRecordLib | undefined = this.lib;
+    if (lib === undefined) {
+      return 'idle';
+    }
+    if (this.fd >= 0) {
+      this.captureSegment(lib);
+    }
+    FrameLedger.endRecordingEpoch();
+    const params: StartParams | undefined = this.startParams;
+    const parts: Array<GpuPart> = this.parts;
+    if (parts.length === 0) {
+      const error: string = this.sessionError !== '' ? this.sessionError
+        : (this.lastStatus !== '' ? this.lastStatus : 'idle');
+      this.clearSession();
+      return error;
+    }
+    const counts: Array<number> = [];
+    const losts: Array<number> = [];
+    let totalBytes: number = 0;
+    for (const part of parts) {
+      // segments/frameSessionSummary 口径 = muxer 视频样本数（上游 VideoSegment.count）
+      counts.push(part.samples);
+      losts.push(part.lostMs);
+      totalBytes += part.bytes;
+    }
+    try {
+      const sessionLine: string = frameSessionSummary(counts, losts);
+      if (sessionLine !== '') {
+        Diag.i(WOTA_RECORD_TAG, sessionLine);
       }
-    } else if (arcMode !== 0 && nativeError === '' && status.startsWith('ok') && path !== '') {
-      try {
-        const modeName: string = arcMode === 1 ? 'mend' : 'drop';
-        const segments: Array<ArcDropSegment> = [new ArcDropSegment(0, 0, glOutFrames)];
-        const ok: boolean = ArcDropLog.writeTo(path,
-          new ArcDropLog(modeName, arcDstFps, marks, segments));
-        sidecar = ok ? 'ok' : 'fail';
-        if (!ok) {
-          Diag.w(WOTA_RECORD_TAG, `drops sidecar write failed: ${path}`);
+    } catch (e) {
+    }
+    const firstPath: string = parts[0].path;
+    const lastPart: GpuPart = parts[parts.length - 1];
+    const status: string = this.sessionError !== '' ? this.sessionError : this.lastStatus;
+    let sidecar: string = 'na';
+    if (params !== undefined && params.arcMode !== 0) {
+      if (!this.lastErrorReadOk || !this.lastDropsReadOk) {
+        sidecar = 'skipped(diag)';
+      } else if (this.lastNativeError === '' && status.startsWith('ok') && firstPath !== '') {
+        try {
+          const modeName: string = params.arcMode === 1 ? 'mend' : 'drop';
+          const segments: Array<ArcDropSegment> = SegmentPolicy.buildDropSegments(counts, losts);
+          const ok: boolean = ArcDropLog.writeTo(firstPath,
+            new ArcDropLog(modeName, params.arcDstFps, lastPart.drops, segments));
+          sidecar = ok ? 'ok' : 'fail';
+          if (!ok) {
+            Diag.w(WOTA_RECORD_TAG, `drops sidecar write failed: ${firstPath}`);
+          }
+        } catch (e) {
+          sidecar = 'fail';
+          Diag.w(WOTA_RECORD_TAG, `drops sidecar failed: ${e}`);
         }
-      } catch (e) {
-        sidecar = 'fail';
-        Diag.w(WOTA_RECORD_TAG, `drops sidecar failed: ${e}`);
       }
     }
-    const arcName: string = arcMode === 0 ? 'off' : (arcMode === 1 ? 'mend' : 'drop');
-    const tail: string = nativeError !== '' && status.indexOf(nativeError) < 0
-      ? ` nativeError=${nativeError}` : '';
-    const diagTail: string = diagError === '' ? '' : ` diag=napi-failed(${diagError})`;
-    return `path=${path} bytes=${bytes} duration=${durationMs}ms status=${status}` +
-      ` arc=${arcName} effective=${effectiveMode} flushed=${flushed} drops=${marks.length}` +
-      ` sidecar=${sidecar} measuredSrcFps=${measuredSrcFps} glOutFrames=${glOutFrames}` +
-      `${tail}${diagTail}`;
+    const durationMs: number = Date.now() - this.sessionStartedAtMs;
+    const arcName: string = params === undefined || params.arcMode === 0
+      ? 'off' : (params.arcMode === 1 ? 'mend' : 'drop');
+    const tail: string = this.lastNativeError !== '' && status.indexOf(this.lastNativeError) < 0
+      ? ` nativeError=${this.lastNativeError}` : '';
+    const summary: string = `path=${firstPath} bytes=${totalBytes} duration=${durationMs}ms status=${status}` +
+      ` parts=${parts.length} totalBytes=${totalBytes} arc=${arcName} effective=${this.lastEffectiveMode}` +
+      ` flushed=${this.lastFlushed} drops=${lastPart.drops.length} sidecar=${sidecar}` +
+      ` measuredSrcFps=${this.lastMeasuredSrcFps}(lastSegment) segments=${SegmentPolicy.segmentSummary(counts)}${tail}`;
+    this.clearSession();
+    return summary;
+  }
+
+  private clearSession(): void {
+    if (GlRecorder.activePath !== '') {
+      GlRecorder.activePath = '';
+    }
+    this.fd = -1;
+    this.path = '';
+    this.lib = undefined;
+    this.startParams = undefined;
+    this.parts = [];
+    this.partIndex = 0;
+    this.currentLostMs = 0;
+    this.segmentStartedAtMs = 0;
+    this.sessionStartedAtMs = 0;
+    this.lastSegmentEndMs = 0;
+    this.ledgerStart = undefined;
+    this.countersStart = undefined;
+    this.lastStatus = '';
+    this.lastNativeError = '';
+    this.sessionError = '';
   }
 
   isRecording(): boolean {
     return this.fd >= 0;
+  }
+
+  getPartsCount(): number {
+    return this.parts.length;
   }
 }

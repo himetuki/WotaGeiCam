@@ -82,6 +82,10 @@ export function getGpuFrameCounters(): string {
   return glLib.getGpuFrameCounters();
 }
 
+export function getGpuWrittenBytes(): number {
+  return glLib.getGpuWrittenBytes();
+}
+
 export function getArcEffectiveMode(): number {
   return glLib.getArcEffectiveMode();
 }

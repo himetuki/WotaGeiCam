@@ -318,6 +318,15 @@ static napi_value MeasuredArcSrcFps(napi_env env, napi_callback_info info)
     return result;
 }
 
+/** 已成功写入 muxer 的字节累计（轮转触发量；Stop 后 0） */
+static napi_value GetGpuWrittenBytes(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value result = nullptr;
+    napi_create_double(env, static_cast<double>(CodecRecorder::Instance().GetWrittenBytes()), &result);
+    return result;
+}
+
 /** 原生帧账计数 "glCallbacks,glConsumed,swapOk,swapFail,arcDropped" */
 static napi_value GetGpuFrameCounters(napi_env env, napi_callback_info info)
 {
@@ -369,6 +378,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"drainArcDrops", nullptr, DrainArcDrops, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"measuredArcSrcFps", nullptr, MeasuredArcSrcFps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuFrameCounters", nullptr, GetGpuFrameCounters, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getGpuWrittenBytes", nullptr, GetGpuWrittenBytes, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getArcEffectiveMode", nullptr, GetArcEffectiveMode, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

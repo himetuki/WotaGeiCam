@@ -44,6 +44,7 @@ const POLL_TIMEOUT_MS: number = 5000;
 const GPU_RECORD_WIDTH: number = 1920;
 const GPU_RECORD_HEIGHT: number = 1080;
 const GPU_RECORD_FPS: number = 30;
+const START_COOLDOWN_MS: number = 1000;
 
 function autoReasonText(reason: string, saved: boolean): string {
   const suffix: string = saved ? '成片已保存' : '自动停录，但收尾/落盘可能失败';
@@ -74,6 +75,8 @@ struct GlPreview {
   @State arcMode: number = 0;
   /** 手动停录宽限收尾中（按钮防重入） */
   @State stopPending: boolean = false;
+  /** 分段测试阈值（8MB）开关 */
+  @State segmentTestOn: boolean = false;
   private engine: GlCameraEngine = new GlCameraEngine();
   private recorder: GlRecorder = new GlRecorder();
   private pollTimer: number = -1;
@@ -87,7 +90,6 @@ struct GlPreview {
   /** 最近一次收尾摘要（防止迟到回调重复 stop/覆盖文案） */
   private lastStopSummary: string = '';
   private lastStopAtMs: number = 0;
-  private lastStopHadReason: boolean = false;
   private glLib: GlLibApi | undefined = undefined;
   /** 页面销毁后取消所有异步链（轮询/权限/起镜 then 回调不得越过返回继续跑） */
   private disposed: boolean = false;
@@ -96,6 +98,7 @@ struct GlPreview {
 
   aboutToAppear(): void {
     this.disposed = false;
+    this.segmentTestOn = GlRecorder.getSegmentLimitBytes() === 8 * 1024 * 1024;
     // 相机丢失第二道兜底：录制中直接走自动停录；非录制态只提示
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
@@ -134,6 +137,8 @@ struct GlPreview {
       this.finishGpuRecord(); // 页面销毁不等宽限
     }
     this.stopRecordMonitor();
+    // 8MB 测试阈值为进程级静态值：离开页面恢复生产默认
+    GlRecorder.resetSegmentLimitBytes();
     this.engine.stop();
     this.stopPolling();
     try {
@@ -366,6 +371,22 @@ struct GlPreview {
     this.message = `转换: ${this.arcLabel()}`;
   }
 
+  /** 8MB 分段测试阈值开关（仅测试页；生产默认 3.5GiB） */
+  private toggleSegmentTest(): void {
+    if (this.recording) {
+      return;
+    }
+    if (this.segmentTestOn) {
+      GlRecorder.resetSegmentLimitBytes();
+      this.segmentTestOn = false;
+      this.message = '分段测试: 关（默认 3.5GiB）';
+    } else {
+      GlRecorder.setSegmentLimitBytesForTest(8 * 1024 * 1024);
+      this.segmentTestOn = true;
+      this.message = '分段测试: 8MB';
+    }
+  }
+
   private arcLabel(): string {
     if (this.arcMode === 1) {
       return '补弧24';
@@ -401,9 +422,12 @@ struct GlPreview {
       this.requestManualStop();
       return;
     }
-    if (this.lastStopAtMs > 0 && Date.now() - this.lastStopAtMs < 400) {
-      // 停录后到达的迟到点击：识别为已停录，不误起新录/不覆盖摘要
-      this.message = '已停录（如需再录请稍后点击）';
+    if (this.lastStopAtMs > 0 && Date.now() - this.lastStopAtMs < START_COOLDOWN_MS) {
+      // 停录后到达的迟到点击：识别为已停录，追加提示、不覆盖摘要
+      if (this.message.indexOf('刚停录') < 0) {
+        this.message = this.message === '' ? '刚停录，请稍后再录'
+          : `${this.message}（刚停录，请稍后再录）`;
+      }
       return;
     }
     if (this.engine.lastLensInfo() === undefined ||
@@ -429,8 +453,8 @@ struct GlPreview {
     }
     this.recording = true;
     this.stopPending = false;
+    this.stopReason = '';
     this.lastStopSummary = '';
-    this.lastStopHadReason = false;
     this.recordStartedAtMs = Date.now();
     const arcName: string = this.arcMode === 0 ? 'off' : (this.arcMode === 1 ? 'mend' : 'drop');
     this.message = `GPU recording ${GPU_RECORD_WIDTH}x${GPU_RECORD_HEIGHT}@${recordFps}` +
@@ -476,7 +500,7 @@ struct GlPreview {
       if (reason === '') {
         this.message = '已停录';
       } else if (reason === AutoStopRules.REASON_CAMERA_LOST) {
-        this.stopReason = this.stopReason === '' ? reason : this.stopReason;
+        this.message = '已停录（相机已断开）';
       }
       return;
     }
@@ -527,7 +551,6 @@ struct GlPreview {
     const reasonText: string = autoReasonText(reason, saved);
     this.message = `GPU record: ${summary}${reasonText === '' ? '' : `（${reasonText}）`}`;
     this.lastStopSummary = summary;
-    this.lastStopHadReason = reason !== '';
     this.lastStopAtMs = Date.now();
     return summary;
   }
@@ -543,8 +566,12 @@ struct GlPreview {
         this.stopRecordMonitor();
         return;
       }
+      if (this.stopPending) {
+        return; // 宽限收尾中不再轮转
+      }
       const lib: GlLibApi | undefined = this.glLib;
-      if (lib === undefined) {
+      const ctx: common.Context | undefined = this.hostContext();
+      if (lib === undefined || ctx === undefined) {
         return;
       }
       let alive: boolean = false;
@@ -554,7 +581,25 @@ struct GlPreview {
         alive = false;
       }
       if (alive) {
-        return;
+        // 先确认 native 仍存活再轮转；native 已失败时走下方停止路径，不得静默开新段
+        const rotateResult: string = this.recorder.maybeRotate(ctx, lib);
+        if (rotateResult.indexOf('error:') === 0) {
+          const base: string = this.message;
+          this.finishGpuRecord();
+          this.message = `${base}（分段轮转失败，已停止，保留已完成段：${rotateResult}）`;
+          return;
+        }
+        if (rotateResult.indexOf('rotated:') === 0) {
+          this.message = `GPU recording 分段 ${rotateResult.substring('rotated:'.length)}`;
+        }
+        try {
+          alive = lib.isGpuRecording();
+        } catch (e) {
+          alive = false;
+        }
+        if (alive) {
+          return;
+        }
       }
       let reason: string = '';
       try {
@@ -633,6 +678,12 @@ struct GlPreview {
             .enabled(!this.recording)
             .onClick(() => {
               this.cycleArcMode();
+            })
+          Button(`分段测试:${this.segmentTestOn ? '8MB' : '关'}`)
+            .fontSize(12)
+            .enabled(!this.recording)
+            .onClick(() => {
+              this.toggleSegmentTest();
             })
           Button('媒体库')
             .fontSize(12)

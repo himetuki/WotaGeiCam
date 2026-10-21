@@ -40,4 +40,6 @@ export const flushArcPending: () => number;
 export const drainArcDrops: () => string;
 export const measuredArcSrcFps: () => number;
 export const getGpuFrameCounters: () => string;
+/** 已成功写入 muxer 的字节累计（轮转触发量；Stop 后 0） */
+export const getGpuWrittenBytes: () => number;
 export const getArcEffectiveMode: () => number;
