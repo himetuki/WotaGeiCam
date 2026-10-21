@@ -34,6 +34,10 @@
     <string name="set_group_hud">取景器常驻功能</string>
     <string name="set_hud_note">上排是常驻读数（默认只放「快门 / 帧率 / 码率」），下排是录制页的控件胶囊，勾掉即从取景器消失。</string>
 
+    <!-- 滑杆吸附（2026-10-21：逐参数在刻度吸附 / 连续值之间切换） -->
+    <string name="set_group_slider">滑杆吸附</string>
+    <string name="set_slider_note">默认每根滑杆拖动都会吸附到刻度。点选下面某个参数，它的滑杆改为连续值，可以停在任意位置（例如变焦 1.2×、1.7×）。曝光补偿、斑马纹阈值、并入门槛本身按整数逐格取值，不在此列。</string>
+
     <!-- 参考线默认 -->
     <string name="set_group_refline">参考线默认</string>
     <string name="set_refline_note">只决定每次冷启动时默认勾选的参考线；录制页改过的参考线会被记住，不随后台清理回归默认</string>

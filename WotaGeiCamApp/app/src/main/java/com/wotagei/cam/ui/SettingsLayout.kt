@@ -23,6 +23,9 @@ enum class SettingsBlock(val id: String) {
     /** 取景页显示（读数掩码 + 胶囊掩码 + 位置编辑 + 毛玻璃背板） */
     HUD("hud"),
 
+    /** 滑杆吸附（逐参数在「刻度吸附 / 连续值」之间切换，2026-10-21） */
+    SLIDER("slider"),
+
     /** 存储（MANAGE_EXTERNAL_STORAGE 授权入口） */
     STORAGE("storage"),
 
@@ -57,6 +60,7 @@ private val LEFT_COLUMN = listOf(
     SettingsBlock.ORIENTATION,
     SettingsBlock.MOTION,
     SettingsBlock.HUD,
+    SettingsBlock.SLIDER,
     SettingsBlock.STORAGE,
 )
 

@@ -97,9 +97,12 @@ import com.wotagei.cam.ui.theme.WotaBg
 import com.wotagei.cam.ui.theme.WotaRec
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
+import com.wotagei.cam.ui.widget.SliderKey
 import com.wotagei.cam.ui.widget.TierItem
 import com.wotagei.cam.ui.widget.TierPicker
 import com.wotagei.cam.ui.widget.deadbandLadder
+import com.wotagei.cam.ui.widget.decodeContinuousSliders
+import com.wotagei.cam.ui.widget.encodeContinuousSliders
 import com.wotagei.cam.update.ProbeResult
 import com.wotagei.cam.update.ReleaseNotes
 import com.wotagei.cam.update.UpdateDownloader
@@ -214,6 +217,15 @@ object WotaSettings {
     const val KEY_GALLERY_COLUMNS = "gallery_columns"
 
     /**
+     * 滑杆吸附开关（2026-10-21 用户反馈：变焦只有 0.5/1/1.5…，想调 1.2×/1.7×）。
+     *
+     * 存**关掉吸附**（改用连续值）的参数 id 集合，逗号分隔；缺键/空串 = 全部吸附（2026-10-17 的
+     * 现行为）。纯 UI 设置：`PillSlider` 每次组成时直读 prefs，**不走 [applyDefaultsOnce]**
+     * （那条链进程内只套一次，会把设置页的改动挡掉）。
+     */
+    const val KEY_SLIDER_CONTINUOUS = "slider_continuous"
+
+    /**
      * 强制 24/25fps 在无原生精确档设备上的录制期转换模式（2026-10-03 定版）：
      * `MEND`（默认，抽帧+整像素选择补弧）/ `DROP`（仅抽帧）。只在帧率弹层选中 24/25 且设备无
      * 精确档时生效；设备有原生档时该控件不显示、值不参与录制。
@@ -316,6 +328,18 @@ object WotaSettings {
     fun hudItems(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_ITEMS, HudItem.DEFAULT_MASK)
 
     fun hudPills(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)
+
+    /** 关掉刻度吸附（改用连续值）的滑杆集合：缺键 = 空集 = 全部吸附 */
+    fun continuousSliders(prefs: SharedPreferences): Set<SliderKey> =
+        decodeContinuousSliders(prefs.getString(KEY_SLIDER_CONTINUOUS, null))
+
+    fun setContinuousSliders(prefs: SharedPreferences, keys: Set<SliderKey>) {
+        prefs.edit().putString(KEY_SLIDER_CONTINUOUS, encodeContinuousSliders(keys)).apply()
+    }
+
+    /** 该滑杆当前是否为「连续值」模式（设置页逐个开关的读取口） */
+    fun sliderContinuous(prefs: SharedPreferences, key: SliderKey): Boolean =
+        key in continuousSliders(prefs)
 
     /** 录制页默认方向：缺键或坏串都回落到 [UIOrientation.DEFAULT]（横屏），不抛 */
     fun uiOrientation(prefs: SharedPreferences): UIOrientation =
@@ -503,6 +527,7 @@ private fun BlockHost(block: SettingsBlock, prefs: SharedPreferences, onOpenHudE
         SettingsBlock.ORIENTATION -> BlockOrientation(prefs)
         SettingsBlock.MOTION -> BlockMotion(prefs)
         SettingsBlock.HUD -> BlockHud(prefs, onOpenHudEditor)
+        SettingsBlock.SLIDER -> BlockSlider(prefs)
         SettingsBlock.STORAGE -> BlockStorage()
         SettingsBlock.REFLINE -> BlockRefline(prefs)
         SettingsBlock.LEVEL -> BlockLevel(prefs)
@@ -599,6 +624,8 @@ private fun BlockDefault(prefs: SharedPreferences) {
             onValueChangeFinished = {
                 prefs.edit().putInt(WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND, defaultDeadband).apply()
             },
+            // 整数域（0..32 逐格），没有可关的吸附
+            snapKey = null,
             ladder = deadbandLadder()
         )
         Text(
@@ -804,6 +831,58 @@ private fun BlockHud(prefs: SharedPreferences, onOpenHudEditor: () -> Unit) {
             )
         }
     }
+}
+
+/**
+ * 滑杆吸附（2026-10-21 用户反馈）：默认每根滑杆拖动必落刻度，这里可**逐个参数**改成连续值
+ * （例如变焦想调 1.2×、1.7×，不用被 0.5/1/1.5/2 的档卡住）。选中 = 该参数改用连续值（不吸附）。
+ *
+ * 只列取值域比梯更细的 7 个参数；曝光补偿 / 斑马纹阈值 / 并入门槛本身按整数逐格取值，
+ * 连续模式与梯完全等价，列出来只会让人以为开关没生效（见 [SliderKey] KDoc）。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BlockSlider(prefs: SharedPreferences) {
+    var continuous by remember { mutableStateOf(WotaSettings.continuousSliders(prefs)) }
+    SettingGroup(stringResource(R.string.set_group_slider))
+    Card {
+        Text(
+            text = stringResource(R.string.set_slider_note),
+            style = MaterialTheme.typography.bodyMedium,
+            color = WotaColor.textMid
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            SliderKey.entries.forEach { key ->
+                val on = key in continuous
+                ChipCell(
+                    text = stringResource(sliderKeyLabelRes(key)),
+                    selected = on,
+                    onClick = {
+                        val next = if (on) continuous - key else continuous + key
+                        continuous = next
+                        WotaSettings.setContinuousSliders(prefs, next)
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** 滑杆开关的展示名：复用录制页各滑杆自己的标签，同一参数不造第二套叫法 */
+@StringRes
+private fun sliderKeyLabelRes(key: SliderKey): Int = when (key) {
+    SliderKey.SHUTTER -> R.string.cam_p_shutter
+    SliderKey.ISO -> R.string.cam_p_iso
+    SliderKey.KELVIN -> R.string.cam_p_kelvin
+    SliderKey.TINT -> R.string.cam_p_tint
+    SliderKey.ZOOM -> R.string.cam_p_zoom
+    SliderKey.DIOPTER -> R.string.cam_p_mf
+    SliderKey.PEAKING -> R.string.cam_peaking_strength
 }
 
 @Composable

@@ -57,6 +57,7 @@ import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaType
+import com.wotagei.cam.ui.widget.SliderKey
 import com.wotagei.cam.ui.widget.deadbandLadder
 import com.wotagei.cam.ui.widget.diopterLadder
 import com.wotagei.cam.ui.widget.evLadder
@@ -421,6 +422,8 @@ private fun FpsPill(
                 onValueChange = { params.setArcMergeDeadband(it.roundToInt()) },
                 format = { "${it.roundToInt()}" },
                 onValueChangeFinished = onPersist,
+                // 整数域（0..32 逐格），没有可关的吸附
+                snapKey = null,
                 ladder = deadbandLadder()
             )
             NoteText(stringResource(R.string.cam_fps_deadband_note))
@@ -487,6 +490,7 @@ private fun ShutterPill(
                     format = { tick -> byTierFloat[tick]?.label ?: shutterText(tick.toLong()) },
                     enabled = editable,
                     onValueChangeFinished = onPersist,
+                    snapKey = SliderKey.SHUTTER,
                     ladder = ladder
                 )
             }
@@ -521,6 +525,7 @@ private fun IsoPill(
                 onValueChange = { params.iso.value = iso.copy(value = it.roundToInt()) },
                 format = { "${it.roundToInt()}" },
                 onValueChangeFinished = onPersist,
+                snapKey = SliderKey.ISO,
                 ladder = isoLadder(lo, hi)
             )
         } else {
@@ -559,6 +564,8 @@ private fun EvPill(
                 onValueChange = { params.ev.value = ev.copy(value = it.roundToInt()) },
                 format = { evText(it.roundToInt(), evStep) },
                 onValueChangeFinished = onPersist,
+                // EV 是整数域（每个整数一档），连续模式与梯等价，不提供开关
+                snapKey = null,
                 ladder = evLadder(lo, hi)
             )
         }
@@ -605,6 +612,7 @@ private fun WbPill(
                 onValueChange = { params.kelvin.value = kelvin.copy(value = it.roundToInt()) },
                 format = { "${it.roundToInt()}K" },
                 onValueChangeFinished = onPersist,
+                snapKey = SliderKey.KELVIN,
                 ladder = kelvinLadder(kelvinLo, kelvinHi)
             )
             val tintLo = (tint.range?.start ?: 0)
@@ -619,6 +627,7 @@ private fun WbPill(
                 onValueChange = { params.tint.value = tint.copy(value = it.roundToInt()) },
                 format = { String.format(Locale.US, "%+d", it.roundToInt()) },
                 onValueChangeFinished = onPersist,
+                snapKey = SliderKey.TINT,
                 ladder = tintLadder(tintLo, tintHi)
             )
         }
@@ -648,6 +657,7 @@ private fun ZoomPill(
                 onValueChange = { params.zoom.value = zoom.copy(value = it) },
                 format = { fmtX(it) },
                 onValueChangeFinished = onPersist,
+                snapKey = SliderKey.ZOOM,
                 ladder = zoomLadder(lo, hi)
             )
         } else {
@@ -711,6 +721,7 @@ private fun FocusPill(
                     onValueChange = { params.manualFocusDiopter.value = mf.copy(value = it) },
                     format = { String.format(Locale.US, "%.2fD", it) },
                     onValueChangeFinished = onPersist,
+                    snapKey = SliderKey.DIOPTER,
                     ladder = diopterLadder(lo, hi)
                 )
             } else {
@@ -877,6 +888,8 @@ private fun MonitorPill(
                 onValueChange = { params.zebraThreshold.value = zebraThresholdOfUi(it.roundToInt()) },
                 format = { "${it.roundToInt()}%" },
                 onValueChangeFinished = onPersist,
+                // 斑马阈值是整数百分比（80..100 逐格），连续模式与梯等价
+                snapKey = null,
                 ladder = percentLadder(80, 100, 1)
             )
             PillChoices(
@@ -899,6 +912,7 @@ private fun MonitorPill(
                 onValueChange = { params.peakingStrength.value = (it / 100f).coerceIn(0f, 1f) },
                 format = { "${it.roundToInt()}%" },
                 onValueChangeFinished = onPersist,
+                snapKey = SliderKey.PEAKING,
                 ladder = percentLadder(5, 95, 5)
             )
             PillChoices(

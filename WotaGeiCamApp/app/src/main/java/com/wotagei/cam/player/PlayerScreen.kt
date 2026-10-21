@@ -144,6 +144,7 @@ import com.wotagei.cam.ui.theme.WotaRec
 import com.wotagei.cam.ui.theme.WotaSurface
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaTextDim
+import com.wotagei.cam.ui.widget.SliderKey
 import com.wotagei.cam.ui.widget.deadbandLadder
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
@@ -1375,6 +1376,8 @@ private fun ArcRepairPopup(
                 onValueChange = { params.setArcMergeDeadband(it.roundToInt()) },
                 format = { "${it.roundToInt()}" },
                 onValueChangeFinished = onPersist,
+                // 整数域（0..32 逐格），没有可关的吸附
+                snapKey = null,
                 ladder = deadbandLadder()
             )
             Text(

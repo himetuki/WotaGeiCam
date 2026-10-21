@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
@@ -45,7 +46,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.wotagei.cam.R
+import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.widget.SliderKey
+import com.wotagei.cam.ui.widget.effectiveLadder
 import com.wotagei.cam.ui.widget.nearestLadderIndex
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -287,8 +291,13 @@ private fun PillGroupLabel(text: String) {
  *
  * [ladder] 是 2026-10-17 的刻度梯（升序、已按运行时范围过滤）：有效时滑杆在**索引空间**
  * `0f..(size-1)` 内运行，`steps = size - 2` 让 Material3 画出可见刻度点并吸附；
- * 回调换回梯值，所以写进参数总线的值必为刻度值。梯无效/为空时退回原连续行为
- * （`coerceIn` + `snap`），兼容没有梯的调用点。
+ * 回调换回梯值，所以写进参数总线的值必为刻度值。梯无效/为空时禁用滑杆（不静默退回连续）。
+ *
+ * [snapKey] 是 2026-10-21 的「吸附开关」标识（设置页可逐个参数改成连续值）：
+ * - **无默认值必传**：新加滑杆时必须明确它属于哪个参数，漏挂编译不过；
+ * - `null` = 该参数的取值域本身就是逐格整数（曝光补偿 / 斑马阈值 / 并入门槛），没有可关的吸附；
+ * - 非 null 且用户在设置页关掉了它 → 梯失效，滑杆退回 `lo..hi` 连续区间（按 [step] 量化），
+ *   读数与写回值都能落在梯档之间（例如变焦 1.2×、1.7×）。
  *
  * [onValueChangeFinished] 是「松手回执」通道（R4/用户反馈第 1 条）：拖动中的每一拍照旧只写
  * 参数总线，松手这一刻才让调用方做落盘等重动作。可选（null = 松手时不通知），
@@ -300,20 +309,25 @@ fun PillSlider(
     lo: Float,
     hi: Float,
     onValueChange: (Float) -> Unit,
+    snapKey: SliderKey?,
+    ladder: List<Float>,
     modifier: Modifier = Modifier,
     step: Float = 0f,
     format: (Float) -> String = { it.toString() },
     enabled: Boolean = true,
     label: String? = null,
-    onValueChangeFinished: (() -> Unit)? = null,
-    ladder: List<Float>? = null
+    onValueChangeFinished: (() -> Unit)? = null
 ) {
     val usable = hi > lo
     val shown = if (usable) value.coerceIn(lo, hi) else value
+    // 设置页「滑杆吸附」开关（2026-10-21）：关掉吸附 → 梯为 null → 连续滑杆。
+    // 弹窗每次打开重新组成，开关改动下一次开窗即生效。
+    val continuous = snapKey != null && rememberSliderContinuous(snapKey)
+    val ladderInUse = effectiveLadder(ladder, continuous)
     // 传了梯就是"只许在刻度上取值"：梯不足 2 点时**不许静默退回连续滑杆**（否则拖动可写出非刻度值，
     // 违反"拖动必落刻度"的验收口径）——禁用比假连续诚实（审查 P3）
-    val ladderOnly = ladder != null
-    val ticks = ladder?.takeIf { it.size >= 2 }
+    val ladderOnly = ladderInUse != null
+    val ticks = ladderInUse?.takeIf { it.size >= 2 }
     val tickRange = if (ticks != null) 0f..(ticks.size - 1).toFloat() else if (usable) lo..hi else 0f..1f
     // 当前值不在梯上（旧版本持久化恢复）时滑杆停在最近刻度，读数仍显示真实值；首次拖动后落梯
     val sliderValue = if (ticks != null) nearestLadderIndex(shown, ticks).toFloat() else shown
@@ -368,6 +382,16 @@ fun PillSlider(
             )
         }
     }
+}
+
+/**
+ * 该滑杆当前是否为「连续值」模式（设置页逐个参数的吸附开关，键 [WotaSettings.KEY_SLIDER_CONTINUOUS]）。
+ * `remember(key)` 只在本次组成内缓存：弹窗关闭即释放、下次打开重读 prefs，设置页改动不需要通知机制。
+ */
+@Composable
+private fun rememberSliderContinuous(key: SliderKey): Boolean {
+    val context = LocalContext.current
+    return remember(key) { WotaSettings.sliderContinuous(WotaSettings.of(context), key) }
 }
 
 /**
