@@ -1,0 +1,17 @@
+# DevEco Studio / hvigor 产物
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build/
+/.hvigor/
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test/
+**/src/ohosTest/.preview/
+*.hap
+*.har
+*.hsp
+*.iml
+/.appanalyzer
