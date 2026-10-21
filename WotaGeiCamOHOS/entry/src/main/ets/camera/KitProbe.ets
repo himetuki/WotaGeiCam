@@ -14,29 +14,16 @@ import { Diag } from '../diag/Diag';
 import { WotaTag } from '../core/Constants';
 import { LensSlot, dumpLenses } from '../core/LensSlot';
 import { VideoSizeTable, dumpVideoSizeTable } from '../core/VideoSizePicker';
-import { enumerateKitLenses } from './KitLens';
+import { enumerateKitLenses, findDeviceById } from './KitLens';
 import { videoSizeTableFromKit } from './VideoSizeKit';
 
-/** 按 cameraId 找回该镜头的输出能力表：先匹配设备本体，再匹配逻辑设备的子设备 */
+/** 按 cameraId 找回该镜头的输出能力表（设备查找复用 KitLens.findDeviceById，不复制遍历） */
 function capabilityForSlotId(mgr: camera.CameraManager, id: string): camera.CameraOutputCapability | undefined {
-  let devices: Array<camera.CameraDevice> = [];
-  try {
-    devices = mgr.getSupportedCameras();
-  } catch (e) {
+  const device: camera.CameraDevice | undefined = findDeviceById(mgr, id);
+  if (device === undefined) {
     return undefined;
   }
-  for (const device of devices) {
-    if (device.cameraId === id) {
-      return outputCapabilityOf(mgr, device);
-    }
-    const children: Array<camera.CameraDevice> = device.constituentCameraDevices ?? [];
-    for (const child of children) {
-      if (child.cameraId === id) {
-        return outputCapabilityOf(mgr, child);
-      }
-    }
-  }
-  return undefined;
+  return outputCapabilityOf(mgr, device);
 }
 
 function outputCapabilityOf(mgr: camera.CameraManager, device: camera.CameraDevice):

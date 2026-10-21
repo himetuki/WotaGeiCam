@@ -2,10 +2,12 @@
  * 移植编译图锚点（非业务代码）：pages/Index.ets 引用本模块，把 core 直译批次七个文件
  * （CameraAbility/LensSlot/VideoSizePicker/WotaParams/CurveModel/UIOrientation/diag/Diag）
  * 拉进 CompileArkTS 类型检查范围——未被任何入口引用的 .ets 不会参与编译检查，
- * assembleHap 会假绿（2026-10-20 record 批次基线构建实证；core 批次当时只有
- * Constants/WotaParams 的部分依赖路径经 record 锚点进入编译图，其余五个文件为假绿，
- * 本文件补齐）。相机预览批次（XComponent+会话）真实消费这些模块后删除本文件与
- * Index.ets 的引用（同 record/RecordAnchors.ets 口径）。
+ * assembleHap 会假绿（2026-10-20 record 批次基线构建实证；core 批次当时仅 Constants
+ * 一个文件经 record 锚点（BitratePolicy/AutoStopRules 的 import）进入编译图，其余
+ * 六个 core 文件与 diag/Diag 均为假绿；金丝雀（612ff53）实证并顺带暴露修复两处预存错：
+ * WotaParams 的 LensType 导入源、VideoSizePicker 的 buildVideoSizeTable 上下限取向）。
+ * 相机预览批次（XComponent+会话）真实消费这些模块后删除本文件与 Index.ets 的引用
+ * （同 record/RecordAnchors.ets 口径）。
  */
 
 export {

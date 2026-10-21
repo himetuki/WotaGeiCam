@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "WotaGeiCamOHOS"
+    },
+    {
+      "name": "camera_perm_reason",
+      "value": "Used for camera preview and recording"
     }
   ]
 }

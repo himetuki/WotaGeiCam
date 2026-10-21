@@ -44,6 +44,32 @@ export function discoverKitCameraIds(mgr: camera.CameraManager): Array<string> {
   return devices.map((d: camera.CameraDevice): string => d.cameraId);
 }
 
+/**
+ * 按 cameraId 找回设备对象：先匹配 getSupportedCameras 本体，再匹配逻辑设备的子设备。
+ * 镜头枚举后会话/输出要用 device 本体开输入（LensSlot 只存 id 不存设备引用），
+ * KitProbe 取能力与 KitPreview 开会话共用这一份查找，不复制遍历。
+ */
+export function findDeviceById(mgr: camera.CameraManager, id: string): camera.CameraDevice | undefined {
+  let devices: Array<camera.CameraDevice> = [];
+  try {
+    devices = mgr.getSupportedCameras();
+  } catch (e) {
+    return undefined;
+  }
+  for (const device of devices) {
+    if (device.cameraId === id) {
+      return device;
+    }
+    const children: Array<camera.CameraDevice> = device.constituentCameraDevices ?? [];
+    for (const child of children) {
+      if (child.cameraId === id) {
+        return child;
+      }
+    }
+  }
+  return undefined;
+}
+
 /** 一颗待归档的镜头（上游 private data class LensEntry 同口径：物理焦距只用来排序，不落档位名） */
 class LensEntry {
   logicId: string;

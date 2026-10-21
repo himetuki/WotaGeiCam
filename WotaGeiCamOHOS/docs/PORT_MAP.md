@@ -20,7 +20,8 @@
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
 | `Camera2Engine.kt`、`CameraController.kt`、`DualCameraProbe.kt` | 平台绑定 | `@kit.CameraKit`（ModeManager/CameraManager），能力探测从 `CameraDevice.formatInfos` 等运行时读取，沿用「不写死机型」原则 | ☐ |
-| `CameraAbility.from()`、`LensSlot.enumerateLenses/discoverCameraIds`、`VideoSizePicker.minFrameDurationNs/videoSizeTable` 的 CameraKit 探测版适配层 | 平台绑定（采集侧） | `entry/src/main/ets/camera/`：`KitAbility.ets`（能力快照工厂，逐字段映射表见文件头注释）、`KitLens.ets`（镜头枚举，复用 core 的 shouldHideLogicalHead/assignRearTiers/dumpLenses）、`VideoSizeKit.ets`（帧周期按 videoProfiles maxFps 折算注入）、`KitProbe.ets`（探测入口，pages/Index 按钮消费）。探测版落地 2026-10-20，对齐上游 38d712a；会话期能力字段（zoom/ev/iso/flash/OIS/EIS/AF/AWB/区域上限）按 closed/空集退化，预览批开会话后补真值；上游「按数字 id 探隐藏镜头」无 OHOS 等价物，不移植（见 KitLens.ets 头注释登记） | ☑ 探测版 |
+| `CameraAbility.from()`、`LensSlot.enumerateLenses/discoverCameraIds`、`VideoSizePicker.minFrameDurationNs/videoSizeTable` 的 CameraKit 探测版适配层 | 平台绑定（采集侧） | `entry/src/main/ets/camera/`：`KitAbility.ets`（能力快照工厂，逐字段映射表见文件头注释）、`KitLens.ets`（镜头枚举，复用 core 的 shouldHideLogicalHead/assignRearTiers/dumpLenses）、`VideoSizeKit.ets`（帧周期按 videoProfiles maxFps 折算注入）、`KitProbe.ets`（探测入口，pages/Index 按钮消费）。探测版落地 2026-10-20，对齐上游 38d712a；会话期字段已补 zoom/ev/flash/iso/ois（`KitAbility.abilityRefineWithSession`，预览批）——OIS/EIS 之外的 exposureNs/afModes/awbModes/regions 仍留白（随参数下发批）；上游「按数字 id 探隐藏镜头」无 OHOS 等价物，不移植（见 KitLens.ets 头注释登记） | ☑ 探测版 |
+| `CameraController` 的「默认开广角后摄 + 出画面」最小闭环（预览批） | 平台绑定（会话侧） | `entry/src/main/ets/camera/`：`PermGate.ets`（CAMERA 权限申请门）+ `KitPreview.ets`（PhotoSession 预览引擎：默认档 assignRearTiers 后首个 WIDE、`pickDirectPreviewSize` 选档、createSession/createPreviewOutput/start、stop 逐项收尾）+ `pages/Index.ets`（XComponent(SURFACE) 预览面 + 权限流按钮，探测路径保留）。落地 2026-10-21，对齐上游 38d712a。留白项：切镜头 UI、GL/DIRECT 双路、参数下发（曝光/对焦/变焦）、VideoSession 能力（EIS 真值随录制批）、永久拒绝引导（随 HUD 批）。装机验证项（不阻塞）：授权框弹出与拒绝重试、预览画面出现/关页无崩溃、`hdc hilog \| grep -E "WotaAbility\|WotaLens"` 真值与镜头列表 | ☑ 部分 |
 | `GlRenderEngine.kt`、`ArcMendPass.kt`、`FrostBlur.kt`、`FrostBlurChain.kt`、`NtscGrid.kt` | 平台绑定（GL 着色器本体是纯逻辑） | XComponent + NDK NativeWindow，OpenGL ES 着色器源码几乎原样复用；斑马纹/峰值对焦同在此链路 | ☐ |
 | `DirectSink.kt`、`GlRenderSuppression.kt`、`FrameRateFallback.kt` | 纯逻辑为主 | 直译 + 适配相机回调签名 | ☐ |
 | `LevelMath.kt`（水平仪/俯仰数学） | 纯逻辑 | 直译；传感器输入改 `@ohos.sensor` | ☐ |
@@ -39,7 +40,7 @@
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `Diag.kt` | 平台绑定（薄） | `@ohos.hilog` 封装同名 API（i/w/e/d 最小版已落 `diag/Diag.ets`）；完整版（环形缓冲/落盘轮转/crash 挂钩/install(Application)）下一批 | ☑ 部分 |
+| `Diag.kt` | 平台绑定（薄） | `@ohos.hilog` 封装同名 API（i/w/e/d 最小版已落 `diag/Diag.ets`）；完整版（环形缓冲/落盘轮转/crash 挂钩/install(Application)）登记为预览批之后的独立下一批（落盘导出需真机 hdc 验证手段就位） | ☑ 部分 |
 
 ## media — 媒体库
 

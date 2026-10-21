@@ -26,7 +26,7 @@
  * 逐项 tryOrNull 兜底风格与上游一致：单字段读取失败不拖垮整套能力快照。
  */
 import { camera } from '@kit.CameraKit';
-import { CameraAbility, CameraAbilityArgs, RangeI } from '../core/CameraAbility';
+import { CameraAbility, CameraAbilityArgs, RangeI, RangeF } from '../core/CameraAbility';
 import { Rect, Size } from '../core/Constants';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 
@@ -228,4 +228,70 @@ export function eqFocalMmOfKit(device: camera.CameraDevice): number {
 /** 实际物理焦距（mm，排序用）：device.lensFocalLength（API24+）；缺失返回 0 */
 export function focalMmOfKit(device: camera.CameraDevice): number {
   return tryOrNull((): number | undefined => device.lensFocalLength) ?? 0;
+}
+
+/**
+ * 会话期能力补真值（预览批）：探测版按 closed/空集退化的字段，开会话后在会话域重新读取。
+ * 复制 base 快照、仅替换下列项；逐项 try/catch——单项失败保 base 值（退化路径继续兜底）。
+ *
+ * | 字段 | 真值来源 |
+ * |---|---|
+ * | zoomRatioRange | session.getZoomRatioRange()（ZoomQuery）[min,max] → RangeF；不 ok() → undefined |
+ * | evRange | session.getExposureBiasRange()（AutoExposureQuery）[min,max] → RangeI。单位登记：OHOS 直接给 EV 数值、Android 给档值（× CONTROL_AE_COMPENSATION_STEP）——evStep 保持 0，映射随参数下发批 |
+ * | flashAvailable | session.hasFlash()（FlashQuery） |
+ * | iso | session.getSupportedIsoRange()（ManualIsoQuery）[min,max] → RangeI；manualExposurePossible 由此可能转真（exposureNs 仍留白，见下） |
+ * | oisAvailable | session.isOISModeSupported(camera.OISMode.AUTO)（PhotoSession extends OIS）——以 AUTO 档受支持作「有 OIS」的代理判定 |
+ * | eisAvailable | isVideoStabilizationModeSupported 只在 VideoSession（StabilizationQuery）；PhotoSession 拿不到 → 保 base（false），VideoSession 版随录制批 |
+ * | exposureNs / afModes / awbModes / maxRegionsAf / maxRegionsAe | 本批仍留 closed/空集：无对应查询或契约值映射需专门设计，随参数下发批 |
+ */
+export function abilityRefineWithSession(base: CameraAbility, session: camera.PhotoSession): CameraAbility {
+  let zoomRatioRange: RangeF | undefined = undefined;
+  const zoomArr: Array<number> | undefined = tryOrNull((): Array<number> => session.getZoomRatioRange());
+  if (zoomArr !== undefined && zoomArr.length >= 2) {
+    const zr: RangeF = new RangeF(zoomArr[0], zoomArr[1]);
+    zoomRatioRange = zr.ok() ? zr : undefined;
+  }
+
+  const evArr: Array<number> | undefined = tryOrNull((): Array<number> => session.getExposureBiasRange());
+  const evRange: RangeI = evArr !== undefined && evArr.length >= 2
+    ? new RangeI(evArr[0], evArr[1])
+    : base.evRange;
+
+  const isoArr: Array<number> | undefined = tryOrNull((): Array<number> => session.getSupportedIsoRange());
+  const iso: RangeI = isoArr !== undefined && isoArr.length >= 2
+    ? new RangeI(isoArr[0], isoArr[1])
+    : base.iso;
+
+  const flashAvailable: boolean = tryOrNull((): boolean => session.hasFlash()) ?? base.flashAvailable;
+  const oisAvailable: boolean =
+    tryOrNull((): boolean => session.isOISModeSupported(camera.OISMode.AUTO)) ?? base.oisAvailable;
+
+  const args: CameraAbilityArgs = {
+    hardwareLevel: base.hardwareLevel,
+    sensorOrientation: base.sensorOrientation,
+    activeArray: base.activeArray,
+    jpegSizes: base.jpegSizes,
+    highSpeedSizes: base.highSpeedSizes,
+    videoSizes: base.videoSizes,
+    fpsRanges: base.fpsRanges,
+    highSpeedFps: base.highSpeedFps,
+    iso: iso,
+    exposureNs: base.exposureNs,
+    evRange: evRange,
+    evStep: base.evStep,
+    afModes: base.afModes,
+    awbModes: base.awbModes,
+    flashAvailable: flashAvailable,
+    maxRegionsAf: base.maxRegionsAf,
+    maxRegionsAe: base.maxRegionsAe,
+    minFocusDistanceDiopter: base.minFocusDistanceDiopter,
+    zoomRatioRange: zoomRatioRange,
+    maxDigitalZoom: base.maxDigitalZoom,
+    oisAvailable: oisAvailable,
+    eisAvailable: base.eisAvailable,
+    highSpeedCapable: base.highSpeedCapable,
+    availableSurfaceFormats: base.availableSurfaceFormats,
+    previewSizes: base.previewSizes
+  };
+  return new CameraAbility(args);
 }
