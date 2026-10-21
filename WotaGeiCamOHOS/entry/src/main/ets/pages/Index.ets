@@ -24,6 +24,8 @@ import { probeAndDump } from '../camera/KitProbe';
 // 预览批：CAMERA 权限申请门 + PhotoSession 预览引擎（PermGate/KitPreview 又把两文件拉进编译图）。
 import { requestCameraPermission } from '../camera/PermGate';
 import { PreviewEngine } from '../camera/KitPreview';
+// diag 完整版的页面真实消费者（开关/导出/清除三按钮）
+import { Diag, ExportResult } from '../diag/Diag';
 import { common } from '@kit.AbilityKit';
 
 @Entry
@@ -31,12 +33,28 @@ import { common } from '@kit.AbilityKit';
 struct Index {
   @State message: string = 'Hello World';
   @State surfaceId: string = '';
+  @State logEnabled: boolean = false;
+  @State diagSummary: string = '';
   private xhc: XComponentController = new XComponentController();
   private engine: PreviewEngine = new PreviewEngine();
+
+  aboutToAppear(): void {
+    // 反向初始化开关态：页面重建后按钮文案与实际总开关一致（Diag 状态活在进程内，持久化留白）
+    this.logEnabled = Diag.isEnabled();
+    this.refreshDiagSummary();
+  }
 
   aboutToDisappear(): void {
     // 关页收尾：stop 逐项清理不抛；fire-and-forget（页面生命周期内完成主要清理即可）
     this.engine.stop();
+  }
+
+  private refreshDiagSummary(): void {
+    try {
+      this.diagSummary = `${Diag.workingDir()} · ${Diag.usedBytes()}B`;
+    } catch (e) {
+      this.diagSummary = '';
+    }
   }
 
   build() {
@@ -97,6 +115,58 @@ struct Index {
               });
             })
         }
+
+        // 诊断区：日志开关 / 导出 / 清除（diag 完整版的最小消费面；预览/探测路径不动）
+        Row({ space: 8 }) {
+          Button(this.logEnabled ? '日志关' : '日志开')
+            .fontSize(14)
+            .onClick(() => {
+              try {
+                Diag.setEnabled(!this.logEnabled);
+                this.logEnabled = !this.logEnabled;
+                this.refreshDiagSummary();
+              } catch (e) {
+                this.message = `diag toggle failed: ${e}`;
+              }
+            })
+          Button('导出日志')
+            .fontSize(14)
+            .onClick(() => {
+              const ctx: common.Context | undefined =
+                this.getUIContext().getHostContext() as common.Context | undefined;
+              if (ctx === undefined) {
+                this.message = 'no host context';
+                return;
+              }
+              Diag.export(ctx)
+                .then((res: ExportResult | null): void => {
+                  this.message = res === null
+                    ? '日志导出失败（见 hilog WotaDiag）'
+                    : `日志已导出\n${res.path}\nbytes=${res.bytes}`;
+                  this.refreshDiagSummary();
+                })
+                .catch((e: Object): void => {
+                  this.message = `diag export failed: ${e}`;
+                });
+            })
+          Button('清除日志')
+            .fontSize(14)
+            .onClick(() => {
+              Diag.clear()
+                .then((): void => {
+                  this.refreshDiagSummary();
+                  this.message = '日志已清除';
+                })
+                .catch((e: Object): void => {
+                  this.message = `diag clear failed: ${e}`;
+                });
+            })
+        }
+
+        Text(this.diagSummary)
+          .fontSize(12)
+          .fontColor(Color.Gray)
+          .maxLines(2)
       }
       .alignItems(HorizontalAlign.Center)
       .width('100%')

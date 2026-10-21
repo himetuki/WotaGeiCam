@@ -242,6 +242,7 @@ export function focalMmOfKit(device: camera.CameraDevice): number {
  * | iso | session.getSupportedIsoRange()（ManualIsoQuery）[min,max] → RangeI；manualExposurePossible 由此可能转真（exposureNs 仍留白，见下） |
  * | oisAvailable | session.isOISModeSupported(camera.OISMode.AUTO)（PhotoSession extends OIS）——以 AUTO 档受支持作「有 OIS」的代理判定 |
  * | eisAvailable | isVideoStabilizationModeSupported 只在 VideoSession（StabilizationQuery）；PhotoSession 拿不到 → 保 base（false），VideoSession 版随录制批 |
+ * | maxDigitalZoom | 恒 base=1：d.ts 无对应查询 API，上限语义由 zoomRatioRange[1] 承担（Android 的 SCALER_AVAILABLE_MAX_DIGITAL_ZOOM 无 OHOS 等价物） |
  * | exposureNs / afModes / awbModes / maxRegionsAf / maxRegionsAe | 本批仍留 closed/空集：无对应查询或契约值映射需专门设计，随参数下发批 |
  */
 export function abilityRefineWithSession(base: CameraAbility, session: camera.PhotoSession): CameraAbility {

@@ -58,6 +58,7 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | `core/Constants.kt`、`core/WotaParams.kt`、`core/CurveModel.kt` | 参数键名、RGB 曲线模型 |
 | `player/ClipExport.kt` | 剪辑导出选轨/零样本轨规则 |
 | `record/PlaybackCaptureController.kt` | 双音轨（环境音+内录）轨位布局 |
+| `diag/Diag.kt` | 导出件格式/轮转规则/崩溃件命名（鸿蒙侧 `diag/DiagPure.ets`） |
 
 流程：有变更 → 在 PORT_MAP.md 找到该上游文件对应的鸿蒙落点 → 同步语义 →
 在 PORT_MAP.md 中更新登记（注明对齐到的上游 commit 短哈希）。
