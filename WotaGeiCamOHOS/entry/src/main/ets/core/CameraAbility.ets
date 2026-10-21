@@ -104,6 +104,12 @@ export class CameraAbility {
    * videoSizes 是预览 ∪ 照片表，DIRECT 模式挑预览流尺寸必须用这张单表。默认空表兼容旧构造点。
    */
   previewSizes: Array<Size>;
+  /**
+   * OHOS 适配层扩展字段（非上游 Camera2 字段，登记于 KitAbility.abilityRefineWithSession）：
+   * 会话期 ManualFocusQuery.isFocusDistanceSupported（API24）探针结果。
+   * undefined = 未探测/旧设备无该接口；true = 可下发 setFocusDistance；false = 设备拒绝该能力。
+   */
+  focusDistanceSupported: boolean | undefined;
 
   constructor(ability: CameraAbilityArgs) {
     this.hardwareLevel = ability.hardwareLevel;
@@ -131,6 +137,7 @@ export class CameraAbility {
     this.highSpeedCapable = ability.highSpeedCapable;
     this.availableSurfaceFormats = ability.availableSurfaceFormats;
     this.previewSizes = ability.previewSizes ?? [];
+    this.focusDistanceSupported = ability.focusDistanceSupported;
   }
 
   /** LEGACY 设备无逐帧控制/无 ZOOM_RATIO，UI 顶部要提示能力受限 */
@@ -246,6 +253,8 @@ export interface CameraAbilityArgs {
   highSpeedCapable: boolean;
   availableSurfaceFormats: Array<number>;
   previewSizes?: Array<Size>;
+  /** OHOS 适配层扩展（非上游字段）：ManualFocusQuery.isFocusDistanceSupported 探针结果 */
+  focusDistanceSupported?: boolean;
 }
 
 /** 目标帧率 → 实际写入目标 fps 范围的档位（固定 [f,f] 优先，避免 AE 漂移） */

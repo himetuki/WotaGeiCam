@@ -29,6 +29,7 @@ import { camera } from '@kit.CameraKit';
 import { CameraAbility, CameraAbilityArgs, RangeI, RangeF } from '../core/CameraAbility';
 import { Rect, Size } from '../core/Constants';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
+import { focusModesToCam2, wbModesToAwb } from './ParamMap';
 
 /** Camera2 INFO_SUPPORTED_HARDWARE_LEVEL_FULL 契约值：OHOS 无档位概念，按非 LEGACY 填充（LEGACY=2 见 core 侧判定） */
 const HARDWARE_LEVEL_FULL: number = 1;
@@ -116,9 +117,11 @@ export function abilityFromKit(
     tryOrNull((): Array<camera.VideoProfile> => capability.videoProfiles) ?? [];
 
   const sensorOrientation: number = tryOrNull((): number => device.cameraOrientation) ?? 0;
+  // @SuppressWarnings compatibility
   const minFocusDistanceDiopter: number = tryOrNull((): number | undefined => device.minimumFocusDistance) ?? 0;
 
   // sensorPixelArraySize: [w, h]（API24+ 可选；6.0(20) 设备运行期为 undefined → 空数组兜底）
+  // @SuppressWarnings compatibility
   const pixelArray: Array<number> | undefined = tryOrNull((): Array<number> | undefined => device.sensorPixelArraySize);
   const activeArray: Rect = pixelArray !== undefined && pixelArray.length >= 2
     ? new Rect(0, 0, pixelArray[0], pixelArray[1])
@@ -218,6 +221,7 @@ export function abilityFromKit(
  * OHOS 平台已给等效值就不重复推算；缺失返回 0，排档兜底交给 KitLens 的「未知焦距排最后」。
  */
 export function eqFocalMmOfKit(device: camera.CameraDevice): number {
+  // @SuppressWarnings compatibility
   const list: Array<number> | undefined = tryOrNull((): Array<number> | undefined => device.lensEquivalentFocalLength);
   if (list === undefined || list.length === 0) {
     return 0;
@@ -227,6 +231,7 @@ export function eqFocalMmOfKit(device: camera.CameraDevice): number {
 
 /** 实际物理焦距（mm，排序用）：device.lensFocalLength（API24+）；缺失返回 0 */
 export function focalMmOfKit(device: camera.CameraDevice): number {
+  // @SuppressWarnings compatibility
   return tryOrNull((): number | undefined => device.lensFocalLength) ?? 0;
 }
 
@@ -237,13 +242,21 @@ export function focalMmOfKit(device: camera.CameraDevice): number {
  * | 字段 | 真值来源 |
  * |---|---|
  * | zoomRatioRange | session.getZoomRatioRange()（ZoomQuery）[min,max] → RangeF；不 ok() → undefined |
- * | evRange | session.getExposureBiasRange()（AutoExposureQuery）[min,max] → RangeI。单位登记：OHOS 直接给 EV 数值、Android 给档值（× CONTROL_AE_COMPENSATION_STEP）——evStep 保持 0，映射随参数下发批 |
+ * | evRange | session.getExposureBiasRange()（AutoExposureQuery）[min,max] 按 session.getExposureBiasStep() 换算成**档数**（round(EV/step)）→ RangeI，保持 core 契约（params.ev 是步数）；step≤0 → 保 base（登记） |
+ * | evStep | session.getExposureBiasStep()（ManualExposureQuery）；≤0/不可读 → 保 base；下发侧 setExposureBias(steps × evStep) |
  * | flashAvailable | session.hasFlash()（FlashQuery） |
- * | iso | session.getSupportedIsoRange()（ManualIsoQuery）[min,max] → RangeI；manualExposurePossible 由此可能转真（exposureNs 仍留白，见下） |
+ * | iso | session.getSupportedIsoRange()（ManualIsoQuery）[min,max] → RangeI；manualExposurePossible 由此可能转真（exposureNs 已补） |
+ * | exposureNs | session.getSupportedExposureDurationRange()（ManualExposureQuery）[min,max] **微秒** → ×1000 换算为 ns 存储（core 契约是 ns），hi>0 才替换 |
+ * | afModes | focusModesToCam2(session)（ParamMap：逐档 session.isFocusModeSupported 探测后映射回 Camera2 契约值；连续档双发 {3,4}；空集 → 保 base） |
+ * | awbModes | wbModesToAwb(session)（ParamMap：逐档 session.isWhiteBalanceModeSupported 探测后映射回 AWB_MODE 契约值；空集 → 保 base） |
+ * | maxRegionsAf / maxRegionsAe | 恒 1：OHOS 单点对焦/测光，无区域数概念（近似登记；上游该值只用于门控区域写入与 dump） |
+ * | focusDistanceSupported | session.isFocusDistanceSupported()（ManualFocusQuery，API24；OHOS 适配层扩展字段，非上游字段）——true 才可下发 setFocusDistance；undefined=旧设备/探测失败 → 下发侧 skipped（不是 failed） |
  * | oisAvailable | session.isOISModeSupported(camera.OISMode.AUTO)（PhotoSession extends OIS）——以 AUTO 档受支持作「有 OIS」的代理判定 |
  * | eisAvailable | isVideoStabilizationModeSupported 只在 VideoSession（StabilizationQuery）；PhotoSession 拿不到 → 保 base（false），VideoSession 版随录制批 |
  * | maxDigitalZoom | 恒 base=1：d.ts 无对应查询 API，上限语义由 zoomRatioRange[1] 承担（Android 的 SCALER_AVAILABLE_MAX_DIGITAL_ZOOM 无 OHOS 等价物） |
- * | exposureNs / afModes / awbModes / maxRegionsAf / maxRegionsAe | 本批仍留 closed/空集：无对应查询或契约值映射需专门设计，随参数下发批 |
+ *
+ * 仍留白（登记）：tint（OHOS 无 RGB 增益接口）、逐帧 fps（预览档 profile 固定）、帧周期（同前）、
+ * EIS 真值与 VideoSession 参数面（随录制批）。
  */
 export function abilityRefineWithSession(base: CameraAbility, session: camera.PhotoSession): CameraAbility {
   let zoomRatioRange: RangeF | undefined = undefined;
@@ -253,17 +266,47 @@ export function abilityRefineWithSession(base: CameraAbility, session: camera.Ph
     zoomRatioRange = zr.ok() ? zr : undefined;
   }
 
+  // EV：OHOS 直接给 EV 数值；按步长换算回 core 的档数口径（params.ev 是步数）
+  // @SuppressWarnings compatibility
+  const rawEvStep: number | undefined = tryOrNull((): number => session.getExposureBiasStep());
+  // step≤0 / 不可读 → 回退 base（不拿 1 猜步长）
+  const evStep: number = rawEvStep !== undefined && rawEvStep > 0 ? rawEvStep : base.evStep;
   const evArr: Array<number> | undefined = tryOrNull((): Array<number> => session.getExposureBiasRange());
-  const evRange: RangeI = evArr !== undefined && evArr.length >= 2
-    ? new RangeI(evArr[0], evArr[1])
+  const evRange: RangeI = evArr !== undefined && evArr.length >= 2 && evStep > 0
+    ? new RangeI(Math.round(evArr[0] / evStep), Math.round(evArr[1] / evStep))
     : base.evRange;
 
+  // @SuppressWarnings compatibility
   const isoArr: Array<number> | undefined = tryOrNull((): Array<number> => session.getSupportedIsoRange());
   const iso: RangeI = isoArr !== undefined && isoArr.length >= 2
     ? new RangeI(isoArr[0], isoArr[1])
     : base.iso;
 
+  // 手动曝光时长范围：OHOS 单位是**微秒**（d.ts getSupportedExposureDurationRange/setExposureDuration
+  // 均注明 microseconds），core 契约 exposureNs 是纳秒 → ×1000 存储，下发侧 /1000 转回。
+  // OHOS 无 AE OFF，MANUAL 由 LOCKED + 显式时长/ISO 实现（d.ts：setIso 仅 EXPOSURE_MODE_LOCKED 生效，
+  // 故不用 EXPOSURE_MODE_MANUAL——它会令 setIso 失效，登记）。
+  // @SuppressWarnings compatibility
+  const expArr: Array<number> | undefined =
+    tryOrNull((): Array<number> => session.getSupportedExposureDurationRange());
+  const exposureNs: RangeI = expArr !== undefined && expArr.length >= 2 && expArr[1] > 0
+    ? new RangeI(expArr[0] * 1000, expArr[1] * 1000)
+    : base.exposureNs;
+
+  const probedAf: Set<number> = focusModesToCam2(session);
+  const afModes: Set<number> = probedAf.size > 0 ? probedAf : base.afModes;
+  const probedAwb: Set<number> = wbModesToAwb(session);
+  const awbModes: Set<number> = probedAwb.size > 0 ? probedAwb : base.awbModes;
+
+  // 手动对焦距离能力（API24 ManualFocusQuery）：undefined = 旧设备/探测失败 → 下发侧 skipped（不是 failed）
+  // @SuppressWarnings compatibility
+  const focusDistanceProbed: boolean | undefined =
+    tryOrNull((): boolean => session.isFocusDistanceSupported());
+  const focusDistanceSupported: boolean | undefined =
+    focusDistanceProbed !== undefined ? focusDistanceProbed : base.focusDistanceSupported;
+
   const flashAvailable: boolean = tryOrNull((): boolean => session.hasFlash()) ?? base.flashAvailable;
+  // @SuppressWarnings compatibility
   const oisAvailable: boolean =
     tryOrNull((): boolean => session.isOISModeSupported(camera.OISMode.AUTO)) ?? base.oisAvailable;
 
@@ -277,14 +320,14 @@ export function abilityRefineWithSession(base: CameraAbility, session: camera.Ph
     fpsRanges: base.fpsRanges,
     highSpeedFps: base.highSpeedFps,
     iso: iso,
-    exposureNs: base.exposureNs,
+    exposureNs: exposureNs,
     evRange: evRange,
-    evStep: base.evStep,
-    afModes: base.afModes,
-    awbModes: base.awbModes,
+    evStep: evStep,
+    afModes: afModes,
+    awbModes: awbModes,
     flashAvailable: flashAvailable,
-    maxRegionsAf: base.maxRegionsAf,
-    maxRegionsAe: base.maxRegionsAe,
+    maxRegionsAf: 1,
+    maxRegionsAe: 1,
     minFocusDistanceDiopter: base.minFocusDistanceDiopter,
     zoomRatioRange: zoomRatioRange,
     maxDigitalZoom: base.maxDigitalZoom,
@@ -292,7 +335,8 @@ export function abilityRefineWithSession(base: CameraAbility, session: camera.Ph
     eisAvailable: base.eisAvailable,
     highSpeedCapable: base.highSpeedCapable,
     availableSurfaceFormats: base.availableSurfaceFormats,
-    previewSizes: base.previewSizes
+    previewSizes: base.previewSizes,
+    focusDistanceSupported: focusDistanceSupported
   };
   return new CameraAbility(args);
 }

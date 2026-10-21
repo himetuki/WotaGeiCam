@@ -29,7 +29,8 @@ function capabilityForSlotId(mgr: camera.CameraManager, id: string): camera.Came
 function outputCapabilityOf(mgr: camera.CameraManager, device: camera.CameraDevice):
 camera.CameraOutputCapability | undefined {
   try {
-    return mgr.getSupportedOutputCapability(device);
+    // mode 版（无 mode 版自 API 11 废弃）；探测面按 NORMAL_PHOTO 采集
+    return mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_PHOTO);
   } catch (e) {
     return undefined;
   }

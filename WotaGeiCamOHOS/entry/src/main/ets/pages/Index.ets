@@ -17,7 +17,9 @@
 // 符号本身未被页面使用；录制引擎批次落地后移除（见 record/RecordAnchors.ets 头注释）。
 import { ArcKeepRule } from '../record/RecordAnchors';
 // 同上：core 直译批次七个文件的编译图锚点（见 core/CoreAnchors.ets 头注释）。
-import { WotaParams } from '../core/CoreAnchors';
+// WotaParams/ParamState 在本页参数自检里成为真实消费者（参数总线）。
+import { ParamState, WotaParams } from '../core/CoreAnchors';
+import { Flash, WbPreset } from '../core/Constants';
 // 探测版适配层的页面真实消费者：点击即 getCameraManager → 枚举镜头 → dump（camera/KitProbe.ets）。
 // KitProbe 传递引用 KitLens/KitAbility/VideoSizeKit，探测适配层四个文件均在编译图内。
 import { probeAndDump } from '../camera/KitProbe';
@@ -37,6 +39,8 @@ struct Index {
   @State diagSummary: string = '';
   private xhc: XComponentController = new XComponentController();
   private engine: PreviewEngine = new PreviewEngine();
+  /** 参数总线：参数自检八档的输入（也是后续 HUD 的同一实例来源） */
+  private params: WotaParams = new WotaParams();
 
   aboutToAppear(): void {
     // 反向初始化开关态：页面重建后按钮文案与实际总开关一致（Diag 状态活在进程内，持久化留白）
@@ -73,7 +77,7 @@ struct Index {
           .fontSize($r('app.float.page_text_font_size'))
           .fontWeight(FontWeight.Bold)
           .fontColor(Color.White)
-          .maxLines(8)
+          .maxLines(14)
           .textAlign(TextAlign.Center)
 
         Row({ space: 12 }) {
@@ -113,6 +117,34 @@ struct Index {
                     this.message = summary;
                   });
               });
+            })
+          Button('参数自检')
+            .fontSize(14)
+            .onClick(() => {
+              // 八档演示（不含 manual 曝光/ISO，避免黑屏）：变焦 2 档 → EV 两向 → 色温 2 档 → 补光 2 档。
+              // 每档改参数总线后立即 applyParams，报告进 message（全文在 hilog WotaAbility 的 apply 行）。
+              try {
+                const lines: Array<string> = [];
+                this.params.zoom.value = ParamState.of(1);
+                lines.push(`①zoom=1 ${this.engine.applyParams(this.params)}`);
+                this.params.zoom.value = ParamState.of(2);
+                lines.push(`②zoom=2 ${this.engine.applyParams(this.params)}`);
+                this.params.ev.value = ParamState.of(-2);
+                lines.push(`③ev=-2 ${this.engine.applyParams(this.params)}`);
+                this.params.ev.value = ParamState.of(2);
+                lines.push(`④ev=+2 ${this.engine.applyParams(this.params)}`);
+                this.params.wbMode.value = WbPreset.DAYLIGHT;
+                lines.push(`⑤wb=DAYLIGHT ${this.engine.applyParams(this.params)}`);
+                this.params.wbMode.value = WbPreset.CLOUDY_DAYLIGHT;
+                lines.push(`⑥wb=CLOUDY ${this.engine.applyParams(this.params)}`);
+                this.params.flash.value = Flash.TORCH;
+                lines.push(`⑦flash=TORCH ${this.engine.applyParams(this.params)}`);
+                this.params.flash.value = Flash.OFF;
+                lines.push(`⑧flash=OFF ${this.engine.applyParams(this.params)}`);
+                this.message = lines.join('\n');
+              } catch (e) {
+                this.message = `param self-check failed: ${e}`;
+              }
             })
         }
 

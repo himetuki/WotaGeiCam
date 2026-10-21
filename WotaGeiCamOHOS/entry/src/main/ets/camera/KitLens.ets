@@ -60,6 +60,7 @@ export function findDeviceById(mgr: camera.CameraManager, id: string): camera.Ca
     if (device.cameraId === id) {
       return device;
     }
+    // @SuppressWarnings compatibility
     const children: Array<camera.CameraDevice> = device.constituentCameraDevices ?? [];
     for (const child of children) {
       if (child.cameraId === id) {
@@ -105,8 +106,11 @@ function entryToSlot(e: LensEntry, type: LensType): LensSlot {
 
 /** 单颗设备的能力采集：getSupportedOutputCapability 失败/为空时用空表（各字段闭集兜底） */
 function abilityOfDevice(mgr: camera.CameraManager, device: camera.CameraDevice): CameraAbility {
+  // 用 mode 版（无 mode 版自 API 11 废弃）；预览/照片链路按 NORMAL_PHOTO 采集，
+  // 录制批将按 NORMAL_VIDEO 再采一份（video 档能力以录制会话为准，登记）
   const capability: camera.CameraOutputCapability | undefined =
-    tryLens((): camera.CameraOutputCapability => mgr.getSupportedOutputCapability(device));
+    tryLens((): camera.CameraOutputCapability =>
+      mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_PHOTO));
   return abilityFromKit(device.cameraId, device, capability ?? EMPTY_CAPABILITY);
 }
 
@@ -128,7 +132,9 @@ export function enumerateKitLenses(mgr: camera.CameraManager): Array<LensSlot> {
 
   for (const device of devices) {
     const front: boolean = device.cameraPosition === camera.CameraPosition.CAMERA_POSITION_FRONT;
+    // @SuppressWarnings compatibility
     const logical: boolean = device.isLogicalCamera === true;
+    // @SuppressWarnings compatibility
     const children: Array<camera.CameraDevice> =
       logical ? (device.constituentCameraDevices ?? []) : [];
     const childIds: Set<string> = new Set<string>(

@@ -16,12 +16,14 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag } from '../core/Constants';
+import { Size, WotaTag, WotaTiers } from '../core/Constants';
 import { LensSlot, LensType } from '../core/LensSlot';
 import { CameraAbility } from '../core/CameraAbility';
+import { WotaParams } from '../core/WotaParams';
 import { pickDirectPreviewSize, sizeCloseTo, VideoSizeCandidates } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
+import { ApplyReport, State, applySnapshot, snapshotOf, stateOf } from './RequestApplier';
 
 /** 默认档：归档结果里第一个 WIDE（多后摄按焦距归档后广角稳定在 WIDE）；无 WIDE 则第一个非前摄 */
 function pickDefaultLens(slots: Array<LensSlot>): LensSlot | undefined {
@@ -53,6 +55,8 @@ export class PreviewEngine {
   private session: camera.PhotoSession | undefined = undefined;
   private preview: camera.PreviewOutput | undefined = undefined;
   private input: camera.CameraInput | undefined = undefined;
+  /** 会话期能力真值快照（applyParams 的 State 来源；随会话生命周期存续） */
+  private refinedAbility: CameraAbility | undefined = undefined;
 
   /**
    * 开预览。返回人读状态摘要（页面直接显示）；失败不抛——Diag 落错 + 返回 "preview failed: ..."。
@@ -112,8 +116,9 @@ export class PreviewEngine {
       this.preview = preview;
       this.session = session;
 
-      // 会话期能力真值化（zoom/ev/flash/iso/ois，见 KitAbility.abilityRefineWithSession）后 dump
+      // 会话期能力真值化（zoom/ev/iso/af/awb/flash/exposure，见 KitAbility.abilityRefineWithSession）后 dump
       const refined: CameraAbility = abilityRefineWithSession(slot.ability, session);
+      this.refinedAbility = refined;
       refined.dump(slot.key);
       Diag.i(WotaTag.ABILITY,
         `preview started: lens=${slot.key} profile=${chosen.width}x${chosen.height} of ${previewProfiles.length}`);
@@ -121,6 +126,26 @@ export class PreviewEngine {
     } catch (e) {
       Diag.e(WotaTag.ABILITY, `preview failed: ${e}`);
       return `preview failed: ${e}`;
+    }
+  }
+
+  /**
+   * 参数下发（HUD/自检入口）：按参数总线当前快照逐键 apply，返回报告摘要。
+   * 会话未就绪时返回提示串（页面直接显示）；异常兜底不抛。
+   */
+  applyParams(params: WotaParams): string {
+    try {
+      if (this.session === undefined || this.refinedAbility === undefined) {
+        return 'param apply skipped: no session';
+      }
+      const highSpeed: boolean = params.fps.value.value > WotaTiers.HIGH_SPEED_FPS;
+      const state: State = stateOf(
+        this.refinedAbility, params.size.value, highSpeed, this.refinedAbility.evStep);
+      const report: ApplyReport = applySnapshot(this.session, state, snapshotOf(params, state));
+      return report.summary();
+    } catch (e) {
+      Diag.e(WotaTag.ABILITY, `param apply failed: ${e}`);
+      return `param apply failed: ${e}`;
     }
   }
 
@@ -157,13 +182,15 @@ export class PreviewEngine {
     this.session = undefined;
     this.preview = undefined;
     this.input = undefined;
+    this.refinedAbility = undefined;
   }
 }
 
 function outputCapabilityOf(mgr: camera.CameraManager, device: camera.CameraDevice):
 camera.CameraOutputCapability | undefined {
   try {
-    return mgr.getSupportedOutputCapability(device);
+    // mode 版（无 mode 版自 API 11 废弃）；预览会话即 PhotoSession，按 NORMAL_PHOTO 采集
+    return mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_PHOTO);
   } catch (e) {
     return undefined;
   }
