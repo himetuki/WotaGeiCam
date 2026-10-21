@@ -54,6 +54,11 @@ public:
     /** 已成功写入 muxer 的样本字节累计（轮转触发量；Stop 后 0） */
     int64_t GetWrittenBytes();
 
+    /** 健康三格：编码器视频轨已添加 / muxer 已启动 / 成功写入样本数 */
+    bool IsVideoTrackAdded();
+    bool IsMuxStarted();
+    int32_t SampleCount();
+
     /** 以指定原因中止录制（surface 丢失/编码 pass 连续失败/muxer 写失败）；内部走 Stop 清理 */
     void Abort(const std::string& reason);
 
@@ -91,6 +96,7 @@ private:
     int64_t lastPtsUs_ = -1;
     int32_t samples_ = 0;
     int64_t writtenBytes_ = 0;
+    bool muxStarted_ = false;
     bool eosSeen_ = false;
     /** muxer 写失败：停止送样并作为中止原因带回 ArkTS（samples 仅成功写入自增） */
     bool writeFailed_ = false;

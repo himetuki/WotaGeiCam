@@ -42,4 +42,6 @@ export const measuredArcSrcFps: () => number;
 export const getGpuFrameCounters: () => string;
 /** 已成功写入 muxer 的字节累计（轮转触发量；Stop 后 0） */
 export const getGpuWrittenBytes: () => number;
+/** 健康三格："trackAdded,muxStarted,samples"（1/0/整数） */
+export const getGpuHealth: () => string;
 export const getArcEffectiveMode: () => number;

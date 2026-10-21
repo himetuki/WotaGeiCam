@@ -86,6 +86,10 @@ export function getGpuWrittenBytes(): number {
   return glLib.getGpuWrittenBytes();
 }
 
+export function getGpuHealth(): string {
+  return glLib.getGpuHealth();
+}
+
 export function getArcEffectiveMode(): number {
   return glLib.getArcEffectiveMode();
 }

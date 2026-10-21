@@ -65,16 +65,19 @@ struct Settings {
   private async drainSave(): Promise<void> {
     const ctx: common.Context | undefined = this.hostContext();
     if (ctx === undefined) {
+      this.saving = false;
+      this.pendingSave = false;
+      this.message = '无上下文，未保存';
       return;
     }
     this.saving = true;
     while (this.pendingSave) {
       this.pendingSave = false;
-      try {
-        await SettingsStore.save(ctx, this.settings);
-      } catch (e) {
-        this.message = `保存失败: ${e}`;
+      const ok: boolean = await SettingsStore.save(ctx, this.settings);
+      if (!ok) {
         this.saving = false;
+        this.pendingSave = false;
+        this.message = '保存失败';
         return;
       }
     }
@@ -162,7 +165,7 @@ struct Settings {
                 this.persist();
               })
 
-            Text('画幅/帧率在录制中不可切换；效果可切换并同步预览/编码')
+            Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')
               .fontSize(10)
               .fontColor('#78909C')
               .padding({ left: 12, right: 12 })

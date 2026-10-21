@@ -47,6 +47,7 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     lastError_.clear();
     samples_ = 0;
     writtenBytes_ = 0;
+    muxStarted_ = false;
     eosSeen_ = false;
     lastPtsUs_ = -1;
     writeFailed_ = false;
@@ -131,6 +132,7 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     if (OH_AVMuxer_Start(muxer_) != AV_ERR_OK) {
         return fail("muxer-start");
     }
+    muxStarted_ = true;
     // 相对时基在 Start 前落值：回调可能在 Start 返回前就到（PTS 一律 wall-clock − startUs）
     startUs_ = NowUs();
     if (OH_VideoEncoder_Start(codec_) != AV_ERR_OK) {
@@ -155,6 +157,7 @@ std::string CodecRecorder::FailStart(std::unique_lock<std::mutex>& lock, const c
     track_ = -1;
     samples_ = 0;
     writtenBytes_ = 0;
+    muxStarted_ = false;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -222,6 +225,7 @@ std::string CodecRecorder::Stop()
     track_ = -1;
     samples_ = 0;
     writtenBytes_ = 0;
+    muxStarted_ = false;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -276,6 +280,24 @@ int64_t CodecRecorder::GetWrittenBytes()
 {
     std::lock_guard<std::mutex> lock(mtx_);
     return writtenBytes_;
+}
+
+bool CodecRecorder::IsVideoTrackAdded()
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return track_ >= 0;
+}
+
+bool CodecRecorder::IsMuxStarted()
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return muxStarted_;
+}
+
+int32_t CodecRecorder::SampleCount()
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return samples_;
 }
 
 void CodecRecorder::Abort(const std::string& reason)

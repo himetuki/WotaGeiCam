@@ -67,7 +67,7 @@ export class SettingsStore {
     return s;
   }
 
-  static async save(ctx: common.Context, s: CameraSettings): Promise<void> {
+  static async save(ctx: common.Context, s: CameraSettings): Promise<boolean> {
     try {
       const store: preferences.Preferences = await preferences.getPreferences(ctx, STORE_NAME);
       await store.put('sizeW', s.sizeW);
@@ -78,8 +78,10 @@ export class SettingsStore {
       await store.put('grid', s.grid);
       await store.put('effect', s.effect);
       await store.flush();
+      return true;
     } catch (e) {
       Diag.w(TAG, `save settings failed: ${e}`);
+      return false;
     }
   }
 }

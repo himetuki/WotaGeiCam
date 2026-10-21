@@ -327,6 +327,16 @@ static napi_value GetGpuWrittenBytes(napi_env env, napi_callback_info info)
     return result;
 }
 
+/** 录制健康三格："trackAdded,muxStarted,samples" */
+static napi_value GetGpuHealth(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string health = std::string(CodecRecorder::Instance().IsVideoTrackAdded() ? "1" : "0") + "," +
+        (CodecRecorder::Instance().IsMuxStarted() ? "1" : "0") + "," +
+        std::to_string(CodecRecorder::Instance().SampleCount());
+    return MakeString(env, health);
+}
+
 /** 原生帧账计数 "glCallbacks,glConsumed,swapOk,swapFail,arcDropped" */
 static napi_value GetGpuFrameCounters(napi_env env, napi_callback_info info)
 {
@@ -379,6 +389,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"measuredArcSrcFps", nullptr, MeasuredArcSrcFps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuFrameCounters", nullptr, GetGpuFrameCounters, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuWrittenBytes", nullptr, GetGpuWrittenBytes, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getGpuHealth", nullptr, GetGpuHealth, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getArcEffectiveMode", nullptr, GetArcEffectiveMode, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

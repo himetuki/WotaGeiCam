@@ -10,6 +10,11 @@ export { DropMark, ArcDropSegment, ArcDropLog } from './ArcDropLog';
 export { BitratePolicy, StorageEstimate } from './BitratePolicy';
 export { AutoStopRules, CameraLostWatch } from './AutoStopRules';
 export {
+  RecordHealthWindow, HealthVerdict, RetryAction, VIDEO_WINDOW_MS, FULL_WINDOW_MS,
+  MAX_RESTART_ATTEMPTS, MIN_OUTPUT_BYTES, defaultRecordHealthWindow, healthVerdict,
+  retryActionOf, resolveOutputBytes, streamHealthVerdict
+} from './RecordHealth';
+export {
   FrameLedger, FrameCounterSnapshot, FrameLedgerReport, frameMerged, frameCentiFps, frameCentiText,
   FrameStageDrops, frameStageDrops, frameLedgerLine, frameSessionSummary
 } from './FrameLedger';

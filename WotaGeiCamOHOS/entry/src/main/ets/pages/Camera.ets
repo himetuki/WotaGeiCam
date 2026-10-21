@@ -10,6 +10,7 @@
 import { common } from '@kit.AbilityKit';
 import { display, window } from '@kit.ArkUI';
 import { batteryInfo } from '@kit.BasicServicesKit';
+import { Diag } from '../diag/Diag';
 import { camera } from '@kit.CameraKit';
 import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
@@ -18,6 +19,11 @@ import { CurveStack } from '../core/CurveModel';
 import { ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Constants';
 import { AutoStopMonitor } from '../record/AutoStopMonitor';
 import { AutoStopRules } from '../record/AutoStopRules';
+import {
+  HealthVerdict, RecordHealthWindow, RetryAction, defaultRecordHealthWindow, healthVerdict, retryActionOf
+} from '../record/RecordHealth';
+import { ArcDropLog } from '../record/ArcDropLog';
+import { WOTA_RECORD_TAG } from '../record/RecordResult';
 import { DeviceStatus } from '../camera/DeviceStatus';
 import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
@@ -88,6 +94,8 @@ struct CameraPage {
   @State freeMb: number = -1;
   @State zoomLabel: string = '1x';
   @State flashOn: boolean = false;
+  @State startingCamera: boolean = false;
+  @State permissionRequesting: boolean = false;
 
   private engine: GlCameraEngine = new GlCameraEngine();
   private recorder: GlRecorder = new GlRecorder();
@@ -107,7 +115,11 @@ struct CameraPage {
   private disposed: boolean = false;
   /** 页面可见性：隐藏后 async 设置/权限/起镜链不得再拉起相机 */
   private pageVisible: boolean = true;
-  private startingCamera: boolean = false;
+  private healthTimer: number = -1;
+  private healthStartMs: number = 0;
+  private healthAttempts: number = 0;
+  private healthWindow: RecordHealthWindow = defaultRecordHealthWindow();
+  private healthHealthy: boolean = false;
   private lastReadoutMs: number = 0;
   private recordStartedAtMs: number = 0;
   private stopGraceTimer: number = -1;
@@ -123,12 +135,13 @@ struct CameraPage {
       if (this.disposed) {
         return;
       }
+      this.cameraStarted = false;
+      this.resetCameraLabels();
       if (this.recording || this.stopPending) {
         this.requestStop(AutoStopRules.REASON_CAMERA_LOST);
         return;
       }
       this.message = '相机已断开';
-      this.cameraStarted = false;
     });
     try {
       display.on('change', (_id: number): void => {
@@ -160,6 +173,10 @@ struct CameraPage {
       if (this.recording) {
         return;
       }
+      if (!this.permissionGranted) {
+        this.ensureCameraPermission();
+        return;
+      }
       if (sizeChanged && this.cameraStarted) {
         this.restartCamera();
       } else if (!this.cameraStarted) {
@@ -171,8 +188,10 @@ struct CameraPage {
   onPageHide(): void {
     this.pageVisible = false;
     this.cancelTapTimers();
+    this.stopHealthMonitor(); // 页面隐藏统一停健康巡检（录制中亦不后台读 native）
     if (!this.recording) {
       this.stopStatusTimer();
+      this.stopHealthMonitor();
       this.stopPolling();
       this.engine.stop();
       this.cameraStarted = false;
@@ -186,6 +205,7 @@ struct CameraPage {
     this.stopStatusTimer();
     this.stopRecordMonitor();
     this.stopAutoStopMonitor();
+    this.stopHealthMonitor();
     if (this.stopGraceTimer >= 0) {
       clearTimeout(this.stopGraceTimer);
       this.stopGraceTimer = -1;
@@ -222,21 +242,10 @@ struct CameraPage {
       this.gridOn = s.grid;
       this.effectIndex = s.effect;
       this.syncLabels();
-      requestCameraPermission(ctx).then((granted: boolean): void => {
-        if (this.disposed) {
-          return;
-        }
-        this.permissionGranted = granted;
-        this.loading = false;
-        if (!granted) {
-          this.message = '相机权限被拒绝，点按重试';
-          return;
-        }
-        if (!this.pageVisible) {
-          return; // 隐藏页不启动相机；onPageShow 会重试
-        }
-        this.tryStartCamera();
-      });
+      if (!this.pageVisible) {
+        return; // 隐藏页只落设置，不请求权限/起镜；onPageShow 补发
+      }
+      this.ensureCameraPermission();
     }).catch((e: Object): void => {
       this.loading = false;
       this.message = `读取设置失败: ${e}`;
@@ -317,6 +326,38 @@ struct CameraPage {
     }
   }
 
+  /** 权限请求唯一入口：disposed/pageVisible/permissionRequesting/settingsLoaded 四重门控 */
+  private ensureCameraPermission(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (this.disposed || !this.pageVisible || this.permissionRequesting ||
+      this.permissionGranted || !this.settingsLoaded || ctx === undefined) {
+      return;
+    }
+    this.permissionRequesting = true;
+    requestCameraPermission(ctx).then((granted: boolean): void => {
+      this.permissionRequesting = false;
+      if (this.disposed) {
+        return;
+      }
+      this.permissionGranted = granted;
+      this.loading = false;
+      if (!granted) {
+        this.message = '相机权限被拒绝，点按重试';
+        return;
+      }
+      if (!this.pageVisible) {
+        return;
+      }
+      this.tryStartCamera();
+    }).catch((e: Object): void => {
+      this.permissionRequesting = false;
+      this.loading = false;
+      if (this.pageVisible) {
+        this.message = `权限请求失败: ${e}`;
+      }
+    });
+  }
+
   private tryStartCamera(): void {
     const ctx: common.Context | undefined = this.ctx;
     if (this.disposed || !this.pageVisible || !this.permissionGranted || !this.settingsLoaded ||
@@ -368,8 +409,9 @@ struct CameraPage {
           this.persistSettings();
         }
       }
-      this.zoomIndex = 0;
-      this.zoomLabel = '1x';
+      const initialZoom: number = this.engine.currentZoom();
+      this.zoomIndex = this.nearestZoomIndex(initialZoom);
+      this.zoomLabel = `${initialZoom}x`;
       this.applyGeometry();
       this.initNativeParams();
       this.startStatusTimer();
@@ -401,6 +443,17 @@ struct CameraPage {
       case 3: return '超长焦';
       case 5: return '前置';
       default: return '镜头';
+    }
+  }
+
+  private appendNotice(text: string): void {
+    if (text === '') {
+      return;
+    }
+    if (this.message === '') {
+      this.message = text;
+    } else if (this.message.indexOf(text) < 0) {
+      this.message = `${this.message}（${text}）`;
     }
   }
 
@@ -458,6 +511,19 @@ struct CameraPage {
     this.persistSettings();
   }
 
+  private nearestZoomIndex(actual: number): number {
+    let best: number = 0;
+    let bestDiff: number = Number.MAX_VALUE;
+    for (let i = 0; i < ZOOM_LEVELS.length; i++) {
+      const diff: number = Math.abs(ZOOM_LEVELS[i] - actual);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = i;
+      }
+    }
+    return best;
+  }
+
   private cycleZoom(): void {
     if (!this.cameraStarted) {
       return;
@@ -465,16 +531,16 @@ struct CameraPage {
     this.zoomIndex = (this.zoomIndex + 1) % ZOOM_LEVELS.length;
     const target: number = ZOOM_LEVELS[this.zoomIndex];
     const actual: number = this.engine.applyZoom(target);
-    if (actual > 0) {
-      this.zoomLabel = `${actual}x`;
-      const idx: number = ZOOM_LEVELS.indexOf(actual);
-      if (idx >= 0) {
-        this.zoomIndex = idx;
-      }
-    } else {
+    if (actual <= 0) {
       this.zoomIndex = 0;
       this.zoomLabel = '1x';
       this.message = '该镜头不支持该变焦档';
+      return;
+    }
+    this.zoomLabel = `${actual}x`;
+    this.zoomIndex = this.nearestZoomIndex(actual);
+    if (actual <= 1.01 && target > 1) {
+      this.message = '该镜头不支持该变焦档（已钳回 1x）';
     }
   }
 
@@ -544,9 +610,20 @@ struct CameraPage {
     if (ctx === undefined) {
       return;
     }
-    SettingsStore.save(ctx, this.settings).catch((e: Object): void => {
+    SettingsStore.save(ctx, this.settings).then((ok: boolean): void => {
+      if (!ok) {
+        this.message = '设置保存失败';
+      }
+    }).catch((e: Object): void => {
       this.message = `设置保存失败: ${e}`;
     });
+  }
+
+  private resetCameraLabels(): void {
+    this.lensLabel = '—';
+    this.sizeLabel = '—';
+    this.zoomLabel = '1x';
+    this.zoomIndex = 0;
   }
 
   private applyGeometry(): void {
@@ -559,6 +636,26 @@ struct CameraPage {
       lib.setDisplayGeometry(info.sensorDeg, this.displayDeg(), info.front);
     } catch (e) {
     }
+  }
+
+  private readoutText(key: string): string {
+    if (key === 'lens') {
+      return this.lensLabel;
+    }
+    if (key === 'size') {
+      return this.sizeLabel;
+    }
+    if (key === 'fps') {
+      const preview: number = this.engine.currentPreviewFps();
+      return `预览${preview > 0 ? preview : '—'}fps/录${this.settings.fps}fps`;
+    }
+    if (key === 'battery') {
+      return `🔋${this.batteryPct >= 0 ? this.batteryPct + '%' : '—'}`;
+    }
+    if (key === 'free') {
+      return `${this.freeMb >= 0 ? this.freeMb + 'MB' : '—'}`;
+    }
+    return formatElapsed(this.elapsedMs);
   }
 
   private displayDeg(): number {
@@ -660,9 +757,7 @@ struct CameraPage {
       return;
     }
     if (this.lastStopAtMs > 0 && Date.now() - this.lastStopAtMs < START_COOLDOWN_MS) {
-      if (this.message.indexOf('刚停录') < 0) {
-        this.message = `${this.message}（刚停录，请稍后再录）`;
-      }
+      this.appendNotice('刚停录，请稍后再录');
       return;
     }
     if (!this.cameraStarted || this.engine.deviceStatus() !== DeviceStatus.OPEN_SUCCEED) {
@@ -695,6 +790,131 @@ struct CameraPage {
     this.message = `录制中 ${w}x${h}@${fps} arc=${arcMode === 0 ? 'off' : (arcMode === 1 ? 'mend' : 'drop')}`;
     this.startRecordMonitor();
     this.startAutoStopMonitor(ctx);
+    this.healthAttempts = 0;
+    this.startHealthMonitor();
+  }
+
+  private startHealthMonitor(): void {
+    this.stopHealthMonitor();
+    this.healthStartMs = Date.now();
+    this.healthHealthy = false;
+    this.healthTimer = setInterval((): void => {
+      this.checkHealth();
+    }, 500);
+  }
+
+  private stopHealthMonitor(): void {
+    if (this.healthTimer >= 0) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = -1;
+    }
+  }
+
+  private checkHealth(): void {
+    if (this.disposed || !this.recording || this.stopPending) {
+      return;
+    }
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      return;
+    }
+    let raw: string = '';
+    try {
+      raw = lib.getGpuHealth();
+    } catch (e) {
+      return;
+    }
+    const parts: Array<string> = raw.split(',');
+    if (parts.length !== 3) {
+      Diag.w(WOTA_RECORD_TAG, `gpu health parse failed: ${raw}`);
+      return;
+    }
+    const trackAdded: boolean = parts[0] === '1';
+    const muxStarted: boolean = parts[1] === '1';
+    const samples: number = Number(parts[2]);
+    if (!Number.isFinite(samples)) {
+      return;
+    }
+    let nativeError: string = '';
+    try {
+      nativeError = lib.getGpuRecordError();
+    } catch (e) {
+      nativeError = '';
+    }
+    const elapsed: number = Date.now() - this.healthStartMs;
+    const verdict: HealthVerdict = healthVerdict(samples > 0, muxStarted, trackAdded,
+      nativeError, elapsed, this.healthWindow);
+    if (verdict === HealthVerdict.HEALTHY) {
+      if (!this.healthHealthy) {
+        this.healthHealthy = true;
+        Diag.i(WOTA_RECORD_TAG, `record health healthy samples=${samples} elapsed=${elapsed}ms`);
+      }
+      this.stopHealthMonitor();
+      return;
+    }
+    if (verdict !== HealthVerdict.UNHEALTHY) {
+      return;
+    }
+    this.stopHealthMonitor();
+    if (nativeError !== '') {
+      this.finishRecord();
+      this.appendNotice(`录制异常停止: ${nativeError}`);
+      return;
+    }
+    const action: RetryAction = retryActionOf(this.healthAttempts, this.healthWindow, verdict);
+    if (action === RetryAction.RESTART) {
+      this.healthAttempts++;
+      this.restartSegmentAfterHealthFailure(this.healthAttempts);
+      return;
+    }
+    const summary: string = this.finishRecord();
+    this.discardEmptySegment(summary);
+    this.appendNotice('录制启动失败：3 秒内无视频样本（已重试 2 次）');
+  }
+
+  private restartSegmentAfterHealthFailure(attempt: number): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    const ctx: common.Context | undefined = this.ctx;
+    const actual: Size | undefined = this.engine.currentSize();
+    if (lib === undefined || ctx === undefined || actual === undefined) {
+      this.finishRecord();
+      return;
+    }
+    this.stopRecordMonitor();
+    const summary: string = this.recorder.stop();
+    this.discardEmptySegment(summary);
+    const fps: number = this.settings.fps;
+    const bitrate: number = BitratePolicy.resolve(this.settings.bitrate, actual.width, actual.height, fps, false);
+    const arcMode: number = fps < 30 ? this.settings.arcMode : 0;
+    const error: string = this.recorder.start(ctx, lib, actual.width, actual.height, fps, bitrate,
+      arcMode, fps, ArcMergeDeadband.deadband);
+    if (error !== '') {
+      this.finishRecord();
+      this.appendNotice(`自动重录失败: ${error}`);
+      return;
+    }
+    this.appendNotice(`录制未产出，自动重试 ${attempt}/${this.healthWindow.maxAttempts}`);
+    this.startRecordMonitor();
+    this.startHealthMonitor();
+  }
+
+  /** 仅当 samples=0 且 bytes<=0 才删空段；解析失败/有样本一律保留 */
+  private discardEmptySegment(summary: string): void {
+    const pathM: RegExpExecArray | null = new RegExp('path=([^ ]+)').exec(summary);
+    const bytesM: RegExpExecArray | null = new RegExp('bytes=(-?\d+)').exec(summary);
+    const samplesM: RegExpExecArray | null = new RegExp('samples=(\d+)').exec(summary);
+    if (pathM === null || bytesM === null || samplesM === null) {
+      return;
+    }
+    const path: string = pathM[1];
+    const bytes: number = Number(bytesM[1]);
+    const samples: number = Number(samplesM[1]);
+    if (path === '' || samples > 0 || bytes > 0) {
+      return;
+    }
+    VideoStore.discard(path);
+    ArcDropLog.deleteFor(path);
+    Diag.w(WOTA_RECORD_TAG, `empty segment discarded: ${path} bytes=${bytes} samples=${samples}`);
   }
 
   private startAutoStopMonitor(ctx: common.Context): void {
@@ -740,11 +960,14 @@ struct CameraPage {
         const rotateResult: string = this.recorder.maybeRotate(ctx, lib);
         if (rotateResult.indexOf('error:') === 0) {
           this.finishRecord();
-          this.message = `${this.message}（分段轮转失败，已停止，保留已完成段：${rotateResult}）`;
+          this.appendNotice(`分段轮转失败，已停止，保留已完成段：${rotateResult}`);
           return;
         }
         if (rotateResult.indexOf('rotated:') === 0) {
           this.message = `录制中 分段 ${rotateResult.substring('rotated:'.length)}`;
+          if (this.healthTimer >= 0) {
+            this.healthStartMs = Date.now(); // 新段重新计健康窗，避免旧段读数误判
+          }
         }
         try {
           alive = lib.isGpuRecording();
@@ -795,6 +1018,7 @@ struct CameraPage {
     const delay: number = AutoStopRules.stopGraceDelayMs(Date.now() - this.recordStartedAtMs);
     if (delay > 0) {
       this.stopPending = true;
+      this.stopHealthMonitor();
       this.stopAutoStopMonitor();
       this.message = '录制: 收尾中…';
       this.stopGraceTimer = setTimeout((): void => {
@@ -816,6 +1040,7 @@ struct CameraPage {
     }
     this.stopAutoStopMonitor();
     this.stopRecordMonitor();
+    this.stopHealthMonitor();
     const summary: string = this.recorder.stop();
     this.recording = false;
     this.stopPending = false;
@@ -832,7 +1057,8 @@ struct CameraPage {
     this.lastStopSummary = summary;
     this.lastStopAtMs = Date.now();
     if (this.engine.deviceStatus() !== DeviceStatus.OPEN_SUCCEED) {
-      this.cameraStarted = false; // 相机丢失：露出「重试相机」，不依赖镜头循环/重进
+      this.cameraStarted = false;
+      this.resetCameraLabels();
     }
     return summary;
   }
@@ -901,18 +1127,15 @@ struct CameraPage {
             .onClick((): void => {
               this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
             })
-          Text(`${this.lensLabel} · ${this.sizeLabel} · ${this.fpsLabel}fps`)
-            .fontSize(12)
-            .fontColor(Color.White)
-            .layoutWeight(1)
-            .maxLines(1)
-          Text(`🔋${this.batteryPct >= 0 ? this.batteryPct + '%' : '—'} ` +
-            `${this.freeMb >= 0 ? this.freeMb + 'MB' : '—'}`)
-            .fontSize(10)
-            .fontColor('#B0BEC5')
-          Text(formatElapsed(this.elapsedMs))
-            .fontSize(12)
-            .fontColor(this.recording ? '#FF5252' : Color.White)
+          Row({ space: 6 }) {
+            ForEach(HudSpec.HUD_READOUTS, (key: string): void => {
+              Text(this.readoutText(key))
+                .fontSize(10)
+                .fontColor(key === 'duration' && this.recording ? '#FF5252' : Color.White)
+                .maxLines(1)
+            }, (key: string): string => key)
+          }
+          .layoutWeight(1)
         }
         .width('100%')
         .height(HudSpec.TOP_BAR_HEIGHT)
@@ -922,10 +1145,11 @@ struct CameraPage {
 
         Column({ space: 6 }) {
           if (this.permissionGranted === false) {
-            Button('相机权限被拒绝，点按重试')
+            Button(this.permissionRequesting ? '请求权限中…' : '相机权限被拒绝，点按重试')
               .fontSize(12)
+              .enabled(!this.permissionRequesting)
               .onClick((): void => {
-                this.bootstrap();
+                this.ensureCameraPermission();
               })
           }
           if (this.message !== '') {
@@ -937,8 +1161,9 @@ struct CameraPage {
               .width('100%')
           }
           if (!this.cameraStarted && this.permissionGranted && !this.loading) {
-            Button('重试相机')
+            Button(this.startingCamera ? '启动中…' : '重试相机')
               .fontSize(11)
+              .enabled(!this.startingCamera)
               .onClick((): void => {
                 this.retryCamera();
               })

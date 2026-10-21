@@ -36,6 +36,7 @@ export interface GlRecordLib {
   getGpuFrameCounters: () => string;
   getArcEffectiveMode: () => number;
   getGpuWrittenBytes: () => number;
+  getGpuHealth: () => string;
 }
 
 class GpuCounters {
