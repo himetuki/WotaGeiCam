@@ -11,8 +11,8 @@
  * - 分段（3.5GiB 轮转）/AutoStop 巡检/FrameLedger 接线/MediaStore 入库/HEVC 重试/
  *   .drops.json 均留白（随录制后续批）；
  * - 输出契约：**AVRecorderConfig.url 用 `fd://<fd>`**（d.ts 明确 fd://xx；fileIo.openSync
- *   WRITE_ONLY|CREATE|TRUNC 建文件取 fd，fd 保留到 AVRecorder reset/release 之后才关闭）；
- *   不再使用裸路径/file:// 退路；
+ *   READ_WRITE|CREATE|TRUNC 建文件取 fd——SDK 示例要求 fd 可读写：AVRecorder 写、我们只读
+ *   stat 不移动指针；fd 保留到 AVRecorder reset/release 之后才关闭）；不再使用裸路径/file:// 退路；
  * - 起录失败：统一 failStart（先释放资源并关 fd，再删已创建/半写的输出文件，不留幽灵件）；
  *   判废顺序：先 MIN_KEEP_MS（短段一律 discard + TOO_SHORT，含 engineErr 短段）；唯一例外
  *   是 av.stop 失败（STOP_FAILED，保留文件 triage，登记）；
@@ -208,7 +208,7 @@ export class RecordingEngine {
       // fd:// 契约（d.ts：AVRecorderConfig.url = fd://xx）：先建文件拿 fd，AVRecorder 按 fd 写；
       // fd 保留到 reset/release 之后才关闭（releaseAll 收尾）。不再使用裸路径/file:// 退路。
       const outFile: fileIo.File = fileIo.openSync(path,
-        fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       this.outFd = outFile.fd;
 
       let prepared: boolean = false;
@@ -282,6 +282,11 @@ export class RecordingEngine {
   async stop(): Promise<RecordResult> {
     const seriesId: number = this.seriesId;
     if (this.stopping) {
+      return RecordResult.fail(RecordError.BAD_STATE, seriesId);
+    }
+    // 起录窗口内 stop 被拒（aboutToDisappear 与起录并发时）：start 完成后录制继续，
+    // 需再次进入页面停录——即「一次起录至多一次有效 stop」的边界（登记）。
+    if (this.starting) {
       return RecordResult.fail(RecordError.BAD_STATE, seriesId);
     }
     if (!this.isRecording()) {

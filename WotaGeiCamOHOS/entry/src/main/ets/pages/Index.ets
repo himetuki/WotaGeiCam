@@ -130,8 +130,7 @@ struct Index {
               });
             })
           Button(this.recording ? '停录' : '录制')
-            .fontSize(14)
-            .enabled(!this.recordingBusy)
+            .fontSize(14)            .enabled(!this.recordingBusy)
             .onClick(() => {
               const ctx: common.Context | undefined =
                 this.getUIContext().getHostContext() as common.Context | undefined;
@@ -186,6 +185,13 @@ struct Index {
                     });
                 });
               }
+            })
+          Button('GL 试验')
+            .fontSize(14)
+            .onClick(() => {
+              // GL-0 试验页：原生 EGL/GLES3 管线验证（相机预览/录制链路不受影响）
+              // 用 UIContext.getRouter()（模块级 router.pushUrl 自 API 18 弃用）
+              this.getUIContext().getRouter().pushUrl({ url: 'pages/GlPreview' });
             })
           Button('参数自检')
             .fontSize(14)
