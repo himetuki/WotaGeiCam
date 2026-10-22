@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "模块描述"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "描述"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "WotaGeiCamOHOS"
+    },
+    {
+      "name": "camera_perm_reason",
+      "value": "用于相机预览与录制"
+    },
+    {
+      "name": "mic_perm_reason",
+      "value": "用于录制视频时记录声音"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "module description"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "WotaGeiCamOHOS"
+    },
+    {
+      "name": "camera_perm_reason",
+      "value": "Used for camera preview and recording"
+    },
+    {
+      "name": "mic_perm_reason",
+      "value": "Used to record audio with video"
+    }
+  ]
+}

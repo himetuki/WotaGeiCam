@@ -1,0 +1,11 @@
+{
+  "src": [
+    "pages/Camera",
+    "pages/Settings",
+    "pages/Index",
+    "pages/GlPreview",
+    "pages/Gallery",
+    "pages/Player",
+    "pages/Compare"
+  ]
+}
