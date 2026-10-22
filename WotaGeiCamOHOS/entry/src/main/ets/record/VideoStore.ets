@@ -12,6 +12,7 @@
 import { fileIo, statfs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { WotaTiers } from '../core/Constants';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { RecordError, WOTA_RECORD_TAG } from './RecordResult';
 
@@ -105,6 +106,27 @@ export class VideoStore {
       return true;
     } catch (e) {
       Diag.e(WOTA_RECORD_TAG, `discard failed: ${path} ${e}`);
+      return false;
+    }
+  }
+
+  /**
+   * 幂等删除（T29 审查 P3）：文件已不存在（ENOENT 13900002）视为**已达成**、不记 ERROR。
+   * 供半成品清理/兜底 reap 使用——重复删同一路径不该在日志里伪装成故障。
+   */
+  static discardQuiet(path: string): boolean {
+    if (path === '') {
+      return true;
+    }
+    try {
+      fileIo.unlinkSync(path);
+      return true;
+    } catch (e) {
+      const code: number = (e as BusinessError).code;
+      if (code === 13900002) {
+        return true; // 已不存在 = 目标已达成
+      }
+      Diag.w(WOTA_RECORD_TAG, `discardQuiet failed: ${path} ${e}`);
       return false;
     }
   }

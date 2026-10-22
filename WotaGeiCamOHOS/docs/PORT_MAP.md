@@ -73,7 +73,7 @@
 | `Recorder.kt`、`CaptureStateMachine.kt`、`RecordProfile.kt`、`VideoStore.kt` | 纯逻辑为主 | 直译（状态机与接口不动，引擎实现注入）。最小契约已落：`record/RecordResult.ets`（RecordError 机器码 + RecordResult 首段字段/summary，VideoSegment/health/parts 留待分段批）、`record/RecordProfile.ets`（纯字段子集 + CODEC_H264/CODEC_HEVC/MIN_KEEP_MS + effectiveBitrate，captureAudio/arcConvert/fpsNtsc 留白）、`record/VideoStore.ets`（VID_yyyyMMdd_HHmmss_###.mp4 命名/MIN_FREE_MB 余量/sizeOf/discard；MediaStore pending 与相册入库留白）。分段轮转每段各自 displayName/文件，段序号只在 parts/segments/日志；系列归组（MediaSeries/SeriesPart）留白。落地 2026-10-21，对齐上游 38d712a。**T26 追加**：`record/CaptureStateMachine.ets` 直译上游授权状态机（16 用例）；`record/CaptureSources.ets` 因 Android usage 白名单无 OHOS 等价物，改以源枚举优先列表承载（差异登记于文件头）；`record/AudioProbe.ets` / `record/CaptureSilence.ets` 落可测算式与判据（消耗方留 T27） | ☑ 部分 |
 | `ArcKeepRule.kt`、`ArcDropLog.kt`、`BitratePolicy.kt`、`AutoStopRules.kt`、`FrameLedger.kt` | 纯逻辑 | **逐行直译**——这些是与上游共享语义的锚点（见 UPSTREAM_SYNC.md），格式/判据/阈值必须与上游逐字段一致。直译完成 2026-10-20，对齐上游 38d712a，落点 `entry/src/main/ets/record/` 同名 .ets；BitratePolicy 的 `resolve(RecordProfile)` 重载待 RecordProfile 移植后补。在线消费已接线（2026-10-21）：ArcKeepRule/ArcRepairFlow 的 C++ 等价物（`cpp/arc_flow.*`）跑在编码支路，ArcDropLog 由 GlRecorder 停录写 sidecar，FrameLedger 合成原生五格+相机 frameStart（分段时逐段成文）；ArcDropLog segments 已随分段写全段清单（drops 只保留最后一段，跨段失真登记）；AutoStopRules/CameraLostWatch 由 `record/AutoStopMonitor.ets` 消费（GPU 主路径：1s 相机/30s 电量存储、一次一发、停止宽限 500ms；AVRecorder 路径留白） | ☑ |
 | `RecordHealth.kt` | 纯逻辑 | `record/RecordHealth.ets`：GPU 三格（trackAdded/muxStarted/firstVideoSample）+ 判定顺序（错误码→三格→视频短窗 1.2s→完整窗 3s→WAIT）、retryActionOf（attempts<maxAttempts）、MIN_OUTPUT_BYTES=64KiB、resolveOutputBytes/streamHealthVerdict（AVRecorder 路纯函数留白）。**GPU 主路径已接（2026-10-21）**：native CodecRecorder 暴露 trackAdded/muxStarted/samples（getGpuHealth），Camera 500ms 巡检、最多自动重录 2 次、仅重开录制段不重开相机。T18 P3×4（T19）：GlRecorder stop 摘要补 samples、空段仅 samples=0 且 bytes=0 丢弃、onPageHide/Show 续跑巡检、GIVE_UP 文案常量生成、native HealthSnapshot 单锁快照。**T22 健康收口（2026-10-22，对齐上游 38d712a）四项关闭**：① 三格真信号——native `formatChanged_`（OnStreamChangedCb 置位，Start/FailStart/Stop 复位）= 上游 MediaCodec format-changed 等价物，getGpuHealth 扩 4 字段 `track,mux,samples,fmt`，Camera checkHealth 容 4 字段（3 字段旧序防御），healthVerdict 的 videoTrackAdded 实参 = `fmt || samples>0`（samples 兜底防回调时序不触），muxer AddTrack 位降为 Diag 诊断字段（三格语义对照表见 Camera.ets 头注释）；② 轮转重启健康窗——上一段已健康停巡检后轮转新段重启巡检（幂等），**healthAttempts 会话级不清零（与上游"每次起录清零"口径差异登记：防轮转循环无限重录）**，隐藏页不重启只置 healthPausedByHide 由 resumeHealthAfterShow 消费；③ 健康重录三残差——restartSegmentAfterHealthFailure 重置 recordStartedAtMs（宽限期口径）、GlRecorder.stop 摘要追加末段账 `lastPath/lastBytes/lastSamples`、健康重录与 GIVE_UP 丢段读末段账（仅末段 samples=0 且 bytes=0 才删，**保留已完成前段**；被丢弃零样本段在首段 sidecar segments 留 count=0 条目，无害登记）；④ 纯逻辑单测落地（test/pure/record-health.test.ets，21 用例，判定顺序五条各被点名，见 §纯逻辑测试）。AVRecorder 健康检查/stream 活性路留白（Index 未接） | ☑ 部分 |
-| `ArcRepairPlan.kt`、`ArcRepairRunner.kt`、`ArcRepairGl.kt`（离线修复） | 平台绑定（计划逻辑纯） | 计划直译；执行走 CPU（ArkTS/NDK）与 GPU（复用 GL 着色器）双路。**在线 ArcRepairFlow 已落（2026-10-21）**：`cpp/arc_flow.h/.cpp` 的 Hold/Fold/Emit/Merge 指令序列 + `cpp/arc_mend_pass.*` 执行。**T28 纯逻辑已落（2026-10-22）**：`record/ArcRepairPlan.ets`（有理数抽帧计划 dstFrameCount/isKept/progressOf/of，29.97 与 25.4 真值位次锚点；不移植旧 Int 外壳）、`record/ArcRepairFlow.ets`（Hold/Fold/Emit/Merge 流式状态机 + 计划路 onSourceFrame + 在线分类路，PTS=keptCount·1e6/dstFps，补上 cpp/arc_flow.h 所引的 ArkTS 锚点）、`record/ArcRepairMerge.ets`（CPU 4:2:0 2×2 块整像素选择，Uint8Array 无符号 Δ、块内最大 Δ、4Y+U+V 整块搬运不造色）、`record/ArcRepairVerdict.ets`（arcRepairOk 三格 + arcRepairKeep 的 stop 门槛）；单测 41 条（plan 15/flow 9/merge 12/verdict 5）。**T29 CPU 执行器核心已落（2026-10-22）**：`cpp/arc_repair.h/.cpp`（单例+worker 状态机、probe：宽高/旋转/容器 fps/时长/音轨数/帧距中位数（≤2M 样本）、同步模式解码 → 紧打包 I420（NV12/NV21/I420 + stride/sliceHeight，未知格式 ARC_CPU_YUV）、ArcRepairFlow 指令执行（cur/pending/acc 三面整像素合并）、同步模式编码（YUVI420 缓冲输入、显式 PTS=j/dstFps）→ 首枚输出后 AddTrack/SetRotation/Start → 逐样本写 muxer、取消/deadline/状态串）、NAPI 四口（probeArcRepairSource/startArcRepair/getArcRepairStatus/cancelArcRepair）、`record/ArcRepairRunner.ets`（fd 生命周期/200ms 轮询/取消宽限+linger/失败 discard/成功 stat/`contract()` 启动日志）、`record/ArcRepairSessionModel.ets`（24 用例：错误码/probe 与状态串解析/速率回退/NO_NEED/去重门限/帧数估算/结果归因/note）。**音频直拷与 Player 面板 T30**（开放按钮前必须先补音频）；**GPU 路线（ArcRepairGl）与真机调优 T31** | ☑ 部分（T29 CPU 执行器核心 / 音频+面板 T30 / GPU T31） |
+| `ArcRepairPlan.kt`、`ArcRepairRunner.kt`、`ArcRepairGl.kt`（离线修复） | 平台绑定（计划逻辑纯） | 计划直译；执行走 CPU（ArkTS/NDK）与 GPU（复用 GL 着色器）双路。**在线 ArcRepairFlow 已落（2026-10-21）**：`cpp/arc_flow.h/.cpp` 的 Hold/Fold/Emit/Merge 指令序列 + `cpp/arc_mend_pass.*` 执行。**T28 纯逻辑已落（2026-10-22）**：`record/ArcRepairPlan.ets`（有理数抽帧计划 dstFrameCount/isKept/progressOf/of，29.97 与 25.4 真值位次锚点；不移植旧 Int 外壳）、`record/ArcRepairFlow.ets`（Hold/Fold/Emit/Merge 流式状态机 + 计划路 onSourceFrame + 在线分类路，PTS=keptCount·1e6/dstFps，补上 cpp/arc_flow.h 所引的 ArkTS 锚点）、`record/ArcRepairMerge.ets`（CPU 4:2:0 2×2 块整像素选择，Uint8Array 无符号 Δ、块内最大 Δ、4Y+U+V 整块搬运不造色）、`record/ArcRepairVerdict.ets`（arcRepairOk 三格 + arcRepairKeep 的 stop 门槛）；单测 41 条（plan 15/flow 9/merge 12/verdict 5）。**T29 CPU 执行器核心已落（2026-10-22）**：`cpp/arc_repair.h/.cpp`（单例+worker 状态机、probe：宽高/旋转/容器 fps/时长/音轨数/帧距中位数（≤2M 样本）、同步模式解码 → 紧打包 I420（NV12/NV21/I420 + stride/sliceHeight，未知格式 ARC_CPU_YUV）、ArcRepairFlow 指令执行（cur/pending/acc 三面整像素合并）、同步模式编码（YUVI420 缓冲输入、显式 PTS=j/dstFps）→ 首枚输出后 AddTrack/SetRotation/Start → 逐样本写 muxer、取消/deadline/状态串）、NAPI 四口（probeArcRepairSource/startArcRepair/getArcRepairStatus/cancelArcRepair）、`record/ArcRepairRunner.ets`（fd 生命周期/200ms 轮询/取消宽限+linger/失败 discard/成功 stat/`contract()` 启动日志）、`record/ArcRepairSessionModel.ets`（24 用例：错误码/probe 与状态串解析/速率回退/NO_NEED/去重门限/帧数估算/结果归因/note）。**T30 音频直拷 + Player 面板已落（2026-10-22）**：运行期保留全部 `audio/` 轨（`audioTrackIndices/audioFormats/audioDstTracks` 并行表），首枚视频输出时在 SetRotation/Start 前逐轨 AddTrack（失败逐轨降级）；视频 EOS 排空后用同一 fd 新建 audio source/demuxer，逐轨 select→SeekToTime(0,PREVIOUS_SYNC)→逐样本读，PTS 按视频首帧归一（视频基准缺失退回本轨首样）、负值丢弃、`MonotonicPts` 逐轨兜底后写 muxer；done 串 `audioSamples` = 全轨成功样本合计；`record/ArcRepairSessionModel.ets` 增 `describeRepairError`/`audioLaneNote`（29 用例）、`ArcRepairRunner.run` 可复用面板 probe 结果；Player 页「修复光弧」面板（probe 拦截 NO_NEED/无视频/失败、目标 24/25、死区 0/12/32、进度/取消/成功跳媒体库、与导出 A/B 互斥、忙碌拦返回）。**GPU 路线（ArcRepairGl）与真机调优 T31** | ☑ 部分（T30 音频+面板 / GPU T31） |
 | `PreMuxVideoBuffer.kt`（起录缓冲）、`SeriesIds.kt`、`PendingName.kt`、`StalePendingSweep.kt`、`RotateGuard.kt`、`RotateFailLog.kt`、`OrientationExport.kt`、`AudioFeeder.kt` | 纯逻辑为主 | 直译。`SeriesIds.ets`、`PendingName.ets` 直译完成 2026-10-20（对齐上游 38d712a，落点 `entry/src/main/ets/record/` 同名 .ets）；其余待后续 | ☑ 部分 |
 
 ## ui — 界面（全部 ArkUI 重写）
@@ -266,7 +266,7 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   ③ 取消终态：native 取消发 `cancelled`（不再 `failed:ARC_CANCELLED`），契约两处一致。
   ④ 零样本归因改 `ARC_NO_VIDEO`（上游同口径，测试钉码）。⑤ probe 时长不可得返回 `ok=false`。
   ⑥ 统一收尾 `parkOrDiscard`（失败/异常同口径，异常路径不再抢关 native 正在写的 fd）。
-  ⑦ 音轨硬闸 `ARC_NO_AUDIO_LANE`（源含音轨即拒绝，T30 补音频后移除）。⑧ 成片命名走
+  ⑦（T30 已由音频直拷取代，硬闸删除）。⑧ 成片命名走
   `ClipExporter.uniqueOutputPath`（防 1/1000 碰撞 TRUNC 覆盖）。⑨ native 卫生：删未赋值
   `outBuffer`、解码 Query 非 TRY_AGAIN/STREAM_CHANGED 即 ARC_DECODER、drain 空转有界（50 拍）
   且每拍查取消/deadline、解码输出尺寸与容器宽高不符即 ARC_CPU_YUV。
@@ -275,7 +275,7 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   （verify-app 3 级链 + 3254B profile；签名块 62480B）。交付快照：unsigned 5506096B /
   `a5094b48…b074b8`、signed 5610286B / `ac289b5c…0e5fc5`（hash/字节均易变，内容级校验只对
   unsigned，signed 走 verify-app；全文见 README「交付」节）。
-- **遗留**：同步模式解码/编码只能在真机验证（见「真机待验」新增 6 项）。
+- **遗留**：同步模式解码/编码只能在真机验证（见「真机待验」T29 节）。
 
 ## T29 native 契约（与 record/ArcRepairSessionModel.ets 逐字段对齐）
 
@@ -285,13 +285,15 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 - **probe 串**：`ok:<w>:<h>:<rotation>:<containerFps>:<durationMs>:<cleanCount>:<medianUs>:<audioCount>:<mime>`
   或 `err:<code>`（ARC_SOURCE / ARC_NO_VIDEO / ARC_PROBE）。
 - **状态串**：`idle` | `running:<pct>` | `done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>`
-  | `failed:<code>` | `cancelled`；本批 audioSamples 恒 0。取消走**独立终态** `cancelled`
-  （不再发 `failed:ARC_CANCELLED`）。
+  | `failed:<code>` | `cancelled`。取消走**独立终态** `cancelled`（不再发 `failed:ARC_CANCELLED`）。
+  **T30 起 `audioSamples` = 全部音轨成功写入 muxer 的样本合计**（无音轨源 0；逐轨降级只计成功
+  lane），串仍 6 段。
 - **CSD 口径**：编码器输出里 `AVCODEC_BUFFER_FLAGS_CODEC_DATA` 的缓冲在 AddTrack 后直接 Free，
   **不写 muxer**（SPS/PPS 已随 AddTrack 的 trackFormat 登记）；`videoSamples` 必须与
   `dstFrames` 相等，done 状态与日志均带偏差值。
-- **音轨硬闸（T29 临时）**：源 `audioCount > 0` 时 ArkTS 侧直接返回 `ARC_NO_AUDIO_LANE`，
-  不启动 native（避免静默丢掉源音频）；T30 补音频直拷后移除。
+- **音频直拷（T30）**：源全部 `audio/` 轨按容器轨序 AddTrack 并逐轨直拷（不做偏移合成，
+  TrackSync 归播放期选轨语义 T27-4）；AddTrack 失败/读失败逐轨降级 + WARN，`audioLaneNote`
+  向用户说明「有音轨但零样本 → 成片无音频」。**原 T29 的音轨硬闸已删除**（T30 起改为真实直拷）。
 - **半成品清理**：失败/取消**先 unlink 成片路径**（native 写已解除链接 inode，安全），fd 等
   native 离开 `running:` 后关闭；linger 耗尽挂 `pendingFds` 并在 reap 时兜底再 discard。
 - **错误码**：ARC_SOURCE / ARC_DECODER / ARC_ENCODER / ARC_MUXER / ARC_CPU_YUV / ARC_CPU_FEED /
@@ -305,7 +307,41 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   （`srcNum <= dstFps * srcDen` / `(s * dstFps * srcDen + srcNum - 1) / srcNum` /
   `j * srcNum / (dstFps * srcDen) == s`）；ArkTS 为已测规格。
 
-## 纯逻辑测试（T22 落地，T23/T24/T25/T26/T28/T29 扩展，2026-10-22）
+## 交付批（T30，2026-10-22）
+
+- **音频直拷（native）**：Run 保留全部音频轨并行表；首枚视频输出后、SetRotation/Start 前逐轨
+  AddTrack（失败逐轨降级）；视频 EOS 排空后同 fd 新建 audio source/demuxer 逐轨直拷（PTS 按视频
+  首帧归一、负值丢弃、逐轨单调兜底、逐样本取消/deadline）；done 串 audioSamples 为全轨合计；
+  per-lane 摘要日志（track/samples/skipped/read error）。
+- **会话模型**：删除 T29 临时音轨硬闸码；新增 `describeRepairError`（全码中文文案 + ENGINE 后缀 +
+  busy/args/worker + 未知码兜底）与 `audioLaneNote`（无音轨/成功/降级三态）；session 26→29。
+- **Runner**：移除音轨硬闸；`run()` 可传 `preProbed` 复用面板探测；结果带 `audioSamples`；
+  contract 与 d.ts 注释同步（状态串 6 段不变、audioSamples 语义升级）。
+- **Player 面板**：底栏「修复光弧」按钮 + 面板（打开即 probe：源实测帧率/计划源帧/音轨数；
+  NO_NEED/无视频/探测失败直接拦；目标 24/25、死区 0/12/32；开始/取消/进度/成功路径+大小+音轨
+  注记/打开媒体库）；忙碌时拦返回；与导出 A/B 互斥（各自忙碌禁用对方入口）。
+- **T29 P3×7**：① `VideoStore.discardQuiet`（ENOENT 13900002 视为已达成、不记 ERROR），
+  reap/park 两处改用；② 排空截尾：`encoderEos` 未到或 `videoSamples != dstFrames` 打 WARN，
+  header 明示 delta 仅诊断、不改变成功判定；③ 解码输出缺 `OH_MD_KEY_PIXEL_FORMAT` 即
+  ARC_CPU_YUV（不再默认猜 I420），stride/sliceHeight 缺失每任务仅 WARN 一次并回落宽高；
+  ④ `run()` 增 `nativeStarted`（start 成功才 park）；⑤ 会话测试头注计数订正；⑥
+  `resolveRepairOutcome` JSDoc 补「无轨或零样本 → ARC_NO_VIDEO」；⑦ 真机节计数措辞订正。
+- **本批不做（已登记）**：TrackSync 偏移合成（播放期选轨语义 T27-4）；GPU 路线与真机调优 T31。
+- **审查修复（P1×1 + P2×1 + P3×5）**：① P1 `probe()` 补赋 `out.dstFrames`（默认 24 档，经
+  `planForTarget`）；面板守卫改为源侧事实 `probed.srcFrames <= 0` + 逐档可行性，默认档不可行时
+  自动落到可行档；新增纯函数 `planForTarget`/`targetFeasible` 与 2 条用例（探测→计划→NO_NEED）。
+  ② P2 成片说明按**实际** dstFps/deadband 在 `run()` 重算（`actualNote`），面板选项切换时
+  `refreshRepairNote` 同步刷新预览；成功 note 与实际参数一致。③ P3 零样本音轨：AddTrack 前
+  预读一枚样本（`hasData`），零样本轨不建轨（避免 muxer Stop 失败连坐）；④ 逐轨成功数进
+  native done 日志（`audio lanes ok=M/N`），`audioLaneNote` 多音轨改为「至少 1 条已直拷」不再
+  宣称全部；⑤ lane 中途读失败记 `readError` 并在摘要 WARN；⑥ `SeekToTime(0)` 失败回退为从头读；
+  ⑦ 面板按目标档分别判 NO_NEED，不可行档按钮禁用并提示。
+- **回归**：pure-test files=21 tests=235 passed=235 failed=0；clean assembleHap 退出 0、WARN=2；
+  local-sign 成功（verify-app 3 级链 + 3254B profile；签名块 60526B）。交付快照：unsigned
+  5665690B / `efb17efd…bdd96b4`、signed 5780314B / `67a588a9…cfbe8f9`（hash/字节均易变，内容级
+  校验只对 unsigned，signed 走 verify-app；全文见 README「交付」节）。
+
+## 纯逻辑测试（T22 落地，T23/T24/T25/T26/T28/T29/T30 扩展，2026-10-22）
 
 自研轻量测试架（不用 hypium/ohosTest，无真机可跑）：
 
@@ -320,7 +356,7 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（230）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（235）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -335,8 +371,9 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   PCM16/24/F32LE/降单声道/多段 append）、arc-repair-plan（15，T28：帧数/抽帧点/进度/整数源
   oracle 扫描/29.97 与 25.4 真值位次）、arc-repair-flow（9，T28：指令序列/PTS/逐帧不变量）、
   arc-repair-merge（12，T28：不造色/死区三分支/块整体性/多块索引/奇数宽高）、
-  arc-repair-verdict（5，T28：三格判据 + keep 四组合）、arc-repair-session（26，T29：parseProbe 3/
-  速率 4/NO_NEED 3/去重 3/帧数 3/状态 4/归因 3/note 1 + 审查修复 2：音轨硬闸码互异/取消终态）。
+  arc-repair-verdict（5，T28：三格判据 + keep 四组合）、arc-repair-session（31，T29：parseProbe 3/
+  速率 4/NO_NEED 3/去重 3/帧数 3/状态 4/归因 3/note 1 + 取消终态 1；T30：describeRepairError 3 +
+  audioLaneNote 1；T30 审查修复：planForTarget 接线 1 + 逐档 NO_NEED 1）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；
@@ -403,8 +440,27 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 6. **取消/超时/失败**：中途取消 → 状态 **`cancelled`** 终态、媒体库无半成品残留（含 linger
    超时路径：取消后立刻 `hdc shell ls files/videos` 确认新成片已消失）；盘满/坏源 → `failed:<code>`、
    fd 全关（`hdc shell ls -l /proc/<pid>/fd` 抽查无泄漏）。
-7. **音轨硬闸**：带音轨的源 → 立即返回 `ARC_NO_AUDIO_LANE`（不启动 native、不产文件）；
-   仅视频源才执行修复。T30 补音频后本项改为「成片含音频轨」。
+7. **音频直拷**：带音轨的源 → 成片含与源同轨序的音频轨（`done` 的 audioSamples > 0）；
+   无音轨源 audioSamples=0 且面板无音轨提示。
+
+### T30 音频直拷 + 面板（8 项，真机首验）
+
+1. **音频存在**：带音轨源修复后成片有声；`done` 串 audioSamples > 0，与 `ffprobe -show_packets`
+   的音频包数一致（±0 逐样本计数）。
+2. **双轨**：双音轨源成片含 2 条音频轨（轨序 0/1 与源一致）；`hdc hilog | grep "audio lane"`
+   两条 per-lane 摘要 samples>0。
+3. **同步**：音频起点与视频首帧对齐（`ffprobe` 首包 PTS 均 ≈0）；早于视频首帧的音频段被丢弃
+   （skipped>0 时 start_time 仍 ≥0），无负 PTS 报警。
+4. **顺序写兼容**：视频整轨后写音频的非交织 MP4 在各播放器（系统相册/第三方）可正常播放且
+   音画同步；若有播放器拒播，T31 改 PTS 轮转写。
+5. **面板取消**：修复中点「取消修复」→ 面板文案「已取消，半成品已删除」、媒体库无新成片；
+   忙碌时按返回被拦。
+6. **无音轨源**：纯视频源修复成功、`audioLaneNote` 不出现、面板不显示音轨数异常；
+   不支持编码的音轨源 → 逐轨降级且 note 明示「成片将无音频」。
+7. **面板可运行性（T30 审查必验）**：任意可修源进入面板后「开始修复」按钮**必须出现**并可点
+   （守卫只看源侧事实）；源 24fps 时 24/25 两档按钮均置灰并给提示、30fps 源两档全亮。
+8. **说明随档位一致**：选 25fps 与死区 32 后开始修复，成功 note 必须写「目标 25fps…死区 D=32」；
+   面板切换档位时预览说明立即刷新（不得残留 24/12）。
 
 ## 交付后路线（T26 修订，2026-10-22）
 
@@ -434,9 +490,9 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   四模块 + 41 用例（159→200）+ T26 P3×3；执行器转 T29。
 - **T29：离线修复 CPU 执行器核心——已关闭（2026-10-22）**：native probe/解码/合并/编码/mux、
   NAPI 四口、ArkTS 门面与会话模型 + 28 用例（200→228）+ T28 P3×4。音频与面板转 T30，GPU 转 T31。
-- **T30：离线修复收口（音频 + Player 面板，真机首验）**——音频直拷（源全部 audio/ 轨按轨序
-  0/1 建 lane，TrackSync 偏移合成）、Player 页「修复光弧」按钮与参数面板（目标帧率 24/25、死区
-  0..32、进度/取消）、成片入库与说明文案；真机首验 6 项（见「真机待验」）。
+- **T30：离线修复音频直拷 + Player 面板——已关闭（2026-10-22）**：全轨 AddTrack/逐轨直拷、
+  会话模型文案、Runner 复用 probe、Player「修复光弧」面板 + T29 P3×7；真机首验 6 项见
+  「真机待验」T30 节。
 - **T31：离线修复 GPU 路线与调优**——`ArcRepairGl`（复用 ARC_MERGE_FS/ArcMend 着色器，
   EGL 离屏 + 编码面两条路）、1080p 性能基准（决定 ArkTS/native 或 GPU）、已知残差（GPU 4:2:0
   色度混色 1~2px）真机像素验证。
@@ -454,4 +510,5 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 5. 光弧工具链（复用着色器与 ArcKeepRule）；
 6. `media` 媒体库 → `player` 播放/剪辑 → 对比播放；
 7. T28 后按「交付后路线」推进：T27 内录平台面四步（T27-1 平台探针 → T27-2 ENV 音轨 →
-   T27-3 CAP 双轨 → T27-4 消费面）与 T29 离线修复执行器 → T30+ 蓝牙/更新检查/HUD 编辑器等长尾。
+   T27-3 CAP 双轨 → T27-4 消费面）与 T30 离线修复收口 → T31 GPU 路线/真机调优与 T32+ 蓝牙/
+   更新检查/HUD 编辑器等长尾。

@@ -1,17 +1,19 @@
 /*
  * 离线光弧修复的 CPU 执行器核心（上游 record/ArcRepairRunner.kt + ArcRepairGl 的
- * CPU 路线子集；对齐上游 38d712a）。本批只做视频，不产音频轨（T30 补音频直拷）。
+ * CPU 路线子集；对齐上游 38d712a）。T30 起含**音频直拷**：源全部 audio/ 轨按轨序 AddTrack，
+ * 视频轨写完后逐轨顺序写样本（不做偏移合成，TrackSync 归播放期选轨语义 T27-4）。
  *
  * 流程：AVSource/AVDemuxer 探测 → 同步模式 AVCodec 解码（buffer 输出，不接 surface）
  * → 转紧打包 I420 → ArcRepairFlow 指令执行（cur/pending/acc 三面整像素合并）
  * → 同步模式 AVCodec 编码（YUVI420 缓冲输入、显式 PTS=j/dstFps）→ 首枚输出后
- * AddTrack/SetRotation/Start → 逐样本写 AVMuxer。
+ * AddTrack(video)/AddTrack(audio…)/SetRotation/Start → 逐样本写 AVMuxer → 音频逐轨直拷。
  *
  * 关键契约（与 ArkTS 侧 record/ArcRepairSessionModel.ets 逐字段对齐）：
  * - probe 串：`ok:<w>:<h>:<rotation>:<containerFps>:<durationMs>:<cleanCount>:<medianUs>:<audioCount>:<mime>`
  *   或 `err:<code>`；
  * - status 串：`idle` | `running:<pct>` | `done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>`
- *   | `failed:<code>` | `cancelled`；本批 audioSamples 恒 0；
+ *   | `failed:<code>` | `cancelled`；audioSamples = 全部音轨成功写入 muxer 的样本合计
+ *   （无音轨源恒 0；逐轨降级时只计成功 lane）；
  * - 错误码：ARC_SOURCE / ARC_DECODER / ARC_ENCODER / ARC_MUXER / ARC_CPU_YUV / ARC_CPU_FEED /
  *   ARC_NO_VIDEO / ARC_CANCELLED / ARC_TIMEOUT / ARC_ENGINE。
  *
@@ -19,7 +21,10 @@
  * - 同步模式（QueryInputBuffer/QueryOutputBuffer）自 API 20（build-profile compatibleSdk=6.0.0(20)）；
  * - fd 全部归 ArkTS：native 绝不 close；失败/取消时 ArkTS 侧删半成品；
  * - 输出像素布局：解码输出按 OH_MD_KEY_VIDEO_STRIDE / OH_MD_KEY_VIDEO_SLICE_HEIGHT 解释，
- *   支持 NV12 / NV21 / YUVI420 三档；其它格式返回 ARC_CPU_YUV（绝不猜布局产出错色）；
+ *   支持 NV12 / NV21 / YUVI420 三档；**OH_MD_KEY_PIXEL_FORMAT 缺失即 ARC_CPU_YUV**
+ *   （绝不默认猜 I420）；stride/sliceHeight 缺失每条任务仅 WARN 一次并回落宽高；
+ * - `videoSamples` 与 `dstFrames` 的偏差（delta）只作诊断日志/真机判据，不改变成功判定
+ *   （成功仍由 arcRepairOk 三格 + mux stop 门槛决定）；
  * - 解码 format 的旋转角被剥离（副本上写 0，容器旋转由 muxer 侧写回原始值），
  *   编码面只吃"已正向"的帧；
  * - C++ 的 DstFrameCount/IsKept 是 ArkTS record/ArcRepairPlan.ets 的整数公式镜像

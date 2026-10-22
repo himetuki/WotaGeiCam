@@ -15,6 +15,9 @@ import { AbRange, clampPan, Pan, PlayerSpeedTiers } from '../player/PlayerModel'
 import { TapArbiter, TapDecision } from '../player/TapArbiter';
 import { ClipExportResult, ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { audioOrdinalOf, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
+import { ArcRepairProbeResult, ArcRepairResult, ArcRepairRunner } from '../record/ArcRepairRunner';
+import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
+import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
 
 interface PlayerParams {
   id: number;
@@ -68,6 +71,23 @@ struct Player {
   @State exportAudioCount: number = 0;
   @State exportTrack: TrackChoice = TrackChoice.NO_AUDIO;
   @State exportProbeBlocked: boolean = false;
+  /** T30「修复光弧」面板（CPU 唯一路线；页面销毁不强杀 worker，见 aboutToDisappear） */
+  @State repairPanelVisible: boolean = false;
+  @State repairBusy: boolean = false;
+  @State repairProbing: boolean = false;
+  @State repairProbeBlocked: boolean = false;
+  @State repairProgress: number = 0;
+  @State repairError: string = '';
+  @State repairNote: string = '';
+  @State repairDonePath: string = '';
+  @State repairDoneSize: number = 0;
+  @State repairDstFps: number = 24;
+  @State repairDeadband: number = 12;
+  /** 探测摘要（打开面板时展示：源实测帧率/计划帧数/音轨数） */
+  @State repairSrcFps: number = 0;
+  @State repairSrcFrames: number = 0;
+  @State repairAudioCount: number = 0;
+  @State repairAudioSamples: number = 0;
 
   private engine: PlayerEngine = new PlayerEngine();
   private xc: XComponentController = new XComponentController();
@@ -77,6 +97,9 @@ struct Player {
   private exportAbA: number = -1;
   private exportAbB: number = -1;
   private exportProbeSeq: number = 0;
+  /** 面板 probe 结果缓存（run 时复用，避免二次全量帧距扫描） */
+  private repairProbed: ArcRepairProbeResult | undefined = undefined;
+  private repairProbeSeq: number = 0;
   private surfaceId: string = '';
   private attachStarted: boolean = false;
   private disposed: boolean = false;
@@ -177,20 +200,32 @@ struct Player {
     if (this.exportBusy) {
       ClipExporter.cancel(); // 页面销毁不得让 native worker 继续持有已关的 fd
     }
+    if (this.repairBusy) {
+      // 只发取消位，不 join worker（native fd 由 Runner 的 linger/park 机制收尾）
+      ArcRepairRunner.cancel();
+    }
     this.stopPageTimer();
     this.cancelTapTimer();
     this.stepQueue = [];
     this.engine.release();
   }
 
-  /** 导出中拦住返回；面板打开时先关面板 */
+  /** 导出/修复中拦住返回；面板打开时先关面板 */
   onBackPress(): boolean {
     if (this.exportBusy) {
       this.hint = '导出中，请先取消';
       return true;
     }
+    if (this.repairBusy) {
+      this.hint = '修复中，请先取消';
+      return true;
+    }
     if (this.exportPanelVisible) {
       this.closeExportPanel();
+      return true;
+    }
+    if (this.repairPanelVisible) {
+      this.closeRepairPanel();
       return true;
     }
     return false;
@@ -609,6 +644,201 @@ struct Player {
     });
   }
 
+  // ---------------------------------------------------------------- T30 修复光弧面板
+
+  private openRepairPanel(): void {
+    const clip: VideoClip | undefined = this.videoClip;
+    const ctx: common.Context | undefined = this.ctx;
+    if (clip === undefined || ctx === undefined) {
+      this.hint = '片源未就绪';
+      return;
+    }
+    if (this.exportBusy) {
+      this.hint = '导出中，稍后再试';
+      return;
+    }
+    if (this.engine.playing) {
+      this.engine.playPause(); // 修复期间保持暂停（CPU 修复会长时间占用 fd）
+    }
+    this.repairPanelVisible = true;
+    this.repairBusy = false;
+    this.repairProbing = true;
+    this.repairProbeBlocked = false;
+    this.repairProgress = 0;
+    this.repairError = '';
+    this.repairNote = '';
+    this.repairDonePath = '';
+    this.repairDoneSize = 0;
+    this.repairSrcFps = 0;
+    this.repairSrcFrames = 0;
+    this.repairAudioCount = 0;
+    this.repairAudioSamples = 0;
+    this.repairProbed = undefined;
+    const probeSeq: number = ++this.repairProbeSeq;
+    ArcRepairRunner.probe(ctx, clip).then((probed: ArcRepairProbeResult): void => {
+      if (this.disposed || probeSeq !== this.repairProbeSeq) {
+        return;
+      }
+      this.repairProbing = false;
+      if (!probed.ok) {
+        this.repairProbeBlocked = true;
+        this.repairError = `探测失败：${ArcRepairSessionModel.describeRepairError(probed.error)}`;
+        return;
+      }
+      this.repairProbed = probed;
+      this.repairSrcFps = probed.srcFps;
+      this.repairSrcFrames = probed.srcFrames;
+      this.repairAudioCount = probed.audioCount;
+      // 守卫只看源侧事实（T30 审查 P1：dstFrames 是「按档计划」的派生值，不能当探测成功判据）
+      if (probed.srcFrames <= 0) {
+        this.repairProbeBlocked = true;
+        this.repairError = ArcRepairSessionModel.describeRepairError('ARC_SOURCE');
+        return;
+      }
+      const rate: MeasuredSrcFps = ArcRateProbe.measuredOf(probed.srcNum, probed.srcDen);
+      if (!ArcRepairSessionModel.targetFeasible(rate, 24) &&
+        !ArcRepairSessionModel.targetFeasible(rate, 25)) {
+        // 两档都无需修复（源不高于 25fps）：整面板拦（不是故障）
+        this.repairProbeBlocked = true;
+        this.repairError = ArcRepairSessionModel.describeRepairError('ARC_NO_NEED');
+        return;
+      }
+      // 默认档不可行时自动落到可行档，避免一进来就踩 NO_NEED
+      if (!ArcRepairSessionModel.targetFeasible(rate, this.repairDstFps)) {
+        this.repairDstFps = ArcRepairSessionModel.targetFeasible(rate, 24) ? 24 : 25;
+      }
+      this.refreshRepairNote();
+    }).catch((e: Object): void => {
+      if (this.disposed || probeSeq !== this.repairProbeSeq) {
+        return;
+      }
+      this.repairProbing = false;
+      this.repairProbeBlocked = true;
+      this.repairError = `探测失败：${e}`;
+    });
+  }
+
+  /** 面板当前目标档/死区对应的估算输出帧数（0 = 源无帧） */
+  private repairDstFrames(): number {
+    const probed: ArcRepairProbeResult | undefined = this.repairProbed;
+    if (probed === undefined || probed.srcFrames <= 0) {
+      return 0;
+    }
+    return ArcRepairSessionModel.planForTarget(probed.srcFrames,
+      ArcRateProbe.measuredOf(probed.srcNum, probed.srcDen), this.repairDstFps).dstFrames;
+  }
+
+  /** 目标档是否可行（源帧率 > 目标）：false 的档按钮禁用 */
+  private repairTargetFeasible(dstFps: number): boolean {
+    const probed: ArcRepairProbeResult | undefined = this.repairProbed;
+    if (probed === undefined) {
+      return true;
+    }
+    return ArcRepairSessionModel.targetFeasible(
+      ArcRateProbe.measuredOf(probed.srcNum, probed.srcDen), dstFps);
+  }
+
+  /** 按**当前所选**目标档/死区刷新预览说明（T30 审查 P2：说明必须随选项变化） */
+  private refreshRepairNote(): void {
+    const probed: ArcRepairProbeResult | undefined = this.repairProbed;
+    if (probed === undefined) {
+      this.repairNote = '';
+      return;
+    }
+    this.repairNote = ArcRepairSessionModel.repairNote(probed.srcFps, probed.srcNum, probed.srcDen,
+      probed.containerFps, this.repairDstFps, this.repairDeadband);
+  }
+
+  /** 切目标档：不可行档拒绝选择并提示 */
+  private pickRepairDstFps(dstFps: number): void {
+    if (!this.repairTargetFeasible(dstFps)) {
+      this.hint = `源 ${this.repairSrcFps}fps 不高于目标 ${dstFps}fps，该档无需修复`;
+      return;
+    }
+    this.repairDstFps = dstFps;
+    this.refreshRepairNote();
+  }
+
+  /** 切死区：预览说明随档刷新 */
+  private pickRepairDeadband(deadband: number): void {
+    this.repairDeadband = deadband;
+    this.refreshRepairNote();
+  }
+
+  private closeRepairPanel(): void {
+    if (this.repairBusy) {
+      return;
+    }
+    this.repairProbeSeq++;
+    this.repairPanelVisible = false;
+    this.repairProbed = undefined;
+  }
+
+  private startRepair(): void {
+    const clip: VideoClip | undefined = this.videoClip;
+    const ctx: common.Context | undefined = this.ctx;
+    const probed: ArcRepairProbeResult | undefined = this.repairProbed;
+    if (this.repairBusy || this.repairProbing || this.repairProbeBlocked || clip === undefined ||
+      ctx === undefined || probed === undefined) {
+      return;
+    }
+    if (this.exportBusy) {
+      this.hint = '导出中，稍后再试';
+      return;
+    }
+    this.repairBusy = true;
+    this.repairProgress = 0;
+    this.repairError = '';
+    this.repairDonePath = '';
+    this.repairDoneSize = 0;
+    this.repairAudioSamples = 0;
+    const dstFps: number = this.repairDstFps;
+    ArcRepairRunner.run(ctx, clip, dstFps, this.repairDeadband, (percent: number): void => {
+      if (!this.disposed) {
+        this.repairProgress = percent;
+      }
+    }, probed).then((result: ArcRepairResult): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.repairBusy = false;
+      if (result.ok) {
+        this.repairDonePath = result.path;
+        this.repairDoneSize = result.bytes;
+        this.repairAudioSamples = result.audioSamples;
+        this.repairNote = result.note;
+      } else {
+        this.repairNote = '';
+        this.repairError = ArcRepairSessionModel.describeRepairError(result.error);
+      }
+    }).catch((e: Object): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.repairBusy = false;
+      this.repairNote = '';
+      this.repairError = `修复失败：${e}`;
+    });
+  }
+
+  private cancelRepair(): void {
+    if (!this.repairBusy) {
+      return;
+    }
+    ArcRepairRunner.cancel();
+    this.repairNote = '正在取消…';
+  }
+
+  private openRepairGallery(): void {
+    if (this.repairBusy) {
+      return;
+    }
+    this.repairPanelVisible = false;
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' }).catch((e: Object): void => {
+      this.hint = `打开媒体库失败: ${e}`;
+    });
+  }
+
   @Builder
   private topBar() {
     Row({ space: 8 }) {
@@ -722,10 +952,17 @@ struct Player {
         if (this.canExportAb()) {
           Button('导出 A/B')
             .fontSize(11)
+            .enabled(!this.repairBusy)
             .onClick((): void => {
               this.openExportPanel();
             })
         }
+        Button('修复光弧')
+          .fontSize(11)
+          .enabled(!this.exportBusy && !this.repairBusy)
+          .onClick((): void => {
+            this.openRepairPanel();
+          })
         Button(`倍速:${this.speed}/${this.actualSpeed}`)
           .fontSize(11)
           .onClick((): void => {
@@ -740,6 +977,181 @@ struct Player {
     }
     .width('100%')
     .padding({ left: 10, right: 10, bottom: 10 })
+  }
+
+  @Builder
+  private repairPanel() {
+    Column({ space: 8 }) {
+      Row({ space: 8 }) {
+        Text('修复光弧')
+          .fontSize(14)
+          .fontColor(Color.White)
+          .layoutWeight(1)
+        Button('关闭')
+          .fontSize(11)
+          .enabled(!this.repairBusy)
+          .onClick((): void => {
+            this.closeRepairPanel();
+          })
+      }
+      .width('100%')
+
+      if (this.repairProbing) {
+        Row({ space: 8 }) {
+          LoadingProgress()
+            .width(22)
+            .height(22)
+          Text('探测源视频…')
+            .fontSize(11)
+            .fontColor('#AAAAAA')
+        }
+        .width('100%')
+      } else if (this.repairProbeBlocked) {
+        Text(this.repairError)
+          .fontSize(11)
+          .fontColor('#FF8A80')
+          .maxLines(3)
+          .width('100%')
+      } else {
+        Text(`源实测≈${this.repairSrcFps}fps · ${this.repairSrcFrames} 源帧 → ` +
+          `目标 ${this.repairDstFps}fps 输出 ${this.repairDstFrames()} 帧 · ` +
+          `音轨 ${this.repairAudioCount} 条`)
+          .fontSize(10)
+          .fontColor('#B0BEC5')
+          .width('100%')
+
+        Text('目标帧率')
+          .fontSize(10)
+          .fontColor('#90A4AE')
+          .width('100%')
+        Row({ space: 6 }) {
+          Button('24fps')
+            .fontSize(11)
+            .backgroundColor(this.repairDstFps === 24 ? '#FF3D71' : '#333333')
+            .enabled(!this.repairBusy && this.repairTargetFeasible(24))
+            .onClick((): void => {
+              this.pickRepairDstFps(24);
+            })
+          Button('25fps')
+            .fontSize(11)
+            .backgroundColor(this.repairDstFps === 25 ? '#FF3D71' : '#333333')
+            .enabled(!this.repairBusy && this.repairTargetFeasible(25))
+            .onClick((): void => {
+              this.pickRepairDstFps(25);
+            })
+        }
+        .width('100%')
+
+        Text('差分死区')
+          .fontSize(10)
+          .fontColor('#90A4AE')
+          .width('100%')
+        Row({ space: 6 }) {
+          Button('0')
+            .fontSize(11)
+            .backgroundColor(this.repairDeadband === 0 ? '#FF3D71' : '#333333')
+            .enabled(!this.repairBusy)
+            .onClick((): void => {
+              this.pickRepairDeadband(0);
+            })
+          Button('12')
+            .fontSize(11)
+            .backgroundColor(this.repairDeadband === 12 ? '#FF3D71' : '#333333')
+            .enabled(!this.repairBusy)
+            .onClick((): void => {
+              this.pickRepairDeadband(12);
+            })
+          Button('32')
+            .fontSize(11)
+            .backgroundColor(this.repairDeadband === 32 ? '#FF3D71' : '#333333')
+            .enabled(!this.repairBusy)
+            .onClick((): void => {
+              this.pickRepairDeadband(32);
+            })
+        }
+        .width('100%')
+
+        if (this.repairBusy) {
+          Progress({ value: this.repairProgress, total: 100, type: ProgressType.Linear })
+            .width('100%')
+          Text(`修复中 ${this.repairProgress}%`)
+            .fontSize(11)
+            .fontColor('#FFCC80')
+            .width('100%')
+          if (this.repairNote !== '') {
+            Text(this.repairNote)
+              .fontSize(10)
+              .fontColor('#90A4AE')
+              .maxLines(2)
+              .width('100%')
+          }
+          Button('取消修复')
+            .fontSize(11)
+            .onClick((): void => {
+              this.cancelRepair();
+            })
+        } else if (this.repairDonePath !== '') {
+          Text('修复完成')
+            .fontSize(12)
+            .fontColor('#81C784')
+            .width('100%')
+          Text(this.repairDonePath)
+            .fontSize(10)
+            .fontColor(Color.White)
+            .maxLines(3)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+          Text(formatSize(this.repairDoneSize))
+            .fontSize(10)
+            .fontColor('#90A4AE')
+            .width('100%')
+          if (this.repairNote !== '') {
+            Text(this.repairNote)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .maxLines(3)
+              .width('100%')
+          }
+          Row({ space: 8 }) {
+            Button('打开媒体库')
+              .fontSize(11)
+              .onClick((): void => {
+                this.openRepairGallery();
+              })
+            Button('完成')
+              .fontSize(11)
+              .onClick((): void => {
+                this.repairPanelVisible = false;
+              })
+          }
+          .width('100%')
+        } else {
+          Button('开始修复')
+            .fontSize(12)
+            .onClick((): void => {
+              this.startRepair();
+            })
+          if (this.repairError !== '') {
+            Text(this.repairError)
+              .fontSize(10)
+              .fontColor('#FF8A80')
+              .maxLines(3)
+              .width('100%')
+          }
+          if (this.repairNote !== '') {
+            Text(this.repairNote)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .maxLines(3)
+              .width('100%')
+          }
+        }
+      }
+    }
+    .width('90%')
+    .padding(14)
+    .backgroundColor('#F0202020')
+    .borderRadius(12)
   }
 
   @Builder
@@ -1040,6 +1452,16 @@ struct Player {
       if (this.exportPanelVisible) {
         Column() {
           this.exportPanel()
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#88000000')
+      }
+
+      if (this.repairPanelVisible) {
+        Column() {
+          this.repairPanel()
         }
         .width('100%')
         .height('100%')

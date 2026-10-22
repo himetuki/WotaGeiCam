@@ -65,7 +65,7 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | `player/TrackSync.kt` | 双音轨偏移合成（内容差 + 首样本容器差）、低置信度归零、失败分类（`player/TrackSync.ets`） |
 | `record/AudioFeeder.kt` | PCM 泵契约：帧宽/读块/整缓冲算式、静音锁存与逐段账（`record/AudioProbe.ets` / `record/CaptureSilence.ets`） |
 | `record/ArcRepairPlan.kt` | 离线修复抽帧计划与流式指令序（有理数保留集/PTS 网格；`record/ArcRepairPlan.ets` / `record/ArcRepairFlow.ets`，C++ 侧 `cpp/arc_flow.*`） |
-| `record/ArcRepairRunner.kt` | 修复成功/可保留判据（三格 + stop 门槛；`record/ArcRepairVerdict.ets`）+ **执行器契约**：NO_NEED 门槛（源实测≤目标）、解码去重门限（半个源帧周期）、失败归因（`ARC_ENGINE:MUX_CLOSE`）、状态串与错误码（`record/ArcRepairSessionModel.ets` / `cpp/arc_repair.*` / `record/ArcRepairRunner.ets`） |
+| `record/ArcRepairRunner.kt` | 修复成功/可保留判据（三格 + stop 门槛；`record/ArcRepairVerdict.ets`）+ **执行器契约**：NO_NEED 门槛（源实测≤目标）、解码去重门限（半个源帧周期）、失败归因（`ARC_ENGINE:MUX_CLOSE`）、状态串与错误码（`record/ArcRepairSessionModel.ets` / `cpp/arc_repair.*` / `record/ArcRepairRunner.ets`）+ **音频直拷 PTS 口径**：以视频首帧为基准归一、负值丢弃、逐轨 `MonotonicPts` 单调兜底、AddTrack 失败逐轨降级（`cpp/arc_repair.cpp` 音频直拷段）+ 零样本轨 AddTrack 前预读剔除（`hasData`） |
 | `record/CodecRecorder.kt` | 内录音轨收尾判据：静音双门槛（2s 收尾/5s 巡检）、fedMsOf、采样率/声道档位（`record/CaptureSilence.ets` / `record/AudioProbe.ets`） |
 | `record/FrameLedger.kt` | 录制帧账输出格式 |
 | `record/BitratePolicy.kt`、`record/AutoStopRules.kt` | 码率策略、3.5 GiB 分段轮转与自停判据 |

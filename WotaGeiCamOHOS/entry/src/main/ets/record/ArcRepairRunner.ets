@@ -36,6 +36,9 @@ interface ArcRepairNativeLib {
 
 const TAG: string = 'WotaArcRepair';
 const POLL_MS: number = 200;
+/** 探测结果里自带计划的默认目标档/死区（面板切换时用 planForTarget 重算） */
+const REPAIR_DEFAULT_DST_FPS: number = 24;
+const REPAIR_DEFAULT_DEADBAND: number = 12;
 /** 取消宽限：先等 native 自己收尾 */
 const CANCEL_GRACE_MS: number = 5000;
 /** 宽限耗尽后的 native 退场等待上限（linger 轮询） */
@@ -71,6 +74,8 @@ export class ArcRepairResult {
   bytes: number = 0;
   error: string = '';
   note: string = '';
+  /** 成功写出 muxer 的音频样本合计（T30 起真实值；仅视频源为 0） */
+  audioSamples: number = 0;
 }
 
 /** 超时挂起的 fd（native 仍在 running: 时不能关） */
@@ -164,14 +169,20 @@ export class ArcRepairRunner {
       }
       out.ok = true;
       out.srcFrames = ArcRepairSessionModel.estimateSrcFrames(out.durationMs, rate);
+      // T30 审查 P1：dstFrames 必须在这里赋值（默认目标档 24）。面板按 24/25 切换时会用
+      // planForTarget 重算，但「探测结果自带一份默认计划」是守卫/日志/无面板调用方的基线。
+      out.dstFrames =
+        ArcRepairSessionModel.planForTarget(out.srcFrames, rate, REPAIR_DEFAULT_DST_FPS).dstFrames;
       const fpsForBitrate: number = out.containerFps > 0 ? out.containerFps : out.srcFps;
       out.bitrate = BitratePolicy.resolve(0, out.width, out.height, fpsForBitrate, false);
       out.noNeed = ArcRepairSessionModel.decideNoNeed(rate, 24) && ArcRepairSessionModel.decideNoNeed(rate, 25);
+      // note 只是**默认档预览**：run() 会用实际 dstFps/deadband 重算覆盖（T30 审查 P2）
       out.note = ArcRepairSessionModel.repairNote(out.srcFps, out.srcNum, out.srcDen,
-        out.containerFps, 24, 12);
+        out.containerFps, REPAIR_DEFAULT_DST_FPS, REPAIR_DEFAULT_DEADBAND);
       Diag.i(TAG, `probe ${out.width}x${out.height} rot=${out.rotation} container=${out.containerFps} ` +
         `src=${out.srcFps}(${out.srcNum}/${out.srcDen}) dur=${out.durationMs} ` +
-        `srcFrames=${out.srcFrames} audio=${out.audioCount} bitrate=${out.bitrate}`);
+        `srcFrames=${out.srcFrames} dstFrames24=${out.dstFrames} audio=${out.audioCount} ` +
+        `bitrate=${out.bitrate}`);
       return out;
     } catch (e) {
       out.ok = false;
@@ -195,38 +206,41 @@ export class ArcRepairRunner {
    * 调用方应先 probe 并处理 noNeed / 音轨硬闸。
    */
   static async run(ctx: common.Context, clip: VideoClip, dstFps: number, deadband: number,
-    onProgress: (percent: number) => void): Promise<ArcRepairResult> {
+    onProgress: (percent: number) => void,
+    preProbed?: ArcRepairProbeResult): Promise<ArcRepairResult> {
     const result: ArcRepairResult = new ArcRepairResult();
     let inFd: number = -1;
     let outFd: number = -1;
     let outPath: string = '';
     let lib: ArcRepairNativeLib | undefined = undefined;
+    /** native worker 已启动（start 成功）—— false 时 fd 可立即关闭，无需等待退场 */
+    let nativeStarted: boolean = false;
     try {
       lib = await ArcRepairRunner.ensureLib();
       ArcRepairRunner.reapPendingFds();
       cancelRequested = false;
-      const probed: ArcRepairProbeResult = await ArcRepairRunner.probe(ctx, clip);
+      // 面板已 probe 过的结果可直接复用（避免二次全量帧距扫描）
+      const probed: ArcRepairProbeResult = preProbed !== undefined
+        ? preProbed : await ArcRepairRunner.probe(ctx, clip);
       if (!probed.ok) {
         result.error = probed.error;
         return result;
       }
-      if (ArcRepairSessionModel.decideNoNeed(ArcRateProbe.measuredOf(probed.srcNum, probed.srcDen),
-        dstFps)) {
+      const rate: MeasuredSrcFps = ArcRateProbe.measuredOf(probed.srcNum, probed.srcDen);
+      if (ArcRepairSessionModel.decideNoNeed(rate, dstFps)) {
         result.error = ArcRepairError.NO_NEED;
-        result.note = probed.note;
+        result.note = ArcRepairSessionModel.repairNote(probed.srcFps, probed.srcNum, probed.srcDen,
+          probed.containerFps, dstFps, deadband);
         return result;
       }
-      // T29 临时硬闸：源含音轨时本批无法产出音频轨（T30 补直拷）——拒绝而不是静默丢音
-      if (probed.audioCount > 0) {
-        result.error = ArcRepairError.NO_AUDIO_LANE;
-        result.note = probed.note;
-        return result;
-      }
-      const plan: ArcRepairPlan = ArcRepairPlan.of(probed.srcFrames, probed.srcNum, probed.srcDen, dstFps);
+      const plan: ArcRepairPlan = ArcRepairSessionModel.planForTarget(probed.srcFrames, rate, dstFps);
       if (plan.dstFrames <= 0) {
         result.error = ArcRepairError.SOURCE;
         return result;
       }
+      // 成片说明按**本次实际**目标档/死区生成（T30 审查 P2）：probed.note 只是探测期 24/12 预览
+      const actualNote: string = ArcRepairSessionModel.repairNote(probed.srcFps, probed.srcNum,
+        probed.srcDen, probed.containerFps, dstFps, deadband);
       const namePrefix: string = ArcRateProbe.convertNamePrefix(probed.srcFps, dstFps);
       // 防覆盖：1/1000 随机后缀可能撞名，存在即换 _N（与 ClipExporter 同一实现）
       outPath = ClipExporter.uniqueOutputPath(ctx,
@@ -239,6 +253,8 @@ export class ArcRepairRunner {
       const startError: string = lib.startArcRepair(inFd, stat.size, outFd, dstFps, probed.bitrate,
         deadband, probed.srcNum, probed.srcDen, probed.srcFrames, plan.dstFrames, probed.rotation,
         probed.durationMs);
+      // start 返回空串才代表 worker 真的在跑：catch/收尾据此决定 park 还是立即 reap
+      nativeStarted = startError === '';
       if (startError !== '') {
         ArcRepairRunner.closeQuietly(outFd);
         outFd = -1;
@@ -313,7 +329,7 @@ export class ArcRepairRunner {
 
       const outcome: ArcRepairOutcome = ArcRepairSessionModel.resolveRepairOutcome(status);
       result.ok = outcome.ok;
-      result.note = probed.note;
+      result.note = actualNote;
       if (outcome.ok) {
         // 成功：fd 先关再 stat（关闭触发落盘收尾）
         ArcRepairRunner.closeQuietly(outFd);
@@ -322,9 +338,16 @@ export class ArcRepairRunner {
         inFd = -1;
         result.path = outPath;
         result.bytes = VideoStore.sizeOf(outPath);
+        result.audioSamples = status.audioSamples;
+        const laneNote: string = ArcRepairSessionModel.audioLaneNote(probed.audioCount,
+          status.audioSamples);
+        if (laneNote !== '') {
+          result.note = result.note === '' ? laneNote : `${result.note}；${laneNote}`;
+        }
         onProgress(100);
         Diag.i(TAG, `repair done ${outPath} bytes=${result.bytes} samples=${status.videoSamples} ` +
-          `dstFrames=${plan.dstFrames} delta=${status.videoSamples - plan.dstFrames}`);
+          `dstFrames=${plan.dstFrames} delta=${status.videoSamples - plan.dstFrames} ` +
+          `audio=${status.audioSamples} lanes=${probed.audioCount}`);
       } else {
         result.error = outcome.error;
         if (nativeSettled) {
@@ -333,7 +356,7 @@ export class ArcRepairRunner {
           ArcRepairRunner.closeQuietly(inFd);
           inFd = -1;
         }
-        ArcRepairRunner.parkOrDiscard(outPath, inFd, outFd, !nativeSettled);
+        ArcRepairRunner.parkOrDiscard(outPath, inFd, outFd, nativeStarted && !nativeSettled);
         inFd = -1;
         outFd = -1;
         Diag.w(TAG, `repair failed ${outcome.error} (status=${status.kind} v=${status.videoSamples})`);
@@ -343,9 +366,8 @@ export class ArcRepairRunner {
       result.ok = false;
       result.error = ArcRepairError.ENGINE;
       Diag.w(TAG, `run failed: ${e}`);
-      // 与收尾同一口径：native 可能仍在写 → 先 unlink 再挂 fd；否则关 fd
-      const nativeMaybeRunning: boolean = inFd >= 0 && outFd >= 0;
-      ArcRepairRunner.parkOrDiscard(outPath, inFd, outFd, nativeMaybeRunning);
+      // 与收尾同一口径：nativeStarted 才可能是"仍在写"；start 之前异常立即关 fd
+      ArcRepairRunner.parkOrDiscard(outPath, inFd, outFd, nativeStarted);
       inFd = -1;
       outFd = -1;
       return result;
@@ -360,7 +382,7 @@ export class ArcRepairRunner {
   private static parkOrDiscard(outPath: string, inFd: number, outFd: number,
     nativeRunning: boolean): void {
     if (outPath !== '') {
-      VideoStore.discard(outPath);
+      VideoStore.discardQuiet(outPath);
     }
     if (nativeRunning && (inFd >= 0 || outFd >= 0)) {
       pendingFds.push(new PendingFd(inFd, outFd, outPath, Date.now()));
@@ -375,7 +397,7 @@ export class ArcRepairRunner {
   static contract(): string {
     return 'probe/start/status/cancel | status=idle|running:pct|' +
       'done:v:a:mux:track:stop|failed:code|cancelled | err=ARC_SOURCE/DECODER/ENCODER/MUXER/' +
-      'CPU_YUV/CPU_FEED/NO_VIDEO/CANCELLED/TIMEOUT/ENGINE/NO_NEED/NO_AUDIO_LANE';
+      'CPU_YUV/CPU_FEED/NO_VIDEO/CANCELLED/TIMEOUT/ENGINE/NO_NEED | a=全轨成功音频样本合计';
   }
 
   /** 回收超时挂起的 fd（native 已离开 running: 才关闭；否则下一轮再试） */
@@ -401,8 +423,8 @@ export class ArcRepairRunner {
       ArcRepairRunner.closeQuietly(pending.inFd);
       ArcRepairRunner.closeQuietly(pending.outFd);
       if (pending.path !== '') {
-        // 兜底：park 时已 unlink；这里再 discard 一次（幂等），防任何遗漏的半成品进媒体库
-        VideoStore.discard(pending.path);
+        // 兜底：park 时已 unlink；这里再 discardQuiet 一次（ENOENT 视为已达成，不记 ERROR）
+        VideoStore.discardQuiet(pending.path);
       }
       Diag.w(TAG, `reaped parked fd after ${Date.now() - pending.parkedAtMs}ms: ${pending.path}`);
     }

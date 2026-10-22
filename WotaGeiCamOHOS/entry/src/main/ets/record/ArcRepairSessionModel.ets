@@ -14,6 +14,7 @@
  * 纯逻辑（不 import 平台 Kit）。
  */
 import { ArcRateProbe, MeasuredSrcFps } from './ArcKeepRule';
+import { ArcRepairPlan } from './ArcRepairPlan';
 import { arcRepairKeep, arcRepairOk } from './ArcRepairVerdict';
 
 /** 错误码（机器码；UI 只做映射，不解析自由文本） */
@@ -32,8 +33,6 @@ export class ArcRepairError {
   static readonly ENGINE: string = 'ARC_ENGINE';
   /** 源实测帧率不高于目标：没有帧可抽（不是故障，UI 给专门提示） */
   static readonly NO_NEED: string = 'ARC_NO_NEED';
-  /** 源含音轨但本批不产音频轨（T30 补音频后移除该闸）：宁可拒绝也不静默丢音 */
-  static readonly NO_AUDIO_LANE: string = 'ARC_NO_AUDIO_LANE';
   /** 串解析失败（native 契约被破坏） */
   static readonly PROBE: string = 'ARC_PROBE';
 }
@@ -160,6 +159,20 @@ export class ArcRepairSessionModel {
   }
 
   /**
+   * 按目标档造抽帧计划（探测→计划→面板守卫的**唯一**入口，T30 审查 P1）。
+   * 探测结果只保存源侧事实（srcFrames/有理数速率）；目标档由面板选择，每次切换都用本函数重算，
+   * 避免「探测只按 24 档算一次、面板换 25 档后仍用旧计划」的接线漏赋值。
+   */
+  static planForTarget(srcFrames: number, rate: MeasuredSrcFps, dstFps: number): ArcRepairPlan {
+    return ArcRepairPlan.of(srcFrames, rate.num, rate.den, dstFps);
+  }
+
+  /** 该目标档是否需要修复（源帧率 > 目标）；false = 此档不可行（面板应禁用并提示） */
+  static targetFeasible(rate: MeasuredSrcFps, dstFps: number): boolean {
+    return !ArcRepairSessionModel.decideNoNeed(rate, dstFps);
+  }
+
+  /**
    * 解码帧去重门限（µs）：半个源帧周期（`500000·den/num` 整数除）。同一 PTS 重复解码（B 帧重排/
    * 容器抖动）间隔小于该门限的帧直接丢弃，不推进 prevPts、不进抽帧状态机。
    */
@@ -215,7 +228,9 @@ export class ArcRepairSessionModel {
    * 结果归因：done 态先走 arcRepairOk（三格）再走 arcRepairKeep（stop 门槛）。
    * - 可保留 → ok=true/keep=true/error=''；
    * - 三格成立但 stop 抛 → `ARC_ENGINE:MUX_CLOSE`（moov 未写，坏容器不得入库）；
-   * - 视频轨没建 → `ARC_NO_VIDEO`；其余三格失败 → `ARC_ENGINE:MUX`。
+   * - **无轨或零样本（trackAdded=false 或 videoSamples<=0）→ `ARC_NO_VIDEO`**（上游同口径：
+   *   「没有可用视频」比「引擎错误」如实；建轨成功但一帧未写也归此类）；
+   * - 其余三格失败 → `ARC_ENGINE`（视频写样通道异常）。
    * failed/cancelled 原样透传错误码。
    */
   static resolveRepairOutcome(status: ArcRepairStatus): ArcRepairOutcome {
@@ -241,6 +256,84 @@ export class ArcRepairSessionModel {
       return new ArcRepairOutcome(false, false, ArcRepairError.NO_VIDEO);
     }
     return new ArcRepairOutcome(false, false, ArcRepairError.ENGINE);
+  }
+
+  /**
+   * 错误码 → 用户文案（面板/日志共用）。覆盖全部 ARC_* 码 + `ENGINE:MUX_CLOSE` / `ENGINE:MUX`
+   * + start 的 busy/args/worker；未知码兜底带原码（绝不吞成空串）。
+   */
+  static describeRepairError(code: string): string {
+    if (code === ArcRepairError.NO_NEED) {
+      return '源帧率不高于目标帧率，无需修复';
+    }
+    if (code === ArcRepairError.SOURCE) {
+      return '读取源视频失败（缺失/损坏/无时长）';
+    }
+    if (code === ArcRepairError.DECODER) {
+      return '视频解码失败';
+    }
+    if (code === ArcRepairError.ENCODER) {
+      return '视频编码失败';
+    }
+    if (code === ArcRepairError.MUXER) {
+      return '封装写盘失败（存储可能已满）';
+    }
+    if (code === ArcRepairError.CPU_YUV) {
+      return '解码输出格式不受支持（无法取得可处理的 YUV）';
+    }
+    if (code === ArcRepairError.CPU_FEED) {
+      return '视频帧写入编码器失败';
+    }
+    if (code === ArcRepairError.NO_VIDEO) {
+      return '源没有可用的视频帧';
+    }
+    if (code === ArcRepairError.CANCELLED) {
+      return '已取消，半成品已删除';
+    }
+    if (code === ArcRepairError.TIMEOUT) {
+      return '修复超时，已中止并清理半成品';
+    }
+    if (code === ArcRepairError.PROBE) {
+      return '探测结果异常（内部契约错误）';
+    }
+    if (code === `${ArcRepairError.ENGINE}:MUX_CLOSE`) {
+      return '成片封装未收尾（moov 未写），已丢弃';
+    }
+    if (code === `${ArcRepairError.ENGINE}:MUX`) {
+      return '视频样本写入封装失败';
+    }
+    if (code === ArcRepairError.ENGINE) {
+      return '修复引擎内部错误';
+    }
+    if (code === 'busy') {
+      return '已有修复任务在进行';
+    }
+    if (code === 'args') {
+      return '修复参数非法';
+    }
+    if (code === 'worker') {
+      return '修复线程启动失败';
+    }
+    return `修复失败（${code}）`;
+  }
+
+  /**
+   * 音轨口径说明（三态）：源无音轨 → 空串（无需提示）；有音轨且写出样本 → 成功注记；
+   * 有音轨但零样本（逐轨降级/不支持的编码）→ 明确告知「成片无音频」。
+   *
+   * 口径（T30 审查 P3）：状态串保持 6 字段不变，**逐轨成功数只在 native done 日志**
+   * （`audio lanes ok=M/N`）；因此多音轨时这里只说「至少 1 条已直拷」，不宣称全部成功。
+   */
+  static audioLaneNote(audioCount: number, audioSamples: number): string {
+    if (audioCount <= 0) {
+      return '';
+    }
+    if (audioSamples > 0) {
+      return audioCount === 1
+        ? `源 1 条音轨已直拷（${audioSamples} 个样本）`
+        : `源 ${audioCount} 条音轨中至少 1 条已直拷（共 ${audioSamples} 个样本；逐轨见日志）`;
+    }
+    return `源 ${audioCount} 条音轨无法直拷（编码不受支持/零样本），成片将无音频`;
   }
 
   /** 用户口径说明（成片说明/日志共用；与上游 note 同义） */

@@ -207,12 +207,28 @@ int32_t FormatFrameRate(OH_AVFormat* format)
     return 0;
 }
 
-std::string MakeStatusDone(int32_t videoSamples, bool muxStarted, bool trackAdded, bool muxStopOk)
+std::string MakeStatusDone(int32_t videoSamples, int64_t audioSamples, bool muxStarted,
+    bool trackAdded, bool muxStopOk)
 {
-    // done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>（本批音频恒 0）
-    return "done:" + std::to_string(videoSamples) + ":0:" + (muxStarted ? "1" : "0") + ":" +
-        (trackAdded ? "1" : "0") + ":" + (muxStopOk ? "1" : "0");
+    // done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>
+    // audioSamples = 全部音轨成功写入 muxer 的样本合计（T30 起真实值；无音轨源恒 0）
+    return "done:" + std::to_string(videoSamples) + ":" + std::to_string(audioSamples) + ":" +
+        (muxStarted ? "1" : "0") + ":" + (trackAdded ? "1" : "0") + ":" +
+        (muxStopOk ? "1" : "0");
 }
+
+/**
+ * 单条音频轨的直拷记账。三条并行表（audioTrackIndices/audioFormats/audioDstTracks）与
+ * audioStats 同下标：源轨下标 / 格式副本 / muxer 轨号（-1 = AddTrack 失败降级）/ 样本账。
+ */
+struct AudioLaneStats {
+    int32_t samples = 0;
+    int32_t skipped = 0;
+    int64_t lastPtsUs = -1;
+    bool readError = false;
+    /** 预读探针：该轨至少有一枚非空样本（false = 零样本轨，不 AddTrack，避免 muxer Stop 失败） */
+    bool hasData = false;
+};
 
 /** 探测结果（内部结构；串化在 Probe） */
 struct ProbeResult {
@@ -228,6 +244,12 @@ struct ProbeResult {
     std::string mime;
     std::string error;
 };
+
+/** 逐轨单调 PTS 兜底（与 clip_exporter 的 MonotonicPts 同式；本 TU 独立定义） */
+int64_t MonotonicPts(int64_t lastUs, int64_t candidateUs)
+{
+    return (lastUs >= 0 && candidateUs <= lastUs) ? lastUs + 1 : candidateUs;
+}
 
 bool HasEosFlag(const OH_AVCodecBufferAttr& attr)
 {
@@ -458,6 +480,11 @@ void ArcRepair::Run(const Job& job)
     bool muxStopOk = false;
     int32_t videoSamples = 0;
     int32_t dstTrack = -1;
+    // 音频直拷表（必须在 fail lambda 之前声明：失败清理要销毁格式副本）
+    std::vector<uint32_t> audioTrackIndices;
+    std::vector<OH_AVFormat*> audioFormats;
+    std::vector<int32_t> audioDstTracks;
+    std::vector<AudioLaneStats> audioStats;
 
     auto fail = [&](const std::string& code) {
         if (encoder != nullptr) {
@@ -486,6 +513,11 @@ void ArcRepair::Run(const Job& job)
             OH_AVSource_Destroy(source);
         }
         OH_AVFormat_Destroy(videoFormat);
+        for (auto& format : audioFormats) {
+            OH_AVFormat_Destroy(format);
+            format = nullptr;
+        }
+        audioFormats.clear();
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "repair failed %{public}s",
             code.c_str());
         // 取消走独立终态（契约/验收单都按 `cancelled` 判；不再发 failed:ARC_CANCELLED）
@@ -531,6 +563,12 @@ void ArcRepair::Run(const Job& job)
         if (type == MEDIA_TYPE_VID && videoTrack < 0) {
             videoTrack = i;
             videoFormat = tf;
+        } else if (type == MEDIA_TYPE_AUD) {
+            // 运行期保留全部音频轨（T30 直拷）：下标与格式副本进并行表，样本由独立 demuxer 读
+            audioTrackIndices.push_back(static_cast<uint32_t>(i));
+            audioFormats.push_back(tf);
+            audioDstTracks.push_back(-1);
+            audioStats.push_back(AudioLaneStats());
         } else {
             OH_AVFormat_Destroy(tf);
         }
@@ -538,6 +576,50 @@ void ArcRepair::Run(const Job& job)
     if (videoTrack < 0 || videoFormat == nullptr) {
         fail("ARC_NO_VIDEO");
         return;
+    }
+    // 零样本音轨预检（T30 审查 P3）：AddTrack 早于直拷，零样本轨会让 muxer Stop 失败并连坐
+    // 整片。这里用临时 source/demuxer 每轨预读一枚样本：无非空样本的轨直接不建轨（降级）。
+    if (!audioTrackIndices.empty()) {
+        OH_AVSource* preSource = OH_AVSource_CreateWithFD(job.inFd, 0, job.inSize);
+        OH_AVDemuxer* preDemuxer = preSource != nullptr
+            ? OH_AVDemuxer_CreateWithSource(preSource) : nullptr;
+        OH_AVBuffer* preBuffer = preDemuxer != nullptr ? OH_AVBuffer_Create(256 * 1024) : nullptr;
+        if (preDemuxer != nullptr && preBuffer != nullptr) {
+            for (size_t ai = 0; ai < audioTrackIndices.size(); ++ai) {
+                if (OH_AVDemuxer_SelectTrackByID(preDemuxer, audioTrackIndices[ai]) != AV_ERR_OK) {
+                    continue;
+                }
+                OH_AVDemuxer_SeekToTime(preDemuxer, 0, SEEK_MODE_PREVIOUS_SYNC);
+                for (int32_t probe = 0; probe < 8; ++probe) {
+                    if (OH_AVDemuxer_ReadSampleBuffer(preDemuxer, audioTrackIndices[ai], preBuffer)
+                        != AV_ERR_OK) {
+                        break;
+                    }
+                    OH_AVCodecBufferAttr probeAttr;
+                    if (OH_AVBuffer_GetBufferAttr(preBuffer, &probeAttr) != AV_ERR_OK ||
+                        probeAttr.size <= 0) {
+                        break;
+                    }
+                    audioStats[ai].hasData = true;
+                    break;
+                }
+                OH_AVDemuxer_UnselectTrackByID(preDemuxer, audioTrackIndices[ai]);
+                if (!audioStats[ai].hasData) {
+                    OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "audio track %{public}u has no data, track skipped", audioTrackIndices[ai]);
+                }
+            }
+        } else {
+            // 预检不可用：保守按「有数据」处理（直拷阶段逐样本失败仍会降级）
+            for (auto& stats : audioStats) {
+                stats.hasData = true;
+            }
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "audio preflight unavailable, assume all lanes have data");
+        }
+        OH_AVBuffer_Destroy(preBuffer);
+        OH_AVDemuxer_Destroy(preDemuxer);
+        OH_AVSource_Destroy(preSource);
     }
     FormatIntOrZero(videoFormat, OH_MD_KEY_WIDTH, width);
     FormatIntOrZero(videoFormat, OH_MD_KEY_HEIGHT, height);
@@ -628,6 +710,8 @@ void ArcRepair::Run(const Job& job)
     int32_t stride = width;
     int32_t sliceHeight = height;
     int32_t pixelFormat = AV_PIXEL_FORMAT_YUVI420;
+    /** stride/sliceHeight 缺失告警：每条任务只打一次（防逐帧刷日志） */
+    bool layoutWarned = false;
     bool encoderEos = false;
 
     auto encodeFrame = [&](const YuvFrame& frame, int64_t ptsUs) -> const char* {
@@ -718,6 +802,24 @@ void ArcRepair::Run(const Job& job)
                         return "ARC_MUXER";
                     }
                     trackAdded = true;
+                    // T30：视频轨之后、SetRotation/Start 之前逐轨 AddTrack 音频（失败逐轨降级，
+                    // 不连坐：该轨 audioDstTracks 保持 -1，直拷阶段跳过）
+                    for (size_t ai = 0; ai < audioFormats.size(); ++ai) {
+                        if (audioFormats[ai] == nullptr || !audioStats[ai].hasData) {
+                            continue; // 零样本/无格式轨不建轨（降级，避免 muxer Stop 失败）
+                        }
+                        int32_t audioDst = -1;
+                        const OH_AVErrCode audioAdd =
+                            OH_AVMuxer_AddTrack(muxer, &audioDst, audioFormats[ai]);
+                        if (audioAdd != AV_ERR_OK) {
+                            audioDstTracks[ai] = -1;
+                            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                                "audio track %{public}u addTrack failed (%{public}d), lane degraded",
+                                audioTrackIndices[ai], static_cast<int32_t>(audioAdd));
+                            continue;
+                        }
+                        audioDstTracks[ai] = audioDst;
+                    }
                     const int32_t safeRotation = WotaNormalizeQuarter(job.rotation);
                     if (OH_AVMuxer_SetRotation(muxer, safeRotation) != AV_ERR_OK) {
                         OH_VideoEncoder_FreeOutputBuffer(encoder, index);
@@ -930,6 +1032,19 @@ void ArcRepair::Run(const Job& job)
             fail("ARC_CPU_YUV");
             return;
         }
+        // 严格像素格式（T29 审查 P3）：缺 OH_MD_KEY_PIXEL_FORMAT 键即失败——绝不默认猜 I420。
+        // stride/sliceHeight 缺失时每条任务只 WARN 一次并回落宽高（部分 ROM 只给宽高）。
+        if (fmtPixel <= 0) {
+            OH_VideoDecoder_FreeOutputBuffer(decoder, outIndex);
+            fail("ARC_CPU_YUV");
+            return;
+        }
+        if (!layoutWarned && (fmtStride <= 0 || fmtSlice <= 0)) {
+            layoutWarned = true;
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "decoder layout keys missing (stride=%{public}d slice=%{public}d), fallback %{public}dx%{public}d",
+                fmtStride, fmtSlice, decodedOutW, decodedOutH);
+        }
         const uint8_t* data = OH_AVBuffer_GetAddr(frameBuf);
         if (!ConvertToI420(data, attr.size, decodedOutW, decodedOutH, stride, sliceHeight,
             pixelFormat, cur)) {
@@ -990,6 +1105,128 @@ void ArcRepair::Run(const Job& job)
         fail(stop);
         return;
     }
+    // 排空截尾诊断（T29 审查 P3）：delta 只用于日志/真机判据，**不改变成功判定**
+    // （成功仍只由 arcRepairOk 三格 + stop 门槛决定）；非零即提示编码器/时钟问题。
+    if (!encoderEos || videoSamples != static_cast<int32_t>(job.dstFrames)) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encoder tail mismatch eos=%{public}d videoSamples=%{public}d dstFrames=%{public}lld "
+            "delta=%{public}d", encoderEos ? 1 : 0, videoSamples,
+            static_cast<long long>(job.dstFrames),
+            videoSamples - static_cast<int32_t>(job.dstFrames));
+    }
+
+    // ---------- 音频直拷（T30）：视频轨写完后逐轨顺序写，不与视频交织
+    // 用同一 fd 新建 source/demuxer（原 demuxer 已读尽视频轨，回 seek 不可靠）。
+    int64_t audioSamples = 0;
+    if (muxStarted && !audioTrackIndices.empty()) {
+        OH_AVSource* audioSource = OH_AVSource_CreateWithFD(job.inFd, 0, job.inSize);
+        OH_AVDemuxer* audioDemuxer = audioSource != nullptr
+            ? OH_AVDemuxer_CreateWithSource(audioSource) : nullptr;
+        OH_AVBuffer* audioBuffer = audioDemuxer != nullptr ? OH_AVBuffer_Create(1024 * 1024) : nullptr;
+        if (audioSource == nullptr || audioDemuxer == nullptr || audioBuffer == nullptr) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "audio copy skipped: source/demuxer/buffer unavailable");
+        } else {
+            for (size_t ai = 0; ai < audioTrackIndices.size(); ++ai) {
+                if (audioDstTracks[ai] < 0) {
+                    continue; // AddTrack 阶段已降级
+                }
+                const uint32_t laneTrack = audioTrackIndices[ai];
+                const int32_t laneDst = audioDstTracks[ai];
+                AudioLaneStats& lane = audioStats[ai];
+                if (const char* stop = cancelledOrTimedOut()) {
+                    OH_AVBuffer_Destroy(audioBuffer);
+                    OH_AVDemuxer_Destroy(audioDemuxer);
+                    OH_AVSource_Destroy(audioSource);
+                    fail(stop);
+                    return;
+                }
+                // 每轨独立 select；SeekToTime(0) 失败不判死——新建 demuxer 本来就在 0，
+                // 回退为直接从头读（T30 审查 P3）
+                if (OH_AVDemuxer_SelectTrackByID(audioDemuxer, laneTrack) != AV_ERR_OK) {
+                    OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "audio lane %{public}u select failed, degraded", laneTrack);
+                    continue;
+                }
+                if (OH_AVDemuxer_SeekToTime(audioDemuxer, 0, SEEK_MODE_PREVIOUS_SYNC) != AV_ERR_OK) {
+                    OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "audio lane %{public}u seek(0) failed, read from current position", laneTrack);
+                }
+                int64_t laneBaseUs = -1;
+                for (;;) {
+                    if (const char* stop = cancelledOrTimedOut()) {
+                        OH_AVBuffer_Destroy(audioBuffer);
+                        OH_AVDemuxer_Destroy(audioDemuxer);
+                        OH_AVSource_Destroy(audioSource);
+                        fail(stop);
+                        return;
+                    }
+                    const OH_AVErrCode readRet = OH_AVDemuxer_ReadSampleBuffer(audioDemuxer,
+                        laneTrack, audioBuffer);
+                    if (readRet != AV_ERR_OK) {
+                        // AV_ERR_UNKNOWN = 正常 EOF；其它错误记 readError（摘要 WARN 标注）
+                        if (readRet != AV_ERR_UNKNOWN) {
+                            lane.readError = true;
+                        }
+                        break;
+                    }
+                    OH_AVCodecBufferAttr attr;
+                    if (OH_AVBuffer_GetBufferAttr(audioBuffer, &attr) != AV_ERR_OK) {
+                        lane.readError = true;
+                        break;
+                    }
+                    if (attr.size <= 0) {
+                        break;
+                    }
+                    // PTS 归一：以视频首帧为基准（与视频 PTS 同轴）；视频基准缺失时退回本轨首样本
+                    if (laneBaseUs < 0) {
+                        laneBaseUs = attr.pts;
+                    }
+                    const int64_t base = ptsBase >= 0 ? ptsBase : laneBaseUs;
+                    int64_t norm = attr.pts - base;
+                    if (norm < 0) {
+                        lane.skipped++; // 早于视频首帧的音频段丢弃（上游同口径）
+                        continue;
+                    }
+                    norm = MonotonicPts(lane.lastPtsUs, norm);
+                    lane.lastPtsUs = norm;
+                    attr.pts = norm;
+                    attr.flags &= ~static_cast<uint32_t>(AVCODEC_BUFFER_FLAGS_EOS);
+                    OH_AVBuffer_SetBufferAttr(audioBuffer, &attr);
+                    if (OH_AVMuxer_WriteSampleBuffer(muxer, static_cast<uint32_t>(laneDst),
+                        audioBuffer) != AV_ERR_OK) {
+                        lane.skipped++;
+                        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                            "audio lane %{public}u write failed, sample skipped", laneTrack);
+                        continue;
+                    }
+                    lane.samples++;
+                    audioSamples++;
+                }
+                OH_AVDemuxer_UnselectTrackByID(audioDemuxer, laneTrack);
+                OH_LOG_Print(LOG_APP, lane.samples > 0 ? LOG_INFO : LOG_WARN, WOTA_LOG_DOMAIN,
+                    WOTA_LOG_TAG, "audio lane %{public}u done track=%{public}d samples=%{public}d "
+                    "skipped=%{public}d%s", laneTrack, laneDst, lane.samples,
+                    lane.skipped, lane.readError ? " (read error)" : "");
+            }
+            OH_AVBuffer_Destroy(audioBuffer);
+            OH_AVDemuxer_Destroy(audioDemuxer);
+            OH_AVSource_Destroy(audioSource);
+            int32_t lanesOk = 0;
+            for (const auto& stats : audioStats) {
+                if (stats.samples > 0) {
+                    lanesOk++;
+                }
+            }
+            OH_LOG_Print(LOG_APP, lanesOk > 0 ? LOG_INFO : LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "audio lanes ok=%{public}d/%{public}zu samples=%{public}lld",
+                lanesOk, audioStats.size(), static_cast<long long>(audioSamples));
+        }
+    }
+    if (const char* stop = cancelledOrTimedOut()) {
+        fail(stop);
+        return;
+    }
 
     // ---------- 收尾：Stop 结果进状态串（arcRepairKeep 的 stop 门槛）
     OH_VideoEncoder_Stop(encoder);
@@ -1010,11 +1247,19 @@ void ArcRepair::Run(const Job& job)
     OH_AVFormat_Destroy(videoFormat);
     videoFormat = nullptr;
 
+    for (auto& format : audioFormats) {
+        OH_AVFormat_Destroy(format);
+        format = nullptr;
+    }
+    audioFormats.clear();
     progress_.store(100);
-    const std::string done = MakeStatusDone(videoSamples, muxStarted, trackAdded, muxStopOk);
+    const std::string done = MakeStatusDone(videoSamples, audioSamples, muxStarted,
+        trackAdded, muxStopOk);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "repair done %{public}s srcFrames=%{public}lld dstFrames=%{public}lld delta=%{public}d",
-        done.c_str(), static_cast<long long>(job.srcFrames), static_cast<long long>(job.dstFrames),
-        videoSamples - static_cast<int32_t>(job.dstFrames));
+        "repair done %{public}s srcFrames=%{public}lld dstFrames=%{public}lld delta=%{public}d "
+        "audio=%{public}lld lanes=%{public}zu", done.c_str(),
+        static_cast<long long>(job.srcFrames), static_cast<long long>(job.dstFrames),
+        videoSamples - static_cast<int32_t>(job.dstFrames),
+        static_cast<long long>(audioSamples), audioTrackIndices.size());
     Finish(State::DONE, done);
 }

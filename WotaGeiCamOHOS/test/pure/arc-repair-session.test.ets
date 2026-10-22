@@ -2,11 +2,14 @@
  * 离线修复会话模型（record/ArcRepairSessionModel.ets）单测——对拍上游
  * record/ArcRepairRunner.kt 的常量区/判定区（对齐上游 38d712a）。
  *
- * 24 条：parseProbe 3（正常/err/坏字段数）、速率 4（样本不足回退/30/25/29.97）、NO_NEED 3、
- * 去重门限 3、帧数估算 3、状态解析 4、结果归因 3、note 字面量 1。期望值一律手写字面量。
+ * 31 条：parseProbe 3（正常/err/坏字段数）、速率 4（样本不足回退/30/25/29.97）、NO_NEED 3、
+ * 去重门限 3、帧数估算 3、状态解析 4、结果归因 3、note 字面量 1、取消终态 1（T29 审查修复）、
+ * T30 新增 4（describeRepairError 3 + audioLaneNote 1）、T30 审查修复 2（planForTarget 接线 /
+ * 逐档 NO_NEED）；原音轨硬闸用例随硬闸删除。期望值一律手写字面量。
  * 零平台依赖（不 import @ohos/@kit）。
  */
-import { ArcRateProbe } from '../../entry/src/main/ets/record/ArcKeepRule';
+import { ArcRateProbe, MeasuredSrcFps } from '../../entry/src/main/ets/record/ArcKeepRule';
+import { ArcRepairPlan } from '../../entry/src/main/ets/record/ArcRepairPlan';
 import {
   ArcProbeInfo, ArcRepairError, ArcRepairOutcome, ArcRepairSessionModel, ArcRepairStatus
 } from '../../entry/src/main/ets/record/ArcRepairSessionModel';
@@ -204,19 +207,6 @@ test('note字面量 用户口径说明', (): void => {
   ArcRepairSessionModel.repairNote(30, 30, 1, 30, 24, 12), 'note 逐字');
 });
 
-test('音轨硬闸码字面量 与既有错误码互异', (): void => {
-  // T29 临时硬闸：源含音轨时拒绝执行（T30 补音频后移除）；码值必须自成一类
-  assertEq('ARC_NO_AUDIO_LANE', ArcRepairError.NO_AUDIO_LANE, '硬闸码');
-  const codes: Array<string> = [ArcRepairError.SOURCE, ArcRepairError.DECODER,
-    ArcRepairError.ENCODER, ArcRepairError.MUXER, ArcRepairError.CPU_YUV,
-    ArcRepairError.CPU_FEED, ArcRepairError.NO_VIDEO, ArcRepairError.CANCELLED,
-    ArcRepairError.TIMEOUT, ArcRepairError.ENGINE, ArcRepairError.NO_NEED,
-    ArcRepairError.PROBE];
-  for (const c of codes) {
-    assertTrue(c !== ArcRepairError.NO_AUDIO_LANE, `硬闸码不得与 ${c} 重名`);
-  }
-});
-
 test('取消状态串 解析为 cancelled 终态', (): void => {
   // native 取消收尾改为 cancelled 终态（不再 failed:ARC_CANCELLED），契约两处一致
   const cancelled: ArcRepairStatus = ArcRepairSessionModel.parseRepairStatus('cancelled');
@@ -224,4 +214,88 @@ test('取消状态串 解析为 cancelled 终态', (): void => {
   const outcome: ArcRepairOutcome = ArcRepairSessionModel.resolveRepairOutcome(cancelled);
   assertFalse(outcome.ok, '取消不算成功');
   assertEq(ArcRepairError.CANCELLED, outcome.error, '归因取消码');
+});
+
+test('describeRepairError 全码中文文案', (): void => {
+  // 覆盖全部 ARC_* 码 + 两种 ENGINE 后缀 + start 的三种早退码，逐条手写期望
+  assertEq('源帧率不高于目标帧率，无需修复',
+    ArcRepairSessionModel.describeRepairError('ARC_NO_NEED'), 'NO_NEED');
+  assertEq('读取源视频失败（缺失/损坏/无时长）',
+    ArcRepairSessionModel.describeRepairError('ARC_SOURCE'), 'SOURCE');
+  assertEq('视频解码失败', ArcRepairSessionModel.describeRepairError('ARC_DECODER'), 'DECODER');
+  assertEq('视频编码失败', ArcRepairSessionModel.describeRepairError('ARC_ENCODER'), 'ENCODER');
+  assertEq('封装写盘失败（存储可能已满）',
+    ArcRepairSessionModel.describeRepairError('ARC_MUXER'), 'MUXER');
+  assertEq('解码输出格式不受支持（无法取得可处理的 YUV）',
+    ArcRepairSessionModel.describeRepairError('ARC_CPU_YUV'), 'CPU_YUV');
+  assertEq('视频帧写入编码器失败',
+    ArcRepairSessionModel.describeRepairError('ARC_CPU_FEED'), 'CPU_FEED');
+  assertEq('源没有可用的视频帧',
+    ArcRepairSessionModel.describeRepairError('ARC_NO_VIDEO'), 'NO_VIDEO');
+  assertEq('已取消，半成品已删除',
+    ArcRepairSessionModel.describeRepairError('ARC_CANCELLED'), 'CANCELLED');
+  assertEq('修复超时，已中止并清理半成品',
+    ArcRepairSessionModel.describeRepairError('ARC_TIMEOUT'), 'TIMEOUT');
+  assertEq('探测结果异常（内部契约错误）',
+    ArcRepairSessionModel.describeRepairError('ARC_PROBE'), 'PROBE');
+  assertEq('修复引擎内部错误',
+    ArcRepairSessionModel.describeRepairError('ARC_ENGINE'), 'ENGINE');
+});
+
+test('describeRepairError ENGINE后缀与start早退码', (): void => {
+  assertEq('成片封装未收尾（moov 未写），已丢弃',
+    ArcRepairSessionModel.describeRepairError('ARC_ENGINE:MUX_CLOSE'), 'MUX_CLOSE');
+  assertEq('视频样本写入封装失败',
+    ArcRepairSessionModel.describeRepairError('ARC_ENGINE:MUX'), 'MUX');
+  assertEq('已有修复任务在进行', ArcRepairSessionModel.describeRepairError('busy'), 'busy');
+  assertEq('修复参数非法', ArcRepairSessionModel.describeRepairError('args'), 'args');
+  assertEq('修复线程启动失败', ArcRepairSessionModel.describeRepairError('worker'), 'worker');
+});
+
+test('describeRepairError 未知码兜底带原码', (): void => {
+  assertEq('修复失败（ARC_SOMETHING_NEW）',
+    ArcRepairSessionModel.describeRepairError('ARC_SOMETHING_NEW'), '未知码原样入文案');
+  assertEq('修复失败（）', ArcRepairSessionModel.describeRepairError(''), '空码也带括号');
+});
+
+test('audioLaneNote 有音轨且写出/有音轨零样本/无音轨 三态', (): void => {
+  // 多音轨不宣称全部成功（逐轨成功数只在 native done 日志）
+  assertEq('源 2 条音轨中至少 1 条已直拷（共 1200 个样本；逐轨见日志）',
+    ArcRepairSessionModel.audioLaneNote(2, 1200), '多音轨有写出');
+  assertEq('源 1 条音轨已直拷（900 个样本）',
+    ArcRepairSessionModel.audioLaneNote(1, 900), '单音轨有写出（可精确表述）');
+  assertEq('源 1 条音轨无法直拷（编码不受支持/零样本），成片将无音频',
+    ArcRepairSessionModel.audioLaneNote(1, 0), '有音轨但零样本（降级）');
+  assertEq('', ArcRepairSessionModel.audioLaneNote(0, 0), '无音轨不提示');
+  assertEq('', ArcRepairSessionModel.audioLaneNote(-1, 0), '非法音轨数按无音轨');
+});
+
+test('planForTarget 探测到计划接线 24档出36帧且可行', (): void => {
+  // T30 审查 P1 的行为锚：探测只存源侧事实，计划由目标档重算——45 帧 30fps 源 → 24 档 36 帧
+  const rate: MeasuredSrcFps = ArcRateProbe.measuredOf(30, 1);
+  const plan24: ArcRepairPlan = ArcRepairSessionModel.planForTarget(45, rate, 24);
+  assertEq(36, plan24.dstFrames, '24 档计划帧数');
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate, 24), '24 档可行');
+  // 25 档：⌈45·25/30⌉ = 38
+  assertEq(38, ArcRepairSessionModel.planForTarget(45, rate, 25).dstFrames, '25 档计划帧数');
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate, 25), '25 档可行');
+});
+
+test('planForTarget 逐档 NO_NEED 与不可行档', (): void => {
+  // 24fps 源：24 档无需修复（不可行）、25 档也无需修复 → 面板整面板拦
+  const rate24: MeasuredSrcFps = ArcRateProbe.measuredOf(24, 1);
+  assertFalse(ArcRepairSessionModel.targetFeasible(rate24, 24), '24 源对 24 档不可行');
+  assertFalse(ArcRepairSessionModel.targetFeasible(rate24, 25), '24 源对 25 档不可行');
+  // 25.4fps 源：两档都可行（25.4 > 25，整数视图 25 会误判 NO_NEED）
+  const rate254: MeasuredSrcFps = ArcRateProbe.measuredOf(254, 10);
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate254, 24), '25.4 对 24 可行');
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate254, 25), '25.4 对 25 可行（有理数判据）');
+  // 恰 25fps 源对 25 档：无需修复（该档按钮必须禁用，否则一点即 NO_NEED）
+  const rate25: MeasuredSrcFps = ArcRateProbe.measuredOf(25, 1);
+  assertFalse(ArcRepairSessionModel.targetFeasible(rate25, 25), '25 源对 25 档不可行');
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate25, 24), '25 源对 24 档可行');
+  // 30fps 源两档都可行
+  const rate30: MeasuredSrcFps = ArcRateProbe.measuredOf(30, 1);
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate30, 24), '30 对 24 可行');
+  assertTrue(ArcRepairSessionModel.targetFeasible(rate30, 25), '30 对 25 可行');
 });

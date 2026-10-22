@@ -69,7 +69,8 @@ export const probeClipTracks: (inFd: number, inSize: number) => string;
  *   srcFrames/dstFrames 由 ArkTS 纯逻辑算好传入；rotation 为源容器旋转（native 侧归一后写 muxer）。
  * getArcRepairStatus：
  *   `idle` | `running:<pct>` | `done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>`
- *   | `failed:<code>` | `cancelled`。本批 audioSamples 恒 0（音频 T30）。
+ *   | `failed:<code>` | `cancelled`。T30 起 audioSamples = 全部音轨成功写入 muxer 的样本合计
+ *   （无音轨源为 0；逐轨降级时只计成功 lane；串仍是 6 段）。
  * cancelArcRepair：置取消位（worker 在下一个样本边界收尾）。
  */
 export const probeArcRepairSource: (inFd: number, inSize: number) => string;

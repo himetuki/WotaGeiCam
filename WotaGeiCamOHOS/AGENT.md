@@ -39,7 +39,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 
 - `sync-upstream.sh` — 一条命令同步上游 main 到 harmony（只读上游镜像，改动只落 `WotaGeiCamOHOS/`）。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 230 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 235 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -53,7 +53,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `codec_recorder.*` — GPU 录制（OH_VideoEncoder surface + AVMuxer）
 - `clip_exporter.*` — A/B 无损 remux（AVSource/AVDemuxer → AVMuxer）
 - `arc_flow.*` / `arc_mend_pass.*` — 光弧在线判定与补弧离屏
-- `arc_repair.*` — 离线修复 CPU 执行器（同步解码/合并/编码/mux；T29）
+- `arc_repair.*` — 离线修复 CPU 执行器（同步解码/合并/编码/mux + 音频直拷；T29/T30）
 - `shaders.h` / `wota_math.h` — 着色器源码与共享角度归一
 - `CMakeLists.txt` — 产物 `libentry.so`；链接 `libnative_media_{vdec,venc,avmuxer,avsource,avdemuxer,codecbase,core}`
 
@@ -65,7 +65,9 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `record/`：`CaptureStateMachine`（内录授权态机）、`CaptureSilence`（静音判据+按场节流）、
   `AudioProbe`（采集算式/档位体检）、`CaptureSources`（OH_AudioCaptureSourceType 契约）、
   `ArcRepairPlan`/`ArcRepairFlow`/`ArcRepairMerge`/`ArcRepairVerdict`（离线光弧修复纯逻辑）、
-  `ArcRepairSessionModel`（native 串解析/速率/NO_NEED/去重/归因）、`ArcRepairRunner`（执行器门面：
-  fd/轮询/取消宽限/失败 discard，T30 接音频与页面）。
+  `ArcRepairSessionModel`（native 串解析/速率/NO_NEED/去重/归因/错误文案/音轨注记）、
+  `ArcRepairRunner`（执行器门面：fd/轮询/取消宽限/失败 discard/可复用面板 probe 结果）。
+- `pages/Player.ets`：「修复光弧」面板（T30）——probe 拦截、24/25 与死区 0/12/32、进度/取消、
+  成功跳媒体库、忙碌拦返回、与导出 A/B 互斥。
 - 以上模块**不得 import `@ohos.*`/`@kit.*`**；新增纯逻辑模块须进 `PureLogicBarrel`，否则 hvigor
   不可达、编译门失效。`test/pure/*.test.ets` 由 `scripts/pure-test.mjs` 转译执行。
