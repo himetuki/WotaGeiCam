@@ -1,12 +1,12 @@
-# 打包四件套（产物名带版本号）：WotaGeiCam-v0.0.4-release.apk /
-# WotaGeiCam-v0.0.4-universal-release.apk / WotaGeiCam-v0.0.4-arm64-v8a-release.apk /
-# WotaGeiCam-v0.0.4-armeabi-v7a-release.apk（版本号取自 versionName，随版本走）
+# 打包安卓四件套（monorepo 版，Gradle 根在 Android/WotaGeiCamApp/）
+# 产物：android-v<版本>[-r<NN>]-release.apk / -universal-release.apk /
+#       -arm64-v8a-release.apk / -armeabi-v7a-release.apk（版本号取自 versionName）
 # r 号：tag 格式 v<版本>-r<检查点>（如 v0.0.7-r08）时，r 段经 -Prbuild 传给 Gradle，
-#   产物名与设置页"版本"显示携带 r 号（如 WotaGeiCam-v0.0.7-r08-release.apk）；
-#   tag 无 -r 后缀或不填 dispatch input → 不传该属性，保持旧行为（向后兼容）。
-# 触发：推送 v* 标签；也可在 Actions 页手动触发（可选输入 rbuild）。
-# 签名：keystore 与密码不进 git（见 .gitignore），启动时从 Actions Secrets 还原——
-#   WOTA_KEYSTORE_BASE64 = keystore/wotageicam-release.jks 的 base64（单行）
+#   产物名与设置页"版本"显示携带 r 号；无 -r 后缀或不填 dispatch input 则不传。
+# 触发：推送 v* 标签（与 build-hap.yml 共用同一个 tag，两条流水线并行，资产进同一个 Release）；
+#   也可在 Actions 页手动触发（可选输入 rbuild）。
+# 签名：keystore 与密码不进 git，启动时从 Actions Secrets 还原——
+#   WOTA_KEYSTORE_BASE64 = 发布 keystore 的 base64（单行）
 #   WOTA_KEYSTORE_PROPS  = keystore.properties 的完整文本
 name: Build Release APKs
 
@@ -50,19 +50,19 @@ jobs:
           WOTA_KEYSTORE_BASE64: ${{ secrets.WOTA_KEYSTORE_BASE64 }}
           WOTA_KEYSTORE_PROPS: ${{ secrets.WOTA_KEYSTORE_PROPS }}
         run: |
-          mkdir -p WotaGeiCamApp/keystore
-          printf '%s' "$WOTA_KEYSTORE_BASE64" | base64 -d > WotaGeiCamApp/keystore/wotageicam-release.jks
-          printf '%s\n' "$WOTA_KEYSTORE_PROPS" > WotaGeiCamApp/keystore.properties
+          mkdir -p Android/WotaGeiCamApp/keystore
+          printf '%s' "$WOTA_KEYSTORE_BASE64" | base64 -d > Android/WotaGeiCamApp/keystore/wotageicam-release.jks
+          printf '%s\n' "$WOTA_KEYSTORE_PROPS" > Android/WotaGeiCamApp/keystore.properties
 
-      # gradle.properties 里的 org.gradle.java.home 是本机 JDK 绝对路径，CI 上不存在，删掉后用 setup-java 的 JAVA_HOME；
-      # gradlew 在库里是 100644（Windows 不保存可执行位），Linux 上必须补 chmod。
+      # gradle.properties 里的 org.gradle.java.home 是本机 JDK 绝对路径，CI 上不存在，删掉后用
+      # setup-java 的 JAVA_HOME；gradlew 在库里是 100644，Linux 上必须补 chmod。
       - name: Strip machine-specific gradle.properties and chmod gradlew
         run: |
-          sed -i '/^org.gradle.java.home/d' WotaGeiCamApp/gradle.properties
-          chmod +x WotaGeiCamApp/gradlew
+          sed -i '/^org.gradle.java.home/d' Android/WotaGeiCamApp/gradle.properties
+          chmod +x Android/WotaGeiCamApp/gradlew
 
-      # r 段提取：tag v0.0.7-r08 → EXTRA_PROPS="-Prbuild=08"；tag 无 -r 后缀 → 不传（旧行为）；
-      # 手动触发用 input rbuild。EXTRA_PROPS 为空串时两遍构建命令里展开为无。
+      # r 段提取：tag v0.0.7-r08 → EXTRA_PROPS="-Prbuild=08"；无 -r 后缀 → 不传；
+      # 手动触发用 input rbuild。
       - name: Derive -Prbuild from tag r-segment or dispatch input
         env:
           RBUILD_INPUT: ${{ inputs.rbuild }}
@@ -80,24 +80,24 @@ jobs:
           else
             echo "EXTRA_PROPS=" >> "$GITHUB_ENV"
           fi
-          echo "EXTRA_PROPS='$EXTRA_PROPS'"
 
       # 第一遍：ABI 分包（universal + arm64-v8a + armeabi-v7a 三枚）
       # 注意：两遍配置不同（分包开/关），后一遍会把前一遍的产物从 outputs 里清掉，
       # 所以每遍跑完立刻拷进 apk-out 暂存，最后统一校验。
+      # apkBaseName=android：产物名 android-v<版本>-*.apk，与鸿蒙的 ohos-* 资产区分。
       - name: Build split APKs (universal / arm64-v8a / armeabi-v7a)
-        working-directory: WotaGeiCamApp
+        working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
-          mkdir -p ../apk-out
-          cp app/build/outputs/apk/release/*.apk ../apk-out/
+          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=android $EXTRA_PROPS --stacktrace
+          mkdir -p ../../apk-out
+          cp app/build/outputs/apk/release/*.apk ../../apk-out/
 
       # 第二遍：不分包的普通 release（复用编译缓存，只重新打包，很快）
       - name: Build plain release APK
-        working-directory: WotaGeiCamApp
+        working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
-          cp app/build/outputs/apk/release/*.apk ../apk-out/
+          ./gradlew :app:assembleRelease -PapkBaseName=android $EXTRA_PROPS --stacktrace
+          cp app/build/outputs/apk/release/*.apk ../../apk-out/
 
       - name: Verify four APKs staged
         run: |
@@ -111,18 +111,22 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: WotaGeiCam-${{ github.ref_name }}-apks
+          name: android-${{ github.ref_name }}-apks
           path: |
             apk-out/*.apk
-            WotaGeiCamApp/app/build/outputs/mapping/release/mapping.txt
+            Android/WotaGeiCamApp/app/build/outputs/mapping/release/mapping.txt
           if-no-files-found: error
 
-      - name: Create GitHub Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/')
+      # 与 build-hap.yml 共用同一个 v* Release：谁先跑完谁创建，另一个只上传资产。
+      - name: Publish to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" apk-out/*.apk \
-            --title "WotaGeiCam $GITHUB_REF_NAME" \
-            --generate-notes \
-            || gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "WotaGeiCam $GITHUB_REF_NAME" \
+              --generate-notes \
+              || gh release view "$GITHUB_REF_NAME" >/dev/null
+          fi
+          gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber

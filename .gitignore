@@ -1,0 +1,92 @@
+# =====================================================================
+# WotaGeiCam monorepo
+#   Android/    ← 上游安卓工程（Gradle）
+#   HarmonyOS/  ← 鸿蒙复现工程（DevEco / hvigor）
+# 各自目录内还有更细的 .gitignore；本文件管跨平台产物与仓库根状态。
+# =====================================================================
+
+# ===== 跨平台构建产物 =====
+build/
+*/build/
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hap
+*.har
+*.hsp
+
+# ===== 仓库根 CI 暂存目录 =====
+/apk-out/
+/dist/
+
+# ===== Android =====
+/Android/local.properties
+/Android/keystore.properties
+*.jks
+*.keystore
+!/gradle/wrapper/gradle-wrapper.jar
+# 内部材料沿用 main 的公开边界（monorepo 里路径多了一层 Android/）
+/Android/AGENTS.md
+/Android/readme.md
+/Android/.zcodeignore
+/Android/.github/
+/Android/docs/
+/Android/deliverable/
+/Android/research/
+/Android/tools/
+
+# ===== HarmonyOS（HarmonyOS/.gitignore 为主，这里兜底）=====
+/HarmonyOS/.hvigor/
+/HarmonyOS/oh_modules/
+/HarmonyOS/node_modules/
+/HarmonyOS/.cxx/
+/HarmonyOS/.pure-test-tmp/
+/HarmonyOS/.local-signing/
+/HarmonyOS/local.properties
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.fleet/
+.navigation/
+.vscode/
+
+# ===== 临时与缓存 =====
+.tmp/
+tmp/
+*.log
+*.bak
+hs_err_pid*
+replay_pid*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== mapping 归档 =====
+deliverable/**/mapping/
+
+# ===== 本机工具链（体积大且可重装）=====
+tools/android-sdk/
+tools/**/platform-tools/
+tools/**/build-tools/
+
+# ===== 会话与工具本地状态 =====
+.mimosa/
+.zcode/
+agent-memory/
+node_modules/
+package.json
+package-lock.json
+
+# ===== 交接文档（按 Handover_Android.md 的口径：留在磁盘，不入版本库）=====
+/Handover_*.md
+/Handover.md
