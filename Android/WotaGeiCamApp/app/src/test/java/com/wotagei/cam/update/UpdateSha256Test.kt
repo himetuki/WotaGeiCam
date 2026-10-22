@@ -52,7 +52,7 @@ class UpdateSha256Test {
     // ------------------------------------------------------------------ 段1/段2 信任边界
 
     private fun jsonWithBody(body: String) =
-        """{"tag_name": "v0.0.8-r01", "assets": [{"name": "WotaGeiCam-v0.0.8-r01-universal-release.apk", """ +
+        """{"tag_name": "v0.0.8-r01", "assets": [{"name": "v0.0.8-r01-universal-release-Android.apk", """ +
             """"browser_download_url": "https://x/u.apk", "size": 5}], "body": "$body"}"""
 
     @Test

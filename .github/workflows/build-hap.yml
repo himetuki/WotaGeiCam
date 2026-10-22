@@ -8,8 +8,9 @@
 # 触发：推送 v* 标签（与 build-apk.yml 共用同一个 tag，两条流水线并行，资产进同一个 Release）；
 #   也可在 Actions 页手动触发。日常提交不跑 HAP（工具链 2GB，按需/发版时跑）。
 #
-# 产物：ohos-<tag>-unsigned.hap + SHA256SUMS（手动触发为 ohos-<branch>-<sha7>-unsigned.hap）
-#   配置签名 Secrets 后额外产出 ...-signed.hap（profile 含设备 UDID 时真机可装）。
+# 产物：<tag>-unsigned-Harmony.hap + SHA256SUMS（手动触发为 <branch>-<sha7>-unsigned-Harmony.hap）
+#   配置签名 Secrets 后额外产出 <tag>-signed-Harmony.hap（profile 含设备 UDID 时真机可装）；
+#   扩展名前平台后缀 -Harmony，与安卓的 -Android 资产区分。
 #
 # 工具链下载：默认取第三方镜像上的华为原版 zip，并做 SHA256 固定校验。
 #   如需改用自己的镜像/私有 Release 资产，设仓库 Variables（或 Environment Variables）：
@@ -138,9 +139,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            HAP_NAME="ohos-${GITHUB_REF_NAME}"
+            HAP_NAME="${GITHUB_REF_NAME}"
           else
-            HAP_NAME="ohos-${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+            HAP_NAME="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
           fi
           HAP=$(find entry/build/default/outputs -type f -name '*-unsigned.hap' | head -n 1)
           if [ -z "$HAP" ]; then
@@ -149,9 +150,9 @@ jobs:
             exit 1
           fi
           mkdir -p ../../dist
-          cp "$HAP" "../../dist/${HAP_NAME}-unsigned.hap"
+          cp "$HAP" "../../dist/${HAP_NAME}-unsigned-Harmony.hap"
           echo "HAP_NAME=${HAP_NAME}" >> "$GITHUB_ENV"
-          echo "HAP_PATH=dist/${HAP_NAME}-unsigned.hap" >> "$GITHUB_ENV"
+          echo "HAP_PATH=dist/${HAP_NAME}-unsigned-Harmony.hap" >> "$GITHUB_ENV"
 
       # 四件套齐全才签名；任一缺失就只交付 unsigned。
       - name: Sign HAP (only when signing secrets are configured)
@@ -165,7 +166,7 @@ jobs:
           printf '%s' "$HAP_PROFILE_BASE64" | base64 -d > "$TMP/profile.p7b"
           JAR="$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar"
           ALIAS="${HAP_KEY_ALIAS:-debugKey}"
-          OUT="dist/${HAP_NAME}-signed.hap"
+          OUT="dist/${HAP_NAME}-signed-Harmony.hap"
           java -jar "$JAR" sign-app \
             -keyAlias "$ALIAS" \
             -signAlg "SHA256withECDSA" \

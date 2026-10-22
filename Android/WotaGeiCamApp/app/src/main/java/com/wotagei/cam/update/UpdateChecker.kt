@@ -447,10 +447,10 @@ object RedirectProbe {
 
     /**
      * 段 3 无 JSON 资产列表，universal 包名从 tag 推导。命名以 CI workflow（build-apk.yml 产物四件套）
-     * 为准：archivesName = `WotaGeiCam-v<versionName>` ⇒ 资产名**携带 v 前缀**
-     * （如 `WotaGeiCam-v0.0.7-r08-universal-release.apk`）。
+     * 为准：资产名 = `<tag>-universal-release-Android.apk`——**携带 v 前缀、扩展名前平台后缀 -Android**
+     * （如 `v0.0.7-r08-universal-release-Android.apk`）。
      */
-    fun guessUniversalAssetName(tag: String): String = "WotaGeiCam-$tag-universal-release.apk"
+    fun guessUniversalAssetName(tag: String): String = "$tag-universal-release-Android.apk"
 }
 
 /** 探测结论：UI 只消费这个，不再自己比版本 */

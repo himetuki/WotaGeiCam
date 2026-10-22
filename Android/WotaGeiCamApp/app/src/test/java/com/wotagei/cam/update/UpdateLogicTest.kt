@@ -107,7 +107,7 @@ class UpdateLogicTest {
 
     @Test
     fun `下载候选_直连在首位_后接每个镜像前缀`() {
-        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.9-r06/WotaGeiCam-v0.0.9-r06-universal-release.apk"
+        val raw = "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.9-r06/v0.0.9-r06-universal-release-Android.apk"
         val issues = candidateIssues(UpdateDownloader.downloadCandidates(raw), raw)
         assertEquals("下载候选行为退化：${issues.joinToString()}", emptyList<String>(), issues)
         // 镜像表必须全部 HTTPS（明文代理等于让中间人换包）
@@ -174,14 +174,14 @@ class UpdateLogicTest {
       "assets": [
         {
           "url": "https://api.github.com/assets/11",
-          "name": "WotaGeiCam-v0.0.8-r01-release.apk",
-          "browser_download_url": "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-release.apk",
+          "name": "v0.0.8-r01-release-Android.apk",
+          "browser_download_url": "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-release-Android.apk",
           "size": 12345678
         },
         {
           "url": "https://api.github.com/assets/12",
-          "name": "WotaGeiCam-v0.0.8-r01-universal-release.apk",
-          "browser_download_url": "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release.apk",
+          "name": "v0.0.8-r01-universal-release-Android.apk",
+          "browser_download_url": "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
           "size": 23456789
         },
         {
@@ -200,11 +200,11 @@ class UpdateLogicTest {
         assertEquals("v0.0.8-r01", ReleaseJson.parseTag(sampleJson))
         val info = ReleaseJson.parse(sampleJson)!!
         assertEquals("v0.0.8-r01", info.tag)
-        // 四件套里挑 universal（不是 plain 的 -release.apk，也不是 mapping.txt）
-        assertEquals("WotaGeiCam-v0.0.8-r01-universal-release.apk", info.asset?.name)
+        // 四件套里挑 universal（不是 plain 的 -release-Android.apk，也不是 mapping.txt）
+        assertEquals("v0.0.8-r01-universal-release-Android.apk", info.asset?.name)
         assertEquals(23456789L, info.asset?.sizeBytes)
         assertEquals(
-            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release.apk",
+            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
             info.asset?.url
         )
     }
@@ -214,10 +214,10 @@ class UpdateLogicTest {
         val noUniversal = """
             {"tag_name": "v0.1.0", "assets": [
                {"name": "mapping.txt", "browser_download_url": "https://x/mapping.txt", "size": 1},
-               {"name": "WotaGeiCam-v0.1.0-release.apk", "browser_download_url": "https://x/a.apk", "size": 7}
+               {"name": "v0.1.0-release-Android.apk", "browser_download_url": "https://x/a.apk", "size": 7}
             ]}
         """.trimIndent()
-        assertEquals("WotaGeiCam-v0.1.0-release.apk", ReleaseJson.pickApkAsset(ReleaseJson.parseAssets(noUniversal))?.name)
+        assertEquals("v0.1.0-release-Android.apk", ReleaseJson.pickApkAsset(ReleaseJson.parseAssets(noUniversal))?.name)
 
         val noApk = """
             {"tag_name": "v0.1.0", "assets": [{"name": "mapping.txt", "browser_download_url": "https://x/m.txt", "size": 1}]}
@@ -240,7 +240,7 @@ class UpdateLogicTest {
 
     @Test
     fun `资产名安全判据_只接受纯文件名apk`() {
-        assertTrue("正常 CI 产物名", ReleaseJson.isSafeReleaseAssetName("WotaGeiCam-v0.0.9-r03-universal-release.apk"))
+        assertTrue("正常 CI 产物名", ReleaseJson.isSafeReleaseAssetName("v0.0.9-r03-universal-release-Android.apk"))
         assertFalse("路径分隔符", ReleaseJson.isSafeReleaseAssetName("../evil.apk"))
         assertFalse("反斜杠", ReleaseJson.isSafeReleaseAssetName("dir\\evil.apk"))
         assertFalse("绝对路径", ReleaseJson.isSafeReleaseAssetName("/sdcard/evil.apk"))
@@ -270,16 +270,17 @@ class UpdateLogicTest {
     }
 
     @Test
-    fun `资产名推导_与CI产物四件套命名一致_携带v前缀`() {
-        // build-apk.yml 第 2 行的产物名：WotaGeiCam-v0.0.7-r08-universal-release.apk（带 v）
+    fun `资产名推导_与CI产物四件套命名一致_平台后缀Android`() {
+        // build-apk.yml 头部注释的产物名：v0.0.7-r08-universal-release-Android.apk
+        // （tag 直接做前缀 + 扩展名前平台后缀 -Android）
         assertEquals(
-            "WotaGeiCam-v0.0.8-r01-universal-release.apk",
+            "v0.0.8-r01-universal-release-Android.apk",
             RedirectProbe.guessUniversalAssetName("v0.0.8-r01")
         )
         // 直连下载 URL 拼接
         assertEquals(
-            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release.apk",
-            UpdateConfig.directDownloadUrl("v0.0.8-r01", "WotaGeiCam-v0.0.8-r01-universal-release.apk")
+            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
+            UpdateConfig.directDownloadUrl("v0.0.8-r01", "v0.0.8-r01-universal-release-Android.apk")
         )
     }
 
@@ -305,7 +306,7 @@ class UpdateLogicTest {
     @Test
     fun `编排_段1失败走段2镜像_镜像失败走段3`() {
         val hit = mutableListOf<String>()
-        val mirrorJson = """{"tag_name": "v0.0.9", "assets": [{"name": "WotaGeiCam-v0.0.9-universal-release.apk", "browser_download_url": "https://x/u.apk", "size": 5}]}"""
+        val mirrorJson = """{"tag_name": "v0.0.9", "assets": [{"name": "v0.0.9-universal-release-Android.apk", "browser_download_url": "https://x/u.apk", "size": 5}]}"""
         val result = probeLatestRelease(
             localVersionName = "0.0.7-r09",
             fetchJson = { url ->
@@ -334,7 +335,7 @@ class UpdateLogicTest {
     fun `编排_镜像JSON的下载URL不得被采信_一律重建为仓库直连`() {
         val evil = """
             {"tag_name": "v0.0.9", "assets": [
-              {"name": "WotaGeiCam-v0.0.9-universal-release.apk",
+              {"name": "v0.0.9-universal-release-Android.apk",
                "browser_download_url": "https://evil.example/payload.apk", "size": 5}
             ]}
         """.trimIndent()
@@ -346,7 +347,7 @@ class UpdateLogicTest {
         val avail = result as ProbeResult.UpdateAvailable
         assertEquals(
             "下载 URL 必须由可信仓库常量重建，不能采信镜像 JSON 的 browser_download_url",
-            UpdateConfig.directDownloadUrl("v0.0.9", "WotaGeiCam-v0.0.9-universal-release.apk"),
+            UpdateConfig.directDownloadUrl("v0.0.9", "v0.0.9-universal-release-Android.apk"),
             avail.downloadUrl
         )
         assertFalse("不得出现攻击者主机", avail.downloadUrl.contains("evil.example"))
@@ -370,11 +371,11 @@ class UpdateLogicTest {
         )
         val avail = result as ProbeResult.UpdateAvailable
         assertEquals("v0.0.8-r01", avail.latestTag)
-        assertEquals("WotaGeiCam-v0.0.8-r01-universal-release.apk", avail.assetName)
+        assertEquals("v0.0.8-r01-universal-release-Android.apk", avail.assetName)
         // 段 3 无 size → null（下载时用 Content-Length）
         assertNull(avail.sizeBytes)
         assertEquals(
-            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release.apk",
+            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
             avail.downloadUrl
         )
     }
@@ -399,7 +400,7 @@ class UpdateLogicTest {
     @Test
     fun `编排_有新版但JSON无apk附件_该节点无结论继续下一段`() {
         val noApkJson = """{"tag_name": "v0.9.9", "assets": [{"name": "mapping.txt", "browser_download_url": "https://x/m.txt", "size": 1}]}"""
-        val okJson = """{"tag_name": "v0.9.9", "assets": [{"name": "WotaGeiCam-v0.9.9-universal-release.apk", "browser_download_url": "https://x/u.apk", "size": 5}]}"""
+        val okJson = """{"tag_name": "v0.9.9", "assets": [{"name": "v0.9.9-universal-release-Android.apk", "browser_download_url": "https://x/u.apk", "size": 5}]}"""
         val result = probeLatestRelease(
             localVersionName = "0.0.7-r09",
             fetchJson = { url ->
@@ -457,21 +458,21 @@ class UpdateLogicTest {
     @Test
     fun `过期文件判据_删part与非本轮资产_保留本轮已完成APK`() {
         val dir = listOf(
-            "WotaGeiCam-v0.0.8-r01-universal-release.apk",      // 本轮资产：保留（安装器可能还在读）
-            "WotaGeiCam-v0.0.8-r01-universal-release.apk.part", // 半截文件：删
+            "v0.0.8-r01-universal-release-Android.apk",      // 本轮资产：保留（安装器可能还在读）
+            "v0.0.8-r01-universal-release-Android.apk.part", // 半截文件：删
             // 按代唯一的 part（修复轮 P2：.part<nanoTime>）——上一代残留，靠「非本轮资产名」删
-            "WotaGeiCam-v0.0.8-r01-universal-release.apk.part1738888888888",
-            "WotaGeiCam-v0.0.7-r08-universal-release.apk",      // 上一轮的旧包：删
-            "WotaGeiCam-v0.0.9-arm64-v8a-release.apk"           // 别的资产名：删
+            "v0.0.8-r01-universal-release-Android.apk.part1738888888888",
+            "v0.0.7-r08-universal-release-Android.apk",      // 上一轮的旧包：删
+            "v0.0.9-arm64-v8a-release-Android.apk"           // 别的资产名：删
         )
         assertEquals(
             listOf(
-                "WotaGeiCam-v0.0.8-r01-universal-release.apk.part",
-                "WotaGeiCam-v0.0.8-r01-universal-release.apk.part1738888888888",
-                "WotaGeiCam-v0.0.7-r08-universal-release.apk",
-                "WotaGeiCam-v0.0.9-arm64-v8a-release.apk"
+                "v0.0.8-r01-universal-release-Android.apk.part",
+                "v0.0.8-r01-universal-release-Android.apk.part1738888888888",
+                "v0.0.7-r08-universal-release-Android.apk",
+                "v0.0.9-arm64-v8a-release-Android.apk"
             ),
-            UpdateDownloader.staleFilesOf(dir, "WotaGeiCam-v0.0.8-r01-universal-release.apk")
+            UpdateDownloader.staleFilesOf(dir, "v0.0.8-r01-universal-release-Android.apk")
         )
         // 空目录与干净目录都返回空
         assertTrue(UpdateDownloader.staleFilesOf(emptyList(), "a.apk").isEmpty())

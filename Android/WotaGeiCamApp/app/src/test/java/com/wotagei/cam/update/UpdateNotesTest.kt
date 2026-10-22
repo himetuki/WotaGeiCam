@@ -24,7 +24,7 @@ class UpdateNotesTest {
     private val hashHex = "0123456789abcdef".repeat(4)
 
     private fun jsonWithBody(body: String) =
-        """{"tag_name": "v0.0.9-r07", "assets": [{"name": "WotaGeiCam-v0.0.9-r07-universal-release.apk", """ +
+        """{"tag_name": "v0.0.9-r07", "assets": [{"name": "v0.0.9-r07-universal-release-Android.apk", """ +
             """"browser_download_url": "https://x/u.apk", "size": 5}], "body": "$body"}"""
 
     // ------------------------------------------------------------------ 探测层：说明只在段 1
