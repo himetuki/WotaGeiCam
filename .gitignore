@@ -1,13 +1,27 @@
 # =====================================================================
-# WotaGeiCam monorepo
-#   Android/    ← 上游安卓工程（Gradle）
-#   HarmonyOS/  ← 鸿蒙复现工程（DevEco / hvigor）
-# 各自目录内还有更细的 .gitignore；本文件管跨平台产物与仓库根状态。
+# WotaGeiCam 单树 monorepo（main 一棵树管两端）
+#   Android/WotaGeiCamApp/     ← 安卓 Gradle 工程（分区细节见 Android/.gitignore）
+#   HarmonyOS/WotaGeiCamOHOS/  ← 鸿蒙 DevEco 工程（见 HarmonyOS/.gitignore 与
+#                                 HarmonyOS/WotaGeiCamOHOS/.gitignore）
+# 分区细节由嵌套 .gitignore 负责；本文件只管：仓库根的本地资产目录、
+# 跨分区构建产物与签名材料、IDE/临时类规则、交接文档。
 # =====================================================================
 
-# ===== 跨平台构建产物 =====
+# ===== 仓库根本地资产目录（工具/依赖/打包/记忆类，2026-10-22 晚自 Android/ 迁至根）=====
+/tools/
+/node_modules/
+/docs/
+/research/
+/deliverable/
+/agent-memory/
+/camera-knowledge/
+/.zcode/
+.mimosa/
+package.json
+package-lock.json
+
+# ===== 跨分区构建产物（各分区 .gitignore 另有细则）=====
 build/
-*/build/
 .gradle/
 .kotlin/
 .cxx/
@@ -26,23 +40,11 @@ captures/
 /apk-out/
 /dist/
 
-# ===== Android =====
-/Android/local.properties
-/Android/keystore.properties
+# ===== 签名材料（只留本机；CI 从 Actions Secrets 还原）=====
 *.jks
 *.keystore
-!/gradle/wrapper/gradle-wrapper.jar
-# 内部材料沿用 main 的公开边界（monorepo 里路径多了一层 Android/）
-/Android/AGENTS.md
-/Android/readme.md
-/Android/.zcodeignore
-/Android/.github/
-/Android/docs/
-/Android/deliverable/
-/Android/research/
-/Android/tools/
 
-# ===== HarmonyOS（HarmonyOS/.gitignore 为主，这里兜底）=====
+# ===== HarmonyOS 兜底（细则在 HarmonyOS/.gitignore 与 WotaGeiCamOHOS/.gitignore）=====
 /HarmonyOS/.hvigor/
 /HarmonyOS/oh_modules/
 /HarmonyOS/node_modules/
@@ -71,22 +73,5 @@ replay_pid*
 Thumbs.db
 desktop.ini
 
-# ===== mapping 归档 =====
-deliverable/**/mapping/
-
-# ===== 本机工具链（体积大且可重装）=====
-tools/android-sdk/
-tools/**/platform-tools/
-tools/**/build-tools/
-
-# ===== 会话与工具本地状态 =====
-.mimosa/
-.zcode/
-agent-memory/
-node_modules/
-package.json
-package-lock.json
-
-# ===== 交接文档（按 Handover_Android.md 的口径：留在磁盘，不入版本库）=====
-/Handover_*.md
-/Handover.md
+# ===== 交接文档（留在磁盘，不入版本库）=====
+/Handover*.md

@@ -1,21 +1,26 @@
 # WotaGeiCam
 
-「打师相机」——把 Android 版与 HarmonyOS 版放在同一个仓库里维护。
+「打师相机」——把 Android 版与 HarmonyOS 版放在同一个仓库里维护（main 一棵树管两端）。
 
 ```
 WotaGeiCam/
-├── Android/          # 安卓仓库子树（Gradle 根在 Android/WotaGeiCamApp/）
-├── HarmonyOS/        # 鸿蒙工程（DevEco 工程根在 HarmonyOS/WotaGeiCamOHOS/）
+├── Android/
+│   └── WotaGeiCamApp/      # 安卓 Gradle 工程（入库）
+├── HarmonyOS/
+│   └── WotaGeiCamOHOS/     # 鸿蒙 DevEco 工程（入库）
 ├── .github/workflows/
-│   ├── build-apk.yml # v* tag → android-*.apk 四件套
-│   └── build-hap.yml # v* tag → ohos-*.hap（工具链自取，无需本机 DevEco）
-├── LICENSE
-└── .gitignore
+│   ├── build-apk.yml       # v* tag → android-*.apk 四件套
+│   └── build-hap.yml       # v* tag → ohos-*.hap（工具链自取，无需本机 DevEco）
+├── tools/  node_modules/  docs/  research/  deliverable/  agent-memory/
+│   camera-knowledge/  .zcode/  .mimosa/
+│                           # 本地资产（工具/依赖/打包/记忆类），gitignored 不入库
+├── LICENSE                 # GPL-3.0
+└── README.md  .gitignore  .gitattributes
 ```
 
 ## 构建
 
-**Android**（需要 Android SDK / JDK 17；目录结构沿用上游，Gradle 根在 `WotaGeiCamApp/`）：
+**Android**（需要 Android SDK / JDK 17；目录结构沿用上游，Gradle 根在 `Android/WotaGeiCamApp/`）：
 
 ```bash
 cd Android/WotaGeiCamApp
@@ -75,3 +80,8 @@ HAP 的 `profile.p7b` 必须是由 AGC/DevEco 签发、包含设备 UDID 的 pro
 - HAP CI 使用华为 DevEco Linux 命令行工具（内置 HarmonyOS 6.1.1 / API 24 SDK），
   版本与 SHA256 固定在 `build-hap.yml`；镜像可用仓库变量 `HARMONY_CLI_TOOLS_URL` /
   `HARMONY_CLI_TOOLS_SHA256` 覆盖。
+
+## 许可
+
+整项目以 GPL-3.0-only 发布（SPDX: `GPL-3.0-only`），全文见 [LICENSE](LICENSE)。
+Android 子树沿用上游（github.com/himetuki/WotaGeiCam）的 GPL v3 许可；HarmonyOS 移植工程同许可证。
