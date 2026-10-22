@@ -3,7 +3,10 @@
  * player/CompareHistory.kt 的解析/去重/编码语义（对齐上游 38d712a）。
  *
  * 上游把 preferences 读写揉在同一 object；本侧纯核心只吃 raw 串/数组，preferences 适配
- * 留待 T25。期望值一律手写字面量（含编码串的键序 rightId/leftId/ts）。
+ * 由 player/CompareHistoryStore.ets（T25，平台侧）承担。期望值一律手写字面量（含编码串的
+ * 键序 rightId/leftId/ts）。
+ *
+ * T25 追加两条：数字串宽松解析（对齐上游 org.json getLong：整数串可读）与坏串拒绝面。
  */
 import {
   CompareHistory, CompareHistoryEntry
@@ -118,4 +121,31 @@ test('编码到解析往返', (): void => {
   assertEq(11, back[1].leftId, '往返 1 leftId');
   assertEq(1700000005000, back[1].ts, '往返 1 ts');
   assertEq(0, CompareHistory.entriesOf('[]').length, '空数组往返空表');
+});
+
+test('数字串宽松解析 对齐上游getLong', (): void => {
+  // 上游 org.json getLong 对整数串宽松解析（"5" → 5）；本侧 number/整数 string 同等接受
+  const raw: string = '[{"rightId":"5","leftId":"7","ts":"1700000000000"}]';
+  const out: Array<CompareHistoryEntry> = CompareHistory.entriesOf(raw);
+  assertEq(1, out.length, '整数串记录可解析');
+  assertEq(5, out[0].rightId, 'rightId 串转数');
+  assertEq(7, out[0].leftId, 'leftId 串转数');
+  assertEq(1700000000000, out[0].ts, 'ts 串转数');
+  // 负数串同样按整数解析，但 id 非正数在入口被跳（与上游 id 判据一致）
+  assertEq(0, CompareHistory.entriesOf('[{"rightId":"-5","leftId":"7","ts":"1"}]').length,
+    '负 id 串解析后仍被 id>0 门挡下');
+});
+
+test('数字串坏格式跳过 非整数与空串与超安全整数', (): void => {
+  const raw: string = '[' +
+    '{"rightId":"5abc","leftId":7,"ts":1},' +
+    '{"rightId":"5.5","leftId":7,"ts":1},' +
+    '{"rightId":"","leftId":7,"ts":1},' +
+    '{"rightId":"9007199254740993","leftId":7,"ts":1},' +
+    '{"rightId":9007199254740993,"leftId":7,"ts":1},' +
+    '{"rightId":8,"leftId":7,"ts":1}' +
+    ']';
+  const out: Array<CompareHistoryEntry> = CompareHistory.entriesOf(raw);
+  assertEq(1, out.length, '仅合法数字记录保留（string/number 超安全整数同口径跳过）');
+  assertEq(8, out[0].rightId, '保留 number 记录');
 });

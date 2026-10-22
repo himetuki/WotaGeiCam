@@ -61,6 +61,7 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | `player/CompareTimeline.kt` | 对比时间线域判定/主钟/决策指令（交接不 seek、250ms 硬 seek、末段回绕 Tmin；`player/CompareTimeline.ets`，纯逻辑单测 25 条） |
 | `player/AudioSync.kt` | 自动同步 DSP（重采样/包络/粗对齐/FFT 精修与置信度；`player/AudioSync.ets`，常量与算法逐项对拍） |
 | `player/CompareAudio.kt` | 对比音频轨序（环境=组 0/内录=组 1）与静音/override 命令顺序（`player/CompareAudio.ets`） |
+| `player/CompareHistory.kt` | 对比历史 JSON 契约（`[{"rightId","leftId","ts"}]`、rightId 去重/12 条上限；`player/CompareHistory.ets` 纯核心 + `player/CompareHistoryStore.ets` preferences 适配） |
 | `record/FrameLedger.kt` | 录制帧账输出格式 |
 | `record/BitratePolicy.kt`、`record/AutoStopRules.kt` | 码率策略、3.5 GiB 分段轮转与自停判据 |
 | `record/SeriesIds.kt`、`record/PendingName.kt` | 段命名/系列命名规则，跨平台素材互认的关键 |

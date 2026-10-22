@@ -51,6 +51,13 @@ export class PlayerEngine {
   private seekInFlightAt: number = 0;
   /** 页面隐藏：attach 完成时不得启动 tick */
   private suspended: boolean = false;
+  /** 容器音轨序（MD_KEY_TRACK_INDEX，按音轨出现顺序；prepare 后枚举，失败为空） */
+  private audioTrackIndices: Array<number> = [];
+  /** 当前选中的音频组序数（0=环境、1=内录；仅用于日志/诊断） */
+  private selectedAudioGroup: number = 0;
+  /** completed 复播/重建续播：seek 落地后再 play（避免 seek 与 play 抢状态机；审查修复 P3） */
+  private pendingPlayAfterSeek: boolean = false;
+  private pendingPlayAfterSeekAt: number = 0;
 
   /** 绑定 surface 与片源；返回空串 = 成功，'cancelled' = 页面已销毁，其余 = 错误串 */
   async attach(surfaceId: string, clip: VideoClip, fpsHint: number): Promise<string> {
@@ -88,6 +95,11 @@ export class PlayerEngine {
       }
       this.durationMs = player.duration > 0 ? player.duration : clip.durationMs;
       this.positionMs = 0;
+      // T25：枚举容器音轨序（selectAudioGroup 的轨道下标来源）；失败只登记不清空能力
+      await this.loadAudioTracks(player);
+      if (this.released) {
+        throw new Error('cancelled');
+      }
       if (!this.suspended) {
         this.startTick();
       }
@@ -159,6 +171,16 @@ export class PlayerEngine {
       } else if (!this.lastSeekWasWrap) {
         this.seekInFlight = false;
       }
+      // completed 复播：等 seek 落地再起播，避免「先 play 回 0 再被 seek 拽走」的竞态
+      if (this.pendingPlayAfterSeek) {
+        this.pendingPlayAfterSeek = false;
+        this.pendingPlayAfterSeekAt = 0;
+        this.playing = true;
+        player.play().catch((e: Object): void => {
+          this.playing = false;
+          Diag.w(TAG, `resume after seek failed: ${e}`);
+        });
+      }
     });
     player.on('speedDone', (speed: number): void => {
       if (this.released || this.av !== player) {
@@ -222,6 +244,16 @@ export class PlayerEngine {
     } else if (this.fallbackDurationMs > 0) {
       this.durationMs = this.fallbackDurationMs;
     }
+    // 待复播兜底：seekDone 事件丢失时 800ms 后直接起播（与 seekInFlight 的陈旧阈值同口径）
+    if (this.pendingPlayAfterSeek && Date.now() - this.pendingPlayAfterSeekAt > 800) {
+      this.pendingPlayAfterSeek = false;
+      this.pendingPlayAfterSeekAt = 0;
+      this.playing = true;
+      player.play().catch((e: Object): void => {
+        this.playing = false;
+        Diag.w(TAG, `fallback resume failed: ${e}`);
+      });
+    }
     if (this.pendingStepMs !== undefined) {
       const frameMs: number = 1000 / Math.max(1, this.fps);
       const landed: boolean = Math.abs(this.positionMs - this.pendingStepMs) <= frameMs / 2;
@@ -275,6 +307,153 @@ export class PlayerEngine {
   /** 进度条 Begin/Moving = true、End = false：拖动期间不触发 AB 回绕 */
   setSeeking(active: boolean): void {
     this.seeking = active;
+  }
+
+  /**
+   * 枚举音频轨下标（prepare 后调用）：只收集 MD_KEY_TRACK_TYPE == MEDIA_TYPE_AUD 的
+   * MD_KEY_TRACK_INDEX，按描述数组顺序即容器音轨序（0=环境、1=内录）。
+   * MediaDescription 是 index-signature 接口，按 ArkTS 规则先 cast 到 Record 再取值。
+   */
+  private async loadAudioTracks(player: media.AVPlayer): Promise<void> {
+    try {
+      const descs: Array<media.MediaDescription> = await player.getTrackDescription();
+      const audio: Array<number> = [];
+      for (const desc of descs) {
+        const rec: Record<string, Object> = desc as Record<string, Object>;
+        const typeV: Object = rec[media.MediaDescriptionKey.MD_KEY_TRACK_TYPE];
+        const indexV: Object = rec[media.MediaDescriptionKey.MD_KEY_TRACK_INDEX];
+        if (typeof typeV !== 'number' || typeof indexV !== 'number') {
+          continue;
+        }
+        if ((typeV as number) === media.MediaType.MEDIA_TYPE_AUD) {
+          audio.push(indexV as number);
+        }
+      }
+      this.audioTrackIndices = audio;
+      this.selectedAudioGroup = 0;
+      Diag.i(TAG, `audio tracks=${audio.length} [${audio.join(',')}]`);
+    } catch (e) {
+      this.audioTrackIndices = [];
+      Diag.w(TAG, `getTrackDescription failed: ${e}`);
+    }
+  }
+
+  /** 断言暂停（幂等；只在确实在播时下发，避免与引擎状态机抢） */
+  pauseIfPlaying(): void {
+    const player: media.AVPlayer | undefined = this.av;
+    this.pendingPlayAfterSeek = false; // 暂停撤销待复播意图
+    this.pendingPlayAfterSeekAt = 0;
+    if (this.released || player === undefined || !this.playing) {
+      return;
+    }
+    this.playing = false;
+    player.pause().catch((e: Object): void => {
+      Diag.w(TAG, `pauseIfPlaying failed: ${e}`);
+    });
+  }
+
+  /**
+   * 断言播放（幂等）。completed 时先按 positionMs 补一次 seek，**等 seekDone 落地再 play**
+   * ——上游 playIfPaused 的 completed 分支语义（重播走已知位置，不回 0），同时避开
+   * 「seek 与 play 抢状态机」的竞态（T25 审查修复 P3）。
+   */
+  playIfPaused(): void {
+    const player: media.AVPlayer | undefined = this.av;
+    if (this.released || player === undefined || this.playing || this.pendingPlayAfterSeek) {
+      return;
+    }
+    if (this.state === 'completed') {
+      const dur: number = this.durationMs > 0 ? this.durationMs : this.positionMs;
+      const target: number = Number.isFinite(this.positionMs)
+        ? Math.max(0, Math.min(this.positionMs, dur)) : 0;
+      this.pendingStepMs = undefined;
+      this.cancelWrap();
+      this.positionMs = target;
+      this.pendingPlayAfterSeek = true;
+      this.pendingPlayAfterSeekAt = Date.now();
+      this.seekInternal(target);
+      return;
+    }
+    this.playing = true;
+    player.play().catch((e: Object): void => {
+      this.playing = false;
+      Diag.w(TAG, `playIfPaused failed: ${e}`);
+    });
+  }
+
+  /**
+   * seek 落地后再起播（重建续播/换片对齐专用）：与 completed 复播共用 pending 通道，
+   * 避免「seek 与 play 抢状态机」导致回到旧位置或落在 0（T25 审查修复）。
+   */
+  seekAndPlayIfPaused(ms: number): void {
+    const player: media.AVPlayer | undefined = this.av;
+    if (this.released || player === undefined || this.playing) {
+      return;
+    }
+    const target: number = Math.max(0, this.durationMs > 0 ? Math.min(ms, this.durationMs) : ms);
+    this.pendingStepMs = undefined;
+    this.cancelWrap();
+    this.positionMs = target;
+    this.pendingPlayAfterSeek = true;
+    this.pendingPlayAfterSeekAt = Date.now();
+    this.seekInternal(target);
+  }
+
+  /** 待复播意图（重建续播路径的静态检查锚点） */
+  hasPendingPlayAfterSeek(): boolean {
+    return this.pendingPlayAfterSeek;
+  }
+
+  /**
+   * 软追赶占位（上游 nudgeSpeedForSync 的平台空操作）：AVPlayer setSpeed 只有枚举档
+   * （speedToEnum 为证），无任意 ratio 微调接口；漂出 250ms 由 decide 的硬 seek 兜底。
+   * 保留调用点与行为签名，便于将来平台提供任意速率时原地接线。
+   */
+  nudgeSpeedForSync(driftMs: number): void {
+    if (this.released) {
+      return;
+    }
+    if (!Number.isFinite(driftMs) || Math.abs(driftMs) < 1) {
+      return; // 零/亚毫秒漂移：每拍都会来，不刷日志
+    }
+    Diag.d(TAG, `nudge skip drift=${Math.round(driftMs)}ms (AVPlayer enum-only speed)`);
+  }
+
+  /**
+   * 按容器音频组序切换音轨（0=环境、1=内录）。undefined = 回第 1 条音频轨（引擎默认）。
+   * 越界/状态不符/无音轨只 Diag.w 不抛（页面侧全程 try/catch 之上的第二道闸）。
+   */
+  selectAudioGroup(groupIndex: number | undefined): void {
+    const player: media.AVPlayer | undefined = this.av;
+    if (this.released || player === undefined) {
+      Diag.w(TAG, `selectAudioGroup ${groupIndex} skipped: player absent`);
+      return;
+    }
+    if (this.state !== 'prepared' && this.state !== 'playing' && this.state !== 'paused') {
+      Diag.w(TAG, `selectAudioGroup ${groupIndex} skipped: state=${this.state}`);
+      return;
+    }
+    if (this.audioTrackIndices.length === 0) {
+      Diag.w(TAG, `selectAudioGroup ${groupIndex} skipped: no audio tracks`);
+      return;
+    }
+    const ordinal: number = groupIndex === undefined ? 0 : groupIndex;
+    if (ordinal < 0 || ordinal >= this.audioTrackIndices.length) {
+      Diag.w(TAG, `selectAudioGroup ${groupIndex} skipped: out of range (${this.audioTrackIndices.length})`);
+      return;
+    }
+    const trackIndex: number = this.audioTrackIndices[ordinal];
+    this.selectedAudioGroup = ordinal;
+    player.selectTrack(trackIndex).then((): void => {
+      Diag.i(TAG, `audio group=${ordinal} trackIndex=${trackIndex} selected`);
+    }).catch((e: Object): void => {
+      Diag.w(TAG, `selectTrack ${trackIndex} failed: ${e}`);
+    });
+  }
+
+  /** 已知音频轨数（0 = 未探测到/无音轨；页面可用它做 chip 门控的旁证） */
+  audioTrackCount(): number {
+    return this.audioTrackIndices.length;
   }
 
   playPause(): void {
@@ -475,6 +654,8 @@ export class PlayerEngine {
       return;
     }
     this.released = true;
+    this.pendingPlayAfterSeek = false;
+    this.pendingPlayAfterSeekAt = 0;
     this.stopTick();
     if (this.abUnlockTimer >= 0) {
       clearTimeout(this.abUnlockTimer);
@@ -503,6 +684,8 @@ export class PlayerEngine {
   }
 
   private async cleanupAttachFailure(playerHint?: media.AVPlayer): Promise<void> {
+    this.pendingPlayAfterSeek = false;
+    this.pendingPlayAfterSeekAt = 0;
     this.stopTick();
     const player: media.AVPlayer | undefined = playerHint !== undefined ? playerHint : this.av;
     this.av = undefined;

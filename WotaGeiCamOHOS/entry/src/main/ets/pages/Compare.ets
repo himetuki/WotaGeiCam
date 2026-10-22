@@ -1,51 +1,78 @@
 /**
- * 对比播放最小版（双 XComponent + 双 PlayerEngine，手动时间线）。
+ * 对比播放（双 XComponent + 双 PlayerEngine），T25 起消费上游 CompareTimeline decide 内核。
  *
  * 平台差异 / 本批边界：
  * - 两个预览面都是普通 XComponent(SURFACE)：AVPlayer 每实例独占一个 surface，
  *   不走 native libentry 的单路 GL 预览（那一路只有一个 NativeImage，不能同时喂两面）；
- * - 只做手动偏移：seek/±0.5s/归零 + 120ms 漂移校正（阈值 250ms 硬 seek、冷却 500ms）；
- *   不含上游 DecideCommands/AudioSync 的自动判定与自动对齐；
- * - 声音侧默认左（右侧静音），切换只改两路 AVPlayer 音量，不做混音；
- * - 右侧片源从 MediaRepo 现选，排除左片（id+path 双排除，左片未就绪时用路由参数原始 path）；
- *   两侧独立 attach/retry，页面销毁统一释放。
+ * - 时间线编排：onTick 每拍交 decide 裁决（域判定/主钟/交接/纠偏/末段回绕/拖动让路），
+ *   应用顺序固定 pause/resume → seek → nudge → 黑层写回；主钟读数走 resolveT（可为负轴 T）；
+ * - 进页起播保持「用户手点播放」（上游 attach 后自动起播，登记偏离）；换右片/右片晚挂
+ *   用 wantPlaying 续播意图补一次 setPlaying(true)；
+ * - 静音保留三态扩展（左/右走 CompareAudio 计划，静音直接双 0）；双音轨门控用
+ *   ClipExporter.probe 的 audioCount≥2 替代上游 TrackSync.countAudioTracks；
+ * - 漂移速度微调为平台空操作（AVPlayer setSpeed 仅枚举档），250ms 硬 seek 保留；
+ * - 对比历史走 preferences（store=wota_player_ab）+ 纯核心编解码；练习动线（ComparePractice）
+ *   需分屏录制页，本批不接线（T26）。
  *
- * T22 时间线双轴消费（对齐上游 CompareTimeline 几何）：
- * - 进度 Slider min/max = TimelineGeometry.tMin()/tMax()（off>0 时负轴 pre-roll 可拖），
- *   拖动值 t 即时间线坐标，seekBoth 走 leftTarget/rightTarget park 规则；
- * - 左端标签 = tMin()、右端标签 = timelineEnd()；off=0 时 tMin=0/tMax=max(L,R)，
- *   [0,L] 区间与旧单左轴逐像素等价（回归红线，test/pure/compare-timeline.test.ets 钉死）；
- * - timelineSpan 无 UI 消费（进度百分比语义未定），留白登记；
- * - 进度读数 positionMs 仍随左钟（pre-roll 段左 park 在 0，读数显 0，最小版不派生真 T）。
- *
- * T22 其余收口：
- * - 右片 surface 重建/重试恢复播放位置（resumeRightPosMs，复刻左片 resumeLeftPosMs 模式；
- *   换选右片不恢复）；左片既有恢复路径零改动；
- * - 隐藏期（!pageVisible）surface 重建只置 deferred 标志，onPageShow 消费执行重建；
- *   retry 入口与 rebuild then 链均再查 pageVisible（隐藏期不 release/attach，防双开销）；
- * - 漂移"速度微调"以平台限制登记关闭：AVPlayer setSpeed 仅枚举档
- *   （player/PlayerEngine.ets speedToEnum 为证，无任意 ratio 接口），邻域纠偏维持
- *   250ms 硬 seek/500ms 冷却（上游 AudioSync 的 setPlaybackParams 微调无 OHOS 等价物）。
+ * T25 审查修复（2026-10-22）：
+ * - 重建续播：surface 重建/重试先记 wantPlaying（旧引擎 release 后 playing 归零），attach 成功
+ *   走 seekAndPlayIfPaused（seek 落地再 play），maybeResumeWanted 不再以「任一侧在播」早退；
+ * - 独播域复活：seekTimeline 写黑层后若 wantPlaying 即 resumeDomainAt(t)——拖回双覆盖区
+ *   dormant 侧随松手复播，不再无黑层冻结；
+ * - 音轨重探：换右片/左右 attach 成功均按当前音频侧重探 audioSideDual；静音态也落轨选择；
+ * - 单侧进度：右片未选/报错时 positionMs/sliderValue 跟左钟（重建中保留 T，预录态不回落）。
  */
 import { common } from '@kit.AbilityKit';
 import { ArcDropLog } from '../record/ArcDropLog';
+import { Diag } from '../diag/Diag';
 import { ClipFilter } from '../media/MediaTag';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { formatDuration, formatSignedDuration } from '../media/MediaFormat';
+import { ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { PlayerSpeedTiers } from '../player/PlayerModel';
-import { normalizeOffset, rightTargetFor, timelineEnd, TimelineGeometry } from '../player/CompareTimeline';
+import {
+  AudioTrackKind, CompareAudioPlan, EngineCommand, EngineCommandKind, Side, applyOrderOf, audioPlanOf
+} from '../player/CompareAudio';
+import { CompareHistoryEntry } from '../player/CompareHistory';
+import { CompareHistoryStore } from '../player/CompareHistoryStore';
+import {
+  DecideCommands, DecideInput, decide, normalizeOffset, resolveT, timelineEnd, TimelineGeometry
+} from '../player/CompareTimeline';
 
 interface CompareParams {
   leftId: number;
   leftPath?: string;
 }
 
+/** 历史面板一行（缺失 = 右片已不在媒体库，只能删） */
+class CompareHistoryRow {
+  readonly rightId: number;
+  readonly leftId: number;
+  readonly rightName: string;
+  readonly leftName: string;
+  readonly missing: boolean;
+  readonly clip: VideoClip | undefined;
+
+  constructor(rightId: number, leftId: number, rightName: string, leftName: string,
+    missing: boolean, clip: VideoClip | undefined) {
+    this.rightId = rightId;
+    this.leftId = leftId;
+    this.rightName = rightName;
+    this.leftName = leftName;
+    this.missing = missing;
+    this.clip = clip;
+  }
+}
+
+const TAG: string = 'WotaCompare';
 const TICK_MS: number = 120;
-const DRIFT_THRESHOLD_MS: number = 250;
-const DRIFT_COOLDOWN_MS: number = 500;
+/** decide 的硬 seek 阈值（上游 HARD_RESYNC_MS；邻域内交 nudgeSpeedForSync 软追赶） */
+const HARD_RESYNC_MS: number = 250;
 const OFFSET_STEP_MS: number = 500;
 const DEFAULT_FPS: number = 30;
+/** 黑层总开关（review 退路：false = 不渲染黑层；dormant pause 仍由 decide 下发） */
+const BLACK_LAYER_ENABLED: boolean = true;
 
 /** 声音侧：0 左、1 右、2 静音 */
 const SOUND_LEFT: number = 0;
@@ -77,6 +104,18 @@ struct Compare {
   @State selectingRight: boolean = false;
   @State rightListLoading: boolean = false;
   @State rightList: Array<VideoClip> = [];
+  /** T25：全程循环（时间线末回绕 Tmin；关 = 停末帧） */
+  @State timelineLoop: boolean = true;
+  /** T25：dormant 黑层（decide 输出写回；UI 常驻透明度层） */
+  @State domBlackLeft: boolean = false;
+  @State domBlackRight: boolean = false;
+  /** T25：音频侧/轨（env=组 0、cap=组 1；双音轨才显示 chip） */
+  @State audioTrack: AudioTrackKind = AudioTrackKind.ENV;
+  @State audioSideDual: boolean = false;
+  /** T25：历史面板 */
+  @State historyOpen: boolean = false;
+  @State historyLoading: boolean = false;
+  @State historyRows: Array<CompareHistoryRow> = [];
 
   private leftEngine: PlayerEngine = new PlayerEngine();
   private rightEngine: PlayerEngine = new PlayerEngine();
@@ -89,10 +128,14 @@ struct Compare {
   private leftClip: VideoClip | undefined = undefined;
   private rightClip: VideoClip | undefined = undefined;
   private repo: MediaRepo | undefined = undefined;
+  private ctx: common.Context | undefined = undefined;
   private disposed: boolean = false;
   private pageVisible: boolean = true;
   private tickTimer: number = -1;
-  private lastCorrectionMs: number = 0;
+  /** 当前音频侧（静音时保留最后一次有声侧；声音循环同步） */
+  private audioSide: Side = Side.LEFT;
+  /** 续播意图：换右片/右片晚挂/重建后 attach 成功时补一次 setPlaying(true) */
+  private wantPlaying: boolean = false;
   private resumeLeftPosMs: number = -1;
   /** 右片重建/重试前的位置快照（-1 = 无待恢复；换选右片时清 -1 不恢复） */
   private resumeRightPosMs: number = -1;
@@ -118,6 +161,7 @@ struct Compare {
     }
     const params: CompareParams = raw as CompareParams;
     this.paramsLeftPath = params.leftPath ?? '';
+    this.ctx = ctx;
     this.repo = new MediaRepo(ctx);
     MediaRepo.resetProbeCapHit();
     this.startTick();
@@ -160,7 +204,10 @@ struct Compare {
   private consumeDeferredRebuilds(): void {
     if (this.deferredLeftRebuild) {
       this.deferredLeftRebuild = false;
-      this.resumeLeftPosMs = Math.max(0, this.positionMs);
+      // 重建前记住续播意图（旧引擎放掉后 playing 就没了，不能等 attach 时再读）
+      this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+        (this.rightReady && this.rightEngine.playing);
+      this.snapshotLeftForResume();
       this.leftReady = false;
       this.leftLoading = true;
       this.leftAttachStarted = false;
@@ -169,6 +216,8 @@ struct Compare {
     }
     if (this.deferredRightRebuild) {
       this.deferredRightRebuild = false;
+      this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+        (this.rightReady && this.rightEngine.playing);
       this.snapshotRightForResume();
       this.rightReady = false;
       this.rightLoading = true;
@@ -225,13 +274,6 @@ struct Compare {
       if (left.durationMs > 0 && left.durationMs !== this.leftDurationMs) {
         this.leftDurationMs = left.durationMs;
       }
-      if (!this.sliderDragging) {
-        const pos: number = Math.round(left.positionMs);
-        if (pos !== this.positionMs) {
-          this.positionMs = pos;
-          this.sliderValue = pos;
-        }
-      }
     }
     if (this.rightReady) {
       if (right.error !== '' && this.rightError !== right.error) {
@@ -246,31 +288,68 @@ struct Compare {
     if (active !== this.playing) {
       this.playing = active;
     }
-    // 漂移校正 + park 门控（offset<0 时右片在时间线前段无画面：停在首帧，等左片进入覆盖区再起播；
-    // offset>0 时右片先结束则停在末帧）。左片暂停时不做任何自动起播。
-    if (this.leftReady && this.rightReady && !this.sliderDragging &&
-      left.playing && this.leftError === '' && this.rightError === '') {
-      const geo: TimelineGeometry = new TimelineGeometry(this.leftDurationMs, this.rightDurationMs, this.offsetMs);
-      const target: number = geo.rightTarget(left.positionMs);
-      const now: number = Date.now();
-      if (!geo.rightCovers(left.positionMs)) {
-        if (right.playing) {
-          right.playPause();
+    // 双片就绪且无错误才交 decide：单侧/错误态由加载层与错误层接管，不猜编排。
+    // 但进度读数不能跟着停：右片未选/报错时仍按左钟（currentTimelineT 已回退左片素材位）
+    // 更新 positionMs/sliderValue，否则播放中滑杆冻结（T25 审查修复）。
+    if (!this.leftReady || !this.rightReady || this.leftError !== '' || this.rightError !== '') {
+      // 右片未选/报错：进度跟左钟；右片重建/加载中保留 T（预录态不能回退成左素材 0）
+      const rightAbsent: boolean = this.rightClip === undefined;
+      const rightBroken: boolean = this.rightError !== '' && !this.rightLoading;
+      if (this.leftReady && !this.sliderDragging && (rightAbsent || rightBroken)) {
+        const fallback: number = Math.round(Math.min(this.timelineTMax(),
+          Math.max(this.timelineTMin(), this.currentTimelineT())));
+        if (fallback !== this.positionMs) {
+          this.positionMs = fallback;
         }
-        if (Math.abs(right.positionMs - target) > DRIFT_THRESHOLD_MS &&
-          now - this.lastCorrectionMs >= DRIFT_COOLDOWN_MS) {
-          right.seekTo(target);
-          this.lastCorrectionMs = now;
+        if (fallback !== this.sliderValue) {
+          this.sliderValue = fallback;
         }
-      } else if (!right.playing) {
-        if (target < this.rightDurationMs - 1) {
-          this.startRightAt(target);
-          this.lastCorrectionMs = now;
-        }
-      } else if (Math.abs(right.positionMs - target) > DRIFT_THRESHOLD_MS &&
-        now - this.lastCorrectionMs >= DRIFT_COOLDOWN_MS) {
-        right.seekTo(target);
-        this.lastCorrectionMs = now;
+      }
+      return;
+    }
+    const geo: TimelineGeometry = this.timelineGeo();
+    const abLoopActive: boolean = left.ab.valid && left.ab.loopEnabled;
+    // userPlaying 取「续播意图 ∪ 引擎在播」：ENDED 后引擎 playing 已落，仅靠并集会丢循环/交接
+    // 的用户意图（上游 isPlaying 在 ENDED 同样为假，这里用 wantPlaying 补足意图位，登记偏离）
+    const userPlaying: boolean = this.wantPlaying || left.playing || right.playing;
+    const cmd: DecideCommands = decide(new DecideInput(geo,
+      Math.max(0, left.positionMs), Math.max(0, right.positionMs),
+      userPlaying, abLoopActive, this.timelineLoop, this.sliderDragging,
+      this.domBlackLeft, this.domBlackRight, HARD_RESYNC_MS));
+    // 应用顺序红线（不可换）：pause/resume → seek → nudge → 黑层写回。
+    // resume 触发的 ENDED 自动回零会被随后的 seek 覆盖，nudge 永远落在最终位置上。
+    if (cmd.pauseLeft) {
+      left.pauseIfPlaying();
+    }
+    if (cmd.pauseRight) {
+      right.pauseIfPlaying();
+    }
+    if (cmd.resumeLeft) {
+      left.playIfPaused();
+    }
+    if (cmd.resumeRight) {
+      right.playIfPaused();
+    }
+    if (cmd.seekLeftMs !== undefined) {
+      left.seekTo(cmd.seekLeftMs);
+    }
+    if (cmd.seekRightMs !== undefined) {
+      right.seekTo(cmd.seekRightMs);
+    }
+    if (cmd.nudgeRightDriftMs !== undefined) {
+      right.nudgeSpeedForSync(cmd.nudgeRightDriftMs);
+    }
+    this.domBlackLeft = cmd.blackLeft;
+    this.domBlackRight = cmd.blackRight;
+    // 主钟读数走 resolveT：双素材/左独播随左钟、右独播随右钟、末态 Tmax（pre-roll 为负 T）
+    if (!this.sliderDragging) {
+      const t: number = Math.round(resolveT(geo, Math.max(0, left.positionMs),
+        Math.max(0, right.positionMs), this.domBlackLeft, this.domBlackRight));
+      if (t !== this.positionMs) {
+        this.positionMs = t;
+      }
+      if (t !== this.sliderValue) {
+        this.sliderValue = t;
       }
     }
   }
@@ -317,13 +396,19 @@ struct Compare {
       } else {
         engine.suspendTick();
       }
-      this.applySound();
+      this.applyAudioPlan();
+      this.probeAudioSide();
       if (this.resumeLeftPosMs >= 0) {
-        engine.seekTo(this.resumeLeftPosMs);
-        this.positionMs = this.resumeLeftPosMs;
-        this.sliderValue = this.resumeLeftPosMs;
+        const resume: number = this.resumeLeftPosMs;
         this.resumeLeftPosMs = -1;
+        // 重建续播：seek 落地后再起播（与 decide 的 resume→seek 顺序不抢状态机）
+        if (this.wantPlaying) {
+          engine.seekAndPlayIfPaused(resume);
+        } else {
+          engine.seekTo(resume);
+        }
       }
+      this.maybeResumeWanted();
     }).catch((e: Object): void => {
       if (this.disposed || this.leftEngine !== engine) {
         engine.release();
@@ -373,12 +458,19 @@ struct Compare {
       } else {
         engine.suspendTick();
       }
-      this.applySound();
+      this.applyAudioPlan();
+      this.probeAudioSide();
       if (this.resumeRightPosMs >= 0) {
-        // 右片重建/重试恢复位置（T22，复刻左片 resumeLeftPosMs 模式）
-        engine.seekTo(this.resumeRightPosMs);
+        // 右片重建/重试恢复位置（素材位快照，T25 起不再用时间线 T）
+        const resume: number = this.resumeRightPosMs;
         this.resumeRightPosMs = -1;
+        if (this.wantPlaying) {
+          engine.seekAndPlayIfPaused(resume);
+        } else {
+          engine.seekTo(resume);
+        }
       }
+      this.maybeResumeWanted();
     }).catch((e: Object): void => {
       if (this.disposed || this.rightEngine !== engine) {
         engine.release();
@@ -391,11 +483,18 @@ struct Compare {
     });
   }
 
-  /** 右片重建/重试前的位置快照：就绪取引擎实位，否则按时间线换算（rightTargetFor 夹 0..R） */
+  /** 左片重建/重试前的位置快照：就绪取引擎实位（素材位），否则按时间线 park 落点 */
+  private snapshotLeftForResume(): void {
+    this.resumeLeftPosMs = this.leftReady
+      ? Math.max(0, Math.round(this.leftEngine.positionMs))
+      : this.timelineGeo().leftTarget(this.positionMs);
+  }
+
+  /** 右片重建/重试前的位置快照：就绪取引擎实位（素材位），否则按时间线 park 落点 */
   private snapshotRightForResume(): void {
     this.resumeRightPosMs = this.rightReady
       ? Math.max(0, Math.round(this.rightEngine.positionMs))
-      : rightTargetFor(Math.max(0, this.positionMs), this.offsetMs, this.rightDurationMs);
+      : this.timelineGeo().rightTarget(this.positionMs);
   }
 
   private onSurfaceLoaded(isLeft: boolean): void {
@@ -425,7 +524,12 @@ struct Compare {
           return;
         }
         // surface 重建：旧 AVPlayer 已绑在失效面上，release 后换新引擎重挂
-        this.resumeLeftPosMs = Math.max(0, this.positionMs);
+        // T25 审查修复：先记住续播意图（旧引擎 release 后 playing 归零），attach 成功据此复播
+        this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+          (this.rightReady && this.rightEngine.playing);
+        // T25：快照改素材位（时间线 T 可为负轴，不能直接当素材位置）
+        this.snapshotLeftForResume();
+        // 黑层/域状态保留：重建期间右独播/尾段的主钟口径不能丢，attach 后由 maybeResumeWanted 复算
         this.leftReady = false;
         this.leftLoading = true;
         this.leftAttachStarted = false;
@@ -441,6 +545,9 @@ struct Compare {
           this.deferredRightRebuild = true;
           return;
         }
+        // T25 审查修复：右片重建同样先记住续播意图，否则另一侧在播会让 maybeResumeWanted 早退
+        this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+          (this.rightReady && this.rightEngine.playing);
         this.snapshotRightForResume();
         this.rightReady = false;
         this.rightLoading = true;
@@ -502,8 +609,10 @@ struct Compare {
     if (this.disposed || !this.pageVisible || this.leftLoading || this.leftClip === undefined) {
       return;
     }
-    this.pauseAll();
-    this.resumeLeftPosMs = Math.max(0, this.positionMs);
+    this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+      (this.rightReady && this.rightEngine.playing);
+    this.pauseAll(false);
+    this.snapshotLeftForResume();
     this.leftReady = false;
     this.leftLoading = true;
     this.leftAttachStarted = false;
@@ -515,7 +624,9 @@ struct Compare {
     if (this.disposed || !this.pageVisible || this.rightLoading || this.rightClip === undefined) {
       return;
     }
-    this.pauseAll();
+    this.wantPlaying = this.wantPlaying || this.leftEngine.playing ||
+      (this.rightReady && this.rightEngine.playing);
+    this.pauseAll(false);
     this.snapshotRightForResume();
     this.rightReady = false;
     this.rightLoading = true;
@@ -525,7 +636,11 @@ struct Compare {
   }
 
   private openRightPicker(): void {
-    this.pauseAll();
+    // 选片期间暂停但保留续播意图：选中后 chooseRight 会带进 wantPlaying，关掉面板则清意图
+    const wasPlaying: boolean = this.wantPlaying ||
+      this.leftEngine.playing || (this.rightReady && this.rightEngine.playing);
+    this.pauseAll(false);
+    this.wantPlaying = wasPlaying;
     this.selectingRight = true;
     this.loadRightList();
   }
@@ -562,8 +677,12 @@ struct Compare {
     if (this.disposed || (left !== undefined && clip.id === left.id)) {
       return;
     }
+    // 换片前保留续播意图：新右片 attach 成功后由 maybeResumeWanted 补一次 setPlaying(true)
+    const wasPlaying: boolean = this.wantPlaying ||
+      this.leftEngine.playing || (this.rightReady && this.rightEngine.playing);
     this.selectingRight = false;
-    this.pauseAll();
+    this.pauseAll(false);
+    this.wantPlaying = wasPlaying;
     this.rightClip = clip;
     this.rightName = clip.name;
     this.rightDurationMs = Math.max(0, clip.durationMs);
@@ -572,7 +691,18 @@ struct Compare {
     this.rightAttachStarted = false;
     this.rightError = '';
     this.resumeRightPosMs = -1; // 换选右片是全新片源：不恢复旧片位置
+    // 换片：黑层/域状态保留（attach 后 maybeResumeWanted 按新片位置复算），
+    // 音轨门控按当前音频侧重探（审查修复：不能只置 false 等 attach，默认音频侧=左时换右片
+    // 不会触发左 attach，chip 会永久消失）
+    this.audioTrack = AudioTrackKind.ENV;
+    this.audioSideDual = false;
     this.normalizeOffsetNow();
+    this.probeAudioSide();
+    if (left !== undefined && this.ctx !== undefined) {
+      CompareHistoryStore.record(this.ctx, clip.id, left.id).then((): void => {
+        // 落盘异步；失败在 store 内 Diag.w，不阻塞换片
+      });
+    }
     this.rebuildRightEngine();
   }
 
@@ -595,19 +725,125 @@ struct Compare {
     return Math.max(this.timelineGeo().tMax(), this.timelineTMin() + 1);
   }
 
-  private applySound(): void {
-    if (this.leftReady) {
-      this.leftEngine.setVolume(this.soundSide === SOUND_LEFT ? 1 : 0);
+  /** 当前时间线主钟读数（resolveT；右片未就绪时退回左片素材位） */
+  private currentTimelineT(): number {
+    if (!this.leftReady) {
+      return this.positionMs;
     }
-    if (this.rightReady) {
-      this.rightEngine.setVolume(this.soundSide === SOUND_RIGHT ? 1 : 0);
+    const leftPos: number = Math.max(0, this.leftEngine.positionMs);
+    if (!this.rightReady) {
+      return Math.round(leftPos);
+    }
+    const rightPos: number = Math.max(0, this.rightEngine.positionMs);
+    return Math.round(resolveT(this.timelineGeo(), leftPos, rightPos, this.domBlackLeft, this.domBlackRight));
+  }
+
+  private engineForSide(side: Side): PlayerEngine {
+    return side === Side.LEFT ? this.leftEngine : this.rightEngine;
+  }
+
+  private sideReady(side: Side): boolean {
+    return side === Side.LEFT ? this.leftReady : this.rightReady;
+  }
+
+  /**
+   * 音频计划下发（T25）：静音=双 0（本侧三态扩展）；否则 CompareAudio 的固定命令序
+   * ——先静音另一侧 → 再设/清 override（selectAudioGroup）→ 最后落选中侧音量 1。
+   * 未就绪侧跳过（其 attach 成功后会重新 applyAudioPlan）。
+   */
+  private applyAudioPlan(): void {
+    if (this.soundSide === SOUND_MUTE) {
+      if (this.leftReady) {
+        this.leftEngine.setVolume(0);
+      }
+      if (this.rightReady) {
+        this.rightEngine.setVolume(0);
+      }
+      // 静音态也落轨选择（音量保持 0）：静音中切「内录/环境」对引擎**静默生效**，
+      // 解除静音不必重选、也不会把用户选过的轨复位（T25 审查修复 P3）
+      if (this.audioSideDual && this.sideReady(this.audioSide)) {
+        const mutedPlan: CompareAudioPlan =
+          audioPlanOf(this.audioSide, this.audioTrack, this.audioSideDual);
+        this.engineForSide(this.audioSide).selectAudioGroup(mutedPlan.overrideGroupIndex);
+      }
+      return;
+    }
+    const plan: CompareAudioPlan = audioPlanOf(this.audioSide, this.audioTrack, this.audioSideDual);
+    const cmds: Array<EngineCommand> = applyOrderOf(plan);
+    for (const cmd of cmds) {
+      if (!this.sideReady(cmd.side)) {
+        continue;
+      }
+      const engine: PlayerEngine = this.engineForSide(cmd.side);
+      if (cmd.kind === EngineCommandKind.SET_VOLUME) {
+        engine.setVolume(cmd.volume);
+      } else if (cmd.kind === EngineCommandKind.SET_AUDIO_OVERRIDE) {
+        engine.selectAudioGroup(cmd.groupIndex);
+      } else {
+        engine.selectAudioGroup(undefined);
+      }
+    }
+  }
+
+  /** 探当前音频侧片源的音轨数（audioCount≥2 才允许内录 chip；失败/单轨归 false 并复位 ENV） */
+  private probeAudioSide(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    const side: Side = this.audioSide;
+    const clip: VideoClip | undefined = side === Side.LEFT ? this.leftClip : this.rightClip;
+    if (ctx === undefined || clip === undefined) {
+      this.audioSideDual = false;
+      this.resetAudioTrackIfNeeded();
+      return;
+    }
+    ClipExporter.probe(ctx, clip).then((info: ClipTrackInfo): void => {
+      if (this.disposed || this.audioSide !== side) {
+        return;
+      }
+      this.audioSideDual = info.error === '' && info.audioCount >= 2;
+      this.resetAudioTrackIfNeeded();
+      this.applyAudioPlan();
+      Diag.i(TAG, `audio side=${side} count=${info.audioCount} err=${info.error}`);
+    }).catch((e: Object): void => {
+      if (this.disposed || this.audioSide !== side) {
+        return;
+      }
+      this.audioSideDual = false;
+      this.resetAudioTrackIfNeeded();
+      this.applyAudioPlan();
+      Diag.w(TAG, `audio probe failed: ${e}`);
+    });
+  }
+
+  private resetAudioTrackIfNeeded(): void {
+    if (!this.audioSideDual && this.audioTrack === AudioTrackKind.CAP) {
+      this.audioTrack = AudioTrackKind.ENV;
     }
   }
 
   private cycleSound(): void {
     this.soundSide = (this.soundSide + 1) % 3;
-    this.applySound();
+    if (this.soundSide !== SOUND_MUTE) {
+      this.audioSide = this.soundSide === SOUND_RIGHT ? Side.RIGHT : Side.LEFT;
+      // 切边复探：探测完成前保留旧结论（dual=false 时 resetAudioTrackIfNeeded 会复位环境），
+      // 不在切边瞬间清 audioTrack —— 否则静音/切边往返会静默丢掉用户选过的内录（T25 审查修复）
+      this.probeAudioSide();
+    }
+    this.applyAudioPlan();
     this.hint = `声音：${this.soundLabel()}`;
+  }
+
+  private cycleAudioTrack(): void {
+    if (!this.audioSideDual) {
+      return;
+    }
+    this.audioTrack = this.audioTrack === AudioTrackKind.CAP ? AudioTrackKind.ENV : AudioTrackKind.CAP;
+    this.applyAudioPlan();
+    this.hint = `音轨：${this.audioTrack === AudioTrackKind.CAP ? '内录' : '环境'}`;
+  }
+
+  private toggleTimelineLoop(): void {
+    this.timelineLoop = !this.timelineLoop;
+    this.hint = `全程循环：${this.timelineLoop ? '开' : '关'}`;
   }
 
   private soundLabel(): string {
@@ -620,34 +856,17 @@ struct Compare {
     return '静音';
   }
 
-  private pauseAll(): void {
+  /** 统一暂停（clearWant=true 清续播意图；换片/重试保留意图时传 false） */
+  private pauseAll(clearWant: boolean = true): void {
     if (this.leftReady && this.leftEngine.playing) {
-      this.leftEngine.playPause();
+      this.leftEngine.pauseIfPlaying();
     }
     if (this.rightReady && this.rightEngine.playing) {
-      this.rightEngine.playPause();
+      this.rightEngine.pauseIfPlaying();
     }
     this.playing = false;
-  }
-
-  /** 右侧从 target 起播；completed 的 playPause 会先回 0，故先起播再 seek 到时间线目标 */
-  private startRightAt(target: number): void {
-    const right: PlayerEngine = this.rightEngine;
-    if (this.disposed || !this.rightReady) {
-      return;
-    }
-    if (target >= this.rightDurationMs - 1) {
-      right.seekTo(this.rightDurationMs);
-      return;
-    }
-    if (right.state === 'completed') {
-      right.playPause();
-      right.seekTo(target);
-      return;
-    }
-    right.seekTo(target);
-    if (!right.playing) {
-      right.playPause();
+    if (clearWant) {
+      this.wantPlaying = false;
     }
   }
 
@@ -657,50 +876,133 @@ struct Compare {
       return;
     }
     const left: PlayerEngine = this.leftEngine;
-    const right: PlayerEngine = this.rightEngine;
-    const active: boolean = left.playing || (this.rightReady && right.playing);
+    const active: boolean = left.playing || (this.rightReady && this.rightEngine.playing);
     if (active) {
-      this.pauseAll();
+      this.setPlaying(false);
       return;
     }
-    let start: number = Math.round(left.positionMs);
-    if (this.leftDurationMs > 0 && start >= this.leftDurationMs - 100) {
-      left.seekTo(0);
-      start = 0;
-      this.positionMs = 0;
-      this.sliderValue = 0;
-    }
-    left.playPause();
-    if (this.rightReady) {
-      const geo: TimelineGeometry = new TimelineGeometry(this.leftDurationMs, this.rightDurationMs, this.offsetMs);
-      if (geo.rightCovers(start)) {
-        this.startRightAt(geo.rightTarget(start));
-      } else {
-        // 右片在起点无覆盖：停在 park 位，进入覆盖区由 tick 自动起播
-        right.seekTo(geo.rightTarget(start));
-      }
-    }
-    this.lastCorrectionMs = Date.now();
-    this.playing = true;
+    this.setPlaying(true);
   }
 
   /**
-   * 双轴时间线落位（T22）：ms 为时间线坐标（左端 tMin、右端 tMax）——
-   * 左走 leftTarget park 规则（pre-roll 停 0、越尾停 durMs），右走 rightTarget
-   * （pre-roll 落 t+off、越尾停 durMs）。off=0 时在旧单左轴域 [0, min(L,max)] 逐像素等价（回归红线）。
+   * 播放意图入口（T25）：want=true 时末态先回 Tmin，再按当前域恢复主钟侧、dormant 侧保持停；
+   * want=false 统一暂停并清意图。attach 成功后的续播也走这里（wantPlaying 门）。
    */
-  private seekBoth(ms: number): void {
+  private setPlaying(want: boolean): void {
+    if (this.disposed) {
+      return;
+    }
+    if (!want) {
+      this.pauseAll();
+      return;
+    }
+    if (!this.leftReady) {
+      this.hint = '左片尚未就绪';
+      return;
+    }
+    this.wantPlaying = true;
     const geo: TimelineGeometry = this.timelineGeo();
-    const t: number = Math.min(geo.tMax(), Math.max(geo.tMin(), ms));
-    this.positionMs = Math.round(t);
-    this.sliderValue = this.positionMs;
+    let t: number = this.currentTimelineT();
+    if (t >= geo.tMax() - 100) {
+      this.seekTimeline(geo.tMin());
+      t = geo.tMin();
+    }
+    this.resumeDomainAt(t);
+    this.playing = true;
+  }
+
+  /** 按时间线位 t 恢复域内主钟侧播放、dormant 侧暂停；黑层按覆盖判定写回（末态不盖黑） */
+  private resumeDomainAt(t: number): void {
+    const geo: TimelineGeometry = this.timelineGeo();
+    const leftCovers: boolean = geo.leftCovers(t);
+    const rightCovers: boolean = this.rightReady && geo.rightCovers(t);
+    const atEnd: boolean = t >= geo.tMax();
     if (this.leftReady) {
+      if (leftCovers) {
+        this.leftEngine.playIfPaused();
+      } else {
+        this.leftEngine.pauseIfPlaying();
+      }
+    }
+    if (this.rightReady) {
+      if (rightCovers) {
+        this.rightEngine.playIfPaused();
+      } else {
+        this.rightEngine.pauseIfPlaying();
+      }
+    }
+    this.domBlackLeft = !atEnd && !leftCovers;
+    this.domBlackRight = !atEnd && !rightCovers;
+  }
+
+  /**
+   * 续播意图消费（T25 审查修复）：不再以「任一侧在播」为门（重建侧停着也早退），
+   * 而是以 wantPlaying + 本侧覆盖判定为准：先把新挂侧对齐到时间线期望素材位，
+   * 再统一 resumeDomainAt —— 覆盖侧 playIfPaused、dormant 侧保持停、黑层按覆盖写回。
+   * 入口态 wantPlaying=false 时不动（进页起播仍归用户手点，登记偏离）。
+   */
+  private maybeResumeWanted(): void {
+    if (this.disposed || !this.wantPlaying || !this.leftReady) {
+      return;
+    }
+    const geo: TimelineGeometry = this.timelineGeo();
+    const t: number = this.currentTimelineT();
+    if (t >= geo.tMax() - 100) {
+      // 末态续播：走 setPlaying 的 Tmin 回绕（与用户点播放同路径）
+      this.setPlaying(true);
+      return;
+    }
+    // 新挂右侧对齐：从旧位置/0 起播会白闪一帧，先 seek 到 T 对应素材位（已覆盖才对齐）
+    if (this.rightReady && geo.rightCovers(t)) {
+      const target: number = geo.rightTarget(t);
+      if (Math.abs(this.rightEngine.positionMs - target) > 1) {
+        this.rightEngine.seekAndPlayIfPaused(target);
+      }
+    }
+    this.resumeDomainAt(t);
+    if (this.leftEngine.playing || (this.rightReady && this.rightEngine.playing)) {
+      this.playing = true;
+    }
+  }
+
+  /**
+   * 时间线落位（T25 统一入口）：ms 为时间线坐标（可负，夹 [tMin,tMax]）——
+   * 左走 leftTarget park 规则、右走 rightTarget；无覆盖侧暂停并亮黑层，末态撤黑。
+   * 播放权不在本方法：松手后的起播由 decide/setPlaying 决定。
+   */
+  private seekTimeline(ms: number): void {
+    const geo: TimelineGeometry = this.timelineGeo();
+    const t: number = Math.round(Math.min(geo.tMax(), Math.max(geo.tMin(), ms)));
+    this.positionMs = t;
+    this.sliderValue = t;
+    const leftCovers: boolean = geo.leftCovers(t);
+    const rightCovers: boolean = geo.rightCovers(t);
+    const atEnd: boolean = t >= geo.tMax();
+    if (this.leftReady) {
+      if (!leftCovers) {
+        this.leftEngine.pauseIfPlaying();
+      }
       this.leftEngine.seekTo(geo.leftTarget(t));
     }
     if (this.rightReady) {
+      if (!rightCovers) {
+        this.rightEngine.pauseIfPlaying();
+      }
       this.rightEngine.seekTo(geo.rightTarget(t));
     }
-    this.lastCorrectionMs = Date.now();
+    if (atEnd) {
+      this.domBlackLeft = false;
+      this.domBlackRight = false;
+    } else {
+      this.domBlackLeft = !leftCovers;
+      this.domBlackRight = !rightCovers;
+    }
+    // T25 审查修复：拖回双覆盖区/跨域后按用户播放意图统一复活覆盖侧。
+    // 只写黑层=false 会抹掉 decide「该侧原 dormant、需要唤醒」的唯一信号（resume=black&&userPlaying），
+    // dormant 侧将无黑层地冻在暂停帧；这里松手即按覆盖判定 resumeDomainAt（播放权仍归 wantPlaying）。
+    if (this.wantPlaying) {
+      this.resumeDomainAt(t);
+    }
   }
 
   private cycleSpeed(): void {
@@ -724,11 +1026,9 @@ struct Compare {
       this.hint = '已到偏移边界';
       return;
     }
+    const t: number = this.currentTimelineT();
     this.offsetMs = next;
-    if (this.rightReady) {
-      this.rightEngine.seekTo(rightTargetFor(this.positionMs, this.offsetMs, this.rightDurationMs));
-    }
-    this.lastCorrectionMs = Date.now();
+    this.seekTimeline(t);
     this.hint = `偏移 ${this.offsetText()}`;
   }
 
@@ -737,16 +1037,102 @@ struct Compare {
       this.hint = '请先选择右侧片源';
       return;
     }
+    const t: number = this.currentTimelineT();
     this.offsetMs = 0;
-    if (this.rightReady) {
-      this.rightEngine.seekTo(rightTargetFor(this.positionMs, 0, this.rightDurationMs));
-    }
-    this.lastCorrectionMs = Date.now();
+    this.seekTimeline(t);
     this.hint = '偏移已归零';
   }
 
   private offsetText(): string {
     return `${this.offsetMs >= 0 ? '+' : ''}${this.offsetMs}ms`;
+  }
+
+  /** 打开历史面板：先暂停（保留续播意图，选中条目后自动续播），再异步载入 */
+  private openHistory(): void {
+    // 与选片同口径：保留续播意图供条目选择后续播；直接关闭面板时清意图
+    const wasPlaying: boolean = this.wantPlaying ||
+      this.leftEngine.playing || (this.rightReady && this.rightEngine.playing);
+    this.pauseAll(false);
+    this.wantPlaying = wasPlaying;
+    this.historyOpen = true;
+    this.loadHistory();
+  }
+
+  /**
+   * 载入历史列表：CompareHistoryStore 读 preferences（坏值返回空表），
+   * MediaRepo.load(ClipFilter.all()) 一次建 id→clip 映射；右片缺失标「缺失」且只能删。
+   */
+  private loadHistory(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    const repo: MediaRepo | undefined = this.repo;
+    if (ctx === undefined || repo === undefined) {
+      this.historyRows = [];
+      return;
+    }
+    this.historyLoading = true;
+    CompareHistoryStore.load(ctx).then((entries: Array<CompareHistoryEntry>): void => {
+      if (this.disposed) {
+        return;
+      }
+      repo.load(ClipFilter.all()).then((clips: Array<VideoClip>): void => {
+        if (this.disposed) {
+          return;
+        }
+        const byId: Map<number, VideoClip> = new Map();
+        for (const c of clips) {
+          byId.set(c.id, c);
+        }
+        const rows: Array<CompareHistoryRow> = [];
+        for (const e of entries) {
+          const right: VideoClip | undefined = byId.get(e.rightId);
+          const left: VideoClip | undefined = byId.get(e.leftId);
+          const rightName: string = right !== undefined ? right.name : '缺失';
+          const leftName: string = left !== undefined ? left.name : '缺失';
+          rows.push(new CompareHistoryRow(e.rightId, e.leftId, rightName, leftName,
+            right === undefined, right));
+        }
+        this.historyRows = rows;
+        this.historyLoading = false;
+      }).catch((e: Object): void => {
+        if (this.disposed) {
+          return;
+        }
+        this.historyLoading = false;
+        this.historyRows = [];
+        this.hint = `读取媒体库失败: ${e}`;
+      });
+    }).catch((e: Object): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.historyLoading = false;
+      this.historyRows = [];
+      this.hint = `读取历史失败: ${e}`;
+    });
+  }
+
+  /** 点历史条目填右槽（缺失条目只提示，不换片） */
+  private pickHistoryRow(row: CompareHistoryRow): void {
+    const clip: VideoClip | undefined = row.clip;
+    if (clip === undefined) {
+      this.hint = '该记录的视频已不在媒体库，可删除此记录';
+      return;
+    }
+    this.historyOpen = false;
+    this.chooseRight(clip);
+  }
+
+  private deleteHistoryRow(row: CompareHistoryRow): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    CompareHistoryStore.remove(ctx, row.rightId).then((): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.loadHistory();
+    });
   }
 
   private canRetryLeft(): boolean {
@@ -779,6 +1165,15 @@ struct Compare {
           })
           .width('100%')
           .height('100%')
+        // T25 dormant 黑层：常驻透明层，只在左独播域外/左独播时由 decide 写回；不拦触摸
+        if (BLACK_LAYER_ENABLED) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(Color.Black)
+            .opacity(this.domBlackLeft ? 1 : 0)
+            .hitTestBehavior(HitTestMode.None)
+        }
         if (this.leftError !== '') {
           Column({ space: 6 }) {
             Text(this.leftError)
@@ -840,6 +1235,15 @@ struct Compare {
           })
           .width('100%')
           .height('100%')
+        // T25 dormant 黑层（右）
+        if (BLACK_LAYER_ENABLED) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(Color.Black)
+            .opacity(this.domBlackRight ? 1 : 0)
+            .hitTestBehavior(HitTestMode.None)
+        }
         if (this.rightClip === undefined) {
           Column({ space: 6 }) {
             Text('未选择右侧片源')
@@ -913,6 +1317,7 @@ struct Compare {
           Button('关闭')
             .fontSize(11)
             .onClick((): void => {
+              this.pauseAll();
               this.selectingRight = false;
             })
         }
@@ -937,6 +1342,7 @@ struct Compare {
             Button('返回')
               .fontSize(11)
               .onClick((): void => {
+                this.pauseAll();
                 this.selectingRight = false;
               })
           }
@@ -984,6 +1390,102 @@ struct Compare {
     .backgroundColor('#66000000')
   }
 
+  /** T25 对比历史面板：条目名/缺失标记/点击填右槽/删除 */
+  @Builder
+  private historyOverlay() {
+    Column() {
+      Blank()
+      Column({ space: 8 }) {
+        Row({ space: 8 }) {
+          Text('对比历史')
+            .fontSize(14)
+            .fontColor(Color.White)
+            .layoutWeight(1)
+          Button('关闭')
+            .fontSize(11)
+            .onClick((): void => {
+              this.pauseAll();
+              this.historyOpen = false;
+            })
+        }
+        .width('100%')
+        if (this.historyLoading) {
+          Column({ space: 6 }) {
+            LoadingProgress()
+              .width(28)
+              .height(28)
+            Text('读取历史…')
+              .fontSize(10)
+              .fontColor('#AAAAAA')
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else if (this.historyRows.length === 0) {
+          Column({ space: 8 }) {
+            Text('暂无对比历史')
+              .fontSize(11)
+              .fontColor('#AAAAAA')
+            Text('选过一次右侧片源后会自动记录')
+              .fontSize(9)
+              .fontColor('#78909C')
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else {
+          List({ space: 4 }) {
+            ForEach(this.historyRows, (row: CompareHistoryRow): void => {
+              ListItem() {
+                Row({ space: 8 }) {
+                  Column({ space: 2 }) {
+                    Text(`${row.rightName} ↔ ${row.leftName}`)
+                      .fontSize(11)
+                      .fontColor(row.missing ? '#FF8A80' : Color.White)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                    Text(row.missing ? '缺失：右片已不在媒体库' : `右:${row.rightName}`)
+                      .fontSize(9)
+                      .fontColor('#90A4AE')
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                  }
+                  .layoutWeight(1)
+                  .alignItems(HorizontalAlign.Start)
+                  Button('删除')
+                    .fontSize(10)
+                    .onClick((): void => {
+                      this.deleteHistoryRow(row);
+                    })
+                }
+                .width('100%')
+                .padding(10)
+                .backgroundColor('#22FFFFFF')
+                .borderRadius(6)
+                .onClick((): void => {
+                  this.pickHistoryRow(row);
+                })
+              }
+            }, (row: CompareHistoryRow): string => `${row.rightId}_${row.leftId}_${row.missing}`)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .scrollBar(BarState.Off)
+        }
+      }
+      .width('100%')
+      .height('72%')
+      .padding(12)
+      .backgroundColor('#F0202020')
+      .borderRadius({ topLeft: 12, topRight: 12 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#66000000')
+  }
+
   build() {
     Stack() {
       Column() {
@@ -997,6 +1499,11 @@ struct Compare {
             .fontSize(13)
             .fontColor(Color.White)
             .layoutWeight(1)
+          Button('历史')
+            .fontSize(11)
+            .onClick((): void => {
+              this.openHistory();
+            })
           Button(this.rightClip === undefined ? '选右片' : '换右片')
             .fontSize(11)
             .onClick((): void => {
@@ -1047,11 +1554,11 @@ struct Compare {
                 } else if (mode === SliderChangeMode.End) {
                   this.sliderDragging = false;
                   this.leftEngine.setSeeking(false);
-                  this.seekBoth(value);
+                  this.seekTimeline(value);
                 } else if (mode === SliderChangeMode.Click) {
                   this.sliderDragging = false;
                   this.leftEngine.setSeeking(false);
-                  this.seekBoth(value);
+                  this.seekTimeline(value);
                 }
               })
             // 右端标签 = timelineEnd()（= tMax；off=0 时即 max(L,R)，与旧左轴时长标签衔接）
@@ -1082,6 +1589,18 @@ struct Compare {
               .onClick((): void => {
                 this.resetOffset();
               })
+            Button(this.timelineLoop ? '循环:开' : '循环:关')
+              .fontSize(11)
+              .onClick((): void => {
+                this.toggleTimelineLoop();
+              })
+            if (this.audioSideDual) {
+              Button(`音轨:${this.audioTrack === AudioTrackKind.CAP ? '内录' : '环境'}`)
+                .fontSize(11)
+                .onClick((): void => {
+                  this.cycleAudioTrack();
+                })
+            }
           }
           .width('100%')
 
@@ -1128,6 +1647,10 @@ struct Compare {
 
       if (this.selectingRight) {
         this.pickerOverlay()
+      }
+
+      if (this.historyOpen) {
+        this.historyOverlay()
       }
 
       if (this.fatalError !== '') {

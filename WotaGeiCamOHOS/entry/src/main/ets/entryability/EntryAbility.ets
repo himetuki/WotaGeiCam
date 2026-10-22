@@ -17,6 +17,7 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.Ab
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { Diag } from '../diag/Diag';
+import { PureLogicBarrel } from '../player/PureLogicBarrel';
 
 const DOMAIN = 0x0000;
 
@@ -24,6 +25,8 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // 装诊断日志（必须在写第一条日志之前；重复调用只更新开关）——hilog 通道恒活，文件侧走开关门
     Diag.install(this.context);
+    // T25 P3-1：编译守卫——把 T24 纯逻辑模块拉进 ArkTS program 并留一行启动签名
+    Diag.i('WotaPure', `pure logic barrel ${PureLogicBarrel.signature()}`);
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {

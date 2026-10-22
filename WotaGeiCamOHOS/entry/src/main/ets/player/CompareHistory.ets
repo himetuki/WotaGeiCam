@@ -11,7 +11,36 @@
  * T24 差异登记：recordEntry 由调用方显式传 ts（上游内部读 System.currentTimeMillis）——
  * 纯函数可测；调用方传 Date.now() 即与上游等价。recordEntry/removeEntry 一律返回新数组、
  * 不改入参（上游是 prefs 写回，天然不暴露入参变异）。
+ *
+ * T25 数值容错（登记）：上游 org.json 的 getLong 对数字串宽松解析（"5" → 5，非整数串抛异常
+ * 被 runCatching 吞掉）；本侧 entriesOf 对 number/string **统一要求 safe integer**
+ * （number 非有限/超安全整数跳过，string 另需匹配 `^-?\d+$`；"5abc"/"5.5"/"" 仍跳过），
+ * 与上游 getLong 的接受面对齐到「整数可读、其他坏值跳过」（T25 审查修复：两分支口径一致）。
  */
+
+/** 整数串白名单（ArkTS 禁正则字面量） */
+const INT_STRING_RE: RegExp = new RegExp('^-?\\d+$');
+
+/**
+ * 历史字段数值读取：number → safe integer；string → 整数串且 safe integer；其余 undefined。
+ * 对齐上游 getLong 的宽松数字串解析（见文件头 T25 登记）。
+ */
+function historyNumberOrUndefined(value: Object): number | undefined {
+  if (typeof value === 'number') {
+    const n: number = value as number;
+    // 与 string 分支同口径：非有限/超安全整数一律跳过（防 JSON.parse 出的畸形大数）
+    return Number.isFinite(n) && Number.isSafeInteger(n) ? n : undefined;
+  }
+  if (typeof value === 'string') {
+    const s: string = value as string;
+    if (!INT_STRING_RE.test(s)) {
+      return undefined;
+    }
+    const n: number = Number(s);
+    return Number.isSafeInteger(n) ? n : undefined;
+  }
+  return undefined;
+}
 
 /** 一条对照记录：右侧视频 rightId 与哪条左侧 leftId 搭过、什么时候（epoch ms） */
 export class CompareHistoryEntry {
@@ -59,20 +88,13 @@ export class CompareHistory {
         continue;
       }
       const row: Record<string, Object> = rowObj as Record<string, Object>;
-      const rightV: Object = row['rightId'];
-      const leftV: Object = row['leftId'];
-      const tsV: Object = row['ts'];
-      if (typeof rightV !== 'number' || typeof leftV !== 'number' || typeof tsV !== 'number') {
+      const rightNum: number | undefined = historyNumberOrUndefined(row['rightId']);
+      const leftNum: number | undefined = historyNumberOrUndefined(row['leftId']);
+      const tsNum: number | undefined = historyNumberOrUndefined(row['ts']);
+      if (rightNum === undefined || leftNum === undefined || tsNum === undefined) {
         continue;
       }
-      const rightNum: number = rightV as number;
-      const leftNum: number = leftV as number;
-      const tsNum: number = tsV as number;
-      if (!Number.isFinite(rightNum) || !Number.isFinite(leftNum) || !Number.isFinite(tsNum)) {
-        continue;
-      }
-      const entry: CompareHistoryEntry =
-        new CompareHistoryEntry(Math.trunc(rightNum), Math.trunc(leftNum), Math.trunc(tsNum));
+      const entry: CompareHistoryEntry = new CompareHistoryEntry(rightNum, leftNum, tsNum);
       if (entry.rightId <= 0 || entry.leftId <= 0) {
         continue;
       }
