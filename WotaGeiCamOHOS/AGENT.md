@@ -69,5 +69,12 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `ArcRepairRunner`（执行器门面：fd/轮询/取消宽限/失败 discard/可复用面板 probe 结果）。
 - `pages/Player.ets`：「修复光弧」面板（T30）——probe 拦截、24/25 与死区 0/12/32、进度/取消、
   成功跳媒体库、忙碌拦返回、与导出 A/B 互斥。
+- `ui/HudTokens.ets` / `ui/HudSpec.ets`：相机 HUD 令牌（深色色板、字阶 11/13/17、触控 48vp）与
+  固定布局常量（顶栏两行 5 项、Dock 2×4）。**HUD 代码禁止 fontSize(10)**。
+- `ui/WindowChrome.ets`：沉浸式取景 + 系统栏配色 + AvoidArea 安全区；普通页恢复黑底系统栏。
+- `ui/HudPill.ets`：**@Component + @Prop** 的 HUD 胶囊（不要用按值 @Builder 传动态 label——
+  值参数首帧冻结，真机表现为胶囊标签恒为 `—`）。
+- `ui/HudMoreSheet.ets`：低频开关面板（闪光/效果/光弧/网格），复用 PillPopup 遮罩/量框。
+- 设置页开发者入口默认隐藏：版本号 2s 内 7 连点显形（Index/GlPreview 仅此入口可达，均有页头+返回）。
 - 以上模块**不得 import `@ohos.*`/`@kit.*`**；新增纯逻辑模块须进 `PureLogicBarrel`，否则 hvigor
   不可达、编译门失效。`test/pure/*.test.ets` 由 `scripts/pure-test.mjs` 转译执行。

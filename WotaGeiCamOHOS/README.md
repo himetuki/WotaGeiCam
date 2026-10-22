@@ -124,8 +124,10 @@ arc-repair-verdict（5，T28）、arc-repair-session（31，T29 25 + T30 4 + 审
 
 - [x] T30 离线修复音频直拷 + Player「修复光弧」面板（2026-10-22）：native 运行期保留全部 `audio/` 轨（`audioTrackIndices/audioFormats/audioDstTracks` 并行表），首枚视频输出时在 SetRotation/Start 前逐轨 AddTrack（失败逐轨降级）；视频 EOS 排空后同 fd 新建 audio source/demuxer 逐轨 select→SeekToTime(0,PREVIOUS_SYNC)→读样本，PTS 按视频首帧归一、负值丢弃、逐轨单调兜底后写 muxer；done 串 audioSamples=全轨成功样本合计；`record/ArcRepairSessionModel.ets` 增 `describeRepairError`（全码中文文案 + ENGINE 后缀 + busy/args/worker + 未知兜底）与 `audioLaneNote`（无/成功/降级三态），删除临时音轨硬闸；`ArcRepairRunner.run` 可复用面板 probe 结果、结果带 `audioSamples`；`pages/Player.ets` 底栏「修复光弧」面板（probe 拦截 NO_NEED/无视频/失败、目标 24/25、死区 0/12/32、进度/取消/成功跳媒体库、与导出 A/B 互斥、忙碌拦返回）。T29 P3×7（discardQuiet(ENOENT)/排空 delta 仅诊断 WARN/缺像素格式即 ARC_CPU_YUV/stride·slice 单次 WARN/nativeStarted/头注与 JSDoc 订正）。审查修复（P1×1+P2×1+P3×5）：probe 补赋 dstFrames + 面板守卫改源侧事实并逐档判 NO_NEED（不可行档禁用）、成片说明按实际目标档/死区重算且切换即刷新、零样本音轨预读后不建轨、逐轨成功数进 native done 日志（note 不再宣称全部）、lane 读失败记 readError、Seek(0) 失败回退从头读。**面板可用，GPU 路线与真机调优 T31**
 
-**进度收敛（T30 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、内录纯逻辑内核（授权态机/静音判据/采集算式/源契约/双轨偏移/PCM 解码）、离线光弧修复（抽帧计划/指令流/整像素合并/成功判据 + native CPU 执行器 probe/解码/合并/编码/mux + 音频直拷 + Player 修复面板）、纯逻辑测试架（233 用例）。
-**留白（后续批）**：离线修复 GPU 路线与真机调优（T31：ArcRepairGl/1080p 基准/色度残差）、内录平台面四步（T27-1 平台探针/T27-2 ENV 音轨/T27-3 CAP 双轨/T27-4 消费面）、AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、VideoSession 参数面（录制参数下发）、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
+- [x] T31 取景页 HUD 真机取证与修复（2026-10-22，HUAWEI ALN-AL00 / HarmonyOS 7.0.0.109 / API 26 / 1260x2720）：真机取证（旧包 XComponent [0,124][1260,2629] 未沉浸、底部白条；胶囊 镜头:—/画幅:— 而顶栏已为 广角/1080p；单行 Scroll 仅 6 颗可见；录制键绿色圆角矩形；网格完全不可见；系统栏白底黑图标）→ `ui/HudTokens.ets`（深色色板/字阶 11-13-17/触控 48/遮罩令牌）、`ui/WindowChrome.ets`（沉浸式+透明系统栏白图标+AvoidArea 安全区；普通页黑底栏）、`ui/HudPill.ets`（@Component+@Prop 替 @Builder 值参数：胶囊标签不刷新根因）、`ui/HudMoreSheet.ets`（复用 PillPopup：闪光/效果/光弧/网格）、Camera 顶栏两行各 5 项+右侧 48vp 入口胶囊+渐变遮罩、Dock 2×4 主胶囊（48vp、无横向 Scroll）、更多+圆形快门（44vp 红点/录制中 24vp 方块）、确定性 3×3 网格、删「预览—fps」死读数、Settings List 顶对齐+48vp 选项+开发者入口 7 连点显形、Index/GlPreview 页头+返回、EntryAbility 强制深色、Gallery 黑底栏。**真机复验未执行：安装包签名指纹与本仓自签证书不匹配，按红线不安装**；待用户以 DevEco 同证书重装后按 PORT_MAP T31 11 项走查
+
+**进度收敛（T31 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、内录纯逻辑内核（授权态机/静音判据/采集算式/源契约/双轨偏移/PCM 解码）、离线光弧修复（抽帧计划/指令流/整像素合并/成功判据 + native CPU 执行器 probe/解码/合并/编码/mux + 音频直拷 + Player 修复面板）、纯逻辑测试架（233 用例）。
+**留白（后续批）**：T31 真机复验 11 项与相机交互（T32：UIOrientation 接线/对焦/捏合变焦）、离线修复 GPU 路线与真机调优（T32：ArcRepairGl/1080p 基准/色度残差）、内录平台面四步（T27-1 平台探针/T27-2 ENV 音轨/T27-3 CAP 双轨/T27-4 消费面）、AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、VideoSession 参数面（录制参数下发）、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
 
 ## 交付
 
@@ -133,12 +135,12 @@ arc-repair-verdict（5，T28）、arc-repair-session（31，T29 25 + T30 4 + 审
 
 | 产物 | 路径 | 字节数（单次快照） | sha256（单次快照，易变） |
 | --- | --- | --- | --- |
-| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5665690 | `efb17efd012c5172f6dd085c1b82eb0c547ade96318ae501f7a48b4a1bdd96b4` |
-| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5780314 | `67a588a9ad5fb373e1c6dcaea6cac929a5c743ae33e86f73d30b94732cfbe8f9` |
+| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5797906 | `2827829b6ea082f29659aacb087bed2f5b7e09e861fddb653362e7d39d7f5b15` |
+| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5920862 | `3ed35be8c01d938fcd90ef06fa392d4bc63604ec9be6103f5ea492b92c62ab20` |
 
 > **hash 不可复现，勿作复验判据**：zip 条目时间戳随打包时刻变化，同一源码两次 clean 构建
 > 字节数相同但 sha256 不同；signed 包还叠加 sign-app 时间戳，每次重签必变，**signed 字节数也
-> 会随签名块长度小幅浮动**（本快照 5780314B 不是固定值）。上表是 T30 审查修复批的单次本机快照（仅交付
+> 会随签名块长度小幅浮动**（本快照 5920862B 不是固定值）。上表是 T31 批的单次本机快照（仅交付
 > 留痕）。内容级复验**只对 unsigned 有效**：解包后按路径排序逐文件 sha256 比对（16 个业务文件）；
 > signed 包以 `local-sign.mjs` 内置 `verify-app` 的证书链/profile 输出为准（`.pages.info` 由签名
 > 工具生成，不参与内容比对）。示例：
@@ -154,10 +156,10 @@ arc-repair-verdict（5，T28）、arc-repair-session（31，T29 25 + T30 4 + 审
 
 - 未签名包：clean 构建（WARN=2 基线：napi 未验证提示 + 未配置签名跳过）产物。
 - 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，bundleName
-  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 60526 字节，含
+  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 66290 字节，含
   `<hap sign block>` 标记）位于 ZIP 尾部中央目录之前，**不产生旧式 `META-INF/` 条目**——「签名块
   与 profile 可见」以脚本内置 `verify-app` 回验为准（实测还原 3 级证书链 + 3254 字节 profile）。
-  `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 576 字节），无 `META-INF/`。
+  `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 592 字节），无 `META-INF/`。
   **仅证明包结构可签名/可验证**——自签证书未经华为云颁发，真机安装请改用 DevEco Studio 自动签名。
 - 复跑：`node scripts/local-sign.mjs`（需 `DEVECO_SDK_HOME` 或 `HAP_SIGN_TOOL_JAR`、PATH 中有 `java`；
   可用 `LOCAL_SIGN_PASS` 覆盖本地口令）；签名材料只首次生成，落 `.local-signing/`（已 gitignore，

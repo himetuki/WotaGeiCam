@@ -31,7 +31,9 @@ export default class EntryAbility extends UIAbility {
     // T29 编译门：离线修复门面（fd 生命周期/轮询/归因）必须进 ArkTS program
     Diag.i('WotaRepair', `repair contract ${ArcRepairRunner.contract()}`);
     try {
-      this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+      // T31：强制深色——相机 UI 是深色 HUD，系统组件（按钮/系统栏/弹层）跟随深色，
+      // 避免真机取证里的「蓝按钮 + 白系统栏 + 绿录制键」浅色混入。
+      this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }

@@ -9,6 +9,7 @@ import { common } from '@kit.AbilityKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
 import { formatDuration, formatSize } from '../media/MediaFormat';
+import { WindowChrome } from '../ui/WindowChrome';
 
 function pad2(v: number): string {
   return v < 10 ? `0${v}` : `${v}`;
@@ -53,6 +54,10 @@ struct Gallery {
       this.message = 'no host context';
       return;
     }
+    // T31：媒体库恢复黑底系统栏（相机页是全屏透明栏，离开相机页必须复位）
+    WindowChrome.lastWindow(ctx).then((win): Promise<void> =>
+      WindowChrome.applyStandardDark(win)).catch((e: Object): void => {
+    });
     this.repo = new MediaRepo(ctx);
     this.refreshAll();
   }

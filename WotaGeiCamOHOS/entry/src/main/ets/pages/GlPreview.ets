@@ -637,7 +637,7 @@ struct GlPreview {
   }
 
   build() {
-    Stack() {
+    Stack({ alignContent: Alignment.Top }) {
       // libraryname 与 cpp/CMakeLists.txt 的 add_library(entry ...) 及 napi nm_modname 三者一致
       XComponent({ id: 'wotaGlCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
         .onLoad(() => {
@@ -647,6 +647,26 @@ struct GlPreview {
         .width('100%')
 
       Column({ space: 8 }) {
+        // T31：开发者页补页头 + 返回（原返回混在控制行里、无页头）
+        Row({ space: 8 }) {
+          Button('返回')
+            .fontSize(13)
+            .height(48)
+            .borderRadius(24)
+            .backgroundColor('#B312171C')
+            .onClick((): void => {
+              this.disposed = true;
+              this.getUIContext().getRouter().back();
+            })
+          Text('开发者：GL 试验（预览/录制链路）')
+            .fontSize(17)
+            .fontColor(Color.White)
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+
         Text(this.message)
           .fontSize(12)
           .fontColor(Color.White)
@@ -668,13 +688,6 @@ struct GlPreview {
             .fontSize(12)
             .onClick(() => {
               this.toggleFrost();
-            })
-          Button('返回')
-            .fontSize(12)
-            .onClick(() => {
-              // 先置 disposed 再返回：轮询/权限/起镜回调立即失效（aboutToDisappear 再兜底收尾）
-              this.disposed = true;
-              this.getUIContext().getRouter().back();
             })
         }
         Row({ space: 8 }) {
@@ -704,7 +717,7 @@ struct GlPreview {
             })
         }
       }
-      .alignItems(HorizontalAlign.Center)
+      .alignItems(HorizontalAlign.Start)
       .width('100%')
       .padding(16)
     }

@@ -25,6 +25,17 @@
  * 上游 ParamsPersist 留白）；tint 副轴/对焦弹层留白；视频-only；设置持久化走 ui/SettingsStore
  * （键独立于上游 ParamsPersist）。
  * 加载顺序契约：不得页面顶层静态 import 'libentry.so'，XComponent onLoad 后 dynamic import 桥。
+ *
+ * T31 取景页可用性修复（真机 HUAWEI ALN-AL00 / 1260x2720 取证）：
+ * - 沉浸式：WindowChrome.applyCamera（setWindowLayoutFullScreen + 透明系统栏 + 白色图标），
+ *   XComponent 由 [0,124]..[1260,2629] 铺到全屏；HUD 按 AvoidArea(TYPE_SYSTEM|TYPE_CUTOUT) 留边；
+ * - 胶囊标签走 ui/HudPill（@Component + @Prop）——原 @Builder 按值传 label 不随 @State 刷新，
+ *   真机表现为顶栏正确而胶囊恒为「镜头:—/画幅:—」；
+ * - Dock 改 2×4 两行主胶囊（镜头/画幅/帧率/变焦 + 快门/ISO/EV/WB），48vp、无横向 Scroll；
+ *   闪光/效果/光弧/网格收进「更多」面板（ui/HudMoreSheet，复用 PillPopup 遮罩/量框）；
+ * - 录制键 72vp 圆形白环 + 44vp 红点（录制中 24vp 红方块、收尾中禁用）；
+ * - 网格确定性三行三列（2 横 2 竖 Divider），不再依赖百分比 position；
+ * - 删除预览帧率死读数（GlCameraEngine 无 previewFps 真值），只显「录Nfps」。
  */
 import { common } from '@kit.AbilityKit';
 import { display, window } from '@kit.ArkUI';
@@ -52,6 +63,10 @@ import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudSpec } from '../ui/HudSpec';
+import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
+import { HudEntryButton, HudPill } from '../ui/HudPill';
+import { HudMoreSheet } from '../ui/HudMoreSheet';
+import { SafeInsets, WindowChrome } from '../ui/WindowChrome';
 import { evText, shutterText, wbShort } from '../ui/ParamFormat';
 import { PillRect } from '../ui/PillPopup';
 import {
@@ -163,22 +178,30 @@ struct CameraPage {
   @State activePill: string = '';
   /** 弹层锚点（窗口 px；零矩形 = 未量到，PillPopup 内部走底贴屏回退） */
   private pillAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** 「更多」面板锚点（pill_more 的窗口矩形） */
+  private moreAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
   /** 顶栏第二行读数（参数流驱动，subscribe 里重算） */
   @State rowShutter: string = '-';
   @State rowIso: string = '-';
   @State rowEv: string = '-';
   @State rowWb: string = '-';
-  /** 高级参数胶囊当前值标签 */
+  /** 高级参数胶囊当前值标签（T31 起由 HudPill @Prop 消费，状态变即刷新） */
   @State pillShutterLabel: string = 'AUTO';
   @State pillIsoLabel: string = 'AUTO';
   @State pillEvLabel: string = '+0.0EV';
   @State pillWbLabel: string = '自动';
+  /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
+  @State safeTop: number = 0;
+  @State safeBottom: number = 0;
+  /** T31「更多」面板（闪光/效果/光弧/网格） */
+  @State moreOpen: boolean = false;
 
   aboutToAppear(): void {
     this.disposed = false;
     this.pageVisible = true;
     this.ctx = this.getUIContext().getHostContext() as common.Context | undefined;
     this.bindParamsLabels();
+    this.applyImmersiveChrome();
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
         return;
@@ -207,6 +230,7 @@ struct CameraPage {
       return;
     }
     this.setKeepScreenOn(true);
+    this.applyImmersiveChrome();
     this.resumeHealthAfterShow();
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
@@ -303,6 +327,49 @@ struct CameraPage {
       this.loading = false;
       this.message = `读取设置失败: ${e}`;
     });
+  }
+
+  /**
+   * T31 沉浸式窗口：全屏布局 + 透明系统栏（白色图标），并读安全区给 HUD 留边。
+   * 失败只记日志并保持默认外观（退路：非全屏 + 黑底白图标）。
+   */
+  private applyImmersiveChrome(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    WindowChrome.lastWindow(ctx).then((win): Promise<SafeInsets> =>
+      WindowChrome.applyCamera(win)).then((insets: SafeInsets): void => {
+      if (this.disposed) {
+        return;
+      }
+      // 兜底下限：系统不报 avoidArea 时按状态栏/手势条常见高度留边，避免 HUD 压挖孔
+      this.safeTop = Math.max(24, Math.round(insets.top));
+      this.safeBottom = Math.max(12, Math.round(insets.bottom));
+    }).catch((e: Object): void => {
+      Diag.w(WOTA_RECORD_TAG, `immersive chrome failed: ${e}`);
+    });
+  }
+
+  /** 「更多」面板：量锚点后开（锚点失败零矩形 → PillPopup 底贴屏回退） */
+  private openMore(): void {
+    this.moreAnchor = { left: 0, top: 0, right: 0, bottom: 0 };
+    try {
+      const info = this.getUIContext().getComponentUtils().getRectangleById('pill_more');
+      this.moreAnchor = {
+        left: info.windowOffset.x,
+        top: info.windowOffset.y,
+        right: info.windowOffset.x + info.size.width,
+        bottom: info.windowOffset.y + info.size.height
+      };
+    } catch (e) {
+      // 锚点量取失败：保持零矩形（回退底贴屏）
+    }
+    this.moreOpen = true;
+  }
+
+  private closeMore(): void {
+    this.moreOpen = false;
   }
 
   private syncLabels(): void {
@@ -813,14 +880,17 @@ struct CameraPage {
       return this.sizeLabel;
     }
     if (key === 'fps') {
-      const preview: number = this.engine.currentPreviewFps();
-      return `预览${preview > 0 ? preview : '—'}fps/录${this.settings.fps}fps`;
+      // T31：删预览帧率死读数（GlCameraEngine 无 previewFps 真值，真机恒显 —）
+      return `录${this.settings.fps}fps`;
     }
     if (key === 'battery') {
-      return `🔋${this.batteryPct >= 0 ? this.batteryPct + '%' : '—'}`;
+      return this.batteryPct >= 0 ? `${this.batteryPct}%` : '—';
     }
     if (key === 'free') {
-      return `${this.freeMb >= 0 ? this.freeMb + 'MB' : '—'}`;
+      if (this.freeMb < 0) {
+        return '—';
+      }
+      return this.freeMb >= 1024 ? `${Math.floor(this.freeMb / 1024)}GB` : `${this.freeMb}MB`;
     }
     return formatElapsed(this.elapsedMs);
   }
@@ -1300,42 +1370,93 @@ struct CameraPage {
     return summary;
   }
 
-  @Builder
-  private pill(label: string, onTap: () => void, enabled: boolean, componentId: string = '') {
-    Button(label)
-      .fontSize(11)
-      .height(30)
-      .enabled(enabled)
-      .backgroundColor('#4D000000')
-      .id(componentId)
-      .onClick((): void => {
-        onTap();
-      })
-  }
-
+  /**
+   * 3×3 网格（T31 可靠性修复）：确定性三行三列布局 + 2 横 2 竖 Divider。
+   * 旧实现用 `position({ y: '33%' })` 百分比定位，真机取证网格完全不可见（百分比定位不可靠）。
+   */
   @Builder
   private gridOverlay() {
     Stack() {
-      ForEach(HudSpec.gridFractions(), (f: number): void => {
-        Divider()
-          .width('100%')
-          .strokeWidth(1)
-          .color('#55FFFFFF')
-          .position({ x: 0, y: `${f * 100}%` })
-        Divider()
-          .vertical(true)
-          .height('100%')
-          .strokeWidth(1)
-          .color('#55FFFFFF')
-          .position({ x: `${f * 100}%`, y: 0 })
-      }, (f: number): string => `${f}`)
-      Text('+')
-        .fontSize(18)
-        .fontColor('#55FFFFFF')
+      Column() {
+        Row().layoutWeight(1)
+        Divider().width('100%').strokeWidth(1).color(HudColor.GRID_LINE)
+        Row().layoutWeight(1)
+        Divider().width('100%').strokeWidth(1).color(HudColor.GRID_LINE)
+        Row().layoutWeight(1)
+      }
+      .width('100%')
+      .height('100%')
+      Row() {
+        Column().layoutWeight(1)
+        Divider().vertical(true).height('100%').strokeWidth(1).color(HudColor.GRID_LINE)
+        Column().layoutWeight(1)
+        Divider().vertical(true).height('100%').strokeWidth(1).color(HudColor.GRID_LINE)
+        Column().layoutWeight(1)
+      }
+      .width('100%')
+      .height('100%')
     }
     .width('100%')
     .height('100%')
     .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** Dock 胶囊文案（单一分配点；@State 值变化 → HudPill @Prop 刷新） */
+  private dockLabel(key: string): string {
+    if (key === 'lens') {
+      return `镜头:${this.lensLabel}`;
+    }
+    if (key === 'size') {
+      return `画幅:${this.sizeLabel}`;
+    }
+    if (key === 'fps') {
+      const label: string = `${this.settings.fps}`;
+      return `帧率:${label}`;
+    }
+    if (key === 'zoom') {
+      return `变焦:${this.zoomLabel}`;
+    }
+    if (key === 'shutter') {
+      return `快门:${this.pillShutterLabel}`;
+    }
+    if (key === 'iso') {
+      return `ISO:${this.pillIsoLabel}`;
+    }
+    if (key === 'ev') {
+      return `EV:${this.pillEvLabel}`;
+    }
+    return `WB:${this.pillWbLabel}`;
+  }
+
+  /** Dock 胶囊门控（沿旧胶囊口径：起镜后可改；录制/收尾中仅高级参数按 ParamPills 白名单） */
+  private dockEnabled(key: string): boolean {
+    if (key === 'lens' || key === 'size' || key === 'fps') {
+      return !this.recording && !this.stopPending;
+    }
+    if (key === 'zoom') {
+      return true;
+    }
+    return this.cameraStarted && (!this.recording || pillEditableDuringRecording(key));
+  }
+
+  private onDockTap(key: string): void {
+    if (key === 'lens') {
+      this.cycleLens();
+      return;
+    }
+    if (key === 'size') {
+      this.cycleSize();
+      return;
+    }
+    if (key === 'fps') {
+      this.cycleFps();
+      return;
+    }
+    if (key === 'zoom') {
+      this.cycleZoom();
+      return;
+    }
+    this.openPill(key, `pill_${key}`);
   }
 
   build() {
@@ -1351,51 +1472,116 @@ struct CameraPage {
         this.gridOverlay()
       }
 
+      // T31 渐变遮罩：上/下两条压暗带，保证白字在任何画面上可读（不拦触摸）。
+      // 用「满屏 Column + Blank 分隔」确定性布局，不用百分比 position（真机网格曾因此不可见）。
       Column() {
-        Row({ space: 8 }) {
-          Button('设置')
-            .fontSize(12)
-            .enabled(!this.recording && !this.stopPending)
-            .onClick((): void => {
-              this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
-            })
-          Button('媒体库')
-            .fontSize(12)
-            .enabled(!this.recording && !this.stopPending)
-            .onClick((): void => {
-              this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
-            })
-          Column({ space: 2 }) {
-            Row({ space: 6 }) {
-              ForEach(HudSpec.HUD_READOUTS, (key: string): void => {
-                Text(this.readoutText(key))
-                  .fontSize(10)
-                  .fontColor(key === 'duration' && this.recording ? '#FF5252' : Color.White)
-                  .maxLines(1)
+        Column()
+          .width('100%')
+          .height(HudSpec.TOP_SCRIM_HEIGHT + this.safeTop)
+          .linearGradient({
+            angle: 180,
+            colors: [[HudColor.SCRIM_STRONG, 0], [HudColor.SCRIM_TRANSLUCENT, 0.55],
+              [HudColor.SCRIM_CLEAR, 1]]
+          })
+        Blank()
+        Column()
+          .width('100%')
+          .height(HudSpec.BOTTOM_SCRIM_HEIGHT + this.safeBottom)
+          .linearGradient({
+            angle: 0,
+            colors: [[HudColor.SCRIM_STRONG, 0], [HudColor.SCRIM_TRANSLUCENT, 0.5],
+              [HudColor.SCRIM_CLEAR, 1]]
+          })
+      }
+      .width('100%')
+      .height('100%')
+      .hitTestBehavior(HitTestMode.None)
+
+      Column() {
+        // ---------- 顶栏：两行读数（各 5 项）+ 右侧 48vp 深色入口胶囊
+        Row({ space: HudSpace.M }) {
+          Column({ space: HudSpace.XS }) {
+            // 两行读数直接内联（不用按值 @Builder：@Builder 值参数会在首帧冻结，不随 @State 刷新）
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.HUD_ROW1, (key: string): void => {
+                Column({ space: 1 }) {
+                  Text(HudSpec.rowLabelOf(key))
+                    .fontSize(HudType.LABEL)
+                    .fontColor(HudColor.TEXT_TERTIARY)
+                    .maxLines(1)
+                  Text(this.readoutText(key))
+                    .fontSize(HudType.VALUE)
+                    .fontColor(key === 'duration' && this.recording
+                      ? HudColor.DANGER : HudColor.TEXT_PRIMARY)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
               }, (key: string): string => key)
             }
-            // T21 顶栏第二行：快门/ISO/EV/WB（对齐上游 READOUT 可见项；固定两行为登记偏离）
-            Row({ space: 6 }) {
-              ForEach(HudSpec.HUD_READOUTS_ROW2, (key: string): void => {
-                Text(this.readoutText2(key))
-                  .fontSize(10)
-                  .fontColor(Color.White)
-                  .maxLines(1)
+            .width('100%')
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.HUD_ROW2, (key: string): void => {
+                Column({ space: 1 }) {
+                  Text(HudSpec.rowLabelOf(key))
+                    .fontSize(HudType.LABEL)
+                    .fontColor(HudColor.TEXT_TERTIARY)
+                    .maxLines(1)
+                  Text(key === 'duration' ? formatElapsed(this.elapsedMs) : this.readoutText2(key))
+                    .fontSize(HudType.VALUE)
+                    .fontColor(key === 'duration' && this.recording
+                      ? HudColor.DANGER : HudColor.TEXT_PRIMARY)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
               }, (key: string): string => key)
             }
+            .width('100%')
           }
           .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Column({ space: HudSpace.S }) {
+            HudEntryButton({
+              label: '设置',
+              entryEnabled: !this.recording && !this.stopPending,
+              onTap: (): void => {
+                this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
+              }
+            })
+            HudEntryButton({
+              label: '媒体库',
+              entryEnabled: !this.recording && !this.stopPending,
+              onTap: (): void => {
+                this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
+              }
+            })
+          }
+          .width(76)
         }
         .width('100%')
-        .height(HudSpec.TOP_BAR_HEIGHT)
-        .padding({ left: HudSpec.SAFE_MARGIN, right: HudSpec.SAFE_MARGIN })
+        .height(HudSpec.TOP_BAR_HEIGHT + this.safeTop)
+        .alignItems(VerticalAlign.Top)
+        .padding({
+          left: HudSpec.SAFE_MARGIN,
+          right: HudSpec.SAFE_MARGIN,
+          top: this.safeTop + HudSpace.S
+        })
 
         Blank()
 
-        Column({ space: 6 }) {
+        // ---------- 底栏：状态提示 + 两行主胶囊 + 更多/快门
+        Column({ space: HudSpace.S }) {
           if (this.permissionGranted === false) {
             Button(this.permissionRequesting ? '请求权限中…' : '相机权限被拒绝，点按重试')
-              .fontSize(12)
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .height(HudTouch.BUTTON_HEIGHT)
+              .borderRadius(HudShape.PILL_RADIUS)
+              .backgroundColor(HudColor.PILL_BG_ACTIVE)
               .enabled(!this.permissionRequesting)
               .onClick((): void => {
                 this.ensureCameraPermission();
@@ -1403,87 +1589,116 @@ struct CameraPage {
           }
           if (this.message !== '') {
             Text(this.message)
-              .fontSize(11)
-              .fontColor('#FFCC80')
+              .fontSize(HudType.CAPTION)
+              .fontColor(HudColor.WARN)
               .maxLines(2)
               .textAlign(TextAlign.Center)
               .width('100%')
           }
           if (!this.cameraStarted && this.permissionGranted && !this.loading) {
             Button(this.startingCamera ? '启动中…' : '重试相机')
-              .fontSize(11)
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .height(HudTouch.BUTTON_HEIGHT)
+              .borderRadius(HudShape.PILL_RADIUS)
+              .backgroundColor(HudColor.PILL_BG_ACTIVE)
               .enabled(!this.startingCamera)
               .onClick((): void => {
                 this.retryCamera();
               })
           }
-          Scroll() {
-            Row({ space: 6 }) {
-              this.pill(`镜头:${this.lensLabel}`, (): void => {
-                this.cycleLens();
-              }, !this.recording && !this.stopPending)
-              this.pill(`画幅:${this.sizeLabel}`, (): void => {
-                this.cycleSize();
-              }, !this.recording && !this.stopPending)
-              this.pill(`帧率:${this.fpsLabel}`, (): void => {
-                this.cycleFps();
-              }, !this.recording && !this.stopPending)
-              // T21 高级参数胶囊：点按开 PillPopup 就近浮层（门控见 ParamPills.RECORDING_EDITABLE_PILLS）
-              this.pill(`快门:${this.pillShutterLabel}`, (): void => {
-                this.openPill('shutter', 'pill_shutter');
-              }, this.cameraStarted, 'pill_shutter')
-              this.pill(`ISO:${this.pillIsoLabel}`, (): void => {
-                this.openPill('iso', 'pill_iso');
-              }, this.cameraStarted, 'pill_iso')
-              this.pill(`EV:${this.pillEvLabel}`, (): void => {
-                this.openPill('ev', 'pill_ev');
-              }, this.cameraStarted, 'pill_ev')
-              this.pill(`WB:${this.pillWbLabel}`, (): void => {
-                this.openPill('wb', 'pill_wb');
-              }, this.cameraStarted, 'pill_wb')
-              this.pill(`变焦:${this.zoomLabel}`, (): void => {
-                this.cycleZoom();
-              }, true)
-              this.pill(`闪光:${this.flashOn ? '常亮' : '关'}`, (): void => {
-                this.toggleFlash();
-              }, true)
-              this.pill(`效果:${this.effectLabel}`, (): void => {
-                this.cycleEffect();
-              }, true)
-              if (this.settings.fps < 30) {
-                this.pill(`光弧:${this.settings.arcMode === 1 ? '补弧' : '抽帧'}`, (): void => {
-                  this.cycleArc();
-                }, !this.recording && !this.stopPending)
-              } else {
-                this.pill('光弧:—', (): void => {
-                }, false)
+          // 两行主胶囊（2×4，均分宽度、48vp；无横向 Scroll）。
+          // HudPill 是 @Component+@Prop：父 @State 变即刷新（旧 @Builder 值参数会冻结）
+          Row({ space: HudSpace.S }) {
+            ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
+              // 外层 Row 拿 layoutWeight（4 等分）与锚点 id（量框定位弹层用）；内层胶囊铺满
+              Row() {
+                HudPill({
+                  label: this.dockLabel(key),
+                  pillEnabled: this.dockEnabled(key),
+                  active: false,
+                  onTap: (): void => {
+                    this.onDockTap(key);
+                  }
+                })
               }
-              this.pill(`网格:${this.gridOn ? '开' : '关'}`, (): void => {
-                this.toggleGrid();
-              }, true)
-            }
+              .layoutWeight(1)
+              .id(`pill_${key}`)
+            }, (key: string): string => key)
           }
-          .scrollable(ScrollDirection.Horizontal)
-          .scrollBar(BarState.Off)
-          .height(HudSpec.PILL_ROW_HEIGHT)
+          .width('100%')
+          Row({ space: HudSpace.S }) {
+            ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
+              Row() {
+                HudPill({
+                  label: this.dockLabel(key),
+                  pillEnabled: this.dockEnabled(key),
+                  active: false,
+                  onTap: (): void => {
+                    this.onDockTap(key);
+                  }
+                })
+              }
+              .layoutWeight(1)
+              .id(`pill_${key}`)
+            }, (key: string): string => key)
+          }
           .width('100%')
 
-          Row({ space: 10 }) {
-            Button(this.stopPending ? '收尾中…' : (this.recording ? '停录' : '录制'))
-              .fontSize(16)
-              .height(52)
-              .layoutWeight(1)
-              .backgroundColor(this.recording ? '#B71C1C' : '#2E7D32')
-              .enabled(!this.stopPending && this.glFatal === '')
-              .onClick((): void => {
-                this.toggleRecord();
-              })
+          // 更多 + 圆形快门（居中）+ 右侧对称占位（保证快门几何居中）
+          Stack({ alignContent: Alignment.Center }) {
+            Row() {
+              Row() {
+                HudEntryButton({
+                  label: '更多',
+                  entryEnabled: true,
+                  onTap: (): void => {
+                    this.openMore();
+                  }
+                })
+              }
+              .id('pill_more')
+              Blank()
+              // 右侧占位与「更多」同宽，快门保持屏幕中线
+              Row().width(76)
+            }
+            .width('100%')
+
+            Stack() {
+              // 外环（72vp 白环）
+              Column()
+                .width(HudTouch.SHUTTER)
+                .height(HudTouch.SHUTTER)
+                .borderRadius(HudTouch.SHUTTER / 2)
+                .border({ width: 3, color: HudColor.RECORD_RING })
+                .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
+              // 内芯：72vp 圆外 44vp 红点；录制中 24vp 红方块；收尾中灰显
+              Column()
+                .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
+                .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
+                  : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
+            }
+            .width(HudTouch.SHUTTER)
+            .height(HudTouch.SHUTTER)
+            .enabled(!this.stopPending && this.glFatal === '')
+            .onClick((): void => {
+              this.toggleRecord();
+            })
+
+            // 收尾态文案走状态提示行（避免百分比定位叠加层）
           }
           .width('100%')
+          .height(HudTouch.SHUTTER)
         }
         .width('100%')
-        .padding({ left: HudSpec.SAFE_MARGIN, right: HudSpec.SAFE_MARGIN, bottom: HudSpec.SAFE_MARGIN })
-        .height(HudSpec.BOTTOM_BAR_HEIGHT)
+        .padding({
+          left: HudSpec.SAFE_MARGIN,
+          right: HudSpec.SAFE_MARGIN,
+          bottom: this.safeBottom + HudSpace.S
+        })
+        .height(HudSpec.BOTTOM_BAR_HEIGHT + this.safeBottom)
       }
       .width('100%')
       .height('100%')
@@ -1552,6 +1767,33 @@ struct CameraPage {
           },
           onApply: (): void => {
             this.applyParamsFromPills();
+          }
+        })
+      }
+      // T31「更多」面板（闪光/效果/光弧/网格）：复用 PillPopup 遮罩 + 量框定位
+      if (this.moreOpen) {
+        HudMoreSheet({
+          anchor: this.moreAnchor,
+          flashOn: this.flashOn,
+          effectLabel: this.effectLabel,
+          arcVisible: this.settings.fps < 30,
+          arcLabel: this.settings.arcMode === 1 ? '补弧' : '抽帧',
+          arcEnabled: !this.recording && !this.stopPending,
+          gridOn: this.gridOn,
+          onToggleFlash: (): void => {
+            this.toggleFlash();
+          },
+          onCycleEffect: (): void => {
+            this.cycleEffect();
+          },
+          onCycleArc: (): void => {
+            this.cycleArc();
+          },
+          onToggleGrid: (): void => {
+            this.toggleGrid();
+          },
+          onClose: (): void => {
+            this.closeMore();
           }
         })
       }

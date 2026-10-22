@@ -73,7 +73,7 @@ struct Index {
   }
 
   build() {
-    Stack() {
+    Stack({ alignContent: Alignment.Top }) {
       // 预览面（SURFACE）：onLoad 时 surface 已创建，先存 id；会话在权限通过后再开
       XComponent({ type: XComponentType.SURFACE, controller: this.xhc })
         .onLoad(() => {
@@ -83,13 +83,39 @@ struct Index {
         .width('100%')
 
       Column({ space: 12 }) {
-        Text(this.message)
-          .id('HelloWorld')
-          .fontSize($r('app.float.page_text_font_size'))
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Color.White)
-          .maxLines(14)
-          .textAlign(TextAlign.Center)
+        // T31：开发者页补页头 + 返回（原页无导航入口、长文案 32fp 盖屏）
+        Row({ space: 8 }) {
+          Button('返回')
+            .fontSize(13)
+            .height(48)
+            .borderRadius(24)
+            .backgroundColor('#B312171C')
+            .onClick((): void => {
+              this.engine.stop();
+              this.getUIContext().getRouter().back();
+            })
+          Text('开发者：Index（AVRecorder 试验）')
+            .fontSize(17)
+            .fontColor(Color.White)
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+
+        // 日志区：13fp + 固定高度可滚动（原实现 32fp 铺满整屏）
+        Scroll() {
+          Text(this.message)
+            .id('HelloWorld')
+            .fontSize(13)
+            .fontColor(Color.White)
+            .maxLines(30)
+            .textAlign(TextAlign.Start)
+            .width('100%')
+        }
+        .constraintSize({ maxHeight: 220 })
+        .width('100%')
+        .scrollBar(BarState.Off)
 
         Row({ space: 12 }) {
           Button('探测')
@@ -279,7 +305,7 @@ struct Index {
           .fontColor(Color.Gray)
           .maxLines(2)
       }
-      .alignItems(HorizontalAlign.Center)
+      .alignItems(HorizontalAlign.Start)
       .width('100%')
       .padding(16)
     }
