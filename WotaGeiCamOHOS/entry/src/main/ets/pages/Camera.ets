@@ -35,7 +35,7 @@
  *   闪光/效果/光弧/网格收进「更多」面板（ui/HudMoreSheet，复用 PillPopup 遮罩/量框）；
  * - 录制键 72vp 圆形白环 + 44vp 红点（录制中 24vp 红方块、收尾中禁用）；
  * - 网格确定性三行三列（2 横 2 竖 Divider），不再依赖百分比 position；
- * - 删除预览帧率死读数（GlCameraEngine 无 previewFps 真值），只显「录Nfps」。
+ * - 删除预览帧率死读数，只显录制帧率「Nfps」（复审 P3-2：去「录」前缀防 360vp 截字）。
  */
 import { common } from '@kit.AbilityKit';
 import { display, window } from '@kit.ArkUI';
@@ -129,7 +129,6 @@ struct CameraPage {
   @State cameraStarted: boolean = false;
   @State lensLabel: string = '—';
   @State sizeLabel: string = '—';
-  @State fpsLabel: string = '30';
   @State effectLabel: string = '直通';
   @State gridOn: boolean = true;
   @State elapsedMs: number = 0;
@@ -373,7 +372,6 @@ struct CameraPage {
   }
 
   private syncLabels(): void {
-    this.fpsLabel = `${this.settings.fps}`;
     this.sizeLabel = this.settings.sizeW >= 3840 ? '4K' : '1080p';
     const labels: Array<string> = ['直通', '曲线', '斑马', '峰值'];
     this.effectIndex = this.settings.effect;
@@ -725,7 +723,6 @@ struct CameraPage {
       return;
     }
     this.settings.fps = this.settings.fps === 24 ? 25 : (this.settings.fps === 25 ? 30 : 24);
-    this.fpsLabel = `${this.settings.fps}`;
     // T21：fps 档位换挡 → 参数总线重算（快门上限吃帧率档位）
     this.params.fps.value = ParamState.of(this.settings.fps);
     if (this.ability !== undefined) {
@@ -880,8 +877,9 @@ struct CameraPage {
       return this.sizeLabel;
     }
     if (key === 'fps') {
-      // T31：删预览帧率死读数（GlCameraEngine 无 previewFps 真值，真机恒显 —）
-      return `录${this.settings.fps}fps`;
+      // T31：删预览帧率死读数（GlCameraEngine 无 previewFps 真值）；
+      // 只保留录制帧率，且不带「录」前缀——360vp 宽下 5 等分约 45.6vp，「录30fps」会被省略
+      return `${this.settings.fps}fps`;
     }
     if (key === 'battery') {
       return this.batteryPct >= 0 ? `${this.batteryPct}%` : '—';
@@ -1428,7 +1426,12 @@ struct CameraPage {
     return `WB:${this.pillWbLabel}`;
   }
 
-  /** Dock 胶囊门控（沿旧胶囊口径：起镜后可改；录制/收尾中仅高级参数按 ParamPills 白名单） */
+  /**
+   * Dock 胶囊门控：镜头/画幅/帧率录制中不可切；变焦恒可点；
+   * 高级参数（快门/ISO/EV/WB）**录制中仍可开窗**——可编辑性由弹层内 editable
+   * （ParamPills.RECORDING_EDITABLE_PILLS={ISO,EV,WB}）控制，快门录制中开只读 Note
+   * （T31 复审 P3-3：不得整颗禁用而丢失只读信息）。
+   */
   private dockEnabled(key: string): boolean {
     if (key === 'lens' || key === 'size' || key === 'fps') {
       return !this.recording && !this.stopPending;
@@ -1436,7 +1439,7 @@ struct CameraPage {
     if (key === 'zoom') {
       return true;
     }
-    return this.cameraStarted && (!this.recording || pillEditableDuringRecording(key));
+    return this.cameraStarted;
   }
 
   private onDockTap(key: string): void {
@@ -1698,7 +1701,6 @@ struct CameraPage {
           right: HudSpec.SAFE_MARGIN,
           bottom: this.safeBottom + HudSpace.S
         })
-        .height(HudSpec.BOTTOM_BAR_HEIGHT + this.safeBottom)
       }
       .width('100%')
       .height('100%')

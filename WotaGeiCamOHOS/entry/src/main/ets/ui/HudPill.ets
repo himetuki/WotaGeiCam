@@ -23,14 +23,14 @@ export struct HudPill {
 
   build() {
     Button(this.label)
-      .fontSize(HudType.VALUE)
+      .fontSize(HudType.PILL)
       .fontColor(this.pillEnabled ? HudColor.TEXT_PRIMARY : HudColor.TEXT_DISABLED)
       .width('100%')
       .height(HudTouch.PILL_HEIGHT)
       .borderRadius(HudShape.PILL_RADIUS)
       .backgroundColor(this.active ? HudColor.PILL_BG_ACTIVE
         : (this.pillEnabled ? HudColor.PILL_BG : HudColor.PILL_BG_DISABLED))
-      .padding({ left: 10, right: 10 })
+      .padding({ left: 6, right: 6 })
       .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
       .enabled(this.pillEnabled)
       .onClick((): void => {

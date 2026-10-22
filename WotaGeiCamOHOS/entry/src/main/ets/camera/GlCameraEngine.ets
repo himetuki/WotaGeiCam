@@ -70,7 +70,6 @@ export class GlCameraEngine {
   private zoomRange: Array<number> = [1, 1];
   private previewSizes: Array<Size> = [];
   private lastZoom: number = 1;
-  private previewFps: number = 0;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
@@ -108,11 +107,6 @@ export class GlCameraEngine {
   /** 最近一次 applyZoom 实际生效倍率（1 = 未设置/失败） */
   currentZoom(): number {
     return this.lastZoom;
-  }
-
-  /** 实际预览帧率（0 = 未设置/平台拒绝；登记可能仍为默认 30fps） */
-  currentPreviewFps(): number {
-    return this.previewFps;
   }
 
   /** 相机丢失（未录制时页面仅提示；录制中由 AutoStopMonitor 消费） */
@@ -180,8 +174,7 @@ export class GlCameraEngine {
       this.preview = preview;
       session.addOutput(preview);
       // 登记偏离：PhotoSession 预览无 setFrameRate（该 API 属 VideoOutput），预览源可能仍为 30fps；
-      // 录制帧率仅编码器侧生效，光弧抽帧按编码器输出节奏。previewFps 保持 0 = 未设置。
-      this.previewFps = 0;
+      // 录制帧率仅编码器侧生效，光弧抽帧按编码器输出节奏。
       if (fps !== undefined && fps > 0) {
         Diag.i(WotaTag.ABILITY,
           `gl camera preview fps set not supported (requested ${fps}), encoder-side only`);
@@ -345,7 +338,6 @@ export class GlCameraEngine {
     this.zoomRange = [1, 1];
     this.previewSizes = [];
     this.lastZoom = 1;
-    this.previewFps = 0;
     this.status = DeviceStatus.CLOSE;
   }
 }

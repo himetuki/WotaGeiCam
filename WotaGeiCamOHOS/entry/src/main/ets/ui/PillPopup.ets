@@ -15,6 +15,7 @@
  */
 import { display } from '@kit.ArkUI';
 import { nearestLadderIndex } from './SliderLadder';
+import { HudType } from './HudTokens';
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内（上游 0.62f） */
 export class PillAnchor {
@@ -366,7 +367,7 @@ export struct PillNote {
 
   build() {
     Text(this.noteText)
-      .fontSize(10)
+      .fontSize(HudType.LABEL)
       .fontColor('#8CFFFFFF')
       .maxLines(2)
       .textAlign(TextAlign.Start)

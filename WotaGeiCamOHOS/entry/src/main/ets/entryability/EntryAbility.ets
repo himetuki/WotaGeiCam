@@ -19,6 +19,7 @@ import { window } from '@kit.ArkUI';
 import { Diag } from '../diag/Diag';
 import { PureLogicBarrel } from '../player/PureLogicBarrel';
 import { ArcRepairRunner } from '../record/ArcRepairRunner';
+import { WindowChrome } from '../ui/WindowChrome';
 
 const DOMAIN = 0x0000;
 
@@ -49,6 +50,14 @@ export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+
+    // T31 复审 P3-5：loadContent 之前先预置「全屏 + 透明系统栏 + 黑底」，消除冷启动首帧白条；
+    // 页面侧 applyCamera/applyStandardDark 经同一 Promise 链串行，快速切页不会乱序。
+    try {
+      WindowChrome.prime(windowStage.getMainWindowSync());
+    } catch (err) {
+      hilog.warn(DOMAIN, 'testTag', 'Failed to prime window chrome. Cause: %{public}s', JSON.stringify(err));
+    }
 
     windowStage.loadContent('pages/Camera', (err) => {
       if (err.code) {
