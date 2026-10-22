@@ -31,7 +31,7 @@ import { common } from '@kit.AbilityKit';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { ClipFilter } from '../media/MediaTag';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
-import { formatDuration } from '../media/MediaFormat';
+import { formatDuration, formatSignedDuration } from '../media/MediaFormat';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { PlayerSpeedTiers } from '../player/PlayerModel';
 import { normalizeOffset, rightTargetFor, timelineEnd, TimelineGeometry } from '../player/CompareTimeline';
@@ -1024,8 +1024,10 @@ struct Compare {
 
         Column({ space: 4 }) {
           Row({ space: 6 }) {
-            // T22 双轴时间线：左端标签 = tMin()（off>0 时负轴）、滑杆值即时间线坐标 t
-            Text(formatDuration(this.timelineTMin()))
+            // T22 双轴时间线：左端标签 = tMin()（off>0 时负轴，T23 起负值走 formatSignedDuration
+            // 显示 -m:ss；亚秒负值下限 -00:01，避免 -500ms 步进时与 0 混淆）；滑杆值即时间线
+            // 坐标 t；仅左端标签带符号，进度读数仍随左钟口径不变
+            Text(formatSignedDuration(this.timelineTMin()))
               .fontSize(10)
               .fontColor('#B0BEC5')
             Slider({

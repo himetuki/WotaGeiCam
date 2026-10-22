@@ -22,7 +22,6 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SRC_ANCHOR = path.join(ROOT, 'entry', 'src', 'main', 'ets');
 const TEST_DIR = path.resolve(ROOT, process.env.PURE_TEST_DIR || path.join('test', 'pure'));
 const TMP_DIR = path.join(ROOT, '.pure-test-tmp');
 
@@ -74,7 +73,7 @@ function resolveRelative(spec, fromFile) {
   return undefined;
 }
 
-/** 依赖闭包：test 文件 + 递归相对 import 的 .ets（只收 ROOT 下、通常是 SRC_ANCHOR 内的文件） */
+/** 依赖闭包：test 文件 + 递归相对 import 的 .ets（只收 ROOT 下的文件） */
 function collectClosure(entryFiles) {
   const closure = new Set();
   const queue = [...entryFiles];

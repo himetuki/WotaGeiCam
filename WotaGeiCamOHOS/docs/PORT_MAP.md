@@ -48,7 +48,7 @@
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 38d712a。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
-| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize。落地 2026-10-21，对齐上游 38d712a。留白：SeriesStore/SeriesGroup 归组 UI、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
+| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 38d712a。留白：SeriesStore/SeriesGroup 归组 UI、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
 | `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。留白：缩略图、全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、系列折叠、分享、重命名、MediaStore 相册（对比播放已由 Player 顶部「对比」入口提供；T20 剪辑成片落私有 videos，Gallery 下次刷新可见） | ☑ 部分 |
 
@@ -60,7 +60,7 @@
 | `AudioSync.kt`、`CompareAudio.kt`（对齐数学） | 纯逻辑 | 直译 | ☐ |
 | `FrameStep.kt`、`TapArbiter.kt`、`CompareTimeline.kt`、`ComparePractice.kt`、`CompareHistory.kt`、`ClipExport.kt`（ClipRule） | 纯逻辑为主 | `player/FrameStep.ets`（SNAP_TOL_MS=1.5、floor+1/ceil−1、duration 钳制）、`player/PlayerModel.ets`（AbRange valid、倍速档/最近档、clampPan 半域）、`player/TapArbiter.ets`（280ms 双击窗口）逐行直译；T19 新增 `player/CompareTimeline.ets`：TimelineGeometry（tMin=min(0,−offset)/tMax=max(leftDur,rightDur−offset)/leftCovers/rightCovers/leftTarget/rightTarget park 规则）+ normalizeOffset（[−rightDur,leftDur] 夹紧）+ rightTargetFor（leftPos+offset 夹到 0..rightDur）+ timelineSpan/timelineEnd，仅手动偏移子集；T22 订正：tMin/normalizeOffset/rightTargetFor 的 -0 归一 +0（纯逻辑测试发现，对齐上游 Long 语义，文件头登记）。T20 新增 `player/ClipRule.ets`：MIN_KEEP_MS=300、ClipRange、normalize（0..duration 夹紧，恰等 300ms 通过）、keepSample（relUs>=0）、clipNameOf（edit_<stem>_<yyyyMMdd_HHmmss>.mp4）、keyFrameIndexOf（四舍五入）、remapDrops（k>=shift 平移到 k−shift，segments 清空登记）、TrackChoice(-1/0/1)+audioOrdinalOf。**T22 纯逻辑单测落地（见 §纯逻辑测试）**：compare-timeline.test.ets（9 用例，off=0 回归红线两条独立钉死）+ clip-rule.test.ets（6 用例）。ComparePractice/CompareHistory、DecideCommands/AudioSync 自动对齐仍留白 | ☑ 部分 |
 | `ClipExport.kt`、`RemuxOrientation.kt` | 平台绑定（封装逻辑纯） | **T20 无损 remux 最小版（2026-10-21）**：`cpp/clip_exporter.h/.cpp`（OH_AVSource/OH_AVDemuxer 逐样本读 → OH_AVMuxer 原样写 MPEG_4，不解码/不重编码；worker 线程 + atomic 进度/取消，状态 `idle/running:<pct>/done:<base>:<v>:<a>[:audio=skipped]/failed:<code>/cancelled`；入点 Seek PREVIOUS_SYNC 取首个 SYNC 帧 basePts，视频/音频 PTS 同减 base，负 rel 丢弃，逐轨 monotonicPts 桥；出点按 PTS 截止，视频 32/音频 8 连续越界容忍 B 帧重排；源/视频轨旋转经 WotaNormalizeQuarter 透传，源格式优先；音轨可选 -1/0/1，预扫区间内零可写样本不建轨，AddTrack 失败退纯视频；先视频整轨后音频整轨；muxer Start 后取消 best-effort Stop）+ NAPI `startClipExport/getClipExportStatus/cancelClipExport/probeClipTracks` + `player/ClipExporter.ets`（fd 生命周期、200ms 轮询、10min 超时、失败/取消删除半成品、done 后按 basePts 关键帧序号 remapDrops 写输出 sidecar、同名追加 _N）+ Player 页「导出 A/B」面板（A/B≥300ms 才显示、暂停、音轨选择、进度/取消、成功路径/大小/媒体库跳转）。错误码 source/track-format/no-video/no-sync/muxer/add-track/rotation/muxer-start/read/sample-too-large/write/empty-range。**T21 修复 T20 复审 P3×4（2026-10-21）**：① done 日志打实际生效 rotation（与 `OH_AVMuxer_SetRotation` 同读归一后的 `appliedRotation`，源格式缺旋转键、视频轨带键时不再打错 sourceRotation）；② 音频拷贝阶段 NO_MEMORY 不判死——跳过剩余音频样本继续视频、done 状态追加 `audio=skipped`（首枚即超限=已 AddTrack 零样本 → WARN + 既有 audioSamples==0/Stop 失败兜底；视频轨 NO_MEMORY 维持 sample-too-large 判死，口径登记 clip_exporter.h）；③ ArkTS uniqueOutputPath 的 accessSync 异常按「被占用」继续 _N 循环、1..99 穷尽回退 `${stem}_${Date.now()}.mp4`（绝不返回 access 异常原候选名，防 TRUNC 覆盖旧成片）；④ 超时 fd 延迟关闭——CANCEL_GRACE_MS(5s) 耗尽进 linger 轮询（NATIVE_LINGER_MS=30s 上限）等 native 离开 running:，linger 内退出照常 close+discard、耗尽挂模块级 pendingFds（exportClip 入口/轮询 reap，Diag.w 登记泄漏），不关正被阻塞调用写的 fd。已知差异：逐轨顺序写入=非交织（真机播放器兼容性待验）、音频只选一条、无 MediaStore pending/commit（导出中直接写目标 mp4，极端并发刷新可能看到半成品）、无分享、clipName 追加时间戳（OHOS 私有目录防覆盖）、remapDrops 清空 segments（剪辑单文件不再适用源段账）。RemuxOrientation 只做旋转透传，不单独移植平台读源。留白：交织写入、双音轨、自动音频同步、剪辑进度持久化/后台保活；T18/T19 其余 P3 分别登记到健康/对比收口批（本批仅 PlayerEngine 音量防护） | ☑ 部分 |
-| `PlayerScreen.kt`、`CompareScreen.kt` | UI | `pages/Player.ets` 最小版：播放画面/进度条/播放暂停/逐帧/A-B/倍速/帧率/镜像、单击显隐、双击启停、双指缩放平移（clampPan）；Gallery 卡片进入、返回刷新，顶部「对比」带 {leftId,leftPath} 进 Compare。T19 `pages/Compare.ets` 对比播放最小版：双普通 XComponent(SURFACE)+双 PlayerEngine、右片 MediaRepo 现选（排除左片）、共享播放/暂停/seek/倍速、手动偏移 ±0.5s/归零（park 门控：无覆盖侧停首/末帧，进入覆盖区由 tick 起播）、声音侧左/右/静音（默认左）、120ms tick 漂移校正（阈值 250ms/冷却 500ms）、两侧独立 attach/retry 与 surface 重建换代、页面隐藏暂停/销毁双 release。T20 在 A/B 合法（≥300ms）时增加「导出 A/B」入口与导出面板（音轨选择/进度/取消/成功路径与大小/媒体库跳转，导出期间拦截返回）。**T22 对比收口（2026-10-22）四项关闭 + 平台限制登记**：① 时间线双轴消费——进度 Slider min/max=TimelineGeometry.tMin()/tMax()（off>0 负轴 pre-roll 可拖）、拖动值 t 即时间线坐标、seekBoth 走 leftTarget/rightTarget park 规则、左端标签 tMin/右端 timelineEnd；off=0 在旧单左轴域逐像素等价（回归红线）；timelineSpan 无 UI 消费留白；进度读数仍随左钟（pre-roll 段显 0，最小版不派生真 T，登记）；② 右片 surface 重建/重试恢复播放位置（resumeRightPosMs 快照 rightTargetFor 或引擎实位，tryAttachRight 成功路径 seekTo 恢复；换选右片不恢复；左片既有恢复路径零改动）；③ attach/retry/surface 隐藏期门控——onSurfaceLoaded 重建分支在 !pageVisible 只置 deferred 标志（left/right 各一）由 onPageShow 消费执行、retryLeft/retryRight 入口拒 pageVisible=false、rebuild then 链 attach 前再查 pageVisible；④ 右片列表 id+path 双排除左片（leftClip 未就绪用路由参数原始 path=paramsLeftPath 兜底，防 FNV-1a ID 碰撞）。**漂移"速度微调"以平台限制登记关闭**：AVPlayer setSpeed 仅枚举档（player/PlayerEngine.ets speedToEnum 0.125/0.25/0.5/0.75/1.0 为证，无任意 ratio 接口），上游 AudioSync 的 setPlaybackParams 微调无 OHOS 等价物，邻域纠偏维持 250ms 硬 seek/500ms 冷却。留白：自动对齐/DecideCommands/AudioSync、全屏手势锁定/字幕/音轨菜单/AB 持久化、剪辑进度持久化 | ☑ 部分 |
+| `PlayerScreen.kt`、`CompareScreen.kt` | UI | `pages/Player.ets` 最小版：播放画面/进度条/播放暂停/逐帧/A-B/倍速/帧率/镜像、单击显隐、双击启停、双指缩放平移（clampPan）；Gallery 卡片进入、返回刷新，顶部「对比」带 {leftId,leftPath} 进 Compare。T19 `pages/Compare.ets` 对比播放最小版：双普通 XComponent(SURFACE)+双 PlayerEngine、右片 MediaRepo 现选（排除左片）、共享播放/暂停/seek/倍速、手动偏移 ±0.5s/归零（park 门控：无覆盖侧停首/末帧，进入覆盖区由 tick 起播）、声音侧左/右/静音（默认左）、120ms tick 漂移校正（阈值 250ms/冷却 500ms）、两侧独立 attach/retry 与 surface 重建换代、页面隐藏暂停/销毁双 release。T20 在 A/B 合法（≥300ms）时增加「导出 A/B」入口与导出面板（音轨选择/进度/取消/成功路径与大小/媒体库跳转，导出期间拦截返回）。**T22 对比收口（2026-10-22）四项关闭 + 平台限制登记**：① 时间线双轴消费——进度 Slider min/max=TimelineGeometry.tMin()/tMax()（off>0 负轴 pre-roll 可拖）、拖动值 t 即时间线坐标、seekBoth 走 leftTarget/rightTarget park 规则、左端标签 tMin/右端 timelineEnd；off=0 在旧单左轴域逐像素等价（回归红线）；timelineSpan 无 UI 消费留白；进度读数仍随左钟（pre-roll 段显 0，最小版不派生真 T，登记）；② 右片 surface 重建/重试恢复播放位置（resumeRightPosMs 快照 rightTargetFor 或引擎实位，tryAttachRight 成功路径 seekTo 恢复；换选右片不恢复；左片既有恢复路径零改动）；③ attach/retry/surface 隐藏期门控——onSurfaceLoaded 重建分支在 !pageVisible 只置 deferred 标志（left/right 各一）由 onPageShow 消费执行、retryLeft/retryRight 入口拒 pageVisible=false、rebuild then 链 attach 前再查 pageVisible；④ 右片列表 id+path 双排除左片（leftClip 未就绪用路由参数原始 path=paramsLeftPath 兜底，防 FNV-1a ID 碰撞）。**漂移"速度微调"以平台限制登记关闭**：AVPlayer setSpeed 仅枚举档（player/PlayerEngine.ets speedToEnum 0.125/0.25/0.5/0.75/1.0 为证，无任意 ratio 接口），上游 AudioSync 的 setPlaybackParams 微调无 OHOS 等价物，邻域纠偏维持 250ms 硬 seek/500ms 冷却。**T23 P3 关销（2026-10-22）**：时间线左端标签负轴改用 `media/MediaFormat.formatSignedDuration`（off>0 的 pre-roll 显示 `-m:ss`；亚秒负值下限 `-00:01`，避免 500ms 偏移步进时与 0 混淆），进度读数仍随左钟口径（不派生真 T，登记保留）；formatDuration 负值归零语义不变，新增 media-format 3 用例钉住正/负/0（含 `2:00:50` 手写字面量）。留白：自动对齐/DecideCommands/AudioSync、全屏手势锁定/字幕/音轨菜单/AB 持久化、剪辑进度持久化 | ☑ 部分 |
 
 ## record — 录制链路（移植重心）
 
@@ -92,7 +92,34 @@
 | --- | --- | --- | --- |
 | `UpdateChecker.kt`、`UpdateDownloader.kt`、`UpdateInstaller.kt` | 平台绑定（策略纯） | `@ohos.net.http` 读 GitHub Releases；**手动联网、SHA-256 校验、不自动检查**等隐私承诺照搬；安装侧需改为鸿蒙包体（hap/hsp）或引导下载页 | ☐ |
 
-## 纯逻辑测试（T22 落地，2026-10-22）
+## 交付批（T23，2026-10-22）
+
+- **T22 P3×2 关销**：① `scripts/pure-test.mjs` 死常量 `SRC_ANCHOR` 删除（仅注释保留目录文字），
+  50 用例回归不变；② `pages/Compare.ets` 时间线左端标签负轴改 `media/MediaFormat.formatSignedDuration`
+  （`-m:ss`；亚秒负值下限 `-00:01`，避免 500ms 偏移步进时与 0 混淆；-1.5s 仍按 floor 截断为
+  `-00:01`），进度读数仍随左钟；`test/pure/media-format.test.ets` 3 用例，合计 53。
+- **本地签名探针** `scripts/local-sign.mjs`：hap-sign-tool 全链 ECC P-256（keypair×4 → root/sub CA →
+  app-cert/profile-cert → sign-profile(debug, bundleName `com.wotagei.cam`) → sign-app → verify-app
+  自动回验）；材料落 `.local-signing/`（gitignore，仅缺失时生成，可重复重签）。平台事实登记：
+  HarmonyOS NEXT 新式签名块位于 ZIP 中央目录前（`<hap sign block>` 标记，本快照 60374B），不产生
+  `META-INF/` 条目；`unzip -l` 为 16 业务文件 + `.pages.info`（签名工具生成）；签名块+profile 的
+  可还原性以 `verify-app` 取证（实测 3 级证书链 + 3254B profile）。审查修复后：证书链/profile
+  空输出直接失败、签名先写 `.tmp` 且任一步失败只删临时件（既有 signed HAP 不动）、口令可由
+  `LOCAL_SIGN_PASS` 覆盖、POSIX p12 0600。
+- **HAP 交付口径**：clean `assembleHap` 退出 0、WARN=2 基线（napi 未验证 + 未配置签名跳过）。
+  **hash 不可复现**：zip 条目时间戳（signed 另加签名时间戳）使同一源码重建/重签得到不同 sha256；
+  T23 审查修复批单次快照 = unsigned 5067199B / `b58e3ca5…de5462`、signed 5166613B /
+  `c0f1bcb6…1292b2`（全文见 README「交付」节，**勿作复验判据**）。内容级复验：解包后按路径排序
+  逐文件 sha256 比对（unsigned 16 项；signed 排除 `.pages.info`），或字节数 + `verify-app` 输出。
+- **文档终稿**：README 当前进度收敛 + 交付节（产物/安装/签名指引/真机清单/内容级校验示例）、
+  本表交付批与「交付后路线」、AGENT.md 补工程脚本清单。
+- **审查修复（2026-10-22）**：P2 交付 hash 口径（README/PORT_MAP 标明单次快照、不可复现、给出
+  内容级校验）；P3 一并处理 `.pages.info` 描述、亚秒负轴显示、签名探针断言/失败清理/口令与权限、
+  模拟器签名口径、media-format 期望值手写字面量。
+- **回归**：`node scripts/pure-test.mjs` → files=6 tests=53 passed=53 failed=0（exit 0）；
+  clean assembleHap exit 0；`git diff --name-only 851347a..HEAD` 全部落在 `WotaGeiCamOHOS/`。
+
+## 纯逻辑测试（T22 落地，T23 扩展，2026-10-22）
 
 自研轻量测试架（不用 hypium/ohosTest，无真机可跑）：
 
@@ -103,20 +130,22 @@
   （test/assertEq/assertTrue/assertFalse/assertNull）→ 汇总 passed/failed，失败退出码非 0；
   零测试退出 0。typescript 复用 DevEco 自带
   `$DEVECO_HOME/tools/hvigor/hvigor/node_modules/typescript`（`PURE_TEST_TS_PATH` 可覆盖）。
+  **T23 P3 关销**：删除死常量 `SRC_ANCHOR`（仅保留注释里的目录文字），执行器输出与用例数不变。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（50）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（53）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（9，对拍上游 CompareTimelineTest.kt 裁剪到已移植面，off=0
   回归红线两条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、segment-policy（5，
-  常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/命名/关键帧/平移/音轨序数）。
+  常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/命名/关键帧/平移/音轨序数）、
+  media-format（3，T23 新增：formatSignedDuration 正值/负值/0 与 formatDuration 口径对齐）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
-  segment-policy/clip-rule 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行。
+  segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行。
 - **对拍口径**：期望值一律手写字面量（不用实现反推）；上游用例中依赖未移植面
   （MR 专用段判定/DecideCommands 等）的条目不进本侧文件，随对应批补。
 
-## 真机待验（T22 收口批新增，不阻塞）
+## 真机待验（T22 收口批 + T23 交付批新增，不阻塞）
 
 - **onStreamChanged 触发时序**：surface 输入下首帧到达是否可靠触发 format-changed
   （健康第一格真信号）；个别 ROM 不触发时 `fmt || samples>0` 兜底已在，但
@@ -127,6 +156,23 @@
   右片落在 t+off；数值读数 pre-roll 段显 0（随左钟，登记的最小版口径）。
 - **轮转后健康窗重启**：8MB 分段测试阈值下跨段录制，第二段起若编码器异常应仍触发自动重录
   （attempts 会话级不清零——第 2 段起可用重录次数少于首段，属登记的上游口径差异）。
+- **本地签名包安装边界（T23）**：自签 ECC 证书 + debug profile 只证明签名链/包结构可验证，
+  未经华为云颁发；零售机安装预期被拒属正常。真机安装验证改用 DevEco Studio 自动签名产物
+  （AGC 账号）执行 `hdc install`，并回看首启权限弹窗/HUD 出画面。
+
+## 交付后路线（T23 定稿，2026-10-22）
+
+- **T24：纯逻辑直译批（无真机依赖，优先）**——`player/AudioSync.kt`、`player/CompareAudio.kt`
+  （对齐数学）、`player/ComparePractice.kt`、`player/CompareHistory.kt`、`player/DecideCommands.kt`
+  逐行直译 + `test/pure/` 单测对拍；顺手消费 T23 登记的 Compare 真 T 派生、AB 持久化等纯逻辑留白。
+- **T25：内录双轨（全量需真机；真机前先做纯逻辑降级版）**——`record/CaptureStateMachine.kt`、
+  静音/提示门控（SilencePromptGate 等价物）、`record/AudioFeeder.kt` 的纯决策面先直译 + 单测；
+  `PlaybackCaptureController.kt`（AVScreenCapture 内录+环境音双轨）、`MrRecorder` 音轨布局、
+  `ClipExport` 双音轨需真机验证后接。
+- **T26+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、应用内更新检查
+  （`UpdateChecker/Downloader/Installer.kt`）、离线光弧修复（`ArcRepairPlan/Runner/Gl.kt`）、
+  HUD 布局编辑器（`HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid/ParamsPersist.kt`）、
+  相册入库/分享/缩略图/系列归组等媒体长尾。
 
 ## 建议移植顺序
 
@@ -136,4 +182,6 @@
 4. `MrRecorder`（AVRecorder）最小可用录制 → `CodecRecorder`（GL + AVCodec）；
 5. 光弧工具链（复用着色器与 ArcKeepRule）；
 6. `media` 媒体库 → `player` 播放/剪辑 → 对比播放；
-7. 内录双轨、蓝牙面板、更新检查。
+7. T23 后按「交付后路线」推进：T24 纯逻辑直译（AudioSync/CompareAudio/ComparePractice/
+   CompareHistory/DecideCommands）→ T25 内录双轨（真机前先做 CaptureStateMachine/静音门控等
+   纯逻辑降级版）→ T26+ 蓝牙/更新检查/离线修复/HUD 编辑器等长尾。

@@ -21,11 +21,12 @@ WotaGeiCamOHOS/
 │   └── PORT_MAP.md           # Android 模块 → 鸿蒙落点映射表
 ├── scripts/
 │   ├── sync-upstream.sh      # 一条命令同步上游 main
-│   └── pure-test.mjs         # 纯逻辑测试架（test/pure/*.test.ets 的转译执行器）
+│   ├── pure-test.mjs         # 纯逻辑测试架（test/pure/*.test.ets 的转译执行器）
+│   └── local-sign.mjs        # HAP 本地签名探针（hap-sign-tool 全链 + verify-app 回验）
 ├── test/
 │   └── pure/                 # 纯逻辑单测（.test.ets；entry 模块外，hvigor 不扫描、不进 HAP）
 ├── AGENT.md                  # 给 AI 代理的工程导览（改哪些文件、跳过哪些）
-└── .gitignore                # DevEco/hvigor 构建产物忽略规则（含 .pure-test-tmp/）
+└── .gitignore                # DevEco/hvigor 构建产物忽略规则（含 .pure-test-tmp/、.local-signing/）
 ```
 
 ## 构建
@@ -56,9 +57,10 @@ cd WotaGeiCamOHOS
 node scripts/pure-test.mjs     # 退出码 0 = 全绿；任何失败非 0（CI 可直接消费）
 ```
 
-已覆盖（50 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（9，
+已覆盖（53 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（9，
 含 off=0 回归红线两条）、slider-ladder（9，上游 SliderLadderTest 直译）、
-segment-policy（5）、clip-rule（6）。
+segment-policy（5）、clip-rule（6）、media-format（3，formatSignedDuration 正/负/0
+及 formatDuration 口径对齐，对比页时间线左端标签消费）。
 
 > **为什么工程里没有 hvigorw.js**：DevEco 自带 wrapper 按「自身位于
 > `tools/hvigor/bin/`」的布局解析引擎路径；把它的副本放进工程根会导致引擎链接
@@ -103,8 +105,49 @@ segment-policy（5）、clip-rule（6）。
 - [x] A/B 无损剪辑导出（T20，2026-10-21）：`player/ClipRule.ets`（normalize/keepSample/clipNameOf/keyFrameIndexOf/remapDrops/TrackChoice）；native `cpp/clip_exporter`（OH_AVSource/AVDemuxer→OH_AVMuxer 逐样本 remux、关键帧入点/basePts 平移/旋转透传/视频 32 音频 8 B 帧尾容忍/逐轨 monotonicPts/音轨选择与零样本不建轨/worker 进度取消）；NAPI 四口 + `player/ClipExporter.ets`（fd/轮询/超时/半成品删除/sidecar 平移/防覆盖命名）；Player「导出 A/B」面板与 media library 跳转。T19 P3：PlayerEngine setVolume Number.isFinite 防护、删除 setMuted。已知差异：逐轨非交织、单音轨、无 MediaStore pending/分享；T18/T19 剩余 P3 登记到健康/对比收口批。留白：交织、双音轨/自动同步、剪辑进度持久化、后台保活
 - [x] HUD 高级参数面板（T21，2026-10-21）：`ui/PillPopup.ets`（就近浮层基础设施：遮罩点击关/PillAnchor.place 钳制定位/档位网格/刻度滑杆/Note，锚点 getRectangleById+底贴屏回退）+ `ui/SliderLadder.ets`（梯子纯函数族直译）+ `ui/ParamFormat.ets`（shutterText/evText/wbShort/shutterItems）+ `ui/ParamPills.ets`（AeModeRow/快门/ISO/EV/WB 弹层，录制门控 RECORDING_EDITABLE={ISO,EV,WB}）；Camera 页参数总线接线（起镜 applyAbility(refined)、起录前/弹层改动 engine.applyParams 逐键下发、顶栏第二行 快门/ISO/EV/WB 读数）；T20 P3×4（clip done 旋转日志同 SetRotation 变量、音频 NO_MEMORY 跳过不判死、uniqueOutputPath 占用兜底、超时 fd linger 延迟关闭+pendingFds reap）。留白：ZOOM/FOCUS 胶囊、tint 副轴、参数持久化、动效/Tokens、可编排 READOUT 网格
 - [x] 健康+对比收口（T22，2026-10-22）：三格真信号（native formatChanged_=onStreamChanged 等价上游 format-changed，getGpuHealth 4 字段；muxer track 位降诊断）、轮转重启健康窗（attempts 会话级登记）、健康重录三残差（recordStartedAtMs 重置/stop 摘要末段账 lastPath|lastBytes|lastSamples/丢段读末段账保留前段）、时间线双轴消费（Slider min/max=tMin/tMax、seekBoth 走 park 规则、timelineSpan 留白）、右片 surface 重建恢复位置、隐藏期 attach/retry/surface 门控（deferred 标志）、右列表 id+path 双排除、漂移速度微调平台限制登记（AVPlayer setSpeed 仅枚举档，speedToEnum 为证）、T21 P3×4（快门读数 ※/skipped 降 Diag.i/相机丢失 closePill/PillPopup 尺寸重排）+ 纯逻辑测试架（scripts/pure-test.mjs + test/pure 五件 50 用例）
-- [ ] 相机预览 + 录制链路
-- [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
-- [x] 媒体库 + 播放器最小版（A/B 无损剪辑导出于 T20 补齐）
-- [ ] 双音轨（内录）与蓝牙面板
-- [ ] 更新检查（GitHub Releases）
+- [x] T23 收尾交付（2026-10-22）：T22 P3×2 清账（pure-test 死常量 SRC_ANCHOR 清理；对比页时间线左端标签负轴显示 `media/MediaFormat.formatSignedDuration` + 3 用例，53 用例全绿）+ 本地签名探针 `scripts/local-sign.mjs`（hap-sign-tool 全链 ECC P-256：keypair→CA→app-cert→profile-cert→sign-profile→sign-app→verify-app 自动回验）+ 交付口径（见下「交付」节）
+
+**进度收敛（T23 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放/A-B 无损剪辑、HUD 高级参数面板、diag 完整版、纯逻辑测试架（53 用例）。
+**留白（后续批）**：音频轨（内录双轨）、VideoSession 参数面（录制参数下发）、离线光弧修复、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
+
+## 交付
+
+构建产物（`./hvigorw --mode module -p product=default assembleHap` 后）：
+
+| 产物 | 路径 | 字节数（单次快照） | sha256（单次快照，易变） |
+| --- | --- | --- | --- |
+| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5067199 | `b58e3ca5afcaceb5975b9953e0cb1e9a98ab302f7b447fd4a941ac69dbde5462` |
+| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5166613 | `c0f1bcb674fb13512928344d23942f3fe25bd82ac1150ff4d766f927311292b2` |
+
+> **hash 不可复现，勿作复验判据**：zip 条目时间戳随打包时刻变化，同一源码两次 clean 构建
+> 字节数相同但 sha256 不同；signed 包还叠加 sign-app 时间戳，每次重签必变。上表是 T23
+> 审查修复批的单次本机快照（仅交付留痕）。复验请用内容级校验：解包后按路径排序逐文件
+> sha256 比对（未签名包 16 个业务文件；signed 额外含 `.pages.info`，比对时排除），或只校验
+> 字节数 + `local-sign.mjs` 内置 `verify-app` 的证书链/profile 输出。示例：
+>
+> ```bash
+> rm -rf /tmp/hap-check && mkdir -p /tmp/hap-check
+> unzip -q entry-default-unsigned.hap -d /tmp/hap-check
+> (cd /tmp/hap-check && find . -type f | sed 's|^\./||' | sort | \
+>   while IFS= read -r f; do sha256sum "$f"; done) > /tmp/hap-manifest.txt
+> ```
+>
+> 两次构建的 `/tmp/hap-manifest.txt` 应逐行一致。
+
+- 未签名包：clean 构建（WARN=2 基线：napi 未验证提示 + 未配置签名跳过）产物。
+- 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，bundleName
+  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 60374 字节，含
+  `<hap sign block>` 标记）位于 ZIP 尾部中央目录之前，**不产生旧式 `META-INF/` 条目**——「签名块
+  与 profile 可见」以脚本内置 `verify-app` 回验为准（实测还原 3 级证书链 + 3254 字节 profile）。
+  `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（520 字节），无 `META-INF/`。
+  **仅证明包结构可签名/可验证**——自签证书未经华为云颁发，真机安装请改用 DevEco Studio 自动签名。
+- 复跑：`node scripts/local-sign.mjs`（需 `DEVECO_SDK_HOME` 或 `HAP_SIGN_TOOL_JAR`、PATH 中有 `java`；
+  可用 `LOCAL_SIGN_PASS` 覆盖本地口令）；签名材料只首次生成，落 `.local-signing/`（已 gitignore，
+  POSIX 下 p12 收紧为 0600），重复执行会复用材料并重签；签名先写 `.tmp`，任一步失败即删临时件，
+  既有 signed HAP 保持不动，仅回验通过后才替换成品。
+- 安装：真机/模拟器 `hdc install <signed.hap>`，均需有效签名。自签探针产物不可直接装零售机；
+  模拟器同样建议使用 DevEco 自动签名产物（AGC 账号或本机 debug 证书 + 含设备 ID 的 profile），
+  社区 OpenHarmony 签名材料未在本批实测范围内。
+- 签名指引：DevEco Studio → File → Project Structure → Signing Configs → 勾选 "Automatically generate signature"
+  （需 AGC 开发者账号），构建即产出可安装 HAP。
+- 真机验证清单：见 [docs/PORT_MAP.md](docs/PORT_MAP.md)「真机待验」节（T22 新增 4 项、T23 新增 1 项 + 各行「装机验证项」）。

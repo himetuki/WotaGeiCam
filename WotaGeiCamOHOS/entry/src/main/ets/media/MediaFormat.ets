@@ -95,6 +95,21 @@ export function formatDuration(ms: number): string {
   return `${pad2(m)}:${pad2(s)}`;
 }
 
+/**
+ * 带符号时长（T23）：t < 0 → '-' + 绝对时长；其余（含 0）透传 formatDuration。
+ * 负轴口径：毫秒 floor 截断（与 formatDuration 一致）且下限 1 秒——对比页偏移按 500ms
+ * 步进，tMin=-500 若按 floor 会显示 `-00:00` 与 0 无法区分，故亚秒负值统一显示 `-00:01`
+ * （-499 → -00:01；-1500 → -00:01 仍按 floor 截断，不向上夸大）。
+ * 消费方：对比播放页时间线左端标签（off>0 时负轴 pre-roll，tMin 可为负）；上游无对应物
+ * （Compose 侧直接拼字符串），此处落成纯函数供单测对拍（test/pure/media-format.test.ets）。
+ */
+export function formatSignedDuration(ms: number): string {
+  if (ms < 0) {
+    return `-${formatDuration(Math.max(1000, -ms))}`;
+  }
+  return formatDuration(ms);
+}
+
 /** 文件大小可读化（上游口径：GB 两位、MB 一位、其余 KB 整数；0/负值 = "0 B"） */
 export function formatSize(bytes: number): string {
   if (bytes <= 0) {

@@ -12,6 +12,8 @@
 **/src/ohosTest/.preview/
 # 纯逻辑测试架（scripts/pure-test.mjs）转译临时目录
 /.pure-test-tmp/
+# 本地签名探针（scripts/local-sign.mjs）密钥/证书材料（自签，不入库）
+/.local-signing/
 *.hap
 *.har
 *.hsp
