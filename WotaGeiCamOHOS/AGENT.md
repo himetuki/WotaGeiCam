@@ -39,7 +39,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 
 - `sync-upstream.sh` — 一条命令同步上游 main 到 harmony（只读上游镜像，改动只落 `WotaGeiCamOHOS/`）。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 53 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 111 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
