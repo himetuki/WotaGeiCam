@@ -9,7 +9,13 @@
  * - 逐轨顺序写入（先视频整轨、后选中音频整轨），非交织 MP4 的播放器兼容性列真机验证项；
  * - 音轨只导一条：audioOrdinal = -1 无 / >=0 容器音轨序；选中轨区间内零可写样本时不建轨
  *   （零样本轨会让 muxer Stop 失败），状态带 audio=skipped；
- * - 旋转只透传源容器/视频轨 OH_MD_KEY_ROTATION（经 WotaNormalizeQuarter 到 0/90/180/270）；
+ * - 音频拷贝阶段样本超缓冲（AV_ERR_NO_MEMORY）不判死（T20 复审 P3）：跳过剩余音频样本
+ *   继续收尾，done 状态追加 audio=skipped（已写样本保留、视频轨完好）；首枚样本即超限
+ *   （已 AddTrack 零样本）时 WARN + 跳过，依赖既有兜底（audioSamples==0 → write 失败，
+ *   零样本轨 muxer Stop 亦会失败）收尾；视频轨 NO_MEMORY 维持 sample-too-large 判死
+ *   （视频残缺即整片无价值）；
+ * - 旋转只透传源容器/视频轨 OH_MD_KEY_ROTATION（经 WotaNormalizeQuarter 到 0/90/180/270；
+ *   SetRotation 与 done 日志同读归一后的同一变量）；
  * - 后台 std::thread + 状态轮询；取消每样本检查；muxer 已 Start 时取消走 best-effort Stop，
  *   半成品由 ArkTS 删除。
  */

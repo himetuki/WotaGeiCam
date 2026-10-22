@@ -12,10 +12,14 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag } from '../core/Constants';
+import { Size, WotaTag, WotaTiers } from '../core/Constants';
+import { CameraAbility } from '../core/CameraAbility';
+import { WotaParams } from '../core/WotaParams';
 import { LensSlot, LensType } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
+import { abilityRefineWithSession } from './KitAbility';
+import { ApplyReport, State, applySnapshot, snapshotOf, stateOf } from './RequestApplier';
 import { FrameLedger } from '../record/FrameLedger';
 import { DeviceStatus } from './DeviceStatus';
 
@@ -249,6 +253,50 @@ export class GlCameraEngine {
     } catch (e) {
       Diag.w(WotaTag.ABILITY, `gl camera flash failed: ${e}`);
       return false;
+    }
+  }
+
+  /**
+   * 会话期能力真值（T21 高级参数批）：复用 KitAbility.abilityRefineWithSession
+   * 补会话期字段（iso/曝光/ev/evStep/zoom/af/awb/flash/focusDistance/ois）。
+   * 每次现算（会话域查询本身便宜，免缓存失效问题）；session 未启动返回 undefined。
+   */
+  refinedAbility(): CameraAbility | undefined {
+    const session: camera.PhotoSession | undefined = this.session;
+    const slot: LensSlot | undefined = this.currentSlot;
+    if (session === undefined || slot === undefined) {
+      return undefined;
+    }
+    try {
+      return abilityRefineWithSession(slot.ability, session);
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl camera refine ability failed: ${e}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * 参数下发（T21）：按参数总线当前快照逐键 apply（RequestApplier.applySnapshot）。
+   * 会话停止/能力不可得时返回空报告（applied/skipped/failed 全空）不崩溃——
+   * 页面在停镜后的残留回调（弹层改动/停录收尾）仍可安全调用。
+   * 口径与 KitPreview.applyParams 同：size 用本会话选中预览档，fps 用参数总线档位。
+   */
+  applyParams(params: WotaParams): ApplyReport {
+    const empty: ApplyReport = new ApplyReport();
+    const session: camera.PhotoSession | undefined = this.session;
+    const ability: CameraAbility | undefined = this.refinedAbility();
+    if (session === undefined || ability === undefined) {
+      return empty;
+    }
+    try {
+      const size: Size = this.chosenSize ?? params.size.value;
+      const fps: number = params.fps.value.value;
+      const highSpeed: boolean = fps > WotaTiers.HIGH_SPEED_FPS;
+      const state: State = stateOf(ability, size, highSpeed, ability.evStep);
+      return applySnapshot(session, state, snapshotOf(params, state));
+    } catch (e) {
+      Diag.e(WotaTag.ABILITY, `gl camera applyParams failed: ${e}`);
+      return empty;
     }
   }
 

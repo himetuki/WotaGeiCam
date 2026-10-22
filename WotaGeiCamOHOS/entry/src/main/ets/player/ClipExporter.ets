@@ -7,9 +7,18 @@
  *
  * 失败语义：native 未 done 的任何失败/取消都删除本次新建的私有 videos 文件；done 之后
  * 只允许 sidecar 写失败（结果仍 ok，sidecarOk=false），绝不删已成片。
+ *
+ * T20 复审 P3（本批修复）：
+ * - uniqueOutputPath：access 异常视为被占用继续 _N 循环，1..99 穷尽回退时间戳名，
+ *   绝不返回 access 异常的原候选名（防 TRUNC 覆盖旧成片）；
+ * - 超时 fd 延迟关闭：CANCEL_GRACE_MS 耗尽后不立即 close，进入 linger 轮询
+ *   （NATIVE_LINGER_MS 上限）等 native 离开 running:；linger 内退出照常 close+discard，
+ *   耗尽则挂模块级 pendingFds（下次 exportClip 入口/轮询 reap），Diag.w 登记泄漏，
+ *   不关正被阻塞调用写的 fd。
  */
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { Diag } from '../diag/Diag';
 import { VideoClip } from '../media/MediaRepo';
 import { VideoStore } from '../record/VideoStore';
 import { ArcDropLog } from '../record/ArcDropLog';
@@ -27,6 +36,28 @@ interface ClipNativeLib {
 const POLL_MS: number = 200;
 const EXPORT_TIMEOUT_MS: number = 10 * 60 * 1000;
 const CANCEL_GRACE_MS: number = 5000;
+/** 取消宽限耗尽后的 native 退场等待上限（linger 轮询；再不退才挂 pendingFds） */
+const NATIVE_LINGER_MS: number = 30 * 1000;
+/** 与 native 侧 OH_LOG_PRINT 同 tag（WotaClip），hilog 一并过滤 */
+const WOTA_CLIP_TAG: string = 'WotaClip';
+
+/** 超时未退场的导出 fd（挂起待 reap：native 离开 running: 之前不能关） */
+class PendingFd {
+  inFd: number;
+  outFd: number;
+  path: string;
+  parkedAtMs: number;
+
+  constructor(inFd: number, outFd: number, path: string, parkedAtMs: number) {
+    this.inFd = inFd;
+    this.outFd = outFd;
+    this.path = path;
+    this.parkedAtMs = parkedAtMs;
+  }
+}
+
+/** 模块级挂起列表：跨导出调用存活，下一次 exportClip 入口/轮询时 reap */
+const pendingFds: Array<PendingFd> = [];
 
 /** 轨探测结果：error 非空 = 失败；否则 videoCount/audioCount 有效 */
 export class ClipTrackInfo {
@@ -140,6 +171,7 @@ export class ClipExporter {
     let completed: boolean = false;
     try {
       const lib: ClipNativeLib = await ClipExporter.ensureLib();
+      ClipExporter.reapPendingFds(); // 入口回收上一轮超时挂起的 fd（native 已退场则关闭）
       const stat: fileIo.Stat = fileIo.statSync(clip.path);
       if (stat.size <= 0) {
         return ClipExporter.failed('', 'OPEN', false);
@@ -166,6 +198,7 @@ export class ClipExporter {
       const deadline: number = Date.now() + EXPORT_TIMEOUT_MS;
       for (;;) {
         status = lib.getClipExportStatus();
+        ClipExporter.reapPendingFds(); // 轮询顺带回收挂起 fd（native 退场即关；空表 no-op）
         if (status.indexOf('running:') === 0) {
           const pct: number = Number(status.substring('running:'.length));
           if (Number.isFinite(pct)) {
@@ -184,6 +217,36 @@ export class ClipExporter {
           cancelAt = now;
           lib.cancelClipExport();
         } else if (timeoutAt > 0 && now - cancelAt > CANCEL_GRACE_MS) {
+          // 宽限耗尽（T20 复审 P3）：不立即 close——先 linger 轮询等 native 离开 running:。
+          // native 单线程 worker，卡死时关掉它正写的 outFd 语义未定义（半成品+可能的崩溃面）。
+          const lingerDeadline: number = Date.now() + NATIVE_LINGER_MS;
+          let nativeLeft: boolean = false;
+          for (;;) {
+            let probe: string = '';
+            try {
+              probe = lib.getClipExportStatus();
+            } catch (e) {
+              probe = '';
+            }
+            if (probe.indexOf('running:') !== 0) {
+              nativeLeft = true;
+              break;
+            }
+            if (Date.now() > lingerDeadline) {
+              break;
+            }
+            await delayMs(POLL_MS);
+          }
+          if (nativeLeft) {
+            // linger 内退场：照常 close + 按超时失败 discard（下方统一路径）
+            status = 'failed:timeout';
+            break;
+          }
+          // linger 耗尽仍 running:：fd 挂 pendingFds 延迟关闭，输出文件仍按失败 discard
+          // （unlink 后 native 继续写已解除链接的 inode，reap close 后空间回收）
+          ClipExporter.parkPendingFds(outFd, inFd, outPath);
+          outFd = -1;
+          inFd = -1;
           status = 'failed:timeout';
           break;
         }
@@ -255,6 +318,44 @@ export class ClipExporter {
     }
   }
 
+  /** 超时未退场：挂起 fd 不关闭（泄漏登记 Diag.w；native 退场后由 reapPendingFds 关） */
+  private static parkPendingFds(outFd: number, inFd: number, path: string): void {
+    pendingFds.push(new PendingFd(inFd, outFd, path, Date.now()));
+    Diag.w(WOTA_CLIP_TAG, `export timeout: native still running, fds parked for delayed close: ${path}`);
+  }
+
+  /** 挂起 fd 回收：native 已离开 running: 才关（exportClip 入口/轮询双时机调用；空表 no-op） */
+  static reapPendingFds(): void {
+    if (pendingFds.length === 0) {
+      return;
+    }
+    const lib: ClipNativeLib | undefined = ClipExporter.lib;
+    if (lib === undefined) {
+      return;
+    }
+    const keep: Array<PendingFd> = [];
+    for (const p of pendingFds) {
+      let running: boolean = true;
+      try {
+        running = lib.getClipExportStatus().indexOf('running:') === 0;
+      } catch (e) {
+        running = true; // 状态不可得：保守保留，等下一轮
+      }
+      if (running) {
+        keep.push(p);
+      } else {
+        ClipExporter.closeQuietly(p.outFd);
+        ClipExporter.closeQuietly(p.inFd);
+        Diag.i(WOTA_CLIP_TAG,
+          `parked fds reaped after native exit: ${p.path} (held ${Date.now() - p.parkedAtMs}ms)`);
+      }
+    }
+    pendingFds.length = 0;
+    for (const p of keep) {
+      pendingFds.push(p);
+    }
+  }
+
   private static writeSidecar(clip: VideoClip, outPath: string, basePtsUs: number): boolean {
     try {
       const source: ArcDropLog | null = ArcDropLog.readFrom(clip.path);
@@ -268,25 +369,33 @@ export class ClipExporter {
     }
   }
 
-  /** 同名文件已存在时追加 _N，绝不 TRUNC 覆盖上一次导出 */
+  /**
+   * 同名文件已存在时追加 _N，绝不 TRUNC 覆盖上一次导出。
+   * T20 复审 P3：accessSync 异常（权限/并发删除等）按「被占用」处理继续 _N 循环；
+   * 1..99 穷尽回退 `${stem}_${Date.now()}.mp4`——绝不返回 access 异常的原候选名
+   * （调用方以 TRUNC 打开，返回旧名等于覆盖旧成片）。
+   */
   private static uniqueOutputPath(ctx: common.Context, name: string): string {
-    let candidate: string = VideoStore.pathFor(ctx, name);
-    try {
-      if (!fileIo.accessSync(candidate)) {
+    const occupied = (p: string): boolean => {
+      try {
+        return fileIo.accessSync(p);
+      } catch (e) {
+        return true; // 查询失败按占用保守处理：宁可换名不可覆盖
+      }
+    };
+    const first: string = VideoStore.pathFor(ctx, name);
+    if (!occupied(first)) {
+      return first;
+    }
+    const dot: number = name.lastIndexOf('.');
+    const stem: string = dot > 0 ? name.substring(0, dot) : name;
+    for (let i: number = 1; i < 100; i++) {
+      const candidate: string = VideoStore.pathFor(ctx, `${stem}_${i}.mp4`);
+      if (!occupied(candidate)) {
         return candidate;
       }
-      const dot: number = name.lastIndexOf('.');
-      const stem: string = dot > 0 ? name.substring(0, dot) : name;
-      for (let i = 1; i < 100; i++) {
-        candidate = VideoStore.pathFor(ctx, `${stem}_${i}.mp4`);
-        if (!fileIo.accessSync(candidate)) {
-          return candidate;
-        }
-      }
-    } catch (e) {
-      return candidate;
     }
-    return candidate;
+    return VideoStore.pathFor(ctx, `${stem}_${Date.now()}.mp4`);
   }
 
   private static failed(path: string, error: string, cancelled: boolean): ClipExportResult {

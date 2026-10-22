@@ -1,10 +1,19 @@
 /**
  * 主录制页最小版（上游 CameraScreen.kt 的最小集合）：
- * 全屏 GL 预览 + 固定 HUD（顶栏读数/3×3 网格/底栏控制）+ 参数胶囊（镜头/画幅/帧率/变焦/闪光/效果/光弧/网格）
+ * 全屏 GL 预览 + 固定 HUD（顶栏两行读数/3×3 网格/底栏控制）+ 参数胶囊
+ * （镜头/画幅/帧率/变焦/闪光/效果/光弧/网格点按循环；快门/ISO/EV/WB 走 PillPopup 就近浮层）
  * + GPU 录制（GlRecorder + AutoStop + 500ms 宽限 + 分段轮转 + sidecar/FrameLedger）。
  *
- * 边界（登记）：固定 HUD，不移植 HudLayout/HudLayoutEditor；胶囊点按循环，无 PillPopup/完整参数面板；
- * 高级参数（曝光/ISO/EV/WB/快门）留白；视频-only；设置持久化走 ui/SettingsStore（键独立于上游 ParamsPersist）。
+ * T21 高级参数批（对齐上游 38d712a）：WotaParams 参数总线 + 起镜后 applyAbility(refined) +
+ * 起录前/弹层改动 engine.applyParams（RequestApplier 逐键报告）；顶栏第二行 快门/ISO/EV/WB 读数
+ * （AE AUTO 时 ISO 显示 AUTO、EV 仅非 MANUAL 显示、wbShort 预设缩写+色温、能力缺失显示 -）。
+ * 录制门控走 ParamPills.RECORDING_EDITABLE_PILLS（{ISO,EV,WB}；上游含 ZOOM/FOCUS——
+ * 两颗胶囊本批未移植，差异登记 PORT_MAP §ui）。
+ *
+ * 边界（登记）：固定 HUD，不移植 HudLayout/HudLayoutEditor（READOUT 非可编排网格）；
+ * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；高级参数不持久化（会话内有效，
+ * 上游 ParamsPersist 留白）；tint 副轴/对焦弹层留白；视频-only；设置持久化走 ui/SettingsStore
+ * （键独立于上游 ParamsPersist）。
  * 加载顺序契约：不得页面顶层静态 import 'libentry.so'，XComponent onLoad 后 dynamic import 桥。
  */
 import { common } from '@kit.AbilityKit';
@@ -16,7 +25,10 @@ import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
-import { ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Constants';
+import { AeMode, ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Constants';
+import { CameraAbility } from '../core/CameraAbility';
+import { ParamState, WotaParams } from '../core/WotaParams';
+import { ApplyReport } from '../camera/RequestApplier';
 import { AutoStopMonitor } from '../record/AutoStopMonitor';
 import { AutoStopRules } from '../record/AutoStopRules';
 import {
@@ -30,6 +42,11 @@ import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudSpec } from '../ui/HudSpec';
+import { evText, shutterText, wbShort } from '../ui/ParamFormat';
+import { PillRect } from '../ui/PillPopup';
+import {
+  EvPillPopup, IsoPillPopup, ShutterPillPopup, WbPillPopup, pillEditableDuringRecording
+} from '../ui/ParamPills';
 import { LensSlot } from '../core/LensSlot';
 
 interface GlLibApi extends GlRecordLib {
@@ -128,11 +145,30 @@ struct CameraPage {
   private stopReason: string = '';
   private lastStopSummary: string = '';
   private lastStopAtMs: number = 0;
+  /** 高级参数总线（T21）：会话内有效，不持久化（上游 ParamsPersist 留白） */
+  private params: WotaParams = new WotaParams();
+  /** 最近一次会话期能力真值（起镜成功/开弹层时刷新；停镜置空） */
+  private ability: CameraAbility | undefined = undefined;
+  /** 当前打开的高级参数弹层（'' = 无）：快门/ISO/EV/WB */
+  @State activePill: string = '';
+  /** 弹层锚点（窗口 px；零矩形 = 未量到，PillPopup 内部走底贴屏回退） */
+  private pillAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** 顶栏第二行读数（参数流驱动，subscribe 里重算） */
+  @State rowShutter: string = '-';
+  @State rowIso: string = '-';
+  @State rowEv: string = '-';
+  @State rowWb: string = '-';
+  /** 高级参数胶囊当前值标签 */
+  @State pillShutterLabel: string = 'AUTO';
+  @State pillIsoLabel: string = 'AUTO';
+  @State pillEvLabel: string = '+0.0EV';
+  @State pillWbLabel: string = '自动';
 
   aboutToAppear(): void {
     this.disposed = false;
     this.pageVisible = true;
     this.ctx = this.getUIContext().getHostContext() as common.Context | undefined;
+    this.bindParamsLabels();
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
         return;
@@ -420,6 +456,15 @@ struct CameraPage {
       this.zoomLabel = `${initialZoom}x`;
       this.applyGeometry();
       this.initNativeParams();
+      // T21：起镜成功后能力落档（参数总线按会话期能力重算 range 并钳制当前值）；
+      // fps 先对齐设置档（applyAbility 以总线 fps 档位为快门上限基准）
+      const refined: CameraAbility | undefined = this.engine.refinedAbility();
+      if (refined !== undefined) {
+        this.ability = refined;
+        this.params.fps.value = ParamState.of(this.settings.fps);
+        this.params.applyAbility(refined);
+        this.syncParamLabels();
+      }
       this.startStatusTimer();
       this.message = this.message === '' ? '取景就绪' : this.message;
     }).catch((e: Object): void => {
@@ -461,6 +506,87 @@ struct CameraPage {
     } else if (this.message.indexOf(text) < 0) {
       this.message = `${this.message}（${text}）`;
     }
+  }
+
+  /** 参数流 → 读数/胶囊标签的同步（T21）：任何一次写值都会触发重算 */
+  private bindParamsLabels(): void {
+    const recompute = (): void => {
+      this.syncParamLabels();
+    };
+    this.params.aeMode.subscribe(recompute);
+    this.params.shutter.subscribe(recompute);
+    this.params.iso.subscribe(recompute);
+    this.params.ev.subscribe(recompute);
+    this.params.wbMode.subscribe(recompute);
+    this.params.kelvin.subscribe(recompute);
+    this.syncParamLabels();
+  }
+
+  /** 快照当前参数到顶栏第二行/胶囊标签（AE AUTO 时 ISO 显示 AUTO、EV 仅非 MANUAL 显示、能力缺失 -） */
+  private syncParamLabels(): void {
+    const ae: AeMode = this.params.aeMode.value;
+    const manual: boolean = ae === AeMode.MANUAL;
+    const shutterRangeOk: boolean = this.params.shutter.value.range !== undefined;
+    const isoRangeOk: boolean = this.params.iso.value.range !== undefined;
+    const evRangeOk: boolean = this.params.ev.value.range !== undefined;
+    const evStep: number = this.ability !== undefined && this.ability.evStep > 0 ? this.ability.evStep : 1;
+    this.rowShutter = manual ? (shutterRangeOk ? shutterText(this.params.shutter.value.value) : '-') : 'AUTO';
+    this.pillShutterLabel = this.rowShutter;
+    this.rowIso = manual ? (isoRangeOk ? `${Math.round(this.params.iso.value.value)}` : '-') : 'AUTO';
+    this.pillIsoLabel = this.rowIso;
+    this.rowEv = manual ? '-' :
+      (evRangeOk ? evText(this.params.ev.value.value, evStep) : '-');
+    this.pillEvLabel = this.rowEv;
+    this.rowWb = wbShort(this.params.wbMode.value, Math.round(this.params.kelvin.value.value));
+    this.pillWbLabel = this.rowWb;
+  }
+
+  /**
+   * 弹层改动下发（T21）：engine.applyParams 逐键报告；failed 项 Diag.w + 用户提示，
+   * skipped 摘要剔除恒在的 tint（无 OHOS 等价，RequestApplier 每次自曝）后按需提示。
+   */
+  private applyParamsFromPills(): void {
+    const report: ApplyReport = this.engine.applyParams(this.params);
+    this.syncParamLabels();
+    if (report.failed.length > 0) {
+      Diag.w(WOTA_RECORD_TAG, `pill apply failed: ${report.failed.join('|')}`);
+      this.appendNotice(`参数下发失败: ${report.failed.join(',').substring(0, 80)}`);
+      return;
+    }
+    const notable: Array<string> = report.skipped.filter((s: string): boolean => s.indexOf('tint:') !== 0);
+    if (notable.length > 0) {
+      this.appendNotice(`部分参数未下发: ${notable.join(',').substring(0, 60)}`);
+    }
+  }
+
+  /** 起录前兜底下发一次（T21）：ApplyReport failed 项 Diag.w（不起录，录制键另有门控） */
+  private applyParamsBeforeRecord(): void {
+    const report: ApplyReport = this.engine.applyParams(this.params);
+    if (report.failed.length > 0) {
+      Diag.w(WOTA_RECORD_TAG, `pre-record apply failed: ${report.failed.join('|')}`);
+    }
+  }
+
+  /** 打开高级参数弹层：量取触发胶囊的窗口矩形做锚点；量不到走 PillPopup 底贴屏回退 */
+  private openPill(name: string, componentId: string): void {
+    this.pillAnchor = { left: 0, top: 0, right: 0, bottom: 0 };
+    this.ability = this.cameraStarted ? this.engine.refinedAbility() : undefined;
+    try {
+      const info = this.getUIContext().getComponentUtils().getRectangleById(componentId);
+      this.pillAnchor = {
+        left: info.windowOffset.x,
+        top: info.windowOffset.y,
+        right: info.windowOffset.x + info.size.width,
+        bottom: info.windowOffset.y + info.size.height
+      };
+    } catch (e) {
+      // 锚点量取失败（id 失效/首帧未量到）：保持零矩形，PillPopup 回退底贴屏
+    }
+    this.activePill = name;
+  }
+
+  private closePill(): void {
+    this.activePill = '';
   }
 
   private cycleLens(): void {
@@ -514,6 +640,12 @@ struct CameraPage {
     }
     this.settings.fps = this.settings.fps === 24 ? 25 : (this.settings.fps === 25 ? 30 : 24);
     this.fpsLabel = `${this.settings.fps}`;
+    // T21：fps 档位换挡 → 参数总线重算（快门上限吃帧率档位）
+    this.params.fps.value = ParamState.of(this.settings.fps);
+    if (this.ability !== undefined) {
+      this.params.applyAbility(this.ability);
+    }
+    this.syncParamLabels();
     this.persistSettings();
   }
 
@@ -630,6 +762,16 @@ struct CameraPage {
     this.sizeLabel = '—';
     this.zoomLabel = '1x';
     this.zoomIndex = 0;
+    // 会话已失：能力/读数一并复位（能力缺失显示 -）
+    this.ability = undefined;
+    this.rowShutter = '-';
+    this.rowIso = '-';
+    this.rowEv = '-';
+    this.rowWb = '-';
+    this.pillShutterLabel = '-';
+    this.pillIsoLabel = '-';
+    this.pillEvLabel = '-';
+    this.pillWbLabel = '-';
   }
 
   private applyGeometry(): void {
@@ -662,6 +804,20 @@ struct CameraPage {
       return `${this.freeMb >= 0 ? this.freeMb + 'MB' : '—'}`;
     }
     return formatElapsed(this.elapsedMs);
+  }
+
+  /** 顶栏第二行读数（T21）：快门/ISO/EV/WB（值由 syncParamLabels 预算进 @State） */
+  private readoutText2(key: string): string {
+    if (key === 'shutter') {
+      return this.rowShutter;
+    }
+    if (key === 'iso') {
+      return this.rowIso;
+    }
+    if (key === 'ev') {
+      return this.rowEv;
+    }
+    return this.rowWb;
   }
 
   private displayDeg(): number {
@@ -780,6 +936,7 @@ struct CameraPage {
     const fps: number = this.settings.fps;
     const bitrate: number = BitratePolicy.resolve(this.settings.bitrate, w, h, fps, false);
     const arcMode: number = fps < 30 ? this.settings.arcMode : 0;
+    this.applyParamsBeforeRecord(); // T21：起录前把参数总线快照下发一遍（failed 项 Diag.w）
     const error: string = this.recorder.start(ctx, lib, w, h, fps, bitrate, arcMode, fps,
       ArcMergeDeadband.deadband);
     if (error !== '') {
@@ -908,6 +1065,7 @@ struct CameraPage {
     const fps: number = this.settings.fps;
     const bitrate: number = BitratePolicy.resolve(this.settings.bitrate, actual.width, actual.height, fps, false);
     const arcMode: number = fps < 30 ? this.settings.arcMode : 0;
+    this.applyParamsBeforeRecord(); // 自动重录也是起录：同一条下发兜底
     const error: string = this.recorder.start(ctx, lib, actual.width, actual.height, fps, bitrate,
       arcMode, fps, ArcMergeDeadband.deadband);
     if (error !== '') {
@@ -1094,12 +1252,13 @@ struct CameraPage {
   }
 
   @Builder
-  private pill(label: string, onTap: () => void, enabled: boolean) {
+  private pill(label: string, onTap: () => void, enabled: boolean, componentId: string = '') {
     Button(label)
       .fontSize(11)
       .height(30)
       .enabled(enabled)
       .backgroundColor('#4D000000')
+      .id(componentId)
       .onClick((): void => {
         onTap();
       })
@@ -1157,13 +1316,24 @@ struct CameraPage {
             .onClick((): void => {
               this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
             })
-          Row({ space: 6 }) {
-            ForEach(HudSpec.HUD_READOUTS, (key: string): void => {
-              Text(this.readoutText(key))
-                .fontSize(10)
-                .fontColor(key === 'duration' && this.recording ? '#FF5252' : Color.White)
-                .maxLines(1)
-            }, (key: string): string => key)
+          Column({ space: 2 }) {
+            Row({ space: 6 }) {
+              ForEach(HudSpec.HUD_READOUTS, (key: string): void => {
+                Text(this.readoutText(key))
+                  .fontSize(10)
+                  .fontColor(key === 'duration' && this.recording ? '#FF5252' : Color.White)
+                  .maxLines(1)
+              }, (key: string): string => key)
+            }
+            // T21 顶栏第二行：快门/ISO/EV/WB（对齐上游 READOUT 可见项；固定两行为登记偏离）
+            Row({ space: 6 }) {
+              ForEach(HudSpec.HUD_READOUTS_ROW2, (key: string): void => {
+                Text(this.readoutText2(key))
+                  .fontSize(10)
+                  .fontColor(Color.White)
+                  .maxLines(1)
+              }, (key: string): string => key)
+            }
           }
           .layoutWeight(1)
         }
@@ -1209,6 +1379,19 @@ struct CameraPage {
               this.pill(`帧率:${this.fpsLabel}`, (): void => {
                 this.cycleFps();
               }, !this.recording && !this.stopPending)
+              // T21 高级参数胶囊：点按开 PillPopup 就近浮层（门控见 ParamPills.RECORDING_EDITABLE_PILLS）
+              this.pill(`快门:${this.pillShutterLabel}`, (): void => {
+                this.openPill('shutter', 'pill_shutter');
+              }, this.cameraStarted, 'pill_shutter')
+              this.pill(`ISO:${this.pillIsoLabel}`, (): void => {
+                this.openPill('iso', 'pill_iso');
+              }, this.cameraStarted, 'pill_iso')
+              this.pill(`EV:${this.pillEvLabel}`, (): void => {
+                this.openPill('ev', 'pill_ev');
+              }, this.cameraStarted, 'pill_ev')
+              this.pill(`WB:${this.pillWbLabel}`, (): void => {
+                this.openPill('wb', 'pill_wb');
+              }, this.cameraStarted, 'pill_wb')
               this.pill(`变焦:${this.zoomLabel}`, (): void => {
                 this.cycleZoom();
               }, true)
@@ -1278,6 +1461,64 @@ struct CameraPage {
           .maxLines(3)
           .padding(12)
           .backgroundColor('#66000000')
+      }
+
+      // T21 高级参数就近浮层（最顶层：遮罩拦点按，量框后定位面板）
+      if (this.activePill === 'shutter') {
+        ShutterPillPopup({
+          anchor: this.pillAnchor,
+          params: this.params,
+          ability: this.ability,
+          editable: !this.recording || pillEditableDuringRecording('shutter'),
+          onClose: (): void => {
+            this.closePill();
+          },
+          onApply: (): void => {
+            this.applyParamsFromPills();
+          }
+        })
+      }
+      if (this.activePill === 'iso') {
+        IsoPillPopup({
+          anchor: this.pillAnchor,
+          params: this.params,
+          ability: this.ability,
+          editable: !this.recording || pillEditableDuringRecording('iso'),
+          onClose: (): void => {
+            this.closePill();
+          },
+          onApply: (): void => {
+            this.applyParamsFromPills();
+          }
+        })
+      }
+      if (this.activePill === 'ev') {
+        EvPillPopup({
+          anchor: this.pillAnchor,
+          params: this.params,
+          ability: this.ability,
+          editable: !this.recording || pillEditableDuringRecording('ev'),
+          onClose: (): void => {
+            this.closePill();
+          },
+          onApply: (): void => {
+            this.applyParamsFromPills();
+          }
+        })
+      }
+      if (this.activePill === 'wb') {
+        WbPillPopup({
+          anchor: this.pillAnchor,
+          params: this.params,
+          ability: this.ability,
+          editable: !this.recording || pillEditableDuringRecording('wb'),
+          onClose: (): void => {
+            this.closePill();
+          },
+          onApply: (): void => {
+            this.applyParamsFromPills();
+          }
+        })
       }
     }
     .width('100%')

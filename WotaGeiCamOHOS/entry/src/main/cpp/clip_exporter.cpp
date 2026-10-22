@@ -243,6 +243,10 @@ void ClipExporter::Run(const Job& job)
     int32_t videoSamples = 0;
     int32_t audioSamples = 0;
     int32_t sourceRotation = 0;
+    // 实际写进 muxer 的旋转角（源格式优先、视频轨兜底后经 WotaNormalizeQuarter 归一）。
+    // SetRotation 与 done 日志必须同读这一个变量（T20 复审 P3：旧代码 done 行打的是
+    // sourceRotation，源格式缺旋转键、视频轨带键时日志与成片不一致）。
+    int32_t appliedRotation = 0;
     bool audioBuilt = false;
     bool audioSkipped = false;
     bool muxerStarted = false;
@@ -311,6 +315,7 @@ void ClipExporter::Run(const Job& job)
         // 源格式优先（容器级旋转=显示角，权威口径）；缺失时退回视频轨格式。
         const int32_t rotation = sourceRotationPresent ? sourceRotation :
             (trackRotationPresent ? trackRotation : 0);
+        appliedRotation = WotaNormalizeQuarter(rotation);
 
         TrackEntry* chosenAudio = nullptr;
         if (job.audioOrdinal >= 0) {
@@ -442,7 +447,7 @@ void ClipExporter::Run(const Job& job)
                     "audio add-track failed, export video only");
             }
         }
-        if (OH_AVMuxer_SetRotation(muxer, WotaNormalizeQuarter(rotation)) != AV_ERR_OK) {
+        if (OH_AVMuxer_SetRotation(muxer, appliedRotation) != AV_ERR_OK) {
             error = "rotation";
             break;
         }
@@ -536,7 +541,16 @@ void ClipExporter::Run(const Job& job)
                     break;
                 }
                 if (outcome == ReadOutcome::NO_MEMORY) {
-                    error = "sample-too-large";
+                    // T20 复审 P3：音频样本超缓冲不判死——跳过剩余音频样本继续收尾，
+                    // done 状态追加 audio=skipped（视频轨保持完好；已写样本原样保留）。
+                    // 首枚样本即 NO_MEMORY（已 AddTrack 零样本）时 audioSamples==0，
+                    // 由下方既有兜底（audioSamples==0 → "write"，零样本轨 Stop 亦会失败）
+                    // 收尾为失败——跳过并 WARN，不静默。视频轨 NO_MEMORY 维持
+                    // sample-too-large 判死（视频残缺即整片无价值，登记 clip_exporter.h）。
+                    audioSkipped = true;
+                    OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                        "audio sample too large, skip remaining audio (samples=%{public}d)",
+                        audioSamples);
                     break;
                 }
                 if (outcome == ReadOutcome::ERROR) {
@@ -639,11 +653,15 @@ void ClipExporter::Run(const Job& job)
     std::string status = "done:" + std::to_string(basePtsUs) + ":" + std::to_string(videoSamples) +
         ":" + std::to_string(audioSamples);
     if (audioSkipped) {
+        // audio=skipped 两处来源：①建轨阶段（ordinal 越界/缓冲分配失败/预扫零可写样本/
+        // AddTrack 被拒——纯视频成片）；②拷贝阶段 NO_MEMORY 跳过剩余音频样本（T20 复审
+        // P3 新增——视频完整、音频截到跳过点；首枚即超限时走 audioSamples==0 兜底不会到这）。
         status += ":audio=skipped";
     }
+    // rotation 与 OH_AVMuxer_SetRotation 同读 appliedRotation（T20 复审 P3 修复口径）
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "clip export done base=%{public}lld v=%{public}d a=%{public}d skipped=%{public}d rotation=%{public}d",
         static_cast<long long>(basePtsUs), videoSamples, audioSamples, audioSkipped ? 1 : 0,
-        WotaNormalizeQuarter(sourceRotation));
+        appliedRotation);
     Finish(State::DONE, status);
 }
