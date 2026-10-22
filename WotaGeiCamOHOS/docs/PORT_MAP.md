@@ -2,6 +2,14 @@
 
 上游源码根：`WotaGeiCamApp/app/src/main/java/com/wotagei/cam/`（117 个 Kotlin 文件，下表省略该前缀）。
 
+> **2026-10-22 历史剥离**：harmony 已重写为 OHOS-only 独立历史，`WotaGeiCamApp/`
+> （与 `WotaGeiCam_Android_Icons/`、`.github/`、根 `README.md`）不再入库，仅在本机磁盘保留、
+> 未跟踪（被 `.gitignore` 忽略）供对拍，**权威读法改为**
+> `git show main:WotaGeiCamApp/app/src/main/java/com/wotagei/cam/<文件>`（main = origin/main 镜像）。
+> 与 origin/main 无共同祖先，pull/merge 废用；同步方式见 [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md)。
+
+> README 的同步表述待 CI 会话收尾后更新；HAP CI workflow（`.github/`）未入库，待其所有者决定。
+
 类型说明：
 - **纯逻辑** —— 不依赖 Android API（或仅依赖可等价替换的薄层），可近乎逐行翻译成 ArkTS/TS，移植成本最低；
 - **平台绑定** —— 依赖 Camera2 / MediaCodec / GL / 服务等平台能力，需按鸿蒙对应 Kit 重写；

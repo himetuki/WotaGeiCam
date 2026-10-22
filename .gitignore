@@ -1,79 +1,56 @@
-# ===== 构建产物 =====
-build/
-!gradle/wrapper/gradle-wrapper.jar
-.gradle/
-.kotlin/
-*/build/
-app/build/
-captures/
-*.apk
-*.aab
-*.ap_
-*.dex
-*.class
+# =====================================================================
+# harmony 分支 = OHOS-only 仓库（2026-10-22 历史剥离）
+# 入库路径只有：WotaGeiCamOHOS/、LICENSE、.gitattributes、本文件。
+# 上游 Android 源码保留在本机磁盘（未跟踪）供移植对拍，不再入库。
+# =====================================================================
 
-# ===== 本地环境与机器配置 =====
-local.properties
-*.jks
-*.keystore
-.cxx/
-.externalNativeBuild/
-obj/
-bin/
-gen/
+# ===== 上游 Android 侧（磁盘保留，git 不跟踪）=====
+/WotaGeiCamApp/
+/WotaGeiCam_Android_Icons/
+/README.md
+/.github/
 
-# ===== IDE =====
-.idea/
-*.iml
-*.ipr
-*.iws
-.fleet/
-.navigation/
-.vscode/
-
-# ===== 临时与缓存 =====
-.tmp/
-tmp/
-*.log
-hs_err_pid*
-replay_pid*
-.cxx-abi/
-
-# ===== mapping 归档（docs/plan/15 步骤 5：与 *.apk 同等待遇，不进 git，靠 APK-LOG.md 清单追溯）=====
-deliverable/**/mapping/
-
-# ===== 本机工具链（体积大且可重装）=====
-tools/android-sdk/
-tools/**/platform-tools/
-tools/**/build-tools/
-
-# ===== 系统与编辑器垃圾 =====
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ===== 公开仓库边界（github.com/himetuki/WotaGeiCam）=====
-# 签名材料只留本地，CI 从 Actions Secrets 还原（build.gradle.kts 缺失时回退 debug 签名的判据不变）
-keystore.properties
-# ===== 内部材料一律不进公开仓库（2026-10-03 用户指令，边界调整）=====
-/AGENTS.md
-/readme.md
-/需求.md
-/deliverable/
-/research/
-/docs/
-/tools/
-/.zcodeignore
-
-# ===== adb 调试取证产物 =====
-repro_log.txt
-repro_screen*.png
-
-# ===== 会话与工具本地状态 =====
+# ===== 本机会话 / 工具状态 =====
 .mimosa/
 .zcode/
 agent-memory/
+
+# ===== OHOS 构建产物（WotaGeiCamOHOS/.gitignore 为主，本文件兜底）=====
+build/
+oh_modules/
 node_modules/
-package.json
-package-lock.json
+.hvigor/
+.cxx/
+.clangd
+.clang-format
+.clang-tidy
+.appanalyzer
+.test/
+.preview/
+.pure-test-tmp/
+.local-signing/
+*.hap
+*.har
+*.hsp
+local.properties
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+.vscode/
+.fleet/
+
+# ===== 签名材料（只留本机）=====
+*.jks
+*.keystore
+
+# ===== 临时与垃圾 =====
+.tmp/
+tmp/
+*.log
 *.bak
+hs_err_pid*
+replay_pid*
+.DS_Store
+Thumbs.db
+desktop.ini
