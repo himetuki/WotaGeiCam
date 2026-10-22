@@ -57,13 +57,15 @@ cd WotaGeiCamOHOS
 node scripts/pure-test.mjs     # 退出码 0 = 全绿；任何失败非 0（CI 可直接消费）
 ```
 
-已覆盖（113 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（25，
-T22 几何 9 + T24 内核 16，含 off=0 回归红线三条）、slider-ladder（9，上游
+已覆盖（159 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（26，
+T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），含 off=0 回归红线三条）、slider-ladder（9，上游
 SliderLadderTest 直译）、segment-policy（5）、clip-rule（6）、media-format（3，
 formatSignedDuration 正/负/0 及 formatDuration 口径对齐）、compare-audio（16，
 T24：选轨计划/命令顺序/桥函数 + 分屏 3 臂）、audio-sync（10，T24：重采样/包络/
 粗对齐/FFT/精修）、compare-practice（6，T24）、compare-history（12，T24 10 + T25 2：
-数字串宽松解析对齐上游 getLong）。
+数字串宽松解析对齐上游 getLong）、capture-state-machine（16，T26：上游 14 条转移 +
+状态/事件短名）、capture-silence（5，T26）、audio-probe（3，T26）、capture-sources（3，
+T26）、track-sync（11，T26）、pcm-decode（7，T26）。
 
 > **为什么工程里没有 hvigorw.js**：DevEco 自带 wrapper 按「自身位于
 > `tools/hvigor/bin/`」的布局解析引擎路径；把它的副本放进工程根会导致引擎链接
@@ -112,8 +114,10 @@ T24：选轨计划/命令顺序/桥函数 + 分屏 3 臂）、audio-sync（10，
 - [x] T24 纯逻辑直译（2026-10-22）：`player/CompareTimeline.ets` 补 decide 全量内核（CompareDomain/DecideInput/DecideCommands/domainOf/resolveT/decide：域判定黑层回灌、交接不 seek、双覆盖 250ms 硬 seek/邻域 nudge、时间线末回绕 Tmin 与末帧停驻、AB 不抢回绕、拖动让路）+ `player/CompareAudio.ets`（轨序 0/1 单一映射、单侧静音计划、固定命令序、分屏单引擎音量恒 1）+ `player/AudioSync.ets`（重采样/包络/粗对齐/radix-2 FFT/1kHz 低通/±50ms 精修与置信度；平台解码留 T25）+ `player/ComparePractice.ets`（armed/takeLeftId/deliver，练习页分屏阻塞）+ `player/CompareHistory.ets`（容错解析/去重插首/截 12/编码键序；preferences 留 T25）；新增 58 用例（53→111），`pages/` 零改动
 - [x] T25 对比页接线（2026-10-22）：Compare 页 onTick 交 decide（pause/resume→seek→nudge→黑层写回；主钟读数 resolveT，pre-roll 显负 T）、seekTimeline 统一 park/黑层、setPlaying 末态回 Tmin + wantPlaying 续播（换右片/右片晚挂补一次）、domBlack 常驻透明层 + 底栏循环开关；音频计划真实下发（CompareAudio applyOrderOf → setVolume/selectAudioGroup，ClipExporter.probe audioCount≥2 门控 chip，静音三态保留）；`player/PlayerEngine.ets` 增 pauseIfPlaying/playIfPaused（completed 按 positionMs 补 seek）/nudgeSpeedForSync（平台空操作）/selectAudioGroup（getTrackDescription 音轨序）；`player/CompareHistoryStore.ets`（wota_player_ab）+ 历史面板（回填/缺失/删除）+ 选右片记账；`player/PureLogicBarrel.ets` 编译守卫（EntryAbility 启动日志）；CompareHistory 数字串容错（+2 用例，113 全绿）。审查修复：surface 重建后按 wantPlaying 自动复播（seekAndPlayIfPaused）、拖回双覆盖区 dormant 侧随松手复活、换片/attach 后音轨门控无条件重探、右片未选/报错时进度跟左钟、静音态音轨静默生效、历史写入串行。进页起播仍为手点播放（登记偏离）；练习动线/AudioSync 平台解码转 T26
 
-**进度收敛（T25 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、纯逻辑测试架（113 用例）。
-**留白（后续批）**：AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、音频轨（内录双轨，T26）、VideoSession 参数面（录制参数下发）、离线光弧修复、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
+- [x] T26 内录纯逻辑降级版（2026-10-22）：`record/CaptureStateMachine.ets`（Idle→Authorizing→Active/Failed→Revoked 全转移 + 状态/事件短名，16 用例）、`record/CaptureSilence.ets`（SilencePromptGate 按场 60s 节流 + captureSilenceVerdict 2s/5s 双门槛 + fedMsOf，5）、`record/AudioProbe.ets`（frameBytes/chunkBytes/recordBufferBytes/dbOf + captureParamMismatch 档位体检，3）、`record/CaptureSources.ets`（OH_AudioCaptureSourceType 契约 MIC=1/ALL_PLAYBACK=2/APP_PLAYBACK=3 + 内录源优先级，3）、`player/TrackSync.ets`（内容差+首样本容器差合成/低置信度归零/失败分类，11）、`player/PcmDecode.ets`（PTS 落位/空洞补零/PCM16/24/F32LE/降单声道，7）；PureLogicBarrel 纳入六模块（启动日志扩展 cap/src/sync/chunk/silence/pcm）；新增 46 用例（113→159，含审查修复 1 条右片重建恢复目标四域臂）。T25 P3×4：自然播完清 wantPlaying、右片重建按快照单次 seek、探测中跳过 override、删死 API。审查修复：右片重建在右独播/pre-roll 域保留重建前素材位（`rightResumeTargetOf` 以快照为右钟）、标签函数去 default 改显式 throw、AudioProbe 补网格、探测早退清 pending。**平台面（AVScreenCapture 双源+AAC 三轨+隐私授权）转 T27 真机批**，调研结论见 docs/PORT_MAP.md「T26 平台调研」
+
+**进度收敛（T26 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、内录纯逻辑内核（授权态机/静音判据/采集算式/源契约/双轨偏移/PCM 解码）、纯逻辑测试架（159 用例）。
+**留白（后续批）**：内录平台面四步（T27-1 平台探针/T27-2 ENV 音轨/T27-3 CAP 双轨/T27-4 消费面）、AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、VideoSession 参数面（录制参数下发）、离线光弧修复、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
 
 ## 交付
 
@@ -121,12 +125,12 @@ T24：选轨计划/命令顺序/桥函数 + 分屏 3 臂）、audio-sync（10，
 
 | 产物 | 路径 | 字节数（单次快照） | sha256（单次快照，易变） |
 | --- | --- | --- | --- |
-| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5227659 | `0be7fb6e427d464742661cdc7e4f5ef92f04c6698af40a5126d092e2d3af8434` |
-| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5324045 | `e389c8369e4c8569e87a6d8f45e5e763526cce22dddda1622045c1aa1533d3d1` |
+| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5271587 | `f81211d1ec1fc212ae7a3c97040e225db245d3f0d3ca11739d79e5d801d43bbd` |
+| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5371800 | `d1ff748848b28ee8ddfc8be3a74cb9240b0b042f5ebcf7b0d70b661f00a748eb` |
 
 > **hash 不可复现，勿作复验判据**：zip 条目时间戳随打包时刻变化，同一源码两次 clean 构建
 > 字节数相同但 sha256 不同；signed 包还叠加 sign-app 时间戳，每次重签必变，**signed 字节数也
-> 会随签名块长度小幅浮动**（本快照 5324045B 不是固定值）。上表是 T25 批的单次本机快照（仅交付
+> 会随签名块长度小幅浮动**（本快照 5371800B 不是固定值）。上表是 T26 批的单次本机快照（仅交付
 > 留痕）。内容级复验**只对 unsigned 有效**：解包后按路径排序逐文件 sha256 比对（16 个业务文件）；
 > signed 包以 `local-sign.mjs` 内置 `verify-app` 的证书链/profile 输出为准（`.pages.info` 由签名
 > 工具生成，不参与内容比对）。示例：
@@ -142,10 +146,10 @@ T24：选轨计划/命令顺序/桥函数 + 分屏 3 臂）、audio-sync（10，
 
 - 未签名包：clean 构建（WARN=2 基线：napi 未验证提示 + 未配置签名跳过）产物。
 - 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，bundleName
-  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 61946 字节，含
+  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 60365 字节，含
   `<hap sign block>` 标记）位于 ZIP 尾部中央目录之前，**不产生旧式 `META-INF/` 条目**——「签名块
   与 profile 可见」以脚本内置 `verify-app` 回验为准（实测还原 3 级证书链 + 3254 字节 profile）。
-  `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 528 字节），无 `META-INF/`。
+  `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 536 字节），无 `META-INF/`。
   **仅证明包结构可签名/可验证**——自签证书未经华为云颁发，真机安装请改用 DevEco Studio 自动签名。
 - 复跑：`node scripts/local-sign.mjs`（需 `DEVECO_SDK_HOME` 或 `HAP_SIGN_TOOL_JAR`、PATH 中有 `java`；
   可用 `LOCAL_SIGN_PASS` 覆盖本地口令）；签名材料只首次生成，落 `.local-signing/`（已 gitignore，

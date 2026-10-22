@@ -296,6 +296,29 @@ export function resolveT(
 }
 
 /**
+ * 右片重建/重试后的恢复目标（素材位）。**必须用重建前的快照当右钟输入**，绝不能用新引擎的
+ * positionMs（AVPlayer attach 后恒 0）：右独播域（左已播尽的尾段）里 0 会被 domainOf 的
+ * 黑层/覆盖判定读成双覆盖，T 落到左片时长，右窗回跳；off>0 的 pre-roll 更会被读成 tMin，
+ * 右片直接回素材 0。
+ *
+ * 步骤：按快照域判定主钟得 T → 取 rightTarget(T)（覆盖区即 T+off；域外 park 到 0/dur）。
+ * 返回 undefined = 快照无效（<0/非有限），调用方回退到原始快照值。
+ */
+export function rightResumeTargetOf(
+  geo: TimelineGeometry,
+  leftLiveMs: number,
+  rightSnapshotMs: number,
+  blackLeft: boolean,
+  blackRight: boolean
+): number | undefined {
+  if (!Number.isFinite(rightSnapshotMs) || rightSnapshotMs < 0) {
+    return undefined;
+  }
+  const t: number = resolveT(geo, Math.max(0, leftLiveMs), rightSnapshotMs, blackLeft, blackRight);
+  return geo.rightTarget(t);
+}
+
+/**
  * 一拍决策（纯函数）。职责：
  * - 素材域 pause/黑层（dormant 轨每拍重断言，幂等）；
  * - 双素材域纠偏（公式与旧循环逐字一致：漂出 hardResyncMs 硬 seek 回邻域，

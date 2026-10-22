@@ -399,11 +399,6 @@ export class PlayerEngine {
     this.seekInternal(target);
   }
 
-  /** 待复播意图（重建续播路径的静态检查锚点） */
-  hasPendingPlayAfterSeek(): boolean {
-    return this.pendingPlayAfterSeek;
-  }
-
   /**
    * 软追赶占位（上游 nudgeSpeedForSync 的平台空操作）：AVPlayer setSpeed 只有枚举档
    * （speedToEnum 为证），无任意 ratio 微调接口；漂出 250ms 由 decide 的硬 seek 兜底。

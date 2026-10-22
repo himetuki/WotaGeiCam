@@ -7,6 +7,8 @@
  *   timelineSpan/timelineEnd；**off=0 两条回归红线原样保留**；
  * - T24 全量内核（16 条）：域判定/主钟/交接/入口态/纠偏/时间线末/AB/拖动/pre-roll 自洽，
  *   与上游 18 个测试方法逐一对位（几何 2 条已在前批）。期望值全部手写字面量。
+ * - T26 审查修复（1 条）：rightResumeTargetOf 四域臂——右片重建恢复目标必须由**重建前快照**
+ *   做域判定（右独播尾段/pre-roll/左主钟双素材/左独播 park），新引擎 attach 后的 0 不得参与。
  *
  * off=0 回归红线（两条独立用例钉死）：
  * - 几何红线：Tmin=0、Tmax=max(L,R)（右片没选 R=0 时 Tmax=L，与旧单左轴完全一致）；
@@ -14,7 +16,7 @@
  */
 import {
   CompareDomain, DecideCommands, DecideInput, TimelineGeometry, decide, domainOf, normalizeOffset,
-  resolveT, rightTargetFor, timelineEnd, timelineSpan
+  resolveT, rightResumeTargetOf, rightTargetFor, timelineEnd, timelineSpan
 } from '../../entry/src/main/ets/player/CompareTimeline';
 
 /** decide 输入底座（上游测试 input() 的 ArkTS 版：L=10s、R=20s、off=0、中段在播） */
@@ -383,4 +385,28 @@ test('pre-roll seek落park后 拍间状态自洽', (): void => {
   assertTrue(c.blackLeft, '黑层不闪');
   assertNull(c.seekLeftMs, '拍间不 seek 左');
   assertNull(c.seekRightMs, '拍间不 seek 右');
+});
+
+test('右片重建恢复目标 快照为右钟的四域臂', (): void => {
+  // 审查修复 P2 的行为锚：恢复目标必须由**重建前快照**做域判定，不能用新引擎的 0。
+  // 臂 1：off=0 右独播尾段（左已播尽、blackLeft=true、快照 15000）→ 必须回 15000
+  // （若误用新引擎 0，会读成 DUAL、T=10000，右窗回跳）
+  const tail: TimelineGeometry = new TimelineGeometry(10000, 20000, 0);
+  assertEq(15000, rightResumeTargetOf(tail, 10000, 15000, true, false) ?? -1,
+    '右独播尾段保留快照素材位');
+  // 臂 2：off=5000 pre-roll（blackLeft=true、快照 3000）→ 必须回 3000
+  // （若误用新引擎 0，会被读成 tMin=-5000 → 右片回素材 0）
+  const pre: TimelineGeometry = new TimelineGeometry(10000, 20000, 5000);
+  assertEq(3000, rightResumeTargetOf(pre, 0, 3000, true, false) ?? -1,
+    'pre-roll 右独播保留快照素材位');
+  // 臂 3：off=0 左主钟双素材（black=false、左 5000/快照 5000）→ 对齐 T+off = 5000
+  const dual: TimelineGeometry = new TimelineGeometry(10000, 20000, 0);
+  assertEq(5000, rightResumeTargetOf(dual, 5000, 5000, false, false) ?? -1,
+    '双素材按 T+off 对齐');
+  // 臂 4：off=0 左独播（blackRight=true、左 15000、快照 10000=右片尽头 park）→ 保持 park
+  const leftSolo: TimelineGeometry = new TimelineGeometry(20000, 10000, 0);
+  assertEq(10000, rightResumeTargetOf(leftSolo, 15000, 10000, false, true) ?? -1,
+    '左独播右片保持尽头 park');
+  // 防御：无效快照返回 undefined（调用方回退原始值）
+  assertNull(rightResumeTargetOf(dual, 5000, -1, false, false), '负快照无效');
 });

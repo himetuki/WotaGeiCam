@@ -37,7 +37,8 @@ import {
 import { CompareHistoryEntry } from '../player/CompareHistory';
 import { CompareHistoryStore } from '../player/CompareHistoryStore';
 import {
-  DecideCommands, DecideInput, decide, normalizeOffset, resolveT, timelineEnd, TimelineGeometry
+  CompareDomain, DecideCommands, DecideInput, decide, domainOf, normalizeOffset, resolveT,
+  rightResumeTargetOf, timelineEnd, TimelineGeometry
 } from '../player/CompareTimeline';
 
 interface CompareParams {
@@ -71,6 +72,8 @@ const TICK_MS: number = 120;
 const HARD_RESYNC_MS: number = 250;
 const OFFSET_STEP_MS: number = 500;
 const DEFAULT_FPS: number = 30;
+/** 音轨探测在途的陈旧阈值：超过此值视为探测丢失（兜底解除 override 抑制） */
+const AUDIO_PROBE_STALE_MS: number = 2000;
 /** 黑层总开关（review 退路：false = 不渲染黑层；dormant pause 仍由 decide 下发） */
 const BLACK_LAYER_ENABLED: boolean = true;
 
@@ -112,6 +115,8 @@ struct Compare {
   /** T25：音频侧/轨（env=组 0、cap=组 1；双音轨才显示 chip） */
   @State audioTrack: AudioTrackKind = AudioTrackKind.ENV;
   @State audioSideDual: boolean = false;
+  /** 音轨探测在途（P3-3）：在途时跳过 selectAudioGroup（音量照发），2s 陈旧兜底 */
+  @State audioProbePending: boolean = false;
   /** T25：历史面板 */
   @State historyOpen: boolean = false;
   @State historyLoading: boolean = false;
@@ -134,6 +139,8 @@ struct Compare {
   private tickTimer: number = -1;
   /** 当前音频侧（静音时保留最后一次有声侧；声音循环同步） */
   private audioSide: Side = Side.LEFT;
+  /** 音轨探测发起的墙钟毫秒（audioProbePending 的陈旧判定基准） */
+  private audioProbePendingAt: number = 0;
   /** 续播意图：换右片/右片晚挂/重建后 attach 成功时补一次 setPlaying(true) */
   private wantPlaying: boolean = false;
   private resumeLeftPosMs: number = -1;
@@ -341,6 +348,14 @@ struct Compare {
     }
     this.domBlackLeft = cmd.blackLeft;
     this.domBlackRight = cmd.blackRight;
+    // P3-1：自然播完（时间线末 + 循环关 + 双引擎已停）清续播意图——否则 wantPlaying 会
+    // 让下一拍 decide 把 userPlaying 当假真，末态读数/回绕判断失真（用户再点播放才重新置位）。
+    const ended: CompareDomain = domainOf(geo, Math.max(0, left.positionMs),
+      Math.max(0, right.positionMs), this.domBlackLeft, this.domBlackRight);
+    if (!this.timelineLoop && !this.sliderDragging && !left.playing && !right.playing &&
+      ended === CompareDomain.TIMELINE_END) {
+      this.wantPlaying = false;
+    }
     // 主钟读数走 resolveT：双素材/左独播随左钟、右独播随右钟、末态 Tmax（pre-roll 为负 T）
     if (!this.sliderDragging) {
       const t: number = Math.round(resolveT(geo, Math.max(0, left.positionMs),
@@ -461,13 +476,21 @@ struct Compare {
       this.applyAudioPlan();
       this.probeAudioSide();
       if (this.resumeRightPosMs >= 0) {
-        // 右片重建/重试恢复位置（素材位快照，T25 起不再用时间线 T）
-        const resume: number = this.resumeRightPosMs;
+        // 右片重建/重试恢复位置（素材位快照）。审查修复 P2：**始终用快照**算恢复目标——
+        // 新引擎刚 attach 时 positionMs 恒 0，拿它参与 resolveT 会在右独播域（左已播尽）
+        // 被读成双覆盖、T 落到左片时长，右窗回跳（off>0 pre-roll 更会回素材 0）。
+        // rightResumeTargetOf 以快照为右钟输入做域判定，右独播/左独播/末态 park 都落正确素材位；
+        // 这里只发一次 seek（wantPlaying 时 seek 落地即播），maybeResumeWanted 随后复算 T
+        // （此时引擎位置已是目标位）只做域内唤醒，不再二次 seek。
+        const snapshot: number = this.resumeRightPosMs;
         this.resumeRightPosMs = -1;
+        const target: number | undefined = rightResumeTargetOf(this.timelineGeo(),
+          Math.max(0, this.leftEngine.positionMs), snapshot, this.domBlackLeft, this.domBlackRight);
+        const resumeAt: number = target !== undefined ? target : snapshot;
         if (this.wantPlaying) {
-          engine.seekAndPlayIfPaused(resume);
+          engine.seekAndPlayIfPaused(resumeAt);
         } else {
-          engine.seekTo(resume);
+          engine.seekTo(resumeAt);
         }
       }
       this.maybeResumeWanted();
@@ -770,6 +793,10 @@ struct Compare {
     }
     const plan: CompareAudioPlan = audioPlanOf(this.audioSide, this.audioTrack, this.audioSideDual);
     const cmds: Array<EngineCommand> = applyOrderOf(plan);
+    // P3-3：探测在途时跳过 selectAudioGroup（旧结论可能指向不存在的组，越界会被引擎拒并刷日志），
+    // 音量命令照发；2s 后视为探测丢失，不再抑制。
+    const probeBlocked: boolean = this.audioProbePending &&
+      (Date.now() - this.audioProbePendingAt) < AUDIO_PROBE_STALE_MS;
     for (const cmd of cmds) {
       if (!this.sideReady(cmd.side)) {
         continue;
@@ -777,6 +804,8 @@ struct Compare {
       const engine: PlayerEngine = this.engineForSide(cmd.side);
       if (cmd.kind === EngineCommandKind.SET_VOLUME) {
         engine.setVolume(cmd.volume);
+      } else if (probeBlocked) {
+        // 探测在途：override/清 override 一律让路（音量已在上面落定）
       } else if (cmd.kind === EngineCommandKind.SET_AUDIO_OVERRIDE) {
         engine.selectAudioGroup(cmd.groupIndex);
       } else {
@@ -786,19 +815,30 @@ struct Compare {
   }
 
   /** 探当前音频侧片源的音轨数（audioCount≥2 才允许内录 chip；失败/单轨归 false 并复位 ENV） */
+  private clearAudioProbePending(): void {
+    this.audioProbePending = false;
+    this.audioProbePendingAt = 0;
+  }
+
   private probeAudioSide(): void {
     const ctx: common.Context | undefined = this.ctx;
     const side: Side = this.audioSide;
     const clip: VideoClip | undefined = side === Side.LEFT ? this.leftClip : this.rightClip;
     if (ctx === undefined || clip === undefined) {
+      // 早退也要清在途位（审查修复 P3）：上一次探测若未落地，残留的 pending 会压掉 override
+      this.clearAudioProbePending();
       this.audioSideDual = false;
       this.resetAudioTrackIfNeeded();
       return;
     }
+    this.audioProbePending = true;
+    this.audioProbePendingAt = Date.now();
     ClipExporter.probe(ctx, clip).then((info: ClipTrackInfo): void => {
       if (this.disposed || this.audioSide !== side) {
+        // 侧已切换：pending 归新一次探测所有，不得在此清（否则会解开新探测的抑制）
         return;
       }
+      this.clearAudioProbePending();
       this.audioSideDual = info.error === '' && info.audioCount >= 2;
       this.resetAudioTrackIfNeeded();
       this.applyAudioPlan();
@@ -807,6 +847,7 @@ struct Compare {
       if (this.disposed || this.audioSide !== side) {
         return;
       }
+      this.clearAudioProbePending();
       this.audioSideDual = false;
       this.resetAudioTrackIfNeeded();
       this.applyAudioPlan();
@@ -947,8 +988,9 @@ struct Compare {
     }
     const geo: TimelineGeometry = this.timelineGeo();
     const t: number = this.currentTimelineT();
-    if (t >= geo.tMax() - 100) {
-      // 末态续播：走 setPlaying 的 Tmin 回绕（与用户点播放同路径）
+    if (t >= geo.tMax()) {
+      // 末态续播：走 setPlaying 的 Tmin 回绕（与用户点播放同路径）。
+      // P3-1：这里只认严格到顶；100ms 容差只留给 setPlaying 的「用户点播放」路径。
       this.setPlaying(true);
       return;
     }

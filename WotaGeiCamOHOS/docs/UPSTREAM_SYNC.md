@@ -62,6 +62,9 @@ git diff ORIG_HEAD..origin/main --stat -- <下列路径>
 | `player/AudioSync.kt` | 自动同步 DSP（重采样/包络/粗对齐/FFT 精修与置信度；`player/AudioSync.ets`，常量与算法逐项对拍） |
 | `player/CompareAudio.kt` | 对比音频轨序（环境=组 0/内录=组 1）与静音/override 命令顺序（`player/CompareAudio.ets`） |
 | `player/CompareHistory.kt` | 对比历史 JSON 契约（`[{"rightId","leftId","ts"}]`、rightId 去重/12 条上限；`player/CompareHistory.ets` 纯核心 + `player/CompareHistoryStore.ets` preferences 适配） |
+| `player/TrackSync.kt` | 双音轨偏移合成（内容差 + 首样本容器差）、低置信度归零、失败分类（`player/TrackSync.ets`） |
+| `record/AudioFeeder.kt` | PCM 泵契约：帧宽/读块/整缓冲算式、静音锁存与逐段账（`record/AudioProbe.ets` / `record/CaptureSilence.ets`） |
+| `record/CodecRecorder.kt` | 内录音轨收尾判据：静音双门槛（2s 收尾/5s 巡检）、fedMsOf、采样率/声道档位（`record/CaptureSilence.ets` / `record/AudioProbe.ets`） |
 | `record/FrameLedger.kt` | 录制帧账输出格式 |
 | `record/BitratePolicy.kt`、`record/AutoStopRules.kt` | 码率策略、3.5 GiB 分段轮转与自停判据 |
 | `record/SeriesIds.kt`、`record/PendingName.kt` | 段命名/系列命名规则，跨平台素材互认的关键 |

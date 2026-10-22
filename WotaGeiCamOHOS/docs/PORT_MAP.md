@@ -69,8 +69,8 @@
 | `MrRecorder.kt`（MediaRecorder 引擎） | 平台绑定 | `@ohos.multimedia.media` AVRecorder + CameraKit VideoSession：`camera/KitRecorder.ets` 最小录制（VIDEO_SOURCE_TYPE_SURFACE_YUV 面输入、NORMAL_VIDEO 会话、**videoProfiles + frameRateRange 覆盖选档**（VideoSizeTable 留待后续）、BitratePolicy 复用、SeriesIds 接线、MIN_KEEP_MS 判废）。落地 2026-10-21，对齐上游 38d712a。输出契约：`AVRecorderConfig.url = fd://<fd>`（fileIo.openSync 建文件取 fd，fd 保留到 AVRecorder reset/release 后关闭）；起录失败统一回收资源并删除已创建/半写文件；判废顺序=先 MIN_KEEP_MS（短段含 engineErr 一律 TOO_SHORT），唯一例外 av.stop 失败保留文件 triage（STOP_FAILED）；start/stop 有 starting/stopping 重入保护。留白：3.5GiB 分段轮转/起录健康三格/AutoStop 巡检（GPU 已接，AVRecorder 留白）/FrameLedger 接线/HEVC 重试/.drops.json/参数下发（VideoSession 无 ManualExposure/ManualIso/OIS）/orientationHint 与 AVRecorderConfig.rotation 未接线（显示旋转源随 HUD 批）/sampleRate 恒 48k 未探测/mirrored/useGpu 恒 false。装机验证项（不阻塞）：录 5 秒文件可播放有声音、停录后预览恢复、拒绝 MIC 录无声视频、<1 秒判废删除、fd:// 契约真机验证 | ☑ 部分 |
 | `CodecRecorder.kt`（MediaCodec+MediaMuxer 引擎） | 平台绑定 | AVCodec + AVMuxer（NDK 侧），与 GL 链路衔接。**最小切片已落（2026-10-21，对齐上游 38d712a）**：`cpp/codec_recorder.h/.cpp`（OH_VideoEncoder CreateByMime→RegisterCallback→Configure→GetSurface（Prepare 前）→Prepare→muxer Create/AddTrack/Start→encoder Start；surface 输入、输出回调直写 OH_AVMuxer，PTS 一律 wall-clock 相对段基准（NowUs−startUs，µs）并经 OH_AVBuffer_SetBufferAttr 回写、lastPts 单调守卫（前提：无 B 帧，登记）；容器旋转 OH_AVMuxer_SetRotation(normalizeQuarter(sensor−display))（0/90/180/270 四舍五入，非 90 倍数 sensor 按上游归一；须在 muxer Start 前；编码 UV 仅送缓冲原样帧）；I 帧间隔 1000ms；FRAME_RATE/BITRATE 按 SDK 类型（double/int64）写入并检查；EOS 等待 ≤3s；错误机器码 busy/encoder-create/register-callback/format-create/format-key/configure/get-surface/prepare/muxer/track-format/track/muxer-rotation/muxer-start/start/encoder-surface；运行期 muxer-write/pts-set/muxer-missing/engine-error/surface-lost/encoder-pass-failed；muxer 写失败/时间轴回写失败即停止送样（samples 仅成功自增），错误经 getGpuRecordError/stop 带回；native 不 close fd）+ `camera/GlRecorder.ets`（fd 归 ArkTS、VideoStore 命名/落盘与 MIN_FREE_MB 起录预检、停录 close+stat 摘要；napi-failed 先 best-effort stop 再 close）+ GlRecorder（起录弧档/dstFps/deadband 传递；停录顺序 flushArcPending→（阻塞 stop 前冻结帧账 end 快照）→stop→逐项 drainArcDrops/帧计数/实测源帧率→close+stat→FrameLedger 成文→写 `.drops.json` sidecar（segments.count=muxer 视频样本数（part.samples，上游 VideoSegment.count；与首段旁 sidecar 同口径）；frameStart 不可用时相机帧退原生 GL 回调上界））+ GlPreview「录 GPU/停录」与三态转换按钮（关/补弧24/抽帧24，固定 1920×1080@30 或 24、BitratePolicy.resolve；500ms 监视 isGpuRecording/getGpuRecordError 校正录制态）+ **AutoStopMonitor（2026-10-21）**：1s 相机设备态转移（启动时以当前设备态预置 watch；session error 直连兜底）、首个 1s tick 立即查电量 batterySOC≤3% 与可用空间 <MIN_FREE_MB（其后 30s 节拍），一次录制至多一发，命中提示“成片已保存”；手动停录/相机丢失兜底统一按 AutoStopRules.stopGraceDelayMs 做 500ms 宽限（stopPending 防重入，首个停录原因合并）。相机丢失后 lensInfo/deviceStatus 失效，需重新进入本页起镜后才允许再次录制。**3.5GiB 分段轮转已落（2026-10-21）**：native `getGpuWrittenBytes`（成功写入 attr.size 累计）+ ArkTS 500ms 轮询 maybeRotate；SegmentPolicy（MAX_FILE_BYTES=3_758_096_384、ROTATE_SAFETY=0.98）；轮转=停段（EOS）→新文件→重建编码器/EGL 面（段间 lostMs 记账），每段独立 MP4/时间轴、各自 displayName；逐段 FrameLedger（partIndex/rotateLostMs/rotateFramesUpper）与 `frameSessionSummary`；首段旁 `.drops.json` 的 segments 覆盖全部段（first 前缀和/part.samples/lostMs），drops 只保留最后一段（上游跨段失真登记）；8MB 测试阈值入口（离开页面恢复默认）；summary 的 measuredSrcFps 标注为最后一段口径；**T22（2026-10-22）**：SegmentPolicy 无自动化单测登记撤销（test/pure/segment-policy.test.ets 5 用例，见 §纯逻辑测试）、stop 摘要追加末段账 lastPath/lastBytes/lastSamples（健康收口丢段专用）、被丢弃零样本段在首段 sidecar segments 留 count=0 条目（无害，登记——首段 sidecar 不回写）。上批 P3×4：起录后 1s 冷却（迟到点击不覆盖摘要）、删除 lastStopHadReason 死字段、Player metaNotice 移出控制层、stopReason 起录清理。本批 P3×5：轮转错误先 finish 再追加摘要、onPageHide/离开页面复位 8MB 测试阈值、起录清 lastStopAtMs、napi-failed 摘要带 path 保留 triage、~~SegmentPolicy 无自动化单测登记~~（T22 撤销）。 T18 P3×8：bootstrap/权限 pageVisible 门控、重试相机按钮 disabled(startingCamera)、SettingsStore.save 返回 boolean + 保存串行化、变焦实际值/最近档、HUD_READOUTS 驱动顶栏、appendNotice 冷却/错误追加、相机丢失清镜头/画幅标签、预览/录制帧率分显。留白：音频轨、参数下发、PTS 网格化、成片名前缀、MediaStore、NV12 直通与 DIRECT 路、系列归组 UI。已知：容器旋转 hint 在起录时定格（录制中转屏不更新，单段口径，登记）。装机验证项（不阻塞）：GL 页录 5s→hdc file recv 取回 mp4 可播放且时长 5s 量级；ES2 回退下 MEND 不降级（unsized GL_RGBA）；时间戳单位 ns/µs/ms 归一与实测源帧率合理；竖屏成片方向正确（muxer SetRotation）；停录后再次起录正常；录制中返回页面→录制中止、无崩溃；`hdc hilog \| grep -E "WotaGL\|WotaRecord"` 见编码面建立/首帧/EOS 日志 | ☑ 部分 |
 | `CaptureFgService.kt`（前台服务） | 平台绑定 | 长时任务（continuous task）+ 通知栏常驻 | ☐ |
-| `PlaybackCaptureController.kt`（内录） | 平台绑定 | AVScreenCapture 音频内部录制（环境音+内录双轨） | ☐ |
-| `Recorder.kt`、`CaptureStateMachine.kt`、`RecordProfile.kt`、`VideoStore.kt` | 纯逻辑为主 | 直译（状态机与接口不动，引擎实现注入）。最小契约已落：`record/RecordResult.ets`（RecordError 机器码 + RecordResult 首段字段/summary，VideoSegment/health/parts 留待分段批）、`record/RecordProfile.ets`（纯字段子集 + CODEC_H264/CODEC_HEVC/MIN_KEEP_MS + effectiveBitrate，captureAudio/arcConvert/fpsNtsc 留白）、`record/VideoStore.ets`（VID_yyyyMMdd_HHmmss_###.mp4 命名/MIN_FREE_MB 余量/sizeOf/discard；MediaStore pending 与相册入库留白）。分段轮转每段各自 displayName/文件，段序号只在 parts/segments/日志；系列归组（MediaSeries/SeriesPart）留白。落地 2026-10-21，对齐上游 38d712a | ☑ 部分 |
+| `PlaybackCaptureController.kt`（内录） | 平台绑定 | **T26 纯逻辑已落（2026-10-22）**：`record/CaptureStateMachine.ets`（Idle→Authorizing→Active/Failed→Revoked 全转移 + 状态/事件短名）、`record/CaptureSilence.ets`（SilencePromptGate 按场 60s 节流 + captureSilenceVerdict 2s/5s 双门槛 + fedMsOf）、`record/AudioProbe.ets`（frameBytes/chunkBytes/recordBufferBytes/dbOf + captureParamMismatch 档位体检）、`record/CaptureSources.ets`（OH_AudioCaptureSourceType 契约 MIC=1/ALL_PLAYBACK=2/APP_PLAYBACK=3 + 内录源优先级 [ALL_PLAYBACK, APP_PLAYBACK]）；**平台面（AVScreenCapture 会话 + 隐私授权 + 双源采集 + AAC 三轨合流）T27 真机批**，调研结论见 §T26 平台调研 | ☑ 部分（T26 纯逻辑，平台 T27） |
+| `Recorder.kt`、`CaptureStateMachine.kt`、`RecordProfile.kt`、`VideoStore.kt` | 纯逻辑为主 | 直译（状态机与接口不动，引擎实现注入）。最小契约已落：`record/RecordResult.ets`（RecordError 机器码 + RecordResult 首段字段/summary，VideoSegment/health/parts 留待分段批）、`record/RecordProfile.ets`（纯字段子集 + CODEC_H264/CODEC_HEVC/MIN_KEEP_MS + effectiveBitrate，captureAudio/arcConvert/fpsNtsc 留白）、`record/VideoStore.ets`（VID_yyyyMMdd_HHmmss_###.mp4 命名/MIN_FREE_MB 余量/sizeOf/discard；MediaStore pending 与相册入库留白）。分段轮转每段各自 displayName/文件，段序号只在 parts/segments/日志；系列归组（MediaSeries/SeriesPart）留白。落地 2026-10-21，对齐上游 38d712a。**T26 追加**：`record/CaptureStateMachine.ets` 直译上游授权状态机（16 用例）；`record/CaptureSources.ets` 因 Android usage 白名单无 OHOS 等价物，改以源枚举优先列表承载（差异登记于文件头）；`record/AudioProbe.ets` / `record/CaptureSilence.ets` 落可测算式与判据（消耗方留 T27） | ☑ 部分 |
 | `ArcKeepRule.kt`、`ArcDropLog.kt`、`BitratePolicy.kt`、`AutoStopRules.kt`、`FrameLedger.kt` | 纯逻辑 | **逐行直译**——这些是与上游共享语义的锚点（见 UPSTREAM_SYNC.md），格式/判据/阈值必须与上游逐字段一致。直译完成 2026-10-20，对齐上游 38d712a，落点 `entry/src/main/ets/record/` 同名 .ets；BitratePolicy 的 `resolve(RecordProfile)` 重载待 RecordProfile 移植后补。在线消费已接线（2026-10-21）：ArcKeepRule/ArcRepairFlow 的 C++ 等价物（`cpp/arc_flow.*`）跑在编码支路，ArcDropLog 由 GlRecorder 停录写 sidecar，FrameLedger 合成原生五格+相机 frameStart（分段时逐段成文）；ArcDropLog segments 已随分段写全段清单（drops 只保留最后一段，跨段失真登记）；AutoStopRules/CameraLostWatch 由 `record/AutoStopMonitor.ets` 消费（GPU 主路径：1s 相机/30s 电量存储、一次一发、停止宽限 500ms；AVRecorder 路径留白） | ☑ |
 | `RecordHealth.kt` | 纯逻辑 | `record/RecordHealth.ets`：GPU 三格（trackAdded/muxStarted/firstVideoSample）+ 判定顺序（错误码→三格→视频短窗 1.2s→完整窗 3s→WAIT）、retryActionOf（attempts<maxAttempts）、MIN_OUTPUT_BYTES=64KiB、resolveOutputBytes/streamHealthVerdict（AVRecorder 路纯函数留白）。**GPU 主路径已接（2026-10-21）**：native CodecRecorder 暴露 trackAdded/muxStarted/samples（getGpuHealth），Camera 500ms 巡检、最多自动重录 2 次、仅重开录制段不重开相机。T18 P3×4（T19）：GlRecorder stop 摘要补 samples、空段仅 samples=0 且 bytes=0 丢弃、onPageHide/Show 续跑巡检、GIVE_UP 文案常量生成、native HealthSnapshot 单锁快照。**T22 健康收口（2026-10-22，对齐上游 38d712a）四项关闭**：① 三格真信号——native `formatChanged_`（OnStreamChangedCb 置位，Start/FailStart/Stop 复位）= 上游 MediaCodec format-changed 等价物，getGpuHealth 扩 4 字段 `track,mux,samples,fmt`，Camera checkHealth 容 4 字段（3 字段旧序防御），healthVerdict 的 videoTrackAdded 实参 = `fmt || samples>0`（samples 兜底防回调时序不触），muxer AddTrack 位降为 Diag 诊断字段（三格语义对照表见 Camera.ets 头注释）；② 轮转重启健康窗——上一段已健康停巡检后轮转新段重启巡检（幂等），**healthAttempts 会话级不清零（与上游"每次起录清零"口径差异登记：防轮转循环无限重录）**，隐藏页不重启只置 healthPausedByHide 由 resumeHealthAfterShow 消费；③ 健康重录三残差——restartSegmentAfterHealthFailure 重置 recordStartedAtMs（宽限期口径）、GlRecorder.stop 摘要追加末段账 `lastPath/lastBytes/lastSamples`、健康重录与 GIVE_UP 丢段读末段账（仅末段 samples=0 且 bytes=0 才删，**保留已完成前段**；被丢弃零样本段在首段 sidecar segments 留 count=0 条目，无害登记）；④ 纯逻辑单测落地（test/pure/record-health.test.ets，21 用例，判定顺序五条各被点名，见 §纯逻辑测试）。AVRecorder 健康检查/stream 活性路留白（Index 未接） | ☑ 部分 |
 | `ArcRepairPlan.kt`、`ArcRepairRunner.kt`、`ArcRepairGl.kt`（离线修复） | 平台绑定（计划逻辑纯） | 计划直译；执行走 CPU（ArkTS/NDK）与 GPU（复用 GL 着色器）双路。**在线 ArcRepairFlow 已落（2026-10-21）**：`cpp/arc_flow.h/.cpp` 的 Hold/Fold/Emit/Merge 指令序列 + `cpp/arc_mend_pass.*` 执行；离线修复（ArcRepairRunner/ArcRepairGl）仍待后续批 | ☑ 部分 |
@@ -168,7 +168,65 @@
 - **遗留**：AudioSync 平台解码/自动对齐入口、ComparePractice 练习动线（分屏录制页）、
   AB 持久化、nudge 真机空操作验证 → T26。
 
-## 纯逻辑测试（T22 落地，T23/T24/T25 扩展，2026-10-22）
+## 交付批（T26，2026-10-22）
+
+- **内录纯逻辑降级版**（无真机可验证的平台面不落实现）：`record/CaptureStateMachine.ets`（16 用例）、
+  `record/CaptureSilence.ets`（5）、`record/AudioProbe.ets`（3）、`record/CaptureSources.ets`（3）、
+  `player/TrackSync.ets`（11）、`player/PcmDecode.ets`（7）——新增 46 用例（113→159，含审查修复
+  1 条「右片重建恢复目标四域臂」；`rightResumeTargetOf` 纯函数）。
+- **T25 P3×4 清账**：① 自然播完（TIMELINE_END + loop 关 + 双引擎停）清 wantPlaying，maybeResumeWanted
+  末态改严格 `t >= tMax`（100ms 容差只留 setPlaying）；② 右片重建 wantPlaying 且 T 在覆盖区时不再
+  先 seek 快照位，统一交 maybeResumeWanted 一次对齐（非覆盖区仍落快照位）；③ audioProbePending
+  在途（2s 陈旧兜底）跳过 selectAudioGroup、音量照发；④ 删除 hasPendingPlayAfterSeek 死 API。
+- **审查修复（P2×1 + P3×3）**：① P2 右片重建保留素材位——`rightResumeTargetOf(geo, leftLive,
+  rightSnapshot, blackL, blackR)` 用**重建前快照**当右钟做域判定，右独播尾段/pre-roll/左独播/
+  末态 park 都落正确素材位（新引擎 attach 后 positionMs=0 不再参与 T 计算）；`tryAttachRight`
+  始终按该目标发一次 seek（wantPlaying 时 seek 落地即播），`maybeResumeWanted` 复算 T 只做域内
+  唤醒。四域臂用例见 compare-timeline（26 条）。② P3 `captureStateLabel/captureEventLabel` 去掉
+  default 改显式 throw + 枚举成员数断言；③ P3 AudioProbe 补 8191/100/三声道/负 minBuffer 断言
+  与负值掩蔽注释；④ P3 `probeAudioSide` 早退/then/catch 统一经 `clearAudioProbePending()`。
+- **口径订正**：上游 TrackSyncTest 实为 **11 条纯函数用例 + 1 条 extractor 源码守卫**（无
+  MIN_CONFIDENCE 断言；本侧那条为额外断言），已在测试头与本表如实登记。
+- **编译守卫**：PureLogicBarrel 纳入六新模块，EntryAbility 启动日志签名扩展为
+  `… cap=未授权 src=2 sync=+120 chunk=64 silence=2000 pcm=S16LE`。
+- **明确不做**：不建 AVScreenCapture 会话/不请求隐私授权/不写 native 音频编码或三轨 mux/不写无实现
+  的解码接口骨架/不接线 ComparePractice/不动 codec_recorder.cpp 与 GlRecorder。
+- **回归**：pure-test files=16 tests=159 passed=159 failed=0；clean assembleHap 退出 0、WARN=2；
+  local-sign 成功（verify-app 3 级链 + 3254B profile）。交付快照：unsigned 5271587B /
+  `f81211d1…d43bbd`、signed 5371800B / `d1ff7488…a748eb`（hash/字节均易变，内容级校验只对
+  unsigned，signed 走 verify-app；全文见 README「交付」节）。
+- **遗留**：平台面全部转 T27（见「T26 平台调研」四步计划）。
+
+## T26 平台调研（AVScreenCapture，2026-10-22）
+
+结论先行：**内录双轨在当前公开 API 下只有 NDK 一条路可行**，ArkTS 侧无法同时拿环境音+内录原始
+PCM；且内录会话必须与视频采集配置同场（没有音频-only 的原始流形态）。四步计划见「交付后路线」。
+
+- **ArkTS 侧（AVScreenCaptureRecorder）单轨限制**：`AVScreenCaptureRecordConfig` 只有一组
+  `audioSampleRate/audioChannelCount/audioBitrate`（注释明确「used for both internal capture and
+  external capture」），**没有 audioSourceType 字段**，输出是编码后的 MP4（`fd` + preset
+  H264/AAC/MP4），拿不到分源 PCM；因此不能作为「环境轨 + 内录轨」双轨原料（SDK d.ts：
+  `@ohos.multimedia.media.d.ts` AVScreenCaptureRecordConfig / createAVScreenCaptureRecorder）。
+- **NDK 双源能力**：`OH_AVScreenCaptureConfig.audioInfo` 同时含 `micCapInfo` 与 `innerCapInfo`
+  （各自 `OH_AudioCaptureInfo{audioSampleRate,audioChannels,audioSource}`），
+  `OH_AVScreenCapture_AcquireAudioBuffer(capture, &buf, type)` 按 `OH_AudioCaptureSourceType`
+  分别取原始 PCM；`OH_AudioCaptureSourceType` 数值为 `OH_MIC=1 / OH_ALL_PLAYBACK=2 /
+  OH_APP_PLAYBACK=3`（与 `record/CaptureSources.ets` 逐值对齐）。`dataType=OH_ORIGINAL_STREAM`
+  时音频不需要编码器配置（`audioEncInfo` 注释「no need to set」）。
+- **隐私授权**：AVScreenCapture 启动会拉起系统投屏/录制隐私确认（每次会话用户确认），授权态
+  与上游 MediaProjection 语义对齐——落到本侧状态机即 ConsentRequested → Authorizing → Active；
+  取消/系统停止回 ConsentCancelled / ProjectionStopped（→Revoked 回退环境音）。
+  SDK 接口注释未声明额外 `ohos.permission.CAPTURE_SCREEN` 运行时权限，**以真机弹窗实测为准**。
+- **视频必选**：`OH_AVScreenCaptureConfig` 同时要求 `videoInfo`（`OH_VideoCaptureInfo`）与
+  `audioInfo`；即使只要音频，也要给一份屏幕视频配置（可丢弃其回调），没有纯音频配置形态。
+  这与上游「内录独立于屏幕视频」的模型不同——本侧录制视频仍走 GL 编码面，AVScreenCapture 仅取音频。
+- **三轨方案（T27 目标）**：视频轨 = 现有 GPU 编码面（不变）；音频轨 0 = 环境音（MIC，现有
+  AVRecorder/AudioCapturer 路线）；音频轨 1 = 内录（AVScreenCapture 的 inner PCM）。三轨合流在
+  native muxer：环境/内录各编 AAC 后 `OH_AVMuxer` 加两轨（轨序 0/1 = CompareAudio 的唯一映射），
+  或直接写 PCM 由 muxer 编码（视 SDK 能力二选一，T27-1 探针定）。时间戳统一 wall-clock µs，
+  偏移合成用 `player/TrackSync.ets`（内容差 + 首样本容器差）。
+
+## 纯逻辑测试（T22 落地，T23/T24/T25/T26 扩展，2026-10-22）
 
 自研轻量测试架（不用 hypium/ohosTest，无真机可跑）：
 
@@ -183,20 +241,27 @@
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（113）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
-  各被点名）、compare-timeline（25，T22 几何 9 + T24 内核 16，对拍上游 CompareTimelineTest.kt
+- **已落用例（159）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+  各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
   命名/关键帧/平移/音轨序数）、media-format（3，formatSignedDuration 正/负/0 与 formatDuration
   口径对齐）、compare-audio（16，T24：上游 CompareAudioTest 14 个 @Test 全量断言（两条命令顺序臂合一条）+ SplitAudioPickTest 3 条分屏臂，含命令顺序与桥函数）、audio-sync（10，T24：重采样 3/包络 2/粗对齐 2/FFT 2/精修 1）、compare-practice
   （6，T24：armed 门/take 一次性/普通录制不污染）、compare-history（12，T24 10 + T25 2：容错解析/数字串宽松解析（对齐上游 getLong）/去重插首/
-  截 12/编码键序与往返）。
+  截 12/编码键序与往返）、capture-state-machine（16，T26：上游 14 条转移 + 状态/事件短名逐字）、
+  capture-silence（5，T26：常量/verdict 全表/fedMsOf/gate 语义/判据×门控桥）、audio-probe（3，T26：
+  档位体检全表 + chunk/buffer 字面量 + dbOf）、capture-sources（3，T26：源枚举契约/优先级/短名）、
+  track-sync（11，T26：合成 4/resolve 2/signed 3/失败分类 2；上游 11 条纯函数用例全量，
+  另 1 条 extractor 源码守卫随 T27；MIN_CONFIDENCE 同源为本侧额外断言）、pcm-decode（7，T26：PTS 落位/补零/
+  PCM16/24/F32LE/降单声道/多段 append）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；
   T24 五件均为零平台依赖（无 @ohos/@kit import），不经 stub。
-- **对拍口径**：期望值一律手写字面量（不用实现反推）；上游用例中依赖未移植面
-  （MR 专用段判定/平台解码等）的条目不进本侧文件，随对应批补；T24 起 DecideCommands/域判定已在本侧。
+- **对拍口径（T26 复核）**：期望值一律手写字面量（不用实现反推）；上游用例中依赖**平台文件/源码
+  结构守卫**的条目（如 CaptureSilenceVerdictTest 的 bodyOf/KotlinSourceScan 守卫、CaptureParamAuditTest
+  的平台调用点守卫、TrackSyncTest 的 extractor 守卫）不进本侧文件——纯函数断言面已全量移植，
+  平台守卫随 T27 真机批以 ArkTS 结构检查补；T24 起 DecideCommands/域判定已在本侧。
 
 ## 真机待验（T22 收口批 + T23 交付批新增，不阻塞）
 
@@ -230,8 +295,12 @@
 - **单侧与域复活（审查修复项）**：只选左片（未选右片）播放时滑杆/读数随左钟前进；
   右片报错态同样不冻结。播放中从独播域（pre-roll 或尾段）拖回双覆盖区，松手后 dormant 侧
   应立即复播（无黑层、无冻结帧）；用户暂停状态下拖动则保持双停（播放权归用户）。
+- **右独播域重建（T26 审查必验）**：播放到左片已播尽、右片独播（尾段）时触发右片 surface
+  重建（切后台/分屏/旋转），回页后右窗必须从**重建前位置**继续（不回跳左片时长、不回 0）；
+  off>0 的 pre-roll 段重建同理（不得回素材 0）。检查 `hdc hilog | grep WotaPlayer` 的
+  attach/seek 位置与判定 T。
 
-## 交付后路线（T24 修订，2026-10-22）
+## 交付后路线（T26 修订，2026-10-22）
 
 - **T24：纯逻辑直译批（无真机依赖，优先）——已关闭（2026-10-22）**：CompareTimeline decide
   全量内核、CompareAudio、AudioSync DSP、ComparePractice、CompareHistory 落
@@ -241,13 +310,21 @@
   音频计划真实下发、历史面板与 preferences、PlayerEngine 能力补齐、PureLogicBarrel 编译守卫、
   历史数字串容错；审查修复重建续播/独播域复活/音轨重探/单侧进度。剩余项（AudioSync 平台解码
   与自动对齐入口、练习动线）转 T26。
-- **T26：内录双轨 + 对比页剩余（全量需真机；真机前先做纯逻辑降级版）**——
-  `record/CaptureStateMachine.kt`、静音/提示门控（SilencePromptGate 等价物）、
-  `record/AudioFeeder.kt` 的纯决策面先直译 + 单测；`PlaybackCaptureController.kt`
-  （AVScreenCapture 内录+环境音双轨）、`MrRecorder` 音轨布局、`ClipExport` 双音轨需真机验证后接；
-  另含 AudioSync 平台解码（MediaExtractor/MediaCodec→8kHz PCM）+ 自动对齐入口、
-  ComparePractice 练习动线（分屏录制页）。
-- **T27+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、应用内更新检查
+- **T26：内录纯逻辑降级版——已关闭（2026-10-22）**：CaptureStateMachine/CaptureSilence/
+  AudioProbe/CaptureSources/TrackSync/PcmDecode 六模块 + 46 用例（113→159）+ T25 P3×4；
+  平台面调研结论见「T26 平台调研」。
+- **T27：内录平台面（真机批，分四步）**——
+  - **T27-1 平台探针**：AVScreenCapture NDK 最小会话（`OH_ORIGINAL_STREAM`）验证双源
+    `AcquireAudioBuffer` 可取到 inner/app playback PCM、采样率/声道回读、隐私弹窗与撤销回调；
+    同时定「AAC 二次编码 vs PCM 直写」路线；
+  - **T27-2 ENV 音轨**：GPU 成片补环境音轨（AudioCapturer/AAC 编码 + muxer 单音轨），
+    消费 AudioProbe 算式与 CaptureSilence 判据（环境路不判静音）；
+  - **T27-3 CAP 双轨**：环境+内录双音轨落 muxer（轨序 0/1）、`captureParamMismatch` 档位体检、
+    静音提示接线（SilencePromptGate + captureSilent 提示通道）、撤销回退环境音（CaptureStateMachine
+    Revoked）、音频侧健康判据；
+  - **T27-4 消费面**：CompareAudio/ClipExport 双音轨消费（TrackSync 偏移合成 + PcmDecode 解码核心）、
+    AudioSync 平台解码（AVDemuxer+AVCodec→8kHz PCM）+ 自动对齐入口、ComparePractice 练习动线。
+- **T28+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、应用内更新检查
   （`UpdateChecker/Downloader/Installer.kt`）、离线光弧修复（`ArcRepairPlan/Runner/Gl.kt`）、
   HUD 布局编辑器（`HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid/ParamsPersist.kt`）、
   相册入库/分享/缩略图/系列归组等媒体长尾。
@@ -260,6 +337,5 @@
 4. `MrRecorder`（AVRecorder）最小可用录制 → `CodecRecorder`（GL + AVCodec）；
 5. 光弧工具链（复用着色器与 ArcKeepRule）；
 6. `media` 媒体库 → `player` 播放/剪辑 → 对比播放；
-7. T25 后按「交付后路线」推进：T26 内录双轨 + 对比页剩余（AudioSync 平台解码/自动对齐入口、
-   练习动线；真机前先做 CaptureStateMachine/静音门控等纯逻辑降级版）→ T27+ 蓝牙/更新检查/
-   离线修复/HUD 编辑器等长尾。
+7. T26 后按「交付后路线」推进：T27 内录平台面四步（T27-1 平台探针 → T27-2 ENV 音轨 →
+   T27-3 CAP 双轨 → T27-4 消费面）→ T28+ 蓝牙/更新检查/离线修复/HUD 编辑器等长尾。
