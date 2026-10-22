@@ -58,7 +58,7 @@ jobs:
       # 保证跨版本递增（patch<100、r<100）。tag 不合规时警告并保持 app.json5 原值。
       - name: Inject version from tag
         if: startsWith(github.ref, 'refs/tags/v')
-        working-directory: HarmonyOS
+        working-directory: HarmonyOS/WotaGeiCamOHOS
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
@@ -117,24 +117,24 @@ jobs:
 
       # 纯逻辑单测是工程自带的质量门。typescript 用工具链自带那份。
       - name: Pure logic tests
-        working-directory: HarmonyOS
+        working-directory: HarmonyOS/WotaGeiCamOHOS
         run: |
           export PURE_TEST_TS_PATH="$CLI_ROOT/hvigor/hvigor/node_modules/typescript"
           node scripts/pure-test.mjs
 
       - name: Install ohpm dependencies
-        working-directory: HarmonyOS
+        working-directory: HarmonyOS/WotaGeiCamOHOS
         run: ohpm install --all
 
       - name: Build release HAP
-        working-directory: HarmonyOS
+        working-directory: HarmonyOS/WotaGeiCamOHOS
         run: |
           set -euo pipefail
           hvigorw --mode module -p product=default -p buildMode=release assembleHap --no-daemon
           ls -la entry/build/default/outputs/default
 
       - name: Stage unsigned HAP
-        working-directory: HarmonyOS
+        working-directory: HarmonyOS/WotaGeiCamOHOS
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
@@ -148,8 +148,8 @@ jobs:
             find entry/build \( -name '*.hap' -o -name '*.app' \) || true
             exit 1
           fi
-          mkdir -p ../dist
-          cp "$HAP" "../dist/${HAP_NAME}-unsigned.hap"
+          mkdir -p ../../dist
+          cp "$HAP" "../../dist/${HAP_NAME}-unsigned.hap"
           echo "HAP_NAME=${HAP_NAME}" >> "$GITHUB_ENV"
           echo "HAP_PATH=dist/${HAP_NAME}-unsigned.hap" >> "$GITHUB_ENV"
 

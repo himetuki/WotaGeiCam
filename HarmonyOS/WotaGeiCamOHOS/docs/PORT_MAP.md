@@ -1,5 +1,9 @@
 # 移植映射表（Android → HarmonyOS）
 
+> 注（2026-10-22 单树重组）：表中上游路径多为重组前的写法（`WotaGeiCamApp/...`）。
+> 重组后上游工程位于 main 的 `Android/WotaGeiCamApp/` 下（读法
+> `git show origin/main:Android/WotaGeiCamApp/...`），鸿蒙侧落点路径不变。
+
 上游源码根：`WotaGeiCamApp/app/src/main/java/com/wotagei/cam/`（117 个 Kotlin 文件，下表省略该前缀）。
 
 > **2026-10-22 历史剥离**：harmony 已重写为 OHOS-only 独立历史，`WotaGeiCamApp/`

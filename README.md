@@ -5,7 +5,7 @@
 ```
 WotaGeiCam/
 ├── Android/          # 安卓仓库子树（Gradle 根在 Android/WotaGeiCamApp/）
-├── HarmonyOS/        # 鸿蒙工程（DevEco Studio 直接打开这个目录）
+├── HarmonyOS/        # 鸿蒙工程（DevEco 工程根在 HarmonyOS/WotaGeiCamOHOS/）
 ├── .github/workflows/
 │   ├── build-apk.yml # v* tag → android-*.apk 四件套
 │   └── build-hap.yml # v* tag → ohos-*.hap（工具链自取，无需本机 DevEco）
@@ -28,13 +28,13 @@ cd Android/WotaGeiCamApp
 **HarmonyOS**（需要 DevEco Studio 的 hvigor 与 HarmonyOS SDK）：
 
 ```bash
-cd HarmonyOS
+cd HarmonyOS/WotaGeiCamOHOS
 export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 ./hvigorw --mode module -p product=default assembleHap
 ```
 
-产物在 `HarmonyOS/entry/build/default/outputs/default/entry-default-unsigned.hap`。
-纯逻辑测试：`cd HarmonyOS && node scripts/pure-test.mjs`（235 用例）。
+产物在 `HarmonyOS/WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap`。
+纯逻辑测试：`cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs`（235 用例）。
 
 ## 发布
 
@@ -70,8 +70,8 @@ HAP 的 `profile.p7b` 必须是由 AGC/DevEco 签发、包含设备 UDID 的 pro
 ## 说明
 
 - Android 与 HarmonyOS 两个工程互不 import，共享的只有产品语义与发布流程；
-  跨端对齐记录见 `HarmonyOS/docs/PORT_MAP.md`。
-- 上游同步：`HarmonyOS/docs/UPSTREAM_SYNC.md`（只读对比上游 Android 代码后手工移植）。
+  跨端对齐记录见 `HarmonyOS/WotaGeiCamOHOS/docs/PORT_MAP.md`。
+- 上游同步：`HarmonyOS/WotaGeiCamOHOS/docs/UPSTREAM_SYNC.md`（只读对比上游 Android 代码后手工移植）。
 - HAP CI 使用华为 DevEco Linux 命令行工具（内置 HarmonyOS 6.1.1 / API 24 SDK），
   版本与 SHA256 固定在 `build-hap.yml`；镜像可用仓库变量 `HARMONY_CLI_TOOLS_URL` /
   `HARMONY_CLI_TOOLS_SHA256` 覆盖。
