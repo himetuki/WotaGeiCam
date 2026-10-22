@@ -431,7 +431,11 @@ fun PlayerScreen(
     var selectedAudio by remember(clip.uri) { mutableStateOf(SelectedTrack.ENV) }
     // 非 null = 已跑过同步（含低置信度按起点落 0），导出弹窗读数与导出平移共用它
     var syncedOffsetMs by remember(clip.uri) { mutableStateOf<Long?>(null) }
+    // 偏移来源（自动校准/手动同步）；旧记录无 source 由 TrackSync.cachedSource 归一成 MANUAL
+    var syncedSource by remember(clip.uri) { mutableStateOf<TrackSync.Source?>(null) }
     var syncRunning by remember(clip.uri) { mutableStateOf(false) }
+    // 录制停止后的自动校准进度（PostStopSync 后台对象）：本片校准完成 → 重读偏移/来源
+    val postStopRunning by PostStopSync.running.collectState(emptySet<String>())
     var trackPickMenu by remember { mutableStateOf(false) }
     var trackPickAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     var trackSyncAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
@@ -454,8 +458,19 @@ fun PlayerScreen(
     // 打开时探测音轨数（IO 线程，MediaExtractor）：>=2 才亮三控件；顺带读上次同步的
     // 持久化偏移（keyed-by-uri），导出弹窗的「已同步 +Xms」读数不因退出页面丢失
     LaunchedEffect(clip.uri) {
-        syncedOffsetMs = TrackSync.cachedOffsetMs(app, clip.uri)
+        val snap = TrackSync.cachedSync(app, clip.uri)
+        syncedOffsetMs = snap?.offsetMs
+        syncedSource = snap?.source
         dualAudio = withContext(Dispatchers.IO) { TrackSync.countAudioTracks(app, clip.uri) >= 2 }
+    }
+    // 停止后的自动校准完成（PostStopSync.running 移除本片）→ 重读持久化结果。
+    // 运行中不读：避免显示半成品；低置信/越界的自动校准不写盘，重读后保持原读数。
+    LaunchedEffect(clip.uri, postStopRunning) {
+        if (clip.uri.toString() !in postStopRunning) {
+            val snap = TrackSync.cachedSync(app, clip.uri)
+            syncedOffsetMs = snap?.offsetMs
+            syncedSource = snap?.source
+        }
     }
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -686,7 +701,10 @@ fun PlayerScreen(
                                         stringResource(R.string.player_track_sync),
                                         accent = syncRunning
                                     ) {
-                                        if (!syncRunning) {
+                                        val autoBusy = clip.uri.toString() in postStopRunning
+                                        if (autoBusy) {
+                                            banner = R.string.player_track_sync_busy
+                                        } else if (!syncRunning) {
                                             syncRunning = true
                                             scope.launch {
                                                 try {
@@ -694,11 +712,13 @@ fun PlayerScreen(
                                                     when {
                                                         r.ok && !r.lowConfidence -> {
                                                             syncedOffsetMs = r.offsetMs
+                                                            syncedSource = TrackSync.Source.MANUAL
                                                             banner = R.string.player_sync_done
                                                         }
                                                         // 低置信度不硬凑数字：偏移已按录制起点落 0，讲明即可
                                                         r.ok -> {
                                                             syncedOffsetMs = r.offsetMs
+                                                            syncedSource = TrackSync.Source.MANUAL
                                                             banner = R.string.player_track_sync_low
                                                         }
                                                         !r.dualAudio -> banner = R.string.player_sync_no_audio
@@ -780,10 +800,12 @@ fun PlayerScreen(
                             clipMenu = false
                             clipExporting = true
                             clipProgress = 0f
+                            // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
+                            val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
                             clipJob = scope.launch {
                                 try {
                                     // 区间与选轨都在起跑那一刻定版：导出期间用户再动 A/B / 换轨不影响这一轮
-                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack) { p -> clipProgress = p }) {
+                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset) { p -> clipProgress = p }) {
                                         is ClipResult.Done -> {
                                             banner = R.string.player_clip_done
                                             clipRepo.invalidate()
@@ -836,6 +858,7 @@ fun PlayerScreen(
                     anchor = trackExportAnchor,
                     track = selectedAudio,
                     syncedOffsetMs = syncedOffsetMs,
+                    syncedSource = syncedSource,
                     exporting = trackExporting,
                     progress = trackExportProgress,
                     onExport = {
@@ -894,7 +917,12 @@ fun PlayerScreen(
                         if (arcStatus == ArcRepairStatus.RUNNING) {
                             banner = R.string.player_arc_busy
                         } else {
-                            arcRunner.start(clip.uri, useGpu, arcDstFps)
+                            arcRunner.start(
+                                clip.uri,
+                                useGpu,
+                                arcDstFps,
+                                capOffsetMs = syncedOffsetMs?.toInt() ?: 0
+                            )
                         }
                     },
                     onDismiss = { arcMenu = false }
@@ -1268,6 +1296,7 @@ private fun TrackExportPopup(
     anchor: androidx.compose.ui.unit.IntRect,
     track: SelectedTrack,
     syncedOffsetMs: Long?,
+    syncedSource: TrackSync.Source?,
     exporting: Boolean,
     progress: Float,
     onExport: () -> Unit,
@@ -1288,12 +1317,28 @@ private fun TrackExportPopup(
             style = MaterialTheme.typography.bodySmall,
             color = WotaText
         )
+        val sourceLabel = when (syncedSource) {
+            TrackSync.Source.AUTO -> R.string.player_track_sync_auto
+            TrackSync.Source.MANUAL -> R.string.player_track_sync_manual
+            // 读数在而来源读不到只会出现在旧版手写 prefs 的脏数据上：按老的手动记录显示
+            null -> R.string.player_track_sync_manual
+        }
         Text(
             if (syncedOffsetMs != null) {
-                stringResource(R.string.player_track_sync_done_fmt, TrackSync.signedMs(syncedOffsetMs))
+                stringResource(
+                    R.string.player_track_sync_source_fmt,
+                    stringResource(sourceLabel),
+                    TrackSync.signedMs(syncedOffsetMs)
+                )
             } else {
                 stringResource(R.string.player_track_sync_none)
             },
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+        // 诚实边界：原片分享不重写容器，只有本页导出/光弧修复会应用同步残差
+        Text(
+            stringResource(R.string.player_track_sync_note),
             style = MaterialTheme.typography.bodySmall,
             color = WotaTextDim
         )

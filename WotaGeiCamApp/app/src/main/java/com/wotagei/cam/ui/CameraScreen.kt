@@ -144,6 +144,7 @@ import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.AudioTrackKind
 import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.LoopMode
+import com.wotagei.cam.player.PostStopSync
 import com.wotagei.cam.player.nextCcwQuarter
 import com.wotagei.cam.player.pinchZoom
 import com.wotagei.cam.player.splitAudioPlanOf
@@ -2484,6 +2485,17 @@ private class RecordRunner(
             rec.release()
             failNow(RecordError.NO_OUTPUT); return true
         }
+        // 蓝牙内录预校准（A2DP 双音轨才实际执行；失败只返回 false，绝不打断起录）：
+        // 必须在编码面交给相机**之前**跑——此时正式采集器尚未 start，临时 AudioRecord 不会与
+        // 录制链抢同一路采集。取消信号必须同时看 pendingStop：PREPARE 期点停只置 pendingStop
+        // （requestStopWhenReady），只看 stopRequested 会白等满 800ms 并继续 start。
+        val preflightCancelled = { stopRequested || pendingStop }
+        runCatching { rec.preflightAudioSync(preflightCancelled) }
+            .onFailure { Log.w(TAG_UI, "预校准异常（已忽略）：${it.javaClass.simpleName} ${it.message}") }
+        if (preflightCancelled()) {
+            teardownAbandonedSession(rec)
+            return false
+        }
         if (renderMode == RenderMode.DIRECT) {
             ctrl.setRecordingTarget(surface)
             // 换段重挂（2026-10-08）：换段会销毁旧引擎实例，而 DIRECT 的编码面来自实例本身
@@ -3057,6 +3069,18 @@ private class RecordRunner(
         val reason = autoStopReason
         autoStopReason = null
         result.value = if (reason != null) out.copy(autoStopReason = reason) else out
+        // 录制完全停止后的自动音轨校准（不等待、不阻塞收尾、不影响成片）：只把已 commit 的分段
+        // 交给后台；是否双音轨由本场请求的 captureAudio 标记，PostStopSync 内部还会用
+        // TrackSync.autoRun 的结构性双轨判据兜底。整段 runCatching：调度失败只留日志。
+        runCatching {
+            val dual = sessionArgs?.captureAudio == true
+            val segments = out.parts
+                .filter { it.committed && it.uri != null }
+                .map { it.uri!! to dual }
+            PostStopSync.schedule(app, segments)
+        }.onFailure {
+            Log.w(TAG_UI, "后校准调度失败（不影响成片）：${it.javaClass.simpleName} ${it.message}")
+        }
         // 停止收尾完成：取消信号清账（显示值 out.durationMs 是引擎结算值，下一场 start 从零起算）
         stopRequested = false
     }

@@ -163,12 +163,14 @@ class ArcRepairRunner(private val ctx: Context) {
      * @param useGpu true = GPU 路线（EGL 到编码器面）；false = CPU 路线（4:2:0 2×2 块整像素选择后直写编码器输入缓冲）
      * @param dstFps 抽帧目标帧率（产品口径 = 强制档 24/25）；源实测帧率不高于它时任务以 NO_NEED 收场
      * @param deadband 补弧合并差分死区 D（0..32）；缺省取参数总线发布的只读快照（默认 12）
+     * @param capOffsetMs 播放页缓存的音轨同步偏移（内录 − 环境，正=内录晚）；仅双音轨第 2 条 lane 应用
      */
     fun start(
         srcUri: Uri,
         useGpu: Boolean,
         dstFps: Int,
-        deadband: Int = ArcMergeDeadband.deadband
+        deadband: Int = ArcMergeDeadband.deadband,
+        capOffsetMs: Int = 0
     ) {
         handler.post {
             if (busy) {
@@ -187,6 +189,7 @@ class ArcRepairRunner(private val ctx: Context) {
                     useGpu = useGpu,
                     dstFps = dstFps,
                     deadband = ArcMergeDeadband.clamp(deadband),
+                    capOffsetMs = capOffsetMs,
                     onProgress = { progress.value = it },
                     cancelled = { cancelRequested }
                 ).run()
@@ -261,6 +264,8 @@ private class ArcRepairSession(
     private val useGpu: Boolean,
     private val dstFps: Int,
     private val deadband: Int,
+    /** 播放页缓存的同步偏移（ms，正=内录晚）；只作用于双音轨第 2 条，单音轨恒 0 */
+    private val capOffsetMs: Int,
     private val onProgress: (Float) -> Unit,
     private val cancelled: () -> Boolean
 ) {
@@ -432,6 +437,9 @@ private class ArcRepairSession(
             countSamples(videoEx)
         }
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+        // 视频首样本 PTS（容器时间轴）：内录 lane 的零样本预扫用它做保守基准。
+        // 首样本（解码序）PTS ≥ 首帧显示 PTS，用它算出的可写性只会更严，不会漏掉"全负"。
+        val videoBasePtsUs = videoEx.sampleTime.coerceAtLeast(0L)
         if (dstFps <= 0) throw ArcFail(ArcRepairError.SOURCE)
         if (srcRate.atMostInt(dstFps)) throw ArcFail(ArcRepairError.NO_NEED)
         val plan = ArcRepairPlan.of(srcFrames, srcRate.num, srcRate.den, dstFps)
@@ -452,7 +460,7 @@ private class ArcRepairSession(
         // track2 内录 AudioPlaybackCapture）。单轨时代 findTrack 命中即返回，内录轨被整体丢掉
         // ——本缺陷点。枚举复用视频 extractor（数轨不动样本游标）；建 lane 时每轨**各配一枚新
         // extractor**：同一 extractor 只能 select 一条轨（约束不变，×N）。
-        audioLanes = openAudioLanes(audioTrackIndices(videoEx))
+        audioLanes = openAudioLanes(audioTrackIndices(videoEx), videoBasePtsUs)
 
         // 输出与封装。成片名带抽帧前缀（"30fto24f_"，源=实测帧率）：名字上可辨本片被抽过帧
         val st = VideoStore(ctx)
@@ -616,14 +624,34 @@ private class ArcRepairSession(
     }
 
     /** 每条 audio/ 轨建一条 lane、各配一枚新 extractor；单轨打开失败只弃该轨，按无音频继续 */
-    private fun openAudioLanes(idxs: List<Int>): List<AudioCopyLane> {
+    private fun openAudioLanes(idxs: List<Int>, videoBasePtsUs: Long): List<AudioCopyLane> {
         val lanes = ArrayList<AudioCopyLane>(idxs.size)
         idxs.forEachIndexed { li, ti ->
             val ex = MediaExtractor()
             try {
                 ex.setDataSource(ctx, src, null)
                 ex.selectTrack(ti)
-                lanes.add(AudioCopyLane("audio$li", ex, ex.getTrackFormat(ti), ti))
+                // 轨序即识别口径：0=环境、1=内录。只有「确有第二轨」且选中 lane 1 才应用后校准；
+                // 单音轨/无法识别内录时 shift 恒 0，绝不猜。
+                val shiftUs = if (idxs.size >= 2 && li == 1 && capOffsetMs != 0) {
+                    -capOffsetMs.toLong() * 1000L
+                } else {
+                    0L
+                }
+                val lane = AudioCopyLane("audio$li", ex, ex.getTrackFormat(ti), ti, shiftUs)
+                // 零样本 lane 防线（与 ClipExport 的 audioTrackWritable 同目的）：内录被整体
+                // 前移时可能一个样本都落不进 [0, ...]，addTrack 后零样本会让 muxer.stop() 抛错，
+                // 整份修复产物被回收。建轨前先确认至少一枚可写样本，没有就不建。
+                if (!lane.hasWritableSample(videoBasePtsUs)) {
+                    Log.i(
+                        TAG_ARC,
+                        "音频轨 ${lane.label} 平移后无可写样本（shift=${shiftUs}us base=$videoBasePtsUs），" +
+                            "不建轨（防零样本轨崩 muxer）"
+                    )
+                    lane.release()
+                } else {
+                    lanes.add(lane)
+                }
             } catch (e: IOException) {
                 Log.i(TAG_ARC, "音频轨 ti=$ti 建 lane 失败，该轨按无音频继续：${e.message}")
                 runCatching { ex.release() }
@@ -1144,7 +1172,9 @@ private class ArcRepairSession(
         val label: String,
         val ex: MediaExtractor,
         val format: MediaFormat,
-        val trackIndex: Int
+        val trackIndex: Int,
+        /** 本 lane 的 PTS 平移（µs）：仅内录 lane 可能非 0（播放页缓存的同步偏移） */
+        val shiftUs: Long
     ) {
         /** muxer 侧轨号（addTrack 失败 = -1：该 lane 降级 done 不连坐） */
         var muxTrack = -1
@@ -1161,6 +1191,31 @@ private class ArcRepairSession(
 
         private val bufInfo = MediaCodec.BufferInfo()
         private val buf: ByteBuffer = ByteBuffer.allocateDirect(1 shl 20)
+
+        /**
+         * 平移后是否至少有一枚样本能落进 muxer 时间轴（PTS ≥ 0）。
+         *
+         * [basePtsUs] 取视频首样本 PTS（容器时间轴）：drain 时实际用 `decodePtsBase`（首帧显示
+         * PTS，可能更小），所以按更大的 base 预判"可写"只会更保守，不会把全负轨误判成可写。
+         * 查完必须把 extractor 游标还原到轨道起点，后续 drainUpTo 仍从 0 读。
+         */
+        fun hasWritableSample(basePtsUs: Long): Boolean {
+            val needPtsUs = basePtsUs - shiftUs
+            return try {
+                ex.seekTo(needPtsUs.coerceAtLeast(0L), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                // 音频帧通常全是 sync 点，一次 seek 就落到位；最多再看几枚，防个别容器给出前一个 sync
+                var guard = 0
+                while (guard++ < 4) {
+                    val size = ex.sampleSize
+                    if (size < 0L) return false
+                    if (ex.sampleTime >= needPtsUs) return true
+                    if (!ex.advance()) return false
+                }
+                false
+            } finally {
+                runCatching { ex.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC) }
+            }
+        }
 
         /** 音频直拷：源已是 AAC，格式（含 csd）已直接 addTrack，样本原样写出去 */
         fun drainUpTo(limitUs: Long) {
@@ -1197,15 +1252,26 @@ private class ArcRepairSession(
                     }
                     continue
                 }
-                if (norm > limitUs) return
+                // 同步偏移只作用于内录 lane（环境 lane shiftUs=0）。平移后仍为负的样本丢弃，
+                // 不 clip 到 0：同刻多样本会破坏 muxer 单调约束；穿插上限也按平移后的时刻算。
+                val outPts = norm + shiftUs
+                if (outPts < 0L) {
+                    pending = false
+                    if (!ex.advance()) {
+                        done = true
+                        return
+                    }
+                    continue
+                }
+                if (outPts > limitUs) return
                 buf.position(0)
                 buf.limit(pendingSize)
                 // 单调桥与视频轨同口径（各轨独立账本）：穿插/封轨判据不动，只改写出的戳
-                val fix = monotonicPts(muxLastPtsUs, norm)
+                val fix = monotonicPts(muxLastPtsUs, outPts)
                 if (fix.advanced) {
                     ptsFixes++
                     if (fix.backUs > ptsMaxBackUs) ptsMaxBackUs = fix.backUs
-                    Log.d(TAG_ARC, "音频轨${label} pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
+                    Log.d(TAG_ARC, "音频轨${label} pts 修正 cur=$outPts → ${fix.ptsUs}（back=${fix.backUs}us）")
                 }
                 muxLastPtsUs = fix.ptsUs
                 bufInfo.set(0, pendingSize, fix.ptsUs, 0)

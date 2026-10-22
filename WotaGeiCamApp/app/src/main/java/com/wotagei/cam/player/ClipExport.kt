@@ -109,13 +109,23 @@ object ClipRule {
      *
      * 为什么预扫与写出必须同口径：muxer 的轨在 `addTrack` 时就定型，之后一个样本都没写进去，
      * `muxer.stop()` 必抛（MPEG4Writer 对零样本轨的硬约束）；而导出链的异常路径会删掉整份输出
-     * ——视频完好却被判失败。剪辑导出传 `shiftUs = 0` 并带出点 [endRelUs]；选轨导出无出点
-     * （[endRelUs] = null）并带对齐平移。
+     * ——视频完好却被判失败。剪辑导出传选中轨的同步平移（ENV=0 / CAP=−offset）并带出点
+     * [endRelUs]；选轨导出无出点（[endRelUs] = null）并带同样的对齐平移。
      */
     fun remuxAudioSampleWritable(relUs: Long, shiftUs: Long, endRelUs: Long?): Boolean {
-        if (relUs + shiftUs < 0L) return false
-        return endRelUs == null || relUs <= endRelUs
+        val shiftedRelUs = relUs + shiftUs
+        if (shiftedRelUs < 0L) return false
+        // 出点判据也吃平移后的时刻：内录轨延后时，raw rel 在区间内不代表写出时仍在区间内；
+        // 预扫与拷贝必须同口径，否则可能"预扫说可写、拷贝一个样本都没写"⇒ 零样本轨崩 muxer
+        return endRelUs == null || shiftedRelUs <= endRelUs
     }
+
+    /**
+     * 剪辑导出的音轨平移量（µs）：只有内录轨吃 `−offsetMs`，环境轨恒 0。
+     * 与 [TrackRule.shiftUsFor] 同一表达式——剪辑/选轨两条导出链的符号口径不许分叉。
+     */
+    fun audioShiftUs(track: SelectedTrack, offsetMs: Long): Long =
+        TrackRule.shiftUsFor(track, offsetMs)
 }
 
 /**
@@ -143,7 +153,8 @@ internal fun audioTrackWritable(
             val size = ex.sampleSize
             if (size < 0L) return false
             val rel = ex.sampleTime - baseUs
-            if (endRelUs != null && rel > endRelUs) {
+            // 封轨判据与 remuxAudioSampleWritable/拷贝循环同口径：吃平移后的时刻（ENV shift=0 不变）
+            if (endRelUs != null && rel + shiftUs > endRelUs) {
                 outOfRange++
             } else {
                 outOfRange = 0
@@ -216,11 +227,14 @@ class ClipExporter(private val ctx: Context) {
         startMs: Long,
         endMs: Long,
         track: SelectedTrack,
+        offsetMs: Long,
         onProgress: (Float) -> Unit
     ): ClipResult = withContext(Dispatchers.IO) {
         val range = ClipRule.normalize(startMs, endMs, src.durationMs)
             ?: return@withContext ClipResult.Fail(ClipError.RANGE)
         val (sMs, eMs) = range
+        // 内录轨按缓存的同步偏移平移；环境轨恒 0。同一次导出的预扫与写出共用这一枚值
+        val audioShiftUs = ClipRule.audioShiftUs(track, offsetMs)
         val pendingUri = insertPending(ClipRule.clipNameOf(src.name))
             ?: return@withContext ClipResult.Fail(ClipError.OPEN)
         // 循环在非 suspend 的 copy() 里跑，取消检查靠把 Job 递进去（coroutineContext 是 suspend 属性，
@@ -239,7 +253,7 @@ class ClipExporter(private val ctx: Context) {
                     // 读数走双源（readSourceRotationHint），写出必须经 exportOrientationHint 统一口径
                     val hint = readSourceRotationHint(ctx, src.uri)
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
-                    val baseUs = copy(src, sMs * 1000L, eMs * 1000L, track, job, muxer, onProgress)
+                    val baseUs = copy(src, sMs * 1000L, eMs * 1000L, track, audioShiftUs, job, muxer, onProgress)
                     muxer.stop()
                     bytesComplete = true
                     // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
@@ -304,6 +318,7 @@ class ClipExporter(private val ctx: Context) {
         startUs: Long,
         endUs: Long,
         track: SelectedTrack,
+        shiftUs: Long,
         job: Job?,
         muxer: MediaMuxer,
         onProgress: (Float) -> Unit
@@ -346,7 +361,7 @@ class ClipExporter(private val ctx: Context) {
             val audioOrdinal = if (track == SelectedTrack.ENV) 0 else 1
             val requested = audioTracks.getOrNull(audioOrdinal)
             val audioTrack = requested?.takeIf {
-                audioTrackWritable(ex, it, baseUs, shiftUs = 0L, endRelUs = endRel, tailTolerance = AUDIO_TAIL_TOLERANCE)
+                audioTrackWritable(ex, it, baseUs, shiftUs = shiftUs, endRelUs = endRel, tailTolerance = AUDIO_TAIL_TOLERANCE)
             }
             if (requested == null) {
                 Log.i(TAG, "源只有 ${audioTracks.size} 条音轨，选中轨#$audioOrdinal 不存在，本片只导出视频")
@@ -417,16 +432,19 @@ class ClipExporter(private val ctx: Context) {
                         }
                     }
                 } else if (!audioClosed) {
-                    if (rel > endRel) {
+                    // 内录轨按同步偏移平移；环境轨 shiftUs=0（判据与写出同吃 audioRel）。
+                    // 负 PTS 丢弃不 clip 到 0——同刻多样本会崩 Muxer；出点也按平移后时刻封轨，
+                    // 与 audioTrackWritable 预扫同口径（否则可能建了零样本轨）。
+                    val audioRel = rel + shiftUs
+                    if (audioRel > endRel) {
                         if (++aTail >= AUDIO_TAIL_TOLERANCE) audioClosed = true
-                    } else if (aIdx >= 0 && ClipRule.keepSample(rel)) {
-                        // 早于公共基准的音频样本（AAC 帧界早于视频关键帧）丢弃：负 PTS 会崩 Muxer。
+                    } else if (aIdx >= 0 && ClipRule.keepSample(audioRel)) {
                         // 单调桥与视频轨同口径（两轨独立账本）
-                        val fix = monotonicPts(aLastPts, rel)
+                        val fix = monotonicPts(aLastPts, audioRel)
                         if (fix.advanced) {
                             aPtsFixes++
                             if (fix.backUs > aPtsMaxBackUs) aPtsMaxBackUs = fix.backUs
-                            Log.d(TAG, "音频轨 pts 修正 cur=$rel → ${fix.ptsUs}（back=${fix.backUs}us）")
+                            Log.d(TAG, "音频轨 pts 修正 cur=$audioRel → ${fix.ptsUs}（back=${fix.backUs}us）")
                         }
                         aLastPts = fix.ptsUs
                         @Suppress("WrongConstant") // 同上：sampleFlags 与 BUFFER_FLAG_* 同值体系

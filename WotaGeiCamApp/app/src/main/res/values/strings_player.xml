@@ -105,7 +105,11 @@
     <string name="player_track_cap">内录</string>
     <string name="player_track_pick_title">选择音轨</string>
     <string name="player_track_sync">同步音轨</string>
-    <string name="player_track_sync_done_fmt">已同步 %1$s ms</string>
+    <string name="player_track_sync_auto">自动校准</string>
+    <string name="player_track_sync_manual">手动同步</string>
+    <string name="player_track_sync_source_fmt">%1$s %2$s ms</string>
+    <string name="player_track_sync_busy">自动校准中，请稍候</string>
+    <string name="player_track_sync_note">分享原片不改写音轨：录制前校准若已生效会保留在原片；未跑或失败的预校准与后校准残差只在本页导出、光弧修复时应用</string>
     <string name="player_track_sync_low">未能自动校正，已按录制起点对齐</string>
     <string name="player_track_sync_failed">同步失败，请重试</string>
     <string name="player_track_sync_none">未同步，按录制起点对齐</string>

@@ -38,8 +38,8 @@ class ExportTrackSelectionGuardTest {
             copyBody.contains("audioTrack < 0 &&")
         )
         assertTrue(
-            "建轨前必须预扫零样本轨（否则 muxer.stop 抛错 → 整份输出被删）",
-            copyBody.contains("audioTrackWritable(ex, it, baseUs, shiftUs = 0L, endRelUs = endRel")
+            "建轨前必须预扫零样本轨（否则 muxer.stop 抛错 → 整份输出被删；平移量必须与写出同源）",
+            copyBody.contains("audioTrackWritable(ex, it, baseUs, shiftUs = shiftUs, endRelUs = endRel")
         )
     }
 
@@ -68,8 +68,8 @@ class ExportTrackSelectionGuardTest {
         assertTrue("弹层必须能改选", popup.contains("onPickTrack"))
         assertTrue("内录项必须按双音轨门置灰", popup.contains("enabled = dualReady"))
         assertTrue(
-            "导出调用必须把用户选中的音轨传进去（漏传 = 选择无效）",
-            flatten(player).contains("clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack)")
+            "导出调用必须把用户选中的音轨与缓存偏移传进去（漏传 = 选择/同步无效）",
+            flatten(player).contains("clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset)")
         )
         assertTrue("选轨必须是按片重置的会话态", player.contains("var clipTrack by remember(clip.uri)"))
     }

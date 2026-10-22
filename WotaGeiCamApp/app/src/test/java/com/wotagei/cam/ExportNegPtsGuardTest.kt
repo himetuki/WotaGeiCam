@@ -81,9 +81,14 @@ class ExportNegPtsGuardTest {
             "player/ClipExport.kt", "if (isVideo)", "else if (!audioClosed)", "ex.advance()"
         )
         assertTrue(
-            "ClipExporter.copy 的音频轨写入必须过 ClipRule.keepSample：AAC 帧界早于视频关键帧时 rel 为负，" +
-                "负 pts 直写会让 Muxer 给整轨加巨大 baseMediaDecodeTime 偏移并生成畸形 ctts",
-            branch.contains("ClipRule.keepSample(rel)")
+            "ClipExporter.copy 的音频轨写入必须过 ClipRule.keepSample，且判据吃平移后的 audioRel：" +
+                "AAC 帧界早于视频关键帧时 rel 为负，负 pts 直写会让 Muxer 给整轨加巨大 " +
+                "baseMediaDecodeTime 偏移并生成畸形 ctts",
+            branch.contains("ClipRule.keepSample(audioRel)")
+        )
+        assertTrue(
+            "内录音轨的平移必须进入写出判据（audioRel = rel + shiftUs），环境轨 shiftUs 恒 0",
+            branch.contains("val audioRel = rel + shiftUs")
         )
     }
 

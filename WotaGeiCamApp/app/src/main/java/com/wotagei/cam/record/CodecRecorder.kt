@@ -48,7 +48,9 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class CodecRecorder(
     private val ctx: Context,
-    private val store: VideoStore
+    private val store: VideoStore,
+    /** 输出路由探测（预校准只在 A2DP 时跑；默认实现零权限、失败按非 A2DP） */
+    private val routeProbe: AudioRouteProbe = AndroidAudioRouteProbe(ctx)
 ) : Recorder {
 
     companion object {
@@ -260,6 +262,11 @@ class CodecRecorder(
         var heldPkt: AudioFeeder.Packet? = null
         /** 本通道最后喂进编码器的真实 PCM 包 PTS（EOS 收尾时间戳基准） */
         var lastPtsUs = 0L
+        /**
+         * 本段喂编码器时的 PTS 平移（µs，正 = 延后）：环境轨恒 0；内录轨继承会话级
+         * [preCalShiftUs]（蓝牙预校准）。**只改喂入戳，不改包内容**，EOS 也用平移后的末戳。
+         */
+        var ptsShiftUs = 0L
         /** muxer 轨号（addTrack 成功后 ≥0） */
         var track = -1
         /** 输出格式已到（INFO_OUTPUT_FORMAT_CHANGED 见过；内录轨 addTrack 待轨序门控放行） */
@@ -346,6 +353,12 @@ class CodecRecorder(
     /** 双 feeder 的 start 时刻（μs，nanoTime 域）：启动记账（批 4 校正的数据基础） */
     private var envFeederStartUs = 0L
     private var capFeederStartUs = 0L
+    /**
+     * 蓝牙预校准得到的内录 PTS 平移（µs，正 = 延后）。会话级、跨段保持：同一场录制里 A2DP
+     * 延迟不随换段变化；prepare 复位 0，换段**不**复位（新 AudioChannel 建段时重新继承）。
+     * 只在 pump 线程起跑前写、启动后由 pump 线程读，@Volatile 兜住线程切换可见性。
+     */
+    @Volatile private var preCalShiftUs = 0L
 
     @Volatile private var state = EngineState.IDLE
     @Volatile private var engineError: String? = null
@@ -597,6 +610,7 @@ class CodecRecorder(
         resetRotateBooks()
         envFeederStartUs = 0L
         capFeederStartUs = 0L
+        preCalShiftUs = 0L
         clock.reset()
         // 分步耗时打点（2026-10-12，纯观测）：注册表 REG-10「起录 1~2s 延迟（低端机 insert+prepare
         // 串行链正常量级）」从未有过分步读数，这行给将来动起录链攒第一手数据。零行为变更。
@@ -942,6 +956,42 @@ class CodecRecorder(
     // endregion
 
     // region 启停
+
+    /**
+     * 蓝牙内录预校准（[Recorder] 契约）：只在双音轨编码器都建好、且当前输出是 A2DP 时跑。
+     * 任何失败都只清 [preCalShiftUs] 并返回 false——不置错误、不删 pending；成功路径最多增加
+     * 约 800ms 有界采集，失败/取消由 shouldCancel 在轮询粒度内返回。
+     */
+    override fun preflightAudioSync(shouldCancel: () -> Boolean): Boolean {
+        val p = profile ?: return false
+        if (state != EngineState.PREPARE) return false
+        val envOn = p.audioEnabled && aCodec != null
+        val capOn = p.captureAudio && capCodec != null
+        // 路由探测失败按"不是 A2DP"处理：预校准只是增益功能，不许把异常带进起录链
+        val a2dp = runCatching { routeProbe.isA2dpOutput() }.getOrDefault(false)
+        if (!AudioPreflightPolicy.shouldPreflight(envOn, capOn, a2dp)) {
+            preCalShiftUs = 0L
+            return false
+        }
+        val r = runCatching {
+            AudioPreflightCapture(ctx).capture(p.sampleRate, p.channels, audioSource, shouldCancel)
+        }.getOrElse {
+            // 预校准自身异常也只留日志：它只是增益功能，不许打断起录
+            Log.w(TAG, "蓝牙预校准异常：${it.javaClass.simpleName} ${it.message}")
+            PreflightResult(false)
+        }
+        if (!r.ok) {
+            preCalShiftUs = 0L
+            Log.i(TAG, "蓝牙预校准未生效，按原时间轴录制")
+            return false
+        }
+        preCalShiftUs = r.shiftUs
+        Log.i(
+            TAG,
+            "蓝牙预校准 offset=${r.offsetMs} conf=${r.confidence} shift=${preCalShiftUs}us"
+        )
+        return true
+    }
 
     override fun start() {
         if (state != EngineState.PREPARE) {
@@ -1741,6 +1791,9 @@ class CodecRecorder(
         // 只在单段内（pumpLoop 每段重建编码器并清 held 包），段内局部比实例字段更不容易串轨
         val envCh = if (a != null) AudioChannel() else null
         val capCh = if (c != null) AudioChannel() else null
+        // 蓝牙预校准只作用于内录轨：环境轨是时间轴的参照，恒不平移。换段重建 AudioChannel 时
+        // 重新继承会话级 shift（prepare 已复位；本会话后续段沿用同一测量值）
+        capCh?.ptsShiftUs = preCalShiftUs
         // P1：捕获源失效的一次性贯穿收尾标志（teardown 幂等，恒只做一次）
         var capTornDown = false
         // 环境采集源不活的一次性贯穿收尾标志（S1-M3-05 收口，与 capTornDown 同款幂等）：标志后
@@ -2371,9 +2424,12 @@ class CodecRecorder(
         if (len < pkt.data.size) ch.feedTruncated++
         buf.clear()
         buf.put(pkt.data, 0, len)
+        // 内录轨的整体 PTS 平移（预校准；环境轨恒 0）：从喂入编码器这一层改时间轴，
+        // 不改 PCM 内容。EOS 的末戳也用平移后的值（见 eosPts），避免收尾戳比样本还早。
+        val ptsUs = pkt.ptsUs + ch.ptsShiftUs
         try {
-            codec.queueInputBuffer(idx, 0, len, pkt.ptsUs, 0)
-            ch.lastPtsUs = pkt.ptsUs
+            codec.queueInputBuffer(idx, 0, len, ptsUs, 0)
+            ch.lastPtsUs = ptsUs
             ch.fedBytes += len // 有效样本字节账（静音判读的时长来源；入队失败不计）
         } catch (e: IllegalStateException) {
             Log.e(TAG, "audio queueInput failed: ${e.message}")

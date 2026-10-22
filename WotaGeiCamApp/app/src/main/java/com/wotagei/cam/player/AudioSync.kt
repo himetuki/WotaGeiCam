@@ -7,13 +7,11 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import com.wotagei.cam.R
+import com.wotagei.cam.core.AudioAlign
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 
 /**
  * 基于音频的自动同步（05 文档第 7 节定版：能量包络互相关 + FFT 精修，纯 Kotlin，无第三方库）。
@@ -39,14 +37,10 @@ object AudioSync {
     )
 
     /** 目标采样率：TrackSync 判"至少 1 秒 PCM"同口径复用，故 internal 单一真源 */
-    internal const val TARGET_SR = 8000
+    internal const val TARGET_SR = AudioAlign.TARGET_SR
     private const val MAX_SECONDS = 30
-    private const val ENV_WIN_MS = 10
-    private const val SEARCH_MS = 10_000L
-    private const val REFINE_MS = 50L
-    private const val PEAK_GUARD_MS = 150L
     /** 低置信度门槛（主峰/次峰比）：TrackSync 同口径复用，故 internal 单一真源 */
-    internal const val MIN_CONFIDENCE = 1.5f
+    internal const val MIN_CONFIDENCE = AudioAlign.MIN_CONFIDENCE
 
     suspend fun align(context: Context, left: Uri, right: Uri): Result = withContext(Dispatchers.Default) {
         val pcmL = decodeMono(context, left) ?: return@withContext Result(false, reasonRes = R.string.player_sync_no_audio)
@@ -269,282 +263,24 @@ object AudioSync {
         }
     }
 
-    /** 线性插值重采样 + 截断到 maxSeconds。
-     *  输出帧数 = 源帧数×dst/src（整段重采样的目标帧数）再被 maxSeconds 封顶——
-     *  旧实现拿 src.size（源帧数）与 dstRate·maxSeconds（目标帧数）直接取 min 是单位混用，
-     *  44.1k→8k 时会输出 44100 帧（=5.5s@8k，比真实时长多出 10% 的零填充尾巴）。 */
-    internal fun resample(src: FloatArray, srcRate: Int, dstRate: Int, maxSeconds: Int): FloatArray {
-        val rate = if (srcRate <= 0) dstRate else srcRate
-        val limitFrames = minOf(
-            src.size.toLong() * dstRate / rate,
-            dstRate.toLong() * maxSeconds
-        ).toInt().coerceAtLeast(0)
-        if (rate == dstRate) return src.copyOfRange(0, limitFrames)
-        val ratio = rate.toFloat() / dstRate.toFloat()
-        val out = FloatArray(limitFrames)
-        for (i in 0 until limitFrames) {
-            val pos = i * ratio
-            val idx = pos.toInt()
-            val frac = pos - idx
-            val a = src.getOrElse(idx) { 0f }
-            val b = src.getOrElse(idx + 1) { a }
-            out[i] = a + (b - a) * frac
-        }
-        return out
-    }
+    /** 重采样委托 core（纯 DSP 单一真源，见 [AudioAlign]） */
+    internal fun resample(src: FloatArray, srcRate: Int, dstRate: Int, maxSeconds: Int): FloatArray =
+        AudioAlign.resample(src, srcRate, dstRate, maxSeconds)
 
     // endregion
 
-    // region 2~3. 包络 + 粗对齐
+    // region 2~5. 包络 / 粗对齐 / FFT 精修（全部委托 core.AudioAlign）
 
-    /** 10ms 窗 RMS，去均值后归一化到 0..1，得到 100 点/秒的包络 */
-    internal fun envelope(pcm: FloatArray, sr: Int = TARGET_SR): FloatArray {
-        val win = max(1, sr * ENV_WIN_MS / 1000)
-        val n = pcm.size / win
-        if (n <= 0) return FloatArray(1) { 0f }
-        val rms = FloatArray(n)
-        for (k in 0 until n) {
-            var sum = 0.0
-            val base = k * win
-            for (j in 0 until win) {
-                val v = pcm[base + j].toDouble()
-                sum += v * v
-            }
-            rms[k] = sqrt(sum / win).toFloat()
-        }
-        var mean = 0f
-        rms.forEach { mean += it }
-        mean /= n
-        var maxV = 0f
-        for (k in 0 until n) {
-            val d = rms[k] - mean
-            rms[k] = if (d > 0f) d else 0f
-            if (rms[k] > maxV) maxV = rms[k]
-        }
-        if (maxV > 0f) for (k in 0 until n) rms[k] = rms[k] / maxV
-        return rms
-    }
+    internal fun envelope(pcm: FloatArray, sr: Int = TARGET_SR): FloatArray = AudioAlign.envelope(pcm, sr)
 
-    /**
-     * 粗偏移（ms）：在 ±[SEARCH_MS] 内求归一化互相关最大。
-     * 正偏移含义见类注释：left(t) ≈ right(t + offset)。
-     */
-    internal fun coarseAlign(envL: FloatArray, envR: FloatArray): Long {
-        val stepMs = ENV_WIN_MS
-        val maxLag = (SEARCH_MS / stepMs).toInt()
-        val pl = prefixEnergy(envL)
-        val pr = prefixEnergy(envR)
-        var bestLag = 0
-        var bestScore = -Float.MAX_VALUE
-        for (lag in -maxLag..maxLag) {
-            val (from, until) = overlapRange(envL.size, envR.size, lag) ?: continue
-            val r = correlate(envL, envR, from, until, lag)
-            val eL = rangeEnergy(pl, from, until)
-            val eR = rangeEnergy(pr, from + lag, until + lag)
-            val denom = sqrt(eL * eR)
-            val score = if (denom > 1e-6f) r / denom else 0f
-            if (score > bestScore) {
-                bestScore = score
-                bestLag = lag
-            }
-        }
-        return bestLag.toLong() * stepMs
-    }
+    internal fun coarseAlign(envL: FloatArray, envR: FloatArray): Long = AudioAlign.coarseAlign(envL, envR)
 
-    private fun correlate(a: FloatArray, b: FloatArray, from: Int, until: Int, lag: Int): Float {
-        var sum = 0f
-        var i = from
-        while (i < until) {
-            sum += a[i] * b[i + lag]
-            i++
-        }
-        return sum
-    }
+    internal fun refine(pcmL: FloatArray, pcmR: FloatArray, coarseMs: Long): Pair<Long, Float> =
+        AudioAlign.refine(pcmL, pcmR, coarseMs)
 
-    // endregion
+    internal fun fft(re: FloatArray, im: FloatArray) = AudioAlign.fft(re, im)
 
-    // region 4~5. FFT 精修与置信度
-
-    /**
-     * 精修：1kHz 带内（带通由低通近似）做 FFT 互相关，在粗偏移 ±[REFINE_MS] 内按 1ms 步进取峰。
-     * 置信度 = 主峰 / 次峰（次峰取主峰 ±[PEAK_GUARD_MS] 之外、搜索窗内的最大值）。
-     */
-    internal fun refine(pcmL: FloatArray, pcmR: FloatArray, coarseMs: Long): Pair<Long, Float> {
-        val low = lowPass1k(pcmL)
-        val high = lowPass1k(pcmR)
-        val n = nextPowerOfTwo(low.size + high.size)
-        val reL = FloatArray(n)
-        val imL = FloatArray(n)
-        val reR = FloatArray(n)
-        val imR = FloatArray(n)
-        System.arraycopy(low, 0, reL, 0, low.size)
-        System.arraycopy(high, 0, reR, 0, high.size)
-        meanRemove(reL, low.size)
-        meanRemove(reR, high.size)
-
-        fft(reL, imL)
-        fft(reR, imR)
-        // 互相关：conj(FFT(L)) * FFT(R)
-        for (i in 0 until n) {
-            val ar = reL[i]; val ai = imL[i]
-            val br = reR[i]; val bi = imR[i]
-            // (ar - j·ai)(br + j·bi) = (ar·br + ai·bi) + j(ar·bi - ai·br)
-            reL[i] = ar * br + ai * bi
-            imL[i] = ar * bi - ai * br
-        }
-        inverseFft(reL, imL)
-
-        val corr = FloatArray(n) { reL[it] / n }
-        val pl = prefixEnergy(low)
-        val pr = prefixEnergy(high)
-        val stepMs = 1L
-        val lo = (coarseMs - REFINE_MS).coerceAtLeast(-SEARCH_MS)
-        val hi = (coarseMs + REFINE_MS).coerceAtMost(SEARCH_MS)
-        val maxLagSamples = (SEARCH_MS * TARGET_SR / 1000L).toInt()
-
-        // 候选：1ms 步进的 lag（样本数 = lag * SR/1000）
-        val candidates = ArrayList<Pair<Int, Float>>()
-        var ms = lo
-        while (ms <= hi) {
-            val lag = (ms * TARGET_SR / 1000L).toInt()
-            if (kotlin.math.abs(lag) <= maxLagSamples) {
-                score(corr, pl, pr, lag, low.size, high.size, n)?.let { candidates += lag.toInt() to it }
-            }
-            ms += stepMs
-        }
-        if (candidates.isEmpty()) return coarseMs to 0f
-
-        val best = candidates.maxByOrNull { it.second } ?: return coarseMs to 0f
-        // 次峰：搜索窗内排除主峰 ±150ms
-        val guard = (PEAK_GUARD_MS * TARGET_SR / 1000L).toInt()
-        var second = -Float.MAX_VALUE
-        var scan = -SEARCH_MS
-        while (scan <= SEARCH_MS) {
-            val lag = (scan * TARGET_SR / 1000L).toInt()
-            if (abs(lag - best.first) > guard && abs(lag) <= maxLagSamples) {
-                score(corr, pl, pr, lag, low.size, high.size, n)?.let { if (it > second) second = it }
-            }
-            scan += 4L // 4ms 粒度扫次峰，够精且省时间
-        }
-        val confidence = when {
-            second <= 0.02f || second <= 0f -> 99f
-            else -> (best.second / second).coerceIn(0f, 99f)
-        }
-        return (best.first.toLong() * 1000L / TARGET_SR) to confidence
-    }
-
-    /** 归一化互相关：直接取 FFT 相关在 lag 处的值，再按重叠窗能量归一 */
-    private fun score(corr: FloatArray, pl: FloatArray, pr: FloatArray, lag: Int, lenL: Int, lenR: Int, n: Int): Float? {
-        val (from, until) = overlapRange(lenL, lenR, lag) ?: return null
-        if (until - from <= 1) return null
-        val index = if (lag >= 0) lag else n + lag
-        if (index < 0 || index >= n) return null
-        val raw = corr[index]
-        val eL = rangeEnergy(pl, from, until)
-        val eR = rangeEnergy(pr, from + lag, until + lag)
-        val denom = sqrt(eL * eR)
-        return if (denom > 1e-6f) raw / denom else null
-    }
-
-    private fun overlapRange(lenL: Int, lenR: Int, lag: Int): Pair<Int, Int>? {
-        val from = max(0, -lag)
-        val until = min(lenL, lenR - lag)
-        return if (until - from <= 1) null else from to until
-    }
-
-    private fun prefixEnergy(x: FloatArray): FloatArray {
-        val p = FloatArray(x.size + 1)
-        var sum = 0f
-        for (i in x.indices) {
-            sum += x[i] * x[i]
-            p[i + 1] = sum
-        }
-        return p
-    }
-
-    private fun rangeEnergy(prefix: FloatArray, from: Int, until: Int): Float {
-        val a = from.coerceIn(0, prefix.size - 1)
-        val b = until.coerceIn(0, prefix.size - 1)
-        return if (b <= a) 0f else prefix[b] - prefix[a]
-    }
-
-    /** ~1kHz 低通（8 点滑动平均，8kHz 下第一零点约 1kHz），抑制高频让对齐更稳 */
-    private fun lowPass1k(x: FloatArray): FloatArray {
-        val win = 8
-        val out = FloatArray(x.size)
-        var acc = 0f
-        for (i in x.indices) {
-            acc += x[i]
-            if (i >= win) acc -= x[i - win]
-            out[i] = acc / min(win, i + 1)
-        }
-        return out
-    }
-
-    private fun meanRemove(re: FloatArray, len: Int) {
-        if (len <= 0) return
-        var sum = 0f
-        for (i in 0 until len) sum += re[i]
-        val m = sum / len
-        for (i in 0 until len) re[i] -= m
-    }
-
-    private fun nextPowerOfTwo(v: Int): Int {
-        var n = 1
-        while (n < v) n = n shl 1
-        return n
-    }
-
-    /** 迭代 radix-2 FFT（in-place） */
-    internal fun fft(re: FloatArray, im: FloatArray) = transform(re, im, false)
-
-    internal fun inverseFft(re: FloatArray, im: FloatArray) = transform(re, im, true)
-
-    private fun transform(re: FloatArray, im: FloatArray, inverse: Boolean) {
-        val n = re.size
-        if (n <= 1) return
-        // 位反转置换
-        var j = 0
-        for (i in 1 until n) {
-            var bit = n shr 1
-            while (j and bit != 0) {
-                j = j xor bit
-                bit = bit shr 1
-            }
-            j = j or bit
-            if (i < j) {
-                var t = re[i]; re[i] = re[j]; re[j] = t
-                t = im[i]; im[i] = im[j]; im[j] = t
-            }
-        }
-        var len = 2
-        while (len <= n) {
-            val ang = (if (inverse) 2.0 else -2.0) * Math.PI / len
-            val wRe = kotlin.math.cos(ang).toFloat()
-            val wIm = kotlin.math.sin(ang).toFloat()
-            var start = 0
-            while (start < n) {
-                var curRe = 1f
-                var curIm = 0f
-                val half = len / 2
-                for (k in 0 until half) {
-                    val a = start + k
-                    val b = a + half
-                    val xRe = re[b] * curRe - im[b] * curIm
-                    val xIm = re[b] * curIm + im[b] * curRe
-                    re[b] = re[a] - xRe
-                    im[b] = im[a] - xIm
-                    re[a] += xRe
-                    im[a] += xIm
-                    val nextRe = curRe * wRe - curIm * wIm
-                    curIm = curRe * wIm + curIm * wRe
-                    curRe = nextRe
-                }
-                start += len
-            }
-            len = len shl 1
-        }
-    }
+    internal fun inverseFft(re: FloatArray, im: FloatArray) = AudioAlign.inverseFft(re, im)
 
     // endregion
 

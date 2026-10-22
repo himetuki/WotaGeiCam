@@ -277,6 +277,18 @@ interface Recorder {
     /** @return false = 失败（内部已回 IDLE 并记日志），调用方不进 START */
     fun prepare(p: RecordProfile, sink: OutputSink): Boolean
 
+    /**
+     * 录制正式开始前的蓝牙内录预校准（[com.wotagei.cam.record.AudioPreflightCapture]）。
+     * 只有「双音轨 + 当前输出是 A2DP」才值得跑；默认实现直接 false（MediaRecorder 路无多音轨能力，
+     * 也不改它的行为）。**约定：任何失败都只返回 false，绝不置错误、不删文件**；成功路径是
+     * 800ms 有界采集 + 两条临时采集器的有界收尾（各 ≤300ms join），最坏约 1.4s，
+     * 失败/取消也由采集轮询的 shouldCancel 在同一量级内返回。
+     *
+     * @param shouldCancel 采集轮询每拍检查一次；返回 true 立即放弃本次预校准
+     * @return true = 测量成功（即使 shift=0）；false = 跳过/失败，调用方照常录制
+     */
+    fun preflightAudioSync(shouldCancel: () -> Boolean = { false }): Boolean = false
+
     fun start()
 
     /** 停引擎 + 收尾入库（成功清 IS_PENDING，失败/废片删记录），任何状态都可调、幂等 */
