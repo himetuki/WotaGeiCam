@@ -43,6 +43,46 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 产物：`entry/build/default/outputs/default/entry-default-unsigned.hap`（未签名；
 签名需在 `build-profile.json5` 的 `signingConfigs` 配置证书，或用 DevEco Studio 自动签名）。
 
+### CI（GitHub Actions）
+
+`.github/workflows/build-hap.yml` 在 GitHub 托管的 Ubuntu runner 上打包 HAP，不用本机 DevEco：
+
+- 工具链：华为 DevEco **Linux 命令行工具** `commandline-tools-linux-x64-6.1.1.280.zip`
+  （2.14GB，解压 6.5GB），内置 HarmonyOS 6.1.1 SDK / API 24（openharmony + hms）、
+  hvigor 6.24.2、ohpm、node、native LLVM 与 CMake，与本工程 `build-profile.json5` 对齐。
+  zip 做 SHA256 固定校验；要换镜像/私有资产，改仓库变量 `HARMONY_CLI_TOOLS_URL` 与
+  `HARMONY_CLI_TOOLS_SHA256`（成对修改）。
+- JDK 必需：hvigor 的 `PackageHap` 任务会 `spawn java`，即使不签名也会失败（`spawn java ENOENT`），
+  workflow 用 `setup-java` 固定 Temurin 17。
+- 触发：push 到 `harmony` 分支、push `ohos-v*` 标签。
+  2026-10-22 历史剥离后 harmony 是 OHOS-only 仓库（与 main 无共同祖先），
+  一个 tag 名只能指向一个提交，**不存在“同一个 tag 同时打两边”**。要一次推送同时发两端，
+  两个 tag 建好后一起推：
+
+  ```bash
+  git tag v0.0.10          # 指向 main 的提交（Android）
+  git tag ohos-v0.0.10     # 指向 harmony 的提交（鸿蒙）
+  git push origin v0.0.10 ohos-v0.0.10
+  ```
+
+  两条 workflow 并行跑，Android 产物是 `android-*`，鸿蒙产物是 `ohos-*`，各自进各自的
+  Release 页（`v0.0.10` / `ohos-v0.0.10`）。`workflow_dispatch` 需要 workflow 文件位于默认
+  分支（main）才会出现在 Actions 列表里；本文件目前只在 harmony（`.gitignore` 单独放行），
+  所以手动触发入口暂不可用，用 tag 或分支推送即可。`detect` job 是为将来把本文件镜像到
+  main 时准备的：main 的提交没有 `WotaGeiCamOHOS/` 就跳过而不是报错。
+- 产物：`ohos-<tag>-unsigned.hap` + `SHA256SUMS`（分支推送为 `ohos-harmony-<sha7>-unsigned.hap`）。
+  Android 侧对应 `android-v<版本>[-r<NN>]-*.apk` 四件套——这需要在 main 的
+  `.github/workflows/build-apk.yml` 里把 `-PapkBaseName=WotaGeiCam` 改成 `-PapkBaseName=android`
+  （harmony 分支已不再跟踪该文件，改动只落在 main）。
+  配齐 `HAP_KEYSTORE_BASE64` / `HAP_APP_CERT_BASE64` / `HAP_PROFILE_BASE64`
+  （及 `HAP_KEY_ALIAS`、`HAP_KEY_PASSWORD`、`HAP_KEYSTORE_PASSWORD`）后，额外产出 signed HAP
+  并跑 `verify-app` 回验；缺任意一项只交付 unsigned。
+  注意 HAP 包内 `versionName` 仍取自 `AppScope/app.json5`（当前 1.0.0），不随 tag 变；
+  要让设置页版本号跟 tag 一致，在发版提交里同步改这个文件。
+- 实测口径（2026-10-22，WSL Ubuntu 24.04 用与 workflow 相同的命令）：`ohpm install --all` →
+  235 条纯逻辑用例全绿 → `assembleHap -p buildMode=release` 产出 unsigned HAP →
+  `hap-sign-tool sign-app` + `verify-app` 成功。因此 CI 只需要网络和一个 JDK。
+
 ## 纯逻辑测试
 
 `test/pure/*.test.ets` 是不依赖真机的纯函数单测（对拍上游 JVM 测试的已移植面），

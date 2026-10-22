@@ -1,0 +1,231 @@
+# 打包 HarmonyOS HAP（harmony 分支专用，对齐 WotaGeiCamOHOS/ 工程）
+#
+# 2026-10-22 历史剥离后，harmony 是 OHOS-only 仓库（与 main 无共同祖先），
+# 本文件是 harmony 上唯一入库的 workflow（.gitignore 单独放行）。tag 约定：
+#   main（安卓）   v*        → build-apk.yml（只存在于 main，产物 android-*）
+#   harmony（鸿蒙）ohos-v*   → 本文件（产物 ohos-*）
+#
+# 一个 tag 名在仓库里只能指向一个提交，而两个分支没有共同祖先，所以不存在
+# “同一个 tag 同时打两边”的做法。要一次推送同时发两端，创建两个 tag 后一起推：
+#   git tag v0.0.10               # 指向 main 的提交
+#   git tag ohos-v0.0.10          # 指向 harmony 的提交
+#   git push origin v0.0.10 ohos-v0.0.10
+# 两条 workflow 并行跑，各自进各自的 Release 页，资产名用 android-* / ohos-* 区分。
+#
+# 为什么 GitHub 托管 runner 能编 HAP：DevEco Studio 有 **linux-x64 版命令行工具**
+# （commandline-tools-linux-x64-<版本>.zip），内置与本工程一致的 HarmonyOS SDK
+# （本项目 compatibleSdkVersion 6.0.0(20) / targetSdkVersion 6.1.1(24)，工具链 6.1.1.280
+# 自带 HarmonyOS 6.1.1 SDK / API 24，含 openharmony + hms 两套），以及 hvigor / ohpm / node，
+# 无需登录华为账号、无需 GUI。本文件里的命令已在 WSL Ubuntu 24.04 上按同样步骤实测通过。
+#
+# 触发：
+#   - push 到 harmony 分支（该分支的每次提交都验一次 HAP 可编）
+#   - push ohos-v* 标签（鸿蒙发版）
+#   - workflow_dispatch：GitHub 要求 workflow 文件存在于**默认分支（main）**才会出现在
+#     Actions 列表里。本文件目前只在 harmony，所以手动触发入口不可用；需要时把本文件
+#     复制一份到 main（detect job 会在缺少 WotaGeiCamOHOS/ 时自动跳过），或用 tag/分支推送。
+#
+# 产物：ohos-<tag>-unsigned.hap + SHA256SUMS（分支推送为 ohos-harmony-<sha7>-unsigned.hap）
+#   配置下方签名 Secrets 后，额外产出 ...-signed.hap（profile 含设备 UDID 时真机可装）。
+#
+# 工具链下载：默认取第三方镜像上的华为原版 zip（2.14GB），并做 SHA256 固定校验。
+#   如需改用自己的镜像/私有 Release 资产，设仓库 Variables（或 Environment Variables）：
+#     HARMONY_CLI_TOOLS_URL     zip 直链
+#     HARMONY_CLI_TOOLS_SHA256  zip 的 sha256（两个变量必须成对修改）
+#
+# 签名 Secrets（base64 单行；缺任意一项则只产 unsigned 包）：
+#   HAP_KEYSTORE_BASE64   .p12 密钥库
+#   HAP_APP_CERT_BASE64   .cer 应用证书
+#   HAP_PROFILE_BASE64    .p7b 已签 profile（DevEco 自动签名产物，含设备 UDID）
+#   HAP_KEY_ALIAS         密钥别名（默认 debugKey，DevEco 自动签名即此别名）
+#   HAP_KEY_PASSWORD      密钥口令
+#   HAP_KEYSTORE_PASSWORD 密钥库口令
+#   导出路径：DevEco Studio → File → Project Structure → Signing Configs（自动签名后
+#   材料落在用户目录 ~/.ohos/config/，p12/cer/p7b 三件套）。
+name: Build HarmonyOS HAP
+
+on:
+  push:
+    branches: [harmony]
+    tags: ["ohos-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CLI_URL: ${{ vars.HARMONY_CLI_TOOLS_URL || 'https://image.cdn.dog/commandline-tools-linux-x64-6.1.1.280.zip' }}
+  CLI_SHA256: ${{ vars.HARMONY_CLI_TOOLS_SHA256 || 'b9caf7b73c541b90e6c8f3c7c3de7f2bea9b35e41e80cd3525f2f759ebf16cf4' }}
+
+jobs:
+  # 本文件将来若镜像到 main（为启用手动 dispatch），main 的提交没有 WotaGeiCamOHOS/，
+  # 先探测再决定是否 build，避免 Android-only 提交把流水线拖红。
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_ohos: ${{ steps.check.outputs.has_ohos }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Detect WotaGeiCamOHOS on this commit
+        id: check
+        run: |
+          if [ -d WotaGeiCamOHOS ]; then
+            echo "has_ohos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_ohos=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::this commit has no WotaGeiCamOHOS/ (Android-only branch); HAP build skipped"
+          fi
+
+  build:
+    needs: detect
+    if: ${{ needs.detect.outputs.has_ohos == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HAP_KEYSTORE_BASE64: ${{ secrets.HAP_KEYSTORE_BASE64 }}
+      HAP_APP_CERT_BASE64: ${{ secrets.HAP_APP_CERT_BASE64 }}
+      HAP_PROFILE_BASE64: ${{ secrets.HAP_PROFILE_BASE64 }}
+      HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
+      HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
+      HAP_KEYSTORE_PASSWORD: ${{ secrets.HAP_KEYSTORE_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # hvigor 的 PackageHap 任务（以及下面的 hap-sign-tool）都依赖 java，缺它会在
+      # “spawn java ENOENT” 处失败——即使不签名也一样。ubuntu-latest 自带 JDK，
+      # 这里显式 setup 保证版本固定。
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Fetch and verify command line tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.harmony-cli"
+          ZIP="$HOME/.harmony-cli/cli.zip"
+          curl -fL --retry 3 --retry-all-errors --retry-delay 5 -o "$ZIP" "$CLI_URL"
+          echo "$CLI_SHA256  $ZIP" | sha256sum -c -
+          unzip -q -o "$ZIP" -d "$HOME/.harmony-cli"
+          # 解压后 6.5GB，zip 还留着会多占 2.1GB；不缓存 zip（托管 runner 网络快，
+          # 每次重下比长期占盘/占 cache 配额更稳）。
+          rm -f "$ZIP"
+          CLI_ROOT="$HOME/.harmony-cli/command-line-tools"
+          # zip 里的可执行位不保证还原（本机 Windows 打包同样不存），统一补 chmod。
+          chmod +x "$CLI_ROOT/bin/"* "$CLI_ROOT/hvigor/bin/"* "$CLI_ROOT/ohpm/bin/"*
+          chmod -R +x "$CLI_ROOT/tool/node/bin" \
+            "$CLI_ROOT/sdk/default/openharmony/native/llvm/bin" \
+            "$CLI_ROOT/sdk/default/openharmony/native/build-tools/cmake/bin"
+          {
+            echo "CLI_ROOT=$CLI_ROOT"
+            echo "DEVECO_SDK_HOME=$CLI_ROOT/sdk"
+            echo "DEVECO_NODE_HOME=$CLI_ROOT/tool/node"
+            echo "OHOS_BASE_SDK_HOME=$CLI_ROOT/sdk/default/openharmony"
+          } >> "$GITHUB_ENV"
+          echo "$CLI_ROOT/bin" >> "$GITHUB_PATH"
+          echo "$CLI_ROOT/sdk/default/openharmony/native/llvm/bin" >> "$GITHUB_PATH"
+
+      # 纯逻辑单测是工程自带的质量门（README「纯逻辑测试」）。typescript 用工具链自带那份，
+      # 与 scripts/pure-test.mjs 的 PURE_TEST_TS_PATH 约定一致。
+      - name: Pure logic tests
+        working-directory: WotaGeiCamOHOS
+        run: |
+          export PURE_TEST_TS_PATH="$CLI_ROOT/hvigor/hvigor/node_modules/typescript"
+          node scripts/pure-test.mjs
+
+      - name: Install ohpm dependencies
+        working-directory: WotaGeiCamOHOS
+        run: ohpm install --all
+
+      - name: Build release HAP
+        working-directory: WotaGeiCamOHOS
+        run: |
+          set -euo pipefail
+          hvigorw --mode module -p product=default -p buildMode=release assembleHap --no-daemon
+          ls -la entry/build/default/outputs/default
+
+      - name: Stage unsigned HAP
+        working-directory: WotaGeiCamOHOS
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # ohos-v0.0.10 → ohos-v0.0.10（去掉重复前缀，资产名与 tag 一致）
+            HAP_NAME="ohos-${GITHUB_REF_NAME#ohos-}"
+          else
+            HAP_NAME="ohos-${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          fi
+          HAP=$(find entry/build/default/outputs -type f -name '*-unsigned.hap' | head -n 1)
+          if [ -z "$HAP" ]; then
+            echo "::error::unsigned hap not found under entry/build/default/outputs"
+            find entry/build \( -name '*.hap' -o -name '*.app' \) || true
+            exit 1
+          fi
+          mkdir -p ../dist
+          cp "$HAP" "../dist/${HAP_NAME}-unsigned.hap"
+          echo "HAP_NAME=${HAP_NAME}" >> "$GITHUB_ENV"
+          echo "HAP_PATH=dist/${HAP_NAME}-unsigned.hap" >> "$GITHUB_ENV"
+
+      # 四件套齐全才签名；任一缺失就只交付 unsigned（与本地 local-sign.mjs 的定位一致：
+      # 自签只能验证结构，真机安装必须用 AGC/DevEco 签发的 profile）。
+      - name: Sign HAP (only when signing secrets are configured)
+        if: ${{ env.HAP_KEYSTORE_BASE64 != '' && env.HAP_APP_CERT_BASE64 != '' && env.HAP_PROFILE_BASE64 != '' }}
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/hap-sign"
+          mkdir -p "$TMP"
+          printf '%s' "$HAP_KEYSTORE_BASE64" | base64 -d > "$TMP/keystore.p12"
+          printf '%s' "$HAP_APP_CERT_BASE64" | base64 -d > "$TMP/app.cer"
+          printf '%s' "$HAP_PROFILE_BASE64" | base64 -d > "$TMP/profile.p7b"
+          JAR="$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar"
+          ALIAS="${HAP_KEY_ALIAS:-debugKey}"
+          OUT="dist/${HAP_NAME}-signed.hap"
+          java -jar "$JAR" sign-app \
+            -keyAlias "$ALIAS" \
+            -signAlg "SHA256withECDSA" \
+            -mode "localSign" \
+            -appCertFile "$TMP/app.cer" \
+            -profileFile "$TMP/profile.p7b" \
+            -inFile "$HAP_PATH" \
+            -outFile "$OUT" \
+            -keystoreFile "$TMP/keystore.p12" \
+            -keyPwd "$HAP_KEY_PASSWORD" \
+            -keystorePwd "$HAP_KEYSTORE_PASSWORD"
+          java -jar "$JAR" verify-app \
+            -inFile "$OUT" \
+            -outCertChain "$TMP/verified-cert-chain.cer" \
+            -outProfile "$TMP/verified-profile.p7b"
+          rm -rf "$TMP"
+          echo "SIGNED_HAP=1" >> "$GITHUB_ENV"
+
+      - name: Write checksums
+        run: |
+          cd dist
+          sha256sum *.hap > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.HAP_NAME }}-hap
+          path: |
+            dist/*.hap
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      # 鸿蒙发版走 ohos-v* 标签，独立 Release 页；Android 的 v* Release 由 main 侧创建。
+      - name: Publish to GitHub Release (ohos-v* tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/ohos-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#ohos-}"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "WotaGeiCam HarmonyOS $VER" \
+              --generate-notes \
+              || gh release view "$GITHUB_REF_NAME" >/dev/null
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.hap dist/SHA256SUMS --clobber

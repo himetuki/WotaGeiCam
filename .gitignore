@@ -1,6 +1,7 @@
 # =====================================================================
 # harmony 分支 = OHOS-only 仓库（2026-10-22 历史剥离）
-# 入库路径只有：WotaGeiCamOHOS/、LICENSE、.gitattributes、本文件。
+# 入库路径只有：WotaGeiCamOHOS/、LICENSE、.gitattributes、本文件，
+# 以及 .github/workflows/build-hap.yml（鸿蒙 CI 必须随 harmony 提交走）。
 # 上游 Android 源码保留在本机磁盘（未跟踪）供移植对拍，不再入库。
 # =====================================================================
 
@@ -8,7 +9,13 @@
 /WotaGeiCamApp/
 /WotaGeiCam_Android_Icons/
 /README.md
-/.github/
+# .github 只放行鸿蒙 workflow；安卓 CI（build-apk.yml）只存在于 main。
+# 注意 git 的规则：父目录被排除时无法单独放行子文件，所以先排除内容、
+# 再放行 workflows 目录、再排除其中内容、最后放行 build-hap.yml。
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/build-hap.yml
 
 # ===== 本机会话 / 工具状态 =====
 .mimosa/
