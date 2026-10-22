@@ -1,73 +1,67 @@
-# 上游同步流程（OHOS-only 独立历史：只读对比 + 人工移植）
+# 上游同步流程（bare 总仓库 + worktree：只读对比 + 人工移植）
 
-## 2026-10-22 历史剥离（现状，必读）
+## 现状（2026-10-22 迁入 worktree 后）
 
-harmony 分支的全部历史已重写为 **OHOS-only**（456 → 41 提交，另有本次收尾提交）：
-
-- 安卓源码目录（`WotaGeiCamApp/`）、安卓图标（`WotaGeiCam_Android_Icons/`）、安卓 CI（`.github/`）
-  与安卓根 `README.md` **已从 harmony 的每一个提交中移除**；源码仍保留在本机磁盘上，
-  仅取消跟踪（被 `.gitignore` 忽略），供移植对拍用。
-- 入库路径只有：`WotaGeiCamOHOS/`、`LICENSE`、`.gitattributes`、`.gitignore`（根）。
-- **harmony 与 origin/main 已无共同祖先**（`git merge-base harmony main` 无输出）。
-- pull / merge 已废用：没有共同祖先，合并无意义且会把上游 Android 目录整棵带回；
-  上游跟踪配置（`branch.harmony.remote` / `branch.harmony.merge`）已 unset。
-- 重写前的完整备份：`.git/backup-pre-ohos-only.bundle`（不进版本库，勿提交）。
-
-## 分支模型
+根目录 `E:\22600\Agent\ZCode\WotaGeiCam\` 是 **bare 仓库**，两个 worktree 各管一端：
 
 ```
-origin/main ──fetch──▶ origin/main（+ 本地 main 镜像，只读，不开发）
-                              │
-                              └──只读对照（git show / git diff）──▶ harmony（OHOS-only）
-                                                          ▲
-                                            读 diff → 手工移植 → 更新 PORT_MAP
+WotaGeiCam\              # bare 仓库（只有 .git；不直接编辑）
+├── Android\             # worktree: main  → 上游安卓工程（只读参照）
+└── HarmonyOS\           # worktree: harmony → 本工程（OHOS-only）
+    └── WotaGeiCamOHOS\
 ```
 
-`main` / `origin/main` 是上游的**只读权威副本**：要读上游某一版源码都用
-`git show origin/main:<path>`；磁盘上的 `WotaGeiCamApp/` 是 38d712a 快照，会漂移，仅供 grep/IDE。
+- **上游权威是 `origin/main`**（github.com/himetuki/WotaGeiCam 的 main）。
+  `Android/` 只是工作副本，可能滞后；读最新上游一律用
+  `git show origin/main:WotaGeiCamApp/<path>`。
+- `harmony` 与 `origin/main` **没有共同祖先**（OHOS-only 独立历史）。
+  **永不 merge / pull `origin/main`**：合并没有意义，还会把安卓目录整棵带回。
+- harmony 的入库路径：`WotaGeiCamOHOS/`、`.github/workflows/build-hap.yml`、
+  `LICENSE`、`.gitattributes`、`.gitignore`。安卓目录/安卓 CI 只存在于 `main`。
+- 同步方式固定为：**读 diff → 在 `WotaGeiCamOHOS/` 手工移植 → 更新 PORT_MAP 与 UPSTREAM_BASE**。
 
-## 黄金规则
+## 基线文件
 
-1. **harmony 只装 OHOS 代码**：入库路径只有 `WotaGeiCamOHOS/` + `LICENSE` + `.gitattributes` + `.gitignore`。
-   `WotaGeiCamApp/`、`WotaGeiCam_Android_Icons/`、`.github/`、根 `README.md` 一律不入库
-   （不要对它们 `git add`；`git add -f` 会把安卓树重新写进历史，破坏 OHOS-only 约定）。
-2. **永不合并上游**：没有共同祖先，合并无意义且会带回安卓目录。同步方式固定为
-   「读 diff → 手工移植到 `WotaGeiCamOHOS/` → 更新 PORT_MAP 登记」。
-3. **上游权威副本是 main / origin/main**：只读查看用 `git show origin/main:<path>`、
-   `git diff main..origin/main -- <path>`；磁盘 `WotaGeiCamApp/` 仅供 grep/IDE，可能已漂移。
-4. **共享语义只用文档锚定**：鸿蒙侧与上游共享的格式/判据/命名（见下方锚点表）在
-   [PORT_MAP.md](PORT_MAP.md) 里登记对应关系，上游一变就能定位到鸿蒙侧要跟的文件。
+`WotaGeiCamOHOS/docs/UPSTREAM_BASE` 记录"上次评审/对齐到的上游提交"（单个完整 SHA）。
+同步脚本以它为起点列出新提交；评审并移植完成后执行 `--update-base` 更新，
+**与本次移植改动一起提交**。
+
+当前基线：`38d712a`（T31 批次对齐的上游提交）。之后 main 上的新提交会在下次同步时列出。
 
 ## 日常同步（只读，脚本不会合并）
 
 ```bash
-git switch harmony
-bash WotaGeiCamOHOS/scripts/sync-upstream.sh   # fetch + 列出新提交与锚点 diff，退出码 0
+# 在 HarmonyOS worktree 的任意目录
+bash WotaGeiCamOHOS/scripts/sync-upstream.sh                 # 只对比：新提交 + 锚点 diff
+bash WotaGeiCamOHOS/scripts/sync-upstream.sh --update-base   # 评审/移植完成后更新基线
 ```
 
-脚本只做三件事：在 fetch 前记住本地 `main` 镜像位，`git fetch --prune origin` 后打印
-「上次镜像 → 新 origin/main」的新提交与全量 `--stat` → 只打印锚点路径的 `--stat` →
-最后才把本地 `main` 镜像 fast-forward 到 origin/main（失败只提示）。比较在前、镜像跟进在后，
-否则镜像一更新，新提交段就恒为空。
-它不改动 harmony、不合并、不提交；无新提交时打印「无新提交。」且锚点段为空。
+脚本只做四件事：
+
+1. `git fetch --prune origin`（只更新远端跟踪引用，shared bare 仓库全局生效）；
+2. 打印 `UPSTREAM_BASE → origin/main` 的新提交与全量 `--stat`；
+3. 只打印语义锚点路径的 `--stat`（空输出 = 无需跟进）；
+4. 可选地把 `origin/main` 当前 SHA 写入 `UPSTREAM_BASE`。
+
+它不改工作树、不 merge、不提交、不切换分支。基线 SHA 在仓库里不存在时（历史被重写/浅克隆）
+会警告并退回以 `origin/main` 为基线。
 
 手工等价命令：
 
 ```bash
 git fetch --prune origin
-git log --oneline main..origin/main              # 上游新提交
-git diff --stat main..origin/main                # 上游全量变更
-git diff --stat main..origin/main -- <锚点路径>    # 只关心共享语义
-git show origin/main:<path>                      # 读上游某文件当前内容
+git log --oneline "$(cat WotaGeiCamOHOS/docs/UPSTREAM_BASE)"..origin/main
+git diff --stat "$(cat WotaGeiCamOHOS/docs/UPSTREAM_BASE)"..origin/main
+git diff --stat "$(cat WotaGeiCamOHOS/docs/UPSTREAM_BASE)"..origin/main -- <锚点路径>
+git show origin/main:WotaGeiCamApp/<path>       # 读上游某文件当前内容
 ```
 
 ## 上游变更检查清单（语义锚点）
 
-历史剥离后不存在「合并」这一步：每次同步先看下列上游文件有没有变，
-变了就按映射表人工移植到 `WotaGeiCamOHOS/`：
+每次同步先看下列上游文件有没有变；变了就按映射表人工移植到 `WotaGeiCamOHOS/`：
 
 ```bash
-git diff main..origin/main --stat -- <下列路径>
+git diff --stat <基线>..origin/main -- <下列路径>
 git show origin/main:<路径>
 ```
 
@@ -100,17 +94,16 @@ git show origin/main:<路径>
 | `record/PlaybackCaptureController.kt` | 双音轨（环境音+内录）轨位布局 |
 | `diag/Diag.kt` | 导出件格式/轮转规则/崩溃件命名（鸿蒙侧 `diag/DiagPure.ets`） |
 
-流程：有变更 → 在 PORT_MAP.md 找到该上游文件对应的鸿蒙落点 → 同步语义 →
-在 PORT_MAP.md 中更新登记（注明对齐到的上游 commit 短哈希）。
+流程：有变更 → 在 `docs/PORT_MAP.md` 找到该上游文件对应的鸿蒙落点 → 同步语义 →
+在 `PORT_MAP.md` 中更新登记（注明对齐到的上游 commit 短哈希）→ 更新 `UPSTREAM_BASE`。
 
-## 把 harmony 推到自己的远端（可选）
+## 边界与常见错误
 
-harmony 是本地分支，如需备份或协作可推到你自己的 fork：
-
-```bash
-git remote add fork <你的仓库地址>
-git push -u fork harmony
-```
-
-**不要推 origin**：harmony 与 `origin/main` 已无共同祖先，`git push origin harmony` 会被判为非快进；
-对上游分支使用 `--force` 同样禁止（会毁掉上游历史）。
+- **不要**在 harmony worktree 里 `git merge origin/main` / `git pull origin main`：历史独立。
+- **不要**把 `Android/` 的改动当成鸿蒙移植的一部分提交；两端各自在各自 worktree 提交。
+- 更新 `Android/` 到最新上游：在 `main` worktree 里拉取/切换，或直接用
+  `git show origin/main:WotaGeiCamApp/...`；不要把上游历史合并进 `harmony`。
+- `.github/workflows/build-apk.yml` 只属于 `main`；harmony 只保留 `build-hap.yml`
+  （`.gitignore` 单独放行）。不要在两个 worktree 之间复制 workflow。
+- 看到 `UPSTREAM_BASE` 指向的提交不存在：说明仓库历史被重写或浅克隆，
+  脚本会退回 `origin/main` 作基线，重新评审后 `--update-base` 即可。

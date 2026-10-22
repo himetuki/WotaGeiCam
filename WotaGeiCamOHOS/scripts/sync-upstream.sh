@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
-# 上游只读对比（2026-10-22 历史剥离后）：fetch origin → 列出 main..origin/main 的新提交与
-# 语义锚点 diff，最后给人工移植提示。**本脚本只读，绝不 merge、绝不改 harmony 内容。**
+# 上游只读对比（worktree 模型）：fetch origin/main → 列出上次评审基线（UPSTREAM_BASE）之后的
+# 新提交与语义锚点 diff，最后给人工移植提示。**只读：不 merge、不改工作树、不提交。**
 #
-# 背景：harmony 是 OHOS-only 独立历史，与 origin/main 无共同祖先（合并会把上游 Android 目录
-# 整棵带回）；上游 Android 源码不入库，只读查看用 `git show origin/main:<path>`。
-# 磁盘上的 WotaGeiCamApp/ 是 38d712a 快照（未跟踪、被忽略），仅供 grep/IDE，会漂移。
+# 仓库结构（2026-10-22 起）：根目录是 bare 仓库，两个 worktree 各管一端——
+#   Android/    → main（上游安卓工程）
+#   HarmonyOS/  → harmony（本 worktree，OHOS-only）
+# 上游权威仍是 origin/main；Android/ 只是工作副本，可能滞后。两分支没有共同祖先，
+# 所以永不 merge/pull origin/main。
 #
-# 用法：在仓库任意位置执行 bash WotaGeiCamOHOS/scripts/sync-upstream.sh
+# 用法（在本 worktree 任意目录）：
+#   bash WotaGeiCamOHOS/scripts/sync-upstream.sh                 # 只对比，不改基线
+#   bash WotaGeiCamOHOS/scripts/sync-upstream.sh --update-base   # 评审/移植后更新基线
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
 
-if [ "$(git rev-parse --abbrev-ref HEAD)" != "harmony" ]; then
-  echo "错误：当前不在 harmony 分支，请先执行 git switch harmony" >&2
+if [ ! -d WotaGeiCamOHOS ] || [ ! -d WotaGeiCamOHOS/docs ]; then
+  echo "错误：请在 harmony worktree 根（含 WotaGeiCamOHOS/）执行" >&2
   exit 1
 fi
+
+BASE_FILE="WotaGeiCamOHOS/docs/UPSTREAM_BASE"
+ANDROID_UPSTREAM_DIR="WotaGeiCamApp"   # origin/main 里安卓工程的路径
 
 ANCHOR_PATHS=(
   "WotaGeiCamApp/app/src/main/java/com/wotagei/cam/record/ArcDropLog.kt"
@@ -39,41 +47,59 @@ ANCHOR_PATHS=(
   "WotaGeiCamApp/app/src/main/java/com/wotagei/cam/record/PlaybackCaptureController.kt"
 )
 
-echo "[1/3] fetch 上游（只读；不 merge、不改 harmony）……"
-# 比较基线在 fetch 之前取：否则随后把 main fast-forward 到 origin/main，下面两段恒为空
-BASE_MAIN="$(git rev-parse --verify -q main || true)"
+UPDATE_BASE=0
+case "${1:-}" in
+  --update-base) UPDATE_BASE=1 ;;
+  "") ;;
+  *)
+    echo "未知参数：$1（只支持 --update-base）" >&2
+    exit 2
+    ;;
+esac
+
+echo "[1/4] fetch origin（只读；不 merge）……"
 git fetch --prune origin
 
-echo "[2/3] origin/main 相对上次镜像的新提交……"
-if [ -z "$BASE_MAIN" ]; then
-  echo "提示：本地无 main 镜像，先列出 origin/main 最近 10 条；之后以本次 fetch 为基线。"
-  git log --oneline -10 origin/main || true
-  BASE_MAIN="$(git rev-parse origin/main)"
-else
-  NEW_COMMITS="$(git log --oneline "$BASE_MAIN"..origin/main || true)"
-  if [ -z "$NEW_COMMITS" ]; then
-    echo "无新提交。"
-  else
-    echo "$NEW_COMMITS"
-    echo "---- 上游全量变更 ----"
-    git diff --stat "$BASE_MAIN"..origin/main || true
-  fi
+UPSTREAM="$(git rev-parse --verify -q origin/main || true)"
+if [ -z "$UPSTREAM" ]; then
+  echo "错误：找不到 origin/main。请确认 remote origin 指向 github.com/himetuki/WotaGeiCam。" >&2
+  exit 1
 fi
 
-echo "[3/3] 语义锚点 diff……"
-echo "---- 语义锚点 diff（空输出 = 无需跟进）----"
-git diff --stat "$BASE_MAIN"..origin/main -- "${ANCHOR_PATHS[@]}" || true
+BASE="$(cat "$BASE_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -n "$BASE" ] && ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+  echo "警告：UPSTREAM_BASE 记录的 $BASE 在当前仓库不存在，改用 origin/main 作基线。" >&2
+  BASE=""
+fi
+if [ -z "$BASE" ]; then
+  BASE="$UPSTREAM"
+  echo "提示：未记录基线，本次以 origin/main（${UPSTREAM:0:7}）为基线。"
+fi
+
+echo "[2/4] 基线 ${BASE:0:7} → origin/main ${UPSTREAM:0:7}"
+if [ "$BASE" = "$UPSTREAM" ]; then
+  echo "无新提交（已对齐）。"
+else
+  git log --oneline "$BASE..$UPSTREAM" || true
+  echo "---- 上游全量变更 ----"
+  git diff --stat "$BASE..$UPSTREAM" || true
+fi
+
+echo "[3/4] 语义锚点 diff（空输出 = 无需跟进）……"
+git diff --stat "$BASE..$UPSTREAM" -- "${ANCHOR_PATHS[@]}" || true
 echo "------------------------------------------------"
 
-# 比较完成后再对齐本地 main 镜像；被检出或有分叉时 fast-forward 会失败，只提示不中断
-if ! git fetch -q origin main:main 2>/dev/null; then
-  echo "提示：本地 main 镜像未更新（可能被检出或有分叉）；下次以 origin/main 为基线。"
+if [ "$UPDATE_BASE" -eq 1 ]; then
+  printf '%s\n' "$UPSTREAM" > "$BASE_FILE"
+  echo "[4/4] UPSTREAM_BASE 已更新为 ${UPSTREAM:0:7}；请与本次移植改动一起提交。"
+else
+  echo "[4/4] 基线未更新。评审并移植完成后执行："
+  echo "      bash WotaGeiCamOHOS/scripts/sync-upstream.sh --update-base"
 fi
 
-cat <<'HINT'
-上游权威副本 = origin/main（也可用本地 main 镜像）：
-  git show origin/main:WotaGeiCamApp/app/src/main/java/com/wotagei/cam/<文件>
-  git diff main..origin/main -- <路径>
-磁盘 WotaGeiCamApp/ 是 38d712a 快照、未跟踪，仅供 grep/IDE 对拍，可能已漂移。
+cat <<HINT
+上游权威副本 = origin/main（Android/ 是工作副本，可能滞后）：
+  git show origin/main:$ANDROID_UPSTREAM_DIR/app/src/main/java/com/wotagei/cam/<文件>
+  git diff ${BASE:0:7}..origin/main -- <路径>
 完成。锚点有 diff 时按 WotaGeiCamOHOS/docs/PORT_MAP.md 定位鸿蒙侧落点并人工移植。
 HINT

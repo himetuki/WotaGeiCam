@@ -37,9 +37,10 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 
 ## 工程脚本（WotaGeiCamOHOS/scripts/）
 
-- `sync-upstream.sh` — 上游**只读对比**：fetch origin → 列出 `main..origin/main` 新提交与语义锚点
-  diff，**绝不 merge**（harmony 是 OHOS-only 独立历史，与 origin/main 无共同祖先）。
-  上游源码用 `git show main:<path>` 读；磁盘 `WotaGeiCamApp/` 未跟踪，仅供对拍。
+- `sync-upstream.sh` — 上游**只读对比**：以 `docs/UPSTREAM_BASE` 为基线，fetch 后列出
+  新提交与语义锚点 diff，**绝不 merge**（harmony 是 OHOS-only 独立历史，与 origin/main
+  无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
+  `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
   `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 235 用例，
   退出码 0 才算全绿。
