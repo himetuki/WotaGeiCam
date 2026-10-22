@@ -80,7 +80,7 @@ test('桥 滞留帧恰好发出一次且EOS后清零', (): void => {
   }
   flow.onSourceEos();
   assertEq(0, flow.onSourceEos().length, 'EOS 后再问为空');
-  assertEq(0, flow.keptCount - 36, 'keptCount 停在 36');
+  assertEq(36, flow.keptCount(), 'keptCount 停在 36');
 });
 
 test('桥 被抽帧并进前后两保留帧 合并计数对账', (): void => {
@@ -209,4 +209,47 @@ test('桥 NTSC源整流 发出721帧末PTS对齐目标步长', (): void => {
   }
   assertEq(721, emitted, '900 源帧发 721 帧');
   assertEq(Math.floor(720 * 1000000 / 24), lastPts, '末帧 PTS = 720/24 秒');
+});
+
+test('构造 dstFps为零 抛错不静默降级', (): void => {
+  // dstFps=0：PTS 步长分母为 0 会产出全 0 时间戳；静默降级（原实现 dstFps<=0 ? 1）比失败更坏
+  let threw: boolean = false;
+  try {
+    ArcRepairFlow.ofDstFps(0);
+  } catch (e) {
+    threw = true;
+  }
+  assertTrue(threw, 'dstFps=0 必须抛错');
+});
+
+test('构造 dstFps为负 抛错', (): void => {
+  let threw: boolean = false;
+  try {
+    ArcRepairFlow.ofPlan(ArcRepairPlan.of(45, 30, 1, -24));
+  } catch (e) {
+    threw = true;
+  }
+  assertTrue(threw, '计划里 dstFps=-24 也必须抛错');
+});
+
+test('getter 只读状态推进 与指令流同步', (): void => {
+  const flow: ArcRepairFlow = ArcRepairFlow.ofPlan(ArcRepairPlan.of(45, 30, 1, 24));
+  assertEq(0, flow.keptCount(), '起始 0 帧');
+  assertFalse(flow.hasPending(), '起始无滞留');
+  assertFalse(flow.hasAcc(), '起始无累积');
+  flow.onSourceFrame(0);
+  assertTrue(flow.hasPending(), '首保留帧滞留');
+  assertFalse(flow.hasAcc(), '尚无累积');
+  assertEq(0, flow.keptCount(), '滞留未发出，计数仍 0');
+  flow.onSourceFrame(1);
+  assertEq(1, flow.keptCount(), '第二保留帧发出第一枚');
+  flow.onSourceFrame(2);
+  flow.onSourceFrame(3);
+  assertEq(3, flow.keptCount(), '0..3 四枚保留帧已发三枚');
+  flow.onSourceFrame(4); // 抽帧位次（30→24 首个抽帧点）
+  assertTrue(flow.hasAcc(), '抽帧累积');
+  assertEq(3, flow.keptCount(), '抽帧不推进计数');
+  flow.onSourceFrame(5); // 下一保留帧
+  assertFalse(flow.hasAcc(), 'Merge 后累积清空');
+  assertEq(4, flow.keptCount(), '发出第四枚');
 });

@@ -9,6 +9,7 @@
  * TrackSync / PcmDecode（内录纯逻辑降级版，平台面留 T27）。
  * T28 追加四个模块：ArcRepairPlan / ArcRepairFlow / ArcRepairMerge / ArcRepairVerdict
  * （离线光弧修复纯逻辑，执行器留 T29）。
+ * T29 追加 record/ArcRepairSessionModel（native 串解析/速率/NO_NEED/去重/归因）。
  * 注意：本文件只做**引用**，不改变任何模块语义；不 import 平台 Kit。
  */
 import { AudioSync } from './AudioSync';
@@ -21,10 +22,14 @@ import { captureAudioSources } from '../record/CaptureSources';
 import { chunkBytes } from '../record/AudioProbe';
 import { PcmEncoding } from './PcmDecode';
 import { TrackSync } from './TrackSync';
+import { ArcRateProbe } from '../record/ArcKeepRule';
 import { ArcRepairPlan } from '../record/ArcRepairPlan';
 import { ArcRepairFlow } from '../record/ArcRepairFlow';
 import { ArcRepairMerge } from '../record/ArcRepairMerge';
 import { arcRepairOk } from '../record/ArcRepairVerdict';
+import {
+  ArcProbeInfo, ArcRepairSessionModel, ArcRepairStatus
+} from '../record/ArcRepairSessionModel';
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -56,6 +61,14 @@ export class PureLogicBarrel {
   private static arcRepairCompileProbe(): void {
     const flow: ArcRepairFlow = ArcRepairFlow.ofDstFps(24);
     flow.onSourceEos();
+    const kept: number = flow.keptCount();
+    // T29 会话模型：解析两个 native 串契约（零副作用），编译门覆盖其类型面
+    const probeInfo: ArcProbeInfo = ArcRepairSessionModel.parseProbe(
+      'ok:1920:1080:0:30:1000:8:33333:1:video/avc');
+    const status: ArcRepairStatus = ArcRepairSessionModel.parseRepairStatus('idle');
+    if (probeInfo.ok && status.kind === 'idle') {
+      ArcRepairSessionModel.dedupeMinGapUs(ArcRateProbe.measuredOf(probeInfo.containerFps, 1));
+    }
     const aY: Uint8Array = new Uint8Array(4);
     const bY: Uint8Array = new Uint8Array(4);
     const uvA: Uint8Array = new Uint8Array(1);

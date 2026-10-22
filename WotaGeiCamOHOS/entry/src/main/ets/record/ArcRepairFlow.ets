@@ -75,16 +75,35 @@ export class ArcRepairFlow {
   private readonly dstFps: number;
   private readonly plannedKeep: ((srcIndex: number) => boolean) | undefined;
 
-  /** 已发出的保留帧数 = 下一个输出下标（进度与 PTS 都由它派生） */
-  keptCount: number = 0;
-  /** 是否有一枚滞留待发的保留帧 */
-  hasPending: boolean = false;
-  /** 自上一保留帧以来是否累积了被抽帧 */
-  hasAcc: boolean = false;
+  /** 已发出的保留帧数 = 下一个输出下标（进度与 PTS 都由它派生；只读出口 keptCount()） */
+  private keptCount_: number = 0;
+  /** 是否有一枚滞留待发的保留帧（只读出口 hasPending()） */
+  private hasPending_: boolean = false;
+  /** 自上一保留帧以来是否累积了被抽帧（只读出口 hasAcc()） */
+  private hasAcc_: boolean = false;
 
+  /** dstFps 非法（≤0）直接抛错：PTS 步长分母为 0 会产出全 0 时间戳，静默降级比失败更坏 */
   private constructor(dstFps: number, plannedKeep: ((srcIndex: number) => boolean) | undefined) {
-    this.dstFps = dstFps > 0 ? dstFps : 1;
+    if (!(dstFps > 0)) {
+      throw new Error(`ArcRepairFlow dstFps 必须为正，实际 ${dstFps}`);
+    }
+    this.dstFps = dstFps;
     this.plannedKeep = plannedKeep;
+  }
+
+  /** 已发出的保留帧数（只读） */
+  keptCount(): number {
+    return this.keptCount_;
+  }
+
+  /** 是否有一枚滞留待发的保留帧（只读） */
+  hasPending(): boolean {
+    return this.hasPending_;
+  }
+
+  /** 自上一保留帧以来是否累积了被抽帧（只读） */
+  hasAcc(): boolean {
+    return this.hasAcc_;
   }
 
   /** 离线路：按抽帧计划逐源帧问询（保留判定吃有理数真值） */
@@ -110,42 +129,42 @@ export class ArcRepairFlow {
     const ops: Array<ArcOp> = [];
     if (!kept) {
       // 首枚保留帧之前的被抽帧没有"前帧"可并，直接弃（片头黑场语义不受损）
-      if (!this.hasPending) {
+      if (!this.hasPending_) {
         return ops;
       }
-      const fresh: boolean = !this.hasAcc;
-      this.hasAcc = true;
+      const fresh: boolean = !this.hasAcc_;
+      this.hasAcc_ = true;
       ops.push(ArcOp.accumulateCur(fresh));
       return ops;
     }
-    if (!this.hasPending) {
-      this.hasPending = true;
+    if (!this.hasPending_) {
+      this.hasPending_ = true;
       ops.push(ArcOp.holdCurAsPending());
       return ops;
     }
-    if (this.hasAcc) {
+    if (this.hasAcc_) {
       ops.push(ArcOp.foldAccIntoPending());
     }
-    ops.push(ArcOp.emitPending(this.ptsOf(this.keptCount)));
-    ops.push(ArcOp.mergeCurAsPending(this.hasAcc));
-    this.keptCount++;
-    this.hasAcc = false;
+    ops.push(ArcOp.emitPending(this.ptsOf(this.keptCount_)));
+    ops.push(ArcOp.mergeCurAsPending(this.hasAcc_));
+    this.keptCount_++;
+    this.hasAcc_ = false;
     return ops;
   }
 
   /** 解码 EOS：尾巴上的累积补弧并进最后一枚待发帧后发出 */
   onSourceEos(): Array<ArcOp> {
     const ops: Array<ArcOp> = [];
-    if (!this.hasPending) {
+    if (!this.hasPending_) {
       return ops;
     }
-    if (this.hasAcc) {
+    if (this.hasAcc_) {
       ops.push(ArcOp.foldAccIntoPending());
     }
-    ops.push(ArcOp.emitPending(this.ptsOf(this.keptCount)));
-    this.keptCount++;
-    this.hasAcc = false;
-    this.hasPending = false;
+    ops.push(ArcOp.emitPending(this.ptsOf(this.keptCount_)));
+    this.keptCount_++;
+    this.hasAcc_ = false;
+    this.hasPending_ = false;
     return ops;
   }
 

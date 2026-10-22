@@ -112,3 +112,24 @@ export function cancelClipExport(): void {
 export function probeClipTracks(inFd: number, inSize: number): string {
   return glLib.probeClipTracks(inFd, inSize);
 }
+
+// ---------------------------------------------------------------- T29 离线光弧修复（CPU 执行器核心）
+
+export function probeArcRepairSource(inFd: number, inSize: number): string {
+  return glLib.probeArcRepairSource(inFd, inSize);
+}
+
+export function startArcRepair(inFd: number, inSize: number, outFd: number, dstFps: number,
+  bitrate: number, deadband: number, srcNum: number, srcDen: number, srcFrames: number,
+  dstFrames: number, rotation: number, durationMs: number): string {
+  return glLib.startArcRepair(inFd, inSize, outFd, dstFps, bitrate, deadband, srcNum, srcDen,
+    srcFrames, dstFrames, rotation, durationMs);
+}
+
+export function getArcRepairStatus(): string {
+  return glLib.getArcRepairStatus();
+}
+
+export function cancelArcRepair(): void {
+  glLib.cancelArcRepair();
+}

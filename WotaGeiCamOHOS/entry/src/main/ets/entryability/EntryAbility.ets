@@ -18,6 +18,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { Diag } from '../diag/Diag';
 import { PureLogicBarrel } from '../player/PureLogicBarrel';
+import { ArcRepairRunner } from '../record/ArcRepairRunner';
 
 const DOMAIN = 0x0000;
 
@@ -27,6 +28,8 @@ export default class EntryAbility extends UIAbility {
     Diag.install(this.context);
     // T25 P3-1：编译守卫——把 T24 纯逻辑模块拉进 ArkTS program 并留一行启动签名
     Diag.i('WotaPure', `pure logic barrel ${PureLogicBarrel.signature()}`);
+    // T29 编译门：离线修复门面（fd 生命周期/轮询/归因）必须进 ArkTS program
+    Diag.i('WotaRepair', `repair contract ${ArcRepairRunner.contract()}`);
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {

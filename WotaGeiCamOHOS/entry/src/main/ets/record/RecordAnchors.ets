@@ -24,3 +24,6 @@ export { ArcRepairPlan } from './ArcRepairPlan';
 export { ArcOp, ArcOpKind, ArcRepairFlow } from './ArcRepairFlow';
 export { ArcRepairMerge } from './ArcRepairMerge';
 export { arcRepairOk, arcRepairKeep } from './ArcRepairVerdict';
+export {
+  ArcProbeInfo, ArcRepairError, ArcRepairOutcome, ArcRepairSessionModel, ArcRepairStatus
+} from './ArcRepairSessionModel';

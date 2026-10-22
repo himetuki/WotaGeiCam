@@ -375,7 +375,8 @@ export class ClipExporter {
    * 1..99 穷尽回退 `${stem}_${Date.now()}.mp4`——绝不返回 access 异常的原候选名
    * （调用方以 TRUNC 打开，返回旧名等于覆盖旧成片）。
    */
-  private static uniqueOutputPath(ctx: common.Context, name: string): string {
+  /** 防覆盖命名（T29 起离线修复复用；access 异常按占用处理） */
+  static uniqueOutputPath(ctx: common.Context, name: string): string {
     const occupied = (p: string): boolean => {
       try {
         return fileIo.accessSync(p);

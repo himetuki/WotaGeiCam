@@ -59,3 +59,22 @@ export const startClipExport: (inFd: number, inSize: number, outFd: number, star
 export const getClipExportStatus: () => string;
 export const cancelClipExport: () => void;
 export const probeClipTracks: (inFd: number, inSize: number) => string;
+
+/**
+ * T29 离线光弧修复（CPU 执行器核心）：fd 由 ArkTS 打开并归其所有（native 不 close）。
+ * probeArcRepairSource：
+ *   `ok:<w>:<h>:<rotation>:<containerFps>:<durationMs>:<cleanCount>:<medianUs>:<audioCount>:<mime>`
+ *   或 `err:<code>`（ARC_SOURCE/ARC_NO_VIDEO/...）。
+ * startArcRepair：空串 = 已入队；busy/args/worker = 立即失败。srcNum/srcDen 为有理数源帧率，
+ *   srcFrames/dstFrames 由 ArkTS 纯逻辑算好传入；rotation 为源容器旋转（native 侧归一后写 muxer）。
+ * getArcRepairStatus：
+ *   `idle` | `running:<pct>` | `done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>`
+ *   | `failed:<code>` | `cancelled`。本批 audioSamples 恒 0（音频 T30）。
+ * cancelArcRepair：置取消位（worker 在下一个样本边界收尾）。
+ */
+export const probeArcRepairSource: (inFd: number, inSize: number) => string;
+export const startArcRepair: (inFd: number, inSize: number, outFd: number, dstFps: number,
+  bitrate: number, deadband: number, srcNum: number, srcDen: number, srcFrames: number,
+  dstFrames: number, rotation: number, durationMs: number) => string;
+export const getArcRepairStatus: () => string;
+export const cancelArcRepair: () => void;

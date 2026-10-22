@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "arc_repair.h"
 #include "clip_exporter.h"
 #include "codec_recorder.h"
 #include "gl_render.h"
@@ -414,6 +415,77 @@ static napi_value ProbeClipTracks(napi_env env, napi_callback_info info)
     return MakeString(env, ClipExporter::Instance().ProbeTracks(inFd, inSize));
 }
 
+// ---------------------------------------------------------------- T29 离线光弧修复（CPU 执行器核心）
+
+/** 只读探测：ok 串或 err:<code>（串格式见 record/ArcRepairSessionModel.ets 头注） */
+static napi_value ProbeArcRepairSource(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        return MakeString(env, "err:ARC_SOURCE");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    return MakeString(env, ArcRepair::Instance().Probe(inFd, inSize));
+}
+
+/** 启动修复：空串 = 已入队；busy/args = 立即失败。fd 归 ArkTS（native 不 close） */
+static napi_value StartArcRepair(napi_env env, napi_callback_info info)
+{
+    size_t argc = 12;
+    napi_value argv[12] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 12) {
+        return MakeString(env, "args");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    int32_t outFd = -1;
+    int32_t dstFps = 24;
+    int32_t bitrate = 0;
+    int32_t deadband = 12;
+    int64_t srcNum = 30;
+    int64_t srcDen = 1;
+    int64_t srcFrames = 0;
+    int64_t dstFrames = 0;
+    int32_t rotation = 0;
+    int64_t durationMs = 0;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    napi_get_value_int32(env, argv[2], &outFd);
+    napi_get_value_int32(env, argv[3], &dstFps);
+    napi_get_value_int32(env, argv[4], &bitrate);
+    napi_get_value_int32(env, argv[5], &deadband);
+    napi_get_value_int64(env, argv[6], &srcNum);
+    napi_get_value_int64(env, argv[7], &srcDen);
+    napi_get_value_int64(env, argv[8], &srcFrames);
+    napi_get_value_int64(env, argv[9], &dstFrames);
+    napi_get_value_int32(env, argv[10], &rotation);
+    napi_get_value_int64(env, argv[11], &durationMs);
+    return MakeString(env, ArcRepair::Instance().Start(inFd, inSize, outFd, dstFps, bitrate,
+        deadband, srcNum, srcDen, srcFrames, dstFrames, rotation, durationMs));
+}
+
+/** idle | running:<pct> | done:<v>:<a>:<mux>:<track>:<stop> | failed:<code> | cancelled */
+static napi_value GetArcRepairStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, ArcRepair::Instance().Status());
+}
+
+static napi_value CancelArcRepair(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    (void)env;
+    ArcRepair::Instance().Cancel();
+    return nullptr;
+}
+
 /*
  * 模块初始化契约（P2 顺序风险修复）：
  * - XComponent 带 libraryname 创建时会加载本库，并以**带 OH_NATIVE_XCOMPONENT_OBJ 的 exports**
@@ -456,6 +528,10 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getClipExportStatus", nullptr, GetClipExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelClipExport", nullptr, CancelClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeClipTracks", nullptr, ProbeClipTracks, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"probeArcRepairSource", nullptr, ProbeArcRepairSource, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startArcRepair", nullptr, StartArcRepair, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getArcRepairStatus", nullptr, GetArcRepairStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelArcRepair", nullptr, CancelArcRepair, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
 

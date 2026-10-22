@@ -315,3 +315,25 @@ test('CPU 奇数宽高明确拒绝而不是静默截断', (): void => {
   }
   assertTrue(threwShort, 'Y 平面不足必须抛错');
 });
+
+test('尺子能红 GPU逐通道取大把偏蓝背景与橙拼成中间色', (): void => {
+  // T28 审查补：CPU 侧已钉「逐平面取大造色」，GPU 侧需同样一条反向断言（上游同款）。
+  // GPU 口径离线复刻：luma 差分整像素选择（与 shaders.h 的 ARC_MERGE_FS 同式）。
+  const bg: Rgb = new Rgb(20, 20, 90);
+  const arc: Rgb = new Rgb(255, 140, 0);
+  const la: number = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
+  const lb: number = 0.299 * arc.r + 0.587 * arc.g + 0.114 * arc.b;
+  const deadband: number = ArcMergeDeadband.DEFAULT;
+  const good: Rgb = (lb - la > deadband) ? arc : bg;
+  assertTrue(sameRgb(good, bg) || sameRgb(good, arc), '生产选择式必须落在输入像素上');
+  // 突变回旧 GPU 口径：RGB 逐通道取大 → (255,140,90)，既不是背景也不是橙
+  const mutated: Rgb = new Rgb(Math.max(bg.r, arc.r), Math.max(bg.g, arc.g), Math.max(bg.b, arc.b));
+  assertEq(255, mutated.r, '逐通道取大 R');
+  assertEq(140, mutated.g, '逐通道取大 G');
+  assertEq(90, mutated.b, '逐通道取大 B（蓝通道被背景抬高 +90）');
+  assertFalse(sameRgb(mutated, bg) || sameRgb(mutated, arc),
+    '逐通道取大必须造出输入像素没有的中间色');
+  // 珊瑚粉锚同样不落在输入上（CPU 逐平面取大产物），两条路都不许造色
+  const pink: Rgb = new Rgb(255, 109, 158);
+  assertFalse(sameRgb(pink, bg) || sameRgb(pink, arc), '珊瑚粉不是任一输入颜色');
+});
