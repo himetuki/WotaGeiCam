@@ -20,3 +20,7 @@ export {
 } from './FrameLedger';
 export { PendingName } from './PendingName';
 export { SeriesIds } from './SeriesIds';
+export { ArcRepairPlan } from './ArcRepairPlan';
+export { ArcOp, ArcOpKind, ArcRepairFlow } from './ArcRepairFlow';
+export { ArcRepairMerge } from './ArcRepairMerge';
+export { arcRepairOk, arcRepairKeep } from './ArcRepairVerdict';

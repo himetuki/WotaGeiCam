@@ -57,7 +57,7 @@ cd WotaGeiCamOHOS
 node scripts/pure-test.mjs     # 退出码 0 = 全绿；任何失败非 0（CI 可直接消费）
 ```
 
-已覆盖（159 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（26，
+已覆盖（200 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（26，
 T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），含 off=0 回归红线三条）、slider-ladder（9，上游
 SliderLadderTest 直译）、segment-policy（5）、clip-rule（6）、media-format（3，
 formatSignedDuration 正/负/0 及 formatDuration 口径对齐）、compare-audio（16，
@@ -65,7 +65,8 @@ T24：选轨计划/命令顺序/桥函数 + 分屏 3 臂）、audio-sync（10，
 粗对齐/FFT/精修）、compare-practice（6，T24）、compare-history（12，T24 10 + T25 2：
 数字串宽松解析对齐上游 getLong）、capture-state-machine（16，T26：上游 14 条转移 +
 状态/事件短名）、capture-silence（5，T26）、audio-probe（3，T26）、capture-sources（3，
-T26）、track-sync（11，T26）、pcm-decode（7，T26）。
+T26）、track-sync（11，T26）、pcm-decode（7，T26）、arc-repair-plan（15，T28）、
+arc-repair-flow（9，T28）、arc-repair-merge（12，T28）、arc-repair-verdict（5，T28）。
 
 > **为什么工程里没有 hvigorw.js**：DevEco 自带 wrapper 按「自身位于
 > `tools/hvigor/bin/`」的布局解析引擎路径；把它的副本放进工程根会导致引擎链接
@@ -116,8 +117,10 @@ T26）、track-sync（11，T26）、pcm-decode（7，T26）。
 
 - [x] T26 内录纯逻辑降级版（2026-10-22）：`record/CaptureStateMachine.ets`（Idle→Authorizing→Active/Failed→Revoked 全转移 + 状态/事件短名，16 用例）、`record/CaptureSilence.ets`（SilencePromptGate 按场 60s 节流 + captureSilenceVerdict 2s/5s 双门槛 + fedMsOf，5）、`record/AudioProbe.ets`（frameBytes/chunkBytes/recordBufferBytes/dbOf + captureParamMismatch 档位体检，3）、`record/CaptureSources.ets`（OH_AudioCaptureSourceType 契约 MIC=1/ALL_PLAYBACK=2/APP_PLAYBACK=3 + 内录源优先级，3）、`player/TrackSync.ets`（内容差+首样本容器差合成/低置信度归零/失败分类，11）、`player/PcmDecode.ets`（PTS 落位/空洞补零/PCM16/24/F32LE/降单声道，7）；PureLogicBarrel 纳入六模块（启动日志扩展 cap/src/sync/chunk/silence/pcm）；新增 46 用例（113→159，含审查修复 1 条右片重建恢复目标四域臂）。T25 P3×4：自然播完清 wantPlaying、右片重建按快照单次 seek、探测中跳过 override、删死 API。审查修复：右片重建在右独播/pre-roll 域保留重建前素材位（`rightResumeTargetOf` 以快照为右钟）、标签函数去 default 改显式 throw、AudioProbe 补网格、探测早退清 pending。**平台面（AVScreenCapture 双源+AAC 三轨+隐私授权）转 T27 真机批**，调研结论见 docs/PORT_MAP.md「T26 平台调研」
 
-**进度收敛（T26 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、内录纯逻辑内核（授权态机/静音判据/采集算式/源契约/双轨偏移/PCM 解码）、纯逻辑测试架（159 用例）。
-**留白（后续批）**：内录平台面四步（T27-1 平台探针/T27-2 ENV 音轨/T27-3 CAP 双轨/T27-4 消费面）、AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、VideoSession 参数面（录制参数下发）、离线光弧修复、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
+- [x] T28 离线光弧修复纯逻辑（2026-10-22）：`record/ArcRepairPlan.ets`（有理数抽帧计划 dstFrameCount/isKept/progressOf/of；29.97 与 25.4 真值位次锚点；不移植旧 Int 外壳）、`record/ArcRepairFlow.ets`（Hold/Fold/Emit/Merge 流式状态机 + 计划路/在线分类路，PTS=keptCount·1e6/dstFps；补上 cpp/arc_flow.h 所引 ArkTS 锚点）、`record/ArcRepairMerge.ets`（CPU 4:2:0 2×2 块整像素选择，Uint8Array 无符号 Δ、块内最大 Δ、4Y+U+V 整块搬运不造色）、`record/ArcRepairVerdict.ets`（arcRepairOk 三格 + arcRepairKeep stop 门槛）；四模块纳入 PureLogicBarrel（`arc=36/0/1`）与 RecordAnchors 编译门；新增 41 用例（159→200）。T26 P3×3：双表面重建右先挂用快照恢复、已播态 seekTo 纠偏、PORT_MAP 旧描述订正。**执行器（解码/编码/EGL/Player 面板）转 T29**
+
+**进度收敛（T28 口径）——已落主线**：相机预览/能力探测/参数下发（KitAbility/KitPreview/RequestApplier）、GL 渲染链 GL-0..GL-4（含毛玻璃/光弧在线补弧抽帧/编码面）、GPU 录制（3.5GiB 分段+健康三格重录+AutoStop）、媒体库/播放器/对比播放（decide 编排/黑层/主钟/音频选轨/历史）、A-B 无损剪辑、HUD 高级参数面板、diag 完整版、对比页纯逻辑内核（decide/音频/自动对齐 DSP/练习桥/历史）、内录纯逻辑内核（授权态机/静音判据/采集算式/源契约/双轨偏移/PCM 解码）、离线光弧修复纯逻辑（抽帧计划/指令流/整像素合并/成功判据）、纯逻辑测试架（200 用例）。
+**留白（后续批）**：离线修复执行器（T29：解码/编码/EGL/Player 面板）、内录平台面四步（T27-1 平台探针/T27-2 ENV 音轨/T27-3 CAP 双轨/T27-4 消费面）、AudioSync 平台解码与自动对齐入口、练习动线（分屏录制页）、VideoSession 参数面（录制参数下发）、蓝牙面板、更新检查、HUD 布局编辑器、缩略图/相册入库/分享、ParamsPersist 持久化、交织写入剪辑等——逐项见 [docs/PORT_MAP.md](docs/PORT_MAP.md) 与「交付后路线」节。
 
 ## 交付
 
@@ -125,12 +128,12 @@ T26）、track-sync（11，T26）、pcm-decode（7，T26）。
 
 | 产物 | 路径 | 字节数（单次快照） | sha256（单次快照，易变） |
 | --- | --- | --- | --- |
-| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5271587 | `f81211d1ec1fc212ae7a3c97040e225db245d3f0d3ca11739d79e5d801d43bbd` |
-| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5371800 | `d1ff748848b28ee8ddfc8be3a74cb9240b0b042f5ebcf7b0d70b661f00a748eb` |
+| 未签名 HAP | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap` | 5297714 | `c933ad0663409821083ecc6744172fdafe40c02a82db6329a17a7c069c9cfc0c` |
+| 本地签名 HAP（自签探针） | `WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-signed.hap` | 5394157 | `51cb0bd9e46c307ca8fae3d02390badbf01cf8bfa8aed348ab9633d7a7a02c84` |
 
 > **hash 不可复现，勿作复验判据**：zip 条目时间戳随打包时刻变化，同一源码两次 clean 构建
 > 字节数相同但 sha256 不同；signed 包还叠加 sign-app 时间戳，每次重签必变，**signed 字节数也
-> 会随签名块长度小幅浮动**（本快照 5371800B 不是固定值）。上表是 T26 批的单次本机快照（仅交付
+> 会随签名块长度小幅浮动**（本快照 5394157B 不是固定值）。上表是 T28 批的单次本机快照（仅交付
 > 留痕）。内容级复验**只对 unsigned 有效**：解包后按路径排序逐文件 sha256 比对（16 个业务文件）；
 > signed 包以 `local-sign.mjs` 内置 `verify-app` 的证书链/profile 输出为准（`.pages.info` 由签名
 > 工具生成，不参与内容比对）。示例：
@@ -146,7 +149,7 @@ T26）、track-sync（11，T26）、pcm-decode（7，T26）。
 
 - 未签名包：clean 构建（WARN=2 基线：napi 未验证提示 + 未配置签名跳过）产物。
 - 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，bundleName
-  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 60365 字节，含
+  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：签名块（本快照实测 61049 字节，含
   `<hap sign block>` 标记）位于 ZIP 尾部中央目录之前，**不产生旧式 `META-INF/` 条目**——「签名块
   与 profile 可见」以脚本内置 `verify-app` 回验为准（实测还原 3 级证书链 + 3254 字节 profile）。
   `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 536 字节），无 `META-INF/`。

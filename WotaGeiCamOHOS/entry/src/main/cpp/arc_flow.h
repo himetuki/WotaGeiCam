@@ -2,7 +2,9 @@
  * 录制在线路的光弧判定（逐行对拍上游 38d712a 与 ArkTS 锚点）：
  * - record/ArcKeepRule.kt / record/ArcKeepRule.ets：应到时刻抽帧规则（槽宽 + 10% 相位容差、
  *   首帧锚定、停滞追平、pendingDrops 账）；
- * - record/ArcRepairPlan.kt 的 ArcRepairFlow（在线路）：Hold/Fold/Emit/Merge 指令序列。
+ * - record/ArcRepairPlan.kt 的 ArcRepairFlow（在线路）：Hold/Fold/Emit/Merge 指令序列；
+ *   ArkTS 锚点 **record/ArcRepairFlow.ets**（T28 落地：同一状态机 + 计划路 onSourceFrame，
+ *   逐指令对拍本文件）。计划/帧数公式见 record/ArcRepairPlan.ets（dstFrameCount/isKept）。
  *
  * 平台差异（登记）：
  * - Kotlin sealed interface ArcOp → C++ 枚举 + 单结构体（kind + flag + ptsUs）；

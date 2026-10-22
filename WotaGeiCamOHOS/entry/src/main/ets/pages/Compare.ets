@@ -484,9 +484,16 @@ struct Compare {
         // （此时引擎位置已是目标位）只做域内唤醒，不再二次 seek。
         const snapshot: number = this.resumeRightPosMs;
         this.resumeRightPosMs = -1;
-        const target: number | undefined = rightResumeTargetOf(this.timelineGeo(),
-          Math.max(0, this.leftEngine.positionMs), snapshot, this.domBlackLeft, this.domBlackRight);
-        const resumeAt: number = target !== undefined ? target : snapshot;
+        // T26 审查 P3-a：左片未就绪（双表面重建右先挂）时左引擎 positionMs 恒 0，不得参与
+        // 域判定——直接用快照作恢复位（右片自身素材位），左片挂上后由 decide/resume 对齐。
+        let resumeAt: number = snapshot;
+        if (this.leftReady) {
+          const target: number | undefined = rightResumeTargetOf(this.timelineGeo(),
+            Math.max(0, this.leftEngine.positionMs), snapshot, this.domBlackLeft, this.domBlackRight);
+          if (target !== undefined) {
+            resumeAt = target;
+          }
+        }
         if (this.wantPlaying) {
           engine.seekAndPlayIfPaused(resumeAt);
         } else {
@@ -994,11 +1001,17 @@ struct Compare {
       this.setPlaying(true);
       return;
     }
-    // 新挂右侧对齐：从旧位置/0 起播会白闪一帧，先 seek 到 T 对应素材位（已覆盖才对齐）
+    // 新挂右侧对齐：从旧位置/0 起播会白闪一帧，先 seek 到 T 对应素材位（已覆盖才对齐）。
+    // T26 审查 P3-a：右片**已在播**时 seekAndPlayIfPaused 会早退（playing 门），必须用
+    // seekTo 纠偏——例如右片重建后已按快照起播、左片挂上后 T 变为右主钟的另一位置。
     if (this.rightReady && geo.rightCovers(t)) {
       const target: number = geo.rightTarget(t);
       if (Math.abs(this.rightEngine.positionMs - target) > 1) {
-        this.rightEngine.seekAndPlayIfPaused(target);
+        if (this.rightEngine.playing) {
+          this.rightEngine.seekTo(target);
+        } else {
+          this.rightEngine.seekAndPlayIfPaused(target);
+        }
       }
     }
     this.resumeDomainAt(t);
