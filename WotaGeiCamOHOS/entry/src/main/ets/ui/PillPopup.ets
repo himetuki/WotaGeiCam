@@ -116,6 +116,9 @@ export struct WotaPillPopup {
   private density: number = 1;
   private screenW: number = 0;
   private screenH: number = 0;
+  /** 上次放置所用面板尺寸（vp）：onAreaChange 报告同尺寸直接跳过，防重入环 */
+  private lastWVp: number = 0;
+  private lastHVp: number = 0;
 
   aboutToAppear(): void {
     try {
@@ -129,9 +132,18 @@ export struct WotaPillPopup {
     this.maxContentVp = PillAnchor.MAX_HEIGHT_RATIO * this.screenH / this.density;
   }
 
-  /** 量到面板真实尺寸后按锚点定位（锚点无效 → 底贴屏居中回退分支） */
+  /**
+   * 量到面板真实尺寸后按锚点定位（锚点无效 → 底贴屏居中回退分支）。
+   * T22 P3：撤销 shown 封口——内容增删导致面板尺寸变化时重跑 PillAnchor.place 更新位置态
+   * （上游 Compose onGloballyPositioned 每次尺寸变化都会重定位）；同尺寸跳过，
+   * 且 place() 对同一尺寸是纯函数（同进同出），position 变化不会再触发尺寸变化 → 无重入环。
+   * shown 的首测语义保留：第一次量到才显形（opacity 0→1）。
+   */
   private onMeasured(wVp: number, hVp: number): void {
-    if (this.shown || !(wVp > 0) || !(hVp > 0)) {
+    if (!(wVp > 0) || !(hVp > 0)) {
+      return;
+    }
+    if (this.shown && wVp === this.lastWVp && hVp === this.lastHVp) {
       return;
     }
     const popup: PillSize = { width: wVp * this.density, height: hVp * this.density };
@@ -146,6 +158,8 @@ export struct WotaPillPopup {
     } else {
       p = PillAnchor.place(this.anchor, popup, { width: this.screenW, height: this.screenH }, gapPx, marginPx);
     }
+    this.lastWVp = wVp;
+    this.lastHVp = hVp;
     this.posX = p.x / this.density;
     this.posY = p.y / this.density;
     this.shown = true;

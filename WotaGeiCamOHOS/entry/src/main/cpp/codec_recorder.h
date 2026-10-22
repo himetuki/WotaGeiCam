@@ -32,11 +32,18 @@ typedef struct OH_AVMuxer OH_AVMuxer;
 typedef struct OH_AVFormat OH_AVFormat;
 typedef struct OH_AVBuffer OH_AVBuffer;
 
-/** 录制健康三格单锁快照（trackAdded/muxStarted/samples） */
+/**
+ * 录制健康单锁快照：trackAdded/muxStarted/samples + formatChanged。
+ * 三格语义对照（2026-10-22 健康收口批）：上游 GPU 路 videoTrackAdded 的真信号是
+ * MediaCodec format-changed 回调；OHOS 侧等价物 = OH_VCodecCallback onStreamChanged
+ * （surface 输入下首帧到达/编码器格式落定时触发），formatChanged 位即此信号。
+ * trackAdded（muxer AddTrack 成功）为 OHOS 特有诊断位，不进健康判定（Camera.ets 头注释登记）。
+ */
 struct HealthSnapshot {
     bool trackAdded = false;
     bool muxStarted = false;
     int32_t samples = 0;
+    bool formatChanged = false;
 };
 
 class CodecRecorder {
@@ -107,6 +114,8 @@ private:
     int32_t samples_ = 0;
     int64_t writtenBytes_ = 0;
     bool muxStarted_ = false;
+    /** 编码器 OnStreamChanged 真信号（上游 format-changed 等价物；Start/FailStart/Stop 复位） */
+    bool formatChanged_ = false;
     bool eosSeen_ = false;
     /** muxer 写失败：停止送样并作为中止原因带回 ArkTS（samples 仅成功写入自增） */
     bool writeFailed_ = false;

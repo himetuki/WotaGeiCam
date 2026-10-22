@@ -10,8 +10,8 @@
  * 平台差异：Kotlin Float 档位在 ArkTS 用 number（双精度）承载——上游为 1/24 的
  * 41,666,666ns 做 Float 键会掉到 41,666,664（快门弹层注释），双精度下无损，
  * 「梯值反查原始 ns」的 Map 结构仍原样保留（语义对齐，精度问题不存在而已）。
- * 未移植（本批无消费方，登记）：diopterLadder / percentLadder / deadbandLadder
- * （对焦胶囊与光弧死区滑杆未进本批）。
+ * 未移植（本批无消费方，登记）：deadbandLadder（光弧死区滑杆未进本批；
+ * diopterLadder/percentLadder 已随纯逻辑测试批补齐，消费方仍留待对焦/斑马胶囊批）。
  */
 
 /** 就近刻度索引：空表返回 0；恰好落在两档中点时取低档（与滑杆"向下吸附"的观感一致） */
@@ -66,6 +66,27 @@ export function tintLadder(lo: number, hi: number): Array<number> {
 export function zoomLadder(lo: number, hi: number): Array<number> {
   const tiers: Array<number> = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
   return tiers.filter((t: number): boolean => t >= lo && t <= hi);
+}
+
+/**
+ * 屈光度梯：lo..hi 等分 10 段共 11 点（上游 diopterLadder 直译，2026-10-22 随纯逻辑
+ * 测试批补齐——对焦胶囊仍未进 UI 批，函数先落语义与单测锚点）。
+ * 梯必须以运行时 range.lo 起、range.hi 止，不造域外刻度；定焦镜头（hi<=lo）没有梯。
+ */
+export function diopterLadder(lo: number, hi: number): Array<number> {
+  if (hi <= lo) {
+    return [];
+  }
+  const out: Array<number> = [];
+  for (let i: number = 0; i <= 10; i++) {
+    out.push(lo + (hi - lo) * i / 10);
+  }
+  return out;
+}
+
+/** 百分比梯（斑马阈值 80..100 步 1、峰值强度 5..95 步 5；上游 percentLadder 直译） */
+export function percentLadder(lo: number, hi: number, step: number): Array<number> {
+  return steppedLadder(lo, hi, step);
 }
 
 /**

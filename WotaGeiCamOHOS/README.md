@@ -20,9 +20,12 @@ WotaGeiCamOHOS/
 │   ├── UPSTREAM_SYNC.md      # 上游同步流程（黄金规则 + 检查清单）
 │   └── PORT_MAP.md           # Android 模块 → 鸿蒙落点映射表
 ├── scripts/
-│   └── sync-upstream.sh      # 一条命令同步上游 main
+│   ├── sync-upstream.sh      # 一条命令同步上游 main
+│   └── pure-test.mjs         # 纯逻辑测试架（test/pure/*.test.ets 的转译执行器）
+├── test/
+│   └── pure/                 # 纯逻辑单测（.test.ets；entry 模块外，hvigor 不扫描、不进 HAP）
 ├── AGENT.md                  # 给 AI 代理的工程导览（改哪些文件、跳过哪些）
-└── .gitignore                # DevEco/hvigor 构建产物忽略规则
+└── .gitignore                # DevEco/hvigor 构建产物忽略规则（含 .pure-test-tmp/）
 ```
 
 ## 构建
@@ -38,6 +41,24 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 
 产物：`entry/build/default/outputs/default/entry-default-unsigned.hap`（未签名；
 签名需在 `build-profile.json5` 的 `signingConfigs` 配置证书，或用 DevEco Studio 自动签名）。
+
+## 纯逻辑测试
+
+`test/pure/*.test.ets` 是不依赖真机的纯函数单测（对拍上游 JVM 测试的已移植面），
+由自研轻量测试架执行：`scripts/pure-test.mjs` 用 DevEco 自带 typescript
+（`$DEVECO_HOME/tools/hvigor/hvigor/node_modules/typescript`，可用环境变量
+`PURE_TEST_TS_PATH` 覆盖）把测试文件及其 import 闭包（`entry/src/main/ets/` 起）
+转译到 `.pure-test-tmp/` 镜像目录运行；`@ohos.*`/`@kit.*` import 桩成惰性 Proxy，
+不触碰平台 API。测试目录在 entry 模块外，不进 HAP。
+
+```bash
+cd WotaGeiCamOHOS
+node scripts/pure-test.mjs     # 退出码 0 = 全绿；任何失败非 0（CI 可直接消费）
+```
+
+已覆盖（50 用例）：record-health（21，判定顺序五条全点名）、compare-timeline（9，
+含 off=0 回归红线两条）、slider-ladder（9，上游 SliderLadderTest 直译）、
+segment-policy（5）、clip-rule（6）。
 
 > **为什么工程里没有 hvigorw.js**：DevEco 自带 wrapper 按「自身位于
 > `tools/hvigor/bin/`」的布局解析引擎路径；把它的副本放进工程根会导致引擎链接
@@ -81,6 +102,7 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 - [x] 对比播放最小版（T19，2026-10-21）：`player/CompareTimeline.ets`（TimelineGeometry park 规则 + normalizeOffset/rightTargetFor/timelineSpan/End）、PlayerEngine setVolume（双实例无静态共享；T20 收紧 NaN 防护并移除 setMuted）、`pages/Compare.ets`（双 XComponent(SURFACE)+双 PlayerEngine、右片 MediaRepo 现选、共享播放/暂停/seek/倍速、手动偏移 ±0.5s/归零、声音侧左/右/静音默认左、120ms 漂移校正 250ms 阈值/500ms 冷却、两侧独立 attach/retry 与 surface 重建、隐藏暂停/销毁双 release）；Player 顶部「对比」入口 + main_pages 注册。T18 P3×4：空段仅 samples=0 且 bytes=0 才丢（bytes<0 保留 triage）、onPageShow 续跑健康巡检（保留 healthStartMs）、GIVE_UP 文案由 FULL_WINDOW_MS/MAX_RESTART_ATTEMPTS 生成、native HealthSnapshot 单锁快照供 getGpuHealth。留白：自动对齐/DecideCommands/AudioSync、AB 持久化、美颜/滤镜导出、蓝牙
 - [x] A/B 无损剪辑导出（T20，2026-10-21）：`player/ClipRule.ets`（normalize/keepSample/clipNameOf/keyFrameIndexOf/remapDrops/TrackChoice）；native `cpp/clip_exporter`（OH_AVSource/AVDemuxer→OH_AVMuxer 逐样本 remux、关键帧入点/basePts 平移/旋转透传/视频 32 音频 8 B 帧尾容忍/逐轨 monotonicPts/音轨选择与零样本不建轨/worker 进度取消）；NAPI 四口 + `player/ClipExporter.ets`（fd/轮询/超时/半成品删除/sidecar 平移/防覆盖命名）；Player「导出 A/B」面板与 media library 跳转。T19 P3：PlayerEngine setVolume Number.isFinite 防护、删除 setMuted。已知差异：逐轨非交织、单音轨、无 MediaStore pending/分享；T18/T19 剩余 P3 登记到健康/对比收口批。留白：交织、双音轨/自动同步、剪辑进度持久化、后台保活
 - [x] HUD 高级参数面板（T21，2026-10-21）：`ui/PillPopup.ets`（就近浮层基础设施：遮罩点击关/PillAnchor.place 钳制定位/档位网格/刻度滑杆/Note，锚点 getRectangleById+底贴屏回退）+ `ui/SliderLadder.ets`（梯子纯函数族直译）+ `ui/ParamFormat.ets`（shutterText/evText/wbShort/shutterItems）+ `ui/ParamPills.ets`（AeModeRow/快门/ISO/EV/WB 弹层，录制门控 RECORDING_EDITABLE={ISO,EV,WB}）；Camera 页参数总线接线（起镜 applyAbility(refined)、起录前/弹层改动 engine.applyParams 逐键下发、顶栏第二行 快门/ISO/EV/WB 读数）；T20 P3×4（clip done 旋转日志同 SetRotation 变量、音频 NO_MEMORY 跳过不判死、uniqueOutputPath 占用兜底、超时 fd linger 延迟关闭+pendingFds reap）。留白：ZOOM/FOCUS 胶囊、tint 副轴、参数持久化、动效/Tokens、可编排 READOUT 网格
+- [x] 健康+对比收口（T22，2026-10-22）：三格真信号（native formatChanged_=onStreamChanged 等价上游 format-changed，getGpuHealth 4 字段；muxer track 位降诊断）、轮转重启健康窗（attempts 会话级登记）、健康重录三残差（recordStartedAtMs 重置/stop 摘要末段账 lastPath|lastBytes|lastSamples/丢段读末段账保留前段）、时间线双轴消费（Slider min/max=tMin/tMax、seekBoth 走 park 规则、timelineSpan 留白）、右片 surface 重建恢复位置、隐藏期 attach/retry/surface 门控（deferred 标志）、右列表 id+path 双排除、漂移速度微调平台限制登记（AVPlayer setSpeed 仅枚举档，speedToEnum 为证）、T21 P3×4（快门读数 ※/skipped 降 Diag.i/相机丢失 closePill/PillPopup 尺寸重排）+ 纯逻辑测试架（scripts/pure-test.mjs + test/pure 五件 50 用例）
 - [ ] 相机预览 + 录制链路
 - [ ] 光弧工具链（抽帧 / 补弧 / 离线修复）
 - [x] 媒体库 + 播放器最小版（A/B 无损剪辑导出于 T20 补齐）

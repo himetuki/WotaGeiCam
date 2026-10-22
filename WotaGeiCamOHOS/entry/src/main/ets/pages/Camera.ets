@@ -10,6 +10,16 @@
  * 录制门控走 ParamPills.RECORDING_EDITABLE_PILLS（{ISO,EV,WB}；上游含 ZOOM/FOCUS——
  * 两颗胶囊本批未移植，差异登记 PORT_MAP §ui）。
  *
+ * T22 健康收口——三格语义对照表（对齐上游 CodecRecorder/MrRecorder 的健康判定口径）：
+ * | 上游信号 | OHOS 等价物 | 进判定 |
+ * | MediaCodec onOutputFormatChanged（videoTrackAdded） | OH_AVCodecCallback onStreamChanged（native formatChanged_，getGpuHealth 第 4 字段 fmt） | 是（videoTrackAdded 实参 = fmt || samples>0，samples 兜底防 onStreamChanged 时序不触） |
+ * | muxer started（muxStarted） | OH_AVMuxer_Start 成功（muxStarted_，第 2 字段） | 是 |
+ * | 首个视频样本（firstVideoSample） | 成功写入 muxer 的样本数 >0（第 3 字段 samples） | 是 |
+ * | —（无对应） | muxer AddTrack 成功（trackAdded，第 1 字段） | 否（OHOS 特有诊断位，仅 Diag 日志） |
+ * 健康重录 attempts 为会话级计数（轮转重启健康窗不清零，防无限重录——与上游"每次起录清零"口径差异登记）；
+ * 轮转后若巡检已停（上一段已健康）则重启健康窗；健康重录/GIVE_UP 丢段读 stop 摘要末段账
+ * （lastPath/lastBytes/lastSamples），保留已完成前段（被丢零样本段在首段 sidecar segments 留 count=0 条目，无害登记）。
+ *
  * 边界（登记）：固定 HUD，不移植 HudLayout/HudLayoutEditor（READOUT 非可编排网格）；
  * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；高级参数不持久化（会话内有效，
  * 上游 ParamsPersist 留白）；tint 副轴/对焦弹层留白；视频-only；设置持久化走 ui/SettingsStore
@@ -26,7 +36,7 @@ import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { AeMode, ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Constants';
-import { CameraAbility } from '../core/CameraAbility';
+import { CameraAbility, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
 import { AutoStopMonitor } from '../record/AutoStopMonitor';
@@ -173,6 +183,7 @@ struct CameraPage {
       if (this.disposed) {
         return;
       }
+      this.closePill(); // T22 P3：相机丢失/session error 处置统一收口弹层（锚点/能力快照已失效）
       this.cameraStarted = false;
       this.resetCameraLabels();
       if (this.recording || this.stopPending) {
@@ -530,7 +541,15 @@ struct CameraPage {
     const isoRangeOk: boolean = this.params.iso.value.range !== undefined;
     const evRangeOk: boolean = this.params.ev.value.range !== undefined;
     const evStep: number = this.ability !== undefined && this.ability.evStep > 0 ? this.ability.evStep : 1;
-    this.rowShutter = manual ? (shutterRangeOk ? shutterText(this.params.shutter.value.value) : '-') : 'AUTO';
+    // T22 P3：强制档（1/24、1/25）超出本机曝光范围时读数追加 ※（上游 CameraScreen.kt:1195-1203
+    // 口径：MANUAL 且 ability.exposureNs 在册且 forcedShutterOutOfRange，与快门弹层/下发侧同源判据）
+    const shutterNs: number = this.params.shutter.value.value;
+    let shutterLabel: string = shutterRangeOk ? shutterText(shutterNs) : '-';
+    if (manual && shutterRangeOk && this.ability !== undefined &&
+      forcedShutterOutOfRange(shutterNs, this.ability.exposureNs)) {
+      shutterLabel += '※';
+    }
+    this.rowShutter = manual ? shutterLabel : 'AUTO';
     this.pillShutterLabel = this.rowShutter;
     this.rowIso = manual ? (isoRangeOk ? `${Math.round(this.params.iso.value.value)}` : '-') : 'AUTO';
     this.pillIsoLabel = this.rowIso;
@@ -542,8 +561,8 @@ struct CameraPage {
   }
 
   /**
-   * 弹层改动下发（T21）：engine.applyParams 逐键报告；failed 项 Diag.w + 用户提示，
-   * skipped 摘要剔除恒在的 tint（无 OHOS 等价，RequestApplier 每次自曝）后按需提示。
+   * 弹层改动下发（T21）：engine.applyParams 逐键报告；failed 项 Diag.w + 用户提示。
+   * T22 P3：skipped 摘要改 Diag.i（上游只进日志，不占用户提示位），仅 failed 留 appendNotice。
    */
   private applyParamsFromPills(): void {
     const report: ApplyReport = this.engine.applyParams(this.params);
@@ -555,7 +574,7 @@ struct CameraPage {
     }
     const notable: Array<string> = report.skipped.filter((s: string): boolean => s.indexOf('tint:') !== 0);
     if (notable.length > 0) {
-      this.appendNotice(`部分参数未下发: ${notable.join(',').substring(0, 60)}`);
+      Diag.i(WOTA_RECORD_TAG, `pill apply skipped: ${notable.join('|')}`);
     }
   }
 
@@ -1003,16 +1022,18 @@ struct CameraPage {
       return;
     }
     const parts: Array<string> = raw.split(',');
-    if (parts.length !== 3) {
+    // 4 字段（track,mux,samples,fmt）为新序；容 3 字段旧序防御（fmt 缺席按 false）
+    if (parts.length !== 4 && parts.length !== 3) {
       Diag.w(WOTA_RECORD_TAG, `gpu health parse failed: ${raw}`);
       return;
     }
-    const trackAdded: boolean = parts[0] === '1';
+    const trackAdded: boolean = parts[0] === '1'; // 诊断位：OHOS muxer AddTrack（不进判定，头注释对照表）
     const muxStarted: boolean = parts[1] === '1';
     const samples: number = Number(parts[2]);
     if (!Number.isFinite(samples)) {
       return;
     }
+    const fmt: boolean = parts.length >= 4 && parts[3] === '1';
     let nativeError: string = '';
     try {
       nativeError = lib.getGpuRecordError();
@@ -1020,12 +1041,15 @@ struct CameraPage {
       nativeError = '';
     }
     const elapsed: number = Date.now() - this.healthStartMs;
-    const verdict: HealthVerdict = healthVerdict(samples > 0, muxStarted, trackAdded,
+    // videoTrackAdded 实参 = fmt || samples>0：onStreamChanged 是上游 format-changed 的等价真信号，
+    // samples>0 兜底防个别 ROM 回调时序不触（此时编码器实际已在产出）
+    const verdict: HealthVerdict = healthVerdict(samples > 0, muxStarted, fmt || samples > 0,
       nativeError, elapsed, this.healthWindow);
     if (verdict === HealthVerdict.HEALTHY) {
       if (!this.healthHealthy) {
         this.healthHealthy = true;
-        Diag.i(WOTA_RECORD_TAG, `record health healthy samples=${samples} elapsed=${elapsed}ms`);
+        Diag.i(WOTA_RECORD_TAG, `record health healthy samples=${samples} fmt=${fmt ? 1 : 0}` +
+          ` muxTrack(diag)=${trackAdded ? 1 : 0} elapsed=${elapsed}ms`);
       }
       this.stopHealthMonitor();
       return;
@@ -1073,16 +1097,30 @@ struct CameraPage {
       this.appendNotice(`自动重录失败: ${error}`);
       return;
     }
+    // 重录段重置起算：停录宽限期（AutoStopRules.stopGraceDelayMs）与计时显示都吃它，
+    // 不重置会把"重录后立即停录"误判为已录很久而跳过宽限
+    this.recordStartedAtMs = Date.now();
     this.appendNotice(`录制未产出，自动重试 ${attempt}/${this.healthWindow.maxAttempts}`);
     this.startRecordMonitor();
     this.startHealthMonitor();
   }
 
-  /** 仅当 samples=0 且 bytes===0 才删空段；bytes<0 保留 triage；解析失败/有样本一律保留 */
+  /**
+   * 丢空段（T22 改读末段账）：优先解析 lastPath/lastBytes/lastSamples（GlRecorder.stop 摘要
+   * 自 T22 起携带；多段会话里健康重录/GIVE_UP 丢的是**末段**——刚停的那枚，已完成前段保留）；
+   * 旧摘要无末段账时回退 path/bytes/samples（单段口径两者同值）。
+   * 仅当末段 samples===0 且 bytes===0 才删文件+sidecar；bytes<0 保留 triage；
+   * 解析失败/有样本一律保留。被丢弃零样本段在首段 sidecar segments 留 count=0 条目（无害，登记 PORT_MAP）。
+   */
   private discardEmptySegment(summary: string): void {
-    const pathM: RegExpExecArray | null = new RegExp('path=([^ ]+)').exec(summary);
-    const bytesM: RegExpExecArray | null = new RegExp('bytes=(-?\\d+)').exec(summary);
-    const samplesM: RegExpExecArray | null = new RegExp('samples=(\\d+)').exec(summary);
+    let pathM: RegExpExecArray | null = new RegExp('lastPath=([^ ]+)').exec(summary);
+    let bytesM: RegExpExecArray | null = new RegExp('lastBytes=(-?\\d+)').exec(summary);
+    let samplesM: RegExpExecArray | null = new RegExp('lastSamples=(\\d+)').exec(summary);
+    if (pathM === null || bytesM === null || samplesM === null) {
+      pathM = new RegExp('path=([^ ]+)').exec(summary);
+      bytesM = new RegExp('bytes=(-?\\d+)').exec(summary);
+      samplesM = new RegExp('samples=(\\d+)').exec(summary);
+    }
     if (pathM === null || bytesM === null || samplesM === null) {
       return;
     }
@@ -1153,7 +1191,18 @@ struct CameraPage {
         if (rotateResult.indexOf('rotated:') === 0) {
           this.message = `录制中 分段 ${rotateResult.substring('rotated:'.length)}`;
           if (this.healthTimer >= 0) {
-            this.healthStartMs = Date.now(); // 新段重新计健康窗，避免旧段读数误判
+            // 仍在巡检：新段重开健康窗（避免旧段读数误判新段）
+            this.healthStartMs = Date.now();
+          } else if (this.pageVisible) {
+            // 上一段已健康停巡检：新段重启健康窗（幂等——startHealthMonitor 先清旧定时器）。
+            // healthAttempts 会话级不清零（防轮转循环里无限重录，登记头注释）
+            this.startHealthMonitor();
+          } else {
+            // 隐藏页不后台读 native：置恢复标记，onPageShow 由 resumeHealthAfterShow 重启；
+            // 健康窗仍从新段起点起算（healthStartMs 落轮转时刻，隐藏时长照计入窗口）
+            this.healthHealthy = false;
+            this.healthStartMs = Date.now();
+            this.healthPausedByHide = true;
           }
         }
         try {

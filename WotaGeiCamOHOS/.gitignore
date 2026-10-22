@@ -10,6 +10,8 @@
 /.clang-tidy
 **/.test/
 **/src/ohosTest/.preview/
+# 纯逻辑测试架（scripts/pure-test.mjs）转译临时目录
+/.pure-test-tmp/
 *.hap
 *.har
 *.hsp

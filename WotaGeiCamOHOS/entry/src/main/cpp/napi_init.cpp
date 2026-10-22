@@ -328,13 +328,14 @@ static napi_value GetGpuWrittenBytes(napi_env env, napi_callback_info info)
     return result;
 }
 
-/** 录制健康三格："trackAdded,muxStarted,samples" */
+/** 录制健康："trackAdded,muxStarted,samples,fmt"（fmt = onStreamChanged 真信号 0/1；ArkTS 侧容 3 字段旧序防御） */
 static napi_value GetGpuHealth(napi_env env, napi_callback_info info)
 {
     (void)info;
     const HealthSnapshot snapshot = CodecRecorder::Instance().GetHealthSnapshot();
     std::string health = std::string(snapshot.trackAdded ? "1" : "0") + "," +
-        (snapshot.muxStarted ? "1" : "0") + "," + std::to_string(snapshot.samples);
+        (snapshot.muxStarted ? "1" : "0") + "," + std::to_string(snapshot.samples) + "," +
+        (snapshot.formatChanged ? "1" : "0");
     return MakeString(env, health);
 }
 

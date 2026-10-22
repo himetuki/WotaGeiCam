@@ -4,10 +4,28 @@
  * 平台差异 / 本批边界：
  * - 两个预览面都是普通 XComponent(SURFACE)：AVPlayer 每实例独占一个 surface，
  *   不走 native libentry 的单路 GL 预览（那一路只有一个 NativeImage，不能同时喂两面）；
- * - 只做手动偏移：seek/±0.5s/归零 + 120ms 漂移校正（阈值 250ms、冷却 500ms）；
+ * - 只做手动偏移：seek/±0.5s/归零 + 120ms 漂移校正（阈值 250ms 硬 seek、冷却 500ms）；
  *   不含上游 DecideCommands/AudioSync 的自动判定与自动对齐；
  * - 声音侧默认左（右侧静音），切换只改两路 AVPlayer 音量，不做混音；
- * - 右侧片源从 MediaRepo 现选，排除左片；两侧独立 attach/retry，页面销毁统一释放。
+ * - 右侧片源从 MediaRepo 现选，排除左片（id+path 双排除，左片未就绪时用路由参数原始 path）；
+ *   两侧独立 attach/retry，页面销毁统一释放。
+ *
+ * T22 时间线双轴消费（对齐上游 CompareTimeline 几何）：
+ * - 进度 Slider min/max = TimelineGeometry.tMin()/tMax()（off>0 时负轴 pre-roll 可拖），
+ *   拖动值 t 即时间线坐标，seekBoth 走 leftTarget/rightTarget park 规则；
+ * - 左端标签 = tMin()、右端标签 = timelineEnd()；off=0 时 tMin=0/tMax=max(L,R)，
+ *   [0,L] 区间与旧单左轴逐像素等价（回归红线，test/pure/compare-timeline.test.ets 钉死）；
+ * - timelineSpan 无 UI 消费（进度百分比语义未定），留白登记；
+ * - 进度读数 positionMs 仍随左钟（pre-roll 段左 park 在 0，读数显 0，最小版不派生真 T）。
+ *
+ * T22 其余收口：
+ * - 右片 surface 重建/重试恢复播放位置（resumeRightPosMs，复刻左片 resumeLeftPosMs 模式；
+ *   换选右片不恢复）；左片既有恢复路径零改动；
+ * - 隐藏期（!pageVisible）surface 重建只置 deferred 标志，onPageShow 消费执行重建；
+ *   retry 入口与 rebuild then 链均再查 pageVisible（隐藏期不 release/attach，防双开销）；
+ * - 漂移"速度微调"以平台限制登记关闭：AVPlayer setSpeed 仅枚举档
+ *   （player/PlayerEngine.ets speedToEnum 为证，无任意 ratio 接口），邻域纠偏维持
+ *   250ms 硬 seek/500ms 冷却（上游 AudioSync 的 setPlaybackParams 微调无 OHOS 等价物）。
  */
 import { common } from '@kit.AbilityKit';
 import { ArcDropLog } from '../record/ArcDropLog';
@@ -16,7 +34,7 @@ import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { formatDuration } from '../media/MediaFormat';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { PlayerSpeedTiers } from '../player/PlayerModel';
-import { normalizeOffset, rightTargetFor, TimelineGeometry } from '../player/CompareTimeline';
+import { normalizeOffset, rightTargetFor, timelineEnd, TimelineGeometry } from '../player/CompareTimeline';
 
 interface CompareParams {
   leftId: number;
@@ -76,6 +94,13 @@ struct Compare {
   private tickTimer: number = -1;
   private lastCorrectionMs: number = 0;
   private resumeLeftPosMs: number = -1;
+  /** 右片重建/重试前的位置快照（-1 = 无待恢复；换选右片时清 -1 不恢复） */
+  private resumeRightPosMs: number = -1;
+  /** 隐藏期发生的 surface 重建（left/right 各一）：只置标志，onPageShow 消费执行重建 */
+  private deferredLeftRebuild: boolean = false;
+  private deferredRightRebuild: boolean = false;
+  /** 路由参数原始左片 path（leftClip 未就绪时右列表按 path 排除用） */
+  private paramsLeftPath: string = '';
 
   aboutToAppear(): void {
     this.disposed = false;
@@ -92,6 +117,7 @@ struct Compare {
       return;
     }
     const params: CompareParams = raw as CompareParams;
+    this.paramsLeftPath = params.leftPath ?? '';
     this.repo = new MediaRepo(ctx);
     MediaRepo.resetProbeCapHit();
     this.startTick();
@@ -121,11 +147,34 @@ struct Compare {
       return;
     }
     this.startTick();
+    this.consumeDeferredRebuilds();
     if (this.leftReady) {
       this.leftEngine.resumeTick();
     }
     if (this.rightReady) {
       this.rightEngine.resumeTick();
+    }
+  }
+
+  /** 隐藏期发生的 surface 重建在此消费：页面可见后才走 release/换引擎/attach（防隐藏期双开销） */
+  private consumeDeferredRebuilds(): void {
+    if (this.deferredLeftRebuild) {
+      this.deferredLeftRebuild = false;
+      this.resumeLeftPosMs = Math.max(0, this.positionMs);
+      this.leftReady = false;
+      this.leftLoading = true;
+      this.leftAttachStarted = false;
+      this.leftError = '';
+      this.rebuildLeftEngine();
+    }
+    if (this.deferredRightRebuild) {
+      this.deferredRightRebuild = false;
+      this.snapshotRightForResume();
+      this.rightReady = false;
+      this.rightLoading = true;
+      this.rightAttachStarted = false;
+      this.rightError = '';
+      this.rebuildRightEngine();
     }
   }
 
@@ -325,6 +374,11 @@ struct Compare {
         engine.suspendTick();
       }
       this.applySound();
+      if (this.resumeRightPosMs >= 0) {
+        // 右片重建/重试恢复位置（T22，复刻左片 resumeLeftPosMs 模式）
+        engine.seekTo(this.resumeRightPosMs);
+        this.resumeRightPosMs = -1;
+      }
     }).catch((e: Object): void => {
       if (this.disposed || this.rightEngine !== engine) {
         engine.release();
@@ -335,6 +389,13 @@ struct Compare {
       this.rightAttachStarted = false;
       this.rightError = `播放器启动失败: ${e}`;
     });
+  }
+
+  /** 右片重建/重试前的位置快照：就绪取引擎实位，否则按时间线换算（rightTargetFor 夹 0..R） */
+  private snapshotRightForResume(): void {
+    this.resumeRightPosMs = this.rightReady
+      ? Math.max(0, Math.round(this.rightEngine.positionMs))
+      : rightTargetFor(Math.max(0, this.positionMs), this.offsetMs, this.rightDurationMs);
   }
 
   private onSurfaceLoaded(isLeft: boolean): void {
@@ -358,6 +419,11 @@ struct Compare {
     if (isLeft) {
       this.leftSid = sid;
       if (oldSid !== '') {
+        if (!this.pageVisible) {
+          // 隐藏期 surface 重建：只置 deferred 标志（release/换引擎/attach 回页再做）
+          this.deferredLeftRebuild = true;
+          return;
+        }
         // surface 重建：旧 AVPlayer 已绑在失效面上，release 后换新引擎重挂
         this.resumeLeftPosMs = Math.max(0, this.positionMs);
         this.leftReady = false;
@@ -371,6 +437,11 @@ struct Compare {
     } else {
       this.rightSid = sid;
       if (oldSid !== '') {
+        if (!this.pageVisible) {
+          this.deferredRightRebuild = true;
+          return;
+        }
+        this.snapshotRightForResume();
         this.rightReady = false;
         this.rightLoading = true;
         this.rightAttachStarted = false;
@@ -390,6 +461,11 @@ struct Compare {
       }
       this.leftEngine = new PlayerEngine();
       this.leftAttachStarted = false;
+      if (!this.pageVisible) {
+        // 释放完成时页面已隐藏：attach 等回页（onPageShow 消费 deferred）
+        this.deferredLeftRebuild = true;
+        return;
+      }
       this.tryAttachLeft();
     }).catch((e: Object): void => {
       if (this.disposed) {
@@ -408,6 +484,10 @@ struct Compare {
       }
       this.rightEngine = new PlayerEngine();
       this.rightAttachStarted = false;
+      if (!this.pageVisible) {
+        this.deferredRightRebuild = true;
+        return;
+      }
       this.tryAttachRight();
     }).catch((e: Object): void => {
       if (this.disposed) {
@@ -419,7 +499,7 @@ struct Compare {
   }
 
   private retryLeft(): void {
-    if (this.disposed || this.leftLoading || this.leftClip === undefined) {
+    if (this.disposed || !this.pageVisible || this.leftLoading || this.leftClip === undefined) {
       return;
     }
     this.pauseAll();
@@ -432,10 +512,11 @@ struct Compare {
   }
 
   private retryRight(): void {
-    if (this.disposed || this.rightLoading || this.rightClip === undefined) {
+    if (this.disposed || !this.pageVisible || this.rightLoading || this.rightClip === undefined) {
       return;
     }
     this.pauseAll();
+    this.snapshotRightForResume();
     this.rightReady = false;
     this.rightLoading = true;
     this.rightAttachStarted = false;
@@ -460,8 +541,12 @@ struct Compare {
       if (this.disposed) {
         return;
       }
+      // T22：id+path 双排除左片（ID=FNV-1a 有碰撞面，path 补刀）；leftClip 未就绪时
+      // 用路由参数原始 path（paramsLeftPath）兜底，避免选到自己正在看的那条
       const left: VideoClip | undefined = this.leftClip;
-      this.rightList = list.filter((clip: VideoClip): boolean => left === undefined || clip.id !== left.id);
+      const leftPath: string = left !== undefined ? left.path : this.paramsLeftPath;
+      this.rightList = list.filter((clip: VideoClip): boolean =>
+        (left === undefined || clip.id !== left.id) && (leftPath === '' || clip.path !== leftPath));
       this.rightListLoading = false;
     }).catch((e: Object): void => {
       if (this.disposed) {
@@ -486,12 +571,28 @@ struct Compare {
     this.rightLoading = true;
     this.rightAttachStarted = false;
     this.rightError = '';
+    this.resumeRightPosMs = -1; // 换选右片是全新片源：不恢复旧片位置
     this.normalizeOffsetNow();
     this.rebuildRightEngine();
   }
 
   private normalizeOffsetNow(): void {
     this.offsetMs = normalizeOffset(this.offsetMs, this.leftDurationMs, this.rightDurationMs);
+  }
+
+  /** 当前时间线几何（双轴进度条的 min/max/标签统一取此快照） */
+  private timelineGeo(): TimelineGeometry {
+    return new TimelineGeometry(this.leftDurationMs, this.rightDurationMs, this.offsetMs);
+  }
+
+  /** 时间线左端（off>0 时为负轴 pre-roll） */
+  private timelineTMin(): number {
+    return this.timelineGeo().tMin();
+  }
+
+  /** 时间线右端（max(L, R−off)；双片未就绪时至少保 1ms 槽宽防 Slider min===max） */
+  private timelineTMax(): number {
+    return Math.max(this.timelineGeo().tMax(), this.timelineTMin() + 1);
   }
 
   private applySound(): void {
@@ -583,15 +684,21 @@ struct Compare {
     this.playing = true;
   }
 
+  /**
+   * 双轴时间线落位（T22）：ms 为时间线坐标（左端 tMin、右端 tMax）——
+   * 左走 leftTarget park 规则（pre-roll 停 0、越尾停 durMs），右走 rightTarget
+   * （pre-roll 落 t+off、越尾停 durMs）。off=0 时在旧单左轴域 [0, min(L,max)] 逐像素等价（回归红线）。
+   */
   private seekBoth(ms: number): void {
-    const pos: number = Math.max(0, this.leftDurationMs > 0 ? Math.min(ms, this.leftDurationMs) : ms);
-    this.positionMs = pos;
-    this.sliderValue = pos;
+    const geo: TimelineGeometry = this.timelineGeo();
+    const t: number = Math.min(geo.tMax(), Math.max(geo.tMin(), ms));
+    this.positionMs = Math.round(t);
+    this.sliderValue = this.positionMs;
     if (this.leftReady) {
-      this.leftEngine.seekTo(pos);
+      this.leftEngine.seekTo(geo.leftTarget(t));
     }
     if (this.rightReady) {
-      this.rightEngine.seekTo(rightTargetFor(pos, this.offsetMs, this.rightDurationMs));
+      this.rightEngine.seekTo(geo.rightTarget(t));
     }
     this.lastCorrectionMs = Date.now();
   }
@@ -917,13 +1024,14 @@ struct Compare {
 
         Column({ space: 4 }) {
           Row({ space: 6 }) {
-            Text(formatDuration(this.positionMs))
+            // T22 双轴时间线：左端标签 = tMin()（off>0 时负轴）、滑杆值即时间线坐标 t
+            Text(formatDuration(this.timelineTMin()))
               .fontSize(10)
               .fontColor('#B0BEC5')
             Slider({
               value: this.sliderValue,
-              min: 0,
-              max: this.leftDurationMs > 0 ? this.leftDurationMs : 1,
+              min: this.timelineTMin(),
+              max: this.timelineTMax(),
               step: 1
             })
               .layoutWeight(1)
@@ -944,7 +1052,8 @@ struct Compare {
                   this.seekBoth(value);
                 }
               })
-            Text(formatDuration(this.leftDurationMs))
+            // 右端标签 = timelineEnd()（= tMax；off=0 时即 max(L,R)，与旧左轴时长标签衔接）
+            Text(formatDuration(timelineEnd(this.timelineGeo())))
               .fontSize(10)
               .fontColor('#B0BEC5')
           }

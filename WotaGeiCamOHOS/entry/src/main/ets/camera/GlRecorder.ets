@@ -503,10 +503,14 @@ export class GlRecorder {
       ? 'off' : (params.arcMode === 1 ? 'mend' : 'drop');
     const tail: string = this.lastNativeError !== '' && status.indexOf(this.lastNativeError) < 0
       ? ` nativeError=${this.lastNativeError}` : '';
+    // 末段账（T22）：健康重录/GIVE_UP 丢段只针对刚停的末段（Camera.discardEmptySegment 读这三键），
+    // path/bytes/samples 仍是全会话合计；被丢弃的零样本段已在上面 segments 清单里留 count=0 条目
+    // （首段 sidecar 不回写，无害——登记 PORT_MAP §record）
     const summary: string = `path=${firstPath} bytes=${totalBytes} samples=${totalSamples} duration=${durationMs}ms status=${status}` +
       ` parts=${parts.length} totalBytes=${totalBytes} arc=${arcName} effective=${this.lastEffectiveMode}` +
       ` flushed=${this.lastFlushed} drops=${lastPart.drops.length} sidecar=${sidecar}` +
-      ` measuredSrcFps=${this.lastMeasuredSrcFps}(lastSegment) segments=${SegmentPolicy.segmentSummary(counts)}${tail}`;
+      ` measuredSrcFps=${this.lastMeasuredSrcFps}(lastSegment) segments=${SegmentPolicy.segmentSummary(counts)}` +
+      ` lastPath=${lastPart.path} lastBytes=${lastPart.bytes} lastSamples=${lastPart.samples}${tail}`;
     this.clearSession();
     return summary;
   }

@@ -48,6 +48,7 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     samples_ = 0;
     writtenBytes_ = 0;
     muxStarted_ = false;
+    formatChanged_ = false;
     eosSeen_ = false;
     lastPtsUs_ = -1;
     writeFailed_ = false;
@@ -158,6 +159,7 @@ std::string CodecRecorder::FailStart(std::unique_lock<std::mutex>& lock, const c
     samples_ = 0;
     writtenBytes_ = 0;
     muxStarted_ = false;
+    formatChanged_ = false;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -226,6 +228,7 @@ std::string CodecRecorder::Stop()
     samples_ = 0;
     writtenBytes_ = 0;
     muxStarted_ = false;
+    formatChanged_ = false;
     eosSeen_ = false;
     startUs_ = 0;
     lastPtsUs_ = -1;
@@ -307,6 +310,7 @@ HealthSnapshot CodecRecorder::GetHealthSnapshot()
     snapshot.trackAdded = track_ >= 0;
     snapshot.muxStarted = muxStarted_;
     snapshot.samples = samples_;
+    snapshot.formatChanged = formatChanged_;
     return snapshot;
 }
 
@@ -352,7 +356,14 @@ void CodecRecorder::OnStreamChangedCb(OH_AVCodec* codec, OH_AVFormat* format, vo
 {
     (void)codec;
     (void)format;
-    (void)userData;
+    // 上游 MediaCodec format-changed 的等价真信号（surface 输入下首帧到达/编码器格式落定触发）：
+    // 编码器确实跑起来的证据，健康判定第一格（videoTrackAdded）吃它。只置位不读 format 键。
+    CodecRecorder* self = static_cast<CodecRecorder*>(userData);
+    std::lock_guard<std::mutex> lock(self->mtx_);
+    if (!self->formatChanged_) {
+        self->formatChanged_ = true;
+        OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_RECORD_TAG, "gpu record stream changed");
+    }
 }
 
 void CodecRecorder::OnNeedInputBufferCb(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData)

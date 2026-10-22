@@ -21,9 +21,9 @@ export class TimelineGeometry {
     this.offsetMs = offsetMs;
   }
 
-  /** 共同时间线起点：offset > 0 时左侧先于右侧（负轴），否则 0 */
+  /** 共同时间线起点：offset > 0 时左侧先于右侧（负轴），否则 0（-0 归一到 +0，对齐上游 Long 语义） */
   tMin(): number {
-    return Math.min(0, -this.offsetMs);
+    return normZero(Math.min(0, -this.offsetMs));
   }
 
   /** 共同时间线终点：任一侧仍能出画面的最晚时刻 */
@@ -65,18 +65,27 @@ export class TimelineGeometry {
 export function normalizeOffset(offsetMs: number, leftDurMs: number, rightDurMs: number): number {
   const left: number = Math.max(0, leftDurMs);
   const right: number = Math.max(0, rightDurMs);
-  return Math.min(left, Math.max(-right, offsetMs));
+  return normZero(Math.min(left, Math.max(-right, offsetMs)));
 }
 
 /** 左游标 leftPos 对应的右片落点（0..rightDur 夹紧；offset 已由调用方归一） */
 export function rightTargetFor(leftPosMs: number, offsetMs: number, rightDurMs: number): number {
   const right: number = Math.max(0, rightDurMs);
-  return Math.min(right, Math.max(0, leftPosMs + offsetMs));
+  return normZero(Math.min(right, Math.max(0, leftPosMs + offsetMs)));
 }
 
 /** 共同时间线总长（tMax − tMin，恒 ≥ 0） */
 export function timelineSpan(geometry: TimelineGeometry): number {
   return Math.max(0, geometry.tMax() - geometry.tMin());
+}
+
+/**
+ * -0 归一到 +0：JS 的 Math.min/max 在 off=0 时会产出 -0（Math.min(0, -0) = -0），
+ * Object.is/映射键等严格相等消费者会与 0 区分；上游 Kotlin Long 无 -0，数值语义以 +0 对齐
+ * （2026-10-22 纯逻辑测试批发现并订正，登记）。
+ */
+function normZero(v: number): number {
+  return v === 0 ? 0 : v;
 }
 
 /** 共同时间线终点（与 tMax 同值；供 UI 进度条取上限） */
