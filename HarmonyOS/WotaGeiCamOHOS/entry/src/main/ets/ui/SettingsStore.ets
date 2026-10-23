@@ -1,24 +1,40 @@
 /**
- * 相机默认设置持久化（@ohos.data.preferences；键独立于上游 ParamsPersist，登记差异）。
- * 只持久化最小设置：画幅/帧率/码率/光弧/网格/效果 + 滑杆吸附开关（slider_continuous，
- * 对齐上游 0dee86d KEY_SLIDER_CONTINUOUS 语义：存「关掉吸附」的参数 id 集合编码串，
- * 缺键/坏串 = 空集 = 全部吸附）；表情/曲线等复杂参数不持久化。
+ * 相机默认设置持久化（@ohos.data.preferences）。
+ *
+ * 键名迁移（本批 I）：与上游 24 键白名单重叠的字段改由上游键名做唯一权威——
+ * `fps→default_fps`、`bitrate→default_bitrate`、`sizeW/sizeH→default_size`；
+ * `level_enabled`/`default_ref_lines` 本来就同名。**迁移读**：新键在册就用新键，否则回退旧键
+ * （旧键保留不删，无害）；下一次 save 起只写新键，旧键从此不再更新。
+ * 键常量复用 `ui/ParamsPersist.ets`（纯逻辑单一真源），不在这里另写一份。
+ *
+ * **行为偏离登记（本批不动）**：`arcMode`（光弧 MEND/DROP）与 `grid`（3×3 开关）留在本 store
+ * 原地，不折进 24 键白名单、也不折进 `default_ref_lines` 位掩码。
+ *
+ * 其余：画幅/帧率/码率/光弧/网格/效果 + 滑杆吸附开关（slider_continuous，对齐上游 0dee86d
+ * KEY_SLIDER_CONTINUOUS 语义：存「关掉吸附」的参数 id 集合编码串，缺键/坏串 = 空集 = 全部吸附）。
  * 读取失败/类型异常回默认值；保存失败记日志不抛。
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { Size } from '../core/Constants';
 import { Diag } from '../diag/Diag';
+import { PARAMS_STORE_NAME } from './ParamsStore';
+import {
+  KEY_DEFAULT_BITRATE, KEY_DEFAULT_FPS, KEY_DEFAULT_REF_LINES, KEY_DEFAULT_SIZE, KEY_LEVEL_ENABLED,
+  ParamsMigrate, formatSize
+} from './ParamsPersist';
 import { SliderKey, decodeContinuousSliders } from './SliderSnap';
 
-const STORE_NAME: string = 'wota_camera_settings';
 const TAG: string = 'WotaSettings';
 /** 滑杆吸附开关的 prefs 键（编码串见 ui/SliderSnap.ets；缺键 = 全部吸附） */
 const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
-/** 取景辅助：水平仪/俯仰仪显示与回正震动（键名与上游 WotaSettings 逐字一致） */
-const KEY_LEVEL_ENABLED: string = 'level_enabled';
+/** 取景辅助：水平仪/俯仰仪回正震动（`level_enabled` 已并入上游 24 键，见 ParamsPersist） */
 const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
-/** 默认取景参考线位掩码（键名与上游 WotaSettings 逐字一致） */
-const KEY_DEFAULT_REF_LINES: string = 'default_ref_lines';
+// ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
+const LEGACY_KEY_SIZE_W: string = 'sizeW';
+const LEGACY_KEY_SIZE_H: string = 'sizeH';
+const LEGACY_KEY_FPS: string = 'fps';
+const LEGACY_KEY_BITRATE: string = 'bitrate';
 
 export class CameraSettings {
   sizeW: number = 1920;
@@ -45,15 +61,48 @@ function asInt(value: number, fallback: number): number {
   return Number.isFinite(value) ? Math.floor(value) : fallback;
 }
 
+/** 新键是否在册才算数（迁移读要靠"缺失"区分新键从没写过；类型不符一律当缺失） */
+function readIntIfPresent(store: preferences.Preferences, key: string): number | undefined {
+  try {
+    if (!store.hasSync(key)) {
+      return undefined;
+    }
+    const raw: preferences.ValueType = store.getSync(key, 0);
+    return typeof raw === 'number' && Number.isFinite(raw as number) ? raw as number : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function readStringIfPresent(store: preferences.Preferences, key: string): string | undefined {
+  try {
+    if (!store.hasSync(key)) {
+      return undefined;
+    }
+    const raw: preferences.ValueType = store.getSync(key, '');
+    return typeof raw === 'string' ? raw as string : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
 export class SettingsStore {
   static async load(ctx: common.Context): Promise<CameraSettings> {
     const s: CameraSettings = new CameraSettings();
     try {
-      const store: preferences.Preferences = await preferences.getPreferences(ctx, STORE_NAME);
-      s.sizeW = asInt(await store.get('sizeW', s.sizeW) as number, s.sizeW);
-      s.sizeH = asInt(await store.get('sizeH', s.sizeH) as number, s.sizeH);
-      s.fps = asInt(await store.get('fps', s.fps) as number, s.fps);
-      s.bitrate = asInt(await store.get('bitrate', s.bitrate) as number, s.bitrate);
+      const store: preferences.Preferences = await preferences.getPreferences(ctx, PARAMS_STORE_NAME);
+      // 迁移读：新键（上游名）优先，缺失才回退旧键；下一次 save 写新键
+      const size: Size = ParamsMigrate.size(
+        readStringIfPresent(store, KEY_DEFAULT_SIZE),
+        readIntIfPresent(store, LEGACY_KEY_SIZE_W),
+        readIntIfPresent(store, LEGACY_KEY_SIZE_H),
+        s.sizeW, s.sizeH);
+      s.sizeW = size.width;
+      s.sizeH = size.height;
+      s.fps = ParamsMigrate.int(readIntIfPresent(store, KEY_DEFAULT_FPS),
+        readIntIfPresent(store, LEGACY_KEY_FPS), s.fps);
+      s.bitrate = ParamsMigrate.int(readIntIfPresent(store, KEY_DEFAULT_BITRATE),
+        readIntIfPresent(store, LEGACY_KEY_BITRATE), s.bitrate);
       s.arcMode = asInt(await store.get('arcMode', s.arcMode) as number, s.arcMode);
       const gridRaw: preferences.ValueType = await store.get('grid', s.grid);
       s.grid = typeof gridRaw === 'boolean' ? gridRaw as boolean : s.grid;
@@ -97,11 +146,12 @@ export class SettingsStore {
 
   static async save(ctx: common.Context, s: CameraSettings): Promise<boolean> {
     try {
-      const store: preferences.Preferences = await preferences.getPreferences(ctx, STORE_NAME);
-      await store.put('sizeW', s.sizeW);
-      await store.put('sizeH', s.sizeH);
-      await store.put('fps', s.fps);
-      await store.put('bitrate', s.bitrate);
+      const store: preferences.Preferences = await preferences.getPreferences(ctx, PARAMS_STORE_NAME);
+      // 白名单重叠字段只写上游键名（旧键 sizeW/sizeH/fps/bitrate 不再更新，保留在盘上无害）
+      await store.put(KEY_DEFAULT_FPS, s.fps);
+      await store.put(KEY_DEFAULT_BITRATE, s.bitrate);
+      await store.put(KEY_DEFAULT_SIZE, formatSize(new Size(s.sizeW, s.sizeH)));
+      // 非白名单键原地保留（arcMode/grid 是登记的本侧行为偏离，不折进 24 键）
       await store.put('arcMode', s.arcMode);
       await store.put('grid', s.grid);
       await store.put('effect', s.effect);
@@ -125,7 +175,7 @@ export class SettingsStore {
   static sliderContinuousKeys(ctx: common.Context): Set<SliderKey> {
     try {
       const store: preferences.Preferences =
-        preferences.getPreferencesSync(ctx, { name: STORE_NAME } as preferences.Options);
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
       return decodeContinuousSliders(store.getSync(KEY_SLIDER_CONTINUOUS, '') as string);
     } catch (e) {
       Diag.w(TAG, `read slider_continuous failed, all snapped: ${e}`);

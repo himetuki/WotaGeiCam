@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 385 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 406 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -95,6 +95,13 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `ui/HudPill.ets`：**@Component + @Prop** 的 HUD 胶囊（不要用按值 @Builder 传动态 label——
   值参数首帧冻结，真机表现为胶囊标签恒为 `—`）。胶囊字号 12fp + 左右 6vp，防 360vp 宽截字。
 - `ui/HudMoreSheet.ets`：低频开关面板（闪光/效果/光弧/网格），复用 PillPopup 遮罩/量框。
+- `ui/ParamsPersist.ets`（纯逻辑）+ `ui/ParamsStore.ets`（平台件）：录制页高级参数持久化（I 批）。
+  `PARAMS_KEYS` 24 键白名单——**键名是持久化契约**（逐字等于上游 `WotaSettings.KEY_*`，只许追加/改值
+  语义，不许改名）；`restore` 冷启只写 value（range/enabled/exact 与机型域钳制归 `applyAbility`）；
+  `ParamsPersistSession` 影子只写与影子不同的字段（防录制页陈旧总线覆盖设置页）。平台读写
+  （`getPreferencesSync` / `putSync`+`flushSync`）只许在 `ParamsStore`，与 `SettingsStore` 共用
+  `wota_camera_settings`。排除清单（renderMode/sampleRate/audioEnabled/focusPoint/curve/
+  arc_convert_mode）不许"补齐"。`arcMode`/`grid` 留在 SettingsStore（登记偏离，不折进 24 键）。
 - `update/`：应用内更新。纯逻辑 `UpdateChecker`（版本比较/镜像链/JSON 提取/说明整形/三段编排）、
   `UpdatePure`（渠道排序/URL 安全门槛/上限/过期文件判据）、`Sha256`（纯 SHA-256）；平台件
   `UpdateDownloader`（唯一允许 `@ohos.net.http` 的文件：测速选路 + 流式落盘 + 三重校验）、

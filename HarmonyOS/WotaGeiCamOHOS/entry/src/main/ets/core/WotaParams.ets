@@ -109,6 +109,11 @@ export class WotaParams {
     this.size.value = s;
   }
 
+  /** 意图画幅档的只读快照（持久化 flush 写的是它，不是「当前生效的 size」） */
+  requestedSizeOf(): Size {
+    return this.requestedSize;
+  }
+
   readonly fps: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(25));
   readonly shutter: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(40_000_000)); // ns，1/25
   readonly iso: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(100));

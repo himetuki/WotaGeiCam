@@ -45,7 +45,10 @@ import { DirectDisplay } from '../core/DirectDisplay';
 import { FrameRateFallback } from '../core/FrameRateFallback';
 import { degradeSuppressed } from '../camera/GlRenderSuppression';
 import { RangeI } from '../core/CameraAbility';
-import { WotaTiers } from '../core/Constants';
+import { AfMode, Size, WotaTiers } from '../core/Constants';
+import {
+  PARAMS_KEYS, ParamsMigrate, PrefEnum, enumFrom, enumName, formatSize, parseSize
+} from '../ui/ParamsPersist';
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -69,6 +72,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.syncSnapCompileProbe();
     PureLogicBarrel.updateCompileProbe();
     PureLogicBarrel.cameraPerfCompileProbe();
+    PureLogicBarrel.paramsPersistCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -146,6 +150,23 @@ export class PureLogicBarrel {
       WotaTiers.HIGH_SPEED_FPS);
     const suppressed: boolean = degradeSuppressed(false, false) && !degradeSuppressed(true, false);
     if (m.length === 9 && fps > 0 && !suppressed) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 录制页参数持久化（I 批，ui/ParamsPersist）的编译探针：24 键表 / 迁移读 / 尺寸串 /
+   * 枚举编解码。零副作用，不改变 signature 输出。
+   */
+  private static paramsPersistCompileProbe(): void {
+    const keys: number = PARAMS_KEYS.length;
+    const migrated: number = ParamsMigrate.int(24, undefined, 30);
+    const parsed: Size | undefined = parseSize('1920x1080');
+    const sizeText: string = parsed === undefined ? '' : formatSize(parsed);
+    const afText: string = enumName(PrefEnum.AF_MODE, AfMode.MANUAL);
+    const afBack: number = enumFrom(PrefEnum.AF_MODE, afText, AfMode.CONTINUOUS_VIDEO);
+    if (keys === 24 && migrated === 24 && parsed !== undefined && sizeText === '1920x1080' &&
+      afText === 'MANUAL' && afBack === AfMode.MANUAL) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

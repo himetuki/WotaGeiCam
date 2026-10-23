@@ -100,7 +100,7 @@
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `CameraScreen.kt`、`MainActivity.kt`、`HudLayer/HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid.kt`、`CameraPills.kt`、`SettingsScreen.kt`、`SettingsLayout.kt`、`ParamsPersist.kt`、`PreviewCoords.kt` | UI | **最小主 UI/HUD 已落（2026-10-21，对齐上游 342dd99）**：`pages/Camera.ets` 全屏 GL 预览 + 固定 HUD（顶栏两行读数/3×3 网格/底栏/录制计时）+ 参数胶囊（镜头/画幅/帧率/变焦/闪光/效果/光弧/网格点按循环；快门/ISO/EV/WB 点按开 PillPopup 就近浮层）+ GlRecorder/AutoStop/宽限/分段接线；**T21 高级参数批（2026-10-21）**：`ui/ParamPills.ets` 五件直译（对拍 CameraPills.kt:236-628——AeModeRow（AUTO/MANUAL/LOCK，manualExposurePossible 门控）、ShutterPill（梯=supported 档滑杆吸附、Float 往返经梯值反查原始 ns、仅 MANUAL 显示滑杆、fpsHi=pick.lo 与下发同源）、IsoPill（isoLadder 仅 MANUAL 可调）、EvPill（evLadder+evText、MANUAL 只读注记）、WbPill（预设网格+MANUAL 色温滑杆 kelvinLadder，**tint 副轴留白**））、WotaParams 参数总线接线（起镜成功 `applyAbility(engine.refinedAbility())`、fps 档位联动重算）；顶栏第二行 快门/ISO/EV/WB 读数（AE AUTO 时 ISO 显 AUTO、EV 仅非 MANUAL 显示、wbShort 预设缩写+色温、能力缺失 `-`；`HudSpec.HUD_ROW2`）——**偏离登记：上游 READOUT 是可编排网格（hud_items 位掩码 + HudLayoutEditor），本批固定两行**；胶囊行追加 快门/ISO/EV/WB 四颗（点按开浮层，录制门控 `ParamPills.RECORDING_EDITABLE_PILLS` = {ISO,EV,WB}——**上游含 ZOOM/FOCUS，两颗胶囊本批未移植，差异登记**；快门录制中开窗只读 Note）；每次起录前与弹层改动 `engine.applyParams` 下发（RequestApplier 逐键报告，failed 项 Diag.w + appendNotice）；`pages/Settings.ets` 六项设置（画幅/帧率/码率/光弧/效果/网格）经 `ui/SettingsStore.ets`（preferences）持久化；`ui/HudSpec.ets` 固定布局常量；主入口改为 Camera（EntryAbility loadContent），Index/GlPreview 保留开发者测试入口；pageVisible 门控隐藏页 async 起镜链、启动失败/session error 提供「重试相机」、applyZoom 按实际生效值显示、Settings 保存串行化/类型白名单、HUD 读数顺序常量与顶栏一致、媒体库入口去重；效果槽同时作用于预览与编码（`gl_render DrawScene` 同一 GL 效果 program）。**T21 复审 P3×3 收口（T22，2026-10-22）**：① 快门读数 ※——syncParamLabels 在 MANUAL 且 ability 在册且 forcedShutterOutOfRange 时追加 `※`（上游 CameraScreen.kt:1195-1203 口径，与快门弹层/下发侧同源判据）；② applyParamsFromPills 的 skipped 摘要改 Diag.i（上游只进日志不占用户提示位），仅 failed 留 appendNotice；③ 相机丢失/session error 处置路径统一 closePill()（onCameraLost 回调首行收口弹层）。**T31 取景页真机取证与修复（2026-10-22，HUAWEI ALN-AL00 / HarmonyOS 7.0.0.109 / API 26 / 1260x2720）**：`ui/HudTokens.ets`（深色色板/字阶 11-12-13-17/触控 48/圆角间距/遮罩令牌）、`ui/WindowChrome.ets`（沉浸式 setWindowLayoutFullScreen + 透明系统栏白图标 + AvoidArea TYPE_SYSTEM|TYPE_CUTOUT 转 vp 安全区；普通页恢复黑底系统栏）、`ui/HudPill.ets`（@Component+@Prop 替 @Builder 值参数——真机「顶栏正确而胶囊恒为 镜头:—/画幅:—」的根因）、`ui/HudMoreSheet.ets`（复用 PillPopup 遮罩/量框：闪光/效果/光弧/网格）；Camera 顶栏两行各 5 项（label 11fp/value 13fp）+ 右侧 48vp 深色入口胶囊、顶部/底部渐变遮罩、Dock 2×4 主胶囊（镜头/画幅/帧率/变焦 + 快门/ISO/EV/WB，48vp、均分、无横向 Scroll）、更多+72vp 圆形快门（44vp 红点/录制中 24vp 方块/收尾禁用）、确定性 3×3 网格（2 横 2 竖 Divider 替代百分比 position——真机旧实现网格不可见）、删除「预览—fps」死读数（只显「Nfps」）；Settings 重做（List 顶对齐消除顶部 539px 空白、48vp 选项、保存提示定高不推动、开发者入口默认隐藏→版本号 7 连点显形）；Index/GlPreview 补页头+返回、Index 长文案改 13fp 可滚动日志区；EntryAbility 强制 COLOR_MODE_DARK；Gallery 恢复黑底系统栏。**T31 复审收尾（2026-10-22，P3×5+清理）**：底栏去固定高（相机断开/权限拒绝时状态行与重试按钮不裁 8 胶囊与 72vp 快门）、Dock 胶囊 12fp+左右 6vp、顶栏 fps 读数去「录」前缀（360vp 宽 4/5 等分不省略）、快门/ISO/EV/WB 录制中恢复可点开窗（只读由弹层 editable 承担，不再整颗禁用）、PillNote 11fp（HUD 弹层无 10fp）、WindowChrome 模块级 Promise 链串行 + EntryAbility.loadContent 前 prime（冷启动首帧无白条、设置/相机往返不乱序）；删死代码（GlCameraEngine.currentPreviewFps/previewFps 字段、Camera.fpsLabel、HudSpec.PILL_ROW_HEIGHT/gridFractions、HudTouch.MIN/HudShape.PANEL_RADIUS/HudColor.SUCCESS、SafeInsets.left/right 留 T32 横屏）。**真机复验未执行：已安装包签名指纹 48A3BDCE… 与本仓 `.local-signing` 自签证书 C8D36043… 不匹配，按安全红线不安装，交付源码/HAP 由用户以 DevEco 同证书重装后验证**（待验项见「真机待验」T31 节）。留白：HudLayout/HudLayoutEditor 自定义布局、ZOOM/FOCUS 胶囊与弹层、高级参数持久化（上游 ParamsPersist；本批会话内有效）、tint 副轴、PreviewCoords、SheetSpec/Widgets 全量、UIOrientation 接线（T32，本批保持系统方向） | ☑ 部分 |
+| `CameraScreen.kt`、`MainActivity.kt`、`HudLayer/HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid.kt`、`CameraPills.kt`、`SettingsScreen.kt`、`SettingsLayout.kt`、`ParamsPersist.kt`、`PreviewCoords.kt` | UI | **最小主 UI/HUD 已落（2026-10-21，对齐上游 342dd99）**：`pages/Camera.ets` 全屏 GL 预览 + 固定 HUD（顶栏两行读数/3×3 网格/底栏/录制计时）+ 参数胶囊（镜头/画幅/帧率/变焦/闪光/效果/光弧/网格点按循环；快门/ISO/EV/WB 点按开 PillPopup 就近浮层）+ GlRecorder/AutoStop/宽限/分段接线；**T21 高级参数批（2026-10-21）**：`ui/ParamPills.ets` 五件直译（对拍 CameraPills.kt:236-628——AeModeRow（AUTO/MANUAL/LOCK，manualExposurePossible 门控）、ShutterPill（梯=supported 档滑杆吸附、Float 往返经梯值反查原始 ns、仅 MANUAL 显示滑杆、fpsHi=pick.lo 与下发同源）、IsoPill（isoLadder 仅 MANUAL 可调）、EvPill（evLadder+evText、MANUAL 只读注记）、WbPill（预设网格+MANUAL 色温滑杆 kelvinLadder，**tint 副轴留白**））、WotaParams 参数总线接线（起镜成功 `applyAbility(engine.refinedAbility())`、fps 档位联动重算）；顶栏第二行 快门/ISO/EV/WB 读数（AE AUTO 时 ISO 显 AUTO、EV 仅非 MANUAL 显示、wbShort 预设缩写+色温、能力缺失 `-`；`HudSpec.HUD_ROW2`）——**偏离登记：上游 READOUT 是可编排网格（hud_items 位掩码 + HudLayoutEditor），本批固定两行**；胶囊行追加 快门/ISO/EV/WB 四颗（点按开浮层，录制门控 `ParamPills.RECORDING_EDITABLE_PILLS` = {ISO,EV,WB}——**上游含 ZOOM/FOCUS，两颗胶囊本批未移植，差异登记**；快门录制中开窗只读 Note）；每次起录前与弹层改动 `engine.applyParams` 下发（RequestApplier 逐键报告，failed 项 Diag.w + appendNotice）；`pages/Settings.ets` 六项设置（画幅/帧率/码率/光弧/效果/网格）经 `ui/SettingsStore.ets`（preferences）持久化；`ui/HudSpec.ets` 固定布局常量；主入口改为 Camera（EntryAbility loadContent），Index/GlPreview 保留开发者测试入口；pageVisible 门控隐藏页 async 起镜链、启动失败/session error 提供「重试相机」、applyZoom 按实际生效值显示、Settings 保存串行化/类型白名单、HUD 读数顺序常量与顶栏一致、媒体库入口去重；效果槽同时作用于预览与编码（`gl_render DrawScene` 同一 GL 效果 program）。**T21 复审 P3×3 收口（T22，2026-10-22）**：① 快门读数 ※——syncParamLabels 在 MANUAL 且 ability 在册且 forcedShutterOutOfRange 时追加 `※`（上游 CameraScreen.kt:1195-1203 口径，与快门弹层/下发侧同源判据）；② applyParamsFromPills 的 skipped 摘要改 Diag.i（上游只进日志不占用户提示位），仅 failed 留 appendNotice；③ 相机丢失/session error 处置路径统一 closePill()（onCameraLost 回调首行收口弹层）。**T31 取景页真机取证与修复（2026-10-22，HUAWEI ALN-AL00 / HarmonyOS 7.0.0.109 / API 26 / 1260x2720）**：`ui/HudTokens.ets`（深色色板/字阶 11-12-13-17/触控 48/圆角间距/遮罩令牌）、`ui/WindowChrome.ets`（沉浸式 setWindowLayoutFullScreen + 透明系统栏白图标 + AvoidArea TYPE_SYSTEM|TYPE_CUTOUT 转 vp 安全区；普通页恢复黑底系统栏）、`ui/HudPill.ets`（@Component+@Prop 替 @Builder 值参数——真机「顶栏正确而胶囊恒为 镜头:—/画幅:—」的根因）、`ui/HudMoreSheet.ets`（复用 PillPopup 遮罩/量框：闪光/效果/光弧/网格）；Camera 顶栏两行各 5 项（label 11fp/value 13fp）+ 右侧 48vp 深色入口胶囊、顶部/底部渐变遮罩、Dock 2×4 主胶囊（镜头/画幅/帧率/变焦 + 快门/ISO/EV/WB，48vp、均分、无横向 Scroll）、更多+72vp 圆形快门（44vp 红点/录制中 24vp 方块/收尾禁用）、确定性 3×3 网格（2 横 2 竖 Divider 替代百分比 position——真机旧实现网格不可见）、删除「预览—fps」死读数（只显「Nfps」）；Settings 重做（List 顶对齐消除顶部 539px 空白、48vp 选项、保存提示定高不推动、开发者入口默认隐藏→版本号 7 连点显形）；Index/GlPreview 补页头+返回、Index 长文案改 13fp 可滚动日志区；EntryAbility 强制 COLOR_MODE_DARK；Gallery 恢复黑底系统栏。**T31 复审收尾（2026-10-22，P3×5+清理）**：底栏去固定高（相机断开/权限拒绝时状态行与重试按钮不裁 8 胶囊与 72vp 快门）、Dock 胶囊 12fp+左右 6vp、顶栏 fps 读数去「录」前缀（360vp 宽 4/5 等分不省略）、快门/ISO/EV/WB 录制中恢复可点开窗（只读由弹层 editable 承担，不再整颗禁用）、PillNote 11fp（HUD 弹层无 10fp）、WindowChrome 模块级 Promise 链串行 + EntryAbility.loadContent 前 prime（冷启动首帧无白条、设置/相机往返不乱序）；删死代码（GlCameraEngine.currentPreviewFps/previewFps 字段、Camera.fpsLabel、HudSpec.PILL_ROW_HEIGHT/gridFractions、HudTouch.MIN/HudShape.PANEL_RADIUS/HudColor.SUCCESS、SafeInsets.left/right 留 T32 横屏）。**真机复验未执行：已安装包签名指纹 48A3BDCE… 与本仓 `.local-signing` 自签证书 C8D36043… 不匹配，按安全红线不安装，交付源码/HAP 由用户以 DevEco 同证书重装后验证**（待验项见「真机待验」T31 节）。留白：HudLayout/HudLayoutEditor 自定义布局、ZOOM/FOCUS 胶囊与弹层、tint 副轴、PreviewCoords、SheetSpec/Widgets 全量、UIOrientation 接线（T32，本批保持系统方向）。**高级参数持久化已落（本批 I，2026-10-23，对齐上游 `ui/ParamsPersist.kt`）**：`ui/ParamsPersist.ets`（纯逻辑：24 键白名单 `PARAMS_KEYS`，键名/顺序逐字等于上游 `WotaSettings.KEY_*`；`restore` 冷启恢复只写 value、range/enabled/exact 不动，机型域钳制仍交给 `applyAbility`；`ParamsPersistSession` 进页冻结影子、动作完成点 `flush` 只写与影子不同的字段、写失败不推进影子；枚举编解码与尺寸串 `"WxH"`；零 `@ohos.`/`@kit.` import）+ `ui/ParamsStore.ets`（平台件：`getPreferencesSync` 同步门面 + `putSync`/`flushSync`，写失败只 `Diag.w`，与 SettingsStore 共用 `wota_camera_settings`）；`pages/Camera.ets`：`bootstrap` 读完设置后 `restore`，flush 点 = 弹层提交 / 帧率 / 画幅 / 变焦 / 闪光循环 + `onPageHide` + `aboutToDisappear`。**排除清单照搬**：renderMode/sampleRate（设置页独占的自动降级）、audioEnabled（内录授权）、focusPoint（瞬时态）、curve/arc_convert_mode（专属直写链）。**键名迁移**：`fps→default_fps`、`bitrate→default_bitrate`、`sizeW/sizeH→default_size`（迁移读新键优先、回退旧键；save 只写新键，旧键保留不删），`level_enabled`/`default_ref_lines` 本来同名；`arcMode`/`grid` 留在 SettingsStore 原地（本侧已登记行为偏离，不折进 24 键/参考线掩码）。**与上游差异登记**：① 变焦/闪光循环走 engine 直写、不更新参数总线，flush 不会把 zoom/flash 入档（上游由 ZOOM/FOCUS 弹层写总线）；② 弹层滑杆每 tick 都走 `applyParamsFromPills`（上游按松手 `onValueChangeFinished`），故 flush 频率更高（但只写变化键） | ☑ 部分 |
 | `design/Tokens.kt`、`PillPopup.kt`、`SheetSpec.kt`、`Widgets.kt` | UI（设计令牌近纯逻辑） | **PillPopup 最小实现已落（T21，2026-10-21）**：`ui/PillPopup.ets`——WotaPillPopup（半透明遮罩点击关 + 量框后定位面板 + 标题/收起钮；锚点取 `getUIContext().getComponentUtils().getRectangleById`（窗口 px），**取不到回退底贴屏居中**）、PillAnchor.place 纯函数直译（margin/right/bottom/above/below 钳制，MAX_HEIGHT_RATIO=0.62、gap 8vp/margin 6vp/面板 max 400vp 照搬）、PillChoices（网格单选 + disabled 灰显且点不动）、PillSlider（ladder 刻度滑杆：索引空间运行+nearestLadderIndex 吸附+梯不足 2 点禁用占位不退回连续）、PillNote。**T21 复审 P3（T22，2026-10-22）**：撤销 shown 封口——onMeasured 记录 lastW/lastH，onAreaChange 报告尺寸与上次放置尺寸不同时重跑 PillAnchor.place 更新位置态（内容增删导致面板尺寸变化时重排；同尺寸跳过 + place 纯函数 ⇒ 无重入环），shown 首测语义保留（首量显形）。未迁（登记）：LocalMotion 动效（淡入/0.94 长开）、TextScaleLayer、HDS 阴影/令牌色（静态深色近似）、WotaChip 视觉令牌、PillToggles/PillRowList（无消费方）。**T31**：新增 `ui/HudTokens.ets`（相机 HUD 自有令牌：深色色板/字阶 LABEL11-PILL12-VALUE13-TITLE17/触控 48/圆角/间距/遮罩渐变），是上游 HDS Tokens 的**静态子集等价**（非逐值移植，登记）。Tokens/SheetSpec/Widgets 其余仍待后续 | ☑ 部分 |
 | `dialog/`（音源/蓝牙/相机/曲线弹层） | UI | **相机弹层数值段已落（T21）**：`ui/ParamFormat.ets` 直译 CameraDialogs.kt 数值段——shutterText（`1/` 与 `%.1fs` 分支）、evText（`%+.1fEV`）、wbShort/wbLabel/aeLabel（zh 档名取上游 strings_camera.xml）、shutterItems（supported 只绑设备判定 + 强制档 `※`；可选上限 shutterCeilingNs 按 fpsHi 现算与下发同源）。其余弹层（音源/蓝牙/曲线）待后续 | ☑ 部分 |
 | `widget/`（CameraSurface、ParamSlider、SliderLadder 刻度滑杆、RefLineOverlay 参考线、AttitudeMeter、AudioChip） | 平台绑定 + UI | **SliderLadder 已直译（T21，2026-10-21）**：`ui/SliderLadder.ets` 纯函数族 nearestLadderIndex/isoLadder（25 档含 50/12800）/evLadder/kelvinLadder（500K 网格）/tintLadder/zoomLadder（含 0.5/1.5/2.5）/shutterLadder（过滤/去重/升序）/steppedLadder/alignUp（Math.floor 复刻 floorDiv 负数语义）；**T22（2026-10-22）补齐 diopterLadder（lo..hi 等分 10 段 11 点）与 percentLadder**（上游直译，消费方仍留待对焦/斑马胶囊批），九用例单测见 §纯逻辑测试。未移植（无消费方，登记）：deadbandLadder（光弧死区滑杆未进本批）。**RefLineOverlay 已落（F 批，2026-10-23）**：`core/RefLine.ets`（11 档位掩码 + inscribedBox + horizonEndpoints 纯函数）+ `ui/RefLineOverlay.ets`（Canvas 绘制 11 档，红线 2vp 最后画）；相机页用 `refLineMask() = default_ref_lines | (gridOn ? 三分法 : 0)` 消费，T31 的 Divider 版 3×3 网格删除。**AttitudeMeter 已落（E 批）**。CameraSurface/ParamSlider/AudioChip 待后续 | ☑ 部分 |
@@ -117,6 +117,30 @@
 > 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
+
+## 交付批（I：录制页参数持久化 ParamsPersist，2026-10-23）
+
+- **模块**：`ui/ParamsPersist.ets`（纯逻辑，零 `@ohos.`/`@kit.` import：24 键白名单 + `restore` 冷启链 +
+  `ParamsPersistSession` 影子落盘链 + 枚举/尺寸编解码 + `ParamsMigrate` 迁移判定）、`ui/ParamsStore.ets`
+  （平台件：`getPreferencesSync` 同步门面 + `putSync`/`flushSync`，与 `SettingsStore` 共用
+  `wota_camera_settings`）；`PureLogicBarrel` 纳入编译探针（`signature()` 返回串不变）。
+- **接线**：`pages/Camera.ets` 的 `bootstrap` 冷启 `restore`（读完设置、起镜/initNativeParams 之前；
+  机型域仍由 `applyAbility` 收口）；flush 点 = `applyParamsFromPills`（弹层提交）、`cycleFps`/`cycleSize`/
+  `cycleZoom`/`toggleFlash`、`onPageHide`、`aboutToDisappear`；会话在 `aboutToAppear` 建、
+  `aboutToDisappear` 清（restore 后 `resync` 影子，恢复值不算用户动作）。
+- **键名迁移**：`SettingsStore` 的 `fps`/`bitrate`/`sizeW+sizeH` 改以上游键名 `default_fps`/
+  `default_bitrate`/`default_size` 为唯一权威（迁移读新键优先、回退旧键；save 只写新键，旧键保留不删）；
+  `arcMode`/`grid` 留在 SettingsStore 原地（本侧已登记行为偏离）。
+- **排除清单**：renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode 一律不入档
+  （照搬上游，测例逐键断言）。
+- **测试**：`test/pure/params-persist.test.ets` 21 条（白名单契约 3 / restore 正反例 6 / 尺寸与枚举 2 /
+  会话影子 8 / 键名迁移 2），纯逻辑用例 385 → 406。
+- **回归**：`node scripts/pure-test.mjs` → `files=37 tests=406 passed=406 failed=0`（exit 0）；
+  clean `assembleHap` exit 0（BUILD SUCCESSFUL；WARN 基线不变：napi 未验证 + 未配置签名）。
+- **真机待验（不阻塞）**：① 改快门/ISO/EV/WB 后杀进程冷启，读数回到上次值
+  （`hdc hilog | grep WotaParamsStore` 查有无写失败）；② 设置页改帧率/码率/画幅 → 回录制页退后台再进，
+  值不回默认且不被录制页陈旧总线覆盖；③ 音源（内录/环境音）任何路径都不跨进程记住（排除清单）；
+  ④ 旧版本升级（只有 `fps`/`bitrate`/`sizeW/sizeH` 旧键）首启读到旧值，进设置页保存一次后改由新键承载。
 
 ## 交付批（T23，2026-10-22）
 
@@ -550,7 +574,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   ③ 下载进度/取消（确认取消后不再弹回对话框）；④ 另存到文件管理后点按安装（需 signed HAP 且 profile
   含本机 UDID；unsigned 包应被系统拒绝——这是预期）；⑤ SHA256SUMS 缺失的老 Release 走 PK+size 兜底。
 
-## 纯逻辑测试（T22 落地，T23/T24/T25/T26/T28/T29/T30 扩展，2026-10-22）
+## 纯逻辑测试（T22 落地，T23/T24/T25/T26/T28/T29/T30 扩展，I 批 2026-10-23 扩展）
 
 自研轻量测试架（不用 hypium/ohosTest，无真机可跑）：
 
@@ -565,7 +589,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（385）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（406）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -593,7 +617,12 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   series-group（15，G 批：上游 SeriesGroupTest 10 + 扇出 3 + 突变自证 2）、
   direct-display（7，H 批：上游 DirectRulesTest 矩阵 5 + 直显预览选档 2——此前无 pickDirectPreviewSize 覆盖）、
   frame-rate-fallback（7，H 批：上游纯函数全表 6 + 突变自证 1，S3-01 旧口径 15 / 新口径 60）、
-  gl-render-suppression（2，H 批：抑制真值表 4 组合 + `||`→`&&` 突变自证；上游接线守卫臂本侧无对应点，跳过登记）。
+  gl-render-suppression（2，H 批：抑制真值表 4 组合 + `||`→`&&` 突变自证；上游接线守卫臂本侧无对应点，跳过登记）、
+  params-persist（21，I 批：白名单契约 3（24 条/无重复/逐字顺序/排除清单）+ restore 正反例 6
+  （24 键逐项/坏值韧性/fps 两端钳制/>0 门槛/LOCK 归一/状态位不受改）+ 尺寸与枚举 2 + 会话影子 8
+  （只写变化键/不覆盖设置页/无差异 no-op/影子前进幂等/写失败重试/resync/意图画幅）+ 键名迁移 2；
+  上游 ParamsPersistWiringGuardTest 的 Compose 源码扫描臂本侧无对应（接线点在 Camera.ets，人工核对）；
+  ParamsPersistSessionTest 的 AF 能力保留臂属 WotaParams.applyAbility，本侧已有 core 测试面覆盖）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；
@@ -783,7 +812,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   与 1080p 基准；蓝牙/HUD 布局编辑器等长尾（应用内更新已在 C 批落地，见上）。
 - **T30+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、
   HUD 布局编辑器
-  （`HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid/ParamsPersist.kt`）、
+  （`HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid`；~~`ParamsPersist.kt`~~ 已于 2026-10-23 I 批完成）、
   相册入库/分享/缩略图/系列归组等媒体长尾（~~应用内更新~~ 已于 2026-10-23 C 批完成）。
 
 ## 建议移植顺序

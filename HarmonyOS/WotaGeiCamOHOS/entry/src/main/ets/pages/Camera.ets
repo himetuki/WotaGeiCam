@@ -21,9 +21,13 @@
  * （lastPath/lastBytes/lastSamples），保留已完成前段（被丢零样本段在首段 sidecar segments 留 count=0 条目，无害登记）。
  *
  * 边界（登记）：固定 HUD，不移植 HudLayout/HudLayoutEditor（READOUT 非可编排网格）；
- * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；高级参数不持久化（会话内有效，
- * 上游 ParamsPersist 留白）；tint 副轴/对焦弹层留白；视频-only；设置持久化走 ui/SettingsStore
- * （键独立于上游 ParamsPersist）。
+ * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；tint 副轴/对焦弹层留白；视频-only。
+ * **高级参数持久化已落（本批 I，对齐上游 ui/ParamsPersist.kt）**：24 键白名单（`ui/ParamsPersist.ets`
+ * 纯逻辑 + `ui/ParamsStore.ets` 平台件，与 SettingsStore 同一个 `wota_camera_settings` store）——
+ * 冷启 `bootstrap` 读完设置后 `ParamsPersist.restore` 灌总线；落盘点 = 弹层提交
+ * `applyParamsFromPills`、帧率/画幅/变焦/闪光循环、`onPageHide`、`aboutToDisappear`（会话影子只写
+ * 与影子不同的字段）。排除清单照搬上游：renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode。
+ * 设置持久化走 ui/SettingsStore（键名已迁移到上游名：`default_fps`/`default_bitrate`/`default_size`）。
  * 加载顺序契约：不得页面顶层静态 import 'libentry.so'，XComponent onLoad 后 dynamic import 桥。
  *
  * T31 取景页可用性修复（真机 HUAWEI ALN-AL00 / 1260x2720 取证）：
@@ -62,6 +66,8 @@ import { DeviceStatus } from '../camera/DeviceStatus';
 import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
+import { ParamsPersist, ParamsPersistSession, ParamsPrefs } from '../ui/ParamsPersist';
+import { ParamsStore } from '../ui/ParamsStore';
 import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
@@ -183,8 +189,11 @@ struct CameraPage {
   private stopReason: string = '';
   private lastStopSummary: string = '';
   private lastStopAtMs: number = 0;
-  /** 高级参数总线（T21）：会话内有效，不持久化（上游 ParamsPersist 留白） */
+  /** 高级参数总线（T21）：启动值由 ParamsPersist.restore 灌入（本批 I），录制页改动经会话影子落盘 */
   private params: WotaParams = new WotaParams();
+  /** 参数持久化平台门面与会话（本批 I）：aboutToAppear 建、aboutToDisappear 清 */
+  private persistPrefs: ParamsPrefs | undefined = undefined;
+  private persister: ParamsPersistSession | undefined = undefined;
   /** 最近一次会话期能力真值（起镜成功/开弹层时刷新；停镜置空） */
   private ability: CameraAbility | undefined = undefined;
   /** 当前打开的高级参数弹层（'' = 无）：快门/ISO/EV/WB */
@@ -213,6 +222,10 @@ struct CameraPage {
     this.disposed = false;
     this.pageVisible = true;
     this.ctx = this.getUIContext().getHostContext() as common.Context | undefined;
+    // 入档会话：此刻冻结影子；冷启 restore 完成后由 bootstrap 调 resync 重新冻结（恢复值不算用户动作）
+    const prefs: ParamsPrefs | undefined = this.ctx === undefined ? undefined : ParamsStore.open(this.ctx);
+    this.persistPrefs = prefs;
+    this.persister = prefs === undefined ? undefined : new ParamsPersistSession(prefs, this.params);
     this.bindParamsLabels();
     this.initLevelSensor();
     this.applyImmersiveChrome();
@@ -332,6 +345,8 @@ struct CameraPage {
 
   onPageHide(): void {
     this.pageVisible = false;
+    // 退后台是用户动作完成点：落盘一次（旁路副作用，失败只记日志）
+    this.flushParams();
     this.cancelTapTimers();
     // 传感器只在可见时采样：后台常开很费电（上游 DisposableEffect 同义）
     if (this.levelSensor !== undefined) {
@@ -354,6 +369,10 @@ struct CameraPage {
   aboutToDisappear(): void {
     this.disposed = true;
     this.pageVisible = false;
+    // 离开录制页：最后一次落盘并销毁会话（之后的晚到回调不再写盘）
+    this.flushParams();
+    this.persister = undefined;
+    this.persistPrefs = undefined;
     if (this.levelSensor !== undefined) {
       this.levelSensor.stop();
       this.levelSensor = undefined;
@@ -398,6 +417,17 @@ struct CameraPage {
       this.gridOn = s.grid;
       this.refMask = s.refLines;
       this.effectIndex = s.effect;
+      // 冷启恢复（本批 I）：24 键白名单灌进参数总线（只写 value，range/enabled/exact 不动）；
+      // 机型域钳制仍由起镜后的 applyAbility 收口，本处不绕开。恢复值不是用户动作，
+      // 完成后 resync 影子，避免第一次 flush 把它们当改动写回。
+      const prefs: ParamsPrefs | undefined = this.persistPrefs;
+      if (prefs !== undefined) {
+        ParamsPersist.restore(prefs, this.params);
+        const persister: ParamsPersistSession | undefined = this.persister;
+        if (persister !== undefined) {
+          persister.resync();
+        }
+      }
       this.syncLabels();
       this.applyLevelSetting();
       if (!this.pageVisible) {
@@ -714,6 +744,8 @@ struct CameraPage {
   private applyParamsFromPills(): void {
     const report: ApplyReport = this.engine.applyParams(this.params);
     this.syncParamLabels();
+    // 落盘（本批 I）：动作完成点，且是旁路副作用——写在错误提示之前，不改变既有下发时序。
+    this.flushParams();
     if (report.failed.length > 0) {
       Diag.w(WOTA_RECORD_TAG, `pill apply failed: ${report.failed.join('|')}`);
       this.appendNotice(`参数下发失败: ${report.failed.join(',').substring(0, 80)}`);
@@ -797,6 +829,8 @@ struct CameraPage {
     this.settings.sizeH = want4k ? RECORD_HEIGHT_4K : RECORD_HEIGHT_1080;
     this.sizeLabel = want4k ? '4K' : '1080p';
     this.persistSettings();
+    // 画幅循环是参数动作完成点：SettingsStore 已写 default_size，这里再收一次总线侧的待落盘改动
+    this.flushParams();
     this.restartCamera();
   }
 
@@ -812,6 +846,8 @@ struct CameraPage {
     }
     this.syncParamLabels();
     this.persistSettings();
+    // 帧率循环同时改了总线 fps：立刻落盘（default_fps 与 SettingsStore 的新键同名同值）
+    this.flushParams();
   }
 
   private nearestZoomIndex(actual: number): number {
@@ -845,6 +881,8 @@ struct CameraPage {
     if (actual <= 1.01 && target > 1) {
       this.message = '该镜头不支持该变焦档（已钳回 1x）';
     }
+    // 变焦循环是参数动作完成点（总线 zoom 未跟随 engine，flush 对 zoom 无差异；登记差异见 PORT_MAP）
+    this.flushParams();
   }
 
   private toggleFlash(): void {
@@ -856,6 +894,8 @@ struct CameraPage {
       ? camera.FlashMode.FLASH_MODE_ALWAYS_OPEN : camera.FlashMode.FLASH_MODE_CLOSE);
     if (ok) {
       this.flashOn = next;
+      // 闪光开关是参数动作完成点（总线 flash 未跟随 engine，登记差异见 PORT_MAP）
+      this.flushParams();
     } else {
       this.message = '该镜头不支持闪光/常亮';
     }
@@ -920,6 +960,24 @@ struct CameraPage {
     }).catch((e: Object): void => {
       this.message = `设置保存失败: ${e}`;
     });
+  }
+
+  /**
+   * 参数落盘（本批 I）：会话影子只写与影子不同的字段；无差异不触碰 prefs。
+   * 纯旁路副作用——失败只记日志，绝不改变下发时序/错误提示/录制流程。
+   */
+  private flushParams(): void {
+    const persister: ParamsPersistSession | undefined = this.persister;
+    if (persister === undefined) {
+      return;
+    }
+    try {
+      if (!persister.flush()) {
+        Diag.w(WOTA_RECORD_TAG, 'params persist flush failed (next action retries)');
+      }
+    } catch (e) {
+      Diag.w(WOTA_RECORD_TAG, `params persist flush threw: ${e}`);
+    }
   }
 
   private resetCameraLabels(): void {
