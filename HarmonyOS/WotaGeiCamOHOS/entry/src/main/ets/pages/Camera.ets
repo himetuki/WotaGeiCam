@@ -62,6 +62,8 @@ import { DeviceStatus } from '../camera/DeviceStatus';
 import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
+import { LevelReading, LevelSensor } from '../camera/LevelSensor';
+import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -131,6 +133,12 @@ struct CameraPage {
   @State sizeLabel: string = '—';
   @State effectLabel: string = '直通';
   @State gridOn: boolean = true;
+  /** 水平仪/俯仰仪（上游需求 24/25「必须」）：读数已换算到显示方向、已折叠到 ±90 */
+  @State levelOn: boolean = true;
+  @State levelAvailable: boolean = true;
+  @State levelRoll: number = 0;
+  @State levelPitch: number = 0;
+  @State levelIsLevel: boolean = false;
   @State elapsedMs: number = 0;
   @State batteryPct: number = -1;
   @State freeMb: number = -1;
@@ -145,6 +153,8 @@ struct CameraPage {
   private ctx: common.Context | undefined = undefined;
   private settings: CameraSettings = new CameraSettings();
   private settingsLoaded: boolean = false;
+  /** 水平仪数据源（页面可见时才采样；隐藏/销毁必停，传感器常开很费电） */
+  private levelSensor: LevelSensor | undefined = undefined;
   private lenses: Array<LensSlot> = [];
   private lensKey: string = '';
   private effectIndex: number = 0;
@@ -200,6 +210,7 @@ struct CameraPage {
     this.pageVisible = true;
     this.ctx = this.getUIContext().getHostContext() as common.Context | undefined;
     this.bindParamsLabels();
+    this.initLevelSensor();
     this.applyImmersiveChrome();
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
@@ -217,10 +228,63 @@ struct CameraPage {
     try {
       display.on('change', (_id: number): void => {
         this.applyGeometry();
+        this.syncLevelDisplayDegrees();
       });
     } catch (e) {
     }
     this.bootstrap();
+  }
+
+  // ------------------------------------------------------------------ 水平仪/俯仰仪
+
+  /** 建数据源（不启动）：回调只落 @State，判定仍全在 LevelMath/LevelSensor */
+  private initLevelSensor(): void {
+    if (this.levelSensor !== undefined) {
+      return;
+    }
+    const sensor: LevelSensor = new LevelSensor((r: LevelReading): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.levelRoll = r.roll;
+      this.levelPitch = r.pitch;
+      this.levelIsLevel = r.isLevel;
+    });
+    this.levelSensor = sensor;
+    this.levelAvailable = sensor.available;
+    this.syncLevelDisplayDegrees();
+    sensor.buzzEnabled = this.settings.levelBuzz;
+  }
+
+  /**
+   * 把当前显示旋转喂给传感器（roll 必须换算到显示帧：加速度计是机头坐标系，
+   * 只在竖屏与屏幕系重合）。取不到显示信息时按 0 处理（等于不换算的旧行为，登记）。
+   */
+  private syncLevelDisplayDegrees(): void {
+    const sensor: LevelSensor | undefined = this.levelSensor;
+    if (sensor === undefined) {
+      return;
+    }
+    try {
+      sensor.setDisplayDegrees(display.getDefaultDisplaySync().rotation * 90);
+    } catch (e) {
+      sensor.setDisplayDegrees(0);
+    }
+  }
+
+  /** 按设置与页面可见性启停采样（关掉显示或页面隐藏都停——传感器常开很费电） */
+  private applyLevelSetting(): void {
+    const sensor: LevelSensor | undefined = this.levelSensor;
+    if (sensor === undefined) {
+      return;
+    }
+    this.levelOn = this.settings.levelEnabled && sensor.available;
+    sensor.buzzEnabled = this.settings.levelBuzz;
+    if (this.levelOn && this.pageVisible && !this.disposed) {
+      sensor.start();
+    } else {
+      sensor.stop();
+    }
   }
 
   onPageShow(): void {
@@ -231,6 +295,8 @@ struct CameraPage {
     this.setKeepScreenOn(true);
     this.applyImmersiveChrome();
     this.resumeHealthAfterShow();
+    this.syncLevelDisplayDegrees();
+    this.applyLevelSetting();
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
       return;
@@ -242,6 +308,7 @@ struct CameraPage {
       const sizeChanged: boolean = s.sizeW !== this.settings.sizeW || s.sizeH !== this.settings.sizeH;
       this.settings = s;
       this.syncLabels();
+      this.applyLevelSetting();
       this.initNativeParams();
       if (this.recording) {
         return;
@@ -261,6 +328,10 @@ struct CameraPage {
   onPageHide(): void {
     this.pageVisible = false;
     this.cancelTapTimers();
+    // 传感器只在可见时采样：后台常开很费电（上游 DisposableEffect 同义）
+    if (this.levelSensor !== undefined) {
+      this.levelSensor.stop();
+    }
     if (this.recording && !this.healthHealthy && this.healthTimer >= 0) {
       this.healthPausedByHide = true;
     }
@@ -278,6 +349,10 @@ struct CameraPage {
   aboutToDisappear(): void {
     this.disposed = true;
     this.pageVisible = false;
+    if (this.levelSensor !== undefined) {
+      this.levelSensor.stop();
+      this.levelSensor = undefined;
+    }
     this.stopStatusTimer();
     this.stopRecordMonitor();
     this.stopAutoStopMonitor();
@@ -318,6 +393,7 @@ struct CameraPage {
       this.gridOn = s.grid;
       this.effectIndex = s.effect;
       this.syncLabels();
+      this.applyLevelSetting();
       if (!this.pageVisible) {
         return; // 隐藏页只落设置，不请求权限/起镜；onPageShow 补发
       }
@@ -1499,6 +1575,24 @@ struct CameraPage {
       .width('100%')
       .height('100%')
       .hitTestBehavior(HitTestMode.None)
+
+      // ---------- 姿态仪（水平仪/俯仰仪）：顶栏下方的右上角浮层，点按切换气泡/数值
+      if (this.levelOn && this.levelAvailable) {
+        Row() {
+          Blank()
+          AttitudeMeter({
+            roll: this.levelRoll,
+            pitch: this.levelPitch,
+            isLevel: this.levelIsLevel
+          })
+        }
+        .width('100%')
+        .align(Alignment.TopEnd)
+        .padding({
+          right: HudSpec.SAFE_MARGIN,
+          top: this.safeTop + HudSpec.TOP_BAR_HEIGHT + HudSpace.M
+        })
+      }
 
       Column() {
         // ---------- 顶栏：两行读数（各 5 项）+ 右侧 48vp 深色入口胶囊

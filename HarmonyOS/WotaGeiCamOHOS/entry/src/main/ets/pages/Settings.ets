@@ -371,6 +371,56 @@ struct Settings {
     this.persist();
   }
 
+  /**
+   * 取景辅助分组（对齐上游 0dee86d/需求 24/25：「显示水平仪与俯仰仪」「0° 时震动」）：
+   * 两个开关都直写 prefs，相机页进页面时读取（进页面即生效，无需重启）。
+   */
+  @Builder
+  private levelGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('取景辅助')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Row({ space: HudSpace.S }) {
+        Text('显示水平仪与俯仰仪')
+          .fontSize(HudType.VALUE)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.settings.levelEnabled })
+          .selectedColor(HudColor.ACCENT)
+          .onChange((on: boolean): void => {
+            this.settings.levelEnabled = on;
+            this.persist();
+          })
+      }
+      .width('100%')
+      .height(HudTouch.BUTTON_HEIGHT)
+      Row({ space: HudSpace.S }) {
+        Text('水平仪、俯仰仪 0° 时震动')
+          .fontSize(HudType.VALUE)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.settings.levelBuzz })
+          .selectedColor(HudColor.ACCENT)
+          .onChange((on: boolean): void => {
+            this.settings.levelBuzz = on;
+            this.persist();
+          })
+      }
+      .width('100%')
+      .height(HudTouch.BUTTON_HEIGHT)
+      Text('回正瞬间轻震一次提示；关闭后两者都不震动')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
   /** 分组卡片：标题 13fp + 选项 Flex 换行（全部 48vp 高） */
   @Builder
   private optionGroup(title: string, options: Array<string>, selected: number,
@@ -734,6 +784,9 @@ struct Settings {
             }
             ListItem() {
               this.sliderSnapGroup()
+            }
+            ListItem() {
+              this.levelGroup()
             }
             ListItem() {
               Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')

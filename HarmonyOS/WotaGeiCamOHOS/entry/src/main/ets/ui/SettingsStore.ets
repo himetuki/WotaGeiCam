@@ -14,6 +14,9 @@ const STORE_NAME: string = 'wota_camera_settings';
 const TAG: string = 'WotaSettings';
 /** 滑杆吸附开关的 prefs 键（编码串见 ui/SliderSnap.ets；缺键 = 全部吸附） */
 const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
+/** 取景辅助：水平仪/俯仰仪显示与回正震动（键名与上游 WotaSettings 逐字一致） */
+const KEY_LEVEL_ENABLED: string = 'level_enabled';
+const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
 
 export class CameraSettings {
   sizeW: number = 1920;
@@ -28,6 +31,10 @@ export class CameraSettings {
   effect: number = 0;
   /** 关掉刻度吸附（改连续值）的滑杆集合编码串；空串 = 全部吸附 */
   sliderContinuous: string = '';
+  /** 取景辅助：显示水平仪与俯仰仪（上游 level_enabled，默认开） */
+  levelEnabled: boolean = true;
+  /** 水平仪/俯仰仪过 0° 时震动（上游 level_buzz_enabled，默认开） */
+  levelBuzz: boolean = true;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -50,6 +57,10 @@ export class SettingsStore {
       // 坏串原样保留，读取口逐次 decode（空/坏 = 空集 = 全部吸附），与上游语义一致
       const sliderRaw: preferences.ValueType = await store.get(KEY_SLIDER_CONTINUOUS, s.sliderContinuous);
       s.sliderContinuous = typeof sliderRaw === 'string' ? sliderRaw as string : '';
+      const levelRaw: preferences.ValueType = await store.get(KEY_LEVEL_ENABLED, s.levelEnabled);
+      s.levelEnabled = typeof levelRaw === 'boolean' ? levelRaw as boolean : s.levelEnabled;
+      const buzzRaw: preferences.ValueType = await store.get(KEY_LEVEL_BUZZ, s.levelBuzz);
+      s.levelBuzz = typeof buzzRaw === 'boolean' ? buzzRaw as boolean : s.levelBuzz;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -88,6 +99,8 @@ export class SettingsStore {
       await store.put('grid', s.grid);
       await store.put('effect', s.effect);
       await store.put(KEY_SLIDER_CONTINUOUS, s.sliderContinuous);
+      await store.put(KEY_LEVEL_ENABLED, s.levelEnabled);
+      await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
       await store.flush();
       return true;
     } catch (e) {
