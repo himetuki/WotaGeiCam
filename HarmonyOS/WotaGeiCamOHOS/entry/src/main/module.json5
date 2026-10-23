@@ -48,6 +48,9 @@
     ],
     "requestPermissions": [
       {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
         "name": "ohos.permission.CAMERA",
         "reason": "$string:camera_perm_reason",
         "usedScene": {

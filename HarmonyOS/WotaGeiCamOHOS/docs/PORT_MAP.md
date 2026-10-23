@@ -111,15 +111,12 @@
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `UpdateChecker.kt`、`UpdateDownloader.kt`、`UpdateInstaller.kt` | 平台绑定（策略纯） | `@ohos.net.http` 读 GitHub Releases；**手动联网、SHA-256 校验、不自动检查**等隐私承诺照搬；安装侧需改为鸿蒙包体（hap/hsp）或引导下载页 | ☐ |
+| `UpdateChecker.kt`、`UpdateDownloader.kt`、`UpdateInstaller.kt` | 平台绑定（策略纯） | **已落（2026-10-23，对齐上游 971874a + 376b3ef + 82943cf 的双平台资产命名）**：`update/UpdateChecker.ets`（纯逻辑：UpdateConfig 常量与镜像表、CompareVersions（上游 versionName 口径 + 本侧 versionCode 口径）、MirrorNode/MirrorChain、ReleaseJson 手写提取器、ReleaseNotes 整形、RedirectProbe、`probeLatestRelease` 三段编排 + 取消探针）；`update/UpdatePure.ets`（downloadCandidates/rankChannelsBySpeed/staleFilesOf/sha256Matches/isSafeRemoteUrl/isPublicHost（IPv4+IPv6 私网判据）/响应体上限）；`update/Sha256.ets`（纯 SHA-256，NIST 向量钉住）；`update/UpdateDownloader.ets`（`@ohos.net.http`：fetchJson 短读超时、并发测速选路、requestInStream 流式落盘（.part 按代唯一）、PK 魔数 + size + SHA-256 三重校验）；`update/UpdateInstaller.ets`（结构核对 + DocumentViewPicker 另存 + 浏览器兜底）；`pages/Settings.ets`「检查更新」行 + 说明/下载两个弹层（**纯手动**：联网只由行点击触发，不挂生命周期；下载取消按代际隔离）。**偏离登记**：① 段 3 跳过——http 自动跟随重定向且拿不到中间 `Location`，实跑只有段 1（官方 API）+ 段 2（镜像 API）；② 无法手写逐跳重定向 → 每渠道 URL 发请求前过 `isSafeRemoteUrl`（拒环回/私有），落盘后仍有三道校验；③ 包体上限 100MiB（`maxLimit` 平台硬上限，上游 2GiB）；④ **Release 说明里的 `SHA256:` 行是安卓 universal APK 的哈希**（build-apk.yml 回填），HAP 改读同 tag 的 `SHA256SUMS` 直连资产（build-hap.yml 产出；老 Release 无此文件则退回 PK + size），说明文本仍两段都读、只用于弹窗展示；⑤ OHOS 不开放三方拉起安装器 → 下载校验后经文件选择器另存，由用户在文件管理里交给系统安装器（无同包名/同签名的程序化核对，补偿是 SHA-256 与系统 profile 校验）；⑥ 版本比较用 **versionCode**：CI 注入公式 `1000000 + major*1e6 + minor*1e4 + patch*100 + r`，因为鸿蒙 versionName 不允许 `-rNN` 后缀 | ☑ 完整（真机待验） |
 
-> **2026-10-23 评审结论（上游 `971874a` 更新弹窗说明 / `376b3ef` 镜像测速选路）**：本侧无 `update/` 目录，
-> 两个提交是**整块新建**而非移植 → **暂缓至 T30+ 长尾批**，本周期不落代码。可直译纯函数已备查
-> （零 android 依赖）：`downloadCandidates`、`rankChannelsBySpeed`、`isSafeRemoteUrl`、`isPublicHost`
-> （含 IPv4/IPv6 私网判据）、`ReleaseNotes.forDisplay`（去 Markdown/隐 SHA256 行/4000 字截断）。
-> OHOS 侧待设计两项：① `@ohos.net.http` 能否禁用自动跟随重定向（上游手写跟随是「防镜像 302 引内网」
-> 的安全红线）；② hap 安装没有 Android 系统安装器签名强校验的等价物，需自补防线（hap 亦为 zip，
-> PK 魔数判据可复用 + SHA-256 照搬 + 产物名平台后缀制已在 monorepo 落地）。
+> **2026-10-23 收口（原「暂缓至 T30+」评审结论作废）**：`971874a` + `376b3ef` 已按上表落地为 `update/`
+> 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
+> 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
+> ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
 ## 交付批（T23，2026-10-22）
 
@@ -388,13 +385,56 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   `player/PureLogicBarrel.ets` 登记 5 个新纯模块（编译门覆盖）。新测试 4 件 + track-sync/clip-rule 扩容，
   共 +34 例，期望值手写字面量对拍上游。
 - **批 C（未做，并入 T27-4）**：ArcRepair `capOffsetMs` 车道平移与 native 传参——无偏移来源前恒 0、单独价值低。
-- **暂缓（已登记）**：`971874a` + `376b3ef` 更新器域（见 update 节评审结论）→ T30+。
+- **批 C（更新器，原暂缓项）：已完成，见下节「交付批（C：应用内更新，2026-10-23）」**。
 - **回归**：pure-test files=26 tests=276 passed=276 failed=0（基线 235 + A 批 7 + B 批 34）；
   `hvigorw --mode module -p product=default -p buildMode=release assembleHap` BUILD SUCCESSFUL（barrel
   登记后编译门覆盖全部新模块；仅既有 GlLibBridge napi 未验证 WARN）。
 - **跳过未移植的守卫测试**（平台接线不存在，随 T27）：`PreflightWiringGuardTest`、`PostStopSyncGuardTest`、
   `ArcRepairZeroSampleLaneGuardTest`、`ClipExportShiftTest.导出接线`、`TrackSyncAutoTest.AUTO 落盘锁内复核`
   （其语义已由 writeAutoPrefs 行为用例覆盖）、`AudioAlignTest.core 纯度`（本侧纯度由 pure-test 架构保证）。
+
+## 交付批（C：应用内更新，2026-10-23）
+
+上游 `971874a`（更新弹窗展示 Release 说明）+ `376b3ef`（说明镜像也读 / 扩充镜像表 / 下载前测速选路）
+的完整移植，并把 `82943cf` 的双平台产物命名接进来。**本侧原先没有 `update/` 目录，本批是整块新建。**
+
+- **新模块（4 件）**：
+  - `update/UpdateChecker.ets`（纯逻辑，零平台 import）：UpdateConfig（仓库常量 + 5 枚 HTTPS 镜像 +
+    2 枚 API 镜像）、CompareVersions（上游 versionName 口径 + 本侧 **versionCode** 口径）、
+    MirrorNode/MirrorChain、ReleaseAsset/ReleaseInfo、ReleaseJson（手写 JSON 提取器 + 资产名安全判据 +
+    `parseSha256Sums`）、ReleaseNotes（去 Markdown/隐哈希行/4000 字按行截断）、RedirectProbe、
+    ProbeResult + `probeLatestRelease`（三段编排、取消探针在每个节点前检查）。
+  - `update/UpdatePure.ets`（纯判据）：probeBytesAllowed/bytesOverLimit/downloadCandidates/
+    rankChannelsBySpeed/staleFilesOf/sha256Matches/isHttpsUrl/isSafeRemoteUrl/isPublicHost（IPv4/IPv6 私网判据）、
+    自带 `parseUrl`（不依赖平台 URL 实现，userinfo 不能绕过主机判据）。
+  - `update/Sha256.ets`（纯 SHA-256）：流式 update + digestHex，NIST 四条标准向量钉住。
+  - `update/UpdateDownloader.ets`（平台）：`@ohos.net.http` 的 fetchJson（短读超时 10s）、**并发测速选路**
+    （每渠道 256KiB / 3s 读超时 / 6s 预算）、`requestInStream` 流式落盘（.part 按代唯一）、
+    连接 10s/读 30s、Content-Length 与探测 size 一致性、PK 魔数、磁盘帽、SHA-256 端到端校验。
+  - `update/UpdateInstaller.ets`（平台）：结构核对 + `DocumentViewPicker.save` 另存到用户可见目录 +
+    浏览器打开 Release 页兜底。
+- **UI**：`pages/Settings.ets` 关于卡新增「检查更新」行（Idle/Checking/Cancelling/Latest/Failed 五态，
+  检查中再点 = 取消），更新可用弹层（版本号 + 包体大小 + 说明滚动区 max 260vp）与下载弹层
+  （选路 → 进度 → 完成「保存到文件/打开下载页」→ 失败）；版本号读数改为 `bundleManager` 实读，
+  不再硬编码。**红线保持**：联网只由行点击触发（无 LaunchedEffect/生命周期自动检查）；取消标志按代际隔离
+  （旧代进度与回执一律丢弃）。
+- **权限**：`module.json5` 增 `ohos.permission.INTERNET`（normal，无需运行时授权）。
+- **测试**：`test/pure/update-logic.test.ets`（版本比较/versionCode/镜像链/JSON/资产名/redirect/
+  三段编排含取消 + ReleaseNotes 整形 + SHA256SUMS 解析）、`test/pure/update-channel-speed.test.ets`
+  （排序/候选/URL 门槛/上限/过期文件/SHA 判据）、`test/pure/update-sha256.test.ets`（NIST 向量 + 流式
+  等价 + 64KiB 边界）。共 +52 例（276 → 328），全绿。
+- **两处「照搬会坏」的坑（本批发现并修正）**：
+  ① 上游按资产名挑包用 `contains("universal")`；鸿蒙资产是 `-signed-Harmony.hap`/`-unsigned-Harmony.hap`，
+    且 `unsigned` 里含 `signed` 子串——裸 `indexOf('signed')` 会误中 unsigned 包，改用 `-signed-harmony` 判据
+    （单测钉住）。
+  ② 上游校验值来自 Release 说明的 `SHA256:` 行，而本仓库那行由 build-apk.yml 回填的是**安卓 APK** 哈希；
+     拿它校验 HAP 必然失败。改为读同 tag 的 `SHA256SUMS` 直连资产（HAP 工作流产出），并加单测钉住
+     「探测结论的 sha256 恒为 undefined」。
+- **回归**：pure-test files=29 tests=328 passed=328 failed=0；`assembleHap`（release）BUILD SUCCESSFUL，
+  新增 update 模块无告警。
+- **真机待验**（T33）：① 有网/断网各点一次「检查更新」的文案与取消；② 有新版时说明区排版与滚动；
+  ③ 下载进度/取消（确认取消后不再弹回对话框）；④ 另存到文件管理后点按安装（需 signed HAP 且 profile
+  含本机 UDID；unsigned 包应被系统拒绝——这是预期）；⑤ SHA256SUMS 缺失的老 Release 走 PK+size 兜底。
 
 ## 纯逻辑测试（T22 落地，T23/T24/T25/T26/T28/T29/T30 扩展，2026-10-22）
 
@@ -411,7 +451,7 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（235）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（328）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -428,7 +468,11 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   arc-repair-merge（12，T28：不造色/死区三分支/块整体性/多块索引/奇数宽高）、
   arc-repair-verdict（5，T28：三格判据 + keep 四组合）、arc-repair-session（31，T29：parseProbe 3/
   速率 4/NO_NEED 3/去重 3/帧数 3/状态 4/归因 3/note 1 + 取消终态 1；T30：describeRepairError 3 +
-  audioLaneNote 1；T30 审查修复：planForTarget 接线 1 + 逐档 NO_NEED 1）。
+  audioLaneNote 1；T30 审查修复：planForTarget 接线 1 + 逐档 NO_NEED 1）、
+  update-logic（35，C 批：版本比较 4/versionCode 2/镜像链 3/JSON 4/资产名 1/redirect 1/编排 9（含取消 2）
+  + ReleaseNotes 6 + SHA256SUMS 1 + 「APK 哈希不得当 HAP 校验值」1）、update-channel-speed（12，C 批：
+  排序 3/候选 2/URL 门槛 2/解析 1/上限 1/过期文件 1/SHA 判据 1/突变体 1）、update-sha256（5，C 批：NIST 四向量
+  2 组 + 流式等价 + 64KiB 边界 + digest 后封口）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；
@@ -615,11 +659,11 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 - **T32：真机复验 + 相机交互与长尾**——T31 待验 16 项真机走查（含 360vp UI 树无省略号、
   降级态底栏、录制中只读弹层、系统栏往返串行）；UIOrientation 接线与横屏 SafeInsets 左右留白
   （按 T31 横屏走查结论：放不下则锁竖屏并登记）；对焦/捏合变焦胶囊；离线修复 GPU 路线（ArcRepairGl）
-  与 1080p 基准；蓝牙/更新检查/HUD 布局编辑器等长尾。
-- **T30+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、应用内更新检查
-  （`UpdateChecker/Downloader/Installer.kt`）、HUD 布局编辑器
+  与 1080p 基准；蓝牙/HUD 布局编辑器等长尾（应用内更新已在 C 批落地，见上）。
+- **T30+：长尾批**——蓝牙音箱面板（`BtSpeakerController.kt`）、
+  HUD 布局编辑器
   （`HudLayout/HudLayoutEditor/HudMetrics/HudPageGrid/ParamsPersist.kt`）、
-  相册入库/分享/缩略图/系列归组等媒体长尾。
+  相册入库/分享/缩略图/系列归组等媒体长尾（~~应用内更新~~ 已于 2026-10-23 C 批完成）。
 
 ## 建议移植顺序
 
@@ -631,4 +675,4 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
 6. `media` 媒体库 → `player` 播放/剪辑 → 对比播放；
 7. T28 后按「交付后路线」推进：T27 内录平台面四步（T27-1 平台探针 → T27-2 ENV 音轨 →
    T27-3 CAP 双轨 → T27-4 消费面）与 T30 离线修复收口 → T31 GPU 路线/真机调优与 T32+ 蓝牙/
-   更新检查/HUD 编辑器等长尾。
+   HUD 编辑器等长尾（应用内更新 C 批已完成）。

@@ -38,6 +38,9 @@ import { AudioPreflightPolicy } from '../record/AudioPreflightPolicy';
 import { PreflightMonoPcm } from '../record/PreflightPcm';
 import { PostStopPlan, PostStopSyncPlan } from './PostStopSyncPlan';
 import { SLIDER_KEYS, decodeContinuousSliders, effectiveLadder } from '../ui/SliderSnap';
+import { CompareVersions, ReleaseJson, ReleaseNotes, UpdateConfig } from '../update/UpdateChecker';
+import { UpdateDownloadPure } from '../update/UpdatePure';
+import { Sha256 } from '../update/Sha256';
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -59,6 +62,7 @@ export class PureLogicBarrel {
     // Flow/Merge 无默认态可打印：走一次零副作用探针，让编译门覆盖其类型面
     PureLogicBarrel.arcRepairCompileProbe();
     PureLogicBarrel.syncSnapCompileProbe();
+    PureLogicBarrel.updateCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -102,6 +106,25 @@ export class PureLogicBarrel {
     const emptyPlan: PostStopPlan = PostStopSyncPlan.planFor([]);
     if (keyCount > 0 && badDecoded === 0 && ladderNull && alignSr > 0 &&
       preShiftUs > 0 && pcmFrames === 0 && emptyPlan !== undefined) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 更新器纯逻辑（update/UpdateChecker + UpdatePure + Sha256）的编译探针：
+   * 覆盖 tag→versionCode、说明整形、JSON 提取、渠道排序、URL 门槛与 SHA-256 向量。
+   */
+  private static updateCompileProbe(): void {
+    const vcode: number | undefined = CompareVersions.versionCodeOf('v0.0.10-r05');
+    const newer: boolean = CompareVersions.isNewerThanVersionCode(1000000, 'v0.0.10-r05');
+    const digest: string = Sha256.hexOf(new Uint8Array(0));
+    const candidates: number = UpdateDownloadPure
+      .downloadCandidates('https://x/y.hap', UpdateConfig.MIRROR_PREFIXES).length;
+    const safe: boolean = UpdateDownloadPure.isSafeRemoteUrl('https://api.github.com/x');
+    const notes: string | undefined = ReleaseNotes.forDisplay('## 标题\n- 条目');
+    const tag: string | undefined = ReleaseJson.parseTag('{"tag_name":"v1.0.0"}');
+    if (vcode !== undefined && newer && digest.length === 64 && candidates > 0 && safe &&
+      notes !== undefined && tag !== undefined) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

@@ -9,12 +9,21 @@
  * - 开发者入口默认隐藏：版本号 7 连点（2s 内）显形。
  *
  * 设置项：画幅/帧率/码率/光弧档/效果/HUD 网格，点选即保存（preferences，串行化）。
+ *
+ * 应用内更新（对齐上游 SettingsScreen 的 UpdateSection，2026-10-23）：关于卡内的「检查更新」行，
+ * 纯手动触发（不挂生命周期/进页面不自动检查）；说明经 ReleaseNotes 去 Markdown 后展示；
+ * 下载按测速排序选渠道，落盘后 PK 魔数 + 体积 + SHA-256 三重校验，完成后走系统文件选择器
+ * 另存，由用户在文件管理里交给系统安装器（OHOS 不开放三方拉起安装器，见 UpdateInstaller）。
  */
-import { common } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { WindowChrome } from '../ui/WindowChrome';
 import { SliderKey, decodeContinuousSliders, encodeContinuousSliders } from '../ui/SliderSnap';
+import { formatSize } from '../media/MediaFormat';
+import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
+import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
+import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
 
 /**
  * 滑杆吸附分组只列**有消费方**的 3 键（快门/感光度/色温，对齐上游 BlockSlider 的子集）；
@@ -72,7 +81,32 @@ struct Settings {
   private devTapCount: number = 0;
   private devTapStartMs: number = 0;
 
+  // ---- 应用内更新（对齐上游 SettingsScreen 的 UpdateSection：纯手动、不挂生命周期） ----
+  /** 行内状态：idle / checking / cancelling / latest / failed（有新版转对话框，行回 idle） */
+  @State updateRow: string = 'idle';
+  @State updatePromptVisible: boolean = false;
+  @State updateTag: string = '';
+  @State updateSizeText: string = '';
+  @State updateNotesText: string = '';
+  @State downloadVisible: boolean = false;
+  /** 正在给各渠道测速选路（还没开始真正下载，进度数字尚无意义） */
+  @State downloadMeasuring: boolean = false;
+  @State downloadDone: boolean = false;
+  @State downloadFailed: boolean = false;
+  @State downloadRead: number = 0;
+  @State downloadTotal: number = -1;
+  @State versionName: string = '1.0.0';
+  /** 版本号读不到时保持 0：任何可比 tag 都算「有新版」——宁可多提示一次，不漏更新 */
+  private versionCode: number = 0;
+  /** 探测取消探针（检查中点行 = 取消）；编排只在节点前查，置位后最坏再等一个探测超时 */
+  private probeCancelled: boolean = false;
+  /** 下载代际：每轮下载自增；旧代回调一律丢弃（取消/重开互不污染） */
+  private downloadGen: number = 0;
+  private pendingAvailable: ProbeResult | undefined = undefined;
+  private downloadedPath: string = '';
+
   aboutToAppear(): void {
+    this.readVersion();
     const ctx: common.Context | undefined = this.hostContext();
     if (ctx !== undefined) {
       // 设置页恢复黑底系统栏（相机页是全屏透明栏，离开相机页必须复位）
@@ -96,6 +130,182 @@ struct Settings {
 
   private hostContext(): common.Context | undefined {
     return this.getUIContext().getHostContext() as common.Context | undefined;
+  }
+
+  /** 版本号/版本码（更新比较用 versionCode：鸿蒙 versionName 不含 -rNN，见 UpdateChecker 文件头） */
+  private readVersion(): void {
+    try {
+      const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      this.versionName = info.versionName;
+      this.versionCode = info.versionCode;
+    } catch (e) {
+      this.versionName = '未知';
+      this.versionCode = 0;
+    }
+  }
+
+  /** 「检查更新」行尾状态文案（与上游 strings_settings.xml 同语义） */
+  private updateStatusText(): string {
+    if (this.updateRow === 'checking') {
+      return '检查中…';
+    }
+    if (this.updateRow === 'cancelling') {
+      return '取消中…';
+    }
+    if (this.updateRow === 'latest') {
+      return '已是最新版本';
+    }
+    if (this.updateRow === 'failed') {
+      return '检查失败，请稍后重试';
+    }
+    return '点此联网检查 GitHub 最新版';
+  }
+
+  /**
+   * 「检查更新」行点击：Idle → Checking →（Cancelling）→ Latest/Failed；
+   * Checking 时再点 = 取消（置取消探针，行等编排跳完剩余节点回来）。
+   * **纯手动纪律**：联网只由本方法触发，不挂生命周期/进页面自动检查。
+   */
+  private async onUpdateRowClick(): Promise<void> {
+    if (this.updateRow === 'checking') {
+      this.probeCancelled = true;
+      this.updateRow = 'cancelling';
+      return;
+    }
+    if (this.updateRow === 'cancelling' || this.downloadVisible) {
+      return;
+    }
+    this.probeCancelled = false;
+    this.updateRow = 'checking';
+    let r: ProbeResult;
+    try {
+      r = await probeLatestRelease(this.versionCode,
+        (url: string): Promise<string | undefined> =>
+          UpdateDownloader.fetchJson(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS),
+        (url: string): Promise<string | undefined> => UpdateDownloader.fetchRedirectLocation(url),
+        (): boolean => this.probeCancelled);
+    } catch (e) {
+      // 编排自身不该抛（网络层已全部收口）；真抛了也不能让行卡在「检查中…」
+      this.updateRow = 'failed';
+      return;
+    }
+    if (r.kind === ProbeKind.UPDATE_AVAILABLE) {
+      // 取消落在最后一个在飞请求窗口内 → 丢弃回执，不许凭空弹「发现新版本」
+      if (!this.probeCancelled) {
+        this.pendingAvailable = r;
+        this.updateTag = r.latestTag;
+        this.updateSizeText = r.sizeBytes > 0 ? formatSize(r.sizeBytes) : '大小未知';
+        const notes: string | undefined = ReleaseNotes.forDisplay(r.notes);
+        this.updateNotesText = notes === undefined ? '' : notes;
+        this.updatePromptVisible = true;
+      }
+      this.updateRow = 'idle';
+      return;
+    }
+    if (r.kind === ProbeKind.UP_TO_DATE) {
+      this.updateRow = this.probeCancelled ? 'idle' : 'latest';
+      return;
+    }
+    if (r.kind === ProbeKind.CANCELLED) {
+      this.updateRow = 'idle';
+      return;
+    }
+    this.updateRow = this.probeCancelled ? 'idle' : 'failed';
+  }
+
+  /** 开始下载（测速选路 → 进度 → 完成/失败）；每轮新建代际，旧代回调一律丢弃 */
+  private startDownload(): void {
+    const ctx: common.Context | undefined = this.hostContext();
+    const avail: ProbeResult | undefined = this.pendingAvailable;
+    if (ctx === undefined || avail === undefined) {
+      return;
+    }
+    this.updatePromptVisible = false;
+    this.downloadVisible = true;
+    this.downloadMeasuring = true;
+    this.downloadDone = false;
+    this.downloadFailed = false;
+    this.downloadRead = 0;
+    this.downloadTotal = avail.sizeBytes;
+    const gen: number = ++this.downloadGen;
+    UpdateDownloader.downloadPackage(ctx, avail.downloadUrl, avail.sizeBytes, avail.sha256,
+      (read: number, total: number): void => {
+        if (gen === this.downloadGen) {
+          this.downloadRead = read;
+          this.downloadTotal = total;
+        }
+      },
+      (): boolean => gen !== this.downloadGen,
+      (): void => {
+        if (gen === this.downloadGen) {
+          this.downloadMeasuring = false;
+        }
+      }).then((o: DownloadOutcome): void => {
+        if (gen !== this.downloadGen) {
+          return;
+        }
+        if (o.kind === DownloadKind.DONE) {
+          this.downloadedPath = o.path;
+          this.downloadRead = o.sizeBytes;
+          this.downloadTotal = o.sizeBytes;
+          this.downloadMeasuring = false;
+          this.downloadDone = true;
+          return;
+        }
+        if (o.kind === DownloadKind.CANCELLED) {
+          this.downloadVisible = false;
+          this.downloadMeasuring = false;
+          return;
+        }
+        this.downloadMeasuring = false;
+        this.downloadFailed = true;
+      });
+  }
+
+  /** 取消下载：自增代际 → 旧代 isCancelled 立即为真，迟到回执全部丢弃 */
+  private cancelDownload(): void {
+    this.downloadGen++;
+    this.downloadVisible = false;
+    this.downloadMeasuring = false;
+    this.downloadDone = false;
+    this.downloadFailed = false;
+  }
+
+  /** 另存到用户可见目录（文件管理里点按即交给系统安装器） */
+  private async saveUpdate(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined || this.downloadedPath === '') {
+      return;
+    }
+    const name: string = this.downloadedPath.substring(this.downloadedPath.lastIndexOf('/') + 1);
+    const r: SaveResult = await UpdateInstaller.saveAs(ctx, this.downloadedPath, name);
+    this.message = r.message;
+    if (r.ok) {
+      this.downloadVisible = false;
+    }
+  }
+
+  /** 打开 Release 页（浏览器兜底：没有可拉起的安装器时用） */
+  private async openReleasePage(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    const ok: boolean = await UpdateInstaller.openReleasePage(ctx, UpdateConfig.RELEASES_LATEST_PAGE);
+    if (!ok) {
+      this.message = '打开浏览器失败';
+    }
+  }
+
+  /** 下载进度文案（总长未知时退化为只显示已下体量） */
+  private downloadProgressText(): string {
+    const total: number = this.downloadTotal;
+    if (total > 0) {
+      const pct: number = Math.min(100, Math.floor(this.downloadRead * 100 / total));
+      return `${pct}% · 已下 ${formatSize(this.downloadRead)} / ${formatSize(total)}`;
+    }
+    return `已下 ${formatSize(this.downloadRead)}`;
   }
 
   /** 保存串行化：连点时只落最后一次快照，避免后发先至 */
@@ -257,132 +467,363 @@ struct Settings {
     .padding({ left: HudSpace.L, right: HudSpace.L, top: HudSpace.M })
   }
 
-  build() {
-    Column({ space: HudSpace.XS }) {
-      this.header()
-      // 保存提示：固定一行高度，出现/消失不推动下方列表（T31 布局稳定）
-      Text(this.message)
-        .fontSize(HudType.LABEL)
-        .fontColor(this.message.indexOf('失败') >= 0 ? HudColor.DANGER : HudColor.WARN)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-        .height(20)
-        .padding({ left: HudSpace.L, right: HudSpace.L })
+  /** 弹层遮罩：全屏压暗 + 居中卡片（点击卡片外不关，与上游弹窗的显式按钮一致） */
+  @Builder
+  private modalBackdrop() {
+    Column()
+      .width('100%')
+      .height('100%')
+      .backgroundColor(HudColor.SCRIM_STRONG)
+  }
 
-      if (this.loading) {
-        Column() {
-          LoadingProgress()
-            .width(32)
-            .height(32)
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .justifyContent(FlexAlign.Center)
-      } else {
-        // List + ListItem 天然顶对齐（旧 Scroll 内容垂直居中导致顶部大空白）
-        List({ space: HudSpace.M }) {
-          ListItem() {
-            this.optionGroup('画幅', ['1080p', '4K'], this.settings.sizeW >= 3840 ? 1 : 0,
-              (index: number): void => {
-                this.settings.sizeW = index === 1 ? 3840 : 1920;
-                this.settings.sizeH = index === 1 ? 2160 : 1080;
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.optionGroup('帧率', ['24', '25', '30'],
-              this.settings.fps === 24 ? 0 : (this.settings.fps === 25 ? 1 : 2),
-              (index: number): void => {
-                this.settings.fps = index === 0 ? 24 : (index === 1 ? 25 : 30);
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.optionGroup('码率', BITRATE_OPTIONS.map((o: BitrateOption): string => o.label),
-              this.bitrateIndex(),
-              (index: number): void => {
-                this.settings.bitrate = BITRATE_OPTIONS[index].value;
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.optionGroup('光弧（24/25fps）', ['补弧', '抽帧'], this.settings.arcMode === 2 ? 1 : 0,
-              (index: number): void => {
-                this.settings.arcMode = index === 1 ? 2 : 1;
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.optionGroup('效果', ['直通', '曲线', '斑马', '峰值'], this.settings.effect,
-              (index: number): void => {
-                this.settings.effect = index;
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.optionGroup('HUD 网格', ['开', '关'], this.settings.grid ? 0 : 1,
-              (index: number): void => {
-                this.settings.grid = index === 0;
-                this.persist();
-              })
-          }
-          ListItem() {
-            this.sliderSnapGroup()
-          }
-          ListItem() {
-            Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')
+  /** 更新可用提示框：版本号 + 包体大小 + 说明（限高滚动）+ 取消/下载 */
+  @Builder
+  private updatePromptDialog() {
+    Stack({ alignContent: Alignment.Center }) {
+      this.modalBackdrop()
+      Column({ space: HudSpace.M }) {
+        Text('发现新版本')
+          .fontSize(HudType.TITLE)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .width('100%')
+        Text(`新版本 ${this.updateTag} · HAP ${this.updateSizeText}`)
+          .fontSize(HudType.VALUE)
+          .fontColor(HudColor.TEXT_SECONDARY)
+          .width('100%')
+        if (this.updateNotesText !== '') {
+          Text('更新内容')
+            .fontSize(HudType.LABEL)
+            .fontColor(HudColor.TEXT_TERTIARY)
+            .width('100%')
+          Scroll() {
+            Text(this.updateNotesText)
               .fontSize(HudType.LABEL)
-              .fontColor(HudColor.TEXT_TERTIARY)
-              .padding({ left: HudSpace.L, right: HudSpace.L })
+              .fontColor(HudColor.TEXT_SECONDARY)
+              .width('100%')
           }
-          ListItem() {
-            Column({ space: HudSpace.XS }) {
-              Text('版本 1.0.0')
+          .width('100%')
+          // 说明区限高：上百行说明也不把按钮顶出屏幕（对齐上游 min(40% 窗高, 260dp)）
+          .constraintSize({ maxHeight: 260 })
+          .align(Alignment.TopStart)
+        }
+        Row({ space: HudSpace.S }) {
+          Button('取消')
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_SECONDARY)
+            .height(HudTouch.BUTTON_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .backgroundColor(HudColor.PILL_BG)
+            .layoutWeight(1)
+            .onClick((): void => {
+              this.updatePromptVisible = false;
+              this.pendingAvailable = undefined;
+            })
+          Button('下载更新')
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_PRIMARY)
+            .height(HudTouch.BUTTON_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .backgroundColor(HudColor.ACCENT)
+            .layoutWeight(1)
+            .onClick((): void => {
+              this.startDownload();
+            })
+        }
+        .width('100%')
+        .margin({ top: HudSpace.S })
+      }
+      .width('86%')
+      .padding(HudSpace.XL)
+      .backgroundColor(HudColor.CARD_BG)
+      .borderRadius(HudShape.CARD_RADIUS)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 下载对话框：选路 → 进度 → 完成（保存/打开下载页）→ 失败，四态 */
+  @Builder
+  private downloadDialog() {
+    Stack({ alignContent: Alignment.Center }) {
+      this.modalBackdrop()
+      Column({ space: HudSpace.M }) {
+        Text(this.downloadDone ? '下载完成，可以安装'
+          : (this.downloadFailed ? '下载失败，请稍后重试'
+            : (this.downloadMeasuring ? '正在选择最快的下载通道…' : '正在下载更新')))
+          .fontSize(HudType.TITLE)
+          .fontColor(this.downloadFailed ? HudColor.DANGER : HudColor.TEXT_PRIMARY)
+          .width('100%')
+        if (this.downloadMeasuring) {
+          LoadingProgress()
+            .width(36)
+            .height(36)
+          Row() {
+            this.dialogCancelButton()
+          }
+          .width('100%')
+        } else if (this.downloadDone) {
+          Text(`更新包 ${formatSize(this.downloadRead)} 已校验通过，另存后用文件管理打开安装`)
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_SECONDARY)
+            .width('100%')
+          Button('保存到文件（安装）')
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_PRIMARY)
+            .height(HudTouch.BUTTON_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .backgroundColor(HudColor.ACCENT)
+            .width('100%')
+            .onClick((): void => {
+              this.saveUpdate();
+            })
+          Row({ space: HudSpace.S }) {
+            Button('打开下载页')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_SECONDARY)
+              .height(HudTouch.BUTTON_HEIGHT)
+              .borderRadius(HudShape.PILL_RADIUS)
+              .backgroundColor(HudColor.PILL_BG)
+              .layoutWeight(1)
+              .onClick((): void => {
+                this.openReleasePage();
+              })
+            Button('关闭')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_SECONDARY)
+              .height(HudTouch.BUTTON_HEIGHT)
+              .borderRadius(HudShape.PILL_RADIUS)
+              .backgroundColor(HudColor.PILL_BG)
+              .layoutWeight(1)
+              .onClick((): void => {
+                this.downloadVisible = false;
+              })
+          }
+          .width('100%')
+        } else if (this.downloadFailed) {
+          Row() {
+            Button('关闭')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_SECONDARY)
+              .height(HudTouch.BUTTON_HEIGHT)
+              .borderRadius(HudShape.PILL_RADIUS)
+              .backgroundColor(HudColor.PILL_BG)
+              .width('100%')
+              .onClick((): void => {
+                this.downloadVisible = false;
+              })
+          }
+          .width('100%')
+        } else {
+          Text(this.downloadProgressText())
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_SECONDARY)
+            .width('100%')
+          if (this.downloadTotal > 0) {
+            Progress({
+              value: Math.min(this.downloadRead, this.downloadTotal),
+              total: this.downloadTotal,
+              type: ProgressType.Linear
+            })
+              .width('100%')
+              .color(HudColor.ACCENT)
+              .backgroundColor(HudColor.DIVIDER)
+          } else {
+            LoadingProgress()
+              .width(36)
+              .height(36)
+          }
+          Row() {
+            this.dialogCancelButton()
+          }
+          .width('100%')
+        }
+      }
+      .width('86%')
+      .padding(HudSpace.XL)
+      .backgroundColor(HudColor.CARD_BG)
+      .borderRadius(HudShape.CARD_RADIUS)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  private dialogCancelButton() {
+    Button('取消')
+      .fontSize(HudType.VALUE)
+      .fontColor(HudColor.TEXT_SECONDARY)
+      .height(HudTouch.BUTTON_HEIGHT)
+      .borderRadius(HudShape.PILL_RADIUS)
+      .backgroundColor(HudColor.PILL_BG)
+      .layoutWeight(1)
+      .onClick((): void => {
+        this.cancelDownload();
+      })
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: HudSpace.XS }) {
+        this.header()
+        // 保存提示：固定一行高度，出现/消失不推动下方列表（T31 布局稳定）
+        Text(this.message)
+          .fontSize(HudType.LABEL)
+          .fontColor(this.message.indexOf('失败') >= 0 ? HudColor.DANGER : HudColor.WARN)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .height(20)
+          .padding({ left: HudSpace.L, right: HudSpace.L })
+
+        if (this.loading) {
+          Column() {
+            LoadingProgress()
+              .width(32)
+              .height(32)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else {
+          // List + ListItem 天然顶对齐（旧 Scroll 内容垂直居中导致顶部大空白）
+          List({ space: HudSpace.M }) {
+            ListItem() {
+              this.optionGroup('画幅', ['1080p', '4K'], this.settings.sizeW >= 3840 ? 1 : 0,
+                (index: number): void => {
+                  this.settings.sizeW = index === 1 ? 3840 : 1920;
+                  this.settings.sizeH = index === 1 ? 2160 : 1080;
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.optionGroup('帧率', ['24', '25', '30'],
+                this.settings.fps === 24 ? 0 : (this.settings.fps === 25 ? 1 : 2),
+                (index: number): void => {
+                  this.settings.fps = index === 0 ? 24 : (index === 1 ? 25 : 30);
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.optionGroup('码率', BITRATE_OPTIONS.map((o: BitrateOption): string => o.label),
+                this.bitrateIndex(),
+                (index: number): void => {
+                  this.settings.bitrate = BITRATE_OPTIONS[index].value;
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.optionGroup('光弧（24/25fps）', ['补弧', '抽帧'], this.settings.arcMode === 2 ? 1 : 0,
+                (index: number): void => {
+                  this.settings.arcMode = index === 1 ? 2 : 1;
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.optionGroup('效果', ['直通', '曲线', '斑马', '峰值'], this.settings.effect,
+                (index: number): void => {
+                  this.settings.effect = index;
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.optionGroup('HUD 网格', ['开', '关'], this.settings.grid ? 0 : 1,
+                (index: number): void => {
+                  this.settings.grid = index === 0;
+                  this.persist();
+                })
+            }
+            ListItem() {
+              this.sliderSnapGroup()
+            }
+            ListItem() {
+              Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')
                 .fontSize(HudType.LABEL)
                 .fontColor(HudColor.TEXT_TERTIARY)
-                .onClick((): void => {
-                  this.onVersionTap();
-                })
-              if (this.devUnlocked) {
-                Row({ space: HudSpace.S }) {
-                  Button('开发者: Index')
-                    .fontSize(HudType.LABEL)
-                    .fontColor(HudColor.TEXT_SECONDARY)
-                    .height(HudTouch.BUTTON_HEIGHT)
-                    .borderRadius(HudShape.PILL_RADIUS)
-                    .backgroundColor(HudColor.PILL_BG)
-                    .padding({ left: 12, right: 12 })
-                    .onClick((): void => {
-                      this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' });
-                    })
-                  Button('开发者: GL 试验')
-                    .fontSize(HudType.LABEL)
-                    .fontColor(HudColor.TEXT_SECONDARY)
-                    .height(HudTouch.BUTTON_HEIGHT)
-                    .borderRadius(HudShape.PILL_RADIUS)
-                    .backgroundColor(HudColor.PILL_BG)
-                    .padding({ left: 12, right: 12 })
-                    .onClick((): void => {
-                      this.getUIContext().getRouter().pushUrl({ url: 'pages/GlPreview' });
-                    })
+                .padding({ left: HudSpace.L, right: HudSpace.L })
+            }
+            ListItem() {
+              Column({ space: HudSpace.XS }) {
+                this.updateRowCard()
+                Text(`版本 ${this.versionName}`)
+                  .fontSize(HudType.LABEL)
+                  .fontColor(HudColor.TEXT_TERTIARY)
+                  .onClick((): void => {
+                    this.onVersionTap();
+                  })
+                if (this.devUnlocked) {
+                  Row({ space: HudSpace.S }) {
+                    Button('开发者: Index')
+                      .fontSize(HudType.LABEL)
+                      .fontColor(HudColor.TEXT_SECONDARY)
+                      .height(HudTouch.BUTTON_HEIGHT)
+                      .borderRadius(HudShape.PILL_RADIUS)
+                      .backgroundColor(HudColor.PILL_BG)
+                      .padding({ left: 12, right: 12 })
+                      .onClick((): void => {
+                        this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' });
+                      })
+                    Button('开发者: GL 试验')
+                      .fontSize(HudType.LABEL)
+                      .fontColor(HudColor.TEXT_SECONDARY)
+                      .height(HudTouch.BUTTON_HEIGHT)
+                      .borderRadius(HudShape.PILL_RADIUS)
+                      .backgroundColor(HudColor.PILL_BG)
+                      .padding({ left: 12, right: 12 })
+                      .onClick((): void => {
+                        this.getUIContext().getRouter().pushUrl({ url: 'pages/GlPreview' });
+                      })
+                  }
                 }
               }
+              .width('100%')
+              .alignItems(HorizontalAlign.Start)
+              .padding({ left: HudSpace.L, right: HudSpace.L, bottom: 24 })
             }
-            .width('100%')
-            .alignItems(HorizontalAlign.Start)
-            .padding({ left: HudSpace.L, right: HudSpace.L, bottom: 24 })
           }
+          .layoutWeight(1)
+          .width('100%')
+          .padding({ left: HudSpace.L, right: HudSpace.L })
+          .scrollBar(BarState.Off)
         }
-        .layoutWeight(1)
-        .width('100%')
-        .padding({ left: HudSpace.L, right: HudSpace.L })
-        .scrollBar(BarState.Off)
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(HudColor.BLACK)
+
+      if (this.updatePromptVisible) {
+        this.updatePromptDialog()
+      }
+      if (this.downloadVisible) {
+        this.downloadDialog()
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(HudColor.BLACK)
+  }
+
+  /**
+   * 「检查更新」行（关于卡内、版本行上方）：纯手动——探测/下载只由本行点击触发，
+   * 不挂任何生命周期观察者（上游 UpdateNetworkGuardTest 的纪律在鸿蒙侧靠此结构保持）。
+   */
+  @Builder
+  private updateRowCard() {
+    Row() {
+      Text('检查更新')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_PRIMARY)
+        .layoutWeight(1)
+      Text(this.updateStatusText())
+        .fontSize(HudType.LABEL)
+        .fontColor(this.updateRow === 'failed' ? HudColor.DANGER : HudColor.TEXT_TERTIARY)
+    }
+    .width('100%')
+    .height(HudTouch.BUTTON_HEIGHT)
+    .padding({ left: HudSpace.L, right: HudSpace.L })
+    .borderRadius(HudShape.PILL_RADIUS)
+    .backgroundColor(HudColor.PILL_BG)
+    .onClick((): void => {
+      this.onUpdateRowClick();
+    })
   }
 
   private bitrateIndex(): number {
