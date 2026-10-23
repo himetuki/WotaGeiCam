@@ -8,6 +8,7 @@
 import { common } from '@kit.AbilityKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
+import { GalleryEntry, expandSeriesTargets, galleryEntries } from '../media/SeriesGroup';
 import { formatDuration, formatSize } from '../media/MediaFormat';
 import { WindowChrome } from '../ui/WindowChrome';
 
@@ -261,6 +262,23 @@ struct Gallery {
     return '先在 GL 试验页录制一段 GPU 视频';
   }
 
+  // ------------------------------------------------------------------ 分段归组（上游 SeriesGroup）
+
+  /** 当前页签的展示单元（分段合并成一条；单片与今天逐字等价） */
+  private entryList(): Array<GalleryEntry> {
+    return galleryEntries(this.clips);
+  }
+
+  /** 组级动作扇出：点在代表段上，真正动到整组所有可见成员 */
+  private seriesTargets(clip: VideoClip): Array<VideoClip> {
+    return expandSeriesTargets([clip], this.clips);
+  }
+
+  /** 动作结果提示：组级动作补一句段数，避免用户以为只动了一段 */
+  private actionNotice(base: string, moved: number): string {
+    return moved > 1 ? `${base}（含 ${moved} 段）` : base;
+  }
+
   private openPlayer(clip: VideoClip): void {
     try {
       this.getUIContext().getRouter().pushUrl({ url: 'pages/Player', params: { id: clip.id, path: clip.path } });
@@ -285,9 +303,14 @@ struct Gallery {
     }
     this.actionBusy = true;
     try {
-      const ok: boolean = await repo.setLike(clip, !clip.liked);
-      const notice: string = ok ? (clip.liked ? '已取消收藏' : '已收藏') : '收藏操作失败（数据库不可用）';
-      await this.refreshAll(notice);
+      // 组级扇出：代表段上的收藏状态对整组生效（上游 expandSeriesTargets 语义）
+      const targets: Array<VideoClip> = this.seriesTargets(clip);
+      let ok: boolean = true;
+      for (const t of targets) {
+        ok = (await repo.setLike(t, !clip.liked)) && ok;
+      }
+      const base: string = ok ? (clip.liked ? '已取消收藏' : '已收藏') : '收藏操作失败（数据库不可用）';
+      await this.refreshAll(this.actionNotice(base, targets.length));
     } finally {
       this.actionBusy = false;
     }
@@ -300,9 +323,13 @@ struct Gallery {
     }
     this.actionBusy = true;
     try {
-      const ok: boolean = await repo.moveToTrash(clip);
-      const notice: string = ok ? '已移入回收站（文件仍保留）' : '移入回收站失败';
-      await this.refreshAll(notice);
+      const targets: Array<VideoClip> = this.seriesTargets(clip);
+      let ok: boolean = true;
+      for (const t of targets) {
+        ok = (await repo.moveToTrash(t)) && ok;
+      }
+      const base: string = ok ? '已移入回收站（文件仍保留）' : '移入回收站失败';
+      await this.refreshAll(this.actionNotice(base, targets.length));
     } finally {
       this.actionBusy = false;
     }
@@ -315,18 +342,26 @@ struct Gallery {
     }
     this.actionBusy = true;
     try {
-      const ok: boolean = await repo.restore(clip.path);
-      const notice: string = ok ? '已还原' : '还原失败';
-      await this.refreshAll(notice);
+      const targets: Array<VideoClip> = this.seriesTargets(clip);
+      let ok: boolean = true;
+      for (const t of targets) {
+        ok = (await repo.restore(t.path)) && ok;
+      }
+      const base: string = ok ? '已还原' : '还原失败';
+      await this.refreshAll(this.actionNotice(base, targets.length));
     } finally {
       this.actionBusy = false;
     }
   }
 
   private confirmDelete(clip: VideoClip): void {
+    const targets: Array<VideoClip> = this.seriesTargets(clip);
+    const scope: string = targets.length > 1
+      ? `本组 ${targets.length} 段的文件与同名 .drops.json 将被永久删除：\n${clip.name}` :
+      `文件与同名 .drops.json 将被永久删除：\n${clip.name}`;
     this.getUIContext().showAlertDialog({
       title: '彻底删除',
-      message: `文件与同名 .drops.json 将被永久删除：\n${clip.name}`,
+      message: scope,
       primaryButton: {
         value: '取消',
         action: (): void => {
@@ -349,9 +384,13 @@ struct Gallery {
     }
     this.actionBusy = true;
     try {
-      const ok: boolean = await repo.deleteForever(clip);
-      const notice: string = ok ? '已彻底删除' : '删除未完全成功（部分文件/记录失败，详见日志）';
-      await this.refreshAll(notice);
+      const targets: Array<VideoClip> = this.seriesTargets(clip);
+      let ok: boolean = true;
+      for (const t of targets) {
+        ok = (await repo.deleteForever(t)) && ok;
+      }
+      const base: string = ok ? '已彻底删除' : '删除未完全成功（部分文件/记录失败，详见日志）';
+      await this.refreshAll(this.actionNotice(base, targets.length));
     } finally {
       this.actionBusy = false;
     }
@@ -484,14 +523,21 @@ struct Gallery {
         .padding(24)
       } else {
         List({ space: 8 }) {
-          ForEach(this.clips, (clip: VideoClip): void => {
+          // 分段归组（上游 SeriesGroup.galleryEntries）：同一次录制的多段折成一张卡，
+          // 代表段 = partIndex 最小者；只剩 1 段时自动退化成单条（与扁平列表逐字等价）。
+          ForEach(this.entryList(), (entry: GalleryEntry): void => {
             ListItem() {
               Column({ space: 6 }) {
                 Row({ space: 10 }) {
-                  Column() {
+                  Column({ space: 1 }) {
                     Text('MP4')
                       .fontSize(12)
                       .fontColor(Color.White)
+                    if (entry.seriesCount() !== undefined) {
+                      Text(`${entry.seriesCount()} 段`)
+                        .fontSize(9)
+                        .fontColor('#FFCC80')
+                    }
                   }
                   .width(52)
                   .height(52)
@@ -499,21 +545,22 @@ struct Gallery {
                   .backgroundColor('#37474F')
                   .borderRadius(6)
                   .onClick((): void => {
-                    this.openPlayer(clip);
+                    this.openPlayer(entry.clip);
                   })
 
                   Column({ space: 2 }) {
-                    Text(clip.liked ? `★ ${clip.name}` : clip.name)
+                    Text(entry.clip.liked ? `★ ${entry.title()}` : entry.title())
                       .fontSize(13)
                       .fontColor(Color.White)
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(`${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)} · ` +
-                      `${formatDate(clip.dateAddedSec)}`)
+                    Text(`${entry.seriesCount() !== undefined
+                      ? `${entry.seriesCount()} 段 · ` : ''}${formatDuration(entry.totalDurationMs())} · ` +
+                      `${formatSize(entry.clip.sizeBytes)} · ${formatDate(entry.clip.dateAddedSec)}`)
                       .fontSize(10)
                       .fontColor('#B0BEC5')
-                    if (clip.width > 0 && clip.height > 0) {
-                      Text(`${clip.width}x${clip.height}`)
+                    if (entry.clip.width > 0 && entry.clip.height > 0) {
+                      Text(`${entry.clip.width}x${entry.clip.height}`)
                         .fontSize(10)
                         .fontColor('#78909C')
                     }
@@ -521,17 +568,18 @@ struct Gallery {
                   .layoutWeight(1)
                   .alignItems(HorizontalAlign.Start)
                   .onClick((): void => {
-                    this.openPlayer(clip);
+                    this.openPlayer(entry.clip);
                   })
                 }
-                this.actionRow(clip)
+                this.actionRow(entry.clip)
               }
               .width('100%')
               .padding(10)
               .backgroundColor('#1F1F1F')
               .borderRadius(8)
             }
-          }, (clip: VideoClip): string => clip.path)
+          }, (entry: GalleryEntry): string =>
+            entry.seriesId === undefined ? entry.clip.path : `series_${entry.seriesId}`)
         }
         .layoutWeight(1)
         .width('100%')
