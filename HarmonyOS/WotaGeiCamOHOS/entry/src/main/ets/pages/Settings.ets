@@ -14,6 +14,28 @@ import { common } from '@kit.AbilityKit';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { WindowChrome } from '../ui/WindowChrome';
+import { SliderKey, decodeContinuousSliders, encodeContinuousSliders } from '../ui/SliderSnap';
+
+/**
+ * 滑杆吸附分组只列**有消费方**的 3 键（快门/感光度/色温，对齐上游 BlockSlider 的子集）；
+ * ZOOM/TINT/DIOPTER/PEAKING 在键表（ui/SliderSnap.ets）中存在、UI 留白——对应上游
+ * 七 chip，待变焦/对焦等胶囊批次接入后自动列全（登记差异）。
+ */
+class SliderSnapEntry {
+  key: SliderKey;
+  label: string;
+
+  constructor(key: SliderKey, label: string) {
+    this.key = key;
+    this.label = label;
+  }
+}
+
+const SLIDER_SNAP_ENTRIES: Array<SliderSnapEntry> = [
+  new SliderSnapEntry(SliderKey.SHUTTER, '快门速度'),
+  new SliderSnapEntry(SliderKey.ISO, '感光度'),
+  new SliderSnapEntry(SliderKey.KELVIN, '色温')
+];
 
 class BitrateOption {
   label: string;
@@ -122,6 +144,23 @@ struct Settings {
     }
   }
 
+  /** 该滑杆当前是否为「连续值」模式（选中 = 不吸附刻度）；缺键/坏串 = 未选中 */
+  private sliderSnapOn(key: SliderKey): boolean {
+    return decodeContinuousSliders(this.settings.sliderContinuous).has(key);
+  }
+
+  /** 切换某参数的吸附开关并整串写回 prefs（点选 = 该参数改用连续值） */
+  private toggleSliderSnap(key: SliderKey): void {
+    const next: Set<SliderKey> = decodeContinuousSliders(this.settings.sliderContinuous);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    this.settings.sliderContinuous = encodeContinuousSliders(next);
+    this.persist();
+  }
+
   /** 分组卡片：标题 13fp + 选项 Flex 换行（全部 48vp 高） */
   @Builder
   private optionGroup(title: string, options: Array<string>, selected: number,
@@ -146,6 +185,46 @@ struct Settings {
               onPick(index);
             })
         }, (label: string): string => label)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
+  /**
+   * 滑杆吸附分组（对齐上游 0dee86d SettingsBlock.SLIDER，紧跟「HUD 网格」之后）：
+   * 默认每根滑杆拖动必落刻度，这里可逐个参数改成连续值。选中 = 该参数改用连续值
+   * （不吸附）。曝光补偿本身按整数逐格取值，连续与梯等价，不列出。
+   */
+  @Builder
+  private sliderSnapGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('滑杆吸附')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Text('默认每根滑杆拖动都会吸附到刻度；点选某个参数后它的滑杆改为连续值，可以停在任意位置（例如色温 5350K）。曝光补偿本身按整数逐格取值，不在此列。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(SLIDER_SNAP_ENTRIES, (entry: SliderSnapEntry, _index: number): void => {
+          Button(entry.label)
+            .fontSize(HudType.VALUE)
+            .fontColor(this.sliderSnapOn(entry.key) ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({ width: 1, color: this.sliderSnapOn(entry.key) ? HudColor.ACCENT : HudColor.DIVIDER })
+            .backgroundColor(this.sliderSnapOn(entry.key) ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              this.toggleSliderSnap(entry.key);
+            })
+        }, (entry: SliderSnapEntry): string => entry.label)
       }
       .width('100%')
     }
@@ -247,6 +326,9 @@ struct Settings {
                 this.settings.grid = index === 0;
                 this.persist();
               })
+          }
+          ListItem() {
+            this.sliderSnapGroup()
           }
           ListItem() {
             Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')

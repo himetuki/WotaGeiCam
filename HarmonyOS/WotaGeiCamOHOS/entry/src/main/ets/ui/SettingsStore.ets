@@ -1,14 +1,19 @@
 /**
  * 相机默认设置持久化（@ohos.data.preferences；键独立于上游 ParamsPersist，登记差异）。
- * 只持久化 6 项最小设置：画幅/帧率/码率/光弧/网格/效果；表情/曲线等复杂参数不持久化。
+ * 只持久化最小设置：画幅/帧率/码率/光弧/网格/效果 + 滑杆吸附开关（slider_continuous，
+ * 对齐上游 0dee86d KEY_SLIDER_CONTINUOUS 语义：存「关掉吸附」的参数 id 集合编码串，
+ * 缺键/坏串 = 空集 = 全部吸附）；表情/曲线等复杂参数不持久化。
  * 读取失败/类型异常回默认值；保存失败记日志不抛。
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { Diag } from '../diag/Diag';
+import { SliderKey, decodeContinuousSliders } from './SliderSnap';
 
 const STORE_NAME: string = 'wota_camera_settings';
 const TAG: string = 'WotaSettings';
+/** 滑杆吸附开关的 prefs 键（编码串见 ui/SliderSnap.ets；缺键 = 全部吸附） */
+const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
 
 export class CameraSettings {
   sizeW: number = 1920;
@@ -21,6 +26,8 @@ export class CameraSettings {
   grid: boolean = true;
   /** 0直通/1曲线/2斑马/3峰值 */
   effect: number = 0;
+  /** 关掉刻度吸附（改连续值）的滑杆集合编码串；空串 = 全部吸附 */
+  sliderContinuous: string = '';
 }
 
 function asInt(value: number, fallback: number): number {
@@ -40,6 +47,9 @@ export class SettingsStore {
       const gridRaw: preferences.ValueType = await store.get('grid', s.grid);
       s.grid = typeof gridRaw === 'boolean' ? gridRaw as boolean : s.grid;
       s.effect = asInt(await store.get('effect', s.effect) as number, s.effect);
+      // 坏串原样保留，读取口逐次 decode（空/坏 = 空集 = 全部吸附），与上游语义一致
+      const sliderRaw: preferences.ValueType = await store.get(KEY_SLIDER_CONTINUOUS, s.sliderContinuous);
+      s.sliderContinuous = typeof sliderRaw === 'string' ? sliderRaw as string : '';
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -77,11 +87,28 @@ export class SettingsStore {
       await store.put('arcMode', s.arcMode);
       await store.put('grid', s.grid);
       await store.put('effect', s.effect);
+      await store.put(KEY_SLIDER_CONTINUOUS, s.sliderContinuous);
       await store.flush();
       return true;
     } catch (e) {
       Diag.w(TAG, `save settings failed: ${e}`);
       return false;
+    }
+  }
+
+  /**
+   * 关掉刻度吸附（改连续值）的滑杆集合：弹窗打开时（PillSlider aboutToAppear）同步读，
+   * 缺键/坏读 = 空集 = 全部吸附（现行为）。弹窗每次打开重建组件 = 重读，设置页改动
+   * 下一次开窗即生效，不需要通知机制（上游 rememberSliderContinuous 同款语义）。
+   */
+  static sliderContinuousKeys(ctx: common.Context): Set<SliderKey> {
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: STORE_NAME } as preferences.Options);
+      return decodeContinuousSliders(store.getSync(KEY_SLIDER_CONTINUOUS, '') as string);
+    } catch (e) {
+      Diag.w(TAG, `read slider_continuous failed, all snapped: ${e}`);
+      return new Set<SliderKey>();
     }
   }
 }

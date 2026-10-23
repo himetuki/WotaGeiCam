@@ -12,9 +12,17 @@
  * SheetSpec；锚点量取从 Compose onGloballyPositioned(boundsInWindow) 换成
  * getUIContext().getComponentUtils().getRectangleById(id)（窗口坐标系 px，同一语义）。
  * 取不到锚点（首帧未量到/id 失效/异常）回退底贴屏居中——回退分支必须存在。
+ *
+ * 滑杆吸附开关（snapKey / 连续值退回）对齐上游 0dee86d：PillSlider 增加必传语义的
+ * snapKey（上游 Kotlin 是无默认值形参；ArkTS struct 成员必须给默认值，无法编译期强制
+ * 必传——缺省 null = 恒吸附，漏挂由接线单测逐调用点点名守卫，登记差异）；吸附关掉 →
+ * effectiveLadder 判 null → 滑杆退回 lo..hi 连续区间、按上游同式 step 量化。
  */
 import { display } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { nearestLadderIndex } from './SliderLadder';
+import { SliderKey, effectiveLadder } from './SliderSnap';
+import { SettingsStore } from './SettingsStore';
 import { HudType } from './HudTokens';
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内（上游 0.62f） */
@@ -277,10 +285,15 @@ export struct PillChoices {
 }
 
 /**
- * 弹窗内的刻度滑杆（上游 PillSlider 的 ladder 档位路径）：
+ * 弹窗内的刻度滑杆（上游 PillSlider 直译，滑杆吸附开关对齐上游 0dee86d）：
  * - 梯（升序、已按运行时范围过滤）有效时滑杆在索引空间 0..size-1 内运行，
  *   松手/拖动回调都换回梯值——写进参数总线的值必为刻度值；
- * - 梯不足 2 点时不许静默退回连续滑杆（否则拖动可写出非刻度值，违反
+ * - snapKey 是「吸附开关」标识（设置页可逐个参数改成连续值）：null = 该参数的取值域
+ *   本身就是逐格整数（曝光补偿等），没有可关的吸附；非 null 且用户在设置页关掉了它 →
+ *   effectiveLadder 判 null → 滑杆退回 lo..hi 连续区间（按 step 量化），读数与写回值
+ *   都能落在梯档之间（例如色温 5350K）。弹窗每次打开重建组件 = 重读设置，改动下一次
+ *   开窗即生效，不需要通知机制；
+ * - 吸附模式下梯不足 2 点时不许静默退回连续滑杆（否则拖动可写出非刻度值，违反
  *   "拖动必落刻度"的验收口径）——禁用占位比假连续诚实（上游审查 P3 同款）；
  * - 当前值不在梯上（旧持久化恢复）时滑杆停在最近刻度，读数仍显示真实值。
  */
@@ -290,13 +303,62 @@ export struct PillSlider {
   lo: number = 0;
   hi: number = 1;
   ladder: Array<number> = [];
+  /**
+   * 吸附开关标识：null = 整数域参数（如 EV），不可连续化。上游是 Kotlin 无默认值必传形参；
+   * ArkTS struct 成员必须给默认值（编译器强检），无法编译期强制必传——缺省 null = 恒吸附
+   * （= 开关引入前的现行为，安全退化），漏挂由 slider-snap 纯测逐调用点点名守卫。
+   */
+  snapKey: SliderKey | null = null;
+  /** 连续模式的量化步长（上游 step: Float = 0f；0 = 不量化） */
+  step: number = 0;
   onValueChange: (v: number) => void = (_v: number): void => {};
   formatLabel: (v: number) => string = (v: number): string => `${v}`;
   active: boolean = true;
   sliderLabel: string = '';
+  /** 本弹窗打开时该参数是否为「连续值」模式（aboutToAppear 读一次 prefs） */
+  private continuous: boolean = false;
+
+  aboutToAppear(): void {
+    this.continuous = this.readContinuous();
+  }
+
+  /** 弹窗打开时从设置读连续开关：snapKey null / 读不到上下文 / 坏读 = 吸附（现行为） */
+  private readContinuous(): boolean {
+    if (this.snapKey === null) {
+      return false;
+    }
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctx === undefined) {
+      return false;
+    }
+    return SettingsStore.sliderContinuousKeys(ctx).has(this.snapKey);
+  }
+
+  /** 桥函数入口：开关关掉吸附 → 梯按 null 处理（连续区间）；否则原梯（同一引用） */
+  private ladderInUse(): Array<number> | null {
+    return effectiveLadder(this.ladder, this.continuous);
+  }
 
   private ticks(): Array<number> {
-    return this.ladder !== undefined && this.ladder.length >= 2 ? this.ladder : [];
+    const inUse: Array<number> | null = this.ladderInUse();
+    return inUse !== null && inUse.length >= 2 ? inUse : [];
+  }
+
+  /** 梯被开关判 null（连续模式）且区间可用 → 可退回 lo..hi 连续区间 */
+  private continuousUsable(): boolean {
+    return this.ladderInUse() === null && this.usable();
+  }
+
+  /**
+   * 连续值按上游同式量化（ParamSlider.kt snap 直译）：
+   * lo + round((v-lo)/step)*step，再钳回 lo..hi；step<=0 原样返回。
+   */
+  private snapValue(v: number): number {
+    if (this.step <= 0) {
+      return v;
+    }
+    const q: number = this.lo + Math.round((v - this.lo) / this.step) * this.step;
+    return Math.min(this.hi, Math.max(this.lo, q));
   }
 
   private usable(): boolean {
@@ -341,8 +403,26 @@ export struct PillSlider {
               // 梯值也必须落在参数域内：梯构造一般已按 range 过滤，这里是最后一道闸
               this.onValueChange(this.usable() ? Math.min(this.hi, Math.max(this.lo, tick)) : tick);
             })
+        } else if (this.continuousUsable()) {
+          // 吸附关掉：梯按 null 处理 → 退回 lo..hi 连续区间，写回值按 step 量化
+          Slider({
+            value: this.shownValue(),
+            min: this.lo,
+            max: this.hi,
+            step: 0,
+            style: SliderStyle.InSet
+          })
+            .layoutWeight(1)
+            .constraintSize({ maxWidth: 220 })
+            .selectedColor('#FF0A59F7')
+            .trackColor('#33FFFFFF')
+            .enabled(this.active)
+            .onChange((raw: number, _mode: SliderChangeMode): void => {
+              const v: number = Math.min(this.hi, Math.max(this.lo, raw));
+              this.onValueChange(this.snapValue(v));
+            })
         } else {
-          // 梯不足 2 点：禁用占位（不退回连续滑杆）
+          // 吸附模式下梯不足 2 点：禁用占位（不退回连续滑杆）
           Slider({ value: 0, min: 0, max: 1, step: 1, style: SliderStyle.InSet })
             .layoutWeight(1)
             .constraintSize({ maxWidth: 220 })

@@ -16,6 +16,7 @@ import { ParamState, WotaParams } from '../core/WotaParams';
 import { evLadder, isoLadder, kelvinLadder, shutterLadder } from './SliderLadder';
 import { TierItem, aeLabel, evText, shutterItems, shutterText, wbLabel } from './ParamFormat';
 import { PillChoices, PillNote, PillOption, PillRect, PillSlider, WotaPillPopup } from './PillPopup';
+import { SliderKey } from './SliderSnap';
 
 /**
  * 录制中仍可调参的白名单（对拍上游 CameraPills.kt:104 RECORDING_EDITABLE_PILLS）：
@@ -155,6 +156,8 @@ export struct ShutterPillPopup {
             current: this.shutterNs,
             lo: this.loNs,
             hi: this.hiNs,
+            snapKey: SliderKey.SHUTTER,
+            step: 1000,
             ladder: this.ladder,
             active: this.editable,
             onValueChange: (tick: number): void => {
@@ -232,6 +235,8 @@ export struct IsoPillPopup {
           current: this.iso,
           lo: this.lo,
           hi: this.hi,
+          snapKey: SliderKey.ISO,
+          step: 1,
           ladder: this.ladder,
           active: this.editable && this.aeMode === AeMode.MANUAL,
           onValueChange: (v: number): void => {
@@ -313,6 +318,8 @@ export struct EvPillPopup {
           current: this.ev,
           lo: this.lo,
           hi: this.hi,
+          // EV 是整数域（每个整数一档），连续模式与梯等价，不提供开关
+          snapKey: null,
           ladder: this.ladder,
           active: this.editable,
           onValueChange: (v: number): void => {
@@ -393,6 +400,8 @@ export struct WbPillPopup {
           current: this.kelvin,
           lo: this.kelvinLo,
           hi: this.kelvinHi,
+          snapKey: SliderKey.KELVIN,
+          step: 50,
           ladder: this.ladder,
           active: this.editable,
           sliderLabel: '色温',
