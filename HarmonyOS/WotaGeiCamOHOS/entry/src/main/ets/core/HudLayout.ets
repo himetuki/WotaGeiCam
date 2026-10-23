@@ -1,10 +1,11 @@
 /**
- * 「编辑控件」页与录制页共用的位置模型（纯逻辑地基，J1 批）。
+ * 「编辑控件」页与录制页共用的位置模型（纯逻辑）。
  *
- * 直译自上游 `ui/HudLayout.kt` 的**类型 + 序列化 + 夹取/落区**子集。上游文件 2252 行里有大半是
- * 网格几何与拖拽落点（`gridBoxOf` / `clampCellToBox` / `cellDropOf` / `freeCellNear` /
- * `resolveCells` / `defaultCellsOf` / `gridPitchPx` / `gridRowPitchPx` …），那些留 J2；
- * 本批只交付「位置表能不能安全存下来、拖出屏幕时钳到哪」这一层。
+ * J1 直译上游 `ui/HudLayout.kt` 的**类型 + 序列化 + 夹取/落区**子集；
+ * J2 在同文件补齐**网格几何、拖放落点、表方法与读数行规划**（`gridBoxOf` / `clampCellToBox` /
+ * `cellDropOf` / `freeCellNear` / `resolveCells` / `defaultCellsOf` / `gridPitchPx` /
+ * `gridRowPitchPx` / `placeEntryAt` / `planReadoutRow` …），逐式等价上游 2252 行里的可纯逻辑面。
+ * J1 已交付「位置表能不能安全存下来、拖出屏幕时钳到哪」这一层。
  *
  * ## 两级：容器位置 + 条目格子
  * - **容器整体**（[HudZone]，5 枚）各一份 (x, y)——**底栏只有 y 一轴**（x 恒哨兵）；
@@ -34,7 +35,9 @@
  * （`hud-layout.test.ets` 直译上游 `HudLayoutClampTest` + `HudLayoutCodecTest` 的可移植面）。
  */
 import { CamPill, CamPills, HudItem, HudItems } from './Constants';
-import { HUD_ROW_GAP_DP } from './HudMetrics';
+import {
+  HUD_BLOCK_PAD_DP, HUD_ROW_GAP_DP, hudChipHeightDp, hudPerRowFor, hudRoomDp
+} from './HudMetrics';
 
 /** 条目在容器内的排布主轴：决定「拖到第几格」怎么算（J2 的落点裁决消费） */
 export enum HudAxis {
@@ -413,6 +416,281 @@ export class HudLayoutTable {
       }
     });
     return out;
+  }
+
+  /**
+   * 这一枚容器**这一帧真正渲染**的格子清单（顺序＝[visibleOrderOf] 的顺序）。
+   *
+   * 两趟解析，规则只有一条：**一枚格子只许住"同一个默认组"的颗**（今天只有 S2-2B 那对
+   * 「姿态仪 + 音量表」，见 [cellGroupMatesOf]）——跨组撞进同一格由 [resolveCells] 就近挪开。
+   */
+  gridItems(zone: HudZone, plan: HudGridPlan): Array<HudGridItem> {
+    const order: Array<HudEntry> = this.visibleOrderOf(zone, plan.visible);
+    if (!hudZoneIsGrid(zone)) {
+      return order.map((entry: HudEntry): HudGridItem => new HudGridItem(entry, GridCell.DEFAULT));
+    }
+    return resolveCells(
+      order,
+      this.placedCellsOf(zone),
+      defaultCellsOf(zone, order, plan),
+      gridColsCapOf(zone),
+      gridRowHardCap(),
+      plan.cellHeightOf,
+      plan.rowPitchOf(zone)
+    );
+  }
+
+  /**
+   * 这一枚容器**默认表**的「条目 id → 格子」（任务 #80：锚定与预留的唯一来源）。
+   * 与 [gridItems] 的区别就一件事：它**不看用户摆过的格子**，只按可见集推导。
+   */
+  defaultGridOf(zone: HudZone, plan: HudGridPlan): Map<string, GridCell> {
+    if (!hudZoneIsGrid(zone)) {
+      return new Map<string, GridCell>();
+    }
+    return defaultCellsOf(zone, this.visibleOrderOf(zone, plan.visible), plan);
+  }
+
+  /**
+   * 该容器**当前挡得住一颗**的格子（可见条目按 [gridItems] 解析结果，隐藏条目按表里的显式格子）。
+   * 隐藏条目也算占用：它只是这帧不画，格子还是它的位置。
+   *
+   * 返回被占**档**的 token 集（`'0.2'` 形态；ArkTS 无结构相等的适配）。
+   * `exclude` 为 null 是"格子里有人就算占"的旧口径。
+   */
+  occupiedCells(zone: HudZone, plan: HudGridPlan, exclude: HudEntry | null = null): Set<string> {
+    if (!hudZoneIsGrid(zone)) {
+      return new Set<string>();
+    }
+    let mates: Set<string> = new Set<string>();
+    if (exclude !== null) {
+      mates = cellGroupMatesOf(this.defaultGridOf(zone, plan), exclude);
+    }
+    return blockingCells(
+      this.residentsOf(zone, plan),
+      exclude,
+      mates,
+      plan.cellHeightOf,
+      plan.rowPitchOf(zone)
+    );
+  }
+
+  /**
+   * 这一枚容器**这一帧的住户表**：锚点格 token → 住在那里的条目。
+   * 可见的那份来自渲染解析结果，隐藏的那份来自表里的显式格。
+   * [occupiedCells] 的"挡路集"与 [placeEntryAt] 的"同格交换"**共读这一份**。
+   */
+  residentsOf(zone: HudZone, plan: HudGridPlan): Map<string, Array<HudEntry>> {
+    const out: Map<string, Array<HudEntry>> = new Map<string, Array<HudEntry>>();
+    if (!hudZoneIsGrid(zone)) {
+      return out;
+    }
+    for (const item of this.gridItems(zone, plan)) {
+      putResident(out, item.cell, item.entry);
+    }
+    const placed: Map<string, GridCell> = this.placedCellsOf(zone);
+    placed.forEach((cell: GridCell, id: string): void => {
+      if (plan.visible.has(id)) {
+        return;
+      }
+      const entry: HudEntry | undefined = HudEntry.fromId(id);
+      if (entry === undefined) {
+        return;
+      }
+      putResident(out, cell, entry);
+    });
+    return out;
+  }
+
+  /**
+   * 把 [zones] 里这些网格容器的**推导格固化成显式格子**（只写格子，不改任何人的位置）。
+   *
+   * 这是"移动一颗不动另一颗"的实现核心：[order] 一旦被增删，还挂着哨兵的条目会按**新的**可见
+   * 顺序重新推导 ⇒ 集体错位。所以任何改动 [order] 的操作之前，先把来源与目标两枚容器的当前格子
+   * 原样钉住。钉的是**格子**不是"每颗各一格"：配对那两颗钉完仍共用同一枚格子。
+   *
+   * ArkTS 适配：上游是 `vararg zones`，这里收数组（调用方只有两处，显式传 `[source, target]`）。
+   */
+  pinned(plan: HudGridPlan, zones: Array<HudZone>): HudLayoutTable {
+    let table: HudLayoutTable = this;
+    const done: Set<string> = new Set<string>();
+    for (const zone of zones) {
+      if (!hudZoneIsGrid(zone) || done.has(hudZoneKey(zone))) {
+        continue;
+      }
+      done.add(hudZoneKey(zone));
+      const items: Array<HudGridItem> = table.gridItems(zone, plan);
+      if (items.length > 0) {
+        const merged: Map<string, GridCell> = new Map<string, GridCell>();
+        table.placedCellsOf(zone).forEach((cell: GridCell, id: string): void => {
+          merged.set(id, cell);
+        });
+        for (const item of items) {
+          merged.set(item.entry.id, item.cell);
+        }
+        table = table.replaceCells(zone, merged);
+      }
+    }
+    return table;
+  }
+
+  /** 换掉一枚容器的格子表，其余字段（位置与顺序）一动不动 */
+  private replaceCells(zone: HudZone, cells: Map<string, GridCell>): HudLayoutTable {
+    const next: Map<string, ZoneState> = new Map<string, ZoneState>();
+    this.zones.forEach((state: ZoneState, key: string): void => {
+      next.set(key, state);
+    });
+    const key: string = hudZoneKey(zone);
+    const cur: ZoneState | undefined = this.zones.get(key);
+    const state: ZoneState = cur === undefined
+      ? new ZoneState(ZonePlacement.DEFAULT, HudLayoutTable.defaultOrderOf(zone), new Map<string, GridCell>())
+      : cur;
+    next.set(key, new ZoneState(state.pos, state.order, cells));
+    return new HudLayoutTable(this.version, next);
+  }
+
+  /**
+   * 把条目摆到 [target] 的第 [cell] 格（同容器换格 = 同一个调用；[cell] 传 [GridCell.DEFAULT]
+   * 就是"只换顺序、位置交给推导"，[moveEntryTo] 走的就是这一支）。
+   *
+   * 四步：① 先钉格子（来源与目标两枚容器）；② 再改顺序（从**所有**容器摘掉它、插到目标第 [index]）；
+   * ③ 格子落位（非网格 ⇒ 哨兵；同容器 ⇒ [cellDropOf] 交换语义；跨容器 ⇒ [freeCellNear] 只落空格）；
+   * ④ 其余三枚容器一行不碰。
+   */
+  placeEntryAt(
+    entry: HudEntry,
+    target: HudZone,
+    index: number,
+    cell: GridCell,
+    plan: HudGridPlan
+  ): HudLayoutTable {
+    const source: HudZone = this.sourceZoneOf(entry);
+    const pinnedTable: HudLayoutTable = this.pinned(plan, [source, target]);
+    const orders: Map<string, Array<HudEntry>> = new Map<string, Array<HudEntry>>();
+    for (const z of HUD_ZONES) {
+      const state: ZoneState | undefined = pinnedTable.zones.get(hudZoneKey(z));
+      const list: Array<HudEntry> = state === undefined
+        ? HudLayoutTable.defaultOrderOf(z)
+        : state.order.slice();
+      const at: number = list.findIndex((x: HudEntry): boolean => x.id === entry.id);
+      if (at >= 0) {
+        list.splice(at, 1);
+      }
+      orders.set(hudZoneKey(z), list);
+    }
+    const targetKey: string = hudZoneKey(target);
+    const targetOrder: Array<HudEntry> | undefined = orders.get(targetKey);
+    if (targetOrder !== undefined) {
+      const at: number = index < 0 ? 0 : (index > targetOrder.length ? targetOrder.length : index);
+      targetOrder.splice(at, 0, entry);
+    }
+    let drop: CellDrop;
+    if (!hudZoneIsGrid(target)) {
+      // 非网格容器：格子对它不生效，一律抹成哨兵（[normalize] 那一道同样会抹）
+      drop = new CellDrop(GridCell.DEFAULT, new Map<string, GridCell>());
+    } else if (cell.isDefault) {
+      // 显式传哨兵 = "这次只换顺序，位置仍交给推导"（[moveEntryTo] 走的就是这一支）
+      drop = new CellDrop(GridCell.DEFAULT, new Map<string, GridCell>());
+    } else if (target === source) {
+      let origin: GridCell = GridCell.DEFAULT;
+      for (const item of pinnedTable.gridItems(target, plan)) {
+        if (item.entry.id === entry.id) {
+          origin = item.cell;
+          break;
+        }
+      }
+      drop = cellDropOf(
+        clampStoredCell(target, cell),
+        origin,
+        pinnedTable.residentsOf(target, plan),
+        entry,
+        cellGroupMatesOf(pinnedTable.defaultGridOf(target, plan), entry),
+        pinnedTable.droppedCellHeightPx(plan, entry, target),
+        plan.cellHeightOf,
+        gridColsCapOf(target),
+        gridRowHardCap(),
+        plan.rowPitchOf(target)
+      );
+    } else {
+      // 跨容器 ⇒ 维持"只落空格"：没有"你的原格"这一说，不许写出越区格
+      drop = new CellDrop(
+        freeCellNear(
+          clampStoredCell(target, cell),
+          pinnedTable.occupiedCells(target, plan, entry),
+          gridColsCapOf(target),
+          gridRowHardCap(),
+          pinnedTable.droppedCellHeightPx(plan, entry, target),
+          plan.rowPitchOf(target)
+        ),
+        new Map<string, GridCell>()
+      );
+    }
+    const nextZones: Map<string, ZoneState> = new Map<string, ZoneState>();
+    for (const z of HUD_ZONES) {
+      const key: string = hudZoneKey(z);
+      const state: ZoneState | undefined = pinnedTable.zones.get(key);
+      const base: ZoneState = state === undefined
+        ? new ZoneState(ZonePlacement.DEFAULT, HudLayoutTable.defaultOrderOf(z), new Map<string, GridCell>())
+        : state;
+      const cells: Map<string, GridCell> = new Map<string, GridCell>();
+      base.cells.forEach((c: GridCell, id: string): void => {
+        if (id !== entry.id) {
+          cells.set(id, c);
+        }
+      });
+      if (z === target && !drop.dropped.isDefault) {
+        cells.set(entry.id, drop.dropped);
+        drop.moved.forEach((c: GridCell, id: string): void => {
+          cells.set(id, c);
+        });
+      }
+      const order: Array<HudEntry> | undefined = orders.get(key);
+      nextZones.set(key, new ZoneState(base.pos,
+        order === undefined ? [] : order, cells));
+    }
+    return new HudLayoutTable(this.version, nextZones).normalize();
+  }
+
+  /**
+   * 被拖那颗落到目标容器之后**这一格的内容高**（px）：取"它自己"与"它同组搭档"里最高的那个。
+   * 只在 [freeCellNear] 的"块尾不许出带"判据里用一次，不参与任何人的位置推导。
+   */
+  droppedCellHeightPx(plan: HudGridPlan, entry: HudEntry, zone: HudZone): number {
+    const own: number = plan.cellHeightOf(entry);
+    let best: number = own > 0 ? own : 0;
+    const mates: Set<string> = cellGroupMatesOf(
+      defaultCellsOf(zone, this.visibleOrderOf(zone, plan.visible), plan), entry
+    );
+    mates.forEach((id: string): void => {
+      const mate: HudEntry | undefined = HudEntry.fromId(id);
+      if (mate !== undefined) {
+        const h: number = plan.cellHeightOf(mate);
+        if (h > best) {
+          best = h;
+        }
+      }
+    });
+    return best;
+  }
+
+  /**
+   * 把条目挪到 [zone] 的第 [index] 格（同容器换序 = 同一个调用），**位置交给推导**。
+   * #74 之后它只是 [placeEntryAt] 的哨兵格版本；它同时负责"把来源容器钉住"这件必要的事。
+   */
+  moveEntryTo(entry: HudEntry, zone: HudZone, index: number, plan: HudGridPlan): HudLayoutTable {
+    return this.placeEntryAt(entry, zone, index, GridCell.DEFAULT, plan);
+  }
+
+  /** 条目当前归属（表里没有时回 [HudEntry.homeZone]） */
+  sourceZoneOf(entry: HudEntry): HudZone {
+    for (const zone of HUD_ZONES) {
+      for (const e of this.orderOf(zone)) {
+        if (e.id === entry.id) {
+          return zone;
+        }
+      }
+    }
+    return entry.homeZone;
   }
 
   /** 整张表的条目（按容器分组、容器按 [hudZoneAll] 顺序） */
@@ -966,6 +1244,166 @@ export class GridBox {
   }
 }
 
+// ------------------------------------------------------------------ J2：网格几何 / 拖放 / 读数行规划的纯类型
+
+/** 一个 px 尺寸（[HudLayout] 是纯逻辑，不引平台尺寸类型） */
+export class HudSizePx {
+  readonly width: number;
+  readonly height: number;
+
+  constructor(width: number, height: number) {
+    this.width = width;
+    this.height = height;
+  }
+
+  equals(other: HudSizePx): boolean {
+    return this.width === other.width && this.height === other.height;
+  }
+}
+
+/**
+ * 一帧网格解析要的运行时输入（都来自组合期实测，表本身不该知道它们）。
+ *
+ * `rowPitchOf` / `cellHeightOf` 是**取器**而不是两张 Map：录制页那份实测高住在快照状态里，
+ * 解析时现读才能挂上读取订阅（量到之后那一帧才重组、跨度才接管）。
+ *
+ * ⚠ 两个取器与上游一样**没有默认值**（#69 铁律）：给默认值 `{ 1 }` / `{ 0 }` 会让新增调用点
+ * 静默退回"每格一档 + 行距由最高那颗顶"，而那正是 #75 修掉的回归。
+ *
+ * ArkTS 适配：`visible` 是条目 **id** 集（与 [HudLayoutTable.visibleOrderOf] 同一口径），
+ * 上游是 `Set<HudEntry>`；语义一一对应。
+ */
+export class HudGridPlan {
+  /** 设置里开着显示的条目 id 集：两页各有一份同源计算，传进来而不是表里再算一遍 */
+  readonly visible: Set<string>;
+  /** 读数块"一行几颗"那一档（`hudPerRowFor` / `planReadoutRow` 的产物），只作用读数块 */
+  readonly readoutPerRow: number;
+  /** 该容器的**纵向格距**（px）：由胶囊档推出的那条 [gridRowPitchPx]，与格子里住了谁无关 */
+  readonly rowPitchOf: (zone: HudZone) => number;
+  /** 该条目的**实测高**（px）：量不到返回 0 ⇒ 那颗这一帧按一档算（下一帧实测接管） */
+  readonly cellHeightOf: (entry: HudEntry) => number;
+
+  constructor(
+    visible: Set<string>,
+    readoutPerRow: number,
+    rowPitchOf: (zone: HudZone) => number,
+    cellHeightOf: (entry: HudEntry) => number
+  ) {
+    this.visible = visible;
+    this.readoutPerRow = readoutPerRow;
+    this.rowPitchOf = rowPitchOf;
+    this.cellHeightOf = cellHeightOf;
+  }
+
+  /** 该容器推导默认格子时的分行档：只有读数块吃这个数，其余容器 `hudRowGroups` 不读它 */
+  perRowOf(zone: HudZone): number {
+    return zone === HudZone.READOUT ? this.readoutPerRow : 1;
+  }
+}
+
+/**
+ * 一帧网格的**锚定与预留**（#80）。
+ *
+ * `defaultCells` = 该容器**默认表**的「条目 id → 格子」（[HudLayoutTable.defaultGridOf] 的产物；
+ * 空 = 这一帧还没量到/容器空）。
+ */
+export class GridAnchor {
+  readonly zone: HudZone;
+  readonly defaultCells: Map<string, GridCell>;
+
+  constructor(zone: HudZone, defaultCells: Map<string, GridCell>) {
+    this.zone = zone;
+    this.defaultCells = defaultCells;
+  }
+}
+
+/** 一条条目在这一格（渲染层拿到的就是这一对，不再有第二份算式） */
+export class HudGridItem {
+  readonly entry: HudEntry;
+  readonly cell: GridCell;
+
+  constructor(entry: HudEntry, cell: GridCell) {
+    this.entry = entry;
+    this.cell = cell;
+  }
+}
+
+/**
+ * 一次落点的裁决结果：被拖那颗落哪、被挤出的那些各自落哪（未发生交换/让位时 [moved] 为空）。
+ *
+ * ArkTS 适配：[moved] 的键是被挤出住户的**条目 id**（无结构相等的适配），值是它们的新锚点格。
+ */
+export class CellDrop {
+  readonly dropped: GridCell;
+  readonly moved: Map<string, GridCell>;
+
+  constructor(dropped: GridCell, moved: Map<string, GridCell>) {
+    this.dropped = dropped;
+    this.moved = moved;
+  }
+}
+
+/** [gridPlacementOf] 的产物：渲染层只读这三件，不再自己算任何一格的位置 */
+export class GridPlacement {
+  readonly pitch: HudSizePx;
+  readonly size: HudSizePx;
+  readonly offsets: Array<HudPointPx>;
+
+  constructor(pitch: HudSizePx, size: HudSizePx, offsets: Array<HudPointPx>) {
+    this.pitch = pitch;
+    this.size = size;
+    this.offsets = offsets;
+  }
+}
+
+/** 读数块与底栏 Dock 之间那条底部横带的关系（任务 #70 A 的唯一裁决点） */
+export class ReadoutRowPlan {
+  /** 这一帧到底同不同行（裁决本身的露出点） */
+  readonly sharesDockRow: boolean;
+  /** 喂给读数块容器（`HudAreaDp.bottomAvoidDp`）的**容器**让位 */
+  readonly bottomAvoidDp: number;
+  /** 一行几颗（横屏再经 [DOCK_ROW_PER_ROW_CAP] 夹一次） */
+  readonly perRow: number;
+  /** 这一帧真正可用的**块内宽**（已扣设计留白与块自身内边距） */
+  readonly roomWidthDp: number;
+
+  constructor(sharesDockRow: boolean, bottomAvoidDp: number, perRow: number, roomWidthDp: number) {
+    this.sharesDockRow = sharesDockRow;
+    this.bottomAvoidDp = bottomAvoidDp;
+    this.perRow = perRow;
+    this.roomWidthDp = roomWidthDp;
+  }
+}
+
+/** 一对重叠的容器（上游 `Pair<HudZone, HudZone>`；ArkTS 无元组） */
+export class HudZonePair {
+  readonly first: HudZone;
+  readonly second: HudZone;
+
+  constructor(first: HudZone, second: HudZone) {
+    this.first = first;
+    this.second = second;
+  }
+
+  equals(other: HudZonePair): boolean {
+    return this.first === other.first && this.second === other.second;
+  }
+}
+
+/**
+ * 底栏拖拽 gate 读的录制态（上游 `camera.RecordStatus` 的五档）。
+ *
+ * 本侧录制管线没有与上游同名的状态枚举（内录状态机是另一套），所以这里只镜像上游那**五个值**，
+ * 由 J3 的编辑器/录制页在调用点替它映射。判据逐字照搬：PREPARE / START / STOPPING 拒绝。
+ */
+export enum HudDockStatus {
+  IDLE = 'IDLE',
+  PREPARE = 'PREPARE',
+  START = 'START',
+  STOPPING = 'STOPPING',
+  ERROR = 'ERROR'
+}
+
 /**
  * 一枚格子的**行跨度**（占掉几档）：内容高 ÷ 格距向上取整，至少 1。
  *
@@ -1138,4 +1576,1189 @@ export function intOrUndefined(raw: string | undefined): number | undefined {
  */
 export function hudGridGapDp(zone: HudZone): number {
   return zone === HudZone.READOUT ? HUD_ROW_GAP_DP : 4;
+}
+
+// ------------------------------------------------------------------ J2：可放带 → 格盒（#80 预留/生长）
+
+/** 编辑上限相对默认表预留的**额外行档数**（用户 10-01 明示放宽的那一格） */
+export const GRID_ROW_GROWTH_ROWS: number = 1;
+
+/** 把条目登记进住户表（token → 条目数组），保持插入序 —— 与上游 `getOrPut { mutableListOf() }` 同义 */
+function putResident(
+  residents: Map<string, Array<HudEntry>>, cell: GridCell, entry: HudEntry
+): void {
+  const cur: Array<HudEntry> | undefined = residents.get(cell.token);
+  if (cur === undefined) {
+    residents.set(cell.token, [entry]);
+  } else {
+    cur.push(entry);
+  }
+}
+
+/** Kotlin `coerceIn(lo, hi)`（lo ≤ hi 由调用方保证，与上游一致） */
+function clampInt(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/** Kotlin Int 除法（向零截断；JS 的 `/` 是浮点，`Math.trunc` 对齐上游 Int 语义） */
+function truncDiv(v: number, p: number): number {
+  return Math.trunc(v / p);
+}
+
+/** Kotlin `maxOfOrNull` 的等价物：空数组给 fallback */
+function maxOrNull(values: Array<number>, fallback: number): number {
+  let best: number = fallback;
+  for (const v of values) {
+    if (v > best) {
+      best = v;
+    }
+  }
+  return best;
+}
+
+/**
+ * 可放带 → [GridBox]：行由**带高 ÷ 格距**算（#75 之后这是"有几档可用"，不是"有几颗条目能排"），
+ * 列对读数块由**可用内宽**决定、对两枚竖 Dock 直接取 [gridColsCapOf]。
+ *
+ * #80 之后带还要再夹一次预留档数（`reservedRows` / `reservedCols`，0 = 不夹）。两个生长量由调用方
+ * 显式表态：编辑页传 `rowGrowth = GRID_ROW_GROWTH_ROWS`、`colGrowth = 0`；**其余调用点全部传 0**
+ * ⇒ 逐字退回改前那句 `min(带内, 预留)`。四个数**没有默认值**（#69 铁律）。
+ */
+export function gridBoxOf(
+  zone: HudZone,
+  pitchXDp: number,
+  pitchYDp: number,
+  bandHeightDp: number,
+  roomWidthDp: number,
+  reservedRows: number,
+  reservedCols: number,
+  rowGrowth: number,
+  colGrowth: number
+): GridBox {
+  const rows: number = pitchYDp <= 0 ? 1 : (truncDiv(bandHeightDp, pitchYDp) > 1 ? truncDiv(bandHeightDp, pitchYDp) : 1);
+  let cols: number;
+  if (zone !== HudZone.READOUT) {
+    cols = gridColsCapOf(zone);
+  } else if (pitchXDp <= 0) {
+    cols = 1;
+  } else {
+    cols = clampInt(truncDiv(roomWidthDp, pitchXDp), 1, gridColsCapOf(zone));
+  }
+  const clampedCols: number = reservedCols > 0
+    ? Math.max(1, Math.min(cols, reservedCols + colGrowth))
+    : (cols > 1 ? cols : 1);
+  return new GridBox(clampedCols, editableGridRowsOf(reservedRows, rows, rowGrowth));
+}
+
+/**
+ * 可编辑的行档数：预留 + 生长余量，再夹进带内实际档数；`reservedRows <= 0`（读数块那一支）
+ * 与改前逐字同值 = 带内实际档数。生长由 `growthRows` 显式喂进来（上游给了一个可读默认值，
+ * 本侧逐字保留）。带高不够时结果就是 `bandRows`，不抛、不给空区间。
+ */
+export function editableGridRowsOf(
+  reservedRows: number, bandRows: number, growthRows: number = GRID_ROW_GROWTH_ROWS
+): number {
+  if (reservedRows <= 0) {
+    return bandRows > 1 ? bandRows : 1;
+  }
+  const grown: number = reservedRows + growthRows;
+  const capped: number = bandRows < grown ? bandRows : grown;
+  return capped > 1 ? capped : 1;
+}
+
+/**
+ * 把格子钳进可放带（负数与越界都收回来；[GridCell.DEFAULT] 原样放行）。
+ *
+ * ⚠ 它是**格 → 格**的函数，不吃条目身份，所以配对格不可能被钳进两个不同格子。
+ * #75：纵向钳的是**整块**，不是起始档（行上限 = `box.rows − rowSpan`）。
+ * 两个形参**没有默认值**：内容高由调用方实测（#69 铁律）。
+ */
+export function clampCellToBox(
+  cell: GridCell, box: GridBox, contentHeightPx: number, rowPitchPx: number
+): GridCell {
+  if (cell.isDefault) {
+    return cell;
+  }
+  const col: number = clampInt(cell.col, 0, box.cols - 1);
+  const rowHi: number = box.rows - cellRowSpan(contentHeightPx, rowPitchPx);
+  const row: number = clampInt(cell.row, 0, rowHi > 0 ? rowHi : 0);
+  return new GridCell(col, row);
+}
+
+/**
+ * 同容器内一次落点的唯一裁决（拖到已占格**交换**，而不是跳到最近空格）。
+ *
+ * 九步见上游 KDoc；要点：块尾出带 / 别颗高格跨度尾 / 整块压人 ⇒ 退回 [freeCellNear]；
+ * 交换只动被点名的那一颗（`moved`），跨度尾压到第三颗时**拒绝交换**。
+ *
+ * `residents` 的键是锚点格 token；`mates` 是同组搭档的**条目 id** 集；
+ * `moved` 是「被挤出住户 id → 新锚点格」。所有实测/格距形参**没有默认值**（#69 铁律）。
+ */
+export function cellDropOf(
+  wanted: GridCell,
+  origin: GridCell,
+  residents: Map<string, Array<HudEntry>>,
+  self: HudEntry,
+  mates: Set<string>,
+  draggedHeightPx: number,
+  cellHeightPx: (entry: HudEntry) => number,
+  cols: number,
+  rows: number,
+  rowPitchPx: number
+): CellDrop {
+  const target: GridCell = new GridCell(
+    clampInt(wanted.col, 0, cols - 1 > 0 ? cols - 1 : 0),
+    clampInt(wanted.row, 0, rows - 1 > 0 ? rows - 1 : 0)
+  );
+  const span: number = cellRowSpan(draggedHeightPx, rowPitchPx);
+  const blocked: Set<string> = blockingCells(residents, self, mates, cellHeightPx, rowPitchPx);
+  // ② 块尾出带 ⇒ 退回就近找空格（与改前同一条兜底，只是不再吞掉"交换"这条路）
+  if (target.row > rows - span) {
+    return new CellDrop(
+      freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx),
+      new Map<string, GridCell>()
+    );
+  }
+  // ③ 只认"锚点恰在 target"的住户当格主（mates 与 self 自己不算）
+  const occupant: Array<HudEntry> = [];
+  const here: Array<HudEntry> | undefined = residents.get(target.token);
+  if (here !== undefined) {
+    for (const e of here) {
+      if (!e.equals(self) && !mates.has(e.id)) {
+        occupant.push(e);
+      }
+    }
+  }
+  if (occupant.length === 0) {
+    // ④ 真空格（含拖回同组搭档那一格）⇒ 落它；只是别颗高格的跨度尾巴 ⇒ 退回让位。
+    // ④′ 同族整块判据：被拖那颗落下去占的整块（含跨度尾）不许压到**别人**的块上。
+    //    排除集必须 mate 感知：只算"非 self 非 mate"的住户，否则合对会被误杀。
+    const others: Map<string, Array<HudEntry>> = new Map<string, Array<HudEntry>>();
+    residents.forEach((who: Array<HudEntry>, token: string): void => {
+      const keep: Array<HudEntry> = who.filter((e: HudEntry): boolean => !e.equals(self) && !mates.has(e.id));
+      if (keep.length > 0) {
+        others.set(token, keep);
+      }
+    });
+    const othersBlocked: Set<string> =
+      blockingCells(others, null, new Set<string>(), cellHeightPx, rowPitchPx);
+    let tailClear: boolean = true;
+    for (const c of spannedCells(target, span)) {
+      if (othersBlocked.has(c.token)) {
+        tailClear = false;
+        break;
+      }
+    }
+    if (!blocked.has(target.token) && tailClear) {
+      return new CellDrop(target, new Map<string, GridCell>());
+    }
+    return new CellDrop(
+      freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx),
+      new Map<string, GridCell>()
+    );
+  }
+  // ⑤ 原格能不能承接这一组：扣掉 self 与 occupant 之后再算一遍"谁还占着哪一块"
+  const rest: Map<string, Array<HudEntry>> = new Map<string, Array<HudEntry>>();
+  const occupantIds: Set<string> = new Set<string>();
+  for (const e of occupant) {
+    occupantIds.add(e.id);
+  }
+  residents.forEach((who: Array<HudEntry>, token: string): void => {
+    const keep: Array<HudEntry> = who.filter((e: HudEntry): boolean => !e.equals(self) && !occupantIds.has(e.id));
+    if (keep.length > 0) {
+      rest.set(token, keep);
+    }
+  });
+  const restBlocked: Set<string> = blockingCells(rest, null, new Set<string>(), cellHeightPx, rowPitchPx);
+  let occupantBlockPx: number = 0;
+  for (const e of occupant) {
+    const h: number = cellHeightPx(e);
+    const c: number = h > 0 ? h : 0;
+    if (c > occupantBlockPx) {
+      occupantBlockPx = c;
+    }
+  }
+  const occupantSpan: number = cellRowSpan(occupantBlockPx, rowPitchPx);
+  const originInBox: boolean = origin.col >= 0 && origin.col < cols && origin.row >= 0 && origin.row < rows;
+  // ⑤a【判据 A】被拖那颗落下去占的整块（含跨度尾）不许压到第三颗的块上
+  const selfBlock: Array<GridCell> = spannedCells(target, span);
+  let selfClear: boolean = true;
+  for (const c of selfBlock) {
+    if (restBlocked.has(c.token)) {
+      selfClear = false;
+      break;
+    }
+  }
+  // ⑤b【判据 B】原格承接：既要避开第三颗，也要避开 self 落下去那一块
+  let originClear: boolean = true;
+  for (const c of spannedCells(origin, occupantSpan)) {
+    let inside: boolean = restBlocked.has(c.token);
+    if (!inside) {
+      for (const s of selfBlock) {
+        if (s.token === c.token) {
+          inside = true;
+          break;
+        }
+      }
+    }
+    if (inside) {
+      originClear = false;
+      break;
+    }
+  }
+  const originHosts: boolean = !origin.equals(target) && originInBox &&
+    origin.row + occupantSpan <= rows && originClear;
+  if (selfClear && originHosts) {
+    const moved: Map<string, GridCell> = new Map<string, GridCell>();
+    for (const e of occupant) {
+      moved.set(e.id, origin);
+    }
+    return new CellDrop(target, moved);
+  }
+  if (selfClear) {
+    // ⑥ 只剩"原格承接不了" ⇒ 占位者就近让位；让位搜索的占位集并进 selfBlock
+    const union: Set<string> = new Set<string>();
+    restBlocked.forEach((token: string): void => {
+      union.add(token);
+    });
+    for (const c of selfBlock) {
+      union.add(c.token);
+    }
+    const moved: Map<string, GridCell> = new Map<string, GridCell>();
+    for (const e of occupant) {
+      moved.set(e.id, freeCellNear(origin, union, cols, rows, occupantBlockPx, rowPitchPx));
+    }
+    return new CellDrop(target, moved);
+  }
+  // ⑥′ 交换会让 self 的跨度尾压到第三颗 ⇒ 拒绝交换（moved 为空），退回"不挤人"的就近空格
+  return new CellDrop(
+    freeCellNear(target, blocked, cols, rows, draggedHeightPx, rowPitchPx),
+    new Map<string, GridCell>()
+  );
+}
+
+/**
+ * 目标格被占了就在可放带里就近找**空格**（曼哈顿距离最小，同距离按「先上后下、先左后右」定序）。
+ *
+ * #75：候选格必须**整块**放得下（`spannedCells` 不与 [occupied] 相交），且 `row + rowSpan − 1 <= rows − 1`。
+ * 带内一个空格都没有时返回钳进带内的 [wanted] 自己。
+ * `occupied` 是**档 token** 集（[blockingCells] 展开后的那一套）。
+ */
+export function freeCellNear(
+  wanted: GridCell,
+  occupied: Set<string>,
+  cols: number,
+  rows: number,
+  contentHeightPx: number,
+  rowPitchPx: number
+): GridCell {
+  const c: number = clampInt(wanted.col, 0, cols - 1 > 0 ? cols - 1 : 0);
+  const r: number = clampInt(wanted.row, 0, rows - 1 > 0 ? rows - 1 : 0);
+  const rowSpan: number = cellRowSpan(contentHeightPx, rowPitchPx);
+  const lastRow: number = rows - rowSpan > 0 ? rows - rowSpan : 0;
+  const fits: (cell: GridCell) => boolean = (cell: GridCell): boolean => {
+    for (const x of spannedCells(cell, rowSpan)) {
+      if (occupied.has(x.token)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (r <= lastRow && fits(new GridCell(c, r))) {
+    return new GridCell(c, r);
+  }
+  const maxD: number = (cols > 1 ? cols : 1) * (rows > 1 ? rows : 1);
+  for (let d = 1; d <= maxD; d++) {
+    for (let row = 0; row < rows; row++) {
+      if (row > lastRow) {
+        continue;
+      }
+      for (let col = 0; col < cols; col++) {
+        const candidate: GridCell = new GridCell(col, row);
+        if (!fits(candidate)) {
+          continue;
+        }
+        if (Math.abs(col - c) + Math.abs(row - r) !== d) {
+          continue;
+        }
+        return candidate;
+      }
+    }
+  }
+  return new GridCell(c, r);
+}
+
+/**
+ * 解析一帧的格子清单：摆过的先占位，没摆过的用 [defaultCellsOf] 推，撞了就就近让位。
+ *
+ * 两趟（先全部显式、再全部推导）：落点规则是 [blockingCells] 那一条（**同组的颗可以共用一格**，
+ * 跨组才算撞车），搜索盒用**整容器**的 `[0, cols) × [0, rows)`。
+ * 第 2 趟与第 1 趟同一条"锚点优先"口径：推导格的锚点没被占就直接落（合对那一支），
+ * 被占了才进 [freeCellNear] 的整块搜索。
+ *
+ * `placed` / `derived` 的键是条目 id；两个新形参（实测高取器与格距）**没有默认值**（#69 铁律）。
+ */
+export function resolveCells(
+  order: Array<HudEntry>,
+  placed: Map<string, GridCell>,
+  derived: Map<string, GridCell>,
+  cols: number,
+  rows: number,
+  cellHeightPx: (entry: HudEntry) => number,
+  rowPitchPx: number
+): Array<HudGridItem> {
+  const taken: Map<string, Array<HudEntry>> = new Map<string, Array<HudEntry>>();
+  const out: Map<string, GridCell> = new Map<string, GridCell>();
+  // 第 1 趟：摆过的条目占位。两颗**不同组**的被手改成同一格时先到先得、后者就近让位；
+  // 同组两颗（钉过格子的 S2-2B 配对）共用一格是合法形态，不让位
+  for (const e of order) {
+    const want: GridCell | undefined = placed.get(e.id);
+    if (want === undefined || want.isDefault) {
+      continue;
+    }
+    const blocked: Set<string> = blockingCells(taken, e, cellGroupMatesOf(derived, e), cellHeightPx, rowPitchPx);
+    const cell: GridCell = blocked.has(want.token)
+      ? freeCellNear(want, blocked, cols, rows, cellHeightPx(e), rowPitchPx)
+      : want;
+    putResident(taken, cell, e);
+    out.set(e.id, cell);
+  }
+  // 第 2 趟：没摆过的用推导格；推导格被摆过的那颗占了就让位（显式优先）
+  for (const e of order) {
+    if (out.has(e.id)) {
+      continue;
+    }
+    const blocked: Set<string> = blockingCells(taken, e, cellGroupMatesOf(derived, e), cellHeightPx, rowPitchPx);
+    const d: GridCell | undefined = derived.get(e.id);
+    const want: GridCell = d === undefined ? new GridCell(0, 0) : d;
+    const cell: GridCell = blocked.has(want.token)
+      ? freeCellNear(want, blocked, cols, rows, cellHeightPx(e), rowPitchPx)
+      : want;
+    putResident(taken, cell, e);
+    out.set(e.id, cell);
+  }
+  const result: Array<HudGridItem> = [];
+  for (const e of order) {
+    const cell: GridCell | undefined = out.get(e.id);
+    result.push(new HudGridItem(e, cell === undefined ? GridCell.DEFAULT : cell));
+  }
+  return result;
+}
+
+/**
+ * 「今天的排布」→ 格子的唯一一处换算：顺序按 [hudRowGroups] 分行。
+ *
+ * 行组 → 格子：一枚行组＝一枚格子（竖 Dock），一行组＝一**排**格子（读数块）。
+ * #75：row 按**行跨度**推进（`row += span`），不是 +1。
+ * 实测高量不到（0）那一档跨度按 1 算，下一帧实测接管。
+ */
+export function defaultCellsOf(
+  zone: HudZone, order: Array<HudEntry>, plan: HudGridPlan
+): Map<string, GridCell> {
+  const rowPitchPx: number = plan.rowPitchOf(zone);
+  let row: number = 0;
+  const out: Map<string, GridCell> = new Map<string, GridCell>();
+  for (const group of hudRowGroups(zone, order, plan.perRowOf(zone))) {
+    let contentPx: number = 0;
+    for (const e of group) {
+      const h: number = plan.cellHeightOf(e);
+      const c: number = h > 0 ? h : 0;
+      if (c > contentPx) {
+        contentPx = c;
+      }
+    }
+    const span: number = cellRowSpan(contentPx, rowPitchPx);
+    if (hudZoneAxis(zone) === HudAxis.GRID) {
+      for (let col = 0; col < group.length; col++) {
+        out.set(group[col].id, new GridCell(col, row));
+      }
+    } else {
+      for (const entry of group) {
+        out.set(entry.id, new GridCell(0, row));
+      }
+    }
+    row += span;
+  }
+  return out;
+}
+
+/**
+ * 与 [entry] **同属一枚默认格组**的其他颗（可以合法与它共用一格的那些）。
+ * 判据只有一条：**推导格相同**。配对尺子仍然只有 [hudRowGroups] 那一把。
+ * 返回条目 id 集（ArkTS 无结构相等）。
+ */
+export function cellGroupMatesOf(derived: Map<string, GridCell>, entry: HudEntry): Set<string> {
+  const out: Set<string> = new Set<string>();
+  const home: GridCell | undefined = derived.get(entry.id);
+  if (home === undefined) {
+    return out;
+  }
+  derived.forEach((cell: GridCell, id: string): void => {
+    if (id !== entry.id && cell.equals(home)) {
+      out.add(id);
+    }
+  });
+  return out;
+}
+
+// ------------------------------------------------------------------ 格子 ↔ 像素（渲染与编辑页共用）
+
+/**
+ * 格长 = **横向：该容器内最宽那枚格子的内容宽 + 一道列距；纵向：与住户无关的固定格距**。
+ * #75 起纵向不再"取最高那颗"：纵向恒等于 [gridRowPitchPx]（**已经含那道行距**，不再 `+ gapYPx`）。
+ */
+export function gridPitchPx(maxCellWidthPx: number, rowPitchPx: number, gapXPx: number): HudSizePx {
+  return new HudSizePx(maxCellWidthPx + gapXPx, rowPitchPx);
+}
+
+/**
+ * **纵向格距**（px）＝ 一颗紧凑档胶囊的高 + 该容器的一道行距，向上取整。
+ * 本机（density 2.0）手算：竖 Dock 100% **68px = 34dp**、120% 76px；读数块 100% **72px = 36dp**。
+ * 向上取整是有意的：格距是"一行有多少预算"，不是量出来的尺寸。
+ */
+export function gridRowPitchPx(fontScale: number, gapDp: number, density: number): number {
+  const px: number = Math.ceil((hudChipHeightDp(fontScale) + gapDp) * density);
+  return px > 1 ? px : 1;
+}
+
+/**
+ * 按容器取格距（上游 UI 层 `hudGridRowPitchPx(zone, Density)` 的纯逻辑等价物）：
+ * 行距档走 [hudGridGapDp]（竖 Dock 4dp / 读数块 6dp）——三处消费方共读这一条出口。
+ * ArkTS 适配：上游吃 Compose `Density`，这里吃 `fontScale` + `density` 两个数（纯逻辑不引平台类型）。
+ */
+export function hudGridRowPitchPx(zone: HudZone, fontScale: number, density: number): number {
+  return gridRowPitchPx(fontScale, hudGridGapDp(zone), density);
+}
+
+/**
+ * 一枚格子的**内容宽** = 格内各颗实测宽之和 + (n − 1) 道行距（一颗时就是它自己的宽）。
+ * 录制中右 Dock 那枚配对格：姿态仪 108 + 8 + 音量表 56 = **172px = 86dp**。
+ */
+export function cellContentWidthPx(childWidthsPx: Array<number>, gapXPx: number): number {
+  if (childWidthsPx.length === 0) {
+    return 0;
+  }
+  let sum: number = 0;
+  for (const w of childWidthsPx) {
+    sum += w;
+  }
+  return sum + gapXPx * (childWidthsPx.length - 1);
+}
+
+/**
+ * 一枚格子的**左缘**相对格网原点（px，#80）：col 0 贴哪条边由 [gridColFromEndOf] 说了算。
+ * 贴右缘那一支：`slot(c) = gridWidth + gap − (c+1)×pitch`；单列时与从左数**逐字同值**。
+ */
+export function cellSlotLeftPx(
+  col: number, pitch: HudSizePx, gridWidthPx: number, gapXPx: number, colFromEnd: boolean
+): number {
+  const c: number = col > 0 ? col : 0;
+  return colFromEnd ? gridWidthPx - (c + 1) * pitch.width + gapXPx : c * pitch.width;
+}
+
+/**
+ * 格内各颗相对**网格原点**的左缘（px）：整枚格子在它那一格里居中，再按各颗实测宽 + 行距依次排开。
+ * 单颗格子时与 [cellPlaceOffsetPx] 的 x 逐字同值。
+ * [gridWidthPx] 与 [colFromEnd] 是 #80 加的，**没有默认值**（给了默认值就等于把"贴右缘从右数"
+ * 悄悄退回从左数）。
+ */
+export function cellChildLeftsPx(
+  cell: GridCell,
+  pitch: HudSizePx,
+  childWidthsPx: Array<number>,
+  gapXPx: number,
+  gridWidthPx: number,
+  colFromEnd: boolean
+): Array<number> {
+  const out: Array<number> = [];
+  if (childWidthsPx.length === 0) {
+    return out;
+  }
+  const content: number = cellContentWidthPx(childWidthsPx, gapXPx);
+  let x: number = cellSlotLeftPx(cell.col, pitch, gridWidthPx, gapXPx, colFromEnd) +
+    truncDiv(pitch.width - content, 2);
+  for (const width of childWidthsPx) {
+    out.push(x);
+    x += width + gapXPx;
+  }
+  return out;
+}
+
+/**
+ * 该容器的 col 0 贴哪条边（#80）。只有右竖 Dock 贴右缘：它原生对齐是 `CenterEnd`，
+ * 第 2 列必须**向左**生长，否则一用出第 2 列整块就向左平移一档。
+ * 左 Dock 贴左缘 ⇒ 第 2 列向右生长；读数块保持"col 0 在左"（那两枚一组的默认顺序是定版观感）。
+ */
+export function gridColFromEndOf(zone: HudZone): boolean {
+  return zone === HudZone.RIGHT;
+}
+
+/** 默认表里每枚格子的住户实测高（预留行档数与预留格长共用的那一份分组） */
+function groupDefaultCellHeights(
+  defaultCells: Map<string, GridCell>, cellHeightPx: (entry: HudEntry) => number
+): Map<string, Array<number>> {
+  const out: Map<string, Array<number>> = new Map<string, Array<number>>();
+  defaultCells.forEach((cell: GridCell, id: string): void => {
+    const entry: HudEntry | undefined = HudEntry.fromId(id);
+    if (entry === undefined) {
+      return;
+    }
+    const h: number = cellHeightPx(entry);
+    const c: number = h > 0 ? h : 0;
+    const cur: Array<number> | undefined = out.get(cell.token);
+    if (cur === undefined) {
+      out.set(cell.token, [c]);
+    } else {
+      cur.push(c);
+    }
+  });
+  return out;
+}
+
+/** 默认表里最宽那枚格子的内容宽（px，#80：格长的唯一来源）；量不到宽的颗按 0 算 */
+function defaultCellWidthsPx(
+  defaultCells: Map<string, GridCell>, childWidthOf: (entry: HudEntry) => number, gapXPx: number
+): Array<number> {
+  const grouped: Map<string, Array<number>> = new Map<string, Array<number>>();
+  defaultCells.forEach((cell: GridCell, id: string): void => {
+    const entry: HudEntry | undefined = HudEntry.fromId(id);
+    if (entry === undefined) {
+      return;
+    }
+    const w: number = childWidthOf(entry);
+    const c: number = w > 0 ? w : 0;
+    const cur: Array<number> | undefined = grouped.get(cell.token);
+    if (cur === undefined) {
+      grouped.set(cell.token, [c]);
+    } else {
+      cur.push(c);
+    }
+  });
+  const out: Array<number> = [];
+  grouped.forEach((widths: Array<number>): void => {
+    out.push(cellContentWidthPx(widths, gapXPx));
+  });
+  return out;
+}
+
+/**
+ * 预留的**行档数**（#80）：默认表用到几档就是几档，0 = 不预留（读数块那一支）。
+ *
+ * 档数按 `max(row + 行跨度)` 算，与 [defaultCellsOf] 推进默认行号用的是同一条 [cellRowSpan] 算式。
+ * [cellHeightPx] 与 [rowPitchPx] 都是无默认值的必传形参（#69 铁律）。
+ */
+export function reservedGridRowsOf(
+  anchor: GridAnchor, cellHeightPx: (entry: HudEntry) => number, rowPitchPx: number
+): number {
+  if (anchor.zone === HudZone.READOUT || anchor.defaultCells.size === 0) {
+    return 0;
+  }
+  const heightsByCell: Map<string, Array<number>> = groupDefaultCellHeights(anchor.defaultCells, cellHeightPx);
+  let best: number = 0;
+  heightsByCell.forEach((heights: Array<number>, token: string): void => {
+    const cell: GridCell = gridCellOfToken(token);
+    const row: number = cell.row > 0 ? cell.row : 0;
+    const end: number = row + cellRowSpan(maxOrNull(heights, 0), rowPitchPx);
+    if (end > best) {
+      best = end;
+    }
+  });
+  return best;
+}
+
+/**
+ * 预留的**列数**（#80）：只对读数块生效（透明底板 ⇒ 预留不花观感钱），其余容器返回 0 = 底板包内容。
+ */
+export function reservedGridColsOf(anchor: GridAnchor): number {
+  if (anchor.zone !== HudZone.READOUT || anchor.defaultCells.size === 0) {
+    return 0;
+  }
+  let widest: number = 0;
+  anchor.defaultCells.forEach((cell: GridCell): void => {
+    const col: number = cell.col > 0 ? cell.col : 0;
+    if (col > widest) {
+      widest = col;
+    }
+  });
+  return widest + 1;
+}
+
+/**
+ * 一帧格网的**完整测量结果**：格长、格网尺寸、每颗相对网格原点的左上角。
+ *
+ * 三条规则：① 逐格累计住户（清单序 = 格内左右序）；② 格长横向取**默认分组**里最宽那枚格子
+ * （#80；渲染分组永远不宽过它，取两者的大只兜坏数据），纵向 = 传进来的固定 [rowPitchPx]；
+ * ③ 总行数**按跨度算**（`max(row + span − 1) + 1`），漏掉这一笔最后一枚高格的尾巴会画出格网。
+ *
+ * [rowPitchPx] **没有默认值**：必须由调用方喂进来，否则两页的格子高度立刻分叉。
+ */
+export function gridPlacementOf(
+  items: Array<HudGridItem>,
+  childSizes: Array<HudSizePx>,
+  gapPx: HudSizePx,
+  rowPitchPx: number,
+  anchor: GridAnchor
+): GridPlacement {
+  if (items.length !== childSizes.length) {
+    throw new Error(`格网测量：颗数与尺寸数不等 ${items.length} vs ${childSizes.length}`);
+  }
+  const widthOf: Map<string, number> = new Map<string, number>();
+  const heightOf: Map<string, number> = new Map<string, number>();
+  for (let i = 0; i < items.length; i++) {
+    widthOf.set(items[i].entry.id, childSizes[i].width);
+    heightOf.set(items[i].entry.id, childSizes[i].height);
+  }
+  const cells: Map<string, Array<number>> = new Map<string, Array<number>>();
+  for (let i = 0; i < items.length; i++) {
+    const token: string = items[i].cell.token;
+    const cur: Array<number> | undefined = cells.get(token);
+    if (cur === undefined) {
+      cells.set(token, [i]);
+    } else {
+      cur.push(i);
+    }
+  }
+  const cellWidths: Array<number> = [];
+  cells.forEach((idx: Array<number>): void => {
+    const widths: Array<number> = [];
+    for (const i of idx) {
+      widths.push(childSizes[i].width);
+    }
+    cellWidths.push(cellContentWidthPx(widths, gapPx.width));
+  });
+  const defaultWidths: Array<number> = defaultCellWidthsPx(anchor.defaultCells, (entry: HudEntry): number => {
+    const w: number | undefined = widthOf.get(entry.id);
+    return w === undefined ? 0 : w;
+  }, gapPx.width);
+  const maxWidth: number = Math.max(maxOrNull(defaultWidths, 0), maxOrNull(cellWidths, 0));
+  const pitch: HudSizePx = gridPitchPx(maxWidth, rowPitchPx, gapPx.width);
+  // 每枚格子的行跨度：格内最高那颗 ÷ 格距
+  const spans: Map<string, number> = new Map<string, number>();
+  cells.forEach((idx: Array<number>, token: string): void => {
+    let tallest: number = 0;
+    for (const i of idx) {
+      const h: number = childSizes[i].height;
+      if (h > tallest) {
+        tallest = h;
+      }
+    }
+    spans.set(token, cellRowSpan(tallest, pitch.height));
+  });
+  let usedCols: number = 0;
+  for (const item of items) {
+    const col: number = item.cell.col > 0 ? item.cell.col : 0;
+    if (col + 1 > usedCols) {
+      usedCols = col + 1;
+    }
+  }
+  let usedRows: number = 0;
+  cells.forEach((idx: Array<number>, token: string): void => {
+    const cell: GridCell = gridCellOfToken(token);
+    const span: number | undefined = spans.get(token);
+    const s: number = span === undefined ? 1 : span;
+    const end: number = (cell.row > 0 ? cell.row : 0) + (s - 1);
+    if (end + 1 > usedRows) {
+      usedRows = end + 1;
+    }
+  });
+  const cols: number = Math.max(usedCols, reservedGridColsOf(anchor));
+  const rows: number = Math.max(usedRows, reservedGridRowsOf(anchor, (entry: HudEntry): number => {
+    const h: number | undefined = heightOf.get(entry.id);
+    return h === undefined ? 0 : h;
+  }, pitch.height));
+  const size: HudSizePx = gridSizePx(cols, rows, pitch, gapPx);
+  const colFromEnd: boolean = gridColFromEndOf(anchor.zone);
+  const offsets: Array<HudPointPx> = [];
+  for (let i = 0; i < items.length; i++) {
+    offsets.push(new HudPointPx(0, 0));
+  }
+  cells.forEach((idx: Array<number>, token: string): void => {
+    const cell: GridCell = gridCellOfToken(token);
+    const widths: Array<number> = [];
+    for (const i of idx) {
+      widths.push(childSizes[i].width);
+    }
+    const lefts: Array<number> = cellChildLeftsPx(cell, pitch, widths, gapPx.width, size.width, colFromEnd);
+    const spanValue: number | undefined = spans.get(token);
+    const s: number = spanValue === undefined ? 1 : spanValue;
+    for (let k = 0; k < idx.length; k++) {
+      const childIndex: number = idx[k];
+      offsets[childIndex] = new HudPointPx(lefts[k],
+        cellPlaceOffsetPx(cell, pitch, childSizes[childIndex], s).y);
+    }
+  });
+  return new GridPlacement(pitch, size, offsets);
+}
+
+/**
+ * 一格多颗时"指针压住的是哪一颗"（配对 = 一格两颗，编辑器必须能点名要搬哪一颗）。
+ * 先取横向区间真的压住指针的那些颗；都不压住时把候选放宽到全部；候选里取**区间中心离指针最近**
+ * 的那颗，同距离取靠左那颗。空候选返回 -1。
+ */
+export function entryHitIndex(spans: Array<IntRange>, pointerX: number): number {
+  if (spans.length === 0) {
+    return -1;
+  }
+  const inside: Array<number> = [];
+  for (let i = 0; i < spans.length; i++) {
+    if (spans[i].contains(pointerX)) {
+      inside.push(i);
+    }
+  }
+  const pool: Array<number> = inside.length > 0 ? inside : spans.map((_s: IntRange, i: number): number => i);
+  let best: number = pool[0];
+  let bestD: number = -1;
+  for (const i of pool) {
+    const center: number = truncDiv(spans[i].first + spans[i].last, 2);
+    const d: number = Math.abs(center - pointerX);
+    if (bestD < 0 || d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** 网格总尺寸：`列数 × 格宽 − 一道行距`（最后一格后面不再有间距） */
+export function gridSizePx(cols: number, rows: number, pitch: HudSizePx, gap: HudSizePx): HudSizePx {
+  if (cols <= 0 || rows <= 0) {
+    return new HudSizePx(0, 0);
+  }
+  return new HudSizePx(cols * pitch.width - gap.width, rows * pitch.height - gap.height);
+}
+
+/**
+ * [gridSizePx] 的逆算：编辑页拿网格节点的**实测矩形**把**列**长除回来。
+ * 空容器退回"被拖那颗自己的尺寸 + 行距"。
+ * #75 之后纵向**不许**再从这条逆算（带跨度后 `网格高 ÷ 行数 ≠ 行距`）；本函数的 height
+ * 只是"与 [gridSizePx] 互为逆运算"这条性质的测试对象，生产调用点只取 `.width`，纵向走 [snapGridPitchPx]。
+ */
+export function gridPitchOf(
+  gridWidthPx: number,
+  gridHeightPx: number,
+  cols: number,
+  rows: number,
+  gapPx: number,
+  fallbackChildWidthPx: number,
+  fallbackChildHeightPx: number
+): HudSizePx {
+  const w: number = cols > 0 ? truncDiv(gridWidthPx + gapPx, cols) : Math.max(1, fallbackChildWidthPx + gapPx);
+  const h: number = rows > 0 ? truncDiv(gridHeightPx + gapPx, rows) : Math.max(1, fallbackChildHeightPx + gapPx);
+  return new HudSizePx(w, h);
+}
+
+/**
+ * 编辑页吸附用的**格长**：横向从网格实测矩形逆算（[gridPitchOf]），纵向**直接用格距**。
+ * [rowPitchPx] 与 [fallbackChildWidthPx] 都是无默认值的必传形参（#69 铁律）。
+ */
+export function snapGridPitchPx(
+  gridWidthPx: number,
+  cols: number,
+  gapPx: number,
+  fallbackChildWidthPx: number,
+  rowPitchPx: number
+): HudSizePx {
+  const width: number = gridPitchOf(gridWidthPx, 0, cols, 0, gapPx, fallbackChildWidthPx, 0).width;
+  return new HudSizePx(width, rowPitchPx);
+}
+
+/** 某格的左上角相对网格原点（格子 → 坐标的正算式，[cellAtPointer] 是它的逆） */
+export function cellOffsetPx(cell: GridCell, pitch: HudSizePx): HudPointPx {
+  const col: number = cell.col > 0 ? cell.col : 0;
+  const row: number = cell.row > 0 ? cell.row : 0;
+  return new HudPointPx(col * pitch.width, row * pitch.height);
+}
+
+/** 向下取整的除法（`/` 对负数是截断，指针拖到网格左上方时会给出 -0 这种暧昧值） */
+function floorDiv(v: number, p: number): number {
+  const q: number = truncDiv(v, p);
+  return v % p !== 0 && (v < 0) !== (p < 0) ? q - 1 : q;
+}
+
+/** 向上取整的除法（#80 那一支"从右往里数列"的逆算式用；与 [floorDiv] 同一套负数语义） */
+function ceilDiv(v: number, p: number): number {
+  return -floorDiv(-v, p);
+}
+
+/**
+ * 指针 → 它**压住的那一格**（编辑页吸附用的逆算式，与 [cellOffsetPx] / [cellSlotLeftPx] 一对一）。
+ * 取"压住"（floor）而不是"中心最近"（round）。
+ * [gridWidthPx]、[gapPx]、[colFromEnd] 三个形参**没有默认值**（漏挂会把"从右数"退回"从左数"）。
+ */
+export function cellAtPointer(
+  pointer: HudPointPx,
+  origin: HudPointPx,
+  pitch: HudSizePx,
+  gridWidthPx: number,
+  gapPx: number,
+  colFromEnd: boolean
+): GridCell {
+  if (pitch.width <= 0 || pitch.height <= 0) {
+    return new GridCell(0, 0);
+  }
+  const localX: number = pointer.x - origin.x;
+  let col: number;
+  if (colFromEnd) {
+    col = ceilDiv(gridWidthPx + gapPx - localX, pitch.width) - 1;
+  } else {
+    col = floorDiv(localX, pitch.width);
+  }
+  const row: number = floorDiv(pointer.y - origin.y, pitch.height);
+  return new GridCell(col > 0 ? col : 0, row > 0 ? row : 0);
+}
+
+/**
+ * 格内的居中偏移：纵向在**整块**里居中（`span=1` 时与 #74 逐字同值）。
+ * [rowSpan] **没有默认值**：漏挂会把 72dp 的姿态仪塞回一档里、与下一颗叠字。
+ */
+export function cellPlaceOffsetPx(
+  cell: GridCell, pitch: HudSizePx, child: HudSizePx, rowSpan: number
+): HudPointPx {
+  const g: HudPointPx = cellOffsetPx(cell, pitch);
+  const span: number = rowSpan > 1 ? rowSpan : 1;
+  const blockHeightPx: number = pitch.height * span;
+  return new HudPointPx(
+    g.x + truncDiv(pitch.width - child.width, 2),
+    g.y + truncDiv(blockHeightPx - child.height, 2)
+  );
+}
+
+/**
+ * 外接矩形重叠检测（重叠**只提示不禁止**）：返回按 [hudZoneAll] 顺序去重后的容器名对。
+ * `rects` 的键是容器 key（ArkTS 无结构相等的适配）。
+ */
+export function overlappingZones(rects: Map<string, HudRectDp>): Array<HudZonePair> {
+  const out: Array<HudZonePair> = [];
+  const present: Array<HudZone> = [];
+  for (const zone of HUD_ZONES) {
+    if (rects.has(hudZoneKey(zone))) {
+      present.push(zone);
+    }
+  }
+  for (let i = 0; i < present.length; i++) {
+    for (let j = i + 1; j < present.length; j++) {
+      const a: HudRectDp | undefined = rects.get(hudZoneKey(present[i]));
+      const b: HudRectDp | undefined = rects.get(hudZoneKey(present[j]));
+      if (a !== undefined && b !== undefined && a.intersects(b)) {
+        out.push(new HudZonePair(present[i], present[j]));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 落点在哪枚容器：命中**最里面**（面积最小）的那枚，都不命中返回 undefined（= 这次拖动不改归属）。
+ * 取最小面积而不是第一个命中，是因为读数块贴在底栏 Dock 右上时会嵌套。
+ */
+export function zoneAt(pointer: HudPointDp, rects: Map<string, HudRectDp>): HudZone | undefined {
+  let best: HudZone | undefined = undefined;
+  let bestArea: number = -1;
+  // 按调用方 Map 的插入序扫（与上游 `rects.filter{…}.minByOrNull` 同一条定序）；
+  // 面积相同时保留先出现的那个（`minByOrNull` 返回首个最小值）。
+  rects.forEach((rect: HudRectDp, key: string): void => {
+    const zone: HudZone | undefined = hudZoneFromKey(key);
+    if (zone === undefined || !rect.contains(pointer.x, pointer.y)) {
+      return;
+    }
+    const area: number = rect.width * rect.height;
+    if (bestArea < 0 || area < bestArea) {
+      bestArea = area;
+      best = zone;
+    }
+  });
+  return best;
+}
+
+/** 按竖直方向重叠把条目分簇成「行」（保持入参顺序，簇内也按入参顺序） */
+function clusterRows(items: Array<HudRectDp>): Array<Array<HudRectDp>> {
+  const rows: Array<Array<HudRectDp>> = [];
+  const sorted: Array<HudRectDp> = items.slice().sort((a: HudRectDp, b: HudRectDp): number => a.top - b.top);
+  for (const rect of sorted) {
+    let hit: Array<HudRectDp> | undefined = undefined;
+    for (const row of rows) {
+      const r: HudRectDp = row[0];
+      if (rect.top < r.bottom && r.top < rect.bottom) {
+        hit = row;
+        break;
+      }
+    }
+    if (hit === undefined) {
+      const created: Array<HudRectDp> = [];
+      rows.push(created);
+      created.push(rect);
+    } else {
+      hit.push(rect);
+    }
+  }
+  const out: Array<Array<HudRectDp>> = [];
+  for (const row of rows) {
+    const ordered: Array<HudRectDp> = [];
+    for (const rect of items) {
+      if (row.indexOf(rect) >= 0) {
+        ordered.push(rect);
+      }
+    }
+    if (ordered.length > 0) {
+      out.push(ordered);
+    }
+  }
+  return out;
+}
+
+/**
+ * 松手后条目该插到目标容器的第几格（返回 0..size，越界由 [HudLayoutTable.moveEntryTo] 再夹一次）。
+ * ROW / COLUMN：沿主轴数「有几颗的中心比指针更靠前」；GRID：先按上下边界把行分簇，再在指针那一行里数横向。
+ */
+export function dropIndexFor(axis: HudAxis, items: Array<HudRectDp>, pointer: HudPointDp): number {
+  if (items.length === 0) {
+    return 0;
+  }
+  if (axis === HudAxis.ROW) {
+    let n: number = 0;
+    for (const it of items) {
+      if (truncDiv(it.left + it.right, 2) < pointer.x) {
+        n++;
+      }
+    }
+    return n;
+  }
+  if (axis === HudAxis.COLUMN) {
+    let n: number = 0;
+    for (const it of items) {
+      if (truncDiv(it.top + it.bottom, 2) < pointer.y) {
+        n++;
+      }
+    }
+    return n;
+  }
+  const rows: Array<Array<HudRectDp>> = clusterRows(items);
+  let row: Array<HudRectDp> | undefined = undefined;
+  for (const r of rows) {
+    if (pointer.y >= r[0].top && pointer.y <= r[r.length - 1].bottom) {
+      row = r;
+      break;
+    }
+  }
+  if (row === undefined) {
+    let bestD: number = -1;
+    for (const r of rows) {
+      const center: number = truncDiv(r[0].top + r[r.length - 1].bottom, 2);
+      const d: number = Math.abs(center - pointer.y);
+      if (bestD < 0 || d < bestD) {
+        bestD = d;
+        row = r;
+      }
+    }
+  }
+  if (row === undefined) {
+    return items.length;
+  }
+  let before: number = 0;
+  for (const r of rows) {
+    if (r === row) {
+      break;
+    }
+    before += r.length;
+  }
+  let n: number = 0;
+  for (const it of row) {
+    if (truncDiv(it.left + it.right, 2) < pointer.x) {
+      n++;
+    }
+  }
+  return before + n;
+}
+
+// ------------------------------------------------------------------ 第 8 条：底栏 Dock 的上栏 / 下栏
+
+/**
+ * 底栏 Dock 的两档 y：**下栏 = 定稿位置**（底边贴安全区底再让开 `bottomPadDp`），
+ * **上栏 = 下栏再上一整排**，间距一枚 `gapDp`。全程只有实测高与令牌，没有机型数值。
+ */
+export function dockLowerY(area: HudAreaDp, heightDp: number, bottomPadDp: number): number {
+  const y: number = area.height - bottomPadDp - heightDp;
+  return y > 0 ? y : 0;
+}
+
+export function dockUpperY(area: HudAreaDp, heightDp: number, bottomPadDp: number, gapDp: number): number {
+  const y: number = dockLowerY(area, heightDp, bottomPadDp) - heightDp - gapDp;
+  return y > 0 ? y : 0;
+}
+
+/**
+ * 拖动位移 → 落在哪一栏（**只有两档**）：往上过半程去上栏，其余一律回下栏。
+ * [deltaYDp] 是相对下栏的竖直位移（屏幕坐标，向上为负）。
+ */
+export function dockSnapY(
+  area: HudAreaDp, heightDp: number, bottomPadDp: number, gapDp: number, deltaYDp: number
+): number {
+  const lower: number = dockLowerY(area, heightDp, bottomPadDp);
+  const upper: number = dockUpperY(area, heightDp, bottomPadDp, gapDp);
+  const pitch: number = lower - upper;
+  return pitch > 0 && -deltaYDp >= pitch / 2 ? upper : lower;
+}
+
+/**
+ * 第 8 条进入拖拽的 gate（正在录的时候不能让人把底栏搬走）。
+ * PREPARE / START / STOPPING 三态一律拒绝；ERROR 不算忙。
+ */
+export function dockDragBlocked(status: HudDockStatus): boolean {
+  return status === HudDockStatus.PREPARE || status === HudDockStatus.START ||
+    status === HudDockStatus.STOPPING;
+}
+
+/**
+ * 右竖 Dock 的下界要让开「读数块所在的那一横带」，但**不许低于底栏那一排自己的下界**：
+ * 两块共用底栏那一行（同一基线）是**并联**关系 ⇒ 取大而不是求和。
+ * 坏值（负高）按 0 处理。
+ */
+export function areaForRightDock(area: HudAreaDp, readoutHeightDp: number, readoutBottomDp: number): HudAreaDp {
+  const h: number = readoutHeightDp > 0 ? readoutHeightDp : 0;
+  const wanted: number = readoutBottomDp + h;
+  return new HudAreaDp(area.width, area.height, area.topAvoidDp,
+    area.bottomAvoidDp > wanted ? area.bottomAvoidDp : wanted);
+}
+
+// ------------------------------------------------------------------ #70 A：读数块与底栏那一行
+
+/** 用户 2026-09-29 12:20 定版的列数上限：横屏「读数缩到一行两颗」，不是按剩余宽度算到 3 */
+export const DOCK_ROW_PER_ROW_CAP: number = 2;
+
+/**
+ * 「这一帧有横行可言」的下限：右半带至少排得下两颗才算同行。
+ * 与 [DOCK_ROW_PER_ROW_CAP] 同为 2 但**不是同一个数**：那条是上限，这条是门槛。
+ */
+const MIN_COLUMNS_FOR_SHARED_ROW: number = 2;
+
+/**
+ * 与底栏同一行时**整块读数**（含它自己的内边距）允许占的那一段宽度：
+ * 底栏右缘 + 一枚间距 → 安全区右缘 − 设计留白。
+ */
+export function readoutStripWidthDp(
+  safeWidthDp: number, dockWidthDp: number, endPadDp: number, dockGapDp: number
+): number {
+  const w: number = safeWidthDp / 2 - dockWidthDp / 2 - dockGapDp - endPadDp;
+  return w > 0 ? w : 0;
+}
+
+/**
+ * 与底栏同一行时读数块的可用内宽（走 [hudRoomDp]，与整幅取档那条同一个表达式、同一批真源）。
+ * 极窄时整条被 [hudRoomDp] 夹到 0，不会给负数。
+ */
+export function readoutRoomBesideDockDp(
+  safeWidthDp: number, dockWidthDp: number, endPadDp: number, dockGapDp: number
+): number {
+  return hudRoomDp(safeWidthDp / 2 - dockWidthDp / 2 - dockGapDp, endPadDp);
+}
+
+/**
+ * [ReadoutRowPlan] 的算式本体。两页（录制页 / 编辑页）必须调这一条，不许各写一份判据（S3-5 同源）。
+ *
+ * 两个形参**没有默认值**，都是承重的（#69 铁律）：`landscape` 由调用方从方向送进来；
+ * `readoutWidthDp` 实测块宽（给默认值 0 等于"永远放行"，新调用点漏传就拆了竖屏那道安全网）。
+ *
+ * @param dockRowBaselineDp 两枚容器共用的那条基线（= 底板可见底边的高度）
+ */
+export function planReadoutRow(
+  readoutCount: number,
+  fontScale: number,
+  safeWidthDp: number,
+  dockWidthDp: number,
+  dockStripDp: number,
+  dockRowBaselineDp: number,
+  endPadDp: number,
+  dockGapDp: number,
+  landscape: boolean,
+  readoutWidthDp: number
+): ReadoutRowPlan {
+  const besideRoom: number = readoutRoomBesideDockDp(safeWidthDp, dockWidthDp, endPadDp, dockGapDp);
+  const perRowBeside: number = hudPerRowFor(readoutCount, fontScale, besideRoom);
+  // 同基线档的容器让位：基线减掉块自己那枚内边距，胶囊可见底边才与底板可见底边齐平
+  const dockRowBottomDp: number = Math.max(0, dockRowBaselineDp - HUD_BLOCK_PAD_DP);
+  if (landscape) {
+    // 横屏（定版）：恒同行、列数夹到 [DOCK_ROW_PER_ROW_CAP]。这一支**不读** readoutWidthDp
+    return new ReadoutRowPlan(true, dockRowBottomDp,
+      Math.min(DOCK_ROW_PER_ROW_CAP, perRowBeside), besideRoom);
+  }
+  const fullRoom: number = hudRoomDp(safeWidthDp, endPadDp);
+  const perRowFull: number = hudPerRowFor(readoutCount, fontScale, fullRoom);
+  // 安全网：估宽偏小 ⇒ 再用**实测块宽**兜一道（量不到那一帧 0 = 先按估宽走）
+  const stripWidth: number = readoutStripWidthDp(safeWidthDp, dockWidthDp, endPadDp, dockGapDp);
+  const measuredFitsBeside: boolean = readoutWidthDp <= 0 || readoutWidthDp <= stripWidth;
+  if (perRowBeside >= MIN_COLUMNS_FOR_SHARED_ROW && measuredFitsBeside) {
+    return new ReadoutRowPlan(true, dockRowBottomDp, perRowBeside, besideRoom);
+  }
+  // 退化档的列数必须对**本帧这次决策不敏感**，否则 `块宽→档位` 会把自己闩死（S1）
+  const perRow: number = perRowBeside >= MIN_COLUMNS_FOR_SHARED_ROW
+    ? Math.min(perRowBeside, perRowFull)
+    : perRowFull;
+  return new ReadoutRowPlan(false, dockStripDp, perRow, fullRoom);
+}
+
+// ------------------------------------------------------------------ 容器内的条目渲染分组
+
+/**
+ * 把一枚容器的可见条目切成「一行一行」，五枚容器共用这一条算式（B1–B3 的高度账就靠它）。
+ *
+ * - 顶栏 / 底栏：横排一行；
+ * - 左竖 Dock：一行一颗；
+ * - 右竖 Dock：**S2-2 B 那条并排规则保留**——姿态仪与音量表相邻时并成一行（#74 之后是**一枚格子
+ *   里放两颗**，见 [defaultCellsOf]，用户拆开就不再并排）；
+ * - 读数块：按 `perRow` 分行。
+ */
+export function hudRowGroups(zone: HudZone, order: Array<HudEntry>, perRow: number): Array<Array<HudEntry>> {
+  if (zone === HudZone.TOP || zone === HudZone.BOTTOM) {
+    return order.length === 0 ? [] : [order.slice()];
+  }
+  if (zone === HudZone.LEFT) {
+    return order.map((entry: HudEntry): Array<HudEntry> => [entry]);
+  }
+  if (zone === HudZone.RIGHT) {
+    const groups: Array<Array<HudEntry>> = [];
+    const levelId: string = HudEntry.ofPill(CamPill.LEVEL).id;
+    const volumeId: string = HudEntry.ofPill(CamPill.VOLUME).id;
+    let i: number = 0;
+    while (i < order.length) {
+      const next: HudEntry | undefined = i + 1 < order.length ? order[i + 1] : undefined;
+      const nextId: string | undefined = next === undefined ? undefined : next.id;
+      if (order[i].id === levelId && nextId === volumeId) {
+        groups.push([order[i], order[i + 1]]);
+        i += 2;
+      } else if (order[i].id === volumeId && nextId === levelId) {
+        groups.push([order[i], order[i + 1]]);
+        i += 2;
+      } else {
+        groups.push([order[i]]);
+        i++;
+      }
+    }
+    return groups;
+  }
+  const per: number = perRow < 1 ? 1 : perRow;
+  const out: Array<Array<HudEntry>> = [];
+  for (let i = 0; i < order.length; i += per) {
+    out.push(order.slice(i, i + per));
+  }
+  return out;
+}
+
+/**
+ * 右竖 Dock 的「并排」判据（单独暴露给用例）：姿态仪与音量表**相邻**才并排。
+ * 用户把音量表挪到别处、或把它关掉了，都必须退回一行一颗。
+ */
+export function rightDockPacksLevelAndVolume(order: Array<HudEntry>): boolean {
+  const levelId: string = HudEntry.ofPill(CamPill.LEVEL).id;
+  const volumeId: string = HudEntry.ofPill(CamPill.VOLUME).id;
+  let level: number = -1;
+  let volume: number = -1;
+  for (let i = 0; i < order.length; i++) {
+    if (level < 0 && order[i].id === levelId) {
+      level = i;
+    }
+    if (volume < 0 && order[i].id === volumeId) {
+      volume = i;
+    }
+  }
+  return level >= 0 && volume >= 0 && Math.abs(level - volume) === 1;
 }

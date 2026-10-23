@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 473 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 569 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -73,10 +73,20 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `Camera2Engine` 那套退档/降级窗口；抑制判定在 native `cpp/gl_render.cpp`），只交付纯函数 + 全表用例。
   `HudMetrics`（J1：`hudPerRowFor`/`hudRoomDp`/`hudChipHeightDp`/`hudStripHeightDp`，读数块换行档与高度预测）、
   `HudPageGrid`（J1：整页页格数学 `pageCellPx`/`pageGridBoxOf`/`pageCellAtPointer`/`pageCellsBlocked`，
-  与 Dock 内格同源同尺）、`HudLayout`（J1：位置表类型/`hud_layout` 编解码/安全区钳制/`dropZoneOf`）。
-  **三件同属 HUD 可编排布局地基，目前无 UI 消费方**：J2 网格几何与拖拽落点（`gridBoxOf`/`clampCellToBox`/
-  `cellDropOf`/`freeCellNear`/`resolveCells`/`defaultCellsOf`/`gridRowPitchPx` 等）、J3 编辑器 UI；
-  `hud_layout` 串是**逐字节持久化契约**，改分隔符/后缀顺序等于改存量配置语义。
+  与 Dock 内格同源同尺）、`HudLayout`（J1 位置表类型/`hud_layout` 编解码/安全区钳制/`dropZoneOf`；
+  J2 网格几何与拖放：`gridBoxOf`/`editableGridRowsOf`/`clampCellToBox`/`cellDropOf`/`freeCellNear`/
+  `resolveCells`/`defaultCellsOf`/`cellGroupMatesOf`/`gridPitchPx`/`gridRowPitchPx`/`hudGridRowPitchPx`/
+  `gridPlacementOf`/`cellAtPointer`/`entryHitIndex`/`reservedGridRowsOf`/`reservedGridColsOf`/
+  `gridColFromEndOf`/`gridItems`/`defaultGridOf`/`occupiedCells`/`residentsOf`/`pinned`/`placeEntryAt`/
+  `moveEntryTo`/`sourceZoneOf`/`droppedCellHeightPx`/`dockLowerY`/`dockUpperY`/`dockSnapY`/
+  `dockDragBlocked`/`zoneAt`/`overlappingZones`/`dropIndexFor`/`areaForRightDock`/`hudRowGroups`/
+  `rightDockPacksLevelAndVolume`/`planReadoutRow`/`readoutStripWidthDp`/`readoutRoomBesideDockDp`）。
+  **三件同属 HUD 可编排布局地基，目前无 UI 消费方**（J3 编辑器 UI 与录制页消费）。
+  **铁律（#69）**：跨度/实测高/格距/带边界一类形参（`cellRowSpan`、`clampCellToBox`、`freeCellNear`、
+  `cellDropOf`、`resolveCells`、`reservedGridRowsOf`、`gridPlacementOf`、`planReadoutRow` 的
+  `landscape`/`readoutWidthDp`…）**一律没有默认值**——给了默认值，新调用点漏挂就会静默退回旧行为；
+  ArkTS 里同样必须由调用方显式喂入。
+  `hud_layout` 串是**逐字节持久化契约**，改分隔符/后缀顺序等于改存量配置语义（J2 一个字符未动）。
 - `player/`：`CompareTimeline`（几何+decide 内核）、`CompareAudio`（选轨计划/命令序）、`AudioSync`
   （DSP）、`ComparePractice`（练习桥）、`CompareHistory`（历史纯核心）、`TrackSync`（双轨偏移合成）、
   `PcmDecode`（PTS 落位/PCM16/24/F32 解码）、`PureLogicBarrel`（编译守卫，EntryAbility 启动调用）。

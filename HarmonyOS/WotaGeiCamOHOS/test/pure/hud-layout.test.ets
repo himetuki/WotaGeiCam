@@ -1,7 +1,9 @@
 /**
- * HUD 位置模型：越界钳制 + 持久化契约（直译上游 `HudLayoutClampTest` + `HudLayoutCodecTest`
- * 的可移植面；`dockLowerY/dockUpperY/dockSnapY/dockDragBlocked/zoneAt/overlappingZones` 属
- * 底栏吸附与重叠提示，随编辑器 UI 批次再来，本批不含）。
+ * HUD 位置模型：越界钳制 + 持久化契约（直译上游 `HudLayoutClampTest` + `HudLayoutCodecTest` 全量）。
+ *
+ * J1 交付了类型/编解码/夹取/落区；J2 在同文件补齐**底栏两档吸附、重叠提示、最内层命中**，以及
+ * CodecTest 里依赖 `gridItems`/`placeEntryAt`/`defaultCellsOf` 的那些臂（v1 迁移逐颗落点、
+ * 配对同格往返、隐藏态格位保留、坏格子后缀回推导格）。
  *
  * ## 数值档与上游同源
  * 横屏安全区 766×360（挖孔让掉一条短边之后的 1532px/2）、竖屏 360×800；顶栏 44dp、底栏 72dp。
@@ -18,10 +20,11 @@
  */
 import { CamPill, HudItem, HudItems } from '../../entry/src/main/ets/core/Constants';
 import {
-  GridCell, HudAreaDp, HudEntry, HudLayoutTable, HudPointDp, HudRectDp, HudZone, IntRange, ZonePlacement,
-  chromeBandBottomDp, clampStoredCell, clampZonePos, clampZoneX, clampZoneYRange, dropZoneOf,
-  editorVisibleEntries, gridColsCapOf, gridRowHardCap, hudZoneAll, hudZoneAxis, hudZoneFromKey, hudZoneIsGrid,
-  pxToDp, zoneBandYRange
+  GridCell, HudAreaDp, HudDockStatus, HudEntry, HudGridItem, HudGridPlan, HudLayoutTable, HudPointDp, HudRectDp, HudZone,
+  HudZonePair, IntRange, ZonePlacement, chromeBandBottomDp, clampStoredCell, clampZonePos, clampZoneX,
+  clampZoneYRange, dockDragBlocked, dockLowerY, dockSnapY, dockUpperY, dropZoneOf, editorVisibleEntries,
+  gridColsCapOf, gridRowHardCap, hudZoneAll, hudZoneAxis, hudZoneFromKey, hudZoneIsGrid, overlappingZones,
+  pxToDp, zoneAt, zoneBandYRange
 } from '../../entry/src/main/ets/core/HudLayout';
 
 /** 横屏：safeDrawing 后实测 766×360，顶栏 44、底栏 72 */
@@ -53,6 +56,23 @@ function entryIdOf(raw: string): string {
 function tokenOf(cells: Map<string, GridCell>, entry: HudEntry): string {
   const cell: GridCell | undefined = cells.get(entry.id);
   return cell === undefined ? '<none>' : cell.token;
+}
+
+/** J2 的格子解析输入：全部可见、读数块一行 3 颗、格距手摆 30px、实测高一律 0（跨度恒 1） */
+const PLAN_ALL: HudGridPlan = new HudGridPlan(
+  new Set<string>(HudEntry.ALL.map((x: HudEntry): string => x.id)),
+  3,
+  (_zone: HudZone): number => 30,
+  (_entry: HudEntry): number => 0
+);
+
+function cellTokenAt(table: HudLayoutTable, zone: HudZone, entry: HudEntry): string {
+  for (const it of table.gridItems(zone, PLAN_ALL)) {
+    if (it.entry.id === entry.id) {
+      return it.cell.token;
+    }
+  }
+  return '<none>';
 }
 
 // ================================================================== 一、越界钳制（上游 HudLayoutClampTest）
@@ -605,4 +625,258 @@ test('hud_items掩码契约_位值默认档与往返', () => {
   assertEq(127, full);
   assertEq(full, HudItems.maskOf(HudItems.typesOf(full)));
   assertEq(0, HudItems.typesOf(0).length);
+});
+
+
+// ================================================================== 三、底栏两档吸附（上游第 8 条）
+
+test('底栏上下两档由实测高推出_不是写死80dp', () => {
+  const lower: number = dockLowerY(LAND, 72, 6);
+  const upper: number = dockUpperY(LAND, 72, 6, 8);
+  assertEq(282, lower, '下栏 = 360 − 6 − 72');
+  assertEq(202, upper, '上栏 = 下栏 − 72 − 8');
+  // 排高变了（120% 文本 → 底板更高）两档跟着分开
+  assertEq(276, dockLowerY(LAND, 78, 6));
+  assertEq(190, dockUpperY(LAND, 78, 6, 8));
+});
+
+test('底栏只吸两档_往上过半程才去上栏', () => {
+  const lower: number = dockLowerY(LAND, 72, 6);
+  const upper: number = dockUpperY(LAND, 72, 6, 8);
+  assertEq(lower, dockSnapY(LAND, 72, 6, 8, 0), '原地松手');
+  assertEq(lower, dockSnapY(LAND, 72, 6, 8, 30), '往下拖');
+  assertEq(lower, dockSnapY(LAND, 72, 6, 8, -39), '往上但没过半程');
+  assertEq(upper, dockSnapY(LAND, 72, 6, 8, -40), '过半程（间距 80，半程 40）');
+  assertEq(upper, dockSnapY(LAND, 72, 6, 8, -999), '再往上也是上栏，没有第三档');
+  assertEq(dockLowerY(PORT, 72, 6), dockSnapY(PORT, 72, 6, 8, 0));
+  assertEq(dockUpperY(PORT, 72, 6, 8), dockSnapY(PORT, 72, 6, 8, -999));
+});
+
+test('极矮窗口两档重合时_一律按下栏处理', () => {
+  const tiny: HudAreaDp = new HudAreaDp(766, 70, 0, 0);
+  assertEq(0, dockLowerY(tiny, 72, 6));
+  assertEq(0, dockUpperY(tiny, 72, 6, 8));
+  assertEq(0, dockSnapY(tiny, 72, 6, 8, -999));
+});
+
+test('录制三态拒绝搬底栏_空闲与失败放行', () => {
+  assertTrue(dockDragBlocked(HudDockStatus.PREPARE));
+  assertTrue(dockDragBlocked(HudDockStatus.START));
+  assertTrue(dockDragBlocked(HudDockStatus.STOPPING), 'STOPPING 也被挡：分裂动画中没有第二指的空间');
+  assertFalse(dockDragBlocked(HudDockStatus.IDLE));
+  assertFalse(dockDragBlocked(HudDockStatus.ERROR));
+  // 五档逐个都判过：新增一档时这里要求显式表态
+  assertEq(5, [HudDockStatus.IDLE, HudDockStatus.PREPARE, HudDockStatus.START,
+    HudDockStatus.STOPPING, HudDockStatus.ERROR].length);
+});
+
+// ================================================================== 四、重叠只提示不禁止 + 最内层命中
+
+test('重叠检测报成对而不是计数_边贴边不算叠', () => {
+  const rects: Map<string, HudRectDp> = new Map<string, HudRectDp>();
+  rects.set(HudZone.LEFT, new HudRectDp(8, 60, 200, 262));
+  rects.set(HudZone.READOUT, new HudRectDp(150, 200, 400, 262));
+  rects.set(HudZone.TOP, new HudRectDp(8, 4, 300, 48));
+  const pairs: Array<HudZonePair> = overlappingZones(rects);
+  assertEq(1, pairs.length, '只该报出真重叠的那一对');
+  assertEq(HudZone.LEFT, pairs[0].first);
+  assertEq(HudZone.READOUT, pairs[0].second);
+  // 外接矩形边贴边不算叠
+  const touching: Map<string, HudRectDp> = new Map<string, HudRectDp>();
+  touching.set(HudZone.READOUT, new HudRectDp(500, 100, 700, 200));
+  touching.set(HudZone.BOTTOM, new HudRectDp(300, 200, 600, 282));
+  assertEq(0, overlappingZones(touching).length, '边贴边不许报重叠');
+  assertEq(0, overlappingZones(new Map<string, HudRectDp>()).length);
+  const single: Map<string, HudRectDp> = new Map<string, HudRectDp>();
+  single.set(HudZone.TOP, new HudRectDp(0, 0, 10, 10));
+  assertEq(0, overlappingZones(single).length);
+});
+
+test('指针命中面积最小的那枚容器_不是第一个命中', () => {
+  const rects: Map<string, HudRectDp> = new Map<string, HudRectDp>();
+  rects.set(HudZone.LEFT, new HudRectDp(0, 0, 100, 300));
+  rects.set(HudZone.READOUT, new HudRectDp(50, 200, 150, 260));
+  assertEq(HudZone.READOUT, zoneAt(new HudPointDp(60, 210), rects), '读数块整个压在左 Dock 的角上');
+  assertEq(HudZone.LEFT, zoneAt(new HudPointDp(10, 10), rects));
+  assertTrue(zoneAt(new HudPointDp(999, 999), rects) === undefined, '两枚之外：本次拖动不改归属');
+  assertTrue(zoneAt(new HudPointDp(0, 0), new Map<string, HudRectDp>()) === undefined);
+});
+
+test('操作栏与顶栏的交叠判定_33dp仍压住_34dp脱离', () => {
+  // 竖屏本机手算：三颗胶囊左 8、上 4、高 30、宽 192；顶栏两段整宽 271、高 24
+  const chips: HudRectDp = new HudRectDp(8, 4, 200, 34);
+  const topUnpushed: HudRectDp = new HudRectDp(8, 4, 8 + 271, 4 + 24);
+  assertTrue(topUnpushed.intersects(chips), '不推就必须交叠');
+  const pushed: HudRectDp = new HudRectDp(8, 56, 8 + 271, 56 + 24);
+  assertFalse(pushed.intersects(chips), '推到操作栏下缘之后必须完全让开');
+  assertTrue(new HudRectDp(8, 33, 8 + 271, 33 + 24).intersects(chips), '33dp 那一档仍压在胶囊行里');
+  assertFalse(new HudRectDp(8, 34, 8 + 271, 34 + 24).intersects(chips), '34dp 正好脱离');
+  assertTrue(topUnpushed.left < chips.right && chips.left < topUnpushed.right, '横向确实重叠');
+  assertEq(4, Math.max(4, chromeBandBottomDp(0, 68, 2)), '让位量 0 时等于改前的 4dp');
+  assertEq(56, Math.max(4, chromeBandBottomDp(180, 68, 2)));
+});
+
+// ================================================================== 五、J2 补的编解码臂
+
+test('编辑过的表编解码无损_含跨容器换序与显式格', () => {
+  const edited: HudLayoutTable = HudLayoutTable.default()
+    .withZonePos(HudZone.RIGHT, 612, 88)
+    .moveEntryTo(e(CamPill.CURVE), HudZone.TOP, 1, PLAN_ALL)
+    .placeEntryAt(e(CamPill.FLASH), HudZone.LEFT, 3, new GridCell(1, 3), PLAN_ALL);
+  const back: HudLayoutTable = HudLayoutTable.decode(edited.encode());
+  assertEq(edited.encode(), back.encode(), '编解码必须无损回到同一张表');
+  assertEq(612, back.posOf(HudZone.RIGHT).xDp);
+  assertEq(88, back.posOf(HudZone.RIGHT).yDp);
+  assertEq(HudZone.TOP, back.sourceZoneOf(e(CamPill.CURVE)));
+  // 光看整张表相等看不出 encode 漏写后缀（默认格恰好等于钉住之前那一格）⇒ 直接点格子值
+  assertEq('1.3', tokenOf(back.cellsOf(HudZone.LEFT), e(CamPill.FLASH)));
+  assertEachEntryOnce(back, '回读表');
+});
+
+test('显式格只对网格容器落串_非网格容器不留脏数据', () => {
+  const t: HudLayoutTable = HudLayoutTable.default()
+    .placeEntryAt(e(CamPill.BT), HudZone.RIGHT, 4, new GridCell(1, 2), PLAN_ALL);
+  let rightSeg: string = '';
+  let topSeg: string = '';
+  for (const seg of t.encode().split(';')) {
+    if (seg.startsWith('R,')) {
+      rightSeg = seg;
+    }
+    if (seg.startsWith('T,')) {
+      topSeg = seg;
+    }
+  }
+  assertTrue(rightSeg.indexOf('P2:1.2') >= 0, `右 Dock 的格子后缀没写进串：${rightSeg}`);
+  assertFalse(topSeg.indexOf(':') >= 0, `顶栏写了格子后缀：${topSeg}`);
+  assertEq('1.2', tokenOf(HudLayoutTable.decode(t.encode()).cellsOf(HudZone.RIGHT), e(CamPill.BT)));
+});
+
+test('v1串迁移_逐颗落点等于推导格_格子表全空', () => {
+  // **v1 → v2 迁移的硬要求**：用户已经拖过的东西一律不许被打回默认。
+  const v1: string = 'v1;T,42,7,P11,P12;L,-1,-1,P6,P7,P8,P9;R,-1,-1,P0,P1,P2,P3,P4,P5;' +
+    'D,-1,-1,H0,H1,H2,H3,H4,H5,H6;B,-1,-1,P2';
+  const t: HudLayoutTable = HudLayoutTable.decode(v1);
+  assertEq(2, t.version, '读老串要把表版本抬到当前');
+  assertEq(42, t.posOf(HudZone.TOP).xDp, '老串里拖过的容器位置必须原样保住');
+  assertEq(7, t.posOf(HudZone.TOP).yDp);
+  // 逐颗点名默认格子（v1 的顺序 × 分行 ⇒ 与 v2 推导同形）
+  assertEq('0.0', cellTokenAt(t, HudZone.LEFT, e(CamPill.REFLINE)));
+  assertEq('0.2', cellTokenAt(t, HudZone.LEFT, e(CamPill.CURVE)));
+  assertEq('0.3', cellTokenAt(t, HudZone.LEFT, e(CamPill.FLASH)));
+  // 右 Dock 配对共格（v1 迁移后必须与新默认同形，否则一进编辑页就看到右 Dock 变宽）
+  assertEq('0.0', cellTokenAt(t, HudZone.RIGHT, e(CamPill.LEVEL)));
+  assertEq('0.0', cellTokenAt(t, HudZone.RIGHT, e(CamPill.VOLUME)));
+  assertEq('0.1', cellTokenAt(t, HudZone.RIGHT, e(CamPill.BT)));
+  assertEq('0.4', cellTokenAt(t, HudZone.RIGHT, e(CamPill.STAB)));
+  assertEq('2.1', cellTokenAt(t, HudZone.READOUT, h(HudItem.WB)));
+  assertEq('0.2', cellTokenAt(t, HudZone.READOUT, h(HudItem.ZOOM)));
+  // 迁移不写格子表
+  for (const zone of hudZoneAll()) {
+    assertEq(0, t.cellsOf(zone).size, `${zone} 段迁移后不该有显式格子`);
+  }
+  assertTrue(cellTokenAt(t, HudZone.TOP, e(CamPill.SIZE)) === '-', '非网格容器永远拿哨兵格');
+  assertEachEntryOnce(t, 'v1 迁移表');
+});
+
+test('v1编辑过的顺序迁移到它渲染的那一格', () => {
+  // 变焦被拖到左 Dock 第 0 格、左 Dock 整体被拖到 (120,300)
+  const v1: string = 'v1;T,-1,-1,P11,P12;L,120,300,P3,P6,P7,P8,P9;R,-1,-1,P0,P1,P2,P4,P5;' +
+    'D,-1,-1,H0,H1,H2,H3,H4,H5,H6;B,-1,-1,P2';
+  const t: HudLayoutTable = HudLayoutTable.decode(v1);
+  assertEq(HudZone.LEFT, t.sourceZoneOf(e(CamPill.ZOOM)));
+  const left: Array<HudGridItem> = t.gridItems(HudZone.LEFT, PLAN_ALL);
+  assertEq(e(CamPill.ZOOM).id, left[0].entry.id, '拖到左 Dock 第 0 格的变焦仍在第 0 位');
+  assertEq('0.0', left[0].cell.token, '落点仍是第 0 行第 0 列');
+  assertEq('0.1', left[1].cell.token);
+  assertEq(120, t.posOf(HudZone.LEFT).xDp, '容器整体落点必须原样搬过来');
+  assertEq(300, t.posOf(HudZone.LEFT).yDp);
+  assertEq('0.0', cellTokenAt(t, HudZone.RIGHT, e(CamPill.LEVEL)));
+  assertEq('0.0', cellTokenAt(t, HudZone.RIGHT, e(CamPill.VOLUME)));
+  assertEq('0.2', cellTokenAt(t, HudZone.RIGHT, e(CamPill.FOCUS)));
+});
+
+test('v1拖过容器加搬过条目加隐藏_整串迁移且重开回原位', () => {
+  const v1: string = 'v1;T,-1,-1,P11;L,200,90,P12,P6,P7,P9;R,-1,-1,P0,P1,P2,P3,P4,P5;' +
+    'D,-1,-1,H0,H1,P8,H2,H3,H4,H5,H6;B,-1,-1,P10';
+  const t: HudLayoutTable = HudLayoutTable.decode(v1);
+  assertEq(200, t.posOf(HudZone.LEFT).xDp, '容器落点原样');
+  assertEq(90, t.posOf(HudZone.LEFT).yDp);
+  assertTrue(t.posOf(HudZone.RIGHT).isDefault, '没拖过的容器仍必须是哨兵');
+  assertEq('P12,P6,P7,P9', ids(t.orderOf(HudZone.LEFT)), '归属与顺序原样');
+  assertEq(HudZone.READOUT, t.sourceZoneOf(e(CamPill.CURVE)));
+  // 逐颗的格子 = 改前那副排布
+  assertEq('0.0', cellTokenAt(t, HudZone.LEFT, e(CamPill.STORAGE)));
+  assertEq('0.1', cellTokenAt(t, HudZone.LEFT, e(CamPill.REFLINE)));
+  assertEq('0.3', cellTokenAt(t, HudZone.LEFT, e(CamPill.FLASH)));
+  assertEq('2.0', cellTokenAt(t, HudZone.READOUT, e(CamPill.CURVE)));
+  assertEq('1.1', cellTokenAt(t, HudZone.READOUT, h(HudItem.ISO)));
+  assertEq('1.2', cellTokenAt(t, HudZone.READOUT, h(HudItem.ZOOM)));
+  // 关掉那两颗再重开：位置还是"改前它所在的那一格"，且没有回出厂容器
+  const hidden: Set<string> = new Set<string>();
+  for (const pill of [CamPill.LEVEL, CamPill.VOLUME, CamPill.BT, CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB,
+    CamPill.REFLINE, CamPill.MONITOR, CamPill.FLASH, CamPill.LENS, CamPill.SIZE]) {
+    hidden.add(e(pill).id);
+  }
+  for (const item of HudItems.ALL) {
+    hidden.add(h(item).id);
+  }
+  let storageVisible: boolean = false;
+  for (const x of t.visibleOrderOf(HudZone.LEFT, hidden)) {
+    if (x.id === e(CamPill.STORAGE).id) {
+      storageVisible = true;
+    }
+  }
+  assertFalse(storageVisible, '关掉的条目不许出现在页面上');
+  const reopened: HudLayoutTable = HudLayoutTable.decode(t.encode());
+  const shown: Array<HudEntry> = reopened.visibleOrderOf(HudZone.LEFT, new Set<string>(
+    HudEntry.ALL.map((x: HudEntry): string => x.id)));
+  assertEq(e(CamPill.STORAGE).id, shown[0].id, '重开显示必须回到左 Dock 第 0 位（不是出厂的顶栏）');
+  assertEq('0.0', reopened.gridItems(HudZone.LEFT, PLAN_ALL)[0].cell.token, '重开后落点还是第 0 行');
+  assertEq(t.encode(), HudLayoutTable.decode(t.encode()).encode(), '同一串二次解码与原表一致');
+  assertEachEntryOnce(t, 'v1 拖过 + 隐藏过');
+});
+
+test('配对同格同串往返_格内次序等于清单次序', () => {
+  const paired: HudLayoutTable = HudLayoutTable.default()
+    .placeEntryAt(e(CamPill.BT), HudZone.RIGHT, 2, new GridCell(1, 0), PLAN_ALL);
+  let rightSeg: string = '';
+  for (const seg of paired.encode().split(';')) {
+    if (seg.startsWith('R,')) {
+      rightSeg = seg;
+    }
+  }
+  assertEq('R,-1,-1,P0:0.0,P1:0.0,P2:1.0,P3:0.2,P4:0.3,P5:0.4', rightSeg,
+    '真实串钉的是格式本身（两颗同格不许新造写法）');
+  const back: HudLayoutTable = HudLayoutTable.decode(paired.encode());
+  assertEq(paired.encode(), back.encode(), '整张表无损 / 编→解→编同串');
+  assertEq('0.0', tokenOf(back.cellsOf(HudZone.RIGHT), e(CamPill.LEVEL)));
+  assertEq('0.0', tokenOf(back.cellsOf(HudZone.RIGHT), e(CamPill.VOLUME)));
+  const inPair: Array<string> = [];
+  for (const it of back.gridItems(HudZone.RIGHT, PLAN_ALL)) {
+    if (it.cell.token === '0.0') {
+      inPair.push(it.entry.id);
+    }
+  }
+  assertEq('P0,P1', inPair.join(','), '格内左右次序 = 清单次序');
+  assertEachEntryOnce(back, '配对同格往返');
+  // 出厂默认表（格子全哨兵）里两颗也共用推导格 ⇒ 与上面是两条不同的码路
+  assertEq('0.0', cellTokenAt(HudLayoutTable.default(), HudZone.RIGHT, e(CamPill.LEVEL)));
+  assertEq('0.0', cellTokenAt(HudLayoutTable.default(), HudZone.RIGHT, e(CamPill.VOLUME)));
+});
+
+test('坏格子后缀只丢那一颗_推导格补回', () => {
+  // 缺行、非数字、负数、越界列：全部只丢那一颗的格子，条目本身照留
+  const raw: string = 'v2;T,-1,-1,P11,P12;L,-1,-1,P6:0,P7:1.2,P8:x.y,P9:9.9;R,-1,-1,P0;D,-1,-1,H0;B,-1,-1,P2';
+  const t: HudLayoutTable = HudLayoutTable.decode(raw);
+  // ① 存储层：只有合法后缀收下，`P9:9.9` 的列被钳进两列上限
+  assertEq('1.2', tokenOf(t.cellsOf(HudZone.LEFT), e(CamPill.MONITOR)));
+  assertEq('1.9', tokenOf(t.cellsOf(HudZone.LEFT), e(CamPill.FLASH)));
+  assertFalse(t.cellsOf(HudZone.LEFT).has(e(CamPill.REFLINE).id), 'P6:0 缺行 ⇒ 按没摆过处理');
+  assertFalse(t.cellsOf(HudZone.LEFT).has(e(CamPill.CURVE).id), 'P8:x.y 非数字 ⇒ 没摆过');
+  assertEq(4, t.orderOf(HudZone.LEFT).length, '条目本身照留');
+  // ② 解析层：没摆过的那两颗回落到推导格（不是 (0,0) 也不是别的野值）
+  assertEq('0.0', cellTokenAt(t, HudZone.LEFT, e(CamPill.REFLINE)));
+  assertEq('1.2', cellTokenAt(t, HudZone.LEFT, e(CamPill.MONITOR)));
+  assertEq('0.2', cellTokenAt(t, HudZone.LEFT, e(CamPill.CURVE)));
+  assertEq('1.9', cellTokenAt(t, HudZone.LEFT, e(CamPill.FLASH)));
 });
