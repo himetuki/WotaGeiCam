@@ -119,7 +119,7 @@ ClipExporter::~ClipExporter()
 }
 
 std::string ClipExporter::Start(int32_t inFd, int64_t inSize, int32_t outFd, int64_t startMs,
-    int64_t endMs, int32_t audioOrdinal)
+    int64_t endMs, int32_t audioOrdinal, int64_t audioShiftUs)
 {
     if (inFd < 0 || inSize <= 0 || outFd < 0 || startMs < 0 || endMs <= startMs) {
         return "args";
@@ -142,6 +142,9 @@ std::string ClipExporter::Start(int32_t inFd, int64_t inSize, int32_t outFd, int
     job.startMs = startMs;
     job.endMs = endMs;
     job.audioOrdinal = audioOrdinal < 0 ? -1 : audioOrdinal;
+    // 平移只对选中音轨生效（上游 ClipRule.audioShiftUs 已在 ArkTS 侧按轨算好）；
+    // 无音轨时清零，杜绝把 AR 的平移误用到别的语义上。
+    job.audioShiftUs = job.audioOrdinal < 0 ? 0 : audioShiftUs;
     try {
         worker_ = std::thread(&ClipExporter::Run, this, job);
     } catch (...) {
@@ -150,9 +153,10 @@ std::string ClipExporter::Start(int32_t inFd, int64_t inSize, int32_t outFd, int
         return "worker";
     }
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "clip export start fd=%{public}d size=%{public}lld range=%{public}lld..%{public}lld audio=%{public}d",
+        "clip export start fd=%{public}d size=%{public}lld range=%{public}lld..%{public}lld "
+        "audio=%{public}d shiftUs=%{public}lld",
         inFd, static_cast<long long>(inSize), static_cast<long long>(startMs),
-        static_cast<long long>(endMs), job.audioOrdinal);
+        static_cast<long long>(endMs), job.audioOrdinal, static_cast<long long>(job.audioShiftUs));
     return "";
 }
 
@@ -405,12 +409,14 @@ void ClipExporter::Run(const Job& job)
                             outcome == ReadOutcome::NO_MEMORY || outcome == ReadOutcome::ERROR) {
                             break;
                         }
-                        const int64_t rel = attr.pts - basePtsUs;
-                        if (rel > endRelUs) {
+                        // 平移后的时刻：封轨判据与拷贝循环同口径（上游 audioTrackWritable 的
+                        // `rel + shiftUs > endRelUs`）。用 raw rel 判会「预扫说可写、拷贝零样本」。
+                        const int64_t audioRel = attr.pts - basePtsUs + job.audioShiftUs;
+                        if (audioRel > endRelUs) {
                             outOfRange++;
                         } else {
                             outOfRange = 0;
-                            if (rel >= 0) {
+                            if (audioRel >= 0) {
                                 writable = true;
                                 break;
                             }
@@ -557,18 +563,21 @@ void ClipExporter::Run(const Job& job)
                     error = "read";
                     break;
                 }
+                // 内录轨按同步平移（环境轨 shiftUs 恒 0）：封轨、负 PTS 丢弃与单调桥
+                // 全都吃平移后的时刻，与预扫同口径（上游 ClipExport.kt 拷贝循环）。
                 const int64_t rel = attr.pts - basePtsUs;
-                if (rel > endRelUs) {
+                const int64_t audioRel = rel + job.audioShiftUs;
+                if (audioRel > endRelUs) {
                     if (++audioTail >= AUDIO_TAIL_TOLERANCE) {
                         break;
                     }
                     continue;
                 }
                 audioTail = 0;
-                if (rel < 0) {
-                    continue;
+                if (audioRel < 0) {
+                    continue; // 平移后仍早于公共基准：丢弃而不裁到 0（同刻多样本会崩 muxer）
                 }
-                const int64_t pts = MonotonicPts(audioLastPts, rel);
+                const int64_t pts = MonotonicPts(audioLastPts, audioRel);
                 audioLastPts = pts;
                 attr.pts = pts;
                 attr.flags &= ~static_cast<uint32_t>(AVCODEC_BUFFER_FLAGS_EOS);

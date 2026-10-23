@@ -362,8 +362,9 @@ static napi_value GetArcEffectiveMode(napi_env env, napi_callback_info info)
 /** 启动 remux：fd 归 ArkTS（native 不 close）；空串 = 已入队，busy/args/worker = 立即失败 */
 static napi_value StartClipExport(napi_env env, napi_callback_info info)
 {
-    size_t argc = 6;
-    napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    // 第 7 位 audioShiftUs 可选：老调用点（6 参）按 0 处理，避免 ABI 断裂
+    size_t argc = 7;
+    napi_value argv[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 6) {
         return MakeString(env, "args");
@@ -374,14 +375,18 @@ static napi_value StartClipExport(napi_env env, napi_callback_info info)
     int64_t startMs = 0;
     int64_t endMs = 0;
     int32_t audioOrdinal = -1;
+    int64_t audioShiftUs = 0;
     napi_get_value_int32(env, argv[0], &inFd);
     napi_get_value_int64(env, argv[1], &inSize);
     napi_get_value_int32(env, argv[2], &outFd);
     napi_get_value_int64(env, argv[3], &startMs);
     napi_get_value_int64(env, argv[4], &endMs);
     napi_get_value_int32(env, argv[5], &audioOrdinal);
+    if (argc >= 7) {
+        napi_get_value_int64(env, argv[6], &audioShiftUs);
+    }
     return MakeString(env, ClipExporter::Instance().Start(inFd, inSize, outFd, startMs, endMs,
-        audioOrdinal));
+        audioOrdinal, audioShiftUs));
 }
 
 /** idle | running:<pct> | done:<base>:<v>:<a>[:audio=skipped] | failed:<code> | cancelled */
@@ -436,9 +441,10 @@ static napi_value ProbeArcRepairSource(napi_env env, napi_callback_info info)
 /** 启动修复：空串 = 已入队；busy/args = 立即失败。fd 归 ArkTS（native 不 close） */
 static napi_value StartArcRepair(napi_env env, napi_callback_info info)
 {
-    size_t argc = 12;
-    napi_value argv[12] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    // 第 13 位 capOffsetMs 可选：老调用点（12 参）按 0 处理
+    size_t argc = 13;
+    napi_value argv[13] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 12) {
         return MakeString(env, "args");
@@ -455,6 +461,7 @@ static napi_value StartArcRepair(napi_env env, napi_callback_info info)
     int64_t dstFrames = 0;
     int32_t rotation = 0;
     int64_t durationMs = 0;
+    int32_t capOffsetMs = 0;
     napi_get_value_int32(env, argv[0], &inFd);
     napi_get_value_int64(env, argv[1], &inSize);
     napi_get_value_int32(env, argv[2], &outFd);
@@ -467,8 +474,11 @@ static napi_value StartArcRepair(napi_env env, napi_callback_info info)
     napi_get_value_int64(env, argv[9], &dstFrames);
     napi_get_value_int32(env, argv[10], &rotation);
     napi_get_value_int64(env, argv[11], &durationMs);
+    if (argc >= 13) {
+        napi_get_value_int32(env, argv[12], &capOffsetMs);
+    }
     return MakeString(env, ArcRepair::Instance().Start(inFd, inSize, outFd, dstFps, bitrate,
-        deadband, srcNum, srcDen, srcFrames, dstFrames, rotation, durationMs));
+        deadband, srcNum, srcDen, srcFrames, dstFrames, rotation, durationMs, capOffsetMs));
 }
 
 /** idle | running:<pct> | done:<v>:<a>:<mux>:<track>:<stop> | failed:<code> | cancelled */

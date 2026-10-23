@@ -14,7 +14,9 @@ import { PlayerEngine } from '../player/PlayerEngine';
 import { AbRange, clampPan, Pan, PlayerSpeedTiers } from '../player/PlayerModel';
 import { TapArbiter, TapDecision } from '../player/TapArbiter';
 import { ClipExportResult, ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
-import { audioOrdinalOf, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
+import { audioOrdinalOf, audioShiftUs, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
+import { SyncPrefsStore } from '../player/SyncPrefsStore';
+import { Source, SyncSnapshot, TrackSync } from '../player/TrackSync';
 import { ArcRepairProbeResult, ArcRepairResult, ArcRepairRunner } from '../record/ArcRepairRunner';
 import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
 import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
@@ -71,6 +73,15 @@ struct Player {
   @State exportAudioCount: number = 0;
   @State exportTrack: TrackChoice = TrackChoice.NO_AUDIO;
   @State exportProbeBlocked: boolean = false;
+  /**
+   * 音画同步读数（对齐上游 PlayerScreen 的 syncedOffsetMs/syncedSource）：
+   * 进页面时从 prefs 读一次；导出面板展示「已同步 +Xms（自动校准/手动）」与诚实边界说明。
+   * 说明：本侧尚无「同步音轨」入口与停止后自动校准（平台面挂 T27-4），所以读数通常为「未同步」；
+   * 一旦 T27-4 落盘，这里无需改动即生效（键名/编解码与上游同源）。
+   */
+  @State syncOffsetMs: number = 0;
+  @State syncSource: Source | undefined = undefined;
+  @State syncKnown: boolean = false;
   /** T30「修复光弧」面板（CPU 唯一路线；页面销毁不强杀 worker，见 aboutToDisappear） */
   @State repairPanelVisible: boolean = false;
   @State repairBusy: boolean = false;
@@ -160,6 +171,7 @@ struct Player {
         fpsHint = drops.dstFps;
       }
       this.fps = this.snapFps(fpsHint);
+      this.loadSyncSnapshot(clip);
       this.tryAttach();
     }).catch((e: Object): void => {
       this.loading = false;
@@ -506,6 +518,53 @@ struct Player {
     this.abLoop = this.engine.ab.loopEnabled;
   }
 
+  /**
+   * 读该片的同步快照（prefs 五键，key = 成片路径）。
+   * 对齐上游 PlayerScreen 的 `TrackSync.cachedSync(app, clip.uri)`：读不到 = 未同步，
+   * 不猜、不补 0。停止后自动校准完成时上游会重读；本侧该校准尚未落地（T27-4），
+   * 因此只在进页面时读一次，届时补上 PostStopSync.running 的观察点即可。
+   */
+  private loadSyncSnapshot(clip: VideoClip): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    SyncPrefsStore.read(ctx, clip.path).then((snap: SyncSnapshot | undefined): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.syncKnown = snap !== undefined;
+      this.syncOffsetMs = snap === undefined ? 0 : snap.offsetMs;
+      this.syncSource = snap === undefined ? undefined : snap.source;
+    }).catch((e: Object): void => {
+      if (this.disposed) {
+        return;
+      }
+      this.syncKnown = false;
+      this.syncOffsetMs = 0;
+      this.syncSource = undefined;
+    });
+  }
+
+  /** 偏移来源文案：AUTO = 自动校准；MANUAL / 无来源（老记录，上游同口径）= 手动 */
+  private syncSourceLabel(): string {
+    return this.syncSource === Source.AUTO ? '自动校准' : '手动';
+  }
+
+  /** 「已同步 +12ms（自动校准）」/「未同步（导出按 0 平移）」 */
+  private syncReadoutText(): string {
+    if (!this.syncKnown) {
+      return '未同步：导出按 0 平移';
+    }
+    return `已同步 ${TrackSync.signedMs(this.syncOffsetMs)}ms（${this.syncSourceLabel()}）`;
+  }
+
+  /** 本次导出要用的音轨平移（µs）：起跑那一刻取快照，导出期间读数变化不影响本轮 */
+  private exportAudioShiftUs(): number {
+    const offsetMs: number = this.syncKnown ? this.syncOffsetMs : 0;
+    return audioShiftUs(this.exportTrack, offsetMs);
+  }
+
   private canExportAb(): boolean {
     return this.abA >= 0 && this.abB > this.abA && this.abB - this.abA >= MIN_KEEP_MS;
   }
@@ -526,6 +585,8 @@ struct Player {
     }
     this.exportAbA = this.abA;
     this.exportAbB = this.abB;
+    // 打开面板时重读一次同步快照（上游 LaunchedEffect(clip.uri) 的口径）：读数不因退出页面过期
+    this.loadSyncSnapshot(clip);
     this.exportPanelVisible = true;
     this.exportBusy = false;
     this.exportProbing = true;
@@ -581,13 +642,15 @@ struct Player {
       return;
     }
     const range: ClipRange = new ClipRange(this.exportAbA, this.exportAbB);
+    // 平移在起跑那一刻定版（与上游同口径）：导出期间同步读数被改写不影响本轮
+    const shiftUs: number = this.exportAudioShiftUs();
     this.exportBusy = true;
     this.exportProgress = 0;
     this.exportError = '';
     this.exportNote = '';
     this.exportDonePath = '';
     this.exportDoneSize = 0;
-    ClipExporter.exportClip(ctx, clip, range, audioOrdinalOf(this.exportTrack),
+    ClipExporter.exportClip(ctx, clip, range, audioOrdinalOf(this.exportTrack), shiftUs,
       (percent: number): void => {
         if (!this.disposed) {
           this.exportProgress = percent;
@@ -793,7 +856,11 @@ struct Player {
     this.repairDoneSize = 0;
     this.repairAudioSamples = 0;
     const dstFps: number = this.repairDstFps;
-    ArcRepairRunner.run(ctx, clip, dstFps, this.repairDeadband, (percent: number): void => {
+    // 光弧修复也应用同步残差（上游 arcRunner.start(..., capOffsetMs = syncedOffsetMs ?: 0)）：
+    // 取缓存的偏移（未同步 = 0），native 只在双音轨的第 2 条 lane 上平移
+    const capOffsetMs: number = this.syncKnown ? Math.trunc(this.syncOffsetMs) : 0;
+    ArcRepairRunner.run(ctx, clip, dstFps, this.repairDeadband, capOffsetMs,
+      (percent: number): void => {
       if (!this.disposed) {
         this.repairProgress = percent;
       }
@@ -1174,6 +1241,17 @@ struct Player {
       Text(`${formatDuration(this.exportAbA)} - ${formatDuration(this.exportAbB)}`)
         .fontSize(11)
         .fontColor('#B0BEC5')
+        .width('100%')
+
+      // 同步读数与来源（对齐上游 TrackExportPopup：已同步 +Xms（自动校准/手动）/ 未同步）
+      Text(this.syncReadoutText())
+        .fontSize(11)
+        .fontColor('#B0BEC5')
+        .width('100%')
+      // 诚实边界：原片分享不重写容器，只有本页导出/光弧修复会应用同步残差
+      Text('原片分享不重写容器；只有本页导出/光弧修复会应用同步残差')
+        .fontSize(11)
+        .fontColor('#78909C')
         .width('100%')
 
       if (this.exportProbing) {

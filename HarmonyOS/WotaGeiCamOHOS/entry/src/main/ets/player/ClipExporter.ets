@@ -27,7 +27,7 @@ import { ClipRange, clipNameOf, keyFrameIndexOf, normalize, remapDrops } from '.
 /** native 桥的最小视图（dynamic import 后 cast） */
 interface ClipNativeLib {
   startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
-    endMs: number, audioOrdinal: number) => string;
+    endMs: number, audioOrdinal: number, audioShiftUs: number) => string;
   getClipExportStatus: () => string;
   cancelClipExport: () => void;
   probeClipTracks: (inFd: number, inSize: number) => string;
@@ -154,10 +154,12 @@ export class ClipExporter {
 
   /**
    * 导出 A/B 区间。range 可为原始 A/B（内部再 normalize）；非法返回 RANGE。
+   * audioShiftUs = 选中音轨的同步平移（µs，调用方用 ClipRule.audioShiftUs(track, offsetMs) 算好；
+   * 环境轨恒 0、内录轨 = −offset）。native 的预扫与拷贝循环同吃这一枚值。
    * onProgress 0..100，UI 线程回调。
    */
   static async exportClip(ctx: common.Context, clip: VideoClip, range: ClipRange, audioOrdinal: number,
-    onProgress: (percent: number) => void): Promise<ClipExportResult> {
+    audioShiftUs: number, onProgress: (percent: number) => void): Promise<ClipExportResult> {
     // 元数据探测失败的片 durationMs 可能为 0；用 A/B 终点兜底，native 仍按源实际 EOF 截止。
     const durationMs: number = clip.durationMs > 0 ? clip.durationMs :
       Math.max(range.startMs, range.endMs);
@@ -182,7 +184,7 @@ export class ClipExporter {
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC).fd;
       onProgress(0);
       const startError: string = lib.startClipExport(inFd, stat.size, outFd, valid.startMs, valid.endMs,
-        audioOrdinal < 0 ? -1 : audioOrdinal);
+        audioOrdinal < 0 ? -1 : audioOrdinal, audioOrdinal < 0 ? 0 : Math.trunc(audioShiftUs));
       if (startError !== '') {
         ClipExporter.closeQuietly(outFd);
         outFd = -1;

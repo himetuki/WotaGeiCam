@@ -402,7 +402,7 @@ std::string ArcRepair::Probe(int32_t inFd, int64_t inSize)
 
 std::string ArcRepair::Start(int32_t inFd, int64_t inSize, int32_t outFd, int32_t dstFps,
     int32_t bitrate, int32_t deadband, int64_t srcNum, int64_t srcDen, int64_t srcFrames,
-    int64_t dstFrames, int32_t rotation, int64_t durationMs)
+    int64_t dstFrames, int32_t rotation, int64_t durationMs, int32_t capOffsetMs)
 {
     if (inFd < 0 || inSize <= 0 || outFd < 0 || dstFps <= 0 || srcNum <= 0 || srcDen <= 0) {
         return "args";
@@ -431,6 +431,7 @@ std::string ArcRepair::Start(int32_t inFd, int64_t inSize, int32_t outFd, int32_
     job.dstFrames = dstFrames > 0 ? dstFrames : DstFrameCount(srcFrames, srcNum, srcDen, dstFps);
     job.rotation = rotation;
     job.durationMs = durationMs;
+    job.capOffsetMs = capOffsetMs;
     try {
         worker_ = std::thread(&ArcRepair::Run, this, job);
     } catch (...) {
@@ -579,17 +580,45 @@ void ArcRepair::Run(const Job& job)
     }
     // 零样本音轨预检（T30 审查 P3）：AddTrack 早于直拷，零样本轨会让 muxer Stop 失败并连坐
     // 整片。这里用临时 source/demuxer 每轨预读一枚样本：无非空样本的轨直接不建轨（降级）。
+    // e950328 起追加第二问：内录 lane 被整体前移（capOffsetMs > 0 → shift < 0）后可能一枚样本
+    // 都落不进 [0, ...]——同样会造出零样本轨。判据用**视频首样本 PTS**（容器时间轴）作基准：
+    // 直拷阶段实际用的 ptsBase 是首帧显示 PTS（可能更小），按更大的基准预判只会更保守。
     if (!audioTrackIndices.empty()) {
         OH_AVSource* preSource = OH_AVSource_CreateWithFD(job.inFd, 0, job.inSize);
         OH_AVDemuxer* preDemuxer = preSource != nullptr
             ? OH_AVDemuxer_CreateWithSource(preSource) : nullptr;
         OH_AVBuffer* preBuffer = preDemuxer != nullptr ? OH_AVBuffer_Create(256 * 1024) : nullptr;
         if (preDemuxer != nullptr && preBuffer != nullptr) {
+            // 先取视频首样本 PTS（解码序；≥ 显示序首帧 PTS，保守）
+            int64_t probeVideoPtsUs = -1;
+            if (OH_AVDemuxer_SelectTrackByID(preDemuxer, static_cast<uint32_t>(videoTrack)) == AV_ERR_OK) {
+                OH_AVDemuxer_SeekToTime(preDemuxer, 0, SEEK_MODE_PREVIOUS_SYNC);
+                for (int32_t probe = 0; probe < 4; ++probe) {
+                    if (OH_AVDemuxer_ReadSampleBuffer(preDemuxer, static_cast<uint32_t>(videoTrack),
+                        preBuffer) != AV_ERR_OK) {
+                        break;
+                    }
+                    OH_AVCodecBufferAttr probeAttr;
+                    if (OH_AVBuffer_GetBufferAttr(preBuffer, &probeAttr) != AV_ERR_OK ||
+                        probeAttr.size <= 0) {
+                        break;
+                    }
+                    probeVideoPtsUs = std::max<int64_t>(0, probeAttr.pts);
+                    break;
+                }
+                OH_AVDemuxer_UnselectTrackByID(preDemuxer, static_cast<uint32_t>(videoTrack));
+            }
+            const bool dualAudio = audioTrackIndices.size() >= 2;
             for (size_t ai = 0; ai < audioTrackIndices.size(); ++ai) {
                 if (OH_AVDemuxer_SelectTrackByID(preDemuxer, audioTrackIndices[ai]) != AV_ERR_OK) {
                     continue;
                 }
                 OH_AVDemuxer_SeekToTime(preDemuxer, 0, SEEK_MODE_PREVIOUS_SYNC);
+                // 只有「确有第二轨」的内录 lane 吃平移（轨序 0=环境 / 1=内录），与拷贝阶段同判据
+                const int64_t laneShiftUs =
+                    (dualAudio && ai == 1 && job.capOffsetMs != 0)
+                        ? -static_cast<int64_t>(job.capOffsetMs) * 1000
+                        : 0;
                 for (int32_t probe = 0; probe < 8; ++probe) {
                     if (OH_AVDemuxer_ReadSampleBuffer(preDemuxer, audioTrackIndices[ai], preBuffer)
                         != AV_ERR_OK) {
@@ -600,8 +629,12 @@ void ArcRepair::Run(const Job& job)
                         probeAttr.size <= 0) {
                         break;
                     }
-                    audioStats[ai].hasData = true;
-                    break;
+                    // 平移后仍须 ≥ 0 才算「会写出」（与拷贝循环的 outPts < 0 丢弃同口径）
+                    if (laneShiftUs == 0 || probeVideoPtsUs < 0 ||
+                        probeAttr.pts - probeVideoPtsUs + laneShiftUs >= 0) {
+                        audioStats[ai].hasData = true;
+                        break;
+                    }
                 }
                 OH_AVDemuxer_UnselectTrackByID(preDemuxer, audioTrackIndices[ai]);
                 if (!audioStats[ai].hasData) {
@@ -1134,6 +1167,12 @@ void ArcRepair::Run(const Job& job)
                 const uint32_t laneTrack = audioTrackIndices[ai];
                 const int32_t laneDst = audioDstTracks[ai];
                 AudioLaneStats& lane = audioStats[ai];
+                // 同步平移只作用于内录 lane（环境 lane shiftUs=0）：轨序 0=环境 / 1=内录，
+                // 且必须**确有第二轨**才认内录（单轨绝不猜）。与预检的 laneShiftUs 同判据。
+                const int64_t laneShiftUs =
+                    (audioTrackIndices.size() >= 2 && ai == 1 && job.capOffsetMs != 0)
+                        ? -static_cast<int64_t>(job.capOffsetMs) * 1000
+                        : 0;
                 if (const char* stop = cancelledOrTimedOut()) {
                     OH_AVBuffer_Destroy(audioBuffer);
                     OH_AVDemuxer_Destroy(audioDemuxer);
@@ -1184,8 +1223,11 @@ void ArcRepair::Run(const Job& job)
                     }
                     const int64_t base = ptsBase >= 0 ? ptsBase : laneBaseUs;
                     int64_t norm = attr.pts - base;
+                    // 平移后为负的样本丢弃而不裁到 0（同刻多样本会破坏 muxer 单调约束）；
+                    // 单调桥也吃平移后的时刻，与 ClipExport 的拷贝循环同口径。
+                    norm += laneShiftUs;
                     if (norm < 0) {
-                        lane.skipped++; // 早于视频首帧的音频段丢弃（上游同口径）
+                        lane.skipped++; // 早于视频首帧（平移后）的音频段丢弃
                         continue;
                     }
                     norm = MonotonicPts(lane.lastPtsUs, norm);

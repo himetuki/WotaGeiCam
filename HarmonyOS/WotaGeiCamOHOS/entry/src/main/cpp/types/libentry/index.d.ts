@@ -53,9 +53,10 @@ export const getArcEffectiveMode: () => number;
  *   | failed:<code> | cancelled。failed 机器码：source/track-format/no-video/no-sync/muxer/add-track/
  *   rotation/muxer-start/read/sample-too-large/write/empty-range。
  * probeClipTracks：只读 "videoCount,audioCount" 或 "err:<code>"。
+ * audioShiftUs：选中音轨的同步平移（µs，内录轨 = −offset、环境轨 0）；预扫与拷贝循环同吃它。
  */
 export const startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
-  endMs: number, audioOrdinal: number) => string;
+  endMs: number, audioOrdinal: number, audioShiftUs: number) => string;
 export const getClipExportStatus: () => string;
 export const cancelClipExport: () => void;
 export const probeClipTracks: (inFd: number, inSize: number) => string;
@@ -72,10 +73,11 @@ export const probeClipTracks: (inFd: number, inSize: number) => string;
  *   | `failed:<code>` | `cancelled`。T30 起 audioSamples = 全部音轨成功写入 muxer 的样本合计
  *   （无音轨源为 0；逐轨降级时只计成功 lane；串仍是 6 段）。
  * cancelArcRepair：置取消位（worker 在下一个样本边界收尾）。
+ * capOffsetMs：播放页缓存的音轨同步偏移（ms，正 = 内录晚），只作用于双音轨第 2 条 lane。
  */
 export const probeArcRepairSource: (inFd: number, inSize: number) => string;
 export const startArcRepair: (inFd: number, inSize: number, outFd: number, dstFps: number,
   bitrate: number, deadband: number, srcNum: number, srcDen: number, srcFrames: number,
-  dstFrames: number, rotation: number, durationMs: number) => string;
+  dstFrames: number, rotation: number, durationMs: number, capOffsetMs: number) => string;
 export const getArcRepairStatus: () => string;
 export const cancelArcRepair: () => void;

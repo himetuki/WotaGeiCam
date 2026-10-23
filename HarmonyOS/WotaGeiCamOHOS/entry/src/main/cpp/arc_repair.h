@@ -51,10 +51,12 @@ public:
     /**
      * 启动修复：空串 = 已入队；busy/args = 立即失败。fd 归 ArkTS（native 不 close）。
      * srcNum/srcDen/srcFrames/dstFrames 由 ArkTS 纯逻辑算好传入（C++ 镜像仅作流式判定）。
+     * capOffsetMs = 播放页缓存的音轨同步偏移（ms，正 = 内录晚）；**只作用于双音轨的第 2 条 lane**
+     * （轨序 0 = 环境、1 = 内录），单音轨或 0 值时平移恒 0（对齐上游 e950328 ArcRepairRunner）。
      */
     std::string Start(int32_t inFd, int64_t inSize, int32_t outFd, int32_t dstFps, int32_t bitrate,
         int32_t deadband, int64_t srcNum, int64_t srcDen, int64_t srcFrames, int64_t dstFrames,
-        int32_t rotation, int64_t durationMs);
+        int32_t rotation, int64_t durationMs, int32_t capOffsetMs);
 
     /** 状态串（契约见文件头） */
     std::string Status();
@@ -84,6 +86,7 @@ private:
         int64_t dstFrames = 0;
         int32_t rotation = 0;
         int64_t durationMs = 0;
+        int32_t capOffsetMs = 0;
     };
 
     void Run(const Job& job);

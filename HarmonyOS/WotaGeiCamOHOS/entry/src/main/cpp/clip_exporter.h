@@ -9,6 +9,11 @@
  * - 逐轨顺序写入（先视频整轨、后选中音频整轨），非交织 MP4 的播放器兼容性列真机验证项；
  * - 音轨只导一条：audioOrdinal = -1 无 / >=0 容器音轨序；选中轨区间内零可写样本时不建轨
  *   （零样本轨会让 muxer Stop 失败），状态带 audio=skipped；
+ * - **音频同步平移（对齐上游 e950328 的 ClipRule.audioShiftUs）**：audioShiftUs 只作用于选中
+ *   音频轨，`audioRel = rel + audioShiftUs`。预扫的越界/负值判据、拷贝循环的封轨判据、
+ *   负 PTS 丢弃与单调桥**一律吃平移后的时刻**——预扫与写出必须同口径，否则会出现
+ *   「预扫说可写、拷贝一枚都没写」⇒ 零样本轨崩 muxer。视频轨永不平移（shift 恒 0）；
+ *   平移后为负的样本丢弃而不裁到 0（同刻多样本会崩 muxer）；
  * - 音频拷贝阶段样本超缓冲（AV_ERR_NO_MEMORY）不判死（T20 复审 P3）：跳过剩余音频样本
  *   继续收尾，done 状态追加 audio=skipped（已写样本保留、视频轨完好）；首枚样本即超限
  *   （已 AddTrack 零样本）时 WARN + 跳过，依赖既有兜底（audioSamples==0 → write 失败，
@@ -32,9 +37,12 @@ class ClipExporter {
 public:
     static ClipExporter& Instance();
 
-    /** 启动导出：空串 = 已入队；busy/args/worker = 立即失败。fd 归 ArkTS，native 不 close */
+    /**
+     * 启动导出：空串 = 已入队；busy/args/worker = 立即失败。fd 归 ArkTS，native 不 close。
+     * audioShiftUs = 选中音频轨的同步平移（µs；只对 audioOrdinal >= 0 生效，视频轨不受影响）。
+     */
     std::string Start(int32_t inFd, int64_t inSize, int32_t outFd, int64_t startMs, int64_t endMs,
-        int32_t audioOrdinal);
+        int32_t audioOrdinal, int64_t audioShiftUs);
 
     /** idle | running:<pct> | done:<basePtsUs>:<videoSamples>:<audioSamples>[:audio=skipped]
      *  | failed:<code> | cancelled */
@@ -62,6 +70,7 @@ private:
         int64_t startMs = 0;
         int64_t endMs = 0;
         int32_t audioOrdinal = -1;
+        int64_t audioShiftUs = 0;
     };
 
     void Run(const Job& job);

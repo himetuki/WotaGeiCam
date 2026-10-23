@@ -49,6 +49,27 @@ export function keepSample(relUs: number): boolean {
   return relUs >= 0;
 }
 
+/**
+ * 音轨样本「是否会被写出」的单一判据（对齐上游 e950328 的 ClipRule.remuxAudioSampleWritable）：
+ * - **平移后**（rel + shift）为负 → 丢弃，绝不 clip 到 0（同刻多样本会崩 muxer）；
+ * - 出点判据也吃平移后的时刻：内录轨延后时，raw rel 在区间内不代表写出时仍在区间内。
+ *
+ * 为什么必须与 native 同口径：muxer 的轨在 AddTrack 就定型，一个样本都没写进去时 Stop 必失败；
+ * 而导出链的异常路径会删掉整份输出——视频完好却被判失败。native 的预扫（clip_exporter.cpp
+ * 的 `audioRel > endRelUs` 分支）与拷贝循环是这条规则的 C++ 镜像；本函数是它的可测真源，
+ * 两侧改动必须同步（test/pure/clip-rule.test.ets 与 clip-export-shift 的接线守卫点名）。
+ *
+ * @param endRelUs 出点（相对 basePts，µs）；undefined = 无出点（选轨导出）
+ */
+export function remuxAudioSampleWritable(relUs: number, shiftUs: number,
+  endRelUs: number | undefined): boolean {
+  const shifted: number = relUs + shiftUs;
+  if (shifted < 0) {
+    return false;
+  }
+  return endRelUs === undefined || shifted <= endRelUs;
+}
+
 /** 剪辑成片命名：`edit_<源名去扩展名>_<yyyyMMdd_HHmmss>.mp4` */
 export function clipNameOf(srcName: string, stampMs: number): string {
   const dot: number = srcName.lastIndexOf('.');

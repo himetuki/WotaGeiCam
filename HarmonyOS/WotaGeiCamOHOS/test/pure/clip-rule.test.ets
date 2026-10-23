@@ -8,7 +8,7 @@
 import { ArcDropLog, ArcDropSegment, DropMark } from '../../entry/src/main/ets/record/ArcDropLog';
 import {
   MIN_KEEP_MS, TrackChoice, audioOrdinalOf, audioShiftUs, clipNameOf, keyFrameIndexOf,
-  keepSample, normalize, remapDrops
+  keepSample, normalize, remapDrops, remuxAudioSampleWritable
 } from '../../entry/src/main/ets/player/ClipRule';
 
 test('MIN_KEEP_MS 恰等通过 差一毫秒拒绝', (): void => {

@@ -29,7 +29,7 @@ interface ArcRepairNativeLib {
   probeArcRepairSource: (inFd: number, inSize: number) => string;
   startArcRepair: (inFd: number, inSize: number, outFd: number, dstFps: number, bitrate: number,
     deadband: number, srcNum: number, srcDen: number, srcFrames: number, dstFrames: number,
-    rotation: number, durationMs: number) => string;
+    rotation: number, durationMs: number, capOffsetMs: number) => string;
   getArcRepairStatus: () => string;
   cancelArcRepair: () => void;
 }
@@ -204,8 +204,12 @@ export class ArcRepairRunner {
    * native 若仍在写，写的是已解除链接的 inode，不会在媒体库留下垃圾；fd 等 native 离开 running:
    * 后再关（linger 耗尽则挂 pendingFds，由下一次调用/轮询回收并兜底再次 discard）。
    * 调用方应先 probe 并处理 noNeed / 音轨硬闸。
+   *
+   * [capOffsetMs] = 播放页缓存的音轨同步偏移（ms，正 = 内录晚），对齐上游 e950328：
+   * 只作用于双音轨的第 2 条 lane（native 侧判轨序与「确有第二轨」），单音轨/0 值恒不平移。
    */
   static async run(ctx: common.Context, clip: VideoClip, dstFps: number, deadband: number,
+    capOffsetMs: number,
     onProgress: (percent: number) => void,
     preProbed?: ArcRepairProbeResult): Promise<ArcRepairResult> {
     const result: ArcRepairResult = new ArcRepairResult();
@@ -252,7 +256,7 @@ export class ArcRepairRunner {
       onProgress(0);
       const startError: string = lib.startArcRepair(inFd, stat.size, outFd, dstFps, probed.bitrate,
         deadband, probed.srcNum, probed.srcDen, probed.srcFrames, plan.dstFrames, probed.rotation,
-        probed.durationMs);
+        probed.durationMs, Math.trunc(capOffsetMs));
       // start 返回空串才代表 worker 真的在跑：catch/收尾据此决定 park 还是立即 reap
       nativeStarted = startError === '';
       if (startError !== '') {
