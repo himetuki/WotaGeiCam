@@ -49,6 +49,17 @@ import { AfMode, Size, WotaTiers } from '../core/Constants';
 import {
   PARAMS_KEYS, ParamsMigrate, PrefEnum, enumFrom, enumName, formatSize, parseSize
 } from '../ui/ParamsPersist';
+import { FlushScheduler, ParamsFlushThrottle } from '../ui/ParamsFlushThrottle';
+
+/** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
+class NoopFlushScheduler implements FlushScheduler {
+  arm(_delayMs: number, _fn: () => void): number {
+    return -1;
+  }
+
+  disarm(_handle: number): void {
+  }
+}
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -73,6 +84,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.updateCompileProbe();
     PureLogicBarrel.cameraPerfCompileProbe();
     PureLogicBarrel.paramsPersistCompileProbe();
+    PureLogicBarrel.paramsFlushThrottleCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -169,5 +181,14 @@ export class PureLogicBarrel {
       afText === 'MANUAL' && afBack === AfMode.MANUAL) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
+  }
+
+  /** 落盘节流器编译探针：注入空定时器走一遍首请求/取消（产物丢弃，无副作用） */
+  private static paramsFlushThrottleCompileProbe(): void {
+    const throttle: ParamsFlushThrottle = new ParamsFlushThrottle(300, (): number => 0,
+      new NoopFlushScheduler(), (): void => {
+      });
+    throttle.request();
+    throttle.cancel();
   }
 }

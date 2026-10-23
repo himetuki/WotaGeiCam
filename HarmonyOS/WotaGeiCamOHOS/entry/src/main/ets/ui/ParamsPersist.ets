@@ -87,7 +87,9 @@ export const PARAMS_KEYS: Array<string> = [
 
 /**
  * prefs 最小注入面（对齐上游 SharedPreferences 的用到的子集）。
- * getter 一律带默认值语义：缺键/类型不符回默认值；putter 返回「是否写成功」，
+ * getter 一律带默认值语义：缺键/类型不符回默认值；putter 返回「是否写成功」。
+ * 写入分两段对齐上游 `commit()` 的批写口径：putter 只进内存，[commit] 才同步落盘——
+ * 一次 flush 无论改几个字段都只调一次 commit（滑杆逐帧落盘会变成同步 IO 风暴）。
  * 失败时 session 不推进影子（下次 flush 重试；上游 commit()=false 同义）。
  */
 export interface ParamsPrefs {
@@ -99,6 +101,8 @@ export interface ParamsPrefs {
   putBool(key: string, value: boolean): boolean;
   putFloat(key: string, value: number): boolean;
   putString(key: string, value: string): boolean;
+  /** 把本批 put 一次性落盘；失败返回 false（session 不推进影子，下次重试） */
+  commit(): boolean;
 }
 
 // ---------------------------------------------------------------- 枚举编解码（坏值 → 默认）
@@ -618,7 +622,12 @@ export class ParamsPersistSession {
     this.shArcDeadband = this.params.arcMergeDeadband.value;
   }
 
-  /** 返回 true = 无差异或全部写成功；false = 有写失败（影子保持旧值，下次重试）。 */
+  /**
+   * 返回 true = 无差异或全部写成功；false = 有 put/commit 失败（影子保持旧值，下次重试）。
+   *
+   * 批写口径（对齐上游 `commit()`）：有差异时先把所有变化字段 put 进内存，最后**只调一次**
+   * [ParamsPrefs.commit] 落盘；无差异直接返回、不 commit（空落盘也是同步 IO）。
+   */
   flush(): boolean {
     // 先读一遍当前总线（一次 flush 内 diff 与影子同步都吃这一份，避免中途再变）
     const fps: number = this.params.fps.value.value;
@@ -645,6 +654,20 @@ export class ParamsPersistSession {
     const peakC: PeakingColor = this.params.peakingColor.value;
     const lens: LensType = this.params.lens.value;
     const arcDeadband: number = this.params.arcMergeDeadband.value;
+
+    // 无差异：不 put、不 commit（一次空落盘也不做；影子与总线本来就一致）
+    const changed: boolean = fps !== this.shFps || shutter !== this.shShutter ||
+      bitrate !== this.shBitrate || refLines !== this.shRefLines || level !== this.shLevel ||
+      iso !== this.shIso || ae !== this.shAe || ev !== this.shEv || wb !== this.shWb ||
+      kelvin !== this.shKelvin || tint !== this.shTint || zoom !== this.shZoom ||
+      flash !== this.shFlash || stabilize !== this.shStabilize || af !== this.shAf ||
+      diopter !== this.shDiopter || size.width !== this.shSizeW || size.height !== this.shSizeH ||
+      effect !== this.shEffect || zebraT !== this.shZebraT || zebraD !== this.shZebraD ||
+      peakS !== this.shPeakS || peakC !== this.shPeakC || lens !== this.shLens ||
+      arcDeadband !== this.shArcDeadband;
+    if (!changed) {
+      return true;
+    }
 
     let ok: boolean = true;
     if (fps !== this.shFps) {
@@ -721,9 +744,12 @@ export class ParamsPersistSession {
     }
 
     if (!ok) {
-      return false; // 写盘失败：影子保持旧值，下次 flush 重试
+      return false; // 写内存失败：影子保持旧值，下次 flush 重试
     }
-    // 写盘成功才把新值记入影子
+    if (!this.prefs.commit()) {
+      return false; // 落盘失败：已 put 的值仍在内存，下次 flush 重 put + 再 commit
+    }
+    // 落盘成功才把新值记入影子
     this.shFps = fps;
     this.shShutter = shutter;
     this.shBitrate = bitrate;

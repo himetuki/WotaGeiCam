@@ -24,9 +24,10 @@
  * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；tint 副轴/对焦弹层留白；视频-only。
  * **高级参数持久化已落（本批 I，对齐上游 ui/ParamsPersist.kt）**：24 键白名单（`ui/ParamsPersist.ets`
  * 纯逻辑 + `ui/ParamsStore.ets` 平台件，与 SettingsStore 同一个 `wota_camera_settings` store）——
- * 冷启 `bootstrap` 读完设置后 `ParamsPersist.restore` 灌总线；落盘点 = 弹层提交
- * `applyParamsFromPills`、帧率/画幅/变焦/闪光循环、`onPageHide`、`aboutToDisappear`（会话影子只写
- * 与影子不同的字段）。排除清单照搬上游：renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode。
+ * 冷启 `bootstrap` 读完设置后 `ParamsPersist.restore` 灌总线；落盘点分两档——关键点立即
+ * （`onPageHide`/`aboutToDisappear`/起录前/点按循环/关弹层），滑杆逐帧路径走 300ms 尾随节流
+ * （`ui/ParamsFlushThrottle`；一次 flush 只 commit 一次）。会话影子只写与影子不同的字段。
+ * 排除清单照搬上游：renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode。
  * 设置持久化走 ui/SettingsStore（键名已迁移到上游名：`default_fps`/`default_bitrate`/`default_size`）。
  * 加载顺序契约：不得页面顶层静态 import 'libentry.so'，XComponent onLoad 后 dynamic import 桥。
  *
@@ -68,6 +69,7 @@ import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { ParamsPersist, ParamsPersistSession, ParamsPrefs } from '../ui/ParamsPersist';
 import { ParamsStore } from '../ui/ParamsStore';
+import { FlushScheduler, ParamsFlushThrottle } from '../ui/ParamsFlushThrottle';
 import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
@@ -104,6 +106,19 @@ const RECORD_WIDTH_4K: number = 3840;
 const RECORD_HEIGHT_4K: number = 2160;
 const ZOOM_LEVELS: Array<number> = [1, 2, 3];
 const START_COOLDOWN_MS: number = 1000;
+/** 滑杆逐帧路径的落盘节流窗口：首请求立即落一次，之后每次动作完成后最多补一次 */
+const PARAMS_FLUSH_WINDOW_MS: number = 300;
+
+/** 节流器定时器注入（`ui/ParamsFlushThrottle` 是纯逻辑，真定时器只出现在页面层） */
+class PageFlushScheduler implements FlushScheduler {
+  arm(delayMs: number, fn: () => void): number {
+    return setTimeout(fn, delayMs);
+  }
+
+  disarm(handle: number): void {
+    clearTimeout(handle);
+  }
+}
 
 function autoReasonText(reason: string, saved: boolean): string {
   const suffix: string = saved ? '成片已保存' : '自动停录，但收尾/落盘可能失败';
@@ -194,6 +209,8 @@ struct CameraPage {
   /** 参数持久化平台门面与会话（本批 I）：aboutToAppear 建、aboutToDisappear 清 */
   private persistPrefs: ParamsPrefs | undefined = undefined;
   private persister: ParamsPersistSession | undefined = undefined;
+  /** 滑杆高频落盘节流（300ms 尾随）：首请求立即、窗口内合并、尾部补一次 */
+  private flushThrottle: ParamsFlushThrottle | undefined = undefined;
   /** 最近一次会话期能力真值（起镜成功/开弹层时刷新；停镜置空） */
   private ability: CameraAbility | undefined = undefined;
   /** 当前打开的高级参数弹层（'' = 无）：快门/ISO/EV/WB */
@@ -226,6 +243,11 @@ struct CameraPage {
     const prefs: ParamsPrefs | undefined = this.ctx === undefined ? undefined : ParamsStore.open(this.ctx);
     this.persistPrefs = prefs;
     this.persister = prefs === undefined ? undefined : new ParamsPersistSession(prefs, this.params);
+    // 滑杆逐帧回调走尾随节流；无会话时不建定时器（action 本就是空操作）
+    this.flushThrottle = prefs === undefined ? undefined : new ParamsFlushThrottle(PARAMS_FLUSH_WINDOW_MS,
+      (): number => Date.now(), new PageFlushScheduler(), (): void => {
+        this.flushParamsDirect();
+      });
     this.bindParamsLabels();
     this.initLevelSensor();
     this.applyImmersiveChrome();
@@ -345,8 +367,8 @@ struct CameraPage {
 
   onPageHide(): void {
     this.pageVisible = false;
-    // 退后台是用户动作完成点：落盘一次（旁路副作用，失败只记日志）
-    this.flushParams();
+    // 退后台是关键点：取消未触发的尾随并立即落盘（旁路副作用，失败只记日志）
+    this.flushParamsNow();
     this.cancelTapTimers();
     // 传感器只在可见时采样：后台常开很费电（上游 DisposableEffect 同义）
     if (this.levelSensor !== undefined) {
@@ -369,8 +391,9 @@ struct CameraPage {
   aboutToDisappear(): void {
     this.disposed = true;
     this.pageVisible = false;
-    // 离开录制页：最后一次落盘并销毁会话（之后的晚到回调不再写盘）
-    this.flushParams();
+    // 离开录制页：取消节流定时器、补最后一次落盘，然后销毁会话（晚到回调不再写盘）
+    this.flushParamsNow();
+    this.flushThrottle = undefined;
     this.persister = undefined;
     this.persistPrefs = undefined;
     if (this.levelSensor !== undefined) {
@@ -744,8 +767,9 @@ struct CameraPage {
   private applyParamsFromPills(): void {
     const report: ApplyReport = this.engine.applyParams(this.params);
     this.syncParamLabels();
-    // 落盘（本批 I）：动作完成点，且是旁路副作用——写在错误提示之前，不改变既有下发时序。
-    this.flushParams();
+    // 落盘（本批 I）：滑杆 onValueChange 每帧到达，走 300ms 尾随节流（首请求立即、尾部补一次），
+    // 不在拖动期逐帧同步落盘。旁路副作用——写在错误提示之前，不改变既有下发时序。
+    this.flushParamsDeferred();
     if (report.failed.length > 0) {
       Diag.w(WOTA_RECORD_TAG, `pill apply failed: ${report.failed.join('|')}`);
       this.appendNotice(`参数下发失败: ${report.failed.join(',').substring(0, 80)}`);
@@ -760,6 +784,8 @@ struct CameraPage {
   /** 起录前兜底下发一次（T21）：ApplyReport failed 项 Diag.w（不起录，录制键另有门控） */
   private applyParamsBeforeRecord(): void {
     const report: ApplyReport = this.engine.applyParams(this.params);
+    // 起录是关键点：可能紧接退后台/进程被杀，参数必须先落盘（立即通道，不受节流延后）
+    this.flushParamsNow();
     if (report.failed.length > 0) {
       Diag.w(WOTA_RECORD_TAG, `pre-record apply failed: ${report.failed.join('|')}`);
     }
@@ -784,7 +810,12 @@ struct CameraPage {
   }
 
   private closePill(): void {
+    const wasOpen: boolean = this.activePill !== '';
     this.activePill = '';
+    if (wasOpen) {
+      // 关弹窗是动作完成点（对齐上游收手/关弹层落盘）：把拖动期尚未尾随落盘的值立即落一次
+      this.flushParamsNow();
+    }
   }
 
   private cycleLens(): void {
@@ -830,7 +861,7 @@ struct CameraPage {
     this.sizeLabel = want4k ? '4K' : '1080p';
     this.persistSettings();
     // 画幅循环是参数动作完成点：SettingsStore 已写 default_size，这里再收一次总线侧的待落盘改动
-    this.flushParams();
+    this.flushParamsNow();
     this.restartCamera();
   }
 
@@ -847,7 +878,7 @@ struct CameraPage {
     this.syncParamLabels();
     this.persistSettings();
     // 帧率循环同时改了总线 fps：立刻落盘（default_fps 与 SettingsStore 的新键同名同值）
-    this.flushParams();
+    this.flushParamsNow();
   }
 
   private nearestZoomIndex(actual: number): number {
@@ -882,7 +913,7 @@ struct CameraPage {
       this.message = '该镜头不支持该变焦档（已钳回 1x）';
     }
     // 变焦循环是参数动作完成点（总线 zoom 未跟随 engine，flush 对 zoom 无差异；登记差异见 PORT_MAP）
-    this.flushParams();
+    this.flushParamsNow();
   }
 
   private toggleFlash(): void {
@@ -895,7 +926,7 @@ struct CameraPage {
     if (ok) {
       this.flashOn = next;
       // 闪光开关是参数动作完成点（总线 flash 未跟随 engine，登记差异见 PORT_MAP）
-      this.flushParams();
+      this.flushParamsNow();
     } else {
       this.message = '该镜头不支持闪光/常亮';
     }
@@ -963,10 +994,36 @@ struct CameraPage {
   }
 
   /**
-   * 参数落盘（本批 I）：会话影子只写与影子不同的字段；无差异不触碰 prefs。
+   * 关键点落盘（不可延后）：取消未触发的尾随，立刻 flush 一次。
+   * 用在退后台、离开页、起录前、各点按循环、关弹层——这些点是「用户动作完成点」，
+   * 之后可能直接被杀进程，不能被 300ms 节流吃掉。
+   */
+  private flushParamsNow(): void {
+    const throttle: ParamsFlushThrottle | undefined = this.flushThrottle;
+    if (throttle !== undefined) {
+      throttle.cancel();
+    }
+    this.flushParamsDirect();
+  }
+
+  /**
+   * 高频路径落盘（滑杆 `onValueChange` 逐帧）：300ms 尾随节流——首次请求立即落一次，
+   * 窗口内的重复请求只在尾部补一次，避免拖动期间把同步 `flushSync` 打成每帧一次。
+   */
+  private flushParamsDeferred(): void {
+    const throttle: ParamsFlushThrottle | undefined = this.flushThrottle;
+    if (throttle === undefined) {
+      this.flushParamsDirect(); // 会话未就绪：退回直接落盘（persister 为空时是空操作）
+      return;
+    }
+    throttle.request();
+  }
+
+  /**
+   * 参数落盘（本批 I）：会话影子只写与影子不同的字段，一次 flush 只 commit 一次。
    * 纯旁路副作用——失败只记日志，绝不改变下发时序/错误提示/录制流程。
    */
-  private flushParams(): void {
+  private flushParamsDirect(): void {
     const persister: ParamsPersistSession | undefined = this.persister;
     if (persister === undefined) {
       return;

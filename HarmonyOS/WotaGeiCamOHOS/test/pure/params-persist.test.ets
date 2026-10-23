@@ -15,6 +15,7 @@ import {
   PARAMS_KEYS, ParamsMigrate, ParamsPersist, ParamsPersistSession, ParamsPrefs, PrefEnum,
   enumFrom, enumName, formatSize, parseSize
 } from '../../entry/src/main/ets/ui/ParamsPersist';
+import { FlushScheduler, ParamsFlushThrottle } from '../../entry/src/main/ets/ui/ParamsFlushThrottle';
 import { ParamState, WotaParams } from '../../entry/src/main/ets/core/WotaParams';
 import {
   AeMode, AfMode, Flash, FrameEffect, PeakingColor, Size, Stabilize, WotaTiers, WbPreset
@@ -23,11 +24,14 @@ import { LensType } from '../../entry/src/main/ets/core/LensSlot';
 
 type PrefRaw = string | number | boolean;
 
-/** 纯 map 假 prefs：记录 put 调用序列（会话影子用例的断言面）；failPuts 模拟写盘失败 */
+/** 纯 map 假 prefs：记录 put/commit 调用序列（会话影子用例的断言面）；failPuts/failCommits 模拟写盘失败 */
 class FakeParamsPrefs implements ParamsPrefs {
   map: Map<string, PrefRaw> = new Map<string, PrefRaw>();
   puts: Array<string> = [];
   failPuts: boolean = false;
+  /** commit（落盘）调用次数：批写口径断言「一次 flush 只 commit 一次」 */
+  commits: number = 0;
+  failCommits: boolean = false;
 
   getInt(key: string, def: number): number {
     const raw: PrefRaw | undefined = this.map.get(key);
@@ -63,6 +67,11 @@ class FakeParamsPrefs implements ParamsPrefs {
 
   putString(key: string, value: string): boolean {
     return this.record(key, value);
+  }
+
+  commit(): boolean {
+    this.commits += 1;
+    return !this.failCommits;
   }
 
   private record(key: string, value: PrefRaw): boolean {
@@ -462,4 +471,152 @@ test('迁移后的旧键名不在白名单（一个字段只有权威键名）',
   for (const legacy of ['fps', 'bitrate', 'sizeW', 'sizeH']) {
     assertFalse(PARAMS_KEYS.indexOf(legacy) >= 0, `${legacy} 是旧键，不许进白名单`);
   }
+});
+
+// ================================================================== 6. 批写（一次 flush 一次 commit）
+
+test('会话 一次 flush 多个字段变化只 commit 一次', (): void => {
+  // 缺陷回归：put 逐键落盘会让滑杆拖动 = 每秒几十次 flushSync；批写后一次 flush 只落一次盘
+  const prefs: FakeParamsPrefs = new FakeParamsPrefs();
+  const params: WotaParams = new WotaParams();
+  const session: ParamsPersistSession = new ParamsPersistSession(prefs, params);
+  params.iso.value = ParamState.of(800);
+  params.ev.value = ParamState.of(1);
+  params.wbMode.value = WbPreset.DAYLIGHT;
+  params.kelvin.value = ParamState.of(4000);
+  assertTrue(session.flush(), '四个字段 flush 成功');
+  assertEq(4, prefs.puts.length, '四个字段各 put 一次');
+  assertEq(1, prefs.commits, '一次 flush 只 commit 一次');
+});
+
+test('会话 无变化 flush 不 commit', (): void => {
+  const prefs: FakeParamsPrefs = new FakeParamsPrefs();
+  const session: ParamsPersistSession = new ParamsPersistSession(prefs, new WotaParams());
+  assertTrue(session.flush(), '首次无差异返回 true');
+  assertTrue(session.flush(), '再次仍无差异');
+  assertEq(0, prefs.puts.length, '无差异不 put');
+  assertEq(0, prefs.commits, '无差异不 commit（空落盘也是同步 IO）');
+});
+
+test('会话 commit 失败不推进影子，下次 flush 重写并再次 commit', (): void => {
+  const prefs: FakeParamsPrefs = new FakeParamsPrefs();
+  const params: WotaParams = new WotaParams();
+  const session: ParamsPersistSession = new ParamsPersistSession(prefs, params);
+  params.iso.value = ParamState.of(1600);
+  prefs.failCommits = true;
+  assertFalse(session.flush(), 'commit 失败返回 false');
+  assertEq(1, prefs.commits, '失败路径也尝试过一次 commit');
+  assertEq(1, prefs.puts.length, 'put 已进内存');
+  prefs.failCommits = false;
+  assertTrue(session.flush(), '恢复后重试成功');
+  assertEq(2, prefs.commits, '重试再 commit 一次');
+  assertEq(2, prefs.puts.length, '影子未推进 → 重写一次（put 幂等）');
+  assertEq(1600, prefs.map.get('default_iso'), '值最终落盘');
+  assertTrue(session.flush(), '成功后无差异');
+  assertEq(2, prefs.commits, '影子已推进 → 不再 commit');
+});
+
+// ================================================================== 7. 落盘节流器
+
+/** 手摇时钟 + 手摇定时器：now 只由测试推进，回调只由 fireAll 触发（不碰真 setTimeout） */
+class ManualScheduler implements FlushScheduler {
+  nowMs: number = 0;
+  armCount: number = 0;
+  disarmCount: number = 0;
+  private fns: Array<() => void> = [];
+
+  arm(_delayMs: number, fn: () => void): number {
+    this.armCount += 1;
+    this.fns.push(fn);
+    return this.armCount;
+  }
+
+  disarm(_handle: number): void {
+    this.disarmCount += 1;
+  }
+
+  /** 到点：把在册回调都执行一次（含已 disarm 的，模拟"取消后回调仍晚到"的最坏情况） */
+  fireAll(): void {
+    const pending: Array<() => void> = this.fns;
+    this.fns = [];
+    for (const fn of pending) {
+      fn();
+    }
+  }
+}
+
+test('节流 窗口外首请求立即执行且不排定时器', (): void => {
+  const scheduler: ManualScheduler = new ManualScheduler();
+  let runs: number = 0;
+  const throttle: ParamsFlushThrottle = new ParamsFlushThrottle(300,
+    (): number => scheduler.nowMs, scheduler, (): void => {
+      runs += 1;
+    });
+  assertTrue(throttle.request(), '首请求走立即通道');
+  assertEq(1, runs, '立即执行一次');
+  assertEq(0, scheduler.armCount, '立即通道不排定时器');
+});
+
+test('节流 窗口内合并为一次，尾部只补一次', (): void => {
+  const scheduler: ManualScheduler = new ManualScheduler();
+  let runs: number = 0;
+  const throttle: ParamsFlushThrottle = new ParamsFlushThrottle(300,
+    (): number => scheduler.nowMs, scheduler, (): void => {
+      runs += 1;
+    });
+  throttle.request(); // t=0 立即
+  scheduler.nowMs = 100;
+  assertFalse(throttle.request(), '窗口内不立即执行');
+  scheduler.nowMs = 200;
+  assertFalse(throttle.request(), '窗口内继续合并');
+  assertEq(1, scheduler.armCount, '多次请求只排一个尾随');
+  assertEq(1, runs, '拖动期只有首帧那一次落盘');
+  scheduler.nowMs = 400;
+  scheduler.fireAll();
+  assertEq(2, runs, '尾部补一次');
+  assertEq(1, scheduler.armCount, '尾随不重复排');
+});
+
+test('节流 尾随补跑后按新的窗口重新起算', (): void => {
+  const scheduler: ManualScheduler = new ManualScheduler();
+  let runs: number = 0;
+  const throttle: ParamsFlushThrottle = new ParamsFlushThrottle(300,
+    (): number => scheduler.nowMs, scheduler, (): void => {
+      runs += 1;
+    });
+  throttle.request(); // t=0 立即
+  scheduler.nowMs = 100;
+  throttle.request(); // 排尾随
+  scheduler.nowMs = 300;
+  scheduler.fireAll(); // 尾随执行（lastRun=300）
+  assertEq(2, runs, '尾部一次');
+  scheduler.nowMs = 400;
+  assertFalse(throttle.request(), '距上次落盘 100ms，仍在窗口内');
+  assertEq(2, scheduler.armCount, '再排一个尾随');
+  scheduler.nowMs = 600;
+  scheduler.fireAll();
+  assertEq(3, runs, '第二次尾随');
+  scheduler.nowMs = 900;
+  assertTrue(throttle.request(), '距上次落盘 300ms，窗口外立即');
+  assertEq(4, runs, '立即通道恢复');
+});
+
+test('节流 cancel 后尾随不再触发，后续请求重新从立即开始', (): void => {
+  const scheduler: ManualScheduler = new ManualScheduler();
+  let runs: number = 0;
+  const throttle: ParamsFlushThrottle = new ParamsFlushThrottle(300,
+    (): number => scheduler.nowMs, scheduler, (): void => {
+      runs += 1;
+    });
+  assertTrue(throttle.request(), '首请求立即');
+  scheduler.nowMs = 100;
+  assertFalse(throttle.request(), '窗口内排尾随');
+  throttle.cancel();
+  assertEq(1, scheduler.disarmCount, 'cancel 撤销定时器');
+  scheduler.nowMs = 200;
+  scheduler.fireAll(); // 最坏情况：取消后回调仍被调用
+  assertEq(1, runs, 'cancel 后尾随不再触发');
+  scheduler.nowMs = 500;
+  assertTrue(throttle.request(), 'cancel 不污染窗口计时（距上次落盘已超窗口）');
+  assertEq(2, runs, '后续请求立即执行');
 });
