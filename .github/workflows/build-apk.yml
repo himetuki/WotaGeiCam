@@ -154,3 +154,17 @@ jobs:
               || gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
           gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber
+
+          # 应用内更新从 Release 说明的 `SHA256: <64位hex>` 行取 universal 包的校验值
+          # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
+          # 哈希，故构建完在此回填：读现有 body（可能已由 build-hap.yml 创建）→ 去掉旧哈希行
+          # → 追加本次 universal 包的哈希。无此行的更新仍可下载，但会退回"仅大小/名称"防线。
+          UNI=$(ls apk-out/*universal-release-Android.apk | head -n 1)
+          SHA=$(sha256sum "$UNI" | cut -d' ' -f1)
+          BODY=/tmp/release-body.md
+          : > "$BODY"
+          gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
+            | grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' > "$BODY" || true
+          printf '\n**校验和**\n\n- universal 包 SHA256: %s\n' "$SHA" >> "$BODY"
+          gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
+          echo "release body updated with universal sha256=$SHA"
