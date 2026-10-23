@@ -64,6 +64,8 @@ import { VideoStore } from '../record/VideoStore';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
+import { RefLineOverlay } from '../ui/RefLineOverlay';
+import { RefLine, RefLineType } from '../core/RefLine';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -133,6 +135,8 @@ struct CameraPage {
   @State sizeLabel: string = '—';
   @State effectLabel: string = '直通';
   @State gridOn: boolean = true;
+  /** 取景参考线位掩码（设置页多选；`gridOn` 额外把三分法网格并进来） */
+  @State refMask: number = 0;
   /** 水平仪/俯仰仪（上游需求 24/25「必须」）：读数已换算到显示方向、已折叠到 ±90 */
   @State levelOn: boolean = true;
   @State levelAvailable: boolean = true;
@@ -308,6 +312,7 @@ struct CameraPage {
       const sizeChanged: boolean = s.sizeW !== this.settings.sizeW || s.sizeH !== this.settings.sizeH;
       this.settings = s;
       this.syncLabels();
+      this.refMask = s.refLines;
       this.applyLevelSetting();
       this.initNativeParams();
       if (this.recording) {
@@ -391,6 +396,7 @@ struct CameraPage {
       this.settings = s;
       this.settingsLoaded = true;
       this.gridOn = s.grid;
+      this.refMask = s.refLines;
       this.effectIndex = s.effect;
       this.syncLabels();
       this.applyLevelSetting();
@@ -1444,36 +1450,8 @@ struct CameraPage {
     return summary;
   }
 
-  /**
-   * 3×3 网格（T31 可靠性修复）：确定性三行三列布局 + 2 横 2 竖 Divider。
-   * 旧实现用 `position({ y: '33%' })` 百分比定位，真机取证网格完全不可见（百分比定位不可靠）。
-   */
-  @Builder
-  private gridOverlay() {
-    Stack() {
-      Column() {
-        Row().layoutWeight(1)
-        Divider().width('100%').strokeWidth(1).color(HudColor.GRID_LINE)
-        Row().layoutWeight(1)
-        Divider().width('100%').strokeWidth(1).color(HudColor.GRID_LINE)
-        Row().layoutWeight(1)
-      }
-      .width('100%')
-      .height('100%')
-      Row() {
-        Column().layoutWeight(1)
-        Divider().vertical(true).height('100%').strokeWidth(1).color(HudColor.GRID_LINE)
-        Column().layoutWeight(1)
-        Divider().vertical(true).height('100%').strokeWidth(1).color(HudColor.GRID_LINE)
-        Column().layoutWeight(1)
-      }
-      .width('100%')
-      .height('100%')
-    }
-    .width('100%')
-    .height('100%')
-    .hitTestBehavior(HitTestMode.None)
-  }
+  // 3×3 网格改由 ui/RefLineOverlay（Canvas + 内接框算线）绘制：T31 的教训是「百分比 position
+  // 定位在真机上不可靠」，而 Canvas 用画布实测尺寸算线，天然避开这一点（旧 Divider 版已删除）。
 
   /** Dock 胶囊文案（单一分配点；@State 值变化 → HudPill @Prop 刷新） */
   private dockLabel(key: string): string {
@@ -1518,6 +1496,15 @@ struct CameraPage {
     return this.cameraStarted;
   }
 
+  /**
+   * 实际生效的参考线掩码：设置页多选（`default_ref_lines`）+ 「HUD 网格」开关的三分法。
+   * 用 RefLine.bitOf 取位值，不在调用点手写 `| 1`（位值是持久化契约，手写字面量最容易漂）。
+   */
+  private refLineMask(): number {
+    const gridBit: number = RefLine.bitOf(RefLineType.GRID_3X3);
+    return this.gridOn ? (this.refMask | gridBit) : this.refMask;
+  }
+
   private onDockTap(key: string): void {
     if (key === 'lens') {
       this.cycleLens();
@@ -1547,10 +1534,16 @@ struct CameraPage {
         .height('100%')
         .width('100%')
 
-      if (this.gridOn) {
-        this.gridOverlay()
+      // 取景参考线（11 档位掩码，设置页多选；`gridOn` 额外并入三分法网格）。
+      // aspect 传 0 = 铺满整屏：本侧预览是 XComponent 全屏直出，未做 letterbox 几何（登记）。
+      if (this.refLineMask() !== 0) {
+        RefLineOverlay({
+          lineMask: this.refLineMask(),
+          aspect: 0,
+          rollDegrees: this.levelRoll,
+          showLevelLine: this.levelOn && this.levelAvailable
+        })
       }
-
       // T31 渐变遮罩：上/下两条压暗带，保证白字在任何画面上可读（不拦触摸）。
       // 用「满屏 Column + Blank 分隔」确定性布局，不用百分比 position（真机网格曾因此不可见）。
       Column() {

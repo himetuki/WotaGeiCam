@@ -21,6 +21,7 @@ import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens
 import { WindowChrome } from '../ui/WindowChrome';
 import { SliderKey, decodeContinuousSliders, encodeContinuousSliders } from '../ui/SliderSnap';
 import { formatSize } from '../media/MediaFormat';
+import { REF_LINE_ENTRIES, RefLine, RefLineEntry } from '../core/RefLine';
 import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
 import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
@@ -421,6 +422,52 @@ struct Settings {
     .borderRadius(HudShape.CARD_RADIUS)
   }
 
+  /**
+   * 取景参考线分组（上游 11 档位掩码，多选叠加）：每颗 chip 点一次开、再点一次关，
+   * 位运算全部走 `core/RefLine` 的纯函数（不许在这里手写 `mask ^ bit`）。
+   * 水平线额外受「显示水平仪与俯仰仪」总开关约束（关掉就没有 roll 读数可画）。
+   */
+  @Builder
+  private refLineGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('取景参考线')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Text('可多选叠加；红线用于 WOTA 走位判定（2vp 加粗，画在其余线之上）。水平线跟随水平仪读数，关掉水平仪则不画。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(REF_LINE_ENTRIES, (entry: RefLineEntry): void => {
+          Button(entry.label)
+            .fontSize(HudType.VALUE)
+            .fontColor(RefLine.isOn(this.settings.refLines, entry.type)
+              ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({
+              width: 1,
+              color: RefLine.isOn(this.settings.refLines, entry.type) ? HudColor.ACCENT : HudColor.DIVIDER
+            })
+            .backgroundColor(RefLine.isOn(this.settings.refLines, entry.type)
+              ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              this.settings.refLines = RefLine.toggle(this.settings.refLines, entry.type);
+              this.persist();
+            })
+        }, (entry: RefLineEntry): string => entry.type as string)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
   /** 分组卡片：标题 13fp + 选项 Flex 换行（全部 48vp 高） */
   @Builder
   private optionGroup(title: string, options: Array<string>, selected: number,
@@ -787,6 +834,9 @@ struct Settings {
             }
             ListItem() {
               this.levelGroup()
+            }
+            ListItem() {
+              this.refLineGroup()
             }
             ListItem() {
               Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')

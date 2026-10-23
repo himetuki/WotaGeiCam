@@ -17,6 +17,8 @@ const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
 /** 取景辅助：水平仪/俯仰仪显示与回正震动（键名与上游 WotaSettings 逐字一致） */
 const KEY_LEVEL_ENABLED: string = 'level_enabled';
 const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
+/** 默认取景参考线位掩码（键名与上游 WotaSettings 逐字一致） */
+const KEY_DEFAULT_REF_LINES: string = 'default_ref_lines';
 
 export class CameraSettings {
   sizeW: number = 1920;
@@ -35,6 +37,8 @@ export class CameraSettings {
   levelEnabled: boolean = true;
   /** 水平仪/俯仰仪过 0° 时震动（上游 level_buzz_enabled，默认开） */
   levelBuzz: boolean = true;
+  /** 默认取景参考线位掩码（上游 default_ref_lines，11 档位或；0 = 不开任何参考线） */
+  refLines: number = 0;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -61,6 +65,9 @@ export class SettingsStore {
       s.levelEnabled = typeof levelRaw === 'boolean' ? levelRaw as boolean : s.levelEnabled;
       const buzzRaw: preferences.ValueType = await store.get(KEY_LEVEL_BUZZ, s.levelBuzz);
       s.levelBuzz = typeof buzzRaw === 'boolean' ? buzzRaw as boolean : s.levelBuzz;
+      const refRaw: preferences.ValueType = await store.get(KEY_DEFAULT_REF_LINES, s.refLines);
+      s.refLines = typeof refRaw === 'number' && Number.isFinite(refRaw as number)
+        ? Math.trunc(refRaw as number) : 0;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -101,6 +108,7 @@ export class SettingsStore {
       await store.put(KEY_SLIDER_CONTINUOUS, s.sliderContinuous);
       await store.put(KEY_LEVEL_ENABLED, s.levelEnabled);
       await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
+      await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
       await store.flush();
       return true;
     } catch (e) {

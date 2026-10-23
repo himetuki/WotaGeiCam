@@ -39,6 +39,10 @@ export class HudColor {
   /** 网格线（细、低对比，压暗背景时仍可见） */
   static readonly GRID_LINE: string = '#66FFFFFF';
   static readonly DIVIDER: string = '#26FFFFFF';
+  /** 取景参考线（与上游 wota_refline 同语义：细、半透明白） */
+  static readonly REF_LINE: string = '#59FFFFFF';
+  /** 参考线里的 WOTA 走位红线（上游 wota_refline_red，2dp 加粗压在其余线之上） */
+  static readonly REF_LINE_RED: string = '#CCFF3B30';
 }
 
 /** 字阶（fp） */
