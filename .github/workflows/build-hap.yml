@@ -200,15 +200,26 @@ jobs:
           if-no-files-found: error
 
       # 与 build-apk.yml 共用同一个 v* Release：谁先跑完谁创建，另一个只上传资产。
+      # 发布说明优先取仓库内 `.github/release-notes/<tag>.md`（手写）；没有则退回自动 changelog。
+      # 本文件通常先跑完（约 2 分钟）从而负责创建 Release，故这里也要认手写说明；
+      # 最终的 universal 包哈希行由 build-apk.yml 收口步骤回填。
       - name: Publish to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          NOTES=".github/release-notes/${GITHUB_REF_NAME}.md"
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --title "WotaGeiCam $GITHUB_REF_NAME" \
-              --generate-notes \
-              || gh release view "$GITHUB_REF_NAME" >/dev/null
+            if [ -f "$NOTES" ]; then
+              gh release create "$GITHUB_REF_NAME" \
+                --title "WotaGeiCam $GITHUB_REF_NAME" \
+                --notes-file "$NOTES" \
+                || gh release view "$GITHUB_REF_NAME" >/dev/null
+            else
+              gh release create "$GITHUB_REF_NAME" \
+                --title "WotaGeiCam $GITHUB_REF_NAME" \
+                --generate-notes \
+                || gh release view "$GITHUB_REF_NAME" >/dev/null
+            fi
           fi
           gh release upload "$GITHUB_REF_NAME" dist/*.hap dist/SHA256SUMS --clobber

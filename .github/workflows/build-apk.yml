@@ -142,29 +142,53 @@ jobs:
           if-no-files-found: error
 
       # 与 build-hap.yml 共用同一个 v* Release：谁先跑完谁创建，另一个只上传资产。
+      # 发布说明来源（按优先级）：
+      #   1) 仓库内 `.github/release-notes/<tag>.md`（如 v0.0.10-r01.md）——**推荐**：发版前写好
+      #      并提交，随 tag 一起推，用户看到的就是这份手写说明；
+      #   2) 没有该文件时退回 `--generate-notes`（只有 changelog 链接）。
+      # 两条流水线并行，HAP 通常先跑完并创建 Release，APK 这步最后收口，故统一在此定稿 body。
       - name: Publish to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          NOTES=".github/release-notes/${GITHUB_REF_NAME}.md"
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --title "WotaGeiCam $GITHUB_REF_NAME" \
-              --generate-notes \
-              || gh release view "$GITHUB_REF_NAME" >/dev/null
+            if [ -f "$NOTES" ]; then
+              gh release create "$GITHUB_REF_NAME" \
+                --title "WotaGeiCam $GITHUB_REF_NAME" \
+                --notes-file "$NOTES" \
+                || gh release view "$GITHUB_REF_NAME" >/dev/null
+            else
+              echo "::warning::缺少 $NOTES，Release 说明将只有自动生成的 changelog"
+              gh release create "$GITHUB_REF_NAME" \
+                --title "WotaGeiCam $GITHUB_REF_NAME" \
+                --generate-notes \
+                || gh release view "$GITHUB_REF_NAME" >/dev/null
+            fi
           fi
           gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber
 
           # 应用内更新从 Release 说明的 `SHA256: <64位hex>` 行取 universal 包的校验值
           # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
-          # 哈希，故构建完在此回填：读现有 body（可能已由 build-hap.yml 创建）→ 去掉旧哈希行
+          # 哈希，故构建完在此回填：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行
           # → 追加本次 universal 包的哈希。无此行的更新仍可下载，但会退回"仅大小/名称"防线。
           UNI=$(ls apk-out/*universal-release-Android.apk | head -n 1)
           SHA=$(sha256sum "$UNI" | cut -d' ' -f1)
           BODY=/tmp/release-body.md
-          : > "$BODY"
-          gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
-            | grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' > "$BODY" || true
-          printf '\n**校验和**\n\n- universal 包 SHA256: %s\n' "$SHA" >> "$BODY"
+          if [ -f "$NOTES" ]; then
+            grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
+          else
+            gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
+              | grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' > "$BODY" || true
+          fi
+          # 手写说明里若已带"校验和"小节标题就不再重复加，只补哈希行
+          if ! grep -qE '^##+ .*校验和' "$BODY"; then
+            printf '\n## 校验和\n\n- universal 包 SHA256：\n' >> "$BODY"
+          elif ! grep -qE 'universal 包 SHA256' "$BODY"; then
+            printf '\n- universal 包 SHA256：\n' >> "$BODY"
+          fi
+          printf 'SHA256: %s\n' "$SHA" >> "$BODY"
           gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
-          echo "release body updated with universal sha256=$SHA"
+          echo "release body finalized from ${NOTES} with universal sha256=$SHA"
+
