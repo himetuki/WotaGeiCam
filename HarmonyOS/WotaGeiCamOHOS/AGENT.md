@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 369 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 385 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -66,6 +66,11 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   不要在各处手写旋转）——平台面 `camera/LevelSensor`、UI 面 `ui/AttitudeMeter`。
   `RefLine`（参考线 11 档位掩码 + `inscribedBox`/`horizonEndpoints` 纯函数）——UI 面 `ui/RefLineOverlay`；
   掩码位值是持久化契约（`default_ref_lines`），只许追加不许改值。
+  `DirectDisplay`（DIRECT 直显显示矩阵 `matrix`：顺时针旋转 + 等比居中信箱黑边 + 镜像作用在旋转之后的
+  屏幕横轴；任一尺寸 ≤0 退单位阵）、`FrameRateFallback`（`ceilingFps` 只排除 cap 截断后不可用的范围，
+  无退档目标返回 0）、`camera/GlRenderSuppression` 的 `degradeSuppressed`（停止序列 / 换段重挂两窗口析取）。
+  **grep 不到接线方时不要伪造接线**：这三件在本侧暂无 ArkTS 消费方（没有 DIRECT 直显通道，也没有
+  `Camera2Engine` 那套退档/降级窗口；抑制判定在 native `cpp/gl_render.cpp`），只交付纯函数 + 全表用例。
 - `player/`：`CompareTimeline`（几何+decide 内核）、`CompareAudio`（选轨计划/命令序）、`AudioSync`
   （DSP）、`ComparePractice`（练习桥）、`CompareHistory`（历史纯核心）、`TrackSync`（双轨偏移合成）、
   `PcmDecode`（PTS 落位/PCM16/24/F32 解码）、`PureLogicBarrel`（编译守卫，EntryAbility 启动调用）。

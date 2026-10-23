@@ -36,7 +36,7 @@
 | `CameraController` 的「默认开广角后摄 + 出画面」最小闭环（预览批） | 平台绑定（会话侧） | `entry/src/main/ets/camera/`：`PermGate.ets`（CAMERA 权限申请门）+ `KitPreview.ets`（PhotoSession 预览引擎：默认档 assignRearTiers 后首个 WIDE、`pickDirectPreviewSize` 选档、createSession/createPreviewOutput/start、stop 逐项收尾、`applyParams` 参数下发入口）+ `pages/Index.ets`（XComponent(SURFACE) 预览面 + 权限流按钮 + 参数自检八档，探测路径保留）。落地 2026-10-21，对齐上游 342dd99。留白项：切镜头 UI、GL/DIRECT 双路、参数下发 UI（本批只有自检入口）、VideoSession 能力（EIS 真值随录制批）、永久拒绝引导（随 HUD 批）。装机验证项（不阻塞）：授权框弹出与拒绝重试、预览画面出现/关页无崩溃、`hdc hilog \| grep -E "WotaAbility\|WotaLens"` 真值与镜头列表 | ☑ 部分 |
 | `RequestApplier.kt`（参数 → 请求的纯决策层 + OHOS 会话下发） | 纯逻辑 + 平台绑定（下发侧） | `camera/RequestApplier.ets`：State/stateOf、Snapshot/snapshotOf、clampShutterNs（双钳制+强制档豁免）、frameDurationNs、pickFps、exposurePlan、flashPlan（五分支）、stabilizePlan（三门控）逐行直译；apply 段 `applySnapshot(session,…)` 逐键 try/catch 产出 applied/skipped/failed 报告（`ApplyReport`），`KitPreview.applyParams` + Index「参数自检」为真实消费者。落地 2026-10-21，对齐上游 342dd99。审查修复订正（2026-10-21）：曝光时长单位 OHOS=微秒、core=纳秒（采集 ×1000/下发 ÷1000）；曝光组按档语义（MANUAL 写全 时长+ISO+EV 归零；LOCK/AUTO 只写模式与补偿——LOCK 冻结当前 AE 曝光，不写 SENSOR 键，OHOS LOCKED 下 setIso 会实际生效，登记）；MANUAL 用 LOCKED（d.ts：setIso 仅 LOCKED 生效，不用 EXPOSURE_MODE_MANUAL）；闪光由纯 flashPlan 驱动（无灯/手动退化/TORCH 全走 plan，state.flashAvailable 已消费）；EIS skipped 按用户意图判定并如实标注原因（PhotoSession 未暴露 EIS 参数面 ≠ 镜头不支持；高帧率/4K 门控原因单独列出）；手动对焦距离经 refine 的 isFocusDistanceSupported 探针门控 + ManualFocus.setFocusDistance 归一化下发（API24；探针不可得/6.0 设备 → skipped 不是 failed，登记）；evStep≤0 不猜 1、补偿键进 skipped；白平衡 MANUAL 模式与色温分键报告；4K 下 EIS=不下发该键（非显式 false）；ParamMap 反向探针 FOCUS_MODE_AUTO→AfMode.MACRO(2) 近似、catch 清空集合。不移植项（无 OHOS 等价物）：RGB 增益四件套（kelvinTintToRgb255/gain255ToUnit/rggbFromRgb255/identityColorTransform，手动白平衡走 mode+kelvin，tint 留白）、meteringBox/fullFrameBox/meteringRect（改用归一化 setFocusPoint/setMeteringPoint）、cropBox（只有 setZoomRatio）、afTrigger（无 AF 触发语义）、逐帧 AE_TARGET_FPS_RANGE（预览档 profile 固定，FpsPick 仅 State/dump）。`camera/ParamMap.ets` 承载枚举映射（FocusMode/WhiteBalanceMode/ExposureMode/OIS/VideoStabilization ↔ Camera2 契约值 + 反向探针；Flash 语义经 RequestApplier.flashPlan 派生）。装机验证项（不阻塞）：开预览→参数自检（变焦/色温/补光）→hilog WotaAbility 见每档 apply 与 failed 项 | ☑ |
 | `GlRenderEngine.kt`、`ArcMendPass.kt`、`FrostBlur.kt`、`FrostBlurChain.kt`、`NtscGrid.kt` | 平台绑定（GL 着色器本体是纯逻辑） | XComponent + NDK NativeWindow，OpenGL ES 着色器源码几乎原样复用；斑马纹/峰值对焦同在此链路。GL-0（构建骨架/EGL/OnFrame）、GL-1（NativeImage 相机帧 + 基对）、GL-2（旋转镜像/曲线 LUT/斑马/峰值）已落；**GL-3 已落（2026-10-21）**：FBO/RT 基础设施（frostRtSizeInto/FrostRtNeedsRebuild/fillFrostBlurOffset 逐行；RGBA8+LINEAR+CLAMP，glCheckFramebufferStatus 完整性出口）、三趟链（OES→2D 拷贝→横向高斯→纵向高斯，权重 0.17524/0.16577/0.14032/0.10629 逐值，highp→mediump 退避，错误连击 8 帧停链）、PASS_THROUGH_2D_FS 上屏、全屏毛玻璃开关（页面「毛玻璃」）；**GL-4 编码面已落（2026-10-21）**：EGL 第二个 window surface 挂编码器输入面（复用初始化缓存的 EGLConfig）、编码 pass 每帧第二趟且仅新相机帧驱动（vsync 重绘不重复送帧；上屏 swap 后）、编码 UV 口径 deg=stRotDeg 且不镜像（上游 buildTexCoords(encoderPass=true) 语义）、**编码 pass 绝不进入 frost 分支（上游红线：霜面是上屏专属）**、surface 丢失中止；编码 pass swap/绘制连续失败 3 次中止（encoder-pass-failed）；恢复上屏上下文失败 1 次即中止，g_displayCtxLost 每帧重试上限 60 帧（达上限 abort display-context-lost，首帧与上限各一条日志）、WotaGlDestroy 先 detach+abort；**上批 P3×6 修正（2026-10-21）**：帧账录制纪元（frameStart 只计录制窗口；begin 前入队、begin 后执行的残余 frameStart 登记为观测偏差，相机帧取 max(cameraDelta,glCbDelta) 上界，仅作到达上界/不得当精确丢帧数）、sidecar 诊断读取门控（skipped(diag)）、flush DrawPending 失败计 swapFail、display-context-lost 页面提示并禁用录制、实测源帧率整场口径（降级不重置，登记偏离）、MEND attach 最多 2 次重试后降 DROP；frost 开关只释放离屏资源/program（基础 g_idUvVbo 归 EGL 管线生命周期，开→关→开可用）；**GL-4 光弧链在线版已落（2026-10-21，对齐上游 342dd99）**：ARC_MERGE_FS（整像素选择+差分死区）逐 token、ArcMendPass 等价（cur+pending×2+acc×2 五张 unsized GL_RGBA FBO（ES2/ES3 通吃，对齐上游/frost）、两枚 program、完整性出口/Release 清零）、ArcKeepRule/ArcRepairFlow C++ 逐行对拍、MEND/DROP 只吃新相机帧、MEND 离屏补弧与停录 flush、MEND→DROP 降级（降级帧无条件直通补发、不记新 rule 位次）；drops 位次账与实测源帧率、原生五格帧账；**编码 pass/MEND 均不进入 frost 分支（上游红线）**。留白：ARC_MERGE_FS（A/B 修复链已落 shaders.h；离线 GPU 消费 T29）、Frost 画板/圆角 SDF/卡片 UV/letterbox 几何（HUD 批；本批 RT 内容=整屏等比画面，登记与上游 letterbox 口径差异）、NtscGrid（ntscGridStepNs 纯函数，Codec 批）、独立渲染线程与性能控制。已知：全屏毛玻璃与监视效果互斥一帧；`.so` 导入 1 条 napi 未验证工具链提示（已实测无抑制通道）。装机验证项（不阻塞）：毛玻璃开关画面整体模糊、方向与直通一致、关闭恢复效果态；**毛玻璃开→关→开仍可用**；横竖屏下模糊方向与画面一致；`hdc hilog \| grep WotaGL` 见 frost RT/programs/错误日志 | ☑ 部分（GL-0/1/2/3/4） |
-| `DirectSink.kt`、`GlRenderSuppression.kt`、`FrameRateFallback.kt` | 纯逻辑为主 | 直译 + 适配相机回调签名 | ☐ |
+| `DirectSink.kt`、`GlRenderSuppression.kt`、`FrameRateFallback.kt` | 纯逻辑为主 | **H 批已落（2026-10-23，纯函数三件）**：`core/DirectDisplay.ets`（`DirectDisplay.matrix` ← 上游 `directDisplayMatrix` 逐行等价——按施加角顺时针旋转 + 等比居中信箱黑边 + 镜像乘在旋转**之后**的屏幕横轴（否则成了传感器左右反）；任一尺寸 ≤0 退单位阵；非 90 倍数的 sensorOrientation 按旋转后包围盒 `bw·|c|+bh·|s|` 算黑边；语义与 GL 路「纹理旋转 + 等比居中 contentRect」等价，两模式因此同角度）、`camera/GlRenderSuppression.ets`（`degradeSuppressed(recordTearingDown, segmentRotating)`：停止序列窗口 / GPU 分段轮转重挂窗口，任一为真即抑制转换降级——窗口内丢几帧好过 MEND→DROP 清掉位次账、DROP→直通把换段点之后的成片降成慢放）、`core/FrameRateFallback.ets`（`FrameRateFallback.ceilingFps(ranges, cap)`：只排除被 cap 截断后不可用的范围 `min(hi,cap) >= lo`，固定档 `[f,f]` 不再被误杀；修复旧口径 `usable > r.lo` 排除全部固定档 + `minOfOrNull{hi}` 兜底取全表**最小**上界、用户选 120fps 却退到 15fps 的 S3-01 缺陷；一个可用范围都没有返回 0 = 无退档目标）。三模块零平台 import，均已进 `PureLogicBarrel` 编译探针。**登记（不移植/无接线点）**：① `DirectSink` 类体的平台胶水（`TextureView`/`SurfaceTexture`/`Surface`/`Matrix`/`Handler` 线程切回与选流重算）本侧无等价物——ArkUI 只有 XComponent surface 即 GL 路径，没有「相机帧直落承载视图 + 读回 SurfaceTexture 变换矩阵」通道；② `PreviewOrientation` 未移植，因此 `directDisplayMatrix` 在本侧**没有调用方**，本批只交付纯函数 + 全表用例；③ 上游 `Camera2Engine.ceilingFps`/`syncFpsPick`/`degradeArcConvert` 的源码结构守卫臂在本侧无对应接线点（相机引擎是 `GlCameraEngine`，帧率下发走 `RequestApplier.pickFps`，抑制判定在 native `cpp/gl_render.cpp` 的 C++ 分支，不在 ArkTS 可扫描面），不伪造接线。 | ☑ 部分（纯函数三件；接线待 C++ 共用口径） |
 | `LevelMath.kt`（水平仪/俯仰数学）、`SensorLevel.kt`、`ui/widget/AttitudeMeter.kt` | 纯逻辑 + 平台绑定 + UI | **已落（2026-10-23，E 批）**：`core/LevelMath.ets`（displayVector 四象限/rollOf 折半圆/pitchOf/foldToHalfCircle/toDegrees/isLevelOf + `LevelConst` 全部纯常量）、`camera/LevelSensor.ets`（`@ohos.sensor` 优先 GRAVITY、无融合回退 ACCELEROMETER，`interval:'game'`≈50Hz；分量低通 0.30、NaN 入口丢弃、`MIN_VALID_G`/`FLAT_GUARD` 丢帧闸、0.1° 发布节流、回正两路独立 `vibrator` 轻震、**首启静默自愈 watchdog**（600ms 零样本重挂，上限 2 次，stop 复位预算）；显示方向经 `setDisplayDegrees` 喂入）、`ui/AttitudeMeter.ets`（Canvas 人工地平仪：满量程 roll±30/pitch±45、天地双色 16% 透明、±10/±20 刻度、固定机标；点按切「气泡/数值」两模式，会话态不持久化；状态行「已回正/偏斜中」）。接线：`pages/Camera.ets` 右上角浮层（`levelOn && levelAvailable` 才显示），进页面建源、`onPageShow`/`onPageHide`/`aboutToDisappear` 启停（传感器常开很费电），显示旋转变化即重喂；`SettingsStore` 增 `level_enabled`/`level_buzz_enabled`（键名与上游逐字一致，默认 true）+ 设置页「取景辅助」分组两开关；`module.json5` 增 `ohos.permission.VIBRATE`（normal） | ☑ 完整（真机待验） |
 
 ## core — 参数与常量（第一轮直译完成 2026-10-21，对齐上游 342dd99）
@@ -394,6 +394,38 @@ PCM；且内录会话必须与视频采集配置同场（没有音频-only 的�
   `ArcRepairZeroSampleLaneGuardTest`、`ClipExportShiftTest.导出接线`、`TrackSyncAutoTest.AUTO 落盘锁内复核`
   （其语义已由 writeAutoPrefs 行为用例覆盖）、`AudioAlignTest.core 纯度`（本侧纯度由 pure-test 架构保证）。
 
+## 交付批（H：相机性能三件纯逻辑，2026-10-23）
+
+上游 `camera/DirectSink.kt`（只取纯函数 `directDisplayMatrix`）、`camera/GlRenderSuppression.kt`、
+`camera/FrameRateFallback.kt`。
+
+- `core/DirectDisplay.ets`（纯逻辑）：`DirectDisplay.matrix(viewW, viewH, bufferW, bufferH,
+  rotationDegrees, mirrored)`——行主序 3x3（`Array<number>`，长度 9）；顺时针旋转 + 等比居中信箱
+  黑边 + 镜像作用在**旋转之后**的屏幕横轴；非 90 倍数 sensorOrientation 按旋转后包围盒
+  `bw·|c|+bh·|s|` 算黑边；任一尺寸 ≤0 退单位阵。与 GL 路径「纹理旋转 + 等比 contentRect」等价，
+  两渲染模式因此同角度。
+- `camera/GlRenderSuppression.ets`（纯逻辑）：`degradeSuppressed(recordTearingDown, segmentRotating)`
+  ——停止序列窗口 / 分段轮转重挂窗口的析取；窗口内丢帧好过 MEND→DROP 清账与 DROP→直通慢放。
+- `core/FrameRateFallback.ets`（纯逻辑）：`ceilingFps(ranges, cap)` 只排除被 cap 截断后不可用的范围
+  （`min(hi,cap) >= lo`），修复旧口径「`usable > r.lo` 排除全部固定档 + 兜底取全表最小上界」的
+  120fps→15fps 缺陷；一个可用范围都没有返回 0 = 无退档目标。
+- 三模块零平台 import，已登记 `PureLogicBarrel` 编译探针（不改变 `signature()` 输出）。
+- **测试**：`test/pure/direct-display.test.ets`（7 例：上游 DirectRulesTest 矩阵 5 + 直显预览选档 2；
+  此前 test/pure 无 `pickDirectPreviewSize` 覆盖，属新增而非重复）、
+  `test/pure/frame-rate-fallback.test.ets`（7 例：纯函数全表 6 + 突变自证 1，含旧口径突变体
+  `usable > r.lo` + 最小 hi 兜底，S3-01 本体断言旧口径 15 / 新口径 60）、
+  `test/pure/gl-render-suppression.test.ets`（2 例：真值表 4 组合 + `||`→`&&` 突变自证）。
+  共 +16（369 → 385）。
+- **登记（跳过）**：① `DirectSink` 平台胶水（TextureView/SurfaceTexture/Surface/Matrix/Handler）
+  本侧无等价物不移植——ArkUI 只有 XComponent surface = GL 路径；② `PreviewOrientation` 未移植，
+  因此 `directDisplayMatrix` 在本侧没有调用方；③ 上游的引擎源码结构守卫臂
+  （`Camera2Engine.ceilingFps`/`syncFpsPick`/`degradeArcConvert`、`CameraScreen.beginSession`
+  重挂 mark/await/clear 顺序）在鸿蒙侧无对应接线点——抑制判定在 native `cpp/gl_render.cpp`
+  的 C++ 分支，不在 ArkTS 可扫描面，本批只交付纯函数与其全表用例，不伪造接线。
+- **回归**：pure-test 36 files / 385 tests / failed=0；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **真机待验/留白**：三件当前都无 ArkTS 调用方（DIRECT 直显通道与引擎退档/降级窗口在本侧不存在），
+  真机无可观测面；等 C++ 侧需要与 ArkTS 共用抑制口径时经 napi 导出回接。
+
 ## 交付批（G：媒体库分段归组，2026-10-23）
 
 上游 `media/SeriesGroup.kt`。本侧录制早已按段写 `series_part`（WotaDb），媒体层也已把
@@ -533,7 +565,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（369）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（385）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -558,7 +590,10 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   三条纯判据全量 + 接线守卫 3（ArkTS 门面/播放页/store 接线、C++ 预扫与拷贝同口径、修复 lane 1 与预检））、
   level-math（7，E 批：上游 LevelMathTest 全量六条 + 容差/常量口径一条）、
   ref-line（13，F 批：上游 RefLineMaskTest 5 + 位值契约 1 + RefLineHorizonTest 5 + 内接框 2）、
-  series-group（15，G 批：上游 SeriesGroupTest 10 + 扇出 3 + 突变自证 2）。
+  series-group（15，G 批：上游 SeriesGroupTest 10 + 扇出 3 + 突变自证 2）、
+  direct-display（7，H 批：上游 DirectRulesTest 矩阵 5 + 直显预览选档 2——此前无 pickDirectPreviewSize 覆盖）、
+  frame-rate-fallback（7，H 批：上游纯函数全表 6 + 突变自证 1，S3-01 旧口径 15 / 新口径 60）、
+  gl-render-suppression（2，H 批：抑制真值表 4 组合 + `||`→`&&` 突变自证；上游接线守卫臂本侧无对应点，跳过登记）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；

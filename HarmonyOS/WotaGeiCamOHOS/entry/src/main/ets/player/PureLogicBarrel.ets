@@ -41,6 +41,11 @@ import { SLIDER_KEYS, decodeContinuousSliders, effectiveLadder } from '../ui/Sli
 import { CompareVersions, ReleaseJson, ReleaseNotes, UpdateConfig } from '../update/UpdateChecker';
 import { UpdateDownloadPure } from '../update/UpdatePure';
 import { Sha256 } from '../update/Sha256';
+import { DirectDisplay } from '../core/DirectDisplay';
+import { FrameRateFallback } from '../core/FrameRateFallback';
+import { degradeSuppressed } from '../camera/GlRenderSuppression';
+import { RangeI } from '../core/CameraAbility';
+import { WotaTiers } from '../core/Constants';
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -63,6 +68,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.arcRepairCompileProbe();
     PureLogicBarrel.syncSnapCompileProbe();
     PureLogicBarrel.updateCompileProbe();
+    PureLogicBarrel.cameraPerfCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -125,6 +131,21 @@ export class PureLogicBarrel {
     const tag: string | undefined = ReleaseJson.parseTag('{"tag_name":"v1.0.0"}');
     if (vcode !== undefined && newer && digest.length === 64 && candidates > 0 && safe &&
       notes !== undefined && tag !== undefined) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 相机性能三件纯逻辑的编译探针：DIRECT 显示矩阵 / fps 退档口径 / 降级抑制判定。
+   * H 批登记——三者目前都还没有 ArkTS 侧调用方（DirectSink 平台胶水与 Camera2Engine 那套
+   * 引擎结构在本侧不存在），靠本探针保证 hvigor 编译门覆盖其类型面，不改变 signature 输出。
+   */
+  private static cameraPerfCompileProbe(): void {
+    const m: Array<number> = DirectDisplay.matrix(100, 100, 200, 100, 90, true);
+    const fps: number = FrameRateFallback.ceilingFps([new RangeI(30, 30), new RangeI(60, 60)],
+      WotaTiers.HIGH_SPEED_FPS);
+    const suppressed: boolean = degradeSuppressed(false, false) && !degradeSuppressed(true, false);
+    if (m.length === 9 && fps > 0 && !suppressed) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }
