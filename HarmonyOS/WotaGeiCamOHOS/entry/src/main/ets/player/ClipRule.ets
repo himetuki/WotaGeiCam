@@ -108,3 +108,17 @@ export function audioOrdinalOf(track: TrackChoice): number {
   }
   return -1;
 }
+
+/**
+ * 剪辑导出的音轨平移量（µs，对齐上游 e950328 的 ClipRule.audioShiftUs → TrackRule.shiftUsFor
+ * 同一表达式）：只有内录轨（CAP）吃 −offsetMs，环境轨（ENV）恒 0；NO_AUDIO 无音轨可平移恒 0。
+ * 与预校准（record/AudioPreflightPolicy.capPreShiftUs）同一符号口径——offset 正 = 内录晚响，
+ * 导出把内录轨向前拉 −offset。
+ */
+export function audioShiftUs(track: TrackChoice, offsetMs: number): number {
+  if (track === TrackChoice.CAP) {
+    // 0 - x 而非 -x：JS 的 -0×1000=-0，整数语义（Kotlin Long）零就是 +0
+    return 0 - offsetMs * 1000;
+  }
+  return 0;
+}

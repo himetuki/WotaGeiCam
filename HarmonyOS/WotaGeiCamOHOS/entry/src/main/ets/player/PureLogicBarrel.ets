@@ -10,6 +10,9 @@
  * T28 追加四个模块：ArcRepairPlan / ArcRepairFlow / ArcRepairMerge / ArcRepairVerdict
  * （离线光弧修复纯逻辑，执行器留 T29）。
  * T29 追加 record/ArcRepairSessionModel（native 串解析/速率/NO_NEED/去重/归因）。
+ * 上游对齐批（0dee86d/e950328 纯逻辑层）追加五个模块：ui/SliderSnap（滑杆吸附）、
+ * core/AudioAlign（DSP 自 AudioSync 迁出 + estimateOffsetMs）、record/AudioPreflightPolicy、
+ * record/PreflightPcm、player/PostStopSyncPlan（平台接线面留 T27）。
  * 注意：本文件只做**引用**，不改变任何模块语义；不 import 平台 Kit。
  */
 import { AudioSync } from './AudioSync';
@@ -30,6 +33,11 @@ import { arcRepairOk } from '../record/ArcRepairVerdict';
 import {
   ArcProbeInfo, ArcRepairSessionModel, ArcRepairStatus
 } from '../record/ArcRepairSessionModel';
+import { AudioAlign } from '../core/AudioAlign';
+import { AudioPreflightPolicy } from '../record/AudioPreflightPolicy';
+import { PreflightMonoPcm } from '../record/PreflightPcm';
+import { PostStopPlan, PostStopSyncPlan } from './PostStopSyncPlan';
+import { SLIDER_KEYS, decodeContinuousSliders, effectiveLadder } from '../ui/SliderSnap';
 
 /** 十四个纯逻辑模块的编译/启动签名（只读常量与纯函数，无副作用） */
 export class PureLogicBarrel {
@@ -50,6 +58,7 @@ export class PureLogicBarrel {
     const okBit: number = arcRepairOk(true, true, 1) ? 1 : 0;
     // Flow/Merge 无默认态可打印：走一次零副作用探针，让编译门覆盖其类型面
     PureLogicBarrel.arcRepairCompileProbe();
+    PureLogicBarrel.syncSnapCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -78,6 +87,22 @@ export class PureLogicBarrel {
       ArcRepairMerge.selectInPlace(aY, uvA, uvA, bY, uvB, uvB, 2, 2, 12);
     } catch (e) {
       // 编译探针：吞掉即可（生产调用方各自处理）
+    }
+  }
+
+  /** 滑杆吸附 + 音频同步纯逻辑层的编译探针（零副作用，产物丢弃；不改变 signature 输出） */
+  private static syncSnapCompileProbe(): void {
+    const keyCount: number = SLIDER_KEYS.length;
+    const badDecoded: number = decodeContinuousSliders('bad-id').size;
+    const ladderNull: boolean = effectiveLadder([1, 2, 3], true) === null;
+    const alignSr: number = AudioAlign.TARGET_SR;
+    const preShiftUs: number = AudioPreflightPolicy.capPreShiftUs(-100, AudioPreflightPolicy.MIN_CONFIDENCE);
+    const emptyPcm: PreflightMonoPcm = new PreflightMonoPcm(8000, 1, 0);
+    const pcmFrames: number = emptyPcm.frameCount();
+    const emptyPlan: PostStopPlan = PostStopSyncPlan.planFor([]);
+    if (keyCount > 0 && badDecoded === 0 && ladderNull && alignSr > 0 &&
+      preShiftUs > 0 && pcmFrames === 0 && emptyPlan !== undefined) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }
 }

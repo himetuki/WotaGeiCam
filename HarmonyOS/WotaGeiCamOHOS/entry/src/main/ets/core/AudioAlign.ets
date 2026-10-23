@@ -1,0 +1,480 @@
+/**
+ * 音频自动对齐的**纯 DSP 核心**（直译上游 core/AudioAlign.kt，对齐上游 e950328）。
+ *
+ * 本文件不许 import `@ohos.*` / `@kit.*` / player 包：player 的 AudioSync（对比页）与
+ * 录制前的 record/AudioPreflight（预校准，T27 平台面）共用同一份实现，纯测试架直接跑它。
+ * 解码 / 持久化等平台依赖留在各自的调用方。
+ *
+ * 偏移符号约定（与对比页、TrackSync 全链一致）：**left(t) ≈ right(t + offsetMs)**。
+ * 本类里 left=环境参考、right=内录（或对比页右片），所以正 offset = 内录内容晚响。
+ *
+ * 处理链：
+ * 1. 10ms 窗 RMS → 去均值 → 归一化包络（100 点/秒）；
+ * 2. ±searchMs 搜索窗内互相关求粗偏移；
+ * 3. 以粗偏移为中心，1kHz 带内 FFT 相关在 ±refineMs 内以 1ms 步进精修；
+ * 4. 置信度 = 峰 / 次峰（次峰取主峰 ±150ms 之外的最大值）。
+ *
+ * 浮点口径（与 player/AudioSync.ets 原实现一致，登记）：
+ * - Kotlin FloatArray → Float32Array（数组存储按 float32 舍入）；
+ * - 蝶形/累加器中间量用 JS number（double）计算后写回 Float32Array，差异远小于测试容差；
+ * - Kotlin Long/Int 除法截断 → Math.trunc（本文件所有时间量均为整毫秒或非负帧数）。
+ */
+
+/** 精修结果：偏移毫秒 + 置信度（主峰/次峰比） */
+export class RefineResult {
+  readonly offsetMs: number;
+  readonly confidence: number;
+
+  constructor(offsetMs: number, confidence: number) {
+    this.offsetMs = offsetMs;
+    this.confidence = confidence;
+  }
+}
+
+/** estimateOffsetMs 的产出：内容偏移毫秒 + 置信度 */
+export class OffsetEstimate {
+  readonly offsetMs: number;
+  readonly confidence: number;
+
+  constructor(offsetMs: number, confidence: number) {
+    this.offsetMs = offsetMs;
+    this.confidence = confidence;
+  }
+}
+
+/** 区间 [from, until)（内部辅助；上游 Kotlin Pair<Int,Int>） */
+class Span {
+  readonly from: number;
+  readonly until: number;
+
+  constructor(from: number, until: number) {
+    this.from = from;
+    this.until = until;
+  }
+}
+
+export class AudioAlign {
+  /** 对齐链的目标采样率（AudioSync 的「至少 1 秒 PCM」口径也复用它） */
+  static readonly TARGET_SR: number = 8000;
+  /** 低置信度门槛（主峰/次峰比）；官方口径由 AudioSync 与 TrackSync 共同引用 */
+  static readonly MIN_CONFIDENCE: number = 1.5;
+  static readonly ENV_WIN_MS: number = 10;
+  static readonly DEFAULT_SEARCH_MS: number = 10000;
+  static readonly DEFAULT_REFINE_MS: number = 50;
+  static readonly PEAK_GUARD_MS: number = 150;
+
+  /**
+   * 估计 capPcm 相对 envPcm 的内容偏移（上游 e950328 新增 API，预校准/后校准共用）。
+   *
+   * 两段 PCM 必须**已同一采样率、单声道**（调用方负责重采样；录制前预校准转 8k，对比页也转 8k）。
+   * 三条红线（一律返回 undefined，调用方据此走「不纠偏」，不许把低置信结果当成真偏移写盘）：
+   * 1) 任一路时长不足 200ms（连一个包络窗都凑不满，互相关无统计意义）；
+   * 2) 任一路全静音（峰值 ≤ 1e-6）；
+   * 3) 置信度低于注入的 minConfidence。
+   *
+   * @param searchMs 粗对齐搜索半径，单位 ms
+   * @param refineMs 精修搜索半径（围绕粗偏移），单位 ms
+   */
+  static estimateOffsetMs(
+    envPcm: Float32Array,
+    capPcm: Float32Array,
+    sampleRate: number,
+    searchMs: number = AudioAlign.DEFAULT_SEARCH_MS,
+    refineMs: number = AudioAlign.DEFAULT_REFINE_MS,
+    minConfidence: number = AudioAlign.MIN_CONFIDENCE
+  ): OffsetEstimate | undefined {
+    if (sampleRate <= 0 || searchMs <= 0 || refineMs <= 0) {
+      return undefined;
+    }
+    // 200ms 下限：再短连一个包络窗口都凑不满，互相关没有统计意义
+    const minSamples: number = Math.max(1, Math.trunc(sampleRate / 5));
+    if (envPcm.length < minSamples || capPcm.length < minSamples) {
+      return undefined;
+    }
+    if (AudioAlign.isSilent(envPcm) || AudioAlign.isSilent(capPcm)) {
+      return undefined;
+    }
+    const env: Float32Array = AudioAlign.envelope(envPcm, sampleRate);
+    const cap: Float32Array = AudioAlign.envelope(capPcm, sampleRate);
+    const coarseMs: number = AudioAlign.coarseAlign(env, cap, searchMs);
+    const fine: RefineResult = AudioAlign.refine(envPcm, capPcm, coarseMs, sampleRate, searchMs, refineMs);
+    if (fine.confidence < minConfidence) {
+      return undefined;
+    }
+    return new OffsetEstimate(fine.offsetMs, fine.confidence);
+  }
+
+  /** 全静音判据：峰值绝对值全不超过 1e-6（早退，见 estimateOffsetMs 红线 2） */
+  private static isSilent(pcm: Float32Array): boolean {
+    let peak: number = 0;
+    for (let i: number = 0; i < pcm.length; i++) {
+      const a: number = Math.abs(pcm[i]);
+      if (a > peak) {
+        peak = a;
+      }
+      if (peak > 1e-6) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 线性插值重采样 + 截断到 maxSeconds。
+   * 输出帧数 = 源帧数×dstRate/srcRate（整段重采样的目标帧数）再被 maxSeconds 封顶——
+   * 不能拿 src.length（源帧数）与 dstRate·maxSeconds（目标帧数）直接取 min（单位混用）。
+   */
+  static resample(src: Float32Array, srcRate: number, dstRate: number, maxSeconds: number): Float32Array {
+    const rate: number = srcRate <= 0 ? dstRate : srcRate;
+    const byLength: number = Math.trunc(src.length * dstRate / rate);
+    const bySeconds: number = dstRate * maxSeconds;
+    const limitFrames: number = Math.max(0, Math.min(byLength, bySeconds));
+    if (rate === dstRate) {
+      return src.slice(0, limitFrames);
+    }
+    const ratio: number = rate / dstRate;
+    const out: Float32Array = new Float32Array(limitFrames);
+    for (let i: number = 0; i < limitFrames; i++) {
+      const pos: number = i * ratio;
+      const idx: number = Math.floor(pos);
+      const frac: number = pos - idx;
+      const a: number = idx >= 0 && idx < src.length ? src[idx] : 0;
+      const b: number = idx + 1 >= 0 && idx + 1 < src.length ? src[idx + 1] : a;
+      out[i] = a + (b - a) * frac;
+    }
+    return out;
+  }
+
+  /** 10ms 窗 RMS，去均值后归一化到 0..1，得到 100 点/秒的包络 */
+  static envelope(pcm: Float32Array, sr: number = AudioAlign.TARGET_SR): Float32Array {
+    const win: number = Math.max(1, Math.trunc(sr * AudioAlign.ENV_WIN_MS / 1000));
+    const n: number = Math.trunc(pcm.length / win);
+    if (n <= 0) {
+      return new Float32Array(1);
+    }
+    const rms: Float32Array = new Float32Array(n);
+    for (let k: number = 0; k < n; k++) {
+      let sum: number = 0;
+      const base: number = k * win;
+      for (let j: number = 0; j < win; j++) {
+        const v: number = pcm[base + j];
+        sum += v * v;
+      }
+      rms[k] = Math.sqrt(sum / win);
+    }
+    let mean: number = 0;
+    for (let k: number = 0; k < n; k++) {
+      mean += rms[k];
+    }
+    mean /= n;
+    let maxV: number = 0;
+    for (let k: number = 0; k < n; k++) {
+      const d: number = rms[k] - mean;
+      rms[k] = d > 0 ? d : 0;
+      if (rms[k] > maxV) {
+        maxV = rms[k];
+      }
+    }
+    if (maxV > 0) {
+      for (let k: number = 0; k < n; k++) {
+        rms[k] = rms[k] / maxV;
+      }
+    }
+    return rms;
+  }
+
+  /**
+   * 粗偏移（ms）：在 ±searchMs 内求归一化互相关最大。
+   * 正偏移含义见文件头：left(t) ≈ right(t + offset)。
+   */
+  static coarseAlign(envL: Float32Array, envR: Float32Array,
+    searchMs: number = AudioAlign.DEFAULT_SEARCH_MS): number {
+    const stepMs: number = AudioAlign.ENV_WIN_MS;
+    const maxLag: number = Math.max(0, Math.trunc(searchMs / stepMs));
+    const pl: Float32Array = AudioAlign.prefixEnergy(envL);
+    const pr: Float32Array = AudioAlign.prefixEnergy(envR);
+    let bestLag: number = 0;
+    let bestScore: number = -Number.MAX_VALUE;
+    for (let lag: number = -maxLag; lag <= maxLag; lag++) {
+      const span: Span | undefined = AudioAlign.overlapRange(envL.length, envR.length, lag);
+      if (span === undefined) {
+        continue;
+      }
+      const r: number = AudioAlign.correlate(envL, envR, span.from, span.until, lag);
+      const eL: number = AudioAlign.rangeEnergy(pl, span.from, span.until);
+      const eR: number = AudioAlign.rangeEnergy(pr, span.from + lag, span.until + lag);
+      const denom: number = Math.sqrt(eL * eR);
+      const score: number = denom > 1e-6 ? r / denom : 0;
+      if (score > bestScore) {
+        bestScore = score;
+        bestLag = lag;
+      }
+    }
+    return bestLag * stepMs;
+  }
+
+  private static correlate(a: Float32Array, b: Float32Array, from: number, until: number, lag: number): number {
+    let sum: number = 0;
+    let i: number = from;
+    while (i < until) {
+      sum += a[i] * b[i + lag];
+      i++;
+    }
+    return sum;
+  }
+
+  /**
+   * 精修：1kHz 带内（带通由低通近似）做 FFT 互相关，在粗偏移 ±refineMs 内按 1ms 步进取峰。
+   * 置信度 = 主峰 / 次峰（次峰取主峰 ±PEAK_GUARD_MS 之外、搜索窗内的最大值）。
+   */
+  static refine(
+    pcmL: Float32Array,
+    pcmR: Float32Array,
+    coarseMs: number,
+    sampleRate: number = AudioAlign.TARGET_SR,
+    searchMs: number = AudioAlign.DEFAULT_SEARCH_MS,
+    refineMs: number = AudioAlign.DEFAULT_REFINE_MS
+  ): RefineResult {
+    const low: Float32Array = AudioAlign.lowPass1k(pcmL, sampleRate);
+    const high: Float32Array = AudioAlign.lowPass1k(pcmR, sampleRate);
+    const n: number = AudioAlign.nextPowerOfTwo(low.length + high.length);
+    const reL: Float32Array = new Float32Array(n);
+    const imL: Float32Array = new Float32Array(n);
+    const reR: Float32Array = new Float32Array(n);
+    const imR: Float32Array = new Float32Array(n);
+    for (let i: number = 0; i < low.length; i++) {
+      reL[i] = low[i];
+    }
+    for (let i: number = 0; i < high.length; i++) {
+      reR[i] = high[i];
+    }
+    AudioAlign.meanRemove(reL, low.length);
+    AudioAlign.meanRemove(reR, high.length);
+
+    AudioAlign.fft(reL, imL);
+    AudioAlign.fft(reR, imR);
+    // 互相关：conj(FFT(L)) * FFT(R)
+    for (let i: number = 0; i < n; i++) {
+      const ar: number = reL[i];
+      const ai: number = imL[i];
+      const br: number = reR[i];
+      const bi: number = imR[i];
+      // (ar - j·ai)(br + j·bi) = (ar·br + ai·bi) + j(ar·bi - ai·br)
+      reL[i] = ar * br + ai * bi;
+      imL[i] = ar * bi - ai * br;
+    }
+    AudioAlign.inverseFft(reL, imL);
+
+    const corr: Float32Array = new Float32Array(n);
+    for (let i: number = 0; i < n; i++) {
+      corr[i] = reL[i] / n;
+    }
+    const pl: Float32Array = AudioAlign.prefixEnergy(low);
+    const pr: Float32Array = AudioAlign.prefixEnergy(high);
+    const lo: number = Math.max(coarseMs - refineMs, -searchMs);
+    const hi: number = Math.min(coarseMs + refineMs, searchMs);
+    const maxLagSamples: number = Math.trunc(searchMs * sampleRate / 1000);
+
+    // 候选：1ms 步进的 lag（样本数 = lag * SR/1000）
+    const candLags: Array<number> = [];
+    const candScores: Array<number> = [];
+    let ms: number = lo;
+    while (ms <= hi) {
+      const lag: number = Math.trunc(ms * sampleRate / 1000);
+      if (Math.abs(lag) <= maxLagSamples) {
+        const s: number | undefined =
+          AudioAlign.score(corr, pl, pr, lag, low.length, high.length, n);
+        if (s !== undefined) {
+          candLags.push(lag);
+          candScores.push(s);
+        }
+      }
+      ms += 1;
+    }
+    if (candLags.length === 0) {
+      return new RefineResult(coarseMs, 0);
+    }
+
+    let bestIdx: number = 0;
+    for (let i: number = 1; i < candScores.length; i++) {
+      if (candScores[i] > candScores[bestIdx]) {
+        bestIdx = i;
+      }
+    }
+    const bestLag: number = candLags[bestIdx];
+    const bestScore: number = candScores[bestIdx];
+    // 次峰：搜索窗内排除主峰 ±PEAK_GUARD_MS
+    const guard: number = Math.trunc(AudioAlign.PEAK_GUARD_MS * sampleRate / 1000);
+    let second: number = -Number.MAX_VALUE;
+    let scan: number = -searchMs;
+    while (scan <= searchMs) {
+      const lag: number = Math.trunc(scan * sampleRate / 1000);
+      if (Math.abs(lag - bestLag) > guard && Math.abs(lag) <= maxLagSamples) {
+        const s: number | undefined =
+          AudioAlign.score(corr, pl, pr, lag, low.length, high.length, n);
+        if (s !== undefined && s > second) {
+          second = s;
+        }
+      }
+      scan += 4; // 4ms 粒度扫次峰，够精且省时间
+    }
+    let confidence: number = 0;
+    if (second <= 0.02 || second <= 0) {
+      confidence = 99;
+    } else {
+      confidence = Math.max(0, Math.min(99, bestScore / second));
+    }
+    return new RefineResult(Math.trunc(bestLag * 1000 / sampleRate), confidence);
+  }
+
+  /** 归一化互相关：直接取 FFT 相关在 lag 处的值，再按重叠窗能量归一 */
+  private static score(
+    corr: Float32Array,
+    pl: Float32Array,
+    pr: Float32Array,
+    lag: number,
+    lenL: number,
+    lenR: number,
+    n: number
+  ): number | undefined {
+    const span: Span | undefined = AudioAlign.overlapRange(lenL, lenR, lag);
+    if (span === undefined) {
+      return undefined;
+    }
+    if (span.until - span.from <= 1) {
+      return undefined;
+    }
+    const index: number = lag >= 0 ? lag : n + lag;
+    if (index < 0 || index >= n) {
+      return undefined;
+    }
+    const raw: number = corr[index];
+    const eL: number = AudioAlign.rangeEnergy(pl, span.from, span.until);
+    const eR: number = AudioAlign.rangeEnergy(pr, span.from + lag, span.until + lag);
+    const denom: number = Math.sqrt(eL * eR);
+    return denom > 1e-6 ? raw / denom : undefined;
+  }
+
+  private static overlapRange(lenL: number, lenR: number, lag: number): Span | undefined {
+    const from: number = Math.max(0, -lag);
+    const until: number = Math.min(lenL, lenR - lag);
+    if (until - from <= 1) {
+      return undefined;
+    }
+    return new Span(from, until);
+  }
+
+  private static prefixEnergy(x: Float32Array): Float32Array {
+    const p: Float32Array = new Float32Array(x.length + 1);
+    let sum: number = 0;
+    for (let i: number = 0; i < x.length; i++) {
+      sum += x[i] * x[i];
+      p[i + 1] = sum;
+    }
+    return p;
+  }
+
+  private static rangeEnergy(prefix: Float32Array, from: number, until: number): number {
+    const a: number = Math.max(0, Math.min(prefix.length - 1, from));
+    const b: number = Math.max(0, Math.min(prefix.length - 1, until));
+    return b <= a ? 0 : prefix[b] - prefix[a];
+  }
+
+  /** ~1kHz 低通（滑动平均，窗宽 = 采样率/1000；8kHz 下为 8 点，第一零点约 1kHz） */
+  private static lowPass1k(x: Float32Array, sampleRate: number): Float32Array {
+    const win: number = Math.max(1, Math.trunc(sampleRate / 1000));
+    const out: Float32Array = new Float32Array(x.length);
+    let acc: number = 0;
+    for (let i: number = 0; i < x.length; i++) {
+      acc += x[i];
+      if (i >= win) {
+        acc -= x[i - win];
+      }
+      out[i] = acc / Math.min(win, i + 1);
+    }
+    return out;
+  }
+
+  private static meanRemove(re: Float32Array, len: number): void {
+    if (len <= 0) {
+      return;
+    }
+    let sum: number = 0;
+    for (let i: number = 0; i < len; i++) {
+      sum += re[i];
+    }
+    const m: number = sum / len;
+    for (let i: number = 0; i < len; i++) {
+      re[i] -= m;
+    }
+  }
+
+  private static nextPowerOfTwo(v: number): number {
+    let n: number = 1;
+    while (n < v) {
+      n = n << 1;
+    }
+    return n;
+  }
+
+  /** 迭代 radix-2 FFT（in-place） */
+  static fft(re: Float32Array, im: Float32Array): void {
+    AudioAlign.transform(re, im, false);
+  }
+
+  static inverseFft(re: Float32Array, im: Float32Array): void {
+    AudioAlign.transform(re, im, true);
+  }
+
+  private static transform(re: Float32Array, im: Float32Array, inverse: boolean): void {
+    const n: number = re.length;
+    if (n <= 1) {
+      return;
+    }
+    // 位反转置换
+    let j: number = 0;
+    for (let i: number = 1; i < n; i++) {
+      let bit: number = n >> 1;
+      while ((j & bit) !== 0) {
+        j = j ^ bit;
+        bit = bit >> 1;
+      }
+      j = j | bit;
+      if (i < j) {
+        let t: number = re[i];
+        re[i] = re[j];
+        re[j] = t;
+        t = im[i];
+        im[i] = im[j];
+        im[j] = t;
+      }
+    }
+    let len: number = 2;
+    while (len <= n) {
+      const ang: number = (inverse ? 2 : -2) * Math.PI / len;
+      const wRe: number = Math.cos(ang);
+      const wIm: number = Math.sin(ang);
+      let start: number = 0;
+      while (start < n) {
+        let curRe: number = 1;
+        let curIm: number = 0;
+        const half: number = len / 2;
+        for (let k: number = 0; k < half; k++) {
+          const a: number = start + k;
+          const b: number = a + half;
+          const xRe: number = re[b] * curRe - im[b] * curIm;
+          const xIm: number = re[b] * curIm + im[b] * curRe;
+          re[b] = re[a] - xRe;
+          im[b] = im[a] - xIm;
+          re[a] += xRe;
+          im[a] += xIm;
+          const nextRe: number = curRe * wRe - curIm * wIm;
+          curIm = curRe * wIm + curIm * wRe;
+          curRe = nextRe;
+        }
+        start += len;
+      }
+      len = len << 1;
+    }
+  }
+}

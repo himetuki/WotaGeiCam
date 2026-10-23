@@ -7,8 +7,8 @@
  */
 import { ArcDropLog, ArcDropSegment, DropMark } from '../../entry/src/main/ets/record/ArcDropLog';
 import {
-  MIN_KEEP_MS, TrackChoice, audioOrdinalOf, clipNameOf, keyFrameIndexOf, keepSample,
-  normalize, remapDrops
+  MIN_KEEP_MS, TrackChoice, audioOrdinalOf, audioShiftUs, clipNameOf, keyFrameIndexOf,
+  keepSample, normalize, remapDrops
 } from '../../entry/src/main/ets/player/ClipRule';
 
 test('MIN_KEEP_MS 恰等通过 差一毫秒拒绝', (): void => {
@@ -96,4 +96,14 @@ test('TrackChoice 序数与 audioOrdinalOf 映射', (): void => {
   assertEq(-1, audioOrdinalOf(TrackChoice.NO_AUDIO), '不导音频');
   assertEq(0, audioOrdinalOf(TrackChoice.ENV), '第一条音轨');
   assertEq(1, audioOrdinalOf(TrackChoice.CAP), '第二条音轨');
+});
+
+test('内录轨按负偏移平移_环境轨恒零', (): void => {
+  // 对拍上游 ClipExportShiftTest（e950328）`内录轨按负偏移平移_环境轨恒零` 全表
+  assertEq(-120000, audioShiftUs(TrackChoice.CAP, 120), 'CAP +120ms → -120000µs（向前拉）');
+  assertEq(120000, audioShiftUs(TrackChoice.CAP, -120), 'CAP -120ms → +120000µs（延后）');
+  assertEq(0, audioShiftUs(TrackChoice.CAP, 0), 'CAP 零偏移不平移');
+  assertEq(0, audioShiftUs(TrackChoice.ENV, 120), 'ENV 恒不平移');
+  assertEq(0, audioShiftUs(TrackChoice.ENV, -999), 'ENV 负偏移也不平移');
+  assertEq(0, audioShiftUs(TrackChoice.NO_AUDIO, 120), '无音轨无可平移');
 });
