@@ -39,13 +39,9 @@ hs_err_pid*
 replay_pid*
 .cxx-abi/
 
-# ===== mapping 归档（docs/plan/15 步骤 5：与 *.apk 同等待遇，不进 git，靠 APK-LOG.md 清单追溯）=====
-deliverable/**/mapping/
-
-# ===== 本机工具链（体积大且可重装）=====
-tools/android-sdk/
-tools/**/platform-tools/
-tools/**/build-tools/
+# ===== mapping / 签名打包输出（防 AS「Generate Signed APK」输出目录的 output.json、散装 mapping.txt 泄露；与 *.apk 同等待遇，靠 APK-LOG.md 清单追溯）=====
+mapping.txt
+**/app/release/
 
 # ===== 系统与编辑器垃圾 =====
 .DS_Store
@@ -55,14 +51,10 @@ desktop.ini
 # ===== 公开仓库边界（github.com/himetuki/WotaGeiCam）=====
 # 签名材料只留本地，CI 从 Actions Secrets 还原（build.gradle.kts 缺失时回退 debug 签名的判据不变）
 keystore.properties
+keystore/
 # ===== 内部材料一律不进公开仓库（2026-10-03 用户指令，边界调整）=====
 /AGENTS.md
-/readme.md
 /需求.md
-/deliverable/
-/research/
-/docs/
-/tools/
 /.zcodeignore
 
 # ===== adb 调试取证产物 =====
@@ -74,6 +66,4 @@ repro_screen*.png
 .zcode/
 agent-memory/
 node_modules/
-package.json
-package-lock.json
 *.bak

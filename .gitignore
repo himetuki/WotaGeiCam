@@ -17,8 +17,8 @@
 /camera-knowledge/
 /.zcode/
 .mimosa/
-package.json
-package-lock.json
+/package.json
+/package-lock.json
 
 # ===== 跨分区构建产物（各分区 .gitignore 另有细则）=====
 build/
@@ -43,15 +43,23 @@ captures/
 # ===== 签名材料（只留本机；CI 从 Actions Secrets 还原）=====
 *.jks
 *.keystore
+# 鸿蒙签名材料扩展名，根级覆盖双端任意深度
+*.p12
+*.cer
+*.p7b
+*.csr
+# 环境变量/密钥文件
+.env
+.env.*
 
-# ===== HarmonyOS 兜底（细则在 HarmonyOS/.gitignore 与 WotaGeiCamOHOS/.gitignore）=====
-/HarmonyOS/.hvigor/
-/HarmonyOS/oh_modules/
-/HarmonyOS/node_modules/
-/HarmonyOS/.cxx/
-/HarmonyOS/.pure-test-tmp/
-/HarmonyOS/.local-signing/
-/HarmonyOS/local.properties
+# ===== HarmonyOS 兜底（细则在 HarmonyOS/.gitignore 与 WotaGeiCamOHOS/.gitignore；真实产物在 WotaGeiCamOHOS/ 层级下，故用 ** 深度无关写法）=====
+/HarmonyOS/**/.hvigor/
+/HarmonyOS/**/oh_modules/
+/HarmonyOS/**/node_modules/
+/HarmonyOS/**/.cxx/
+/HarmonyOS/**/.pure-test-tmp/
+/HarmonyOS/**/.local-signing/
+/HarmonyOS/**/local.properties
 
 # ===== IDE / 编辑器 =====
 .idea/

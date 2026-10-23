@@ -5,17 +5,7 @@
 # 上游 Android 源码保留在本机磁盘（未跟踪）供移植对拍，不再入库。
 # =====================================================================
 
-# ===== 上游 Android 侧（磁盘保留，git 不跟踪）=====
-/WotaGeiCamApp/
-/WotaGeiCam_Android_Icons/
-/README.md
-# .github 只放行鸿蒙 workflow；安卓 CI（build-apk.yml）只存在于 main。
-# 注意 git 的规则：父目录被排除时无法单独放行子文件，所以先排除内容、
-# 再放行 workflows 目录、再排除其中内容、最后放行 build-hap.yml。
-/.github/*
-!/.github/workflows/
-/.github/workflows/*
-!/.github/workflows/build-hap.yml
+# 本文件现役职责：会话状态与鸿蒙构建产物的兜底忽略；CI workflow 在仓库根 .github/workflows/。
 
 # ===== 本机会话 / 工具状态 =====
 .mimosa/
