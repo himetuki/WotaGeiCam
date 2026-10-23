@@ -11,7 +11,7 @@
 
 ```
 WotaGeiCamOHOS/
-├── AppScope/                 # 应用级配置与资源（app.json5：bundleName com.wotagei.cam）
+├── AppScope/                 # 应用级配置与资源（app.json5：bundleName com.wotagei.camohos）
 ├── entry/                    # 主模块（EntryAbility + pages/Index）
 ├── hvigor/                   # hvigor 构建配置（modelVersion 6.1.1）
 ├── hvigorw / hvigorw.bat     # 构建入口（见下方「构建」：委托 DevEco 自带 wrapper）
@@ -200,8 +200,10 @@ arc-repair-verdict（5，T28）、arc-repair-session（31，T29 25 + T30 4 + 审
 > 两次构建的 `/tmp/hap-manifest.txt` 应逐行一致。
 
 - 未签名包：clean 构建（WARN=2 基线：napi 未验证提示 + 未配置签名跳过）产物。
-- 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，bundleName
-  `com.wotagei.cam`）。HarmonyOS NEXT 采用新式签名：带 `<hap sign block>` 标记的签名块位于 ZIP
+- 本地签名包：`node scripts/local-sign.mjs` 产出（自签 ECC P-256 证书链 + debug profile，脚本硬编码
+  旧包名 `com.wotagei.cam`；应用 bundleName 已于 2026-10-23 改为 `com.wotagei.camohos` 以支持与安卓版
+  `com.wotagei.cam` 双端同装，故 `.local-signing/` 既有材料与 profile 绑定的旧包名已失效，属已知预期，
+  重新生成需 DevEco Studio 自动签名/AGC，超出脚本范围）。HarmonyOS NEXT 采用新式签名：带 `<hap sign block>` 标记的签名块位于 ZIP
   尾部中央目录之前，**不产生旧式 `META-INF/` 条目**——「签名块
   与 profile 可见」以脚本内置 `verify-app` 回验为准（实测还原 3 级证书链 + 3254 字节 profile）。
   `unzip -l` 可见 17 项 = 16 个业务文件 + sign-app 生成的 `.pages.info`（本快照 592 字节），无 `META-INF/`。
