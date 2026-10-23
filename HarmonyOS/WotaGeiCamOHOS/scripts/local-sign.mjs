@@ -2,7 +2,7 @@
 /**
  * HAP 本地签名探针（T23 方案 C）：用 DevEco 自带 hap-sign-tool.jar 走完整本地签名链——
  *   generate-keypair(ECC P-256 ×4) → generate-ca(root/sub) → generate-app-cert
- *   → generate-profile-cert → sign-profile(debug, bundleName com.wotagei.cam)
+ *   → generate-profile-cert → sign-profile(debug, bundleName com.wotagei.camohos)
  *   → sign-app → verify-app（自动回验：还原证书链与 profile）
  *
  * 密钥/证书落 .local-signing/（已进 .gitignore；材料**只在缺失时生成**，跨次运行保持稳定，
@@ -31,7 +31,10 @@ import { spawnSync } from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, '.local-signing');
-const BUNDLE = 'com.wotagei.cam';
+// 2026-10-23：bundleName 由 com.wotagei.cam 改为 com.wotagei.camohos（与安卓版区分、双端同装）。
+// profile 里嵌的就是这个包名——改名后必须删掉 .local-signing/ 的 wota-debug-profile.json
+// 与 wota-debug.p7b 让其按新包名重签；p12 与四张证书保持原样（证书指纹不变，覆盖安装不受影响）。
+const BUNDLE = 'com.wotagei.camohos';
 // 仅本地结构探针口令；可用 LOCAL_SIGN_PASS 覆盖。绝不用于生产/发布签名。
 const STORE_PASS = process.env.LOCAL_SIGN_PASS || 'wota-local-123456';
 

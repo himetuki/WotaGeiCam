@@ -130,8 +130,9 @@
 - **本地签名探针** `scripts/local-sign.mjs`：hap-sign-tool 全链 ECC P-256（keypair×4 → root/sub CA →
   app-cert/profile-cert → sign-profile(debug, bundleName `com.wotagei.cam`) → sign-app → verify-app
   自动回验）；材料落 `.local-signing/`（gitignore，仅缺失时生成，可重复重签）。
-  （2026-10-23 注：应用 bundleName 已改 `com.wotagei.camohos`（与安卓版 `com.wotagei.cam` 双端同装），
-  本探针硬编码旧包名，改名后其 profile/材料失效，待 DevEco/AGC 重新生成，属已知预期。）平台事实登记：
+  （2026-10-23 注：应用 bundleName 已改 `com.wotagei.camohos`（与安卓版 `com.wotagei.cam` 双端同装）；
+  本探针的 `BUNDLE` 已同步改名并重签 profile——删 `wota-debug-profile.json`/`wota-debug.p7b` 后复跑，
+  `verify-app` 通过（3 级链 + 3259B profile），p12 与证书沿用原指纹。）平台事实登记：
   HarmonyOS NEXT 新式签名块位于 ZIP 中央目录前（`<hap sign block>` 标记，本快照 60374B），不产生
   `META-INF/` 条目；`unzip -l` 为 16 业务文件 + `.pages.info`（签名工具生成）；签名块+profile 的
   可还原性以 `verify-app` 取证（实测 3 级证书链 + 3254B profile）。审查修复后：证书链/profile
