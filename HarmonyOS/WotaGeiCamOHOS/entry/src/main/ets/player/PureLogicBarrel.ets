@@ -50,6 +50,16 @@ import {
   PARAMS_KEYS, ParamsMigrate, PrefEnum, enumFrom, enumName, formatSize, parseSize
 } from '../ui/ParamsPersist';
 import { FlushScheduler, ParamsFlushThrottle } from '../ui/ParamsFlushThrottle';
+import { hudPerRowFor, hudRoomDp, hudStripHeightDp } from '../core/HudMetrics';
+import {
+  GridBox, GridCell, HudAreaDp, HudEntry, HudLayoutTable, HudPointDp, HudPointPx, HudRectDp, HudZone,
+  IntRange, ZonePlacement, clampStoredCell, clampZonePos, dropZoneOf, editorVisibleEntries, gridColsCapOf,
+  zoneBandYRange
+} from '../core/HudLayout';
+import {
+  HudPageCell, pageCellAtPointer, pageCellOffsetPx, pageCellPx, pageCellsBlocked, pageGridBoxOf,
+  pageGridColCap, pageGridRowCap
+} from '../core/HudPageGrid';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
 class NoopFlushScheduler implements FlushScheduler {
@@ -85,6 +95,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.cameraPerfCompileProbe();
     PureLogicBarrel.paramsPersistCompileProbe();
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
+    PureLogicBarrel.hudLayoutCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -190,5 +201,37 @@ export class PureLogicBarrel {
       });
     throttle.request();
     throttle.cancel();
+  }
+
+  /**
+   * HUD 可编排布局地基（J1）的编译探针：度量层换行档/高度预测、位置表编解码往返、
+   * 安全区钳制与落区、整页页格数学。零副作用（默认表 encode→decode 产物丢弃），
+   * 不改变 signature 输出；本批没有 UI 消费方（J2 网格几何、J3 编辑器 UI）。
+   */
+  private static hudLayoutCompileProbe(): void {
+    const room: number = hudRoomDp(360, 8);
+    const perRow: number = hudPerRowFor(3, 1, room);
+    const strip: number = hudStripHeightDp(3, perRow, 1);
+    const table: HudLayoutTable = HudLayoutTable.decode(HudLayoutTable.default().encode());
+    const area: HudAreaDp = new HudAreaDp(766, 360, 44, 72);
+    const placed: ZonePlacement = clampZonePos(HudZone.RIGHT, 9999, 9999, 94, 202, area, 0);
+    const band: IntRange = zoneBandYRange(HudZone.RIGHT, area, 0);
+    const stored: GridCell = clampStoredCell(HudZone.LEFT, new GridCell(9, 99));
+    const visible: Set<string> = editorVisibleEntries(true);
+    const cellPx: number = pageCellPx(1, 2);
+    const box: GridBox = pageGridBoxOf(1532, 720, cellPx);
+    const page: HudPageCell = pageCellAtPointer(100, 100, 0, 0, cellPx);
+    const offset: HudPointPx = pageCellOffsetPx(page, cellPx);
+    const blocked: Set<string> = pageCellsBlocked(new Map<string, Array<HudEntry>>(), null,
+      new Set<string>(), (entry: HudEntry): number => entry.ordinal, cellPx);
+    const card: HudRectDp | undefined = undefined;
+    const landed: HudZone = dropZoneOf(new HudPointDp(0, 0), HudZone.RIGHT, card, band, HudZone.READOUT);
+    const caps: number = pageGridColCap() + pageGridRowCap() + gridColsCapOf(HudZone.READOUT);
+    if (room > 0 && perRow > 0 && strip > 0 && table.orderOf(HudZone.TOP).length > 0 &&
+      placed.xDp >= 0 && band.first <= band.last && stored.col >= 0 && visible.size > 0 &&
+      cellPx > 0 && box.cols > 0 && offset.x >= 0 && blocked.size >= 0 && landed !== undefined &&
+      caps > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
   }
 }
