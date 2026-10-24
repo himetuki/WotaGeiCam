@@ -13,10 +13,12 @@
  *   （[HudZone.LEFT] / [HudZone.RIGHT] / [HudZone.READOUT]），空格子就空着。
  *
  * ## 默认值走「推导」而不是手抄坐标
- * [GridCell.DEFAULT] 是哨兵，语义＝"这颗从没被摆过 ⇒ 回落到推导格"。本批只保留哨兵与序列化语义，
- * 推导函数 `defaultCellsOf` 与 `resolveCells` 在 J2；所以 `gridItems` / `placeEntryAt` /
- * `moveEntryTo` / `pinned` / `occupiedCells` / `residentsOf` 本批**没有移植**——
- * 没有推导与落点裁决就搬它们，只会得到一半语义的假 API。
+ * [GridCell.DEFAULT] 是哨兵，语义＝"这颗从没被摆过 ⇒ 回落到推导格"（[defaultCellsOf] /
+ * [resolveCells]，J2 已落）。J2 起 `gridItems` / `placeEntryAt` / `moveEntryTo` / `pinned` /
+ * `occupiedCells` / `residentsOf` 也已在本文件（推导与落点裁决齐备后的完整语义）；
+ * J3b 的顺序编辑器走更轻的 [HudLayoutTable.withZoneOrder]（同容器、无格子钉扎）。
+ * 仍未移植：上游「编辑控件」页的自由拖拽 UI 本体（`HudLayoutEditor`，本侧登记为设计性偏离，
+ * 见 PORT_MAP J3b 节）。
  *
  * ## 持久化契约（`hud_layout`）
  * [HudLayoutTable.encode] / [HudLayoutTable.decode] 的输出串**必须与上游逐字节一致**：
@@ -388,6 +390,27 @@ export class HudLayoutTable {
       : cur;
     next.set(key, new ZoneState(new ZonePlacement(xDp, yDp), state.order, state.cells));
     return new HudLayoutTable(this.version, next);
+  }
+
+  /**
+   * 只改一枚容器内的条目顺序（位置与格子一律不动）。J3b 读数顺序编辑器的写入口：
+   * 编辑器只在 READOUT 容器内做「上移/下移」，没有跨容器搬运、也没有格子钉扎需求，
+   * 所以不走 [moveEntryTo] 的完整四步（那套要 HudGridPlan 与落点裁决），直接重建
+   * ZoneState 后过一遍 [normalize]（非法/重复条目收口，格子照旧保留）。
+   * [order] 应是**同一容器条目的一个排列**（缺的会被 `normalize` 补回、多的会被丢弃）。
+   */
+  withZoneOrder(zone: HudZone, order: Array<HudEntry>): HudLayoutTable {
+    const next: Map<string, ZoneState> = new Map<string, ZoneState>();
+    this.zones.forEach((state: ZoneState, key: string): void => {
+      next.set(key, state);
+    });
+    const key: string = hudZoneKey(zone);
+    const cur: ZoneState | undefined = this.zones.get(key);
+    const state: ZoneState = cur === undefined
+      ? new ZoneState(ZonePlacement.DEFAULT, [], new Map<string, GridCell>())
+      : cur;
+    next.set(key, new ZoneState(state.pos, order.slice(), state.cells));
+    return new HudLayoutTable(this.version, next).normalize();
   }
 
   /** 该容器里**被用户摆过**的格子（键 = 条目 id；缺席或哨兵＝用推导格）；返回副本 */

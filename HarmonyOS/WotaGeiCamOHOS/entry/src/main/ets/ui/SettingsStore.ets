@@ -34,6 +34,8 @@ const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
 const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
 /** 取景读数条位掩码（上游 WotaSettings.KEY_HUD_ITEMS，逐字一致；不在 24 键白名单——纯 UI 设置，设置页直读直写） */
 const KEY_HUD_ITEMS: string = 'hud_items';
+/** HUD 位置表（上游 WotaSettings.KEY_HUD_LAYOUT，逐字一致；值为 HudLayoutTable.encode 的串） */
+const KEY_HUD_LAYOUT: string = 'hud_layout';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -61,6 +63,12 @@ export class CameraSettings {
   refLines: number = 0;
   /** 取景读数条位掩码（上游 hud_items；默认上屏四档，0 = 读数条整条不渲染） */
   hudItems: number = HudItems.DEFAULT_MASK;
+  /**
+   * HUD 位置表原文（上游 hud_layout，`HudLayoutTable.encode` 的 v2 串；空串 = 默认表）。
+   * 本侧 J3b 只消费 READOUT 容器的条目顺序；容器位置/格子留给后续（编辑器本体见
+   * pages/HudEditor.ets，编解码单一真源在 core/HudLayout.ets）。
+   */
+  hudLayout: string = '';
 }
 
 function asInt(value: number, fallback: number): number {
@@ -126,6 +134,9 @@ export class SettingsStore {
       // 坏值（非有限数/负数）收口在 HudItems.maskOrDefault；类型不符（手改 prefs）按缺失回默认
       const hudRaw: preferences.ValueType = await store.get(KEY_HUD_ITEMS, s.hudItems);
       s.hudItems = typeof hudRaw === 'number' ? HudItems.maskOrDefault(hudRaw as number) : s.hudItems;
+      // 坏串（类型不符）当缺失 → 默认表；串本身的收口在 HudLayoutTable.decode（坏段丢弃/整表回默认）
+      const layoutRaw: preferences.ValueType = await store.get(KEY_HUD_LAYOUT, s.hudLayout);
+      s.hudLayout = typeof layoutRaw === 'string' ? layoutRaw as string : '';
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -169,6 +180,7 @@ export class SettingsStore {
       await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
       await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
       await store.put(KEY_HUD_ITEMS, s.hudItems);
+      await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.flush();
       return true;
     } catch (e) {

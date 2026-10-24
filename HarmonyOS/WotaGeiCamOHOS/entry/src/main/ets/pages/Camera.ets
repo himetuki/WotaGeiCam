@@ -77,7 +77,7 @@ import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
 import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
-import { HudEntry, HudZone, hudRowGroups } from '../core/HudLayout';
+import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -226,6 +226,9 @@ struct CameraPage {
   private ability: CameraAbility | undefined = undefined;
   /** 读数条换行档的字体档输入（hudPerRowFor 的 fontScale；<1 档在该函数内部夹回 1） */
   private hudFontScale: number = 1;
+  /** hud_layout 位置表缓存（键 = 原文串；见 readoutTable()） */
+  private hudTableCache: HudLayoutTable | undefined = undefined;
+  private hudTableRaw: string = '';
   /** 当前打开的高级参数弹层（'' = 无）：快门/ISO/EV/WB */
   @State activePill: string = '';
   /** 弹层锚点（窗口 px；零矩形 = 未量到，PillPopup 内部走底贴屏回退） */
@@ -1157,11 +1160,29 @@ struct CameraPage {
    * J3b 把读数条挪进 READOUT zone 后换 planReadoutRow。
    */
   private hudReadoutRowGroups(): Array<Array<HudEntry>> {
-    const items: Array<HudItem> = HudItems.typesOf(this.hudItemsMask);
-    const perRow: number = hudPerRowFor(items.length, this.hudFontScale,
+    // J3b：条目顺序来自 hud_layout 位置表（编辑页上下移落的就是它）；hud_items 只管显隐。
+    // 默认表（空串/坏串）的 READOUT 顺序 = HudItem 枚举声明序 ⇒ 与 J3a 行为逐字等价。
+    const visible: Set<string> = new Set<string>();
+    for (const item of HudItems.typesOf(this.hudItemsMask)) {
+      visible.add(HudEntry.ofItem(item).id);
+    }
+    const order: Array<HudEntry> = this.readoutTable().visibleOrderOf(HudZone.READOUT, visible);
+    const perRow: number = hudPerRowFor(order.length, this.hudFontScale,
       hudRoomDp(this.hudStripWidthVp, HudSpec.HUD_EDGE_PAD));
-    const order: Array<HudEntry> = items.map((item: HudItem): HudEntry => HudEntry.ofItem(item));
     return hudRowGroups(HudZone.READOUT, order, perRow);
+  }
+
+  /**
+   * hud_layout 位置表（按原文串缓存：decode 每帧跑一遍纯浪费，原文没变就没有重解的必要；
+   * onPageShow 重读设置后原文变化即自动失效）。坏串/空串 → 默认表（decode 内收口）。
+   */
+  private readoutTable(): HudLayoutTable {
+    const raw: string = this.settings.hudLayout;
+    if (this.hudTableCache === undefined || this.hudTableRaw !== raw) {
+      this.hudTableCache = HudLayoutTable.decode(raw);
+      this.hudTableRaw = raw;
+    }
+    return this.hudTableCache;
   }
 
   /** 读数条条目值：快门/ISO/EV/WB/帧率复用既有读数函数；码率/变焦本批新增（变焦与 zoomLabel 同源） */

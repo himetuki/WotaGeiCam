@@ -6,6 +6,7 @@
     "pages/GlPreview",
     "pages/Gallery",
     "pages/Player",
-    "pages/Compare"
+    "pages/Compare",
+    "pages/HudEditor"
   ]
 }

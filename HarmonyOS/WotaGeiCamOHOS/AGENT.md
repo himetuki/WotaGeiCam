@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 577 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 583 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -107,7 +107,9 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   固定布局常量（顶栏固定两行 = 镜头/画幅/电量/空间 + 时长、Dock 2×4；**HudItem 集的读数
   快门/ISO/EV/WB/帧率/码率/变焦只出现在 hud_items 读数条**，键 `hud_items`、位运算只经
   `HudItems.isOn/toggle/maskOrDefault`——换行档/分组消费 J1/J2 的 `hudPerRowFor`/`hudRoomDp`/
-  `hudRowGroups(READOUT)`，可用宽必须与换行档同一份实测宽）。**HUD 代码禁止 fontSize(10)**；底栏不设固定高。
+  `hudRowGroups(READOUT)`，可用宽必须与换行档同一份实测宽；**顺序来自 `hud_layout` 位置表**
+  （`readoutTable().visibleOrderOf`，编辑页 `pages/HudEditor` 经 `withZoneOrder`→`encode` 落盘；
+  默认表 = 枚举声明序）。**HUD 代码禁止 fontSize(10)**；底栏不设固定高。
 - `ui/WindowChrome.ets`：沉浸式取景 + 系统栏配色 + AvoidArea 安全区；普通页恢复黑底系统栏。
   **所有外观切换经模块级 Promise 链串行**（EntryAbility.loadContent 前先 prime，禁止在页面里裸调
   window 外观接口）。

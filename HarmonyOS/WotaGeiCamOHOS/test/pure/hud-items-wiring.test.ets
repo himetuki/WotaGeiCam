@@ -152,7 +152,8 @@ test('接线_相机页typesOf驱动读数条并消费J1J2行规划', () => {
   const cam: string = sourceText('entry/src/main/ets/pages/Camera.ets');
   assertTrue(cam.indexOf('HudItems.typesOf(this.hudItemsMask)') >= 0,
     '读数条条目必须由 HudItems.typesOf(掩码) 驱动（枚举声明序）');
-  assertTrue(cam.indexOf('hudPerRowFor(items.length, this.hudFontScale,') >= 0,
+  // J3b 起条目顺序来自 hud_layout 表（visibleOrderOf），可见条目数即 order.length
+  assertTrue(cam.indexOf('hudPerRowFor(order.length, this.hudFontScale,') >= 0,
     '换行档必须走 J1 的 hudPerRowFor');
   assertTrue(cam.indexOf('hudRoomDp(this.hudStripWidthVp, HudSpec.HUD_EDGE_PAD)') >= 0,
     '可用宽必须经 hudRoomDp 同一表达式喂入（endPad 用 HudSpec.HUD_EDGE_PAD 同源）');

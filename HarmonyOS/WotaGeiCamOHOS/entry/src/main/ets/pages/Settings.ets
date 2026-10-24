@@ -485,6 +485,17 @@ struct Settings {
         .fontSize(HudType.LABEL)
         .fontColor(HudColor.TEXT_TERTIARY)
         .width('100%')
+      Button('调整顺序 →')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .height(HudTouch.BUTTON_HEIGHT)
+        .borderRadius(HudShape.PILL_RADIUS)
+        .backgroundColor(HudColor.PILL_BG)
+        .padding({ left: 16, right: 16 })
+        .margin({ bottom: HudSpace.S })
+        .onClick((): void => {
+          this.getUIContext().getRouter().pushUrl({ url: 'pages/HudEditor' });
+        })
       Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
         ForEach(HudItems.ALL, (item: HudItem): void => {
           Button(HudItems.label(item))
