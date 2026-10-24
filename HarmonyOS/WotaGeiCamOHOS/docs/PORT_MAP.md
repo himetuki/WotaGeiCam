@@ -118,6 +118,28 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（DIAG：设置页诊断区块 UI 入口，2026-10-24）
+
+上游 `SettingsScreen.BlockDiag`（总开关默认关 + 详细档层级置灰闸 + 清除 + 一键导出）。
+§diag 行留白的「详细档 UI 入口（随设置页批）」收口——ST 批只落了持久化
+（`diagEnabled/diagVerbose` + `persistDiagFlags`），UI 一直缺位。
+
+- **`pages/Settings.ets`**：新增「诊断日志」区块（独立 ListItem）：① 记录日志 Toggle
+  （默认关；运行期 `Diag.setEnabled` 立即生效，上游不重启应用同口径；关闸级联关
+  详细档）；② 详细日志 Toggle（`enabled` 随总开关置灰——上游「没开着记录，记多细
+  无从谈起」层级闸）；③ 清除日志/导出日志双钮（busy 互斥 + 状态行；消费 Diag
+  既有 `clear()/export()` API，不新造文件面）。
+- **落盘**：走 `SettingsStore.persistDiagFlags`（putSync+flushSync 专用同步口，
+  与通用 persist() 的异步批写分离）；下次进页 `load()` 回读（ST 批已接）。
+- **留白维持（UI 注记）**：导出落**应用沙箱目录**（`ExportResult.inPublicDir=false`
+  既有口径）；公共 Documents + 分享面板（上游 exportForShare）维持留白并在 UI
+  注记——公共目录写与系统分享面板为独立平台面，随分享批。
+- **运行时走查待办**：开关生效链（改设置→日志文件增减）需装机/模拟器走查。
+- **守卫**：`diag-settings.test.ets` +2（开关运行期生效与级联/置灰闸/专用落盘口/
+  双动作互斥与留白 UI 注记）。共 +2（684 → 686）。
+- **回归**：pure-test 64 files / 686 tests 全绿；`assembleHap`（release）
+  BUILD SUCCESSFUL。
+
 ## 交付批（ABP2：对比页左引擎 A/B 段与持久化，2026-10-24）
 
 上游 `CompareScreen` 底栏 AbRow（onA/onB/onLoop 落 `leftEngine`；pre-roll（T<0）

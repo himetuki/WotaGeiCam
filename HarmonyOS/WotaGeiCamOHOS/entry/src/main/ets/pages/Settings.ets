@@ -28,6 +28,7 @@ import { UserSettings } from '../core/UserSettings';
 import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
 import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
+import { Diag, ExportResult } from '../diag/Diag';
 
 /**
  * 滑杆吸附分组只列**有消费方**的 3 键（快门/感光度/色温，对齐上游 BlockSlider 的子集）；
@@ -80,6 +81,9 @@ struct Settings {
   @State loading: boolean = true;
   /** 开发者入口：默认隐藏，版本号 7 连点显形（T31 P1 收口） */
   @State devUnlocked: boolean = false;
+  /** DIAG：诊断区块动作忙态（clear/export 互斥）与结果行 */
+  @State diagBusy: string = '';
+  @State diagStatus: string = '';
   private saving: boolean = false;
   private pendingSave: boolean = false;
   private devTapCount: number = 0;
@@ -341,6 +345,65 @@ struct Settings {
     }
     this.saving = false;
     this.message = '已保存';
+  }
+
+  // ------------------------------------------------------------------ DIAG：诊断区块（HM7-UI-02）
+
+  /** 总开关：运行期立即生效（日志器不重启应用，上游 Diag.setEnabled 同口径）；关闸级联关详细档 */
+  private setDiagEnabled(on: boolean): void {
+    this.settings.diagEnabled = on;
+    if (!on && this.settings.diagVerbose) {
+      this.settings.diagVerbose = false;
+      Diag.setVerbose(false);
+    }
+    Diag.setEnabled(on);
+    this.persistDiag();
+  }
+
+  private setDiagVerbose(on: boolean): void {
+    this.settings.diagVerbose = on;
+    Diag.setVerbose(on);
+    this.persistDiag();
+  }
+
+  /** 专用同步落盘（persistDiagFlags：putSync+flushSync；通用 persist() 的异步批写不走这里） */
+  private persistDiag(): void {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    SettingsStore.persistDiagFlags(ctx, this.settings.diagEnabled, this.settings.diagVerbose);
+  }
+
+  private async clearDiag(): Promise<void> {
+    if (this.diagBusy !== '') {
+      return;
+    }
+    this.diagBusy = 'clear';
+    try {
+      await Diag.clear();
+      this.diagStatus = '日志已清除（当前件/轮转件/崩溃件）';
+    } catch (e) {
+      this.diagStatus = `清除失败：${e}`;
+    } finally {
+      this.diagBusy = '';
+    }
+  }
+
+  private async exportDiag(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined || this.diagBusy !== '') {
+      return;
+    }
+    this.diagBusy = 'export';
+    try {
+      const r: ExportResult | null = await Diag.export(ctx);
+      this.diagStatus = r === null ? '导出失败' : `已导出：${r.path}（${r.bytes}B）`;
+    } catch (e) {
+      this.diagStatus = `导出失败：${e}`;
+    } finally {
+      this.diagBusy = '';
+    }
   }
 
   /** 版本号连点解锁开发者入口（2s 内 7 次） */
@@ -1056,6 +1119,81 @@ struct Settings {
                 .fontSize(HudType.LABEL)
                 .fontColor(HudColor.TEXT_TERTIARY)
                 .padding({ left: HudSpace.L, right: HudSpace.L })
+            }
+            ListItem() {
+              Column({ space: HudSpace.XS }) {
+                Text('诊断日志')
+                  .fontSize(HudType.VALUE)
+                  .fontColor(HudColor.TEXT_SECONDARY)
+                  .width('100%')
+                Row({ space: HudSpace.S }) {
+                  Text('记录日志')
+                    .fontSize(HudType.VALUE)
+                    .fontColor(HudColor.TEXT_PRIMARY)
+                    .layoutWeight(1)
+                  Toggle({ type: ToggleType.Switch, isOn: this.settings.diagEnabled })
+                    .selectedColor(HudColor.ACCENT)
+                    .accessibilityText('记录日志')
+                    .onChange((on: boolean): void => {
+                      this.setDiagEnabled(on);
+                    })
+                }
+                .width('100%')
+                .height(HudTouch.BUTTON_HEIGHT)
+                Text('默认关：关闭期间不写常规日志（崩溃件不受影响）；开启后运行期立即生效')
+                  .fontSize(HudType.LABEL)
+                  .fontColor(HudColor.TEXT_TERTIARY)
+                  .width('100%')
+                Row({ space: HudSpace.S }) {
+                  Text('详细日志')
+                    .fontSize(HudType.VALUE)
+                    .fontColor(this.settings.diagEnabled ? HudColor.TEXT_PRIMARY : HudColor.TEXT_TERTIARY)
+                    .layoutWeight(1)
+                  Toggle({ type: ToggleType.Switch, isOn: this.settings.diagVerbose })
+                    .selectedColor(HudColor.ACCENT)
+                    .enabled(this.settings.diagEnabled)
+                    .accessibilityText('详细日志')
+                    .onChange((on: boolean): void => {
+                      this.setDiagVerbose(on);
+                    })
+                }
+                .width('100%')
+                .height(HudTouch.BUTTON_HEIGHT)
+                Text('总开关关闭时置灰：没开着记录，记多细无从谈起（上游同层级闸）')
+                  .fontSize(HudType.LABEL)
+                  .fontColor(HudColor.TEXT_TERTIARY)
+                  .width('100%')
+                Row({ space: HudSpace.S }) {
+                  Button(this.diagBusy === 'clear' ? '清除中…' : '清除日志')
+                    .fontSize(HudType.LABEL)
+                    .height(HudTouch.BUTTON_HEIGHT)
+                    .enabled(this.diagBusy === '')
+                    .accessibilityText('删除全部日志文件并清空内存缓冲')
+                    .onClick((): void => {
+                      this.clearDiag();
+                    })
+                  Button(this.diagBusy === 'export' ? '导出中…' : '导出日志')
+                    .fontSize(HudType.LABEL)
+                    .height(HudTouch.BUTTON_HEIGHT)
+                    .enabled(this.diagBusy === '')
+                    .accessibilityText('合并全部日志导出到应用目录')
+                    .onClick((): void => {
+                      this.exportDiag();
+                    })
+                }
+                .width('100%')
+                if (this.diagStatus !== '') {
+                  Text(this.diagStatus)
+                    .fontSize(HudType.LABEL)
+                    .fontColor(HudColor.TEXT_SECONDARY)
+                    .width('100%')
+                }
+                Text('导出落应用目录（沙箱）；公共 Documents 与分享面板为登记留白')
+                  .fontSize(HudType.LABEL)
+                  .fontColor(HudColor.TEXT_TERTIARY)
+                  .width('100%')
+              }
+              .padding({ left: HudSpace.L, right: HudSpace.L })
             }
             ListItem() {
               Column({ space: HudSpace.XS }) {
