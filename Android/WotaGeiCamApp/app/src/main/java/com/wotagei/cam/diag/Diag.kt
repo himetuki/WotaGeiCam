@@ -161,16 +161,24 @@ object Diag {
         this.verbose = verbose
         if (!installed.compareAndSet(false, true)) return
         appRef = app
-        runCatching {
-            logDir = File(app.getExternalFilesDir(null), LOG_DIR_NAME).apply { mkdirs() }
-            current = File(logDir, BASE_NAME)
-            startWriter()
-            installCrashHandler(app)
-            val prev = app.getSharedPreferences("wota_diag", Context.MODE_PRIVATE)
-                .getString("last_session", null)
-            i("WotaDiag", "日志启动：上一会话结束于 ${prev ?: "（无记录）"}")
-        }
-        i("WotaDiag", "设备与版本：${deviceSummary(app)}")
+        // 崩溃处理器仍同步装（纯内存注册）：取证窗口不后移。logDir 未就绪的窗口期由
+        // handler 内部的 filesDir 兜底（见 installCrashHandler），崩溃件不丢。
+        installCrashHandler(app)
+        // 磁盘初始化挪到后台线程（StrictMode P2，2026-10-24）：getExternalFilesDir 的目录
+        // 存在性检查 + mkdirs + "wota_diag" prefs 读原先全在主线程冷启路径（DiskReadViolation ×5）。
+        // 时序安全性：writer 未起时 record() 只进内存队列（drainToFile 对 logDir==null 幂等），
+        // 目录建好后写盘线程一拍补落；@Volatile 字段本就按跨线程口径声明（见类注 S2-M8-01）。
+        Thread({
+            runCatching {
+                logDir = File(app.getExternalFilesDir(null), LOG_DIR_NAME).apply { mkdirs() }
+                current = File(logDir, BASE_NAME)
+                startWriter()
+                val prev = app.getSharedPreferences("wota_diag", Context.MODE_PRIVATE)
+                    .getString("last_session", null)
+                i("WotaDiag", "日志启动：上一会话结束于 ${prev ?: "（无记录）"}")
+            }
+            i("WotaDiag", "设备与版本：${deviceSummary(app)}")
+        }, "wota-diag-init").apply { isDaemon = true; start() }
     }
 
     /** 用户切详细档（设置页调用；只影响之后的记录） */
@@ -291,19 +299,20 @@ object Diag {
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, tr ->
             runCatching {
-                val dir = logDir
-                if (dir != null) {
-                    val text = buildString {
-                        append(diagHeader(deviceSummary(app), app.packageName))
-                        append("\n=== 崩溃 ===\n线程：${thread.name}\n")
-                        append(Diag.getStackTraceString(tr))
-                        append("\n=== 崩溃前日志（末 ${DIAG_CRASH_TAIL_LINES} 行）===\n")
-                        synchronized(lock) { ring.toList().takeLast(DIAG_CRASH_TAIL_LINES) }
-                            .forEach { append(it) }
-                    }
-                    File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)
-                    drainToFile()
+                // logDir 未就绪的窗口期（后台 init 线程还在跑，见 install）不许丢崩溃件：
+                // 兜底写内部 files 目录（构造路径无磁盘存在性检查，崩溃线程上也没有 StrictMode 顾虑），
+                // 代价是窗口期崩溃件落在私有目录而不在导出目录——比整个不落盘好。
+                val dir = logDir ?: File(app.filesDir, LOG_DIR_NAME).apply { runCatching { mkdirs() } }
+                val text = buildString {
+                    append(diagHeader(deviceSummary(app), app.packageName))
+                    append("\n=== 崩溃 ===\n线程：${thread.name}\n")
+                    append(Diag.getStackTraceString(tr))
+                    append("\n=== 崩溃前日志（末 ${DIAG_CRASH_TAIL_LINES} 行）===\n")
+                    synchronized(lock) { ring.toList().takeLast(DIAG_CRASH_TAIL_LINES) }
+                        .forEach { append(it) }
                 }
+                File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)
+                drainToFile()
             }
             if (prev != null) prev.uncaughtException(thread, tr)
         }

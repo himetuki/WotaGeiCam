@@ -511,8 +511,11 @@ fun CameraScreen(
             }
         }
     }
-    LaunchedEffect(recStatus) { freeMb = runner.probeFreeSpace() }
-    LaunchedEffect(Unit) { freeMb = runner.probeFreeSpace() }
+    // 余量探测含 StatFs 磁盘访问（StrictMode P2，2026-10-24）：LaunchedEffect 跑在主线程
+    // 组合作用域上，裸调 probeFreeSpace 会在每次录制态切换时给主线程插一刀 20~80ms 的磁盘读。
+    // 探测本体重（runner 的其余路径本就在后台线程），这里只把调度切到 IO。
+    LaunchedEffect(recStatus) { freeMb = withContext(Dispatchers.IO) { runner.probeFreeSpace() } }
+    LaunchedEffect(Unit) { freeMb = withContext(Dispatchers.IO) { runner.probeFreeSpace() } }
 
     // ---- 常亮 + 高亮（产品裁决：进录制页 = 屏幕常亮 + 窗口亮度拉满，离开页面恢复进页前原状）。
     // 已于 2026-10-07 搬到「拥有窗口的那一层」：MainActivity.onRouteForWindowKeepOn → ui/WindowKeepOn.kt。
