@@ -139,3 +139,42 @@ export class GalleryTabs {
     return new GallerySelection(i, tabFilter);
   }
 }
+
+/**
+ * 自定义标签页的派生与合法化（上游 MediaRepo.customTags + MediaActions.addTag 的纯逻辑面）。
+ *
+ * 派生：media_tag 行 → 过滤系统保留 tag → 按 createdAt 升序 → 去重。页签顺序 = 首次使用时间。
+ * 合法化：TagSpace.normalize（去空白、≤24 字、不含保留词）；非法返回 undefined（调用方提示，
+ * 不静默截断）。
+ */
+export class CustomTagRow {
+  tag: string;
+  createdAt: number;
+
+  constructor(tag: string, createdAt: number) {
+    this.tag = tag;
+    this.createdAt = createdAt;
+  }
+}
+
+export class CustomTags {
+  /**
+   * media_tag 行 → 去重后的自定义 tag 列表（按首次使用时间升序；页签顺序据此稳定）。
+   * 系统保留 tag（like/trash）与大小写变体一律过滤（与 normalize 的保留词判定同口径）。
+   */
+  static ofRows(rows: Array<CustomTagRow>): Array<string> {
+    const seen: Set<string> = new Set<string>();
+    const out: Array<string> = [];
+    const sorted: Array<CustomTagRow> = rows.slice();
+    sorted.sort((a: CustomTagRow, b: CustomTagRow): number => a.createdAt - b.createdAt);
+    for (const row of sorted) {
+      const t: string = row.tag.trim();
+      if (t === '' || TagSpace.isSystem(t) || seen.has(t)) {
+        continue;
+      }
+      seen.add(t);
+      out.push(t);
+    }
+    return out;
+  }
+}

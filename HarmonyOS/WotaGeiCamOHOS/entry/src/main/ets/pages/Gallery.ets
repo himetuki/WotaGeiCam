@@ -10,6 +10,7 @@ import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
 import { GalleryEntry, expandSeriesTargets, galleryEntries } from '../media/SeriesGroup';
+import { TagSpace } from '../media/MediaTag';
 import { ThumbLoader } from '../media/ThumbLoader';
 import { WotaShare } from '../media/WotaShare';
 import { AlbumSaver } from '../media/AlbumSaver';
@@ -41,6 +42,13 @@ struct Gallery {
   @State detailMeta: string = '';
   /** 分段折叠开关（会话态，默认开=组卡；关=与上游 collapse=false 同义的扁平基线） */
   @State seriesCollapsed: boolean = true;
+  /** CT 批：自定义标签（media_tag 行派生，页签行追加自定义页签） */
+  @State customTags: Array<string> = [];
+  /** 加标签弹层（对应上游 MediaTagDialog）：对指定片加/移除自定义标签 */
+  @State tagDialogClip: VideoClip | undefined = undefined;
+  @State tagInput: string = '';
+  /** 弹层内该片的自定义标签清单（来自该片 tags 的 isCustom 子集） */
+  @State tagDialogTags: Array<string> = [];
   /** 分段展开面板：非 null = 显示该组的成员清单（只钉 seriesId，按当前 clips 重解析） */
   @State seriesSheetId: number | undefined = undefined;
 
@@ -131,6 +139,11 @@ struct Gallery {
       if (this.disposed || seq !== this.requestSeq) {
         return;
       }
+      this.customTags = await repo.customTags();
+      this.refreshTabs();
+      // 自定义页签缩可能使选中越界/失配：统一矫正（上游 clampedSelection 调用点同款）
+      const sel = GalleryTabs.clampedSelection(this.tabs, this.selectedTab, this.currentTab().filter);
+      this.selectedTab = sel.index;
       this.allClips = all;
       this.likeClips = liked;
       this.trashClips = trashed;
@@ -276,6 +289,11 @@ struct Gallery {
   // ------------------------------------------------------------------ 分段归组（上游 SeriesGroup）
 
   /** 当前页签的展示单元（分段合并成一条；单片与今天逐字等价） */
+  /** CT 批：页签表 = 系统 3 页签 + 自定义页签（media_tag 派生，按首次使用时间） */
+  private refreshTabs(): void {
+    this.tabs = GalleryTabs.build(this.customTags);
+  }
+
   private entryList(): Array<GalleryEntry> {
     return galleryEntries(this.clips, this.seriesCollapsed);
   }
@@ -288,6 +306,65 @@ struct Gallery {
   /** 动作结果提示：组级动作补一句段数，避免用户以为只动了一段 */
   private actionNotice(base: string, moved: number): string {
     return moved > 1 ? `${base}（含 ${moved} 段）` : base;
+  }
+
+  /** CT 批：打开标签弹层（回填该片现有自定义标签） */
+  private openTagDialog(clip: VideoClip): void {
+    this.tagDialogClip = clip;
+    this.reloadTagDialogTags(clip);
+  }
+
+  private reloadTagDialogTags(clip: VideoClip): void {
+    this.tagDialogTags = Array.from(clip.tags).filter(
+      (t: string): boolean => TagSpace.isCustom(t));
+  }
+
+  /** CT 批：给片加自定义标签（normalize 守卫；重复加同 tag 由 DB UNIQUE 幂等） */
+  private async addTagToClip(clip: VideoClip, rawTag: string): Promise<void> {
+    const repo: MediaRepo | undefined = this.repo;
+    if (repo === undefined || this.actionBusy) {
+      return;
+    }
+    this.actionBusy = true;
+    try {
+      const result: string = await repo.addTag(clip, rawTag);
+      this.message = result === '' ? `已加标签「${rawTag.trim()}」` : result;
+      await this.refreshAll(this.message);
+      // 刷新后 clip 对象换新：按路径找回，弹层清单随之更新
+      const again: VideoClip | undefined = this.clips.find(
+        (c: VideoClip): boolean => c.path === clip.path);
+      if (again !== undefined) {
+        this.tagDialogClip = again;
+        this.reloadTagDialogTags(again);
+      }
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
+  /** CT 批：从片移除自定义标签 */
+  private async removeTagFromClip(tag: string): Promise<void> {
+    const repo: MediaRepo | undefined = this.repo;
+    const clip: VideoClip | undefined = this.tagDialogClip;
+    if (repo === undefined || clip === undefined || this.actionBusy) {
+      return;
+    }
+    this.actionBusy = true;
+    try {
+      const ok: boolean = await repo.removeTag(clip, tag);
+      if (ok) {
+        this.message = `已移除标签「${tag}」`;
+      }
+      await this.refreshAll(this.message);
+      const again: VideoClip | undefined = this.clips.find(
+        (c: VideoClip): boolean => c.path === clip.path);
+      if (again !== undefined) {
+        this.tagDialogClip = again;
+        this.reloadTagDialogTags(again);
+      }
+    } finally {
+      this.actionBusy = false;
+    }
   }
 
   private openPlayer(clip: VideoClip): void {
@@ -463,6 +540,13 @@ struct Gallery {
           .enabled(!this.actionBusy && this.dbOk)
           .onClick((): void => {
             this.moveToTrash(clip);
+          })
+        Button('标签')
+          .fontSize(11)
+          .height(26)
+          .enabled(!this.actionBusy && this.dbOk)
+          .onClick((): void => {
+            this.openTagDialog(clip);
           })
         Button('分享')
           .fontSize(11)
@@ -742,6 +826,73 @@ struct Gallery {
         .padding(12)
         .backgroundColor('#263238')
         .borderRadius(12)
+      }
+
+      // CT 批：加/移除自定义标签弹层（上游 MediaTagDialog 对应物）
+      if (this.tagDialogClip !== undefined) {
+        Column({ space: 6 }) {
+          Row({ space: 8 }) {
+            Text(`标签：${this.tagDialogClip.name}`)
+              .fontSize(13)
+              .fontColor(Color.White)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Button('关闭')
+              .fontSize(11)
+              .height(24)
+              .onClick((): void => {
+                this.tagDialogClip = undefined;
+                this.tagInput = '';
+              })
+          }
+          Row({ space: 6 }) {
+            TextInput({ text: this.tagInput, placeholder: '新标签（1-24 字）' })
+              .fontSize(12)
+              .layoutWeight(1)
+              .height(30)
+              .onChange((v: string): void => {
+                this.tagInput = v;
+              })
+            Button('添加')
+              .fontSize(11)
+              .height(26)
+              .enabled(!this.actionBusy && this.dbOk && this.tagInput.trim() !== '')
+              .onClick((): void => {
+                const clip: VideoClip | undefined = this.tagDialogClip;
+                const input: string = this.tagInput.trim();
+                if (clip !== undefined && input !== '') {
+                  this.addTagToClip(clip, input);
+                  this.tagInput = '';
+                }
+              })
+          }
+          .width('100%')
+          if (this.tagDialogTags.length === 0) {
+            Text('暂无自定义标签')
+              .fontSize(11)
+              .fontColor('#78909C')
+          }
+          ForEach(this.tagDialogTags, (tag: string): void => {
+            Row({ space: 8 }) {
+              Text(tag)
+                .fontSize(12)
+                .fontColor(Color.White)
+                .layoutWeight(1)
+                .maxLines(1)
+              Button('移除')
+                .fontSize(11)
+                .height(24)
+                .onClick((): void => {
+                  this.removeTagFromClip(tag);
+                })
+            }
+            .width('100%')
+          }, (tag: string): string => tag)
+        }
+        .width('100%')
+        .padding(12)
+        .backgroundColor('#263238')
       }
 
       if (this.showDetail) {

@@ -19,7 +19,7 @@ import { ArcDropLog } from '../record/ArcDropLog';
 import { VideoStore } from '../record/VideoStore';
 import { GlRecorder } from '../camera/GlRecorder';
 import { WotaTag } from '../core/Constants';
-import { ClipFilter, ClipKind, TagSpace } from './MediaTag';
+import { ClipFilter, ClipKind, CustomTagRow, CustomTags, TagSpace } from './MediaTag';
 import { MediaTagRow, SeriesPartRow, TrashItemRow, WotaDb } from './WotaDb';
 
 const TAG: string = WotaTag.MEDIA_REPO;
@@ -677,6 +677,67 @@ export class MediaRepo {
     } catch (e) {
       Diag.e(TAG, `setLike failed ${clip.name}: ${e}`);
       return false;
+    }
+  }
+
+  /**
+   * 加自定义标签（CT 批，上游 MediaActions.addTag 同构）：TagSpace.normalize 守卫
+   * （去空白/≤24 字/不含保留词），非法返回提示；成功走 insertTag（同点去重交 DB
+   * UNIQUE 约束——重复加同一 tag 幂等）。
+   */
+  async addTag(clip: VideoClip, rawTag: string): Promise<string> {
+    if (!this.isDbAvailable() || clip.path === GlRecorder.getActiveRecordingPath()) {
+      return '数据库不可用';
+    }
+    const tag: string | undefined = TagSpace.normalize(rawTag);
+    if (tag === undefined) {
+      return '标签无效（1-24 字，不能用保留词）';
+    }
+    const db: WotaDb | undefined = await this.ensureDb();
+    if (db === undefined) {
+      return '数据库不可用';
+    }
+    try {
+      await db.insertTag(clip.id, clip.relativePath, tag, Date.now());
+      return '';
+    } catch (e) {
+      Diag.e(TAG, `addTag failed ${clip.name}: ${e}`);
+      return '加标签失败';
+    }
+  }
+
+  /** 移除自定义标签（CT 批；上游 MediaActions.removeTag 同构） */
+  async removeTag(clip: VideoClip, tag: string): Promise<boolean> {
+    if (!this.isDbAvailable()) {
+      return false;
+    }
+    const db: WotaDb | undefined = await this.ensureDb();
+    if (db === undefined) {
+      return false;
+    }
+    try {
+      await db.deleteTag(clip.id, tag);
+      return true;
+    } catch (e) {
+      Diag.e(TAG, `removeTag failed ${clip.name}: ${e}`);
+      return false;
+    }
+  }
+
+  /** 自定义标签清单（media_tag 行派生：isCustom 过滤 + createdAt 升序 + 去重） */
+  async customTags(): Promise<Array<string>> {
+    const db: WotaDb | undefined = await this.ensureDb();
+    if (db === undefined) {
+      return [];
+    }
+    try {
+      const rows: Array<MediaTagRow> = await db.allTags();
+      const ctRows: Array<CustomTagRow> = rows.map((r: MediaTagRow): CustomTagRow =>
+        new CustomTagRow(r.tag, r.createdAt));
+      return CustomTags.ofRows(ctRows);
+    } catch (e) {
+      Diag.e(TAG, `customTags failed: ${e}`);
+      return [];
     }
   }
 
