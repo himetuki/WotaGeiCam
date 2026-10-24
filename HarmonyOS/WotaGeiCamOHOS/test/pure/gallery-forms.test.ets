@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { VideoClip } from '../../entry/src/main/ets/media/MediaRepo';
 import {
-  DEFAULT_LIST_MODE, GALLERY_COLUMN_TIERS, LIST_GRID, LIST_TIMELINE, TimelineGroup,
+  DEFAULT_LIST_MODE, GALLERY_COLUMN_TIERS, LIST_FULLSCREEN, LIST_GRID, LIST_TIMELINE, TimelineGroup,
   daysFromCivil, epochDayOf, galleryColumnsOf, groupTimeline
 } from '../../entry/src/main/ets/media/GalleryForms';
 
@@ -116,6 +116,35 @@ test('接线_页面双形态与列数持久化', () => {
   assertTrue(page.indexOf('this.toggleSeriesExpand(entry.seriesId)') >= 0 &&
     page.indexOf('entry.parts.slice(1)') >= 0,
     '时间线系列行必须内联展开（首段不重复出行）');
+});
+
+test('形态_全屏常量上游同序', () => {
+  assertEq(LIST_FULLSCREEN, 'fullscreen', 'ListMode{Timeline,Grid,Fullscreen} 第三态');
+});
+
+test('接线_全屏滑动单引擎换代与拆解', () => {
+  const page: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
+  // 仅当前页挂 XComponent（Swiper 预渲染邻页不挂，全局恒一枚表面）
+  assertTrue(page.indexOf('if (idx === this.fullscreenIndex) {') >= 0 &&
+    page.indexOf('XComponent({ type: XComponentType.SURFACE, controller: this.fsXc })') >= 0,
+    'XComponent 必须被 当前页判定 门控');
+  // 翻页 = 在途作废 + 引擎换代（release 后拒绝复活的引擎不复用）
+  assertTrue(page.indexOf('this.fsAttachSeq++;') >= 0 &&
+    page.indexOf('this.fsEngine.release();') >= 0 &&
+    page.indexOf('this.fsEngine = new PlayerEngine();') >= 0,
+    '翻页/拆解必须换代引擎');
+  assertTrue(page.indexOf('.index(this.fullscreenIndex)') >= 0 &&
+    page.indexOf('this.onFullscreenSwipe(idx);') >= 0, 'Swiper 受控 index + onChange');
+  assertTrue(page.indexOf('engine.playPause(); // 新引擎恒不在播') >= 0,
+    '挂载成功即起播（上游 softPause(false)）');
+  // 离开全屏/页面销毁必须拆引擎停钟
+  assertTrue(page.indexOf('private teardownFullscreen(): void {') >= 0 &&
+    page.indexOf('this.teardownFullscreen();') >= 1, '拆解方法存在且被调用');
+  const dispose: string = page.slice(page.indexOf('aboutToDisappear'));
+  assertTrue(dispose.indexOf('this.teardownFullscreen();') >= 0,
+    'aboutToDisappear 必须拆全屏（引擎/定时器不漏过页）');
+  assertTrue(page.indexOf('Math.min(this.fullscreenIndex, this.clips.length - 1)') >= 0,
+    '越界钳末位（回收站动作后列表变短）');
 });
 
 test('接线_动作菜单进bindSheet且动作即收', () => {

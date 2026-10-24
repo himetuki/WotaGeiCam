@@ -16,10 +16,11 @@ import { WotaShare } from '../media/WotaShare';
 import { AlbumSaver } from '../media/AlbumSaver';
 import { formatDuration, formatSize } from '../media/MediaFormat';
 import {
-  DEFAULT_LIST_MODE, GALLERY_COLUMNS_KEY, LIST_GRID, LIST_TIMELINE,
+  DEFAULT_LIST_MODE, GALLERY_COLUMNS_KEY, LIST_FULLSCREEN, LIST_GRID, LIST_TIMELINE,
   TimelineGroup, galleryColumnsOf, groupTimeline
 } from '../media/GalleryForms';
 import { ParamsStore } from '../ui/ParamsStore';
+import { PlayerEngine } from '../player/PlayerEngine';
 import { WindowChrome } from '../ui/WindowChrome';
 
 function pad2(v: number): string {
@@ -54,6 +55,16 @@ struct Gallery {
   @State gridColumns: number = 2;
   @State expandedSeriesIds: Set<string> = new Set<string>();
   @State menuClip: VideoClip | undefined = undefined;
+  // G3b：全屏滑动形态——单引擎挂当前页（离屏页只出缩略图，上游 FullscreenBrowse 同构）
+  @State fullscreenIndex: number = 0;
+  @State fsPlaying: boolean = false;
+  @State fsPosMs: number = 0;
+  @State fsDurMs: number = 0;
+  private fsEngine: PlayerEngine = new PlayerEngine();
+  private fsSurfaceId: string = '';
+  private fsAttachSeq: number = 0;
+  private fsTimer: number = -1;
+  private fsXc: XComponentController = new XComponentController();
   /** CT 批：自定义标签（media_tag 行派生，页签行追加自定义页签） */
   @State customTags: Array<string> = [];
   /** 加标签弹层（对应上游 MediaTagDialog）：对指定片加/移除自定义标签 */
@@ -112,6 +123,7 @@ struct Gallery {
   aboutToDisappear(): void {
     this.disposed = true;
     this.requestSeq++;
+    this.teardownFullscreen();
   }
 
   private applyDbAvailability(repo: MediaRepo): void {
@@ -408,6 +420,125 @@ struct Gallery {
   private openClipMenu(clip: VideoClip): void {
     this.menuClip = clip;
     this.sheetKind = 'menu';
+  }
+
+  /** G3b：形态切换（离开全屏必须拆引擎/停钟；进入全屏起 500ms 状态钟） */
+  private switchListMode(next: string): void {
+    if (next === this.listMode) {
+      return;
+    }
+    if (this.listMode === LIST_FULLSCREEN) {
+      this.teardownFullscreen();
+    }
+    this.listMode = next;
+    if (next === LIST_FULLSCREEN) {
+      this.fullscreenIndex = Math.min(this.fullscreenIndex, Math.max(0, this.clips.length - 1));
+      this.startFsTimer();
+    }
+  }
+
+  /** G3b：全屏当前片（越界钳末位——回收站动作后列表变短） */
+  private fsCurrentClip(): VideoClip | undefined {
+    if (this.clips.length === 0) {
+      return undefined;
+    }
+    const idx: number = Math.min(this.fullscreenIndex, this.clips.length - 1);
+    return this.clips[idx];
+  }
+
+  private onFullscreenSwipe(idx: number): void {
+    this.fullscreenIndex = idx;
+    // 旧页 XComponent 随翻页卸载：作废在途 attach，旧引擎立即停（新页 onLoad 再挂新引擎）
+    this.fsAttachSeq++;
+    this.fsEngine.release();
+    this.fsEngine = new PlayerEngine();
+    this.fsSurfaceId = '';
+    this.fsPlaying = false;
+  }
+
+  /** XComponent 装载（仅当前页有一枚）：换代引擎挂当前片，起播（上游 softPause(false)） */
+  private fsSurfaceLoaded(): void {
+    if (this.disposed) {
+      return;
+    }
+    const sid: string = this.fsXc.getXComponentSurfaceId();
+    if (sid === '' || sid === this.fsSurfaceId) {
+      return;
+    }
+    this.fsSurfaceId = sid;
+    this.attachFullscreen();
+  }
+
+  private attachFullscreen(): void {
+    if (this.disposed || this.fsSurfaceId === '') {
+      return;
+    }
+    const clip: VideoClip | undefined = this.fsCurrentClip();
+    if (clip === undefined) {
+      return;
+    }
+    const seq: number = ++this.fsAttachSeq;
+    const engine: PlayerEngine = new PlayerEngine();
+    this.fsEngine.release();
+    this.fsEngine = engine;
+    engine.attach(this.fsSurfaceId, clip, 30).then((error: string): void => {
+      if (this.disposed || seq !== this.fsAttachSeq) {
+        engine.release();
+        return;
+      }
+      if (error !== '') {
+        this.message = error;
+        engine.release();
+        return;
+      }
+      engine.playPause(); // 新引擎恒不在播：playPause = 起播（上游 attach 后 softPause(false)）
+    }).catch((e: Object): void => {
+      if (seq === this.fsAttachSeq) {
+        this.message = `播放失败：${e}`;
+      }
+    });
+  }
+
+  private startFsTimer(): void {
+    this.stopFsTimer();
+    this.fsTimer = setInterval((): void => {
+      if (this.disposed) {
+        return;
+      }
+      if (this.fullscreenIndex >= this.clips.length) {
+        this.fullscreenIndex = Math.max(0, this.clips.length - 1);
+      }
+      const e: PlayerEngine = this.fsEngine;
+      this.fsPlaying = e.playing;
+      this.fsPosMs = Math.round(e.positionMs);
+      if (e.durationMs > 0) {
+        this.fsDurMs = e.durationMs;
+      }
+    }, 500);
+  }
+
+  private stopFsTimer(): void {
+    if (this.fsTimer >= 0) {
+      clearInterval(this.fsTimer);
+      this.fsTimer = -1;
+    }
+  }
+
+  private teardownFullscreen(): void {
+    this.stopFsTimer();
+    this.fsAttachSeq++;
+    this.fsEngine.release();
+    this.fsEngine = new PlayerEngine();
+    this.fsSurfaceId = '';
+    this.fsPlaying = false;
+    this.fsPosMs = 0;
+    this.fsDurMs = 0;
+  }
+
+  /** G3b：全屏页底部「对比」入口（与播放页顶栏同参路由） */
+  private openCompareFromFs(clip: VideoClip): void {
+    const params: FsCompareParams = { leftId: clip.id, leftPath: clip.path };
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/Compare', params: params });
   }
 
   /** G3a：网格列数档位循环（2→3→4→5→2，上游顶栏 onColumns 同一持久化键） */
@@ -916,12 +1047,27 @@ struct Gallery {
           .fontSize(18)
           .fontColor(Color.White)
           .layoutWeight(1)
-        Button(this.listMode === LIST_TIMELINE ? '网格' : '时间线')
-          .fontSize(11)
-          .height(26)
-          .onClick((): void => {
-            this.listMode = this.listMode === LIST_TIMELINE ? LIST_GRID : LIST_TIMELINE;
-          })
+        if (this.listMode === LIST_FULLSCREEN) {
+          Button('退出全屏')
+            .fontSize(11)
+            .height(26)
+            .onClick((): void => {
+              this.switchListMode(LIST_GRID);
+            })
+        } else {
+          Button(this.listMode === LIST_TIMELINE ? '网格' : '时间线')
+            .fontSize(11)
+            .height(26)
+            .onClick((): void => {
+              this.switchListMode(this.listMode === LIST_TIMELINE ? LIST_GRID : LIST_TIMELINE);
+            })
+          Button('全屏')
+            .fontSize(11)
+            .height(26)
+            .onClick((): void => {
+              this.switchListMode(LIST_FULLSCREEN);
+            })
+        }
         if (this.listMode === LIST_GRID) {
           Button(`${this.gridColumns}列`)
             .fontSize(11)
@@ -1056,6 +1202,98 @@ struct Gallery {
           .layoutWeight(1)
           .width('100%')
           .padding({ left: 12, right: 12 })
+        }
+        if (this.listMode === LIST_FULLSCREEN) {
+          Stack({ alignContent: Alignment.Bottom }) {
+            Swiper() {
+              ForEach(this.clips, (clip: VideoClip, idx: number): void => {
+                if (idx === this.fullscreenIndex) {
+                  Column() {
+                    XComponent({ type: XComponentType.SURFACE, controller: this.fsXc })
+                      .onLoad((): void => {
+                        this.fsSurfaceLoaded();
+                      })
+                      .width('100%')
+                      .height('100%')
+                  }
+                  .width('100%')
+                  .height('100%')
+                  .backgroundColor(Color.Black)
+                } else {
+                  Column() {
+                    GalleryThumb({ path: clip.path, durationMs: clip.durationMs })
+                  }
+                  .width('100%')
+                  .height('100%')
+                }
+              }, (clip: VideoClip): string => clip.path)
+            }
+            .loop(false)
+            .index(this.fullscreenIndex)
+            .onChange((idx: number): void => {
+              this.onFullscreenSwipe(idx);
+            })
+            .width('100%')
+            .height('100%')
+
+            if (this.fsCurrentClip() !== undefined) {
+              Row({ space: 8 }) {
+                Button(this.fsPlaying ? '暂停' : '播放')
+                  .fontSize(11)
+                  .height(26)
+                  .onClick((): void => {
+                    this.fsEngine.playPause();
+                  })
+                Text(`${formatDuration(this.fsPosMs)} / ${formatDuration(this.fsDurMs)}`)
+                  .fontSize(10)
+                  .fontColor(Color.White)
+                Button(this.fsCurrentClip()!.liked ? '★' : '☆')
+                  .fontSize(11)
+                  .height(26)
+                  .onClick((): void => {
+                    this.toggleLike(this.fsCurrentClip()!);
+                  })
+                Button('分享')
+                  .fontSize(11)
+                  .height(26)
+                  .onClick((): void => {
+                    this.shareClip(this.fsCurrentClip()!);
+                  })
+                if (this.selectedTab === 2) {
+                  Button('还原')
+                    .fontSize(11)
+                    .height(26)
+                    .onClick((): void => {
+                      this.restore(this.fsCurrentClip()!);
+                    })
+                } else {
+                  Button('回收站')
+                    .fontSize(11)
+                    .height(26)
+                    .onClick((): void => {
+                      this.moveToTrash(this.fsCurrentClip()!);
+                    })
+                }
+                Button('对比')
+                  .fontSize(11)
+                  .height(26)
+                  .onClick((): void => {
+                    this.openCompareFromFs(this.fsCurrentClip()!);
+                  })
+                Button('播放页')
+                  .fontSize(11)
+                  .height(26)
+                  .onClick((): void => {
+                    this.openPlayer(this.fsCurrentClip()!);
+                  })
+              }
+              .width('100%')
+              .justifyContent(FlexAlign.Center)
+              .padding({ bottom: 12, left: 8, right: 8 })
+            }
+          }
+          .layoutWeight(1)
+          .width('100%')
         }
       }
 
@@ -1255,6 +1493,12 @@ struct Gallery {
  * 媒体卡缩略图（上游 VideoThumbnail 的对应物）：ThumbLoader 取中点帧，命中即显示，
  * 未就绪/失败退 MP4 占位块。@Prop 驱动：列表滚动复用组件时 path 变化会重新加载。
  */
+/** G3b：对比页路由参数（与 Player.ets 的 CompareRouteParams 同键） */
+interface FsCompareParams {
+  leftId: number;
+  leftPath: string;
+}
+
 /** G3a：时间线一个日组（label/dayKey 来自纯逻辑；entries 已回查成页面 entry） */
 class TimelineDay {
   label: string;
