@@ -159,8 +159,10 @@ class TrackExporter(private val ctx: Context) {
             }
         } catch (e: CancellationException) {
             if (bytesComplete) {
-                // 成片已封轨：取消也不删行（同全败口径），留待冷启救援
+                // 成片已封轨：取消也不删行（同全败口径），留待冷启救援。
+                // sidecar 与 commit 全败分支同款写，被救援回的成片档案才完整
                 Log.i(TAG, "取消但成片已封轨，保留 pending 行待冷启救援 uri=$pendingUri")
+                writeSidecar(src, pendingUri)
             } else {
                 fail(pendingUri, ClipError.CANCELLED)
             }

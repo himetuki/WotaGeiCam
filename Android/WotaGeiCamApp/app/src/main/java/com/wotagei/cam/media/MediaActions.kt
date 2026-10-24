@@ -16,6 +16,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.wotagei.cam.core.WotaStorage
+import com.wotagei.cam.player.TrackSync
 import com.wotagei.cam.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -98,11 +99,17 @@ class MediaActions private constructor(
                 // 撞名时 MediaStore 自行加序号后缀且 update 仍报成功，请求名不可信——
                 // 与录制路（CameraScreen.stopInternal）同口径：回查真实名，回查失败退回请求名
                 if (oldPath != null) withContext(Dispatchers.IO) {
-                    val actualName = queryDisplayName(clip.uri)
-                        ?: values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
-                    val dir = oldPath.substringBeforeLast('/', "")
-                    val newPath = if (dir.isEmpty()) actualName else "$dir/$actualName"
-                    com.wotagei.cam.record.ArcDropLog.renameFor(oldPath, newPath)
+                    val actualName = (queryDisplayName(clip.uri)
+                        ?: values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME))
+                        // 回退名来自用户输入：MediaStore 自己会消毒，拼路径的这边不能裸用
+                        //（`/`、`..` 能把 sidecar 挪出本应用目录，甚至指向别处的同名档案）
+                        ?.substringAfterLast('/')
+                        ?.takeIf { it.isNotBlank() && it != "." && it != ".." }
+                    if (actualName != null) {
+                        val dir = oldPath.substringBeforeLast('/', "")
+                        val newPath = if (dir.isEmpty()) actualName else "$dir/$actualName"
+                        com.wotagei.cam.record.ArcDropLog.renameFor(oldPath, newPath)
+                    }
                 }
                 MediaOp.Done
             } else {
@@ -312,6 +319,9 @@ class MediaActions private constructor(
                     // 不清的话表会无界增长。读侧本来就按「成员 ≥ 2 才成组」忽略它，这纯粹是收尾。
                     seriesDao.pruneOrphans()
                     trashDao.removeAll(clips.map { it.uri.toString() })
+                    // 同步偏移也按 uri 键存（TrackSync）：不清的话 MediaStore 复用 _ID 给新片时，
+                    // 新片会命中旧片的「已校准 + 旧偏移」，音画被按上一片的偏移平移
+                    TrackSync.clearFor(app, clips.map { it.uri })
                     clips.forEach { ThumbLoader.evict(it.uri) }
                 }
             },

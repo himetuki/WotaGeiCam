@@ -32,9 +32,10 @@ class ClipExportShiftTest {
     fun `平移后负PTS不可写_不clip到零`() {
         // 源样本早于入点 100ms：环境轨（shift=0）仍为负 → 丢弃
         assertFalse(ClipRule.remuxAudioSampleWritable(relUs = -100_000, shiftUs = 0, endRelUs = null))
-        // 内录晚响 120ms → shift=+120ms，同一枚样本被拉回正区间 → 可写
+        // 内录早响 120ms → offset=-120 → shift=+120ms（延后内录轨），同一枚样本被拉回正区间 → 可写
         assertTrue(ClipRule.remuxAudioSampleWritable(relUs = -100_000, shiftUs = 120_000, endRelUs = null))
-        // 负向平移（内录早响）会把 50ms 样本推到负 → 丢弃，且不允许钳到 0
+        // 内录晚响 120ms → offset=+120 → shift=-120ms（提前内录轨），会把 50ms 样本推到负 → 丢弃，
+        // 且不允许钳到 0
         assertFalse(ClipRule.remuxAudioSampleWritable(relUs = 50_000, shiftUs = -120_000, endRelUs = null))
         // 出点也必须吃平移后的时刻：raw 在区间内、延后后越界 → 不写（预扫/写出同口径）
         assertFalse(

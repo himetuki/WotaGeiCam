@@ -242,6 +242,9 @@ class ClipExporter(private val ctx: Context) {
         val job = coroutineContext[Job]
         // muxer.stop() 已过 = 容器里是完整合法 MP4：此后的失败一律保留行不删（#4，救援通道回收）
         var bytesComplete = false
+        // copy() 的入点关键帧时刻：封轨后取消/全败都要照成功路径写 sidecar，
+        // 提到 try 外面是为了让 catch 分支也拿得到（只在 bytesComplete 之后才可能是有效值）
+        var baseUs = -1L
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)
@@ -253,7 +256,7 @@ class ClipExporter(private val ctx: Context) {
                     // 读数走双源（readSourceRotationHint），写出必须经 exportOrientationHint 统一口径
                     val hint = readSourceRotationHint(ctx, src.uri)
                     muxer.setOrientationHint(exportOrientationHint(hint, ORIENTATION_MUXER_CCW))
-                    val baseUs = copy(src, sMs * 1000L, eMs * 1000L, track, audioShiftUs, job, muxer, onProgress)
+                    baseUs = copy(src, sMs * 1000L, eMs * 1000L, track, audioShiftUs, job, muxer, onProgress)
                     muxer.stop()
                     bytesComplete = true
                     // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
@@ -287,8 +290,10 @@ class ClipExporter(private val ctx: Context) {
             }
         } catch (e: CancellationException) {
             if (bytesComplete) {
-                // 成片已封轨：取消也不删行（同全败口径），留待冷启救援
+                // 成片已封轨：取消也不删行（同全败口径），留待冷启救援。
+                // sidecar 与 commit 全败分支同款写——被救援回的成片档案要完整
                 Log.i(TAG, "取消但成片已封轨，保留 pending 行待冷启救援 uri=$pendingUri")
+                writeSidecar(src, pendingUri, baseUs)
             } else {
                 fail(pendingUri, ClipError.CANCELLED)
             }

@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.jvm.Volatile
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -108,6 +109,11 @@ class PlayerEngine(private val context: Context) {
     var released: Boolean = false
         private set
 
+    /**
+     * 当前片。主线程写（[attach] / [releasePlayer]）；帧率兜底探测在 IO 线程读它做「还是同一片」
+     * 复核，所以必须 @Volatile（与 GlRenderEngine 的跨线程字段同一纪律）。
+     */
+    @Volatile
     var currentUri: Uri? = null
         private set
 
@@ -469,8 +475,20 @@ class PlayerEngine(private val context: Context) {
             }
             if (rate > 0f) break
         }
-        if (rate <= 0f) rate = probeFrameRate(currentUri)
-        _fps.value = if (rate > 0f) rate else DEFAULT_FPS
+        if (rate <= 0f) {
+            // 容器不带 fps 时 MediaMetadataRetriever 兜底：setDataSource 是**阻塞 IO**
+            // （开文件 + 解析元数据），而 onTracksChanged 跑在建播放器的 Looper 上——本地录片
+            // 几毫秒，外部 provider 的慢速 content:// 就不可控，主线程绝不能做。
+            // 先回默认值（探测期间不留上一片的读数），探测完只认「还是同一片」的结果。
+            _fps.value = DEFAULT_FPS
+            val uri = currentUri
+            scope.launch(Dispatchers.IO) {
+                val probed = probeFrameRate(uri)
+                if (probed > 0f && currentUri == uri) _fps.value = probed
+            }
+            return
+        }
+        _fps.value = rate
     }
 
     /** MediaStore 不给 fps，用 retriever 的拍摄帧率兜底，仍失败用 25 */

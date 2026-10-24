@@ -126,6 +126,59 @@ class TrackSyncAutoTest {
         assertEquals(7L, sp.getLong("sync_at:$key", -1L))
     }
 
+    /**
+     * 删片清同步 prefs：键是 uri（含 MediaStore `_ID`），不清的话 ID 复用时新片命中旧片的
+     * done/offset——被误判「已校准」并带上错的音画偏移。
+     * 五个键必须与 [TrackSync.writeSyncPrefs] 写入的一一对应（漏一个 = 没清干净）。
+     */
+    @Test
+    fun `删片清理_五个键全抹掉_不影响别的片`() {
+        val sp = FakePrefs()
+        val dead = "content://media/external/video/media/7"
+        val alive = "content://media/external/video/media/8"
+        TrackSync.writeSyncPrefs(sp, dead, offsetMs = 250, source = manual, confidence = 8f, nowMs = 2L)
+        TrackSync.writeSyncPrefs(sp, alive, offsetMs = -90, source = auto, confidence = 3f, nowMs = 5L)
+
+        TrackSync.clearForPrefs(sp, listOf(dead))
+
+        assertNull("done 标记必须抹掉", TrackSync.sourceOfPrefs(sp, dead))
+        assertFalse("done 键必须真的没了", sp.contains("sync_done:$dead"))
+        assertEquals("offset 键必须抹掉", -1L, sp.getLong("sync_offset:$dead", -1L))
+        assertEquals("source 键必须抹掉", null, sp.getString("sync_source:$dead", null))
+        assertEquals("conf 键必须抹掉", 0f, sp.getFloat("sync_conf:$dead", 0f), 1e-6f)
+        assertEquals("at 键必须抹掉", -1L, sp.getLong("sync_at:$dead", -1L))
+        // 别的片一根汗毛都不许动
+        assertEquals(auto, TrackSync.sourceOfPrefs(sp, alive))
+        assertEquals(-90L, sp.getLong("sync_offset:$alive", -1L))
+        assertEquals(3f, sp.getFloat("sync_conf:$alive", 0f), 1e-6f)
+        assertEquals(5L, sp.getLong("sync_at:$alive", -1L))
+    }
+
+    @Test
+    fun `删片清理_空列表不写盘`() {
+        val sp = FakePrefs()
+        val key = "clip-keep"
+        TrackSync.writeSyncPrefs(sp, key, offsetMs = 1, source = manual, confidence = 1f, nowMs = 1L)
+        val before = sp.applyCount
+        TrackSync.clearForPrefs(sp, emptyList())
+        assertEquals("空列表不该产生任何 apply", before, sp.applyCount)
+        assertEquals(manual, TrackSync.sourceOfPrefs(sp, key))
+    }
+
+    /** 删片收尾必须真的调 clearFor：漏了就是「ID 复用串片」的缺口（行为桥，不是恒等式） */
+    @Test
+    fun `删片收尾必须清理同步prefs`() {
+        val src = codeOnly(mainSourceText("media/MediaActions.kt"))
+        val cleanup = flatten(bodyOf(src, "finishDelete"))
+        assertTrue(
+            "finishDelete 的清理块必须调用 TrackSync.clearFor（否则删除后同步偏移残留）",
+            cleanup.contains("TrackSync.clearFor(")
+        )
+        // 突变：把清理调用删掉，尺子必须红
+        val mutant = cleanup.replace("TrackSync.clearFor(", "TrackSync.cachedOffsetMs(")
+        assertTrue("删掉清理调用后尺子必须报红", mutant != cleanup)
+    }
+
     /** AUTO 分支的落盘调用必须走 persistAuto（锁内复核）；走裸 persist 就绕过了 MANUAL 保护 */
     private fun autoWriteViolations(runBody: String): List<String> = listOf(
         runBody.contains("val written = persistAuto(context, uri, decision.offsetMs, confidence)") to

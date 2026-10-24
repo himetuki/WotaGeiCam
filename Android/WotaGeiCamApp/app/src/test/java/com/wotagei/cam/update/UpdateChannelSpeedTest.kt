@@ -84,8 +84,8 @@ class UpdateChannelSpeedTest {
         // 放行
         listOf(
             "api.github.com", "gh-proxy.com", "gh-proxy.org", "gh.monlor.com", "ghproxy.imciel.com",
-            "8.8.8.8", "172.32.0.1", "100.128.0.1", "example.invalid", "1.2.3.999",
-            "2001:4860:4860::8888"
+            "8.8.8.8", "172.32.0.1", "100.128.0.1", "example.invalid",
+            "2001:4860:4860::8888", "[2001:4860:4860::8888]", "[::ffff:8.8.8.8]"
         ).forEach { assertTrue("应放行：$it", UpdateDownloader.isPublicHost(it)) }
         // 拒
         listOf(
@@ -95,8 +95,76 @@ class UpdateChannelSpeedTest {
             "169.254.1.1", "100.64.0.1", "100.127.255.255",
             "192.0.2.1", "198.18.0.1", "198.51.100.7", "203.0.113.9",
             "224.0.0.1", "255.255.255.255",
-            "[::1]", "::1", "[fd00::1]", "[fe80::1]", "[::ffff:127.0.0.1]"
+            "[::1]", "::1", "[fd00::1]", "[fe80::1]", "[::ffff:127.0.0.1]",
+            // 文档专用 / discard-only
+            "[2001:db8::1]", "[100::1]"
         ).forEach { assertFalse("应拒绝：$it", UpdateDownloader.isPublicHost(it)) }
+    }
+
+    /**
+     * 「像 IP 又不是规范点分十进制」的编码形式：旧判据把它们当**域名**放行，而平台的
+     * inet_aton 语义会把它们解析成内网/环回地址——镜像一个 302 就把请求引到路由器上。
+     */
+    @Test
+    fun `主机判据_非规范IP编码一律拒_不落域名分支放行`() {
+        listOf(
+            // 十进制整数 / 简写 IPv4（inet_aton：2130706433 与 127.1 都是 127.0.0.1）
+            "2130706433", "127.1", "127.0.1", "10.1",
+            // 八进制（inet_aton：0177 是八进制 = 127）
+            "0177.0.0.1", "127.000.000.001",
+            // 十六进制
+            "0x7f.0.0.1", "0x7f.1",
+            // 超范围段 / 段数不对：像 IP 又不是，禁猜
+            "1.2.3.999", "1.2.3", "1.2.3.4.5",
+            // IPv4 映射 IPv6 的十六进制形态（::ffff:c0a8:1 = 192.168.0.1）
+            "[::ffff:c0a8:1]", "[::ffff:7f00:1]", "[0:0:0:0:0:ffff:127.0.0.1]", "[::ffff:10.0.0.1]",
+            // IPv4 兼容形态（::a9fe:a9fe = 169.254.169.254 云元数据）与 NAT64
+            "[::a9fe:a9fe]", "[64:ff9b::a9fe:a9fe]",
+            // 其它非规范 IPv6
+            "[::1%eth0]", "[1::2::3]", "[12345::]"
+        ).forEach { assertFalse("应拒绝：$it", UpdateDownloader.isPublicHost(it)) }
+    }
+
+    /** 尺子自证：换回 2026-10-21 的旧判据（非 4 段/非纯数字就当域名），上面那把尺子必须红 */
+    @Test
+    fun `尺子自己能红_旧判据放行的编码形式新判据必须拒`() {
+        // 旧 isPublicIpv4OrDomain 的判据复刻（4 段纯数字才判私网，否则一律放行）
+        fun oldGate(h: String): Boolean {
+            val parts = h.split('.')
+            if (parts.size != 4) return true
+            val o = IntArray(4)
+            for (i in 0 until 4) {
+                val s = parts[i]
+                if (s.isEmpty() || s.length > 3 || !s.all { it.isDigit() }) return true
+                o[i] = s.toIntOrNull() ?: return true
+                if (o[i] !in 0..255) return true
+            }
+            val (a, b) = o[0] to o[1]
+            return !(a == 127 || a == 10 || a == 0 ||
+                (a == 192 && b == 168) || (a == 172 && b in 16..31) || a >= 224)
+        }
+        val bypass = listOf(
+            "2130706433", "127.1", "0177.0.0.1", "0x7f.0.0.1", "1.2.3.999",
+            "[::ffff:c0a8:1]", "[::ffff:7f00:1]", "[0:0:0:0:0:ffff:127.0.0.1]", "[::a9fe:a9fe]"
+        )
+        // 良品必须先真的绿
+        bypass.forEach { assertFalse("新判据必须先拒：$it", UpdateDownloader.isPublicHost(it)) }
+        // 旧判据在这些形态上必须放行（否则新尺子没有增量，测了个恒真式）
+        val leaked = bypass.filter { host ->
+            if (host.startsWith("[")) {
+                // 旧 IPv6 判据：只认点分十进制的 ::ffff: 映射，其余全放行
+                val inner = host.removePrefix("[").removeSuffix("]").lowercase()
+                !(inner == "::1" || inner == "::" ||
+                    inner.startsWith("fc") || inner.startsWith("fd") ||
+                    inner.startsWith("fe8") || inner.startsWith("fe9") ||
+                    inner.startsWith("fea") || inner.startsWith("feb") ||
+                    (inner.startsWith("::ffff:") && !oldGate(inner.removePrefix("::ffff:"))))
+            } else {
+                oldGate(host)
+            }
+        }
+        assertTrue("旧判据在这些编码形态上必须放行，新尺子才量到了东西：实际只有 $leaked", leaked.isNotEmpty())
+        assertEquals("全部形态旧判据都放行", bypass.size, leaked.size)
     }
 
     // ------------------------------------------------------------------ 接线守卫

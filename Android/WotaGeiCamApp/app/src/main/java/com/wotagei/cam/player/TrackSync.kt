@@ -154,6 +154,37 @@ object TrackSync {
     fun cachedOffsetMs(context: Context, uri: Uri): Long? = cachedSync(context, uri)?.offsetMs
 
     /**
+     * 删片收尾：抹掉这些 uri 的同步结果。
+     *
+     * 键是 `uri.toString()`（含 MediaStore 的 `_ID`），删片不清的话，**ID 被复用给新片时**
+     * 新片会命中旧片的 done/offset——被误判「已校准」并带上错的音画偏移。删除路径
+     * （media/MediaActions.finishDelete）与 Room/缓存清理同批调用。
+     */
+    fun clearFor(context: Context, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        synchronized(ioLock) {
+            clearForPrefs(prefs(context), uris.map { it.toString() })
+        }
+    }
+
+    /**
+     * 纯 prefs 清理（internal 供 JVM 测试注入 FakePrefs）：五个键逐个 remove。
+     * 只删这几个 key 的语义必须与 [writeSyncPrefs] 写入的一一对应——漏一个就等于没清。
+     */
+    internal fun clearForPrefs(sp: android.content.SharedPreferences, keys: List<String>) {
+        if (keys.isEmpty()) return
+        val ed = sp.edit()
+        for (key in keys) {
+            ed.remove(doneKey(key))
+            ed.remove(offsetKey(key))
+            ed.remove(sourceKey(key))
+            ed.remove(confKey(key))
+            ed.remove(atKey(key))
+        }
+        ed.apply()
+    }
+
+    /**
      * 上次结果的来源；null = 未校准。
      * **旧记录兼容**：`sync_done=true` 但无 `sync_source`（本功能上线前只有手动按钮），视为 MANUAL
      * ——这样自动校准不会把老用户手动调好的结果冲掉。

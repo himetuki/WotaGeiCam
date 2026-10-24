@@ -46,10 +46,12 @@ class TrackSidecarGuardTest {
     fun `成功与全败保留两条路径都写sidecar`() {
         val code = flatCode("player/TrackExport.kt")
         // 定义是 `writeSidecar(src: VideoClip, ...)`，调用是 `writeSidecar(src, pendingUri)`——
-        // 按调用形态计数：成功路径 + 全败保留分支，共 2 处
+        // 按调用形态计数：成功路径 + 全败保留分支 + 封轨后取消分支，共 3 处
+        // （取消分支是 2026-10-25 审查轮补的：那条路同样保留 pending 行待冷启救援，
+        //  少写 sidecar，被救回的成片就没有位次档案）
         assertEquals(
-            "TrackExporter 必须恰好在「commit 成功」与「全败保留」两条路径各写一次 sidecar（漏掉保留分支 = 被救援回的成片丢档案）",
-            2, KotlinSourceScan.occurrences(code, "writeSidecar(src, pendingUri)").size
+            "TrackExporter 必须在「commit 成功」「全败保留」「封轨后取消」三条路径各写一次 sidecar",
+            3, KotlinSourceScan.occurrences(code, "writeSidecar(src, pendingUri)").size
         )
         // 保留分支内的那次：最后一个 if (!committed) 分支到 COMMIT 返回之间必须有 writeSidecar
         val branch = code.lastIndexOf("if (!committed)")
@@ -58,6 +60,13 @@ class TrackSidecarGuardTest {
         assertTrue(
             "全败保留分支必须照成功路径同款写 sidecar（被救援回的成片档案要完整）",
             code.substring(branch, commitFail).contains("writeSidecar(src, pendingUri)")
+        )
+        // 封轨后取消分支：CancellationException 里 bytesComplete 为真时也要写
+        val cancel = code.indexOf("catch (e: CancellationException)")
+        assertTrue("定位取消分支失败（守卫失去输入，不许算通过）", cancel >= 0)
+        assertTrue(
+            "封轨后取消同样保留行待救援，必须照成功路径写 sidecar",
+            code.substring(cancel, cancel + 400).contains("writeSidecar(src, pendingUri)")
         )
     }
 

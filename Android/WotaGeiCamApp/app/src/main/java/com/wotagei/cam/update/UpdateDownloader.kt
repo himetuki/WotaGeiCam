@@ -10,6 +10,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * 「检查更新」的**网络执行层**（update 包唯一允许出现 HttpURLConnection 的地方，守卫钉住）。
@@ -239,14 +240,24 @@ object UpdateDownloader {
                 return DownloadOutcome.Cancelled
             }
             when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled)) {
-                is DownloadOutcome.Done ->
+                is DownloadOutcome.Done -> {
                     // 重下同一资产时旧包还在：Windows 语义下 renameTo 对已存在目标会失败，必须先删旧再改名
                     //（此刻删的是刚下完的新包要顶掉的旧包，与 P3-3 保留旧包给安装器读不冲突——重下即用户已弃旧包）
-                    if ((if (target.exists()) target.delete() else true) && part.renameTo(target)) {
+                    val renamed = (if (target.exists()) target.delete() else true) && part.renameTo(target)
+                    if (renamed) {
                         // SHA-256 端到端校验（v0.0.8）：哈希来自段 1 官方端点的 Release 说明（发版者写入）。
-                        // 探测没给（段 2/3、旧版 notes）→ null 恒过，退回既有防线（PK+size+安装签名网）；
-                        // 给了且不匹配 → 镜像污染实锤，删包判失败，绝不让它进安装器。
-                        if (sha256Matches(expectedSha256, sha256Hex(target))) {
+                        // 探测没给（段 2/3、旧版 notes）→ 跳过校验（不为 null 才读盘，省一次全量 IO），
+                        // 退回既有防线（PK+size+安装签名网）；给了且不匹配 → 镜像污染实锤，删包判失败。
+                        // 校验本身是读盘：IO 异常必须折算成失败——下载协程没有 CoroutineExceptionHandler，
+                        // 抛出去就是未捕获异常杀进程（与 tryNode「任何异常都折算成失败」同纪律）。
+                        val verified = runCatching {
+                            expectedSha256 == null ||
+                                sha256Matches(expectedSha256, sha256Hex(target))
+                        }.getOrElse { e ->
+                            Log.e(TAG, "SHA-256 校验读盘失败（${e.javaClass.simpleName}），判失败", e)
+                            false
+                        }
+                        if (verified) {
                             return DownloadOutcome.Done(target, r.sizeBytes)
                         }
                         Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），判镜像污染，删包")
@@ -256,6 +267,7 @@ object UpdateDownloader {
                         part.delete()
                         return DownloadOutcome.Failed
                     }
+                }
                 is DownloadOutcome.Cancelled -> {
                     part.delete()
                     return DownloadOutcome.Cancelled
@@ -283,8 +295,21 @@ object UpdateDownloader {
             val futures = candidates.map { url ->
                 url to pool.submit(Callable { measureOne(url, isCancelled) })
             }
+            // 等结果同样受整段预算约束：[measureOne] 的 deadline 只在「开连接前」与「读循环顶」
+            // 检查，单次 connect / read 阻塞与 DNS 解析都不受它打断——这里必须自带超时，
+            // 否则「6 秒预算」在最坏情况下不成立，用户点取消也要干等一个挂起的渠道。
+            val deadlineNanos = System.nanoTime() + SPEED_TEST_BUDGET_MS * 1_000_000L
             rankChannelsBySpeed(
-                futures.map { (url, f) -> ChannelSpeed(url, runCatching { f.get() }.getOrDefault(0L)) }
+                futures.map { (url, f) ->
+                    val leftMs = (deadlineNanos - System.nanoTime()) / 1_000_000L
+                    val bps = try {
+                        if (leftMs > 0) f.get(leftMs, TimeUnit.MILLISECONDS) else 0L
+                    } catch (e: Exception) {
+                        // 超时 / 取消 / 执行失败：该渠道记 0 垫底（仍在表里，仍会被尝试）
+                        0L
+                    }
+                    ChannelSpeed(url, bps)
+                }
             )
         } finally {
             pool.shutdownNow()
@@ -466,24 +491,41 @@ object UpdateDownloader {
     }
 
     /**
-     * IPv4 字面量按段判断；**不是字面量（域名）一律放行**。拒：0/8、10/8、100.64/10、127/8、
-     * 169.254/16、172.16/12、192.168/16、192.0.0.0/16（含 192.0.2.0/24）、198.18/15、
-     * 198.51.100/24、203.0.113/24、224/4 与 240/4（组播/保留）。
+     * 「像 IP 字面量又不是规范点分十进制」的主机判据（纯函数，JVM 全测）。
+     *
+     * 只认两种标签：十进制数字与 `0x` 十六进制。域名分支必须**不**被这类主机蹭到——
+     * 平台的 `inet_aton` 语义会把 `127.1`、`2130706433`、`0177.0.0.1`、`0x7f.0.0.1`
+     * 当 IP 解析（分别落 127.0.0.1 / 127.0.0.1 / 127.0.0.1 / 127.0.0.1），
+     * 而「不是字面量就放行」的旧判据正是把它们漏进内网的那道缝。
      */
-    private fun isPublicIpv4OrDomain(h: String): Boolean {
+    private val NUMERIC_LABEL = Regex("[0-9]+|0[xX][0-9a-fA-F]+")
+
+    private fun isNumericLiteralHost(h: String): Boolean =
+        h.isNotEmpty() && h.split('.').all { NUMERIC_LABEL.matches(it) }
+
+    /**
+     * 规范点分十进制：恰好 4 段、每段 1~3 位、无前导零（`0` 自身除外）、值 ≤255。
+     * 任何「像 IP 又不符合」的形态（段数不对、超范围、前导零、十六进制）返回 null。
+     */
+    private fun parseIpv4(h: String): IntArray? {
         val parts = h.split('.')
-        if (parts.size != 4) return true
-        val octets = IntArray(4)
+        if (parts.size != 4) return null
+        val out = IntArray(4)
         for (i in 0 until 4) {
             val s = parts[i]
-            if (s.isEmpty() || s.length > 3 || !s.all { it.isDigit() }) return true
-            octets[i] = s.toIntOrNull() ?: return true
-            if (octets[i] !in 0..255) return true
+            if (s.length !in 1..3 || !s.all { it.isDigit() }) return null
+            // 前导零（007、010）在 inet_aton 下是八进制，禁掉——宁可拒也不猜平台语义
+            if (s.length > 1 && s[0] == '0') return null
+            val v = s.toIntOrNull() ?: return null
+            if (v !in 0..255) return null
+            out[i] = v
         }
-        val a = octets[0]
-        val b = octets[1]
-        val c = octets[2]
-        val blocked = a == 0 || a == 10 || a == 127 ||
+        return out
+    }
+
+    /** IPv4 私网/环回/保留判据（前两段即可定，第三段留给 192.0.2.0/24 与 198.51.100/24） */
+    private fun isBlockedIpv4(a: Int, b: Int, c: Int): Boolean =
+        a == 0 || a == 10 || a == 127 ||
             (a == 100 && b in 64..127) ||
             (a == 169 && b == 254) ||
             (a == 172 && b in 16..31) ||
@@ -493,17 +535,104 @@ object UpdateDownloader {
             (a == 198 && b == 51 && c == 100) ||
             (a == 203 && b == 0 && c == 113) ||
             a >= 224
-        return !blocked
+
+    /**
+     * 主机判据的 IPv4 半边：**域名**（含字母的标签）一律放行（不做 DNS 预解析）；
+     * 数字/十六进制标签的主机按 IP 字面量要求——不是规范点分十进制就拒，不是判完私网再放行。
+     * 私网/环回/保留判据见 [isBlockedIpv4]（0/8、10/8、100.64/10、127/8、169.254/16、
+     * 172.16/12、192.168/16、192.0.0.0/16、198.18/15、198.51.100/24、203.0.113/24、224/4 与 240/4）。
+     */
+    private fun isPublicIpv4OrDomain(h: String): Boolean {
+        if (isNumericLiteralHost(h)) {
+            val o = parseIpv4(h) ?: return false
+            return !isBlockedIpv4(o[0], o[1], o[2])
+        }
+        return true
     }
 
-    /** IPv6 字面量：拒 `::`、`::1`、fc00::/7（ULA）、fe80::/10（链路本地）与 ::ffff: 映射的私网/环回 */
+    /**
+     * IPv6 字面量：先严格解析成 16 字节（[parseIpv6]），**解析不了一律拒**（fail-closed），
+     * 再按地址判据：未指定、环回、fc00::/7（ULA）、fe80::/10（链路本地）、ff00::/8（组播），
+     * 以及 ::ffff:0:0/96（IPv4 映射）、::/96（IPv4 兼容，含 ::a9fe:a9fe 这类云元数据地址）、
+     * 64:ff9b::/96（NAT64）——后三种解出内嵌 IPv4 后按 [isBlockedIpv4] 判。
+     * 旧的「startsWith("fc") / ::ffff: 只认点分十进制」实现漏掉了十六进制映射形式
+     * （`[::ffff:c0a8:1]`、`[::ffff:7f00:1]`、`[0:0:0:0:0:ffff:127.0.0.1]` 全部放行）。
+     */
     private fun isPublicIpv6(host: String): Boolean {
-        val h = host.removePrefix("[").removeSuffix("]").lowercase()
-        if (h == "::" || h == "::1") return false
-        if (h.startsWith("fc") || h.startsWith("fd")) return false
-        if (h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false
-        if (h.startsWith("::ffff:")) return isPublicIpv4OrDomain(h.removePrefix("::ffff:"))
+        val bytes = parseIpv6(host) ?: return false
+        fun zero(from: Int, to: Int) = (from until to).all { bytes[it] == 0.toByte() }
+        fun v4At(from: Int) = intArrayOf(
+            bytes[from].toInt() and 0xff, bytes[from + 1].toInt() and 0xff,
+            bytes[from + 2].toInt() and 0xff, bytes[from + 3].toInt() and 0xff
+        )
+        // ::/128 未指定、::1/128 环回
+        if (zero(0, 16)) return false
+        if (zero(0, 15) && bytes[15] == 1.toByte()) return false
+        // fc00::/7 ULA、fe80::/10 链路本地、ff00::/8 组播
+        if ((bytes[0].toInt() and 0xfe) == 0xfc) return false
+        if (bytes[0] == 0xfe.toByte() && (bytes[1].toInt() and 0xc0) == 0x80) return false
+        if (bytes[0] == 0xff.toByte()) return false
+        // 2001:db8::/32（文档专用）、100::/64（discard-only）
+        if (bytes[0] == 0x20.toByte() && bytes[1] == 0x01.toByte() &&
+            bytes[2] == 0x0d.toByte() && bytes[3] == 0xb8.toByte()
+        ) return false
+        if (bytes[0] == 0x01.toByte() && zero(1, 8)) return false
+        // ::ffff:0:0/96 IPv4 映射
+        if (zero(0, 10) && bytes[10] == 0xff.toByte() && bytes[11] == 0xff.toByte()) {
+            val o = v4At(12)
+            return !isBlockedIpv4(o[0], o[1], o[2])
+        }
+        // ::/96 IPv4 兼容（::a9fe:a9fe = 169.254.169.254）
+        if (zero(0, 12)) {
+            val o = v4At(12)
+            return !isBlockedIpv4(o[0], o[1], o[2])
+        }
+        // 64:ff9b::/96 NAT64（内嵌 IPv4 同样可能是环回/链路本地）
+        if (bytes[0] == 0x00.toByte() && bytes[1] == 0x64.toByte() &&
+            bytes[2] == 0xff.toByte() && bytes[3] == 0x9b.toByte() && zero(4, 12)
+        ) {
+            val o = v4At(12)
+            return !isBlockedIpv4(o[0], o[1], o[2])
+        }
         return true
+    }
+
+    /**
+     * IPv6 字面量 → 16 字节（纯函数，JVM 全测，零网络调用）。不认 zone id（`%eth0`）、
+     * 多处 `::`、非法十六进制组；尾组可以是点分 IPv4（`::ffff:1.2.3.4` 形态）。
+     */
+    private fun parseIpv6(text: String): ByteArray? {
+        var s = text.removePrefix("[").removeSuffix("]").lowercase()
+        if (s.isEmpty() || s.contains('%')) return null
+        // 尾组点分 IPv4 → 换成两个十六进制组（::ffff:1.2.3.4 → ::ffff:102:304）。
+        // 必须按十六进制写：下面 group() 用 toInt(16) 解析，写十进制会被当成 16 进制读错
+        val lastColon = s.lastIndexOf(':')
+        if (s.contains('.')) {
+            if (lastColon < 0) return null
+            val o = parseIpv4(s.substring(lastColon + 1)) ?: return null
+            s = s.substring(0, lastColon + 1) +
+                "${(o[0] shl 8 or o[1]).toString(16)}:${(o[2] shl 8 or o[3]).toString(16)}"
+        }
+        val halves = s.split("::")
+        if (halves.size > 2) return null
+        val head = if (halves[0].isEmpty()) emptyList() else halves[0].split(':')
+        val tail = if (halves.size == 2 && halves[1].isNotEmpty()) halves[1].split(':') else emptyList()
+        if (halves.size == 1 && head.size != 8) return null
+        if (halves.size == 2 && head.size + tail.size > 7) return null
+        val groups = ArrayList<Int>(8)
+        fun group(g: String): Int? =
+            if (g.length in 1..4 && g.all { it in "0123456789abcdef" }) g.toInt(16) else null
+
+        for (g in head) groups.add(group(g) ?: return null)
+        if (halves.size == 2) repeat(8 - head.size - tail.size) { groups.add(0) }
+        for (g in tail) groups.add(group(g) ?: return null)
+        if (groups.size != 8) return null
+        val out = ByteArray(16)
+        for (i in 0 until 8) {
+            out[i * 2] = (groups[i] ushr 8).toByte()
+            out[i * 2 + 1] = (groups[i] and 0xff).toByte()
+        }
+        return out
     }
 
     /** 原始连接（**不跟随重定向**）；URL 不过 [isSafeRemoteUrl] 直接 null */

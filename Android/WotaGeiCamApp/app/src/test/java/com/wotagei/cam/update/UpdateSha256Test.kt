@@ -139,4 +139,39 @@ class UpdateSha256Test {
         val mutated = dl.replace("sha256Matches(expectedSha256, sha256Hex(target))", "true")
         assertTrue("校验接线被恒真短路后尺子必须红", !mutated.contains("sha256Matches"))
     }
+
+    /**
+     * 校验步的异常兜底与「无哈希不读盘」：重算是**读盘**，IO 异常穿出函数就是协程未捕获异常
+     * （下载协程没有 CoroutineExceptionHandler → 杀进程）；期望哈希为 null 时更不该白读一遍 5MB。
+     */
+    @Test
+    fun `接线_校验读盘异常必须折算失败_无期望不读盘`() {
+        val dl = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(
+                KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt")),
+                "downloadApk"
+            )
+        )
+        assertTrue(
+            "校验必须包在 runCatching 里（读盘异常折算失败，不穿成未捕获异常）",
+            dl.contains("runCatching {")
+        )
+        assertTrue(
+            "无期望哈希必须短路（Kotlin 实参先求值，不短路就会白读一遍整个 APK）",
+            dl.contains("expectedSha256 == null ||")
+        )
+        assertTrue("读盘失败必须记日志", dl.contains("Log.e(TAG,"))
+        // 日志文案要在**原文**里核（codeOnly 会把字符串字面量内容遮蔽掉）
+        val raw = KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt")
+        assertTrue("读盘失败的日志要能认出来", raw.contains("SHA-256 校验读盘失败"))
+        // 突变 1：拆掉 null 短路 → 无哈希也全量读盘
+        val noShortCircuit = dl.replace("expectedSha256 == null ||", "")
+        assertTrue(
+            "去掉 null 短路后尺子必须报红",
+            !noShortCircuit.contains("expectedSha256 == null ||")
+        )
+        // 突变 2：异常不再兜底（回到裸调用）
+        val noGuard = dl.replace("runCatching {", "run {")
+        assertTrue("去掉 runCatching 后尺子必须报红", !noGuard.contains("runCatching {"))
+    }
 }

@@ -196,6 +196,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     @Volatile
     private var encoderEglSurface: EGLSurface? = null
 
+    /** 编码面的 Surface 本体。GL 线程写、录制控制线程经 [isEncoderSurfaceNative] 读 → 必须 @Volatile */
+    @Volatile
     private var encoderNative: Surface? = null
 
     @Volatile
@@ -1211,6 +1213,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             arcRule.reset()
             if (arcDstFps > 0) arcFlow = ArcRepairFlow(arcDstFps)
             synchronized(arcDropsLock) { arcDrops.clear() }
+            // 补弧离屏资源一起放：它持有 5 张编码尺寸 RGBA 纹理（1080p ≈ 41MiB / 4K ≈ 166MiB），
+            // 不放就一路滞留到下次 setArcConvert 或退出录制页——而空闲预览期本来就用不到它。
+            // setArcConvert 会在真正需要时按 encoderWidth/Height 重建，释放不损失任何能力。
+            arcMendPass?.release()
+            arcMendPass = null
             return
         }
         val config = eglConfig
@@ -2091,6 +2098,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 画板的 program 与那枚结果纹理的绑定也在这里收口（新资源必须在此登记删除，14 号计划 §二）
         frostPlatePass?.release()
         frostPlatePass = null
+        // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
+        // 这里兜「引擎直接销毁、没走过解绑」的那条路
+        arcMendPass?.release()
+        arcMendPass = null
         publishedFrost = null
         frostTableCards = 0
         frostDiagSnapshotPublished = false
