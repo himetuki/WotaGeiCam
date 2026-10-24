@@ -118,6 +118,25 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（SP：半模态尺寸纪律 SheetSpec，2026-10-24）
+
+上游 `ui/design/SheetSpec.kt`（半模态面板尺寸口径单一真源；§ui 行「SheetSpec 全量留白」
+的纯算式面收口）。**零平台 import**：全部算式参数化（shortSide/windowHeight/topInset 由
+调用方运行时读入），可在 test/pure 钉住。
+
+- **常量**（上游逐字）：宽 480vp 上限、最小高 320vp、最大高=短边 90%、距信号栏 8vp、
+  弹窗内间距 12vp、>600vp 短边转居中、顶栏兜底 48vp。
+- **`sheetMaxHeight(shortSideDp, windowHeightDp, topInsetDp)`**：短边 90% 与
+  「窗口高 − max(inset+8, 48)」取小、下限 0。上游真机实测锚点（横屏 1600x720 density 2 →
+  ≈278dp）以参数化形式钉住（shortSide=windowHeight=326）。
+- **`clampSheetWidth` / `centeredForShortSide`**：宽上限与 >600vp 短边居中断点
+  （2026-10-02 裁决：输入是短边、运行时取，不按方向写死）。
+- **消费方登记**：本侧暂无半模态面板消费方（Gallery 分段清单是内嵌 Column）——纯逻辑
+  先行，半模态面板批（含 BottomPanel 对应物）落地时直接消费。
+- **测试**：`sheet-spec.test.ets`（6：常量逐字、横屏真机 ≈278 锚点、竖屏短边 90% 绑定、
+  顶避让 max 语义、退化到 0、断点判定）。共 +7（645 → 652）。
+- **回归**：pure-test 58 files / 652 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（CT：自定义标签页，2026-10-24）
 
 上游 Gallery 自定义标签（需求「标记 tag 无数量限制，需要有按分类的标签页」）的接线：
@@ -1033,7 +1052,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（645）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（652）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/

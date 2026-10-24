@@ -136,6 +136,8 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `core/FocusTap.ets`：tap-to-focus 归一化纯算式（窗口 vp → [0,1]，钳 2%..98%）——
   Camera 页 HUD 列 onClick 消费；**XComponent(SURFACE) 的 onClick 不触发**（平台行为，
   别往它上面挂手势）。
+- `core/SheetSpec.ets`：半模态尺寸纪律纯算式（480 上限/320 最小高/短边 90%/8 信号栏/
+  600 居中断点/48 顶栏兜底）——inset 由调用方运行时读入，半模态面板批消费。
 - `core/UIOrientation.ets`：方向两档纯逻辑（产出 window.Orientation 契约数值 6/7，
   零平台 import；本侧默认 PORTRAIT 偏离上游 LANDSCAPE——T31 竖屏取证设计）。
   **所有外观切换经模块级 Promise 链串行**（EntryAbility.loadContent 前先 prime，禁止在页面里裸调
