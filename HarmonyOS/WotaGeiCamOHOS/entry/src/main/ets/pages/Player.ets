@@ -11,7 +11,7 @@ import { ArcDropLog } from '../record/ArcDropLog';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { formatDuration, formatSize } from '../media/MediaFormat';
 import { PlayerEngine } from '../player/PlayerEngine';
-import { AbRange, clampPan, Pan, PlayerSpeedTiers } from '../player/PlayerModel';
+import { AbRange, clampPan, nextCcwQuarter, Pan, PlayerSpeedTiers } from '../player/PlayerModel';
 import { TapArbiter, TapDecision } from '../player/TapArbiter';
 import { ClipExportResult, ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { audioOrdinalOf, audioShiftUs, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
@@ -56,6 +56,8 @@ struct Player {
   @State actualSpeed: number = PlayerSpeedTiers.DEFAULT;
   @State fps: number = 30;
   @State mirrored: boolean = false;
+  /** RV：逆时针四分之一圈计数（会话态，不持久化、换片不清零——与镜像同口径） */
+  @State quarterTurns: number = 0;
   @State zoom: number = 1;
   @State panX: number = 0;
   @State panY: number = 0;
@@ -979,6 +981,11 @@ struct Player {
         .onClick((): void => {
           this.mirrored = !this.mirrored;
         })
+      Button(`旋转:${this.quarterTurns * 90}°`)
+        .fontSize(11)
+        .onClick((): void => {
+          this.quarterTurns = nextCcwQuarter(this.quarterTurns);
+        })
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 8 })
@@ -1434,6 +1441,7 @@ struct Player {
           this.viewH = Number(area.height);
         })
         .scale({ x: this.mirrored ? -this.zoom : this.zoom, y: this.zoom })
+        .rotate({ x: 0, y: 0, z: 1, angle: this.quarterTurns * 90, centerX: '50%', centerY: '50%' })
         .translate({ x: this.panX, y: this.panY })
         .height('100%')
         .width('100%')

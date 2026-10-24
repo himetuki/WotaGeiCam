@@ -86,3 +86,13 @@ export function clampPan(panX: number, panY: number, scale: number,
   const halfY: number = viewportH * (scale - 1) / 2;
   return new Pan(clampPanAxis(panX, halfX), clampPanAxis(panY, halfY));
 }
+
+/**
+ * 逆时针旋转的四分之一圈计数（RV 批，直译上游 PlayerScreen.nextCcwQuarter）：
+ * 0→3→2→1→0 循环，连按 4 次必回原角；负数/超界输入先按 4 折回等价角再走一步
+ * （TS 的 % 与 Kotlin 同为保号余数，语义逐字）。会话态观看辅助：不持久化、
+ * 换片不清零（与镜像开关同口径）。
+ */
+export function nextCcwQuarter(q: number): number {
+  return ((q % 4) + 3) % 4;
+}
