@@ -946,6 +946,28 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 
 ## 真机待验（T22 收口批 + T23 交付批新增，不阻塞）
 
+### 模拟器走查已验（2026-10-24，Pura 900 / HarmonyOS 6.1.1 API 24 / x86_64，hdc+uitest 自动化）
+
+- **C 更新链路端到端 ✓**：检查更新 → GitHub API 拉取 → 「发现新版本 v0.0.10-r01 · HAP 3.8 MB」
+  弹窗（ReleaseNotes 去 Markdown 整形生效、真实说明展示）→ 下载更新 → **「下载完成，已校验通过」**
+  （PK 魔数 + 体积 + SHA256SUMS 端到端校验全过）→ 保存到文件 → 系统 DocumentViewPicker 打开
+  （默认名 v0.0.10-r01-unsigned-Harmony.hap、目录导航正常）。真机上仅需复测真实证书链场景。
+- **P27 探针端到端 ✓**：探针全生命周期（Create→SetCallback→SetMicrophoneEnabled(true)+
+  ALL_PLAYBACK→Init→Start→2.7s 计数→Stop→Release）**零错误码、零隐私拦截**，窗口内两类
+  音频缓冲均 0 → `SILENT_WINDOW`（模拟器无声源，判读与复测指引按设计给出）。
+  双源缓冲送达结论 → 真机（有声源环境）。
+- **BT 降级态 ✓**：模拟器无蓝牙适配器 → `蓝牙未开启` 引导态 + 减法页脚说明（BtPanel 设计点）。
+- **J3a/J3b/E/F/G 渲染 ✓**：相机页 hud_items 读数条默认四档（快门/帧率/码率/感光度）、
+  姿态仪「已回正」、Dock 八颗、设置页参考线 11 chip/取景读数 7 chip/调整顺序入口、
+  版本 7 连点解锁开发者入口、媒体库组卡。
+- **模拟器限制（证据）**：AVRecorder `PREPARE_FAILED`（录制链在模拟器不可用 → RT 切后台续录、
+  MS 分享/存相册（需成片）、水平仪真实传感器方向、T27 双源缓冲 → **真机批**）；
+  Index 开发者页按钮行横向溢出已修（7f914d9）。
+- **取证操作**：`node scripts/device-check.mjs` 预检 / `log` hilog / `check` 清单；
+  UI 自动化 = `hdc shell uitest uiInput click/swipe` + `dumpLayout`（版本 7 连点需单条 shell
+  链式执行压进 2s 窗口）。
+
+
 - **onStreamChanged 触发时序**：surface 输入下首帧到达是否可靠触发 format-changed
   （健康第一格真信号）；个别 ROM 不触发时 `fmt || samples>0` 兜底已在，但
   `hdc hilog | grep WotaRecord` 观察 "gpu record stream changed" 出现时机（应在首样本前后）。
