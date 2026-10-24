@@ -118,6 +118,30 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（ABP2：对比页左引擎 A/B 段与持久化，2026-10-24）
+
+上游 `CompareScreen` 底栏 AbRow（onA/onB/onLoop 落 `leftEngine`；pre-roll（T<0）
+不可打点，复用 invalid 横幅通道）+ 引擎级 AB 持久化（attach 时 restoreAb）。
+本侧 Compare 此前**无 AB 打点 UI**——Player 行 T25 历史留白的最后一角。
+
+- **`pages/Compare.ets`**：底栏控制行加 `A:<秒|—>`/`B:<秒|—>`/`AB循环:开|关`/`清AB`
+  四钮（读数 = 引擎 AB 会话镜像 `cmpAbA/B/Loop`；A/B 钮带 accessibilityText）；
+  `cmpMarkA/cmpMarkB` 闸 `currentTimelineT() < 0`（pre-roll park 位打点无意义，
+  上游同闸）；`cmpToggleAbLoop`/`cmpClearAb` 语义与 Player 页同名族。
+- **持久化**：复用 ABP 批的 `AbPersistStore`（同 `wota_player_ab` 键域、键 = 左片
+  路径——与播放页同片互通：播放页打的 A/B 对比页可见可续）；左挂成功即
+  `cmpHydrateAb`（每次 attach 都灌：新引擎恒空 + `applyPersistedAb` 不覆盖闸，
+  surface 重建后 AB 随 prefs 回来——上游 `restoreAb(uri)` 在每次 attach 调用的
+  同口径，顺带补齐本侧重建丢 AB 的旧行为）。回写 = markA/markB 成功支/
+  toggle 成功支/clearAb 四处即写（失败支不写）。
+- **登记（标签适应）**：上游 AbRow 用资源字符串迷你胶囊（A/B/循环/清除），本侧
+  按钮读数带秒值（`A:12s`）——信息增量（读屏与视觉都直接念出点位），动作语义逐字。
+- **运行时走查待办**：打点→回绕→重建恢复链路需模拟器/真机走查（本轮静态接线）。
+- **守卫**：`ab-persist.test.ets` +1（pre-roll 闸/左引擎落点/水化护栏/四处即写/
+  左片路径回写）。共 +1（683 → 684）。
+- **回归**：pure-test 63 files / 684 tests 全绿；`assembleHap`（release）
+  BUILD SUCCESSFUL。
+
 ## 交付批（A11Y：无障碍全量审计，2026-10-24）
 
 HM7-UI-02 步骤 3。审计口径：文本按钮（`Button('文案')`）读屏原生可读，不列；

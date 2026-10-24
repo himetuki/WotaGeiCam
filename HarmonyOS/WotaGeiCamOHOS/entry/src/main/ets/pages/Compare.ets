@@ -31,7 +31,7 @@ import { formatDuration, formatSignedDuration } from '../media/MediaFormat';
 import { ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { SettingsStore } from '../ui/SettingsStore';
-import { PlayerSpeedTiers } from '../player/PlayerModel';
+import { AbRange, PlayerSpeedTiers } from '../player/PlayerModel';
 import {
   AudioTrackKind, CompareAudioPlan, EngineCommand, EngineCommandKind, Side, applyOrderOf, audioPlanOf
 } from '../player/CompareAudio';
@@ -42,6 +42,7 @@ import {
   rightResumeTargetOf, timelineEnd, TimelineGeometry
 } from '../player/CompareTimeline';
 import { HudColor, PageColor } from '../ui/HudTokens';
+import { AbPersistStore } from '../player/AbPersistStore';
 
 interface CompareParams {
   leftId: number;
@@ -135,6 +136,10 @@ struct Compare {
   private rightAttachStarted: boolean = false;
   private leftClip: VideoClip | undefined = undefined;
   private rightClip: VideoClip | undefined = undefined;
+  /** ABP2：对比左引擎 AB 段（上游 CompareScreen AbRow 同源；会话镜像供按钮读数） */
+  @State cmpAbA: number = -1;
+  @State cmpAbB: number = -1;
+  @State cmpAbLoop: boolean = false;
   private repo: MediaRepo | undefined = undefined;
   private ctx: common.Context | undefined = undefined;
   private disposed: boolean = false;
@@ -412,6 +417,7 @@ struct Compare {
       }
       this.leftReady = true;
       this.leftError = '';
+      this.cmpHydrateAb(clip, engine);
       if (engine.durationMs > 0) {
         this.leftDurationMs = engine.durationMs;
       }
@@ -898,6 +904,75 @@ struct Compare {
     this.audioTrack = this.audioTrack === AudioTrackKind.CAP ? AudioTrackKind.ENV : AudioTrackKind.CAP;
     this.applyAudioPlan();
     this.hint = `音轨：${this.audioTrack === AudioTrackKind.CAP ? '内录' : '环境'}`;
+  }
+
+  /** ABP2：左引擎 AB 镜像同步（按钮读数随引擎态） */
+  private cmpSyncAb(): void {
+    this.cmpAbA = this.leftEngine.ab.aMs;
+    this.cmpAbB = this.leftEngine.ab.bMs;
+    this.cmpAbLoop = this.leftEngine.ab.loopEnabled;
+  }
+
+  /** ABP2：左挂成功后水化持久化 AB（引擎换代/销毁即弃；applyPersistedAb 自带不覆盖闸） */
+  private cmpHydrateAb(clip: VideoClip, engine: PlayerEngine): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    AbPersistStore.load(ctx, clip.path).then((ab: AbRange | undefined): void => {
+      if (this.disposed || this.leftEngine !== engine || ab === undefined) {
+        return;
+      }
+      engine.applyPersistedAb(ab);
+      this.cmpSyncAb();
+    }).catch((): void => {
+      // load 内部已折 undefined，这里只兜 Promise 链意外
+    });
+  }
+
+  /** ABP2：打点/循环/清除即写（左片路径；失败支不写、清除也写） */
+  private cmpPersistAb(): void {
+    const clip: VideoClip | undefined = this.leftClip;
+    const ctx: common.Context | undefined = this.ctx;
+    if (clip === undefined || ctx === undefined) {
+      return;
+    }
+    AbPersistStore.save(ctx, clip.path, this.leftEngine.ab);
+  }
+
+  /** ABP2：pre-roll（T<0）不可打 AB 点——AB 数值是左片时间，park 位打点无意义（上游同闸） */
+  private cmpMarkA(): void {
+    if (this.currentTimelineT() < 0) {
+      this.hint = 'pre-roll 区不可打 A/B 点';
+      return;
+    }
+    this.leftEngine.markA();
+    this.cmpSyncAb();
+    this.cmpPersistAb();
+  }
+
+  private cmpMarkB(): void {
+    if (this.currentTimelineT() < 0 || !this.leftEngine.markB()) {
+      this.hint = this.currentTimelineT() < 0 ? 'pre-roll 区不可打 A/B 点' : 'B 必须晚于 A';
+      return;
+    }
+    this.cmpSyncAb();
+    this.cmpPersistAb();
+  }
+
+  private cmpToggleAbLoop(): void {
+    if (!this.leftEngine.toggleAbLoop()) {
+      this.hint = '需先设置合法的 A/B';
+      return;
+    }
+    this.cmpSyncAb();
+    this.cmpPersistAb();
+  }
+
+  private cmpClearAb(): void {
+    this.leftEngine.clearAb();
+    this.cmpSyncAb();
+    this.cmpPersistAb();
   }
 
   private toggleTimelineLoop(): void {
@@ -1644,6 +1719,28 @@ struct Compare {
               .fontSize(11)
               .onClick((): void => {
                 this.togglePlay();
+              })
+            Button(`A:${this.cmpAbA >= 0 ? Math.round(this.cmpAbA / 1000) + 's' : '—'}`)
+              .fontSize(11)
+              .accessibilityText('打 A 点')
+              .onClick((): void => {
+                this.cmpMarkA();
+              })
+            Button(`B:${this.cmpAbB >= 0 ? Math.round(this.cmpAbB / 1000) + 's' : '—'}`)
+              .fontSize(11)
+              .accessibilityText('打 B 点')
+              .onClick((): void => {
+                this.cmpMarkB();
+              })
+            Button(`AB循环:${this.cmpAbLoop ? '开' : '关'}`)
+              .fontSize(11)
+              .onClick((): void => {
+                this.cmpToggleAbLoop();
+              })
+            Button('清AB')
+              .fontSize(11)
+              .onClick((): void => {
+                this.cmpClearAb();
               })
             Button(`倍速:${PlayerSpeedTiers.label(this.speed)}`)
               .fontSize(11)

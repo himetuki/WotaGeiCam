@@ -106,6 +106,28 @@ test('接线_页面水化与回写点', () => {
     '回写按媒体路径整段落盘（清除也写）');
 });
 
+test('接线_对比页左引擎AB与持久化（ABP2）', () => {
+  const cp: string = sourceText('entry/src/main/ets/pages/Compare.ets');
+  // 上游 CompareScreen 的 AbRow：AB 走左引擎；pre-roll（T<0）不可打点
+  assertTrue(cp.indexOf('cmpMarkA(): void {') >= 0 &&
+    cp.indexOf('this.currentTimelineT() < 0') >= 0,
+    '对比页打点必须闸 pre-roll（上游 AbRow 同闸）');
+  assertTrue(cp.indexOf('this.leftEngine.markA();') >= 0 &&
+    cp.indexOf('this.leftEngine.markB()') >= 0 &&
+    cp.indexOf('this.leftEngine.toggleAbLoop()') >= 0,
+    'AB 动作必须落在左引擎');
+  // 水化：每次左挂都灌（新引擎恒空 + applyPersistedAb 不覆盖闸；surface 重建 AB 随 prefs 回来）
+  assertTrue(cp.indexOf('this.cmpHydrateAb(clip, engine);') >= 0 &&
+    cp.indexOf('this.leftEngine !== engine || ab === undefined') >= 0,
+    '左挂水化必须护栏 引擎换代/销毁/无记录');
+  // 回写：成功支即写（markB/toggle 失败支不写；清除也写）
+  const blk: string = cp.slice(cp.indexOf('private cmpMarkA'), cp.indexOf('private toggleTimelineLoop'));
+  assertEq((blk.match(/this\.cmpPersistAb\(\);/g) ?? []).length, 4,
+    'markA/markB成功/toggle成功/clearAb 四处即写（失败支不写）');
+  assertTrue(cp.indexOf('AbPersistStore.save(ctx, clip.path, this.leftEngine.ab)') >= 0,
+    '对比页回写按左片路径（与播放页同 prefs 键域）');
+});
+
 test('接线_引擎不覆盖闸门与store薄封装', () => {
   const engine: string = sourceText('entry/src/main/ets/player/PlayerEngine.ets');
   assertTrue(engine.indexOf('applyPersistedAb(ab: AbRange): void {') >= 0,
