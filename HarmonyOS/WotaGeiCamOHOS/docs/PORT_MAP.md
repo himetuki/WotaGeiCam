@@ -62,7 +62,7 @@
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 342dd99。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
 | `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：SeriesStore 落库侧的 UI 展示开关（本侧恒折叠，无回退开关按钮）、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
-| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名决策：不迁**——本仓媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`），改名即换 id，标签/回收站/系列成员全部失联；前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径），升级前做了必坏账（守卫钉住无重命名入口）。留白：~~全屏手势锁定~~（幽灵留白裁决 HM7-1：上游全仓无此功能，`git grep -i "手势锁定"` 零命中，见交付批 HM7-1 节）、时间线/网格/全屏滑动切换（真实留白：上游 `MediaTag.ListMode` + `GalleryScreen.FullscreenBrowse`）、~~自定义标签页~~（CT 批已落）、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
+| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名决策：不迁**——本仓媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`），改名即换 id，标签/回收站/系列成员全部失联；前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径），升级前做了必坏账（守卫钉住无重命名入口）。留白：~~全屏手势锁定~~（幽灵留白裁决 HM7-1：上游全仓无此功能，`git grep -i "手势锁定"` 零命中，见交付批 HM7-1 节）、时间线/网格（G3a 批 2026-10-24 已落，见交付批节）、~~全屏滑动~~仍留白（上游 `FullscreenBrowse`，Swiper + 内嵌播放器，G3b 批）、~~自定义标签页~~（CT 批已落）、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
 
 ## player — 播放器 / 对比 / 剪辑
 
@@ -117,6 +117,38 @@
 > 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
+
+## 交付批（G3a：媒体库列表形态——时间线 + 网格列数，2026-10-24）
+
+上游需求 29 行「按时间线/网格/全屏滑动查看」（`MediaTag.ListMode`，顶栏三键，默认
+Grid）。本批落时间线与网格两形态及列数档位；全屏滑动（`FullscreenBrowse`，Swiper +
+内嵌播放器）留 G3b。
+
+- **`media/GalleryForms.ets`**（纯逻辑零平台 import）：形态常量（`timeline/grid/
+  fullscreen`，默认 grid 上游逐字）；`GALLERY_COLUMN_TIERS=[2,3,4,5]` 缺 2 校验
+  （`gallery_columns` 键，上游 `WotaSettings.galleryColumns` 逐字）；
+  `groupTimeline` 直译（今天/昨天/同年 `M 月 D 日`/跨年 `YYYY 年 M 月 D 日`，文案
+  strings_gallery.xml 逐字；epochDay 走 days-from-civil 纯算式取**本地日历日**，
+  上游 Calendar 口径——跨年不误判「昨天」；输入序即组内序不重排，LinkedHashMap
+  插入序同构）。
+- **`pages/Gallery.ets`**：头部行加「时间线/网格」切换 + 网格态「N 列」循环钮
+  （2→3→4→5→2，经 `ParamsStore` 落 `wota_camera_settings` 同盘——上游 WotaSettings
+  单文件口径）。时间线 = 日头 List + 78x58 缩略行（信息列点按 = 系列内联展开/收起，
+  `＋/－` 徽标带 accessibilityText；展开列 `parts.slice(1)` 缩进子段行，首段不重复
+  出行——上游「组内其余成员不单独出行」）+ 动作沿用 `actionRow`；网格 = N 列
+  `Grid` + 16:9 紧凑卡（角标 段数/★，`⋯` 钮 + 单卡长按开**动作菜单 bindSheet**）。
+- **动作菜单 sheet**（`sheetKind='menu'`）：新分支复用 `actionRow` 原样渲染（组级
+  提示行按 `seriesTargets>1` 显隐），7 个动作方法（信息/收藏/回收站/还原/彻底删除/
+  分享/存相册）入口统一「菜单打开即收面板」；标签动作本就切 `tags` 分支。
+- **登记（视觉适应）**：上游卡片动作走 `[⋯]` 弹出菜单（WotaMenuPopup），本侧
+  时间线保留平铺 `actionRow`、网格走菜单 sheet——动作集合逐字一致，承载不同。
+  全屏滑动形态见 G3b。
+- **测试**：`gallery-forms.test.ets` +8（默认形态/列数档位校验/days-from-civil
+  锚点 1970-01-01=0、2000-03-01=11017、2026-10-24=20750/本地日历日 23:30 归当日/
+  四类文案/同日合组与空表/页面双形态与列数持久化守卫/菜单 sheet 复用 actionRow
+  与 9 处 menu 判定守卫）。共 +8（663 → 671）。
+- **回归**：pure-test 60 files / 671 tests 全绿；clean `assembleHap`（release）
+  BUILD SUCCESSFUL。
 
 ## 交付批（ABP：播放页 A-B 段持久化，2026-10-24）
 

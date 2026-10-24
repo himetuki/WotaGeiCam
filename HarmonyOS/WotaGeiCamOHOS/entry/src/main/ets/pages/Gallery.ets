@@ -15,6 +15,11 @@ import { ThumbLoader } from '../media/ThumbLoader';
 import { WotaShare } from '../media/WotaShare';
 import { AlbumSaver } from '../media/AlbumSaver';
 import { formatDuration, formatSize } from '../media/MediaFormat';
+import {
+  DEFAULT_LIST_MODE, GALLERY_COLUMNS_KEY, LIST_GRID, LIST_TIMELINE,
+  TimelineGroup, galleryColumnsOf, groupTimeline
+} from '../media/GalleryForms';
+import { ParamsStore } from '../ui/ParamsStore';
 import { WindowChrome } from '../ui/WindowChrome';
 
 function pad2(v: number): string {
@@ -44,6 +49,11 @@ struct Gallery {
   @State detailMeta: string = '';
   /** 分段折叠开关（会话态，默认开=组卡；关=与上游 collapse=false 同义的扁平基线） */
   @State seriesCollapsed: boolean = true;
+  // G3a：列表形态（上游 ListMode，默认网格逐字；全屏滑动形态 G3b）与网格列数（prefs 持久化）
+  @State listMode: string = DEFAULT_LIST_MODE;
+  @State gridColumns: number = 2;
+  @State expandedSeriesIds: Set<string> = new Set<string>();
+  @State menuClip: VideoClip | undefined = undefined;
   /** CT 批：自定义标签（media_tag 行派生，页签行追加自定义页签） */
   @State customTags: Array<string> = [];
   /** 加标签弹层（对应上游 MediaTagDialog）：对指定片加/移除自定义标签 */
@@ -80,6 +90,11 @@ struct Gallery {
     WindowChrome.lastWindow(ctx).then((win): Promise<void> =>
       WindowChrome.applyStandardDark(win)).catch((e: Object): void => {
     });
+    // G3a：网格列数（上游 WotaSettings.galleryColumns，同 store 单文件口径）
+    const prefs = ParamsStore.open(ctx);
+    if (prefs !== undefined) {
+      this.gridColumns = galleryColumnsOf(prefs.getInt(GALLERY_COLUMNS_KEY, 2));
+    }
     this.repo = new MediaRepo(ctx);
     this.refreshAll();
   }
@@ -389,6 +404,73 @@ struct Gallery {
     return entry === undefined ? [] : entry.parts;
   }
 
+  /** G3a：网格卡 [⋯]/长按开动作菜单（bindSheet menu 分支渲染 actionRow） */
+  private openClipMenu(clip: VideoClip): void {
+    this.menuClip = clip;
+    this.sheetKind = 'menu';
+  }
+
+  /** G3a：网格列数档位循环（2→3→4→5→2，上游顶栏 onColumns 同一持久化键） */
+  private cycleColumns(): void {
+    const tiers: Array<number> = [2, 3, 4, 5];
+    const next: number = tiers[(tiers.indexOf(this.gridColumns) + 1) % tiers.length];
+    this.gridColumns = next;
+    const ctx: common.Context | undefined = this.ctx;
+    const prefs = ctx === undefined ? undefined : ParamsStore.open(ctx);
+    if (prefs !== undefined) {
+      prefs.putInt(GALLERY_COLUMNS_KEY, next);
+      prefs.commit();
+    }
+  }
+
+  /** G3a：时间线按日分组（吃 entryList 的代表段序，输入序即组内序；携带回查好的 entry） */
+  private timelineDays(): Array<TimelineDay> {
+    const entries: Array<GalleryEntry> = this.entryList();
+    const byPath: Map<string, GalleryEntry> = new Map<string, GalleryEntry>();
+    for (const e of entries) {
+      byPath.set(e.clip.path, e);
+    }
+    const reps: Array<VideoClip> = entries.map((e: GalleryEntry): VideoClip => e.clip);
+    return groupTimeline(reps, Date.now()).map((g: TimelineGroup): TimelineDay => {
+      const dayEntries: Array<GalleryEntry> = [];
+      for (const c of g.clips) {
+        const e: GalleryEntry | undefined = byPath.get(c.path);
+        if (e !== undefined) {
+          dayEntries.push(e);
+        }
+      }
+      return new TimelineDay(g.label, g.dayKey, dayEntries);
+    });
+  }
+
+  private gridColumnsTemplate(): string {
+    let t: string = '';
+    for (let i = 0; i < this.gridColumns; i++) {
+      t += '1fr ';
+    }
+    return t.trim();
+  }
+
+  private entryByPath(): Map<string, GalleryEntry> {
+    const m: Map<string, GalleryEntry> = new Map<string, GalleryEntry>();
+    for (const e of this.entryList()) {
+      m.set(e.clip.path, e);
+    }
+    return m;
+  }
+
+  /** G3a：时间线系列行点按 = 内联展开/收起（纯视觉，上游 expandedSeries 同款会话态） */
+  private toggleSeriesExpand(seriesId: number): void {
+    const key: string = String(seriesId);
+    const next: Set<string> = new Set<string>(this.expandedSeriesIds);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    this.expandedSeriesIds = next;
+  }
+
   private openSeriesSheet(entry: GalleryEntry): void {
     if (entry.seriesId !== undefined) {
       this.seriesSheetId = entry.seriesId;
@@ -397,6 +479,9 @@ struct Gallery {
   }
 
   private showDetailOf(clip: VideoClip): void {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const tags: string = clip.tags.size === 0 ? '无' : Array.from(clip.tags).join(', ');
     this.detailName = clip.name;
     this.detailMeta = `${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)} · ` +
@@ -406,6 +491,9 @@ struct Gallery {
   }
 
   private async toggleLike(clip: VideoClip): Promise<void> {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const repo: MediaRepo | undefined = this.repo;
     if (repo === undefined || this.actionBusy) {
       return;
@@ -426,6 +514,9 @@ struct Gallery {
   }
 
   private async moveToTrash(clip: VideoClip): Promise<void> {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const repo: MediaRepo | undefined = this.repo;
     if (repo === undefined || this.actionBusy) {
       return;
@@ -445,6 +536,9 @@ struct Gallery {
   }
 
   private async restore(clip: VideoClip): Promise<void> {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const repo: MediaRepo | undefined = this.repo;
     if (repo === undefined || this.actionBusy) {
       return;
@@ -464,6 +558,9 @@ struct Gallery {
   }
 
   private confirmDelete(clip: VideoClip): void {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const targets: Array<VideoClip> = this.seriesTargets(clip);
     const scope: string = targets.length > 1
       ? `本组 ${targets.length} 段的文件与同名 .drops.json 将被永久删除：\n${clip.name}` :
@@ -503,6 +600,211 @@ struct Gallery {
     } finally {
       this.actionBusy = false;
     }
+  }
+
+  /** G3a：时间线行（上游 TimelineList：日头 + 78x58 缩略行 + 系列内联展开；动作沿用 actionRow） */
+  @Builder
+  timelineCard(entry: GalleryEntry) {
+    Column({ space: 6 }) {
+      Row({ space: 10 }) {
+        Stack({ alignContent: Alignment.BottomStart }) {
+          GalleryThumb({
+            path: entry.clip.path,
+            durationMs: entry.clip.durationMs
+          })
+          if (entry.seriesCount() !== undefined) {
+            Text(`${entry.seriesCount()} 段`)
+              .fontSize(9)
+              .fontColor('#FFCC80')
+              .backgroundColor('#99000000')
+              .borderRadius(4)
+              .padding({ left: 3, right: 3 })
+              .margin(2)
+          }
+        }
+        .width(78)
+        .height(58)
+        .borderRadius(6)
+        .clip(true)
+        .onClick((): void => {
+          this.openPlayer(entry.clip);
+        })
+
+        Column({ space: 2 }) {
+          Text(entry.clip.liked ? `★ ${entry.title()}` : entry.title())
+            .fontSize(13)
+            .fontColor(Color.White)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(`${entry.seriesCount() !== undefined
+            ? `${entry.seriesCount()} 段 · ` : ''}${formatDuration(entry.totalDurationMs())} · ` +
+            `${formatSize(entry.clip.sizeBytes)} · ${formatDate(entry.clip.dateAddedSec)}`)
+            .fontSize(10)
+            .fontColor('#B0BEC5')
+          if (entry.clip.width > 0 && entry.clip.height > 0) {
+            Text(`${entry.clip.width}x${entry.clip.height}`)
+              .fontSize(10)
+              .fontColor('#78909C')
+          }
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        .onClick((): void => {
+          if (entry.seriesId !== undefined) {
+            this.toggleSeriesExpand(entry.seriesId);
+          } else {
+            this.openPlayer(entry.clip);
+          }
+        })
+
+        if (entry.seriesId !== undefined) {
+          Text(this.expandedSeriesIds.has(String(entry.seriesId)) ? '－' : '＋')
+            .fontSize(16)
+            .fontColor('#78909C')
+            .width(20)
+            .textAlign(TextAlign.Center)
+            .accessibilityText(this.expandedSeriesIds.has(String(entry.seriesId))
+              ? '收起分段' : '展开分段')
+            .onClick((): void => {
+              if (entry.seriesId !== undefined) {
+                this.toggleSeriesExpand(entry.seriesId);
+              }
+            })
+        }
+      }
+      .width('100%')
+      this.actionRow(entry.clip)
+      if (entry.seriesId !== undefined && this.expandedSeriesIds.has(String(entry.seriesId))) {
+        ForEach(entry.parts.slice(1), (part: VideoClip, idx: number): void => {
+          Row({ space: 8 }) {
+            Text(`第 ${idx + 2} 段`)
+              .fontSize(10)
+              .fontColor('#FFCC80')
+              .width(40)
+            Column() {
+              GalleryThumb({ path: part.path, durationMs: part.durationMs })
+            }
+            .width(52)
+            .height(38)
+            .borderRadius(4)
+            .clip(true)
+            Column({ space: 2 }) {
+              Text(part.name)
+                .fontSize(11)
+                .fontColor(Color.White)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
+                .fontSize(10)
+                .fontColor('#B0BEC5')
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+          .padding({ left: 34, top: 4, bottom: 4 })
+          .accessibilityText(`第 ${idx + 2} 段，${part.name}，点按打开播放页`)
+          .onClick((): void => {
+            this.openPlayer(part);
+          })
+        }, (part: VideoClip): string => part.path)
+      }
+    }
+    .width('100%')
+    .padding(10)
+    .backgroundColor('#1F1F1F')
+    .borderRadius(8)
+    .gesture(
+      LongPressGesture({ repeat: false, duration: 500 })
+        .onAction((e: GestureEvent): void => {
+          if (entry.seriesCount() !== undefined) {
+            this.openSeriesSheet(entry);
+          }
+        })
+    )
+  }
+
+  /** G3a：网格卡（上游 ClipGrid/ClipCard：16:9 缩略 + 名字/角标 + [⋯] 菜单；动作进 bindSheet） */
+  @Builder
+  gridCard(entry: GalleryEntry) {
+    Column({ space: 4 }) {
+      Stack({ alignContent: Alignment.TopStart }) {
+        Column() {
+          GalleryThumb({ path: entry.clip.path, durationMs: entry.clip.durationMs })
+        }
+        .width('100%')
+        .aspectRatio(16 / 9)
+        .borderRadius(6)
+        .clip(true)
+        Row({ space: 4 }) {
+          if (entry.seriesCount() !== undefined) {
+            Text(`${entry.seriesCount()} 段`)
+              .fontSize(9)
+              .fontColor('#FFCC80')
+              .backgroundColor('#99000000')
+              .borderRadius(4)
+              .padding({ left: 3, right: 3 })
+          }
+          if (entry.clip.liked) {
+            Text('★')
+              .fontSize(10)
+              .fontColor('#FF4D6A')
+              .backgroundColor('#99000000')
+              .borderRadius(4)
+              .padding({ left: 3, right: 3 })
+          }
+        }
+        Row() {
+          Text('⋯')
+            .fontSize(14)
+            .fontColor(Color.White)
+            .backgroundColor('#99000000')
+            .borderRadius(11)
+            .width(22)
+            .height(22)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('操作菜单')
+            .onClick((): void => {
+              this.openClipMenu(entry.clip);
+            })
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.End)
+      }
+      Text(entry.clip.liked ? `★ ${entry.title()}` : entry.title())
+        .fontSize(12)
+        .fontColor(Color.White)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+      Text(`${entry.seriesCount() !== undefined
+        ? `${entry.seriesCount()} 段 · ${formatDuration(entry.totalDurationMs())}` : formatDuration(entry.clip.durationMs)} · ${formatSize(entry.clip.sizeBytes)}`)
+        .fontSize(10)
+        .fontColor('#B0BEC5')
+        .maxLines(1)
+        .width('100%')
+    }
+    .width('100%')
+    .padding(6)
+    .backgroundColor('#1F1F1F')
+    .borderRadius(8)
+    .onClick((): void => {
+      if (entry.seriesId !== undefined) {
+        this.openSeriesSheet(entry);
+      } else {
+        this.openPlayer(entry.clip);
+      }
+    })
+    .gesture(
+      LongPressGesture({ repeat: false, duration: 500 })
+        .onAction((e: GestureEvent): void => {
+          if (entry.seriesCount() !== undefined) {
+            this.openSeriesSheet(entry);
+          } else {
+            this.openClipMenu(entry.clip);
+          }
+        })
+    )
   }
 
   @Builder
@@ -572,6 +874,9 @@ struct Gallery {
 
   /** 系统分享面板（组级动作扇出到整组成员；批量走 BATCH 模式） */
   private async shareClip(clip: VideoClip): Promise<void> {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
       this.message = '无上下文，无法分享';
@@ -585,6 +890,9 @@ struct Gallery {
 
   /** 存入系统相册（showAssetsCreationDialog 系统确认框；组级扇出到整组） */
   private async saveClip(clip: VideoClip): Promise<void> {
+    if (this.sheetKind === 'menu') {
+      this.closeSheet();
+    }
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
       this.message = '无上下文，无法保存';
@@ -608,6 +916,20 @@ struct Gallery {
           .fontSize(18)
           .fontColor(Color.White)
           .layoutWeight(1)
+        Button(this.listMode === LIST_TIMELINE ? '网格' : '时间线')
+          .fontSize(11)
+          .height(26)
+          .onClick((): void => {
+            this.listMode = this.listMode === LIST_TIMELINE ? LIST_GRID : LIST_TIMELINE;
+          })
+        if (this.listMode === LIST_GRID) {
+          Button(`${this.gridColumns}列`)
+            .fontSize(11)
+            .height(26)
+            .onClick((): void => {
+              this.cycleColumns();
+            })
+        }
         Button('刷新')
           .fontSize(12)
           .enabled(!this.loading)
@@ -698,80 +1020,43 @@ struct Gallery {
         .justifyContent(FlexAlign.Center)
         .padding(24)
       } else {
-        List({ space: 8 }) {
-          // 分段归组（上游 SeriesGroup.galleryEntries）：同一次录制的多段折成一张卡，
-          // 代表段 = partIndex 最小者；只剩 1 段时自动退化成单条（与扁平列表逐字等价）。
-          ForEach(this.entryList(), (entry: GalleryEntry): void => {
-            ListItem() {
-              Column({ space: 6 }) {
-                Row({ space: 10 }) {
-                  Stack({ alignContent: Alignment.BottomStart }) {
-                    GalleryThumb({
-                      path: entry.clip.path,
-                      durationMs: entry.clip.durationMs
-                    })
-                    if (entry.seriesCount() !== undefined) {
-                      Text(`${entry.seriesCount()} 段`)
-                        .fontSize(9)
-                        .fontColor('#FFCC80')
-                        .backgroundColor('#99000000')
-                        .borderRadius(4)
-                        .padding({ left: 3, right: 3 })
-                        .margin(2)
-                    }
-                  }
-                  .width(52)
-                  .height(52)
-                  .borderRadius(6)
-                  .clip(true)
-                  .onClick((): void => {
-                    this.openPlayer(entry.clip);
-                  })
-
-                  Column({ space: 2 }) {
-                    Text(entry.clip.liked ? `★ ${entry.title()}` : entry.title())
-                      .fontSize(13)
-                      .fontColor(Color.White)
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(`${entry.seriesCount() !== undefined
-                      ? `${entry.seriesCount()} 段 · ` : ''}${formatDuration(entry.totalDurationMs())} · ` +
-                      `${formatSize(entry.clip.sizeBytes)} · ${formatDate(entry.clip.dateAddedSec)}`)
-                      .fontSize(10)
-                      .fontColor('#B0BEC5')
-                    if (entry.clip.width > 0 && entry.clip.height > 0) {
-                      Text(`${entry.clip.width}x${entry.clip.height}`)
-                        .fontSize(10)
-                        .fontColor('#78909C')
-                    }
-                  }
-                  .layoutWeight(1)
-                  .alignItems(HorizontalAlign.Start)
-                  .onClick((): void => {
-                    this.openPlayer(entry.clip);
-                  })
-                }
-                this.actionRow(entry.clip)
+        if (this.listMode === LIST_TIMELINE) {
+          List({ space: 6 }) {
+            ForEach(this.timelineDays(), (day: TimelineDay): void => {
+              ListItem() {
+                Text(day.label)
+                  .fontSize(13)
+                  .fontColor('#78909C')
+                  .width('100%')
+                  .padding({ top: 8, bottom: 0, left: 2 })
               }
-              .width('100%')
-              .padding(10)
-              .backgroundColor('#1F1F1F')
-              .borderRadius(8)
-              .gesture(
-                LongPressGesture({ repeat: false, duration: 500 })
-                  .onAction((e: GestureEvent): void => {
-                    if (entry.seriesCount() !== undefined) {
-                      this.openSeriesSheet(entry);
-                    }
-                  })
-              )
-            }
-          }, (entry: GalleryEntry): string =>
-            entry.seriesId === undefined ? entry.clip.path : `series_${entry.seriesId}`)
+              ForEach(day.entries, (entry: GalleryEntry): void => {
+                ListItem() {
+                  this.timelineCard(entry)
+                }
+              }, (entry: GalleryEntry): string =>
+                entry.seriesId === undefined ? entry.clip.path : `series_${entry.seriesId}`)
+            }, (day: TimelineDay): string => `d_${day.dayKey}`)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .padding({ left: 12, right: 12 })
+        } else {
+          Grid() {
+            ForEach(this.entryList(), (entry: GalleryEntry): void => {
+              GridItem() {
+                this.gridCard(entry)
+              }
+            }, (entry: GalleryEntry): string =>
+              entry.seriesId === undefined ? entry.clip.path : `series_${entry.seriesId}`)
+          }
+          .columnsTemplate(this.gridColumnsTemplate())
+          .columnsGap(6)
+          .rowsGap(8)
+          .layoutWeight(1)
+          .width('100%')
+          .padding({ left: 12, right: 12 })
         }
-        .layoutWeight(1)
-        .width('100%')
-        .padding({ left: 12, right: 12 })
       }
 
       if (this.showDetail) {
@@ -863,6 +1148,28 @@ struct Gallery {
       }
       .width('100%')
       .height('100%')
+    } else if (this.sheetKind === 'menu') {
+      Column({ space: 8 }) {
+        if (this.menuClip !== undefined && this.seriesTargets(this.menuClip).length > 1) {
+          Text('组级动作自动作用于该次录制的全部段。')
+            .fontSize(11)
+            .fontColor('#78909C')
+            .width('100%')
+        }
+        if (this.menuClip !== undefined) {
+          this.actionRow(this.menuClip)
+        }
+        Button('关闭')
+          .fontSize(11)
+          .height(26)
+          .width('100%')
+          .onClick((): void => {
+            this.closeSheet();
+          })
+      }
+      .width('100%')
+      .height('100%')
+        .padding({ top: 4 })
     } else {
       Column({ space: 6 }) {
         Row({ space: 6 }) {
@@ -929,6 +1236,9 @@ struct Gallery {
     if (this.sheetKind === 'tags') {
       return `标签：${this.tagDialogClip !== undefined ? this.tagDialogClip.name : ''}`;
     }
+    if (this.sheetKind === 'menu') {
+      return `操作：${this.menuClip !== undefined ? this.menuClip.name : ''}`;
+    }
     return '';
   }
 
@@ -937,6 +1247,7 @@ struct Gallery {
     this.seriesSheetId = undefined;
     this.tagDialogClip = undefined;
     this.tagInput = '';
+    this.menuClip = undefined;
   }
 }
 
@@ -944,6 +1255,19 @@ struct Gallery {
  * 媒体卡缩略图（上游 VideoThumbnail 的对应物）：ThumbLoader 取中点帧，命中即显示，
  * 未就绪/失败退 MP4 占位块。@Prop 驱动：列表滚动复用组件时 path 变化会重新加载。
  */
+/** G3a：时间线一个日组（label/dayKey 来自纯逻辑；entries 已回查成页面 entry） */
+class TimelineDay {
+  label: string;
+  dayKey: string;
+  entries: Array<GalleryEntry>;
+
+  constructor(label: string, dayKey: string, entries: Array<GalleryEntry>) {
+    this.label = label;
+    this.dayKey = dayKey;
+    this.entries = entries;
+  }
+}
+
 @Component
 struct GalleryThumb {
   @Prop @Watch('onPathChange') path: string = '';
