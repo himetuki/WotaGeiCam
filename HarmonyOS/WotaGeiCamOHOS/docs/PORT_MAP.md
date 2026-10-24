@@ -25,7 +25,7 @@
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `BtSpeakerController.kt`（媒体音量/播放控制/电量） | 平台绑定 | `@ohos.bluetooth.ble/constant` + A2DP，电量走 GATT 电池服务 | ☐ |
+| `BtSpeakerController.kt`、`ui/dialog/BtSpeakerPanel.kt`（媒体音量/播放控制/电量） | 平台绑定 | **BT 批已落（2026-10-24，减法定版）**：`bt/BtSpeakerModel.ets`（纯逻辑：配对表+A2DP 连接表合并去重、已连接置前其余稳定保输入序、电量/状态文案——未上报显「—」不编 0%）+ `bt/BtSpeakerController.ets`（`connection.getPairedDevices`/`getRemoteDeviceName` + `a2dp.createA2dpSrcProfile().getConnectedDevices` + `getRemoteDeviceBatteryInfo`(since 12) + `on('batteryChange')` 实时刷新；异常全折成「蓝牙未开」引导或空表+日志）+ `pages/BtPanel.ets`（列表/连接徽标/电量/刷新/引导态；页脚一行减法说明）+「更多」面板入口。**登记**：① 电量**不走 GATT 电池服务**（原登记作废，`getRemoteDeviceBatteryInfo` 直取）；② `BatteryInfo` **不带 deviceId**（SDK 核实，只有 batteryLevel+左右耳/仓三组）——回执按「首个已连接设备」合并，双连接另一台靠手动刷新；③ **不迁**（调研报告 §1，无三方等价物）：STREAM_MUSIC 音量写（AudioVolumeGroupManager 无 setVolume）、播放/上一曲/下一曲（avsession 控制器需 system 权限）、扫描发现（startBluetoothDiscovery 需定位权限，连接管理交系统设置）；④ 权限 `ACCESS_BLUETOOTH`（normal，只声明不弹窗）。真机待验：801 能力不支持机型、电量实时性、双连接场景 | ☑ 部分（减法版） |
 
 ## camera — 相机引擎与 GL 渲染
 
@@ -117,6 +117,25 @@
 > 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
+
+## 交付批（BT：蓝牙音箱面板减法版，2026-10-24）
+
+上游 `bt/BtSpeakerController.kt`（516 行）+ `ui/dialog/BtSpeakerPanel.kt`（376 行）的**减法移植**
+（调研报告 §1 定版：列表/连接/电量有等价甚至更优，音量写与播控无三方等价）。
+
+- `bt/BtSpeakerModel.ets`（纯逻辑）：`mergeEntries`（配对表 × A2DP 连接表：去重按 deviceId、
+  连接表有而配对表无的补入、**已连接置前其余稳定保输入序**——中文名字节序无意义且重排会跳位）、
+  `batteryText`（-1/越界 =「电量 —」，0% 是合法低电不许混写）、`stateText`。
+- `bt/BtSpeakerController.ets`（平台）：配对/名字/A2DP 连接/电量全链 + `batteryChange` 实时刷新；
+  一切异常（蓝牙关 2900003 / 能力 801 / 服务未起）折成引导态或空表。**BatteryInfo 无 deviceId**
+  （编译期抓获，SDK 只有 batteryLevel + 耳塞三仓组）→ 回执按「首个已连接设备」合并（登记）。
+- `pages/BtPanel.ets`：列表（名/电量/连接徽标）、刷新、蓝牙未开引导、页脚减法说明；
+  订阅挂/解与页面生命周期同进退。入口：「更多」面板「蓝牙 → 音箱…」（先收面板再跳页）。
+- **测试**：`bt-speaker.test.ets`（8：合并去重/补入/连接置前/稳定序、电量文案边界、
+  两条源码接线守卫——含「不许出现 setVolume/avsession/startBluetoothDiscovery」的减法红线
+  与 ACCESS_BLUETOOTH 声明检查）。共 +8（595 → 603）。
+- **回归**：pure-test 49 files / 603 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **真机待验**：无蓝牙能力机型（801）的引导态、电量刷新实时性、双 A2DP 连接场景的合并行为。
 
 ## 交付批（MS：分享/缩略图/存入相册，2026-10-24）
 
@@ -783,7 +802,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（595）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（603）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -841,7 +860,8 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   顺序跟表走/默认表=枚举序回归线/编辑页与相机页接线守卫 2）、
   media-mime-thumb（12，MS 批：MIME/UTD/title 映射表 + ThumbLru 驱逐序）、
   media-share-wiring（4，MS 批：三条链单一真源 + Gallery 入口与扇出 + 零新增权限红线 +
-  createAsset since 22 禁用）。
+  createAsset since 22 禁用）、bt-speaker（8，BT 批：合并/排序/电量文案 6 + 接线守卫 2
+  （含减法红线 setVolume/avsession/startBluetoothDiscovery 禁用与 ACCESS_BLUETOOTH 声明））。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；

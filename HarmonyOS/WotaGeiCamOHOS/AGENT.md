@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 595 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 603 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -98,6 +98,9 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `expandSeriesTargets` 扇出**，否则会出现「只动首段」的半截状态。`MimeMap`（MIME/UTD/title 纯映射，
   平台件不许手写类型串）、`WotaShare`（systemShare 面板）、`ThumbLru`+`ThumbLoader`（缩略图，
   **驱逐不 release**——PixelMap 可能正在显示）、`AlbumSaver`（showAssetsCreationDialog，零权限）。
+- `bt/`：`BtSpeakerModel`（纯逻辑：合并/排序/文案）+ `BtSpeakerController`（平台：配对/A2DP/电量）。
+  **减法红线**（接线守卫钉住）：不得引入 setVolume / avsession / startBluetoothDiscovery——
+  音量写、播控、扫描发现在 OHOS 无三方等价物（登记 PORT_MAP BT 节），不许"补齐"。
 - `record/`：`CaptureStateMachine`（内录授权态机）、`CaptureSilence`（静音判据+按场节流）、
   `AudioProbe`（采集算式/档位体检）、`CaptureSources`（OH_AudioCaptureSourceType 契约）、
   `ArcRepairPlan`/`ArcRepairFlow`/`ArcRepairMerge`/`ArcRepairVerdict`（离线光弧修复纯逻辑）、

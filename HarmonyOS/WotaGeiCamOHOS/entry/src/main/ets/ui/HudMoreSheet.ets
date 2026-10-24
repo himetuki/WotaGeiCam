@@ -22,6 +22,7 @@ export struct HudMoreSheet {
   onCycleEffect: () => void = (): void => {};
   onCycleArc: () => void = (): void => {};
   onToggleGrid: () => void = (): void => {};
+  onOpenBt: () => void = (): void => {};
   onClose: () => void = (): void => {};
 
   build() {
@@ -111,6 +112,27 @@ export struct HudMoreSheet {
           .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
           .onClick((): void => {
             this.onToggleGrid();
+          })
+        Blank()
+      }
+      .width('100%')
+
+      // 蓝牙音箱面板入口（减法版：列表/连接态/电量；音量与播控不迁，页脚说明）
+      Row({ space: HudSpaceGap.M }) {
+        Text('蓝牙')
+          .fontSize(HudType.LABEL)
+          .fontColor(HudColor.TEXT_SECONDARY)
+          .width(56)
+        Button('音箱…')
+          .fontSize(HudType.VALUE)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .height(HudTouch.PILL_HEIGHT)
+          .borderRadius(HudShape.PILL_RADIUS)
+          .backgroundColor(HudColor.PILL_BG)
+          .padding({ left: 14, right: 14 })
+          .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
+          .onClick((): void => {
+            this.onOpenBt();
           })
         Blank()
       }

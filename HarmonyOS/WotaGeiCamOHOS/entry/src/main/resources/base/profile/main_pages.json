@@ -7,6 +7,7 @@
     "pages/Gallery",
     "pages/Player",
     "pages/Compare",
-    "pages/HudEditor"
+    "pages/HudEditor",
+    "pages/BtPanel"
   ]
 }

@@ -19,6 +19,10 @@
     {
       "name": "mic_perm_reason",
       "value": "Used to record audio with video"
+    },
+    {
+      "name": "bt_perm_reason",
+      "value": "Used to show Bluetooth speaker connection and battery"
     }
   ]
 }

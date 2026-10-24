@@ -2166,6 +2166,11 @@ struct CameraPage {
           onToggleGrid: (): void => {
             this.toggleGrid();
           },
+          onOpenBt: (): void => {
+            // 先收面板再跳页（面板挂在相机页 Stack 里，带着跳会残留遮罩）
+            this.moreOpen = false;
+            this.getUIContext().getRouter().pushUrl({ url: 'pages/BtPanel' });
+          },
           onClose: (): void => {
             this.closeMore();
           }
