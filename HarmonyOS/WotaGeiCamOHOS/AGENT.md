@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 607 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 612 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -135,6 +135,9 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `UpdateDownloader`（唯一允许 `@ohos.net.http` 的文件：测速选路 + 流式落盘 + 三重校验）、
   `UpdateInstaller`（结构核对 + 文件选择器另存 + 浏览器兜底）。**版本比较用 versionCode**
   （CI 注入公式），**HAP 校验值读同 tag 的 `SHA256SUMS`**（说明里的 SHA256 行是安卓 APK 的）。
+- `ui/ParamPills.ets` 的弹层滑杆现为 **5 根**（快门/ISO/色温/对焦屈光度 + EV 整数域 null）——
+  slider-snap 接线守卫按调用点计数 5 钉住；**tint 副轴不迁**（setWhiteBalance 无 RGB 增益接口，
+  WbPillPopup 里不许出现 tint 控件，守卫钉住）。
 - 设置页开发者入口默认隐藏：版本号 2s 内 7 连点显形（Index/GlPreview 仅此入口可达，均有页头+返回）。
 - 以上模块**不得 import `@ohos.*`/`@kit.*`**；新增纯逻辑模块须进 `PureLogicBarrel`，否则 hvigor
   不可达、编译门失效。`test/pure/*.test.ets` 由 `scripts/pure-test.mjs` 转译执行。

@@ -23,8 +23,12 @@ import {
 /** 枚举成员名（string enum 无反向映射，键表点名用它拼 `SliderKey.XXX` 检索） */
 const KEY_NAMES: Array<string> = ['SHUTTER', 'ISO', 'KELVIN', 'TINT', 'ZOOM', 'DIOPTER', 'PEAKING'];
 
-/** 有消费方的键（弹层滑杆挂了 snapKey 的三根）；其余四键 UI 留白（设置页不列） */
-const CONSUMED_NAMES: Array<string> = ['SHUTTER', 'ISO', 'KELVIN'];
+/**
+ * 有消费方的键（弹层滑杆挂了 snapKey 的）：SHUTTER/ISO/KELVIN（T21 三根）+
+ * DIOPTER（FC 批对焦弹层）。其余三键（TINT/ZOOM/PEAKING）UI 留白（设置页不列）——
+ * TINT 因白平衡副轴平台无等价物不迁（FC 批决策，见 focus-pill.test.ets）。
+ */
+const CONSUMED_NAMES: Array<string> = ['SHUTTER', 'ISO', 'KELVIN', 'DIOPTER'];
 
 /** 从转译产物目录向上找仓库根（含 entry/src/main/ets/ui/PillPopup.ets 的祖先目录） */
 function srcRoot(): string {
@@ -99,11 +103,11 @@ function wiringIssues(popup: string, pills: string, settings: string, store: str
     }
   }
 
-  // 3) 弹层四根滑杆逐个点名（1 根整数域显式 null，3 根各一次）
-  if (occurrences(pills, 'PillSlider({') !== 4) {
-    bad.push('PillSlider 调用点不是 4 处');
+  // 3) 弹层五根滑杆逐个点名（1 根整数域显式 null，4 根各一次；FC 批加对焦屈光度）
+  if (occurrences(pills, 'PillSlider({') !== 5) {
+    bad.push('PillSlider 调用点不是 5 处');
   }
-  if (occurrences(pills, 'snapKey:') !== 4) {
+  if (occurrences(pills, 'snapKey:') !== 5) {
     bad.push('有滑杆没点名 snapKey');
   }
   if (occurrences(pills, 'snapKey: null') !== 1) {

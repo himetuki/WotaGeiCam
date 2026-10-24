@@ -3,17 +3,19 @@
  * （对齐上游 38d712a，对拍段 :236-628）。
  *
  * 本批边界（登记 PORT_MAP §ui）：
- * - ZOOM/FOCUS 胶囊不进本批 → RECORDING_EDITABLE_PILLS 移植为 {ISO, EV, WB}
- *   （上游 {ISO, EV, WB, ZOOM, FOCUS}，差异登记）；
+ * - ZOOM 为 Dock 直循环胶囊（无弹层）；FOCUS 弹层已落（FC 批 2026-10-24）→
+ *   RECORDING_EDITABLE_PILLS = {ISO, EV, WB, FOCUS}（对齐上游 {ISO,EV,WB,ZOOM,FOCUS} 减 ZOOM——
+ *   本侧变焦无弹层，录制门控不适用）；
  * - 快门弹层不做快捷 chip（上游 2026-10-17 已删），直接对齐刻度滑杆最终形态；
- * - WbPill 只做预设 + 色温（tint 副轴留白：OHOS 无 RGB 增益接口）；
+ * - WbPill 只做预设 + 色温（tint 副轴**平台无等价物不迁**：OHOS setWhiteBalance 只吃 kelvin，
+ *   无 RGB 增益接口——造假滑杆比没有更糟，登记 PORT_MAP）；
  * - 高级参数不持久化（上游 ParamsPersist 留白），会话内有效；
  * - 每次改动经 onApply 回调上抛，由 Camera 页 engine.applyParams 下发并汇总报告。
  */
-import { AeMode, WbPreset, WbPresets, WotaTiers } from '../core/Constants';
+import { AeMode, AfMode, WbPreset, WbPresets, WotaTiers } from '../core/Constants';
 import { CameraAbility, RangeI, pickFpsRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
-import { evLadder, isoLadder, kelvinLadder, shutterLadder } from './SliderLadder';
+import { evLadder, isoLadder, kelvinLadder, shutterLadder, diopterLadder } from './SliderLadder';
 import { TierItem, aeLabel, evText, shutterItems, shutterText, wbLabel } from './ParamFormat';
 import { PillChoices, PillNote, PillOption, PillRect, PillSlider, WotaPillPopup } from './PillPopup';
 import { SliderKey } from './SliderSnap';
@@ -23,7 +25,7 @@ import { SliderKey } from './SliderSnap';
  * 其余胶囊录制中可开窗但控件只读。单点定义——弹窗控件闸引用这一张表。
  * 与上游差异：上游含 ZOOM/FOCUS，本批未移植这两颗胶囊（登记 PORT_MAP §ui）。
  */
-export const RECORDING_EDITABLE_PILLS: Set<string> = new Set<string>(['iso', 'ev', 'wb']);
+export const RECORDING_EDITABLE_PILLS: Set<string> = new Set<string>(['iso', 'ev', 'wb', 'focus']);
 
 /** 录制中该弹窗是否可调（非录制态由调用方直接判 editing 前置，与上游同形） */
 export function pillEditableDuringRecording(key: string): boolean {
@@ -413,6 +415,89 @@ export struct WbPillPopup {
           },
           formatLabel: (v: number): string => `${Math.round(v)}K`
         })
+      }
+    }
+  }
+}
+
+/**
+ * 对焦弹层（FC 批，上游 CameraPills 的 FocusPill 对应物）：
+ * AF 模式（连续/手动）+ MANUAL 时的屈光度滑杆（diopterLadder，T22 备好）。
+ * 手动对焦距离受能力闸：range 缺失（定焦头/探针不支持）时滑杆不显示、只留说明。
+ * 录制中可调（RECORDING_EDITABLE_PILLS 含 focus，对齐上游）。
+ */
+@Component
+export struct FocusPillPopup {
+  anchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  params: WotaParams = new WotaParams();
+  ability: CameraAbility | undefined = undefined;
+  editable: boolean = true;
+  onClose: () => void = (): void => {};
+  onApply: () => void = (): void => {};
+  @State afMode: AfMode = AfMode.CONTINUOUS_VIDEO;
+  @State diopter: number = 0;
+  private lo: number = 0;
+  private hi: number = 0;
+  private hasRange: boolean = false;
+  private ladder: Array<number> = [];
+
+  aboutToAppear(): void {
+    this.afMode = this.params.afMode.value;
+    this.diopter = this.params.manualFocusDiopter.value.value;
+    const range = this.params.manualFocusDiopter.value.range;
+    if (range !== undefined && range.hi > range.lo) {
+      this.lo = range.lo;
+      this.hi = range.hi;
+      this.hasRange = true;
+      this.ladder = diopterLadder(this.lo, this.hi);
+    }
+  }
+
+  build() {
+    WotaPillPopup({
+      anchor: this.anchor,
+      panelTitle: '对焦',
+      onDismiss: (): void => {
+        this.onClose();
+      }
+    }) {
+      PillChoices({
+        options: [
+          new PillOption(AfMode.CONTINUOUS_VIDEO as number, '连续', true),
+          new PillOption(AfMode.MANUAL as number, '手动',
+            this.hasRange || this.ability === undefined)
+        ],
+        selected: this.afMode as number,
+        perRow: 2,
+        active: this.editable,
+        onPick: (opt: PillOption): void => {
+          const next: AfMode = opt.value as AfMode;
+          this.afMode = next;
+          this.params.afMode.value = next;
+          this.onApply();
+        }
+      })
+      if (this.afMode === AfMode.MANUAL && this.hasRange) {
+        PillSlider({
+          current: this.diopter,
+          lo: this.lo,
+          hi: this.hi,
+          snapKey: SliderKey.DIOPTER,
+          step: (this.hi - this.lo) / 40,
+          ladder: this.ladder,
+          active: this.editable,
+          sliderLabel: '对焦距离',
+          onValueChange: (v: number): void => {
+            const value: number = Math.round(v * 10) / 10;
+            this.diopter = value;
+            this.params.manualFocusDiopter.value = withValue(this.params.manualFocusDiopter.value, value);
+            this.onApply();
+          },
+          formatLabel: (v: number): string => `${(Math.round(v * 10) / 10).toFixed(1)}m⁻¹`
+        })
+      }
+      if (this.afMode === AfMode.MANUAL && !this.hasRange) {
+        PillNote({ noteText: '本机镜头不支持手动对焦距离（定焦头或探针不支持），仅切模式。' })
       }
     }
   }

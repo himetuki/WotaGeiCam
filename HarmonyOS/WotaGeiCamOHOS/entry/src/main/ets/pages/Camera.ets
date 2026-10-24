@@ -53,7 +53,7 @@ import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
-import { AeMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size } from '../core/Constants';
+import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size } from '../core/Constants';
 import { CameraAbility, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
@@ -87,7 +87,7 @@ import { SafeInsets, WindowChrome } from '../ui/WindowChrome';
 import { evText, shutterText, wbShort } from '../ui/ParamFormat';
 import { PillRect } from '../ui/PillPopup';
 import {
-  EvPillPopup, IsoPillPopup, ShutterPillPopup, WbPillPopup, pillEditableDuringRecording
+  EvPillPopup, FocusPillPopup, IsoPillPopup, ShutterPillPopup, WbPillPopup, pillEditableDuringRecording
 } from '../ui/ParamPills';
 import { LensSlot } from '../core/LensSlot';
 
@@ -1720,6 +1720,9 @@ struct CameraPage {
     if (key === 'ev') {
       return `EV:${this.pillEvLabel}`;
     }
+    if (key === 'focus') {
+      return `对焦:${this.params.afMode.value === AfMode.MANUAL ? '手动' : '连续'}`;
+    }
     return `WB:${this.pillWbLabel}`;
   }
 
@@ -2191,6 +2194,20 @@ struct CameraPage {
           params: this.params,
           ability: this.ability,
           editable: !this.recording || pillEditableDuringRecording('wb'),
+          onClose: (): void => {
+            this.closePill();
+          },
+          onApply: (): void => {
+            this.applyParamsFromPills();
+          }
+        })
+      }
+      if (this.activePill === 'focus') {
+        FocusPillPopup({
+          anchor: this.pillAnchor,
+          params: this.params,
+          ability: this.ability,
+          editable: !this.recording || pillEditableDuringRecording('focus'),
           onClose: (): void => {
             this.closePill();
           },

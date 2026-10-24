@@ -49,7 +49,7 @@ export class HudSpec {
     return '时长';
   }
 
-  /** 底部 Dock 主胶囊（2×4 两行）：第一行镜头/画幅/帧率/变焦，第二行快门/ISO/EV/WB */
+  /** 底部 Dock 主胶囊（2 行）：第一行镜头/画幅/帧率/变焦，第二行快门/ISO/EV/WB/对焦（FC 批 5 颗） */
   static readonly DOCK_ROW1: Array<string> = ['lens', 'size', 'fps', 'zoom'];
-  static readonly DOCK_ROW2: Array<string> = ['shutter', 'iso', 'ev', 'wb'];
+  static readonly DOCK_ROW2: Array<string> = ['shutter', 'iso', 'ev', 'wb', 'focus'];
 }
