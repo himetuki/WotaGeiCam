@@ -118,6 +118,31 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（CT：自定义标签页，2026-10-24）
+
+上游 Gallery 自定义标签（需求「标记 tag 无数量限制，需要有按分类的标签页」）的接线：
+`media/MediaTag.TagSpace`（normalize/isCustom，T20 期已落）+ `MediaRepo` 通用 tag 变异
+（insertTag/deleteTag，DB 批已落）早已备齐——缺的只是 Gallery 的派生页签与标签弹层。
+
+- **派生**（`media/MediaTag.ets` 增 `CustomTags.ofRows`）：media_tag 行 → 过滤系统保留
+  （like/trash 及大小写变体）→ 按 createdAt 升序 → 去重。页签顺序 = 首次使用时间（稳定，
+  不随刷新跳位）。
+- **MediaRepo**：`addTag(clip, rawTag)`（TagSpace.normalize 守卫：去空白/≤24 字/不含保留词；
+  非法返回提示不静默截断；insertTag 带 createdAt）/ `removeTag(clip, tag)` / `customTags()`
+  （经 `CustomTags.ofRows` 派生）。
+- **Gallery**：
+  - 页签行 = 系统 3 页签 + 自定义页签（`customTags` 派生；「分段合并」开关旁的页签行同一
+    ForEach 渲染）；自定义页签缩后 `clampedSelection` 矫正选中（上游调用点同款）；
+  - 卡片动作行加「标签」按钮 → **标签弹层**（上游 MediaTagDialog 对应物）：TextInput 加标签
+    （normalize 守卫）+ 现有自定义标签清单逐条移除；刷新后按路径找回 clip 更新清单；
+  - 加/移除后 `refreshAll`（页签表随 media_tag 行即时增减）。
+- **决策（登记）**：标签重命名不迁（同重命名决策——ID=路径哈希，改名必坏账）；自定义页签
+  的删除（无片引用的空页签随 media_tag 清理自动消失，无需手动管理页签表）。
+- **测试**：`custom-tags.test.ets`（4：派生排序/过滤/去重、空表、Gallery 派生页签与弹层
+  接线守卫、三上游键名/函数守卫）。共 +4（641 → 645）。
+- **回归**：pure-test 57 files / 645 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **模拟器待验**：加自定义标签后页签即时出现、切页签过滤正确、移除标签后空页签自动消失。
+
 ## 交付批（TFC：取景页 tap-to-focus，2026-10-24）
 
 上游「点按预览 = 对焦 + 测光」的手势接线（§ui 行「tap-to-focus 留 T32 手势分派批」收口）。
@@ -1008,7 +1033,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（641）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（645）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/

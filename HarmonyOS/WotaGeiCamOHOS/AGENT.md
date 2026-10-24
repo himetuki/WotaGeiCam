@@ -95,6 +95,8 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `SyncPrefsStore`（平台件）：TrackSync 五键 ↔ `@ohos.data.preferences`；`Player` 导出/修复的
   音轨平移只消费它读到的快照（**拿不到 = 不平移**，绝不猜）。导出/修复平移的口径单一真源是
   `ClipRule.audioShiftUs` + `ClipRule.remuxAudioSampleWritable`，C++ 只是同式镜像。
+- `media/CustomTags`（在 MediaTag.ets 内）：自定义页签派生（createdAt 升序+去重）——
+  Gallery 页签行与标签弹层消费；加/删走 MediaRepo.addTag/removeTag（normalize 守卫）。
 - `media/` 决策钉子：**重命名不迁**（媒体 ID=相对路径 32 位 FNV-1a，改名即换 id——标签/回收站/
   系列成员失联；前置 id 架构升级，守卫钉住 Gallery 无重命名入口）；组卡长按开分段清单、
   「分段合并」开关关 = `galleryEntries(clips, false)` 扁平基线。
