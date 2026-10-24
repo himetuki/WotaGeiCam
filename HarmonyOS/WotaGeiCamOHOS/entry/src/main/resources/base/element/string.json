@@ -23,6 +23,10 @@
     {
       "name": "bt_perm_reason",
       "value": "Used to show Bluetooth speaker connection and battery"
+    },
+    {
+      "name": "keep_bg_perm_reason",
+      "value": "Used to keep video recording alive when the app goes to background"
     }
   ]
 }

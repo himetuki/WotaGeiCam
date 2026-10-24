@@ -65,6 +65,7 @@ import {
 } from '../record/RecordHealth';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
+import { RecordTask } from '../record/RecordTask';
 import { DeviceStatus } from '../camera/DeviceStatus';
 import { BitratePolicy } from '../record/BitratePolicy';
 import { VideoStore } from '../record/VideoStore';
@@ -1347,6 +1348,10 @@ struct CameraPage {
       return;
     }
     this.recording = true;
+    // 长时任务（上游前台服务的对应物）：切后台续录；失败只记日志不阻塞录制
+    if (this.ctx !== undefined) {
+      RecordTask.start(this.ctx);
+    }
     this.stopPending = false;
     this.stopReason = '';
     this.lastStopSummary = '';
@@ -1664,6 +1669,10 @@ struct CameraPage {
     this.healthPausedByHide = false;
     const summary: string = this.recorder.stop();
     this.recording = false;
+    // 长时任务收口（幂等）：所有停录终态都汇到 finishRecord，这里解一次即可
+    if (this.ctx !== undefined) {
+      RecordTask.stop(this.ctx);
+    }
     this.stopPending = false;
     this.elapsedMs = 0;
     this.recordStartedAtMs = 0;
