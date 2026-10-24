@@ -20,6 +20,7 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { HudItems, Size } from '../core/Constants';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
+import { UserSettings } from '../core/UserSettings';
 import { Diag } from '../diag/Diag';
 import { PARAMS_STORE_NAME } from './ParamsStore';
 import {
@@ -39,6 +40,14 @@ const KEY_HUD_ITEMS: string = 'hud_items';
 const KEY_HUD_LAYOUT: string = 'hud_layout';
 /** 界面方向（上游 WotaSettings.KEY_UI_ORIENTATION，逐字一致；'portrait' | 'landscape'） */
 const KEY_UI_ORIENTATION: string = 'ui_orientation';
+/** 编排节拍（上游 WotaSettings.KEY_COMPARE_TICK_MS，逐字一致） */
+const KEY_COMPARE_TICK_MS: string = 'compare_tick_ms';
+/** 取景文本缩放（上游 WotaSettings.KEY_TEXT_SCALE_CAMERA，逐字一致；%） */
+const KEY_TEXT_SCALE_CAMERA: string = 'text_scale_camera';
+/** 诊断总开关（上游 WotaSettings.KEY_DIAG_ENABLED，逐字一致） */
+const KEY_DIAG_ENABLED: string = 'diag_enabled';
+/** 诊断详细档（上游 WotaSettings.KEY_DIAG_VERBOSE，逐字一致） */
+const KEY_DIAG_VERBOSE: string = 'diag_verbose';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -77,6 +86,14 @@ export class CameraSettings {
    * 本侧 portrait（竖屏固定）——鸿蒙 HUD 是 T31 竖屏取证设计（core/UIOrientation.ets 头注）。
    */
   uiOrientation: UIOrientation = UIOrientations.DEFAULT;
+  /** 对比页编排节拍（上游 compare_tick_ms；缺键 200，钳 100..1000） */
+  compareTickMs: number = UserSettings.COMPARE_TICK_DEFAULT_MS;
+  /** 取景文本缩放（上游 text_scale_camera；%，默认 100） */
+  textScaleCameraPct: number = UserSettings.TEXT_SCALE_DEFAULT_PCT;
+  /** 诊断总开关（上游 diag_enabled；默认关——隐私承诺照搬） */
+  diagEnabled: boolean = false;
+  /** 诊断详细档（上游 diag_verbose；默认关） */
+  diagVerbose: boolean = false;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -150,6 +167,16 @@ export class SettingsStore {
         UIOrientations.persistValue(s.uiOrientation));
       s.uiOrientation = typeof oriRaw === 'string'
         ? UIOrientations.fromPersistValue(oriRaw as string) : s.uiOrientation;
+      const tickRaw: preferences.ValueType = await store.get(KEY_COMPARE_TICK_MS, s.compareTickMs);
+      s.compareTickMs = typeof tickRaw === 'number'
+        ? UserSettings.compareTickMsOf(tickRaw as number) : s.compareTickMs;
+      const tsRaw: preferences.ValueType = await store.get(KEY_TEXT_SCALE_CAMERA, s.textScaleCameraPct);
+      s.textScaleCameraPct = typeof tsRaw === 'number'
+        ? UserSettings.textScalePctOf(tsRaw as number) : s.textScaleCameraPct;
+      const deRaw: preferences.ValueType = await store.get(KEY_DIAG_ENABLED, s.diagEnabled);
+      s.diagEnabled = typeof deRaw === 'boolean' ? deRaw as boolean : s.diagEnabled;
+      const dvRaw: preferences.ValueType = await store.get(KEY_DIAG_VERBOSE, s.diagVerbose);
+      s.diagVerbose = typeof dvRaw === 'boolean' ? dvRaw as boolean : s.diagVerbose;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -195,6 +222,10 @@ export class SettingsStore {
       await store.put(KEY_HUD_ITEMS, s.hudItems);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
+      await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);
+      await store.put(KEY_TEXT_SCALE_CAMERA, s.textScaleCameraPct);
+      await store.put(KEY_DIAG_ENABLED, s.diagEnabled);
+      await store.put(KEY_DIAG_VERBOSE, s.diagVerbose);
       await store.flush();
       return true;
     } catch (e) {
@@ -207,6 +238,63 @@ export class SettingsStore {
    * 冷启同步读界面方向（EntryAbility 在 loadContent 前落窗口方向；走 getPreferencesSync，
    * 与 sliderContinuousKeys 同款）。坏串/缺键回默认（竖屏固定）。
    */
+  /** 冷启同步读编排节拍（Compare 页 aboutToAppear 用） */
+  static compareTickMsSync(ctx: common.Context): number {
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
+      const raw: preferences.ValueType = store.getSync(KEY_COMPARE_TICK_MS, UserSettings.COMPARE_TICK_DEFAULT_MS);
+      return typeof raw === 'number'
+        ? UserSettings.compareTickMsOf(raw as number) : UserSettings.COMPARE_TICK_DEFAULT_MS;
+    } catch (e) {
+      Diag.w(TAG, `read compare_tick_ms failed, use default: ${e}`);
+      return UserSettings.COMPARE_TICK_DEFAULT_MS;
+    }
+  }
+
+  /** 冷启同步读取景文本缩放（Camera 页 hudFontScale 用） */
+  static textScaleCameraSync(ctx: common.Context): number {
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
+      const raw: preferences.ValueType = store.getSync(KEY_TEXT_SCALE_CAMERA, UserSettings.TEXT_SCALE_DEFAULT_PCT);
+      return typeof raw === 'number'
+        ? UserSettings.textScalePctOf(raw as number) : UserSettings.TEXT_SCALE_DEFAULT_PCT;
+    } catch (e) {
+      Diag.w(TAG, `read text_scale_camera failed, use default: ${e}`);
+      return UserSettings.TEXT_SCALE_DEFAULT_PCT;
+    }
+  }
+
+  /** 冷启同步读诊断两开关（Index 页 install 用） */
+  static diagPersistSync(ctx: common.Context): boolean[] {
+    const out: boolean[] = [false, false];
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
+      const en: preferences.ValueType = store.getSync(KEY_DIAG_ENABLED, false);
+      const ve: preferences.ValueType = store.getSync(KEY_DIAG_VERBOSE, false);
+      out[0] = typeof en === 'boolean' ? en as boolean : false;
+      out[1] = typeof ve === 'boolean' ? ve as boolean : false;
+    } catch (e) {
+      Diag.w(TAG, `read diag persist failed, use default: ${e}`);
+    }
+    return out;
+  }
+
+  /** 诊断两开关持久化（Index 页开关按钮用；与 load/save 同 store 同键） */
+  static persistDiagFlags(ctx: common.Context, enabled: boolean, verbose: boolean): void {
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
+      store.putSync(KEY_DIAG_ENABLED, enabled);
+      store.putSync(KEY_DIAG_VERBOSE, verbose);
+      store.flushSync();
+    } catch (e) {
+      Diag.w(TAG, `persist diag flags failed: ${e}`);
+    }
+  }
+
   static uiOrientationSync(ctx: common.Context): UIOrientation {
     try {
       const store: preferences.Preferences =

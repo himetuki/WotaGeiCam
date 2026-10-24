@@ -41,6 +41,7 @@ import { SLIDER_KEYS, decodeContinuousSliders, effectiveLadder } from '../ui/Sli
 import { CompareVersions, ReleaseJson, ReleaseNotes, UpdateConfig } from '../update/UpdateChecker';
 import { UpdateDownloadPure } from '../update/UpdatePure';
 import { Sha256 } from '../update/Sha256';
+import { UserSettings } from '../core/UserSettings';
 import { DirectDisplay } from '../core/DirectDisplay';
 import { FrameRateFallback } from '../core/FrameRateFallback';
 import { degradeSuppressed } from '../camera/GlRenderSuppression';
@@ -92,6 +93,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.arcRepairCompileProbe();
     PureLogicBarrel.syncSnapCompileProbe();
     PureLogicBarrel.updateCompileProbe();
+    PureLogicBarrel.userSettingsCompileProbe();
     PureLogicBarrel.cameraPerfCompileProbe();
     PureLogicBarrel.paramsPersistCompileProbe();
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
@@ -147,6 +149,16 @@ export class PureLogicBarrel {
    * 更新器纯逻辑（update/UpdateChecker + UpdatePure + Sha256）的编译探针：
    * 覆盖 tag→versionCode、说明整形、JSON 提取、渠道排序、URL 门槛与 SHA-256 向量。
    */
+  /** ST 批：设置数值档编译探针（节拍钳制/缩放档/倍率换算） */
+  private static userSettingsCompileProbe(): void {
+    const tick: number = UserSettings.compareTickMsOf(99999);
+    const pct: number = UserSettings.textScalePctOf(137);
+    const factor: number = UserSettings.textScaleFactorOf(110);
+    if (tick === 1000 && pct === 120 && factor > 1.19 && factor < 1.21) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
   private static updateCompileProbe(): void {
     const vcode: number | undefined = CompareVersions.versionCodeOf('v0.0.10-r05');
     const newer: boolean = CompareVersions.isNewerThanVersionCode(1000000, 'v0.0.10-r05');

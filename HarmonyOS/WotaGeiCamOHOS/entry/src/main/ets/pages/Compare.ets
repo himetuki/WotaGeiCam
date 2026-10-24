@@ -30,6 +30,7 @@ import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { formatDuration, formatSignedDuration } from '../media/MediaFormat';
 import { ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { PlayerEngine } from '../player/PlayerEngine';
+import { SettingsStore } from '../ui/SettingsStore';
 import { PlayerSpeedTiers } from '../player/PlayerModel';
 import {
   AudioTrackKind, CompareAudioPlan, EngineCommand, EngineCommandKind, Side, applyOrderOf, audioPlanOf
@@ -67,7 +68,8 @@ class CompareHistoryRow {
 }
 
 const TAG: string = 'WotaCompare';
-const TICK_MS: number = 120;
+/** 默认节拍（上游 compare_tick_ms 缺键 200——本侧历史口径 120，登记为缺键默认） */
+const TICK_MS_DEFAULT: number = 120;
 /** decide 的硬 seek 阈值（上游 HARD_RESYNC_MS；邻域内交 nudgeSpeedForSync 软追赶） */
 const HARD_RESYNC_MS: number = 250;
 const OFFSET_STEP_MS: number = 500;
@@ -137,6 +139,8 @@ struct Compare {
   private disposed: boolean = false;
   private pageVisible: boolean = true;
   private tickTimer: number = -1;
+  /** 编排节拍（ST 批：compare_tick_ms 持久化，缺键回本侧历史 120） */
+  private tickMs: number = TICK_MS_DEFAULT;
   /** 当前音频侧（静音时保留最后一次有声侧；声音循环同步） */
   private audioSide: Side = Side.LEFT;
   /** 音轨探测发起的墙钟毫秒（audioProbePending 的陈旧判定基准） */
@@ -153,6 +157,12 @@ struct Compare {
   private paramsLeftPath: string = '';
 
   aboutToAppear(): void {
+    // ST 批：编排节拍持久化（上游 compare_tick_ms；缺键回本侧历史 120）
+    const ctx0: common.Context | undefined =
+      this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctx0 !== undefined) {
+      this.tickMs = SettingsStore.compareTickMsSync(ctx0);
+    }
     this.disposed = false;
     this.pageVisible = true;
     const ctx: common.Context | undefined =
@@ -258,7 +268,7 @@ struct Compare {
     }
     this.tickTimer = setInterval((): void => {
       this.onTick();
-    }, TICK_MS);
+    }, this.tickMs);
   }
 
   private stopTick(): void {

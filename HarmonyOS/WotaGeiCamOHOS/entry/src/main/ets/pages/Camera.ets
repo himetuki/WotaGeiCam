@@ -79,6 +79,7 @@ import { RefLineOverlay } from '../ui/RefLineOverlay';
 import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
+import { UserSettings } from '../core/UserSettings';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -1144,7 +1145,9 @@ struct CameraPage {
       const ctx: common.UIAbilityContext =
         this.getUIContext().getHostContext() as common.UIAbilityContext;
       const fs: number | undefined = ctx.config.fontSizeScale;
-      this.hudFontScale = fs !== undefined && Number.isFinite(fs) && fs > 0 ? fs : 1;
+      const sysScale: number = fs !== undefined && Number.isFinite(fs) && fs > 0 ? fs : 1;
+      // ST 批：乘上用户「取景字体缩放」档（text_scale_camera，默认 100% = 1.0 不变）
+      this.hudFontScale = sysScale * UserSettings.textScaleFactorOf(this.settings.textScaleCameraPct);
     } catch (e) {
       this.hudFontScale = 1;
     }

@@ -24,6 +24,7 @@ import { formatSize } from '../media/MediaFormat';
 import { HudItem, HudItems } from '../core/Constants';
 import { REF_LINE_ENTRIES, RefLine, RefLineEntry } from '../core/RefLine';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
+import { UserSettings } from '../core/UserSettings';
 import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
 import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
@@ -463,6 +464,92 @@ struct Settings {
         }, (entry: RefLineEntry): string => entry.type as string)
       }
       .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
+  /**
+   * 对比页节拍分组（ST 批，对齐上游 compare_tick_ms）：四档 [100,200,500,1000]，
+   * 缺键 200。数值钳制走 core/UserSettings 纯函数（调用点不许手写 min/max）。
+   */
+  @Builder
+  private compareTickGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('对比页节拍')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Text('对比播放的编排检查间隔（毫秒）；越小同步越跟手、越耗电。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(UserSettings.COMPARE_TICK_TIERS, (ms: number): void => {
+          Button(`${ms}`)
+            .fontSize(HudType.VALUE)
+            .fontColor(this.settings.compareTickMs === ms ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({
+              width: 1,
+              color: this.settings.compareTickMs === ms ? HudColor.ACCENT : HudColor.DIVIDER
+            })
+            .backgroundColor(this.settings.compareTickMs === ms ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              this.settings.compareTickMs = UserSettings.compareTickMsOf(ms);
+              this.persist();
+            })
+        }, (ms: number): string => `${ms}`)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
+  /**
+   * 取景字体缩放分组（ST 批，对齐上游 text_scale_camera）：五档 [80..120]%，
+   * 乘系统字体缩放后喂 hudPerRowFor 宽度账（J3a 换行档随档位自动退/进）。
+   */
+  @Builder
+  private textScaleGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('取景字体缩放')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(UserSettings.TEXT_SCALE_PCTS, (pct: number): void => {
+          Button(`${pct}%`)
+            .fontSize(HudType.VALUE)
+            .fontColor(this.settings.textScaleCameraPct === pct ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({
+              width: 1,
+              color: this.settings.textScaleCameraPct === pct ? HudColor.ACCENT : HudColor.DIVIDER
+            })
+            .backgroundColor(this.settings.textScaleCameraPct === pct ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              this.settings.textScaleCameraPct = UserSettings.textScalePctOf(pct);
+              this.persist();
+            })
+        }, (pct: number): string => `${pct}`)
+      }
+      .width('100%')
+      Text('影响取景页读数条文字与换行档；100% 为工程默认排版。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
     }
     .width('100%')
     .padding(HudSpace.L)
@@ -951,6 +1038,12 @@ struct Settings {
             }
             ListItem() {
               this.refLineGroup()
+            }
+            ListItem() {
+              this.compareTickGroup()
+            }
+            ListItem() {
+              this.textScaleGroup()
             }
             ListItem() {
               this.uiOrientationGroup()

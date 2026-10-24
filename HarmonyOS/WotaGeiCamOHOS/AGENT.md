@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 625 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 630 用例，
   退出码 0 才算全绿。
 - `device-check.mjs` — 真机预检/走查：`node scripts/device-check.mjs`（预检）、`log`（hilog 实时）、
   `check`（23 条待验清单操作索引，离线可打）。
@@ -129,6 +129,8 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `ui/WindowChrome.ets`：沉浸式取景 + 系统栏配色 + AvoidArea 安全区；普通页恢复黑底系统栏；
   **applyOrientation**（UO 批）：界面方向落窗（竖屏固定默认，`ui_orientation` 键；冷启
   EntryAbility 落一次、设置页点选即落——窗口级 sticky 全页生效）。
+- `core/UserSettings.ets`：设置数值档纯算式（compareTickMsOf 钳 100..1000 缺 200、
+  textScalePctOf 钳 80..120 缺 100、倍率换算）——Compare/Camera/Index 消费。
 - `core/UIOrientation.ets`：方向两档纯逻辑（产出 window.Orientation 契约数值 6/7，
   零平台 import；本侧默认 PORTRAIT 偏离上游 LANDSCAPE——T31 竖屏取证设计）。
   **所有外观切换经模块级 Promise 链串行**（EntryAbility.loadContent 前先 prime，禁止在页面里裸调

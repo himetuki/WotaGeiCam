@@ -35,6 +35,7 @@ import { RecordResult } from '../record/RecordResult';
 // T27-1 平台探针：AVScreenCapture 内录取证（真机批第一步；Runner 传递引用 AvScreenProbeModel）
 import { cancelAvScreenProbe, runAvScreenProbe } from '../record/AvScreenProbeRunner';
 import { common } from '@kit.AbilityKit';
+import { SettingsStore } from '../ui/SettingsStore';
 
 @Entry
 @Component
@@ -50,6 +51,8 @@ struct Index {
   @State recording: boolean = false;
   /** 录制按钮防重复：权限/起录/停录异步链进行中禁用按钮 */
   @State recordingBusy: boolean = false;
+  /** ST 批：诊断详细档（持久化 diag_verbose；总开关日志开已在 logEnabled） */
+  @State diagVerbose: boolean = false;
   /** T27-1 探针：取证进行中（按钮防重入） */
   @State avProbeBusy: boolean = false;
   /** 参数总线：参数自检八档的输入（也是后续 HUD 的同一实例来源） */
@@ -58,6 +61,16 @@ struct Index {
   aboutToAppear(): void {
     // 反向初始化开关态：页面重建后按钮文案与实际总开关一致（Diag 状态活在进程内，持久化留白）
     this.logEnabled = Diag.isEnabled();
+    // ST 批：诊断两开关持久化（上游 diag_enabled/diag_verbose；冷启回填按钮态与运行态）
+    const ctxD: common.Context | undefined =
+      this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctxD !== undefined) {
+      const persist: boolean[] = SettingsStore.diagPersistSync(ctxD);
+      Diag.setEnabled(persist[0]);
+      Diag.setVerbose(persist[1]);
+      this.logEnabled = persist[0];
+      this.diagVerbose = persist[1];
+    }
     this.refreshDiagSummary();
   }
 
@@ -68,6 +81,20 @@ struct Index {
     this.recorder.stop().then((): void => {
       this.engine.stop();
     });
+  }
+
+  /** ST 批：诊断两开关持久化（上游 diag_enabled/diag_verbose；冷启回填） */
+  private persistDiagFlags(): void {
+    const ctxD: common.Context | undefined =
+      this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctxD === undefined) {
+      return;
+    }
+    try {
+      SettingsStore.persistDiagFlags(ctxD, this.logEnabled, this.diagVerbose);
+    } catch (e) {
+      this.message = `diag persist failed: ${e}`;
+    }
   }
 
   private refreshDiagSummary(): void {
@@ -283,9 +310,22 @@ struct Index {
               try {
                 Diag.setEnabled(!this.logEnabled);
                 this.logEnabled = !this.logEnabled;
+                this.persistDiagFlags();
                 this.refreshDiagSummary();
               } catch (e) {
                 this.message = `diag toggle failed: ${e}`;
+              }
+            })
+          Button(this.diagVerbose ? '详细开' : '详细关')
+            .fontSize(14)
+            .onClick(() => {
+              try {
+                Diag.setVerbose(!this.diagVerbose);
+                this.diagVerbose = !this.diagVerbose;
+                this.persistDiagFlags();
+                this.refreshDiagSummary();
+              } catch (e) {
+                this.message = `verbose toggle failed: ${e}`;
               }
             })
           Button('导出日志')
