@@ -62,7 +62,7 @@
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 342dd99。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
 | `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：SeriesStore 落库侧的 UI 展示开关（本侧恒折叠，无回退开关按钮）、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
-| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。留白：缩略图、全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、分段逐个展开（本侧点组卡进首段播放）、折叠回退开关、分享、重命名、MediaStore 相册（对比播放已由 Player 顶部「对比」入口提供；T20 剪辑成片落私有 videos，Gallery 下次刷新可见） | ☑ 部分 |
+| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。留白：全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、分段逐个展开（本侧点组卡进首段播放）、折叠回退开关（恒折叠）、重命名（沙箱 `fs.rename` 直改可做，登记留白）、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
 
 ## player — 播放器 / 对比 / 剪辑
 
@@ -117,6 +117,38 @@
 > 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
+
+## 交付批（MS：分享/缩略图/存入相册，2026-10-24）
+
+上游 `media/Share.kt` + `MediaRepo.ThumbLoader` + `VideoStore` 入库面在 OHOS 的对应物
+（调研报告 §二的 MS-1/2/3 三批一次落地；`StorageAccess.kt` 改判不移植）。
+
+- **MimeMap**（`media/MimeMap.ets`，纯逻辑）：`extOf/mimeOf/utdOf/titleOf`——上游手写 MIME 表
+  逐条直译（OHOS 无全局 MimeTypeMap，只用表，登记）；UTD 是 systemShare 的类型语言
+  （SDK 核实：mp4 一族 `general.mpeg-4`、其余 `general.video`；**没有** `general.mp4`）；
+  `titleOf` 去扩展名（`PhotoCreationConfig.title` 与 `fileNameExtension` 分开拼，防双后缀）。
+- **分享**（`media/WotaShare.ets`）：`@kit.ShareKit` 的 systemShare 面板——单发/多发映射
+  `SelectionMode.SINGLE/BATCH`，record = {utd, uri(fileUri.getUriFromPath), title}。
+  与上游差异（登记）：FileProvider 白名单与 `FLAG_GRANT_READ` 不需要（面板接管目标应用授权）。
+- **缩略图**（`media/ThumbLru.ets` 纯逻辑 + `media/ThumbLoader.ets` 平台）：
+  `AVImageGenerator.fetchFrameByTime(中点帧, CLOSEST, {w,h})`（since 12 在兼容面内），
+  fd 生命周期 finally 收口、单条 6s 超时退占位、并发限 2（上游 Semaphore(2)）、
+  LRU 32 **驱逐不 release**（PixelMap 可能正在 Image 上显示，显式 release 会让在显图变空——
+  登记偏离，交 GC）。上游主路径 `loadThumbnail`/`PhotoAsset.getThumbnail`（since 22）不可用。
+- **存入相册**（`media/AlbumSaver.ets`）：`showAssetsCreationDialog`（since 12、**无权限**、
+  系统确认框）——与上游「入库不打扰」有差异，故做成 **Gallery 显式动作**而非录制收尾自动入库
+  （决策）；上游 IS_PENDING 两段式在「沙箱写完→整文件入库」模型下无对应问题域（登记）。
+  字段名按 d.ts 实名（`fileNameExtension`/`photoType: PhotoType.VIDEO`，调研稿写的 `extension`
+  有误，编译期抓获）。
+- **Gallery 接线**：卡片缩略图（`GalleryThumb` @Component：占位块回退、`@Prop @Watch` path
+  重载防列表复用串图、按代序丢弃迟到回执）；动作行加「分享」「存入相册」，与收藏/回收站同走
+  `expandSeriesTargets` 组级扇出；`this.ctx` 字段化（分享面板要 UIAbilityContext）。
+- **测试**：`media-mime-thumb.test.ets`（12：MIME 表逐条/兜底、UTD、title、LRU 命中提升/
+  容量/重写不占位/clear/容量夹紧）+ `media-share-wiring.test.ets`（4：三条链单一真源与调用
+  形态、Gallery 入口与扇出、**零新增权限红线**、createAsset since 22 禁用）。共 +16（583 → 595）。
+- **回归**：pure-test 48 files / 595 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **真机待验**：systemShare 面板对沙箱 file:// URI 的目标应用可读性（单发/多发）；
+  `fetchFrameByTime` 对 24/25fps 光弧成片的中点帧精度与耗时；确认框取消/失败的实际形态。
 
 ## 交付批（J3b：取景读数顺序编辑器，2026-10-24）
 
@@ -751,7 +783,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（583）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（595）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -806,7 +838,10 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   hud-items-wiring（8，J3a 批：`maskOrDefault` 坏值表 + `isOn/toggle` 往返 + 默认档经生产算式
   到行列（对拍 HudDefaultIsoTest）+ 全七档/极窄宽分组 + 去重红线 + 源码接线守卫 3）、
   hud-layout-order（6，J3b 批：`withZoneOrder` 真编解码往返/normalize 收口/`visibleOrderOf`
-  顺序跟表走/默认表=枚举序回归线/编辑页与相机页接线守卫 2）。
+  顺序跟表走/默认表=枚举序回归线/编辑页与相机页接线守卫 2）、
+  media-mime-thumb（12，MS 批：MIME/UTD/title 映射表 + ThumbLru 驱逐序）、
+  media-share-wiring（4，MS 批：三条链单一真源 + Gallery 入口与扇出 + 零新增权限红线 +
+  createAsset since 22 禁用）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；

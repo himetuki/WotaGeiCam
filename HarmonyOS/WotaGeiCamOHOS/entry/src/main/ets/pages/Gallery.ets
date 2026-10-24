@@ -6,9 +6,13 @@
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
+import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
 import { GalleryEntry, expandSeriesTargets, galleryEntries } from '../media/SeriesGroup';
+import { ThumbLoader } from '../media/ThumbLoader';
+import { WotaShare } from '../media/WotaShare';
+import { AlbumSaver } from '../media/AlbumSaver';
 import { formatDuration, formatSize } from '../media/MediaFormat';
 import { WindowChrome } from '../ui/WindowChrome';
 
@@ -37,6 +41,8 @@ struct Gallery {
   @State detailMeta: string = '';
 
   private repo: MediaRepo | undefined = undefined;
+  /** 页面宿主上下文（分享面板要 UIAbilityContext；本页宿主就是它） */
+  private ctx: common.Context | undefined = undefined;
   private allClips: Array<VideoClip> = [];
   private likeClips: Array<VideoClip> = [];
   private trashClips: Array<VideoClip> = [];
@@ -50,6 +56,7 @@ struct Gallery {
     this.disposed = false;
     const ctx: common.Context | undefined =
       this.getUIContext().getHostContext() as common.Context | undefined;
+    this.ctx = ctx;
     if (ctx === undefined) {
       this.loading = false;
       this.message = 'no host context';
@@ -436,8 +443,48 @@ struct Gallery {
           .onClick((): void => {
             this.moveToTrash(clip);
           })
+        Button('分享')
+          .fontSize(11)
+          .height(26)
+          .enabled(!this.actionBusy)
+          .onClick((): void => {
+            this.shareClip(clip);
+          })
+        Button('存入相册')
+          .fontSize(11)
+          .height(26)
+          .enabled(!this.actionBusy)
+          .onClick((): void => {
+            this.saveClip(clip);
+          })
       }
     }
+  }
+
+  /** 系统分享面板（组级动作扇出到整组成员；批量走 BATCH 模式） */
+  private async shareClip(clip: VideoClip): Promise<void> {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      this.message = '无上下文，无法分享';
+      return;
+    }
+    const targets: Array<VideoClip> = this.seriesTargets(clip);
+    this.message = targets.length > 1 ? `正在拉起分享（${targets.length} 段）…` : '正在拉起分享…';
+    const err: string = await WotaShare.share(ctx as common.UIAbilityContext, targets);
+    this.message = err === '' ? '' : err;
+  }
+
+  /** 存入系统相册（showAssetsCreationDialog 系统确认框；组级扇出到整组） */
+  private async saveClip(clip: VideoClip): Promise<void> {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      this.message = '无上下文，无法保存';
+      return;
+    }
+    const targets: Array<VideoClip> = this.seriesTargets(clip);
+    this.message = '等待系统确认…';
+    const result: string = await AlbumSaver.saveToGallery(ctx, targets);
+    this.message = result === '' ? this.actionNotice('已存入相册', targets.length) : result;
   }
 
   build() {
@@ -529,21 +576,25 @@ struct Gallery {
             ListItem() {
               Column({ space: 6 }) {
                 Row({ space: 10 }) {
-                  Column({ space: 1 }) {
-                    Text('MP4')
-                      .fontSize(12)
-                      .fontColor(Color.White)
+                  Stack({ alignContent: Alignment.BottomStart }) {
+                    GalleryThumb({
+                      path: entry.clip.path,
+                      durationMs: entry.clip.durationMs
+                    })
                     if (entry.seriesCount() !== undefined) {
                       Text(`${entry.seriesCount()} 段`)
                         .fontSize(9)
                         .fontColor('#FFCC80')
+                        .backgroundColor('#99000000')
+                        .borderRadius(4)
+                        .padding({ left: 3, right: 3 })
+                        .margin(2)
                     }
                   }
                   .width(52)
                   .height(52)
-                  .justifyContent(FlexAlign.Center)
-                  .backgroundColor('#37474F')
                   .borderRadius(6)
+                  .clip(true)
                   .onClick((): void => {
                     this.openPlayer(entry.clip);
                   })
@@ -614,5 +665,60 @@ struct Gallery {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+  }
+}
+
+/**
+ * 媒体卡缩略图（上游 VideoThumbnail 的对应物）：ThumbLoader 取中点帧，命中即显示，
+ * 未就绪/失败退 MP4 占位块。@Prop 驱动：列表滚动复用组件时 path 变化会重新加载。
+ */
+@Component
+struct GalleryThumb {
+  @Prop @Watch('onPathChange') path: string = '';
+  @Prop durationMs: number = 0;
+  @State private pm: image.PixelMap | undefined = undefined;
+  private loadSeq: number = 0;
+
+  aboutToAppear(): void {
+    this.loadThumb();
+  }
+
+  /** 列表复用导致 path 变化时重载（@Prop 更新不走 aboutToAppear，必须挂 @Watch） */
+  private onPathChange(): void {
+    this.pm = undefined;
+    this.loadThumb();
+  }
+
+  /** 加载（旧请求回执按代序丢弃，复用/快速刷新不串图） */
+  private loadThumb(): void {
+    const path: string = this.path;
+    const seq: number = ++this.loadSeq;
+    ThumbLoader.load(path, this.durationMs, 160).then((pm: image.PixelMap | undefined): void => {
+      if (seq === this.loadSeq) {
+        this.pm = pm;
+      }
+    }).catch((_e: Object): void => {
+      // 失败保持占位块（ThumbLoader 内已记日志）
+    });
+  }
+
+  build() {
+    if (this.pm !== undefined) {
+      Image(this.pm)
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        .interpolation(ImageInterpolation.Medium)
+    } else {
+      Column() {
+        Text('MP4')
+          .fontSize(12)
+          .fontColor(Color.White)
+      }
+      .width('100%')
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+      .backgroundColor('#37474F')
+    }
   }
 }
