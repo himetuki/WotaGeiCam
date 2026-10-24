@@ -1,5 +1,7 @@
 /**
- * 取景页 HUD 设计令牌（T31）：深色相机 UI 的色板 / 字阶 / 触控 / 形状 / 间距唯一真源。
+ * 深色 UI 设计令牌（T31 建，HM7-UI-02 扩）：色板 / 字阶 / 触控 / 形状 / 间距唯一真源。
+ * 两族色板：HudColor = 取景 HUD（半透明浮层压在相机画面上）；PageColor = 页面语义
+ * （媒体库/播放/对比的实底深色面板与文本阶）。
  *
  * 取值口径（对齐上游 design/Tokens.kt 的意图，非逐值移植——上游是 HDS 令牌）：
  * - 背景恒为相机画面，所有浮层用**半透明深色**而不是浅色实底，保证任何画面下白字可读；
@@ -43,6 +45,37 @@ export class HudColor {
   static readonly REF_LINE: string = '#59FFFFFF';
   /** 参考线里的 WOTA 走位红线（上游 wota_refline_red，2dp 加粗压在其余线之上） */
   static readonly REF_LINE_RED: string = '#CCFF3B30';
+}
+
+/**
+ * 页面语义色板（HM7-UI-02 令牌统一批）：媒体库/播放/对比页既定视觉的收敛
+ * （取值 = 迁移前各页在用字面量，只收敛不重设计）；与 HudColor 同为设计令牌真源。
+ * 字阶偏离登记：页内显示档 9fp（角标）/15/16/18fp（节标题）/28fp（空态字形）为
+ * 一次性展示尺寸，不入档（HUD 主档 11-17 不变，HUD 浮层仍禁 10fp）。
+ */
+export class PageColor {
+  /** 列表卡/行底 */
+  static readonly CARD: string = '#1F1F1F';
+  /** 弹层/详情面板底（蓝灰深） */
+  static readonly PANEL: string = '#263238';
+  /** 次级按钮/页签底 */
+  static readonly CHIP: string = '#333333';
+  /** 次要文本（元信息行） */
+  static readonly TEXT_SECONDARY: string = '#B0BEC5';
+  /** 弱化文本（空态/提示） */
+  static readonly TEXT_DIM: string = '#AAAAAA';
+  /** 极弱文本（引导/日期头） */
+  static readonly TEXT_FAINT: string = '#78909C';
+  /** 提示文本（标签/注记） */
+  static readonly TEXT_HINT: string = '#90A4AE';
+  /** 收藏/强调粉 */
+  static readonly LIKED: string = '#FF3D71';
+  /** 角标底衬（强） */
+  static readonly OVERLAY: string = '#AA000000';
+  /** 角标底衬 */
+  static readonly OVERLAY_SOFT: string = '#99000000';
+  /** 对比页面板底 */
+  static readonly PANEL_COMPARE: string = '#F0202020';
 }
 
 /** 字阶（fp） */

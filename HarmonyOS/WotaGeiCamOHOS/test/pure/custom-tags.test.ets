@@ -87,8 +87,9 @@ test('接线_半模态bindSheet消费SheetSpec纪律', () => {
   assertTrue(gallery.indexOf('height: SheetSize.MEDIUM') >= 0, '高度 = SheetSize.MEDIUM（屏半高档）');
   assertTrue(gallery.indexOf('dragBar: true') >= 0, 'dragBar 必须开（系统半模态规范）');
   assertTrue(gallery.indexOf('showClose: true') >= 0, 'showClose 必须开');
-  // 深浅色：深色底显式（本 app 深色 only，EntryAbility 强制 COLOR_MODE_DARK）
-  assertTrue(gallery.indexOf("backgroundColor: '#263238'") >= 0, '深色底显式声明');
+  // 深浅色：深色底显式（本 app 深色 only，EntryAbility 强制 COLOR_MODE_DARK）；
+  // HM7-UI-02 令牌统一后走 PageColor.PANEL（值 = #263238，ui-tokens 守卫钉字面）。
+  assertTrue(gallery.indexOf('backgroundColor: PageColor.PANEL') >= 0, '深色底显式声明（语义令牌）');
   // 无障碍：sheet 内可交互元素带 accessibilityText（读屏可念出段序号/标签名）
   assertTrue(gallery.indexOf('.accessibilityText(`第 ${idx + 1} 段，${part.name}') >= 0,
     '分段行必须带 accessibilityText（读屏念段名）');

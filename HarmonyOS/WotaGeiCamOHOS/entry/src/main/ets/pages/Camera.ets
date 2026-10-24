@@ -83,7 +83,7 @@ import { UserSettings } from '../core/UserSettings';
 import { FocusTapArbiter, FocusTapMath } from '../core/FocusTap';
 import { TapPoint } from '../core/Constants';
 import { HudSpec } from '../ui/HudSpec';
-import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
+import { HudColor, HudShape, HudSpace, HudTouch, HudType, PageColor } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
 import { HudMoreSheet } from '../ui/HudMoreSheet';
 import { SafeInsets, WindowChrome } from '../ui/WindowChrome';
@@ -2261,7 +2261,7 @@ struct CameraPage {
             .height(36)
           Text('启动相机…')
             .fontSize(12)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
         }
         .width('100%')
         .height('100%')
@@ -2271,7 +2271,7 @@ struct CameraPage {
       if (this.glFatal !== '') {
         Text(this.glFatal)
           .fontSize(12)
-          .fontColor('#FF8A80')
+          .fontColor(HudColor.DANGER)
           .maxLines(3)
           .padding(12)
           .backgroundColor('#66000000')

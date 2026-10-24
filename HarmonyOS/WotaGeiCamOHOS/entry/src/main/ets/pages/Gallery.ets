@@ -22,6 +22,7 @@ import {
 import { ParamsStore } from '../ui/ParamsStore';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { WindowChrome } from '../ui/WindowChrome';
+import { HudColor, PageColor } from '../ui/HudTokens';
 
 function pad2(v: number): string {
   return v < 10 ? `0${v}` : `${v}`;
@@ -746,8 +747,8 @@ struct Gallery {
           if (entry.seriesCount() !== undefined) {
             Text(`${entry.seriesCount()} 段`)
               .fontSize(9)
-              .fontColor('#FFCC80')
-              .backgroundColor('#99000000')
+              .fontColor(HudColor.WARN)
+              .backgroundColor(PageColor.OVERLAY_SOFT)
               .borderRadius(4)
               .padding({ left: 3, right: 3 })
               .margin(2)
@@ -771,11 +772,11 @@ struct Gallery {
             ? `${entry.seriesCount()} 段 · ` : ''}${formatDuration(entry.totalDurationMs())} · ` +
             `${formatSize(entry.clip.sizeBytes)} · ${formatDate(entry.clip.dateAddedSec)}`)
             .fontSize(10)
-            .fontColor('#B0BEC5')
+            .fontColor(PageColor.TEXT_SECONDARY)
           if (entry.clip.width > 0 && entry.clip.height > 0) {
             Text(`${entry.clip.width}x${entry.clip.height}`)
               .fontSize(10)
-              .fontColor('#78909C')
+              .fontColor(PageColor.TEXT_FAINT)
           }
         }
         .layoutWeight(1)
@@ -791,7 +792,7 @@ struct Gallery {
         if (entry.seriesId !== undefined) {
           Text(this.expandedSeriesIds.has(String(entry.seriesId)) ? '－' : '＋')
             .fontSize(16)
-            .fontColor('#78909C')
+            .fontColor(PageColor.TEXT_FAINT)
             .width(20)
             .textAlign(TextAlign.Center)
             .accessibilityText(this.expandedSeriesIds.has(String(entry.seriesId))
@@ -810,7 +811,7 @@ struct Gallery {
           Row({ space: 8 }) {
             Text(`第 ${idx + 2} 段`)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .width(40)
             Column() {
               GalleryThumb({ path: part.path, durationMs: part.durationMs })
@@ -827,7 +828,7 @@ struct Gallery {
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
               Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
                 .fontSize(10)
-                .fontColor('#B0BEC5')
+                .fontColor(PageColor.TEXT_SECONDARY)
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)
@@ -843,7 +844,7 @@ struct Gallery {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#1F1F1F')
+    .backgroundColor(PageColor.CARD)
     .borderRadius(8)
     .gesture(
       LongPressGesture({ repeat: false, duration: 500 })
@@ -871,8 +872,8 @@ struct Gallery {
           if (entry.seriesCount() !== undefined) {
             Text(`${entry.seriesCount()} 段`)
               .fontSize(9)
-              .fontColor('#FFCC80')
-              .backgroundColor('#99000000')
+              .fontColor(HudColor.WARN)
+              .backgroundColor(PageColor.OVERLAY_SOFT)
               .borderRadius(4)
               .padding({ left: 3, right: 3 })
           }
@@ -880,7 +881,7 @@ struct Gallery {
             Text('★')
               .fontSize(10)
               .fontColor('#FF4D6A')
-              .backgroundColor('#99000000')
+              .backgroundColor(PageColor.OVERLAY_SOFT)
               .borderRadius(4)
               .padding({ left: 3, right: 3 })
           }
@@ -889,7 +890,7 @@ struct Gallery {
           Text('⋯')
             .fontSize(14)
             .fontColor(Color.White)
-            .backgroundColor('#99000000')
+            .backgroundColor(PageColor.OVERLAY_SOFT)
             .borderRadius(11)
             .width(22)
             .height(22)
@@ -911,13 +912,13 @@ struct Gallery {
       Text(`${entry.seriesCount() !== undefined
         ? `${entry.seriesCount()} 段 · ${formatDuration(entry.totalDurationMs())}` : formatDuration(entry.clip.durationMs)} · ${formatSize(entry.clip.sizeBytes)}`)
         .fontSize(10)
-        .fontColor('#B0BEC5')
+        .fontColor(PageColor.TEXT_SECONDARY)
         .maxLines(1)
         .width('100%')
     }
     .width('100%')
     .padding(6)
-    .backgroundColor('#1F1F1F')
+    .backgroundColor(PageColor.CARD)
     .borderRadius(8)
     .onClick((): void => {
       if (entry.seriesId !== undefined) {
@@ -1090,7 +1091,7 @@ struct Gallery {
       Row({ space: 6 }) {
         Text('分段合并')
           .fontSize(11)
-          .fontColor('#B0BEC5')
+          .fontColor(PageColor.TEXT_SECONDARY)
         Toggle({ type: ToggleType.Switch, isOn: this.seriesCollapsed })
           .selectedColor('#FF4D6A')
           .onChange((on: boolean): void => {
@@ -1100,7 +1101,7 @@ struct Gallery {
         if (this.selectedTab !== 2) {
           Text('长按组卡可展开分段清单')
             .fontSize(10)
-            .fontColor('#78909C')
+            .fontColor(PageColor.TEXT_FAINT)
         }
       }
       .width('100%')
@@ -1110,7 +1111,7 @@ struct Gallery {
         ForEach(this.tabs, (tab: GalleryTab, index: number): void => {
           Button(this.tabLabel(tab, index))
             .fontSize(12)
-            .backgroundColor(this.selectedTab === index ? '#2E7D32' : '#333333')
+            .backgroundColor(this.selectedTab === index ? '#2E7D32' : PageColor.CHIP)
             .onClick((): void => {
               this.switchTab(index);
             })
@@ -1123,7 +1124,7 @@ struct Gallery {
         Row({ space: 8 }) {
           Text(this.message)
             .fontSize(11)
-            .fontColor('#FFCC80')
+            .fontColor(HudColor.WARN)
             .maxLines(2)
             .layoutWeight(1)
           if (!this.dbOk) {
@@ -1147,7 +1148,7 @@ struct Gallery {
             .height(36)
           Text('加载中…')
             .fontSize(12)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
         }
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
@@ -1158,7 +1159,7 @@ struct Gallery {
             .fontColor(Color.White)
           Text(this.emptyHint())
             .fontSize(11)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
             .textAlign(TextAlign.Center)
             .maxLines(3)
         }
@@ -1172,7 +1173,7 @@ struct Gallery {
               ListItem() {
                 Text(day.label)
                   .fontSize(13)
-                  .fontColor('#78909C')
+                  .fontColor(PageColor.TEXT_FAINT)
                   .width('100%')
                   .padding({ top: 8, bottom: 0, left: 2 })
               }
@@ -1314,12 +1315,12 @@ struct Gallery {
           }
           Text(this.detailMeta)
             .fontSize(11)
-            .fontColor('#B0BEC5')
+            .fontColor(PageColor.TEXT_SECONDARY)
             .maxLines(6)
         }
         .width('100%')
         .padding(12)
-        .backgroundColor('#263238')
+        .backgroundColor(PageColor.PANEL)
       }
     }
     .width('100%')
@@ -1336,7 +1337,7 @@ struct Gallery {
       showClose: true,
       title: { title: this.sheetTitle() },
       maskColor: '#33000000',
-      backgroundColor: '#263238'
+      backgroundColor: PageColor.PANEL
     } as SheetOptions)
   }
 
@@ -1347,7 +1348,7 @@ struct Gallery {
       Column({ space: 6 }) {
         Text('点按任一段直接打开播放页；组级动作（收藏/回收站/分享）作用于全部段。')
           .fontSize(11)
-          .fontColor('#78909C')
+          .fontColor(PageColor.TEXT_FAINT)
           .width('100%')
         Scroll() {
           Column({ space: 4 }) {
@@ -1355,7 +1356,7 @@ struct Gallery {
               Row({ space: 8 }) {
                 Text(`第 ${idx + 1} 段`)
                   .fontSize(11)
-                  .fontColor('#FFCC80')
+                  .fontColor(HudColor.WARN)
                   .width(52)
                 Text(part.name)
                   .fontSize(12)
@@ -1365,11 +1366,11 @@ struct Gallery {
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
                   .fontSize(10)
-                  .fontColor('#B0BEC5')
+                  .fontColor(PageColor.TEXT_SECONDARY)
               }
               .width('100%')
               .padding(6)
-              .backgroundColor('#1F1F1F')
+              .backgroundColor(PageColor.CARD)
               .borderRadius(6)
               .accessibilityText(`第 ${idx + 1} 段，${part.name}，${formatDuration(part.durationMs)}，点按打开播放页`)
               .onClick((): void => {
@@ -1391,7 +1392,7 @@ struct Gallery {
         if (this.menuClip !== undefined && this.seriesTargets(this.menuClip).length > 1) {
           Text('组级动作自动作用于该次录制的全部段。')
             .fontSize(11)
-            .fontColor('#78909C')
+            .fontColor(PageColor.TEXT_FAINT)
             .width('100%')
         }
         if (this.menuClip !== undefined) {
@@ -1435,7 +1436,7 @@ struct Gallery {
         if (this.tagDialogTags.length === 0) {
           Text('暂无自定义标签')
             .fontSize(11)
-            .fontColor('#78909C')
+            .fontColor(PageColor.TEXT_FAINT)
         }
         List({ space: 4 }) {
           ForEach(this.tagDialogTags, (tag: string): void => {

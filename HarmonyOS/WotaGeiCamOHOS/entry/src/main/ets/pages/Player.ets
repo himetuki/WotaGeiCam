@@ -21,6 +21,7 @@ import { Source, SyncSnapshot, TrackSync } from '../player/TrackSync';
 import { ArcRepairProbeResult, ArcRepairResult, ArcRepairRunner } from '../record/ArcRepairRunner';
 import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
 import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
+import { HudColor, PageColor } from '../ui/HudTokens';
 
 interface PlayerParams {
   id: number;
@@ -997,7 +998,7 @@ struct Player {
       Row({ space: 8 }) {
         Text(formatDuration(this.positionMs))
           .fontSize(10)
-          .fontColor('#B0BEC5')
+          .fontColor(PageColor.TEXT_SECONDARY)
         Slider({
           value: this.sliderValue,
           min: 0,
@@ -1025,7 +1026,7 @@ struct Player {
           })
         Text(formatDuration(this.durationMs))
           .fontSize(10)
-          .fontColor('#B0BEC5')
+          .fontColor(PageColor.TEXT_SECONDARY)
       }
       .width('100%')
 
@@ -1115,13 +1116,13 @@ struct Player {
             .height(22)
           Text('探测源视频…')
             .fontSize(11)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
         }
         .width('100%')
       } else if (this.repairProbeBlocked) {
         Text(this.repairError)
           .fontSize(11)
-          .fontColor('#FF8A80')
+          .fontColor(HudColor.DANGER)
           .maxLines(3)
           .width('100%')
       } else {
@@ -1129,24 +1130,24 @@ struct Player {
           `目标 ${this.repairDstFps}fps 输出 ${this.repairDstFrames()} 帧 · ` +
           `音轨 ${this.repairAudioCount} 条`)
           .fontSize(10)
-          .fontColor('#B0BEC5')
+          .fontColor(PageColor.TEXT_SECONDARY)
           .width('100%')
 
         Text('目标帧率')
           .fontSize(10)
-          .fontColor('#90A4AE')
+          .fontColor(PageColor.TEXT_HINT)
           .width('100%')
         Row({ space: 6 }) {
           Button('24fps')
             .fontSize(11)
-            .backgroundColor(this.repairDstFps === 24 ? '#FF3D71' : '#333333')
+            .backgroundColor(this.repairDstFps === 24 ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.repairBusy && this.repairTargetFeasible(24))
             .onClick((): void => {
               this.pickRepairDstFps(24);
             })
           Button('25fps')
             .fontSize(11)
-            .backgroundColor(this.repairDstFps === 25 ? '#FF3D71' : '#333333')
+            .backgroundColor(this.repairDstFps === 25 ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.repairBusy && this.repairTargetFeasible(25))
             .onClick((): void => {
               this.pickRepairDstFps(25);
@@ -1156,26 +1157,26 @@ struct Player {
 
         Text('差分死区')
           .fontSize(10)
-          .fontColor('#90A4AE')
+          .fontColor(PageColor.TEXT_HINT)
           .width('100%')
         Row({ space: 6 }) {
           Button('0')
             .fontSize(11)
-            .backgroundColor(this.repairDeadband === 0 ? '#FF3D71' : '#333333')
+            .backgroundColor(this.repairDeadband === 0 ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.repairBusy)
             .onClick((): void => {
               this.pickRepairDeadband(0);
             })
           Button('12')
             .fontSize(11)
-            .backgroundColor(this.repairDeadband === 12 ? '#FF3D71' : '#333333')
+            .backgroundColor(this.repairDeadband === 12 ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.repairBusy)
             .onClick((): void => {
               this.pickRepairDeadband(12);
             })
           Button('32')
             .fontSize(11)
-            .backgroundColor(this.repairDeadband === 32 ? '#FF3D71' : '#333333')
+            .backgroundColor(this.repairDeadband === 32 ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.repairBusy)
             .onClick((): void => {
               this.pickRepairDeadband(32);
@@ -1188,12 +1189,12 @@ struct Player {
             .width('100%')
           Text(`修复中 ${this.repairProgress}%`)
             .fontSize(11)
-            .fontColor('#FFCC80')
+            .fontColor(HudColor.WARN)
             .width('100%')
           if (this.repairNote !== '') {
             Text(this.repairNote)
               .fontSize(10)
-              .fontColor('#90A4AE')
+              .fontColor(PageColor.TEXT_HINT)
               .maxLines(2)
               .width('100%')
           }
@@ -1215,12 +1216,12 @@ struct Player {
             .width('100%')
           Text(formatSize(this.repairDoneSize))
             .fontSize(10)
-            .fontColor('#90A4AE')
+            .fontColor(PageColor.TEXT_HINT)
             .width('100%')
           if (this.repairNote !== '') {
             Text(this.repairNote)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .maxLines(3)
               .width('100%')
           }
@@ -1246,14 +1247,14 @@ struct Player {
           if (this.repairError !== '') {
             Text(this.repairError)
               .fontSize(10)
-              .fontColor('#FF8A80')
+              .fontColor(HudColor.DANGER)
               .maxLines(3)
               .width('100%')
           }
           if (this.repairNote !== '') {
             Text(this.repairNote)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .maxLines(3)
               .width('100%')
           }
@@ -1262,7 +1263,7 @@ struct Player {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor('#F0202020')
+    .backgroundColor(PageColor.PANEL_COMPARE)
     .borderRadius(12)
   }
 
@@ -1285,18 +1286,18 @@ struct Player {
 
       Text(`${formatDuration(this.exportAbA)} - ${formatDuration(this.exportAbB)}`)
         .fontSize(11)
-        .fontColor('#B0BEC5')
+        .fontColor(PageColor.TEXT_SECONDARY)
         .width('100%')
 
       // 同步读数与来源（对齐上游 TrackExportPopup：已同步 +Xms（自动校准/手动）/ 未同步）
       Text(this.syncReadoutText())
         .fontSize(11)
-        .fontColor('#B0BEC5')
+        .fontColor(PageColor.TEXT_SECONDARY)
         .width('100%')
       // 诚实边界：原片分享不重写容器，只有本页导出/光弧修复会应用同步残差
       Text('原片分享不重写容器；只有本页导出/光弧修复会应用同步残差')
         .fontSize(11)
-        .fontColor('#78909C')
+        .fontColor(PageColor.TEXT_FAINT)
         .width('100%')
 
       if (this.exportProbing) {
@@ -1306,24 +1307,24 @@ struct Player {
             .height(22)
           Text('探测音轨…')
             .fontSize(11)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
         }
         .width('100%')
       } else if (this.exportProbeBlocked) {
         Text(this.exportError)
           .fontSize(11)
-          .fontColor('#FF8A80')
+          .fontColor(HudColor.DANGER)
           .maxLines(3)
           .width('100%')
       } else {
         Text('音轨')
           .fontSize(10)
-          .fontColor('#90A4AE')
+          .fontColor(PageColor.TEXT_HINT)
           .width('100%')
         Row({ space: 6 }) {
           Button('无音轨')
             .fontSize(11)
-            .backgroundColor(this.exportTrack === TrackChoice.NO_AUDIO ? '#FF3D71' : '#333333')
+            .backgroundColor(this.exportTrack === TrackChoice.NO_AUDIO ? PageColor.LIKED : PageColor.CHIP)
             .enabled(!this.exportBusy)
             .onClick((): void => {
               this.exportTrack = TrackChoice.NO_AUDIO;
@@ -1331,7 +1332,7 @@ struct Player {
           if (this.exportAudioCount >= 1) {
             Button('音轨 1')
               .fontSize(11)
-              .backgroundColor(this.exportTrack === TrackChoice.ENV ? '#FF3D71' : '#333333')
+              .backgroundColor(this.exportTrack === TrackChoice.ENV ? PageColor.LIKED : PageColor.CHIP)
               .enabled(!this.exportBusy)
               .onClick((): void => {
                 this.exportTrack = TrackChoice.ENV;
@@ -1340,7 +1341,7 @@ struct Player {
           if (this.exportAudioCount >= 2) {
             Button('音轨 2')
               .fontSize(11)
-              .backgroundColor(this.exportTrack === TrackChoice.CAP ? '#FF3D71' : '#333333')
+              .backgroundColor(this.exportTrack === TrackChoice.CAP ? PageColor.LIKED : PageColor.CHIP)
               .enabled(!this.exportBusy)
               .onClick((): void => {
                 this.exportTrack = TrackChoice.CAP;
@@ -1354,12 +1355,12 @@ struct Player {
             .width('100%')
           Text(`导出中 ${this.exportProgress}%`)
             .fontSize(11)
-            .fontColor('#FFCC80')
+            .fontColor(HudColor.WARN)
             .width('100%')
           if (this.exportNote !== '') {
             Text(this.exportNote)
               .fontSize(10)
-              .fontColor('#90A4AE')
+              .fontColor(PageColor.TEXT_HINT)
               .width('100%')
           }
           Button('取消导出')
@@ -1380,12 +1381,12 @@ struct Player {
             .width('100%')
           Text(formatSize(this.exportDoneSize))
             .fontSize(10)
-            .fontColor('#90A4AE')
+            .fontColor(PageColor.TEXT_HINT)
             .width('100%')
           if (this.exportNote !== '') {
             Text(this.exportNote)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .maxLines(2)
               .width('100%')
           }
@@ -1411,14 +1412,14 @@ struct Player {
           if (this.exportError !== '') {
             Text(this.exportError)
               .fontSize(10)
-              .fontColor('#FF8A80')
+              .fontColor(HudColor.DANGER)
               .maxLines(3)
               .width('100%')
           }
           if (this.exportNote !== '') {
             Text(this.exportNote)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .width('100%')
           }
         }
@@ -1426,7 +1427,7 @@ struct Player {
     }
     .width('90%')
     .padding(14)
-    .backgroundColor('#F0202020')
+    .backgroundColor(PageColor.PANEL_COMPARE)
     .borderRadius(12)
   }
 
@@ -1514,7 +1515,7 @@ struct Player {
       if (this.metaNotice !== '') {
         Text(this.metaNotice)
           .fontSize(10)
-          .fontColor('#FFCC80')
+          .fontColor(HudColor.WARN)
           .maxLines(2)
           .textAlign(TextAlign.Center)
           .width('100%')
@@ -1529,7 +1530,7 @@ struct Player {
             .height(36)
           Text('准备播放…')
             .fontSize(12)
-            .fontColor('#AAAAAA')
+            .fontColor(PageColor.TEXT_DIM)
           Button('返回')
             .fontSize(12)
             .onClick((): void => {
@@ -1544,7 +1545,7 @@ struct Player {
       if (this.hint !== '') {
         Text(this.hint)
           .fontSize(11)
-          .fontColor('#FFCC80')
+          .fontColor(HudColor.WARN)
           .maxLines(2)
           .padding(8)
           .backgroundColor('#66000000')
@@ -1558,7 +1559,7 @@ struct Player {
         Column({ space: 8 }) {
           Text(this.fatalError)
             .fontSize(12)
-            .fontColor('#FF8A80')
+            .fontColor(HudColor.DANGER)
             .maxLines(4)
           if (this.canRetryAttach()) {
             Button('重试播放')

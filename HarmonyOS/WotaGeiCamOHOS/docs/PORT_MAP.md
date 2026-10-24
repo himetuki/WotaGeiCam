@@ -118,6 +118,28 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（TOK：页面语义色令牌统一，2026-10-24）
+
+HM7-UI-02 步骤 2（静态令牌审计）。全仓硬编码色清点（pages/ui/player/media/record/
+update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) 四页共 109 处
+——Settings/Index/GlPreview 及全部非 pages 目录已在用 HudTokens（Settings T31 起即
+全令牌化）。
+
+- **`ui/HudTokens.ets`**：charter 扩为「深色 UI 设计令牌真源（两族色板）」，新增
+  `PageColor` 页面语义色板 11 档（CARD/PANEL/CHIP/TEXT_SECONDARY/TEXT_DIM/
+  TEXT_FAINT/TEXT_HINT/LIKED/OVERLAY/OVERLAY_SOFT/PANEL_COMPARE）——取值 =
+  迁移前各页在用字面量逐字（只收敛不重设计）。
+- **notation 归一**：`#FFCC80`(15)/`#FF8A80`(10) 与 `HudColor.WARN/DANGER` 值等
+  （8 位补 FF alpha，视觉恒等），页面统一消费 HUD 令牌；`'#FFFFFF'` 归
+  `HudColor.TEXT_PRIMARY`。
+- **字阶偏离登记（不改码）**：页内显示档 9fp（角标）/15/16/18fp（节标题）/28fp
+  （空态字形）为一次性展示尺寸，不入档；HUD 主档 11-17 不变，HUD 浮层仍禁 10fp
+  （T31 取证口径）；`HudTokens` 头注登记。
+- **守卫**：`ui-tokens.test.ets` +3（PageColor 11 档值逐字 / WARN·DANGER 值等 /
+  四页零残留字面量 + 消费令牌 + import 真源）。共 +3（676 → 679）。
+- **回归**：pure-test 62 files / 679 tests 全绿；`assembleHap`（release）
+  BUILD SUCCESSFUL。
+
 ## 交付批（SPEC-T：SheetSpec 平板/分屏系统映射裁决，2026-10-24）
 
 HM7-UI-02 步骤 4。把 HM7-1 批「系统面板形态承担」的登记升格为**正式裁决**，防止后续

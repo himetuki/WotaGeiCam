@@ -41,6 +41,7 @@ import {
   CompareDomain, DecideCommands, DecideInput, decide, domainOf, normalizeOffset, resolveT,
   rightResumeTargetOf, timelineEnd, TimelineGeometry
 } from '../player/CompareTimeline';
+import { HudColor, PageColor } from '../ui/HudTokens';
 
 interface CompareParams {
   leftId: number;
@@ -1219,7 +1220,7 @@ struct Compare {
     Column({ space: 2 }) {
       Text(this.leftName === '' ? '左' : `左 · ${this.leftName}`)
         .fontSize(11)
-        .fontColor('#B0BEC5')
+        .fontColor(PageColor.TEXT_SECONDARY)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
@@ -1243,7 +1244,7 @@ struct Compare {
           Column({ space: 6 }) {
             Text(this.leftError)
               .fontSize(10)
-              .fontColor('#FF8A80')
+              .fontColor(HudColor.DANGER)
               .maxLines(3)
               .textAlign(TextAlign.Center)
             if (this.canRetryLeft()) {
@@ -1257,7 +1258,7 @@ struct Compare {
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('#AA000000')
+          .backgroundColor(PageColor.OVERLAY)
         } else if (!this.leftReady) {
           Column({ space: 6 }) {
             LoadingProgress()
@@ -1265,19 +1266,19 @@ struct Compare {
               .height(28)
             Text(this.leftClip === undefined ? '读取左片…' : '左片准备中…')
               .fontSize(10)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
           }
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('#AA000000')
+          .backgroundColor(PageColor.OVERLAY)
         }
       }
       .layoutWeight(1)
       .width('100%')
       Text(formatDuration(this.leftDurationMs))
         .fontSize(9)
-        .fontColor('#78909C')
+        .fontColor(PageColor.TEXT_FAINT)
     }
     .layoutWeight(1)
     .height('100%')
@@ -1289,7 +1290,7 @@ struct Compare {
     Column({ space: 2 }) {
       Text(this.rightName === '' ? '右' : `右 · ${this.rightName}`)
         .fontSize(11)
-        .fontColor('#B0BEC5')
+        .fontColor(PageColor.TEXT_SECONDARY)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
@@ -1313,7 +1314,7 @@ struct Compare {
           Column({ space: 6 }) {
             Text('未选择右侧片源')
               .fontSize(10)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
             Button('选择右侧片源')
               .fontSize(11)
               .onClick((): void => {
@@ -1323,12 +1324,12 @@ struct Compare {
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('#AA000000')
+          .backgroundColor(PageColor.OVERLAY)
         } else if (this.rightError !== '') {
           Column({ space: 6 }) {
             Text(this.rightError)
               .fontSize(10)
-              .fontColor('#FF8A80')
+              .fontColor(HudColor.DANGER)
               .maxLines(3)
               .textAlign(TextAlign.Center)
             if (this.canRetryRight()) {
@@ -1342,7 +1343,7 @@ struct Compare {
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('#AA000000')
+          .backgroundColor(PageColor.OVERLAY)
         } else if (!this.rightReady) {
           Column({ space: 6 }) {
             LoadingProgress()
@@ -1350,19 +1351,19 @@ struct Compare {
               .height(28)
             Text('右片准备中…')
               .fontSize(10)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
           }
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('#AA000000')
+          .backgroundColor(PageColor.OVERLAY)
         }
       }
       .layoutWeight(1)
       .width('100%')
       Text(formatDuration(this.rightDurationMs))
         .fontSize(9)
-        .fontColor('#78909C')
+        .fontColor(PageColor.TEXT_FAINT)
     }
     .layoutWeight(1)
     .height('100%')
@@ -1394,7 +1395,7 @@ struct Compare {
               .height(28)
             Text('读取媒体库…')
               .fontSize(10)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
           }
           .layoutWeight(1)
           .width('100%')
@@ -1403,7 +1404,7 @@ struct Compare {
           Column({ space: 8 }) {
             Text('库中没有可用的其他视频')
               .fontSize(11)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
             Button('返回')
               .fontSize(11)
               .onClick((): void => {
@@ -1427,7 +1428,7 @@ struct Compare {
                     .layoutWeight(1)
                   Text(formatDuration(clip.durationMs))
                     .fontSize(10)
-                    .fontColor('#90A4AE')
+                    .fontColor(PageColor.TEXT_HINT)
                 }
                 .width('100%')
                 .padding(10)
@@ -1447,7 +1448,7 @@ struct Compare {
       .width('100%')
       .height('72%')
       .padding(12)
-      .backgroundColor('#F0202020')
+      .backgroundColor(PageColor.PANEL_COMPARE)
       .borderRadius({ topLeft: 12, topRight: 12 })
     }
     .width('100%')
@@ -1481,7 +1482,7 @@ struct Compare {
               .height(28)
             Text('读取历史…')
               .fontSize(10)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
           }
           .layoutWeight(1)
           .width('100%')
@@ -1490,10 +1491,10 @@ struct Compare {
           Column({ space: 8 }) {
             Text('暂无对比历史')
               .fontSize(11)
-              .fontColor('#AAAAAA')
+              .fontColor(PageColor.TEXT_DIM)
             Text('选过一次右侧片源后会自动记录')
               .fontSize(9)
-              .fontColor('#78909C')
+              .fontColor(PageColor.TEXT_FAINT)
           }
           .layoutWeight(1)
           .width('100%')
@@ -1506,13 +1507,13 @@ struct Compare {
                   Column({ space: 2 }) {
                     Text(`${row.rightName} ↔ ${row.leftName}`)
                       .fontSize(11)
-                      .fontColor(row.missing ? '#FF8A80' : Color.White)
+                      .fontColor(row.missing ? HudColor.DANGER : Color.White)
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                       .width('100%')
                     Text(row.missing ? '缺失：右片已不在媒体库' : `右:${row.rightName}`)
                       .fontSize(9)
-                      .fontColor('#90A4AE')
+                      .fontColor(PageColor.TEXT_HINT)
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                       .width('100%')
@@ -1543,7 +1544,7 @@ struct Compare {
       .width('100%')
       .height('72%')
       .padding(12)
-      .backgroundColor('#F0202020')
+      .backgroundColor(PageColor.PANEL_COMPARE)
       .borderRadius({ topLeft: 12, topRight: 12 })
     }
     .width('100%')
@@ -1601,7 +1602,7 @@ struct Compare {
             // 坐标 t；仅左端标签带符号，进度读数仍随左钟口径不变
             Text(formatSignedDuration(this.timelineTMin()))
               .fontSize(10)
-              .fontColor('#B0BEC5')
+              .fontColor(PageColor.TEXT_SECONDARY)
             Slider({
               value: this.sliderValue,
               min: this.timelineTMin(),
@@ -1629,7 +1630,7 @@ struct Compare {
             // 右端标签 = timelineEnd()（= tMax；off=0 时即 max(L,R)，与旧左轴时长标签衔接）
             Text(formatDuration(timelineEnd(this.timelineGeo())))
               .fontSize(10)
-              .fontColor('#B0BEC5')
+              .fontColor(PageColor.TEXT_SECONDARY)
           }
           .width('100%')
 
@@ -1672,7 +1673,7 @@ struct Compare {
           Row({ space: 6 }) {
             Text('手动偏移')
               .fontSize(10)
-              .fontColor('#90A4AE')
+              .fontColor(PageColor.TEXT_HINT)
             Button('-0.5s')
               .fontSize(11)
               .onClick((): void => {
@@ -1680,7 +1681,7 @@ struct Compare {
               })
             Text(this.offsetText())
               .fontSize(11)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .width(76)
               .textAlign(TextAlign.Center)
             Button('+0.5s')
@@ -1696,7 +1697,7 @@ struct Compare {
           if (this.hint !== '') {
             Text(this.hint)
               .fontSize(10)
-              .fontColor('#FFCC80')
+              .fontColor(HudColor.WARN)
               .maxLines(2)
               .width('100%')
               .onClick((): void => {
@@ -1722,7 +1723,7 @@ struct Compare {
         Column({ space: 8 }) {
           Text(this.fatalError)
             .fontSize(12)
-            .fontColor('#FF8A80')
+            .fontColor(HudColor.DANGER)
             .maxLines(4)
             .textAlign(TextAlign.Center)
           Button('返回')
