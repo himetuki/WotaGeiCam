@@ -91,12 +91,14 @@ test('接线_HUD列保持Transparent_姿态仪与焦点标记共存', () => {
   const cam: string = sourceText('entry/src/main/ets/pages/Camera.ets');
   // HUD 列 Transparent（点击穿透到下层兄弟）是姿态仪可点性与点按对焦的前提；
   // 改回 None/Default 会把姿态仪模式切换与标记裁掉（T31 遮罩同款教训）。
-  // codeOnly 会删行注释，锚点一律用代码：XComponent onClick（列开）→ Transparent（列关）→ 标记
+  // codeOnly 会删行注释，锚点一律用代码。HUD 列修饰链顺序：width/height →
+  // hitTestBehavior(Transparent) → onClick(onPreviewTap)；标记浮层在列之后（顶层渲染）。
   const xclick: number = cam.indexOf('this.onPreviewTap(event.windowX, event.windowY)');
   const transparent: number = cam.indexOf('.hitTestBehavior(HitTestMode.Transparent)');
   const marker: number = cam.indexOf('focusMarkX - 28');
-  assertTrue(xclick >= 0 && transparent > xclick, 'HUD 列必须保持 Transparent');
-  assertTrue(marker > transparent, '焦点标记必须在 HUD 列之后（顶层渲染）');
+  assertTrue(xclick >= 0, 'HUD 列必须挂 onPreviewTap 点击');
+  assertTrue(transparent > 0 && transparent < xclick, '同列修饰链中 Transparent 在 onClick 之前');
+  assertTrue(marker > xclick, '焦点标记浮层在列之后（顶层渲染）');
   // 姿态仪仍在（E 批），其模式切换 onClick 保留（Transparent 下内层手势优先）
   assertTrue(cam.indexOf('AttitudeMeter({') >= 0, '姿态仪仍在（E 批）');
   assertTrue(cam.indexOf('this.getUIContext().getRouter()') >= 0 || cam.length > 0, 'sanity');
