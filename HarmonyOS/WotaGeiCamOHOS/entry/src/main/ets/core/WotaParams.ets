@@ -190,6 +190,12 @@ export class WotaParams {
 
     // activeArray 随镜头变化，旧点按坐标语义失效（换算依赖 activeArray）
     this.focusPoint.value = undefined;
+    // 对焦锁定清锁（Q4）：换镜头/切渲染模式/离开取景页再回等一切经本函数的
+    // 「相机整套重开」都要解锁，锚点随锁一起失效（未锁定时不触碰）。这是清锁的唯一落点。
+    if (this.focusLocked.value) {
+      this.focusLocked.value = false;
+      this.focusLockPoint.value = undefined;
+    }
     // 对焦锁定清锁（Q4）：换镜头/切渲染模式等一切经本函数的「相机整套重开」都要解锁，
     // 锚点随锁一起失效。这是清锁的唯一落点。
     if (this.focusLocked.value) {

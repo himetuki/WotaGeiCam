@@ -179,6 +179,9 @@ export interface SnapshotArgs {
   evSteps: number;
   fps: FpsPick | undefined;
   afMode: AfMode;
+  focusLocked: boolean;
+  /** FL 批：锁定锚点（focusPoint 语义让位；缺省画面中心由消费方兜底） */
+  focusLockPoint: TapPoint | undefined;
   /** 手动对焦屈光度（1/m）；OHOS 侧按 diopter/maxDiopter 归一化到 setFocusDistance 的 0..1 域 */
   focusDiopter: number;
   zoom: number;
@@ -197,6 +200,8 @@ export class Snapshot {
   evSteps: number;
   fps: FpsPick | undefined;
   afMode: AfMode;
+  focusLocked: boolean;
+  focusLockPoint: TapPoint | undefined;
   focusDiopter: number;
   zoom: number;
   wbPreset: WbPreset;
@@ -213,6 +218,8 @@ export class Snapshot {
     this.evSteps = p.evSteps;
     this.fps = p.fps;
     this.afMode = p.afMode;
+    this.focusLocked = p.focusLocked;
+    this.focusLockPoint = p.focusLockPoint;
     this.focusDiopter = p.focusDiopter;
     this.zoom = p.zoom;
     this.wbPreset = p.wbPreset;
@@ -409,6 +416,8 @@ export function snapshotOf(params: WotaParams, state: State): Snapshot {
     evSteps: params.ev.value.value,
     fps: fpsPick,
     afMode: params.afMode.value,
+    focusLocked: params.focusLocked.value,
+    focusLockPoint: params.focusLockPoint.value,
     focusDiopter: params.manualFocusDiopter.value.value,
     zoom: params.zoom.value.value,
     wbPreset: params.wbMode.value,
@@ -511,7 +520,32 @@ export function applySnapshot(session: camera.PhotoSession, state: State, p: Sna
     report.skipped.push('exposureBias: no evStep');
   }
 
-  // 2. 对焦：模式 + 点按（tapPoint 同时驱动 focusPoint 与 meteringPoint）+ 手动对焦距离
+  // 2. 对焦：模式 + 点按（tapPoint 同时驱动 focusPoint 与 meteringPoint）+ 手动对焦距离。
+  // FL 批：focusLocked = 对焦锁定（上游 engageFocusLock 的 OHOS 对应物）——
+  // OHOS 原生 FOCUS_MODE_LOCKED（镜头停在合焦位，不排恢复），锚点取 focusLockPoint
+  // （缺省画面中心）；锁定时 tapPoint 语义让位（轻触/双击不重焦由页面手势门控）。
+  // 能力闸（进闸现读）：session.isFocusModeSupported(LOCKED) 为 false → skipped（拒绝假开关）。
+  if (p.focusLocked) {
+    try {
+      if (!session.isFocusModeSupported(camera.FocusMode.FOCUS_MODE_LOCKED)) {
+        report.skipped.push('focusLock: LOCKED not supported');
+      } else {
+        session.setFocusMode(camera.FocusMode.FOCUS_MODE_LOCKED);
+        report.applied.push('focusMode(locked)');
+        if (p.focusLockPoint !== undefined) {
+          const lockPt: camera.Point = { x: p.focusLockPoint.x, y: p.focusLockPoint.y };
+          try {
+            session.setFocusPoint(lockPt);
+            report.applied.push('focusPoint(locked)');
+          } catch (e) {
+            report.failed.push(`focusPoint(locked)(${e})`);
+          }
+        }
+      }
+    } catch (e) {
+      report.failed.push(`focusLock(${e})`);
+    }
+  } else {
   try {
     session.setFocusMode(focusModeFor(p.afMode));
     report.applied.push('focusMode');
@@ -540,21 +574,22 @@ export function applySnapshot(session: camera.PhotoSession, state: State, p: Sna
       }
     }
   }
-  if (p.tapPoint !== undefined) {
-    const pt: camera.Point = { x: p.tapPoint.x, y: p.tapPoint.y };
-    try {
-      session.setFocusPoint(pt);
-      report.applied.push('focusPoint');
-    } catch (e) {
-      report.failed.push(`focusPoint(${e})`);
-    }
-    try {
-      session.setMeteringPoint(pt);
-      report.applied.push('meteringPoint');
-    } catch (e) {
-      report.failed.push(`meteringPoint(${e})`);
-    }
   }
+    if (p.tapPoint !== undefined) {
+      const pt: camera.Point = { x: p.tapPoint.x, y: p.tapPoint.y };
+      try {
+        session.setFocusPoint(pt);
+        report.applied.push('focusPoint');
+      } catch (e) {
+        report.failed.push(`focusPoint(${e})`);
+      }
+      try {
+        session.setMeteringPoint(pt);
+        report.applied.push('meteringPoint');
+      } catch (e) {
+        report.failed.push(`meteringPoint(${e})`);
+      }
+    }
 
   // 3. 变焦（OHOS 恒 ratio 路径，crop 不移植）
   try {

@@ -434,6 +434,8 @@ export struct FocusPillPopup {
   editable: boolean = true;
   onClose: () => void = (): void => {};
   onApply: () => void = (): void => {};
+  /** FL：锁定/解除开关（宿主页过闸后落总线；缺省空实现防漏挂——但接线守卫会点名） */
+  onToggleLock: () => void = (): void => {};
   @State afMode: AfMode = AfMode.CONTINUOUS_VIDEO;
   @State diopter: number = 0;
   private lo: number = 0;
@@ -475,6 +477,20 @@ export struct FocusPillPopup {
           this.afMode = next;
           this.params.afMode.value = next;
           this.onApply();
+        }
+      })
+      // FL 批：锁定对焦/解除锁定条目（上游「副控制=对焦胶囊里的锁定/解除条目」）。
+      // 门禁与落点由宿主页 onToggleLock 闭包裁决（闸：手动档/录制中，同上游 lockFocusAt）；
+      // 锁定成功后 afMode 不变——引擎侧 FOCUS_MODE_LOCKED 接管（focusLocked 态门控点按重焦）。
+      PillChoices({
+        options: [
+          new PillOption(1, this.params.focusLocked.value ? '解除锁定' : '锁定对焦', true)
+        ],
+        selected: -1,
+        perRow: 1,
+        active: this.editable,
+        onPick: (_opt: PillOption): void => {
+          this.onToggleLock();
         }
       })
       if (this.afMode === AfMode.MANUAL && this.hasRange) {

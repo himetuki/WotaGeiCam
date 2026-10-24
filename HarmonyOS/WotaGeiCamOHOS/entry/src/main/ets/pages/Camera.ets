@@ -80,7 +80,7 @@ import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
 import { UserSettings } from '../core/UserSettings';
-import { FocusTapMath } from '../core/FocusTap';
+import { FocusTapArbiter, FocusTapMath } from '../core/FocusTap';
 import { TapPoint } from '../core/Constants';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
@@ -238,6 +238,10 @@ struct CameraPage {
   private winWvp: number = 0;
   private winHvp: number = 0;
   private focusMarkTimer: number = -1;
+  /** FL 批：点按/双击/长按三击派发仲裁（单击=对焦、双击=锁定、长按=解锁重对焦） */
+  private tapArbiter: FocusTapArbiter = new FocusTapArbiter(280);
+  /** 锁定期首次轻触提示已给（每次上锁重置，对齐上游 lockedTapTipShown） */
+  private lockedTapTipShown: boolean = false;
   /** hud_layout 位置表缓存（键 = 原文串；见 readoutTable()） */
   private hudTableCache: HudLayoutTable | undefined = undefined;
   private hudTableRaw: string = '';
@@ -287,6 +291,8 @@ struct CameraPage {
       this.closePill(); // T22 P3：相机丢失/session error 处置统一收口弹层（锚点/能力快照已失效）
       this.cameraStarted = false;
       this.hideFocusMark();
+      this.tapArbiter.reset();
+      this.lockedTapTipShown = false;
       this.resetCameraLabels();
       if (this.recording || this.stopPending) {
         this.requestStop(AutoStopRules.REASON_CAMERA_LOST);
@@ -1257,11 +1263,82 @@ struct CameraPage {
     if (pt === undefined) {
       return;
     }
+    const isDouble: boolean = this.tapArbiter.onTapUp(Date.now());
+    if (this.params.focusLocked.value) {
+      // 锁定期轻触/双击不重焦（防误触字面要求）：首次轻触给一句提示
+      this.showFocusMark(windowX, windowY);
+      if (!this.lockedTapTipShown) {
+        this.lockedTapTipShown = true;
+        this.message = '对焦已锁定；要换焦点请长按画面或打开对焦胶囊解除';
+      }
+      return;
+    }
+    if (isDouble) {
+      this.lockFocusAt(pt, windowX, windowY);
+      return;
+    }
+    this.focusTapAt(pt, windowX, windowY);
+  }
+
+  /** 普通点焦：写 focusPoint → 既有 applyParams 下发 → 标记（上游 focusTapAt 同构） */
+  private focusTapAt(pt: TapPoint, windowX: number, windowY: number): void {
+    // StateFlow 同值去重会吞同点重触：先置 undefined 再写（上游 writeFocusPoint 同构）
+    this.params.focusPoint.value = undefined;
     this.params.focusPoint.value = pt;
     this.applyParamsFromPills();
     // 诊断留痕：点按对焦的归一化坐标（真机取证/排查"点了没反应"的第一现场）
     Diag.i(WOTA_RECORD_TAG, `focus tap norm=(${pt.x.toFixed(3)},${pt.y.toFixed(3)})`);
     this.showFocusMark(windowX, windowY);
+  }
+
+  /**
+   * FL：锁定入口（双击取景与胶囊条目共用）。**先写锚点再置锁定态**（引擎回执读到新锚点）。
+   * 门（进闸现读，对齐上游 lockFocusAt 顺序）：手动档即锁定（不置锁）→ 录制中不锁 →
+   * 已锁不重复。命中闸给一句说明、不置锁定态——拒绝假开关。
+   */
+  private lockFocusAt(pt: TapPoint, windowX: number, windowY: number): void {
+    if (this.params.afMode.value === AfMode.MANUAL) {
+      this.message = '手动对焦档本身即锁定，无需再锁';
+      return;
+    }
+    if (this.recording) {
+      this.message = '录制中不可锁定对焦';
+      return;
+    }
+    this.params.focusLockPoint.value = pt;
+    this.params.focusLocked.value = true;
+    this.lockedTapTipShown = false;
+    this.message = '对焦已锁定，轻触画面不会重新对焦';
+    this.showFocusMark(windowX, windowY);
+  }
+
+  /**
+   * FL：长按半秒 = 解锁（若已锁）；未锁定时空操作（上游同款）。
+   * **平台偏离登记**：上游解锁后在长按点重新对焦（detectTapGestures 带坐标）；OHOS 的
+   * LongPressGesture/GestureEvent **不含坐标字段**（SDK d.ts 核实）——本侧解锁后由用户的
+   * 连续对焦档自动接管重对焦，坐标级重对焦不再单独下发。
+   */
+  private onPreviewLongPress(): void {
+    if (this.params.focusLocked.value) {
+      this.params.focusLocked.value = false;
+      this.message = '对焦锁定已解除';
+    }
+    this.tapArbiter.reset();
+  }
+
+  /**
+   * FL：胶囊「锁定对焦/解除锁定」条目（上游 toggleFocusLock 同构）：已锁 → 解锁；
+   * 未锁 → 从最近点按处（focusPoint 总线值，无则画面中心）过闸锁定。
+   */
+  private toggleFocusLock(): void {
+    if (this.params.focusLocked.value) {
+      this.params.focusLocked.value = false;
+      this.message = '对焦锁定已解除';
+      return;
+    }
+    const last: TapPoint | undefined = this.params.focusPoint.value;
+    const anchor: TapPoint = last !== undefined ? last : new TapPoint(0.5, 0.5);
+    this.lockFocusAt(anchor, anchor.x * this.winWvp, anchor.y * this.winHvp);
   }
 
   /** 对焦标记：窗口 vp 坐标定位，800ms 自动隐（连点重置计时） */
@@ -2159,6 +2236,12 @@ struct CameraPage {
       .onClick((event: ClickEvent): void => {
         this.onPreviewTap(event.windowX, event.windowY);
       })
+      .gesture(
+        LongPressGesture({ repeat: false, duration: 500 })
+          .onAction((_e: GestureEvent): void => {
+            this.onPreviewLongPress();
+          })
+      )
 
       // TFC：对焦标记（瞬时可视反馈；hitTest None 不拦触摸，800ms 自动隐）
       if (this.focusMarkVisible) {
@@ -2294,6 +2377,9 @@ struct CameraPage {
           },
           onApply: (): void => {
             this.applyParamsFromPills();
+          },
+          onToggleLock: (): void => {
+            this.toggleFocusLock();
           }
         })
       }

@@ -173,6 +173,33 @@
 - **回归**：pure-test 54 files / 630 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
 - **模拟器待验**：节拍/缩放档切换后对比页与取景页的实际变化（纯 UI 观察，低风险）。
 
+## 交付批（FL：对焦锁定，2026-10-24）
+
+上游「对焦锁定」（用户反馈第 2 条：双击取景=该点锁定、长按半秒=解锁重对焦、对焦胶囊
+副控制条目、锁定期轻触/双击不重焦）的接线。前置 TapPoint/focusPoint 双驱动链已备（TFC）。
+
+- **下发**（`camera/RequestApplier.ets`）：`focusLocked` → OHOS 原生
+  **`FOCUS_MODE_LOCKED`**（OHOS 有直接等价物——镜头停在合焦位不排恢复，**非**上游
+  Camera2 的「AUTO 覆写 + TRIGGER 单发」三段式；语义对齐：镜头锁定直到显式解除）。
+  能力闸进闸现读：`isFocusModeSupported(LOCKED)` 为 false → skipped（拒绝假开关，上游 R3a）。
+  锁定时锚点经 `setFocusPoint` 下发；未锁路径 `focusModeFor(afMode)` 不变。
+- **生命周期**（`core/WotaParams.applyAbility`）：相机整套重开（换镜头/切渲染/离开取景页
+  再回）= **清锁唯一落点**（锚点随锁一起失效，未锁定时不触碰——上游 Q4 同口径）。
+- **Camera 页三击派发**：单击=对焦、**双击=该点锁定**、**长按半秒=解锁**；锁定期轻触/双击
+  不重焦、首次轻触给提示（`lockedTapTipShown`，每次上锁重置）；仲裁态机
+  `FocusTapArbiter.onTapUp`（280ms 窗口，长按后 reset 不误判）。
+- **对焦胶囊**：「锁定对焦/解除锁定」条目经宿主页 `onToggleLock` 过闸（胶囊不直写总线绕过
+  门禁）；MANUAL 门：手动对焦档本身即锁定（提示不置锁）；录制门：录制中不锁（已锁可解锁）。
+- **平台偏离登记**：① OHOS LongPressGesture/GestureEvent **不含坐标字段**（SDK d.ts
+  核实）→ 长按解锁**不重对焦**（上游在长按点 focusTapAt）——解锁后用户连续对焦档自动
+  接管，语义损失登记；② 锁定下发用原生 LOCKED 而非上游三段式。
+- **测试**：`focus-lock.test.ets`（7：派发语义 2/长按重置/WotaParams 清锁唯一落点 +
+  24 键排除清单/LOCKED 能力闸与锚点下发/相机页三击与胶囊条目守卫）。共 +7（634 → 641）。
+- **回归**：pure-test 56 files / 641 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **模拟器验证 ✓（hilog 实证）**：双击锁定后轻触不产生新对焦日志（不重焦生效）；长按解锁
+  后点按重新出现对焦日志（连续对焦接管）。真机待验：FOCUS_MODE_LOCKED 对真实镜头的合焦
+  保持、录制约束、锁定期提示文案的视觉呈现。
+
 ## 交付批（UO：界面方向/竖屏固定，2026-10-24）
 
 上游 `core/UIOrientation.kt` + `WotaSettings.KEY_UI_ORIENTATION` + 设置页 BlockUiOrientation 的
@@ -981,7 +1008,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（634）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（641）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
