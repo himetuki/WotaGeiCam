@@ -9,6 +9,20 @@
  */
 import glLib from 'libentry.so';
 
+// T27-1 平台探针三口（startAvScreenProbe/getAvScreenProbeStatus/cancelAvScreenProbe，
+// 见 cpp/avscreen_probe.*）：native 实现注册在 napi_init 的 exports 表里
+export function startAvScreenProbe(durationMs: number): string {
+  return glLib.startAvScreenProbe(durationMs);
+}
+
+export function getAvScreenProbeStatus(): string {
+  return glLib.getAvScreenProbeStatus();
+}
+
+export function cancelAvScreenProbe(): void {
+  glLib.cancelAvScreenProbe();
+}
+
 export function getInputSurfaceId(): string {
   return glLib.getInputSurfaceId();
 }

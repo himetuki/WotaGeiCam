@@ -94,7 +94,7 @@
 | `record/AudioPreflightPolicy.kt`（e950328 新增） | 纯逻辑 | **已落（2026-10-23，对齐 e950328）**：`record/AudioPreflightPolicy.ets`——MIN/MAX_PRE_SHIFT_MS=20..600、MAX_AUTO_OFFSET_MS=1000、MIN_CONFIDENCE=2.0（比对比页手动 1.5 更严：无人值守自动写盘）、`capPreShiftUs`（低置信 → 0；`-offset<20ms` 即内录不早 → 0；>600 钳到 600）、`shouldPreflight(envOn,capOn,a2dp)`、`autoOffsetWithinRange`；上游 `a2dpFromOutputTypes` 的 Android 常量比对改为**注入布尔组合面**（activeA2dp ‖ listHasA2dp），平台比对移到 AudioRoute | ☑ 纯逻辑层 |
 | `record/PreflightPcm.kt`（e950328 新增） | 纯逻辑 | **已落（2026-10-23）**：`record/PreflightPcm.ets`——`PreflightMonoPcm`：交织 PCM16→单声道 float、按两路共同 t0 落位（早于 t0 钳 0、不带负前导）、空洞补零、静音锁存与 peak | ☑ |
 | `record/AudioRoute.kt`（e950328 新增） | 平台绑定 | **已落（2026-10-23，降级实现）**：`record/AudioRoute.ets`——`isA2dpLikelyOn()` 取 `audio.getAudioManager().getRoutingManager().getDevicesSync(OUTPUT_DEVICES_FLAG)`，出现 `DeviceType.BLUETOOTH_A2DP` 即 true，异常按 false。**降级登记**：OHOS 无 `isBluetoothA2dpOn`「活动路由」API（本机 SDK d.ts 已查证：仅 BLUETOOTH_A2DP=8 与 getDevices/getDevicesSync，无 getActiveOutputDevice），本判据等价上游的**兜底路径**（设备列表含 A2DP）——A2DP 已连但输出切回扬声器时会多跑一次预校准（无害：预校准失败路径恒 shift=0，不写错偏移）。真机待验见对应小节 | ☑ 降级 |
-| `record/AudioPreflight.kt`（预校准采集）、`record/CodecRecorder.kt` 的 `AudioChannel.ptsShiftUs` 与 `preflightAudioSync` 挂点、`record/Recorder.kt` 的引擎契约 | 平台绑定 | **未落，整块挂 T27（2026-10-24 收口定版：真机批，无设备不盲落）**——native 侧 AVScreenCapture 头文件已在 sysroot 核实在册（`native_avscreen_capture.h`，API 10+：Create/StartScreenRecording/SetMicrophoneEnabled 等），API 面不缺；缺的是隐私确认弹窗的实际形态与双源采集行为，只能真机取证（本仓纪律：不可验证的平台面不落地）。前置条件 = 一台 HarmonyOS 设备 + 隐私弹窗 UX 定版（预校准二次弹窗问题维持既有结论：须复用同一 capture 会话或砍预校准）：① 预校准需两条临时 AudioFeeder 双源同采 800ms，OHOS 内录原始 PCM 只有 AVScreenCapture NDK 一条路且**每次会话拉隐私确认**——预校准+正式录制=二次弹窗（体验不可接受，须 T27-3 复用同一 capture 会话，或砍预校准只留后校准）；② ptsShiftUs 需内录音轨，而 `cpp/codec_recorder.cpp` 现无音频轨（留白）；③ Recorder 契约随 T27-3 录制链改造一并落。策略与 PCM 落位算式已在纯逻辑层备好（上两行） | ☐ |
+| `record/AudioPreflight.kt`（预校准采集）、`record/CodecRecorder.kt` 的 `AudioChannel.ptsShiftUs` 与 `preflightAudioSync` 挂点、`record/Recorder.kt` 的引擎契约 | 平台绑定 | **T27-1 平台探针已落（P27 批 2026-10-24，见交付批 P27 节）；T27-2/3/4 真机批（无设备不盲落）**——native 侧 AVScreenCapture 头文件已在 sysroot 核实在册（`native_avscreen_capture.h`，API 10+：Create/StartScreenRecording/SetMicrophoneEnabled 等），API 面不缺；缺的是隐私确认弹窗的实际形态与双源采集行为，只能真机取证（本仓纪律：不可验证的平台面不落地）。前置条件 = 一台 HarmonyOS 设备 + 隐私弹窗 UX 定版（预校准二次弹窗问题维持既有结论：须复用同一 capture 会话或砍预校准）：① 预校准需两条临时 AudioFeeder 双源同采 800ms，OHOS 内录原始 PCM 只有 AVScreenCapture NDK 一条路且**每次会话拉隐私确认**——预校准+正式录制=二次弹窗（体验不可接受，须 T27-3 复用同一 capture 会话，或砍预校准只留后校准）；② ptsShiftUs 需内录音轨，而 `cpp/codec_recorder.cpp` 现无音频轨（留白）；③ Recorder 契约随 T27-3 录制链改造一并落。策略与 PCM 落位算式已在纯逻辑层备好（上两行） | ☐ |
 
 ## ui — 界面（全部 ArkUI 重写）
 
@@ -932,7 +932,8 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   KEEP_BACKGROUND_RUNNING 声明、无 ForegroundService 仿写））、
   focus-pill（5，FC 批：AfMode 契约值/diopterLadder 档/dock 与录制可调集接线/弹层能力闸/
   tint 不迁守卫）、media-share-wiring 增 2（GX 批：分段展开/折叠开关接线守卫 +
-  重命名不迁决策守卫）。
+  重命名不迁决策守卫）、avscreen-probe（6，P27 批：状态串解析全表 + 接线守卫——双源配置/
+  缓冲取还/CMake 实名链接/页面按钮与销毁兜底）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；

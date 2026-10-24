@@ -13,6 +13,7 @@
 #include <string>
 
 #include "arc_repair.h"
+#include "avscreen_probe.h"
 #include "clip_exporter.h"
 #include "codec_recorder.h"
 #include "gl_render.h"
@@ -360,6 +361,34 @@ static napi_value GetArcEffectiveMode(napi_env env, napi_callback_info info)
 // ---------------------------------------------------------------- T20 A/B 无损剪辑导出
 
 /** 启动 remux：fd 归 ArkTS（native 不 close）；空串 = 已入队，busy/args/worker = 立即失败 */
+/** T27-1 平台探针：启动 AVScreenCapture 取证（空串=入队；busy/args=失败） */
+static napi_value StartAvScreenProbe(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t durationMs = 2500;
+    if (argc >= 1) {
+        napi_get_value_int32(env, argv[0], &durationMs);
+    }
+    return MakeString(env, AvScreenProbe::Instance().Start(durationMs));
+}
+
+/** 探针状态串：idle | running:<elapsedMs> | ok:<字段> | failed:<code> | cancelled */
+static napi_value GetAvScreenProbeStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, AvScreenProbe::Instance().Status());
+}
+
+static napi_value CancelAvScreenProbe(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    AvScreenProbe::Instance().Cancel();
+    return nullptr;
+}
+
 static napi_value StartClipExport(napi_env env, napi_callback_info info)
 {
     // 第 7 位 audioShiftUs 可选：老调用点（6 参）按 0 处理，避免 ABI 断裂
@@ -534,6 +563,9 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getGpuWrittenBytes", nullptr, GetGpuWrittenBytes, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGpuHealth", nullptr, GetGpuHealth, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getArcEffectiveMode", nullptr, GetArcEffectiveMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startAvScreenProbe", nullptr, StartAvScreenProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getAvScreenProbeStatus", nullptr, GetAvScreenProbeStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelAvScreenProbe", nullptr, CancelAvScreenProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startClipExport", nullptr, StartClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getClipExportStatus", nullptr, GetClipExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelClipExport", nullptr, CancelClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},

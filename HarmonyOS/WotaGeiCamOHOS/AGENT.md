@@ -42,8 +42,10 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 614 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 620 用例，
   退出码 0 才算全绿。
+- `device-check.mjs` — 真机预检/走查：`node scripts/device-check.mjs`（预检）、`log`（hilog 实时）、
+  `check`（23 条待验清单操作索引，离线可打）。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
   `entry/build/default/outputs/default/entry-default-signed.hap`；命令 `node scripts/local-sign.mjs`。
@@ -104,6 +106,10 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
 - `bt/`：`BtSpeakerModel`（纯逻辑：合并/排序/文案）+ `BtSpeakerController`（平台：配对/A2DP/电量）。
   **减法红线**（接线守卫钉住）：不得引入 setVolume / avsession / startBluetoothDiscovery——
   音量写、播控、扫描发现在 OHOS 无三方等价物（登记 PORT_MAP BT 节），不许"补齐"。
+- `record/AvScreenProbeModel.ets`（纯）+ `AvScreenProbeRunner.ets` + `cpp/avscreen_probe.*`：
+  T27-1 平台探针（AVScreenCapture 双源取证）。**链接库名是 sysroot 实名
+  `libnative_avscreen_capture.so`**（不是 libnative_media_*）；错误码不解读、原样上报——
+  真机取证原则。设备到位后：`node scripts/device-check.mjs` 预检 → Index 页点探针。
 - `record/RecordTask.ets`：录制长时任务（启停经 `RecordTaskGate` 幂等闸；失败只记日志不阻塞录制；
   BackgroundMode 用 TASK_KEEPING——无视频录制专属档，T27-3 内录后切 AUDIO_RECORDING）。
 - `record/`：`CaptureStateMachine`（内录授权态机）、`CaptureSilence`（静音判据+按场节流）、

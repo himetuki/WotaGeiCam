@@ -32,6 +32,8 @@ import { Diag, ExportResult } from '../diag/Diag';
 import { RecordingEngine } from '../camera/KitRecorder';
 import { RecordPermResult, requestRecordPermissions } from '../camera/PermGate';
 import { RecordResult } from '../record/RecordResult';
+// T27-1 平台探针：AVScreenCapture 内录取证（真机批第一步；Runner 传递引用 AvScreenProbeModel）
+import { cancelAvScreenProbe, runAvScreenProbe } from '../record/AvScreenProbeRunner';
 import { common } from '@kit.AbilityKit';
 
 @Entry
@@ -48,6 +50,8 @@ struct Index {
   @State recording: boolean = false;
   /** 录制按钮防重复：权限/起录/停录异步链进行中禁用按钮 */
   @State recordingBusy: boolean = false;
+  /** T27-1 探针：取证进行中（按钮防重入） */
+  @State avProbeBusy: boolean = false;
   /** 参数总线：参数自检八档的输入（也是后续 HUD 的同一实例来源） */
   private params: WotaParams = new WotaParams();
 
@@ -58,6 +62,8 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    // 探针后台窗口随页面销毁收口（native 侧窗口上限是硬兜底）
+    cancelAvScreenProbe();
     // 先停录制再停预览（录制占用相机；recorder.stop 幂等，未录制返回 BAD_STATE 无副作用）
     this.recorder.stop().then((): void => {
       this.engine.stop();
@@ -250,6 +256,20 @@ struct Index {
               } catch (e) {
                 this.message = `param self-check failed: ${e}`;
               }
+            })
+          Button('AVScreenCapture 探针')
+            .fontSize(14)
+            .enabled(!this.avProbeBusy)
+            .onClick(() => {
+              this.avProbeBusy = true;
+              this.message = '探针运行中（约 2.5s；期间可能弹系统确认框——弹窗形态正是取证目标，请照常操作）…';
+              runAvScreenProbe().then((info): void => {
+                this.avProbeBusy = false;
+                this.message = info.summary();
+              }).catch((e: Object): void => {
+                this.avProbeBusy = false;
+                this.message = `probe failed: ${e}`;
+              });
             })
         }
 
