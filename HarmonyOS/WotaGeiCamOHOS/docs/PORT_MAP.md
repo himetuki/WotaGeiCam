@@ -210,6 +210,35 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 - **回归**：pure-test 62 files / 679 tests 全绿；`assembleHap`（release）
   BUILD SUCCESSFUL。
 
+## 走查批（WALK-HM7UI03：模拟器运行时走查，Pura 900，2026-10-24）
+
+**口径**：本节全部结论为「模拟器走查」，不构成真机验收；真机冻结项（T27-2/3/4、
+练习动线/SplitPanel、Android BP generateBaselineProfile）不受影响。
+**环境**：Pura 900 模拟器（HarmonyOS 6.1.0.126 / API 24 系像 / x86_64 / 1320×2856 竖屏
+手机形态），本地签名 HAP（com.wotagei.camohos debug profile）覆盖安装。走查截图本地
+留存 `baseline/walk-hm7ui03/`（gitignore 资产区，不入库——仓库无截图入库惯例）。
+
+**逐项判定**：
+
+| 项 | 判定 | 证据/说明 |
+|---|---|---|
+| DIAG 链（W2-4） | **模拟器走查通过** | 总开关 ON→详细置灰解除（enabled false→true）；关总闸→级联关详细+置灰回归；导出→状态行出现沙箱路径；清除→「日志已清除（当前件/轮转件/崩溃件）」；busy 互斥为静态守卫复核（ui-a11y/diag-settings 守卫，模拟器无法制造竞态） |
+| 深色底（W1-7） | **模拟器走查通过**（Camera/Gallery/Settings 三页截图留档） | COLOR_MODE_DARK 强制下三页黑底/深色面板；Player/Compare 不可达（无素材，见差异①）——两页迁移为字面量等值替换（ui-tokens 守卫钉值），登记差异② |
+| a11y 语义（W2-2） | **静态守卫复核通过；读屏焦点序待真机复核** | uitest dumpLayout 树不含 accessibilityText 字段（平台限制），模拟器无读屏服务可驱动；ui-a11y.test.ets 四条守卫钉住接线，焦点序与播报顺序留真机 |
+| SPEC-T 平板形态（W2-5） | **模拟器不可覆盖，登记差异③** | Pura 900 短边 1320px（≈411vp）< 600vp 断点，系统 bindSheet 居中/480vp 上限的宽形态表现无法在此模拟器产生；裁决不推翻 |
+| 翻页起播/RV 旋转/AB 水化回写/离屏 Fit→Cover/翻页窗口期/bindSheet 形态（W1-1/2/3/4/5/6） | **静态守卫复核通过；模拟器走查不可达，登记差异①** | 全部依赖库内视频素材；素材通道三重不可达：① GL 录制 `GPU record failed: encoder-create`（模拟器无 H264 编码器，失败点实测）② shell uid 2000 无提权（su 不存在、setenforce 拒绝）③ 沙箱 DAC 拒绝 hdc file send（drwxrwx--- 属主 20020062）。相关静态守卫：ab-persist/ab-persist(ABP2)/gallery-forms/player-rotate/ui-tokens/sheet-spec 全绿 |
+| ABP2 链（W2-3） | **静态守卫复核通过；走查不可达（同差异①）** | 打点→回绕→水化→重建恢复链需素材 |
+| 竖屏固定（W1-8） | **静态守卫复核通过；模拟器差异④** | 模拟器无加速度计（既有登记），无旋转激励源；UO 守卫（契约值 6/7 + portrait 默认）钉住实现，运行时复核随真机批 |
+| C 更新链路（顺带） | **模拟器走查通过（复证）** | 设置页现场拉起「发现新版本 v0.0.10-r01」弹层与 Release 说明渲染，取消路径正常（此前批次已验，本轮复证） |
+
+**差异项去向**：① 素材通道缺失 → 真机批复核（真机可录制产素材；或后续模拟器镜像带
+编码器时补走查）；② Player/Compare 深色底目检 → 静态守卫承担（字面量等值），随真机批
+复核；③ 平板/分屏形态 → 平板真机/可变形态模拟器（当前无此环境，平台差异登记）；
+④ 旋转激励 → 真机批。**FIX 批：空过**（走查暴露的均为环境限制，非应用缺陷；无缺陷
+不造空 commit）。**模拟器运行险情登记**：宿主空闲内存 1.6GB 时 qemu 冷启后死亡
+（OOM，与 baseline-env 已录指纹同源）；gradle daemon 停止 + 走查期间不并行宿主构建
+后稳定——后续模拟器作业沿用此协议。
+
 ## 交付批（SPEC-T：SheetSpec 平板/分屏系统映射裁决，2026-10-24）
 
 HM7-UI-02 步骤 4。把 HM7-1 批「系统面板形态承担」的登记升格为**正式裁决**，防止后续
