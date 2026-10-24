@@ -758,6 +758,7 @@ struct Gallery {
         .height(58)
         .borderRadius(6)
         .clip(true)
+        .accessibilityText(`打开播放页：${entry.title()}`)
         .onClick((): void => {
           this.openPlayer(entry.clip);
         })
@@ -1094,6 +1095,7 @@ struct Gallery {
           .fontColor(PageColor.TEXT_SECONDARY)
         Toggle({ type: ToggleType.Switch, isOn: this.seriesCollapsed })
           .selectedColor('#FF4D6A')
+          .accessibilityText('分段合并')
           .onChange((on: boolean): void => {
             this.seriesCollapsed = on;
           })
@@ -1211,6 +1213,8 @@ struct Gallery {
                 if (idx === this.fullscreenIndex) {
                   Column() {
                     XComponent({ type: XComponentType.SURFACE, controller: this.fsXc })
+                      .accessibilityText('全屏浏览画面')
+                      .accessibilityDescription('左右滑动切换视频，控制见底部控制条')
                       .onLoad((): void => {
                         this.fsSurfaceLoaded();
                       })

@@ -1914,6 +1914,8 @@ struct CameraPage {
   build() {
     Stack() {
       XComponent({ id: 'wotaCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
+      .accessibilityText('取景画面')
+      .accessibilityDescription('点按对焦，长按锁定对焦')
         .onLoad((): void => {
           this.loadNativeModule();
         })
@@ -2210,6 +2212,7 @@ struct CameraPage {
             .width(HudTouch.SHUTTER)
             .height(HudTouch.SHUTTER)
             .enabled(!this.stopPending && this.glFatal === '')
+            .accessibilityText(this.recording ? '停止录制' : '开始录制')
             .onClick((): void => {
               this.toggleRecord();
             })

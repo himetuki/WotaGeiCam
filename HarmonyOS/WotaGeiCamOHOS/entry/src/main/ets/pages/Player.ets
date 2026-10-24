@@ -1005,6 +1005,7 @@ struct Player {
           max: this.durationMs > 0 ? this.durationMs : 1,
           step: 1
         })
+          .accessibilityText('播放进度')
           .layoutWeight(1)
           .onChange((value: number, mode: SliderChangeMode): void => {
             this.sliderValue = value;
@@ -1434,6 +1435,8 @@ struct Player {
   build() {
     Stack() {
       XComponent({ type: XComponentType.SURFACE, controller: this.xc })
+        .accessibilityText('播放画面')
+        .accessibilityDescription('单击显示或隐藏控制，双击播放或暂停，双指缩放平移')
         .onLoad((): void => {
           this.onSurfaceLoaded();
         })

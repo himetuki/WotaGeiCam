@@ -1226,6 +1226,8 @@ struct Compare {
         .width('100%')
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.leftXc })
+          .accessibilityText('左片画面')
+          .accessibilityDescription('播放控制见底部控制条')
           .onLoad((): void => {
             this.onSurfaceLoaded(true);
           })
@@ -1296,6 +1298,8 @@ struct Compare {
         .width('100%')
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.rightXc })
+          .accessibilityText('右片画面')
+          .accessibilityDescription('播放控制见底部控制条')
           .onLoad((): void => {
             this.onSurfaceLoaded(false);
           })
@@ -1609,6 +1613,7 @@ struct Compare {
               max: this.timelineTMax(),
               step: 1
             })
+              .accessibilityText('对比时间线进度')
               .layoutWeight(1)
               .enabled(this.leftReady && this.leftDurationMs > 0)
               .onChange((value: number, mode: SliderChangeMode): void => {
