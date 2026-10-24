@@ -66,6 +66,21 @@ class CodecRecorder(
         private const val DEQUEUE_TIMEOUT_US = 2_000L
 
         /**
+         * 空闲自适应退避（2026-10-24 性能基线轮 P3）：连续 [DEQUEUE_IDLE_STREAK_BACKOFF] 轮
+         * 三通道输出全空时，下一轮 dequeue 超时从 2ms 放宽到本值。
+         *
+         * 依据（模拟器基线 trace，15.25s 录制窗口）：泵线程 13,043 次调度、平均 44µs/次
+         * ≈855 次唤醒/秒——来自 2ms×3 通道的轮询；放大量级（8ms）仍低于 2026-10-09
+         * 回退掉的 10ms 档（那一档的问题是最坏 3×10=30ms 全忙阻塞），而退避只在
+         * 「三通道连续空转」时生效：任一通道出数即清零回 2ms，活跃流路径逐字不变。
+         * 最坏阻塞 3×8=24ms < 30ms（旧 10ms 档），背压上界仍受控。
+         */
+        internal const val DEQUEUE_BACKOFF_TIMEOUT_US = 8_000L
+
+        /** 连续全空多少轮后启用退避超时（4 轮 × 2ms ≈ 8ms 无产出才算真空闲） */
+        internal const val DEQUEUE_IDLE_STREAK_BACKOFF = 4
+
+        /**
          * 抽干窗口的**静默预算**（idle budget）：窗口内**没有任何推进**时才按它判超时。
          *
          * 【原是一刀切 1200ms 绝对 deadline（起钟即定），超时即 `ENGINE_ERROR:DRAIN` + 整段删】——
@@ -1819,6 +1834,9 @@ class CodecRecorder(
         var drainExtensions = 0
         var drainProgress = false
         var drainTimedOut = false
+        // 空闲退避状态（见 [DEQUEUE_BACKOFF_TIMEOUT_US]）：连续无产出轮数与当前轮的超时档
+        var dequeueIdleStreak = 0
+        var dequeueUs = DEQUEUE_TIMEOUT_US
         // 各轨最后样本的媒体时长（已按段基准归一），用来在一行日志里看出轨间与墙钟的漂移
         var vPtsLastUs = 0L
         var aPtsLastUs = 0L
@@ -1834,6 +1852,8 @@ class CodecRecorder(
         preMuxDropped = 0L
 
         while (true) {
+            // 本拍三通道是否都空（空闲退避的推进输入，见循环底部；见 [DEQUEUE_BACKOFF_TIMEOUT_US]）
+            var anyOutThisTick = false
             // 本段请求重建（新段首笔就写不进 muxer，见 writeSample）：立刻收口，**不置错误码**，
             // 交 pumpLoop 按"重开一段"处理（engineError 一置，录制中途看门狗就会抢先把整场停掉）
             if (segmentRestartRequested) {
@@ -1928,9 +1948,11 @@ class CodecRecorder(
                 }
             }
             if (!videoDone) {
-                val idx = v.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
-                // 抽干推进观测（见 [drainWaitTick]）：吐了任何东西（数据/格式/EOS）即算这一拍有推进
+                val idx = v.dequeueOutputBuffer(bi, dequeueUs)
+                // 抽干推进观测（见 [drainWaitTick]）：吐了任何东西（数据/格式/EOS）即算这一拍有推进。
+                // 两行分开写：DrainWaitGuardTest 按文本钉住第一行的推进观测形态；第二行是 P3 空闲退避的输入
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         videoTrack = mx.addTrack(v.getOutputFormat())
@@ -1984,8 +2006,9 @@ class CodecRecorder(
                 }
             }
             if (a != null && envCh != null && !envCh.done) {
-                val idx = a.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
+                val idx = a.dequeueOutputBuffer(bi, dequeueUs)
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true // 同视频路（P3 空闲退避输入）
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> envCh.fmtReady = true
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
@@ -2030,8 +2053,9 @@ class CodecRecorder(
                 }
             }
             if (c != null && capCh != null && !capCh.done) {
-                val idx = c.dequeueOutputBuffer(bi, DEQUEUE_TIMEOUT_US)
+                val idx = c.dequeueOutputBuffer(bi, dequeueUs)
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
+                if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true // 同视频路（P3 空闲退避输入）
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> capCh.fmtReady = true
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
@@ -2190,6 +2214,10 @@ class CodecRecorder(
             }
             // 本拍推进观测读走即清（见 [drainWaitTick]）：抽干窗口的顺延只看"刚过去的这一拍有没有动"，
             // 清晚了会把窗口开启前的老活动误算成推进（清在循环末尾与清在下一拍开头等价）
+            // 空闲退避推进（P3）：出数即回 2ms 档；连续全空到阈值才放宽到 8ms——任一通道有产出，
+            // 下一拍立即恢复原节奏，活跃流路径逐字不变
+            dequeueIdleStreak = if (anyOutThisTick) 0 else dequeueIdleStreak + 1
+            dequeueUs = if (dequeueIdleStreak >= DEQUEUE_IDLE_STREAK_BACKOFF) DEQUEUE_BACKOFF_TIMEOUT_US else DEQUEUE_TIMEOUT_US
             drainProgress = false
         }
         if (videoTrack < 0) {
