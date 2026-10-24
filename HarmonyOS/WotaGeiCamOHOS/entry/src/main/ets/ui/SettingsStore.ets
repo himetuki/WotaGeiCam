@@ -19,6 +19,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { HudItems, Size } from '../core/Constants';
+import { UIOrientation, UIOrientations } from '../core/UIOrientation';
 import { Diag } from '../diag/Diag';
 import { PARAMS_STORE_NAME } from './ParamsStore';
 import {
@@ -36,6 +37,8 @@ const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
 const KEY_HUD_ITEMS: string = 'hud_items';
 /** HUD 位置表（上游 WotaSettings.KEY_HUD_LAYOUT，逐字一致；值为 HudLayoutTable.encode 的串） */
 const KEY_HUD_LAYOUT: string = 'hud_layout';
+/** 界面方向（上游 WotaSettings.KEY_UI_ORIENTATION，逐字一致；'portrait' | 'landscape'） */
+const KEY_UI_ORIENTATION: string = 'ui_orientation';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -69,6 +72,11 @@ export class CameraSettings {
    * pages/HudEditor.ets，编解码单一真源在 core/HudLayout.ets）。
    */
   hudLayout: string = '';
+  /**
+   * 界面方向（上游 ui_orientation）。**默认偏离登记**：上游出厂 landscape（横屏优先），
+   * 本侧 portrait（竖屏固定）——鸿蒙 HUD 是 T31 竖屏取证设计（core/UIOrientation.ets 头注）。
+   */
+  uiOrientation: UIOrientation = UIOrientations.DEFAULT;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -137,6 +145,11 @@ export class SettingsStore {
       // 坏串（类型不符）当缺失 → 默认表；串本身的收口在 HudLayoutTable.decode（坏段丢弃/整表回默认）
       const layoutRaw: preferences.ValueType = await store.get(KEY_HUD_LAYOUT, s.hudLayout);
       s.hudLayout = typeof layoutRaw === 'string' ? layoutRaw as string : '';
+      // 坏串由 UIOrientations.fromPersistValue 收口（大小写不敏感回默认）
+      const oriRaw: preferences.ValueType = await store.get(KEY_UI_ORIENTATION,
+        UIOrientations.persistValue(s.uiOrientation));
+      s.uiOrientation = typeof oriRaw === 'string'
+        ? UIOrientations.fromPersistValue(oriRaw as string) : s.uiOrientation;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -181,11 +194,29 @@ export class SettingsStore {
       await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
       await store.put(KEY_HUD_ITEMS, s.hudItems);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
+      await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.flush();
       return true;
     } catch (e) {
       Diag.w(TAG, `save settings failed: ${e}`);
       return false;
+    }
+  }
+
+  /**
+   * 冷启同步读界面方向（EntryAbility 在 loadContent 前落窗口方向；走 getPreferencesSync，
+   * 与 sliderContinuousKeys 同款）。坏串/缺键回默认（竖屏固定）。
+   */
+  static uiOrientationSync(ctx: common.Context): UIOrientation {
+    try {
+      const store: preferences.Preferences =
+        preferences.getPreferencesSync(ctx, { name: PARAMS_STORE_NAME } as preferences.Options);
+      const raw: preferences.ValueType = store.getSync(KEY_UI_ORIENTATION, '');
+      return typeof raw === 'string'
+        ? UIOrientations.fromPersistValue(raw as string) : UIOrientations.DEFAULT;
+    } catch (e) {
+      Diag.w(TAG, `read ui_orientation failed, use default: ${e}`);
+      return UIOrientations.DEFAULT;
     }
   }
 

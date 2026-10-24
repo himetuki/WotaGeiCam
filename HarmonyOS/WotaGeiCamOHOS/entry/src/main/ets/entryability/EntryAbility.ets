@@ -20,6 +20,7 @@ import { Diag } from '../diag/Diag';
 import { PureLogicBarrel } from '../player/PureLogicBarrel';
 import { ArcRepairRunner } from '../record/ArcRepairRunner';
 import { WindowChrome } from '../ui/WindowChrome';
+import { SettingsStore } from '../ui/SettingsStore';
 
 const DOMAIN = 0x0000;
 
@@ -57,6 +58,15 @@ export default class EntryAbility extends UIAbility {
       WindowChrome.prime(windowStage.getMainWindowSync());
     } catch (err) {
       hilog.warn(DOMAIN, 'testTag', 'Failed to prime window chrome. Cause: %{public}s', JSON.stringify(err));
+    }
+
+    // UO 批：冷启落界面方向（窗口级 sticky，全页生效；坏串/缺键回竖屏固定）。
+    // 在 prime 之后的串行链里执行，避免与全屏/系统栏设置竞态。
+    try {
+      const ctx = this.context;
+      WindowChrome.applyOrientation(windowStage.getMainWindowSync(), SettingsStore.uiOrientationSync(ctx));
+    } catch (err) {
+      hilog.warn(DOMAIN, 'testTag', 'Failed to apply UI orientation. Cause: %{public}s', JSON.stringify(err));
     }
 
     windowStage.loadContent('pages/Camera', (err) => {

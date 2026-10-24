@@ -23,6 +23,7 @@ import { SliderKey, decodeContinuousSliders, encodeContinuousSliders } from '../
 import { formatSize } from '../media/MediaFormat';
 import { HudItem, HudItems } from '../core/Constants';
 import { REF_LINE_ENTRIES, RefLine, RefLineEntry } from '../core/RefLine';
+import { UIOrientation, UIOrientations } from '../core/UIOrientation';
 import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
 import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
@@ -470,6 +471,61 @@ struct Settings {
   }
 
   /**
+   * 界面方向分组（UO 批，对齐上游 BlockUiOrientation / ui_orientation 键）：
+   * 竖屏固定（本侧默认，T31 竖屏取证设计）与横屏两档；点选即写 prefs 并立刻
+   * 经 WindowChrome 串行链落到当前窗口（窗口级 sticky，全页生效）。
+   * 默认偏离登记：上游出厂 landscape，本侧 portrait（T31 竖屏取证设计）。
+   */
+  @Builder
+  private uiOrientationGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('界面方向')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(UIOrientations.ALL, (o: UIOrientation): void => {
+          Button(o === UIOrientation.PORTRAIT ? '竖屏固定' : '横屏')
+            .fontSize(HudType.VALUE)
+            .fontColor(this.settings.uiOrientation === o ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({
+              width: 1,
+              color: this.settings.uiOrientation === o ? HudColor.ACCENT : HudColor.DIVIDER
+            })
+            .backgroundColor(this.settings.uiOrientation === o ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              if (this.settings.uiOrientation === o) {
+                return;
+              }
+              this.settings.uiOrientation = o;
+              this.persist();
+              const ctx: common.Context | undefined = this.hostContext();
+              if (ctx !== undefined) {
+                WindowChrome.lastWindow(ctx).then((win): void => {
+                  WindowChrome.applyOrientation(win, o);
+                }).catch((_e: Object): void => {
+                });
+              }
+            })
+        }, (o: UIOrientation): string => UIOrientations.persistValue(o))
+      }
+      .width('100%')
+      Text('对所有页面生效；两档都会随重力在各自轴向的两个朝向间自动翻转（竖屏含倒置、横屏含反向）。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
+  /**
    * 取景读数分组（J3a，对齐上游 BlockHud 的 hud_items 段）：7 档位掩码多选，
    * 相机页顶栏读数条按同一掩码渲染。位运算全部走 `core/Constants` 的 HudItems 纯函数
    * （选中态 isOn / 写入 toggle），调用点不许手写 `mask ^ bit`。
@@ -895,6 +951,9 @@ struct Settings {
             }
             ListItem() {
               this.refLineGroup()
+            }
+            ListItem() {
+              this.uiOrientationGroup()
             }
             ListItem() {
               this.hudItemsGroup()

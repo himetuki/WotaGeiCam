@@ -118,6 +118,64 @@
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
 
+## 交付批（UO：界面方向/竖屏固定，2026-10-24）
+
+上游 `core/UIOrientation.kt` + `WotaSettings.KEY_UI_ORIENTATION` + 设置页 BlockUiOrientation 的
+接线（§ui 行「UIOrientation 接线（T32，本批保持系统方向）」留白收口；用户点名项）。
+
+- **core/UIOrientation.ets 重写为纯逻辑**（原版 import window——违反 core 纪律）：
+  `preferredOrientationCodeOf` 产出 **OHOS window.Orientation 契约数值**
+  （AUTO_ROTATION_PORTRAIT=6 / AUTO_ROTATION_LANDSCAPE=7，SDK d.ts 核实）——与上游
+  「产出 ActivityInfo 编译期 Int」同构；窗口调用在 WindowChrome 串行链里
+  （`setPreferredOrientation(code as window.Orientation)`）。
+- **默认偏离决策**：上游出厂 LANDSCAPE（横屏优先）→ 本侧 **PORTRAIT（竖屏固定）**——
+  鸿蒙 HUD 是 T31 真机取证后的竖屏优先设计，默认横屏会破坏 T31 布局；用户可切横屏
+  （横屏 HUD 保真度属 T32）。守卫钉住默认档防"顺手对齐上游"。
+- **SettingsStore**：`uiOrientation` 字段（键 `ui_orientation` 与上游逐字一致；
+  load 经 `fromPersistValue` 收口坏串/大小写；`uiOrientationSync` 冷启同步读）。
+- **WindowChrome**：`applyOrientation(win, o)` 进串行链（与 prime/camera/standardDark
+  同链防竞态）；窗口级 sticky 一次设置全页生效；失败只记日志。
+- **EntryAbility**：`onWindowStageCreate` 在 prime 后按持久化档位落方向（`uiOrientationSync`）。
+- **设置页**：「界面方向」分组（取景读数之前）：竖屏固定 / 横屏两 chip，点选即写 prefs +
+  立刻落当前窗口。
+- **测试**：`ui-orientation-wiring.test.ets`（5：persistValue 契约串/fromPersistValue 大小写
+  与坏串收口/**默认档 PORTRAIT 钉子**/契约数值 6/7 手写字面量 + 三条源码接线守卫——键名、
+  冷启链、设置页落窗）。共 +5（620 → 625）。
+- **回归**：pure-test 53 files / 625 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **模拟器验证 ✓（hdc+uitest）**：冷启窗口 1320×2856（竖屏固定默认生效）→ 设置点「横屏」→
+  **窗口翻转为 2856×1320** → 点「竖屏固定」→ 回到 1320×2856。双向即时生效实证。
+
+## 交付批（P27：T27-1 平台探针 + 真机预检脚本，2026-10-24）
+
+T27 真机批的第一步：**取证工具先于被取证的功能落地**（探针本身就是为了拿真机证据）。
+
+- **`cpp/avscreen_probe.h/.cpp`**（native，链接 `libnative_avscreen_capture.so`——sysroot
+  实名，`libnative_media_avscreen_capture` 是编译期纠正过的错名）：Create → SetCallback
+  （since-10 三件套：onError/onAudio/onVideo）→ **SetMicrophoneEnabled(true) + 内录源
+  OH_ALL_PLAYBACK（双源同采取证配置）** → Init → StartScreenCapture → 计数 500..10000ms
+  （默认 2.5s）→ Stop → Release。音频缓冲取后立刻 ReleaseAudioBuffer（不还卡死回调）、
+  视频缓冲只取还不计数（探针只要音频）。每步错误码原样进状态串，**不解读**（真机取证原则：
+  失败形态本身就是结论）。
+- **napi 三口**（`startAvScreenProbe/getAvScreenProbeStatus/cancelAvScreenProbe`）+
+  `camera/GlLibBridge.ets` 三桥 + `record/AvScreenProbeRunner.ets`（轮询到终态、20s 上限、
+  页面销毁取消兜底）。
+- **`record/AvScreenProbeModel.ets`**（纯逻辑）：状态串解析 + 三条取证结论判读——
+  `DUAL_SOURCE`（双源都出数据，T27-3 可行）/ `SINGLE_SOURCE`（单轨）/ `SILENT_WINDOW`
+  （窗口无回调，要求带声源复测再下结论）/ `BLOCKED`（Init/Start 失败 = 隐私弹窗拒绝路径的
+  错误码形态，取证有效）/ `CANCELLED`/`FAILED`。错误码与 `OH_SCREEN_CAPTURE_STATE_*` 序列
+  原样保留（真机日志对表用）；`summary()` 一行读数含复测指引。
+- **入口**：Index 开发者页「AVScreenCapture 探针」按钮（默认隐藏，版本号 7 连点可达）；
+  运行前提示「可能弹系统确认框——弹窗形态正是取证目标」。
+- **`scripts/device-check.mjs`**：真机预检（hdc 发现/设备信息/安装态/签名包存在性/签名冲突
+  处置指引 a|b）+ `log` 模式（hilog 实时）+ `check` 模式（23 条待验清单的操作索引，离线可打）。
+- **测试**：`avscreen-probe.test.ets`（6：解析全表四态/坏段容错/summary 读数 + 接线守卫——
+  native 三口、双源配置、缓冲取还、CMake 实名链接、页面按钮与销毁兜底）。共 +6（614 → 620）。
+- **回归**：pure-test 52 files / 620 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL
+  （native 重编通过，链接库实名纠正由守卫钉住）。
+- **真机取证步骤**（设备到位后 turnkey）：`node scripts/device-check.mjs` 预检 → 装包 →
+  Index 页点探针 → 读 `summary()`（双源/单源/被拒三态其一即 T27-2/3 定案依据）→
+  `hdc shell hilog` 对错误码表。
+
 ## 交付批（GX：媒体库收尾 + 两项平台裁决收口，2026-10-24）
 
 媒体库三条留白的收口（两条代码 + 一条决策），并把 §core/StorageAccess、T27 两条 ☐ 行
@@ -868,7 +926,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（614）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（625）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/

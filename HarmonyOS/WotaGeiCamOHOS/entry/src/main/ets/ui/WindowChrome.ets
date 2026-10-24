@@ -21,6 +21,7 @@
 import { display, window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { Diag } from '../diag/Diag';
+import { UIOrientation, UIOrientations } from '../core/UIOrientation';
 
 const TAG: string = 'WotaWindow';
 
@@ -161,6 +162,27 @@ export class WindowChrome {
     Diag.i(TAG, `camera insets top=${Math.round(insets.top)} bottom=${Math.round(insets.bottom)} ` +
       `density=${density}`);
     return insets;
+  }
+
+  /**
+   * 界面方向（UO 批）：把设置页的「竖屏固定/横屏」档位写进窗口首选方向（串行，同一链）。
+   * 窗口级 sticky：一次设置对所有页生效（上游全页统一口径）；方向变化由系统旋转完成，
+   * 页面 SafeInsets 已挂 display.on('change') 的消费方会自动重算。
+   * 失败只记日志（方向锁不影响功能），下次冷启 EntryAbility 会再按持久化档位落一次。
+   */
+  static applyOrientation(win: window.Window | undefined, orientation: UIOrientation): void {
+    if (win === undefined) {
+      return;
+    }
+    const code: number = UIOrientations.preferredOrientationCodeOf(orientation);
+    runSerialized(async (): Promise<void> => {
+      try {
+        await win.setPreferredOrientation(code as window.Orientation);
+        Diag.i(TAG, `preferred orientation -> ${UIOrientations.persistValue(orientation)}`);
+      } catch (e) {
+        Diag.w(TAG, `setPreferredOrientation(${code}) failed: ${e}`);
+      }
+    });
   }
 
   /** 普通页（设置/媒体库/播放）：黑底系统栏 + 白色内容图标（串行，与取景页同一链） */
