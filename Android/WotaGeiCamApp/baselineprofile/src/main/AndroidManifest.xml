@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- instrumentation 的 targetPackage 必须指向宿主 app：缺省落到测试模块自身包
+     （com.wotagei.cam.bp），instrumentation 跑起来就是零测试（2026-10-24 实证）。
+     AGP 8.1 的 Test DSL 无该属性，只能在此显式声明。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation
+        android:name="androidx.test.runner.AndroidJUnitRunner"
+        android:targetPackage="com.wotagei.cam" />
+</manifest>

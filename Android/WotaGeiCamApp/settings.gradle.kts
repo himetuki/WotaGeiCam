@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "WotaGeiCam"
 include(":app")
+include(":baselineprofile")

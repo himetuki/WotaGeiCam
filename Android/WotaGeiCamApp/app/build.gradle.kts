@@ -4,6 +4,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
+    id("androidx.baselineprofile")
 }
 
 // 版本单一来源：defaultConfig 与产物命名共用。
@@ -210,4 +211,7 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")
+
+    // Baseline Profile 生成源（coldstart-lever.md 路径 A）：四热路径采集模块
+    baselineProfile(project(":baselineprofile"))
 }
