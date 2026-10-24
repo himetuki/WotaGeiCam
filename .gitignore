@@ -15,6 +15,7 @@
 /deliverable/
 /agent-memory/
 /camera-knowledge/
+/baseline/
 /.zcode/
 .mimosa/
 /package.json
