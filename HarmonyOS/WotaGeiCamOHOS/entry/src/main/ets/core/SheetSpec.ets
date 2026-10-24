@@ -16,8 +16,12 @@
  * **零平台 import**：全部算式参数化（shortSide/windowHeight/topInset 由调用方运行时读入），
  * 可在 test/pure 钉住（上游 sheetMaxHeight 的 ≈278dp 真机实测即手写期望）。
  *
- * **本侧消费方登记**：暂无半模态面板消费方（Gallery 分段清单是内嵌 Column、非半模态）——
- * 纯逻辑先行（半模态面板批落地时直接消费，J3/半模态面板批）。
+ * **系统映射裁决（HM7-UI-02 定版）**：`sheetMaxHeight` 的避让语义与 `clampSheetWidth`
+ * 的 480vp 宽上限**由系统 `bindSheet` 面板形态承担，不二次实现**——`SheetSize.MEDIUM`
+ * 即系统半高档（含拖拽/避让/居中行为），手机形态 <480vp 天然合规、平板/分屏形态由系统
+ * 面板自居中。消费纪律：半模态面板一律走系统 bindSheet + 尺寸档（守卫钉住 Gallery
+ * 消费面）；本文件的纯算式保留作**规格真源**（口径对账/未来自绘面板的唯一依据），
+ * 任何「补一层数学实现」前必须先推翻本裁决并在 PORT_MAP 登记。
  */
 export class SheetSpec {
   /** 「手机横屏时保持宽度 480vp 最大宽度」 */

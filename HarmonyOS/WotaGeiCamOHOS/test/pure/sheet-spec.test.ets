@@ -82,12 +82,19 @@ test('断点_短边600以上居中_手机横竖屏底贴屏', () => {
 
 // ------------------------------------------------------------------ 接线守卫
 
-test('接线_纯模块零平台import_消费方登记', () => {
+test('接线_纯模块零平台import_消费纪律钉住', () => {
   const core: string = sourceText('entry/src/main/ets/core/SheetSpec.ets');
   assertTrue(core.indexOf('@kit') < 0 && core.indexOf('@ohos') < 0,
     'SheetSpec 必须零平台 import（inset 由调用方运行时读入）');
-  // 本侧暂无半模态面板消费方（Gallery 分段清单是内嵌 Column）——纯逻辑先行，
-  // 半模态面板批落地时消费；守卫只要求文件本体可测（上方全表已证）。
   assertTrue(core.indexOf('SHEET_MAX_WIDTH') >= 0 && core.indexOf('SHEET_CENTER_BREAKPOINT') >= 0,
     '纪律常量必须在 core 层单一真源');
+  // 系统映射裁决（HM7-UI-02）：半模态消费面一律走系统 bindSheet，禁自绘假面板；
+  // SheetSpec 只作规格真源，不搭第二套数学实现。裁决写在头注 → 读原文不剥注释。
+  const coreRaw: string = readFileSync(resolve(srcRoot(), 'entry/src/main/ets/core/SheetSpec.ets'), 'utf8');
+  assertTrue(coreRaw.indexOf('由系统 `bindSheet` 面板形态承担，不二次实现') >= 0,
+    '系统映射裁决必须写在规格真源头注');
+  const gallery: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
+  assertTrue(gallery.indexOf(".bindSheet(this.sheetKind !== 'none'") >= 0,
+    'Gallery 半模态必须消费系统 bindSheet');
+  assertTrue(gallery.indexOf(".height('60%')") < 0, '禁止自绘 60% 假面板回潮');
 });
