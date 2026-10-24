@@ -16,6 +16,7 @@ import { TapArbiter, TapDecision } from '../player/TapArbiter';
 import { ClipExportResult, ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { audioOrdinalOf, audioShiftUs, ClipRange, MIN_KEEP_MS, TrackChoice } from '../player/ClipRule';
 import { SyncPrefsStore } from '../player/SyncPrefsStore';
+import { AbPersistStore } from '../player/AbPersistStore';
 import { Source, SyncSnapshot, TrackSync } from '../player/TrackSync';
 import { ArcRepairProbeResult, ArcRepairResult, ArcRepairRunner } from '../record/ArcRepairRunner';
 import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
@@ -282,6 +283,10 @@ struct Player {
       this.fatalError = '';
       this.hint = '';
       this.durationMs = engine.durationMs > 0 ? engine.durationMs : this.durationMs;
+      // ABP：全新进页（非 surface 重建）水化持久化 AB——restoreSession 路径已带会话 AB
+      if (this.restoreAb === undefined) {
+        this.loadPersistedAb(clip, engine);
+      }
       let shouldPlay: boolean = false;
       if (this.restorePosMs >= 0 && this.restoreAb !== undefined) {
         engine.restoreSession(this.restorePosMs, this.restoreAb, this.restoreSpeed);
@@ -490,11 +495,14 @@ struct Player {
   private markA(): void {
     this.engine.markA();
     this.syncAb();
+    this.persistAb();
   }
 
   private markB(): void {
     if (!this.engine.markB()) {
       this.hint = 'B 必须晚于 A';
+    } else {
+      this.persistAb();
     }
     this.syncAb();
   }
@@ -502,6 +510,8 @@ struct Player {
   private toggleAbLoop(): void {
     if (!this.engine.toggleAbLoop()) {
       this.hint = '需先设置合法的 A/B';
+    } else {
+      this.persistAb();
     }
     this.syncAb();
   }
@@ -510,6 +520,34 @@ struct Player {
     this.engine.clearAb();
     this.hint = '';
     this.syncAb();
+    this.persistAb();
+  }
+
+  /** ABP：attach 成功后水化持久化 AB（引擎换代/销毁即弃；会话已打点不覆盖） */
+  private loadPersistedAb(clip: VideoClip, engine: PlayerEngine): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    AbPersistStore.load(ctx, clip.path).then((ab: AbRange | undefined): void => {
+      if (this.disposed || this.engine !== engine || ab === undefined) {
+        return;
+      }
+      engine.applyPersistedAb(ab);
+      this.syncAb();
+    }).catch((): void => {
+      // load 内部已折 undefined，这里只兜 Promise 链意外
+    });
+  }
+
+  /** ABP：打点/循环/清除即写（清除也写：空值落盘，下次进页不再水化旧段） */
+  private persistAb(): void {
+    const clip: VideoClip | undefined = this.videoClip;
+    const ctx: common.Context | undefined = this.ctx;
+    if (clip === undefined || ctx === undefined) {
+      return;
+    }
+    AbPersistStore.save(ctx, clip.path, this.engine.ab);
   }
 
   private syncAb(): void {

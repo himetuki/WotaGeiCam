@@ -612,6 +612,15 @@ export class PlayerEngine {
     this.cancelWrap();
   }
 
+  /** ABP：水化持久化 AB（attach 成功后页面调用一次；surface 重建走 restoreSession，两路互斥）。
+   * 会话里已有合法 AB（用户先打点/上一轮会话残留）时不覆盖。 */
+  applyPersistedAb(ab: AbRange): void {
+    if (this.released || this.ab.valid || this.ab.loopEnabled) {
+      return;
+    }
+    this.ab = ab;
+  }
+
   isReady(): boolean {
     if (this.released || this.av === undefined) {
       return false;
