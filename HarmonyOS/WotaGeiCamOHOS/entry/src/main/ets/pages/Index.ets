@@ -123,7 +123,9 @@ struct Index {
         .width('100%')
         .scrollBar(BarState.Off)
 
-        Row({ space: 12 }) {
+        // 模拟器取证发现（P27 复核）：7 颗按钮在 1320px 屏上横向溢出——参数自检/探针
+        // 被裁到屏幕外不可达。改 Flex 换行（Row 不换行、无滚动，纯 Row 会静默裁内容）。
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
           Button('探测')
             .onClick(() => {
               // 回归锚点：探测版路径（无会话、无权限依赖，走 probeAndDump 内部兜底）
