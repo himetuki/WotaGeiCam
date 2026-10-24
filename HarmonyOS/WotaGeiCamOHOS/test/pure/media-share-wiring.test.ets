@@ -86,3 +86,31 @@ test('接线_Gallery三条链都有入口且组级扇出', () => {
   assertTrue(manifest.indexOf('READ_IMAGEVIDEO') < 0 && manifest.indexOf('WRITE_IMAGEVIDEO') < 0,
     '不得声明媒体库读写权限（沙箱 + 系统确认框路线零权限）');
 });
+
+// ------------------------------------------------------------------ GX 批（分段展开 + 折叠开关 + 重命名决策）
+
+test('接线_折叠开关与会话态_长按组卡开分段清单', () => {
+  const gallery: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
+  assertTrue(gallery.indexOf('galleryEntries(this.clips, this.seriesCollapsed)') >= 0,
+    '列表必须消费折叠开关（上游 collapse 旋钮的会话态对应物）');
+  assertTrue(gallery.indexOf('LongPressGesture') >= 0 &&
+    gallery.indexOf('this.openSeriesSheet(entry)') >= 0,
+    '组卡长按必须打开分段清单（上游 SeriesSheet 的对应交互）');
+  assertTrue(gallery.indexOf('seriesSheetId: number | undefined') >= 0 &&
+    gallery.indexOf('this.seriesSheetParts()') >= 0,
+    '面板只钉 seriesId、按当前 clips 重解析（上游同款：不吃快照）');
+  assertTrue(gallery.indexOf('this.openPlayer(part)') >= 0, '清单点按直接开该段播放页');
+});
+
+test('决策_重命名不迁_id架构限制登记', () => {
+  // 本仓媒体 ID = 相对路径 32 位 FNV-1a（MediaIds.ofRelativePath：改一个字符即换 id）——
+  // 改名即换 id，标签/回收站/系列成员全部失联；上游 MediaStore 行 id 与路径无关所以可改名。
+  // 前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径）。
+  const repo: string = sourceText('entry/src/main/ets/media/MediaRepo.ets');
+  assertTrue(repo.indexOf('static ofRelativePath(rel: string): number') >= 0,
+    'id = 相对路径哈希的实现面（MediaIds.ofRelativePath）');
+  assertTrue(repo.indexOf('0x01000193') >= 0, '32 位 FNV-1a 质数（路径即身份的事实依据）');
+  const gallery: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
+  assertTrue(gallery.indexOf('重命名') < 0,
+    '不许出现重命名入口（id 架构未升级前做了必坏账）');
+});

@@ -42,7 +42,7 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   无共同祖先）。上游源码用 `git show origin/main:WotaGeiCamApp/<path>` 读；
   `Android/` worktree 只是工作副本。评审/移植完成后 `--update-base` 更新基线。
 - `pure-test.mjs` — 纯逻辑测试架：扫描 `test/pure/*.test.ets`，收集相对 import 闭包并转译到
-  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 612 用例，
+  `.pure-test-tmp/`，`@ohos.*`/`@kit.*` 惰性桩；命令 `node scripts/pure-test.mjs`，当前 614 用例，
   退出码 0 才算全绿。
 - `local-sign.mjs` — HAP 本地签名探针：hap-sign-tool ECC P-256 全链（keypair→CA→app/profile cert→
   sign-profile→sign-app→verify-app），材料落 `.local-signing/`（已 gitignore），产物
@@ -93,6 +93,9 @@ This is an OpenHarmony (stage-model) application template. **Only read the 3 fil
   `SyncPrefsStore`（平台件）：TrackSync 五键 ↔ `@ohos.data.preferences`；`Player` 导出/修复的
   音轨平移只消费它读到的快照（**拿不到 = 不平移**，绝不猜）。导出/修复平移的口径单一真源是
   `ClipRule.audioShiftUs` + `ClipRule.remuxAudioSampleWritable`，C++ 只是同式镜像。
+- `media/` 决策钉子：**重命名不迁**（媒体 ID=相对路径 32 位 FNV-1a，改名即换 id——标签/回收站/
+  系列成员失联；前置 id 架构升级，守卫钉住 Gallery 无重命名入口）；组卡长按开分段清单、
+  「分段合并」开关关 = `galleryEntries(clips, false)` 扁平基线。
 - `media/`：`MediaRepo`（扫描/联表/探测）、`MediaTag`（页签与过滤器）、`MediaFormat`（时长/大小/分组）、
   `SeriesGroup`（分段归组：`groupSpans`/`galleryEntries`/`expandSeriesTargets`）。**组级动作必须经
   `expandSeriesTargets` 扇出**，否则会出现「只动首段」的半截状态。`MimeMap`（MIME/UTD/title 纯映射，

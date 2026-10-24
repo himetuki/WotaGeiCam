@@ -39,6 +39,10 @@ struct Gallery {
   @State showDetail: boolean = false;
   @State detailName: string = '';
   @State detailMeta: string = '';
+  /** 分段折叠开关（会话态，默认开=组卡；关=与上游 collapse=false 同义的扁平基线） */
+  @State seriesCollapsed: boolean = true;
+  /** 分段展开面板：非 null = 显示该组的成员清单（只钉 seriesId，按当前 clips 重解析） */
+  @State seriesSheetId: number | undefined = undefined;
 
   private repo: MediaRepo | undefined = undefined;
   /** 页面宿主上下文（分享面板要 UIAbilityContext；本页宿主就是它） */
@@ -273,7 +277,7 @@ struct Gallery {
 
   /** 当前页签的展示单元（分段合并成一条；单片与今天逐字等价） */
   private entryList(): Array<GalleryEntry> {
-    return galleryEntries(this.clips);
+    return galleryEntries(this.clips, this.seriesCollapsed);
   }
 
   /** 组级动作扇出：点在代表段上，真正动到整组所有可见成员 */
@@ -291,6 +295,23 @@ struct Gallery {
       this.getUIContext().getRouter().pushUrl({ url: 'pages/Player', params: { id: clip.id, path: clip.path } });
     } catch (e) {
       this.message = `打开播放页失败: ${e}`;
+    }
+  }
+
+  /** 分段展开面板的成员（按当前 clips 重解析：面板打开期间刷新也拿到最新成员表） */
+  private seriesSheetParts(): Array<VideoClip> {
+    const sid: number | undefined = this.seriesSheetId;
+    if (sid === undefined) {
+      return [];
+    }
+    const entry: GalleryEntry | undefined = this.entryList().find(
+      (e: GalleryEntry): boolean => e.seriesId === sid);
+    return entry === undefined ? [] : entry.parts;
+  }
+
+  private openSeriesSheet(entry: GalleryEntry): void {
+    if (entry.seriesId !== undefined) {
+      this.seriesSheetId = entry.seriesId;
     }
   }
 
@@ -509,6 +530,26 @@ struct Gallery {
       .width('100%')
       .padding({ left: 12, right: 12, top: 8 })
 
+      // 分段折叠开关（会话态）：关 = 上游 collapse=false 的扁平基线（逐字等价、回退开关）
+      Row({ space: 6 }) {
+        Text('分段合并')
+          .fontSize(11)
+          .fontColor('#B0BEC5')
+        Toggle({ type: ToggleType.Switch, isOn: this.seriesCollapsed })
+          .selectedColor('#FF4D6A')
+          .onChange((on: boolean): void => {
+            this.seriesCollapsed = on;
+          })
+        Blank()
+        if (this.selectedTab !== 2) {
+          Text('长按组卡可展开分段清单')
+            .fontSize(10)
+            .fontColor('#78909C')
+        }
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 4 })
+
       Row({ space: 6 }) {
         ForEach(this.tabs, (tab: GalleryTab, index: number): void => {
           Button(this.tabLabel(tab, index))
@@ -628,6 +669,14 @@ struct Gallery {
               .padding(10)
               .backgroundColor('#1F1F1F')
               .borderRadius(8)
+              .gesture(
+                LongPressGesture({ repeat: false, duration: 500 })
+                  .onAction((e: GestureEvent): void => {
+                    if (entry.seriesCount() !== undefined) {
+                      this.openSeriesSheet(entry);
+                    }
+                  })
+              )
             }
           }, (entry: GalleryEntry): string =>
             entry.seriesId === undefined ? entry.clip.path : `series_${entry.seriesId}`)
@@ -635,6 +684,64 @@ struct Gallery {
         .layoutWeight(1)
         .width('100%')
         .padding({ left: 12, right: 12 })
+      }
+
+      if (this.seriesSheetId !== undefined) {
+        Column({ space: 6 }) {
+          Row({ space: 8 }) {
+            Text(`分段清单（${this.seriesSheetParts().length} 段）`)
+              .fontSize(13)
+              .fontColor(Color.White)
+              .layoutWeight(1)
+              .maxLines(1)
+            Button('关闭')
+              .fontSize(11)
+              .height(24)
+              .onClick((): void => {
+                this.seriesSheetId = undefined;
+              })
+          }
+          Text('点按任一段直接打开播放页；组级动作（收藏/回收站/分享）作用于全部段。')
+            .fontSize(10)
+            .fontColor('#78909C')
+          Scroll() {
+            Column({ space: 4 }) {
+              ForEach(this.seriesSheetParts(), (part: VideoClip, idx: number): void => {
+                Row({ space: 8 }) {
+                  Text(`第 ${idx + 1} 段`)
+                    .fontSize(11)
+                    .fontColor('#FFCC80')
+                    .width(52)
+                  Text(part.name)
+                    .fontSize(12)
+                    .fontColor(Color.White)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
+                    .fontSize(10)
+                    .fontColor('#B0BEC5')
+                }
+                .width('100%')
+                .padding(6)
+                .backgroundColor('#1F1F1F')
+                .borderRadius(6)
+                .onClick((): void => {
+                  this.seriesSheetId = undefined;
+                  this.openPlayer(part);
+                })
+              }, (part: VideoClip): string => part.path)
+            }
+            .width('100%')
+          }
+          .layoutWeight(1)
+          .width('100%')
+        }
+        .width('100%')
+        .height('60%')
+        .padding(12)
+        .backgroundColor('#263238')
+        .borderRadius(12)
       }
 
       if (this.showDetail) {

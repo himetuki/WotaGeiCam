@@ -47,7 +47,7 @@
 | `LensSlot.kt` | 纯逻辑 + 平台绑定 | `core/LensSlot.ets`：LensType/LensSlot/assignRearTiers/shouldHideLogicalHead/dumpLenses 已直译；`enumerateLenses/discoverCameraIds` 适配层探测版已落 `camera/KitLens.ets`（会话期字段待预览批） | ☑ 部分 |
 | `CameraAbility.kt` | 纯逻辑 + 薄适配 | `core/CameraAbility.ets`：RangeI/RangeF/能力快照/纯函数族（pickFpsRange、shutterCeilingNs、eqFocalMm、hFovDeg…）已直译；`from()` 适配层探测版已落 `camera/KitAbility.ets`（会话期字段待预览批） | ☑ 部分 |
 | `VideoSizePicker.kt` | 纯逻辑 + 薄适配 | `core/VideoSizePicker.ets`：候选表/求交/落档/直显预览挑选已直译；`minFrameDurationNs` 注入适配层探测版已落 `camera/VideoSizeKit.ets`（会话期字段待预览批） | ☑ 部分 |
-| `StorageAccess.kt` | 平台绑定 | `@ohos.file.fs` + `photoAccessHelper`（媒体库写入用安全控件/授权），与文件层一起移植 | ☐ |
+| `StorageAccess.kt` | 平台绑定 | **决策：不移植（2026-10-24，MS 批随调研定版）**——「所有文件访问」在 OHOS 无对应权限/API；本仓媒体库只扫应用沙箱 `filesDir/videos`（增删改名零权限零弹窗），上游该文件的存在理由（跨应用静默删除/规避系统授权框）在沙箱模型下不成立（调研报告 §2.3/§2.8）。photoAccessHelper 面归入相册入库（MS 批已落 `AlbumSaver`） | ☑ 不移植（登记） |
 
 ## diag — 诊断日志
 
@@ -62,7 +62,7 @@
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 342dd99。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
 | `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：SeriesStore 落库侧的 UI 展示开关（本侧恒折叠，无回退开关按钮）、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
-| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。留白：全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、分段逐个展开（本侧点组卡进首段播放）、折叠回退开关（恒折叠）、重命名（沙箱 `fs.rename` 直改可做，登记留白）、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
+| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名决策：不迁**——本仓媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`），改名即换 id，标签/回收站/系列成员全部失联；前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径），升级前做了必坏账（守卫钉住无重命名入口）。留白：全屏手势锁定、时间线/网格/全屏滑动切换、自定义标签页、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
 
 ## player — 播放器 / 对比 / 剪辑
 
@@ -94,7 +94,7 @@
 | `record/AudioPreflightPolicy.kt`（e950328 新增） | 纯逻辑 | **已落（2026-10-23，对齐 e950328）**：`record/AudioPreflightPolicy.ets`——MIN/MAX_PRE_SHIFT_MS=20..600、MAX_AUTO_OFFSET_MS=1000、MIN_CONFIDENCE=2.0（比对比页手动 1.5 更严：无人值守自动写盘）、`capPreShiftUs`（低置信 → 0；`-offset<20ms` 即内录不早 → 0；>600 钳到 600）、`shouldPreflight(envOn,capOn,a2dp)`、`autoOffsetWithinRange`；上游 `a2dpFromOutputTypes` 的 Android 常量比对改为**注入布尔组合面**（activeA2dp ‖ listHasA2dp），平台比对移到 AudioRoute | ☑ 纯逻辑层 |
 | `record/PreflightPcm.kt`（e950328 新增） | 纯逻辑 | **已落（2026-10-23）**：`record/PreflightPcm.ets`——`PreflightMonoPcm`：交织 PCM16→单声道 float、按两路共同 t0 落位（早于 t0 钳 0、不带负前导）、空洞补零、静音锁存与 peak | ☑ |
 | `record/AudioRoute.kt`（e950328 新增） | 平台绑定 | **已落（2026-10-23，降级实现）**：`record/AudioRoute.ets`——`isA2dpLikelyOn()` 取 `audio.getAudioManager().getRoutingManager().getDevicesSync(OUTPUT_DEVICES_FLAG)`，出现 `DeviceType.BLUETOOTH_A2DP` 即 true，异常按 false。**降级登记**：OHOS 无 `isBluetoothA2dpOn`「活动路由」API（本机 SDK d.ts 已查证：仅 BLUETOOTH_A2DP=8 与 getDevices/getDevicesSync，无 getActiveOutputDevice），本判据等价上游的**兜底路径**（设备列表含 A2DP）——A2DP 已连但输出切回扬声器时会多跑一次预校准（无害：预校准失败路径恒 shift=0，不写错偏移）。真机待验见对应小节 | ☑ 降级 |
-| `record/AudioPreflight.kt`（预校准采集）、`record/CodecRecorder.kt` 的 `AudioChannel.ptsShiftUs` 与 `preflightAudioSync` 挂点、`record/Recorder.kt` 的引擎契约 | 平台绑定 | **未落，整块挂 T27**：① 预校准需两条临时 AudioFeeder 双源同采 800ms，OHOS 内录原始 PCM 只有 AVScreenCapture NDK 一条路且**每次会话拉隐私确认**——预校准+正式录制=二次弹窗（体验不可接受，须 T27-3 复用同一 capture 会话，或砍预校准只留后校准）；② ptsShiftUs 需内录音轨，而 `cpp/codec_recorder.cpp` 现无音频轨（留白）；③ Recorder 契约随 T27-3 录制链改造一并落。策略与 PCM 落位算式已在纯逻辑层备好（上两行） | ☐ |
+| `record/AudioPreflight.kt`（预校准采集）、`record/CodecRecorder.kt` 的 `AudioChannel.ptsShiftUs` 与 `preflightAudioSync` 挂点、`record/Recorder.kt` 的引擎契约 | 平台绑定 | **未落，整块挂 T27（2026-10-24 收口定版：真机批，无设备不盲落）**——native 侧 AVScreenCapture 头文件已在 sysroot 核实在册（`native_avscreen_capture.h`，API 10+：Create/StartScreenRecording/SetMicrophoneEnabled 等），API 面不缺；缺的是隐私确认弹窗的实际形态与双源采集行为，只能真机取证（本仓纪律：不可验证的平台面不落地）。前置条件 = 一台 HarmonyOS 设备 + 隐私弹窗 UX 定版（预校准二次弹窗问题维持既有结论：须复用同一 capture 会话或砍预校准）：① 预校准需两条临时 AudioFeeder 双源同采 800ms，OHOS 内录原始 PCM 只有 AVScreenCapture NDK 一条路且**每次会话拉隐私确认**——预校准+正式录制=二次弹窗（体验不可接受，须 T27-3 复用同一 capture 会话，或砍预校准只留后校准）；② ptsShiftUs 需内录音轨，而 `cpp/codec_recorder.cpp` 现无音频轨（留白）；③ Recorder 契约随 T27-3 录制链改造一并落。策略与 PCM 落位算式已在纯逻辑层备好（上两行） | ☐ |
 
 ## ui — 界面（全部 ArkUI 重写）
 
@@ -117,6 +117,26 @@
 > 整块新模块；`82943cf` 的产物命名在本侧体现为 `-signed-Harmony.hap` / `-unsigned-Harmony.hap`
 > 与 `SHA256SUMS` 消费。两项待设计问题当时的结论：① redirect 无等价物 → 放弃段 3，不手写跟随；
 > ② hap 无系统安装器等价物 → 应用内只保证「下对、下全、没被换」，安装交给系统安装器。
+
+## 交付批（GX：媒体库收尾 + 两项平台裁决收口，2026-10-24）
+
+媒体库三条留白的收口（两条代码 + 一条决策），并把 §core/StorageAccess、T27 两条 ☐ 行
+落成显式裁决——PORT_MAP 不再有悬而未决的「暂缓」项。
+
+- **分段展开**（组卡长按 500ms →「分段清单」面板）：只钉 seriesId、按当前 clips 重解析
+  （上游 SeriesSheet 同款纪律：不吃快照）；每段一行（第 N 段/文件名/时长·大小），点按直接
+  开该段播放页；面板注记「组级动作作用于全部段」。
+- **折叠回退开关**：「分段合并」Toggle（会话态不持久化，关 = `galleryEntries(clips, false)`
+  的上游扁平基线，`SeriesGroup` 的 collapse 参数终于有 UI 消费方）。
+- **重命名决策：不迁**——媒体 ID = 相对路径 32 位 FNV-1a，改名即换 id（标签/回收站/系列
+  成员失联）；前置 = id 架构升级（MediaRepo 既登记），升级前做必坏账；守卫钉住无重命名入口。
+- **StorageAccess 决策：不移植**（MS 批调研定版，行状态 ☐→☑ 不移植）。
+- **T27 决策：真机批定版**——native AVScreenCapture 头文件在册（sysroot 核实），缺口是
+  隐私弹窗形态与双源行为（只能真机取证）；行内写入前置条件，不再是无期挂起。
+- **测试**：media-share-wiring.test.ets 增 2（折叠开关/长按清单/重解析接线守卫 +
+  重命名不迁决策守卫——FNV-1a 代码面为据）。共 +2（612 → 614）。
+- **回归**：pure-test 51 files / 614 tests 全绿；clean `assembleHap`（release）BUILD SUCCESSFUL。
+- **真机待验**：长按手势与列表滚动的冲突；分段清单在多段（>4）组内的滚动。
 
 ## 交付批（FC：对焦胶囊 + tint 决策，2026-10-24）
 
@@ -848,7 +868,7 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
 - **命令**：`node scripts/pure-test.mjs`（仓库根 WotaGeiCamOHOS/ 下）。
 - **测试目录** `test/pure/`：entry 模块外，hvigor 不扫描、不进 HAP；临时目录 `.pure-test-tmp/`
   已进 .gitignore。
-- **已落用例（612）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
+- **已落用例（614）**：record-health（21，直译上游 RecordHealthTest.kt 已移植面，判定顺序五条
   各被点名）、compare-timeline（26，T22 几何 9 + T24 内核 16 + T26 审查修复 1（右片重建恢复目标四域臂），对拍上游 CompareTimelineTest.kt
   18 个方法，off=0 回归红线三条独立）、slider-ladder（9，上游 SliderLadderTest.kt 直译）、
   segment-policy（5，常量/阈值边界/前缀和/丢帧上界/摘要）、clip-rule（6，MIN_KEEP/normalize/
@@ -911,7 +931,8 @@ Divider 3×3 网格并进同一套绘制（旧 builder 删除）。
   record-task（5，RT 批：闸迁移语义 3 + 接线守卫 2（TASK_KEEPING 判据、起停接线、
   KEEP_BACKGROUND_RUNNING 声明、无 ForegroundService 仿写））、
   focus-pill（5，FC 批：AfMode 契约值/diopterLadder 档/dock 与录制可调集接线/弹层能力闸/
-  tint 不迁守卫）。
+  tint 不迁守卫）、media-share-wiring 增 2（GX 批：分段展开/折叠开关接线守卫 +
+  重命名不迁决策守卫）。
 - **降级路径（预登记）**：若某测试文件的依赖闭包被 Diag 等顶层副作用卡死，只保零依赖三件
   （record-health/compare-timeline/slider-ladder）并显式打印 skip——本批未触发，
   segment-policy/clip-rule/media-format 经 @kit stub 链（ArcDropLog 顶层 import fileIo）正常执行；
