@@ -42,6 +42,7 @@ import { CompareVersions, ReleaseJson, ReleaseNotes, UpdateConfig } from '../upd
 import { UpdateDownloadPure } from '../update/UpdatePure';
 import { Sha256 } from '../update/Sha256';
 import { UserSettings } from '../core/UserSettings';
+import { FocusTapMath } from '../core/FocusTap';
 import { DirectDisplay } from '../core/DirectDisplay';
 import { FrameRateFallback } from '../core/FrameRateFallback';
 import { degradeSuppressed } from '../camera/GlRenderSuppression';
@@ -94,6 +95,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.syncSnapCompileProbe();
     PureLogicBarrel.updateCompileProbe();
     PureLogicBarrel.userSettingsCompileProbe();
+    PureLogicBarrel.focusTapCompileProbe();
     PureLogicBarrel.cameraPerfCompileProbe();
     PureLogicBarrel.paramsPersistCompileProbe();
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
@@ -150,6 +152,15 @@ export class PureLogicBarrel {
    * 覆盖 tag→versionCode、说明整形、JSON 提取、渠道排序、URL 门槛与 SHA-256 向量。
    */
   /** ST 批：设置数值档编译探针（节拍钳制/缩放档/倍率换算） */
+  /** TFC 批：tap-to-focus 归一化/钳制编译探针 */
+  private static focusTapCompileProbe(): void {
+    const pt = FocusTapMath.pointFromWindowTap(660, 1428, 1320, 2856);
+    const edge = FocusTapMath.pointFromWindowTap(-5, -5, 1320, 2856);
+    if (pt !== undefined && edge !== undefined && pt.x > 0.4 && pt.x < 0.6 && edge.x > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
   private static userSettingsCompileProbe(): void {
     const tick: number = UserSettings.compareTickMsOf(99999);
     const pct: number = UserSettings.textScalePctOf(137);

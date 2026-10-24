@@ -80,6 +80,8 @@ import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
 import { UserSettings } from '../core/UserSettings';
+import { FocusTapMath } from '../core/FocusTap';
+import { TapPoint } from '../core/Constants';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -171,6 +173,10 @@ struct CameraPage {
   @State hudItemsMask: number = HudItems.DEFAULT_MASK;
   /** 读数条容器实测宽（vp）：首帧按屏幕宽兜底，onAreaChange 接管（J1 宽度账要实测宽） */
   @State hudStripWidthVp: number = 0;
+  /** TFC 批：对焦标记（点按对焦的可视反馈；窗口 vp 坐标，800ms 自动隐） */
+  @State focusMarkVisible: boolean = false;
+  @State focusMarkX: number = 0;
+  @State focusMarkY: number = 0;
   /** 水平仪/俯仰仪（上游需求 24/25「必须」）：读数已换算到显示方向、已折叠到 ±90 */
   @State levelOn: boolean = true;
   @State levelAvailable: boolean = true;
@@ -228,6 +234,10 @@ struct CameraPage {
   private ability: CameraAbility | undefined = undefined;
   /** 读数条换行档的字体档输入（hudPerRowFor 的 fontScale；<1 档在该函数内部夹回 1） */
   private hudFontScale: number = 1;
+  /** 窗口 vp 尺寸（FocusTapMath 归一化用；refreshHudReadoutMetrics 顺手刷新） */
+  private winWvp: number = 0;
+  private winHvp: number = 0;
+  private focusMarkTimer: number = -1;
   /** hud_layout 位置表缓存（键 = 原文串；见 readoutTable()） */
   private hudTableCache: HudLayoutTable | undefined = undefined;
   private hudTableRaw: string = '';
@@ -276,6 +286,7 @@ struct CameraPage {
       }
       this.closePill(); // T22 P3：相机丢失/session error 处置统一收口弹层（锚点/能力快照已失效）
       this.cameraStarted = false;
+      this.hideFocusMark();
       this.resetCameraLabels();
       if (this.recording || this.stopPending) {
         this.requestStop(AutoStopRules.REASON_CAMERA_LOST);
@@ -411,6 +422,7 @@ struct CameraPage {
 
   aboutToDisappear(): void {
     this.disposed = true;
+    this.hideFocusMark();
     this.pageVisible = false;
     // 离开录制页：取消节流定时器、补最后一次落盘，然后销毁会话（晚到回调不再写盘）
     this.flushParamsNow();
@@ -1136,6 +1148,9 @@ struct CameraPage {
       const d: display.Display = display.getDefaultDisplaySync();
       const density: number = d.densityPixels > 0 ? d.densityPixels : 1;
       this.hudStripWidthVp = Math.max(0, d.width / density - 2 * HudSpec.SAFE_MARGIN);
+      // TFC：窗口 vp 尺寸（tap-to-focus 归一化基准；旋转后 display.on('change') 会重刷）
+      this.winWvp = Math.max(0, d.width / density);
+      this.winHvp = Math.max(0, d.height / density);
     } catch (e) {
       // 量不到：保持现值（首帧兜底 0 → hudPerRowFor 退 1 颗一行，宁可高也不裁字）
     }
@@ -1225,6 +1240,51 @@ struct CameraPage {
   private hudStripValue(entry: HudEntry): string {
     const item: HudItem | undefined = entry.item;
     return item === undefined ? '-' : this.readoutStripValue(item);
+  }
+
+  /**
+   * TFC：点按对焦（预览区任意非控件位置）。归一化点写进参数总线 focusPoint，
+   * 经既有 engine.applyParams → RequestApplier.setFocusPoint/setMeteringPoint 双驱动下发；
+   * 同时给 800ms 的可视标记（无反馈用户无法确认对焦生效）。
+   * 门控：取景未就绪/glFatal 时不动作（下发会失败）。
+   */
+  private onPreviewTap(windowX: number, windowY: number): void {
+    if (!this.cameraStarted || this.glFatal !== '') {
+      return;
+    }
+    const pt: TapPoint | undefined =
+      FocusTapMath.pointFromWindowTap(windowX, windowY, this.winWvp, this.winHvp);
+    if (pt === undefined) {
+      return;
+    }
+    this.params.focusPoint.value = pt;
+    this.applyParamsFromPills();
+    // 诊断留痕：点按对焦的归一化坐标（真机取证/排查"点了没反应"的第一现场）
+    Diag.i(WOTA_RECORD_TAG, `focus tap norm=(${pt.x.toFixed(3)},${pt.y.toFixed(3)})`);
+    this.showFocusMark(windowX, windowY);
+  }
+
+  /** 对焦标记：窗口 vp 坐标定位，800ms 自动隐（连点重置计时） */
+  private showFocusMark(windowX: number, windowY: number): void {
+    if (this.focusMarkTimer >= 0) {
+      clearTimeout(this.focusMarkTimer);
+      this.focusMarkTimer = -1;
+    }
+    this.focusMarkX = windowX;
+    this.focusMarkY = windowY;
+    this.focusMarkVisible = true;
+    this.focusMarkTimer = setTimeout((): void => {
+      this.focusMarkTimer = -1;
+      this.focusMarkVisible = false;
+    }, 1200);
+  }
+
+  private hideFocusMark(): void {
+    if (this.focusMarkTimer >= 0) {
+      clearTimeout(this.focusMarkTimer);
+      this.focusMarkTimer = -1;
+    }
+    this.focusMarkVisible = false;
   }
 
   private displayDeg(): number {
@@ -2092,6 +2152,24 @@ struct CameraPage {
       .width('100%')
       .height('100%')
       .hitTestBehavior(HitTestMode.Transparent)
+      // TFC：点按对焦。挂在 HUD 列（Transparent）上：空白区点击由列消费（onPreviewTap），
+      // 按钮子节点各自消费（内层手势优先，不会双触发）；姿态仪浮层是下层兄弟，同理内层优先。
+      // XComponent(SURFACE) 的 onClick 在模拟器/真机上均不触发（平台行为，登记）——不挂它。
+      // 坐标用 windowX/windowY（窗口 vp），归一化/钳制在 core/FocusTapMath。
+      .onClick((event: ClickEvent): void => {
+        this.onPreviewTap(event.windowX, event.windowY);
+      })
+
+      // TFC：对焦标记（瞬时可视反馈；hitTest None 不拦触摸，800ms 自动隐）
+      if (this.focusMarkVisible) {
+        Column()
+          .width(56)
+          .height(56)
+          .borderRadius(28)
+          .border({ width: 2, color: HudColor.ACCENT })
+          .position({ x: this.focusMarkX - 28, y: this.focusMarkY - 28 })
+          .hitTestBehavior(HitTestMode.None)
+      }
 
       if (this.loading) {
         Column({ space: 8 }) {
