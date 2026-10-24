@@ -76,3 +76,24 @@ test('接线_三个上游键名逐字', () => {
   assertTrue(repo.indexOf('CustomTags.ofRows(ctRows)') >= 0,
     'customTags 必须经 CustomTags.ofRows 派生（不许手写过滤）');
 });
+
+// ------------------------------------------------------------------ HM7-1：半模态面板接线守卫
+
+test('接线_半模态bindSheet消费SheetSpec纪律', () => {
+  const gallery: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
+  // 半模态必须走鸿蒙原生 bindSheet（系统面板形态；不用安卓式自绘 Column 假面板）
+  assertTrue(gallery.indexOf('.bindSheet(this.sheetKind !== \'none\', (): void => {') >= 0,
+    '必须用原生 bindSheet（CustomBuilder + SheetOptions）');
+  assertTrue(gallery.indexOf('height: SheetSize.MEDIUM') >= 0, '高度 = SheetSize.MEDIUM（屏半高档）');
+  assertTrue(gallery.indexOf('dragBar: true') >= 0, 'dragBar 必须开（系统半模态规范）');
+  assertTrue(gallery.indexOf('showClose: true') >= 0, 'showClose 必须开');
+  // 深浅色：深色底显式（本 app 深色 only，EntryAbility 强制 COLOR_MODE_DARK）
+  assertTrue(gallery.indexOf("backgroundColor: '#263238'") >= 0, '深色底显式声明');
+  // 无障碍：sheet 内可交互元素带 accessibilityText（读屏可念出段序号/标签名）
+  assertTrue(gallery.indexOf('.accessibilityText(`第 ${idx + 1} 段，${part.name}') >= 0,
+    '分段行必须带 accessibilityText（读屏念段名）');
+  assertTrue(gallery.indexOf('.accessibilityText(`移除标签 ${tag}`)') >= 0,
+    '移除按钮必须带 accessibilityText（读屏念标签名）');
+  // 旧内嵌弹层已迁走：不得残留 60% 高度的自绘假面板
+  assertTrue(gallery.indexOf(".height('60%')") < 0, '旧自绘 60% 面板必须移除（HM7-1 迁移）');
+});

@@ -31,6 +31,8 @@ function formatDate(sec: number): string {
 struct Gallery {
   @State clips: Array<VideoClip> = [];
   @State tabs: Array<GalleryTab> = GalleryTabs.build([]);
+  /** HM7-1：半模态面板种类（'none' | 'series' | 'tags'） */
+  @State sheetKind: string = 'none';
   @State selectedTab: number = 0;
   @State counts: Array<number> = [0, 0, 0];
   @State loading: boolean = true;
@@ -312,6 +314,7 @@ struct Gallery {
   private openTagDialog(clip: VideoClip): void {
     this.tagDialogClip = clip;
     this.reloadTagDialogTags(clip);
+    this.sheetKind = 'tags';
   }
 
   private reloadTagDialogTags(clip: VideoClip): void {
@@ -389,6 +392,7 @@ struct Gallery {
   private openSeriesSheet(entry: GalleryEntry): void {
     if (entry.seriesId !== undefined) {
       this.seriesSheetId = entry.seriesId;
+      this.sheetKind = 'series';
     }
   }
 
@@ -770,131 +774,6 @@ struct Gallery {
         .padding({ left: 12, right: 12 })
       }
 
-      if (this.seriesSheetId !== undefined) {
-        Column({ space: 6 }) {
-          Row({ space: 8 }) {
-            Text(`分段清单（${this.seriesSheetParts().length} 段）`)
-              .fontSize(13)
-              .fontColor(Color.White)
-              .layoutWeight(1)
-              .maxLines(1)
-            Button('关闭')
-              .fontSize(11)
-              .height(24)
-              .onClick((): void => {
-                this.seriesSheetId = undefined;
-              })
-          }
-          Text('点按任一段直接打开播放页；组级动作（收藏/回收站/分享）作用于全部段。')
-            .fontSize(10)
-            .fontColor('#78909C')
-          Scroll() {
-            Column({ space: 4 }) {
-              ForEach(this.seriesSheetParts(), (part: VideoClip, idx: number): void => {
-                Row({ space: 8 }) {
-                  Text(`第 ${idx + 1} 段`)
-                    .fontSize(11)
-                    .fontColor('#FFCC80')
-                    .width(52)
-                  Text(part.name)
-                    .fontSize(12)
-                    .fontColor(Color.White)
-                    .layoutWeight(1)
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
-                    .fontSize(10)
-                    .fontColor('#B0BEC5')
-                }
-                .width('100%')
-                .padding(6)
-                .backgroundColor('#1F1F1F')
-                .borderRadius(6)
-                .onClick((): void => {
-                  this.seriesSheetId = undefined;
-                  this.openPlayer(part);
-                })
-              }, (part: VideoClip): string => part.path)
-            }
-            .width('100%')
-          }
-          .layoutWeight(1)
-          .width('100%')
-        }
-        .width('100%')
-        .height('60%')
-        .padding(12)
-        .backgroundColor('#263238')
-        .borderRadius(12)
-      }
-
-      // CT 批：加/移除自定义标签弹层（上游 MediaTagDialog 对应物）
-      if (this.tagDialogClip !== undefined) {
-        Column({ space: 6 }) {
-          Row({ space: 8 }) {
-            Text(`标签：${this.tagDialogClip.name}`)
-              .fontSize(13)
-              .fontColor(Color.White)
-              .layoutWeight(1)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Button('关闭')
-              .fontSize(11)
-              .height(24)
-              .onClick((): void => {
-                this.tagDialogClip = undefined;
-                this.tagInput = '';
-              })
-          }
-          Row({ space: 6 }) {
-            TextInput({ text: this.tagInput, placeholder: '新标签（1-24 字）' })
-              .fontSize(12)
-              .layoutWeight(1)
-              .height(30)
-              .onChange((v: string): void => {
-                this.tagInput = v;
-              })
-            Button('添加')
-              .fontSize(11)
-              .height(26)
-              .enabled(!this.actionBusy && this.dbOk && this.tagInput.trim() !== '')
-              .onClick((): void => {
-                const clip: VideoClip | undefined = this.tagDialogClip;
-                const input: string = this.tagInput.trim();
-                if (clip !== undefined && input !== '') {
-                  this.addTagToClip(clip, input);
-                  this.tagInput = '';
-                }
-              })
-          }
-          .width('100%')
-          if (this.tagDialogTags.length === 0) {
-            Text('暂无自定义标签')
-              .fontSize(11)
-              .fontColor('#78909C')
-          }
-          ForEach(this.tagDialogTags, (tag: string): void => {
-            Row({ space: 8 }) {
-              Text(tag)
-                .fontSize(12)
-                .fontColor(Color.White)
-                .layoutWeight(1)
-                .maxLines(1)
-              Button('移除')
-                .fontSize(11)
-                .height(24)
-                .onClick((): void => {
-                  this.removeTagFromClip(tag);
-                })
-            }
-            .width('100%')
-          }, (tag: string): string => tag)
-        }
-        .width('100%')
-        .padding(12)
-        .backgroundColor('#263238')
-      }
-
       if (this.showDetail) {
         Column({ space: 4 }) {
           Row({ space: 8 }) {
@@ -923,6 +802,141 @@ struct Gallery {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    // HM7-1：半模态面板（SheetSpec 消费面，走鸿蒙原生 bindSheet）——
+    // 分段清单与标签弹层共用；高度 SheetSize.MEDIUM（屏半高）、dragBar、深色底。
+    // 宽 480vp 上限由系统面板形态承担（手机 < 480 自然合规，SheetSpec.clampSheetWidth 同义，登记）。
+    .bindSheet(this.sheetKind !== 'none', (): void => {
+      this.gallerySheetBuilder()
+    }, {
+      height: SheetSize.MEDIUM,
+      dragBar: true,
+      showClose: true,
+      title: { title: this.sheetTitle() },
+      maskColor: '#33000000',
+      backgroundColor: '#263238'
+    } as SheetOptions)
+  }
+
+  /** HM7-1：半模态面板内容（CustomBuilder 无参，内容读组件状态） */
+  @Builder
+  gallerySheetBuilder() {
+    if (this.sheetKind === 'series') {
+      Column({ space: 6 }) {
+        Text('点按任一段直接打开播放页；组级动作（收藏/回收站/分享）作用于全部段。')
+          .fontSize(11)
+          .fontColor('#78909C')
+          .width('100%')
+        Scroll() {
+          Column({ space: 4 }) {
+            ForEach(this.seriesSheetParts(), (part: VideoClip, idx: number): void => {
+              Row({ space: 8 }) {
+                Text(`第 ${idx + 1} 段`)
+                  .fontSize(11)
+                  .fontColor('#FFCC80')
+                  .width(52)
+                Text(part.name)
+                  .fontSize(12)
+                  .fontColor(Color.White)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(`${formatDuration(part.durationMs)} · ${formatSize(part.sizeBytes)}`)
+                  .fontSize(10)
+                  .fontColor('#B0BEC5')
+              }
+              .width('100%')
+              .padding(6)
+              .backgroundColor('#1F1F1F')
+              .borderRadius(6)
+              .accessibilityText(`第 ${idx + 1} 段，${part.name}，${formatDuration(part.durationMs)}，点按打开播放页`)
+              .onClick((): void => {
+                this.closeSheet();
+                this.openPlayer(part);
+              })
+            }, (part: VideoClip): string => part.path)
+          }
+          .width('100%')
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+      }
+      .width('100%')
+      .height('100%')
+    } else {
+      Column({ space: 6 }) {
+        Row({ space: 6 }) {
+          TextInput({ text: this.tagInput, placeholder: '新标签（1-24 字）' })
+            .fontSize(12)
+            .layoutWeight(1)
+            .height(30)
+            .onChange((v: string): void => {
+              this.tagInput = v;
+            })
+          Button('添加')
+            .fontSize(11)
+            .height(26)
+            .enabled(!this.actionBusy && this.dbOk && this.tagInput.trim() !== '')
+            .onClick((): void => {
+              const clip: VideoClip | undefined = this.tagDialogClip;
+              const input: string = this.tagInput.trim();
+              if (clip !== undefined && input !== '') {
+                this.addTagToClip(clip, input);
+                this.tagInput = '';
+              }
+            })
+        }
+        .width('100%')
+        if (this.tagDialogTags.length === 0) {
+          Text('暂无自定义标签')
+            .fontSize(11)
+            .fontColor('#78909C')
+        }
+        List({ space: 4 }) {
+          ForEach(this.tagDialogTags, (tag: string): void => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Text(tag)
+                  .fontSize(12)
+                  .fontColor(Color.White)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                Button('移除')
+                  .fontSize(11)
+                  .height(24)
+                  .accessibilityText(`移除标签 ${tag}`)
+                  .onClick((): void => {
+                    this.removeTagFromClip(tag);
+                  })
+              }
+              .width('100%')
+            }
+          }, (tag: string): string => tag)
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+      }
+      .width('100%')
+      .height('100%')
+    }
+  }
+
+  private sheetTitle(): string {
+    if (this.sheetKind === 'series') {
+      return `分段清单（${this.seriesSheetParts().length} 段）`;
+    }
+    if (this.sheetKind === 'tags') {
+      return `标签：${this.tagDialogClip !== undefined ? this.tagDialogClip.name : ''}`;
+    }
+    return '';
+  }
+
+  private closeSheet(): void {
+    this.sheetKind = 'none';
+    this.seriesSheetId = undefined;
+    this.tagDialogClip = undefined;
+    this.tagInput = '';
   }
 }
 
