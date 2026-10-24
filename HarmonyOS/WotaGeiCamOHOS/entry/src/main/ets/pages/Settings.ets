@@ -21,6 +21,7 @@ import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens
 import { WindowChrome } from '../ui/WindowChrome';
 import { SliderKey, decodeContinuousSliders, encodeContinuousSliders } from '../ui/SliderSnap';
 import { formatSize } from '../media/MediaFormat';
+import { HudItem, HudItems } from '../core/Constants';
 import { REF_LINE_ENTRIES, RefLine, RefLineEntry } from '../core/RefLine';
 import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease } from '../update/UpdateChecker';
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
@@ -468,6 +469,52 @@ struct Settings {
     .borderRadius(HudShape.CARD_RADIUS)
   }
 
+  /**
+   * 取景读数分组（J3a，对齐上游 BlockHud 的 hud_items 段）：7 档位掩码多选，
+   * 相机页顶栏读数条按同一掩码渲染。位运算全部走 `core/Constants` 的 HudItems 纯函数
+   * （选中态 isOn / 写入 toggle），调用点不许手写 `mask ^ bit`。
+   */
+  @Builder
+  private hudItemsGroup() {
+    Column({ space: HudSpace.S }) {
+      Text('取景读数')
+        .fontSize(HudType.VALUE)
+        .fontColor(HudColor.TEXT_SECONDARY)
+        .width('100%')
+      Text('可多选叠加在取景页顶栏的常驻读数条；默认上屏 快门/帧率/码率/感光度，其余点选追加，全部取消则不显示读数条。')
+        .fontSize(HudType.LABEL)
+        .fontColor(HudColor.TEXT_TERTIARY)
+        .width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+        ForEach(HudItems.ALL, (item: HudItem): void => {
+          Button(HudItems.label(item))
+            .fontSize(HudType.VALUE)
+            .fontColor(HudItems.isOn(this.settings.hudItems, item)
+              ? HudColor.TEXT_PRIMARY : HudColor.TEXT_SECONDARY)
+            .height(HudTouch.PILL_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .border({
+              width: 1,
+              color: HudItems.isOn(this.settings.hudItems, item) ? HudColor.ACCENT : HudColor.DIVIDER
+            })
+            .backgroundColor(HudItems.isOn(this.settings.hudItems, item)
+              ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
+            .padding({ left: 16, right: 16 })
+            .margin({ right: HudSpace.S, bottom: HudSpace.S })
+            .onClick((): void => {
+              this.settings.hudItems = HudItems.toggle(this.settings.hudItems, item);
+              this.persist();
+            })
+        }, (item: HudItem): string => HudItems.nameOf(item))
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(HudSpace.L)
+    .backgroundColor(HudColor.CARD_BG)
+    .borderRadius(HudShape.CARD_RADIUS)
+  }
+
   /** 分组卡片：标题 13fp + 选项 Flex 换行（全部 48vp 高） */
   @Builder
   private optionGroup(title: string, options: Array<string>, selected: number,
@@ -837,6 +884,9 @@ struct Settings {
             }
             ListItem() {
               this.refLineGroup()
+            }
+            ListItem() {
+              this.hudItemsGroup()
             }
             ListItem() {
               Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')

@@ -11,12 +11,14 @@
  * 原地，不折进 24 键白名单、也不折进 `default_ref_lines` 位掩码。
  *
  * 其余：画幅/帧率/码率/光弧/网格/效果 + 滑杆吸附开关（slider_continuous，对齐上游 0dee86d
- * KEY_SLIDER_CONTINUOUS 语义：存「关掉吸附」的参数 id 集合编码串，缺键/坏串 = 空集 = 全部吸附）。
+ * KEY_SLIDER_CONTINUOUS 语义：存「关掉吸附」的参数 id 集合编码串，缺键/坏串 = 空集 = 全部吸附）
+ * + 取景读数条位掩码（hud_items，对齐上游 WotaSettings.KEY_HUD_ITEMS：默认 DEFAULT_MASK=15，
+ * 坏值经 HudItems.maskOrDefault 回默认，0 = 合法的「全部取消」）。
  * 读取失败/类型异常回默认值；保存失败记日志不抛。
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
-import { Size } from '../core/Constants';
+import { HudItems, Size } from '../core/Constants';
 import { Diag } from '../diag/Diag';
 import { PARAMS_STORE_NAME } from './ParamsStore';
 import {
@@ -30,6 +32,8 @@ const TAG: string = 'WotaSettings';
 const KEY_SLIDER_CONTINUOUS: string = 'slider_continuous';
 /** 取景辅助：水平仪/俯仰仪回正震动（`level_enabled` 已并入上游 24 键，见 ParamsPersist） */
 const KEY_LEVEL_BUZZ: string = 'level_buzz_enabled';
+/** 取景读数条位掩码（上游 WotaSettings.KEY_HUD_ITEMS，逐字一致；不在 24 键白名单——纯 UI 设置，设置页直读直写） */
+const KEY_HUD_ITEMS: string = 'hud_items';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -55,6 +59,8 @@ export class CameraSettings {
   levelBuzz: boolean = true;
   /** 默认取景参考线位掩码（上游 default_ref_lines，11 档位或；0 = 不开任何参考线） */
   refLines: number = 0;
+  /** 取景读数条位掩码（上游 hud_items；默认上屏四档，0 = 读数条整条不渲染） */
+  hudItems: number = HudItems.DEFAULT_MASK;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -117,6 +123,9 @@ export class SettingsStore {
       const refRaw: preferences.ValueType = await store.get(KEY_DEFAULT_REF_LINES, s.refLines);
       s.refLines = typeof refRaw === 'number' && Number.isFinite(refRaw as number)
         ? Math.trunc(refRaw as number) : 0;
+      // 坏值（非有限数/负数）收口在 HudItems.maskOrDefault；类型不符（手改 prefs）按缺失回默认
+      const hudRaw: preferences.ValueType = await store.get(KEY_HUD_ITEMS, s.hudItems);
+      s.hudItems = typeof hudRaw === 'number' ? HudItems.maskOrDefault(hudRaw as number) : s.hudItems;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -159,6 +168,7 @@ export class SettingsStore {
       await store.put(KEY_LEVEL_ENABLED, s.levelEnabled);
       await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
       await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
+      await store.put(KEY_HUD_ITEMS, s.hudItems);
       await store.flush();
       return true;
     } catch (e) {

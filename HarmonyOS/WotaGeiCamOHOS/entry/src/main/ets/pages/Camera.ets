@@ -20,7 +20,9 @@
  * 轮转后若巡检已停（上一段已健康）则重启健康窗；健康重录/GIVE_UP 丢段读 stop 摘要末段账
  * （lastPath/lastBytes/lastSamples），保留已完成前段（被丢零样本段在首段 sidecar segments 留 count=0 条目，无害登记）。
  *
- * 边界（登记）：固定 HUD，不移植 HudLayout/HudLayoutEditor（READOUT 非可编排网格）；
+ * 边界（登记）：J3a 起 hud_items 位掩码已接 UI——顶栏固定两行之下的「读数条」按掩码渲染
+ * （换行档走 J1/J2 的 hudPerRowFor+hudRoomDp+hudRowGroups；条位置为临时落位，J3b 挪进 READOUT
+ * zone 并换 planReadoutRow 的同行裁决）；拖拽布局编辑器（HudLayoutEditor）仍留 J3b。
  * PillPopup 为最小实现（无动效/Tokens/文字缩放层/SheetSpec）；tint 副轴/对焦弹层留白；视频-only。
  * **高级参数持久化已落（本批 I，对齐上游 ui/ParamsPersist.kt）**：24 键白名单（`ui/ParamsPersist.ets`
  * 纯逻辑 + `ui/ParamsStore.ets` 平台件，与 SettingsStore 同一个 `wota_camera_settings` store）——
@@ -51,7 +53,7 @@ import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
-import { AeMode, ArcMergeDeadband, FrameEffect, PeakingColor, Size } from '../core/Constants';
+import { AeMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size } from '../core/Constants';
 import { CameraAbility, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
@@ -74,6 +76,8 @@ import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
 import { RefLine, RefLineType } from '../core/RefLine';
+import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
+import { HudEntry, HudZone, hudRowGroups } from '../core/HudLayout';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
@@ -158,6 +162,13 @@ struct CameraPage {
   @State gridOn: boolean = true;
   /** 取景参考线位掩码（设置页多选；`gridOn` 额外把三分法网格并进来） */
   @State refMask: number = 0;
+  /**
+   * 取景读数条位掩码（上游 hud_items；设置页「取景读数」多选，onPageShow 读取）。
+   * 0 = 整条不渲染；J3a 临时落位在固定两行之下，J3b 挪进 READOUT zone。
+   */
+  @State hudItemsMask: number = HudItems.DEFAULT_MASK;
+  /** 读数条容器实测宽（vp）：首帧按屏幕宽兜底，onAreaChange 接管（J1 宽度账要实测宽） */
+  @State hudStripWidthVp: number = 0;
   /** 水平仪/俯仰仪（上游需求 24/25「必须」）：读数已换算到显示方向、已折叠到 ±90 */
   @State levelOn: boolean = true;
   @State levelAvailable: boolean = true;
@@ -213,6 +224,8 @@ struct CameraPage {
   private flushThrottle: ParamsFlushThrottle | undefined = undefined;
   /** 最近一次会话期能力真值（起镜成功/开弹层时刷新；停镜置空） */
   private ability: CameraAbility | undefined = undefined;
+  /** 读数条换行档的字体档输入（hudPerRowFor 的 fontScale；<1 档在该函数内部夹回 1） */
+  private hudFontScale: number = 1;
   /** 当前打开的高级参数弹层（'' = 无）：快门/ISO/EV/WB */
   @State activePill: string = '';
   /** 弹层锚点（窗口 px；零矩形 = 未量到，PillPopup 内部走底贴屏回退） */
@@ -251,6 +264,7 @@ struct CameraPage {
     this.bindParamsLabels();
     this.initLevelSensor();
     this.applyImmersiveChrome();
+    this.refreshHudReadoutMetrics();
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
         return;
@@ -268,6 +282,7 @@ struct CameraPage {
       display.on('change', (_id: number): void => {
         this.applyGeometry();
         this.syncLevelDisplayDegrees();
+        this.refreshHudReadoutMetrics();
       });
     } catch (e) {
     }
@@ -348,6 +363,7 @@ struct CameraPage {
       this.settings = s;
       this.syncLabels();
       this.refMask = s.refLines;
+      this.hudItemsMask = s.hudItems;
       this.applyLevelSetting();
       this.initNativeParams();
       if (this.recording) {
@@ -1090,7 +1106,8 @@ struct CameraPage {
     return formatElapsed(this.elapsedMs);
   }
 
-  /** 顶栏第二行读数（T21）：快门/ISO/EV/WB（值由 syncParamLabels 预算进 @State） */
+  /** 顶栏第二行读数（T21）：快门/ISO/EV/WB（值由 syncParamLabels 预算进 @State）；
+   * J3a 起固定行只留时长，这四个值改由 hud_items 读数条消费（同一真源，不另算一份） */
   private readoutText2(key: string): string {
     if (key === 'shutter') {
       return this.rowShutter;
@@ -1102,6 +1119,87 @@ struct CameraPage {
       return this.rowEv;
     }
     return this.rowWb;
+  }
+
+  /**
+   * 读数条换行档的两枚运行时输入（J1 宽度账）：首帧按屏幕宽（px→vp，再扣左右安全边距）兜底，
+   * 之后由读数条容器的 onAreaChange 接管——J1 审查口径：喂 hudRoomDp 的必须是
+   * 调用点同一表达式算出的**实测**可用宽，不许直接塞 screenWidthDp。
+   */
+  private refreshHudReadoutMetrics(): void {
+    try {
+      const d: display.Display = display.getDefaultDisplaySync();
+      const density: number = d.densityPixels > 0 ? d.densityPixels : 1;
+      this.hudStripWidthVp = Math.max(0, d.width / density - 2 * HudSpec.SAFE_MARGIN);
+    } catch (e) {
+      // 量不到：保持现值（首帧兜底 0 → hudPerRowFor 退 1 颗一行，宁可高也不裁字）
+    }
+    // 字体缩放档：Display 上没有 fontScale（SDK 核实），读 UIAbility 的
+    // Configuration.fontSizeScale（API 18+；未配置/读不到 → 1，<1 档由 hudPerRowFor 内部夹回 1）
+    try {
+      const ctx: common.UIAbilityContext =
+        this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const fs: number | undefined = ctx.config.fontSizeScale;
+      this.hudFontScale = fs !== undefined && Number.isFinite(fs) && fs > 0 ? fs : 1;
+    } catch (e) {
+      this.hudFontScale = 1;
+    }
+  }
+
+  /**
+   * 读数条一行一行的分组（J3a）：条目 = `HudItems.typesOf(mask)` 按枚举声明序（= 上游读数块顺序），
+   * 分组走 J2 的 `hudRowGroups(HudZone.READOUT, …)`（上游读数块切行用的就是它）。
+   *
+   * 换行档选 `hudPerRowFor` 而不是 `planReadoutRow`（二选一的理由）：读数条目前**临时落位**在
+   * 顶栏固定两行之下，没有「与底栏 Dock 同一条横带」的几何——planReadoutRow 的
+   * sharesDockRow/bottomAvoid/底板宽那些裁决在这个落位下无从谈起；这里用的正是它竖屏退化档
+   * （退回整排之上）的同一条整幅宽取档算式 hudPerRowFor(count, scale, hudRoomDp(实测宽, 端侧留白))。
+   * J3b 把读数条挪进 READOUT zone 后换 planReadoutRow。
+   */
+  private hudReadoutRowGroups(): Array<Array<HudEntry>> {
+    const items: Array<HudItem> = HudItems.typesOf(this.hudItemsMask);
+    const perRow: number = hudPerRowFor(items.length, this.hudFontScale,
+      hudRoomDp(this.hudStripWidthVp, HudSpec.HUD_EDGE_PAD));
+    const order: Array<HudEntry> = items.map((item: HudItem): HudEntry => HudEntry.ofItem(item));
+    return hudRowGroups(HudZone.READOUT, order, perRow);
+  }
+
+  /** 读数条条目值：快门/ISO/EV/WB/帧率复用既有读数函数；码率/变焦本批新增（变焦与 zoomLabel 同源） */
+  private readoutStripValue(item: HudItem): string {
+    if (item === HudItem.BITRATE) {
+      // 上游 `${bitrate / 1_000_000}M`（Kotlin Int 除法截断 → Math.trunc）；
+      // 档位 0（自动）按 BitratePolicy 现解当前画幅/帧率的实录码率
+      const bps: number = BitratePolicy.resolve(this.settings.bitrate, this.settings.sizeW,
+        this.settings.sizeH, this.settings.fps, false);
+      return `${Math.trunc(bps / 1_000_000)}M`;
+    }
+    if (item === HudItem.ZOOM) {
+      return this.zoomLabel;
+    }
+    if (item === HudItem.FPS) {
+      return this.readoutText('fps');
+    }
+    if (item === HudItem.SHUTTER) {
+      return this.readoutText2('shutter');
+    }
+    if (item === HudItem.ISO) {
+      return this.readoutText2('iso');
+    }
+    if (item === HudItem.EV) {
+      return this.readoutText2('ev');
+    }
+    return this.readoutText2('wb');
+  }
+
+  /** 读数条条目标签（HudItems.label 单一真源；ordinal 越界的坏条目空串不渲染值） */
+  private hudStripLabel(entry: HudEntry): string {
+    const item: HudItem | undefined = entry.item;
+    return item === undefined ? '' : HudItems.label(item);
+  }
+
+  private hudStripValue(entry: HudEntry): string {
+    const item: HudItem | undefined = entry.item;
+    return item === undefined ? '-' : this.readoutStripValue(item);
   }
 
   private displayDeg(): number {
@@ -1703,7 +1801,7 @@ struct CameraPage {
       }
 
       Column() {
-        // ---------- 顶栏：两行读数（各 5 项）+ 右侧 48vp 深色入口胶囊
+        // ---------- 顶栏：固定两行读数（镜头/画幅/电量/空间 + 时长）+ 右侧 48vp 深色入口胶囊
         Row({ space: HudSpace.M }) {
           Column({ space: HudSpace.XS }) {
             // 两行读数直接内联（不用按值 @Builder：@Builder 值参数会在首帧冻结，不随 @State 刷新）
@@ -1716,8 +1814,7 @@ struct CameraPage {
                     .maxLines(1)
                   Text(this.readoutText(key))
                     .fontSize(HudType.VALUE)
-                    .fontColor(key === 'duration' && this.recording
-                      ? HudColor.DANGER : HudColor.TEXT_PRIMARY)
+                    .fontColor(HudColor.TEXT_PRIMARY)
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                 }
@@ -1733,7 +1830,8 @@ struct CameraPage {
                     .fontSize(HudType.LABEL)
                     .fontColor(HudColor.TEXT_TERTIARY)
                     .maxLines(1)
-                  Text(key === 'duration' ? formatElapsed(this.elapsedMs) : this.readoutText2(key))
+                  // J3a：快门/ISO/EV/WB 迁入下方读数条，固定行只留时长（readoutText 兜底分支）
+                  Text(this.readoutText(key))
                     .fontSize(HudType.VALUE)
                     .fontColor(key === 'duration' && this.recording
                       ? HudColor.DANGER : HudColor.TEXT_PRIMARY)
@@ -1775,6 +1873,57 @@ struct CameraPage {
           right: HudSpec.SAFE_MARGIN,
           top: this.safeTop + HudSpace.S
         })
+
+        // ---------- 读数条（J3a：hud_items 位掩码驱动；**临时落位**在固定两行之下，J3b 挪进 READOUT
+        // zone 并换 planReadoutRow 的同行裁决）。条目/分组/换行档全在 hudReadoutRowGroups()（J1/J2 算式）；
+        // 掩码 0（设置页全部取消）整条不渲染。默认档少显 EV/WB 是与上游 DEFAULT_MASK 对齐的故意行为。
+        if (this.hudItemsMask !== 0) {
+          Column() {
+            Column({ space: HUD_ROW_GAP_DP }) {
+              ForEach(this.hudReadoutRowGroups(), (row: Array<HudEntry>): void => {
+                Row({ space: HUD_ROW_GAP_DP }) {
+                  ForEach(row, (entry: HudEntry): void => {
+                    Column({ space: 1 }) {
+                      Text(this.hudStripLabel(entry))
+                        .fontSize(HudType.LABEL)
+                        .fontColor(HudColor.TEXT_TERTIARY)
+                        .maxLines(1)
+                      Text(this.hudStripValue(entry))
+                        .fontSize(HudType.VALUE)
+                        .fontColor(HudColor.TEXT_PRIMARY)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    }
+                    .layoutWeight(1)
+                    .alignItems(HorizontalAlign.Start)
+                  }, (entry: HudEntry): string => entry.id)
+                }
+                .width('100%')
+              }, (row: Array<HudEntry>): string => {
+                // 行 key = 行内条目 id 串（mask 或换行档变化 → 分组变化 → 重建行）
+                let key: string = '';
+                for (const entry of row) {
+                  key += (key === '' ? '' : ',') + entry.id;
+                }
+                return key;
+              })
+            }
+            .width('100%')
+            .onAreaChange((_old: Area, area: Area): void => {
+              // 实测宽接管首帧的屏幕宽兜底（J1 宽度账：可用宽必须与换行档同一份实测）
+              const w: number = area.width as number;
+              if (w > 0 && Math.abs(w - this.hudStripWidthVp) > 0.5) {
+                this.hudStripWidthVp = w;
+              }
+            })
+          }
+          .width('100%')
+          .padding({
+            left: HudSpec.SAFE_MARGIN,
+            right: HudSpec.SAFE_MARGIN,
+            top: HudSpace.XS
+          })
+        }
 
         Blank()
 

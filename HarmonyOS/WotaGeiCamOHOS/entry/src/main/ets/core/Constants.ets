@@ -263,6 +263,42 @@ export class HudItems {
     }
     return m;
   }
+
+  /**
+   * 设置页 chip / 读数条共用的中文短标签（对应上游 labelKey 指向的 strings_camera.xml 值）。
+   * EV 上游文案是「EV」，本侧按产品文案用「曝光补偿」（登记 PORT_MAP §ui J3a）。
+   */
+  static label(t: HudItem): string {
+    switch (t) {
+      case HudItem.SHUTTER: return '快门';
+      case HudItem.FPS: return '帧率';
+      case HudItem.BITRATE: return '码率';
+      case HudItem.ISO: return '感光度';
+      case HudItem.EV: return '曝光补偿';
+      case HudItem.WB: return '白平衡';
+      case HudItem.ZOOM: return '变焦';
+      default: return '';
+    }
+  }
+
+  /** 多选态判据（设置页 chip 选中态；与 RefLines.isOn 同形态，调用点不许手写 `mask & bit`） */
+  static isOn(mask: number, t: HudItem): boolean {
+    return (mask & HudItems.bit(t)) !== 0;
+  }
+
+  /** 多选切换：再点一次关回去（设置页唯一写入口；与 RefLines.toggle 同形态） */
+  static toggle(mask: number, t: HudItem): number {
+    return HudItems.isOn(mask, t) ? (mask & ~HudItems.bit(t)) : (mask | HudItems.bit(t));
+  }
+
+  /**
+   * prefs 原始值 → 掩码（SettingsStore 的坏值收口，抽纯函数进用例）：
+   * 非有限数 / 负数回出厂默认；**0 是合法的「全部取消」**，不回默认
+   * （回默认会让「全部关掉」这一用户动作存不下来）；高位未知 bit 原样保留（前向兼容，typesOf 只滤已知位）。
+   */
+  static maskOrDefault(raw: number): number {
+    return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : HudItems.DEFAULT_MASK;
+  }
 }
 
 /** 核心渲染模式：GPU = 图像信号交 GPU 实时处理；DIRECT = 绕过 GPU 直连传感器与编码器 */
