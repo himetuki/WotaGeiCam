@@ -16,7 +16,7 @@
 ### 拍摄控制
 - 手动曝光：ISO / 快门 / EV；快门支持强制 1/24、1/25 低速档（长曝光保证光弧连贯），并按当前帧周期校验哪些档位可选
 - 帧率控制（含非精确档的抽帧转换）、白平衡色温、手动对焦与变焦
-- 实时 RGB 曲线调整
+- 实时 RGB 曲线调整：编辑弹窗可拖右缘宽高等比放大（默认尺寸为最小值，只增不减；节点与线宽随画布同步放大，方便手指大的人调节），扇面「重置」一键回恒等并把弹窗尺寸复位到默认最小
 - 取景手势：轻触画面对焦并测光；双击在该点对焦并锁定；锁定期间轻触画面不重新对焦（首次给出提示），长按画面解锁并在该点重新对焦；自动曝光档下长按半秒锁定 / 解除曝光（AE）；对焦面板内也有「锁定 / 解除锁定」条目
 - 录制页参数持久化：录制页上改过的参数（感光度、快门、帧率、白平衡、变焦、分辨率等）会被记住，重启后不回默认值；滑杆松手即保存
 - 刻度滑杆：滑杆按设备能力分档运行，读数仍显示真实值；设置页「滑杆吸附」可逐个参数改成连续值（例如变焦调到 1.2×、1.7×）
@@ -58,7 +58,7 @@
 - 应用内「检查更新 / 下载更新」：**只在你主动点击时联网**，读取 GitHub Releases 的最新版本并下载安装包（直连失败时按 HTTPS 镜像链回退），不自动检查、不自动下载、不后台联网
 - 每次下载前先给直连与各镜像**测速**（每路只采样 256KiB），按实测速度挑最快的通道，下载失败再按速度依次回退；测速全部失败时回到「直连优先 + 镜像表序」的老顺序
 - 发现新版本时，弹窗里会显示该版本的更新说明（GitHub Release 的说明原文，去掉 Markdown 标记；直连与镜像读取的说明都会显示，它只用于展示、不参与安装判断）
-- 下载地址一律用仓库常量与校验过的资产名重建并强制 HTTPS；SHA-256 只从 GitHub 官方接口读取，下载完成后本地比对，不匹配即丢弃；安装前核对包名与签名与已装应用一致，不一致不交给系统安装器
+- 下载地址一律用仓库常量与校验过的资产名重建并强制 HTTPS，编码形态的 IP 字面量与指向内网 / 环回的目标一律拒绝；SHA-256 只从 GitHub 官方接口读取，下载完成后本地比对，不匹配即丢弃；安装前核对包名与签名与已装应用一致，不一致不交给系统安装器
 
 ## 下载
 
@@ -81,7 +81,7 @@
 - 系统要求：Android 10（API 29）及以上
 - 升级直接覆盖安装；**请勿先卸载**——卸载会清空应用内的设置与媒体库存档
 - 也可以直接在应用内检查更新并下载安装包
-- 本应用为纯 Kotlin 实现、不含原生库，四种 APK 内容一致
+- 本应用为纯 Kotlin 实现、不含原生库，四种 APK 内容一致；安装包内置 Baseline Profile（启动期热路径预编译，冷启动更快）
 - 「所有文件访问」自 Android 11 起提供，Android 10 上应用内如实标注为不支持（此时删除 / 重命名只对本应用录制的视频生效）
 
 **HarmonyOS**
@@ -98,7 +98,7 @@ cd WotaGeiCam/Android/WotaGeiCamApp
 ./gradlew :app:assembleDebug      # 日常构建
 ./gradlew :app:assembleRelease    # 发布构建（签名说明见下）
 
-# 打带检查点号的包（版本名 0.0.9-rNN，设置页可见；属性接受 05 或 r05 两种写法）
+# 打带检查点号的包（版本名 0.0.10-rNN，设置页可见；属性接受 05 或 r05 两种写法）
 ./gradlew :app:assembleRelease -Prbuild=05
 ```
 
@@ -123,7 +123,7 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 ```
 
 产物在 `HarmonyOS/WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap`。
-纯逻辑测试：`cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs`（235 用例）。
+纯逻辑测试：`cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs`（759 用例）。
 
 ### 仓库布局
 
@@ -132,9 +132,10 @@ WotaGeiCam/
 ├── Android/WotaGeiCamApp/     # 安卓 Gradle 工程（入库）
 ├── HarmonyOS/WotaGeiCamOHOS/  # 鸿蒙 DevEco 工程（入库）
 ├── .github/workflows/         # build-apk.yml + build-hap.yml（v* tag 双流水线）
-├── tools/ node_modules/ docs/ research/ deliverable/ agent-memory/
-│   camera-knowledge/ .zcode/ .mimosa/
-│                              # 本地资产（工具/依赖/打包/记忆类），gitignored 不入库
+├── tools/                     # 本地工具链：android-sdk（SDK/模拟器）、avd（虚拟机）、
+│   │                          # trace_processor 等；连同 node_modules/ docs/ research/
+│   │                          # deliverable/ agent-memory/ camera-knowledge/ .zcode/
+│   │                          # .mimosa/ 均为本地资产（gitignored 不入库）
 └── README.md LICENSE .gitignore .gitattributes
 ```
 
