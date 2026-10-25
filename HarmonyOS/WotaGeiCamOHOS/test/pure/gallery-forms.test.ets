@@ -152,9 +152,9 @@ test('接线_动作菜单进bindSheet且动作即收', () => {
   assertTrue(page.indexOf("this.sheetKind = 'menu';") >= 0, '菜单走 bindSheet（menu 分支）');
   assertTrue(page.indexOf('this.actionRow(this.menuClip)') >= 0,
     '菜单分支复用 actionRow（动作面零重复实现）');
-  // 菜单打开时动作即收面板：7 个动作方法各一行收口
-  assertEq((page.match(/if \(this\.sheetKind === 'menu'\) \{/g) ?? []).length, 9,
-    '7 个动作方法 + builder 分支 + sheetTitle 的 menu 判定行');
+  // 菜单打开时动作即收面板：8 个动作方法各一行收口（含 RN 批的改名）
+  assertEq((page.match(/if \(this\.sheetKind === 'menu'\) \{/g) ?? []).length, 10,
+    '8 个动作方法 + builder 分支 + sheetTitle 的 menu 判定行');
   assertTrue(page.indexOf('.accessibilityText(\'操作菜单\')') >= 0,
     '网格 [⋯] 必须带读屏文本');
 });

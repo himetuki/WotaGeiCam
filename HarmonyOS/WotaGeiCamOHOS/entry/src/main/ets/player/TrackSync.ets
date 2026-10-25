@@ -210,6 +210,29 @@ export class TrackSync {
   }
 
   /**
+   * 改名迁移（RN 批）：把某段的五键从旧路径键**搬到**新路径键（内容不变、键随文件走）。
+   * 与 `clearFor` 的区别：改名不是删片，记录该留——丢记录会让用户白校准一次。
+   * 旧键一并清空（否则同名复现时会命中旧偏移）。
+   */
+  static renameFor(prefs: SyncPrefs, oldKey: string, newKey: string): void {
+    if (oldKey === newKey) {
+      return;
+    }
+    const done: string = prefs.getString(TrackSync.doneKeyOf(oldKey), '');
+    if (done !== 'true') {
+      TrackSync.clearFor(prefs, oldKey);
+      return; // 未校准：无记录可搬
+    }
+    prefs.putString(TrackSync.doneKeyOf(newKey), 'true');
+    prefs.putString(TrackSync.offsetKeyOf(newKey), prefs.getString(TrackSync.offsetKeyOf(oldKey), '0'));
+    prefs.putString(TrackSync.sourceKeyOf(newKey),
+      prefs.getString(TrackSync.sourceKeyOf(oldKey), Source.MANUAL));
+    prefs.putString(TrackSync.confKeyOf(newKey), prefs.getString(TrackSync.confKeyOf(oldKey), '0'));
+    prefs.putString(TrackSync.atKeyOf(newKey), prefs.getString(TrackSync.atKeyOf(oldKey), '0'));
+    TrackSync.clearFor(prefs, oldKey);
+  }
+
+  /**
    * 抹掉某段的同步结果（RISK 批，对齐上游 f941799 的 TrackSync.clearFor）。
    *
    * 上游动机是 MediaStore 复用 `_ID` 后新片命中旧片的 done/offset；本侧键是**路径**，

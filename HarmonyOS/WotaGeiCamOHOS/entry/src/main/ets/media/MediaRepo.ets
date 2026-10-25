@@ -16,6 +16,7 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { SyncPrefsStore } from '../player/SyncPrefsStore';
+import { RenameSpec } from '../core/RenameSpec';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { VideoStore } from '../record/VideoStore';
 import { GlRecorder } from '../camera/GlRecorder';
@@ -743,6 +744,72 @@ export class MediaRepo {
   }
 
   /** 移入回收站：只写本地记录，文件原地保留（对齐上游 API29 本地回收站语义） */
+  /**
+   * 改名（RN 批）。上游走 MediaStore `DISPLAY_NAME`、`_ID` 不变；本侧 ID = 相对路径 FNV-1a，
+   * 改名即换 ID，故必须**成套迁移**：磁盘文件 → `.drops.json` sidecar → 三张按
+   * ID/路径记账的表（单事务）→ TrackSync 路径键（旧键清空，避免同名复现命中旧偏移）。
+   *
+   * 失败语义：任一硬步失败即整体报失败（文件没改名的情形不留账；文件已改名而账未迁移的
+   * 情形由 DB 事务保证不会出现——事务在文件改名之后才提交，失败则回滚且文件已改名 → 此时
+   * 直接把文件改回去，恢复原状）。返回空串 = 成功，非空 = 拒绝/失败原因（UI 直接展示）。
+   *
+   * 对比历史（CompareHistory，键=数值 ID）**不迁移**：它对失效条目的既有语义就是「缺失标记」，
+   * 用户重选右片即可；顺手迁移反而要把历史整表重写一遍（登记为取舍，非遗漏）。
+   */
+  async rename(clip: VideoClip, rawName: string): Promise<string> {
+    if (!this.isDbAvailable()) {
+      return '数据库不可用，改名会丢标签与系列，已取消';
+    }
+    if (clip.path === GlRecorder.getActiveRecordingPath()) {
+      return '正在录制的文件不能改名';
+    }
+    const fileName: string = RenameSpec.resolve(rawName, clip.name);
+    if (fileName === '') {
+      return RenameSpec.sanitize(rawName) === '' ? '名字不合法（不能为空、不能含 / 或 \）' : '名字没有变化';
+    }
+    const newPath: string = RenameSpec.newPathOf(clip.path, fileName);
+    const newRelative: string = RenameSpec.newRelativePathOf(clip.relativePath, fileName);
+    if (fileIo.accessSync(newPath)) {
+      return '同名文件已存在';
+    }
+    try {
+      fileIo.renameSync(clip.path, newPath);
+    } catch (e) {
+      Diag.e(TAG, `rename failed ${clip.path} → ${newPath}: ${e}`);
+      return `改名失败：${e}`;
+    }
+    // sidecar：改名后位次档案脱钩（旧名孤儿 + 新片无档案）；失败只记日志不阻断（上游同口径）
+    const sidecarOk: boolean = ArcDropLog.renameFor(clip.path, newPath);
+    if (!sidecarOk) {
+      Diag.w(TAG, `rename sidecar skipped/failed ${clip.path} → ${newPath}`);
+    }
+    const newId: number = MediaIds.ofRelativePath(newRelative);
+    const db: WotaDb | undefined = await this.ensureDb();
+    if (db === undefined) {
+      await this.revertRename(newPath, clip.path);
+      return '数据库不可用，已撤销改名';
+    }
+    try {
+      await db.renameMedia(clip.id, newId, clip.path, newPath, clip.relativePath, newRelative);
+      // 同步记录随文件搬（键=路径）：不搬的话用户白校准一次，且旧键会在同名复现时被误命中
+      await SyncPrefsStore.renameFor(this.ctx, clip.path, newPath);
+    } catch (e) {
+      await this.revertRename(newPath, clip.path);
+      return `改名失败（账未迁移，已撤销）：${e}`;
+    }
+    return '';
+  }
+
+  /** 账迁移失败时把文件改回去（best-effort；失败只记日志，让 UI 报「已改名但账未迁移」不再发生） */
+  private async revertRename(fromPath: string, toPath: string): Promise<void> {
+    try {
+      fileIo.renameSync(fromPath, toPath);
+      ArcDropLog.renameFor(fromPath, toPath);
+    } catch (e) {
+      Diag.e(TAG, `revert rename failed ${fromPath} → ${toPath}: ${e}`);
+    }
+  }
+
   async moveToTrash(clip: VideoClip): Promise<boolean> {
     if (!this.isDbAvailable() || clip.path === GlRecorder.getActiveRecordingPath()) {
       return false;

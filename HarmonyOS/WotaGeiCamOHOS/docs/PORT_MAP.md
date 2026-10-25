@@ -62,7 +62,7 @@
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 342dd99。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
 | `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：SeriesStore 落库侧的 UI 展示开关（本侧恒折叠，无回退开关按钮）、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
-| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名决策：不迁**——本仓媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`），改名即换 id，标签/回收站/系列成员全部失联；前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径），升级前做了必坏账（守卫钉住无重命名入口）。留白：~~全屏手势锁定~~（幽灵留白裁决 HM7-1：上游全仓无此功能，`git grep -i "手势锁定"` 零命中，见交付批 HM7-1 节）、时间线/网格/全屏滑动（G3a/G3b 批 2026-10-24 全落，见交付批节）、~~自定义标签页~~（CT 批已落）、上游 `StorageAccess` 不移植（见该行） | ☑ 部分 |
+| `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名（RN 批 2026-10-25 改判：已迁）**——历史登记是「不迁」，理由是媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`）改名即换 id、标签/回收站/系列成员失联。RN 批不再等 id 架构升级，而是把改名做成**成套迁移**：磁盘文件 → `.drops.json` sidecar（`ArcDropLog.renameFor`）→ 三表单事务换键（`WotaDb.renameMedia`：media_tag/trash_item/series_part）→ 同步键随搬（`TrackSync.renameFor`），任一硬步失败即把文件改回去（不留半迁移态）。**取舍登记**：CompareHistory 按数值 ID 记账，改名后旧条目失效——沿用其既有「缺失标记」语义（用户重选右片即可），不额外整表重写。守卫从「不许有改名入口」改为「入口在册 && 迁移面在册」。留白：~~全屏手势锁定~~（幽灵留白裁决 HM7-1：上游全仓无此功能，`git grep -i "手势锁定"` 零命中，见交付批 HM7-1 节）、时间线/网格/全屏滑动（G3a/G3b 批 2026-10-24 全落，见交付批节）、~~自定义标签页~~（CT 批已落）、上游 `StorageAccess` 不移植（见该行）；外部改名（系统文件管理器改）仍会脱钩——登记平台事实 | ☑ 部分 |
 
 ## player — 播放器 / 对比 / 剪辑
 
@@ -225,6 +225,41 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 
 锚点 diff（ClipExport.kt / PlayerEngine.kt）两项均属 f941799，已按 N/A 登记（无 pendingUri
 救援模型 / 无阻塞帧率探测）。
+
+## 交付批（RN：媒体改名 + 成套迁移，2026-10-25）
+
+**改判说明**：此项此前裁决「不迁」，理由是「ID = 相对路径 FNV-1a，改名即换 id，标签/回收站/
+系列成员全部失联，前置 = id 升级 64 位」。经复核，**前置不是必须的**——上游 MediaStore 的
+`_ID` 与名字无关所以改名天然安全，而本侧只要把「按路径/ID 记账的每一处」在改名时一起搬，
+就能在不改 ID 架构的前提下安全改名。故本批按功能落地。
+
+- **`core/RenameSpec.ets`**（纯逻辑零平台 import）：`sanitize`（拒空/`.`/`..`/含 `/` `\`/
+  控制字符/超长——上游靠 MediaStore 消毒，本侧直接拼路径必须自己拦，与 f941799 给 sidecar
+  补的那道闸同源理由）；`ensureSuffix`（上游逐字：旧名有后缀而新名没带则补，大小写不敏感）；
+  `stemOf`/`extOf`；`resolve`（合法化+补后缀，与原名逐字相同则拒绝=不动作）；`newPathOf`/
+  `newRelativePathOf`（同目录）。
+- **`MediaRepo.rename`**（编排）：合法化 → 同名文件先拒 → 录制中文件拒 → 磁盘改名 →
+  sidecar 跟着搬 → **DB 三表单事务换键** → **同步键随搬**（`TrackSync.renameFor`：五键按新
+  路径写回、旧键清空；未校准段不留记录）。任一硬步失败 → `revertRename` 把文件改回去，
+  不留「文件已改名、账未迁移」的半态。返回空串=成功，非空=可展示的拒绝/失败原因。
+- **`WotaDb.renameMedia`**：`beginTransaction` + 三条 UPDATE（media_tag 按 path、
+  trash_item 按 uri、series_part 按 uri）+ commit/rollBack。
+- **`TrackSync.renameFor`**（纯逻辑）：与 `clearFor` 的区别是「改名不是删片，记录该留」；
+  done 非 true 时只清旧键不搬（无记录可搬）。来源（auto/manual）随搬，不被误降级。
+- **UI**：Gallery 卡片动作行加「改名」→ `bindSheet` 改名弹层（`sheetKind='rename'`，预填
+  基名、提交走仓库侧、成功即刷新并提示新名）。
+- **取舍登记**：① CompareHistory 按数值 ID 记账，改名后旧条目失效——沿用其「缺失标记」
+  既有语义，不整表重写；② 外部改名（系统文件管理器）仍会脱钩，登记为平台事实。
+- **测试**：`media-rename.test.ets` +12（合法化拒绝面/去空白与常见字符/后缀补齐三态/基名与
+  扩展名/`resolve` 拒绝同名的两条/同目录拼装/同步键迁移三例（随搬+旧键清空、未校准不搬、
+  自动记录来源保持）/接线守卫三条（仓库成套迁移、DB 三表单事务、页面入口与弹层））。
+  另**改写两条被本批推翻的旧钉子**：`media-share-wiring` 的「不许出现重命名入口」→
+  「入口在册 && 迁移面在册」；`gallery-forms` 的菜单收口计数 9 → 10（新增改名动作方法）。
+  共 +12（732 → 744）。
+- **运行时走查待办**：真机/模拟器上改名一条 → 标签/系列/同步记录仍在、`drops.json` 跟名、
+  撞名与非法名提示。
+- **回归**：pure-test 71 files / 744 tests 全绿；clean `assembleHap`（release）
+  BUILD SUCCESSFUL。
 
 ## 交付批（WLB：取景预览 letterbox 几何，2026-10-25）
 

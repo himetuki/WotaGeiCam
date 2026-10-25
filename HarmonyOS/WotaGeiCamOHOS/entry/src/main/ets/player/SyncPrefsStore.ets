@@ -118,6 +118,19 @@ export class SyncPrefsStore {
     }
   }
 
+  /** 改名迁移（RN 批）：五键从旧路径键搬到新路径键（失败只记日志，由调用方决定是否回滚改名） */
+  static async renameFor(ctx: common.Context, oldKey: string, newKey: string): Promise<void> {
+    try {
+      const store: preferences.Preferences = await preferences.getPreferences(ctx, STORE_NAME);
+      const prefs: MappedSyncPrefs = new MappedSyncPrefs(store);
+      await prefs.hydrate(SyncKeys.all(oldKey));
+      TrackSync.renameFor(prefs, oldKey, newKey);
+      await store.flush();
+    } catch (e) {
+      Diag.w(TAG, `迁移同步记录失败：${oldKey} → ${newKey}`, e as Error);
+    }
+  }
+
   /**
    * 删片收尾：抹掉该段（按路径键）的同步结果（RISK 批，对齐上游 TrackSync.clearFor）。
    * 失败只记日志——删片已经成功，清脏账失败不该把删除报成失败。

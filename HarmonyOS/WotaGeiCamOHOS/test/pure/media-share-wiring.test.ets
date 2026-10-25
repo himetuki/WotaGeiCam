@@ -102,15 +102,17 @@ test('接线_折叠开关与会话态_长按组卡开分段清单', () => {
   assertTrue(gallery.indexOf('this.openPlayer(part)') >= 0, '清单点按直接开该段播放页');
 });
 
-test('决策_重命名不迁_id架构限制登记', () => {
-  // 本仓媒体 ID = 相对路径 32 位 FNV-1a（MediaIds.ofRelativePath：改一个字符即换 id）——
-  // 改名即换 id，标签/回收站/系列成员全部失联；上游 MediaStore 行 id 与路径无关所以可改名。
-  // 前置 = id 升级 64 位或 (mediaId,path) 二次确认（MediaRepo 既登记的升级路径）。
+test('裁决_重命名已迁_改判自「不迁」并保留 id 事实', () => {
+  // 历史：本仓媒体 ID = 相对路径 32 位 FNV-1a，改名即换 id → 曾裁决「重命名不迁」。
+  // RN 批（2026-10-25）改判：不改 id 架构，而是把**改名做成成套迁移**（文件 → sidecar →
+  // 三表事务 → 同步键），迁移面在册即可安全改名。id 仍是路径派生这一事实保留在册
+  // （它是迁移必要性的依据，也是「改名后 CompareHistory 旧条目失效」取舍的来源）。
   const repo: string = sourceText('entry/src/main/ets/media/MediaRepo.ets');
   assertTrue(repo.indexOf('static ofRelativePath(rel: string): number') >= 0,
     'id = 相对路径哈希的实现面（MediaIds.ofRelativePath）');
   assertTrue(repo.indexOf('0x01000193') >= 0, '32 位 FNV-1a 质数（路径即身份的事实依据）');
   const gallery: string = sourceText('entry/src/main/ets/pages/Gallery.ets');
-  assertTrue(gallery.indexOf('重命名') < 0,
-    '不许出现重命名入口（id 架构未升级前做了必坏账）');
+  assertTrue(gallery.indexOf("Button('改名')") >= 0,
+    '改名入口已在册（RN 批落地，取代旧的「不许出现重命名入口」钉子）');
+  assertTrue(repo.indexOf('await db.renameMedia(') >= 0, '入口存在的前提是迁移面在册');
 });

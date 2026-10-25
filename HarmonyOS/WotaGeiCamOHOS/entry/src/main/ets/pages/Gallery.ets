@@ -20,6 +20,7 @@ import {
   TimelineGroup, galleryColumnsOf, groupTimeline
 } from '../media/GalleryForms';
 import { ParamsStore } from '../ui/ParamsStore';
+import { RenameSpec } from '../core/RenameSpec';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { WindowChrome } from '../ui/WindowChrome';
 import { HudColor, HudType, PageColor } from '../ui/HudTokens';
@@ -71,6 +72,9 @@ struct Gallery {
   /** 加标签弹层（对应上游 MediaTagDialog）：对指定片加/移除自定义标签 */
   @State tagDialogClip: VideoClip | undefined = undefined;
   @State tagInput: string = '';
+  /** RN 批：改名弹层（sheetKind='rename'）的片子与输入 */
+  @State renameClip: VideoClip | undefined = undefined;
+  @State renameInput: string = '';
   /** 弹层内该片的自定义标签清单（来自该片 tags 的 isCustom 子集） */
   @State tagDialogTags: Array<string> = [];
   /** 分段展开面板：非 null = 显示该组的成员清单（只钉 seriesId，按当前 clips 重解析） */
@@ -339,6 +343,42 @@ struct Gallery {
   }
 
   /** CT 批：打开标签弹层（回填该片现有自定义标签） */
+  /** RN 批：打开改名弹层（预填基名——用户只改名字主体，扩展名由 RenameSpec 补） */
+  private openRenameDialog(clip: VideoClip): void {
+    if (this.sheetKind === 'menu') {
+      this.sheetKind = 'none';
+    }
+    this.renameClip = clip;
+    this.renameInput = RenameSpec.stemOf(clip.name);
+    this.sheetKind = 'rename';
+  }
+
+  /** 提交改名：仓库侧成套迁移（文件/sidecar/三表/同步键）；成功即刷新列表 */
+  private async submitRename(): Promise<void> {
+    const clip: VideoClip | undefined = this.renameClip;
+    const repo: MediaRepo | undefined = this.repo;
+    if (clip === undefined || repo === undefined || this.actionBusy) {
+      return;
+    }
+    const input: string = this.renameInput.trim();
+    if (input === '') {
+      this.message = '名字不能为空';
+      return;
+    }
+    this.actionBusy = true;
+    try {
+      const err: string = await repo.rename(clip, input);
+      if (err !== '') {
+        this.message = err;
+        return;
+      }
+      await this.refreshAll(`已重命名为 ${RenameSpec.ensureSuffix(input, clip.name)}`);
+      this.closeSheet();
+    } finally {
+      this.actionBusy = false;
+    }
+  }
+
   private openTagDialog(clip: VideoClip): void {
     this.tagDialogClip = clip;
     this.reloadTagDialogTags(clip);
@@ -987,6 +1027,14 @@ struct Gallery {
           .onClick((): void => {
             this.openTagDialog(clip);
           })
+        // RN 批：改名入口（此前登记为「ID 脱钩不迁」，本批连带迁移面一起落地）
+        Button('改名')
+          .fontSize(11)
+          .height(26)
+          .enabled(!this.actionBusy && this.dbOk)
+          .onClick((): void => {
+            this.openRenameDialog(clip);
+          })
         Button('分享')
           .fontSize(11)
           .height(26)
@@ -1457,6 +1505,39 @@ struct Gallery {
       .width('100%')
       .height('100%')
         .padding({ top: 4 })
+    } else if (this.sheetKind === 'rename') {
+      Column({ space: 8 }) {
+        Text(this.renameClip !== undefined ? `当前：${this.renameClip.name}` : '')
+          .fontSize(11)
+          .fontColor(PageColor.TEXT_FAINT)
+          .width('100%')
+          .maxLines(1)
+        Row({ space: 6 }) {
+          TextInput({ text: this.renameInput, placeholder: '新名字（不输扩展名则沿用原后缀）' })
+            .fontSize(12)
+            .layoutWeight(1)
+            .height(34)
+            .accessibilityText('新的文件名')
+            .onChange((v: string): void => {
+              this.renameInput = v;
+            })
+          Button('确定')
+            .fontSize(12)
+            .height(30)
+            .enabled(!this.actionBusy && this.dbOk && this.renameInput.trim() !== '')
+            .onClick((): void => {
+              this.submitRename();
+            })
+        }
+        .width('100%')
+        Text('标签、系列与音画同步记录会一起迁移；含 / 或 \ 的名字会被拒绝')
+          .fontSize(10)
+          .fontColor(PageColor.TEXT_FAINT)
+          .width('100%')
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: 4 })
     } else {
       Column({ space: 6 }) {
         Row({ space: 6 }) {
@@ -1526,6 +1607,9 @@ struct Gallery {
     if (this.sheetKind === 'menu') {
       return `操作：${this.menuClip !== undefined ? this.menuClip.name : ''}`;
     }
+    if (this.sheetKind === 'rename') {
+      return '重命名';
+    }
     return '';
   }
 
@@ -1535,6 +1619,7 @@ struct Gallery {
     this.tagDialogClip = undefined;
     this.tagInput = '';
     this.menuClip = undefined;
+    this.renameClip = undefined;
   }
 }
 

@@ -567,6 +567,42 @@ export class WotaDb {
     }
   }
 
+  /**
+   * 改名迁移（RN 批）：把三张按 ID/路径记账的表从旧键搬到新键，**单事务**完成
+   * （mediaId 是相对路径的 FNV-1a，改名即换 ID；中途失败会留下半迁移的账）。
+   * 上游没有这一步是因为 MediaStore 的 `_ID` 不随名字变——见 core/RenameSpec 头注。
+   */
+  async renameMedia(oldMediaId: number, newMediaId: number, oldUri: string, newUri: string,
+    oldRelativePath: string, newRelativePath: string): Promise<void> {
+    const stmts: Array<Array<Object>> = [
+      ['UPDATE media_tag SET mediaId = ?, path = ? WHERE path = ?',
+        [newMediaId, newRelativePath, oldRelativePath]],
+      ['UPDATE trash_item SET mediaId = ?, uri = ?, origin = ? WHERE uri = ?',
+        [newMediaId, newUri, newUri, oldUri]],
+      ['UPDATE series_part SET mediaId = ?, uri = ? WHERE uri = ?',
+        [newMediaId, newUri, oldUri]]
+    ];
+    this.store.beginTransaction();
+    try {
+      for (const item of stmts) {
+        await this.store.executeSql(item[0] as string, item[1] as Array<relationalStore.ValueType>);
+      }
+      this.store.commit();
+    } catch (e) {
+      try {
+        this.store.rollBack();
+      } catch (rb) {
+        Diag.e(TAG, `renameMedia rollback failed: ${rb}`);
+      }
+      Diag.e(TAG, `renameMedia failed ${oldUri} → ${newUri}: ${e}`);
+      throw e as Error;
+    }
+    // mediaId 换了：旧 ID 若还有别的行的引用（不该有），一并收拢由调用方 prune
+    if (oldMediaId !== newMediaId) {
+      Diag.i(TAG, `renameMedia migrated id ${oldMediaId} → ${newMediaId}`);
+    }
+  }
+
   /** 收掉成员全被删后留下的空壳系列头 */
   async pruneOrphanSeries(): Promise<void> {
     try {
