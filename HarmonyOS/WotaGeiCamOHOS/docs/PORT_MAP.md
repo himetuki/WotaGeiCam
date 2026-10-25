@@ -60,7 +60,7 @@
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
 | `WotaDb.kt` | 平台绑定（schema 纯逻辑） | `media/WotaDb.ets`：RDB（wota_media.db，version 1）四表逐字段对齐上游——`media_tag(id,mediaId,path,tag,createdAt)` + UNIQUE(mediaId,tag) + INDEX(tag)、`trash_item(uri PK,mediaId,name,deletedAt,origin)` + INDEX(mediaId)、`media_series(seriesId,startedAt,partCount)`、`series_part(seriesId,partIndex,mediaId,uri,durationMs)` + PK(seriesId,partIndex)；DAO 全 Promise、ResultSet 必 close、SQL 失败 Diag.e 后上抛。落地 2026-10-21，对齐上游 342dd99。版本不匹配按 Room fallbackToDestructiveMigration 等价实现 deleteRdbStore 重建（收藏/标签/回收站一起丢，登记）；schema 导出 JSON/Migration 未做 | ☑ 部分 |
-| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：SeriesStore 落库侧的 UI 展示开关（本侧恒折叠，无回退开关按钮）、自定义标签管理、相册 AllVideos、缩略图、外部改名（ID 脱钩，登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
+| `MediaRepo.kt`、`SeriesStore.kt`、`SeriesGroup.kt`、`MediaTag.kt` | 纯逻辑为主 | `media/MediaRepo.ets`：扫描私有 filesDir/videos/*.mp4（stat size/mtime + AVMetadataExtractor 1.5s 超时补时长/分辨率，失败归零）、WotaDb 联表标签/回收站/系列、dateAddedSec 降序；ID=相对路径 32 位 FNV-1a（0→1；碰撞概率 1 万条约 1.2%/10 万条约 69%，升级 64 位或 (mediaId,path) 二次确认，登记）；探测 1.5s 超时只放弃结果、fd/extractor 延后到 fetch settle 回收；正在录制的半成品排除在列表外且动作层拒绝；收藏/移入回收站/还原/彻底删除（unlink + .drops.json + 清账）。`media/MediaTag.ets`：TagSpace（like/trash/长度 24/保留词大小写不敏感）、MediaScope/ListMode、ClipFilter/GalleryTabs（All→Like→Trash→自定义）/clampedSelection 逐行。`media/MediaFormat.ets`：groupTimeline（今天/昨天/同年/跨年）、formatDuration、formatSize、formatSignedDuration（T23 新增：负轴带符号时长，对比页时间线左端标签消费）。落地 2026-10-21，对齐上游 342dd99。**G 批（2026-10-23）补 `media/SeriesGroup.ets`**：`groupSpans`（seriesId 归组、≥2 段才成组、partIndex 升序含脏数据排尾、首见位定序、`collapse=false` 逐字等价基线）、`galleryEntries`（代表段 = 首段）、`expandSeriesTargets`（组级动作扇出 + 按 id 去重）。留白：~~SeriesStore 落库侧的 UI 展示开关~~（GX 批「分段合并」Toggle 已落）、~~自定义标签管理~~（CT 批已落）、~~相册 AllVideos~~（**ALB 批 2026-10-25 以「导入」形态落地**：上游是浏览全机视频（需读权限），本侧零权限姿态 + 沙箱模型不管理别人的文件 → 改用系统选择器临时授权导入，见交付批节）、~~缩略图~~（MS 批已落）、~~外部改名~~（本仓改名 RN 批已落；**系统文件管理器改的名**仍会脱钩，平台事实登记）。**P3 修复（2026-10-21）**：探测缓存/在途/负缓存提模块级 + 512 上限 + 陈旧剔除；未 settle 任务上限 4（stale 剔除不释放计数，真正挂起 open/fetch 的 fd/extractor 泄漏上界=4，登记）；满载时写 3s 负缓存并在 Gallery 提示“元数据暂不可用”；DB 重试入口 retryDb；switchTab 失败回退；sidecar stat 区分 13900002 与 IO 错误；open/stat 进超时任务；帧账 cameraFrames 明确为到达上界（非精确值） | ☑ 部分 |
 | `MediaActions.kt`、`Share.kt` | 平台绑定 | 本批只落**本地**收藏/回收站/彻底删除（MediaRepo 动作，RDB 清账）；`photoAccessHelper` 相册入库、系统分享（shareData）、重命名、删除授权回路留白 | ☑ 部分 |
 | `GalleryScreen.kt` | UI | `pages/Gallery.ets`：全部/收藏/回收站三页签（含数量）、卡片列表（文件名/时长/大小/日期/收藏星标）、空态/加载态/刷新、收藏切换、移入回收站、还原、彻底删除二次确认（AlertDialog）、元信息面板；卡片点击进入播放页。Index/GlPreview 均有「媒体库」入口。落地 2026-10-21。**G 批（2026-10-23）分段折叠**：列表改吃 `SeriesGroup.galleryEntries`——同一次录制的多段折成一张卡（角标「N 段」、副行「N 段 · 总时长」），代表段 = 首段；收藏/移入回收站/还原/彻底删除经 `expandSeriesTargets` 扇出到整组（提示补「（含 N 段）」，彻底删除的确认框也写明段数）。**MS 批（2026-10-24）**：缩略图（`media/ThumbLoader.ets`：AVImageGenerator 中点帧 CLOSEST、并发限 2、ThumbLru 缓存 32 驱逐不回收交 GC；`GalleryThumb` 组件占位回退 + @Watch path 重载）、分享（`media/WotaShare.ets`：systemShare 面板 SINGLE/BATCH、UTD 经 MimeMap、沙箱路径 fileUri.getUriFromPath；**FileProvider/FLAG_GRANT_READ 不需要**——面板自带目标应用授权）、存入相册（`media/AlbumSaver.ets`：`showAssetsCreationDialog` 系统确认框，**无权限**；title 去扩展名防双后缀、fileNameExtension+photoType 按 d.ts 实名）。三动作全走 `expandSeriesTargets` 组级扇出；**零新增权限**（红线用例钉住）。**GX 批（2026-10-24）**：分段展开（组卡**长按**开「分段清单」面板——只钉 seriesId 按当前 clips 重解析、点按任一段直接开播放页，上游 SeriesSheet 对应交互）+ 折叠回退开关（「分段合并」Toggle，会话态，关 = 上游 `collapse=false` 的逐字扁平基线）。**重命名（RN 批 2026-10-25 改判：已迁）**——历史登记是「不迁」，理由是媒体 ID = 相对路径 32 位 FNV-1a（`MediaIds.ofRelativePath`）改名即换 id、标签/回收站/系列成员失联。RN 批不再等 id 架构升级，而是把改名做成**成套迁移**：磁盘文件 → `.drops.json` sidecar（`ArcDropLog.renameFor`）→ 三表单事务换键（`WotaDb.renameMedia`：media_tag/trash_item/series_part）→ 同步键随搬（`TrackSync.renameFor`），任一硬步失败即把文件改回去（不留半迁移态）。**取舍登记**：CompareHistory 按数值 ID 记账，改名后旧条目失效——沿用其既有「缺失标记」语义（用户重选右片即可），不额外整表重写。守卫从「不许有改名入口」改为「入口在册 && 迁移面在册」。留白：~~全屏手势锁定~~（幽灵留白裁决 HM7-1：上游全仓无此功能，`git grep -i "手势锁定"` 零命中，见交付批 HM7-1 节）、时间线/网格/全屏滑动（G3a/G3b 批 2026-10-24 全落，见交付批节）、~~自定义标签页~~（CT 批已落）、上游 `StorageAccess` 不移植（见该行）；外部改名（系统文件管理器改）仍会脱钩——登记平台事实 | ☑ 部分 |
 
@@ -225,6 +225,39 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 
 锚点 diff（ClipExport.kt / PlayerEngine.kt）两项均属 f941799，已按 N/A 登记（无 pendingUri
 救援模型 / 无阻塞帧率探测）。
+
+## 交付批（ALB：系统相册导入，2026-10-25）
+
+**改判说明**：此前的登记把「相册 AllVideos」与 StorageAccess 打包成「不迁」。复核后：上游
+`MediaScope.AllVideos` 是**浏览全机视频**的 scope（需要 `READ_MEDIA_VIDEO` 一类读权限，并且
+对别人的文件做收藏/回收站/删除）。本侧一贯姿态是**零媒体权限**（MS 批红线用例钉住），沙箱
+模型下管理别人的文件也必须逐次弹系统授权框——那正是上游 StorageAccess 那条线要规避的东西。
+故取**等价且合规的形态**落地：系统相册选择器（用户显式选择 = 临时授权读，**零权限声明**）
+→ 把选中视频**拷进应用库**；导入后即为本应用正常成片，改名/标签/系列/分享/同步等既有能力
+自动可用。
+
+- **`core/ImportNaming.ets`**（纯逻辑零平台 import）：`fileNameFromUri`（取 URI 尾段、去
+  查询串与 fragment、百分号解码，解码失败原样）；`preferredName`（走 `RenameSpec.sanitize`
+  同一道闸 + 缺扩展名补 `.mp4`）；`stampName`（兜底名 `IMP_yyyyMMdd_HHmmss.mp4`）；
+  `withOrdinal`（`a.mp4` → `a (2).mp4`，基名与扩展名分别保留）；`uniqueName`（库内撞名递增，
+  **大小写不敏感**——部分文件系统 `A.mp4`/`a.mp4` 会互相覆盖；用满 `MAX_TRIES=200` 返回空串，
+  **绝不硬写覆盖**）。
+- **`media/AlbumImport.ets`**（平台件）：`PhotoViewPicker.select`（`VIDEO_TYPE` 过滤、
+  单次上限 20）→ 逐个 `fileIo.openSync(uri, READ_ONLY)` 流式拷贝进 `filesDir/videos`
+  （选择器 URI 临时可读；读取路径按本机 d.ts 实证——`PhotoAsset.open` 自 API 11 起
+  `@deprecated` 且 `@useinstead ohos.file.fs/fileIo#open`）→ 成功/失败/取消三态回报。
+  拷贝失败**必须清残留**（0 字节幽灵条目防线）。
+- **UI**：媒体库顶栏工具胶囊组加「导入」（`enabled` 受 loading/busy/dbOk 门控），完成后刷新
+  并提示「已导入 N 个视频，M 个失败（原因）」。
+- **权限姿态（红线）**：`module.json5` **不新增任何媒体读权限**——守卫直接对权限清单断言
+  `READ_IMAGEVIDEO`/`WRITE_IMAGEVIDEO`/`READ_MEDIA` 零命中。
+- **测试**：`album-import.test.ets` +8（URI 尾段与解码五态/目标名合法化与补后缀/兜底名格式/
+  撞名递增三态/去重（含大小写不敏感与空名）/上限耗尽不覆盖/权限姿态与平台读法守卫/页面
+  入口守卫）。共 +8（744 → 752）。
+- **运行时走查待办**：真机/模拟器上拉起相册选择器、选多个视频、核对库内新条目可播放、
+  撞名递增与失败清理。
+- **回归**：pure-test 72 files / 752 tests 全绿；clean `assembleHap`（release）
+  BUILD SUCCESSFUL。
 
 ## 交付批（RN：媒体改名 + 成套迁移，2026-10-25）
 

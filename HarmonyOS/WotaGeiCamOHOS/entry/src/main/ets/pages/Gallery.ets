@@ -21,6 +21,7 @@ import {
 } from '../media/GalleryForms';
 import { ParamsStore } from '../ui/ParamsStore';
 import { RenameSpec } from '../core/RenameSpec';
+import { AlbumImport, ImportResult } from '../media/AlbumImport';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { WindowChrome } from '../ui/WindowChrome';
 import { HudColor, HudType, PageColor } from '../ui/HudTokens';
@@ -580,6 +581,41 @@ struct Gallery {
   private openCompareFromFs(clip: VideoClip): void {
     const params: FsCompareParams = { leftId: clip.id, leftPath: clip.path };
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Compare', params: params });
+  }
+
+  /**
+   * ALB 批：从系统相册导入（上游 `MediaScope.AllVideos` 的等价且合规形态——零媒体权限 +
+   * 沙箱模型下不管理别人的文件，改用选择器把选中视频拷进库）。
+   */
+  private async importFromAlbum(): Promise<void> {
+    const ctx: common.Context | undefined = this.ctx;
+    const repo: MediaRepo | undefined = this.repo;
+    if (ctx === undefined) {
+      this.message = '无上下文，无法导入';
+      return;
+    }
+    if (this.actionBusy) {
+      return;
+    }
+    this.actionBusy = true;
+    try {
+      const taken: Array<string> = this.clips.map((c: VideoClip): string => c.name);
+      const r: ImportResult = await AlbumImport.pickAndImport(ctx, taken);
+      if (r.cancelled) {
+        this.message = '';
+        return;
+      }
+      const parts: Array<string> = [];
+      if (r.imported > 0) {
+        parts.push(`已导入 ${r.imported} 个视频`);
+      }
+      if (r.failed > 0) {
+        parts.push(`${r.failed} 个失败${r.detail === '' ? '' : `（${r.detail}）`}`);
+      }
+      await this.refreshAll(parts.length === 0 ? '没有可导入的视频' : parts.join('，'));
+    } finally {
+      this.actionBusy = false;
+    }
   }
 
   /** G3a：网格列数档位循环（2→3→4→5→2，上游顶栏 onColumns 同一持久化键） */
@@ -1152,6 +1188,20 @@ struct Gallery {
               this.cycleColumns();
             })
         }
+        // ALB 批：系统相册导入（选择器临时授权、零权限；拷进库后走既有全部能力）
+        Text('导入')
+          .fontSize(12)
+          .fontColor(Color.White)
+          .height(30)
+          .borderRadius(15)
+          .backgroundColor(PageColor.CHIP)
+          .padding({ left: 14, right: 14 })
+          .enabled(!this.loading && !this.actionBusy && this.dbOk)
+          .opacity(this.loading || this.actionBusy ? 0.5 : 1)
+          .accessibilityText('从系统相册导入视频')
+          .onClick((): void => {
+            this.importFromAlbum();
+          })
         Text('刷新')
           .fontSize(12)
           .fontColor(Color.White)
