@@ -210,6 +210,22 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 - **回归**：pure-test 62 files / 679 tests 全绿；`assembleHap`（release）
   BUILD SUCCESSFUL。
 
+## 上游基线推进（2026-10-25，b462fad → 4998ce4）
+
+`UPSTREAM_BASE` 推进到 4998ce4（= 含本轮全部上游提交的 main）。区间内上游提交逐条评审：
+
+| 上游提交 | 内容 | 鸿蒙处置 |
+|---|---|---|
+| `5bc8b2d` | RGB 曲线拖动不跟手（手势期禁 morph 补间） | CURVE 批「morph 直切」简化天然覆盖（无 morph 即无不跟手），见 CURVE 批简化偏离② |
+| `eb956f5` | 曲线弹窗右缘拖拽等比缩放 | CURVE 批整体移植（含该修订） |
+| `f941799` | 高置信风险扫描修复七项 | RISK 批：3 项落地（IP 门槛/SHA 短路/clearFor）、4 项 N/A 登记 |
+| `0e73ecb` / `af38019` | Android Baseline Profile 模块与产物 | Android-only（BP 工作流域），鸿蒙无对应面 |
+| `376ffbb` / `b8f81c5` | 录制泵空闲退避 / StrictMode 收集 | Android 平台面（OHOS 无 StrictMode、泵模型不同），N/A |
+| `322b080` / `518bc9c` 等 | 本仓自身提交（release 说明/NAPI 修复） | 已在本仓 |
+
+锚点 diff（ClipExport.kt / PlayerEngine.kt）两项均属 f941799，已按 N/A 登记（无 pendingUri
+救援模型 / 无阻塞帧率探测）。
+
 ## 交付批（PTS-GRID：编码器 PTS 网格纯逻辑，2026-10-25）
 
 §recorder 行留白「PTS 网格化」的**纯逻辑面**收口（platform 面按本仓纪律留真机批）。
