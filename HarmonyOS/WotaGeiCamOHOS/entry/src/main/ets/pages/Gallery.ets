@@ -22,7 +22,7 @@ import {
 import { ParamsStore } from '../ui/ParamsStore';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { WindowChrome } from '../ui/WindowChrome';
-import { HudColor, PageColor } from '../ui/HudTokens';
+import { HudColor, HudType, PageColor } from '../ui/HudTokens';
 
 function pad2(v: number): string {
   return v < 10 ? `0${v}` : `${v}`;
@@ -1039,9 +1039,18 @@ struct Gallery {
 
   build() {
     Column({ space: 8 }) {
-      Row({ space: 10 }) {
-        Button('返回')
-          .fontSize(12)
+      // VIS 批：顶栏工具胶囊化 + × 圆钮（对齐安卓媒体库顶栏的工具组信息架构；
+      // 承载语言为鸿蒙胶囊/令牌）
+      Row({ space: 8 }) {
+        Text('×')
+          .fontSize(18)
+          .fontColor(Color.White)
+          .width(36)
+          .height(36)
+          .borderRadius(18)
+          .backgroundColor(PageColor.CHIP)
+          .textAlign(TextAlign.Center)
+          .accessibilityText('关闭媒体库')
           .onClick((): void => {
             this.getUIContext().getRouter().back();
           })
@@ -1050,37 +1059,60 @@ struct Gallery {
           .fontColor(Color.White)
           .layoutWeight(1)
         if (this.listMode === LIST_FULLSCREEN) {
-          Button('退出全屏')
-            .fontSize(11)
-            .height(26)
+          Text('退出全屏')
+            .fontSize(12)
+            .fontColor(Color.White)
+            .height(30)
+            .borderRadius(15)
+            .backgroundColor(PageColor.CHIP)
+            .padding({ left: 14, right: 14 })
             .onClick((): void => {
               this.switchListMode(LIST_GRID);
             })
         } else {
-          Button(this.listMode === LIST_TIMELINE ? '网格' : '时间线')
-            .fontSize(11)
-            .height(26)
+          Text(this.listMode === LIST_TIMELINE ? '网格' : '时间线')
+            .fontSize(12)
+            .fontColor(Color.White)
+            .height(30)
+            .borderRadius(15)
+            .backgroundColor(PageColor.CHIP)
+            .padding({ left: 14, right: 14 })
             .onClick((): void => {
               this.switchListMode(this.listMode === LIST_TIMELINE ? LIST_GRID : LIST_TIMELINE);
             })
-          Button('全屏')
-            .fontSize(11)
-            .height(26)
+          Text('全屏')
+            .fontSize(12)
+            .fontColor(Color.White)
+            .height(30)
+            .borderRadius(15)
+            .backgroundColor(PageColor.CHIP)
+            .padding({ left: 14, right: 14 })
             .onClick((): void => {
               this.switchListMode(LIST_FULLSCREEN);
             })
         }
         if (this.listMode === LIST_GRID) {
-          Button(`${this.gridColumns}列`)
-            .fontSize(11)
-            .height(26)
+          Text(`${this.gridColumns}列`)
+            .fontSize(12)
+            .fontColor(Color.White)
+            .height(30)
+            .borderRadius(15)
+            .backgroundColor(PageColor.CHIP)
+            .padding({ left: 14, right: 14 })
+            .accessibilityText(`网格列数 ${this.gridColumns}，点按切换`)
             .onClick((): void => {
               this.cycleColumns();
             })
         }
-        Button('刷新')
+        Text('刷新')
           .fontSize(12)
+          .fontColor(Color.White)
+          .height(30)
+          .borderRadius(15)
+          .backgroundColor(PageColor.CHIP)
+          .padding({ left: 14, right: 14 })
           .enabled(!this.loading)
+          .opacity(this.loading ? 0.5 : 1)
           .onClick((): void => {
             this.refreshAll();
           })
@@ -1109,18 +1141,30 @@ struct Gallery {
       .width('100%')
       .padding({ left: 12, right: 12, top: 4 })
 
-      Row({ space: 6 }) {
+      // VIS 批：页签改鸿蒙 Tabs 形态——选中强调字 + 下划线指示条（对齐安卓媒体库页签的
+      // 信息架构；承载语言为鸿蒙 Tabs 视觉，强调色用系统蓝）
+      Row({ space: 0 }) {
         ForEach(this.tabs, (tab: GalleryTab, index: number): void => {
-          Button(this.tabLabel(tab, index))
-            .fontSize(12)
-            .backgroundColor(this.selectedTab === index ? '#2E7D32' : PageColor.CHIP)
-            .onClick((): void => {
-              this.switchTab(index);
-            })
+          Column({ space: 6 }) {
+            Text(this.tabLabel(tab, index))
+              .fontSize(HudType.VALUE)
+              .fontColor(this.selectedTab === index ? PageColor.ACCENT_BLUE : PageColor.TEXT_FAINT)
+              .maxLines(1)
+            Row()
+              .width(40)
+              .height(2)
+              .borderRadius(1)
+              .backgroundColor(this.selectedTab === index ? PageColor.ACCENT_BLUE : Color.Transparent)
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Center)
+          .onClick((): void => {
+            this.switchTab(index);
+          })
         }, (tab: GalleryTab): string => tab.label)
       }
       .width('100%')
-      .padding({ left: 12, right: 12 })
+      .padding({ left: 12, right: 12, top: 4 })
 
       if (this.message !== '') {
         Row({ space: 8 }) {

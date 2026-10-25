@@ -76,6 +76,8 @@ export class PageColor {
   static readonly OVERLAY_SOFT: string = '#99000000';
   /** 对比页面板底 */
   static readonly PANEL_COMPARE: string = '#F0202020';
+  /** 系统强调蓝（HarmonyOS 品牌蓝；页签选中/指示条等选中语义。VIS 批） */
+  static readonly ACCENT_BLUE: string = '#FF0A59F7';
 }
 
 /** 字阶（fp） */

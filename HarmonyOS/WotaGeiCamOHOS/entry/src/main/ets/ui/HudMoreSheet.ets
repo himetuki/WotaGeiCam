@@ -79,6 +79,20 @@ export struct HudMoreSheet {
                 this.onEditCurve();
               })
           )
+        // VIS 批：曲线编辑可见入口（点按直开，与长按等价——对齐安卓取景页独立
+        // 「RGB 曲线」按钮的可发现性）
+        Text('编辑')
+          .fontSize(HudType.LABEL)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .height(30)
+          .borderRadius(15)
+          .backgroundColor(HudColor.PILL_BG)
+          .border({ width: 1, color: HudColor.DIVIDER })
+          .padding({ left: 10, right: 10 })
+          .accessibilityText('编辑 RGB 曲线')
+          .onClick((): void => {
+            this.onEditCurve();
+          })
         Blank()
       }
       .width('100%')

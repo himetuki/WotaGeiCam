@@ -2065,21 +2065,39 @@ struct CameraPage {
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
 
+          // VIS 批：右上入口改圆形描边单字钮（对齐安卓取景页右上双圆钮的信息架构；
+          // 承载语言为鸿蒙描边圆钮 + 令牌色板）
           Column({ space: HudSpace.S }) {
-            HudEntryButton({
-              label: '设置',
-              entryEnabled: !this.recording && !this.stopPending,
-              onTap: (): void => {
-                this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
-              }
-            })
-            HudEntryButton({
-              label: '媒体库',
-              entryEnabled: !this.recording && !this.stopPending,
-              onTap: (): void => {
-                this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
-              }
-            })
+            Text('设')
+              .fontSize(HudType.VALUE)
+              .fontColor(!this.recording && !this.stopPending ? HudColor.TEXT_PRIMARY : HudColor.TEXT_DISABLED)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('设置')
+              .onClick((): void => {
+                if (!this.recording && !this.stopPending) {
+                  this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
+                }
+              })
+            Text('库')
+              .fontSize(HudType.VALUE)
+              .fontColor(!this.recording && !this.stopPending ? HudColor.TEXT_PRIMARY : HudColor.TEXT_DISABLED)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('媒体库')
+              .onClick((): void => {
+                if (!this.recording && !this.stopPending) {
+                  this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
+                }
+              })
           }
           .width(76)
         }
