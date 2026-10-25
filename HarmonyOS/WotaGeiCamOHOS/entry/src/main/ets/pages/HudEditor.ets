@@ -14,6 +14,7 @@ import { common } from '@kit.AbilityKit';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudItem, HudItems } from '../core/Constants';
 import { HudEntry, HudLayoutTable, HudZone } from '../core/HudLayout';
+import { HudDragOrder } from '../core/HudDragOrder';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { WindowChrome } from '../ui/WindowChrome';
 
@@ -23,6 +24,10 @@ struct HudEditor {
   @State settings: CameraSettings = new CameraSettings();
   /** READOUT 容器的完整顺序（含被隐藏的条目；隐藏只影响渲染，不改变顺序） */
   @State order: Array<HudEntry> = [];
+  /** HDG 批：拖拽状态（-1 = 未拖）。按下记起下标，移动时按位移算目标下标，释放落位 */
+  @State dragFrom: number = -1;
+  @State dragTo: number = -1;
+  private rowHeightVp: number = 0;
   @State loading: boolean = true;
   @State message: string = '';
   private saving: boolean = false;
@@ -119,6 +124,45 @@ struct HudEditor {
     this.writeOrder(next);
   }
 
+  /**
+   * HDG 批：拖拽落位（长按拾起 → 上下拖 → 释放）。
+   * 落点算式走 `HudDragOrder`（纯逻辑，单一真源）；顺序改写仍走 `writeOrder`
+   * （`HudLayoutTable.withZoneOrder` 同容器路径），本页不手写任何位运算/串拼接。
+   */
+  private beginRowDrag(index: number): void {
+    this.dragFrom = index;
+    this.dragTo = index;
+  }
+
+  private updateRowDrag(offsetY: number): void {
+    if (this.dragFrom < 0) {
+      return;
+    }
+    this.dragTo = HudDragOrder.targetIndex(this.dragFrom, offsetY,
+      this.rowHeightVp > 0 ? this.rowHeightVp : HudTouch.BUTTON_HEIGHT + HudSpace.S,
+      this.order.length);
+  }
+
+  private finishRowDrag(): void {
+    const from: number = this.dragFrom;
+    const to: number = this.dragTo;
+    this.dragFrom = -1;
+    this.dragTo = -1;
+    if (!HudDragOrder.changed(from, to)) {
+      return; // 没换位：不写盘（免无谓保存与 IO）
+    }
+    this.writeOrder(HudDragOrder.moveTo(this.order, from, to));
+    this.message = `已移到第 ${to + 1} 位`;
+  }
+
+  /** 行高实测（onAreaChange 落值；量不到时落价用兜底行高） */
+  private onRowArea(area: Area): void {
+    const h: number = Number(area.height);
+    if (Number.isFinite(h) && h > 0) {
+      this.rowHeightVp = h;
+    }
+  }
+
   private onToggleVisible(item: HudItem): void {
     this.settings.hudItems = HudItems.toggle(this.settings.hudItems, item);
     this.persist();
@@ -180,7 +224,7 @@ struct HudEditor {
         .justifyContent(FlexAlign.Center)
       } else {
         Column({ space: HudSpace.S }) {
-          Text('顺序自上而下对应取景页读数条从左到右、从上到下；关掉显示的读数保留位置，重新打开回到原位。')
+          Text('顺序自上而下对应取景页读数条从左到右、从上到下；长按 ≡ 拖动或点 ↑/↓ 调整。关掉显示的读数保留位置，重新打开回到原位。')
             .fontSize(HudType.LABEL)
             .fontColor(HudColor.TEXT_TERTIARY)
             .width('100%')
@@ -188,6 +232,19 @@ struct HudEditor {
             ForEach(this.order, (entry: HudEntry, index: number): void => {
               ListItem() {
                 Row({ space: HudSpace.S }) {
+                  // HDG 批：长按拾起拖拽把手（≡）——与 ↑/↓ 按钮并存，两种操作都可
+                  Text('≡')
+                    .fontSize(HudType.VALUE)
+                    .fontColor(this.dragFrom === index ? HudColor.ACCENT : HudColor.TEXT_TERTIARY)
+                    .width(24)
+                    .textAlign(TextAlign.Center)
+                    .accessibilityText('长按拖动调整顺序')
+                    .gesture(
+                      LongPressGesture({ repeat: false, duration: 400 })
+                        .onAction((): void => {
+                          this.beginRowDrag(index);
+                        })
+                    )
                   Text(this.rowLabel(entry))
                     .fontSize(HudType.VALUE)
                     .fontColor(HudColor.TEXT_PRIMARY)
@@ -225,6 +282,24 @@ struct HudEditor {
                 }
                 .width('100%')
                 .padding({ left: HudSpace.L, right: HudSpace.L })
+                .onAreaChange((_o: Area, area: Area): void => {
+                  this.onRowArea(area);
+                })
+                // 拖拽跟手：仅当本行是拾起行时吃纵向拖动（其余行不拦触摸）
+                .gesture(
+                  PanGesture({ fingers: 1, direction: PanDirection.Vertical, distance: 1 })
+                    .onActionUpdate((e: GestureEvent): void => {
+                      if (this.dragFrom === index) {
+                        this.updateRowDrag(e.offsetY);
+                      }
+                    })
+                    .onActionEnd((): void => {
+                      if (this.dragFrom === index) {
+                        this.finishRowDrag();
+                      }
+                    })
+                )
+                .opacity(this.dragFrom >= 0 && this.dragFrom !== index ? 0.6 : 1)
               }
             }, (entry: HudEntry): string => `${entry.id}_${this.order.indexOf(entry)}`)
           }
