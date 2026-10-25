@@ -104,6 +104,11 @@ fun CurvePopup(
     var points by remember(channel) { mutableStateOf(CurveEdit.pointsOf(stack.curveOf(channel))) }
     var selected by remember(channel) { mutableStateOf(-1) }
     val livePoints = rememberUpdatedState(points)
+    // 画布手势进行中：拖动帧必须直贴（snap），morph 补间只留给换通道/重置的整条跳变。
+    // 快拖的单帧偏移会超过 morph 的 0.08「跳变」判据，而每帧新 target 都把动画重启回
+    // 起跳点——曲线被钉在起跳位置追不上手指（节点画的是本地 points 即时跟手，两者分离
+    // ＝用户报的「曲线变化与节点呈现不跟手」，2026-10-25）
+    var canvasGesture by remember { mutableStateOf(false) }
 
     // 以总线现值做底、只替换本通道：其它通道在拖动期间可能被改过，不能用手里的旧 stack 合
     fun commit(next: List<ColorCurve.Point>, persist: Boolean) {
@@ -209,6 +214,7 @@ fun CurvePopup(
                                 selected = selected,
                                 color = channelColor(channel),
                                 enabled = gpuMode,
+                                animateJump = !canvasGesture,
                                 modifier = Modifier.matchParentSize()
                             )
                             Box(
@@ -245,6 +251,7 @@ fun CurvePopup(
                                         }
                                         // 已到控制点上限且没点到现有点：本次手势什么都不做
                                         if (index >= 0) {
+                                            canvasGesture = true
                                             val deletable = index > 0 && index < working.size - 1
                                             val secondTap = selected == index && deletable
                                             selected = index
@@ -276,6 +283,7 @@ fun CurvePopup(
                                             } else {
                                                 commit(working, persist = true)
                                             }
+                                            canvasGesture = false
                                         }
                                     }
                                 }
@@ -572,6 +580,7 @@ private fun CurveCanvas(
     selected: Int,
     color: Color,
     enabled: Boolean,
+    animateJump: Boolean,
     modifier: Modifier = Modifier
 ) {
     val target = remember(points) { ColorCurve(points).table(64) }
@@ -583,6 +592,13 @@ private fun CurveCanvas(
     LaunchedEffect(target) {
         val from = shown.value
         if (from === target) return@LaunchedEffect
+        // 拖动手势期间（animateJump=false）无条件直贴：快拖的单帧偏移会超 0.08 判据，
+        // morph 又被每帧新 target 反复重启回 0——曲线钉在起跳点追不上手指（2026-10-25
+        // 「不跟手」的根因）。morph 只服务换通道/重置的整条跳变（animateJump=true）
+        if (!animateJump) {
+            shown.value = target
+            return@LaunchedEffect
+        }
         val jump = from.size == target.size &&
             (0 until target.size).any { kotlin.math.abs(from[it] - target[it]) > 0.08f }
         if (!jump) { shown.value = target; return@LaunchedEffect }
