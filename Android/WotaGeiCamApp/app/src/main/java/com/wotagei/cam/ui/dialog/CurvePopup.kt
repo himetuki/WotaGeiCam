@@ -17,9 +17,13 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,10 +46,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
 import com.wotagei.cam.core.ColorCurve
@@ -73,6 +81,8 @@ import kotlin.math.sin
  * - 弹窗本体是一枚**面板卡**（surface 底 + 描边 + 圆角），左缘在安全区外再加 [PanelBreath]
  *   呼吸——不再贴死屏缘（同日投诉"弹窗不够完整"的另一半：裸框贴边 + Dock 滑出残段叠压）。
  * - 删控制点不再占按钮位：**选中后再点一次同一点＝删点**（端点不可删），点错用重置兜底。
+ * - 面板**右缘可拖拽等比缩放**（2026-10-25）：默认最小尺寸只增不减，节点/线宽随画布等比
+ *   放大（方便手指大的人调节）；扇面「重置」除回恒等外同时把尺寸复位到默认最小。
  * - 边拖边写参数总线、抬手落盘的口径不变；CPU 渲染档整块置灰不可拖（提示改由打开入口的
  *   提示条承担，弹窗里没有副标题位）。
  * - 关闭：点弹窗外任意处 / BACK。不加暗化 scrim——预览要保持原亮度可看。
@@ -109,6 +119,10 @@ fun CurvePopup(
     // 起跳点——曲线被钉在起跳位置追不上手指（节点画的是本地 points 即时跟手，两者分离
     // ＝用户报的「曲线变化与节点呈现不跟手」，2026-10-25）
     var canvasGesture by remember { mutableStateOf(false) }
+    // 面板等比缩放（右缘拖拽，2026-10-25）：1f = 默认最小尺寸（原设计档），只许放大不许
+    // 缩小；扇面「重置」同时复位到 1f。会话级不落盘——「默认最小值」语义即每次进入回到最小。
+    var panelScale by remember { mutableStateOf(1f) }
+    var panelPx by remember { mutableStateOf(IntSize.Zero) }
 
     // 以总线现值做底、只替换本通道：其它通道在拖动期间可能被改过，不能用手里的旧 stack 合
     fun commit(next: List<ColorCurve.Point>, persist: Boolean) {
@@ -165,15 +179,15 @@ fun CurvePopup(
             // 贴边避让交给系统（safeDrawingPadding，不按方向写死），弹窗本体再贴一枚设计留白
             Box(Modifier.matchParentSize().padding(HudEdgePad)) {
                 BoxWithConstraints(Modifier.align(Alignment.CenterStart).padding(start = PanelBreath.dp)) {
-                    // 曲线框设计档 200dp；安全区给不出就收进「边长−两侧留白」，下限 120dp 保最差档仍能拖点
-                    val side = maxOf(
-                        MinCurveSide.dp,
-                        minOf(
-                            CurveSide.dp,
-                            maxWidth - PanelBreath.dp - PopupMargin.dp * 2,
-                            maxHeight - PopupMargin.dp * 2
-                        )
-                    )
+                    // 曲线框设计档 200dp 为**默认最小值**（2026-10-25：右缘拖拽等比放大，方便
+                    // 手指大的人调节；扇面重置钮同时把 panelScale 复位到 1f）。放大上限 =
+                    // 弹窗可用区（宽向扣扇钮槽/内距/呼吸，高向扣内距/呼吸）。
+                    val maxSide = minOf(
+                        maxWidth - CENTER_SIZE.dp - FanGap.dp - PanelPad.dp * 2 - PopupMargin.dp,
+                        maxHeight - PanelPad.dp * 2 - PopupMargin.dp
+                    ).coerceAtLeast(MinCurveSide.dp)
+                    val baseSide = maxOf(MinCurveSide.dp, minOf(CurveSide.dp, maxSide))
+                    val side = (baseSide * panelScale).coerceAtMost(maxSide)
                     // 面板卡 = [扇钮左槽 | 曲线框]：通道钮有了自己的格子，闭合态与曲线绘图区零重叠
                     // （用户 2026-10-04 投诉"通道切换按钮与曲线框重叠"的落点）；面板底/描边让弹窗读起来
                     // 是一枚完整的浮层而不是贴屏的裸框，屏缘再留 PanelBreath 呼吸。
@@ -182,6 +196,7 @@ fun CurvePopup(
                     // （真机复验踩实过两回：Row 版 + 回滚版）
                     Box(
                         Modifier
+                            .onSizeChanged { panelPx = it }
                             .clip(RoundedCornerShape(WotaShape.menu))
                             .background(WotaColor.surface.copy(alpha = 0.97f))
                             .border(1.dp, WotaColor.acrylicBorder, RoundedCornerShape(WotaShape.menu))
@@ -215,6 +230,7 @@ fun CurvePopup(
                                 color = channelColor(channel),
                                 enabled = gpuMode,
                                 animateJump = !canvasGesture,
+                                scale = panelScale,
                                 modifier = Modifier.matchParentSize()
                             )
                             Box(
@@ -310,10 +326,50 @@ fun CurvePopup(
                                 },
                                 onReset = {
                                     resetAll()
+                                    panelScale = 1f
                                     fanOpen = false
                                 }
                             )
                         }
+                    }
+                    // 右缘等比缩放把手（2026-10-25）：面板**外缘**的命中条（不占画布触区；
+                    // 面板 Box 有 clip，clip 区外的子级收不到触点，所以必须是面板的兄弟），
+                    // 横向拖拽 1:1 换算 panelScale 增量；下限 1f = 默认最小尺寸，上限 = 可用区。
+                    // 无 a11y 等价操作——画布拖点本身亦无（与既有口径一致）
+                    val handleHeight = with(LocalDensity.current) { panelPx.height.toDp() }
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            .offset { IntOffset(panelPx.width, 0) }
+                            .height(handleHeight)
+                            .width(ResizeHit.dp)
+                            .pointerInput(baseSide, maxSide) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    down.consume()
+                                    val startScale = panelScale
+                                    val startX = down.position.x
+                                    val maxScale = if (baseSide > 0.dp) maxSide.value / baseSide.value else 1f
+                                    while (true) {
+                                        val change = awaitPointerEvent()
+                                            .changes.firstOrNull { it.id == down.id } ?: break
+                                        panelScale = (startScale + (change.position.x - startX) / baseSide.toPx())
+                                            .coerceIn(1f, maxScale)
+                                        change.consume()
+                                        if (!change.pressed) break
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.CenterEnd
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxHeight()
+                                .padding(vertical = 24.dp)
+                                .width(3.dp)
+                                .clip(CircleShape)
+                                .background(WotaColor.acrylicBorder)
+                        )
                     }
                 }
             }
@@ -337,9 +393,12 @@ private const val FAN_RADIUS = 64f
 
 /** 中心钮圆心到曲线框左缘的距离常量已废弃：扇钮改住面板左槽（2026-10-04 不重叠改版） */
 
-/** 曲线框设计边长与下限 */
+/** 曲线框设计边长与下限；200dp 同时是右缘缩放的**默认最小值** */
 private const val CurveSide = 200
 private const val MinCurveSide = 120
+
+/** 右缘缩放把手的命中条宽（dp），贴面板右缘外侧 */
+private const val ResizeHit = 22
 
 /** 面板卡内边距（包住左槽与曲线框） */
 private const val PanelPad = 10
@@ -581,6 +640,7 @@ private fun CurveCanvas(
     color: Color,
     enabled: Boolean,
     animateJump: Boolean,
+    scale: Float,
     modifier: Modifier = Modifier
 ) {
     val target = remember(points) { ColorCurve(points).table(64) }
@@ -618,9 +678,11 @@ private fun CurveCanvas(
     Canvas(modifier) {
         val w = size.width
         val h = size.height
-        // 线宽与点半径一律走 dp：DrawScope 自带 Density，写裸数字会在 2x 屏上糊成看不见的点
-        val dot = 6.5.dp.toPx()
-        val dotSel = 9.dp.toPx()
+        // 线宽与点半径一律走 dp：DrawScope 自带 Density，写裸数字会在 2x 屏上糊成看不见的点。
+        // 交互内容（线/节点）随面板等比缩放同步放大（放大是为手指大的人服务的，点不放大就
+        // 失去意义）；网格与 y=x 基准是背景家具，不缩放
+        val dot = 6.5.dp.toPx() * scale
+        val dotSel = 9.dp.toPx() * scale
         drawRect(WotaColor.bg)
         val grid = WotaColor.acrylicBorder.copy(alpha = 0.15f * dim)
         for (i in 1..2) {
@@ -636,7 +698,7 @@ private fun CurveCanvas(
             val y = h * (1f - sample[i])
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
-        drawPath(path, strokeColor, style = Stroke(width = 2.dp.toPx()))
+        drawPath(path, strokeColor, style = Stroke(width = 2.dp.toPx() * scale))
         points.forEachIndexed { i, p ->
             val c = Offset(w * p.x, h * (1f - p.y))
             val r = if (i == selected) dotSel else dot
