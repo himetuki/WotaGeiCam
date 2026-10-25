@@ -48,6 +48,8 @@ const KEY_TEXT_SCALE_CAMERA: string = 'text_scale_camera';
 const KEY_DIAG_ENABLED: string = 'diag_enabled';
 /** 诊断详细档（上游 WotaSettings.KEY_DIAG_VERBOSE，逐字一致） */
 const KEY_DIAG_VERBOSE: string = 'diag_verbose';
+/** RGB 曲线栈持久串（上游 WotaSettings.KEY_CURVE_STACK，逐字一致；CURVE 批） */
+const KEY_CURVE_STACK: string = 'curve_stack';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -94,6 +96,8 @@ export class CameraSettings {
   diagEnabled: boolean = false;
   /** 诊断详细档（上游 diag_verbose；默认关） */
   diagVerbose: boolean = false;
+  /** RGB 曲线栈持久串（CurveStack.encode 格式 `x:y,…;×4`；空串 = 恒等。CURVE 批，上游 curve_stack） */
+  curveStackRaw: string = '';
 }
 
 function asInt(value: number, fallback: number): number {
@@ -177,6 +181,8 @@ export class SettingsStore {
       s.diagEnabled = typeof deRaw === 'boolean' ? deRaw as boolean : s.diagEnabled;
       const dvRaw: preferences.ValueType = await store.get(KEY_DIAG_VERBOSE, s.diagVerbose);
       s.diagVerbose = typeof dvRaw === 'boolean' ? dvRaw as boolean : s.diagVerbose;
+      const csRaw: preferences.ValueType = await store.get(KEY_CURVE_STACK, s.curveStackRaw);
+      s.curveStackRaw = typeof csRaw === 'string' ? csRaw as string : s.curveStackRaw;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -224,6 +230,7 @@ export class SettingsStore {
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);
       await store.put(KEY_TEXT_SCALE_CAMERA, s.textScaleCameraPct);
+      await store.put(KEY_CURVE_STACK, s.curveStackRaw);
       await store.put(KEY_DIAG_ENABLED, s.diagEnabled);
       await store.put(KEY_DIAG_VERBOSE, s.diagVerbose);
       await store.flush();

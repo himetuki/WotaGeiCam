@@ -20,6 +20,8 @@ export struct HudMoreSheet {
   @Prop gridOn: boolean = true;
   onToggleFlash: () => void = (): void => {};
   onCycleEffect: () => void = (): void => {};
+  /** CURVE：长按效果钮打开 RGB 曲线编辑弹窗（上游 onCurveClick 同位） */
+  onEditCurve: () => void = (): void => {};
   onCycleArc: () => void = (): void => {};
   onToggleGrid: () => void = (): void => {};
   onOpenBt: () => void = (): void => {};
@@ -67,9 +69,16 @@ export struct HudMoreSheet {
           .backgroundColor(this.effectLabel !== '直通' ? HudColor.PILL_BG_ACTIVE : HudColor.PILL_BG)
           .padding({ left: 14, right: 14 })
           .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
+          .accessibilityText(`效果：${this.effectLabel}，点按切换，长按编辑 RGB 曲线`)
           .onClick((): void => {
             this.onCycleEffect();
           })
+          .gesture(
+            LongPressGesture({ repeat: false, duration: 500 })
+              .onAction((): void => {
+                this.onEditCurve();
+              })
+          )
         Blank()
       }
       .width('100%')

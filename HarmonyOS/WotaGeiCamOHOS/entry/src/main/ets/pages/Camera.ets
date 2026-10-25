@@ -86,6 +86,7 @@ import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType, PageColor } from '../ui/HudTokens';
 import { HudEntryButton, HudPill } from '../ui/HudPill';
 import { HudMoreSheet } from '../ui/HudMoreSheet';
+import { CurvePopup } from '../ui/CurvePopup';
 import { SafeInsets, WindowChrome } from '../ui/WindowChrome';
 import { evText, shutterText, wbShort } from '../ui/ParamFormat';
 import { PillRect } from '../ui/PillPopup';
@@ -163,6 +164,11 @@ struct CameraPage {
   @State lensLabel: string = '—';
   @State sizeLabel: string = '—';
   @State effectLabel: string = '直通';
+  /** RGB 曲线栈（CURVE 批；编辑弹窗与 GL LUT 上传的数据源） */
+  @State curveStack: CurveStack = CurveStack.IDENTITY;
+  @State curvePopupVisible: boolean = false;
+  /** 曲线编辑入口一次性提示旗（会话级） */
+  private curveHintShown: boolean = false;
   @State gridOn: boolean = true;
   /** 取景参考线位掩码（设置页多选；`gridOn` 额外把三分法网格并进来） */
   @State refMask: number = 0;
@@ -386,6 +392,7 @@ struct CameraPage {
       this.syncLabels();
       this.refMask = s.refLines;
       this.hudItemsMask = s.hudItems;
+      this.curveStack = CurveStack.decode(s.curveStackRaw);
       this.applyLevelSetting();
       this.initNativeParams();
       if (this.recording) {
@@ -977,7 +984,42 @@ struct CameraPage {
     const labels: Array<string> = ['直通', '曲线', '斑马', '峰值'];
     this.effectLabel = labels[this.effectIndex];
     this.applyEffect();
+    if (this.effectIndex === 1 && !this.curveHintShown) {
+      this.curveHintShown = true;
+      this.message = '长按「更多」面板的效果钮可编辑 RGB 曲线';
+    }
     this.persistSettings();
+  }
+
+  /** CURVE：曲线栈变化 → 重传 LUT；曲线档位上同步开关（恒等曲线开着无视觉差） */
+  private applyCurve(): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      return;
+    }
+    try {
+      lib.uploadCurveLut(this.curveStack.bakeBytes().buffer as ArrayBuffer);
+      if (this.effectIndex === 1) {
+        lib.setCurveEnabled(!this.curveStack.isPassthrough);
+      }
+    } catch (e) {
+      this.message = `曲线上传失败: ${e}`;
+    }
+  }
+
+  private openCurveEditor(): void {
+    this.closePill();
+    this.moreOpen = false;
+    this.curvePopupVisible = true;
+  }
+
+  private onCurveCommit(stack: CurveStack, persist: boolean): void {
+    this.curveStack = stack;
+    this.applyCurve();
+    if (persist) {
+      this.settings.curveStackRaw = stack.encode();
+      this.persistSettings();
+    }
   }
 
   private applyEffect(): void {
@@ -991,7 +1033,8 @@ struct CameraPage {
         lib.setCurveEnabled(false);
       } else if (this.effectIndex === 1) {
         lib.setEffect(0);
-        lib.setCurveEnabled(true);
+        lib.uploadCurveLut(this.curveStack.bakeBytes().buffer as ArrayBuffer);
+        lib.setCurveEnabled(!this.curveStack.isPassthrough);
       } else if (this.effectIndex === 2) {
         lib.setEffect(FrameEffect.ZEBRA as number);
         lib.setCurveEnabled(false);
@@ -2323,6 +2366,19 @@ struct CameraPage {
           }
         })
       }
+      // CURVE：RGB 曲线编辑弹窗（全屏捕获层；本侧预览恒 GL 渲染，gpuMode 恒 true）
+      CurvePopup({
+        visible: this.curvePopupVisible,
+        stack: this.curveStack,
+        gpuMode: true,
+        onDismiss: (): void => {
+          this.curvePopupVisible = false;
+        },
+        onCommit: (stack: CurveStack, persist: boolean): void => {
+          this.onCurveCommit(stack, persist);
+        }
+      })
+
       // T31「更多」面板（闪光/效果/光弧/网格）：复用 PillPopup 遮罩 + 量框定位
       if (this.moreOpen) {
         HudMoreSheet({
@@ -2338,6 +2394,9 @@ struct CameraPage {
           },
           onCycleEffect: (): void => {
             this.cycleEffect();
+          },
+          onEditCurve: (): void => {
+            this.openCurveEditor();
           },
           onCycleArc: (): void => {
             this.cycleArc();
