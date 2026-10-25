@@ -54,9 +54,10 @@ export const getArcEffectiveMode: () => number;
  *   rotation/muxer-start/read/sample-too-large/write/empty-range。
  * probeClipTracks：只读 "videoCount,audioCount" 或 "err:<code>"。
  * audioShiftUs：选中音轨的同步平移（µs，内录轨 = −offset、环境轨 0）；预扫与拷贝循环同吃它。
+ * 第 7 位 audioShiftUs 可选（native 兼容老 6 参调用点，缺省按 0）。
  */
 export const startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
-  endMs: number, audioOrdinal: number, audioShiftUs: number) => string;
+  endMs: number, audioOrdinal: number, audioShiftUs?: number) => string;
 export const getClipExportStatus: () => string;
 export const cancelClipExport: () => void;
 export const probeClipTracks: (inFd: number, inSize: number) => string;
@@ -68,6 +69,7 @@ export const probeClipTracks: (inFd: number, inSize: number) => string;
  *   或 `err:<code>`（ARC_SOURCE/ARC_NO_VIDEO/...）。
  * startArcRepair：空串 = 已入队；busy/args/worker = 立即失败。srcNum/srcDen 为有理数源帧率，
  *   srcFrames/dstFrames 由 ArkTS 纯逻辑算好传入；rotation 为源容器旋转（native 侧归一后写 muxer）。
+ *   第 13 位 capOffsetMs 可选（native 兼容老 12 参调用点，缺省按 0）。
  * getArcRepairStatus：
  *   `idle` | `running:<pct>` | `done:<videoSamples>:<audioSamples>:<mux0/1>:<track0/1>:<stop0/1>`
  *   | `failed:<code>` | `cancelled`。T30 起 audioSamples = 全部音轨成功写入 muxer 的样本合计
@@ -78,6 +80,17 @@ export const probeClipTracks: (inFd: number, inSize: number) => string;
 export const probeArcRepairSource: (inFd: number, inSize: number) => string;
 export const startArcRepair: (inFd: number, inSize: number, outFd: number, dstFps: number,
   bitrate: number, deadband: number, srcNum: number, srcDen: number, srcFrames: number,
-  dstFrames: number, rotation: number, durationMs: number, capOffsetMs: number) => string;
+  dstFrames: number, rotation: number, durationMs: number, capOffsetMs?: number) => string;
 export const getArcRepairStatus: () => string;
 export const cancelArcRepair: () => void;
+
+/**
+ * T27-1 内录平台探针三口（cpp/avscreen_probe.*，P27 批；napi_init exports 表注册）：
+ * - startAvScreenProbe：durationMs 缺省 2500（native 兼容 0/1 参调用）；返回状态串见
+ *   getAvScreenProbeStatus；
+ * - getAvScreenProbeStatus：idle | running:<elapsedMs> | ok:<字段> | failed:<code> | cancelled；
+ * - cancelAvScreenProbe：置取消位。
+ */
+export const startAvScreenProbe: (durationMs?: number) => string;
+export const getAvScreenProbeStatus: () => string;
+export const cancelAvScreenProbe: () => void;

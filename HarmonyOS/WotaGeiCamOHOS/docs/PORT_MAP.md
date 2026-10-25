@@ -210,6 +210,26 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 - **回归**：pure-test 62 files / 679 tests 全绿；`assembleHap`（release）
   BUILD SUCCESSFUL。
 
+## 修复批（NAPI-DECL：index.d.ts 漂移修复 + 声明守卫，2026-10-25）
+
+v0.0.10-r02 CI HAP 构建失败修复。根因：`entry/src/main/cpp/types/libentry/index.d.ts`
+（手写声明）未随 native 加口/签名演进——P27 批给 napi_init exports 表加了探针三口、
+T20/T30 给 startClipExport/startArcRepair 挂了可选尾参，声明侧三处没跟上。
+
+- **修复**：补探针三口声明（`startAvScreenProbe(durationMs?: number)`——native 兼容
+  0/1 参、缺省 2500 / `getAvScreenProbeStatus()` / `cancelAvScreenProbe()`）；
+  `startClipExport` 第 7 位 `audioShiftUs?` 改可选（native 兼容老 6 参调用点，桥即
+  6 参）；`startArcRepair` 第 13 位 `capOffsetMs?` 改可选（native 兼容老 12 参，桥即
+  12 参）——三方对齐：napi_init.cpp:545-577 描述符表 ↔ index.d.ts ↔ GlLibBridge.ets。
+- **守卫**：`napi-decl.test.ets` +4——native exports 表逐名对账（声明缺名即红）、
+  幽灵声明反向闸（声明了 native 没有的名字即红）、尾参可选写法逐字、桥调用点元数。
+  漂移类缺陷从此有机器闸。
+- **口径登记**：本地 hvigor 对 .d.ts 互操作类型检查不触发 CI 的严格口径（本地
+  clean 全量构建对新旧声明均绿）——CI 是这类缺陷的唯一裁判；守卫把检查前移到
+  pure-test 层补位。
+- **回归**：pure-test 65 files / 690 tests 全绿；clean `assembleHap`（release）
+  BUILD SUCCESSFUL。
+
 ## 走查批（WALK-HM7UI03：模拟器运行时走查，Pura 900，2026-10-24）
 
 **口径**：本节全部结论为「模拟器走查」，不构成真机验收；真机冻结项（T27-2/3/4、
