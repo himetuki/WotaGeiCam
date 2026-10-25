@@ -44,6 +44,7 @@ import { Sha256 } from '../update/Sha256';
 import { UserSettings } from '../core/UserSettings';
 import { FocusTapMath } from '../core/FocusTap';
 import { DirectDisplay } from '../core/DirectDisplay';
+import { EncoderPts } from '../core/EncoderPts';
 import { FrameRateFallback } from '../core/FrameRateFallback';
 import { degradeSuppressed } from '../camera/GlRenderSuppression';
 import { RangeI } from '../core/CameraAbility';
@@ -195,7 +196,11 @@ export class PureLogicBarrel {
     const fps: number = FrameRateFallback.ceilingFps([new RangeI(30, 30), new RangeI(60, 60)],
       WotaTiers.HIGH_SPEED_FPS);
     const suppressed: boolean = degradeSuppressed(false, false) && !degradeSuppressed(true, false);
-    if (m.length === 9 && fps > 0 && !suppressed) {
+    // PTS-GRID 批：编码器 PTS 网格纯算式（native 逐帧打戳接线随真机批）
+    const step: number = EncoderPts.ntscGridStepNs(24) > 0
+      ? EncoderPts.ntscGridStepNs(24) : EncoderPts.integerStepNs(24);
+    const pts: number = EncoderPts.encoderAdaptivePtsNs(0, 1000, step, 0, 1);
+    if (m.length === 9 && fps > 0 && !suppressed && pts >= 0) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }
