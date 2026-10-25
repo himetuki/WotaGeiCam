@@ -53,6 +53,7 @@ import { GlCameraEngine, GlLensInfo } from '../camera/GlCameraEngine';
 import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
+import { ContentPoint, PreviewBox, PreviewFit } from '../core/PreviewFit';
 import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size } from '../core/Constants';
 import { CameraAbility, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
@@ -99,6 +100,7 @@ interface GlLibApi extends GlRecordLib {
   getInputSurfaceId: () => string;
   getNativeImageError: () => string;
   setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
+  setDisplayFit: (fitX: number, fitY: number) => void;
   setEffect: (effect: number) => void;
   setCurveEnabled: (on: boolean) => void;
   setZebraParams: (threshold: number, density: number) => void;
@@ -243,6 +245,11 @@ struct CameraPage {
   /** 窗口 vp 尺寸（FocusTapMath 归一化用；refreshHudReadoutMetrics 顺手刷新） */
   private winWvp: number = 0;
   private winHvp: number = 0;
+  /**
+   * WLB：画面在窗口内的矩形（letterbox 单一真源）——参考线 aspect、点按映射、native 上屏
+   * 收缩因子三处都吃它，不许各算一遍。宽高比不可用/首帧未量到时 = 铺满（= 旧行为）。
+   */
+  private previewBox: PreviewBox = new PreviewBox(0, 0, 0, 0, 0);
   private focusMarkTimer: number = -1;
   /** FL 批：点按/双击/长按三击派发仲裁（单击=对焦、双击=锁定、长按=解锁重对焦） */
   private tapArbiter: FocusTapArbiter = new FocusTapArbiter(280);
@@ -1146,6 +1153,32 @@ struct CameraPage {
       lib.setDisplayGeometry(info.sensorDeg, this.displayDeg(), info.front);
     } catch (e) {
     }
+    this.applyPreviewFit();
+  }
+
+  /**
+   * WLB：按「预览档尺寸 × 表面尺寸 × 旋转」算画面矩形，并下发 native 上屏收缩因子。
+   * 旋转取向与 native UV 旋转同源（`displayDeg` 一侧）——几何/尺寸/视口任一变化都重算。
+   */
+  private applyPreviewFit(): void {
+    const size: Size | undefined = this.engine.currentSize();
+    const rotation: number = this.displayDeg();
+    this.previewBox = PreviewFit.rectOf(this.winWvp, this.winHvp,
+      size === undefined ? 0 : size.width, size === undefined ? 0 : size.height, rotation);
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      return;
+    }
+    try {
+      lib.setDisplayFit(PreviewFit.ndcScaleX(this.previewBox, this.winWvp),
+        PreviewFit.ndcScaleY(this.previewBox, this.winHvp));
+    } catch (e) {
+    }
+  }
+
+  /** 参考线/网格的内接宽高比（画面矩形不可用时 0 = 铺满，与旧行为一致） */
+  private refLineAspect(): number {
+    return this.previewBox.aspect;
   }
 
   private readoutText(key: string): string {
@@ -1200,6 +1233,7 @@ struct CameraPage {
       // TFC：窗口 vp 尺寸（tap-to-focus 归一化基准；旋转后 display.on('change') 会重刷）
       this.winWvp = Math.max(0, d.width / density);
       this.winHvp = Math.max(0, d.height / density);
+      this.applyPreviewFit(); // WLB：视口变化（旋转/分屏/窗口尺寸）后重算画面矩形
     } catch (e) {
       // 量不到：保持现值（首帧兜底 0 → hudPerRowFor 退 1 颗一行，宁可高也不裁字）
     }
@@ -1301,11 +1335,15 @@ struct CameraPage {
     if (!this.cameraStarted || this.glFatal !== '') {
       return;
     }
-    const pt: TapPoint | undefined =
+    const raw: TapPoint | undefined =
       FocusTapMath.pointFromWindowTap(windowX, windowY, this.winWvp, this.winHvp);
-    if (pt === undefined) {
+    if (raw === undefined) {
       return;
     }
+    // WLB：窗口坐标 → 画面坐标（黑边上的点夹到最近边缘）；画面矩形不可用时与旧行为逐字相同
+    const mapped: ContentPoint = PreviewFit.mapToContent(raw.x, raw.y, this.previewBox,
+      this.winWvp, this.winHvp);
+    const pt: TapPoint = new TapPoint(mapped.x, mapped.y);
     const isDouble: boolean = this.tapArbiter.onTapUp(Date.now());
     if (this.params.focusLocked.value) {
       // 锁定期轻触/双击不重焦（防误触字面要求）：首次轻触给一句提示
@@ -1970,7 +2008,7 @@ struct CameraPage {
       if (this.refLineMask() !== 0) {
         RefLineOverlay({
           lineMask: this.refLineMask(),
-          aspect: 0,
+          aspect: this.refLineAspect(),
           rollDegrees: this.levelRoll,
           showLevelLine: this.levelOn && this.levelAvailable
         })

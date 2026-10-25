@@ -132,6 +132,22 @@ static napi_value SetDisplayGeometry(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+/** WLB：上屏等比收缩因子（1,1 = 铺满；编码面不受影响） */
+static napi_value SetDisplayFit(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    double fitX = 1.0;
+    double fitY = 1.0;
+    if (argc >= 2) {
+        napi_get_value_double(env, argv[0], &fitX);
+        napi_get_value_double(env, argv[1], &fitY);
+    }
+    WotaGlSetDisplayFit(static_cast<float>(fitX), static_cast<float>(fitY));
+    return nullptr;
+}
+
 static napi_value SetEffect(napi_env env, napi_callback_info info)
 {
     size_t argc = 1;
@@ -546,6 +562,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayGeometry", nullptr, SetDisplayGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDisplayFit", nullptr, SetDisplayFit, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setEffect", nullptr, SetEffect, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCurveEnabled", nullptr, SetCurveEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZebraParams", nullptr, SetZebraParams, nullptr, nullptr, nullptr, napi_default, nullptr},

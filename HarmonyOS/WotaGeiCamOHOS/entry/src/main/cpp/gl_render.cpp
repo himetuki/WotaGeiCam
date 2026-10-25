@@ -74,6 +74,13 @@ int g_displayDeg = 0;
 int g_stRotDeg = 0;
 bool g_mirrored = false;
 int g_geomKey = -1;
+/**
+ * WLB 批（letterbox）：上屏四边形的等比收缩因子（NDC 半域，1,1 = 铺满 = 旧行为逐字相同）。
+ * 由 ArkTS 侧按「预览档尺寸 vs 表面尺寸 vs 旋转」算好后经 setDisplayFit 下发；
+ * **编码面恒传 (1,1)**——成片是满幅画面，黑边只属于预览显示。
+ */
+float g_fitX = 1.0f;
+float g_fitY = 1.0f;
 
 // ---- GL-4 编码面（GPU 录制）：第二个 EGL window surface + 编码专用 UV ----
 EGLSurface g_encSurface = EGL_NO_SURFACE;
@@ -198,6 +205,7 @@ struct ProgramLocs {
     GLint aPosition = -1;
     GLint aTexCoord = -1;
     GLint uTexMatrix = -1;
+    GLint uFit = -1;
     GLint uFrame = -1;
     GLint uCurve = -1;
     GLint uStripe = -1;
@@ -378,6 +386,7 @@ void FetchLocations(ProgramLocs& locs)
     locs.aPosition = glGetAttribLocation(locs.program, "aPosition");
     locs.aTexCoord = glGetAttribLocation(locs.program, "aTexCoord");
     locs.uTexMatrix = glGetUniformLocation(locs.program, "uTexMatrix");
+    locs.uFit = glGetUniformLocation(locs.program, "uFit");
     locs.uFrame = glGetUniformLocation(locs.program, "uFrame");
     locs.uCurve = glGetUniformLocation(locs.program, "uCurve");
     locs.uStripe = glGetUniformLocation(locs.program, "uStripe");
@@ -647,11 +656,15 @@ void SyncEffect()
  * @param uvVbo  朝向来源（上屏 = 显示 UV；编码 = 编码 UV）
  * @param vaoOk  是否允许走上屏的 VAO 快路（编码面用独立 UV VBO，必须手动绑指针）
  */
-void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk)
+void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false)
 {
     glUseProgram(locs.program);
     if (locs.uTexMatrix >= 0) {
         glUniformMatrix4fv(locs.uTexMatrix, 1, GL_FALSE, g_texMatrix);
+    }
+    if (locs.uFit >= 0) {
+        // letterbox：上屏吃 g_fit，编码面恒满幅（成片不带黑边）
+        glUniform2f(locs.uFit, applyFit ? g_fitX : 1.0f, applyFit ? g_fitY : 1.0f);
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
@@ -1015,6 +1028,7 @@ struct FrostProgram {
     GLint aTexCoord = -1;
     GLint uFrame = -1;
     GLint uTexMatrix = -1;
+    GLint uFit = -1;
     GLint uSrc = -1;
     GLint uOffset = -1;
     GLint uWeight = -1;
@@ -1157,6 +1171,7 @@ bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram
     out.aTexCoord = glGetAttribLocation(program, "aTexCoord");
     out.uFrame = glGetUniformLocation(program, "uFrame");
     out.uTexMatrix = glGetUniformLocation(program, "uTexMatrix");
+    out.uFit = glGetUniformLocation(program, "uFit");
     out.uSrc = glGetUniformLocation(program, "uSrc");
     out.uOffset = glGetUniformLocation(program, "uOffset");
     out.uWeight = needWeight ? glGetUniformLocation(program, "uWeight[0]") : -1;
@@ -1344,6 +1359,9 @@ bool RunFrostChain()
     if (g_frostCopy.uFrame >= 0) {
         glUniform1i(g_frostCopy.uFrame, 0);
     }
+    if (g_frostCopy.uFit >= 0) {
+        glUniform2f(g_frostCopy.uFit, 1.0f, 1.0f); // 中间 RT：恒等（RT 尺寸=表面尺寸）
+    }
     DrawFullscreenQuad(g_frostCopy.aPosition, g_frostCopy.aTexCoord, g_posVbo, g_uvVbo);
     errors += DrainGlErrors();
 
@@ -1362,6 +1380,9 @@ bool RunFrostChain()
         }
         if (g_frostBlur.uWeight >= 0) {
             glUniform1fv(g_frostBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        if (g_frostBlur.uFit >= 0) {
+            glUniform2f(g_frostBlur.uFit, 1.0f, 1.0f); // 中间 RT：恒等
         }
         DrawFullscreenQuad(g_frostBlur.aPosition, g_frostBlur.aTexCoord, g_posVbo, g_idUvVbo);
         errors += DrainGlErrors();
@@ -1383,6 +1404,9 @@ bool RunFrostChain()
         }
         if (g_frostBlur.uWeight >= 0) {
             glUniform1fv(g_frostBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        if (g_frostBlur.uFit >= 0) {
+            glUniform2f(g_frostBlur.uFit, 1.0f, 1.0f); // 中间 RT：恒等
         }
         DrawFullscreenQuad(g_frostBlur.aPosition, g_frostBlur.aTexCoord, g_posVbo, g_idUvVbo);
         errors += DrainGlErrors();
@@ -1448,6 +1472,8 @@ void ResetSessionState()
     g_peakingColor = 4;
     g_sensorDeg = 0;
     g_displayDeg = 0;
+    g_fitX = 1.0f;
+    g_fitY = 1.0f;
     g_stRotDeg = 0;
     g_mirrored = false;
     g_geomKey = -1;
@@ -1839,6 +1865,9 @@ void WotaGlRender(uint64_t timestamp)
         if (g_frostDisplay.uFrame >= 0) {
             glUniform1i(g_frostDisplay.uFrame, 0);
         }
+        if (g_frostDisplay.uFit >= 0) {
+            glUniform2f(g_frostDisplay.uFit, g_fitX, g_fitY); // 上屏：letterbox 等比收缩
+        }
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g_frostResultTex);
         DrawFullscreenQuad(g_frostDisplay.aPosition, g_frostDisplay.aTexCoord, g_posVbo, g_idUvVbo);
@@ -1866,6 +1895,9 @@ void WotaGlRender(uint64_t timestamp)
     glUseProgram(locs.program);
     if (locs.uTexMatrix >= 0) {
         glUniformMatrix4fv(locs.uTexMatrix, 1, GL_FALSE, g_texMatrix);
+    }
+    if (locs.uFit >= 0) {
+        glUniform2f(locs.uFit, g_fitX, g_fitY); // 上屏：letterbox 等比收缩
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
@@ -2285,6 +2317,23 @@ void WotaGlSetDisplayGeometry(int sensorDeg, int displayDeg, bool mirrored)
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "geometry sensor=%{public}d display=%{public}d mirror=%{public}d",
         sensorDeg, displayDeg, mirrored ? 1 : 0);
+}
+
+/**
+ * WLB（letterbox）：上屏等比收缩因子（NDC 半域；1,1 = 铺满）。预览档比例与表面比例不一致时
+ * 由 ArkTS 侧算出并下发，黑边只出现在预览上屏，编码面恒满幅。
+ */
+void WotaGlSetDisplayFit(float fitX, float fitY)
+{
+    const float x = (fitX > 0.0f && fitX <= 1.0f) ? fitX : 1.0f;
+    const float y = (fitY > 0.0f && fitY <= 1.0f) ? fitY : 1.0f;
+    if (x == g_fitX && y == g_fitY) {
+        return;
+    }
+    g_fitX = x;
+    g_fitY = y;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "display fit x=%{public}.4f y=%{public}.4f", x, y);
 }
 
 void WotaGlSetEffect(int effect)

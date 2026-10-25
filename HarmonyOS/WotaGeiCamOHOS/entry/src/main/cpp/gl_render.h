@@ -69,6 +69,7 @@ bool WotaGlUploadCurveLut(const void* data, size_t length);
  * 返回 false = EGL 面创建失败（GPU 录制不可用，预览/效果不受影响）。
  */
 bool WotaGlAttachEncoderWindow(OHNativeWindow* window, int width, int height);
+void WotaGlSetDisplayFit(float fitX, float fitY);
 
 /** 解绑编码面（幂等）：恢复上屏 makeCurrent 并销毁 EGL 编码 surface（不销毁 native window，归 CodecRecorder） */
 void WotaGlDetachEncoder();

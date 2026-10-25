@@ -14,9 +14,10 @@ static const char* WOTA_TEXTURE_VS =
     "attribute vec4 aPosition;\n"
     "attribute vec2 aTexCoord;\n"
     "uniform mat4 uTexMatrix;\n"
+    "uniform vec2 uFit;\n"
     "varying vec2 vUv;\n"
     "void main() {\n"
-    "    gl_Position = aPosition;\n"
+    "    gl_Position = vec4(aPosition.xy * uFit, aPosition.zw);\n"
     "    vUv = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;\n"
     "}\n";
 
@@ -87,9 +88,10 @@ static const char* WOTA_FROST_COPY_FS =
 static const char* WOTA_FROST_QUAD_VS =
     "attribute vec4 aPosition;\n"
     "attribute vec2 aTexCoord;\n"
+    "uniform vec2 uFit;\n"
     "varying vec2 vUv;\n"
     "void main() {\n"
-    "    gl_Position = aPosition;\n"
+    "    gl_Position = vec4(aPosition.xy * uFit, aPosition.zw);\n"
     "    vUv = aTexCoord;\n"
     "}\n";
 

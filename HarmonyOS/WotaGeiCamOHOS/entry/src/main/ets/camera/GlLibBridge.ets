@@ -35,6 +35,11 @@ export function setDisplayGeometry(sensorDeg: number, displayDeg: number, mirror
   glLib.setDisplayGeometry(sensorDeg, displayDeg, mirrored);
 }
 
+/** WLB：上屏 letterbox 等比收缩因子（1,1 = 铺满；编码面满幅不受影响） */
+export function setDisplayFit(fitX: number, fitY: number): void {
+  glLib.setDisplayFit(fitX, fitY);
+}
+
 export function setEffect(effect: number): void {
   glLib.setEffect(effect);
 }

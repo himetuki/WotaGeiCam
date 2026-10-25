@@ -6,6 +6,8 @@
 export const getInputSurfaceId: () => string;
 export const getNativeImageError: () => string;
 export const setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
+/** WLB：上屏 letterbox 等比收缩因子（NDC 半域，1,1 = 铺满；编码面恒满幅） */
+export const setDisplayFit: (fitX: number, fitY: number) => void;
 export const setEffect: (effect: number) => void;
 export const setCurveEnabled: (on: boolean) => void;
 export const setZebraParams: (threshold: number, density: number) => void;
