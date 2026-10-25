@@ -43,6 +43,9 @@ test('接线_清除与导出动作及留白登记', () => {
   assertTrue(st.indexOf("this.diagBusy = 'clear';") >= 0 && st.indexOf("this.diagBusy = 'export';") >= 0 &&
     st.indexOf(".enabled(this.diagBusy === '')") >= 0,
     '双动作必须互斥忙态（上游 busy 口径）');
-  assertTrue(st.indexOf('公共 Documents 与分享面板为登记留白') >= 0,
-    '导出落沙箱、公共目录/分享面板留白必须在 UI 注记');
+  // DIAG-SHARE 批收口「公共目录/分享面板」留白：UI 注记改为「分享走系统面板，另存可自选位置」
+  assertTrue(st.indexOf('分享走系统面板，另存可自选位置') >= 0,
+    '分享/另存能力必须在 UI 注记（原留白已收口）');
+  assertTrue(st.indexOf("公共 Documents 与分享面板为登记留白") < 0,
+    '旧留白注记必须移除');
 });

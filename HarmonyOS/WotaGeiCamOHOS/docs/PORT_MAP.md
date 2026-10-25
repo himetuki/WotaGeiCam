@@ -53,7 +53,7 @@
 
 | 上游 | 类型 | 鸿蒙落点 | 状态 |
 | --- | --- | --- | --- |
-| `Diag.kt` | 平台绑定（薄） | `diag/DiagPure.ets`（纯函数层：diagLine/diagStamp/头部文案/轮转命名/丢弃自曝/帧账段，逐字段锚定）+ `diag/Diag.ets`（完整版：总开关默认关+级别档位门控、ring 3000/pending 3000 封顶丢最老并自曝、setInterval 1s 拍落盘 ≤500 行、512KB×3 轮转、崩溃件同步直写留 3、导出报告 2MB 预算）+ EntryAbility onCreate/onDestroy 接线。完整版落地 2026-10-21，对齐上游 342dd99。有意偏离（登记于 Diag.ets 头注释）：hilog 恒写双通道、setInterval 替代写盘线程（导出于 UI 线程同步读拼写有阻塞风险，TaskPool 化留待后续）、errorManager 'error' 替代 UncaughtExceptionHandler（无上一处理器链）、last-session.txt 替代 SharedPreferences、导出只写应用目录、时区 ±HH:MM/线程恒 main、deviceSummary 的硬件行用 hardwareModel 近似且设备行用 deviceType（语义与 Android Build.HARDWARE/Build.DEVICE 不同）、board/fingerprint 省行、ABI 用 deviceInfo.abiList。留白：公共目录导出、exportForShare 分享面板、总开关/详细档持久化（上游 WotaSettings diagEnabled/diagVerbose）与详细档 UI 入口（随设置页批）。装机验证项：开日志→导出→hdc file recv 看行格式与轮转；人为崩溃→crash-*.txt；清除后 logs 目录内本系统日志件（当前件/轮转件/崩溃件）清空，last-session.txt 保留，且日志关闭时不会立即新建当前件 | ☑ |
+| `Diag.kt` | 平台绑定（薄） | `diag/DiagPure.ets`（纯函数层：diagLine/diagStamp/头部文案/轮转命名/丢弃自曝/帧账段，逐字段锚定）+ `diag/Diag.ets`（完整版：总开关默认关+级别档位门控、ring 3000/pending 3000 封顶丢最老并自曝、setInterval 1s 拍落盘 ≤500 行、512KB×3 轮转、崩溃件同步直写留 3、导出报告 2MB 预算）+ EntryAbility onCreate/onDestroy 接线。完整版落地 2026-10-21，对齐上游 342dd99。有意偏离（登记于 Diag.ets 头注释）：hilog 恒写双通道、setInterval 替代写盘线程（导出于 UI 线程同步读拼写有阻塞风险，TaskPool 化留待后续）、errorManager 'error' 替代 UncaughtExceptionHandler（无上一处理器链）、last-session.txt 替代 SharedPreferences、导出只写应用目录、时区 ±HH:MM/线程恒 main、deviceSummary 的硬件行用 hardwareModel 近似且设备行用 deviceType（语义与 Android Build.HARDWARE/Build.DEVICE 不同）、board/fingerprint 省行、ABI 用 deviceInfo.abiList。留白：~~公共目录导出 / exportForShare 分享面板~~（**DIAG-SHARE 批 2026-10-25 已落**：分享走 systemShare、另存走 DocumentViewPicker 用户选址=沙箱模型下公共目录的零权限等价路径，见交付批节）、~~总开关/详细档持久化与 UI 入口~~（ST 批持久化 + DIAG 批设置页区块已落）。装机验证项：开日志→导出→hdc file recv 看行格式与轮转；人为崩溃→crash-*.txt；清除后 logs 目录内本系统日志件（当前件/轮转件/崩溃件）清空，last-session.txt 保留，且日志关闭时不会立即新建当前件 | ☑ |
 
 ## media — 媒体库
 
@@ -209,6 +209,38 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
   四页零残留字面量 + 消费令牌 + import 真源）。共 +3（676 → 679）。
 - **回归**：pure-test 62 files / 679 tests 全绿；`assembleHap`（release）
   BUILD SUCCESSFUL。
+
+## 交付批（RISK：同步上游 f941799 风险修复 + DIAG-SHARE 诊断分享，2026-10-25）
+
+上游 `f941799`「高置信风险扫描修复七项」逐项对照鸿蒙面的落地结果，外加 §diag 行
+「公共目录导出 / 分享面板」留白收口。
+
+**RISK 逐项对照**：
+
+| 上游项 | 鸿蒙面 | 处置 |
+|---|---|---|
+| update 请求目标安全门槛（非规范 IP 编码 / IPv6 严格解析） | `UpdatePure.ets` 旧判据（`::ffff:` 只认点分十进制、非 4 段纯数字一律当域名） | **已修**：新增 `isNumericLiteralHost`/`parseIpv4`（禁前导零）/`isBlockedIpv4`/`parseIpv6`（16 字节严格解析、fail-closed）+ `isPublicIpv6` 重写（ULA/链路本地/组播/文档/discard + `::ffff:`/`::/96`/`64:ff9b::` 三种内嵌 IPv4） |
+| update SHA-256 读盘异常兜底 + 无期望值短路 | `sha256HexOfFile` 已 try/catch 折空串 | **补短路**：`expectedSha === undefined` 时不算摘要（省 ~5MB 全量读） |
+| update 测速剩余预算超时 | 已有墙钟 `setTimeout(BUDGET_MS)` + 读循环 deadline | **已具备**（守卫钉存在性） |
+| camera MEND 离屏资源（5 张编码尺寸纹理）两条路释放 | `WotaGlDetachEncoder` 释放 `g_arcMend`；`WotaGlDestroy` 首行转调 Detach | **已具备**（守卫钉两条路） |
+| camera `encoderNative` @Volatile | 本侧编码面 attach 走**同步 NAPI 返回 bool**，无跨线程轮询谓词 | **N/A**（架构差异，登记） |
+| player 帧率兜底探测移出主线程 | 本侧 `attach(surfaceId, clip, fpsHint)` 直接吃 clip 的 fpsHint，**无阻塞探测** | **N/A**（架构差异，登记） |
+| player/TrackSync 删片清同步结果 | `TrackSync` 无 clearFor；`MediaRepo.deleteForever` 不清 sync 键 | **已修**：`TrackSync.clearFor`（纯逻辑，五键清空）+ `SyncPrefsStore.clearFor` + 删片收尾调用 |
+| ClipExport/TrackExport 取消也写 sidecar | 本侧取消即 `VideoStore.discard` 删成片（无 pendingUri 冷启救援模型） | **N/A**（模型差异，登记） |
+| MediaActions 改名显示名消毒（`/`、`..` 穿越） | 本侧重命名**已裁决不移植**（ID 脱钩），无该路径 | **N/A**（既有裁决） |
+
+**DIAG-SHARE**：`Diag.exportForShare`（落 `cacheDir/share-out`，先清旧分享件）+ `Diag.reportText`
++ `Diag.exportName`；新 `diag/DiagShare.ets`——分享走 `systemShare`（沙箱 URI 经 `fileUri`，
+无需 FileProvider 等价物，与 MS 批 `WotaShare` 同口径）、另存走 `DocumentViewPicker.save`
+（**用户选址 = 上游「公共 Documents」在沙箱模型下的零权限等价路径**）；设置页诊断区块加
+「分享日志 / 另存为」两钮（busy 互斥），全程不联网。
+
+**测试**：`risk-fix.test.ets` +9（clearFor 三例：五键全清回未同步 / 只影响本段 / 键全集与
+读写同源；接线守卫六条：SHA 短路、测速预算兜底、补弧两条释放路、删片抹同步记录、
+诊断分享与另存）。共 +10（700 → 710）。
+
+**回归**：pure-test 68 files / 710 tests 全绿；clean `assembleHap`（release）
+BUILD SUCCESSFUL。运行时走查待办：分享面板拉起、保存选择器、删除后重录同名片的同步清零。
 
 ## 交付批（VIS：WIKO 真机安卓版走查 + 视觉对齐，2026-10-25）
 

@@ -117,4 +117,19 @@ export class SyncPrefsStore {
       return false;
     }
   }
+
+  /**
+   * 删片收尾：抹掉该段（按路径键）的同步结果（RISK 批，对齐上游 TrackSync.clearFor）。
+   * 失败只记日志——删片已经成功，清脏账失败不该把删除报成失败。
+   */
+  static async clearFor(ctx: common.Context, key: string): Promise<void> {
+    try {
+      const store: preferences.Preferences = await preferences.getPreferences(ctx, STORE_NAME);
+      const prefs: MappedSyncPrefs = new MappedSyncPrefs(store);
+      TrackSync.clearFor(prefs, key);
+      await store.flush();
+    } catch (e) {
+      Diag.w(TAG, `清除同步记录失败：${key}`, e as Error);
+    }
+  }
 }

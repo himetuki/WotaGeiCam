@@ -15,6 +15,7 @@ import { media } from '@kit.MediaKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
+import { SyncPrefsStore } from '../player/SyncPrefsStore';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { VideoStore } from '../record/VideoStore';
 import { GlRecorder } from '../camera/GlRecorder';
@@ -849,6 +850,9 @@ export class MediaRepo {
       await db.removeTrash(clip.path);
       await db.clearSeriesForUri(clip.path);
       await db.pruneOrphanSeries();
+      // RISK：抹掉该路径键的同步记录（否则同名成片复现时会命中旧片的「已校准 + 旧偏移」，
+      // 音画被按上一片的偏移平移；对齐上游 f941799 的 TrackSync.clearFor）
+      await SyncPrefsStore.clearFor(this.ctx, clip.path);
       return complete;
     } catch (e) {
       Diag.e(TAG, `db clear failed ${clip.name}: ${e}`);

@@ -192,7 +192,10 @@ export class UpdateDownloader {
           UpdateDownloader.removeQuietly(part);
           return DownloadOutcome.failed();
         }
-        const actual: string = UpdateDownloader.sha256HexOfFile(target);
+        // RISK：无期望哈希时短路——不白读 ~5MB 全量包体算一个用不上的摘要
+        // （对齐上游 f941799；读盘异常已由 sha256HexOfFile 内部折 ''，不会穿成未捕获异常）
+        const actual: string = expectedSha === undefined
+          ? '' : UpdateDownloader.sha256HexOfFile(target);
         if (UpdateDownloadPure.sha256Matches(expectedSha, actual)) {
           Diag.i(TAG, `更新包就绪：${target}（${r.sizeBytes}B）`);
           return DownloadOutcome.done(target, r.sizeBytes);

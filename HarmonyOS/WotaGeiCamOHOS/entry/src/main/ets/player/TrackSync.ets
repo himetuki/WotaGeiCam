@@ -198,6 +198,31 @@ export class TrackSync {
     return `sync_at:${key}`;
   }
 
+  /** 五键全集（清除/搬运用；顺序与 read/write 一致） */
+  static keyNamesOf(key: string): Array<string> {
+    return [
+      TrackSync.doneKeyOf(key),
+      TrackSync.offsetKeyOf(key),
+      TrackSync.sourceKeyOf(key),
+      TrackSync.confKeyOf(key),
+      TrackSync.atKeyOf(key)
+    ];
+  }
+
+  /**
+   * 抹掉某段的同步结果（RISK 批，对齐上游 f941799 的 TrackSync.clearFor）。
+   *
+   * 上游动机是 MediaStore 复用 `_ID` 后新片命中旧片的 done/offset；本侧键是**路径**，
+   * 复用面更窄但仍存在（同一秒同序号的成片名可重现），且「删片后记录还在」本身是脏账。
+   * SyncPrefs 只有 putString，故清成空串——读侧把 done!=='true' 一律视为未同步，
+   * 与真删除语义等价（不引入删键 API）。
+   */
+  static clearFor(prefs: SyncPrefs, key: string): void {
+    for (const k of TrackSync.keyNamesOf(key)) {
+      prefs.putString(k, '');
+    }
+  }
+
   /** 读来源（bool/string 编码经五键 codec）：done 未置 → undefined */
   static sourceOfPrefs(prefs: SyncPrefs, key: string): Source | undefined {
     const done: boolean = prefs.getString(TrackSync.doneKeyOf(key), 'false') === 'true';

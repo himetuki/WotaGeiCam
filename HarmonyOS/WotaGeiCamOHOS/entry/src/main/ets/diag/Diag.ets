@@ -19,8 +19,12 @@
  *    无「上一处理器链」。崩溃件同步直写（fs Sync 系）。
  * 4. SharedPreferences("wota_diag") → filesDir/logs/last-session.txt 单行文件同步读写
  *    （不引入 preferences 异步初始化）。
- * 5. 导出边界：本批只写应用目录 filesDir/WotaGeiCam/（EXPORT_DIR_NAME 保留）；
- *    公共 Documents 与分享面板（上游 exportForShare）留白，随设置页/分享批。
+ * 5. 导出边界：三种落点——① `export` 写应用目录 filesDir/WotaGeiCam/（原口径）；
+ *    ② `exportForShare`（DIAG-SHARE 批，对齐上游同名函数）写**缓存目录** cacheDir/share-out
+ *    供系统分享面板用（缓存件被系统回收正合「分享完就没用」语义，且分享不被公共目录
+ *    可写性卡住）；③ `reportText` 供系统保存选择器（DocumentViewPicker）落用户选定位置
+ *    ——这是「公共 Documents」（上游写外部存储）在沙箱模型下的**零权限等价路径**
+ *    （用户显式选址，与 MS 批相册入库同款思路）。
  * 6. deviceSummary：board/fingerprint 无对应字段省行；hardware 用 deviceInfo.hardwareModel
  *    近似（与 Android Build.HARDWARE 语义不完全相同——登记）；ABI 用 deviceInfo.abiList
  *    （已是逗号分隔串，等价上游 joinToString(",")）；设备用 deviceType（phone/tablet 等
@@ -553,6 +557,67 @@ export class Diag {
     } catch (e) {
       Diag.e('WotaDiag', `日志导出失败: ${e}`);
       return null;
+    }
+  }
+
+  /**
+   * 生成专供**分享**的报告（DIAG-SHARE 批，直译上游 `exportForShare`）：落
+   * `cacheDir/share-out`（缓存目录永远可写，分享不被「公共目录能不能写」卡住；
+   * 缓存件被系统按空间回收，正合一次性语义），先清上次分享件防攒。
+   */
+  static async exportForShare(context: common.Context): Promise<ExportResult | null> {
+    try {
+      Diag.drainToFile();
+      const dir: string = `${context.cacheDir}/share-out`;
+      try {
+        fileIo.mkdirSync(dir);
+      } catch (e) {
+        // 已存在或父目录缺失都吞（cacheDir 必在）
+      }
+      try {
+        for (const name of fileIo.listFileSync(dir)) {
+          try {
+            fileIo.unlinkSync(`${dir}/${name}`);
+          } catch (e) {
+            // 旧分享件删不掉不影响本次（一次性语义，下次再清）
+          }
+        }
+      } catch (e) {
+        // 目录刚建/不可列：无旧件
+      }
+      const target: string = `${dir}/${diagExportName(diagFileStamp(Date.now()))}`;
+      const text: string = Diag.buildReport(context);
+      if (!writeTextSync(target, text)) {
+        Diag.e('WotaDiag', `日志导出失败: 写盘失败 path=${target}`);
+        return null;
+      }
+      let bytes: number = 0;
+      try {
+        bytes = fileIo.statSync(target).size;
+      } catch (e) {
+        bytes = text.length;
+      }
+      Diag.i('WotaDiag', `日志已导出 path=${target} bytes=${bytes} 公共=false（分享件）`);
+      return new ExportResult(target, false, bytes);
+    } catch (e) {
+      Diag.e('WotaDiag', `日志导出失败: ${e}`);
+      return null;
+    }
+  }
+
+  /** 导出件默认名（另存选择器的默认文件名；命名规则单一真源在 DiagPure） */
+  static exportName(): string {
+    return diagExportName(diagFileStamp(Date.now()));
+  }
+
+  /** 报告正文（供系统保存选择器落用户选定位置；空串 = 生成失败） */
+  static reportText(context: common.Context): string {
+    try {
+      Diag.drainToFile();
+      return Diag.buildReport(context);
+    } catch (e) {
+      Diag.e('WotaDiag', `报告生成失败: ${e}`);
+      return '';
     }
   }
 

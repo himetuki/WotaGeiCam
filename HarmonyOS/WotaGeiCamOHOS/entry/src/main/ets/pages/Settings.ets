@@ -29,6 +29,7 @@ import { ProbeKind, ProbeResult, ReleaseNotes, UpdateConfig, probeLatestRelease 
 import { DownloadKind, DownloadOutcome, UpdateDownloader } from '../update/UpdateDownloader';
 import { SaveResult, UpdateInstaller } from '../update/UpdateInstaller';
 import { Diag, ExportResult } from '../diag/Diag';
+import { DiagShare } from '../diag/DiagShare';
 
 /**
  * 滑杆吸附分组只列**有消费方**的 3 键（快门/感光度/色温，对齐上游 BlockSlider 的子集）；
@@ -401,6 +402,40 @@ struct Settings {
       this.diagStatus = r === null ? '导出失败' : `已导出：${r.path}（${r.bytes}B）`;
     } catch (e) {
       this.diagStatus = `导出失败：${e}`;
+    } finally {
+      this.diagBusy = '';
+    }
+  }
+
+  /** DIAG-SHARE：导出到缓存目录并拉起系统分享面板（不联网） */
+  private async shareDiag(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined || this.diagBusy !== '') {
+      return;
+    }
+    this.diagBusy = 'share';
+    try {
+      const err: string = await DiagShare.share(ctx as common.UIAbilityContext);
+      this.diagStatus = err === '' ? '已拉起分享面板（目标应用由你选择）' : err;
+    } catch (e) {
+      this.diagStatus = `分享失败：${e}`;
+    } finally {
+      this.diagBusy = '';
+    }
+  }
+
+  /** DIAG-SHARE：报告交系统保存选择器，用户自选位置（公共目录的零权限等价路径） */
+  private async saveDiagAs(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined || this.diagBusy !== '') {
+      return;
+    }
+    this.diagBusy = 'saveas';
+    try {
+      const err: string = await DiagShare.saveAs(ctx as common.UIAbilityContext);
+      this.diagStatus = err === '' ? '已保存到你选定的位置' : err;
+    } catch (e) {
+      this.diagStatus = `另存失败：${e}`;
     } finally {
       this.diagBusy = '';
     }
@@ -1182,13 +1217,33 @@ struct Settings {
                     })
                 }
                 .width('100%')
+                // DIAG-SHARE：分享（系统分享面板）与另存（系统保存选择器，用户选址）
+                Row({ space: HudSpace.S }) {
+                  Button(this.diagBusy === 'share' ? '分享中…' : '分享日志')
+                    .fontSize(HudType.LABEL)
+                    .height(HudTouch.BUTTON_HEIGHT)
+                    .enabled(this.diagBusy === '')
+                    .accessibilityText('导出日志并拉起系统分享面板')
+                    .onClick((): void => {
+                      this.shareDiag();
+                    })
+                  Button(this.diagBusy === 'saveas' ? '保存中…' : '另存为')
+                    .fontSize(HudType.LABEL)
+                    .height(HudTouch.BUTTON_HEIGHT)
+                    .enabled(this.diagBusy === '')
+                    .accessibilityText('选择保存位置保存日志文件')
+                    .onClick((): void => {
+                      this.saveDiagAs();
+                    })
+                }
+                .width('100%')
                 if (this.diagStatus !== '') {
                   Text(this.diagStatus)
                     .fontSize(HudType.LABEL)
                     .fontColor(HudColor.TEXT_SECONDARY)
                     .width('100%')
                 }
-                Text('导出落应用目录（沙箱）；公共 Documents 与分享面板为登记留白')
+                Text('导出落应用目录；分享走系统面板，另存可自选位置（均不联网）')
                   .fontSize(HudType.LABEL)
                   .fontColor(HudColor.TEXT_TERTIARY)
                   .width('100%')

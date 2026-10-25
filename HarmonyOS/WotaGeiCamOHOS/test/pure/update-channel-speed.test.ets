@@ -101,8 +101,8 @@ test('URL门槛_只允许HTTPS_拒环回与私有地址', () => {
 test('主机判据_环回私有链路本地保留全拒_公网域名与地址放行', () => {
   const allowed: Array<string> = [
     'api.github.com', 'gh-proxy.com', 'gh-proxy.org', 'gh.monlor.com', 'ghproxy.imciel.com',
-    '8.8.8.8', '172.32.0.1', '100.128.0.1', 'example.invalid', '1.2.3.999',
-    '2001:4860:4860::8888'
+    '8.8.8.8', '172.32.0.1', '100.128.0.1', 'example.invalid',
+    '2001:4860:4860::8888', '[2001:4860:4860::8888]', '[::ffff:8.8.8.8]'
   ];
   for (const h of allowed) {
     assertTrue(UpdateDownloadPure.isPublicHost(h), `应放行：${h}`);
@@ -114,11 +114,76 @@ test('主机判据_环回私有链路本地保留全拒_公网域名与地址放
     '169.254.1.1', '100.64.0.1', '100.127.255.255',
     '192.0.2.1', '198.18.0.1', '198.51.100.7', '203.0.113.9',
     '224.0.0.1', '255.255.255.255',
-    '[::1]', '::1', '[fd00::1]', '[fe80::1]', '[::ffff:127.0.0.1]'
+    '[::1]', '::1', '[fd00::1]', '[fe80::1]', '[::ffff:127.0.0.1]',
+    // 文档专用 / discard-only（RISK 批对齐上游 f941799）
+    '[2001:db8::1]', '[100::1]'
   ];
   for (const h of blocked) {
     assertFalse(UpdateDownloadPure.isPublicHost(h), `应拒绝：${h}`);
   }
+});
+
+/**
+ * RISK 批（对齐上游 f941799）：非规范 IP 编码形式——旧判据把它们当域名放行，
+ * 而 inet_aton 语义会把它们解析成环回/内网地址（镜像一个 302 就能引到路由器）。
+ */
+test('主机判据_非规范IP编码一律拒_不落域名分支放行', () => {
+  const bypass: Array<string> = [
+    // 十进制整数 / 简写 IPv4（inet_aton：2130706433 与 127.1 都是 127.0.0.1）
+    '2130706433', '127.1', '127.0.1', '10.1',
+    // 八进制
+    '0177.0.0.1', '127.000.000.001',
+    // 十六进制
+    '0x7f.0.0.1', '0x7f.1',
+    // 超范围段 / 段数不对：像 IP 又不是，禁猜
+    '1.2.3.999', '1.2.3', '1.2.3.4.5',
+    // IPv4 映射 IPv6 的十六进制形态（::ffff:c0a8:1 = 192.168.0.1）
+    '[::ffff:c0a8:1]', '[::ffff:7f00:1]', '[0:0:0:0:0:ffff:127.0.0.1]', '[::ffff:10.0.0.1]',
+    // IPv4 兼容形态（::a9fe:a9fe = 169.254.169.254 云元数据）与 NAT64
+    '[::a9fe:a9fe]', '[64:ff9b::a9fe:a9fe]',
+    // 其它非规范 IPv6
+    '[::1%eth0]', '[1::2::3]', '[12345::]'
+  ];
+  for (const h of bypass) {
+    assertFalse(UpdateDownloadPure.isPublicHost(h), `非规范 IP 编码必须拒：${h}`);
+  }
+});
+
+test('尺子自证_旧判据放行的编码新判据全拒', () => {
+  // 旧判据复刻（4 段纯数字才判私网，否则一律放行）
+  const oldGate = (h: string): boolean => {
+    const parts: Array<string> = h.split('.');
+    if (parts.length !== 4) {
+      return true;
+    }
+    const o: Array<number> = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      const s: string = parts[i];
+      if (s === '' || s.length > 3 || !/^[0-9]+$/.test(s)) {
+        return true;
+      }
+      const v: number = Number.parseInt(s, 10);
+      if (!Number.isFinite(v) || v < 0 || v > 255) {
+        return true;
+      }
+      o[i] = v;
+    }
+    const a: number = o[0];
+    const b: number = o[1];
+    return !(a === 127 || a === 10 || a === 0 || (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) || a >= 224);
+  };
+  const bypass: Array<string> = [
+    '2130706433', '127.1', '0177.0.0.1', '0x7f.0.0.1', '1.2.3.999',
+    '[::ffff:c0a8:1]', '[::ffff:7f00:1]', '[0:0:0:0:0:ffff:127.0.0.1]', '[::a9fe:a9fe]'
+  ];
+  for (const h of bypass) {
+    assertTrue(oldGate(h), `旧判据本应放行（尺子输入有效）：${h}`);
+    assertFalse(UpdateDownloadPure.isPublicHost(h), `新判据必须拒：${h}`);
+  }
+  // 良品两侧都放行（不是靠一律拒把尺子做红）
+  assertTrue(oldGate('8.8.8.8'));
+  assertTrue(UpdateDownloadPure.isPublicHost('8.8.8.8'));
 });
 
 test('URL解析_authority与IPv6闭合判据', () => {
