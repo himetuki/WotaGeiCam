@@ -12,8 +12,8 @@ plugins {
 // 归一成 "-r08" 后缀拼进 appVersionName → versionName / BuildConfig.VERSION_NAME（设置页显示）
 // / archivesName（产物名 WotaGeiCam-v0.0.7-r08-release.apk）全部连锁携带；
 // versionCode 不含 r，r 变体之间覆盖安装不受影响。属性空白/缺失 → 无后缀，回退纯 appVersionBase。
-val appVersionCode = 10
-val appVersionBase = "0.0.10"
+val appVersionCode = 11
+val appVersionBase = "0.0.11"
 val rbuildProp = (project.findProperty("rbuild") as? String)?.trim().orEmpty().removePrefix("r")
 val rSuffix = if (rbuildProp.isEmpty()) "" else "-r$rbuildProp"
 val appVersionName = appVersionBase + rSuffix
