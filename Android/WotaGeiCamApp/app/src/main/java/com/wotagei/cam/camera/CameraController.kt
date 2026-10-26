@@ -15,10 +15,15 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStoreOwner
 import com.wotagei.cam.core.CameraAbility
+import com.wotagei.cam.core.LensPickPreference
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.WotaParams
+import com.wotagei.cam.core.WotaTag
+import com.wotagei.cam.core.dumpLenses
 import com.wotagei.cam.core.enumerateLenses
+import com.wotagei.cam.core.pickCapabilityDefault
+import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,6 +63,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     /** 自建 scope：不依赖 viewModelScope，免得隐式要求 lifecycle-viewmodel-ktx */
+    /**
+     * 用户显式选过镜头的持久化位（[LensPickPreference]）：false 期间 pickSlot 走能力协商默认
+     * （后摄里最大视频档最大的那颗，不认档位标签）；switchLens 一次之后永久尊重用户选择。
+     */
+    private var lensPickedByUser = LensPickPreference.isPicked(app)
     private val bus: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val params: WotaParams = WotaParams(bus)
@@ -249,6 +259,14 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                     return@launch
                 }
                 chosenSlotKey = slot.key
+                // 打开的是哪一颗物理头必须能从日志对上：ability.dump 的 label 只是档位名（WIDE），
+                // 同档位多颗/归档存疑时只有 key + 等效焦距 + 最大视频档能定位现场
+                Log.i(
+                    WotaTag.LENS,
+                    "open slot=${slot.key} type=${slot.type} eq=${slot.eqFocal}mm " +
+                        "videoMax=${slot.ability.videoSizes.maxOfOrNull { it.pixels }} " +
+                        "afModes=${slot.ability.afModes} minFocusD=${slot.ability.minFocusDistanceDiopter}"
+                )
                 ui.value = ui.value.copy(currentLens = slot.type, currentSlot = slot, lenses = lensSlots)
                 applyAbilityToParams(slot.ability)
                 e.open(slot)
@@ -269,7 +287,22 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 每次换挡重新枚举（很轻，且能覆盖镜头被系统临时下线的情况） */
     private fun pickSlot(manager: CameraManager): LensSlot? {
         val slots = runCatching { enumerateLenses(manager) }.getOrDefault(emptyList())
-        if (slots.isNotEmpty()) lensSlots = slots
+        if (slots.isNotEmpty()) {
+            lensSlots = slots
+            // 镜头枚举全量落日志（M1 门禁的字面）：哪颗物理头被归进哪个档、各自的最大视频档——
+            // 「画质只有 720p」「广角是定焦」这类反馈，没有这张表就无法判断是枚举归档问题
+            // 还是该颗镜头本来如此（2026-10-26 marble 反馈的取证缺口）
+            dumpLenses(slots)
+        }
+        // 能力协商的出厂默认（用户指令「能力协商，而非能力假设」）：从未显式选过镜头时不认
+        // 档位标签，开后摄里最大视频档最大的那颗——个别机型会把小底定焦头归进「广角」档
+        // （marble 实测：出厂「广角」最大 1600x1200 且定焦）。显式切换过一次后完全尊重选择。
+        if (!lensPickedByUser) {
+            pickCapabilityDefault(lensSlots)?.let {
+                Log.i(WotaTag.LENS, "capability default -> ${it.key} type=${it.type}")
+                return it
+            }
+        }
         // 先认槽位（同档位多颗时才准），再退到档位名，最后退到列表首颗
         return lensSlots.firstOrNull { it.key == chosenSlotKey }
             ?: lensSlots.firstOrNull { it.type == params.lens.value }
@@ -282,6 +315,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         params.lens.value = type
         // 按档位切：清掉槽位偏好，让 pickSlot 重新落到该档位的第一颗
         chosenSlotKey = null
+        markLensPickedByUser()
         reopenCurrentLens()
     }
 
@@ -289,7 +323,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     fun switchLens(slot: LensSlot) {
         params.lens.value = slot.type
         chosenSlotKey = slot.key
+        markLensPickedByUser()
         reopenCurrentLens()
+    }
+
+    /** 显式切换即永久关闭能力协商默认（持久化：冷启后也不再替用户选镜头） */
+    private fun markLensPickedByUser() {
+        if (!lensPickedByUser) {
+            lensPickedByUser = true
+            LensPickPreference.markPicked(getApplication())
+        }
     }
 
     private fun reopenCurrentLens() {

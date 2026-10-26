@@ -88,6 +88,9 @@
     <string name="cam_focus_tap_locked_tip">对焦已锁定；要换焦点请长按画面或打开对焦胶囊解除</string>
     <string name="cam_focus_manual_locked">手动对焦档本身即锁定，无需再锁</string>
     <string name="cam_focus_lock_unsupported">此镜头不支持单次自动对焦，无法锁定焦点</string>
+    <!-- 能力给不了时胶囊「在场但禁用」的点击解释（2026-10-26）：不再整颗隐藏——隐藏会在钉格上留洞 -->
+    <string name="cam_focus_unsupported">当前镜头不支持对焦调节</string>
+    <string name="cam_flash_unsupported">当前镜头没有闪光灯</string>
     <string name="cam_focus_lock_recording">录制中不可锁定对焦</string>
     <string name="cam_recording_readonly">录制中不可调整，停止后可改</string>
     <string name="cam_manual_exposure_only">切到手动曝光档后可调</string>

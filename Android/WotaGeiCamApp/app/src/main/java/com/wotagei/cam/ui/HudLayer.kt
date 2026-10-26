@@ -69,6 +69,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -603,7 +604,13 @@ data class HudCtx(
      * 编辑页正被拖起来的那一颗：原位只留**空壳**（alpha 0，几何与占位不变所以容器不重排），
      * 跟着手指的那一份与「腰」由编辑页上层画。录制页恒为 null。
      */
-    val hiddenEntry: HudEntry? = null
+    val hiddenEntry: HudEntry? = null,
+    // ---- 能力闸的两颗（2026-10-26 用户反馈后的口径反转）：能力给不了时**在场但禁用**，
+    // 不再整颗隐藏——隐藏会让「显隐设置点亮了、录制页却空一格」，用户对着洞无从知道为什么。
+    // 禁用态的点击由调用方在 onClick 里给解释文案（面板照旧不出现，#44「不摆灰选项骗点」的
+    // 精神保留在面板层）。编辑页拿不到 ability，恒走默认 true。
+    val focusUsable: Boolean = true,
+    val flashUsable: Boolean = true
 )
 
 // ------------------------------------------------------------------ 单颗条目（五枚容器共用）
@@ -729,7 +736,10 @@ fun HudEntryItem(
                 gatedClick(clicksAccepted, ctx.onZoomClick), frost
             )
             CamPill.FOCUS -> TierChip(
-                tier, ctx.focusLabel, ctx.focusActive, anchor.then(modifier),
+                tier, ctx.focusLabel, ctx.focusActive,
+                // 能力给不了（定焦镜头）：在场但半透明禁用——点了给解释而不是面板，
+                // 槽位也不留洞（2026-10-26 反馈：整颗隐藏后用户对着空格子无从理解）
+                anchor.then(modifier).alpha(if (ctx.focusUsable) 1f else 0.38f),
                 gatedClick(clicksAccepted, ctx.onFocusClick), frost
             )
             CamPill.STAB -> TierChip(
@@ -762,7 +772,7 @@ fun HudEntryItem(
                 image = flashIcon(ctx.flash),
                 description = stringResource(flashLabelRes(ctx.flash)),
                 selected = ctx.flash != Flash.OFF,
-                modifier = anchor.then(modifier),
+                modifier = anchor.then(modifier).alpha(if (ctx.flashUsable) 1f else 0.38f),
                 frost = frost,
                 onClick = ctx.onFlashClick
             )
