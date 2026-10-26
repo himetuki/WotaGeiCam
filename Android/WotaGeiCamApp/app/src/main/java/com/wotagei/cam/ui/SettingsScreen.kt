@@ -83,6 +83,7 @@ import com.wotagei.cam.core.RenderMode
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.core.mediaReadPermissionFor
 import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.dialog.bitrateText
 import com.wotagei.cam.ui.dialog.sampleRateText
@@ -454,10 +455,8 @@ object WotaSettings {
         ParamsPersist.restore(prefs, params)
     }
 
-    /** 媒体库读取权限：33+ 走细分权限，以下回退旧存储权限 */
-    fun mediaReadPermission(): String =
-        if (android.os.Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
-        else Manifest.permission.READ_EXTERNAL_STORAGE
+    /** 媒体库读取权限：33+ 走细分权限，以下回退旧存储权限（版本闸收在 core/MediaAccess 单一处） */
+    fun mediaReadPermission(): String = mediaReadPermissionFor(android.os.Build.VERSION.SDK_INT)
 }
 
 @Composable

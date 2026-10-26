@@ -5,6 +5,8 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.util.Log
+import com.wotagei.cam.core.mediaAccessLabel
+import com.wotagei.cam.core.mediaAccessState
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -514,6 +516,9 @@ object Diag {
         append("品牌=${Build.BRAND} 厂商=${Build.MANUFACTURER} 机型=${Build.MODEL} 设备=${Build.DEVICE}\n")
         append("硬件=${Build.HARDWARE} 主板=${Build.BOARD} 指纹=${Build.FINGERPRINT}\n")
         append("ABI=${Build.SUPPORTED_ABIS.joinToString(",")}\n")
+        // 媒体读取权限的授予状态：对比页选片失败、媒体库缺片这类问题的第一判据。
+        // 只能查权限本身——本应用自录的行在「部分授权」下同样可见，看列表内容判断不了。
+        append("媒体权限=${mediaAccessLabel(mediaAccessState(app))}\n")
         append("时间=${diagStamp(System.currentTimeMillis())} 时区=${java.util.TimeZone.getDefault().id}\n")
     }
 

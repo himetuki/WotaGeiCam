@@ -19,7 +19,8 @@
     <string name="cam_split_exit">退出分屏</string>
     <string name="cam_split_lens">另镜头录制</string>
     <string name="cam_split_compare">实时对比播放</string>
-    <!-- 第 3 项后半：右侧对比播放器；播放/暂停复用 player_play_pause，选片失败复用 compare_pick_failed -->
+    <!-- 第 3 项后半：右侧对比播放器；播放/暂停复用 player_play_pause。选片失败按原因分档：
+         权限不足弹 MediaAccessDialog，非媒体库来源用 compare_pick_foreign_source，其余 compare_pick_failed -->
     <string name="cam_split_pick">选择视频</string>
     <!-- 双摄并发探测为空时挂在「另镜头录制」项下；可用态本次仍占位，点击只给下一批提示 -->
     <string name="cam_split_lens_unsupported">本机不支持双摄并发</string>

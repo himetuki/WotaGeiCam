@@ -73,8 +73,15 @@
     <string name="compare_history">历史</string>
     <string name="compare_history_empty">还没有对比记录</string>
     <string name="compare_history_missing">视频已不存在</string>
+    <string name="compare_history_unreadable">无法访问该来源（授权可能已失效）</string>
     <string name="compare_history_remove">删除该记录</string>
     <string name="compare_pick_failed">无法读取所选视频</string>
+    <!-- 回程 URI 不是 MediaStore 视频条目（系统照片选择器 / 文档 provider / 相册私有 provider）时的
+         专用文案：URI 优先后这类来源会先尝试直接读，只有读不到才落到这里；用「无法读取」笼统化
+         会让人误以为是权限问题，如实说清来源不支持更有用 -->
+    <string name="compare_pick_foreign_source">该视频来自相册之外的来源，暂时无法读取</string>
+    <!-- 外来来源取不到显示名时的兜底名（MediaRepo 用；只在对比右槽的片名标签上出现） -->
+    <string name="compare_unnamed_video">未命名视频</string>
     <string name="compare_mirror">镜像</string>
     <string name="compare_mirror_left">左镜像</string>
     <string name="compare_mirror_right">右镜像</string>

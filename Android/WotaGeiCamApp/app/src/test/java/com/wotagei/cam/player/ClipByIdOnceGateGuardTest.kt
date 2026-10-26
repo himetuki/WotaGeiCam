@@ -16,10 +16,11 @@ import org.junit.Test
  * 为什么要结构守卫：把某个消费点悄悄改回 `clipById(id).first()`，纯看代码审查极易漏
  * （形态几乎一样）；给 `clipByIdOnce` 塞回闸门引用则会让修复整条作废。本文件钉三件事：
  * 1. `clipByIdOnce` 体内直接走 `queryById` 且**不引用 refreshGate**；
- * 2. 5 处消费点逐一断言调 `clipByIdOnce(`，切片内不得残留 `.first()`/`.firstOrNull()` 回退形态；
+ * 2. 消费点逐一断言调 `clipByIdOnce(`，切片内不得残留 `.first()`/`.firstOrNull()` 回退形态；
  * 3. 每条断言配突变自证（文本级突变不编译，只验尺子会红）——期望值逐个手推复核过：
- *    CompareContent 2 处（:282 选右片 + :316 练习回程）、CompareHistorySheet 1 处（历史面板）、
- *    SplitComparePlayer 2 处（练习参考片自动挂载 + 手选片）。
+ *    CompareContent 1 处（练习回程；2026-10-26 起手选右片改走 `clipByUri(uri)`，不再按 id 反查）、
+ *    CompareHistorySheet 1 处（历史面板的库内条目；外来条目走 clipByUri）、
+ *    SplitComparePlayer 1 处（练习参考片自动挂载；手选片同上改走 clipByUri）。
  *
  * 与既有 `PlayerClipMissingGuardTest` 互不遮蔽：它钉 `clipById` 本体的 null 直发契约，
  * 本文件钉 `clipByIdOnce` 与消费点接线，两者各管各的。
@@ -69,11 +70,11 @@ class ClipByIdOnceGateGuardTest {
     }
 
     @Test
-    fun `对比页主体两处反查都走一次性查询`() {
+    fun `对比页主体反查都走一次性查询`() {
         val raw = mainText("player/CompareScreen.kt")
         assertTrue(
-            "CompareContent（选右片 + 练习回程两处）必须走 clipByIdOnce，且切片内不得残留 .first()/.firstOrNull()",
-            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 2)
+            "CompareContent（练习回程一处；手选右片走 clipByUri）必须走 clipByIdOnce，且切片内不得残留 .first()/.firstOrNull()",
+            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 1)
         )
     }
 
@@ -87,11 +88,11 @@ class ClipByIdOnceGateGuardTest {
     }
 
     @Test
-    fun `录制页对比播放两处反查都走一次性查询`() {
+    fun `录制页对比播放反查都走一次性查询`() {
         val raw = mainText("ui/CameraScreen.kt")
         assertTrue(
-            "SplitComparePlayer（练习参考片自动挂载 + 手选片两处）必须走 clipByIdOnce",
-            onceOnlyHolds(raw, "ui/CameraScreen.kt", "SplitComparePlayer", expected = 2)
+            "SplitComparePlayer（练习参考片自动挂载一处；手选片走 clipByUri）必须走 clipByIdOnce",
+            onceOnlyHolds(raw, "ui/CameraScreen.kt", "SplitComparePlayer", expected = 1)
         )
     }
 
@@ -99,7 +100,7 @@ class ClipByIdOnceGateGuardTest {
     fun `突变_消费点改回first收流必红`() {
         val raw = mainText("player/CompareScreen.kt")
         assertTrue("良品必须先真的绿，否则突变体的红没有意义",
-            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 2))
+            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 1))
         // 突变：某一点改回 clipById(id).first()（文本级突变不编译，只验尺子会红）
         val mutant = raw.replace(
             Regex.fromLiteral("repo.clipByIdOnce(id)"),
@@ -107,7 +108,7 @@ class ClipByIdOnceGateGuardTest {
         )
         assertFalse(
             "消费点改回 .first() 后守卫必须报红（真偏离：零发射流上挂起整个关闸期）",
-            onceOnlyHolds(mutant, "player/CompareScreen.kt", "CompareContent", expected = 2)
+            onceOnlyHolds(mutant, "player/CompareScreen.kt", "CompareContent", expected = 1)
         )
     }
 }

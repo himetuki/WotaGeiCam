@@ -1,5 +1,6 @@
 package com.wotagei.cam.media
 
+import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
@@ -7,9 +8,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.LruCache
 import android.util.Size
 import com.wotagei.cam.R
+import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -197,9 +200,10 @@ class MediaRepo private constructor(private val app: Context) {
      * 一次性明确查询：不受列表刷新闸门约束（闸门只护列表/播放页两条流）。
      *
      * 为什么有了 [clipById] 还要它：关闸期 [clipById] 的闸门分支**零发射**，散点的单次反查
-     * （对比页选右片 / 练习回程 / 历史面板）用 `.first()` 收流会在零发射流上**挂起整个关闸期**
-     * （约 1.15s）——挂起不是异常，但一样是缺陷。这里一次查完即返回，语义与 [clipById]
-     * 开闸后的单次发射相同：null = 查过且没有。调用点见 CompareScreen / CameraScreen 的五处反查。
+     * （练习回程 / 历史面板的库内条目 / 分屏自动挂载）用 `.first()` 收流会在零发射流上
+     * **挂起整个关闸期**（约 1.15s）——挂起不是异常，但一样是缺陷。这里一次查完即返回，
+     * 语义与 [clipById] 开闸后的单次发射相同：null = 查过且没有。手选右片自 2026-10-26 起
+     * 改走 [clipByUri]（外来来源没有 mediaId 可查），不再经这里。
      */
     suspend fun clipByIdOnce(id: Long): VideoClip? {
         // 块体而非 `= withContext(...)` 表达式体：源码守卫（ClipByIdOnceGateGuardTest）按花括号体
@@ -207,6 +211,113 @@ class MediaRepo private constructor(private val app: Context) {
         return withContext(Dispatchers.IO) {
             val clip = queryById(id)
             clip?.copy(tags = tagDao.tagsOf(id).toSet())
+        }
+    }
+
+    /**
+     * 按**任意可读的 content:// URI** 反查播放条目（对比页右槽的来源无关入口）。
+     *
+     * 两支：
+     * 1. URI 是 MediaStore 视频集合条目（`content://media/<volume>/video/media/<id>`）：
+     *    按 `_ID` 走 [queryById]，命中即补 Room 标签返回（与 [clipByIdOnce] 同口径）；
+     * 2. 其它来源（照片选择器 / 文档 provider / 下载 provider …）或 MediaStore 查无此行：
+     *    先做可读性预检（`openAssetFileDescriptor` 能打开才算可读），再取 `DISPLAY_NAME`、
+     *    `MediaMetadataRetriever` 时长，构造一个**外来条目**。
+     *
+     * 返回条目的 `id == 0L` 是刻意语义：表示「非本机媒体库条目」（外来来源/照片选择器/文档
+     * provider）。这类条目**只用于对比右槽播放与历史**，**不得进入媒体库列表**——它没有 Room
+     * 标签、没有 MediaStore 行，混进列表会被删除/收藏/系列等按 `_ID` 工作的链路当成真条目。
+     * 跨重启能否再读到它，取决于该 URI 的读授权是否被持久化（见 `persistPickReadPermission`，
+     * 只有 ACTION_OPEN_DOCUMENT 类结果可持久化；ACTION_PICK 回程通常只在本次会话内有效）。
+     *
+     * 读不到（SecurityException / FileNotFound / provider 返回 null）或 URI 非法、任何异常
+     * 一律返回 null，**不抛**。
+     */
+    suspend fun clipByUri(uri: Uri): VideoClip? {
+        return withContext(Dispatchers.IO) {
+            try {
+                mediaStoreClipByUri(uri) ?: foreignClipByUri(uri)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 取消必须原样冒泡：吞掉会让调用方在已取消的协程里继续写 UI 状态
+                throw e
+            } catch (e: Exception) {
+                // 失败现场要留：调用方只拿到 null，不看这条日志就分不清权限/IO/解码
+                Log.w(TAG, "clipByUri 读取失败 uri=$uri", e)
+                null
+            }
+        }
+    }
+
+    /** [clipByUri] 的 MediaStore 分支：命中返回带标签的库条目；非 MediaStore 形态或查无此行返回 null */
+    private suspend fun mediaStoreClipByUri(uri: Uri): VideoClip? {
+        if (!isMediaStoreVideoUri(uri)) return null
+        // 末段超出 Long 范围时不要整条判死：交给外来分支按 URI 直读
+        val id = runCatching { ContentUris.parseId(uri) }.getOrNull() ?: return null
+        val hit = queryById(id) ?: return null
+        // 标签是增强信息：Room 抖动不该把一条已命中的可播片判成「读取失败」
+        return hit.copy(tags = runCatching { tagDao.tagsOf(id).toSet() }.getOrDefault(emptySet()))
+    }
+
+    /**
+     * [clipByUri] 的「任意来源」分支。
+     * 先验可读性：`openAssetFileDescriptor` 成功（并且 use 关闭）才算可读；抛异常或返回 null
+     * 一律视为读不到（= null），绝不把一个打不开的 URI 塞进播放器。
+     * provider 若声明了非视频类型（选中图片/文档/音频）直接拒——右槽是视频位，
+     * 放进去只会在播放器里报一个难读的错误。
+     */
+    private fun foreignClipByUri(uri: Uri): VideoClip? {
+        if (!canReadUri(uri)) return null
+        val declared = runCatching { app.contentResolver.getType(uri) }.getOrNull()
+        if (!declared.isNullOrEmpty() && !declared.startsWith("video/")) return null
+        val name = displayNameOf(uri)
+            ?: uri.lastPathSegment?.takeIf { it.isNotBlank() }
+            ?: app.getString(R.string.compare_unnamed_video)
+        return VideoClip(
+            id = 0L,
+            uri = uri,
+            name = name,
+            dataPath = null,
+            relativePath = "",
+            dateAddedSec = 0L,
+            sizeBytes = 0L,
+            durationMs = durationOf(uri),
+            width = 0,
+            height = 0,
+            mimeType = "video/*",
+            tags = emptySet(),
+            isTrashed = false
+        )
+    }
+
+    /** 可读性预检：能打开（并关闭）读描述符即可读；任何异常/返回 null 都按不可读处理 */
+    private fun canReadUri(uri: Uri): Boolean = runCatching {
+        app.contentResolver.openAssetFileDescriptor(uri, "r")?.let { fd -> fd.use { true } } ?: false
+    }.getOrDefault(false)
+
+    /** provider 的 DISPLAY_NAME；查不到/为空返回 null（由调用方回退到路径段/默认名） */
+    private fun displayNameOf(uri: Uri): String? = runCatching {
+        app.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { c ->
+            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx)?.takeIf { it.isNotBlank() } else null
+        }
+    }.getOrNull()
+
+    /** 时长（ms）；取不到或任何异常一律 0，不影响播放 */
+    private fun durationOf(uri: Uri): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(app, uri)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        } catch (e: Exception) {
+            0L
+        } finally {
+            runCatching { retriever.release() }
         }
     }
 

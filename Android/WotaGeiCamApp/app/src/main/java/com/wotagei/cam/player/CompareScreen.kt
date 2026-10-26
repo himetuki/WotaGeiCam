@@ -1,9 +1,9 @@
 package com.wotagei.cam.player
 
 import android.app.Activity
-import android.content.ContentUris
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -77,9 +77,16 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import com.wotagei.cam.R
+import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.isMediaStoreVideoUri
+import com.wotagei.cam.core.mediaAccessLabel
+import com.wotagei.cam.core.mediaAccessState
+import com.wotagei.cam.core.needsMediaAccessHint
+import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.MediaRepo
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
+import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.ui.CompareProbe
 import com.wotagei.cam.ui.CompareProbeOverlay
@@ -87,6 +94,7 @@ import com.wotagei.cam.ui.CompareProbeState
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.dialog.BottomPanel
+import com.wotagei.cam.ui.dialog.MediaAccessDialog
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaIconButton
@@ -157,6 +165,20 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     val offsetMs = remember { mutableStateOf(0L) }
     var syncing by remember { mutableStateOf(false) }
     var banner by remember { mutableStateOf<Int?>(null) }
+    /**
+     * 选片失败且媒体读取权限不足时的提示档（null = 不弹）。
+     *
+     * 部分授权（Android 14+「选择照片和视频」）下相册里未被选中的视频对本应用不可见，
+     * 选片必然落到「无法读取」。这类用户启动门与设置页都显示「已授予」，所以只能在这里
+     * 就地告知并给「去设置」出口；判据是运行时权限，不能从媒体库列表内容反推
+     * （本应用自录的行在任何授权态下都可见）。
+     */
+    var accessPrompt by remember { mutableStateOf<MediaAccessState?>(null) }
+    /**
+     * 选片请求序号：云相册/远程 provider 的解析可能阻塞数秒，用户等不及再点一次时
+     * 先后两次的结果可能乱序返回。只应用最新一次的结果，旧的失败/弹层不许盖在新选择上。
+     */
+    var pickSeq by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     var dragUnified by remember { mutableStateOf<Float?>(null) }
     var dragLeft by remember { mutableStateOf<Float?>(null) }
     var dragRight by remember { mutableStateOf<Float?>(null) }
@@ -189,6 +211,12 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 探针只读的播放态（不参与判断）
     val leftState by leftEngine.playbackState.collectState(Player.STATE_IDLE)
     val rightState by rightEngine.playbackState.collectState(Player.STATE_IDLE)
+    // 右引擎播放错误可见（2026-10-26）：坏文件/不支持的编码在 ExoPlayer 里只走 onPlayerError，
+    // 不给 UI 反馈就是「右窗黑着、进度不动」，导出的诊断件也看不出是解码失败。外来 URI
+    // 直接播（见 pickRight）后这类失败概率更高，所以右槽必须能报出来。左引擎既有错误
+    // 消费逻辑不在这里动。
+    val rightErr by rightEngine.playbackError.collectState(null)
+    LaunchedEffect(rightErr) { if (rightErr != null) banner = R.string.player_error }
     // 启停态取两引擎并集：只读左引擎会在右引擎自己播完/绕回后把按钮状态显示错
     val leftPlaying by leftEngine.isPlaying.collectState(false)
     val rightPlaying by rightEngine.isPlaying.collectState(false)
@@ -251,41 +279,70 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     val repo = rememberMediaRepo()
     val prefs = remember(app) { WotaSettings.of(app) }
 
+    /**
+     * 选片失败统一出口：先留现场（失败分支原先一条日志都没有，导出的诊断件里看不出
+     * 走到哪一步），再按媒体权限决定提示形态——权限不足给可操作提示，其余只给文案。
+     *
+     * URI 优先后失败只剩两步：[stage]="无回程URI"（选片器没回 data）与「读取失败」
+     * （clipByUri 解不出，含权限过滤/来源不可读）；[id] 仅对库内来源有意义，外来来源恒 0。
+     */
+    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String) {
+        // 权限探测里有 isExternalStorageManager 的 binder 调用：放 IO 上做，横幅仍回主线程写
+        val access = withContext(Dispatchers.IO) { mediaAccessState(app) }
+        // 形态也要记：MediaStore 条目之外的来源（照片选择器/文档 provider）与「权限不足」
+        // 是两条完全不同的修法，日志里必须先分清
+        val mediaShape = isMediaStoreVideoUri(uri)
+        Log.w(
+            "WotaPick",
+            "对比页选片失败[$stage] uri=$uri authority=${uri?.authority} id=$id " +
+                "mediaStoreUri=$mediaShape access=${mediaAccessLabel(access)}"
+        )
+        if (needsMediaAccessHint(access)) {
+            accessPrompt = access
+        } else {
+            banner = if (uri != null && !mediaShape) {
+                R.string.compare_pick_foreign_source
+            } else {
+                R.string.compare_pick_failed
+            }
+        }
+    }
+
     // 右侧视频改走系统图库选择器（ACTION_PICK 直开系统相册）：测试机无 GMS，
     // Photo Picker 会退化成文档界面，ACTION_PICK 才是用户熟悉的相册入口。
-    // 回调把 content Uri 还原成 mediaId 再经仓库反查，选中后记进对比历史。
+    //
+    // 2026-10-26 URI 优先（H1/H2/H3 的共同修复点）：回程 content Uri **直接播**——
+    // clipByUri 一次解码成可播片，mediaId 不再是播放门槛。照片选择器/文档 provider 等
+    // 外来来源没有 MediaStore 行，旧实现先 parseId/_ID 反查再播会把它们全判死。
+    // clip.id 对库内条目才是真 MediaStore id（外来来源为 0），只用于库内历史去重与增强。
     val pickRight = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        // 每次回程先清旧横幅：否则上一次的失败文案会盖在新一次尝试的反馈上
+        banner = null
         if (result.resultCode == Activity.RESULT_OK) {
-            // 坏 Uri / 解析失败一律按没选成处理：给错误横幅而不是静默吞。
-            // parseId 只认数字末段（media uri）；个别相册/文件管理器会回私有 provider uri，
-            // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
-            // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
-            // （一次性反查 clipByIdOnce 是挂起调用、自带 IO 切换），横幅/右槽仍是主线程写
+            // 个别相册把结果放 ClipData 而不是 data：两个都取，都没有才判「没选成」
             val uri = result.data?.data
-            var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
+                ?: result.data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            val seq = ++pickSeq
             tapScope.launch {
-                if (id <= 0L && uri != null) {
-                    id = withContext(Dispatchers.IO) {
-                        runCatching {
-                            app.contentResolver.query(
-                                uri, arrayOf(android.provider.MediaStore.Video.Media._ID), null, null, null
-                            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
-                        }.getOrNull() ?: 0L
-                    }
+                if (uri == null) {
+                    reportPickFailure(null, 0L, "无回程URI")
+                    return@launch
                 }
-                if (id <= 0L) {
-                    banner = R.string.compare_pick_failed
+                val clip = repo.clipByUri(uri)
+                // 慢 provider 让先后两次选片乱序返回时，只认最新一次的请求
+                if (seq != pickSeq) return@launch
+                if (clip == null) {
+                    reportPickFailure(uri, 0L, "读取失败")
                 } else {
-                    val clip = repo.clipByIdOnce(id)
-                    if (clip == null) {
-                        banner = R.string.compare_pick_failed
-                    } else {
-                        right = clip
-                        offsetMs.value = 0L
-                        CompareHistory.record(prefs, clip.id, left.id)
-                    }
+                    // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读
+                    persistPickReadPermission(app, uri)
+                    accessPrompt = null
+                    banner = null
+                    right = clip
+                    offsetMs.value = 0L
+                    CompareHistory.record(prefs, clip.id, uri.toString(), left.id)
                 }
             }
         }
@@ -293,8 +350,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     fun launchPicker() {
         // 不加 FLAG_GRANT_READ_URI_PERMISSION：它只对启动 intent 自己的 uri 有意义，
-        // 结果 uri 的读授权由相册在 result 里自行授予，我们的读数走 MediaStore 自带权限
-        pickRight.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+        // 结果 uri 的读授权由相册在 result 里自行授予
+        banner = null
+        // 没有 handler（个别 ROM 不注册 ACTION_PICK）时 launch 会抛 ActivityNotFoundException，
+        // 不接住就是主线程崩溃；按普通失败提示处理
+        runCatching {
+            pickRight.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+        }.onFailure { banner = R.string.compare_pick_failed }
     }
 
     // 练习闭环回程消费（2026-10-04 方向 4）：本页 ON_RESUME 时先自愈清 armed（录制失败/
@@ -316,7 +378,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     if (clip != null) {
                         right = clip
                         offsetMs.value = 0L
-                        CompareHistory.record(prefs, clip.id, left.id)
+                        CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
                     }
                 }
             }
@@ -972,6 +1034,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             )
         }
 
+        // 权限提示是窗口层（AlertDialog 不占布局），与底部反馈条并列互不影响
+        accessPrompt?.let { state ->
+            MediaAccessDialog(state = state, onDismiss = { accessPrompt = null })
+        }
+
         // 同步结果反馈条：从底边浮起、3.2s 后淡出。文案钉在快照上，
         // 否则退场动画那一帧 banner 已置空，条子会先变成空的再滑走
         val msg = banner
@@ -1026,7 +1093,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                 onPick = { clip ->
                     right = clip
                     offsetMs.value = 0L
-                    CompareHistory.record(prefs, clip.id, left.id)
+                    CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
                     historyOpen = false
                 }
             )
@@ -1070,9 +1137,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 }
 
 /**
- * 「历史」面板**内容**：把 [CompareHistory] 的记录逐条经 [MediaRepo.clipByIdOnce] 反查成视频——
+ * 「历史」面板**内容**：把 [CompareHistory] 的记录逐条还原成视频——库内条目经
+ * [MediaRepo.clipByIdOnce] 反查，外来来源经 [MediaRepo.clipByUri] 直接解码回程 URI——
  * 还在的显示片名 + 时长（整行点选直接设为右侧视频，并把这条记回队首再收面板），
- * 已不存在的（删了/换库）显示灰色占位行，行尾删除钮把这条记录摘掉后就地刷新。
+ * 已不存在的（删了/换库/URI 失效）显示灰色占位行，行尾删除钮把这条记录摘掉后就地刷新。
  *
  * 容器（标题/关闭钮/scrim/滚动/宽高纪律）全部由录制页同一枚 [BottomPanel] 提供——
  * 本函数只管行列表。换装取舍：M3 ModalBottomSheet 的**手势下滑关闭**没有等价搬过来
@@ -1097,7 +1165,16 @@ private fun CompareHistorySheet(
     LaunchedEffect(refresh) {
         val resolved = ArrayList<Pair<CompareHistory.Entry, VideoClip?>>()
         CompareHistory.entries(prefs).forEach { entry ->
-            resolved += entry to repo.clipByIdOnce(entry.rightId)
+            // 库内条目按 mediaId 一次性反查；外来来源没有 MediaStore 行，直接按历史里存的
+            // 回程 URI 解码（clipByUri 自带 IO 切换）。两条都失败 = 失效行（灰度删除线）。
+            val clip = if (entry.rightId > 0L) {
+                // 库内条目优先按 id；权限态变化/行暂时不可见时回退到历史里存的 URI，
+                // 否则「视频还在、只是这一行查不到」会被误显示成「视频已不存在」
+                repo.clipByIdOnce(entry.rightId) ?: entry.rightUri?.let { repo.clipByUri(Uri.parse(it)) }
+            } else {
+                entry.rightUri?.let { repo.clipByUri(Uri.parse(it)) }
+            }
+            resolved += entry to clip
         }
         items = resolved
     }
@@ -1125,7 +1202,11 @@ private fun CompareHistorySheet(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            stringResource(R.string.compare_history_missing),
+                            // 外来来源没有库行：读不到多半是临时授权过期，不是文件被删
+                            stringResource(
+                                if (entry.rightId > 0L) R.string.compare_history_missing
+                                else R.string.compare_history_unreadable
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                             // 正文压 AcrylicScrim 只准 textHi（同上）；「失效」语义由删除线承担
                             color = WotaText,
@@ -1133,7 +1214,7 @@ private fun CompareHistorySheet(
                             modifier = Modifier.weight(1f)
                         )
                         IconButton(onClick = {
-                            CompareHistory.remove(prefs, entry.rightId)
+                            CompareHistory.remove(prefs, entry.key)
                             refresh++
                         }) {
                             Icon(
