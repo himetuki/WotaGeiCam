@@ -145,6 +145,11 @@ data class CameraAbility(
             " minFocusD=$minFocusDistanceDiopter zoomRatio=$zoomRatioRange maxDigital=$maxDigitalZoom")
         Log.i(tag, "ability[$label] afModes=$afModes awbModes=$awbModes flash=$flashAvailable" +
             " regionsAf=$maxRegionsAf regionsAe=$maxRegionsAe ois=$oisAvailable eis=$eisAvailable")
+        // 画面降噪的**唯一能力依据**（2026-10-26）：0=OFF 1=FAST 2=HIGH_QUALITY 4=ZERO_SHUTTER_LAG。
+        // 面板"HAL 快速/HAL 高质量"能不能选、下发会不会被 RequestApplier 拦掉，都只看这一行；
+        // 空集合 = 未声明 ⇒ 两档都必须灰显（判"用户说开了却没效果"时先核这里）
+        Log.i(tag, "ability[$label] noiseReductionModes=${noiseReductionModes.sorted().joinToString()}" +
+            if (noiseReductionModes.isEmpty()) "（未声明 ⇒ HAL 两档不可用）" else "")
         Log.i(tag, "ability[$label] fpsRanges=${fpsRanges.joinToString { "[${it.lo},${it.hi}]" }}" +
             " fixed24=${hasFixedFps(24)} fixed25=${hasFixedFps(25)} highSpeedCapable=$highSpeedCapable")
         Log.i(tag, "ability[$label] videoSizes=${videoSizes.size} max=${maxSize.fmt()}(${maxSize.aspect()})" +

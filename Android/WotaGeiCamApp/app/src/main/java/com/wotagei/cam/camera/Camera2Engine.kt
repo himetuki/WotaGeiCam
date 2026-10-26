@@ -160,6 +160,15 @@ class Camera2Engine(
     /** 「清不掉」这条日志每场只打一次（未声明 OFF 的机型），避免逐帧刷屏 */
     private var halNrStuckLogged = false
 
+    /**
+     * 上一次**打过日志**的降噪下发值（2026-10-26）：只在变化时打，避免合成刷新每 5ms 一行。
+     * 初值 null 而不是 0：0 是 `NOISE_REDUCTION_MODE_OFF` 的合法值，用它当初值会让
+     * "第一次就该写 OFF"的那一帧被当成"没变化"而不打日志；null 又恰好是"本次不写键"，
+     * 所以再用 [halNrLoggedOnce] 区分"还没打过"与"已经打过且现在不写"。
+     */
+    private var halNrLastLogged: Int? = null
+    private var halNrLoggedOnce = false
+
     /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface；v0.0.1 不挂 YUV 分析流 */
     private var extraSurface: Surface? = null
     private var extraReader: ImageReader? = null
@@ -708,6 +717,8 @@ class Camera2Engine(
         // 新 builder = 请求里没有我们写过的任何键 ⇒ 残留账清零（生命周期与 builder 严格一致）
         halNrWritten = false
         halNrStuckLogged = false
+        halNrLastLogged = null
+        halNrLoggedOnce = false
     }
 
     /**
@@ -730,9 +741,35 @@ class Camera2Engine(
      * ①把决议结果塞进快照 ②把"写过什么"记回来。
      */
     private fun applyParams(builder: CaptureRequest.Builder, state: RequestApplier.State) {
+        val requested = videoDenoiseActual()
         val mode = com.wotagei.cam.core.noiseReductionModeToSend(
-            videoDenoiseActual(), state.noiseReductionModes, halNrWritten
+            requested, state.noiseReductionModes, halNrWritten
         )
+        // 画面降噪的**下发真值**（2026-10-26 取证）：只在"这次要写的值变了"时打一行，不跟着逐帧刷
+        // （合成刷新 5ms 一拍会淹掉 logcat）。null 的两种来历必须分开报，否则排障时分不清
+        // "用户关了"与"本机没声明这一档"：
+        //   · requested=OFF 且本场没写过 ⇒ 正常（不碰厂商默认）
+        //   · requested=HAL 但不在声明表 ⇒ 该档在本机不可用（面板本应已灰显）
+        if (!halNrLoggedOnce || mode != halNrLastLogged) {
+            halNrLoggedOnce = true
+            halNrLastLogged = mode
+            val why = when {
+                mode != null -> "写入 ${halNrName(mode)}"
+                // GPU 双边是**设计上**不写 HAL 键（由 GL 管线独占，避免 HAL+GL 双重降噪）——
+                // 这种情况必须与"HAL 档在本机不可用"分开报，否则排障会误判成能力缺失
+                requested == com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL ->
+                    "不写（GPU 双边由 GL 管线独占，HAL 侧按不降噪处理）" +
+                        if (halNrWritten) "；本次写 OFF 清残留" else ""
+                requested != com.wotagei.cam.core.VideoDenoise.OFF ->
+                    "不写（本机未声明该档：$requested，declared 里没有）"
+                else -> "不写（OFF；本场未写过该键）"
+            }
+            Log.i(
+                TAG,
+                "画面降噪下发 requested=$requested highSpeed=${state.highSpeed}" +
+                    " declared=${state.noiseReductionModes.sorted()} -> $why"
+            )
+        }
         if (mode == null && halNrWritten && !halNrStuckLogged) {
             // 退出 HAL 档却清不掉：本机没声明 OFF。留一条日志（用户排障时能看出"关不掉"的原因），
             // 不阻断任何东西——下一场会话（新 builder）自然干净。
@@ -743,6 +780,16 @@ class Camera2Engine(
         if (mode != null) {
             halNrWritten = mode != CaptureRequest.NOISE_REDUCTION_MODE_OFF
         }
+    }
+
+    /** 降噪模式的日志短名（Camera2 的 NOISE_REDUCTION_MODE_* 就这五档） */
+    private fun halNrName(mode: Int): String = when (mode) {
+        CaptureRequest.NOISE_REDUCTION_MODE_OFF -> "OFF(0)"
+        CaptureRequest.NOISE_REDUCTION_MODE_FAST -> "FAST(1)"
+        CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY -> "HIGH_QUALITY(2)"
+        CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL -> "MINIMAL(3)"
+        CaptureRequest.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG -> "ZSL(4)"
+        else -> "mode($mode)"
     }
 
     private fun snapshot(halNoiseReductionMode: Int?): RequestApplier.Snapshot = with(params) {

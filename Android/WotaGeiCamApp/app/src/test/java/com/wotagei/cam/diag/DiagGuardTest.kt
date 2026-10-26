@@ -133,23 +133,30 @@ class DiagGuardTest {
     }
 
     /**
-     * 总开关（2026-10-13 用户裁决：默认关）的两条**语义锚**：
-     * 1. 常规记录的 enabled 短路必须发生在级别档位判定**之前**（关 = 全拒，连 verbose 都不看）；
-     * 2. **崩溃写入路径不许出现 enabled 短路**——本日志系统存在的理由就是"被系统拒绝类问题必须留现场"，
-     *    默认关闭后崩溃取证是唯一零常态占用的兜底，量小、价值极高，绝不能被开关卡住。
+     * 记录入口的两条**语义锚**（2026-10-26 拆闸后的口径）：
+     * 1. **logcat 那一路不许被总开关挡住**——真机排查靠它，改前"默认关 ⇒ logcat 一行没有"，
+     *    现场只能靠用户口述；改后 `record()` 里必须先走 [com.wotagei.cam.diag.diagLogcatGated]
+     *    再走 `diagRecordGated`（顺序钉死：先保住取证通道，再谈要不要落盘）；
+     * 2. **崩溃写入路径不许出现 enabled 短路**——本日志系统存在的理由就是"被系统拒绝类问题必须留现场"。
      * 判据全部走函数体定位 + 突变自证，防"文本在哪都行"的假绿。
      */
     @Test
-    fun `总开关短路必须在级别判定之前且常规记录入口必须走这道门`() {
-        assertTrue("对照组：真源码必须通过", gateOrderOk(diag) && recordGatedOk(diag))
-        // 突变 1：把总开关判定摘掉（只剩级别档位）⇒ 顺序判据必红
-        val m1 = diag.replace("if (!enabled) return true", "")
-        assertFalse("对照突变体必须真的改动", m1 == diag)
-        assertFalse("摘掉总开关短路后必须红", gateOrderOk(m1))
-        // 突变 2：常规记录入口摘掉这道门 ⇒ 接线判据必红
-        val m2 = diag.replace("if (diagRecordGated(level, enabled, verbose)) return", "")
-        assertFalse("对照突变体必须真的改动", m2 == diag)
-        assertFalse("记录入口不走总开关后必须红", recordGatedOk(m2))
+    fun `logcat通道不受总开关，落盘才受`() {
+        val record = bodyOf(diag, "record")
+        val logcat = record.indexOf("diagLogcatGated(")
+        val file = record.indexOf("diagRecordGated(")
+        assertTrue("record 必须先判 logcat 通道（总开关关也要能进 logcat）", logcat >= 0)
+        assertTrue("落盘仍必须走总开关", file >= 0)
+        assertTrue("logcat 判定必须先于落盘判定（先保住取证通道，再谈省空间）", logcat < file)
+        // 突变：把 logcat 那一路挪到总开关之后 ⇒ 顺序判据必红
+        val swapped = record.replace("diagLogcatGated(", "diagLogcatGatedTmp(")
+            .let { it.replace("diagRecordGated(", "diagLogcatGated(") }
+            .replace("diagLogcatGatedTmp(", "diagRecordGated(")
+        val mutatedRecord = diag.replace(record, swapped)
+        val mL = bodyOf(mutatedRecord, "record").indexOf("diagLogcatGated(")
+        val mF = bodyOf(mutatedRecord, "record").indexOf("diagRecordGated(")
+        assertTrue("对照突变体必须真的改动", mutatedRecord != diag)
+        assertFalse("顺序颠倒后判据必须红", mL in 0 until mF)
     }
 
     @Test
@@ -179,7 +186,7 @@ class DiagGuardTest {
         assertTrue("必须有清除按钮且走 Diag.clear(", block.contains("Diag.clear("))
     }
 
-    /** 判据本体：总开关短路（`if (!enabled)`）在该纯函数里先于级别档位判定（[diagLevelEnabled]） */
+    /** 判据本体：`diagRecordGated` 里总开关判定（`if (!enabled)`）先于级别档位判定（[diagLevelEnabled]） */
     private fun gateOrderOk(src: String): Boolean {
         val gate = bodyOf(src, "diagRecordGated")
         val on = gate.indexOf("if (!enabled)")
@@ -187,9 +194,13 @@ class DiagGuardTest {
         return on in 0 until lvl
     }
 
-    /** 判据本体：常规记录入口真的把总开关判据接进了调用链 */
-    private fun recordGatedOk(src: String): Boolean =
-        bodyOf(src, "record").contains("diagRecordGated(level, enabled, verbose)")
+    @Test
+    fun `落盘总开关的短路顺序仍必须是先开关后档位`() {
+        assertTrue("对照组：真源码必须通过", gateOrderOk(diag))
+        val m1 = diag.replace("if (!enabled) return true", "")
+        assertFalse("对照突变体必须真的改动", m1 == diag)
+        assertFalse("摘掉总开关短路后必须红", gateOrderOk(m1))
+    }
 
     @Test
     fun `记录动作不许把主流程带崩（全程吞异常）`() {

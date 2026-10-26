@@ -3302,7 +3302,7 @@ private class RecordRunner(
         // audioTrackPlan 桥取——面板四组合（双开/仅内录/仅环境/全关）原样落两轨，
         // 旧「内录×静音=纯视频」的互斥掐死废除（它只对批 2 单源时代成立）
         val plan = audioTrackPlan(params.audioEnabled.value, captureAudio)
-        return RecordProfile(
+        val profile = RecordProfile(
             audioDenoise = params.audioDenoise.value,
             width = width,
             height = height,
@@ -3331,6 +3331,25 @@ private class RecordRunner(
             fpsNtsc = !params.fps.value.exact,
             captureAudio = AudioTrack.CAPTURE in plan
         )
+        // 起录决议一行（2026-10-26 取证增强）：真机反馈"录出来不对"时，用户只需说一句"录了"，
+        // 这一行就把该问的全答了——用哪个引擎、走自研还是 MediaRecorder、降噪档、渲染模式、
+        // 帧率与是否 ※、音轨组合、是否开抽帧补弧。放在 buildProfile 出口是因为这里是
+        // **所有**决议已经落定、还没交给录制的唯一时点（改任一条都会出现在这一行里）。
+        //
+        // 判读示例：`engine=CODEC` 但 `audioDenoise=OFF` 且 `ambient=false` ⇒ 是内录或高帧率带的，
+        // 不是降噪强制切；`videoDenoise=GPU_BILATERAL` 但 `render=DIRECT` ⇒ 会退回 HAL 快速档。
+        val engine = if (com.wotagei.cam.record.Recorders.useCodecEngine(profile)) "CODEC" else "MR"
+        Log.i(
+            TAG_UI,
+            "起录决议 engine=$engine ${profile.width}x${profile.height}@${profile.fps}" +
+                "(${if (profile.fpsNtsc) "NTSC/※" else "整数"}) render=$renderMode" +
+                " bitrate=${profile.bitrate} codec=${profile.codec}" +
+                " audio[ambient=${profile.audioEnabled} capture=${profile.captureAudio}" +
+                " denoise=${profile.audioDenoise}]" +
+                " videoDenoise=${params.videoDenoise.value}" +
+                " arc=${profile.arcConvert ?: "off"}"
+        )
+        return profile
     }
 
     companion object {

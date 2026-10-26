@@ -355,11 +355,8 @@ object Diag {
 
     private fun record(level: Char, tag: String, msg: String, tr: Throwable?) {
         runCatching {
-            // 总开关（默认关）：关 = 常规记录一行都不写，必须在级别档位判定**之前**短路。
-            // 崩溃件不走这里（见 installCrashHandler 同步直写）——崩溃取证不许被开关卡住。
-            if (diagRecordGated(level, enabled, verbose)) return
             if (!installed.get()) {
-                // 未装（单测/JVM）时保持旧行为：仍旧只走系统日志
+                // 未装（单测/JVM）时保持旧行为：只走系统日志
                 when (level) {
                     'V' -> Log.v(tag, msg)
                     'D' -> Log.d(tag, msg)
@@ -369,7 +366,22 @@ object Diag {
                 }
                 return
             }
-            if (!diagLevelEnabled(level, verbose)) return
+            // ① logcat：**不看总开关**（2026-10-26 拆闸，理由见 [diagRecordGated] 的说明）。
+            //    真机排查靠的就是这一路——改前默认关 = 连 logcat 都拿不到一行，现场只能靠用户口述。
+            //    d/v 仍受详细档：逐帧日志会把系统环形缓冲冲掉，反而看不到关键事件。
+            if (!diagLogcatGated(level, verbose)) {
+                val text = if (tr == null) msg else "$msg | ${Log.getStackTraceString(tr)}"
+                when (level) {
+                    'V' -> Log.v(tag, text)
+                    'D' -> Log.d(tag, text)
+                    'I' -> Log.i(tag, text)
+                    'W' -> Log.w(tag, text)
+                    else -> Log.e(tag, text)
+                }
+            }
+            // ② 文件落盘：仍受总开关（默认关 = 不占用户存储，2026-10-13 裁决不变）
+            //    崩溃件不走这里（见 installCrashHandler 同步直写）——崩溃取证不许被开关卡住。
+            if (diagRecordGated(level, enabled, verbose)) return
             val line = diagLine(
                 stamp = diagStamp(System.currentTimeMillis()),
                 level = level, tag = tag,
@@ -563,15 +575,30 @@ internal fun diagLevelEnabled(level: Char, verbose: Boolean): Boolean = when (le
 }
 
 /**
- * 常规记录的总闸（总开关 × 级别档位合成一个判据，纯函数便于表测）：
- * 总开关**关 ⇒ 全拒**（2026-10-13 用户裁决：默认关闭省空间）；
- * 开 ⇒ 再按级别档位判（[diagLevelEnabled]）。**崩溃件不走本判据**——它同步直写文件（取证语义）。
- * 判定顺序钉死为"先总开关后级别"：开关关着时连 verbose 都不必看。
+ * 常规记录的两道闸拆开：**[diagRecordGated] 管"要不要落盘"**，**[diagLogcatGated] 管"要不要进 logcat"**。
+ *
+ * 为什么必须拆（2026-10-26 真机取证踩到的）：
+ * 改前总开关默认关 ⇒ `record()` 第一句就 return，于是 **logcat 里我们自己的 tag 一行都没有**。
+ * 在 WIKO / 华为这类容器上真机排查"帧率到底下发了什么"时，用户手上没有任何可看的东西，
+ * 只能靠反复描述现象——日志系统本来是为了省几 MB 磁盘，结果把最便宜的取证通道也一起关了。
+ * 而 logcat 的环形缓冲由**系统**管理（按 tid/tag 定额，应用写多少都不会落进自己的存储），
+ * 成本约等于零 ⇒ 没有理由受"省空间"这条约束。
+ *
+ * 现在的口径：
+ * - **logcat：恒开**（i/w/e 恒写；d/v 仍受详细档，避免逐帧日志把系统缓冲冲掉）；
+ * - **文件落盘：仍受总开关**（默认关，省空间这条裁决不变）；
+ * - **崩溃件：两条路都不经过**（同步直写，取证语义不变）。
  */
 internal fun diagRecordGated(level: Char, enabled: Boolean, verbose: Boolean): Boolean {
     if (!enabled) return true
     return !diagLevelEnabled(level, verbose)
 }
+
+/**
+ * logcat 这一路要不要写：**不看总开关**，只看级别（详细档决定 d/v）。
+ * 见 [diagRecordGated] 的说明——这条是把"取证通道"与"磁盘占用"解耦的地方。
+ */
+internal fun diagLogcatGated(level: Char, verbose: Boolean): Boolean = !diagLevelEnabled(level, verbose)
 
 /**
  * 「清除日志」的删除判据（纯 JVM，只碰 java.io）：删掉目录下**本系统**写的全部日志件——

@@ -15,14 +15,27 @@ import java.nio.file.Files
  */
 class DiagSwitchClearTest {
 
-    // ---- 总开关 × 级别档位（diagRecordGated）----
+    // ---- 总开关 × 级别档位（diagRecordGated = 落盘闸；diagLogcatGated = logcat 闸）----
 
     @Test
-    fun `总开关关=全拒（任何级别都不记，连详细档也救不回来）`() {
+    fun `总开关关=不落盘（任何级别都不记，连详细档也救不回来）`() {
         for (lvl in listOf('V', 'D', 'I', 'W', 'E', 'X')) {
             assertTrue("关 + 默认档：$lvl 必须拒", diagRecordGated(lvl, enabled = false, verbose = false))
             assertTrue("关 + 详细档：$lvl 仍必须拒", diagRecordGated(lvl, enabled = false, verbose = true))
         }
+    }
+
+    @Test
+    fun `logcat通道不看总开关（取证纪律，2026-10-26 拆闸）`() {
+        // 总开关关着，i/w/e 也必须能进 logcat —— 真机排查全靠这一路
+        for (lvl in listOf('I', 'W', 'E')) {
+            assertFalse("总开关关：$lvl 仍要进 logcat", diagLogcatGated(lvl, verbose = false))
+        }
+        // d/v 仍受详细档（逐帧日志会冲掉系统环形缓冲，反而看不到关键事件）
+        assertTrue(diagLogcatGated('D', verbose = false))
+        assertTrue(diagLogcatGated('V', verbose = false))
+        assertFalse(diagLogcatGated('D', verbose = true))
+        assertFalse(diagLogcatGated('V', verbose = true))
     }
 
     @Test
