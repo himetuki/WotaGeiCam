@@ -342,6 +342,10 @@ class EncoderSlotClockTest {
         // M2-02 帧龄：换帧墙钟 − 相机 SOF 戳，均值与极值两枚都记
         if (!body.contains("lastDrawnTimestampNs")) bad.add("帧龄必须取相机 SOF 戳")
         if (!body.contains("nowNs - frameTsNs")) bad.add("帧龄必须用同一趟 nanoTime 的 nowNs")
+        // 2026-10-26 反馈附B：帧龄改"段内漂移"——必须先取段首基线再相减，
+        // 否则两时钟域（nanoTime vs SENSOR_TIMESTAMP）的不定常量差会让指标恒为巨负
+        if (!body.contains("stampAgeBaseNs = ageNs")) bad.add("必须取段首帧龄基线（跨时钟域常量的唯一去处）")
+        if (!body.contains("ageNs - stampAgeBaseNs")) bad.add("帧龄累计必须吃相对基线的漂移")
         if (body.split("System.nanoTime()").size - 1 > 1) bad.add("不许每帧再取一次 System.nanoTime（两趟时钟之差不是帧龄）")
         if (!body.contains("stampAgeSumNs +=")) bad.add("必须累计帧龄和")
         if (!body.contains("stampAgeCount++")) bad.add("必须累计帧龄样本数")
@@ -431,7 +435,10 @@ class EncoderSlotClockTest {
         assertEquals("良品段尾接线必须先绿", 0, drainViolations(gl).size)
 
         val mutants = listOf(
-            Triple("删掉帧龄累计（只剩戳不记龄）", gl.replace("stampAgeSumNs += ageNs", ""), true),
+            // 2026-10-26 起帧龄改"段内漂移"：累计吃 driftNs（age − 段首基线），突变判据随之更新。
+            // 把基线行删掉 ⇒ drift 恒等于跨时钟域的原始差 ⇒ 指标回退成巨负数，必须报红
+            Triple("删掉帧龄漂移累计（只剩戳不记龄）", gl.replace("stampAgeSumNs += driftNs", ""), true),
+            Triple("删掉帧龄基线（退回跨时钟域巨负值）", gl.replace("stampAgeBaseNs = ageNs", ""), true),
             Triple("帧龄每帧另取一次时钟", gl.replace("val nowNs = System.nanoTime()", "val nowNs = System.nanoTime(); System.nanoTime()"), true),
             Triple("空格内联不走纯函数桥", gl.replace("val gap = encoderSlotGap(encoderLastPtsNs, ptsNs, fps)", "val gap = (ptsNs - encoderLastPtsNs) / 1000000L"), true),
             Triple("删掉空格累计", gl.replace("stampGapSlots += gap", ""), true),
