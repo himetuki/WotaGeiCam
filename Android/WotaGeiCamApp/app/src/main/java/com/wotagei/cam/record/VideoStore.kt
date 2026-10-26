@@ -122,6 +122,52 @@ class VideoStore(private val ctx: Context) {
         }
     }
 
+    /**
+     * 补弧位次 sidecar 的 **MediaStore 兜底通道**（2026-10-26，反馈附A）。
+     *
+     * 为什么存在：sidecar（`.drops.json`）是共享 `Movies/WotaGeiCam/Camera/` 下的**非媒体文件**，
+     * 直写 `java.io.File` 在 Android 11+ 的部分机型上被拒（dada / vivo 实测 `sidecar ok=false`，
+     * WIKO 恰好放行——机型差异，不可依赖）。而视频**本体**刚刚经 MediaStore 成功 commit，
+     * 这就是"本机 MediaStore 可写"的现成证明 ⇒ File 通道失败时 sidecar 走同一条。
+     *
+     * 走 [MediaStore.Files]（非媒体集合）+ 同一 [RELATIVE_PATH] + `application/json`，
+     * 两段式（pending → 写 → commit）与成片一致。中途失败即删 pending 行，不留幽灵。
+     *
+     * @return 成功落库的 uri；失败 null（调用方保留 File 通道的失败日志与"归位"语义）
+     */
+    fun writeSidecar(displayName: String, bytes: ByteArray): Uri? = try {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+        }
+        val uri = resolver.insert(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+        if (uri == null) {
+            Log.e(TAG, "sidecar insert returned null name=$displayName")
+            null
+        } else {
+            runCatching {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: error("output stream 为空")
+                resolver.update(
+                    uri,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null, null
+                )
+                Log.i(TAG, "sidecar via MediaStore name=$displayName bytes=${bytes.size}")
+                uri
+            }.getOrElse {
+                runCatching { resolver.delete(uri, null, null) } // 幽灵 pending 行不留
+                Log.e(TAG, "sidecar write failed: ${it.message}")
+                null
+            }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "sidecar insert failed: ${e.message}")
+        null
+    }
+
     /** 失败/废片回收：删 pending 记录（content uri）或删真实文件（File sink） */
     fun discard(sink: OutputSink?) {
         if (sink == null) return

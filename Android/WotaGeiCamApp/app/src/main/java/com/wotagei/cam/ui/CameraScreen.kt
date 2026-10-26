@@ -3118,6 +3118,8 @@ private class RecordRunner(
             // sidecar 是否真写出去了：写成功才谈"归位"（提到外层作用域——归位块在前缀改名之后，
             // 必须能看见这个标志，而不是嵌进内层 if 里各管一段）
             var sidecarWritten = false
+            // sidecar 落库通道：file = 共享目录直写（可归位）；mediastore = 兜底（按最终名落库）
+            var sidecarChannel = "none"
             if (path != null) {
                 val drops = glProvider()?.drainArcDrops() ?: emptyList()
                 // 段清单（2026-10-04 裁决）：录制器逐段已写视频样本数 → {segment,first,count}，
@@ -3140,7 +3142,30 @@ private class RecordRunner(
                     path,
                     ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops, segments = segs)
                 )
-                Log.i(TAG_UI, "arc drops sidecar ok=$sidecarWritten drops=${drops.size} segs=${segs.size} path=$path")
+                if (sidecarWritten) sidecarChannel = "file"
+                // File 通道失败 ⇒ MediaStore 兜底（2026-10-26 反馈附A）：共享目录的非媒体文件
+                // 直写在 Android 11+ 部分机型被拒（dada/vivo 实测），而视频本体刚走通
+                // MediaStore ⇒ 可写性有现成证明。兜底按**最终公开名**落库（commit 已完成），
+                // 因此不走下面的"归位"（那条只服务 File 通道的 pending 期落盘）。
+                if (!sidecarWritten && path != null) {
+                    val stem = path.substringAfterLast('/').substringBeforeLast('.')
+                    val viaStore = sessionStore?.writeSidecar(
+                        "$stem${ArcDropLog.EXTENSION}",
+                        ArcDropLog(
+                            mode = convert.name.lowercase(), dstFps = activeArcDstFps,
+                            drops = drops, segments = segs
+                        ).encode().toByteArray()
+                    ) != null
+                    if (viaStore) {
+                        sidecarWritten = true
+                        sidecarChannel = "mediastore"
+                    }
+                }
+                Log.i(
+                    TAG_UI,
+                    "arc drops sidecar ok=$sidecarWritten channel=$sidecarChannel " +
+                        "drops=${drops.size} segs=${segs.size} path=$path"
+                )
             }
             // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
             // 容器标称会被强制档标假）：commit 后 update DISPLAY_NAME 连文件改名，
@@ -3187,7 +3212,9 @@ private class RecordRunner(
             //（源实测帧率 == 目标帧率，或拿不到实测值）走不到上面那块 ⇒ 旧代码直接漏搬，
             // sidecar 永久留在 pending 名下（真机每会话一条 `.pending-<id>-….drops.json` 幽灵，
             // 成片从此找不到自己的位次档案）。目标名走 [PendingName.sidecarConvergeTarget] 单一出口。
-            if (sidecarWritten && path != null) {
+            if (sidecarWritten && path != null && sidecarChannel == "file") {
+                // 只服务 File 通道：pending 期落的盘要跟 commit 后的成片名归位。
+                // MediaStore 通道按**最终公开名**直接落库，没有"归位"这一步（也无 pending 可搬）
                 val queriedName = out.parts.firstOrNull()?.uri?.let { queryDisplayName(it) }
                 val target = PendingName.sidecarConvergeTarget(path, queriedName)
                 if (target != null) {

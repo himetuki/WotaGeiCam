@@ -251,8 +251,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     // 全部由 GL 线程独占写（写点在 [stampEncoderPresentation]，读点在 [replaceEncoderSurface]），
     // 不需要 @Volatile。
 
-    /** 帧龄累计和（ns）：换帧墙钟 − 相机 SOF 戳 */
+    /** 帧龄**漂移**累计和（ns）：(换帧墙钟 − SOF 戳) − 本段首帧基线，见 stampEncoderPresentation */
     private var stampAgeSumNs = 0L
+
+    /**
+     * 本段帧龄基线（2026-10-26 反馈附B）：首帧的 (nanoTime − SOF 戳)。
+     * 两个时钟域（nanoTime 任意基准 vs SENSOR_TIMESTAMP 由 TIMESTAMP_SOURCE 决定）差一个
+     * 不定常量，直接相减恒为巨大负数（真机 −21.7h）；只看相对基线的漂移才有时钟无关的诊断价值。
+     */
+    private var stampAgeBaseNs = 0L
 
     /** 帧龄样本数（相机 SOF 戳还没到的那几帧不计入） */
     private var stampAgeCount = 0L
@@ -1567,12 +1574,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 观测 S1-M2-02：帧龄 = 换帧墙钟 − 相机 SOF 戳。抽帧节奏吃相机戳、成片戳吃墙钟，
         // 中间那段不恒定的管线延迟此前全仓零读数，"源真慢 / 两时基速率差 / 延迟单调增长"
         // 三种成因分不开。相机戳还没到（0）不记——那会把墙钟全量算成帧龄。
+        // 【2026-10-26 修正（反馈附B）】原实现 `nowNs - frameTsNs` 混了两个时钟域：
+        // nowNs = System.nanoTime()（任意基准），frameTsNs = 相机 SOF 戳（SENSOR_TIMESTAMP，
+        // 基准由 SENSOR_INFO_TIMESTAMP_SOURCE 决定，UNKNOWN 档从开机附近起算）——两域差一个
+        // 不定常量 ⇒ 帧龄恒为巨大负值（真机实测 −21.7h / −33.3h，指标失效）。
+        // 修正：**段内相对化**——本段首个样本的 (now − ts) 记为基线，其后只累计与基线的**漂移**。
+        // 语义从"绝对帧龄"变为"帧龄漂移"：漂移单调上涨 = 管线延迟在涨；围绕 0 波动 = 两时基
+        // 速率差；恒 0 附近 = 源真慢不成立。跨时钟域基线差被减掉，任何机型都不会再出巨负数。
         val frameTsNs = lastDrawnTimestampNs
         if (frameTsNs > 0L) {
             val ageNs = nowNs - frameTsNs
-            stampAgeSumNs += ageNs
+            if (stampAgeCount == 0L) stampAgeBaseNs = ageNs
+            val driftNs = ageNs - stampAgeBaseNs
+            stampAgeSumNs += driftNs
             stampAgeCount++
-            if (ageNs > stampAgeMaxNs) stampAgeMaxNs = ageNs
+            if (driftNs > stampAgeMaxNs) stampAgeMaxNs = driftNs
         }
         // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderAdaptivePtsNs]
         // 把 slot 序号丢掉了，这里从两枚戳反推跨距，计空格总数与最大单次跨距。
@@ -1616,6 +1632,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         stampAgeSumNs = 0L
         stampAgeCount = 0L
         stampAgeMaxNs = 0L
+        stampAgeBaseNs = 0L // 新段重取基线（跨段的时钟域常量不许带进来）
         stampGapSlots = 0L
         stampGapMaxSlots = 0L
         stampFailCount = 0
@@ -2422,7 +2439,7 @@ internal fun stampObsLine(
 ): String {
     val meanMs = if (ageCount > 0L) ageSumNs / ageCount / 1_000_000L else 0L
     val fpsText = "${achievedCentiFps / 100}.${(achievedCentiFps % 100).toString().padStart(2, '0')}"
-    return "打戳观测[$why] 帧龄 均值=${meanMs}ms 峰值=${ageMaxNs / 1_000_000L}ms 样本=$ageCount " +
+    return "打戳观测[$why] 帧龄漂移 均值=${meanMs}ms 峰值=${ageMaxNs / 1_000_000L}ms 样本=$ageCount " +
         "实到=${fpsText}fps 空格=${gapSlots}格 最大跨距=${gapMaxSlots}格 写戳失败=$failCount"
 }
 
