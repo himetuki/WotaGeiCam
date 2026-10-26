@@ -477,8 +477,10 @@ private fun ShutterPill(
             // （可变范围 [24,30] 选 24 时 41.67ms 在合法域内、HAL 放到 24fps），选档域与下发同源；
             // 旧口径用 pick.hi=30 会把 1/24 灰显——那是 r10 之前"帧周期按 hi 钳"语义的产物。
             // 取不到（该档 fps 不可用）时退回用户档位，与 WotaParams.applyExposure 的退回一致。
-            // 帧周期上界取"本次决议下发的区间下界"（与引擎钳制同源）；取不到就按目标档本身
-            val fpsHi = ability?.decideFps(size, fps.value)?.pick?.lo ?: fps.value
+            // 帧周期上界 = **目标档位**（与引擎钳制/曝光计划同一条线）：可变高速档的下界
+            // （[30,120] 的 30）低于目标 50，用它会把 1/30 放进梯子里——那是 50fps 装不下的死档
+            val fpsHi = ability?.decideFps(size, fps.value)
+                ?.let { maxOf(it.pick.lo, fps.value) } ?: fps.value
             // 2026-10-17 需求：快门 7 档快捷 chip 删除，档位改由刻度滑杆承担。
             // 梯只收 supported 档（被设备否决的档消失而不是灰 chip）；标签仍来自 shutterItems，
             // 所以强制档 1/24、1/25 的 ※ 保留。

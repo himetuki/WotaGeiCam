@@ -812,7 +812,8 @@ class Camera2Engine(
             afRegions = tapAfRegions,
             aeRegions = tapAeRegions,
             afTrigger = tapTrigger,
-            halNoiseReductionMode = halNoiseReductionMode
+            halNoiseReductionMode = halNoiseReductionMode,
+            fpsTarget = fpsValue()
         )
     }
 
@@ -952,7 +953,9 @@ class Camera2Engine(
                 // 帧周期钳制吃**范围下界**（2026-10-04 r26 与 r10/r11 同源）：lo=档位（[24,30] 的
                 // lo=24），1/24 的 41.67ms 在合法域 [1/30, 1/24] 内不再被 hi=30 钳回 1/30——
                 // 旧口径在回写时就把强制档改写掉，r10 的下发修正根本见不到 1/24
-                clampShutterToFrame(normal.lo)
+                // 钳制基准 = **目标档位**（不是区间下界）：可变高速档 [30,120] 的 lo=30 会让
+                // 50/60 档放行 1/30 死档（帧周期 20ms 装不下），见 Snapshot.fpsTarget 的说明
+                clampShutterToFrame(target)
             }
             return
         }
@@ -979,7 +982,7 @@ class Camera2Engine(
             Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围，退到 $ceiling")
             publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)
             writeBackFps(ceiling, fallback.exact)
-            clampShutterToFrame(fallback.lo)
+            clampShutterToFrame(ceiling)
             if (device != null) publishDevice(DeviceStatus.OPEN_SUCCEED)
         }
     }

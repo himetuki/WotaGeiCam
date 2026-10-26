@@ -271,4 +271,74 @@ class RequestApplierTest {
         assertEquals(false, plan.oisOn)
         assertEquals(false, plan.eisOn)
     }
+
+    // -------------------------------------------------- 帧周期/快门基准 = 目标档位（2026-10-26）
+
+    /** 与 EvCrashGuardTest 同型的最小 State/Snapshot 便捷构造 */
+    private fun stateHs(): RequestApplier.State = RequestApplier.State(
+        activeArray = com.wotagei.cam.core.Rect(0, 0, 4000, 3000),
+        isoMin = 100, isoMax = 16000,
+        exposureMinNs = 1_000_000L, exposureMaxNs = 667_847_000L,
+        evMinSteps = -4, evMaxSteps = 4,
+        fpsRanges = listOf(RangeI(30, 120), RangeI(60, 120), RangeI(120, 120)),
+        maxRegionsAf = 1, maxRegionsAe = 1,
+        manualFocusMaxDiopter = 10f, zoomMin = 1f, zoomMax = 8f,
+        useZoomRatio = false, flashAvailable = true, oisAvailable = true, eisAvailable = true,
+        highSpeed = true, eisBlockedBySize = false
+    )
+
+    private fun snapHs(target: Int) = RequestApplier.Snapshot(
+        aeMode = com.wotagei.cam.core.AeMode.MANUAL, iso = 800, shutterNs = 20_000_000L, evSteps = 0,
+        fps = FpsPick(30, 120, false), afMode = com.wotagei.cam.core.AfMode.CONTINUOUS_VIDEO,
+        afModeOverride = null, focusDiopter = 0f, zoom = 1f,
+        wbPreset = com.wotagei.cam.core.WbPreset.AUTO, kelvin = 5500, tint = 0,
+        flashOverride = null, flash = Flash.OFF, stabilize = Stabilize.OFF,
+        afRegions = null, aeRegions = null, afTrigger = null,
+        fpsTarget = target
+    )
+
+    @Test
+    fun framePeriodBasisIsTargetTierNotRangeLowerBound() {
+        // vivo 50 → [30,120]：lo=30 若作基准会放行 33.3ms 帧周期（>50fps 的 20ms）＝死档；
+        // 基准必须是目标 50。曝光 20ms 与 1/50 同域 ⇒ 不被钳
+        val plan = RequestApplier.exposurePlan(stateHs(), snapHs(target = 50))
+        assertEquals(1_000_000_000L / 50, plan.frameDurationNs)
+        assertEquals("曝光 20ms < 1/50 帧周期 ⇒ 原样", 20_000_000L, plan.exposureNs)
+    }
+
+    @Test
+    fun shutterLadderCeilingFollowsTargetTierOnVariableHighSpeedRange() {
+        // 1/30（33.3ms）在 50fps 档必须被钳回 1/50（20ms）——这是 UI 梯与引擎共同的基准
+        val clamped = RequestApplier.clampShutterNs(33 * ns + 333_333L, fps = 50, exposureMinNs = 1, exposureMaxNs = 1_000 * ns)
+        assertEquals(1_000_000_000L / 50, clamped)
+    }
+
+    @Test
+    fun exactNormalTierKeepsLegacyBehavior() {
+        // 回归锚：r10 的原案 [24,30] 选 24（lo==目标）⇒ 41.67ms 帧周期，1/24 长曝光保留
+        val s = RequestApplier.State(
+            activeArray = com.wotagei.cam.core.Rect(0, 0, 4000, 3000),
+            isoMin = 100, isoMax = 16000,
+            exposureMinNs = 1_000_000L, exposureMaxNs = 667_847_000L,
+            evMinSteps = -4, evMaxSteps = 4,
+            fpsRanges = listOf(RangeI(24, 30)),
+            maxRegionsAf = 1, maxRegionsAe = 1,
+            manualFocusMaxDiopter = 10f, zoomMin = 1f, zoomMax = 8f,
+            useZoomRatio = false, flashAvailable = true, oisAvailable = true, eisAvailable = true,
+            highSpeed = false, eisBlockedBySize = false
+        )
+        val snap = RequestApplier.Snapshot(
+            aeMode = com.wotagei.cam.core.AeMode.MANUAL, iso = 800,
+            shutterNs = 1_000_000_000L / 24, evSteps = 0,
+            fps = FpsPick(24, 30, false), afMode = com.wotagei.cam.core.AfMode.CONTINUOUS_VIDEO,
+            afModeOverride = null, focusDiopter = 0f, zoom = 1f,
+            wbPreset = com.wotagei.cam.core.WbPreset.AUTO, kelvin = 5500, tint = 0,
+            flashOverride = null, flash = Flash.OFF, stabilize = Stabilize.OFF,
+            afRegions = null, aeRegions = null, afTrigger = null,
+            fpsTarget = 24
+        )
+        val plan = RequestApplier.exposurePlan(s, snap)
+        assertEquals("1/24 强制档在 [24,30] 上保留（r10 意图不变）", 1_000_000_000L / 24, plan.exposureNs)
+        assertEquals(1_000_000_000L / 24, plan.frameDurationNs)
+    }
 }

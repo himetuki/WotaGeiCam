@@ -116,7 +116,19 @@ object RequestApplier {
          * 取值由引擎经 `core.noiseReductionModeToSend` 决议（声明过才写、退出 HAL 档时清自己的残留、
          * 从没写过就选关闭则完全不碰）——本层只负责"非 null 就写"，策略不进这里。
          */
-        val halNoiseReductionMode: Int? = null
+        val halNoiseReductionMode: Int? = null,
+        /**
+         * 用户选的**帧率档位**（2026-10-26）：帧周期与快门钳制的基准。
+         *
+         * 为什么不直接用 [fps].lo：两个选档函数都只返回**包含目标**的区间（lo ≤ 目标恒成立），
+         * 而区间下界在可变高速档上会**低于**目标——vivo 的 50 → `[30,120]`，lo=30 ⇒ 帧周期
+         * 33.3ms > 50fps 的 20ms，快门梯因此放出一个"引擎必定被 HAL 压回"的死档。
+         * r10 那条"钳制吃范围下界"的裁决针对的是 `[24,30]` 选 24（lo==目标==24）；在 lo < 目标
+         * 的档上必须回到**目标档位**才与用户意图、与 `core.shutterCeilingNs`
+         * （WotaParams.applyAbility 一直按目标档算）同一条线。取 max 是防御：万一未来出现
+         * lo > 目标的选档（现在不可能），仍以较长帧周期为准不炸。
+         */
+        val fpsTarget: Int = 0
     )
 
     // ---------------------------------------------------------------- 能力快照
@@ -394,11 +406,12 @@ object RequestApplier {
      */
     fun exposurePlan(state: State, p: Snapshot): ExposurePlan {
         val manual = p.aeMode == AeMode.MANUAL
-        // 帧周期/快门钳制一律吃**范围下界**（2026-10-04 r10 修正）：无精确档设备上 [24,30] 的
-        // hi=30 会把强制 1/24 钳回 1/30，长曝光观感全失。lo=24（即档位）的帧周期 41.67ms 恰在
-        // 可变范围的合法域 [1/30, 1/24] 内——HAL 据此把节奏放到 24fps，MANUAL 档两键都被尊重；
-        // AE_ON 下这些键本就被 HAL 忽略。精确档 [f,f] 的 lo==hi==f，逐字同旧行为。
-        val fps = p.fps?.lo ?: WotaTiers.HIGH_SPEED_FPS
+        // 帧周期/快门钳制的基准 = **用户档位**（2026-10-26 修正，见 Snapshot.fpsTarget 的说明）：
+        // r10 的"吃范围下界"在 lo==目标 的普通档上与档位相等（[24,30] 选 24 ⇒ 24），行为不变；
+        // 在可变高速档上（vivo 50 → [30,120]，lo=30 < 目标 50）必须回到目标，否则帧周期 33.3ms
+        // 超过 50fps 的 20ms，快门梯放出一个 HAL 必定压回的死档。
+        // 兜底链：两个来源都拿不到（异常态）才退 HIGH_SPEED_FPS——与旧 fallback 一致。
+        val fps = maxOf(p.fpsTarget, p.fps?.lo ?: 0).takeIf { it > 0 } ?: WotaTiers.HIGH_SPEED_FPS
         return ExposurePlan(
             aeLock = !manual && p.aeMode == AeMode.LOCK,
             aeMode = if (manual) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON,
