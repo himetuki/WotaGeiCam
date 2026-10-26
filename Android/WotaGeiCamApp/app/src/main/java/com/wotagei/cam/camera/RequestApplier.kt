@@ -393,16 +393,23 @@ object RequestApplier {
         val aeMode: Int,
         /** manual → 0（AE OFF 下补偿无语义，非零值是矛盾信息）；auto → 钳制后的用户步数（EV 用户值不丢，在 params.ev） */
         val aeComp: Int,
-        val sensitivity: Int,
-        val exposureNs: Long,
-        val frameDurationNs: Long
+        /**
+         * SENSOR 三键（2026-10-26 反馈 #1 方案A）：**null = 本帧不写该键**（仅 AE 自动档）。
+         * 旧设计"auto 档也写三键的确定值"依赖官方契约"HAL 在 AE_ON 下忽略它们"——部分 MTK HAL
+         * 不守约，把三键当钳制采纳，与连续对焦搜索互相拉扯 ⇒ 预览与**成片**曝光闪动
+         * （vivo V2302A 实锤：连续档成片闪、手动档稳定）。
+         */
+        val sensitivity: Int?,
+        val exposureNs: Long?,
+        val frameDurationNs: Long?
     )
 
     /**
      * 曝光组键值计划（纯函数，可直接 JVM 单测）。
-     * SENSOR 三键在 auto 档也写（AE_ON 下 HAL 按官方契约忽略它们），值与 manual 档**同一套钳制**
-     * 算出：域内合法、帧周期与 TARGET_FPS_RANGE 自洽——翻转瞬间不会出现「带着上一档残值」的键，
-     * 这是「清残键」在 Camera2 无删键操作下唯一可执行的形态。
+     * SENSOR 三键只在 manual 档产出（null = 不写）；auto 档的残值清理由引擎侧"AE 翻转即重建
+     * repeating builder"承担（Camera2 无删键，整 builder 重建后键集天然自洽）——这是 2026-10-26
+     * 对旧设计"auto 也写三键确定值"的推翻：官方契约"HAL 在 AE_ON 下忽略它们"被部分 MTK HAL
+     * 打破，三键与 AF 搜索互相拉扯把闪动编码进了成片（vivo V2302A 实锤）。
      */
     fun exposurePlan(state: State, p: Snapshot): ExposurePlan {
         val manual = p.aeMode == AeMode.MANUAL
@@ -412,17 +419,32 @@ object RequestApplier {
         // 超过 50fps 的 20ms，快门梯放出一个 HAL 必定压回的死档。
         // 兜底链：两个来源都拿不到（异常态）才退 HIGH_SPEED_FPS——与旧 fallback 一致。
         val fps = maxOf(p.fpsTarget, p.fps?.lo ?: 0).takeIf { it > 0 } ?: WotaTiers.HIGH_SPEED_FPS
-        return ExposurePlan(
-            aeLock = !manual && p.aeMode == AeMode.LOCK,
-            aeMode = if (manual) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON,
-            aeComp = if (manual) 0 else state.clampEv(p.evSteps),
-            sensitivity = state.clampIso(p.iso),
+        // SENSOR 三键只在手动档产出（AE_OFF 下它们被尊重，值有意义）；
+        // 自动档 null = 不写。残值由引擎在 AE 翻转时**整 builder 重建**解决
+        //（Camera2 无单键 remove，"不写"清不掉上一档写的值——见 Camera2Engine.applyRepeatingNow）。
+        val sensitivity: Int?
+        val exposureNs: Long?
+        val frameDurationNs: Long?
+        if (manual) {
+            sensitivity = state.clampIso(p.iso)
             exposureNs = clampShutterNs(
                 p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
                 // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
                 forceDeviceRange = WotaTiers.isRequiredShutterNs(p.shutterNs)
-            ),
+            )
             frameDurationNs = frameDurationNs(fps)
+        } else {
+            sensitivity = null
+            exposureNs = null
+            frameDurationNs = null
+        }
+        return ExposurePlan(
+            aeLock = !manual && p.aeMode == AeMode.LOCK,
+            aeMode = if (manual) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON,
+            aeComp = if (manual) 0 else state.clampEv(p.evSteps),
+            sensitivity = sensitivity,
+            exposureNs = exposureNs,
+            frameDurationNs = frameDurationNs
         )
     }
 
@@ -431,9 +453,12 @@ object RequestApplier {
         builder.set(CaptureRequest.CONTROL_AE_LOCK, plan.aeLock)
         builder.set(CaptureRequest.CONTROL_AE_MODE, plan.aeMode)
         builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, plan.aeComp)
-        builder.set(CaptureRequest.SENSOR_SENSITIVITY, plan.sensitivity)
-        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, plan.exposureNs)
-        builder.set(CaptureRequest.SENSOR_FRAME_DURATION, plan.frameDurationNs)
+        // SENSOR 三键只在手动档写（null = 不写）；自动档的残值由引擎侧 AE 翻转重建 builder 清掉。
+        // 这里的 `?.let` 不是"按档分支写键"的老病：三键在请求里**缺席**才是本设计的目标，
+        // 分支判断吃的是 plan 的可空性而不是档位字面量（守卫的 if(manual) 禁令针对后者）
+        plan.sensitivity?.let { builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
+        plan.exposureNs?.let { builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+        plan.frameDurationNs?.let { builder.set(CaptureRequest.SENSOR_FRAME_DURATION, it) }
     }
 
     private fun applyAutoFocus(builder: CaptureRequest.Builder, state: State, p: Snapshot) {

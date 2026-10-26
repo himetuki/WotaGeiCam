@@ -161,6 +161,19 @@ class Camera2Engine(
     private var halNrStuckLogged = false
 
     /**
+     * 当前 repeating builder 挂的目标面（2026-10-26 反馈 #1 方案A）：AE 档翻转时要**整 builder
+     * 重建**（SENSOR 三键在自动档必须从请求里缺席，而 Camera2 无单键 remove，"不写"清不掉
+     * 上一档写的值）——重建需要同一批 targets，故在 [prepareBuilder] 里存一份。
+     */
+    private var builderTargets: List<Surface> = emptyList()
+
+    /**
+     * 当前 repeating builder 对应的 AE 档（true=手动/AE_OFF）：与参数总线不一致 ⇒ 翻转发生，
+     * 下一次下发前先重建 builder。null = builder 刚建、还没对过账。
+     */
+    private var builderAeManual: Boolean? = null
+
+    /**
      * 上一次**打过日志**的降噪下发值（2026-10-26）：只在变化时打，避免合成刷新每 5ms 一行。
      * 初值 null 而不是 0：0 是 `NOISE_REDUCTION_MODE_OFF` 的合法值，用它当初值会让
      * "第一次就该写 OFF"的那一帧被当成"没变化"而不打日志；null 又恰好是"本次不写键"，
@@ -714,11 +727,14 @@ class Camera2Engine(
         }
         targets.forEach { surface -> builder.addTarget(surface) }
         reqBuilder = builder
-        // 新 builder = 请求里没有我们写过的任何键 ⇒ 残留账清零（生命周期与 builder 严格一致）
+        builderTargets = targets
+        // 新 builder = 请求里没有我们写过的任何键 ⇒ 残留账清零（生命周期与 builder 严格一致）；
+        // AE 档对齐当前值（新 builder 无 SENSOR 三键，manual 档下一次 apply 会补写）
         halNrWritten = false
         halNrStuckLogged = false
         halNrLastLogged = null
         halNrLoggedOnce = false
+        builderAeManual = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
     }
 
     /**
@@ -833,7 +849,17 @@ class Camera2Engine(
         // 让下面的分类 catch 对「下发前的最后计算」同样生效。
         try {
             syncFpsPick(writeBack = true)
-            applyParams(builder, state)
+            // AE 档翻转（反馈 #1 方案A）：SENSOR 三键在自动档必须从请求里**缺席**，
+            // 而 builder 无删键 ⇒ 整个重建（键集天然自洽，applyParams 随后全量重放其余键）。
+            // 放在 try 内：与 syncFpsPick/apply/build 同一条 P1 纪律（任何 RuntimeException 不许穿透）。
+            val manualNow = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
+            if (builderAeManual != manualNow) {
+                device?.takeIf { builderTargets.isNotEmpty() }?.let { prepareBuilder(it, builderTargets) }
+                builderAeManual = manualNow
+                Log.i(TAG, "AE 档翻转 → 重建 repeating builder（manual=$manualNow），清 SENSOR 三键残留")
+            }
+            // builder 可能刚被重建：重新取（prepareBuilder 失败时 reqBuilder 不动，沿用旧值）
+            applyParams(reqBuilder ?: builder, state)
             val request = builder.build()
             val hs = highSpeedSession
             val normal = session
