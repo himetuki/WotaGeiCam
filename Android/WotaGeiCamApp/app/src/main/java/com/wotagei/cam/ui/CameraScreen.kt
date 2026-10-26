@@ -880,13 +880,14 @@ fun CameraScreen(
     else BottomBarSpaceFallback.value.roundToInt()
     // ---- 可见条目集 = 设置里开着显示的那些。关掉的整颗不出现，但**仍留在位置表里**（见
     // [HudLayoutTable.visibleOrderOf]：过滤只读表、不改表），所以"隐藏再打开显示"回到的是用户放好的位置。
-    // #54 的开关位 + #44 的定焦判定 + 运行时「本机有无闪光灯」+ 音量表只在录制中出现，四条判据都收在
-    // 这里，少认一条就是假开关（历史上「对焦」那颗按下去没反应就是这个）
+    // #54 的开关位 + 运行时「本机有无闪光灯/这颗镜头能不能对焦」+ 音量表只在录制中出现。
+    // 2026-10-26 口径反转：闪光/对焦这两颗**能力给不了时不再整颗摘除**——摘除会在它们的钉格上
+    // 留一格空洞（marble 反馈：点亮「对焦」后录制页那格空着），且用户对着洞无从知道为什么；
+    // 改为留在 visibleEntries 里，由 HudEntryItem 按 ctx 两枚布尔画半透明禁用态、点击给解释。
+    // 少认一条仍是假开关：四条判据的现居处 = HudEntryItem 的 alpha + hudCtx 的 onClick 分流。
     val visibleEntries: Set<HudEntry> = buildSet {
         CamPill.ALL.filter { it !in hiddenPills }.filter { p ->
             when (p) {
-                CamPill.FLASH -> canFlash
-                CamPill.FOCUS -> focusUsable
                 CamPill.LEVEL -> levelEnabled
                 CamPill.VOLUME -> recording && audioEnabled
                 else -> true
@@ -1167,6 +1168,10 @@ fun CameraScreen(
     val topBarSizeLabel = sizeText(size)
     val topBarWidths = rememberCapacityTextWidths(freeMb, topBarTotalBps, topBarSizeLabel)
     val hudCtx = HudCtx(
+        // 能力闸两颗（2026-10-26 口径反转）：给不了时胶囊**在场但禁用**（HudEntryItem 画半透明，
+        // 点击给解释），不再整颗隐藏——隐藏会在钉格上留洞且用户无从理解（见 visibleEntries 处注释）
+        focusUsable = focusUsable,
+        flashUsable = canFlash,
         recording = recStatus == RecordStatus.START,
         busy = recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
         // 计时与状态是**读数**不是入口：给它们挂 onClick 只会让人以为点开有配置项（§37 第 4 条）
@@ -1266,7 +1271,12 @@ fun CameraScreen(
         onFreeClick = { pop = PillKey.STORAGE },
         onRefLineClick = { pop = PillKey.REFLINE },
         onMonitorClick = { pop = PillKey.MONITOR },
-        onFlashClick = { pop = PillKey.FLASH },
+        // 能力给不了的两颗（2026-10-26 口径反转）：不再从 visibleEntries 整颗摘除（那会在它的
+        // 钉格上留一格空洞，用户对着洞无从理解），改为**在场但禁用**——点了给一句解释，面板不出现
+        //（#44「不摆灰选项骗点」保留在面板层）。半透明的禁用观感由 HudEntryItem 按 ctx 两枚布尔画。
+        onFlashClick = {
+            if (canFlash) pop = PillKey.FLASH else showTip(app.getString(R.string.cam_flash_unsupported))
+        },
         onDenoiseClick = { pop = PillKey.DENOISE },
         onCurveClick = {
             openSheet(Sheet.CURVE)
@@ -1275,7 +1285,9 @@ fun CameraScreen(
             if (renderMode != RenderMode.GPU) showTip(app.getString(R.string.cam_monitor_need_gpu))
         },
         onZoomClick = { pop = PillKey.ZOOM },
-        onFocusClick = { pop = PillKey.FOCUS },
+        onFocusClick = {
+            if (focusUsable) pop = PillKey.FOCUS else showTip(app.getString(R.string.cam_focus_unsupported))
+        },
         onStabClick = { pop = PillKey.STAB },
         onBtClick = { pop = PillKey.BT },
         // 2026-10-17：点按/长按都开镜头面板（点按不再切下一颗镜头）；录制中也能开，弹窗内只读

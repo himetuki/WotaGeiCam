@@ -18,7 +18,10 @@ import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.WotaParams
+import com.wotagei.cam.core.WotaTag
+import com.wotagei.cam.core.dumpLenses
 import com.wotagei.cam.core.enumerateLenses
+import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -236,6 +239,14 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                     return@launch
                 }
                 chosenSlotKey = slot.key
+                // 打开的是哪一颗物理头必须能从日志对上：ability.dump 的 label 只是档位名（WIDE），
+                // 同档位多颗/归档存疑时只有 key + 等效焦距 + 最大视频档能定位现场
+                Log.i(
+                    WotaTag.LENS,
+                    "open slot=${slot.key} type=${slot.type} eq=${slot.eqFocal}mm " +
+                        "videoMax=${slot.ability.videoSizes.maxOfOrNull { it.pixels }} " +
+                        "afModes=${slot.ability.afModes} minFocusD=${slot.ability.minFocusDistanceDiopter}"
+                )
                 ui.value = ui.value.copy(currentLens = slot.type, currentSlot = slot, lenses = lensSlots)
                 applyAbilityToParams(slot.ability)
                 e.open(slot)
@@ -256,7 +267,13 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 每次换挡重新枚举（很轻，且能覆盖镜头被系统临时下线的情况） */
     private fun pickSlot(manager: CameraManager): LensSlot? {
         val slots = runCatching { enumerateLenses(manager) }.getOrDefault(emptyList())
-        if (slots.isNotEmpty()) lensSlots = slots
+        if (slots.isNotEmpty()) {
+            lensSlots = slots
+            // 镜头枚举全量落日志（M1 门禁的字面）：哪颗物理头被归进哪个档、各自的最大视频档——
+            // 「画质只有 720p」「广角是定焦」这类反馈，没有这张表就无法判断是枚举归档问题
+            // 还是该颗镜头本来如此（2026-10-26 marble 反馈的取证缺口）
+            dumpLenses(slots)
+        }
         // 先认槽位（同档位多颗时才准），再退到档位名，最后退到列表首颗
         return lensSlots.firstOrNull { it.key == chosenSlotKey }
             ?: lensSlots.firstOrNull { it.type == params.lens.value }
