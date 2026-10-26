@@ -104,6 +104,12 @@ class Camera2Engine(
         /** AE/AF 状态遥测的拍点间隔（反馈 #1/#7 方案F）：1s 一拍，d 级 */
         private const val AE_AF_TELEMETRY_MS = 1_000L
 
+        /**
+         * 手动白平衡运行时探测的判负上限（反馈 #6）：保活拍点 500ms × 4 = 2s 内 HAL 一直
+         * 不回报 TRANSFORM_MATRIX ⇒ 判定增益不被采纳，弹回自动。
+         */
+        private const val WB_PROBE_MAX_FAILS = 4
+
         private const val REOPEN_DELAY_MS = 800L
         private const val REOPEN_MAX = 2
 
@@ -196,7 +202,10 @@ class Camera2Engine(
     private var sinkWaitRetries = 0
     private var reopenRetries = 0
     private var flashResetStage = false
-    private var lastWbKeepAliveMs = 0L   // 单调钟（SystemClock.elapsedRealtime）读数，不是墙钟
+    private var lastWbKeepAliveMs = 0L
+
+    /** 手动白平衡探测的连续不合拍数（见 WB_PROBE_MAX_FAILS；引擎线程独占写） */
+    private var wbProbeFails = 0   // 单调钟（SystemClock.elapsedRealtime）读数，不是墙钟
 
     /** 关闭代数：异步回调只认最新一次开机的结果，防止旧回调写脏状态 */
     private var generation = 0
@@ -944,7 +953,10 @@ class Camera2Engine(
             result: TotalCaptureResult
         ) {
             logAeAfTelemetry(result)
-            if (!RequestApplier.isManualWhiteBalance(params.wbMode.value)) return
+            if (!RequestApplier.isManualWhiteBalance(params.wbMode.value)) {
+                wbProbeFails = 0
+                return
+            }
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
             // `now - lastWbKeepAliveMs` 变负、`< WB_KEEP_ALIVE_MS` 恒真 ⇒ 手动白平衡保活永久停摆，
             // 颜色慢慢漂回自动且无错误码。同族先例：record/Recorder.kt 的 ElapsedClock。
@@ -952,6 +964,28 @@ class Camera2Engine(
             if (now - lastWbKeepAliveMs < WB_KEEP_ALIVE_MS) return
             lastWbKeepAliveMs = now
             markDirty()
+            // 手动白平衡**运行时探测**（2026-10-26 反馈 #6）：公开 API 拿不到
+            // `android.colorCorrection.availableModes`（隐藏键，getKeys 不暴露，真机实证），
+            // "支不支持 TRANSFORM_MATRIX"只能行为探测——我们请求了 TRANSFORM_MATRIX，
+            // HAL 回报的却是别的模式 ⇒ 增益没被采纳（华为 ALN-AL00：AWB_OFF 被采纳画面变绿、
+            // 增益被忽略滑杆无响应）。连续 4 拍（≈2s）不合 ⇒ 弹回 AUTO 并留日志。
+            // 判据只在探测窗口连续累计；用户切回自动即清零。
+            val applied = runCatching { result.get(android.hardware.camera2.CaptureResult.COLOR_CORRECTION_MODE) }
+                .getOrNull()
+            if (applied == CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX) {
+                wbProbeFails = 0
+            } else {
+                wbProbeFails++
+                Log.w(
+                    TAG,
+                    "手动白平衡探测：请求 TRANSFORM_MATRIX 但 HAL 回报 applied=$applied（连续 $wbProbeFails 拍）"
+                )
+                if (wbProbeFails >= WB_PROBE_MAX_FAILS) {
+                    wbProbeFails = 0
+                    params.wbMode.value = com.wotagei.cam.core.WbPreset.AUTO
+                    Log.w(TAG, "本机不支持手动白平衡（增益不被采纳），已弹回自动——反馈 #6 的运行时处置")
+                }
+            }
         }
     }
 
