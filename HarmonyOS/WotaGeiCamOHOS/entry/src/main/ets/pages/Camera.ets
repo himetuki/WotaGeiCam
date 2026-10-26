@@ -248,6 +248,8 @@ struct CameraPage {
   /**
    * WLB：画面在窗口内的矩形（letterbox 单一真源）——参考线 aspect、点按映射、native 上屏
    * 收缩因子三处都吃它，不许各算一遍。宽高比不可用/首帧未量到时 = 铺满（= 旧行为）。
+   * 视口 = 窗口全幅即 GL 表面全幅（本侧沉浸式 setWindowLayoutFullScreen，模拟器实证
+   * 根 Stack 377.14×816vp、native surface created 1320x2856 逐值吻合）。
    */
   private previewBox: PreviewBox = new PreviewBox(0, 0, 0, 0, 0);
   private focusMarkTimer: number = -1;

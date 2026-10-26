@@ -171,6 +171,7 @@ test('接线_画面矩形旋转用复合角', () => {
     '旋转必须与 native UV 旋转同式（sensor − display）；displayDeg 单侧在竖屏=0，画面被压成横带（真机取证）');
   assertTrue(cam.indexOf('((raw % 360) + 360) % 360') >= 0,
     '复合角必须归一到 [0,360)，swapsAxes 才认 90/270（前置镜像会出负角）');
+  assertEq(cam.indexOf('surfWvp'), -1, '视口必须是窗口全幅（沉浸式全屏 = GL 表面全幅，模拟器实证），不得另测表面');
 });
 
 test('接线_姿态仪浮层Stack对齐且不拦触摸', () => {
