@@ -295,7 +295,7 @@ private fun SizePill(
         )
         // 分辨率与帧率是同一件事的两半（换分辨率后帧率档可能失效），放一个弹窗里免得来回点
         PillChoices(
-            options = fpsOptions(ability, size, fps.value > WotaTiers.HIGH_SPEED_FPS),
+            options = fpsOptions(ability, size),
             selected = fps.value,
             label = stringResource(R.string.cam_p_fps),
             onPick = { opt ->
@@ -305,10 +305,9 @@ private fun SizePill(
                     // 会沿用旧档的 exact——"有原生 [25,25] 但无 [24,24]"的机型从 ※24 切到 25
                     // 会把 exact=false 带过去，arcConvertNow() 误把原生 25 当 ※ 档抽帧
                     //（白抽帧 + HUD 假 ※）
-                    val highSpeed = opt.value > WotaTiers.HIGH_SPEED_FPS
-                    val pick = pickFpsRange(
-                        ability?.fpsRangesFor(size, highSpeed) ?: emptyList(), opt.value
-                    )
+                    // 并集判定（2026-10-26）：50/60 在只进高速表的机型上（vivo V2520A）
+                    // 也按高速范围给出近似档，不再因普通流无档而落回 disabled
+                    val pick = pickFpsRange(ability?.fpsRangesUnion(size) ?: emptyList(), opt.value)
                     params.fps.value = pick
                         ?.let { ParamState(opt.value, it.lo..it.hi, enabled = true, exact = it.exact) }
                         ?: fps.copy(value = opt.value, enabled = false, exact = false)
@@ -344,7 +343,7 @@ private fun FpsPill(
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_fps)) {
         if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
-            options = fpsOptions(ability, size, fps.value > WotaTiers.HIGH_SPEED_FPS),
+            options = fpsOptions(ability, size),
             selected = fps.value,
             onPick = { opt ->
                 if (!opt.enabled) {
@@ -353,10 +352,9 @@ private fun FpsPill(
                     // 换档必须**按目标档重查**精确性：copy(value=) 会沿用旧档的 exact——
                     // "有原生 [25,25] 但无 [24,24]"的机型从 ※24 切到 25 会把 exact=false 带过去，
                     // 转换误激活（白抽帧）+ 假 ※。fpsOptions 的求交口径在这里复用同一支。
-                    val highSpeed = opt.value > WotaTiers.HIGH_SPEED_FPS
-                    val pick = pickFpsRange(
-                        ability?.fpsRangesFor(size, highSpeed) ?: emptyList(), opt.value
-                    )
+                    // 并集判定（2026-10-26）：50/60 在只进高速表的机型上（vivo V2520A）
+                    // 也按高速范围给出近似档，不再因普通流无档而落回 disabled
+                    val pick = pickFpsRange(ability?.fpsRangesUnion(size) ?: emptyList(), opt.value)
                     params.fps.value = pick
                         ?.let { ParamState(opt.value, it.lo..it.hi, enabled = true, exact = it.exact) }
                         ?: fps.copy(value = opt.value, enabled = false, exact = false)
@@ -433,8 +431,10 @@ private fun FpsPill(
 
 /** 帧率档：与抽屉同一套求交逻辑，`※` 表示本机只能给近似值 */
 @Composable
-private fun fpsOptions(ability: CameraAbility?, size: Size, highSpeed: Boolean): List<PillOption> {
-    val ranges = ability?.fpsRangesFor(size, highSpeed) ?: emptyList()
+private fun fpsOptions(ability: CameraAbility?, size: Size): List<PillOption> {
+    // 普通∪高速并集（2026-10-26）：厂商把 50/60 只放进高速表时（vivo V2520A 普通流仅
+    // [24,24]/[30,30]），按当前会话模态判定会让 50/60/120/240 永远灰显（用户报障）
+    val ranges = ability?.fpsRangesUnion(size) ?: emptyList()
     val approx = stringResource(R.string.approx_mark)
     return WotaTiers.FPS.map { tier ->
         val pick = pickFpsRange(ranges, tier)
@@ -464,7 +464,7 @@ private fun ShutterPill(
             // （可变范围 [24,30] 选 24 时 41.67ms 在合法域内、HAL 放到 24fps），选档域与下发同源；
             // 旧口径用 pick.hi=30 会把 1/24 灰显——那是 r10 之前"帧周期按 hi 钳"语义的产物。
             // 取不到（该档 fps 不可用）时退回用户档位，与 WotaParams.applyExposure 的退回一致。
-            val ranges = ability?.fpsRangesFor(size, fps.value > WotaTiers.HIGH_SPEED_FPS) ?: emptyList()
+            val ranges = ability?.fpsRangesFor(size, ability.needsHighSpeed(size, fps.value)) ?: emptyList()
             val fpsHi = pickFpsRange(ranges, fps.value)?.lo ?: fps.value
             // 2026-10-17 需求：快门 7 档快捷 chip 删除，档位改由刻度滑杆承担。
             // 梯只收 supported 档（被设备否决的档消失而不是灰 chip）；标签仍来自 shutterItems，

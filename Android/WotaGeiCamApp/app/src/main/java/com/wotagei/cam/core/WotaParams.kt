@@ -96,7 +96,9 @@ class WotaParams(private val scope: CoroutineScope) {
         // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
         applySize(a)
         val targetFps = fps.value.value.coerceAtLeast(1)
-        val highSpeed = targetFps > WotaTiers.HIGH_SPEED_FPS
+        // 高速会话判定按「普通覆盖不了但高速表覆盖」：厂商把 50/60 只放进高速表时
+        // （vivo V2520A），>60 的旧阈值会让这两档在换挡后被普通范围判成不可用
+        val highSpeed = a.needsHighSpeed(size.value, targetFps)
         val pick = pickFpsRange(a.fpsRangesFor(size.value, highSpeed), targetFps)
         fps.value = if (pick == null) ParamState(targetFps, null, enabled = false, exact = false)
         else ParamState(targetFps, pick.lo..pick.hi, true, pick.exact)

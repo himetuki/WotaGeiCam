@@ -259,7 +259,8 @@ class Camera2Engine(
             if (slot.ability.isLegacy()) {
                 Log.w(TAG, "镜头 ${slot.logicId} 是 LEGACY 等级，手动参数可能不生效")
             }
-            highSpeedActive = slot.ability.highSpeedCapable && fpsValue() > WotaTiers.HIGH_SPEED_FPS
+            highSpeedActive = slot.ability.highSpeedCapable &&
+                slot.ability.needsHighSpeed(params.size.value, fpsValue())
             reqState = RequestApplier.stateOf(slot.ability, params.size.value, highSpeedActive)
             chosenFps = null
             structuralSignature = ""
@@ -524,8 +525,11 @@ class Camera2Engine(
     }
 
     private fun wantHighSpeed(): Boolean {
-        if (fpsValue() <= WotaTiers.HIGH_SPEED_FPS) return false
-        return ability?.highSpeedCapable == true
+        val a = ability ?: return false
+        if (!a.highSpeedCapable) return false
+        // 帧率普通会话覆盖不了（厂商把 50/60 只放进高速表，如 vivo V2520A）⇒ 高速会话；
+        // 旧阈值 fps > 60 会让 50/60 落回普通会话，而普通流根本没有这两档
+        return a.needsHighSpeed(params.size.value, fpsValue())
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
@@ -911,7 +915,7 @@ class Camera2Engine(
     private fun onStructuralPulse(pulse: Pulse) {
         val slotAbility = ability ?: return
         val previous = reqState
-        val highSpeed = pulse.fps > WotaTiers.HIGH_SPEED_FPS && slotAbility.highSpeedCapable
+        val highSpeed = slotAbility.highSpeedCapable && slotAbility.needsHighSpeed(pulse.size, pulse.fps)
         // 每次结构脉冲都重建能力快照：fps 档位表、4K 门禁、active array 都跟着尺寸/分支变
         reqState = RequestApplier.stateOf(slotAbility, pulse.size, highSpeed)
         pushSinkFrameSize(pulse.size)

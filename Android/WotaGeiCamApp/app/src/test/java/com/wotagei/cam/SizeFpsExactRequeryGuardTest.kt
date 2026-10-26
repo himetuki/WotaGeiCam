@@ -17,6 +17,10 @@ import org.junit.Test
  * `arcConvertNow()` 判 `value in REQUIRED_FPS && !exact` 误判为 ※ 档 → 录制期对原生精确
  * 25fps 白抽帧（成片卡顿）+ HUD 挂假 ※。同文件 FpsPill 早在 ea0b74e 修过同款（:288-294），
  * SizePill 是漏网点。本守卫钉住 SizePill 分支必须与 FpsPill 同口径重查，回退即红。
+ *
+ * 2026-10-26 判定域升级：重查从「按目标档的单模态 fpsRangesFor(size, highSpeed)」改为
+ * 「普通∪高速并集 fpsRangesUnion(size)」——厂商把 50/60 只放进高速表时（vivo V2520A），
+ * 单模态判定会让这两档在换档时落回 disabled。守卫判据随之更新，意图不变（按目标档重查）。
  */
 class SizeFpsExactRequeryGuardTest {
 
@@ -29,8 +33,8 @@ class SizeFpsExactRequeryGuardTest {
         if (!size.contains("pickFpsRange(")) {
             bad.add("SizePill 的 fps onPick 缺 pickFpsRange 按目标档重查（exact 沿用旧档 = ※ 档污染）")
         }
-        if (!size.contains("fpsRangesFor(size, highSpeed)")) {
-            bad.add("重查必须按目标档取 fpsRangesFor(size, highSpeed)（沿用旧档的 ranges = 查错表）")
+        if (!size.contains("fpsRangesUnion(size)")) {
+            bad.add("重查必须按目标档走普通∪高速并集（fpsRangesUnion(size)）——单模态判定会让只进高速表的 50/60/120/240 永远灰显（2026-10-26）")
         }
         if (size.contains("fps.copy(value = opt.value)")) {
             bad.add("SizePill 出现裸 fps.copy(value = opt.value)（exact 沿用旧档；只许带 enabled/exact 的兜底全形）")

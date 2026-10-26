@@ -99,6 +99,19 @@ data class CameraAbility(
         return exact?.value ?: emptyList()
     }
 
+    /**
+     * 档位可用性判定域：普通 ∪ 高速（按尺寸）并集——档位「能不能选」看它。
+     * 厂商常把 50/60 只放进高速表（如 vivo V2520A：普通流仅 [24,24]/[30,30]，
+     * 高速 1080p 给 [30,120]/[60,120]/[120,120]/[30,240]/[60,240]/[240,240]），
+     * 按当前会话模态判定会让 50/60/120/240 永远灰显（2026-10-26 用户报障）。
+     * 会话内的下发 / 钳制仍按单模态 [fpsRangesFor]（当前会话实际给得到的范围）。
+     */
+    fun fpsRangesUnion(size: Size?): List<RangeI> = fpsRangesUnion(fpsRanges, fpsRangesFor(size, true))
+
+    /** 该帧率普通会话覆盖不了、但高速表（按尺寸）覆盖 ⇒ 需要高速会话（结构性换挡） */
+    fun needsHighSpeed(size: Size?, fps: Int): Boolean =
+        needsHighSpeedFps(fpsRanges, fpsRangesFor(size, true), fps)
+
     /** 录像尺寸上下限（UI「本机支持范围 …～」文案数据源） */
     fun videoBounds(): Pair<Size?, Size?> {
         if (videoSizes.isEmpty()) return null to null
@@ -262,6 +275,13 @@ fun pickFpsRange(ranges: List<RangeI>, target: Int): FpsPick? {
     val containing = ranges.filter { it.lo <= target && target <= it.hi }.maxByOrNull { it.hi } ?: return null
     return FpsPick(containing.lo, containing.hi, false)
 }
+
+/** 档位可用性判定域：普通 ∪ 高速并集。UI 档位「能不能选」与换档精确性按它判定；会话内下发 / 钳制仍按单模态范围表 */
+fun fpsRangesUnion(normal: List<RangeI>, highSpeed: List<RangeI>): List<RangeI> = normal + highSpeed
+
+/** 该帧率普通会话覆盖不了、但高速会话（按尺寸的高速范围表）覆盖 ⇒ 需要高速会话 */
+fun needsHighSpeedFps(normal: List<RangeI>, highSpeed: List<RangeI>, fps: Int): Boolean =
+    pickFpsRange(normal, fps) == null && pickFpsRange(highSpeed, fps) != null
 
 /** 35mm 等效焦距：eq = round(43.27 / sqrt(sw²+sh²) × focal × 100) / 100；43.27 是全画幅对角线，物理常量非机型值 */
 fun eqFocalMm(sensorWidthMm: Float, sensorHeightMm: Float, focalMm: Float): Float {
