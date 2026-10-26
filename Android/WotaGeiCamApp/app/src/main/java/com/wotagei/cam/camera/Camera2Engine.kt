@@ -205,7 +205,7 @@ class Camera2Engine(
     private var lastWbKeepAliveMs = 0L
 
     /** 手动白平衡探测的连续不合拍数（见 WB_PROBE_MAX_FAILS；引擎线程独占写） */
-    private var wbProbeFails = 0   // 单调钟（SystemClock.elapsedRealtime）读数，不是墙钟
+    private var wbProbeFails = 0
 
     /** 关闭代数：异步回调只认最新一次开机的结果，防止旧回调写脏状态 */
     private var generation = 0
