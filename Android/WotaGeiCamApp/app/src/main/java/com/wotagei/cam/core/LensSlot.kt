@@ -1,5 +1,6 @@
 package com.wotagei.cam.core
 
+import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -176,6 +177,51 @@ fun dumpLenses(slots: List<LensSlot>) {
         Log.i(WotaTag.LENS, "lens ${slot.type} key=${slot.key} eq=${slot.eqFocal}mm" +
             " videoSizes=${slot.ability.videoSizes.size} previewSizes=${slot.ability.previewSizes.size}")
         slot.ability.dump(slot.key)
+    }
+}
+
+/**
+ * **能力协商的出厂默认镜头**（2026-10-26 用户指令「能力协商，而非能力假设」）：
+ * 用户从未显式选过镜头时，默认打开**后摄里最大视频档最大的那颗**，不认档位标签。
+ *
+ * 为什么：档位标签由焦距排序归档（[assignRearTiers]），个别机型的 HAL 会把小底定焦头
+ * 排进「广角」档——真机 marble（Redmi Note 12 Turbo/MIUI14）实测：出厂默认开出的
+ * 「广角」videoSizes 最大只有 1600x1200 且定焦（afModes=[0]），用户由此只能选 720p。
+ * 按能力协商后，这类机型首启直接打开真主摄；正常机型主摄本来就是最大视频档，行为不变。
+ * 用户显式切换过一次后（[LensPickPreference]），完全尊重用户选择，本函数不再参与。
+ *
+ * 纯函数（JVM 可测）：前置一律排除；全空或所有镜头都报不出视频档时返回 null（调用方
+ * 退回既有的档位/首颗链路）。
+ */
+fun pickCapabilityDefault(slots: List<LensSlot>): LensSlot? =
+    slots.filter { it.type != LensType.FRONT }
+        .maxByOrNull { slot -> slot.ability.videoSizes.maxOfOrNull { it.pixels } ?: 0L }
+        ?.takeIf { slot -> slot.ability.videoSizes.maxOfOrNull { it.pixels } ?: 0L > 0L }
+
+/**
+ * 「用户显式选过镜头」的持久化位：能力协商默认（[pickCapabilityDefault]）只对**从未选过**
+ * 的用户生效；用户在镜头面板里切过一次，之后每次冷启都完全尊重持久化的档位/槽位。
+ *
+ * 读写收在这一个对象里：prefs 文件名与键名只在这里出现一次，camera 层不自己拼
+ * `getSharedPreferences` 字面量。单开一个小文件而不复用 ui 层 `WotaSettings` 的
+ * `wota_settings`，是为了不让 core 反向依赖 ui 的常量；这份位丢失的最大代价只是
+ * 退回能力默认（再选一次即恢复），可接受。
+ */
+object LensPickPreference {
+
+    private const val PREFS = "wota_lens_pick"
+    private const val KEY = "lens_user_picked"
+
+    fun isPicked(context: Context): Boolean = runCatching {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY, false)
+    }.getOrDefault(false)
+
+    fun markPicked(context: Context) {
+        runCatching {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY, true).apply()
+        }
     }
 }
 

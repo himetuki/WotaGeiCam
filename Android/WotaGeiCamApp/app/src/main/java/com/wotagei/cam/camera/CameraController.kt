@@ -15,12 +15,14 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStoreOwner
 import com.wotagei.cam.core.CameraAbility
+import com.wotagei.cam.core.LensPickPreference
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTag
 import com.wotagei.cam.core.dumpLenses
 import com.wotagei.cam.core.enumerateLenses
+import com.wotagei.cam.core.pickCapabilityDefault
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +63,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     /** 自建 scope：不依赖 viewModelScope，免得隐式要求 lifecycle-viewmodel-ktx */
+    /**
+     * 用户显式选过镜头的持久化位（[LensPickPreference]）：false 期间 pickSlot 走能力协商默认
+     * （后摄里最大视频档最大的那颗，不认档位标签）；switchLens 一次之后永久尊重用户选择。
+     */
+    private var lensPickedByUser = LensPickPreference.isPicked(app)
     private val bus: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val params: WotaParams = WotaParams(bus)
@@ -274,6 +281,15 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             // 还是该颗镜头本来如此（2026-10-26 marble 反馈的取证缺口）
             dumpLenses(slots)
         }
+        // 能力协商的出厂默认（用户指令「能力协商，而非能力假设」）：从未显式选过镜头时不认
+        // 档位标签，开后摄里最大视频档最大的那颗——个别机型会把小底定焦头归进「广角」档
+        // （marble 实测：出厂「广角」最大 1600x1200 且定焦）。显式切换过一次后完全尊重选择。
+        if (!lensPickedByUser) {
+            pickCapabilityDefault(lensSlots)?.let {
+                Log.i(WotaTag.LENS, "capability default -> ${it.key} type=${it.type}")
+                return it
+            }
+        }
         // 先认槽位（同档位多颗时才准），再退到档位名，最后退到列表首颗
         return lensSlots.firstOrNull { it.key == chosenSlotKey }
             ?: lensSlots.firstOrNull { it.type == params.lens.value }
@@ -286,6 +302,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         params.lens.value = type
         // 按档位切：清掉槽位偏好，让 pickSlot 重新落到该档位的第一颗
         chosenSlotKey = null
+        markLensPickedByUser()
         reopenCurrentLens()
     }
 
@@ -293,7 +310,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     fun switchLens(slot: LensSlot) {
         params.lens.value = slot.type
         chosenSlotKey = slot.key
+        markLensPickedByUser()
         reopenCurrentLens()
+    }
+
+    /** 显式切换即永久关闭能力协商默认（持久化：冷启后也不再替用户选镜头） */
+    private fun markLensPickedByUser() {
+        if (!lensPickedByUser) {
+            lensPickedByUser = true
+            LensPickPreference.markPicked(getApplication())
+        }
     }
 
     private fun reopenCurrentLens() {
