@@ -100,3 +100,12 @@ test('编解码往返_逐字段相等_坏串回恒等', () => {
   assertTrue(CurveStack.decode('bad;only').isPassthrough, '段数不对回恒等');
   assertTrue(CurveStack.decode(undefined).isPassthrough, '缺键回恒等');
 });
+
+// ------------------------------------------------------------------ 真机取证修正（2026-10-26）
+
+test('隐藏档根层退出命中树', () => {
+  const popup: string = sourceText('entry/src/main/ets/ui/CurvePopup.ets');
+  assertTrue(popup.indexOf('.visibility(this.visible ? Visibility.Visible : Visibility.None)') >= 0,
+    '根 Stack 必须按 visible 门控 visibility——全屏层常驻（Default 命中）会挡掉整页兄弟节点的触摸' +
+    '（真机表现为录制页所有控件点不动）');
+});

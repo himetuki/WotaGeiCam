@@ -162,3 +162,21 @@ test('接线_三处共用同一份画面矩形', () => {
   const bridge: string = sourceText('entry/src/main/ets/camera/GlLibBridge.ets');
   assertTrue(bridge.indexOf('glLib.setDisplayFit(fitX, fitY);') >= 0, '桥转发面在册');
 });
+
+// ------------------------------------------------------------------ 真机取证修正（2026-10-26）
+
+test('接线_画面矩形旋转用复合角', () => {
+  const cam: string = sourceText('entry/src/main/ets/pages/Camera.ets');
+  assertTrue(cam.indexOf('info.sensorDeg - this.displayDeg()') >= 0,
+    '旋转必须与 native UV 旋转同式（sensor − display）；displayDeg 单侧在竖屏=0，画面被压成横带（真机取证）');
+  assertTrue(cam.indexOf('((raw % 360) + 360) % 360') >= 0,
+    '复合角必须归一到 [0,360)，swapsAxes 才认 90/270（前置镜像会出负角）');
+});
+
+test('接线_姿态仪浮层Stack对齐且不拦触摸', () => {
+  const cam: string = sourceText('entry/src/main/ets/pages/Camera.ets');
+  assertTrue(cam.indexOf('Stack({ alignContent: Alignment.TopEnd })') >= 0,
+    '姿态仪包装层必须用 Stack 的 alignContent（Row 上 .align() 无效，浮层被页面 Stack 居中到屏幕中部）');
+  assertEq(cam.indexOf('.align(Alignment.TopEnd)'), -1, 'Row/Column 上的 .align() 是无效调用，不得回归');
+  assertTrue(cam.indexOf('.hitTestBehavior(HitTestMode.None)') >= 0, '全屏包装层自身必须退出命中树');
+});

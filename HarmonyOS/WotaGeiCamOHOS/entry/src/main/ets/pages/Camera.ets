@@ -1158,11 +1158,16 @@ struct CameraPage {
 
   /**
    * WLB：按「预览档尺寸 × 表面尺寸 × 旋转」算画面矩形，并下发 native 上屏收缩因子。
-   * 旋转取向与 native UV 旋转同源（`displayDeg` 一侧）——几何/尺寸/视口任一变化都重算。
+   * 旋转 = native 上屏 UV 旋转的同一复合角 normalize(sensorDeg − displayDeg)（gl_render
+   * buildTexCoords 同式；缓冲矩阵分量 stRotDeg ArkTS 不可读，按 0 处理——登记）。竖屏典型
+   * sensor=90/display=0 → 90 → 内容轴交换，矩形才是竖档；用 displayDeg 单侧会把画面压成横带
+   * （2026-10-26 真机取证）。几何/尺寸/视口任一变化都重算。
    */
   private applyPreviewFit(): void {
     const size: Size | undefined = this.engine.currentSize();
-    const rotation: number = this.displayDeg();
+    const info: GlLensInfo | undefined = this.engine.lastLensInfo();
+    const raw: number = info === undefined ? this.displayDeg() : info.sensorDeg - this.displayDeg();
+    const rotation: number = ((raw % 360) + 360) % 360;
     this.previewBox = PreviewFit.rectOf(this.winWvp, this.winHvp,
       size === undefined ? 0 : size.width, size === undefined ? 0 : size.height, rotation);
     const lib: GlLibApi | undefined = this.glLib;
@@ -2039,9 +2044,10 @@ struct CameraPage {
       .hitTestBehavior(HitTestMode.None)
 
       // ---------- 姿态仪（水平仪/俯仰仪）：顶栏下方的右上角浮层，点按切换气泡/数值
+      // 真机取证修正（2026-10-26）：对齐用 Stack 的 alignContent（Row 上 .align() 无效，浮层被
+      // 页面 Stack 按 Center 落到屏幕中部）；包装层自身 hitTest None 不拦触摸，子层点按保留。
       if (this.levelOn && this.levelAvailable) {
-        Row() {
-          Blank()
+        Stack({ alignContent: Alignment.TopEnd }) {
           AttitudeMeter({
             roll: this.levelRoll,
             pitch: this.levelPitch,
@@ -2049,7 +2055,8 @@ struct CameraPage {
           })
         }
         .width('100%')
-        .align(Alignment.TopEnd)
+        .height('100%')
+        .hitTestBehavior(HitTestMode.None)
         .padding({
           right: HudSpec.SAFE_MARGIN,
           top: this.safeTop + HudSpec.TOP_BAR_HEIGHT + HudSpace.M

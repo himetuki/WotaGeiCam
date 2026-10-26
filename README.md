@@ -123,7 +123,7 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash 示例
 ```
 
 产物在 `HarmonyOS/WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap`。
-纯逻辑测试：`cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs`（759 用例）。
+纯逻辑测试：`cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs`（762 用例）。
 
 ### 仓库布局
 

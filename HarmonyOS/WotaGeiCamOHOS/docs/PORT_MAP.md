@@ -356,6 +356,27 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 - **回归**：pure-test 70 files / 732 tests 全绿；clean `assembleHap`（release）
   BUILD SUCCESSFUL（含 native 编译）。
 
+### WLB 真机取证修正（2026-10-26，HUAWEI ALN-AL00 / HarmonyOS 7.0.0.109）
+
+装机 v0.0.10-r03 实测两处缺陷，均已修复：
+
+1. **画面压成全宽横带**（≈1260×709px，严重纵横比失真）：`applyPreviewFit` 旋转输入取了
+   `displayDeg()` 单侧（竖屏=0）→ `swapsAxes(0)=false` → 按 16:9 横档内接出横带。native 上屏
+   UV 旋转是复合角 `normalize(sensorDeg − displayDeg + stRotDeg)`（`gl_render buildTexCoords`），
+   竖屏典型 90−0=90 → 内容轴交换。修正：ArkTS 侧用同一复合角（`info.sensorDeg − displayDeg`
+   归一到 [0,360)；**stRotDeg 缓冲矩阵分量 ArkTS 不可读，按 0 处理，登记**——本机 stRot=0，
+   实测横带尺寸与 16:9 未交换内接逐像素吻合）。守卫：`接线_画面矩形旋转用复合角`。
+2. **姿态仪浮层落到屏幕中部**：包装 Row 上的 `.align(Alignment.TopEnd)` 是无效调用（alignContent
+   只对 Stack 生效），浮层被页面 Stack 按 Center 居中。修正：改 `Stack({alignContent: TopEnd})`
+   + 全屏 + `hitTestBehavior(None)`（全屏包装层自身退出命中树）。守卫：`接线_姿态仪浮层Stack对齐且不拦触摸`。
+
+同轮顺带修复（非 WLB，CURVE 批回归）：**CurvePopup 根 Stack 全屏常驻吞掉整页触摸**——
+内容虽 `if(visible)` 门控，但根层全屏且 Default 命中，作为最顶层兄弟把录制页所有控件
+（胶囊/快门/设/库/更多）全部挡死（真机复现：uitest 注入点击「更多」无任何反应，Home 键
+注入正常排除通道问题）。修正：根层加 `.visibility(this.visible ? Visible : None)`，
+隐藏档整体退出布局与命中树。守卫：`curve-resize.test.ets 隐藏档根层退出命中树`。
+共 +3（759 → 762）。
+
 ## 交付批（PTS-GRID：编码器 PTS 网格纯逻辑，2026-10-25）
 
 §recorder 行留白「PTS 网格化」的**纯逻辑面**收口（platform 面按本仓纪律留真机批）。

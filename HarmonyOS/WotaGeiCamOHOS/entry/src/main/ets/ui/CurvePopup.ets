@@ -354,6 +354,9 @@ export struct CurvePopup {  @Prop visible: boolean = false;
     }
     .width('100%')
     .height('100%')
+    // 真机取证修正（2026-10-26）：隐藏档根层必须整体退出命中树——全屏 Stack 常驻时（Default 命中）
+    // 会挡掉整页兄弟节点的触摸（真机上表现为录制页全部控件点不动）。None = 布局与命中都不参与。
+    .visibility(this.visible ? Visibility.Visible : Visibility.None)
   }
 
   @Builder
