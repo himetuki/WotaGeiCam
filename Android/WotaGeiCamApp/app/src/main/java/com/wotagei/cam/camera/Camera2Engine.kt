@@ -1192,12 +1192,14 @@ class Camera2Engine(
     private fun downgradeHighSpeed(reason: String) {
         publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)
         val state = reqState
-        val normalRanges = normalFpsRangesOf(state)
+        val normalRanges = normalFpsRangesOf()
         val ceiling = normalRanges
             .filter { it.hi <= WotaTiers.HIGH_SPEED_FPS }
             .maxOfOrNull { it.hi }
         if (state == null || ceiling == null) {
-            Log.w(TAG, "高帧率失败且无可退让档位：$reason")
+            // ability 拿不到（open 失败窗口）时 normalRanges 为空 ⇒ 走这条明确失败：
+            // 设备状态已是 OPEN_FAILED_HIGH_FPS，UI 有遮罩与自动重开路径，不假装能退档
+            Log.w(TAG, "高帧率失败且无可退让档位：$reason（能力表可用=${ability != null}）")
             return
         }
         Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：$reason，fps 退到 $ceiling")
@@ -1215,11 +1217,15 @@ class Camera2Engine(
 
     /**
      * 普通（非高速）帧率表：退档候选的唯一来源。
-     * [RequestApplier.State.fpsRanges] 是**按当前会话模态**给的（高速态下即高速表），
-     * 所以这里直接读能力表，不再经过会话模态——否则又踩回上面那条恒空的坑。
+     *
+     * 【2026-10-26 二修】兜底链原来是 `ability?.fpsRanges ?: state?.fpsRanges`——`ability == null`
+     * 时会退到 [RequestApplier.State.fpsRanges]，而高速态下它**就是高速表**：`filter { hi <= 60 }`
+     * 恒空，退档分支又变回"打一行日志就 return"的原坑（取景器假死）。所以这一层**只认能力表**：
+     * ability 拿不到（open 失败窗口）就返回空表，让 [downgradeHighSpeed] 走"无可退让档位"的
+     * 明确失败路径并留日志——宁可如实失败，不拿错误的表装普通表硬退。
      */
-    private fun normalFpsRangesOf(state: RequestApplier.State?): List<com.wotagei.cam.core.RangeI> =
-        ability?.fpsRanges ?: state?.fpsRanges ?: emptyList()
+    private fun normalFpsRangesOf(): List<com.wotagei.cam.core.RangeI> =
+        ability?.fpsRanges ?: emptyList()
 
     private fun failDevice(status: DeviceStatus, reason: String) {
         Log.w(TAG, "设备状态→$status：$reason")
