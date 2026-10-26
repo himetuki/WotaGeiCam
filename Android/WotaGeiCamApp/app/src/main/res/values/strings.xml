@@ -24,6 +24,15 @@
     <string name="perm_bluetooth_rationale">需要蓝牙权限才能连接音箱。</string>
     <string name="perm_denied_settings">权限被拒绝，请到系统设置中开启</string>
     <string name="perm_open_settings">去设置</string>
+    <!-- 媒体读取权限不足的运行时提示（2026-10-26，对比播放右槽选片失败）：
+         2026-10-26 URI 优先后，未预选的视频也可能借选片回程的临时授权直接播，所以文案
+         从「必然读不到」改成「可能读不到」；具体能不能播以实际失败为准。"所有文件访问"
+         单列一条：API 29 没有这个系统页，只在支持的机型上追加显示。 -->
+    <string name="perm_media_partial_title">只能读取部分视频</string>
+    <string name="perm_media_partial_body">系统当前只允许本应用访问你挑选过的部分视频，相册里其它视频可能读不到。请到系统设置的权限页把「照片和视频」改为「允许全部」后重试。</string>
+    <string name="perm_media_none_title">未授予视频读取权限</string>
+    <string name="perm_media_none_body">本应用没有视频读取权限，相册里的视频可能读不到。请到系统设置的权限页允许本应用访问视频后重试。</string>
+    <string name="perm_media_all_files_hint">也可以在本应用设置页开启「所有文件访问」，效果等同于全量媒体权限。</string>
     <string name="no_audio_record_tip">无麦克风权限，本次仅录制画面</string>
 
     <!-- 诊断日志（ui/SettingsScreen.kt BlockDiag，2026-10-09 用户指令「把日志功能加上」；

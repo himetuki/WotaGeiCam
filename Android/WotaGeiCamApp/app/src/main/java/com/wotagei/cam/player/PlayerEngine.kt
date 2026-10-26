@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
+import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.media.VideoClip
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,12 @@ enum class LoopMode { OFF, ONE }
 data class AbRange(val aMs: Long = -1L, val bMs: Long = -1L, val loopEnabled: Boolean = false) {
     val valid: Boolean get() = aMs >= 0 && bMs > aMs
 }
+
+/**
+ * 最近一次播放失败的现场（诊断用）。
+ * [code] 即 `PlaybackException.errorCode`，[codeName] 为其可读名，[cause] 为底层原因链。
+ */
+data class PlaybackError(val code: Int, val codeName: String, val cause: Throwable?)
 
 /** 倍速档位（需求 27 行：0.1 / 0.3 / 0.5 / 0.75 / 1.0） */
 object PlayerSpeedTiers {
@@ -84,6 +91,10 @@ class PlayerEngine(private val context: Context) {
 
     private val _error = MutableStateFlow(false)
     val error: StateFlow<Boolean> = _error.asStateFlow()
+
+    /** 最近一次播放失败详情；换片（[attach]）与销毁（[releasePlayer]）时清空 */
+    private val _playbackError = MutableStateFlow<PlaybackError?>(null)
+    val playbackError: StateFlow<PlaybackError?> = _playbackError.asStateFlow()
 
     private val _fps = MutableStateFlow(DEFAULT_FPS)
     val fps: StateFlow<Float> = _fps.asStateFlow()
@@ -148,6 +159,15 @@ class PlayerEngine(private val context: Context) {
 
         override fun onPlayerError(error: PlaybackException) {
             _error.value = true
+            _playbackError.value = PlaybackError(error.errorCode, error.errorCodeName, error.cause)
+            // 失败现场必须落盘：库内片与外来 content:// URI 的失败原因（权限/编解码/容器）
+            // 在界面上长得一样，只靠 code/name/uri 才能区分。uri 只在已 attach 过时才记。
+            val uri = currentUri
+            if (uri != null) {
+                Diag.w(TAG, "播放失败 code=${error.errorCode} name=${error.errorCodeName} uri=$uri", error)
+            } else {
+                Diag.w(TAG, "播放失败 code=${error.errorCode} name=${error.errorCodeName}", error)
+            }
         }
     }
 
@@ -158,10 +178,25 @@ class PlayerEngine(private val context: Context) {
         if (released) return
         val p = player ?: build().also { player = it }
         if (currentUri == uri) {
+            // 同 URI 重选：上一轮确实失败过才真正重试——「去系统设置开完权限，回来再选同一条」
+            // 是外来来源最常见的恢复路径，原先这里直接 return，等于永远停在错误态。
+            // 没失败过则保持既有的「不重建」幂等语义。两个错误态必须一起清，否则会出现
+            // 「横幅清了但 error 仍是 true」的矛盾状态（PlaybackError 与 error 是同一现场的两面）。
+            if (!_error.value) {
+                if (tick?.isActive != true) startTick()
+                return
+            }
+            _error.value = false
+            _playbackError.value = null
+            _positionMs.value = 0L
+            p.seekTo(0L)
+            p.prepare()
             if (tick?.isActive != true) startTick()
             return
         }
         currentUri = uri
+        // 换片即新一轮播放：上一轮失败现场不再成立
+        _playbackError.value = null
         _error.value = false
         _positionMs.value = 0L
         pendingStepMs = null
@@ -229,6 +264,7 @@ class PlayerEngine(private val context: Context) {
         runCatching { p?.release() }
         _isPlaying.value = false
         _playbackState.value = Player.STATE_IDLE
+        _playbackError.value = null
     }
 
     // endregion
@@ -559,6 +595,9 @@ class PlayerEngine(private val context: Context) {
     // endregion
 
     companion object {
+        /** 播放失败的诊断日志锚点 */
+        private const val TAG = "WotaPlayer"
+
         private const val POLL_MS = 120L
 
         /** 步进目标迟迟不落地时的兜底轮询数（约 360ms），防止 AB 回绕被长期抑制 */

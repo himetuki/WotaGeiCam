@@ -132,7 +132,12 @@ import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
+import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.core.isMediaStoreVideoUri
+import com.wotagei.cam.core.mediaAccessLabel
+import com.wotagei.cam.core.mediaAccessState
+import com.wotagei.cam.core.needsMediaAccessHint
 import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
@@ -140,6 +145,7 @@ import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.SeriesStore
 import com.wotagei.cam.media.formatDuration
+import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
 import com.wotagei.cam.player.AudioTrackKind
 import com.wotagei.cam.player.ComparePractice
@@ -202,6 +208,7 @@ import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.wotaCard
 import com.wotagei.cam.ui.dialog.CurvePopup
+import com.wotagei.cam.ui.dialog.MediaAccessDialog
 import com.wotagei.cam.ui.dialog.evText
 import com.wotagei.cam.ui.dialog.lensLabelRes
 import com.wotagei.cam.ui.dialog.observed
@@ -1857,7 +1864,8 @@ private fun SplitPanel(
  * 左侧录制与这里互不干扰：这是**独立**的引擎实例，整条相机链路一次都不碰。
  *
  * 参考视频**外放**（用 PlayerEngine 默认音量）：内录要 MediaProjection 授权，本批不做，
- * 只让用户听得见。选片走系统相册 ACTION_PICK（与对比页同一手法）：content Uri → mediaId → 仓库反查；
+ * 只让用户听得见。选片走系统相册 ACTION_PICK（与对比页同一手法）：回程 content Uri 直接交仓库
+ * 解码播放（2026-10-26 起 URI 优先，mediaId 不再是播放门槛，外来 provider 也能播），
  * 选完默认暂停（[com.wotagei.cam.player.PlayerEngine.attach] 内置 playWhenReady=false），点播放才播。
  * （上面这句说的是**采集**外放，不是选轨：内录出产片——容器双音轨——的选轨播放已支持，见下。）
  *
@@ -1874,6 +1882,19 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     val scope = rememberCoroutineScope()
     var clipUri by remember { mutableStateOf<Uri?>(null) }
     var banner by remember { mutableStateOf<Int?>(null) }
+    /**
+     * 选片失败且媒体读取权限不足时的提示档（null = 不弹）。
+     *
+     * 与 [banner] 分工：权限不足要引导去开权限（可操作），其它失败（云端/私密相册/来源不支持）
+     * 只给一句文案。判据是运行时权限，不是列表内容——本应用自录的行在部分授权下同样可见，
+     * 「切到手机相册仍能看到自己录的视频」证明不了权限正常。
+     */
+    var accessPrompt by remember { mutableStateOf<MediaAccessState?>(null) }
+    /**
+     * 选片请求序号：云相册/远程 provider 的解析可能阻塞数秒，用户等不及再点一次时
+     * 先后两次的结果可能乱序返回。只应用最新一次的结果，旧的失败/弹层不许盖在新选择上。
+     */
+    var pickSeq by remember { mutableIntStateOf(0) }
     // 拖动中本地值覆盖轮询值（与单播放页同一条  手法）：松手才 seek，避免 seek 未完成时进度回跳
     var dragFrac by remember { mutableStateOf<Float?>(null) }
     // 观看辅助（部分参考视频可能是竖屏的，转个角度看）：双指缩放+平移复用 PlayerScreen 的
@@ -1892,6 +1913,12 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
     val dur by engine.durationMs.observed()
     val playing by engine.isPlaying.observed()
     val audioGroups by engine.audioGroups.observed()
+    // 播放错误可见（2026-10-26）：坏文件/不支持的编码在 ExoPlayer 里只会走 onPlayerError，
+    // 不给 UI 反馈就是「画面黑着、进度不动」——导出诊断件也看不出是解码失败。
+    val playbackErr by engine.playbackError.observed()
+    LaunchedEffect(playbackErr) {
+        if (playbackErr != null) banner = R.string.player_error
+    }
 
     // 练习参考片自动挂载：只挂一次（clipUri 已非空 = 用户换过片，别再拉回去）
     LaunchedEffect(autoAttachId) {
@@ -1925,37 +1952,70 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
         else engine.setAudioTrackOverride(plan.overrideGroupIndex, 0)
     }
 
+    /**
+     * 选片失败统一出口：先留现场（这两条失败分支原先一条日志都没有，用户导出的诊断件里
+     * 看不出走到哪一步，只能靠猜），再按媒体权限决定提示形态。
+     */
+    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String) {
+        // 权限探测里有 isExternalStorageManager 的 binder 调用：放 IO 上做，横幅仍回主线程写
+        val access = withContext(Dispatchers.IO) { mediaAccessState(app) }
+        // 形态也要记：MediaStore 条目之外的来源（照片选择器/文档 provider）与「权限不足」
+        // 是两条完全不同的修法，日志里必须先分清
+        val mediaShape = isMediaStoreVideoUri(uri)
+        Log.w(
+            "WotaPick",
+            "分屏选片失败[$stage]（URI 直读路径）uri=$uri authority=${uri?.authority} id=$id " +
+                "mediaStoreUri=$mediaShape access=${mediaAccessLabel(access)}"
+        )
+        if (needsMediaAccessHint(access)) {
+            accessPrompt = access
+        } else {
+            banner = if (uri != null && !mediaShape) {
+                R.string.compare_pick_foreign_source
+            } else {
+                R.string.compare_pick_failed
+            }
+        }
+    }
+
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        // 每次回程先清旧横幅：原先只写不清，一次失败会把这条文案永久挂在按钮下方，
+        // 之后无论重试、取消还是成功都还看得见，读作「一直失败 / 进不去选片界面」。
+        banner = null
         if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
-        // 坏 Uri / 解析失败一律按没选成处理：parseId 只认 media uri，个别相册会回私有 provider uri，
-        // 那条路回退查 _ID 列（读走 MediaStore 自带权限，不经 uri grant）。
-        // 兜底查询是 binder IPC：回调体在主线程，必须挪进协程并 withContext(IO) 里做
-        // （这段裸 query 不经 repo，clipByIdOnce 的自带 IO 覆盖不到它），横幅仍主线程写
+        // URI 优先（2026-10-26）：回程 URI 直接交仓库解码成 VideoClip 播放，不再 parseId 后按 _ID 反查。
+        // mediaId 只是本应用库内的行号，不再是播放门槛——照片选择器 / 文档 provider / 云端相册给的
+        // Uri 大多本来就 parse 不出数字 id（旧路会误判成「没选成」），这类外来来源也能直接播。
+        // repo.clipByUri 自带 IO 切换，回调体在主线程也不会阻塞；横幅仍主线程写。
+        // 个别相册把结果放 ClipData 而不是 data，两个都取；再没有才判「没选成」。
         val uri = result.data?.data
-        var id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
+            ?: result.data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+        val seq = ++pickSeq
         scope.launch {
-            if (id <= 0L && uri != null) {
-                id = withContext(Dispatchers.IO) {
-                    runCatching {
-                        app.contentResolver.query(uri, arrayOf(MediaStore.Video.Media._ID), null, null, null)
-                            ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
-                    }.getOrNull() ?: 0L
-                }
+            if (uri == null) {
+                reportPickFailure(null, 0L, "无回程URI")
+                return@launch
             }
-            if (id <= 0L) {
-                banner = R.string.compare_pick_failed
+            val clip = repo.clipByUri(uri)
+            // 慢 provider 让先后两次选片乱序返回时，只认最新一次的请求
+            if (seq != pickSeq) return@launch
+            if (clip == null) {
+                reportPickFailure(uri, 0L, "读取失败")
             } else {
-                val clip = repo.clipByIdOnce(id)
-                if (clip == null) {
-                    banner = R.string.compare_pick_failed
-                } else {
-                    engine.attach(clip.uri)
-                    clipUri = clip.uri
-                }
+                persistPickReadPermission(app, uri)
+                accessPrompt = null
+                banner = null
+                engine.attach(clip.uri)
+                clipUri = clip.uri
             }
         }
+    }
+
+    // 权限提示是窗口层（AlertDialog 不占布局），放在分支之外：已挂片后续再选失败也能弹
+    accessPrompt?.let { state ->
+        MediaAccessDialog(state = state, onDismiss = { accessPrompt = null })
     }
 
     if (clipUri == null) {
@@ -1969,15 +2029,21 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                     selected = false,
                     onClick = {
                         // 不加 FLAG_GRANT_READ_URI_PERMISSION：结果 uri 的读授权由相册在 result 里自行授予
-                        picker.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+                        banner = null
+                        // 没有 handler（个别 ROM 不注册 ACTION_PICK）时 launch 会抛
+                        // ActivityNotFoundException，不接住就是主线程崩溃；按普通失败提示处理
+                        runCatching {
+                            picker.launch(Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI))
+                        }.onFailure { banner = R.string.compare_pick_failed }
                     }
                 )
-                // 失败提示就地挂在选择按钮下方（本页主职是录制，不另起横幅浮层）
+                // 失败提示就地挂在选择按钮下方（本页主职是录制，不另起横幅浮层）。
+                // 字阶/颜色按正文告警档取：textLo 只准用于非正文（Tokens 的对比度红线）
                 banner?.let {
                     Text(
                         text = stringResource(it),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = WotaColor.textLo
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WotaColor.textMid
                     )
                 }
             }
@@ -2052,6 +2118,15 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                 },
                 modifier = Modifier.fillMaxWidth()
             )
+            // 播放错误也要能看见：挂片后解码失败/授权中途失效只会「黑屏不动」，
+            // 而上面空态的横幅渲染点已经不再可达——同一枚 banner 在已挂片分支也要画一次
+            banner?.let {
+                Text(
+                    text = stringResource(it),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = WotaColor.textMid
+                )
+            }
         }
     }
 }
