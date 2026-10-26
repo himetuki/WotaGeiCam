@@ -274,5 +274,6 @@
     <string name="denoise_video_effect_on">监看叠加（斑马纹/峰值对焦）开着时不降噪，关掉后自动恢复</string>
     <string name="denoise_lite_tip">本机负载较高（画质×帧率），画面降噪已自动改用轻量档</string>
     <string name="denoise_audio_unsupported_tip">本机不支持系统降噪，环境音按原样录制</string>
+    <string name="cam_focus_manual_peaking_tip">手动对焦可配合监看·峰值对焦使用：合焦区域会高亮</string>
     <string name="cam_fps_downgraded_tip">本机跑不动该帧率，已自动退回 %1$d 帧</string>
 </resources>

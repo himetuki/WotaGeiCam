@@ -502,6 +502,16 @@ fun CameraScreen(
     // 判据 [denoiseKernelLite] 与 GL 侧挑 program 用的是**同一支纯函数**（编码面像素 × 帧率），
     // 所以这里判它降档 = GL 那边确实换了轻量核。每次录制最多一条，退到 IDLE 复位。
     var denoiseLiteNotified by remember { mutableStateOf(false) }
+    // 切手动对焦时提示峰值对焦（2026-10-26 反馈 #2/#7 方案G 的最小形态）：手动对焦只有屈光度
+    // 滑杆没有判焦辅助确实难用，而峰值监看是既有功能——提示一次，不联动开启（联动改变用户
+    // 的监看设置属习惯变更，用户未要）。每次进页一条，重复切不刷屏。
+    var focusManualTipShown by remember { mutableStateOf(false) }
+    LaunchedEffect(afMode) {
+        if (afMode == AfMode.MANUAL && !focusManualTipShown) {
+            focusManualTipShown = true
+            showTip(app.getString(R.string.cam_focus_manual_peaking_tip))
+        }
+    }
     LaunchedEffect(recStatus) {
         when (recStatus) {
             RecordStatus.IDLE -> denoiseLiteNotified = false

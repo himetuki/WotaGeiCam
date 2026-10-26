@@ -101,6 +101,9 @@ class Camera2Engine(
         private const val SINK_WAIT_MAX = 20
 
         /** 占用/内部错误后的自动重开 */
+        /** AE/AF 状态遥测的拍点间隔（反馈 #1/#7 方案F）：1s 一拍，d 级 */
+        private const val AE_AF_TELEMETRY_MS = 1_000L
+
         private const val REOPEN_DELAY_MS = 800L
         private const val REOPEN_MAX = 2
 
@@ -940,6 +943,7 @@ class Camera2Engine(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            logAeAfTelemetry(result)
             if (!RequestApplier.isManualWhiteBalance(params.wbMode.value)) return
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
             // `now - lastWbKeepAliveMs` 变负、`< WB_KEEP_ALIVE_MS` 恒真 ⇒ 手动白平衡保活永久停摆，
@@ -949,6 +953,36 @@ class Camera2Engine(
             lastWbKeepAliveMs = now
             markDirty()
         }
+    }
+
+    /**
+     * AE/AF 状态遥测（2026-10-26 反馈 #1/#7 方案F）：每秒一拍，d 级（详细档才记）。
+     *
+     * 为什么是它：曝光闪动 / 弱光对焦差这类 3A 行为问题，此前现场**只有结果**（用户口述"闪"），
+     * 没有中间态。`CONTROL_AE_STATE / AF_STATE / AF_MODE` 每秒快照进日志后，"闪动时刻 AE 在
+     * SEARCHING 还是 CONVERGED""弱光下 AF 卡在 ACTIVE_SCAN"这类归因一眼可判——取证密度
+     * 是本轮的明线任务（用户指令：日志多解释）。`get` 失败按"未知"打，不让单键异常炸回调。
+     *
+     * 频率与级别：1s 一拍不会淹没缓冲；d 级吃详细档（Diag 拆闸后 logcat 的 d/v 仍受详细档），
+     * 不开详细档就零输出——遥测是排查工具，不是常态记录。
+     */
+    private var lastAeAfTelemetryMs = 0L
+
+    private fun logAeAfTelemetry(result: TotalCaptureResult) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAeAfTelemetryMs < AE_AF_TELEMETRY_MS) return
+        lastAeAfTelemetryMs = now
+        val aeState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE) }.getOrNull()
+        val afState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_STATE) }.getOrNull()
+        val afMode = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_MODE) }.getOrNull()
+        val aeFps = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)?.let { "[${it.lower},${it.upper}]" }
+        }.getOrNull()
+        Log.d(
+            TAG,
+            "3A遥测 aeState=$aeState afState=$afState afMode=$afMode fpsRange=${aeFps ?: "无"}" +
+                " lensFocus=${runCatching { result.get(android.hardware.camera2.CaptureResult.LENS_FOCUS_DISTANCE) }.getOrNull()}"
+        )
     }
 
     // ------------------------------------------------- fps 选择与钳制
