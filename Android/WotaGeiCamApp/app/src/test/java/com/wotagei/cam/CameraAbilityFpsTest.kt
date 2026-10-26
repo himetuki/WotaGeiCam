@@ -1,7 +1,9 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.core.RangeI
+import com.wotagei.cam.core.decideFps
 import com.wotagei.cam.core.fpsRangesUnion
+import com.wotagei.cam.core.pickHighSpeedFpsRange
 import com.wotagei.cam.core.needsHighSpeedFps
 import com.wotagei.cam.core.pickFpsRange
 import org.junit.Assert.assertEquals
@@ -21,9 +23,14 @@ import org.junit.Test
  * [30,240]/[60,240]/[240,240]）→ 按当前模态判定永远灰显（死循环：120/240 只有
  * 已在 >60 档的用户才查得到）。
  *
- * 修复语义：档位可用性按「普通 ∪ 高速」并集判定；会话选择按
- * needsHighSpeedFps（普通覆盖不了但高速覆盖 ⇒ 高速会话）。50/60 在该机是
- * 高速会话原生可达（区间内近似，带 ※），25 两表都不覆盖 → 维持抽帧补弧路径。
+ * 修复语义（2026-10-26 定版）：**一档的完整决议只走 [decideFps] 一个出口** —— 普通表先来
+ * （覆盖得了就不开高速会话），覆盖不了才看高速表；两张表都不覆盖 ⇒ 灰显。50/60 在该机
+ * 仍是可用档（这张高速表正是厂商把"高帧率录像"暴露给第三方 App 的途径），实际速率由 HAL 在
+ * 区间内定 ⇒ 界面标 ※；25 两表都不覆盖 → 维持普通会话 + 抽帧补弧路径。
+ *
+ * 【为什么不是"并集允许、下发另算"】并集只回答"能不能选"；而下发必须落在**机器声明过的区间**上。
+ * 旧的下发分支自己造 `[50,50]`（机器没声明过）⇒ `createHighSpeedRequestList` 拒收 ⇒ 假死。
+ * 所以判定与下发同一支，见本文件末尾那组下发区间断言。
  */
 class CameraAbilityFpsTest {
 
@@ -103,5 +110,44 @@ class CameraAbilityFpsTest {
         // 部分机型普通流直接给 [50,50]：50 不需要高速会话
         val with50 = listOf(RangeI(24, 24), RangeI(30, 30), RangeI(50, 50))
         assertFalse(needsHighSpeedFps(with50, vivoHs1080, 50))
+    }
+
+    // ---------------------------------------------------------------- 决议与下发同一支（2026-10-26）
+
+    @Test
+    fun `决议后下发的是机器声明过的区间`() {
+        // 这条正是 2026-10-26 的 P1：旧下发分支 `FpsPick(target, target, true)` 会造 [50,50]，
+        // 而该机高速表里没有它 —— 请求被拒 ⇒ 掉进无退路的降档分支 ⇒ 取景器假死
+        assertEquals(
+            "60 取「下界正好等于目标」里上界最小的 [60,120]",
+            Triple(60, 120, false),
+            decideFps(vivoNormal, vivoHs1080, 60)!!.let { Triple(it.pick.lo, it.pick.hi, it.pick.exact) }
+        )
+        assertEquals(
+            "50 无 lo==50 的区间 ⇒ 退到覆盖它的 [30,120]（上界最小的那个）",
+            Triple(30, 120, false),
+            decideFps(vivoNormal, vivoHs1080, 50)!!.let { Triple(it.pick.lo, it.pick.hi, it.pick.exact) }
+        )
+        assertTrue("120 有原生 [120,120] ⇒ 精确", decideFps(vivoNormal, vivoHs1080, 120)!!.pick.exact)
+        assertTrue("240 有原生 [240,240] ⇒ 精确", decideFps(vivoNormal, vivoHs1080, 240)!!.pick.exact)
+        assertTrue("50 走高速会话", decideFps(vivoNormal, vivoHs1080, 50)!!.highSpeed)
+        assertTrue("60 走高速会话", decideFps(vivoNormal, vivoHs1080, 60)!!.highSpeed)
+        assertFalse("30 普通表覆盖 ⇒ 普通会话", decideFps(vivoNormal, vivoHs1080, 30)!!.highSpeed)
+        assertFalse("24 普通表覆盖 ⇒ 普通会话", decideFps(vivoNormal, vivoHs1080, 24)!!.highSpeed)
+    }
+
+    @Test
+    fun `高速选档绝不返回未声明的固定区间`() {
+        for (fps in listOf(50, 60)) {
+            val pick = pickHighSpeedFpsRange(vivoHs1080, fps)!!
+            assertTrue(
+                "下发区间 $fps -> [${pick.lo},${pick.hi}] 必须是声明表里的原样一条",
+                vivoHs1080.any { it.lo == pick.lo && it.hi == pick.hi }
+            )
+        }
+        assertNull(
+            "表里没有任何区间覆盖目标 ⇒ null（由失败路径降级，不许硬发）",
+            pickHighSpeedFpsRange(listOf(RangeI(120, 120), RangeI(240, 240)), 60)
+        )
     }
 }

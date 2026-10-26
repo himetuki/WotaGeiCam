@@ -18,8 +18,8 @@ import org.junit.Test
  * 25fps 白抽帧（成片卡顿）+ HUD 挂假 ※。同文件 FpsPill 早在 ea0b74e 修过同款（:288-294），
  * SizePill 是漏网点。本守卫钉住 SizePill 分支必须与 FpsPill 同口径重查，回退即红。
  *
- * 2026-10-26 判定域升级：重查从「按目标档的单模态 fpsRangesFor(size, highSpeed)」改为
- * 「普通∪高速并集 fpsRangesUnion(size)」——厂商把 50/60 只放进高速表时（vivo V2520A），
+ * 2026-10-26 判定域**两次升级**：先是从「按目标档的单模态 fpsRangesFor(size, highSpeed)」改成
+ * 「普通∪高速并集 fpsRangesUnion(size)」（厂商把 50/60 只放进高速表时，vivo V2520A），
  * 单模态判定会让这两档在换档时落回 disabled。守卫判据随之更新，意图不变（按目标档重查）。
  */
 class SizeFpsExactRequeryGuardTest {
@@ -30,11 +30,13 @@ class SizeFpsExactRequeryGuardTest {
     private fun sizePillFpsViolations(pills: String): List<String> {
         val bad = ArrayList<String>()
         val size = flatten(bodyOf(pills, "SizePill"))
-        if (!size.contains("pickFpsRange(")) {
-            bad.add("SizePill 的 fps onPick 缺 pickFpsRange 按目标档重查（exact 沿用旧档 = ※ 档污染）")
-        }
-        if (!size.contains("fpsRangesUnion(size)")) {
-            bad.add("重查必须按目标档走普通∪高速并集（fpsRangesUnion(size)）——单模态判定会让只进高速表的 50/60/120/240 永远灰显（2026-10-26）")
+        if (!size.contains("decideFps(size, opt.value)")) {
+            bad.add(
+                "SizePill 的 fps onPick 必须按目标档走 core.decideFps(size, 目标档) 重查——" +
+                    "它是「用哪张表 / 下发哪个区间 / 精不精确 / 要不要高速会话」的唯一出口：" +
+                    "自己的单模态判定会让只进高速表的 50/60 灰显（2026-10-26 之前），" +
+                    "而按 fps 阈值猜表又会让请求发出机器没声明的区间（同轮修掉）"
+            )
         }
         if (size.contains("fps.copy(value = opt.value)")) {
             bad.add("SizePill 出现裸 fps.copy(value = opt.value)（exact 沿用旧档；只许带 enabled/exact 的兜底全形）")
@@ -65,10 +67,10 @@ class SizeFpsExactRequeryGuardTest {
             sizePillFpsViolations(bareCopy).any { it.contains("裸 fps.copy") }
         )
         // 突变 2：抄丢重查调用（文本级突变，不编译——守卫只判代码形态）
-        val noRequery = pills.replace("pickFpsRange(", "pickFpsRangeMissing(")
+        val noRequery = pills.replace("decideFps(size, opt.value)", "fps.copy(value = opt.value)")
         assertTrue(
-            "删重查后尺子必须红",
-            sizePillFpsViolations(noRequery).any { it.contains("pickFpsRange") }
+            "删掉按目标档重查后尺子必须红",
+            sizePillFpsViolations(noRequery).any { it.contains("decideFps") }
         )
     }
 }

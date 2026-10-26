@@ -118,6 +118,14 @@ data class CameraAbility(
     fun needsHighSpeed(size: Size?, fps: Int): Boolean =
         needsHighSpeedFps(fpsRanges, fpsRangesFor(size, true), fps)
 
+    /**
+     * 一档的**完整决议**：用哪张表、下发哪个区间、精不精确、要不要高速会话。
+     * UI 的可选性/※ 标记、参数总线落档、引擎开会话与下发，四处都只认这一个出口
+     * （2026-10-26 三处判据分叉那次事故的根治：各写一份就会"界面说可选、请求发的是非法值"）。
+     */
+    fun decideFps(size: Size?, fps: Int): FpsDecision? =
+        decideFps(fpsRanges, fpsRangesFor(size, true), fps)
+
     /** 录像尺寸上下限（UI「本机支持范围 …～」文案数据源） */
     fun videoBounds(): Pair<Size?, Size?> {
         if (videoSizes.isEmpty()) return null to null
@@ -292,7 +300,51 @@ fun fpsRangesUnion(normal: List<RangeI>, highSpeed: List<RangeI>): List<RangeI> 
 
 /** 该帧率普通会话覆盖不了、但高速会话（按尺寸的高速范围表）覆盖 ⇒ 需要高速会话 */
 fun needsHighSpeedFps(normal: List<RangeI>, highSpeed: List<RangeI>, fps: Int): Boolean =
-    pickFpsRange(normal, fps) == null && pickFpsRange(highSpeed, fps) != null
+    pickFpsRange(normal, fps) == null && pickHighSpeedFpsRange(highSpeed, fps) != null
+
+/**
+ * 高速表专用选档（2026-10-26 新增）：**只用机器声明过的区间**，绝不自己造 `[f,f]`。
+ *
+ * 为什么不沿用 [pickFpsRange]：它"取覆盖目标里上界最大者"，放到高速表上会挑到 `[30,240]`
+ * 这种极宽区间——用户选 60、HAL 却有机会跑到 240。高速表这里分三级：
+ * 1. **固定档 `[f,f]`**（`[120,120]`/`[240,240]`）⇒ 精确，原样返回；
+ * 2. **下界正好等于目标**的区间（目标 60 → `[60,120]`/`[60,240]`）⇒ 最贴近目标且 HAL 只会往上，
+ *    取其中上界最小者；
+ * 3. 再退：覆盖目标者取上界最小者（目标 50 只有 `[30,120]`/`[30,240]` ⇒ 取 `[30,120]`）。
+ *
+ * 返回 null = 这张表没有任何区间覆盖目标（调用方按"本机做不到这一档"处理，**不要**退回普通表硬发）。
+ *
+ * 【2026-10-26 修正】旧实现是 `FpsPick(target, target, true)`——直接造 `[50,50]`。那不是机器声明过
+ * 的值，送进 `createHighSpeedRequestList` 会被拒；而拒了之后又掉进没有退路的降档分支 ⇒ 取景器假死。
+ */
+fun pickHighSpeedFpsRange(ranges: List<RangeI>, target: Int): FpsPick? {
+    if (ranges.isEmpty() || target <= 0) return null
+    ranges.firstOrNull { it.lo == target && it.hi == target }?.let { return FpsPick(it.lo, it.hi, true) }
+    val containing = ranges.filter { it.lo <= target && target <= it.hi }
+    if (containing.isEmpty()) return null
+    val chosen = containing.filter { it.lo == target }.minByOrNull { it.hi }
+        ?: containing.minByOrNull { it.hi }!!
+    return FpsPick(chosen.lo, chosen.hi, false)
+}
+
+/** 一档的完整决议（见 [CameraAbility.decideFps]）：下发哪个区间、走不走高速会话 */
+data class FpsDecision(val pick: FpsPick, val highSpeed: Boolean)
+
+/**
+ * 一档的完整决议（纯函数，JVM 全测）：**普通表先来，普通表覆盖不了才看高速表**。
+ * 返回 null = 两张表都不覆盖 ⇒ 界面灰显、总线落 `enabled=false`，不硬发。
+ *
+ * 这条顺序就是产品口径：机器能在普通流里跑的就别开高速会话；只有普通流给不到的档才请出高速会话。
+ * 它同时回答"50/60 该不该灰"——**看机器在哪张表里声明**：声明在普通表就是普通档；只在高速表
+ * 声明的（如 vivo V2520A 的 50/60）仍然可用，因为那张表正是厂商把"高帧率录像"暴露给第三方 App
+ * 的途径，只是实际速率由 HAL 在区间内定 ⇒ 界面标 ※ 如实告知。
+ */
+fun decideFps(normal: List<RangeI>, highSpeed: List<RangeI>, fps: Int): FpsDecision? {
+    if (fps <= 0) return null
+    pickFpsRange(normal, fps)?.let { return FpsDecision(it, false) }
+    pickHighSpeedFpsRange(highSpeed, fps)?.let { return FpsDecision(it, true) }
+    return null
+}
 
 /** 35mm 等效焦距：eq = round(43.27 / sqrt(sw²+sh²) × focal × 100) / 100；43.27 是全画幅对角线，物理常量非机型值 */
 fun eqFocalMm(sensorWidthMm: Float, sensorHeightMm: Float, focalMm: Float): Float {

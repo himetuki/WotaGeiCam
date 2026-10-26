@@ -265,6 +265,13 @@ class AudioFeeder private constructor(
     private var denoiser: AudioDenoiser = AudioDenoiser.INACTIVE
 
     /**
+     * 效果器**实际**挂上了吗（读 [AudioDenoiser.active]）。UI 侧要的是这个而不是"用户选了哪档"：
+     * 机型没有 NoiseSuppressor / 启用失败时，面板选着"系统降噪"而环境音其实是原样录的。
+     * 录制侧据此在 health 里置"要了却没生效"，由录制页提示一次。
+     */
+    val denoiseActive: Boolean get() = denoiser.active
+
+    /**
      * 建 AudioRecord（构造路径分叉点）→ 起泵线程。环境路的权限/参数检查在 [openRecord] 内。
      * @return false = 无权限或初始化失败，调用方静默降级为纯视频（不录了再丢）
      */
@@ -291,6 +298,11 @@ class AudioFeeder private constructor(
             rec.startRecording()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "startRecording failed: ${e.message}")
+            // 次序与 [stop] 同一条：**先摘效果器再放 AudioRecord**（效果器持着那条 session，
+            // AudioRecord 释放后再放会报错）。这一支此前漏了——起录失败时效果器要等调用方收尾的
+            // `f.stop()` 才放，那时 AudioRecord 早已释放（2026-10-26 修正）；守卫同轮补了这条次序。
+            denoiser.release()
+            denoiser = AudioDenoiser.INACTIVE
             rec.release()
             record = null
             return false

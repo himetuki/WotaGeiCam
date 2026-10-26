@@ -83,7 +83,15 @@ data class RecorderHealth(
      * 「已保存」文案上附注（两条通道各自可见，互不替代）。
      * 默认 false：MR 路（无环境轨降级语义）与旧构造点行为逐字不变。
      */
-    val ambientLost: Boolean = false
+    val ambientLost: Boolean = false,
+    /**
+     * 本次录制**要了音频降噪但本机没生效**（2026-10-26）：用户选了"音频降噪"，而效果器没挂上
+     * （机型没有 NoiseSuppressor / 启用失败 / sessionId 无效）⇒ 环境音其实是原样录的。
+     * 与 [ambientLost] 同一族：录制页录制中巡检读到即经提示通道报一次——用户口径是
+     * "一切自动降档的提示都有必要"，这里降的不是画质，是"以为开着其实没开"。
+     * 默认 false：没选降噪（OFF）与 MR 路都不置位。
+     */
+    val denoiseInactive: Boolean = false
 )
 
 /**

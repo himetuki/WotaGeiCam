@@ -65,6 +65,18 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     private val ui = MutableStateFlow(CameraUiState())
     val state: StateFlow<CameraUiState> = ui
 
+    /**
+     * 帧率被**自动降档**的提示槽（2026-10-26）：引擎在一次高速档请求失败后把 fps 退到可达上限，
+     * 这里原样转给界面（值 = 退到的帧率）。界面读走提示后调 [clearFpsDowngrade] 清槽——
+     * StateFlow 相等去重，不清就收不到下一次同值事件（与 [RecordRunner.ambientLostNotice] 同一手法）。
+     */
+    private val fpsDowngrade = MutableStateFlow<Int?>(null)
+    val fpsDowngraded: StateFlow<Int?> = fpsDowngrade
+
+    fun clearFpsDowngrade() {
+        fpsDowngrade.value = null
+    }
+
     private var engine: Camera2Engine? = null
     private var boundSink: PreviewSink? = null
     private var lensSlots: List<LensSlot> = emptyList()
@@ -92,7 +104,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             sink = sink,
             scope = bus,
             onDeviceStatus = { status -> publishOnMain { ui.value = ui.value.copy(device = status) } },
-            onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } }
+            onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } },
+            onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } }
         ).also { it.attach() }
         if (pendingStart) start()
     }

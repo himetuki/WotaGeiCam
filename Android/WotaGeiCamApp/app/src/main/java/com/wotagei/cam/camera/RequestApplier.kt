@@ -20,6 +20,7 @@ import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.core.pickFpsRange
+import com.wotagei.cam.core.pickHighSpeedFpsRange
 import kotlin.math.roundToInt
 
 /**
@@ -110,8 +111,12 @@ object RequestApplier {
         val aeRegions: List<MeteringRectangle>?,
         /** 单次通道用 TRIGGER_START；repeating 通道用 TRIGGER_IDLE 复位 */
         val afTrigger: Int?,
-        /** 画面降噪实际档（2026-10-26）：OFF 不写该键（恒等于"不动 HAL 默认"） */
-        val videoDenoise: com.wotagei.cam.core.VideoDenoise = com.wotagei.cam.core.VideoDenoise.OFF
+        /**
+         * 本次要下发的 `NOISE_REDUCTION_MODE`（2026-10-26）：**null = 一个键都不写**。
+         * 取值由引擎经 `core.noiseReductionModeToSend` 决议（声明过才写、退出 HAL 档时清自己的残留、
+         * 从没写过就选关闭则完全不碰）——本层只负责"非 null 就写"，策略不进这里。
+         */
+        val halNoiseReductionMode: Int? = null
     )
 
     // ---------------------------------------------------------------- 能力快照
@@ -186,15 +191,22 @@ object RequestApplier {
 
     /**
      * fps 档位 → 实际写入 CONTROL_AE_TARGET_FPS_RANGE 的范围。
-     * 固定 [f,f] 优先（录像时间戳稳定的前提），无固定档时由 core 落「包含 f 且上界最大」的可变范围
-     * 并标 exact=false（UI 打「※」）；高帧率分支只接受 Range(f,f)。
-     * 返回 null 表示设备没有任何范围覆盖 target，由引擎上报高帧率失败并退档，
+     *
+     * 两张表各用各的选法，**两条都不许自己造值**：
+     * - 普通表（`highSpeed=false`）：[pickFpsRange] —— 固定 [f,f] 优先，其次"包含 f 且上界最大"的可变
+     *   范围并标 exact=false（UI 打「※」）。普通会话里上界大一点没坏处，反而给 HAL 留了自动曝光余量。
+     * - 高速表（`highSpeed=true`）：[pickHighSpeedFpsRange] —— 固定档优先，其次"下界正好等于目标"，
+     *   再其次"覆盖目标里上界最小"，**绝不返回机器没声明过的 `[f,f]`**。
+     *   【2026-10-26 修正】旧实现 `FpsPick(target, target, true)` 就是自己造值：50/60 首次被路由进
+     *   高速会话后，`[50,50]` 不在声明表里 ⇒ `createHighSpeedRequestList` 拒收 ⇒ 掉进无退路的降档
+     *   分支（取景器假死）。
+     *
+     * 返回 null 表示**这张表**没有任何区间覆盖 target，由引擎按"本机做不到这一档"降级/上报，
      * 而不是静默跑另一个帧率（那会让 params.fps 与成片 fps 不一致）。
      */
     fun pickFps(ranges: List<RangeI>, target: Int, highSpeed: Boolean): FpsPick? {
         if (target <= 0) return null
-        if (highSpeed) return FpsPick(target, target, true)
-        return pickFpsRange(ranges, target)
+        return if (highSpeed) pickHighSpeedFpsRange(ranges, target) else pickFpsRange(ranges, target)
     }
 
     /**
@@ -328,35 +340,23 @@ object RequestApplier {
         applyWhiteBalance(builder, p)
         applyFlash(builder, state, p)
         applyStabilize(builder, state, p.stabilize)
-        applyNoiseReduction(builder, state, p.videoDenoise)
+        applyNoiseReduction(builder, p.halNoiseReductionMode)
         applyMeteringRegions(builder, state, p)
     }
 
     /**
-     * 画面降噪（2026-10-26）：HAL 档把 `NOISE_REDUCTION_MODE` 下给相机；GPU 双边不进这里
-     * （它走 GL 管线，见 GlRenderEngine）。
+     * 画面降噪（2026-10-26）：把引擎决议好的 `NOISE_REDUCTION_MODE` 写进请求；**null 就一个键都不写**。
      *
-     * 三条纪律：
-     * 1. **只在能力声明里出现过的模式才下发**（[State.noiseReductionModes] 为空/不含即跳过）——
-     *    给未声明的模式等于发一个非法请求，轻则被 HAL 忽略重则报错；
-     * 2. OFF 时**不写这个键**：不写 = 不动 HAL 默认（不同机型默认不同，写 OFF 会强行关掉
-     *    厂商自己开着的降噪，那是负优化）；
-     * 3. GPU 双边档在 HAL 侧按 OFF 处理（不重复降噪），由 GL 管线独占。
+     * 策略（写哪个值、什么时候要写 OFF 清残留）全在 `core.noiseReductionModeToSend` 一处，
+     * 本函数只做"非 null 即写"这一件事：这样策略能被 JVM 用例直接钉住，而"是否真的写进请求"这一层
+     * 保持薄到不会再出错。
+     *
+     * 提醒后来人一条 Camera2 事实：`CaptureRequest.Builder` **每会话只建一次、跨多次下发复用**，
+     * 而且**没有单键 remove** —— 所以"不写"不等于"清掉上一次写的值"，那件事必须显式写 OFF
+     * （这正是 2026-10-26 修掉的缺陷：面板显示关闭、实际还在降噪）。
      */
-    private fun applyNoiseReduction(
-        builder: CaptureRequest.Builder,
-        state: State,
-        denoise: com.wotagei.cam.core.VideoDenoise
-    ) {
-        if (state.noiseReductionModes.isEmpty()) return
-        val mode = when (denoise) {
-            com.wotagei.cam.core.VideoDenoise.HAL_FAST ->
-                CaptureRequest.NOISE_REDUCTION_MODE_FAST
-            com.wotagei.cam.core.VideoDenoise.HAL_HIGH_QUALITY ->
-                CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
-            else -> return
-        }
-        if (mode !in state.noiseReductionModes) return
+    private fun applyNoiseReduction(builder: CaptureRequest.Builder, mode: Int?) {
+        if (mode == null) return
         builder.set(CaptureRequest.NOISE_REDUCTION_MODE, mode)
     }
 

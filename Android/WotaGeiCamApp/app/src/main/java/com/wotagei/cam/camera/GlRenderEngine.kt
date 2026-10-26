@@ -85,6 +85,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         /** 上屏节流上限（03 文档 §3.1）：只作用于窗口 pass，编码器 pass 一帧不丢 */
         private const val MAX_DISPLAY_FPS = 60f
 
+        /** 降噪档位编号（[denoiseLevelNow] / [programDenoiseLevel] 共用一套值） */
+        private const val DENOISE_FULL = 1
+        private const val DENOISE_LITE = 2
+
         /** 峰值对焦邻域取样步长（UV 空间，03 文档 §3.6 的 texel≈0.002 档位） */
         private const val PEAKING_TEXEL = 0.002f
 
@@ -354,8 +358,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     @Volatile
     private var wantDenoise = false
 
-    /** 当前 program 是否已带双边降噪（与 [programEffect] 同级，判"要不要重建"） */
-    private var programDenoise = false
+    /**
+     * 当前 program 带的降噪档（与 [programEffect] 同级，判"要不要重建"）：
+     * 0 = 无降噪，1 = 完整核（8 邻域），2 = 轻量核（4 邻域）。见 [denoiseLevelNow]。
+     */
+    private var programDenoiseLevel = 0
 
     /** 双边降噪的亮度差 σ（0..1 归一化亮度域）：越小越保边。夜间暗部噪点取 0.08。
      *  uTexel 复用既有峰值对焦那颗同名 uniform（二者不同时在场：双边只在 effect=NONE 时启用） */
@@ -1824,7 +1831,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
         // 双边降噪的 uniform（2026-10-26）：纹素步长取相机帧尺寸（错则降噪半径错）；
         // 只在本帧 program 确为双边档时写，不给直通/曲线 program 白设未知 uniform
-        if (programDenoise) {
+        if (programDenoiseLevel != 0) {
             if (uTexelLoc >= 0 && wantFrameWidth > 0 && wantFrameHeight > 0) {
                 GLES20.glUniform2f(uTexelLoc, 1f / wantFrameWidth, 1f / wantFrameHeight)
             }
@@ -1928,9 +1935,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val requested = wantEffect
         val target = if (requested == blacklistedEffect) FrameEffect.NONE else requested
         val curveOn = curveBytes != null && !curveFailed
-        val denoiseOn = wantDenoise
+        val denoiseLevel = denoiseLevelNow()
         if (programId != 0 && target == programEffect && curveOn == programCurve &&
-            denoiseOn == programDenoise
+            denoiseLevel == programDenoiseLevel
         ) {
             if (target == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
             // 开关状态没变、只是曲线形状改了：重传表即可，重建 program 会闪一帧
@@ -1944,41 +1951,80 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         }
         programEffect = FrameEffect.NONE
         programCurve = false
-        programDenoise = false
-        buildProgram(target, curveOn, denoiseOn)
+        programDenoiseLevel = 0
+        buildProgram(target, curveOn, denoiseLevel)
         if (programEffect != FrameEffect.ZEBRA) deleteStripeTexture()
         if (programEffect == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
         if (programCurve) ensureCurveTexture() else deleteCurveTexture()
     }
 
-    private fun buildProgram(effect: FrameEffect, curveOn: Boolean, denoiseOn: Boolean) {
+    /**
+     * 本帧该用哪个降噪档（0 = 关，1 = 完整核，2 = 轻量核）。
+     *
+     * 判据 = [com.wotagei.cam.core.denoiseKernelLite]（纯函数，UI 侧算提示用的是同一支）：
+     * **编码面**的「像素 × 帧率」超过阈值就用轻量核。只算编码面是有意的——它是成片的唯一来源，
+     * 也是唯一会按相机帧节奏逐帧跑满全分辨率的 pass；上屏那一路本身被限频（[MAX_DISPLAY_FPS]），
+     * 拿它参与分档只会让预览态与录制态反复换档、白闪两次 program。
+     *
+     * 无编码面（只在预览）时一律完整核：那时没有成片帧要保，少一层降噪反而是损失。
+     */
+    private fun denoiseLevelNow(): Int = when {
+        !wantDenoise -> 0
+        encoderEglSurface != null && encoderFps > 0 &&
+            com.wotagei.cam.core.denoiseKernelLite(encoderWidth, encoderHeight, encoderFps) -> DENOISE_LITE
+        else -> DENOISE_FULL
+    }
+
+    /**
+     * 按"效果 × 曲线 × 降噪档"挑片元着色器。**降噪只在 effect=NONE（直通/曲线）这两条成片支路**，
+     * 斑马纹与峰值对焦那两条一律不带（见 [buildProgram] 的注释）。
+     * 抽成函数是因为链接失败的回退链要在同一套组合上试第二次、第三次（完整核 / 不带降噪），
+     * 手写那几份 when 必然会漏一条。
+     */
+    private fun bilateralFragment(effect: FrameEffect, curveOn: Boolean, denoise: Int): String = when (effect) {
+        FrameEffect.ZEBRA -> Shaders.zebraFragment(curveOn)
+        FrameEffect.PEAKING -> Shaders.peakingFragment(curveOn)
+        else -> when {
+            denoise == DENOISE_LITE && curveOn -> Shaders.BILATERAL_LITE_CURVE_FS
+            denoise == DENOISE_LITE -> Shaders.BILATERAL_LITE_FS
+            denoise == DENOISE_FULL && curveOn -> Shaders.BILATERAL_CURVE_FS
+            denoise == DENOISE_FULL -> Shaders.BILATERAL_FS
+            curveOn -> Shaders.CURVE_FS
+            else -> Shaders.PASS_THROUGH_FS
+        }
+    }
+
+    private fun buildProgram(effect: FrameEffect, curveOn: Boolean, denoiseLevel: Int) {
         // 画面降噪只作用于「直通 / 曲线」这两条成片支路——斑马纹与峰值对焦是**监看**叠加层，
         // 对它们降噪等于对判读工具本身做处理，无意义且会拖慢帧；切换效果即回到各自程序。
-        val denoise = denoiseOn && effect == FrameEffect.NONE
-        val fragment = when (effect) {
-            FrameEffect.ZEBRA -> Shaders.zebraFragment(curveOn)
-            FrameEffect.PEAKING -> Shaders.peakingFragment(curveOn)
-            else -> when {
-                denoise && curveOn -> Shaders.BILATERAL_CURVE_FS
-                denoise -> Shaders.BILATERAL_FS
-                curveOn -> Shaders.CURVE_FS
-                else -> Shaders.PASS_THROUGH_FS
-            }
-        }
+        val denoise = if (effect == FrameEffect.NONE) denoiseLevel else 0
+        val fragment = bilateralFragment(effect, curveOn, denoise)
         var id = link(Shaders.TEXTURE_VS, fragment)
         var effective = effect
         var curveApplied = curveOn
+        var denoiseApplied = denoise
         if (id == 0 && curveOn) {
             // 曲线版编不出来时先退曲线、保住当前效果；只有直通本身失败才允许不出图
             Log.w(TAG_GL, "曲线 program 链接失败，退回不带曲线的 $effect")
             curveFailed = true
             curveApplied = false
-            val plain = when (effect) {
-                FrameEffect.ZEBRA -> Shaders.zebraFragment(false)
-                FrameEffect.PEAKING -> Shaders.peakingFragment(false)
-                else -> Shaders.PASS_THROUGH_FS
-            }
-            id = link(Shaders.TEXTURE_VS, plain)
+            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, false, denoise))
+        }
+        if (id == 0 && denoiseApplied == DENOISE_LITE) {
+            // 轻量核编不出来（个别驱动对更短的循环也挑）⇒ **退回完整核**而不是直接关降噪：
+            // 两档只差邻域集合，完整核是长期在用的一支，成功率更高。
+            Log.w(TAG_GL, "轻量降噪 program 链接失败，退回完整核")
+            denoiseApplied = DENOISE_FULL
+            curveApplied = curveOn && !curveFailed
+            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, curveApplied, DENOISE_FULL))
+        }
+        if (id == 0 && denoiseApplied != 0) {
+            // 两档都编不出来：退回"不带降噪"的同效果 program（画面照旧、只是没降噪），并留日志——
+            // 排障先看这一行，别去怀疑参数（早期注释曾自称"已规避循环风险"，与实现不符）
+            Log.w(TAG_GL, "降噪 program 链接失败（完整核与轻量核都试过），退回不带降噪")
+            denoiseApplied = 0
+            curveApplied = curveOn && !curveFailed
+            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, curveApplied, 0))
         }
         if (id == 0 && effective != FrameEffect.NONE) {
             // 少数驱动不支持片元 highp：退化成直通而不是黑屏，并记住该档不再重试
@@ -1996,7 +2042,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         programId = id
         programEffect = effective
         programCurve = curveApplied
-        programDenoise = denoise
+        programDenoiseLevel = denoiseApplied
+        // 切档留痕（2026-10-26）：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样，按负载自动降档）。
+        // 真机核对"到底用没用到轻量档"就 grep 这一行，不用重编也不用看帧账
+        Log.i(TAG_GL, "画面降噪 program：档=$denoiseApplied（0=关 1=完整 2=轻量）")
         aPositionLoc = GLES20.glGetAttribLocation(id, "aPosition")
         aTexCoordLoc = GLES20.glGetAttribLocation(id, "aTexCoord")
         uTexMatrixLoc = GLES20.glGetUniformLocation(id, "uTexMatrix")

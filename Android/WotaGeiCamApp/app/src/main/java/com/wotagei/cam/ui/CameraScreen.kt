@@ -491,6 +491,36 @@ fun CameraScreen(
             runner.clearRetryNotice()
         }
     }
+    // 画面降噪"按负载自动降档"的提示（2026-10-26，用户要求：自动降档都要看得见）：
+    // 判据 [denoiseKernelLite] 与 GL 侧挑 program 用的是**同一支纯函数**（编码面像素 × 帧率），
+    // 所以这里判它降档 = GL 那边确实换了轻量核。每次录制最多一条，退到 IDLE 复位。
+    var denoiseLiteNotified by remember { mutableStateOf(false) }
+    LaunchedEffect(recStatus) {
+        when (recStatus) {
+            RecordStatus.IDLE -> denoiseLiteNotified = false
+            RecordStatus.START -> {
+                val gpuDenoise = com.wotagei.cam.core.effectiveVideoDenoise(
+                    videoDenoise, renderMode == RenderMode.GPU
+                ) == com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL
+                val lite = com.wotagei.cam.core.denoiseKernelLite(size.width, size.height, fps.value)
+                if (!denoiseLiteNotified && gpuDenoise && frameEffect == FrameEffect.NONE && lite) {
+                    denoiseLiteNotified = true
+                    showTip(app.getString(R.string.denoise_lite_tip))
+                }
+            }
+            else -> Unit
+        }
+    }
+    // 帧率被自动降档（2026-10-26）：引擎在一次高速档请求失败后把 fps 退到普通表可达上限，
+    // 走同一条 hint 通道报出去。用户口径：**所有自动降档都要看得见**——不说的话他只看到帧率
+    // 自己变了，只会当成 bug（本轮之前这条路径是"什么都不做、取景器假死"）。
+    LaunchedEffect(ctrl) {
+        ctrl.fpsDowngraded.collect { to ->
+            if (to == null) return@collect
+            showTip(app.getString(R.string.cam_fps_downgraded_tip, to))
+            ctrl.clearFpsDowngrade()
+        }
+    }
     // 环境音丢失提示（S1-M3-05 可见化）：录制中巡检读到引擎置位即推一次，同款 hint 通道。
     // 提示是"这一刻没有环境音"的信息，结果层的「已保存 + 附注」是另一条通道（两条各自可见）
     LaunchedEffect(runner) {
@@ -498,6 +528,15 @@ fun CameraScreen(
             if (id == null) return@collect
             showTip(app.getString(id))
             runner.clearAmbientLostNotice()
+        }
+    }
+    // 音频降噪「要了却没生效」（2026-10-26）：本机没有 NoiseSuppressor / 启用失败时如实报一次，
+    // 免得用户以为环境音在降噪（面板文案只说"会按无降噪继续"，不说明"这一次到底有没有生效"）
+    LaunchedEffect(runner) {
+        runner.denoiseInactiveNotice.collect { id ->
+            if (id == null) return@collect
+            showTip(app.getString(id))
+            runner.clearDenoiseInactiveNotice()
         }
     }
     // 录制中相机设备被系统收回（2026-10-16 M1-01）：唯一 CLOSE 发布点 Camera2Engine.handleDeviceLost
@@ -1197,7 +1236,10 @@ fun CameraScreen(
         // 不在这里改成"当前档短名"：底栏左带最窄只有 ≈64dp（竖屏 360dp 那一档），
         // 一串「系统降噪·GPU 双边」会把那颗 chip 撑到顶掉整个 Dock 左带
         denoiseLabel = stringResource(R.string.cam_pill_denoise),
-        denoiseActive = com.wotagei.cam.core.videoDenoiseActive(params.videoDenoise.value, renderMode == RenderMode.GPU) ||
+        denoiseActive = com.wotagei.cam.core.videoDenoiseActive(
+            params.videoDenoise.value, renderMode == RenderMode.GPU,
+            monitorEffectOn = frameEffect != FrameEffect.NONE
+        ) ||
             params.audioDenoise.value != com.wotagei.cam.core.AudioDenoise.OFF,
         flash = flash,
         // 六项第 7 条：镜头入口从顶栏搬到底栏那颗，标签读当前镜头名
@@ -1673,7 +1715,10 @@ fun CameraScreen(
             bt = bt,
             capture = capture,
             onEnableCapture = enableCapture,
-            halNoiseReductionSupported = slot?.ability?.noiseReductionModes?.isNotEmpty() == true,
+            // HAL 两档逐档判可用 ⇒ 传集合（不是"有没有任意模式"）；斑马纹/峰值开着时 GPU 双边不生效，
+            // 面板要如实说明（胶囊的"生效中"标记走 core.videoDenoiseActive 的同一条口径）
+            halNoiseReductionModes = slot?.ability?.noiseReductionModes.orEmpty(),
+            monitorEffectOn = frameEffect != FrameEffect.NONE,
             )
         }
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，
@@ -2288,10 +2333,20 @@ private class RecordRunner(
     val ambientLostNotice = MutableStateFlow<Int?>(null)
 
     /**
+     * 音频降噪"要了却没生效"提示（2026-10-26）：与 [ambientLostNotice] 同型同节奏——录制中巡检
+     * 读到引擎置位即推一次，每次录制一条。用户口径：一切自动降档的提示都有必要（这条降的是
+     * 用户对"开着降噪"的预期）。
+     */
+    val denoiseInactiveNotice = MutableStateFlow<Int?>(null)
+
+    /**
      * 同一次录制只提示一次环境音丢失（在录制中巡检里置位）。会话级：[start] 起新录制时复位；
      * 自检重录（attempt++）不复位——用户看到的是"这一次录制"的一条提示，不是每次 attempt 一条。
      */
     private var ambientLostNotified = false
+
+    /** 同一次录制只提示一次「音频降噪未生效」（在录制中巡检里置位，[start] 起新录制时复位） */
+    private var denoiseInactiveNotified = false
 
     /** 起录参数的整束（[SessionArgs]）：start 收一次，自检重录按它整束重放 */
     private class SessionArgs(
@@ -2312,6 +2367,11 @@ private class RecordRunner(
     /** UI 读走环境音丢失提示后清槽（StateFlow 相等去重：清了才收得到下一次同因事件） */
     fun clearAmbientLostNotice() {
         ambientLostNotice.value = null
+    }
+
+    /** UI 读走「降噪未生效」提示后清槽（StateFlow 相等去重：清了才收得到下一次同因事件） */
+    fun clearDenoiseInactiveNotice() {
+        denoiseInactiveNotice.value = null
     }
 
     /**
@@ -2381,6 +2441,7 @@ private class RecordRunner(
             pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
             stopRequested = false // 同上：上一会话的停止取消信号不带进新会话
             ambientLostNotified = false // 环境音提示按"一次录制一条"复位（重录 attempt 间不去重）
+            denoiseInactiveNotified = false // 同上：降噪未生效提示也按一次录制一条复位
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
@@ -2735,6 +2796,14 @@ private class RecordRunner(
                 ambientLostNotified = true
                 ambientLostNotice.value = R.string.cam_ambient_lost_tip
                 Log.w(TAG_UI, "环境音轨丢失（引擎置位）：提示一次，结果文案另有附注")
+            }
+            // 音频降噪「要了却没生效」（2026-10-26）：同一拍、同一条提示通道、同一次一条。
+            // 排在环境音丢失之后：那一件是"没有环境音"，比"降噪没生效"更重，先报重的
+            val healthNow = rec.health()
+            if (recording && !denoiseInactiveNotified && healthNow.denoiseInactive) {
+                denoiseInactiveNotified = true
+                denoiseInactiveNotice.value = R.string.denoise_audio_unsupported_tip
+                Log.w(TAG_UI, "音频降噪未生效（引擎置位）：提示一次")
             }
             if (recording) handler.postDelayed(this, POLL_MS)
         }

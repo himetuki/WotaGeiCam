@@ -104,10 +104,9 @@ class WotaParams(private val scope: CoroutineScope) {
         // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
         applySize(a)
         val targetFps = fps.value.value.coerceAtLeast(1)
-        // 高速会话判定按「普通覆盖不了但高速表覆盖」：厂商把 50/60 只放进高速表时
-        // （vivo V2520A），>60 的旧阈值会让这两档在换挡后被普通范围判成不可用
-        val highSpeed = a.needsHighSpeed(size.value, targetFps)
-        val pick = pickFpsRange(a.fpsRangesFor(size.value, highSpeed), targetFps)
+        // 一档的完整决议交给 core.decideFps（普通表先来、覆盖不了才看高速表）——UI 的可用性/※、
+        // 引擎的下发与会话选择都走同一支，这里只把结果落进总线，不再自己判模态
+        val pick = a.decideFps(size.value, targetFps)?.pick
         fps.value = if (pick == null) ParamState(targetFps, null, enabled = false, exact = false)
         else ParamState(targetFps, pick.lo..pick.hi, true, pick.exact)
 

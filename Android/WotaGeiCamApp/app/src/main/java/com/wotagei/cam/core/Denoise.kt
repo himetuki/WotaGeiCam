@@ -77,8 +77,85 @@ fun effectiveVideoDenoise(requested: VideoDenoise, gpuMode: Boolean): VideoDenoi
 fun audioDenoiseNeedsCodec(audio: AudioDenoise): Boolean = audio != AudioDenoise.OFF
 
 /**
- * 画面降噪是否真的改变出图（用于 UI 上的"生效中"标记与"没变化就别重开会话"判定）：
- * OFF 与"GPU 双边但当前非 GPU"都算"没有额外效果"。
+ * 画面降噪**这一刻真的在降噪吗**（UI 的"生效中"标记 / HUD 胶囊选中态的唯一判据）。
+ *
+ * 三条口径，少一条界面就说谎：
+ * 1. OFF ⇒ 没有；
+ * 2. GPU 双边在**直连渲染**下退回 HAL 快速档 ⇒ **仍然算有降噪**（否则胶囊的选中态会跟着
+ *    渲染模式乱闪）；HAL 档与相机请求有关、与渲染模式无关，照旧生效；
+ * 3. GPU 双边在**监看叠加（斑马纹/峰值对焦）开着**时那条支路根本不存在——叠加层是判读工具，
+ *    对它们降噪没有意义，引擎只在 effect=NONE 时才编双边 program（见 GlRenderEngine.buildProgram）。
+ *    这时如实返回 false：胶囊不亮、面板另有一句说明（2026-10-26 修正，此前会亮着"生效中"）。
  */
-fun videoDenoiseActive(requested: VideoDenoise, gpuMode: Boolean): Boolean =
-    effectiveVideoDenoise(requested, gpuMode) != VideoDenoise.OFF
+fun videoDenoiseActive(
+    requested: VideoDenoise,
+    gpuMode: Boolean,
+    monitorEffectOn: Boolean
+): Boolean = when (val effective = effectiveVideoDenoise(requested, gpuMode)) {
+    VideoDenoise.OFF -> false
+    VideoDenoise.GPU_BILATERAL -> !monitorEffectOn
+    else -> effective != VideoDenoise.OFF
+}
+
+/**
+ * 该档在**相机请求侧**对应的 `NOISE_REDUCTION_MODE`；null = 这一档与"相机硬件降噪"无关。
+ * [VideoDenoise.GPU_BILATERAL] 也返回 null —— 它在 HAL 侧按"不降噪"处理，由 GL 管线独占
+ * （见 [noiseReductionModeToSend] 的判据 2：写过 HAL 档再切过来时要清残留，否则双重降噪）。
+ */
+fun halNoiseReductionMode(mode: VideoDenoise): Int? = when (mode) {
+    VideoDenoise.HAL_FAST -> android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_FAST
+    VideoDenoise.HAL_HIGH_QUALITY ->
+        android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+    VideoDenoise.OFF, VideoDenoise.GPU_BILATERAL -> null
+}
+
+/**
+ * 本次要下发的 `NOISE_REDUCTION_MODE`（**纯函数**，JVM 全测）：null = 一个键都不写。
+ *
+ * 三档语义，缺任何一档都会出问题：
+ * 1. **HAL 档且本机声明过它** ⇒ 写它。没声明过的不写——发一个未声明的模式轻则被 HAL 忽略、
+ *    重则报错，而且界面会"说开着其实没开"；
+ * 2. **退出 HAL 档（关闭 / GPU 双边）且本场会话写过** ⇒ 写 `NOISE_REDUCTION_MODE_OFF` 清残留。
+ *    `CaptureRequest.Builder` 每会话只建一次、跨多次下发复用，而 Camera2 **没有单键 remove**
+ *    ⇒ 写过一次就一直留在请求里。不清的后果实测两条：①"先开 HAL 再关闭"关不掉（面板显示关闭、
+ *    实际还在降噪）；②"先 HAL 再 GPU 双边"成了 HAL + GL **双重降噪**，与本模块"GPU 档在 HAL 侧
+ *    按 OFF 处理"的设计直接矛盾。只有 OFF 也在声明表里才写（清不掉时由引擎记一条日志）；
+ * 3. **从没写过就选关闭** ⇒ 不写。这档不能省：不写 = 不动厂商默认，而写 OFF 会把厂商自己开着
+ *    的降噪**强关**（那是负优化）。
+ *
+ * @param requested 实际生效档（调用方先过 [effectiveVideoDenoise]，GPU 双边在直连下会变成 HAL 快速）
+ * @param declared 本机声明的模式集合（空 = 未声明 ⇒ 一律不写）
+ * @param previouslyWritten 本场会话是否已经写过该键；生命周期与 builder 一致
+ *   （引擎在"每会话新建一次 builder"处复位）
+ */
+fun noiseReductionModeToSend(
+    requested: VideoDenoise,
+    declared: Set<Int>,
+    previouslyWritten: Boolean
+): Int? {
+    if (declared.isEmpty()) return null
+    val mode = halNoiseReductionMode(requested)
+    if (mode != null) return if (mode in declared) mode else null
+    if (!previouslyWritten) return null
+    val off = android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_OFF
+    return if (off in declared) off else null
+}
+
+/**
+ * 画面降噪的**负载分档**（纯函数）：编码面「像素 × 帧率」超过阈值 ⇒ 用轻量核（4 邻域、5 次采样；
+ * 完整核是 9 次）。4K30 / 1080p120 / 4K60 / 1080p240 这类组合自动落到轻量档。
+ *
+ * 为什么按这个量而不是按 GPU 型号：像素率是"每帧采样次数"的正比量，与"这张卡跑不跑得动"直接相关，
+ * 且完全能从录制参数算出来——不需要真机探测、也不需要维护机型名单（名单一发新机就过时）。
+ * 阈值取在 1080p60（1.24e8 像素/秒）与 1440p30（1.11e8）之上，所以常见档位只有上面那几组会降档。
+ *
+ * 语义边界（**自动降档 ≠ 关档**）：核变小、仍然降噪；用户选的档位、面板文案、持久化值都不变。
+ * 录制开始后界面会提示一句"已按本机负载自动用轻量降噪"——所有自动降档都要让用户看得见。
+ */
+fun denoiseKernelLite(widthPx: Int, heightPx: Int, fps: Int): Boolean {
+    if (widthPx <= 0 || heightPx <= 0 || fps <= 0) return false
+    return widthPx.toLong() * heightPx.toLong() * fps.toLong() > DENOISE_FULL_KERNEL_PIXEL_RATE
+}
+
+/** 完整核（9 次采样）的负载上限：1.5e8 像素/秒（1080p60 = 1.24e8 留在完整档） */
+const val DENOISE_FULL_KERNEL_PIXEL_RATE = 150_000_000L

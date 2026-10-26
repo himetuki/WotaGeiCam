@@ -199,6 +199,13 @@ object WotaSettings {
     const val KEY_HUD_ITEMS = "hud_items"
     /** 录制页控件胶囊的显隐（#54）：与读数分开一套位掩码，默认全开 */
     const val KEY_HUD_PILLS = "hud_pills"
+
+    /**
+     * 显隐位清单的**版本号**（2026-10-26）：与 [KEY_HUD_PILLS] 一起读写。存在的意义见
+     * [CamPill.MASK_SCHEMA]：缺它就没法区分"用户关掉了这颗"与"存掩码时这颗还不存在"，
+     * 新加的胶囊于是对老用户默认隐藏。
+     */
+    const val KEY_HUD_PILLS_SCHEMA = "hud_pills_schema"
     /**
      * 录制页的默认方向（13 号计划第 6 条）：`landscape`（默认）/ `portrait`。
      * 纯 UI 设置，**不进 [applyDefaultsOnce]** —— 那条链进程内只套一次，设置页改完回录制页会被挡住，
@@ -339,7 +346,18 @@ object WotaSettings {
     fun levelBuzzEnabled(prefs: SharedPreferences) = prefs.getBoolean(KEY_LEVEL_BUZZ, true)
     fun hudItems(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_ITEMS, HudItem.DEFAULT_MASK)
 
-    fun hudPills(prefs: SharedPreferences) = prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)
+    /**
+     * 显隐掩码（读）。缺键 = 从没动过 ⇒ 全开；有键但**版本落后** ⇒ 只补上"那一版之后新加的位"
+     * （[CamPill.migrateMask]），用户自己关过的一律不动。
+     *
+     * 这里是**纯读**（不写回）：迁移是幂等的，用户下一次在设置页动任何一颗时会把新掩码与新版本号
+     * 一起落盘，那之后迁移自然停止生效——没必要在 getter 里偷偷写盘（那个副作用会散到所有调用点）。
+     */
+    fun hudPills(prefs: SharedPreferences): Int {
+        val raw = prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)
+        val schema = prefs.getInt(KEY_HUD_PILLS_SCHEMA, 0)
+        return if (schema >= CamPill.MASK_SCHEMA) raw else CamPill.migrateMask(raw, schema)
+    }
 
     /** 关掉刻度吸附（改用连续值）的滑杆集合：缺键 = 空集 = 全部吸附 */
     fun continuousSliders(prefs: SharedPreferences): Set<SliderKey> =
@@ -794,7 +812,11 @@ private fun BlockHud(prefs: SharedPreferences, onOpenHudEditor: () -> Unit) {
                     onClick = {
                         val next = if (on) pillMask and item.bit.inv() else pillMask or item.bit
                         pillMask = next
-                        prefs.edit().putInt(WotaSettings.KEY_HUD_PILLS, next).apply()
+                        // 版本号一起落盘：之后 [hudPills] 不再做迁移（用户此刻的取舍就是最终取舍）
+                        prefs.edit()
+                            .putInt(WotaSettings.KEY_HUD_PILLS, next)
+                            .putInt(WotaSettings.KEY_HUD_PILLS_SCHEMA, CamPill.MASK_SCHEMA)
+                            .apply()
                     }
                 )
             }

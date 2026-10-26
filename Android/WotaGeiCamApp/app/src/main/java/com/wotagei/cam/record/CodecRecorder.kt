@@ -400,6 +400,13 @@ class CodecRecorder(
      */
     @Volatile private var ambientLost = false
 
+    /**
+     * 用户要了音频降噪、但本机没生效（2026-10-26）：效果器没挂上（无 NoiseSuppressor / 启用失败 /
+     * sessionId 无效）⇒ 环境音其实原样录的。与 [ambientLost] 同族同生命周期：起录时判定、会话级、
+     * [health] 供录制页巡检提示一次。**只报"要了却没生效"**，没选降噪（OFF）不置位。
+     */
+    @Volatile private var denoiseInactive = false
+
     /** stop() 置位：循环给两轨发 EOS 后收尾 */
     @Volatile private var stopping = false
 
@@ -602,6 +609,7 @@ class CodecRecorder(
         engineError = null
         degradedCode = null
         ambientLost = false
+        denoiseInactive = false
         abandonSegment = false
         stopping = false
         rotatePending = false
@@ -1094,6 +1102,12 @@ class CodecRecorder(
         if (f.start()) {
             feeder = f
             envFeederStartUs = System.nanoTime() / 1000L
+            // 降噪"要了却没生效"：只在这时才有真值（attach 的成败要到起录才知道）——
+            // 报给 health，由录制页提示一次（用户口径：自动降档都要看得见）
+            if (p.audioDenoise != com.wotagei.cam.core.AudioDenoise.OFF && !f.denoiseActive) {
+                denoiseInactive = true
+                Log.w(TAG, "音频降噪未生效（本机无 NoiseSuppressor 或启用失败），环境音按原样录")
+            }
             return
         }
         // 起不来就整条音频通路撤掉：视频继续（的静默降级）。profile 一并改写（P3，与内录
@@ -1219,6 +1233,7 @@ class CodecRecorder(
         engineError = null
         degradedCode = null
         ambientLost = false
+        denoiseInactive = false
         abandonSegment = false
         clock.reset()
         parts.clear()
@@ -1272,7 +1287,9 @@ class CodecRecorder(
             outputBytes = segWrittenBytes,
             milestonesObservable = true,
             // 环境音丢失（S1-M3-05 可见化）：录制页巡检读到即提示一次（结果文案另有附注，见 buildResult）
-            ambientLost = ambientLost
+            ambientLost = ambientLost,
+            // 音频降噪"要了却没生效"（2026-10-26）：同一条巡检提示通道，见字段注释
+            denoiseInactive = denoiseInactive
         )
     }
 

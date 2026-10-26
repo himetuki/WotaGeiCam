@@ -5,11 +5,16 @@ import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.VideoDenoise
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.audioDenoiseNeedsCodec
+import com.wotagei.cam.core.denoiseKernelLite
+import com.wotagei.cam.core.noiseReductionModeToSend
+import com.wotagei.cam.core.denoiseKernelLite
+import com.wotagei.cam.core.noiseReductionModeToSend
 import com.wotagei.cam.core.effectiveVideoDenoise
 import com.wotagei.cam.core.videoDenoiseActive
 import com.wotagei.cam.source.KotlinSourceScan
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.ui.HudEntry
+import com.wotagei.cam.ui.bandLeftPx
 import com.wotagei.cam.ui.HudLayoutTable
 import com.wotagei.cam.ui.HudZone
 import kotlinx.coroutines.CoroutineScope
@@ -67,13 +72,22 @@ class DenoiseWiringGuardTest {
             assertEquals(m, effectiveVideoDenoise(m, false))
         }
         // "有没有改变出图"的判据：OFF 恒 false；GPU 双边退回 HAL 后仍是"有降噪"（不是装了个空开关）
-        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, true))
-        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, false))
-        assertEquals(true, videoDenoiseActive(VideoDenoise.HAL_FAST, false))
-        assertEquals(true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true))
+        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, true, false))
+        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, false, false))
+        assertEquals(true, videoDenoiseActive(VideoDenoise.HAL_FAST, false, false))
+        assertEquals(true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true, false))
         assertEquals(
             "退回 HAL 后仍算有降噪——否则那颗胶囊的'生效中'标记会跟着渲染模式乱闪",
-            true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, false)
+            true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, false, false)
+        )
+        // 监看叠加（斑马纹/峰值）开着时 GPU 双边那条支路不存在 ⇒ 不许亮"生效中"（2026-10-26）
+        assertEquals(
+            "叠加层开着时不降噪，胶囊必须灭",
+            false, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true, true)
+        )
+        assertEquals(
+            "HAL 档与叠加层无关，照旧算生效",
+            true, videoDenoiseActive(VideoDenoise.HAL_FAST, false, true)
         )
     }
 
@@ -171,7 +185,13 @@ class DenoiseWiringGuardTest {
         for (needle in listOf(
             "onDenoiseClick = { pop = PillKey.DENOISE }",
             "denoiseLabel = stringResource(R.string.cam_pill_denoise)",
-            "halNoiseReductionSupported ="
+            // HAL 两档逐档判可用 + 监看叠加态（2026-10-26：两处口径必须一起传进面板）
+            "halNoiseReductionModes =",
+            "monitorEffectOn =",
+            // 三条"自动降档 / 没生效"的运行时可观测通道（用户口径：都要看得见）
+            "ctrl.fpsDowngraded.collect",
+            "runner.denoiseInactiveNotice.collect",
+            "denoiseKernelLite"
         )) {
             if (KotlinSourceScan.occurrences(screen, needle).isEmpty()) {
                 bad.add("CameraScreen 缺少这一处接线：$needle")
@@ -205,14 +225,32 @@ class DenoiseWiringGuardTest {
             KotlinSourceScan.occurrences(ra, "applyNoiseReduction(builder").isNotEmpty()
         )
         val body = KotlinSourceScan.bodyOf(ra, "applyNoiseReduction")
+        assertTrue("非 null 才写进请求", body.contains("builder.set(CaptureRequest.NOISE_REDUCTION_MODE, mode)"))
+        assertTrue("null 必须早退（一个键都不碰）", body.contains("if (mode == null) return"))
+        // 策略（声明集合 + 残留账）已收进 core 的纯函数（JVM 全测见下一组用例）；引擎侧只需钉
+        // "决议出口唯一"——散回本层自己判档就会出现"界面说关着、请求里还开着"那类分叉
         assertTrue(
-            "未声明的能力不许下发（发一个非法请求轻则被忽略重则报错）",
-            body.contains("noiseReductionModes")
+            "RequestApplier 不再自带降噪策略（值由引擎经 core 决议后传进来）",
+            !body.contains("noiseReductionModes")
         )
-        assertTrue(body.contains("NOISE_REDUCTION_MODE_FAST"))
-        assertTrue(body.contains("NOISE_REDUCTION_MODE_HIGH_QUALITY"))
-        // OFF 那一支必须**早退**（不写键 = 不动 HAL 默认；写 OFF 会把厂商开着的降噪强关，属负优化）
-        assertTrue("OFF 档必须 return 而不是写键", body.contains("else -> return"))
+        assertTrue(
+            "引擎必须经 core.noiseReductionModeToSend 决议",
+            KotlinSourceScan.occurrences(
+                codeOnly(KotlinSourceScan.mainSourceText("camera/Camera2Engine.kt")),
+                "noiseReductionModeToSend"
+            ).isNotEmpty()
+        )
+    }
+
+    @Test
+    fun `显隐掩码迁移是纯读_版本号在设置页写入`() {
+        val settings = codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
+        assertTrue("hudPills 必须做版本迁移（否则新胶囊对老用户默认隐藏）",
+            settings.contains("CamPill.migrateMask(raw, schema)"))
+        assertTrue("设置页写掩码时必须一起写版本号（写了迁移才停得下来）",
+            settings.contains("WotaSettings.KEY_HUD_PILLS_SCHEMA"))
+        assertTrue("缺键 = 从没动过 ⇒ 全开（既有语义不许变）",
+            settings.contains("prefs.getInt(KEY_HUD_PILLS, CamPill.DEFAULT_MASK)"))
     }
 
     @Test
@@ -237,6 +275,16 @@ class DenoiseWiringGuardTest {
             "必须【先挂效果器再起录】：效果器跟 session 走，起录后再挂会丢掉开头一段",
             attach < recording
         )
+        // 起录失败那一支同样是"先摘效果器再放 AudioRecord"（2026-10-26 补齐；此前只盯了 stop()）
+        val startCatch = start.substring(start.indexOf("catch (e: IllegalStateException)"))
+        val relCatch = startCatch.indexOf("denoiser.release()")
+        val freeCatch = startCatch.indexOf("rec.release()")
+        assertTrue("start() 的 catch 分支里没放效果器", relCatch >= 0)
+        assertTrue("start() 的 catch 分支里没释放 AudioRecord", freeCatch >= 0)
+        assertTrue(
+            "startRecording 失败时也必须【先放效果器再放 AudioRecord】（同一条不变量）",
+            relCatch < freeCatch
+        )
         val stop = KotlinSourceScan.bodyOf(src, "stop")
         val release = stop.indexOf("denoiser.release()")
         val freeRec = stop.indexOf("rec?.release()")
@@ -254,12 +302,84 @@ class DenoiseWiringGuardTest {
         val gl = codeOnly(KotlinSourceScan.mainSourceText("camera/GlRenderEngine.kt"))
         assertTrue("双边程序必须真的在着色器表里", gl.contains("BILATERAL_FS"))
         assertTrue("曲线+双边那条支路也要有", gl.contains("BILATERAL_CURVE_FS"))
+        assertTrue("轻量核也要在着色器表里（按负载自动降档用）", gl.contains("BILATERAL_LITE_FS"))
         val body = KotlinSourceScan.bodyOf(gl, "buildProgram")
         assertTrue(
             "双边只作用于 effect=NONE（直通/曲线）——斑马纹与峰值对焦是监看叠加层，对它降噪等于对判读工具本身处理",
-            body.contains("denoiseOn && effect == FrameEffect.NONE")
+            body.contains("if (effect == FrameEffect.NONE) denoiseLevel else 0")
         )
-        assertTrue("program 是否带降噪必须参与'要不要重建'的判据", body.contains("programDenoise"))
+        assertTrue(
+            "降噪档必须参与'要不要重建 program'的判据（否则切档不生效）",
+            KotlinSourceScan.bodyOf(gl, "syncEffect").contains("denoiseLevel == programDenoiseLevel")
+        )
+        assertTrue(
+            "轻量核编不出来时要退回完整核（denoiseApplied = DENOISE_FULL），而不是直接关掉降噪",
+            body.contains("denoiseApplied = DENOISE_FULL")
+        )
+    }
+
+    // ---------------------------------------------------------------- 本轮修复的纯逻辑（2026-10-26 复审）
+
+    @Test
+    fun `降噪残留只在写过时才清`() {
+        val fast = android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_FAST
+        val hq = android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+        val off = android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE_OFF
+        val declared = setOf(off, fast, hq)
+
+        // ① HAL 档且声明过 ⇒ 写它
+        assertEquals(fast, noiseReductionModeToSend(VideoDenoise.HAL_FAST, declared, false))
+        assertEquals(hq, noiseReductionModeToSend(VideoDenoise.HAL_HIGH_QUALITY, declared, false))
+        // ② 声明表里没有这一档 ⇒ 一个键都不写（发未声明的模式是非法请求，而且界面会谎报生效）
+        assertEquals(null, noiseReductionModeToSend(VideoDenoise.HAL_FAST, setOf(off, hq), false))
+        // ③ 从没写过就选关闭 ⇒ 不写（不碰厂商默认：写 OFF 会把厂商自己开着的降噪强关）
+        assertEquals(null, noiseReductionModeToSend(VideoDenoise.OFF, declared, false))
+        // ④ **写过再关** ⇒ 必须写 OFF 清残留（本轮 P1：旧实现不写 ⇒ 面板说关着、实际还在降噪）
+        assertEquals(off, noiseReductionModeToSend(VideoDenoise.OFF, declared, true))
+        // ⑤ 先 HAL 再 GPU 双边 ⇒ 也要清（否则 HAL + GL 双重降噪，与设计直接矛盾）
+        assertEquals(off, noiseReductionModeToSend(VideoDenoise.GPU_BILATERAL, declared, true))
+        // ⑥ 本机没声明 OFF ⇒ 清不掉，只能不写（引擎另留一条日志）
+        assertEquals(null, noiseReductionModeToSend(VideoDenoise.OFF, setOf(fast), true))
+        // ⑦ 未声明任何模式（LEGACY 机器）⇒ 一律不写
+        assertEquals(null, noiseReductionModeToSend(VideoDenoise.HAL_FAST, emptySet(), true))
+    }
+
+    @Test
+    fun `GPU双边的负载分档_重活才换轻量核`() {
+        // 常见档位：1080p30/60、1440p30 留在完整核（阈值 1.5e8 像素/秒）
+        assertEquals(false, denoiseKernelLite(1920, 1080, 30))
+        assertEquals(false, denoiseKernelLite(1920, 1080, 60))
+        assertEquals(false, denoiseKernelLite(2560, 1440, 30))
+        // 重活：4K30 / 1080p120 / 4K60 / 1080p240 走轻量核
+        assertEquals(true, denoiseKernelLite(3840, 2160, 30))
+        assertEquals(true, denoiseKernelLite(1920, 1080, 120))
+        assertEquals(true, denoiseKernelLite(3840, 2160, 60))
+        assertEquals(true, denoiseKernelLite(1920, 1080, 240))
+        // 尺寸/帧率未知（还没绑编码面）⇒ 不降档：信息不全时宁可完整核，别乱降
+        assertEquals(false, denoiseKernelLite(0, 0, 60))
+        assertEquals(false, denoiseKernelLite(1920, 1080, 0))
+    }
+
+    @Test
+    fun `新增位的显隐迁移只补新位`() {
+        val withoutDenoise = CamPill.DEFAULT_MASK - CamPill.DENOISE.bit
+        // 老用户（版本 0）掩码里没有降噪位 ⇒ 升级后补成可见
+        assertEquals(CamPill.DEFAULT_MASK, CamPill.migrateMask(withoutDenoise, 0))
+        // 用户自己在设置页关掉降噪（版本已是当前版）⇒ 迁移不复位，他的取舍优先
+        assertEquals(withoutDenoise, CamPill.migrateMask(withoutDenoise, CamPill.MASK_SCHEMA))
+        // 幂等
+        val once = CamPill.migrateMask(CamPill.SIZE.bit or CamPill.STORAGE.bit, 0)
+        assertEquals(once, CamPill.migrateMask(once, CamPill.MASK_SCHEMA))
+        assertEquals("新位确实登记进了 ADDED_IN_SCHEMA", CamPill.DENOISE.bit, CamPill.ADDED_IN_SCHEMA[1])
+    }
+
+    @Test
+    fun `底栏伴随条目的左缘只看绝对定位那一支`() {
+        // 底栏默认位与"只认 y"的落位：槽是 fillMaxWidth + Center ⇒ 左缘 =（槽宽 − 卡片宽）/2
+        assertEquals("默认位（Dock 居中）", 216, bandLeftPx(1080, 648, false))
+        assertEquals("Dock 被搬到绝对 y：仍居中，不是 0（本轮 P1 的回归点）", 216, bandLeftPx(1080, 648, false))
+        // 只有绝对定位那一支（槽 TopStart）才是 0
+        assertEquals(0, bandLeftPx(1080, 648, true))
     }
 }
 

@@ -253,6 +253,27 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
         val ALL: List<CamPill> = values().toList()
         val DEFAULT_MASK: Int = ALL.fold(0) { acc, t -> acc or t.bit }
 
+        /**
+         * 显隐位清单的版本号：**每加一颗新胶囊就 +1**，并把它的位登记进 [ADDED_IN_SCHEMA]。
+         *
+         * 为什么要有它（2026-10-26）：掩码是"位没置位 = 隐藏"，所以**老用户存的掩码里没有新位**
+         * 时，新胶囊会对他**默认隐藏**——而产品口径是"默认全开"（见 [CamPillTest] 那句"老用户升
+         * 上来界面不能凭空少东西"）。只在"用户**不可能**关过这一位"的升级当口补上它，就能既不打扰
+         * 用户已有的取舍、又不让新功能凭空消失。用户关过的那一位在下一版里照旧是关的
+         * （读写都会带上 [WotaSettings.KEY_HUD_PILLS_SCHEMA]，升级只发生一次）。
+         */
+        const val MASK_SCHEMA = 1
+
+        /** 「这一位是在哪一版加进来的」：升级时只补这些位，其余一律保持用户原样 */
+        val ADDED_IN_SCHEMA: Map<Int, Int> = mapOf(1 to DENOISE.bit)
+
+        /**
+         * 把 [fromSchema] 版的掩码升级到当前版：只 OR 进"从那一版之后新加的位"。
+         * 纯函数（JVM 全测）：`fromSchema` 已是当前版 ⇒ 原样返回，幂等。
+         */
+        fun migrateMask(mask: Int, fromSchema: Int): Int =
+            ((fromSchema + 1)..MASK_SCHEMA).fold(mask) { acc, v -> acc or (ADDED_IN_SCHEMA[v] ?: 0) }
+
         /** 掩码里“没置位”的那些就是要隐藏的胶囊 */
         fun hiddenOf(mask: Int): Set<CamPill> = ALL.filter { mask and it.bit == 0 }.toSet()
         fun maskOf(types: List<CamPill>): Int = types.fold(0) { acc, t -> acc or t.bit }

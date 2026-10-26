@@ -135,10 +135,17 @@ class EvCrashGuardTest {
         }
     }
 
-    /** 「apply/build 落在 try 内」的判据抽出来，尺子测试要拿 mutate 文本复验 */
+    /**
+     * 「apply/build 落在 try 内」的判据抽出来，尺子测试要拿 mutate 文本复验。
+     *
+     * 锚点从 `RequestApplier.apply` 换成 `applyParams(`（2026-10-26）：下发那一句包进了引擎的
+     * 私有 helper（降噪残留账号的记账点与下发必须同处），但"整条路径必须在 try 内"这条 P1 纪律
+     * 一字不变 —— helper 体内仍然调 RequestApplier.apply（见本文件另一条断言）。
+     */
     private fun applyInsideTry(body: String): Boolean {
         val tryAt = KotlinSourceScan.occurrences(body, "try {")
-        return tryAt.isNotEmpty() && tryAt[0] < body.indexOf("RequestApplier.apply")
+        val applyAt = body.indexOf("applyParams(")
+        return tryAt.isNotEmpty() && applyAt >= 0 && tryAt[0] < applyAt
     }
 
     @Test
@@ -148,7 +155,11 @@ class EvCrashGuardTest {
         // P1：syncFpsPick/apply/build 原先在 try 外，任何 RuntimeException 穿透即进程死亡。
         // 证伪：把 apply 挪回 try 外（或整体删 try）→ applyInsideTry 红
         //（indexOf 裸比较在 try 被删时为 -1 < 正数，会假绿，所以判据必须先验 try 在场）
-        assertTrue("RequestApplier.apply 必须落在 try 之内（P1 逃逸通道回归点）", applyInsideTry(apply))
+        assertTrue("参数下发必须落在 try 之内（P1 逃逸通道回归点）", applyInsideTry(apply))
+        assertEquals(
+            "参数下发必须集中在 applyParams 一处（散成多份就会再次出现'某条通路的 try 覆盖漏了'）",
+            1, KotlinSourceScan.occurrences(src, "RequestApplier.apply").size
+        )
         // P2：IAE 原先不分会话类型一律 downgradeHighSpeed。证伪：删掉分流 →
         // "highSpeedSession != null" 从 catch 里消失 → occurrences == 0 红
         val branch = KotlinSourceScan.occurrences(apply, "highSpeedSession != null")

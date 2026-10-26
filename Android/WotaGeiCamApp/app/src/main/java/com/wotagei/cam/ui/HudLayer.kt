@@ -1039,15 +1039,25 @@ fun BoxScope.HudZoneBox(
                     translationY = shiftYPx()
                 }
         ) { content() }
-        // 伴随条目：卡片左缘的槽内 x —— 与上面那两条对齐分支一一对应。绝对定位（含底栏只认 y 的
-        // 那一支）槽是 TopStart ⇒ 左缘 0；原生对齐（居中）⇒ (槽宽 − 卡片宽)/2。
-        // 已知边界（与码率 chip 那条同族）：拖拽期间那条跟手位移只进卡片的 graphicsLayer，
-        // 伴随条目不跟着动——松手写表后【落位】它跟得上（槽自己带 offset），只有拖拽中的观感不同步。
-        bandExtra?.let { extra ->
-            extra(if (absolute || bottomYOnly) 0 else ((slotWpx - cardWpx) / 2f).roundToInt())
-        }
+        // 伴随条目：卡片左缘的槽内 x —— 算式在 [bandLeftPx]，这里只调它（那条算式有 JVM 用例钉着）
+        bandExtra?.let { extra -> extra(bandLeftPx(slotWpx, cardWpx, absolute)) }
     }
 }
+
+/**
+ * 伴随条目的「卡片左缘在槽内的 x」（px）——[HudZoneBox] 的 `bandExtra` 槽唯一喂给调用方的数。
+ *
+ * 判据只有一条：**槽位是不是 TopStart**。只有绝对定位（[HudZoneBox] 里 `absolute`）那一支既是
+ * `align(TopStart)` 又把 `contentAlignment` 设成 TopStart；其余几支（含底栏"只认 y"那一支
+ * `bottomYOnly`）槽位都是 `fillMaxWidth` + `Alignment.Center`，Dock 依旧横向居中 ⇒ 左缘是
+ * `(槽宽 − 卡片宽)/2`。底栏那支若按 0 算，伴随 chip 会脱离 Dock 贴到安全区左缘并被抬高一条带
+ * （2026-10-26 修正；同一处曾把码率 chip 原本正确的居中算式一并改坏）。
+ *
+ * 抽成纯函数不是为了复用，是为了让这条算式**能被 JVM 用例直接钉死**：真机上要触发它得先把底栏
+ * 长按换到上栏，成本高且容易漏。
+ */
+internal fun bandLeftPx(slotWidthPx: Int, cardWidthPx: Int, absolutePlacement: Boolean): Int =
+    if (absolutePlacement) 0 else ((slotWidthPx - cardWidthPx) / 2f).roundToInt()
 
 // ------------------------------------------------------------------ 五枚容器的内容
 
