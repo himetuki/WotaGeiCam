@@ -1,5 +1,5 @@
 # 打包安卓四件套（monorepo 版，Gradle 根在 Android/WotaGeiCamApp/）
-# 产物：v<版本>[-r<NN>]-release-Android.apk / -universal-release-Android.apk /
+# 产物：WotaGeiCam-v<版本>[-r<NN>]-release-Android.apk / -universal-release-Android.apk /
 #       -arm64-v8a-release-Android.apk / -armeabi-v7a-release-Android.apk
 #       （版本号取自 versionName；扩展名前平台后缀 -Android，与鸿蒙的 -Harmony 资产区分）
 # r 号：tag 格式 v<版本>-r<检查点>（如 v0.0.7-r08）时，r 段经 -Prbuild 传给 Gradle，
@@ -85,12 +85,12 @@ jobs:
       # 第一遍：ABI 分包（universal + arm64-v8a + armeabi-v7a 三枚）
       # 注意：两遍配置不同（分包开/关），后一遍会把前一遍的产物从 outputs 里清掉，
       # 所以每遍跑完立刻拷进 apk-out 暂存，最后统一校验。
-      # apkBaseName=android：Gradle 产物名 android-v<版本>-*.apk。这只是暂存名——
-      # 下面 Rename 步骤统一改为 v<版本>-*-Android.apk（剥 android- 前缀、.apk 前插 -Android）。
+      # apkBaseName=WotaGeiCam：Gradle 产物名 WotaGeiCam-v<版本>-*.apk（用户 10-25 裁决：
+      # 资产名必须带项目名）。下面 Rename 步骤统一改为 WotaGeiCam-v<版本>-*-Android.apk。
       - name: Build split APKs (universal / arm64-v8a / armeabi-v7a)
         working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=android $EXTRA_PROPS --stacktrace
+          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           mkdir -p ../../apk-out
           cp app/build/outputs/apk/release/*.apk ../../apk-out/
 
@@ -98,20 +98,20 @@ jobs:
       - name: Build plain release APK
         working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PapkBaseName=android $EXTRA_PROPS --stacktrace
+          ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           cp app/build/outputs/apk/release/*.apk ../../apk-out/
 
-      # 统一改名（产物最终名）：android-v0.0.10-r05-release.apk → v0.0.10-r05-release-Android.apk。
-      # 剥 android- 前缀、在 .apk 前插平台后缀 -Android；Gradle 侧 apkBaseName 保持不动。
+      # 统一改名（产物最终名）：WotaGeiCam-v0.0.11-r01-release.apk → WotaGeiCam-v0.0.11-r01-release-Android.apk。
+      # 剥 WotaGeiCam- 暂存前缀、在 .apk 前插平台后缀 -Android；Gradle 侧 apkBaseName 保持不动。
       - name: Rename APKs to platform-suffixed names
         run: |
           set -euo pipefail
           shopt -s nullglob
           renamed=0
-          for f in apk-out/android-v*.apk; do
+          for f in apk-out/WotaGeiCam-v*.apk; do
             base="${f##*/}"
-            base="${base#android-}"
-            mv "$f" "apk-out/${base%.apk}-Android.apk"
+            base="${base#WotaGeiCam-}"
+            mv "$f" "apk-out/WotaGeiCam-${base%.apk}-Android.apk"
             renamed=$((renamed + 1))
           done
           echo "renamed $renamed APK(s)"
@@ -125,8 +125,8 @@ jobs:
             echo "::error::expected 4 APKs, got $count"
             exit 1
           fi
-          # 最终名必须是 v*-Android.apk（不允许 android- 前缀或漏掉平台后缀的残留）
-          bad=$(ls apk-out/*.apk | grep -Ev '/v[^/]*-Android\.apk$' || true)
+          # 最终名必须是 WotaGeiCam-v*-Android.apk（项目名是 10-25 用户裁决，不许再丢）
+          bad=$(ls apk-out/*.apk | grep -Ev '/WotaGeiCam-v[^/]*-Android\.apk$' || true)
           if [ -n "$bad" ]; then
             echo "::error::non-conforming APK name(s): $bad"
             exit 1

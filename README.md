@@ -66,10 +66,10 @@
 
 | 文件 | 平台 / 适配 |
 |---|---|
-| `vX.X.X-rYY-release-Android.apk` / `vX.X.X-rYY-universal-release-Android.apk` | Android：全设备通用（拿不准选 universal） |
-| `vX.X.X-rYY-arm64-v8a-release-Android.apk` | Android：64 位 ARM（2016 年后的绝大多数手机） |
-| `vX.X.X-rYY-armeabi-v7a-release-Android.apk` | Android：32 位 ARM 老设备 |
-| `vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS（未配置签名 Secrets 时产出；见下节安装注意） |
+| `WotaGeiCam-vX.X.X-rYY-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-universal-release-Android.apk` | Android：全设备通用（拿不准选 universal） |
+| `WotaGeiCam-vX.X.X-rYY-arm64-v8a-release-Android.apk` | Android：64 位 ARM（2016 年后的绝大多数手机） |
+| `WotaGeiCam-vX.X.X-rYY-armeabi-v7a-release-Android.apk` | Android：32 位 ARM 老设备 |
+| `WotaGeiCam-vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS（未配置签名 Secrets 时产出；见下节安装注意） |
 
 配置 HAP 签名 Secrets 后，Release 里会另有 `vX.X.X-rYY-signed-Harmony.hap`，并附 `SHA256SUMS`。
 

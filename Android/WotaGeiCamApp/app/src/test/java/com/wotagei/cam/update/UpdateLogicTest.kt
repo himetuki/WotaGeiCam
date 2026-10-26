@@ -271,16 +271,16 @@ class UpdateLogicTest {
 
     @Test
     fun `资产名推导_与CI产物四件套命名一致_平台后缀Android`() {
-        // build-apk.yml 头部注释的产物名：v0.0.7-r08-universal-release-Android.apk
-        // （tag 直接做前缀 + 扩展名前平台后缀 -Android）
+        // build-apk.yml 头部注释的产物名：WotaGeiCam-v0.0.11-r01-universal-release-Android.apk
+        // （项目名前缀 + tag + 扩展名前平台后缀 -Android；10-25 用户裁决）
         assertEquals(
-            "v0.0.8-r01-universal-release-Android.apk",
+            "WotaGeiCam-v0.0.8-r01-universal-release-Android.apk",
             RedirectProbe.guessUniversalAssetName("v0.0.8-r01")
         )
         // 直连下载 URL 拼接
         assertEquals(
-            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
-            UpdateConfig.directDownloadUrl("v0.0.8-r01", "v0.0.8-r01-universal-release-Android.apk")
+            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release-Android.apk",
+            UpdateConfig.directDownloadUrl("v0.0.8-r01", "WotaGeiCam-v0.0.8-r01-universal-release-Android.apk")
         )
     }
 
@@ -371,11 +371,11 @@ class UpdateLogicTest {
         )
         val avail = result as ProbeResult.UpdateAvailable
         assertEquals("v0.0.8-r01", avail.latestTag)
-        assertEquals("v0.0.8-r01-universal-release-Android.apk", avail.assetName)
+        assertEquals("WotaGeiCam-v0.0.8-r01-universal-release-Android.apk", avail.assetName)
         // 段 3 无 size → null（下载时用 Content-Length）
         assertNull(avail.sizeBytes)
         assertEquals(
-            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/v0.0.8-r01-universal-release-Android.apk",
+            "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release-Android.apk",
             avail.downloadUrl
         )
     }
