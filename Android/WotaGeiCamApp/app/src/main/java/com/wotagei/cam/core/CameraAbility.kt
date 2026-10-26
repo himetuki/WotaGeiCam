@@ -82,7 +82,20 @@ data class CameraAbility(
      * 空表 = HAL 未声明（[android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_NOISE_REDUCTION_MODES]
      * 缺失或不含任何有效项），此时 UI 的 HAL 两档按不可用处理——不猜、不下发未声明能力。
      */
-    val noiseReductionModes: Set<Int> = emptySet()
+    val noiseReductionModes: Set<Int> = emptySet(),
+    /**
+     * 本机可用的 `COLOR_CORRECTION_MODE` 集合（2026-10-26 反馈 #6）。
+     *
+     * 手动白平衡（色温/色调增益）的**契约前提**是 `TRANSFORM_MATRIX`：AWB_MODE=OFF 只关自动
+     * 白平衡，增益要被采纳必须同时进入变换矩阵模式——该机 HAL 没声明 TRANSFORM_MATRIX 时
+     * （华为 ALN-AL00 实测变绿+滑杆失效），系统回合退 FAST/HQ，增益被静默忽略。
+     *
+     * 采集走**键名匹配**而不是静态常量：`android.colorCorrection.availableModes` 这枚键在
+     * 公开 Java API 里没有静态字段（android-34 jar 只有 ABERRATION_MODES 那枚），但键本身
+     * 在能力表里、`getKeys()` 按名字就能拿到。空集合 = 拿不到（隐藏键被裁/LEGACY）⇒ 手动档
+     * 按不可用处理——与"增益不被采纳"的实际行为一致。
+     */
+    val colorCorrectionModes: Set<Int> = emptySet()
 ) {
     /** LEGACY 设备无逐帧控制/无 ZOOM_RATIO，UI 顶部要提示能力受限 */
     fun isLegacy(): Boolean = hardwareLevel == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
@@ -93,6 +106,15 @@ data class CameraAbility(
 
     /** 手动曝光三件套里的 ISO+快门是否可用（CameraCharacteristics 未给范围即不可手动） */
     fun manualExposurePossible(): Boolean = iso.ok() && exposureNs.ok()
+
+    /**
+     * 手动白平衡（色温/色调增益）在本机是否真能生效（2026-10-26 反馈 #6）：
+     * 契约前提是 HAL 声明了 `TRANSFORM_MATRIX`。空集合 = 隐藏键拿不到（无法判定）
+     * ⇒ 视为可用，保持既有行为（不因"查不到"而把用户已选的手动档弹掉）。
+     */
+    fun manualWhiteBalancePossible(): Boolean =
+        colorCorrectionModes.isEmpty() ||
+            colorCorrectionModes.contains(CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
 
     /**
      * 帧率范围按尺寸分流：高速档是「尺寸 → 范围」表，
@@ -150,6 +172,9 @@ data class CameraAbility(
         // 空集合 = 未声明 ⇒ 两档都必须灰显（判"用户说开了却没效果"时先核这里）
         Log.i(tag, "ability[$label] noiseReductionModes=${noiseReductionModes.sorted().joinToString()}" +
             if (noiseReductionModes.isEmpty()) "（未声明 ⇒ HAL 两档不可用）" else "")
+        Log.i(tag, "ability[$label] colorCorrectionModes=${colorCorrectionModes.sorted().joinToString()}" +
+            if (colorCorrectionModes.contains(CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)) ""
+            else "（未声明 TRANSFORM_MATRIX ⇒ 手动白平衡增益不被采纳）")
         Log.i(tag, "ability[$label] fpsRanges=${fpsRanges.joinToString { "[${it.lo},${it.hi}]" }}" +
             " fixed24=${hasFixedFps(24)} fixed25=${hasFixedFps(25)} highSpeedCapable=$highSpeedCapable")
         Log.i(tag, "ability[$label] videoSizes=${videoSizes.size} max=${maxSize.fmt()}(${maxSize.aspect()})" +
@@ -196,6 +221,13 @@ data class CameraAbility(
             val noiseReductionModes =
                 (tryOrNull { cc.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) }
                     ?: IntArray(0)).toSet()
+            // 手动白平衡的门控依据（反馈 #6）：隐藏键按名字取（公开 API 无静态字段，见字段注）
+            val colorCorrectionModes = tryOrNull {
+                @Suppress("UNCHECKED_CAST")
+                val key = cc.keys.firstOrNull { it.name == "android.colorCorrection.availableModes" }
+                    as? CameraCharacteristics.Key<IntArray>
+                key?.let { cc.get(it) } ?: IntArray(0)
+            }?.toSet() ?: emptySet()
             val zoomRatio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 RangeF.of(tryOrNull { cc.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) })
             } else RangeF.CLOSED
@@ -232,7 +264,8 @@ data class CameraAbility(
                 highSpeedCapable = highSpeedCapable,
                 availableSurfaceFormats = tryOrNull { map?.outputFormats } ?: IntArray(0),
                 previewSizes = previewSizes,
-                noiseReductionModes = noiseReductionModes
+                noiseReductionModes = noiseReductionModes,
+                colorCorrectionModes = colorCorrectionModes
             )
         }
 

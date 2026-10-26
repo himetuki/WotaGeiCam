@@ -605,7 +605,16 @@ private fun WbPill(
         // 白平衡属录制中可调白名单（A4）：预设行保持可选，否则手动组（色温/色调）不可达
         PillChoices(
             options = WbPreset.values().mapIndexed { i, p ->
-                PillOption(p.ordinal, names[i], p == WbPreset.MANUAL || ability?.awbModes?.contains(p.awbMode) != false)
+                // 手动档的门控（2026-10-26 反馈 #6）：增益生效的契约前提是 HAL 声明了
+                // TRANSFORM_MATRIX（见 CameraAbility.colorCorrectionModes）。没声明时手动档
+                // 按"选了也不生效"处理——在场但禁用，点了给解释（与对焦/闪光胶囊同一手法）。
+                // 预设档不受影响（走 AWB_MODE，另有 awbModes 门控）。
+                val ok = when {
+                    p != WbPreset.MANUAL -> ability?.awbModes?.contains(p.awbMode) != false
+                    // ability 为 null（编辑器/枚举前）放行：门控真源在 WotaParams.applyWhiteBalance 的回弹
+                    else -> ability == null || ability.manualWhiteBalancePossible()
+                }
+                PillOption(p.ordinal, names[i], ok)
             },
             selected = wbMode.ordinal,
             columns = 4,
