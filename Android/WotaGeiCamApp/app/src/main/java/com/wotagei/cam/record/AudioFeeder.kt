@@ -120,7 +120,9 @@ class AudioFeeder private constructor(
      *   又打开（3bc1acd）。静音判读现已改低成本判据（[sawNonZero]：按字节扫"任一非零、命中
      *   断扫"），逐样本 RMS 在内录路没有读者——不得回退。
      */
-    private val needsAmplitude: Boolean = true
+    private val needsAmplitude: Boolean = true,
+    /** 环境音降噪档（2026-10-26）：仅环境路生效；内录轨恒 OFF（别人的成品混音不二次降噪） */
+    private val audioDenoise: com.wotagei.cam.core.AudioDenoise = com.wotagei.cam.core.AudioDenoise.OFF
 ) {
 
     /**
@@ -132,7 +134,8 @@ class AudioFeeder private constructor(
         sampleRate: Int,
         channels: Int,
         source: Int,
-        minBufferSize: Int
+        minBufferSize: Int,
+        audioDenoise: com.wotagei.cam.core.AudioDenoise = com.wotagei.cam.core.AudioDenoise.OFF
     ) : this(sampleRate, channels, source, minBufferSize, { bufferBytes ->
         // 权限检查点 2/2：创建 AudioRecord 前再查一次（原 start() 逐字搬入，行为不变）
         if (!AudioProbe.hasRecordPermission(ctx)) {
@@ -153,7 +156,7 @@ class AudioFeeder private constructor(
             Log.e(TAG, "AudioRecord init failed: ${e.message}")
             null
         }
-    })
+    }, audioDenoise = audioDenoise)
 
     /**
      * 捕获（AudioPlaybackCapture）路径：AudioRecord 由 controller 在 Active 态建
@@ -256,6 +259,12 @@ class AudioFeeder private constructor(
     }
 
     /**
+     * 环境音降噪挂载点（2026-10-26）：随 AudioRecord 建立、随 [stop] 释放；`INACTIVE` = 不降噪。
+     * 内录路（捕获）不挂——别人的成品混音不二次降噪。
+     */
+    private var denoiser: AudioDenoiser = AudioDenoiser.INACTIVE
+
+    /**
      * 建 AudioRecord（构造路径分叉点）→ 起泵线程。环境路的权限/参数检查在 [openRecord] 内。
      * @return false = 无权限或初始化失败，调用方静默降级为纯视频（不录了再丢）
      */
@@ -267,6 +276,8 @@ class AudioFeeder private constructor(
             rec.release()
             return false
         }
+        // 降噪必须在 startRecording 之前挂上（效果器跟 session 走，起录后再挂会丢开头一段）
+        denoiser = AudioDenoiser.attach(rec.audioSessionId, audioDenoise)
         queue.clear()
         record = rec
         running = true
@@ -411,6 +422,9 @@ class AudioFeeder private constructor(
                 Thread.currentThread().interrupt()
             }
         }
+        // 先摘效果器再停/放 AudioRecord：效果器持着 session，AudioRecord 释放后再释放会报
+        denoiser.release()
+        denoiser = AudioDenoiser.INACTIVE
         val rec = record
         record = null
         try {

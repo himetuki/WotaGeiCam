@@ -852,7 +852,34 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 shiftXPx = shiftXOf(HudZone.BOTTOM),
                 shiftYPx = shiftYOf(HudZone.BOTTOM),
                 nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                onCardRect = { if (zoneRects[HudZone.BOTTOM] != it) zoneRects[HudZone.BOTTOM] = it }
+                onCardRect = { if (zoneRects[HudZone.BOTTOM] != it) zoneRects[HudZone.BOTTOM] = it },
+                // 降噪那颗（2026-10-26）：与录制页**同一个渲染入口 + 同一条落位账**（贴 Dock 左缘、
+                // 装不下退安全区左缘）。编辑页多两点：①它经 ctx.anchorOf 报矩形 ⇒ 进 [entryRects]、
+                // **可拖**（用户能把它搬去别的容器，拖拽裁决照旧走 entryAtPointer）；
+                // ②不留录制页那条"再上移一条带"的第三档——这页是排版预览，与容器重叠时看得见也
+                // 拖得动，不必再挪走，多一档反而会让"我摆的位置"与看到的对不上。
+                bandExtra = { dockLeftPx ->
+                    val denoiseEntry = HudEntry.of(CamPill.DENOISE)
+                    if (denoiseEntry in visibleEntries && draft.sourceZoneOf(denoiseEntry) == HudZone.BOTTOM) {
+                        var chipWpx by remember { mutableIntStateOf(0) }
+                        val gapPx = with(density) { WotaSpace.s.toPx() }
+                        val edgePx = with(density) { HudEdgePad.toPx() }
+                        HudBottomBandEntry(
+                            entry = denoiseEntry,
+                            ctx = ctx,
+                            clicksAccepted = true,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .offset {
+                                    IntOffset(
+                                        (dockLeftPx - gapPx - chipWpx).coerceAtLeast(edgePx).roundToInt(),
+                                        0
+                                    )
+                                }
+                                .onSizeChanged { if (it.width != chipWpx) chipWpx = it.width }
+                        )
+                    }
+                }
             ) {
                 // drag = null：长按换栏是**录制页**的手势，这页改 y 用整枚拖动。
                 // showLens 判据与录制页同一条：既看设置开关，也看那颗归属哪枚容器（挪走了这里就不占槽）
@@ -1264,6 +1291,8 @@ private fun editorCtx(
         monitorLabel = stringResource(R.string.cam_p_monitor),
         monitorActive = false,
         curveOn = false,
+        denoiseLabel = stringResource(R.string.cam_pill_denoise),
+        denoiseActive = false,
         flash = Flash.OFF,
         lensLabel = stringResource(lensLabelRes(LensType.WIDE)),
         btConnected = false,
@@ -1300,6 +1329,7 @@ private fun editorCtx(
         onMonitorClick = { },
         onFlashClick = { },
         onCurveClick = { },
+        onDenoiseClick = { },
         onZoomClick = { },
         onFocusClick = { },
         onStabClick = { },

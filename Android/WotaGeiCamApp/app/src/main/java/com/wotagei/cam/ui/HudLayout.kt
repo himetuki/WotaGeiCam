@@ -129,6 +129,12 @@ data class HudEntry(val kind: HudEntryKind, val ordinal: Int) {
             HudEntryKind.PILL -> when (pill) {
                 CamPill.SIZE, CamPill.STORAGE -> HudZone.TOP            // 顶栏两段
                 CamPill.LENS -> HudZone.BOTTOM                           // 底栏那颗（六项第 7 条从顶栏搬来）
+                // 降噪（2026-10-26 用户指定）：默认落底栏 Dock，且排在镜头那颗**左侧**。
+                // 注意：底栏是 `2S+R+2G+2P` 等宽槽特例布局（只摆得下 缩略图/快门/镜头 三格），
+                // 降噪**不进那三格**——走 `HudZoneBox(bandExtra =)` 那枚「同带伴随条目」槽
+                // （录制页与编辑页共用 [HudBottomBandEntry] 一个渲染入口，落位＝贴 Dock 左缘）。
+                // 此处把它登记进 BOTTOM 有序表，供"默认在最左""隐藏后不回默认"与跨容器搬移三件事用。
+                CamPill.DENOISE -> HudZone.BOTTOM
                 CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH -> HudZone.LEFT
                 CamPill.LEVEL, CamPill.VOLUME, CamPill.BT,
                 CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB -> HudZone.RIGHT
@@ -527,7 +533,8 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     /**
      * 补全 + 去重 + 丢坏值：
      * - 同一个 id 出现在两枚容器 → **先到先得**，后出现的丢掉（手改 prefs 造成的重复不能让一颗控件渲染两遍）；
-     * - 表里完全没有的条目 → 追加到它的 [HudEntry.homeZone] 末尾（新增 CamPill 位时老配置自动补齐）；
+     * - 表里完全没有的条目 → 补进它的 [HudEntry.homeZone] **末尾**（新增 CamPill 位时老配置自动补齐；
+     *   而"整枚容器都没写过"的另一档走 [defaultOrderOf]，见下方循环里的注释——这两档不能合并）；
      * - ordinal 越界的条目 → 丢弃；
      * - 格子表跟着条目走：丢了的人的格子一起丢，非网格容器（[HudZone.isGrid] = false）上的格子一律抹成
      *   缺席（那两枚按顺序排，留着只会变成"下次进网格容器时莫名复活一个老位置"）。
@@ -539,7 +546,11 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
         HudZone.ALL.forEach { placed[it] = mutableListOf(); placedCells[it] = LinkedHashMap() }
         for (zone in HudZone.ALL) {
             val cells = cellsOf(zone)
-            for (e in orderOf(zone)) {
+            // 表里**没这一枚容器** = 用户从没动过它 ⇒ 定序基准是 [defaultOrderOf]（缺席段走默认序，
+            // 与 posOf / cellsOf 的缺席语义同一条口径）；只有"写了这一段、但漏了几颗条目"才把缺的
+            // 补到段末（见下方补全循环）。底栏出厂序「降噪 → 镜头」与 ordinal 序相反，两档必须分开。
+            val base = zones[zone]?.order ?: defaultOrderOf(zone)
+            for (e in base) {
                 if (e.pill == null && e.item == null) continue
                 if (seen.add(e)) {
                     placed.getValue(zone).add(e)
@@ -636,7 +647,8 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
                 HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.BT),
                 HudEntry.of(CamPill.ZOOM), HudEntry.of(CamPill.FOCUS), HudEntry.of(CamPill.STAB)
             )
-            HudZone.BOTTOM -> listOf(HudEntry.of(CamPill.LENS))
+            // 降噪在镜头**之前** = 底栏左起（用户 2026-10-26："默认放在底部Dock栏左侧"）
+            HudZone.BOTTOM -> listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS))
             HudZone.READOUT -> HudItem.ALL.map { HudEntry.of(it) }
         }
 

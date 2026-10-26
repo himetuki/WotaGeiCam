@@ -75,7 +75,9 @@ object RequestApplier {
         val oisAvailable: Boolean,
         val eisAvailable: Boolean,
         val highSpeed: Boolean,
-        val eisBlockedBySize: Boolean
+        val eisBlockedBySize: Boolean,
+        /** HAL 声明可用的 NOISE_REDUCTION_MODE 集合（2026-10-26 画面降噪）；空 = 不下发该键 */
+        val noiseReductionModes: Set<Int> = emptySet()
     ) {
         /** 能力缺失时 RangeI 是 closed(0..0)，不能拿它去 coerce，否则会把 ISO 压成 0 */
         fun clampIso(value: Int): Int = if (isoMin in 1..isoMax) value.coerceIn(isoMin, isoMax) else value
@@ -107,7 +109,9 @@ object RequestApplier {
         val afRegions: List<MeteringRectangle>?,
         val aeRegions: List<MeteringRectangle>?,
         /** 单次通道用 TRIGGER_START；repeating 通道用 TRIGGER_IDLE 复位 */
-        val afTrigger: Int?
+        val afTrigger: Int?,
+        /** 画面降噪实际档（2026-10-26）：OFF 不写该键（恒等于"不动 HAL 默认"） */
+        val videoDenoise: com.wotagei.cam.core.VideoDenoise = com.wotagei.cam.core.VideoDenoise.OFF
     )
 
     // ---------------------------------------------------------------- 能力快照
@@ -142,7 +146,8 @@ object RequestApplier {
             oisAvailable = ability.oisAvailable,
             eisAvailable = ability.eisAvailable,
             highSpeed = highSpeed,
-            eisBlockedBySize = longEdge >= EIS_BLOCK_LONG_EDGE && shortEdge >= EIS_BLOCK_SHORT_EDGE
+            eisBlockedBySize = longEdge >= EIS_BLOCK_LONG_EDGE && shortEdge >= EIS_BLOCK_SHORT_EDGE,
+            noiseReductionModes = ability.noiseReductionModes
         )
     }
 
@@ -323,7 +328,36 @@ object RequestApplier {
         applyWhiteBalance(builder, p)
         applyFlash(builder, state, p)
         applyStabilize(builder, state, p.stabilize)
+        applyNoiseReduction(builder, state, p.videoDenoise)
         applyMeteringRegions(builder, state, p)
+    }
+
+    /**
+     * 画面降噪（2026-10-26）：HAL 档把 `NOISE_REDUCTION_MODE` 下给相机；GPU 双边不进这里
+     * （它走 GL 管线，见 GlRenderEngine）。
+     *
+     * 三条纪律：
+     * 1. **只在能力声明里出现过的模式才下发**（[State.noiseReductionModes] 为空/不含即跳过）——
+     *    给未声明的模式等于发一个非法请求，轻则被 HAL 忽略重则报错；
+     * 2. OFF 时**不写这个键**：不写 = 不动 HAL 默认（不同机型默认不同，写 OFF 会强行关掉
+     *    厂商自己开着的降噪，那是负优化）；
+     * 3. GPU 双边档在 HAL 侧按 OFF 处理（不重复降噪），由 GL 管线独占。
+     */
+    private fun applyNoiseReduction(
+        builder: CaptureRequest.Builder,
+        state: State,
+        denoise: com.wotagei.cam.core.VideoDenoise
+    ) {
+        if (state.noiseReductionModes.isEmpty()) return
+        val mode = when (denoise) {
+            com.wotagei.cam.core.VideoDenoise.HAL_FAST ->
+                CaptureRequest.NOISE_REDUCTION_MODE_FAST
+            com.wotagei.cam.core.VideoDenoise.HAL_HIGH_QUALITY ->
+                CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            else -> return
+        }
+        if (mode !in state.noiseReductionModes) return
+        builder.set(CaptureRequest.NOISE_REDUCTION_MODE, mode)
     }
 
     private fun applyFps(builder: CaptureRequest.Builder, pick: FpsPick?) {

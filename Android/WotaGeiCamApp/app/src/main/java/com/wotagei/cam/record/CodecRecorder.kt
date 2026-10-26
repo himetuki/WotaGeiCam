@@ -1090,7 +1090,7 @@ class CodecRecorder(
 
     private fun startFeederOrDropAudio() {
         val p = profile ?: return
-        val f = AudioFeeder(ctx, p.sampleRate, p.channels, audioSource, aacMinBuf)
+        val f = AudioFeeder(ctx, p.sampleRate, p.channels, audioSource, aacMinBuf, p.audioDenoise)
         if (f.start()) {
             feeder = f
             envFeederStartUs = System.nanoTime() / 1000L

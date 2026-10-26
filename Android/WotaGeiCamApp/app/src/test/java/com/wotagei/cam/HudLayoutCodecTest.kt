@@ -43,7 +43,7 @@ class HudLayoutCodecTest {
 
     private fun assertEachEntryOnce(table: HudLayoutTable, tag: String) {
         val all = table.allEntries()
-        assertEquals("$tag：条目总数必须等于 13 颗 CamPill + 7 颗读数", HudEntry.ALL.size, all.size)
+        assertEquals("$tag：条目总数必须等于 14 颗 CamPill + 7 颗读数", HudEntry.ALL.size, all.size)
         assertEquals("$tag：同一颗控件不许出现在两枚容器里", all.size, all.toSet().size)
         assertEquals("$tag：表里必须覆盖全部可编辑条目", HudEntry.ALL.toSet(), all.toSet())
     }
@@ -92,7 +92,8 @@ class HudLayoutCodecTest {
                 .map { HudEntry.of(it) },
             t.orderOf(HudZone.RIGHT)
         )
-        assertEquals(listOf(HudEntry.of(CamPill.LENS)), t.orderOf(HudZone.BOTTOM))
+        // 2026-10-26：降噪（CamPill.DENOISE）加入底栏，排在镜头**左侧**（用户指定"底栏 Dock 左侧"）
+        assertEquals(listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)), t.orderOf(HudZone.BOTTOM))
         assertEquals(HudItem.ALL.map { HudEntry.of(it) }, t.orderOf(HudZone.READOUT))
         assertEachEntryOnce(t, "默认表")
         // 默认表的所有容器都在默认位置：位置表里没有任何绝对坐标
@@ -110,7 +111,7 @@ class HudLayoutCodecTest {
         assertEquals(zoomPill, HudEntry.fromId("P3"))
         assertEquals(zoomReadout, HudEntry.fromId("H6"))
         // ordinal 越界的串一律拒绝（手改 prefs 不能凭空造出一颗不存在的控件）
-        assertNull(HudEntry.fromId("P13"))
+        assertNull(HudEntry.fromId("P14"))
         assertNull(HudEntry.fromId("H7"))
         assertNull(HudEntry.fromId("Z0"))
         assertNull(HudEntry.fromId(""))
@@ -360,7 +361,11 @@ class HudLayoutCodecTest {
         val afterReset = HudLayoutTable.default()
         assertEquals("重置＝整张表清回默认", HudLayoutTable.default(), afterReset)
         for (z in HudZone.ALL) assertTrue("${z.key} 段重置后必须回默认位置", afterReset.posOf(z).isDefault)
-        assertEquals(HudEntry.of(CamPill.LENS), afterReset.orderOf(HudZone.BOTTOM).single())
+        // 2026-10-26：底栏现有「降噪 + 镜头」两颗 ⇒ 不再 single()
+        assertEquals(
+            listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)),
+            afterReset.orderOf(HudZone.BOTTOM)
+        )
         // 「即时可重做」的模型前提：重置前那张表的串还完整可读回来（撤销靠的是它，不是内存里的手抄本）
         assertEquals("撤销重置要把前一张表原样读回来", edited, HudLayoutTable.decode(beforeReset))
     }
@@ -454,7 +459,7 @@ class HudLayoutCodecTest {
         assertEquals(
             mapOf(
                 HudZone.TOP to 2, HudZone.LEFT to 4, HudZone.RIGHT to 6,
-                HudZone.READOUT to 7, HudZone.BOTTOM to 1
+                HudZone.READOUT to 7, HudZone.BOTTOM to 2
             ), homes
         )
     }

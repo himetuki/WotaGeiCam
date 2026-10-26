@@ -184,6 +184,10 @@ object WotaSettings {
      */
     const val KEY_DEFAULT_ARC_MERGE_DEADBAND = "default_arc_merge_deadband"
 
+    /** 降噪两项（2026-10-26）：默认关，与相机参数同一条"录制页即改即存"纪律 */
+    const val KEY_DENOISE_AUDIO = "denoise_audio"
+    const val KEY_DENOISE_VIDEO = "denoise_video"
+
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
 
@@ -298,6 +302,14 @@ object WotaSettings {
     fun arcMergeDeadband(prefs: SharedPreferences): Int =
         prefs.getInt(KEY_DEFAULT_ARC_MERGE_DEADBAND, ArcMergeDeadband.DEFAULT)
             .coerceIn(ArcMergeDeadband.MIN, ArcMergeDeadband.MAX)
+
+    /** 音频降噪档（坏串回 OFF——降噪是"改变了声音"的开关，不认识的值一律按关处理） */
+    fun audioDenoise(prefs: SharedPreferences): com.wotagei.cam.core.AudioDenoise =
+        com.wotagei.cam.core.AudioDenoise.fromKey(prefs.getString(KEY_DENOISE_AUDIO, null))
+
+    /** 画面降噪档（坏串回 OFF，同上） */
+    fun videoDenoise(prefs: SharedPreferences): com.wotagei.cam.core.VideoDenoise =
+        com.wotagei.cam.core.VideoDenoise.fromKey(prefs.getString(KEY_DENOISE_VIDEO, null))
 
     fun defaultAudioMuted(prefs: SharedPreferences): Boolean = prefs.getBoolean(KEY_DEFAULT_AUDIO_MUTE, false)
 

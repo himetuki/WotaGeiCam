@@ -347,6 +347,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     private var programId = 0
     private var programEffect = FrameEffect.NONE
 
+    /**
+     * 画面降噪意图（2026-10-26）：GPU 双边档。写在调用线程、生效在 GL 线程；
+     * program 选择与曲线/效果同一套机制（改开关即重建 program，见 [syncEffect]）。
+     */
+    @Volatile
+    private var wantDenoise = false
+
+    /** 当前 program 是否已带双边降噪（与 [programEffect] 同级，判"要不要重建"） */
+    private var programDenoise = false
+
+    /** 双边降噪的亮度差 σ（0..1 归一化亮度域）：越小越保边。夜间暗部噪点取 0.08。
+     *  uTexel 复用既有峰值对焦那颗同名 uniform（二者不同时在场：双边只在 effect=NONE 时启用） */
+    private var denoiseSigmaR = 0.08f
+
+    private var uSigmaRLoc = -1
+
     /** 效果档编译失败：记住它，避免每帧重建同一坏 program 拖死帧率 */
     private var blacklistedEffect: FrameEffect? = null
 
@@ -775,6 +791,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         wantPeakingColor = color
         requestRender()
     }
+
+    /**
+     * 画面降噪（2026-10-26）：[enabled] = 是否启用 GPU 双边档。改开关即重建 program
+     * （与 [setCurve] 同一条路径：编译落在下一帧，且不阻塞编码面 swap）。
+     *
+     * DIRECT 渲染模式下不应调用本入口——相机帧不进 GL 管线，双边无从作用；
+     * 降噪档的实际生效判定在 [com.wotagei.cam.core.effectiveVideoDenoise]，UI 与引擎共用同一支。
+     */
+    fun setVideoDenoise(enabled: Boolean) {
+        if (released.get()) return
+        if (wantDenoise == enabled) return
+        wantDenoise = enabled
+        postGl {
+            syncEffect()
+            dirty = true
+            scheduleDraw()
+        }
+    }
+
+    /** 当前 program 是否带双边降噪（UI/守卫查询用；与 [isReady] 同一类只读快照） */
+    fun isVideoDenoiseOn(): Boolean = wantDenoise && !released.get()
 
     /**
      * 补弧合并差分死区 D（0..32，8bit luma 级）：`Δluma > D` 时整颗像素取被抽帧，否则保持保留帧。
@@ -1785,6 +1822,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             if (uColorLoc >= 0) GLES20.glUniform3f(uColorLoc, rgb[0], rgb[1], rgb[2])
         }
 
+        // 双边降噪的 uniform（2026-10-26）：纹素步长取相机帧尺寸（错则降噪半径错）；
+        // 只在本帧 program 确为双边档时写，不给直通/曲线 program 白设未知 uniform
+        if (programDenoise) {
+            if (uTexelLoc >= 0 && wantFrameWidth > 0 && wantFrameHeight > 0) {
+                GLES20.glUniform2f(uTexelLoc, 1f / wantFrameWidth, 1f / wantFrameHeight)
+            }
+            if (uSigmaRLoc >= 0) GLES20.glUniform1f(uSigmaRLoc, denoiseSigmaR)
+        }
+
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
         buildTexCoords(encoderPass)
         if (aPositionLoc >= 0) {
@@ -1882,7 +1928,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val requested = wantEffect
         val target = if (requested == blacklistedEffect) FrameEffect.NONE else requested
         val curveOn = curveBytes != null && !curveFailed
-        if (programId != 0 && target == programEffect && curveOn == programCurve) {
+        val denoiseOn = wantDenoise
+        if (programId != 0 && target == programEffect && curveOn == programCurve &&
+            denoiseOn == programDenoise
+        ) {
             if (target == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
             // 开关状态没变、只是曲线形状改了：重传表即可，重建 program 会闪一帧
             if (programCurve) ensureCurveTexture()
@@ -1895,17 +1944,26 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         }
         programEffect = FrameEffect.NONE
         programCurve = false
-        buildProgram(target, curveOn)
+        programDenoise = false
+        buildProgram(target, curveOn, denoiseOn)
         if (programEffect != FrameEffect.ZEBRA) deleteStripeTexture()
         if (programEffect == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
         if (programCurve) ensureCurveTexture() else deleteCurveTexture()
     }
 
-    private fun buildProgram(effect: FrameEffect, curveOn: Boolean) {
+    private fun buildProgram(effect: FrameEffect, curveOn: Boolean, denoiseOn: Boolean) {
+        // 画面降噪只作用于「直通 / 曲线」这两条成片支路——斑马纹与峰值对焦是**监看**叠加层，
+        // 对它们降噪等于对判读工具本身做处理，无意义且会拖慢帧；切换效果即回到各自程序。
+        val denoise = denoiseOn && effect == FrameEffect.NONE
         val fragment = when (effect) {
             FrameEffect.ZEBRA -> Shaders.zebraFragment(curveOn)
             FrameEffect.PEAKING -> Shaders.peakingFragment(curveOn)
-            else -> if (curveOn) Shaders.CURVE_FS else Shaders.PASS_THROUGH_FS
+            else -> when {
+                denoise && curveOn -> Shaders.BILATERAL_CURVE_FS
+                denoise -> Shaders.BILATERAL_FS
+                curveOn -> Shaders.CURVE_FS
+                else -> Shaders.PASS_THROUGH_FS
+            }
         }
         var id = link(Shaders.TEXTURE_VS, fragment)
         var effective = effect
@@ -1938,6 +1996,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         programId = id
         programEffect = effective
         programCurve = curveApplied
+        programDenoise = denoise
         aPositionLoc = GLES20.glGetAttribLocation(id, "aPosition")
         aTexCoordLoc = GLES20.glGetAttribLocation(id, "aTexCoord")
         uTexMatrixLoc = GLES20.glGetUniformLocation(id, "uTexMatrix")
@@ -1949,6 +2008,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         uStrengthLoc = GLES20.glGetUniformLocation(id, "uStrength")
         uColorLoc = GLES20.glGetUniformLocation(id, "uColor")
         uCurveLoc = GLES20.glGetUniformLocation(id, "uCurve")
+        uSigmaRLoc = GLES20.glGetUniformLocation(id, "uSigmaR")
     }
 
     /**

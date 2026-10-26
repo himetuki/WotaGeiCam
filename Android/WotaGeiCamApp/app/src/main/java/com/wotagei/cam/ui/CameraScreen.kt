@@ -290,6 +290,8 @@ fun CameraScreen(
     val refLines by params.refLines.observed()
     val levelEnabled by params.levelEnabled.observed()
     val arcMergeDeadband by params.arcMergeDeadband.observed()
+    /** 画面降噪档（2026-10-26）：实际生效档由 core.effectiveVideoDenoise 与本页 renderMode 共同裁决 */
+    val videoDenoise by params.videoDenoise.observed()
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
@@ -561,7 +563,7 @@ fun CameraScreen(
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
     LaunchedEffect(
         glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack,
-        arcMergeDeadband
+        arcMergeDeadband, videoDenoise
     ) {
         val gl = glEngine ?: return@LaunchedEffect
         gl.setEffect(if (renderMode == RenderMode.DIRECT) FrameEffect.NONE else frameEffect)
@@ -572,6 +574,12 @@ fun CameraScreen(
         // 补弧「并入门槛」同理：只下发给当前引擎的本段 uniform，下一段 setArcConvert 仍回落到
         // 参数总线发布的快照（真源在 WotaParams.setArcMergeDeadband）——这里不改打戳/抽帧节奏
         gl.setArcMergeDeadband(arcMergeDeadband)
+        // 画面降噪（2026-10-26）：GPU 双边档只在 GPU 渲染下成立，实际档由 core.effectiveVideoDenoise
+        // 统一裁决（DIRECT 退回 HAL，HAL 由相机请求下发、不走 GL）；换引擎时同曲线一样补发
+        gl.setVideoDenoise(
+            com.wotagei.cam.core.effectiveVideoDenoise(videoDenoise, renderMode == RenderMode.GPU) ==
+                com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL
+        )
     }
 
     // ---- 方向：显示角喂给两条 sink，sink 内部再叠自己读到的缓冲矩阵旋转分量（见 camera/PreviewOrientation）
@@ -1012,6 +1020,9 @@ fun CameraScreen(
     val lensEntry = HudEntry.of(CamPill.LENS)
     val lensInBottomDock = lensEntry in visibleEntries &&
         hudLayout.sourceZoneOf(lensEntry) == HudZone.BOTTOM
+    // 「降噪」那颗同理（2026-10-26）：归属归表说了算，在底栏时走 [BottomBandChips] 的伴随条目渲染，
+    // 被搬到别的容器时由那枚容器泛化渲染——同一颗只有一条渲染路，锚点也就只有一个写入方
+    val denoiseEntry = HudEntry.of(CamPill.DENOISE)
 
     // ---- 第 8 条：长按底栏 Dock 换栏（只作用 y，结果写进 hud_layout 的底栏容器那一份坐标）
     var dockDragging by remember { mutableStateOf(false) }
@@ -1181,6 +1192,13 @@ fun CameraScreen(
         ),
         monitorActive = frameEffect != FrameEffect.NONE,
         curveOn = !curveStack.isPassthrough,
+        // 降噪胶囊读数（2026-10-26）：短名与"生效中"标记。短名恒取**控件名**（与 防抖/对焦/监看
+        // 同一条口径：读数颗的字面量是"它是什么"，而"开没开"由 TierChip 的选中态上色承担）。
+        // 不在这里改成"当前档短名"：底栏左带最窄只有 ≈64dp（竖屏 360dp 那一档），
+        // 一串「系统降噪·GPU 双边」会把那颗 chip 撑到顶掉整个 Dock 左带
+        denoiseLabel = stringResource(R.string.cam_pill_denoise),
+        denoiseActive = com.wotagei.cam.core.videoDenoiseActive(params.videoDenoise.value, renderMode == RenderMode.GPU) ||
+            params.audioDenoise.value != com.wotagei.cam.core.AudioDenoise.OFF,
         flash = flash,
         // 六项第 7 条：镜头入口从顶栏搬到底栏那颗，标签读当前镜头名
         lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
@@ -1242,6 +1260,7 @@ fun CameraScreen(
         onRefLineClick = { pop = PillKey.REFLINE },
         onMonitorClick = { pop = PillKey.MONITOR },
         onFlashClick = { pop = PillKey.FLASH },
+        onDenoiseClick = { pop = PillKey.DENOISE },
         onCurveClick = {
             openSheet(Sheet.CURVE)
             // 小弹窗没有副标题位：CPU 渲染档曲线不可拖，进弹窗第一时间用提示条说清
@@ -1503,69 +1522,36 @@ fun CameraScreen(
                             area = baseArea,
                             shiftYPx = { if (dockDragging) dockShiftPx else 0f },
                             nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
-                            onCardRect = { putCardRect(HudZone.BOTTOM, it) }
+                            onCardRect = { putCardRect(HudZone.BOTTOM, it) },
+                            // ---- 底栏 Dock 左侧、同一带的两枚 chip（10-01 布局批的码率读数 + 2026-10-26
+                            // 的降噪胶囊）。落位账全在 [BottomBandChips] 里：贴 Dock 左缘、装不下退屏幕
+                            // 左缘、再装不下上移一条带——两枚 chip 一起进退（一条 Row），不会互相压上。
+                            // 走 b 案（伴随条目挂在**容器槽里**）不选 a 案（Row 包 BOTTOM 的 HudZoneBox）：
+                            // BOTTOM 槽位是 `align(BottomCenter) + fillMaxWidth`，Row 里先摆 chip 再摆 Dock
+                            // 会把 Dock 的居中基准从"整宽安全区"改成"扣掉 chip 的剩余宽"，录制键中心≠可视
+                            // 水平中心，不变量②当场崩。伴随条目与 Dock 是同一枚槽 Box 的**两个兄弟**，
+                            // Dock 的居中一个字都不受影响。
+                            bandExtra = { dockLeftPx ->
+                                BottomBandChips(
+                                    dockLeftPx = dockLeftPx,
+                                    dockStripH = dockStripH,
+                                    denoiseEntry = denoiseEntry.takeIf {
+                                        it in visibleEntries && hudLayout.sourceZoneOf(it) == HudZone.BOTTOM
+                                    },
+                                    hudCtx = hudCtx,
+                                    bitrateLabel = if (HudItem.BITRATE in hudItems) {
+                                        hudCtx.readoutValue(HudItem.BITRATE)
+                                    } else null,
+                                    pillAnchors = pillAnchors,
+                                    onBitrateClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) }
+                                )
+                            }
                         ) {
                             HudBottomZone(
                                 showLens = lensInBottomDock,
                                 ctx = hudCtx,
                                 drag = dockDrag
                             )
-                        }
-                        // ---- 码率读数 chip（10-01 布局批第 1 条）：底栏 Dock 左侧、同一带 ----
-                        // 选 b 案（HUD 根盒上加 sibling）不选 a 案（Row 包 BOTTOM 的 HudZoneBox）：BOTTOM
-                        // 槽位是 `align(BottomCenter) + fillMaxWidth`（HudZoneBox），Row 里先摆 chip 再摆 Dock
-                        // 会把 Dock 的居中基准从"整宽安全区"改成"扣掉 chip 的剩余宽"，录制键中心≠可视水平
-                        // 中心，不变量②当场崩；且 HudZoneBox 是 BoxScope 扩展，Row 作用域里编译不过。
-                        // 横向用 offset 反推而不用 padding(end=)：padding 会把左半带剩余宽压成 chip 的测量
-                        // 上限（竖屏 360dp 那档只有 ≈64dp，chip 自然宽 ≈90dp 被迫裁字——§58/§73 那族坑）；
-                        // offset 只平移不改测量约束，chip 永远按自然宽量。左半带真装不下（竖屏）时先退贴屏幕
-                        // 左缘；若那样仍压到 Dock（fallback 右缘越过 Dock 左缘）则再上移退出这条带
-                        // （见 bitrateYOffPx）——分两步退，第一步保持同带、第二步才是离带。chip 宽实测
-                        // 两轮收敛（与 topBarH/dockStripH 同一套手法），首帧按退避位画、第二帧贴上 Dock 左缘。
-                        // 已知边界：第 8 条把 Dock 长按换到上栏后这颗留在底带——跟 y 需要安全区盒的窗口原点
-                        // 这个新机制，用户未要求，不做。
-                        if (HudItem.BITRATE in hudItems) {
-                            val bitrateLabel = hudCtx.readoutValue(HudItem.BITRATE)
-                            if (bitrateLabel != null) {
-                                var bitrateChipWpx by remember { mutableIntStateOf(0) }
-                                val bitrateGapPx = with(hudDensity) { WotaSpace.s.toPx() }
-                                val bitrateEdgePx = with(hudDensity) { HudEdgePad.toPx() }
-                                val bitrateDockW =
-                                    if (dockCardW > 0) dockCardW else BottomDockWidthFallback.value.roundToInt()
-                                // Dock 居中于整宽安全区（不变量②），左缘 = (safeW − dockW)/2；
-                                // chip 右缘目标 = Dock 左缘 − 一枚 WotaSpace.s（与 planReadoutRow 的 dockGapDp 同一枚令牌）
-                                val bitrateDockLeftPx =
-                                    with(hudDensity) { ((safeW - bitrateDockW).coerceAtLeast(0) / 2f).dp.toPx() }
-                                val bitrateHugX = bitrateDockLeftPx - bitrateGapPx - bitrateChipWpx
-                                val bitrateFits = bitrateChipWpx > 0 && bitrateHugX >= bitrateEdgePx
-                                val bitrateX = if (bitrateFits) bitrateHugX else bitrateEdgePx
-                                // 审查 P1（10-01 布局批）：竖屏窄带（safeW <≈434dp）时 fallback 位（贴屏幕左缘）
-                                // 的右缘会越过 Dock 左缘、压上底板 26dp——fallback 必须真正退出这条带：上移一档
-                                // （dockStripH + 一枚间隙），与 READOUT 退化档"装不下就退到带上方"真正同族
-                                // （原注释称同族是错的，两者的退法并不同族）。首帧 chipW=0 不判重叠，第二帧实测接管
-                                val bitrateYOffPx =
-                                    if (!bitrateFits && bitrateEdgePx + bitrateChipWpx > bitrateDockLeftPx) {
-                                        with(hudDensity) { (dockStripH.dp + WotaSpace.s).toPx() }.roundToInt()
-                                    } else 0
-                                WotaChip(
-                                    label = bitrateLabel,
-                                    selected = false,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        // 与底板可见底边齐平（BottomBarOuterPadV 那一档），即与 READOUT 那行
-                                        // 同一条底缘线——"同带"的纵向口径与 #70 A 一致；上移档由 bitrateYOffPx 承担
-                                        .padding(bottom = BottomBarOuterPadV)
-                                        .offset { IntOffset(bitrateX.roundToInt(), -bitrateYOffPx) }
-                                        .onSizeChanged { if (it.width != bitrateChipWpx) bitrateChipWpx = it.width }
-                                        // BITRATE 就近浮层的锚点写入方从 HudEntryItem 换到这颗：不挂的话
-                                        // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
-                                        .pillAnchorReport(pillAnchors, PillKey.BITRATE),
-                                    secondary = stringResource(HudItem.BITRATE.labelRes),
-                                    onClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
-                                    onLongClick = { hudCtx.onReadoutOpen(HudItem.BITRATE) },
-                                    frost = hudFrostPillPlate
-                                )
-                            }
                         }
                     }
                 }
@@ -1687,6 +1673,7 @@ fun CameraScreen(
             bt = bt,
             capture = capture,
             onEnableCapture = enableCapture,
+            halNoiseReductionSupported = slot?.ability?.noiseReductionModes?.isNotEmpty() == true,
             )
         }
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，
@@ -3160,6 +3147,7 @@ private class RecordRunner(
         // 旧「内录×静音=纯视频」的互斥掐死废除（它只对批 2 单源时代成立）
         val plan = audioTrackPlan(params.audioEnabled.value, captureAudio)
         return RecordProfile(
+            audioDenoise = params.audioDenoise.value,
             width = width,
             height = height,
             fps = fps,
@@ -3263,5 +3251,81 @@ private fun launchCaptureConsent(
         Log.w(TAG_UI, "拉起内录授权框失败：${e.message}")
         capture.onConsentResult(Activity.RESULT_CANCELED, null)
         showTip(app.getString(R.string.audio_capture_cancelled))
+    }
+}
+
+/**
+ * 底栏 Dock **左侧、同一带**的那几枚伴随 chip（2026-10-26 从"码率读数 chip"那块扩成通用的一枚）：
+ * 左侧起依次是「降噪」（可编辑条目，用户可在编辑页把它搬走）与「码率」（固定读数，Dock 外特权）。
+ *
+ * ## 为什么收成一条 Row 而不是各算各的 x
+ * 两枚 chip 都在 Dock 左缘外，各自反推 x 会互相压上（谁也不知道另一枚多宽）。收成一条 Row 后，
+ * "贴 Dock 左缘"这条账只算一次：`x = dockLeftPx − 间隙 − 整条 Row 的实测宽`。
+ *
+ * ## 退让是三档，与旧码率 chip 逐字同源（不是新规矩）
+ * ① 贴 Dock 左缘（装得下）；② 装不下 → 退贴安全区左缘；③ 那样右缘仍越过 Dock 左缘（竖屏窄带）→
+ * 再整条上移一档（`dockStripH + 一枚间隙`）退出这条带——分两步退，第一步保持同带、第二步才是离带。
+ * 横向用 `offset` 反推而**不用** `padding(end=)`：padding 会把剩余宽压成 chip 的测量上限
+ * （竖屏 360dp 那档只剩 ≈64dp，chip 自然宽 ≈90dp 被迫裁字，§58/§73 那族坑）；offset 只平移
+ * 不改测量约束，chip 永远按自然宽量。Row 宽实测两轮收敛（与 topBarH / dockStripH 同一套手法）：
+ * 首帧按退避位画、第二帧贴上 Dock 左缘。
+ *
+ * ## 纵向
+ * `align(BottomStart)` 落在这枚槽 Box 的**内容底**上，而槽的内容底就是卡片（Dock）底 ⇒ 与底板
+ * 可见底边齐平（旧写法在根盒里补的那枚 `padding(bottom = BottomBarOuterPadV)` 正是同一档，
+ * 两者等价）。降噪那枚自己不写 frost：它经 [HudBottomBandEntry] 走 [HudEntryItem]，由那条路
+ * 统一决定"有没有父板"，不在这里再注册一块。
+ */
+@Composable
+private fun BoxScope.BottomBandChips(
+    dockLeftPx: Int,
+    dockStripH: Int,
+    denoiseEntry: HudEntry?,
+    hudCtx: HudCtx,
+    bitrateLabel: String?,
+    pillAnchors: MutableMap<PillKey, IntRect>,
+    onBitrateClick: () -> Unit
+) {
+    if (denoiseEntry == null && bitrateLabel == null) return
+    val density = LocalDensity.current
+    var rowWpx by remember { mutableIntStateOf(0) }
+    val gapPx = with(density) { WotaSpace.s.toPx() }
+    val edgePx = with(density) { HudEdgePad.toPx() }
+    val hugX = dockLeftPx - gapPx - rowWpx
+    val fits = rowWpx > 0 && hugX >= edgePx
+    val x = if (fits) hugX else edgePx
+    val yOffPx = if (!fits && edgePx + rowWpx > dockLeftPx) {
+        with(density) { (dockStripH.dp + WotaSpace.s).toPx() }.roundToInt()
+    } else 0
+    Row(
+        modifier = Modifier
+            .align(Alignment.BottomStart)
+            .offset { IntOffset(x.roundToInt(), -yOffPx) }
+            .onSizeChanged { if (it.width != rowWpx) rowWpx = it.width },
+        horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
+    ) {
+        if (denoiseEntry != null) {
+            HudBottomBandEntry(
+                entry = denoiseEntry,
+                ctx = hudCtx,
+                // 这颗不参与底栏那套"吸收进录制键"（它不在 Dock 的三格里）⇒ 闸门恒开。
+                // 点按动作从 ctx.onDenoiseClick 走（与 Dock 内那颗同一条 ctx，调用方一处接线）
+                clicksAccepted = true
+            )
+        }
+        if (bitrateLabel != null) {
+            WotaChip(
+                label = bitrateLabel,
+                selected = false,
+                modifier = Modifier
+                    // BITRATE 就近浮层的锚点写入方从 HudEntryItem 换到这颗：不挂的话
+                    // 长按弹层按 IntRect.Zero 钉回屏幕左上角（§69 缺陷族）
+                    .pillAnchorReport(pillAnchors, PillKey.BITRATE),
+                secondary = stringResource(HudItem.BITRATE.labelRes),
+                onClick = onBitrateClick,
+                onLongClick = onBitrateClick,
+                frost = hudFrostPillPlate
+            )
+        }
     }
 }

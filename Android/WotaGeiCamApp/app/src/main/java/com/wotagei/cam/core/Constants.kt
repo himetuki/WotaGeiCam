@@ -241,7 +241,13 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
     FLASH(512, com.wotagei.cam.R.string.cam_pill_flash),
     LENS(1024, com.wotagei.cam.R.string.cam_pill_lens),
     SIZE(2048, com.wotagei.cam.R.string.cam_pill_size),
-    STORAGE(4096, com.wotagei.cam.R.string.cam_pill_storage);
+    STORAGE(4096, com.wotagei.cam.R.string.cam_pill_storage),
+
+    /**
+     * 降噪（2026-10-26 用户需求）：一颗胶囊管音频降噪 + 画面降噪两件事，**默认关**。
+     * 默认落位在底栏 Dock 左侧（见 [com.wotagei.cam.ui.HudEntry.homeZone]）。
+     */
+    DENOISE(8192, com.wotagei.cam.R.string.cam_pill_denoise);
 
     companion object {
         val ALL: List<CamPill> = values().toList()

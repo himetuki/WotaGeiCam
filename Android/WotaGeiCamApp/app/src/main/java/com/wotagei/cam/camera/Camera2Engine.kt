@@ -216,6 +216,13 @@ class Camera2Engine(
             .launchIn(scope)
 
         // 闪光切换要「先复位再置新值」，不能只靠普通脏刷新
+        // 画面降噪档变化（2026-10-26）：HAL 档只改下发内容（脏刷新即可）；GPU↔HAL 切换要重建会话
+        // ——GPU 档是"GL 侧处理、相机侧按 OFF"，进 GPU 双边/退回 HAL 时结构签名不变但下发键变，
+        // 走合并刷新；renderMode 变化本就走结构脉冲重建，无需在此处理
+        collectJobs += params.videoDenoise.drop(1)
+            .onEach { post { markDirty() } }
+            .launchIn(scope)
+
         collectJobs += params.flash.drop(1)
             .onEach { post { onFlashChanged() } }
             .launchIn(scope)
@@ -684,6 +691,16 @@ class Camera2Engine(
         reqBuilder = builder
     }
 
+    /**
+     * 画面降噪的实际档（2026-10-26）：GPU 双边只在 GPU 渲染下成立，DIRECT 时退回 HAL 快速档
+     * ——口径与 UI 的 [com.wotagei.cam.core.effectiveVideoDenoise] 同一支，不许各写一份。
+     */
+    private fun videoDenoiseActual(): com.wotagei.cam.core.VideoDenoise =
+        com.wotagei.cam.core.effectiveVideoDenoise(
+            params.videoDenoise.value,
+            params.renderMode.value == RenderMode.GPU
+        )
+
     private fun snapshot(): RequestApplier.Snapshot = with(params) {
         RequestApplier.Snapshot(
             aeMode = aeMode.value,
@@ -703,7 +720,8 @@ class Camera2Engine(
             stabilize = stabilize.value,
             afRegions = tapAfRegions,
             aeRegions = tapAeRegions,
-            afTrigger = tapTrigger
+            afTrigger = tapTrigger,
+            videoDenoise = videoDenoiseActual()
         )
     }
 

@@ -37,6 +37,14 @@ class WotaParams(private val scope: CoroutineScope) {
         size.value = s
     }
     val fps = MutableStateFlow(ParamState(25, exact = true))
+
+    /**
+     * 音频降噪 / 画面降噪（2026-10-26 用户需求：两项默认关）。
+     * 与相机参数放同一条总线：面板即改即生效，落盘由设置持久化层负责（键见 ParamsPersist）。
+     * 画面降噪的实际生效档还要过 [com.wotagei.cam.core.effectiveVideoDenoise]（DIRECT 模式退回 HAL）。
+     */
+    val audioDenoise = MutableStateFlow(com.wotagei.cam.core.AudioDenoise.OFF)
+    val videoDenoise = MutableStateFlow(com.wotagei.cam.core.VideoDenoise.OFF)
     val shutter = MutableStateFlow(ParamState(40_000_000L))          // ns，1/25
     val iso = MutableStateFlow(ParamState(100))
     val aeMode = MutableStateFlow(AeMode.AUTO)

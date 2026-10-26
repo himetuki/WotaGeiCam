@@ -292,6 +292,7 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
         CamPill.REFLINE -> PillKey.REFLINE
         CamPill.MONITOR -> PillKey.MONITOR
         CamPill.FLASH -> PillKey.FLASH
+        CamPill.DENOISE -> PillKey.DENOISE
         CamPill.CURVE -> null
         CamPill.LEVEL, CamPill.VOLUME -> null
     }
@@ -541,6 +542,10 @@ data class HudCtx(
     val monitorLabel: String,
     val monitorActive: Boolean,
     val curveOn: Boolean,
+    /** 降噪胶囊的读数文本（恒取控件名「降噪」，与 防抖/对焦 同口径）与"两项里任一降噪生效"标记 */
+    val denoiseLabel: String,
+    val denoiseActive: Boolean,
+    val onDenoiseClick: () -> Unit,
     val flash: Flash,
     val lensLabel: String,
     val btConnected: Boolean,
@@ -748,6 +753,11 @@ fun HudEntryItem(
                 tier, stringResource(R.string.cam_p_curve), ctx.curveOn, anchor.then(modifier),
                 gatedClick(clicksAccepted, ctx.onCurveClick), frost
             )
+            // 降噪（2026-10-26）：一颗胶囊管音频+画面两件事，读数走 TierChip 短名（点开是面板）
+            CamPill.DENOISE -> TierChip(
+                tier, ctx.denoiseLabel, ctx.denoiseActive, anchor.then(modifier),
+                gatedClick(clicksAccepted, ctx.onDenoiseClick), frost
+            )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),
                 description = stringResource(flashLabelRes(ctx.flash)),
@@ -879,6 +889,32 @@ internal fun zoneBandHeight(zone: HudZone, area: HudAreaDp): Int =
     else (area.height - area.topAvoidDp - area.bottomAvoidDp).coerceAtLeast(0)
 
 /**
+ * 底栏 Dock **左侧同带**那颗条目的渲染点（2026-10-26 降噪）：`HudZoneBox(bandExtra =)`
+ * 的槽里由录制页与编辑页**共用同一个渲染入口**，免得两页各写一份"档位 + ghost + 锚点"三件套。
+ *
+ * 三件事收在这里而不是让调用方各写一遍：
+ * - **档位**：底栏那条带恒走 [WotaChipTier.Standard]（[chipTierFor] 的裁决，理由是那颗的宽
+ *   参与 `DockSlotSpace` 那笔账，收窄档会更窄）；
+ * - **锚点**：仍只经 [HudCtx.anchorOf] 这一条（[HudEntryItem] 内部），就近浮层不会甩到屏幕原点；
+ * - **ghost**：编辑页拖动中把原位那份藏掉（[HudCtx.hiddenEntry]）；录制页该字段恒 null ⇒ 零成本。
+ */
+@Composable
+fun HudBottomBandEntry(
+    entry: HudEntry,
+    ctx: HudCtx,
+    clicksAccepted: Boolean,
+    modifier: Modifier = Modifier
+) {
+    HudEntryItem(
+        entry = entry,
+        ctx = ctx,
+        modifier = modifier.ghostWhileDragged(ctx.hiddenEntry == entry),
+        tier = chipTierFor(HudZone.BOTTOM),
+        clicksAccepted = clicksAccepted
+    )
+}
+
+/**
  * 一枚容器的外壳：定稿位置走原生对齐，用户拖过的位置走绝对 `offset`。
  *
  * 三条分支（按表里的绝对轴取）：
@@ -916,6 +952,21 @@ fun BoxScope.HudZoneBox(
      */
     nativeTopMinDp: Int,
     onCardRect: (IntRect) -> Unit,
+    /**
+     * 「同带伴随条目」槽（2026-10-26 降噪那颗）：[HudBottomZone] 的布局是锁死的三格
+     * （缩略图 / 快门 / 镜头），只认镜头那一颗可编辑条目；底栏 Dock **左侧、同一带**还要挂 chip
+     * （降噪胶囊就是那一颗），而它不能进那三格——进了就要动 `dockWidthPx` 那笔账，
+     * 不变量②（键心＝可视水平中心）当场崩。
+     *
+     * 这枚槽把"跟随容器落位、跟随带内边距、与卡片同一条底缘"留在容器内做：调用方只写 chip，
+     * 形参给的是**卡片左缘在槽内的 x**（px）；"贴卡片左缘再退一枚间隙"＝ `dockLeftPx - gap - chipW`
+     * （chip 自己的宽由调用方实测，与码率 chip 那套两轮收敛同一手法）。
+     *
+     * 默认 null 不走 [nativeTopMinDp] 那条"形参必须显式传"的铁律：那条铁律针对的是**有值就会写错**
+     * 的数字（漏传一个错的默认值，真机上才炸）；这里 null 的语义就是"这条带没有伴随条目"，
+     * 是完整的语义而不是占位值，其余九枚容器（四枚不横向铺满的 + 顶栏）本就无从谈左缘。
+     */
+    bandExtra: (@Composable BoxScope.(dockLeftPx: Int) -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
     // 霜的宿主登记（#84 步骤 2）：五枚容器各登记一次，引用计数到 0 才撤定时器与 prefs 监听。
@@ -923,6 +974,9 @@ fun BoxScope.HudZoneBox(
     HudFrost.Host()
     val density = LocalDensity.current
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
+    // [bandExtra] 要贴卡片左缘，而"卡片在槽里居没居中"只有本层知道 ⇒ 两份实测宽收在这里
+    var slotWpx by remember { mutableIntStateOf(0) }
+    var cardWpx by remember { mutableIntStateOf(0) }
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
     val bottomYOnly = zone == HudZone.BOTTOM && placement.yDp >= 0
     val absolute = !bottomYOnly && (placement.xDp >= 0 || placement.yDp >= 0)
@@ -966,7 +1020,7 @@ fun BoxScope.HudZoneBox(
         }
     }
     Box(
-        slot.then(modifier),
+        slot.then(modifier).onSizeChanged { slotWpx = it.width },
         contentAlignment = if (absolute) Alignment.TopStart else nativeContentAlignment(zone)
     ) {
         Box(
@@ -974,6 +1028,8 @@ fun BoxScope.HudZoneBox(
                 .onGloballyPositioned { coords ->
                     val p = coords.positionInWindow()
                     val s = coords.size
+                    // 卡片宽同时喂给 [bandExtra]：贴卡片左缘要的"卡片在槽里居中"只有这里知道
+                    cardWpx = s.width
                     onCardRect(IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height))
                 }
                 .graphicsLayer {
@@ -983,6 +1039,13 @@ fun BoxScope.HudZoneBox(
                     translationY = shiftYPx()
                 }
         ) { content() }
+        // 伴随条目：卡片左缘的槽内 x —— 与上面那两条对齐分支一一对应。绝对定位（含底栏只认 y 的
+        // 那一支）槽是 TopStart ⇒ 左缘 0；原生对齐（居中）⇒ (槽宽 − 卡片宽)/2。
+        // 已知边界（与码率 chip 那条同族）：拖拽期间那条跟手位移只进卡片的 graphicsLayer，
+        // 伴随条目不跟着动——松手写表后【落位】它跟得上（槽自己带 offset），只有拖拽中的观感不同步。
+        bandExtra?.let { extra ->
+            extra(if (absolute || bottomYOnly) 0 else ((slotWpx - cardWpx) / 2f).roundToInt())
+        }
     }
 }
 

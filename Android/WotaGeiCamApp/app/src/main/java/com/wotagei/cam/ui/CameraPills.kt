@@ -96,7 +96,7 @@ import kotlin.math.roundToInt
  * 加值就等于改存量配置语义；右竖 Dock 的「对焦」本来也不属于可自定义读数。
  * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
-enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT }
+enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE }
 
 /**
  * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
@@ -142,6 +142,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.STAB to "HudLayer.HudEntryItem(STAB) ← 同上，位置由 hud_layout 的条目归属决定",
     PillKey.BT to "HudLayer.HudEntryItem(BT) → widget.AudioChip(modifier)，批 2 起这颗是「音频」chip（键名 BT 沿用：原蓝牙位，位掩码按 bit 持久化不许改名）",
     PillKey.REFLINE to "HudLayer.HudEntryItem(REFLINE) → design.WotaIconButton(modifier)",
+    PillKey.DENOISE to "HudLayer.HudEntryItem(DENOISE) → design.TierChip(modifier)，默认落底栏 Dock 左侧",
     PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
     PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
     PillKey.SHUTTER to "HudLayer.HudEntryItem(HudItem.SHUTTER) → design.WotaChip(modifier)",
@@ -186,11 +187,14 @@ fun PillHost(
     freeMb: Long,
     bt: com.wotagei.cam.bt.BtSpeakerController,
     capture: com.wotagei.cam.record.PlaybackCaptureController,
-    onEnableCapture: () -> Unit
+    onEnableCapture: () -> Unit,
+    /** 本机 HAL 是否声明了任何 NOISE_REDUCTION 模式（画面降噪 HAL 两档的可用性判据） */
+    halNoiseReductionSupported: Boolean
 ) {
     val ability = slot?.ability
     // A4 录制中矩阵：所有弹窗都能开，只有白名单内的可调；其余控件禁用 + 顶部只读提示。
     val editable = !recording || pillEditableDuringRecording(key)
+    val halSupported = halNoiseReductionSupported
     when (key) {
         PillKey.SIZE -> SizePill(anchor, params, ability, editable, onClose, onUnsupported)
         PillKey.FPS -> FpsPill(anchor, params, ability, editable, onClose, onUnsupported, onPersist)
@@ -219,6 +223,9 @@ fun PillHost(
         PillKey.FLASH -> FlashPill(anchor, params, ability, editable, onClose, onUnsupported)
         PillKey.STAB -> StabPill(anchor, params, ability, editable, onClose, onUnsupported)
         PillKey.STORAGE -> StoragePill(anchor, params, freeMb, editable, onClose)
+        PillKey.DENOISE -> DenoisePill(
+            anchor, params, editable, gpuMode, halSupported, onClose, onPersist
+        )
         PillKey.BT -> {
             // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
             // 下次起录按它落音轨），与内录开关（controller 态）互相独立
@@ -1033,6 +1040,79 @@ private fun StabPill(
             },
             enabled = editable
         )
+    }
+}
+
+/**
+ * 降噪（2026-10-26 用户需求）：一颗胶囊管两件事——**音频降噪（环境音）** 与 **画面降噪（夜间暗部）**，
+ * 两项默认关（见 [com.wotagei.cam.core.Denoise] 的口径说明）。
+ *
+ * 能力门禁与提示都收在这一个面板里，不做成两个胶囊：
+ * - 音频档只有「关闭 / 系统降噪」（NoiseSuppressor），点选即写总线；
+ * - 画面档「关闭 / HAL 快速 / HAL 高质量 / GPU 双边」——HAL 两档要本机 HAL 声明了模式才可选；
+ *   GPU 双边只在 GPU 渲染下可选，DIRECT 下若已选中则**如实提示"已退回 HAL 快速"**（不静默失效）。
+ *
+ * 录制中：与其余控件同一条 A4 纪律——能开面板，但档位禁用（[editable] 由调用方裁决）。
+ */
+@Composable
+private fun DenoisePill(
+    anchor: IntRect,
+    params: WotaParams,
+    editable: Boolean,
+    gpuMode: Boolean,
+    halSupported: Boolean,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
+    val audio by params.audioDenoise.observed()
+    val video by params.videoDenoise.observed()
+    val audioNames = com.wotagei.cam.core.AudioDenoise.ALL.map { stringResource(it.labelRes) }
+    val videoNames = com.wotagei.cam.core.VideoDenoise.ALL.map { stringResource(it.labelRes) }
+    WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_pill_denoise)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
+
+        NoteText(stringResource(R.string.denoise_title_audio))
+        PillChoices(
+            options = com.wotagei.cam.core.AudioDenoise.ALL.mapIndexed { i, m ->
+                // 系统降噪档对"本机是否真的有 NoiseSuppressor"不做预判（NoiseSuppressor.create 要到
+                // 起录才试得起），这里恒可选；真机不支持时由 AudioDenoiser 降级并在日志留痕
+                PillOption(m.ordinal, audioNames[i], true)
+            },
+            selected = audio.ordinal,
+            columns = 2,
+            onPick = { opt ->
+                params.audioDenoise.value = com.wotagei.cam.core.AudioDenoise.ALL[opt.value]
+                onPersist()
+            },
+            enabled = editable
+        )
+        NoteText(stringResource(R.string.denoise_audio_note))
+
+        NoteText(stringResource(R.string.denoise_title_video))
+        PillChoices(
+            options = com.wotagei.cam.core.VideoDenoise.ALL.mapIndexed { i, m ->
+                val ok = when (m) {
+                    com.wotagei.cam.core.VideoDenoise.OFF -> true
+                    com.wotagei.cam.core.VideoDenoise.HAL_FAST,
+                    com.wotagei.cam.core.VideoDenoise.HAL_HIGH_QUALITY -> halSupported
+                    // GPU 双边只在 GPU 渲染下可选；DIRECT 下置灰（已选中的由下方提示条说明退回）
+                    com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL -> gpuMode
+                }
+                PillOption(m.ordinal, videoNames[i], ok)
+            },
+            selected = video.ordinal,
+            columns = 2,
+            onPick = { opt ->
+                params.videoDenoise.value = com.wotagei.cam.core.VideoDenoise.ALL[opt.value]
+                onPersist()
+            },
+            enabled = editable
+        )
+        NoteText(stringResource(R.string.denoise_video_note))
+        // 已选 GPU 双边但当前是 DIRECT：如实提示实际生效档（不静默失效）
+        if (video == com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL && !gpuMode) {
+            NoteText(stringResource(R.string.denoise_video_fallback_direct))
+        }
     }
 }
 

@@ -76,7 +76,13 @@ data class CameraAbility(
      * [videoSizes] 是 PRIVATE ∪ JPEG，直接拿去开预览流可能命中只有 JPEG 支持的档；
      * DIRECT 模式挑预览流尺寸必须用这张单表。默认空表兼容旧构造点。
      */
-    val previewSizes: List<Size> = emptyList()
+    val previewSizes: List<Size> = emptyList(),
+    /**
+     * 本机可用的 `NOISE_REDUCTION_MODE` 集合（2026-10-26 画面降噪）。
+     * 空表 = HAL 未声明（[android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_NOISE_REDUCTION_MODES]
+     * 缺失或不含任何有效项），此时 UI 的 HAL 两档按不可用处理——不猜、不下发未声明能力。
+     */
+    val noiseReductionModes: Set<Int> = emptySet()
 ) {
     /** LEGACY 设备无逐帧控制/无 ZOOM_RATIO，UI 顶部要提示能力受限 */
     fun isLegacy(): Boolean = hardwareLevel == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
@@ -173,6 +179,10 @@ data class CameraAbility(
                 }
             } else emptyMap()
 
+            // 画面降噪（2026-10-26）：HAL 声明的降噪模式是「能不能开」的唯一依据
+            val noiseReductionModes =
+                (tryOrNull { cc.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) }
+                    ?: IntArray(0)).toSet()
             val zoomRatio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 RangeF.of(tryOrNull { cc.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) })
             } else RangeF.CLOSED
@@ -208,7 +218,8 @@ data class CameraAbility(
                     ?: IntArray(0)).contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON),
                 highSpeedCapable = highSpeedCapable,
                 availableSurfaceFormats = tryOrNull { map?.outputFormats } ?: IntArray(0),
-                previewSizes = previewSizes
+                previewSizes = previewSizes,
+                noiseReductionModes = noiseReductionModes
             )
         }
 

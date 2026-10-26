@@ -56,7 +56,7 @@ class PopupCompactGuardTest {
 
     /** 豁免外全部 `WotaPillPopup` 调用点：文件 → 调用数（盘点表钉死，新增弹层须同轮登记） */
     private val popupCallSites = mapOf(
-        "ui/CameraPills.kt" to 15,      // 录制页 15 颗参数胶囊
+        "ui/CameraPills.kt" to 16,      // 录制页 16 颗参数胶囊（2026-10-26 起含降噪面板）
         "player/PlayerScreen.kt" to 5,  // 倍速 / 剪辑导出 / 光弧修复 / 音轨选择 / 选轨导出（内录批 4）
         "player/CompareScreen.kt" to 1, // 镜像三选
         "ui/dialog/AudioSourcePanel.kt" to 1 // 音源管理（内录 + 蓝牙页签）

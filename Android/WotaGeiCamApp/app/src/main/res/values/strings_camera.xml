@@ -254,4 +254,17 @@
     <string name="hud_zone_right">右竖 Dock</string>
     <string name="hud_zone_readout">常驻读数块</string>
     <string name="hud_zone_bottom">底栏 Dock</string>
+    <!-- 降噪（2026-10-26）：音频/画面两项默认关，一枚胶囊管两件事 -->
+    <string name="cam_pill_denoise">降噪</string>
+    <string name="denoise_audio_off">关闭</string>
+    <string name="denoise_audio_system">系统降噪</string>
+    <string name="denoise_video_off">关闭</string>
+    <string name="denoise_video_hal_fast">HAL 快速</string>
+    <string name="denoise_video_hal_hq">HAL 高质量</string>
+    <string name="denoise_video_gpu">GPU 双边</string>
+    <string name="denoise_title_audio">音频降噪（环境音）</string>
+    <string name="denoise_title_video">画面降噪（夜间暗部）</string>
+    <string name="denoise_audio_note">使用系统 NoiseSuppressor 压制风声与环境底噪；内录音轨不受影响。开启后录制改走自研引擎，本机不支持时自动按无降噪继续。</string>
+    <string name="denoise_video_note">HAL 档由相机硬件降噪（零额外功耗）；GPU 双边按边缘保持滤除暗部噪点，仅 GPU 渲染可用。</string>
+    <string name="denoise_video_fallback_direct">当前为直连渲染，GPU 双边不可用，已退回 HAL 快速档</string>
 </resources>

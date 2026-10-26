@@ -65,7 +65,9 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_PEAKING_STRENGTH,
         WotaSettings.KEY_DEFAULT_PEAKING_COLOR,
         WotaSettings.KEY_DEFAULT_LENS,
-        WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND
+        WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND,
+        WotaSettings.KEY_DENOISE_AUDIO,
+        WotaSettings.KEY_DENOISE_VIDEO
     )
 
     /**
@@ -131,6 +133,9 @@ object ParamsPersist {
         params.setArcMergeDeadband(
             prefs.getInt(WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND, ArcMergeDeadband.DEFAULT)
         )
+        // ⑰ 降噪两项（2026-10-26）：坏串/缺键一律回 OFF（默认关是产品口径，见 core/Denoise）
+        params.audioDenoise.value = WotaSettings.audioDenoise(prefs)
+        params.videoDenoise.value = WotaSettings.videoDenoise(prefs)
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -196,6 +201,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shLens = params.lens.value
     private var shArcDeadband = params.arcMergeDeadband.value
     private var shBitrate = params.bitrate.value
+    private var shDenoiseAudio = params.audioDenoise.value
+    private var shDenoiseVideo = params.videoDenoise.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
 
@@ -225,12 +232,16 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val bitrate = params.bitrate.value
         val refLines = params.refLines.value
         val level = params.levelEnabled.value
+        val denoiseAudio = params.audioDenoise.value
+        val denoiseVideo = params.videoDenoise.value
 
         val editor = prefs.edit()
         var dirty = false
         if (fps != shFps) { editor.putInt(WotaSettings.KEY_DEFAULT_FPS, fps); dirty = true }
         if (shutter != shShutter) { editor.putInt(WotaSettings.KEY_DEFAULT_SHUTTER_NS, shutter.toInt()); dirty = true }
         if (bitrate != shBitrate) { editor.putInt(WotaSettings.KEY_DEFAULT_BITRATE, bitrate); dirty = true }
+        if (denoiseAudio != shDenoiseAudio) { editor.putString(WotaSettings.KEY_DENOISE_AUDIO, denoiseAudio.key); dirty = true }
+        if (denoiseVideo != shDenoiseVideo) { editor.putString(WotaSettings.KEY_DENOISE_VIDEO, denoiseVideo.key); dirty = true }
         if (refLines != shRefLines) { editor.putInt(WotaSettings.KEY_DEFAULT_REF_LINES, refLines); dirty = true }
         if (level != shLevel) { editor.putBoolean(WotaSettings.KEY_LEVEL_ENABLED, level); dirty = true }
         if (iso != shIso) { editor.putInt(WotaSettings.KEY_DEFAULT_ISO, iso); dirty = true }
@@ -281,6 +292,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shLens = lens
             shArcDeadband = arcDeadband
             shBitrate = bitrate
+            shDenoiseAudio = denoiseAudio
+            shDenoiseVideo = denoiseVideo
             shRefLines = refLines
             shLevel = level
         }

@@ -68,7 +68,8 @@ class HudLayoutDragTest {
         // 顶栏/读数块/底栏三枚没被牵连
         assertEquals(HudLayoutTable.defaultOrderOf(HudZone.TOP), t.orderOf(HudZone.TOP))
         assertEquals(HudLayoutTable.defaultOrderOf(HudZone.READOUT), t.orderOf(HudZone.READOUT))
-        assertEquals(listOf(e(CamPill.LENS)), t.orderOf(HudZone.BOTTOM))
+        // 2026-10-26：底栏现有「降噪 + 镜头」两颗（降噪在左）
+        assertEquals(listOf(e(CamPill.DENOISE), e(CamPill.LENS)), t.orderOf(HudZone.BOTTOM))
     }
 
     @Test
@@ -129,10 +130,16 @@ class HudLayoutDragTest {
 
     @Test
     fun emptyingBottomContainerIsLegal() {
-        // 底栏只有「镜头」一颗可编辑；把它挪走之后那枚容器顺序为空，底板仍按等宽槽算（MergeSlot 有用例）
-        val t = HudLayoutTable.default().moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1, planAll)
+        // 2026-10-26：底栏现有「降噪 + 镜头」两颗；把两颗都挪走之后容器顺序为空，
+        // 底板仍按等宽槽算（MergeSlot 有用例）——"底栏可清空"这条结构性质不变
+        val t = HudLayoutTable.default()
+            .moveEntryTo(e(CamPill.LENS), HudZone.TOP, 1, planAll)
+            .moveEntryTo(e(CamPill.DENOISE), HudZone.TOP, 2, planAll)
         assertTrue(t.orderOf(HudZone.BOTTOM).isEmpty())
-        assertEquals(listOf(e(CamPill.SIZE), e(CamPill.LENS), e(CamPill.STORAGE)), t.orderOf(HudZone.TOP))
+        assertEquals(
+            listOf(e(CamPill.SIZE), e(CamPill.LENS), e(CamPill.DENOISE), e(CamPill.STORAGE)),
+            t.orderOf(HudZone.TOP)
+        )
         once(t, "底栏清空")
     }
 

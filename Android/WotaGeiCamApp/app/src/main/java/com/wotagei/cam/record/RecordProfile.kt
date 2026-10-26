@@ -51,7 +51,12 @@ data class RecordProfile(
      * 由 CameraScreen.buildProfile 落地）。会话健康与否在**录制开始时**由 controller 态决定，
      * 录制中撤销=内录轨提前 EOS，不中断录制。
      */
-    val captureAudio: Boolean = false
+    val captureAudio: Boolean = false,
+    /**
+     * 环境音降噪档（2026-10-26）：非 OFF 时环境音必须走 AudioFeeder 才能挂 NoiseSuppressor，
+     * 因此该字段同时决定引擎选型（见 [Recorders.useCodecEngine]）。
+     */
+    val audioDenoise: com.wotagei.cam.core.AudioDenoise = com.wotagei.cam.core.AudioDenoise.OFF
 ) {
     companion object {
         /** 参数表 `codec` 取值：与 MediaRecorder.VideoEncoder / MediaCodec mime 双向映射 */

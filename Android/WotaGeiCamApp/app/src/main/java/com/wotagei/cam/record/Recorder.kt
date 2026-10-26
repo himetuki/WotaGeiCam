@@ -336,7 +336,9 @@ object Recorders {
     const val MR_MAX_FPS = 60
 
     fun useCodecEngine(p: RecordProfile): Boolean {
-        return p.fps > MR_MAX_FPS || p.arcConvert != null || p.captureAudio
+        // 环境音降噪（2026-10-26）：NoiseSuppressor 只能挂在自采 AudioRecord 上，MediaRecorder 无挂载点
+        return p.fps > MR_MAX_FPS || p.arcConvert != null || p.captureAudio ||
+            com.wotagei.cam.core.audioDenoiseNeedsCodec(p.audioDenoise)
     }
 
     /** 供 UI 灰显高速档时用：本机高速码率建议值 */
