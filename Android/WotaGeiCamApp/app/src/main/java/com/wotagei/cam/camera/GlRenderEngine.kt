@@ -683,6 +683,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     private val stMatrix = FloatArray(16)
 
+    /** 方向诊断只打首帧/换姿态一行（见 [consumeFrame]）：false = 还没打过第一行 */
+    private var stLoggedOnce = false
+    private var stLoggedMirror = false
+
     /** 上屏 pass 与编码 pass 各一份纹理坐标与脏标记：两者施加的转正角不同，见 [buildTexCoords] */
     private val displayTexCoords = FloatArray(8)
     private val encoderTexCoords = FloatArray(8)
@@ -2130,7 +2134,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             FrameLedger.onGlConsumed()
             st.getTransformMatrix(stMatrix)
             // 矩阵自带的旋转分量决定「抵消多少」，变了就必须重算两路纹理坐标（真机首帧才拿得到矩阵）
-            if (orientation.setStMatrix(stMatrix)) {
+            val stChanged = orientation.setStMatrix(stMatrix)
+            // 方向链路诊断（2026-10-27 前摄歪 90° 排查）：矩阵逐元素只在首帧/换姿态打一行，
+            // 前后摄 HAL 矩阵不同轴时这里是唯一可观测量
+            if (stChanged || !stLoggedOnce || orientation.mirrored != stLoggedMirror) {
+                stLoggedOnce = true
+                stLoggedMirror = orientation.mirrored
+                Log.i(
+                    TAG_GL,
+                    "WotaOrient 矩阵=${stMatrix.contentToString()} " +
+                        "stK=${orientation.stRotationDegrees} residual=${orientation.residualDegrees()} " +
+                        "applied=${orientation.appliedDegrees()} mirror=${orientation.mirrored} " +
+                        "frame=${wantFrameWidth}x${wantFrameHeight}"
+                )
+            }
+            if (stChanged) {
                 updateContentRect()
                 dirty = true
                 scheduleDraw()
