@@ -1513,6 +1513,9 @@ fun CameraScreen(
                             // 两个浮层互斥：点圆钮只翻控件层，选色窗顺手收掉
                             markerControlsOpen = !markerControlsOpen
                             if (markerControlsOpen) markerColorPop = false
+                            // 取证日志（用户口径：日志多解释）：点按是否真的落到开关上、
+                            // 以及紧随其后的 dismiss 是用户点外部还是同一手势被系统当外部触摸
+                            Log.i(TAG_UI, "marker 控件层 toggle open=$markerControlsOpen")
                         },
                         onLongClick = {
                             markerColorPop = true
@@ -1533,9 +1536,18 @@ fun CameraScreen(
                         Popup(
                             alignment = Alignment.TopCenter,
                             offset = IntOffset(0, with(hudDensity) { 72.dp.roundToPx() }),
-                            onDismissRequest = { markerControlsOpen = false },
+                            onDismissRequest = {
+                                markerControlsOpen = false
+                                Log.i(TAG_UI, "marker 控件层 dismiss(点外部/失焦)")
+                            },
                             properties = PopupProperties(focusable = true)
                         ) {
+                            // 取证：控件层真的组合了才算"点开了"；组合后立刻 dispose 说明
+                            // 开合在同一手势里被系统判成外部触摸（日志里能看见成对出现）
+                            DisposableEffect(Unit) {
+                                Log.i(TAG_UI, "marker 控件层 compose")
+                                onDispose { Log.i(TAG_UI, "marker 控件层 dispose") }
+                            }
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
