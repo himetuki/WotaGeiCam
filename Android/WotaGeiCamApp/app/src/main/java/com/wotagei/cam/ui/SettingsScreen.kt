@@ -198,6 +198,13 @@ object WotaSettings {
     const val KEY_DEFAULT_MARKER_SPREAD = "default_marker_spread"
     const val KEY_DEFAULT_MARKER_COLOR = "default_marker_color"
 
+    /**
+     * Glow 光晕的**整份参数**（2026-10-27 用户需求；docs/plan/24 R3 §1.5）：一个复合串键，
+     * `encodeGlow`/`decodeGlow` 纯函数负责往返（坏串整份回默认）。不摊成 10 个 prefs 键——
+     * 那会让"参数模型加一维"变成"持久化白名单也要加一条"，与 `hud_layout` 同族的复合键口径一致。
+     */
+    const val KEY_GLOW = "glow_params"
+
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
 

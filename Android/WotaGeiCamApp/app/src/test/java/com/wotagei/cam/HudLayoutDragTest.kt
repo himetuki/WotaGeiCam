@@ -55,7 +55,11 @@ class HudLayoutDragTest {
     fun crossContainerMoveKeepsBothListsConsistent() {
         val t = HudLayoutTable.default().moveEntryTo(e(CamPill.ZOOM), HudZone.LEFT, 0, planAll)
         assertEquals(
-            listOf(e(CamPill.ZOOM), e(CamPill.REFLINE), e(CamPill.MONITOR), e(CamPill.CURVE), e(CamPill.FLASH)),
+            // 2026-10-27：左 Dock 第 5 组 = Glow（变焦插到最前，其余顺延）
+            listOf(
+                e(CamPill.ZOOM), e(CamPill.REFLINE), e(CamPill.MONITOR),
+                e(CamPill.CURVE), e(CamPill.FLASH), e(CamPill.GLOW)
+            ),
             t.orderOf(HudZone.LEFT)
         )
         // 右 Dock 少了变焦，其余顺序原样（姿态/音量/蓝牙/对焦/防抖）

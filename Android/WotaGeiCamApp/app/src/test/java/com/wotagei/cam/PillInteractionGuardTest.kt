@@ -18,7 +18,7 @@ import org.junit.Test
  * 2026-10-17 胶囊交互调整的源码/行为守卫：
  * 1. 读数与镜头胶囊**点按、长按都开弹窗**（点按不再循环改值）；
  * 2. 旧循环实现（`HudCycle.kt` / `nextLensKey`）删除干净——全仓主源码零残留；
- * 3. 录制中可调白名单恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR（2026-10-27 B4 加入 MONITOR：
+ * 3. 录制中可调白名单恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW（2026-10-27 B4 加入 MONITOR：
  *    监看叠加只改上屏槽，成片不变），其余弹窗控件走 `enabled = editable`；
  * 4. 对焦锁定录制中的条目判据是 `!recording || focusLocked`；
  * 5. 监看弹窗常驻「只上屏、不进成片」说明（B4 的前置提示，缺了就是静默改）。
@@ -56,7 +56,7 @@ class PillInteractionGuardTest {
     private fun readOnlyIssues(src: String): List<String> {
         val readOnlyPills = listOf(
             "SizePill", "FpsPill", "ShutterPill", "BitratePill", "LensPill",
-            "RefLinePill", "MonitorPill", "FlashPill", "StabPill", "StoragePill"
+            "RefLinePill", "MonitorPill", "FlashPill", "StabPill", "StoragePill", "GlowPill"
         )
         return readOnlyPills.filter { fn ->
             val body = runCatching { bodyOf(src, fn) }.getOrNull()
@@ -70,11 +70,14 @@ class PillInteractionGuardTest {
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 10) bad.add("PillSlider 调用点不是 10 处")
+        if (occurrences(src, "PillSlider(").size != 17) bad.add("PillSlider 调用点不是 17 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 10) bad.add("ladder = 参数不是 10 处（有滑杆退回连续模式）")
-        val panels = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill", "FpsPill")
+        if (ladderArgs != 17) bad.add("ladder = 参数不是 17 处（有滑杆退回连续模式）")
+        val panels = listOf(
+            "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
+            "MonitorPill", "FpsPill", "GlowPill"
+        )
         panels.forEach { fn ->
             val body = runCatching { bodyOf(src, fn) }.getOrNull()
             if (body == null || occurrences(body, "ladder =").isEmpty()) bad.add("$fn 没有 ladder")
@@ -149,11 +152,15 @@ class PillInteractionGuardTest {
     }
 
     @Test
-    fun `录制中可调白名单恰为六项`() {
-        // 2026-10-27（25 号计划 B4）：MONITOR 整组进白名单——监看叠加只改 DISPLAY 槽，成片不变
+    fun `录制中可调白名单恰为七项`() {
+        // 2026-10-27 B4：MONITOR 整组进白名单（只改 DISPLAY 槽，成片不变）
+        // 2026-10-27 B7：GLOW 进白名单（scene layer：**会**改成片，但不触发重画、不产生重复帧）
         assertEquals(
-            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR",
-            setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS, PillKey.MONITOR),
+            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW",
+            setOf(
+                PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
+                PillKey.MONITOR, PillKey.GLOW
+            ),
             RECORDING_EDITABLE_PILLS
         )
         PillKey.values().forEach { key ->
@@ -167,6 +174,7 @@ class PillInteractionGuardTest {
         assertTrue(pillEditableDuringRecording(PillKey.WB))
         assertTrue(pillEditableDuringRecording(PillKey.FOCUS))
         assertTrue("监看叠加只上屏 ⇒ 录制中可调（25 号计划 B4）", pillEditableDuringRecording(PillKey.MONITOR))
+        assertTrue("Glow 是 scene layer ⇒ 录制中可调（24 号计划 §1.6）", pillEditableDuringRecording(PillKey.GLOW))
         assertFalse(pillEditableDuringRecording(PillKey.SHUTTER))
         assertFalse(pillEditableDuringRecording(PillKey.BITRATE))
         assertFalse(pillEditableDuringRecording(PillKey.BT))

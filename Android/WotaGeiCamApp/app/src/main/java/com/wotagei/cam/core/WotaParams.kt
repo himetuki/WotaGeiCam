@@ -46,6 +46,15 @@ class WotaParams(private val scope: CoroutineScope) {
     val audioDenoise = MutableStateFlow(com.wotagei.cam.core.AudioDenoise.OFF)
     val videoDenoise = MutableStateFlow(com.wotagei.cam.core.VideoDenoise.OFF)
 
+    /**
+     * Glow（荧光棒光晕，2026-10-27 用户需求；docs/plan/24 R3）。
+     *
+     * 整份参数走**一个** StateFlow：形状参数都是 uniform 级改动，UI 每拍写、引擎下一帧生效
+     * （`GlowProvider.setGlowParams` 不触发重画——录制中拖滑杆不会往成片塞重复帧）。
+     * 落盘由 [com.wotagei.cam.ui.ParamsPersist] 的复合键负责（`encodeGlow`/`decodeGlow`）。
+     */
+    val glowParams = MutableStateFlow(GlowParams.DEFAULT)
+
     // 站位指示线（2026-10-27）：会话级（v1 不落盘——默认 4 线/中距/黄已是典型四人位，
     // 持久化等交互真机复验后随反馈补，避免首版把没调过的默认值写进用户存储）。
     // 【交互定版 2026-10-27 二轮】**没有独立开关**：线的开/关只由线数驱动

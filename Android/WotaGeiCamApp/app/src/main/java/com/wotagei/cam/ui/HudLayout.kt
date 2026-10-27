@@ -136,6 +136,10 @@ data class HudEntry(val kind: HudEntryKind, val ordinal: Int) {
                 // 此处把它登记进 BOTTOM 有序表，供"默认在最左""隐藏后不回默认"与跨容器搬移三件事用。
                 CamPill.DENOISE -> HudZone.BOTTOM
                 CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH -> HudZone.LEFT
+                // Glow（2026-10-27 用户需求；24 §1.6）：scene layer，但**不进底栏**——底栏是
+                // `2S+R+2G+2P` 等宽槽特例，塞不下第 4 颗；左竖 Dock 按 308dp 的账装得下第 5 组
+                // （DockBandAvoidTest 钉着那笔账），默认落在那条带的最末。
+                CamPill.GLOW -> HudZone.LEFT
                 CamPill.LEVEL, CamPill.VOLUME, CamPill.BT,
                 CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB -> HudZone.RIGHT
                 // 越界 ordinal：[HudLayoutTable.normalize] 会把这种坏条目丢掉，这里只需给个不抛的值
@@ -639,9 +643,10 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
          */
         fun defaultOrderOf(zone: HudZone): List<HudEntry> = when (zone) {
             HudZone.TOP -> listOf(HudEntry.of(CamPill.SIZE), HudEntry.of(CamPill.STORAGE))
+            // 左 Dock 第 5 组 = Glow（2026-10-27）：排在闪光灯之后（"最末"是计划 §1.6 的定版）
             HudZone.LEFT -> listOf(
                 HudEntry.of(CamPill.REFLINE), HudEntry.of(CamPill.MONITOR),
-                HudEntry.of(CamPill.CURVE), HudEntry.of(CamPill.FLASH)
+                HudEntry.of(CamPill.CURVE), HudEntry.of(CamPill.FLASH), HudEntry.of(CamPill.GLOW)
             )
             HudZone.RIGHT -> listOf(
                 HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.BT),

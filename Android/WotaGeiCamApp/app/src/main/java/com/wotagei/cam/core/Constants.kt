@@ -247,7 +247,13 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
      * 降噪（2026-10-26 用户需求）：一颗胶囊管音频降噪 + 画面降噪两件事，**默认关**。
      * 默认落位在底栏 Dock 左侧（见 [com.wotagei.cam.ui.HudEntry.homeZone]）。
      */
-    DENOISE(8192, com.wotagei.cam.R.string.cam_pill_denoise);
+    DENOISE(8192, com.wotagei.cam.R.string.cam_pill_denoise),
+
+    /**
+     * Glow 光晕（2026-10-27 用户需求；docs/plan/24 R3）：scene layer，**默认关**（零代价口径）。
+     * 默认落位在**左竖 Dock 第 5 组**（见 [com.wotagei.cam.ui.HudEntry.homeZone] 与计划 §1.6）。
+     */
+    GLOW(16384, com.wotagei.cam.R.string.cam_pill_glow);
 
     companion object {
         val ALL: List<CamPill> = values().toList()
@@ -262,10 +268,13 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
          * 用户已有的取舍、又不让新功能凭空消失。用户关过的那一位在下一版里照旧是关的
          * （读写都会带上 [WotaSettings.KEY_HUD_PILLS_SCHEMA]，升级只发生一次）。
          */
-        const val MASK_SCHEMA = 1
+        const val MASK_SCHEMA = 2
 
-        /** 「这一位是在哪一版加进来的」：升级时只补这些位，其余一律保持用户原样 */
-        val ADDED_IN_SCHEMA: Map<Int, Int> = mapOf(1 to DENOISE.bit)
+        /**
+         * 「这一位是在哪一版加进来的」：升级时只补这些位，其余一律保持用户原样。
+         * 1 = 降噪（2026-10-26）；2 = 光晕（2026-10-27）。
+         */
+        val ADDED_IN_SCHEMA: Map<Int, Int> = mapOf(1 to DENOISE.bit, 2 to GLOW.bit)
 
         /**
          * 把 [fromSchema] 版的掩码升级到当前版：只 OR 进"从那一版之后新加的位"。

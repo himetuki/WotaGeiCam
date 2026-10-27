@@ -294,6 +294,7 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
         CamPill.MONITOR -> PillKey.MONITOR
         CamPill.FLASH -> PillKey.FLASH
         CamPill.DENOISE -> PillKey.DENOISE
+        CamPill.GLOW -> PillKey.GLOW
         CamPill.CURVE -> null
         CamPill.LEVEL, CamPill.VOLUME -> null
     }
@@ -547,6 +548,11 @@ data class HudCtx(
     val denoiseLabel: String,
     val denoiseActive: Boolean,
     val onDenoiseClick: () -> Unit,
+    /** Glow 胶囊：读数文本（控件名「光晕」）、"开着"标记、能力闸（DIRECT 下在场但禁用）与点按 */
+    val glowLabel: String,
+    val glowActive: Boolean,
+    val glowUsable: Boolean,
+    val onGlowClick: () -> Unit,
     val flash: Flash,
     val lensLabel: String,
     val btConnected: Boolean,
@@ -767,6 +773,13 @@ fun HudEntryItem(
             CamPill.DENOISE -> TierChip(
                 tier, ctx.denoiseLabel, ctx.denoiseActive, anchor.then(modifier),
                 gatedClick(clicksAccepted, ctx.onDenoiseClick), frost
+            )
+            // Glow（2026-10-27）：scene layer，读数恒取控件名；DIRECT 下**在场但禁用**
+            // （alpha 0.38，对齐对焦那颗：不藏控件、不摆洞，点了由调用方给解释）
+            CamPill.GLOW -> TierChip(
+                tier, ctx.glowLabel, ctx.glowActive,
+                anchor.then(modifier).alpha(if (ctx.glowUsable) 1f else 0.38f),
+                gatedClick(clicksAccepted, ctx.onGlowClick), frost
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),

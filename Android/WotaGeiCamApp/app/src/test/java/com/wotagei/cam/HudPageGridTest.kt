@@ -283,8 +283,8 @@ class HudPageGridTest {
         assertTrue("编辑页必须列出被掩码关掉的闪光灯", e(CamPill.FLASH) in editorVisible)
         // 码率是唯一例外（10-01 布局批：Dock 外固定读数，不进两页的可见集）
         assertFalse("码率不进编辑页可见集", h(HudItem.BITRATE) in editorVisible)
-        // 2026-10-26：降噪（CamPill.DENOISE）加入全集 ⇒ 21 颗 CamPill 全集 − 码率 = 20 颗
-        assertEquals("编辑页可见集 = 全集 21 − 码率 = 20 颗", 20, editorVisible.size)
+        // 2026-10-26 降噪 + 2026-10-27 Glow ⇒ 22 颗 CamPill 全集 − 码率 = 21 颗
+        assertEquals("编辑页可见集 = 全集 22 − 码率 = 21 颗", 21, editorVisible.size)
         // 水平仪的显示开关关掉时那颗整颗不渲染 ⇒ 编辑页不列（理由在 editorVisibleEntries 的 KDoc 里）
         assertFalse(
             "显示开关关掉水平仪时编辑页不列它", e(CamPill.LEVEL) in editorVisibleEntries(levelEnabled = false)
@@ -294,13 +294,16 @@ class HudPageGridTest {
         // ② 同一份表、同一个 visibleOrderOf：换可见集就换答案 ⇒ 录制页口径一字未动
         val table = HudLayoutTable.default()
         assertEquals(
-            "录制页：掩码关掉的两颗被过滤掉（顺序仍来自表）",
-            listOf(e(CamPill.REFLINE), e(CamPill.CURVE)),
+            "录制页：掩码关掉的两颗被过滤掉（顺序仍来自表；Glow 仍可见 ⇒ 跟在后头）",
+            listOf(e(CamPill.REFLINE), e(CamPill.CURVE), e(CamPill.GLOW)),
             table.visibleOrderOf(HudZone.LEFT, recordingVisible)
         )
         assertEquals(
-            "编辑页：同样的表、同样的函数，四颗全列",
-            listOf(e(CamPill.REFLINE), e(CamPill.MONITOR), e(CamPill.CURVE), e(CamPill.FLASH)),
+            "编辑页：同样的表、同样的函数，五颗全列（2026-10-27 含 Glow）",
+            listOf(
+                e(CamPill.REFLINE), e(CamPill.MONITOR), e(CamPill.CURVE),
+                e(CamPill.FLASH), e(CamPill.GLOW)
+            ),
             table.visibleOrderOf(HudZone.LEFT, editorVisible)
         )
 

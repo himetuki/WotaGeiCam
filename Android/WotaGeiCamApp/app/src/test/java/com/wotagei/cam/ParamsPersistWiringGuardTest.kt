@@ -37,7 +37,9 @@ class ParamsPersistWiringGuardTest {
         // 2026-10-26：降噪两项（音频/画面）入档
         "denoise_audio", "denoise_video",
         // 2026-10-27：站位线的间距与颜色入档（**线数刻意不入档**，见下面的专门用例）
-        "default_marker_spread", "default_marker_color"
+        "default_marker_spread", "default_marker_color",
+        // 2026-10-27：Glow 整份参数（复合串键）
+        "glow_params"
     )
 
     // ------------------------------------------------------------------ 取 lambda 体（PillEnabledGuardTest 同款花括号配对）
@@ -170,7 +172,8 @@ class ParamsPersistWiringGuardTest {
                     "KEY_DEFAULT_ARC_MERGE_DEADBAND",
                     // 降噪两项不在此列：恢复侧走 WotaSettings.audioDenoise/videoDenoise 助手
                     // （键常量只在 KEYS 与 flush 出现，引用数 2 是设计如此）
-                    "KEY_DEFAULT_MARKER_SPREAD", "KEY_DEFAULT_MARKER_COLOR"
+                    "KEY_DEFAULT_MARKER_SPREAD", "KEY_DEFAULT_MARKER_COLOR",
+                    "KEY_GLOW"
                 )
             )
         )
@@ -223,14 +226,17 @@ class ParamsPersistWiringGuardTest {
     }
 
     @Test
-    fun `R4_十个滑杆调用点全接松手落盘`() {
-        assertEquals("PillSlider 调用点数（拍板以实查 10 处为准）", 10, occurrences(maskedPills, "PillSlider(").size)
+    fun `R4_十七个滑杆调用点全接松手落盘`() {
+        assertEquals("PillSlider 调用点数（拍板以实查 17 处为准）", 17, occurrences(maskedPills, "PillSlider(").size)
         assertEquals(
             "补传 onValueChangeFinished 的调用点数",
-            10, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
+            17, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
         )
-        // 八个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
-        val pillFns = listOf("ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill", "MonitorPill", "FpsPill")
+        // 九个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
+        val pillFns = listOf(
+            "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
+            "MonitorPill", "FpsPill", "GlowPill"
+        )
         val misses = pillFns.filter { fn ->
             val body = runCatching { bodyOf(maskedPills, fn) }.getOrNull()
             body == null || occurrences(body, "onValueChangeFinished = onPersist").isEmpty()

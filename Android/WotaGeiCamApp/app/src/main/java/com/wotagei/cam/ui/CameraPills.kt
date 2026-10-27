@@ -3,10 +3,17 @@ package com.wotagei.cam.ui
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,7 +25,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import com.wotagei.cam.R
@@ -29,6 +40,10 @@ import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
+import com.wotagei.cam.core.GlowColor
+import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.GlowStatus
+import com.wotagei.cam.core.glowStatusNote
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.PeakingColor
@@ -95,7 +110,7 @@ import kotlin.math.roundToInt
  * 加值就等于改存量配置语义；右竖 Dock 的「对焦」本来也不属于可自定义读数。
  * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
-enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE }
+enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE, GLOW }
 
 /**
  * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
@@ -104,10 +119,18 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
  * 2026-10-27（25 号计划 B4）：`MONITOR` **整组**进白名单（效果档 + 斑马阈值/密度 + 峰值强度/颜色）。
  * 依据是双槽模型：这些只改 DISPLAY 槽（判读工具只上屏），成片一个字节都不变；引擎的
  * state-only 护栏（`skip = !hasFrame`）保证切监看不往成片塞重复帧。
- * Glow 不是监看层（scene layer，改了会改成片），它的白名单走 B7 单独决策。
+ *
+ * 2026-10-27（24 号计划 B7）：`GLOW` 进白名单，但语义与 MONITOR **相反**——Glow 是 scene layer，
+ * 录制中改它**会改接下来几帧的成片**（烘焙进像素，已录的不受影响）。允许调是因为：
+ * ① `GlowProvider.setGlowParams` 不触发重画 ⇒ 不产生重复帧、不推进 PTS 网格；
+ * ② 光晕是"现场可判断"的观感参数，10 分钟演出里需要边看边调（与监看同一个使用场景）。
+ * 面板常驻一句"进成片"的说明（`cam_glow_note`），不许静默。
  */
 internal val RECORDING_EDITABLE_PILLS =
-    setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS, PillKey.MONITOR)
+    setOf(
+        PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
+        PillKey.MONITOR, PillKey.GLOW
+    )
 
 /** 录制中该弹窗是否可调（非录制态一律可调，含调用方尚未拿到能力时的初始化阶段） */
 internal fun pillEditableDuringRecording(key: PillKey): Boolean = key in RECORDING_EDITABLE_PILLS
@@ -147,6 +170,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.BT to "HudLayer.HudEntryItem(BT) → widget.AudioChip(modifier)，批 2 起这颗是「音频」chip（键名 BT 沿用：原蓝牙位，位掩码按 bit 持久化不许改名）",
     PillKey.REFLINE to "HudLayer.HudEntryItem(REFLINE) → design.WotaIconButton(modifier)",
     PillKey.DENOISE to "HudLayer.HudEntryItem(DENOISE) → design.TierChip(modifier)，默认落底栏 Dock 左侧",
+    PillKey.GLOW to "HudLayer.HudEntryItem(GLOW) → design.TierChip(modifier)，默认落左竖 Dock 第 5 组",
     PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
     PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
     PillKey.SHUTTER to "HudLayer.HudEntryItem(HudItem.SHUTTER) → design.WotaChip(modifier)",
@@ -201,7 +225,15 @@ fun PillHost(
      */
     halNoiseReductionModes: Set<Int>,
     /** 监看叠加（斑马纹 / 峰值对焦）当前是否开着：开着时 GPU 双边不生效，面板要如实说明 */
-    monitorEffectOn: Boolean
+    monitorEffectOn: Boolean,
+    /**
+     * Glow 运行期状态（Glow 胶囊的状态行：分档/停用/夹取/DIRECT）。
+     *
+     * **无默认值必传**（与锚点同一条纪律）：漏挂 = 状态行静默消失，而"自动变化必须可见"是
+     * 24 §〇.1-4 的验收口径。DIRECT 下同样要传（`DirectSink` 也实现 [com.wotagei.cam.camera.GlowProvider]，
+     * 回答 available=false，状态行照旧能打出"需切到使用 GPU"）。
+     */
+    glowStatusProvider: () -> GlowStatus?
 ) {
     val ability = slot?.ability
     // A4 录制中矩阵：所有弹窗都能开，只有白名单内的可调；其余控件禁用 + 顶部只读提示。
@@ -238,6 +270,9 @@ fun PillHost(
         PillKey.DENOISE -> DenoisePill(
             anchor, params, editable, gpuMode, halNoiseReductionModes, monitorEffectOn,
             onClose, onPersist
+        )
+        PillKey.GLOW -> GlowPill(
+            anchor, params, editable, gpuMode, glowStatusProvider, onClose, onPersist
         )
         PillKey.BT -> {
             // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
@@ -958,6 +993,196 @@ private fun MonitorPill(
             )
         }
     }
+}
+
+/** 参数域是否与某个预设"同形"（忽略 `enabled`）：用于把预设行点亮 */
+private fun glowShapeMatches(p: GlowParams, preset: GlowParams): Boolean =
+    p.copy(enabled = preset.enabled) == preset
+
+/**
+ * Glow 光晕（2026-10-27 用户需求；docs/plan/24 R3 §1.5/§1.6）。
+ *
+ * 与监看面板（[MonitorPill]）正好相反：**Glow 是 scene layer，改了会进成片**——所以常驻一句
+ * 口径说明（`cam_glow_note`），状态行如实报分档/停用/夹取（"自动变化必须可见"，24 §〇.1-4）。
+ *
+ * 七条滑杆全部走「整数刻度梯 + `snapKey = null`」：非空梯 + null 键 = **恒吸附**
+ * （`PillSlider` 的 `ladderOnly`），既不新增 `SliderKey`（那是持久化契约，加一个就要在设置页
+ * 长一行），也不让拖动写出梯外值。显示域 = 参数域 × [GlowSlider.scale]（0..1 的参数用百分比格），
+ * 于是写回总线的恒是两位小数的干净值。
+ */
+@Composable
+@Suppress("LongParameterList")
+private fun GlowPill(
+    anchor: IntRect,
+    params: WotaParams,
+    editable: Boolean,
+    gpuMode: Boolean,
+    glowStatusProvider: () -> GlowStatus?,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
+    val glow by params.glowParams.observed()
+    val status = glowStatusProvider()
+    fun write(next: GlowParams) {
+        params.glowParams.value = next
+    }
+    WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_glow_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
+        // 常驻口径：进成片（与监看面板的"只上屏"相反，两处各说各的，不许含糊）
+        Note(R.string.cam_glow_note)
+
+        // ---- 开关（离散完成点，当场落盘）
+        PillChoices(
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_glow_off)),
+                PillOption(1, stringResource(R.string.cam_glow_on))
+            ),
+            selected = if (glow.enabled) 1 else 0,
+            columns = 2,
+            onPick = { opt ->
+                write(glow.copy(enabled = opt.value == 1))
+                onPersist()
+            },
+            enabled = editable
+        )
+
+        // ---- A/B 预设：**只换两端色与强度**，不碰开关（开着就换、关着仍关）。
+        // 24 §1.6 的默认口径是"只换预设"；若产品要"点预设即开"，由所有者拍板后另改（登记在报告里）。
+        PillChoices(
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_glow_preset_a)),
+                PillOption(1, stringResource(R.string.cam_glow_preset_b))
+            ),
+            selected = when {
+                glowShapeMatches(glow, GlowParams.PRESET_A) -> 0
+                glowShapeMatches(glow, GlowParams.PRESET_B) -> 1
+                else -> -1
+            },
+            columns = 2,
+            onPick = { opt ->
+                val base = if (opt.value == 0) GlowParams.PRESET_A else GlowParams.PRESET_B
+                write(base.copy(enabled = glow.enabled))
+                onPersist()
+            },
+            enabled = editable
+        )
+
+        // ---- 七条滑杆（阈值/软边/宽度/增益/叠加/频率/混合）
+        // 24 §1.6 的定版：**不新增 SliderKey**（那是持久化契约，加一个就要在设置页长一行）——
+        // 一律「整数刻度梯 + snapKey = null」⇒ PillSlider 的 ladderOnly 分支：恒吸附、写回必落刻度。
+        // 显示域 = 参数域 × 缩放（0..1 的参数用 0..100 的百分比格），于是落盘恒是两位小数。
+        PillSlider(
+            value = glow.threshold * 100f, lo = 0f, hi = 100f, step = 5f,
+            enabled = editable, label = stringResource(R.string.cam_glow_threshold),
+            snapKey = null, ladder = percentLadder(0, 100, 5), format = glowFmt(2),
+            onValueChange = { write(glow.copy(threshold = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.soft * 100f, lo = 0f, hi = 50f, step = 5f,
+            enabled = editable, label = stringResource(R.string.cam_glow_soft),
+            snapKey = null, ladder = percentLadder(0, 50, 5), format = glowFmt(2),
+            onValueChange = { write(glow.copy(soft = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.width * 100f, lo = 0f, hi = 20f, step = 2f,
+            enabled = editable, label = stringResource(R.string.cam_glow_width),
+            snapKey = null, ladder = percentLadder(0, 20, 2), format = glowFmt(2),
+            onValueChange = { write(glow.copy(width = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.gain * 100f, lo = 0f, hi = 400f, step = 25f,
+            enabled = editable, label = stringResource(R.string.cam_glow_gain),
+            snapKey = null, ladder = percentLadder(0, 400, 25), format = glowFmt(2),
+            onValueChange = { write(glow.copy(gain = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.add * 100f, lo = 0f, hi = 100f, step = 10f,
+            enabled = editable, label = stringResource(R.string.cam_glow_add),
+            snapKey = null, ladder = percentLadder(0, 100, 10), format = glowFmt(2),
+            onValueChange = { write(glow.copy(add = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.freq, lo = 0f, hi = 64f, step = 4f,
+            enabled = editable, label = stringResource(R.string.cam_glow_freq),
+            snapKey = null, ladder = percentLadder(0, 64, 4), format = glowFmt(0),
+            onValueChange = { write(glow.copy(freq = it)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = glow.blend * 100f, lo = 0f, hi = 100f, step = 5f,
+            enabled = editable, label = stringResource(R.string.cam_glow_blend),
+            snapKey = null, ladder = percentLadder(0, 100, 5), format = glowFmt(2),
+            onValueChange = { write(glow.copy(blend = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+
+        // ---- 两端色（色点行；与站位线的取色点同一个视觉/无障碍口径）
+        GlowColorRow(R.string.cam_glow_color_a, glow.colorA, editable) {
+            write(glow.copy(colorA = it))
+            onPersist()
+        }
+        GlowColorRow(R.string.cam_glow_color_b, glow.colorB, editable) {
+            write(glow.copy(colorB = it))
+            onPersist()
+        }
+
+        // ---- 状态行（分档 / 停用 / 夹取 / DIRECT）——空状态不占位
+        GlowStatusLine(status, glow.enabled, gpuMode)
+    }
+}
+
+/** Glow 滑杆读数格式（显示域小数位可配；与全工程 `String.format(Locale.US, …)` 同口径） */
+private fun glowFmt(decimals: Int): (Float) -> String =
+    { String.format(Locale.US, "%.${decimals}f", it) }
+
+/** Glow 的一端色：8 枚色点（[GlowColor] 调色板），选中态描边；点一下即写总线并落盘 */
+@Composable
+private fun GlowColorRow(labelRes: Int, current: Long, editable: Boolean, onPick: (Long) -> Unit) {
+    val context = LocalContext.current
+    val selected = GlowColor.of(current)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(text = stringResource(labelRes), style = WotaType.label, color = WotaColor.textLo, maxLines = 1)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            GlowColor.ALL.forEach { c ->
+                val on = c == selected
+                Box(
+                    Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(Color(c.argb.toULong() shl 32))
+                        .let { if (on) it.border(2.dp, WotaColor.textHi, CircleShape) else it }
+                        .clickable(enabled = editable) { onPick(c.argb) }
+                        .semantics { contentDescription = context.getString(c.labelRes) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Glow 状态行（"自动变化必须可见"）。
+ *
+ * 分支判定全部收在纯函数 [glowStatusNote] 里（JVM 六态全测）；这里只负责把选中的那句话
+ * 用对应的参数渲染出来。顺序（DIRECT → 关 → 停用 → 夹取 → 分档）见该函数的 KDoc。
+ */
+@Composable
+private fun GlowStatusLine(status: GlowStatus?, enabled: Boolean, gpuMode: Boolean) {
+    val noteRes = glowStatusNote(status, enabled, gpuMode) ?: return
+    val s = status
+    val text = when {
+        noteRes == R.string.cam_glow_clamped && s != null ->
+            stringResource(noteRes, s.rtWidthPx, s.rtHeightPx)
+        noteRes == R.string.cam_glow_status_res_label && s != null ->
+            stringResource(noteRes, s.scale, s.inputWidthPx, s.inputHeightPx)
+        noteRes == R.string.cam_glow_status_auto && s != null -> stringResource(noteRes, s.scale)
+        else -> stringResource(noteRes)
+    }
+    NoteText(text)
 }
 
 /**

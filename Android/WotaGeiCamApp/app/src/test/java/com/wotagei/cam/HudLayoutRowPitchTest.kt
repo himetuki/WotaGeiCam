@@ -78,10 +78,14 @@ class HudLayoutRowPitchTest {
 
     /** 左竖 Dock 满配：参考线与闪光灯是 38dp 圆形图标钮 = 76px（**不吃字体缩放**），两颗胶囊 60px */
     private val leftHeights100 = mapOf(
-        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 60, e(CamPill.CURVE) to 60, e(CamPill.FLASH) to 76
+        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 60, e(CamPill.CURVE) to 60,
+        e(CamPill.FLASH) to 76,
+        // 2026-10-27：Glow 是普通胶囊（30dp = 60px），左 Dock 第 5 组
+        e(CamPill.GLOW) to 60
     )
     private val leftWidths = mapOf(
-        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 136, e(CamPill.CURVE) to 139, e(CamPill.FLASH) to 76
+        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 136, e(CamPill.CURVE) to 139,
+        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 136
     )
 
     /** 读数块满配 7 颗：全是全局档胶囊（主副标签共 30dp = 60px），宽按 `hudPerRowFor` 那笔 90dp 估 */
@@ -95,7 +99,8 @@ class HudLayoutRowPitchTest {
         e(CamPill.BT) to 68, e(CamPill.ZOOM) to 68, e(CamPill.FOCUS) to 68, e(CamPill.STAB) to 68
     )
     private val leftHeights120 = mapOf(
-        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 68, e(CamPill.CURVE) to 68, e(CamPill.FLASH) to 76
+        e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 68, e(CamPill.CURVE) to 68,
+        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 68
     )
     private val readoutHeights120: Map<HudEntry, Int> = HudItem.ALL.associate { h(it) to 68 }
 
@@ -237,12 +242,14 @@ class HudLayoutRowPitchTest {
         assertEquals(GridCell(0, 5), right[e(CamPill.FOCUS)])
         assertEquals(GridCell(0, 6), right[e(CamPill.STAB)])
         assertEquals("仍然只有**一列**（把高条目拆去第 2 列就是把宽度账做反的那一步）", setOf(0), right.values.map { it.col }.toSet())
-        // 左 Dock：两枚 38dp 图标钮各吃 2 档 ⇒ 参考线 (0,0)、监看 (0,2)、曲线 (0,3)、闪光灯 (0,4)
+        // 左 Dock：两枚 38dp 图标钮各吃 2 档 ⇒ 参考线 (0,0)、监看 (0,2)、曲线 (0,3)、闪光灯 (0,4)、
+        // 光晕 (0,6)（Glow 60px < 68px 一档，落在闪光灯那两档之后）
         val left = defaultCellsOf(HudZone.LEFT, HudLayoutTable.defaultOrderOf(HudZone.LEFT), plan)
         assertEquals(GridCell(0, 0), left[e(CamPill.REFLINE)])
         assertEquals(GridCell(0, 2), left[e(CamPill.MONITOR)])
         assertEquals(GridCell(0, 3), left[e(CamPill.CURVE)])
         assertEquals(GridCell(0, 4), left[e(CamPill.FLASH)])
+        assertEquals("Glow 是第 5 组（闪光灯吃 4/5 两档 ⇒ 它落在 6）", GridCell(0, 6), left[e(CamPill.GLOW)])
         // 读数块：每颗都是胶囊（60px ≤ 72px 一档）⇒ 行号与 #74 **逐字相同**（这一批没碰它的行为）
         val readout = defaultCellsOf(HudZone.READOUT, HudLayoutTable.defaultOrderOf(HudZone.READOUT), plan)
         assertEquals(GridCell(0, 0), readout[h(HudItem.SHUTTER)])
@@ -252,7 +259,7 @@ class HudLayoutRowPitchTest {
         assertEquals(GridCell(0, 2), readout[h(HudItem.ZOOM)])
         // 颗数与归属不受高矮影响
         assertEquals(6, right.size)
-        assertEquals(4, left.size)
+        assertEquals(5, left.size)
     }
 
     @Test
@@ -508,26 +515,24 @@ class HudLayoutRowPitchTest {
         // ---- 100%（格距 68px = 34dp）----
         // 右 Dock：配对块 3 档 + 四颗各 1 档 = 7 档 ⇒ 7×68 − 8 = 468px = 234dp
         assertEquals(468, gridSize(HudZone.RIGHT, 1f, rightHeights100, rightWidths).height)
-        // 左 Dock：两枚图标钮各 2 档 ⇒ 6 档 ⇒ 6×68 − 8 = **400px = 200dp**
-        //（上一批这里手算成 392，是 408 − 8 那道减法口算错了；带高那一侧的结论一个字没变：
-        // 200dp 仍装得进 244dp。改期望值之前先核实现——同一把尺子在右 Dock 那行给的是 7×68−8 = 468，
-        // 与 `rightDockGridNowFitsTheLandscapeBand…` 独立钉住的数一致，所以是实现侧没有双算行距）
-        assertEquals(400, gridSize(HudZone.LEFT, 1f, leftHeights100, leftWidths).height)
+        // 左 Dock：两枚图标钮各 2 档 + 三颗胶囊各 1 档 ⇒ 7 档 ⇒ 7×68 − 8 = **468px = 234dp**
+        //（2026-10-27 加 Glow 后从 6 档变 7 档；带高 488px 仍装得下）
+        assertEquals(468, gridSize(HudZone.LEFT, 1f, leftHeights100, leftWidths).height)
         // 读数块：格距 72px、一行两颗 ⇒ 4 行 × 72 − 12 = 276px = 138dp
         assertEquals(276, gridSize(HudZone.READOUT, 1f, readoutHeights100, readoutWidths, perRow = 2).height)
         assertFits("右 Dock 100%", 468, dockBandPx, 8)
-        assertFits("左 Dock 100%", 400, dockBandPx, 8)
+        assertFits("左 Dock 100%", 468, dockBandPx, 8)
         assertFits("读数块 100%", 276, readoutBandPx, 12)
 
         // ---- 120%（格距 76px = 38dp；读数块 ceil((33.6+6)×2) = 80px）----
         // 右 Dock：配对块 150px ≤ 两档(152px) ⇒ 2+4 = 6 档 ⇒ 6×76 − 8 = 448px = 224dp
         assertEquals(448, gridSize(HudZone.RIGHT, 1.2f, rightHeights120, rightWidths).height)
-        // 左 Dock：76px 刚好等于一档 ⇒ 4 档 ⇒ 296px = 148dp
-        assertEquals(296, gridSize(HudZone.LEFT, 1.2f, leftHeights120, leftWidths).height)
+        // 左 Dock：76px 刚好等于一档 ⇒ 5 档（含 Glow）⇒ 5×76 − 8 = 372px = 186dp
+        assertEquals(372, gridSize(HudZone.LEFT, 1.2f, leftHeights120, leftWidths).height)
         // 读数块：4 行 × 80 − 12 = 308px = 154dp
         assertEquals(308, gridSize(HudZone.READOUT, 1.2f, readoutHeights120, readoutWidths, perRow = 2).height)
         assertFits("右 Dock 120%", 448, dockBandPx, 8)
-        assertFits("左 Dock 120%", 296, dockBandPx, 8)
+        assertFits("左 Dock 120%", 372, dockBandPx, 8)
         assertFits("读数块 120%", 308, readoutBandPx, 12)
 
         // ---- "露出的颗数"：逐颗点名底边，不许只数 placed.size ----

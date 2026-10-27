@@ -247,4 +247,203 @@ class GlowWiringGuardTest {
             movedBody.indexOf("drawGlowPass(hasFrame)") > movedBody.indexOf("drawEncoderPass()")
         )
     }
+
+    // ------------------------------------------------------------------ B7 · UI 登记（胶囊/位掩码/持久化）
+
+    private val pills by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/CameraPills.kt")) }
+    private val hudLayer by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/HudLayer.kt")) }
+    private val hudLayout by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/HudLayout.kt")) }
+    private val persist by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/ParamsPersist.kt")) }
+
+    /**
+     * UI 登记的**源码侧**判据（真身与突变体同吃一把尺）。
+     *
+     * 数值/枚举那几条不在这里：它们直接断言运行时值（`CamPill.GLOW.bit` / `MASK_SCHEMA` /
+     * `WotaSettings.KEY_GLOW` / `ParamsPersist.KEYS`），本身就是真值，不必再抄一份文本。
+     */
+    private fun coreGlowSrc(): String = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("core/Glow.kt"))
+
+    private fun uiWiringIssues(pillsSrc: String): List<String> {
+        val bad = ArrayList<String>()
+        if (!pillsSrc.contains("DENOISE, GLOW }")) bad.add("PillKey 末尾必须有 GLOW")
+        if (!pillsSrc.contains("PillKey.MONITOR, PillKey.GLOW")) bad.add("GLOW 必须进录制可调白名单")
+        if (!pillsSrc.contains("PillKey.GLOW to")) bad.add("pillAnchorWriters 缺 GLOW 一行（浮层会弹到屏幕原点）")
+        if (!pillsSrc.contains("PillKey.GLOW -> GlowPill(")) bad.add("PillHost 缺 GLOW → GlowPill 分支")
+        if (!pillsSrc.contains("glowStatusProvider()")) bad.add("GlowPill 没读状态（分档/停用/夹取三条都成摆设）")
+        // 状态行的**选句**住在纯函数 glowStatusNote（core/Glow.kt，六态 JVM 全测）：
+        // pills 侧只需"真的用了它"，五条文案的引用在 core 侧逐个点名
+        if (!pillsSrc.contains("glowStatusNote(")) bad.add("GlowPill 状态行没走纯函数 glowStatusNote")
+        val coreGlow = coreGlowSrc()
+        for (res in listOf(
+            "cam_glow_status_auto", "cam_glow_status_res_label",
+            "cam_glow_broken", "cam_glow_clamped", "cam_glow_direct"
+        )) {
+            // 按词边界判：`contains` 会把 "…_clampedX" 当成"还在"（经典假绿）
+            if (KotlinSourceScan.occurrences(coreGlow, res).isEmpty()) {
+                bad.add("glowStatusNote 缺 $res（状态行少一种状态）")
+            }
+        }
+        if (!hudLayer.contains("CamPill.GLOW -> PillKey.GLOW")) bad.add("HudEntry.pillKey 缺 GLOW")
+        if (!hudLayer.contains("ctx.glowUsable") || !hudLayer.contains("ctx.onGlowClick")) {
+            bad.add("HudEntryItem 的 GLOW 分支没接 ctx 字段")
+        }
+        if (!hudLayout.contains("CamPill.GLOW -> HudZone.LEFT")) bad.add("GLOW 的默认容器必须是左竖 Dock")
+        if (!hudLayout.contains("HudEntry.of(CamPill.GLOW)")) bad.add("左竖 Dock 默认序必须登记 GLOW")
+        if (!persist.contains("decodeGlow(")) bad.add("ParamsPersist.restore 没走 decodeGlow")
+        if (!persist.contains("encodeGlow(")) bad.add("ParamsPersist.flush 没走 encodeGlow")
+        return bad
+    }
+
+    @Test
+    fun `UI登记_枚举位掩码与持久化键的真值`() {
+        // 位掩码：GLOW 必须是新加的一位，版本升到 2，迁移只补这一位（老用户默认全开口径）
+        assertEquals(16384, com.wotagei.cam.core.CamPill.GLOW.bit)
+        assertEquals(2, com.wotagei.cam.core.CamPill.MASK_SCHEMA)
+        assertEquals(
+            com.wotagei.cam.core.CamPill.GLOW.bit,
+            com.wotagei.cam.core.CamPill.ADDED_IN_SCHEMA[2]
+        )
+        // 胶囊可调性（录制中整组可调：Glow 是 scene layer，改了会进成片但不产生重复帧）
+        assertTrue(com.wotagei.cam.ui.pillEditableDuringRecording(com.wotagei.cam.ui.PillKey.GLOW))
+        // 持久化：整份参数一个复合串键，且在白名单里
+        assertEquals("glow_params", com.wotagei.cam.ui.WotaSettings.KEY_GLOW)
+        assertTrue(
+            "glow_params 必须在 ParamsPersist.KEYS 白名单里（否则重启回默认）",
+            com.wotagei.cam.ui.ParamsPersist.KEYS.contains(com.wotagei.cam.ui.WotaSettings.KEY_GLOW)
+        )
+        // 默认落位：左竖 Dock 的末位（第 5 组）
+        val leftOrder = com.wotagei.cam.ui.HudLayoutTable.defaultOrderOf(com.wotagei.cam.ui.HudZone.LEFT)
+        assertEquals(
+            com.wotagei.cam.ui.HudEntry.of(com.wotagei.cam.core.CamPill.GLOW),
+            leftOrder.last()
+        )
+        assertEquals(com.wotagei.cam.ui.HudZone.LEFT, com.wotagei.cam.ui.HudEntry.of(com.wotagei.cam.core.CamPill.GLOW).homeZone)
+    }
+
+    @Test
+    fun `UI登记_源码接线判据`() {
+        val issues = uiWiringIssues(pills)
+        assertEquals("Glow 的 UI 接线缺口：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
+    }
+
+    // ------------------------------------------------------------------ B7 · 下发通道与状态行接线
+
+    private val screen by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt")) }
+
+    /**
+     * Glow 的**下发通道**判据（真身与突变体同吃一把尺）：
+     * - 参数下发必须是**独立 effect**（键 = activeSink + glowParams），否则长键里一挂 Glow，
+     *   拖滑杆每 tick 就把 effect/zebra/peaking/curve/降噪整条链重跑一遍；
+     * - 独立 effect 必须在长 effect **之前**且**不经过** `glEngine ?: return`（DIRECT 下 glEngine 恒 null，
+     *   走那里就到不了 DirectSink）；
+     * - 长键里不许出现 glowParams、长体内不许出现 setGlowParams；
+     * - 胶囊的状态源必须真的接到 sink（`glowStatusProvider` + `glowStatus()`），
+     *   并且 `PillHost` 的 GlowPill 实参里带上了它（漏传 = 状态行永远空白，编译期就该挡，这里再加一道）。
+     */
+    private fun glowChannelIssues(screenSrc: String, pillsSrc: String): List<String> {
+        val bad = ArrayList<String>()
+        val flatScreen = KotlinSourceScan.flatten(screenSrc)
+        val flatPills = KotlinSourceScan.flatten(pillsSrc)
+        if (!flatScreen.contains("LaunchedEffect(activeSink, glowParams)")) {
+            bad.add("CameraScreen 缺独立 effect LaunchedEffect(activeSink, glowParams)")
+        }
+        if (!flatScreen.contains(
+                "LaunchedEffect(activeSink, glowParams) { (activeSink as? com.wotagei.cam.camera.GlowProvider)?.setGlowParams(glowParams) }"
+            )
+        ) {
+            bad.add("独立 effect 体内必须是 setGlowParams（且不许先过 glEngine ?: return，否则 DIRECT 收不到）")
+        }
+        // ⚠ 这条针以 '(' 结尾：occurrences 的"后一个字符不能是标识符"会把调用点整批判掉，
+        // 所以用普通子串计数（1 处 = 下发点唯一）
+        if (screenSrc.split("setGlowParams(").size - 1 != 1) {
+            bad.add("CameraScreen 只许有一处 setGlowParams（下发点必须唯一）")
+        }
+        if (flatScreen.contains("videoDenoise, glowParams )")) {
+            bad.add("长键里不许有 glowParams（拖滑杆会每 tick 重跑整条 effect 链）")
+        }
+        if (!flatScreen.contains("arcMergeDeadband, videoDenoise )")) {
+            bad.add("长键锚点丢失：键表尾部应停在 videoDenoise")
+        }
+        if (!flatScreen.contains("glowStatusProvider = {")) {
+            bad.add("CameraScreen 没给 PillHost 传 glowStatusProvider")
+        }
+        if (!flatScreen.contains("(activeSink as? com.wotagei.cam.camera.GlowProvider)?.glowStatus()")) {
+            bad.add("glowStatusProvider 必须现读 sink 的 glowStatus（DIRECT 也实现 GlowProvider）")
+        }
+        if (!flatPills.contains(
+                "PillKey.GLOW -> GlowPill( anchor, params, editable, gpuMode, glowStatusProvider, onClose, onPersist )"
+            )
+        ) {
+            bad.add("PillHost 的 GlowPill 实参缺 glowStatusProvider（状态行永远空白）")
+        }
+        return bad
+    }
+
+    @Test
+    fun `Glow下发走独立effect且胶囊状态源接到sink`() {
+        val issues = glowChannelIssues(screen, pills)
+        assertEquals(
+            "Glow 下发/状态源接线缺口：\n" + issues.joinToString("\n"),
+            emptyList<String>(),
+            issues
+        )
+    }
+
+    @Test
+    fun `尺子能红_把Glow塞回长键或摘掉状态源必红`() {
+        assertEquals("真身必须绿", emptyList<String>(), glowChannelIssues(screen, pills))
+        // 突变 1：把 Glow 塞回长键（= 每 tick 重跑整条 effect 链）
+        val intoLongKey = screen.replace(
+            "arcMergeDeadband, videoDenoise",
+            "arcMergeDeadband, videoDenoise, glowParams"
+        )
+        assertTrue(
+            "塞回长键的突变必须报红",
+            glowChannelIssues(intoLongKey, pills).any { it.contains("长键") }
+        )
+        // 突变 2：独立 effect 摘掉（DIRECT / 换引擎都收不到参数）
+        val noEffect = screen.replace("LaunchedEffect(activeSink, glowParams) {", "LaunchedEffect(activeSink) {")
+        assertTrue("摘掉独立 effect 的突变必须报红", glowChannelIssues(noEffect, pills).isNotEmpty())
+        // 突变 3：状态源不传（状态行静默消失）
+        val noStatus = pills.replace("gpuMode, glowStatusProvider, onClose", "gpuMode, onClose")
+        assertTrue(
+            "摘掉 glowStatusProvider 实参的突变必须报红",
+            glowChannelIssues(screen, noStatus).any { it.contains("glowStatusProvider") }
+        )
+    }
+
+    @Test
+    fun `预设只换色与强度_不改变开关`() {
+        val flatPills = KotlinSourceScan.flatten(pills)
+        assertTrue(
+            "A/B 预设必须保留当前 enabled（点预设不改开关，24 §1.6 默认口径）",
+            flatPills.contains("write(base.copy(enabled = glow.enabled))")
+        )
+        // 突变：改回"顺手打开"必红
+        val forcedOn = pills.replace("base.copy(enabled = glow.enabled)", "base.copy(enabled = true)")
+        assertFalse(
+            "点预设强制开启的突变必须被这条抓到",
+            KotlinSourceScan.flatten(forcedOn).contains("base.copy(enabled = glow.enabled)")
+        )
+    }
+
+    @Test
+    fun `尺子能红_摘掉白名单_Host分支或状态行必红`() {
+        assertEquals("真身必须绿", emptyList<String>(), uiWiringIssues(pills))
+        // 突变 1：白名单摘掉 GLOW（录制中变只读）
+        val noWhitelist = pills.replace("PillKey.MONITOR, PillKey.GLOW", "PillKey.MONITOR")
+        assertTrue("白名单突变必须报红", uiWiringIssues(noWhitelist).any { it.contains("白名单") })
+        // 突变 2：PillHost 分支摘掉（点开了没内容）
+        val noHost = pills.replace("PillKey.GLOW -> GlowPill(", "PillKey.GLOW -> Note(")
+        assertTrue("PillHost 分支突变必须报红", uiWiringIssues(noHost).any { it.contains("PillHost") })
+        // 突变 3：状态行不再走纯函数（分档/停用/夹取三条全成摆设）
+        val noNote = pills.replace("glowStatusNote(", "glowStatusNoteX(")
+        assertTrue(
+            "摘掉 glowStatusNote 的突变必须报红",
+            uiWiringIssues(noNote).any { it.contains("glowStatusNote") }
+        )
+        // 突变 4：锚点登记摘掉（浮层回屏幕原点）
+        val noAnchor = pills.replace("PillKey.GLOW to", "PillKey.GLOWX to")
+        assertTrue("锚点登记突变必须报红", uiWiringIssues(noAnchor).any { it.contains("锚点") || it.contains("pillAnchorWriters") })
+    }
 }

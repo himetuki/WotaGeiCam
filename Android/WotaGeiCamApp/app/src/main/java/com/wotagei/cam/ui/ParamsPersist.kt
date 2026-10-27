@@ -6,6 +6,7 @@ import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
+import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MarkerLineColor
 import com.wotagei.cam.core.MarkerLines
@@ -15,6 +16,8 @@ import com.wotagei.cam.core.Stabilize
 import com.wotagei.cam.core.WbPreset
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.core.decodeGlow
+import com.wotagei.cam.core.encodeGlow
 
 /**
  * 录制页参数持久化（用户反馈第 1 条；2026-10-16 用户拍板口径）：
@@ -23,8 +26,8 @@ import com.wotagei.cam.core.WotaTiers
  * 语义 = **键即启动档位**（上次用过就是下次启动值）——与设置页默认档共用同一套键，
  * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 19 个新键与
  * 5 个存量键（`default_fps`/`default_shutter_ns`/`default_bitrate`/`default_ref_lines`/
- * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项共同构成入档白名单
- * [KEYS]（28 项）。
+ * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项与 Glow 一份共同构成入档白名单
+ * [KEYS]（29 项）。
  *
  * 两条链：
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
@@ -77,7 +80,9 @@ object ParamsPersist {
         // 2026-10-27：站位线的间距与颜色入档；**线数刻意不入档**（用户口径：启动时取景器
         // 要干净无线 ⇒ 线数恒从 0 起步，见 restore 末尾那条注释与 KeyTable 守卫）
         WotaSettings.KEY_DEFAULT_MARKER_SPREAD,
-        WotaSettings.KEY_DEFAULT_MARKER_COLOR
+        WotaSettings.KEY_DEFAULT_MARKER_COLOR,
+        // 2026-10-27：Glow 整份参数入档（复合串键，见 WotaSettings.KEY_GLOW 的注释）
+        WotaSettings.KEY_GLOW
     )
 
     /**
@@ -154,6 +159,8 @@ object ParamsPersist {
         params.markerColor.value = enumOrDefault(
             prefs, WotaSettings.KEY_DEFAULT_MARKER_COLOR, MarkerLineColor.YELLOW
         )
+        // ⑳ Glow：整份参数一个复合串键；坏串整份回出厂（decodeGlow 内部已 sanitize）
+        params.glowParams.value = decodeGlow(prefs.getString(WotaSettings.KEY_GLOW, null))
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -223,6 +230,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shDenoiseVideo = params.videoDenoise.value
     private var shMarkerSpread = params.markerSpread.value
     private var shMarkerColor = params.markerColor.value
+    private var shGlow = params.glowParams.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
 
@@ -258,6 +266,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         // 所以这里**故意不读 params.markerCount**
         val markerSpread = params.markerSpread.value
         val markerColor = params.markerColor.value
+        val glow = params.glowParams.value
 
         val editor = prefs.edit()
         var dirty = false
@@ -268,6 +277,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (denoiseVideo != shDenoiseVideo) { editor.putString(WotaSettings.KEY_DENOISE_VIDEO, denoiseVideo.key); dirty = true }
         if (markerSpread != shMarkerSpread) { editor.putFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, markerSpread); dirty = true }
         if (markerColor != shMarkerColor) { editor.putString(WotaSettings.KEY_DEFAULT_MARKER_COLOR, markerColor.name); dirty = true }
+        if (glow != shGlow) { editor.putString(WotaSettings.KEY_GLOW, encodeGlow(glow)); dirty = true }
         if (refLines != shRefLines) { editor.putInt(WotaSettings.KEY_DEFAULT_REF_LINES, refLines); dirty = true }
         if (level != shLevel) { editor.putBoolean(WotaSettings.KEY_LEVEL_ENABLED, level); dirty = true }
         if (iso != shIso) { editor.putInt(WotaSettings.KEY_DEFAULT_ISO, iso); dirty = true }
@@ -322,6 +332,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shDenoiseVideo = denoiseVideo
             shMarkerSpread = markerSpread
             shMarkerColor = markerColor
+            shGlow = glow
             shRefLines = refLines
             shLevel = level
         }

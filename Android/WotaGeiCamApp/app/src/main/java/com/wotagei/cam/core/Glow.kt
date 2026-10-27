@@ -1,5 +1,6 @@
 package com.wotagei.cam.core
 
+import com.wotagei.cam.R
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -261,6 +262,56 @@ fun glowRgb(argb: Long): FloatArray {
         ((v shr 8) and 0xFF).toFloat() / 255f,
         (v and 0xFF).toFloat() / 255f
     )
+}
+
+/**
+ * Glow 色带的**可选色点**（UI 两行色点用；参数本身仍只存 ARGB Long 的 `GlowParams.colorA/B`）。
+ *
+ * 与 [MarkerLineColor] 同族：core 不引 Compose，颜色一律 ARGB Long，UI 侧 `Color(argb.toULong() shl 32)`。
+ * 调色板只约束"点选得到什么"，**不约束持久化域**——手改 prefs 写进任意 32 位色值也照单全收
+ * （解码过 [GlowParams.sanitize] 的掩码），此时 UI 上没有任何色点被点亮（[of] 返回 null）。
+ */
+enum class GlowColor(val labelRes: Int, val argb: Long) {
+    MAGENTA(R.string.glow_color_magenta, 0xFFFF3399L),
+    CYAN(R.string.glow_color_cyan, 0xFF33E6FFL),
+    ORANGE(R.string.glow_color_orange, 0xFFFF730DL),
+    GREEN(R.string.glow_color_green, 0xFF33D940L),
+    YELLOW(R.string.glow_color_yellow, 0xFFFFE033L),
+    BLUE(R.string.glow_color_blue, 0xFF4D7CFFL),
+    PURPLE(R.string.glow_color_purple, 0xFFB44DFFL),
+    WHITE(R.string.glow_color_white, 0xFFFFFFFFL);
+
+    companion object {
+        val ALL: List<GlowColor> = values().toList()
+
+        /** 参数里的色值 → 调色板项（没有精确匹配时 null = 这行一个点都不点亮，不猜） */
+        fun of(argb: Long): GlowColor? = ALL.firstOrNull { it.argb == (argb and 0xFFFF_FFFFL) }
+    }
+}
+
+/**
+ * Glow 胶囊状态行该显示哪一句（纯函数，JVM 全测）：返回 `R.string.cam_glow_*` 的资源 id，
+ * `null` = 这帧什么都不显示。
+ *
+ * 顺序是**语义优先级**，不是随意的：
+ * 1. **DIRECT 先说清楚**：没有 GL 管线，后面所有状态都无意义（"需切到使用 GPU 才生效"）；
+ * 2. **关着 ⇒ 什么都不显示**（含停用/夹取）：效果没开时这些残留状态都是噪声；
+ * 3. 停用 ⇒ "Glow 已停用"（链坏了，开了也没有光晕——必须让用户知道）；
+ * 4. 被机型上限夹过**且 RT 真的建了** ⇒ "已夹到 N×M"（rtW/rtH 为 0 时不能报一个假尺寸）；
+ * 5. 否则报分档：已知输入尺寸报"当前：×N（W×H 自动）"，未知报"当前：×N（自动）"。
+ *
+ * @param status 引擎快照（null = 引擎还没建好/已释放 ⇒ 没有可报的分档，见上面第 2/5 条）
+ * @param enabled 用户开关
+ * @param gpuMode 是否 GPU 渲染（DIRECT 恒 false）
+ */
+fun glowStatusNote(status: GlowStatus?, enabled: Boolean, gpuMode: Boolean): Int? = when {
+    !gpuMode -> R.string.cam_glow_direct
+    !enabled -> null
+    status == null -> null
+    status.broken -> R.string.cam_glow_broken
+    status.clamped && status.rtWidthPx > 0 && status.rtHeightPx > 0 -> R.string.cam_glow_clamped
+    status.inputWidthPx > 0 && status.inputHeightPx > 0 -> R.string.cam_glow_status_res_label
+    else -> R.string.cam_glow_status_auto
 }
 
 /**

@@ -323,6 +323,11 @@ fun CameraScreen(
      * 读 `.value`——后者不订阅变化，且触发 lint `StateFlowValueCalledInComposition`。
      */
     val audioDenoise by params.audioDenoise.observed()
+    /**
+     * Glow 参数（2026-10-27）：整份参数一个流。滑杆拖动时每拍只写总线，落盘走 [persist].flush()。
+     * 长键 LaunchedEffect 会把它下发给 `GlowProvider`（不触发重画，见 setGlowParams 的注释）。
+     */
+    val glowParams by params.glowParams.observed()
     // 站位指示线（2026-10-27 二轮定版）：**线的开/关只由线数驱动**（0 = 关），没有独立开关——
     // 点按圆钮出的浮层控件被误点（点外部即关）也不会连累线消失，这是用户点名要的行为。
     // markerControlsOpen 是纯 UI 态：+/线数/- 与间距滑杆那层透明浮层的开/关。
@@ -651,6 +656,16 @@ fun CameraScreen(
     DisposableEffect(directSink, ctrl) {
         directSink.onStreamSizeChanged = { ctrl.onPreviewSurfaceReady() }
         onDispose { directSink.onStreamSizeChanged = null }
+    }
+
+    // ---- Glow 参数下发（2026-10-27）：**独立 effect**，键 = (activeSink, glowParams)。
+    // 为什么不能并进下面那条长键：那条的键一变就跑**整条 effect**（重发 effect/zebra/peaking/curve/
+    // 降噪…），而 Glow 形状参数是拖滑杆时每 tick 都变的 —— 并进去等于每 tick 把整条 effect 链重跑
+    // 一遍（真机上是白掉帧 + 无谓的 uniform 重传）。独立之后一次改动只做一次 setGlowParams。
+    // 键含 activeSink：换引擎（GPU↔DIRECT、换会话）时照样补发；DIRECT 也走这条（DirectSink 只存值）。
+    // 位置在长键 **之前**、且不经 `glEngine ?: return`：DIRECT 下 glEngine 恒 null，走那里就到不了 DirectSink。
+    LaunchedEffect(activeSink, glowParams) {
+        (activeSink as? com.wotagei.cam.camera.GlowProvider)?.setGlowParams(glowParams)
     }
 
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
@@ -1317,6 +1332,11 @@ fun CameraScreen(
         denoiseLabel = stringResource(R.string.cam_pill_denoise),
         denoiseActive = com.wotagei.cam.core.videoDenoiseActive(videoDenoise, renderMode == RenderMode.GPU) ||
             audioDenoise != com.wotagei.cam.core.AudioDenoise.OFF,
+        // Glow（2026-10-27）：读数恒取控件名（与降噪/防抖同口径），"开着"由选中态承担；
+        // DIRECT 下相机帧不进 GL 管线 ⇒ 在场但禁用（半透明 + 点了给解释）
+        glowLabel = stringResource(R.string.cam_pill_glow),
+        glowActive = glowParams.enabled && renderMode == RenderMode.GPU,
+        glowUsable = renderMode == RenderMode.GPU,
         flash = flash,
         // 六项第 7 条：镜头入口从顶栏搬到底栏那颗，标签读当前镜头名
         lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
@@ -1384,6 +1404,10 @@ fun CameraScreen(
             if (canFlash) pop = PillKey.FLASH else showTip(app.getString(R.string.cam_flash_unsupported))
         },
         onDenoiseClick = { pop = PillKey.DENOISE },
+        onGlowClick = {
+            if (renderMode == RenderMode.GPU) pop = PillKey.GLOW
+            else showTip(app.getString(R.string.cam_monitor_need_gpu))
+        },
         onCurveClick = {
             openSheet(Sheet.CURVE)
             // 小弹窗没有副标题位：CPU 渲染档曲线不可拖，进弹窗第一时间用提示条说清
@@ -1967,6 +1991,10 @@ fun CameraScreen(
             // 胶囊的"生效中"标记走 core.videoDenoiseActive（不再看监看态）
             halNoiseReductionModes = slot?.ability?.noiseReductionModes.orEmpty(),
             monitorEffectOn = frameEffect != FrameEffect.NONE,
+            // Glow 状态行（分档/停用/夹取/DIRECT）：两个 sink 都实现 GlowProvider，DIRECT 回 available=false
+            glowStatusProvider = {
+                (activeSink as? com.wotagei.cam.camera.GlowProvider)?.glowStatus()
+            },
             )
         }
         // 提示必须与胶囊同一层甚至更高：胶囊是独立窗口，写在主窗口里的提示会被它整个盖住，

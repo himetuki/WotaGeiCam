@@ -92,6 +92,8 @@ class ParamsPersistSessionTest {
         markerSpread.value = 0.85f
         markerColor.value = com.wotagei.cam.core.MarkerLineColor.CYAN
         markerCount.value = 6
+        // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）
+        glowParams.value = com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f)
     }
 
     /** 空能力假件（走 VideoSizeAspectTest 的手填惯例）；afModes 由用例点菜 */
@@ -125,7 +127,7 @@ class ParamsPersistSessionTest {
     // -------------------------------------------------- 1. 往返桥
 
     @Test
-    fun `往返桥_二十八字段经flush与applyDefaults逐项一致`() {
+    fun `往返桥_二十九字段经flush与applyDefaults逐项一致`() {
         val prefs = FakePrefs()
         val bus = params()
         val session = ParamsPersistSession(prefs, bus)   // 影子先冻结（进录制页）
@@ -177,6 +179,11 @@ class ParamsPersistSessionTest {
         assertEquals(
             "站位线**线数不入档**：恢复后恒为出厂 0（启动时取景器干净无线）",
             0, back.markerCount.value
+        )
+        assertEquals(
+            "Glow 整份参数必须往返（复合串键）",
+            com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f),
+            back.glowParams.value
         )
     }
 

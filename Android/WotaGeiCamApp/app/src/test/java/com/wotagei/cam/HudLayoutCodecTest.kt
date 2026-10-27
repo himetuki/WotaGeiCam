@@ -43,7 +43,7 @@ class HudLayoutCodecTest {
 
     private fun assertEachEntryOnce(table: HudLayoutTable, tag: String) {
         val all = table.allEntries()
-        assertEquals("$tag：条目总数必须等于 14 颗 CamPill + 7 颗读数", HudEntry.ALL.size, all.size)
+        assertEquals("$tag：条目总数必须等于 15 颗 CamPill + 7 颗读数", HudEntry.ALL.size, all.size)
         assertEquals("$tag：同一颗控件不许出现在两枚容器里", all.size, all.toSet().size)
         assertEquals("$tag：表里必须覆盖全部可编辑条目", HudEntry.ALL.toSet(), all.toSet())
     }
@@ -83,8 +83,10 @@ class HudLayoutCodecTest {
             listOf(HudEntry.of(CamPill.SIZE), HudEntry.of(CamPill.STORAGE)),
             t.orderOf(HudZone.TOP)
         )
+        // 2026-10-27：左 Dock 第 5 组 = Glow（CamPill.GLOW，排在闪光灯之后）
         assertEquals(
-            listOf(CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH).map { HudEntry.of(it) },
+            listOf(CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH, CamPill.GLOW)
+                .map { HudEntry.of(it) },
             t.orderOf(HudZone.LEFT)
         )
         assertEquals(
@@ -110,8 +112,9 @@ class HudLayoutCodecTest {
         assertNotEqualsSelf(zoomPill, zoomReadout)
         assertEquals(zoomPill, HudEntry.fromId("P3"))
         assertEquals(zoomReadout, HudEntry.fromId("H6"))
-        // ordinal 越界的串一律拒绝（手改 prefs 不能凭空造出一颗不存在的控件）
-        assertNull(HudEntry.fromId("P14"))
+        // GLOW 是新加的第 15 颗（P14）；再往后才是 ordinal 越界
+        assertEquals(HudEntry.of(CamPill.GLOW), HudEntry.fromId("P14"))
+        assertNull(HudEntry.fromId("P15"))
         assertNull(HudEntry.fromId("H7"))
         assertNull(HudEntry.fromId("Z0"))
         assertNull(HudEntry.fromId(""))
@@ -284,7 +287,7 @@ class HudLayoutCodecTest {
         assertEquals(GridCell(0, 2), left[HudEntry.of(CamPill.CURVE)])
         // `P9:9.9` 的列越界（左 Dock 最多两列）⇒ 解码时就钳进上限；行 9 没超行上限（条目总数 20）所以照收
         assertEquals("越界列必须钳进 gridColsCapOf", GridCell(1, 9), left[HudEntry.of(CamPill.FLASH)])
-        assertEquals(4, t.orderOf(HudZone.LEFT).size)
+        assertEquals(5, t.orderOf(HudZone.LEFT).size)
     }
 
     @Test
@@ -413,7 +416,7 @@ class HudLayoutCodecTest {
         // ② 归属与顺序原样（跨容器那两颗还在原位）
         assertEquals(
             listOf(HudEntry.of(CamPill.STORAGE), HudEntry.of(CamPill.REFLINE),
-                HudEntry.of(CamPill.MONITOR), HudEntry.of(CamPill.FLASH)),
+                HudEntry.of(CamPill.MONITOR), HudEntry.of(CamPill.FLASH), HudEntry.of(CamPill.GLOW)),
             t.orderOf(HudZone.LEFT)
         )
         assertEquals(HudZone.READOUT, t.sourceZoneOf(HudEntry.of(CamPill.CURVE)))
@@ -458,7 +461,7 @@ class HudLayoutCodecTest {
         val homes = HudEntry.ALL.groupingBy { it.homeZone }.eachCount()
         assertEquals(
             mapOf(
-                HudZone.TOP to 2, HudZone.LEFT to 4, HudZone.RIGHT to 6,
+                HudZone.TOP to 2, HudZone.LEFT to 5, HudZone.RIGHT to 6,
                 HudZone.READOUT to 7, HudZone.BOTTOM to 2
             ), homes
         )
