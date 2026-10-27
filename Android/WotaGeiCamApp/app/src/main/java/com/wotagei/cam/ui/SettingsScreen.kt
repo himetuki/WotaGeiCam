@@ -483,7 +483,7 @@ object WotaSettings {
      */
     fun applyDefaults(prefs: SharedPreferences, params: WotaParams) {
         val fps = defaultFps(prefs).coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
-        params.fps.value = params.fps.value.copy(value = fps)
+        params.setFps(params.fps.value.copy(value = fps))
         params.shutter.value = params.shutter.value.copy(value = defaultShutterNs(prefs).toLong())
         params.bitrate.value = defaultBitrate(prefs)
         params.sampleRate.value = defaultSampleRate(prefs)

@@ -1129,7 +1129,9 @@ class Camera2Engine(
     private fun writeBackFps(value: Int, exact: Boolean) {
         val current: ParamState<Int> = params.fps.value
         if (current.value == value && current.exact == exact && current.enabled) return
-        params.fps.value = current.copy(value = value, exact = exact, enabled = true)
+        // 走 setFps 单一写入者（28 §4.4）：引擎自动降档也是「用户可见的档位变化」，
+        // 快门可选域必须同一拍按新档位重算，否则退到 24fps 后滑杆仍被 1/60 顶住
+        params.setFps(current.copy(value = value, exact = exact, enabled = true))
     }
 
     private fun onStructuralPulse(pulse: Pulse) {
