@@ -60,10 +60,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.outlined.ViewWeek
 import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -83,6 +87,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as GeoSize
@@ -99,6 +105,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
@@ -130,6 +138,8 @@ import com.wotagei.cam.core.forcedShutterOutOfRange
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.CamPill
+import com.wotagei.cam.core.MarkerLineColor
+import com.wotagei.cam.core.MarkerLines
 import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MediaAccessState
@@ -221,6 +231,7 @@ import com.wotagei.cam.ui.theme.WotaSurface
 import com.wotagei.cam.ui.theme.WotaText
 import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.CameraSurface
+import com.wotagei.cam.ui.widget.MarkerLineOverlay
 import com.wotagei.cam.ui.widget.RefLineOverlay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -299,6 +310,12 @@ fun CameraScreen(
     val arcMergeDeadband by params.arcMergeDeadband.observed()
     /** 画面降噪档（2026-10-26）：实际生效档由 core.effectiveVideoDenoise 与本页 renderMode 共同裁决 */
     val videoDenoise by params.videoDenoise.observed()
+    // 站位指示线（2026-10-27）：开/线数/组宽/色
+    val markerOn by params.markerOn.observed()
+    val markerCount by params.markerCount.observed()
+    val markerSpread by params.markerSpread.observed()
+    val markerColor by params.markerColor.observed()
+    var markerColorPop by remember { mutableStateOf(false) }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
@@ -1167,6 +1184,15 @@ fun CameraScreen(
                     showLevelLine = levelEnabled,
                     modifier = Modifier.matchParentSize()
                 )
+                // 站位指示线（2026-10-27）：与参考线同一 View 叠加通道——**不进录像画面**
+                // （录制采集相机/GL 面，View 层结构上进不了编码器），录制中也可用
+                MarkerLineOverlay(
+                    count = markerCount,
+                    spread = markerSpread,
+                    color = markerColor,
+                    aspect = previewAspect,
+                    modifier = Modifier.matchParentSize()
+                )
                 FocusBox(
                     // 锁定期的数据源切换成锁定锚点（缺省画面中心，与引擎同一口径）；未锁路径一字不动
                     point = if (focusLocked) (focusLockPoint ?: TapPoint(0.5f, 0.5f)) else focusPoint,
@@ -1466,6 +1492,124 @@ fun CameraScreen(
                             // （HudEdgePad/TopRowGap 是 HudTopChrome 那排自己的令牌，不新造间距数字）
                             .padding(end = HudEdgePad + WotaHit.iconButton + TopRowGap, top = TopTopPad)
                     )
+                    // 站位指示线圆钮（2026-10-27）：分屏钮**左侧**、同款圆形（同一 size/glyph 令牌）。
+                    // 点按 = 开/关（线与内联控件簇随 markerOn 出入）；长按 = 选色弹窗。
+                    // 与分屏的录制锁不同：站位线是 View 叠加层不进成片，**录制中照常可用**。
+                    WotaIconButton(
+                        image = Icons.Outlined.ViewWeek,
+                        description = stringResource(R.string.cam_marker),
+                        selected = markerOn,
+                        onClick = { params.markerOn.value = !markerOn },
+                        onLongClick = { markerColorPop = true },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(
+                                end = HudEdgePad + (WotaHit.iconButton + TopRowGap) * 2,
+                                top = TopTopPad
+                            )
+                    )
+                    if (markerOn) {
+                        // 内联控件簇（用户点名「无弹窗式控件」）：+/线数/- 一行 + 间距滑杆一行，
+                        // 都水平；挂在圆钮正下方（TopEnd 对齐，不遮画面主体）
+                        Column(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(
+                                    end = HudEdgePad,
+                                    top = TopTopPad + WotaHit.iconButton + WotaSpace.xs
+                                )
+                                .wotaCard()
+                                .padding(WotaSpace.s),
+                            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                WotaIconButton(
+                                    image = Icons.Outlined.Remove,
+                                    description = stringResource(R.string.cam_marker_remove),
+                                    size = WotaHit.iconButton * 0.8f,
+                                    glyph = WotaHit.iconGlyph * 0.8f,
+                                    onClick = {
+                                        params.markerCount.value =
+                                            MarkerLines.clampCount(markerCount - 1)
+                                    }
+                                )
+                                Text(
+                                    text = markerCount.toString(),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = WotaText,
+                                    modifier = Modifier.padding(horizontal = WotaSpace.s)
+                                )
+                                WotaIconButton(
+                                    image = Icons.Outlined.Add,
+                                    description = stringResource(R.string.cam_marker_add),
+                                    size = WotaHit.iconButton * 0.8f,
+                                    glyph = WotaHit.iconGlyph * 0.8f,
+                                    onClick = {
+                                        params.markerCount.value =
+                                            MarkerLines.clampCount(markerCount + 1)
+                                    }
+                                )
+                            }
+                            // 间距滑杆 = 调「整组展开宽度」：等距线随之变疏/变密（方向一致），
+                            // 任意 (线数, spread) 组合都保证全部线落在预览宽内（MarkerLines 头注）
+                            Slider(
+                                value = markerSpread,
+                                onValueChange = {
+                                    params.markerSpread.value = MarkerLines.clampSpread(it)
+                                },
+                                valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
+                                modifier = Modifier.width(180.dp)
+                            )
+                        }
+                        if (markerColorPop) {
+                            // 选色弹窗（圆钮长按）：只选色——线数/间距按用户口径留在页面的
+                            // 无弹窗控件里，不入此窗。点窗外即关（focusable）。
+                            Popup(
+                                alignment = Alignment.TopEnd,
+                                offset = IntOffset(
+                                    with(hudDensity) {
+                                        HudEdgePad.roundToPx() + WotaHit.iconButton.roundToPx()
+                                    },
+                                    with(hudDensity) {
+                                        (TopTopPad + WotaHit.iconButton * 2f).roundToPx()
+                                    }
+                                ),
+                                onDismissRequest = { markerColorPop = false },
+                                properties = PopupProperties(focusable = true)
+                            ) {
+                                Row(
+                                    Modifier
+                                        .wotaCard()
+                                        .padding(WotaSpace.s),
+                                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.s),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    MarkerLineColor.ALL.forEach { c ->
+                                        val selected = c == markerColor
+                                        Box(
+                                            Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(c.argb.toULong() shl 32))
+                                                .let {
+                                                    if (selected) it.border(
+                                                        2.dp, WotaColor.textHi, CircleShape
+                                                    ) else it
+                                                }
+                                                .clickable {
+                                                    params.markerColor.value = c
+                                                    markerColorPop = false
+                                                }
+                                                .semantics {
+                                                    contentDescription = context.getString(c.labelRes)
+                                                }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // #73 取证钩子生效时的标识：顶栏正中一枚胶囊，写明钉住的进度与时长倍率。
                     // 钩子关着（release / debug / 没带 adb extra）时它**根本不组合**，所以截图里看见它
                     // 就等于这张是钩子态，不会把钉住的中间帧当成正常渲染写进验收结论。

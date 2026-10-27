@@ -45,6 +45,13 @@ class WotaParams(private val scope: CoroutineScope) {
      */
     val audioDenoise = MutableStateFlow(com.wotagei.cam.core.AudioDenoise.OFF)
     val videoDenoise = MutableStateFlow(com.wotagei.cam.core.VideoDenoise.OFF)
+
+    // 站位指示线（2026-10-27）：会话级（v1 不落盘——默认 4 线/中距/黄已是典型四人位，
+    // 持久化等交互真机复验后随反馈补，避免首版把没调过的默认值写进用户存储）
+    val markerOn = MutableStateFlow(false)
+    val markerCount = MutableStateFlow(com.wotagei.cam.core.MarkerLines.DEFAULT_COUNT)
+    val markerSpread = MutableStateFlow(com.wotagei.cam.core.MarkerLines.DEFAULT_SPREAD)
+    val markerColor = MutableStateFlow(com.wotagei.cam.core.MarkerLineColor.YELLOW)
     val shutter = MutableStateFlow(ParamState(40_000_000L))          // ns，1/25
     val iso = MutableStateFlow(ParamState(100))
     val aeMode = MutableStateFlow(AeMode.AUTO)

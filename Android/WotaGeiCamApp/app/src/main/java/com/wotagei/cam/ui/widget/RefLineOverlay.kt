@@ -69,8 +69,12 @@ private fun DrawScope.thin(): Float = 1.dp.toPx()
 
 private fun DrawScope.thick(): Float = 2.dp.toPx()
 
-/** 把参考线约束在画面内容的内接矩形内，避免黑边区域也画线 */
-private fun DrawScope.inscribedBox(aspect: Float): Rect {
+/**
+ * 把参考线约束在画面内容的内接矩形内，避免黑边区域也画线。
+ * 2026-10-27 起 [MarkerLineOverlay]（站位线）共用这一份——内接口径分叉会让
+ * 同一 fraction 在两族参考图形上落在不同 x。
+ */
+internal fun DrawScope.inscribedBox(aspect: Float): Rect {
     val canvasW = size.width
     val canvasH = size.height
     if (canvasW <= 0f || canvasH <= 0f) return Rect(Offset.Zero, Size.Zero)

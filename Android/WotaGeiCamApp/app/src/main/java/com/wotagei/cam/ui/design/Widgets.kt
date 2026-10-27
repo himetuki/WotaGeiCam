@@ -483,6 +483,7 @@ private fun WotaChipImpl(
  * - **霜不在**（纸面页 / 实底兜底）：维持 accent tint——压 hudScrim 实底 4.79 ≥ 图形 3.0，观感不变。
  */
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun WotaIconButton(
     image: ImageVector,
     description: String,
@@ -491,7 +492,9 @@ fun WotaIconButton(
     selected: Boolean = false,
     size: Dp = WotaHit.iconButton,
     glyph: Dp = WotaHit.iconGlyph,
-    frost: HudFrostCard? = null
+    frost: HudFrostCard? = null,
+    /** 长按动作（2026-10-27 站位线圆钮：点按开关、长按选色）。null = 维持纯点按 */
+    onLongClick: (() -> Unit)? = null
 ) {
     val motion = LocalMotion.current
     val interaction = remember { MutableInteractionSource() }
@@ -511,7 +514,18 @@ fun WotaIconButton(
                 if (selected && onFrost) Modifier.background(WotaColor.accentSurface, CircleShape)
                 else Modifier
             )
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onClick,
+                        onLongClick = onLongClick
+                    )
+                } else {
+                    Modifier.clickable(interactionSource = interaction, indication = null, onClick = onClick)
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
         Icon(
