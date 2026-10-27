@@ -16,6 +16,29 @@ data class ParamState<T : Comparable<T>>(
 )
 
 /**
+ * 上屏渲染比例（2026-10-27 用户需求；docs/plan/24 R3 §2.3）：**只作用于 drawWindowPass 的离屏 RT**，
+ * 与相机流 / `setDefaultBufferSize` / 编码面 / 相机会话 / Glow 链 / 霜链尺寸**无关**。
+ *
+ * `divisor = N` ⇒ 上屏 RT = 等比区 / N（floor，两维都 ≥128px 才可用），然后放大 blit 回窗口面。
+ * 默认 [ORIG]：那条路与改前逐字相同（不建 RT、不 blit）。
+ *
+ * 名字刻意叫 `DisplayScale`（不是 PreviewScale/Resolution）：语义是"上屏那一路的渲染比例"，
+ * 防止后人再把它接回相机流（R1 的 `setDefaultBufferSize(w/N,h/N)` 已被证伪并作废）。
+ */
+enum class DisplayScale(val divisor: Int) {
+    ORIG(1),
+    HALF(2),
+    QUARTER(4),
+    EIGHTH(8),
+    SIXTEENTH(16);
+
+    companion object {
+        val ALL: List<DisplayScale> = values().toList()
+        fun fromDivisor(divisor: Int): DisplayScale = ALL.firstOrNull { it.divisor == divisor } ?: ORIG
+    }
+}
+
+/**
  * 参数总线：每个可调项一个 StateFlow，UI 只读流、camera 层只读快照。
  * 切镜头调用 [applyAbility] 重算范围并钳制当前值。
  */
@@ -54,6 +77,12 @@ class WotaParams(private val scope: CoroutineScope) {
      * 落盘由 [com.wotagei.cam.ui.ParamsPersist] 的复合键负责（`encodeGlow`/`decodeGlow`）。
      */
     val glowParams = MutableStateFlow(GlowParams.DEFAULT)
+
+    /**
+     * 上屏渲染比例（24 §2.3）：出厂 = 原片。**不重建相机会话**（结构签名里没有它），
+     * 换引擎时由 UI 那条长键补发（与 Glow 同一条纪律）。
+     */
+    val displayScale = MutableStateFlow(DisplayScale.ORIG)
 
     // 站位指示线（2026-10-27）：会话级（v1 不落盘——默认 4 线/中距/黄已是典型四人位，
     // 持久化等交互真机复验后随反馈补，避免首版把没调过的默认值写进用户存储）。

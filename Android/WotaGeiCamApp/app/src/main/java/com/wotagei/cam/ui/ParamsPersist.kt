@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AfMode
+import com.wotagei.cam.core.DisplayScale
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
@@ -26,8 +27,8 @@ import com.wotagei.cam.core.encodeGlow
  * 语义 = **键即启动档位**（上次用过就是下次启动值）——与设置页默认档共用同一套键，
  * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 19 个新键与
  * 5 个存量键（`default_fps`/`default_shutter_ns`/`default_bitrate`/`default_ref_lines`/
- * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项与 Glow 一份共同构成入档白名单
- * [KEYS]（29 项）。
+ * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项、Glow 一份与上屏档共同构成
+ * 入档白名单 [KEYS]（30 项）。
  *
  * 两条链：
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
@@ -82,7 +83,9 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_MARKER_SPREAD,
         WotaSettings.KEY_DEFAULT_MARKER_COLOR,
         // 2026-10-27：Glow 整份参数入档（复合串键，见 WotaSettings.KEY_GLOW 的注释）
-        WotaSettings.KEY_GLOW
+        WotaSettings.KEY_GLOW,
+        // 2026-10-27：上屏渲染比例（枚举名；只改窗口 pass，不重建会话）
+        WotaSettings.KEY_DISPLAY_SCALE
     )
 
     /**
@@ -161,6 +164,11 @@ object ParamsPersist {
         )
         // ⑳ Glow：整份参数一个复合串键；坏串整份回出厂（decodeGlow 内部已 sanitize）
         params.glowParams.value = decodeGlow(prefs.getString(WotaSettings.KEY_GLOW, null))
+        // ㉑ 上屏档：枚举名；坏串回原片。**不在这里推可用性**——窗口尺寸要到出帧才知道，
+        //    "这一档本机可不可用"由 UI 的灰显 + 引擎的回落信号负责（读数与实际一致的口径见 24 §2.3）
+        params.displayScale.value = enumOrDefault(
+            prefs, WotaSettings.KEY_DISPLAY_SCALE, DisplayScale.ORIG
+        )
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -231,6 +239,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shMarkerSpread = params.markerSpread.value
     private var shMarkerColor = params.markerColor.value
     private var shGlow = params.glowParams.value
+    private var shDisplayScale = params.displayScale.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
 
@@ -267,6 +276,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val markerSpread = params.markerSpread.value
         val markerColor = params.markerColor.value
         val glow = params.glowParams.value
+        val displayScale = params.displayScale.value
 
         val editor = prefs.edit()
         var dirty = false
@@ -278,6 +288,9 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (markerSpread != shMarkerSpread) { editor.putFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, markerSpread); dirty = true }
         if (markerColor != shMarkerColor) { editor.putString(WotaSettings.KEY_DEFAULT_MARKER_COLOR, markerColor.name); dirty = true }
         if (glow != shGlow) { editor.putString(WotaSettings.KEY_GLOW, encodeGlow(glow)); dirty = true }
+        if (displayScale != shDisplayScale) {
+            editor.putString(WotaSettings.KEY_DISPLAY_SCALE, displayScale.name); dirty = true
+        }
         if (refLines != shRefLines) { editor.putInt(WotaSettings.KEY_DEFAULT_REF_LINES, refLines); dirty = true }
         if (level != shLevel) { editor.putBoolean(WotaSettings.KEY_LEVEL_ENABLED, level); dirty = true }
         if (iso != shIso) { editor.putInt(WotaSettings.KEY_DEFAULT_ISO, iso); dirty = true }
@@ -333,6 +346,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shMarkerSpread = markerSpread
             shMarkerColor = markerColor
             shGlow = glow
+            shDisplayScale = displayScale
             shRefLines = refLines
             shLevel = level
         }

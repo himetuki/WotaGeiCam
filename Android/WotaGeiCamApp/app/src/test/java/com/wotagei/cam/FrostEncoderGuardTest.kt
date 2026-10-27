@@ -101,10 +101,12 @@ class FrostEncoderGuardTest {
             calls.size
         )
         val call = calls[0]
-        val window = KotlinSourceScan.regionOf(masked, "drawWindowPass")
+        // 2026-10-27（上屏档 B8）：两条窗口路径（原片 / 降档）共用同一条收尾 `finishWindowFrame`，
+        // 贴板仍只此一处、且它只被窗口路径调用 —— 红线（只有上屏那一条路贴板）一个字没放宽。
+        val tail = KotlinSourceScan.regionOf(masked, "finishWindowFrame")
         assertTrue(
-            "drawFrostPlates() 的第 ${KotlinSourceScan.lineOf(engineSrc, call)} 行不在 drawWindowPass 体内（窗口体 ${window.start}..${window.end}）",
-            call in window.start until window.end
+            "drawFrostPlates() 的第 ${KotlinSourceScan.lineOf(engineSrc, call)} 行不在 finishWindowFrame 体内",
+            call in tail.start until tail.end
         )
         val encoder = KotlinSourceScan.regionOf(masked, "drawEncoderPass")
         assertFalse(
@@ -112,21 +114,47 @@ class FrostEncoderGuardTest {
             call in encoder.start until encoder.end
         )
         // 谁持有它： enclosing 判定与区间判定是两条独立的路，都得说同一个答案
-        assertEquals("drawWindowPass", KotlinSourceScan.enclosingOf(bodies, call))
+        assertEquals("finishWindowFrame", KotlinSourceScan.enclosingOf(bodies, call))
+        // 收尾本身只许被两条窗口路径调用（编码 pass / MEND / 帧循环都不许碰）。
+        // 声明处要剔掉：`fun finishWindowFrame(` 那一个是定义，不是调用
+        // ⚠ 这条针以 '(' 结尾：occurrences 的"后一个字符不能是标识符"会把调用点整批判掉（'(w' 就是），
+        // 所以按普通子串逐处定位，再剔掉声明那一处。
+        val declAt = masked.indexOf("fun finishWindowFrame")
+        val declNameAt = if (declAt < 0) -1 else masked.indexOf("finishWindowFrame", declAt)
+        val tailCalls = ArrayList<Int>()
+        var at = masked.indexOf("finishWindowFrame(")
+        while (at >= 0) {
+            if (at != declNameAt) tailCalls.add(at)
+            at = masked.indexOf("finishWindowFrame(", at + 1)
+        }
+        assertTrue("找不到 finishWindowFrame 的调用点（守卫失去输入）", tailCalls.isNotEmpty())
+        val callers = tailCalls.mapNotNull { KotlinSourceScan.enclosingOf(bodies, it) }.toSet()
+        assertEquals(
+            "窗口收尾只许被原片/降档两条上屏路径调用（实际调用方：$callers）",
+            setOf("drawWindowPassOrig", "drawWindowPassScaled"),
+            callers
+        )
     }
 
     @Test
     fun `贴板发生在预览 blit 之后 swap 之前`() {
         // 顺序错了有两种坏观感：贴板在 blit 之前 = 霜被预览盖住（永远看不见）；
         // 在 swap 之后 = 那一帧已经交出去了，板要到下一帧才出现（卡片一闪一闪）
-        val body = KotlinSourceScan.bodyOf(masked, "drawWindowPass")
-        val blit = body.indexOf("drawPass(encoderPass = false)")
-        val plate = body.indexOf("drawFrostPlates()")
-        val swap = body.indexOf("swap(window)")
-        assertTrue("锚点丢失：blit", blit >= 0)
+        // 2026-10-27（上屏档 B8）：两条窗口路径都必须在"预览画完"之后才进收尾；
+        // 收尾体内贴板在 swap 之前。三条断言一起守，顺序错任何一种都红。
+        for (fn in listOf("drawWindowPassOrig", "drawWindowPassScaled")) {
+            val body = KotlinSourceScan.bodyOf(masked, fn)
+            val blit = body.indexOf("drawPass(encoderPass = false)")
+            val plate = body.indexOf("finishWindowFrame(window)")
+            assertTrue("$fn 锚点丢失：预览绘制", blit >= 0)
+            assertTrue("$fn 锚点丢失：收尾调用", plate >= 0)
+            assertTrue("$fn 必须先画预览再进收尾（blit=$blit tail=$plate）", blit < plate)
+        }
+        val tail = KotlinSourceScan.bodyOf(masked, "finishWindowFrame")
+        val plate = tail.indexOf("drawFrostPlates()")
+        val swap = tail.indexOf("swap(window)")
         assertTrue("锚点丢失：贴板", plate >= 0)
         assertTrue("锚点丢失：swap", swap >= 0)
-        assertTrue("贴板必须在预览 blit 之后（blit=$blit plate=$plate）", blit < plate)
         assertTrue("贴板必须在 swap 之前（plate=$plate swap=$swap）", plate < swap)
     }
 

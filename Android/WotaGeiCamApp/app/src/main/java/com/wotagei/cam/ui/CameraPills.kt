@@ -38,6 +38,7 @@ import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
+import com.wotagei.cam.core.DisplayScale
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowColor
@@ -58,6 +59,7 @@ import com.wotagei.cam.core.buildVideoSizeTable
 import com.wotagei.cam.core.screenAspectOf
 import com.wotagei.cam.core.enumerateLenses
 import com.wotagei.cam.core.hFovOf
+import com.wotagei.cam.core.resolveDisplayRtOrNull
 import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.sizeCloseTo
 import com.wotagei.cam.record.StorageEstimate
@@ -227,6 +229,14 @@ fun PillHost(
     /** 监看叠加（斑马纹 / 峰值对焦）当前是否开着：开着时 GPU 双边不生效，面板要如实说明 */
     monitorEffectOn: Boolean,
     /**
+     * 取景器**等比区**的实测尺寸（px，= 上屏 RT 的分母）。
+     *
+     * 与 [anchor] / [glowStatusProvider] 同一条纪律：**无默认值必传**。给默认值的话，画幅弹窗里
+     * 「预览分辨率」那一段会永远拿不到分母 ⇒ 每档都被判不可用（或更糟：静默按窗口尺寸算）。
+     * 返回 null = 还没量到（首帧前），此时非原片档灰显。
+     */
+    previewContentSize: () -> Pair<Int, Int>?,
+    /**
      * Glow 运行期状态（Glow 胶囊的状态行：分档/停用/夹取/DIRECT）。
      *
      * **无默认值必传**（与锚点同一条纪律）：漏挂 = 状态行静默消失，而"自动变化必须可见"是
@@ -240,7 +250,10 @@ fun PillHost(
     val editable = !recording || pillEditableDuringRecording(key)
     val halModes = halNoiseReductionModes
     when (key) {
-        PillKey.SIZE -> SizePill(anchor, params, ability, editable, onClose, onUnsupported)
+        PillKey.SIZE -> SizePill(
+            anchor, params, ability, editable, gpuMode, previewContentSize,
+            onClose, onUnsupported, onPersist
+        )
         PillKey.FPS -> FpsPill(anchor, params, ability, editable, onClose, onUnsupported, onPersist)
         PillKey.SHUTTER -> ShutterPill(anchor, params, ability, editable, onClose, onPersist)
         PillKey.ISO -> IsoPill(anchor, params, ability, editable, onClose, onPersist)
@@ -309,8 +322,11 @@ private fun SizePill(
     params: WotaParams,
     ability: CameraAbility?,
     editable: Boolean,
+    gpuMode: Boolean,
+    previewContentSize: () -> Pair<Int, Int>?,
     onClose: () -> Unit,
-    onUnsupported: () -> Unit
+    onUnsupported: () -> Unit,
+    onPersist: () -> Unit
 ) {
     val size by params.size.observed()
     val fps by params.fps.observed()
@@ -371,6 +387,54 @@ private fun SizePill(
             enabled = editable
         )
         rangeNote?.let { NoteText(it) }
+
+        // ---- 预览分辨率（上屏档，2026-10-27；24 §2.4）：只改窗口 pass 的离屏 RT 尺寸。
+        // DIRECT 没有 GL 上屏 pass ⇒ 整段不显示（不摆灰选项骗点）。
+        if (gpuMode) {
+            val displayScale by params.displayScale.observed()
+            val content = previewContentSize()
+            NoteText(stringResource(R.string.cam_display_scale))
+            PillChoices(
+                options = DisplayScale.ALL.map { s ->
+                    // 「原片」永远可用（它就是回退档）；其余档要等比区 ÷ divisor 两维都 ≥128px。
+                    // 判定与引擎共用 resolveDisplayRtOrNull —— 灰显的档引擎也判不可用，
+                    // 两处不会一个说能点、一个悄悄按原片跑
+                    val ok = s == DisplayScale.ORIG ||
+                        (content != null &&
+                            resolveDisplayRtOrNull(content.first, content.second, s.divisor) != null)
+                    PillOption(
+                        s.divisor,
+                        if (s == DisplayScale.ORIG) stringResource(R.string.cam_display_scale_orig)
+                        else s.divisor.toString(),
+                        ok
+                    )
+                },
+                selected = displayScale.divisor,
+                columns = 2,
+                onPick = { opt ->
+                    params.displayScale.value = DisplayScale.fromDivisor(opt.value)
+                    onPersist()
+                },
+                // 录制中由 editable 锁住（PillKey.SIZE 不在可调白名单）：首次切档要建 RT + 编 blit
+                // program，排在编码 swap 前会掉格（24 §2.4 的理由改写）
+                enabled = editable
+            )
+            // 状态行：原片 / 「当前：4（上屏 W×H）」/ 窗口太小不可用
+            val rt = content?.let { resolveDisplayRtOrNull(it.first, it.second, displayScale.divisor) }
+            if (displayScale == DisplayScale.ORIG) {
+                NoteText(stringResource(R.string.cam_display_scale_current))
+            } else if (rt != null) {
+                NoteText(
+                    stringResource(
+                        R.string.cam_display_scale_current_rt,
+                        displayScale.divisor, rt.first, rt.second
+                    )
+                )
+            } else {
+                NoteText(stringResource(R.string.cam_display_scale_too_small))
+            }
+            NoteText(stringResource(R.string.cam_display_scale_note))
+        }
     }
 }
 

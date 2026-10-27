@@ -328,6 +328,8 @@ fun CameraScreen(
      * 长键 LaunchedEffect 会把它下发给 `GlowProvider`（不触发重画，见 setGlowParams 的注释）。
      */
     val glowParams by params.glowParams.observed()
+    /** 上屏渲染比例（2026-10-27）：只影响窗口 pass 的离屏 RT；换引擎由下面那条长键补发 */
+    val displayScale by params.displayScale.observed()
     // 站位指示线（2026-10-27 二轮定版）：**线的开/关只由线数驱动**（0 = 关），没有独立开关——
     // 点按圆钮出的浮层控件被误点（点外部即关）也不会连累线消失，这是用户点名要的行为。
     // markerControlsOpen 是纯 UI 态：+/线数/- 与间距滑杆那层透明浮层的开/关。
@@ -671,7 +673,7 @@ fun CameraScreen(
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
     LaunchedEffect(
         glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack,
-        arcMergeDeadband, videoDenoise
+        arcMergeDeadband, videoDenoise, displayScale
     ) {
         val gl = glEngine ?: return@LaunchedEffect
         gl.setEffect(if (renderMode == RenderMode.DIRECT) FrameEffect.NONE else frameEffect)
@@ -688,12 +690,32 @@ fun CameraScreen(
             com.wotagei.cam.core.effectiveVideoDenoise(videoDenoise, renderMode == RenderMode.GPU) ==
                 com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL
         )
+        // 上屏档（24 §2.3）：不重建相机会话，只在 GL 线程换窗口 pass 的 RT 尺寸；换引擎必须补发
+        // （否则切一次渲染模式再回来，上屏档静默回落到原片）
+        gl.setDisplayScale(displayScale)
     }
 
     // 直方图采样开关（2026-10-27）：仅曲线弹窗可见 + GPU 档才采。独立 effect——键表必须含
     // sheet（弹窗开关本身就要触发），不能蹭上面那条长键表（它的键全是"值变化才重发"的参数）
     LaunchedEffect(glEngine, sheet, renderMode) {
         glEngine?.setHistogramEnabled(sheet == Sheet.CURVE && renderMode == RenderMode.GPU)
+    }
+
+    // 上屏降档回落（24 §〇.1-4「自动变化必须可见」）：引擎说这一档不可用 ⇒ 档位改回原片 + 提示一次。
+    // 键含 glEngine：换引擎后旧实例的 flow 不再收，新实例的照收。
+    LaunchedEffect(glEngine) {
+        val engine = glEngine ?: return@LaunchedEffect
+        engine.displayScaleFallback.collect { fellBack ->
+            if (!fellBack) return@collect
+            // 按 24 §2.3 落到**最近可用档**（16 不可用 → 8/4/2，兜底原片），再把档位写回总线
+            // （读数与实际一致；禁止"显示 4、实际按原片跑"）。等比区此刻量不到 ⇒ 直接原片。
+            val content = engine.contentRect()
+            params.displayScale.value = com.wotagei.cam.core.nearestDisplayScale(
+                content.width(), content.height(), params.displayScale.value
+            )
+            showTip(app.getString(R.string.cam_display_scale_fallback))
+            engine.displayScaleFallback.value = false
+        }
     }
 
     // ---- 方向：显示角喂给两条 sink，sink 内部再叠自己读到的缓冲矩阵旋转分量（见 camera/PreviewOrientation）
@@ -1991,6 +2013,10 @@ fun CameraScreen(
             // 胶囊的"生效中"标记走 core.videoDenoiseActive（不再看监看态）
             halNoiseReductionModes = slot?.ability?.noiseReductionModes.orEmpty(),
             monitorEffectOn = frameEffect != FrameEffect.NONE,
+            // 上屏档的分母 = 取景器等比区实测尺寸（还没出帧时为 null ⇒ 非原片档灰显）
+            previewContentSize = {
+                glEngine?.contentRect()?.let { it.width() to it.height() }
+            },
             // Glow 状态行（分档/停用/夹取/DIRECT）：两个 sink 都实现 GlowProvider，DIRECT 回 available=false
             glowStatusProvider = {
                 (activeSink as? com.wotagei.cam.camera.GlowProvider)?.glowStatus()

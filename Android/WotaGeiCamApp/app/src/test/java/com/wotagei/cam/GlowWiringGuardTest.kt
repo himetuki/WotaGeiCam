@@ -361,8 +361,9 @@ class GlowWiringGuardTest {
         if (flatScreen.contains("videoDenoise, glowParams )")) {
             bad.add("长键里不许有 glowParams（拖滑杆会每 tick 重跑整条 effect 链）")
         }
-        if (!flatScreen.contains("arcMergeDeadband, videoDenoise )")) {
-            bad.add("长键锚点丢失：键表尾部应停在 videoDenoise")
+        // 长键尾部：videoDenoise（降噪）→ displayScale（上屏档，B8 加的，档位是离散选择不是每 tick 参数）
+        if (!flatScreen.contains("arcMergeDeadband, videoDenoise, displayScale )")) {
+            bad.add("长键锚点丢失：键表尾部应是 videoDenoise, displayScale")
         }
         if (!flatScreen.contains("glowStatusProvider = {")) {
             bad.add("CameraScreen 没给 PillHost 传 glowStatusProvider")

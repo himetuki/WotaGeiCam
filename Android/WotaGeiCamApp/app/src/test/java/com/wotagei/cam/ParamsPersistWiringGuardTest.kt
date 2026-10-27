@@ -38,8 +38,8 @@ class ParamsPersistWiringGuardTest {
         "denoise_audio", "denoise_video",
         // 2026-10-27：站位线的间距与颜色入档（**线数刻意不入档**，见下面的专门用例）
         "default_marker_spread", "default_marker_color",
-        // 2026-10-27：Glow 整份参数（复合串键）
-        "glow_params"
+        // 2026-10-27：Glow 整份参数（复合串键）+ 上屏渲染比例
+        "glow_params", "display_scale"
     )
 
     // ------------------------------------------------------------------ 取 lambda 体（PillEnabledGuardTest 同款花括号配对）
@@ -135,7 +135,7 @@ class ParamsPersistWiringGuardTest {
         return issues
     }
 
-    /** 28 个键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
+    /** 键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
     private fun keyWiringIssues(masked: String, keyNames: List<String>): List<String> =
         keyNames.filter { occurrences(masked, it).size < 3 }
             .map { "$it 在 ParamsPersist.kt 里引用不足 3 处（KEYS 表/restore/flush 三者缺一）" }
@@ -173,7 +173,7 @@ class ParamsPersistWiringGuardTest {
                     // 降噪两项不在此列：恢复侧走 WotaSettings.audioDenoise/videoDenoise 助手
                     // （键常量只在 KEYS 与 flush 出现，引用数 2 是设计如此）
                     "KEY_DEFAULT_MARKER_SPREAD", "KEY_DEFAULT_MARKER_COLOR",
-                    "KEY_GLOW"
+                    "KEY_GLOW", "KEY_DISPLAY_SCALE"
                 )
             )
         )

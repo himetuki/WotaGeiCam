@@ -199,6 +199,12 @@ object WotaSettings {
     const val KEY_DEFAULT_MARKER_COLOR = "default_marker_color"
 
     /**
+     * 上屏渲染比例（2026-10-27 用户需求；docs/plan/24 R3 §2.3）：存枚举名（`ORIG`/`HALF`/…），
+     * 坏串回 [com.wotagei.cam.core.DisplayScale.ORIG]。**不重建相机会话**——它只改窗口 pass 的 RT 尺寸。
+     */
+    const val KEY_DISPLAY_SCALE = "display_scale"
+
+    /**
      * Glow 光晕的**整份参数**（2026-10-27 用户需求；docs/plan/24 R3 §1.5）：一个复合串键，
      * `encodeGlow`/`decodeGlow` 纯函数负责往返（坏串整份回默认）。不摊成 10 个 prefs 键——
      * 那会让"参数模型加一维"变成"持久化白名单也要加一条"，与 `hud_layout` 同族的复合键口径一致。

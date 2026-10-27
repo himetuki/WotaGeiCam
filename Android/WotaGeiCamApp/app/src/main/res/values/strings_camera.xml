@@ -102,6 +102,14 @@
     <string name="cam_lens_using">正在使用</string>
     <string name="cam_lens_fov">等效 %1$s mm · 水平视场角 %2$s°</string>
     <string name="cam_lens_fov_only">等效 %1$s mm</string>
+    <!-- 上屏档（2026-10-27 用户需求；docs/plan/24 R3 §2.4）：只改取景器的上屏渲染分辨率 -->
+    <string name="cam_display_scale">预览分辨率</string>
+    <string name="cam_display_scale_orig">原片</string>
+    <string name="cam_display_scale_note">只影响取景器上屏的渲染分辨率，成片画质不变。调低会把 GPU 帧预算让给录制、补弧与降噪，减少 4K 下的掉帧与发热。</string>
+    <string name="cam_display_scale_current">当前：原片</string>
+    <string name="cam_display_scale_current_rt">当前：%1$d（上屏 %2$d×%3$d）</string>
+    <string name="cam_display_scale_too_small">当前窗口太小，这一档不可用</string>
+    <string name="cam_display_scale_fallback">上屏降档不可用，已按原片渲染</string>
     <string name="cam_size_range">本机支持范围 %1$s ～ %2$s</string>
     <string name="cam_lens_super_wide">超广角</string>
     <string name="cam_lens_wide">广角</string>

@@ -94,6 +94,8 @@ class ParamsPersistSessionTest {
         markerCount.value = 6
         // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）
         glowParams.value = com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f)
+        // 2026-10-27：上屏渲染比例（枚举名）
+        displayScale.value = com.wotagei.cam.core.DisplayScale.QUARTER
     }
 
     /** 空能力假件（走 VideoSizeAspectTest 的手填惯例）；afModes 由用例点菜 */
@@ -127,7 +129,7 @@ class ParamsPersistSessionTest {
     // -------------------------------------------------- 1. 往返桥
 
     @Test
-    fun `往返桥_二十九字段经flush与applyDefaults逐项一致`() {
+    fun `往返桥_三十字段经flush与applyDefaults逐项一致`() {
         val prefs = FakePrefs()
         val bus = params()
         val session = ParamsPersistSession(prefs, bus)   // 影子先冻结（进录制页）
@@ -184,6 +186,10 @@ class ParamsPersistSessionTest {
             "Glow 整份参数必须往返（复合串键）",
             com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f),
             back.glowParams.value
+        )
+        assertEquals(
+            "上屏渲染比例必须往返",
+            com.wotagei.cam.core.DisplayScale.QUARTER, back.displayScale.value
         )
     }
 
@@ -322,6 +328,26 @@ class ParamsPersistSessionTest {
     }
 
     // -------------------------------------------------- 5. 排除清单（自动降级/音源/瞬时态）
+
+    @Test
+    fun `上屏档坏串恢复回原片`() {
+        val prefs = FakePrefs()
+        prefs.map[WotaSettings.KEY_DISPLAY_SCALE] = "SUPER_LOW"   // 手改 prefs 的未知枚举名
+        val p = params().apply { displayScale.value = com.wotagei.cam.core.DisplayScale.EIGHTH }
+        ParamsPersist.restore(prefs, p)
+        assertEquals(
+            "坏串必须回原片（枚举名解析失败不许猜一档）",
+            com.wotagei.cam.core.DisplayScale.ORIG, p.displayScale.value
+        )
+        // 合法串要读得回来（否则每次启动都回原片）
+        prefs.map[WotaSettings.KEY_DISPLAY_SCALE] = com.wotagei.cam.core.DisplayScale.HALF.name
+        ParamsPersist.restore(prefs, p)
+        assertEquals(com.wotagei.cam.core.DisplayScale.HALF, p.displayScale.value)
+        // 缺键 = 从没改过 ⇒ 原片
+        prefs.map.remove(WotaSettings.KEY_DISPLAY_SCALE)
+        ParamsPersist.restore(prefs, p)
+        assertEquals(com.wotagei.cam.core.DisplayScale.ORIG, p.displayScale.value)
+    }
 
     @Test
     fun `自动降级与音源瞬时态都不入档`() {

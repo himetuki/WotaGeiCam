@@ -23,6 +23,7 @@ import com.wotagei.cam.core.CurveStack
 import com.wotagei.cam.core.DENOISE_LEVEL_FULL
 import com.wotagei.cam.core.DENOISE_LEVEL_LITE
 import com.wotagei.cam.core.DENOISE_LEVEL_OFF
+import com.wotagei.cam.core.DisplayScale
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.GlowStatus
@@ -487,6 +488,29 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     /** 上一次打出的 Glow 分档（档变才打日志，避免每帧刷屏） */
     private var glowLoggedScale = 0
+
+    // endregion
+
+    // region 上屏降档（docs/plan/24 R3 §2.2 · 25 §11.5）
+
+    /**
+     * 上屏渲染比例意图（UI 线程写、GL 线程读 ⇒ @Volatile）。
+     * **只作用于 [drawWindowPass]**：相机流/编码面/MEND/Glow 链/霜链尺寸一律不碰。
+     */
+    @Volatile
+    private var wantDisplayScale = DisplayScale.ORIG
+
+    /** 上屏离屏 RT + 放大 blit（GL 线程独占；null = `initGl` 还没跑或已 release） */
+    private var displayPost: DisplayPostPass? = null
+
+    /** `GL_MAX_TEXTURE_SIZE` 只查一次（上屏 RT 的硬上限保护） */
+    private var glMaxTextureSizeCached = 0
+
+    /**
+     * 上屏降档回落信号（GL 线程写、UI 线程 collect）：true = 这一档在本机不可用，
+     * 已按原片渲染。UI 收到后把档位改回 [DisplayScale.ORIG] 并弹一句提示，然后把标志复位。
+     */
+    val displayScaleFallback = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     // endregion
 
@@ -1311,6 +1335,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         frostChain = FrostBlurChain(::link, ::drainGlError, positionBuffer)
         // 上屏画板同理：只存对象，program 等到开关真打开时才编（见 setFrostBlurEnabled）
         frostPlatePass = FrostPlatePass(::link, ::drainGlError, positionBuffer)
+        // 上屏降档（24 批 2）：只存对象；program/RT 等真的切到 >ORIG 时才建（ORIG 不占资源）
+        displayPost = DisplayPostPass(::link, positionBuffer)
         // Glow 离屏链（24 批 1）：与霜链同构、实例独立；program 等 `enabled` 翻真时再 prepare
         glowChain = GlowBlurChain(::link, ::drainGlError, positionBuffer)
         glowIdentityUv = glowIdentityTexCoords()
@@ -1953,6 +1979,18 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             dropWindowSurface()
             return
         }
+        // 上屏降档（24 §2.2）：>ORIG 时先画进等比区/divisor 的 RT 再放大 blit 回来。
+        // 同一帧**绝不**既画 RT 又画窗口 —— 降档不可用时整帧改走原片路径。
+        if (wantDisplayScale != DisplayScale.ORIG && drawWindowPassScaled(window)) return
+        drawWindowPassOrig(window)
+    }
+
+    /**
+     * **原片档（`DisplayScale == ORIG`）的那条路：与引入上屏档之前逐字不变。**
+     * 清黑 → 视口=等比区 → `drawPass(false)` → 霜板 → swap。
+     * 本函数体内**不许**出现任何上屏 RT / blit / 档位引用（源码守卫钉着）。
+     */
+    private fun drawWindowPassOrig(window: EGLSurface) {
         // 先全屏清黑再把视口收窄到等比居中区，得到正确黑边
         GLES20.glViewport(0, 0, windowWidth, windowHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -1964,10 +2002,52 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 窗口坐标 Y 向下 → GL 视口 Y 向上
         GLES20.glViewport(left, windowHeight - top - height, width, height)
         drawPass(encoderPass = false)
+        finishWindowFrame(window)
+    }
+
+    /**
+     * 上屏帧的**收尾**（两条窗口路径共用：原片档与上屏降档）。
+     *
+     * 顺带说明：上屏降档（24 §2.2）把"blit 回窗口"插在 `drawPass` 与这里之间，
+     * 所以霜板在两条路上都仍是"预览之后、swap 之前"（#84 的顺序红线不变）；
+     * 而它**只**在这条尾巴里贴 —— [drawEncoderPass] 一个引用都没有（`FrostEncoderGuardTest` 钉着）。
+     */
+    private fun finishWindowFrame(window: EGLSurface) {
         // 预览 blit 之后、swap 之前：按矩形表把霜底板贴上去（#84 步骤 2，A2 混合）。
         // 这一步只在窗口面里发生，[drawEncoderPass] 走的是另一条完整独立的路（同一条"绝不碰霜"红线）
         drawFrostPlates()
         if (!swap(window)) dropWindowSurface() else lastWindowSwapNs = System.nanoTime()
+    }
+
+    /**
+     * 上屏降档（`DisplayScale > ORIG`）：等比区/divisor 的 RT → 放大 blit → 霜板 → swap。
+     *
+     * @return true = 本帧已经画完并 swap；false = 这一档此刻不可用（`begin` 说不行，或运行时链被停用），
+     *   调用方**同一帧**改走 [drawWindowPassOrig]（并且本函数已经置了 [displayScaleFallback]）
+     */
+    private fun drawWindowPassScaled(window: EGLSurface): Boolean {
+        val post = displayPost
+        val size = glContentRect
+        val contentW = size.width()
+        val contentH = size.height()
+        // 瞬态 0/未量到的等比区（转屏/分屏/视图刚重建）不是"这一档不可用"：
+        // 静默回原片这一帧即可，**绝不置回落信号** —— 否则 UI 会把用户档位永久写回并落盘
+        // （录制中 SIZE 还锁着，用户改不回来 ⇒ 设置白丢）。
+        if (contentW <= 0 || contentH <= 0) return false
+        if (post == null ||
+            !post.begin(contentW, contentH, wantDisplayScale.divisor, glMaxTextureSize())
+        ) {
+            // 尺寸是正的但这一档真的用不了（<128px / 超纹理上限 / FBO 或 program 级失败）：
+            // 让 UI 按最近可用档收回（"读数显示 4、实际按原片跑"是禁止的静默偏差）
+            displayScaleFallback.value = true
+            return false
+        }
+        // ① 画进 RT（视口已由 begin 设成 RT 尺寸）
+        drawPass(encoderPass = false)
+        // ② 回默认面 + 放大 blit（霜板/swap 都假定当前是默认面）
+        post.blitToWindow(windowWidth, windowHeight, size)
+        finishWindowFrame(window)
+        return true
     }
 
     /**
@@ -2362,6 +2442,39 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     // endregion
 
+    // region 对外：上屏降档（24 §2.3）
+
+    /**
+     * 写入上屏渲染比例（任意线程）。
+     *
+     * **不 `requestRender`/不置 `dirty`**：这是上屏那一路的渲染比例，下一个相机帧的窗口 pass 自然生效
+     * （≤16ms）；触发重画只会在录制中多画一帧，没有任何收益。
+     * `>ORIG` 时把 blit program 的编译挪到 postGl（开档那一帧本来就什么都没画，不该在帧路径上现编）；
+     * `ORIG` 时释放 RT（只删两枚空纹理，program 留在会话缓存 —— 编译贵、重建便宜）。
+     *
+     * 档位超出本机能力（等比区太小/纹理上限）由 [drawWindowPass] 当场回原片并通过
+     * [displayScaleFallback] 告知 UI，**不在写入侧猜**（那一刻窗口尺寸可能还没量出来）。
+     */
+    fun setDisplayScale(scale: DisplayScale) {
+        if (released.get()) return
+        if (wantDisplayScale == scale) return
+        wantDisplayScale = scale
+        postGl {
+            if (scale == DisplayScale.ORIG) displayPost?.releaseTarget() else displayPost?.prepare()
+        }
+    }
+
+    /** 最近一次查询到的 `GL_MAX_TEXTURE_SIZE`（异常值兜 2048，低端机常见上限） */
+    private fun glMaxTextureSize(): Int {
+        if (glMaxTextureSizeCached > 0) return glMaxTextureSizeCached
+        val out = IntArray(1)
+        GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, out, 0)
+        glMaxTextureSizeCached = if (out[0] > 0) out[0] else 2048
+        return glMaxTextureSizeCached
+    }
+
+    // endregion
+
     // region 内部实现：program 与纹理（双槽）
 
     /**
@@ -2737,6 +2850,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 画板的 program 与那枚结果纹理的绑定也在这里收口（新资源必须在此登记删除，14 号计划 §二）
         frostPlatePass?.release()
         frostPlatePass = null
+        // 上屏降档（1 纹理 + 1 FBO + 1 program）同一处收口（24 §2.2 的登记义务）
+        displayPost?.release()
+        displayPost = null
         // Glow 链（3 纹理 + 3 FBO + 2 program）与那枚 1×1 黑纹理同一处收口（24 §1.2 的登记义务）
         glowChain?.release()
         glowChain = null
