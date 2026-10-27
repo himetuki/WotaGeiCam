@@ -318,6 +318,11 @@ fun CameraScreen(
     val arcMergeDeadband by params.arcMergeDeadband.observed()
     /** 画面降噪档（2026-10-26）：实际生效档由 core.effectiveVideoDenoise 与本页 renderMode 共同裁决 */
     val videoDenoise by params.videoDenoise.observed()
+    /**
+     * 音频降噪档（2026-10-27）：与画面降噪一起算"降噪是否生效中"。必须在组合里**收集**而不是
+     * 读 `.value`——后者不订阅变化，且触发 lint `StateFlowValueCalledInComposition`。
+     */
+    val audioDenoise by params.audioDenoise.observed()
     // 站位指示线（2026-10-27 二轮定版）：**线的开/关只由线数驱动**（0 = 关），没有独立开关——
     // 点按圆钮出的浮层控件被误点（点外部即关）也不会连累线消失，这是用户点名要的行为。
     // markerControlsOpen 是纯 UI 态：+/线数/- 与间距滑杆那层透明浮层的开/关。
@@ -1306,13 +1311,12 @@ fun CameraScreen(
         // 降噪胶囊读数（2026-10-26）：短名与"生效中"标记。短名恒取**控件名**（与 防抖/对焦/监看
         // 同一条口径：读数颗的字面量是"它是什么"，而"开没开"由 TierChip 的选中态上色承担）。
         // 不在这里改成"当前档短名"：底栏左带最窄只有 ≈64dp（竖屏 360dp 那一档），
-        // 一串「系统降噪·GPU 双边」会把那颗 chip 撑到顶掉整个 Dock 左带
+        // 一串「系统降噪·GPU 双边」会把那颗 chip 撑到顶掉整个 Dock 左带。
+        // 2026-10-27（双槽改口）：成片恒按所选档降噪 ⇒ 判据不再看监看叠加态；
+        // 两个档位都在组合里收集（`videoDenoise`/`audioDenoise`），组合期不读 `.value`
         denoiseLabel = stringResource(R.string.cam_pill_denoise),
-        denoiseActive = com.wotagei.cam.core.videoDenoiseActive(
-            params.videoDenoise.value, renderMode == RenderMode.GPU,
-            monitorEffectOn = frameEffect != FrameEffect.NONE
-        ) ||
-            params.audioDenoise.value != com.wotagei.cam.core.AudioDenoise.OFF,
+        denoiseActive = com.wotagei.cam.core.videoDenoiseActive(videoDenoise, renderMode == RenderMode.GPU) ||
+            audioDenoise != com.wotagei.cam.core.AudioDenoise.OFF,
         flash = flash,
         // 六项第 7 条：镜头入口从顶栏搬到底栏那颗，标签读当前镜头名
         lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
@@ -1958,8 +1962,9 @@ fun CameraScreen(
             bt = bt,
             capture = capture,
             onEnableCapture = enableCapture,
-            // HAL 两档逐档判可用 ⇒ 传集合（不是"有没有任意模式"）；斑马纹/峰值开着时 GPU 双边不生效，
-            // 面板要如实说明（胶囊的"生效中"标记走 core.videoDenoiseActive 的同一条口径）
+            // HAL 两档逐档判可用 ⇒ 传集合（不是"有没有任意模式"）。
+            // 斑马纹/峰值开着时**预览**不叠降噪（成片照降，2026-10-27 双槽改口），面板要如实说明；
+            // 胶囊的"生效中"标记走 core.videoDenoiseActive（不再看监看态）
             halNoiseReductionModes = slot?.ability?.noiseReductionModes.orEmpty(),
             monitorEffectOn = frameEffect != FrameEffect.NONE,
             )

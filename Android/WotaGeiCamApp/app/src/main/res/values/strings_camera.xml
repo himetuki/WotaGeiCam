@@ -147,6 +147,8 @@
     <!-- 屏幕监看面板 -->
     <string name="cam_monitor_title">屏幕监看</string>
     <string name="cam_monitor_need_gpu">需切到「使用 GPU」才生效</string>
+    <!-- 25 号计划 B4：录制中整组可调，但改了只影响预览（成片只由曲线/Glow/降噪/相机决定） -->
+    <string name="cam_monitor_preview_only">监看叠加只上屏，不进成片</string>
     <string name="cam_effect_none">关闭</string>
     <string name="cam_effect_zebra">斑马纹</string>
     <string name="cam_effect_peaking">峰值对焦</string>
@@ -271,7 +273,7 @@
     <string name="denoise_audio_note">使用系统 NoiseSuppressor 压制风声与环境底噪；内录音轨不受影响。开启后录制改走自研引擎，本机不支持时自动按无降噪继续。</string>
     <string name="denoise_video_note">HAL 档由相机硬件降噪（零额外功耗）；GPU 双边按边缘保持滤除暗部噪点，仅 GPU 渲染可用。</string>
     <string name="denoise_video_fallback_direct">当前为直连渲染，GPU 双边不可用，已退回 HAL 快速档</string>
-    <string name="denoise_video_effect_on">监看叠加（斑马纹/峰值对焦）开着时不降噪，关掉后自动恢复</string>
+    <string name="denoise_video_effect_on">监看叠加只影响预览；成片仍按所选档降噪</string>
     <string name="denoise_lite_tip">本机负载较高（画质×帧率），画面降噪已自动改用轻量档</string>
     <string name="denoise_audio_unsupported_tip">本机不支持系统降噪，环境音按原样录制</string>
     <string name="cam_marker">站位线</string>

@@ -100,9 +100,14 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
 /**
  * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
  * 单点定义——弹窗控件闸与守卫测试都读这一张表，别在别处再写一份。
+ *
+ * 2026-10-27（25 号计划 B4）：`MONITOR` **整组**进白名单（效果档 + 斑马阈值/密度 + 峰值强度/颜色）。
+ * 依据是双槽模型：这些只改 DISPLAY 槽（判读工具只上屏），成片一个字节都不变；引擎的
+ * state-only 护栏（`skip = !hasFrame`）保证切监看不往成片塞重复帧。
+ * Glow 不是监看层（scene layer，改了会改成片），它的白名单走 B7 单独决策。
  */
 internal val RECORDING_EDITABLE_PILLS =
-    setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS)
+    setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS, PillKey.MONITOR)
 
 /** 录制中该弹窗是否可调（非录制态一律可调，含调用方尚未拿到能力时的初始化阶段） */
 internal fun pillEditableDuringRecording(key: PillKey): Boolean = key in RECORDING_EDITABLE_PILLS
@@ -890,6 +895,10 @@ private fun MonitorPill(
         stringResource(R.string.cam_zebra_d3)
     )
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_monitor_title)) {
+        // 常驻口径（25 号计划 B4）：监看叠加是判读工具，只上屏——录制中可调，但改了不动成片。
+        // 放在效果档之上，用户切档前就看得到；与"录制中不可调"的只读提示是两件事（后者对
+        // MONITOR 已不再触发，保留是因为这个闸对其它状态的弹窗仍是唯一总闸）
+        Note(R.string.cam_monitor_preview_only)
         if (!editable) Note(R.string.cam_recording_readonly)
         PillChoices(
             options = FrameEffect.values().mapIndexed { i, e -> PillOption(e.ordinal, effectNames[i]) },
@@ -1124,8 +1133,9 @@ private fun DenoisePill(
             enabled = editable
         )
         NoteText(stringResource(R.string.denoise_video_note))
-        // GPU 双边 + 监看叠加开着：降噪那条支路不存在（斑马纹/峰值是监看层，不对它降噪），
-        // 如实说明——不说的话胶囊亮着、用户以为在降噪
+        // GPU 双边 + 监看叠加开着：**预览**这一路按 denoise=0 渲染（判读工具不该被处理），
+        // 但成片仍按所选档降噪（2026-10-27 双槽改口，docs/plan/25 §3.9.3）——
+        // 如实说明，别让用户以为录出来的也没降噪
         if (video == com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL && monitorEffectOn) {
             NoteText(stringResource(R.string.denoise_video_effect_on))
         }

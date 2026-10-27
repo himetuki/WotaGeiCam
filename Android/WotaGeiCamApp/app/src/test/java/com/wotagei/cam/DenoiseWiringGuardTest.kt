@@ -72,22 +72,24 @@ class DenoiseWiringGuardTest {
             assertEquals(m, effectiveVideoDenoise(m, false))
         }
         // "有没有改变出图"的判据：OFF 恒 false；GPU 双边退回 HAL 后仍是"有降噪"（不是装了个空开关）
-        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, true, false))
-        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, false, false))
-        assertEquals(true, videoDenoiseActive(VideoDenoise.HAL_FAST, false, false))
-        assertEquals(true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true, false))
+        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, true))
+        assertEquals(false, videoDenoiseActive(VideoDenoise.OFF, false))
+        assertEquals(true, videoDenoiseActive(VideoDenoise.HAL_FAST, false))
+        assertEquals(true, videoDenoiseActive(VideoDenoise.HAL_HIGH_QUALITY, true))
+        assertEquals(true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true))
         assertEquals(
             "退回 HAL 后仍算有降噪——否则那颗胶囊的'生效中'标记会跟着渲染模式乱闪",
-            true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, false, false)
+            true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, false)
         )
-        // 监看叠加（斑马纹/峰值）开着时 GPU 双边那条支路不存在 ⇒ 不许亮"生效中"（2026-10-26）
+        // 2026-10-27（25 号计划 B3 改口）：成片恒按所选档降噪，判据不再看监看叠加态 ⇒
+        // 双槽之后斑马/峰值只影响预览，胶囊必须照旧亮"生效中"（旧口径会灭，界面就说谎了）
         assertEquals(
-            "叠加层开着时不降噪，胶囊必须灭",
-            false, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true, true)
+            "监看叠加只影响预览，成片照降 ⇒ GPU 双边恒算生效",
+            true, videoDenoiseActive(VideoDenoise.GPU_BILATERAL, true)
         )
         assertEquals(
-            "HAL 档与叠加层无关，照旧算生效",
-            true, videoDenoiseActive(VideoDenoise.HAL_FAST, false, true)
+            "HAL 档同样与监看叠加无关",
+            true, videoDenoiseActive(VideoDenoise.HAL_FAST, false)
         )
     }
 

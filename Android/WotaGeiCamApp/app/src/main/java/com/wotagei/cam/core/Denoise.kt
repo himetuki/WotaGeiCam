@@ -83,19 +83,14 @@ fun audioDenoiseNeedsCodec(audio: AudioDenoise): Boolean = audio != AudioDenoise
  * 1. OFF ⇒ 没有；
  * 2. GPU 双边在**直连渲染**下退回 HAL 快速档 ⇒ **仍然算有降噪**（否则胶囊的选中态会跟着
  *    渲染模式乱闪）；HAL 档与相机请求有关、与渲染模式无关，照旧生效；
- * 3. GPU 双边在**监看叠加（斑马纹/峰值对焦）开着**时那条支路根本不存在——叠加层是判读工具，
- *    对它们降噪没有意义，引擎只在 effect=NONE 时才编双边 program（见 GlRenderEngine.buildProgram）。
- *    这时如实返回 false：胶囊不亮、面板另有一句说明（2026-10-26 修正，此前会亮着"生效中"）。
+ * 3. **成片恒按所选档降噪**（2026-10-27 双槽改口，docs/plan/25 §3.9.3 / §四末）：GPU 双边编进
+ *    MOVIE 槽，与监看叠加无关——斑马纹/峰值对焦是 monitor layer，只上屏，不会让成片失去降噪。
+ *    预览在 `effect != NONE` 时按 denoise=0 渲染（判读工具不该被处理，见 `displayProgramKey`），
+ *    面板另有一句说明"监看叠加只影响预览；成片仍按所选档降噪"。所以这里不再看监看态，恒如实返回
+ *    "有降噪"——旧版 `monitorEffectOn=false 才降噪` 的口径在双槽落地后会让界面说谎。
  */
-fun videoDenoiseActive(
-    requested: VideoDenoise,
-    gpuMode: Boolean,
-    monitorEffectOn: Boolean
-): Boolean = when (val effective = effectiveVideoDenoise(requested, gpuMode)) {
-    VideoDenoise.OFF -> false
-    VideoDenoise.GPU_BILATERAL -> !monitorEffectOn
-    else -> effective != VideoDenoise.OFF
-}
+fun videoDenoiseActive(requested: VideoDenoise, gpuMode: Boolean): Boolean =
+    effectiveVideoDenoise(requested, gpuMode) != VideoDenoise.OFF
 
 /**
  * 该档在**相机请求侧**对应的 `NOISE_REDUCTION_MODE`；null = 这一档与"相机硬件降噪"无关。

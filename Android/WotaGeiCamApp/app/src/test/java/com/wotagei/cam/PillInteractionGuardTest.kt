@@ -8,6 +8,7 @@ import com.wotagei.cam.source.KotlinSourceScan.occurrences
 import com.wotagei.cam.ui.PillKey
 import com.wotagei.cam.ui.RECORDING_EDITABLE_PILLS
 import com.wotagei.cam.ui.pillEditableDuringRecording
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -17,8 +18,10 @@ import org.junit.Test
  * 2026-10-17 胶囊交互调整的源码/行为守卫：
  * 1. 读数与镜头胶囊**点按、长按都开弹窗**（点按不再循环改值）；
  * 2. 旧循环实现（`HudCycle.kt` / `nextLensKey`）删除干净——全仓主源码零残留；
- * 3. 录制中可调白名单恰为 ISO/EV/WB/ZOOM/FOCUS，其余弹窗控件走 `enabled = editable`；
- * 4. 对焦锁定录制中的条目判据是 `!recording || focusLocked`。
+ * 3. 录制中可调白名单恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR（2026-10-27 B4 加入 MONITOR：
+ *    监看叠加只改上屏槽，成片不变），其余弹窗控件走 `enabled = editable`；
+ * 4. 对焦锁定录制中的条目判据是 `!recording || focusLocked`；
+ * 5. 监看弹窗常驻「只上屏、不进成片」说明（B4 的前置提示，缺了就是静默改）。
  *
  * 每条判据都配「尺子能红」：拆掉接线/改掉白名单后同一把尺必须报红。
  */
@@ -146,10 +149,11 @@ class PillInteractionGuardTest {
     }
 
     @Test
-    fun `录制中可调白名单恰为五项`() {
+    fun `录制中可调白名单恰为六项`() {
+        // 2026-10-27（25 号计划 B4）：MONITOR 整组进白名单——监看叠加只改 DISPLAY 槽，成片不变
         assertEquals(
-            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS",
-            setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS),
+            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR",
+            setOf(PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS, PillKey.MONITOR),
             RECORDING_EDITABLE_PILLS
         )
         PillKey.values().forEach { key ->
@@ -162,9 +166,50 @@ class PillInteractionGuardTest {
         // 只读/可调的代表项各点一次名（写死方向错一处即红）
         assertTrue(pillEditableDuringRecording(PillKey.WB))
         assertTrue(pillEditableDuringRecording(PillKey.FOCUS))
+        assertTrue("监看叠加只上屏 ⇒ 录制中可调（25 号计划 B4）", pillEditableDuringRecording(PillKey.MONITOR))
         assertFalse(pillEditableDuringRecording(PillKey.SHUTTER))
         assertFalse(pillEditableDuringRecording(PillKey.BITRATE))
         assertFalse(pillEditableDuringRecording(PillKey.BT))
+    }
+
+    @Test
+    fun `监看弹窗常驻只上屏提示且录制中不再走只读提示`() {
+        // 用户口径（25 §3.9.1）：MonitorPill 里常驻一句「监看叠加只上屏，不进成片」——
+        // 录制中可调的前提是用户知道改了不改片；缺这句就是"静默改了却没说清"
+        val monitor = flatten(bodyOf(pills, "MonitorPill"))
+        assertTrue(
+            "MonitorPill 缺少常驻提示 cam_monitor_preview_only",
+            occurrences(monitor, "cam_monitor_preview_only").isNotEmpty()
+        )
+        // 字符串本身必须真的存在（引用拼错名字在遮蔽文本里看不出来）
+        val strings = stringsCamera().readText(Charsets.UTF_8)
+        assertTrue(
+            "strings_camera.xml 缺 cam_monitor_preview_only",
+            strings.contains("name=\"cam_monitor_preview_only\"") && strings.contains("监看叠加只上屏，不进成片")
+        )
+        // 只读总闸保留（对 MONITOR 自然不再触发），且必须排在常驻提示之后
+        val previewAt = monitor.indexOf("cam_monitor_preview_only")
+        val readOnlyAt = monitor.indexOf("cam_recording_readonly")
+        assertTrue("MonitorPill 的只读总闸被删了（其它状态的弹窗靠它）", readOnlyAt >= 0)
+        assertTrue("常驻提示必须排在只读提示之前（先讲清只上屏，再讲能不能改）", previewAt < readOnlyAt)
+        // 突变自证：摘掉常驻提示必须被守卫抓到（`occurrences` 按词边界判，
+        // 单纯把名字加个后缀（…_onlyX）不会被当成"还在"——那是 contains 的经典假绿）
+        val mutated = pills.replace("cam_monitor_preview_only", "cam_monitor_preview_note")
+        assertTrue(
+            "摘掉常驻提示的突变必须被守卫抓到",
+            occurrences(flatten(bodyOf(mutated, "MonitorPill")), "cam_monitor_preview_only").isEmpty()
+        )
+    }
+
+    /** 文案资源文件（`res/values/strings_camera.xml`）：与 DegradedKeepGuardTest 同一手法 */
+    private fun stringsCamera(): File {
+        var d: File? = KotlinSourceScan.mainSourceFile("ui/CameraScreen.kt").parentFile
+        while (d != null) {
+            val f = File(d, "res/values/strings_camera.xml")
+            if (f.isFile) return f
+            d = d.parentFile
+        }
+        throw AssertionError("找不到 res/values/strings_camera.xml（文案资源被挪走/改名，守卫失去输入）")
     }
 
     @Test
