@@ -2333,9 +2333,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         st?.setOnFrameAvailableListener(null)
         st?.release()
 
+        // 直方图迷你 FBO 必须在 **teardownEgl 之前**删（需要现存的当前上下文）；
+        // 放在 teardown 之后调用是空操作（上下文已销毁，ID 变 stale）——GPU 资源靠
+        // EGL 销毁上下文兜底回收，但字段里的 ID 残留会让下一次误判"已建"
+        releaseHistogram()
+
         teardownEgl()
 
-        releaseHistogram()
         onFrameDrawn = null
         onCameraSurfaceReady = null
         Log.i(TAG_GL, "GL 线程资源已释放")
