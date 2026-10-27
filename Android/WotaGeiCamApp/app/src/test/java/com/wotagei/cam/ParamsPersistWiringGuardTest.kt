@@ -35,7 +35,9 @@ class ParamsPersistWiringGuardTest {
         "default_zebra_density", "default_peaking_strength", "default_peaking_color", "default_lens",
         "default_arc_merge_deadband",
         // 2026-10-26：降噪两项（音频/画面）入档
-        "denoise_audio", "denoise_video"
+        "denoise_audio", "denoise_video",
+        // 2026-10-27：站位线的间距与颜色入档（**线数刻意不入档**，见下面的专门用例）
+        "default_marker_spread", "default_marker_color"
     )
 
     // ------------------------------------------------------------------ 取 lambda 体（PillEnabledGuardTest 同款花括号配对）
@@ -79,6 +81,19 @@ class ParamsPersistWiringGuardTest {
         }
         check("H1 closePill", "val closePill")
         check("H3 onLongPress", "onLongPress = {")
+        // 2026-10-27：站位线的两个完成点也是落盘点——
+        // H6 间距滑杆松手（与十个 PillSlider 同一条"拖拽中途不写盘"纪律）、
+        // H7 选色（离散动作，当场落盘）
+        check("H6 站位线滑杆松手", "onValueChangeFinished = { persist.flush() }")
+        val colorAt = masked.indexOf("params.markerColor.value = c")
+        if (colorAt < 0) {
+            issues.add("H7：找不到站位线选色写点——守卫失去输入，不许算通过")
+        } else {
+            val window = masked.substring(colorAt, (colorAt + 300).coerceAtMost(masked.length))
+            if (occurrences(window, "persist.flush()").isEmpty()) {
+                issues.add("H7：选色完成点没接 persist.flush()（颜色会丢）")
+            }
+        }
         // H5：ON_STOP 观察者要在 DisposableEffect 里，且分支里调 flush（窗口双向各取 400 字符）
         val at = masked.indexOf("Lifecycle.Event.ON_STOP")
         if (at < 0) {
@@ -89,9 +104,10 @@ class ParamsPersistWiringGuardTest {
             if (!window.contains("DisposableEffect")) issues.add("H5：ON_STOP 观察者必须挂在 DisposableEffect（防重复注册）")
         }
         // 2026-10-17：点按循环（H2 onReadoutCycle / H4 onLensCycle）随功能删除，
-        // flush 恰好 4 处 = H1/H3/H5 三钩子 + PillHost 透传；多一处（散落别处）少一处（钩子掉了）都红
+        // flush 恰好 6 处 = H1/H3/H5 三钩子 + PillHost 透传 + H6 站位线滑杆松手 + H7 选色；
+        // 多一处（散落别处）少一处（钩子掉了）都红
         val n = occurrences(masked, "persist.flush()").size
-        if (n != 4) issues.add("persist.flush() 出现 $n 次，应为恰好 4 处（H1/H3/H5 三钩子 + PillHost 透传）")
+        if (n != 6) issues.add("persist.flush() 出现 $n 次，应为恰好 6 处（H1/H3/H5 三钩子 + PillHost 透传 + H6 滑杆松手 + H7 选色）")
         return issues
     }
 
@@ -117,7 +133,7 @@ class ParamsPersistWiringGuardTest {
         return issues
     }
 
-    /** 26 个键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
+    /** 28 个键常量在 ParamsPersist.kt 里的引用数至少 3（KEYS 表 1 + restore 1 + flush 1）；空 = 每个键都真的在两条链里 */
     private fun keyWiringIssues(masked: String, keyNames: List<String>): List<String> =
         keyNames.filter { occurrences(masked, it).size < 3 }
             .map { "$it 在 ParamsPersist.kt 里引用不足 3 处（KEYS 表/restore/flush 三者缺一）" }
@@ -151,10 +167,29 @@ class ParamsPersistWiringGuardTest {
                     "KEY_DEFAULT_MF_DIOPTER", "KEY_DEFAULT_SIZE", "KEY_DEFAULT_FRAME_EFFECT",
                     "KEY_DEFAULT_ZEBRA_THRESHOLD", "KEY_DEFAULT_ZEBRA_DENSITY",
                     "KEY_DEFAULT_PEAKING_STRENGTH", "KEY_DEFAULT_PEAKING_COLOR", "KEY_DEFAULT_LENS",
-                    "KEY_DEFAULT_ARC_MERGE_DEADBAND"
+                    "KEY_DEFAULT_ARC_MERGE_DEADBAND",
+                    // 降噪两项不在此列：恢复侧走 WotaSettings.audioDenoise/videoDenoise 助手
+                    // （键常量只在 KEYS 与 flush 出现，引用数 2 是设计如此）
+                    "KEY_DEFAULT_MARKER_SPREAD", "KEY_DEFAULT_MARKER_COLOR"
                 )
             )
         )
+    }
+
+    @Test
+    fun `站位线线数刻意不入档_启动时取景器干净无线`() {
+        // 用户口径（2026-10-27）：间距、颜色要记住，线数不要——否则一开机画面上就挂着上次的线
+        assertFalse(
+            "键表里不许出现站位线线数键",
+            ParamsPersist.KEYS.any { it.contains("marker_count") }
+        )
+        assertFalse("恢复/落盘两条链都不许读线数", maskedPersist.contains("markerCount"))
+        assertFalse("录制页不许为线数写 prefs", maskedScreen.contains("marker_count"))
+        // 正对照：间距与颜色两项真的在两条链里（键常量各 ≥3 处引用由上面那条用例管）
+        assertTrue(ParamsPersist.KEYS.contains(WotaSettings.KEY_DEFAULT_MARKER_SPREAD))
+        assertTrue(ParamsPersist.KEYS.contains(WotaSettings.KEY_DEFAULT_MARKER_COLOR))
+        // 恢复后线数恒为出厂默认（0 = 关），与 MarkerLines 的定版一致
+        assertEquals(0, com.wotagei.cam.core.MarkerLines.DEFAULT_COUNT)
     }
 
     @Test

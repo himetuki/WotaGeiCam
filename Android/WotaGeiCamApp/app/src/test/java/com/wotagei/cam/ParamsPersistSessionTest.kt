@@ -88,6 +88,10 @@ class ParamsPersistSessionTest {
         // 2026-10-26：降噪两项也在白名单里，必须一起动到非默认值（否则 flush 集合对不上白名单）
         audioDenoise.value = com.wotagei.cam.core.AudioDenoise.SYSTEM
         videoDenoise.value = com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL
+        // 2026-10-27：站位线间距与颜色入档；**线数故意调成非默认**，用来证明它不被落盘
+        markerSpread.value = 0.85f
+        markerColor.value = com.wotagei.cam.core.MarkerLineColor.CYAN
+        markerCount.value = 6
     }
 
     /** 空能力假件（走 VideoSizeAspectTest 的手填惯例）；afModes 由用例点菜 */
@@ -121,11 +125,11 @@ class ParamsPersistSessionTest {
     // -------------------------------------------------- 1. 往返桥
 
     @Test
-    fun `往返桥_二十六字段经flush与applyDefaults逐项一致`() {
+    fun `往返桥_二十八字段经flush与applyDefaults逐项一致`() {
         val prefs = FakePrefs()
         val bus = params()
         val session = ParamsPersistSession(prefs, bus)   // 影子先冻结（进录制页）
-        bus.makeBusy()                                    // 再逐项调出 26 个非默认值（用户动作）
+        bus.makeBusy()                                    // 再逐项调出 28 个非默认值（用户动作）
         assertTrue("全动过的会话 flush() 必须真的落盘", session.flush())
         assertEquals(
             "flush 实写的键集合必须恰好等于白名单（多一个=排他字段泄入，少一个=有字段漏写）",
@@ -164,6 +168,15 @@ class ParamsPersistSessionTest {
         assertEquals(
             "画面降噪也必须往返",
             com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL, back.videoDenoise.value
+        )
+        assertEquals("站位线间距必须往返", 0.85f, back.markerSpread.value, 1e-6f)
+        assertEquals(
+            "站位线颜色必须往返",
+            com.wotagei.cam.core.MarkerLineColor.CYAN, back.markerColor.value
+        )
+        assertEquals(
+            "站位线**线数不入档**：恢复后恒为出厂 0（启动时取景器干净无线）",
+            0, back.markerCount.value
         )
     }
 
@@ -261,6 +274,8 @@ class ParamsPersistSessionTest {
         prefs.map[WotaSettings.KEY_DEFAULT_PEAKING_STRENGTH] = -3f
         prefs.map[WotaSettings.KEY_DEFAULT_PEAKING_COLOR] = "LAVA"
         prefs.map[WotaSettings.KEY_DEFAULT_LENS] = "PERISCOPE"
+        prefs.map[WotaSettings.KEY_DEFAULT_MARKER_SPREAD] = 9f
+        prefs.map[WotaSettings.KEY_DEFAULT_MARKER_COLOR] = "PLAID"
 
         val p = params()
         ParamsPersist.restore(prefs, p)
@@ -280,6 +295,14 @@ class ParamsPersistSessionTest {
         assertEquals("峰值强度钳 0..1", 0f, p.peakingStrength.value, 1e-6f)
         assertEquals(PeakingColor.RED, p.peakingColor.value)
         assertEquals(LensType.WIDE, p.lens.value)
+        assertEquals(
+            "站位线间距越界钳回产品域上限", com.wotagei.cam.core.MarkerLines.MAX_SPREAD,
+            p.markerSpread.value, 1e-6f
+        )
+        assertEquals(
+            "站位线颜色坏串回黄（与色板 fromOrdinal 兜底同取向）",
+            com.wotagei.cam.core.MarkerLineColor.YELLOW, p.markerColor.value
+        )
 
         // 下端同样有执行力：fps 太小钳回首档；合法尺寸串真的能套上
         val low = FakePrefs()

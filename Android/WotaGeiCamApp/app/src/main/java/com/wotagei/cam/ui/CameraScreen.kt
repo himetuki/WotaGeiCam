@@ -1611,6 +1611,9 @@ fun CameraScreen(
                                     onValueChange = {
                                         params.markerSpread.value = MarkerLines.clampSpread(it)
                                     },
+                                    // 松手落盘（2026-10-27）：间距入档，和 PillSlider 同一套"完成点写盘"
+                                    // 纪律——拖拽中途不写盘，避免每帧 commit
+                                    onValueChangeFinished = { persist.flush() },
                                     valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
                                     modifier = Modifier.width(220.dp)
                                 )
@@ -1653,6 +1656,8 @@ fun CameraScreen(
                                             .clickable {
                                                 params.markerColor.value = c
                                                 markerColorPop = false
+                                                // 选色是离散完成点：当场落盘（颜色入档，线数不入档）
+                                                persist.flush()
                                             }
                                             .semantics {
                                                 contentDescription = context.getString(c.labelRes)

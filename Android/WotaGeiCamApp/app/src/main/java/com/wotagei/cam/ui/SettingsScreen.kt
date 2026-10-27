@@ -189,6 +189,15 @@ object WotaSettings {
     const val KEY_DENOISE_AUDIO = "denoise_audio"
     const val KEY_DENOISE_VIDEO = "denoise_video"
 
+    /**
+     * 站位线的**间距与颜色**（2026-10-27 用户裁决）：只持久化这两项，
+     * **线数不入档**——"启动时取景器能干净无线"是用户点名的口径，所以默认线数恒为
+     * [com.wotagei.cam.core.MarkerLines.DEFAULT_COUNT]（0 = 关），上次开过几条不带进下次。
+     * 间距存 float（产品域 0.15..1.00，恢复侧钳制），颜色存枚举名（坏串回黄）。
+     */
+    const val KEY_DEFAULT_MARKER_SPREAD = "default_marker_spread"
+    const val KEY_DEFAULT_MARKER_COLOR = "default_marker_color"
+
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
 

@@ -7,6 +7,8 @@ import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.LensType
+import com.wotagei.cam.core.MarkerLineColor
+import com.wotagei.cam.core.MarkerLines
 import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.Stabilize
@@ -21,7 +23,8 @@ import com.wotagei.cam.core.WotaTiers
  * 语义 = **键即启动档位**（上次用过就是下次启动值）——与设置页默认档共用同一套键，
  * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 19 个新键与
  * 5 个存量键（`default_fps`/`default_shutter_ns`/`default_bitrate`/`default_ref_lines`/
- * `level_enabled`）共同构成入档白名单 [KEYS]（24 项）。
+ * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项共同构成入档白名单
+ * [KEYS]（28 项）。
  *
  * 两条链：
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
@@ -36,7 +39,10 @@ import com.wotagei.cam.core.WotaTiers
  * - `audioEnabled`（音源）：**不持久化**（拍板 R3）——录制页音源双开关（内录/环境音）任何路径
  *   都不写 prefs、不跨进程恢复（否则开过内录的用户每次启动都要重新申请投屏授权）；
  * - `focusPoint`：瞬时点按态，冷启不应钉死对焦框；
- * - `curve`/`arc_convert_mode`：已有各自专属的直写链，避免第二写入方。
+ * - `curve`/`arc_convert_mode`：已有各自专属的直写链，避免第二写入方；
+ * - `markerCount`（站位线线数）：**刻意不入档**（2026-10-27 用户裁决）——"启动时取景器能
+ *   干净无线"，线数每次从 0 起步；间距与颜色照常入档（[WotaSettings.KEY_DEFAULT_MARKER_SPREAD]
+ *   / [WotaSettings.KEY_DEFAULT_MARKER_COLOR]）。
  */
 object ParamsPersist {
 
@@ -67,7 +73,11 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_LENS,
         WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND,
         WotaSettings.KEY_DENOISE_AUDIO,
-        WotaSettings.KEY_DENOISE_VIDEO
+        WotaSettings.KEY_DENOISE_VIDEO,
+        // 2026-10-27：站位线的间距与颜色入档；**线数刻意不入档**（用户口径：启动时取景器
+        // 要干净无线 ⇒ 线数恒从 0 起步，见 restore 末尾那条注释与 KeyTable 守卫）
+        WotaSettings.KEY_DEFAULT_MARKER_SPREAD,
+        WotaSettings.KEY_DEFAULT_MARKER_COLOR
     )
 
     /**
@@ -136,6 +146,14 @@ object ParamsPersist {
         // ⑰ 降噪两项（2026-10-26）：坏串/缺键一律回 OFF（默认关是产品口径，见 core/Denoise）
         params.audioDenoise.value = WotaSettings.audioDenoise(prefs)
         params.videoDenoise.value = WotaSettings.videoDenoise(prefs)
+        // ⑱ 站位线（2026-10-27）：**只恢复间距与颜色，线数不恢复**——用户口径「启动时取景器
+        //    能干净无线」，线数恒停在出厂 0（= 关），由用户当场用 +/− 调；间距越界钳回产品域，
+        //    颜色坏串回黄（与 MarkerLineColor.fromOrdinal 兜底同一取向）
+        params.markerSpread.value =
+            MarkerLines.clampSpread(prefs.getFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, MarkerLines.DEFAULT_SPREAD))
+        params.markerColor.value = enumOrDefault(
+            prefs, WotaSettings.KEY_DEFAULT_MARKER_COLOR, MarkerLineColor.YELLOW
+        )
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -203,6 +221,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shBitrate = params.bitrate.value
     private var shDenoiseAudio = params.audioDenoise.value
     private var shDenoiseVideo = params.videoDenoise.value
+    private var shMarkerSpread = params.markerSpread.value
+    private var shMarkerColor = params.markerColor.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
 
@@ -234,6 +254,10 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val level = params.levelEnabled.value
         val denoiseAudio = params.audioDenoise.value
         val denoiseVideo = params.videoDenoise.value
+        // 站位线只落间距与颜色：线数不进白名单（用户口径"启动时取景器干净无线"），
+        // 所以这里**故意不读 params.markerCount**
+        val markerSpread = params.markerSpread.value
+        val markerColor = params.markerColor.value
 
         val editor = prefs.edit()
         var dirty = false
@@ -242,6 +266,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (bitrate != shBitrate) { editor.putInt(WotaSettings.KEY_DEFAULT_BITRATE, bitrate); dirty = true }
         if (denoiseAudio != shDenoiseAudio) { editor.putString(WotaSettings.KEY_DENOISE_AUDIO, denoiseAudio.key); dirty = true }
         if (denoiseVideo != shDenoiseVideo) { editor.putString(WotaSettings.KEY_DENOISE_VIDEO, denoiseVideo.key); dirty = true }
+        if (markerSpread != shMarkerSpread) { editor.putFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, markerSpread); dirty = true }
+        if (markerColor != shMarkerColor) { editor.putString(WotaSettings.KEY_DEFAULT_MARKER_COLOR, markerColor.name); dirty = true }
         if (refLines != shRefLines) { editor.putInt(WotaSettings.KEY_DEFAULT_REF_LINES, refLines); dirty = true }
         if (level != shLevel) { editor.putBoolean(WotaSettings.KEY_LEVEL_ENABLED, level); dirty = true }
         if (iso != shIso) { editor.putInt(WotaSettings.KEY_DEFAULT_ISO, iso); dirty = true }
@@ -294,6 +320,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shBitrate = bitrate
             shDenoiseAudio = denoiseAudio
             shDenoiseVideo = denoiseVideo
+            shMarkerSpread = markerSpread
+            shMarkerColor = markerColor
             shRefLines = refLines
             shLevel = level
         }
