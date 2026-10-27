@@ -1,5 +1,7 @@
 package com.wotagei.cam.camera
 
+import com.wotagei.cam.core.FrameEffect
+
 /**
  * 渲染用的 GLSL ES 1.00 源码常量（斑马纹/峰值对焦/RGB 曲线都是片元级 pass，见 ）。
  *
@@ -12,6 +14,8 @@ package com.wotagei.cam.camera
  *   `SurfaceTexture.getTransformMatrix` 的矩阵；两者混用会导致预览与录像方向不一致。
  * - 曲线按「是否需要」在 Kotlin 侧组合源码，不用 `#ifdef`：`#define` 要写在 `#extension`
  *   之前才生效，而部分驱动要求 `#extension` 是首条指令，会直接编译失败。
+ * - **Glow 是 program 维度**（[com.wotagei.cam.camera.ProgramKey.glow]），不是 uniform 开关：
+ *   关着时调用方**根本不调** [glowFragment]，下面所有常量逐字不变（24 R3 §〇.1 不变量 1）。
  */
 internal object Shaders {
 
@@ -24,6 +28,31 @@ internal object Shaders {
         void main() {
             gl_Position = aPosition;
             vUv = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+        }
+    """.trimIndent()
+
+    /**
+     * Glow 版的顶点源：与 [TEXTURE_VS] 唯一的差别是多输出一条 **不乘矩阵** 的 `vUvGlow`。
+     *
+     * 为什么要第二份而不是在原 VS 里改：`glowOn=false` 时源码必须逐字不变（零代价口径），
+     * 而 varying 一多就是顶点阶段的可执行差异（哪怕片元不用，驱动也可能多一次插值）。
+     *
+     * 为什么 `vUvGlow` 不乘 `uTexMatrix`（24 §1.2 的推导）：
+     * - 离屏链的拷贝趟用**恒等纹理坐标** `q` 采样 OES，VS 里乘矩阵 ⇒ `RT(q) = B(M·q)`；
+     * - 主 pass 在屏幕位置 `p` 用 `t(p)` 采样 OES：`uFrame` 取到 `B(M·t(p))`；
+     * - 要让光晕与画面逐像素对齐，就得在同一个 `t(p)` 处取 RT ⇒ `vUvGlow = aTexCoord`。
+     *   乘了矩阵就是"光晕相对画面差一次旋转/镜像"，横竖屏一换立刻可见。
+     */
+    val TEXTURE_VS_GLOW = """
+        attribute vec4 aPosition;
+        attribute vec2 aTexCoord;
+        uniform mat4 uTexMatrix;
+        varying vec2 vUv;
+        varying vec2 vUvGlow;
+        void main() {
+            gl_Position = aPosition;
+            vUv = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+            vUvGlow = aTexCoord;
         }
     """.trimIndent()
 
@@ -393,6 +422,144 @@ $decl
         }
         """.trimIndent()
     }
+
+    // region Glow 注入（scene layer，两槽都带；24 R3 §1.1/§1.3 · 25 §11.1）
+
+    /**
+     * Glow 离屏链**第 ① 趟（拷贝 + 亮部提取 + 降采样）**的片元源。
+     *
+     * 与 [FROST_COPY_FS]（纯拷贝，霜要的是整幅模糊）的本质区别就在这里：Glow 只让**亮部**发光。
+     * `t = smoothstep(threshold − soft, threshold + soft, luma)` 把阈值以下压成 0、以上保留，
+     * 平移后的亮部再交给两趟高斯 —— 于是"只有光源周围有光晕"，而不是整帧糊一层。
+     *
+     * - **亮部判定取相机原帧**（不是曲线/降噪后的帧）：链每帧只跑一次（24 §1.2），若要吃处理后的帧
+     *   就得先跑一遍主 pass，零代价当场破产。副作用是"曲线压暗后光晕仍按光源真实亮度出现"，
+     *   这是 R2 刻意登记的观感口径（T7 真机回看）。
+     * - `uGlowSoft` 是过渡带半宽：0 = 硬切（会出锯齿状发光边），默认 0.05。
+     * - 上界取 `max(th + soft, th − soft + 0.0001)`：`smoothstep` 要求 `edge0 < edge1`，
+     *   否则结果未定义；th=soft=0 这种极端组合下仍给出一个极窄的合法过渡带。
+     * - 只吃 `samplerExternalOES`（OES 不能当 FBO 附件，所以这一趟必须落到 2D）；
+     *   与模糊趟的 `sampler2D` 分属两条 program（混用会直接链接失败，见 [FROST_COPY_FS] 的注释）。
+     * - 恒等 UV + `uTexMatrix`：RT(q)=B(M·q)，主 pass 的 `vUvGlow = aTexCoord` 才能逐像素对齐。
+     * - 强制不透明：与 [PASS_THROUGH_FS] 同一条纪律（alpha 不可信）。
+     */
+    val GLOW_COPY_FS = """
+        #extension GL_OES_EGL_image_external : require
+        precision mediump float;
+        varying vec2 vUv;
+        uniform samplerExternalOES uFrame;
+        uniform float uGlowThreshold;
+        uniform float uGlowSoft;
+        void main() {
+            vec3 c = texture2D(uFrame, vUv).rgb;
+            float luma = dot(c, vec3(0.299, 0.587, 0.114));
+            float t = smoothstep(
+                uGlowThreshold - uGlowSoft,
+                max(uGlowThreshold + uGlowSoft, uGlowThreshold - uGlowSoft + 0.0001),
+                luma);
+            gl_FragColor = vec4(c * t, 1.0);
+        }
+    """.trimIndent()
+
+    /**
+     * 注入段：varying + 7 颗 uniform + `applyGlow`（含廉价三元组噪声）。
+     *
+     * 算式（24 §1.1 定版）：
+     * ```
+     * out = c + ((glow * gain + add) * hue) * (blend * n)
+     * ```
+     * - **在 `c` 上叠加**，不是 `mix(c, glow, blend)`：后者会在 blend=0.6 时把画面换成 60% 的纯光晕、
+     *   非发光区也向黑偏——观感是"换画面"而不是"加光晕"；
+     * - `pos` 取**归一化亮度**（不是红通道）：取红通道会让橙色荧光棒永远停在 A 端、B 端形同虚设；
+     * - `n` 是频率噪声（0 = 干净）：`step(0.0001, freq)` 让 freq=0 时退化成乘 1，不做无谓的 hash。
+     *
+     * ES 1.00 没有 `noise()`，hash 取三次 fract 的经典廉价写法（纯算术、无纹理、无扩展）。
+     */
+    private const val GLOW_DECL = """
+varying vec2 vUvGlow;
+uniform sampler2D uGlowSrc;
+uniform float uGlowGain;
+uniform float uGlowAdd;
+uniform float uGlowFreq;
+uniform float uGlowBlend;
+uniform vec3 uGlowColorA;
+uniform vec3 uGlowColorB;
+float glowHash(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+vec3 applyGlow(vec3 c, vec2 uv) {
+    vec3 glow = texture2D(uGlowSrc, uv).rgb;
+    float pos = clamp(dot(glow, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+    vec3 hue = mix(uGlowColorA, uGlowColorB, pos);
+    float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));
+    return c + ((glow * uGlowGain + uGlowAdd) * hue) * (uGlowBlend * n);
+}
+    """
+
+    /** `void main() {` 的定位（注入点在它之前；`#extension` 必须仍是首条指令） */
+    private val MAIN_DECL = Regex("\\n[ \\t]*void\\s+main\\s*\\(\\s*\\)\\s*\\{")
+
+    /** 终写语句 `gl_FragColor = vec4(<表达式>, 1.0);`：scene 支路把表达式整个包进 applyGlow */
+    private val SCENE_OUT = Regex("gl_FragColor\\s*=\\s*vec4\\(([^\\n]+?),\\s*1\\.0\\);")
+
+    /**
+     * 把 Glow 注进一条**已存在的**片元源，返回新源码；锚点对不上返回 **null**（调用方回退无 Glow
+     * 并留日志）——绝不静默返回原串：那会让"开了 Glow 但没生效"变成查不出来的静默失效。
+     *
+     * 三种注入点（合成顺序 `降噪 → 曲线 → Glow → 监看`，24 §1.3）：
+     * - **scene**（effect = NONE：直通 / 曲线 / 双边四档）：终写表达式整个包成
+     *   `vec4(applyGlow(EXPR, vUvGlow), 1.0)`；
+     * - **ZEBRA**：**只包 else 分支**（`vec4(c, 1.0)`）。条纹分支原样输出——条纹是判读用的尺子，
+     *   让它发光既没意义、又会把"亮到多少"读错；`luma` 判定仍用 pre-Glow 的 `c`，阈值口径零变化；
+     * - **PEAKING**：`mix(c, uColor, paint)` → `mix(applyGlow(c, vUvGlow), uColor, paint)`。
+     *   边缘判定仍用 pre-Glow 的 `c`，描边色不被光晕染色（否则峰值色档位失真）。
+     *
+     * 每类锚点都要求**恰好一次**命中：ZEBRA 的 `vec4(c, 1.0)` 与 scene 的终写长得很像，
+     * 放宽成"包含任意处"就会把条纹分支也包进去（或反过来漏包），两种错误在真机上都"看起来生效了"。
+     */
+    fun glowFragment(base: String, effect: FrameEffect): String? {
+        val mains = MAIN_DECL.findAll(base).toList()
+        if (mains.size != 1) return null
+        val mainAt = mains[0].range.first
+
+        val patched = when (effect) {
+            FrameEffect.ZEBRA -> {
+                val target = "gl_FragColor = vec4(c, 1.0);"
+                if (countOf(base, target) != 1) return null
+                base.replace(target, "gl_FragColor = vec4(applyGlow(c, vUvGlow), 1.0);")
+            }
+            FrameEffect.PEAKING -> {
+                val target = "mix(c, uColor, paint)"
+                if (countOf(base, target) != 1) return null
+                base.replace(target, "mix(applyGlow(c, vUvGlow), uColor, paint)")
+            }
+            FrameEffect.NONE -> {
+                val outs = SCENE_OUT.findAll(base).toList()
+                if (outs.size != 1) return null
+                val m = outs[0]
+                val expr = m.groupValues[1]
+                base.substring(0, m.range.first) +
+                    "gl_FragColor = vec4(applyGlow(" + expr + ", vUvGlow), 1.0);" +
+                    base.substring(m.range.last + 1)
+            }
+        }
+        // 声明段插在 void main 之前：上面的替换都发生在主函数体里（mainAt 之后），偏移不受影响
+        return patched.substring(0, mainAt) + "\n" + GLOW_DECL + patched.substring(mainAt)
+    }
+
+    private fun countOf(source: String, needle: String): Int {
+        var count = 0
+        var at = source.indexOf(needle)
+        while (at >= 0) {
+            count++
+            at = source.indexOf(needle, at + needle.length)
+        }
+        return count
+    }
+
+    // endregion
 
     // region 毛玻璃离屏链（#84：三趟里后两趟的源；第一趟见 FROST_COPY_FS）
 

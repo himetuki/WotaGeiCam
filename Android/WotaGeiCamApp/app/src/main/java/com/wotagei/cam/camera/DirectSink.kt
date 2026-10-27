@@ -4,6 +4,8 @@ import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
+import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.GlowStatus
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.pickDirectPreviewSize
 import kotlin.math.abs
@@ -73,7 +75,7 @@ fun directDisplayMatrix(
  * 线程：全部方法可能被相机工作线程与主线程交替调用，状态用 @Volatile 收；
  * 回调 [onReconfigure] 固定抛回主线程（`TextureView` 只能在主线程改）。
  */
-class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider {
+class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowProvider {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -213,6 +215,41 @@ class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider {
         viewOriginXInWindowPx: Float,
         viewOriginYInWindowPx: Float
     ): FrostGeometry? = null
+
+    // endregion
+
+    // region Glow 接缝（24 批 1 / B6b）：DIRECT 下的回答恒为「在场但不可用」
+
+    /** 用户选的 Glow 参数（只存不用：DIRECT 没有 GL 管线可注入，UI 据此显示"在场但禁用"） */
+    @Volatile
+    private var glowParams = GlowParams.DEFAULT
+
+    /**
+     * DIRECT 的相机帧不进 GL 管线（预览面直接挂进 session），没有 program 可注入 Glow，
+     * 所以这里**只存参数**、[isGlowAvailable] 恒 false —— UI 侧可以无条件调本方法，
+     * 拿到的 false 就是"禁用 + 说明"的信号（与 [setFrostBlurEnabled] 同一条优雅降级）。
+     */
+    override fun setGlowParams(params: GlowParams) {
+        glowParams = params.sanitize()
+    }
+
+    override fun isGlowAvailable(): Boolean = false
+
+    /** 尺寸/分档一律 0：DIRECT 下没有链、没有 RT，也没有"分档"这回事 */
+    override fun glowStatus(): GlowStatus {
+        return GlowStatus(
+            available = false,
+            enabled = glowParams.enabled,
+            broken = false,
+            scale = 1,
+            inputWidthPx = 0,
+            inputHeightPx = 0,
+            fps = 0,
+            rtWidthPx = 0,
+            rtHeightPx = 0,
+            clamped = false
+        )
+    }
 
     // endregion
 

@@ -24,7 +24,11 @@ import com.wotagei.cam.core.DENOISE_LEVEL_FULL
 import com.wotagei.cam.core.DENOISE_LEVEL_LITE
 import com.wotagei.cam.core.DENOISE_LEVEL_OFF
 import com.wotagei.cam.core.FrameEffect
+import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.GlowStatus
 import com.wotagei.cam.core.PeakingColor
+import com.wotagei.cam.core.glowRgb
+import com.wotagei.cam.core.glowScaleFor
 import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
 import com.wotagei.cam.record.ArcRepairFlow
@@ -78,7 +82,7 @@ interface DisplaySurfaceReceiver {
  *
  * 实例一次性：[release] 后不可复用（线程已退出），重建请 new 新实例。
  */
-class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
+class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowProvider,
     SurfaceTexture.OnFrameAvailableListener {
 
     companion object {
@@ -387,7 +391,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val uStrength: Int,
         val uColor: Int,
         val uCurve: Int,
-        val uSigmaR: Int
+        val uSigmaR: Int,
+        val uGlowSrc: Int,
+        val uGlowGain: Int,
+        val uGlowAdd: Int,
+        val uGlowFreq: Int,
+        val uGlowBlend: Int,
+        val uGlowColorA: Int,
+        val uGlowColorB: Int
     )
 
     /**
@@ -427,6 +438,55 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 而用户只是开了一下斑马纹。按键记之后，display 的坏效果只影响 display 的请求键。
      */
     private val failedKeys = mutableSetOf<ProgramKey>()
+
+    // endregion
+
+    // region Glow（docs/plan/24 R3 · 25 §11.3/§11.4；scene layer，两槽都带、进成片）
+
+    /**
+     * Glow 参数：UI 线程写、GL 线程读 ⇒ `@Volatile`（整体替换，无需锁）。
+     * **形状参数只换 uniform**（不重建 program）；只有 `enabled` 进 [ProgramKey] 的 `glow` 一维。
+     */
+    @Volatile
+    private var glowParams = GlowParams.DEFAULT
+
+    /** 预换算的两端色（uniform 用）：`glowRgb` 只在参数变化时调，帧路径零分配 */
+    @Volatile
+    private var glowColorA = glowRgb(GlowParams.DEFAULT.colorA)
+
+    @Volatile
+    private var glowColorB = glowRgb(GlowParams.DEFAULT.colorB)
+
+    /**
+     * Glow 离屏链（三趟：亮部提取+降采样 → 横向高斯 → 纵向高斯）。
+     * **只在 GL 线程创建/调用**（null = `initGl` 还没跑或已 release）；UI 线程只读它的状态快照
+     * （[glowStatus] / [isGlowAvailable]）⇒ 引用本身 `@Volatile`。
+     */
+    @Volatile
+    private var glowChain: GlowBlurChain? = null
+
+    /**
+     * 1×1 全黑纹理：链未就绪（首帧/刚开启/已停用）时 `uGlowSrc` 绑它，光晕贡献为 0。
+     * **不为它切 program**（切 program 会闪帧、会在编码 swap 前编译）。
+     * ⚠ **GL 线程独占**（建/用/删都在 `initGl`→`releaseGl` 那条线上），不加 @Volatile。
+     */
+    private var glowBlackTex = 0
+
+    /**
+     * 拷贝趟的恒等 4×2 UV（见 [glowIdentityTexCoords]）；`initGl` 建、`releaseGl` 清。
+     * ⚠ **GL 线程独占**（只在链的 draw 与释放路径上读写），不加 @Volatile。
+     */
+    private var glowIdentityUv: FloatBuffer? = null
+
+    /**
+     * 本帧可采样的 Glow 纹理（0 = 未就绪，`drawPass` 退回 1×1 黑纹理）。
+     * **`drawPass` 只读它、不碰 [glowChain]**：链只在 `drawFrame` 里跑一次（§11.4 的硬纪律）。
+     * ⚠ **GL 线程独占**（`drawGlowPass` 写、`drawPass` 读，同一条线程），不加 @Volatile。
+     */
+    private var glowFrameTex = 0
+
+    /** 上一次打出的 Glow 分档（档变才打日志，避免每帧刷屏） */
+    private var glowLoggedScale = 0
 
     // endregion
 
@@ -1251,6 +1311,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         frostChain = FrostBlurChain(::link, ::drainGlError, positionBuffer)
         // 上屏画板同理：只存对象，program 等到开关真打开时才编（见 setFrostBlurEnabled）
         frostPlatePass = FrostPlatePass(::link, ::drainGlError, positionBuffer)
+        // Glow 离屏链（24 批 1）：与霜链同构、实例独立；program 等 `enabled` 翻真时再 prepare
+        glowChain = GlowBlurChain(::link, ::drainGlError, positionBuffer)
+        glowIdentityUv = glowIdentityTexCoords()
+        glowBlackTex = createGlowBlackTexture()
 
         glReady = true
         // 首帧之前先把上屏槽建好（此时编码面尚未绑定 ⇒ movie 槽不建），
@@ -1444,9 +1508,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 切到轻量核），新尺寸落定后直接把 program 编好/绑好。这样两笔编译都发生在相机帧到达之前，
         // 不占第一枚编码帧的 swap 时间窗（成片 PTS 网格对丢格零容忍）。
         // 建 program 需要 current 上下文，而本函数不保证 current ⇒ 用 pbuffer 兜一次。
-        // B6（Glow）的 glow=1 变体以后再补；本批 glow 恒 false，wantMov == wantDisp 时 display 直接共用。
+        // Glow 开着时把 glow=1 的两个变体一起预热（24 §1.3）：录制首帧 / 首次开 Glow 都不编译。
         if (makeCurrent(pbufferSurface)) {
             syncMovieSlot()
+            // Glow 开着：链的 program 与两个槽的 glow=1 变体都在这里编好
+            //（录制中第一次开 Glow / 换档都不许现编；prepare/build 都是幂等的）
+            if (glowParams.enabled) {
+                glowChain?.prepare()
+                prepareGlowPrograms()
+            }
         } else {
             Log.w(TAG_GL, "WotaGl 预热跳过：makeCurrent(pbufferSurface) 失败")
         }
@@ -1513,6 +1583,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 成片槽先同步（编码 pass 要用它）；上屏槽的同步让到编码 pass 之后（§3.9.2-2）。
         // 没有编码面时 syncMovieSlot 只清绑定、不建 program（空闲预览不白编一枚用不到的）。
         syncMovieSlot()
+
+        // Glow 离屏链：每帧一次，夹在成片槽同步与编码 pass 之间（§11.7 定版顺序）。
+        // 它必须在 drawEncoderMended 之前跑——MEND 的 cur 渲染同样要采这张图。
+        drawGlowPass(hasFrame)
 
         // 录制期转换（抽帧/补弧）只动编码支路；预览/霜/上屏各走各的，一帧不丢。
         // skip=true 的帧跳过编码 swap（帧序号不推进 ⇒ 输出节奏均匀）；MEND 通道内部失败会
@@ -2039,6 +2113,24 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             if (p.uSigmaR >= 0) GLES20.glUniform1f(p.uSigmaR, denoiseSigmaR)
         }
 
+        // Glow（scene layer，两槽都带）：链在 drawFrame 里跑过（每帧一次），这里**只采样结果**。
+        // 链未就绪绑 1×1 黑纹理 ⇒ 贡献为 0，绝不为它切 program（切 program 会闪帧）。
+        val glowOn = p.applied.glow
+        if (glowOn) {
+            val glowTex = glowFrameTex.takeIf { it != 0 } ?: glowBlackTex
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowTex)
+            if (p.uGlowSrc >= 0) GLES20.glUniform1i(p.uGlowSrc, GLOW_SRC_UNIT)
+            if (p.uGlowGain >= 0) GLES20.glUniform1f(p.uGlowGain, glowParams.gain)
+            if (p.uGlowAdd >= 0) GLES20.glUniform1f(p.uGlowAdd, glowParams.add)
+            if (p.uGlowFreq >= 0) GLES20.glUniform1f(p.uGlowFreq, glowParams.freq)
+            if (p.uGlowBlend >= 0) GLES20.glUniform1f(p.uGlowBlend, glowParams.blend)
+            val rgbA = glowColorA
+            if (p.uGlowColorA >= 0) GLES20.glUniform3f(p.uGlowColorA, rgbA[0], rgbA[1], rgbA[2])
+            val rgbB = glowColorB
+            if (p.uGlowColorB >= 0) GLES20.glUniform3f(p.uGlowColorB, rgbB[0], rgbB[1], rgbB[2])
+        }
+
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
         buildTexCoords(encoderPass)
         if (p.aPosition >= 0) {
@@ -2050,6 +2142,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             GLES20.glVertexAttribPointer(p.aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
         }
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        // 立刻把 5 号单元上的 Glow 图摘下来：下一帧链要往同一张纹理里画，某些驱动只查
+        // "这张还挂在某个激活单元上"就当 feedback loop 报警（免费的保险，与霜链同一条理由）
+        if (glowOn) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        }
     }
 
     /**
@@ -2127,13 +2226,149 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     // endregion
 
+    // region 对外：Glow（GlowProvider 实现 + 离屏链驱动）
+
+    /**
+     * 写入 Glow 参数（任意线程）。
+     *
+     * **绝不调 `requestRender()`/置 `dirty`**：形状参数是 uniform 级改动，下一个相机帧生效（≤33ms）；
+     * 触发重画就等于在录制中往成片里多塞一帧重复帧（霜的先例，25 §11.7 / 24 §1.3）。
+     *
+     * `enabled` 翻真时把"编译/建链"挪到 postGl：开光晕那一帧本来就什么都没画，不该在
+     * `drawFrame` 里现编（毫秒级编译撞上编码 swap 就是丢格）。
+     * 关掉只停跑（下一帧起链不再被调），资源保留 —— 再打开不重建、不闪。
+     */
+    override fun setGlowParams(params: GlowParams) {
+        if (released.get()) return
+        val next = params.sanitize()
+        val wasOn = glowParams.enabled
+        glowColorA = glowRgb(next.colorA)
+        glowColorB = glowRgb(next.colorB)
+        glowParams = next
+        if (!next.enabled || wasOn) return
+        postGl {
+            // 显式开启 = 给含 glow 维度的坏键一次重试（同一坏键不逐帧重试的口径不变）
+            failedKeys.removeAll { it.glow }
+            glowChain?.resetAfterBreak()
+            glowChain?.prepare()
+            prepareGlowPrograms()
+        }
+    }
+
+    /**
+     * 本 sink 这一刻能否产出光晕：链已建、引擎未释放、链没被停用。
+     * **不**看 `glowParams.enabled`（"能不能"与"开没开"是两件事，UI 要分开显示）。
+     */
+    override fun isGlowAvailable(): Boolean =
+        glowChain != null && !released.get() && glowChain?.isBrokenForDiagnostics() != true
+
+    /**
+     * 状态快照（UI 线程读）。字段来源：
+     * - `available` = 链当前产出的纹理 id ≠ 0（未就绪/停用时为 false）；
+     * - `enabled` = [glowParams]；`broken` = 链的停用位；
+     * - `scale` = [glowScaleFor]（相机帧尺寸 × 帧率；还没绑定编码面时帧率按 30 估）；
+     * - `input*` = 相机帧尺寸（= 录制档）；`rt*`、`clamped` = 链当前 RT 与夹取位。
+     *
+     * 这些读都是"尽力快照"：跨线程读到的可能是上一帧的组合（胶囊本来就是低频读数，够用）。
+     */
+    override fun glowStatus(): GlowStatus {
+        val chain = glowChain
+        val fps = if (encoderFps > 0) encoderFps else 30
+        return GlowStatus(
+            available = (chain?.resultTex ?: 0) != 0,
+            enabled = glowParams.enabled,
+            broken = chain?.isBrokenForDiagnostics() == true,
+            scale = glowScaleFor(wantFrameWidth, wantFrameHeight, fps),
+            inputWidthPx = wantFrameWidth,
+            inputHeightPx = wantFrameHeight,
+            fps = fps,
+            rtWidthPx = chain?.rtWidthPx ?: 0,
+            rtHeightPx = chain?.rtHeightPx ?: 0,
+            clamped = chain?.lastClamped == true
+        )
+    }
+
+    /**
+     * 预热 **glow=1** 的两个键（成片槽 + 上屏槽）：只进会话缓存、**不绑槽**。
+     *
+     * 为什么要预热：`enabled` 翻真会换掉两槽的 program，而编译是毫秒级——不预热就是
+     * "录制中第一次开 Glow 掉一帧"。失败按既有失败备忘口径走 [failedKeys]（回退阶梯会降掉 glow），
+     * 这里不额外处理返回值。
+     */
+    private fun prepareGlowPrograms() {
+        val curveOn = curveBytes != null
+        val denoise = denoiseLevelNow()
+        buildProgram(movieProgramKey(curveOn, denoise, glow = true), "movie")
+        buildProgram(displayProgramKey(wantEffect, curveOn, denoise, glow = true), "display")
+    }
+
+    /**
+     * Glow 离屏链：**每帧一次**，在 `drawFrame` 里编码 pass 之前跑（§11.7 的定版顺序）。
+     *
+     * 四条早退：
+     * - 关着 / `blend <= 0` ⇒ 一次 GL 调用都不发（零代价口径）；
+     * - state-only 帧（`!hasFrame`）⇒ 没有新像素可糊，跳过；
+     * - 既没编码面也没窗口面 ⇒ 没有消费者，跳过；
+     * - **空闲预览且上屏正被 [MAX_DISPLAY_FPS] 节流** ⇒ 跳过。只在没有编码面时省：
+     *   编码面在位时编码器每帧都要这张图，一帧都不能省。
+     *
+     * 链自己保存/恢复 viewport/scissor/program/属性/FBO（含 `GL_FRAMEBUFFER_BINDING`），
+     * 所以它夹在 `syncMovieSlot()` 与编码 pass 之间不会伤到 MEND 的"画进当前面"契约。
+     */
+    private fun drawGlowPass(hasFrame: Boolean) {
+        if (!glowParams.enabled || glowParams.blend <= 0f) return
+        if (!hasFrame) return
+        if (encoderEglSurface == null && windowEglSurface == null) return
+        if (encoderEglSurface == null && windowThrottled()) return
+        val uv = glowIdentityUv ?: return
+        val chain = glowChain ?: return
+        val scale = glowScaleFor(wantFrameWidth, wantFrameHeight, if (encoderFps > 0) encoderFps else 30)
+        val ok = chain.draw(
+            oesTextureId = oesTextureId,
+            texMatrix = stMatrix,
+            identityUv = uv,
+            frameWidthPx = wantFrameWidth,
+            frameHeightPx = wantFrameHeight,
+            scale = scale,
+            widthParam = glowParams.width,
+            thresholdParam = glowParams.threshold,
+            softParam = glowParams.soft
+        )
+        // drawPass 只认这个字段（不直接读链）：失败时链已把 resultTex 归 0 ⇒ 这里自然退回黑纹理
+        glowFrameTex = chain.resultTex
+        // 档变才打（每帧一行会把 logcat 刷满；分档本身是"自动变化必须可见"的取证点）
+        if (ok && scale != glowLoggedScale) {
+            glowLoggedScale = scale
+            Log.i(TAG_GLOW, "Glow 链：scale=$scale rt=${chain.rtWidthPx}x${chain.rtHeightPx}（每帧一次）")
+        }
+    }
+
+    /** 1×1 全黑 RGBA8：链未就绪时的 `uGlowSrc` 兜底（贡献为 0，不切 program） */
+    private fun createGlowBlackTexture(): Int {
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 1, 1, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ByteBuffer.allocateDirect(4)
+        )
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        return ids[0]
+    }
+
+    // endregion
+
     // region 内部实现：program 与纹理（双槽）
 
     /**
-     * Glow 维度（docs/plan/24 R2/R3）：它是 scene layer，两槽都带、进成片。
-     * **B2 阶段恒 false**——键里留位、暂不接特效（B6 只改这一处，两个槽自动跟上）。
+     * Glow 维度（docs/plan/24 R3）：scene layer，两槽都带、进成片。
+     * 直接取用户开关——`enabled` 一变，两槽的键就变（走会话缓存，不重编）。
      */
-    private fun glowOn(): Boolean = false
+    private fun glowOn(): Boolean = glowParams.enabled
 
     /**
      * **成片槽**同步：必须在编码 pass 之前调（[drawFrame]）。键 = [movieProgramKey]，effect 恒 NONE。
@@ -2239,18 +2474,26 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 四维键 → 片元着色器。**降噪只在 effect=NONE（直通/曲线）这两条支路**：斑马纹与峰值对焦是
      * 判读工具，对它们降噪没有意义（这条口径由 [displayProgramKey] 的降噪闸保证，不是在这里判）。
      * 抽成函数是因为回退阶梯的每一级都换一个键、也就换一份源码。
+     *
+     * `glow=true` 时在 base 上注入 `applyGlow`（[Shaders.glowFragment]）；**注入锚点对不上返回 null**
+     * ⇒ 整条链接失败 ⇒ [nextFallback] 降掉 glow 并留日志。不许静默用无 Glow 源：
+     * 那会让"开了光晕但没效果"变成查不出来的静默失效。
      */
-    private fun fragmentFor(key: ProgramKey): String = when (key.effect) {
-        FrameEffect.ZEBRA -> Shaders.zebraFragment(key.curve)
-        FrameEffect.PEAKING -> Shaders.peakingFragment(key.curve)
-        else -> when {
-            key.denoise == DENOISE_LEVEL_LITE && key.curve -> Shaders.BILATERAL_LITE_CURVE_FS
-            key.denoise == DENOISE_LEVEL_LITE -> Shaders.BILATERAL_LITE_FS
-            key.denoise == DENOISE_LEVEL_FULL && key.curve -> Shaders.BILATERAL_CURVE_FS
-            key.denoise == DENOISE_LEVEL_FULL -> Shaders.BILATERAL_FS
-            key.curve -> Shaders.CURVE_FS
-            else -> Shaders.PASS_THROUGH_FS
+    private fun fragmentFor(key: ProgramKey): String? {
+        val base = when (key.effect) {
+            FrameEffect.ZEBRA -> Shaders.zebraFragment(key.curve)
+            FrameEffect.PEAKING -> Shaders.peakingFragment(key.curve)
+            else -> when {
+                key.denoise == DENOISE_LEVEL_LITE && key.curve -> Shaders.BILATERAL_LITE_CURVE_FS
+                key.denoise == DENOISE_LEVEL_LITE -> Shaders.BILATERAL_LITE_FS
+                key.denoise == DENOISE_LEVEL_FULL && key.curve -> Shaders.BILATERAL_CURVE_FS
+                key.denoise == DENOISE_LEVEL_FULL -> Shaders.BILATERAL_FS
+                key.curve -> Shaders.CURVE_FS
+                else -> Shaders.PASS_THROUGH_FS
+            }
         }
+        if (!key.glow) return base
+        return Shaders.glowFragment(base, key.effect)
     }
 
     /**
@@ -2294,7 +2537,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     /** 真正链接一枚 program 并取齐所有 location（[key] 即实际编译的键） */
     private fun linkProgram(key: ProgramKey): GlProgram? {
-        val id = link(Shaders.TEXTURE_VS, fragmentFor(key))
+        // Glow 是 program 维度：开着就用带 vUvGlow 的顶点源（关着时 TEXTURE_VS 一个字节不变）
+        val fragment = fragmentFor(key) ?: return null
+        val vertex = if (key.glow) Shaders.TEXTURE_VS_GLOW else Shaders.TEXTURE_VS
+        val id = link(vertex, fragment)
         if (id == 0) return null
         if (key.denoise != DENOISE_LEVEL_OFF) {
             // 切档留痕（2026-10-26）：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样，按负载自动降档）。
@@ -2315,7 +2561,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             uStrength = GLES20.glGetUniformLocation(id, "uStrength"),
             uColor = GLES20.glGetUniformLocation(id, "uColor"),
             uCurve = GLES20.glGetUniformLocation(id, "uCurve"),
-            uSigmaR = GLES20.glGetUniformLocation(id, "uSigmaR")
+            uSigmaR = GLES20.glGetUniformLocation(id, "uSigmaR"),
+            uGlowSrc = GLES20.glGetUniformLocation(id, "uGlowSrc"),
+            uGlowGain = GLES20.glGetUniformLocation(id, "uGlowGain"),
+            uGlowAdd = GLES20.glGetUniformLocation(id, "uGlowAdd"),
+            uGlowFreq = GLES20.glGetUniformLocation(id, "uGlowFreq"),
+            uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend"),
+            uGlowColorA = GLES20.glGetUniformLocation(id, "uGlowColorA"),
+            uGlowColorB = GLES20.glGetUniformLocation(id, "uGlowColorB")
         )
     }
 
@@ -2484,6 +2737,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 画板的 program 与那枚结果纹理的绑定也在这里收口（新资源必须在此登记删除，14 号计划 §二）
         frostPlatePass?.release()
         frostPlatePass = null
+        // Glow 链（3 纹理 + 3 FBO + 2 program）与那枚 1×1 黑纹理同一处收口（24 §1.2 的登记义务）
+        glowChain?.release()
+        glowChain = null
+        if (glowBlackTex != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(glowBlackTex), 0)
+            glowBlackTex = 0
+        }
+        glowIdentityUv = null
+        glowFrameTex = 0
         // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
         // 这里兜「引擎直接销毁、没走过解绑」的那条路
         arcMendPass?.release()

@@ -1,0 +1,250 @@
+package com.wotagei.cam
+
+import com.wotagei.cam.source.KotlinSourceScan
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Glow 接到引擎上的**接线守卫**（docs/plan/24 R3 §1.2/§1.3，25 §11.3/§11.4，B6b）。
+ *
+ * 素材层（模型/着色器/链）由 `GlowScaleTest` / `GlowShaderTest` / `GlowChainGuardTest` 把守；
+ * 这里钉的是"**素材真的被接上了、而且只接在该接的地方**"——后者尤其重要：
+ * - 链若被塞进 `drawPass`（一帧调 2~4 次）⇒ 每帧跑 2~4 趟模糊，零代价当场破产（§11.4 点名）；
+ * - 链若排在编码 pass 之后 ⇒ MEND 的 cur 渲染采到上一帧的光晕（错帧）；
+ * - `setGlowParams` 若调 `requestRender` ⇒ 录制中拖一条滑杆就往成片塞一帧重复帧（§11.7）；
+ * - 参数只写 volatile 而不进 program 键 ⇒ 开关永远不生效（"能点、无效果"）。
+ *
+ * 全部是源码级判据（GL 行为只有真机能证，T1/T11/T17）。
+ */
+class GlowWiringGuardTest {
+
+    private val engineSrc by lazy { KotlinSourceScan.mainSourceText("camera/GlRenderEngine.kt") }
+    private val engine by lazy { KotlinSourceScan.codeOnly(engineSrc) }
+    private val direct by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/DirectSink.kt")) }
+    private val provider by lazy { KotlinSourceScan.mainSourceText("camera/GlowProvider.kt") }
+
+    private fun body(name: String): String = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, name))
+
+    private fun directBody(name: String): String = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(direct, name))
+
+    @Test
+    fun `两个sink都实现GlowProvider`() {
+        assertTrue(
+            "GlRenderEngine 必须实现 GlowProvider（B7 的 UI 只认这个接口）",
+            Regex("class GlRenderEngine\\s*:[^{]*\\bGlowProvider\\b").containsMatchIn(engine)
+        )
+        assertTrue(
+            "DirectSink 必须实现 GlowProvider（DIRECT 下在场但禁用）",
+            Regex("class DirectSink\\s*:[^{]*\\bGlowProvider\\b").containsMatchIn(direct)
+        )
+        // 接口本身的三件事（模型注释里写的是"能不能/开没开/读数"三分）
+        for (fn in listOf("fun setGlowParams(params: GlowParams)", "fun isGlowAvailable(): Boolean", "fun glowStatus(): GlowStatus")) {
+            assertTrue("GlowProvider 缺 $fn", provider.contains(fn))
+        }
+    }
+
+    @Test
+    fun `setGlowParams绝不触发重画`() {
+        val body = body("setGlowParams")
+        assertTrue("锚点丢失：setGlowParams 里没截到 enabled 判定", body.contains("next.enabled"))
+        assertFalse(
+            "setGlowParams 不许调 requestRender（录制中会多一帧重复帧）",
+            body.contains("requestRender")
+        )
+        assertFalse("setGlowParams 不许置 dirty", body.contains("dirty = true"))
+        assertFalse("setGlowParams 不许直接排帧", body.contains("scheduleDraw"))
+        // 首次开启才做编译/建链（关掉只停跑）
+        assertTrue("enabled 翻真时必须预热 glow 变体", body.contains("prepareGlowPrograms()"))
+        assertTrue("enabled 翻真时给链一次重试机会", body.contains("glowChain?.prepare()"))
+    }
+
+    @Test
+    fun `链只在drawFrame里跑且排在编码pass之前`() {
+        val frame = body("drawFrame")
+        assertEquals("drawGlowPass 在帧循环里必须恰好一处", 1, KotlinSourceScan.occurrences(frame, "drawGlowPass(hasFrame)").size)
+        val glowAt = frame.indexOf("drawGlowPass(hasFrame)")
+        val encoderAt = frame.indexOf("drawEncoderPass()")
+        assertTrue("锚点丢失：drawFrame 里没截到 drawEncoderPass()", encoderAt >= 0)
+        assertTrue("Glow 链必须排在编码 pass 之前（MEND 的 cur 渲染也要采这张图）", glowAt in 0 until encoderAt)
+        // 也不许跑到成片槽同步之前（那条要先定 program，链与 program 无关但顺序口径固定）
+        val syncAt = frame.indexOf("syncMovieSlot()")
+        assertTrue("Glow 链必须排在 syncMovieSlot() 之后（§11.7 定版顺序）", syncAt in 0 until glowAt)
+        // drawPass 只采样、不跑链
+        assertFalse(
+            "drawPass 不许出现 glowChain —— 它一帧被调 2~4 次，链在里面就是 2~4 趟模糊",
+            body("drawPass").contains("glowChain")
+        )
+    }
+
+    @Test
+    fun `drawGlowPass的三条早退与每帧一次`() {
+        val body = body("drawGlowPass")
+        assertTrue("关着必须一次 GL 调用都不发", body.contains("!glowParams.enabled"))
+        assertTrue("blend=0 不跑链（零代价早退）", body.contains("glowParams.blend <= 0f"))
+        assertTrue("state-only 帧不跑链", body.contains("if (!hasFrame) return"))
+        assertTrue(
+            "没有编码面也没有窗口面时不跑链（没有消费者）",
+            body.contains("encoderEglSurface == null && windowEglSurface == null")
+        )
+        assertTrue(
+            "空闲预览被上屏节流的帧不跑链（编码面在位时不许省：编码器每帧都要这张图）",
+            body.contains("encoderEglSurface == null && windowThrottled()")
+        )
+        assertTrue("必须按相机帧尺寸 + 帧率分档", body.contains("glowScaleFor("))
+        assertTrue("必须把恒等 UV 交给链", body.contains("identityUv = uv"))
+        assertTrue("必须把 threshold 交给链（否则阈值滑杆无效）", body.contains("thresholdParam = glowParams.threshold"))
+        assertTrue("必须把 soft 交给链（否则软边滑杆无效）", body.contains("softParam = glowParams.soft"))
+        assertTrue("分档变化必须留日志（自动变化必须可见）", body.contains("TAG_GLOW") && body.contains("glowLoggedScale"))
+        // 不调 requestRender（链只是产出纹理，不该引发重画）
+        assertFalse("drawGlowPass 不许调 requestRender", body.contains("requestRender"))
+    }
+
+    /**
+     * 键/着色器版本的判据（真身与突变体同吃一把尺）。`glowOn` 是表达式体，按整文件精确串钉。
+     */
+    private fun fragmentIssues(maskedSrc: String): List<String> {
+        val bad = ArrayList<String>()
+        if (!maskedSrc.contains("fun glowOn(): Boolean = glowParams.enabled")) {
+            bad.add("glowOn() 必须取 glowParams.enabled（写死 false = 能点但无效果）")
+        }
+        fun slice(name: String): String? =
+            runCatching { KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(maskedSrc, name)) }.getOrNull()
+        val link = slice("linkProgram") ?: return bad + "linkProgram 定位失败"
+        val fragment = slice("fragmentFor") ?: return bad + "fragmentFor 定位失败"
+        if (!link.contains("Shaders.TEXTURE_VS_GLOW")) bad.add("glow=true 时必须配 TEXTURE_VS_GLOW")
+        if (!link.contains("else Shaders.TEXTURE_VS")) bad.add("glow=false 时必须配 TEXTURE_VS（源码逐字不变）")
+        if (!fragment.contains("glowFragment(")) bad.add("片元必须经 glowFragment 注入")
+        if (!fragment.contains("if (!key.glow) return base")) {
+            bad.add("fragmentFor 必须先短路 glow=false（关着时一字节都不注入）")
+        }
+        if (!link.contains("fragmentFor(key) ?: return null")) {
+            bad.add("注入失败必须整条链接失败（让回退阶梯降掉 glow），不许静默用无 Glow 源")
+        }
+        return bad
+    }
+
+    @Test
+    fun `glow维度进program键且着色器按开关分版本`() {
+        val issues = fragmentIssues(engine)
+        assertEquals("Glow 键/着色器版本缺口：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
+    }
+
+    @Test
+    fun `尺子能红_删掉glow短路或键维度必红`() {
+        assertEquals("真身必须绿", emptyList<String>(), fragmentIssues(engine))
+        // 突变 1：删掉 `if (!key.glow) return base`（= 关着也走注入，零代价破产）
+        val noShortCircuit = engine.replace("        if (!key.glow) return base", "")
+        assertTrue(
+            "删掉 glow 短路的突变必须报红",
+            fragmentIssues(noShortCircuit).any { it.contains("短路") }
+        )
+        // 突变 2：键维度写死 false（= 开关不进 program 键）
+        val stuckOff = engine.replace("fun glowOn(): Boolean = glowParams.enabled", "fun glowOn(): Boolean = false")
+        assertTrue("写死 glowOn 的突变必须报红", fragmentIssues(stuckOff).isNotEmpty())
+        // 突变 3：注入失败静默回原串（= "开了没效果"且查不出来）
+        val silent = engine.replace("fragmentFor(key) ?: return null", "fragmentFor(key) ?: \"\"")
+        assertTrue("静默回退的突变必须报红", fragmentIssues(silent).isNotEmpty())
+    }
+
+    @Test
+    fun `drawPass绑5号单元并画完解绑`() {
+        val body = body("drawPass")
+        assertTrue("必须绑 GLOW_SRC_UNIT", body.contains("GL_TEXTURE0 + GLOW_SRC_UNIT"))
+        assertTrue("未就绪兜底 1×1 黑纹理", body.contains("glowBlackTex"))
+        assertTrue("必须传 uGlowSrc", body.contains("p.uGlowSrc"))
+        for (u in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowColorA", "uGlowColorB")) {
+            assertTrue("drawPass 缺 $u 的写入", body.contains("p.$u"))
+        }
+        // 画完必须解绑（下一帧链要往同一张里画，挂着会被当 feedback loop）
+        val drawAt = body.indexOf("glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)")
+        val unbindAt = body.indexOf("glBindTexture(GLES20.GL_TEXTURE_2D, 0)")
+        assertTrue("drawPass 锚点丢失：drawArrays", drawAt >= 0)
+        assertTrue("解绑必须在 drawArrays 之后", unbindAt > drawAt)
+    }
+
+    @Test
+    fun `预热与释放都登记了Glow资源`() {
+        assertTrue("replaceEncoderSurface 必须预热 glow 变体", body("replaceEncoderSurface").contains("prepareGlowPrograms()"))
+        assertTrue(
+            "预热必须同时把链的 program 编好（链自己也有两枚 program：亮部提取 + 高斯）",
+            body("replaceEncoderSurface").contains("glowChain?.prepare()")
+        )
+        assertTrue("预热必须只在 enabled 时做", body("replaceEncoderSurface").contains("glowParams.enabled"))
+        val prewarm = body("prepareGlowPrograms")
+        assertTrue("成片槽的 glow=1 变体", prewarm.contains("movieProgramKey(curveOn, denoise, glow = true)"))
+        assertTrue("上屏槽的 glow=1 变体", prewarm.contains("displayProgramKey(wantEffect, curveOn, denoise, glow = true)"))
+        val release = body("releaseGl")
+        assertTrue("releaseGl 必须收链", release.contains("glowChain?.release()"))
+        assertTrue("releaseGl 必须删 1×1 黑纹理", release.contains("glowBlackTex"))
+        assertTrue("releaseGl 必须清恒等 UV", release.contains("glowIdentityUv = null"))
+        // 建资源点：只在 initGl（链 + 黑纹理 + 恒等 UV 一次建好）
+        val init = body("initGl")
+        assertTrue("initGl 必须建链", init.contains("GlowBlurChain(::link, ::drainGlError, positionBuffer)"))
+        assertTrue("initGl 必须建恒等 UV", init.contains("glowIdentityTexCoords()"))
+        assertTrue("initGl 必须建 1×1 黑纹理", init.contains("createGlowBlackTexture()"))
+    }
+
+    @Test
+    fun `glowStatus的字段来源`() {
+        val body = body("glowStatus")
+        assertTrue("available 看链的结果纹理", body.contains("chain?.resultTex"))
+        assertTrue("enabled 看用户参数", body.contains("glowParams.enabled"))
+        assertTrue("broken 看链停用位", body.contains("isBrokenForDiagnostics"))
+        assertTrue("scale 按相机帧 × 帧率", body.contains("glowScaleFor(wantFrameWidth, wantFrameHeight, fps)"))
+        assertTrue("没绑编码面时帧率按 30 估", body.contains("if (encoderFps > 0) encoderFps else 30"))
+        assertTrue("RT 尺寸从链读", body.contains("chain?.rtWidthPx") && body.contains("chain?.rtHeightPx"))
+        assertTrue("夹取位从链读", body.contains("chain?.lastClamped"))
+    }
+
+    @Test
+    fun `DirectSink在场但不可用`() {
+        assertTrue(
+            "DIRECT 必须回答不可用（表达式体，按整文件精确串钉）",
+            direct.contains("override fun isGlowAvailable(): Boolean = false")
+        )
+        assertTrue("DIRECT 仍然收下参数（UI 可无条件下发）", direct.contains("override fun setGlowParams"))
+        val status = directBody("glowStatus")
+        assertTrue("DIRECT 的 status.available 必须恒 false", status.contains("available = false"))
+        assertTrue("DIRECT 的 status.broken 必须恒 false", status.contains("broken = false"))
+        assertTrue("DIRECT 没有分档", status.contains("scale = 1"))
+    }
+
+    // ------------------------------------------------------------------ 突变自证
+
+    @Test
+    fun `尺子自己能红_把链挪进drawPass或去掉预热必须报红`() {
+        // 真身必须绿
+        assertFalse(body("drawPass").contains("glowChain"))
+        assertTrue(body("replaceEncoderSurface").contains("prepareGlowPrograms()"))
+
+        // 突变 1：drawPass 里顺手跑一次链（= 每帧 2~4 趟模糊）
+        val leaked = engine.replace(
+            "private fun drawPass(encoderPass: Boolean) {",
+            "private fun drawPass(encoderPass: Boolean) { glowChain?.prepare()"
+        )
+        assertTrue(
+            "drawPass 引用 glowChain 的突变必须被这条判据看见",
+            KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(leaked, "drawPass")).contains("glowChain")
+        )
+
+        // 突变 2：去掉编码面预热
+        val noPrewarm = engine.replace("if (glowParams.enabled) prepareGlowPrograms()", "")
+        assertFalse("去掉预热的突变必须报红", noPrewarm.contains("if (glowParams.enabled) prepareGlowPrograms()"))
+
+        // 突变 3：drawGlowPass 挪到编码 pass 之后（MEND 会采到上一帧的光晕）
+        // ⚠ 搜索串里不带换行符：全仓 EOL 不统一（有人存 CRLF 时带 \n 的搜索永远不命中 = 突变空转）
+        val frame = KotlinSourceScan.bodyOf(engine, "drawFrame")
+        val movedFrame = frame.replace("drawGlowPass(hasFrame)", "").replace(
+            "        syncDisplaySlot()",
+            "        syncDisplaySlot()\n        drawGlowPass(hasFrame)"
+        )
+        val moved = engine.replace(frame, movedFrame)
+        val movedBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(moved, "drawFrame"))
+        assertTrue(
+            "挪到编码 pass 之后的突变必须被这条顺序判据抓到",
+            movedBody.indexOf("drawGlowPass(hasFrame)") > movedBody.indexOf("drawEncoderPass()")
+        )
+    }
+}
