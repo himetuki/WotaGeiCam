@@ -93,7 +93,12 @@ fun CurvePopup(
     gpuMode: Boolean,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
-    visible: Boolean = true
+    visible: Boolean = true,
+    /**
+     * 直方图快照源（2026-10-27：曲线框背景直方图，调曲线参考用）。null/缺省 = 无直方图
+     * （DIRECT 档无 GL 帧，本就不提供）。GL 侧 4Hz 采样，这里 150ms 轮询进重组状态。
+     */
+    histogramProvider: (() -> IntArray?)? = null
 ) {
     val context = LocalContext.current
     val prefs = remember(context) { WotaSettings.of(context) }
@@ -123,6 +128,16 @@ fun CurvePopup(
     // 缩小；扇面「重置」同时复位到 1f。会话级不落盘——「默认最小值」语义即每次进入回到最小。
     var panelScale by remember { mutableStateOf(1f) }
     var panelPx by remember { mutableStateOf(IntSize.Zero) }
+
+    // 直方图快照轮询（弹窗可见才轮询；GL 侧 4Hz 采样，这里 150ms 拉一次进状态）
+    var histogram by remember { mutableStateOf<IntArray?>(null) }
+    LaunchedEffect(visible, histogramProvider) {
+        while (visible) {
+            histogram = histogramProvider?.invoke()
+            kotlinx.coroutines.delay(150)
+        }
+        histogram = null
+    }
 
     // 以总线现值做底、只替换本通道：其它通道在拖动期间可能被改过，不能用手里的旧 stack 合
     fun commit(next: List<ColorCurve.Point>, persist: Boolean) {
@@ -231,6 +246,7 @@ fun CurvePopup(
                                 enabled = gpuMode,
                                 animateJump = !canvasGesture,
                                 scale = panelScale,
+                                histogram = histogram,
                                 modifier = Modifier.matchParentSize()
                             )
                             Box(
@@ -641,6 +657,7 @@ private fun CurveCanvas(
     enabled: Boolean,
     animateJump: Boolean,
     scale: Float,
+    histogram: IntArray? = null,
     modifier: Modifier = Modifier
 ) {
     val target = remember(points) { ColorCurve(points).table(64) }
@@ -684,6 +701,29 @@ private fun CurveCanvas(
         val dot = 6.5.dp.toPx() * scale
         val dotSel = 9.dp.toPx() * scale
         drawRect(WotaColor.bg)
+        // 直方图背景（2026-10-27）：**高透明度**三通道条形，画在网格/曲线之下；
+        // 随画布尺寸缩放（条宽 = w/64，条高 = 归一计数 × h）——panelScale 改变 box 尺寸时
+        // 自然跟随，无额外数学。口径 = 曲线输出后的画面（HistogramMath 头注）。
+        if (histogram != null) {
+            val heights = com.wotagei.cam.core.HistogramMath.normalizedHeights(histogram)
+            val barW = w / com.wotagei.cam.core.HistogramMath.BINS
+            val channels = listOf(
+                Triple(0, Color(0xFF, 0x55, 0x55, 0x30), 0),   // R
+                Triple(com.wotagei.cam.core.HistogramMath.BINS, Color(0x55, 0xFF, 0x55, 0x30), 1), // G
+                Triple(2 * com.wotagei.cam.core.HistogramMath.BINS, Color(0x55, 0x99, 0xFF, 0x30), 2) // B
+            )
+            for ((base, tint, idx) in channels) {
+                for (i in 0 until com.wotagei.cam.core.HistogramMath.BINS) {
+                    val hgt = heights[base + i]
+                    if (hgt <= 0f) continue
+                    drawRect(
+                        tint,
+                        topLeft = Offset(w * i / com.wotagei.cam.core.HistogramMath.BINS, h * (1f - hgt)),
+                        size = androidx.compose.ui.geometry.Size(barW + 0.5f, h * hgt)
+                    )
+                }
+            }
+        }
         val grid = WotaColor.acrylicBorder.copy(alpha = 0.15f * dim)
         for (i in 1..2) {
             val t = i / 3f

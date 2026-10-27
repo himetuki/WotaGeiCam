@@ -89,6 +89,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         private const val DENOISE_FULL = 1
         private const val DENOISE_LITE = 2
 
+        /** 直方图采样拍点：4Hz 足够调曲线参考用，读回成本 16KB/拍 */
+        private const val HISTOGRAM_PERIOD_MS = 250L
+
         /** 峰值对焦邻域取样步长（UV 空间，03 文档 §3.6 的 texel≈0.002 档位） */
         private const val PEAKING_TEXEL = 0.002f
 
@@ -364,6 +367,85 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      */
     @Volatile
     private var wantDenoise = false
+
+    // ---- 直方图采样（2026-10-27：RGB 曲线框背景，调曲线参考用）----
+    // 仅 GPU 档有意义（曲线框本就只在这档可拖）。数据路：drawFrame 尾部把当前帧画进
+    // 64×64 迷你 FBO（**当前 program** ⇒ 曲线输出后的画面，"边调边看分布"），glReadPixels
+    // 16KB 后分箱；250ms 一拍，弹窗可见才采（[setHistogramEnabled]）。
+    // 读回在 GL 线程会短暂管线停顿——16KB + 4Hz 的量级远低于既有霜板/补弧 pass 的成本，
+    // 且只发生在弹窗打开期间（录制中开弹窗调曲线是它的目标场景，掉一拍观测帧可接受）。
+
+    /** 弹窗可见时置 true；false 即停采并清快照（省电 + 不留旧数据） */
+    @Volatile
+    private var wantHistogram = false
+
+    /** 3×64 计数快照（R/G/B）；整体引用替换发布，读侧免锁 */
+    @Volatile
+    var histogramSnapshot: IntArray? = null
+        private set
+
+    private var histFbo = 0
+    private var histTex = 0
+    private var histLastSampleMs = 0L
+
+    private val histPixels = java.nio.ByteBuffer.allocateDirect(64 * 64 * 4).order(java.nio.ByteOrder.nativeOrder())
+
+    /** 弹窗开关（CurvePopup visible 时开；写在调用线程，读在 GL 线程 → @Volatile） */
+    fun setHistogramEnabled(on: Boolean) {
+        if (released.get()) return
+        wantHistogram = on
+        if (!on) histogramSnapshot = null
+    }
+
+    /**
+     * drawFrame 尾部调用（GL 线程）：250ms 一拍把当前帧画进迷你 FBO 并读回分箱。
+     * 用 [drawPass]（当前 program = 曲线/降噪后的输出）而不是另编 identity——
+     * "边调边看结果"口径，见 HistogramMath 头注。
+     */
+    private fun maybeSampleHistogram() {
+        if (!wantHistogram) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - histLastSampleMs < HISTOGRAM_PERIOD_MS) return
+        histLastSampleMs = now
+        if (histFbo == 0) {
+            val tex = IntArray(1)
+            GLES20.glGenTextures(1, tex, 0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex[0])
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 64, 64, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+            )
+            val fbo = IntArray(1)
+            GLES20.glGenFramebuffers(1, fbo, 0)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[0])
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, tex[0], 0
+            )
+            histTex = tex[0]
+            histFbo = fbo[0]
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, histFbo)
+        GLES20.glViewport(0, 0, 64, 64)
+        drawPass(encoderPass = false)
+        histPixels.rewind()
+        GLES20.glReadPixels(0, 0, 64, 64, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, histPixels)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        val bins = com.wotagei.cam.core.HistogramMath.binRgba(histPixels.array(), 64, 64)
+        histogramSnapshot = bins // 引用替换发布（读侧免锁）
+    }
+
+    /** 释放迷你 FBO/纹理（GL 线程；与其它 GL 资源同一收尾点） */
+    private fun releaseHistogram() {
+        if (histFbo != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(histFbo), 0)
+        if (histTex != 0) GLES20.glDeleteTextures(1, intArrayOf(histTex), 0)
+        histFbo = 0
+        histTex = 0
+        histogramSnapshot = null
+    }
 
     /**
      * 当前 program 带的降噪档（与 [programEffect] 同级，判"要不要重建"）：
@@ -1411,6 +1493,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         adoptFrostIntentFromTable()
         drawFrostPass(hasFrame)
         drawWindowPass(stateOnly)
+        maybeSampleHistogram()
 
         onFrameDrawn?.invoke(lastDrawnTimestampNs)
         checkGlError("drawFrame")
@@ -2252,6 +2335,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
         teardownEgl()
 
+        releaseHistogram()
         onFrameDrawn = null
         onCameraSurfaceReady = null
         Log.i(TAG_GL, "GL 线程资源已释放")

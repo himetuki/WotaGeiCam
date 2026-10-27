@@ -638,6 +638,12 @@ fun CameraScreen(
         )
     }
 
+    // 直方图采样开关（2026-10-27）：仅曲线弹窗可见 + GPU 档才采。独立 effect——键表必须含
+    // sheet（弹窗开关本身就要触发），不能蹭上面那条长键表（它的键全是"值变化才重发"的参数）
+    LaunchedEffect(glEngine, sheet, renderMode) {
+        glEngine?.setHistogramEnabled(sheet == Sheet.CURVE && renderMode == RenderMode.GPU)
+    }
+
     // ---- 方向：显示角喂给两条 sink，sink 内部再叠自己读到的缓冲矩阵旋转分量（见 camera/PreviewOrientation）
     // 槽位按 key 认（同档位可能有多颗镜头），认不到再退档位名
     val slot = remember(ui.lenses, ui.currentSlot, ui.currentLens, lens) {
@@ -1633,7 +1639,8 @@ fun CameraScreen(
                 gpuMode = renderMode == RenderMode.GPU,
                 onDismiss = { sheet = Sheet.NONE },
                 visible = sheet == Sheet.CURVE,
-                modifier = Modifier.matchParentSize()
+                modifier = Modifier.matchParentSize(),
+                histogramProvider = { (activeSink as? GlRenderEngine)?.histogramSnapshot }
             )
             // 录制中会话会因换输出面而重建，预览瞬间回到 START，此时不能盖遮罩。
             // 遮罩本身改成淡入淡出：镜头切换 / 会话重建时它原来是「啪地盖上、啪地撤掉」，
