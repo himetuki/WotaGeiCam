@@ -66,6 +66,7 @@ import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.ViewWeek
 import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -93,10 +94,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as GeoSize
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -310,11 +313,13 @@ fun CameraScreen(
     val arcMergeDeadband by params.arcMergeDeadband.observed()
     /** 画面降噪档（2026-10-26）：实际生效档由 core.effectiveVideoDenoise 与本页 renderMode 共同裁决 */
     val videoDenoise by params.videoDenoise.observed()
-    // 站位指示线（2026-10-27）：开/线数/组宽/色
-    val markerOn by params.markerOn.observed()
+    // 站位指示线（2026-10-27 二轮定版）：**线的开/关只由线数驱动**（0 = 关），没有独立开关——
+    // 点按圆钮出的浮层控件被误点（点外部即关）也不会连累线消失，这是用户点名要的行为。
+    // markerControlsOpen 是纯 UI 态：+/线数/- 与间距滑杆那层透明浮层的开/关。
     val markerCount by params.markerCount.observed()
     val markerSpread by params.markerSpread.observed()
     val markerColor by params.markerColor.observed()
+    var markerControlsOpen by remember { mutableStateOf(false) }
     var markerColorPop by remember { mutableStateOf(false) }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
@@ -1186,9 +1191,8 @@ fun CameraScreen(
                 )
                 // 站位指示线（2026-10-27）：与参考线同一 View 叠加通道——**不进录像画面**
                 // （录制采集相机/GL 面，View 层结构上进不了编码器），录制中也可用。
-                // 只在圆钮开启时组合：真机首轮截图抓到过"忘挂 markerOn ⇒ 线关不掉"的缺陷，
-                // 这里 if 是开关的**执行点**，不是装饰
-                if (markerOn) {
+                // 门控 = **线数 > 0**（二轮定版：没有独立开关，0 = 关；浮层控件被误关不连累线）
+                if (markerCount > 0) {
                     MarkerLineOverlay(
                         count = markerCount,
                         spread = markerSpread,
@@ -1496,15 +1500,24 @@ fun CameraScreen(
                             // （HudEdgePad/TopRowGap 是 HudTopChrome 那排自己的令牌，不新造间距数字）
                             .padding(end = HudEdgePad + WotaHit.iconButton + TopRowGap, top = TopTopPad)
                     )
-                    // 站位指示线圆钮（2026-10-27）：分屏钮**左侧**、同款圆形（同一 size/glyph 令牌）。
-                    // 点按 = 开/关（线与内联控件簇随 markerOn 出入）；长按 = 选色弹窗。
-                    // 与分屏的录制锁不同：站位线是 View 叠加层不进成片，**录制中照常可用**。
+                    // 站位指示线圆钮（2026-10-27 二轮定版）：分屏钮**左侧**、同款圆形（同一
+                    // size/glyph 令牌）。点按 = 开/关**透明浮层控件**（+/线数/- 与滑杆）；
+                    // 长按 = 选色弹窗。线的显隐只由线数驱动（0 = 关）——浮层被误点关闭
+                    // （点外部）不会连累线消失。与分屏的录制锁不同：站位线是 View 叠加层
+                    // 不进成片，**录制中照常可用**。
                     WotaIconButton(
                         image = Icons.Outlined.ViewWeek,
                         description = stringResource(R.string.cam_marker),
-                        selected = markerOn,
-                        onClick = { params.markerOn.value = !markerOn },
-                        onLongClick = { markerColorPop = true },
+                        selected = markerControlsOpen,
+                        onClick = {
+                            // 两个浮层互斥：点圆钮只翻控件层，选色窗顺手收掉
+                            markerControlsOpen = !markerControlsOpen
+                            if (markerControlsOpen) markerColorPop = false
+                        },
+                        onLongClick = {
+                            markerColorPop = true
+                            markerControlsOpen = false
+                        },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(
@@ -1512,104 +1525,104 @@ fun CameraScreen(
                                 top = TopTopPad
                             )
                     )
-                    if (markerOn) {
-                        // 内联控件簇（用户点名「无弹窗式控件」）：+/线数/- 一行 + 间距滑杆一行，
-                        // 都水平；挂在圆钮正下方（TopEnd 对齐，不遮画面主体）
-                        Column(
-                            Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(
-                                    end = HudEdgePad,
-                                    top = TopTopPad + WotaHit.iconButton + WotaSpace.xs
-                                )
-                                .wotaCard()
-                                .padding(WotaSpace.s),
-                            verticalArrangement = Arrangement.spacedBy(WotaSpace.xs),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                    if (markerControlsOpen) {
+                        // 浮层控件（用户点名「无弹窗式控件」「完全透明背景」）：+/线数/- 一行 +
+                        // 间距滑杆一行，均水平；**无卡片背景**——控件直接浮在预览上（半透明白圆钮 +
+                        // 白字带阴影，亮暗场景都可辨）。对齐 TopCenter = 向画面中间靠，避开右 Dock
+                        // （姿态仪卡）与左 Dock；y 落在顶栏那排之下。
+                        Popup(
+                            alignment = Alignment.TopCenter,
+                            offset = IntOffset(0, with(hudDensity) { 72.dp.roundToPx() }),
+                            onDismissRequest = { markerControlsOpen = false },
+                            properties = PopupProperties(focusable = true)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                WotaIconButton(
-                                    image = Icons.Outlined.Remove,
-                                    description = stringResource(R.string.cam_marker_remove),
-                                    size = WotaHit.iconButton * 0.8f,
-                                    glyph = WotaHit.iconGlyph * 0.8f,
-                                    onClick = {
-                                        params.markerCount.value =
-                                            MarkerLines.clampCount(markerCount - 1)
-                                    }
-                                )
-                                Text(
-                                    text = markerCount.toString(),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = WotaText,
-                                    modifier = Modifier.padding(horizontal = WotaSpace.s)
-                                )
-                                WotaIconButton(
-                                    image = Icons.Outlined.Add,
-                                    description = stringResource(R.string.cam_marker_add),
-                                    size = WotaHit.iconButton * 0.8f,
-                                    glyph = WotaHit.iconGlyph * 0.8f,
-                                    onClick = {
-                                        params.markerCount.value =
-                                            MarkerLines.clampCount(markerCount + 1)
-                                    }
-                                )
-                            }
-                            // 间距滑杆 = 调「整组展开宽度」：等距线随之变疏/变密（方向一致），
-                            // 任意 (线数, spread) 组合都保证全部线落在预览宽内（MarkerLines 头注）
-                            Slider(
-                                value = markerSpread,
-                                onValueChange = {
-                                    params.markerSpread.value = MarkerLines.clampSpread(it)
-                                },
-                                valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
-                                modifier = Modifier.width(180.dp)
-                            )
-                        }
-                        if (markerColorPop) {
-                            // 选色弹窗（圆钮长按）：只选色——线数/间距按用户口径留在页面的
-                            // 无弹窗控件里，不入此窗。点窗外即关（focusable）。
-                            Popup(
-                                alignment = Alignment.TopEnd,
-                                offset = IntOffset(
-                                    with(hudDensity) {
-                                        HudEdgePad.roundToPx() + WotaHit.iconButton.roundToPx()
-                                    },
-                                    with(hudDensity) {
-                                        (TopTopPad + WotaHit.iconButton * 2f).roundToPx()
-                                    }
-                                ),
-                                onDismissRequest = { markerColorPop = false },
-                                properties = PopupProperties(focusable = true)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
                             ) {
                                 Row(
-                                    Modifier
-                                        .wotaCard()
-                                        .padding(WotaSpace.s),
-                                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.s),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.m)
                                 ) {
-                                    MarkerLineColor.ALL.forEach { c ->
-                                        val selected = c == markerColor
-                                        Box(
-                                            Modifier
-                                                .size(28.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(c.argb.toULong() shl 32))
-                                                .let {
-                                                    if (selected) it.border(
-                                                        2.dp, WotaColor.textHi, CircleShape
-                                                    ) else it
-                                                }
-                                                .clickable {
-                                                    params.markerColor.value = c
-                                                    markerColorPop = false
-                                                }
-                                                .semantics {
-                                                    contentDescription = context.getString(c.labelRes)
-                                                }
-                                        )
-                                    }
+                                    MarkerClusterButton(
+                                        image = Icons.Outlined.Remove,
+                                        description = stringResource(R.string.cam_marker_remove),
+                                        onClick = {
+                                            params.markerCount.value =
+                                                MarkerLines.clampCount(markerCount - 1)
+                                        }
+                                    )
+                                    Text(
+                                        text = markerCount.toString(),
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            shadow = Shadow(
+                                                color = Color.Black,
+                                                offset = Offset(1f, 1f),
+                                                blurRadius = 3f
+                                            )
+                                        ),
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = WotaSpace.s)
+                                    )
+                                    MarkerClusterButton(
+                                        image = Icons.Outlined.Add,
+                                        description = stringResource(R.string.cam_marker_add),
+                                        onClick = {
+                                            params.markerCount.value =
+                                                MarkerLines.clampCount(markerCount + 1)
+                                        }
+                                    )
+                                }
+                                // 间距滑杆 = 调「整组展开宽度」：等距线随之变疏/变密（方向一致），
+                                // 任意 (线数, spread) 组合都保证全部线落在预览宽内（MarkerLines 头注）
+                                Slider(
+                                    value = markerSpread,
+                                    onValueChange = {
+                                        params.markerSpread.value = MarkerLines.clampSpread(it)
+                                    },
+                                    valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
+                                    modifier = Modifier.width(220.dp)
+                                )
+                            }
+                        }
+                    }
+                    if (markerColorPop) {
+                        // 选色弹窗（圆钮长按）：只选色——线数/间距按用户口径留在透明浮层里，
+                        // 不入此窗。对齐 TopCenter 同样是为了避开右 Dock；y 让到控件层之下。
+                        // 点窗外即关（focusable）。
+                        Popup(
+                            alignment = Alignment.TopCenter,
+                            offset = IntOffset(0, with(hudDensity) { 200.dp.roundToPx() }),
+                            onDismissRequest = { markerColorPop = false },
+                            properties = PopupProperties(focusable = true)
+                        ) {
+                            Row(
+                                Modifier
+                                    .wotaCard()
+                                    .padding(WotaSpace.s),
+                                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                MarkerLineColor.ALL.forEach { c ->
+                                    val selected = c == markerColor
+                                    Box(
+                                        Modifier
+                                            .size(28.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(c.argb.toULong() shl 32))
+                                            .let {
+                                                if (selected) it.border(
+                                                    2.dp, WotaColor.textHi, CircleShape
+                                                ) else it
+                                            }
+                                            .clickable {
+                                                params.markerColor.value = c
+                                                markerColorPop = false
+                                            }
+                                            .semantics {
+                                                contentDescription = context.getString(c.labelRes)
+                                            }
+                                    )
                                 }
                             }
                         }
@@ -3386,10 +3399,8 @@ private class RecordRunner(
                     .substringAfterLast('/')
                 val displayName = videoName.substringBeforeLast('.') + ArcDropLog.EXTENSION
                 val viaStore = sessionStore?.writeSidecar(displayName, storeLog.encode().toByteArray()) != null
-                if (viaStore) {
-                    sidecarWritten = true
-                    sidecarChannel = "mediastore"
-                }
+                // 不回写 sidecarWritten/sidecarChannel：这两个标记唯一的下游是上面那段
+                // File 通道归位（已在本次改名之后走完），此处再赋值是死写（编译器告警）
                 Log.i(
                     TAG_UI,
                     "arc sidecar(mediastore) ok=$viaStore name=$displayName"
@@ -3703,5 +3714,35 @@ private fun BoxScope.BottomBandChips(
                 frost = hudFrostPillPlate
             )
         }
+    }
+}
+
+/**
+ * 站位线透明浮层里的 +/− 圆钮（2026-10-27 二轮）。
+ *
+ * 为什么不用 [com.wotagei.cam.ui.design.WotaIconButton]：那颗自带 `wotaHudCard` 卡片底
+ * （玻璃/实底），而用户点名这层控件要「完全透明背景、类似浮动控件无弹窗」——只有按钮
+ * 自己是半透明白圆，四周不铺任何卡片。图标与点按语义与前者一致，故只做局部小件。
+ */
+@Composable
+private fun MarkerClusterButton(
+    image: ImageVector,
+    description: String,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.35f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            image,
+            contentDescription = description,
+            tint = Color.White,
+            modifier = Modifier.size(22.dp)
+        )
     }
 }

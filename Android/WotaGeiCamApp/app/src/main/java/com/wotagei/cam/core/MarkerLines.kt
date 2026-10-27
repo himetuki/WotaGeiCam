@@ -20,12 +20,17 @@ package com.wotagei.cam.core
  */
 object MarkerLines {
 
-    const val MIN_COUNT = 1
+    const val MIN_COUNT = 0
     const val MAX_COUNT = 8
     const val MIN_SPREAD = 0.15f
     const val MAX_SPREAD = 1.00f
 
-    const val DEFAULT_COUNT = 4
+    /**
+     * 出厂默认 = **0 条 = 关闭**（2026-10-27 二轮定版）：线的开/关只由线数驱动，没有独立
+     * 开关，所以"默认关"只能靠默认线数为 0 表达——站位线是监看辅助，不给默认画面添东西；
+     * 用户点浮层里的 + 从 1 条开始加。
+     */
+    const val DEFAULT_COUNT = 0
     const val DEFAULT_SPREAD = 0.60f
 
     fun clampCount(v: Int): Int = v.coerceIn(MIN_COUNT, MAX_COUNT)
@@ -35,11 +40,13 @@ object MarkerLines {
     /**
      * 等距竖线的 x 比例（升序，全部落在 0..1）：居中对称，整组占 [spread] 比例的宽度。
      * count=1 恒居中（0.5）；count/spread 越界一律钳回合法域（滑杆外的脏值不炸渲染）。
+     * **count = 0 返回空表 = 站位线关闭**（2026-10-27 交互定版：线的开/关只由线数驱动，
+     * 不设独立开关——浮层控件被误关不会连累线消失，见 WotaParams.markerCount 的说明）。
      */
     fun lineXsFraction(count: Int, spread: Float): List<Float> {
         val n = clampCount(count)
         val w = clampSpread(spread)
-        if (n == 1) return listOf(0.5f)
+        if (n <= 1) return if (n == 1) listOf(0.5f) else emptyList()
         return List(n) { i -> 0.5f - w / 2f + w * i / (n - 1) }
     }
 }

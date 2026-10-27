@@ -10,6 +10,9 @@ import org.junit.Test
  * 站位指示线几何（2026-10-27）：等距、居中对称、任意 (count, spread) 组合不出画。
  * 用户语义：+/- 调线数、滑杆调间距——这里钉的是**渲染拿到的最终几何**，控件怎么算出来的
  * 中间值不管。
+ *
+ * 二轮定版（2026-10-27）：线的开/关只由**线数**驱动，0 = 关（没有独立开关）。
+ * 所以 0 必须是合法值（能被 +/− 调到）且渲染为空表，出厂默认也必须是 0（默认不画）。
  */
 class MarkerLinesTest {
 
@@ -39,6 +42,23 @@ class MarkerLinesTest {
     }
 
     @Test
+    fun `线数为零即关闭_空表`() {
+        // 二轮定版的开关语义全压在这一条上：0 = 没有线 = 关
+        assertEquals("0 必须是合法线数（否则 +/− 关不掉）", 0, MarkerLines.MIN_COUNT)
+        assertEquals(emptyList<Float>(), MarkerLines.lineXsFraction(0, MarkerLines.DEFAULT_SPREAD))
+        assertEquals(emptyList<Float>(), MarkerLines.lineXsFraction(0, MarkerLines.MAX_SPREAD))
+        // 负数脏值钳到 0（= 关），不是钳到 1
+        assertEquals(0, MarkerLines.clampCount(-3))
+    }
+
+    @Test
+    fun `出厂默认不画线`() {
+        assertEquals("默认线数 = 0（没有独立开关，默认关只能靠 0 表达）", 0, MarkerLines.DEFAULT_COUNT)
+        assertTrue(MarkerLines.lineXsFraction(MarkerLines.DEFAULT_COUNT, MarkerLines.DEFAULT_SPREAD).isEmpty())
+        assertTrue("默认组宽在滑杆域内", MarkerLines.DEFAULT_SPREAD in MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD)
+    }
+
+    @Test
     fun `单线恒居中`() {
         assertEquals(listOf(0.5f), MarkerLines.lineXsFraction(1, MarkerLines.MAX_SPREAD))
         assertEquals(listOf(0.5f), MarkerLines.lineXsFraction(1, MarkerLines.MIN_SPREAD))
@@ -60,7 +80,7 @@ class MarkerLinesTest {
 
     @Test
     fun `脏值钳回合法域`() {
-        assertEquals(MarkerLines.MIN_COUNT, MarkerLines.clampCount(0))
+        assertEquals(0, MarkerLines.clampCount(0))
         assertEquals(MarkerLines.MAX_COUNT, MarkerLines.clampCount(99))
         assertEquals(MarkerLines.MIN_SPREAD, MarkerLines.clampSpread(-1f))
         assertEquals(MarkerLines.MAX_SPREAD, MarkerLines.clampSpread(9f))
