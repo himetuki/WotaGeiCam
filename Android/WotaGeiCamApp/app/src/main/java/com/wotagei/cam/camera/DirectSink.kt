@@ -173,7 +173,7 @@ class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowP
                     viewWidth, viewHeight,
                     if (swapped) streamHeight else streamWidth,
                     if (swapped) streamWidth else streamHeight,
-                    orientation.appliedDegrees(), orientation.mirrored
+                    orientation.displayDegrees(), orientation.displayMirrored()
                 )
             )
         }

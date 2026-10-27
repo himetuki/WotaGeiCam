@@ -134,9 +134,10 @@ class DirectRulesTest {
         // 竖屏持机：容器记 90，播放器据此出竖画幅
         assertEquals(90, recordOrientationHint(90, 0, front = false, direct = false))
         assertEquals(90, recordOrientationHint(90, 0, front = false, direct = true))
-        // 前摄同样按「传感器方向 − 显示旋转」：镜像只是预览侧的屏幕翻转，文件里是未镜像原样帧
-        assertEquals(180, recordOrientationHint(270, 90, front = true, direct = false))
-        assertEquals(180, recordOrientationHint(270, 90, front = true, direct = true))
+        // 前摄走官方公式 360−((sensor+display)%360) = sensor−display+180（2026-10-27 修正）：
+        // 镜像只作用在预览侧，文件里是未镜像原样帧，但**角度**比后摄公式多 180°
+        assertEquals(0, recordOrientationHint(270, 90, front = true, direct = false))
+        assertEquals(0, recordOrientationHint(270, 90, front = true, direct = true))
         // 负角与越界角归一到 0..359
         assertEquals(270, recordOrientationHint(-90, 0, front = false, direct = true))
         assertEquals(270, recordOrientationHint(450, 180, front = false, direct = false))

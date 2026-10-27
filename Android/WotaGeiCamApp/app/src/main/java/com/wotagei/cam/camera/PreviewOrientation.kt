@@ -21,10 +21,24 @@ class PreviewOrientation {
         private set
 
     /**
-     * 缓冲变换矩阵自带的顺时针旋转分量（0/90/180/270）。
+     * 缓冲矩阵自带的顺时针旋转分量（0/90/180/270）。
      * 由 [setStMatrix] 从运行时矩阵解析；未解析到（矩阵还没到 / 不是八种标准朝向之一）取 0。
+     *
+     * 两族都要认（2026-10-27 前摄方向缺陷，[stRotationFromMatrix] 有推导）：
+     * 后摄 WIKO/华为实测 `(1−t,1−s)` 是「课本族」，前摄 `(t,1−s)` 是「恒等族」。
+     * 恒等族在这里回报 `k+180°`，于是 `applied = 残角 + stK` 一条式子两族通用。
      */
     var stRotationDegrees: Int = 0
+        private set
+
+    /**
+     * 缓冲矩阵是否属于**恒等族**（矩阵里没有课本约定那一步 `t → 1−t` 翻转）。
+     *
+     * 2026-10-27 前摄方向缺陷的根因：`buildTexCoords` 把 t 翻转写死，只对课本族成立；
+     * WIKO/华为**前摄**实测 `(s,t)→(t,1−s)` 是恒等族，于是永远多一次反射 ⇒ 前摄画面
+     * 转 90°、被内容框压扁、还带一次错误镜像。本标记让两路各自补上那次翻转。
+     */
+    var stIdentityFamily: Boolean = false
         private set
 
     /** 由相机引擎写入：`CameraCharacteristics.SENSOR_ORIENTATION` 原值 */
@@ -45,8 +59,11 @@ class PreviewOrientation {
      */
     fun setStMatrix(matrix: FloatArray): Boolean {
         val next = stRotationFromMatrix(matrix)
-        if (next < 0 || next == stRotationDegrees) return false
+        if (next < 0) return false
+        val nextFamily = stIdentityFamilyFromMatrix(matrix)
+        if (next == stRotationDegrees && nextFamily == stIdentityFamily) return false
         stRotationDegrees = next
+        stIdentityFamily = nextFamily
         return true
     }
 
@@ -64,6 +81,28 @@ class PreviewOrientation {
      */
     fun appliedDegrees(): Int = normalize(residualDegrees() + stRotationDegrees)
 
+    /**
+     * 上屏实际施加的度数。
+     *
+     * 恒等族要再翻 180°（[displayMirrored] 同时置 false）：矩阵少掉的那次 `t→1−t` 反射
+     * 不能只靠角度补，上屏这一路实测要多转半圈才是正的（2026-10-27 前摄真机两轮标定）。
+     * 编码 pass 不读本函数，仍用 [appliedDegrees] 的矩阵分量，录出像素与改前一致。
+     */
+    fun displayDegrees(): Int =
+        if (stIdentityFamily) normalize(appliedDegrees() + 180) else appliedDegrees()
+
+    /**
+     * 编码 pass 是否要镜像：恒等族恒为 true（把矩阵少掉的那次反射补回偶数，净效果仍是缓冲原样），
+     * 课本族恒为 false。
+     */
+    fun encoderMirrored(): Boolean = stIdentityFamily
+
+    /**
+     * 上屏是否要镜像：恒等族恒为 false（反射已由 [displayDegrees] 的额外半圈＋纹理坐标的
+     * t 翻转一起抵消，再镜像就多翻一次），课本族沿用镜头朝向（前置 true / 后置 false）。
+     */
+    fun displayMirrored(): Boolean = if (stIdentityFamily) false else mirrored
+
     /** 施加 [appliedDegrees] 之前，输入源（视图/纹理里那张已归一化的图）的宽高是否被矩阵换了轴 */
     fun stSwapsSource(): Boolean = stRotationDegrees % 180 != 0
 
@@ -73,9 +112,15 @@ class PreviewOrientation {
         /**
          * 从列主序 4x4 的缓冲变换矩阵里解析「矩阵自带的顺时针旋转分量」。
          *
-         * 判据不靠猜：把 4 个候选角 k 逐个代进「纹理坐标变换」，看哪个 k 能让
-         * `矩阵 ∘ 旋转(k)` 恰好等于**教科书约定**的归一化矩阵 `(s,t) → (s, 1-t)`
-         * （即只把 GL 的 t 轴翻回图像的行序，不含任何旋转）。命中的 k 就是矩阵多转的度数。
+         * 判据不靠猜，**两族都要认**（2026-10-27 前摄方向缺陷）：
+         * - **课本族**：找 k 使 `矩阵 ∘ 旋转(k)` = `(s,t)→(s,1−t)`。WIKO 后摄 `(1−t,1−s)`
+         *   命中 k=270，`applied = 残角 + 270` 在老实现里是对的。
+         * - **恒等族**：找 k 使 `矩阵 ∘ 旋转(k)` = 恒等 `(s,t)`。WIKO/华为**前摄**实测
+         *   `(t,1−s)` 命中 k=90 —— 它比课本族少一次 t 翻转（`buildTexCoords` 里那步
+         *   `t=1−v` 是给课本族准备的），老实现四候选全不命中就回退 0，导致前摄画面
+         *   转了 90°、被内容框压扁、还带一次多余镜像。恒等族回报 `k+180°`，正好把那次
+         *   t 翻转折回角度里，`applied = 残角 + stK` 于是两族通用。
+         *
          * 矩阵还没取到（全 0）返回 **-1（未知）**，让调用方保留上一次的结果；解析不出八种标准朝向时返回 0，
          * 行为退化成教科书约定。
          */
@@ -86,11 +131,33 @@ class PreviewOrientation {
             val a21 = matrix[1]; val a22 = matrix[5]; val b2 = matrix[13]
             if (allZero(a11, a12, a21, a22, b1, b2)) return -1
             for (k in intArrayOf(0, 90, 180, 270)) {
-                val rot = rotationMap(k)
                 // 复合 (s,t) -> matrix(rot(s,t))，与归一化矩阵逐点比对
-                if (matchesCanonical(a11, a12, b1, a21, a22, b2, rot)) return k
+                if (matchesCanonical(a11, a12, b1, a21, a22, b2, rotationMap(k))) return k
+            }
+            for (k in intArrayOf(0, 90, 180, 270)) {
+                if (matchesIdentity(a11, a12, b1, a21, a22, b2, rotationMap(k))) {
+                    return normalize(k + 180)
+                }
             }
             return 0
+        }
+
+        /**
+         * 矩阵是否属于恒等族（见 [stIdentityFamily]）。恒等族要把 [stRotationFromMatrix]
+         * 回报的 `k+180°` 折回 `k` 才是它在「课本约定」下的等价值；这里只回答"是哪一族"。
+         */
+        fun stIdentityFamilyFromMatrix(matrix: FloatArray): Boolean {
+            if (matrix.size < 16) return false
+            val a11 = matrix[0]; val a12 = matrix[4]; val b1 = matrix[12]
+            val a21 = matrix[1]; val a22 = matrix[5]; val b2 = matrix[13]
+            if (allZero(a11, a12, a21, a22, b1, b2)) return false
+            for (k in intArrayOf(0, 90, 180, 270)) {
+                if (matchesCanonical(a11, a12, b1, a21, a22, b2, rotationMap(k))) return false
+            }
+            for (k in intArrayOf(0, 90, 180, 270)) {
+                if (matchesIdentity(a11, a12, b1, a21, a22, b2, rotationMap(k))) return true
+            }
+            return false
         }
 
         /** 归一化矩阵 `(s,t) → (s, 1-t)` 的仿射系数 */
@@ -124,6 +191,25 @@ class PreviewOrientation {
             val cb2 = a21 * rot[2] + a22 * rot[5] + b2
             return near(c11, 1f) && near(c12, 0f) && near(cb1, 0f) &&
                 near(c21, 0f) && near(c22, -1f) && near(cb2, 1f)
+        }
+
+        /**
+         * 复合矩阵 `M ∘ Rot` 是否等于**恒等** `(s,t) → (s,t)`（恒等族，见 [stRotationFromMatrix]）。
+         * 只有课本族那一步 t 翻转**不在**矩阵里时才会命中——WIKO/华为前摄取到的就是这一族。
+         */
+        private fun matchesIdentity(
+            a11: Float, a12: Float, b1: Float,
+            a21: Float, a22: Float, b2: Float,
+            rot: FloatArray
+        ): Boolean {
+            val c11 = a11 * rot[0] + a12 * rot[3]
+            val c12 = a11 * rot[1] + a12 * rot[4]
+            val cb1 = a11 * rot[2] + a12 * rot[5] + b1
+            val c21 = a21 * rot[0] + a22 * rot[3]
+            val c22 = a21 * rot[1] + a22 * rot[4]
+            val cb2 = a21 * rot[2] + a22 * rot[5] + b2
+            return near(c11, 1f) && near(c12, 0f) && near(cb1, 0f) &&
+                near(c21, 0f) && near(c22, 1f) && near(cb2, 0f)
         }
 
         private fun near(actual: Float, expected: Float): Boolean =

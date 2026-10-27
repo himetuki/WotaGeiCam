@@ -32,12 +32,31 @@ class PreviewOrientationTest {
         1f, 1f, 0f, 1f
     )
 
-    /** 纯旋转矩阵（不含 GL 行序翻转）：八种标准朝向之外的异常输入，必须安全退化 */
+    /** 纯旋转矩阵（不含 GL 行序翻转）：属**恒等族**，2026-10-27 起必须被识别出来 */
     private val pureRotationSt = floatArrayOf(
         0f, 1f, 0f, 0f,
         -1f, 0f, 0f, 0f,
         0f, 0f, 1f, 0f,
         1f, 0f, 0f, 1f
+    )
+
+    /**
+     * WIKO / 华为**前摄**实测矩阵（2026-10-27 抓）：`(s,t) → (t, 1−s)`。
+     * 与 [garAn60St] 差一次反射——这就是前摄歪 90° 又被压扁的根因。
+     */
+    private val frontCameraSt = floatArrayOf(
+        0f, -1f, 0f, 0f,
+        1f, 0f, 0f, 0f,
+        0f, 0f, 1f, 0f,
+        0f, 1f, 0f, 1f
+    )
+
+    /** 真·异常矩阵（切变）：八种标准朝向之外，必须安全退化为教科书约定 */
+    private val shearSt = floatArrayOf(
+        1f, 0f, 0f, 0f,
+        0.3f, 1f, 0f, 0f,
+        0f, 0f, 1f, 0f,
+        0f, 0f, 0f, 1f
     )
 
     private fun orientationWith(sensor: Int, display: Int, front: Boolean, st: FloatArray): PreviewOrientation =
@@ -116,6 +135,21 @@ class PreviewOrientationTest {
     @Test
     fun `真机转置型矩阵解析出自带 270 度`() {
         assertEquals(270, PreviewOrientation.stRotationFromMatrix(garAn60St))
+        assertFalse(
+            "后摄矩阵属课本族，不许被认成恒等族",
+            PreviewOrientation.stIdentityFamilyFromMatrix(garAn60St)
+        )
+    }
+
+    @Test
+    fun `前摄恒等族矩阵解析出 270 度并标记恒等族`() {
+        // (s,t)→(t,1−s) 命中恒等族的 k=90，对外回报 90+180=270（与后摄同一个补偿角）
+        assertEquals(270, PreviewOrientation.stRotationFromMatrix(frontCameraSt))
+        assertTrue(
+            "前摄矩阵少一次 t 翻转，必须认成恒等族（2026-10-27 前摄歪 90° 的根因）",
+            PreviewOrientation.stIdentityFamilyFromMatrix(frontCameraSt)
+        )
+        assertTrue(PreviewOrientation.stIdentityFamilyFromMatrix(pureRotationSt))
     }
 
     @Test
@@ -130,10 +164,28 @@ class PreviewOrientationTest {
 
     @Test
     fun `解析不出标准朝向时安全退化为教科书约定`() {
-        assertEquals(0, PreviewOrientation.stRotationFromMatrix(pureRotationSt))
-        val o = orientationWith(sensor = 90, display = 90, front = false, st = pureRotationSt)
+        // 切变不是八种标准朝向之一：两族都不命中 ⇒ 退化成教科书约定（0）
+        assertEquals(0, PreviewOrientation.stRotationFromMatrix(shearSt))
+        assertFalse(PreviewOrientation.stIdentityFamilyFromMatrix(shearSt))
+        val o = orientationWith(sensor = 90, display = 90, front = false, st = shearSt)
         assertEquals(0, o.stRotationDegrees)
         assertEquals(0, o.appliedDegrees())
+    }
+
+    @Test
+    fun `恒等族上屏多转半圈且不镜像_编码仍缓冲原样`() {
+        // 课本族（后摄）：编码不镜像、上屏不镜像，角度与改前逐字相同
+        val back = orientationWith(90, 90, front = false, st = garAn60St)
+        assertFalse(back.displayMirrored())
+        assertFalse(back.encoderMirrored())
+        assertEquals(270, back.displayDegrees())
+        // 恒等族（前摄）：上屏 = 施加角 + 180°、不镜像；编码偏移 0、镜像位 true（净效果仍是缓冲原样）
+        val front = orientationWith(270, 90, front = true, st = frontCameraSt)
+        assertFalse(front.displayMirrored())
+        assertTrue(front.encoderMirrored())
+        // 横屏下前摄：残角 180 + 矩阵 270 = 施加角 90，上屏再翻半圈 = 270
+        assertEquals(90, front.appliedDegrees())
+        assertEquals(270, front.displayDegrees())
     }
 
     @Test
@@ -175,7 +227,10 @@ class PreviewOrientationTest {
         val displays = intArrayOf(0, 90, 180, 270)
         for (st in listOf(canonicalSt, garAn60St)) {
             for (sensor in sensors) {
-                for (front in booleanArrayOf(false, true)) {
+                // 前摄（2026-10-27）：预览是**镜像**、成片不镜像，转正角之间差一次反射，
+                // 角度等式只对后摄成立；前摄的几何正确性由「前摄横屏上屏为缓冲水平镜像」
+                // 与「前摄编码帧仍是缓冲原样」两条采样级用例钉住。
+                for (front in booleanArrayOf(false)) {
                     for (display in displays) {
                         val o = orientationWith(sensor, display, front, st)
                         val residual = o.residualDegrees()
@@ -201,6 +256,25 @@ class PreviewOrientationTest {
     }
 
     @Test
+    fun `前摄成片容器角比后摄公式多 180 度_横屏落在 0`() {
+        // 前摄官方公式 360−((sensor+display)%360)，整理后即 sensor−display+180
+        assertEquals(0, recordOrientationHint(270, 90, front = true, direct = false))
+        assertEquals(0, recordOrientationHint(270, 90, front = true, direct = true))
+        // 同一姿态的后摄仍是 180（两条式子确实不同，不许合并）
+        assertEquals(180, recordOrientationHint(270, 90, front = false, direct = false))
+        // 前摄成片不镜像：播放出来就是缓冲原样（未镜像），预览则是它的水平镜像
+        val o = orientationWith(270, 90, front = true, st = frontCameraSt)
+        assertSamples(
+            frontCameraSt, o.displayDegrees(), o.displayMirrored(),
+            { u, v -> 1 - u to v }, "前摄上屏"
+        )
+        assertSamples(
+            frontCameraSt, o.stRotationDegrees, o.encoderMirrored(),
+            { u, v -> u to v }, "前摄编码"
+        )
+    }
+
+    @Test
     fun `真机横屏姿态下成片与参照 App 约定一致`() {
         // GAR-AN60 横屏：1920x1080 原样帧 + 容器无 rotation
         val o = orientationWith(90, 90, front = false, st = garAn60St)
@@ -210,6 +284,65 @@ class PreviewOrientationTest {
         // 竖屏持机：容器记 90，播放器据此转成竖画幅，两条路径同值
         assertEquals(90, recordOrientationHint(90, 0, front = false, direct = false))
         assertEquals(90, recordOrientationHint(90, 0, front = false, direct = true))
+    }
+
+    // endregion
+    // region 几何级守卫：直接算采样坐标，反射/旋转错一位就红
+
+    private val corners = listOf(0.1 to 0.1, 0.9 to 0.1, 0.1 to 0.9, 0.9 to 0.9, 0.35 to 0.62)
+
+    /**
+     * 复刻 `GlRenderEngine.buildTexCoords` + shader 的 `vUv = uTexMatrix * aTexCoord`：
+     * 屏幕上 (u,v)（v 向下）最终采到缓冲的哪个像素（x 向右、y 向下，均为 [0,1]）。
+     *
+     * 这里是**唯一能看见反射**的层级——只比转正角的用例对镜像/转置完全无感，
+     * 2026-10-27 前摄歪 90° 就是这么漏过单测的。
+     */
+    private fun sampled(matrix: FloatArray, deg: Int, mirror: Boolean, u: Double, v: Double): Pair<Double, Double> {
+        var x = u - 0.5
+        val y = 0.5 - v
+        if (mirror) x = -x
+        val rad = Math.toRadians(deg.toDouble())
+        val c = kotlin.math.cos(rad)
+        val s = kotlin.math.sin(rad)
+        val sx = c * x + s * y
+        val sy = -s * x + c * y
+        val a11 = matrix[0].toDouble(); val a12 = matrix[4].toDouble(); val b1 = matrix[12].toDouble()
+        val a21 = matrix[1].toDouble(); val a22 = matrix[5].toDouble(); val b2 = matrix[13].toDouble()
+        val sp = a11 * (sx + 0.5) + a12 * (0.5 - sy) + b1
+        val tp = a21 * (sx + 0.5) + a22 * (0.5 - sy) + b2
+        return sp to (1.0 - tp)
+    }
+
+    private fun assertSamples(
+        matrix: FloatArray, deg: Int, mirror: Boolean,
+        expect: (Double, Double) -> Pair<Double, Double>, tag: String
+    ) {
+        for ((u, v) in corners) {
+            val (ax, ay) = sampled(matrix, deg, mirror, u, v)
+            val (ex, ey) = expect(u, v)
+            assertEquals("$tag 采样点 u=$u v=$v", ex, ax, 1e-6)
+            assertEquals("$tag 采样点 u=$u v=$v", ey, ay, 1e-6)
+        }
+    }
+
+    @Test
+    fun `后摄横屏上屏为缓冲原样且编码帧也是原样`() {
+        val o = orientationWith(90, 90, front = false, st = garAn60St)
+        assertSamples(garAn60St, o.appliedDegrees(), o.displayMirrored(), { u, v -> u to v }, "后摄上屏")
+        assertSamples(garAn60St, o.stRotationDegrees, o.encoderMirrored(), { u, v -> u to v }, "后摄编码")
+    }
+
+    @Test
+    fun `前摄横屏上屏为缓冲水平镜像_编码仍是缓冲原样`() {
+        val o = orientationWith(270, 90, front = true, st = frontCameraSt)
+        assertEquals(270, o.displayDegrees())
+        assertFalse(o.displayMirrored())
+        assertTrue(o.encoderMirrored())
+        // 上屏：用户两轮口径（先镜像再逆时针 90°，再上下对称）合成后 = 缓冲的水平镜像
+        assertSamples(frontCameraSt, o.displayDegrees(), o.displayMirrored(), { u, v -> 1 - u to v }, "前摄上屏")
+        // 编码：仍是缓冲原样（容器角由 orientationHint 承载，录出像素与改前一致）
+        assertSamples(frontCameraSt, o.stRotationDegrees, o.encoderMirrored(), { u, v -> u to v }, "前摄编码")
     }
 
     // endregion

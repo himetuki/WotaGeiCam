@@ -2144,7 +2144,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                     TAG_GL,
                     "WotaOrient 矩阵=${stMatrix.contentToString()} " +
                         "stK=${orientation.stRotationDegrees} residual=${orientation.residualDegrees()} " +
-                        "applied=${orientation.appliedDegrees()} mirror=${orientation.mirrored} " +
+                        "applied=${orientation.appliedDegrees()} " +
+                        "disp=${orientation.displayDegrees()}/${orientation.displayMirrored()} " +
+                        "encMirror=${orientation.encoderMirrored()} " +
                         "frame=${wantFrameWidth}x${wantFrameHeight}"
                 )
             }
@@ -2297,8 +2299,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 镜像作用在屏幕空间，故先令 X=-X。写回属性时 t=1-v 抵消顶点 Y 轴方向。
      */
     private fun buildTexCoords(encoderPass: Boolean) {
-        val deg = if (encoderPass) orientation.stRotationDegrees else orientation.appliedDegrees()
-        val mirror = !encoderPass && orientation.mirrored
+        // 上屏走上屏口径（displayDegrees/displayMirrored），编码只抵消矩阵分量（stRotationDegrees
+        // + encoderMirrored）：两族的分工完全不同，2026-10-27 前摄方向缺陷把这一点写在这里。
+        val deg = if (encoderPass) orientation.stRotationDegrees else orientation.displayDegrees()
+        val mirror = if (encoderPass) orientation.encoderMirrored() else orientation.displayMirrored()
         val key = (deg shl 1) or (if (mirror) 1 else 0)
         val target = if (encoderPass) encoderTexCoords else displayTexCoords
         val buffer = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer

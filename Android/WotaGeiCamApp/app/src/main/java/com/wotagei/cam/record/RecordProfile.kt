@@ -94,8 +94,11 @@ data class RecordProfile(
  * 所以「画面转正多少」这件事完全落在容器角上，两条路径同一个公式：
  * `sensorOrientation − 显示旋转`，即 `SENSOR_ORIENTATION` 减去当前显示旋转角（官方定义的转正角）。
  *
- * 前置镜头同理：`SENSOR_ORIENTATION` 的定义对前后摄一致，镜像只是预览侧的屏幕空间翻转，
- * 文件里存的是未镜像的原样帧，所以不需要另一套角度。
+ * 前置镜头（2026-10-27 前摄方向缺陷修正）：官方 Camera1/Camera2 的前摄转正角是
+ * `360° − ((SENSOR_ORIENTATION + 显示旋转) % 360)`，与后摄的 `sensor − 显示` 不是同一条式子。
+ * 本工程只喂 `sensor − 显示` 会让前摄成片**上下颠倒**（WIKO/华为实测：预览已按镜像+转正正确，
+ * 回放却要再翻半圈）。整理后前摄式 = `sensor − 显示 + 180°`，所以这里只加一个 180° 分支。
+ * 文件里存的仍是未镜像的原样帧（镜像只作用在预览侧），符合相机惯例。
  * 真机 WIKO GAR-AN60 横屏（sensor=90、显示=90）录出 1920x1080 + 容器角 0，成片容器不带 rotation。
  *
  * 本函数输出的是**显示所需旋转角**语义（与 `MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION` 同口径）；
@@ -104,10 +107,10 @@ data class RecordProfile(
  *
  * @param sensorOrientation `SENSOR_ORIENTATION`
  * @param deviceDegrees     当前显示旋转（0/90/180/270）
- * @param front             前置镜头（不参与取值，保留形参以兼容既有调用与单测）
- * @param direct            是否 DIRECT（不使用 GPU）渲染模式（同上，不参与取值）
+ * @param front             前置镜头：公式多 180°（见上）
+ * @param direct            是否 DIRECT（不使用 GPU）渲染模式（不参与取值）
  */
 fun recordOrientationHint(sensorOrientation: Int, deviceDegrees: Int, front: Boolean, direct: Boolean): Int =
-    normalizeDegrees(sensorOrientation - deviceDegrees)
+    normalizeDegrees(sensorOrientation - deviceDegrees + if (front) 180 else 0)
 
 private fun normalizeDegrees(degrees: Int): Int = ((degrees % 360) + 360) % 360
