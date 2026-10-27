@@ -295,6 +295,54 @@ class DisplayScaleWiringGuardTest {
         assertFalse("上屏档不许引入滑杆", sizePill.contains("PillSlider("))
     }
 
+    // ------------------------------------------------------------------ 胶囊下方读数（钉子 3）
+
+    /**
+     * 画幅胶囊下方「预览：<档位值>」读数的判据（24 R3 §2.4 / 钉子 3）：
+     * 仅 GPU、无背景、半透明灰 + 红描边、锚在 SIZE 胶囊实测矩形正下方。
+     */
+    private fun readoutIssues(maskedSrc: String): List<String> {
+        val bad = ArrayList<String>()
+        val body = runCatching {
+            KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(maskedSrc, "DisplayScaleReadout"))
+        }.getOrNull() ?: return listOf("DisplayScaleReadout 定位失败（读数组件被删/改名）")
+        for (token in listOf("WotaColor.rec", "Stroke(", "WotaColor.textLo", "anchor.bottom")) {
+            if (!body.contains(token)) bad.add("读数缺样式/位置锚点：$token")
+        }
+        if (body.contains("background(")) bad.add("读数必须无背景（钉子 3 的样式）")
+        val flat = KotlinSourceScan.flatten(maskedSrc)
+        for (token in listOf(
+            "cam_display_scale_readout",
+            "pillAnchors[PillKey.SIZE]",
+            "if (renderMode == RenderMode.GPU && !splitOn)",
+            "DisplayScaleReadout(displayScale, sizeAnchor)"
+        )) {
+            if (!flat.contains(token)) bad.add("读数接线缺：$token")
+        }
+        return bad
+    }
+
+    @Test
+    fun `画幅下方读数仅GPU且无背景红描边`() {
+        val issues = readoutIssues(screen)
+        assertEquals("胶囊下方读数缺口：\n${issues.joinToString("\n")}", emptyList<String>(), issues)
+        // 突变 1：红描边换成普通颜色（无描边）
+        assertTrue(
+            "去掉红描边的突变必须报红",
+            readoutIssues(screen.replace("WotaColor.rec", "WotaColor.textHi")).isNotEmpty()
+        )
+        // 突变 2：删掉 Stroke（只剩填充文字）
+        assertTrue(
+            "删掉 Stroke 的突变必须报红",
+            readoutIssues(screen.replace("Stroke(width = outline)", "")).isNotEmpty()
+        )
+        // 突变 3：去掉仅 GPU 门（DIRECT 也显示）
+        assertTrue(
+            "去掉 GPU 门的突变必须报红",
+            readoutIssues(screen.replace("if (renderMode == RenderMode.GPU && !splitOn)", "if (true)")).isNotEmpty()
+        )
+    }
+
     // ------------------------------------------------------------------ 突变自证
 
     @Test

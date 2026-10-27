@@ -159,6 +159,20 @@ class DisplayScaleRtTest {
         assertEquals(DisplayScale.EIGHTH, nearestDisplayScale(1080, 1920, DisplayScale.SIXTEENTH))
     }
 
+    // ------------------------------------------------------------------ 读数标签
+
+    @Test
+    fun `读数档位文案与原片本地化标签同源`() {
+        // 胶囊下方读数 = 档位标签（24 R3 钉子 3）：原片走本地化串，其余用除数字面量
+        assertEquals("原片", displayScaleReadoutLabel(DisplayScale.ORIG, "原片"))
+        assertEquals("2", displayScaleReadoutLabel(DisplayScale.HALF, "原片"))
+        assertEquals("4", displayScaleReadoutLabel(DisplayScale.QUARTER, "原片"))
+        assertEquals("8", displayScaleReadoutLabel(DisplayScale.EIGHTH, "原片"))
+        assertEquals("16", displayScaleReadoutLabel(DisplayScale.SIXTEENTH, "原片"))
+        // 原片标签由调用方给（UI 传 stringResource），纯函数不写死中文
+        assertEquals("Orig", displayScaleReadoutLabel(DisplayScale.ORIG, "Orig"))
+    }
+
     // ------------------------------------------------------------------ 重建判据
 
     @Test

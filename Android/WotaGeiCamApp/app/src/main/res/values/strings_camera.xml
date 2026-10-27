@@ -105,6 +105,7 @@
     <!-- 上屏档（2026-10-27 用户需求；docs/plan/24 R3 §2.4）：只改取景器的上屏渲染分辨率 -->
     <string name="cam_display_scale">预览分辨率</string>
     <string name="cam_display_scale_orig">原片</string>
+    <string name="cam_display_scale_readout">预览：%1$s</string>
     <string name="cam_display_scale_note">只影响取景器上屏的渲染分辨率，成片画质不变。调低会把 GPU 帧预算让给录制、补弧与降噪，减少 4K 下的掉帧与发热。</string>
     <string name="cam_display_scale_current">当前：原片</string>
     <string name="cam_display_scale_current_rt">当前：%1$d（上屏 %2$d×%3$d）</string>

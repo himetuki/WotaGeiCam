@@ -76,6 +76,15 @@ fun nearestDisplayScale(
 }
 
 /**
+ * 胶囊下方读数（24 R3 钉子 3）的档位文案：`原片` 用本地化标签，其余用除数字面量。
+ *
+ * 抽成纯函数是为了让「读数 = 档位标签」这条口径能被 JVM 单测钉住——UI 侧只负责套
+ * `cam_display_scale_readout` 的 `预览：%1$s`，不再各写一份 when。
+ */
+fun displayScaleReadoutLabel(scale: DisplayScale, origLabel: String): String =
+    if (scale == DisplayScale.ORIG) origLabel else scale.divisor.toString()
+
+/**
  * 要不要重建上屏 RT（`DisplayPostPass.begin` 每帧问一句）。
  *
  * 判据只看尺寸（= 等比区或档位变了），**与开关无关**：同一档下窗口尺寸不变就不重建。

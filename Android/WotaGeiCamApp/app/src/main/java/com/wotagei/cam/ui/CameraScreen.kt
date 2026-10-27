@@ -145,6 +145,8 @@ import com.wotagei.cam.core.hasAdjustableFocus
 import com.wotagei.cam.core.forcedShutterOutOfRange
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.FrameEffect
+import com.wotagei.cam.core.DisplayScale
+import com.wotagei.cam.core.displayScaleReadoutLabel
 import com.wotagei.cam.core.CamPill
 import com.wotagei.cam.core.MarkerLineColor
 import com.wotagei.cam.core.MarkerLines
@@ -221,6 +223,7 @@ import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeDebugBadge
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
+import com.wotagei.cam.ui.design.WotaType
 import com.wotagei.cam.ui.design.WotaHit
 import com.wotagei.cam.ui.design.WotaIconButton
 import com.wotagei.cam.ui.design.WotaSpace
@@ -1939,6 +1942,16 @@ fun CameraScreen(
                 onLensClick = { showTip(app.getString(R.string.cam_split_lens_soon)) },
                 autoAttachId = practiceLeftId
             )
+        }
+
+        // 画幅胶囊下方读数（24 R3 钉子 3）：无背景 + 半透明灰 + 红描边，仅 GPU 显示。
+        // 锚点用 SIZE 胶囊布局期回报的窗口矩形（与 pillAnchorReport 同一坐标系），不改 HUD 布局/不占格；
+        // DIRECT 无独立预览分辨率参数、分屏态锚点不随 graphicsLayer 变换回报，两态都不显示。
+        if (renderMode == RenderMode.GPU && !splitOn) {
+            val sizeAnchor = pillAnchors[PillKey.SIZE]
+            if (sizeAnchor != null && sizeAnchor.width > 0 && sizeAnchor.height > 0) {
+                DisplayScaleReadout(displayScale, sizeAnchor)
+            }
         }
 
         // 就近胶囊与提示条是**全局浮层**（各自独立 Popup 窗口），挂在压图层之外：窗口不参与父层
@@ -3887,6 +3900,36 @@ private fun MarkerClusterButton(
             contentDescription = description,
             tint = Color.White,
             modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+/**
+ * 画幅胶囊下方「预览：<档位值>」读数（docs/plan/24 R3 §2.4 / 决策钉子 3）。
+ *
+ * - **位置**：SIZE 胶囊布局期回报的窗口矩形正下方（同一坐标系），不改 HUD 布局、不占格；
+ * - **样式**：无背景、半透明灰字、红描边（两层 Text：底层红描边、顶层半透明灰填充）；
+ * - **仅 GPU**：调用方用 `renderMode == GPU` 门控；DIRECT 没有独立预览分辨率参数，不显示。
+ */
+@Composable
+private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
+    val label = displayScaleReadoutLabel(scale, stringResource(R.string.cam_display_scale_orig))
+    val text = stringResource(R.string.cam_display_scale_readout, label)
+    val density = LocalDensity.current
+    val gap = with(density) { 4.dp.roundToPx() }
+    val outline = with(density) { 1.5.dp.toPx() }
+    Box(Modifier.offset { IntOffset(anchor.left, anchor.bottom + gap) }) {
+        Text(
+            text = text,
+            color = WotaColor.rec,
+            style = WotaType.label.copy(drawStyle = Stroke(width = outline)),
+            maxLines = 1
+        )
+        Text(
+            text = text,
+            color = WotaColor.textLo,
+            style = WotaType.label,
+            maxLines = 1
         )
     }
 }
