@@ -268,7 +268,8 @@ interface Recorder {
     /**
      * 编码器输入面（`android.view.Surface`）；prepare 成功后有效，未 prepare 时为 null。
      * - DIRECT 模式：Camera2 把录像面直接挂进 session；
-     * - GPU 模式：`GlRenderEngine.outputSurface` 接同一个面（零拷贝，录出=所见）。
+     * - GPU 模式：`GlRenderEngine.outputSurface` 接同一个面（零拷贝；成片支路 effect 恒 NONE，
+     *   只含曲线/Glow/降噪；斑马纹/峰值对焦只上屏）。
      */
     val surface: Any?
 

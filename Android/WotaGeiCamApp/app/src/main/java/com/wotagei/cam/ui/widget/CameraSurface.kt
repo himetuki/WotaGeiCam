@@ -26,7 +26,7 @@ import com.wotagei.cam.core.RenderMode
  *   **不吃任何画面特效**（UI 需把特效按钮置灰）。
  *   为什么不用 `SurfaceView`：窗口面按传感器原始方向出图，应用侧没有变换通道，真机上与 GPU 差 90°。
  * - 其他（GPU）：`TextureView` + [GlRenderEngine] 自建 EGL 线程，
- *   相机帧走 OES 纹理，斑马纹/峰值对焦生效，录出=所见。
+ *   相机帧走 OES 纹理；斑马纹/峰值对焦只上屏（监看层），成片支路只含曲线/Glow/降噪。
  *
  * 窗口面投递（两条路都通，按 sink 的实现能力择一）：
  * - GPU：`sink` 是 [GlRenderEngine]，已实现 [DisplaySurfaceReceiver]，无需额外接线；
