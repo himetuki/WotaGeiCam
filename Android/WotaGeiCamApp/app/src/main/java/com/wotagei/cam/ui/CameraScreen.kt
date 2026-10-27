@@ -3130,6 +3130,7 @@ private class RecordRunner(
             var sidecarWritten = false
             // sidecar 落库通道：file = 共享目录直写（可归位）；mediastore = 兜底（按最终名落库）
             var sidecarChannel = "none"
+            var sidecarStorePending: ArcDropLog? = null // File 通道失败时的兜底挂起件
             if (path != null) {
                 val drops = glProvider()?.drainArcDrops() ?: emptyList()
                 // 段清单（2026-10-04 裁决）：录制器逐段已写视频样本数 → {segment,first,count}，
@@ -3148,33 +3149,22 @@ private class RecordRunner(
                         lostMs = out.segLostMs.getOrNull(part.partIndex) ?: 0L
                     )
                 }
-                sidecarWritten = ArcDropLog.writeTo(
-                    path,
-                    ArcDropLog(mode = convert.name.lowercase(), dstFps = activeArcDstFps, drops = drops, segments = segs)
+                val log = ArcDropLog(
+                    mode = convert.name.lowercase(), dstFps = activeArcDstFps,
+                    drops = drops, segments = segs
                 )
+                sidecarWritten = ArcDropLog.writeTo(path, log)
                 if (sidecarWritten) sidecarChannel = "file"
-                // File 通道失败 ⇒ MediaStore 兜底（2026-10-26 反馈附A）：共享目录的非媒体文件
-                // 直写在 Android 11+ 部分机型被拒（dada/vivo 实测），而视频本体刚走通
-                // MediaStore ⇒ 可写性有现成证明。兜底按**最终公开名**落库（commit 已完成），
-                // 因此不走下面的"归位"（那条只服务 File 通道的 pending 期落盘）。
-                if (!sidecarWritten && path != null) {
-                    val stem = path.substringAfterLast('/').substringBeforeLast('.')
-                    val viaStore = sessionStore?.writeSidecar(
-                        "$stem${ArcDropLog.EXTENSION}",
-                        ArcDropLog(
-                            mode = convert.name.lowercase(), dstFps = activeArcDstFps,
-                            drops = drops, segments = segs
-                        ).encode().toByteArray()
-                    ) != null
-                    if (viaStore) {
-                        sidecarWritten = true
-                        sidecarChannel = "mediastore"
-                    }
-                }
+                // File 通道失败 ⇒ MediaStore 兜底**挂起**（2026-10-26 反馈附A）：共享目录的非媒体
+                // 文件直写在 Android 11+ 部分机型被拒（dada/vivo 实测）。不能在这里写——
+                // 【本轮复审修掉的缺陷】兜底名必须与成片**最终公开名**一致（含前缀改名与
+                // pending 复原之后），用 pending 脏名落库 = `readFrom` 永远找不到 + 前导点是
+                // 隐藏文件；所以挂到下面前缀改名/归位全部完成之后再落库。
+                if (!sidecarWritten) sidecarStorePending = log
                 Log.i(
                     TAG_UI,
-                    "arc drops sidecar ok=$sidecarWritten channel=$sidecarChannel " +
-                        "drops=${drops.size} segs=${segs.size} path=$path"
+                    "arc drops sidecar(file) ok=$sidecarWritten drops=${drops.size} " +
+                        "segs=${segs.size} path=$path"
                 )
             }
             // 处理过片名前缀（用户 2026-10-04 定版："XXftoXXf"，源=GL 侧实测源帧率，
@@ -3230,6 +3220,25 @@ private class RecordRunner(
                 if (target != null) {
                     Log.i(TAG_UI, "arc sidecar 归位 ok=${ArcDropLog.renameFor(path, target)} -> $target")
                 }
+            }
+            // MediaStore 兜底落库（反馈附A）：必须在**前缀改名与归位全部完成之后**——
+            // 名字要跟成片的最终公开名（含前缀、剥净 pending 段）逐字一致，
+            // 否则 ArcDropLog.readFrom 对不上号（上一提交用 pending 脏名的缺陷已修）。
+            val storeLog = sidecarStorePending
+            if (storeLog != null && path != null) {
+                val queried = out.parts.firstOrNull()?.uri?.let { queryDisplayName(it) }
+                val videoName = (PendingName.sidecarConvergeTarget(path, queried) ?: path)
+                    .substringAfterLast('/')
+                val displayName = videoName.substringBeforeLast('.') + ArcDropLog.EXTENSION
+                val viaStore = sessionStore?.writeSidecar(displayName, storeLog.encode().toByteArray()) != null
+                if (viaStore) {
+                    sidecarWritten = true
+                    sidecarChannel = "mediastore"
+                }
+                Log.i(
+                    TAG_UI,
+                    "arc sidecar(mediastore) ok=$viaStore name=$displayName"
+                )
             }
         }
         // AOSP 顺序：先 stop 编码器，再把编码面从会话里摘掉

@@ -1,6 +1,7 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.core.RangeI
+import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.decideFps
 import com.wotagei.cam.core.fpsRangesUnion
 import com.wotagei.cam.core.pickHighSpeedFpsRange
@@ -149,5 +150,26 @@ class CameraAbilityFpsTest {
             "表里没有任何区间覆盖目标 ⇒ null（由失败路径降级，不许硬发）",
             pickHighSpeedFpsRange(listOf(RangeI(120, 120), RangeI(240, 240)), 60)
         )
+    }
+
+    @Test
+    fun `决议边界_两表同覆盖必选普通_固定档恒优先`() {
+        // ① 两表都覆盖 60：必须选普通表（白开高速会话 = 白白换结构 + 高速面约束）
+        val normal = listOf(RangeI(30, 60))
+        val hs = listOf(RangeI(60, 120))
+        val d = decideFps(normal, hs, 60)!!
+        assertFalse("两表同覆盖 ⇒ 普通会话", d.highSpeed)
+        assertEquals(FpsPick(30, 60, false), d.pick)
+        // ② 固定档恒优先于"下界相等"：[60,60] 在场时 60 不该落到 [60,120]
+        val both = listOf(RangeI(60, 120), RangeI(60, 60))
+        val d2 = decideFps(emptyList(), both, 60)!!
+        assertEquals(FpsPick(60, 60, true), d2.pick)
+        // ③ [120,120] 与 [30,240] 并存，目标 120 ⇒ 固定档精确
+        val both2 = listOf(RangeI(30, 240), RangeI(120, 120))
+        assertEquals(FpsPick(120, 120, true), pickHighSpeedFpsRange(both2, 120))
+        // ④ 目标 0 / 负数 / 空表 ⇒ null（不硬发）
+        assertNull(decideFps(normal, hs, 0))
+        assertNull(decideFps(normal, hs, -50))
+        assertNull(decideFps(emptyList(), emptyList(), 24))
     }
 }
