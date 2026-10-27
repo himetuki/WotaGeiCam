@@ -6,16 +6,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 站位线 UI 接线守卫（2026-10-27，二轮定版）。
+ * 站位线 UI 接线守卫（2026-10-27，三轮反馈逐条钉）。
  *
- * 两轮真机反馈各钉一条：
  * 1. 首轮：`MarkerLineOverlay` 曾无条件组合 ⇒ 线关不掉。现在开关 = **线数 > 0**，
  *    执行点必须钉在叠加层的 `if` 上。
  * 2. 二轮：点按圆钮弹的浮层一旦被误点（点外部即关）就连带把线关掉 —— 用户点名"改成
- *    线数为零时关闭"。守卫钉三件事：
- *    - 页面里**不存在**独立开关 `markerOn`（存在即有"误关连累线"的回路）；
- *    - `if (markerControlsOpen)` 那层控件是**完全透明**的（无 `wotaCard()` 卡片底）；
- *    - 控件层与选色窗都对齐 `TopCenter`（右 Dock 侧不再重叠）。
+ *    线数为零时关闭"。守卫钉：页面里**不存在**独立开关 `markerOn`；
+ *    `if (markerControlsOpen)` 那层控件**完全透明**（无 `wotaCard()` 卡片底）。
+ * 3. 三轮：浮层曾被移到 TopCenter 而"太靠中间" ⇒ 必须贴着圆钮落点，且右缘不得越过
+ *    实测的右 Dock 槽左缘（`MarkerPopupPosition` + `core.popupBelowRight`）。
  */
 class MarkerWiringGuardTest {
 
@@ -79,14 +78,39 @@ class MarkerWiringGuardTest {
     }
 
     @Test
-    fun `两个浮层都向画面中间靠_不压右Dock`() {
+    fun `两个浮层都贴圆钮落点_且实测右Dock左缘作保留区`() {
         val body = controlsBody()
-        // 二轮反馈：原 TopEnd + 右 Dock 侧偏移会与右 Dock 重叠 ⇒ 一律 TopCenter
-        assertTrue("控件浮层必须对齐 TopCenter", body.contains("alignment = Alignment.TopCenter"))
-        assertFalse("控件浮层不许再贴 TopEnd", body.contains("alignment = Alignment.TopEnd"))
+        // 三轮反馈：不要漂在画面中间，也不要压右 Dock ⇒ 两个浮层都走实测锚点定位器
+        assertTrue(
+            "控件浮层必须用 MarkerPopupPosition 实测落点",
+            body.contains("popupPositionProvider = MarkerPopupPosition(")
+        )
+        assertFalse("控件浮层不许再按窗口对齐（那会漂离控件）", body.contains("alignment = Alignment.TopCenter"))
+        assertFalse("控件浮层不许贴 TopEnd（会压右 Dock）", body.contains("alignment = Alignment.TopEnd"))
         val pop = colorPopBody()
-        assertTrue("选色窗必须对齐 TopCenter", pop.contains("alignment = Alignment.TopCenter"))
-        assertFalse("选色窗不许再贴 TopEnd", pop.contains("alignment = Alignment.TopEnd"))
+        assertTrue(
+            "选色窗必须用同一套实测落点",
+            pop.contains("popupPositionProvider = MarkerPopupPosition(")
+        )
+        assertFalse("选色窗不许再按窗口对齐", pop.contains("alignment = Alignment.TopCenter"))
+        // 锚点与保留区都必须是**实测**矩形：圆钮的 boundsInWindow、右 Dock 槽的 boundsInWindow
+        assertTrue(
+            "圆钮必须回报自身窗口矩形当锚点",
+            flat.contains("markerAnchorRect = r") && flat.contains("boundsInWindow()")
+        )
+        assertTrue(
+            "右 Dock 槽必须回报窗口矩形当右侧保留区",
+            flat.contains("rightDockSlotRect = r")
+        )
+        assertTrue(
+            "两个浮层都要把保留区左缘喂给定位器",
+            KotlinSourceScan.occurrences(flat, "rightKeepOutPx = rightDockSlotRect?.left?.roundToInt()").size >= 2
+        )
+        // 定位器内部走纯算术出口（JVM 单测在 PopupPlacementTest）
+        assertTrue(
+            "定位器必须走 core.popupBelowRight（贴右下的算术唯一出口）",
+            flat.contains("com.wotagei.cam.core.popupBelowRight(")
+        )
     }
 
     @Test

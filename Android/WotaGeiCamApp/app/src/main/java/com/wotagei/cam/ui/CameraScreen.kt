@@ -92,6 +92,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size as GeoSize
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Shadow
@@ -103,6 +104,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -117,8 +119,11 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -321,6 +326,11 @@ fun CameraScreen(
     val markerColor by params.markerColor.observed()
     var markerControlsOpen by remember { mutableStateOf(false) }
     var markerColorPop by remember { mutableStateOf(false) }
+    // 浮层落点（2026-10-27 三轮）：实测的**圆钮**矩形 = 锚点，实测的**右 Dock 槽**矩形 = 右侧保留区。
+    // 都取窗口坐标（boundsInWindow），与 PopupPositionProvider 的坐标口径一致；
+    // 用户两次点名落点问题（先"别漂画面中间"，再"别压右 Dock"），所以这里不写任何手算常量。
+    var markerAnchorRect by remember { mutableStateOf<Rect?>(null) }
+    var rightDockSlotRect by remember { mutableStateOf<Rect?>(null) }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
@@ -1527,15 +1537,24 @@ fun CameraScreen(
                                 end = HudEdgePad + (WotaHit.iconButton + TopRowGap) * 2,
                                 top = TopTopPad
                             )
+                            // 锚点实测（含分屏缩放等变换）：浮层按这枚矩形贴到圆钮正下方
+                            .onGloballyPositioned {
+                                val r = it.boundsInWindow()
+                                if (markerAnchorRect != r) markerAnchorRect = r
+                            }
                     )
                     if (markerControlsOpen) {
                         // 浮层控件（用户点名「无弹窗式控件」「完全透明背景」）：+/线数/- 一行 +
                         // 间距滑杆一行，均水平；**无卡片背景**——控件直接浮在预览上（半透明白圆钮 +
-                        // 白字带阴影，亮暗场景都可辨）。对齐 TopCenter = 向画面中间靠，避开右 Dock
-                        // （姿态仪卡）与左 Dock；y 落在顶栏那排之下。
+                        // 白字带阴影，亮暗场景都可辨）。落点见 [MarkerPopupPosition]：
+                        // 贴着圆钮右下、右缘不越过右 Dock 左缘（三轮反馈：不要再漂到画面中间）。
                         Popup(
-                            alignment = Alignment.TopCenter,
-                            offset = IntOffset(0, with(hudDensity) { 72.dp.roundToPx() }),
+                            popupPositionProvider = MarkerPopupPosition(
+                                anchor = markerAnchorRect,
+                                rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                                gapPx = with(hudDensity) { WotaSpace.xs.roundToPx() },
+                                marginPx = with(hudDensity) { HudEdgePad.roundToPx() }
+                            ),
                             onDismissRequest = {
                                 markerControlsOpen = false
                                 Log.i(TAG_UI, "marker 控件层 dismiss(点外部/失焦)")
@@ -1600,11 +1619,15 @@ fun CameraScreen(
                     }
                     if (markerColorPop) {
                         // 选色弹窗（圆钮长按）：只选色——线数/间距按用户口径留在透明浮层里，
-                        // 不入此窗。对齐 TopCenter 同样是为了避开右 Dock；y 让到控件层之下。
-                        // 点窗外即关（focusable）。
+                        // 不入此窗。落点与控件层同一套（[MarkerPopupPosition]）：贴圆钮右下、
+                        // 右缘不越过右 Dock。点窗外即关（focusable）。
                         Popup(
-                            alignment = Alignment.TopCenter,
-                            offset = IntOffset(0, with(hudDensity) { 200.dp.roundToPx() }),
+                            popupPositionProvider = MarkerPopupPosition(
+                                anchor = markerAnchorRect,
+                                rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                                gapPx = with(hudDensity) { WotaSpace.xs.roundToPx() },
+                                marginPx = with(hudDensity) { HudEdgePad.roundToPx() }
+                            ),
                             onDismissRequest = { markerColorPop = false },
                             properties = PopupProperties(focusable = true)
                         ) {
@@ -1721,6 +1744,12 @@ fun CameraScreen(
                         area = rightArea,
                         shiftXPx = { dockSlide.value * ((hudRootView.width - (zoneRects[HudZone.RIGHT] ?: IntRect.Zero).left.coerceAtLeast(0)) + hudEdgePadPx) },
                         nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
+                        // 站位线浮层的右侧保留区：槽的**左缘**（含卡片内边距，比卡片左缘更保守）。
+                        // 用实测而不是手算——右 Dock 的宽度随 HUD 条目变化，写死就会在换设备后又压上去。
+                        modifier = Modifier.onGloballyPositioned {
+                            val r = it.boundsInWindow()
+                            if (rightDockSlotRect != r) rightDockSlotRect = r
+                        },
                         onCardRect = { putCardRect(HudZone.RIGHT, it) }
                     ) {
                         HudDockZone(
@@ -3726,6 +3755,45 @@ private fun BoxScope.BottomBandChips(
                 frost = hudFrostPillPlate
             )
         }
+    }
+}
+
+/**
+ * 站位线浮层的定位（2026-10-27 三轮）：**贴着圆钮右下**，不漂画面中间、也不压右 Dock。
+ *
+ * 三条约束都来自实测矩形（[anchor] = 圆钮、[rightKeepOutPx] = 右 Dock 槽左缘），
+ * 纯算术部分在 [com.wotagei.cam.core.popupBelowRight]（JVM 单测钉住）：
+ * 1. 右缘对齐锚点右缘（圆钮在顶栏右端 ⇒ 浮层整块落在顶栏那列之下）；
+ * 2. 右缘同时不得越过右 Dock 槽左缘（Dock 宽度随 HUD 条目变，实测才跟得住）；
+ * 3. 整块内容钳在窗口内，至少留 [marginPx]。
+ *
+ * 还没量到锚点时退回左上角（下一帧就会被实测值修正），不会闪到屏幕中央。
+ */
+private class MarkerPopupPosition(
+    private val anchor: Rect?,
+    private val rightKeepOutPx: Int?,
+    private val gapPx: Int,
+    private val marginPx: Int
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize
+    ): IntOffset {
+        val a = anchor ?: return IntOffset(marginPx, marginPx)
+        val rightLimit = minOf(a.right.roundToInt(), rightKeepOutPx ?: Int.MAX_VALUE)
+        val (x, y) = com.wotagei.cam.core.popupBelowRight(
+            rightLimitPx = rightLimit,
+            anchorBottomPx = a.bottom.roundToInt(),
+            popupWidthPx = popupContentSize.width,
+            popupHeightPx = popupContentSize.height,
+            windowWidthPx = windowSize.width,
+            windowHeightPx = windowSize.height,
+            gapPx = gapPx,
+            marginPx = marginPx
+        )
+        return IntOffset(x, y)
     }
 }
 
