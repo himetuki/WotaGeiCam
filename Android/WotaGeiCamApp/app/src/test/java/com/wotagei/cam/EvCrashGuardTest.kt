@@ -176,6 +176,22 @@ class EvCrashGuardTest {
         val downgrade = KotlinSourceScan.occurrences(apply, "downgradeHighSpeed")
         assertTrue("降级调用必须落在分流守卫之后（旧实现无条件降级，顺序断言红）",
             downgrade.isNotEmpty() && branch[0] < downgrade[0])
+        // AE 翻转重建（2026-10-27 复审 P1）：repeating 的 apply 与 build 必须落在**同一枚**
+        // （可能刚重建的）builder 上。缺陷形态：apply 写进新 reqBuilder、build 却 build 旧
+        // 局部 builder ⇒ 翻转那一次下发带 SENSOR 三键残值的旧请求，闪动修复静默失效。
+        // 判据：存在 effectiveBuilder 中转，且 apply 与 build 都吃它；突变体（build 回旧名）必红。
+        assertTrue(
+            "AE 翻转后必须经 effectiveBuilder 中转（重建的新 builder 才会被下发）",
+            apply.contains("val effectiveBuilder = reqBuilder ?: builder")
+        )
+        assertTrue(
+            "apply 必须写 effectiveBuilder",
+            apply.contains("applyParams(effectiveBuilder, state)")
+        )
+        assertTrue(
+            "build 必须吃 effectiveBuilder（build 旧 builder = 翻转修复静默失效）",
+            apply.contains("val request = effectiveBuilder.build()")
+        )
     }
 
     @Test

@@ -870,9 +870,13 @@ class Camera2Engine(
                 builderAeManual = manualNow
                 Log.i(TAG, "AE 档翻转 → 重建 repeating builder（manual=$manualNow），清 SENSOR 三键残留")
             }
-            // builder 可能刚被重建：重新取（prepareBuilder 失败时 reqBuilder 不动，沿用旧值）
-            applyParams(reqBuilder ?: builder, state)
-            val request = builder.build()
+            // builder 可能刚被重建：apply 与 build 都必须落在新 builder 上——
+            // 【2026-10-27 复审修掉的 P1】重建后若仍 build 旧 builder，翻转那一次下发的是
+            // 带 SENSOR 三键残值的旧请求（闪动修复在翻转瞬间静默失效，且 AUTO 档此后
+            // 没有别的下发时机会自愈）。prepareBuilder 失败时 reqBuilder 不动 = 沿用旧值。
+            val effectiveBuilder = reqBuilder ?: builder
+            applyParams(effectiveBuilder, state)
+            val request = effectiveBuilder.build()
             val hs = highSpeedSession
             val normal = session
             if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
