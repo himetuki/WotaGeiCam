@@ -1185,14 +1185,18 @@ fun CameraScreen(
                     modifier = Modifier.matchParentSize()
                 )
                 // 站位指示线（2026-10-27）：与参考线同一 View 叠加通道——**不进录像画面**
-                // （录制采集相机/GL 面，View 层结构上进不了编码器），录制中也可用
-                MarkerLineOverlay(
-                    count = markerCount,
-                    spread = markerSpread,
-                    color = markerColor,
-                    aspect = previewAspect,
-                    modifier = Modifier.matchParentSize()
-                )
+                // （录制采集相机/GL 面，View 层结构上进不了编码器），录制中也可用。
+                // 只在圆钮开启时组合：真机首轮截图抓到过"忘挂 markerOn ⇒ 线关不掉"的缺陷，
+                // 这里 if 是开关的**执行点**，不是装饰
+                if (markerOn) {
+                    MarkerLineOverlay(
+                        count = markerCount,
+                        spread = markerSpread,
+                        color = markerColor,
+                        aspect = previewAspect,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
                 FocusBox(
                     // 锁定期的数据源切换成锁定锚点（缺省画面中心，与引擎同一口径）；未锁路径一字不动
                     point = if (focusLocked) (focusLockPoint ?: TapPoint(0.5f, 0.5f)) else focusPoint,
