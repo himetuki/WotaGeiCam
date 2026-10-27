@@ -141,6 +141,20 @@ fun noiseReductionModeToSend(
     return if (off in declared) off else null
 }
 
+// ---------------------------------------------------------------------------------------------
+// GPU 双边的**档位编号**（0/1/2）：`denoiseLevelNow` 算档、`ProgramKey.denoise` 记档、
+// `GlRenderEngine` 挑片元着色器，三处共用这一套值——散写魔数迟早对不上（0=关 / 1=完整 / 2=轻量）。
+// ---------------------------------------------------------------------------------------------
+
+/** 无降噪（program 键的降噪维度取此值） */
+const val DENOISE_LEVEL_OFF = 0
+
+/** 完整核（8 邻域、9 次采样） */
+const val DENOISE_LEVEL_FULL = 1
+
+/** 轻量核（4 邻域、5 次采样；按负载自动降档，见 [denoiseKernelLite]） */
+const val DENOISE_LEVEL_LITE = 2
+
 /**
  * 画面降噪的**负载分档**（纯函数）：编码面「像素 × 帧率」超过阈值 ⇒ 用轻量核（4 邻域、5 次采样；
  * 完整核是 9 次）。4K30 / 1080p120 / 4K60 / 1080p240 这类组合自动落到轻量档。

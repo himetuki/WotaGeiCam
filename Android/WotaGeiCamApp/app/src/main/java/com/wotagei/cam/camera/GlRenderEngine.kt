@@ -20,6 +20,9 @@ import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.ColorCurve
 import com.wotagei.cam.core.CurveStack
+import com.wotagei.cam.core.DENOISE_LEVEL_FULL
+import com.wotagei.cam.core.DENOISE_LEVEL_LITE
+import com.wotagei.cam.core.DENOISE_LEVEL_OFF
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.record.ArcKeepRule
@@ -85,9 +88,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         /** 上屏节流上限（03 文档 §3.1）：只作用于窗口 pass，编码器 pass 一帧不丢 */
         private const val MAX_DISPLAY_FPS = 60f
 
-        /** 降噪档位编号（[denoiseLevelNow] / [programDenoiseLevel] 共用一套值） */
-        private const val DENOISE_FULL = 1
-        private const val DENOISE_LITE = 2
+        /**
+         * program 会话缓存上限（docs/plan/25 §3.9.2-3）：键是四维 [ProgramKey]，两槽同键共用；
+         * 反复切监看/曲线/降噪只做 `glUseProgram`，不重编。3×2×3 组合理论值远大于此，
+         * 但实际常用 ≤4（默认档 / 曲线 / 降噪 / 监看各一），8 只是"切来切去不重编"的余量。
+         */
+        private const val PROGRAM_CACHE_LIMIT = 8
 
         /** 直方图采样拍点：4Hz 足够调曲线参考用，读回成本 16KB/拍 */
         private const val HISTOGRAM_PERIOD_MS = 250L
@@ -358,19 +364,82 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
     private var oesTextureId = 0
     private var hasTextureData = false
 
-    private var programId = 0
-    private var programEffect = FrameEffect.NONE
+    // region program 双槽（docs/plan/25 §3.1 / §3.3）
+
+    /**
+     * 一枚已建好的 GL program 及其 uniform/attrib 位置（不可变）。
+     *
+     * [applied] 是**实际编出来**的键：链接失败走回退阶梯后，可能与请求键不同
+     * （例：请求 `(ZEBRA,1,0,0)` 的曲线版编不出来 ⇒ applied `(ZEBRA,0,0,0)`）。
+     * 槽里的 `requested` 记请求键、这里记实际键，两者不等就是"走了回退"。
+     */
+    private class GlProgram(
+        val applied: ProgramKey,
+        val id: Int,
+        val aPosition: Int,
+        val aTexCoord: Int,
+        val uTexMatrix: Int,
+        val uFrame: Int,
+        val uStripe: Int,
+        val uThreshold: Int,
+        val uTile: Int,
+        val uTexel: Int,
+        val uStrength: Int,
+        val uColor: Int,
+        val uCurve: Int,
+        val uSigmaR: Int
+    )
+
+    /**
+     * 一条绘制支路 → 当前挂着的 program（`requested ≠ program.applied` 表示请求键走了回退）。
+     *
+     * 两个槽一起构成双槽模型：DISPLAY（监看叠加 + 曲线）与 MOVIE（曲线 + 降噪，effect 恒 NONE）。
+     * 键相同 ⇒ 两槽指向**同一枚** GlProgram（`displaySlot.program === movieSlot.program`），
+     * 不新增编译、不新增显存，成片逐像素不变。
+     */
+    private class PassSlot {
+        var requested: ProgramKey? = null
+        var program: GlProgram? = null
+
+        fun clearBinding() {
+            requested = null
+            program = null
+        }
+    }
+
+    /** 上屏槽：effect = 用户选的 NONE/ZEBRA/PEAKING（monitor layer 只在这里出现） */
+    private var displaySlot = PassSlot()
+
+    /** 成片槽：effect 恒 NONE（[movieProgramKey] 是唯一真源；编码 pass 只认这个槽） */
+    private var movieSlot = PassSlot()
+
+    /**
+     * 会话级 program 缓存（`LinkedHashMap` 的 access-order，即 LRU）：键 = 四维 [ProgramKey]。
+     * 切监看先查这里；被任一槽引用的项永不淘汰；`releaseGl` 统一删。
+     */
+    private val programCache = LinkedHashMap<ProgramKey, GlProgram>(PROGRAM_CACHE_LIMIT, 0.75f, true)
+
+    /**
+     * 编译失败备忘（按四维键）：同一坏键不逐帧重试。
+     *
+     * 取代单槽时代的三个全局布尔（`blacklistedEffect` / `curveFailed` / `passThroughFailed`）——
+     * 那些全局布尔在双槽下会**连坐**：display 的 `ZEBRA+曲线` 链接失败会把成片的曲线一起关掉，
+     * 而用户只是开了一下斑马纹。按键记之后，display 的坏效果只影响 display 的请求键。
+     */
+    private val failedKeys = mutableSetOf<ProgramKey>()
+
+    // endregion
 
     /**
      * 画面降噪意图（2026-10-26）：GPU 双边档。写在调用线程、生效在 GL 线程；
-     * program 选择与曲线/效果同一套机制（改开关即重建 program，见 [syncEffect]）。
+     * program 选择与曲线/效果同一套机制（改开关即重建两槽的键，见 [syncMovieSlot] / [syncDisplaySlot]）。
      */
     @Volatile
     private var wantDenoise = false
 
     // ---- 直方图采样（2026-10-27：RGB 曲线框背景，调曲线参考用）----
     // 仅 GPU 档有意义（曲线框本就只在这档可拖）。数据路：drawFrame 尾部把当前帧画进
-    // 64×64 迷你 FBO（**当前 program** ⇒ 曲线输出后的画面，"边调边看分布"），glReadPixels
+    // 64×64 迷你 FBO（**上屏槽的 program** ⇒ 曲线输出后的画面，"边调边看分布"），glReadPixels
     // 16KB 后分箱；250ms 一拍，弹窗可见才采（[setHistogramEnabled]）。
     // 读回在 GL 线程会短暂管线停顿——16KB + 4Hz 的量级远低于既有霜板/补弧 pass 的成本，
     // 且只发生在弹窗打开期间（录制中开弹窗调曲线是它的目标场景，掉一拍观测帧可接受）。
@@ -399,10 +468,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     /**
      * drawFrame 尾部调用（GL 线程）：250ms 一拍把当前帧画进迷你 FBO 并读回分箱。
-     * 用 [drawPass]（当前 program = 曲线/降噪后的输出）而不是另编 identity——
-     * "边调边看结果"口径，见 HistogramMath 头注。
+     * 用 [drawPass]（**上屏槽**的 program = 曲线/降噪/监看叠加后的输出）而不是另编 identity——
+     * "边调边看结果"口径，见 HistogramMath 头注。开斑马时这里会采到条纹分布，登记为已知限制
+     * （docs/plan/25 §十"不改直方图采样口径"）。
      */
     private fun maybeSampleHistogram() {
+        // 上屏槽没有 program（两槽皆空的极端态）时早退：留着旧快照比采一张黑帧更有意义
+        if (displaySlot.program == null) return
         if (!wantHistogram) return
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - histLastSampleMs < HISTOGRAM_PERIOD_MS) return
@@ -447,53 +519,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         histogramSnapshot = null
     }
 
-    /**
-     * 当前 program 带的降噪档（与 [programEffect] 同级，判"要不要重建"）：
-     * 0 = 无降噪，1 = 完整核（8 邻域），2 = 轻量核（4 邻域）。见 [denoiseLevelNow]。
-     */
-    private var programDenoiseLevel = 0
-
     /** 双边降噪的亮度差 σ（0..1 归一化亮度域）：越小越保边。夜间暗部噪点取 0.08。
-     *  uTexel 复用既有峰值对焦那颗同名 uniform（二者不同时在场：双边只在 effect=NONE 时启用） */
+     *  uTexel 复用既有峰值对焦那颗同名 uniform（二者不同时在场：`displayProgramKey` 保证
+     *  effect ≠ NONE 时 denoise 恒 0，见 [ProgramKey] 的注释） */
     private var denoiseSigmaR = 0.08f
-
-    private var uSigmaRLoc = -1
-
-    /** 效果档编译失败：记住它，避免每帧重建同一坏 program 拖死帧率 */
-    private var blacklistedEffect: FrameEffect? = null
-
-    /** 连直通 program 都链接不上（驱动异常）：停止逐帧重试，否则每帧白烧一次编译 */
-    private var passThroughFailed = false
 
     private var stripeTextureId = 0
     private var stripeDensity = 0
 
-    private var aPositionLoc = -1
-    private var aTexCoordLoc = -1
-    private var uTexMatrixLoc = -1
-    private var uFrameLoc = -1
-    private var uStripeLoc = -1
-
-    /** 曲线查表纹理（256×1 GL_RGB，绑在单元 2）。null 表示曲线关着 */
+    /** 曲线查表纹理（256×1 GL_RGB，绑在单元 2）。0 表示曲线关着 */
     private var curveTextureId = 0
 
     @Volatile
     private var curveBytes: ByteArray? = null
 
-    /** 带曲线的 program 链接失败：记住它，避免每帧重建同一坏 program 拖死帧率 */
-    private var curveFailed = false
-
-    private var programCurve = false
-
     /** 已经传上去的那份表。`setCurve` 每次都烘出新数组，所以按引用比就能判断"表变了没" */
     private var curveUploaded: ByteArray? = null
-
-    private var uCurveLoc = -1
-    private var uThresholdLoc = -1
-    private var uTileLoc = -1
-    private var uTexelLoc = -1
-    private var uStrengthLoc = -1
-    private var uColorLoc = -1
 
     /**
      * 毛玻璃离屏链（OES→2D + 两趟高斯）。只在 GL 线程创建与使用；
@@ -900,7 +941,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (wantDenoise == enabled) return
         wantDenoise = enabled
         postGl {
-            syncEffect()
+            // 显式改降噪档 = 给所有含降噪维度的坏键一次重试（只清这些，别把驱动级坏键又试一遍）
+            failedKeys.removeAll { it.denoise != DENOISE_LEVEL_OFF }
+            retrySlots()
+            // 成片优先：movie 槽的键先跟上（display 的同步在 drawFrame 的编码 pass 之后）
+            syncMovieSlot()
             dirty = true
             scheduleDraw()
         }
@@ -934,9 +979,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         if (released.get()) return
         curveBytes = stack?.takeIf { !it.isPassthrough }?.bakeBytes()
         postGl {
-            // 每次显式改曲线都重新给一次编译机会：可能是上一版表触发的偶发失败
-            curveFailed = false
-            syncEffect()
+            // 每次显式改曲线都重新给一次编译机会：可能是上一版表触发的偶发失败。
+            // 只清含 curve 维度的备忘——不含曲线维度的坏键（如驱动不认 PEAKING）与本次无关。
+            failedKeys.removeAll { it.curve }
+            retrySlots()
+            syncMovieSlot()
             dirty = true
             scheduleDraw()
         }
@@ -1206,7 +1253,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         frostPlatePass = FrostPlatePass(::link, ::drainGlError, positionBuffer)
 
         glReady = true
-        syncEffect()
+        // 首帧之前先把上屏槽建好（此时编码面尚未绑定 ⇒ movie 槽不建），
+        // 让第一次窗口 pass 不再等一次 program 链接
+        syncDisplaySlot()
         updateContentRect()
         checkGlError("initGl")
         Log.i(TAG_GL, "EGL 就绪 version=$eglVersion oesTex=$oesTextureId")
@@ -1341,6 +1390,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         encoderHeight = 0
         if (surface == null) {
             Log.i(TAG_GL, "编码器面已解除")
+            // 成片槽的绑定只清引用（program 可能正被 display 共用 / 在会话缓存里等下一次起录）：
+            // 下一段起录按新尺寸/新帧率重新预热（§3.5）
+            movieSlot.clearBinding()
             // 解绑即清转换账（节奏/位次）：半会话状态不许漏进下一次录制
             // （今天的 stop 时序先 drain 再解绑，这里清是账本本位，不依赖调用顺序）
             arcRule.reset()
@@ -1388,6 +1440,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             }
             arcMendPass?.ensure(widthPx, heightPx)
         }
+        // 预热（docs/plan/25 §3.5）：movie 键依赖编码面尺寸/帧率（[denoiseLevelNow] 可能刚从完整核
+        // 切到轻量核），新尺寸落定后直接把 program 编好/绑好。这样两笔编译都发生在相机帧到达之前，
+        // 不占第一枚编码帧的 swap 时间窗（成片 PTS 网格对丢格零容忍）。
+        // 建 program 需要 current 上下文，而本函数不保证 current ⇒ 用 pbuffer 兜一次。
+        // B6（Glow）的 glow=1 变体以后再补；本批 glow 恒 false，wantMov == wantDisp 时 display 直接共用。
+        if (makeCurrent(pbufferSurface)) {
+            syncMovieSlot()
+        } else {
+            Log.w(TAG_GL, "WotaGl 预热跳过：makeCurrent(pbufferSurface) 失败")
+        }
+        // 这行**在 makeCurrent 之外**：预热被跳过时也要照打（program=无 本身就是排障要看的证据）
+        Log.i(
+            TAG_GL,
+            "WotaGl 编码面绑定：program=movie ${movieSlot.program?.applied?.debug() ?: "无"}（监看叠加只上屏）"
+        )
         dirty = true
         scheduleDraw()
     }
@@ -1443,16 +1510,19 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             return
         }
 
-        syncEffect()
-        if (programId == 0) return
+        // 成片槽先同步（编码 pass 要用它）；上屏槽的同步让到编码 pass 之后（§3.9.2-2）。
+        // 没有编码面时 syncMovieSlot 只清绑定、不建 program（空闲预览不白编一枚用不到的）。
+        syncMovieSlot()
 
         // 录制期转换（抽帧/补弧）只动编码支路；预览/霜/上屏各走各的，一帧不丢。
         // skip=true 的帧跳过编码 swap（帧序号不推进 ⇒ 输出节奏均匀）；MEND 通道内部失败会
         // 把自己降级并返回"需要直通补一帧"，所以调用方取反成 skip，直通调用点恒一（FrostEncoderGuard 钉着）。
         // 转换账（保留判定/位次/实测帧率）只认**新到的相机帧**：状态刷新重画（dirty 无新帧）
         // 拿旧时间戳再分类一轮会幻记丢弃、双计数源帧（实测前缀被打高）；转换模式下也不许往
-        // 均匀节奏里塞无账重复帧——stateOnly 的效果切换等下一个真帧落地（≤1 档位间隔）。
-        var skip = false
+        // 均匀节奏里塞无账重复帧——stateOnly 的效果切换等下一个真帧落地。
+        // 2026-10-27（§3.9.2-1）：没有新帧的状态刷新一律不进编码支路（`skip = !hasFrame`）——
+        // 此前只有转换模式兜住了这一条，曲线/监看的状态刷新每来一次就往成片里多塞一帧重复帧。
+        var skip = !hasFrame
         if (arcConvert != null) {
             if (hasFrame) {
                 // 保留判定只算一次；帧账的"有意抽帧"与 DROP/MEND 共用同一枚判定结果
@@ -1474,8 +1544,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
             drawEncoderPass()
             // DROP 的保留帧经直通发出，位次账必须在这里落（与 MEND emit/flush 同一
             // (输出位次, 丢弃数) 口径）：漏记则 DROP 的 sidecar drops 恒空，立档落空；
-            // 以编码面在位为前提——面已被摘时 drawEncoderPass 是空操作，记账会写假位次
-            if (arcConvert == ArcConvertMode.DROP && encoderEglSurface != null) {
+            // 以"编码面在位且成片 program 可用"为前提——两者缺一 drawEncoderPass 都是空操作，
+            // 记账会写假位次
+            if (arcConvert == ArcConvertMode.DROP && encoderEglSurface != null && movieSlot.program != null) {
                 synchronized(arcDropsLock) {
                     arcDrops += (encoderFrameIndex - 1).coerceAtLeast(0) to arcRule.takeDrops()
                 }
@@ -1488,6 +1559,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
                 degradeArcConvert("直通编码面掉链")
             }
         }
+        // 上屏槽同步让到编码 pass **之后**：首次切监看那一次的 program 链接是毫秒级，
+        // 不许让它挡在编码器的 swap 前面（与下面霜开关同一条纪律）。首帧仍成立：无编码面时
+        // 编码 pass 是空操作，display 在同一帧的窗口 pass 之前建好。
+        syncDisplaySlot()
+        // 两槽都空 = program 子系统整体不可用（连直通都链接不上），这一帧不出图
+        if (displaySlot.program == null && movieSlot.program == null) return
         // 开关意图从矩形表搬进门里——放在编码 pass **之后**：翻开关那一次的着色器编译是毫秒级，
         // 不许让它挡在编码器的 swap 前面（那是成片的一帧）
         adoptFrostIntentFromTable()
@@ -1501,6 +1578,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     private fun drawEncoderPass() {
         val encoder = encoderEglSurface ?: return
+        // 成片 program 不可用 ⇒ 宁可丢这一帧也不 stamp/swap（stamp 会推进位次账、swap 会交出一帧
+        // 从未绘制的缓冲）。**绝不拿上屏槽的 program 补**——那是把斑马纹重新灌进成片的唯一路径。
+        if (movieSlot.program == null) return
         if (!makeCurrent(encoder)) {
             dropEncoderSurface()
             return
@@ -1523,6 +1603,11 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         val mend = arcMendPass
         if (encoder == null || mend == null || !mend.ready || encoderWidth <= 0) {
             degradeArcConvert("补弧链未就绪")
+            return true
+        }
+        if (movieSlot.program == null) {
+            // 成片 program 不可用：本帧按"需要直通补发"处理（内部已降级），绝不拿上屏槽的 program 补
+            degradeArcConvert("成片 program 不可用")
             return true
         }
         if (!makeCurrent(encoder)) {
@@ -1786,6 +1871,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     private fun drawWindowPass(stateOnly: Boolean) {
         val window = windowEglSurface ?: return
+        // 上屏 program 不可用（整条回退阶梯都编不出来）：宁可这一帧不刷窗口，也不清黑 + swap——
+        // 那会闪一帧纯黑（§3.4 的失败隔离：上屏失败不该有任何可见副作用以外的动作）
+        if (displaySlot.program == null) return
         if (!stateOnly && windowThrottled()) return
         if (!makeCurrent(window)) {
             dropWindowSurface()
@@ -1870,6 +1958,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         encoderNative = null
         encoderWidth = 0
         encoderHeight = 0
+        // movie 槽只清引用、不删 program：同一枚可能正被 display 槽共用 / 在会话缓存里等着复用，
+        // 统一由缓存淘汰与 [releaseGl] 收口
+        movieSlot.clearBinding()
     }
 
     private fun windowThrottled(): Boolean {
@@ -1900,53 +1991,63 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         }
     }
 
+    /**
+     * 两条输出路唯一的绘制例程：**按布尔选槽**，其余逐行不变。
+     *
+     * 不变量（双槽模型的编译期外契约，`ProgramKeyTest` / `MonitorEffectEncoderGuardTest` 钉着）：
+     * - `p.applied.effect != NONE ⇒ p.applied.denoise == 0`——`uTexel` 一颗 uniform 被峰值与降噪共用，
+     *   靠这条保证两者不同时在场（由 [displayProgramKey] 的降噪闸给出）；
+     * - 编码 pass 只能拿到 movie 槽（effect 恒 NONE），监看叠加结构上进不了成片。
+     *
+     * 贴图坐标与输出面仍由 `encoderPass` 决定（[buildTexCoords]）：编码只抵消矩阵分量、不转正不镜像。
+     */
     private fun drawPass(encoderPass: Boolean) {
-        if (programId == 0) return
-        GLES20.glUseProgram(programId)
+        val p = (if (encoderPass) movieSlot else displaySlot).program ?: return
+        GLES20.glUseProgram(p.id)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
-        if (uFrameLoc >= 0) GLES20.glUniform1i(uFrameLoc, 0)
-        if (uTexMatrixLoc >= 0) GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, stMatrix, 0)
+        if (p.uFrame >= 0) GLES20.glUniform1i(p.uFrame, 0)
+        if (p.uTexMatrix >= 0) GLES20.glUniformMatrix4fv(p.uTexMatrix, 1, false, stMatrix, 0)
 
-        if (programCurve) {
+        if (p.applied.curve) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curveTextureId)
-            if (uCurveLoc >= 0) GLES20.glUniform1i(uCurveLoc, 2)
+            if (p.uCurve >= 0) GLES20.glUniform1i(p.uCurve, 2)
         }
 
-        if (programEffect == FrameEffect.ZEBRA) {
+        if (p.applied.effect == FrameEffect.ZEBRA) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, stripeTextureId)
-            if (uStripeLoc >= 0) GLES20.glUniform1i(uStripeLoc, 1)
-            if (uThresholdLoc >= 0) GLES20.glUniform1f(uThresholdLoc, wantZebraThreshold)
+            if (p.uStripe >= 0) GLES20.glUniform1i(p.uStripe, 1)
+            if (p.uThreshold >= 0) GLES20.glUniform1f(p.uThreshold, wantZebraThreshold)
             val repeat = ZebraPattern.tileRepeat(wantZebraDensity)
-            if (uTileLoc >= 0) GLES20.glUniform2f(uTileLoc, repeat, repeat)
-        } else if (programEffect == FrameEffect.PEAKING) {
-            if (uTexelLoc >= 0) GLES20.glUniform2f(uTexelLoc, PEAKING_TEXEL, PEAKING_TEXEL)
-            if (uStrengthLoc >= 0) GLES20.glUniform1f(uStrengthLoc, wantPeakingStrength)
+            if (p.uTile >= 0) GLES20.glUniform2f(p.uTile, repeat, repeat)
+        } else if (p.applied.effect == FrameEffect.PEAKING) {
+            if (p.uTexel >= 0) GLES20.glUniform2f(p.uTexel, PEAKING_TEXEL, PEAKING_TEXEL)
+            if (p.uStrength >= 0) GLES20.glUniform1f(p.uStrength, wantPeakingStrength)
             val rgb = peakingRgb(wantPeakingColor)
-            if (uColorLoc >= 0) GLES20.glUniform3f(uColorLoc, rgb[0], rgb[1], rgb[2])
+            if (p.uColor >= 0) GLES20.glUniform3f(p.uColor, rgb[0], rgb[1], rgb[2])
         }
 
         // 双边降噪的 uniform（2026-10-26）：纹素步长取相机帧尺寸（错则降噪半径错）；
         // 只在本帧 program 确为双边档时写，不给直通/曲线 program 白设未知 uniform
-        if (programDenoiseLevel != 0) {
-            if (uTexelLoc >= 0 && wantFrameWidth > 0 && wantFrameHeight > 0) {
-                GLES20.glUniform2f(uTexelLoc, 1f / wantFrameWidth, 1f / wantFrameHeight)
+        if (p.applied.denoise != DENOISE_LEVEL_OFF) {
+            if (p.uTexel >= 0 && wantFrameWidth > 0 && wantFrameHeight > 0) {
+                GLES20.glUniform2f(p.uTexel, 1f / wantFrameWidth, 1f / wantFrameHeight)
             }
-            if (uSigmaRLoc >= 0) GLES20.glUniform1f(uSigmaRLoc, denoiseSigmaR)
+            if (p.uSigmaR >= 0) GLES20.glUniform1f(p.uSigmaR, denoiseSigmaR)
         }
 
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
         buildTexCoords(encoderPass)
-        if (aPositionLoc >= 0) {
-            GLES20.glEnableVertexAttribArray(aPositionLoc)
-            GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 0, positionBuffer)
+        if (p.aPosition >= 0) {
+            GLES20.glEnableVertexAttribArray(p.aPosition)
+            GLES20.glVertexAttribPointer(p.aPosition, 2, GLES20.GL_FLOAT, false, 0, positionBuffer)
         }
-        if (aTexCoordLoc >= 0) {
-            GLES20.glEnableVertexAttribArray(aTexCoordLoc)
-            GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, coords)
+        if (p.aTexCoord >= 0) {
+            GLES20.glEnableVertexAttribArray(p.aTexCoord)
+            GLES20.glVertexAttribPointer(p.aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
         }
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
@@ -2026,36 +2127,94 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
 
     // endregion
 
-    // region 内部实现：program 与纹理（单效果槽）
+    // region 内部实现：program 与纹理（双槽）
 
-    private fun syncEffect() {
-        // 「程序尚未建出来」必须和「效果没变」分开判断：初值 programEffect 就是 NONE，
-        // 只看效果是否相同会让直通 program 永远不编译，预览整块黑（真机踩过）。
-        if (programId == 0 && passThroughFailed) return
-        val requested = wantEffect
-        val target = if (requested == blacklistedEffect) FrameEffect.NONE else requested
-        val curveOn = curveBytes != null && !curveFailed
-        val denoiseLevel = denoiseLevelNow()
-        if (programId != 0 && target == programEffect && curveOn == programCurve &&
-            denoiseLevel == programDenoiseLevel
-        ) {
-            if (target == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
-            // 开关状态没变、只是曲线形状改了：重传表即可，重建 program 会闪一帧
-            if (programCurve) ensureCurveTexture()
+    /**
+     * Glow 维度（docs/plan/24 R2/R3）：它是 scene layer，两槽都带、进成片。
+     * **B2 阶段恒 false**——键里留位、暂不接特效（B6 只改这一处，两个槽自动跟上）。
+     */
+    private fun glowOn(): Boolean = false
+
+    /**
+     * **成片槽**同步：必须在编码 pass 之前调（[drawFrame]）。键 = [movieProgramKey]，effect 恒 NONE。
+     *
+     * 没有编码面就**不建** movie（空闲预览不白编一枚用不到的程序）：只清绑定、不删对象——
+     * 同一枚 program 可能正被 display 共用，或者在会话缓存里等着下一次起录复用。
+     *
+     * 键变了才重建（`requested` 记请求键，`program.applied` 记实际键）。失败走 §3.4 的回退阶梯，
+     * 坏键记进 [failedKeys]（同一坏键不逐帧重试）。
+     */
+    private fun syncMovieSlot() {
+        val wantMov = movieProgramKey(curveBytes != null, denoiseLevelNow(), glowOn())
+        if (encoderEglSurface == null) {
+            movieSlot.clearBinding()
+            syncEffectTextures()
             return
         }
-        if (programId != 0) {
-            //  单效果槽：切换时先删旧 program 再建新的，同一时刻只亮一个
-            GLES20.glDeleteProgram(programId)
-            programId = 0
+        if (movieSlot.program == null || movieSlot.requested != wantMov) {
+            movieSlot.requested = wantMov
+            movieSlot.program = buildProgram(wantMov, "movie")
         }
-        programEffect = FrameEffect.NONE
-        programCurve = false
-        programDenoiseLevel = 0
-        buildProgram(target, curveOn, denoiseLevel)
-        if (programEffect != FrameEffect.ZEBRA) deleteStripeTexture()
-        if (programEffect == FrameEffect.ZEBRA) ensureStripeTexture(wantZebraDensity)
-        if (programCurve) ensureCurveTexture() else deleteCurveTexture()
+        syncEffectTextures()
+    }
+
+    /**
+     * **上屏槽**同步：必须在编码 pass **之后**调（[drawFrame]）——首次切监看那一次的 program
+     * 链接是毫秒级，不许挡在编码器的 swap 前面（与霜开关同一条纪律，§3.9.2-2）。
+     *
+     * 与 movie 同键且 movie 已建好 ⇒ **直接共用**那一枚（`effect=NONE` 时零编译的根源）；
+     * 否则按自己的键取/建（监看叠加只影响 display 的键）。
+     */
+    private fun syncDisplaySlot() {
+        val curveOn = curveBytes != null
+        val denoise = denoiseLevelNow()
+        val glow = glowOn()
+        val wantDisp = displayProgramKey(wantEffect, curveOn, denoise, glow)
+        val wantMov = movieProgramKey(curveOn, denoise, glow)
+        if (wantDisp == wantMov && movieSlot.program?.applied == wantMov) {
+            // 两槽同键且成片那枚就是本键 ⇒ 直接共用（不新增编译、不新增显存）。
+            // movie 走了回退（applied ≠ 请求键）时不共用：各按自己的键取一次，缓存键相同 ⇒
+            // 取到的仍是同一枚回退 program，不重复编译
+            displaySlot.requested = wantDisp
+            displaySlot.program = movieSlot.program
+        } else if (displaySlot.program == null || displaySlot.requested != wantDisp) {
+            displaySlot.requested = wantDisp
+            displaySlot.program = buildProgram(wantDisp, "display")
+        }
+        syncEffectTextures()
+    }
+
+    /**
+     * 两槽共享的两张纹理（§3.7）：
+     * - 斑马条纹瓦片**只属于上屏槽**（monitor layer）——删除判据看 display 的 `applied.effect`；
+     * - 曲线 LUT 两槽共享——**任一槽**的 `applied.curve` 为真就留着，都为假才删。
+     *
+     * 每帧都调是安全的：两个 ensure 各自带"形状/表没变就早退"的判据，改曲线表只重传、不重建 program。
+     */
+    private fun syncEffectTextures() {
+        if (displaySlot.program?.applied?.effect == FrameEffect.ZEBRA) {
+            ensureStripeTexture(wantZebraDensity)
+        } else {
+            deleteStripeTexture()
+        }
+        if (movieSlot.program?.applied?.curve == true || displaySlot.program?.applied?.curve == true) {
+            ensureCurveTexture()
+        } else {
+            deleteCurveTexture()
+        }
+    }
+
+    /**
+     * 失败备忘被清掉之后**给两槽一次重试机会**：只作废"请求键"、保留 program 引用。
+     *
+     * 为什么不能只清 [failedKeys]：槽里可能正挂着回退结果（`requested.curve=true` 但
+     * `applied.curve=false`），只看"请求键没变"就又走回老路，曲线改了一直不生效。
+     * 保留 program 引用的理由：这一瞬 `syncEffectTextures` 还能查到 applied，不会把
+     * 上屏正在用的条纹/曲线纹理误删（那些 delete 都看槽里的 applied）。
+     */
+    private fun retrySlots() {
+        displaySlot.requested = null
+        movieSlot.requested = null
     }
 
     /**
@@ -2069,99 +2228,116 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
      * 无编码面（只在预览）时一律完整核：那时没有成片帧要保，少一层降噪反而是损失。
      */
     private fun denoiseLevelNow(): Int = when {
-        !wantDenoise -> 0
+        !wantDenoise -> DENOISE_LEVEL_OFF
         encoderEglSurface != null && encoderFps > 0 &&
-            com.wotagei.cam.core.denoiseKernelLite(encoderWidth, encoderHeight, encoderFps) -> DENOISE_LITE
-        else -> DENOISE_FULL
+            com.wotagei.cam.core.denoiseKernelLite(encoderWidth, encoderHeight, encoderFps) ->
+            DENOISE_LEVEL_LITE
+        else -> DENOISE_LEVEL_FULL
     }
 
     /**
-     * 按"效果 × 曲线 × 降噪档"挑片元着色器。**降噪只在 effect=NONE（直通/曲线）这两条成片支路**，
-     * 斑马纹与峰值对焦那两条一律不带（见 [buildProgram] 的注释）。
-     * 抽成函数是因为链接失败的回退链要在同一套组合上试第二次、第三次（完整核 / 不带降噪），
-     * 手写那几份 when 必然会漏一条。
+     * 四维键 → 片元着色器。**降噪只在 effect=NONE（直通/曲线）这两条支路**：斑马纹与峰值对焦是
+     * 判读工具，对它们降噪没有意义（这条口径由 [displayProgramKey] 的降噪闸保证，不是在这里判）。
+     * 抽成函数是因为回退阶梯的每一级都换一个键、也就换一份源码。
      */
-    private fun bilateralFragment(effect: FrameEffect, curveOn: Boolean, denoise: Int): String = when (effect) {
-        FrameEffect.ZEBRA -> Shaders.zebraFragment(curveOn)
-        FrameEffect.PEAKING -> Shaders.peakingFragment(curveOn)
+    private fun fragmentFor(key: ProgramKey): String = when (key.effect) {
+        FrameEffect.ZEBRA -> Shaders.zebraFragment(key.curve)
+        FrameEffect.PEAKING -> Shaders.peakingFragment(key.curve)
         else -> when {
-            denoise == DENOISE_LITE && curveOn -> Shaders.BILATERAL_LITE_CURVE_FS
-            denoise == DENOISE_LITE -> Shaders.BILATERAL_LITE_FS
-            denoise == DENOISE_FULL && curveOn -> Shaders.BILATERAL_CURVE_FS
-            denoise == DENOISE_FULL -> Shaders.BILATERAL_FS
-            curveOn -> Shaders.CURVE_FS
+            key.denoise == DENOISE_LEVEL_LITE && key.curve -> Shaders.BILATERAL_LITE_CURVE_FS
+            key.denoise == DENOISE_LEVEL_LITE -> Shaders.BILATERAL_LITE_FS
+            key.denoise == DENOISE_LEVEL_FULL && key.curve -> Shaders.BILATERAL_CURVE_FS
+            key.denoise == DENOISE_LEVEL_FULL -> Shaders.BILATERAL_FS
+            key.curve -> Shaders.CURVE_FS
             else -> Shaders.PASS_THROUGH_FS
         }
     }
 
-    private fun buildProgram(effect: FrameEffect, curveOn: Boolean, denoiseLevel: Int) {
-        // 画面降噪只作用于「直通 / 曲线」这两条成片支路——斑马纹与峰值对焦是**监看**叠加层，
-        // 对它们降噪等于对判读工具本身做处理，无意义且会拖慢帧；切换效果即回到各自程序。
-        val denoise = if (effect == FrameEffect.NONE) denoiseLevel else 0
-        val fragment = bilateralFragment(effect, curveOn, denoise)
-        var id = link(Shaders.TEXTURE_VS, fragment)
-        var effective = effect
-        var curveApplied = curveOn
-        var denoiseApplied = denoise
-        if (id == 0 && curveOn) {
-            // 曲线版编不出来时先退曲线、保住当前效果；只有直通本身失败才允许不出图
-            Log.w(TAG_GL, "曲线 program 链接失败，退回不带曲线的 $effect")
-            curveFailed = true
-            curveApplied = false
-            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, false, denoise))
+    /**
+     * 按**请求键**取一枚 program：先查会话缓存，再按 [nextFallback] 的单调阶梯逐级试。
+     *
+     * 失败隔离（§3.4）：每个链接失败的键写进 [failedKeys]、下一帧跳过重试；**display 的坏效果
+     * 只影响 display 的请求键**——movie 的键永远不会含 ZEBRA/PEAKING，所以它的曲线/降噪不会被
+     * 一次"开斑马"连坐掉（旧全局 `curveFailed` 的连坐缺陷）。
+     *
+     * @return null = 整条阶梯都不可用（连直通都链接不上），该槽本帧不出图
+     */
+    private fun buildProgram(want: ProgramKey, pass: String): GlProgram? {
+        // 请求键本身就是已知坏键 ⇒ 直接从它的下一级开始，不重复一次注定失败的链接
+        var candidate: ProgramKey? = if (want in failedKeys) nextFallback(want) else want
+        while (candidate != null) {
+            val key = candidate
+            if (key !in failedKeys) {
+                programCache[key]?.let { cached ->
+                    if (key != want) {
+                        Log.w(TAG_GL, "WotaGl program 回退：pass=$pass 请求 ${want.short()} → ${cached.applied.short()}（缓存命中）")
+                    }
+                    return cached
+                }
+                val program = linkProgram(key)
+                if (program != null) {
+                    putProgram(program)
+                    Log.i(TAG_GL, "WotaGl program：pass=$pass ${key.debug()} applied=${key.short()}")
+                    if (key != want) {
+                        Log.w(TAG_GL, "WotaGl program 回退：pass=$pass 请求 ${want.short()} → ${key.short()}")
+                    }
+                    return program
+                }
+                failedKeys += key
+                Log.w(TAG_GL, "WotaGl program 回退：pass=$pass 键 ${key.short()} 链接失败，降下一级")
+            }
+            candidate = nextFallback(key)
         }
-        if (id == 0 && denoiseApplied == DENOISE_LITE) {
-            // 轻量核编不出来（个别驱动对更短的循环也挑）⇒ **退回完整核**而不是直接关降噪：
-            // 两档只差邻域集合，完整核是长期在用的一支，成功率更高。
-            Log.w(TAG_GL, "轻量降噪 program 链接失败，退回完整核")
-            denoiseApplied = DENOISE_FULL
-            curveApplied = curveOn && !curveFailed
-            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, curveApplied, DENOISE_FULL))
+        Log.w(TAG_GL, "WotaGl program：pass=$pass 请求 ${want.short()} 整条回退阶梯都不可用——本槽不出图")
+        return null
+    }
+
+    /** 真正链接一枚 program 并取齐所有 location（[key] 即实际编译的键） */
+    private fun linkProgram(key: ProgramKey): GlProgram? {
+        val id = link(Shaders.TEXTURE_VS, fragmentFor(key))
+        if (id == 0) return null
+        if (key.denoise != DENOISE_LEVEL_OFF) {
+            // 切档留痕（2026-10-26）：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样，按负载自动降档）。
+            // 真机核对"到底用没用到轻量档"就 grep 这一行，不用重编也不用看帧账
+            Log.i(TAG_GL, "画面降噪 program：档=${key.denoise}（0=关 1=完整 2=轻量）")
         }
-        if (id == 0 && denoiseApplied != 0) {
-            // 两档都编不出来：退回"不带降噪"的同效果 program（画面照旧、只是没降噪），并留日志——
-            // 排障先看这一行，别去怀疑参数（早期注释曾自称"已规避循环风险"，与实现不符）
-            Log.w(TAG_GL, "降噪 program 链接失败（完整核与轻量核都试过），退回不带降噪")
-            denoiseApplied = 0
-            curveApplied = curveOn && !curveFailed
-            id = link(Shaders.TEXTURE_VS, bilateralFragment(effect, curveApplied, 0))
-        }
-        if (id == 0 && effective != FrameEffect.NONE) {
-            // 少数驱动不支持片元 highp：退化成直通而不是黑屏，并记住该档不再重试
-            Log.w(TAG_GL, "效果 $effective 的 program 链接失败，退回直通")
-            blacklistedEffect = effective
-            effective = FrameEffect.NONE
-            curveApplied = false
-            id = link(Shaders.TEXTURE_VS, Shaders.PASS_THROUGH_FS)
-        }
-        if (id == 0) {
-            Log.w(TAG_GL, "直通 program 链接失败，本引擎不出图")
-            passThroughFailed = true
-            return
-        }
-        programId = id
-        programEffect = effective
-        programCurve = curveApplied
-        programDenoiseLevel = denoiseApplied
-        // 切档留痕（2026-10-26）：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样，按负载自动降档）。
-        // 真机核对"到底用没用到轻量档"就 grep 这一行，不用重编也不用看帧账
-        Log.i(TAG_GL, "画面降噪 program：档=$denoiseApplied（0=关 1=完整 2=轻量）")
-        aPositionLoc = GLES20.glGetAttribLocation(id, "aPosition")
-        aTexCoordLoc = GLES20.glGetAttribLocation(id, "aTexCoord")
-        uTexMatrixLoc = GLES20.glGetUniformLocation(id, "uTexMatrix")
-        uFrameLoc = GLES20.glGetUniformLocation(id, "uFrame")
-        uStripeLoc = GLES20.glGetUniformLocation(id, "uStripe")
-        uThresholdLoc = GLES20.glGetUniformLocation(id, "uThreshold")
-        uTileLoc = GLES20.glGetUniformLocation(id, "uTile")
-        uTexelLoc = GLES20.glGetUniformLocation(id, "uTexel")
-        uStrengthLoc = GLES20.glGetUniformLocation(id, "uStrength")
-        uColorLoc = GLES20.glGetUniformLocation(id, "uColor")
-        uCurveLoc = GLES20.glGetUniformLocation(id, "uCurve")
-        uSigmaRLoc = GLES20.glGetUniformLocation(id, "uSigmaR")
+        return GlProgram(
+            applied = key,
+            id = id,
+            aPosition = GLES20.glGetAttribLocation(id, "aPosition"),
+            aTexCoord = GLES20.glGetAttribLocation(id, "aTexCoord"),
+            uTexMatrix = GLES20.glGetUniformLocation(id, "uTexMatrix"),
+            uFrame = GLES20.glGetUniformLocation(id, "uFrame"),
+            uStripe = GLES20.glGetUniformLocation(id, "uStripe"),
+            uThreshold = GLES20.glGetUniformLocation(id, "uThreshold"),
+            uTile = GLES20.glGetUniformLocation(id, "uTile"),
+            uTexel = GLES20.glGetUniformLocation(id, "uTexel"),
+            uStrength = GLES20.glGetUniformLocation(id, "uStrength"),
+            uColor = GLES20.glGetUniformLocation(id, "uColor"),
+            uCurve = GLES20.glGetUniformLocation(id, "uCurve"),
+            uSigmaR = GLES20.glGetUniformLocation(id, "uSigmaR")
+        )
     }
 
     /**
-     * 曲线表变了才重传。`syncEffect` 每帧都会走到这里（早退分支也调它），
+     * 收进会话缓存（access-order LRU，上限 [PROGRAM_CACHE_LIMIT]）。
+     *
+     * 淘汰**跳过被任一槽引用的项**：把在用的 program 删掉会让那一槽下一帧拿到一个已删的 id。
+     * 极端情况下（全部在引用中）宁可暂时超上限，也不删在用的。
+     */
+    private fun putProgram(program: GlProgram) {
+        programCache[program.applied] = program
+        while (programCache.size > PROGRAM_CACHE_LIMIT) {
+            val victim = programCache.entries.firstOrNull {
+                it.value !== displaySlot.program && it.value !== movieSlot.program
+            } ?: return
+            programCache.remove(victim.key)
+            GLES20.glDeleteProgram(victim.value.id)
+        }
+    }
+
+    /**
+     * 曲线表变了才重传。[syncEffectTextures] 每帧都会走到这里（两槽同步的尾部），
      * 不加这道判断就是每帧分配一个 direct buffer + 整表 `glTexImage2D`，
      * 拖动曲线时预览会自己掉帧——本来想验的"跟手"就被我这行改没了。
      */
@@ -2295,12 +2471,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider,
         // 删除资源需要 current 上下文，用 pbuffer 兜底
         makeCurrent(pbufferSurface)
 
-        if (programId != 0) {
-            GLES20.glDeleteProgram(programId)
-            programId = 0
-        }
-        programEffect = FrameEffect.NONE
-        programCurve = false
+        // 两槽绑定先松手，再把会话缓存里的 program 一次删光（含被槽引用的那几枚）——
+        // 这里是全引擎唯一的 program 释放点，漏登记就是 ID 残留 + 上下文销毁前不回收
+        displaySlot.clearBinding()
+        movieSlot.clearBinding()
+        programCache.values.forEach { GLES20.glDeleteProgram(it.id) }
+        programCache.clear()
+        failedKeys.clear()
         // 离屏链的 2 纹理 + 2 FBO + 2 program 全在这一次调用里删（内部删完把 target 置 null）
         frostChain?.release()
         frostChain = null
