@@ -105,12 +105,13 @@ fun TierPicker(
             enabled = enabled
         )
         note?.let {
+            // 说明不限行数（2026-10-28 用户反馈：部分设备上「启动后自动亮屏」的说明被截断）——
+            // 说明句在窄屏/大字体下两行都装不下，maxLines=1+Ellipsis 会把关键尾句（"0 = 关闭"这类）
+            // 吞掉。消费方（设置页/参数弹层）都是纵向可滚容器，高度增长有处去。
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodyMedium,
                 color = WotaTextDim,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(bottom = 4.dp)
             )
         }
