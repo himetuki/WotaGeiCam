@@ -89,6 +89,7 @@ desktop.ini
 /.tmp/
 
 # ===== 依赖锁与本机临时产物（不入版本库）=====
+/docs/remained/
 /HarmonyOS/**/*-lock.json5
 /HarmonyOS/**/*.localbak*
 /.*.json
