@@ -122,12 +122,24 @@ function entryToSlot(e: LensEntry, type: LensType): LensSlot {
 
 /** 单颗设备的能力采集：getSupportedOutputCapability 失败/为空时用空表（各字段闭集兜底） */
 function abilityOfDevice(mgr: camera.CameraManager, device: camera.CameraDevice): CameraAbility {
-  // 用 mode 版（无 mode 版自 API 11 废弃）；预览/照片链路按 NORMAL_PHOTO 采集，
-  // 录制批将按 NORMAL_VIDEO 再采一份（video 档能力以录制会话为准，登记）
-  const capability: camera.CameraOutputCapability | undefined =
+  // 用 mode 版（无 mode 版自 API 11 废弃）；预览/照片链路按 NORMAL_PHOTO 采集。
+  // **2026-10-28 逻辑漏洞修复**：NORMAL_PHOTO 表的 videoProfiles 常为空（模拟器实证
+  // fpsRanges= 空）⇒ decideFps 全档灰 = 帧率弹层死锁。视频档能力必须以 NORMAL_VIDEO
+  // 会话表为准，这里两表合并（预览/照片用 PHOTO，videoProfiles 并上 VIDEO）。
+  const photoCap: camera.CameraOutputCapability | undefined =
     tryLens((): camera.CameraOutputCapability =>
       mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_PHOTO));
-  return abilityFromKit(device.cameraId, device, capability ?? EMPTY_CAPABILITY);
+  const videoCap: camera.CameraOutputCapability | undefined =
+    tryLens((): camera.CameraOutputCapability =>
+      mgr.getSupportedOutputCapability(device, camera.SceneMode.NORMAL_VIDEO));
+  const base: camera.CameraOutputCapability = photoCap ?? EMPTY_CAPABILITY;
+  const merged: camera.CameraOutputCapability = {
+    previewProfiles: base.previewProfiles ?? [],
+    photoProfiles: base.photoProfiles ?? [],
+    videoProfiles: (base.videoProfiles ?? []).concat(videoCap?.videoProfiles ?? []),
+    supportedMetadataObjectTypes: []
+  };
+  return abilityFromKit(device.cameraId, device, merged);
 }
 
 /**

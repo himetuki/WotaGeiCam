@@ -667,6 +667,27 @@ EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 OR
 | 高帧率档位 | 🟡 等 VideoSession 帧率平台面 |
 | 前摄/方向 | ✅ 模拟器标定 v1→v4；真机须按 SENSOR 语义复测 |
 
+## 修复批（LOGICFIX：逻辑漏洞与功能错位，2026-10-28）
+
+deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` + 本机 SDK d.ts 为权威）驱动的
+全量对账修复。
+
+- **fps 数据源死锁（逻辑漏洞，P1）**：`abilityOfDevice` 只取 `NORMAL_PHOTO` 场景能力，
+  该表 videoProfiles 常为空（模拟器实证 `fpsRanges=` 空）⇒ `decideFps` 全档 undefined ⇒
+  帧率弹层全灰、参数总线 `inexactDisabled`、`applyPreviewFps` 无据。**修复**：并行取
+  `NORMAL_VIDEO` 能力表并把 videoProfiles 并入（预览/照片仍用 PHOTO 表）。实测
+  `fpsRanges=[30,60]`——30/50/60 可选（※ 近似档），24/25/120/240 诚实灰显。
+- **右上第一圆钮功能错位**：原误接「网格」与左侧圆形网格钮重复；按安卓位语义改**参考线
+  快切**（外框图标，全开 2047/全关，与设置页多选同源），网格只归左侧圆钮。
+- **Glow 持久化跨重启验证**：重装后 `glow params enabled=1` 自动生效（glow_params → 参数→链）。
+- **降噪变体运行时验证**：`program slot effect=0 curve=0 denoise=1`（full 核）。
+- **登记（待真机/产品面）**：① 音量表在 MIC 权限未授予前恒 `—`（探针静默；GPU 录制链无
+  音频轨，不主动弹麦克风权限——与 Android「未授权录音时电平表无读数」同姿态）；
+  ② 模拟器 HAL 拒 `exposureMode` 导致状态行常驻「参数下发失败」噪声（真机无此现象）；
+  ③ DisplayScale「预览：原片」读数仍为常量（缩放上屏链留白）；④ Glow RT 以显示面尺寸
+  定档（本侧无相机帧原生尺寸观测面，登记偏离安卓 wantFrameWidth）。
+- **回归**：pure-test 82 files / 862 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
 追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置

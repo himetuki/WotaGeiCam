@@ -1530,6 +1530,18 @@ struct CameraPage {
     }
   }
 
+  /**
+   * 参考线快切（右上第一圆钮，安卓位=外框图标）：全开（11 档 2047）/ 全关。
+   * 与设置页「取景参考线」多选同源（settings.refLines），快切即互斥切换。
+   */
+  private toggleRefLines(): void {
+    const close: boolean = this.settings.refLines !== 0;
+    this.settings.refLines = close ? 0 : RefLine.fullMask();
+    this.refMask = this.settings.refLines;
+    this.persistSettings();
+    this.message = close ? '参考线:关' : '参考线:全开';
+  }
+
   private toggleGrid(): void {
     this.gridOn = !this.gridOn;
     this.settings.grid = this.gridOn;
@@ -3083,29 +3095,28 @@ struct CameraPage {
           .alignItems(HorizontalAlign.Start)
           .position({ x: LAND_MARGIN, y: this.landTop() })
 
-          // 2. 右上：三颗圆形深色按钮（网格开关 / HUD 位置编辑 / 设置）
+          // 2. 右上：三颗圆形深色按钮（参考线快切 / HUD 位置编辑 / 设置）
+          //    功能错位修复（2026-10-28）：第一钮原误接「网格」，与左侧圆形网格钮重复；
+          //    按安卓位语义（外框图标）改「参考线」全开/关快切，网格只归左侧圆钮。
           Row({ space: LAND_ROUND_GAP }) {
             Button() {
-              Column({ space: 3 }) {
-                Row({ space: 3 }) {
-                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
-                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
-                }
-                Row({ space: 3 }) {
-                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
-                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
-                }
+              Column({ space: 4 }) {
+                Column()
+                  .width(20)
+                  .height(13)
+                  .border({ width: 1.5, color: HudColor.TEXT_PRIMARY })
+                  .borderRadius(1)
               }
             }
             .type(ButtonType.Normal)
             .width(LAND_ROUND)
             .height(LAND_ROUND)
             .borderRadius(LAND_ROUND / 2)
-            .backgroundColor(LAND_PANEL_BG)
+            .backgroundColor(this.settings.refLines !== 0 ? LAND_ACCENT_BLUE : LAND_PANEL_BG)
             .padding(0)
-            .accessibilityText('网格')
+            .accessibilityText('参考线')
             .onClick((): void => {
-              this.toggleGrid();
+              this.toggleRefLines();
             })
 
             // 中钮 = HUD 位置编辑页（安卓侧无旧面板，2026-10-28 用户裁决）
