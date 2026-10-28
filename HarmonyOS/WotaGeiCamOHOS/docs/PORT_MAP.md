@@ -426,6 +426,24 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   本侧编码槽现为 curve 单自由度，扩 glow 时一并升级。
 - **回归**：pure-test 79 files / 830 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（DSCALE：上屏降档纯函数层，2026-10-28）
+
+上游 `1e61e15` + `58464fc` 的 **core 纯逻辑层**。追赶基线第七批。与 Glow 同款拆分纪律。
+
+- **`core/DisplayScaleRt.ets`**：`DisplayScale` 五档枚举（ORIG/HALF/QUARTER/EIGHTH/SIXTEENTH，
+  除数 2 的幂）+ `resolveDisplayRtInto`/`resolveDisplayRtOrNull`（floor 缩放、任一维 < 128
+  不可用且**不写数组**——三处共用同一判据不做 1×1 兜底）+ `nearestDisplayScale`（回落从
+  **下一档**开始找——把 current 算进来会在「失败原因非尺寸」时无限循环；ORIG 恒兜底）+
+  `displayScaleReadoutLabel`（读数 = 档位标签，UI 只套「预览：%s」）+ `displayRtNeedsRebuild`
+  （只看尺寸与开关无关；目标非法 false 不在重建判据里拆资源）。
+- **登记（native 链随真机批）**：OHOS 预览链**没有中间取景器 RT**（效果直接画上屏 surface；
+  唯一离屏是毛玻璃专属）。等价落法只有两条：降相机流尺寸（连成片一起降，违反「成片不变」
+  红线，不可取）或新建「效果 → 缩小 RT → 放大 blit 上屏」链（GPU 新路径，帧率/观感必须真机
+  取证）。UI 档位/「预览：<档位值>」读数（58464fc）依赖该面，随同一批。
+- **守卫**：`test/pure/display-scale-rt.test.ets` 9 例（floor 缩放/128 边界含恰等/非法不写数组/
+  out 不足抛/Pair 版同判/回落不回 current/读数标签/重建判据/fromDivisor 回 ORIG）。
+- **回归**：pure-test 80 files / 839 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是
