@@ -351,11 +351,20 @@ private fun applyPageMode(activity: Activity?, route: String?) {
     val orientation = WotaSettings.uiOrientation(WotaSettings.of(act))
     act.requestedOrientation = UIOrientation.screenOrientationOf(orientation)
     val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
-    if (hudPage) {
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-    } else {
-        controller.show(WindowInsetsCompat.Type.systemBars())
+    when {
+        // HUD 页（录制页 + 编辑控件页）：全沉浸
+        hudPage -> {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        // 播放页（29 §6.2）：**只隐藏状态栏**，导航栏保持显示。状态栏隐藏后 statusBars inset 自然
+        // 变 0（顶栏贴到顶）；下滑临时呼出时 inset 回来、顶栏自动下移。edge-to-edge 下隐藏状态栏
+        // 不改变窗口尺寸 ⇒ 视频面尺寸恒定（29 §6.5 硬约束的成立前提；OEM 若额外缩窗按 §6.6 退回）
+        route == WotaNav.PLAYER -> {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.statusBars())
+        }
+        else -> controller.show(WindowInsetsCompat.Type.systemBars())
     }
 }
 

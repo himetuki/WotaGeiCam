@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoFixHigh
@@ -54,6 +55,8 @@ import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Flip
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Repeat
@@ -91,6 +94,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color as ComposeColor
@@ -180,6 +184,14 @@ private val TopBarGlyphSize: Dp = 18.dp
 /** 播放/暂停是底栏主操作，比其余图标位大一圈 */
 private val PlayIconSize: Dp = 36.dp
 private val PlayGlyphSize: Dp = 26.dp
+
+/** 浮动返回（29 §6.3）：40dp 命中盒 / 20dp 图标；透明背景 + 淡阴影，不用卡底 */
+private val FloatingBackSize: Dp = 40.dp
+private val FloatingBackGlyphSize: Dp = 20.dp
+
+/** 「拉出」钮（29 §6.4）：dock 第一行右端的 28dp 绿圆钮 / 18dp 深色图形 */
+private val PullOutSize: Dp = 28.dp
+private val PullOutGlyphSize: Dp = 18.dp
 
 /** 倍速档位文案（05 文档档位定版：0.1 / 0.3 / 0.5 / 0.75 / 1.0） */
 @StringRes
@@ -410,6 +422,10 @@ fun PlayerScreen(
     }
 
     var controlsVisible by remember { mutableStateOf(true) }
+    // 顶栏持久收起（29 §6.3）：进页读、点按写，冷启保持；chrome 四层的唯一真源是 playerChromeOf
+    //（prefs 已在上方光弧段声明，直接复用同一份）
+    var topBarCollapsed by remember { mutableStateOf(WotaSettings.playerTopBarCollapsed(prefs)) }
+    val chrome = playerChromeOf(controlsVisible, topBarCollapsed)
     var banner by remember { mutableStateOf<Int?>(null) }
     val zoom = remember { mutableStateOf(1f) }
     // 双指平移（2026-10-04）：与缩放同一手势，域由 pinchZoom 内 clampPan 夹住，捏回 1x 自动归零
@@ -559,10 +575,11 @@ fun PlayerScreen(
             }
 
             // 双击显隐控件是播放页最高频的一次变化，整块硬切最刺眼：顶栏从上方落、底栏从下方升，
-            // 两条 AnimatedVisibility 互不干涉，因为它们的 align 各自挂在 Box 上
+            // 两条 AnimatedVisibility 互不干涉，因为它们的 align 各自挂在 Box 上。
+            // 顶栏显隐 = chrome.topBar（控件可见 且 未持久收起，29 §6.3 状态矩阵唯一真源）
             val cm = LocalMotion.current
             AnimatedVisibility(
-                visible = controlsVisible,
+                visible = chrome.topBar,
                 enter = fadeIn(cm.float) + slideInVertically(cm.offset) { -it },
                 exit = fadeOut(cm.float) + slideOutVertically(cm.offset) { -it },
                 modifier = Modifier.align(Alignment.TopStart)
@@ -578,27 +595,43 @@ fun PlayerScreen(
                         if (clip.isTrashed) ops.restoreFromTrash(listOf(clip)) else ops.moveToTrash(listOf(clip))
                     },
                     onPurge = { purgeDialog = true },
-                    onCompare = { onCompare(clip.id) }
+                    onCompare = { onCompare(clip.id) },
+                    // 收起（29 §6.3）：落盘持久，重进/冷启保持
+                    onCollapse = {
+                        topBarCollapsed = true
+                        WotaSettings.setPlayerTopBarCollapsed(prefs, true)
+                    }
                 )
             }
 
             AnimatedVisibility(
-                visible = controlsVisible,
+                visible = chrome.dock,
                 enter = fadeIn(cm.float) + slideInVertically(cm.offset) { it },
                 exit = fadeOut(cm.float) + slideOutVertically(cm.offset) { it },
                 modifier = Modifier.align(Alignment.BottomCenter)
             ) {
+                // 浮动 dock（29 §6.4）：系统栏/挖孔内边距留在**卡片外层**（卡片浮在导航条上方），
+                // 卡片自身圆角 + 亚克力 + 1dp 高光边；左右 12dp、底部 8dp；位置固定不可拖。
+                // 视频尺寸恒定（§6.5 硬约束）：dock 是覆盖层，不参与视频布局
                 Column(
                     Modifier
                         .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.displayCutout))
-                        .background(AcrylicScrim)
-                        .padding(bottom = 2.dp)
-                        // 与顶栏同一口径：时间读数 Text、两行之间的间隙原本不构成命中，
-                        // 点上去会穿透到画面手势区误切显隐/误启停。空 pointerInput 只改
-                        // 命中归属，栏内控件（进度条拖动、按钮、AB 胶囊）事件照旧先于容器。
-                        // 防退化点同顶栏：JVM 测不到命中穿透，真机点时间读数实证。
-                        .pointerInput(Unit) {}
+                        .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
                 ) {
+                    // 卡片圆角：WotaShape.menu(20dp) 是**半径 token**（Dp），按 Shape 用要包一层
+                    // RoundedCornerShape——半径仍是那一个 token，别处改它这里跟着变
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(WotaShape.menu))
+                            .background(AcrylicScrim)
+                            .border(1.dp, WotaColor.outline, RoundedCornerShape(WotaShape.menu))
+                            // 与顶栏同一口径：时间读数 Text、两行之间的间隙原本不构成命中，
+                            // 点上去会穿透到画面手势区误切显隐/误启停。空 pointerInput 只改
+                            // 命中归属，栏内控件（进度条拖动、按钮、AB 胶囊）事件照旧先于容器。
+                            // 防退化点同顶栏：JVM 测不到命中穿透，真机点时间读数实证。
+                            .pointerInput(Unit) {}
+                    ) {
                     val timeStyle = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -617,6 +650,33 @@ fun PlayerScreen(
                             modifier = Modifier.weight(1f)
                         )
                         Text(formatDuration(duration), style = timeStyle, color = WotaTextDim)
+                        // 「拉出」钮（29 §6.4）：只在顶栏收起时渲染；整页唯一绿色元素——
+                        // 用户看到"没见过的颜色"会主动点一下，从而学会用拉出钮召回顶栏
+                        //（可发现性设计，不靠文案不靠动画）。绿实底 + 深色图形保证对比
+                        if (chrome.pullOut) {
+                            Box(
+                                Modifier
+                                    .padding(start = 6.dp)
+                                    .size(PullOutSize)
+                                    .clip(WotaShape.pill)
+                                    .background(WotaColor.pullOut)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        topBarCollapsed = false
+                                        WotaSettings.setPlayerTopBarCollapsed(prefs, false)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Outlined.KeyboardArrowDown,
+                                    contentDescription = stringResource(R.string.player_top_bar_expand),
+                                    tint = WotaColor.bg,
+                                    modifier = Modifier.size(PullOutGlyphSize)
+                                )
+                            }
+                        }
                     }
 
                     // 一行装下全部控件（用户 2026-09-28：三行太吃画面）。倍速钉在最右，
@@ -762,26 +822,43 @@ fun PlayerScreen(
                             onClick = { speedMenu = !speedMenu }
                         )
                     }
+                    }
                 }
             }
 
-            // 控件隐藏时只保留一个退出按钮，避免卡在播放页；和控件条交错淡入淡出，中间不留空档
+            // 浮动返回（29 §6.3）：完整顶栏不可见时恒在（收起 / 控件隐藏共用同一枚，不再分两种外观）
+            // ——它是退出播放页的唯一常驻出口。透明背景（不用 WotaIconButton 的卡底），40dp 命中盒 /
+            // 20dp 图标 + 淡阴影，让它在亮画面上也可辨。顶部区域被它让出的部分仍是画面手势区。
             AnimatedVisibility(
-                visible = !controlsVisible,
+                visible = chrome.floatingBack,
                 enter = fadeIn(cm.float),
                 exit = fadeOut(cm.float),
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
             ) {
-                WotaIconButton(
-                    image = Icons.Outlined.ArrowBack,
-                    description = stringResource(R.string.gallery_desc_back),
-                    onClick = onBack,
-                    modifier = Modifier.padding(6.dp),
-                    size = TopBarIconSize,
-                    glyph = TopBarGlyphSize
-                )
+                Box(
+                    Modifier
+                        .padding(6.dp)
+                        .size(FloatingBackSize)
+                        .clip(WotaShape.pill)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onBack
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Outlined.ArrowBack,
+                        contentDescription = stringResource(R.string.gallery_desc_back),
+                        // 淡阴影替代卡底：亮画面上可辨，又不挡画面（29 §6.3 已确认允许）
+                        tint = WotaText,
+                        modifier = Modifier
+                            .size(FloatingBackGlyphSize)
+                            .shadow(3.dp, WotaShape.pill, clip = false)
+                    )
+                }
             }
 
             if (controlsVisible && speedMenu) {
@@ -1523,14 +1600,17 @@ private fun PlayerTopBar(
     onShare: () -> Unit,
     onTrash: () -> Unit,
     onPurge: () -> Unit,
-    onCompare: () -> Unit
+    onCompare: () -> Unit,
+    onCollapse: () -> Unit
 ) {
     Row(
         modifier
             .fillMaxWidth()
             .background(AcrylicScrim)
             .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
-            .padding(horizontal = 2.dp, vertical = 2.dp)
+            // 29 §6.2-2：保留 statusBars ∪ displayCutout 内边距（状态栏隐藏后 inset 自然归 0，
+            // 顶栏贴到顶；下滑临时呼出时随之下移），纵向内边距 2dp → 1dp
+            .padding(horizontal = 2.dp, vertical = 1.dp)
             // 控件条容器必须自己是命中目标：这一行原本只有 background（不构成命中），
             // 文件名 Text 与四周内边距这些"裸区"的点按会穿透到底下的画面手势区，
             // 被判成画面单击（误切控件显隐）甚至两下凑成双击（误启停）。空 pointerInput
@@ -1570,6 +1650,12 @@ private fun PlayerTopBar(
             stringResource(R.string.gallery_menu_purge),
             tint = WotaRec,
             onClick = onPurge
+        )
+        // 第 8 枚（29 §6.3）：收起顶栏。放最右端不动 weight(1f) 的文件名布局，窄屏由 ellipsis 兜底
+        BarIconSlot(
+            Icons.Outlined.KeyboardArrowUp,
+            stringResource(R.string.player_top_bar_collapse),
+            onClick = onCollapse
         )
     }
 }

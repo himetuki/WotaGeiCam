@@ -8,6 +8,8 @@
     <string name="player_fps_step_exact">%1$.2f fps</string>
     <string name="player_loop_one">单视频循环</string>
     <string name="player_mirror">水平镜像</string>
+    <string name="player_top_bar_collapse">收起顶栏</string>
+    <string name="player_top_bar_expand">展开顶栏</string>
     <string name="player_zoom">%1$.1fx 缩放</string>
     <string name="player_zoom_badge">x%1$.2f</string>
     <string name="player_error">播放失败，文件可能已损坏或格式不支持</string>

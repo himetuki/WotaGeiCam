@@ -88,6 +88,14 @@ object WotaColor {
     val sliderFill = Color(0xFFFFFFFF)
     val sliderRest = Color(0xFF333333)
 
+    /**
+     * 播放页「拉出」钮的绿（29 §6.4，2026-10-28）：整页**唯一**绿色元素——用户看到
+     * 「没见过的颜色」会主动点一下，从而学会用拉出钮召回顶栏（可发现性设计）。
+     * #4CD07D 压 [bg] ≈9.7:1 过非文字 3:1 档；控件用绿实底 + 深色图形（[bg]），
+     * 白图形压它只有约 2:1 不可用，所以图形必须走深色。
+     */
+    val pullOut = Color(0xFF4CD07D)
+
     /** 对焦框与「AF-C · 已锁定曝光」状态点的琥珀 */
     val focus = Color(0xFFE8A33D)
 

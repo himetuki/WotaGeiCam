@@ -266,6 +266,12 @@ object WotaSettings {
     const val KEY_PLAYER_BRIGHTEN_RAMP_TENTHS = "player_brighten_ramp_tenths"
 
     /**
+     * 播放页顶栏持久收起（29 §6.3，2026-10-28）：boolean，缺省 false = 展开（保持现行为）。
+     * 进页读、点按写，退出重进/冷启保持。纯 UI 设置，**不走 [applyDefaultsOnce]**。
+     */
+    const val KEY_PLAYER_TOP_BAR_COLLAPSED = "player_top_bar_collapsed"
+
+    /**
      * 滑杆吸附开关（2026-10-21 用户反馈：变焦只有 0.5/1/1.5…，想调 1.2×/1.7×）。
      *
      * 存**关掉吸附**（改用连续值）的参数 id 集合，逗号分隔；缺键/空串 = 全部吸附（2026-10-17 的
@@ -461,6 +467,14 @@ object WotaSettings {
     /** 「起播渐亮」时长（十分之一秒）：坏值/越界回默认 10（=1.0s，29 §五 表定） */
     fun playerBrightenRampTenths(prefs: SharedPreferences): Int =
         prefs.getInt(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, 10).coerceIn(0, 30)
+
+    /** 播放页顶栏收起态：缺键 = 展开。读侧不做归一（boolean 没有坏域），写入方只有点按两枚钮 */
+    fun playerTopBarCollapsed(prefs: SharedPreferences): Boolean =
+        prefs.getBoolean(KEY_PLAYER_TOP_BAR_COLLAPSED, false)
+
+    fun setPlayerTopBarCollapsed(prefs: SharedPreferences, collapsed: Boolean) {
+        prefs.edit().putBoolean(KEY_PLAYER_TOP_BAR_COLLAPSED, collapsed).apply()
+    }
 
     /** 网格列数：旧值不在档位里（例如手写进 prefs 的 6）一律回落到 2 */
     fun galleryColumns(prefs: SharedPreferences): Int =
