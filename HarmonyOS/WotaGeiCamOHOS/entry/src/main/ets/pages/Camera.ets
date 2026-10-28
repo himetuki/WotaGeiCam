@@ -45,7 +45,7 @@
  * - 删除预览帧率死读数，只显录制帧率「Nfps」（复审 P3-2：去「录」前缀防 360vp 截字）。
  */
 import { common } from '@kit.AbilityKit';
-import { display, window } from '@kit.ArkUI';
+import { display, mediaquery, window } from '@kit.ArkUI';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
 import { camera } from '@kit.CameraKit';
@@ -122,6 +122,141 @@ const ZOOM_LEVELS: Array<number> = [1, 2, 3];
 const START_COOLDOWN_MS: number = 1000;
 /** 滑杆逐帧路径的落盘节流窗口：首请求立即落一次，之后每次动作完成后最多补一次 */
 const PARAMS_FLUSH_WINDOW_MS: number = 300;
+
+/**
+ * 横屏 HUD 局部色板/几何（T32 复刻安卓 r03 截图；HudTokens 不改）：
+ * - 深灰面板 #CC2A2A2E 是截图里左侧芯片容器/入口圆钮/录制长条的底色，芯片再亮一档 #CC3A3A3E；
+ * - 蓝色强调取截图里的 iOS 蓝 #FF0A84FF——HudColor.ACCENT 是录制粉红（#FF4D6A），
+ *   PageColor.ACCENT_BLUE(#FF0A59F7) 偏深一档；按「亮度不够可加局部常量」口径只在本文件取亮。
+ */
+const LAND_PANEL_BG: string = '#CC2A2A2E';
+const LAND_CHIP_BG: string = '#CC3A3A3E';
+const LAND_ACCENT_BLUE: string = '#FF0A84FF';
+/** 屏 816×377vp（2856×1320px @3.5）下的贴边距与控件尺寸 */
+const LAND_MARGIN: number = 12;
+const LAND_ROUND: number = 36;
+const LAND_ROUND_GAP: number = 8;
+const LAND_SIDE_PANEL_W: number = 100;
+/** 底部录制簇：左 32 + 图库 40 + 10 + 快门 72 + 10 + 镜头 64 + 右 8 = 236 宽（快门恰在簇中心）；
+ *  72 快门 + 上下 8 = 88 高 */
+const LAND_CLUSTER_W: number = 236;
+const LAND_CLUSTER_H: number = 88;
+/** 右下读数两行：快门 116 + 6 + 帧率 104 = 226（第二行 124 右对齐） */
+const LAND_READOUT_W: number = 226;
+
+/**
+ * 横屏文本芯片（照 r03 截图：34vp 高、全圆角、白字 12fp）。
+ * `dim` 只是半透明禁用观感，不置 enabled=false——未移植功能仍要能点出一句提示。
+ */
+@Component
+struct LandTag {
+  @Prop label: string = '';
+  @Prop dim: boolean = false;
+  @Prop accent: boolean = false;
+  @Prop tagWidth: number = 84;
+  @Prop tagHeight: number = 34;
+  onTap: () => void = (): void => {};
+
+  build() {
+    Button(this.label)
+      .type(ButtonType.Normal)
+      .fontSize(HudType.PILL)
+      .fontColor(HudColor.TEXT_PRIMARY)
+      .fontWeight(FontWeight.Medium)
+      .width(this.tagWidth)
+      .height(this.tagHeight)
+      .borderRadius(this.tagHeight / 2)
+      .backgroundColor(this.accent ? LAND_ACCENT_BLUE : LAND_CHIP_BG)
+      .opacity(this.dim ? 0.55 : 1)
+      .padding({ left: 4, right: 4 })
+      .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
+      .onClick((): void => {
+        this.onTap();
+      })
+  }
+}
+
+/** 横屏读数芯片（值白字 + 灰标签两段：AUTO 快门 / 24× 帧率 / AUTO 感光度 / n M 码率） */
+@Component
+struct LandReadout {
+  @Prop primary: string = '';
+  @Prop secondary: string = '';
+  @Prop readoutWidth: number = 104;
+  onTap: () => void = (): void => {};
+
+  build() {
+    Button() {
+      Row({ space: 5 }) {
+        Text(this.primary)
+          .fontSize(HudType.VALUE)
+          .fontColor(HudColor.TEXT_PRIMARY)
+          .fontWeight(FontWeight.Medium)
+          .maxLines(1)
+        Text(this.secondary)
+          .fontSize(HudType.LABEL)
+          .fontColor(HudColor.TEXT_SECONDARY)
+          .maxLines(1)
+      }
+    }
+    .type(ButtonType.Normal)
+    .width(this.readoutWidth)
+    .height(34)
+    .borderRadius(17)
+    .backgroundColor(LAND_CHIP_BG)
+    .padding({ left: 10, right: 10 })
+    .onClick((): void => {
+      this.onTap();
+    })
+  }
+}
+
+/** 设置入口的齿轮（Canvas 画，不赌系统符号字体有没有 ⚙）：8 齿 + 外环 + 内芯 */
+@Component
+struct LandGearIcon {
+  private ctxSettings: RenderingContextSettings = new RenderingContextSettings(true);
+  private canvas: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.ctxSettings);
+
+  private draw(): void {
+    const ctx: CanvasRenderingContext2D = this.canvas;
+    const w: number = ctx.width;
+    const h: number = ctx.height;
+    if (!(w > 0) || !(h > 0)) {
+      return;
+    }
+    const cx: number = w / 2;
+    const cy: number = h / 2;
+    const r: number = Math.min(w, h) * 0.26;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = HudColor.TEXT_PRIMARY;
+    ctx.fillStyle = HudColor.TEXT_PRIMARY;
+    // 8 齿：短粗矩形从环外 0.8 咬到 r+3.4（细长射线会读成「亮度/太阳」）
+    ctx.save();
+    ctx.translate(cx, cy);
+    for (let i = 0; i < 8; i++) {
+      ctx.save();
+      ctx.rotate(i * Math.PI / 4);
+      ctx.fillRect(-1.4, -(r + 3.4), 2.8, 4.2);
+      ctx.restore();
+    }
+    ctx.restore();
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  build() {
+    Canvas(this.canvas)
+      .width(20)
+      .height(20)
+      .onReady((): void => {
+        this.draw();
+      })
+  }
+}
 
 /** 节流器定时器注入（`ui/ParamsFlushThrottle` 是纯逻辑，真定时器只出现在页面层） */
 class PageFlushScheduler implements FlushScheduler {
@@ -251,6 +386,12 @@ struct CameraPage {
   /** 横竖屏分支（T32 提前批）：横屏=右侧竖排 Dock，竖屏=底部横排（T31 布局） */
   @State isLandscape: boolean = false;
   /**
+   * 方向监听（mediaquery）：display.on('change') 在模拟器/部分 ROM 上不随窗口方向触发
+   * （2026-10-28 模拟器取证：窗口已 2856×1320 而 display 仍报 1320×2856 → 横屏 HUD 不出现）。
+   * 窗口矩形才是真值，mediaquery 负责给「何时重读」的扳机。
+   */
+  private orientationListener: mediaquery.MediaQueryListener | undefined = undefined;
+  /**
    * WLB：画面在窗口内的矩形（letterbox 单一真源）——参考线 aspect、点按映射、native 上屏
    * 收缩因子三处都吃它，不许各算一遍。宽高比不可用/首帧未量到时 = 铺满（= 旧行为）。
    * 视口 = 窗口全幅即 GL 表面全幅（本侧沉浸式 setWindowLayoutFullScreen，模拟器实证
@@ -281,6 +422,8 @@ struct CameraPage {
   @State pillIsoLabel: string = 'AUTO';
   @State pillEvLabel: string = '+0.0EV';
   @State pillWbLabel: string = '自动';
+  /** 横屏帧率芯片文案（cycleFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
+  @State landFpsLabel: string = '30×';
   /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
   @State safeTop: number = 0;
   @State safeBottom: number = 0;
@@ -304,6 +447,7 @@ struct CameraPage {
     this.initLevelSensor();
     this.applyImmersiveChrome();
     this.refreshHudReadoutMetrics();
+    this.initOrientationListener();
     this.engine.setOnCameraLost((): void => {
       if (this.disposed) {
         return;
@@ -325,6 +469,7 @@ struct CameraPage {
         this.applyGeometry();
         this.syncLevelDisplayDegrees();
         this.refreshHudReadoutMetrics();
+        this.syncViewportFromWindow();
       });
     } catch (e) {
     }
@@ -392,6 +537,7 @@ struct CameraPage {
     this.applyImmersiveChrome();
     this.resumeHealthAfterShow();
     this.syncLevelDisplayDegrees();
+    this.syncViewportFromWindow();
     this.applyLevelSetting();
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
@@ -459,6 +605,14 @@ struct CameraPage {
     if (this.levelSensor !== undefined) {
       this.levelSensor.stop();
       this.levelSensor = undefined;
+    }
+    if (this.orientationListener !== undefined) {
+      try {
+        this.orientationListener.off('change');
+      } catch (e) {
+        // 监听已随页面销毁：忽略
+      }
+      this.orientationListener = undefined;
     }
     this.stopStatusTimer();
     this.stopRecordMonitor();
@@ -568,6 +722,7 @@ struct CameraPage {
 
   private syncLabels(): void {
     this.sizeLabel = this.settings.sizeW >= 3840 ? '4K' : '1080p';
+    this.landFpsLabel = `${this.settings.fps}×`;
     const labels: Array<string> = ['直通', '曲线', '斑马', '峰值'];
     this.effectIndex = this.settings.effect;
     this.effectLabel = labels[this.effectIndex];
@@ -823,6 +978,8 @@ struct CameraPage {
     this.pillEvLabel = this.rowEv;
     this.rowWb = wbShort(this.params.wbMode.value, Math.round(this.params.kelvin.value.value));
     this.pillWbLabel = this.rowWb;
+    // 横屏帧率芯片与 settings.fps 同源（cycleFps → syncParamLabels 这一跳负责刷新）
+    this.landFpsLabel = `${this.settings.fps}×`;
   }
 
   /**
@@ -1279,6 +1436,66 @@ struct CameraPage {
       this.hudFontScale = sysScale * UserSettings.textScaleFactorOf(this.settings.textScaleCameraPct);
     } catch (e) {
       this.hudFontScale = 1;
+    }
+  }
+
+  /**
+   * 窗口矩形 → 横竖屏/vp 视口的权威校对（display 在模拟器上会继续报物理方向：
+   * 2026-10-28 取证窗口已 2856×1320 而 display 仍 1320×2856，导致 isLandscape 卡在 false）。
+   * 只改本页 @State（isLandscape 变化 → build 切分支），窗口尺寸本身不在这里动。
+   */
+  private syncViewportFromWindow(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    window.getLastWindow(ctx).then((win: window.Window): void => {
+      if (this.disposed) {
+        return;
+      }
+      try {
+        const rect: window.Rect = win.getWindowProperties().windowRect;
+        const d: display.Display = display.getDefaultDisplaySync();
+        const density: number = d.densityPixels > 0 ? d.densityPixels : 1;
+        const w: number = rect.width / density;
+        const h: number = rect.height / density;
+        if (!(w > 0) || !(h > 0)) {
+          return;
+        }
+        this.winWvp = w;
+        this.winHvp = h;
+        const landscape: boolean = w > h;
+        this.isLandscape = landscape;
+        this.applyPreviewFit();
+      } catch (e) {
+        Diag.w(WOTA_RECORD_TAG, `viewport read failed: ${e}`);
+      }
+    }).catch((e: Object): void => {
+      Diag.w(WOTA_RECORD_TAG, `viewport window failed: ${e}`);
+    });
+  }
+
+  /**
+   * 方向监听：mediaquery 给扳机、窗口矩形给真值（display.on('change') 在模拟器上不随窗口方向触发）。
+   * listener.matches 可先同步落一次 @State，避免首帧走错分支再闪一下。
+   */
+  private initOrientationListener(): void {
+    if (this.orientationListener !== undefined) {
+      return;
+    }
+    try {
+      const listener: mediaquery.MediaQueryListener =
+        this.getUIContext().getMediaQuery().matchMediaSync('(orientation: landscape)');
+      listener.on('change', (_result: mediaquery.MediaQueryResult): void => {
+        if (!this.disposed) {
+          this.syncViewportFromWindow();
+        }
+      });
+      this.orientationListener = listener;
+      this.isLandscape = listener.matches;
+      this.syncViewportFromWindow();
+    } catch (e) {
+      Diag.w(WOTA_RECORD_TAG, `orientation listener failed: ${e}`);
     }
   }
 
@@ -1984,13 +2201,6 @@ struct CameraPage {
    * （ParamPills.RECORDING_EDITABLE_PILLS={ISO,EV,WB}）控制，快门录制中开只读 Note
    * （T31 复审 P3-3：不得整颗禁用而丢失只读信息）。
    */
-  /** 横屏短标签：dockLabel 的冒号后值（镜头:广角→广角）；单行底栏 68vp 宽仍完整可读 */
-  private dockLabelCompact(key: string): string {
-    const full: string = this.dockLabel(key);
-    const idx: number = full.indexOf(':');
-    return idx >= 0 ? full.substring(idx + 1) : full;
-  }
-
   private dockEnabled(key: string): boolean {
     if (key === 'lens' || key === 'size' || key === 'fps') {
       return !this.recording && !this.stopPending;
@@ -2030,6 +2240,95 @@ struct CameraPage {
     this.openPill(key, `pill_${key}`);
   }
 
+  // ------------------------------------------------------------------ 横屏 HUD 几何/入口
+
+  /** 横屏视口宽（display 量不到时按 816vp 兜底；rotation 后由 display.on('change') 刷新） */
+  private landW(): number {
+    return this.winWvp > 0 ? this.winWvp : 816;
+  }
+
+  private landH(): number {
+    return this.winHvp > 0 ? this.winHvp : 377;
+  }
+
+  /** 贴边基线：安全区 + 4/8vp（安全区由 WindowChrome 兜底 ≥24/12）。
+   *  横屏系统栏是透明沉浸式（模拟器仍报 39vp 的 TYPE_SYSTEM 顶条），HUD 贴边不压状态栏本体：
+   *  顶部按 24 封顶（挖孔在横屏位于左侧，左右留白属 WindowChrome T32 存量缺口）。 */
+  private landTop(): number {
+    return Math.min(this.safeTop, 24) + HudSpace.XS;
+  }
+
+  private landBottom(): number {
+    return this.safeBottom + HudSpace.M;
+  }
+
+  /** 左侧浮 chip 面板顶：让开「分辨率胶囊 + 预览：原片」（截图里面板顶边 ≈ 屏高 28%） */
+  private landSidePanelY(): number {
+    return this.landTop() + 84;
+  }
+
+  /** 右上三圆钮行左端（右对齐：3×36 + 2×8 = 124） */
+  private landRoundRowX(): number {
+    return this.landW() - LAND_MARGIN - LAND_ROUND * 3 - LAND_ROUND_GAP * 2;
+  }
+
+  /**
+   * 锚点 id 出口（openPill/openMore 的 getRectangleById 吃同一串）。
+   * 横竖两分支互斥但静态分析都会扫：动态产出避免「重复组件 id」误报（竖屏 ForEach 同法）。
+   */
+  private pillAnchorId(key: string): string {
+    return `pill_${key}`;
+  }
+
+  /** 安全框内缩（照 r03 截图 letterbox 白框比例：左右 22%、上 14.5%、下 21%） */
+  private landFrameSide(): number {
+    return Math.round(this.landW() * 0.22);
+  }
+
+  private landFrameTop(): number {
+    return Math.round(this.landH() * 0.145);
+  }
+
+  private landFrameBottom(): number {
+    return Math.round(this.landH() * 0.21);
+  }
+
+  /** 左上分辨率读数：当前画幅 + 化简宽高比（1920x1080 → 16:9） */
+  private resolutionLabel(): string {
+    const w: number = this.settings.sizeW > 0 ? this.settings.sizeW : RECORD_WIDTH_1080;
+    const h: number = this.settings.sizeH > 0 ? this.settings.sizeH : RECORD_HEIGHT_1080;
+    let a: number = w;
+    let b: number = h;
+    while (b !== 0) {
+      const t: number = a % b;
+      a = b;
+      b = t;
+    }
+    const g: number = a > 0 ? a : 1;
+    return `${w}x${h} ${w / g}:${h / g}`;
+  }
+
+  /** 横屏图库入口（录制/收尾中不可离开本页，与竖屏右上「库」钮同一门控） */
+  private openGalleryPage(): void {
+    if (this.recording || this.stopPending) {
+      return;
+    }
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/Gallery' });
+  }
+
+  /** 横屏设置入口（口径同竖屏「设」钮） */
+  private openSettingsPage(): void {
+    if (this.recording || this.stopPending) {
+      return;
+    }
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
+  }
+
+  /** 光晕/色调/降噪：本侧未移植（Glow native 留白、色调未移植）——不造假面板，只给一句提示 */
+  private pendingFeatureTip(): void {
+    this.message = '该功能待真机批';
+  }
+
   build() {
     Stack() {
       XComponent({ id: 'wotaCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
@@ -2056,7 +2355,7 @@ struct CameraPage {
       Column() {
         Column()
           .width('100%')
-          .height(HudSpec.TOP_SCRIM_HEIGHT + this.safeTop)
+          .height((this.isLandscape ? 96 : HudSpec.TOP_SCRIM_HEIGHT) + this.safeTop)
           .linearGradient({
             angle: 180,
             colors: [[HudColor.SCRIM_STRONG, 0], [HudColor.SCRIM_TRANSLUCENT, 0.55],
@@ -2065,7 +2364,8 @@ struct CameraPage {
         Blank()
         Column()
           .width('100%')
-          .height(HudSpec.BOTTOM_SCRIM_HEIGHT + this.safeBottom)
+          // 横屏屏高只有 377vp：底遮罩按 128 收（T31 竖屏 232 不裁）
+          .height((this.isLandscape ? 128 : HudSpec.BOTTOM_SCRIM_HEIGHT) + this.safeBottom)
           .linearGradient({
             angle: 0,
             colors: [[HudColor.SCRIM_STRONG, 0], [HudColor.SCRIM_TRANSLUCENT, 0.5],
@@ -2094,8 +2394,12 @@ struct CameraPage {
           right: HudSpec.SAFE_MARGIN,
           top: this.safeTop + HudSpec.TOP_BAR_HEIGHT + HudSpace.M
         })
+        // 横屏姿态仪收进右侧「水平仪 + 对焦」竖排容器（见下方横屏 HUD），这里让位
+        .visibility(this.isLandscape ? Visibility.None : Visibility.Visible)
       }
 
+      // 竖屏 T31 列整段包进方向闸（块内缩进保持原样：vis-align 测试按源码缩进钉右上双圆钮，不许重排）
+      if (!this.isLandscape) {
       Column() {
         // ---------- 顶栏：固定两行读数（镜头/画幅/电量/空间 + 时长）+ 右侧 48vp 深色入口胶囊
         Row({ space: HudSpace.M }) {
@@ -2389,54 +2693,317 @@ struct CameraPage {
             this.onPreviewLongPress();
           })
       )
+      }
 
-      // 横屏 Dock 浮层（T32 提前批）：底部右侧独立定位（全屏容器 End/End 对齐），不受顶部
-      // 读数高度影响，快门/更多永不出屏；锚点 id 与竖屏分支同名（弹层量框定位复用）。
+      // ---------- 横屏 HUD（T32 复刻安卓 r03 截图，逐项）
+      // 全屏 Stack 统一承载点按对焦/长按解锁（Transparent + 子钮内层消费，口径同竖屏列）；
+      // 所有控件 .position 贴边浮动，中间画面裸露；屏 816×377vp（2856×1320px @3.5）。
       if (this.isLandscape) {
-        // 横屏单行底栏（2026-10-28 用户口径：控件不得重叠遮挡、不得多占录制页空间）：
-        // 9 颗短标签胶囊 + 更多 + 快门一行放下，整条 ≈ 84vp 高（22%），读数区/画面区全让出；
-        // 短标签 = dockLabel 冒号后的值（镜头:广角→广角），宽度 68vp 仍完整可读。
-        Column() {
-          Row({ space: HudSpace.XS }) {
-            ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
-              Row() {
-                HudPill({
-                  label: this.dockLabelCompact(key),
-                  pillEnabled: this.dockEnabled(key),
-                  active: false,
-                  onTap: (): void => {
-                    this.onDockTap(key);
-                  }
-                })
+        Stack({ alignContent: Alignment.TopStart }) {
+          // 7. 白色细线安全框（1.5vp，内缩一圈；不参与触摸，压在所有控件之下；
+          //    底边被录制簇/右下读数盖住 = 截图里白框从底部控件背后穿过的观感）
+          Stack() {
+            Column()
+              .width('100%')
+              .height('100%')
+              .border({ width: 1.5, color: HudColor.TEXT_PRIMARY })
+              .opacity(0.85)
+          }
+          .width('100%')
+          .height('100%')
+          .padding({
+            left: this.landFrameSide(),
+            right: this.landFrameSide(),
+            top: this.landFrameTop(),
+            bottom: this.landFrameBottom()
+          })
+          .hitTestBehavior(HitTestMode.None)
+
+          // 1. 左上：分辨率胶囊（1920x1080 16:9，点按循环画幅）+ 下方红字「预览：原片」
+          Column({ space: HudSpace.XS }) {
+            Button() {
+              Text(this.resolutionLabel())
+                .fontSize(HudType.VALUE)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .type(ButtonType.Normal)
+            .width(150)
+            .height(30)
+            .borderRadius(15)
+            .backgroundColor(LAND_PANEL_BG)
+            .padding({ left: 12, right: 12 })
+            .accessibilityText('画幅，点按切换')
+            .id(this.pillAnchorId('size'))
+            .onClick((): void => {
+              this.cycleSize();
+            })
+
+            Text('预览：原片')
+              .fontSize(HudType.LABEL)
+              .fontColor(HudColor.RECORD_DOT)
+              .maxLines(1)
+              .margin({ left: HudSpace.XS })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .position({ x: LAND_MARGIN, y: this.landTop() })
+
+          // 2. 右上：三颗圆形深色按钮（网格开关 / 更多面板 / 设置）
+          Row({ space: LAND_ROUND_GAP }) {
+            Button() {
+              Column({ space: 3 }) {
+                Row({ space: 3 }) {
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                }
+                Row({ space: 3 }) {
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                }
               }
-              .layoutWeight(1)
-              .id(`pill_${key}`)
-            }, (key: string): string => key)
-            ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
-              Row() {
-                HudPill({
-                  label: this.dockLabelCompact(key),
-                  pillEnabled: this.dockEnabled(key),
-                  active: false,
-                  onTap: (): void => {
-                    this.onDockTap(key);
-                  }
-                })
-              }
-              .layoutWeight(1)
-              .id(`pill_${key}`)
-            }, (key: string): string => key)
+            }
+            .type(ButtonType.Normal)
+            .width(LAND_ROUND)
+            .height(LAND_ROUND)
+            .borderRadius(LAND_ROUND / 2)
+            .backgroundColor(LAND_PANEL_BG)
+            .padding(0)
+            .accessibilityText('网格')
+            .onClick((): void => {
+              this.toggleGrid();
+            })
+
+            // 锚点 id 由外层 Row 承载（自定义组件/子钮的 getRectangleById 不可依赖）
             Row() {
-              HudEntryButton({
-                label: '更多',
-                entryEnabled: true,
+              Button() {
+                Row({ space: 3 }) {
+                  Column().width(4).height(4).borderRadius(2).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(4).height(4).borderRadius(2).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(4).height(4).borderRadius(2).backgroundColor(HudColor.TEXT_PRIMARY)
+                }
+              }
+              .type(ButtonType.Normal)
+              .width(LAND_ROUND)
+              .height(LAND_ROUND)
+              .borderRadius(LAND_ROUND / 2)
+              .backgroundColor(LAND_PANEL_BG)
+              .padding(0)
+              .accessibilityText('更多')
+              .onClick((): void => {
+                this.openMore();
+              })
+            }
+            .id(this.pillAnchorId('more'))
+
+            Button() {
+              LandGearIcon()
+            }
+            .type(ButtonType.Normal)
+            .width(LAND_ROUND)
+            .height(LAND_ROUND)
+            .borderRadius(LAND_ROUND / 2)
+            .backgroundColor(LAND_PANEL_BG)
+            .padding(0)
+            .accessibilityText('设置')
+            .onClick((): void => {
+              this.openSettingsPage();
+            })
+          }
+          .position({ x: this.landRoundRowX(), y: this.landTop() })
+
+          // 4. 右侧竖排：水平仪气泡（复用 AttitudeMeter）+ 下方「对焦」蓝色钮（现有对焦弹层）
+          Column({ space: HudSpace.S }) {
+            if (this.levelOn && this.levelAvailable) {
+              AttitudeMeter({
+                roll: this.levelRoll,
+                pitch: this.levelPitch,
+                isLevel: this.levelIsLevel
+              })
+            }
+            Row() {
+              Button('对焦')
+                .type(ButtonType.Normal)
+                .fontSize(HudType.VALUE)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .fontWeight(FontWeight.Medium)
+                .width('100%')
+                .height(36)
+                .borderRadius(18)
+                .backgroundColor(LAND_ACCENT_BLUE)
+                // 容器内宽只有 52vp：默认按钮左右内边距会把两字挤成省略号
+                .padding({ left: 2, right: 2 })
+                .labelStyle({ maxLines: 1, overflow: TextOverflow.Ellipsis })
+                .onClick((): void => {
+                  this.openPill('focus', 'pill_focus');
+                })
+            }
+            .width('100%')
+            .id(this.pillAnchorId('focus'))
+          }
+          .width(68)
+          .padding(HudSpace.S)
+          .borderRadius(HudShape.PILL_RADIUS)
+          .backgroundColor(LAND_PANEL_BG)
+          .position({ x: this.landW() - LAND_MARGIN - 68, y: this.landTop() + LAND_ROUND + LAND_ROUND_GAP })
+
+          // 3. 左侧竖排 float 芯片组：蓝色圆形网格钮 + RGB 曲线 + 光晕 + 色调
+          Column({ space: 10 }) {
+            Button() {
+              Column({ space: 3 }) {
+                Row({ space: 3 }) {
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                }
+                Row({ space: 3 }) {
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                  Column().width(6).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_PRIMARY)
+                }
+              }
+            }
+            .width(40)
+            .height(40)
+            .borderRadius(20)
+            .backgroundColor(this.gridOn ? LAND_ACCENT_BLUE : LAND_CHIP_BG)
+            .padding(0)
+            .accessibilityText('网格')
+            .onClick((): void => {
+              this.toggleGrid();
+            })
+
+            LandTag({
+              label: 'RGB 曲线',
+              tagWidth: 84,
+              onTap: (): void => {
+                this.openCurveEditor();
+              }
+            })
+            // 光晕/色调：本侧未移植（Glow native 留白、色调未移植）→ 半透明禁用观感 + 一句待批提示
+            LandTag({
+              label: '光晕',
+              dim: true,
+              tagWidth: 62,
+              onTap: (): void => {
+                this.pendingFeatureTip();
+              }
+            })
+            LandTag({
+              label: '色调',
+              dim: true,
+              tagWidth: 62,
+              onTap: (): void => {
+                this.pendingFeatureTip();
+              }
+            })
+          }
+          .width(LAND_SIDE_PANEL_W)
+          .padding({ top: 12, bottom: 12, left: 8, right: 8 })
+          .alignItems(HorizontalAlign.Center)
+          .borderRadius(HudShape.PILL_RADIUS)
+          .backgroundColor(LAND_PANEL_BG)
+          .position({ x: LAND_MARGIN, y: this.landSidePanelY() })
+
+          // 6a. 左下：蓝色激活态「降噪」（本侧无功能 → 禁用观感 + 提示）+ 深色「码率」（点按进设置）
+          Row({ space: 6 }) {
+            LandTag({
+              label: '降噪',
+              accent: true,
+              dim: true,
+              tagWidth: 64,
+              onTap: (): void => {
+                this.pendingFeatureTip();
+              }
+            })
+            LandReadout({
+              primary: this.readoutStripValue(HudItem.BITRATE),
+              secondary: '码率',
+              readoutWidth: 104,
+              onTap: (): void => {
+                this.openSettingsPage();
+              }
+            })
+          }
+          .position({ x: LAND_MARGIN, y: this.landH() - this.landBottom() - 34 })
+
+          // 6b. 右下：三枚读数胶囊（AUTO 快门 / 24× 帧率 / AUTO 感光度）——两行右对齐
+          Column({ space: 6 }) {
+            Row({ space: 6 }) {
+              Row() {
+                LandReadout({
+                  primary: this.rowShutter,
+                  secondary: '快门',
+                  readoutWidth: 116,
+                  onTap: (): void => {
+                    this.openPill('shutter', 'pill_shutter');
+                  }
+                })
+              }
+              .id(this.pillAnchorId('shutter'))
+              Row() {
+                LandReadout({
+                  primary: this.landFpsLabel,
+                  secondary: '帧率',
+                  readoutWidth: 104,
+                  onTap: (): void => {
+                    this.cycleFps();
+                  }
+                })
+              }
+              .id(this.pillAnchorId('fps'))
+            }
+            Row() {
+              LandReadout({
+                primary: this.rowIso,
+                secondary: '感光度',
+                readoutWidth: 124,
                 onTap: (): void => {
-                  this.openMore();
+                  this.openPill('iso', 'pill_iso');
                 }
               })
             }
-            .layoutWeight(1)
-            .id('pill_more')
+            .id(this.pillAnchorId('iso'))
+          }
+          .alignItems(HorizontalAlign.End)
+          .position({
+            x: this.landW() - LAND_MARGIN - LAND_READOUT_W,
+            y: this.landH() - this.landBottom() - 74
+          })
+
+          // 5. 底部中央录制簇：图库入口 + 72vp 快门（现有 toggleRecord）+ 当前镜头胶囊（cycleLens）
+          Row({ space: 10 }) {
+            Button() {
+              Stack({ alignContent: Alignment.TopStart }) {
+                Column()
+                  .width(20)
+                  .height(15)
+                  .borderRadius(3)
+                  .border({ width: 1.5, color: HudColor.TEXT_PRIMARY })
+                Column()
+                  .width(5)
+                  .height(5)
+                  .borderRadius(2.5)
+                  .backgroundColor(HudColor.TEXT_PRIMARY)
+                  .margin({ left: 3.5, top: 3 })
+                Column()
+                  .width(12)
+                  .height(1.5)
+                  .backgroundColor(HudColor.TEXT_PRIMARY)
+                  .margin({ left: 4, top: 10.5 })
+              }
+              .width(20)
+              .height(15)
+            }
+            .type(ButtonType.Normal)
+            .width(40)
+            .height(40)
+            .borderRadius(20)
+            .backgroundColor(LAND_CHIP_BG)
+            .padding(0)
+            .accessibilityText('媒体库')
+            .onClick((): void => {
+              this.openGalleryPage();
+            })
+
             Stack() {
               Column()
                 .width(HudTouch.SHUTTER)
@@ -2458,18 +3025,89 @@ struct CameraPage {
             .onClick((): void => {
               this.toggleRecord();
             })
+
+            Row() {
+              LandTag({
+                label: this.lensLabel,
+                tagWidth: 64,
+                tagHeight: 40,
+                onTap: (): void => {
+                  this.cycleLens();
+                }
+              })
+            }
+            .id(this.pillAnchorId('lens'))
           }
-          .width('100%')
+          .height(LAND_CLUSTER_H)
+          // 左宽右窄的空隙让 72 快门落在长条中心（截图：快门是整条的中心，图库偏左、镜头偏右）
+          .padding({ left: 32, right: 8 })
+          .borderRadius(LAND_CLUSTER_H / 2)
+          .backgroundColor(LAND_PANEL_BG)
+          .position({
+            x: (this.landW() - LAND_CLUSTER_W) / 2,
+            y: this.landH() - this.landBottom() - LAND_CLUSTER_H
+          })
+
+          // 状态提示/权限/重试：屏顶中央（不压任何控件；横屏不渲染 T31 底部状态列）
+          Column({ space: HudSpace.S }) {
+            if (this.message !== '') {
+              Text(this.message)
+                .fontSize(HudType.CAPTION)
+                .fontColor(HudColor.WARN)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .textAlign(TextAlign.Center)
+                .width('100%')
+            }
+            if (this.permissionGranted === false) {
+              Button(this.permissionRequesting ? '请求权限中…' : '相机权限被拒绝，点按重试')
+                .fontSize(HudType.CAPTION)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .height(32)
+                .borderRadius(16)
+                .backgroundColor(HudColor.PILL_BG_ACTIVE)
+                .padding({ left: 12, right: 12 })
+                .enabled(!this.permissionRequesting)
+                .onClick((): void => {
+                  this.ensureCameraPermission();
+                })
+            }
+            if (!this.cameraStarted && this.permissionGranted && !this.loading) {
+              Button(this.startingCamera ? '启动中…' : '重试相机')
+                .fontSize(HudType.CAPTION)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .height(32)
+                .borderRadius(16)
+                .backgroundColor(HudColor.PILL_BG_ACTIVE)
+                .padding({ left: 12, right: 12 })
+                .enabled(!this.startingCamera)
+                .onClick((): void => {
+                  this.retryCamera();
+                })
+            }
+          }
+          .width(360)
+          .alignItems(HorizontalAlign.Center)
+          .position({ x: (this.landW() - 360) / 2, y: this.landTop() + 44 })
+
+          // 锚点 id 保留（截图版横屏无 EV/WB/变焦入口：逻辑/弹层原样在，id 挂透明占位供量框回退）
+          Row().width(1).height(1).opacity(0).hitTestBehavior(HitTestMode.None).id(this.pillAnchorId('ev'))
+          Row().width(1).height(1).opacity(0).hitTestBehavior(HitTestMode.None).id(this.pillAnchorId('wb'))
+          Row().width(1).height(1).opacity(0).hitTestBehavior(HitTestMode.None).id(this.pillAnchorId('zoom'))
         }
         .width('100%')
         .height('100%')
-        .justifyContent(FlexAlign.End)
-        .padding({
-          left: HudSpec.SAFE_MARGIN,
-          right: HudSpec.SAFE_MARGIN,
-          bottom: this.safeBottom + HudSpace.S
-        })
         .hitTestBehavior(HitTestMode.Transparent)
+        // TFC：点按对焦/长按解锁（与竖屏列同一收口；子钮各自消费不双触发）
+        .onClick((event: ClickEvent): void => {
+          this.onPreviewTap(event.windowX, event.windowY);
+        })
+        .gesture(
+          LongPressGesture({ repeat: false, duration: 500 })
+            .onAction((_e: GestureEvent): void => {
+              this.onPreviewLongPress();
+            })
+        )
       }
 
       // TFC：对焦标记（瞬时可视反馈；hitTest None 不拦触摸，800ms 自动隐）
