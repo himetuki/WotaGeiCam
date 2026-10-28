@@ -3112,7 +3112,9 @@ struct CameraPage {
             .width(LAND_ROUND)
             .height(LAND_ROUND)
             .borderRadius(LAND_ROUND / 2)
-            .backgroundColor(this.settings.refLines !== 0 ? LAND_ACCENT_BLUE : LAND_PANEL_BG)
+            // 颜色吃 @State refMask（settings 对象字段变更不触发重渲染，2026-10-28 实测：
+            // 切换已落盘 2047 但按钮不蓝）
+            .backgroundColor(this.refMask !== 0 ? LAND_ACCENT_BLUE : LAND_PANEL_BG)
             .padding(0)
             .accessibilityText('参考线')
             .onClick((): void => {
