@@ -27,11 +27,17 @@ class PickUriWiringGuardTest {
 
     @Test
     fun `clipByUri 必须在IO上执行且取消要冒泡`() {
-        val b = body("media/MediaRepo.kt", "clipByUri")
-        assertTrue("clipByUri 必须在 withContext(Dispatchers.IO) 内（provider 读取是阻塞 IO）",
+        // 2026-10-28：clipByUri 退化为 pickClipByUri 的薄壳（只要 clip，不要失败阶段），
+        // IO 切换与取消冒泡的真身都搬进了 pickClipByUri——守卫跟着真身走
+        val b = body("media/MediaRepo.kt", "pickClipByUri")
+        assertTrue("选片读取必须在 withContext(Dispatchers.IO) 内（provider 读取是阻塞 IO）",
             b.contains("withContext(Dispatchers.IO)"))
         assertTrue("CancellationException 必须原样抛出（吞掉 = 已取消协程继续写 UI 状态）",
             b.contains("CancellationException"))
+        // clipByUri 是表达式体薄壳（bodyOf 定位不到花括号体），源码级 contains 判住
+        val shell = KotlinSourceScan.flatten(codeOnly(mainSourceText("media/MediaRepo.kt")))
+        assertTrue("clipByUri 必须仍是 pickClipByUri 的薄壳（旧调用点语义不变）",
+            shell.contains("fun clipByUri(uri: Uri): VideoClip? = pickClipByUri(uri).clip"))
     }
 
     @Test

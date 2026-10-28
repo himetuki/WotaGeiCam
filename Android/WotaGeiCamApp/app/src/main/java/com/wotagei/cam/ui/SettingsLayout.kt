@@ -20,6 +20,9 @@ enum class SettingsBlock(val id: String) {
     /** 动效（PLAIN/FLUENT/LIQUID） */
     MOTION("motion"),
 
+    /** 亮度（取景器跟随系统 + 启动亮屏/起播渐亮两条一次性渐变，2026-10-28） */
+    BRIGHTNESS("brightness"),
+
     /** 取景页显示（读数掩码 + 胶囊掩码 + 位置编辑 + 毛玻璃背板） */
     HUD("hud"),
 
@@ -59,6 +62,7 @@ private val LEFT_COLUMN = listOf(
     SettingsBlock.DEFAULT,
     SettingsBlock.ORIENTATION,
     SettingsBlock.MOTION,
+    SettingsBlock.BRIGHTNESS,
     SettingsBlock.HUD,
     SettingsBlock.SLIDER,
     SettingsBlock.STORAGE,

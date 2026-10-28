@@ -95,7 +95,14 @@ data class CameraAbility(
      * 在能力表里、`getKeys()` 按名字就能拿到。空集合 = 拿不到（隐藏键被裁/LEGACY）⇒ 手动档
      * 按不可用处理——与"增益不被采纳"的实际行为一致。
      */
-    val colorCorrectionModes: Set<Int> = emptySet()
+    val colorCorrectionModes: Set<Int> = emptySet(),
+    /**
+     * `android.sensor.neutralColorPoint`（R,G,B 三元素，Rational 已转 float；2026-10-28 白平衡取证，
+     * docs/plan/28 §2.4-4 判读表第 4 条）：本机 raw 空间的中性白点——B3 相对模型的 CCT 换算入口。
+     * **隐藏键**，读取见 [companion neutralPointOf]；null = 键被剥/缺报（判读按「无」走 gains 反解），
+     * 不因为一个调试键炸掉整份能力收集。
+     */
+    val neutralColorPoint: FloatArray? = null
 ) {
     /** LEGACY 设备无逐帧控制/无 ZOOM_RATIO，UI 顶部要提示能力受限 */
     fun isLegacy(): Boolean = hardwareLevel == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
@@ -166,7 +173,8 @@ data class CameraAbility(
         Log.i(tag, "ability[$label] iso=$iso exposureNs=$exposureNs ev=$evRange evStep=$evStep" +
             " minFocusD=$minFocusDistanceDiopter zoomRatio=$zoomRatioRange maxDigital=$maxDigitalZoom")
         Log.i(tag, "ability[$label] afModes=$afModes awbModes=$awbModes flash=$flashAvailable" +
-            " regionsAf=$maxRegionsAf regionsAe=$maxRegionsAe ois=$oisAvailable eis=$eisAvailable")
+            " regionsAf=$maxRegionsAf regionsAe=$maxRegionsAe ois=$oisAvailable eis=$eisAvailable" +
+            " neutral=${WbTelemetry.formatNeutralPoint(neutralColorPoint)}")
         // 画面降噪的**唯一能力依据**（2026-10-26）：0=OFF 1=FAST 2=HIGH_QUALITY 4=ZERO_SHUTTER_LAG。
         // 面板"HAL 快速/HAL 高质量"能不能选、下发会不会被 RequestApplier 拦掉，都只看这一行；
         // 空集合 = 未声明 ⇒ 两档都必须灰显（判"用户说开了却没效果"时先核这里）
@@ -192,9 +200,14 @@ data class CameraAbility(
         /**
          * 读全一个镜头的能力范围。所有范围/档位/能力开关一律来自 characteristics，无机型硬编码。
          * 单项读取失败（部分 HAL 会抛异常）时退化为 closed/空集合，不影响其余能力收集。
+         *
          * @param cameraId 仅用于日志关联（能力表本身不保存 id）
+         * @param logicalAfModes 逻辑头的 AF 模式（docs/plan/27，2026-10-28 落地）：**仅物理子头**传入。
+         *   HAL 常把 AF 能力只挂在逻辑头层面，子头自己的 `CONTROL_AF_AVAILABLE_MODES` 为空或只报 OFF，
+         *   直接按子头判会把广角/长焦子头误判成定焦（marble 实测 `afModes=[0]`）——子头退化时借
+         *   逻辑头的模式回退。逻辑头自己（传 null）与屈光度域不受影响（后者是镜头物理属性）。
          */
-        fun from(cameraId: String, cc: CameraCharacteristics): CameraAbility {
+        fun from(cameraId: String, cc: CameraCharacteristics, logicalAfModes: Set<Int>? = null): CameraAbility {
             val map = tryOrNull { cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) }
             if (map == null) Log.w(WotaTag.ABILITY, "ability[$cameraId] stream config map missing")
             val capabilities = tryOrNull { cc.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) } ?: IntArray(0)
@@ -249,7 +262,10 @@ data class CameraAbility(
                 exposureNs = RangeI.ofLong(tryOrNull { cc.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) }),
                 evRange = RangeI.of(tryOrNull { cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) }),
                 evStep = stepRational?.toFloat() ?: 0f,
-                afModes = (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
+                afModes = effectiveAfModes(
+                    (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
+                    logicalAfModes
+                ),
                 awbModes = (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
                 flashAvailable = tryOrNull { cc.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) } ?: false,
                 maxRegionsAf = tryOrNull { cc.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) } ?: 0,
@@ -265,11 +281,25 @@ data class CameraAbility(
                 availableSurfaceFormats = tryOrNull { map?.outputFormats } ?: IntArray(0),
                 previewSizes = previewSizes,
                 noiseReductionModes = noiseReductionModes,
-                colorCorrectionModes = colorCorrectionModes
+                colorCorrectionModes = colorCorrectionModes,
+                neutralColorPoint = neutralPointOf(cc)
             )
         }
 
         private inline fun <T> tryOrNull(block: () -> T): T? = try { block() } catch (e: Throwable) { null }
+
+        /**
+         * `android.sensor.neutralColorPoint`（中性白点，R,G,B 三个 Rational；2026-10-28 白平衡取证）。
+         * **隐藏键**——公开桩里没有（android-34 实测无 SENSOR_NEUTRAL_COLOR_POINT 常量，
+         * 与 colorCorrection.availableModes 同一批），只能按名反射读；键不在 keys 里（部分 OEM
+         * 剥隐藏键）或抛异常都返回 null = 判读表里的「无」，走 gains 反解路径，不假装有数。
+         */
+        private fun neutralPointOf(cc: CameraCharacteristics): FloatArray? = tryOrNull {
+            @Suppress("UNCHECKED_CAST")
+            val key = cc.keys.firstOrNull { it.name == "android.sensor.neutralColorPoint" }
+                as? CameraCharacteristics.Key<Array<android.util.Rational>>
+            key?.let { cc.get(it) }
+        }?.takeIf { it.size >= 3 }?.let { pts -> FloatArray(3) { pts[it].toFloat() } }
 
         private fun sizesOf(
             map: StreamConfigurationMap?,
@@ -322,6 +352,22 @@ fun forcedShutterOutOfRange(shutterNs: Long, exposureNs: RangeI): Boolean =
 fun shutterCeilingNs(deviceMaxNs: Long, fpsHi: Int): Long {
     val raised = maxOf(deviceMaxNs, WotaTiers.REQUIRED_SHUTTER_NS.max())
     return minOf(raised, WotaTiers.SHUTTER_CAP_NS, WotaTiers.NS_PER_SECOND / fpsHi.coerceAtLeast(1))
+}
+
+/**
+ * 物理子头的 AF 模式回退（docs/plan/27，2026-10-28 落地；纯函数，JVM 全测）。
+ *
+ * HAL 常把 AF 能力只挂在逻辑头层面：物理子头自己的 `CONTROL_AF_AVAILABLE_MODES`
+ * 为空或只报 OFF（marble 的广角子头实测 `afModes=[0]`、`minFocusD=0`）——按子头原文判
+ * 会把可连续对焦的子头误判成定焦，对焦胶囊被禁用。子头**退化**（空 / 全 OFF）且逻辑头
+ * 给得出非空模式时借逻辑头的；其余情形（子头有有效模式 / 没有逻辑头可借 / 逻辑头也空）
+ * 一律维持子头原文——「能力协商而非能力假设」：借不到就照实报，不替 HAL 编模式。
+ * 只影响 afModes；`minFocusDistanceDiopter` 是镜头物理属性，刻意不回退。
+ */
+fun effectiveAfModes(own: Set<Int>, logicalFallback: Set<Int>?): Set<Int> {
+    val degenerate = own.isEmpty() || own.all { it == CameraMetadata.CONTROL_AF_MODE_OFF }
+    if (!degenerate || logicalFallback.isNullOrEmpty()) return own
+    return logicalFallback
 }
 
 /** 返回 null 表示设备没有任何范围能覆盖 target，UI 侧该档位灰显 */

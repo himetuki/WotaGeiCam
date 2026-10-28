@@ -94,10 +94,14 @@ object ParamsPersist {
      * 手改 prefs 的脏数据最多让它落到出厂默认或产品域边界。
      */
     fun restore(prefs: SharedPreferences, params: WotaParams) {
-        // ① 帧率：产品档位区间钳（与 applyDefaults 同一口径）
-        params.fps.value = params.fps.value.copy(
-            value = prefs.getInt(WotaSettings.KEY_DEFAULT_FPS, 25)
-                .coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
+        // ① 帧率：产品档位区间钳（与 applyDefaults 同一口径）。走 setFps 单一写入者（28 §4.4）：
+        //    冷启恢复时能力快照还没建（applyAbility 未跑），行为与直写等价；留单一入口是为了
+        //    「所有 fps 写入点都过 setFps」这条守卫不被这处漏成例外
+        params.setFps(
+            params.fps.value.copy(
+                value = prefs.getInt(WotaSettings.KEY_DEFAULT_FPS, 25)
+                    .coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
+            )
         )
         // ② 快门（ns）：>0 才套；坏值跳过 = 维持 applyDefaults 刚无条件套上的出厂默认
         //    （本函数自身不做钳制；最终设备域由后续 applyAbility 收口）

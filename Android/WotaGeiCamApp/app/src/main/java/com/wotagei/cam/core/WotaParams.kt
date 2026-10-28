@@ -62,6 +62,26 @@ class WotaParams(private val scope: CoroutineScope) {
     val fps = MutableStateFlow(ParamState(25, exact = true))
 
     /**
+     * 最近一次 [applyAbility] 的能力快照：换帧率要按**新档位**重算快门/ISO 的可选域
+     * （快门上限吃 1/帧率档），否则 60fps→24fps 后快门滑杆还停在 1/60 上限
+     * （Issue #1 Bug3：「快门滑条丢失、无法慢于 1/60」）。@Volatile——引擎线程回写、UI 线程换档。
+     */
+    @Volatile
+    private var lastAbility: CameraAbility? = null
+
+    /**
+     * 换帧率的**唯一写入口**（docs/plan/28 §4.4 方案 A）：写值 + 立即按新档位重算曝光域，
+     * range 与 value 同一拍收口。四个写入点（画幅弹窗 / 帧率弹窗 / 设置页默认档 / 引擎退档回写）
+     * 都必须走这里；绕开它直写 `fps.value` 会让快门可选域停在旧档位上——UI 显示的域与
+     * 下发侧 `clampShutterNs` 各说各话（反向就是「UI 摆着 1/24、实际按 1/60 录」的假读数）。
+     * 没能力快照时（冷启套默认档，相机还没开）只写值，域等 [applyAbility] 再算。
+     */
+    fun setFps(next: ParamState<Int>) {
+        fps.value = next
+        lastAbility?.let { applyExposure(it, next.value) }
+    }
+
+    /**
      * 音频降噪 / 画面降噪（2026-10-26 用户需求：两项默认关）。
      * 与相机参数放同一条总线：面板即改即生效，落盘由设置持久化层负责（键见 ParamsPersist）。
      * 画面降噪的实际生效档还要过 [com.wotagei.cam.core.effectiveVideoDenoise]（DIRECT 模式退回 HAL）。
@@ -147,6 +167,7 @@ class WotaParams(private val scope: CoroutineScope) {
      * 顺序有依赖——快门上限要用帧率（≤1/fps），故帧率先算。
      */
     fun applyAbility(a: CameraAbility) {
+        lastAbility = a
         // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
         applySize(a)
         val targetFps = fps.value.value.coerceAtLeast(1)

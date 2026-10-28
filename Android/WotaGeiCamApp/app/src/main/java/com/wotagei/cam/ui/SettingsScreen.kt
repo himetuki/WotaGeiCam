@@ -251,6 +251,27 @@ object WotaSettings {
     const val KEY_GALLERY_COLUMNS = "gallery_columns"
 
     /**
+     * 「启动后自动亮屏」的延迟秒数（29 §5.3-①，2026-10-28）：0–10 步长 1，**0 = 关闭**
+     * （不是"立即"——立即等于撤销跟随系统，产品口径里关闭就是全程跟随系统）。
+     * 非 0：冷启后第一次进入取景页，延迟结束后 7 秒内线性渐变到满亮度（渐变时长是
+     * [BrightnessRamp.CAMERA_BRIGHTEN_RAMP_MS]，29 §九 定版「7 秒 = 渐变时长、延迟另算」）。
+     * 纯 UI 设置：`BrightnessRamp` 每次触发直读 prefs，**不走 [applyDefaultsOnce]**。
+     */
+    const val KEY_CAMERA_BRIGHTEN_DELAY_SEC = "camera_brighten_delay_sec"
+    /**
+     * 「起播渐亮」的时长（29 §5.3-②）：0.0–3.0 秒存**十分之一秒**整数（步长 5），
+     * 默认 10 = 1.0 秒；0 = 关闭。单播放页首次起播时从当前窗口亮度渐变到满，离开页面恢复。
+     * 纯 UI 设置，同上不走 [applyDefaultsOnce]。
+     */
+    const val KEY_PLAYER_BRIGHTEN_RAMP_TENTHS = "player_brighten_ramp_tenths"
+
+    /**
+     * 播放页顶栏持久收起（29 §6.3，2026-10-28）：boolean，缺省 false = 展开（保持现行为）。
+     * 进页读、点按写，退出重进/冷启保持。纯 UI 设置，**不走 [applyDefaultsOnce]**。
+     */
+    const val KEY_PLAYER_TOP_BAR_COLLAPSED = "player_top_bar_collapsed"
+
+    /**
      * 滑杆吸附开关（2026-10-21 用户反馈：变焦只有 0.5/1/1.5…，想调 1.2×/1.7×）。
      *
      * 存**关掉吸附**（改用连续值）的参数 id 集合，逗号分隔；缺键/空串 = 全部吸附（2026-10-17 的
@@ -436,6 +457,25 @@ object WotaSettings {
     fun textScale(prefs: SharedPreferences, key: String): Float =
         (prefs.getInt(key, 100).coerceIn(TEXT_SCALE_PCTS.first(), TEXT_SCALE_PCTS.last()) / 100f)
 
+    /**
+     * 「启动后自动亮屏」延迟（秒）：坏值/越界回**默认 1**（0 是合法档=关闭，不能当坏值兜底用，
+     * 否则用户手改 prefs 写个 -5 反而把"关闭"当默认铺开）。默认值 = 29 §九 推荐（1s）。
+     */
+    fun cameraBrightenDelaySec(prefs: SharedPreferences): Int =
+        prefs.getInt(KEY_CAMERA_BRIGHTEN_DELAY_SEC, 1).coerceIn(0, 10)
+
+    /** 「起播渐亮」时长（十分之一秒）：坏值/越界回默认 10（=1.0s，29 §五 表定） */
+    fun playerBrightenRampTenths(prefs: SharedPreferences): Int =
+        prefs.getInt(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, 10).coerceIn(0, 30)
+
+    /** 播放页顶栏收起态：缺键 = 展开。读侧不做归一（boolean 没有坏域），写入方只有点按两枚钮 */
+    fun playerTopBarCollapsed(prefs: SharedPreferences): Boolean =
+        prefs.getBoolean(KEY_PLAYER_TOP_BAR_COLLAPSED, false)
+
+    fun setPlayerTopBarCollapsed(prefs: SharedPreferences, collapsed: Boolean) {
+        prefs.edit().putBoolean(KEY_PLAYER_TOP_BAR_COLLAPSED, collapsed).apply()
+    }
+
     /** 网格列数：旧值不在档位里（例如手写进 prefs 的 6）一律回落到 2 */
     fun galleryColumns(prefs: SharedPreferences): Int =
         prefs.getInt(KEY_GALLERY_COLUMNS, 2).let { if (it in GALLERY_COLUMN_TIERS) it else 2 }
@@ -483,7 +523,7 @@ object WotaSettings {
      */
     fun applyDefaults(prefs: SharedPreferences, params: WotaParams) {
         val fps = defaultFps(prefs).coerceIn(WotaTiers.FPS.first(), WotaTiers.FPS.last())
-        params.fps.value = params.fps.value.copy(value = fps)
+        params.setFps(params.fps.value.copy(value = fps))
         params.shutter.value = params.shutter.value.copy(value = defaultShutterNs(prefs).toLong())
         params.bitrate.value = defaultBitrate(prefs)
         params.sampleRate.value = defaultSampleRate(prefs)
@@ -577,6 +617,7 @@ private fun BlockHost(block: SettingsBlock, prefs: SharedPreferences, onOpenHudE
         SettingsBlock.DEFAULT -> BlockDefault(prefs)
         SettingsBlock.ORIENTATION -> BlockOrientation(prefs)
         SettingsBlock.MOTION -> BlockMotion(prefs)
+        SettingsBlock.BRIGHTNESS -> BlockBrightness(prefs)
         SettingsBlock.HUD -> BlockHud(prefs, onOpenHudEditor)
         SettingsBlock.SLIDER -> BlockSlider(prefs)
         SettingsBlock.STORAGE -> BlockStorage()
@@ -775,6 +816,52 @@ private fun BlockMotion(prefs: SharedPreferences) {
                 WotaSettings.setMotionMode(prefs, mode)
             },
             note = stringResource(R.string.set_motion_note)
+        )
+    }
+}
+
+@Composable
+private fun BlockBrightness(prefs: SharedPreferences) {
+    // 读侧已钳（29 §5.5），这里只管展示选中档；0 档 = 关闭（TierPicker 的 zeroValue 提供双击归零）
+    var brightenDelay by remember { mutableStateOf(WotaSettings.cameraBrightenDelaySec(prefs)) }
+    var playerRamp by remember { mutableStateOf(WotaSettings.playerBrightenRampTenths(prefs)) }
+    // TierPicker 的 items/format 是普通 lambda（非 composable 上下文），文案先在外面取好、
+    // 带参格式化走 context.getString——stringResource 只能出现在组合里
+    val context = LocalContext.current
+    val offLabel = stringResource(R.string.set_value_off)
+
+    SettingGroup(stringResource(R.string.set_group_brightness))
+    Card {
+        // ① 启动后自动亮屏：0–10s 步长 1；0 = 关闭（全程跟随系统）
+        TierPicker(
+            label = stringResource(R.string.set_brighten_camera),
+            selected = brightenDelay,
+            items = (0..10).map { TierItem(it, if (it == 0) offLabel else "$it") },
+            format = { sec ->
+                if (sec == 0) offLabel else context.getString(R.string.set_brighten_seconds, sec)
+            },
+            onPick = {
+                brightenDelay = it
+                prefs.edit().putInt(WotaSettings.KEY_CAMERA_BRIGHTEN_DELAY_SEC, it).apply()
+            },
+            zeroValue = 0,
+            note = stringResource(R.string.set_brighten_camera_note)
+        )
+        // ② 起播渐亮：0–3s 步长 0.5（存十分之一秒）；0 = 关闭
+        TierPicker(
+            label = stringResource(R.string.set_brighten_player),
+            selected = playerRamp,
+            items = (0..30 step 5).map { TierItem(it, if (it == 0) offLabel else "$it") },
+            format = { tenths ->
+                if (tenths == 0) offLabel
+                else context.getString(R.string.set_brighten_seconds_tenths, tenths / 10, tenths % 10)
+            },
+            onPick = {
+                playerRamp = it
+                prefs.edit().putInt(WotaSettings.KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, it).apply()
+            },
+            zeroValue = 0,
+            note = stringResource(R.string.set_brighten_player_note)
         )
     }
 }

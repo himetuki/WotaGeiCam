@@ -80,18 +80,35 @@ class MainActivity : ComponentActivity() {
     private val windowKeepOn = WindowKeepOnDriver()
 
     /**
-     * 目的地变化时驱动窗口常亮/高亮（由 [WotaRoot] 注册的 OnDestinationChangedListener 回调）：
-     * `navigate` / `popBackStack` / `setGraph` 都会同步走到这里，注册时还会立刻回放当前目的地，
-     * 所以冷启与"媒体库/设置/编辑页往返"都覆盖得到。
+     * 亮度渐变驱动（29 §5.3：启动亮屏 + 起播渐亮；见 [BrightnessRamp]）。
+     * 与 [windowKeepOn] 由同一个目的地回调先后驱动——离开页面时 keepOn 先写回进页前原值、
+     * ramp 再写回起坡前原值（两值相等，同线程顺序执行无竞态）。
+     */
+    private val brightnessRamp = BrightnessRamp()
+
+    /**
+     * 目的地变化时驱动窗口常亮/高亮与亮度渐变（由 [WotaRoot] 注册的 OnDestinationChangedListener
+     * 回调）：`navigate` / `popBackStack` / `setGraph` 都会同步走到这里，注册时还会立刻回放当前
+     * 目的地，所以冷启与"媒体库/设置/编辑页往返"都覆盖得到。
      */
     internal fun onRouteForWindowKeepOn(route: String?) {
         windowKeepOn.apply(window, route)
+        brightnessRamp.onRoute(window, route, WotaSettings.of(this))
+    }
+
+    /**
+     * 播放页首次起播（29 §5.3-②）：渐变的**触发**在页面（它知道何时起播），写入仍收口在
+     * 窗口拥有者这一层。每次起播都会被调，武装闸（每页一次）在 [BrightnessRamp] 里收口。
+     */
+    internal fun onPlayerPlaybackStarted() {
+        brightnessRamp.onPlayerPlaybackStarted(window, WotaSettings.of(this))
     }
 
     override fun onDestroy() {
         // 诊断日志的「上一会话结束于」留痕：正常退出与"被系统杀/崩溃"因此可区分
         // （下次冷启会把这行写进日志——排障时第一个要回答的就是"上次是正常退出的吗"）
         if (isFinishing) com.wotagei.cam.diag.Diag.markCleanExit()
+        brightnessRamp.shutdown()
         super.onDestroy()
     }
 
@@ -270,7 +287,9 @@ private fun WotaRoot() {
             PlayerScreen(
                 mediaId = entry.arguments?.getLong(WotaNav.PLAYER_ARG) ?: -1L,
                 onBack = { nav.popBackStack() },
-                onCompare = { id -> nav.navigate(WotaNav.compare(id)) }
+                onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
+                // 起播渐亮（29 §5.3-②）：页面只上报"起播了"，武装闸与窗口写入收口在 MainActivity
+                onPlaybackStarted = { (activity as? MainActivity)?.onPlayerPlaybackStarted() }
             )
         }
         composable(
@@ -332,11 +351,20 @@ private fun applyPageMode(activity: Activity?, route: String?) {
     val orientation = WotaSettings.uiOrientation(WotaSettings.of(act))
     act.requestedOrientation = UIOrientation.screenOrientationOf(orientation)
     val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
-    if (hudPage) {
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-    } else {
-        controller.show(WindowInsetsCompat.Type.systemBars())
+    when {
+        // HUD 页（录制页 + 编辑控件页）：全沉浸
+        hudPage -> {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        // 播放页（29 §6.2）：**只隐藏状态栏**，导航栏保持显示。状态栏隐藏后 statusBars inset 自然
+        // 变 0（顶栏贴到顶）；下滑临时呼出时 inset 回来、顶栏自动下移。edge-to-edge 下隐藏状态栏
+        // 不改变窗口尺寸 ⇒ 视频面尺寸恒定（29 §6.5 硬约束的成立前提；OEM 若额外缩窗按 §6.6 退回）
+        route == WotaNav.PLAYER -> {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.statusBars())
+        }
+        else -> controller.show(WindowInsetsCompat.Type.systemBars())
     }
 }
 

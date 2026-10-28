@@ -23,6 +23,8 @@ class SettingsLayoutTest {
         SettingsBlock.DEFAULT,
         SettingsBlock.ORIENTATION,
         SettingsBlock.MOTION,
+        // 2026-10-28 新增：亮度（取景器跟随系统 + 启动亮屏/起播渐亮），紧跟动效
+        SettingsBlock.BRIGHTNESS,
         SettingsBlock.HUD,
         // 2026-10-21 新增：滑杆吸附（逐参数在刻度吸附 / 连续值之间切换），紧挨取景器显示
         SettingsBlock.SLIDER,
@@ -38,9 +40,9 @@ class SettingsLayoutTest {
     )
 
     @Test
-    fun `blocksOf恰好13项且顺序与改造前单列视觉顺序一致`() {
+    fun `blocksOf恰好14项且顺序与改造前单列视觉顺序一致`() {
         assertEquals(expectedOrder, blocksOf())
-        assertEquals(13, blocksOf().size)
+        assertEquals(14, blocksOf().size)
     }
 
     @Test
@@ -48,6 +50,7 @@ class SettingsLayoutTest {
         assertEquals(0, columnOfBlock(SettingsBlock.DEFAULT))
         assertEquals(0, columnOfBlock(SettingsBlock.ORIENTATION))
         assertEquals(0, columnOfBlock(SettingsBlock.MOTION))
+        assertEquals(0, columnOfBlock(SettingsBlock.BRIGHTNESS))
         assertEquals(0, columnOfBlock(SettingsBlock.HUD))
         assertEquals(0, columnOfBlock(SettingsBlock.SLIDER))
         assertEquals(0, columnOfBlock(SettingsBlock.STORAGE))
@@ -83,9 +86,9 @@ class SettingsLayoutTest {
         val plan = layoutPlanOf(766)
         assertEquals(2, plan.columns)
         val union = plan.left + plan.right
-        // 无重复：并集条数必须正好是全部区块数（重一项会变 14）
-        assertEquals(13, union.size)
-        // 并集真断言：不只大小相同，元素集合也必须等于全表（漏一项会变 12 且集合不等）
+        // 无重复：并集条数必须正好是全部区块数（重一项会变 15）
+        assertEquals(14, union.size)
+        // 并集真断言：不只大小相同，元素集合也必须等于全表（漏一项会变 13 且集合不等）
         assertEquals(expectedOrder.toSet(), union.toSet())
     }
 
@@ -105,6 +108,7 @@ class SettingsLayoutTest {
                 SettingsBlock.DEFAULT,
                 SettingsBlock.ORIENTATION,
                 SettingsBlock.MOTION,
+                SettingsBlock.BRIGHTNESS,
                 SettingsBlock.HUD,
                 SettingsBlock.SLIDER,
                 SettingsBlock.STORAGE,
