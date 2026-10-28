@@ -30,6 +30,16 @@
     <string name="set_motion_liquid">液态 Q 弹</string>
     <string name="set_motion_note">只作用于面板与按钮的位移、缩放与淡入淡出</string>
 
+    <!-- 亮度（2026-10-28：取景器跟随系统 + 启动亮屏/起播渐亮两条一次性渐变） -->
+    <string name="set_group_brightness">亮度</string>
+    <string name="set_value_off">关闭</string>
+    <string name="set_brighten_camera">启动后自动亮屏（延迟）</string>
+    <string name="set_brighten_camera_note">进入取景页先跟随系统亮度，延迟结束后 7 秒内渐亮到满；仅冷启后第一次进取景页生效，0 = 关闭</string>
+    <string name="set_brighten_player">起播时渐亮</string>
+    <string name="set_brighten_player_note">单视频播放页起播时从当前亮度渐亮到满，离开页面恢复；0 = 关闭</string>
+    <string name="set_brighten_seconds">%1$d 秒</string>
+    <string name="set_brighten_seconds_tenths">%1$d.%2$d 秒</string>
+
     <!-- 取景器常驻读数 -->
     <string name="set_group_hud">取景器常驻功能</string>
     <string name="set_hud_note">上排是常驻读数（默认只放「快门 / 帧率 / 码率」），下排是录制页的控件胶囊，勾掉即从取景器消失。</string>

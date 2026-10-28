@@ -46,6 +46,10 @@ internal class WindowKeepOnDriver {
      * ② 再整份下发亮度覆写——取的就是 getter 返回的活对象，此刻它已经带上 flag。
      * （反序也不会丢 flag，这样写是为了让"flag 先落地"成为源码上的硬约束：
      * 以后有人在两步之间插一次整体赋值，也不会把还没落地的 flag 换成客户端快照。）
+     *
+     * 亮度（2026-10-28，29 §5.2 裁决）：**跟随系统**（`BRIGHTNESS_OVERRIDE_NONE`），
+     * 撤销 2026-10-07 的强制拉满——夜间系统亮度低时冷启直接跳 100% 是"闪光弹"。
+     * 启动/起播的自动提亮是独立的一次性渐变，见 [BrightnessRamp]；常亮 flag 保留。
      */
     private fun enter(window: Window) {
         if (applied) return
@@ -53,7 +57,7 @@ internal class WindowKeepOnDriver {
         applied = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.attributes = window.attributes.apply {
-            screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+            screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         }
     }
 
@@ -67,9 +71,10 @@ internal class WindowKeepOnDriver {
 }
 
 /**
- * 路由 → 是否「常亮 + 高亮」（**单一真源**，逐条全表单测在 `KeepOnRouteTableTest`）。
+ * 路由 → 是否「常亮」（**单一真源**，逐条全表单测在 `KeepOnRouteTableTest`）。
  *
- * 产品口径（用户 2026-10-07 定版）：**取景相关页面**（录制页 / 「编辑控件」页）常亮 + 拉满亮度；
+ * 产品口径（用户 2026-10-07 定版 + 2026-10-28 修订）：**取景相关页面**（录制页 / 「编辑控件」页）
+ * 常亮，亮度跟随系统（强制拉满已撤销，一次性提亮见 [BrightnessRamp]）；
  * 其余页面（媒体库 / 播放器 / 对比 / 设置）一律恢复——不常亮、亮度回进页前原值。
  *
  * 非取景路由**逐条写出来**（而不是只写 `else`）：新增路由时必须显式过一遍这张表，不能靠默认值蒙混。

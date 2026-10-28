@@ -25,11 +25,12 @@ class SettingsTwoColumnGuardTest {
         codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
     }
 
-    /** 11 个区块 composable 的函数名（枚举声明顺序）；具名强绑定，改一个名字这里就红 */
+    /** 12 个区块 composable 的函数名（枚举声明顺序）；具名强绑定，改一个名字这里就红 */
     private val blockFns = listOf(
         "BlockDefault",
         "BlockOrientation",
         "BlockMotion",
+        "BlockBrightness",
         "BlockHud",
         "BlockStorage",
         "BlockRefline",
