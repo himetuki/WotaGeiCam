@@ -112,10 +112,32 @@ class RequestApplierTest {
     // -------------------------------------------------- 色温 → gains
 
     @Test
-    fun neutralPointAtSixThousandKelvin() {
-        val rgb = RequestApplier.kelvinTintToRgb255(6000, 0)
-        assertEquals(rgb[0], rgb[2], 1f)                 // R=B → 无偏色
-        assertEquals(rgb[0], rgb[1], 1f)                 // 中间点三通道一致
+    fun neutralPointAtFiveThousandFiveHundredKelvin() {
+        // 2026-10-28 订正：中性锚点从 6000K 挪到 5500K（D55）——旧锚点让"选 5500"就带 +11.5% 蓝，
+        // 用户侧读到的是"手动白平衡偏冷"。这条断言钉住锚点，挪回去必红。
+        val rgb = RequestApplier.kelvinTintToRgb255(5500, 0)
+        assertEquals(rgb[0], rgb[2], 0.5f)               // R=B → 无偏色
+        assertEquals(rgb[0], rgb[1], 0.5f)               // 中性点三通道一致
+        // 相邻档必须真的动（防止"锚点挪了但曲线塌成常数"）
+        val k4000 = RequestApplier.kelvinTintToRgb255(4000, 0)
+        val k6500 = RequestApplier.kelvinTintToRgb255(6500, 0)
+        assertTrue("4000K 必须比 5500K 补蓝", k4000[2] > rgb[2] && k4000[0] < rgb[0])
+        assertTrue("6500K 必须比 5500K 补红", k6500[0] > rgb[0] && k6500[2] < rgb[2])
+    }
+
+    @Test
+    fun twoGreenGainsAreBothFull() {
+        // RggbChannelVector 的两个绿通道是**各自的**增益（不是一条绿增益拆两半）。
+        // 旧实现写 g/2f, g/2f ⇒ 绿增益被砍半（整体偏品红发冷），且与 manualGains 报给遥测的 G 对不上。
+        // RggbChannelVector 在 JVM 单测里是 not-mocked 的空壳，只能源码级钉住（同项目其它守卫的做法）。
+        val src = com.wotagei.cam.source.KotlinSourceScan.codeOnly(
+            com.wotagei.cam.source.KotlinSourceScan.mainSourceText("camera/RequestApplier.kt")
+        )
+        val body = com.wotagei.cam.source.KotlinSourceScan.flatten(
+            com.wotagei.cam.source.KotlinSourceScan.bodyOf(src, "rggbFromRgb255")
+        )
+        assertTrue("两个绿通道都必须拿满额增益：RggbChannelVector(r, g, g, b)", body.contains("RggbChannelVector(r, g, g, b)"))
+        assertTrue("绿增益不许再砍半（g / 2f 形态回退必红）", !body.contains("g / 2f"))
     }
 
     @Test

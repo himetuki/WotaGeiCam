@@ -72,9 +72,9 @@ class WbTelemetryTest {
     // -------------------------------------------------- ③ 下发侧纯口径
 
     @Test
-    fun `manualGains与下发同源_6000K中性_两端方向正确`() {
-        val mid = RequestApplier.manualGains(6000, 0)
-        // 模型内 6000K 是中性锚点：三通道相等
+    fun `manualGains与下发同源_5500K中性_两端方向正确`() {
+        val mid = RequestApplier.manualGains(5500, 0)
+        // 模型内 5500K（D55）是中性锚点：三通道相等（2026-10-28 从 6000K 订正过来）
         assertEquals(mid[0], mid[1], 1e-4f)
         assertEquals(mid[1], mid[2], 1e-4f)
         // 色温方向：越高越冷 → R 抬、B 压
@@ -83,7 +83,7 @@ class WbTelemetryTest {
         assertTrue("低色温端 B 必须高于 R（补蓝）", warm[2] > warm[0])
         assertTrue("高色温端 R 必须高于 B（补红）", cold[0] > cold[2])
         // tint 方向（改前模型的绝对偏移口径）：+50 = 品红方向 → G 压、R/B 抬
-        val magenta = RequestApplier.manualGains(6000, 50)
+        val magenta = RequestApplier.manualGains(5500, 50)
         assertTrue("tint=+50 必须压 G", magenta[1] < mid[1])
         assertTrue("tint=+50 必须抬 R/B", magenta[0] > mid[0] && magenta[2] > mid[2])
     }

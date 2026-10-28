@@ -34,6 +34,14 @@ import kotlin.math.roundToInt
  */
 object RequestApplier {
 
+    /**
+     * 手动白平衡的**中性色温**（D55）：该档位下三通道增益完全相等 ⇒ 不加任何偏色。
+     *
+     * 必须是 5500 而不是"色温域的中点"（2000..10000 的中点是 6000）：5500 是用户与行业共同的
+     * "日光参考"，把零偏色放在 6000 会让所有标称值整体偏冷一档（详见 [kelvinTintToRgb255]）。
+     */
+    private const val KELVIN_NEUTRAL = 5500
+
     /** 对焦/测光框在传感器坐标系下固定 1000×1000，权重取最大 */
     private const val REGION_HALF = 1000
 
@@ -223,13 +231,28 @@ object RequestApplier {
 
     /**
      * 色温 + tint → 0–255 域 RGB（双轴插值）。
-     * 色温轴：2000/6000/10000K 三锚点线性插值（锚点即 1.0–3.0 增益域端点映回 0–255）；
+     *
+     * **中性锚点 = [KELVIN_NEUTRAL] = 5500K**（D55，标准"日光"参考）：该色温下三通道增益完全相等，
+     * 即"选了 5500 就不该有任何偏色"。色温轴以它为分界做两段线性插值，三枚锚点（2000/5500/10000）
+     * 对应 1.0–3.0 增益域的两端与中点。
+     *
+     * 2026-10-28 订正（手动白平衡"偏冷"的模型侧根因）：旧实现的锚点写在 **6000K**，
+     * 于是用户按"5500 是日光、应当中性"的常识去选、拿到的却是 **+11.5% 蓝增益**（5000K 更到 +17.8%，
+     * 4000K +37.6%）——那不是 HAL 的问题，是模型把零偏色的位置整体挪高了一档。
+     * 现在 5500K 恰为恒等，两侧再按同一套增益端点展开。
+     *
      * tint 轴：以中点为 0 的 ±偏移，同向抬/压 R、B，反向调整 G。
      * 方向遵循白平衡语义：预设越低（假定光源越暖）补蓝越多，预设越高补红越多。
      */
     fun kelvinTintToRgb255(kelvin: Int, tint: Int): FloatArray {
-        val u = ((kelvin - WotaTiers.KELVIN_MIN).toFloat() /
-            (WotaTiers.KELVIN_MAX - WotaTiers.KELVIN_MIN)).coerceIn(0f, 1f)
+        val k = kelvin.coerceIn(WotaTiers.KELVIN_MIN, WotaTiers.KELVIN_MAX)
+        // u=0 ↔ KELVIN_MIN、u=0.5 ↔ KELVIN_NEUTRAL、u=1 ↔ KELVIN_MAX：两段各自线性，
+        // 保证中性点精确落在 5500 而不是两端的中点（6000）
+        val u = if (k <= KELVIN_NEUTRAL) {
+            0.5f * (k - WotaTiers.KELVIN_MIN).toFloat() / (KELVIN_NEUTRAL - WotaTiers.KELVIN_MIN)
+        } else {
+            0.5f + 0.5f * (k - KELVIN_NEUTRAL).toFloat() / (WotaTiers.KELVIN_MAX - KELVIN_NEUTRAL)
+        }
         val v = ((tint - WotaTiers.TINT_MIN).toFloat() /
             (WotaTiers.TINT_MAX - WotaTiers.TINT_MIN)).coerceIn(0f, 1f)
         val r = lerp3(u, 0.298f, 0.549f, 1f) * 255f
@@ -246,19 +269,26 @@ object RequestApplier {
     /** 0–255 → 增益 1.0–3.0（线性映射，不自己构造色度矩阵） */
     fun gain255ToUnit(x: Float): Float = 1f + (x / 255f) * 2f
 
-    /** 由 0–255 RGB 组 RggbChannelVector（绿通道均分两半） */
+    /**
+     * 由 0–255 RGB 组 RggbChannelVector。
+     *
+     * **两个绿通道都拿满额增益**（[RggbChannelVector] 的 greenEven/greenOdd 是两条绿通道各自的增益，
+     * 不是"一条绿增益拆成两半"）。2026-10-28 订正：旧的 `g/2, g/2` 把绿增益砍半 ⇒ 在按规范实现
+     * 的 HAL 上等效于"R、B 各抬一档、G 不动"，成片/预览整体偏品红发冷；同一份代码的另一侧
+     * [manualGains] 报给遥测的却是不砍半的 G，两处对不上，[com.wotagei.cam.core.WbTelemetry.gainsAdopted]
+     * 的"采纳"判据因此在真正支持手动白平衡的机器上也永远判不采纳。
+     */
     fun rggbFromRgb255(rgb: FloatArray): RggbChannelVector {
         val r = gain255ToUnit(rgb[0])
         val g = gain255ToUnit(rgb[1])
         val b = gain255ToUnit(rgb[2])
-        return RggbChannelVector(r, g / 2f, g / 2f, b)
+        return RggbChannelVector(r, g, g, b)
     }
 
     /**
      * 手动档增益的**纯口径**（下发与遥测同源，28 §2.4-2 的 request 一侧）：
-     * 色温 + tint → 单位域 [R,G,B]。与 [rggbFromRgb255] 用同一组数——绿通道均分两半
-     * 是 RggbChannelVector 的摆法，遥测只关心三通道比例，这里不再构造 android 类型
-     * （构造器 JVM 单测起不来）。
+     * 色温 + tint → 单位域 [R,G,B]（= [rggbFromRgb255] 摆进 RggbChannelVector 的那三个数；
+     * 绿通道两半同值，这里只需要一条）。不构造 android 类型是因为构造器在 JVM 单测里起不来。
      */
     fun manualGains(kelvin: Int, tint: Int): FloatArray {
         val rgb = kelvinTintToRgb255(kelvin, tint)
