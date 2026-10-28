@@ -167,6 +167,18 @@ class ToneParamsTest {
         )) {
             assertTrue("TONE 面板缺 $needle", panel.contains(needle))
         }
+        // 真机取证回归（WIKO 12:05，r03）：四条滑杆曾传 ladder = emptyList() ⇒ PillSlider 判
+        // 「非 null 但不足 2 点」整根禁用（三根 SeekBar enabled=false）。必须传真梯：
+        // 电平走 toneLevelLadder（0.01 网格）、阴影/高光走 percentLadder（±100 步 5）
+        assertFalse("TONE 滑杆不许传空梯（会被判成假连续而整根禁用）", panel.contains("ladder = emptyList()"))
+        assertEquals(
+            "电平两根必须用 toneLevelLadder",
+            2, Regex("toneLevelLadder\\(").findAll(panel).count()
+        )
+        assertEquals(
+            "阴影/高光必须用 percentLadder(-100, 100, 5)",
+            2, Regex("percentLadder\\(-100, 100, 5\\)").findAll(panel).count()
+        )
         // 尺要能红：摘掉白名单里的 TONE 后翻红
         val mutant = pills.replace("PillKey.MONITOR, PillKey.GLOW, PillKey.TONE", "PillKey.MONITOR, PillKey.GLOW")
         assertFalse(mutant.contains("PillKey.TONE)"))

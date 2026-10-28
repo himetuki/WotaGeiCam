@@ -1244,28 +1244,28 @@ private fun TonePill(
         PillSlider(
             value = tone.black, lo = 0f, hi = com.wotagei.cam.core.ToneParams.BLACK_MAX, step = 0.01f,
             enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_black),
-            snapKey = null, ladder = emptyList(), format = toneFmt,
+            snapKey = null, ladder = com.wotagei.cam.ui.widget.toneLevelLadder(com.wotagei.cam.core.ToneParams.BLACK_MAX), format = toneFmt,
             onValueChange = { write(tone.copy(black = it)) },
             onValueChangeFinished = onPersist
         )
         PillSlider(
             value = tone.white, lo = 0f, hi = com.wotagei.cam.core.ToneParams.WHITE_MAX, step = 0.01f,
             enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_white),
-            snapKey = null, ladder = emptyList(), format = toneFmt,
+            snapKey = null, ladder = com.wotagei.cam.ui.widget.toneLevelLadder(com.wotagei.cam.core.ToneParams.WHITE_MAX), format = toneFmt,
             onValueChange = { write(tone.copy(white = it)) },
             onValueChangeFinished = onPersist
         )
         PillSlider(
             value = tone.shadows * 100f, lo = -100f, hi = 100f, step = 5f,
             enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_shadows),
-            snapKey = null, ladder = emptyList(), format = tonePercentFmt,
+            snapKey = null, ladder = com.wotagei.cam.ui.widget.percentLadder(-100, 100, 5), format = tonePercentFmt,
             onValueChange = { write(tone.copy(shadows = it / 100f)) },
             onValueChangeFinished = onPersist
         )
         PillSlider(
             value = tone.highlights * 100f, lo = -100f, hi = 100f, step = 5f,
             enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_highlights),
-            snapKey = null, ladder = emptyList(), format = tonePercentFmt,
+            snapKey = null, ladder = com.wotagei.cam.ui.widget.percentLadder(-100, 100, 5), format = tonePercentFmt,
             onValueChange = { write(tone.copy(highlights = it / 100f)) },
             onValueChangeFinished = onPersist
         )

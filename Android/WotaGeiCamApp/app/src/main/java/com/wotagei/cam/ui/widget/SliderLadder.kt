@@ -62,6 +62,19 @@ internal fun diopterLadder(lo: Float, hi: Float): List<Float> =
 internal fun percentLadder(lo: Int, hi: Int, step: Int): List<Float> = steppedLadder(lo, hi, step)
 
 /**
+ * 色调电平梯（29 §4.4 F4，2026-10-28）：黑点/白点 0..[max] 按 0.01 步长切成刻度。
+ *
+ * **为什么必须有真梯**：`PillSlider` 把「非 null 但不足 2 点」的梯判成禁用（防假连续，
+ * P3 口径），传 `emptyList()` 会让整根滑杆灰掉——色调首版就是这样在真机上三根全灰的
+ * （WIKO 12:05 取证，SeekBar enabled=false）。梯值即 `step=0.01` 的网格，与 snap 后的
+ * 取值域完全一致，不改变拖动手感。
+ */
+internal fun toneLevelLadder(max: Float): List<Float> {
+    val n = kotlin.math.round(max / 0.01f).toInt()
+    return (0..n).map { it * 0.01f }
+}
+
+/**
  * 补弧「并入门槛」（差分死区 D）：整数逐档一格，共 [ArcMergeDeadband.MAX]-[ArcMergeDeadband.MIN]+1 档。
  * 域来自 [ArcMergeDeadband]（参数域常量，非机型数值），所以这里不接任何运行时入参。
  */
