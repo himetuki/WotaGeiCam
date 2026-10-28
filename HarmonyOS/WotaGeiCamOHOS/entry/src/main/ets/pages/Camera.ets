@@ -44,6 +44,14 @@
  * - 录制键 72vp 圆形白环 + 44vp 红点（录制中 24vp 红方块、收尾中禁用）；
  * - 网格确定性三行三列（2 横 2 竖 Divider），不再依赖百分比 position；
  * - 删除预览帧率死读数，只显录制帧率「Nfps」（复审 P3-2：去「录」前缀防 360vp 截字）。
+ *
+ * Tone / 音量表 / 竖屏曲线入口（2026-10-28 接线批，依赖模块由并行代理提供）：
+ * - 竖屏右上第三枚圆钮「曲」（id pill_curve）→ 既有 openCurveEditor（横屏左侧 float 的 RGB 曲线不动）；
+ * - 横屏左侧 float「色调」芯片蓝色可用 → TonePanel（锚点 pill_tone）；提交 → ToneStore.save +
+ *   applyCurve 重传；LUT 唯一合成口径 = CurveStack.bakeBytes → applyToneToLut → uploadCurveLut
+ *   （applyCurve 与 applyEffect 的 effect=1 分支共用；显式搬进满长 ArrayBuffer，抹平 byteOffset）；
+ * - 横屏右侧竖排（水平仪/对焦/闪光）水平仪下方加音量表：AudioLevelProbe 采样 0..1 → 百分比，
+ *   启停唯一裁决 syncAudioProbe（pageVisible && cameraStarted && !recording && !stopPending）。
  */
 import { common } from '@kit.AbilityKit';
 import { display, mediaquery, window } from '@kit.ArkUI';
@@ -91,6 +99,10 @@ import { CurvePopup } from '../ui/CurvePopup';
 import { GlowPanel } from '../ui/GlowPanel';
 import { GlowStore } from '../ui/GlowStore';
 import { GLOW_DEFAULT, GlowParams } from '../core/Glow';
+import { ToneParams, TONE_DEFAULT, applyToneToLut } from '../core/Tone';
+import { ToneStore } from '../ui/ToneStore';
+import { TonePanel } from '../ui/TonePanel';
+import { AudioLevelProbe } from '../ui/AudioLevelProbe';
 import { SafeInsets, WindowChrome } from '../ui/WindowChrome';
 import { evText, shutterText, wbShort } from '../ui/ParamFormat';
 import { PillChoices, PillNote, PillOption, PillRect, WotaPillPopup } from '../ui/PillPopup';
@@ -128,6 +140,8 @@ const PARAMS_FLUSH_WINDOW_MS: number = 300;
 /** 2026-10-28 新增胶囊锚点 id（字面量单点定义；横竖分支互斥复用，避免重复 id 静态误报） */
 const PILL_FLASH_ID: string = 'pill_flash';
 const PILL_BITRATE_ID: string = 'pill_bitrate';
+/** 竖屏右上第三枚圆钮（曲线编辑入口；回归修复——横屏左侧 float 已有 RGB 曲线，竖屏此前无入口） */
+const PILL_CURVE_ID: string = 'pill_curve';
 
 /**
  * 横屏 HUD 局部色板/几何（T32 复刻安卓 r03 截图；HudTokens 不改）：
@@ -342,6 +356,12 @@ struct CameraPage {
   /** 光晕参数（GlowPanel 提交 → GlowStore 落盘；native 渲染链待批，仅参数与提示生效） */
   @State glowParams: GlowParams = GLOW_DEFAULT;
   @State glowOpen: boolean = false;
+  /** 色调参数（TonePanel 提交 → ToneStore 落盘；LUT 合成在 applyCurve 唯一出口） */
+  @State toneParams: ToneParams = TONE_DEFAULT;
+  @State toneSel: boolean = false;
+  /** 音量表读数（0..100）与「是否已采样」：探针启动后首回调前/停止后 UI 显 — */
+  @State audioLevelPct: number = 0;
+  @State audioLevelSampled: boolean = false;
   @State startingCamera: boolean = false;
   @State permissionRequesting: boolean = false;
 
@@ -353,6 +373,10 @@ struct CameraPage {
   private settingsLoaded: boolean = false;
   /** 水平仪数据源（页面可见时才采样；隐藏/销毁必停，传感器常开很费电） */
   private levelSensor: LevelSensor | undefined = undefined;
+  /** 色调面板锚点（pill_tone 的窗口矩形；同 glowAnchor 的就近浮层模式） */
+  private toneAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** 音量探针裁决态（syncAudioProbe 幂等的真源：只在 want 与它不同时 start/stop） */
+  private audioProbeOn: boolean = false;
   private lenses: Array<LensSlot> = [];
   private lensKey: string = '';
   private effectIndex: number = 0;
@@ -462,6 +486,7 @@ struct CameraPage {
       }
       this.closePill(); // T22 P3：相机丢失/session error 处置统一收口弹层（锚点/能力快照已失效）
       this.cameraStarted = false;
+      this.syncAudioProbe();
       this.hideFocusMark();
       this.tapArbiter.reset();
       this.lockedTapTipShown = false;
@@ -547,12 +572,14 @@ struct CameraPage {
     this.syncLevelDisplayDegrees();
     this.syncViewportFromWindow();
     this.applyLevelSetting();
+    this.syncAudioProbe();
     const ctx: common.Context | undefined = this.ctx;
     if (ctx === undefined) {
       return;
     }
-    // 光晕参数与设置页同源回读（面板提交即存；本处覆盖冷启/设置页往返）
+    // 光晕/色调参数与设置页同源回读（面板提交即存；本处覆盖冷启/设置页往返）
     this.glowParams = GlowStore.load(ctx);
+    this.toneParams = ToneStore.load(ctx);
     SettingsStore.load(ctx).then((s: CameraSettings): void => {
       if (this.disposed || !this.pageVisible || this.recording) {
         return;
@@ -586,6 +613,7 @@ struct CameraPage {
     this.pageVisible = false;
     // 面板不跨页留存（返回取景页重新按需打开）
     this.glowOpen = false;
+    this.toneSel = false;
     // 退后台是关键点：取消未触发的尾随并立即落盘（旁路副作用，失败只记日志）
     this.flushParamsNow();
     this.cancelTapTimers();
@@ -593,6 +621,7 @@ struct CameraPage {
     if (this.levelSensor !== undefined) {
       this.levelSensor.stop();
     }
+    this.syncAudioProbe();
     if (this.recording && !this.healthHealthy && this.healthTimer >= 0) {
       this.healthPausedByHide = true;
     }
@@ -611,6 +640,8 @@ struct CameraPage {
     this.disposed = true;
     this.hideFocusMark();
     this.pageVisible = false;
+    // 销毁即停探针（disposed 已在 want 里收口，这里给幂等兜底）
+    this.syncAudioProbe();
     // 离开录制页：取消节流定时器、补最后一次落盘，然后销毁会话（晚到回调不再写盘）
     this.flushParamsNow();
     this.flushThrottle = undefined;
@@ -669,6 +700,7 @@ struct CameraPage {
       this.refMask = s.refLines;
       this.effectIndex = s.effect;
       this.glowParams = GlowStore.load(ctx);
+      this.toneParams = ToneStore.load(ctx);
       // 冷启恢复（本批 I）：24 键白名单灌进参数总线（只写 value，range/enabled/exact 不动）；
       // 机型域钳制仍由起镜后的 applyAbility 收口，本处不绕开。恢复值不是用户动作，
       // 完成后 resync 影子，避免第一次 flush 把它们当改动写回。
@@ -857,6 +889,8 @@ struct CameraPage {
       }
       this.cameraStarted = true;
       this.loading = false;
+      // 起镜成功是音量表的第一启点（首启时 onPageShow 早于起镜完成，必须在真值变化处再裁决一次）
+      this.syncAudioProbe();
       const lens: LensSlot | undefined = this.engine.currentLens();
       if (lens !== undefined) {
         this.lensKey = lens.key;
@@ -1058,6 +1092,61 @@ struct CameraPage {
     this.glowOpen = false;
   }
 
+  /** 色调面板：量取左侧「色调」芯片的窗口矩形做锚点；量不到走 PillPopup 底贴屏回退 */
+  private openTone(): void {
+    this.toneAnchor = { left: 0, top: 0, right: 0, bottom: 0 };
+    try {
+      const info = this.getUIContext().getComponentUtils().getRectangleById(this.pillAnchorId('tone'));
+      this.toneAnchor = {
+        left: info.windowOffset.x,
+        top: info.windowOffset.y,
+        right: info.windowOffset.x + info.size.width,
+        bottom: info.windowOffset.y + info.size.height
+      };
+    } catch (e) {
+      // 锚点量取失败（id 失效/首帧未量到）：保持零矩形，面板回退底贴屏
+    }
+    this.toneSel = true;
+  }
+
+  private closeTone(): void {
+    this.toneSel = false;
+  }
+
+  /**
+   * 音量探针启停唯一裁决（幂等）：取景可见 + 相机已起 + 未录制/未收尾才采样（录制要独占麦克风）。
+   * onPageShow/onPageHide/起镜/开始录制/停录/销毁各点只调它，不各自直接 start/stop。
+   * 探针内部的建路/读失败全吞（增益功能，绝不阻塞取景/录制），页面只做读数换算。
+   */
+  private syncAudioProbe(): void {
+    const want: boolean = this.pageVisible && this.cameraStarted && !this.recording &&
+      !this.stopPending && !this.disposed;
+    if (want === this.audioProbeOn) {
+      return;
+    }
+    this.audioProbeOn = want;
+    if (!want) {
+      AudioLevelProbe.stop();
+      this.audioLevelSampled = false;
+      this.audioLevelPct = 0;
+      return;
+    }
+    this.audioLevelSampled = false; // 首回调前显 —
+    AudioLevelProbe.start((level: number): void => {
+      if (this.disposed || !this.audioProbeOn) {
+        return; // stop 后残留在途回调丢弃
+      }
+      const clamped: number = Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0;
+      this.audioLevelPct = Math.round(clamped * 100);
+      this.audioLevelSampled = true;
+    });
+  }
+
+  /** 音量表读数：未采样（探针未启动/首回调未到）显 — */
+  private audioLevelText(): string {
+    return this.audioLevelSampled ? `${this.audioLevelPct}%` : '—';
+  }
+
   /** 码率弹层档位：自动 + 上游五档（值即 settings.bitrate 的原始 bps） */
   private bitrateOptions(): Array<PillOption> {
     const out: Array<PillOption> = [new PillOption(0, '自动', true)];
@@ -1212,7 +1301,13 @@ struct CameraPage {
       return;
     }
     try {
-      lib.uploadCurveLut(this.curveStack.bakeBytes().buffer as ArrayBuffer);
+      // LUT 合成顺序：曲线栈烘焙（768 字节交错 RGB）→ 色调（入出同长）→ 上传。
+      // 上传走新 ArrayBuffer（同 initNativeParams 的形态）：显式抹平 byteOffset，只给满长 768。
+      const baked: Uint8Array = this.curveStack.bakeBytes();
+      const finalLut: Uint8Array = applyToneToLut(baked, this.toneParams);
+      const ab: ArrayBuffer = new ArrayBuffer(finalLut.length);
+      new Uint8Array(ab).set(finalLut);
+      lib.uploadCurveLut(ab);
       if (this.effectIndex === 1) {
         lib.setCurveEnabled(!this.curveStack.isPassthrough);
       }
@@ -1250,7 +1345,12 @@ struct CameraPage {
         lib.setCurveEnabled(false);
       } else if (this.effectIndex === 1) {
         lib.setEffect(0);
-        lib.uploadCurveLut(this.curveStack.bakeBytes().buffer as ArrayBuffer);
+        // 曲线档的 LUT 与 applyCurve 同一合成口径（曲线烘焙 → 色调），否则切效果会把色调丢掉
+        const baked: Uint8Array = this.curveStack.bakeBytes();
+        const finalLut: Uint8Array = applyToneToLut(baked, this.toneParams);
+        const ab: ArrayBuffer = new ArrayBuffer(finalLut.length);
+        new Uint8Array(ab).set(finalLut);
+        lib.uploadCurveLut(ab);
         lib.setCurveEnabled(!this.curveStack.isPassthrough);
       } else if (this.effectIndex === 2) {
         lib.setEffect(FrameEffect.ZEBRA as number);
@@ -1855,6 +1955,8 @@ struct CameraPage {
     this.healthAttempts = 0;
     this.healthPausedByHide = false;
     this.startHealthMonitor();
+    // 录制要独占麦克风与探针冲突：起录即停采样（读数回 —）
+    this.syncAudioProbe();
   }
 
   /** 页面恢复时续跑未完成的健康巡检（保留 healthStartMs，elapsed 继续累计） */
@@ -2134,6 +2236,7 @@ struct CameraPage {
     const delay: number = AutoStopRules.stopGraceDelayMs(Date.now() - this.recordStartedAtMs);
     if (delay > 0) {
       this.stopPending = true;
+      this.syncAudioProbe();
       this.stopHealthMonitor();
       this.stopAutoStopMonitor();
       this.message = '录制: 收尾中…';
@@ -2181,6 +2284,8 @@ struct CameraPage {
       this.cameraStarted = false;
       this.resetCameraLabels();
     }
+    // 停录终态：磁带让出后探针可恢复采样（页面不可见/相机已失时 want 为 false，不会误启）
+    this.syncAudioProbe();
     return summary;
   }
 
@@ -2361,7 +2466,7 @@ struct CameraPage {
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
   }
 
-  /** 色调/降噪：本侧未移植（色调未移植、降噪 GPU 链待批）——不造假面板，只给一句提示 */
+  /** 降噪：本侧未移植（降噪 GPU 链待批）；色调已接实面板，不再走本入口——不造假，只给一句提示 */
   private pendingFeatureTip(): void {
     this.message = '该功能待真机批';
   }
@@ -2485,8 +2590,24 @@ struct CameraPage {
           .alignItems(HorizontalAlign.Start)
 
           // VIS 批：右上入口改圆形描边单字钮（对齐安卓取景页右上双圆钮的信息架构；
-          // 承载语言为鸿蒙描边圆钮 + 令牌色板）
-          Column({ space: HudSpace.S }) {
+          // 承载语言为鸿蒙描边圆钮 + 令牌色板）。
+          // 回归修复：竖屏此前没有曲线入口（横屏左侧 float 有 RGB 曲线）——右起第三枚「曲」补上，
+          // 横排三枚 40vp（3×40 + 2×6 = 132）不压顶栏两行读数，录制中也可开（曲线/LUT 上传与录制无冲突）。
+          Row({ space: HudSpace.S }) {
+            Text('曲')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('RGB 曲线')
+              .id(PILL_CURVE_ID)
+              .onClick((): void => {
+                this.openCurveEditor();
+              })
             Text('设')
               .fontSize(HudType.VALUE)
               .fontColor(!this.recording && !this.stopPending ? HudColor.TEXT_PRIMARY : HudColor.TEXT_DISABLED)
@@ -2518,7 +2639,7 @@ struct CameraPage {
                 }
               })
           }
-          .width(76)
+          .width(132)
         }
         .width('100%')
         .height(HudSpec.TOP_BAR_HEIGHT + this.safeTop)
@@ -2852,7 +2973,7 @@ struct CameraPage {
           }
           .position({ x: this.landRoundRowX(), y: this.landTop() })
 
-          // 4. 右侧竖排：水平仪气泡（复用 AttitudeMeter）+ 下方「对焦」蓝色钮（现有对焦弹层）
+          // 4. 右侧竖排：水平仪气泡（复用 AttitudeMeter）+ 音量表 + 下方「对焦」蓝色钮（现有对焦弹层）
           Column({ space: HudSpace.S }) {
             if (this.levelOn && this.levelAvailable) {
               AttitudeMeter({
@@ -2861,6 +2982,28 @@ struct CameraPage {
                 isLevel: this.levelIsLevel
               })
             }
+            // 音量表（水平仪下方）：探针只在取景且未录制时采样；未采样显 —
+            // 图标用 4 根细柱拼出 ▮▮▯ 电平符号（不走字形：▮/▯ 的字宽随字体漂，52vp 内宽会溢出）
+            Row({ space: 4 }) {
+              Row({ space: 2 }) {
+                Column().width(3).height(12).borderRadius(1.5).backgroundColor(HudColor.TEXT_TERTIARY)
+                Column().width(3).height(9).borderRadius(1.5).backgroundColor(HudColor.TEXT_TERTIARY)
+                Column().width(3).height(6).borderRadius(1.5).backgroundColor(HudColor.TEXT_TERTIARY)
+                Column().width(3).height(4).borderRadius(1.5).backgroundColor(HudColor.TEXT_TERTIARY)
+              }
+              .height(12)
+              .alignItems(VerticalAlign.Bottom)
+              Text(this.audioLevelText())
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .maxLines(1)
+                .layoutWeight(1)
+                .textAlign(TextAlign.Center)
+                .accessibilityText('音量表')
+            }
+            .width('100%')
+            .height(20)
+            .alignItems(VerticalAlign.Center)
             Row() {
               Button('对焦')
                 .type(ButtonType.Normal)
@@ -2941,7 +3084,7 @@ struct CameraPage {
                 this.openCurveEditor();
               }
             })
-            // 光晕面板（参数可调、持久化；native 渲染链待批）；色调未移植 → 禁用观感 + 提示
+            // 光晕面板（参数可调、持久化；native 渲染链待批）；色调面板（本批接实：提交即落盘 + LUT 合成）
             Row() {
               LandTag({
                 label: '光晕',
@@ -2953,14 +3096,17 @@ struct CameraPage {
               })
             }
             .id(this.pillAnchorId('glow'))
-            LandTag({
-              label: '色调',
-              dim: true,
-              tagWidth: 62,
-              onTap: (): void => {
-                this.pendingFeatureTip();
-              }
-            })
+            Row() {
+              LandTag({
+                label: '色调',
+                accent: true,
+                tagWidth: 62,
+                onTap: (): void => {
+                  this.openTone();
+                }
+              })
+            }
+            .id(this.pillAnchorId('tone'))
           }
           .width(LAND_SIDE_PANEL_W)
           .padding({ top: 12, bottom: 12, left: 8, right: 8 })
@@ -3315,6 +3461,24 @@ struct CameraPage {
               GlowStore.save(ctx, p);
             }
             this.message = '光晕渲染链待 native 批，参数已保存';
+          }
+        })
+      }
+      // 色调面板（TonePanel）：提交即落盘并重合成 LUT（曲线烘焙 → 色调 → uploadCurveLut）
+      if (this.toneSel) {
+        TonePanel({
+          anchor: this.toneAnchor,
+          tone: this.toneParams,
+          onClose: (): void => {
+            this.closeTone();
+          },
+          onCommit: (p: ToneParams): void => {
+            this.toneParams = p;
+            const ctx: common.Context | undefined = this.ctx;
+            if (ctx !== undefined) {
+              ToneStore.save(ctx, p);
+            }
+            this.applyCurve();
           }
         })
       }

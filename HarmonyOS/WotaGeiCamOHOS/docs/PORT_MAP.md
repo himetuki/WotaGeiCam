@@ -628,6 +628,22 @@ EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 OR
 - **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL；
   模拟器实测：更多消失、闪光/光晕/色调/码率落位正确、光晕面板可开合。
 
+### 补齐批（三缺口收口，2026-10-28）
+
+- **竖屏曲线入口回归**：竖屏顶栏右上 40vp 圆钮「曲」→ openCurveEditor（id `pill_curve`）；
+  横屏左侧 float 原入口不变。
+- **色调实面板**：`core/Tone.ets`（黑点/白点 ±0.35、阴影 -1..1；公式与安卓 ToneParams.kt
+  逐点对拍 0 偏差）+ `ui/TonePanel.ets`（照 r03 截图三滑杆）+ `ui/ToneStore.ets`（键
+  `tone_params`）；Camera applyCurve 合成链 `bakeBytes → applyToneToLut → uploadCurveLut`
+  （effect=1 与 applyEffect 同口径）。**登记**：安卓烘焙顺序为 curve(tone(x))，本侧为
+  tone(curve(x))——Tone.ets 头注已记，真机校色批决定是否前置；高光轴本批未移植（接口只留三参）。
+- **音量表**：`ui/AudioLevelProbe.ets`（AudioCapturer MIC 16k 单声道 S16LE，RMS→dBFS→0..1，
+  100ms 节流自愈，失败静默不与录制抢麦）；横屏右侧水平仪下方一行（细柱图标 + NN%），
+  启停由 Camera `syncAudioProbe()` 统一裁决（8 个启停点覆盖显隐/起镜/录制/停录）。
+- **守卫**：`tone-pure.test.ets` 12 例（往返/坏串/钳制/恒等逐字节/单调/方向/尾字节防御）。
+- **回归**：pure-test 82 files / 858 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL；
+  模拟器实测：色调面板可开合、竖屏曲线钮在册、音量表出读数。
+
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
 追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置
