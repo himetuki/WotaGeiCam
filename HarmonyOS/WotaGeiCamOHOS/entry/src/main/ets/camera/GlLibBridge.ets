@@ -75,6 +75,24 @@ export function setFrostEnabled(on: boolean): void {
   glLib.setFrostEnabled(on);
 }
 
+// ---------------------------------------------------------------- 追赶轮：光晕三口 + 降噪一口
+// 参数序是 native napi 注册表的字面契约（cpp/napi_init.cpp 同名口），调用点不得重排
+
+export function setGlowParams(enabled: number, threshold: number, soft: number, width: number,
+  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number): void {
+  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, colorA, colorB);
+}
+
+/** 'off' 或 'on:<broken>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped>' */
+export function getGlowStatus(): string {
+  return glLib.getGlowStatus();
+}
+
+/** 0=关 / 1=完整核 / 2=轻量核（取值见 core/Denoise.ets 的 DENOISE_LEVEL_*） */
+export function setDenoiseLevel(level: number): void {
+  glLib.setDenoiseLevel(level);
+}
+
 // ---------------------------------------------------------------- GL-4 GPU 录制（视频-only 最小切片）
 
 export function startGpuRecord(fd: number, width: number, height: number, fps: number, bitrate: number,

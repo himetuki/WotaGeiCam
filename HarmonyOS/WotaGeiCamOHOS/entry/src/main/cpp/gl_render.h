@@ -111,4 +111,22 @@ std::string WotaGlGetFrameCounters();
 /** 当前实际运行档（0/1/2；MEND 失败降 DROP 后为 2） */
 int WotaGlGetArcEffectiveMode();
 
+// ---------------------------------------------------------------- Glow/降噪（2026-10-28 批，上游 24 R3/25 §11）
+
+/**
+ * Glow 参数（enabled 0/1；颜色 ARGB 数值，与上游 GlowParams 同义）。
+ * 形状参数只换 uniform（不重建 program）；打开动作给停用链一次干净重试。
+ */
+void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
+    float add, float freq, float blend, uint32_t colorA, uint32_t colorB);
+
+/**
+ * Glow 状态串：`off` 或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`。
+ * fps 本侧无编码帧率观测面，按上游「未知按 30」口径报 30；rt 未建时两位为 0。
+ */
+std::string WotaGlGetGlowStatus();
+
+/** 画面降噪档 0/1/2（0=关 1=完整核 2=轻量核；0 时槽键归零、旧变体由下一帧回收） */
+void WotaGlSetDenoiseLevel(int level);
+
 #endif // WOTA_GL_RENDER_H

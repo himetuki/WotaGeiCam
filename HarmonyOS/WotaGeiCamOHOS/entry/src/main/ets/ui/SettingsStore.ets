@@ -18,7 +18,7 @@
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
-import { HudItems, Size } from '../core/Constants';
+import { HudItems, Size, WotaTiers } from '../core/Constants';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
 import { UserSettings } from '../core/UserSettings';
 import { Diag } from '../diag/Diag';
@@ -58,6 +58,8 @@ const KEY_CURVE_STACK: string = 'curve_stack';
  */
 const KEY_LENS_USER_PICKED: string = 'lens_user_picked';
 const KEY_LENS_KEY: string = 'lens_key';
+/** 画面降噪开关（追赶轮；音频降噪在本平台无对应能力，见 core/Denoise.ets 头注 T27-3） */
+const KEY_VIDEO_DENOISE: string = 'video_denoise';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -110,6 +112,11 @@ export class CameraSettings {
   lensUserPicked: boolean = false;
   /** 显式选中的镜头槽位键（LensSlot.key；仅 lensUserPicked=true 时消费） */
   lensKey: string = '';
+  /**
+   * 画面降噪开关（追赶轮，键 `video_denoise`）：开 = 按负载分档下 setDenoiseLevel(1/2)，
+   * 关 = 0。**只有画面降噪**——音频降噪在本平台无对应能力（core/Denoise.ets 头注，T27-3 登记）。
+   */
+  videoDenoise: boolean = false;
 }
 
 function asInt(value: number, fallback: number): number {
@@ -199,6 +206,8 @@ export class SettingsStore {
       s.lensUserPicked = typeof lpRaw === 'boolean' ? lpRaw as boolean : s.lensUserPicked;
       const lkRaw: preferences.ValueType = await store.get(KEY_LENS_KEY, s.lensKey);
       s.lensKey = typeof lkRaw === 'string' ? lkRaw as string : s.lensKey;
+      const vdRaw: preferences.ValueType = await store.get(KEY_VIDEO_DENOISE, s.videoDenoise);
+      s.videoDenoise = typeof vdRaw === 'boolean' ? vdRaw as boolean : s.videoDenoise;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -214,7 +223,9 @@ export class SettingsStore {
     if (!bitrateOk) {
       s.bitrate = 0;
     }
-    if (s.fps !== 24 && s.fps !== 25 && s.fps !== 30) {
+    // 帧率档位与 WotaTiers.FPS（24/25/30/50/60/120/240）同源：高帧率档也是合法持久值，
+    // 旧实现只放行 24/25/30，会把用户选过的高帧率静默洗回 30
+    if (WotaTiers.FPS.indexOf(s.fps) < 0) {
       s.fps = 30;
     }
     if (s.arcMode !== 1 && s.arcMode !== 2) {
@@ -251,6 +262,7 @@ export class SettingsStore {
       await store.put(KEY_DIAG_VERBOSE, s.diagVerbose);
       await store.put(KEY_LENS_USER_PICKED, s.lensUserPicked);
       await store.put(KEY_LENS_KEY, s.lensKey);
+      await store.put(KEY_VIDEO_DENOISE, s.videoDenoise);
       await store.flush();
       return true;
     } catch (e) {

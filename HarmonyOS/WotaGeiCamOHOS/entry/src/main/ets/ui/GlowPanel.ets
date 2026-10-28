@@ -102,6 +102,13 @@ struct GlowSliderRow {
 export struct GlowPanel {
   anchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
   glow: GlowParams = GLOW_DEFAULT;
+  /**
+   * native 运行期状态行（页面 500ms 读 getGlowStatus → core.glowStatusNote 五键映射的中文）。
+   * 空串 = 这帧不显示（关着/链未跑），面板不虚构状态。
+   */
+  @Prop statusText: string = '';
+  /** getGlowStatus 非 off 且 !broken：底部注记的唯一判据（页面算好传进来，面板不碰 native） */
+  @Prop chainActive: boolean = false;
   onClose: () => void = (): void => {};
   onCommit: (p: GlowParams) => void = (_p: GlowParams): void => {};
 
@@ -217,7 +224,9 @@ export struct GlowPanel {
           this.commit(this.withEdits(this.glowOn, this.threshold, v));
         }
       })
-      PillNote({ noteText: '渲染链随 native 真机批生效；参数本地保存' })
+      // 状态行以 getGlowStatus 解析结果为唯一权威（2026-10-28：与 chainActive 双源曾出现
+      // 「渲染链 2856×1320 · 1/2 档」与「渲染链未生效」同屏矛盾，现只留单一来源）。
+      PillNote({ noteText: this.statusText !== '' ? this.statusText : '渲染链未生效（参数已保存）' })
     }
   }
 }

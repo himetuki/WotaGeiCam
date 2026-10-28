@@ -57,6 +57,25 @@ function previewProfileFor(profiles: Array<camera.Profile>,
 /** AF 状态遥测的拍点间隔（上游 4457e4a 方案F）：1s 一拍，d 级（详细档才记） */
 const FOCUS_TELEMETRY_MS: number = 1000;
 
+/**
+ * 档位帧率 → 预览区间：遍历会话声明过的区间，取「min ≤ fps ≤ max 且 max 最小」者
+ * （max 最小 = HAL 可跑的上界最贴近用户档位，不把 60 档放成 [30,240]）。
+ * 无匹配返回 undefined —— 本机预览流做不到这一档，不硬发。
+ * KitPreview（开发者页）复用同一支，不另写一份选档规则。
+ */
+export function previewRangeFor(ranges: Array<camera.FrameRateRange>,
+  fps: number): camera.FrameRateRange | undefined {
+  let best: camera.FrameRateRange | undefined = undefined;
+  for (const r of ranges) {
+    if (r.min <= fps && fps <= r.max) {
+      if (best === undefined || r.max < best.max) {
+        best = r;
+      }
+    }
+  }
+  return best;
+}
+
 /** FocusState → 短名（SCAN=0 / FOCUSED=1 / UNFOCUSED=2，d.ts 契约值） */
 function FocusStateName(st: camera.FocusState): string {
   if (st === camera.FocusState.FOCUS_STATE_SCAN) {
@@ -121,6 +140,59 @@ export class GlCameraEngine {
 
   supportedPreviewSizes(): Array<Size> {
     return this.previewSizes;
+  }
+
+  /**
+   * 当前会话预览支持的帧率（各区间上界去重升序；无会话/查询失败返回空表）。
+   * 只作旁路读数/开发者页显示，不参与任何下发裁决。
+   */
+  supportedPreviewFrameRates(): Array<number> {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return [];
+    }
+    try {
+      const out: Array<number> = [];
+      for (const r of preview.getSupportedFrameRates()) {
+        if (out.indexOf(r.max) < 0) {
+          out.push(r.max);
+        }
+      }
+      out.sort((a: number, b: number): number => a - b);
+      return out;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl preview supported fps query failed: ${e}`);
+      return [];
+    }
+  }
+
+  /** 活设置预览帧率（帧率弹层选中/起录前重下发）：无会话/无匹配区间/下发失败返回 false */
+  applyPreviewFps(fps: number): boolean {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return false;
+    }
+    return this.applyFpsTo(preview, fps);
+  }
+
+  /** 档位 → 声明区间 → setFrameRate（失败 Diag.w 不抛；成功返回 true） */
+  private applyFpsTo(preview: camera.PreviewOutput, fps: number): boolean {
+    if (!(fps > 0)) {
+      return false;
+    }
+    try {
+      const best: camera.FrameRateRange | undefined = previewRangeFor(preview.getSupportedFrameRates(), fps);
+      if (best === undefined) {
+        Diag.w(WotaTag.ABILITY, `gl preview fps ${fps} unsupported by declared ranges`);
+        return false;
+      }
+      preview.setFrameRate(best.min, best.max);
+      Diag.i(WotaTag.ABILITY, `gl preview fps ${fps} -> [${best.min},${best.max}]`);
+      return true;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl preview setFrameRate ${fps} failed: ${e}`);
+      return false;
+    }
   }
 
   /** 最近一次 applyZoom 实际生效倍率（1 = 未设置/失败） */
@@ -199,14 +271,13 @@ export class GlCameraEngine {
       const preview: camera.PreviewOutput = mgr.createPreviewOutput(profile, nativeSurfaceId);
       this.preview = preview;
       session.addOutput(preview);
-      // 登记偏离：PhotoSession 预览无 setFrameRate（该 API 属 VideoOutput），预览源可能仍为 30fps；
-      // 录制帧率仅编码器侧生效，光弧抽帧按编码器输出节奏。
-      if (fps !== undefined && fps > 0) {
-        Diag.i(WotaTag.ABILITY,
-          `gl camera preview fps set not supported (requested ${fps}), encoder-side only`);
-      }
       await session.commitConfig();
       await session.start();
+      // 预览帧率：SDK 12+ 的 PreviewOutput.setFrameRate 是真口（此前登记「预览无 setFrameRate」
+      // 已过时）。失败只 Diag.w，不阻塞起镜——预览照常出画面，录制帧率仍在编码器侧。
+      if (fps !== undefined && fps > 0) {
+        this.applyFpsTo(preview, fps);
+      }
       this.status = DeviceStatus.OPEN_SUCCEED;
       try {
         preview.on('frameStart', (err: BusinessError): void => {

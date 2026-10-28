@@ -64,7 +64,7 @@ import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { ContentPoint, PreviewBox, PreviewFit } from '../core/PreviewFit';
 import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size, WotaTiers } from '../core/Constants';
-import { CameraAbility, forcedShutterOutOfRange } from '../core/CameraAbility';
+import { CameraAbility, FpsDecision, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
 import { AutoStopMonitor } from '../record/AutoStopMonitor';
@@ -98,7 +98,8 @@ import { HudPill } from '../ui/HudPill';
 import { CurvePopup } from '../ui/CurvePopup';
 import { GlowPanel } from '../ui/GlowPanel';
 import { GlowStore } from '../ui/GlowStore';
-import { GLOW_DEFAULT, GlowParams } from '../core/Glow';
+import { GLOW_DEFAULT, GlowNoteKey, GlowParams, GlowStatus, glowStatusNote } from '../core/Glow';
+import { DENOISE_LEVEL_FULL, DENOISE_LEVEL_LITE, DENOISE_LEVEL_OFF, denoiseKernelLite } from '../core/Denoise';
 import { ToneParams, TONE_DEFAULT, applyToneToLut } from '../core/Tone';
 import { ToneStore } from '../ui/ToneStore';
 import { TonePanel } from '../ui/TonePanel';
@@ -125,6 +126,12 @@ interface GlLibApi extends GlRecordLib {
   /** 直方图（曲线框背景，f31d18c）：弹窗可见才开采；快照 3×64 计数，无样本 undefined */
   setHistogramEnabled: (on: boolean) => void;
   getHistogramSnapshot: () => Int32Array | undefined;
+  /** 光晕（追赶轮 Glow 接线）：参数十连发 + 运行期状态串（'off' | 'on:broken:scale:inW:inH:fps:rtW:rtH:clamped'） */
+  setGlowParams: (enabled: number, threshold: number, soft: number, width: number, gain: number,
+    add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+  getGlowStatus: () => string;
+  /** 画面降噪核档位：0 关 / 1 完整核 / 2 轻量核（台侧按负载分档，见 core/Denoise.ets） */
+  setDenoiseLevel: (level: number) => void;
 }
 
 const POLL_INTERVAL_MS: number = 100;
@@ -140,8 +147,57 @@ const PARAMS_FLUSH_WINDOW_MS: number = 300;
 /** 2026-10-28 新增胶囊锚点 id（字面量单点定义；横竖分支互斥复用，避免重复 id 静态误报） */
 const PILL_FLASH_ID: string = 'pill_flash';
 const PILL_BITRATE_ID: string = 'pill_bitrate';
+/** 帧率/降噪弹层锚点（竖屏 Dock 与横屏读数/芯片同一 id 契约） */
+const PILL_FPS_ID: string = 'pill_fps';
+const PILL_DENOISE_ID: string = 'pill_denoise';
+/** 光晕运行期状态的轮询间隔（复用 200ms 状态定时器，按 500ms 节流读 native） */
+const GLOW_STATUS_INTERVAL_MS: number = 500;
 /** 竖屏右上第三枚圆钮（曲线编辑入口；回归修复——横屏左侧 float 已有 RGB 曲线，竖屏此前无入口） */
 const PILL_CURVE_ID: string = 'pill_curve';
+
+/**
+ * native 状态串 → core.GlowStatus（纯数据；enabled 由用户开关给，native 只报链侧事实）。
+ * `off` / 坏串 / 字段数不符返回 undefined（= 链没跑，不是「链坏了」）。
+ */
+function parseGlowStatus(raw: string, enabled: boolean): GlowStatus | undefined {
+  if (typeof raw !== 'string' || raw.indexOf('on:') !== 0) {
+    return undefined;
+  }
+  const parts: Array<string> = raw.substring(3).split(':');
+  if (parts.length !== 8) {
+    return undefined;
+  }
+  const nums: Array<number> = [];
+  for (let i = 1; i < parts.length; i++) {
+    const v: number = Number(parts[i]);
+    if (!Number.isFinite(v)) {
+      return undefined;
+    }
+    nums.push(v);
+  }
+  return new GlowStatus(true, enabled, parts[0] === '1', nums[0], nums[1], nums[2], nums[3],
+    nums[4], nums[5], nums[6] === 1);
+}
+
+/** 五键 Glow 提示文案（core.glowStatusNote 的文案键 → 屏上中文；undefined = 不显示） */
+function glowNoteTextOf(note: GlowNoteKey | undefined, st: GlowStatus | undefined): string {
+  if (note === undefined) {
+    return '';
+  }
+  if (note === 'cam_glow_direct') {
+    return '当前为直连渲染，Glow 需 GPU 渲染才生效';
+  }
+  if (note === 'cam_glow_broken') {
+    return 'Glow 渲染链已停用（连续报错）';
+  }
+  if (note === 'cam_glow_clamped' && st !== undefined) {
+    return `已夹到 ${st.rtWidthPx}×${st.rtHeightPx}（机型纹理上限）`;
+  }
+  if (note === 'cam_glow_status_res_label' && st !== undefined) {
+    return `渲染链 ${st.inputWidthPx}×${st.inputHeightPx}@${st.fps} · 1/${st.scale} 档`;
+  }
+  return 'Glow 自动分档';
+}
 
 /**
  * 横屏 HUD 局部色板/几何（T32 复刻安卓 r03 截图；HudTokens 不改）：
@@ -351,10 +407,16 @@ struct CameraPage {
   @State freeMb: number = -1;
   @State zoomLabel: string = '1x';
   @State flashOn: boolean = false;
+  /** 画面降噪开关（settings.videoDenoise 的镜像 @State：横屏芯片选中态要刷新） */
+  @State denoiseOn: boolean = false;
   /** engine 报闪光不支持后的禁用观感（仍可点出一次「该镜头不支持闪光/常亮」提示） */
   @State flashUnsupported: boolean = false;
-  /** 光晕参数（GlowPanel 提交 → GlowStore 落盘；native 渲染链待批，仅参数与提示生效） */
+  /** 光晕参数（GlowPanel 提交 → GlowStore 落盘 + native setGlowParams 下发） */
   @State glowParams: GlowParams = GLOW_DEFAULT;
+  /** 光晕运行期状态（500ms 一拍读 getGlowStatus；五键中文由 core.glowStatusNote 裁决） */
+  @State glowStatusText: string = '';
+  /** 渲染链真在跑（getGlowStatus 非 off 且 !broken）：GlowPanel 底部注记的唯一判据 */
+  @State glowChainActive: boolean = false;
   @State glowOpen: boolean = false;
   /** 色调参数（TonePanel 提交 → ToneStore 落盘；LUT 合成在 applyCurve 唯一出口） */
   @State toneParams: ToneParams = TONE_DEFAULT;
@@ -396,6 +458,8 @@ struct CameraPage {
   private healthHealthy: boolean = false;
   private healthPausedByHide: boolean = false;
   private lastReadoutMs: number = 0;
+  /** 光晕状态读取拍点节流（状态定时器 200ms 跑，native 口按 500ms 读） */
+  private lastGlowStatusMs: number = 0;
   private recordStartedAtMs: number = 0;
   private stopGraceTimer: number = -1;
   private stopReason: string = '';
@@ -454,7 +518,7 @@ struct CameraPage {
   @State pillIsoLabel: string = 'AUTO';
   @State pillEvLabel: string = '+0.0EV';
   @State pillWbLabel: string = '自动';
-  /** 横屏帧率芯片文案（cycleFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
+  /** 横屏帧率芯片文案（pickFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
   @State landFpsLabel: string = '30×';
   /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
   @State safeTop: number = 0;
@@ -579,6 +643,9 @@ struct CameraPage {
     }
     // 光晕/色调参数与设置页同源回读（面板提交即存；本处覆盖冷启/设置页往返）
     this.glowParams = GlowStore.load(ctx);
+    // 回读后立即下发一次（页面往返不改光晕值也要把 native 侧对齐到盘上真值）
+    this.applyGlowParams(this.glowParams);
+    this.refreshGlowStatus();
     this.toneParams = ToneStore.load(ctx);
     SettingsStore.load(ctx).then((s: CameraSettings): void => {
       if (this.disposed || !this.pageVisible || this.recording) {
@@ -700,6 +767,8 @@ struct CameraPage {
       this.refMask = s.refLines;
       this.effectIndex = s.effect;
       this.glowParams = GlowStore.load(ctx);
+      // 冷启回读后下发一次（native 尚未装载时是空操作，装载后 initNativeParams 再补一次）
+      this.applyGlowParams(this.glowParams);
       this.toneParams = ToneStore.load(ctx);
       // 冷启恢复（本批 I）：24 键白名单灌进参数总线（只写 value，range/enabled/exact 不动）；
       // 机型域钳制仍由起镜后的 applyAbility 收口，本处不绕开。恢复值不是用户动作，
@@ -751,6 +820,7 @@ struct CameraPage {
     this.landFpsLabel = `${this.settings.fps}×`;
     this.effectIndex = this.settings.effect;
     this.gridOn = this.settings.grid;
+    this.denoiseOn = this.settings.videoDenoise;
   }
 
   private loadNativeModule(): void {
@@ -1009,7 +1079,7 @@ struct CameraPage {
     this.pillEvLabel = this.rowEv;
     this.rowWb = wbShort(this.params.wbMode.value, Math.round(this.params.kelvin.value.value));
     this.pillWbLabel = this.rowWb;
-    // 横屏帧率芯片与 settings.fps 同源（cycleFps → syncParamLabels 这一跳负责刷新）
+    // 横屏帧率芯片与 settings.fps 同源（pickFps → syncParamLabels 这一跳负责刷新）
     this.landFpsLabel = `${this.settings.fps}×`;
   }
 
@@ -1037,6 +1107,9 @@ struct CameraPage {
   /** 起录前兜底下发一次（T21）：ApplyReport failed 项 Diag.w（不起录，录制键另有门控） */
   private applyParamsBeforeRecord(): void {
     const report: ApplyReport = this.engine.applyParams(this.params);
+    // 起录是关键点：光晕/降噪的真值也在这条兜底链上重下发一次（native 侧可能被重链接清过）
+    this.applyGlowParams(this.glowParams);
+    this.applyDenoiseLevel();
     // 起录是关键点：可能紧接退后台/进程被杀，参数必须先落盘（立即通道，不受节流延后）
     this.flushParamsNow();
     if (report.failed.length > 0) {
@@ -1086,6 +1159,8 @@ struct CameraPage {
       // 锚点量取失败（id 失效/首帧未量到）：保持零矩形，PillPopup 回退底贴屏
     }
     this.glowOpen = true;
+    // 开面板先读一拍状态（500ms 定时器之外，避免首帧空行）
+    this.refreshGlowStatus();
   }
 
   private closeGlow(): void {
@@ -1161,6 +1236,117 @@ struct CameraPage {
     return `码率:${this.readoutStripValue(HudItem.BITRATE)}`;
   }
 
+  // ------------------------------------------------------------------ 追赶轮：帧率/光晕/降噪接线
+
+  /**
+   * 帧率档位决议的**唯一引用点**：可用性/※ 只走 ability.decideFps(录像画幅, 档位)。
+   * 会话能力未就绪 = undefined（整排禁选，不按「数值 > 30」猜高速）。
+   */
+  private fpsDecisionOf(tier: number): FpsDecision | undefined {
+    const ability: CameraAbility | undefined = this.ability;
+    if (ability === undefined) {
+      return undefined;
+    }
+    return ability.decideFps(new Size(this.settings.sizeW, this.settings.sizeH), tier);
+  }
+
+  /** 帧率弹层档位：WotaTiers.FPS 全表；decideFps undefined → 禁用，highSpeed → ※ 后缀 */
+  private fpsOptions(): Array<PillOption> {
+    const out: Array<PillOption> = [];
+    for (const tier of WotaTiers.FPS) {
+      const decision: FpsDecision | undefined = this.fpsDecisionOf(tier);
+      out.push(new PillOption(tier, decision !== undefined && decision.highSpeed ? `${tier}※` : `${tier}`,
+        decision !== undefined));
+    }
+    return out;
+  }
+
+  /** 帧率选中：settings + 总线 + 能力重算 + 落盘 + 预览活设置（弹层唯一写入口） */
+  private pickFps(fps: number): void {
+    if (this.recording || this.stopPending) {
+      return;
+    }
+    this.settings.fps = fps;
+    this.params.fps.value = ParamState.of(fps);
+    if (this.ability !== undefined) {
+      this.params.applyAbility(this.ability);
+    }
+    this.syncParamLabels();
+    this.persistSettings();
+    this.flushParamsNow();
+    this.engine.applyPreviewFps(fps);
+    this.closePill();
+  }
+
+  /** 光晕参数下发（GlowParams 字段 → native 十参，顺序逐字；enabled 转 0/1） */
+  private applyGlowParams(p: GlowParams): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      return;
+    }
+    const s: GlowParams = p.sanitize();
+    try {
+      lib.setGlowParams(s.enabled ? 1 : 0, s.threshold, s.soft, s.width, s.gain, s.add, s.freq,
+        s.blend, s.colorA, s.colorB);
+    } catch (e) {
+      Diag.w(WOTA_RECORD_TAG, `setGlowParams failed: ${e}`);
+    }
+  }
+
+  /** 光晕运行期状态（状态定时器 500ms 节流调用；面板打开/提交后补一拍） */
+  private refreshGlowStatus(): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    let raw: string = '';
+    if (lib !== undefined) {
+      try {
+        raw = lib.getGlowStatus();
+      } catch (e) {
+        raw = '';
+      }
+    }
+    const st: GlowStatus | undefined = parseGlowStatus(raw, this.glowParams.enabled);
+    const text: string = glowNoteTextOf(glowStatusNote(st, this.glowParams.enabled, true), st);
+    const active: boolean = st !== undefined && !st.broken;
+    // 只在真变化时写 @State：500ms 一拍若每拍都赋值会白刷整页 HUD
+    if (this.glowStatusText !== text) {
+      this.glowStatusText = text;
+    }
+    if (this.glowChainActive !== active) {
+      this.glowChainActive = active;
+    }
+  }
+
+  /** 降噪核档位（native 唯一取值点）：关 = 0；开 = 按画幅×帧率分档 轻量 2 / 完整 1 */
+  private denoiseLevelNow(): number {
+    if (!this.settings.videoDenoise) {
+      return DENOISE_LEVEL_OFF;
+    }
+    return denoiseKernelLite(this.settings.sizeW, this.settings.sizeH, this.settings.fps)
+      ? DENOISE_LEVEL_LITE : DENOISE_LEVEL_FULL;
+  }
+
+  /** 降噪下发（起镜成功/起录前/弹层选中同式重下发；失败只 Diag.w 不阻塞链路） */
+  private applyDenoiseLevel(): void {
+    const lib: GlLibApi | undefined = this.glLib;
+    if (lib === undefined) {
+      return;
+    }
+    try {
+      lib.setDenoiseLevel(this.denoiseLevelNow());
+    } catch (e) {
+      Diag.w(WOTA_RECORD_TAG, `setDenoiseLevel failed: ${e}`);
+    }
+  }
+
+  /** 降噪选中：开关 + 落盘 + 立即下发（弹层唯一写入口；音画两路口径见面板小字） */
+  private pickDenoise(on: boolean): void {
+    this.settings.videoDenoise = on;
+    this.denoiseOn = on;
+    this.persistSettings();
+    this.applyDenoiseLevel();
+    this.closePill();
+  }
+
   private cycleLens(): void {
     if (this.recording || this.stopPending || this.startingCamera || this.lenses.length === 0) {
       return;
@@ -1213,22 +1399,6 @@ struct CameraPage {
     // 画幅循环是参数动作完成点：SettingsStore 已写 default_size，这里再收一次总线侧的待落盘改动
     this.flushParamsNow();
     this.restartCamera();
-  }
-
-  private cycleFps(): void {
-    if (this.recording || this.stopPending) {
-      return;
-    }
-    this.settings.fps = this.settings.fps === 24 ? 25 : (this.settings.fps === 25 ? 30 : 24);
-    // T21：fps 档位换挡 → 参数总线重算（快门上限吃帧率档位）
-    this.params.fps.value = ParamState.of(this.settings.fps);
-    if (this.ability !== undefined) {
-      this.params.applyAbility(this.ability);
-    }
-    this.syncParamLabels();
-    this.persistSettings();
-    // 帧率循环同时改了总线 fps：立刻落盘（default_fps 与 SettingsStore 的新键同名同值）
-    this.flushParamsNow();
   }
 
   private nearestZoomIndex(actual: number): number {
@@ -1832,6 +2002,11 @@ struct CameraPage {
       lib.setZebraParams(0.6, 1);
       lib.setPeakingParams(0.6, PeakingColor.RED as number);
       this.applyEffect();
+      // 追赶轮：native 侧参数复位点一并把光晕/降噪的真值推过去（起镜成功与 native 装载后
+      // 都会走到这里；两条链路各自失败只记日志，不影响 LUT/效果）
+      this.applyGlowParams(this.glowParams);
+      this.applyDenoiseLevel();
+      this.refreshGlowStatus();
     } catch (e) {
     }
   }
@@ -1850,6 +2025,7 @@ struct CameraPage {
 
   private startStatusTimer(): void {
     this.stopStatusTimer();
+    this.lastGlowStatusMs = 0;
     this.statusTimer = setInterval((): void => {
       if (this.disposed) {
         return;
@@ -1858,6 +2034,11 @@ struct CameraPage {
         this.elapsedMs = Date.now() - this.recordStartedAtMs;
       }
       const now: number = Date.now();
+      // 光晕运行期状态：复用本定时器，500ms 节流读 getGlowStatus（面板注记/提示行消费）
+      if (now - this.lastGlowStatusMs >= GLOW_STATUS_INTERVAL_MS) {
+        this.lastGlowStatusMs = now;
+        this.refreshGlowStatus();
+      }
       if (now - this.lastReadoutMs >= 2000) {
         this.lastReadoutMs = now;
         try {
@@ -2360,7 +2541,7 @@ struct CameraPage {
       return;
     }
     if (key === 'fps') {
-      this.cycleFps();
+      this.openPill('fps', PILL_FPS_ID);
       return;
     }
     if (key === 'zoom') {
@@ -2460,11 +2641,6 @@ struct CameraPage {
       return;
     }
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
-  }
-
-  /** 降噪：本侧未移植（降噪 GPU 链待批）；色调已接实面板，不再走本入口——不造假，只给一句提示 */
-  private pendingFeatureTip(): void {
-    this.message = '该功能待真机批';
   }
 
   build() {
@@ -3111,17 +3287,19 @@ struct CameraPage {
           .backgroundColor(LAND_PANEL_BG)
           .position({ x: LAND_MARGIN, y: this.landSidePanelY() })
 
-          // 6a. 左下：蓝色激活态「降噪」（本侧无功能 → 禁用观感 + 提示）+ 深色「码率」（点按开档位弹层）
+          // 6a. 左下：降噪芯片（点按开「关闭 / 画面降噪」弹层，开启态蓝色）+ 深色「码率」（档位弹层）
           Row({ space: 6 }) {
-            LandTag({
-              label: '降噪',
-              accent: true,
-              dim: true,
-              tagWidth: 64,
-              onTap: (): void => {
-                this.pendingFeatureTip();
-              }
-            })
+            Row() {
+              LandTag({
+                label: '降噪',
+                accent: this.denoiseOn,
+                tagWidth: 64,
+                onTap: (): void => {
+                  this.openPill('denoise', PILL_DENOISE_ID);
+                }
+              })
+            }
+            .id(PILL_DENOISE_ID)
             Row() {
               LandReadout({
                 primary: this.readoutStripValue(HudItem.BITRATE),
@@ -3156,7 +3334,7 @@ struct CameraPage {
                   secondary: '帧率',
                   readoutWidth: 104,
                   onTap: (): void => {
-                    this.cycleFps();
+                    this.openPill('fps', this.pillAnchorId('fps'));
                   }
                 })
               }
@@ -3442,11 +3620,65 @@ struct CameraPage {
           })
         }
       }
-      // 光晕参数面板：native 渲染链待批，提交只落参数并给一次诚实提示（不假装画面已变）
+      // 帧率真实弹层（追赶轮）：原 cycleFps 循环改档 → 全表档位；可用性只走 ability.decideFps
+      // （undefined 禁选、highSpeed 加 ※），选中即改设置 + 总线 + 落盘 + 预览活设置。
+      if (this.activePill === 'fps') {
+        WotaPillPopup({
+          anchor: this.pillAnchor,
+          panelTitle: '帧率',
+          onDismiss: (): void => {
+            this.closePill();
+          }
+        }) {
+          if (this.recording || this.stopPending) {
+            PillNote({ noteText: '录制中不可调整，停止后可改' })
+          }
+          PillChoices({
+            options: this.fpsOptions(),
+            selected: this.settings.fps,
+            perRow: 4,
+            active: !this.recording && !this.stopPending,
+            onPick: (opt: PillOption): void => {
+              this.pickFps(opt.value);
+            }
+          })
+          PillNote({ noteText: '※ 高帧率走高速会话，实际速率由 HAL 在声明区间内决定' })
+        }
+      }
+      // 降噪真实弹层（追赶轮）：关闭 / 画面降噪；音频降噪在本平台无对应能力（core/Denoise 头注）
+      if (this.activePill === 'denoise') {
+        WotaPillPopup({
+          anchor: this.pillAnchor,
+          panelTitle: '降噪',
+          onDismiss: (): void => {
+            this.closePill();
+          }
+        }) {
+          if (this.recording || this.stopPending) {
+            PillNote({ noteText: '录制中不可调整，停止后可改' })
+          }
+          PillChoices({
+            options: [
+              new PillOption(0, '关闭', true),
+              new PillOption(1, '画面降噪', true)
+            ],
+            selected: this.denoiseOn ? 1 : 0,
+            perRow: 2,
+            active: !this.recording && !this.stopPending,
+            onPick: (opt: PillOption): void => {
+              this.pickDenoise(opt.value === 1);
+            }
+          })
+          PillNote({ noteText: '仅画面降噪；音频降噪在本平台无对应能力（T27-3 登记）' })
+        }
+      }
+      // 光晕参数面板：提交即落盘 + setGlowParams 下发；状态行吃 getGlowStatus 真值（500ms 刷新）
       if (this.glowOpen) {
         GlowPanel({
           anchor: this.glowAnchor,
           glow: this.glowParams,
+          statusText: this.glowStatusText,
+          chainActive: this.glowChainActive,
           onClose: (): void => {
             this.closeGlow();
           },
@@ -3456,7 +3688,8 @@ struct CameraPage {
             if (ctx !== undefined) {
               GlowStore.save(ctx, p);
             }
-            this.message = '光晕渲染链待 native 批，参数已保存';
+            this.applyGlowParams(p);
+            this.refreshGlowStatus();
           }
         })
       }

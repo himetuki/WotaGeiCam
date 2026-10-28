@@ -8,7 +8,7 @@
  * ④ 传递函数单调（极值参数下 256 点逐通道非降）；端点 0/1 与电平/阴影方向对齐安卓。
  */
 import {
-  TONE_BLACK_MAX, TONE_DEFAULT, TONE_SHADOWS_MAX, TONE_WHITE_MAX,
+  TONE_BLACK_MAX, TONE_DEFAULT, TONE_HIGHLIGHTS_MAX, TONE_HIGHLIGHT_GAIN, TONE_SHADOWS_MAX, TONE_WHITE_MAX,
   ToneParams, applyToneToLut, toneDecode, toneEncode
 } from '../../entry/src/main/ets/core/Tone';
 
@@ -29,10 +29,11 @@ function near(expected: number, actual: number, msg: string): void {
 
 // ------------------------------------------------------------------ 参数模型与 sanitize
 
-test('出厂默认三项全0且恒等', () => {
+test('出厂默认四项全0且恒等', () => {
   assertEq(0, TONE_DEFAULT.black);
   assertEq(0, TONE_DEFAULT.white);
   assertEq(0, TONE_DEFAULT.shadows);
+  assertEq(0, TONE_DEFAULT.highlights);
   assertTrue(TONE_DEFAULT.isIdentity(), '默认必须恒等（不烘焙的唯一依据）');
   assertTrue(TONE_DEFAULT.sanitize().sameAs(TONE_DEFAULT), '域内值 sanitize 不动');
 });
@@ -150,7 +151,10 @@ test('LUT逐通道单调_极值参数下仍非降', () => {
     new ToneParams({ black: TONE_BLACK_MAX, white: TONE_WHITE_MAX, shadows: 1 }),
     new ToneParams({ black: TONE_BLACK_MAX, white: TONE_WHITE_MAX, shadows: -1 }),
     new ToneParams({ black: -TONE_BLACK_MAX, white: -TONE_WHITE_MAX, shadows: -1 }),
-    new ToneParams({ black: 0.2, white: 0.1, shadows: 0 })
+    new ToneParams({ black: 0.2, white: 0.1, shadows: 0 }),
+    // 第四轴极值：阴影与高光反向叠加是导数下界 0.5 的最坏组合
+    new ToneParams({ black: TONE_BLACK_MAX, white: TONE_WHITE_MAX, shadows: 1, highlights: -1 }),
+    new ToneParams({ black: TONE_BLACK_MAX, white: TONE_WHITE_MAX, shadows: -1, highlights: 1 })
   ];
   for (const p of cases) {
     const out: Uint8Array = applyToneToLut(rampLut(), p);
@@ -208,4 +212,93 @@ test('尾字节与非768长度防御', () => {
   assertEq(odd.length, out.length, '入出同长');
   assertEq(7, out[6], '尾部不足一组的字节原样保留');
   assertEq(0, out[0], '首组照常映射');
+});
+
+// ------------------------------------------------------------------ 第四轴：高光
+
+test('高光编码往返与域钳', () => {
+  const samples: Array<ToneParams> = [
+    new ToneParams({ highlights: 0.42 }),
+    new ToneParams({ black: 0.1, white: 0.2, shadows: -0.5, highlights: 0.75 }),
+    new ToneParams({ highlights: -TONE_HIGHLIGHTS_MAX })
+  ];
+  for (const p of samples) {
+    assertTrue(p.sanitize().sameAs(toneDecode(toneEncode(p))),
+      '含高光的 encode→decode 必须逐字段往返');
+  }
+  const wild: ToneParams = new ToneParams({ highlights: 9 }).sanitize();
+  assertEq(TONE_HIGHLIGHTS_MAX, wild.highlights);
+  assertEq(-TONE_HIGHLIGHTS_MAX, new ToneParams({ highlights: -9 }).sanitize().highlights);
+  assertEq(0, new ToneParams({ highlights: NaN }).sanitize().highlights, 'NaN 回 0');
+  assertEq(TONE_HIGHLIGHTS_MAX, new ToneParams({ highlights: Infinity }).sanitize().highlights,
+    '+Infinity 收到上限');
+  assertEq(-TONE_HIGHLIGHTS_MAX, new ToneParams({ highlights: -Infinity }).sanitize().highlights,
+    '-Infinity 收到下限');
+  assertTrue(wild.sameAs(wild.sanitize()), 'sanitize 幂等');
+  assertEq(-TONE_HIGHLIGHTS_MAX, toneDecode('black=0;white=0;shadows=0;highlights=-9').highlights,
+    '串内越界高光走 sanitize 收域而非回默认');
+});
+
+test('isIdentity与sameAs包含高光轴', () => {
+  const onlyHigh: ToneParams = new ToneParams({ highlights: 0.01 });
+  assertFalse(onlyHigh.isIdentity(), '仅高光非 0 就不是恒等');
+  assertFalse(onlyHigh.sameAs(TONE_DEFAULT), 'sameAs 必须区分高光轴');
+  assertTrue(onlyHigh.sameAs(new ToneParams({ highlights: 0.01 })));
+  assertFalse(new ToneParams({ highlights: 0.01 }).sameAs(new ToneParams({ highlights: 0.02 })),
+    '高光不同即不相等');
+  // 仅高光也必须触发烘焙（不能走恒等提前返回）
+  const base: Uint8Array = rampLut();
+  const out: Uint8Array = applyToneToLut(base, new ToneParams({ highlights: 0.5 }));
+  assertTrue(out[200 * 3] > base[200 * 3], '仅高光参数必须实际改变 LUT');
+  assertEq(base[0], out[0], '正高光在 y=0 处增量为 0');
+});
+
+test('高光正抬亮部负压高光_暗部影响更小_阴影后应用', () => {
+  const lift: ToneParams = new ToneParams({ highlights: 0.5 });
+  const press: ToneParams = new ToneParams({ highlights: -0.5 });
+  const darkX: number = 0.1;
+  const brightX: number = 0.8;
+  const darkDelta: number = lift.apply(darkX) - darkX;
+  const brightDelta: number = lift.apply(brightX) - brightX;
+  near(TONE_HIGHLIGHT_GAIN * 0.5 * darkX * darkX, darkDelta, '暗部提升 = 0.25·h·y²');
+  near(TONE_HIGHLIGHT_GAIN * 0.5 * brightX * brightX, brightDelta, '亮部提升 = 0.25·h·y²');
+  assertTrue(brightDelta > 0, '正高光必须抬亮部');
+  assertTrue(darkDelta > 0, '正高光对暗部也有提升');
+  assertTrue(darkDelta < brightDelta, '暗部影响必须小于亮部（y² 权重）');
+  assertTrue(press.apply(brightX) < brightX, '负高光必须压暗高光');
+  assertTrue(Math.abs(press.apply(darkX) - darkX) < Math.abs(press.apply(brightX) - brightX),
+    '负高光同样是亮部影响更大');
+  assertEq(0, lift.apply(0), '黑端不受高光影响');
+  assertEq(1, lift.apply(1), '白端正高光钳在 1');
+  near(0.875, press.apply(1), '白端负高光按 y² 压暗（与安卓同式）');
+  assertEq(0, press.apply(0), '黑端负高光增量为 0');
+  // 顺序：先阴影（改写 y）后高光（在改写后的 y 上算 y²），与安卓一致
+  const both: ToneParams = new ToneParams({ shadows: -1, highlights: 1 });
+  const yAfterShadows: number = 0.5 + 0.25 * (-1) * (1 - 0.5) * (1 - 0.5);
+  near(yAfterShadows + TONE_HIGHLIGHT_GAIN * yAfterShadows * yAfterShadows, both.apply(0.5),
+    '高光必须作用在阴影之后的 y 上');
+  // LUT 方向：正高光抬亮部、不动黑场
+  const base: Uint8Array = rampLut();
+  const high: Uint8Array = applyToneToLut(base, lift);
+  assertTrue(high[200 * 3] > base[200 * 3], '正高光把亮部字节抬高');
+  assertEq(base[0], high[0], '黑场字节不变');
+  const highPressed: Uint8Array = applyToneToLut(base, press);
+  assertTrue(highPressed[200 * 3] < base[200 * 3], '负高光把亮部字节压低');
+});
+
+test('旧串缺highlights键按0兼容读入', () => {
+  const legacy: string = 'black=0.1;white=0.2;shadows=-0.5';
+  const p: ToneParams = toneDecode(legacy);
+  assertTrue(p.sameAs(new ToneParams({ black: 0.1, white: 0.2, shadows: -0.5 })),
+    '旧串缺键按 0 读入，其余字段照常');
+  assertEq(0, p.highlights, '旧串高光语义就是 0');
+  assertEq('black=0.1;white=0.2;shadows=-0.5;highlights=0', toneEncode(p),
+    '再编码应补出显式 highlights 键');
+  // 前向兼容只放宽「缺键」，键在但值坏仍是坏串，整串回默认
+  assertTrue(toneDecode('black=0;white=0;shadows=0;highlights=').sameAs(TONE_DEFAULT),
+    '空值仍算坏串');
+  assertTrue(toneDecode('black=0;white=0;shadows=0;highlights=x').sameAs(TONE_DEFAULT),
+    '非数仍算坏串');
+  assertTrue(toneDecode('black=0;white=0;shadows=0;highlights=1x').sameAs(TONE_DEFAULT),
+    '半数值仍算坏串');
 });
