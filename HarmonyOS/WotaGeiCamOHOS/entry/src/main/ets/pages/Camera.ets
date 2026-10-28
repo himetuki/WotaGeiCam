@@ -1984,6 +1984,13 @@ struct CameraPage {
    * （ParamPills.RECORDING_EDITABLE_PILLS={ISO,EV,WB}）控制，快门录制中开只读 Note
    * （T31 复审 P3-3：不得整颗禁用而丢失只读信息）。
    */
+  /** 横屏短标签：dockLabel 的冒号后值（镜头:广角→广角）；单行底栏 68vp 宽仍完整可读 */
+  private dockLabelCompact(key: string): string {
+    const full: string = this.dockLabel(key);
+    const idx: number = full.indexOf(':');
+    return idx >= 0 ? full.substring(idx + 1) : full;
+  }
+
   private dockEnabled(key: string): boolean {
     if (key === 'lens' || key === 'size' || key === 'fps') {
       return !this.recording && !this.stopPending;
@@ -2386,82 +2393,82 @@ struct CameraPage {
       // 横屏 Dock 浮层（T32 提前批）：底部右侧独立定位（全屏容器 End/End 对齐），不受顶部
       // 读数高度影响，快门/更多永不出屏；锚点 id 与竖屏分支同名（弹层量框定位复用）。
       if (this.isLandscape) {
+        // 横屏单行底栏（2026-10-28 用户口径：控件不得重叠遮挡、不得多占录制页空间）：
+        // 9 颗短标签胶囊 + 更多 + 快门一行放下，整条 ≈ 84vp 高（22%），读数区/画面区全让出；
+        // 短标签 = dockLabel 冒号后的值（镜头:广角→广角），宽度 68vp 仍完整可读。
         Column() {
-          Column({ space: HudSpace.S }) {
-            Row({ space: HudSpace.S }) {
-              ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
-                Row() {
-                  HudPill({
-                    label: this.dockLabel(key),
-                    pillEnabled: this.dockEnabled(key),
-                    active: false,
-                    onTap: (): void => {
-                      this.onDockTap(key);
-                    }
-                  })
-                }
-                .layoutWeight(1)
-                .id(`pill_${key}`)
-              }, (key: string): string => key)
-            }
-            Row({ space: HudSpace.S }) {
-              ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
-                Row() {
-                  HudPill({
-                    label: this.dockLabel(key),
-                    pillEnabled: this.dockEnabled(key),
-                    active: false,
-                    onTap: (): void => {
-                      this.onDockTap(key);
-                    }
-                  })
-                }
-                .layoutWeight(1)
-                .id(`pill_${key}`)
-              }, (key: string): string => key)
-            }
-            Row({ space: HudSpace.S }) {
+          Row({ space: HudSpace.XS }) {
+            ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
               Row() {
-                HudEntryButton({
-                  label: '更多',
-                  entryEnabled: true,
+                HudPill({
+                  label: this.dockLabelCompact(key),
+                  pillEnabled: this.dockEnabled(key),
+                  active: false,
                   onTap: (): void => {
-                    this.openMore();
+                    this.onDockTap(key);
                   }
                 })
               }
               .layoutWeight(1)
-              .id('pill_more')
-              Stack() {
-                Column()
-                  .width(HudTouch.SHUTTER)
-                  .height(HudTouch.SHUTTER)
-                  .borderRadius(HudTouch.SHUTTER / 2)
-                  .border({ width: 3, color: HudColor.RECORD_RING })
-                  .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
-                Column()
-                  .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
-                  .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
-                  .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
-                  .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
-                    : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
+              .id(`pill_${key}`)
+            }, (key: string): string => key)
+            ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
+              Row() {
+                HudPill({
+                  label: this.dockLabelCompact(key),
+                  pillEnabled: this.dockEnabled(key),
+                  active: false,
+                  onTap: (): void => {
+                    this.onDockTap(key);
+                  }
+                })
               }
-              .width(HudTouch.SHUTTER)
-              .height(HudTouch.SHUTTER)
-              .enabled(!this.stopPending && this.glFatal === '')
-              .accessibilityText(this.recording ? '停止录制' : '开始录制')
-              .onClick((): void => {
-                this.toggleRecord();
+              .layoutWeight(1)
+              .id(`pill_${key}`)
+            }, (key: string): string => key)
+            Row() {
+              HudEntryButton({
+                label: '更多',
+                entryEnabled: true,
+                onTap: (): void => {
+                  this.openMore();
+                }
               })
             }
+            .layoutWeight(1)
+            .id('pill_more')
+            Stack() {
+              Column()
+                .width(HudTouch.SHUTTER)
+                .height(HudTouch.SHUTTER)
+                .borderRadius(HudTouch.SHUTTER / 2)
+                .border({ width: 3, color: HudColor.RECORD_RING })
+                .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
+              Column()
+                .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
+                .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
+                  : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
+            }
+            .width(HudTouch.SHUTTER)
+            .height(HudTouch.SHUTTER)
+            .enabled(!this.stopPending && this.glFatal === '')
+            .accessibilityText(this.recording ? '停止录制' : '开始录制')
+            .onClick((): void => {
+              this.toggleRecord();
+            })
           }
-          .width(336)
+          .width('100%')
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.End)
-        .alignItems(HorizontalAlign.End)
-        .padding({ right: HudSpec.SAFE_MARGIN, bottom: this.safeBottom + HudSpace.S })
+        .padding({
+          left: HudSpec.SAFE_MARGIN,
+          right: HudSpec.SAFE_MARGIN,
+          bottom: this.safeBottom + HudSpace.S
+        })
         .hitTestBehavior(HitTestMode.Transparent)
       }
 

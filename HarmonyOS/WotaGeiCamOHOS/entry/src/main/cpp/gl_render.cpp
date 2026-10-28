@@ -359,18 +359,16 @@ int StRotationFromMatrix(const float matrix[16])
  * X=u-0.5、Y=0.5-v（Y 向下），内容顺时针转 θ 等价取样逆旋 -θ：X0=c·X+s·Y、Y0=-s·X+c·Y；
  * 写回属性 t=1-v 抵消顶点 Y 轴方向。
  *
- * 方向常数 v2（2026-10-28 用户按模拟器实测标定，取代 FRONT180 的 v1）：
- * `deg = sensor − display + (front ? 0 : 180)`、`mirror = !front`（后摄镜像、前摄不镜像）。
- * 竖屏实测目标：后摄（270, 镜像）＝当前画面顺时针 90° 再左右镜像；前摄（270, 不镜像）＝
- * 再左右镜像一次。两组与公式吻合，且横屏下两颗镜头都退化为 deg=0（webcam 原始帧横向，
- * 横屏窗口无需旋转，自洽）。根因：**OHOS 预览缓冲的方向语义与 Camera2 SurfaceTexture 不同**，
- * Camera2 公式（sensor−display+front·180 / mirror=front）在本侧整体差这组常数——登记为
- * OHOS 缓冲语义标定，真机复测时若与模拟器冲突再按机型域分流。
+ * 方向标定 v3（2026-10-28 用户两轮实测拟合，模拟器 HAL 的缓冲随显示旋转——sensor 语义
+ * 不适用 webcam）：`deg = display + (rear ? 180 : 90)`、`mirror = !front`（后摄镜像、前摄不镜像）。
+ * 观测锚点：竖屏（display=0）后摄需 180°+镜像、前摄 90° 不镜像；横屏（display=270）后摄需
+ * 90°（用户在 v2 的 180° 上再要求逆时针 90°）。两组四锚点与线性式 `180/90 + display` 全部
+ * 吻合（0→180/90、270→450≡90 / 360≡0）。真机须按 SENSOR 语义复测重新标定（登记待真机批）。
  */
 void RebuildTexCoords()
 {
-    const int deg = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + g_stRotDeg +
-        (g_mirrored ? 0 : 180));
+    const int deg = WotaNormalizeDeg(g_displayDeg + g_stRotDeg +
+        (g_mirrored ? 180 : 90));
     const int key = (deg << 1) | (g_mirrored ? 1 : 0);
     if (key == g_geomKey) {
         return;
@@ -2351,7 +2349,7 @@ int WotaGlEncoderRotation()
     // 保证容器角与竖屏窗口的上屏转角同一叙事。muxer 只接受 0/90/180/270：按上游
     // normalizeQuarter 四舍五入（45→90、359→0），非 90 倍数 sensorOrientation 不得让
     // 起录直接失败（审查 P2）。
-    const int raw = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 0 : 180));
+    const int raw = WotaNormalizeDeg(g_displayDeg + (g_mirrored ? 180 : 90));
     const int rounded = WotaNormalizeQuarter(raw);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "encoder rotation raw=%{public}d rounded=%{public}d mirror=%{public}d",
