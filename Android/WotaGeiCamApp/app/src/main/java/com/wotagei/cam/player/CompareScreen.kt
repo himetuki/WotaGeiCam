@@ -283,8 +283,9 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
      * 选片失败统一出口：先留现场（失败分支原先一条日志都没有，导出的诊断件里看不出
      * 走到哪一步），再按媒体权限决定提示形态——权限不足给可操作提示，其余只给文案。
      *
-     * URI 优先后失败只剩两步：[stage]="无回程URI"（选片器没回 data）与「读取失败」
-     * （clipByUri 解不出，含权限过滤/来源不可读）；[id] 仅对库内来源有意义，外来来源恒 0。
+     * URI 优先后失败按 [MediaRepo.pickClipByUri] 的细分阶段记录：`无回程URI` /
+     * `不可读` / `非视频MIME` / `解码失败`（未知异常兜底「读取失败」）；
+     * [id] 仅对库内来源有意义，外来来源恒 0。
      */
     suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String) {
         // 权限探测里有 isExternalStorageManager 的 binder 调用：放 IO 上做，横幅仍回主线程写
@@ -330,11 +331,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     reportPickFailure(null, 0L, "无回程URI")
                     return@launch
                 }
-                val clip = repo.clipByUri(uri)
+                val outcome = repo.pickClipByUri(uri)
                 // 慢 provider 让先后两次选片乱序返回时，只认最新一次的请求
                 if (seq != pickSeq) return@launch
+                val clip = outcome.clip
                 if (clip == null) {
-                    reportPickFailure(uri, 0L, "读取失败")
+                    // 失败阶段细分（28 §3.4-2）：不可读/非视频MIME/解码失败直接进日志 stage，
+                    // 授权全开还失败的 case 从此一条日志定位
+                    reportPickFailure(uri, 0L, outcome.fail?.label ?: "读取失败")
                 } else {
                     // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读
                     persistPickReadPermission(app, uri)

@@ -34,6 +34,37 @@ import java.util.Locale
 private const val TAG = "WotaMediaRepo"
 
 /**
+ * 选片失败的细分阶段（28 §3.4-2）。[label] 直接进 WotaPick 日志的 stage 字段，
+ * 用户导出诊断件后不需要再猜「权限 / 来源 / 解码」哪一类。
+ */
+enum class PickFailStage(val label: String) {
+    /** URI 打不开：SecurityException / FileNotFound / provider 返回 null（权限不足属此类） */
+    UNREADABLE("不可读"),
+
+    /** provider 明说不是视频（image、audio、text 前缀与 application/pdf）——右槽是视频位 */
+    NOT_VIDEO("非视频MIME"),
+
+    /** 类型声明不明（octet-stream / 空 / application 前缀）且 MediaMetadataRetriever 探不出视频轨 */
+    UNDECODABLE("解码失败")
+}
+
+/** [MediaRepo.pickClipByUri] 的出口：成功 [clip] 非 null 且 [fail] 为 null；失败反之 */
+data class PickOutcome(val clip: VideoClip?, val fail: PickFailStage?)
+
+/**
+ * provider 的类型声明是否**明确**不是视频（纯函数，JVM 可测）。
+ * 只拒确定非视频的声明；`application/octet-stream`、`binary/octet-stream`、空声明等
+ * 类型不明的放行交给解码探测——部分 provider 对 MP4 就报 octet-stream，直接拒会误杀
+ * （28 §3.3-1 的残余风险：HyperOS 相册/云相册的实际案例）。
+ */
+fun declaredMimeClearlyNotVideo(mime: String?): Boolean {
+    val m = mime?.trim()?.lowercase(Locale.US).orEmpty()
+    if (m.isEmpty()) return false
+    return m.startsWith("image/") || m.startsWith("audio/") || m.startsWith("text/") ||
+        m.startsWith("application/pdf")
+}
+
+/**
  * 媒体库条目。tags 来自 Room 标签表，isTrashed 来自 MediaStore（API 30+）或本地回收站记录。
  * 名称刻意用 VideoClip 而非 MediaItem，避免与 media3 的 MediaItem 混淆。
  *
@@ -233,17 +264,41 @@ class MediaRepo private constructor(private val app: Context) {
      * 读不到（SecurityException / FileNotFound / provider 返回 null）或 URI 非法、任何异常
      * 一律返回 null，**不抛**。
      */
-    suspend fun clipByUri(uri: Uri): VideoClip? {
+    suspend fun clipByUri(uri: Uri): VideoClip? = pickClipByUri(uri).clip
+
+    /**
+     * 选片回程的**带诊断出口**（28 §3.4-2）：成功给条目，失败给细分阶段——
+     * 「不可读」（打不开/权限）/「非视频MIME」（provider 明说不是视频）/
+     * 「解码失败」（类型不明且探不出视频轨）。对比页把 [PickFailStage.label] 直接写进
+     * WotaPick 日志的 stage 字段，一次导出就能定位「权限 / 来源 / 解码」哪一类。
+     */
+    suspend fun pickClipByUri(uri: Uri): PickOutcome {
         return withContext(Dispatchers.IO) {
             try {
-                mediaStoreClipByUri(uri) ?: foreignClipByUri(uri)
+                mediaStoreClipByUri(uri)?.let { return@withContext PickOutcome(it, null) }
+                // 先验可读性（[canReadUri]），再验类型：两条失败原因完全不同，不能合并报
+                if (!canReadUri(uri)) return@withContext PickOutcome(null, PickFailStage.UNREADABLE)
+                val declared = runCatching { app.contentResolver.getType(uri) }.getOrNull()
+                if (declaredMimeClearlyNotVideo(declared)) {
+                    return@withContext PickOutcome(null, PickFailStage.NOT_VIDEO)
+                }
+                // 类型不明（octet-stream / 空声明 / application 前缀等）不直接拒：
+                // 部分 provider 对 MP4 就报 binary/octet-stream，交给 MediaMetadataRetriever 探，
+                // 探不出视频轨才算「解码失败」（28 §3.3-1：MIME 过严会误杀可选中的视频）
+                if (!declared.isNullOrEmpty() && !declared.startsWith("video/") &&
+                    !probeHasVideoTrack(uri)
+                ) {
+                    return@withContext PickOutcome(null, PickFailStage.UNDECODABLE)
+                }
+                foreignClipByUri(uri)?.let { PickOutcome(it, null) }
+                    ?: PickOutcome(null, PickFailStage.UNREADABLE)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 取消必须原样冒泡：吞掉会让调用方在已取消的协程里继续写 UI 状态
                 throw e
             } catch (e: Exception) {
                 // 失败现场要留：调用方只拿到 null，不看这条日志就分不清权限/IO/解码
-                Log.w(TAG, "clipByUri 读取失败 uri=$uri", e)
-                null
+                Log.w(TAG, "pickClipByUri 读取失败 uri=$uri", e)
+                PickOutcome(null, PickFailStage.UNREADABLE)
             }
         }
     }
@@ -259,16 +314,10 @@ class MediaRepo private constructor(private val app: Context) {
     }
 
     /**
-     * [clipByUri] 的「任意来源」分支。
-     * 先验可读性：`openAssetFileDescriptor` 成功（并且 use 关闭）才算可读；抛异常或返回 null
-     * 一律视为读不到（= null），绝不把一个打不开的 URI 塞进播放器。
-     * provider 若声明了非视频类型（选中图片/文档/音频）直接拒——右槽是视频位，
-     * 放进去只会在播放器里报一个难读的错误。
+     * [pickClipByUri] 的「任意来源」分支：可读性与 MIME 门槛已在上游逐级验过（原因可细分），
+     * 这里只负责把 URI 解码成条目。
      */
     private fun foreignClipByUri(uri: Uri): VideoClip? {
-        if (!canReadUri(uri)) return null
-        val declared = runCatching { app.contentResolver.getType(uri) }.getOrNull()
-        if (!declared.isNullOrEmpty() && !declared.startsWith("video/")) return null
         val name = displayNameOf(uri)
             ?: uri.lastPathSegment?.takeIf { it.isNotBlank() }
             ?: app.getString(R.string.compare_unnamed_video)
@@ -292,6 +341,18 @@ class MediaRepo private constructor(private val app: Context) {
     /** 可读性预检：能打开（并关闭）读描述符即可读；任何异常/返回 null 都按不可读处理 */
     private fun canReadUri(uri: Uri): Boolean = runCatching {
         app.contentResolver.openAssetFileDescriptor(uri, "r")?.let { fd -> fd.use { true } } ?: false
+    }.getOrDefault(false)
+
+    /** 类型不明时的解码探测：能读出时长或视频宽高任一即认定有视频轨；探不出/异常都算没有 */
+    private fun probeHasVideoTrack(uri: Uri): Boolean = runCatching {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(app, uri)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION) != null ||
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) != null
+        } finally {
+            runCatching { retriever.release() }
+        }
     }.getOrDefault(false)
 
     /** provider 的 DISPLAY_NAME；查不到/为空返回 null（由调用方回退到路径段/默认名） */
