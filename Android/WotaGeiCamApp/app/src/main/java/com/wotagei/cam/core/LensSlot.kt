@@ -80,8 +80,17 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
                 physicalId = null,
                 focalMm = shortestFocalMm(pcc) ?: 0f,
                 eqFocal = eqFocalMmOf(pcc),
-                // 能力按物理头收：同一逻辑摄下超广角与长焦的 ISO/曝光/区域上限常常不同
-                ability = CameraAbility.from(pid, pcc),
+                // 能力按物理头收：同一逻辑摄下超广角与长焦的 ISO/曝光/区域上限常常不同。
+                // AF 模式传逻辑头的做回退（docs/plan/27）：HAL 常把 AF 只挂在逻辑头层面，
+                // 子头报空/全 OFF 时借逻辑头的，否则广角子头会被误判成定焦（marble 实测）
+                ability = CameraAbility.from(
+                    pid,
+                    pcc,
+                    if (logical) {
+                        (tryOrNullLens { cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) }
+                            ?: IntArray(0)).toSet()
+                    } else null
+                ),
                 front = front
             )
         }

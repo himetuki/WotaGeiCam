@@ -200,9 +200,14 @@ data class CameraAbility(
         /**
          * 读全一个镜头的能力范围。所有范围/档位/能力开关一律来自 characteristics，无机型硬编码。
          * 单项读取失败（部分 HAL 会抛异常）时退化为 closed/空集合，不影响其余能力收集。
+         *
          * @param cameraId 仅用于日志关联（能力表本身不保存 id）
+         * @param logicalAfModes 逻辑头的 AF 模式（docs/plan/27，2026-10-28 落地）：**仅物理子头**传入。
+         *   HAL 常把 AF 能力只挂在逻辑头层面，子头自己的 `CONTROL_AF_AVAILABLE_MODES` 为空或只报 OFF，
+         *   直接按子头判会把广角/长焦子头误判成定焦（marble 实测 `afModes=[0]`）——子头退化时借
+         *   逻辑头的模式回退。逻辑头自己（传 null）与屈光度域不受影响（后者是镜头物理属性）。
          */
-        fun from(cameraId: String, cc: CameraCharacteristics): CameraAbility {
+        fun from(cameraId: String, cc: CameraCharacteristics, logicalAfModes: Set<Int>? = null): CameraAbility {
             val map = tryOrNull { cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) }
             if (map == null) Log.w(WotaTag.ABILITY, "ability[$cameraId] stream config map missing")
             val capabilities = tryOrNull { cc.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) } ?: IntArray(0)
@@ -257,7 +262,10 @@ data class CameraAbility(
                 exposureNs = RangeI.ofLong(tryOrNull { cc.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) }),
                 evRange = RangeI.of(tryOrNull { cc.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) }),
                 evStep = stepRational?.toFloat() ?: 0f,
-                afModes = (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
+                afModes = effectiveAfModes(
+                    (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
+                    logicalAfModes
+                ),
                 awbModes = (tryOrNull { cc.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) } ?: IntArray(0)).toSet(),
                 flashAvailable = tryOrNull { cc.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) } ?: false,
                 maxRegionsAf = tryOrNull { cc.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) } ?: 0,
@@ -344,6 +352,22 @@ fun forcedShutterOutOfRange(shutterNs: Long, exposureNs: RangeI): Boolean =
 fun shutterCeilingNs(deviceMaxNs: Long, fpsHi: Int): Long {
     val raised = maxOf(deviceMaxNs, WotaTiers.REQUIRED_SHUTTER_NS.max())
     return minOf(raised, WotaTiers.SHUTTER_CAP_NS, WotaTiers.NS_PER_SECOND / fpsHi.coerceAtLeast(1))
+}
+
+/**
+ * 物理子头的 AF 模式回退（docs/plan/27，2026-10-28 落地；纯函数，JVM 全测）。
+ *
+ * HAL 常把 AF 能力只挂在逻辑头层面：物理子头自己的 `CONTROL_AF_AVAILABLE_MODES`
+ * 为空或只报 OFF（marble 的广角子头实测 `afModes=[0]`、`minFocusD=0`）——按子头原文判
+ * 会把可连续对焦的子头误判成定焦，对焦胶囊被禁用。子头**退化**（空 / 全 OFF）且逻辑头
+ * 给得出非空模式时借逻辑头的；其余情形（子头有有效模式 / 没有逻辑头可借 / 逻辑头也空）
+ * 一律维持子头原文——「能力协商而非能力假设」：借不到就照实报，不替 HAL 编模式。
+ * 只影响 afModes；`minFocusDistanceDiopter` 是镜头物理属性，刻意不回退。
+ */
+fun effectiveAfModes(own: Set<Int>, logicalFallback: Set<Int>?): Set<Int> {
+    val degenerate = own.isEmpty() || own.all { it == CameraMetadata.CONTROL_AF_MODE_OFF }
+    if (!degenerate || logicalFallback.isNullOrEmpty()) return own
+    return logicalFallback
 }
 
 /** 返回 null 表示设备没有任何范围能覆盖 target，UI 侧该档位灰显 */
