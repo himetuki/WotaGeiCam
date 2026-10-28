@@ -395,6 +395,37 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
   （hilog 无新读回）、录制中开弹窗不炸成片。
 - **回归**：pure-test 78 files / 801 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（GLOW：光晕参数模型纯逻辑层，2026-10-28）
+
+上游 `ed59285` + `f381eee` 的 **core 纯逻辑层**。追赶基线第六批。按不迁三档纪律拆分：
+纯逻辑全量落地（全表用例），**native Glow 链 + 胶囊 UI 留白登记**——Glow 是 2500+ 行的
+GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行），链路性能必须
+真机取证（帧率影响/负载分档实测）才可收口，且「不落地 UI 就不摆点不动的开关」（能力协商
+而非能力假设——宁可没有也不做摆设）。
+
+- **`core/Glow.ets`**：直译上游 core/Glow.kt（340 行）——`GlowParams`（enabled 默认关 =
+  零代价口径；域钳在 sanitize：NaN/Infinity 回落出厂值、颜色掩 32 位；两档出厂预设 A 品红→青
+  / B 橙→绿）、`encodeGlow`/`decodeGlow`（单串持久化键，坏串整串回出厂、未知键前向兼容）、
+  `glowScaleFor`（像素×帧率三档：≤40M=1 / ≤150M=2 / 否则 4——与降噪 kernel 同一魔数
+  `DENOISE_FULL_KERNEL_PIXEL_RATE` 不造第二份）、`glowRtSizeInto`/`glowRawLongestEdge`
+  （按最长边等比夹取不破宽高比；夹取判据用夹取前原始最长边）、`fillGlowBlurOffset`
+  （RT 短边单位、横纵各向同性）、`glowRgb`（只取 RGB，alpha 不参与）、`GlowColor` 调色板、
+  `glowStatusNote`（状态行五级优先：DIRECT > 关着不显示 > 停用 > 夹取需真 RT > 分档句）。
+- **平台偏离登记**：① 编码浮点无 Kotlin ".0" 后缀（JS String(1)="1"）——编码串只在本平台
+  自产自销（Glow 参数不跨端互认），往返由 parseFloat 保证；② glowStatusNote 返回文案键
+  （core 不引资源）；③ DENOISE_FULL_KERNEL_PIXEL_RATE 暂住本文件（降噪批移植时收口单源）；
+  ④ **本文件当前无平台消费方**——native Glow 链（编码槽再扩 glow 一维）与胶囊 UI 随后续
+  真机批，与 H 批 DirectSink 同款「只交付纯函数 + 全表用例、不伪造接线」。
+- **守卫**：`test/pure/glow-pure.test.ets` 28 例——参数模型 5（默认/预设 B/钳域幂等/
+  NaN 回落/颜色掩码）、编码解码 6（往返/坏串 9 形态/未知键/先钳再写/开关默认关/ARGB→RGB）、
+  分档尺寸 6（三档/边界内侧/信息不全/按档缩保底/等比夹取/原始最长边/非法不写数组）、
+  模糊偏移 4（横竖屏各向同性/方形/非法）、状态行 6（优先级全表）。
+- **留白（登记，随真机批）**：① native `GlowBlurChain` 等价（两槽带 glow、阈值亮部提取、
+  每帧一次）；② Glow 胶囊 + HUD 登记 + 持久化（f381eee；含 `glow` 键进 24 键白名单的
+  追加裁决——键名契约只许追加）；③ ProgramKey 四维键（effect,curve,denoise,glow）——
+  本侧编码槽现为 curve 单自由度，扩 glow 时一并升级。
+- **回归**：pure-test 79 files / 830 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是
