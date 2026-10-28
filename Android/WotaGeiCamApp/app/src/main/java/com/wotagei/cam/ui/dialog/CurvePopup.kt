@@ -50,9 +50,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -70,6 +73,7 @@ import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaShape
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -107,6 +111,8 @@ fun CurvePopup(
 ) {
     val context = LocalContext.current
     val prefs = remember(context) { WotaSettings.of(context) }
+    // 抓点/插点/长按删除的确认震动（29 §3.2-4）：Compose 自带 HapticFeedback，无权限
+    val haptics = LocalHapticFeedback.current
     val stack by params.curve.observed()
     val motion = LocalMotion.current
     val channelNames = listOf(
@@ -244,12 +250,13 @@ fun CurvePopup(
                             }
                             .padding(PanelPad.dp)
                     ) {
-                        // 曲线框：左让出扇钮槽位与缝，先声明居下层
+                        // 曲线框：左让出扇钮槽位与缝，先声明居下层。
+                        // clip 刻意**不**放这层（29 §3.2-1）：命中区外扩层是它的兄弟，
+                        // 这层的 clip 会把画布外 12dp 的角部触点裁掉
                         Box(
                             Modifier
                                 .padding(start = (CENTER_SIZE + FanGap).dp)
                                 .size(side)
-                                .clip(RoundedCornerShape(WotaShape.menu))
                         ) {
                             CurveCanvas(
                                 points = points,
@@ -260,7 +267,9 @@ fun CurvePopup(
                                 scale = panelScale,
                                 histogram = histogram,
                                 channel = channel,
-                                modifier = Modifier.matchParentSize()
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clip(RoundedCornerShape(WotaShape.menu))
                             )
                             // 输入/输出读数（29 §2.2-4 / §3.2-5）：选中控制点时显示 (x·255, y·255)，
                             // 未选中不占位；拖动随 points 实时更新——回答「该往哪个方向调」
@@ -279,17 +288,35 @@ fun CurvePopup(
                                         .padding(6.dp)
                                 )
                             }
+                            // 命中区（29 §3.2-1）：比画布四边各外扩 [HitExtend]dp 的透明层——
+                            // 端点正好在画布四角，触点一半落在画布外会被面板吞噬层吃掉，
+                            // 「左下/右上端点抓不住」。layout 外扩 + 负偏移放置；手势内先把
+                            // 越界落点 clamp 回画布再判命中。画布圆角 clip 移到了 CurveCanvas
+                            // 自己的 modifier 上（只裁绘制），不裁这层命中区
                             Box(
                                 Modifier
-                                    .matchParentSize()
+                                    .layout { measurable, constraints ->
+                                        val p = HitExtend.dp.roundToPx()
+                                        val placeable = measurable.measure(
+                                            constraints.copy(
+                                                minWidth = constraints.maxWidth + 2 * p,
+                                                maxWidth = constraints.maxWidth + 2 * p,
+                                                minHeight = constraints.maxHeight + 2 * p,
+                                                maxHeight = constraints.maxHeight + 2 * p
+                                            )
+                                        )
+                                        layout(placeable.width, placeable.height) { placeable.place(-p, -p) }
+                                    }
                                     // key **必须含 channel**：手势闭包捕获的 points/selected/commit
                                     // 都绑定在 remember(channel) 的 state 实例上，channel 换了而监听
                                     // 不重启，拖动会写进旧通道的旧 state——总线被写（画面变）而画布
                                     // 不动（显示绑的是新 state），正是用户报的「能调、画面变、曲线不动」
                                     // （59931ab 把 channel 从 key 里去掉引入，2026-10-04 真机复现归因）。
                                     // 代价是换通道瞬间的一次按压会被重启吞掉——点通道钮与画布操作
-                                    // 本就不同指不同时，这个代价远小于写错通道
-                                    .pointerInput(channel, gpuMode) {
+                                    // 本就不同指不同时，这个代价远小于写错通道。
+                                    // panelScale 入 key：命中半径随面板缩放（放大是给手指大的人服务的），
+                                    // 29 §3.2-1；缩放只在拖把手时变化，与画布手势不同指不同时
+                                    .pointerInput(channel, gpuMode, panelScale) {
                                         if (!gpuMode) return@pointerInput
                                         awaitEachGesture {
                                             val down = awaitFirstDown(requireUnconsumed = false)
@@ -299,57 +326,88 @@ fun CurvePopup(
                                             // 画布上就会把整扇收掉，体感是"卫星钮吞了我的操作"；收扇只由
                                             // 中心钮再点与选完自动收回承担
                                             down.consume()
-                                        if (size.width <= 0 || size.height <= 0) return@awaitEachGesture
-                                        var working = livePoints.value
-                                        val gx = down.position.x / size.width
-                                        val gy = 1f - down.position.y / size.height
-                                        var index = CurveEdit.hitTest(working, gx, gy)
-                                        if (index < 0) {
-                                            val added = CurveEdit.inserted(working, gx, gy)
-                                            if (added != null) {
-                                                working = added.first
-                                                index = added.second
-                                            }
-                                        }
-                                        // 已到控制点上限且没点到现有点：本次手势什么都不做
-                                        if (index >= 0) {
-                                            canvasGesture = true
-                                            val deletable = index > 0 && index < working.size - 1
-                                            val secondTap = selected == index && deletable
-                                            selected = index
-                                            commit(working, persist = false)
-                                            var dragging = true
-                                            var moved = false
-                                            while (dragging) {
-                                                val change = awaitPointerEvent()
-                                                    .changes.firstOrNull { it.id == down.id } ?: break
-                                                dragging = change.pressed
-                                                if (!moved &&
-                                                    change.positionChange().getDistance() >
-                                                    viewConfiguration.touchSlop
-                                                ) moved = true
-                                                if (moved) {
-                                                    working = CurveEdit.moved(
-                                                        working, index,
-                                                        change.position.x / size.width,
-                                                        1f - change.position.y / size.height
-                                                    )
-                                                    commit(working, persist = false)
+                                            if (size.width <= 0 || size.height <= 0) return@awaitEachGesture
+                                            val ext = HitExtend.dp.toPx()
+                                            val canvasW = (size.width - 2 * ext).coerceAtLeast(1f)
+                                            val canvasH = (size.height - 2 * ext).coerceAtLeast(1f)
+                                            // 端点角部扩展：画布外 ≤HitExtend 的落点先 clamp 进画布（29 §3.2-1）
+                                            val cx = (down.position.x - ext).coerceIn(0f, canvasW)
+                                            val cy = (down.position.y - ext).coerceIn(0f, canvasH)
+                                            val gx = cx / canvasW
+                                            val gy = 1f - cy / canvasH
+                                            // 命中半径走像素域（29 §3.2-1）：20dp×面板缩放，下限 14dp
+                                            val radiusPx = maxOf(HitRadiusMin.dp.toPx(), HitRadius.dp.toPx() * panelScale)
+                                            var working = livePoints.value
+                                            var index = CurveEdit.hitTestPx(
+                                                working, gx, gy,
+                                                radiusPx / canvasW, radiusPx / canvasH
+                                            )
+                                            if (index < 0) {
+                                                val added = CurveEdit.inserted(working, gx, gy)
+                                                if (added != null) {
+                                                    working = added.first
+                                                    index = added.second
+                                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                                 }
-                                                change.consume()
                                             }
-                                            if (secondTap && !moved) {
-                                                // 二次点按同一点＝删点：原「删除控制点」动作钮的就地化
-                                                commit(CurveEdit.removed(livePoints.value, index), persist = true)
-                                                selected = -1
-                                            } else {
-                                                commit(working, persist = true)
+                                            // 已到控制点上限且没点到现有点：本次手势什么都不做
+                                            if (index >= 0) {
+                                                canvasGesture = true
+                                                val deletable = index > 0 && index < working.size - 1
+                                                val secondTap = selected == index && deletable
+                                                selected = index
+                                                // 抓到点的确认震动（29 §3.2-4）
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                commit(working, persist = false)
+                                                var dragging = true
+                                                var moved = false
+                                                var deleted = false
+                                                while (dragging) {
+                                                    // 长按删除（29 §3.2-3，已裁决）：未移动且长按到时 →
+                                                    // 删中间点 + 震动，手势即止；端点不可删走普通等待
+                                                    val change = if (!moved && deletable) {
+                                                        withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                                            awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                                                        }
+                                                    } else {
+                                                        awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                                                    }
+                                                    if (change == null && !moved) {
+                                                        // 超时 = 长按成立：删点（端点走不进这支）
+                                                        commit(CurveEdit.removed(livePoints.value, index), persist = true)
+                                                        selected = -1
+                                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        deleted = true
+                                                        break
+                                                    }
+                                                    if (change == null) break
+                                                    dragging = change.pressed
+                                                    if (!moved &&
+                                                        change.positionChange().getDistance() >
+                                                        viewConfiguration.touchSlop
+                                                    ) moved = true
+                                                    if (moved) {
+                                                        working = CurveEdit.moved(
+                                                            working, index,
+                                                            (change.position.x - ext).coerceIn(0f, canvasW) / canvasW,
+                                                            1f - (change.position.y - ext).coerceIn(0f, canvasH) / canvasH
+                                                        )
+                                                        commit(working, persist = false)
+                                                    }
+                                                    change.consume()
+                                                }
+                                                when {
+                                                    deleted -> Unit
+                                                    // 二次点按改为「取消选中」（29 §3.2-3：与长按删除冲突，
+                                                    // 快双击误删是 F3 的摩擦点之一）
+                                                    secondTap && !moved -> selected = -1
+                                                    else -> commit(working, persist = true)
+                                                }
+                                                canvasGesture = false
                                             }
-                                            canvasGesture = false
                                         }
                                     }
-                                }
-                        )
+                            )
                         }
                         // 扇钮：居上层，住面板左槽（48dp 恰好占满），垂直居中于画布行；
                         // 展开朝右扫进画布区的三枚因此盖在曲线框上可见
@@ -450,6 +508,13 @@ private const val FAN_RADIUS = 64f
 /** 曲线框设计边长与下限；200dp 同时是右缘缩放的**默认最小值** */
 private const val CurveSide = 200
 private const val MinCurveSide = 120
+
+/** 抓点命中半径（29 §3.2-1，像素域）：20dp×面板缩放，下限 14dp——归一化常数在面板放大后相对手指变小 */
+private const val HitRadius = 20
+private const val HitRadiusMin = 14
+
+/** 端点角部扩展（29 §3.2-1）：命中区比画布四边各外扩的 dp；越界落点先 clamp 回画布再判命中 */
+private const val HitExtend = 12
 
 /** 右缘缩放把手的命中条宽（dp），贴面板右缘外侧 */
 private const val ResizeHit = 22
@@ -802,11 +867,23 @@ private fun CurveCanvas(
         drawPath(path, strokeColor, style = Stroke(width = 2.dp.toPx() * scale))
         points.forEachIndexed { i, p ->
             val c = Offset(w * p.x, h * (1f - p.y))
-            val r = if (i == selected) dotSel else dot
-            // 空心点：实心点在亮画面上会和曲线糊成一团
-            drawCircle(if (i == selected) dotColor else WotaColor.textHi, radius = r, center = c)
-            drawCircle(WotaColor.bg, radius = r - 2.5.dp.toPx(), center = c)
-            if (i == selected) drawCircle(dotColor, radius = r - 2.5.dp.toPx(), center = c)
+            val endpoint = i == 0 || i == points.size - 1
+            // 选中 1.2 倍放大；端点略大（29 §3.2-2：端点要与中间点可区分）
+            val r = when {
+                i == selected -> dotSel * 1.2f
+                endpoint -> dot * 1.15f
+                else -> dot
+            }
+            if (endpoint) {
+                // 端点双层环：外环通道色 + 内芯背景色（29 §3.2-2），与中间点的空心样式区分
+                drawCircle(dotColor, radius = r, center = c)
+                drawCircle(WotaColor.bg, radius = r * 0.62f, center = c)
+            } else {
+                // 空心点：实心点在亮画面上会和曲线糊成一团
+                drawCircle(if (i == selected) dotColor else WotaColor.textHi, radius = r, center = c)
+                drawCircle(WotaColor.bg, radius = r - 2.5.dp.toPx(), center = c)
+                if (i == selected) drawCircle(dotColor, radius = r - 2.5.dp.toPx(), center = c)
+            }
         }
     }
 }

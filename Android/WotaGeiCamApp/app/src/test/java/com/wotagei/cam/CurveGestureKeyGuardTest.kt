@@ -23,11 +23,12 @@ class CurveGestureKeyGuardTest {
 
     @Test
     fun `画布手势层的重启key必须含channel`() {
-        // 定位画布手势层：matchParentSize 之后紧跟的 pointerInput（全文件只有画布这一处双参 key
-        // 带 gpuMode；扇钮/捕获层/吞噬层分别是 fanTap/Unit/Unit）
-        val at = masked.indexOf(".pointerInput(channel, gpuMode)")
+        // 定位画布手势层：pointerInput 三参 key（channel, gpuMode, panelScale——29 §3.2-1 起
+        // 命中半径随面板缩放，panelScale 入 key；全文件只有画布这一处带 gpuMode 的多参 key，
+        // 扇钮/捕获层/吞噬层分别是 fanTap/Unit/Unit）
+        val at = masked.indexOf(".pointerInput(channel, gpuMode, panelScale)")
         assertTrue(
-            "画布手势层的 pointerInput(channel, gpuMode) 不见了：key 被去掉 channel 会让换通道后" +
+            "画布手势层的 pointerInput 重启 key 不见了（须含 channel）：key 被去掉 channel 会让换通道后" +
                 "的拖动写进旧通道的旧 state（画面变色、画布不动）——这是 2026-10-04 的真机缺陷，不许复发",
             at >= 0
         )

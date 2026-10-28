@@ -207,12 +207,24 @@ object CurveEdit {
     }
 
     /** 最近的点；超出 [HIT_RADIUS] 返回 -1（表示点的是空白，应新增控制点） */
-    fun hitTest(points: List<ColorCurve.Point>, x: Float, y: Float): Int {
+    fun hitTest(points: List<ColorCurve.Point>, x: Float, y: Float): Int =
+        hitTestPx(points, x, y, HIT_RADIUS, HIT_RADIUS)
+
+    /**
+     * 像素域命中（29 §3.2-1，2026-10-28）：[rx]/[ry] 是**归一化半径**（调用方按
+     * radiusPx ÷ 画布宽/高换算——x/y 各自换算，正方形画布下二者相等）。
+     * 归一化常数 [HIT_RADIUS] 在面板放大后相对手指变小（120dp 画布 ≈8.4dp），
+     * 是「左下/右上端点抓不住」的根因之一；像素域半径随面板放大同步变大。
+     */
+    fun hitTestPx(points: List<ColorCurve.Point>, x: Float, y: Float, rx: Float, ry: Float): Int {
+        if (rx <= 0f || ry <= 0f) return -1
         var best = -1
         var bestDist = Float.MAX_VALUE
         points.forEachIndexed { i, p ->
-            val d = kotlin.math.hypot((p.x - x).toDouble(), (p.y - y).toDouble())
-            if (d <= HIT_RADIUS && d < bestDist) {
+            val dx = (p.x - x) / rx
+            val dy = (p.y - y) / ry
+            val d = kotlin.math.hypot(dx.toDouble(), dy.toDouble())
+            if (d <= 1.0 && d < bestDist) {
                 bestDist = d.toFloat()
                 best = i
             }

@@ -25,8 +25,9 @@ class CurveFollowGuardTest {
 
     @Test
     fun `画布手势进行中必须置canvasGesture且回落`() {
-        // 定位画布手势层（与 CurveGestureKeyGuardTest 同一锚点：全文件唯一的双参 key）
-        val at = masked.indexOf(".pointerInput(channel, gpuMode)")
+        // 定位画布手势层（与 CurveGestureKeyGuardTest 同一锚点：全文件唯一带 gpuMode 的多参 key，
+        // 29 §3.2-1 起为三参 channel/gpuMode/panelScale）
+        val at = masked.indexOf(".pointerInput(channel, gpuMode, panelScale)")
         assertTrue("画布手势层不见了（锚点失效，守卫失去输入）", at >= 0)
         val body = masked.substring(at)
         assertTrue(
