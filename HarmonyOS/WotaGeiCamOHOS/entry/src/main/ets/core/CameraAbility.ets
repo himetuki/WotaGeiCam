@@ -9,7 +9,7 @@
  *   （上游 fpsRangesFor 本来就是这么写的，语义一致）。
  */
 import { Diag } from '../diag/Diag';
-import { Rect, Size, WotaTag, WotaTiers } from './Constants';
+import { Rect, Size, WotaTag, WotaTiers, WbPreset } from './Constants';
 import { VideoSizeCandidates, aspectOf, sizeCloseTo } from './VideoSizePicker';
 
 /** 整数能力范围；缺失能力用 CLOSED 标记，不伪造范围（02 文件第 4 节） */
@@ -159,6 +159,17 @@ export class CameraAbility {
   }
 
   /**
+   * 手动白平衡（色温轴）在本机是否真能生效（上游 ab73ebf/ee9aa0e 口径的 OHOS 对应）：
+   * 契约前提是会话探测表里**声明了 MANUAL 档**（KitAbility 会话期经
+   * isWhiteBalanceModeSupported 逐档探测后映射回 awbModes——运行时探测，不是能力假设）。
+   * 空集合 = 未探测/旧路径拿不到（无法判定）⇒ 视为可用，保持既有行为
+   * （不因「查不到」把用户已选的手动档弹掉）。
+   */
+  manualWhiteBalancePossible(): boolean {
+    return this.awbModes.size === 0 || this.awbModes.has(WbPreset.MANUAL as number);
+  }
+
+  /**
    * 帧率范围按尺寸分流：高速档是「尺寸 → 范围」表，
    * size 缺省或该尺寸未列入高速表时，退化成所有高速尺寸的并集，仅用于档位可用性判断。
    */
@@ -180,6 +191,31 @@ export class CameraAbility {
       }
     });
     return exact ?? [];
+  }
+
+  /**
+   * 档位可用性判定域：普通 ∪ 高速（按尺寸）并集——档位「能不能选」看它。
+   * 厂商常把 50/60 只放进高速表（如 vivo V2520A：普通流仅 [24,24]/[30,30]，
+   * 高速 1080p 给 [30,120]/[60,120]/[120,120]/[30,240]/[60,240]/[240,240]），
+   * 按当前会话模态判定会让 50/60/120/240 永远灰显（上游 2026-10-26 用户报障，74d4fb2）。
+   * 会话内的下发 / 钳制仍按单模态 [fpsRangesFor]（当前会话实际给得到的范围）。
+   */
+  fpsRangesUnion(size: Size | undefined): Array<RangeI> {
+    return fpsRangesUnion(this.fpsRanges, this.fpsRangesFor(size, true));
+  }
+
+  /** 该帧率普通会话覆盖不了、但高速表（按尺寸）覆盖 ⇒ 需要高速会话（结构性换挡） */
+  needsHighSpeed(size: Size | undefined, fps: number): boolean {
+    return needsHighSpeedFps(this.fpsRanges, this.fpsRangesFor(size, true), fps);
+  }
+
+  /**
+   * 一档的**完整决议**：用哪张表、下发哪个区间、精不精确、要不要高速会话。
+   * UI 的可选性/※ 标记、参数总线落档、引擎开会话与下发，四处都只认这一个出口
+   * （上游 2026-10-26「三处判据分叉」事故的根治：各写一份就会「界面说可选、请求发的是非法值」）。
+   */
+  decideFps(size: Size | undefined, fps: number): FpsDecision | undefined {
+    return decideFps(this.fpsRanges, this.fpsRangesFor(size, true), fps);
   }
 
   /** 录像尺寸上下限（UI「本机支持范围 …～」文案数据源） */
@@ -322,6 +358,89 @@ export function pickFpsRange(ranges: Array<RangeI>, target: number): FpsPick | u
     }
   }
   return best === undefined ? undefined : new FpsPick(best.lo, best.hi, false);
+}
+
+/**
+ * 高速表专用选档（上游 2026-10-26 新增，decideFps 出口的一半）：**只用机器声明过的区间**，
+ * 绝不自己造 `[f,f]`。
+ *
+ * 为什么不沿用 [pickFpsRange]：它「取覆盖目标里上界最大者」，放到高速表上会挑到 `[30,240]`
+ * 这种极宽区间——用户选 60、HAL 却有机会跑到 240。高速表这里分三级：
+ * 1. **固定档 `[f,f]`**（`[120,120]`/`[240,240]`）⇒ 精确，原样返回；
+ * 2. **下界正好等于目标**的区间（目标 60 → `[60,120]`/`[60,240]`）⇒ 最贴近目标且只会往上，
+ *    取其中上界最小者；
+ * 3. 再退：覆盖目标者取上界最小者（目标 50 只有 `[30,120]`/`[30,240]` ⇒ 取 `[30,120]`）。
+ *
+ * 返回 undefined = 这张表没有任何区间覆盖目标（调用方按「本机做不到这一档」处理，
+ * **不要**退回普通表硬发）。上游修正前的旧实现是 `FpsPick(target, target, true)`——直接造
+ * `[50,50]`，那不是机器声明过的值，下发必被拒且没有退路 ⇒ 取景器假死。
+ */
+export function pickHighSpeedFpsRange(ranges: Array<RangeI>, target: number): FpsPick | undefined {
+  if (ranges.length === 0 || target <= 0) {
+    return undefined;
+  }
+  const fixed: RangeI | undefined = ranges.find((r: RangeI): boolean => r.lo === target && r.hi === target);
+  if (fixed !== undefined) {
+    return new FpsPick(fixed.lo, fixed.hi, true);
+  }
+  const containing: Array<RangeI> = ranges.filter((r: RangeI): boolean => r.lo <= target && target <= r.hi);
+  if (containing.length === 0) {
+    return undefined;
+  }
+  const loMatch: Array<RangeI> = containing.filter((r: RangeI): boolean => r.lo === target);
+  const pool: Array<RangeI> = loMatch.length > 0 ? loMatch : containing;
+  let chosen: RangeI = pool[0];
+  for (const r of pool) {
+    if (r.hi < chosen.hi) {
+      chosen = r;
+    }
+  }
+  return new FpsPick(chosen.lo, chosen.hi, false);
+}
+
+/** 档位可用性判定域：普通 ∪ 高速并集。UI 档位「能不能选」与换档精确性按它判定；会话内下发 / 钳制仍按单模态范围表 */
+export function fpsRangesUnion(normal: Array<RangeI>, highSpeed: Array<RangeI>): Array<RangeI> {
+  return normal.concat(highSpeed);
+}
+
+/** 该帧率普通会话覆盖不了、但高速会话（按尺寸的高速范围表）覆盖 ⇒ 需要高速会话 */
+export function needsHighSpeedFps(normal: Array<RangeI>, highSpeed: Array<RangeI>, fps: number): boolean {
+  return pickFpsRange(normal, fps) === undefined && pickHighSpeedFpsRange(highSpeed, fps) !== undefined;
+}
+
+/** 一档的完整决议（见 CameraAbility.decideFps）：下发哪个区间、走不走高速会话 */
+export class FpsDecision {
+  pick: FpsPick;
+  highSpeed: boolean;
+
+  constructor(pick: FpsPick, highSpeed: boolean) {
+    this.pick = pick;
+    this.highSpeed = highSpeed;
+  }
+}
+
+/**
+ * 一档的完整决议（纯函数，全表单测）：**普通表先来，普通表覆盖不了才看高速表**。
+ * 返回 undefined = 两张表都不覆盖 ⇒ 界面灰显、总线落 `enabled=false`，不硬发。
+ *
+ * 这条顺序就是产品口径：机器能在普通流里跑的就别开高速会话；只有普通流给不到的档才请出高速会话。
+ * 它同时回答「50/60 该不该灰」——**看机器在哪张表里声明**：声明在普通表就是普通档；只在高速表
+ * 声明的（如 vivo V2520A 的 50/60）仍然可用，因为那张表正是厂商把「高帧率录像」暴露给三方 App
+ * 的途径，只是实际速率由 HAL 在区间内定 ⇒ 界面标 ※ 如实告知。
+ */
+export function decideFps(normal: Array<RangeI>, highSpeed: Array<RangeI>, fps: number): FpsDecision | undefined {
+  if (fps <= 0) {
+    return undefined;
+  }
+  const normalPick: FpsPick | undefined = pickFpsRange(normal, fps);
+  if (normalPick !== undefined) {
+    return new FpsDecision(normalPick, false);
+  }
+  const highSpeedPick: FpsPick | undefined = pickHighSpeedFpsRange(highSpeed, fps);
+  if (highSpeedPick !== undefined) {
+    return new FpsDecision(highSpeedPick, true);
+  }
+  return undefined;
 }
 
 /** 35mm 等效焦距：eq = round(43.27 / sqrt(sw²+sh²) × focal × 100) / 100；43.27 是全画幅对角线 */

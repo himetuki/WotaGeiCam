@@ -63,6 +63,13 @@ import {
   HudPageCell, pageCellAtPointer, pageCellOffsetPx, pageCellPx, pageCellsBlocked, pageGridBoxOf,
   pageGridColCap, pageGridRowCap
 } from '../core/HudPageGrid';
+import { GLOW_DEFAULT, GlowParams, decodeGlow, encodeGlow, fillGlowBlurOffset, glowRgb,
+  glowScaleFor, glowStatusNote } from '../core/Glow';
+import { DisplayScale, displayRtNeedsRebuild, displayScaleReadoutLabel, nearestDisplayScale,
+  resolveDisplayRtOrNull } from '../core/DisplayScaleRt';
+import { AudioDenoise, VideoDenoise, audioDenoiseNeedsCodec, denoiseKernelLite,
+  effectiveVideoDenoise, videoDenoiseActive } from '../core/Denoise';
+import { HistogramMath } from '../core/HistogramMath';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
 class NoopFlushScheduler implements FlushScheduler {
@@ -101,6 +108,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.paramsPersistCompileProbe();
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
     PureLogicBarrel.hudLayoutCompileProbe();
+    PureLogicBarrel.cameraCatchupCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -259,6 +267,35 @@ export class PureLogicBarrel {
       placed.xDp >= 0 && band.first <= band.last && stored.col >= 0 && visible.size > 0 &&
       cellPx > 0 && box.cols > 0 && offset.x >= 0 && blocked.size >= 0 && landed !== undefined &&
       caps > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 追赶轮纯逻辑模块（Glow/DisplayScale/降噪/HistogramMath）的编译探针：参数模型、
+   * 编解码往返、分档与几何、负载分档、直方图分箱归一。零副作用（产物丢弃）；
+   * Glow/DisplayScale 本侧暂无平台消费方（native 链随真机批），由本探针保住编译门。
+   */
+  private static cameraCatchupCompileProbe(): void {
+    const glow: GlowParams = decodeGlow(encodeGlow(GLOW_DEFAULT));
+    const rgb: Array<number> = glowRgb(glow.colorA);
+    const scale: number = glowScaleFor(1920, 1080, 30);
+    const blurOffset: Array<number> = [0, 0];
+    fillGlowBlurOffset(blurOffset, 960, 540, 0.02, true);
+    const note = glowStatusNote(undefined, true, true);
+    const rt: Array<number> | undefined = resolveDisplayRtOrNull(1080, 1920, 2);
+    const fallbackScale: DisplayScale = nearestDisplayScale(1080, 1920, DisplayScale.SIXTEENTH);
+    const readout: string = displayScaleReadoutLabel(DisplayScale.ORIG, '原片');
+    const rebuild: boolean = displayRtNeedsRebuild(540, 960, 540, 960);
+    const videoActive: boolean = videoDenoiseActive(
+      effectiveVideoDenoise(VideoDenoise.GPU_BILATERAL, false), false);
+    const codec: boolean = audioDenoiseNeedsCodec(AudioDenoise.SYSTEM);
+    const lite: boolean = denoiseKernelLite(3840, 2160, 30);
+    const hist: Array<number> = HistogramMath.normalizedHeights(
+      HistogramMath.binRgba(new ArrayBuffer(64 * 64 * 4), 64, 64));
+    if (glow.threshold >= 0 && rgb.length === 3 && scale > 0 && blurOffset[0] >= 0 &&
+      note !== undefined && rt !== undefined && fallbackScale.divisor > 0 && readout !== '' &&
+      !rebuild && !videoActive && !codec && lite && hist.length === 192) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

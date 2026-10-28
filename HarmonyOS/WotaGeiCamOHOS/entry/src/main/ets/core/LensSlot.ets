@@ -104,3 +104,43 @@ export function dumpLenses(slots: Array<LensSlot>): void {
     slot.ability.dump(slot.key);
   }
 }
+
+/** 一颗镜头视频档里的最大像素数（无档 = 0） */
+export function maxVideoPixels(a: CameraAbility): number {
+  let m: number = 0;
+  for (const s of a.videoSizes) {
+    if (s.pixels > m) {
+      m = s.pixels;
+    }
+  }
+  return m;
+}
+
+/**
+ * **能力协商的出厂默认镜头**（上游 0525fa2，用户指令「能力协商，而非能力假设」）：
+ * 用户从未显式选过镜头时，默认打开**后摄里最大视频档最大的那颗**，不认档位标签。
+ *
+ * 为什么：档位标签由焦距排序归档（assignRearTiers），个别机型的 HAL 会把小底定焦头
+ * 排进「广角」档——上游真机 marble 实测：出厂「广角」videoSizes 最大只有 1600x1200 且
+ * 定焦，用户由此被钉在 720p。按能力协商后这类机型首启直接打开真主摄；正常机型主摄本来
+ * 就是最大视频档，行为不变。用户显式切换过一次后（SettingsStore 的 lens_user_picked 位），
+ * 完全尊重用户选择，本函数不再参与。
+ *
+ * 纯函数（全表单测）：前置一律排除；并列取先见者（对齐 Kotlin maxByOrNull 语义）；
+ * 全空或所有镜头都报不出视频档时返回 undefined（调用方退回既有的档位/首颗链路）。
+ */
+export function pickCapabilityDefault(slots: Array<LensSlot>): LensSlot | undefined {
+  let best: LensSlot | undefined = undefined;
+  let bestPixels: number = 0;
+  for (const s of slots) {
+    if (s.type === LensType.FRONT) {
+      continue;
+    }
+    const pixels: number = maxVideoPixels(s.ability);
+    if (pixels > bestPixels) {
+      bestPixels = pixels;
+      best = s;
+    }
+  }
+  return bestPixels > 0 ? best : undefined;
+}

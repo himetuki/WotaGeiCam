@@ -16,13 +16,14 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag, WotaTiers } from '../core/Constants';
+import { Size, WotaTag } from '../core/Constants';
 import { LensSlot } from '../core/LensSlot';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
 import { pickDirectPreviewSize, sizeCloseTo, VideoSizeCandidates } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
+import { previewRangeFor } from './GlCameraEngine';
 import { ApplyReport, State, applySnapshot, snapshotOf, stateOf } from './RequestApplier';
 
 /** 默认档：归档结果里第一个 WIDE（多后摄按焦距归档后广角稳定在 WIDE）；无 WIDE 则第一个非前摄。
@@ -77,8 +78,10 @@ export class PreviewEngine {
    * 开预览。返回人读状态摘要（页面直接显示）；失败不抛——Diag 落错 + 返回 "preview failed: ..."。
    * @param surfaceId XComponent(SURFACE) 的 surfaceId（onLoad 时由 controller 取得）
    * @param viewW/viewH 承载视图像素宽高；未布局传 0（core 的 pickDirectPreviewSize 会退到最大档）
+   * @param fps 可选预览帧率（>0 才下发；开发者页自检用，缺省不动）
    */
-  async start(ctx: common.Context, surfaceId: string, viewW: number, viewH: number): Promise<string> {
+  async start(ctx: common.Context, surfaceId: string, viewW: number, viewH: number,
+    fps?: number): Promise<string> {
     try {
       await this.stop(); // 重入安全：先收上一套
       if (surfaceId === '') {
@@ -130,6 +133,10 @@ export class PreviewEngine {
       this.input = input;
       this.preview = preview;
       this.session = session;
+      // 预览帧率（SDK 12+ 的 PreviewOutput.setFrameRate）：失败只 Diag.w，不阻塞出画面
+      if (fps !== undefined && fps > 0) {
+        this.applyFpsTo(preview, fps);
+      }
 
       // 会话期能力真值化（zoom/ev/iso/af/awb/flash/exposure，见 KitAbility.abilityRefineWithSession）后 dump
       const refined: CameraAbility = abilityRefineWithSession(slot.ability, session);
@@ -146,6 +153,55 @@ export class PreviewEngine {
     }
   }
 
+  /** 活设置预览帧率（开发者页自检）：无会话/无匹配区间/下发失败返回 false */
+  applyPreviewFps(fps: number): boolean {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return false;
+    }
+    return this.applyFpsTo(preview, fps);
+  }
+
+  /** 当前会话预览支持的帧率（各区间上界去重升序；无会话/查询失败返回空表） */
+  supportedPreviewFrameRates(): Array<number> {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return [];
+    }
+    try {
+      const out: Array<number> = [];
+      for (const r of preview.getSupportedFrameRates()) {
+        if (out.indexOf(r.max) < 0) {
+          out.push(r.max);
+        }
+      }
+      out.sort((a: number, b: number): number => a - b);
+      return out;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `preview supported fps query failed: ${e}`);
+      return [];
+    }
+  }
+
+  private applyFpsTo(preview: camera.PreviewOutput, fps: number): boolean {
+    if (!(fps > 0)) {
+      return false;
+    }
+    try {
+      const best: camera.FrameRateRange | undefined = previewRangeFor(preview.getSupportedFrameRates(), fps);
+      if (best === undefined) {
+        Diag.w(WotaTag.ABILITY, `preview fps ${fps} unsupported by declared ranges`);
+        return false;
+      }
+      preview.setFrameRate(best.min, best.max);
+      Diag.i(WotaTag.ABILITY, `preview fps ${fps} -> [${best.min},${best.max}]`);
+      return true;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `preview setFrameRate ${fps} failed: ${e}`);
+      return false;
+    }
+  }
+
   /**
    * 参数下发（HUD/自检入口）：按参数总线当前快照逐键 apply，返回报告摘要。
    * 会话未就绪时返回提示串（页面直接显示）；异常兜底不抛。
@@ -158,7 +214,9 @@ export class PreviewEngine {
       // 会话实际口径：size 用本会话选中的预览尺寸，fps 用同尺寸视频档 max（预览 profile 无 fps 字段）
       const effectiveSize: Size = this.chosenSize ?? params.size.value;
       const effectiveFps: number = this.sessionFpsMax > 0 ? this.sessionFpsMax : params.fps.value.value;
-      const highSpeed: boolean = effectiveFps > WotaTiers.HIGH_SPEED_FPS;
+      // highSpeed 判据与总线落档/下发钳制同源（core.needsHighSpeed：普通表先来、覆盖不了才看高速表），
+      // 不再按「档位数值 > 30」猜——厂商把 50/60 放在普通表时不该被当成高速会话（上游 2026-10-26 口径）
+      const highSpeed: boolean = this.refinedAbility.needsHighSpeed(effectiveSize, effectiveFps);
       const state: State = stateOf(
         this.refinedAbility, effectiveSize, highSpeed, this.refinedAbility.evStep);
       const report: ApplyReport = applySnapshot(this.session, state, snapshotOf(params, state));

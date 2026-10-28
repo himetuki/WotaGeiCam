@@ -56,12 +56,41 @@ export function setPeakingParams(strength: number, colorIndex: number): void {
   glLib.setPeakingParams(strength, colorIndex);
 }
 
+/** 直方图采样开关（曲线弹窗可见时开；native 关侧停采清快照） */
+export function setHistogramEnabled(on: boolean): void {
+  glLib.setHistogramEnabled(on);
+}
+
+/** 直方图快照（3×64 计数 R/G/B 的 Int32Array）；无样本返回 undefined（未采/已清） */
+export function getHistogramSnapshot(): Int32Array | undefined {
+  const v: Int32Array | null = glLib.getHistogramSnapshot();
+  return v ?? undefined;
+}
+
 export function uploadCurveLut(data: ArrayBuffer): boolean {
   return glLib.uploadCurveLut(data);
 }
 
 export function setFrostEnabled(on: boolean): void {
   glLib.setFrostEnabled(on);
+}
+
+// ---------------------------------------------------------------- 追赶轮：光晕三口 + 降噪一口
+// 参数序是 native napi 注册表的字面契约（cpp/napi_init.cpp 同名口），调用点不得重排
+
+export function setGlowParams(enabled: number, threshold: number, soft: number, width: number,
+  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number): void {
+  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, colorA, colorB);
+}
+
+/** 'off' 或 'on:<broken>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped>' */
+export function getGlowStatus(): string {
+  return glLib.getGlowStatus();
+}
+
+/** 0=关 / 1=完整核 / 2=轻量核（取值见 core/Denoise.ets 的 DENOISE_LEVEL_*） */
+export function setDenoiseLevel(level: number): void {
+  glLib.setDenoiseLevel(level);
 }
 
 // ---------------------------------------------------------------- GL-4 GPU 录制（视频-only 最小切片）

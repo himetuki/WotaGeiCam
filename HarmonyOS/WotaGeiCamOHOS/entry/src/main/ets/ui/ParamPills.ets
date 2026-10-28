@@ -13,7 +13,7 @@
  * - 每次改动经 onApply 回调上抛，由 Camera 页 engine.applyParams 下发并汇总报告。
  */
 import { AeMode, AfMode, WbPreset, WbPresets, WotaTiers } from '../core/Constants';
-import { CameraAbility, RangeI, pickFpsRange } from '../core/CameraAbility';
+import { CameraAbility, FpsPick } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { evLadder, isoLadder, kelvinLadder, shutterLadder, diopterLadder } from './SliderLadder';
 import { TierItem, aeLabel, evText, shutterItems, shutterText, wbLabel } from './ParamFormat';
@@ -110,14 +110,13 @@ export struct ShutterPillPopup {
       this.hiNs = range.hi;
       this.hasRange = range.hi > range.lo;
     }
-    // fpsHi 口径：帧率档位所在范围的下界（可变 [24,30] 选 24 时帧周期按 24 算，
-    // 取不到该档 fps 时退回用户档位，与 WotaParams.applyExposure 的退回一致）
+    // fpsHi 口径（上游 2026-10-26 对齐）：钳制基准 = **用户档位**（max(pick.lo, 目标)）——
+    // 普通档 [24,30] 选 24 时 pick.lo==目标，行为不变；可变高速档（50 → [30,120]，lo=30）
+    // 必须回到目标 50，否则快门梯放出一个引擎必定压回的 1/30 死档。取不到该档时退回用户档位。
     const targetFps: number = this.params.fps.value.value;
-    const ranges: Array<RangeI> =
-      this.ability === undefined ? [] : this.ability.fpsRangesFor(this.params.size.value,
-        targetFps > WotaTiers.HIGH_SPEED_FPS);
-    const pick = pickFpsRange(ranges, targetFps);
-    const fpsHi: number = pick !== undefined ? pick.lo : targetFps;
+    const pick: FpsPick | undefined =
+      this.ability === undefined ? undefined : this.ability.decideFps(this.params.size.value, targetFps)?.pick;
+    const fpsHi: number = pick !== undefined ? Math.max(pick.lo, targetFps) : targetFps;
     const items: Array<TierItem> = shutterItems(
       this.ability === undefined ? undefined : this.ability.exposureNs, fpsHi, '※')
       .filter((t: TierItem): boolean => t.supported);
@@ -367,11 +366,14 @@ export struct WbPillPopup {
       this.kelvinHi = range.hi;
     }
     this.ladder = kelvinLadder(this.kelvinLo, this.kelvinHi);
-    // 能力未知（ability undefined）时预设按可选处理（上游 awbModes?.contains != false 同义）
+    // 能力未知（ability undefined）时预设按可选处理（上游 awbModes?.contains != false 同义）；
+    // MANUAL 例外（2026-10-28 对齐 ab73ebf/ee9aa0e）：**必须经 manualWhiteBalancePossible 探测**
+    // ——设备不声明手动档就不再摆可点选项（点了会下发被拒/错误状态），灰显 + 点不动。
     const options: Array<PillOption> = [];
     for (const p of WbPresets.ALL) {
-      const supported: boolean = p === WbPreset.MANUAL || this.ability === undefined ||
-        this.ability.awbModes.has(WbPresets.awbMode(p));
+      const supported: boolean = p === WbPreset.MANUAL
+        ? this.ability === undefined || this.ability.manualWhiteBalancePossible()
+        : this.ability === undefined || this.ability.awbModes.has(WbPresets.awbMode(p));
       options.push(new PillOption(p as number, wbLabel(p), supported));
     }
     this.wbOptions = options;
@@ -436,6 +438,8 @@ export struct FocusPillPopup {
   onApply: () => void = (): void => {};
   /** FL：锁定/解除开关（宿主页过闸后落总线；缺省空实现防漏挂——但接线守卫会点名） */
   onToggleLock: () => void = (): void => {};
+  /** 切入手动档的一次性提示钩子（上游 4457e4a 方案G 最小形态：宿主页提示开峰值辅助） */
+  onManualSelected: () => void = (): void => {};
   @State afMode: AfMode = AfMode.CONTINUOUS_VIDEO;
   @State diopter: number = 0;
   private lo: number = 0;
@@ -474,8 +478,12 @@ export struct FocusPillPopup {
         active: this.editable,
         onPick: (opt: PillOption): void => {
           const next: AfMode = opt.value as AfMode;
+          const enteredManual: boolean = next === AfMode.MANUAL && this.afMode !== AfMode.MANUAL;
           this.afMode = next;
           this.params.afMode.value = next;
+          if (enteredManual) {
+            this.onManualSelected();
+          }
           this.onApply();
         }
       })

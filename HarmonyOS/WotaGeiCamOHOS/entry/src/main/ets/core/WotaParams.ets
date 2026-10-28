@@ -11,7 +11,7 @@ import {
   AeMode, AfMode, AfModes, ArcMergeDeadband, Flash, FrameEffect,
   PeakingColor, RenderMode, Stabilize, TapPoint, WotaTiers, WbPreset, WbPresets, Size
 } from './Constants';
-import { CameraAbility, FpsPick, RangeF, shutterCeilingNs, pickFpsRange } from './CameraAbility';
+import { CameraAbility, FpsDecision, RangeF, shutterCeilingNs } from './CameraAbility';
 import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
 import { resolveSizeFor, sizeCloseTo, VideoSizeCandidates } from './VideoSizePicker';
@@ -172,11 +172,12 @@ export class WotaParams {
     // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
     this.applySize(a);
     const targetFps: number = Math.max(1, this.fps.value.value);
-    const highSpeed: boolean = targetFps > WotaTiers.HIGH_SPEED_FPS;
-    const pick: FpsPick | undefined = pickFpsRange(a.fpsRangesFor(this.size.value, highSpeed), targetFps);
-    this.fps.value = pick === undefined
+    // 一档的完整决议交给 core.decideFps（普通表先来、覆盖不了才看高速表）——UI 的可用性/※、
+    // 总线落档、会话选择（KitPreview）与下发钳制四处同源，不再各写一份（上游 2026-10-26 口径）。
+    const decision: FpsDecision | undefined = a.decideFps(this.size.value, targetFps);
+    this.fps.value = decision === undefined
       ? ParamState.inexactDisabled(targetFps)
-      : ParamState.ofRange(targetFps, pick.lo, pick.hi, pick.exact);
+      : ParamState.ofRange(targetFps, decision.pick.lo, decision.pick.hi, decision.pick.exact);
 
     // 快门上限吃「实际生效的帧周期上界」= pick 到的 hi（无固定 [f,f] 时是设备的可变范围上界），
     // 不是用户档位本身：否则用户选 24fps、设备只给 [15,30]（非精确）时，列表会按 1/24 判可选，
@@ -266,10 +267,24 @@ export class WotaParams {
   }
 
   private applyWhiteBalance(a: CameraAbility): void {
+    // 手动档门控（上游 ab73ebf/ee9aa0e 口径，2026-10-28 修）：探测表里没有 MANUAL 时**绝不
+    // 落到手动档**——旧兜底 `?? WbPreset.MANUAL` 会把总线钉到设备不支持的档上（能力假设），
+    // 下发 setWhiteBalanceMode(MANUAL) 被拒或落在错误状态。能力未知（空表）时保持既有行为。
+    const manualPossible: boolean = a.manualWhiteBalancePossible();
     if (a.awbModes.size > 0 && !a.awbModes.has(WbPresets.awbMode(this.wbMode.value))) {
-      const fallback: WbPreset | undefined = WbPresets.ALL.find(
+      const fallback: WbPreset | undefined = manualPossible
+        ? WbPresets.ALL.find((p: WbPreset): boolean => a.awbModes.has(WbPresets.awbMode(p)))
+        : WbPresets.ALL.find(
+          (p: WbPreset): boolean => p !== WbPreset.MANUAL && a.awbModes.has(WbPresets.awbMode(p)));
+      this.wbMode.value = fallback ?? (manualPossible ? WbPreset.MANUAL : WbPreset.AUTO);
+    }
+    if (this.wbMode.value === WbPreset.MANUAL && !manualPossible) {
+      // 当前已选手动但本机不可能生效（探测表在且无 MANUAL）：降到第一个受支持预设
+      const demote: WbPreset | undefined = WbPresets.ALL.find(
         (p: WbPreset): boolean => p !== WbPreset.MANUAL && a.awbModes.has(WbPresets.awbMode(p)));
-      this.wbMode.value = fallback ?? WbPreset.MANUAL;
+      if (demote !== undefined) {
+        this.wbMode.value = demote;
+      }
     }
     // 色温/色调是产品滑杆域（双轴插值），不随机型变化
     this.kelvin.value = ParamState.ofRange(

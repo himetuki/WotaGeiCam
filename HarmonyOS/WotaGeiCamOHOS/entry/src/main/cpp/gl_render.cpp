@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,19 @@ constexpr float kCanonicalEps = 1e-3f;
 constexpr int kEffectNone = 0;
 constexpr int kEffectZebra = 1;
 constexpr int kEffectPeaking = 2;
+
+// ---- 2026-10-28 Glow/降噪批：上游 Shaders.kt / core/Glow.kt / core/Denoise.kt 的常量口径 ----
+/** Glow 图的取样单元（与既有 0=OES / 1=条纹 / 2=曲线错开；ES2 保证 MAX_TEXTURE_IMAGE_UNITS ≥ 8） */
+constexpr int kGlowSrcUnit = 5;
+/** 连续这么多帧 GL 报错就整条 Glow 链停用（上游 GlowBlurChain.GLOW_MAX_ERROR_STREAK） */
+constexpr int kGlowMaxErrorStreak = 8;
+/** 判档帧率未知时的兜底（上游 glowStatus 的「还没绑定编码面时帧率按 30 估」） */
+constexpr int kGlowFpsFallback = 30;
+/** Glow 分档阈值（像素 × 帧率）：≤40M 用 1、≤150M 用 2、否则 4（上游 core/Glow.kt） */
+constexpr int64_t kGlowFullMaxPixelRate = 40000000LL;
+constexpr int64_t kGlowHalfMaxPixelRate = 150000000LL;
+/** 降噪亮差权重的 σ（上游 GlRenderEngine.denoiseSigmaR） */
+constexpr float kDenoiseSigmaR = 0.08f;
 
 EGLDisplay g_display = EGL_NO_DISPLAY;
 EGLSurface g_surface = EGL_NO_SURFACE;
@@ -214,11 +228,92 @@ struct ProgramLocs {
     GLint uTexel = -1;
     GLint uStrength = -1;
     GLint uColor = -1;
+    // 2026-10-28 Glow/降噪批：双边降噪（uSigmaR + 峰值同场时的 uDenoiseTexel）与 Glow 段
+    GLint uSigmaR = -1;
+    GLint uDenoiseTexel = -1;
+    GLint uGlowSrc = -1;
+    GLint uGlowGain = -1;
+    GLint uGlowAdd = -1;
+    GLint uGlowFreq = -1;
+    GLint uGlowBlend = -1;
+    GLint uGlowColorA = -1;
+    GLint uGlowColorB = -1;
 };
 ProgramLocs g_passLocs;   // 直通（链接失败即无画面，永不删除）
-ProgramLocs g_slotLocs;   // 效果槽（曲线/斑马/峰值之一）
+ProgramLocs g_slotLocs;   // 上屏效果槽（曲线/斑马/峰值之一）
 int g_slotEffect = kEffectNone;
 bool g_slotCurve = false;
+/**
+ * 上屏槽的降噪档（槽键 (effect, curve, denoise) 的第三维，2026-10-28 批）：
+ * 记**实际编出来**的档（回退链降档后可能与请求不同）；编码槽同理独立一份。
+ */
+int g_slotDenoise = WOTA_DENOISE_OFF;
+// 编码槽（上游 46d8d91 双 program 槽的 OHOS 对应物）：**成片支路恒 NONE**——监看叠加
+// （斑马/峰值）绝不进成片（产品裁决「监看叠加只上屏」）；曲线是创作观感、降噪是成片处理，两槽都带。
+// 槽位不进键：编码槽只有 curve/denoise 两个自由度，跟随上屏请求。
+ProgramLocs g_encSlotLocs;
+bool g_encSlotCurve = false;
+int g_encSlotDenoise = WOTA_DENOISE_OFF;
+
+// ---- 2026-10-28 Glow/降噪批：参数与共享资源（scene layer，两槽共享同一张 glowTex）----
+/**
+ * Glow 参数（上游 core/Glow.kt GlowParams 的 napi 侧形态；颜色用 ARGB 数值，与上游同义）。
+ * napi setter 只写这份请求态，渲染线程下一帧消费（本侧 setter 与 OnFrame 同为 UI 线程契约）。
+ */
+struct GlowParams {
+    bool enabled = false;
+    float threshold = 0.5f;
+    float soft = 0.05f;
+    float width = 0.02f;
+    float gain = 1.0f;
+    float add = 0.0f;
+    float freq = 0.0f;
+    float blend = 0.6f;
+    uint32_t colorA = 0xFFFF3399u;
+    uint32_t colorB = 0xFF33E6FFu;
+};
+GlowParams g_glowParams;
+/** 画面降噪档请求（0=关 1=完整 2=轻量；上游 DENOISE_LEVEL_* 同值） */
+int g_denoiseLevel = WOTA_DENOISE_OFF;
+
+/** 1×1 全黑纹理：链未就绪（首帧/刚开启/已停用）时 uGlowSrc 绑它，光晕贡献为 0 */
+GLuint g_glowBlackTex = 0;
+/** 本帧可采样的 Glow 结果（0 = 未就绪，主 pass 退回黑纹理）；TickGlow 每帧写一次 */
+GLuint g_glowFrameTex = 0;
+
+// Glow 离屏链资源（三趟：亮部提取+降采样 → 横向高斯 → 纵向高斯）
+GLuint g_glowDownTex = 0;
+GLuint g_glowScratchTex = 0;
+GLuint g_glowResultTex = 0;
+GLuint g_glowDownFbo = 0;
+GLuint g_glowScratchFbo = 0;
+GLuint g_glowResultFbo = 0;
+int g_glowW = 0;
+int g_glowH = 0;
+bool g_glowBroken = false;
+int g_glowErrorStreak = 0;
+int g_glowMaxEdge = 0;
+bool g_glowLastClamped = false;
+int g_glowScaleLogged = 0;
+
+// ---- 直方图采样（上游 f31d18c 的 OHOS 对应物：RGB 曲线框背景，调曲线参考用）----
+// 数据路：上屏帧绘制后 250ms 一拍把当前帧经**当前 program**（上屏槽 ⇒ 曲线输出后的画面，
+// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 3×64 计数
+// （BinHistogramRgba 与 core/HistogramMath.ets binRgba 同式镜像）。只在弹窗可见时采
+// （WotaGlSetHistogramEnabled）；16KB/4Hz 的读回停顿远低于既有霜板/补弧 pass，只发生在目标场景。
+constexpr int kHistSize = 64;
+constexpr int kHistBins = 64;
+constexpr int kHistChannels = 3;
+constexpr int kHistValues = kHistBins * kHistChannels;
+constexpr int64_t kHistogramPeriodMs = 250;
+bool g_histRequested = false;
+GLuint g_histFbo = 0;
+GLuint g_histTex = 0;
+int64_t g_histLastSampleMs = 0;
+// 快照（3×64 计数，R/G/B 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
+// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）
+std::mutex g_histMutex;
+std::vector<int32_t> g_histSnapshot;
 
 // 请求态（napi setter 只写状态；实际建槽/上传在渲染线程内完成）
 int g_effectRequested = kEffectNone;
@@ -333,10 +428,16 @@ int StRotationFromMatrix(const float matrix[16])
  * deg = normalize(sensor − display + stRot)；mirror 作用在屏幕空间（先 x=-x）；
  * X=u-0.5、Y=0.5-v（Y 向下），内容顺时针转 θ 等价取样逆旋 -θ：X0=c·X+s·Y、Y0=-s·X+c·Y；
  * 写回属性 t=1-v 抵消顶点 Y 轴方向。
+ *
+ * 方向标定 v4（2026-10-28 用户第三轮实测）：在 v3（竖屏后摄 180/前摄 90）基础上
+ * **前后摄各再 +180°**（用户报两路同时颠倒）：`deg = display + (rear ? 0 : 270)`、
+ * `mirror = !front`。横屏（display=270）锚点：后摄 270、前摄 180。sensor 仍不参与（模拟器
+ * webcam HAL 缓冲随显示旋转）；真机须按 SENSOR 语义复测重新标定（登记待真机批）。
  */
 void RebuildTexCoords()
 {
-    const int deg = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + g_stRotDeg);
+    const int deg = WotaNormalizeDeg(g_displayDeg + g_stRotDeg +
+        (g_mirrored ? 0 : 270));
     const int key = (deg << 1) | (g_mirrored ? 1 : 0);
     if (key == g_geomKey) {
         return;
@@ -395,6 +496,16 @@ void FetchLocations(ProgramLocs& locs)
     locs.uTexel = glGetUniformLocation(locs.program, "uTexel");
     locs.uStrength = glGetUniformLocation(locs.program, "uStrength");
     locs.uColor = glGetUniformLocation(locs.program, "uColor");
+    // 2026-10-28 Glow/降噪批：降噪与 Glow 段的 uniform（不存在的返回 -1，写侧逐颗判）
+    locs.uSigmaR = glGetUniformLocation(locs.program, "uSigmaR");
+    locs.uDenoiseTexel = glGetUniformLocation(locs.program, "uDenoiseTexel");
+    locs.uGlowSrc = glGetUniformLocation(locs.program, "uGlowSrc");
+    locs.uGlowGain = glGetUniformLocation(locs.program, "uGlowGain");
+    locs.uGlowAdd = glGetUniformLocation(locs.program, "uGlowAdd");
+    locs.uGlowFreq = glGetUniformLocation(locs.program, "uGlowFreq");
+    locs.uGlowBlend = glGetUniformLocation(locs.program, "uGlowBlend");
+    locs.uGlowColorA = glGetUniformLocation(locs.program, "uGlowColorA");
+    locs.uGlowColorB = glGetUniformLocation(locs.program, "uGlowColorB");
 }
 
 /** 编译+链接一组 VS/FS 到指定槽；失败打印 info log 返回 false */
@@ -556,8 +667,178 @@ void PeakingRgbOf(int colorIndex, float rgb[3])
 }
 
 /**
- * 单效果槽程序切换（上游退避链）：目标效果+曲线变体失败 → 退无曲线变体；再失败且非 NONE →
- * 黑名单该效果并回直通（下一帧 target 归 NONE）；曲线单独模式失败 → 回直通。
+ * Glow/降噪判档用的输入尺寸（2026-10-28 Glow/降噪批）：
+ * 编码面在挂时取编码尺寸（= 成片档，上游「按相机帧/录制档判，不按上屏档」口径），
+ * 否则取上屏表面尺寸。相机帧原生尺寸本侧无独立观测面（NativeImage 只给缓冲矩阵），登记偏离。
+ */
+void GlowInputSize(int& w, int& h)
+{
+    if (g_encW > 0 && g_encH > 0) {
+        w = g_encW;
+        h = g_encH;
+    } else {
+        w = static_cast<int>(g_width);
+        h = static_cast<int>(g_height);
+    }
+}
+
+/** ARGB → 0..1 三元组（上游 core/Glow.kt glowRgb；只取 RGB，alpha 不参与光晕） */
+void GlowRgbOf(uint32_t argb, float rgb[3])
+{
+    const uint32_t v = argb & 0xFFFFFFFFu;
+    rgb[0] = static_cast<float>((v >> 16) & 0xFFu) / 255.0f;
+    rgb[1] = static_cast<float>((v >> 8) & 0xFFu) / 255.0f;
+    rgb[2] = static_cast<float>(v & 0xFFu) / 255.0f;
+}
+
+/**
+ * 双边降噪 uniform（2026-10-28 批）：纹素步长取相机帧/编码面尺寸（错则降噪半径错），
+ * σ 取上游同值。peaking 同场时降噪走 uDenoiseTexel（uTexel 是峰值的邻域步长），
+ * 其余变体（直通/曲线/斑马）与上游一致共用 uTexel。
+ */
+void BindDenoiseUniforms(const ProgramLocs& locs, int denoise)
+{
+    if (denoise == WOTA_DENOISE_OFF) {
+        return;
+    }
+    int inW = 0;
+    int inH = 0;
+    GlowInputSize(inW, inH);
+    if (inW > 0 && inH > 0) {
+        const float tx = 1.0f / static_cast<float>(inW);
+        const float ty = 1.0f / static_cast<float>(inH);
+        if (locs.uDenoiseTexel >= 0) {
+            glUniform2f(locs.uDenoiseTexel, tx, ty);
+        } else if (locs.uTexel >= 0) {
+            glUniform2f(locs.uTexel, tx, ty);
+        }
+    }
+    if (locs.uSigmaR >= 0) {
+        glUniform1f(locs.uSigmaR, kDenoiseSigmaR);
+    }
+}
+
+/**
+ * Glow 段 uniform（2026-10-28 批；上游 drawPass 的 uGlow* 绑定逐项）：
+ * 链未就绪/关着时绑 1×1 黑纹理并把 gain/add/blend 清零 ⇒ 贡献为 0，**不为它切 program**
+ * （切 program 会闪帧、会在编码 swap 前编译）。两槽共享同一张 glowTex，本函数对两槽同口径。
+ */
+void BindGlowUniforms(const ProgramLocs& locs)
+{
+    const GLuint tex = (g_glowParams.enabled && g_glowFrameTex != 0) ? g_glowFrameTex : g_glowBlackTex;
+    glActiveTexture(GL_TEXTURE0 + kGlowSrcUnit);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    if (locs.uGlowSrc >= 0) {
+        glUniform1i(locs.uGlowSrc, kGlowSrcUnit);
+    }
+    if (g_glowParams.enabled) {
+        if (locs.uGlowGain >= 0) {
+            glUniform1f(locs.uGlowGain, g_glowParams.gain);
+        }
+        if (locs.uGlowAdd >= 0) {
+            glUniform1f(locs.uGlowAdd, g_glowParams.add);
+        }
+        if (locs.uGlowFreq >= 0) {
+            glUniform1f(locs.uGlowFreq, g_glowParams.freq);
+        }
+        if (locs.uGlowBlend >= 0) {
+            glUniform1f(locs.uGlowBlend, g_glowParams.blend);
+        }
+        float rgbA[3];
+        float rgbB[3];
+        GlowRgbOf(g_glowParams.colorA, rgbA);
+        GlowRgbOf(g_glowParams.colorB, rgbB);
+        if (locs.uGlowColorA >= 0) {
+            glUniform3f(locs.uGlowColorA, rgbA[0], rgbA[1], rgbA[2]);
+        }
+        if (locs.uGlowColorB >= 0) {
+            glUniform3f(locs.uGlowColorB, rgbB[0], rgbB[1], rgbB[2]);
+        }
+    } else {
+        // 关着：零贡献（program 里仍有 Glow 段，靠 uniform 归零；与上游「关着时零成本」对齐到观感层）
+        if (locs.uGlowGain >= 0) {
+            glUniform1f(locs.uGlowGain, 0.0f);
+        }
+        if (locs.uGlowAdd >= 0) {
+            glUniform1f(locs.uGlowAdd, 0.0f);
+        }
+        if (locs.uGlowFreq >= 0) {
+            glUniform1f(locs.uGlowFreq, 0.0f);
+        }
+        if (locs.uGlowBlend >= 0) {
+            glUniform1f(locs.uGlowBlend, 0.0f);
+        }
+    }
+    // 其余 texture 绑定都在 GL_TEXTURE0：恢复活动单元，避免后续绑定落到 5 号
+    glActiveTexture(GL_TEXTURE0);
+}
+
+/**
+ * 画完把 5 号单元上的 Glow 图摘下来（上游 drawPass 尾部的同一条保险）：
+ * 下一帧链要往同一张纹理里画，某些驱动只查「这张还挂在激活单元上」就当 feedback loop 报警。
+ */
+void UnbindGlowUnit()
+{
+    glActiveTexture(GL_TEXTURE0 + kGlowSrcUnit);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+/**
+ * 编码槽同步（上游 46d8d91「成片支路恒 NONE」的 OHOS 对应物）：编码支路 program 的
+ * 自由度是 (curve, denoise)——effect 恒 NONE（斑马/峰值是监看叠加，绝不进成片）。
+ * wantCurve 与上屏同源（同一份曲线纹理门控结果）；降噪档读全局 g_denoiseLevel（槽键第三维）。
+ * 构建失败退 g_passLocs 直通（成片丢曲线/降噪优于成片带着监看叠加，且不阻塞录制）。
+ * 在 SyncEffect 里一并驱动，保证两槽同源同帧。
+ */
+void SyncEncodeSlot(bool wantCurve)
+{
+    const int wantDenoise = g_denoiseLevel;
+    if (g_encSlotLocs.program != 0 && wantCurve == g_encSlotCurve &&
+        wantDenoise == g_encSlotDenoise) {
+        return;
+    }
+    DeleteProgramLocs(g_encSlotLocs);
+    g_encSlotCurve = false;
+    g_encSlotDenoise = WOTA_DENOISE_OFF;
+    if (!wantCurve && wantDenoise == WOTA_DENOISE_OFF) {
+        return; // 直通（g_passLocs 常驻）
+    }
+    bool curve = wantCurve;
+    int denoise = wantDenoise;
+    bool built = false;
+    if (denoise == WOTA_DENOISE_OFF) {
+        // 无降噪：保持曲线单变体（WOTA_CURVE_FS）——成片最常见档，源码与上游逐字同一份
+        built = BuildProgramLocs(WOTA_TEXTURE_VS, WOTA_CURVE_FS, g_encSlotLocs);
+    } else {
+        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(curve, denoise), g_encSlotLocs);
+        if (!built) {
+            // 降噪变体整体编不出来（个别驱动的循环/数组限制）：退无降噪档，曲线保留
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "encode slot denoise failed, retry without denoise");
+            denoise = WOTA_DENOISE_OFF;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(curve, denoise), g_encSlotLocs);
+        }
+        if (!built && curve) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "encode slot bilateral+curve failed, retry without curve");
+            curve = false;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(false, denoise), g_encSlotLocs);
+        }
+    }
+    if (built) {
+        g_encSlotCurve = curve;
+        g_encSlotDenoise = denoise;
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encode slot program failed, fallback pass-through (recording keeps going)");
+    }
+}
+
+/**
+ * 单效果槽程序切换（上游退避链）：目标效果+曲线+降噪变体失败 → 退无曲线变体；
+ * 再失败退无降噪变体；再失败且非 NONE → 黑名单该效果并回直通（下一帧 target 归 NONE）；
+ * 曲线单独模式失败 → 回直通。槽键 = (effect, curve, denoise)（2026-10-28 Glow/降噪批）。
  */
 void SyncEffect()
 {
@@ -571,6 +852,9 @@ void SyncEffect()
         EnsureCurveTexture();
     }
     const bool wantCurve = g_curveEnabled && !g_curveFailed && g_curveUploaded && g_curveTexId != 0;
+    const int wantDenoise = g_denoiseLevel;
+    // 编码槽先同步（wantCurve/降噪同源）：上屏槽早退路径也不能跳过它
+    SyncEncodeSlot(wantCurve);
     // 纹理生命周期照上游 syncEffect：目标不再用 zebra 时删条纹瓦片；曲线关闭时删曲线纹理
     // （数据仍在 g_curveData，重开时置 dirty 重新上传，不重复占显存）。
     if (target != kEffectZebra && g_stripeTexId != 0) {
@@ -586,7 +870,8 @@ void SyncEffect()
         g_curveDirty = true; // 数据仍在，重开曲线时重新上传
         OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "curve LUT released");
     }
-    if (g_slotLocs.program != 0 && target == g_slotEffect && wantCurve == g_slotCurve) {
+    if (g_slotLocs.program != 0 && target == g_slotEffect && wantCurve == g_slotCurve &&
+        wantDenoise == g_slotDenoise) {
         if (target == kEffectZebra) {
             EnsureStripeTexture(g_zebraDensity);
         }
@@ -595,36 +880,58 @@ void SyncEffect()
     DeleteProgramLocs(g_slotLocs);
     g_slotEffect = kEffectNone;
     g_slotCurve = false;
-    if (target == kEffectNone && !wantCurve) {
+    g_slotDenoise = WOTA_DENOISE_OFF;
+    if (target == kEffectNone && !wantCurve && wantDenoise == WOTA_DENOISE_OFF) {
         return; // 直通（g_passLocs 常驻）
     }
 
     bool curve = wantCurve;
+    int denoise = wantDenoise;
     bool built = false;
     if (target == kEffectNone) {
-        built = BuildProgramLocs(WOTA_TEXTURE_VS, WOTA_CURVE_FS, g_slotLocs);
-        if (!built) {
+        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(curve, denoise), g_slotLocs);
+        if (!built && denoise != WOTA_DENOISE_OFF) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "scene denoise variant failed, retry without denoise");
+            denoise = WOTA_DENOISE_OFF;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(curve, denoise), g_slotLocs);
+        }
+        if (!built && curve) {
             // CURVE_FS 直链失败：本 surface 内不再重试曲线（避免每帧重编）
             g_curveFailed = true;
-            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "curve program failed, disabled until surface recreate");
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "scene curve variant failed, retry without curve");
+            curve = false;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaSceneFragment(false, denoise), g_slotLocs);
         }
     } else if (target == kEffectZebra) {
-        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(curve), g_slotLocs);
+        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(curve, denoise), g_slotLocs);
+        if (!built && denoise != WOTA_DENOISE_OFF) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "zebra+denoise failed, retry without denoise");
+            denoise = WOTA_DENOISE_OFF;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(curve, denoise), g_slotLocs);
+        }
         if (!built && curve) {
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
                 "zebra+curve failed, retry without curve");
             curve = false;
-            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(false), g_slotLocs);
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaZebraFragment(false, denoise), g_slotLocs);
             g_curveFailed = true; // 曲线变体失败：本 surface 内曲线不再尝试
         }
     } else {
-        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(curve), g_slotLocs);
+        built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(curve, denoise), g_slotLocs);
+        if (!built && denoise != WOTA_DENOISE_OFF) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "peaking+denoise failed, retry without denoise");
+            denoise = WOTA_DENOISE_OFF;
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(curve, denoise), g_slotLocs);
+        }
         if (!built && curve) {
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
                 "peaking+curve failed, retry without curve");
             curve = false;
-            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(false), g_slotLocs);
+            built = BuildProgramLocs(WOTA_TEXTURE_VS, WotaPeakingFragment(false, denoise), g_slotLocs);
             g_curveFailed = true; // 曲线变体失败：本 surface 内曲线不再尝试
         }
     }
@@ -641,6 +948,7 @@ void SyncEffect()
     }
     g_slotEffect = target;
     g_slotCurve = curve;
+    g_slotDenoise = denoise;
     if (target == kEffectZebra) {
         EnsureStripeTexture(g_zebraDensity);
     }
@@ -648,15 +956,19 @@ void SyncEffect()
         EnsureCurveTexture();
     }
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "program slot effect=%{public}d curve=%{public}d", g_slotEffect, g_slotCurve ? 1 : 0);
+        "program slot effect=%{public}d curve=%{public}d denoise=%{public}d",
+        g_slotEffect, g_slotCurve ? 1 : 0, g_slotDenoise);
 }
 
 /**
  * 上屏与编码 pass 共用的绘制（同一套 uniform/纹理绑定）：
  * @param uvVbo  朝向来源（上屏 = 显示 UV；编码 = 编码 UV）
  * @param vaoOk  是否允许走上屏的 VAO 快路（编码面用独立 UV VBO，必须手动绑指针）
+ * @param encodeSlot  true = locs 是编码槽/直通（effect 恒 NONE，只绑曲线）——
+ *                    监看叠加（斑马/峰值）的 uniform 分支只属于上屏槽
  */
-void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false)
+void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false,
+    bool encodeSlot = false)
 {
     glUseProgram(locs.program);
     if (locs.uTexMatrix >= 0) {
@@ -671,7 +983,16 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
-    if (locs.program == g_slotLocs.program) {
+    if (encodeSlot) {
+        // 编码支路：恒无斑马/峰值；曲线是创作观感，两槽都带（上游 46d8d91 口径）
+        if (g_encSlotCurve) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, g_curveTexId);
+            if (locs.uCurve >= 0) {
+                glUniform1i(locs.uCurve, 2);
+            }
+        }
+    } else if (locs.program == g_slotLocs.program) {
         if (g_slotEffect == kEffectZebra) {
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, g_stripeTexId);
@@ -706,6 +1027,11 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
             }
         }
     }
+    // 2026-10-28 Glow/降噪批：降噪 uniform 按实际编出来的档（槽键第三维）；
+    // Glow 段两槽同口径（同一张 glowTex，链未就绪/关着绑 1×1 黑 ⇒ 零贡献）
+    BindDenoiseUniforms(locs,
+        encodeSlot ? g_encSlotDenoise : (locs.program == g_slotLocs.program ? g_slotDenoise : WOTA_DENOISE_OFF));
+    BindGlowUniforms(locs);
     if (vaoOk && g_useVao) {
         // ES3 每帧重绑 VAO（防后续 GL 状态改动把绘制落到未绑定/旧 VAO）
         glBindVertexArray(g_vao);
@@ -728,6 +1054,93 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
         }
     }
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // 画完立刻把 5 号单元上的 Glow 图摘下来（下一帧链要往同一张里画，上游 drawPass 同款保险）
+    if (locs.uGlowSrc >= 0) {
+        UnbindGlowUnit();
+    }
+}
+
+// ---------------------------------------------------------------- 直方图采样（曲线框背景，f31d18c）
+
+/**
+ * RGBA(8888) 像素 → 3×64 档计数（R/G/B 依次）。与 core/HistogramMath.ets binRgba
+ * **同式镜像**（bin = v >> 2；像素住在 GL 线程，16KB 读回后近地分箱再传 192 个 int）——
+ * 契约在两处出现，接线守卫钉住两边的公式文本。
+ */
+void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<int32_t>& out)
+{
+    out.assign(kHistValues, 0);
+    const int px = width * height;
+    for (int i = 0; i < px; i++) {
+        const int o = i * 4;
+        out[rgba[o] >> 2]++;
+        out[kHistBins + (rgba[o + 1] >> 2)]++;
+        out[2 * kHistBins + (rgba[o + 2] >> 2)]++;
+    }
+}
+
+/** 直方图迷你 RT（懒建）：64×64 RGBA + NEAREST + CLAMP，完整性出口对齐 frost RT 口径 */
+bool EnsureHistogramRt()
+{
+    if (g_histFbo != 0) {
+        return true;
+    }
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kHistSize, kHistSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!complete) {
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteTextures(1, &tex);
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "histogram RT incomplete");
+        return false;
+    }
+    g_histTex = tex;
+    g_histFbo = fbo;
+    return true;
+}
+
+/**
+ * 上屏绘制尾部的直方图采样（GL 线程）：250ms 一拍把当前帧经**当前 program** 画进迷你 FBO
+ * 并读回分箱。「曲线输出后」口径（弹窗用途是边调边看分布，见 HistogramMath 头注）。
+ * 调用点：上屏 swap 之后、编码支路之前（display 上下文在场）；采样后恢复 viewport。
+ */
+void MaybeSampleHistogram(const ProgramLocs& locs)
+{
+    if (!g_histRequested || locs.program == 0) {
+        return;
+    }
+    const int64_t now = NowSteadyNs() / 1000000;
+    if (now - g_histLastSampleMs < kHistogramPeriodMs) {
+        return;
+    }
+    g_histLastSampleMs = now;
+    if (!EnsureHistogramRt()) {
+        return;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, g_histFbo);
+    glViewport(0, 0, kHistSize, kHistSize);
+    DrawScene(locs, g_uvVbo, g_useVao, false, false);
+    uint8_t pixels[kHistSize * kHistSize * 4];
+    glReadPixels(0, 0, kHistSize, kHistSize, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+    std::vector<int32_t> bins;
+    BinHistogramRgba(pixels, kHistSize, kHistSize, bins);
+    {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.swap(bins);
+    }
 }
 
 /**
@@ -765,7 +1178,8 @@ void RebuildEncoderTexCoords()
 
 /**
  * 编码 pass：在编码器输入面上绘一帧。**绝不进入 frost 分支**（上游红线：霜面是上屏专属）；
- * 效果链与上屏共用同一槽位 program（直通/曲线/斑马/峰值）。
+ * 效果链走**编码槽**（effect 恒 NONE + 曲线）——监看叠加（斑马/峰值）只上屏、绝不进成片
+ * （上游 46d8d91 双 program 槽裁决的 OHOS 对应物）。
  */
 bool DrawEncoderPass()
 {
@@ -787,10 +1201,10 @@ bool DrawEncoderPass()
     glViewport(0, 0, g_encW, g_encH);
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    const ProgramLocs& locs = g_encSlotLocs.program != 0 ? g_encSlotLocs : g_passLocs;
     bool drawn = false;
     if (locs.program != 0) {
-        DrawScene(locs, g_encUvVbo, false);
+        DrawScene(locs, g_encUvVbo, false, false, true);
         drawn = true;
     }
     const EGLBoolean swapped = drawn ? eglSwapBuffers(g_display, g_encSurface) : EGL_FALSE;
@@ -902,18 +1316,18 @@ bool DrawEncoderMended(bool keep)
     }
     SyncEffect();
     RebuildEncoderTexCoords();
-    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    const ProgramLocs& locs = g_encSlotLocs.program != 0 ? g_encSlotLocs : g_passLocs;
     if (locs.program == 0) {
         RestoreDisplayContext();
         DegradeArc("mend-program");
         return false;
     }
-    // 1) 特效链 → 离屏 cur（编码口径；只 draw 不 swap）
+    // 1) 特效链 → 离屏 cur（编码槽口径：effect 恒 NONE + 曲线；监看叠加不进成片。只 draw 不 swap）
     glBindFramebuffer(GL_FRAMEBUFFER, g_arcMend->CurFbo());
     glViewport(0, 0, g_encW, g_encH);
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    DrawScene(locs, g_encUvVbo, false);
+    DrawScene(locs, g_encUvVbo, false, false, true);
     // 立刻还 FB=0：ArcMendPass 的 copy/merge 自绑自还，DrawPending 契约是画进当前绑定面
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // 2) 状态机指令（保留决策已由调用方 ArcKeepRule 给出）
@@ -1032,6 +1446,9 @@ struct FrostProgram {
     GLint uSrc = -1;
     GLint uOffset = -1;
     GLint uWeight = -1;
+    // 2026-10-28 Glow 链复用同一套离屏 program 结构：拷贝趟的亮部阈值两参
+    GLint uGlowThreshold = -1;
+    GLint uGlowSoft = -1;
 };
 
 FrostProgram g_frostCopy;
@@ -1136,8 +1553,9 @@ void DrawFullscreenQuad(GLint aPosition, GLint aTexCoord, GLuint posVbo, GLuint 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-/** 编一枚离屏 program；失败打印 info log 返回 false */
-bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram& out, bool needWeight)
+/** 编一枚离屏 program；失败打印 info log 返回 false（label 只进日志：frost / glow 各自可辨） */
+bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram& out, bool needWeight,
+    const char* label = "frost")
 {
     GLuint vs = CompileShader(GL_VERTEX_SHADER, vsSrc);
     GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fsSrc.c_str());
@@ -1162,7 +1580,7 @@ bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram
         char info[512] = {0};
         glGetProgramInfoLog(program, sizeof(info), nullptr, info);
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-            "frost program link failed log=%{public}s", info);
+            "%{public}s program link failed log=%{public}s", label, info);
         glDeleteProgram(program);
         return false;
     }
@@ -1175,6 +1593,8 @@ bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram
     out.uSrc = glGetUniformLocation(program, "uSrc");
     out.uOffset = glGetUniformLocation(program, "uOffset");
     out.uWeight = needWeight ? glGetUniformLocation(program, "uWeight[0]") : -1;
+    out.uGlowThreshold = glGetUniformLocation(program, "uGlowThreshold");
+    out.uGlowSoft = glGetUniformLocation(program, "uGlowSoft");
     return true;
 }
 
@@ -1454,6 +1874,453 @@ void DeleteFrostResources()
     g_frostErrorStreak = 0;
 }
 
+// ---------------------------------------------------------------- Glow 离屏链（2026-10-28 Glow/降噪批）
+
+/** 两枚离屏 program：① 亮部阈值拷贝（OES）② 可分离高斯（横向/纵向共用，与霜链同一份源） */
+FrostProgram g_glowCopy;
+FrostProgram g_glowBlur;
+
+/** 上游 core/Glow.kt glowScaleFor：像素 × 帧率越大档越粗（1/2/4）；信息不全按 1（最高质量档） */
+int GlowScaleFor(int widthPx, int heightPx, int fps)
+{
+    if (widthPx <= 0 || heightPx <= 0 || fps <= 0) {
+        return 1;
+    }
+    const int64_t rate = static_cast<int64_t>(widthPx) * heightPx * fps;
+    if (rate <= kGlowFullMaxPixelRate) {
+        return 1;
+    }
+    if (rate <= kGlowHalfMaxPixelRate) {
+        return 2;
+    }
+    return 4;
+}
+
+/** 单边按档缩：四舍五入、最小 1（与 glowRtSizeInto/glowRawLongestEdge 同源） */
+int GlowScaledEdge(int px, int scale)
+{
+    if (px <= 0 || scale <= 0) {
+        return 1;
+    }
+    const int v = static_cast<int>(std::lround(static_cast<double>(px) / scale));
+    return v < 1 ? 1 : v;
+}
+
+/**
+ * 上游 glowRtSizeInto：÷scale 四舍五入、最小 1；最长边超 GL_MAX_TEXTURE_SIZE 时**按最长边等比**夹取
+ * （不许逐维独立夹：那会把 4096×2160 变成椭圆光晕）。非法输入返回 false = 不建链。
+ */
+bool GlowRtSizeInto(int out[2], int widthPx, int heightPx, int scale, int maxTexture)
+{
+    if (widthPx <= 0 || heightPx <= 0 || scale <= 0 || maxTexture <= 0) {
+        return false;
+    }
+    int w = GlowScaledEdge(widthPx, scale);
+    int h = GlowScaledEdge(heightPx, scale);
+    const int longest = w > h ? w : h;
+    if (longest > maxTexture) {
+        const double k = static_cast<double>(maxTexture) / static_cast<double>(longest);
+        w = static_cast<int>(std::lround(static_cast<double>(w) * k));
+        h = static_cast<int>(std::lround(static_cast<double>(h) * k));
+        if (w < 1) {
+            w = 1;
+        }
+        if (h < 1) {
+            h = 1;
+        }
+    }
+    out[0] = w;
+    out[1] = h;
+    return true;
+}
+
+/**
+ * **夹取前**的最长边（"到底有没有被夹"的唯一判据）：夹取后最长边恒等于上限，
+ * 拿它反推会把 4096×2160 @ 4096 这种"本来就正好"误报成夹取（上游 P2 审查项）。
+ */
+int GlowRawLongestEdge(int widthPx, int heightPx, int scale)
+{
+    if (widthPx <= 0 || heightPx <= 0 || scale <= 0) {
+        return 0;
+    }
+    const int a = GlowScaledEdge(widthPx, scale);
+    const int b = GlowScaledEdge(heightPx, scale);
+    return a > b ? a : b;
+}
+
+/** GL_MAX_TEXTURE_SIZE 只查一次；异常值兜 2048（低端机常见上限） */
+int GlowMaxTextureEdge()
+{
+    if (g_glowMaxEdge > 0) {
+        return g_glowMaxEdge;
+    }
+    GLint maxTex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTex);
+    g_glowMaxEdge = maxTex > 0 ? static_cast<int>(maxTex) : 2048;
+    return g_glowMaxEdge;
+}
+
+/**
+ * 上游 fillGlowBlurOffset：width 以 **RT 短边** 为单位，offset = width * (min(1,h/w), min(1,w/h))，
+ * 横/纵趟各取一个分量 ⇒ "横向 N 像素、纵向 N 像素"恒成立（圆光晕），换档/换朝向不改观感比例。
+ */
+bool FillGlowBlurOffset(float out[2], int rtWidthPx, int rtHeightPx, float widthParam, bool horizontal)
+{
+    if (rtWidthPx <= 0 || rtHeightPx <= 0) {
+        return false;
+    }
+    if (!std::isfinite(widthParam) || widthParam < 0.0f) {
+        return false;
+    }
+    const float sx = std::min(1.0f, static_cast<float>(rtHeightPx) / static_cast<float>(rtWidthPx));
+    const float sy = std::min(1.0f, static_cast<float>(rtWidthPx) / static_cast<float>(rtHeightPx));
+    if (horizontal) {
+        out[0] = widthParam * sx;
+        out[1] = 0.0f;
+    } else {
+        out[0] = 0.0f;
+        out[1] = widthParam * sy;
+    }
+    return true;
+}
+
+void DeleteGlowTargets()
+{
+    if (g_glowDownFbo != 0) {
+        glDeleteFramebuffers(1, &g_glowDownFbo);
+        g_glowDownFbo = 0;
+    }
+    if (g_glowScratchFbo != 0) {
+        glDeleteFramebuffers(1, &g_glowScratchFbo);
+        g_glowScratchFbo = 0;
+    }
+    if (g_glowResultFbo != 0) {
+        glDeleteFramebuffers(1, &g_glowResultFbo);
+        g_glowResultFbo = 0;
+    }
+    if (g_glowDownTex != 0) {
+        glDeleteTextures(1, &g_glowDownTex);
+        g_glowDownTex = 0;
+    }
+    if (g_glowScratchTex != 0) {
+        glDeleteTextures(1, &g_glowScratchTex);
+        g_glowScratchTex = 0;
+    }
+    if (g_glowResultTex != 0) {
+        glDeleteTextures(1, &g_glowResultTex);
+        g_glowResultTex = 0;
+    }
+    g_glowW = 0;
+    g_glowH = 0;
+    g_glowLastClamped = false;
+    g_glowFrameTex = 0;
+}
+
+void DeleteGlowPrograms()
+{
+    DeleteFrostProgram(g_glowCopy);
+    DeleteFrostProgram(g_glowBlur);
+}
+
+void DeleteGlowResources()
+{
+    DeleteGlowTargets();
+    DeleteGlowPrograms();
+}
+
+/** 1×1 全黑 RGBA8：链未就绪时的 uGlowSrc 兜底（贡献为 0，不为它切 program） */
+bool EnsureGlowBlackTexture()
+{
+    if (g_glowBlackTex != 0) {
+        return true;
+    }
+    static const uint8_t kBlackPixel[4] = {0, 0, 0, 0};
+    glGenTextures(1, &g_glowBlackTex);
+    if (g_glowBlackTex == 0) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow black texture glGenTextures failed");
+        return false;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_glowBlackTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, kBlackPixel);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+}
+
+/**
+ * 编两枚 program：拷贝趟 = 亮部阈值（WOTA_GLOW_COPY_FS，**不是**霜那枚纯拷贝）；
+ * 模糊趟复用霜链的高斯源（先 highp，失败退 mediump 再编一次）。
+ * 编不出来 ⇒ 链停用（broken），主 pass 绑 1×1 黑，预览与成片其余部分零影响。
+ */
+bool BuildGlowPrograms()
+{
+    if (g_glowCopy.program != 0 && g_glowBlur.program != 0) {
+        return true;
+    }
+    // 幂等重建：上一轮可能留下 copy != 0 && blur == 0 的半初始化态，先删旧件再编
+    DeleteGlowPrograms();
+    if (!BuildFrostProgram(WOTA_TEXTURE_VS, WOTA_GLOW_COPY_FS, g_glowCopy, false, "glow-copy")) {
+        g_glowBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow copy program failed, chain disabled");
+        return false;
+    }
+    bool blurOk = BuildFrostProgram(WOTA_FROST_QUAD_VS,
+        WotaFrostGaussianFragment(kFrostWeightCount, true), g_glowBlur, true, "glow-blur");
+    if (!blurOk) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow gaussian highp failed, retry mediump");
+        blurOk = BuildFrostProgram(WOTA_FROST_QUAD_VS,
+            WotaFrostGaussianFragment(kFrostWeightCount, false), g_glowBlur, true, "glow-blur");
+    }
+    if (!blurOk) {
+        DeleteGlowPrograms();
+        g_glowBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow gaussian program failed, chain disabled");
+        return false;
+    }
+    if (g_glowBlur.uWeight >= 0) {
+        glUseProgram(g_glowBlur.program);
+        glUniform1fv(g_glowBlur.uWeight, kFrostWeightCount, kFrostWeights);
+    }
+    DrainGlErrors();
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "glow programs ready (gaussian taps=%{public}d)", kFrostWeightCount);
+    return true;
+}
+
+/**
+ * 建/重建三张纹理与三枚 FBO（RGBA8 + LINEAR + CLAMP；完整性只认 glCheckFramebufferStatus）。
+ * 内部临时绑 FBO，退出时还原 0（Glow 链排在编码 pass 之前，带脏 FBO 出去会把成片画错面）。
+ */
+bool EnsureGlowTargets(int w, int h)
+{
+    DeleteGlowTargets();
+    GLuint texIds[3] = {0, 0, 0};
+    glGenTextures(3, texIds);
+    if (texIds[0] == 0 || texIds[1] == 0 || texIds[2] == 0) {
+        for (int i = 0; i < 3; i++) {
+            if (texIds[i] != 0) {
+                glDeleteTextures(1, &texIds[i]);
+            }
+        }
+        g_glowBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow glGenTextures failed, chain disabled");
+        return false;
+    }
+    g_glowDownTex = texIds[0];
+    g_glowScratchTex = texIds[1];
+    g_glowResultTex = texIds[2];
+    const GLuint textures[3] = {g_glowDownTex, g_glowScratchTex, g_glowResultTex};
+    for (int i = 0; i < 3; i++) {
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // 只占位不填数据：内容全靠三趟画出来
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    GLuint fboIds[3] = {0, 0, 0};
+    glGenFramebuffers(3, fboIds);
+    g_glowDownFbo = fboIds[0];
+    g_glowScratchFbo = fboIds[1];
+    g_glowResultFbo = fboIds[2];
+    bool complete = g_glowDownFbo != 0 && g_glowScratchFbo != 0 && g_glowResultFbo != 0;
+    if (complete) {
+        complete = AttachFrostTexture(g_glowDownFbo, g_glowDownTex) &&
+            AttachFrostTexture(g_glowScratchFbo, g_glowScratchTex) &&
+            AttachFrostTexture(g_glowResultFbo, g_glowResultTex);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    const bool hadGlError = DrainGlErrors() > 0;
+    if (!complete || hadGlError) {
+        g_glowBroken = true;
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow FBO incomplete, chain disabled (complete=%{public}d glError=%{public}d)",
+            complete ? 1 : 0, hadGlError ? 1 : 0);
+        DeleteGlowTargets();
+        return false;
+    }
+    g_glowW = w;
+    g_glowH = h;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "glow RT %{public}dx%{public}d (three 2D textures, main pass samples one)", w, h);
+    return true;
+}
+
+/**
+ * Glow 离屏链：**每帧一次**（上屏 pass 之前）。三趟、三张纹理、三个 FBO（结果恒在 g_glowResultTex）：
+ * ① OES ──(亮部提取 + 降采样到 1/scale, 恒等 UV + uTexMatrix)──▶ bright @ downFbo
+ * ② bright ──(横向高斯)──▶ scratch @ scratchFbo
+ * ③ scratch ──(纵向高斯)──▶ glow @ resultFbo        ← 主 pass 采这张（单元 kGlowSrcUnit）
+ * ③ 写 result 时读的是 scratch，不构成 feedback loop。
+ *
+ * 三条纪律（照抄上游 GlowBlurChain）：
+ * - 尺寸没变不重建（scale/输入尺寸变了才 EnsureGlowTargets）；
+ * - 每帧只在 WotaGlRender 跑一次（不放进 DrawScene：那份绘制一帧被调多次）；
+ * - 失败语义退化成"没有光晕"：program 编不出来/FBO 不完整/连续 8 帧报错 ⇒ broken 置位并删干净，
+ *   主 pass 绑 1×1 黑；开关从 OFF 打到 ON 时给一次干净重试（resetAfterBreak 同义）。
+ */
+bool TickGlow()
+{
+    g_glowFrameTex = 0;
+    if (!g_glowParams.enabled || g_glowBroken) {
+        return false;
+    }
+    if (g_glowParams.blend <= 0.0f) {
+        // 上游 drawGlowPass：blend<=0 时链不跑（贡献恒 0，别白烧三趟）
+        return false;
+    }
+    if (!g_hasFrame || g_nativeImage == nullptr) {
+        return false;
+    }
+    if (!BuildGlowPrograms()) {
+        return false;
+    }
+    int inW = 0;
+    int inH = 0;
+    GlowInputSize(inW, inH);
+    const int scale = GlowScaleFor(inW, inH, kGlowFpsFallback);
+    const int maxEdge = GlowMaxTextureEdge();
+    int size[2] = {0, 0};
+    if (!GlowRtSizeInto(size, inW, inH, scale, maxEdge)) {
+        // 尺寸/档非法（还没出帧）：这帧没有光晕，但资源留着别拆
+        return false;
+    }
+    if (size[0] != g_glowW || size[1] != g_glowH) {
+        if (!EnsureGlowTargets(size[0], size[1])) {
+            return false;
+        }
+        // "到底有没有被夹"必须用**夹取前**的原始最长边判（上游 P2 审查项）
+        g_glowLastClamped = GlowRawLongestEdge(inW, inH, scale) > maxEdge;
+        if (g_glowLastClamped) {
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "glow RT longest edge clamped to %{public}dpx (GL_MAX_TEXTURE_SIZE, proportional)",
+                maxEdge);
+        }
+    }
+    if (g_glowDownFbo == 0 || g_glowScratchFbo == 0 || g_glowResultFbo == 0) {
+        return false;
+    }
+    if (scale != g_glowScaleLogged) {
+        g_glowScaleLogged = scale;
+        OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow chain scale=%{public}d rt=%{public}dx%{public}d (once per frame)",
+            scale, g_glowW, g_glowH);
+    }
+    const int w = g_glowW;
+    const int h = g_glowH;
+    GLint viewport[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    int errors = 0;
+    glViewport(0, 0, w, h);
+
+    // ① OES → bright：恒等 UV + uTexMatrix ⇒ RT(q) = B(M·q)，主 pass 的 vUvGlow=aTexCoord 才能逐像素对齐
+    glBindFramebuffer(GL_FRAMEBUFFER, g_glowDownFbo);
+    glUseProgram(g_glowCopy.program);
+    if (g_glowCopy.uTexMatrix >= 0) {
+        glUniformMatrix4fv(g_glowCopy.uTexMatrix, 1, GL_FALSE, g_texMatrix);
+    }
+    if (g_glowCopy.uFit >= 0) {
+        glUniform2f(g_glowCopy.uFit, 1.0f, 1.0f); // 离屏 RT：恒等（尺寸本身已按档缩小）
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    if (g_glowCopy.uFrame >= 0) {
+        glUniform1i(g_glowCopy.uFrame, 0);
+    }
+    // 亮部阈值/软边是每帧都可能变的形状参数（只换 uniform，不重建 program/RT）
+    if (g_glowCopy.uGlowThreshold >= 0) {
+        glUniform1f(g_glowCopy.uGlowThreshold, g_glowParams.threshold);
+    }
+    if (g_glowCopy.uGlowSoft >= 0) {
+        glUniform1f(g_glowCopy.uGlowSoft, g_glowParams.soft);
+    }
+    DrawFullscreenQuad(g_glowCopy.aPosition, g_glowCopy.aTexCoord, g_posVbo, g_idUvVbo);
+    errors += DrainGlErrors();
+
+    // ②③ 可分离高斯：横 → scratch，纵 → glow（同一枚 program，差别只在 uOffset 方向）
+    float offset[2] = {0.0f, 0.0f};
+    if (FillGlowBlurOffset(offset, w, h, g_glowParams.width, true)) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_glowScratchFbo);
+        glUseProgram(g_glowBlur.program);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_glowDownTex);
+        if (g_glowBlur.uSrc >= 0) {
+            glUniform1i(g_glowBlur.uSrc, 0);
+        }
+        if (g_glowBlur.uOffset >= 0) {
+            glUniform2f(g_glowBlur.uOffset, offset[0], offset[1]);
+        }
+        if (g_glowBlur.uWeight >= 0) {
+            glUniform1fv(g_glowBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        if (g_glowBlur.uFit >= 0) {
+            glUniform2f(g_glowBlur.uFit, 1.0f, 1.0f);
+        }
+        DrawFullscreenQuad(g_glowBlur.aPosition, g_glowBlur.aTexCoord, g_posVbo, g_idUvVbo);
+        errors += DrainGlErrors();
+    } else {
+        errors++;
+    }
+    if (FillGlowBlurOffset(offset, w, h, g_glowParams.width, false)) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_glowResultFbo);
+        glUseProgram(g_glowBlur.program);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_glowScratchTex);
+        if (g_glowBlur.uSrc >= 0) {
+            glUniform1i(g_glowBlur.uSrc, 0);
+        }
+        if (g_glowBlur.uOffset >= 0) {
+            glUniform2f(g_glowBlur.uOffset, offset[0], offset[1]);
+        }
+        if (g_glowBlur.uWeight >= 0) {
+            glUniform1fv(g_glowBlur.uWeight, kFrostWeightCount, kFrostWeights);
+        }
+        if (g_glowBlur.uFit >= 0) {
+            glUniform2f(g_glowBlur.uFit, 1.0f, 1.0f);
+        }
+        DrawFullscreenQuad(g_glowBlur.aPosition, g_glowBlur.aTexCoord, g_posVbo, g_idUvVbo);
+        errors += DrainGlErrors();
+    } else {
+        errors++;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    // 把源纹理从单元 0 摘下来：下一帧要往这几张里画（部分驱动按"仍挂在激活单元上"报 feedback）
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (errors > 0) {
+        // 报错帧的 RT 内容不可信（半张图/上帧残留）：撤掉结果，这帧退"无光晕"
+        g_glowErrorStreak++;
+        OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "glow chain errors=%{public}d streak=%{public}d", errors, g_glowErrorStreak);
+        if (g_glowErrorStreak >= kGlowMaxErrorStreak) {
+            g_glowBroken = true;
+            DeleteGlowResources();
+            OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "glow chain disabled after %{public}d error frames (resources released)",
+                kGlowMaxErrorStreak);
+        }
+        return false;
+    }
+    g_glowErrorStreak = 0;
+    g_glowFrameTex = g_glowResultTex;
+    return true;
+}
+
 /**
  * 新会话复位请求态（P3）：黑名单/效果请求/曲线开关/参数/几何/毛玻璃都不得跨页面残留，
  * 让重进的页面拥有一次干净重试（例如瞬态驱动失败导致的黑名单）。
@@ -1479,6 +2346,15 @@ void ResetSessionState()
     g_geomKey = -1;
     g_frostRequested = false;
     g_frostErrorStreak = 0;
+    // 2026-10-28 Glow/降噪批：参数与档位不跨页面残留（UI 重进页会重新下发）
+    g_glowParams = GlowParams();
+    g_denoiseLevel = WOTA_DENOISE_OFF;
+    g_glowBroken = false;
+    g_glowErrorStreak = 0;
+    g_glowFrameTex = 0;
+    g_glowScaleLogged = 0;
+    g_glowMaxEdge = 0;
+    g_glowLastClamped = false;
 }
 
 bool BuildPassPipeline()
@@ -1490,6 +2366,8 @@ bool BuildPassPipeline()
     if (g_passLocs.uFrame >= 0) {
         glUniform1i(g_passLocs.uFrame, 0);
     }
+    // Glow 兜底纹理（1×1 黑）随管线建、随 DestroyGlObjects 删：链未就绪时主 pass 直接绑它
+    EnsureGlowBlackTexture();
     // GLES3 下绘制要求绑定 VAO；ES2 上下文没有 VAO，逐帧绑 VBO + attrib 指针
     g_useVao = g_clientVersion >= 3;
     if (g_useVao) {
@@ -1646,7 +2524,37 @@ bool TryInitWithVersion(void* window, int clientVersion)
 void DestroyGlObjects()
 {
     DeleteFrostResources();
+    // Glow 链（2026-10-28 批）：三 RT + 两 program + 1×1 黑纹理，同样必须在 EGL 拆除之前删
+    DeleteGlowResources();
+    if (g_glowBlackTex != 0) {
+        glDeleteTextures(1, &g_glowBlackTex);
+        g_glowBlackTex = 0;
+    }
+    g_glowW = 0;
+    g_glowH = 0;
+    g_glowBroken = false;
+    g_glowErrorStreak = 0;
+    g_glowFrameTex = 0;
+    g_glowMaxEdge = 0;
+    g_glowLastClamped = false;
+    // 直方图迷你 RT 必须在 EGL 拆除**之前**删（需现存当前上下文；5742c0f 释放顺序口径）
+    if (g_histFbo != 0) {
+        glDeleteFramebuffers(1, &g_histFbo);
+        g_histFbo = 0;
+    }
+    if (g_histTex != 0) {
+        glDeleteTextures(1, &g_histTex);
+        g_histTex = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.clear();
+    }
+    g_histLastSampleMs = 0;
     DeleteProgramLocs(g_slotLocs);
+    DeleteProgramLocs(g_encSlotLocs);
+    g_encSlotCurve = false;
+    g_encSlotDenoise = WOTA_DENOISE_OFF;
     DeleteProgramLocs(g_passLocs);
     if (g_curveTexId != 0) {
         glDeleteTextures(1, &g_curveTexId);
@@ -1680,10 +2588,10 @@ void DestroyGlObjects()
     }
     g_slotEffect = kEffectNone;
     g_slotCurve = false;
+    g_slotDenoise = WOTA_DENOISE_OFF;
     g_geomKey = -1;
     g_encGeomKey = -1;
-}
-} // namespace
+}} // namespace
 
 bool WotaGlInit(void* window, uint64_t width, uint64_t height)
 {
@@ -1858,6 +2766,9 @@ void WotaGlRender(uint64_t timestamp)
     if (!g_hasFrame || g_nativeImage == nullptr) {
         return;
     }
+    // Glow 离屏链（2026-10-28 批，scene layer）：**每帧一次**，上屏 pass 之前跑；
+    // 本帧结果 g_glowFrameTex 由两个槽共享（编码 pass 稍后也用同一张）。关着/未就绪不改任何状态。
+    TickGlow();
     // Frost 全屏链（毛玻璃）：成功产出 RT 则直接走 2D 直通上屏，跳过效果程序绘制
     // （登记：全屏版毛玻璃与监视效果互斥一帧；上游是「模糊 RT + 画板」叠加，画板几何随 HUD 批）
     if (g_frostRequested && RunFrostChain()) {
@@ -1939,6 +2850,10 @@ void WotaGlRender(uint64_t timestamp)
             }
         }
     }
+    // 2026-10-28 Glow/降噪批：降噪档取上屏槽实际档；Glow 段与编码槽同口径（同一张 glowTex）
+    BindDenoiseUniforms(locs,
+        locs.program == g_slotLocs.program ? g_slotDenoise : WOTA_DENOISE_OFF);
+    BindGlowUniforms(locs);
     if (g_useVao) {
         // ES3 每帧重绑 VAO（防后续 GL 状态改动把绘制落到未绑定/旧 VAO）
         glBindVertexArray(g_vao);
@@ -1958,6 +2873,9 @@ void WotaGlRender(uint64_t timestamp)
         }
     }
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (locs.uGlowSrc >= 0) {
+        UnbindGlowUnit();
+    }
     EGLBoolean swapped = eglSwapBuffers(g_display, g_surface);
     if (swapped != EGL_TRUE) {
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
@@ -1965,11 +2883,19 @@ void WotaGlRender(uint64_t timestamp)
     }
     if (!g_firstFrameLogged) {
         g_firstFrameLogged = true;
+        // 方向链路首帧汇总（上游 81cb3a5 的 OHOS 对应物；本侧无 stMatrix 面——方向由
+        // sensor/display/mirror 直接下发，恒等族矩阵识别 N/A）：真机排查「前摄方向不对」
+        // 第一眼就看这行的四个量 + 编码容器角是否自洽
         OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-            "first frame %{public}ux%{public}u swap=%{public}d",
+            "first frame %{public}ux%{public}u swap=%{public}d orient sensor=%{public}d display=%{public}d "
+            "mirror=%{public}d fit=%{public}.4f/%{public}.4f enc=%{public}dx%{public}d encRot=%{public}d",
             static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
-            swapped == EGL_TRUE ? 1 : 0);
+            swapped == EGL_TRUE ? 1 : 0,
+            g_sensorDeg, g_displayDeg, g_mirrored ? 1 : 0,
+            g_fitX, g_fitY, g_encW, g_encH, WotaGlEncoderRotation());
     }
+    // 直方图采样（曲线弹窗开着才真采；250ms 一拍。当前 program = 曲线输出后的画面）
+    MaybeSampleHistogram(locs);
     // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧、同一效果链）
     MaybeDrawEncoderPass(newFrameConsumed, frameTs);
 }
@@ -2168,12 +3094,15 @@ std::string WotaGlGetNativeImageError()
 int WotaGlEncoderRotation()
 {
     // 与显示几何同一输入源：sensor 来自镜头信息，display 来自 display.rotation×90。
-    // muxer 只接受 0/90/180/270：按上游 normalizeQuarter 四舍五入（45→90、359→0），
-    // 非 90 倍数 sensorOrientation 不得让起录直接失败（审查 P2）。
-    const int raw = WotaNormalizeDeg(g_sensorDeg - g_displayDeg);
+    // 方向常数 v2（见 RebuildTexCoords 头注）：与上屏同式 `sensor − display + (front?0:180)`，
+    // 保证容器角与竖屏窗口的上屏转角同一叙事。muxer 只接受 0/90/180/270：按上游
+    // normalizeQuarter 四舍五入（45→90、359→0），非 90 倍数 sensorOrientation 不得让
+    // 起录直接失败（审查 P2）。
+    const int raw = WotaNormalizeDeg(g_displayDeg + (g_mirrored ? 0 : 270));
     const int rounded = WotaNormalizeQuarter(raw);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-        "encoder rotation raw=%{public}d rounded=%{public}d", raw, rounded);
+        "encoder rotation raw=%{public}d rounded=%{public}d mirror=%{public}d",
+        raw, rounded, g_mirrored ? 1 : 0);
     return rounded;
 }
 
@@ -2363,6 +3292,38 @@ void WotaGlSetPeakingParams(float strength, int colorIndex)
 }
 
 /**
+ * 直方图采样开关（曲线弹窗可见时开；写在 napi 线程、读在 GL 线程）。关 = 停采 + 清快照
+ * （省电 + 不留旧数据，上游 setHistogramEnabled 同口径）。
+ */
+void WotaGlSetHistogramEnabled(bool on)
+{
+    g_histRequested = on;
+    if (!on) {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.clear();
+    }
+}
+
+/**
+ * 取直方图快照（3×64 计数，R/G/B 依次；无样本返回 false）。出参 caller 提供容量 ≥192 的缓冲。
+ * 归一化在 ArkTS 侧走 core/HistogramMath.normalizedHeights（各通道内按各自最大值归一）。
+ */
+bool WotaGlGetHistogramSnapshot(int32_t* out, int capacity)
+{
+    if (out == nullptr || capacity < kHistValues) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_histMutex);
+    if (static_cast<int>(g_histSnapshot.size()) < kHistValues) {
+        return false;
+    }
+    for (int i = 0; i < kHistValues; i++) {
+        out[i] = g_histSnapshot[i];
+    }
+    return true;
+}
+
+/**
  * 毛玻璃开关（GL-3/开关=重试语义，登记）：
  * - false→true：复位 broken/buildFailed/errorStreak（用户动作给一次干净重试），并就绪时**当场预编**
  *   三枚 program（UI 线程上下文 current；失败登记，OnFrame 懒建仍兜底）；
@@ -2399,4 +3360,112 @@ bool WotaGlUploadCurveLut(const void* data, size_t length)
     g_curveFailed = false;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "curve LUT queued 256x1 RGB");
     return true;
+}
+
+// ---------------------------------------------------------------- Glow/降噪外部入口（2026-10-28 批）
+
+/** 参数域钳（上游 core/Glow.kt sanitize：NaN/Inf 回落该字段出厂值，其余钳进安全域） */
+static float GlowClampF(float value, float lo, float hi, float fallback)
+{
+    if (!std::isfinite(value)) {
+        return fallback;
+    }
+    if (value < lo) {
+        return lo;
+    }
+    if (value > hi) {
+        return hi;
+    }
+    return value;
+}
+
+/**
+ * 写入 Glow 参数（上游 GlowProvider.setGlowParams 的 OHOS 对应物）。
+ * **形状参数只换 uniform**（不重建 program）；打开动作（false→true）给一次干净重试：
+ * 复位 broken/errorStreak 并就绪时当场预编两枚 program（用户动作带上下文 current，失败登记，
+ * OnFrame 懒建仍兜底）。关掉只停跑、不删资源（再打开不重建、不闪）。
+ */
+void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
+    float add, float freq, float blend, uint32_t colorA, uint32_t colorB)
+{
+    const bool was = g_glowParams.enabled;
+    g_glowParams.enabled = enabled != 0;
+    g_glowParams.threshold = GlowClampF(threshold, 0.0f, 1.0f, 0.5f);
+    g_glowParams.soft = GlowClampF(soft, 0.0f, 0.5f, 0.05f);
+    g_glowParams.width = GlowClampF(width, 0.0f, 0.2f, 0.02f);
+    g_glowParams.gain = GlowClampF(gain, 0.0f, 4.0f, 1.0f);
+    g_glowParams.add = GlowClampF(add, 0.0f, 1.0f, 0.0f);
+    g_glowParams.freq = GlowClampF(freq, 0.0f, 64.0f, 0.0f);
+    g_glowParams.blend = GlowClampF(blend, 0.0f, 1.0f, 0.6f);
+    g_glowParams.colorA = colorA & 0xFFFFFFFFu;
+    g_glowParams.colorB = colorB & 0xFFFFFFFFu;
+    if (g_glowParams.enabled && !was) {
+        // 显式开启 = 给坏键/停用链一次重试（同一坏键不逐帧重试的口径不变）
+        g_glowBroken = false;
+        g_glowErrorStreak = 0;
+        if (g_ready) {
+            BuildGlowPrograms();
+        }
+    }
+    if (!g_glowParams.enabled) {
+        g_glowFrameTex = 0; // 停跑即撤结果（资源保留，再开不重建）
+    }
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "glow params enabled=%{public}d th=%{public}.3f soft=%{public}.3f width=%{public}.3f "
+        "gain=%{public}.3f add=%{public}.3f freq=%{public}.2f blend=%{public}.3f a=%{public}u b=%{public}u",
+        g_glowParams.enabled ? 1 : 0, g_glowParams.threshold, g_glowParams.soft, g_glowParams.width,
+        g_glowParams.gain, g_glowParams.add, g_glowParams.freq, g_glowParams.blend,
+        static_cast<unsigned>(g_glowParams.colorA), static_cast<unsigned>(g_glowParams.colorB));
+}
+
+/**
+ * Glow 状态串（上游 core/Glow.kt GlowStatus 的 OHOS 对应物，ArkTS 侧按字段解析）：
+ * `off` 或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`。
+ * fps 本侧无编码帧率观测面，按上游「未知按 30」口径恒报 30。
+ * 只读：UI 线程（napi）读，GL 线程写；本侧 setter/OnFrame 同为 UI 线程（登记契约），无并发。
+ */
+std::string WotaGlGetGlowStatus()
+{
+    if (!g_glowParams.enabled) {
+        return "off";
+    }
+    int inW = 0;
+    int inH = 0;
+    GlowInputSize(inW, inH);
+    const int scale = GlowScaleFor(inW, inH, kGlowFpsFallback);
+    std::string status = "on:";
+    status += g_glowBroken ? "1" : "0";
+    status += ":";
+    status += std::to_string(scale);
+    status += ":";
+    status += std::to_string(inW);
+    status += ":";
+    status += std::to_string(inH);
+    status += ":";
+    status += std::to_string(kGlowFpsFallback);
+    status += ":";
+    status += std::to_string(g_glowW);
+    status += ":";
+    status += std::to_string(g_glowH);
+    status += ":";
+    status += g_glowLastClamped ? "1" : "0";
+    return status;
+}
+
+/**
+ * 画面降噪档（0=关 / 1=完整核 / 2=轻量核；上游 setVideoDenoise + denoiseLevelNow 的 OHOS 对应物）。
+ * 只写请求态：档位是 program 槽键 (effect, curve, denoise) 的第三维，下一帧 SyncEffect 按新键
+ * 重建/回收变体（level=0 时槽键归 0，旧的降噪 program 由 DeleteProgramLocs 一并清掉）。
+ * 非法值钳进 0..2（0 当关处理，不留未知档）。
+ */
+void WotaGlSetDenoiseLevel(int level)
+{
+    const int safe = level < WOTA_DENOISE_OFF ? WOTA_DENOISE_OFF
+        : (level > WOTA_DENOISE_LITE ? WOTA_DENOISE_LITE : level);
+    if (safe == g_denoiseLevel) {
+        return;
+    }
+    g_denoiseLevel = safe;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "video denoise level=%{public}d (0=off 1=full 2=lite; applied on next frame)", safe);
 }

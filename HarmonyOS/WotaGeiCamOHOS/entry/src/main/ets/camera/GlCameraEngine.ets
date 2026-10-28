@@ -12,10 +12,10 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag, WotaTiers } from '../core/Constants';
+import { Size, WotaTag } from '../core/Constants';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
-import { LensSlot, LensType } from '../core/LensSlot';
+import { LensSlot, LensType, lensTypeName, maxVideoPixels, pickCapabilityDefault } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
@@ -54,6 +54,42 @@ function previewProfileFor(profiles: Array<camera.Profile>,
   return hit1080 ?? profiles[0];
 }
 
+/** AF 状态遥测的拍点间隔（上游 4457e4a 方案F）：1s 一拍，d 级（详细档才记） */
+const FOCUS_TELEMETRY_MS: number = 1000;
+
+/**
+ * 档位帧率 → 预览区间：遍历会话声明过的区间，取「min ≤ fps ≤ max 且 max 最小」者
+ * （max 最小 = HAL 可跑的上界最贴近用户档位，不把 60 档放成 [30,240]）。
+ * 无匹配返回 undefined —— 本机预览流做不到这一档，不硬发。
+ * KitPreview（开发者页）复用同一支，不另写一份选档规则。
+ */
+export function previewRangeFor(ranges: Array<camera.FrameRateRange>,
+  fps: number): camera.FrameRateRange | undefined {
+  let best: camera.FrameRateRange | undefined = undefined;
+  for (const r of ranges) {
+    if (r.min <= fps && fps <= r.max) {
+      if (best === undefined || r.max < best.max) {
+        best = r;
+      }
+    }
+  }
+  return best;
+}
+
+/** FocusState → 短名（SCAN=0 / FOCUSED=1 / UNFOCUSED=2，d.ts 契约值） */
+function FocusStateName(st: camera.FocusState): string {
+  if (st === camera.FocusState.FOCUS_STATE_SCAN) {
+    return 'SCAN';
+  }
+  if (st === camera.FocusState.FOCUS_STATE_FOCUSED) {
+    return 'FOCUSED';
+  }
+  if (st === camera.FocusState.FOCUS_STATE_UNFOCUSED) {
+    return 'UNFOCUSED';
+  }
+  return `${st}`;
+}
+
 export class GlCameraEngine {
   private session: camera.PhotoSession | undefined = undefined;
   private preview: camera.PreviewOutput | undefined = undefined;
@@ -70,6 +106,8 @@ export class GlCameraEngine {
   private zoomRange: Array<number> = [1, 1];
   private previewSizes: Array<Size> = [];
   private lastZoom: number = 1;
+  /** AF 遥测拍点节流（1s 一拍，见 start 内 focusStateChange 监听） */
+  private lastFocusTelemetryMs: number = 0;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
@@ -104,6 +142,59 @@ export class GlCameraEngine {
     return this.previewSizes;
   }
 
+  /**
+   * 当前会话预览支持的帧率（各区间上界去重升序；无会话/查询失败返回空表）。
+   * 只作旁路读数/开发者页显示，不参与任何下发裁决。
+   */
+  supportedPreviewFrameRates(): Array<number> {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return [];
+    }
+    try {
+      const out: Array<number> = [];
+      for (const r of preview.getSupportedFrameRates()) {
+        if (out.indexOf(r.max) < 0) {
+          out.push(r.max);
+        }
+      }
+      out.sort((a: number, b: number): number => a - b);
+      return out;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl preview supported fps query failed: ${e}`);
+      return [];
+    }
+  }
+
+  /** 活设置预览帧率（帧率弹层选中/起录前重下发）：无会话/无匹配区间/下发失败返回 false */
+  applyPreviewFps(fps: number): boolean {
+    const preview: camera.PreviewOutput | undefined = this.preview;
+    if (preview === undefined) {
+      return false;
+    }
+    return this.applyFpsTo(preview, fps);
+  }
+
+  /** 档位 → 声明区间 → setFrameRate（失败 Diag.w 不抛；成功返回 true） */
+  private applyFpsTo(preview: camera.PreviewOutput, fps: number): boolean {
+    if (!(fps > 0)) {
+      return false;
+    }
+    try {
+      const best: camera.FrameRateRange | undefined = previewRangeFor(preview.getSupportedFrameRates(), fps);
+      if (best === undefined) {
+        Diag.w(WotaTag.ABILITY, `gl preview fps ${fps} unsupported by declared ranges`);
+        return false;
+      }
+      preview.setFrameRate(best.min, best.max);
+      Diag.i(WotaTag.ABILITY, `gl preview fps ${fps} -> [${best.min},${best.max}]`);
+      return true;
+    } catch (e) {
+      Diag.w(WotaTag.ABILITY, `gl preview setFrameRate ${fps} failed: ${e}`);
+      return false;
+    }
+  }
+
   /** 最近一次 applyZoom 实际生效倍率（1 = 未设置/失败） */
   currentZoom(): number {
     return this.lastZoom;
@@ -116,7 +207,8 @@ export class GlCameraEngine {
 
   /**
    * 把相机帧接到 native 输出面；返回人读摘要/错误串。
-   * slotKey 缺省 = pickDefaultLens；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
+   * slotKey 缺省 = 能力协商默认（pickCapabilityDefault：后摄里最大视频档者，不认档位标签，
+   * 上游 0525fa2）→ 退 pickDefaultLens（档位标签）；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
    */
   async start(ctx: common.Context, nativeSurfaceId: string, slotKey?: string,
     wantSize?: Size, fps?: number): Promise<string> {
@@ -130,15 +222,21 @@ export class GlCameraEngine {
         this.slots = enumerateKitLenses(mgr);
       }
       let slot: LensSlot | undefined = undefined;
-      if (slotKey !== undefined) {
+      if (slotKey !== undefined && slotKey !== '') {
         slot = this.slots.find((s: LensSlot): boolean => s.key === slotKey);
       }
       if (slot === undefined) {
-        slot = pickDefaultLens(this.slots);
+        slot = pickCapabilityDefault(this.slots) ?? pickDefaultLens(this.slots);
       }
       if (slot === undefined) {
         return 'gl camera failed: no camera';
       }
+      // 打开的是哪一颗物理头必须能从日志对上：ability.dump 的 label 只是档位名（WIDE），
+      // 同档位多颗/归档存疑时只有 key + 等效焦距 + 最大视频档能定位现场（上游 9b33272 取证口径）
+      Diag.i(WotaTag.LENS,
+        `open slot=${slot.key} type=${lensTypeName(slot.type)} eq=${slot.eqFocal}mm ` +
+        `videoMax=${maxVideoPixels(slot.ability)} afModes=${Array.from(slot.ability.afModes).join(',')} ` +
+        `minFocusD=${slot.ability.minFocusDistanceDiopter}`);
       const device: camera.CameraDevice | undefined = findDeviceById(mgr, slot.logicId);
       if (device === undefined) {
         return 'gl camera failed: device gone';
@@ -173,14 +271,13 @@ export class GlCameraEngine {
       const preview: camera.PreviewOutput = mgr.createPreviewOutput(profile, nativeSurfaceId);
       this.preview = preview;
       session.addOutput(preview);
-      // 登记偏离：PhotoSession 预览无 setFrameRate（该 API 属 VideoOutput），预览源可能仍为 30fps；
-      // 录制帧率仅编码器侧生效，光弧抽帧按编码器输出节奏。
-      if (fps !== undefined && fps > 0) {
-        Diag.i(WotaTag.ABILITY,
-          `gl camera preview fps set not supported (requested ${fps}), encoder-side only`);
-      }
       await session.commitConfig();
       await session.start();
+      // 预览帧率：SDK 12+ 的 PreviewOutput.setFrameRate 是真口（此前登记「预览无 setFrameRate」
+      // 已过时）。失败只 Diag.w，不阻塞起镜——预览照常出画面，录制帧率仍在编码器侧。
+      if (fps !== undefined && fps > 0) {
+        this.applyFpsTo(preview, fps);
+      }
       this.status = DeviceStatus.OPEN_SUCCEED;
       try {
         preview.on('frameStart', (err: BusinessError): void => {
@@ -190,6 +287,25 @@ export class GlCameraEngine {
         });
       } catch (e) {
         Diag.w(WotaTag.ABILITY, `gl camera frameStart listener failed: ${e}`);
+      }
+      // AF 状态遥测（上游 4457e4a 方案F 的 OHOS 对应面）：1s 一拍、d 级（详细档才记，
+      // 遥测是排查工具不是常态记录）。弱光对焦差这类 3A 行为问题此前现场只有结果没有中间态，
+      // "AF 卡在 SCAN"一眼可判。SDK 无 PhotoSession 的 AE 状态事件（上游 CONTROL_AE_STATE
+      // 无 OHOS 对应，登记）——曝光归因仍靠下发报告 + 本行 AF 中间态。
+      try {
+        session.on('focusStateChange', (err: BusinessError, st: camera.FocusState): void => {
+          if (err) {
+            return;
+          }
+          const now: number = Date.now();
+          if (now - this.lastFocusTelemetryMs < FOCUS_TELEMETRY_MS) {
+            return;
+          }
+          this.lastFocusTelemetryMs = now;
+          Diag.d(WotaTag.ABILITY, `AF遥测 state=${FocusStateName(st)}`);
+        });
+      } catch (e) {
+        Diag.w(WotaTag.ABILITY, `gl camera focusStateChange listener failed: ${e}`);
       }
       this.previewSizes = [];
       for (const p of profiles) {
@@ -284,7 +400,9 @@ export class GlCameraEngine {
     try {
       const size: Size = this.chosenSize ?? params.size.value;
       const fps: number = params.fps.value.value;
-      const highSpeed: boolean = fps > WotaTiers.HIGH_SPEED_FPS;
+      // highSpeed 判据与总线落档/下发钳制同源（core.needsHighSpeed：普通表先来、覆盖不了才看
+      // 高速表），不按「档位数值 > 30」猜（上游 2026-10-26 口径，与 KitPreview.applyParams 一致）
+      const highSpeed: boolean = ability.needsHighSpeed(size, fps);
       const state: State = stateOf(ability, size, highSpeed, ability.evStep);
       return applySnapshot(session, state, snapshotOf(params, state));
     } catch (e) {

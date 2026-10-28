@@ -12,8 +12,25 @@ export const setEffect: (effect: number) => void;
 export const setCurveEnabled: (on: boolean) => void;
 export const setZebraParams: (threshold: number, density: number) => void;
 export const setPeakingParams: (strength: number, colorIndex: number) => void;
+/** 直方图采样开关（RGB 曲线框背景，f31d18c）：曲线弹窗可见时开；关 = 停采清快照 */
+export const setHistogramEnabled: (on: boolean) => void;
+/** 直方图快照（3×64 计数 R/G/B 的 Int32Array）；无样本 null。归一在 ArkTS core/HistogramMath */
+export const getHistogramSnapshot: () => Int32Array | null;
 export const uploadCurveLut: (data: ArrayBuffer) => boolean;
 export const setFrostEnabled: (on: boolean) => void;
+/**
+ * Glow 光晕（2026-10-28 批，上游 core/Glow.kt + camera/GlowBlurChain.kt）：
+ * - setGlowParams：enabled 0/1；threshold 0..1、soft 0..0.5、width 0..0.2（RT 短边单位）、
+ *   gain 0..4、add 0..1、freq 0..64、blend 0..1；colorA/colorB 为 32 位 ARGB 数值。
+ *   native 侧越域钳制、NaN/Inf 回落出厂值（与上游 sanitize 同域）；打开动作给停用链一次重试。
+ * - getGlowStatus：`off`，或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`；
+ *   scale = 1/2/4（像素率 ≤40M/≤150M/其余），fps 未知按 30，rt 未建时两位为 0。
+ * - setDenoiseLevel：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样）；0 时槽键归零、下一帧回收变体。
+ */
+export const setGlowParams: (enabled: number, threshold: number, soft: number, width: number,
+  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+export const getGlowStatus: () => string;
+export const setDenoiseLevel: (level: number) => void;
 /**
  * GL-4 GPU 录制最小切片（视频-only、单段）：
  * - startGpuRecord：fd 由 ArkTS fileIo 打开并归其所有（native 不 close）；空串 = 成功，非空 = 机器码

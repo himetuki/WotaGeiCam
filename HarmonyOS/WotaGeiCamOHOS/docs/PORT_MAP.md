@@ -226,6 +226,493 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 锚点 diff（ClipExport.kt / PlayerEngine.kt）两项均属 f941799，已按 N/A 登记（无 pendingUri
 救援模型 / 无阻塞帧率探测）。
 
+## 交付批（FPS：帧率档位决议面统一出口 + 钳制基准目标档，2026-10-28）
+
+上游 `74d4fb2`（档位可用性按普通∪高速并集判定）+ `313e8e6`（帧周期/快门钳制基准改为
+目标档位）+ `2f30ad5` 的 decideFps 边界用例。追赶基线 4998ce4 → 9cc36c5 的第一批。
+
+- **`core/CameraAbility.ets`**：补齐上游 2026-10-26 决议面全家——`pickHighSpeedFpsRange`
+  （高速表专用选档：固定档优先 → 下界==目标里上界最小 → 覆盖目标里上界最小；**只用机器
+  声明过的区间，绝不自造 [f,f]**——自造区间必被拒且无退路 ⇒ 取景器假死，上游 P1）、
+  `fpsRangesUnion` / `needsHighSpeedFps`（模块级纯函数）+ `FpsDecision` + `decideFps`
+  （一档的完整决议：普通表先来、覆盖不了才看高速表、两张都不覆盖 = 灰显不硬发），类方法
+  `fpsRangesUnion(size)` / `needsHighSpeed(size, fps)` / `decideFps(size, fps)` 按尺寸分流。
+- **`core/WotaParams.ets`** `applyAbility`：帧率落档改走 `a.decideFps(size, targetFps)`
+  ——与 UI 可用性/※、会话选择、下发钳制**四处同源**，不再各写一份（「界面说可选、
+  请求发的是非法值」那类分叉的根治）。两表都不覆盖维持 `inexactDisabled`（灰显）。
+- **`camera/RequestApplier.ets`**：① `pickFps` 高速分支不再自造 `FpsPick(target,target,true)`，
+  改走 `pickHighSpeedFpsRange`；② `Snapshot` 增 `fpsTarget`（用户档位，snapshotOf 传总线
+  档位值）；③ `exposurePlan` 帧周期/快门钳制基准 = `max(fpsTarget, fps.lo)`——普通档
+  [24,30] 选 24 时 lo==目标行为不变（r10 锚），可变高速档（vivo 50 → [30,120]，lo=30）
+  必须回到目标 50，否则帧周期 33.3ms > 20ms 放出死档；两个来源全缺才退 HIGH_SPEED_FPS。
+- **`ui/ParamPills.ets`** ShutterPill：`fpsHi = max(pick.lo, 目标档)`，与引擎同一条线
+  （此前 UI 梯与引擎在可变档上互相矛盾）。
+- **`camera/KitPreview.applyParams` + `camera/GlCameraEngine.applyParams`**：会话
+  highSpeed 判据改 `ability.needsHighSpeed(size, fps)`（普通表先来），不按「档位数值 > 30」
+  猜——厂商把 50/60 放普通表时不该被当成高速会话。
+- **守卫**：`test/pure/fps-decision.test.ets` 13 例——vivo V2520A fixtures（普通流仅
+  [24,24]/[30,30] + 高速 1080p 六区间）全表：并集可选性/精确性口径/needsHighSpeed 判定/
+  决议与下发同支/两表同覆盖必选普通/固定档恒优先/边界 0·负·空表；帧基准 3 例（50→[30,120]
+  帧周期 1/50、1/30 被钳回 1/50、[24,30] 选 24 的 r10 回归锚）+ 兜底链。
+- **登记（不迁/留白）**：① **UI 高帧率档位（50/60/120/240）本侧无消费方**——取景引擎是
+  PhotoSession（预览无 setFrameRate 面），录制帧率只落在编码器/muxer profile；没有
+  `VideoOutput.setFrameRate` / `VideoSession.setFrameRateRange` 接线前开 UI 档也不能真值
+  下发（能力协商而非能力假设），随平台面批；② `0f713a2`（退档兜底不再退化到高速表）N/A——
+  本侧 `FrameRateFallback.ceilingFps` 无引擎调用方（H 批已登记无接线点），无可修点。
+- **回归**：pure-test 74 files / 775 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（LENS：出厂默认镜头能力协商 + 起镜取证日志，2026-10-28）
+
+上游 `0525fa2`（默认镜头改能力协商）+ `9b33272` 的取证日志部分。追赶基线第二批。
+
+- **`core/LensSlot.ets`**：新增纯函数 `maxVideoPixels` + `pickCapabilityDefault`——用户从未
+  显式选过镜头时，默认打开**后摄里最大视频档最大的那颗**，不认档位标签（marble 形态：
+  HAL 把小底定焦头归进「广角」档、最大 1600x1200，旧口径首启即被钉在 720p）。前置一律
+  排除、并列取先见者（对齐 Kotlin maxByOrNull）、全空/全零返回 undefined 走既有链路。
+- **`camera/GlCameraEngine.start`**：默认链改 `pickCapabilityDefault(slots) ?? pickDefaultLens(slots)`
+  （slotKey 空串同缺省处理）；起镜补「slot key / 档位 / 等效焦距 / 最大视频档 / afModes /
+  minFocusD」一行取证日志（上游 9b33272 口径：ability.dump 的 label 只是档位名，同档位
+  多颗/归档存疑时只有这行能定位现场）。
+- **`ui/SettingsStore.ets`**：增 `lens_user_picked` 位 + `lens_key` 槽位键两键（对齐上游
+  LensPickPreference 语义：显式切换过一次后永久尊重用户选择，冷启恢复该槽位键，设备不在
+  了引擎再回能力默认；位丢失的最大代价只是退回能力默认）。
+- **`pages/Camera.ets`**：冷启 startKey = `lensUserPicked ? settings.lensKey : 能力默认`；
+  镜头胶囊显式切换即落「选过」位 + 槽位键并 persistSettings。
+- **守卫**：`test/pure/lens-capability-default.test.ets` 6 例（marble 形态不认标签/正常机型
+  行为不变/前置排除/并列先见/全空全零 undefined/maxVideoPixels）。
+- **登记（不迁/偏离）**：① `9b33272` 的「胶囊在场禁用」主体 **本侧结构性不适用**——上游
+  缺陷是「visibleEntries 摘除能力给不了的胶囊 + 其余条目钉在显式格子上 ⇒ 摘除即留洞」；
+  本侧 Dock 是固定 2×4 网格（镜头/画幅/帧率/变焦/快门/ISO/EV/WB/对焦九颗恒在场），
+  不存在按能力摘条目的路径，无洞可留。能力给不了的点击解释本侧已有：对焦定焦头弹层
+  （FC 批「range 缺失=定焦头只切模式注记」）、闪光不支持时 toggleFlash 落「该镜头不支持
+  闪光/常亮」状态行。② KitPreview/KitRecorder（Index/GlPreview 开发者探针页）默认链
+  维持 pickDefaultLens——探针页要的是「归档标签首颗」的确定性，不随本裁决改。
+- **回归**：pure-test 75 files / 781 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（SLOT：双 program 槽——监看叠加只上屏，2026-10-28）
+
+上游 `46d8d91` + `5742c0f`（释放顺序关注点）+ `5035b09`（附A/C·附B/D 的 N/A 评定）。
+追赶基线第三批。**这是本侧真实缺陷修复**：GL-4 起「效果槽同时作用于预览与编码」
+（DrawEncoderPass/DrawEncoderMended 都吃上屏槽 program），斑马/峰值一直会进成片——
+与 2026-10-27 产品裁决「监看叠加只上屏、绝不进成片」直接冲突（安卓侧 r02 已修，本侧补齐）。
+
+- **`cpp/gl_render.cpp`**：
+  - 新增**编码槽** `g_encSlotLocs`/`g_encSlotCurve`（对齐上游 24↔25 槽位口径：DISPLAY/MOVIE
+    两槽；**槽位不进键**——编码槽只有 curve 一个自由度，effect 恒 NONE）；
+  - `SyncEncodeSlot(wantCurve)`：由 `SyncEffect` 的同一份曲线纹理门控结果驱动（两槽同源同帧），
+    放在上屏槽早退路径**之前**；只允许 `WOTA_CURVE_FS` 变体，构建失败退 `g_passLocs` 直通
+    （成片丢曲线优于成片带监看叠加，且不阻塞录制）并落日志；
+  - `DrawScene` 增 `encodeSlot` 尾参（默认 false，既有调用零改动）：编码分支恒无斑马/峰值
+    uniform、只按 `g_encSlotCurve` 绑曲线；上屏分支原样；
+  - `DrawEncoderPass` / `DrawEncoderMended`（直发 + MEND 离屏 cur 两条编码支路）改吃编码槽；
+  - `DestroyGlObjects` 回收编码槽（在 EGL 拆除**之前**——5742c0f 释放顺序口径：删 GL 对象
+    需现存当前上下文）。
+- **`cpp/gl_render.h`**：`WotaGlSetEffect` 注释改「上屏专属」并登记编码槽自动跟随。
+- **守卫**：`test/pure/monitor-slot-guard.test.ets` 4 例（C++ 源码结构扫描，与
+  clip-export-shift 同口径）：编码槽存在且由 SyncEffect 同源驱动/只许曲线变体、两条编码支路
+  都吃编码槽且 `encodeSlot=true`、DestroyGlObjects 回收、上屏槽保留效果全集。突变自证：
+  编码支路换回上屏槽或删 encodeSlot 分支即红。
+  `test/pure/preview-fit.test.ets` 的 DrawScene 签名锚同步更新（尾参加 `encodeSlot = false`，
+  语义不变：编码恒满幅）。
+- **登记（N/A）**：`5035b09` 附A/C（补弧 sidecar 走 MediaStore 兜底）——Android 共享目录
+  非媒体文件写被拒的兜底，本侧沙箱直写无此通道；附B/D（帧龄改段内漂移）——本侧 native 无
+  「墙钟 − 相机 SOF 戳」帧龄观测面（FrameLedger 只计帧数，NativeImage 戳只进光弧 keep-rule
+  且已有防倒退钳制），无可修点。
+- **真机待验（不阻塞收口）**：开斑马/峰值录制一段，成片应无叠加、预览有叠加；开曲线录制，
+  成片应有曲线；MEND 档录制成片口径同。
+- **回归**：pure-test 76 files / 785 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL
+  （libentry.so 已含新槽代码）。
+
+## 交付批（WB3A：手动白平衡探测门控 + diag 拆闸 + AF 遥测，2026-10-28）
+
+上游 `ab73ebf` + `ee9aa0e`（WB 门控/运行时探测）+ `eefccc9`（日志通道拆闸）+ `4457e4a`
+（AE/AF 遥测 + 峰值提示）。追赶基线第四批。**含本侧三处真实缺陷修复**（同根：手动档
+「能不能用」没走运行时探测）：① `WotaParams.applyWhiteBalance` 兜底 `?? WbPreset.MANUAL`
+会把总线钉到设备探测表里没有的档；② `WbPillPopup` 的 MANUAL 选项被 `p === WbPreset.MANUAL ||`
+短路恒可选；③ apply 对 MANUAL 无探测守卫。
+
+- **`core/CameraAbility.ets`**：新增 `manualWhiteBalancePossible()`——探测表声明 MANUAL 才可用；
+  空表（未探测/无法判定）视为可用，不因「查不到」弹掉用户已选手动档（上游口径逐字）。
+  探测产物本身已在本侧（KitAbility 会话期 `isWhiteBalanceModeSupported` 逐档探测 → awbModes），
+  本次是把三个消费方真正接到探测上。
+- **`core/WotaParams.ets`** `applyWhiteBalance`：fallback 兜底不再裸落 MANUAL（manualPossible
+  才允许）；已选手动但探测不可能 → 降到第一个受支持预设。
+- **`ui/ParamPills.ets`** `WbPillPopup`：MANUAL 选项改经 `manualWhiteBalancePossible()`——
+  设备不声明就灰显点不动（不摆点不动的选项骗用户）。
+- **`camera/RequestApplier.ets`**：`State` 增 `wbManualSupported`（stateOf 从能力探测装配）；
+  apply 的 MANUAL 分支先过门——不支持则 `skipped`（带原因）不硬发（总线侧已降档，此处防御纵深）。
+- **`diag/Diag.ets`**（上游 eefccc9 拆闸）：hilog 通道 **i/w/e 恒写**（取证通道与磁盘占用解耦，
+  「总开关默认关」不再连 hilog 一起关）；**d/v 收详细档**（逐帧日志会冲掉系统 hilog 环形缓冲）；
+  文件落盘仍受总开关（先总开关后级别的次序不变）。头注与 record() 注释同步。
+- **AF 遥测 + 峰值提示**（上游 4457e4a 的 OHOS 对应面）：`GlCameraEngine.start` 挂
+  `session.on('focusStateChange')`（SDK since 11，PhotoSession 在册）——1s 一拍、d 级
+  （详细档才记），`SCAN/FOCUSED/UNFOCUSED` 短名；`FocusPillPopup` 增 `onManualSelected` 钩子
+  （切入手动档一次性触发），Camera 页消费：峰值未开（effect≠3）时提示「手动对焦建议开
+  『峰值』辅助（更多面板）」。
+- **登记（N/A）**：① 上游 4457e4a 的 **AE 状态遥测**——SDK 无 PhotoSession 的 AE 状态事件
+  （`CONTROL_AE_STATE` 无 OHOS 对应，本机 d.ts 全文核过），曝光归因仍靠下发报告 + AF 遥测；
+  ② `79e30a7`/`4155c83`（AE 自动档停写 SENSOR 三键 / AE 翻转重建 builder）——Camera2 请求
+  模型专属，OHOS 参数面无 SENSOR 三键、会话重建模型不同；本侧曝光组键语义（MANUAL 写全
+  时长+ISO、LOCK/AUTO 只写模式与补偿）在 RequestApplier.ets 已有同构实现并有登记；③
+  `ee9aa0e` 的 colorCorrection.availableModes 隐藏键问题——OHOS 无此键面（WB 能力经
+  isWhiteBalanceModeSupported 公开探测），「运行时探测」精神本侧天然成立。
+- **守卫**：`test/pure/wb-manual-gate.test.ets` 8 例——探测三态（有 MANUAL/无 MANUAL/空表）+
+  五条接线源码守卫（PillPopup 探测/总线兜底降档/apply skip/State 装配/diag d-v 门控/AF 遥测与
+  峰值提示）。突变自证：裸兜底回归、短路恒可选回归即红。
+- **真机待验（不阻塞收口）**：不支持手动 WB 的机型上 WB 弹层「手动」灰显、不开详细档时
+  hilog 仍见 i/w/e、开详细档见 AF遥测 行。
+- **回归**：pure-test 77 files / 793 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（HIST：RGB 曲线框背景直方图，2026-10-28）
+
+上游 `f31d18c` + `5742c0f`（释放顺序口径落进回收点）。追赶基线第五批。
+
+- **`core/HistogramMath.ets`**：纯函数直译——`binRgba`（3×64 档，bin = v>>2）+
+  `normalizedHeights`（各通道内按各自最大值归一，偏色不压扁小通道；全零返回全 0）。
+- **`cpp/gl_render.cpp`**：直方图数据路——64×64 迷你 FBO（RGBA + NEAREST + CLAMP，完整性
+  出口对齐 frost RT 口径）懒建；上屏绘制尾部 `MaybeSampleHistogram(locs)` 250ms 一拍把当前帧
+  经**当前 program**（上屏槽 = 曲线输出后的画面，「边调边看分布」口径）画进 FBO 并
+  glReadPixels 16KB；`BinHistogramRgba` 近地分箱（与 core `binRgba` **同式镜像**，接线守卫
+  钉两侧公式文本；像素住在 GL 线程，192 int 跨 napi 带宽是 1/85）。快照锁发布（Android 用
+  @Volatile 引用替换；本侧 napi getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）。
+  只在弹窗可见时采（`WotaGlSetHistogramEnabled`，关侧停采清快照）；16KB/4Hz 读回停顿远低于
+  既有霜板/补弧 pass，只发生在目标场景（录制中开弹窗调曲线，掉一拍观测帧可接受）。
+  `DestroyGlObjects` 回收迷你 RT（在 EGL 拆除**之前**——5742c0f 释放顺序口径，本侧回收点
+  天然满足）。
+- **`cpp/gl_render.h` + `napi_init.cpp` + `types/libentry/index.d.ts`**：`setHistogramEnabled`
+  / `getHistogramSnapshot` 两口全链声明（NAPI-DECL 守卫对账过）。
+- **`camera/GlLibBridge.ets`**：两口转发；**`pages/Camera.ets`**：开曲线弹窗
+  `setHistogramEnabled(true)`、onDismiss `false`；`histogramProvider` 注入 CurvePopup
+  （**UI 层不静态 import 桥**——load-order 契约与 Camera 页同款，provider 闭包持有动态模块引用）。
+- **`ui/CurvePopup.ets`**：`visible` 挂 `@Watch` 启停 150ms 轮询；`drawCurve` 在网格/曲线
+  **之下**画三通道 R/G/B 半透明 0x30 条形（条宽 = side/64、条高 = 归一计数 × side——
+  随框缩放是几何自然结果）；弹窗不可见/无样本不画。归一必须走 core 纯函数（守卫钉）。
+- **守卫**：`test/pure/histogram-math.test.ets` 8 例——纯函数 5 例（纯色单档[G=0 落 bin 0
+  本侧补钉]/灰阶三通道全等/缓冲不足不抛/各自最大归一/全零）+ 接线源码守卫 3 例（native 采样
+  与分箱同式镜像/250ms/当前 program/完整性出口/回收清快照；napi-桥-页面两开关；
+  弹窗轮询与 0x30 背景）。
+- **真机待验（不阻塞收口）**：开曲线弹窗背景出直方图、调红曲线红分布右移、关弹窗采样停
+  （hilog 无新读回）、录制中开弹窗不炸成片。
+- **回归**：pure-test 78 files / 801 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（GLOW：光晕参数模型纯逻辑层，2026-10-28）
+
+上游 `ed59285` + `f381eee` 的 **core 纯逻辑层**。追赶基线第六批。按不迁三档纪律拆分：
+纯逻辑全量落地（全表用例），**native Glow 链 + 胶囊 UI 留白登记**——Glow 是 2500+ 行的
+GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行），链路性能必须
+真机取证（帧率影响/负载分档实测）才可收口，且「不落地 UI 就不摆点不动的开关」（能力协商
+而非能力假设——宁可没有也不做摆设）。
+
+- **`core/Glow.ets`**：直译上游 core/Glow.kt（340 行）——`GlowParams`（enabled 默认关 =
+  零代价口径；域钳在 sanitize：NaN/Infinity 回落出厂值、颜色掩 32 位；两档出厂预设 A 品红→青
+  / B 橙→绿）、`encodeGlow`/`decodeGlow`（单串持久化键，坏串整串回出厂、未知键前向兼容）、
+  `glowScaleFor`（像素×帧率三档：≤40M=1 / ≤150M=2 / 否则 4——与降噪 kernel 同一魔数
+  `DENOISE_FULL_KERNEL_PIXEL_RATE` 不造第二份）、`glowRtSizeInto`/`glowRawLongestEdge`
+  （按最长边等比夹取不破宽高比；夹取判据用夹取前原始最长边）、`fillGlowBlurOffset`
+  （RT 短边单位、横纵各向同性）、`glowRgb`（只取 RGB，alpha 不参与）、`GlowColor` 调色板、
+  `glowStatusNote`（状态行五级优先：DIRECT > 关着不显示 > 停用 > 夹取需真 RT > 分档句）。
+- **平台偏离登记**：① 编码浮点无 Kotlin ".0" 后缀（JS String(1)="1"）——编码串只在本平台
+  自产自销（Glow 参数不跨端互认），往返由 parseFloat 保证；② glowStatusNote 返回文案键
+  （core 不引资源）；③ DENOISE_FULL_KERNEL_PIXEL_RATE 暂住本文件（降噪批移植时收口单源）；
+  ④ **本文件当前无平台消费方**——native Glow 链（编码槽再扩 glow 一维）与胶囊 UI 随后续
+  真机批，与 H 批 DirectSink 同款「只交付纯函数 + 全表用例、不伪造接线」。
+- **守卫**：`test/pure/glow-pure.test.ets` 28 例——参数模型 5（默认/预设 B/钳域幂等/
+  NaN 回落/颜色掩码）、编码解码 6（往返/坏串 9 形态/未知键/先钳再写/开关默认关/ARGB→RGB）、
+  分档尺寸 6（三档/边界内侧/信息不全/按档缩保底/等比夹取/原始最长边/非法不写数组）、
+  模糊偏移 4（横竖屏各向同性/方形/非法）、状态行 6（优先级全表）。
+- **留白（登记，随真机批）**：① native `GlowBlurChain` 等价（两槽带 glow、阈值亮部提取、
+  每帧一次）；② Glow 胶囊 + HUD 登记 + 持久化（f381eee；含 `glow` 键进 24 键白名单的
+  追加裁决——键名契约只许追加）；③ ProgramKey 四维键（effect,curve,denoise,glow）——
+  本侧编码槽现为 curve 单自由度，扩 glow 时一并升级。
+- **回归**：pure-test 79 files / 830 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（DSCALE：上屏降档纯函数层，2026-10-28）
+
+上游 `1e61e15` + `58464fc` 的 **core 纯逻辑层**。追赶基线第七批。与 Glow 同款拆分纪律。
+
+- **`core/DisplayScaleRt.ets`**：`DisplayScale` 五档枚举（ORIG/HALF/QUARTER/EIGHTH/SIXTEENTH，
+  除数 2 的幂）+ `resolveDisplayRtInto`/`resolveDisplayRtOrNull`（floor 缩放、任一维 < 128
+  不可用且**不写数组**——三处共用同一判据不做 1×1 兜底）+ `nearestDisplayScale`（回落从
+  **下一档**开始找——把 current 算进来会在「失败原因非尺寸」时无限循环；ORIG 恒兜底）+
+  `displayScaleReadoutLabel`（读数 = 档位标签，UI 只套「预览：%s」）+ `displayRtNeedsRebuild`
+  （只看尺寸与开关无关；目标非法 false 不在重建判据里拆资源）。
+- **登记（native 链随真机批）**：OHOS 预览链**没有中间取景器 RT**（效果直接画上屏 surface；
+  唯一离屏是毛玻璃专属）。等价落法只有两条：降相机流尺寸（连成片一起降，违反「成片不变」
+  红线，不可取）或新建「效果 → 缩小 RT → 放大 blit 上屏」链（GPU 新路径，帧率/观感必须真机
+  取证）。UI 档位/「预览：<档位值>」读数（58464fc）依赖该面，随同一批。
+- **守卫**：`test/pure/display-scale-rt.test.ets` 9 例（floor 缩放/128 边界含恰等/非法不写数组/
+  out 不足抛/Pair 版同判/回落不回 current/读数标签/重建判据/fromDivisor 回 ORIG）。
+- **回归**：pure-test 80 files / 839 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（DENOISE：降噪参数模型纯逻辑层 + 平台裁定，2026-10-28）
+
+上游 `8646b05` + `316516f` 的 **core 纯逻辑层 + 三路平台裁定**。追赶基线第八批。
+
+- **`core/Denoise.ets`**：`AudioDenoise`（OFF/SYSTEM）/`VideoDenoise`（OFF/HAL_FAST/
+  HAL_HIGH_QUALITY/GPU_BILATERAL）枚举 + 持久化键往返（坏值回 OFF）+ `effectiveVideoDenoise`
+  （DIRECT 下 GPU 双边退 HAL 快速——返回实际档不静默失效）+ `videoDenoiseActive`
+  （退档仍算有降噪——否则胶囊选中态跟渲染模式乱闪；**成片恒按所选档降噪**，上游 2026-10-27
+  双槽改口）+ `audioDenoiseNeedsCodec` + `denoiseKernelLite`（像素×帧率 > 150M 用轻量核；
+  自动降档 ≠ 关档）。`DENOISE_FULL_KERNEL_PIXEL_RATE` 单一真源落此，Glow.ets 改导入消费
+  （此前暂住的常量收口）。
+- **平台裁定（登记，不迁）**：① **音频降噪（SYSTEM）**——上游挂 NoiseSuppressor（采集链），
+  OHOS `setAudioEffectMode` 是**输出端**（Renderer）音效 API，采集/录制输入链无应用侧等价物；
+  且本侧 GPU 录制链 native 无音频轨（T27-3 留白）→ 枚举与判据保留作契约，**无下发面**
+  （不摆没反应的开关）；② **HAL 降噪**（halNoiseReductionMode/noiseReductionModeToSend）——
+  Camera2 NOISE_REDUCTION_MODE 专属，OHOS 相机 API 面无此键（d.ts 全文核过零命中），
+  这两个发值函数不移植（移植了也永远没有消费方）；③ **GLSL 双边（GPU_BILATERAL）**——
+  GPU 链特性随真机批（帧率/观感实测；同 Glow 纪律），本批不落 UI/native。
+- **`PureLogicBarrel`**：Glow/DisplayScaleRt/Denoise/HistogramMath 四模块进编译探针
+  （`cameraCatchupCompileProbe`）——Glow/DisplayScale 暂无平台消费方，由 barrel 保住编译门
+  （#69 铁律：新增纯逻辑模块必须进 barrel，否则 hvigor 不可达）。
+- **守卫**：`test/pure/denoise-pure.test.ets` 6 例（实际档/生效判据/Codec 需求/负载分档含
+  1440p30 留完整核/档位编号常量/键往返坏值回 OFF）。
+- **回归**：pure-test 81 files / 845 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（ORIENT：方向链路诊断日志 + 恒等族裁定，2026-10-28）
+
+上游 `81cb3a5`（方向链路取证日志）+ `9cc36c5`（前摄方向分族修正）。追赶基线第九批。
+
+- **`cpp/gl_render.cpp`**：首帧成功上屏的方向链汇总行——`orient sensor/display/mirror/fit/
+  enc尺寸/encRot` 一行打全（真机排查「前摄方向不对」第一眼核这行的量与编码容器角是否自洽）；
+  与上游 81cb3a5「首帧/换镜头打 stMatrix、stK、残角、applied、镜像、帧尺寸」的取证密度对齐。
+  换镜头侧 `open slot` 取证行已在 LENS 批落地。
+- **登记（N/A，后由 FRONT180 批部分订正）**：`9cc36c5` 恒等族**矩阵识别**——Android
+  SurfaceTexture 平台面专属（`getTransformMatrix` 两族解析），本侧 NativeImage 不暴露变换
+  矩阵，结构性不成立；但该提交的**前摄 +180** 是独立的镜像语义修正，本侧同样需要——见
+  FRONT180 批（2026-10-28 模拟器横屏前摄实测差 180° 后补）。
+- **回归**：pure-test 81 files / 845 tests 全绿（无 ArkTS 改动）；`assembleHap`（release）
+  BUILD SUCCESSFUL（libentry.so 已含 orient 行）。
+
+## 走查批（EMU-WALK：Pura 900 模拟器运行时走查，2026-10-28）
+
+宿主 webcam 作相机输入，unsigned 包装机（模拟器不验签）。**成片侧验证被模拟器挡住**：
+`gpu record start failed code=encoder-create`（OH_VideoEncoder 建档失败 ×2，模拟器无对应
+编码器）——「斑马/峰值不入成片」的成片侧断言留真机；上屏侧全部实测通过。
+
+- **LENS 批（open slot 行）**：全新安装两轮复现——`open slot=lcam001 type=WIDE eq=24mm
+  videoMax=921600 afModes= minFocusD=0`（能力协商默认 + 归档/AF/定焦取证字段齐）。
+- **ORIENT 批（首帧 orient 行）**：`first frame 1320x2856 swap=1 orient sensor=90 display=0
+  mirror=0 fit=1.0000/0.8217 enc=0x0 encRot=90` 一行打齐；换前摄后 `texcoords deg=0/90
+  mirror=1`、模拟器显示旋转时 deg 正确跟随——方向链在换镜头/旋转两场景留痕且自洽。
+- **SLOT 批上屏侧**：效果循环后 `program slot effect=1 curve=0`；截图红条纹像素 4.2%
+  （0xE53935 斜纹，阈值 0.6 之上区域），斑马叠加在上屏渲染确认。
+- **HIST 批**：曲线弹窗 Canvas 700×700 框内 77% 纯黑 + 三通道 0x30 条形（B 2155 > R 1698 >
+  G 728，与暗场景直方图形状一致，条形自底向上）——采样→分箱→归一→绘制全链活。
+- **WB3A 批**：① WB 弹层「手动色温」`enabled=true`——模拟器探测**声明**支持 MANUAL，
+  门控按探测放行（灰显路径需不声明 MANUAL 的机型，由守卫测试钉）；② 起录前逐键报告把
+  模拟器拒掉的 `exposureMode(Operation not allowed.)` 如实打进 `pre-record apply failed`
+  （W 级）——逐键 try/catch + 拆闸后的取证通道按设计工作。
+- **观察（存量，非本批引入，登记不修）**：① `CameraSettings` 对象字段改值不触发 Dock 胶囊
+  重渲染——出现顶栏读数 `24fps` 与 Dock `帧率:30` 并存（两处同读 settings.fps；@State 对象
+  字段变更不通知，读数条因他态重绘偶先刷新）。
+- **方向事件还原（用户报「横屏 HUD 控件巨大/录制键出屏/画面压扁」的结论）**：非方向锁缺陷——
+  沙箱持久化里 `ui_orientation=landscape`（设置页方向控件是唯一写入方；本 walkers 的越界坐标
+  点击最可疑，无法完全归因），应用忠实落了 `preferred orientation -> landscape`，而**横屏 HUD
+  属 T32 留白**（T31 只做了竖屏布局），于是渲染出那套未设计的横屏形态。**方向锁本身有效**：
+  设置页点回「竖屏固定」→ `preferred orientation -> portrait` → 显示立即弹回竖屏（尽管模拟器
+  传感器仍报横屏）。横屏保真度维持 T32 留白登记；「横屏档在 T32 前是否隐藏」属产品决策，
+  待用户裁决。
+- **录制启动失败的用户可见性**：状态行如实显示 `录制启动失败: encoder-create`（健康三格
+  路径），失败不被吞。
+
+## 修复批（FRONT180：前摄方向 +180——横屏实测缺陷，2026-10-28）
+
+EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 ORIENT 批的 N/A 过判**：
+「恒等族矩阵识别」确实 N/A（本侧无 stMatrix 反解面），但 9cc36c5 的**前摄 +180** 是独立的
+语义修正——前摄 sensorOrientation 的参考系与后摄相反（镜像语义），转正公式比后摄多 180°
+（上游 RecordProfile 前摄容器角官方公式 360−((sensor+display)%360) = sensor−display+180），
+与矩阵族无关。
+
+- **取证链**（EMU-WALK 日志）：后摄 sensor=90、前摄 sensor=270（首帧 orient 行直读）、横屏
+  display=270 ⇒ 旧公式后摄 `deg=180`（正确）、前摄 `deg=0`（差 180，正是用户所见）。
+- **`cpp/gl_render.cpp`** 两处同修（g_mirrored 即 front 标志）：① 上屏 UV 复合角
+  `RebuildTexCoords` 加 `(g_mirrored ? 180 : 0)`；② 编码容器角 `WotaGlEncoderRotation`
+  同加——修正后同屏向下两颗镜头容器角一致（竖屏均 90、横屏均 0，佐证这是把前摄镜像
+  参考系扳平的语义修正）。+180 不改变 90/270 性质，letterbox 轴交换（PreviewFit）不受影响。
+- **复验**（模拟器横屏 + 前摄重装后）：`texcoords deg=180 mirror=1` + 首帧
+  `orient sensor=270 display=270 mirror=1 ... encRot=180`——画面转正由用户目视确认。
+- **守卫**：`monitor-slot-guard.test.ets` 增「前摄方向修正」例（两处公式源码钉 + 突变自证）。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（LAND：横屏 HUD + 方向常数 v2 + 默认横屏，2026-10-28）
+
+用户裁决：「横屏才是常用状态，做好」+ 两条画面修正（前摄再左右镜像；后摄顺时针 90° 后
+左右镜像）。T32 横屏保真度提前落地。
+
+- **方向常数 v2（`cpp/gl_render.cpp` 两处同式）**：`deg = sensor − display + (front ? 0 : 180)`、
+  `mirror = !front`（后摄镜像、前摄不镜像）。由用户对模拟器竖屏实景的修正标定反推：后摄目标
+  （270, 镜像）、前摄目标（270, 不镜像）——两组与公式吻合。根因：**OHOS 预览缓冲的方向语义
+  与 Camera2 SurfaceTexture 不同**，Camera2 公式在本侧整体差这组常数（登记；真机复测若冲突
+  再按机型域分流）。ArkTS 侧 `applyGeometry` 传 `mirror = !info.front`；编码容器角同式。
+  横屏后摄稳态 = `deg=180 mirror=1`（90−270）、前摄 `deg=0 mirror=0`——首帧 orient 行
+  与 texcoords 实测自洽。
+- **默认方向改横屏**（`UIOrientations.DEFAULT = LANDSCAPE`）：撤销 T31 的竖屏默认偏离，
+  回到上游口径；竖屏仍在设置页可切（T31 布局逐字保留）。
+- **横屏 HUD（`pages/Camera.ets`）**：`isLandscape` 由窗口 vp 尺寸驱动（`refreshHudReadoutMetrics`）；
+  横屏 Dock 为**根 Stack 底部右侧浮层**（全屏容器 End/End 对齐 + 透明命中），锚点 id 与竖屏
+  同名（弹层量框定位复用）——**首版曾做成 HUD 纵向流内分支，实测被顶部读挤压出屏**
+  （「更多」被裁、快门完全出屏），改浮层后全部落在屏内（更多 y 1047-1215、快门行
+  1026-1278 < 1320）。预览不再被压缩（浮层盖在画面上，行扫描非黑占比 82-91% 全高）。
+- **守卫**：`monitor-slot-guard.test.ets` 方向常数例改 v2（两处公式钉 + v1 写法必须消失的
+  突变自证 + ArkTS `mirror = !front` 接线）；`ui-orientation-wiring.test.ets` 默认档钉子改
+  LANDSCAPE（2026-10-28 裁决口径）。
+- **模拟器实测**：全新安装默认横屏生效（`preferred orientation -> landscape`）；横屏首帧
+  `orient sensor=90 display=270 mirror=1 fit=0.8217/1.0000 encRot=180`；Dock 浮层几何全在屏内。
+  竖屏切换路径（设置页「竖屏固定」）此前已验证锁有效。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 修复批（LAND2：方向 v3 + 横屏单行底栏，2026-10-28）
+
+用户第二轮反馈（后摄再逆时针 90°；HUD 文字截断/控件重叠、占用录制页过多）两轮迭代后收口。
+
+- **方向标定 v3（`cpp/gl_render.cpp` 两处同式）**：`deg = display + (rear ? 180 : 90)`、
+  `mirror = !front`。四锚点拟合（用户两轮实测）：竖屏后摄 180/前摄 90、横屏后摄 90
+  （v2 的 180 再逆时针 90）/前摄 0。**sensor 不参与**——模拟器 webcam 的 HAL 缓冲随显示
+  旋转（登记：真机必须按 SENSOR 语义重新标定；v1→v3 三轮均为模拟器域标定）。实测
+  `texcoords deg=90 mirror=1`、首帧 `encRot=90` ✓。
+- **横屏 HUD 两轮迭代**：① 侧栏版（2×4 网格 + 底行）→ 用户否决：占用过多、设/库与读数条
+  仍有交叉；② **定版=单行底栏**：9 颗短标签胶囊（dockLabel 冒号后值：广角/1080p/30/1x/
+  AUTO×2/-/5500K/连续）+ 更多 + 72vp 快门一行放下，整条 168px（屏高 6%），`HudPill` 宽度
+  由 layoutWeight 均分（约 68vp）文字完整；**dump 全量核对：文本重叠 0 对、越界 0 个**。
+  读数区（顶栏两行 + 读数条）回归全宽、与底栏无交叠；竖屏分支逐字未动。
+- **测量脚本口径**（本轮新增工作法）：uitest dump 全文本节点 + 两两包围盒交叠检查
+  （x/y 交叠 >10px 记重叠）+ 右/下缘越界检查——「多截图多比对」的机器化版本。
+- **v4 追加（同日第三轮用户实测）**：前后摄**各再 +180°**（两路同时颠倒）——
+  `deg = display + (rear ? 0 : 270)`、`mirror = !front` 不变；横屏锚点 后摄 270/前摄 180。
+  实测 `texcoords deg=270 mirror=1`、`encRot=270` ✓。四轮 v1→v4 均为模拟器标定，真机仍待
+  按 SENSOR 语义复测（登记）。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（UI 复刻：安卓横屏 HUD + 双栏设置页，2026-10-28）
+
+用户指令「让子代理并行修订界面，复刻安卓侧界面截图」。两子代理分文件域并行（互不冲突），
+完成后合并验证。
+
+- **取景页横屏 HUD（`pages/Camera.ets`）**：照 r03 截图复刻——左上分辨率胶囊 + 红字
+  「预览：原片」；右上三圆钮（网格/更多/设置）；左侧 float 容器（圆形网格钮 + RGB 曲线 +
+  光晕/色调禁用态芯片〔功能未实现，点击提示，不造假面板〕）；右侧水平仪 + 对焦蓝钮；
+  底部中央录制簇（图库 + 72vp 快门 + 镜头胶囊）；左下 降噪（禁用态）/码率；右下 快门/
+  帧率/感光度读数胶囊；白线安全框。锚点 id 全保留（pill_ev/wb/zoom 无入口留 1×1 占位）；
+  竖屏 T31 分支逐字未动。几何自检：控件两两相交 0、出屏 0。
+- **设置页（`pages/Settings.ets`）**：横屏双栏（两 Scroll 各半 + 32vp 列距）、24fp 蓝色
+  分组标题、卡片组（#1E1E22 圆角 16 + 发丝分隔线）、蓝选中胶囊/蓝 Toggle、右值蓝字；
+  竖屏单列保持原行为；权限状态用 abilityAccessCtrl 真查（查不到显「未知」）；功能与持久化
+  全保留（文案「横屏使用/竖屏使用」）。
+- **登记**：更多面板在本模拟器横屏下内容行空白（HudMoreSheet 未改动，疑 ArkUI Scroll+
+  旋转窗口问题，待查）；左挖孔 avoidArea 未消费（真机须核）；截图未照抄参考图的假读数
+  （码率/帧率/镜头按真实状态显示）。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 交付批（UI 功能对齐：移除「更多」+ 面板/控件按安卓重接，2026-10-28）
+
+用户裁决：**安卓侧没有「更多」面板**；剩余面板/控件按已有布局修订到与安卓同功能。三子代理
+并行（文件域互斥）+ 主线程收口去重。
+
+- **移除「更多」**（Camera.ets）：按钮/状态/渲染块全删（HudMoreSheet.ets 文件保留供守卫读取）；
+  原承载功能按安卓位重接——闪光→右侧竖排胶囊（对焦下方，无闪光灯禁用态+提示）；效果四档→
+  设置页「屏幕监看」组（写 settings.effect，Camera onPageShow 重读并 applyEffect）；
+  蓝牙→设置页入口（pages/BtPanel）；光弧/网格本就在设置页；右上中圆钮→**pages/HudEditor**
+  （恢复安卓「HUD 位置编辑」语义）。
+- **码率胶囊→真弹层**：自动/5M/10M/20M/35M/50M，点选写 settings.bitrate + persist
+  （横屏左下读数、竖屏独立胶囊同弹层）。
+- **光晕面板落真参数**（新 `ui/GlowPanel.ets` + `ui/GlowStore.ets`）：照 r03 截图（关/开、
+  预设 A/B、亮度阈值/软边滑杆）；参数经 core/Glow 的 encode/decode 存 prefs `glow_params`；
+  面板内注明「渲染链随 native 真机批生效」——**参数真实、渲染未接，不冒充已生效**。
+  （ArkTS 坑：组件成员不能命名 `enabled`，与基类属性冲突 → `glowOn`。）
+- **设置页「屏幕监看」组 + 蓝牙入口**（Settings.ets）：与既有双栏/蓝标题/胶囊样式同源；
+  去重：录制卡旧「效果」行删除、过期脚注改「监看只上屏不入成片」口径。
+- **守卫**：bt-speaker.test.ets 蓝牙入口锚点从 Camera.ets 移到 Settings.ets（用户裁决注明）。
+- **遗留**：竖屏曲线编辑入口随更多移除暂无（横屏左侧有）；音频电平表未接；色调/降噪维持
+  禁用态（功能本体未移植）；更多面板横屏内容空白问题随其移除而消失。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL；
+  模拟器实测：更多消失、闪光/光晕/色调/码率落位正确、光晕面板可开合。
+
+### 补齐批（三缺口收口，2026-10-28）
+
+- **竖屏曲线入口回归**：竖屏顶栏右上 40vp 圆钮「曲」→ openCurveEditor（id `pill_curve`）；
+  横屏左侧 float 原入口不变。
+- **色调实面板**：`core/Tone.ets`（黑点/白点 ±0.35、阴影 -1..1；公式与安卓 ToneParams.kt
+  逐点对拍 0 偏差）+ `ui/TonePanel.ets`（照 r03 截图三滑杆）+ `ui/ToneStore.ets`（键
+  `tone_params`）；Camera applyCurve 合成链 `bakeBytes → applyToneToLut → uploadCurveLut`
+  （effect=1 与 applyEffect 同口径）。**登记**：安卓烘焙顺序为 curve(tone(x))，本侧为
+  tone(curve(x))——Tone.ets 头注已记，真机校色批决定是否前置；高光轴本批未移植（接口只留三参）。
+- **音量表**：`ui/AudioLevelProbe.ets`（AudioCapturer MIC 16k 单声道 S16LE，RMS→dBFS→0..1，
+  100ms 节流自愈，失败静默不与录制抢麦）；横屏右侧水平仪下方一行（细柱图标 + NN%），
+  启停由 Camera `syncAudioProbe()` 统一裁决（8 个启停点覆盖显隐/起镜/录制/停录）。
+- **守卫**：`tone-pure.test.ets` 12 例（往返/坏串/钳制/恒等逐字节/单调/方向/尾字节防御）。
+- **回归**：pure-test 82 files / 858 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL；
+  模拟器实测：色调面板可开合、竖屏曲线钮在册、音量表出读数。
+
+### 曲线独立层修正（2026-10-28，回应「RGB 曲线徒有表象」）
+
+- 旧接线：曲线只在「效果档=曲线(1)」时 `setCurveEnabled(true)`，直通/斑马/峰值下烘焙的 LUT
+  被丢弃——RGB 曲线面板在多数态下是摆设（安卓为独立层、可与斑马/峰值叠加）。
+- 修正（`pages/Camera.ets` 两处）：`applyEffect` 统一「合成 LUT → 上传 → setEffect →
+  `setCurveEnabled(!isPassthrough)`」；`applyCurve` 同口径。曲线非恒等即生效，与效果档解耦；
+  设置页「屏幕监看」的「曲线」档保留为遗留兼容档（效果槽恒 NONE，曲线由独立开关承担）。
+- 回归：pure-test 82 files / 858 tests 全绿；assembleHap 绿。
+
+### 「真功能 vs 表象」盘点（2026-10-28 诚实对账，供后续批排期）
+
+| 功能 | 状态 |
+|---|---|
+| RGB 曲线 | ✅ 真：面板编辑 → LUT 烘焙（含色调合成）→ native 曲线 program；本批起独立层生效；直方图参考已落 |
+| 色调 | ✅ 真（LUT 链）：黑/白/阴影三参；**高光轴未移植**；烘焙顺序与安卓相反（登记） |
+| 斑马/峰值 | ✅ 真（上屏专属，双槽口径真机待验成片侧） |
+| 闪光电平表音量表/码率弹层 | ✅ 真 |
+| 光晕 | 🟡 **仅参数与持久化**（native GlowBlurChain 未移植——最大表象，随真机批） |
+| 降噪 | 🟡 禁用态（音频无平台等价、GLSL 双边随真机批） |
+| HUD 位置编辑（HudEditor） | 🟡 仅读数条顺序（完整五容器自由布局未移植，T32 面） |
+| 高帧率档位 | 🟡 等 VideoSession 帧率平台面 |
+| 前摄/方向 | ✅ 模拟器标定 v1→v4；真机须按 SENSOR 语义复测 |
+
+## 修复批（LOGICFIX：逻辑漏洞与功能错位，2026-10-28）
+
+deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` + 本机 SDK d.ts 为权威）驱动的
+全量对账修复。
+
+- **fps 数据源死锁（逻辑漏洞，P1）**：`abilityOfDevice` 只取 `NORMAL_PHOTO` 场景能力，
+  该表 videoProfiles 常为空（模拟器实证 `fpsRanges=` 空）⇒ `decideFps` 全档 undefined ⇒
+  帧率弹层全灰、参数总线 `inexactDisabled`、`applyPreviewFps` 无据。**修复**：并行取
+  `NORMAL_VIDEO` 能力表并把 videoProfiles 并入（预览/照片仍用 PHOTO 表）。实测
+  `fpsRanges=[30,60]`——30/50/60 可选（※ 近似档），24/25/120/240 诚实灰显。
+- **右上第一圆钮功能错位**：原误接「网格」与左侧圆形网格钮重复；按安卓位语义改**参考线
+  快切**（外框图标，全开 2047/全关，与设置页多选同源），网格只归左侧圆钮。
+- **Glow 持久化跨重启验证**：重装后 `glow params enabled=1` 自动生效（glow_params → 参数→链）。
+- **降噪变体运行时验证**：`program slot effect=0 curve=0 denoise=1`（full 核）。
+- **登记（待真机/产品面）**：① 音量表在 MIC 权限未授予前恒 `—`（探针静默；GPU 录制链无
+  音频轨，不主动弹麦克风权限——与 Android「未授权录音时电平表无读数」同姿态）；
+  ② 模拟器 HAL 拒 `exposureMode` 导致状态行常驻「参数下发失败」噪声（真机无此现象）；
+  ③ DisplayScale「预览：原片」读数仍为常量（缩放上屏链留白）；④ Glow RT 以显示面尺寸
+  定档（本侧无相机帧原生尺寸观测面，登记偏离安卓 wantFrameWidth）。
+- **回归**：pure-test 82 files / 862 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
+## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
+
+追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置
+汇总（详单见上方各交付批）：
+
+| 上游提交 | 鸿蒙处置 |
+|---|---|
+| `74d4fb2`/`313e8e6`/`0f713a2`/`2f30ad5`(decideFps) | FPS 批（572a1b1） |
+| `0525fa2`/`9b33272` | LENS 批（b5fbbd5；胶囊禁用主体结构性不适用已登记） |
+| `46d8d91`/`5742c0f`(释放顺序)/`5035b09` | SLOT 批（c67a458；附A/C·附B/D N/A 已登记） |
+| `ab73ebf`/`ee9aa0e`/`eefccc9`/`4457e4a` | WB3A 批（cab8ace；AE 遥测等三件 N/A 已登记） |
+| `79e30a7`/`4155c83` | N/A（Camera2 请求模型专属，WB3A 批登记） |
+| `f31d18c` | HIST 批（218e725） |
+| `ed59285`/`f381eee` | GLOW 批纯逻辑层（e148891；native 链+UI 留真机批） |
+| `1e61e15`/`58464fc` | DSCALE 批纯函数层（31b347a；native 链+UI 留真机批） |
+| `8646b05`/`316516f` | DENOISE 批纯逻辑层+平台裁定（8d9a346） |
+| `81cb3a5` | ORIENT 批（本轮） |
+| `9cc36c5` | ORIENT 批 N/A 登记（SurfaceTexture 平台面专属） |
+| `346ef79` | N/A——右槽选片三根因（Photo Picker URI/权限自省）是 Android 存储面问题；
+  本侧 Compare 选右片走沙箱 MediaRepo（相对路径直读），无 URI 权限通道 |
+| `eefccc9`(Camera2Engine 部分)/`2f30ad5`(sidecar 名) | Android 平台面细节，对应面 N/A 或已覆盖 |
+| `67748e6`/`8e68486`/`c0d6cfa`/`e4ef241`/`62fa57d`/`640f04c` | 文档口径/发版杂务/merge 节点，
+  无移植动作（新口径已随各批落 PORT_MAP） |
+| `a9b0cae`..`8c6603e`（站位线族） | 本侧已在 main（harmony/* 提交），非上游增量 |
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

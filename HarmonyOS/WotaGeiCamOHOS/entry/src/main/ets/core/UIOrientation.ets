@@ -26,10 +26,11 @@ export class UIOrientations {
   static readonly ALL: Array<UIOrientation> = [UIOrientation.PORTRAIT, UIOrientation.LANDSCAPE];
 
   /**
-   * 出厂默认：**竖屏固定**（本侧偏离：上游 LANDSCAPE——鸿蒙 HUD 是 T31 竖屏取证设计，
-   * 默认横屏会破坏 T31 布局；设置页可切横屏，横屏保真度属 T32）。
+   * 出厂默认：**横屏**（2026-10-28 用户裁决「横屏才是常用状态，做好」——撤销 T31 的
+   * 竖屏默认偏离，回到上游 LANDSCAPE 口径；横屏 HUD 已按 T32 提前批落地右侧竖排 Dock，
+   * 竖屏仍可在设置页切回并保持 T31 布局）。
    */
-  static readonly DEFAULT: UIOrientation = UIOrientation.PORTRAIT;
+  static readonly DEFAULT: UIOrientation = UIOrientation.LANDSCAPE;
 
   static persistValue(o: UIOrientation): string {
     return o === UIOrientation.PORTRAIT ? 'portrait' : 'landscape';

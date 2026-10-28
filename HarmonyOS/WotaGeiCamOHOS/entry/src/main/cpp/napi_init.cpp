@@ -237,6 +237,70 @@ static napi_value SetFrostEnabled(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+// ---------------------------------------------------------------- Glow/降噪（2026-10-28 批）
+
+/**
+ * Glow 参数：enabled 0/1，threshold/soft/width/gain/add/freq/blend 为 0..1 域内浮点，
+ * colorA/colorB 为 ARGB 数值（uint32）。缺参按出厂默认（与既有 setter 的 all-or-nothing 同款）。
+ */
+static napi_value SetGlowParams(napi_env env, napi_callback_info info)
+{
+    size_t argc = 10;
+    napi_value argv[10] = {nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t enabled = 0;
+    double threshold = 0.5;
+    double soft = 0.05;
+    double width = 0.02;
+    double gain = 1.0;
+    double add = 0.0;
+    double freq = 0.0;
+    double blend = 0.6;
+    uint32_t colorA = 0xFFFF3399u;
+    uint32_t colorB = 0xFF33E6FFu;
+    if (argc >= 10) {
+        napi_get_value_int32(env, argv[0], &enabled);
+        napi_get_value_double(env, argv[1], &threshold);
+        napi_get_value_double(env, argv[2], &soft);
+        napi_get_value_double(env, argv[3], &width);
+        napi_get_value_double(env, argv[4], &gain);
+        napi_get_value_double(env, argv[5], &add);
+        napi_get_value_double(env, argv[6], &freq);
+        napi_get_value_double(env, argv[7], &blend);
+        napi_get_value_uint32(env, argv[8], &colorA);
+        napi_get_value_uint32(env, argv[9], &colorB);
+    }
+    WotaGlSetGlowParams(enabled, static_cast<float>(threshold), static_cast<float>(soft),
+        static_cast<float>(width), static_cast<float>(gain), static_cast<float>(add),
+        static_cast<float>(freq), static_cast<float>(blend), colorA, colorB);
+    return nullptr;
+}
+
+/** Glow 状态串：off 或 on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1> */
+static napi_value GetGlowStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string status = WotaGlGetGlowStatus();
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, status.c_str(), status.size(), &result);
+    return result;
+}
+
+/** 画面降噪档：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样）；0 时槽键归零、下一帧回收变体 */
+static napi_value SetDenoiseLevel(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t level = 0;
+    if (argc >= 1) {
+        napi_get_value_int32(env, argv[0], &level);
+    }
+    WotaGlSetDenoiseLevel(level);
+    return nullptr;
+}
+
 // ---------------------------------------------------------------- GL-4 GPU 录制（封装归 CodecRecorder，编码面归 gl_render）
 
 static napi_value MakeString(napi_env env, const std::string& text)
@@ -553,6 +617,39 @@ static napi_value CancelArcRepair(napi_env env, napi_callback_info info)
  * 线程契约（登记，P3）：下面的 setter 与 OnFrame 回调在 OHOS XComponent 下同为 UI 线程回调，
  * setter 只写请求态、渲染在下一帧消费，无并发；独立渲染线程（GL-3）需先做原子/双缓冲交接。
  */
+static napi_value SetHistogramEnabled(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool on = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, argv[0], &on);
+    }
+    WotaGlSetHistogramEnabled(on);
+    return nullptr;
+}
+
+/** 直方图快照 → Int32Array(192)（3×64 计数 R/G/B）；无样本返回 null（ArkTS 侧按无数据绘制） */
+static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
+{
+    int32_t bins[192];
+    if (!WotaGlGetHistogramSnapshot(bins, 192)) {
+        napi_value nullValue = nullptr;
+        napi_get_null(env, &nullValue);
+        return nullValue;
+    }
+    napi_value out = nullptr;
+    void* data = nullptr;
+    napi_create_arraybuffer(env, sizeof(bins), &data, &out);
+    if (data != nullptr) {
+        memcpy(data, bins, sizeof(bins));
+    }
+    napi_value typed = nullptr;
+    napi_create_typedarray(env, napi_int32_array, 192, out, 0, &typed);
+    return typed;
+}
+
 static napi_value Init(napi_env env, napi_value exports)
 {
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "module init");
@@ -567,8 +664,13 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setCurveEnabled", nullptr, SetCurveEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZebraParams", nullptr, SetZebraParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPeakingParams", nullptr, SetPeakingParams, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setHistogramEnabled", nullptr, SetHistogramEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getHistogramSnapshot", nullptr, GetHistogramSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"uploadCurveLut", nullptr, UploadCurveLut, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setGlowParams", nullptr, SetGlowParams, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getGlowStatus", nullptr, GetGlowStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDenoiseLevel", nullptr, SetDenoiseLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startGpuRecord", nullptr, StartGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopGpuRecord", nullptr, StopGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isGpuRecording", nullptr, IsGpuRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
