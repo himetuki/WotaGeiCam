@@ -96,7 +96,7 @@
 
     <!-- 掐头去尾剪辑导出（2026-10-04 方向 3：区间复用 A/B 标记，无损拷贝不重编码） -->
     <string name="player_clip">剪辑</string>
-    <string name="player_clip_title">按 A/B 段导出（无损剪）</string>
+    <string name="player_clip_title">按 A/B 段导出</string>
     <string name="player_clip_need_ab">先用底栏 A/B 标出要保留的段落，再回到这里导出</string>
     <string name="player_clip_in">入点 %1$s（自动向前对齐关键帧）</string>
     <string name="player_clip_out">出点 %1$s</string>

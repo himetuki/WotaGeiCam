@@ -50,7 +50,7 @@ class SceneExportRunner(private val ctx: Context) {
      * 保留 pending 行待冷启救援，UI 要报"导出完成但未收录"）；MUXER = 没写成，pending 行已删
      * （UI 报普通失败）。混成一个会让后者对用户撒"重启后自动恢复"的谎。
      */
-    enum class Reason { RANGE, OPEN, DECODER, ENCODER, GL, MUXER, COMMIT, TIMEOUT, CANCELLED }
+    enum class Reason { RANGE, NO_EFFECT, OPEN, DECODER, ENCODER, GL, MUXER, COMMIT, TIMEOUT, CANCELLED }
 
     suspend fun export(
         src: VideoClip,
@@ -66,7 +66,12 @@ class SceneExportRunner(private val ctx: Context) {
         val (sMs, eMs) = range
         val startUs = sMs * 1000L
         val endUs = eMs * 1000L
-        if (!effects.active) return@withContext Failed(Reason.RANGE)
+        // UI 已把无效果时的后渲染 chip 置灰；走到这里说明面板开着期间设置被改了。
+        // 单独一枚 reason：报 RANGE 会让用户看到"保留段太短"这种假话
+        if (!effects.active) {
+            Log.w(TAG, "后渲染被调用但没有可应用的效果（光晕关闭且降噪 OFF），不建空任务")
+            return@withContext Failed(Reason.NO_EFFECT)
+        }
 
         val pendingUri = insertPending(ClipRule.clipNameOf(src.name))
             ?: return@withContext Failed(Reason.OPEN)
@@ -352,6 +357,10 @@ class SceneExportRunner(private val ctx: Context) {
         endUs: Long,
         job: Job?
     ) {
+        // **必须先全部取消选择**：MediaExtractor 的选择是累加的，视频轨在编码循环里还选着，
+        // 不撤就会读到音视频交错的样本流——音轨里混进整帧视频（真机实测：成片音轨码率
+        // 5.2 Mbps、AAC 帧里夹着 20KB 的巨块）
+        for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
         ex.selectTrack(audioIdx)
         ex.seekTo(basePtsUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         val endRelUs = endUs - basePtsUs

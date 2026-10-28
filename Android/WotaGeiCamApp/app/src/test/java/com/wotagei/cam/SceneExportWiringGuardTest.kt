@@ -159,6 +159,19 @@ class SceneExportWiringGuardTest {
     }
 
     @Test
+    fun `音轨拷贝必须先取消全部轨选择`() {
+        // 真机抓到的缺陷（r10）：MediaExtractor 的选择是**累加**的，编码循环里视频轨还选着，
+        // copyAudio 只 select 音轨 ⇒ 读到音视频交错样本 ⇒ 整帧视频被当 AAC 样本写进音轨
+        //（成片音轨码率 5.2 Mbps、AAC 帧间夹着 20KB 巨块，播放器报 channel element 未分配）。
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(runnerSrc, "copyAudio"))
+        val unselect = body.indexOf("unselectTrack(i)")
+        val select = body.indexOf("selectTrack(audioIdx)")
+        assertTrue("copyAudio 必须先 unselectTrack 全部轨（否则音轨混进视频样本）", unselect >= 0)
+        assertTrue("copyAudio 必须选中音轨", select >= 0)
+        assertTrue("取消选择必须早于 selectTrack(audioIdx)", unselect < select)
+    }
+
+    @Test
     fun `COMMIT与MUXER必须分开报`() {
         assertTrue("Reason 必须有 COMMIT（成片在盘但没收录）", runnerSrc.contains("COMMIT"))
         // export() 是表达式体（`= withContext {}`），bodyOf 定位不到；下面几条判据在全文里本就唯一
