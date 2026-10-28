@@ -486,6 +486,32 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
 - **回归**：pure-test 81 files / 845 tests 全绿（无 ArkTS 改动）；`assembleHap`（release）
   BUILD SUCCESSFUL（libentry.so 已含 orient 行）。
 
+## 走查批（EMU-WALK：Pura 900 模拟器运行时走查，2026-10-28）
+
+宿主 webcam 作相机输入，unsigned 包装机（模拟器不验签）。**成片侧验证被模拟器挡住**：
+`gpu record start failed code=encoder-create`（OH_VideoEncoder 建档失败 ×2，模拟器无对应
+编码器）——「斑马/峰值不入成片」的成片侧断言留真机；上屏侧全部实测通过。
+
+- **LENS 批（open slot 行）**：全新安装两轮复现——`open slot=lcam001 type=WIDE eq=24mm
+  videoMax=921600 afModes= minFocusD=0`（能力协商默认 + 归档/AF/定焦取证字段齐）。
+- **ORIENT 批（首帧 orient 行）**：`first frame 1320x2856 swap=1 orient sensor=90 display=0
+  mirror=0 fit=1.0000/0.8217 enc=0x0 encRot=90` 一行打齐；换前摄后 `texcoords deg=0/90
+  mirror=1`、模拟器显示旋转时 deg 正确跟随——方向链在换镜头/旋转两场景留痕且自洽。
+- **SLOT 批上屏侧**：效果循环后 `program slot effect=1 curve=0`；截图红条纹像素 4.2%
+  （0xE53935 斜纹，阈值 0.6 之上区域），斑马叠加在上屏渲染确认。
+- **HIST 批**：曲线弹窗 Canvas 700×700 框内 77% 纯黑 + 三通道 0x30 条形（B 2155 > R 1698 >
+  G 728，与暗场景直方图形状一致，条形自底向上）——采样→分箱→归一→绘制全链活。
+- **WB3A 批**：① WB 弹层「手动色温」`enabled=true`——模拟器探测**声明**支持 MANUAL，
+  门控按探测放行（灰显路径需不声明 MANUAL 的机型，由守卫测试钉）；② 起录前逐键报告把
+  模拟器拒掉的 `exposureMode(Operation not allowed.)` 如实打进 `pre-record apply failed`
+  （W 级）——逐键 try/catch + 拆闸后的取证通道按设计工作。
+- **观察（存量，非本批引入，登记不修）**：① `CameraSettings` 对象字段改值不触发 Dock 胶囊
+  重渲染——出现顶栏读数 `24fps` 与 Dock `帧率:30` 并存（两处同读 settings.fps；@State 对象
+  字段变更不通知，读数条因他态重绘偶先刷新）；② 模拟器虚拟传感器间歇自转（旧数据曾残留
+  `ui_orientation=landscape`、本轮两次自转）——与 UO 批口径的相关性留 UO 真机批核。
+- **录制启动失败的用户可见性**：状态行如实显示 `录制启动失败: encoder-create`（健康三格
+  路径），失败不被吞。
+
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
 追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置
