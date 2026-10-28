@@ -73,3 +73,19 @@ test('上屏槽保持效果全集', () => {
   assertTrue(cpp.indexOf('g_slotEffect == kEffectPeaking') >= 0, '上屏槽保留峰值');
   assertTrue(cpp.indexOf('if (g_slotCurve) {') >= 0, '上屏槽保留曲线');
 });
+
+test('前摄方向修正_上屏与编码容器角都加180', () => {
+  // 上游 9cc36c5 前摄容器角官方公式的本侧对应：前摄 sensorOrientation 参考系相反（镜像
+  // 语义），转正公式一律 +180（g_mirrored 即 front 标志）；与矩阵族无关——2026-10-28
+  // 模拟器实测横屏前摄差 180° 后补（后摄 sensor=90 / 前摄 sensor=270，横屏 display=270：
+  // 旧公式后摄 180 正确、前摄 0 差 180）。
+  const cpp: string = sourceText('entry/src/main/cpp/gl_render.cpp');
+  assertTrue(cpp.indexOf('g_sensorDeg - g_displayDeg + g_stRotDeg +') >= 0 &&
+    cpp.indexOf('(g_mirrored ? 180 : 0)') >= 0,
+    '上屏 UV 复合角必须含前摄 +180');
+  assertTrue(cpp.indexOf('WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 180 : 0))') >= 0,
+    '编码容器角必须含前摄 +180（与上屏同一修法）');
+  // 突变自证：两处任一回退为无 +180 公式即红
+  assertFalse(cpp.indexOf('WotaNormalizeDeg(g_sensorDeg - g_displayDeg);') >= 0,
+    '编码容器角不得回退为无修正公式');
+});

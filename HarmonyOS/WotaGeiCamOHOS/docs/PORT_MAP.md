@@ -477,12 +477,10 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   enc尺寸/encRot` 一行打全（真机排查「前摄方向不对」第一眼核这行的量与编码容器角是否自洽）；
   与上游 81cb3a5「首帧/换镜头打 stMatrix、stK、残角、applied、镜像、帧尺寸」的取证密度对齐。
   换镜头侧 `open slot` 取证行已在 LENS 批落地。
-- **登记（N/A）**：`9cc36c5` 恒等族矩阵识别——**Android SurfaceTexture 平台面专属**：根因是
-  `getTransformMatrix` 有两族（课本族 `(1-t,1-s)` vs WIKO/华为前摄恒等族 `(t,1-s)`），旧解析器
-  只认课本族导致前摄回退 0 + 三重方向错。OHOS NativeImage **不暴露变换矩阵**——本侧方向由
-  `WotaGlSetDisplayGeometry(sensorDeg, displayDeg, mirrored)` 直接下发、编码容器角由 muxer
-  `SetRotation(sensor−display)` 写入，不存在「从矩阵反解方向」的环节，该缺陷类在本侧结构性
-  不成立（若未来真机出现前摄方向异常，取首帧 orient 行取证，按 sensor/mirror 参数面排查）。
+- **登记（N/A，后由 FRONT180 批部分订正）**：`9cc36c5` 恒等族**矩阵识别**——Android
+  SurfaceTexture 平台面专属（`getTransformMatrix` 两族解析），本侧 NativeImage 不暴露变换
+  矩阵，结构性不成立；但该提交的**前摄 +180** 是独立的镜像语义修正，本侧同样需要——见
+  FRONT180 批（2026-10-28 模拟器横屏前摄实测差 180° 后补）。
 - **回归**：pure-test 81 files / 845 tests 全绿（无 ArkTS 改动）；`assembleHap`（release）
   BUILD SUCCESSFUL（libentry.so 已含 orient 行）。
 
@@ -511,6 +509,25 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   `ui_orientation=landscape`、本轮两次自转）——与 UO 批口径的相关性留 UO 真机批核。
 - **录制启动失败的用户可见性**：状态行如实显示 `录制启动失败: encoder-create`（健康三格
   路径），失败不被吞。
+
+## 修复批（FRONT180：前摄方向 +180——横屏实测缺陷，2026-10-28）
+
+EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 ORIENT 批的 N/A 过判**：
+「恒等族矩阵识别」确实 N/A（本侧无 stMatrix 反解面），但 9cc36c5 的**前摄 +180** 是独立的
+语义修正——前摄 sensorOrientation 的参考系与后摄相反（镜像语义），转正公式比后摄多 180°
+（上游 RecordProfile 前摄容器角官方公式 360−((sensor+display)%360) = sensor−display+180），
+与矩阵族无关。
+
+- **取证链**（EMU-WALK 日志）：后摄 sensor=90、前摄 sensor=270（首帧 orient 行直读）、横屏
+  display=270 ⇒ 旧公式后摄 `deg=180`（正确）、前摄 `deg=0`（差 180，正是用户所见）。
+- **`cpp/gl_render.cpp`** 两处同修（g_mirrored 即 front 标志）：① 上屏 UV 复合角
+  `RebuildTexCoords` 加 `(g_mirrored ? 180 : 0)`；② 编码容器角 `WotaGlEncoderRotation`
+  同加——修正后同屏向下两颗镜头容器角一致（竖屏均 90、横屏均 0，佐证这是把前摄镜像
+  参考系扳平的语义修正）。+180 不改变 90/270 性质，letterbox 轴交换（PreviewFit）不受影响。
+- **复验**（模拟器横屏 + 前摄重装后）：`texcoords deg=180 mirror=1` + 首帧
+  `orient sensor=270 display=270 mirror=1 ... encRot=180`——画面转正由用户目视确认。
+- **守卫**：`monitor-slot-guard.test.ets` 增「前摄方向修正」例（两处公式源码钉 + 突变自证）。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
