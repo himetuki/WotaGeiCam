@@ -75,4 +75,56 @@ class HistogramMathTest {
         val h = HistogramMath.normalizedHeights(IntArray(HistogramMath.VALUES))
         assertTrue(h.all { it == 0f })
     }
+
+    // ---------------------------------------------- 第 4 组亮度 Y（29 §2.2，2026-10-28）
+
+    @Test
+    fun `四组输出_Y落在基址段`() {
+        assertEquals("VALUES = 4×64", 256, HistogramMath.VALUES)
+        assertEquals(4, HistogramMath.CHANNELS)
+        // 纯白帧：R/G/B 全落 63 档，Y = (54+183+19)*255 shr 10 = 63 档
+        val white = ByteArray(64 * 64 * 4)
+        for (i in 0 until 64 * 64) {
+            val o = i * 4
+            white[o] = 0xFF.toByte(); white[o + 1] = 0xFF.toByte(); white[o + 2] = 0xFF.toByte(); white[o + 3] = 0xFF.toByte()
+        }
+        val bins = HistogramMath.binRgba(white, 64, 64)
+        assertEquals(4096, bins[63])
+        assertEquals(4096, bins[HistogramMath.BINS + 63])
+        assertEquals(4096, bins[2 * HistogramMath.BINS + 63])
+        assertEquals("白帧 Y63 满计数", 4096, bins[HistogramMath.LUMA_BASE + 63])
+        // 纯黑帧：Y0 满计数
+        val blackBins = HistogramMath.binRgba(ByteArray(64 * 64 * 4), 64, 64)
+        assertEquals(4096, blackBins[HistogramMath.LUMA_BASE])
+    }
+
+    @Test
+    fun `纯红纯绿纯蓝的Y落点符合601权重`() {
+        fun frame(rr: Int, gg: Int, bb: Int): ByteArray {
+            val px = ByteArray(64 * 64 * 4)
+            for (i in 0 until 64 * 64) {
+                val o = i * 4
+                px[o] = rr.toByte(); px[o + 1] = gg.toByte(); px[o + 2] = bb.toByte(); px[o + 3] = 0xFF.toByte()
+            }
+            return px
+        }
+        assertEquals("纯红 Y = 54*255 shr 10 = 13（满计数 4096）", 4096,
+            HistogramMath.binRgba(frame(255, 0, 0), 64, 64)[HistogramMath.LUMA_BASE + 13])
+        assertEquals("纯绿 Y = 183*255 shr 10 = 45", 4096,
+            HistogramMath.binRgba(frame(0, 255, 0), 64, 64)[HistogramMath.LUMA_BASE + 45])
+        assertEquals("纯蓝 Y = 19*255 shr 10 = 4", 4096,
+            HistogramMath.binRgba(frame(0, 0, 255), 64, 64)[HistogramMath.LUMA_BASE + 4])
+        assertEquals("灰 128 混色 → Y32", 4096,
+            HistogramMath.binRgba(frame(128, 128, 128), 64, 64)[HistogramMath.LUMA_BASE + 32])
+    }
+
+    @Test
+    fun `Y组归一与其余通道同口径`() {
+        val counts = IntArray(HistogramMath.VALUES)
+        counts[HistogramMath.LUMA_BASE + 20] = 800
+        counts[HistogramMath.LUMA_BASE + 10] = 400
+        val h = HistogramMath.normalizedHeights(counts)
+        assertEquals("Y 峰归一 = 1", 1f, h[HistogramMath.LUMA_BASE + 20])
+        assertEquals("Y 次峰 = 0.5", 0.5f, h[HistogramMath.LUMA_BASE + 10], 1e-6f)
+    }
 }

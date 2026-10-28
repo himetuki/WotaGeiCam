@@ -272,6 +272,14 @@ object WotaSettings {
     const val KEY_PLAYER_TOP_BAR_COLLAPSED = "player_top_bar_collapsed"
 
     /**
+     * 曲线面板**实际边长** dp（29 §1.2 F1，2026-10-28）：存 dp 不存 scale——跨屏幕/转屏时
+     * baseSide 会变，存 scale 会漂移。缺省 200（= 设计档 CurveSide），读取时经
+     * [curvePanelSideDp] 钳进合法域。写：把手拖拽抬手一次 + 「重置」写回 200；
+     * 纯 UI 设置，**不走 [applyDefaultsOnce]**。
+     */
+    const val KEY_CURVE_PANEL_SIDE_DP = "curve_panel_side_dp"
+
+    /**
      * 滑杆吸附开关（2026-10-21 用户反馈：变焦只有 0.5/1/1.5…，想调 1.2×/1.7×）。
      *
      * 存**关掉吸附**（改用连续值）的参数 id 集合，逗号分隔；缺键/空串 = 全部吸附（2026-10-17 的
@@ -474,6 +482,20 @@ object WotaSettings {
 
     fun setPlayerTopBarCollapsed(prefs: SharedPreferences, collapsed: Boolean) {
         prefs.edit().putBoolean(KEY_PLAYER_TOP_BAR_COLLAPSED, collapsed).apply()
+    }
+
+    /**
+     * 曲线面板边长（dp）：坏值/缺键回 200（设计档），NaN/负数/超大在**读取侧**只钳下限——
+     * 上限（可用区）是组合期才有的输入，由 [com.wotagei.cam.core.CurvePanelSize.clamp]
+     * 在组合期带着 maxSide 二次钳。
+     */
+    fun curvePanelSideDp(prefs: SharedPreferences): Float {
+        val v = prefs.getFloat(KEY_CURVE_PANEL_SIDE_DP, 200f)
+        return if (v.isNaN() || v < 0f) 200f else v
+    }
+
+    fun setCurvePanelSideDp(prefs: SharedPreferences, sideDp: Float) {
+        prefs.edit().putFloat(KEY_CURVE_PANEL_SIDE_DP, sideDp).apply()
     }
 
     /** 网格列数：旧值不在档位里（例如手写进 prefs 的 6）一律回落到 2 */

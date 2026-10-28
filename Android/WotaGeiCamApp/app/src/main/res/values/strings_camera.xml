@@ -181,6 +181,7 @@
     <string name="cam_curve_ch_green">绿</string>
     <string name="cam_curve_ch_blue">蓝</string>
     <string name="cam_curve_reset_all">全部复位</string>
+    <string name="cam_curve_io_readout">入 %1$d · 出 %2$d</string>
 
     <!-- 录制结果与失败提示（机器码在 record 包，这里按码给文案）。
          结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口，分派见 ui/RecordResultNotice.kt 的

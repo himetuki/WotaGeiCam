@@ -71,8 +71,11 @@ class HistogramWiringGuardTest {
         )
         assertTrue("背景绘制必须走归一纯函数", canvas.contains("HistogramMath.normalizedHeights"))
         assertTrue("背景绘制只在有快照时进行", canvas.contains("if (histogram != null)"))
-        // 高透明：三通道 tint 的 alpha 都是 0x30（直接钉字面量，改透明度必须过这里）
-        assertTrue("背景必须高透明（0x30 alpha）", canvas.contains(", 0x30),"))
+        // 高透明（29 §2.2 起**按通道**取数着色，master 走亮度 Y）：当前通道 tint alpha 0.30f
+        //（钉字面量，改透明度必须过这里）；三色混排同绘已退场
+        assertTrue("背景必须高透明（alpha 0.30f）", canvas.contains("copy(alpha = 0.30f)"))
+        assertTrue("必须按通道取数组（不再三色混排）", canvas.contains("histogramBase(channel)"))
+        assertTrue("必须有按通道着色的背景趋势条", canvas.contains("Brush.horizontalGradient(trendColors(channel))"))
     }
 
     @Test
