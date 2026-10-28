@@ -248,6 +248,8 @@ struct CameraPage {
   /** 窗口 vp 尺寸（FocusTapMath 归一化用；refreshHudReadoutMetrics 顺手刷新） */
   private winWvp: number = 0;
   private winHvp: number = 0;
+  /** 横竖屏分支（T32 提前批）：横屏=右侧竖排 Dock，竖屏=底部横排（T31 布局） */
+  @State isLandscape: boolean = false;
   /**
    * WLB：画面在窗口内的矩形（letterbox 单一真源）——参考线 aspect、点按映射、native 上屏
    * 收缩因子三处都吃它，不许各算一遍。宽高比不可用/首帧未量到时 = 铺满（= 旧行为）。
@@ -1171,7 +1173,9 @@ struct CameraPage {
       return;
     }
     try {
-      lib.setDisplayGeometry(info.sensorDeg, this.displayDeg(), info.front);
+      // 方向常数 v2（见 cpp/gl_render.cpp RebuildTexCoords 头注）：mirror = !front
+      // （后摄镜像、前摄不镜像——模拟器实测标定的 OHOS 缓冲语义）。
+      lib.setDisplayGeometry(info.sensorDeg, this.displayDeg(), !info.front);
     } catch (e) {
     }
     this.applyPreviewFit();
@@ -1259,6 +1263,7 @@ struct CameraPage {
       // TFC：窗口 vp 尺寸（tap-to-focus 归一化基准；旋转后 display.on('change') 会重刷）
       this.winWvp = Math.max(0, d.width / density);
       this.winHvp = Math.max(0, d.height / density);
+      this.isLandscape = this.winWvp > this.winHvp;
       this.applyPreviewFit(); // WLB：视口变化（旋转/分屏/窗口尺寸）后重算画面矩形
     } catch (e) {
       // 量不到：保持现值（首帧兜底 0 → hudPerRowFor 退 1 颗一行，宁可高也不裁字）
@@ -2263,91 +2268,96 @@ struct CameraPage {
                 this.retryCamera();
               })
           }
-          // 两行主胶囊（2×4，均分宽度、48vp；无横向 Scroll）。
-          // HudPill 是 @Component+@Prop：父 @State 变即刷新（旧 @Builder 值参数会冻结）
-          Row({ space: HudSpace.S }) {
-            ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
-              // 外层 Row 拿 layoutWeight（4 等分）与锚点 id（量框定位弹层用）；内层胶囊铺满
-              Row() {
-                HudPill({
-                  label: this.dockLabel(key),
-                  pillEnabled: this.dockEnabled(key),
-                  active: false,
-                  onTap: (): void => {
-                    this.onDockTap(key);
-                  }
-                })
-              }
-              .layoutWeight(1)
-              .id(`pill_${key}`)
-            }, (key: string): string => key)
-          }
-          .width('100%')
-          Row({ space: HudSpace.S }) {
-            ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
-              Row() {
-                HudPill({
-                  label: this.dockLabel(key),
-                  pillEnabled: this.dockEnabled(key),
-                  active: false,
-                  onTap: (): void => {
-                    this.onDockTap(key);
-                  }
-                })
-              }
-              .layoutWeight(1)
-              .id(`pill_${key}`)
-            }, (key: string): string => key)
-          }
-          .width('100%')
-
-          // 更多 + 圆形快门（居中）+ 右侧对称占位（保证快门几何居中）
-          Stack({ alignContent: Alignment.Center }) {
-            Row() {
-              Row() {
-                HudEntryButton({
-                  label: '更多',
-                  entryEnabled: true,
-                  onTap: (): void => {
-                    this.openMore();
-                  }
-                })
-              }
-              .id('pill_more')
-              Blank()
-              // 右侧占位与「更多」同宽，快门保持屏幕中线
-              Row().width(76)
+          if (this.isLandscape) {
+            // 横屏 Dock 改为根 Stack 底部右侧浮层（见下方「横屏 Dock 浮层」）：
+            // 不参与 HUD 纵向流式布局——首版流式实测被顶部读数挤到屏外（更多被裁、快门出屏）。
+          } else {
+            // 竖屏（T31 布局）：两行主胶囊（2×4，均分宽度、48vp；无横向 Scroll）。
+            // HudPill 是 @Component+@Prop：父 @State 变即刷新（旧 @Builder 值参数会冻结）
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
+                // 外层 Row 拿 layoutWeight（4 等分）与锚点 id（量框定位弹层用）；内层胶囊铺满
+                Row() {
+                  HudPill({
+                    label: this.dockLabel(key),
+                    pillEnabled: this.dockEnabled(key),
+                    active: false,
+                    onTap: (): void => {
+                      this.onDockTap(key);
+                    }
+                  })
+                }
+                .layoutWeight(1)
+                .id(`pill_${key}`)
+              }, (key: string): string => key)
+            }
+            .width('100%')
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
+                Row() {
+                  HudPill({
+                    label: this.dockLabel(key),
+                    pillEnabled: this.dockEnabled(key),
+                    active: false,
+                    onTap: (): void => {
+                      this.onDockTap(key);
+                    }
+                  })
+                }
+                .layoutWeight(1)
+                .id(`pill_${key}`)
+              }, (key: string): string => key)
             }
             .width('100%')
 
-            Stack() {
-              // 外环（72vp 白环）
-              Column()
-                .width(HudTouch.SHUTTER)
-                .height(HudTouch.SHUTTER)
-                .borderRadius(HudTouch.SHUTTER / 2)
-                .border({ width: 3, color: HudColor.RECORD_RING })
-                .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
-              // 内芯：72vp 圆外 44vp 红点；录制中 24vp 红方块；收尾中灰显
-              Column()
-                .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
-                .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
-                .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
-                .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
-                  : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
-            }
-            .width(HudTouch.SHUTTER)
-            .height(HudTouch.SHUTTER)
-            .enabled(!this.stopPending && this.glFatal === '')
-            .accessibilityText(this.recording ? '停止录制' : '开始录制')
-            .onClick((): void => {
-              this.toggleRecord();
-            })
+            // 更多 + 圆形快门（居中）+ 右侧对称占位（保证快门几何居中）
+            Stack({ alignContent: Alignment.Center }) {
+              Row() {
+                Row() {
+                  HudEntryButton({
+                    label: '更多',
+                    entryEnabled: true,
+                    onTap: (): void => {
+                      this.openMore();
+                    }
+                  })
+                }
+                .id('pill_more')
+                Blank()
+                // 右侧占位与「更多」同宽，快门保持屏幕中线
+                Row().width(76)
+              }
+              .width('100%')
 
-            // 收尾态文案走状态提示行（避免百分比定位叠加层）
+              Stack() {
+                // 外环（72vp 白环）
+                Column()
+                  .width(HudTouch.SHUTTER)
+                  .height(HudTouch.SHUTTER)
+                  .borderRadius(HudTouch.SHUTTER / 2)
+                  .border({ width: 3, color: HudColor.RECORD_RING })
+                  .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
+                // 内芯：72vp 圆外 44vp 红点；录制中 24vp 红方块；收尾中灰显
+                Column()
+                  .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                  .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                  .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
+                  .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
+                    : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
+              }
+              .width(HudTouch.SHUTTER)
+              .height(HudTouch.SHUTTER)
+              .enabled(!this.stopPending && this.glFatal === '')
+              .accessibilityText(this.recording ? '停止录制' : '开始录制')
+              .onClick((): void => {
+                this.toggleRecord();
+              })
+
+              // 收尾态文案走状态提示行（避免百分比定位叠加层）
+            }
+            .width('100%')
+            .height(HudTouch.SHUTTER)
           }
-          .width('100%')
-          .height(HudTouch.SHUTTER)
         }
         .width('100%')
         .padding({
@@ -2372,6 +2382,88 @@ struct CameraPage {
             this.onPreviewLongPress();
           })
       )
+
+      // 横屏 Dock 浮层（T32 提前批）：底部右侧独立定位（全屏容器 End/End 对齐），不受顶部
+      // 读数高度影响，快门/更多永不出屏；锚点 id 与竖屏分支同名（弹层量框定位复用）。
+      if (this.isLandscape) {
+        Column() {
+          Column({ space: HudSpace.S }) {
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.DOCK_ROW1, (key: string): void => {
+                Row() {
+                  HudPill({
+                    label: this.dockLabel(key),
+                    pillEnabled: this.dockEnabled(key),
+                    active: false,
+                    onTap: (): void => {
+                      this.onDockTap(key);
+                    }
+                  })
+                }
+                .layoutWeight(1)
+                .id(`pill_${key}`)
+              }, (key: string): string => key)
+            }
+            Row({ space: HudSpace.S }) {
+              ForEach(HudSpec.DOCK_ROW2, (key: string): void => {
+                Row() {
+                  HudPill({
+                    label: this.dockLabel(key),
+                    pillEnabled: this.dockEnabled(key),
+                    active: false,
+                    onTap: (): void => {
+                      this.onDockTap(key);
+                    }
+                  })
+                }
+                .layoutWeight(1)
+                .id(`pill_${key}`)
+              }, (key: string): string => key)
+            }
+            Row({ space: HudSpace.S }) {
+              Row() {
+                HudEntryButton({
+                  label: '更多',
+                  entryEnabled: true,
+                  onTap: (): void => {
+                    this.openMore();
+                  }
+                })
+              }
+              .layoutWeight(1)
+              .id('pill_more')
+              Stack() {
+                Column()
+                  .width(HudTouch.SHUTTER)
+                  .height(HudTouch.SHUTTER)
+                  .borderRadius(HudTouch.SHUTTER / 2)
+                  .border({ width: 3, color: HudColor.RECORD_RING })
+                  .backgroundColor(HudColor.SCRIM_TRANSLUCENT)
+                Column()
+                  .width(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                  .height(this.recording ? HudTouch.SHUTTER_STOP : HudTouch.SHUTTER_INNER)
+                  .borderRadius(this.recording ? HudShape.STOP_RADIUS : HudTouch.SHUTTER_INNER / 2)
+                  .backgroundColor(this.stopPending ? HudColor.TEXT_DISABLED
+                    : (this.recording ? HudColor.RECORD_DOT_RECORDING : HudColor.RECORD_DOT))
+              }
+              .width(HudTouch.SHUTTER)
+              .height(HudTouch.SHUTTER)
+              .enabled(!this.stopPending && this.glFatal === '')
+              .accessibilityText(this.recording ? '停止录制' : '开始录制')
+              .onClick((): void => {
+                this.toggleRecord();
+              })
+            }
+          }
+          .width(336)
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .alignItems(HorizontalAlign.End)
+        .padding({ right: HudSpec.SAFE_MARGIN, bottom: this.safeBottom + HudSpace.S })
+        .hitTestBehavior(HitTestMode.Transparent)
+      }
 
       // TFC：对焦标记（瞬时可视反馈；hitTest None 不拦触摸，800ms 自动隐）
       if (this.focusMarkVisible) {

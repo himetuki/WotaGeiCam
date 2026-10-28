@@ -74,18 +74,21 @@ test('上屏槽保持效果全集', () => {
   assertTrue(cpp.indexOf('if (g_slotCurve) {') >= 0, '上屏槽保留曲线');
 });
 
-test('前摄方向修正_上屏与编码容器角都加180', () => {
-  // 上游 9cc36c5 前摄容器角官方公式的本侧对应：前摄 sensorOrientation 参考系相反（镜像
-  // 语义），转正公式一律 +180（g_mirrored 即 front 标志）；与矩阵族无关——2026-10-28
-  // 模拟器实测横屏前摄差 180° 后补（后摄 sensor=90 / 前摄 sensor=270，横屏 display=270：
-  // 旧公式后摄 180 正确、前摄 0 差 180）。
+test('方向常数v2_上屏与编码容器角同式_mirror取反', () => {
+  // 2026-10-28 用户按模拟器实测标定（取代 FRONT180 的 v1）：OHOS 预览缓冲方向语义与
+  // Camera2 SurfaceTexture 不同，Camera2 公式整体差一组常数。竖屏实测目标：后摄（270, 镜像）
+  // ＝当前画面顺时针 90° 再左右镜像；前摄（270, 不镜像）＝再左右镜像一次。
+  // 公式：deg = sensor − display + (front ? 0 : 180)、mirror = !front；横屏两镜头退化为
+  // deg=0（webcam 原始帧横向，横屏窗口无需旋转，自洽）。
   const cpp: string = sourceText('entry/src/main/cpp/gl_render.cpp');
   assertTrue(cpp.indexOf('g_sensorDeg - g_displayDeg + g_stRotDeg +') >= 0 &&
-    cpp.indexOf('(g_mirrored ? 180 : 0)') >= 0,
-    '上屏 UV 复合角必须含前摄 +180');
-  assertTrue(cpp.indexOf('WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 180 : 0))') >= 0,
-    '编码容器角必须含前摄 +180（与上屏同一修法）');
-  // 突变自证：两处任一回退为无 +180 公式即红
-  assertFalse(cpp.indexOf('WotaNormalizeDeg(g_sensorDeg - g_displayDeg);') >= 0,
-    '编码容器角不得回退为无修正公式');
+    cpp.indexOf('(g_mirrored ? 0 : 180)') >= 0,
+    '上屏 UV 复合角必须是 v2 公式（后摄 +180 / 前摄 +0）');
+  assertTrue(cpp.indexOf('WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 0 : 180))') >= 0,
+    '编码容器角必须与上屏同式（v2）');
+  assertFalse(cpp.indexOf('(g_mirrored ? 180 : 0)') >= 0,
+    'v1 的前摄 +180 写法必须消失（突变自证）');
+  const camera: string = sourceText('entry/src/main/ets/pages/Camera.ets');
+  assertTrue(camera.indexOf('lib.setDisplayGeometry(info.sensorDeg, this.displayDeg(), !info.front)') >= 0,
+    'ArkTS 侧必须传 mirror = !front');
 });

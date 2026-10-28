@@ -359,16 +359,18 @@ int StRotationFromMatrix(const float matrix[16])
  * X=u-0.5、Y=0.5-v（Y 向下），内容顺时针转 θ 等价取样逆旋 -θ：X0=c·X+s·Y、Y0=-s·X+c·Y；
  * 写回属性 t=1-v 抵消顶点 Y 轴方向。
  *
- * 前摄 +180（上游 9cc36c5 RecordProfile 前摄容器角官方公式的上屏对应，2026-10-28 模拟器
- * 实测补）：前摄 sensorOrientation 的参考系与后摄相反（镜像语义）——转正公式比后摄多 180°，
- * 与矩阵族无关（本侧无 stMatrix 反解面，恒等族判定 N/A 不影响本修正）。g_mirrored 即
- * front 标志（Camera.ets applyGeometry 传 info.front）。+180 不改变 90/270 性质，
- * letterbox 轴交换判断（PreviewFit）不受影响。
+ * 方向常数 v2（2026-10-28 用户按模拟器实测标定，取代 FRONT180 的 v1）：
+ * `deg = sensor − display + (front ? 0 : 180)`、`mirror = !front`（后摄镜像、前摄不镜像）。
+ * 竖屏实测目标：后摄（270, 镜像）＝当前画面顺时针 90° 再左右镜像；前摄（270, 不镜像）＝
+ * 再左右镜像一次。两组与公式吻合，且横屏下两颗镜头都退化为 deg=0（webcam 原始帧横向，
+ * 横屏窗口无需旋转，自洽）。根因：**OHOS 预览缓冲的方向语义与 Camera2 SurfaceTexture 不同**，
+ * Camera2 公式（sensor−display+front·180 / mirror=front）在本侧整体差这组常数——登记为
+ * OHOS 缓冲语义标定，真机复测时若与模拟器冲突再按机型域分流。
  */
 void RebuildTexCoords()
 {
     const int deg = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + g_stRotDeg +
-        (g_mirrored ? 180 : 0));
+        (g_mirrored ? 0 : 180));
     const int key = (deg << 1) | (g_mirrored ? 1 : 0);
     if (key == g_geomKey) {
         return;
@@ -2345,11 +2347,11 @@ std::string WotaGlGetNativeImageError()
 int WotaGlEncoderRotation()
 {
     // 与显示几何同一输入源：sensor 来自镜头信息，display 来自 display.rotation×90。
-    // 前摄 +180（上游 9cc36c5 前摄容器角官方公式 360−((sensor+display)%360) 的等价形）：
-    // 前摄参考系相反。修正后同屏向下两颗镜头容器角一致（竖屏均 90、横屏均 0）。
-    // muxer 只接受 0/90/180/270：按上游 normalizeQuarter 四舍五入（45→90、359→0），
-    // 非 90 倍数 sensorOrientation 不得让起录直接失败（审查 P2）。
-    const int raw = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 180 : 0));
+    // 方向常数 v2（见 RebuildTexCoords 头注）：与上屏同式 `sensor − display + (front?0:180)`，
+    // 保证容器角与竖屏窗口的上屏转角同一叙事。muxer 只接受 0/90/180/270：按上游
+    // normalizeQuarter 四舍五入（45→90、359→0），非 90 倍数 sensorOrientation 不得让
+    // 起录直接失败（审查 P2）。
+    const int raw = WotaNormalizeDeg(g_sensorDeg - g_displayDeg + (g_mirrored ? 0 : 180));
     const int rounded = WotaNormalizeQuarter(raw);
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "encoder rotation raw=%{public}d rounded=%{public}d mirror=%{public}d",

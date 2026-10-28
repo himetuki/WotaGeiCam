@@ -535,6 +535,33 @@ EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 OR
 - **守卫**：`monitor-slot-guard.test.ets` 增「前摄方向修正」例（两处公式源码钉 + 突变自证）。
 - **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（LAND：横屏 HUD + 方向常数 v2 + 默认横屏，2026-10-28）
+
+用户裁决：「横屏才是常用状态，做好」+ 两条画面修正（前摄再左右镜像；后摄顺时针 90° 后
+左右镜像）。T32 横屏保真度提前落地。
+
+- **方向常数 v2（`cpp/gl_render.cpp` 两处同式）**：`deg = sensor − display + (front ? 0 : 180)`、
+  `mirror = !front`（后摄镜像、前摄不镜像）。由用户对模拟器竖屏实景的修正标定反推：后摄目标
+  （270, 镜像）、前摄目标（270, 不镜像）——两组与公式吻合。根因：**OHOS 预览缓冲的方向语义
+  与 Camera2 SurfaceTexture 不同**，Camera2 公式在本侧整体差这组常数（登记；真机复测若冲突
+  再按机型域分流）。ArkTS 侧 `applyGeometry` 传 `mirror = !info.front`；编码容器角同式。
+  横屏后摄稳态 = `deg=180 mirror=1`（90−270）、前摄 `deg=0 mirror=0`——首帧 orient 行
+  与 texcoords 实测自洽。
+- **默认方向改横屏**（`UIOrientations.DEFAULT = LANDSCAPE`）：撤销 T31 的竖屏默认偏离，
+  回到上游口径；竖屏仍在设置页可切（T31 布局逐字保留）。
+- **横屏 HUD（`pages/Camera.ets`）**：`isLandscape` 由窗口 vp 尺寸驱动（`refreshHudReadoutMetrics`）；
+  横屏 Dock 为**根 Stack 底部右侧浮层**（全屏容器 End/End 对齐 + 透明命中），锚点 id 与竖屏
+  同名（弹层量框定位复用）——**首版曾做成 HUD 纵向流内分支，实测被顶部读挤压出屏**
+  （「更多」被裁、快门完全出屏），改浮层后全部落在屏内（更多 y 1047-1215、快门行
+  1026-1278 < 1320）。预览不再被压缩（浮层盖在画面上，行扫描非黑占比 82-91% 全高）。
+- **守卫**：`monitor-slot-guard.test.ets` 方向常数例改 v2（两处公式钉 + v1 写法必须消失的
+  突变自证 + ArkTS `mirror = !front` 接线）；`ui-orientation-wiring.test.ets` 默认档钉子改
+  LANDSCAPE（2026-10-28 裁决口径）。
+- **模拟器实测**：全新安装默认横屏生效（`preferred orientation -> landscape`）；横屏首帧
+  `orient sensor=90 display=270 mirror=1 fit=0.8217/1.0000 encRot=180`；Dock 浮层几何全在屏内。
+  竖屏切换路径（设置页「竖屏固定」）此前已验证锁有效。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
 追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置

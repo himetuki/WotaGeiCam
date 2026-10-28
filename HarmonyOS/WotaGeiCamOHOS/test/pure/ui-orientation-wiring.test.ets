@@ -5,7 +5,8 @@
  * AUTO_ROTATION_PORTRAIT=6、AUTO_ROTATION_LANDSCAPE=7），与上游「产出 ActivityInfo 编译期
  * Int」同构——手写字面量钉住，突变必红。
  *
- * 决策钉子：本侧 DEFAULT = PORTRAIT（偏离上游 LANDSCAPE）——鸿蒙 HUD 是 T31 竖屏取证设计；
+ * 决策钉子：2026-10-28 起 DEFAULT = LANDSCAPE（用户裁决「横屏才是常用状态」；横屏 HUD
+ * 已按 T32 提前批落地，竖屏保留 T31 布局可切）；此前口径（DEFAULT=PORTRAIT）作废。
  * 守卫钉住默认档与 SettingsStore 键名，防"顺手对齐上游"破坏 T31 布局。
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -51,7 +52,7 @@ test('fromPersistValue_大小写不敏感_坏串回默认', () => {
   assertEq(UIOrientations.DEFAULT, UIOrientations.fromPersistValue(''));
   assertEq(UIOrientations.DEFAULT, UIOrientations.fromPersistValue(undefined));
   // 默认档钉子：本侧 PORTRAIT（偏离上游 LANDSCAPE——T31 竖屏取证设计，突变必红）
-  assertEq(UIOrientation.PORTRAIT, UIOrientations.DEFAULT, '本侧出厂默认必须是竖屏固定');
+  assertEq(UIOrientation.LANDSCAPE, UIOrientations.DEFAULT, '2026-10-28 裁决：出厂默认横屏（横屏才是常用状态）');
 });
 
 test('契约数值_映射到window.Orientation的AUTO_ROTATION两档', () => {
