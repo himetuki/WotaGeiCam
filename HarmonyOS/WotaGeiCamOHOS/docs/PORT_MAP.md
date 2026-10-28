@@ -289,6 +289,40 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
   维持 pickDefaultLens——探针页要的是「归档标签首颗」的确定性，不随本裁决改。
 - **回归**：pure-test 75 files / 781 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（SLOT：双 program 槽——监看叠加只上屏，2026-10-28）
+
+上游 `46d8d91` + `5742c0f`（释放顺序关注点）+ `5035b09`（附A/C·附B/D 的 N/A 评定）。
+追赶基线第三批。**这是本侧真实缺陷修复**：GL-4 起「效果槽同时作用于预览与编码」
+（DrawEncoderPass/DrawEncoderMended 都吃上屏槽 program），斑马/峰值一直会进成片——
+与 2026-10-27 产品裁决「监看叠加只上屏、绝不进成片」直接冲突（安卓侧 r02 已修，本侧补齐）。
+
+- **`cpp/gl_render.cpp`**：
+  - 新增**编码槽** `g_encSlotLocs`/`g_encSlotCurve`（对齐上游 24↔25 槽位口径：DISPLAY/MOVIE
+    两槽；**槽位不进键**——编码槽只有 curve 一个自由度，effect 恒 NONE）；
+  - `SyncEncodeSlot(wantCurve)`：由 `SyncEffect` 的同一份曲线纹理门控结果驱动（两槽同源同帧），
+    放在上屏槽早退路径**之前**；只允许 `WOTA_CURVE_FS` 变体，构建失败退 `g_passLocs` 直通
+    （成片丢曲线优于成片带监看叠加，且不阻塞录制）并落日志；
+  - `DrawScene` 增 `encodeSlot` 尾参（默认 false，既有调用零改动）：编码分支恒无斑马/峰值
+    uniform、只按 `g_encSlotCurve` 绑曲线；上屏分支原样；
+  - `DrawEncoderPass` / `DrawEncoderMended`（直发 + MEND 离屏 cur 两条编码支路）改吃编码槽；
+  - `DestroyGlObjects` 回收编码槽（在 EGL 拆除**之前**——5742c0f 释放顺序口径：删 GL 对象
+    需现存当前上下文）。
+- **`cpp/gl_render.h`**：`WotaGlSetEffect` 注释改「上屏专属」并登记编码槽自动跟随。
+- **守卫**：`test/pure/monitor-slot-guard.test.ets` 4 例（C++ 源码结构扫描，与
+  clip-export-shift 同口径）：编码槽存在且由 SyncEffect 同源驱动/只许曲线变体、两条编码支路
+  都吃编码槽且 `encodeSlot=true`、DestroyGlObjects 回收、上屏槽保留效果全集。突变自证：
+  编码支路换回上屏槽或删 encodeSlot 分支即红。
+  `test/pure/preview-fit.test.ets` 的 DrawScene 签名锚同步更新（尾参加 `encodeSlot = false`，
+  语义不变：编码恒满幅）。
+- **登记（N/A）**：`5035b09` 附A/C（补弧 sidecar 走 MediaStore 兜底）——Android 共享目录
+  非媒体文件写被拒的兜底，本侧沙箱直写无此通道；附B/D（帧龄改段内漂移）——本侧 native 无
+  「墙钟 − 相机 SOF 戳」帧龄观测面（FrameLedger 只计帧数，NativeImage 戳只进光弧 keep-rule
+  且已有防倒退钳制），无可修点。
+- **真机待验（不阻塞收口）**：开斑马/峰值录制一段，成片应无叠加、预览有叠加；开曲线录制，
+  成片应有曲线；MEND 档录制成片口径同。
+- **回归**：pure-test 76 files / 785 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL
+  （libentry.so 已含新槽代码）。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

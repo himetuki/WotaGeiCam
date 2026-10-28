@@ -44,7 +44,9 @@ std::string WotaGlGetNativeImageError();
 /** 方向几何：sensorOrientation（度）/ 显示旋转（0/90/180/270）/ 前置镜像 */
 void WotaGlSetDisplayGeometry(int sensorDeg, int displayDeg, bool mirrored);
 
-/** 效果槽：0=NONE / 1=ZEBRA / 2=PEAKING（core FrameEffect 数值） */
+/** 效果槽（**上屏专属**）：0=NONE / 1=ZEBRA / 2=PEAKING（core FrameEffect 数值）。
+ *  监看叠加只上屏、绝不进成片（上游 46d8d91 双 program 槽裁决的 OHOS 对应物）：
+ *  编码支路恒 NONE，曲线是创作观感、两槽都带——编码槽在 native 内部自动跟随，无独立开关。 */
 void WotaGlSetEffect(int effect);
 
 /** 曲线叠加开关（曲线 program / zebra·peaking 曲线变体） */

@@ -216,9 +216,14 @@ struct ProgramLocs {
     GLint uColor = -1;
 };
 ProgramLocs g_passLocs;   // 直通（链接失败即无画面，永不删除）
-ProgramLocs g_slotLocs;   // 效果槽（曲线/斑马/峰值之一）
+ProgramLocs g_slotLocs;   // 上屏效果槽（曲线/斑马/峰值之一）
 int g_slotEffect = kEffectNone;
 bool g_slotCurve = false;
+// 编码槽（上游 46d8d91 双 program 槽的 OHOS 对应物）：**成片支路恒 NONE**——监看叠加
+// （斑马/峰值）绝不进成片（产品裁决「监看叠加只上屏」）；曲线是创作观感，两槽都带。
+// 槽位不进键：编码槽只有 curve 一个自由度，跟随上屏的 wantCurve。
+ProgramLocs g_encSlotLocs;
+bool g_encSlotCurve = false;
 
 // 请求态（napi setter 只写状态；实际建槽/上传在渲染线程内完成）
 int g_effectRequested = kEffectNone;
@@ -556,6 +561,30 @@ void PeakingRgbOf(int colorIndex, float rgb[3])
 }
 
 /**
+ * 编码槽同步（上游 46d8d91「成片支路恒 NONE」的 OHOS 对应物）：编码支路 program 只有
+ * curve 一个自由度（effect 恒 NONE——斑马/峰值是监看叠加，绝不进成片）。
+ * wantCurve 与上屏同源（同一份曲线纹理门控结果）；构建失败退 g_passLocs 直通（成片丢曲线
+ * 优于成片带着监看叠加，且不阻塞录制）。在 SyncEffect 里一并驱动，保证两槽同源同帧。
+ */
+void SyncEncodeSlot(bool wantCurve)
+{
+    if (g_encSlotLocs.program != 0 && wantCurve == g_encSlotCurve) {
+        return;
+    }
+    DeleteProgramLocs(g_encSlotLocs);
+    g_encSlotCurve = false;
+    if (!wantCurve) {
+        return; // 直通（g_passLocs 常驻）
+    }
+    if (BuildProgramLocs(WOTA_TEXTURE_VS, WOTA_CURVE_FS, g_encSlotLocs)) {
+        g_encSlotCurve = true;
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "encode slot curve program failed, fallback pass-through (recording keeps going)");
+    }
+}
+
+/**
  * 单效果槽程序切换（上游退避链）：目标效果+曲线变体失败 → 退无曲线变体；再失败且非 NONE →
  * 黑名单该效果并回直通（下一帧 target 归 NONE）；曲线单独模式失败 → 回直通。
  */
@@ -571,6 +600,8 @@ void SyncEffect()
         EnsureCurveTexture();
     }
     const bool wantCurve = g_curveEnabled && !g_curveFailed && g_curveUploaded && g_curveTexId != 0;
+    // 编码槽先同步（wantCurve 同源）：上屏槽早退路径也不能跳过它
+    SyncEncodeSlot(wantCurve);
     // 纹理生命周期照上游 syncEffect：目标不再用 zebra 时删条纹瓦片；曲线关闭时删曲线纹理
     // （数据仍在 g_curveData，重开时置 dirty 重新上传，不重复占显存）。
     if (target != kEffectZebra && g_stripeTexId != 0) {
@@ -655,8 +686,11 @@ void SyncEffect()
  * 上屏与编码 pass 共用的绘制（同一套 uniform/纹理绑定）：
  * @param uvVbo  朝向来源（上屏 = 显示 UV；编码 = 编码 UV）
  * @param vaoOk  是否允许走上屏的 VAO 快路（编码面用独立 UV VBO，必须手动绑指针）
+ * @param encodeSlot  true = locs 是编码槽/直通（effect 恒 NONE，只绑曲线）——
+ *                    监看叠加（斑马/峰值）的 uniform 分支只属于上屏槽
  */
-void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false)
+void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false,
+    bool encodeSlot = false)
 {
     glUseProgram(locs.program);
     if (locs.uTexMatrix >= 0) {
@@ -671,7 +705,16 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
-    if (locs.program == g_slotLocs.program) {
+    if (encodeSlot) {
+        // 编码支路：恒无斑马/峰值；曲线是创作观感，两槽都带（上游 46d8d91 口径）
+        if (g_encSlotCurve) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, g_curveTexId);
+            if (locs.uCurve >= 0) {
+                glUniform1i(locs.uCurve, 2);
+            }
+        }
+    } else if (locs.program == g_slotLocs.program) {
         if (g_slotEffect == kEffectZebra) {
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, g_stripeTexId);
@@ -765,7 +808,8 @@ void RebuildEncoderTexCoords()
 
 /**
  * 编码 pass：在编码器输入面上绘一帧。**绝不进入 frost 分支**（上游红线：霜面是上屏专属）；
- * 效果链与上屏共用同一槽位 program（直通/曲线/斑马/峰值）。
+ * 效果链走**编码槽**（effect 恒 NONE + 曲线）——监看叠加（斑马/峰值）只上屏、绝不进成片
+ * （上游 46d8d91 双 program 槽裁决的 OHOS 对应物）。
  */
 bool DrawEncoderPass()
 {
@@ -787,10 +831,10 @@ bool DrawEncoderPass()
     glViewport(0, 0, g_encW, g_encH);
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    const ProgramLocs& locs = g_encSlotLocs.program != 0 ? g_encSlotLocs : g_passLocs;
     bool drawn = false;
     if (locs.program != 0) {
-        DrawScene(locs, g_encUvVbo, false);
+        DrawScene(locs, g_encUvVbo, false, false, true);
         drawn = true;
     }
     const EGLBoolean swapped = drawn ? eglSwapBuffers(g_display, g_encSurface) : EGL_FALSE;
@@ -902,18 +946,18 @@ bool DrawEncoderMended(bool keep)
     }
     SyncEffect();
     RebuildEncoderTexCoords();
-    const ProgramLocs& locs = g_slotLocs.program != 0 ? g_slotLocs : g_passLocs;
+    const ProgramLocs& locs = g_encSlotLocs.program != 0 ? g_encSlotLocs : g_passLocs;
     if (locs.program == 0) {
         RestoreDisplayContext();
         DegradeArc("mend-program");
         return false;
     }
-    // 1) 特效链 → 离屏 cur（编码口径；只 draw 不 swap）
+    // 1) 特效链 → 离屏 cur（编码槽口径：effect 恒 NONE + 曲线；监看叠加不进成片。只 draw 不 swap）
     glBindFramebuffer(GL_FRAMEBUFFER, g_arcMend->CurFbo());
     glViewport(0, 0, g_encW, g_encH);
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    DrawScene(locs, g_encUvVbo, false);
+    DrawScene(locs, g_encUvVbo, false, false, true);
     // 立刻还 FB=0：ArcMendPass 的 copy/merge 自绑自还，DrawPending 契约是画进当前绑定面
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // 2) 状态机指令（保留决策已由调用方 ArcKeepRule 给出）
@@ -1647,6 +1691,8 @@ void DestroyGlObjects()
 {
     DeleteFrostResources();
     DeleteProgramLocs(g_slotLocs);
+    DeleteProgramLocs(g_encSlotLocs);
+    g_encSlotCurve = false;
     DeleteProgramLocs(g_passLocs);
     if (g_curveTexId != 0) {
         glDeleteTextures(1, &g_curveTexId);
@@ -1682,8 +1728,7 @@ void DestroyGlObjects()
     g_slotCurve = false;
     g_geomKey = -1;
     g_encGeomKey = -1;
-}
-} // namespace
+}} // namespace
 
 bool WotaGlInit(void* window, uint64_t width, uint64_t height)
 {

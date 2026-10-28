@@ -134,8 +134,9 @@ test('接线_上屏收缩_native侧uFit', () => {
   assertTrue(gl.indexOf('float g_fitX = 1.0f;') >= 0 && gl.indexOf('float g_fitY = 1.0f;') >= 0,
     '默认必须 1,1（未下发时与旧行为逐字相同）');
   assertTrue(gl.indexOf('void WotaGlSetDisplayFit(float fitX, float fitY)') >= 0, 'setter 存在');
-  // 编码面恒满幅：DrawScene 的 applyFit 默认 false
-  assertTrue(gl.indexOf('void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false)') >= 0 &&
+  // 编码面恒满幅：DrawScene 的 applyFit 默认 false（签名含 2026-10-28 追加的 encodeSlot 尾参，同为默认 false）
+  assertTrue(gl.indexOf('void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit = false,') >= 0 &&
+    gl.indexOf('bool encodeSlot = false)') >= 0 &&
     gl.indexOf('applyFit ? g_fitX : 1.0f') >= 0, '编码路径必须恒传 1,1（成片不带黑边）');
   // 上屏两路都吃 g_fit
   assertEq((gl.match(/glUniform2f\(locs\.uFit, g_fitX, g_fitY\)/g) ?? []).length, 1,
