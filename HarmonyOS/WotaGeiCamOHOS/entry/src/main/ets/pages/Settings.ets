@@ -75,6 +75,9 @@ const BITRATE_OPTIONS: Array<BitrateOption> = [
   new BitrateOption('50M', 50_000_000),
 ];
 
+/** 取景效果四档（下标即 settings.effect 的取值；「屏幕监看」与录制卡共用同一标签表） */
+const EFFECT_LABELS: Array<string> = ['直通', '曲线', '斑马', '峰值'];
+
 const DEV_UNLOCK_TAPS: number = 7;
 const DEV_UNLOCK_WINDOW_MS: number = 2000;
 
@@ -780,20 +783,13 @@ struct Settings {
             this.persist();
           })
         this.cardDivider()
-        this.optionRow('效果', '', this.effectLabel(), ['直通', '曲线', '斑马', '峰值'],
-          this.settings.effect,
-          (index: number): void => {
-            this.settings.effect = index;
-            this.persist();
-          })
-        this.cardDivider()
         this.optionRow('HUD 网格', '', this.settings.grid ? '开' : '关', ['开', '关'],
           this.settings.grid ? 0 : 1,
           (index: number): void => {
             this.settings.grid = index === 0;
             this.persist();
           })
-        Text('画幅/帧率在录制中不可切换；效果槽同时作用于预览与编码（同一 GL 效果 program）')
+        Text('画幅/帧率在录制中不可切换；监看叠加（斑马/峰值）只上屏、不进成片（2026-10-28 双 program 槽口径）')
           .fontSize(SettingsVisual.ROW_DESC)
           .fontColor(SettingsVisual.TEXT_DIM)
           .width('100%')
@@ -1002,6 +998,46 @@ struct Settings {
     .width('100%')
   }
 
+  /**
+   * 屏幕监看分组（安卓侧撤「更多」面板后，取景页的效果循环与蓝牙入口由设置页承载）：
+   * 效果四档胶囊单选（下标直写 settings.effect，0..3）走原 persist()；蓝牙音箱行只做路由跳转。
+   */
+  @Builder
+  private monitorGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('屏幕监看')
+      Column() {
+        this.optionRow('效果', '监看叠加只上屏、不进成片；曲线与光晕属画面内容会进成片',
+          this.effectLabel(), EFFECT_LABELS, this.settings.effect,
+          (index: number): void => {
+            this.settings.effect = index;
+            this.persist();
+          })
+        this.cardDivider()
+        Row({ space: 12 }) {
+          Text('蓝牙音箱')
+            .fontSize(SettingsVisual.ROW_TITLE)
+            .fontColor(HudColor.TEXT_PRIMARY)
+            .layoutWeight(1)
+          Text('›')
+            .fontSize(SettingsVisual.ROW_TITLE)
+            .fontColor(SettingsVisual.TEXT_DIM)
+        }
+        .width('100%')
+        .padding({ top: 14, bottom: 14 })
+        .alignItems(VerticalAlign.Center)
+        .onClick((): void => {
+          this.getUIContext().getRouter().pushUrl({ url: 'pages/BtPanel' });
+        })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
   /** 权限状态：两行真实授权态（相机/麦克风），右侧蓝色值 */
   @Builder
   private permissionGroup() {
@@ -1176,11 +1212,12 @@ struct Settings {
     .width('100%')
   }
 
-  /** 横屏右列：取景读数 / 对比播放 / 文本高度 / 权限状态 / 诊断日志 / 检查更新 */
+  /** 横屏右列：取景读数 / 屏幕监看 / 对比播放 / 文本高度 / 权限状态 / 诊断日志 / 检查更新 */
   @Builder
   private rightColumn() {
     Column({ space: SettingsVisual.SECTION_GAP }) {
       this.hudItemsGroup()
+      this.monitorGroup()
       this.compareTickGroup()
       this.textScaleGroup()
       this.permissionGroup()
@@ -1190,7 +1227,7 @@ struct Settings {
     .width('100%')
   }
 
-  /** 竖屏单列：顺序沿用旧页（录制 → 吸附 → 取景辅助/参考线 → 对比/缩放 → 方向/读数 → 权限/诊断/更新） */
+  /** 竖屏单列：顺序沿用旧页（录制 → 吸附 → 取景辅助/参考线 → 屏幕监看 → 对比/缩放 → 方向/读数 → 权限/诊断/更新） */
   @Builder
   private portraitColumn() {
     Column({ space: SettingsVisual.SECTION_GAP }) {
@@ -1198,6 +1235,7 @@ struct Settings {
       this.sliderSnapGroup()
       this.levelGroup()
       this.refLineGroup()
+      this.monitorGroup()
       this.compareTickGroup()
       this.textScaleGroup()
       this.uiOrientationGroup()
@@ -1579,9 +1617,8 @@ struct Settings {
   }
 
   private effectLabel(): string {
-    const labels: Array<string> = ['直通', '曲线', '斑马', '峰值'];
     const i: number = this.settings.effect;
-    return i >= 0 && i < labels.length ? labels[i] : labels[0];
+    return i >= 0 && i < EFFECT_LABELS.length ? EFFECT_LABELS[i] : EFFECT_LABELS[0];
   }
 
   private bitrateLabel(): string {

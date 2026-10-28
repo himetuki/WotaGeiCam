@@ -108,8 +108,11 @@ test('接线_面板页生命周期与入口', () => {
   const sheet: string = sourceText('entry/src/main/ets/ui/HudMoreSheet.ets');
   assertTrue(sheet.indexOf('this.onOpenBt();') >= 0, '「更多」面板必须有蓝牙音箱入口');
 
-  const camera: string = sourceText('entry/src/main/ets/pages/Camera.ets');
-  assertTrue(camera.indexOf("pushUrl({ url: 'pages/BtPanel' })") >= 0, '相机页接线跳转（先收面板）');
+  // 2026-10-28 用户裁决：安卓侧无「更多」面板——入口锚点从相机页改挂设置页「屏幕监看」组
+  //（守卫语义不变：蓝牙音箱必须有接线跳转到 BtPanel）
+  const settings: string = sourceText('entry/src/main/ets/pages/Settings.ets');
+  assertTrue(settings.indexOf("pushUrl({ url: 'pages/BtPanel' })") >= 0,
+    '设置页「屏幕监看」组必须有蓝牙音箱入口');
 
   const pages: string = readFileSync(resolve(srcRoot(),
     'entry/src/main/resources/base/profile/main_pages.json'), 'utf8');

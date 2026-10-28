@@ -604,6 +604,30 @@ EMU-WALK 中用户实测：横屏 + 前摄，取景画面差 180°。**订正 OR
   （码率/帧率/镜头按真实状态显示）。
 - **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（UI 功能对齐：移除「更多」+ 面板/控件按安卓重接，2026-10-28）
+
+用户裁决：**安卓侧没有「更多」面板**；剩余面板/控件按已有布局修订到与安卓同功能。三子代理
+并行（文件域互斥）+ 主线程收口去重。
+
+- **移除「更多」**（Camera.ets）：按钮/状态/渲染块全删（HudMoreSheet.ets 文件保留供守卫读取）；
+  原承载功能按安卓位重接——闪光→右侧竖排胶囊（对焦下方，无闪光灯禁用态+提示）；效果四档→
+  设置页「屏幕监看」组（写 settings.effect，Camera onPageShow 重读并 applyEffect）；
+  蓝牙→设置页入口（pages/BtPanel）；光弧/网格本就在设置页；右上中圆钮→**pages/HudEditor**
+  （恢复安卓「HUD 位置编辑」语义）。
+- **码率胶囊→真弹层**：自动/5M/10M/20M/35M/50M，点选写 settings.bitrate + persist
+  （横屏左下读数、竖屏独立胶囊同弹层）。
+- **光晕面板落真参数**（新 `ui/GlowPanel.ets` + `ui/GlowStore.ets`）：照 r03 截图（关/开、
+  预设 A/B、亮度阈值/软边滑杆）；参数经 core/Glow 的 encode/decode 存 prefs `glow_params`；
+  面板内注明「渲染链随 native 真机批生效」——**参数真实、渲染未接，不冒充已生效**。
+  （ArkTS 坑：组件成员不能命名 `enabled`，与基类属性冲突 → `glowOn`。）
+- **设置页「屏幕监看」组 + 蓝牙入口**（Settings.ets）：与既有双栏/蓝标题/胶囊样式同源；
+  去重：录制卡旧「效果」行删除、过期脚注改「监看只上屏不入成片」口径。
+- **守卫**：bt-speaker.test.ets 蓝牙入口锚点从 Camera.ets 移到 Settings.ets（用户裁决注明）。
+- **遗留**：竖屏曲线编辑入口随更多移除暂无（横屏左侧有）；音频电平表未接；色调/降噪维持
+  禁用态（功能本体未移植）；更多面板横屏内容空白问题随其移除而消失。
+- **回归**：pure-test 81 files / 846 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL；
+  模拟器实测：更多消失、闪光/光晕/色调/码率落位正确、光晕面板可开合。
+
 ## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
 
 追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置
