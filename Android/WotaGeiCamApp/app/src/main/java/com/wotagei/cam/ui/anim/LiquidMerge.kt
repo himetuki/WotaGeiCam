@@ -25,6 +25,7 @@ import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.ui.HudFrost
 import com.wotagei.cam.ui.LocalPreviewCoords
 import com.wotagei.cam.ui.design.HudInkLevel
+import com.wotagei.cam.ui.design.LocalPreviewOverlaysOn
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMotion
 import com.wotagei.cam.ui.design.WotaStroke
@@ -640,6 +641,9 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     // 承载预览盒坐标（录制页由 CameraScreen provide）：非空 ⇒ 可见矩形在**视图局部坐标**里量，
     // 分屏那层祖先 graphicsLayer 缩放被 localPositionOf 抵消；为空（编辑控件页）⇒ 回退窗口系。
     val preview = LocalPreviewCoords.current
+    // 2026-10-28 用户报障：参考线/站位线（Compose 叠加层）会压在底 Dock 上——因为霜板是 GL 画的
+    // （预览图层，比叠加层更下）。叠加层在画时：不再让位给霜板，改画 97% 暖黑实底把线挡在下面。
+    val overlaysOn = LocalPreviewOverlaysOn.current
     val frostSlot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     // 比对缓存：left/top/w/h + **节点原点 x/y**（六元）。原点必须进比对——页面往返/沉浸切换
     // 会平移节点而未动局部几何，漏比它就是「GL 板留在旧位置与 fill 分离」
@@ -671,7 +675,7 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val r = DockShell.cornerRadiusPx(w, h)
             val left = DockShell.insetPx(boxW, w)
             val top = DockShell.insetPx(boxH, h)
-            if (intent && frostSlot >= 0) {
+            if (intent && frostSlot >= 0 && !overlaysOn) {
                 // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
                 // 只有轮廓真的动了才重报。⚠ 比对必须**含节点原点**（frostOriginPx）：
                 // left/top/w/h 是节点局部量，页面往返/沉浸切换时节点原点会平移而局部几何
@@ -703,10 +707,12 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
                 }
             }
             // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）。
-            // 霜在屏幕上时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）
-            if (!live) {
+            // 霜在屏幕上时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）。
+            // 例外（2026-10-28）：叠加层（参考线/站位线）在画时**不让位**，且用 97% 暖黑——
+            // 白线/橙线透过来只剩 3%，控件因此稳在叠加层之上（见 LocalPreviewOverlaysOn 的 KDoc）
+            if (!live || overlaysOn) {
                 drawRoundRect(
-                    color = WotaColor.hudScrim,
+                    color = if (overlaysOn) WotaColor.bg.copy(alpha = 0.97f) else WotaColor.hudScrim,
                     topLeft = Offset(left, top),
                     size = Size(w, h),
                     cornerRadius = CornerRadius(r, r)

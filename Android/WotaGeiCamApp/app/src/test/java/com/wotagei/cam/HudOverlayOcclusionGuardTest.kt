@@ -29,6 +29,9 @@ class HudOverlayOcclusionGuardTest {
     private val screen: String by lazy {
         KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt"))
     }
+    private val liquid: String by lazy {
+        KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/anim/LiquidMerge.kt"))
+    }
 
     // -------------------------------------------------- ① 参考线圆钮收小
 
@@ -82,5 +85,29 @@ class HudOverlayOcclusionGuardTest {
             "录制页摘掉 provide 后判据必须翻红",
             screenMutant.contains("LocalPreviewOverlaysOn provides (refLines != 0 || markerCount > 0)")
         )
+    }
+
+    @Test
+    fun `底栏底板走的是霜壳_同样必须让叠加层`() {
+        // 底栏 Dock 的底板不是 wotaHudCard，而是 LiquidMerge 的 wotaDockShell（绘制期自绘轮廓 +
+        // 霜板注册）。2026-10-28 第一版只修了 wotaHudCard，真机复测站位线仍从卡片上透出来——
+        // 根因就在这里。三处判据：读开关 / 注册让路 / 97% 实底。
+        val shell = KotlinSourceScan.bodyOf(liquid, "Modifier.wotaDockShell")
+        assertTrue("wotaDockShell 必须读 LocalPreviewOverlaysOn", shell.contains("LocalPreviewOverlaysOn.current"))
+        assertTrue(
+            "叠加层在画时霜板注册必须让路（否则板还是画在叠加层之下）",
+            shell.contains("if (intent && frostSlot >= 0 && !overlaysOn) {")
+        )
+        assertTrue(
+            "叠加层在画时底板必须给 97% 实底",
+            shell.contains("WotaColor.bg.copy(alpha = 0.97f)")
+        )
+        assertTrue(
+            "实底分支必须在「!live || overlaysOn」下触发（霜开着也要挡住线）",
+            shell.contains("if (!live || overlaysOn) {")
+        )
+        // 尺要能红：摘掉 overlaysOn 让路后判据翻红
+        val mutant = shell.replace("&& !overlaysOn) {", ") {")
+        assertFalse(mutant.contains("if (intent && frostSlot >= 0 && !overlaysOn) {"))
     }
 }
