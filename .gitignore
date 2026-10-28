@@ -93,3 +93,5 @@ desktop.ini
 /HarmonyOS/**/oh-package-lock.json5
 # DevEco Studio 修改签名配置前自动生成的 build-profile 本机备份（机器相关）
 /HarmonyOS/**/*.localbak-*
+# DevEco MCP 工具本机配置（不入库）
+/mcp.json
