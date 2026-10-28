@@ -1308,9 +1308,8 @@ struct CameraPage {
       const ab: ArrayBuffer = new ArrayBuffer(finalLut.length);
       new Uint8Array(ab).set(finalLut);
       lib.uploadCurveLut(ab);
-      if (this.effectIndex === 1) {
-        lib.setCurveEnabled(!this.curveStack.isPassthrough);
-      }
+      // 曲线独立层（安卓同口径）：非恒等即生效，与效果档（斑马/峰值）互不排斥
+      lib.setCurveEnabled(!this.curveStack.isPassthrough);
     } catch (e) {
       this.message = `曲线上传失败: ${e}`;
     }
@@ -1340,25 +1339,22 @@ struct CameraPage {
       return;
     }
     try {
-      if (this.effectIndex === 0) {
-        lib.setEffect(0);
-        lib.setCurveEnabled(false);
-      } else if (this.effectIndex === 1) {
-        lib.setEffect(0);
-        // 曲线档的 LUT 与 applyCurve 同一合成口径（曲线烘焙 → 色调），否则切效果会把色调丢掉
-        const baked: Uint8Array = this.curveStack.bakeBytes();
-        const finalLut: Uint8Array = applyToneToLut(baked, this.toneParams);
-        const ab: ArrayBuffer = new ArrayBuffer(finalLut.length);
-        new Uint8Array(ab).set(finalLut);
-        lib.uploadCurveLut(ab);
-        lib.setCurveEnabled(!this.curveStack.isPassthrough);
-      } else if (this.effectIndex === 2) {
+      // 曲线是**独立层**（安卓同口径）：合成 LUT 与开关不再跟效果档绑定——非恒等即生效，
+      // 可与斑马/峰值叠加（native 的 zebra/peaking program 本身带曲线变体）。
+      const baked: Uint8Array = this.curveStack.bakeBytes();
+      const finalLut: Uint8Array = applyToneToLut(baked, this.toneParams);
+      const ab: ArrayBuffer = new ArrayBuffer(finalLut.length);
+      new Uint8Array(ab).set(finalLut);
+      lib.uploadCurveLut(ab);
+      if (this.effectIndex === 2) {
         lib.setEffect(FrameEffect.ZEBRA as number);
-        lib.setCurveEnabled(false);
-      } else {
+      } else if (this.effectIndex === 3) {
         lib.setEffect(FrameEffect.PEAKING as number);
-        lib.setCurveEnabled(false);
+      } else {
+        // 直通档（0）与遗留「曲线」档（1）的效果槽都恒 NONE——曲线由上面的独立开关承担
+        lib.setEffect(0);
       }
+      lib.setCurveEnabled(!this.curveStack.isPassthrough);
     } catch (e) {
       this.message = `效果切换失败: ${e}`;
     }
