@@ -58,6 +58,12 @@ void WotaGlSetZebraParams(float threshold, int density);
 /** 峰值参数：strength 0..1、colorIndex 0..4（PeakingColor） */
 void WotaGlSetPeakingParams(float strength, int colorIndex);
 
+/** 直方图采样开关（RGB 曲线框背景，f31d18c）：曲线弹窗可见时开；关 = 停采清快照 */
+void WotaGlSetHistogramEnabled(bool on);
+
+/** 取直方图快照（3×64 计数 R/G/B，出参容量 ≥192；无样本返回 false）。归一在 ArkTS core/HistogramMath */
+bool WotaGlGetHistogramSnapshot(int32_t* out, int capacity);
+
 /** 毛玻璃全屏链开关（GL-3：OES→2D 拷贝→横向高斯→纵向高斯→2D 直通上屏） */
 void WotaGlSetFrostEnabled(bool on);
 

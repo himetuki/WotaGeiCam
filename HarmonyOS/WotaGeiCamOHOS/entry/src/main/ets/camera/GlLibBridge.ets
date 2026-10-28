@@ -56,6 +56,17 @@ export function setPeakingParams(strength: number, colorIndex: number): void {
   glLib.setPeakingParams(strength, colorIndex);
 }
 
+/** 直方图采样开关（曲线弹窗可见时开；native 关侧停采清快照） */
+export function setHistogramEnabled(on: boolean): void {
+  glLib.setHistogramEnabled(on);
+}
+
+/** 直方图快照（3×64 计数 R/G/B 的 Int32Array）；无样本返回 undefined（未采/已清） */
+export function getHistogramSnapshot(): Int32Array | undefined {
+  const v: Int32Array | null = glLib.getHistogramSnapshot();
+  return v ?? undefined;
+}
+
 export function uploadCurveLut(data: ArrayBuffer): boolean {
   return glLib.uploadCurveLut(data);
 }

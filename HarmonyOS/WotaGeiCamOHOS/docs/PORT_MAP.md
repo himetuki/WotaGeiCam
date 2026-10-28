@@ -363,6 +363,38 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
   hilog 仍见 i/w/e、开详细档见 AF遥测 行。
 - **回归**：pure-test 77 files / 793 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（HIST：RGB 曲线框背景直方图，2026-10-28）
+
+上游 `f31d18c` + `5742c0f`（释放顺序口径落进回收点）。追赶基线第五批。
+
+- **`core/HistogramMath.ets`**：纯函数直译——`binRgba`（3×64 档，bin = v>>2）+
+  `normalizedHeights`（各通道内按各自最大值归一，偏色不压扁小通道；全零返回全 0）。
+- **`cpp/gl_render.cpp`**：直方图数据路——64×64 迷你 FBO（RGBA + NEAREST + CLAMP，完整性
+  出口对齐 frost RT 口径）懒建；上屏绘制尾部 `MaybeSampleHistogram(locs)` 250ms 一拍把当前帧
+  经**当前 program**（上屏槽 = 曲线输出后的画面，「边调边看分布」口径）画进 FBO 并
+  glReadPixels 16KB；`BinHistogramRgba` 近地分箱（与 core `binRgba` **同式镜像**，接线守卫
+  钉两侧公式文本；像素住在 GL 线程，192 int 跨 napi 带宽是 1/85）。快照锁发布（Android 用
+  @Volatile 引用替换；本侧 napi getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）。
+  只在弹窗可见时采（`WotaGlSetHistogramEnabled`，关侧停采清快照）；16KB/4Hz 读回停顿远低于
+  既有霜板/补弧 pass，只发生在目标场景（录制中开弹窗调曲线，掉一拍观测帧可接受）。
+  `DestroyGlObjects` 回收迷你 RT（在 EGL 拆除**之前**——5742c0f 释放顺序口径，本侧回收点
+  天然满足）。
+- **`cpp/gl_render.h` + `napi_init.cpp` + `types/libentry/index.d.ts`**：`setHistogramEnabled`
+  / `getHistogramSnapshot` 两口全链声明（NAPI-DECL 守卫对账过）。
+- **`camera/GlLibBridge.ets`**：两口转发；**`pages/Camera.ets`**：开曲线弹窗
+  `setHistogramEnabled(true)`、onDismiss `false`；`histogramProvider` 注入 CurvePopup
+  （**UI 层不静态 import 桥**——load-order 契约与 Camera 页同款，provider 闭包持有动态模块引用）。
+- **`ui/CurvePopup.ets`**：`visible` 挂 `@Watch` 启停 150ms 轮询；`drawCurve` 在网格/曲线
+  **之下**画三通道 R/G/B 半透明 0x30 条形（条宽 = side/64、条高 = 归一计数 × side——
+  随框缩放是几何自然结果）；弹窗不可见/无样本不画。归一必须走 core 纯函数（守卫钉）。
+- **守卫**：`test/pure/histogram-math.test.ets` 8 例——纯函数 5 例（纯色单档[G=0 落 bin 0
+  本侧补钉]/灰阶三通道全等/缓冲不足不抛/各自最大归一/全零）+ 接线源码守卫 3 例（native 采样
+  与分箱同式镜像/250ms/当前 program/完整性出口/回收清快照；napi-桥-页面两开关；
+  弹窗轮询与 0x30 背景）。
+- **真机待验（不阻塞收口）**：开曲线弹窗背景出直方图、调红曲线红分布右移、关弹窗采样停
+  （hilog 无新读回）、录制中开弹窗不炸成片。
+- **回归**：pure-test 78 files / 801 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

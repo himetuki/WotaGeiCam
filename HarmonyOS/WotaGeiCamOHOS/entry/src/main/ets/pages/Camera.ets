@@ -107,6 +107,9 @@ interface GlLibApi extends GlRecordLib {
   setPeakingParams: (strength: number, colorIndex: number) => void;
   uploadCurveLut: (data: ArrayBuffer) => boolean;
   setFrostEnabled: (on: boolean) => void;
+  /** 直方图（曲线框背景，f31d18c）：弹窗可见才开采；快照 3×64 计数，无样本 undefined */
+  setHistogramEnabled: (on: boolean) => void;
+  getHistogramSnapshot: () => Int32Array | undefined;
 }
 
 const POLL_INTERVAL_MS: number = 100;
@@ -1032,6 +1035,10 @@ struct CameraPage {
     this.closePill();
     this.moreOpen = false;
     this.curvePopupVisible = true;
+    // 直方图采样只在弹窗可见时进行（native 250ms 一拍；关弹窗停采清快照，省电不留旧数据）
+    if (this.glLib !== undefined) {
+      this.glLib.setHistogramEnabled(true);
+    }
   }
 
   private onCurveCommit(stack: CurveStack, persist: boolean): void {
@@ -2448,8 +2455,14 @@ struct CameraPage {
         visible: this.curvePopupVisible,
         stack: this.curveStack,
         gpuMode: true,
+        histogramProvider: (): Int32Array | undefined => {
+          return this.glLib !== undefined ? this.glLib.getHistogramSnapshot() : undefined;
+        },
         onDismiss: (): void => {
           this.curvePopupVisible = false;
+          if (this.glLib !== undefined) {
+            this.glLib.setHistogramEnabled(false);
+          }
         },
         onCommit: (stack: CurveStack, persist: boolean): void => {
           this.onCurveCommit(stack, persist);

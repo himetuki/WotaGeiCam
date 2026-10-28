@@ -553,6 +553,39 @@ static napi_value CancelArcRepair(napi_env env, napi_callback_info info)
  * 线程契约（登记，P3）：下面的 setter 与 OnFrame 回调在 OHOS XComponent 下同为 UI 线程回调，
  * setter 只写请求态、渲染在下一帧消费，无并发；独立渲染线程（GL-3）需先做原子/双缓冲交接。
  */
+static napi_value SetHistogramEnabled(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool on = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, argv[0], &on);
+    }
+    WotaGlSetHistogramEnabled(on);
+    return nullptr;
+}
+
+/** 直方图快照 → Int32Array(192)（3×64 计数 R/G/B）；无样本返回 null（ArkTS 侧按无数据绘制） */
+static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
+{
+    int32_t bins[192];
+    if (!WotaGlGetHistogramSnapshot(bins, 192)) {
+        napi_value nullValue = nullptr;
+        napi_get_null(env, &nullValue);
+        return nullValue;
+    }
+    napi_value out = nullptr;
+    void* data = nullptr;
+    napi_create_arraybuffer(env, sizeof(bins), &data, &out);
+    if (data != nullptr) {
+        memcpy(data, bins, sizeof(bins));
+    }
+    napi_value typed = nullptr;
+    napi_create_typedarray(env, napi_int32_array, 192, out, 0, &typed);
+    return typed;
+}
+
 static napi_value Init(napi_env env, napi_value exports)
 {
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "module init");
@@ -567,6 +600,8 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setCurveEnabled", nullptr, SetCurveEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZebraParams", nullptr, SetZebraParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPeakingParams", nullptr, SetPeakingParams, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setHistogramEnabled", nullptr, SetHistogramEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getHistogramSnapshot", nullptr, GetHistogramSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"uploadCurveLut", nullptr, UploadCurveLut, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startGpuRecord", nullptr, StartGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},

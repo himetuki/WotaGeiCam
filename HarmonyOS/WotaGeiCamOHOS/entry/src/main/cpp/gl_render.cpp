@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -224,6 +225,25 @@ bool g_slotCurve = false;
 // 槽位不进键：编码槽只有 curve 一个自由度，跟随上屏的 wantCurve。
 ProgramLocs g_encSlotLocs;
 bool g_encSlotCurve = false;
+
+// ---- 直方图采样（上游 f31d18c 的 OHOS 对应物：RGB 曲线框背景，调曲线参考用）----
+// 数据路：上屏帧绘制后 250ms 一拍把当前帧经**当前 program**（上屏槽 ⇒ 曲线输出后的画面，
+// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 3×64 计数
+// （BinHistogramRgba 与 core/HistogramMath.ets binRgba 同式镜像）。只在弹窗可见时采
+// （WotaGlSetHistogramEnabled）；16KB/4Hz 的读回停顿远低于既有霜板/补弧 pass，只发生在目标场景。
+constexpr int kHistSize = 64;
+constexpr int kHistBins = 64;
+constexpr int kHistChannels = 3;
+constexpr int kHistValues = kHistBins * kHistChannels;
+constexpr int64_t kHistogramPeriodMs = 250;
+bool g_histRequested = false;
+GLuint g_histFbo = 0;
+GLuint g_histTex = 0;
+int64_t g_histLastSampleMs = 0;
+// 快照（3×64 计数，R/G/B 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
+// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）
+std::mutex g_histMutex;
+std::vector<int32_t> g_histSnapshot;
 
 // 请求态（napi setter 只写状态；实际建槽/上传在渲染线程内完成）
 int g_effectRequested = kEffectNone;
@@ -771,6 +791,89 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
         }
     }
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// ---------------------------------------------------------------- 直方图采样（曲线框背景，f31d18c）
+
+/**
+ * RGBA(8888) 像素 → 3×64 档计数（R/G/B 依次）。与 core/HistogramMath.ets binRgba
+ * **同式镜像**（bin = v >> 2；像素住在 GL 线程，16KB 读回后近地分箱再传 192 个 int）——
+ * 契约在两处出现，接线守卫钉住两边的公式文本。
+ */
+void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<int32_t>& out)
+{
+    out.assign(kHistValues, 0);
+    const int px = width * height;
+    for (int i = 0; i < px; i++) {
+        const int o = i * 4;
+        out[rgba[o] >> 2]++;
+        out[kHistBins + (rgba[o + 1] >> 2)]++;
+        out[2 * kHistBins + (rgba[o + 2] >> 2)]++;
+    }
+}
+
+/** 直方图迷你 RT（懒建）：64×64 RGBA + NEAREST + CLAMP，完整性出口对齐 frost RT 口径 */
+bool EnsureHistogramRt()
+{
+    if (g_histFbo != 0) {
+        return true;
+    }
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kHistSize, kHistSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!complete) {
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteTextures(1, &tex);
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "histogram RT incomplete");
+        return false;
+    }
+    g_histTex = tex;
+    g_histFbo = fbo;
+    return true;
+}
+
+/**
+ * 上屏绘制尾部的直方图采样（GL 线程）：250ms 一拍把当前帧经**当前 program** 画进迷你 FBO
+ * 并读回分箱。「曲线输出后」口径（弹窗用途是边调边看分布，见 HistogramMath 头注）。
+ * 调用点：上屏 swap 之后、编码支路之前（display 上下文在场）；采样后恢复 viewport。
+ */
+void MaybeSampleHistogram(const ProgramLocs& locs)
+{
+    if (!g_histRequested || locs.program == 0) {
+        return;
+    }
+    const int64_t now = NowSteadyNs() / 1000000;
+    if (now - g_histLastSampleMs < kHistogramPeriodMs) {
+        return;
+    }
+    g_histLastSampleMs = now;
+    if (!EnsureHistogramRt()) {
+        return;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, g_histFbo);
+    glViewport(0, 0, kHistSize, kHistSize);
+    DrawScene(locs, g_uvVbo, g_useVao, false, false);
+    uint8_t pixels[kHistSize * kHistSize * 4];
+    glReadPixels(0, 0, kHistSize, kHistSize, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, static_cast<GLsizei>(g_width), static_cast<GLsizei>(g_height));
+    std::vector<int32_t> bins;
+    BinHistogramRgba(pixels, kHistSize, kHistSize, bins);
+    {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.swap(bins);
+    }
 }
 
 /**
@@ -1690,6 +1793,20 @@ bool TryInitWithVersion(void* window, int clientVersion)
 void DestroyGlObjects()
 {
     DeleteFrostResources();
+    // 直方图迷你 RT 必须在 EGL 拆除**之前**删（需现存当前上下文；5742c0f 释放顺序口径）
+    if (g_histFbo != 0) {
+        glDeleteFramebuffers(1, &g_histFbo);
+        g_histFbo = 0;
+    }
+    if (g_histTex != 0) {
+        glDeleteTextures(1, &g_histTex);
+        g_histTex = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.clear();
+    }
+    g_histLastSampleMs = 0;
     DeleteProgramLocs(g_slotLocs);
     DeleteProgramLocs(g_encSlotLocs);
     g_encSlotCurve = false;
@@ -2015,6 +2132,8 @@ void WotaGlRender(uint64_t timestamp)
             static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
             swapped == EGL_TRUE ? 1 : 0);
     }
+    // 直方图采样（曲线弹窗开着才真采；250ms 一拍。当前 program = 曲线输出后的画面）
+    MaybeSampleHistogram(locs);
     // 上屏 swap 后第二趟：编码面绘制（仅本 tick 有新相机帧、同一效果链）
     MaybeDrawEncoderPass(newFrameConsumed, frameTs);
 }
@@ -2405,6 +2524,38 @@ void WotaGlSetPeakingParams(float strength, int colorIndex)
 {
     g_peakingStrength = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
     g_peakingColor = colorIndex < 0 ? 0 : (colorIndex > 4 ? 4 : colorIndex);
+}
+
+/**
+ * 直方图采样开关（曲线弹窗可见时开；写在 napi 线程、读在 GL 线程）。关 = 停采 + 清快照
+ * （省电 + 不留旧数据，上游 setHistogramEnabled 同口径）。
+ */
+void WotaGlSetHistogramEnabled(bool on)
+{
+    g_histRequested = on;
+    if (!on) {
+        std::lock_guard<std::mutex> lock(g_histMutex);
+        g_histSnapshot.clear();
+    }
+}
+
+/**
+ * 取直方图快照（3×64 计数，R/G/B 依次；无样本返回 false）。出参 caller 提供容量 ≥192 的缓冲。
+ * 归一化在 ArkTS 侧走 core/HistogramMath.normalizedHeights（各通道内按各自最大值归一）。
+ */
+bool WotaGlGetHistogramSnapshot(int32_t* out, int capacity)
+{
+    if (out == nullptr || capacity < kHistValues) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_histMutex);
+    if (static_cast<int>(g_histSnapshot.size()) < kHistValues) {
+        return false;
+    }
+    for (int i = 0; i < kHistValues; i++) {
+        out[i] = g_histSnapshot[i];
+    }
+    return true;
 }
 
 /**

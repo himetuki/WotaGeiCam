@@ -18,6 +18,7 @@
  * ③ 逐指针消费语义（isConsumed 整手让路）以 hitTestBehavior(Block) 的命中隔离替代。
  */
 import { ColorCurve, CurveEdit, CurveInsertResult, CurvePoint, CurveStack } from '../core/CurveModel';
+import { HistogramMath } from '../core/HistogramMath';
 
 const CENTER_SIZE: number = 48;
 const OPTION_SIZE: number = 40;
@@ -41,11 +42,17 @@ function channelColor(channel: number): string {
 }
 
 @Component
-export struct CurvePopup {  @Prop visible: boolean = false;
+export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = false;
   /** 总线现值（Camera 持有；弹窗经 onCommit 回写——不直改，避免 @Link 与回调双写） */
   stack: CurveStack = CurveStack.IDENTITY;
   /** CPU 渲染档整块置灰不可拖（上游 gpuMode 门） */
   @Prop gpuMode: boolean = true;
+  /**
+   * 直方图快照源（f31d18c：曲线框背景，调曲线参考用）。由宿主页注入（GlLibBridge 的
+   * getHistogramSnapshot——**UI 层不得静态 import 桥**，load-order 契约与 Camera 页同款）；
+   * undefined = 无样本（未采/已清），背景不画。
+   */
+  histogramProvider: () => Int32Array | undefined = (): Int32Array | undefined => undefined;
   onDismiss: () => void = (): void => {};
   /** persist=false = 拖动中（Camera 只更总线态）；true = 抬手落盘（Camera 另写持久化） */
   onCommit: (stack: CurveStack, persist: boolean) => void =
@@ -53,6 +60,9 @@ export struct CurvePopup {  @Prop visible: boolean = false;
 
   @State channel: number = 0;
   @State fanOpen: boolean = false;
+  /** 直方图计数快照（3×64，R/G/B；150ms 轮询，弹窗可见才轮询） */
+  @State histCounts: Array<number> | undefined = undefined;
+  private histTimer: number = -1;
   /** eb956f5：面板等比缩放，1 = 默认最小（只增不减）；会话级不落盘 */
   @State panelScale: number = 1;
   /** 弹窗可用区（关闭捕获层 onAreaChange 实测，缩放上限的输入） */
@@ -124,6 +134,55 @@ export struct CurvePopup {  @Prop visible: boolean = false;
 
   aboutToAppear(): void {
     this.points = CurveEdit.pointsOf(this.stack.curveOf(this.channel));
+    if (this.visible) {
+      this.startHistogramPolling();
+    }
+  }
+
+  aboutToDisappear(): void {
+    this.stopHistogramPolling();
+  }
+
+  /** visible 翻转 → 直方图轮询启停（native 采样开关由宿主页管，这里只管消费节奏） */
+  onVisibleChanged(): void {
+    if (this.visible) {
+      this.startHistogramPolling();
+    } else {
+      this.stopHistogramPolling();
+    }
+  }
+
+  private startHistogramPolling(): void {
+    if (this.histTimer >= 0) {
+      return;
+    }
+    // 150ms 轮询（上游同节奏）：native 250ms 一拍，轮询侧重复读同快照无害
+    this.histTimer = setInterval((): void => {
+      const snap: Int32Array | undefined = this.histogramProvider();
+      if (snap === undefined) {
+        if (this.histCounts !== undefined) {
+          this.histCounts = undefined;
+          this.drawCurve();
+        }
+        return;
+      }
+      const counts: Array<number> = new Array<number>(snap.length).fill(0);
+      for (let i = 0; i < snap.length; i++) {
+        counts[i] = snap[i];
+      }
+      this.histCounts = counts;
+      this.drawCurve();
+    }, 150);
+  }
+
+  private stopHistogramPolling(): void {
+    if (this.histTimer >= 0) {
+      clearInterval(this.histTimer);
+      this.histTimer = -1;
+    }
+    if (this.histCounts !== undefined) {
+      this.histCounts = undefined;
+    }
   }
 
   /** 画布重绘入口：任何编辑态变化后手动调（ArkUI Canvas 无自动脏检查） */
@@ -138,6 +197,23 @@ export struct CurvePopup {  @Prop visible: boolean = false;
     ctx.clearRect(0, 0, side, side);
     ctx.fillStyle = '#FF000000';
     ctx.fillRect(0, 0, side, side);
+    // 直方图背景（画在网格/曲线**之下**）：三通道 R/G/B 半透明 0x30 条形，
+    // 条宽 = side/64、条高 = 各通道内归一计数 × side——随框缩放是几何自然结果
+    if (this.histCounts !== undefined) {
+      const heights: Array<number> = HistogramMath.normalizedHeights(this.histCounts);
+      const barW: number = side / 64;
+      const histColors: Array<string> = ['#30FF0000', '#3000FF00', '#300000FF'];
+      for (let c = 0; c < 3; c++) {
+        ctx.fillStyle = histColors[c];
+        for (let i = 0; i < 64; i++) {
+          const h: number = heights[c * 64 + i] * side;
+          if (h <= 0) {
+            continue;
+          }
+          ctx.fillRect(side * i / 64, side - h, barW, h);
+        }
+      }
+    }
     const grid: string = '#26FFFFFF';
     ctx.strokeStyle = grid;
     ctx.lineWidth = 1 * scale;

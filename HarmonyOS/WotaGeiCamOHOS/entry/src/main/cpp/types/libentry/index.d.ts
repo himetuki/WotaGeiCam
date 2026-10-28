@@ -12,6 +12,10 @@ export const setEffect: (effect: number) => void;
 export const setCurveEnabled: (on: boolean) => void;
 export const setZebraParams: (threshold: number, density: number) => void;
 export const setPeakingParams: (strength: number, colorIndex: number) => void;
+/** 直方图采样开关（RGB 曲线框背景，f31d18c）：曲线弹窗可见时开；关 = 停采清快照 */
+export const setHistogramEnabled: (on: boolean) => void;
+/** 直方图快照（3×64 计数 R/G/B 的 Int32Array）；无样本 null。归一在 ArkTS core/HistogramMath */
+export const getHistogramSnapshot: () => Int32Array | null;
 export const uploadCurveLut: (data: ArrayBuffer) => boolean;
 export const setFrostEnabled: (on: boolean) => void;
 /**
