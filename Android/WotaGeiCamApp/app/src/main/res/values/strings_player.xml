@@ -108,6 +108,18 @@
     <string name="player_clip_failed">导出失败，请重试</string>
     <!-- #4：commit 全败但成片字节已在盘上，保留待冷启救援（文案与"导出失败"分开，不吓用户） -->
     <string name="player_clip_commit_kept">导出完成但未收录，成片已保留，重启应用后自动恢复</string>
+    <!-- 导出方式（2026-10-28）：无损=既有重封；后渲染=重编码并应用 Glow/降噪。
+         曲线刻意不在后渲染里——录制期已烘进成片，再套一次会双倍 -->
+    <string name="player_clip_mode">导出方式</string>
+    <string name="player_clip_mode_lossless">无损</string>
+    <string name="player_clip_mode_scene">后渲染</string>
+    <string name="player_clip_scene_lossless_note">不重编码，画面与你看到的一致（曲线/光晕/降噪都已是录制时的样子）</string>
+    <string name="player_clip_scene_none">当前未启用光晕或降噪，后渲染与无损结果一致</string>
+    <string name="player_clip_scene_glow">光晕</string>
+    <string name="player_clip_scene_denoise">降噪</string>
+    <string name="player_clip_scene_sep"> + </string>
+    <string name="player_clip_scene_summary">重编码，本次应用：%1$s</string>
+    <string name="player_clip_scene_curve_note">。曲线是录制时烘进画面的，不在这里重复渲染</string>
 
     <!-- 内录选轨（批 4）：双音轨片才有音轨 chip/同步/导出三控件；音轨识别口径见 TrackSync 头注 -->
     <string name="player_track_env">环境音</string>

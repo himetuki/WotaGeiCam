@@ -441,8 +441,19 @@ fun PlayerScreen(
     // 执行走 ClipExporter 无损拷贝。进度/取消都是会话态。页面退出时组合级 scope 取消，
     // 导出协程随之取消并删 pending 记录，不留半截文件
     val clipExporter = remember(app) { ClipExporter(app) }
+    // 后渲染导出（2026-10-28 用户需求）：重编码 + Glow/降噪；曲线刻意不做（录制已烘进成片）
+    val sceneRunner = remember(app) { SceneExportRunner(app) }
     val clipRepo = rememberMediaRepo()
     var clipMenu by remember { mutableStateOf(false) }
+    // 导出方式：0 = 无损重封（既有）、1 = 后渲染（重编码）。效果参数在面板每次**打开**时现读，
+    // 让"先去设置改光晕/降噪、再回来导出"吃到最新值；导出中重开面板也按当时参数显示
+    var clipMode by remember { mutableIntStateOf(0) }
+    val sceneEffects = remember(clipMenu) {
+        sceneExportEffects(
+            prefs.getString(WotaSettings.KEY_GLOW, null),
+            WotaSettings.videoDenoise(prefs)
+        )
+    }
     var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     var clipExporting by remember { mutableStateOf(false) }
     var clipProgress by remember { mutableStateOf(0f) }
@@ -883,6 +894,9 @@ fun PlayerScreen(
                     progress = clipProgress,
                     track = clipTrack,
                     dualReady = audioGroups.size >= 2,
+                    mode = clipMode,
+                    sceneEffects = sceneEffects,
+                    onPickMode = { clipMode = it },
                     onPickTrack = { clipTrack = it },
                     onExport = {
                         // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层
@@ -893,10 +907,34 @@ fun PlayerScreen(
                             clipProgress = 0f
                             // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
                             val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
+                            val mode = clipMode
+                            val effects = sceneExportEffects(
+                                prefs.getString(WotaSettings.KEY_GLOW, null),
+                                WotaSettings.videoDenoise(prefs)
+                            )
                             clipJob = scope.launch {
                                 try {
                                     // 区间与选轨都在起跑那一刻定版：导出期间用户再动 A/B / 换轨不影响这一轮
-                                    when (val r = clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset) { p -> clipProgress = p }) {
+                                    val result = if (mode == 1) {
+                                        // 后渲染：重编码 + Glow/降噪（曲线不在其中）
+                                        when (val r = sceneRunner.export(
+                                            clip, ab.aMs, ab.bMs, clipTrack, offset, effects
+                                        ) { p -> clipProgress = p }) {
+                                            is SceneExportRunner.Done -> ClipResult.Done(r.id, r.name)
+                                            is SceneExportRunner.Failed -> ClipResult.Fail(
+                                                when (r.reason) {
+                                                    SceneExportRunner.Reason.RANGE -> ClipError.RANGE
+                                                    // 只有"已封轨、只是没清 IS_PENDING"才算 commit 保留口径；
+                                                    // 其余失败（含 stop 前抛的）pending 行已删，报普通失败
+                                                    SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT
+                                                    else -> ClipError.MUX
+                                                }
+                                            )
+                                        }
+                                    } else {
+                                        clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset) { p -> clipProgress = p }
+                                    }
+                                    when (val r = result) {
                                         is ClipResult.Done -> {
                                             banner = R.string.player_clip_done
                                             clipRepo.invalidate()
@@ -1240,6 +1278,9 @@ private fun ClipExportPopup(
     progress: Float,
     track: SelectedTrack,
     dualReady: Boolean,
+    mode: Int,
+    sceneEffects: SceneExportEffects,
+    onPickMode: (Int) -> Unit,
     onPickTrack: (SelectedTrack) -> Unit,
     onExport: () -> Unit,
     onCancel: () -> Unit,
@@ -1316,6 +1357,34 @@ private fun ClipExportPopup(
                     onClick = { onPickTrack(SelectedTrack.CAP) }
                 )
             }
+            // 导出方式（2026-10-28）：无损 = 既有重封；后渲染 = 重编码并应用 Glow/降噪。
+            // 无效果时后渲染与无损结果一致，置灰而不是偷偷降级——"点了没反应"比置灰更糟
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    stringResource(R.string.player_clip_mode),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WotaTextDim
+                )
+                WotaChip(
+                    label = stringResource(R.string.player_clip_mode_lossless),
+                    selected = mode == 0,
+                    onClick = { onPickMode(0) }
+                )
+                WotaChip(
+                    label = stringResource(R.string.player_clip_mode_scene),
+                    selected = mode == 1,
+                    enabled = sceneEffects.active,
+                    onClick = { onPickMode(1) }
+                )
+            }
+            Text(
+                sceneEffectNote(sceneEffects, mode),
+                style = MaterialTheme.typography.bodySmall,
+                color = WotaTextDim
+            )
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
                 selected = true,
@@ -1329,6 +1398,25 @@ private fun ClipExportPopup(
             )
         }
     }
+}
+
+/**
+ * 导出方式下方的说明行：无损时说清"像素不变"，后渲染列出**这一轮**真正会应用的效果，
+ * 并讲明曲线不在此列（曲线是录制期 scene layer，已在源片像素里——再套一次会双倍）。
+ */
+@Composable
+private fun sceneEffectNote(effects: SceneExportEffects, mode: Int): String {
+    if (mode != 1) return stringResource(R.string.player_clip_scene_lossless_note)
+    if (!effects.active) return stringResource(R.string.player_clip_scene_none)
+    val parts = buildList {
+        if (effects.glow != null) add(stringResource(R.string.player_clip_scene_glow))
+        if (effects.denoise) add(stringResource(R.string.player_clip_scene_denoise))
+    }
+    // 曲线固定不在后渲染里：这句是用户口径的明面化，不随效果开关变化
+    return stringResource(
+        R.string.player_clip_scene_summary,
+        parts.joinToString(stringResource(R.string.player_clip_scene_sep))
+    ) + stringResource(R.string.player_clip_scene_curve_note)
 }
 
 /**
