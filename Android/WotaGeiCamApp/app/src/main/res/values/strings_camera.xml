@@ -12,6 +12,7 @@
     <string name="cam_state_prepare">准备中</string>
     <string name="cam_state_stopping">停止中</string>
     <string name="cam_state_high_fps">该帧率超出本机能力，已退到可用上限</string>
+    <string name="cam_state_low_fps">实际帧率只有约 %1$d（目标 %2$d）：光线不足或快门过慢所限，画面会卡</string>
     <string name="cam_direct_no_effect">不使用 GPU 时斑马纹与峰值对焦不生效</string>
 
     <!-- 录制页分屏（用户第 3 项的前半：分屏控件 + 左侧压缩 + 右侧模式外壳） -->

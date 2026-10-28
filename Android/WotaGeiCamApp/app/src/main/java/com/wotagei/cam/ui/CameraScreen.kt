@@ -304,6 +304,8 @@ fun CameraScreen(
     val shutter by params.shutter.observed()
     val iso by params.iso.observed()
     val ev by params.ev.observed()
+    // 帧率坍塌守卫（2026-10-28 用户6/7）：持续低帧时顶栏告警行如实告知「画面为什么卡」
+    val lowFpsHint by params.lowFpsHint.observed()
     val aeMode by params.aeMode.observed()
     val wbMode by params.wbMode.observed()
     val stabilize by params.stabilize.observed()
@@ -1590,6 +1592,15 @@ fun CameraScreen(
                         deviceFailedHighFps = ui.device == DeviceStatus.OPEN_FAILED_HIGH_FPS,
                         effect = frameEffect,
                         renderMode = renderMode,
+                        // 取景器不在（重开中/已关）时不显示：会话关闭后结果回调停了，总线里
+                        // 可能残留上一场的提示，跟着设备状态机走才不会"回取景页先看半截旧告警"
+                        lowFpsNote = if (ui.device == DeviceStatus.OPEN_SUCCEED) {
+                            lowFpsHint?.let {
+                                stringResource(R.string.cam_state_low_fps, it.achievedFps, it.targetFps)
+                            }
+                        } else {
+                            null
+                        },
                         onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
                         onHeightChanged = { if (topBarH != it) topBarH = it }
                     )

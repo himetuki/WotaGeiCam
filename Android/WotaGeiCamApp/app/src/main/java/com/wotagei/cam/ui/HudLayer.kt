@@ -1611,6 +1611,7 @@ fun BoxScope.HudTopChrome(
     deviceFailedHighFps: Boolean,
     effect: FrameEffect,
     renderMode: RenderMode,
+    lowFpsNote: String?,
     onSettingsClick: () -> Unit,
     onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier
@@ -1664,7 +1665,9 @@ fun BoxScope.HudTopChrome(
         // 照样参与测量，拆掉它会量出一枚 20×2dp 的隐形盒——干净态下 topBarH 静默 +2dp、
         // 竖 Dock 上界与 HintBar 整体下移 2dp，用户看不出但整条实测链偏了。
         // （WarnRowsRenderGuardTest 判据 3 钉着这枚分叉，删了当场红）
-        if (warns.isNotEmpty()) {
+        // lowFpsNote（帧率坍塌守卫，2026-10-28）同住这条分叉：它带运行时数值没法进 warnRows
+        // 的 List<Int> 口径，作为第 5 行排在固定行之后，同一样式同一 warn 色。
+        if (warns.isNotEmpty() || lowFpsNote != null) {
             Column(
                 Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1673,6 +1676,18 @@ fun BoxScope.HudTopChrome(
                 warns.forEach { res ->
                     Text(
                         text = stringResource(res),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WotaColor.warn,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .wotaCard(WotaShape.pill)
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                    )
+                }
+                if (lowFpsNote != null) {
+                    Text(
+                        text = lowFpsNote,
                         style = MaterialTheme.typography.labelSmall,
                         color = WotaColor.warn,
                         maxLines = 1,

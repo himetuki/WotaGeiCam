@@ -93,8 +93,13 @@ class WarnRowsRenderGuardTest {
     /** 定位用的名字带接收者：`fun BoxScope.HudTopChrome(`（bodyOf 的正则按原文逐字匹配） */
     private val chromeFn = "BoxScope.HudTopChrome"
 
-    /** 分叉锚：「无告警时整块不组合」就写在这枚字符串上 */
-    private val branchAnchor = "if (warns.isNotEmpty())"
+    /**
+     * 分叉锚：「无告警时整块不组合」就写在这枚字符串上。
+     * 【2026-10-28 扩展】帧率坍塌提示（lowFpsNote，见 Camera2Engine/LowFpsWatch）同住这条分叉，
+     * 条件从 `if (warns.isNotEmpty())` 扩成带 `|| lowFpsNote != null` 的全字面——锚跟着改
+     * （处置约定：锚常量与源码形态同一次提交一起改）。「零子元素不组合」的语义不变。
+     */
+    private val branchAnchor = "if (warns.isNotEmpty() || lowFpsNote != null)"
 
     /** 遍历锚：判据 2 的字面，也是判据 3 次序比对的落点（见 KDoc 覆盖边界） */
     private val loopAnchor = "warns.forEach"
@@ -220,8 +225,8 @@ class WarnRowsRenderGuardTest {
         // 突变 4：把「无告警时整块不组合」的分叉整个删掉——这是**真结构变化**、不是语义空操作：
         // 删掉后 `warns.forEach` 仍在、体内 `warnRows(` 调用仍在，判据 1/2/4 原样通过，只有判据 3 变红。
         // 若判据 3 缺席，这把尺子对「干净态 topBarH 静默 +2dp」就是完全盲的——这就是它必须存在的理由。
-        // （删 `if (…)` 会留下一枚**孤儿** `}`——它本属被删掉的分叉，是 matchBraces 提前归零把它
-        //  「供」给了 body-open 去配对，而非它自己有伴；bodyOf 因此早一位收体，切出的文本里两者俱在）
+        // （2026-10-28 起分叉条件含 lowFpsNote，锚字面见 branchAnchor 注；删 `if (…)` 留孤儿 `}` 的
+        //  配平行为不变）
         val mutant = real.replace("$branchAnchor {", "")
         assertTrue(
             "删掉 isNotEmpty() 分叉后尺子必须红",

@@ -23,6 +23,8 @@ import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
+import com.wotagei.cam.core.LowFpsHint
+import com.wotagei.cam.core.LowFpsWatch
 import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.RenderMode
@@ -32,6 +34,7 @@ import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.record.FrameLedger
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -960,6 +963,7 @@ class Camera2Engine(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            camResultCount++
             logAeAfTelemetry(result)
             val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
             logWbTelemetry(result, manual)
@@ -1018,10 +1022,19 @@ class Camera2Engine(
      */
     private var lastAeAfTelemetryMs = 0L
 
+    // ---- 运行时帧率坍塌守卫（2026-10-28 用户6/7；判定逻辑在 core.LowFpsWatch，JVM 单测）----
+    // 计数与采样都挂在这条**既有的**结果回调/1s 遥测节拍上，不新增线程、不新增定时器：
+    // 到帧率最诚实的源头就是 capture result 的到达节奏（成片卡不卡的物理成因）。
+    // 只在回调线程碰这些字段（串行），跨线程发布走参数总线 StateFlow。
+    private var camResultCount = 0L
+    private var camRateLastMs = 0L
+    private var lowFpsWatch: LowFpsWatch? = null
+
     private fun logAeAfTelemetry(result: TotalCaptureResult) {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAeAfTelemetryMs < AE_AF_TELEMETRY_MS) return
         lastAeAfTelemetryMs = now
+        sampleCameraRate(now)
         val aeState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE) }.getOrNull()
         val afState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_STATE) }.getOrNull()
         val afMode = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_MODE) }.getOrNull()
@@ -1033,6 +1046,38 @@ class Camera2Engine(
             "3A遥测 aeState=$aeState afState=$afState afMode=$afMode fpsRange=${aeFps ?: "无"}" +
                 " lensFocus=${runCatching { result.get(android.hardware.camera2.CaptureResult.LENS_FOCUS_DISTANCE) }.getOrNull()}"
         )
+    }
+
+    /**
+     * 一拍实测到帧率喂给守卫；状态翻转才写总线（StateFlow 同值天然去重，这里省的是装帧）。
+     * 会话没开成功时不判也不留旧提示——取景器都不在，"帧率低"无从谈起。
+     * 换档（目标变了）换新守卫：旧账的宽限/连续/触发态对新档位全是噪音。
+     */
+    private fun sampleCameraRate(now: Long) {
+        val last = camRateLastMs
+        camRateLastMs = now
+        val count = camResultCount
+        camResultCount = 0
+        if (deviceStatus != DeviceStatus.OPEN_SUCCEED) {
+            lowFpsWatch = null
+            if (params.lowFpsHint.value != null) params.lowFpsHint.value = null
+            return
+        }
+        val target = params.fps.value.value
+        if (target <= 0) return
+        val watch = lowFpsWatch?.takeIf { it.targets(target) } ?: LowFpsWatch(target).also { lowFpsWatch = it }
+        if (last == 0L) return  // 首拍只立基准（这段窗口跨了会话建立，速率不可信）
+        val measured = count * 1000f / (now - last).coerceAtLeast(1L)
+        val alarm = watch.onSample(now, measured)
+        val hint = if (alarm) {
+            LowFpsHint(targetFps = target, achievedFps = measured.roundToInt().coerceAtLeast(1))
+        } else {
+            null
+        }
+        if (params.lowFpsHint.value != hint) {
+            Log.i(TAG, "帧率守卫：target=${target}fps 实测=${"%.1f".format(measured)}fps ⇒ ${if (alarm) "提示" else "解除"}")
+            params.lowFpsHint.value = hint
+        }
     }
 
     // ------------------------------------------------- 白平衡取证遥测（28 §2.4 批次 1）

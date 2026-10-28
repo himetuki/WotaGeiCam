@@ -138,6 +138,16 @@ class WotaParams(private val scope: CoroutineScope) {
      * 会话态：相机重开/切镜头由 [applyAbility] 清掉（能力表换了就得重新协商）。
      */
     val wbHalRejected = MutableStateFlow(false)
+
+    /**
+     * 运行时帧率坍塌提示（2026-10-28 用户6/7 反馈；null = 无提示）。
+     * 帧率决议保证的是**下发值合法**，保证不了实际到帧率——变量档 `[5,30]` 暗场掉 5fps、
+     * 固定档被 HAL 在结果侧放宽（`[24,24]`→`[15,24]`）都发生过。引擎按 ~1s 一拍采样
+     * 实际到帧率喂 [com.wotagei.cam.core.LowFpsWatch]，持续低帧经这里发提示，
+     * HUD 警告行如实告知「画面为什么卡」。判定与滞回全在 core（JVM 单测）。
+     */
+    val lowFpsHint = MutableStateFlow<LowFpsHint?>(null)
+
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
     val tint = MutableStateFlow(ParamState(0))
