@@ -469,6 +469,48 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   1440p30 留完整核/档位编号常量/键往返坏值回 OFF）。
 - **回归**：pure-test 81 files / 845 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（ORIENT：方向链路诊断日志 + 恒等族裁定，2026-10-28）
+
+上游 `81cb3a5`（方向链路取证日志）+ `9cc36c5`（前摄方向分族修正）。追赶基线第九批。
+
+- **`cpp/gl_render.cpp`**：首帧成功上屏的方向链汇总行——`orient sensor/display/mirror/fit/
+  enc尺寸/encRot` 一行打全（真机排查「前摄方向不对」第一眼核这行的量与编码容器角是否自洽）；
+  与上游 81cb3a5「首帧/换镜头打 stMatrix、stK、残角、applied、镜像、帧尺寸」的取证密度对齐。
+  换镜头侧 `open slot` 取证行已在 LENS 批落地。
+- **登记（N/A）**：`9cc36c5` 恒等族矩阵识别——**Android SurfaceTexture 平台面专属**：根因是
+  `getTransformMatrix` 有两族（课本族 `(1-t,1-s)` vs WIKO/华为前摄恒等族 `(t,1-s)`），旧解析器
+  只认课本族导致前摄回退 0 + 三重方向错。OHOS NativeImage **不暴露变换矩阵**——本侧方向由
+  `WotaGlSetDisplayGeometry(sensorDeg, displayDeg, mirrored)` 直接下发、编码容器角由 muxer
+  `SetRotation(sensor−display)` 写入，不存在「从矩阵反解方向」的环节，该缺陷类在本侧结构性
+  不成立（若未来真机出现前摄方向异常，取首帧 orient 行取证，按 sensor/mirror 参数面排查）。
+- **回归**：pure-test 81 files / 845 tests 全绿（无 ArkTS 改动）；`assembleHap`（release）
+  BUILD SUCCESSFUL（libentry.so 已含 orient 行）。
+
+## 上游基线推进（2026-10-28，4998ce4 → 9cc36c5）
+
+追赶轮收口：基线一次推进到本地 main `9cc36c5`（推送后即 origin/main）。区间 39 提交逐条处置
+汇总（详单见上方各交付批）：
+
+| 上游提交 | 鸿蒙处置 |
+|---|---|
+| `74d4fb2`/`313e8e6`/`0f713a2`/`2f30ad5`(decideFps) | FPS 批（572a1b1） |
+| `0525fa2`/`9b33272` | LENS 批（b5fbbd5；胶囊禁用主体结构性不适用已登记） |
+| `46d8d91`/`5742c0f`(释放顺序)/`5035b09` | SLOT 批（c67a458；附A/C·附B/D N/A 已登记） |
+| `ab73ebf`/`ee9aa0e`/`eefccc9`/`4457e4a` | WB3A 批（cab8ace；AE 遥测等三件 N/A 已登记） |
+| `79e30a7`/`4155c83` | N/A（Camera2 请求模型专属，WB3A 批登记） |
+| `f31d18c` | HIST 批（218e725） |
+| `ed59285`/`f381eee` | GLOW 批纯逻辑层（e148891；native 链+UI 留真机批） |
+| `1e61e15`/`58464fc` | DSCALE 批纯函数层（31b347a；native 链+UI 留真机批） |
+| `8646b05`/`316516f` | DENOISE 批纯逻辑层+平台裁定（8d9a346） |
+| `81cb3a5` | ORIENT 批（本轮） |
+| `9cc36c5` | ORIENT 批 N/A 登记（SurfaceTexture 平台面专属） |
+| `346ef79` | N/A——右槽选片三根因（Photo Picker URI/权限自省）是 Android 存储面问题；
+  本侧 Compare 选右片走沙箱 MediaRepo（相对路径直读），无 URI 权限通道 |
+| `eefccc9`(Camera2Engine 部分)/`2f30ad5`(sidecar 名) | Android 平台面细节，对应面 N/A 或已覆盖 |
+| `67748e6`/`8e68486`/`c0d6cfa`/`e4ef241`/`62fa57d`/`640f04c` | 文档口径/发版杂务/merge 节点，
+  无移植动作（新口径已随各批落 PORT_MAP） |
+| `a9b0cae`..`8c6603e`（站位线族） | 本侧已在 main（harmony/* 提交），非上游增量 |
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

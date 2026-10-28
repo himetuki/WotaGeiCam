@@ -2127,10 +2127,16 @@ void WotaGlRender(uint64_t timestamp)
     }
     if (!g_firstFrameLogged) {
         g_firstFrameLogged = true;
+        // 方向链路首帧汇总（上游 81cb3a5 的 OHOS 对应物；本侧无 stMatrix 面——方向由
+        // sensor/display/mirror 直接下发，恒等族矩阵识别 N/A）：真机排查「前摄方向不对」
+        // 第一眼就看这行的四个量 + 编码容器角是否自洽
         OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-            "first frame %{public}ux%{public}u swap=%{public}d",
+            "first frame %{public}ux%{public}u swap=%{public}d orient sensor=%{public}d display=%{public}d "
+            "mirror=%{public}d fit=%{public}.4f/%{public}.4f enc=%{public}dx%{public}d encRot=%{public}d",
             static_cast<unsigned>(g_width), static_cast<unsigned>(g_height),
-            swapped == EGL_TRUE ? 1 : 0);
+            swapped == EGL_TRUE ? 1 : 0,
+            g_sensorDeg, g_displayDeg, g_mirrored ? 1 : 0,
+            g_fitX, g_fitY, g_encW, g_encH, WotaGlEncoderRotation());
     }
     // 直方图采样（曲线弹窗开着才真采；250ms 一拍。当前 program = 曲线输出后的画面）
     MaybeSampleHistogram(locs);
