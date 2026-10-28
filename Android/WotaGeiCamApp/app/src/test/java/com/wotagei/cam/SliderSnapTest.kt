@@ -120,12 +120,13 @@ class SliderSnapTest {
             bad.add("rememberSliderContinuous 没读 WotaSettings.sliderContinuous")
         }
 
-        // 3) 录制页十七根滑杆逐个点名（10 根显式 null：3 根整数域 + Glow 七条；7 根各点一次 SliderKey）
-        if (occurrences(pills, "PillSlider(") != 17) bad.add("PillSlider 调用点不是 17 处")
-        // 17 根全部点名（7 根各自的 SliderKey + 10 根显式 null）
-        if (occurrences(pills, "snapKey =") != 17) bad.add("有滑杆没点名 snapKey")
-        if (occurrences(pills, "snapKey = null") != 10) {
-            bad.add("整数域滑杆（EV/斑马阈值/并入门槛 + Glow 七条）必须显式传 snapKey = null，且恰好 10 处")
+        // 3) 录制页 21 根滑杆逐个点名（14 根显式 null：3 根整数域 + Glow 七条 + 色调四条（29 §4.4）；
+        //    7 根各点一次 SliderKey）
+        if (occurrences(pills, "PillSlider(") != 21) bad.add("PillSlider 调用点不是 21 处")
+        // 21 根全部点名（7 根各自的 SliderKey + 14 根显式 null）
+        if (occurrences(pills, "snapKey =") != 21) bad.add("有滑杆没点名 snapKey")
+        if (occurrences(pills, "snapKey = null") != 14) {
+            bad.add("整数域/色调滑杆（EV/斑马阈值/并入门槛 + Glow 七条 + TONE 四条）必须显式传 snapKey = null，且恰好 14 处")
         }
         SliderKey.entries.forEach { key ->
             val n = occurrences(pills, "snapKey = SliderKey.${key.name}")

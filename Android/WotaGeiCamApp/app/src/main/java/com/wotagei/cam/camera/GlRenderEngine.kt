@@ -1058,14 +1058,17 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /**
-     * 应用 RGB 曲线；传 null 或恒等曲线即关闭。
+     * 应用 RGB 曲线 + 色调（29 §4.3，2026-10-28）；两者都恒等即关闭（跳过 LUT 的唯一合法判据：
+     * `stack.isPassthrough && tone.isIdentity`——**不能**只用曲线一侧决定，否则色调会被静默丢掉）。
      *
      * 烘焙在调用线程做（`TABLE_SIZE*3` 次插值，微秒级），GL 线程只拿字节表，
      * 避免拖动控制点时把重计算压到渲染线程上掉帧。
      */
-    fun setCurve(stack: CurveStack?) {
+    fun setCurve(stack: CurveStack?, tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY) {
         if (released.get()) return
-        curveBytes = stack?.takeIf { !it.isPassthrough }?.bakeBytes()
+        curveBytes = stack
+            ?.takeIf { !it.isPassthrough || !tone.isIdentity }
+            ?.bakeBytes(tone)
         postGl {
             // 每次显式改曲线都重新给一次编译机会：可能是上一版表触发的偶发失败。
             // 只清含 curve 维度的备忘——不含曲线维度的坏键（如驱动不认 PEAKING）与本次无关。

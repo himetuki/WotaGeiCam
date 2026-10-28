@@ -84,6 +84,9 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_MARKER_COLOR,
         // 2026-10-27：Glow 整份参数入档（复合串键，见 WotaSettings.KEY_GLOW 的注释）
         WotaSettings.KEY_GLOW,
+        // 2026-10-28：色调四滑条入档（复合串键 KEY_TONE；**不**并进 KEY_CURVE_STACK——
+        // 那会改曲线持久格式，老用户串会解坏，29 §4.3）
+        WotaSettings.KEY_TONE,
         // 2026-10-27：上屏渲染比例（枚举名；只改窗口 pass，不重建会话）
         WotaSettings.KEY_DISPLAY_SCALE
     )
@@ -173,6 +176,8 @@ object ParamsPersist {
         params.displayScale.value = enumOrDefault(
             prefs, WotaSettings.KEY_DISPLAY_SCALE, DisplayScale.ORIG
         )
+        // ㉒ 色调（29 §4.3，2026-10-28）：复合串一个键；坏串整份回恒等（decode 内部已 sanitize）
+        params.tone.value = com.wotagei.cam.core.ToneParams.decode(prefs.getString(WotaSettings.KEY_TONE, null))
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -243,6 +248,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shMarkerSpread = params.markerSpread.value
     private var shMarkerColor = params.markerColor.value
     private var shGlow = params.glowParams.value
+    private var shTone = params.tone.value
     private var shDisplayScale = params.displayScale.value
     private var shRefLines = params.refLines.value
     private var shLevel = params.levelEnabled.value
@@ -280,6 +286,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val markerSpread = params.markerSpread.value
         val markerColor = params.markerColor.value
         val glow = params.glowParams.value
+        val tone = params.tone.value
         val displayScale = params.displayScale.value
 
         val editor = prefs.edit()
@@ -292,6 +299,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (markerSpread != shMarkerSpread) { editor.putFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, markerSpread); dirty = true }
         if (markerColor != shMarkerColor) { editor.putString(WotaSettings.KEY_DEFAULT_MARKER_COLOR, markerColor.name); dirty = true }
         if (glow != shGlow) { editor.putString(WotaSettings.KEY_GLOW, encodeGlow(glow)); dirty = true }
+        if (tone != shTone) { editor.putString(WotaSettings.KEY_TONE, com.wotagei.cam.core.ToneParams.encode(tone)); dirty = true }
         if (displayScale != shDisplayScale) {
             editor.putString(WotaSettings.KEY_DISPLAY_SCALE, displayScale.name); dirty = true
         }
@@ -350,6 +358,7 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shMarkerSpread = markerSpread
             shMarkerColor = markerColor
             shGlow = glow
+            shTone = tone
             shDisplayScale = displayScale
             shRefLines = refLines
             shLevel = level

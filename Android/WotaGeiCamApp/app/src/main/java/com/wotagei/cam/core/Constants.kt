@@ -253,11 +253,25 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
      * Glow 光晕（2026-10-27 用户需求；docs/plan/24 R3）：scene layer，**默认关**（零代价口径）。
      * 默认落位在**左竖 Dock 第 5 组**（见 [com.wotagei.cam.ui.HudEntry.homeZone] 与计划 §1.6）。
      */
-    GLOW(16384, com.wotagei.cam.R.string.cam_pill_glow);
+    GLOW(16384, com.wotagei.cam.R.string.cam_pill_glow),
+
+    /**
+     * 色调（29 §4.4 F4，2026-10-28）：高光/阴影/黑点/白点四滑条，scene layer（预览+成片）。
+     * **默认关**（所有者口径：「不是没有这个胶囊，而是显隐位默认关」）——DEFAULT_MASK =
+     * 全开 − TONE；**不进 [ADDED_IN_SCHEMA]**（老用户升级时不会被自动打开，他们本来就没见过它），
+     * schema 仍 +1（2 → 3）只是登记这个「不再自动补位」的升级当口。
+     * 默认落位左竖 Dock 第 6 组（GLOW 之后，见 [com.wotagei.cam.ui.HudEntry.homeZone]）。
+     */
+    TONE(32768, com.wotagei.cam.R.string.cam_pill_tone);
 
     companion object {
         val ALL: List<CamPill> = values().toList()
-        val DEFAULT_MASK: Int = ALL.fold(0) { acc, t -> acc or t.bit }
+
+        /**
+         * 出厂显隐掩码：全开 − **TONE**（29 §4.4-2：新装用户默认看不到 TONE 胶囊，
+         * 其余胶囊维持「默认全开 = 与改造前界面一致」的口径不变）。
+         */
+        val DEFAULT_MASK: Int = ALL.fold(0) { acc, t -> acc or t.bit } and TONE.bit.inv()
 
         /**
          * 显隐位清单的版本号：**每加一颗新胶囊就 +1**，并把它的位登记进 [ADDED_IN_SCHEMA]。
@@ -267,12 +281,16 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
          * 上来界面不能凭空少东西"）。只在"用户**不可能**关过这一位"的升级当口补上它，就能既不打扰
          * 用户已有的取舍、又不让新功能凭空消失。用户关过的那一位在下一版里照旧是关的
          * （读写都会带上 [WotaSettings.KEY_HUD_PILLS_SCHEMA]，升级只发生一次）。
+         *
+         * 3（2026-10-28）：加 TONE——**刻意不登记进 [ADDED_IN_SCHEMA]**（TONE 默认关，
+         * 老用户本就没见过它，「补位」反而违背默认关口径；schema +1 只是把当口记下）。
          */
-        const val MASK_SCHEMA = 2
+        const val MASK_SCHEMA = 3
 
         /**
          * 「这一位是在哪一版加进来的」：升级时只补这些位，其余一律保持用户原样。
          * 1 = 降噪（2026-10-26）；2 = 光晕（2026-10-27）。
+         * **TONE（schema 3）刻意不在表里**：它默认关，老用户升级不该被自动打开（29 §4.4-2）。
          */
         val ADDED_IN_SCHEMA: Map<Int, Int> = mapOf(1 to DENOISE.bit, 2 to GLOW.bit)
 

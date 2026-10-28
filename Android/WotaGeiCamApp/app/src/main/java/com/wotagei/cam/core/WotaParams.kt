@@ -159,6 +159,14 @@ class WotaParams(private val scope: CoroutineScope) {
 
     /** RGB 曲线：只走 GPU 渲染链（DIRECT 无片元 pass），恒等即关闭 */
     val curve = MutableStateFlow(CurveStack.IDENTITY)
+
+    /**
+     * 色调四滑条（高光/阴影/黑点/白点，29 §4 F4；2026-10-28）：与曲线同级是 scene layer，
+     * 烘进同一条 LUT（预览+成片），`gl.setCurve(stack, tone)` 一处消费。恒等时 LUT 跳过
+     * （跳过判据 = stack 恒等 **且** tone 恒等，`GlRenderEngine.setCurve` 一处收口）。
+     * 持久化走独立键 KEY_TONE（ParamsPersist），**不**并进 CurveStack 的编解码。
+     */
+    val tone = MutableStateFlow(ToneParams.IDENTITY)
     val refLines = MutableStateFlow(0)                                // RefLineType 位掩码
     val levelEnabled = MutableStateFlow(true)
 

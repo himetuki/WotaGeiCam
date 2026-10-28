@@ -81,11 +81,13 @@ class HudLayoutRowPitchTest {
         e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 60, e(CamPill.CURVE) to 60,
         e(CamPill.FLASH) to 76,
         // 2026-10-27：Glow 是普通胶囊（30dp = 60px），左 Dock 第 5 组
-        e(CamPill.GLOW) to 60
+        e(CamPill.GLOW) to 60,
+        // 2026-10-28：TONE 同为普通胶囊（29 §4.4），左 Dock 第 6 组
+        e(CamPill.TONE) to 60
     )
     private val leftWidths = mapOf(
         e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 136, e(CamPill.CURVE) to 139,
-        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 136
+        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 136, e(CamPill.TONE) to 136
     )
 
     /** 读数块满配 7 颗：全是全局档胶囊（主副标签共 30dp = 60px），宽按 `hudPerRowFor` 那笔 90dp 估 */
@@ -100,16 +102,22 @@ class HudLayoutRowPitchTest {
     )
     private val leftHeights120 = mapOf(
         e(CamPill.REFLINE) to 76, e(CamPill.MONITOR) to 68, e(CamPill.CURVE) to 68,
-        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 68
+        e(CamPill.FLASH) to 76, e(CamPill.GLOW) to 68, e(CamPill.TONE) to 68
     )
     private val readoutHeights120: Map<HudEntry, Int> = HudItem.ALL.associate { h(it) to 68 }
 
     /** 一帧这一枚容器的解析输入（与两页同一个构造）：格距按字体缩放现算，实测高喂手算那张表 */
-    private fun planOf(fontScale: Float, heights: Map<HudEntry, Int>, perRow: Int = 3): HudGridPlan {
+    private fun planOf(
+        fontScale: Float,
+        heights: Map<HudEntry, Int>,
+        perRow: Int = 3,
+        /** 默认全集；对撞带高那条用「出厂可见集」（减 TONE——它默认隐藏，不渲染就不占带，29 §4.4-2） */
+        visible: Set<HudEntry> = HudEntry.ALL.toSet()
+    ): HudGridPlan {
         val rowPitch = gridRowPitchPx(fontScale, dockGapDp, density)
         val readoutPitch = gridRowPitchPx(fontScale, HudRowGapDp, density)
         return HudGridPlan(
-            visible = HudEntry.ALL.toSet(),
+            visible = visible,
             readoutPerRow = perRow,
             rowPitchOf = { zone -> if (zone == HudZone.READOUT) readoutPitch else rowPitch },
             cellHeightOf = { heights[it] ?: 0 }
@@ -121,8 +129,15 @@ class HudLayoutRowPitchTest {
      * 与 `HudEntryGrid` 走的同一条 [gridPlacementOf]（那边只剩"量尺寸 + placeRelative"），
      * 所以这条桥红了，屏幕上必然跟着红——#74 那一版缺的正是这座桥（数值测准了却没去对撞带高）。
      */
-    private fun gridPlaced(zone: HudZone, fontScale: Float, heights: Map<HudEntry, Int>, widths: Map<HudEntry, Int>, perRow: Int = 3): GridPlacement {
-        val plan = planOf(fontScale, heights, perRow)
+    private fun gridPlaced(
+        zone: HudZone,
+        fontScale: Float,
+        heights: Map<HudEntry, Int>,
+        widths: Map<HudEntry, Int>,
+        perRow: Int = 3,
+        visible: Set<HudEntry> = HudEntry.ALL.toSet()
+    ): GridPlacement {
+        val plan = planOf(fontScale, heights, perRow, visible)
         val items = HudLayoutTable.default().gridItems(zone, plan)
         val gapPx = (hudGridGap(zone).value * density).toInt()
         return gridPlacementOf(
@@ -137,8 +152,15 @@ class HudLayoutRowPitchTest {
     }
 
     /** [gridPlaced] 只看格网尺寸那一支（对撞带高用） */
-    private fun gridSize(zone: HudZone, fontScale: Float, heights: Map<HudEntry, Int>, widths: Map<HudEntry, Int>, perRow: Int = 3): HudSizePx =
-        gridPlaced(zone, fontScale, heights, widths, perRow).size
+    private fun gridSize(
+        zone: HudZone,
+        fontScale: Float,
+        heights: Map<HudEntry, Int>,
+        widths: Map<HudEntry, Int>,
+        perRow: Int = 3,
+        visible: Set<HudEntry> = HudEntry.ALL.toSet()
+    ): HudSizePx =
+        gridPlaced(zone, fontScale, heights, widths, perRow, visible).size
 
     /** 逐颗左上角（拿手摆格长换算，期望值可口算）：与 `HudLayoutGridTest` 同一手法 */
     private fun cellOffset(cell: GridCell, pitch: HudSizePx): HudPointPx =
@@ -259,7 +281,7 @@ class HudLayoutRowPitchTest {
         assertEquals(GridCell(0, 2), readout[h(HudItem.ZOOM)])
         // 颗数与归属不受高矮影响
         assertEquals(6, right.size)
-        assertEquals(5, left.size)
+        assertEquals(6, left.size)
     }
 
     @Test
@@ -515,20 +537,22 @@ class HudLayoutRowPitchTest {
         // ---- 100%（格距 68px = 34dp）----
         // 右 Dock：配对块 3 档 + 四颗各 1 档 = 7 档 ⇒ 7×68 − 8 = 468px = 234dp
         assertEquals(468, gridSize(HudZone.RIGHT, 1f, rightHeights100, rightWidths).height)
-        // 左 Dock：两枚图标钮各 2 档 + 三颗胶囊各 1 档 ⇒ 7 档 ⇒ 7×68 − 8 = **468px = 234dp**
+        // 左 Dock：两枚图标钮各 2 档 + 三颗胶囊各 1 档 ⇒ 7 档 ⇒ 7×68 − 8 = **468px = 234dp**。
+        // 可见集 = 出厂掩码（TONE 默认隐藏不渲染，29 §4.4-2）——对撞带高必须按"实际会画出来的"算
+        val defaultVisible = HudEntry.ALL.toSet() - e(CamPill.TONE)
         //（2026-10-27 加 Glow 后从 6 档变 7 档；带高 488px 仍装得下）
-        assertEquals(468, gridSize(HudZone.LEFT, 1f, leftHeights100, leftWidths).height)
+        assertEquals(468, gridSize(HudZone.LEFT, 1f, leftHeights100, leftWidths, visible = defaultVisible).height)
         // 读数块：格距 72px、一行两颗 ⇒ 4 行 × 72 − 12 = 276px = 138dp
         assertEquals(276, gridSize(HudZone.READOUT, 1f, readoutHeights100, readoutWidths, perRow = 2).height)
         assertFits("右 Dock 100%", 468, dockBandPx, 8)
-        assertFits("左 Dock 100%", 468, dockBandPx, 8)
+        assertFits("左 Dock 100%（出厂可见集）", 468, dockBandPx, 8)
         assertFits("读数块 100%", 276, readoutBandPx, 12)
 
         // ---- 120%（格距 76px = 38dp；读数块 ceil((33.6+6)×2) = 80px）----
         // 右 Dock：配对块 150px ≤ 两档(152px) ⇒ 2+4 = 6 档 ⇒ 6×76 − 8 = 448px = 224dp
         assertEquals(448, gridSize(HudZone.RIGHT, 1.2f, rightHeights120, rightWidths).height)
-        // 左 Dock：76px 刚好等于一档 ⇒ 5 档（含 Glow）⇒ 5×76 − 8 = 372px = 186dp
-        assertEquals(372, gridSize(HudZone.LEFT, 1.2f, leftHeights120, leftWidths).height)
+        // 左 Dock：76px 刚好等于一档 ⇒ 5 档（含 Glow；TONE 默认隐藏）⇒ 5×76 − 8 = 372px = 186dp
+        assertEquals(372, gridSize(HudZone.LEFT, 1.2f, leftHeights120, leftWidths, visible = defaultVisible).height)
         // 读数块：4 行 × 80 − 12 = 308px = 154dp
         assertEquals(308, gridSize(HudZone.READOUT, 1.2f, readoutHeights120, readoutWidths, perRow = 2).height)
         assertFits("右 Dock 120%", 448, dockBandPx, 8)
@@ -564,6 +588,24 @@ class HudLayoutRowPitchTest {
         assertEquals(
             "120% 满配横屏：露出的颗数",
             6, bottoms120.count { it.second + 8 <= dockBandPx }
+        )
+    }
+
+    /**
+     * **已知债登记**（29 §4.4 的账外项，2026-10-28）：用户手动打开 TONE 后左 Dock 满配 8 档，
+     * 100% 字号下整枚底板 536+16=552px，超出带高 488px **64px**——最末一颗（TONE）会探出带外。
+     * 默认 UI 不受影响（TONE 默认隐藏，对撞那条按出厂可见集算，7 档 468px 装得下）。
+     * 修法候选（需所有者裁决）：① TONE 挪底栏伴随带；② 左 Dock 带内滚动/行距压缩；
+     * ③ 满配语义改成"只按可见集渲染"。债清掉之前这条钉住「溢出 64px 且只由 TONE 引入」。
+     */
+    @Test
+    fun leftDockFullConfigWithToneOverflowsTheBandBy64pxKnownDebt() {
+        val grid = gridSize(HudZone.LEFT, 1f, leftHeights100, leftWidths).height
+        assertEquals("TONE 可见 ⇒ 8 档 ⇒ 8×68 − 8 = 536px", 536, grid)
+        val cardPx = grid + 8 * 2
+        assertEquals(
+            "整枚底板 552px 对带高 488px 的溢出 = 64px（修债时这条改成 0，并把它并回对撞用例）",
+            64, cardPx - (360 - 44 - 72) * 2
         )
     }
 }

@@ -177,7 +177,10 @@ class HudLayoutGridTest {
         // 监看的目标格 (0,4) 正是 Glow 的默认格 ⇒ Glow 被换到监看原格 (0,1)：那是
         // `droppingIntoOccupiedCellSwapsTheTwo` 的既有语义，不是本用例的断言对象。
         assertEquals(
-            listOf(e(CamPill.REFLINE), e(CamPill.CURVE), e(CamPill.FLASH), e(CamPill.MONITOR), e(CamPill.GLOW)),
+            listOf(
+                e(CamPill.REFLINE), e(CamPill.CURVE), e(CamPill.FLASH),
+                e(CamPill.MONITOR), e(CamPill.GLOW), e(CamPill.TONE)
+            ),
             movedTable.orderOf(HudZone.LEFT)
         )
         assertEquals("顺序第 2 位的曲线仍在第 2 行（旧模型会让它上移到第 1 行）",
@@ -273,7 +276,7 @@ class HudLayoutGridTest {
         assertEquals("监看不动", GridCell(0, 1), after[e(CamPill.MONITOR)])
         // 交换后两者都是**显式格**（写表时把被挤者一并写进去；漏写的话下一帧推导会把它打回默认）
         assertEquals(GridCell(0, 3), placed.cellsOf(HudZone.LEFT)[e(CamPill.CURVE)])
-        assertEquals("五颗仍各占一格（叠格就是又一颗摞在另一颗上）", 5, after.values.toSet().size)
+        assertEquals("六颗仍各占一格（叠格就是又一颗摞在另一颗上）", 6, after.values.toSet().size)
     }
 
     @Test
@@ -550,7 +553,8 @@ class HudLayoutGridTest {
         assertEquals(3, gridColsCapOf(HudZone.READOUT))
         assertEquals(1, gridColsCapOf(HudZone.TOP))
         // 2026-10-26 降噪 / 2026-10-27 Glow 各 +1 ⇒ 行上限随条目总数 19→20→21
-        assertEquals(GridCell(1, 21), clampStoredCell(HudZone.LEFT, GridCell(99, 999)))
+        // 2026-10-26 降噪 / 2026-10-27 Glow / 2026-10-28 TONE 各 +1 ⇒ 行上限随条目总数 19→20→21→22
+        assertEquals(GridCell(1, 22), clampStoredCell(HudZone.LEFT, GridCell(99, 999)))
         assertEquals(GridCell.DEFAULT, clampStoredCell(HudZone.LEFT, GridCell.DEFAULT))
     }
 
@@ -621,14 +625,14 @@ class HudLayoutGridTest {
         val table = HudLayoutTable.default()
         val before = table.gridItems(HudZone.LEFT, planAll)
         val placedBefore = placedOf(HudZone.LEFT, before)
-        // 手算（默认五颗各占一档、格长 60 + 8 = 68）：格网 60×142，逐颗左上角
-        // （2026-10-27：第 5 颗 Glow 占第 5 档 ⇒ 高 5×30−8 = 142）
+        // 手算（默认六颗各占一档、格长 60 + 8 = 68）：格网 60×172，逐颗左上角
+        // （2026-10-27：第 5 颗 Glow；2026-10-28：第 6 颗 TONE ⇒ 高 6×30−8 = 172）
         assertEquals(HudSizePx(68, 30), placedBefore.pitch)
-        assertEquals(HudSizePx(60, 142), placedBefore.size)
+        assertEquals(HudSizePx(60, 172), placedBefore.size)
         assertEquals(
             listOf(
                 HudPointPx(4, 5), HudPointPx(4, 35), HudPointPx(4, 65),
-                HudPointPx(4, 95), HudPointPx(4, 125)
+                HudPointPx(4, 95), HudPointPx(4, 125), HudPointPx(4, 155)
             ),
             placedBefore.offsets
         )
@@ -638,7 +642,7 @@ class HudLayoutGridTest {
         val placedAfter = placedOf(HudZone.LEFT, moved)
         val byEntry = moved.mapIndexed { i, it -> it.entry to placedAfter.offsets[i] }.toMap()
         // ① "板子会长大"与"别人不动"是两件事，分开断：宽度确实从 60 涨到 128（两列），高度一字未变
-        assertEquals("两列 ⇒ 格网宽 = 2×68−8 = 128（底板会长大，这条测的就是它）", HudSizePx(128, 142), placedAfter.size)
+        assertEquals("两列 ⇒ 格网宽 = 2×68−8 = 128（底板会长大，这条测的就是它）", HudSizePx(128, 172), placedAfter.size)
         // ② 其余三颗逐颗点名：左 Dock 贴左缘锚定，第 2 列只向右生长 ⇒ 第 0 列的颗一个像素都不许动
         assertEquals(HudPointPx(4, 5), byEntry[e(CamPill.REFLINE)])
         assertEquals(HudPointPx(4, 65), byEntry[e(CamPill.CURVE)])
@@ -758,7 +762,7 @@ class HudLayoutGridTest {
         assertEquals(0, reservedGridColsOf(rightAnchor))
         assertEquals("右 Dock 默认表用到 5 档", 5, reservedGridRowsOf(rightAnchor, { 0 }, 30))
         val leftAnchor = GridAnchor(HudZone.LEFT, table.defaultGridOf(HudZone.LEFT, planAll))
-        assertEquals("左 Dock 默认表用到 5 档（2026-10-27 加 Glow）", 5, reservedGridRowsOf(leftAnchor, { 0 }, 30))
+        assertEquals("左 Dock 默认表用到 6 档（2026-10-27 加 Glow、2026-10-28 加 TONE）", 6, reservedGridRowsOf(leftAnchor, { 0 }, 30))
         // 钳制带：读数块可用宽 500dp ÷ 90dp = 5 列，但上限 3、预留 2 ⇒ 夹到 2（#70 A「横屏一行两颗」定版）
         assertEquals(
             2,

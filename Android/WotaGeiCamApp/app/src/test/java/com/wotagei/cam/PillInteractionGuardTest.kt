@@ -65,18 +65,18 @@ class PillInteractionGuardTest {
     }
 
     /**
-     * 十根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛滑杆）：任一根漏传 `ladder` 就会退回连续滑杆，
-     * 而纯函数测试仍全绿（审查 P3 的假绿口）。空 = 干净。
+     * 21 根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛滑杆 + 2026-10-28 色调四条）：
+     * 任一根漏传 `ladder` 就会退回连续滑杆，而纯函数测试仍全绿（审查 P3 的假绿口）。空 = 干净。
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 17) bad.add("PillSlider 调用点不是 17 处")
+        if (occurrences(src, "PillSlider(").size != 21) bad.add("PillSlider 调用点不是 21 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 17) bad.add("ladder = 参数不是 17 处（有滑杆退回连续模式）")
+        if (ladderArgs != 21) bad.add("ladder = 参数不是 21 处（有滑杆退回连续模式）")
         val panels = listOf(
             "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
-            "MonitorPill", "FpsPill", "GlowPill"
+            "MonitorPill", "FpsPill", "GlowPill", "TonePill"
         )
         panels.forEach { fn ->
             val body = runCatching { bodyOf(src, fn) }.getOrNull()
@@ -152,14 +152,15 @@ class PillInteractionGuardTest {
     }
 
     @Test
-    fun `录制中可调白名单恰为七项`() {
+    fun `录制中可调白名单恰为八项`() {
         // 2026-10-27 B4：MONITOR 整组进白名单（只改 DISPLAY 槽，成片不变）
         // 2026-10-27 B7：GLOW 进白名单（scene layer：**会**改成片，但不触发重画、不产生重复帧）
+        // 2026-10-28 F-E：TONE 按 Glow 同一先例进白名单（scene layer，29 §4.4-5 / §九-2）
         assertEquals(
-            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW",
+            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW/TONE",
             setOf(
                 PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
-                PillKey.MONITOR, PillKey.GLOW
+                PillKey.MONITOR, PillKey.GLOW, PillKey.TONE
             ),
             RECORDING_EDITABLE_PILLS
         )
@@ -175,6 +176,7 @@ class PillInteractionGuardTest {
         assertTrue(pillEditableDuringRecording(PillKey.FOCUS))
         assertTrue("监看叠加只上屏 ⇒ 录制中可调（25 号计划 B4）", pillEditableDuringRecording(PillKey.MONITOR))
         assertTrue("Glow 是 scene layer ⇒ 录制中可调（24 号计划 §1.6）", pillEditableDuringRecording(PillKey.GLOW))
+        assertTrue("色调是 scene layer ⇒ 录制中可调（29 §九-2）", pillEditableDuringRecording(PillKey.TONE))
         assertFalse(pillEditableDuringRecording(PillKey.SHUTTER))
         assertFalse(pillEditableDuringRecording(PillKey.BITRATE))
         assertFalse(pillEditableDuringRecording(PillKey.BT))

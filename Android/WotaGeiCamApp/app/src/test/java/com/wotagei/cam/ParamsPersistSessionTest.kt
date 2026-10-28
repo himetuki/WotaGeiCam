@@ -94,6 +94,8 @@ class ParamsPersistSessionTest {
         markerCount.value = 6
         // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）
         glowParams.value = com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f)
+        // 2026-10-28：色调四滑条入档（复合串键 KEY_TONE；非恒等足够证往返）
+        tone.value = com.wotagei.cam.core.ToneParams(black = 0.1f, white = 0.2f, shadows = 0.5f, highlights = -0.4f)
         // 2026-10-27：上屏渲染比例（枚举名）
         displayScale.value = com.wotagei.cam.core.DisplayScale.QUARTER
     }
@@ -186,6 +188,11 @@ class ParamsPersistSessionTest {
             "Glow 整份参数必须往返（复合串键）",
             com.wotagei.cam.core.GlowParams.PRESET_B.copy(enabled = true, blend = 0.83f),
             back.glowParams.value
+        )
+        assertEquals(
+            "色调四滑条必须往返（KEY_TONE 独立键，不并进曲线格式）",
+            com.wotagei.cam.core.ToneParams(black = 0.1f, white = 0.2f, shadows = 0.5f, highlights = -0.4f),
+            back.tone.value
         )
         assertEquals(
             "上屏渲染比例必须往返",

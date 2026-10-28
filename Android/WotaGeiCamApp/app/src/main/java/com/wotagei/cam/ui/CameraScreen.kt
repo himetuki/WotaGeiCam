@@ -315,6 +315,8 @@ fun CameraScreen(
     val peakingStrength by params.peakingStrength.observed()
     val peakingColor by params.peakingColor.observed()
     val curveStack by params.curve.observed()
+    // 色调（29 §4.3，2026-10-28）：烘进同一条 LUT，随长键下发（换引擎同曲线一样补发）
+    val toneParams by params.tone.observed()
     val bitrate by params.bitrate.observed()
     val refLines by params.refLines.observed()
     val levelEnabled by params.levelEnabled.observed()
@@ -676,14 +678,15 @@ fun CameraScreen(
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
     LaunchedEffect(
         glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack,
-        arcMergeDeadband, videoDenoise, displayScale
+        arcMergeDeadband, videoDenoise, displayScale, toneParams
     ) {
         val gl = glEngine ?: return@LaunchedEffect
         gl.setEffect(if (renderMode == RenderMode.DIRECT) FrameEffect.NONE else frameEffect)
         gl.setZebraParameters(zebraThreshold, zebraDensity)
         gl.setPeakingParameters(peakingStrength, peakingColor)
-        // 换渲染模式会 new 一个新引擎：曲线要在同一处补发，否则切回 GPU 就丢调色
-        gl.setCurve(curveStack)
+        // 换渲染模式会 new 一个新引擎：曲线要在同一处补发，否则切回 GPU 就丢调色。
+        // 色调（29 §4.3）与曲线共走 setCurve：同一张 LUT 的两个输入
+        gl.setCurve(curveStack, toneParams)
         // 补弧「并入门槛」同理：只下发给当前引擎的本段 uniform，下一段 setArcConvert 仍回落到
         // 参数总线发布的快照（真源在 WotaParams.setArcMergeDeadband）——这里不改打戳/抽帧节奏
         gl.setArcMergeDeadband(arcMergeDeadband)
@@ -1362,6 +1365,10 @@ fun CameraScreen(
         glowLabel = stringResource(R.string.cam_pill_glow),
         glowActive = glowParams.enabled && renderMode == RenderMode.GPU,
         glowUsable = renderMode == RenderMode.GPU,
+        // TONE（29 §4.4）：读数恒取控件名；"生效中" = tone 非恒等且 GPU；DIRECT 下在场但禁用
+        toneLabel = stringResource(R.string.cam_pill_tone),
+        toneActive = toneParams.isIdentity.not() && renderMode == RenderMode.GPU,
+        toneUsable = renderMode == RenderMode.GPU,
         flash = flash,
         // 六项第 7 条：镜头入口从顶栏搬到底栏那颗，标签读当前镜头名
         lensLabel = stringResource(lensLabelRes(slot?.type ?: lens)),
@@ -1431,6 +1438,10 @@ fun CameraScreen(
         onDenoiseClick = { pop = PillKey.DENOISE },
         onGlowClick = {
             if (renderMode == RenderMode.GPU) pop = PillKey.GLOW
+            else showTip(app.getString(R.string.cam_monitor_need_gpu))
+        },
+        onToneClick = {
+            if (renderMode == RenderMode.GPU) pop = PillKey.TONE
             else showTip(app.getString(R.string.cam_monitor_need_gpu))
         },
         onCurveClick = {

@@ -38,8 +38,8 @@ class ParamsPersistWiringGuardTest {
         "denoise_audio", "denoise_video",
         // 2026-10-27：站位线的间距与颜色入档（**线数刻意不入档**，见下面的专门用例）
         "default_marker_spread", "default_marker_color",
-        // 2026-10-27：Glow 整份参数（复合串键）+ 上屏渲染比例
-        "glow_params", "display_scale"
+        // 2026-10-27：Glow 整份参数（复合串键）；2026-10-28：色调（KEY_TONE）+ 上屏渲染比例
+        "glow_params", "tone_params", "display_scale"
     )
 
     // ------------------------------------------------------------------ 取 lambda 体（PillEnabledGuardTest 同款花括号配对）
@@ -173,7 +173,7 @@ class ParamsPersistWiringGuardTest {
                     // 降噪两项不在此列：恢复侧走 WotaSettings.audioDenoise/videoDenoise 助手
                     // （键常量只在 KEYS 与 flush 出现，引用数 2 是设计如此）
                     "KEY_DEFAULT_MARKER_SPREAD", "KEY_DEFAULT_MARKER_COLOR",
-                    "KEY_GLOW", "KEY_DISPLAY_SCALE"
+                    "KEY_GLOW", "KEY_TONE", "KEY_DISPLAY_SCALE"
                 )
             )
         )
@@ -226,16 +226,19 @@ class ParamsPersistWiringGuardTest {
     }
 
     @Test
-    fun `R4_十七个滑杆调用点全接松手落盘`() {
-        assertEquals("PillSlider 调用点数（拍板以实查 17 处为准）", 17, occurrences(maskedPills, "PillSlider(").size)
+    fun `R4_二十一个滑杆调用点全接松手落盘`() {
+        assertEquals(
+            "PillSlider 调用点数（拍板以实查 21 处为准；2026-10-28 +色调四条）",
+            21, occurrences(maskedPills, "PillSlider(").size
+        )
         assertEquals(
             "补传 onValueChangeFinished 的调用点数",
-            17, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
+            21, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
         )
-        // 九个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
+        // 十个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
         val pillFns = listOf(
             "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
-            "MonitorPill", "FpsPill", "GlowPill"
+            "MonitorPill", "FpsPill", "GlowPill", "TonePill"
         )
         val misses = pillFns.filter { fn ->
             val body = runCatching { bodyOf(maskedPills, fn) }.getOrNull()

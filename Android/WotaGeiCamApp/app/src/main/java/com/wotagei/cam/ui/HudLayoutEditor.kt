@@ -1298,6 +1298,11 @@ private fun editorCtx(
         glowActive = false,
         glowUsable = false,
         onGlowClick = { },
+        // TONE 同 Glow：编辑页不接引擎，恒"不可用"，点按无动作
+        toneLabel = stringResource(R.string.cam_pill_tone),
+        toneActive = false,
+        toneUsable = false,
+        onToneClick = { },
         flash = Flash.OFF,
         lensLabel = stringResource(lensLabelRes(LensType.WIDE)),
         btConnected = false,

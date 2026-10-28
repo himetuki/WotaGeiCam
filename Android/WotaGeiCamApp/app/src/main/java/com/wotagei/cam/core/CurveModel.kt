@@ -118,9 +118,10 @@ data class CurveStack(
         else -> copy(master = curve)
     }
 
-    /** 单通道求值：先白后本色，顺序不能换（白曲线是全局对比度，本色是通道增益） */
-    fun evaluate(channel: Int, x: Float): Float {
-        val afterMaster = master.evaluate(x)
+    /** 单通道求值：先色调、再白、后本色，顺序不能换（色调是场景层，白曲线是全局对比度，本色是通道增益） */
+    fun evaluate(channel: Int, x: Float, tone: ToneParams = ToneParams.IDENTITY): Float {
+        val toned = if (tone.isIdentity) x else tone.apply(x)
+        val afterMaster = master.evaluate(toned)
         return when (channel) {
             ColorCurve.CHANNEL_RED -> red.evaluate(afterMaster)
             ColorCurve.CHANNEL_GREEN -> green.evaluate(afterMaster)
@@ -136,13 +137,13 @@ data class CurveStack(
      * （见 `Shaders.CURVE_DECL` 的 `applyCurve`）。若按平面三段（R‖G‖B）产出，
      * GPU 把乱序字节当交错读，每通道变成三轮 0→255 锯齿 ⇒ 花图。
      */
-    fun bake(size: Int = ColorCurve.TABLE_SIZE): FloatArray {
+    fun bake(tone: ToneParams = ToneParams.IDENTITY, size: Int = ColorCurve.TABLE_SIZE): FloatArray {
         val out = FloatArray(size * 3)
         for (i in 0 until size) {
             val v = i.toFloat() / (size - 1)
-            out[3 * i] = evaluate(ColorCurve.CHANNEL_RED, v)
-            out[3 * i + 1] = evaluate(ColorCurve.CHANNEL_GREEN, v)
-            out[3 * i + 2] = evaluate(ColorCurve.CHANNEL_BLUE, v)
+            out[3 * i] = evaluate(ColorCurve.CHANNEL_RED, v, tone)
+            out[3 * i + 1] = evaluate(ColorCurve.CHANNEL_GREEN, v, tone)
+            out[3 * i + 2] = evaluate(ColorCurve.CHANNEL_BLUE, v, tone)
         }
         return out
     }
@@ -152,9 +153,10 @@ data class CurveStack(
      * （唯一消费点是 `GlRenderEngine.ensureCurveTexture`，契约以那边的上传/采样语义为准，两边不许各写一遍）。
      * 必须走 UNSIGNED_BYTE：GLES 2.0 里 `GL_RGB + GL_FLOAT` 不是合法组合格式，
      * 只有 `GL_LUMINANCE`/`GL_ALPHA` 才允许浮点，直接传 FloatBuffer 会在部分 ROM 上出黑屏。
+     * [tone] 默认恒等：**tone=0 时与改前逐字节一致**（29 §4.5 守卫钉住）。
      */
-    fun bakeBytes(size: Int = ColorCurve.TABLE_SIZE): ByteArray {
-        val f = bake(size)
+    fun bakeBytes(tone: ToneParams = ToneParams.IDENTITY, size: Int = ColorCurve.TABLE_SIZE): ByteArray {
+        val f = bake(tone, size)
         return ByteArray(f.size) { i -> ((f[i] * 255f) + 0.5f).toInt().coerceIn(0, 255).toByte() }
     }
 

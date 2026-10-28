@@ -79,7 +79,7 @@ class ColorCurveTest {
         // 2026-10-03 真机花图缺陷：bake 字节布局从平面改交错（plan/17 前的取证 .tmp/curve-corruption.md），
         // 旧断言钉的是 GL 从未按此消费过的平面布局。
         // size=4 ⇒ 每段采样 v = 0, 1/3, 2/3, 1
-        val baked = CurveStack().bake(4)
+        val baked = CurveStack().bake(size = 4)
         assertTrue(CurveStack().isPassthrough)
         assertEquals(12, baked.size)
         for (i in 0 until 4) {
@@ -120,7 +120,7 @@ class ColorCurveTest {
             green = curve(0f to 0.5f, 1f to 0.5f),
             blue = curve(0f to 1f, 1f to 1f)
         )
-        val bytes = stack.bakeBytes(4)
+        val bytes = stack.bakeBytes(size = 4)
         assertEquals(12, bytes.size)
         fun u(i: Int) = bytes[i].toInt() and 0xFF
         // 交错：texel i = (R[i], G[i], B[i]) = (i/3, 0.5, 1.0)，量化 (v*255+0.5) 截断
@@ -145,7 +145,7 @@ class ColorCurveTest {
             green = curve(0f to 0.2f, 1f to 0.2f),
             blue = curve(0f to 0.3f, 1f to 0.3f)
         )
-        val baked = stack.bake(size)
+        val baked = stack.bake(size = size)
         assertEquals(size * 3, baked.size)
         // 交错：每个 texel 三分量依次是 R=0.1、G=0.2、B=0.3
         assertEquals(0.1f, baked[0], 1e-6f)

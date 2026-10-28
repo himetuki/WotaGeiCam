@@ -286,6 +286,18 @@
     <string name="cam_glow_soft">软边</string>
     <string name="cam_glow_width">光晕宽度</string>
     <string name="cam_glow_gain">增益</string>
+
+    <!-- ============ TONE 色调（2026-10-28；docs/plan/29 §四 F4） ============ -->
+    <string name="cam_pill_tone">色调</string>
+    <string name="cam_tone_title">色调</string>
+    <!-- 面板常驻口径：tone 是 scene layer，改了会进成片（与 Glow 同一套说明纪律，不许静默） -->
+    <string name="cam_tone_note">色调进成片（烘进曲线同一张查找表），预览与成片同步变化</string>
+    <string name="cam_tone_direct">直连渲染没有片元链，色调不生效；需切到 GPU 渲染</string>
+    <string name="cam_tone_black">黑点</string>
+    <string name="cam_tone_white">白点</string>
+    <string name="cam_tone_shadows">阴影</string>
+    <string name="cam_tone_highlights">高光</string>
+    <string name="cam_tone_reset">全部归零</string>
     <string name="cam_glow_add">叠加</string>
     <string name="cam_glow_freq">频率</string>
     <string name="cam_glow_blend">混合</string>

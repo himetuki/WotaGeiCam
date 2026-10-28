@@ -140,6 +140,9 @@ data class HudEntry(val kind: HudEntryKind, val ordinal: Int) {
                 // `2S+R+2G+2P` 等宽槽特例，塞不下第 4 颗；左竖 Dock 按 308dp 的账装得下第 5 组
                 // （DockBandAvoidTest 钉着那笔账），默认落在那条带的最末。
                 CamPill.GLOW -> HudZone.LEFT
+                // TONE（29 §4.4-1，2026-10-28）：左竖 Dock 第 6 组（GLOW 之后）；
+                // 显隐位默认关（DEFAULT_MASK 不含它），老配置经 normalize 自动补到本带末尾
+                CamPill.TONE -> HudZone.LEFT
                 CamPill.LEVEL, CamPill.VOLUME, CamPill.BT,
                 CamPill.ZOOM, CamPill.FOCUS, CamPill.STAB -> HudZone.RIGHT
                 // 越界 ordinal：[HudLayoutTable.normalize] 会把这种坏条目丢掉，这里只需给个不抛的值
@@ -646,7 +649,9 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
             // 左 Dock 第 5 组 = Glow（2026-10-27）：排在闪光灯之后（"最末"是计划 §1.6 的定版）
             HudZone.LEFT -> listOf(
                 HudEntry.of(CamPill.REFLINE), HudEntry.of(CamPill.MONITOR),
-                HudEntry.of(CamPill.CURVE), HudEntry.of(CamPill.FLASH), HudEntry.of(CamPill.GLOW)
+                HudEntry.of(CamPill.CURVE), HudEntry.of(CamPill.FLASH), HudEntry.of(CamPill.GLOW),
+                // 左 Dock 第 6 组 = TONE（29 §4.4-1，2026-10-28）：GLOW 之后；显隐位默认关
+                HudEntry.of(CamPill.TONE)
             )
             HudZone.RIGHT -> listOf(
                 HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.BT),

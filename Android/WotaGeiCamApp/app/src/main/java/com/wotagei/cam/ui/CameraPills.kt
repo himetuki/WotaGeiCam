@@ -112,7 +112,7 @@ import kotlin.math.roundToInt
  * 加值就等于改存量配置语义；右竖 Dock 的「对焦」本来也不属于可自定义读数。
  * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
-enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE, GLOW }
+enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE, GLOW, TONE }
 
 /**
  * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
@@ -127,11 +127,15 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
  * ① `GlowProvider.setGlowParams` 不触发重画 ⇒ 不产生重复帧、不推进 PTS 网格；
  * ② 光晕是"现场可判断"的观感参数，10 分钟演出里需要边看边调（与监看同一个使用场景）。
  * 面板常驻一句"进成片"的说明（`cam_glow_note`），不许静默。
+ *
+ * 2026-10-28（29 §4.4-5 / §九-2）：`TONE` 按 Glow 同一先例进白名单——scene layer，录制中改
+ * 会改成片（已录的不变）；四条滑杆每拍写总线（tone 烘焙在调用线程，微秒级），不触发重画。
+ * 面板常驻一句"进成片"的说明（`cam_tone_note`），不许静默。
  */
 internal val RECORDING_EDITABLE_PILLS =
     setOf(
         PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
-        PillKey.MONITOR, PillKey.GLOW
+        PillKey.MONITOR, PillKey.GLOW, PillKey.TONE
     )
 
 /** 录制中该弹窗是否可调（非录制态一律可调，含调用方尚未拿到能力时的初始化阶段） */
@@ -173,6 +177,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.REFLINE to "HudLayer.HudEntryItem(REFLINE) → design.WotaIconButton(modifier)",
     PillKey.DENOISE to "HudLayer.HudEntryItem(DENOISE) → design.TierChip(modifier)，默认落底栏 Dock 左侧",
     PillKey.GLOW to "HudLayer.HudEntryItem(GLOW) → design.TierChip(modifier)，默认落左竖 Dock 第 5 组",
+    PillKey.TONE to "HudLayer.HudEntryItem(TONE) → design.TierChip(modifier)，默认落左竖 Dock 第 6 组（显隐位默认关）",
     PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
     PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
     PillKey.SHUTTER to "HudLayer.HudEntryItem(HudItem.SHUTTER) → design.WotaChip(modifier)",
@@ -287,6 +292,7 @@ fun PillHost(
         PillKey.GLOW -> GlowPill(
             anchor, params, editable, gpuMode, glowStatusProvider, onClose, onPersist
         )
+        PillKey.TONE -> TonePill(anchor, params, editable, gpuMode, onClose, onPersist)
         PillKey.BT -> {
             // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
             // 下次起录按它落音轨），与内录开关（controller 态）互相独立
@@ -1207,6 +1213,83 @@ private fun GlowPill(
 /** Glow 滑杆读数格式（显示域小数位可配；与全工程 `String.format(Locale.US, …)` 同口径） */
 private fun glowFmt(decimals: Int): (Float) -> String =
     { String.format(Locale.US, "%.${decimals}f", it) }
+
+/**
+ * TONE 色调面板（29 §4.4-4，2026-10-28）：高光/阴影/黑点/白点四条滑杆。
+ *
+ * - 与曲线同级是 **scene layer：进成片**（烘进 LUT，预览+成片同一层），面板常驻说明不许静默
+ *   （§九-2 按 Glow 先例允许录制中调，改的是接下来几帧的成片，已录的不变）；
+ * - DIRECT 无 GL 片元链，四条整体灰化 + 一句提示（与曲线面板口径一致，不自动切 GPU）；
+ * - 复位语义（§九-1 推荐口径）：曲线归曲线、色调归色调——本面板内「归零」只清 tone。
+ */
+@Composable
+private fun TonePill(
+    anchor: IntRect,
+    params: WotaParams,
+    editable: Boolean,
+    gpuMode: Boolean,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
+    val tone by params.tone.observed()
+    fun write(next: com.wotagei.cam.core.ToneParams) {
+        params.tone.value = next.sanitize()
+    }
+    WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_tone_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
+        // 常驻口径：进成片（与监看面板的"只上屏"相反；与 Glow 同一套说明纪律）
+        Note(R.string.cam_tone_note)
+        if (!gpuMode) Note(R.string.cam_tone_direct)
+
+        PillSlider(
+            value = tone.black, lo = 0f, hi = com.wotagei.cam.core.ToneParams.BLACK_MAX, step = 0.01f,
+            enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_black),
+            snapKey = null, ladder = emptyList(), format = toneFmt,
+            onValueChange = { write(tone.copy(black = it)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = tone.white, lo = 0f, hi = com.wotagei.cam.core.ToneParams.WHITE_MAX, step = 0.01f,
+            enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_white),
+            snapKey = null, ladder = emptyList(), format = toneFmt,
+            onValueChange = { write(tone.copy(white = it)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = tone.shadows * 100f, lo = -100f, hi = 100f, step = 5f,
+            enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_shadows),
+            snapKey = null, ladder = emptyList(), format = tonePercentFmt,
+            onValueChange = { write(tone.copy(shadows = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        PillSlider(
+            value = tone.highlights * 100f, lo = -100f, hi = 100f, step = 5f,
+            enabled = editable && gpuMode, label = stringResource(R.string.cam_tone_highlights),
+            snapKey = null, ladder = emptyList(), format = tonePercentFmt,
+            onValueChange = { write(tone.copy(highlights = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+
+        // 归零（§九-1：色调面板内单独的复位出口，不连累曲线）
+        PillChoices(
+            options = listOf(PillOption(0, stringResource(R.string.cam_tone_reset))),
+            selected = -1,
+            onPick = {
+                write(com.wotagei.cam.core.ToneParams.IDENTITY)
+                onPersist()
+            },
+            enabled = editable && gpuMode
+        )
+    }
+}
+
+/** 色调电平读数：0..0.35 显示两位小数（与滑杆步长 0.01 对齐） */
+private val toneFmt: (Float) -> String =
+    { String.format(Locale.US, "%.2f", it) }
+
+/** 阴影/高光读数：±100 百分比域 */
+private val tonePercentFmt: (Float) -> String =
+    { String.format(Locale.US, "%+.0f%%", it) }
 
 /** Glow 的一端色：8 枚色点（[GlowColor] 调色板），选中态描边；点一下即写总线并落盘 */
 @Composable

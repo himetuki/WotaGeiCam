@@ -295,6 +295,8 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
         CamPill.FLASH -> PillKey.FLASH
         CamPill.DENOISE -> PillKey.DENOISE
         CamPill.GLOW -> PillKey.GLOW
+        // TONE 有就近面板（同 Glow/监看一族）；曲线开整块面板才回 null
+        CamPill.TONE -> PillKey.TONE
         CamPill.CURVE -> null
         CamPill.LEVEL, CamPill.VOLUME -> null
     }
@@ -553,6 +555,11 @@ data class HudCtx(
     val glowActive: Boolean,
     val glowUsable: Boolean,
     val onGlowClick: () -> Unit,
+    /** TONE 胶囊（29 §4.4）：读数文本（控件名「色调」）、"生效中"标记（tone 非恒等且 GPU）、能力闸与点按 */
+    val toneLabel: String,
+    val toneActive: Boolean,
+    val toneUsable: Boolean,
+    val onToneClick: () -> Unit,
     val flash: Flash,
     val lensLabel: String,
     val btConnected: Boolean,
@@ -780,6 +787,12 @@ fun HudEntryItem(
                 tier, ctx.glowLabel, ctx.glowActive,
                 anchor.then(modifier).alpha(if (ctx.glowUsable) 1f else 0.38f),
                 gatedClick(clicksAccepted, ctx.onGlowClick), frost
+            )
+            // TONE（29 §4.4）：scene layer，读数恒取控件名；DIRECT 下在场但禁用（与 Glow 同口径）
+            CamPill.TONE -> TierChip(
+                tier, ctx.toneLabel, ctx.toneActive,
+                anchor.then(modifier).alpha(if (ctx.toneUsable) 1f else 0.38f),
+                gatedClick(clicksAccepted, ctx.onToneClick), frost
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),

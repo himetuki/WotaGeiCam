@@ -280,6 +280,14 @@ object WotaSettings {
     const val KEY_CURVE_PANEL_SIDE_DP = "curve_panel_side_dp"
 
     /**
+     * 色调四滑条（29 §4.3 F4，2026-10-28）：`black white shadows highlights` 复合串
+     * （编解码在 [com.wotagei.cam.core.ToneParams.encode]/[com.wotagei.cam.core.ToneParams.decode]，
+     * 坏串回恒等）。**刻意不并进 KEY_CURVE_STACK 的编解码**——那会改曲线持久格式，
+     * 老用户串会解坏；走 ParamsPersist 的白名单键（与 KEY_GLOW 同一套会话影子纪律）。
+     */
+    const val KEY_TONE = "tone_params"
+
+    /**
      * 滑杆吸附开关（2026-10-21 用户反馈：变焦只有 0.5/1/1.5…，想调 1.2×/1.7×）。
      *
      * 存**关掉吸附**（改用连续值）的参数 id 集合，逗号分隔；缺键/空串 = 全部吸附（2026-10-17 的

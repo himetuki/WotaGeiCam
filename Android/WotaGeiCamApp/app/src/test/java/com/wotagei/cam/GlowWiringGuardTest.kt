@@ -265,7 +265,8 @@ class GlowWiringGuardTest {
 
     private fun uiWiringIssues(pillsSrc: String): List<String> {
         val bad = ArrayList<String>()
-        if (!pillsSrc.contains("DENOISE, GLOW }")) bad.add("PillKey 末尾必须有 GLOW")
+        // 29 §4.4（2026-10-28）起 PillKey 末尾是 TONE：GLOW 仍在 TONE 之前
+        if (!pillsSrc.contains("DENOISE, GLOW, TONE }")) bad.add("PillKey 末尾必须有 GLOW, TONE")
         if (!pillsSrc.contains("PillKey.MONITOR, PillKey.GLOW")) bad.add("GLOW 必须进录制可调白名单")
         if (!pillsSrc.contains("PillKey.GLOW to")) bad.add("pillAnchorWriters 缺 GLOW 一行（浮层会弹到屏幕原点）")
         if (!pillsSrc.contains("PillKey.GLOW -> GlowPill(")) bad.add("PillHost 缺 GLOW → GlowPill 分支")
@@ -296,9 +297,9 @@ class GlowWiringGuardTest {
 
     @Test
     fun `UI登记_枚举位掩码与持久化键的真值`() {
-        // 位掩码：GLOW 必须是新加的一位，版本升到 2，迁移只补这一位（老用户默认全开口径）
+        // 位掩码：GLOW 必须是新加的一位（版本 2 补位）；2026-10-28 起 schema=3（+TONE，不自动补位）
         assertEquals(16384, com.wotagei.cam.core.CamPill.GLOW.bit)
-        assertEquals(2, com.wotagei.cam.core.CamPill.MASK_SCHEMA)
+        assertEquals(3, com.wotagei.cam.core.CamPill.MASK_SCHEMA)
         assertEquals(
             com.wotagei.cam.core.CamPill.GLOW.bit,
             com.wotagei.cam.core.CamPill.ADDED_IN_SCHEMA[2]
@@ -311,11 +312,11 @@ class GlowWiringGuardTest {
             "glow_params 必须在 ParamsPersist.KEYS 白名单里（否则重启回默认）",
             com.wotagei.cam.ui.ParamsPersist.KEYS.contains(com.wotagei.cam.ui.WotaSettings.KEY_GLOW)
         )
-        // 默认落位：左竖 Dock 的末位（第 5 组）
+        // 默认落位：左竖 Dock 第 5 组（2026-10-28 起末位是 TONE，GLOW 在其前一位）
         val leftOrder = com.wotagei.cam.ui.HudLayoutTable.defaultOrderOf(com.wotagei.cam.ui.HudZone.LEFT)
         assertEquals(
             com.wotagei.cam.ui.HudEntry.of(com.wotagei.cam.core.CamPill.GLOW),
-            leftOrder.last()
+            leftOrder[leftOrder.lastIndex - 1]
         )
         assertEquals(com.wotagei.cam.ui.HudZone.LEFT, com.wotagei.cam.ui.HudEntry.of(com.wotagei.cam.core.CamPill.GLOW).homeZone)
     }
@@ -361,9 +362,10 @@ class GlowWiringGuardTest {
         if (flatScreen.contains("videoDenoise, glowParams )")) {
             bad.add("长键里不许有 glowParams（拖滑杆会每 tick 重跑整条 effect 链）")
         }
-        // 长键尾部：videoDenoise（降噪）→ displayScale（上屏档，B8 加的，档位是离散选择不是每 tick 参数）
-        if (!flatScreen.contains("arcMergeDeadband, videoDenoise, displayScale )")) {
-            bad.add("长键锚点丢失：键表尾部应是 videoDenoise, displayScale")
+        // 长键尾部：videoDenoise（降噪）→ displayScale（上屏档，B8）→ toneParams（29 §4.3 F4，
+        // 色调烘进同一条 LUT，与曲线同一条下发链；同为离散完成点不是每 tick 参数）
+        if (!flatScreen.contains("arcMergeDeadband, videoDenoise, displayScale, toneParams )")) {
+            bad.add("长键锚点丢失：键表尾部应是 videoDenoise, displayScale, toneParams")
         }
         if (!flatScreen.contains("glowStatusProvider = {")) {
             bad.add("CameraScreen 没给 PillHost 传 glowStatusProvider")
