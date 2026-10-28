@@ -25,15 +25,15 @@
  * 只在本平台自产自销（Glow 参数不跨端互认），往返精确性由 parseFloat 保证；
  * ③ glowStatusNote 返回**文案键**（上游返回 R.string 资源 id——core 不引资源的本侧等价物），
  * UI 批消费时再映射文案；
- * ④ DENOISE_FULL_KERNEL_PIXEL_RATE 暂住本文件（上游在 core/Denoise.kt；降噪批移植时收口
- * 单源）——glowScaleFor 与 denoiseKernelLite 同一魔数不造第二份。
+ * ④ DENOISE_FULL_KERNEL_PIXEL_RATE 单一真源在 core/Denoise.ets（本文件导入消费）——
+ * glowScaleFor 与 denoiseKernelLite 同一魔数不造第二份。
  */
+import { DENOISE_FULL_KERNEL_PIXEL_RATE } from './Denoise';
 
 /** 全曲线负载阈值（像素 × 帧率）：≤ 40M 用 scale=1（24 §1.4，初版拍定、T3 真机回填） */
 export const GLOW_FULL_MAX_PIXEL_RATE: number = 40_000_000;
 
-/** 逐帧全分辨率 pass 的负载分水岭（上游 core/Denoise.kt 的 DENOISE_FULL_KERNEL_PIXEL_RATE） */
-export const DENOISE_FULL_KERNEL_PIXEL_RATE: number = 150_000_000;
+/** 逐帧全分辨率 pass 的负载分水岭（真值常量）单一真源在文件顶部 import 的 core/Denoise.ets */
 
 // 安全域（sanitize 与 UI 滑杆共用同一套端点，别在 UI 里再写一份）
 export const GLOW_THRESHOLD_MIN: number = 0;

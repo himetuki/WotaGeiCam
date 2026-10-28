@@ -8,10 +8,11 @@
 import {
   GLOW_ADD_MAX, GLOW_DEFAULT, GLOW_FREQ_MAX, GLOW_GAIN_MAX, GLOW_PRESET_A, GLOW_PRESET_B,
   GLOW_SOFT_MAX, GLOW_THRESHOLD_MAX, GLOW_WIDTH_MAX, GlowParams, GlowStatus,
-  DENOISE_FULL_KERNEL_PIXEL_RATE, GLOW_FULL_MAX_PIXEL_RATE,
-  decodeGlow, encodeGlow, fillGlowBlurOffset, glowRawLongestEdge, glowRgb,
-  glowRtSizeInto, glowScaleFor, glowStatusNote
+  GLOW_FULL_MAX_PIXEL_RATE,
+  decodeGlow, encodeGlow, fillGlowBlurOffset, glowRgb,
+  glowScaleFor, glowStatusNote, glowRtSizeInto, glowRawLongestEdge
 } from '../../entry/src/main/ets/core/Glow';
+import { DENOISE_FULL_KERNEL_PIXEL_RATE } from '../../entry/src/main/ets/core/Denoise';
 
 // ------------------------------------------------------------------ 参数模型与 sanitize
 

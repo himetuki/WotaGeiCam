@@ -444,6 +444,31 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   out 不足抛/Pair 版同判/回落不回 current/读数标签/重建判据/fromDivisor 回 ORIG）。
 - **回归**：pure-test 80 files / 839 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（DENOISE：降噪参数模型纯逻辑层 + 平台裁定，2026-10-28）
+
+上游 `8646b05` + `316516f` 的 **core 纯逻辑层 + 三路平台裁定**。追赶基线第八批。
+
+- **`core/Denoise.ets`**：`AudioDenoise`（OFF/SYSTEM）/`VideoDenoise`（OFF/HAL_FAST/
+  HAL_HIGH_QUALITY/GPU_BILATERAL）枚举 + 持久化键往返（坏值回 OFF）+ `effectiveVideoDenoise`
+  （DIRECT 下 GPU 双边退 HAL 快速——返回实际档不静默失效）+ `videoDenoiseActive`
+  （退档仍算有降噪——否则胶囊选中态跟渲染模式乱闪；**成片恒按所选档降噪**，上游 2026-10-27
+  双槽改口）+ `audioDenoiseNeedsCodec` + `denoiseKernelLite`（像素×帧率 > 150M 用轻量核；
+  自动降档 ≠ 关档）。`DENOISE_FULL_KERNEL_PIXEL_RATE` 单一真源落此，Glow.ets 改导入消费
+  （此前暂住的常量收口）。
+- **平台裁定（登记，不迁）**：① **音频降噪（SYSTEM）**——上游挂 NoiseSuppressor（采集链），
+  OHOS `setAudioEffectMode` 是**输出端**（Renderer）音效 API，采集/录制输入链无应用侧等价物；
+  且本侧 GPU 录制链 native 无音频轨（T27-3 留白）→ 枚举与判据保留作契约，**无下发面**
+  （不摆没反应的开关）；② **HAL 降噪**（halNoiseReductionMode/noiseReductionModeToSend）——
+  Camera2 NOISE_REDUCTION_MODE 专属，OHOS 相机 API 面无此键（d.ts 全文核过零命中），
+  这两个发值函数不移植（移植了也永远没有消费方）；③ **GLSL 双边（GPU_BILATERAL）**——
+  GPU 链特性随真机批（帧率/观感实测；同 Glow 纪律），本批不落 UI/native。
+- **`PureLogicBarrel`**：Glow/DisplayScaleRt/Denoise/HistogramMath 四模块进编译探针
+  （`cameraCatchupCompileProbe`）——Glow/DisplayScale 暂无平台消费方，由 barrel 保住编译门
+  （#69 铁律：新增纯逻辑模块必须进 barrel，否则 hvigor 不可达）。
+- **守卫**：`test/pure/denoise-pure.test.ets` 6 例（实际档/生效判据/Codec 需求/负载分档含
+  1440p30 留完整核/档位编号常量/键往返坏值回 OFF）。
+- **回归**：pure-test 81 files / 845 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是
