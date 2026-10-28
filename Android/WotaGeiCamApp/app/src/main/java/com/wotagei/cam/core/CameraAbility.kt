@@ -124,6 +124,18 @@ data class CameraAbility(
             colorCorrectionModes.contains(CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
 
     /**
+     * **正向声明**：HAL 是否明确把 TRANSFORM_MATRIX 列进 `colorCorrection.availableModes`。
+     *
+     * 与 [manualWhiteBalancePossible] 的差别就是"查不到"时取哪一头，而这一条正是落地路径的分水岭
+     * （2026-10-28 WIKO 取证）：明确声明 ⇒ 增益大概率真被采纳，走 HAL（绝对色温）；未声明/查不到
+     * ⇒ **增益不可信**。WIKO 属后者：`AWB_MODE_OFF` 照做、请求增益在结果里原样回声
+     * （`WB遥测[manual] 请求=回报 采纳=是`），但画面在 2000–10000K 四档**逐像素无差别**，
+     * 只剩传感器原色的绿 ⇒ 改走画面算法（见 [com.wotagei.cam.core.WbApply]）。
+     */
+    fun halDeclaresTransformMatrix(): Boolean =
+        colorCorrectionModes.contains(CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+
+    /**
      * 帧率范围按尺寸分流：高速档是「尺寸 → 范围」表，
      * size 为空或该尺寸未列入高速表时，退化成所有高速尺寸的并集，仅用于档位可用性判断。
      */

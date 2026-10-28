@@ -118,16 +118,29 @@ data class CurveStack(
         else -> copy(master = curve)
     }
 
-    /** 单通道求值：先色调、再白、后本色，顺序不能换（色调是场景层，白曲线是全局对比度，本色是通道增益） */
-    fun evaluate(channel: Int, x: Float, tone: ToneParams = ToneParams.IDENTITY): Float {
+    /**
+     * 单通道求值：先色调、再白、后本色，顺序不能换（色调是场景层，白曲线是全局对比度，本色是通道增益）。
+     *
+     * [wbGain] 是**画面算法白平衡**的相对增益（[com.wotagei.cam.core.WbApply.gains]）：
+     * 乘在整条链的**最后**（显示域逐通道缩放）。物理上白平衡该在曲线之前，但走算法兜底时
+     * HAL 已经做了自动白平衡、我们要的是一个"相对偏移"，乘在出口等价且只影响色不改亮度；
+     * 1.0 = 不参与（自动档/预设档逐字节不变）。
+     */
+    fun evaluate(
+        channel: Int,
+        x: Float,
+        tone: ToneParams = ToneParams.IDENTITY,
+        wbGain: Float = 1f
+    ): Float {
         val toned = if (tone.isIdentity) x else tone.apply(x)
         val afterMaster = master.evaluate(toned)
-        return when (channel) {
+        val curved = when (channel) {
             ColorCurve.CHANNEL_RED -> red.evaluate(afterMaster)
             ColorCurve.CHANNEL_GREEN -> green.evaluate(afterMaster)
             ColorCurve.CHANNEL_BLUE -> blue.evaluate(afterMaster)
             else -> afterMaster
         }
+        return if (wbGain == 1f) curved else (curved * wbGain).coerceIn(0f, 1f)
     }
 
     /**
@@ -137,13 +150,20 @@ data class CurveStack(
      * （见 `Shaders.CURVE_DECL` 的 `applyCurve`）。若按平面三段（R‖G‖B）产出，
      * GPU 把乱序字节当交错读，每通道变成三轮 0→255 锯齿 ⇒ 花图。
      */
-    fun bake(tone: ToneParams = ToneParams.IDENTITY, size: Int = ColorCurve.TABLE_SIZE): FloatArray {
+    fun bake(
+        tone: ToneParams = ToneParams.IDENTITY,
+        size: Int = ColorCurve.TABLE_SIZE,
+        wbGains: FloatArray? = null
+    ): FloatArray {
+        val gr = wbGains?.getOrNull(0) ?: 1f
+        val gg = wbGains?.getOrNull(1) ?: 1f
+        val gb = wbGains?.getOrNull(2) ?: 1f
         val out = FloatArray(size * 3)
         for (i in 0 until size) {
             val v = i.toFloat() / (size - 1)
-            out[3 * i] = evaluate(ColorCurve.CHANNEL_RED, v, tone)
-            out[3 * i + 1] = evaluate(ColorCurve.CHANNEL_GREEN, v, tone)
-            out[3 * i + 2] = evaluate(ColorCurve.CHANNEL_BLUE, v, tone)
+            out[3 * i] = evaluate(ColorCurve.CHANNEL_RED, v, tone, gr)
+            out[3 * i + 1] = evaluate(ColorCurve.CHANNEL_GREEN, v, tone, gg)
+            out[3 * i + 2] = evaluate(ColorCurve.CHANNEL_BLUE, v, tone, gb)
         }
         return out
     }
@@ -155,8 +175,12 @@ data class CurveStack(
      * 只有 `GL_LUMINANCE`/`GL_ALPHA` 才允许浮点，直接传 FloatBuffer 会在部分 ROM 上出黑屏。
      * [tone] 默认恒等：**tone=0 时与改前逐字节一致**（29 §4.5 守卫钉住）。
      */
-    fun bakeBytes(tone: ToneParams = ToneParams.IDENTITY, size: Int = ColorCurve.TABLE_SIZE): ByteArray {
-        val f = bake(tone, size)
+    fun bakeBytes(
+        tone: ToneParams = ToneParams.IDENTITY,
+        size: Int = ColorCurve.TABLE_SIZE,
+        wbGains: FloatArray? = null
+    ): ByteArray {
+        val f = bake(tone, size, wbGains)
         return ByteArray(f.size) { i -> ((f[i] * 255f) + 0.5f).toInt().coerceIn(0, 255).toByte() }
     }
 

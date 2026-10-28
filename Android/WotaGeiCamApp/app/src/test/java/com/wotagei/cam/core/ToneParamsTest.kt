@@ -208,14 +208,19 @@ class ToneParamsTest {
         // 签名在 bodyOf 之外（body 只取花括号体内），签名判据钉整文件
         assertTrue(
             "setCurve 必须接收 tone（默认恒等，旧调用点零改动）",
-            gl.contains("fun setCurve(stack: CurveStack?, tone:")
+            gl.contains("tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY")
         )
-        val body = KotlinSourceScan.bodyOf(gl, "setCurve")
+        // 2026-10-28：烘焙收口到 bakeCurveLut（曲线/色调/画面算法白平衡共用一张 LUT），
+        // 判据与烘焙都挪到那里；setCurve 只记输入并触发重烘
+        val body = KotlinSourceScan.bodyOf(gl, "bakeCurveLut")
         assertTrue(
-            "跳过判据必须是「曲线恒等 或 tone 非恒等」才烘焙（只用曲线一侧会静默丢色调）",
-            body.contains("!it.isPassthrough || !tone.isIdentity")
+            "跳过判据必须是「曲线恒等 或 tone 非恒等 或 白平衡非恒等」才烘焙（只看一侧会静默丢色调/白平衡）",
+            body.contains("!it.isPassthrough || !tone.isIdentity || wb != null")
         )
-        assertTrue("烘焙必须带 tone", body.contains("bakeBytes(tone)"))
+        assertTrue("烘焙必须带 tone", body.contains("bakeBytes(tone"))
+        val setter = KotlinSourceScan.bodyOf(gl, "setCurve")
+        assertTrue("setCurve 必须记住 tone 供重烘", setter.contains("lastCurveTone = tone"))
+        assertTrue("setCurve 必须触发重烘", setter.contains("bakeCurveLut()"))
         // 总线必须有 tone 流；录制页长键必须把它下发
         val params = mainSource("core/WotaParams.kt")
         assertTrue(params.contains("val tone = MutableStateFlow(ToneParams.IDENTITY)"))

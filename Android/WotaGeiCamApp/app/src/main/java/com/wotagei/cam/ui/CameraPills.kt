@@ -736,8 +736,12 @@ private fun WbPill(
                 // 预设档不受影响（走 AWB_MODE，另有 awbModes 门控）。
                 val ok = when {
                     p != WbPreset.MANUAL -> ability?.awbModes?.contains(p.awbMode) != false
-                    // ability 为 null（编辑器/枚举前）放行：门控真源在 WotaParams.applyWhiteBalance 的回弹
-                    else -> ability == null || ability.manualWhiteBalancePossible()
+                    // ability 为 null（编辑器/枚举前）放行：门控真源在 WotaParams.applyWhiteBalance 的回弹。
+                    // 2026-10-28：HAL 不采纳增益、但 GPU 管线在 ⇒ 由画面算法兜底，手动档**可用**
+                    // （DIRECT 没有场景层，仍按不可用出）
+                    else -> ability == null ||
+                        ability.manualWhiteBalancePossible() ||
+                        params.renderMode.value == RenderMode.GPU
                 }
                 PillOption(p.ordinal, names[i], ok)
             },
@@ -749,6 +753,13 @@ private fun WbPill(
             enabled = editable
         )
         if (wbMode == WbPreset.MANUAL) {
+            // 运行时提示（2026-10-28 用户需求）：本机没声明手动白平衡增益支持时，手动档是靠
+            // 画面算法落地的——必须讲在明处，否则用户会以为滑杆在改 HAL 的绝对色温。
+            if (ability != null && !ability.manualWhiteBalancePossible() &&
+                params.renderMode.value == RenderMode.GPU
+            ) {
+                Note(R.string.cam_wb_gl_fallback)
+            }
             val kelvinLo = (kelvin.range?.start ?: WotaTiers.KELVIN_MIN)
             val kelvinHi = (kelvin.range?.endInclusive ?: WotaTiers.KELVIN_MAX)
             PillSlider(

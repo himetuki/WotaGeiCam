@@ -110,6 +110,12 @@ object RequestApplier {
         val wbPreset: WbPreset,
         val kelvin: Int,
         val tint: Int,
+        /**
+         * true = 手动白平衡改由**画面算法**落地（本机 HAL 不采纳 COLOR_CORRECTION_GAINS）。
+         * 此时请求侧必须**保持自动白平衡**：一旦发 AWB_MODE_OFF 又没有增益，画面就只剩传感器
+         * 原色（WIKO 真机：整屏发绿，四档色温毫无差别）。
+         */
+        val wbByGl: Boolean = false,
         /** 闪光切换复位阶段的临时值；null 表示沿用用户设定 */
         val flashOverride: Flash?,
         val flash: Flash,
@@ -526,6 +532,12 @@ object RequestApplier {
     }
 
     private fun applyWhiteBalance(builder: CaptureRequest.Builder, p: Snapshot) {
+        if (isManualWhiteBalance(p.wbPreset) && p.wbByGl) {
+            // 画面算法兜底：留在自动白平衡（增益交给 GL 场景层乘），**绝不发 AWB_MODE_OFF**
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_FAST)
+            return
+        }
         if (isManualWhiteBalance(p.wbPreset)) {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
             builder.set(

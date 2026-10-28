@@ -835,6 +835,9 @@ class Camera2Engine(
             wbPreset = wbMode.value,
             kelvin = kelvin.value.value,
             tint = tint.value.value,
+            // 兜底同理：能力表说增益不被采纳、但 GPU 管线在 ⇒ 请求侧保持自动白平衡，
+            // 色温/色调交给画面算法（见 WotaParams.publishWbPlan）
+            wbByGl = wbByGlNow(),
             flashOverride = if (flashResetStage) Flash.OFF else null,
             flash = flash.value,
             stabilize = stabilize.value,
@@ -989,8 +992,14 @@ class Camera2Engine(
                 )
                 if (wbProbeFails >= WB_PROBE_MAX_FAILS) {
                     wbProbeFails = 0
-                    params.wbMode.value = com.wotagei.cam.core.WbPreset.AUTO
-                    Log.w(TAG, "本机不支持手动白平衡（增益不被采纳），已弹回自动——反馈 #6 的运行时处置")
+                    // 2026-10-28：不再把手动档弹回自动——"HAL 不采纳增益"不再是死路，
+                    // 而是切换到画面算法的信号（WIKO 实测：AWB_MODE_OFF 生效、增益被丢，
+                    // 画面只剩传感器原色发绿）。闩锁由 wbApply 统一裁决。
+                    // 只在**翻真的那一次**留日志：这一拍每 2s 一轮，不封口会刷屏。
+                    if (!params.wbHalRejected.value) {
+                        Log.w(TAG, "本机 HAL 不采纳手动白平衡增益（模式回声不是 TRANSFORM_MATRIX）⇒ 改走画面算法")
+                        params.wbHalRejected.value = true
+                    }
                 }
             }
         }
@@ -1032,6 +1041,25 @@ class Camera2Engine(
     private val WB_AUTO_TELEMETRY_MS = 1_000L
 
     /** MANUAL 档对比节流：2s 一拍，i 级——用户停留手动档才有输出，且这是 B3 前最重要的取证行 */
+    /**
+     * 这一拍手动白平衡是否走画面算法（= 请求侧必须留自动白平衡）。
+     * 判据与 [com.wotagei.cam.core.wbApplyPlan] 同源：手动档 + 能力表说增益不被采纳 + GPU 管线在。
+     */
+    private fun wbByGlNow(): Boolean =
+        params.wbMode.value == com.wotagei.cam.core.WbPreset.MANUAL &&
+            params.renderMode.value == com.wotagei.cam.core.RenderMode.GPU &&
+            // 与 WotaParams.wbApply 同口径：只有 HAL **明确声明** TRANSFORM_MATRIX 才走 HAL
+            ability?.halDeclaresTransformMatrix() != true
+
+    /** 增益采纳判据的相对容差（见 logWbTelemetry）：HAL 量化/归一化不算未采纳 */
+    private val WB_ADOPT_TOL = 0.15f
+
+    /** 连续多少拍对不上就判定「本机不采纳手动增益」（≈2s，与 500ms 保活拍同频） */
+    private val WB_ADOPT_MAX_FAILS = 4
+
+    /** 连续不合格拍数（引擎线程独占写） */
+    private var wbAdoptFails = 0
+
     private val WB_MANUAL_TELEMETRY_MS = 2_000L
 
     private var lastWbAutoTelemetryMs = 0L
@@ -1047,11 +1075,32 @@ class Camera2Engine(
     private fun logWbTelemetry(result: TotalCaptureResult, manual: Boolean) {
         val now = SystemClock.elapsedRealtime()
         if (manual) {
+            if (wbByGlNow()) {
+                // 已改走画面算法：请求侧捕的是 AWB，本来就没有我们的增益，不再比对
+                wbAdoptFails = 0
+                return
+            }
             if (now - lastWbManualTelemetryMs < WB_MANUAL_TELEMETRY_MS) return
             lastWbManualTelemetryMs = now
             val request = RequestApplier.manualGains(params.kelvin.value.value, params.tint.value.value)
             val reported = gainsOf(result)
-            val adopted = WbTelemetry.gainsAdopted(request, reported)
+            // 采纳判据用**相对容差**（0.15）：量化/归一化不算未采纳，HAL 整套丢掉增益才算
+            val adopted = WbTelemetry.gainsAdopted(request, reported, tol = WB_ADOPT_TOL)
+            if (!adopted) {
+                wbAdoptFails++
+                if (wbAdoptFails >= WB_ADOPT_MAX_FAILS && !params.wbHalRejected.value) {
+                    // 连续多拍"请求了却没回报" ⇒ 本机 HAL 不采纳手动增益（WIKO：AWB_MODE_OFF 照做、
+                    // gains 丢弃，画面只剩传感器原色发绿）。改由画面算法接管 + 运行时提示。
+                    Log.w(
+                        TAG,
+                        "本机 HAL 不采纳手动白平衡增益（连续 $wbAdoptFails 拍请求与回报对不上）⇒ 改走画面算法"
+                    )
+                    params.wbHalRejected.value = true
+                    markDirty()
+                }
+            } else {
+                wbAdoptFails = 0
+            }
             Log.i(
                 TAG,
                 "WB遥测[manual] 请求=${WbTelemetry.formatGains(request)} 回报=${WbTelemetry.formatGains(reported)}" +

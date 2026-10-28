@@ -1053,6 +1053,43 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         }
     }
 
+    /** 最近一次设定的曲线/色调（[setWbGains] 换增益时要拿它们重烘同一张表） */
+    private var lastCurveStack: CurveStack? = null
+    /** 画面算法白平衡的相对增益（null = 不参与），与 [lastCurveStack]/[lastCurveTone] 同烘一张 LUT */
+    private var wbLutGains: FloatArray? = null
+    private var lastCurveTone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY
+
+    /**
+     * 画面算法白平衡的相对增益（[com.wotagei.cam.core.WbApply.gains]，已按最大通道归一）：
+     * 不支持 HAL 增益的机型上，手动色温/色调由这组数乘进场景层 LUT 的最后一段。
+     * null / 全 1 = 不参与（自动白平衡、预设档、以及能走 HAL 的机型都走这条）。
+     *
+     * **独立入口而不是并入 [setCurve] 的键**：色温滑杆拖动时每 tick 都在变，并进长键会把
+     * effect/zebra/peaking/curve/降噪 整条链重跑一遍（同 Glow 的分键理由）。
+     */
+    fun setWbGains(gains: FloatArray?) {
+        if (released.get()) return
+        wbLutGains = gains?.takeUnless { com.wotagei.cam.core.isIdentityGains(it) }
+        bakeCurveLut()
+        postGl {
+            failedKeys.removeAll { it.curve }
+            retrySlots()
+            syncMovieSlot()
+            dirty = true
+            scheduleDraw()
+        }
+    }
+
+    /** 曲线/色调/白平衡三者共用一张 LUT：任一非恒等就得烘，只看曲线一侧会静默丢掉另两项 */
+    private fun bakeCurveLut() {
+        val stack = lastCurveStack
+        val tone = lastCurveTone
+        val wb = wbLutGains
+        curveBytes = stack
+            ?.takeIf { !it.isPassthrough || !tone.isIdentity || wb != null }
+            ?.bakeBytes(tone, wbGains = wb)
+    }
+
     /**
      * 应用 RGB 曲线 + 色调（29 §4.3，2026-10-28）；两者都恒等即关闭（跳过 LUT 的唯一合法判据：
      * `stack.isPassthrough && tone.isIdentity`——**不能**只用曲线一侧决定，否则色调会被静默丢掉）。
@@ -1060,11 +1097,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 烘焙在调用线程做（`TABLE_SIZE*3` 次插值，微秒级），GL 线程只拿字节表，
      * 避免拖动控制点时把重计算压到渲染线程上掉帧。
      */
-    fun setCurve(stack: CurveStack?, tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY) {
+    fun setCurve(
+        stack: CurveStack?,
+        tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY
+    ) {
         if (released.get()) return
-        curveBytes = stack
-            ?.takeIf { !it.isPassthrough || !tone.isIdentity }
-            ?.bakeBytes(tone)
+        lastCurveStack = stack
+        lastCurveTone = tone
+        bakeCurveLut()
         postGl {
             // 每次显式改曲线都重新给一次编译机会：可能是上一版表触发的偶发失败。
             // 只清含 curve 维度的备忘——不含曲线维度的坏键（如驱动不认 PEAKING）与本次无关。

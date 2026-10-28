@@ -309,6 +309,7 @@ fun CameraScreen(
     val stabilize by params.stabilize.observed()
     val afMode by params.afMode.observed()
     val kelvin by params.kelvin.observed()
+    val tint by params.tint.observed()
     val zoom by params.zoom.observed()
     val flash by params.flash.observed()
     val frameEffect by params.frameEffect.observed()
@@ -677,6 +678,7 @@ fun CameraScreen(
         (activeSink as? com.wotagei.cam.camera.GlowProvider)?.setGlowParams(glowParams)
     }
 
+
     // ---- GPU 特效档位实时下发；DIRECT 强制无特效（03 文档 §1）
     LaunchedEffect(
         glEngine, renderMode, frameEffect, zebraThreshold, zebraDensity, peakingStrength, peakingColor, curveStack,
@@ -733,6 +735,28 @@ fun CameraScreen(
             ?: ui.lenses.firstOrNull { it.type == lens }
     }
     val ability = slot?.ability
+
+    // ---- 画面算法白平衡（2026-10-28）：HAL 不采纳 COLOR_CORRECTION_GAINS 的机型上，手动色温/色调
+    // 改由场景层 LUT 乘相对增益落地。**独立 effect**：拖色温滑杆时每 tick 都在变，并进下面那条长键
+    // 会把 effect/zebra/peaking/curve/降噪 整条链重跑一遍（同 Glow 的分键理由）。
+    // 增益 null = 不参与（自动/预设档，以及能走 HAL 的机型）。
+    val wbApply = remember(wbMode, kelvin.value, tint.value, ability?.manualWhiteBalancePossible(), renderMode) {
+        params.wbApply()
+    }
+    LaunchedEffect(glEngine, wbApply.gains?.contentHashCode()) {
+        glEngine?.setWbGains(wbApply.gains)
+    }
+    // 手动白平衡转画面算法（2026-10-28 用户需求）：本机没声明手动白平衡增益支持时，色温/色调
+    // 改由场景层乘相对增益落地——这是一次**自动变更**，必须看得见（同帧率/降噪降档的规矩）。
+    // 每次进页最多一条：用户切来切去不刷屏，弹层里还有常驻说明。
+    var wbFallbackTipShown by remember { mutableStateOf(false) }
+    LaunchedEffect(wbApply.byGl) {
+        if (wbApply.byGl && !wbFallbackTipShown) {
+            wbFallbackTipShown = true
+            showTip(app.getString(R.string.cam_wb_gl_fallback_toast))
+        }
+    }
+
     // #44：定焦镜头上「对焦」这件事整体没有意义 —— 胶囊入口与点按对焦一起收掉
     val focusUsable = ability?.hasAdjustableFocus() ?: true
     // ---- 对焦锁定（用户反馈第 2 条）：锁定锚点取最近一次点按处（无则画面中心，供胶囊「锁定对焦」

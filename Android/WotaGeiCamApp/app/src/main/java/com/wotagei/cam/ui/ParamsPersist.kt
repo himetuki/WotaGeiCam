@@ -127,6 +127,13 @@ object ParamsPersist {
         params.ev.value = params.ev.value.copy(value = prefs.getInt(WotaSettings.KEY_DEFAULT_EV, 0))
         // ⑨ 白平衡三件套（awbModes 闸门由 applyWhiteBalance 管；色温/色调是产品滑杆域）
         params.wbMode.value = enumOrDefault(prefs, WotaSettings.KEY_DEFAULT_WB_PRESET, WbPreset.AUTO)
+        // 白平衡落地路径要可归因（2026-10-28）：恢复值 + 实际落地（HAL/画面算法）各留一行，
+        // 用户报"手动白平衡没反应/发绿"时不必再靠猜
+        com.wotagei.cam.diag.Diag.i(
+            "WotaWb",
+            "冷启恢复 wb: raw=${prefs.getString(WotaSettings.KEY_DEFAULT_WB_PRESET, null)}" +
+                " -> ${params.wbMode.value.name} kelvin=${prefs.getInt(WotaSettings.KEY_DEFAULT_WB_KELVIN, 5500)}"
+        )
         params.kelvin.value = params.kelvin.value.copy(value = prefs.getInt(WotaSettings.KEY_DEFAULT_WB_KELVIN, 5500))
         params.tint.value = params.tint.value.copy(value = prefs.getInt(WotaSettings.KEY_DEFAULT_WB_TINT, 0))
         // ⑩ 变焦：>0 才套

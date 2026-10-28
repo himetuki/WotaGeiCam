@@ -130,9 +130,18 @@ class WotaParams(private val scope: CoroutineScope) {
     val focusLockPoint = MutableStateFlow<TapPoint?>(null)
 
     val zoom = MutableStateFlow(ParamState(1f))
+    /**
+     * 运行期探测到的「HAL 不采纳手动白平衡增益」闩锁（2026-10-28）：
+     * 静态能力表给不出答案时（`colorCorrectionModes` 空集 = 未声明，只能乐观当支持），
+     * 由引擎在结果回调里比对"请求增益 vs 回报增益"，连续多拍对不上就置真。
+     * 置真后 [wbApply] 改走画面算法，请求侧也不再发 AWB_MODE_OFF（否则整屏发绿）。
+     * 会话态：相机重开/切镜头由 [applyAbility] 清掉（能力表换了就得重新协商）。
+     */
+    val wbHalRejected = MutableStateFlow(false)
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
     val tint = MutableStateFlow(ParamState(0))
+
     val flash = MutableStateFlow(Flash.OFF)
     val stabilize = MutableStateFlow(Stabilize.OFF)
     val bitrate = MutableStateFlow(10_000_000)
@@ -176,6 +185,8 @@ class WotaParams(private val scope: CoroutineScope) {
      */
     fun applyAbility(a: CameraAbility) {
         lastAbility = a
+        // 换镜头 = 换了一套 3A 实现：上一颗头上"增益不被采纳"的结论不许沿用
+        wbHalRejected.value = false
         // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
         applySize(a)
         val targetFps = fps.value.value.coerceAtLeast(1)
@@ -277,12 +288,25 @@ class WotaParams(private val scope: CoroutineScope) {
     }
 
     private fun applyWhiteBalance(a: CameraAbility) {
-        // 手动档的能力回弹（2026-10-26 反馈 #6）：存量用户可能在不支持 TRANSFORM_MATRIX 的
-        // 机器上持久化过 MANUAL（变绿+滑杆失效的成因）。能力表到了才发现不支持 ⇒ 弹回 AUTO
-        // （与帧率自动降档同一条"自动变更必须可见"的纪律，弹回原因由 UI 侧提示）。
-        // colorCorrectionModes 空集合 = 隐藏键拿不到（无法判定）⇒ 不回弹，保持既有行为。
         val manualSupported = a.manualWhiteBalancePossible()
-        if (wbMode.value == WbPreset.MANUAL && !manualSupported) {
+        // 落地路径的单一裁决点：HAL 能采纳增益就走 HAL，否则退回画面算法（WbPlan 是纯函数）
+        val plan = wbApply()
+        // 落地路径必须可归因：用户报"手动白平衡没反应/发绿"时，一行日志就能区分
+        // "HAL 采纳了增益" / "改由画面算法" / "两条都不通已回弹"
+        com.wotagei.cam.diag.Diag.i(
+            "WotaWb",
+            "落地 mode=${wbMode.value.name} halSupported=$manualSupported" +
+                " byHal=${plan.byHal} byGl=${plan.byGl}" +
+                " render=${renderMode.value}" +
+                " gains=${plan.gains?.joinToString(",") { String.format(java.util.Locale.US, "%.3f", it) }}"
+        )
+
+        // 手动档的能力回弹（2026-10-26 反馈 #6，2026-10-28 收窄）：**只有一条路都走不通**才弹回自动。
+        // - HAL 不采纳增益但画面算法可用（GPU 管线）⇒ 保留手动档，改由 GL 乘相对增益；
+        // - HAL 不采纳增益且当前是 DIRECT（没有 GL）⇒ 确实做不到，弹回 AUTO 并留提示
+        //   （与帧率自动降档同一条"自动变更必须可见"的纪律）。
+        // colorCorrectionModes 空集合 = 隐藏键拿不到（无法判定）⇒ manualWhiteBalancePossible 为真，不回弹。
+        if (wbMode.value == WbPreset.MANUAL && !manualSupported && !plan.byGl) {
             wbMode.value = WbPreset.AUTO
         }
         if (a.awbModes.isNotEmpty() && !a.awbModes.contains(wbMode.value.awbMode)) {
@@ -299,6 +323,30 @@ class WotaParams(private val scope: CoroutineScope) {
             clamped(tint.value.value, WotaTiers.TINT_MIN, WotaTiers.TINT_MAX),
             WotaTiers.TINT_MIN..WotaTiers.TINT_MAX
         )
+    }
+
+    /**
+     * 白平衡落地路径的**唯一裁决点**（纯计算、不缓存 —— 请求侧、画面侧、UI 提示都读这一份，
+     * 免得"读落盘/读能力/读档位"三处各算一遍算出三种答案）。
+     *
+     * DIRECT 渲染没有 GL 场景层 ⇒ 画面算法这条腿不存在：此时 byGl 按 false 出，
+     * 调用方据此把手动档回弹自动（见 [applyWhiteBalance]）。
+     */
+    fun wbApply(): com.wotagei.cam.core.WbApply {
+        val raw = com.wotagei.cam.core.wbApplyPlan(
+            manual = wbMode.value == WbPreset.MANUAL,
+            // 落地路径只看**正向声明**（2026-10-28 WIKO 取证）：HAL 没明确列出 TRANSFORM_MATRIX 时
+            // 增益不可信——WIKO 会把请求原样回声在结果里（"采纳=是"），画面却四档无差别。
+            // 另外运行期抓到"不采纳"（[wbHalRejected]）也一律改走画面算法。
+            halSupportsGains = (lastAbility?.halDeclaresTransformMatrix() ?: false) &&
+                !wbHalRejected.value,
+            kelvin = kelvin.value.value,
+            tint = tint.value.value
+        )
+        if (raw.byGl && renderMode.value != RenderMode.GPU) {
+            return raw.copy(byGl = false, gains = null, noticeNeeded = false)
+        }
+        return raw
     }
 
     /** 落档到当前镜头能力：只按「用户要的那档」求解，见 [resolveSizeFor] */
