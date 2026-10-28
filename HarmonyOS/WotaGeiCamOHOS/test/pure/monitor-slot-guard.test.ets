@@ -82,10 +82,10 @@ test('方向常数v2_上屏与编码容器角同式_mirror取反', () => {
   // deg=0（webcam 原始帧横向，横屏窗口无需旋转，自洽）。
   const cpp: string = sourceText('entry/src/main/cpp/gl_render.cpp');
   assertTrue(cpp.indexOf('WotaNormalizeDeg(g_displayDeg + g_stRotDeg +') >= 0 &&
-    cpp.indexOf('(g_mirrored ? 180 : 90)') >= 0,
-    '上屏 UV 复合角必须是 v3 标定（display + 后摄180/前摄90）');
-  assertTrue(cpp.indexOf('WotaNormalizeDeg(g_displayDeg + (g_mirrored ? 180 : 90))') >= 0,
-    '编码容器角必须与上屏同式（v3）');
+    cpp.indexOf('(g_mirrored ? 0 : 270)') >= 0,
+    '上屏 UV 复合角必须是 v4 标定（display + 后摄0/前摄270——v3 前后各再 180）');
+  assertTrue(cpp.indexOf('WotaNormalizeDeg(g_displayDeg + (g_mirrored ? 0 : 270))') >= 0,
+    '编码容器角必须与上屏同式（v4）');
   assertFalse(cpp.indexOf('g_sensorDeg - g_displayDeg + g_stRotDeg') >= 0,
     'v1/v2 的 sensor−display 公式必须消失（突变自证）');
   const camera: string = sourceText('entry/src/main/ets/pages/Camera.ets');
