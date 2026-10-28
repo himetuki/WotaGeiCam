@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -101,6 +102,20 @@ fun hudFrostPlate(radiusPx: Float, ink: HudInkLevel = HudInkLevel.SECONDARY): Hu
 val hudFrostInherit: HudFrostCard = HudFrostCard(asPlate = false, radiusPx = 0f, ink = HudInkLevel.PRIMARY)
 
 /**
+ * 「预览叠加层（参考线 / 站位线）此刻在画」的**单一开关**（2026-10-28 用户报障）。
+ *
+ * 为什么 HUD 卡片要读它：开毛玻璃时 [wotaHudCard] 会把 74.9% 的实底**让位**给 GL 霜板
+ * （#84 步骤 2 的 A2 分工）。而霜板属于**预览图层**——参考线/站位线是 Compose 叠加层，
+ * 天然画在霜板之上：于是「广播安全框下边线、站位线」看起来压在底 Dock 卡片上
+ * （WIKO 真机取证：同一行像素在开/关广播安全框两张截图里只差这条线，卡片其余像素不动）。
+ *
+ * 口径：叠加层在画时，HUD 卡片改回**近乎不透明**的实底（不是让位给霜板），线就落在控件之下；
+ * 叠加层关掉时一切照旧走霜（观感与 #84 定版逐字相同）。录制页在 HUD 层提供它；
+ * 编辑控件页没有预览叠加层，默认 false。
+ */
+val LocalPreviewOverlaysOn = compositionLocalOf { false }
+
+/**
  * HUD 底板的霜感知版 `wotaCard`：**同一套描边、同一套圆角，只有那层纯色 fill 会在霜真在屏幕上时让位**。
  *
  * 三条不可逆性守卫都落在这函数里：
@@ -110,6 +125,8 @@ val hudFrostInherit: HudFrostCard = HudFrostCard(asPlate = false, radiusPx = 0f,
  *   反过来 GL 撤报那一帧起 fill 就回来（撤回的延迟见 HudFrost 那条轮询，≤ 一个轮询周期，真机未量）。
  * - 让位的是 fill，**不是** clip、不是 border、不是内容：圆角仍由 Shape 裁、1dp 高光边仍在这里描、
  *   选中态那层 accent 实底由调用方的 `.background(fill)` 负责（它在链路更内侧，霜动不到它）。
+ * - **例外（2026-10-28）**：[LocalPreviewOverlaysOn] 为 true（参考线/站位线在画）时**不**让位——
+ *   宁可牺牲这一态下的毛玻璃，也不许线画在控件上；用 97% 暖黑实底把叠加层挡在下面。
  */
 @Composable
 fun Modifier.wotaHudCard(
@@ -117,6 +134,13 @@ fun Modifier.wotaHudCard(
     frost: HudFrostCard? = null
 ): Modifier {
     if (frost == null || !HudFrost.live) return this.wotaCard(shape)
+    if (LocalPreviewOverlaysOn.current) {
+        // 97% 暖黑：白线透过来只剩 3%（≈8/255，肉眼不可辨）；仍保留同一套 1dp 高光边
+        return this
+            .clip(shape)
+            .background(WotaColor.bg.copy(alpha = 0.97f))
+            .border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
+    }
     val edged = this.clip(shape).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
     if (!frost.asPlate) return edged
     return edged.then(hudFrostRectRegistrar(frost))

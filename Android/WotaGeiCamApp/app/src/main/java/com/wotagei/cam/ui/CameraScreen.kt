@@ -121,6 +121,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
@@ -222,6 +223,7 @@ import com.wotagei.cam.record.streamHealthVerdict
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.anim.MergeDebugBadge
 import com.wotagei.cam.ui.design.WotaChip
+import com.wotagei.cam.ui.design.LocalPreviewOverlaysOn
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaType
 import com.wotagei.cam.ui.design.WotaHit
@@ -1538,7 +1540,14 @@ fun CameraScreen(
                 }
         ) {
             previewStage(Modifier.fillMaxSize())
-            CompositionLocalProvider(LocalPreviewCoords provides previewCoords) {
+            // 参考线/站位线是**预览层的 Compose 叠加**：开霜时 HUD 卡片会让出实底（霜板在 GL 层，
+            // 比叠加层更下），线就会看起来压在控件上（2026-10-28 用户报障，真机截图取证）。
+            // 叠加层在画 ⇒ 通知 HUD 卡片改回近乎不透明实底，把线挡在控件之下（设计侧判据见
+            // LocalPreviewOverlaysOn 的 KDoc）；关掉即恢复霜观感。
+            CompositionLocalProvider(
+                LocalPreviewCoords provides previewCoords,
+                LocalPreviewOverlaysOn provides (refLines != 0 || markerCount > 0)
+            ) {
                 Box(
                     Modifier
                         .matchParentSize()
@@ -3928,18 +3937,21 @@ private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
     val text = stringResource(R.string.cam_display_scale_readout, label)
     val density = LocalDensity.current
     val gap = with(density) { 4.dp.roundToPx() }
-    val outline = with(density) { 1.5.dp.toPx() }
+    val outline = with(density) { 1.2.dp.toPx() }
+    // 2026-10-28 用户口径：再透一些、再小一些（她点名这块读数抢画面）。
+    // 字号 11sp→9sp、填充白 40%→30%、描边红从全亮降到 55%——仍可读，但不与画面争。
+    val style = WotaType.label.copy(fontSize = 9.sp, lineHeight = 12.sp)
     Box(Modifier.offset { IntOffset(anchor.left, anchor.bottom + gap) }) {
         Text(
             text = text,
-            color = WotaColor.rec,
-            style = WotaType.label.copy(drawStyle = Stroke(width = outline)),
+            color = WotaColor.rec.copy(alpha = 0.55f),
+            style = style.copy(drawStyle = Stroke(width = outline)),
             maxLines = 1
         )
         Text(
             text = text,
-            color = WotaColor.textLo,
-            style = WotaType.label,
+            color = WotaColor.textLo.copy(alpha = 0.75f),
+            style = style,
             maxLines = 1
         )
     }

@@ -759,11 +759,16 @@ fun HudEntryItem(
                 tier, ctx.stabLabel, ctx.stabActive, anchor.then(modifier),
                 gatedClick(clicksAccepted, ctx.onStabClick), frost
             )
+            // 参考线（2026-10-28 用户口径）：圆形钮从 38dp 收到 30dp（与顶栏那排同款 size/glyph 令牌），
+            // 实测高 76px→60px ⇒ 竖 Dock 里从占 2 档降到 1 档，四周空白随之消失、整条 Dock 省出 1 档。
+            // 命中盒 30dp 仍 ≥ 图标钮最小可点档（顶栏 8 枚同尺寸已在真机长期使用）
             CamPill.REFLINE -> WotaIconButton(
                 image = Icons.Filled.GridOn,
                 description = stringResource(R.string.cam_p_refline),
                 selected = ctx.refLineOn,
                 modifier = anchor.then(modifier),
+                size = 30.dp,
+                glyph = 18.dp,
                 frost = frost,
                 onClick = ctx.onRefLineClick
             )

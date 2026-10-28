@@ -309,6 +309,11 @@ class DisplayScaleWiringGuardTest {
         for (token in listOf("WotaColor.rec", "Stroke(", "WotaColor.textLo", "anchor.bottom")) {
             if (!body.contains(token)) bad.add("读数缺样式/位置锚点：$token")
         }
+        // 2026-10-28 用户口径：再透一些、再小一些（她点名这块读数抢画面）。
+        // 钉住三个具体值：9sp 字号 / 填充 30% 白 / 红描边 55%——谁改回去先红。
+        for (token in listOf("fontSize = 9.sp", "WotaColor.textLo.copy(alpha = 0.75f)", "WotaColor.rec.copy(alpha = 0.55f)")) {
+            if (!body.contains(token)) bad.add("读数样式退化（用户 2026-10-28 口径）：$token")
+        }
         if (body.contains("background(")) bad.add("读数必须无背景（钉子 3 的样式）")
         val flat = KotlinSourceScan.flatten(maskedSrc)
         for (token in listOf(
