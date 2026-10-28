@@ -87,3 +87,9 @@ desktop.ini
 
 # ===== 会话临时取证（截图/UI 树 dump，不入版本库）=====
 /.tmp/
+
+# ===== ohpm 依赖锁与 DevEco 本地备份（不入版本库）=====
+# ohpm 自动生成的依赖锁：CI 用 `ohpm install --all` 不读锁，与上方 /package-lock.json 同口径
+/HarmonyOS/**/oh-package-lock.json5
+# DevEco Studio 修改签名配置前自动生成的 build-profile 本机备份（机器相关）
+/HarmonyOS/**/*.localbak-*
