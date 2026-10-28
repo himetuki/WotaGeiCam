@@ -83,6 +83,108 @@ internal object Shaders {
      *
      * 强制不透明：与 [PASS_THROUGH_FS] 同一个理由（解码/上游给的 alpha 不可信）。
      */
+    /**
+     * 后渲染导出的 **2D 双边降噪**（2026-10-28 用户需求：Glow/降噪要有"内置播放器内后渲染导出"）。
+     *
+     * 与 [BILATERAL_FS] 同一套权重与邻域，唯一差别是采样器类型：导出的输入是解码帧经
+     * OES→2D 拷贝后的普通纹理，必须用 `sampler2D`（类型错配恒黑，见 [PASS_THROUGH_2D_FS] 的
+     * KDoc）。**曲线不在后渲染里做**（用户口径：曲线录制时已烘进成片），所以不提供
+     * BILATERAL_CURVE 的 2D 版。
+     */
+    val SCENE_BILATERAL_2D_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uFrame;
+        uniform vec2 uTexel;
+        uniform float uSigmaR;
+        vec3 bilateral(vec2 uv) {
+            vec3 c = texture2D(uFrame, uv).rgb;
+            float inv2s2 = 1.0 / (2.0 * uSigmaR * uSigmaR);
+            vec3 sum = c;
+            float wsum = 1.0;
+            vec2 o[8];
+            o[0] = vec2(-1.0, -1.0); o[1] = vec2(0.0, -1.0); o[2] = vec2(1.0, -1.0);
+            o[3] = vec2(-1.0,  0.0);                          o[4] = vec2(1.0,  0.0);
+            o[5] = vec2(-1.0,  1.0); o[6] = vec2(0.0,  1.0); o[7] = vec2(1.0,  1.0);
+            for (int i = 0; i < 8; i++) {
+                vec3 s = texture2D(uFrame, uv + o[i] * uTexel).rgb;
+                vec3 d = s - c;
+                float w = exp(-dot(d, d) * inv2s2);
+                sum += s * w;
+                wsum += w;
+            }
+            return sum / wsum;
+        }
+        void main() {
+            gl_FragColor = vec4(bilateral(vUv), 1.0);
+        }
+    """.trimIndent()
+
+    /**
+     * 后渲染导出的**亮部提取**（2D 输入）：`c * smoothstep(threshold±soft, luma)`——
+     * 与 `GlowBlurChain` 的拷贝趟（GLOW_COPY_FS）同口径：乘回原色 ⇒ 光晕是原色的，
+     * 换成 tint 只由合成趟做（见 [SCENE_COMPOSITE_FS]）。
+     */
+    val SCENE_BRIGHT_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uSrc;
+        uniform float uThreshold;
+        uniform float uSoft;
+        void main() {
+            vec3 c = texture2D(uSrc, vUv).rgb;
+            float l = dot(c, vec3(0.299, 0.587, 0.114));
+            float lo = max(uThreshold - uSoft, 0.0);
+            float hi = min(uThreshold + uSoft + 0.0001, 1.0);
+            float w = smoothstep(lo, hi, l);
+            gl_FragColor = vec4(c * w, 1.0);
+        }
+    """.trimIndent()
+
+    /** 后渲染导出的一趟可分离高斯（9 tap；横/纵各跑一次，偏移由 uOffset 给，UV 空间） */
+    val SCENE_BLUR_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uSrc;
+        uniform vec2 uOffset;
+        void main() {
+            vec3 s = texture2D(uSrc, vUv).rgb * 0.227027;
+            s += (texture2D(uSrc, vUv + uOffset).rgb + texture2D(uSrc, vUv - uOffset).rgb) * 0.1945946;
+            s += (texture2D(uSrc, vUv + uOffset * 2.0).rgb + texture2D(uSrc, vUv - uOffset * 2.0).rgb) * 0.1216216;
+            s += (texture2D(uSrc, vUv + uOffset * 3.0).rgb + texture2D(uSrc, vUv - uOffset * 3.0).rgb) * 0.0540540;
+            s += (texture2D(uSrc, vUv + uOffset * 4.0).rgb + texture2D(uSrc, vUv - uOffset * 4.0).rgb) * 0.0162160;
+            gl_FragColor = vec4(s, 1.0);
+        }
+    """.trimIndent()
+
+    /**
+     * 后渲染导出的**合成趟**：`c + glow × tint × (gain + add) × blend × 噪声`，
+     * 与实时链 `GLOW_DECL` 的 applyGlow 逐项同源（2026-10-28 同色光晕 + 单色 tint 口径），
+     * 只是这里 base / glow 都是 2D 纹理。
+     */
+    val SCENE_COMPOSITE_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uBase;
+        uniform sampler2D uGlowSrc;
+        uniform vec3 uTint;
+        uniform float uGain;
+        uniform float uAdd;
+        uniform float uBlend;
+        uniform float uFreq;
+        float glowHash(vec2 p) {
+            vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            q += dot(q, q.yzx + 33.33);
+            return fract((q.x + q.y) * q.z);
+        }
+        void main() {
+            vec3 c = texture2D(uBase, vUv).rgb;
+            vec3 g = texture2D(uGlowSrc, vUv).rgb;
+            float n = mix(1.0, glowHash(vUv * uFreq), step(0.0001, uFreq));
+            gl_FragColor = vec4(c + g * uTint * (uGain + uAdd) * (uBlend * n), 1.0);
+        }
+    """.trimIndent()
+
     val PASS_THROUGH_2D_FS = """
         precision mediump float;
         varying vec2 vUv;
