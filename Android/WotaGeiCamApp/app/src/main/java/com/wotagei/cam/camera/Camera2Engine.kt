@@ -37,6 +37,8 @@ import com.wotagei.cam.record.FrameLedger
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
@@ -44,6 +46,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executor
 
 /** 设备状态机（失败按原因细分四类） */
@@ -107,6 +110,9 @@ class Camera2Engine(
         /** 占用/内部错误后的自动重开 */
         /** AE/AF 状态遥测的拍点间隔（反馈 #1/#7 方案F）：1s 一拍，d 级 */
         private const val AE_AF_TELEMETRY_MS = 1_000L
+
+        /** 帧率守卫的独立采样拍（2026-10-28 审查补盲区）：与遥测节拍同量级，1s 一拍 */
+        private const val LOW_FPS_SAMPLE_PERIOD_MS = 1_000L
 
         /**
          * 手动白平衡运行时探测的判负上限（反馈 #6）：保活拍点 500ms × 4 = 2s 内 HAL 一直
@@ -348,6 +354,7 @@ class Camera2Engine(
      * （乱序是 preview 泄漏与 ANR 的常见根因）
      */
     fun close() {
+        lowFpsSampler.cancel()
         collectJobs.forEach { it.cancel() }
         collectJobs.clear()
         // 先在调用方线程同步封口：置假后所有 post 的入队/执行守卫即刻生效，close 返回后旧引擎
@@ -1023,18 +1030,26 @@ class Camera2Engine(
     private var lastAeAfTelemetryMs = 0L
 
     // ---- 运行时帧率坍塌守卫（2026-10-28 用户6/7；判定逻辑在 core.LowFpsWatch，JVM 单测）----
-    // 计数与采样都挂在这条**既有的**结果回调/1s 遥测节拍上，不新增线程、不新增定时器：
     // 到帧率最诚实的源头就是 capture result 的到达节奏（成片卡不卡的物理成因）。
-    // 只在回调线程碰这些字段（串行），跨线程发布走参数总线 StateFlow。
+    // 计数在结果回调累加；采样由 [lowFpsSampler] 的**独立 1s 定时拍**驱动——不挂在结果回调上：
+    // HAL 完全断流（零回调）时结果路径整体停摆，挂在结果上的采样也会跟着失声，守卫对
+    // "一颗帧都不来"的病态反而哑火（2026-10-28 审查补盲区）。定时拍读计数即可把零到达
+    // 如实喂成 0fps。取景/录制全程运行；设备不在 OPEN_SUCCEED 时采样函数自己清提示。
     private var camResultCount = 0L
     private var camRateLastMs = 0L
     private var lowFpsWatch: LowFpsWatch? = null
+
+    private val lowFpsSampler: Job = scope.launch {
+        while (isActive) {
+            delay(LOW_FPS_SAMPLE_PERIOD_MS)
+            sampleCameraRate(SystemClock.elapsedRealtime())
+        }
+    }
 
     private fun logAeAfTelemetry(result: TotalCaptureResult) {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAeAfTelemetryMs < AE_AF_TELEMETRY_MS) return
         lastAeAfTelemetryMs = now
-        sampleCameraRate(now)
         val aeState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE) }.getOrNull()
         val afState = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_STATE) }.getOrNull()
         val afMode = runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AF_MODE) }.getOrNull()

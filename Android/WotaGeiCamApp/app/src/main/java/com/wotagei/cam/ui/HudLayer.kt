@@ -1576,18 +1576,24 @@ internal fun VolumeLeds(db: Float, card: Boolean = true) {
  *
  * 返回顺序 = 行序 = 优先级，**逐字保持改前那道 `when` 的分支顺序**（高帧率 > 缺麦克风 > LEGACY >
  * DIRECT 特效），不做降序重排——改优先级是另一件裁决，不在本条改动范围内。
+ * 2026-10-28 审查加固新增两行，**追加**在固定行之后（不插入既有序）：换段预提示（segNearCap）
+ * 与「近似档+手动曝光」预告知（approxManual）——它们是状态行不是降级行，排在最后以不抢降级文案。
  */
 internal fun warnRows(
     deviceFailedHighFps: Boolean,
     audioDegraded: Boolean,
     legacy: Boolean,
     effect: FrameEffect,
-    renderMode: RenderMode
+    renderMode: RenderMode,
+    segNearCap: Boolean = false,
+    approxManual: Boolean = false
 ): List<Int> = buildList {
     if (deviceFailedHighFps) add(R.string.cam_state_high_fps)
     if (audioDegraded) add(R.string.no_audio_record_tip)
     if (legacy) add(R.string.capability_limited_tip)
     if (effect != FrameEffect.NONE && renderMode == RenderMode.DIRECT) add(R.string.cam_direct_no_effect)
+    if (segNearCap) add(R.string.cam_state_seg_near_cap)
+    if (approxManual) add(R.string.cam_state_approx_manual)
 }
 
 /**
@@ -1612,6 +1618,8 @@ fun BoxScope.HudTopChrome(
     effect: FrameEffect,
     renderMode: RenderMode,
     lowFpsNote: String?,
+    segNearCap: Boolean = false,
+    approxManual: Boolean = false,
     onSettingsClick: () -> Unit,
     onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier
@@ -1659,7 +1667,9 @@ fun BoxScope.HudTopChrome(
             audioDegraded = audioDegraded,
             legacy = legacy,
             effect = effect,
-            renderMode = renderMode
+            renderMode = renderMode,
+            segNearCap = segNearCap,
+            approxManual = approxManual
         )
         // 这枚分叉是「无告警时整块不组合」的唯一保证，**别删**：Column 的 padding 在零子元素时
         // 照样参与测量，拆掉它会量出一枚 20×2dp 的隐形盒——干净态下 topBarH 静默 +2dp、

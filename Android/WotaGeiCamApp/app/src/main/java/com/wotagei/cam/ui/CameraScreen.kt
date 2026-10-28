@@ -144,6 +144,7 @@ import com.wotagei.cam.camera.concurrentCameraIdsWith
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.hasAdjustableFocus
 import com.wotagei.cam.core.forcedShutterOutOfRange
+import com.wotagei.cam.core.segmentCapApproached
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.DisplayScale
@@ -401,6 +402,8 @@ fun CameraScreen(
     val recStatus by runner.status.observed()
     val recElapsed by runner.elapsedMs.observed()
     val recDb by runner.volumeDb.observed()
+    // 换段预提示（2026-10-28 审查加固）：pollTask 按真实写入字节置位，录制结束自动清
+    val segNearCap by runner.segNearCap.observed()
     val recording = recStatus == RecordStatus.START || recStatus == RecordStatus.PREPARE ||
         recStatus == RecordStatus.STOPPING
 
@@ -1601,6 +1604,11 @@ fun CameraScreen(
                         } else {
                             null
                         },
+                        segNearCap = segNearCap && recording,
+                        // 近似档+手动曝光组合预告知（2026-10-28 审查加固）：※ 档的区间下界不受
+                        // App 控制，暗光下 HAL 可以合法下探——r03 时代这一组合正是帧率坍塌主力，
+                        // 修复后残余面仍存在，按"预想所有问题"口径在取景态就告知
+                        approxManual = !fps.exact && fps.enabled && aeMode == AeMode.MANUAL,
                         onSettingsClick = { if (recording) lockTip() else onOpenSettings() },
                         onHeightChanged = { if (topBarH != it) topBarH = it }
                     )
@@ -2757,6 +2765,15 @@ private class RecordRunner(
     val result = MutableStateFlow<RecordResult?>(null)
 
     /**
+     * 换段预提示（2026-10-28 审查加固）：当前段已写字节 ≥ 单段上限 85% 时置真。
+     * 50Mbps 档约 9.3 分钟就到 3.5GiB，10 分钟以上的录制必然踩一次换段腿——提前告知，
+     * 用户看到换段瞬间的短促停顿不会当成 bug。数据源是 [RecorderHealth.outputBytes]
+     * （两引擎都能报真实字节），不是码率估算；-1（量不到）恒 false。
+     * 分段轮转后 outputBytes 回落到新段的小值 ⇒ 提示自然消退，换段后自动重新武装。
+     */
+    val segNearCap = MutableStateFlow(false)
+
+    /**
      * 自检触发的自动重录文案（资源 id）。UI 侧 collect 后走既有 hint 通道，读走即清——
      * StateFlow 对相等值去重，不清的话同一次会话里的第二次重录置同一 id 再也不会发出来。
      */
@@ -3134,11 +3151,17 @@ private class RecordRunner(
     private val pollTask: Runnable = object : Runnable {
         override fun run() {
             val rec = recorder
-            if (!polling || rec == null) return
+            if (!polling || rec == null) {
+                // 停录/轮询结束必须清掉换段预提示，否则下一场录制前顶栏还挂着上一场的旧行
+                if (segNearCap.value) segNearCap.value = false
+                return
+            }
             // 取引擎当前 attempt 的真实时长——重录跳回 00:00 是**有意为之**（2026-10-14 用户裁决）：
             // 被弃段不进成片，显示值必须与最终成片时长同口径，不掺任何跨 attempt 基线
             elapsedMs.value = rec.elapsedMs
             volumeDb.value = AudioProbe.dbOf(rec.amplitude())
+            // 换段预提示：真实写入字节（不是估算）对上限；分段轮转后自然回落重新武装
+            segNearCap.value = segmentCapApproached(rec.health().outputBytes)
             maybeAutoStop()
             if (status.value == RecordStatus.START) handler.postDelayed(this, POLL_MS)
         }

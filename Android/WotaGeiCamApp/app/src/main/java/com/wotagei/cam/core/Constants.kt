@@ -78,6 +78,20 @@ object WotaTiers {
 }
 
 /**
+ * 换段预提示判据（纯函数，JVM 可测；2026-10-28 审查加固）：当前段已写字节达到
+ * [WotaTiers.MAX_FILE_BYTES] 的 85% ⇒ UI 提前告知"即将自动换段"。
+ * 高码率档（50Mbps）下 3.5GiB 上限约 9.3 分钟就到，10 分钟以上的录制**必然**踩一次换段腿——
+ * 换段本身有界且受阻会明确失败（record/Recorder.kt 的 segLostMs 记账），但可预期的一次
+ * 抖动应当被告知而不是被当成 bug。
+ *
+ * @param outputBytes 当前段已落盘字节（`RecorderHealth.outputBytes`：两引擎都能报；
+ *   **-1 = 不可观测**——"量不到"不是"超了"，按 false 处理，与 streamHealthVerdict 同一口径）
+ * @param capBytes 单段上限；默认产品常量，参数化只为 JVM 测试不必造 3.5GiB
+ */
+fun segmentCapApproached(outputBytes: Long, capBytes: Long = WotaTiers.MAX_FILE_BYTES): Boolean =
+    outputBytes >= 0 && outputBytes * 100 >= capBytes * 85
+
+/**
  * 光弧补弧合并的**差分死区**（8bit luma 级）——CPU/GPU 两路共用的唯一档位真源。
  *
  * 判据：`Δluma = luma(被抽帧) − luma(保留帧)`；`Δluma > D` 时整颗像素取被抽帧，否则保持保留帧。

@@ -117,4 +117,50 @@ class WarnRowsTest {
         assertTrue("缺麦克风必须排在 LEGACY 之前", iAudio < iLegacy)
         assertTrue("LEGACY 必须排在 DIRECT 特效之前", iLegacy < iDirect)
     }
+
+    // ---- 2026-10-28 审查加固新增两行（追加在固定行之后，不插入既有序）----
+
+    @Test
+    fun `新增两行默认关闭_旧四参调用点行为逐字不变`() {
+        assertEquals(
+            "缺省参调用（旧签名形态）四条件全清必须仍为空——旧行为不许被新增行扰动",
+            emptyList<Int>(),
+            warnRows(false, false, false, FrameEffect.NONE, RenderMode.GPU)
+        )
+    }
+
+    @Test
+    fun `换段预提示与近似档手动行各自独立出现`() {
+        assertEquals(
+            "换段预提示单独成立时只出该行",
+            listOf(R.string.cam_state_seg_near_cap),
+            warnRows(false, false, false, FrameEffect.NONE, RenderMode.GPU, segNearCap = true)
+        )
+        assertEquals(
+            "近似档+手动单独成立时只出该行",
+            listOf(R.string.cam_state_approx_manual),
+            warnRows(false, false, false, FrameEffect.NONE, RenderMode.GPU, approxManual = true)
+        )
+    }
+
+    @Test
+    fun `新增行追加在固定行之后_不抢降级文案的行序`() {
+        val rows = warnRows(
+            deviceFailedHighFps = true,
+            audioDegraded = true,
+            legacy = true,
+            effect = FrameEffect.ZEBRA,
+            renderMode = RenderMode.DIRECT,
+            segNearCap = true,
+            approxManual = true
+        )
+        assertEquals("六条全现按固定序+追加序输出", listOf(
+            R.string.cam_state_high_fps,
+            R.string.no_audio_record_tip,
+            R.string.capability_limited_tip,
+            R.string.cam_direct_no_effect,
+            R.string.cam_state_seg_near_cap,
+            R.string.cam_state_approx_manual
+        ), rows)
+    }
 }
