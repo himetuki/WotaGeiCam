@@ -683,7 +683,12 @@ struct CameraPage {
         return Promise.resolve('cancelled');
       }
       const want: Size = new Size(this.settings.sizeW, this.settings.sizeH);
-      return this.engine.start(ctx, this.surfaceId, this.lensKey, want, this.settings.fps);
+      // 冷启默认镜头：用户显式选过（lens_user_picked 位）恢复其槽位键（设备不在了引擎再回退）；
+      // 从没显式选过 = 能力协商默认（引擎侧 pickCapabilityDefault——后摄里最大视频档者，
+      // 不认档位标签，上游 0525fa2）
+      const startKey: string | undefined =
+        this.settings.lensUserPicked && this.settings.lensKey !== '' ? this.settings.lensKey : undefined;
+      return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps);
     }).then((summary: string): void => {
       this.startingCamera = false;
       if (summary === 'cancelled') {
@@ -887,6 +892,13 @@ struct CameraPage {
     idx = (idx + 1) % this.lenses.length;
     this.lensKey = this.lenses[idx].key;
     this.lensLabel = this.lensName(this.lenses[idx]);
+    // 显式切换即永久关闭能力协商默认（上游 0525fa2）：持久化「选过」位与槽位键，
+    // 冷启后尊重用户选择；位丢失的最大代价只是退回能力默认（再选一次即恢复）
+    if (!this.settings.lensUserPicked || this.settings.lensKey !== this.lensKey) {
+      this.settings.lensUserPicked = true;
+      this.settings.lensKey = this.lensKey;
+      this.persistSettings();
+    }
     this.engine.stop().then((): void => {
       this.cameraStarted = false;
       this.tryStartCamera(); // 失败由 tryStartCamera 消息 +「重试相机」承担

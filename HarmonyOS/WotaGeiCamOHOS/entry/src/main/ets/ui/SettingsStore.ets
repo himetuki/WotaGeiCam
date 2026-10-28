@@ -50,6 +50,14 @@ const KEY_DIAG_ENABLED: string = 'diag_enabled';
 const KEY_DIAG_VERBOSE: string = 'diag_verbose';
 /** RGB 曲线栈持久串（上游 WotaSettings.KEY_CURVE_STACK，逐字一致；CURVE 批） */
 const KEY_CURVE_STACK: string = 'curve_stack';
+/**
+ * 「用户显式选过镜头」持久化位 + 选中的槽位键（上游 0525fa2 LensPickPreference 语义对齐）：
+ * false 期间冷启走能力协商默认（core/LensSlot.pickCapabilityDefault——后摄里最大视频档者，
+ * 不认档位标签）；用户在镜头胶囊里切过一次后永久尊重其选择（冷启恢复该槽位键，
+ * 设备不在了再回能力默认）。位丢失的最大代价只是退回能力默认（再选一次即恢复），可接受。
+ */
+const KEY_LENS_USER_PICKED: string = 'lens_user_picked';
+const KEY_LENS_KEY: string = 'lens_key';
 // ---- 迁移读的旧键名（只在 load 回退路径出现；save 不再写它们）----
 const LEGACY_KEY_SIZE_W: string = 'sizeW';
 const LEGACY_KEY_SIZE_H: string = 'sizeH';
@@ -98,6 +106,10 @@ export class CameraSettings {
   diagVerbose: boolean = false;
   /** RGB 曲线栈持久串（CurveStack.encode 格式 `x:y,…;×4`；空串 = 恒等。CURVE 批，上游 curve_stack） */
   curveStackRaw: string = '';
+  /** 用户显式选过镜头（上游 0525fa2 LensPickPreference.isPicked；false = 冷启走能力协商默认） */
+  lensUserPicked: boolean = false;
+  /** 显式选中的镜头槽位键（LensSlot.key；仅 lensUserPicked=true 时消费） */
+  lensKey: string = '';
 }
 
 function asInt(value: number, fallback: number): number {
@@ -183,6 +195,10 @@ export class SettingsStore {
       s.diagVerbose = typeof dvRaw === 'boolean' ? dvRaw as boolean : s.diagVerbose;
       const csRaw: preferences.ValueType = await store.get(KEY_CURVE_STACK, s.curveStackRaw);
       s.curveStackRaw = typeof csRaw === 'string' ? csRaw as string : s.curveStackRaw;
+      const lpRaw: preferences.ValueType = await store.get(KEY_LENS_USER_PICKED, s.lensUserPicked);
+      s.lensUserPicked = typeof lpRaw === 'boolean' ? lpRaw as boolean : s.lensUserPicked;
+      const lkRaw: preferences.ValueType = await store.get(KEY_LENS_KEY, s.lensKey);
+      s.lensKey = typeof lkRaw === 'string' ? lkRaw as string : s.lensKey;
     } catch (e) {
       Diag.w(TAG, `load settings failed, use defaults: ${e}`);
       return new CameraSettings();
@@ -233,6 +249,8 @@ export class SettingsStore {
       await store.put(KEY_CURVE_STACK, s.curveStackRaw);
       await store.put(KEY_DIAG_ENABLED, s.diagEnabled);
       await store.put(KEY_DIAG_VERBOSE, s.diagVerbose);
+      await store.put(KEY_LENS_USER_PICKED, s.lensUserPicked);
+      await store.put(KEY_LENS_KEY, s.lensKey);
       await store.flush();
       return true;
     } catch (e) {

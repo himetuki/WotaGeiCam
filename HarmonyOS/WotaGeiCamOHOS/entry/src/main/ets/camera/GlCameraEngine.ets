@@ -15,7 +15,7 @@ import { Diag } from '../diag/Diag';
 import { Size, WotaTag } from '../core/Constants';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
-import { LensSlot, LensType } from '../core/LensSlot';
+import { LensSlot, LensType, lensTypeName, maxVideoPixels, pickCapabilityDefault } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
@@ -116,7 +116,8 @@ export class GlCameraEngine {
 
   /**
    * 把相机帧接到 native 输出面；返回人读摘要/错误串。
-   * slotKey 缺省 = pickDefaultLens；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
+   * slotKey 缺省 = 能力协商默认（pickCapabilityDefault：后摄里最大视频档者，不认档位标签，
+   * 上游 0525fa2）→ 退 pickDefaultLens（档位标签）；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
    */
   async start(ctx: common.Context, nativeSurfaceId: string, slotKey?: string,
     wantSize?: Size, fps?: number): Promise<string> {
@@ -130,15 +131,21 @@ export class GlCameraEngine {
         this.slots = enumerateKitLenses(mgr);
       }
       let slot: LensSlot | undefined = undefined;
-      if (slotKey !== undefined) {
+      if (slotKey !== undefined && slotKey !== '') {
         slot = this.slots.find((s: LensSlot): boolean => s.key === slotKey);
       }
       if (slot === undefined) {
-        slot = pickDefaultLens(this.slots);
+        slot = pickCapabilityDefault(this.slots) ?? pickDefaultLens(this.slots);
       }
       if (slot === undefined) {
         return 'gl camera failed: no camera';
       }
+      // 打开的是哪一颗物理头必须能从日志对上：ability.dump 的 label 只是档位名（WIDE），
+      // 同档位多颗/归档存疑时只有 key + 等效焦距 + 最大视频档能定位现场（上游 9b33272 取证口径）
+      Diag.i(WotaTag.LENS,
+        `open slot=${slot.key} type=${lensTypeName(slot.type)} eq=${slot.eqFocal}mm ` +
+        `videoMax=${maxVideoPixels(slot.ability)} afModes=${Array.from(slot.ability.afModes).join(',')} ` +
+        `minFocusD=${slot.ability.minFocusDistanceDiopter}`);
       const device: camera.CameraDevice | undefined = findDeviceById(mgr, slot.logicId);
       if (device === undefined) {
         return 'gl camera failed: device gone';

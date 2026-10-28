@@ -261,6 +261,34 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
   本侧 `FrameRateFallback.ceilingFps` 无引擎调用方（H 批已登记无接线点），无可修点。
 - **回归**：pure-test 74 files / 775 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
 
+## 交付批（LENS：出厂默认镜头能力协商 + 起镜取证日志，2026-10-28）
+
+上游 `0525fa2`（默认镜头改能力协商）+ `9b33272` 的取证日志部分。追赶基线第二批。
+
+- **`core/LensSlot.ets`**：新增纯函数 `maxVideoPixels` + `pickCapabilityDefault`——用户从未
+  显式选过镜头时，默认打开**后摄里最大视频档最大的那颗**，不认档位标签（marble 形态：
+  HAL 把小底定焦头归进「广角」档、最大 1600x1200，旧口径首启即被钉在 720p）。前置一律
+  排除、并列取先见者（对齐 Kotlin maxByOrNull）、全空/全零返回 undefined 走既有链路。
+- **`camera/GlCameraEngine.start`**：默认链改 `pickCapabilityDefault(slots) ?? pickDefaultLens(slots)`
+  （slotKey 空串同缺省处理）；起镜补「slot key / 档位 / 等效焦距 / 最大视频档 / afModes /
+  minFocusD」一行取证日志（上游 9b33272 口径：ability.dump 的 label 只是档位名，同档位
+  多颗/归档存疑时只有这行能定位现场）。
+- **`ui/SettingsStore.ets`**：增 `lens_user_picked` 位 + `lens_key` 槽位键两键（对齐上游
+  LensPickPreference 语义：显式切换过一次后永久尊重用户选择，冷启恢复该槽位键，设备不在
+  了引擎再回能力默认；位丢失的最大代价只是退回能力默认）。
+- **`pages/Camera.ets`**：冷启 startKey = `lensUserPicked ? settings.lensKey : 能力默认`；
+  镜头胶囊显式切换即落「选过」位 + 槽位键并 persistSettings。
+- **守卫**：`test/pure/lens-capability-default.test.ets` 6 例（marble 形态不认标签/正常机型
+  行为不变/前置排除/并列先见/全空全零 undefined/maxVideoPixels）。
+- **登记（不迁/偏离）**：① `9b33272` 的「胶囊在场禁用」主体 **本侧结构性不适用**——上游
+  缺陷是「visibleEntries 摘除能力给不了的胶囊 + 其余条目钉在显式格子上 ⇒ 摘除即留洞」；
+  本侧 Dock 是固定 2×4 网格（镜头/画幅/帧率/变焦/快门/ISO/EV/WB/对焦九颗恒在场），
+  不存在按能力摘条目的路径，无洞可留。能力给不了的点击解释本侧已有：对焦定焦头弹层
+  （FC 批「range 缺失=定焦头只切模式注记」）、闪光不支持时 toggleFlash 落「该镜头不支持
+  闪光/常亮」状态行。② KitPreview/KitRecorder（Index/GlPreview 开发者探针页）默认链
+  维持 pickDefaultLens——探针页要的是「归档标签首颗」的确定性，不随本裁决改。
+- **回归**：pure-test 75 files / 781 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是
