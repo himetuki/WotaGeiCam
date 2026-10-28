@@ -32,7 +32,7 @@
 import {
   AeMode, AfMode, Flash, Rect, Size, Stabilize, TapPoint, WbPreset, WotaTag, WotaTiers
 } from '../core/Constants';
-import { CameraAbility, FpsPick, RangeI, RangeF, pickFpsRange } from '../core/CameraAbility';
+import { CameraAbility, FpsPick, RangeI, RangeF, pickFpsRange, pickHighSpeedFpsRange } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
 import { camera } from '@kit.CameraKit';
 import { Diag } from '../diag/Diag';
@@ -191,6 +191,18 @@ export interface SnapshotArgs {
   flash: Flash;
   stabilize: Stabilize;
   tapPoint: TapPoint | undefined;
+  /**
+   * 用户选的**帧率档位**（上游 2026-10-26 对齐）：帧周期与快门钳制的基准。
+   *
+   * 为什么不直接用 fps.lo：两个选档函数都只返回**包含目标**的区间（lo ≤ 目标恒成立），
+   * 而区间下界在可变高速档上会**低于**目标——vivo 的 50 → `[30,120]`，lo=30 ⇒ 帧周期
+   * 33.3ms > 50fps 的 20ms，快门梯因此放出一个「引擎必定被 HAL 压回」的死档。
+   * 「钳制吃范围下界」的裁决针对的是 [24,30] 选 24（lo==目标==24）；在 lo < 目标
+   * 的档上必须回到**目标档位**才与用户意图、与 core.shutterCeilingNs
+   * （WotaParams.applyAbility 一直按目标档算）同一条线。取 max 是防御：万一未来出现
+   * lo > 目标的选档（现在不可能），仍以较长帧周期为准不炸。
+   */
+  fpsTarget?: number;
 }
 
 export class Snapshot {
@@ -210,6 +222,8 @@ export class Snapshot {
   flash: Flash;
   stabilize: Stabilize;
   tapPoint: TapPoint | undefined;
+  /** 见 SnapshotArgs.fpsTarget；缺省 0 = 来源缺失，exposurePlan 走兜底链 */
+  fpsTarget: number;
 
   constructor(p: SnapshotArgs) {
     this.aeMode = p.aeMode;
@@ -228,6 +242,7 @@ export class Snapshot {
     this.flash = p.flash;
     this.stabilize = p.stabilize;
     this.tapPoint = p.tapPoint;
+    this.fpsTarget = p.fpsTarget ?? 0;
   }
 }
 
@@ -301,18 +316,17 @@ export function frameDurationNs(fps: number): number {
 
 /**
  * fps 档位 → 实际写入的范围。固定 [f,f] 优先（录像时间戳稳定的前提），无固定档时由 core 落
- * 「包含 f 且上界最大」的可变范围并标 exact=false；高帧率分支只接受 Range(f,f)。
- * 返回 undefined 表示设备没有任何范围覆盖 target（引擎上报高帧率失败并退档）。
+ * 「包含 f 且上界最大」的可变范围并标 exact=false；高速分支走 core 的 pickHighSpeedFpsRange
+ * （**只用机器声明过的区间**，下界贴目标者优先——绝不自造 [f,f]，上游 2026-10-26 口径）。
+ * 返回 undefined 表示设备没有任何范围覆盖 target（引擎按「本机做不到这一档」处理并明确失败，
+ * 不静默跑另一个帧率——那会让 params.fps 与成片 fps 不一致）。
  * OHOS 侧 FpsPick 仅留作 State/dump（预览档 profile 固定，不逐帧下发，登记）。
  */
 export function pickFps(ranges: Array<RangeI>, target: number, highSpeed: boolean): FpsPick | undefined {
   if (target <= 0) {
     return undefined;
   }
-  if (highSpeed) {
-    return new FpsPick(target, target, true);
-  }
-  return pickFpsRange(ranges, target);
+  return highSpeed ? pickHighSpeedFpsRange(ranges, target) : pickFpsRange(ranges, target);
 }
 
 /**
@@ -386,12 +400,17 @@ export class ExposurePlan {
 }
 
 /**
- * 曝光组键值计划（纯函数）。帧周期/快门钳制一律吃范围下界 fps=lo（无精确档设备上 [24,30]
- * 的 hi=30 会把强制 1/24 钳回 1/30）；manual 时 aeComp=0（AE 关闭下补偿无语义）。
+ * 曝光组键值计划（纯函数）。帧周期/快门钳制的基准 = **用户档位**（Snapshot.fpsTarget，
+ * 上游 2026-10-26 对齐）：普通档 [24,30] 选 24 时 lo==目标，行为与旧的「吃范围下界」一致；
+ * 可变高速档（vivo 50 → [30,120]，lo=30 < 目标 50）必须回到目标，否则帧周期 33.3ms
+ * 超过 50fps 的 20ms，快门梯放出一个必定被压回的死档。
+ * 兜底链：两个来源都拿不到（异常态）才退 HIGH_SPEED_FPS。
+ * manual 时 aeComp=0（AE 关闭下补偿无语义）。
  */
 export function exposurePlan(state: State, p: Snapshot): ExposurePlan {
   const manual: boolean = p.aeMode === AeMode.MANUAL;
-  const fps: number = p.fps !== undefined ? p.fps.lo : WotaTiers.HIGH_SPEED_FPS;
+  const fpsBase: number = Math.max(p.fpsTarget, p.fps !== undefined ? p.fps.lo : 0);
+  const fps: number = fpsBase > 0 ? fpsBase : WotaTiers.HIGH_SPEED_FPS;
   return new ExposurePlan({
     aeLock: !manual && p.aeMode === AeMode.LOCK,
     aeMode: manual ? AE_MODE_OFF : AE_MODE_ON,
@@ -406,7 +425,7 @@ export function exposurePlan(state: State, p: Snapshot): ExposurePlan {
   });
 }
 
-/** 从参数总线取一帧快照（StateFlow .value；fps 经 pickFps 落档） */
+/** 从参数总线取一帧快照（StateFlow .value；fps 经 pickFps 落档；fpsTarget = 用户档位，钳制基准） */
 export function snapshotOf(params: WotaParams, state: State): Snapshot {
   const fpsPick: FpsPick | undefined = pickFps(state.fpsRanges, params.fps.value.value, state.highSpeed);
   return new Snapshot({
@@ -415,6 +434,7 @@ export function snapshotOf(params: WotaParams, state: State): Snapshot {
     shutterNs: params.shutter.value.value,
     evSteps: params.ev.value.value,
     fps: fpsPick,
+    fpsTarget: params.fps.value.value,
     afMode: params.afMode.value,
     focusLocked: params.focusLocked.value,
     focusLockPoint: params.focusLockPoint.value,

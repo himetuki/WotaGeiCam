@@ -226,6 +226,41 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 锚点 diff（ClipExport.kt / PlayerEngine.kt）两项均属 f941799，已按 N/A 登记（无 pendingUri
 救援模型 / 无阻塞帧率探测）。
 
+## 交付批（FPS：帧率档位决议面统一出口 + 钳制基准目标档，2026-10-28）
+
+上游 `74d4fb2`（档位可用性按普通∪高速并集判定）+ `313e8e6`（帧周期/快门钳制基准改为
+目标档位）+ `2f30ad5` 的 decideFps 边界用例。追赶基线 4998ce4 → 9cc36c5 的第一批。
+
+- **`core/CameraAbility.ets`**：补齐上游 2026-10-26 决议面全家——`pickHighSpeedFpsRange`
+  （高速表专用选档：固定档优先 → 下界==目标里上界最小 → 覆盖目标里上界最小；**只用机器
+  声明过的区间，绝不自造 [f,f]**——自造区间必被拒且无退路 ⇒ 取景器假死，上游 P1）、
+  `fpsRangesUnion` / `needsHighSpeedFps`（模块级纯函数）+ `FpsDecision` + `decideFps`
+  （一档的完整决议：普通表先来、覆盖不了才看高速表、两张都不覆盖 = 灰显不硬发），类方法
+  `fpsRangesUnion(size)` / `needsHighSpeed(size, fps)` / `decideFps(size, fps)` 按尺寸分流。
+- **`core/WotaParams.ets`** `applyAbility`：帧率落档改走 `a.decideFps(size, targetFps)`
+  ——与 UI 可用性/※、会话选择、下发钳制**四处同源**，不再各写一份（「界面说可选、
+  请求发的是非法值」那类分叉的根治）。两表都不覆盖维持 `inexactDisabled`（灰显）。
+- **`camera/RequestApplier.ets`**：① `pickFps` 高速分支不再自造 `FpsPick(target,target,true)`，
+  改走 `pickHighSpeedFpsRange`；② `Snapshot` 增 `fpsTarget`（用户档位，snapshotOf 传总线
+  档位值）；③ `exposurePlan` 帧周期/快门钳制基准 = `max(fpsTarget, fps.lo)`——普通档
+  [24,30] 选 24 时 lo==目标行为不变（r10 锚），可变高速档（vivo 50 → [30,120]，lo=30）
+  必须回到目标 50，否则帧周期 33.3ms > 20ms 放出死档；两个来源全缺才退 HIGH_SPEED_FPS。
+- **`ui/ParamPills.ets`** ShutterPill：`fpsHi = max(pick.lo, 目标档)`，与引擎同一条线
+  （此前 UI 梯与引擎在可变档上互相矛盾）。
+- **`camera/KitPreview.applyParams` + `camera/GlCameraEngine.applyParams`**：会话
+  highSpeed 判据改 `ability.needsHighSpeed(size, fps)`（普通表先来），不按「档位数值 > 30」
+  猜——厂商把 50/60 放普通表时不该被当成高速会话。
+- **守卫**：`test/pure/fps-decision.test.ets` 13 例——vivo V2520A fixtures（普通流仅
+  [24,24]/[30,30] + 高速 1080p 六区间）全表：并集可选性/精确性口径/needsHighSpeed 判定/
+  决议与下发同支/两表同覆盖必选普通/固定档恒优先/边界 0·负·空表；帧基准 3 例（50→[30,120]
+  帧周期 1/50、1/30 被钳回 1/50、[24,30] 选 24 的 r10 回归锚）+ 兜底链。
+- **登记（不迁/留白）**：① **UI 高帧率档位（50/60/120/240）本侧无消费方**——取景引擎是
+  PhotoSession（预览无 setFrameRate 面），录制帧率只落在编码器/muxer profile；没有
+  `VideoOutput.setFrameRate` / `VideoSession.setFrameRateRange` 接线前开 UI 档也不能真值
+  下发（能力协商而非能力假设），随平台面批；② `0f713a2`（退档兜底不再退化到高速表）N/A——
+  本侧 `FrameRateFallback.ceilingFps` 无引擎调用方（H 批已登记无接线点），无可修点。
+- **回归**：pure-test 74 files / 775 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

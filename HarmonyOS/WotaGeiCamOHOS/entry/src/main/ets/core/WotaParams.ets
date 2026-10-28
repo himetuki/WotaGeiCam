@@ -11,7 +11,7 @@ import {
   AeMode, AfMode, AfModes, ArcMergeDeadband, Flash, FrameEffect,
   PeakingColor, RenderMode, Stabilize, TapPoint, WotaTiers, WbPreset, WbPresets, Size
 } from './Constants';
-import { CameraAbility, FpsPick, RangeF, shutterCeilingNs, pickFpsRange } from './CameraAbility';
+import { CameraAbility, FpsDecision, RangeF, shutterCeilingNs } from './CameraAbility';
 import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
 import { resolveSizeFor, sizeCloseTo, VideoSizeCandidates } from './VideoSizePicker';
@@ -172,11 +172,12 @@ export class WotaParams {
     // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
     this.applySize(a);
     const targetFps: number = Math.max(1, this.fps.value.value);
-    const highSpeed: boolean = targetFps > WotaTiers.HIGH_SPEED_FPS;
-    const pick: FpsPick | undefined = pickFpsRange(a.fpsRangesFor(this.size.value, highSpeed), targetFps);
-    this.fps.value = pick === undefined
+    // 一档的完整决议交给 core.decideFps（普通表先来、覆盖不了才看高速表）——UI 的可用性/※、
+    // 总线落档、会话选择（KitPreview）与下发钳制四处同源，不再各写一份（上游 2026-10-26 口径）。
+    const decision: FpsDecision | undefined = a.decideFps(this.size.value, targetFps);
+    this.fps.value = decision === undefined
       ? ParamState.inexactDisabled(targetFps)
-      : ParamState.ofRange(targetFps, pick.lo, pick.hi, pick.exact);
+      : ParamState.ofRange(targetFps, decision.pick.lo, decision.pick.hi, decision.pick.exact);
 
     // 快门上限吃「实际生效的帧周期上界」= pick 到的 hi（无固定 [f,f] 时是设备的可变范围上界），
     // 不是用户档位本身：否则用户选 24fps、设备只给 [15,30]（非精确）时，列表会按 1/24 判可选，

@@ -16,7 +16,7 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag, WotaTiers } from '../core/Constants';
+import { Size, WotaTag } from '../core/Constants';
 import { LensSlot } from '../core/LensSlot';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
@@ -158,7 +158,9 @@ export class PreviewEngine {
       // 会话实际口径：size 用本会话选中的预览尺寸，fps 用同尺寸视频档 max（预览 profile 无 fps 字段）
       const effectiveSize: Size = this.chosenSize ?? params.size.value;
       const effectiveFps: number = this.sessionFpsMax > 0 ? this.sessionFpsMax : params.fps.value.value;
-      const highSpeed: boolean = effectiveFps > WotaTiers.HIGH_SPEED_FPS;
+      // highSpeed 判据与总线落档/下发钳制同源（core.needsHighSpeed：普通表先来、覆盖不了才看高速表），
+      // 不再按「档位数值 > 30」猜——厂商把 50/60 放在普通表时不该被当成高速会话（上游 2026-10-26 口径）
+      const highSpeed: boolean = this.refinedAbility.needsHighSpeed(effectiveSize, effectiveFps);
       const state: State = stateOf(
         this.refinedAbility, effectiveSize, highSpeed, this.refinedAbility.evStep);
       const report: ApplyReport = applySnapshot(this.session, state, snapshotOf(params, state));

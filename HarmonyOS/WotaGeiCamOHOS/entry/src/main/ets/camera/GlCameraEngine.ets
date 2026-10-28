@@ -12,7 +12,7 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag, WotaTiers } from '../core/Constants';
+import { Size, WotaTag } from '../core/Constants';
 import { CameraAbility } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
 import { LensSlot, LensType } from '../core/LensSlot';
@@ -284,7 +284,9 @@ export class GlCameraEngine {
     try {
       const size: Size = this.chosenSize ?? params.size.value;
       const fps: number = params.fps.value.value;
-      const highSpeed: boolean = fps > WotaTiers.HIGH_SPEED_FPS;
+      // highSpeed 判据与总线落档/下发钳制同源（core.needsHighSpeed：普通表先来、覆盖不了才看
+      // 高速表），不按「档位数值 > 30」猜（上游 2026-10-26 口径，与 KitPreview.applyParams 一致）
+      const highSpeed: boolean = ability.needsHighSpeed(size, fps);
       const state: State = stateOf(ability, size, highSpeed, ability.evStep);
       return applySnapshot(session, state, snapshotOf(params, state));
     } catch (e) {
