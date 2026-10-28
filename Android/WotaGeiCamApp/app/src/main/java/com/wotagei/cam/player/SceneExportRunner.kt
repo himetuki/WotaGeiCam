@@ -50,7 +50,9 @@ class SceneExportRunner(private val ctx: Context) {
      * 保留 pending 行待冷启救援，UI 要报"导出完成但未收录"）；MUXER = 没写成，pending 行已删
      * （UI 报普通失败）。混成一个会让后者对用户撒"重启后自动恢复"的谎。
      */
-    enum class Reason { RANGE, NO_EFFECT, OPEN, DECODER, ENCODER, GL, MUXER, COMMIT, TIMEOUT, CANCELLED }
+    // 没有 CANCELLED：取消在 export() 的 catch (CancellationException) 里清场后原样重抛，
+    // 永远不会变成 Failed（映射成失败值反而会吞掉协程取消）；别把它加回来
+    enum class Reason { RANGE, NO_EFFECT, OPEN, DECODER, ENCODER, GL, MUXER, COMMIT, TIMEOUT }
 
     suspend fun export(
         src: VideoClip,
