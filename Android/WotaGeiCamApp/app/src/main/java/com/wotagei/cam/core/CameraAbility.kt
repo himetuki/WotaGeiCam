@@ -95,7 +95,14 @@ data class CameraAbility(
      * 在能力表里、`getKeys()` 按名字就能拿到。空集合 = 拿不到（隐藏键被裁/LEGACY）⇒ 手动档
      * 按不可用处理——与"增益不被采纳"的实际行为一致。
      */
-    val colorCorrectionModes: Set<Int> = emptySet()
+    val colorCorrectionModes: Set<Int> = emptySet(),
+    /**
+     * `android.sensor.neutralColorPoint`（R,G,B 三元素，Rational 已转 float；2026-10-28 白平衡取证，
+     * docs/plan/28 §2.4-4 判读表第 4 条）：本机 raw 空间的中性白点——B3 相对模型的 CCT 换算入口。
+     * **隐藏键**，读取见 [companion neutralPointOf]；null = 键被剥/缺报（判读按「无」走 gains 反解），
+     * 不因为一个调试键炸掉整份能力收集。
+     */
+    val neutralColorPoint: FloatArray? = null
 ) {
     /** LEGACY 设备无逐帧控制/无 ZOOM_RATIO，UI 顶部要提示能力受限 */
     fun isLegacy(): Boolean = hardwareLevel == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
@@ -166,7 +173,8 @@ data class CameraAbility(
         Log.i(tag, "ability[$label] iso=$iso exposureNs=$exposureNs ev=$evRange evStep=$evStep" +
             " minFocusD=$minFocusDistanceDiopter zoomRatio=$zoomRatioRange maxDigital=$maxDigitalZoom")
         Log.i(tag, "ability[$label] afModes=$afModes awbModes=$awbModes flash=$flashAvailable" +
-            " regionsAf=$maxRegionsAf regionsAe=$maxRegionsAe ois=$oisAvailable eis=$eisAvailable")
+            " regionsAf=$maxRegionsAf regionsAe=$maxRegionsAe ois=$oisAvailable eis=$eisAvailable" +
+            " neutral=${WbTelemetry.formatNeutralPoint(neutralColorPoint)}")
         // 画面降噪的**唯一能力依据**（2026-10-26）：0=OFF 1=FAST 2=HIGH_QUALITY 4=ZERO_SHUTTER_LAG。
         // 面板"HAL 快速/HAL 高质量"能不能选、下发会不会被 RequestApplier 拦掉，都只看这一行；
         // 空集合 = 未声明 ⇒ 两档都必须灰显（判"用户说开了却没效果"时先核这里）
@@ -265,11 +273,25 @@ data class CameraAbility(
                 availableSurfaceFormats = tryOrNull { map?.outputFormats } ?: IntArray(0),
                 previewSizes = previewSizes,
                 noiseReductionModes = noiseReductionModes,
-                colorCorrectionModes = colorCorrectionModes
+                colorCorrectionModes = colorCorrectionModes,
+                neutralColorPoint = neutralPointOf(cc)
             )
         }
 
         private inline fun <T> tryOrNull(block: () -> T): T? = try { block() } catch (e: Throwable) { null }
+
+        /**
+         * `android.sensor.neutralColorPoint`（中性白点，R,G,B 三个 Rational；2026-10-28 白平衡取证）。
+         * **隐藏键**——公开桩里没有（android-34 实测无 SENSOR_NEUTRAL_COLOR_POINT 常量，
+         * 与 colorCorrection.availableModes 同一批），只能按名反射读；键不在 keys 里（部分 OEM
+         * 剥隐藏键）或抛异常都返回 null = 判读表里的「无」，走 gains 反解路径，不假装有数。
+         */
+        private fun neutralPointOf(cc: CameraCharacteristics): FloatArray? = tryOrNull {
+            @Suppress("UNCHECKED_CAST")
+            val key = cc.keys.firstOrNull { it.name == "android.sensor.neutralColorPoint" }
+                as? CameraCharacteristics.Key<Array<android.util.Rational>>
+            key?.let { cc.get(it) }
+        }?.takeIf { it.size >= 3 }?.let { pts -> FloatArray(3) { pts[it].toFloat() } }
 
         private fun sizesOf(
             map: StreamConfigurationMap?,

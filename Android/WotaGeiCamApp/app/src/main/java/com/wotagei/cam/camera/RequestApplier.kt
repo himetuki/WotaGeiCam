@@ -255,6 +255,17 @@ object RequestApplier {
     }
 
     /**
+     * 手动档增益的**纯口径**（下发与遥测同源，28 §2.4-2 的 request 一侧）：
+     * 色温 + tint → 单位域 [R,G,B]。与 [rggbFromRgb255] 用同一组数——绿通道均分两半
+     * 是 RggbChannelVector 的摆法，遥测只关心三通道比例，这里不再构造 android 类型
+     * （构造器 JVM 单测起不来）。
+     */
+    fun manualGains(kelvin: Int, tint: Int): FloatArray {
+        val rgb = kelvinTintToRgb255(kelvin, tint)
+        return floatArrayOf(gain255ToUnit(rgb[0]), gain255ToUnit(rgb[1]), gain255ToUnit(rgb[2]))
+    }
+
+    /**
      * 归一化点按坐标 → 传感器坐标的 1000×1000 框（换算式：x' = x×arrayW − 半框宽，再 clamp）。
      * TapPoint 的 x/y 已是 [0,1] 且按 sensorOrientation 摆正，所以这里不再除预览尺寸。
      * 返回 left/top/right/bottom。

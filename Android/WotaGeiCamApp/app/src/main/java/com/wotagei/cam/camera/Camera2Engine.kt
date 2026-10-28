@@ -26,6 +26,7 @@ import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.ParamState
 import com.wotagei.cam.core.RangeI
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.core.WbTelemetry
 import com.wotagei.cam.core.Size
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
@@ -957,7 +958,9 @@ class Camera2Engine(
             result: TotalCaptureResult
         ) {
             logAeAfTelemetry(result)
-            if (!RequestApplier.isManualWhiteBalance(params.wbMode.value)) {
+            val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
+            logWbTelemetry(result, manual)
+            if (!manual) {
                 wbProbeFails = 0
                 return
             }
@@ -1022,6 +1025,68 @@ class Camera2Engine(
                 " lensFocus=${runCatching { result.get(android.hardware.camera2.CaptureResult.LENS_FOCUS_DISTANCE) }.getOrNull()}"
         )
     }
+
+    // ------------------------------------------------- 白平衡取证遥测（28 §2.4 批次 1）
+
+    /** AUTO 档快照节流：1s 一拍（与 3A 遥测同节奏），d 级——详细档才输出，常态零刷屏 */
+    private val WB_AUTO_TELEMETRY_MS = 1_000L
+
+    /** MANUAL 档对比节流：2s 一拍，i 级——用户停留手动档才有输出，且这是 B3 前最重要的取证行 */
+    private val WB_MANUAL_TELEMETRY_MS = 2_000L
+
+    private var lastWbAutoTelemetryMs = 0L
+    private var lastWbManualTelemetryMs = 0L
+
+    /**
+     * 白平衡取证遥测（28 §2.4；判读表见 core/WbTelemetry 的 KDoc）：
+     * - AUTO：回报 gains / CCM / AWB 状态——「中性增益在哪、R1 是否成立」的实据；
+     * - MANUAL：请求 gains（下发侧纯口径 [RequestApplier.manualGains]）vs 回报 gains + 采纳判据
+     *   ——「HAL 是否覆盖增益」的实据（TRANSFORM_MATRIX 回报对不代表增益被采纳）。
+     * 所有键 runCatching 读取；格式化交给 [WbTelemetry]（JVM 单测覆盖）。
+     */
+    private fun logWbTelemetry(result: TotalCaptureResult, manual: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        if (manual) {
+            if (now - lastWbManualTelemetryMs < WB_MANUAL_TELEMETRY_MS) return
+            lastWbManualTelemetryMs = now
+            val request = RequestApplier.manualGains(params.kelvin.value.value, params.tint.value.value)
+            val reported = gainsOf(result)
+            val adopted = WbTelemetry.gainsAdopted(request, reported)
+            Log.i(
+                TAG,
+                "WB遥测[manual] 请求=${WbTelemetry.formatGains(request)} 回报=${WbTelemetry.formatGains(reported)}" +
+                    " 采纳=${if (adopted) "是" else "否（HAL 覆盖/未采纳）"}" +
+                    " ccm=${WbTelemetry.formatTransform9(transform9Of(result))}" +
+                    " awbState=${runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE) }.getOrNull()}"
+            )
+        } else {
+            if (now - lastWbAutoTelemetryMs < WB_AUTO_TELEMETRY_MS) return
+            lastWbAutoTelemetryMs = now
+            val gains = gainsOf(result)
+            Log.d(
+                TAG,
+                "WB遥测[auto] gains=${WbTelemetry.formatGains(gains)} 比值=${WbTelemetry.formatGainsRatios(gains)}" +
+                    " ccm=${WbTelemetry.formatTransform9(transform9Of(result))}" +
+                    " awbState=${runCatching { result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE) }.getOrNull()}"
+            )
+        }
+    }
+
+    /** `COLOR_CORRECTION_GAINS`（RggbChannelVector）→ [R,G,B]；缺报/异常按「无」处理（保持花括号体：守卫按函数体定位） */
+    private fun gainsOf(result: TotalCaptureResult): FloatArray? {
+        return runCatching {
+            val v = result.get(android.hardware.camera2.CaptureResult.COLOR_CORRECTION_GAINS)
+                ?: return@runCatching null
+            floatArrayOf(v.red, v.greenEven, v.blue)
+        }.getOrNull()
+    }
+
+    /** `COLOR_CORRECTION_TRANSFORM` → 行优先 9 元素；缺报/异常都按「无」处理 */
+    private fun transform9Of(result: TotalCaptureResult): FloatArray? = runCatching {
+        val t = result.get(android.hardware.camera2.CaptureResult.COLOR_CORRECTION_TRANSFORM)
+            ?: return@runCatching null
+        FloatArray(9) { idx -> t.getElement(idx % 3, idx / 3).toFloat() }
+    }.getOrNull()
 
     // ------------------------------------------------- fps 选择与钳制
 
