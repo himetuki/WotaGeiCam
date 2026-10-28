@@ -9,7 +9,7 @@
  *   （上游 fpsRangesFor 本来就是这么写的，语义一致）。
  */
 import { Diag } from '../diag/Diag';
-import { Rect, Size, WotaTag, WotaTiers } from './Constants';
+import { Rect, Size, WotaTag, WotaTiers, WbPreset } from './Constants';
 import { VideoSizeCandidates, aspectOf, sizeCloseTo } from './VideoSizePicker';
 
 /** 整数能力范围；缺失能力用 CLOSED 标记，不伪造范围（02 文件第 4 节） */
@@ -156,6 +156,17 @@ export class CameraAbility {
   /** 手动曝光三件套里的 ISO+快门是否可用（能力表未给范围即不可手动） */
   manualExposurePossible(): boolean {
     return this.iso.ok() && this.exposureNs.ok();
+  }
+
+  /**
+   * 手动白平衡（色温轴）在本机是否真能生效（上游 ab73ebf/ee9aa0e 口径的 OHOS 对应）：
+   * 契约前提是会话探测表里**声明了 MANUAL 档**（KitAbility 会话期经
+   * isWhiteBalanceModeSupported 逐档探测后映射回 awbModes——运行时探测，不是能力假设）。
+   * 空集合 = 未探测/旧路径拿不到（无法判定）⇒ 视为可用，保持既有行为
+   * （不因「查不到」把用户已选的手动档弹掉）。
+   */
+  manualWhiteBalancePossible(): boolean {
+    return this.awbModes.size === 0 || this.awbModes.has(WbPreset.MANUAL as number);
   }
 
   /**

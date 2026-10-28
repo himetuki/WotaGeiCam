@@ -366,11 +366,14 @@ export struct WbPillPopup {
       this.kelvinHi = range.hi;
     }
     this.ladder = kelvinLadder(this.kelvinLo, this.kelvinHi);
-    // 能力未知（ability undefined）时预设按可选处理（上游 awbModes?.contains != false 同义）
+    // 能力未知（ability undefined）时预设按可选处理（上游 awbModes?.contains != false 同义）；
+    // MANUAL 例外（2026-10-28 对齐 ab73ebf/ee9aa0e）：**必须经 manualWhiteBalancePossible 探测**
+    // ——设备不声明手动档就不再摆可点选项（点了会下发被拒/错误状态），灰显 + 点不动。
     const options: Array<PillOption> = [];
     for (const p of WbPresets.ALL) {
-      const supported: boolean = p === WbPreset.MANUAL || this.ability === undefined ||
-        this.ability.awbModes.has(WbPresets.awbMode(p));
+      const supported: boolean = p === WbPreset.MANUAL
+        ? this.ability === undefined || this.ability.manualWhiteBalancePossible()
+        : this.ability === undefined || this.ability.awbModes.has(WbPresets.awbMode(p));
       options.push(new PillOption(p as number, wbLabel(p), supported));
     }
     this.wbOptions = options;
@@ -435,6 +438,8 @@ export struct FocusPillPopup {
   onApply: () => void = (): void => {};
   /** FL：锁定/解除开关（宿主页过闸后落总线；缺省空实现防漏挂——但接线守卫会点名） */
   onToggleLock: () => void = (): void => {};
+  /** 切入手动档的一次性提示钩子（上游 4457e4a 方案G 最小形态：宿主页提示开峰值辅助） */
+  onManualSelected: () => void = (): void => {};
   @State afMode: AfMode = AfMode.CONTINUOUS_VIDEO;
   @State diopter: number = 0;
   private lo: number = 0;
@@ -473,8 +478,12 @@ export struct FocusPillPopup {
         active: this.editable,
         onPick: (opt: PillOption): void => {
           const next: AfMode = opt.value as AfMode;
+          const enteredManual: boolean = next === AfMode.MANUAL && this.afMode !== AfMode.MANUAL;
           this.afMode = next;
           this.params.afMode.value = next;
+          if (enteredManual) {
+            this.onManualSelected();
+          }
           this.onApply();
         }
       })

@@ -267,10 +267,24 @@ export class WotaParams {
   }
 
   private applyWhiteBalance(a: CameraAbility): void {
+    // 手动档门控（上游 ab73ebf/ee9aa0e 口径，2026-10-28 修）：探测表里没有 MANUAL 时**绝不
+    // 落到手动档**——旧兜底 `?? WbPreset.MANUAL` 会把总线钉到设备不支持的档上（能力假设），
+    // 下发 setWhiteBalanceMode(MANUAL) 被拒或落在错误状态。能力未知（空表）时保持既有行为。
+    const manualPossible: boolean = a.manualWhiteBalancePossible();
     if (a.awbModes.size > 0 && !a.awbModes.has(WbPresets.awbMode(this.wbMode.value))) {
-      const fallback: WbPreset | undefined = WbPresets.ALL.find(
+      const fallback: WbPreset | undefined = manualPossible
+        ? WbPresets.ALL.find((p: WbPreset): boolean => a.awbModes.has(WbPresets.awbMode(p)))
+        : WbPresets.ALL.find(
+          (p: WbPreset): boolean => p !== WbPreset.MANUAL && a.awbModes.has(WbPresets.awbMode(p)));
+      this.wbMode.value = fallback ?? (manualPossible ? WbPreset.MANUAL : WbPreset.AUTO);
+    }
+    if (this.wbMode.value === WbPreset.MANUAL && !manualPossible) {
+      // 当前已选手动但本机不可能生效（探测表在且无 MANUAL）：降到第一个受支持预设
+      const demote: WbPreset | undefined = WbPresets.ALL.find(
         (p: WbPreset): boolean => p !== WbPreset.MANUAL && a.awbModes.has(WbPresets.awbMode(p)));
-      this.wbMode.value = fallback ?? WbPreset.MANUAL;
+      if (demote !== undefined) {
+        this.wbMode.value = demote;
+      }
     }
     // 色温/色调是产品滑杆域（双轴插值），不随机型变化
     this.kelvin.value = ParamState.ofRange(

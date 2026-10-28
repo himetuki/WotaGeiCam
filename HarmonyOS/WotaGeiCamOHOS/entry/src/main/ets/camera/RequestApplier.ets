@@ -107,6 +107,8 @@ export interface StateArgs {
   evStep: number;
   /** OHOS 会话对焦距离能力探针（isFocusDistanceSupported，API24）：true 才下发 setFocusDistance */
   focusDistanceSupported: boolean;
+  /** 手动白平衡探测（manualWhiteBalancePossible）：false 时 apply 对 MANUAL 档 skip 不硬发 */
+  wbManualSupported: boolean;
 }
 
 export class State {
@@ -131,6 +133,7 @@ export class State {
   eisBlockedBySize: boolean;
   evStep: number;
   focusDistanceSupported: boolean;
+  wbManualSupported: boolean;
 
   constructor(state: StateArgs) {
     this.activeArray = state.activeArray;
@@ -154,6 +157,7 @@ export class State {
     this.eisBlockedBySize = state.eisBlockedBySize;
     this.evStep = state.evStep;
     this.focusDistanceSupported = state.focusDistanceSupported;
+    this.wbManualSupported = state.wbManualSupported;
   }
 
   /** 能力缺失时 RangeI 是 closed(0..0)，不能拿它去 coerce，否则会把 ISO 压成 0 */
@@ -277,7 +281,8 @@ export function stateOf(ability: CameraAbility, size: Size, highSpeed: boolean, 
     highSpeed: highSpeed,
     eisBlockedBySize: longEdge >= EIS_BLOCK_LONG_EDGE && shortEdge >= EIS_BLOCK_SHORT_EDGE,
     evStep: evStep,
-    focusDistanceSupported: ability.focusDistanceSupported === true
+    focusDistanceSupported: ability.focusDistanceSupported === true,
+    wbManualSupported: ability.manualWhiteBalancePossible()
   });
 }
 
@@ -620,19 +625,24 @@ export function applySnapshot(session: camera.PhotoSession, state: State, p: Sna
   }
 
   // 4. 白平衡：MANUAL → 模式与色温分两个 try（半状态在报告里可辨）；否则预设档。
-  // tint 无 OHOS 等价（skipped 自曝）
+  // tint 无 OHOS 等价（skipped 自曝）。MANUAL 先过探测门（ab73ebf/ee9aa0e 口径）：
+  // 设备没声明手动档就不硬发（总线侧已由 applyWhiteBalance 降档，这里是防御纵深）。
   if (p.wbPreset === WbPreset.MANUAL) {
-    try {
-      session.setWhiteBalanceMode(camera.WhiteBalanceMode.MANUAL);
-      report.applied.push('whiteBalanceMode(MANUAL)');
-    } catch (e) {
-      report.failed.push(`whiteBalanceMode(${e})`);
-    }
-    try {
-      session.setWhiteBalance(p.kelvin);
-      report.applied.push('whiteBalanceKelvin');
-    } catch (e) {
-      report.failed.push(`whiteBalanceKelvin(${e})`);
+    if (!state.wbManualSupported) {
+      report.skipped.push('whiteBalanceManual: mode unsupported by device probe');
+    } else {
+      try {
+        session.setWhiteBalanceMode(camera.WhiteBalanceMode.MANUAL);
+        report.applied.push('whiteBalanceMode(MANUAL)');
+      } catch (e) {
+        report.failed.push(`whiteBalanceMode(${e})`);
+      }
+      try {
+        session.setWhiteBalance(p.kelvin);
+        report.applied.push('whiteBalanceKelvin');
+      } catch (e) {
+        report.failed.push(`whiteBalanceKelvin(${e})`);
+      }
     }
   } else {
     try {

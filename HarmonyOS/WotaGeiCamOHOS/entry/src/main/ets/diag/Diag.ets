@@ -5,9 +5,10 @@
  * 丢最老并自曝、环形缓冲 3000 行、单件 512KB × 留 3、导出 2MB 预算。
  *
  * 与上游的有意偏离（六条决策，登记）：
- * 1. hilog 恒写双通道：上游装 Diag 后只写文件（EMUI 容器 logcat 不可见是病根）；
- *    OHOS hilog 可见且是当前主要取证通道，故 record() 恒写 hilog（既有调用点行为不变、
- *    零改动），文件侧才走开关门。
+ * 1. hilog 恒写双通道（i/w/e）：上游装 Diag 后只写文件（EMUI 容器 logcat 不可见是病根）；
+ *    OHOS hilog 可见且是当前主要取证通道，故 record() 对 i/w/e 恒写 hilog，文件侧才走开关门。
+ *    2026-10-28 对齐上游 eefccc9 拆闸：**d/v 收详细档**（逐帧日志会把系统 hilog 环形缓冲
+ *    冲掉）——「恒写取证通道」与「磁盘占用」解耦，但「别冲掉系统缓冲」仍是硬约束。
  * 2. 无独立写盘线程：Thread+writerLoop → setInterval(cb, 1000)，写盘用 fs 同步 API
  *    （每秒 ≤500 行量级可接受；单线程事件循环内同步批写天然无并发交错，clear/export
  *    无需等在途批）。后台杀定时器只影响落盘时延，pending 封顶兜底（与上游写盘线程
@@ -40,9 +41,9 @@ import { fileIo } from '@kit.CoreFileKit';
 import {
   DIAG_RING_LINES, DIAG_PENDING_MAX_LINES, DIAG_FILE_KEEP, DIAG_EXPORT_MAX_BYTES,
   DIAG_CRASH_TAIL_LINES, FRAME_ACCOUNT_MAX_LINES, BASE_NAME, CRASH_PREFIX, EXPORT_DIR_NAME,
-  LOG_DIR_NAME, diagStamp, diagFileStamp, diagLine, diagRecordGated, diagShouldRotate,
-  diagPendingOverflow, diagRotatedName, diagExportName, diagCrashName, diagDroppedNote,
-  diagFrameAccountSection, diagHeader, diagClearLogNames
+  LOG_DIR_NAME, diagStamp, diagFileStamp, diagLine, diagRecordGated, diagLevelEnabled,
+  diagShouldRotate, diagPendingOverflow, diagRotatedName, diagExportName, diagCrashName,
+  diagDroppedNote, diagFrameAccountSection, diagHeader, diagClearLogNames
 } from './DiagPure';
 
 /** 导出结果：文件路径 + 是否落在公共可见目录（本批恒 false = 应用私有目录）+ 导出件字节数 */
@@ -174,8 +175,10 @@ export class Diag {
   }
 
   /**
-   * 记录动作不许影响主流程：全程 try/catch 吞。恒写 hilog（决策 1），文件侧才走开关门；
-   * 门控次序钉死为先总开关后级别（diagRecordGated）；未 install 只走 hilog（=上游「未装只走系统日志」）。
+   * 记录动作不许影响主流程：全程 try/catch 吞。hilog 通道 i/w/e **恒写**（取证通道与磁盘占用
+   * 解耦，对齐上游 eefccc9 拆闸——真机排查不能再被「总开关默认关」卡死）；**d/v 仍受详细档**
+   * （逐帧日志会把系统 hilog 环形缓冲冲掉，反而看不到关键事件）；文件落盘仍走总开关门
+   * （diagRecordGated，先总开关后级别的次序钉死）；崩溃件不走这里（同步直写，取证语义）。
    */
   private static record(level: string, tag: string, msg: string, err?: Error): void {
     try {
@@ -186,8 +189,8 @@ export class Diag {
         hilog.warn(0x0000, tag, '%{public}s', msgFull);
       } else if (level === 'I') {
         hilog.info(0x0000, tag, '%{public}s', msgFull);
-      } else {
-        hilog.debug(0x0000, tag, '%{public}s', msgFull); // V/D 同走 debug（既有 d 的行为照搬）
+      } else if (diagLevelEnabled(level, Diag.verbose)) {
+        hilog.debug(0x0000, tag, '%{public}s', msgFull); // V/D 同走 debug；受详细档（不冲系统缓冲）
       }
       if (diagRecordGated(level, Diag.enabled, Diag.verbose)) {
         return;

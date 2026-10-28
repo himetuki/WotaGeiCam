@@ -2519,6 +2519,13 @@ struct CameraPage {
           },
           onToggleLock: (): void => {
             this.toggleFocusLock();
+          },
+          onManualSelected: (): void => {
+            // 切手动对焦的一次性提示（上游 4457e4a 方案G 最小形态）：峰值还没开才提，
+            // 已开则不打扰（effect 3=峰值，labels=['直通','曲线','斑马','峰值']）
+            if (this.settings.effect !== 3) {
+              this.message = '手动对焦建议开「峰值」辅助（更多面板）';
+            }
           }
         })
       }

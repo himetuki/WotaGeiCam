@@ -151,7 +151,7 @@ function stateHs(): State {
     maxRegionsAf: 1, maxRegionsAe: 1,
     manualFocusMaxDiopter: 10, zoomMin: 1, zoomMax: 8,
     useZoomRatio: false, flashAvailable: true, oisAvailable: true, eisAvailable: true,
-    highSpeed: true, eisBlockedBySize: false, evStep: 0, focusDistanceSupported: false
+    highSpeed: true, eisBlockedBySize: false, evStep: 0, focusDistanceSupported: false, wbManualSupported: true
   });
 }
 
@@ -190,7 +190,7 @@ test('普通档选下界回归锚_r10意图不变', () => {
     maxRegionsAf: 1, maxRegionsAe: 1,
     manualFocusMaxDiopter: 10, zoomMin: 1, zoomMax: 8,
     useZoomRatio: false, flashAvailable: true, oisAvailable: true, eisAvailable: true,
-    highSpeed: false, eisBlockedBySize: false, evStep: 0, focusDistanceSupported: false
+    highSpeed: false, eisBlockedBySize: false, evStep: 0, focusDistanceSupported: false, wbManualSupported: true
   });
   const snap = new Snapshot({
     aeMode: AeMode.MANUAL, iso: 800, shutterNs: 41_666_666, evSteps: 0,

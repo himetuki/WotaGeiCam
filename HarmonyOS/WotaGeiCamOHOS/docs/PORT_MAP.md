@@ -323,6 +323,46 @@ update/bt）：偏离面收敛为 Gallery(30)/Player(47)/Compare(30)/Camera(2) �
 - **回归**：pure-test 76 files / 785 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL
   （libentry.so 已含新槽代码）。
 
+## 交付批（WB3A：手动白平衡探测门控 + diag 拆闸 + AF 遥测，2026-10-28）
+
+上游 `ab73ebf` + `ee9aa0e`（WB 门控/运行时探测）+ `eefccc9`（日志通道拆闸）+ `4457e4a`
+（AE/AF 遥测 + 峰值提示）。追赶基线第四批。**含本侧三处真实缺陷修复**（同根：手动档
+「能不能用」没走运行时探测）：① `WotaParams.applyWhiteBalance` 兜底 `?? WbPreset.MANUAL`
+会把总线钉到设备探测表里没有的档；② `WbPillPopup` 的 MANUAL 选项被 `p === WbPreset.MANUAL ||`
+短路恒可选；③ apply 对 MANUAL 无探测守卫。
+
+- **`core/CameraAbility.ets`**：新增 `manualWhiteBalancePossible()`——探测表声明 MANUAL 才可用；
+  空表（未探测/无法判定）视为可用，不因「查不到」弹掉用户已选手动档（上游口径逐字）。
+  探测产物本身已在本侧（KitAbility 会话期 `isWhiteBalanceModeSupported` 逐档探测 → awbModes），
+  本次是把三个消费方真正接到探测上。
+- **`core/WotaParams.ets`** `applyWhiteBalance`：fallback 兜底不再裸落 MANUAL（manualPossible
+  才允许）；已选手动但探测不可能 → 降到第一个受支持预设。
+- **`ui/ParamPills.ets`** `WbPillPopup`：MANUAL 选项改经 `manualWhiteBalancePossible()`——
+  设备不声明就灰显点不动（不摆点不动的选项骗用户）。
+- **`camera/RequestApplier.ets`**：`State` 增 `wbManualSupported`（stateOf 从能力探测装配）；
+  apply 的 MANUAL 分支先过门——不支持则 `skipped`（带原因）不硬发（总线侧已降档，此处防御纵深）。
+- **`diag/Diag.ets`**（上游 eefccc9 拆闸）：hilog 通道 **i/w/e 恒写**（取证通道与磁盘占用解耦，
+  「总开关默认关」不再连 hilog 一起关）；**d/v 收详细档**（逐帧日志会冲掉系统 hilog 环形缓冲）；
+  文件落盘仍受总开关（先总开关后级别的次序不变）。头注与 record() 注释同步。
+- **AF 遥测 + 峰值提示**（上游 4457e4a 的 OHOS 对应面）：`GlCameraEngine.start` 挂
+  `session.on('focusStateChange')`（SDK since 11，PhotoSession 在册）——1s 一拍、d 级
+  （详细档才记），`SCAN/FOCUSED/UNFOCUSED` 短名；`FocusPillPopup` 增 `onManualSelected` 钩子
+  （切入手动档一次性触发），Camera 页消费：峰值未开（effect≠3）时提示「手动对焦建议开
+  『峰值』辅助（更多面板）」。
+- **登记（N/A）**：① 上游 4457e4a 的 **AE 状态遥测**——SDK 无 PhotoSession 的 AE 状态事件
+  （`CONTROL_AE_STATE` 无 OHOS 对应，本机 d.ts 全文核过），曝光归因仍靠下发报告 + AF 遥测；
+  ② `79e30a7`/`4155c83`（AE 自动档停写 SENSOR 三键 / AE 翻转重建 builder）——Camera2 请求
+  模型专属，OHOS 参数面无 SENSOR 三键、会话重建模型不同；本侧曝光组键语义（MANUAL 写全
+  时长+ISO、LOCK/AUTO 只写模式与补偿）在 RequestApplier.ets 已有同构实现并有登记；③
+  `ee9aa0e` 的 colorCorrection.availableModes 隐藏键问题——OHOS 无此键面（WB 能力经
+  isWhiteBalanceModeSupported 公开探测），「运行时探测」精神本侧天然成立。
+- **守卫**：`test/pure/wb-manual-gate.test.ets` 8 例——探测三态（有 MANUAL/无 MANUAL/空表）+
+  五条接线源码守卫（PillPopup 探测/总线兜底降档/apply skip/State 装配/diag d-v 门控/AF 遥测与
+  峰值提示）。突变自证：裸兜底回归、短路恒可选回归即红。
+- **真机待验（不阻塞收口）**：不支持手动 WB 的机型上 WB 弹层「手动」灰显、不开详细档时
+  hilog 仍见 i/w/e、开详细档见 AF遥测 行。
+- **回归**：pure-test 77 files / 793 tests 全绿；`assembleHap`（release）BUILD SUCCESSFUL。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是

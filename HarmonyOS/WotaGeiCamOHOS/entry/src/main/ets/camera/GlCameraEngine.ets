@@ -54,6 +54,23 @@ function previewProfileFor(profiles: Array<camera.Profile>,
   return hit1080 ?? profiles[0];
 }
 
+/** AF 状态遥测的拍点间隔（上游 4457e4a 方案F）：1s 一拍，d 级（详细档才记） */
+const FOCUS_TELEMETRY_MS: number = 1000;
+
+/** FocusState → 短名（SCAN=0 / FOCUSED=1 / UNFOCUSED=2，d.ts 契约值） */
+function FocusStateName(st: camera.FocusState): string {
+  if (st === camera.FocusState.FOCUS_STATE_SCAN) {
+    return 'SCAN';
+  }
+  if (st === camera.FocusState.FOCUS_STATE_FOCUSED) {
+    return 'FOCUSED';
+  }
+  if (st === camera.FocusState.FOCUS_STATE_UNFOCUSED) {
+    return 'UNFOCUSED';
+  }
+  return `${st}`;
+}
+
 export class GlCameraEngine {
   private session: camera.PhotoSession | undefined = undefined;
   private preview: camera.PreviewOutput | undefined = undefined;
@@ -70,6 +87,8 @@ export class GlCameraEngine {
   private zoomRange: Array<number> = [1, 1];
   private previewSizes: Array<Size> = [];
   private lastZoom: number = 1;
+  /** AF 遥测拍点节流（1s 一拍，见 start 内 focusStateChange 监听） */
+  private lastFocusTelemetryMs: number = 0;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
@@ -197,6 +216,25 @@ export class GlCameraEngine {
         });
       } catch (e) {
         Diag.w(WotaTag.ABILITY, `gl camera frameStart listener failed: ${e}`);
+      }
+      // AF 状态遥测（上游 4457e4a 方案F 的 OHOS 对应面）：1s 一拍、d 级（详细档才记，
+      // 遥测是排查工具不是常态记录）。弱光对焦差这类 3A 行为问题此前现场只有结果没有中间态，
+      // "AF 卡在 SCAN"一眼可判。SDK 无 PhotoSession 的 AE 状态事件（上游 CONTROL_AE_STATE
+      // 无 OHOS 对应，登记）——曝光归因仍靠下发报告 + 本行 AF 中间态。
+      try {
+        session.on('focusStateChange', (err: BusinessError, st: camera.FocusState): void => {
+          if (err) {
+            return;
+          }
+          const now: number = Date.now();
+          if (now - this.lastFocusTelemetryMs < FOCUS_TELEMETRY_MS) {
+            return;
+          }
+          this.lastFocusTelemetryMs = now;
+          Diag.d(WotaTag.ABILITY, `AF遥测 state=${FocusStateName(st)}`);
+        });
+      } catch (e) {
+        Diag.w(WotaTag.ABILITY, `gl camera focusStateChange listener failed: ${e}`);
       }
       this.previewSizes = [];
       for (const p of profiles) {
