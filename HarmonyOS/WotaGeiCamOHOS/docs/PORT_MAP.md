@@ -505,8 +505,14 @@ GPU 特性（GlowBlurChain 507 行 + Shaders 167 行 + GlRenderEngine 298 行）
   （W 级）——逐键 try/catch + 拆闸后的取证通道按设计工作。
 - **观察（存量，非本批引入，登记不修）**：① `CameraSettings` 对象字段改值不触发 Dock 胶囊
   重渲染——出现顶栏读数 `24fps` 与 Dock `帧率:30` 并存（两处同读 settings.fps；@State 对象
-  字段变更不通知，读数条因他态重绘偶先刷新）；② 模拟器虚拟传感器间歇自转（旧数据曾残留
-  `ui_orientation=landscape`、本轮两次自转）——与 UO 批口径的相关性留 UO 真机批核。
+  字段变更不通知，读数条因他态重绘偶先刷新）。
+- **方向事件还原（用户报「横屏 HUD 控件巨大/录制键出屏/画面压扁」的结论）**：非方向锁缺陷——
+  沙箱持久化里 `ui_orientation=landscape`（设置页方向控件是唯一写入方；本 walkers 的越界坐标
+  点击最可疑，无法完全归因），应用忠实落了 `preferred orientation -> landscape`，而**横屏 HUD
+  属 T32 留白**（T31 只做了竖屏布局），于是渲染出那套未设计的横屏形态。**方向锁本身有效**：
+  设置页点回「竖屏固定」→ `preferred orientation -> portrait` → 显示立即弹回竖屏（尽管模拟器
+  传感器仍报横屏）。横屏保真度维持 T32 留白登记；「横屏档在 T32 前是否隐藏」属产品决策，
+  待用户裁决。
 - **录制启动失败的用户可见性**：状态行如实显示 `录制启动失败: encoder-create`（健康三格
   路径），失败不被吞。
 
