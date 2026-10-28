@@ -278,10 +278,10 @@
     <string name="cam_glow_title">Glow 光晕</string>
     <!-- 面板常驻口径：Glow 是 scene layer，改了会进成片（与监看叠加相反） -->
     <string name="cam_glow_note">光晕进成片（烘焙进像素），调参在下一个真帧生效</string>
+    <!-- 2026-10-28 用户口径：光晕跟随光棒自身颜色（预设/两端色已删除） -->
+    <string name="cam_glow_same_color">光晕跟随光棒自身的颜色（不再提供换色）</string>
     <string name="cam_glow_on">开</string>
     <string name="cam_glow_off">关</string>
-    <string name="cam_glow_preset_a">预设 A · 品红→青</string>
-    <string name="cam_glow_preset_b">预设 B · 橙→绿</string>
     <string name="cam_glow_threshold">亮度阈值</string>
     <string name="cam_glow_soft">软边</string>
     <string name="cam_glow_width">光晕宽度</string>
@@ -301,22 +301,12 @@
     <string name="cam_glow_add">叠加</string>
     <string name="cam_glow_freq">频率</string>
     <string name="cam_glow_blend">混合</string>
-    <string name="cam_glow_color_a">色 A（近景光源）</string>
-    <string name="cam_glow_color_b">色 B（远景光源）</string>
     <!-- 状态行：当前档位来自 GlowStatus（相机帧尺寸 × 帧率判档） -->
     <string name="cam_glow_status_auto">当前：×%1$d（自动）</string>
     <string name="cam_glow_status_res_label">当前：×%1$d（%2$d×%3$d 自动）</string>
     <string name="cam_glow_broken">Glow 已停用</string>
     <string name="cam_glow_clamped">受机型纹理上限，已夹到 %1$d×%2$d</string>
     <string name="cam_glow_direct">需切到「使用 GPU」才生效</string>
-    <string name="glow_color_magenta">品红</string>
-    <string name="glow_color_cyan">青</string>
-    <string name="glow_color_orange">橙</string>
-    <string name="glow_color_green">绿</string>
-    <string name="glow_color_yellow">黄</string>
-    <string name="glow_color_blue">蓝</string>
-    <string name="glow_color_purple">紫</string>
-    <string name="glow_color_white">白</string>
     <string name="denoise_audio_off">关闭</string>
     <string name="denoise_audio_system">系统降噪</string>
     <string name="denoise_video_off">关闭</string>

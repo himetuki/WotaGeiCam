@@ -28,7 +28,6 @@ import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.GlowStatus
 import com.wotagei.cam.core.PeakingColor
-import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.core.glowScaleFor
 import com.wotagei.cam.record.ArcKeepRule
 import com.wotagei.cam.record.ArcOp
@@ -397,9 +396,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val uGlowGain: Int,
         val uGlowAdd: Int,
         val uGlowFreq: Int,
-        val uGlowBlend: Int,
-        val uGlowColorA: Int,
-        val uGlowColorB: Int
+        val uGlowBlend: Int
     )
 
     /**
@@ -450,13 +447,6 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      */
     @Volatile
     private var glowParams = GlowParams.DEFAULT
-
-    /** 预换算的两端色（uniform 用）：`glowRgb` 只在参数变化时调，帧路径零分配 */
-    @Volatile
-    private var glowColorA = glowRgb(GlowParams.DEFAULT.colorA)
-
-    @Volatile
-    private var glowColorB = glowRgb(GlowParams.DEFAULT.colorB)
 
     /**
      * Glow 离屏链（三趟：亮部提取+降采样 → 横向高斯 → 纵向高斯）。
@@ -2228,10 +2218,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uGlowAdd >= 0) GLES20.glUniform1f(p.uGlowAdd, glowParams.add)
             if (p.uGlowFreq >= 0) GLES20.glUniform1f(p.uGlowFreq, glowParams.freq)
             if (p.uGlowBlend >= 0) GLES20.glUniform1f(p.uGlowBlend, glowParams.blend)
-            val rgbA = glowColorA
-            if (p.uGlowColorA >= 0) GLES20.glUniform3f(p.uGlowColorA, rgbA[0], rgbA[1], rgbA[2])
-            val rgbB = glowColorB
-            if (p.uGlowColorB >= 0) GLES20.glUniform3f(p.uGlowColorB, rgbB[0], rgbB[1], rgbB[2])
+            // 2026-10-28：同色光晕——不再上传色带两端色（见 Shaders.applyGlow 的注释）
         }
 
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
@@ -2347,8 +2334,6 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         if (released.get()) return
         val next = params.sanitize()
         val wasOn = glowParams.enabled
-        glowColorA = glowRgb(next.colorA)
-        glowColorB = glowRgb(next.colorB)
         glowParams = next
         if (!next.enabled || wasOn) return
         postGl {
@@ -2704,9 +2689,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             uGlowGain = GLES20.glGetUniformLocation(id, "uGlowGain"),
             uGlowAdd = GLES20.glGetUniformLocation(id, "uGlowAdd"),
             uGlowFreq = GLES20.glGetUniformLocation(id, "uGlowFreq"),
-            uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend"),
-            uGlowColorA = GLES20.glGetUniformLocation(id, "uGlowColorA"),
-            uGlowColorB = GLES20.glGetUniformLocation(id, "uGlowColorB")
+            uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend")
         )
     }
 

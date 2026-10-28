@@ -2,26 +2,24 @@ package com.wotagei.cam.core
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [GlowParams] 的模型层账（docs/plan/24 R3 §1.1 / §1.5）：出厂值、域钳、单串持久化键的往返与坏串。
+ * [GlowParams] 的模型层账（docs/plan/24 R3 §1.1 / §1.5；2026-10-28 撤掉预设与色带）。
  *
  * 这一层全是纯函数，所以 JVM 能全测；而它恰恰是"真机上查不出来"的那一类缺陷的所在地：
  * - 坏值漏进 uniform ⇒ 整帧发灰/发白，看不出原因（所以 [GlowParams.sanitize] 必须兜住 NaN）；
  * - 持久化往返丢精度 ⇒ 用户每次启动光晕都"变了一点"（所以浮点用 `Float.toString()` 的精确往返）；
- * - 颜色位宽搞错 ⇒ 光晕整条变黑白或变纯红（所以 ARGB 掩到 32 位）。
+ * - **同色光晕**：光晕的颜色来自亮部提取（原色），参数里不再有 colorA/colorB——
+ *   用户 2026-10-28 口径：预设 A/B（品红→青 / 橙→绿）是"变色光晕"，整组删除。
  */
 class GlowParamsTest {
 
     @Test
-    fun `出厂默认是预设A且关闭`() {
+    fun `出厂默认关且参数逐字段点名`() {
         val d = GlowParams.DEFAULT
         assertEquals("出厂必须关（零代价口径）", false, d.enabled)
-        assertEquals(GlowParams.PRESET_A, d)
-        assertEquals("DEFAULT 与 PRESET_A 是同一份参数", GlowParams.PRESET_A, d)
         // 逐字段点名：任何一个默认值被"顺手"改掉都要在这里有意识地改
         assertEquals(0.5f, d.threshold)
         assertEquals(0.05f, d.soft)
@@ -30,19 +28,6 @@ class GlowParamsTest {
         assertEquals(0.0f, d.add)
         assertEquals(0.0f, d.freq)
         assertEquals(0.6f, d.blend)
-        assertEquals(0xFFFF3399L, d.colorA) // 品红
-        assertEquals(0xFF33E6FFL, d.colorB) // 青
-    }
-
-    @Test
-    fun `预设B只改两端色与强度`() {
-        val b = GlowParams.PRESET_B
-        assertNotEquals(GlowParams.PRESET_A, b)
-        assertEquals(0xFFFF730DL, b.colorA) // 橙
-        assertEquals(0xFF33D940L, b.colorB) // 绿
-        assertEquals(0.45f, b.threshold)
-        assertEquals(0.55f, b.blend)
-        assertEquals("预设 B 也必须是关的（预设≠自动开启）", false, b.enabled)
     }
 
     @Test
@@ -91,21 +76,32 @@ class GlowParamsTest {
     }
 
     @Test
-    fun `sanitize 把颜色掩到32位`() {
-        // -1L = 全 1 的 64 位；越界位必须被掩掉，否则 encode 出来的十六进制串不是 8 位
-        assertEquals(0xFFFFFFFFL, GlowParams(colorA = -1L).sanitize().colorA)
-        assertEquals(0xFFFF3399L, GlowParams(colorA = 0x1_FFFF_3399L).sanitize().colorA)
-        assertEquals(0xFF000000L, GlowParams(colorB = 0xFF000000L).sanitize().colorB)
-    }
-
-    @Test
     fun `编码解码往返逐字段一致`() {
-        for (p in listOf(GlowParams.DEFAULT, GlowParams.PRESET_B, GlowParams(enabled = true, threshold = 0.37f, blend = 0.83f))) {
+        for (p in listOf(
+            GlowParams.DEFAULT,
+            GlowParams(enabled = true, threshold = 0.45f, blend = 0.55f),
+            GlowParams(enabled = true, threshold = 0.37f, blend = 0.83f, gain = 2.5f, freq = 12f)
+        )) {
             assertEquals("encode→decode 必须逐字段往返（$p）", p.sanitize(), decodeGlow(encodeGlow(p)))
         }
         // 开着也要往返（enabled 是开关，不是"是否参与编码"）
-        val on = GlowParams.PRESET_A.copy(enabled = true)
+        val on = GlowParams.DEFAULT.copy(enabled = true)
         assertTrue(decodeGlow(encodeGlow(on)).enabled)
+    }
+
+    @Test
+    fun `旧版带颜色的串仍能解码_颜色被忽略`() {
+        // 2026-10-28 前的落盘串带 colorA/colorB；用户升级后旧串必须照常读回来（颜色丢弃），
+        // 不许整串回默认——否则升级一次光晕参数全丢。
+        val legacy = "enabled=1;threshold=0.45;soft=0.05;width=0.02;gain=1.5;add=0.0;" +
+            "freq=0.0;blend=0.55;colorA=FFFF730D;colorB=FF33D940"
+        val decoded = decodeGlow(legacy)
+        assertEquals(true, decoded.enabled)
+        assertEquals(0.45f, decoded.threshold)
+        assertEquals(0.55f, decoded.blend)
+        assertEquals(1.5f, decoded.gain)
+        // 新编码串里不再出现颜色键
+        assertFalse(encodeGlow(GlowParams.DEFAULT).contains("colorA"))
     }
 
     @Test
@@ -116,10 +112,9 @@ class GlowParamsTest {
         assertEquals(d, decodeGlow("   "))
         assertEquals(d, decodeGlow("garbage"))
         assertEquals(d, decodeGlow("enabled=1")) // 缺键
-        // 单键坏：非数 / 非十六进制 / enabled 既不是 0 也不是 1
+        // 单键坏：非数 / enabled 既不是 0 也不是 1
         val good = encodeGlow(GlowParams.DEFAULT)
         assertEquals(d, decodeGlow(good.replace("threshold=0.5", "threshold=abc")))
-        assertEquals(d, decodeGlow(good.replace("colorA=FFFF3399", "colorA=ZZZZ3399")))
         assertEquals(d, decodeGlow(good.replace("enabled=0", "enabled=2")))
         assertEquals(d, decodeGlow(good.replace("soft=0.05", "soft=")))
     }
@@ -136,43 +131,15 @@ class GlowParamsTest {
     }
 
     @Test
-    fun `编码前先钳域且颜色固定八位大写十六进制`() {
-        val encoded = encodeGlow(GlowParams(threshold = 9f, colorA = 0xFFFF3399L))
+    fun `编码前先钳域`() {
+        val encoded = encodeGlow(GlowParams(threshold = 9f))
         assertTrue("越界值必须先钳再写盘：$encoded", encoded.contains("threshold=1.0"))
-        assertTrue("颜色固定 8 位大写十六进制：$encoded", encoded.contains("colorA=FFFF3399"))
-        assertTrue(encoded.contains("colorB=FF33E6FF"))
         assertFalse("编码串里不许出现负数或越界写法", encoded.contains("threshold=9.0"))
     }
 
     @Test
-    fun `参数里的开关默认关且预设不改开关`() {
-        assertFalse(GlowParams.PRESET_A.enabled)
-        assertFalse(GlowParams.PRESET_B.enabled)
+    fun `参数里的开关默认关`() {
+        assertFalse(GlowParams.DEFAULT.enabled)
         assertFalse(decodeGlow(encodeGlow(GlowParams.DEFAULT)).enabled)
-    }
-
-    @Test
-    fun `ARGB 换算只取RGB且忽略alpha`() {
-        val magenta = glowRgb(0xFFFF3399L)
-        assertEquals(3, magenta.size)
-        assertEquals(1.0f, magenta[0], 1e-6f)   // FF
-        assertEquals(0.2f, magenta[1], 1e-6f)   // 33
-        assertEquals(0.6f, magenta[2], 1e-6f)   // 99
-        // alpha 不参与（输出恒不透明，与 PASS_THROUGH_FS 同一条纪律）
-        val sameRgbOtherAlpha = glowRgb(0x00FF3399L)
-        assertEquals(magenta[0], sameRgbOtherAlpha[0], 0f)
-        assertEquals(magenta[1], sameRgbOtherAlpha[1], 0f)
-        assertEquals(magenta[2], sameRgbOtherAlpha[2], 0f)
-        assertEquals(0f, glowRgb(0xFF000000L)[0], 0f)
-        assertEquals(1f, glowRgb(0xFFFFFFFFL)[0], 1e-6f)
-        // 预设两端色换算出来的正好是品红/青（避免"色值写反"无人发现）
-        val presetA = glowRgb(GlowParams.PRESET_A.colorA)
-        assertEquals(1f, presetA[0], 1e-6f)
-        assertEquals(0.2f, presetA[1], 1e-6f)
-        assertEquals(0.6f, presetA[2], 1e-6f)
-        val cyan = glowRgb(GlowParams.PRESET_A.colorB)
-        assertEquals(51f / 255f, cyan[0], 1e-6f)
-        assertEquals(230f / 255f, cyan[1], 1e-6f)
-        assertEquals(1f, cyan[2], 1e-6f)
     }
 }

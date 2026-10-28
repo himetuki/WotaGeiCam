@@ -41,7 +41,6 @@ import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.DisplayScale
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
-import com.wotagei.cam.core.GlowColor
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.GlowStatus
 import com.wotagei.cam.core.glowStatusNote
@@ -1069,10 +1068,6 @@ private fun MonitorPill(
     }
 }
 
-/** 参数域是否与某个预设"同形"（忽略 `enabled`）：用于把预设行点亮 */
-private fun glowShapeMatches(p: GlowParams, preset: GlowParams): Boolean =
-    p.copy(enabled = preset.enabled) == preset
-
 /**
  * Glow 光晕（2026-10-27 用户需求；docs/plan/24 R3 §1.5/§1.6）。
  *
@@ -1115,27 +1110,6 @@ private fun GlowPill(
             columns = 2,
             onPick = { opt ->
                 write(glow.copy(enabled = opt.value == 1))
-                onPersist()
-            },
-            enabled = editable
-        )
-
-        // ---- A/B 预设：**只换两端色与强度**，不碰开关（开着就换、关着仍关）。
-        // 24 §1.6 的默认口径是"只换预设"；若产品要"点预设即开"，由所有者拍板后另改（登记在报告里）。
-        PillChoices(
-            options = listOf(
-                PillOption(0, stringResource(R.string.cam_glow_preset_a)),
-                PillOption(1, stringResource(R.string.cam_glow_preset_b))
-            ),
-            selected = when {
-                glowShapeMatches(glow, GlowParams.PRESET_A) -> 0
-                glowShapeMatches(glow, GlowParams.PRESET_B) -> 1
-                else -> -1
-            },
-            columns = 2,
-            onPick = { opt ->
-                val base = if (opt.value == 0) GlowParams.PRESET_A else GlowParams.PRESET_B
-                write(base.copy(enabled = glow.enabled))
                 onPersist()
             },
             enabled = editable
@@ -1195,15 +1169,9 @@ private fun GlowPill(
             onValueChangeFinished = onPersist
         )
 
-        // ---- 两端色（色点行；与站位线的取色点同一个视觉/无障碍口径）
-        GlowColorRow(R.string.cam_glow_color_a, glow.colorA, editable) {
-            write(glow.copy(colorA = it))
-            onPersist()
-        }
-        GlowColorRow(R.string.cam_glow_color_b, glow.colorB, editable) {
-            write(glow.copy(colorB = it))
-            onPersist()
-        }
+        // 2026-10-28 用户口径：预设 A/B 与两端色**整组删除**——光晕应跟随光棒自身颜色，
+        // 不是给整片画面换一种发光色。面板里留一句口径说明，避免用户再找"颜色"入口。
+        Note(R.string.cam_glow_same_color)
 
         // ---- 状态行（分档 / 停用 / 夹取 / DIRECT）——空状态不占位
         GlowStatusLine(status, glow.enabled, gpuMode)
@@ -1290,30 +1258,6 @@ private val toneFmt: (Float) -> String =
 /** 阴影/高光读数：±100 百分比域 */
 private val tonePercentFmt: (Float) -> String =
     { String.format(Locale.US, "%+.0f%%", it) }
-
-/** Glow 的一端色：8 枚色点（[GlowColor] 调色板），选中态描边；点一下即写总线并落盘 */
-@Composable
-private fun GlowColorRow(labelRes: Int, current: Long, editable: Boolean, onPick: (Long) -> Unit) {
-    val context = LocalContext.current
-    val selected = GlowColor.of(current)
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text = stringResource(labelRes), style = WotaType.label, color = WotaColor.textLo, maxLines = 1)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            GlowColor.ALL.forEach { c ->
-                val on = c == selected
-                Box(
-                    Modifier
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .background(Color(c.argb.toULong() shl 32))
-                        .let { if (on) it.border(2.dp, WotaColor.textHi, CircleShape) else it }
-                        .clickable(enabled = editable) { onPick(c.argb) }
-                        .semantics { contentDescription = context.getString(c.labelRes) }
-                )
-            }
-        }
-    }
-}
 
 /**
  * Glow 状态行（"自动变化必须可见"）。

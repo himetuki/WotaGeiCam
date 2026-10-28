@@ -51,7 +51,7 @@ class GlowShaderTest {
         "BILATERAL_LITE_CURVE_FS" to Shaders.BILATERAL_LITE_CURVE_FS
     )
 
-    private val glowTokens = listOf("applyGlow", "vUvGlow", "uGlowSrc", "uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowColorA", "uGlowColorB", "glowHash")
+    private val glowTokens = listOf("applyGlow", "vUvGlow", "uGlowSrc", "uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "glowHash")
 
     // ------------------------------------------------------------------ glow=false：源码逐字不变
 
@@ -205,18 +205,17 @@ class GlowShaderTest {
         val g = Shaders.glowFragment(Shaders.PASS_THROUGH_FS, FrameEffect.NONE)!!
         assertTrue(
             "叠加式（不是 mix(c, glow, blend)）：在 c 上加光晕",
-            g.contains("return c + ((glow * uGlowGain + uGlowAdd) * hue) * (uGlowBlend * n);")
+            g.contains("return c + glow * (uGlowGain + uGlowAdd) * (uGlowBlend * n);")
         )
-        assertTrue(
-            "hue 的位置参数取归一化亮度（不是红通道）",
-            g.contains("float pos = clamp(dot(glow, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);")
-        )
-        assertTrue("色带两端 mix", g.contains("vec3 hue = mix(uGlowColorA, uGlowColorB, pos);"))
+        // 2026-10-28 用户口径：**同色光晕**——不许再出现色带/hue mix（那是"给光棒换色"）
+        assertFalse("光晕不许做色带 mix（用户：要光棒自身颜色的光晕）", g.contains("mix(uGlowColorA"))
+        assertFalse(g.contains("uGlowColorA"))
+        assertFalse(g.contains("uGlowColorB"))
         assertTrue(
             "频率 0 时噪声退化成 1（不做无谓的 hash）",
             g.contains("float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));")
         )
-        for (uniform in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowColorA", "uGlowColorB", "uGlowSrc")) {
+        for (uniform in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowSrc")) {
             assertTrue("缺 uniform $uniform", g.contains(uniform))
         }
         // 声明段只出现一次（重复声明在 GLSL 里是编译错误）

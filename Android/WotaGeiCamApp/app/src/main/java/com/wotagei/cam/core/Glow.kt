@@ -40,11 +40,7 @@ data class GlowParams(
     /** 0..64 光晕噪声频率（0 = 干净），主 pass；链只跑一次所以噪声不能进链 */
     val freq: Float = 0.0f,
     /** 0..1 混合强度比例（0 = 原图，1 = 满强度） */
-    val blend: Float = 0.6f,
-    /** 色带 A 端（ARGB Long）；hue 的位置参数取归一化亮度，不取红通道 */
-    val colorA: Long = 0xFFFF3399L,
-    /** 色带 B 端（ARGB Long） */
-    val colorB: Long = 0xFF33E6FFL
+    val blend: Float = 0.6f
 ) {
 
     /** 域钳之后的同一份参数（幂等）。落盘/下发前必须过这一关，见类注释 */
@@ -55,25 +51,17 @@ data class GlowParams(
         gain = glowClamp(gain, 0f, GLOW_GAIN_MAX, 1f),
         add = glowClamp(add, 0f, GLOW_ADD_MAX, 0f),
         freq = glowClamp(freq, 0f, GLOW_FREQ_MAX, 0f),
-        blend = glowClamp(blend, 0f, 1f, 0.6f),
-        colorA = colorA and GLOW_ARGB_MASK,
-        colorB = colorB and GLOW_ARGB_MASK
+        blend = glowClamp(blend, 0f, 1f, 0.6f)
     )
 
     companion object {
-        /** 出厂预设 A：品红 → 青（用户拍板，见 24 §六-1） */
-        val PRESET_A = GlowParams()
-
-        /** 预设 B：橙 → 绿（同一条色带公式，只换两端色与强度） */
-        val PRESET_B = GlowParams(
-            threshold = 0.45f,
-            blend = 0.55f,
-            colorA = 0xFFFF730DL,
-            colorB = 0xFF33D940L
-        )
-
-        /** 出厂默认 = 预设 A */
-        val DEFAULT = PRESET_A
+        /**
+         * 出厂默认。**没有"预设 A/B"**（2026-10-28 用户口径撤掉）：那一版预设改的是光晕的
+         * 两端色（品红→青 / 橙→绿），观感是"整片换个颜色发光"；正确语义是**同色光晕**——
+         * 亮部提取本来就乘回了原色（GLOW_COPY_FS），主 pass 再拿色带 mix 一次等于给光棒换色。
+         * 现在主 pass 直接用提取出来的颜色，光棒什么色就发什么色的光晕。
+         */
+        val DEFAULT = GlowParams()
     }
 }
 
@@ -88,9 +76,6 @@ const val GLOW_WIDTH_MAX = 0.2f
 const val GLOW_GAIN_MAX = 4f
 const val GLOW_ADD_MAX = 1f
 const val GLOW_FREQ_MAX = 64f
-
-/** 32 位 ARGB 掩码：颜色是 8 位四通道，超出部分是脏数据 */
-private const val GLOW_ARGB_MASK = 0xFFFF_FFFFL
 
 /** 全曲线负载阈值（像素 × 帧率）：≤ 40M 用 scale=1（24 §1.4，初版拍定、T3 真机回填） */
 const val GLOW_FULL_MAX_PIXEL_RATE = 40_000_000L
@@ -116,8 +101,6 @@ fun encodeGlow(params: GlowParams): String {
         append(";add=").append(p.add)
         append(";freq=").append(p.freq)
         append(";blend=").append(p.blend)
-        append(";colorA=").append(p.colorA.toString(16).uppercase())
-        append(";colorB=").append(p.colorB.toString(16).uppercase())
     }
 }
 
@@ -136,7 +119,6 @@ fun decodeGlow(raw: String?): GlowParams {
         values[pair.substring(0, eq).trim()] = pair.substring(eq + 1).trim()
     }
     fun floatOf(key: String): Float? = values[key]?.toFloatOrNull()
-    fun colorOf(key: String): Long? = values[key]?.toLongOrNull(16)?.and(GLOW_ARGB_MASK)
 
     val enabled = when (values["enabled"]) {
         "1" -> true
@@ -151,9 +133,7 @@ fun decodeGlow(raw: String?): GlowParams {
         gain = floatOf("gain") ?: return GlowParams.DEFAULT,
         add = floatOf("add") ?: return GlowParams.DEFAULT,
         freq = floatOf("freq") ?: return GlowParams.DEFAULT,
-        blend = floatOf("blend") ?: return GlowParams.DEFAULT,
-        colorA = colorOf("colorA") ?: return GlowParams.DEFAULT,
-        colorB = colorOf("colorB") ?: return GlowParams.DEFAULT
+        blend = floatOf("blend") ?: return GlowParams.DEFAULT
     ).sanitize()
 }
 
@@ -249,44 +229,6 @@ fun fillGlowBlurOffset(
         out[1] = widthParam * sy
     }
     return true
-}
-
-/**
- * ARGB Long → 0..1 三元组（uniform 用）。只取 RGB：alpha 不参与光晕（输出恒不透明，
- * 与 `PASS_THROUGH_FS` 同一条"强制不透明"纪律）。
- */
-fun glowRgb(argb: Long): FloatArray {
-    val v = argb and GLOW_ARGB_MASK
-    return floatArrayOf(
-        ((v shr 16) and 0xFF).toFloat() / 255f,
-        ((v shr 8) and 0xFF).toFloat() / 255f,
-        (v and 0xFF).toFloat() / 255f
-    )
-}
-
-/**
- * Glow 色带的**可选色点**（UI 两行色点用；参数本身仍只存 ARGB Long 的 `GlowParams.colorA/B`）。
- *
- * 与 [MarkerLineColor] 同族：core 不引 Compose，颜色一律 ARGB Long，UI 侧 `Color(argb.toULong() shl 32)`。
- * 调色板只约束"点选得到什么"，**不约束持久化域**——手改 prefs 写进任意 32 位色值也照单全收
- * （解码过 [GlowParams.sanitize] 的掩码），此时 UI 上没有任何色点被点亮（[of] 返回 null）。
- */
-enum class GlowColor(val labelRes: Int, val argb: Long) {
-    MAGENTA(R.string.glow_color_magenta, 0xFFFF3399L),
-    CYAN(R.string.glow_color_cyan, 0xFF33E6FFL),
-    ORANGE(R.string.glow_color_orange, 0xFFFF730DL),
-    GREEN(R.string.glow_color_green, 0xFF33D940L),
-    YELLOW(R.string.glow_color_yellow, 0xFFFFE033L),
-    BLUE(R.string.glow_color_blue, 0xFF4D7CFFL),
-    PURPLE(R.string.glow_color_purple, 0xFFB44DFFL),
-    WHITE(R.string.glow_color_white, 0xFFFFFFFFL);
-
-    companion object {
-        val ALL: List<GlowColor> = values().toList()
-
-        /** 参数里的色值 → 调色板项（没有精确匹配时 null = 这行一个点都不点亮，不猜） */
-        fun of(argb: Long): GlowColor? = ALL.firstOrNull { it.argb == (argb and 0xFFFF_FFFFL) }
-    }
 }
 
 /**

@@ -154,7 +154,7 @@ class GlowWiringGuardTest {
         assertTrue("必须绑 GLOW_SRC_UNIT", body.contains("GL_TEXTURE0 + GLOW_SRC_UNIT"))
         assertTrue("未就绪兜底 1×1 黑纹理", body.contains("glowBlackTex"))
         assertTrue("必须传 uGlowSrc", body.contains("p.uGlowSrc"))
-        for (u in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowColorA", "uGlowColorB")) {
+        for (u in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend")) {
             assertTrue("drawPass 缺 $u 的写入", body.contains("p.$u"))
         }
         // 画完必须解绑（下一帧链要往同一张里画，挂着会被当 feedback loop）
@@ -415,18 +415,39 @@ class GlowWiringGuardTest {
         )
     }
 
+    /**
+     * 2026-10-28 用户口径：预设 A/B（品红→青 / 橙→绿）与两端色**整组删除**——光晕要跟随
+     * 光棒自身颜色，不做变色。这条把「删干净」钉成可执行判据：残留任何一枚预设/色点符号即红，
+     * 同时要求面板保留一句同色口径说明（否则用户会继续找"换色"入口）。
+     */
+    private fun presetRemovedIssues(src: String): List<String> {
+        val bad = ArrayList<String>()
+        for (token in listOf(
+            "cam_glow_preset_a", "cam_glow_preset_b",
+            "cam_glow_color_a", "cam_glow_color_b",
+            "GlowColorRow(", "GlowParams.PRESET_", "GlowColor.of("
+        )) {
+            if (src.contains(token)) bad.add("预设/色带残留：$token")
+        }
+        if (!src.contains("cam_glow_same_color")) bad.add("缺同色口径说明 cam_glow_same_color")
+        return bad
+    }
+
     @Test
-    fun `预设只换色与强度_不改变开关`() {
+    fun `预设与色带已删除_面板保留同色口径说明`() {
         val flatPills = KotlinSourceScan.flatten(pills)
-        assertTrue(
-            "A/B 预设必须保留当前 enabled（点预设不改开关，24 §1.6 默认口径）",
-            flatPills.contains("write(base.copy(enabled = glow.enabled))")
+        assertEquals(
+            "预设/色带删除不干净：${presetRemovedIssues(flatPills)}",
+            emptyList<String>(), presetRemovedIssues(flatPills)
         )
-        // 突变：改回"顺手打开"必红
-        val forcedOn = pills.replace("base.copy(enabled = glow.enabled)", "base.copy(enabled = true)")
-        assertFalse(
-            "点预设强制开启的突变必须被这条抓到",
-            KotlinSourceScan.flatten(forcedOn).contains("base.copy(enabled = glow.enabled)")
+        // 尺要能红：塞回一枚预设控件符号后必须报红
+        val reintroduced = flatPills.replace(
+            "Note(R.string.cam_glow_same_color)",
+            "Note(R.string.cam_glow_preset_a)"
+        )
+        assertTrue(
+            "塞回预设后判据必须翻红",
+            presetRemovedIssues(reintroduced).any { it.contains("cam_glow_preset_a") }
         )
     }
 

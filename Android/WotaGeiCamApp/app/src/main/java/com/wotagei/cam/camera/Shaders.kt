@@ -482,8 +482,6 @@ uniform float uGlowGain;
 uniform float uGlowAdd;
 uniform float uGlowFreq;
 uniform float uGlowBlend;
-uniform vec3 uGlowColorA;
-uniform vec3 uGlowColorB;
 float glowHash(vec2 p) {
     vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yzx + 33.33);
@@ -491,10 +489,11 @@ float glowHash(vec2 p) {
 }
 vec3 applyGlow(vec3 c, vec2 uv) {
     vec3 glow = texture2D(uGlowSrc, uv).rgb;
-    float pos = clamp(dot(glow, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-    vec3 hue = mix(uGlowColorA, uGlowColorB, pos);
     float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));
-    return c + ((glow * uGlowGain + uGlowAdd) * hue) * (uGlowBlend * n);
+    // 2026-10-28 用户口径：**同色光晕**。链里的亮部提取已经把原色乘回来了
+    // （GLOW_COPY_FS），这里直接用那枚颜色、不再做色带 mix（旧版 mix 等于给光棒换色）；
+    // add 改成增益的加成项（仍乘提取出来的颜色），全画面不再被抬一层灰。
+    return c + glow * (uGlowGain + uGlowAdd) * (uGlowBlend * n);
 }
     """
 
