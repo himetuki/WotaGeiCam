@@ -1164,9 +1164,11 @@ private fun AbPill(label: String, active: Boolean, onClick: () -> Unit) {
         style = MaterialTheme.typography.labelMedium,
         color = if (active) WotaColor.onAccent else WotaColor.textMid,
         maxLines = 1,
+        // 底色用带 Shape 的 background 而不是 clip+background：clip 在 clickable 外侧会把命中区
+        // 裁成跑道形，四角端帽弧外全是死区——胶囊只有 ~20dp 宽时按可见位置/a11y 中心点按会落进
+        // 死区（2026-10-28 真机实证：A 打点「点不动」即此，B 只是"A 没打上"的级联误报）。
         modifier = Modifier
-            .clip(WotaShape.pill)
-            .background(if (active) WotaColor.accentSurface else ComposeColor.Transparent)
+            .background(if (active) WotaColor.accentSurface else ComposeColor.Transparent, WotaShape.pill)
             .clickable(onClick = onClick)
             .padding(horizontal = 7.dp, vertical = 3.dp)
     )
