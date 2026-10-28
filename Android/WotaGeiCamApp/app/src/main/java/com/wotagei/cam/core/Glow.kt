@@ -40,7 +40,16 @@ data class GlowParams(
     /** 0..64 光晕噪声频率（0 = 干净），主 pass；链只跑一次所以噪声不能进链 */
     val freq: Float = 0.0f,
     /** 0..1 混合强度比例（0 = 原图，1 = 满强度） */
-    val blend: Float = 0.6f
+    val blend: Float = 0.6f,
+    /**
+     * 光晕颜色（ARGB Long；**白 = 不改色**，跟随光棒自身的颜色）。
+     *
+     * 2026-10-28 用户口径两步走：先删掉「预设 A/B + 两端色带」（那是给整片改色），
+     * 再允许**用色盘自选单色**——所以这里只有一个颜色、没有 A/B 两端：
+     * 白（出厂）⇒ 输出 = 原色 × 亮度（同色光晕）；选了颜色 ⇒ 原色 × 所选色（整体偏这个色调）。
+     * 色盘上点圆心就是白（饱和度 0），等于回到"跟随原色"。
+     */
+    val color: Long = GLOW_COLOR_DEFAULT
 ) {
 
     /** 域钳之后的同一份参数（幂等）。落盘/下发前必须过这一关，见类注释 */
@@ -51,18 +60,100 @@ data class GlowParams(
         gain = glowClamp(gain, 0f, GLOW_GAIN_MAX, 1f),
         add = glowClamp(add, 0f, GLOW_ADD_MAX, 0f),
         freq = glowClamp(freq, 0f, GLOW_FREQ_MAX, 0f),
-        blend = glowClamp(blend, 0f, 1f, 0.6f)
+        blend = glowClamp(blend, 0f, 1f, 0.6f),
+        color = color and GLOW_ARGB_MASK
     )
 
     companion object {
         /**
-         * 出厂默认。**没有"预设 A/B"**（2026-10-28 用户口径撤掉）：那一版预设改的是光晕的
-         * 两端色（品红→青 / 橙→绿），观感是"整片换个颜色发光"；正确语义是**同色光晕**——
-         * 亮部提取本来就乘回了原色（GLOW_COPY_FS），主 pass 再拿色带 mix 一次等于给光棒换色。
-         * 现在主 pass 直接用提取出来的颜色，光棒什么色就发什么色的光晕。
+         * 出厂默认：**白 = 不改色**（同色光晕）。2026-10-28 用户口径两步走：
+         * ① 撤掉「预设 A/B + 两端色带」（那是给整片换色）；② 开放**色盘自选单色**。
+         * 白是中性元 ⇒ 默认观感仍是"光棒什么色就发什么色的光晕"，只有用户显式选色才偏色。
          */
         val DEFAULT = GlowParams()
     }
+}
+
+/** 32 位 ARGB 掩码：颜色是 8 位四通道，超出部分是脏数据 */
+private const val GLOW_ARGB_MASK = 0xFFFF_FFFFL
+
+/** 出厂光晕色：白 = 不改色（跟随光棒自身颜色） */
+const val GLOW_COLOR_DEFAULT = 0xFFFF_FFFFL
+
+/**
+ * ARGB Long → 0..1 三元组（uniform 用）。只取 RGB：alpha 不参与光晕（输出恒不透明，
+ * 与 `PASS_THROUGH_FS` 同一条"强制不透明"纪律）。
+ */
+fun glowRgb(argb: Long): FloatArray {
+    val v = argb and GLOW_ARGB_MASK
+    return floatArrayOf(
+        ((v shr 16) and 0xFF).toFloat() / 255f,
+        ((v shr 8) and 0xFF).toFloat() / 255f,
+        (v and 0xFF).toFloat() / 255f
+    )
+}
+
+/**
+ * 色盘几何（纯函数，JVM 全测）：圆盘 = 色相角 + 饱和度半径，明度固定 1（光晕是加法层，
+ * 亮度由「增益」滑杆管；色盘只负责色相与饱和度）。
+ *
+ * - [glowHueSatOf]：像素圆心 → 色相（0..1）与饱和度（0..1，圆心 0 = 白）
+ * - [glowArgbFromWheel]：角度/半径 + 明度 → ARGB；圆心即白（= 跟随原色）
+ * - [glowWheelMarkerOf]：参数色 → 色盘上的落点（画选中圈用；灰/白无彩 ⇒ 圆心）
+ */
+fun glowHueSatOf(dx: Float, dy: Float, radiusPx: Float): FloatArray {
+    if (radiusPx <= 0f) return floatArrayOf(0f, 0f)
+    val dist = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+    val sat = (dist / radiusPx).coerceIn(0f, 1f)
+    // atan2 的 0° 在 +x，色盘把红放 0°（顺时针与屏幕坐标一致：+y 向下 = 加角度）
+    val deg = Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble()).toFloat()
+    val hue = (((deg % 360f) + 360f) % 360f) / 360f
+    return floatArrayOf(hue, sat)
+}
+
+/** HSV（各 0..1）→ ARGB Long；色相归一化到 0..1，饱和度/明度越界钳制 */
+fun glowArgbFromHsv(h: Float, s: Float, v: Float): Long {
+    val hh = (((h % 1f) + 1f) % 1f) * 6f
+    val ss = s.coerceIn(0f, 1f)
+    val vv = v.coerceIn(0f, 1f)
+    val i = hh.toInt()
+    val f = hh - i
+    val p = vv * (1f - ss)
+    val q = vv * (1f - ss * f)
+    val t = vv * (1f - ss * (1f - f))
+    val (r, g, b) = when (i % 6) {
+        0 -> Triple(vv, t, p)
+        1 -> Triple(q, vv, p)
+        2 -> Triple(p, vv, t)
+        3 -> Triple(p, q, vv)
+        4 -> Triple(t, p, vv)
+        else -> Triple(vv, p, q)
+    }
+    fun ch(x: Float): Long = (x.coerceIn(0f, 1f) * 255f + 0.5f).toLong()
+    return (0xFFL shl 24) or (ch(r) shl 16) or (ch(g) shl 8) or ch(b)
+}
+
+/** 色盘拖拽点 → ARGB（明度恒 1）：[glowHueSatOf] 之后直接取色 */
+fun glowArgbFromWheel(dx: Float, dy: Float, radiusPx: Float): Long {
+    val hs = glowHueSatOf(dx, dy, radiusPx)
+    return glowArgbFromHsv(hs[0], hs[1], 1f)
+}
+
+/** 参数色 → 色盘落点（单位圆内的 x/y 与饱和度）：给 UI 画选中圈；白/灰没有色相 ⇒ 落在圆心 */
+fun glowWheelMarkerOf(argb: Long): FloatArray {
+    val rgb = glowRgb(argb)
+    val max = kotlin.math.max(rgb[0], kotlin.math.max(rgb[1], rgb[2]))
+    val min = kotlin.math.min(rgb[0], kotlin.math.min(rgb[1], rgb[2]))
+    val delta = max - min
+    if (delta <= 1e-4f || max <= 1e-4f) return floatArrayOf(0f, 0f, 0f)
+    val sat = delta / max
+    val hue = when (max) {
+        rgb[0] -> ((rgb[1] - rgb[2]) / delta).let { if (it < 0f) it + 6f else it }
+        rgb[1] -> (rgb[2] - rgb[0]) / delta + 2f
+        else -> (rgb[0] - rgb[1]) / delta + 4f
+    } / 6f
+    val ang = hue * 2f * Math.PI.toFloat()
+    return floatArrayOf((kotlin.math.cos(ang) * sat), (kotlin.math.sin(ang) * sat), sat)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -101,6 +192,7 @@ fun encodeGlow(params: GlowParams): String {
         append(";add=").append(p.add)
         append(";freq=").append(p.freq)
         append(";blend=").append(p.blend)
+        append(";color=").append(p.color.toString(16).uppercase())
     }
 }
 
@@ -119,6 +211,7 @@ fun decodeGlow(raw: String?): GlowParams {
         values[pair.substring(0, eq).trim()] = pair.substring(eq + 1).trim()
     }
     fun floatOf(key: String): Float? = values[key]?.toFloatOrNull()
+    fun colorOf(key: String): Long? = values[key]?.toLongOrNull(16)?.and(GLOW_ARGB_MASK)
 
     val enabled = when (values["enabled"]) {
         "1" -> true
@@ -133,7 +226,12 @@ fun decodeGlow(raw: String?): GlowParams {
         gain = floatOf("gain") ?: return GlowParams.DEFAULT,
         add = floatOf("add") ?: return GlowParams.DEFAULT,
         freq = floatOf("freq") ?: return GlowParams.DEFAULT,
-        blend = floatOf("blend") ?: return GlowParams.DEFAULT
+        blend = floatOf("blend") ?: return GlowParams.DEFAULT,
+        // color 是 2026-10-28 新增的**可选**键：缺键（旧串）= 白（跟随原色）；
+        // 键在但解析失败 ⇒ 整串回默认（坏色值不许猜）
+        color = if (values.containsKey("color")) {
+            colorOf("color") ?: return GlowParams.DEFAULT
+        } else GLOW_COLOR_DEFAULT
     ).sanitize()
 }
 

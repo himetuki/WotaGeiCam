@@ -27,6 +27,7 @@ import com.wotagei.cam.core.DisplayScale
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.GlowStatus
+import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.core.PeakingColor
 import com.wotagei.cam.core.glowScaleFor
 import com.wotagei.cam.record.ArcKeepRule
@@ -396,7 +397,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val uGlowGain: Int,
         val uGlowAdd: Int,
         val uGlowFreq: Int,
-        val uGlowBlend: Int
+        val uGlowBlend: Int,
+        val uGlowTint: Int
     )
 
     /**
@@ -447,6 +449,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      */
     @Volatile
     private var glowParams = GlowParams.DEFAULT
+
+    /** 预换算的光晕 tint（`glowRgb` 只在参数变化时调，帧路径零分配；白 = 恒等 = 跟随原色） */
+    @Volatile
+    private var glowTint = glowRgb(GlowParams.DEFAULT.color)
 
     /**
      * Glow 离屏链（三趟：亮部提取+降采样 → 横向高斯 → 纵向高斯）。
@@ -2218,6 +2224,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uGlowAdd >= 0) GLES20.glUniform1f(p.uGlowAdd, glowParams.add)
             if (p.uGlowFreq >= 0) GLES20.glUniform1f(p.uGlowFreq, glowParams.freq)
             if (p.uGlowBlend >= 0) GLES20.glUniform1f(p.uGlowBlend, glowParams.blend)
+            if (p.uGlowTint >= 0) {
+                val t = glowTint
+                GLES20.glUniform3f(p.uGlowTint, t[0], t[1], t[2])
+            }
             // 2026-10-28：同色光晕——不再上传色带两端色（见 Shaders.applyGlow 的注释）
         }
 
@@ -2335,6 +2345,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val next = params.sanitize()
         val wasOn = glowParams.enabled
         glowParams = next
+        // tint 预换算（颜色只在参数变化时算一次，帧路径零分配）
+        glowTint = glowRgb(next.color)
         if (!next.enabled || wasOn) return
         postGl {
             // 显式开启 = 给含 glow 维度的坏键一次重试（同一坏键不逐帧重试的口径不变）
@@ -2689,7 +2701,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             uGlowGain = GLES20.glGetUniformLocation(id, "uGlowGain"),
             uGlowAdd = GLES20.glGetUniformLocation(id, "uGlowAdd"),
             uGlowFreq = GLES20.glGetUniformLocation(id, "uGlowFreq"),
-            uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend")
+            uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend"),
+            uGlowTint = GLES20.glGetUniformLocation(id, "uGlowTint")
         )
     }
 

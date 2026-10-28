@@ -154,7 +154,7 @@ class GlowWiringGuardTest {
         assertTrue("必须绑 GLOW_SRC_UNIT", body.contains("GL_TEXTURE0 + GLOW_SRC_UNIT"))
         assertTrue("未就绪兜底 1×1 黑纹理", body.contains("glowBlackTex"))
         assertTrue("必须传 uGlowSrc", body.contains("p.uGlowSrc"))
-        for (u in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend")) {
+        for (u in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowTint")) {
             assertTrue("drawPass 缺 $u 的写入", body.contains("p.$u"))
         }
         // 画完必须解绑（下一帧链要往同一张里画，挂着会被当 feedback loop）
@@ -430,6 +430,9 @@ class GlowWiringGuardTest {
             if (src.contains(token)) bad.add("预设/色带残留：$token")
         }
         if (!src.contains("cam_glow_same_color")) bad.add("缺同色口径说明 cam_glow_same_color")
+        // 第二步（2026-10-28）：删预设之后必须有**色盘自选单色**入口
+        if (!src.contains("GlowColorWheel(")) bad.add("缺色盘入口 GlowColorWheel")
+        if (!src.contains("cam_glow_color")) bad.add("色盘缺标签 cam_glow_color")
         return bad
     }
 

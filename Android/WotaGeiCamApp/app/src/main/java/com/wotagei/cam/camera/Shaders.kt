@@ -482,6 +482,7 @@ uniform float uGlowGain;
 uniform float uGlowAdd;
 uniform float uGlowFreq;
 uniform float uGlowBlend;
+uniform vec3 uGlowTint;
 float glowHash(vec2 p) {
     vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yzx + 33.33);
@@ -490,10 +491,10 @@ float glowHash(vec2 p) {
 vec3 applyGlow(vec3 c, vec2 uv) {
     vec3 glow = texture2D(uGlowSrc, uv).rgb;
     float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));
-    // 2026-10-28 用户口径：**同色光晕**。链里的亮部提取已经把原色乘回来了
-    // （GLOW_COPY_FS），这里直接用那枚颜色、不再做色带 mix（旧版 mix 等于给光棒换色）；
-    // add 改成增益的加成项（仍乘提取出来的颜色），全画面不再被抬一层灰。
-    return c + glow * (uGlowGain + uGlowAdd) * (uGlowBlend * n);
+    // 2026-10-28 用户口径（两步）：① 去掉色带 mix（旧版等于给光棒换色）；② 开放色盘自选单色。
+    // tint 出厂 = 白 ⇒ 恒等，输出仍是"光棒自身颜色"的光晕；用户选色后光晕整体偏该色调。
+    // add 是增益的加成项（仍乘提取出来的颜色），全画面不再被抬一层灰。
+    return c + glow * uGlowTint * (uGlowGain + uGlowAdd) * (uGlowBlend * n);
 }
     """
 

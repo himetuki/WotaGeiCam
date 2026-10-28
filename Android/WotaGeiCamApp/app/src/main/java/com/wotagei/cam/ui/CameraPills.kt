@@ -19,6 +19,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -103,6 +110,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 
 /**
  * 录制页就近胶囊的类别（一个 key 只管一件事）。
@@ -1169,8 +1181,12 @@ private fun GlowPill(
             onValueChangeFinished = onPersist
         )
 
-        // 2026-10-28 用户口径：预设 A/B 与两端色**整组删除**——光晕应跟随光棒自身颜色，
-        // 不是给整片画面换一种发光色。面板里留一句口径说明，避免用户再找"颜色"入口。
+        // 2026-10-28 用户口径（第二步）：删掉预设后**开放色盘自选单色**——
+        // 白/圆心 = 跟随光棒原色；选色后光晕整体偏该色调（单色 tint，不是两端渐变）。
+        GlowColorWheel(current = glow.color, editable = editable) {
+            write(glow.copy(color = it))
+            onPersist()
+        }
         Note(R.string.cam_glow_same_color)
 
         // ---- 状态行（分档 / 停用 / 夹取 / DIRECT）——空状态不占位
@@ -1181,6 +1197,96 @@ private fun GlowPill(
 /** Glow 滑杆读数格式（显示域小数位可配；与全工程 `String.format(Locale.US, …)` 同口径） */
 private fun glowFmt(decimals: Int): (Float) -> String =
     { String.format(Locale.US, "%.${decimals}f", it) }
+
+/**
+ * Glow 色盘（2026-10-28 用户口径：预设删除后允许自选单色）。
+ *
+ * 几何全部收在 core 的纯函数里（[com.wotagei.cam.core.glowHueSatOf] /
+ * [com.wotagei.cam.core.glowArgbFromWheel] / [com.wotagei.cam.core.glowWheelMarkerOf]），
+ * 这里只负责画与拖：
+ * - 外层 = 色相（角度，0° 在右、顺时针）；内层 = 饱和度（圆心 0 = 白）；
+ * - **点圆心 = 白 = 跟随光棒原色**（出厂值）；明度恒 1，光强由「增益」滑杆管；
+ * - 选中点按参数色反算落点画环（白无彩 ⇒ 圆心）。
+ */
+@Composable
+private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> Unit) {
+    val context = LocalContext.current
+    val hueColors = listOf(
+        Color(0xFFFF0000), Color(0xFFFFFF00), Color(0xFF00FF00),
+        Color(0xFF00FFFF), Color(0xFF0000FF), Color(0xFFFF00FF), Color(0xFFFF0000)
+    )
+    val marker = remember(current) { com.wotagei.cam.core.glowWheelMarkerOf(current) }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = stringResource(R.string.cam_glow_color),
+            style = WotaType.label,
+            color = WotaColor.textLo,
+            maxLines = 1
+        )
+        Canvas(
+            Modifier
+                .size(132.dp)
+                .clip(CircleShape)
+                .border(1.dp, WotaColor.acrylicBorder, CircleShape)
+                .pointerInput(editable) {
+                    if (!editable) return@pointerInput
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        if (down.isConsumed) return@awaitEachGesture
+                        down.consume()
+                        val c = Offset(size.width / 2f, size.height / 2f)
+                        val r = minOf(size.width, size.height) / 2f
+                        fun pick(pos: Offset) {
+                            onPick(
+                                com.wotagei.cam.core.glowArgbFromWheel(
+                                    pos.x - c.x, pos.y - c.y, r
+                                )
+                            )
+                        }
+                        pick(down.position)
+                        while (true) {
+                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            if (change.pressed) {
+                                pick(change.position)
+                                change.consume()
+                            } else {
+                                break
+                            }
+                        }
+                    }
+                }
+                .semantics { contentDescription = context.getString(R.string.cam_glow_color) }
+        ) {
+            val radius = size.minDimension / 2f
+            // 色相扫掠 + 白色径向（圆心饱和 0）
+            drawCircle(brush = Brush.sweepGradient(hueColors), radius = radius)
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color.White, Color.White.copy(alpha = 0f)),
+                    center = center,
+                    radius = radius
+                ),
+                radius = radius
+            )
+            // 选中环：参数色 → 单位圆落点
+            val px = center.x + marker[0] * radius
+            val py = center.y + marker[1] * radius
+            drawCircle(
+                color = Color.Black.copy(alpha = 0.55f),
+                radius = 9.dp.toPx(),
+                center = Offset(px, py),
+                style = Stroke(width = 3.dp.toPx())
+            )
+            drawCircle(
+                color = WotaColor.textHi,
+                radius = 6.dp.toPx(),
+                center = Offset(px, py),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
+        }
+    }
+}
+
 
 /**
  * TONE 色调面板（29 §4.4-4，2026-10-28）：高光/阴影/黑点/白点四条滑杆。

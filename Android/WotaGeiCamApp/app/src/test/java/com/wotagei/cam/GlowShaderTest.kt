@@ -51,7 +51,7 @@ class GlowShaderTest {
         "BILATERAL_LITE_CURVE_FS" to Shaders.BILATERAL_LITE_CURVE_FS
     )
 
-    private val glowTokens = listOf("applyGlow", "vUvGlow", "uGlowSrc", "uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "glowHash")
+    private val glowTokens = listOf("applyGlow", "vUvGlow", "uGlowSrc", "uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowTint", "glowHash")
 
     // ------------------------------------------------------------------ glow=false：源码逐字不变
 
@@ -205,7 +205,7 @@ class GlowShaderTest {
         val g = Shaders.glowFragment(Shaders.PASS_THROUGH_FS, FrameEffect.NONE)!!
         assertTrue(
             "叠加式（不是 mix(c, glow, blend)）：在 c 上加光晕",
-            g.contains("return c + glow * (uGlowGain + uGlowAdd) * (uGlowBlend * n);")
+            g.contains("return c + glow * uGlowTint * (uGlowGain + uGlowAdd) * (uGlowBlend * n);")
         )
         // 2026-10-28 用户口径：**同色光晕**——不许再出现色带/hue mix（那是"给光棒换色"）
         assertFalse("光晕不许做色带 mix（用户：要光棒自身颜色的光晕）", g.contains("mix(uGlowColorA"))
@@ -215,7 +215,7 @@ class GlowShaderTest {
             "频率 0 时噪声退化成 1（不做无谓的 hash）",
             g.contains("float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));")
         )
-        for (uniform in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowSrc")) {
+        for (uniform in listOf("uGlowGain", "uGlowAdd", "uGlowFreq", "uGlowBlend", "uGlowTint", "uGlowSrc")) {
             assertTrue("缺 uniform $uniform", g.contains(uniform))
         }
         // 声明段只出现一次（重复声明在 GLSL 里是编译错误）

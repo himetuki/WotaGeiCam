@@ -279,7 +279,8 @@
     <!-- 面板常驻口径：Glow 是 scene layer，改了会进成片（与监看叠加相反） -->
     <string name="cam_glow_note">光晕进成片（烘焙进像素），调参在下一个真帧生效</string>
     <!-- 2026-10-28 用户口径：光晕跟随光棒自身颜色（预设/两端色已删除） -->
-    <string name="cam_glow_same_color">光晕跟随光棒自身的颜色（不再提供换色）</string>
+    <string name="cam_glow_color">光晕颜色</string>
+    <string name="cam_glow_same_color">点色盘圆心 = 跟随光棒原色；选色后光晕整体偏该色调</string>
     <string name="cam_glow_on">开</string>
     <string name="cam_glow_off">关</string>
     <string name="cam_glow_threshold">亮度阈值</string>

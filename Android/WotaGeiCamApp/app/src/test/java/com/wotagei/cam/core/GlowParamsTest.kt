@@ -28,6 +28,7 @@ class GlowParamsTest {
         assertEquals(0.0f, d.add)
         assertEquals(0.0f, d.freq)
         assertEquals(0.6f, d.blend)
+        assertEquals("出厂色 = 白（不改色 = 跟随光棒原色）", 0xFFFFFFFFL, d.color)
     }
 
     @Test
@@ -100,8 +101,18 @@ class GlowParamsTest {
         assertEquals(0.45f, decoded.threshold)
         assertEquals(0.55f, decoded.blend)
         assertEquals(1.5f, decoded.gain)
-        // 新编码串里不再出现颜色键
+        // 旧串没有 color 键 ⇒ 白（跟随原色），其余参数照读（升级不丢参数）
+        assertEquals(0xFFFFFFFFL, decoded.color)
+        // 新编码串仍不出现旧的两端色键
         assertFalse(encodeGlow(GlowParams.DEFAULT).contains("colorA"))
+        assertFalse(encodeGlow(GlowParams.DEFAULT).contains("colorB"))
+        // 新串带单色键，可往返（红）
+        val red = GlowParams(enabled = true, color = 0xFFFF0000L)
+        val back = decodeGlow(encodeGlow(red))
+        assertEquals(0xFFFF0000L, back.color)
+        assertTrue(encodeGlow(red).contains("color=FFFF0000"))
+        // color 键在但坏 ⇒ 整串回默认（坏色不猜）
+        assertEquals(GlowParams.DEFAULT, decodeGlow(encodeGlow(red).replace("color=FFFF0000", "color=ZZZZ")))
     }
 
     @Test
@@ -135,6 +146,40 @@ class GlowParamsTest {
         val encoded = encodeGlow(GlowParams(threshold = 9f))
         assertTrue("越界值必须先钳再写盘：$encoded", encoded.contains("threshold=1.0"))
         assertFalse("编码串里不许出现负数或越界写法", encoded.contains("threshold=9.0"))
+    }
+
+    @Test
+    fun `色盘几何_圆心是白_角度色相_半径饱和`() {
+        // 圆心（dx=dy=0）⇒ 白
+        assertEquals(0xFFFFFFFFL, glowArgbFromWheel(0f, 0f, 50f))
+        // 角度 = 色相：右 = 红、下 = 黄绿交界的黄?（atan2 +y 正 = 90°）⇒ 这里只钉三个主色
+        assertEquals("0° = 红", 0xFFFF0000L, glowArgbFromWheel(50f, 0f, 50f))
+        assertEquals("120° = 绿", 0xFF00FF00L, glowArgbFromWheel(-25f, 43.301f, 50f))
+        assertEquals("240° = 蓝", 0xFF0000FFL, glowArgbFromWheel(-25f, -43.301f, 50f))
+        // 半径超出钳到饱和度 1（边缘色）；半径 0.5 ⇒ 50% 饱和（红与白之间，R 满、G/B 中值）
+        val half = glowArgbFromWheel(25f, 0f, 50f)
+        assertEquals(0xFFFF0000L and 0xFF0000L or 0x808080L, half and 0xFFFFFFL or 0L)
+        // HSV 纯色与主色一致
+        assertEquals(0xFFFF0000L, glowArgbFromHsv(0f, 1f, 1f))
+        assertEquals(0xFFFFFFFFL, glowArgbFromHsv(0.33f, 0f, 1f))
+        assertEquals(0xFF000000L, glowArgbFromHsv(0.2f, 1f, 0f))
+    }
+
+    @Test
+    fun `色盘落点_白在圆心_红在右缘_与取色互逆`() {
+        val white = glowWheelMarkerOf(0xFFFFFFFFL)
+        assertEquals(0f, white[0], 1e-4f)
+        assertEquals(0f, white[1], 1e-4f)
+        assertEquals(0f, white[2], 1e-4f)
+        val red = glowWheelMarkerOf(0xFFFF0000L)
+        assertEquals("红在 +x 方向、饱和 1", 1f, red[0], 1e-3f)
+        assertEquals(0f, red[1], 1e-3f)
+        // 落点回投 → 同色（红）
+        val back = glowArgbFromWheel(red[0] * 50f, red[1] * 50f, 50f)
+        assertEquals(0xFFFF0000L, back)
+        // 灰（无彩）落圆心
+        val gray = glowWheelMarkerOf(0xFF808080L)
+        assertEquals(0f, gray[2], 1e-3f)
     }
 
     @Test
