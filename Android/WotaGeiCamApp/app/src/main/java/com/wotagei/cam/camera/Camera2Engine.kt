@@ -723,6 +723,11 @@ class Camera2Engine(
                 // scheduleReopen 触顶后停在失败态交 UI 恢复，不再无限重开
                 reopenRetries = 0
                 publishPreview(PreviewStatus.ING)
+                // 手动白平衡稳压窗（2026-10-29 用户真机报障）：设置页返回等场景会重建会话，
+                // 桥/HAL 对"一帧请求里的整套 WB 键"可能非原子生效——AWB_OFF 先落、矩阵/增益
+                // 后落，中间那几拍就是裸 OFF 的传感器原色绿。会话活起来的头一拍先按自动走，
+                // 短稳压后再切手动（与面板里热切同一条不闪绿的路径）。
+                wbHoldUntilMs = SystemClock.elapsedRealtime() + WB_SESSION_HOLD_MS
                 applyRepeatingNow()
                 // 会话重建复锁（Q4）：起录/停录/换段/暂停恢复/错误重开都会换一条会话，
                 // 锁定态必须重放一次扫描，否则镜头被 HAL 停在重启后的未知位（R3 的观感代价）
@@ -848,6 +853,8 @@ class Camera2Engine(
             // 兜底同理：能力表说增益不被采纳、但 GPU 管线在 ⇒ 请求侧保持自动白平衡，
             // 色温/色调交给画面算法（见 WotaParams.publishWbPlan）
             wbByGl = wbByGlNow(),
+            // 手动档随增益冻结的 HAL 回报 CCM（null = 没观测到 ⇒ 下发侧退恒等）
+            wbSeedCcm9 = lastAwbCcm9,
             flashOverride = if (flashResetStage) Flash.OFF else null,
             flash = flash.value,
             stabilize = stabilize.value,
@@ -974,8 +981,25 @@ class Camera2Engine(
             logAeAfTelemetry(result)
             val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
             logWbTelemetry(result, manual)
+            // 种子捕获：只要回报显示 3A 自己的色彩管理还在跑（模式不是 TRANSFORM_MATRIX），
+            // HAL 回报的 CCM 就是"活"的，抓来当种子（500ms 节流）。手动 HAL 档回报的是我们
+            // 冻结的种子，不抓；稳压窗/门控期间请求走自动，回报是 FAST ⇒ 照常续上种子——
+            // 这样"手动档从会话第一拍就开着"（冷启 prefs 恢复）也能在几百毫秒内拿到种子。
+            val reportedCcm = runCatching {
+                result.get(android.hardware.camera2.CaptureResult.COLOR_CORRECTION_MODE)
+            }.getOrNull()
+            val nowMs = SystemClock.elapsedRealtime()
+            if (reportedCcm != CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX &&
+                nowMs - lastAwbCcmAtMs > 500
+            ) {
+                transform9Of(result)?.let {
+                    lastAwbCcm9 = it
+                    lastAwbCcmAtMs = nowMs
+                }
+            }
             if (!manual) {
                 wbProbeFails = 0
+                wbAwbActiveFails = 0
                 return
             }
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
@@ -985,6 +1009,13 @@ class Camera2Engine(
             if (now - lastWbKeepAliveMs < WB_KEEP_ALIVE_MS) return
             lastWbKeepAliveMs = now
             markDirty()
+            // 请求侧不在手动 HAL 路径时探测不适用：画面算法路径请求本就不带 TRANSFORM_MATRIX；
+            // 种子未到手（下发侧留在自动等种子）同理——都不是"HAL 拒绝"的证据，不许误闩
+            if (wbByGlNow() || lastAwbCcm9 == null) {
+                wbProbeFails = 0
+                wbAwbActiveFails = 0
+                return
+            }
             // 手动白平衡**运行时探测**（2026-10-26 反馈 #6）：公开 API 拿不到
             // `android.colorCorrection.availableModes`（隐藏键，getKeys 不暴露，真机实证），
             // "支不支持 TRANSFORM_MATRIX"只能行为探测——我们请求了 TRANSFORM_MATRIX，
@@ -1012,6 +1043,26 @@ class Camera2Engine(
                         params.wbHalRejected.value = true
                     }
                 }
+            }
+            // 2026-10-29 卓易通桥（华为 ALN-AL00 实测）的第二道行为判据：桥把声明与回声都照做了
+            //（applied=TRANSFORM_MATRIX、gains 请求=回报），画面却整屏发绿纹丝不动——元数据层
+            // 唯一还能抓的破绽是 **AWB 根本没停**：请求 AWB_MODE=OFF 被采纳时规范要求回报
+            // INACTIVE（或缺报），仍在 SEARCHING/CONVERGED/LOCKED ⇒ 3A 还在自动跑，我们下发的
+            // 增益/矩阵全程被它覆盖。同样连续 4 拍才闩，瞬态残留不误伤。
+            val awbState = runCatching {
+                result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE)
+            }.getOrNull()
+            if (awbState != null &&
+                awbState != android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE_INACTIVE
+            ) {
+                wbAwbActiveFails++
+                if (wbAwbActiveFails >= WB_PROBE_MAX_FAILS && !params.wbHalRejected.value) {
+                    wbAwbActiveFails = 0
+                    Log.w(TAG, "本机请求 AWB_OFF 但回报 awbState=$awbState（自动白平衡未停）⇒ 改走画面算法")
+                    params.wbHalRejected.value = true
+                }
+            } else {
+                wbAwbActiveFails = 0
             }
         }
     }
@@ -1104,12 +1155,18 @@ class Camera2Engine(
     /**
      * 这一拍手动白平衡是否走画面算法（= 请求侧必须留自动白平衡）。
      * 判据与 [com.wotagei.cam.core.wbApplyPlan] 同源：手动档 + 能力表说增益不被采纳 + GPU 管线在。
+     * 2026-10-29 补上运行期闩锁（[com.wotagei.cam.core.WotaParams.wbHalRejected]）：wbApply 已吃
+     * 这枚闩锁，快照侧漏吃 ⇒ 请求仍在发 AWB_MODE_OFF 而 GL 又在乘增益，两条腿打架——两侧必须
+     * 同一份答案。
      */
     private fun wbByGlNow(): Boolean =
         params.wbMode.value == com.wotagei.cam.core.WbPreset.MANUAL &&
             params.renderMode.value == com.wotagei.cam.core.RenderMode.GPU &&
             // 与 WotaParams.wbApply 同口径：只有 HAL **明确声明** TRANSFORM_MATRIX 才走 HAL
-            ability?.halDeclaresTransformMatrix() != true
+            (ability?.halDeclaresTransformMatrix() != true ||
+                params.wbHalRejected.value ||
+                // 会话重建稳压窗：窗内先按自动走，WB 键整套装稳后再切手动
+                SystemClock.elapsedRealtime() < wbHoldUntilMs)
 
     /** 增益采纳判据的相对容差（见 logWbTelemetry）：HAL 量化/归一化不算未采纳 */
     private val WB_ADOPT_TOL = 0.15f
@@ -1119,6 +1176,29 @@ class Camera2Engine(
 
     /** 连续不合格拍数（引擎线程独占写） */
     private var wbAdoptFails = 0
+
+    /**
+     * 手动档 `COLOR_CORRECTION_TRANSFORM` 的种子（见 [RequestApplier.Snapshot.wbSeedCcm9]）：
+     * 自动档帧结果里 HAL 回报的最新 CCM（行优先 9 元素）。切手动档后 AWB 停更，矩阵就冻结在
+     * 这份上——正是"绝对色温"语义需要的那个传感器→sRGB 映射。只增不改空判：单帧缺报不冲掉
+     * 上一次的好观测；换镜头后 ≤0.5s 内可能短暂带上一颗头的种子，比退恒等更接近真值。
+     */
+    private var lastAwbCcm9: FloatArray? = null
+
+    /** 种子捕获节流（500ms）：CCM 随光源慢漂，没必要逐帧抓 */
+    private var lastAwbCcmAtMs = 0L
+
+    /** 「请求 AWB_OFF 但回报里 AWB 还在跑」的连续计数（探测窗同频，引擎线程独占写） */
+    private var wbAwbActiveFails = 0
+
+    /**
+     * 会话重建后的手动白平衡稳压窗截止时刻（见 onConfigured 成功侧）。窗内请求侧按自动白平衡
+     * 走（与画面算法互不相干：wbApply 仍是 byHal ⇒ GL 不乘增益，画面就是纯自动）。
+     */
+    private var wbHoldUntilMs = 0L
+
+    /** 稳压窗时长：桥/HAL 把整套 WB 键落稳的经验值，0.8s 内以自动档示人不闪绿 */
+    private val WB_SESSION_HOLD_MS = 800L
 
     private val WB_MANUAL_TELEMETRY_MS = 2_000L
 

@@ -116,6 +116,18 @@ object RequestApplier {
          * 原色（WIKO 真机：整屏发绿，四档色温毫无差别）。
          */
         val wbByGl: Boolean = false,
+        /**
+         * 手动档要随增益一起下发的 `COLOR_CORRECTION_TRANSFORM` **种子**：引擎在自动档从结果里
+         * 抓的 HAL 最近一次回报的 CCM（行优先 9 元素；null = 从没观测到，比如 LEGACY/桥接层剥键）。
+         *
+         * 为什么必须是种子而不能是恒等矩阵（2026-10-29 华为 ALN-AL00/卓易通 真机取证）：
+         * `TRANSFORM_MATRIX` 模式的契约是"按我给的矩阵×增益算色彩"，写恒等等于把传感器
+         * 原色→sRGB 的校正整个跳过——RGGB 传感器的原生响应绿通道独大，画面立刻整屏发绿，
+         * 增益调什么都压不住。切手动档前 AWB 自己算的那份 CCM 就是现成的正确矩阵：
+         * 冻结它、只动增益，才是"绝对色温"的语义。恒等只配当"没观测到"时的兜底
+         * （这类 HAL 多半无视下发矩阵用自己内部的，行为不变）。
+         */
+        val wbSeedCcm9: FloatArray? = null,
         /** 闪光切换复位阶段的临时值；null 表示沿用用户设定 */
         val flashOverride: Flash?,
         val flash: Flash,
@@ -371,7 +383,25 @@ object RequestApplier {
         return StabilizePlan(ois, eis)
     }
 
-    /** 单位色度矩阵：声明 TRANSFORM_MATRIX 模式但不注入矩阵，色彩完全交给 gains */
+    /**
+     * 行优先 9 元素 → [ColorSpaceTransform]；非法输入（null/长度不对/非有限值）返回 null，
+     * 调用方据此退到 [identityColorTransform]。构造器收的是一维行主序 9 元素 Rational 数组。
+     * 浮点按 1e6 定点化：CCM 元素域 ±8 左右、HAL 侧本身就是有理数近似，1e6 的精度绰绰有余
+     * （`Rational` 会自动约分）。
+     */
+    fun colorTransformFrom9(a: FloatArray?): ColorSpaceTransform? {
+        if (a == null || a.size != 9 || a.any { !it.isFinite() }) return null
+        // CCM 元素域 ±8 左右，×1e6 远在 Int 域内；Rational 自动约分
+        val scale = 1_000_000
+        val rationals = Array(9) { i -> Rational((a[i] * scale).roundToInt(), scale) }
+        return ColorSpaceTransform(rationals)
+    }
+
+    /**
+     * 单位色度矩阵：声明 TRANSFORM_MATRIX 模式但不注入矩阵，色彩完全交给 gains。
+     * 2026-10-29 起只作「从没观测到 HAL 回报 CCM」时的兜底——恒等矩阵在按规范实现的 HAL 上
+     * 会跳过传感器→sRGB 校正（整屏发绿，见 [RequestApplier.Snapshot.wbSeedCcm9]）。
+     */
     fun identityColorTransform(): ColorSpaceTransform {
         val one = Rational(1, 1)
         val zero = Rational(0, 1)
@@ -539,12 +569,23 @@ object RequestApplier {
             return
         }
         if (isManualWhiteBalance(p.wbPreset)) {
+            if (p.wbSeedCcm9 == null) {
+                // 种子未到手（会话头几拍/冷启即手动）：这一拍留在自动白平衡等种子。
+                // 绝不发 OFF+恒等——那正是绿幕闪现的配方（2026-10-29 ALN-AL00/卓易通 取证）。
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_FAST)
+                return
+            }
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
             builder.set(
                 CaptureRequest.COLOR_CORRECTION_MODE,
                 CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
             )
-            builder.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, identityColorTransform())
+            // 矩阵用自动档抓的 HAL 回报种子（见 Snapshot.wbSeedCcm9 的绿幕取证）；观测不到才退恒等
+            builder.set(
+                CaptureRequest.COLOR_CORRECTION_TRANSFORM,
+                colorTransformFrom9(p.wbSeedCcm9) ?: identityColorTransform()
+            )
             builder.set(
                 CaptureRequest.COLOR_CORRECTION_GAINS,
                 rggbFromRgb255(kelvinTintToRgb255(p.kelvin, p.tint))

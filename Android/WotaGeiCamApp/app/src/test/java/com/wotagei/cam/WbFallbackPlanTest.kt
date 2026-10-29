@@ -116,6 +116,80 @@ class WbFallbackPlanTest {
         // 2026-10-28 口径：只认**正向声明**——没明确列出 TRANSFORM_MATRIX 就不信增益
         assertTrue("必须要求 HAL 未声明 TRANSFORM_MATRIX", fn.contains("halDeclaresTransformMatrix() != true"))
         assertTrue("不许再退回「查不到就当支持」的旧判据", !fn.contains("manualWhiteBalancePossible()"))
+        // 2026-10-29：运行期闩锁必须两侧同源（wbApply 已吃，快照侧漏吃 = 请求发 OFF、GL 又乘增益）
+        assertTrue("wbByGlNow 必须吃 wbHalRejected 闩锁", fn.contains("params.wbHalRejected.value"))
+    }
+
+    // ------------------------------------------------- 种子 CCM（2026-10-29 卓易通桥取证）
+
+    @Test
+    fun `手动档矩阵必须用HAL回报的种子_恒等只配当兜底`() {
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(requestSrc, "applyWhiteBalance"))
+        assertTrue(
+            "快照必须带种子字段（行优先 9 元素）",
+            requestSrc.contains("val wbSeedCcm9: FloatArray? = null")
+        )
+        assertTrue(
+            "TRANSFORM 必须写 种子?:恒等（恒等矩阵跳过传感器→sRGB 校正，RGGB 原生绿独大 ⇒ 整屏发绿）",
+            body.contains("colorTransformFrom9(p.wbSeedCcm9) ?: identityColorTransform()")
+        )
+        assertTrue(
+            "不许再直接写恒等矩阵（ALN-AL00/卓易通 真机绿幕根因）",
+            !body.contains("COLOR_CORRECTION_TRANSFORM, identityColorTransform()")
+        )
+    }
+
+    @Test
+    fun `引擎必须在3A还活着时抓种子并递进快照`() {
+        val callback = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(engineSrc, "onCaptureCompleted")
+        )
+        // 抓种子只看"回报的 CCM 不是我们冻结的"（3A 自己在跑），不局限自动档——
+        // 冷启即手动/稳压窗期间请求走自动，种子必须能续上
+        val guardIdx = callback.indexOf(
+            "reportedCcm != CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX"
+        )
+        val seedIdx = callback.indexOf("lastAwbCcm9 = it")
+        assertTrue("必须有 reportedCcm 守卫的种子捕获", guardIdx in 0 until seedIdx)
+        val manualIdx = callback.indexOf("if (!manual)")
+        assertTrue("种子捕获必须在手动分支之前（门控期也要续种子）", guardIdx < manualIdx)
+        assertTrue("快照必须把种子递给请求侧", engineSrc.contains("wbSeedCcm9 = lastAwbCcm9"))
+    }
+
+    @Test
+    fun `下发侧种子未到手必须留在自动_不许发OFF加恒等`() {
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(requestSrc, "applyWhiteBalance"))
+        val gateIdx = body.indexOf("if (p.wbSeedCcm9 == null)")
+        val offIdx = body.indexOf("CONTROL_AWB_MODE_OFF")
+        assertTrue("手动分支必须有种子门", gateIdx in 0 until offIdx)
+        assertTrue(
+            "种子门内必须留在自动白平衡",
+            body.contains("p.wbSeedCcm9 == null")
+        )
+    }
+
+    @Test
+    fun `会话重建后手动档必须先过稳压窗`() {
+        // onConfigured 成功侧布防
+        val configured = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(engineSrc, "onConfigured")
+        )
+        assertTrue("会话配成必须布防稳压窗", configured.contains("wbHoldUntilMs = SystemClock"))
+        // wbByGlNow（表达式体）吃稳压窗 + 闩锁，两侧同源
+        val fn = engineSrc.substringAfter("private fun wbByGlNow()").substringBefore("private val")
+        assertTrue("稳压窗必须参与裁决", fn.contains("wbHoldUntilMs"))
+        // 探测门控覆盖稳压窗与种子未到手（都不是 HAL 拒绝的证据）
+        val callback = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(engineSrc, "onCaptureCompleted")
+        )
+        val glGuardIdx = callback.indexOf("if (wbByGlNow() || lastAwbCcm9 == null)")
+        val probeIdx = callback.indexOf("val applied =")
+        assertTrue(
+            "回声探测必须被 wbByGlNow+种子门控（GL/稳压/无种子时请求本就不带 TRANSFORM_MATRIX，探测会误闩）",
+            glGuardIdx in 0 until probeIdx
+        )
+        assertTrue("AWB-未停判据必须存在", engineSrc.contains("CONTROL_AWB_STATE_INACTIVE"))
+        assertTrue("AWB-未停判据必须连续计数", callback.contains("wbAwbActiveFails"))
     }
 
     @Test
