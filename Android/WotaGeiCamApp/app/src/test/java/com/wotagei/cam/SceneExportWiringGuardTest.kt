@@ -222,6 +222,18 @@ class SceneExportWiringGuardTest {
         val bright = shader("SCENE_BRIGHT_FS")
         assertTrue("亮部提取必须把掩码乘回**原色**（只让 tint 负责换色）", bright.contains("c * w"))
         assertTrue("亮度取 Rec601 三通道加权（与 GLOW_COPY_FS 同口径）", bright.contains("0.299, 0.587, 0.114"))
+        // 🟡-6 角点防御（2026-10-29，docs/reviews/1029/29-shader-bright-corner.md）：hi 的
+        // 1.0 截断曾在唯一角点 (threshold=1.0, soft=0) 吃掉 +0.0001 余量 ⇒ lo==hi ⇒
+        // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。修复式勿叠加 1.0 上限——叠加在
+        // 同一角点仍截回 lo==hi，等于没修（29 专档「修复方向」二次校核结论）。
+        assertTrue(
+            "hi 必须是 max(uThreshold + uSoft, lo + 0.0001)（edge0<edge1 恒成立，与 GLOW_COPY_FS 同款防御）",
+            bright.contains("max(uThreshold + uSoft, lo + 0.0001)")
+        )
+        assertFalse(
+            "不许再出现 1.0 截断（min(uThreshold + uSoft 形态 = 角点退化回潮）",
+            bright.contains("min(uThreshold + uSoft")
+        )
 
         val blur = shader("SCENE_BLUR_FS")
         // 9 tap 权重与实时链 GlowBlurChain 的 gaussianSource 逐字同源

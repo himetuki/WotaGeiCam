@@ -135,7 +135,11 @@ internal object Shaders {
             vec3 c = texture2D(uSrc, vUv).rgb;
             float l = dot(c, vec3(0.299, 0.587, 0.114));
             float lo = max(uThreshold - uSoft, 0.0);
-            float hi = min(uThreshold + uSoft + 0.0001, 1.0);
+            // hi 必须严格 > lo（GLOW_COPY_FS 同款防御，勿叠加 1.0 上限——叠加会在唯一角点
+            // (threshold=1.0, soft=0) 把余量截回 lo==hi ⇒ smoothstep 未定义，驱动相关 NaN 可
+            // 污染导出帧）。修复后该角点 lo=1.0、hi=1.0001，edge0<edge1 恒成立；luma=1.0 时
+            // w=0 与 GLOW_COPY_FS 既有语义一致，非新分叉。
+            float hi = max(uThreshold + uSoft, lo + 0.0001);
             float w = smoothstep(lo, hi, l);
             gl_FragColor = vec4(c * w, 1.0);
         }
