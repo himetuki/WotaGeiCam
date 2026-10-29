@@ -676,37 +676,59 @@ fun CameraScreen(
         }
     }
 
-    // ---- 预览自愈 watchdog（2026-10-29 黑屏取证）
-    // 现场：设置页快速连按返回 → 录制页反复重建 → 最后一次重建后相机没被拉起，整屏黑但进程活着
-    // （系统栏可唤出、日志无崩溃、黑屏时刻之后再无任何相机遥测）。根因家族是"幂等早退拿缓存状态
-    // 当判据"，修复见 CameraController.start/resume（改用引擎真身 isPreviewLive）。这里再加一层
-    // 兜底：页面看得见却没心跳时分级自愈——先重启预览，仍死就整条重建引擎。
-    // 节拍 1.2s：正常开局（相机打开 ~1s）不会误触；连续 5 拍（6s）无真身才升级重建。
+    // ---- 预览自愈 watchdog（2026-10-29 黑屏取证，二次修订）
+    // 一次修订（r30）的教训：判据取了 isPreviewLive()（线程/设备/会话/期望），但**重建卡死的
+    // 中间态下这些字段仍是"看着活着"**，看门狗被判活为真、永不介入——用户装 r30 仍黑屏。
+    // 二次修订改判据为「**有没有真的收到相机帧**」（result 回调累计数，进程内单调）：
+    // 状态字段能残留，帧数不会。任何把管线弄死的路径都会表现为"帧数不再增长"，一律自愈。
+    // 另：本节留在组合里、以 ctrl 为键——录制页被弹出栈时组合销毁，此时页面不可见、也不该
+    // 让后台继续拉相机；回到页面会重新布防（misses 归零重来）。
     LaunchedEffect(ctrl, activeSink) {
         var misses = 0
+        var lastCount = ctrl.frameResultCount() ?: -1L
+        var lastGrowAtMs = SystemClock.elapsedRealtime()
         while (true) {
-            delay(1200)
+            delay(1000)
+            val nowMs = SystemClock.elapsedRealtime()
             val s = ctrl.state.value
+            val count = ctrl.frameResultCount()
             val pageOkay = !s.needsCameraPermission && runner.status.value == RecordStatus.IDLE
-            val live = ctrl.engineOrNull?.isPreviewLive() == true
-            if (!pageOkay || live) {
+            // 有帧到达 = 管线活着（呼吸灯式判据，无状态字段依赖）
+            if (count != null && count != lastCount) {
+                lastCount = count
+                lastGrowAtMs = nowMs
+                misses = 0
+                continue
+            }
+            if (!pageOkay) {
+                lastGrowAtMs = nowMs
+                misses = 0
+                continue
+            }
+            // 连续 3s 无新帧才认为可疑（相机打开本身约 1s，避免开局误触），
+            // 6s 起算 miss、分级自愈
+            if (nowMs - lastGrowAtMs < 3000L) {
                 misses = 0
                 continue
             }
             misses++
             when {
-                ctrl.engineOrNull == null && misses >= 2 -> {
+                count == null && misses >= 2 -> {
                     Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
                     ctrl.bind(activeSink)
+                    lastCount = -1L
+                    lastGrowAtMs = nowMs
                     misses = 0
                 }
-                misses == 5 -> {
-                    Log.w(TAG_UI, "预览自愈：管线无心跳 ⇒ 重启预览（device=${s.device} preview=${s.preview}）")
+                misses == 4 -> {
+                    Log.w(TAG_UI, "预览自愈：3s 无相机帧 ⇒ 重启预览（device=${s.device} preview=${s.preview}）")
                     ctrl.restartPreview()
                 }
-                misses >= 12 -> {
-                    Log.w(TAG_UI, "预览自愈：重启无效 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）")
+                misses >= 9 -> {
+                    Log.w(TAG_UI, "预览自愈：重启预览后仍无帧 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）")
                     ctrl.forceRebind(activeSink)
+                    lastCount = -1L
+                    lastGrowAtMs = nowMs
                     misses = 0
                 }
             }

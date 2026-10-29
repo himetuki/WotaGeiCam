@@ -5,6 +5,13 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import android.os.SystemClock
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -103,6 +110,65 @@ class MainActivity : ComponentActivity() {
      */
     internal fun onPlayerPlaybackStarted() {
         brightnessRamp.onPlayerPlaybackStarted(window, WotaSettings.of(this))
+    }
+
+    /**
+     * 预览自愈 watchdog（2026-10-29 黑屏二次取证）：**Activity 级**兜底。
+     *
+     * 为什么不能只放在 [CameraScreen] 的组成里：黑屏的一种可能形态是页面卡在导航中间态、
+     * 组合不再重组——那时页面内的 LaunchedEffect 也停摆，看门狗等于不存在。这一层只要
+     * Activity 在前台就会跑，与任何页面的组合生命周期无关。
+     *
+     * 判据与页面内那一层同源：**相机 result 回调是否还在增长**（唯一无法伪造的存活证据），
+     * 且当前路由是录制页（其他页面相机可以合法停着）。连续 4s 无新帧 ⇒ 重启预览；
+     * 连续 10s 仍无帧 ⇒ 整条重建引擎。自愈动作都走门面，与 UI 状态无关。
+     */
+    private var previewWatchJob: Job? = null
+    private var watchRoute: String? = null
+
+    internal fun onRouteForPreviewWatch(route: String?, ctrl: com.wotagei.cam.camera.CameraController?) {
+        watchRoute = route
+        if (route != ROUTE_CAMERA || ctrl == null) {
+            previewWatchJob?.cancel()
+            previewWatchJob = null
+            return
+        }
+        if (previewWatchJob?.isActive == true) return
+        previewWatchJob = lifecycleScope.launch {
+            var lastCount = -1L
+            var lastGrowAtMs = SystemClock.elapsedRealtime()
+            var restarted = false
+            while (isActive) {
+                delay(1000)
+                if (watchRoute != ROUTE_CAMERA) break
+                // 只在真正可见时判（后台/其它页不算）
+                if (lifecycle.currentState != Lifecycle.State.RESUMED) {
+                    lastGrowAtMs = SystemClock.elapsedRealtime()
+                    restarted = false
+                    continue
+                }
+                val count = ctrl.frameResultCount()
+                val nowMs = SystemClock.elapsedRealtime()
+                if (count != null && count != lastCount) {
+                    lastCount = count
+                    lastGrowAtMs = nowMs
+                    restarted = false
+                    continue
+                }
+                val deadMs = nowMs - lastGrowAtMs
+                if (deadMs in 4_000L..9_999L && !restarted) {
+                    restarted = true
+                    Log.w("WotaWatch", "Activity 级预览自愈：4s 无相机帧 ⇒ 重启预览")
+                    ctrl.restartPreview()
+                } else if (deadMs >= 10_000L) {
+                    Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
+                    val sink = ctrl.currentSink()
+                    if (sink != null) ctrl.forceRebind(sink)
+                    lastGrowAtMs = nowMs
+                    restarted = false
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -237,9 +303,12 @@ private fun WotaRoot() {
             windowOwner?.onRouteForWindowKeepOn(destination.route)
             // 设置页覆盖保活旗标（2026-10-29 手动白平衡绿帧）：此监听在 navigate/popBackStack 时
             // 同步触发、先于旧页 dispose，旗标读到的新值即时生效。相机 entry 不在栈上时按 false 走老路。
-            runCatching {
+            val cameraCtrl = runCatching {
                 CameraController.of(nav.getBackStackEntry(ROUTE_CAMERA))
-            }.getOrNull()?.previewKeptBehind = destination.route == ROUTE_SETTINGS
+            }.getOrNull()
+            cameraCtrl?.previewKeptBehind = destination.route == ROUTE_SETTINGS
+            // Activity 级预览自愈（与页面组合解耦）：路由进出录制页时起停
+            windowOwner?.onRouteForPreviewWatch(destination.route, cameraCtrl)
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }

@@ -180,6 +180,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         bind(sink)
     }
 
+    /** 当前绑定的预览 sink（自愈重建要用同一枚；null = 还没绑过面） */
+    fun currentSink(): PreviewSink? = boundSink
+
+    /** 相机结果回调累计数（给预览自愈心跳用；null = 引擎不在） */
+    fun frameResultCount(): Long? = engine?.frameResultCount()
+
     /** 显示面挂摘/重挂（设置页覆盖往返）：布防引擎侧手动白平衡稳压窗（绿帧取证，2026-10-29） */
     fun onPreviewSurfaceTransient() {
         engine?.onSinkSurfaceTransient()

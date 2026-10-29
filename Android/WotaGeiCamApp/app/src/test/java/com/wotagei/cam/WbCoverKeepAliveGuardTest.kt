@@ -105,8 +105,17 @@ class WbCoverKeepAliveGuardTest {
         assertTrue(
             "录制页必须有预览自愈 watchdog（先重启预览、仍死再整条重建；codeOnly 遮蔽字符串，按代码锚）",
             screenSrc.contains("ctrl.restartPreview()") &&
-                screenSrc.contains("ctrl.forceRebind(activeSink)") &&
-                screenSrc.contains("isPreviewLive()")
+                screenSrc.contains("ctrl.forceRebind(activeSink)")
+        )
+        // 2026-10-29 二次取证：判据必须是**帧心跳**（result 回调计数），不许再用状态字段——
+        // r30 用 isPreviewLive 判活，重建卡死时字段仍"看着活着"，看门狗被绕过、用户仍黑屏。
+        assertTrue(
+            "看门狗判据必须是帧心跳（frameResultCount），状态字段可残留、帧数不会",
+            screenSrc.contains("frameResultCount()")
+        )
+        assertTrue(
+            "引擎必须暴露 result 回调计数",
+            engineSrc.contains("fun frameResultCount(): Long")
         )
     }
 

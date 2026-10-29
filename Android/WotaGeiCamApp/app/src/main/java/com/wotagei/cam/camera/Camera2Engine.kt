@@ -588,6 +588,14 @@ class Camera2Engine(
     fun isPreviewLive(): Boolean =
         threadRunning && device != null && session != null && desiredPreview
 
+    /**
+     * 相机结果回调累计数（单调递增，进程内）。**唯一无法伪造的存活证据**：状态字段、会话
+     * 引用在重建/竞态里都可能残留成"看着活着"，而"到底有没有收到帧"只有计数知道
+     * （2026-10-29 黑屏二次取证：r30 的 isPreviewLive 判据在重建卡死时仍为真，看门狗被
+     * 骗过去、永不介入；日志里"最后一次重建后再无任何相机遥测"正是这条线索）。
+     */
+    fun frameResultCount(): Long = camResultCount
+
     fun onSinkSurfaceReady() {
         post {
             sinkWaitRetries = 0
