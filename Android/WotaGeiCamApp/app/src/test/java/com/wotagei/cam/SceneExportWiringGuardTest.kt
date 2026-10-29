@@ -274,4 +274,48 @@ class SceneExportWiringGuardTest {
         assertTrue("必须写 IS_PENDING=1 再清 0（相册里不该看到半成品）", runnerSrc.contains("IS_PENDING"))
         assertTrue("封轨后（sealed）失败不许删行（删行=删文件=丢成片）", runnerSrc.contains("if (!sealed)"))
     }
+
+    // ---------------------------------------------------------------- 旋转恰好生效一次
+
+    @Test
+    fun `解码format必须剥除容器旋转角`() {
+        // 🔴 2026-10-29（docs/reviews/1029/47-scene-export-rotation.md）：平台把
+        // "带 KEY_ROTATION 的 format + 有输出面的解码器"解释成把旋转烘进解码像素
+        //（OrientationExport.bakedRotationNeedsStrip 的仓内真机证据），muxer 又写同一个
+        // hint ⇒ 双重旋转——竖录/前摄横录源片后渲染导出方向错误。
+        // 与 ArcRepairRunner 同款：配置解码器必须过 decoderFormatOf（保真拷贝+剥 KEY_ROTATION）。
+        assertTrue(
+            "解码器 format 必须过 decoderFormatOf（剥 KEY_ROTATION，与 ArcRepairRunner 同款）",
+            runnerSrc.contains("dec.configure(decoderFormatOf(vFormat), decoderSurface, null, 0)")
+        )
+        assertFalse(
+            "不许再把带旋原始 format 直接喂给带输出面的解码器",
+            runnerSrc.contains("dec.configure(vFormat,")
+        )
+    }
+
+    @Test
+    fun `muxer旋转写且仅写源旋转一次`() {
+        // 剥旋后解码像素是 as-buffered 原样 ⇒ 容器方向只能靠 hint 恰好补一次：
+        // 读数必须双源（readSourceRotationHint：retriever 权威 + extractor 兜"部分机型给 0"，
+        // 单源 retriever 在那些机型读 0 会导出横躺片），写出经 exportOrientationHint
+        // 与录制/修复/无损导出同一条写出口径。
+        assertTrue(
+            "旋转读数必须走双源 readSourceRotationHint",
+            runnerSrc.contains("readSourceRotationHint(ctx, src.uri)")
+        )
+        assertFalse(
+            "单源读数 readRotationDegrees 必须移除（它已被双源口径取代）",
+            runnerSrc.contains("readRotationDegrees")
+        )
+        assertTrue(
+            "hint 必须来自 exportOrientationHint(readSourceRotationHint(...))（写出与读数同一处）",
+            runnerSrc.contains("exportOrientationHint(readSourceRotationHint(ctx, src.uri), ORIENTATION_MUXER_CCW)")
+        )
+        // 反证：双源裁决纯函数必须真实存在（上面的"引用"不是指向空想）
+        assertTrue(
+            "readSourceRotationHint 必须在 RemuxOrientation 定义（无损/选轨导出同源）",
+            KotlinSourceScan.mainSourceText("player/RemuxOrientation.kt").contains("fun readSourceRotationHint")
+        )
+    }
 }

@@ -7,7 +7,6 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import android.os.SystemClock
@@ -16,6 +15,7 @@ import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
 import com.wotagei.cam.record.monotonicPts
+import com.wotagei.cam.record.decoderFormatOf
 import com.wotagei.cam.record.exportOrientationHint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -92,9 +92,13 @@ class SceneExportRunner(private val ctx: Context) {
                 ?: return@withContext fail(pendingUri, Reason.OPEN)
             afd.use { fd ->
                 muxer = MediaMuxer(fd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                // 容器方向必须恰好生效一次：解码器喂的是剥过 KEY_ROTATION 的 format（见下
+                // dec.configure），像素保持 as-buffered 原样 ⇒ 方向只能靠这里的 hint 补。
+                // 读数走双源（retriever 权威 + extractor 兜"部分机型给 0"），与无损/选轨导出
+                // 同一枚 readSourceRotationHint；写出经 exportOrientationHint 与录制/修复路同口径
                 runCatching {
                     muxer?.setOrientationHint(
-                        exportOrientationHint(readRotationDegrees(src), ORIENTATION_MUXER_CCW)
+                        exportOrientationHint(readSourceRotationHint(ctx, src.uri), ORIENTATION_MUXER_CCW)
                     )
                 }
 
@@ -163,7 +167,11 @@ class SceneExportRunner(private val ctx: Context) {
                     vFormat.getString(MediaFormat.KEY_MIME) ?: MediaFormat.MIMETYPE_VIDEO_AVC
                 )
                 decoder = dec
-                dec.configure(vFormat, decoderSurface, null, 0)
+                // 喂解码器的 format 必须剥掉 KEY_ROTATION（与 ArcRepairRunner 同款）：平台把
+                // "带旋转的 format + 有输出面"解释成把旋转烘进解码像素，而 muxer 又写了同一个
+                // hint ⇒ 双重旋转（竖录/前摄横录导出方向错误）。剥离后像素 as-buffered，
+                // 与上面写出的 hint 恰好各生效一次；width/height 原样，90° 源不会被压扁。
+                dec.configure(decoderFormatOf(vFormat), decoderSurface, null, 0)
                 dec.start()
 
                 // ---- muxer：音轨格式先入，视频轨等编码器回报
@@ -426,16 +434,6 @@ class SceneExportRunner(private val ctx: Context) {
         is IllegalStateException -> Reason.MUXER
         else -> Reason.ENCODER
     }
-
-    private fun readRotationDegrees(src: VideoClip): Int = runCatching {
-        val r = MediaMetadataRetriever()
-        try {
-            r.setDataSource(ctx, src.uri)
-            r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-        } finally {
-            runCatching { r.release() }
-        }
-    }.getOrDefault(0)
 
     private fun MediaFormat.intOr(key: String, fallback: Int): Int =
         if (containsKey(key)) runCatching { getInteger(key) }.getOrDefault(fallback) else fallback
