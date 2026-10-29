@@ -125,7 +125,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** 绑定预览输出面；换面（DIRECT↔GPU）时重建引擎，参数总线保持不变 */
     fun bind(sink: PreviewSink) {
-        if (boundSink === sink && engine != null) return
+        // 早退也要消化 pendingStart（2026-10-29 黑屏取证）：引擎还在时直接 return 会把
+        // "该起相机"的欠账永久挂着（之后没人再调 start）
+        if (boundSink === sink && engine != null) {
+            if (pendingStart) start()
+            return
+        }
         engine?.close()
         boundSink = sink
         engine = Camera2Engine(
@@ -163,6 +168,18 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.onSinkSurfaceReady()
     }
 
+    /**
+     * 预览自愈第二级（2026-10-29 黑屏取证）：整条重建引擎——旧引擎先关，按同一 sink 重新建
+     * 并启动。预览自愈 watchdog 在「重启预览无效」时调它，保证任何卡死态都能自己爬出来，
+     * 不再要求用户手动重进页面。
+     */
+    fun forceRebind(sink: PreviewSink) {
+        engine?.close()
+        engine = null
+        boundSink = null
+        bind(sink)
+    }
+
     /** 显示面挂摘/重挂（设置页覆盖往返）：布防引擎侧手动白平衡稳压窗（绿帧取证，2026-10-29） */
     fun onPreviewSurfaceTransient() {
         engine?.onSinkSurfaceTransient()
@@ -176,14 +193,10 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             pendingStart = true
             return
         }
-        // 覆盖保活回场（设置页往返）：设备与预览都在跑，这里任何"重开"都会撞上桥的会话重建
-        // 窗口（手动白平衡绿帧）——原样返回，预览本来就没停过。只 OPEN 不预览（ON_PAUSE 后）
-        // 的设备仍走下面正常路径由 resume()/这里补 startPreview。
-        if (engineOrNull?.deviceStatus == DeviceStatus.OPEN_SUCCEED &&
-            ui.value.preview == PreviewStatus.ING
-        ) {
-            return
-        }
+        // 覆盖保活回场（设置页往返）且管线**真身**活着：原样返回，任何"重开"都会撞上桥的
+        // 会话重建窗口（手动白平衡绿帧）。2026-10-29 黑屏取证后判据从缓存状态改成引擎真身——
+        // 快速导航的竞态里 deviceStatus/preview 可能残留成"看着活着"，早退会把相机卡死。
+        if (engineOrNull?.isPreviewLive() == true) return
         if (!granted(Manifest.permission.CAMERA)) {
             ui.value = ui.value.copy(needsCameraPermission = true)
             pendingStart = true
@@ -213,9 +226,10 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** ON_RESUME：设备还在就重起预览，被系统收回了就整条重开 */
     fun resume() {
         val e = engine ?: run { pendingStart = true; return }
-        // 预览一直在跑（覆盖保活回场）：不重提请求——面板已验证"同会话重发请求"不闪绿，
-        // 但"重启预览 + 首拍重提交"是否在桥上也干净没有证据，能不动就不动
-        if (e.deviceStatus == DeviceStatus.OPEN_SUCCEED && ui.value.preview == PreviewStatus.ING) return
+        // 预览真身一直在跑（覆盖保活回场）：不重提请求——同会话重发请求不闪绿，但
+        // "重启预览 + 首拍重提交"是否在桥上也干净没有证据，能不动就不动。判据用真身
+        // （2026-10-29 黑屏取证：缓存状态可能残留，早退会把相机卡死在黑屏态）
+        if (e.isPreviewLive()) return
         if (e.deviceStatus == DeviceStatus.OPEN_SUCCEED) e.startPreview() else start()
     }
 

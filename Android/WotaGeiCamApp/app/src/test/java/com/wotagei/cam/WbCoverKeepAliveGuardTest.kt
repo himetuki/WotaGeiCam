@@ -59,10 +59,11 @@ class WbCoverKeepAliveGuardTest {
 
     @Test
     fun `回场start必须对存活会话早退_且GL引擎随VM释放`() {
-        assertTrue(
-            "start() 必须对「设备 OPEN_SUCCEED 且预览 ING」早退（openCurrentLens 不幂等，重开=绿帧）",
-            ctrlSrc.contains("DeviceStatus.OPEN_SUCCEED &&") && ctrlSrc.contains("PreviewStatus.ING")
-        )
+        // 2026-10-29 黑屏取证后：早退判据从缓存状态（OPEN_SUCCEED+ING）改成引擎真身 isPreviewLive
+        //（缓存状态在快速导航竞态里会残留成"看着活着"，早退会把相机卡死）。openCurrentLens 不幂等
+        // 的理由不变——真活着时仍然不许重开。
+        val startBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(ctrlSrc, "start"))
+        assertTrue("start() 早退必须用引擎真身判据", startBody.contains("isPreviewLive()"))
         val cleared = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(ctrlSrc, "onCleared"))
         assertTrue("onCleared 必须释放缓存的 GL 引擎", cleared.contains("cachedGlSink?.release()"))
     }
@@ -80,8 +81,32 @@ class WbCoverKeepAliveGuardTest {
             ctrlSrc.contains("if (previewKeptBehind) return")
         )
         assertTrue(
-            "resume 必须对「预览仍在跑」早退（不重提请求）",
-            ctrlSrc.contains("ui.value.preview == PreviewStatus.ING) return")
+            "start/resume 的回场早退必须用引擎真身 isPreviewLive（缓存状态可能残留成黑屏死态）",
+            ctrlSrc.contains("isPreviewLive()")
+        )
+    }
+
+    @Test
+    fun `黑屏自愈_真身判据加预览看门狗`() {
+        // 2026-10-29 黑屏取证：设置页快速连按返回 → 录制页反复重建 → 最后一次重建后相机
+        // 没被拉起（进程活着、无崩溃、之后再无相机遥测），整屏黑。三处防线必须都在：
+        val engineSrc = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/Camera2Engine.kt"))
+        assertTrue(
+            "引擎必须提供真身判据 isPreviewLive（线程+设备+会话+期望预览）",
+            engineSrc.contains("fun isPreviewLive(): Boolean") &&
+                engineSrc.contains("session != null && desiredPreview")
+        )
+        assertTrue(
+            "bind 的早退必须消化 pendingStart（否则该起相机的欠账永久挂着）",
+            ctrlSrc.contains("if (boundSink === sink && engine != null) {") &&
+                ctrlSrc.contains("if (pendingStart) start()")
+        )
+        assertTrue("必须提供整条重建入口 forceRebind", ctrlSrc.contains("fun forceRebind(sink: PreviewSink)"))
+        assertTrue(
+            "录制页必须有预览自愈 watchdog（先重启预览、仍死再整条重建；codeOnly 遮蔽字符串，按代码锚）",
+            screenSrc.contains("ctrl.restartPreview()") &&
+                screenSrc.contains("ctrl.forceRebind(activeSink)") &&
+                screenSrc.contains("isPreviewLive()")
         )
     }
 

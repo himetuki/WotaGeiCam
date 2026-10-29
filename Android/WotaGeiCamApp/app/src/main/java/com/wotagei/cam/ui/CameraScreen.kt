@@ -676,6 +676,43 @@ fun CameraScreen(
         }
     }
 
+    // ---- 预览自愈 watchdog（2026-10-29 黑屏取证）
+    // 现场：设置页快速连按返回 → 录制页反复重建 → 最后一次重建后相机没被拉起，整屏黑但进程活着
+    // （系统栏可唤出、日志无崩溃、黑屏时刻之后再无任何相机遥测）。根因家族是"幂等早退拿缓存状态
+    // 当判据"，修复见 CameraController.start/resume（改用引擎真身 isPreviewLive）。这里再加一层
+    // 兜底：页面看得见却没心跳时分级自愈——先重启预览，仍死就整条重建引擎。
+    // 节拍 1.2s：正常开局（相机打开 ~1s）不会误触；连续 5 拍（6s）无真身才升级重建。
+    LaunchedEffect(ctrl, activeSink) {
+        var misses = 0
+        while (true) {
+            delay(1200)
+            val s = ctrl.state.value
+            val pageOkay = !s.needsCameraPermission && runner.status.value == RecordStatus.IDLE
+            val live = ctrl.engineOrNull?.isPreviewLive() == true
+            if (!pageOkay || live) {
+                misses = 0
+                continue
+            }
+            misses++
+            when {
+                ctrl.engineOrNull == null && misses >= 2 -> {
+                    Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
+                    ctrl.bind(activeSink)
+                    misses = 0
+                }
+                misses == 5 -> {
+                    Log.w(TAG_UI, "预览自愈：管线无心跳 ⇒ 重启预览（device=${s.device} preview=${s.preview}）")
+                    ctrl.restartPreview()
+                }
+                misses >= 12 -> {
+                    Log.w(TAG_UI, "预览自愈：重启无效 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）")
+                    ctrl.forceRebind(activeSink)
+                    misses = 0
+                }
+            }
+        }
+    }
+
     // 预览流尺寸换了档 = 会话结构签名变了，催一次重建，别让会话继续吃旧尺寸的流
     DisposableEffect(directSink, ctrl) {
         directSink.onStreamSizeChanged = { ctrl.onPreviewSurfaceReady() }

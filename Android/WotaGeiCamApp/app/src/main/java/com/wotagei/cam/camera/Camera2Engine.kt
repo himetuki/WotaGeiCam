@@ -578,6 +578,16 @@ class Camera2Engine(
     }
 
     /** 输出面就绪回调（GPU 引擎的 SurfaceTexture 建好后由上层通知），立即重试建会话 */
+    /**
+     * 预览管线**真身**是否活着（2026-10-29 黑屏取证）：线程在跑、设备在、会话在、期望预览在。
+     *
+     * 给门面的幂等早退用。**不许拿缓存状态判**（`deviceStatus==OPEN_SUCCEED && preview==ING`
+     * 在快速导航/生命周期的竞态里可能残留成"看着活着"）——拿它当"不用重开"的判据会把相机
+     * 卡死在没人重启的死态：页面在、HUD 在、预览全黑，只有重进页面才可能恢复。
+     */
+    fun isPreviewLive(): Boolean =
+        threadRunning && device != null && session != null && desiredPreview
+
     fun onSinkSurfaceReady() {
         post {
             sinkWaitRetries = 0
