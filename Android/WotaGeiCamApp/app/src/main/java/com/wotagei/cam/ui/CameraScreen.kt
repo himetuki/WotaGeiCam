@@ -651,19 +651,28 @@ fun CameraScreen(
     }
 
     // ---- 预览 sink：GPU 用 GlRenderEngine，DIRECT 用 DirectSink（全程不建 EGL，见 camera/DirectSink 注释）
+    // GPU 引擎从门面取**页面级缓存**实例：跨设置往返（previewKeptBehind）复用同一 SurfaceTexture，
+    // 相机会话因此不必重建——重建的首几拍在卓易通桥上是裸 AWB_OFF 的绿帧（2026-10-29 真机取证）
     val directSink = remember { DirectSink() }
     val activeSink: PreviewSink = remember(renderMode) {
-        if (renderMode == RenderMode.GPU) GlRenderEngine() else directSink
+        if (renderMode == RenderMode.GPU) ctrl.glSink() else directSink
     }
     val glEngine = activeSink as? GlRenderEngine
     DisposableEffect(ctrl, activeSink) {
         runner.glProvider = { activeSink as? GlRenderEngine }
         (activeSink as? GlRenderEngine)?.onCameraSurfaceReady = { ctrl.onPreviewSurfaceReady() }
+        // 显示面挂摘/重挂 → 布防手动白平衡稳压窗（卓易通桥过渡拍绿帧，2026-10-29）
+        (activeSink as? GlRenderEngine)?.onDisplaySurfaceTransient = { ctrl.onPreviewSurfaceTransient() }
         ctrl.bind(activeSink)
         ctrl.start()
         onDispose {
-            ctrl.unbind(activeSink)
-            (activeSink as? GlRenderEngine)?.release()
+            if (ctrl.previewKeptBehind && activeSink is GlRenderEngine) {
+                // 设置页覆盖（旗标由 MainActivity 的目的地回调维护）：相机与 GL 引擎原样保活，
+                // 回场零重建。窗口面已由 CameraSurface 的面销毁回调摘除（GL 线程与上下文保持
+                // 存活是 PreviewSink 系的既有契约）；GL 引擎的释放权上收 CameraController.onCleared。
+            } else {
+                ctrl.unbind(activeSink)
+            }
         }
     }
 
@@ -878,7 +887,9 @@ fun CameraScreen(
             runner.shutdown()
             owner.lifecycle.removeObserver(stopOnPause)
             ctrl.detachLifecycle(owner.lifecycle)
-            ctrl.stop()
+            // 设置页覆盖保活（2026-10-29 手动白平衡绿帧）：覆盖期相机与预览原样留着，
+            // 回场零重建；真正离开（媒体库/播放页等）才停预览关设备
+            if (!ctrl.previewKeptBehind) ctrl.stop()
         }
     }
 

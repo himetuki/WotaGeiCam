@@ -93,6 +93,26 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     private var pendingStart = false
     private var busyLoading = false
 
+    // ------------------------------------------------- 设置页覆盖保活（2026-10-29 手动白平衡绿帧）
+
+    /**
+     * 设置页正推在录制页之上（MainActivity 的目的地回调维护，navigate/popBackStack 时同步触发，
+     * 先于旧页 dispose，读到的必是新值）。true 期间录制页 dispose **不关相机、不释 GL**。
+     *
+     * 为什么需要：导航离开录制页会销毁 GL 预览面（SurfaceTexture 随引擎释放一起没了），相机会话
+     * 失去输出面只能整条重开——卓易通桥（华为 ALN-AL00 实测）在会话重建的首几拍无视请求元数据、
+     * 沿用 HAL 里残留的 AWB_OFF 状态，就是用户看到的"回设置再回来闪一下绿"（种子 CCM/稳压窗都
+     * 拦不住，绿帧发生在重建间隙、与请求内容无关）。覆盖期保活让会话跨越设置往返始终活着，
+     * 回场零重建零闪帧。只对设置页置真：其他目的地（媒体库等）可能一待几分钟，相机常开费电发热。
+     */
+    var previewKeptBehind: Boolean = false
+
+    /** GPU 预览引擎的**页面级缓存**：跨设置往返复用同一实例（SurfaceTexture 活着 = 会话不用重建）。释放权在 [onCleared]，页面 dispose 不再碰它 */
+    private var cachedGlSink: GlRenderEngine? = null
+
+    /** GPU 预览引擎取用口：首次创建，之后同一实例（组合销毁重建也拿回同一个） */
+    fun glSink(): GlRenderEngine = cachedGlSink ?: GlRenderEngine().also { cachedGlSink = it }
+
     /** 枚举期间收到的换挡请求先记一笔，等当前这次跑完补做一次（不排队成一串，只做最后一次即可） */
     private var reloadWanted = false
 
@@ -143,12 +163,25 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.onSinkSurfaceReady()
     }
 
+    /** 显示面挂摘/重挂（设置页覆盖往返）：布防引擎侧手动白平衡稳压窗（绿帧取证，2026-10-29） */
+    fun onPreviewSurfaceTransient() {
+        engine?.onSinkSurfaceTransient()
+    }
+
     // ------------------------------------------------- 生命周期
 
     /** 打开相机并起预览；权限缺失时只置 [CameraUiState.needsCameraPermission] 并等回调 */
     fun start() {
         if (engine == null) {
             pendingStart = true
+            return
+        }
+        // 覆盖保活回场（设置页往返）：设备与预览都在跑，这里任何"重开"都会撞上桥的会话重建
+        // 窗口（手动白平衡绿帧）——原样返回，预览本来就没停过。只 OPEN 不预览（ON_PAUSE 后）
+        // 的设备仍走下面正常路径由 resume()/这里补 startPreview。
+        if (engineOrNull?.deviceStatus == DeviceStatus.OPEN_SUCCEED &&
+            ui.value.preview == PreviewStatus.ING
+        ) {
             return
         }
         if (!granted(Manifest.permission.CAMERA)) {
@@ -180,12 +213,23 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** ON_RESUME：设备还在就重起预览，被系统收回了就整条重开 */
     fun resume() {
         val e = engine ?: run { pendingStart = true; return }
+        // 预览一直在跑（覆盖保活回场）：不重提请求——面板已验证"同会话重发请求"不闪绿，
+        // 但"重启预览 + 首拍重提交"是否在桥上也干净没有证据，能不动就不动
+        if (e.deviceStatus == DeviceStatus.OPEN_SUCCEED && ui.value.preview == PreviewStatus.ING) return
         if (e.deviceStatus == DeviceStatus.OPEN_SUCCEED) e.startPreview() else start()
     }
 
-    override fun onPause(owner: LifecycleOwner) = pause()
+    override fun onPause(owner: LifecycleOwner) {
+        // 设置页覆盖保活（2026-10-29 手动白平衡绿帧）：覆盖期连预览都不停——一旦停了，
+        // 回场就变成"重启预览"，桥在重启首拍照样可能吐过渡帧，白保活
+        if (previewKeptBehind) return
+        pause()
+    }
 
-    override fun onResume(owner: LifecycleOwner) = resume()
+    override fun onResume(owner: LifecycleOwner) {
+        if (previewKeptBehind) return
+        resume()
+    }
 
     fun attachLifecycle(lifecycle: Lifecycle) {
         lifecycle.addObserver(this)
@@ -199,6 +243,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         boundSink = null
+        // GL 引擎的释放权在这里（页面 dispose 不再 release）：跨设置往返复用同一实例
+        cachedGlSink?.release()
+        cachedGlSink = null
         bus.cancel()
     }
 

@@ -585,6 +585,21 @@ class Camera2Engine(
         }
     }
 
+    /**
+     * 显示面挂摘/重挂（设置页覆盖往返，GL 侧 [GlRenderEngine.onDisplaySurfaceTransient] 转入）：
+     * 布防手动白平衡稳压窗。桥在显示面切换的过渡拍直接吐 HAL 过渡帧——请求此刻是 AWB_OFF
+     * 就是绿帧，与会话是否重建无关（r23 实测：相机全程存活仍闪）。窗内请求走自动，过渡拍
+     * 就是自然色；回场稳过后与滑杆拖动同一条"同会话重发"路径切回手动，不再闪。
+     */
+    fun onSinkSurfaceTransient() {
+        post {
+            // 只布防、**不**立刻重发请求（2026-10-29 四段取证）：表面交换瞬间的 setRepeatingRequest
+            // 本身就是桥的过渡帧触发器——r26/r27 加了 markDirty 反而把绿帧找回来（真机连拍复现），
+            // r25 无 markDirty 时全程干净。hold 到下一次自然重建（用户动滑杆/保活拍）才生效。
+            wbHoldUntilMs = SystemClock.elapsedRealtime() + WB_SESSION_HOLD_MS
+        }
+    }
+
     /** 会话输出面集合由渲染模式决定（03 文档第 1 节：GPU 下录像面不进相机会话） */
     private fun currentTargets(): List<Surface> {
         val base = sink.cameraTargets()
@@ -999,7 +1014,6 @@ class Camera2Engine(
             }
             if (!manual) {
                 wbProbeFails = 0
-                wbAwbActiveFails = 0
                 return
             }
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
@@ -1013,7 +1027,6 @@ class Camera2Engine(
             // 种子未到手（下发侧留在自动等种子）同理——都不是"HAL 拒绝"的证据，不许误闩
             if (wbByGlNow() || lastAwbCcm9 == null) {
                 wbProbeFails = 0
-                wbAwbActiveFails = 0
                 return
             }
             // 手动白平衡**运行时探测**（2026-10-26 反馈 #6）：公开 API 拿不到
@@ -1044,11 +1057,15 @@ class Camera2Engine(
                     }
                 }
             }
-            // 2026-10-29 卓易通桥（华为 ALN-AL00 实测）的第二道行为判据：桥把声明与回声都照做了
-            //（applied=TRANSFORM_MATRIX、gains 请求=回报），画面却整屏发绿纹丝不动——元数据层
-            // 唯一还能抓的破绽是 **AWB 根本没停**：请求 AWB_MODE=OFF 被采纳时规范要求回报
-            // INACTIVE（或缺报），仍在 SEARCHING/CONVERGED/LOCKED ⇒ 3A 还在自动跑，我们下发的
-            // 增益/矩阵全程被它覆盖。同样连续 4 拍才闩，瞬态残留不误伤。
+            // 「AWB 未停」判据（2026-10-29 三段取证定稿）：请求 AWB_MODE=OFF 被采纳时规范要求
+            // 回报 INACTIVE（或缺报）；连续 4 拍仍在 SEARCHING/CONVERGED/LOCKED ⇒ 本机 3A 压根
+            // 没停，增益/矩阵随时可能被它覆盖。华为 ALN-AL00/卓易通桥实测正是如此：
+            //   · r22（无保活）：表面重挂触发重开会话，新会话首拍采纳增益 → 只闪单帧绿；
+            //   · r26（新增保活、曾删本判据）：会话跨设置存活，表面重挂后桥长期丢弃增益
+            //     → 持续绿屏（真机连拍 G/B≈9.6 不收敛），比闪一帧还糟；
+            //   · r25（保活+本判据）：闩锁改走画面算法，颜色全程正常（2000K 蓝补偿）。
+            // 结论：这枚回报是这台桥『增益不会被采纳』的唯一可靠信号，判据必须留；
+            // 诚实起见提示文案已改为「本机白平衡不接受手动增益」（见 strings_camera）。
             val awbState = runCatching {
                 result.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_STATE)
             }.getOrNull()
@@ -1177,6 +1194,9 @@ class Camera2Engine(
     /** 连续不合格拍数（引擎线程独占写） */
     private var wbAdoptFails = 0
 
+    /** 「请求 AWB_OFF 但回报里 AWB 还在跑」的连续计数（探测窗同频，引擎线程独占写） */
+    private var wbAwbActiveFails = 0
+
     /**
      * 手动档 `COLOR_CORRECTION_TRANSFORM` 的种子（见 [RequestApplier.Snapshot.wbSeedCcm9]）：
      * 自动档帧结果里 HAL 回报的最新 CCM（行优先 9 元素）。切手动档后 AWB 停更，矩阵就冻结在
@@ -1188,8 +1208,6 @@ class Camera2Engine(
     /** 种子捕获节流（500ms）：CCM 随光源慢漂，没必要逐帧抓 */
     private var lastAwbCcmAtMs = 0L
 
-    /** 「请求 AWB_OFF 但回报里 AWB 还在跑」的连续计数（探测窗同频，引擎线程独占写） */
-    private var wbAwbActiveFails = 0
 
     /**
      * 会话重建后的手动白平衡稳压窗截止时刻（见 onConfigured 成功侧）。窗内请求侧按自动白平衡

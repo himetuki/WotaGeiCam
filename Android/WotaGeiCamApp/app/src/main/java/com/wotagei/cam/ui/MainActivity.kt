@@ -44,6 +44,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wotagei.cam.R
+import com.wotagei.cam.camera.CameraController
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.ClipRule
@@ -234,6 +235,11 @@ private fun WotaRoot() {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
             windowOwner?.onRouteForWindowKeepOn(destination.route)
+            // 设置页覆盖保活旗标（2026-10-29 手动白平衡绿帧）：此监听在 navigate/popBackStack 时
+            // 同步触发、先于旧页 dispose，旗标读到的新值即时生效。相机 entry 不在栈上时按 false 走老路。
+            runCatching {
+                CameraController.of(nav.getBackStackEntry(ROUTE_CAMERA))
+            }.getOrNull()?.previewKeptBehind = destination.route == ROUTE_SETTINGS
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }

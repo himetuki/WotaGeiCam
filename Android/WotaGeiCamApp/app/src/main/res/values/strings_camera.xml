@@ -42,8 +42,8 @@
     <string name="cam_p_wb">白平衡</string>
     <!-- 手动白平衡的算法兜底（2026-10-28 用户需求）：本机未声明手动白平衡增益支持时，
          手动档改由画面算法乘相对增益落地，必须在弹层与运行时讲明 -->
-    <string name="cam_wb_gl_fallback">此设备未声明手动白平衡增益支持，已改由画面算法处理：色温/色调是相对自动白平衡的偏移，不再下发相机增益</string>
-    <string name="cam_wb_gl_fallback_toast">此设备未声明手动白平衡增益支持，手动白平衡已改为画面算法处理</string>
+    <string name="cam_wb_gl_fallback">本机白平衡不接受手动增益（HAL 未声明支持，或运行期探测到增益未被采纳），已改由画面算法处理：色温/色调是相对自动白平衡的偏移，不再下发相机增益</string>
+    <string name="cam_wb_gl_fallback_toast">本机白平衡不接受手动增益，手动白平衡已改为画面算法处理</string>
     <string name="cam_p_kelvin">色温</string>
     <string name="cam_p_tint">色调</string>
     <string name="cam_p_lens">镜头</string>

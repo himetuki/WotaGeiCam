@@ -702,6 +702,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     @Volatile
     var onCameraSurfaceReady: (() -> Unit)? = null
 
+    /**
+     * 显示面挂摘/重挂瞬间回调（UI 线程，2026-10-29 手动白平衡绿帧）。
+     *
+     * 卓易通桥（华为 ALN-AL00 实测）在应用显示面切换的过渡拍会直接吐 HAL 过渡帧：请求此刻是
+     * AWB_OFF 就是传感器原色绿——**与会话是否重建无关**（相机全程活着也闪），所以稳压窗必须
+     * 挂在显示面事件上而不是会话事件上。引擎侧消费方见 Camera2Engine.onSinkSurfaceTransient。
+     */
+    @Volatile
+    var onDisplaySurfaceTransient: (() -> Unit)? = null
+
     /** 每帧输出完成后回调（GL 线程）。录制/直方图可用 [frameTimestampNs] 做 A/V 对齐。 */
     @Volatile
     var onFrameDrawn: ((timestampNs: Long) -> Unit)? = null
@@ -792,6 +802,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     override fun onDisplaySurfaceChanged(surface: Surface?, widthPx: Int, heightPx: Int) {
         if (released.get()) return
+        // 挂摘与重挂都要布防稳压窗（见 onDisplaySurfaceTransient 的绿帧取证）
+        onDisplaySurfaceTransient?.invoke()
         postGl { replaceWindowSurface(surface, widthPx, heightPx) }
     }
 

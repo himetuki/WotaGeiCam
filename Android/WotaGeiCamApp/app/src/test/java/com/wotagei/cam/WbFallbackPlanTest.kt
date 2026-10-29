@@ -21,7 +21,7 @@ import java.io.File
  * 关掉自动白平衡又没有增益，就只剩传感器原色。系统相机能改是因为它走厂商私有元数据。
  *
  * 兜底口径：**不关 AWB**，色温/色调由场景层 LUT 乘一组相对增益（5500K = 恒等），
- * 并在运行时给出含"此设备未声明手动白平衡增益支持"的提示。
+ * 并在运行时给出含"本机白平衡不接受手动增益"的提示。
  */
 class WbFallbackPlanTest {
 
@@ -188,8 +188,18 @@ class WbFallbackPlanTest {
             "回声探测必须被 wbByGlNow+种子门控（GL/稳压/无种子时请求本就不带 TRANSFORM_MATRIX，探测会误闩）",
             glGuardIdx in 0 until probeIdx
         )
-        assertTrue("AWB-未停判据必须存在", engineSrc.contains("CONTROL_AWB_STATE_INACTIVE"))
-        assertTrue("AWB-未停判据必须连续计数", callback.contains("wbAwbActiveFails"))
+        // 2026-10-29 三段取证定稿：awbState 判据是这台桥「增益不会被采纳」的唯一可靠信号
+        //（r26 删掉它 → 表面重挂后持续绿屏 G/B≈9.6；r25 有它 → 闩锁画面算法颜色正常）。
+        assertTrue(
+            "AWB-未停判据必须存在（桥的可靠拒绝信号，勿再删）",
+            engineSrc.contains("CONTROL_AWB_STATE_INACTIVE")
+        )
+        // 显示面瞬态钩子只布防、不许立刻重发请求（2026-10-29 四段取证：markDirty 是桥过渡帧触发器）
+        val transient = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(engineSrc, "onSinkSurfaceTransient")
+        )
+        assertTrue("瞬态钩子必须布防稳压窗", transient.contains("wbHoldUntilMs"))
+        assertTrue("瞬态钩子不许 markDirty（会触发桥过渡帧=绿帧复现）", !transient.contains("markDirty()"))
     }
 
     @Test
@@ -215,8 +225,8 @@ class WbFallbackPlanTest {
         val xml = File(File(dir!!.parentFile, "res"), "values/strings_camera.xml")
             .readText(Charsets.UTF_8)
         assertTrue(
-            "弹层说明必须含「此设备未声明手动白平衡增益支持」",
-            xml.contains("此设备未声明手动白平衡增益支持")
+            "弹层说明必须含「本机白平衡不接受手动增益」（口径含未声明与运行期拒绝两类）",
+            xml.contains("本机白平衡不接受手动增益")
         )
         assertTrue("必须有运行时提示那条", xml.contains("name=\"cam_wb_gl_fallback_toast\""))
         val screen = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt"))
