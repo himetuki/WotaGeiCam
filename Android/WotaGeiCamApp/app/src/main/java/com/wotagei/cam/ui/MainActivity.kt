@@ -363,12 +363,20 @@ private fun applyPageMode(activity: Activity?, route: String?) {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller.hide(WindowInsetsCompat.Type.systemBars())
         }
-        // 播放页（29 §6.2）：**只隐藏状态栏**，导航栏保持显示。状态栏隐藏后 statusBars inset 自然
-        // 变 0（顶栏贴到顶）；下滑临时呼出时 inset 回来、顶栏自动下移。edge-to-edge 下隐藏状态栏
-        // 不改变窗口尺寸 ⇒ 视频面尺寸恒定（29 §6.5 硬约束的成立前提；OEM 若额外缩窗按 §6.6 退回）
+        // 播放页：状态栏 + 导航栏都隐藏（2026-10-29 用户反馈：带小白条的设备上播放器底部被
+        // 导航条占出一段白色空带）。此前只藏状态栏是为了"视频面尺寸恒定"（29 §6.5），但导航条
+        // 常驻本身就是那段空带的来源；两端都藏后播放器全屏，呼出行为仍是滑动临时显示。
         route == WotaNav.PLAYER -> {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.statusBars())
+            controller.hide(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
+            )
+        }
+        // 设置页（2026-10-29 用户反馈）：只藏导航栏（顶部状态栏保留，设置页顶栏本来就在状态栏下）。
+        // 不藏的话底部滑动区/小白条会把滚动列表最后一行压出一段白带
+        route == ROUTE_SETTINGS -> {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.navigationBars())
         }
         else -> controller.show(WindowInsetsCompat.Type.systemBars())
     }

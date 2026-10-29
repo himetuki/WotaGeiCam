@@ -131,17 +131,23 @@ internal object Shaders {
         uniform sampler2D uSrc;
         uniform float uThreshold;
         uniform float uSoft;
+        uniform vec3 uTint;
+        uniform float uColorOnly;
         void main() {
             vec3 c = texture2D(uSrc, vUv).rgb;
             float l = dot(c, vec3(0.299, 0.587, 0.114));
-            float lo = max(uThreshold - uSoft, 0.0);
+            // 软边朝 1.0 收敛（与 GLOW_COPY_FS 同口径，见其注释）
+            float s = min(uSoft, max(1.0 - uThreshold, 0.0) + 0.0001);
+            float lo = max(uThreshold - s, 0.0);
             // hi 必须严格 > lo（GLOW_COPY_FS 同款防御，勿叠加 1.0 上限——叠加会在唯一角点
             // (threshold=1.0, soft=0) 把余量截回 lo==hi ⇒ smoothstep 未定义，驱动相关 NaN 可
             // 污染导出帧）。修复后该角点 lo=1.0、hi=1.0001，edge0<edge1 恒成立；luma=1.0 时
             // w=0 与 GLOW_COPY_FS 既有语义一致，非新分叉。
-            float hi = max(uThreshold + uSoft, lo + 0.0001);
+            float hi = max(uThreshold + s, lo + 0.0001);
             float w = smoothstep(lo, hi, l);
-            gl_FragColor = vec4(c * w, 1.0);
+            // 光晕颜色模式（2026-10-29）：1 = 仅色盘颜色；0 = 像素自身颜色
+            vec3 pick = mix(c, uTint, uColorOnly);
+            gl_FragColor = vec4(pick * w, 1.0);
         }
     """.trimIndent()
 
@@ -556,14 +562,21 @@ $decl
         uniform samplerExternalOES uFrame;
         uniform float uGlowThreshold;
         uniform float uGlowSoft;
+        uniform vec3 uGlowTint;
+        uniform float uGlowColorOnly;
         void main() {
             vec3 c = texture2D(uFrame, vUv).rgb;
             float luma = dot(c, vec3(0.299, 0.587, 0.114));
-            float t = smoothstep(
-                uGlowThreshold - uGlowSoft,
-                max(uGlowThreshold + uGlowSoft, uGlowThreshold - uGlowSoft + 0.0001),
-                luma);
-            gl_FragColor = vec4(c * t, 1.0);
+            // 软边朝 1.0 收敛（2026-10-29 用户口径：阈值 100% 时只给画面最亮像素加光晕）。
+            // 阈值越接近 1，剩余余量越小，过渡带随之变窄；不做这层压缩的话 soft 会跨过 1.0，
+            // 100% 档仍会把整片高光拉亮，与"最亮像素"口径不符。
+            float soft = min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0) + 0.0001);
+            float lo = max(uGlowThreshold - soft, 0.0);
+            float hi = max(uGlowThreshold + soft, lo + 0.0001);
+            float t = smoothstep(lo, hi, luma);
+            // 光晕颜色模式：1 = 仅色盘颜色（不乘原色）；0 = 像素自身颜色（乘回原色）
+            vec3 pick = mix(c, uGlowTint, uGlowColorOnly);
+            gl_FragColor = vec4(pick * t, 1.0);
         }
     """.trimIndent()
 

@@ -27,8 +27,11 @@ import kotlin.math.roundToInt
 data class GlowParams(
     /** 开关：映射成 [com.wotagei.cam.camera.ProgramKey] 的 `glow` 一维（换开关 = 换 program，走会话缓存） */
     val enabled: Boolean = false,
-    /** 0..1 亮度阈值：超过才发光（与 Sapphire `S_Glow.Threshold` 同名同义） */
-    val threshold: Float = 0.5f,
+    /**
+     * 亮度阈值（**0.6..1.0**，2026-10-29 用户口径：滑杆域 60~100%）。超过才发光；
+     * **1.0 = 只给整个画面里最亮的像素加光晕**（软边朝 1.0 收敛，见 GLOW_COPY_FS 的 soft 压缩）。
+     */
+    val threshold: Float = 0.7f,
     /** 0..0.5 阈值软边宽度（smoothstep 的过渡带） */
     val soft: Float = 0.05f,
     /** 0..0.2 光晕扩散半径，以 **RT 短边** 为单位（各向同性，见 [fillGlowBlurOffset]） */
@@ -42,6 +45,11 @@ data class GlowParams(
     /** 0..1 混合强度比例（0 = 原图，1 = 满强度） */
     val blend: Float = 0.6f,
     /**
+     * 光晕颜色模式（2026-10-29 用户口径）：false = 达到阈值的像素发**自身颜色**的光晕；
+     * true = **仅用色盘选中的颜色**发光（不乘原色）。出厂 false（物理直觉口径）。
+     */
+    val colorOnly: Boolean = false,
+    /**
      * 光晕颜色（ARGB Long；**白 = 不改色**，跟随光棒自身的颜色）。
      *
      * 2026-10-28 用户口径两步走：先删掉「预设 A/B + 两端色带」（那是给整片改色），
@@ -54,7 +62,7 @@ data class GlowParams(
 
     /** 域钳之后的同一份参数（幂等）。落盘/下发前必须过这一关，见类注释 */
     fun sanitize(): GlowParams = copy(
-        threshold = glowClamp(threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.5f),
+        threshold = glowClamp(threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.7f),
         soft = glowClamp(soft, 0f, GLOW_SOFT_MAX, 0.05f),
         width = glowClamp(width, 0f, GLOW_WIDTH_MAX, 0.02f),
         gain = glowClamp(gain, 0f, GLOW_GAIN_MAX, 1f),
@@ -160,7 +168,7 @@ fun glowWheelMarkerOf(argb: Long): FloatArray {
 // 安全域（sanitize 与 UI 滑杆共用同一套端点，别在 UI 里再写一份）
 // ---------------------------------------------------------------------------------------------
 
-const val GLOW_THRESHOLD_MIN = 0f
+const val GLOW_THRESHOLD_MIN = 0.6f
 const val GLOW_THRESHOLD_MAX = 1f
 const val GLOW_SOFT_MAX = 0.5f
 const val GLOW_WIDTH_MAX = 0.2f
@@ -193,6 +201,7 @@ fun encodeGlow(params: GlowParams): String {
         append(";freq=").append(p.freq)
         append(";blend=").append(p.blend)
         append(";color=").append(p.color.toString(16).uppercase())
+        append(";coloronly=").append(if (p.colorOnly) 1 else 0)
     }
 }
 
@@ -231,7 +240,16 @@ fun decodeGlow(raw: String?): GlowParams {
         // 键在但解析失败 ⇒ 整串回默认（坏色值不许猜）
         color = if (values.containsKey("color")) {
             colorOf("color") ?: return GlowParams.DEFAULT
-        } else GLOW_COLOR_DEFAULT
+        } else GLOW_COLOR_DEFAULT,
+        // coloronly 是 2026-10-29 新增的**可选**键：缺键（旧串）= false（像素自身颜色）；
+        // 键在但值不是 0/1 ⇒ 整串回默认（与 color 同一条"坏值不许猜"）
+        colorOnly = if (values.containsKey("coloronly")) {
+            when (values["coloronly"]) {
+                "1" -> true
+                "0" -> false
+                else -> return GlowParams.DEFAULT
+            }
+        } else false
     ).sanitize()
 }
 

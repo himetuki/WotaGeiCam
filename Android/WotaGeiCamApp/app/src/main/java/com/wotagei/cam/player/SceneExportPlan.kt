@@ -39,6 +39,17 @@ data class SceneExportEffects(
  * @param glowRaw `WotaSettings.KEY_GLOW` 原串（null/坏串 = 出厂 = 关）
  * @param videoDenoise 画面降噪当前档（HAL 两档在离线统一按 GPU 双边处理）
  */
+/**
+ * 导出弹层内**当场可调**的口径（2026-10-29 用户需求：后渲染导出要有配置界面，不能直接开渲）：
+ * 光晕/降噪参数在弹层初始化时取当前落盘值，用户在弹层里改的只作用于**这一次导出**，
+ * 不反写设置（设置页仍是全局默认值的唯一归属）。纯函数，JVM 可测。
+ */
+fun sceneExportEffectsOf(glow: GlowParams, denoiseOn: Boolean): SceneExportEffects =
+    SceneExportEffects(
+        glow = glow.sanitize().let { if (it.enabled) it else null },
+        denoise = denoiseOn
+    )
+
 fun sceneExportEffects(glowRaw: String?, videoDenoise: VideoDenoise): SceneExportEffects {
     val glow = decodeGlow(glowRaw).sanitize().let { if (it.enabled) it else null }
     return SceneExportEffects(glow = glow, denoise = videoDenoise != VideoDenoise.OFF)

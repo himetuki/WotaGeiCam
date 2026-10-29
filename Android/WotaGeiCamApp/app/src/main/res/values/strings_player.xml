@@ -120,6 +120,15 @@
     <string name="player_clip_scene_sep"> + </string>
     <string name="player_clip_scene_summary">重编码，本次应用：%1$s</string>
     <string name="player_clip_scene_curve_note">。曲线是录制时烘进画面的，不在这里重复渲染</string>
+    <string name="player_clip_cfg_title">本次导出效果配置</string>
+    <string name="player_clip_cfg_note">这里的改动只作用于本次导出，不改设置页的默认值</string>
+    <string name="player_clip_cfg_glow">光晕</string>
+    <string name="player_clip_cfg_denoise">降噪</string>
+    <string name="player_clip_cfg_on">应用</string>
+    <string name="player_clip_cfg_off">不应用</string>
+    <string name="player_clip_cfg_threshold">光晕亮度阈值</string>
+    <string name="player_clip_cfg_gain">光晕强度</string>
+    <string name="player_clip_cfg_blend">光晕混合</string>
 
     <!-- 内录选轨（批 4）：双音轨片才有音轨 chip/同步/导出三控件；音轨识别口径见 TrackSync 头注 -->
     <string name="player_track_env">环境音</string>

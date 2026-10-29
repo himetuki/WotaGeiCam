@@ -93,7 +93,7 @@ class ParamsPersistSessionTest {
         markerColor.value = com.wotagei.cam.core.MarkerLineColor.CYAN
         markerCount.value = 6
         // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）
-        glowParams.value = com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.45f, blend = 0.83f)
+        glowParams.value = com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.65f, blend = 0.83f)
         // 2026-10-28：色调四滑条入档（复合串键 KEY_TONE；非恒等足够证往返）
         tone.value = com.wotagei.cam.core.ToneParams(black = 0.1f, white = 0.2f, shadows = 0.5f, highlights = -0.4f)
         // 2026-10-27：上屏渲染比例（枚举名）
@@ -186,7 +186,7 @@ class ParamsPersistSessionTest {
         )
         assertEquals(
             "Glow 整份参数必须往返（复合串键）",
-            com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.45f, blend = 0.83f),
+            com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.65f, blend = 0.83f),
             back.glowParams.value
         )
         assertEquals(

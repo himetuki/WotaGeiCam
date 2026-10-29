@@ -287,7 +287,10 @@
     <string name="cam_glow_note">光晕进成片（烘焙进像素），调参在下一个真帧生效</string>
     <!-- 2026-10-28 用户口径：光晕跟随光棒自身颜色（预设/两端色已删除） -->
     <string name="cam_glow_color">光晕颜色</string>
-    <string name="cam_glow_same_color">点色盘圆心 = 跟随光棒原色；选色后光晕整体偏该色调</string>
+    <string name="cam_glow_same_color">光晕颜色：像素自身颜色 = 亮部发它本来的色；仅色盘颜色 = 亮部统一发所选色。双击色盘归零（白）；点圆心也回中性</string>
+    <string name="cam_glow_color_pixel">像素自身颜色</string>
+    <string name="cam_glow_color_wheel">仅色盘颜色</string>
+    <string name="cam_glow_threshold_hint">100% = 只给画面里最亮的像素加光晕</string>
     <string name="cam_glow_on">开</string>
     <string name="cam_glow_off">关</string>
     <string name="cam_glow_threshold">亮度阈值</string>

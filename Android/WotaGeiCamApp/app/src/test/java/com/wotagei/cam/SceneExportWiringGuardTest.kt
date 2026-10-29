@@ -92,8 +92,12 @@ class SceneExportWiringGuardTest {
             "降噪档必须走 WotaSettings.videoDenoise（与设置页同一枚读取器）",
             playerSrc.contains("WotaSettings.videoDenoise(prefs)")
         )
-        // 起跑那一刻现读一份（导出期间改设置不影响本轮）
-        assertTrue("导出起跑时必须现读一份效果快照", playerSrc.contains("val effects = sceneExportEffects("))
+        // 2026-10-29：导出弹层内可直接配置（光晕开/关/阈值/强度/混合、降噪开/关），起跑那一刻取
+        // 面板当前配置的快照（导出期间再改不影响这一轮）
+        assertTrue(
+            "导出起跑时必须取面板当前配置的快照（sceneExportEffectsOf）",
+            playerSrc.contains("val effects = sceneExportEffectsOf(clipGlow, clipDenoise)")
+        )
         assertTrue(
             "决策层必须把 enabled=false 的光晕折成 null（关着就不该付 GPU 代价）",
             planSrc.contains("if (it.enabled) it else null")
@@ -220,15 +224,24 @@ class SceneExportWiringGuardTest {
         assertTrue("双边必须用亮度差权重", bilat.contains("inv2s2"))
 
         val bright = shader("SCENE_BRIGHT_FS")
-        assertTrue("亮部提取必须把掩码乘回**原色**（只让 tint 负责换色）", bright.contains("c * w"))
+        // 2026-10-29：颜色两模式——mix(c, uTint, uColorOnly)：0 = 乘回原色，1 = 仅色盘色
+        assertTrue(
+            "亮部颜色必须按模式二选一（像素自身颜色 / 仅色盘颜色，与实时链同口径）",
+            bright.contains("mix(c, uTint, uColorOnly)")
+        )
+        assertTrue("亮部保留、暗部压零：颜色 × w", bright.contains("vec4(pick * w, 1.0)"))
+        assertTrue(
+            "软边必须朝 1.0 收敛（阈值 100% = 只给最亮像素加光晕，与 GLOW_COPY_FS 同口径）",
+            bright.contains("min(uSoft, max(1.0 - uThreshold, 0.0) + 0.0001)")
+        )
         assertTrue("亮度取 Rec601 三通道加权（与 GLOW_COPY_FS 同口径）", bright.contains("0.299, 0.587, 0.114"))
         // 🟡-6 角点防御（2026-10-29，docs/reviews/1029/29-shader-bright-corner.md）：hi 的
         // 1.0 截断曾在唯一角点 (threshold=1.0, soft=0) 吃掉 +0.0001 余量 ⇒ lo==hi ⇒
         // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。修复式勿叠加 1.0 上限——叠加在
         // 同一角点仍截回 lo==hi，等于没修（29 专档「修复方向」二次校核结论）。
         assertTrue(
-            "hi 必须是 max(uThreshold + uSoft, lo + 0.0001)（edge0<edge1 恒成立，与 GLOW_COPY_FS 同款防御）",
-            bright.contains("max(uThreshold + uSoft, lo + 0.0001)")
+            "hi 必须是 max(uThreshold + s, lo + 0.0001)（s = 压缩后的软边；edge0<edge1 恒成立，与 GLOW_COPY_FS 同款防御）",
+            bright.contains("max(uThreshold + s, lo + 0.0001)")
         )
         assertFalse(
             "不许再出现 1.0 截断（min(uThreshold + uSoft 形态 = 角点退化回潮）",

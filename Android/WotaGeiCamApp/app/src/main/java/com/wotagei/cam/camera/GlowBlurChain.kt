@@ -127,6 +127,8 @@ internal class GlowBlurChain(
     private var copyUTexMatrix = -1
     private var copyUThreshold = -1
     private var copyUSoft = -1
+    private var copyUTint = -1
+    private var copyUColorOnly = -1
     private var blurAPosition = -1
     private var blurATexCoord = -1
     private var blurUSrc = -1
@@ -167,7 +169,9 @@ internal class GlowBlurChain(
      * @param scale [com.wotagei.cam.core.glowScaleFor] 的分档（1/2/4）
      * @param widthParam `GlowParams.width`（0..0.2，RT 短边为单位）
      * @param thresholdParam `GlowParams.threshold`（**亮部判定**：拷贝趟的 smoothstep 下界中心）
-     * @param softParam `GlowParams.soft`（过渡带半宽；0 = 硬切）
+     * @param softParam `GlowParams.soft`（过渡带半宽；0 = 硬切；阈值接近 1 时在拷贝趟里向 1.0 收敛）
+     * @param tintParam 光晕颜色（`GlowParams.color` 的 RGB；`colorOnly=false` 时消费方需传白=不改变）
+     * @param colorOnlyParam true = 亮部直接取 tint 色（仅色盘颜色），false = 乘回原色
      * @return true = 本帧产出了可采样的光晕图
      */
     fun draw(
@@ -179,7 +183,9 @@ internal class GlowBlurChain(
         scale: Int,
         widthParam: Float,
         thresholdParam: Float,
-        softParam: Float
+        softParam: Float,
+        tintParam: FloatArray,
+        colorOnlyParam: Boolean
     ): Boolean {
         if (broken || oesTextureId == 0) return false
         prepare()
@@ -225,6 +231,9 @@ internal class GlowBlurChain(
         // 亮部提取：阈值/软边是**每帧都可能变**的形状参数（只换 uniform，不重建 program/RT）
         if (copyUThreshold >= 0) GLES20.glUniform1f(copyUThreshold, thresholdParam)
         if (copyUSoft >= 0) GLES20.glUniform1f(copyUSoft, softParam)
+        // 颜色模式（2026-10-29 用户口径）：每帧随参数走，只换 uniform 不重建 program
+        if (copyUTint >= 0) GLES20.glUniform3f(copyUTint, tintParam[0], tintParam[1], tintParam[2])
+        if (copyUColorOnly >= 0) GLES20.glUniform1f(copyUColorOnly, if (colorOnlyParam) 1f else 0f)
         drawQuad(copyAPosition, copyATexCoord, identityUv)
         errors += drainGlError("glowCopyPass")
 
@@ -395,6 +404,8 @@ internal class GlowBlurChain(
         copyUTexMatrix = GLES20.glGetUniformLocation(copyProgram, "uTexMatrix")
         copyUThreshold = GLES20.glGetUniformLocation(copyProgram, "uGlowThreshold")
         copyUSoft = GLES20.glGetUniformLocation(copyProgram, "uGlowSoft")
+        copyUTint = GLES20.glGetUniformLocation(copyProgram, "uGlowTint")
+        copyUColorOnly = GLES20.glGetUniformLocation(copyProgram, "uGlowColorOnly")
 
         blurProgram = linkProgram(Shaders.FROST_QUAD_VS, gaussianSource(highp = true))
         if (blurProgram == 0) {
@@ -488,6 +499,8 @@ internal class GlowBlurChain(
         copyUTexMatrix = -1
         copyUThreshold = -1
         copyUSoft = -1
+        copyUTint = -1
+        copyUColorOnly = -1
         blurAPosition = -1
         blurATexCoord = -1
         blurUSrc = -1

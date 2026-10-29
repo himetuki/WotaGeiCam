@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemGestures
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -1057,7 +1059,12 @@ fun BoxScope.HudZoneBox(
             // 底栏的槽位要横向铺满才谈得上「底板在可视窗口里居中」。居中基准这里不许扣任何让位量：
             // 旧版扣了 34dp（写死的右缘避让），快门就偏在可视中心左边 17dp
             HudZone.BOTTOM -> Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .padding(bottom = BottomBarOuterPadV)
+                // 手势导航小白条避让（2026-10-29 用户反馈）：6dp 外距在带手势条的设备上让底栏落进
+                // 手势区，点快门/旋钮容易先撞上系统条。systemGestures 在沉浸隐藏系统栏后仍报手势区
+                // 高度（navigationBars 会归 0，靠它兜住）；三键导航/无手势条设备该值为 0，行为不变。
+                .padding(bottom = BottomBarOuterPadV + with(density) {
+                    WindowInsets.systemGestures.getBottom(density).toDp()
+                })
         }
     }
     Box(

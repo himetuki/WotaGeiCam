@@ -104,15 +104,23 @@ class GlowShaderTest {
         assertTrue("阈值 uniform", src.contains("uniform float uGlowThreshold;"))
         assertTrue("软边 uniform", src.contains("uniform float uGlowSoft;"))
         assertTrue(
-            "过渡带下界 = threshold - soft",
-            src.contains("uGlowThreshold - uGlowSoft,")
+            "软边必须朝 1.0 收敛（阈值 100% = 只给最亮像素加光晕，2026-10-29 用户口径）",
+            src.contains("min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0) + 0.0001)")
+        )
+        assertTrue(
+            "过渡带下界 = threshold - soft（压缩后的软边）",
+            src.contains("uGlowThreshold - soft,")
         )
         assertTrue(
             "过渡带上界必须 max(...) 兜底：smoothstep 要求 edge0 < edge1",
-            src.contains("max(uGlowThreshold + uGlowSoft, uGlowThreshold - uGlowSoft + 0.0001)")
+            src.contains("max(uGlowThreshold + soft, lo + 0.0001)")
         )
         assertTrue("亮度按 BT.601 权重", src.contains("dot(c, vec3(0.299, 0.587, 0.114))"))
-        assertTrue("亮部保留、暗部压零：原色 × t", src.contains("gl_FragColor = vec4(c * t, 1.0);"))
+        assertTrue(
+            "亮部颜色必须按模式二选一：仅色盘颜色 / 像素自身颜色",
+            src.contains("mix(c, uGlowTint, uGlowColorOnly)")
+        )
+        assertTrue("亮部保留、暗部压零：颜色 × t", src.contains("gl_FragColor = vec4(pick * t, 1.0);"))
         assertTrue("强制不透明", src.contains(", 1.0);"))
         assertFalse("Glow 的拷贝趟不许退化回霜的纯拷贝", src.contains("FROST"))
     }

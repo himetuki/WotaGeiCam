@@ -1142,13 +1142,16 @@ private fun GlowPill(
         // 24 §1.6 的定版：**不新增 SliderKey**（那是持久化契约，加一个就要在设置页长一行）——
         // 一律「整数刻度梯 + snapKey = null」⇒ PillSlider 的 ladderOnly 分支：恒吸附、写回必落刻度。
         // 显示域 = 参数域 × 缩放（0..1 的参数用 0..100 的百分比格），于是落盘恒是两位小数。
+        // 阈值域 60..100（2026-10-29 用户口径）：低端不再放到 0（0 等于整帧发光，没有意义），
+        // 高端 100 = 只给画面里最亮的像素加光晕（软边在拷贝趟里朝 1.0 收敛）
         PillSlider(
-            value = glow.threshold * 100f, lo = 0f, hi = 100f, step = 5f,
+            value = glow.threshold * 100f, lo = 60f, hi = 100f, step = 5f,
             enabled = editable, label = stringResource(R.string.cam_glow_threshold),
-            snapKey = null, ladder = percentLadder(0, 100, 5), format = glowFmt(2),
+            snapKey = null, ladder = percentLadder(60, 100, 5), format = glowFmt(2),
             onValueChange = { write(glow.copy(threshold = it / 100f)) },
             onValueChangeFinished = onPersist
         )
+        Note(R.string.cam_glow_threshold_hint)
         PillSlider(
             value = glow.soft * 100f, lo = 0f, hi = 50f, step = 5f,
             enabled = editable, label = stringResource(R.string.cam_glow_soft),
@@ -1192,8 +1195,23 @@ private fun GlowPill(
             onValueChangeFinished = onPersist
         )
 
-        // 2026-10-28 用户口径（第二步）：删掉预设后**开放色盘自选单色**——
-        // 白/圆心 = 跟随光棒原色；选色后光晕整体偏该色调（单色 tint，不是两端渐变）。
+        // 颜色模式（2026-10-29 用户口径）：关闭 = 亮部发**像素自身颜色**；开启 = **仅色盘颜色**。
+        // 色盘只在开启时参与（关闭时写不写色都不影响画面），双击色盘 = 归零（白）/ 点圆心同理。
+        PillChoices(
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_glow_color_pixel)),
+                PillOption(1, stringResource(R.string.cam_glow_color_wheel))
+            ),
+            selected = if (glow.colorOnly) 1 else 0,
+            columns = 2,
+            onPick = { opt ->
+                write(glow.copy(colorOnly = opt.value == 1))
+                onPersist()
+            },
+            enabled = editable
+        )
+        // 2026-10-28 用户口径（第二步）：删掉预设后**开放色盘自选单色**。
+        // 2026-10-29：色盘 + 上面那枚模式开关配合；双击色盘归零（白）。
         GlowColorWheel(current = glow.color, editable = editable) {
             write(glow.copy(color = it))
             onPersist()
@@ -1241,6 +1259,11 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
                 .border(1.dp, WotaColor.acrylicBorder, CircleShape)
                 .pointerInput(editable) {
                     if (!editable) return@pointerInput
+                    // 双击归零的状态（2026-10-29 用户口径）：两次按下间隔 < 350ms 且落点相距
+                    // < 40px 视为双击 ⇒ 颜色回白（单色模式下面板随之显示为中性）。
+                    // 双击的第一下照常取色、第二下归零，净结果 = 白。
+                    var lastTapAtMs = 0L
+                    var lastTapPos = Offset.Zero
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         if (down.isConsumed) return@awaitEachGesture
@@ -1254,7 +1277,18 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
                                 )
                             )
                         }
-                        pick(down.position)
+                        val nowMs = System.currentTimeMillis()
+                        val isDoubleTap = nowMs - lastTapAtMs < 350L &&
+                            (down.position - lastTapPos).getDistance() < 40f
+                        if (isDoubleTap) {
+                            // 双击 = 归零（白 = 中性，跟随像素颜色）
+                            onPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)
+                            lastTapAtMs = 0L
+                        } else {
+                            pick(down.position)
+                            lastTapAtMs = nowMs
+                            lastTapPos = down.position
+                        }
                         while (true) {
                             val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                             if (change.pressed) {

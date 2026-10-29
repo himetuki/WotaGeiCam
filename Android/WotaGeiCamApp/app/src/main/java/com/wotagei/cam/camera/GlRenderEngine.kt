@@ -453,6 +453,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     /** 预换算的光晕 tint（`glowRgb` 只在参数变化时调，帧路径零分配；白 = 恒等 = 跟随原色） */
     @Volatile
     private var glowTint = glowRgb(GlowParams.DEFAULT.color)
+    /** true = 仅色盘颜色（拷贝趟已上色，主 pass 的 tint 必须传白，否则会二次染色） */
+    private var glowColorOnly = false
+    /** tint 恒等（白）：colorOnly 模式下主 pass 用（单元口径，不改变颜色） */
+    private val GLOW_TINT_WHITE = floatArrayOf(1f, 1f, 1f)
 
     /**
      * Glow 离屏链（三趟：亮部提取+降采样 → 横向高斯 → 纵向高斯）。
@@ -2277,7 +2281,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uGlowFreq >= 0) GLES20.glUniform1f(p.uGlowFreq, glowParams.freq)
             if (p.uGlowBlend >= 0) GLES20.glUniform1f(p.uGlowBlend, glowParams.blend)
             if (p.uGlowTint >= 0) {
-                val t = glowTint
+                // colorOnly 时颜色已在拷贝趟按亮部采样，主 pass 传白避免二次染色
+                val t = if (glowColorOnly) GLOW_TINT_WHITE else glowTint
                 GLES20.glUniform3f(p.uGlowTint, t[0], t[1], t[2])
             }
             // 2026-10-28：同色光晕——不再上传色带两端色（见 Shaders.applyGlow 的注释）
@@ -2399,6 +2404,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         glowParams = next
         // tint 预换算（颜色只在参数变化时算一次，帧路径零分配）
         glowTint = glowRgb(next.color)
+        glowColorOnly = next.colorOnly
         if (!next.enabled || wasOn) return
         postGl {
             // 显式开启 = 给含 glow 维度的坏键一次重试（同一坏键不逐帧重试的口径不变）
@@ -2486,7 +2492,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             scale = scale,
             widthParam = glowParams.width,
             thresholdParam = glowParams.threshold,
-            softParam = glowParams.soft
+            softParam = glowParams.soft,
+            tintParam = glowRgb(glowParams.color),
+            colorOnlyParam = glowParams.colorOnly
         )
         // drawPass 只认这个字段（不直接读链）：失败时链已把 resultTex 归 0 ⇒ 这里自然退回黑纹理
         glowFrameTex = chain.resultTex

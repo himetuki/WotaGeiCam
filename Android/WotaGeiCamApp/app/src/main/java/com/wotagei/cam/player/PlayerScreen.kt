@@ -132,6 +132,9 @@ import com.wotagei.cam.record.ArcRepairStatus
 import com.wotagei.cam.ui.ParamsPersistSession
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.decodeGlow
+import com.wotagei.cam.ui.widget.percentLadder
 import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
@@ -445,15 +448,18 @@ fun PlayerScreen(
     val sceneRunner = remember(app) { SceneExportRunner(app) }
     val clipRepo = rememberMediaRepo()
     var clipMenu by remember { mutableStateOf(false) }
-    // 导出方式：0 = 无损重封（既有）、1 = 后渲染（重编码）。效果参数在面板每次**打开**时现读，
-    // 让"先去设置改光晕/降噪、再回来导出"吃到最新值；导出中重开面板也按当时参数显示
+    // 导出方式：0 = 无损重封（既有）、1 = 后渲染（重编码）
     var clipMode by remember { mutableIntStateOf(0) }
-    val sceneEffects = remember(clipMenu) {
-        sceneExportEffects(
-            prefs.getString(WotaSettings.KEY_GLOW, null),
-            WotaSettings.videoDenoise(prefs)
-        )
+    // 导出效果配置（2026-10-29 用户需求：后渲染导出必须有配置界面，不能直接开渲）：
+    // 面板每次**打开**时从当前落盘值初始化（先改设置再导出仍是自然工作流），面板里的改动
+    // 只作用于本次导出，不反写设置（见 sceneExportEffectsOf 的 KDoc）
+    var clipGlow by remember(clipMenu) {
+        mutableStateOf(decodeGlow(prefs.getString(WotaSettings.KEY_GLOW, null)).sanitize())
     }
+    var clipDenoise by remember(clipMenu) {
+        mutableStateOf(WotaSettings.videoDenoise(prefs) != com.wotagei.cam.core.VideoDenoise.OFF)
+    }
+    val sceneEffects = remember(clipGlow, clipDenoise) { sceneExportEffectsOf(clipGlow, clipDenoise) }
     var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     var clipExporting by remember { mutableStateOf(false) }
     var clipProgress by remember { mutableStateOf(0f) }
@@ -896,6 +902,10 @@ fun PlayerScreen(
                     dualReady = audioGroups.size >= 2,
                     mode = clipMode,
                     sceneEffects = sceneEffects,
+                    glowCfg = clipGlow,
+                    denoiseOn = clipDenoise,
+                    onGlowChange = { clipGlow = it.sanitize() },
+                    onDenoiseChange = { clipDenoise = it },
                     onPickMode = { clipMode = it },
                     onPickTrack = { clipTrack = it },
                     onExport = {
@@ -908,10 +918,8 @@ fun PlayerScreen(
                             // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
                             val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
                             val mode = clipMode
-                            val effects = sceneExportEffects(
-                                prefs.getString(WotaSettings.KEY_GLOW, null),
-                                WotaSettings.videoDenoise(prefs)
-                            )
+                            // 面板里配置的效果起跑那一刻定版（导出中再改不影响这一轮）
+                            val effects = sceneExportEffectsOf(clipGlow, clipDenoise)
                             clipJob = scope.launch {
                                 try {
                                     // 区间与选轨都在起跑那一刻定版：导出期间用户再动 A/B / 换轨不影响这一轮
@@ -1282,6 +1290,11 @@ private fun ClipExportPopup(
     dualReady: Boolean,
     mode: Int,
     sceneEffects: SceneExportEffects,
+    /** 本次导出的光晕参数（面板内可编辑；初始值来自落盘，不反写设置） */
+    glowCfg: GlowParams,
+    denoiseOn: Boolean,
+    onGlowChange: (GlowParams) -> Unit,
+    onDenoiseChange: (Boolean) -> Unit,
     onPickMode: (Int) -> Unit,
     onPickTrack: (SelectedTrack) -> Unit,
     onExport: () -> Unit,
@@ -1387,6 +1400,10 @@ private fun ClipExportPopup(
                 style = MaterialTheme.typography.bodySmall,
                 color = WotaTextDim
             )
+            // 本次导出效果配置（2026-10-29 用户需求：后渲染导出不直接开渲，先在这里配光晕/降噪）
+            if (mode == 1) {
+                ExportEffectConfig(glowCfg, denoiseOn, onGlowChange, onDenoiseChange)
+            }
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
                 selected = true,
@@ -1399,6 +1416,102 @@ private fun ClipExportPopup(
                 color = WotaTextDim
             )
         }
+    }
+}
+
+/**
+ * 导出弹层里的「本次导出效果」配置（2026-10-29 用户需求）：
+ * 光晕开/关 + 亮度阈值/强度/混合，降噪开/关。参数只作用于本次导出（见 [sceneExportEffectsOf]），
+ * 初始值在面板打开时从落盘值读取；这里的改动不写设置页的默认值。
+ */
+@Composable
+private fun ExportEffectConfig(
+    glow: GlowParams,
+    denoiseOn: Boolean,
+    onGlowChange: (GlowParams) -> Unit,
+    onDenoiseChange: (Boolean) -> Unit
+) {
+    Text(
+        stringResource(R.string.player_clip_cfg_title),
+        style = MaterialTheme.typography.bodySmall,
+        color = WotaText
+    )
+    Text(
+        stringResource(R.string.player_clip_cfg_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = WotaTextDim
+    )
+    // ---- 光晕：开/关
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            stringResource(R.string.player_clip_cfg_glow),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_off),
+            selected = !glow.enabled,
+            onClick = { onGlowChange(glow.copy(enabled = false)) }
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_on),
+            selected = glow.enabled,
+            onClick = { onGlowChange(glow.copy(enabled = true)) }
+        )
+    }
+    if (glow.enabled) {
+        // 阈值 60..100（100% = 只给最亮像素加光晕）；强度/混合与录制页同名同义
+        PillSlider(
+            value = glow.threshold * 100f, lo = 60f, hi = 100f,
+            onValueChange = { onGlowChange(glow.copy(threshold = it / 100f)) },
+            snapKey = null,
+            ladder = percentLadder(60, 100, 5),
+            step = 5f,
+            label = stringResource(R.string.player_clip_cfg_threshold),
+            format = { String.format(java.util.Locale.US, "%.0f%%", it) }
+        )
+        PillSlider(
+            value = glow.gain * 100f, lo = 0f, hi = 400f,
+            onValueChange = { onGlowChange(glow.copy(gain = it / 100f)) },
+            snapKey = null,
+            ladder = percentLadder(0, 400, 25),
+            step = 25f,
+            label = stringResource(R.string.player_clip_cfg_gain),
+            format = { String.format(java.util.Locale.US, "%.0f%%", it) }
+        )
+        PillSlider(
+            value = glow.blend * 100f, lo = 0f, hi = 100f,
+            onValueChange = { onGlowChange(glow.copy(blend = it / 100f)) },
+            snapKey = null,
+            ladder = percentLadder(0, 100, 5),
+            step = 5f,
+            label = stringResource(R.string.player_clip_cfg_blend),
+            format = { String.format(java.util.Locale.US, "%.0f%%", it) }
+        )
+    }
+    // ---- 降噪：开/关（离线统一 GPU 双边，无 HAL 档位概念）
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            stringResource(R.string.player_clip_cfg_denoise),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_off),
+            selected = !denoiseOn,
+            onClick = { onDenoiseChange(false) }
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_on),
+            selected = denoiseOn,
+            onClick = { onDenoiseChange(true) }
+        )
     }
 }
 

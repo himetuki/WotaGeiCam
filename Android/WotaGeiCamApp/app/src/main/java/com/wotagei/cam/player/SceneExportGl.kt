@@ -16,6 +16,7 @@ import android.view.Surface
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.diag.Diag as Log
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -105,6 +106,8 @@ internal class SceneExportGl(
     private var brightUSrc = -1
     private var brightUThreshold = -1
     private var brightUSoft = -1
+    private var brightUTint = -1
+    private var brightUColorOnly = -1
 
     private var blurProgram = 0
     private var blurAPos = -1
@@ -370,6 +373,8 @@ internal class SceneExportGl(
             brightUSrc = GLES20.glGetUniformLocation(brightProgram, "uSrc")
             brightUThreshold = GLES20.glGetUniformLocation(brightProgram, "uThreshold")
             brightUSoft = GLES20.glGetUniformLocation(brightProgram, "uSoft")
+            brightUTint = GLES20.glGetUniformLocation(brightProgram, "uTint")
+            brightUColorOnly = GLES20.glGetUniformLocation(brightProgram, "uColorOnly")
             blurAPos = GLES20.glGetAttribLocation(blurProgram, "aPosition")
             blurATex = GLES20.glGetAttribLocation(blurProgram, "aTexCoord")
             blurUMatrix = GLES20.glGetUniformLocation(blurProgram, "uTexMatrix")
@@ -433,6 +438,12 @@ internal class SceneExportGl(
                 if (brightUMatrix >= 0) GLES20.glUniformMatrix4fv(brightUMatrix, 1, false, identity, 0)
                 if (brightUThreshold >= 0) GLES20.glUniform1f(brightUThreshold, glow.threshold)
                 if (brightUSoft >= 0) GLES20.glUniform1f(brightUSoft, glow.soft)
+                // 光晕颜色模式（2026-10-29）：亮部直接上色盘色 / 保留像素自身颜色
+                val bt = glowRgb(glow.color)
+                if (brightUTint >= 0) GLES20.glUniform3f(brightUTint, bt[0], bt[1], bt[2])
+                if (brightUColorOnly >= 0) {
+                    GLES20.glUniform1f(brightUColorOnly, if (glow.colorOnly) 1f else 0f)
+                }
             }
             if (!brightOk) return false
             val dx = glow.width * minOf(1f, heightPx.toFloat() / widthPx)
@@ -467,7 +478,8 @@ internal class SceneExportGl(
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
             if (compUGlow >= 0) GLES20.glUniform1i(compUGlow, UNIT_B)
             if (compUMatrix >= 0) GLES20.glUniformMatrix4fv(compUMatrix, 1, false, identity, 0)
-            val tint = effects.glowTint
+            // colorOnly 时亮部趟已按色盘色采样，这里传白（与实时链 GL_TINT_WHITE 同口径）
+            val tint = if (glow.colorOnly) floatArrayOf(1f, 1f, 1f) else effects.glowTint
             if (compUTint >= 0) GLES20.glUniform3f(compUTint, tint[0], tint[1], tint[2])
             if (compUGain >= 0) GLES20.glUniform1f(compUGain, glow.gain)
             if (compUAdd >= 0) GLES20.glUniform1f(compUAdd, glow.add)

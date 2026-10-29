@@ -149,8 +149,9 @@ class SliderSnapTest {
         if (occurrences(settings, "snapKey = null") != 1) {
             bad.add("设置页并入门槛滑杆必须传 snapKey = null")
         }
-        if (occurrences(player, "snapKey = null") != 1) {
-            bad.add("播放器并入门槛滑杆必须传 snapKey = null")
+        // 2026-10-29：播放器里的整数域滑杆共 4 根——并入门槛 1 根 + 导出配置的光晕阈值/强度/混合 3 根
+        if (occurrences(player, "snapKey = null") != 4) {
+            bad.add("播放器整数域滑杆（并入门槛 + 导出配置三项）必须都传 snapKey = null（当前 ${occurrences(player, "snapKey = null")} 处）")
         }
         return bad
     }

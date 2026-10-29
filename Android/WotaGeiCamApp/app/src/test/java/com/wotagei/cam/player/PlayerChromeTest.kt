@@ -84,9 +84,14 @@ class PlayerChromeTest {
     fun `播放页只藏状态栏且视频面不参与避让`() {
         val main = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/MainActivity.kt"))
         val pageMode = KotlinSourceScan.bodyOf(main, "applyPageMode")
+        // 2026-10-29 用户口径变更：播放页状态栏 + 导航栏都隐藏（带小白条的设备底部会被导航条
+        // 占出一条白带）。此前"只藏状态栏"的裁决作废；视频面尺寸仍由 FIT + fillMaxSize 恒定。
         assertTrue(
-            "applyPageMode 必须有播放页分支：只 hide(statusBars)（导航栏保持显示）",
-            pageMode.contains("WotaNav.PLAYER") && pageMode.contains("hide(WindowInsetsCompat.Type.statusBars())")
+            "applyPageMode 的播放页分支必须同时隐藏状态栏与导航栏",
+            pageMode.contains("WotaNav.PLAYER") &&
+                pageMode.contains("hide(") &&
+                pageMode.contains("statusBars()") &&
+                pageMode.contains("navigationBars()")
         )
         // 视频尺寸恒定（§6.5 硬约束）的负面锁：视频面仍是 FIT + fillMaxSize，没加避让内距
         assertTrue("视频面必须保持 fillMaxSize（尺寸恒定）", playerCode.contains("fillMaxSize()"))
