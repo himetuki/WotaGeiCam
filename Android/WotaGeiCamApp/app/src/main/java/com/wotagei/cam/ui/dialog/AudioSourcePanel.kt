@@ -15,8 +15,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,6 +35,7 @@ import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaPillPopup
+import com.wotagei.cam.ui.design.WotaSwitch
 import com.wotagei.cam.ui.design.WotaType
 
 /**
@@ -205,11 +204,11 @@ private fun AudioSourceRow(label: String, checked: Boolean, enabled: Boolean = t
             style = MaterialTheme.typography.bodyMedium,
             color = if (enabled) WotaColor.textHi else WotaColor.textLo
         )
-        Switch(
+        WotaSwitch(
             checked = checked,
             onCheckedChange = null,
             enabled = enabled,
-            colors = SwitchDefaults.colors(checkedTrackColor = WotaColor.accentActive, checkedThumbColor = WotaColor.onAccent)
+
         )
     }
 }
