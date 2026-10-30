@@ -361,6 +361,9 @@ private fun WotaRoot() {
         // 与「某个页面何时重组/何时离开组合」彻底解耦
         val windowOwner = activity as? MainActivity
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
+            // 目的地留痕（2026-10-30 黑屏取证）：黑屏投诉里最关键的问题就是"黑的那一屏是哪个
+            // 页面"——状态栏可见与否只能缩小范围，这一行直接写名。一次导航一行，量级可忽略。
+            com.wotagei.cam.diag.Diag.i("WotaNav", "目的地 → ${destination.route}")
             applyPageMode(activity, destination.route)
             windowOwner?.onRouteForWindowKeepOn(destination.route)
             // 页面保活旗标（2026-10-29 手动白平衡绿帧 / 2026-10-30 黑屏三次修订扩面）：
