@@ -62,8 +62,12 @@ data class CameraUiState(
 class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecycleObserver {
 
     companion object {
-        /** 页面往返保活宽限（非设置页）：到点自动关相机，回来晚了就走冷开（省电与手感的折中） */
-        const val PAGE_KEEP_ALIVE_MS = 30_000L
+        /**
+         * 页面往返保活宽限（非设置页）。**用户裁决 2s**（2026-10-30）：只覆盖"手滑误触/瞬切"，
+         * 不养一台背后常开的相机。注意超过这个时间的往返回场仍会重开相机（首帧 0.5~0.9s），
+         * 这是刻意的取舍——保活越久越费电发热。
+         */
+        const val PAGE_KEEP_ALIVE_MS = 2_000L
 
         fun of(owner: ViewModelStoreOwner): CameraController =
             ViewModelProvider(owner)[CameraController::class.java]
@@ -126,8 +130,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
      * 的死法**只在重开路径上出现**（r30/r31 日志同一形状：`帧率决议` 打了、帧不来）。保活把
      * 这一整类都绕开：回来就是现成会话，相机与 GL 都不重建。
      *
-     * 省电兜底：非设置页给宽限 [PAGE_KEEP_ALIVE_MS]，到点自动关；app 退到后台立刻关
-     * （[closePreviewNow]，由 MainActivity.onStop 触发）。
+     * 省电兜底：非设置页给宽限 [PAGE_KEEP_ALIVE_MS]（用户裁决 2s，只兜"瞬切/误触"），
+     * 到点自动关；app 退到后台立刻关（[closePreviewNow]，由 MainActivity.onStop 触发）。
      */
     private var keepAliveJob: Job? = null
 
