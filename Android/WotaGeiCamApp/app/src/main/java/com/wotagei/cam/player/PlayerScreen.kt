@@ -137,6 +137,7 @@ import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.decodeGlow
 import com.wotagei.cam.ui.widget.percentLadder
+import com.wotagei.cam.ui.design.LikeHeart
 import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
@@ -634,7 +635,7 @@ fun PlayerScreen(
                     modifier = Modifier,
                     clip = clip,
                     onBack = onBack,
-                    onLike = { ops.setLike(clip, !clip.liked) },
+                    onLike = { ops.setLike(clip, it) },
                     onTag = { tagDialog = true },
                     onShare = { ops.share(listOf(clip)) },
                     onTrash = {
@@ -1765,7 +1766,8 @@ private fun PlayerTopBar(
     modifier: Modifier = Modifier,
     clip: VideoClip,
     onBack: () -> Unit,
-    onLike: () -> Unit,
+    /** 收藏切换（2026-10-30）：传目标值而不是"取反"——红心动画要把状态与效果绑在同一次点击上 */
+    onLike: (Boolean) -> Unit,
     onTag: () -> Unit,
     onShare: () -> Unit,
     onTrash: () -> Unit,
@@ -1801,12 +1803,15 @@ private fun PlayerTopBar(
             modifier = Modifier.weight(1f).padding(horizontal = 2.dp)
         )
         BarIconSlot(Icons.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
-        BarIconSlot(
-            if (clip.liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-            // 图标已经分状态了，标签也必须跟着分：原来恒报「已收藏」，未收藏的成片读屏也说成已收藏
-            stringResource(if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked),
-            tint = if (clip.liked) WotaRec else WotaText,
-            onClick = onLike
+        // 收藏红心（2026-10-30 用户需求）：Bencho "Like" 的红心动画（绽放环 + 七对彩点 +
+        // 红心弹出，无数字滚动）。图标已经分状态、标签也必须跟着分——原来恒报「已收藏」，
+        // 未收藏的成片读屏也说成已收藏。
+        LikeHeart(
+            liked = clip.liked,
+            onToggle = onLike,
+            contentDescription = stringResource(
+                if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked
+            )
         )
         BarIconSlot(Icons.Outlined.Tune, stringResource(R.string.gallery_menu_tags), onClick = onTag)
         BarIconSlot(Icons.Outlined.Share, stringResource(R.string.gallery_menu_share), onClick = onShare)
