@@ -679,6 +679,9 @@ fun CameraScreen(
         (activeSink as? GlRenderEngine)?.onCameraSurfaceReady = { ctrl.onPreviewSurfaceReady() }
         // 显示面挂摘/重挂 → 布防手动白平衡稳压窗（卓易通桥过渡拍绿帧，2026-10-29）
         (activeSink as? GlRenderEngine)?.onDisplaySurfaceTransient = { ctrl.onPreviewSurfaceTransient() }
+        // 上屏 swap 失败摘面 → 立刻请求重挂（GL 线程触发；tryEmit 线程安全）。
+        // 这是「画面黑但应用活着」的唯一发生点，等看门狗轮询要 1.5~2.5s，这里当场救。
+        (activeSink as? GlRenderEngine)?.onWindowSurfaceDropped = { ctrl.requestDisplayReattach() }
         ctrl.bind(activeSink)
         ctrl.start()
         // 预览账（2026-10-30 黑屏三次取证）：本页停留期间相机出了多少帧、屏上真的换了多少帧。
@@ -713,7 +716,13 @@ fun CameraScreen(
     // 请求来自两处看门狗（页面内 + Activity 级），这里只负责把它落成一次视图重建。
     var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }
     LaunchedEffect(ctrl) {
+        // 限频 600ms：swap 连环失败时（挂上又立刻失败）不至于无限重建视图；
+        // 连环失败的最终兜底仍是看门狗的 forceRebind
+        var lastAt = 0L
         ctrl.displayReattach.collect {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastAt < 600L) return@collect
+            lastAt = now
             Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${surfaceEpoch + 1}")
             surfaceEpoch++
         }

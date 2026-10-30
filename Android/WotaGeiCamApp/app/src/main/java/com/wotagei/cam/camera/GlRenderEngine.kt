@@ -744,6 +744,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     var onCameraSurfaceReady: (() -> Unit)? = null
 
     /**
+     * 上屏窗口面被摘除（swap 失败）时的回调（GL 线程触发；消费方须自行保证线程安全）。
+     *
+     * 这是「画面全黑但应用活着」唯一的发生点：swap 失败就地摘面后，绘制退到 pbuffer，
+     * 相机帧照常消费、UI 照常响应，唯独屏幕黑。接入方收到就应走显示面重挂
+     * （重建承载视图），不等看门狗的秒级轮询。
+     */
+    @Volatile
+    var onWindowSurfaceDropped: (() -> Unit)? = null
+
+    /**
      * 显示面挂摘/重挂瞬间回调（UI 线程，2026-10-29 手动白平衡绿帧）。
      *
      * 卓易通桥（华为 ALN-AL00 实测）在应用显示面切换的过渡拍会直接吐 HAL 过渡帧：请求此刻是
@@ -2139,7 +2149,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 预览 blit 之后、swap 之前：按矩形表把霜底板贴上去（#84 步骤 2，A2 混合）。
         // 这一步只在窗口面里发生，[drawEncoderPass] 走的是另一条完整独立的路（同一条"绝不碰霜"红线）
         drawFrostPlates()
-        if (!swap(window)) dropWindowSurface() else {
+        if (!swap(window)) {
+            // 「画面全黑但应用活着」的头号静默路径（2026-10-30 真机录屏对账）：swap 失败就地
+            // 摘除窗口面，之后 drawFrame 退到 pbuffer——相机帧照常消费、UI 照常响应，唯独
+            // 屏幕全黑，且此前一行日志都不留。必须留痕：下一份日志先搜这一行。
+            Log.w(TAG_GL, "上屏 swap 失败 ⇒ 摘除窗口面（画面将保持黑，直到显示面重挂）")
+            dropWindowSurface()
+            // 立刻请求重挂（不等看门狗秒级轮询）；消费方自行限频，连环失败仍有
+            // 看门狗的 forceRebind 兜底
+            onWindowSurfaceDropped?.invoke()
+        } else {
             lastWindowSwapNs = System.nanoTime()
             // 上屏心跳（单调）：只有 swap 成功才算"屏上真的换了一帧"，
             // 这条计数是「相机活着但整屏黑」唯一能观测到的死亡信号
