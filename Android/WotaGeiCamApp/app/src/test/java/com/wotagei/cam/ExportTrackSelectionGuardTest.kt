@@ -21,6 +21,9 @@ class ExportTrackSelectionGuardTest {
     private val clip = codeOnly(mainSourceText("player/ClipExport.kt"))
     private val track = codeOnly(mainSourceText("player/TrackExport.kt"))
     private val player = codeOnly(mainSourceText("player/PlayerScreen.kt"))
+    // 2026-10-30 审查 🟡-1：导出任务上收到 ExportHost（Activity 作用域），派发锚点随之搬家；
+    // 判据语义不变——选中的音轨与缓存偏移必须一路传进导出器。
+    private val host = codeOnly(mainSourceText("player/ExportHost.kt"))
 
     @Test
     fun `剪辑导出必须暴露音轨选择且按选中轨取轨`() {
@@ -69,7 +72,10 @@ class ExportTrackSelectionGuardTest {
         assertTrue("内录项必须按双音轨门置灰", popup.contains("enabled = dualReady"))
         assertTrue(
             "导出调用必须把用户选中的音轨与缓存偏移传进去（漏传 = 选择/同步无效）",
-            flatten(player).contains("clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset)")
+            // 页面把快照交给宿主（track = clipTrack / offsetMs = offset），宿主原样送进导出器
+            flatten(player).contains("track = clipTrack") &&
+                flatten(player).contains("offsetMs = offset") &&
+                host.contains("clipExporter.export(clip, aMs, bMs, track, offsetMs)")
         )
         assertTrue("选轨必须是按片重置的会话态", player.contains("var clipTrack by remember(clip.uri)"))
     }

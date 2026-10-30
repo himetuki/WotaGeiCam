@@ -131,6 +131,8 @@ import com.wotagei.cam.record.ArcRepairRunner
 import com.wotagei.cam.record.ArcRepairStatus
 import com.wotagei.cam.ui.ParamsPersistSession
 import com.wotagei.cam.ui.WotaSettings
+import com.wotagei.cam.ui.findActivity
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.wotagei.cam.ui.anim.LocalMotion
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.decodeGlow
@@ -441,12 +443,18 @@ fun PlayerScreen(
     var mirrored by remember { mutableStateOf(false) }
 
     // 掐头去尾剪辑导出（2026-10-04 方向 3）：区间复用底栏 A/B 标记，不引入第二套设点手势；
-    // 执行走 ClipExporter 无损拷贝。进度/取消都是会话态。页面退出时组合级 scope 取消，
-    // 导出协程随之取消并删 pending 记录，不留半截文件
-    val clipExporter = remember(app) { ClipExporter(app) }
-    // 后渲染导出（2026-10-28 用户需求）：重编码 + Glow/降噪；曲线刻意不做（录制已烘进成片）
-    val sceneRunner = remember(app) { SceneExportRunner(app) }
-    val clipRepo = rememberMediaRepo()
+    // 执行走 ClipExporter 无损拷贝。**任务归 [ExportHost]（Activity 作用域）**：2026-10-30
+    // 全面审查 🟡-1——此前挂在页面组合作用域上，快速返回/组合被拆会静默丢弃用户发起的导出。
+    // 页面只负责展示进度、映射结果横幅、发起与取消。
+    val hostContext = LocalContext.current
+    val hostActivity = remember(hostContext) { hostContext.findActivity() }
+    val storeOwner = LocalViewModelStoreOwner.current
+    val exportHost = remember(hostActivity, storeOwner) {
+        // 宿主优先挂 Activity 作用域（任务寿命=窗口）；拿不到宿主 Activity 再退回页面属主
+        if (hostActivity is androidx.lifecycle.ViewModelStoreOwner) ExportHost.of(hostActivity)
+        else ExportHost.of(checkNotNull(storeOwner) { "PlayerScreen 需要可用的 ViewModelStoreOwner" })
+    }
+    val exportState by exportHost.state.collectState(ExportUiState())
     var clipMenu by remember { mutableStateOf(false) }
     // 导出方式：0 = 无损重封（既有）、1 = 后渲染（重编码）
     var clipMode by remember { mutableIntStateOf(0) }
@@ -461,9 +469,6 @@ fun PlayerScreen(
     }
     val sceneEffects = remember(clipGlow, clipDenoise) { sceneExportEffectsOf(clipGlow, clipDenoise) }
     var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
-    var clipExporting by remember { mutableStateOf(false) }
-    var clipProgress by remember { mutableStateOf(0f) }
-    var clipJob by remember { mutableStateOf<Job?>(null) }
     // 剪辑导出的音轨选择（2026-10-18 用户定版）：只导**用户选中的那一条**，默认环境音；
     // 不再"只认第一条"（双轨素材的内录被静默丢）也不再"多轨全导"。与播放选轨（selectedAudio）
     // 分开：换播放轨不该偷偷改导出内容，反之亦然。
@@ -472,7 +477,6 @@ fun PlayerScreen(
     // 内录选轨（批 4）：双音轨片才亮的「音轨 chip / 同步 / 导出」三控件。dualAudio 由打开时的
     // MediaExtractor 探测（IO 线程）——单音轨片与外来视频静默不显（回归红线，守卫钉住）；
     // cap-only 单音轨段（环境轨零样本废弃后）无法与普通录像区分，同一条红线覆盖：不显、不误标
-    val trackExporter = remember(app) { TrackExporter(app) }
     var dualAudio by remember(clip.uri) { mutableStateOf(false) }
     // 选轨是会话态：换片回环境轨（引擎 override 由 attach 清掉，两侧口径一致）
     var selectedAudio by remember(clip.uri) { mutableStateOf(SelectedTrack.ENV) }
@@ -488,10 +492,35 @@ fun PlayerScreen(
     var trackSyncAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     var trackExportMenu by remember { mutableStateOf(false) }
     var trackExportAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
-    var trackExporting by remember { mutableStateOf(false) }
-    var trackExportProgress by remember { mutableStateOf(0f) }
-    var trackExportJob by remember { mutableStateOf<Job?>(null) }
     val audioGroups by engine.audioGroups.collectState(emptyList<Tracks.Group>())
+
+    // 导出结果 → 横幅（文案归页面，宿主不碰 UI 资源）。不在场时完成的导出，结果留在
+    // 宿主状态里，回到播放页照样弹一次；消费后必须 clearResult（同值去重）
+    LaunchedEffect(exportState.result, exportState.resultKind) {
+        val r = exportState.result ?: return@LaunchedEffect
+        banner = when (exportState.resultKind) {
+            ExportKind.CLIP -> when (r) {
+                is ClipResult.Done -> R.string.player_clip_done
+                is ClipResult.Fail -> when (r.reason) {
+                    ClipError.RANGE -> R.string.player_clip_too_short
+                    // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，文案与
+                    // "导出失败"分开——东西没丢，重启后自动恢复
+                    ClipError.COMMIT -> R.string.player_clip_commit_kept
+                    else -> R.string.player_clip_failed
+                }
+            }
+            // 选轨档：RANGE 不在失败域（无出点截断），只分 commit 保留与普通失败
+            ExportKind.TRACK -> when (r) {
+                is ClipResult.Done -> R.string.player_track_export_done
+                is ClipResult.Fail -> if (r.reason == ClipError.COMMIT) {
+                    R.string.player_track_commit_kept
+                } else {
+                    R.string.player_track_export_failed
+                }
+            }
+        }
+        exportHost.clearResult()
+    }
 
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
     val tapArbiter = remember { TapArbiter(DOUBLE_TAP_WINDOW_MS) }
@@ -772,7 +801,7 @@ fun PlayerScreen(
                                 BarIconSlot(
                                     Icons.Outlined.ContentCut,
                                     stringResource(R.string.player_clip),
-                                    accent = clipExporting
+                                    accent = exportState.clipRunning
                                 ) { clipMenu = !clipMenu }
                             }
                             // 内录选轨三控件（批 4，仅双音轨片渲染）：chip 选轨就近弹窗、同步跑
@@ -826,7 +855,7 @@ fun PlayerScreen(
                                     BarIconSlot(
                                         Icons.Outlined.FileDownload,
                                         stringResource(R.string.player_track_export),
-                                        accent = trackExporting
+                                        accent = exportState.trackRunning
                                     ) { trackExportMenu = !trackExportMenu }
                                 }
                             }
@@ -896,8 +925,8 @@ fun PlayerScreen(
                     aMs = ab.aMs,
                     bMs = ab.bMs,
                     durationMs = duration,
-                    exporting = clipExporting,
-                    progress = clipProgress,
+                    exporting = exportState.clipRunning,
+                    progress = exportState.clipProgress,
                     track = clipTrack,
                     dualReady = audioGroups.size >= 2,
                     mode = clipMode,
@@ -910,63 +939,24 @@ fun PlayerScreen(
                     onPickTrack = { clipTrack = it },
                     onExport = {
                         // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层
-                        if (clipJob == null) {
+                        if (!exportState.clipRunning) {
                             engine.softPause(true)
                             clipMenu = false
-                            clipExporting = true
-                            clipProgress = 0f
                             // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
                             val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
-                            val mode = clipMode
-                            // 面板里配置的效果起跑那一刻定版（导出中再改不影响这一轮）
-                            val effects = sceneExportEffectsOf(clipGlow, clipDenoise)
-                            clipJob = scope.launch {
-                                try {
-                                    // 区间与选轨都在起跑那一刻定版：导出期间用户再动 A/B / 换轨不影响这一轮
-                                    val result = if (mode == 1) {
-                                        // 后渲染：重编码 + Glow/降噪（曲线不在其中）
-                                        when (val r = sceneRunner.export(
-                                            clip, ab.aMs, ab.bMs, clipTrack, offset, effects
-                                        ) { p -> clipProgress = p }) {
-                                            is SceneExportRunner.Done -> ClipResult.Done(r.id, r.name)
-                                            is SceneExportRunner.Failed -> ClipResult.Fail(
-                                                when (r.reason) {
-                                                    SceneExportRunner.Reason.RANGE -> ClipError.RANGE
-                                                    // 只有"已封轨、只是没清 IS_PENDING"才算 commit 保留口径；
-                                                    // 其余失败（含 stop 前抛的）pending 行已删，报普通失败
-                                                    SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT
-                                                    else -> ClipError.MUX
-                                                }
-                                            )
-                                        }
-                                    } else {
-                                        clipExporter.export(clip, ab.aMs, ab.bMs, clipTrack, offset) { p -> clipProgress = p }
-                                    }
-                                    when (val r = result) {
-                                        is ClipResult.Done -> {
-                                            banner = R.string.player_clip_done
-                                            clipRepo.invalidate()
-                                        }
-                                        is ClipResult.Fail ->
-                                            banner = when (r.reason) {
-                                                ClipError.RANGE -> R.string.player_clip_too_short
-                                                // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，
-                                                // 文案与"导出失败"分开——东西没丢，重启后自动恢复
-                                                ClipError.COMMIT -> R.string.player_clip_commit_kept
-                                                else -> R.string.player_clip_failed
-                                            }
-                                    }
-                                } finally {
-                                    clipExporting = false
-                                    clipJob = null
-                                }
-                            }
+                            // 区间、选轨、方式、效果全部在起跑那一刻定版（快照进宿主）
+                            exportHost.startClip(
+                                clip = clip,
+                                aMs = ab.aMs,
+                                bMs = ab.bMs,
+                                track = clipTrack,
+                                offsetMs = offset,
+                                postRender = clipMode == 1,
+                                effects = sceneExportEffectsOf(clipGlow, clipDenoise)
+                            )
                         }
                     },
-                    onCancel = {
-                        clipJob?.cancel()
-                        clipJob = null
-                    },
+                    onCancel = { exportHost.cancelClip() },
                     onDismiss = { clipMenu = false }
                 )
             }
@@ -996,45 +986,22 @@ fun PlayerScreen(
                     track = selectedAudio,
                     syncedOffsetMs = syncedOffsetMs,
                     syncedSource = syncedSource,
-                    exporting = trackExporting,
-                    progress = trackExportProgress,
+                    exporting = exportState.trackRunning,
+                    progress = exportState.trackProgress,
                     onExport = {
                         // 重入防护与选轨/偏移定版同剪辑导出口径：起跑那一刻锁快照，
                         // 导出期间切轨/重跑同步不影响这一轮
-                        if (trackExportJob == null) {
+                        if (!exportState.trackRunning) {
                             engine.softPause(true)
                             trackExportMenu = false
-                            trackExporting = true
-                            trackExportProgress = 0f
-                            val track = selectedAudio
-                            val offset = syncedOffsetMs ?: 0L
-                            trackExportJob = scope.launch {
-                                try {
-                                    when (val r = trackExporter.export(clip, track, offset) { p -> trackExportProgress = p }) {
-                                        is ClipResult.Done -> {
-                                            banner = R.string.player_track_export_done
-                                            clipRepo.invalidate()
-                                        }
-                                        is ClipResult.Fail ->
-                                            // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，
-                                            // 文案与"导出失败"分开；RANGE 不在选轨的失败域（无出点截断）
-                                            banner = if (r.reason == ClipError.COMMIT) {
-                                                R.string.player_track_commit_kept
-                                            } else {
-                                                R.string.player_track_export_failed
-                                            }
-                                    }
-                                } finally {
-                                    trackExporting = false
-                                    trackExportJob = null
-                                }
-                            }
+                            exportHost.startTrack(
+                                clip = clip,
+                                track = selectedAudio,
+                                offsetMs = syncedOffsetMs ?: 0L
+                            )
                         }
                     },
-                    onCancel = {
-                        trackExportJob?.cancel()
-                        trackExportJob = null
-                    },
+                    onCancel = { exportHost.cancelTrack() },
                     onDismiss = { trackExportMenu = false }
                 )
             }

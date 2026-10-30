@@ -25,6 +25,9 @@ import java.io.File
 class SceneExportWiringGuardTest {
 
     private val playerSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/PlayerScreen.kt")) }
+    // 2026-10-30 全面审查 🟡-1：导出任务上收到 ExportHost（Activity 作用域）。守卫判据语义不变
+    // （两条路径都要真接上、COMMIT 与 MUXER 必须分开报），只是派发/映射的锚点跟着代码搬家。
+    private val hostSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/ExportHost.kt")) }
     private val runnerSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportRunner.kt")) }
     private val glSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportGl.kt")) }
     private val planSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportPlan.kt")) }
@@ -96,7 +99,7 @@ class SceneExportWiringGuardTest {
         // 面板当前配置的快照（导出期间再改不影响这一轮）
         assertTrue(
             "导出起跑时必须取面板当前配置的快照（sceneExportEffectsOf）",
-            playerSrc.contains("val effects = sceneExportEffectsOf(clipGlow, clipDenoise)")
+            playerSrc.contains("effects = sceneExportEffectsOf(clipGlow, clipDenoise)")
         )
         assertTrue(
             "决策层必须把 enabled=false 的光晕折成 null（关着就不该付 GPU 代价）",
@@ -108,10 +111,14 @@ class SceneExportWiringGuardTest {
 
     @Test
     fun `lossless与scene两条导出路径都被接上`() {
-        assertTrue("必须真的实例化 SceneExportRunner", playerSrc.contains("SceneExportRunner(app)"))
-        assertTrue("后渲染分支必须真的调用 runner", playerSrc.contains("sceneRunner.export("))
-        assertTrue("无损分支必须保留原路径", playerSrc.contains("clipExporter.export("))
-        assertTrue("两种模式必须由同一个 mode 变量分流", playerSrc.contains("if (mode == 1)"))
+        assertTrue("必须在宿主里实例化 SceneExportRunner", hostSrc.contains("SceneExportRunner(ctx)"))
+        assertTrue("后渲染分支必须真的调用 runner", hostSrc.contains("sceneRunner.export("))
+        assertTrue("无损分支必须保留原路径", hostSrc.contains("clipExporter.export("))
+        // 两种模式由同一个 mode 快照分流：页面算 clipMode==1，宿主按 postRender 分岔
+        assertTrue(
+            "两种模式必须由同一个 mode 变量分流（页面快照 → 宿主分岔）",
+            playerSrc.contains("postRender = clipMode == 1") && hostSrc.contains("if (postRender)")
+        )
     }
 
     @Test
@@ -187,14 +194,14 @@ class SceneExportWiringGuardTest {
             "muxer 没写成时必须报 MUXER（pending 行已删，不许谎报可恢复）",
             runnerSrc.contains("fail(pendingUri, Reason.MUXER)")
         )
-        // PlayerScreen 的映射：只有 COMMIT 才落到 ClipError.COMMIT
+        // 导出宿主的映射：只有 COMMIT 才落到 ClipError.COMMIT
         assertTrue(
-            "PlayerScreen 必须把 Reason.COMMIT 映射成 ClipError.COMMIT",
-            playerSrc.contains("SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT")
+            "宿主必须把 Reason.COMMIT 映射成 ClipError.COMMIT",
+            hostSrc.contains("SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT")
         )
         assertFalse(
             "不许把 MUXER 映射成 COMMIT（pending 已删，谎报会让用户白等重启）",
-            playerSrc.contains("SceneExportRunner.Reason.MUXER -> ClipError.COMMIT")
+            hostSrc.contains("SceneExportRunner.Reason.MUXER -> ClipError.COMMIT")
         )
     }
 

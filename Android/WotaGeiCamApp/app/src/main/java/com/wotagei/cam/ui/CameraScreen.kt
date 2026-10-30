@@ -743,10 +743,9 @@ fun CameraScreen(
         host?.onRouteForPreviewWatch(ROUTE_CAMERA, ctrl)
         // 页面在组合里 = 不需要保活（回场完成）：清掉宽限计时，避免 30s 后把正在用的相机关掉
         ctrl.cancelPreviewKeepAlive()
-        // 组合在场回报（黑屏竞态兜底）：快速连点返回能把本页组合拆掉而目的地不变——
-        // Activity 级看门狗据此识别"整窗黑"并重建 Activity 自救（见 MainActivity）
-        host?.onCameraPageComposed()
-        onDispose { host?.onCameraPageDisposed() }
+        // 组合在场回报已收口到 NavHost 的 DestinationPresence（2026-10-30 审查 🟡-3：
+        // 六个目的地统一回报，不再由本页专用上报）
+        onDispose { }
     }
 
     // ---- 预览自愈 watchdog（2026-10-29 黑屏取证，2026-10-30 三次修订）
@@ -3342,6 +3341,11 @@ private class RecordRunner(
 
     /** 退出页面：同步收尾，保证文件写完、pending 清掉之后再让相机释放 */
     fun shutdown() {
+        // 收尾在工作线程排队完成（quitSafely 保证已入队任务跑完再退线程）。
+        // 2026-10-30 全面审查 🟡-2：此前这里是主线程 `latch.await(3s)`——长录制停录时
+        // moov 收尾写盘在容器慢盘上顶到 3 秒，就是一次最长 3 秒的主线程卡顿，而这段代码
+        // 正好跑在"快速返回"的高频路径上（onDispose）。现在主线程只投递，超时监控挪到
+        // 旁路线程：只留日志，不阻塞任何人；quitSafely 本身保证收尾一定会完成。
         val latch = CountDownLatch(1)
         handler.post {
             stopRequested = false // 退页收尾：清掉取消信号（本路不走检查点，直接完整停录）
@@ -3349,8 +3353,10 @@ private class RecordRunner(
             latch.countDown()
             thread.quitSafely()
         }
-        val ok = runCatching { latch.await(3, TimeUnit.SECONDS) }.getOrDefault(false)
-        if (!ok) Log.w(TAG_UI, "录制收尾超时，交给引擎兜底")
+        Thread({
+            val ok = runCatching { latch.await(3, TimeUnit.SECONDS) }.getOrDefault(false)
+            if (!ok) Log.w(TAG_UI, "录制收尾超过 3s 尚未完成（后台继续收尾），页面已先行退出")
+        }, "WotaRecFinalizeWatch").start()
     }
 
     fun clearResult() {

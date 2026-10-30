@@ -67,8 +67,8 @@ class TrackToolsGuardTest {
         body.contains("engine.clearAudioOverride()") to "选环境必须清 override 回默认（默认即第一条音轨=环境）",
         body.contains("TrackSync.run(app, clip.uri)") to "同步钮必须跑 TrackSync.run",
         body.contains("R.string.player_track_sync_low") to "低置信度必须有「按录制起点对齐」提示（复用低置信口径）",
-        body.contains("trackExporter.export(clip, track, offset)") to
-            "导出必须把选轨快照与偏移一起交给 TrackExporter",
+        body.contains("exportHost.startTrack(") to
+            "导出必须把选轨快照与偏移一起交给宿主的 startTrack（2026-10-30 审查 🟡-1 上收后）",
         (body.contains("trackPickAnchor = it") && body.contains("trackSyncAnchor = it") &&
             body.contains("trackExportAnchor = it")) to "三控件的就近弹窗必须各挂锚点（pillAnchor 写入方登记纪律）"
     ).filter { (ok, _) -> !ok }.map { (_, why) -> why }
@@ -90,6 +90,11 @@ class TrackToolsGuardTest {
                 sig.contains("anchor: androidx.compose.ui.unit.IntRect") && !sig.contains("IntRect =")
             )
         }
+        // 宿主编排侧：选轨快照与偏移必须原样送进 TrackExporter（2026-10-30 审查 🟡-1 上收）
+        assertTrue(
+            "ExportHost.startTrack 必须把选轨快照与偏移交给 TrackExporter",
+            masked("player/ExportHost.kt").contains("trackExporter.export(clip, track, offsetMs)")
+        )
         // 红绿突变 1：拆掉双音轨门（恒显），同一把尺必须报红——这正是"单音轨也显示"的回归形态
         val mutantGate = playerScreenBody().replace("if (dualAudio)", "if (true)")
         assertTrue("拆门突变体必须报红", missingUiWires(mutantGate).isNotEmpty())

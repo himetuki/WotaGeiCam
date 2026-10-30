@@ -201,13 +201,16 @@ class WbCoverKeepAliveGuardTest {
                 activitySrc.contains("recreate()")
         )
         assertTrue(
-            "录制页必须向 Activity 回报组合在场/销毁",
-            screenSrc.contains("host?.onCameraPageComposed()") &&
-                screenSrc.contains("host?.onCameraPageDisposed()")
+            "组合在场回报必须收口到 NavHost 级（2026-10-30 审查 🟡-3：六个目的地统一守护，不再录制页专用）",
+            activitySrc.contains("private fun DestinationPresence(") &&
+                activitySrc.contains("DestinationPresence(windowOwner, ROUTE_CAMERA)") &&
+                activitySrc.contains("DestinationPresence(windowOwner, WotaNav.PLAYER)")
         )
         assertTrue(
-            "目的地未变而组合没了 ≥3s 必须重建 Activity 自救（ViewModel 存活，相机随重组回来）",
-            activitySrc.contains("pageGoneSinceMs >= 3_000L") && activitySrc.contains("recreate()")
+            "目的地未变而组合没了 ≥3s 必须自救（栈空 finish / 栈在 recreate）",
+            activitySrc.contains("composedRoute") && activitySrc.contains("armCompositionGuard()") &&
+                activitySrc.contains("navStateProvider") && activitySrc.contains("recreate()") &&
+                activitySrc.contains("finish()")
         )
         assertTrue(
             "CameraSurface 仍是唯一 Surface 出口（防抖不得绕过面归属守卫）",
