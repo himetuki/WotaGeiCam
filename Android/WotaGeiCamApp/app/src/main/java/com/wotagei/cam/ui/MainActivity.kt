@@ -393,21 +393,19 @@ private fun WotaRoot() {
     // 各屏文本高度独立：prefs 读值即当前设置，回本页时重组生效
     val prefs = remember(context) { WotaSettings.of(context) }
 
-    // 页内返回防抖（2026-10-30 黑屏定案）：设置页返回箭头连点多下时，第二下 pop 会落在
-    // 上一个 pop 的转场中途，把刚进场的录制页组合连带拆掉——目的地不变、内容已销毁
-    // = 整窗黑、无控件、系统返回仍可用（r38 日志 47.465→48.256 实录）。400ms 内的
-    // 第二次 pop 一律忽略；转场动画本身 ~300ms，正常操作节奏不受影响。
+    // 页内返回唯一出口（2026-10-30 生命周期重构）：防抖 + 栈底不变量收口在这一处。
+    // ① 栈底不变量：起始目的地（录制页）**不许被页内返回弹掉**——弹掉 = 返回栈清空 =
+    //    NavHost 无内容可画 = 整窗黑，且 Activity 不会自动结束（r39 日志 isFinishing=false
+    //    实录）。录制页没有页内返回钮，这条路径只来自转场迟到的误点；想退出用系统返回。
+    // ② 防抖：转场 ~300ms，400ms 内的第二次 pop 是同一次手滑的余波，一律忽略。
+    // ③ 系统返回不走这里：返回栈只剩起始页时由系统正常结束 Activity（既有实测行为）。
     var lastPopAt by remember { mutableStateOf(0L) }
-    fun popBackStackDebounced() {
+    fun navigateBack(): Boolean {
+        if (nav.currentDestination?.id == nav.graph.startDestinationId) return false
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastPopAt < 400L) return
-        // 栈底保护（2026-10-30 r39 日志二次定案）：防抖窗外的连点仍会落到录制页上，
-        // 而录制页是**起始目的地**——pop 掉它 = 返回栈清空 = NavHost 无内容可画
-        // （整窗黑，且 Activity 不会自动结束，isFinishing=false 实录）。录制页没有
-        // 页内返回钮，这条路径只会来自转场迟到的误点：直接忽略，想退出用系统返回。
-        if (nav.currentDestination?.id == nav.graph.startDestinationId) return
+        if (now - lastPopAt < 400L) return false
         lastPopAt = now
-        nav.popBackStack()
+        return nav.popBackStack()
     }
 
     val launcher = rememberLauncherForActivityResult(
@@ -443,10 +441,10 @@ private fun WotaRoot() {
             // 此监听在 navigate/popBackStack 时**同步触发、先于旧页 dispose 与 ON_PAUSE**，
             // 旗标读到的新值即时生效。口径：离开录制页就保活——设置页无限期（r28 既有语义），
             // 其他前台页给宽限（到点自动关，见 CameraController.PAGE_KEEP_ALIVE_MS）；
-            // 回到录制页立刻解除。相机 entry 不在栈上时按 false 走老路。
-            val cameraCtrl = runCatching {
-                CameraController.of(nav.getBackStackEntry(ROUTE_CAMERA))
-            }.getOrNull()
+            // 门面 = Activity 作用域单例（2026-10-30 生命周期重构）：与录制页取同一实例，
+            // 不再按导航条目回查——导航竞态从此与相机状态彻底解耦，回场保活/看门狗的
+            // 控制器引用也不再依赖"条目恰好在栈上"。
+            val cameraCtrl = windowOwner?.let { CameraController.of(it) }
             if (cameraCtrl != null) {
                 windowOwner?.previewCtrl = cameraCtrl
                 if (destination.route == ROUTE_CAMERA) {
@@ -495,6 +493,8 @@ private fun WotaRoot() {
                     // 一并弹掉属预期；对比页不在栈内（异常动线）时保底回普通弹栈。该回调只在
                     // ComparePractice.deliver 成功（练习桥 armed）时被调，普通录制路径零影响。
                     onPracticeFinish = {
+                        // 程序化定向返回（非用户手势）：栈上必有录制页在 COMPARE 之下，
+                        // 不会触发"弹掉栈底"竞态，故不走 navigateBack 的栈底不变量
                         if (!nav.popBackStack(WotaNav.COMPARE, false)) nav.popBackStack()
                     }
                 )
@@ -504,7 +504,7 @@ private fun WotaRoot() {
             GalleryEntryScreen(
                 onOpen = { id -> nav.navigate(WotaNav.player(id)) },
                 onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
-                onBack = { popBackStackDebounced() }
+                onBack = { navigateBack() }
             )
         }
         composable(
@@ -513,7 +513,7 @@ private fun WotaRoot() {
         ) { entry ->
             PlayerScreen(
                 mediaId = entry.arguments?.getLong(WotaNav.PLAYER_ARG) ?: -1L,
-                onBack = { popBackStackDebounced() },
+                onBack = { navigateBack() },
                 onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
                 // 起播渐亮（29 §5.3-②）：页面只上报"起播了"，武装闸与窗口写入收口在 MainActivity
                 onPlaybackStarted = { (activity as? MainActivity)?.onPlayerPlaybackStarted() }
@@ -527,14 +527,14 @@ private fun WotaRoot() {
         ) { entry ->
             CompareScreen(
                 leftMediaId = entry.arguments?.getLong(WotaNav.COMPARE_ARG_LEFT) ?: -1L,
-                onBack = { popBackStackDebounced() },
+                onBack = { navigateBack() },
                 onPractice = { nav.navigate(ROUTE_CAMERA) }
             )
         }
         composable(ROUTE_SETTINGS) {
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS)) {
                 SettingsScreen(
-                    onBack = { popBackStackDebounced() },
+                    onBack = { navigateBack() },
                     onOpenHudEditor = { nav.navigate(ROUTE_HUD_EDITOR) }
                 )
             }
@@ -542,7 +542,7 @@ private fun WotaRoot() {
         composable(ROUTE_HUD_EDITOR) {
             // 编辑的是录制页的控件，文本高度也走录制页那一档，两边量出来的宽度才同一个数
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) {
-                HudLayoutEditorScreen(onBack = { popBackStackDebounced() })
+                HudLayoutEditorScreen(onBack = { navigateBack() })
             }
         }
     }

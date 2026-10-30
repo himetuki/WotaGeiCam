@@ -304,10 +304,16 @@ fun CameraScreen(
     val context = LocalContext.current
     val app = remember(context) { context.applicationContext }
     val owner = LocalLifecycleOwner.current
-    // 门面放在导航目的地的 ViewModelStore 上：离开录制页即随栈回收，回到页面复用同一实例
+    val hostActivity = remember(context) { findHostActivity(context) }
     val storeOwner = LocalViewModelStoreOwner.current
-    val ctrl = remember(storeOwner) {
-        CameraController.of(checkNotNull(storeOwner) { "CameraScreen 必须在 NavHost 目的地内使用" })
+    // 门面收口到 **Activity 作用域**（2026-10-30 生命周期重构，黑屏五轮定案后的结构修复）：
+    // 相机管线的寿命 = 窗口寿命，而非导航条目——此前 per-entry 作用域让"导航竞态拆组合"
+    // 连带杀死引擎/GL 缓存/全部接线，才有保活定时器、组合在场回报、recreate 兜底这一整串
+    // 补丁。收口后：页面只负责「可见时驱动、隐藏时按保活策略收放」；导航怎么竞争都动不到
+    // 相机状态，重新组合（含 recreate）拿回的就是同一个控制器与同一枚 GL 引擎。
+    val ctrl = remember(hostActivity, storeOwner) {
+        if (hostActivity != null) CameraController.of(hostActivity)
+        else CameraController.of(checkNotNull(storeOwner) { "CameraScreen 必须在 NavHost 目的地内使用" })
     }
     val params = ctrl.params
     // 默认档位必须在建 sink 之前套用：渲染模式默认值会决定首个 sink 是 GL 还是直显，晚一帧就白起一个 GL 线程

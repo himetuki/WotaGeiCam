@@ -44,6 +44,11 @@ class WbCoverKeepAliveGuardTest {
             !screenSrc.contains("activeSink as? GlRenderEngine)?.release()")
         )
         assertTrue(
+            "门面必须收口到 Activity 作用域（生命周期=窗口；导航竞态动不到相机状态）",
+            screenSrc.contains("CameraController.of(hostActivity)") &&
+                activitySrc.contains("CameraController.of(it)")
+        )
+        assertTrue(
             "GPU 引擎必须取页面级缓存实例（组合销毁重建也拿回同一个 SurfaceTexture）",
             screenSrc.contains("ctrl.glSink()")
         )
@@ -183,9 +188,8 @@ class WbCoverKeepAliveGuardTest {
         val surfaceSrc =
             KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/widget/CameraSurface.kt"))
         assertTrue(
-            "页内返回必须防抖（400ms 内第二次 pop 忽略）",
-            activitySrc.contains("popBackStackDebounced()") &&
-                activitySrc.contains("if (now - lastPopAt < 400L) return")
+            "五处页内返回必须全部走唯一出口 navigateBack（不许再有裸 popBackStack）",
+            activitySrc.contains("onBack = { navigateBack() }")
         )
         assertTrue(
             "页内返回不许弹掉栈底（起始目的地被 pop = 返回栈清空 = 整窗黑）",
