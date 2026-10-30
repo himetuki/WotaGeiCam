@@ -90,6 +90,7 @@ import com.wotagei.cam.R
 import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.ui.WotaSettings
+import com.wotagei.cam.ui.design.LikeHeart
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMenuEntry
 import com.wotagei.cam.ui.design.WotaMenuPopup
@@ -1228,15 +1229,16 @@ private fun FullscreenBrowse(
                     }
                     Text("${formatDuration(pos)} / ${formatDuration(dur)}", style = MonoStyle, color = WotaText)
                     Spacer(Modifier.width(6.dp))
-                    IconButton(onClick = { ops.setLike(clip, !clip.liked) }) {
-                        Icon(
-                            if (clip.liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                            // 标签必须跟着状态走：原来恒报「已收藏」，未收藏的成片读屏也说成已收藏
-                            contentDescription = stringResource(
-                                if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked
-                            )
+                    // 收藏红心（2026-10-30 用户需求）：换用 Bencho "Like" 的红心动画
+                    // （绽放环 + 七对彩点 + 红心弹出；**不含数字滚动**——本工程没有计数）。
+                    // 标签跟着状态走：原来恒报「已收藏」，未收藏的成片读屏也说成已收藏
+                    LikeHeart(
+                        liked = clip.liked,
+                        onToggle = { ops.setLike(clip, it) },
+                        contentDescription = stringResource(
+                            if (clip.liked) R.string.gallery_desc_liked else R.string.gallery_desc_unliked
                         )
-                    }
+                    )
                     IconButton(onClick = { ops.share(listOf(clip)) }) { Icon(Icons.Outlined.Share, contentDescription = stringResource(R.string.gallery_menu_share)) }
                     IconButton(onClick = { ops.moveToTrash(listOf(clip)) }) { Icon(Icons.Outlined.Delete, contentDescription = stringResource(R.string.gallery_menu_trash)) }
                     if (clip.isTrashed) {
