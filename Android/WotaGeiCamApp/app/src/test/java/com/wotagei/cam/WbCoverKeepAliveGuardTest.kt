@@ -188,6 +188,15 @@ class WbCoverKeepAliveGuardTest {
                 activitySrc.contains("if (now - lastPopAt < 400L) return")
         )
         assertTrue(
+            "页内返回不许弹掉栈底（起始目的地被 pop = 返回栈清空 = 整窗黑）",
+            activitySrc.contains("nav.currentDestination?.id == nav.graph.startDestinationId")
+        )
+        assertTrue(
+            "自救必须按栈态分流：栈空 finish、栈在 recreate（recreate 恢复不了空栈）",
+            activitySrc.contains("navStateProvider") && activitySrc.contains("finish()") &&
+                activitySrc.contains("recreate()")
+        )
+        assertTrue(
             "录制页必须向 Activity 回报组合在场/销毁",
             screenSrc.contains("host?.onCameraPageComposed()") &&
                 screenSrc.contains("host?.onCameraPageDisposed()")

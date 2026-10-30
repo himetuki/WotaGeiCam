@@ -147,6 +147,13 @@ class MainActivity : ComponentActivity() {
         cameraPageComposed = false
     }
 
+    /**
+     * 导航栈只读探针（看门狗自救分流用）：组合没了时**返回栈是否也空了**要分开治——
+     * 栈空 = NavHost 无内容可画，recreate 只会把空栈原样恢复（黑屏循环），必须 finish；
+     * 栈非空 = 组合被竞态拆掉，recreate 即愈。由 WotaRoot 接线，Activity 不持有 nav。
+     */
+    internal var navStateProvider: (() -> androidx.navigation.NavController?)? = null
+
     internal fun onRouteForPreviewWatch(route: String?, ctrl: com.wotagei.cam.camera.CameraController?) {
         watchRoute = route
         if (route != ROUTE_CAMERA) {
@@ -187,8 +194,17 @@ class MainActivity : ComponentActivity() {
                 if (!cameraPageComposed) {
                     if (pageGoneSinceMs == 0L) pageGoneSinceMs = nowMs
                     else if (nowMs - pageGoneSinceMs >= 3_000L) {
-                        Log.w("WotaWatch", "录制页组合已销毁而目的地未变（连点返回竞态）⇒ 重建 Activity 自救")
-                        recreate()
+                        // 栈空（目的地被弹掉）⇒ finish（recreate 只会把空栈原样恢复成黑屏循环）；
+                        // 栈还在而内容没了（连点返回竞态）⇒ recreate，ViewModel 存活、相机随重组回来
+                        val nav = navStateProvider?.invoke()
+                        val stackEmpty = nav == null || nav.currentDestination == null
+                        if (stackEmpty) {
+                            Log.w("WotaWatch", "录制页组合已销毁且返回栈已空 ⇒ 结束 Activity（NavHost 无内容可画）")
+                            finish()
+                        } else {
+                            Log.w("WotaWatch", "录制页组合已销毁而目的地未变（连点返回竞态）⇒ 重建 Activity 自救")
+                            recreate()
+                        }
                         return@launch
                     }
                 } else {
@@ -385,6 +401,11 @@ private fun WotaRoot() {
     fun popBackStackDebounced() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastPopAt < 400L) return
+        // 栈底保护（2026-10-30 r39 日志二次定案）：防抖窗外的连点仍会落到录制页上，
+        // 而录制页是**起始目的地**——pop 掉它 = 返回栈清空 = NavHost 无内容可画
+        // （整窗黑，且 Activity 不会自动结束，isFinishing=false 实录）。录制页没有
+        // 页内返回钮，这条路径只会来自转场迟到的误点：直接忽略，想退出用系统返回。
+        if (nav.currentDestination?.id == nav.graph.startDestinationId) return
         lastPopAt = now
         nav.popBackStack()
     }
@@ -438,6 +459,8 @@ private fun WotaRoot() {
             }
             // Activity 级预览自愈（与页面组合解耦）：路由进出录制页时起停
             windowOwner?.onRouteForPreviewWatch(destination.route, cameraCtrl)
+            // 导航栈只读探针（看门狗自救分流：栈空 ⇒ finish / 栈在内容没 ⇒ recreate）
+            windowOwner?.navStateProvider = { nav }
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }
