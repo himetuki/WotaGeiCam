@@ -142,11 +142,26 @@ class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowP
     }
 
     override fun onDisplaySurfaceChanged(surface: Surface?, widthPx: Int, heightPx: Int) {
+        acceptedDisplay = surface
         display = surface
         viewWidth = widthPx.coerceAtLeast(0)
         viewHeight = heightPx.coerceAtLeast(0)
         recomputeStreamSize()
     }
+
+    /**
+     * 面销毁（带归属）：只认当前挂着的那一枚——直显模式的会话也挂在 `cameraTargets()` 上，
+     * 旧视图迟到的摘除同样会把新面顶掉（与 GL 侧同一条竞态，2026-10-30 黑屏三次取证）。
+     */
+    override fun onDisplaySurfaceDestroyed(surface: Surface) {
+        val current = acceptedDisplay
+        if (current != null && current !== surface) return
+        onDisplaySurfaceChanged(null, 0, 0)
+    }
+
+    /** 最近一次被采纳的上屏面（判 [onDisplaySurfaceDestroyed] 的归属） */
+    @Volatile
+    private var acceptedDisplay: Surface? = null
 
     /** 该镜头 PRIVATE 表（来自 `CameraAbility.previewSizes`）；换镜头整套换挡时由 UI 重新注入 */
     fun setStreamCandidates(sizes: List<Size>) {

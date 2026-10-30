@@ -120,6 +120,41 @@ class WbCoverKeepAliveGuardTest {
     }
 
     @Test
+    fun `黑屏自愈_上屏心跳与重挂面`() {
+        // 2026-10-30 三次取证：r31 的帧心跳只能证明「相机在出帧」，证明不了「帧有没有上屏」。
+        // 真机日志里相机 3A 遥测照常 1Hz 而 GL 一帧未画、整屏黑，看门狗判活、永不介入。
+        // 四条红线：
+        val engineSrc = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/Camera2Engine.kt"))
+        val glSrc = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/GlRenderEngine.kt"))
+        val surfaceSrc =
+            KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/widget/CameraSurface.kt"))
+        assertTrue(
+            "相机心跳必须是单调累计（camResultCount 每秒清零，采样边界上会被当成又涨了）",
+            engineSrc.contains("camResultTotal++") && engineSrc.contains("frameResultCount(): Long = camResultTotal")
+        )
+        assertTrue(
+            "GL 必须暴露上屏心跳（窗口面 swap 成功累计）与挂面状态",
+            glSrc.contains("fun displayFrameCount(): Long") && glSrc.contains("fun hasWindowSurface(): Boolean") &&
+                glSrc.contains("displaySwapTotal++")
+        )
+        assertTrue(
+            "面销毁必须带归属（旧视图迟到的摘除不许顶掉新面，否则相机活着也整屏黑）",
+            glSrc.contains("override fun onDisplaySurfaceDestroyed(surface: Surface)") &&
+                surfaceSrc.contains("onDisplaySurfaceDestroyed(dying)")
+        )
+        assertTrue(
+            "两处看门狗都要认上屏心跳并落到「重挂承载面」（重启相机救不了这一档）",
+            screenSrc.contains("ctrl.displayFrameCount()") && screenSrc.contains("ctrl.requestDisplayReattach()") &&
+                activitySrc.contains("ctrl.displayFrameCount()") &&
+                activitySrc.contains("ctrl.requestDisplayReattach()")
+        )
+        assertTrue(
+            "重挂必须真的重建承载视图（CameraSurface 按 epoch 换 key）",
+            screenSrc.contains("key(surfaceEpoch) {") && screenSrc.contains("ctrl.displayReattach.collect")
+        )
+    }
+
+    @Test
     fun `稳压窗必须挂在显示面挂摘重挂上`() {
         val glSrc = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/GlRenderEngine.kt"))
         // 会话全程存活也会闪（r23 实测）：桥过渡帧吐的是 HAL 过渡态，与会话重建无关，

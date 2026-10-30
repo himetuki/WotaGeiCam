@@ -5,6 +5,7 @@ import android.Manifest
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
@@ -76,6 +77,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -277,6 +279,20 @@ import kotlin.math.roundToInt
  * - 录制：[Recorders.create] + [VideoStore]，DIRECT 把编码面交给 Camera2 会话，GPU 交给 [GlRenderEngine]；
  * - 回看：[VideoStore] 已清 IS_PENDING，这里只 `repo.invalidate()` 让媒体库重查。
  */
+/**
+ * 从任意 context 往上找宿主 [MainActivity]（`LocalContext` 可能是 ContextThemeWrapper 包出来的）。
+ * Activity 级自愈布防要用它——页面手里就有现成的 [CameraController]，不必再按路由回查
+ * backStackEntry（那条路在冷启/快速导航竞态下会拿到 null，兜底层不许靠运气布防）。
+ */
+private fun findHostActivity(ctx: Context): MainActivity? {
+    var c: Context? = ctx
+    while (c != null) {
+        if (c is MainActivity) return c
+        c = (c as? ContextWrapper)?.baseContext
+    }
+    return null
+}
+
 @Composable
 @Suppress("LongMethod")
 fun CameraScreen(
@@ -676,60 +692,142 @@ fun CameraScreen(
         }
     }
 
-    // ---- 预览自愈 watchdog（2026-10-29 黑屏取证，二次修订）
-    // 一次修订（r30）的教训：判据取了 isPreviewLive()（线程/设备/会话/期望），但**重建卡死的
-    // 中间态下这些字段仍是"看着活着"**，看门狗被判活为真、永不介入——用户装 r30 仍黑屏。
-    // 二次修订改判据为「**有没有真的收到相机帧**」（result 回调累计数，进程内单调）：
-    // 状态字段能残留，帧数不会。任何把管线弄死的路径都会表现为"帧数不再增长"，一律自愈。
-    // 另：本节留在组合里、以 ctrl 为键——录制页被弹出栈时组合销毁，此时页面不可见、也不该
-    // 让后台继续拉相机；回到页面会重新布防（misses 归零重来）。
+    // ---- 上屏面重挂（2026-10-30 黑屏三次取证）
+    // 「相机活着、屏幕全黑」这一档的**唯一**出路：承载视图整体重建 ⇒ 新 TextureView ⇒ 新
+    // SurfaceTexture ⇒ 引擎重接窗口面。重启预览/重建引擎都动不到这条链（相机本来就在出帧）。
+    // 请求来自两处看门狗（页面内 + Activity 级），这里只负责把它落成一次视图重建。
+    var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }
+    LaunchedEffect(ctrl) {
+        ctrl.displayReattach.collect {
+            Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${surfaceEpoch + 1}")
+            surfaceEpoch++
+        }
+    }
+
+    // ---- Activity 级自愈布防（2026-10-30）：页面在组合里时**直接用这枚 ctrl 布防**。
+    // 目的地回调那条路要按路由回查 backStackEntry 取 ctrl，冷启/快速导航竞态下可能拿不到
+    // （拿到 null 就整条不布防）——而这一层正是"页面卡死也要能救"的兜底，不许靠运气布防。
+    // 离开路由时由目的地回调停火（watchRoute 一变，协程自己 break）。
+    DisposableEffect(ctrl) {
+        val host = findHostActivity(context)
+        host?.onRouteForPreviewWatch(ROUTE_CAMERA, ctrl)
+        onDispose { }
+    }
+
+    // ---- 预览自愈 watchdog（2026-10-29 黑屏取证，2026-10-30 三次修订）
+    // 一次修订（r30）判的是「状态字段」，重建卡死的中间态下字段仍"看着活着"，看门狗被绕过去。
+    // 二次修订（r31）改判「有没有收到相机帧」——但帧心跳只能证明**相机活着**，证明不了
+    // **帧有没有上屏**。2026-10-30 真机日志：设置页往返后重建的页面里相机 3A 遥测照常 1Hz，
+    // 而 GL 侧一帧都没画（没有 EGL 就绪、没有上屏 swap），整屏黑且看门狗判活、永不介入。
+    // 三次修订把"活着"拆成两条**单调**心跳，各自对应一种死法：
+    //  · 相机心跳 = result 回调累计（引擎侧，只增不重置）→ 不涨 = 相机会话死
+    //    ⇒ 重启预览 → 仍不涨就整条重建引擎；
+    //  · 上屏心跳 = 窗口面 swap 成功累计（GL 侧）→ 不涨而相机在涨 = 上屏链死
+    //    ⇒ **重挂承载面**（重建承载视图 = 新 SurfaceTexture）。这一档重启相机毫无意义，
+    //      相机本来就在跑（r31 的盲区正在这里）。
+    // 本节留在组合里、以 ctrl 为键——录制页被弹出栈时组合销毁，页面不可见也不该后台拉相机；
+    // 回到页面会重新布防（各计数归零重来）。
     LaunchedEffect(ctrl, activeSink) {
-        var misses = 0
-        var lastCount = ctrl.frameResultCount() ?: -1L
-        var lastGrowAtMs = SystemClock.elapsedRealtime()
+        var camLast = ctrl.frameResultCount() ?: -1L
+        var camGrowAtMs = SystemClock.elapsedRealtime()
+        var camMiss = 0
+        var dispLast = ctrl.displayFrameCount() ?: -1L
+        var dispGrowAtMs = SystemClock.elapsedRealtime()
+        // 上屏判据要等相机**真的出过帧**才启用：相机还没开起来时"屏上没换帧"是必然的，
+        // 那时去重挂面只会把首帧推得更晚（慢机型开相机要 1.5s+）
+        var camSeenFrames = false
+        var reattachTries = 0
         while (true) {
             delay(1000)
             val nowMs = SystemClock.elapsedRealtime()
             val s = ctrl.state.value
-            val count = ctrl.frameResultCount()
-            val pageOkay = !s.needsCameraPermission && runner.status.value == RecordStatus.IDLE
-            // 有帧到达 = 管线活着（呼吸灯式判据，无状态字段依赖）
-            if (count != null && count != lastCount) {
-                lastCount = count
-                lastGrowAtMs = nowMs
-                misses = 0
-                continue
+            // 页面在前台才判活：熄屏 / 被别的应用盖住 / 导航离开时相机本来就该停着，
+            // 不许把那时的"没帧"当死态去自愈拉起（r31 的看门狗没这道闸，后台会被反复重启相机）
+            val pageOkay = !s.needsCameraPermission &&
+                runner.status.value == RecordStatus.IDLE &&
+                owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+
+            val cam = ctrl.frameResultCount()
+            if (cam != null && cam != camLast) {
+                if (!camSeenFrames) {
+                    camSeenFrames = true
+                    dispGrowAtMs = nowMs
+                }
+                camLast = cam
+                camGrowAtMs = nowMs
+                camMiss = 0
+            }
+            val disp = ctrl.displayFrameCount()
+            if (disp != null && disp != dispLast) {
+                dispLast = disp
+                dispGrowAtMs = nowMs
+                reattachTries = 0
             }
             if (!pageOkay) {
-                lastGrowAtMs = nowMs
-                misses = 0
+                camGrowAtMs = nowMs
+                dispGrowAtMs = nowMs
+                camMiss = 0
+                reattachTries = 0
                 continue
             }
-            // 连续 3s 无新帧才认为可疑（相机打开本身约 1s，避免开局误触），
-            // 6s 起算 miss、分级自愈
-            if (nowMs - lastGrowAtMs < 3000L) {
-                misses = 0
+            // ① 相机侧：连续 2.5s 无新帧才算可疑（相机打开本身约 1s，避免开局误触）
+            val camDeadMs = nowMs - camGrowAtMs
+            if (camDeadMs >= 2_500L) {
+                camMiss++
+                when {
+                    cam == null && camMiss >= 2 -> {
+                        Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
+                        ctrl.bind(activeSink)
+                        camLast = -1L
+                        camGrowAtMs = nowMs
+                        dispGrowAtMs = nowMs
+                        camSeenFrames = false
+                        camMiss = 0
+                    }
+                    cam == null -> Unit
+                    camMiss == 1 -> {
+                        Log.w(
+                            TAG_UI,
+                            "预览自愈：${camDeadMs}ms 无相机帧 ⇒ 重启预览（device=${s.device} preview=${s.preview}）"
+                        )
+                        ctrl.restartPreview()
+                        // 重启期间本来就没帧可画：给上屏判据重开一段宽限，别紧接着把面也重挂了
+                        dispGrowAtMs = nowMs
+                    }
+                    camMiss >= 4 -> {
+                        Log.w(
+                            TAG_UI,
+                            "预览自愈：重启预览后仍无帧 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）"
+                        )
+                        ctrl.forceRebind(activeSink)
+                        camLast = -1L
+                        camGrowAtMs = nowMs
+                        dispGrowAtMs = nowMs
+                        camSeenFrames = false
+                        camMiss = 0
+                    }
+                }
                 continue
             }
-            misses++
-            when {
-                count == null && misses >= 2 -> {
-                    Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
-                    ctrl.bind(activeSink)
-                    lastCount = -1L
-                    lastGrowAtMs = nowMs
-                    misses = 0
-                }
-                misses == 4 -> {
-                    Log.w(TAG_UI, "预览自愈：3s 无相机帧 ⇒ 重启预览（device=${s.device} preview=${s.preview}）")
-                    ctrl.restartPreview()
-                }
-                misses >= 9 -> {
-                    Log.w(TAG_UI, "预览自愈：重启预览后仍无帧 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）")
+            // ② 上屏侧：相机在出帧而屏上不换帧——只有重挂承载面能救（重启相机做不到）
+            if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 1_500L) {
+                reattachTries++
+                Log.w(
+                    TAG_UI,
+                    "预览自愈：相机在出帧但上屏无帧 ${nowMs - dispGrowAtMs}ms" +
+                        "（hasSurface=${ctrl.hasDisplaySurface()} 第${reattachTries}次）⇒ 重挂显示面"
+                )
+                dispGrowAtMs = nowMs
+                if (reattachTries >= 3) {
+                    Log.w(TAG_UI, "预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                     ctrl.forceRebind(activeSink)
-                    lastCount = -1L
-                    lastGrowAtMs = nowMs
-                    misses = 0
+                    camLast = -1L
+                    camGrowAtMs = nowMs
+                    dispGrowAtMs = nowMs
+                    camSeenFrames = false
+                    reattachTries = 0
+                } else {
+                    ctrl.requestDisplayReattach()
                 }
             }
         }
@@ -1334,13 +1432,17 @@ fun CameraScreen(
                     // 与 HUD 各容器同在那层缩放之下，localPositionOf 才能把共同的祖先变换抵消。
                     .onGloballyPositioned { previewCoords = it }
             ) {
-                CameraSurface(
-                    mode = renderMode,
-                    sink = activeSink,
-                    modifier = Modifier.matchParentSize(),
-                    // 直显面尺寸变化会改会话结构签名，主动催一次重建；GL 路径同入口且幂等
-                    onDisplaySurface = { surface, _, _ -> if (surface != null) ctrl.onPreviewSurfaceReady() }
-                )
+                // 承载视图按 surfaceEpoch 重建（上屏面重挂自愈）：换 key = 换 TextureView，
+                // 新 SurfaceTexture 会让引擎重接窗口面——黑屏里"相机活着、屏不换帧"的唯一出路
+                key(surfaceEpoch) {
+                    CameraSurface(
+                        mode = renderMode,
+                        sink = activeSink,
+                        modifier = Modifier.matchParentSize(),
+                        // 直显面尺寸变化会改会话结构签名，主动催一次重建；GL 路径同入口且幂等
+                        onDisplaySurface = { surface, _, _ -> if (surface != null) ctrl.onPreviewSurfaceReady() }
+                    )
+                }
                 RefLineOverlay(
                     mask = refLines,
                     aspect = previewAspect,

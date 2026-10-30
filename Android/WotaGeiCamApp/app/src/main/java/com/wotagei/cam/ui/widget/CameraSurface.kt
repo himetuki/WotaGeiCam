@@ -52,11 +52,17 @@ fun CameraSurface(
         (sink as? DisplaySurfaceReceiver)?.onDisplaySurfaceChanged(surface, widthPx, heightPx)
         onDisplaySurface(surface, widthPx, heightPx)
     }
+    // 销毁带归属：把「正在销毁的那一枚」交给 sink，由它丢弃旧视图迟到的摘除（竞态见接口注释）
+    val newDestroy: (Surface) -> Unit = { dying ->
+        (sink as? DisplaySurfaceReceiver)?.onDisplaySurfaceDestroyed(dying)
+        onDisplaySurface(null, 0, 0)
+    }
     val push = rememberUpdatedState(newPush)
+    val destroy = rememberUpdatedState(newDestroy)
     when (mode) {
         // DIRECT 的变换矩阵只认 DirectSink；传错 sink 就不出面，让上层走「预览未就绪」遮罩而不是静默拉伸
-        RenderMode.DIRECT -> DirectPreview(sink as? DirectSink, push, modifier)
-        else -> GpuPreview(push, modifier)
+        RenderMode.DIRECT -> DirectPreview(sink as? DirectSink, push, destroy, modifier)
+        else -> GpuPreview(push, destroy, modifier)
     }
 }
 
@@ -73,6 +79,7 @@ fun CameraSurface(
 private fun DirectPreview(
     direct: DirectSink?,
     push: State<(Surface?, Int, Int) -> Unit>,
+    destroy: State<(Surface) -> Unit>,
     modifier: Modifier
 ) {
     if (direct == null) return
@@ -110,10 +117,16 @@ private fun DirectPreview(
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
                         direct.onReconfigure = null
-                        push.value(null, 0, 0)
-                        windowSurface?.release()
+                        val dying = windowSurface
+                        if (dying != null) {
+                            destroy.value(dying)
+                        } else {
+                            push.value(null, 0, 0)
+                        }
                         windowSurface = null
                         // 返回 true：本视图的 SurfaceTexture 无人复用，交还系统释放
+                        // （Surface 对象自己的 release 在面销毁回调里做，见上）
+                        dying?.release()
                         return true
                     }
 
@@ -135,6 +148,7 @@ private fun DirectPreview(
 @Composable
 private fun GpuPreview(
     push: State<(Surface?, Int, Int) -> Unit>,
+    destroy: State<(Surface) -> Unit>,
     modifier: Modifier
 ) {
     AndroidView(
@@ -160,10 +174,15 @@ private fun GpuPreview(
                     }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-                        push.value(null, 0, 0)
-                        windowSurface?.release()
+                        val dying = windowSurface
+                        if (dying != null) {
+                            destroy.value(dying)
+                        } else {
+                            push.value(null, 0, 0)
+                        }
                         windowSurface = null
                         // 返回 true：本视图的 SurfaceTexture 无人复用，交还系统释放
+                        dying?.release()
                         return true
                     }
 

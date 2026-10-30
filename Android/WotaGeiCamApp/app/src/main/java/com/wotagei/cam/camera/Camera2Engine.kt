@@ -589,12 +589,15 @@ class Camera2Engine(
         threadRunning && device != null && session != null && desiredPreview
 
     /**
-     * 相机结果回调累计数（单调递增，进程内）。**唯一无法伪造的存活证据**：状态字段、会话
-     * 引用在重建/竞态里都可能残留成"看着活着"，而"到底有没有收到帧"只有计数知道
+     * 相机结果回调累计数（**单调递增**，进程内从不重算）。**唯一无法伪造的相机存活证据**：
+     * 状态字段、会话引用在重建/竞态里都可能残留成"看着活着"，而"到底有没有收到帧"只有计数知道
      * （2026-10-29 黑屏二次取证：r30 的 isPreviewLive 判据在重建卡死时仍为真，看门狗被
      * 骗过去、永不介入；日志里"最后一次重建后再无任何相机遥测"正是这条线索）。
+     *
+     * ⚠ 不许改成读 [camResultCount]：那是给帧率守卫用的**每秒清零**计数，采样边界上"清零"
+     * 会被看门狗当成"又涨了"（2026-10-30 三次修订核对日志时发现的判据漏洞）。
      */
-    fun frameResultCount(): Long = camResultCount
+    fun frameResultCount(): Long = camResultTotal
 
     fun onSinkSurfaceReady() {
         post {
@@ -1011,6 +1014,7 @@ class Camera2Engine(
             result: TotalCaptureResult
         ) {
             camResultCount++
+            camResultTotal++
             logAeAfTelemetry(result)
             val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
             logWbTelemetry(result, manual)
@@ -1122,6 +1126,9 @@ class Camera2Engine(
     // "一颗帧都不来"的病态反而哑火（2026-10-28 审查补盲区）。定时拍读计数即可把零到达
     // 如实喂成 0fps。取景/录制全程运行；设备不在 OPEN_SUCCEED 时采样函数自己清提示。
     private var camResultCount = 0L
+
+    /** 结果回调**进程内单调累计**（只增不重置）：预览自愈心跳的唯一相机侧判据，见 [frameResultCount] */
+    private var camResultTotal = 0L
     private var camRateLastMs = 0L
     private var lowFpsWatch: LowFpsWatch? = null
 

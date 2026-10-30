@@ -28,7 +28,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
@@ -178,6 +180,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine = null
         boundSink = null
         bind(sink)
+        // 重建引擎只换了相机侧；上屏链若是死的（窗口面已失效/被摘掉），这里必须补一次重挂，
+        // 否则"重建完还是黑"（2026-10-30 取证）。
+        requestDisplayReattach()
     }
 
     /** 当前绑定的预览 sink（自愈重建要用同一枚；null = 还没绑过面） */
@@ -185,6 +190,32 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** 相机结果回调累计数（给预览自愈心跳用；null = 引擎不在） */
     fun frameResultCount(): Long? = engine?.frameResultCount()
+
+    /**
+     * 上屏帧累计数（窗口面 swap 成功数，单调）。**与 [frameResultCount] 是两条独立的心跳**：
+     * 前者证明"相机在出帧"，它证明"屏上真的换了一帧"。2026-10-30 真机日志里出现过相机 3A
+     * 遥测照常 1Hz、GL 一帧未画的黑屏——只有这一条能观测到那种死法。
+     * null = 当前不是 GPU 管线（DIRECT 直显不经过 GL，没有上屏计数可读）。
+     */
+    fun displayFrameCount(): Long? = (boundSink as? GlRenderEngine)?.displayFrameCount()
+
+    /** 当前是否挂着上屏窗口面（null = 非 GPU 管线）；false + 相机在出帧 = 上屏链接断了 */
+    fun hasDisplaySurface(): Boolean? = (boundSink as? GlRenderEngine)?.hasWindowSurface()
+
+    // ------------------------------------------------- 上屏面重挂（黑屏自愈第三级）
+
+    private val reattachRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * 上屏面重挂请求：页面收到后**重建承载视图**（新 `TextureView` ⇒ 新 `SurfaceTexture` ⇒
+     * 引擎重建窗口 EGLSurface）。用于「相机活着、屏幕全黑」这一档——那种死态下重启预览与
+     * 重建引擎都没用（相机本来就在跑），只有把上屏面重新接上才能恢复。
+     */
+    val displayReattach: SharedFlow<Unit> = reattachRequests
+
+    fun requestDisplayReattach() {
+        reattachRequests.tryEmit(Unit)
+    }
 
     /** 显示面挂摘/重挂（设置页覆盖往返）：布防引擎侧手动白平衡稳压窗（绿帧取证，2026-10-29） */
     fun onPreviewSurfaceTransient() {

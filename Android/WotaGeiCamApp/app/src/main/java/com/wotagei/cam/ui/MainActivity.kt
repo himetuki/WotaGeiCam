@@ -113,59 +113,111 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 预览自愈 watchdog（2026-10-29 黑屏二次取证）：**Activity 级**兜底。
+     * 预览自愈 watchdog（2026-10-29 黑屏取证 → 2026-10-30 三次修订）：**Activity 级**兜底。
      *
      * 为什么不能只放在 [CameraScreen] 的组成里：黑屏的一种可能形态是页面卡在导航中间态、
      * 组合不再重组——那时页面内的 LaunchedEffect 也停摆，看门狗等于不存在。这一层只要
      * Activity 在前台就会跑，与任何页面的组合生命周期无关。
      *
-     * 判据与页面内那一层同源：**相机 result 回调是否还在增长**（唯一无法伪造的存活证据），
-     * 且当前路由是录制页（其他页面相机可以合法停着）。连续 4s 无新帧 ⇒ 重启预览；
-     * 连续 10s 仍无帧 ⇒ 整条重建引擎。自愈动作都走门面，与 UI 状态无关。
+     * 判据是**两条单调心跳**（r31 只判了第一条，所以"相机在出帧、屏上不换帧"这一档永远漏）：
+     * - 相机心跳 `frameResultCount`：不涨 = 相机会话死 ⇒ 4s 重启预览、10s 整条重建；
+     * - 上屏心跳 `displayFrameCount`：不涨而相机在涨 = 上屏链死 ⇒ 2.5s 重挂承载面，
+     *   连续三次仍不上屏就整条重建 + 再重挂。
+     * 两条都只在当前路由是录制页时判（其他页面相机可以合法停着）。
      */
     private var previewWatchJob: Job? = null
     private var watchRoute: String? = null
 
     internal fun onRouteForPreviewWatch(route: String?, ctrl: com.wotagei.cam.camera.CameraController?) {
         watchRoute = route
-        if (route != ROUTE_CAMERA || ctrl == null) {
+        if (route != ROUTE_CAMERA) {
             previewWatchJob?.cancel()
             previewWatchJob = null
             return
         }
+        // 路由是录制页但这拍拿不到 ctrl（冷启/快速导航竞态里 backStackEntry 可能还不在）：
+        // 不许把已经在跑的那条顺手停掉——页面会拿手里的 ctrl 自己重新布防。
+        if (ctrl == null) return
         if (previewWatchJob?.isActive == true) return
         previewWatchJob = lifecycleScope.launch {
-            var lastCount = -1L
-            var lastGrowAtMs = SystemClock.elapsedRealtime()
+            var camLast = -1L
+            var camGrowAtMs = SystemClock.elapsedRealtime()
+            var dispLast = -1L
+            var dispGrowAtMs = SystemClock.elapsedRealtime()
+            // 上屏判据要等相机真的出过帧才启用（相机还没起来时"屏上没帧"是必然的）
+            var camSeenFrames = false
             var restarted = false
+            var reattachTries = 0
             while (isActive) {
                 delay(1000)
                 if (watchRoute != ROUTE_CAMERA) break
+                val nowMs = SystemClock.elapsedRealtime()
                 // 只在真正可见时判（后台/其它页不算）
                 if (lifecycle.currentState != Lifecycle.State.RESUMED) {
-                    lastGrowAtMs = SystemClock.elapsedRealtime()
+                    camGrowAtMs = nowMs
+                    dispGrowAtMs = nowMs
+                    camSeenFrames = false
                     restarted = false
+                    reattachTries = 0
                     continue
                 }
-                val count = ctrl.frameResultCount()
-                val nowMs = SystemClock.elapsedRealtime()
-                if (count != null && count != lastCount) {
-                    lastCount = count
-                    lastGrowAtMs = nowMs
+                val cam = ctrl.frameResultCount()
+                if (cam != null && cam != camLast) {
+                    if (!camSeenFrames) {
+                        camSeenFrames = true
+                        dispGrowAtMs = nowMs
+                    }
+                    camLast = cam
+                    camGrowAtMs = nowMs
                     restarted = false
+                }
+                val disp = ctrl.displayFrameCount()
+                if (disp != null && disp != dispLast) {
+                    dispLast = disp
+                    dispGrowAtMs = nowMs
+                    reattachTries = 0
+                }
+                val camDeadMs = nowMs - camGrowAtMs
+                if (camDeadMs >= 4_000L) {
+                    if (cam == null) {
+                        Log.w("WotaWatch", "Activity 级预览自愈：引擎不在 ⇒ 重新绑定")
+                        ctrl.currentSink()?.let { ctrl.bind(it) }
+                        camGrowAtMs = nowMs
+                        dispGrowAtMs = nowMs
+                        camSeenFrames = false
+                    } else if (!restarted) {
+                        restarted = true
+                        Log.w("WotaWatch", "Activity 级预览自愈：${camDeadMs}ms 无相机帧 ⇒ 重启预览")
+                        ctrl.restartPreview()
+                        dispGrowAtMs = nowMs
+                    } else if (camDeadMs >= 10_000L) {
+                        Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
+                        ctrl.currentSink()?.let { ctrl.forceRebind(it) }
+                        camGrowAtMs = nowMs
+                        dispGrowAtMs = nowMs
+                        camSeenFrames = false
+                        restarted = false
+                    }
                     continue
                 }
-                val deadMs = nowMs - lastGrowAtMs
-                if (deadMs in 4_000L..9_999L && !restarted) {
-                    restarted = true
-                    Log.w("WotaWatch", "Activity 级预览自愈：4s 无相机帧 ⇒ 重启预览")
-                    ctrl.restartPreview()
-                } else if (deadMs >= 10_000L) {
-                    Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
-                    val sink = ctrl.currentSink()
-                    if (sink != null) ctrl.forceRebind(sink)
-                    lastGrowAtMs = nowMs
-                    restarted = false
+                // 上屏侧：相机在出帧而屏上不换帧（r31 的盲区）——重启相机没用，只能重挂面
+                if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 2_500L) {
+                    reattachTries++
+                    Log.w(
+                        "WotaWatch",
+                        "Activity 级预览自愈：相机在出帧但上屏无帧 ${nowMs - dispGrowAtMs}ms" +
+                            "（hasSurface=${ctrl.hasDisplaySurface()} 第${reattachTries}次）⇒ 重挂显示面"
+                    )
+                    dispGrowAtMs = nowMs
+                    if (reattachTries >= 3) {
+                        Log.w("WotaWatch", "Activity 级预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
+                        ctrl.currentSink()?.let { ctrl.forceRebind(it) }
+                        camGrowAtMs = nowMs
+                        camSeenFrames = false
+                        reattachTries = 0
+                    } else {
+                        ctrl.requestDisplayReattach()
+                    }
                 }
             }
         }
