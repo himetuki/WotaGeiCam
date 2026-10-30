@@ -589,6 +589,14 @@ class Camera2Engine(
         threadRunning && device != null && session != null && desiredPreview
 
     /**
+     * 真身四项的快照（诊断行用）：回场没复用成功时，把**哪一项断了**留在日志里——
+     * 2026-10-30 r34 日志出现「保活已布防、回场仍整条重开」但四项里查无对证，下一轮取证
+     * 全靠这行。与 [isPreviewLive] 同源，不许另立判据。
+     */
+    fun previewLivenessDebug(): String =
+        "thread=$threadRunning device=${device != null} session=${session != null} desired=$desiredPreview"
+
+    /**
      * 相机结果回调累计数（**单调递增**，进程内从不重算）。**唯一无法伪造的相机存活证据**：
      * 状态字段、会话引用在重建/竞态里都可能残留成"看着活着"，而"到底有没有收到帧"只有计数知道
      * （2026-10-29 黑屏二次取证：r30 的 isPreviewLive 判据在重建卡死时仍为真，看门狗被

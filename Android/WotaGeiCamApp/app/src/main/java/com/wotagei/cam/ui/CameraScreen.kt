@@ -2165,7 +2165,16 @@ fun CameraScreen(
                 modifier = Modifier.matchParentSize()
             ) {
                 PreviewGate(
-                    opening = ui.device == DeviceStatus.OPEN_ING,
+                    // 打开中 = 相机打开进行时（OPEN_ING）或设备健康只是会话在重建/等重开
+                    //（OPEN_SUCCEED / CLOSE）：这三种都该转圈。**只有真正的失败档**
+                    //（OPEN_FAILED_*）才给「重试/去设置」。2026-10-30 真机视频实锤：回场重开的
+                    // ~1s 里 device 还没到 OPEN_ING（枚举能力中）或已回到 CLOSE，这行失败文案
+                    // 直接把用户吓退（按返回 = 接一整段黑屏），是黑屏反馈链的起爆点。
+                    opening = ui.preview != PreviewStatus.ERROR && (
+                        ui.device == DeviceStatus.OPEN_ING ||
+                            ui.device == DeviceStatus.CLOSE ||
+                            ui.device == DeviceStatus.OPEN_SUCCEED
+                        ),
                     needPermission = ui.needsCameraPermission,
                     modifier = Modifier.fillMaxSize(),
                     onRetry = {

@@ -312,6 +312,18 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         pendingStart = false
         // 缺 RECORD_AUDIO 只降级纯视频，不打断取景
         applyAudioPermission()
+        // 设备健康、只是会话/期望断了：只重建会话，**不整条重开**——与 resume() 同一口径。
+        // 整条重开要过"关设备→openCamera→建会话"全链（0.5~0.9s 首帧 + 桥的绿帧窗口），
+        // 回场高频路径不值得；2026-10-30 r34 日志：回场重开正是用户看到「预览未就绪」的窗口。
+        val e = engineOrNull
+        if (e != null && e.deviceStatus == DeviceStatus.OPEN_SUCCEED) {
+            Log.i("WotaCam", "回场重开降级：设备在，只重建会话（${e.previewLivenessDebug()}）")
+            e.startPreview()
+            return
+        }
+        if (e != null) {
+            Log.i("WotaCam", "整条重开相机（${e.previewLivenessDebug()}）")
+        }
         openCurrentLens()
     }
 
