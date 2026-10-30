@@ -3,7 +3,7 @@ package com.wotagei.cam.ui.anim
 import android.provider.Settings
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.SpringSpec
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
@@ -15,10 +15,83 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import com.wotagei.cam.ui.design.WotaEasing
 import com.wotagei.cam.ui.design.WotaMotion
+import kotlin.math.PI
 import kotlin.math.roundToInt
 
 /** 需求「UI 控制交互动画风格」三档；FLUENT 为默认（短促、有减速、不回弹过头） */
 enum class MotionMode { PLAIN, FLUENT, LIQUID }
+
+/**
+ * 「液态Q弹」档的弹簧语言（2026-10-30 改版；用户给定的视觉设计语言）。
+ *
+ * ## 概念映射（ArkUI → Compose）
+ * `curves.springMotion(response, dampingFraction)` 的两枚参数在这里原样保留语义：
+ * - **response** = 弹簧的自然振动周期（秒）——决定复位的"跟脚程度"，越小越跟手；
+ * - **dampingFraction** = 阻尼比——越低越弹、越高越稳。
+ * Compose 的 `spring()` 用 `(dampingRatio, stiffness)` 表达，单位质量下换算为
+ * `stiffness = (2π / response)²`。**这条换算是本工程弹簧参数的唯一实现**（纯函数、JVM 可测）：
+ * 调用点只许写 response / dampingFraction，不许再各自报刚度常数。
+ *
+ * ## 取值纪律（用户口径）
+ * - response 落 **0.2~0.5s**：0.2 = 按压等跟手反馈，0.3~0.4 = 常规状态切换，0.45~0.5 = 大位移收尾；
+ * - dampingFraction 优先 **0.6~0.8**：0.6~0.7 明显回弹（"Q弹"本体），0.8~0.9 克制回弹（面板、按压）。
+ * - 越界/非法值一律夹进这两段——参数写错只许"没那么弹"，绝不许弹簧发散或永不成形。
+ *
+ * ## 速度继承
+ * 弹簧只是"能继承速度"的必要条件；真正让【可被用户连续打断的场景（拖拽、页签、滑出）】
+ * 从当前运动状态平滑过渡、而不是速度归零后重启的，是 `Animatable.animateTo` 的默认参数
+ * `initialVelocity = velocity`。所以交互路径一律用 `Animatable.animateTo(...)` 起跑，
+ * 不许换成"snapTo + 重新计时"的写法（那会把离手/连点的速度丢掉）。
+ */
+internal object LiquidSpring {
+
+    /** 弹簧周期域（秒）：低于 0.2 是硬到没有弹性观感的抖动，高于 0.5 复位拖沓 */
+    const val RESPONSE_MIN = 0.2f
+    const val RESPONSE_MAX = 0.5f
+
+    /** 阻尼比域：低于 0.6 回弹过剩（怀疑像坏掉），高于 0.9 等于不弹 */
+    const val DAMPING_MIN = 0.6f
+    const val DAMPING_MAX = 0.9f
+
+    /** response 的机械中位：非法输入（NaN/Inf）退回这里，不猜极端 */
+    private const val RESPONSE_FALLBACK = 0.35f
+    private const val DAMPING_FALLBACK = 0.7f
+
+    /** `response → 刚度`：单位质量弹簧 ω = 2π / response，stiffness = ω²（夹进 [RESPONSE_MIN]..[RESPONSE_MAX]） */
+    fun stiffnessOf(responseSeconds: Float): Float {
+        val r = if (responseSeconds.isFinite()) {
+            responseSeconds.coerceIn(RESPONSE_MIN, RESPONSE_MAX)
+        } else {
+            RESPONSE_FALLBACK
+        }
+        val omega = (2.0 * PI / r).toFloat()
+        return omega * omega
+    }
+
+    /** `dampingFraction → 阻尼比`（夹进 [DAMPING_MIN]..[DAMPING_MAX]） */
+    fun dampingOf(dampingFraction: Float): Float =
+        if (dampingFraction.isFinite()) {
+            dampingFraction.coerceIn(DAMPING_MIN, DAMPING_MAX)
+        } else {
+            DAMPING_FALLBACK
+        }
+
+    /**
+     * 构造弹簧规格。[timeScale] 是取证钩子的倍率（#73）：落在**刚度**上——刚度除以倍率 =
+     * 同样的形状、跑得慢 N 倍（弹簧没有"时长"可乘）。
+     */
+    fun <T> spec(
+        responseSeconds: Float,
+        dampingFraction: Float,
+        timeScale: Float = 1f,
+        visibilityThreshold: T? = null
+    ): SpringSpec<T> = spring(
+        dampingRatio = dampingOf(dampingFraction),
+        stiffness = stiffnessOf(responseSeconds) / timeScale,
+        visibilityThreshold = visibilityThreshold
+    )
+}
+
 
 /**
  * 动画规格集合（06 文档 §3）。
@@ -58,11 +131,19 @@ class MotionSpec(val mode: MotionMode, private val timeScale: Float, private val
     /** FLUENT 档的缓动；减少动效档时长已是 0，缓动无所谓，仍统一给 S 型保持同一份代码路径 */
     private val fluentEasing = if (reduced) LinearEasing else WotaEasing
 
-    /** 标量变换（alpha / scale / 归一化位移） */
+    /** 标量变换（alpha / scale / 归一化位移）：液态档走主弹簧（Q弹本体） */
     val float: FiniteAnimationSpec<Float> = when (mode) {
         MotionMode.PLAIN -> tween(scaled(PLAIN_MS), easing = LinearEasing)
         MotionMode.FLUENT -> tween(scaled(COMMIT_MS), easing = fluentEasing)
-        MotionMode.LIQUID -> if (reduced) tween(0) else spring(dampingRatio = LIQUID_DAMPING, stiffness = Spring.StiffnessLow / scale)
+        MotionMode.LIQUID -> if (reduced) {
+            tween(0)
+        } else {
+            LiquidSpring.spec(
+                responseSeconds = LIQUID_FLOAT_RESPONSE,
+                dampingFraction = LIQUID_FLOAT_DAMPING,
+                timeScale = scale
+            )
+        }
     }
 
     /** 像素位移（抽屉/面板滑入滑出）；离散类型给零阈值保证动画收尾 */
@@ -72,9 +153,11 @@ class MotionSpec(val mode: MotionMode, private val timeScale: Float, private val
         MotionMode.LIQUID -> if (reduced) {
             tween(0, easing = LinearEasing)
         } else {
-            spring(
-                dampingRatio = LIQUID_DAMPING,
-                stiffness = Spring.StiffnessLow / scale,
+            // 大面积位移用更长的周期 + 更高的阻尼：同样是弹簧，但不让整块面板"甩"出画面
+            LiquidSpring.spec(
+                responseSeconds = LIQUID_OFFSET_RESPONSE,
+                dampingFraction = LIQUID_OFFSET_DAMPING,
+                timeScale = scale,
                 visibilityThreshold = IntOffset.Zero
             )
         }
@@ -98,12 +181,30 @@ class MotionSpec(val mode: MotionMode, private val timeScale: Float, private val
      */
     val intSize: FiniteAnimationSpec<IntSize> = tween(intSizeDurationMs, easing = fluentEasing)
 
-    /** 按钮按下缩放还原量：液态档回弹更明显；减少动效档整个停用（形变也是"动"） */
+    /**
+     * 按压反馈（按下收缩 / 松开回弹）：**幅度小、不许夸张回弹**（用户口径）。
+     * 液态档给"响应优先"的弹簧（response 0.2、damping 0.9：跟手、按下即到、几乎不复弹）——
+     * 回弹的"手感"来自阻尼与初速度的配合，不靠拉长时长制造。
+     * 其余档沿用 S 曲线短停；减少动效档 0 时长（形变也是"动"）。
+     */
+    val press: FiniteAnimationSpec<Float> = when (mode) {
+        MotionMode.LIQUID -> if (reduced) {
+            tween(0)
+        } else {
+            LiquidSpring.spec(
+                responseSeconds = LIQUID_PRESS_RESPONSE,
+                dampingFraction = LIQUID_PRESS_DAMPING,
+                timeScale = scale
+            )
+        }
+        else -> tween(scaled(WotaMotion.INTERACT_MS), easing = fluentEasing)
+    }
+
+    /** 按钮按下缩放还原量：幅度克制（液态 0.97 / 流畅 0.97 / 无动画 0.98）；减少动效档整个停用 */
     val pressScale: Float = when {
         reduced -> 1f
         mode == MotionMode.PLAIN -> 0.98f
-        mode == MotionMode.FLUENT -> 0.97f
-        else -> 0.96f
+        else -> 0.97f
     }
 
     /** 需要固定时长（如淡入淡出提示条）时用 */
@@ -118,7 +219,17 @@ class MotionSpec(val mode: MotionMode, private val timeScale: Float, private val
         private const val COMMIT_MS = WotaMotion.COMMIT_MS
         private const val ENTER_MS = WotaMotion.ENTER_MS
         private const val LIQUID_MS = 260
-        private const val LIQUID_DAMPING = 0.55f
+
+        // ---- 液态档弹簧参数（response 秒 / dampingFraction 无量纲；域与换算见 [LiquidSpring]）。
+        // 主弹簧：明显回弹的那一档（damping 0.6~0.7 区间），周期取中位——状态切换带惯性落地；
+        // 位移：周期更长、阻尼更高，大块面不吃"甩"；
+        // 按压：极短周期 + 接近临界阻尼，跟手且不复弹。
+        private const val LIQUID_FLOAT_RESPONSE = 0.32f
+        private const val LIQUID_FLOAT_DAMPING = 0.65f
+        private const val LIQUID_OFFSET_RESPONSE = 0.42f
+        private const val LIQUID_OFFSET_DAMPING = 0.80f
+        private const val LIQUID_PRESS_RESPONSE = 0.20f
+        private const val LIQUID_PRESS_DAMPING = 0.90f
     }
 }
 

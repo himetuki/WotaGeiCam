@@ -655,7 +655,11 @@ private fun FanOption(
             return@LaunchedEffect
         }
         if (open) delay(FanStaggerMs * index)
-        frac.animateTo(target, FanSpring)
+        // 液态档：出场/收回走工程内的弹簧语言（response/damping，见 ui/anim/Motion.kt 的
+        // LiquidSpring）。它会被连点 open/close 连续打断，Animatable.animateTo 默认继承
+        // 当前速度 ⇒ 从当前运动状态平滑改向，而不是速度归零重启。
+        val spec = if (motion.mode == com.wotagei.cam.ui.anim.MotionMode.LIQUID) motion.float else FanSpring
+        frac.animateTo(target, spec)
     }
     val rad = Math.toRadians(angleDeg.toDouble())
     // 命中盒 48dp（[OPTION_HIT_SIZE]）包住 40dp 视觉钮：手指按在圆钮边缘不滑出命中区。

@@ -2058,7 +2058,7 @@ private fun RecordButton(
     val motion = LocalMotion.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
+    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.press)
     Box(
         modifier
             .size(WotaHit.recordTouch)

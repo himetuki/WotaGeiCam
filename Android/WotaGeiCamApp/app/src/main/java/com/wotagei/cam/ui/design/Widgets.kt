@@ -426,7 +426,7 @@ private fun WotaChipImpl(
     val motion = LocalMotion.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
+    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.press)
     /**
      * 选中底色与文字色**即时切换**（#81 第 1 条定版：只动画 alpha 与 scale，禁动画颜色）。
      * 原来这里走 `animateColorAsState` 渐变（理由是"硬切读起来像卡了一下"）；定版之后两枚值
@@ -523,7 +523,7 @@ fun WotaIconButton(
     val motion = LocalMotion.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
+    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.press)
     // 与 wotaHudCard 内部同一条判据：live 只在 GL 真画了板之后才为 true，
     // 所以 onFrost 为真时玻璃必然在场，选中态的 accentSurface 实底正是给这块玻璃兜住图形的
     val onFrost = frost != null && HudFrost.live

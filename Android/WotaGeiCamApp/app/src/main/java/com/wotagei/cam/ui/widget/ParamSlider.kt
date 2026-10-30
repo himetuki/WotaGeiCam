@@ -254,7 +254,7 @@ private fun TierPill(
     val pressed by interaction.collectIsPressedAsState()
     val scale by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (pressed) motion.pressScale else 1f,
-        animationSpec = motion.float
+        animationSpec = motion.press
     )
     // 借 WotaChip 的配色语义而不直接用它：它内部写死 WotaType.chip，「文本高度」设置会对档位失效
     // #81 第 1 条：选中底色与文字色即时切换（禁动画颜色）；"本机不支持"的灰化走下面的 alpha（允许档）

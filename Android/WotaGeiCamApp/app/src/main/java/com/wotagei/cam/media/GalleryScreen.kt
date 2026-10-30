@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -116,6 +117,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.ui.anim.MotionMode
 
 /**
  * 导航路由常量（UI 层 NavHost 照此注册）：
@@ -1182,8 +1184,24 @@ private fun FullscreenBrowse(
     }
     DisposableEffect(Unit) { onDispose { engine.releasePlayer() } }
 
+    // 页签滑动（可被手势连续打断的场景，2026-10-30 液态改版）：液态档把 Pager 的**吸附**规格
+    // 换成工程内的弹簧语言（response/damping 口径，见 ui/anim/Motion.kt 的 LiquidSpring）——
+    // 松手后从当前运动状态带着速度落位，形状由阻尼决定；其余档保持 PagerDefaults.defaultSnap
+    // （速度驱动的既定手感，本改版不碰）。注意 PagerDefaults.flingBehavior 是 @Composable，
+    // 只能在组合期直调；low/highVelocityAnimationSpec 是 decay 族，参数类型不收弹簧，保持默认。
+    val motion = LocalMotion.current
+    val pagerFling = if (motion.mode == MotionMode.LIQUID) {
+        PagerDefaults.flingBehavior(
+            state = pagerState,
+            snapAnimationSpec = motion.float
+        )
+    } else {
+        PagerDefaults.flingBehavior(state = pagerState)
+    }
+
     HorizontalPager(
         state = pagerState,
+        flingBehavior = pagerFling,
         modifier = Modifier.fillMaxSize()
     ) { index ->
         val clip = clips.getOrNull(index) ?: return@HorizontalPager

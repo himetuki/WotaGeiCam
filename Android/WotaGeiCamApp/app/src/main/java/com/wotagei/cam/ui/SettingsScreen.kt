@@ -1628,7 +1628,7 @@ private fun ChipCell(text: String, selected: Boolean, modifier: Modifier = Modif
     // 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过（见 WotaColor.accentSurface 注）
     val fill = if (selected) WotaColor.accentSurface else Color.Transparent
     val labelColor = if (selected) WotaColor.onAccent else WotaColor.textHi
-    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.float)
+    val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.press)
     Box(
         modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }

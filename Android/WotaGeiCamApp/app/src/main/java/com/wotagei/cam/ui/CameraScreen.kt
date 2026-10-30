@@ -2031,6 +2031,10 @@ fun CameraScreen(
                     // 不动、不会跟着 Dock 一起被拖出屏外（霜板那条链是反过来的需求，另见 HudDockZone）。
                     val dockSlideMotion = LocalMotion.current
                     val docksOut = sheet != Sheet.NONE || pop != null
+                    // 可被用户连续打断的场景（连点不同胶囊 = 滑出/收回互相打断）：必须用
+                    // Animatable.animateTo —— 它默认 `initialVelocity = velocity`，液态档的弹簧
+                    // 因此从**当前运动状态**接着走、继承打断瞬间的速度；换成 snapTo + 重新计时
+                    // 就会速度归零重启（"突然一顿再起步"，正是这次改版要消除的观感）。
                     val dockSlide = remember { Animatable(0f) }
                     LaunchedEffect(docksOut) {
                         val target = if (docksOut) 1f else 0f
