@@ -234,6 +234,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // 与 onCreate 配对（2026-10-30）：isFinishing=false 的 destroy = 配置变更/容器重建，
+        // 黑屏窗口若与这行同拍出现，"整窗黑"就是重建期产物，与相机/GL 无关
+        com.wotagei.cam.diag.Diag.i("WotaNav", "Activity onDestroy（isFinishing=$isFinishing）")
         // 诊断日志的「上一会话结束于」留痕：正常退出与"被系统杀/崩溃"因此可区分
         // （下次冷启会把这行写进日志——排障时第一个要回答的就是"上次是正常退出的吗"）
         if (isFinishing) com.wotagei.cam.diag.Diag.markCleanExit()
@@ -242,6 +245,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Activity 重建留痕（2026-10-30 黑屏取证）：「整窗变黑但应用活着、返回正常」的候选之一
+        // 是配置变更/容器导致的 Activity 重建——重建期窗口会黑一拍。有没有重建、是不是配置变更
+        // （重建=true），这行直接写死；与 WotaNav 目的地行配对读。
+        com.wotagei.cam.diag.Diag.i(
+            "WotaNav",
+            "Activity onCreate（重建=${savedInstanceState != null}）"
+        )
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         applyMergeHook(intent)
