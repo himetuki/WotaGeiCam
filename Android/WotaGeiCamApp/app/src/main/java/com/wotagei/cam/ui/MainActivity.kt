@@ -128,6 +128,9 @@ class MainActivity : ComponentActivity() {
     private var previewWatchJob: Job? = null
     private var watchRoute: String? = null
 
+    /** 最近一次见到的录制页门面（onStop 收相机用：app 退后台时保活的相机必须立刻放掉） */
+    internal var previewCtrl: com.wotagei.cam.camera.CameraController? = null
+
     internal fun onRouteForPreviewWatch(route: String?, ctrl: com.wotagei.cam.camera.CameraController?) {
         watchRoute = route
         if (route != ROUTE_CAMERA) {
@@ -221,6 +224,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStop() {
+        // app 退到后台：把"被留在别的页后面"的保活相机立刻放掉（前台往返才保活）。
+        // 录制页正在前台时不能在这里收——那条路由生命周期 ON_PAUSE/ON_RESUME 老路负责。
+        previewCtrl?.onAppBackgrounded()
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -353,12 +363,24 @@ private fun WotaRoot() {
         val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
             applyPageMode(activity, destination.route)
             windowOwner?.onRouteForWindowKeepOn(destination.route)
-            // 设置页覆盖保活旗标（2026-10-29 手动白平衡绿帧）：此监听在 navigate/popBackStack 时
-            // 同步触发、先于旧页 dispose，旗标读到的新值即时生效。相机 entry 不在栈上时按 false 走老路。
+            // 页面保活旗标（2026-10-29 手动白平衡绿帧 / 2026-10-30 黑屏三次修订扩面）：
+            // 此监听在 navigate/popBackStack 时**同步触发、先于旧页 dispose 与 ON_PAUSE**，
+            // 旗标读到的新值即时生效。口径：离开录制页就保活——设置页无限期（r28 既有语义），
+            // 其他前台页给宽限（到点自动关，见 CameraController.PAGE_KEEP_ALIVE_MS）；
+            // 回到录制页立刻解除。相机 entry 不在栈上时按 false 走老路。
             val cameraCtrl = runCatching {
                 CameraController.of(nav.getBackStackEntry(ROUTE_CAMERA))
             }.getOrNull()
-            cameraCtrl?.previewKeptBehind = destination.route == ROUTE_SETTINGS
+            if (cameraCtrl != null) {
+                windowOwner?.previewCtrl = cameraCtrl
+                if (destination.route == ROUTE_CAMERA) {
+                    cameraCtrl.cancelPreviewKeepAlive()
+                } else {
+                    cameraCtrl.keepPreviewAlive(
+                        if (destination.route == ROUTE_SETTINGS) 0L else CameraController.PAGE_KEEP_ALIVE_MS
+                    )
+                }
+            }
             // Activity 级预览自愈（与页面组合解耦）：路由进出录制页时起停
             windowOwner?.onRouteForPreviewWatch(destination.route, cameraCtrl)
         }

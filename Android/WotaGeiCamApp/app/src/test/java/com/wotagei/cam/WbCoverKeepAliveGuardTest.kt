@@ -50,10 +50,31 @@ class WbCoverKeepAliveGuardTest {
     }
 
     @Test
-    fun `旗标由目的地回调维护且只对设置页置真`() {
+    fun `旗标由目的地回调维护_离开录制页即保活`() {
+        // 2026-10-30 三次修订：保活口径从「只保设置页」扩成「离开录制页就保活」——
+        // r32 日志里每次从播放/编辑页回录制页都整条重开相机（首帧 0.5~0.9s），用户报的两次
+        // 黑屏正好落在这两段重开窗口里；而"重开后一帧不来"的死法只在重开路径上出现。
+        // 设置页仍无限期（r28 绿帧语义），其他前台页给宽限，退后台立刻关。
         assertTrue(
-            "MainActivity 必须在目的地回调里维护旗标（navigate/popBackStack 同步触发，先于旧页 dispose）",
-            activitySrc.contains("previewKeptBehind = destination.route == ROUTE_SETTINGS")
+            "MainActivity 目的地回调必须按路由起停保活（回录制页解除、离开则保活）",
+            activitySrc.contains("cameraCtrl.cancelPreviewKeepAlive()") &&
+                activitySrc.contains("cameraCtrl.keepPreviewAlive(")
+        )
+        assertTrue(
+            "设置页必须无限期保活（0L），其他页必须给宽限常量",
+            activitySrc.contains("if (destination.route == ROUTE_SETTINGS) 0L else CameraController.PAGE_KEEP_ALIVE_MS")
+        )
+        assertTrue(
+            "app 退后台必须放掉保活的相机（onStop，但只放被留在别的页后面的那台）",
+            activitySrc.contains("previewCtrl?.onAppBackgrounded()") &&
+                ctrlSrc.contains("fun onAppBackgrounded()") &&
+                ctrlSrc.contains("if (previewKeptBehind) closePreviewNow()")
+        )
+        assertTrue(
+            "门面必须提供保活三件（起停 + 立刻收）",
+            ctrlSrc.contains("fun keepPreviewAlive(graceMs: Long)") &&
+                ctrlSrc.contains("fun cancelPreviewKeepAlive()") &&
+                ctrlSrc.contains("fun closePreviewNow()")
         )
     }
 

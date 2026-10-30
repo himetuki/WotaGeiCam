@@ -26,8 +26,10 @@ import com.wotagei.cam.core.pickCapabilityDefault
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -60,6 +62,9 @@ data class CameraUiState(
 class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecycleObserver {
 
     companion object {
+        /** 页面往返保活宽限（非设置页）：到点自动关相机，回来晚了就走冷开（省电与手感的折中） */
+        const val PAGE_KEEP_ALIVE_MS = 30_000L
+
         fun of(owner: ViewModelStoreOwner): CameraController =
             ViewModelProvider(owner)[CameraController::class.java]
     }
@@ -108,6 +113,61 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
      * 回场零重建零闪帧。只对设置页置真：其他目的地（媒体库等）可能一待几分钟，相机常开费电发热。
      */
     var previewKeptBehind: Boolean = false
+
+    // ------------------------------------------------- 页面往返保活（2026-10-30 黑屏三次取证）
+
+    /**
+     * 页面往返保活：**离开录制页但 app 仍在前台**时，相机再活一段（[graceMs] ≤ 0 = 无限期），
+     * 回来零重建。
+     *
+     * 为什么从"只保设置页"扩到"所有前台页"：2026-10-30 r32 真机日志里，每次从播放/编辑页回到
+     * 录制页都会触发一次完整重开（`open slot=` + 新会话），首帧要 0.5~0.9s；用户报的两次黑屏
+     * 正好落在这两段重开窗口里（页面存在 0.72s，一帧未出就退出）。更关键的是"重开后一帧都不来"
+     * 的死法**只在重开路径上出现**（r30/r31 日志同一形状：`帧率决议` 打了、帧不来）。保活把
+     * 这一整类都绕开：回来就是现成会话，相机与 GL 都不重建。
+     *
+     * 省电兜底：非设置页给宽限 [PAGE_KEEP_ALIVE_MS]，到点自动关；app 退到后台立刻关
+     * （[closePreviewNow]，由 MainActivity.onStop 触发）。
+     */
+    private var keepAliveJob: Job? = null
+
+    fun keepPreviewAlive(graceMs: Long) {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
+        previewKeptBehind = true
+        if (graceMs > 0) {
+            keepAliveJob = bus.launch {
+                delay(graceMs)
+                Log.i("WotaCam", "页面保活到期（${graceMs}ms）⇒ 关相机省电")
+                closePreviewNow()
+            }
+        }
+    }
+
+    fun cancelPreviewKeepAlive() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
+        previewKeptBehind = false
+    }
+
+    /** 立刻收相机并解除保活（app 退后台 / 宽限到期） */
+    fun closePreviewNow() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
+        previewKeptBehind = false
+        stop()
+    }
+
+    /**
+     * app 退到后台（MainActivity.onStop）：**只收「被留在别的页后面」的那台相机**。
+     *
+     * 录制页在前台时不能在这里收：那样 engine 变 null，回到前台没有任何入口再 bind（页面组合
+     * 还在、不会重新执行 DisposableEffect），预览会一直黑着——这条路由生命周期 ON_PAUSE→
+     * [pause]（停预览留设备）→ ON_RESUME→[resume] 的老路负责，别抢。
+     */
+    fun onAppBackgrounded() {
+        if (previewKeptBehind) closePreviewNow()
+    }
 
     /** GPU 预览引擎的**页面级缓存**：跨设置往返复用同一实例（SurfaceTexture 活着 = 会话不用重建）。释放权在 [onCleared]，页面 dispose 不再碰它 */
     private var cachedGlSink: GlRenderEngine? = null
@@ -233,7 +293,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         // 覆盖保活回场（设置页往返）且管线**真身**活着：原样返回，任何"重开"都会撞上桥的
         // 会话重建窗口（手动白平衡绿帧）。2026-10-29 黑屏取证后判据从缓存状态改成引擎真身——
         // 快速导航的竞态里 deviceStatus/preview 可能残留成"看着活着"，早退会把相机卡死。
-        if (engineOrNull?.isPreviewLive() == true) return
+        if (engineOrNull?.isPreviewLive() == true) {
+            // 回场复用留痕（2026-10-30）：这条日志与 `open slot=` 是互斥的两条路——有它 = 零重建，
+            // 没有它 = 整条重开。下次黑屏时先看这一行就能分清"重建窗口"还是"重建后死"
+            Log.i("WotaCam", "回场复用相机（会话在跑，未重建）device=${ui.value.device}")
+            return
+        }
         if (!granted(Manifest.permission.CAMERA)) {
             ui.value = ui.value.copy(needsCameraPermission = true)
             pendingStart = true
@@ -291,6 +356,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     override fun onCleared() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
         engine?.close()
         engine = null
         boundSink = null

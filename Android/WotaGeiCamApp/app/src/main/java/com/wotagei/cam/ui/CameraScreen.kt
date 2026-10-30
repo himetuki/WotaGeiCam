@@ -681,11 +681,26 @@ fun CameraScreen(
         (activeSink as? GlRenderEngine)?.onDisplaySurfaceTransient = { ctrl.onPreviewSurfaceTransient() }
         ctrl.bind(activeSink)
         ctrl.start()
+        // 预览账（2026-10-30 黑屏三次取证）：本页停留期间相机出了多少帧、屏上真的换了多少帧。
+        // 复用引擎时 GL 侧没有 EGL/矩阵日志可看，只有这两个计数差能回答"这一页到底黑不黑"——
+        // 上屏帧为 0 而相机帧正常 = 上屏链死；两者都 0 = 相机没起来。
+        val pageEnteredAtMs = SystemClock.elapsedRealtime()
+        val camAtEntry = ctrl.frameResultCount() ?: -1L
+        val dispAtEntry = ctrl.displayFrameCount() ?: -1L
         onDispose {
+            val seconds = (SystemClock.elapsedRealtime() - pageEnteredAtMs) / 1000.0
+            val cam = ctrl.frameResultCount()
+            val disp = ctrl.displayFrameCount()
+            Log.i(
+                TAG_UI,
+                "预览账：本页 ${"%.1f".format(seconds)}s 相机帧=${if (cam == null || camAtEntry < 0) -1 else cam - camAtEntry}" +
+                    " 上屏帧=${if (disp == null || dispAtEntry < 0) -1 else disp - dispAtEntry}" +
+                    " hasSurface=${ctrl.hasDisplaySurface()} 保活=${ctrl.previewKeptBehind}"
+            )
             if (ctrl.previewKeptBehind && activeSink is GlRenderEngine) {
-                // 设置页覆盖（旗标由 MainActivity 的目的地回调维护）：相机与 GL 引擎原样保活，
-                // 回场零重建。窗口面已由 CameraSurface 的面销毁回调摘除（GL 线程与上下文保持
-                // 存活是 PreviewSink 系的既有契约）；GL 引擎的释放权上收 CameraController.onCleared。
+                // 设置页覆盖 / 前台页面往返（旗标由 MainActivity 的目的地回调维护）：相机与 GL 引擎
+                // 原样保活，回场零重建。窗口面已由 CameraSurface 的面销毁回调摘除（GL 线程与上下文
+                // 保持存活是 PreviewSink 系的既有契约）；GL 引擎的释放权上收 CameraController.onCleared。
             } else {
                 ctrl.unbind(activeSink)
             }
@@ -711,6 +726,8 @@ fun CameraScreen(
     DisposableEffect(ctrl) {
         val host = findHostActivity(context)
         host?.onRouteForPreviewWatch(ROUTE_CAMERA, ctrl)
+        // 页面在组合里 = 不需要保活（回场完成）：清掉宽限计时，避免 30s 后把正在用的相机关掉
+        ctrl.cancelPreviewKeepAlive()
         onDispose { }
     }
 
