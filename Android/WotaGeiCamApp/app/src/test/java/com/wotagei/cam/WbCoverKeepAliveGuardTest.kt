@@ -141,8 +141,7 @@ class WbCoverKeepAliveGuardTest {
     }
 
     @Test
-    fun `黑屏自愈_上屏心跳与重挂面`() {
-        // 2026-10-30 三次取证：r31 的帧心跳只能证明「相机在出帧」，证明不了「帧有没有上屏」。
+    fun `黑屏自愈_上屏心跳与重挂面`() {        // 2026-10-30 三次取证：r31 的帧心跳只能证明「相机在出帧」，证明不了「帧有没有上屏」。
         // 真机日志里相机 3A 遥测照常 1Hz 而 GL 一帧未画、整屏黑，看门狗判活、永不介入。
         // 四条红线：
         val engineSrc = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/Camera2Engine.kt"))
@@ -172,6 +171,34 @@ class WbCoverKeepAliveGuardTest {
         assertTrue(
             "重挂必须真的重建承载视图（CameraSurface 按 epoch 换 key）",
             screenSrc.contains("key(surfaceEpoch) {") && screenSrc.contains("ctrl.displayReattach.collect")
+        )
+    }
+
+    @Test
+    fun `连点返回黑屏_防抖与重建自救`() {
+        // 2026-10-30 r38 日志定案：连点设置页返回箭头，第二下 pop 落在转场中途，把刚进场的
+        // 录制页组合连带拆掉——目的地不变、内容已销毁 = 整窗黑、无控件、返回仍可用
+        // （47.465 目的地→camera → 48.256 预览账[组合销毁] → 10s 无任何目的地变化）。
+        // 两道防线必须都在：页内返回防抖掐触发源 + Activity 级"组合没了而目的地未变"重建自救。
+        val surfaceSrc =
+            KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/widget/CameraSurface.kt"))
+        assertTrue(
+            "页内返回必须防抖（400ms 内第二次 pop 忽略）",
+            activitySrc.contains("popBackStackDebounced()") &&
+                activitySrc.contains("if (now - lastPopAt < 400L) return")
+        )
+        assertTrue(
+            "录制页必须向 Activity 回报组合在场/销毁",
+            screenSrc.contains("host?.onCameraPageComposed()") &&
+                screenSrc.contains("host?.onCameraPageDisposed()")
+        )
+        assertTrue(
+            "目的地未变而组合没了 ≥3s 必须重建 Activity 自救（ViewModel 存活，相机随重组回来）",
+            activitySrc.contains("pageGoneSinceMs >= 3_000L") && activitySrc.contains("recreate()")
+        )
+        assertTrue(
+            "CameraSurface 仍是唯一 Surface 出口（防抖不得绕过面归属守卫）",
+            surfaceSrc.contains("onDisplaySurfaceDestroyed(dying)")
         )
     }
 

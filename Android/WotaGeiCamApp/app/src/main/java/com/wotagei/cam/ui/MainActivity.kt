@@ -131,6 +131,22 @@ class MainActivity : ComponentActivity() {
     /** 最近一次见到的录制页门面（onStop 收相机用：app 退后台时保活的相机必须立刻放掉） */
     internal var previewCtrl: com.wotagei.cam.camera.CameraController? = null
 
+    /**
+     * 录制页**组合**是否在场（页面进出场回报，非路由态）。2026-10-30 黑屏定案：连点返回的
+     * 导航竞态能把录制页组合拆掉而目的地不变（r38 日志 47.465→48.256 实录）——整窗黑、
+     * 无控件、应用活着。此时唯一的自救是重建 Activity（ViewModel 存活，相机随页面重组回来）。
+     */
+    @Volatile
+    internal var cameraPageComposed = false
+
+    internal fun onCameraPageComposed() {
+        cameraPageComposed = true
+    }
+
+    internal fun onCameraPageDisposed() {
+        cameraPageComposed = false
+    }
+
     internal fun onRouteForPreviewWatch(route: String?, ctrl: com.wotagei.cam.camera.CameraController?) {
         watchRoute = route
         if (route != ROUTE_CAMERA) {
@@ -151,6 +167,7 @@ class MainActivity : ComponentActivity() {
             var camSeenFrames = false
             var restarted = false
             var reattachTries = 0
+            var pageGoneSinceMs = 0L
             while (isActive) {
                 delay(1000)
                 if (watchRoute != ROUTE_CAMERA) break
@@ -163,6 +180,19 @@ class MainActivity : ComponentActivity() {
                     restarted = false
                     reattachTries = 0
                     continue
+                }
+                // 黑屏竞态兜底（2026-10-30 定案）：目的地还是录制页、但页面组合已被
+                // 导航竞态拆掉（连点返回）⇒ 屏幕整窗黑且任何相机侧自愈都无意义（组合
+                // 没了）。持续 3s 重建 Activity——ViewModel 存活，页面重组后相机自己回来。
+                if (!cameraPageComposed) {
+                    if (pageGoneSinceMs == 0L) pageGoneSinceMs = nowMs
+                    else if (nowMs - pageGoneSinceMs >= 3_000L) {
+                        Log.w("WotaWatch", "录制页组合已销毁而目的地未变（连点返回竞态）⇒ 重建 Activity 自救")
+                        recreate()
+                        return@launch
+                    }
+                } else {
+                    pageGoneSinceMs = 0L
                 }
                 val cam = ctrl.frameResultCount()
                 if (cam != null && cam != camLast) {
@@ -347,6 +377,18 @@ private fun WotaRoot() {
     // 各屏文本高度独立：prefs 读值即当前设置，回本页时重组生效
     val prefs = remember(context) { WotaSettings.of(context) }
 
+    // 页内返回防抖（2026-10-30 黑屏定案）：设置页返回箭头连点多下时，第二下 pop 会落在
+    // 上一个 pop 的转场中途，把刚进场的录制页组合连带拆掉——目的地不变、内容已销毁
+    // = 整窗黑、无控件、系统返回仍可用（r38 日志 47.465→48.256 实录）。400ms 内的
+    // 第二次 pop 一律忽略；转场动画本身 ~300ms，正常操作节奏不受影响。
+    var lastPopAt by remember { mutableStateOf(0L) }
+    fun popBackStackDebounced() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastPopAt < 400L) return
+        lastPopAt = now
+        nav.popBackStack()
+    }
+
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -439,7 +481,7 @@ private fun WotaRoot() {
             GalleryEntryScreen(
                 onOpen = { id -> nav.navigate(WotaNav.player(id)) },
                 onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
-                onBack = { nav.popBackStack() }
+                onBack = { popBackStackDebounced() }
             )
         }
         composable(
@@ -448,7 +490,7 @@ private fun WotaRoot() {
         ) { entry ->
             PlayerScreen(
                 mediaId = entry.arguments?.getLong(WotaNav.PLAYER_ARG) ?: -1L,
-                onBack = { nav.popBackStack() },
+                onBack = { popBackStackDebounced() },
                 onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
                 // 起播渐亮（29 §5.3-②）：页面只上报"起播了"，武装闸与窗口写入收口在 MainActivity
                 onPlaybackStarted = { (activity as? MainActivity)?.onPlayerPlaybackStarted() }
@@ -462,14 +504,14 @@ private fun WotaRoot() {
         ) { entry ->
             CompareScreen(
                 leftMediaId = entry.arguments?.getLong(WotaNav.COMPARE_ARG_LEFT) ?: -1L,
-                onBack = { nav.popBackStack() },
+                onBack = { popBackStackDebounced() },
                 onPractice = { nav.navigate(ROUTE_CAMERA) }
             )
         }
         composable(ROUTE_SETTINGS) {
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS)) {
                 SettingsScreen(
-                    onBack = { nav.popBackStack() },
+                    onBack = { popBackStackDebounced() },
                     onOpenHudEditor = { nav.navigate(ROUTE_HUD_EDITOR) }
                 )
             }
@@ -477,7 +519,7 @@ private fun WotaRoot() {
         composable(ROUTE_HUD_EDITOR) {
             // 编辑的是录制页的控件，文本高度也走录制页那一档，两边量出来的宽度才同一个数
             TextScaleLayer(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) {
-                HudLayoutEditorScreen(onBack = { nav.popBackStack() })
+                HudLayoutEditorScreen(onBack = { popBackStackDebounced() })
             }
         }
     }

@@ -737,7 +737,10 @@ fun CameraScreen(
         host?.onRouteForPreviewWatch(ROUTE_CAMERA, ctrl)
         // 页面在组合里 = 不需要保活（回场完成）：清掉宽限计时，避免 30s 后把正在用的相机关掉
         ctrl.cancelPreviewKeepAlive()
-        onDispose { }
+        // 组合在场回报（黑屏竞态兜底）：快速连点返回能把本页组合拆掉而目的地不变——
+        // Activity 级看门狗据此识别"整窗黑"并重建 Activity 自救（见 MainActivity）
+        host?.onCameraPageComposed()
+        onDispose { host?.onCameraPageDisposed() }
     }
 
     // ---- 预览自愈 watchdog（2026-10-29 黑屏取证，2026-10-30 三次修订）
