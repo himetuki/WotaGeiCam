@@ -201,6 +201,19 @@ class Camera2Engine(
     private var halNrLastLogged: Int? = null
     private var halNrLoggedOnce = false
 
+    // ---- 曝光三键的下发留痕（2026-10-30 审查 🟡-1/🟡-2 取证）----
+    // 上一次**打过日志**的曝光组键值（iso / 曝光 / 帧周期），只在变化时打一行——
+    // 帧率归因（"60fps+手动1/240 掉到 30"）需要知道当时实际下发的三键，
+    // 特别是 exposureNs 是否被设备曝光范围钳制（min 抬升 / max 压回）。
+    private var expIsoLogged: Int? = null
+    private var expNsLogged: Long? = null
+    private var fdNsLogged: Long? = null
+    private var expLoggedOnce = false
+
+    /** 曝光下发的格式化快照（给帧率守卫行复用；null = 本场还没发过曝光键，即 AE 自动档） */
+    @Volatile
+    private var lastSentExposureText: String? = null
+
     /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface；v0.0.1 不挂 YUV 分析流 */
     private var extraSurface: Surface? = null
     private var extraReader: ImageReader? = null
@@ -865,6 +878,35 @@ class Camera2Engine(
             Log.w(TAG, "退出画面降噪但本机未声明 NOISE_REDUCTION_MODE_OFF，本场请求仍带上一档（下次开会话恢复）")
         }
         RequestApplier.apply(builder, state, snapshot(mode))
+        // 曝光三键的**下发真值**（2026-10-30 审查 🟡-1/🟡-2 取证）：手动档写三键、自动档缺席。
+        // 与降噪那枚同纪律：只在变化时打一行，不跟着逐帧刷。帧率归因（"60fps+手动1/240 掉到
+        // 30"）靠这一行定位——它直接给出当时下发的曝光与帧周期，以及是否被设备范围钳制过。
+        val sentIso = builder.get(CaptureRequest.SENSOR_SENSITIVITY)
+        val sentExpNs = builder.get(CaptureRequest.SENSOR_EXPOSURE_TIME)
+        val sentFdNs = builder.get(CaptureRequest.SENSOR_FRAME_DURATION)
+        if (sentIso != expIsoLogged || sentExpNs != expNsLogged || sentFdNs != fdNsLogged || !expLoggedOnce) {
+            val fmtNs: (Long?) -> String = { ns ->
+                ns?.let {
+                    val ms = it / 1_000_000.0
+                    "%.2fms(1/%d)".format(ms, (1_000_000_000L / it.coerceAtLeast(1L)))
+                } ?: "缺席"
+            }
+            val clampNote = buildString {
+                if (state.exposureMinNs > 0 && sentExpNs != null && sentExpNs < state.exposureMinNs) append("min抬升 ")
+                if (state.exposureMaxNs > 0 && sentExpNs != null && sentExpNs > state.exposureMaxNs) append("max压回 ")
+            }.ifEmpty { "无" }
+            Log.i(
+                TAG,
+                "曝光下发 ae=${if (builderAeManual == true) "MANUAL" else "AUTO"} iso=${sentIso ?: "缺席"} " +
+                    "exposure=${fmtNs(sentExpNs)} frameDuration=${fmtNs(sentFdNs)} clamp=$clampNote"
+            )
+            expIsoLogged = sentIso
+            expNsLogged = sentExpNs
+            fdNsLogged = sentFdNs
+            expLoggedOnce = true
+            // 给帧率守卫行复用（跨线程读，@Volatile）
+            lastSentExposureText = "iso=${sentIso ?: "缺席"} exp=${fmtNs(sentExpNs)} fd=${fmtNs(sentFdNs)}"
+        }
         if (mode != null) {
             halNrWritten = mode != CaptureRequest.NOISE_REDUCTION_MODE_OFF
         }
@@ -1191,7 +1233,16 @@ class Camera2Engine(
             null
         }
         if (params.lowFpsHint.value != hint) {
-            Log.i(TAG, "帧率守卫：target=${target}fps 实测=${"%.1f".format(measured)}fps ⇒ ${if (alarm) "提示" else "解除"}")
+            // 取证字段（2026-10-30 审查 🟡-1）：低帧归因需要知道**当时是否手动曝光、快门多少**——
+            // "60fps+手动1/240 掉到 30"这类 HAL 侧限速，没有这两个字段就无法从日志归因
+            val manual = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
+            val shutterNs = params.shutter.value.value
+            val shutterText = if (shutterNs > 0) "1/${(WotaTiers.NS_PER_SECOND.toDouble() / shutterNs).roundToInt()}" else "无"
+            Log.i(
+                TAG,
+                "帧率守卫：target=${target}fps 实测=${"%.1f".format(measured)}fps ⇒ ${if (alarm) "提示" else "解除"}" +
+                    "（手动曝光=$manual 快门=$shutterText 下发曝光=${lastSentExposureText ?: "无"}）"
+            )
             params.lowFpsHint.value = hint
         }
     }
