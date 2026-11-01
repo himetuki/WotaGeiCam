@@ -713,6 +713,60 @@ deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` +
   无移植动作（新口径已随各批落 PORT_MAP） |
 | `a9b0cae`..`8c6603e`（站位线族） | 本侧已在 main（harmony/* 提交），非上游增量 |
 
+## 交付批（EXP-CORR：等号档曝光纠偏，r42 移植，2026-11-01）
+
+**上游**：`5be0cf9`（取证留痕）+ `8c30210`（主体）+ `b2e5a8d`（二轮裁决），docs/plan/31
+三稿（2026-11-01 用户定版）。**四批落地，基线不推进**（区间 9cc36c5..e261fe9 共 52 提交，
+仅 r42 族本轮评审+移植，其余见下方台账）：
+
+| 批 | 本侧提交 | 内容 |
+|---|---|---|
+| A | `6b7c91c` | core/ExposureCorrection.ets 纯逻辑（适用判定/自动余量 [5%,20%]FD+1ms/纠偏合成 1ns 下限/探测折算中位数）+ Snapshot 四件 + exposurePlan 手动档接线 + WotaParams 六流 + 13 用例 |
+| B | `8301c18` | GlCameraEngine 预览态读出探测（frameStart 采样/6 拍热身/32 样本/5s 超时冷却/键=镜头\|画幅\|fps）+ setRecordingActive 等号不进录制 + applyParams 曝光真值回写 + actualFps 1s 采样 |
+| C | `4864f08` | 快门面板强制档「自动微调曝光」开关+说明+「手动微调」滑杆（0~+8ms/0.5ms 恒定梯/snapKey=null）+ HUD 实测读数行 + 滑杆普查守卫 5→6 |
+| D | `14e377a` | 持久化两键（correction_auto 默认 true/correction_manual_ns）restore+影子 diff+即改即存；键表 24→26 |
+
+**平台偏离登记（对上游）**：
+- 探测帧到达：上游 SENSOR_TIMESTAMP（ns 真值）→ OHOS `PreviewOutput.on('frameStart')`
+  无时间戳载荷 ⇒ 墙钟 `Date.now()` ms ×1e6（1ms 粒度；对 1~8ms Δ 折算足够；NTP 跳变由
+  冷却窗兜底）；
+- 逐帧下发：上游 repeating request + markDirty 每帧重build ⇒ OHOS 会话持态，探测态翻转
+  靠**重下发**（探测开始/取消各一次 applyParams；弹层/起录既有下发点也带新快照）；
+- 录制态：上游 `setExtraSurface(录制面到场)` 即取消探测 ⇒ OHOS 录制吃 GL 流不另挂相机
+  输出，引擎加 `setRecordingActive`（取景页起录/收尾两处告知）；
+- 快门纠偏开关：液态 WotaSwitch 属 r41 liquid 批未移植 ⇒ ArkUI Toggle 近似；
+- HUD 读数行落位：上游钉「预览：<档位>」DisplayScaleReadout 正下方 ⇒ 本侧无该行，
+  落读数条之下同语义位；
+- putLong→putInt：ParamsPrefs 单 number 型，域 0..8_000_000 < 2^31 等价；
+- 上游 32 键 vs 本侧 26 键：差集 = denoise/marker/glow/tone 各批未移植（非本批缺口）；
+- actualFps 采样是**读数**不是守卫：上游帧率坍塌守卫告警行（91e6353）未移植，不冒领。
+
+## 待移植台账（9cc36c5..e261fe9 未评审区间，2026-11-01 快照）
+
+基线停在 `9cc36c5`（推进规则：待评审队列全部评审完才动）。r42 族之外的 49 提交按族预分组，
+**逐条评审未做**，处置以届时评审为准：
+
+- **相机/曝光链**（建议下一批，与纠偏同域）：`45c8500` setFps 单一写入者+快门域收口、
+  `91e6353` 帧率坍塌守卫（批B 已铺 actualFps 采样底座）、`36917e5` 加固三项
+  （守卫补盲区/换段预提示/近似档预告知）、`813e83f` WB 取证遥测、`afa8471` 物理子头
+  AF 回退（OHOS 相机模型无逻辑/物理头同概念，需平台裁定）、WB 算法族
+  `c0ea34a`/`f4aeb36`/`ea5b26e`/`003c3b2`（绿幕根治依赖 HAL CCM 回报，OHOS 无等价
+  接口，评审时重点裁定）；
+- **UI/交互**：`5216e72` 取景器亮度跟随系统+渐变、`e7b7bf2` 播放页顶栏收起+浮动 dock、
+  `320a956`/`bda89bb` 曲线面板记忆/锚点手感、`66f88e0`+`1676a8a` TONE 胶囊（空梯教训
+  对本侧 PillSlider 空梯禁用占位同样适用）、`971d710`/`a3172e8` HUD 读数透字/叠加层
+  让位（本侧霜板结构不同构，需对照）、`03979da` 说明截行；
+- **后渲染导出/媒体**：`dcaf45b`/`ba9f0f4`/`09c19c9`/`a0ef71d`/`56631bc` 后渲染导出管线
+  （本侧 clip_exporter 是 remux 链，后渲染链 native 面）；`7b12162` 选片 MIME；`5f029e8`
+  A/B 打点死区；
+- **Glow**：`04d1c62`/`0b9d275` 预设删除+色盘自选、`350c671` 颜色模式+阈值域+导出面板；
+- **动效**：`81059e2`/`f0716fe`/`a3855c3`/`3651901` 液态 Q 弹（LiquidSpring/液态开关/红心；
+  ArkUI curves.springMotion 有天然对应面）；
+- **Android 导航/生命周期族**（黑屏链 13 提交 `3b20b5e`..`570ea50`）：NavHost 返回栈/
+  Activity 作用域是 Android 导航模型专属，本侧路由/页面栈不同构——**逐条评审后**再登记
+  N/A 或提炼平台无关思想（预览存活真身判据/看门狗），不预判；
+- **杂务/文档**：`e261fe9` r42 发布说明（安卓侧文档，无移植动作）。
+
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
 **范围裁决（本条只落一半，且如实标注）**：上游 `HudLayoutEditor` 的完整自由布局是
