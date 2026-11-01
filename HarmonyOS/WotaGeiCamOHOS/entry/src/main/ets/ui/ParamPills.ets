@@ -19,6 +19,7 @@ import { ParamState, WotaParams } from '../core/WotaParams';
 import { evLadder, isoLadder, kelvinLadder, shutterLadder, diopterLadder } from './SliderLadder';
 import { TierItem, aeLabel, evText, shutterItems, shutterText, wbLabel } from './ParamFormat';
 import { PillChoices, PillNote, PillOption, PillRect, PillSlider, WotaPillPopup } from './PillPopup';
+import { WotaSwitch } from './WotaSwitch';
 import { SliderKey } from './SliderSnap';
 
 /**
@@ -195,18 +196,19 @@ export struct ShutterPillPopup {
               .fontColor('#99FFFFFF')
               .layoutWeight(1)
               .maxLines(1)
-            // 液态 WotaSwitch 属 r41 liquid 批（未移植），本批用 ArkUI Toggle 近似（登记）
-            Toggle({ type: ToggleType.Switch, isOn: this.corrAuto })
-              .selectedColor('#FF0A59F7')
-              .enabled(this.editable)
-              .onChange((on: boolean): void => {
+            // 液态开关（上游 f0716fe WotaSwitch 的 ArkUI 版）：64×32/过中点翻转/弹簧落位
+            WotaSwitch({
+              isOn: this.corrAuto,
+              active: this.editable,
+              onChange: (on: boolean): void => {
                 if (on === this.corrAuto) {
                   return;
                 }
                 this.corrAuto = on;
                 this.params.exposureCorrectionAuto.value = on;
                 this.onApply();
-              })
+              }
+            })
           }
           .width('100%')
           PillNote({ noteText: '自动微调曝光以稳帧：发送时等量缩短曝光，防止满窗档被 HAL 拉长帧周期掉帧率' })
