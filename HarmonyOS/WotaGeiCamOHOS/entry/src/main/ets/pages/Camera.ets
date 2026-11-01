@@ -540,6 +540,8 @@ struct CameraPage {
         this.flushParamsDirect();
       });
     this.bindParamsLabels();
+    // 等号档探测与实测遥测（r42）：引擎要读写参数总线（帧到达采样/探测闩锁/下发真值回写）
+    this.engine.attachParams(this.params);
     this.initLevelSensor();
     this.applyImmersiveChrome();
     this.refreshHudReadoutMetrics();
@@ -2128,6 +2130,8 @@ struct CameraPage {
       return;
     }
     this.recording = true;
+    // 等号档探测（r42）：录制目标在场即取消（等号不进录制；探测态翻转经引擎重下发恢复余量）
+    this.engine.setRecordingActive(true);
     // 长时任务（上游前台服务的对应物）：切后台续录；失败只记日志不阻塞录制
     if (this.ctx !== undefined) {
       RecordTask.start(this.ctx);
@@ -2452,6 +2456,7 @@ struct CameraPage {
     this.healthPausedByHide = false;
     const summary: string = this.recorder.stop();
     this.recording = false;
+    this.engine.setRecordingActive(false); // 收尾回预览态：等号档可重探（闩锁在册则不重探）
     // 长时任务收口（幂等）：所有停录终态都汇到 finishRecord，这里解一次即可
     if (this.ctx !== undefined) {
       RecordTask.stop(this.ctx);

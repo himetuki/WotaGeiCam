@@ -12,14 +12,18 @@ import { camera } from '@kit.CameraKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Diag } from '../diag/Diag';
-import { Size, WotaTag } from '../core/Constants';
+import { AeMode, Size, WotaTag } from '../core/Constants';
 import { CameraAbility } from '../core/CameraAbility';
+import { ExposureCorrection, ReadoutLatch } from '../core/ExposureCorrection';
 import { WotaParams } from '../core/WotaParams';
 import { LensSlot, LensType, lensTypeName, maxVideoPixels, pickCapabilityDefault } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
 import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
-import { ApplyReport, State, applySnapshot, snapshotOf, stateOf } from './RequestApplier';
+import {
+  ApplyReport, ExposurePlan, Snapshot, State, applySnapshot, exposurePlan, readoutKeyOf,
+  snapshotOf, stateOf
+} from './RequestApplier';
 import { FrameLedger } from '../record/FrameLedger';
 import { DeviceStatus } from './DeviceStatus';
 
@@ -90,6 +94,12 @@ function FocusStateName(st: camera.FocusState): string {
   return `${st}`;
 }
 
+/** 等号档探测的热身拍数：等号请求生效 + HAL 换 FD 需要几拍，这几拍不采（上游 docs/plan/31 §3） */
+const EXPOSURE_PROBE_WARMUP_FRAMES: number = 6;
+
+/** 实测帧率采样窗（HUD 读数行的 fps 段；与上游帧率守卫同一拍采样口径，1s 一更） */
+const ACTUAL_FPS_SAMPLE_MS: number = 1000;
+
 export class GlCameraEngine {
   private session: camera.PhotoSession | undefined = undefined;
   private preview: camera.PreviewOutput | undefined = undefined;
@@ -109,9 +119,75 @@ export class GlCameraEngine {
   /** AF 遥测拍点节流（1s 一拍，见 start 内 focusStateChange 监听） */
   private lastFocusTelemetryMs: number = 0;
 
+  /** 参数总线（attachParams 注入；读出探测与实测遥测回写的读写面） */
+  private params: WotaParams | undefined = undefined;
+
+  // ---- 等号档读出探测（2026-11-01 用户定版，上游 docs/plan/31 §3；r42 批B 移植）----
+  // 预览态发等号请求（probeActive=true ⇒ exposurePlan 余量 0，量程本身），用帧到达间隔的
+  // **中位数** − 请求周期折算实际拉长量 Δ，闩锁进总线（键 = 镜头|画幅|fps）。三条纪律：
+  // 录制目标在场立即退出（等号不进录制）；换档先热身几拍（等号请求生效 + HAL 换挡那几拍不采）；
+  // 超时进冷却（帧流不足时防死循环重试）。平台登记：上游帧到达吃 TotalCaptureResult 的
+  // SENSOR_TIMESTAMP（ns）；OHOS frameStart 无时间戳载荷 ⇒ 墙钟 ms × 1e6 折算（1ms 粒度）。
+  private recordingActive: boolean = false;
+  private exposureProbeActive: boolean = false;
+  private exposureProbeKey: string | undefined = undefined;
+  private exposureProbeIntervals: Array<number> = [];
+  private exposureProbeLastMs: number = 0;
+  private exposureProbeFramesSeen: number = 0;
+  private exposureProbeStartMs: number = 0;
+  private exposureProbeCooldownUntilMs: number = 0;
+
+  /** 实测帧率采样（onPreviewFrame 计数；窗口满 1s 折算回写 actualFps） */
+  private fpsSampleCount: number = 0;
+  private fpsSampleLastMs: number = 0;
+
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
     return this.lensInfo;
+  }
+
+  /** 参数总线注入（取景页 aboutToAppear 调一次；不注入则读出探测与实测遥测停用） */
+  attachParams(params: WotaParams): void {
+    this.params = params;
+  }
+
+  /**
+   * 录制态告知（等号不进录制的执行面）：上游在 setExtraSurface(录制面到场) 时取消探测；
+   * OHOS 侧录制不另挂相机输出（GlRecorder 吃 GL 流），由取景页在起录/收尾两处告知。
+   * 起录即取消探测并 markDirty 等价重下发（余量回到正常档）。
+   */
+  setRecordingActive(active: boolean): void {
+    if (active && !this.recordingActive) {
+      this.cancelExposureProbe('录制目标在场');
+    }
+    this.recordingActive = active;
+  }
+
+  /** 参数总线当前帧率档位（exposurePlan/纠偏判定的 fps 真源，与上游 fpsValue() 同名同义） */
+  private fpsValue(): number {
+    const params: WotaParams | undefined = this.params;
+    return params === undefined ? 0 : params.fps.value.value;
+  }
+
+  /**
+   * 预览帧到达（frameStart 回调面）：实测帧率采样 + 等号档读出探测。回调无 err 时才算有效帧。
+   */
+  private onPreviewFrame(): void {
+    const params: WotaParams | undefined = this.params;
+    if (params === undefined || this.status !== DeviceStatus.OPEN_SUCCEED) {
+      return;
+    }
+    const now: number = Date.now();
+    // 实测帧率（HUD 读数行）：1s 窗口计数折算；上游帧率守卫的告警行属 91e6353 移植批，本批不冒领
+    this.fpsSampleCount++;
+    if (this.fpsSampleLastMs === 0) {
+      this.fpsSampleLastMs = now;
+    } else if (now - this.fpsSampleLastMs >= ACTUAL_FPS_SAMPLE_MS) {
+      params.actualFps.value = this.fpsSampleCount * 1000 / (now - this.fpsSampleLastMs);
+      this.fpsSampleCount = 0;
+      this.fpsSampleLastMs = now;
+    }
+    this.feedExposureProbe(now);
   }
 
   deviceStatus(): DeviceStatus {
@@ -283,6 +359,7 @@ export class GlCameraEngine {
         preview.on('frameStart', (err: BusinessError): void => {
           if (!err) {
             FrameLedger.onCameraStarted();
+            this.onPreviewFrame();
           }
         });
       } catch (e) {
@@ -385,6 +462,84 @@ export class GlCameraEngine {
   }
 
   /**
+   * 等号档读出探测（上游 docs/plan/31 §3，2026-11-01 用户定版）：挂在 frameStart 每帧回执上。
+   * 条件齐了才采集——手动 AE + 自动纠偏开 + 强制等号档 + 预览态（无录制目标）+ 本配置没测过；
+   * 条件一破立刻退出探测态（等号请求不能漏进任何别的状态）。前 [EXPOSURE_PROBE_WARMUP_FRAMES]
+   * 拍是换挡热身（等号请求生效 + HAL 换 FD 需要几拍），不采；采满 [ExposureCorrection.PROBE_SAMPLES]
+   * 个间隔即折算中位数落闩锁，下一拍下发就带纠偏。
+   * 平台差异（对上游 feedExposureProbe）：OHOS 无逐帧 repeating request——「下一拍下发就带
+   * 纠偏」落在**重下发**上（probe 态翻转后的下一次 applyParams：探测开始/取消两处各触发一次，
+   * 弹层改动/起录前的既有下发点也会带上最新快照）。
+   */
+  private feedExposureProbe(nowMs: number): void {
+    const params: WotaParams | undefined = this.params;
+    if (params === undefined) {
+      return;
+    }
+    const key: string = readoutKeyOf(params);
+    const shouldProbe: boolean = this.status === DeviceStatus.OPEN_SUCCEED &&
+      !this.recordingActive &&
+      params.aeMode.value === AeMode.MANUAL &&
+      params.exposureCorrectionAuto.value &&
+      ExposureCorrection.applicable(params.shutter.value.value, this.fpsValue()) &&
+      (params.readoutLatch.value === undefined || params.readoutLatch.value.key !== key);
+    if (!shouldProbe) {
+      this.cancelExposureProbe('条件退出');
+      return;
+    }
+    if (nowMs < this.exposureProbeCooldownUntilMs) {
+      return;
+    }
+    if (this.exposureProbeKey !== key) {
+      this.exposureProbeKey = key;
+      this.exposureProbeIntervals = [];
+      this.exposureProbeLastMs = 0;
+      this.exposureProbeFramesSeen = 0;
+      this.exposureProbeStartMs = nowMs;
+      this.exposureProbeActive = true;
+      this.applyParams(params); // markDirty 等价：下一拍起发等号请求（量程本身）；不重下发这一场还带着余量
+      Diag.i(WotaTag.ABILITY, `等号档读出探测开始 key=${key}（预览态发等号请求；录制目标在场即中止）`);
+    }
+    this.exposureProbeFramesSeen++;
+    if (this.exposureProbeFramesSeen <= EXPOSURE_PROBE_WARMUP_FRAMES) {
+      return;
+    }
+    if (this.exposureProbeLastMs > 0 && nowMs > this.exposureProbeLastMs) {
+      this.exposureProbeIntervals.push((nowMs - this.exposureProbeLastMs) * 1_000_000);
+    }
+    this.exposureProbeLastMs = nowMs;
+    if (this.exposureProbeIntervals.length >= ExposureCorrection.PROBE_SAMPLES) {
+      const delta: number = ExposureCorrection.probeDeltaNs(
+        this.exposureProbeIntervals, ExposureCorrection.framePeriodNs(this.fpsValue()));
+      params.readoutLatch.value = new ReadoutLatch(key, delta);
+      Diag.i(WotaTag.ABILITY,
+        `等号档读出探测完成 key=${key} Δ=${delta}ns（${(delta / 1_000_000).toFixed(2)}ms）` +
+        `samples=${this.exposureProbeIntervals.length}`);
+      this.cancelExposureProbe('探测完成');
+    } else if (nowMs - this.exposureProbeStartMs > ExposureCorrection.PROBE_TIMEOUT_MS) {
+      this.exposureProbeCooldownUntilMs = nowMs + ExposureCorrection.PROBE_COOLDOWN_MS;
+      this.cancelExposureProbe(`超时（帧流不足），冷却 ${ExposureCorrection.PROBE_COOLDOWN_MS}ms 后重试`);
+    }
+  }
+
+  /** 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量） */
+  private cancelExposureProbe(why: string): void {
+    if (!this.exposureProbeActive && this.exposureProbeKey === undefined) {
+      return;
+    }
+    this.exposureProbeActive = false;
+    this.exposureProbeKey = undefined;
+    this.exposureProbeIntervals = [];
+    this.exposureProbeLastMs = 0;
+    this.exposureProbeFramesSeen = 0;
+    Diag.i(WotaTag.ABILITY, `等号档探测退出：${why}`);
+    const params: WotaParams | undefined = this.params;
+    if (params !== undefined) {
+      this.applyParams(params);
+    }
+  }
+
+  /**
    * 参数下发（T21）：按参数总线当前快照逐键 apply（RequestApplier.applySnapshot）。
    * 会话停止/能力不可得时返回空报告（applied/skipped/failed 全空）不崩溃——
    * 页面在停镜后的残留回调（弹层改动/停录收尾）仍可安全调用。
@@ -404,7 +559,27 @@ export class GlCameraEngine {
       // 高速表），不按「档位数值 > 30」猜（上游 2026-10-26 口径，与 KitPreview.applyParams 一致）
       const highSpeed: boolean = ability.needsHighSpeed(size, fps);
       const state: State = stateOf(ability, size, highSpeed, ability.evStep);
-      return applySnapshot(session, state, snapshotOf(params, state));
+      const snap: Snapshot = snapshotOf(params, state);
+      // 等号档探测（上游 docs/plan/31）：probeActive 是引擎私有态，快照组装后回填
+      snap.probeActive = this.exposureProbeActive;
+      const report: ApplyReport = applySnapshot(session, state, snap);
+      // 曝光下发的**真值**回写（上游 docs/plan/31，HUD 实测读数行）：手动档才有曝光可言
+      // （自动档曝光键缺席 ⇒ undefined）；纠偏值 = 帧周期 − 实发，非等号档不适用 ⇒ undefined。
+      // 单位登记：setExposureDuration 吃 µs（亚微秒钳 1），µs 取整后的值才是实际生效真值。
+      const plan: ExposurePlan = exposurePlan(state, snap);
+      const manual: boolean = params.aeMode.value === AeMode.MANUAL;
+      if (manual) {
+        const sentNs: number = Math.max(1, Math.round(plan.exposureNs / 1000)) * 1000;
+        params.actualSentExposureNs.value = sentNs;
+        params.actualCorrectionNs.value =
+          ExposureCorrection.applicable(params.shutter.value.value, fps)
+            ? Math.max(0, ExposureCorrection.framePeriodNs(fps) - sentNs)
+            : undefined;
+      } else {
+        params.actualSentExposureNs.value = undefined;
+        params.actualCorrectionNs.value = undefined;
+      }
+      return report;
     } catch (e) {
       Diag.e(WotaTag.ABILITY, `gl camera applyParams failed: ${e}`);
       return empty;
@@ -457,5 +632,21 @@ export class GlCameraEngine {
     this.previewSizes = [];
     this.lastZoom = 1;
     this.status = DeviceStatus.CLOSE;
+    // 等号档探测与实测遥测一并清账（上游口径：deviceStatus 退出 OPEN_SUCCEED 时清空）
+    this.recordingActive = false;
+    this.exposureProbeActive = false;
+    this.exposureProbeKey = undefined;
+    this.exposureProbeIntervals = [];
+    this.exposureProbeLastMs = 0;
+    this.exposureProbeFramesSeen = 0;
+    this.exposureProbeCooldownUntilMs = 0;
+    this.fpsSampleCount = 0;
+    this.fpsSampleLastMs = 0;
+    const params: WotaParams | undefined = this.params;
+    if (params !== undefined) {
+      params.actualSentExposureNs.value = undefined;
+      params.actualCorrectionNs.value = undefined;
+      params.actualFps.value = undefined;
+    }
   }
 }
