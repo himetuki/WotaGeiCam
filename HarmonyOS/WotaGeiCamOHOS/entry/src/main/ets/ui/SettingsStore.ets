@@ -112,6 +112,8 @@ const KEY_CURVE_STACK: string = 'curve_stack';
 const KEY_CURVE_PANEL_SIDE_DP: string = 'curve_panel_side_dp';
 // 播放页顶栏持久收起（29 §6.3，上游 player_top_bar_collapsed 逐字）：进页读、点按写
 const KEY_PLAYER_TOP_BAR_COLLAPSED: string = 'player_top_bar_collapsed';
+// 动效档（上游 motion_mode 逐字；PLAIN=简洁无动画 / FLUENT=流畅 / LIQUID=液态Q弹）
+const KEY_MOTION: string = 'motion_mode';
 // 「启动后自动亮屏」延迟秒（0–10，0=关闭；上游 camera_brighten_delay_sec，5216e72）
 const KEY_CAMERA_BRIGHTEN_DELAY_SEC: string = 'camera_brighten_delay_sec';
 // 「起播渐亮」时长十分之一秒（0–30 步 5，0=关闭；上游 player_brighten_ramp_tenths）
@@ -157,6 +159,8 @@ export class CameraSettings {
   cameraBrightenDelaySec: number = 1;
   /** 「起播渐亮」时长十分之一秒（0=关闭；单播放页首次起播从当前亮度渐到满） */
   playerBrightenRampTenths: number = 10;
+  /** 动效档（MotionMode 名串：PLAIN/FLUENT/LIQUID；坏串回 FLUENT） */
+  motionMode: string = 'FLUENT';
   /**
    * HUD 位置表原文（上游 hud_layout，`HudLayoutTable.encode` 的 v2 串；空串 = 默认表）。
    * 本侧 J3b 只消费 READOUT 容器的条目顺序；容器位置/格子留给后续（编辑器本体见
@@ -259,6 +263,9 @@ export class SettingsStore {
       const playRaw: preferences.ValueType = await store.get(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
       s.playerBrightenRampTenths =
         BrightnessRampMath.playerBrightenRampTenths(typeof playRaw === 'number' ? playRaw as number : undefined);
+      const motionRaw: preferences.ValueType = await store.get(KEY_MOTION, s.motionMode);
+      const mv: string = typeof motionRaw === 'string' ? motionRaw as string : '';
+      s.motionMode = mv === 'PLAIN' || mv === 'FLUENT' || mv === 'LIQUID' ? mv : 'FLUENT';
       // 坏串（类型不符）当缺失 → 默认表；串本身的收口在 HudLayoutTable.decode（坏段丢弃/整表回默认）
       const layoutRaw: preferences.ValueType = await store.get(KEY_HUD_LAYOUT, s.hudLayout);
       s.hudLayout = typeof layoutRaw === 'string' ? layoutRaw as string : '';
@@ -332,6 +339,7 @@ export class SettingsStore {
       await store.put(KEY_HUD_ITEMS, s.hudItems);
       await store.put(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
       await store.put(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
+      await store.put(KEY_MOTION, s.motionMode);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);

@@ -871,6 +871,32 @@ struct Settings {
     .width('100%')
   }
 
+  /**
+   * 动效档分组（上游 BlockMotion，motion_mode 键逐字）：简洁=无动画（0 时长直达）、
+   * 流畅=默认 S 曲线、液态=Q 弹弹簧。消费方（红心/弹层动效）读档降级——系统
+   * 「减少动效」无 ArkUI 读取面，登记平台面。
+   */
+  @Builder
+  private motionGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('动效')
+      Column() {
+        this.optionRow('动效档', '简洁=无动画；流畅=默认；液态=Q 弹弹簧（红心/开关）',
+          this.settings.motionMode,
+          ['简洁', '流畅', '液态'],
+          ['PLAIN', 'FLUENT', 'LIQUID'].indexOf(this.settings.motionMode), (index: number): void => {
+            this.settings.motionMode = ['PLAIN', 'FLUENT', 'LIQUID'][index];
+            this.persist();
+          })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
   @Builder
   private refLineGroup() {
     Column({ space: SettingsVisual.HEAD_GAP }) {
@@ -1241,6 +1267,7 @@ struct Settings {
       this.sliderSnapGroup()
       this.levelGroup()
       this.brightnessGroup()
+      this.motionGroup()
       this.refLineGroup()
       this.uiOrientationGroup()
     }
@@ -1270,6 +1297,7 @@ struct Settings {
       this.sliderSnapGroup()
       this.levelGroup()
       this.brightnessGroup()
+      this.motionGroup()
       this.refLineGroup()
       this.monitorGroup()
       this.compareTickGroup()

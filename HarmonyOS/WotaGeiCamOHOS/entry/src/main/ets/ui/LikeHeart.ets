@@ -17,6 +17,8 @@ import { HudColor } from './HudTokens';
 export struct LikeHeart {
   /** 受控收藏态 */
   @Prop liked: boolean = false;
+  /** 动效档（上游 MotionMode）：PLAIN=不播效果只切状态（BlockMotion 消费面） */
+  @Prop motionMode: string = 'FLUENT';
   onToggle: (next: boolean) => void = (_next: boolean): void => {};
   contentDescription: string = '收藏';
 
@@ -35,8 +37,8 @@ export struct LikeHeart {
   private press(): void {
     const next: boolean = !this.liked;
     this.onToggle(next);
-    if (!next || this.playing) {
-      return; // 取消收藏不播效果；播放中不重放（上游 beat 口径的轻量近似）
+    if (!next || this.playing || this.motionMode === 'PLAIN') {
+      return; // 取消收藏不播效果；播放中不重放；简洁档无动画（上游 playEffect 同口径）
     }
     this.playing = true;
     this.t = 0;

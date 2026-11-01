@@ -26,7 +26,7 @@
 | ui/design/Widgets.kt | 688 | 散布（wotaHudCard/HudTokens/…） | 🔍 | 待比对 |
 | ui/design/Tokens.kt | 315 | ui/HudTokens.ets | ✅ | 令牌化对齐（TOK 批） |
 | ui/anim/LiquidMerge.kt | 981 | （无对应） | ❌缺失 | 速度继承/共享轴/容器变换——ArkUI 无共享轴对应面，逐项重建 |
-| ui/anim/Motion.kt | 264 | （各处 animateTo） | 🔶 | PLAIN/减少动效档无统一闸，待重建 |
+| ui/anim/Motion.kt | 264 | Settings.ets motionGroup + 各处 animateTo | 🔶 | 动效档（motion_mode 三档）已重建并接 LikeHeart 消费闸（本批）；全局闸只覆盖红心宿主，其余动效点（弹层/开关）逐个接线=续批；系统减少动效无 ArkUI 读取面（登记） |
 | ui/ParamsPersist.kt | 394 | ui/ParamsPersist.ets | ✅ | 键表 26（上游 32 的差集=未移植批键，登记） |
 | ui/FrostProbe.kt / FrostSpace.kt | 216/179 | （霜板链在 native） | 🔶 | 霜链 native 在册；探针面待比对 |
 | ui/MainActivity.kt | 721 | EntryAbility + pages | 🔶 | 导出上收/组合守护/导航留痕=N/A（Android 导航模型）；亮度驱动 ✅（f6c6ede） |
@@ -59,8 +59,8 @@
 1. **WotaSwitch 速度继承**（🔶→✅）：`curves.springCurve(velocity, mass, stiffness, damping)`
    支持初速度——球落位改 springCurve（velocity 取 pan 端速度），stiffness=(2π/response)²、
    damping=2ζ√(mass·stiffness)（LiquidSpring.OFFSET 语义换算）。**本批执行**。
-2. **Motion.kt 统一动效闸**（❌）：PLAIN/减少动效档 → ArkUI 无系统开关读取面，重建为
-   设置页「动效档」+ 全局闸（待批）。
+2. **Motion.kt 统一动效闸**（🔶→推进中）：动效档设置+持久化+LikeHeart 消费闸已落
+   （本批）；弹层/开关/其余动效点的闸接线=续批；系统减少动效读取面=平台无 API（登记）。
 3. **LiquidMerge 速度继承三处**（❌）：相册 Pager snapAnimation/曲线扇面/dockSlide——
    springCurve 化逐处重建（待批，量大）。
 4. **CameraScreen/HudLayer/Settings/Player/Gallery 五大面逐段对拍**（🔍）：

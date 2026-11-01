@@ -6,6 +6,7 @@
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
+import { SettingsStore, CameraSettings } from '../ui/SettingsStore';
 import { LikeHeart } from '../ui/LikeHeart';
 import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
@@ -118,6 +119,15 @@ struct Gallery {
   }
 
   onPageShow(): void {
+    const gctx: common.Context | undefined = this.ctx;
+    if (gctx !== undefined) {
+      SettingsStore.load(gctx).then((gs: CameraSettings): void => {
+        if (!this.disposed) {
+          this.motionMode = gs.motionMode;
+        }
+      }).catch((_e: Object): void => {
+      });
+    }
     if (!this.pageShownOnce) {
       this.pageShownOnce = true;
       return;
@@ -481,6 +491,9 @@ struct Gallery {
   }
 
   /** G3b：全屏当前片（越界钳末位——回收站动作后列表变短） */
+    /** 动效档（motion_mode；onPageShow 直读存储——PLAIN 时红心只切状态） */
+  private motionMode: string = 'FLUENT';
+
   private fsCurrentClip(): VideoClip | undefined {
     if (this.clips.length === 0) {
       return undefined;
@@ -1398,6 +1411,7 @@ struct Gallery {
                 // 收藏红心（上游 a3855c3）：收藏那一下播 Bencho "Like" 红心动画
                 LikeHeart({
                   liked: this.fsCurrentClip()!.liked,
+                  motionMode: this.motionMode,
                   onToggle: (_next: boolean): void => {
                     this.toggleLike(this.fsCurrentClip()!);
                   },
