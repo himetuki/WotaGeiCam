@@ -24,6 +24,10 @@ import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
 import { HudColor, PageColor } from '../ui/HudTokens';
 import { WindowBrightness } from '../ui/WindowBrightness';
 import { SettingsStore, CameraSettings, PlayerChromeStore } from '../ui/SettingsStore';
+import { GlowStore } from '../ui/GlowStore';
+import { GlowParams } from '../core/Glow';
+import { encodeGlow } from '../core/Glow';
+import { SceneExportEffects, sceneExportEffectsOf } from '../player/SceneExportPlan';
 import { PlayerChrome, playerChromeOf } from '../player/PlayerChrome';
 import { BrightnessRampMath } from '../core/BrightnessRampMath';
 
@@ -72,10 +76,16 @@ struct Player {
   @State controlsVisible: boolean = true;
   /** 顶栏持久收起（29 §6.3，上游 e7b7bf2）：进页读、点按写，冷启保持；chrome 矩阵唯一真源 */
   @State topBarCollapsed: boolean = false;
+  /** 画面降噪落盘值（后渲染导出特效集的判据；onPageShow 直读存储） */
+  private videoDenoiseSetting: boolean = false;
   @State abA: number = -1;
   @State abB: number = -1;
   @State abLoop: boolean = false;
   @State exportPanelVisible: boolean = false;
+  /** 导出方式（上游 ba9f0f4）：false=无损 remux；true=后渲染（重渲染进成片） */
+  @State exportSceneMode: boolean = false;
+  /** 后渲染特效集（开面板时从落盘参数取一次；弹层内只读摘要——上游弹层内可调的面待批） */
+  @State sceneEffects: SceneExportEffects = new SceneExportEffects(undefined, false);
   @State exportBusy: boolean = false;
   @State exportProbing: boolean = false;
   @State exportProgress: number = 0;
@@ -214,6 +224,7 @@ struct Player {
       SettingsStore.load(ctx).then((st: CameraSettings): void => {
         if (!this.disposed) {
           this.playBrightenTenths = BrightnessRampMath.playerBrightenRampTenths(st.playerBrightenRampTenths);
+          this.videoDenoiseSetting = st.videoDenoise;
         }
       }).catch((_e: Object): void => {
       });
@@ -654,6 +665,11 @@ struct Player {
     return this.abA >= 0 && this.abB > this.abA && this.abB - this.abA >= MIN_KEEP_MS;
   }
 
+  /** 画面降噪落盘值（后渲染判据用；SettingsStore 是唯一真源） */
+  private settingsVideoDenoise(): boolean {
+    return this.videoDenoiseSetting;
+  }
+
   private openExportPanel(): void {
     const clip: VideoClip | undefined = this.videoClip;
     const ctx: common.Context | undefined = this.ctx;
@@ -683,6 +699,9 @@ struct Player {
     this.exportDoneSize = 0;
     this.exportAudioCount = 0;
     this.exportTrack = TrackChoice.NO_AUDIO;
+    // 后渲染特效集（上游 350c671 弹层口径）：开面板时取当前落盘值一次；无效果 ⇒ 后渲染置灰
+    const glow: GlowParams = GlowStore.load(ctx);
+    this.sceneEffects = sceneExportEffectsOf(glow, this.settingsVideoDenoise());
     const probeSeq: number = ++this.exportProbeSeq;
     ClipExporter.probe(ctx, clip).then((info: ClipTrackInfo):void => {
       if (this.disposed || probeSeq !== this.exportProbeSeq) {
@@ -729,12 +748,45 @@ struct Player {
     const range: ClipRange = new ClipRange(this.exportAbA, this.exportAbB);
     // 平移在起跑那一刻定版（与上游同口径）：导出期间同步读数被改写不影响本轮
     const shiftUs: number = this.exportAudioShiftUs();
+    const sceneMode: boolean = this.exportSceneMode && this.sceneEffects.active();
     this.exportBusy = true;
     this.exportProgress = 0;
     this.exportError = '';
     this.exportNote = '';
     this.exportDonePath = '';
     this.exportDoneSize = 0;
+    if (sceneMode) {
+      // 后渲染导出（上游 dcaf45b 本体）：重渲染进成片；音轨直拷、旋转写一次、曲线不重套
+      const glowSpec: string = encodeGlow(this.sceneEffects.glow !== undefined
+        ? this.sceneEffects.glow : new GlowParams());
+      ClipExporter.exportScene(ctx, clip, range, audioOrdinalOf(this.exportTrack), glowSpec,
+        this.sceneEffects.denoise,
+        (percent: number): void => {
+          if (!this.disposed) {
+            this.exportProgress = percent;
+          }
+        }).then((result: ClipExportResult): void => {
+        if (this.disposed) {
+          return;
+        }
+        this.exportBusy = false;
+        if (result.ok) {
+          this.exportDonePath = result.path;
+          this.exportDoneSize = result.sizeBytes;
+          this.exportNote = '后渲染导出完成（光晕/降噪已重渲染进成片）';
+        } else if (result.cancelled) {
+          this.exportError = '已取消，半成品已删除';
+        } else {
+          this.exportError = `后渲染导出失败: ${result.error}`;
+        }
+      }).catch((e: Object): void => {
+        if (!this.disposed) {
+          this.exportBusy = false;
+          this.exportError = `后渲染导出失败: ${e}`;
+        }
+      });
+      return;
+    }
     ClipExporter.exportClip(ctx, clip, range, audioOrdinalOf(this.exportTrack), shiftUs,
       (percent: number): void => {
         if (!this.disposed) {
@@ -1459,7 +1511,34 @@ struct Player {
           }
           .width('100%')
         } else {
-          Button('开始导出')
+          // 导出方式（上游 ba9f0f4）：无效果时后渲染置灰（置灰而不是偷偷降级）
+      Row({ space: 8 }) {
+        Text('导出方式')
+          .fontSize(11)
+          .fontColor(PageColor.TEXT_SECONDARY)
+        Button(this.exportSceneMode ? '后渲染 ✓' : '后渲染')
+          .fontSize(11)
+          .enabled(this.sceneEffects.active())
+          .backgroundColor(this.exportSceneMode ? '#FF1F7A4D' : '#33000000')
+          .onClick((): void => {
+            this.exportSceneMode = !this.exportSceneMode;
+          })
+        Button('无损')
+          .fontSize(11)
+          .enabled(!this.exportSceneMode)
+          .backgroundColor('#33000000')
+          .onClick((): void => {
+            this.exportSceneMode = false;
+          })
+      }
+      .width('100%')
+      Text(this.exportSceneMode
+        ? `后渲染：${this.sceneEffects.glow !== undefined ? '光晕开' : '光晕关'} · ${this.sceneEffects.denoise ? '降噪开' : '降噪关'}（曲线不重套——录制期已烘进源片）`
+        : '无损：原流拷贝，不重编码')
+        .fontSize(10)
+        .fontColor(PageColor.TEXT_DIM)
+        .width('100%')
+      Button('开始导出')
             .fontSize(12)
             .onClick((): void => {
               this.startExport();
