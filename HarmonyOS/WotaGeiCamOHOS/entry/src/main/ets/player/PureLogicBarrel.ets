@@ -299,7 +299,7 @@ export class PureLogicBarrel {
       HistogramMath.binRgba(new ArrayBuffer(64 * 64 * 4), 64, 64));
     if (glow.threshold >= 0 && rgb.length === 3 && scale > 0 && blurOffset[0] >= 0 &&
       note !== undefined && rt !== undefined && fallbackScale.divisor > 0 && readout !== '' &&
-      !rebuild && !videoActive && !codec && lite && hist.length === 192) {
+      !rebuild && !videoActive && !codec && lite && hist.length === 256) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

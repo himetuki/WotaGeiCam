@@ -79,7 +79,7 @@ test('灰阶帧三通道均分', () => {
 
 test('缓冲不足不抛_返回全零', () => {
   const counts: Array<number> = HistogramMath.binRgba(new ArrayBuffer(4), 64, 64);
-  assertEq(192, counts.length);
+  assertEq(256, counts.length);
   let sum: number = 0;
   for (const c of counts) {
     sum += c;
@@ -89,7 +89,7 @@ test('缓冲不足不抛_返回全零', () => {
 
 test('各通道按各自最大归一_偏色不压扁小通道', () => {
   // R 集中一档（峰值 10）、G 均匀分布（峰值 1）——共用最大值会把 G 压成 0.1
-  const counts: Array<number> = new Array<number>(192).fill(0);
+  const counts: Array<number> = new Array<number>(256).fill(0);
   counts[10] = 10; // R 峰值
   for (let i = 0; i < 64; i++) {
     counts[64 + i] = 1; // G 均匀
@@ -100,7 +100,7 @@ test('各通道按各自最大归一_偏色不压扁小通道', () => {
 });
 
 test('全零计数归一返回全零', () => {
-  const h: Array<number> = HistogramMath.normalizedHeights(new Array<number>(192).fill(0));
+  const h: Array<number> = HistogramMath.normalizedHeights(new Array<number>(256).fill(0));
   let sum: number = 0;
   for (const v of h) {
     sum += v;
@@ -110,11 +110,36 @@ test('全零计数归一返回全零', () => {
 
 // ---------------------------------------------------------------- 接线守卫（C++/UI 源码扫描）
 
+test('Y 亮度组：Rec.601 整数权重（master 通道基址 3×BINS）', () => {
+  // 纯白像素：Y = (54+183+19)*255 = 65280，>>10 = 63 ⇒ Y 组末档
+  const white: ArrayBuffer = new ArrayBuffer(4);
+  const wb: Uint8Array = new Uint8Array(white);
+  wb[0] = 255; wb[1] = 255; wb[2] = 255; wb[3] = 255;
+  const c1: Array<number> = HistogramMath.binRgba(white, 1, 1);
+  assertEq(1, c1[63], 'R 末档');
+  assertEq(1, c1[HistogramMath.LUMA_BASE + 63], 'Y = (54·255+183·255+19·255)>>10 = 63');
+  // 纯黑像素：全组 0 档
+  const black: ArrayBuffer = new ArrayBuffer(4);
+  const c2: Array<number> = HistogramMath.binRgba(black, 1, 1);
+  assertEq(1, c2[HistogramMath.LUMA_BASE], '黑在 Y 0 档');
+  assertEq(0, c2[HistogramMath.LUMA_BASE + 63]);
+  // 中灰 128：Y ≈ (54+183+19)*128 = 32640 >>10 = 31
+  const gray: ArrayBuffer = new ArrayBuffer(4);
+  const gb: Uint8Array = new Uint8Array(gray);
+  gb[0] = 128; gb[1] = 128; gb[2] = 128; gb[3] = 255;
+  const c3: Array<number> = HistogramMath.binRgba(gray, 1, 1);
+  assertEq(1, c3[HistogramMath.LUMA_BASE + 32], '128 灰 → (256×128)>>10 = 32 档');
+});
+
 test('接线_native采样与分箱同式镜像', () => {
   const cpp: string = sourceText('entry/src/main/cpp/gl_render.cpp');
   assertTrue(cpp.indexOf('out[rgba[o] >> 2]++;') >= 0 &&
     cpp.indexOf('out[kHistBins + (rgba[o + 1] >> 2)]++;') >= 0,
-    'native BinHistogramRgba 必须与 core binRgba 同式（bin = v >> 2 三通道）');
+    'native BinHistogramRgba 必须与 core binRgba 同式（bin = v >> 2）');
+  assertTrue(cpp.indexOf('kHistChannels = 4') >= 0,
+    'native 通道数 = 4（R/G/B/Y，320a956）');
+  assertTrue(cpp.indexOf('out[3 * kHistBins + ((54 * rgba[o] + 183 * rgba[o + 1] + 19 * rgba[o + 2]) >> 10)]++;') >= 0,
+    'native Y 分箱必须与 core 同式（Rec.601 权重 >>10）');
   assertTrue(cpp.indexOf('constexpr int64_t kHistogramPeriodMs = 250;') >= 0, '250ms 一拍');
   assertTrue(cpp.indexOf('DrawScene(locs, g_uvVbo, g_useVao, false, false);') >= 0,
     '采样必须经 DrawScene 走当前 program（曲线输出后口径，encodeSlot=false）');
@@ -143,13 +168,17 @@ test('接线_napi与桥与页面开关', () => {
   assertTrue(camera.indexOf('histogramProvider') >= 0, 'CurvePopup 必须拿到快照源');
 });
 
-test('接线_弹窗150ms轮询与0x30背景', () => {
+test('接线_弹窗150ms轮询与按通道背景', () => {
   const popup: string = sourceText('entry/src/main/ets/ui/CurvePopup.ets');
-  assertTrue(popup.indexOf('HistogramMath.normalizedHeights') >= 0,
-    '归一必须走 core 纯函数（不许 UI 里另写一份）');
-  assertTrue(popup.indexOf("'#30FF0000', '#3000FF00', '#300000FF'") >= 0,
-    '三通道半透明 0x30（上游口径）');
+  assertTrue(popup.indexOf('histogramProvider()') >= 0 &&
+    popup.indexOf('HistogramMath.normalizedHeights') >= 0,
+    '弹窗 150ms 轮询桥快照并归一');
+  assertTrue(popup.indexOf('histogramBaseOf(this.channel)') >= 0 &&
+    popup.indexOf('HistogramMath.LUMA_BASE') >= 0,
+    '背景按通道取组（master=Y，29 §2.2 F2）');
+  assertTrue(popup.indexOf('this.withAlpha(channelColor(this.channel), 0x30 / 255)') >= 0,
+    '半透明 0x30 通道色（上游口径）');
   assertTrue(popup.indexOf('}, 150);') >= 0, '150ms 轮询节奏');
-  assertTrue(popup.indexOf('@Watch(\'onVisibleChanged\') visible') >= 0,
+  assertTrue(popup.indexOf("@Watch('onVisibleChanged') visible") >= 0,
     'visible 翻转必须启停轮询');
 });

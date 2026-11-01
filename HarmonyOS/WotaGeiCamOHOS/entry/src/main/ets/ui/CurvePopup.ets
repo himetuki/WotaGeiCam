@@ -37,6 +37,20 @@ const FAN_ANGLES: Array<number> = [-90, -45, 0, 45, 90];
 
 const CHANNEL_COLORS: Array<string> = ['#FFFFFFFF', '#FFEF6A5A', '#FF6FCE8F', '#FF5FA8E8'];
 
+/** 直方图按通道取哪一组（29 §2.2-2）：R/G/B 各自的组，master 取亮度 Y */
+function histogramBaseOf(channel: number): number {
+  switch (channel) {
+    case ColorCurve.CHANNEL_RED:
+      return 0;
+    case ColorCurve.CHANNEL_GREEN:
+      return HistogramMath.BINS;
+    case ColorCurve.CHANNEL_BLUE:
+      return 2 * HistogramMath.BINS;
+    default:
+      return HistogramMath.LUMA_BASE;
+  }
+}
+
 function channelColor(channel: number): string {
   return CHANNEL_COLORS[channel >= 0 && channel <= 3 ? channel : 0];
 }
@@ -197,21 +211,20 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     ctx.clearRect(0, 0, side, side);
     ctx.fillStyle = '#FF000000';
     ctx.fillRect(0, 0, side, side);
-    // 直方图背景（画在网格/曲线**之下**）：三通道 R/G/B 半透明 0x30 条形，
-    // 条宽 = side/64、条高 = 各通道内归一计数 × side——随框缩放是几何自然结果
+    // 直方图背景（画在网格/曲线**之下**）：只画**当前通道**那一组（29 §2.2 F2 按通道区分，
+    // 上游 320a956）：R/G/B 各自的组，master 用亮度 Y（不再三色混排）；半透明 0x30 通道色，
+    // 条宽 = side/64、条高 = 通道内归一计数 × side——随框缩放是几何自然结果
     if (this.histCounts !== undefined) {
       const heights: Array<number> = HistogramMath.normalizedHeights(this.histCounts);
       const barW: number = side / 64;
-      const histColors: Array<string> = ['#30FF0000', '#3000FF00', '#300000FF'];
-      for (let c = 0; c < 3; c++) {
-        ctx.fillStyle = histColors[c];
-        for (let i = 0; i < 64; i++) {
-          const h: number = heights[c * 64 + i] * side;
-          if (h <= 0) {
-            continue;
-          }
-          ctx.fillRect(side * i / 64, side - h, barW, h);
+      const base: number = histogramBaseOf(this.channel);
+      ctx.fillStyle = this.withAlpha(channelColor(this.channel), 0x30 / 255);
+      for (let i = 0; i < 64; i++) {
+        const h: number = heights[base + i] * side;
+        if (h <= 0) {
+          continue;
         }
+        ctx.fillRect(side * i / 64, side - h, barW, h);
       }
     }
     const grid: string = '#26FFFFFF';

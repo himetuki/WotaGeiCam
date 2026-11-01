@@ -633,8 +633,8 @@ static napi_value SetHistogramEnabled(napi_env env, napi_callback_info info)
 /** 直方图快照 → Int32Array(192)（3×64 计数 R/G/B）；无样本返回 null（ArkTS 侧按无数据绘制） */
 static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
 {
-    int32_t bins[192];
-    if (!WotaGlGetHistogramSnapshot(bins, 192)) {
+    int32_t bins[256];
+    if (!WotaGlGetHistogramSnapshot(bins, 256)) {
         napi_value nullValue = nullptr;
         napi_get_null(env, &nullValue);
         return nullValue;
@@ -646,7 +646,7 @@ static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
         memcpy(data, bins, sizeof(bins));
     }
     napi_value typed = nullptr;
-    napi_create_typedarray(env, napi_int32_array, 192, out, 0, &typed);
+    napi_create_typedarray(env, napi_int32_array, 256, out, 0, &typed);
     return typed;
 }
 

@@ -298,20 +298,20 @@ int g_glowScaleLogged = 0;
 
 // ---- 直方图采样（上游 f31d18c 的 OHOS 对应物：RGB 曲线框背景，调曲线参考用）----
 // 数据路：上屏帧绘制后 250ms 一拍把当前帧经**当前 program**（上屏槽 ⇒ 曲线输出后的画面，
-// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 3×64 计数
+// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 4×64 计数
 // （BinHistogramRgba 与 core/HistogramMath.ets binRgba 同式镜像）。只在弹窗可见时采
 // （WotaGlSetHistogramEnabled）；16KB/4Hz 的读回停顿远低于既有霜板/补弧 pass，只发生在目标场景。
 constexpr int kHistSize = 64;
 constexpr int kHistBins = 64;
-constexpr int kHistChannels = 3;
+constexpr int kHistChannels = 4; // R/G/B/亮度Y（320a956 四通道直方图）
 constexpr int kHistValues = kHistBins * kHistChannels;
 constexpr int64_t kHistogramPeriodMs = 250;
 bool g_histRequested = false;
 GLuint g_histFbo = 0;
 GLuint g_histTex = 0;
 int64_t g_histLastSampleMs = 0;
-// 快照（3×64 计数，R/G/B 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
-// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）
+// 快照（4×64 计数，R/G/B/Y 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
+// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，256 int 量级锁可忽略，登记偏离）
 std::mutex g_histMutex;
 std::vector<int32_t> g_histSnapshot;
 
@@ -1063,9 +1063,9 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
 // ---------------------------------------------------------------- 直方图采样（曲线框背景，f31d18c）
 
 /**
- * RGBA(8888) 像素 → 3×64 档计数（R/G/B 依次）。与 core/HistogramMath.ets binRgba
- * **同式镜像**（bin = v >> 2；像素住在 GL 线程，16KB 读回后近地分箱再传 192 个 int）——
- * 契约在两处出现，接线守卫钉住两边的公式文本。
+ * RGBA(8888) 像素 → 4×64 档计数（R/G/B/Y 依次）。与 core/HistogramMath.ets binRgba
+ * **同式镜像**（bin = v >> 2；Y 用 Rec.601 整数权重 >>10；像素住在 GL 线程，16KB 读回后
+ * 近地分箱再传 256 个 int）——契约在两处出现，接线守卫钉住两边的公式文本。
  */
 void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<int32_t>& out)
 {
@@ -1076,6 +1076,7 @@ void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<in
         out[rgba[o] >> 2]++;
         out[kHistBins + (rgba[o + 1] >> 2)]++;
         out[2 * kHistBins + (rgba[o + 2] >> 2)]++;
+        out[3 * kHistBins + ((54 * rgba[o] + 183 * rgba[o + 1] + 19 * rgba[o + 2]) >> 10)]++;
     }
 }
 
