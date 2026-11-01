@@ -6,6 +6,7 @@
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
+import { LikeHeart } from '../ui/LikeHeart';
 import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
@@ -1394,12 +1395,14 @@ struct Gallery {
                 Text(`${formatDuration(this.fsPosMs)} / ${formatDuration(this.fsDurMs)}`)
                   .fontSize(10)
                   .fontColor(Color.White)
-                Button(this.fsCurrentClip()!.liked ? '★' : '☆')
-                  .fontSize(11)
-                  .height(26)
-                  .onClick((): void => {
+                // 收藏红心（上游 a3855c3）：收藏那一下播 Bencho "Like" 红心动画
+                LikeHeart({
+                  liked: this.fsCurrentClip()!.liked,
+                  onToggle: (_next: boolean): void => {
                     this.toggleLike(this.fsCurrentClip()!);
-                  })
+                  },
+                  contentDescription: '收藏'
+                })
                 Button('分享')
                   .fontSize(11)
                   .height(26)
