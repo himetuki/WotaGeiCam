@@ -70,6 +70,7 @@ import { DisplayScale, displayRtNeedsRebuild, displayScaleReadoutLabel, nearestD
 import { AudioDenoise, VideoDenoise, audioDenoiseNeedsCodec, denoiseKernelLite,
   effectiveVideoDenoise, videoDenoiseActive } from '../core/Denoise';
 import { HistogramMath } from '../core/HistogramMath';
+import { ExposureCorrection } from '../core/ExposureCorrection';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
 class NoopFlushScheduler implements FlushScheduler {
@@ -109,6 +110,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
     PureLogicBarrel.hudLayoutCompileProbe();
     PureLogicBarrel.cameraCatchupCompileProbe();
+    PureLogicBarrel.exposureCorrectionCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -296,6 +298,22 @@ export class PureLogicBarrel {
     if (glow.threshold >= 0 && rgb.length === 3 && scale > 0 && blurOffset[0] >= 0 &&
       note !== undefined && rt !== undefined && fallbackScale.divisor > 0 && readout !== '' &&
       !rebuild && !videoActive && !codec && lite && hist.length === 192) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 等号档曝光纠偏纯逻辑（r42 移植）的编译探针：适用判定/自动余量夹界/纠偏合成/探测折算。
+   * 零副作用（产物丢弃）；消费方（RequestApplier.exposurePlan）已接线，本探针保住常量面。
+   */
+  private static exposureCorrectionCompileProbe(): void {
+    const applicable: boolean = ExposureCorrection.applicable(40_000_000, 25);
+    const margin: number = ExposureCorrection.autoMarginNs(6_000_000, 40_000_000);
+    const corrected: number = ExposureCorrection.correctedExposureNs(40_000_000, margin, 40_000_000);
+    const manual: number = ExposureCorrection.clampManualNs(8_000_000);
+    const delta: number = ExposureCorrection.probeDeltaNs([42_000_000, 44_000_000], 40_000_000);
+    const period: number = ExposureCorrection.framePeriodNs(24);
+    if (applicable && margin > 0 && corrected > 0 && manual >= 0 && delta >= 0 && period > 0) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

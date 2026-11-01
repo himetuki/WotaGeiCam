@@ -12,6 +12,7 @@ import {
   PeakingColor, RenderMode, Stabilize, TapPoint, WotaTiers, WbPreset, WbPresets, Size
 } from './Constants';
 import { CameraAbility, FpsDecision, RangeF, shutterCeilingNs } from './CameraAbility';
+import { ReadoutLatch } from './ExposureCorrection';
 import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
 import { resolveSizeFor, sizeCloseTo, VideoSizeCandidates } from './VideoSizePicker';
@@ -145,6 +146,40 @@ export class WotaParams {
   readonly zebraDensity: StateFlow<number> = new StateFlow<number>(2);
   readonly peakingStrength: StateFlow<number> = new StateFlow<number>(0.6);
   readonly peakingColor: StateFlow<PeakingColor> = new StateFlow<PeakingColor>(PeakingColor.RED);
+
+  // ------------------------------------------------ 等号档曝光纠偏（2026-11-01 用户定版，上游 docs/plan/31）
+  // 三条铁律见 core/ExposureCorrection：只动发送侧曝光、总线保真、探测只在预览态。
+  // 落盘走 ParamsPersist（KEY_CORRECTION_AUTO 默认 true / KEY_CORRECTION_MANUAL_NS），即改即存。
+
+  /**
+   * 自动微调曝光（默认开）：开 = 发送侧按「实测拉长量 Δ + 安全系数」取余量（下限 5% 帧周期）；
+   * 关 = [exposureCorrectionManualNs] 的手动滑杆值。只影响曝光时长键，
+   * AE 档与帧周期不受影响。
+   */
+  readonly exposureCorrectionAuto: StateFlow<boolean> = new StateFlow<boolean>(true);
+
+  /**
+   * 手动微调滑杆（ns）：0 ~ +8ms、0.5ms 步进（2026-11-01 裁决负值区去掉）。
+   * 正值 = 从满窗再缩短（更稳）；0 = 满窗直发（等号，与改版前一致）。仅在自动关时生效。
+   */
+  readonly exposureCorrectionManualNs: StateFlow<number> = new StateFlow<number>(0);
+
+  /**
+   * 读出探测闩锁：预览态发等号请求测得的实际拉长量 Δ（帧间隔中位数 − 请求周期），
+   * 按 key = "镜头|画幅|fps" 键控——读出时间随这三者变，键不匹配即重探。
+   * 仅运行期，不落盘（固件/模式都可能变，每会话重测）。
+   */
+  readonly readoutLatch: StateFlow<ReadoutLatch | undefined> = new StateFlow<ReadoutLatch | undefined>(undefined);
+
+  /** 实际下发曝光（HUD 读数行；undefined = 自动档三键缺席/会话不在）；引擎回写，UI 只读 */
+  readonly actualSentExposureNs: StateFlow<number | undefined> = new StateFlow<number | undefined>(undefined);
+
+  /** 实际到帧率（引擎帧到达 ~1s 采样；undefined = 不可观测）；引擎回写，UI 只读 */
+  readonly actualFps: StateFlow<number | undefined> = new StateFlow<number | undefined>(undefined);
+
+  /** 实际生效的纠偏值（等号档 + 手动档才有意义，undefined = 不适用）；引擎回写，UI 只读 */
+  readonly actualCorrectionNs: StateFlow<number | undefined> = new StateFlow<number | undefined>(undefined);
+
 
   /**
    * 补弧合并差分死区 D（8bit luma 级）：Δluma > D 时整颗像素取被抽帧，否则保持保留帧。
