@@ -1585,7 +1585,9 @@ struct CameraPage {
       new Uint8Array(ab).set(finalLut);
       lib.uploadCurveLut(ab);
       // 曲线独立层（安卓同口径）：非恒等即生效，与效果档（斑马/峰值）互不排斥
-      lib.setCurveEnabled(!this.curveStack.isPassthrough);
+      // 开关判据 = 曲线与色调**合取**（上游 66f88e0 红线）：只用曲线一侧决定，恒等曲线+
+      // 非恒等色调时 LUT 被禁用，色调被静默丢掉
+      lib.setCurveEnabled(!this.curveStack.isPassthrough || !this.toneParams.isIdentity());
     } catch (e) {
       this.message = `曲线上传失败: ${e}`;
     }
@@ -1630,7 +1632,9 @@ struct CameraPage {
         // 直通档（0）与遗留「曲线」档（1）的效果槽都恒 NONE——曲线由上面的独立开关承担
         lib.setEffect(0);
       }
-      lib.setCurveEnabled(!this.curveStack.isPassthrough);
+      // 开关判据 = 曲线与色调**合取**（上游 66f88e0 红线）：只用曲线一侧决定，恒等曲线+
+      // 非恒等色调时 LUT 被禁用，色调被静默丢掉
+      lib.setCurveEnabled(!this.curveStack.isPassthrough || !this.toneParams.isIdentity());
     } catch (e) {
       this.message = `效果切换失败: ${e}`;
     }
