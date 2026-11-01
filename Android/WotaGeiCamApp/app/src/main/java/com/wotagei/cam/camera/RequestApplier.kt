@@ -11,6 +11,7 @@ import android.util.Rational
 import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
+import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.RangeI
@@ -154,7 +155,17 @@ object RequestApplier {
          * （WotaParams.applyAbility 一直按目标档算）同一条线。取 max 是防御：万一未来出现
          * lo > 目标的选档（现在不可能），仍以较长帧周期为准不炸。
          */
-        val fpsTarget: Int = 0
+        val fpsTarget: Int = 0,
+        // ---- 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）：以下字段只作用于手动档的
+        // ---- SENSOR_EXPOSURE_TIME，AE 状态与帧周期不受影响；全部带默认值，旧构造点/旧用例不破。
+        /** 自动微调曝光（默认 true）：开 = 实测 Δ+安全系数夹界取余量；关 = 手动滑杆值 */
+        val correctionAuto: Boolean = true,
+        /** 手动微调滑杆（ns，-8ms..+8ms、0.5ms 步进；正值 = 更短更稳，负值 = 趋向满窗） */
+        val correctionManualNs: Long = 0L,
+        /** 当前配置键下的实测拉长量 Δ（null = 没测到/键不匹配 ⇒ 自动档走 5% 下限） */
+        val readoutDeltaNs: Long? = null,
+        /** 预览态探测进行中：发等号请求量 Δ（录制目标在场时引擎已退出探测，等号不进录制） */
+        val probeActive: Boolean = false
     )
 
     // ---------------------------------------------------------------- 能力快照
@@ -504,12 +515,28 @@ object RequestApplier {
         val frameDurationNs: Long?
         if (manual) {
             sensitivity = state.clampIso(p.iso)
-            exposureNs = clampShutterNs(
+            val clamped = clampShutterNs(
                 p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
                 // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
                 forceDeviceRange = WotaTiers.isRequiredShutterNs(p.shutterNs)
             )
-            frameDurationNs = frameDurationNs(fps)
+            // 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）：满窗（曝光==帧周期）落在
+            // Camera2 合同的边界域，部分 HAL 会拉长帧周期 ⇒ 帧率掉档。发送侧永不发等号值——
+            // 纠偏只动 SENSOR_EXPOSURE_TIME 这一个键：AE 状态、帧周期（节奏真值）、总线档位全部不动。
+            // 手动负值（趋向满窗）物理上不能越窗 ⇒ correctedExposureNs 收在帧周期（= 满窗直发）。
+            val perFrame = frameDurationNs(fps)
+            val marginNs = if (ExposureCorrection.applicable(p.shutterNs, fps)) {
+                when {
+                    // 探测中发等号：这是"测 Δ"的量程本身，等号请求只允许出现在预览态
+                    p.probeActive -> 0L
+                    p.correctionAuto -> ExposureCorrection.autoMarginNs(p.readoutDeltaNs, perFrame)
+                    else -> ExposureCorrection.manualMarginNs(p.correctionManualNs)
+                }
+            } else {
+                0L
+            }
+            exposureNs = ExposureCorrection.correctedExposureNs(clamped, marginNs, perFrame)
+            frameDurationNs = perFrame
         } else {
             sensitivity = null
             exposureNs = null

@@ -148,6 +148,41 @@ class WotaParams(private val scope: CoroutineScope) {
      */
     val lowFpsHint = MutableStateFlow<LowFpsHint?>(null)
 
+    // ------------------------------------------------ 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）
+    // 三条铁律见 core.ExposureCorrection：只动发送侧曝光、总线保真、探测只在预览态。
+    // 首版不落盘（站位线先例：没经过真机复验的默认值不写进用户存储），重启回默认「自动开」。
+
+    /**
+     * 自动微调曝光（默认开）：开 = 发送侧按「实测拉长量 Δ + 安全系数」取余量（下限 5% 帧周期）；
+     * 关 = 用 [exposureCorrectionManualNs] 的手动滑杆值。只影响 `SENSOR_EXPOSURE_TIME`，
+     * AE 档与帧周期不受影响。
+     */
+    val exposureCorrectionAuto = MutableStateFlow(true)
+
+    /**
+     * 手动微调滑杆（ns）：-8ms ~ +8ms、0.5ms 步进。正值 = 从满窗再缩短（更稳），
+     * 负值 = 趋向满窗（更亮；等号档被物理上限截断 = 满窗直发）。仅在自动关时生效。
+     */
+    val exposureCorrectionManualNs = MutableStateFlow(0L)
+
+    /**
+     * 读出探测闩锁：预览态发等号请求测得的实际拉长量 Δ（帧间隔中位数 − 请求周期），
+     * 按 [ReadoutLatch.key] = "镜头|画幅|fps" 键控——读出时间随这三者变，键不匹配即重探。
+     * 仅运行期，不落盘（固件/模式都可能变，每会话重测）。
+     */
+    data class ReadoutLatch(val key: String, val deltaNs: Long)
+
+    val readoutLatch = MutableStateFlow<ReadoutLatch?>(null)
+
+    /** 实际下发曝光（HUD 读数行；null = 自动档三键缺席/会话不在）；引擎回写，UI 只读 */
+    val actualSentExposureNs = MutableStateFlow<Long?>(null)
+
+    /** 实际到帧率（与帧率守卫同源的 ~1s 采样；null = 不可观测）；引擎回写，UI 只读 */
+    val actualFps = MutableStateFlow<Float?>(null)
+
+    /** 实际生效的纠偏值（等号档 + 手动档才有意义，null = 不适用）；引擎回写，UI 只读 */
+    val actualCorrectionNs = MutableStateFlow<Long?>(null)
+
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
     val tint = MutableStateFlow(ParamState(0))

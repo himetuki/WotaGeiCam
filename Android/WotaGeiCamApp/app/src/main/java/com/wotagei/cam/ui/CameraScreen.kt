@@ -2233,6 +2233,9 @@ fun CameraScreen(
             val sizeAnchor = pillAnchors[PillKey.SIZE]
             if (sizeAnchor != null && sizeAnchor.width > 0 && sizeAnchor.height > 0) {
                 DisplayScaleReadout(displayScale, sizeAnchor)
+                // 等号档实测读数行（方案 31）：与上面那行同锚点，钉在「预览：<档位>」正下方一行；
+                // 手动曝光且实际下发值在场才显示（组件内部判定）
+                ExposureTelemetryReadout(params, sizeAnchor)
             }
         }
 
@@ -4226,6 +4229,55 @@ private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
     // 字号 11sp→9sp、填充白 40%→30%、描边红从全亮降到 55%——仍可读，但不与画面争。
     val style = WotaType.label.copy(fontSize = 9.sp, lineHeight = 12.sp)
     Box(Modifier.offset { IntOffset(anchor.left, anchor.bottom + gap) }) {
+        Text(
+            text = text,
+            color = WotaColor.rec.copy(alpha = 0.55f),
+            style = style.copy(drawStyle = Stroke(width = outline)),
+            maxLines = 1
+        )
+        Text(
+            text = text,
+            color = WotaColor.textLo.copy(alpha = 0.75f),
+            style = style,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * 「预览：<档位>」下方的**实测读数行**（2026-11-01 用户定版，docs/plan/31）：
+ * 实际曝光（`XX ms | 1/YY`）· 实际帧率（`XX fps`）· 纠偏模式（自动/手动）· 纠偏值（`X.X ms`）。
+ *
+ * - 数据同源帧率守卫（~1s 采样）与曝光下发留痕（applyParams 逐次回写总线），但**渲染互不相干**：
+ *   帧率过低提示是告警行（lowFpsHint），这一行是常态读数，各占各的位；
+ * - 只在手动曝光（AE_OFF）且有实际下发值时显示——自动档三键缺席，"实际曝光"无从谈起；
+ * - 样式与 [DisplayScaleReadout] 同一套（红描边 + 半透明灰、9sp），钉在它正下方一行的位置。
+ */
+@Composable
+private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
+    val aeMode by params.aeMode.observed()
+    val sentNs by params.actualSentExposureNs.observed()
+    val fpsMeasured by params.actualFps.observed()
+    val corrAuto by params.exposureCorrectionAuto.observed()
+    val corrNs by params.actualCorrectionNs.observed()
+    if (aeMode != AeMode.MANUAL) return
+    val sent = sentNs ?: return
+    if (sent <= 0L) return
+    val expPart = "%.1f ms | 1/%d".format(
+        sent / 1_000_000.0,
+        (WotaTiers.NS_PER_SECOND.toDouble() / sent).roundToInt().coerceAtLeast(1)
+    )
+    val fpsPart = fpsMeasured?.let { "%.0f fps".format(it) } ?: "-- fps"
+    val modePart = stringResource(if (corrAuto) R.string.cam_ae_auto else R.string.cam_ae_manual)
+    val corrPart = "%.1f ms".format((corrNs ?: 0L) / 1_000_000.0)
+    val text = "$expPart · $fpsPart · $modePart · $corrPart"
+    val density = LocalDensity.current
+    val gap = with(density) { 4.dp.roundToPx() }
+    // DisplayScaleReadout 的正文行高（12sp）：这一行钉在它下面一行，避免两行文字叠在一起
+    val line = with(density) { 12.sp.toPx().roundToInt() }
+    val outline = with(density) { 1.2.dp.toPx() }
+    val style = WotaType.label.copy(fontSize = 9.sp, lineHeight = 12.sp)
+    Box(Modifier.offset { IntOffset(anchor.left, anchor.bottom + gap + line) }) {
         Text(
             text = text,
             color = WotaColor.rec.copy(alpha = 0.55f),

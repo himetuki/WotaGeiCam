@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
@@ -46,6 +47,7 @@ import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.DisplayScale
+import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
@@ -77,6 +79,7 @@ import com.wotagei.cam.ui.design.PillSlider
 import com.wotagei.cam.ui.design.PillToggles
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaColor
+import com.wotagei.cam.ui.design.WotaSwitch
 import com.wotagei.cam.ui.design.WotaPillPopup
 import com.wotagei.cam.ui.design.WotaType
 import com.wotagei.cam.ui.widget.SliderKey
@@ -633,6 +636,52 @@ private fun ShutterPill(
                     snapKey = SliderKey.SHUTTER,
                     ladder = ladder
                 )
+            }
+            // 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）：只在强制档 1/24、1/25 露出。
+            // 自动 = 预览态实测拉长量 Δ + 安全系数（默认开）；关 = 手动滑杆。微调只动发送侧
+            // SENSOR_EXPOSURE_TIME：AE 档（上方 AeModeRow）与帧周期都不受影响。
+            if (WotaTiers.isRequiredShutterNs(shutter.value)) {
+                val corrAuto by params.exposureCorrectionAuto.observed()
+                val corrManualNs by params.exposureCorrectionManualNs.observed()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.cam_shutter_correction_auto),
+                        style = WotaType.caption,
+                        color = WotaColor.textLo
+                    )
+                    WotaSwitch(
+                        checked = corrAuto,
+                        onCheckedChange = { params.exposureCorrectionAuto.value = it }
+                    )
+                }
+                NoteText(stringResource(R.string.cam_shutter_correction_auto_hint))
+                if (!corrAuto) {
+                    Text(
+                        text = stringResource(R.string.cam_shutter_correction_manual),
+                        style = WotaType.caption,
+                        color = WotaColor.textLo
+                    )
+                    // 半毫秒步进是产品语义（恒定刻度梯，不进吸附设置页）：snapKey=null ⇒ 恒走刻度；
+                    // 0.5 的整倍数在 Float 里精确表示，ns 值经 /1e6 往返不丢刻度。
+                    PillSlider(
+                        value = corrManualNs / 1_000_000f,
+                        lo = ExposureCorrection.MANUAL_MIN_NS / 1_000_000f,
+                        hi = ExposureCorrection.MANUAL_MAX_NS / 1_000_000f,
+                        onValueChange = { ms ->
+                            params.exposureCorrectionManualNs.value =
+                                (ms * 2).roundToInt() * ExposureCorrection.MANUAL_STEP_NS
+                        },
+                        snapKey = null,
+                        ladder = (-16..16).map { it * 0.5f },
+                        format = { ms -> "%+.1f ms".format(ms) },
+                        enabled = editable,
+                        onValueChangeFinished = onPersist
+                    )
+                }
             }
         } else {
             Note(R.string.cam_manual_exposure_only)

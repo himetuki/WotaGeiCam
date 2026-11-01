@@ -360,7 +360,10 @@ class RequestApplierTest {
             fpsTarget = 24
         )
         val plan = RequestApplier.exposurePlan(s, snap)
-        assertEquals("1/24 强制档在 [24,30] 上保留（r10 意图不变）", 1_000_000_000L / 24, plan.exposureNs)
-        assertEquals(1_000_000_000L / 24, plan.frameDurationNs)
+        // 2026-11-01 等号档纠偏（docs/plan/31）取代"发等号值"的旧口径：满窗（41.67ms）落在
+        // Camera2 合同边界域、部分 HAL 会拉长帧周期 ⇒ 默认自动纠偏（5% 下限）后发 39_583_333ns。
+        // r10 意图不变：长曝光仍然保留（39.58ms ≫ 1/30 的 33.3ms，没有被 hi=30 压回）。
+        assertEquals("1/24 强制档在 [24,30] 上保留 + 自动纠偏 5% 下限", 39_583_333L, plan.exposureNs)
+        assertEquals("帧周期仍按档位 24（节奏真值不动）", 1_000_000_000L / 24, plan.frameDurationNs)
     }
 }

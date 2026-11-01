@@ -19,6 +19,7 @@ import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.CameraAbility
+import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.LensSlot
@@ -99,6 +100,9 @@ class Camera2Engine(
 
         /** 手动色温保活周期：逐帧重发会与脏标记通道互相触发，这里节流 */
         private const val WB_KEEP_ALIVE_MS = 500L
+
+        /** 等号档探测的热身拍数：等号请求生效 + HAL 换 FD 需要几拍，这几拍不采（方案 31 §3） */
+        private const val EXPOSURE_PROBE_WARMUP_FRAMES = 6
 
         /**
          * 输出面未就绪时的兜底重试（首次 bind 时 GL 面可能还没建出来）。
@@ -209,6 +213,19 @@ class Camera2Engine(
     private var expNsLogged: Long? = null
     private var fdNsLogged: Long? = null
     private var expLoggedOnce = false
+
+    // ---- 等号档读出探测（2026-11-01 用户定版，docs/plan/31 §3）----
+    // 预览态发等号请求（probeActive=true ⇒ exposurePlan 余量 0，量程本身），用帧到达间隔的
+    // **中位数** − 请求周期折算实际拉长量 Δ，闩锁进总线（键 = 镜头|画幅|fps）。三条纪律：
+    // 录制目标在场立即退出（等号不进录制）；换档先热身几拍（等号请求生效 + HAL 换挡那几拍不采）；
+    // 超时进冷却（帧流不足时防死循环重试）。
+    @Volatile private var exposureProbeActive = false
+    private var exposureProbeKey: String? = null
+    private val exposureProbeIntervals = ArrayList<Long>()
+    private var exposureProbeLastTsNs = 0L
+    private var exposureProbeFramesSeen = 0
+    private var exposureProbeStartMs = 0L
+    private var exposureProbeCooldownUntilMs = 0L
 
     /** 曝光下发的格式化快照（给帧率守卫行复用；null = 本场还没发过曝光键，即 AE 自动档） */
     @Volatile
@@ -457,6 +474,9 @@ class Camera2Engine(
             if (reader !== extraReader) stopImageReaders()
             extraSurface = surface
             extraReader = reader
+            // 等号档探测（方案 31）：录制目标在场必须**立刻**退出探测态——探测发的是等号请求，
+            // 决不能带进录制。进冷却，录完回预览后重探。
+            if (surface != null) cancelExposureProbe("录制目标在场")
             structuralSignature = ""
             if (desiredPreview) ensureSession()
         }
@@ -907,6 +927,16 @@ class Camera2Engine(
             // 给帧率守卫行复用（跨线程读，@Volatile）
             lastSentExposureText = "iso=${sentIso ?: "缺席"} exp=${fmtNs(sentExpNs)} fd=${fmtNs(sentFdNs)}"
         }
+        // HUD 实测读数（方案 31，2026-11-01 用户定版）：实际下发曝光与生效纠偏值。
+        // 手动档才有曝光可言（自动档三键缺席 ⇒ null）；非等号档纠偏不适用 ⇒ null——
+        // 这两枚只进左上角读数行，与帧率守卫提示行互不相干。
+        params.actualSentExposureNs.value = sentExpNs
+        params.actualCorrectionNs.value =
+            if (sentExpNs != null && ExposureCorrection.applicable(params.shutter.value.value, fpsValue())) {
+                (ExposureCorrection.framePeriodNs(fpsValue()) - sentExpNs).coerceAtLeast(0L)
+            } else {
+                null
+            }
         if (mode != null) {
             halNrWritten = mode != CaptureRequest.NOISE_REDUCTION_MODE_OFF
         }
@@ -920,6 +950,77 @@ class Camera2Engine(
         CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL -> "MINIMAL(3)"
         CaptureRequest.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG -> "ZSL(4)"
         else -> "mode($mode)"
+    }
+
+    /** 读出闩锁的配置键（方案 31 §3）：读出时间随镜头/画幅/fps 变，键不匹配即重探 */
+    private fun readoutKeyNow(): String =
+        "${params.lens.value.name}|${params.size.value.width}x${params.size.value.height}|${fpsValue()}"
+
+    /**
+     * 等号档读出探测（方案 31 §3，2026-11-01 用户定版）：挂在 [captureCallback] 每帧回执上。
+     * 条件齐了才采集——手动 AE + 自动纠偏开 + 强制等号档 + 预览态（无录制目标）+ 本配置没测过；
+     * 条件一破立刻退出探测态（等号请求不能漏进任何别的状态）。前 [EXPOSURE_PROBE_WARMUP_FRAMES]
+     * 拍是换挡热身（等号请求生效 + HAL 换 FD 需要几拍），不采；采满 [ExposureCorrection.PROBE_SAMPLES]
+     * 个间隔即折算中位数落闩锁，下一拍下发就带纠偏。
+     */
+    private fun feedExposureProbe(result: TotalCaptureResult) {
+        val key = readoutKeyNow()
+        val shouldProbe = deviceStatus == DeviceStatus.OPEN_SUCCEED &&
+            extraSurface == null &&
+            params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL &&
+            params.exposureCorrectionAuto.value &&
+            ExposureCorrection.applicable(params.shutter.value.value, fpsValue()) &&
+            params.readoutLatch.value?.takeIf { it.key == key } == null
+        if (!shouldProbe) {
+            cancelExposureProbe("条件退出")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now < exposureProbeCooldownUntilMs) return
+        if (exposureProbeKey != key) {
+            exposureProbeKey = key
+            exposureProbeIntervals.clear()
+            exposureProbeLastTsNs = 0L
+            exposureProbeFramesSeen = 0
+            exposureProbeStartMs = now
+            exposureProbeActive = true
+            markDirty() // 下一拍起发等号请求（量程本身）；不 mark 的话这一场还带着 5% 余量
+            Log.i(TAG, "等号档读出探测开始 key=$key（预览态发等号请求；录制目标在场即中止）")
+        }
+        exposureProbeFramesSeen++
+        if (exposureProbeFramesSeen <= EXPOSURE_PROBE_WARMUP_FRAMES) return
+        val tsNs = runCatching { result.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) }.getOrNull() ?: return
+        if (exposureProbeLastTsNs > 0L && tsNs > exposureProbeLastTsNs) {
+            exposureProbeIntervals.add(tsNs - exposureProbeLastTsNs)
+        }
+        exposureProbeLastTsNs = tsNs
+        if (exposureProbeIntervals.size >= ExposureCorrection.PROBE_SAMPLES) {
+            val delta = ExposureCorrection.probeDeltaNs(
+                exposureProbeIntervals, ExposureCorrection.framePeriodNs(fpsValue())
+            )
+            params.readoutLatch.value = com.wotagei.cam.core.WotaParams.ReadoutLatch(key, delta)
+            Log.i(
+                TAG,
+                "等号档读出探测完成 key=$key Δ=${delta}ns（${"%.2f".format(delta / 1_000_000.0)}ms）" +
+                    "samples=${exposureProbeIntervals.size}"
+            )
+            cancelExposureProbe("探测完成")
+        } else if (now - exposureProbeStartMs > ExposureCorrection.PROBE_TIMEOUT_MS) {
+            exposureProbeCooldownUntilMs = now + ExposureCorrection.PROBE_COOLDOWN_MS
+            cancelExposureProbe("超时（帧流不足），冷却 ${ExposureCorrection.PROBE_COOLDOWN_MS}ms 后重试")
+        }
+    }
+
+    /** 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量） */
+    private fun cancelExposureProbe(why: String) {
+        if (!exposureProbeActive && exposureProbeKey == null) return
+        exposureProbeActive = false
+        exposureProbeKey = null
+        exposureProbeIntervals.clear()
+        exposureProbeLastTsNs = 0L
+        exposureProbeFramesSeen = 0
+        Log.i(TAG, "等号档探测退出：$why")
+        markDirty()
     }
 
     private fun snapshot(halNoiseReductionMode: Int?): RequestApplier.Snapshot = with(params) {
@@ -948,6 +1049,11 @@ class Camera2Engine(
             aeRegions = tapAeRegions,
             afTrigger = tapTrigger,
             halNoiseReductionMode = halNoiseReductionMode,
+            // 等号档纠偏（方案 31）：闩锁只认当前配置键——换镜头/画幅/fps ⇒ 视同没测过，重探
+            correctionAuto = exposureCorrectionAuto.value,
+            correctionManualNs = exposureCorrectionManualNs.value,
+            readoutDeltaNs = readoutLatch.value?.takeIf { it.key == readoutKeyNow() }?.deltaNs,
+            probeActive = exposureProbeActive,
             fpsTarget = fpsValue()
         )
     }
@@ -1065,6 +1171,7 @@ class Camera2Engine(
         ) {
             camResultCount++
             camResultTotal++
+            feedExposureProbe(result)
             logAeAfTelemetry(result)
             val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
             logWbTelemetry(result, manual)
@@ -1219,6 +1326,9 @@ class Camera2Engine(
         if (deviceStatus != DeviceStatus.OPEN_SUCCEED) {
             lowFpsWatch = null
             if (params.lowFpsHint.value != null) params.lowFpsHint.value = null
+            params.actualSentExposureNs.value = null
+            params.actualCorrectionNs.value = null
+            params.actualFps.value = null
             return
         }
         val target = params.fps.value.value
@@ -1226,6 +1336,8 @@ class Camera2Engine(
         val watch = lowFpsWatch?.takeIf { it.targets(target) } ?: LowFpsWatch(target).also { lowFpsWatch = it }
         if (last == 0L) return  // 首拍只立基准（这段窗口跨了会话建立，速率不可信）
         val measured = count * 1000f / (now - last).coerceAtLeast(1L)
+        // HUD 实测帧率（方案 31）：与帧率守卫同一拍采样，一秒一更；守卫的告警语义不受影响
+        params.actualFps.value = measured
         val alarm = watch.onSample(now, measured)
         val hint = if (alarm) {
             LowFpsHint(targetFps = target, achievedFps = measured.roundToInt().coerceAtLeast(1))

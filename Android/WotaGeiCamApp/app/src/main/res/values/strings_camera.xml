@@ -113,6 +113,10 @@
     <string name="cam_display_scale">预览分辨率</string>
     <string name="cam_display_scale_orig">原片</string>
     <string name="cam_display_scale_readout">预览：%1$s</string>
+    <!-- 等号档曝光纠偏（2026-11-01 用户定版 / docs/plan/31）：快门面板 1/24、1/25 档的微调入口 -->
+    <string name="cam_shutter_correction_auto">自动微调曝光</string>
+    <string name="cam_shutter_correction_auto_hint">自动微调曝光以稳帧</string>
+    <string name="cam_shutter_correction_manual">手动微调</string>
     <string name="cam_display_scale_note">只影响取景器上屏的渲染分辨率，成片画质不变。调低会把 GPU 帧预算让给录制、补弧与降噪，减少 4K 下的掉帧与发热。</string>
     <string name="cam_display_scale_current">当前：原片</string>
     <string name="cam_display_scale_current_rt">当前：%1$d（上屏 %2$d×%3$d）</string>

@@ -70,10 +70,10 @@ class PillInteractionGuardTest {
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 21) bad.add("PillSlider 调用点不是 21 处")
+        if (occurrences(src, "PillSlider(").size != 22) bad.add("PillSlider 调用点不是 22 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 21) bad.add("ladder = 参数不是 21 处（有滑杆退回连续模式）")
+        if (ladderArgs != 22) bad.add("ladder = 参数不是 22 处（有滑杆退回连续模式）")
         val panels = listOf(
             "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
             "MonitorPill", "FpsPill", "GlowPill", "TonePill"
