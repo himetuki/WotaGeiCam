@@ -518,6 +518,8 @@ struct CameraPage {
   @State pillIsoLabel: string = 'AUTO';
   @State pillEvLabel: string = '+0.0EV';
   @State pillWbLabel: string = '自动';
+  /** 等号档实测读数行（r42；上游 ExposureTelemetryReadout）：手动 AE 且实发曝光在场才显 */
+  @State expTelemetryText: string = '';
   /** 横屏帧率芯片文案（pickFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
   @State landFpsLabel: string = '30×';
   /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
@@ -540,6 +542,7 @@ struct CameraPage {
         this.flushParamsDirect();
       });
     this.bindParamsLabels();
+    this.bindExposureTelemetry();
     // 等号档探测与实测遥测（r42）：引擎要读写参数总线（帧到达采样/探测闩锁/下发真值回写）
     this.engine.attachParams(this.params);
     this.initLevelSensor();
@@ -1054,6 +1057,41 @@ struct CameraPage {
     this.params.wbMode.subscribe(recompute);
     this.params.kelvin.subscribe(recompute);
     this.syncParamLabels();
+  }
+
+  /**
+   * 等号档实测读数行（r42 移植，上游 ExposureTelemetryReadout 的数据面）：
+   * 实发曝光 · 实测帧率 · 纠偏模式 · 纠偏值，引擎回写驱动。数据同源帧率守卫与曝光下发
+   * 真值，但渲染互不相干：帧率告警行（未移植批）是告警，这一行是常态读数。
+   * @State 对象字段赋值不触发重渲染 ⇒ 订阅里折算成字符串（纯原语 State 面向 ArkUI）。
+   */
+  private bindExposureTelemetry(): void {
+    const recompute = (): void => {
+      this.refreshExpTelemetry();
+    };
+    this.params.actualSentExposureNs.subscribe(recompute);
+    this.params.actualFps.subscribe(recompute);
+    this.params.actualCorrectionNs.subscribe(recompute);
+    this.params.exposureCorrectionAuto.subscribe(recompute);
+    this.params.aeMode.subscribe(recompute);
+    this.refreshExpTelemetry();
+  }
+
+  /** 读数行文案：手动 AE 且实发曝光在场才显示（自动档曝光键缺席，"实际曝光"无从谈起） */
+  private refreshExpTelemetry(): void {
+    const manual: boolean = this.params.aeMode.value === AeMode.MANUAL;
+    const sent: number | undefined = this.params.actualSentExposureNs.value;
+    if (!manual || sent === undefined || sent <= 0) {
+      this.expTelemetryText = '';
+      return;
+    }
+    const expPart: string = `${(sent / 1_000_000).toFixed(1)} ms | 1/${Math.max(1, Math.round(1_000_000_000 / sent))}`;
+    const fps: number | undefined = this.params.actualFps.value;
+    const fpsPart: string = fps === undefined ? '-- fps' : `${Math.round(fps)} fps`;
+    const modePart: string = this.params.exposureCorrectionAuto.value ? '自动' : '手动';
+    const corr: number | undefined = this.params.actualCorrectionNs.value;
+    const corrPart: string = `${((corr === undefined ? 0 : corr) / 1_000_000).toFixed(1)} ms`;
+    this.expTelemetryText = `${expPart} · ${fpsPart} · ${modePart} · ${corrPart}`;
   }
 
   /** 快照当前参数到顶栏第二行/胶囊标签（AE AUTO 时 ISO 显示 AUTO、EV 仅非 MANUAL 显示、能力缺失 -） */
@@ -2888,6 +2926,22 @@ struct CameraPage {
             right: HudSpec.SAFE_MARGIN,
             top: HudSpace.XS
           })
+        }
+
+        // ---------- 等号档实测读数行（r42）：与读数条同位独立一行；手动 AE 且实发在场才渲染。
+        // 上游钉在「预览：<档位>」DisplayScaleReadout 正下方；本侧无该行，落读数条之下同语义位
+        if (this.expTelemetryText !== '') {
+          Text(this.expTelemetryText)
+            .fontSize(HudType.LABEL)
+            .fontColor(HudColor.TEXT_TERTIARY)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+            .padding({
+              left: HudSpec.SAFE_MARGIN,
+              right: HudSpec.SAFE_MARGIN,
+              top: HudSpace.XS
+            })
         }
 
         Blank()

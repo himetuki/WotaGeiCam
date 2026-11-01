@@ -13,6 +13,7 @@
  * - 每次改动经 onApply 回调上抛，由 Camera 页 engine.applyParams 下发并汇总报告。
  */
 import { AeMode, AfMode, WbPreset, WbPresets, WotaTiers } from '../core/Constants';
+import { ExposureCorrection } from '../core/ExposureCorrection';
 import { CameraAbility, FpsPick } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { evLadder, isoLadder, kelvinLadder, shutterLadder, diopterLadder } from './SliderLadder';
@@ -94,16 +95,25 @@ export struct ShutterPillPopup {
   onApply: () => void = (): void => {};
   @State aeMode: AeMode = AeMode.AUTO;
   @State shutterNs: number = 0;
+  @State corrAuto: boolean = true;
+  @State corrManualNs: number = 0;
   private loNs: number = 0;
   private hiNs: number = 0;
   private hasRange: boolean = false;
   private ladder: Array<number> = [];
+  /** 手动微调滑杆的恒定刻度梯（0..+8ms、0.5ms 步进；产品语义不入吸附设置页 ⇒ snapKey=null） */
+  private manualLadder: Array<number> = [];
   /** 梯值 → 原始档（上游按 Float 键反查原始 ns；ArkTS number 是双精度无损，结构照搬） */
   private byTier: Map<number, TierItem> = new Map<number, TierItem>();
 
   aboutToAppear(): void {
     this.aeMode = this.params.aeMode.value;
     this.shutterNs = this.params.shutter.value.value;
+    this.corrAuto = this.params.exposureCorrectionAuto.value;
+    this.corrManualNs = this.params.exposureCorrectionManualNs.value;
+    for (let i: number = 0; i <= 16; i++) {
+      this.manualLadder.push(i * 0.5);
+    }
     const range = this.params.shutter.value.range;
     if (range !== undefined) {
       this.loNs = range.lo;
@@ -174,6 +184,55 @@ export struct ShutterPillPopup {
               return exact !== undefined ? exact.label : shutterText(Math.round(tick));
             }
           })
+        }
+        // 等号档曝光纠偏（2026-11-01 用户定版，上游 docs/plan/31）：只在强制档 1/24、1/25 露出。
+        // 自动 = 预览态实测拉长量 Δ + 安全系数（默认开）；关 = 手动滑杆。微调只动发送侧
+        // 曝光时长键：AE 档（上方 AeModeRow）与帧周期都不受影响。UI 开关域与 applicable 同判据。
+        if (WotaTiers.isRequiredShutterNs(this.shutterNs)) {
+          Row() {
+            Text('自动微调曝光')
+              .fontSize(11)
+              .fontColor('#99FFFFFF')
+              .layoutWeight(1)
+              .maxLines(1)
+            // 液态 WotaSwitch 属 r41 liquid 批（未移植），本批用 ArkUI Toggle 近似（登记）
+            Toggle({ type: ToggleType.Switch, isOn: this.corrAuto })
+              .selectedColor('#FF0A59F7')
+              .enabled(this.editable)
+              .onChange((on: boolean): void => {
+                if (on === this.corrAuto) {
+                  return;
+                }
+                this.corrAuto = on;
+                this.params.exposureCorrectionAuto.value = on;
+                this.onApply();
+              })
+          }
+          .width('100%')
+          PillNote({ noteText: '自动微调曝光以稳帧：发送时等量缩短曝光，防止满窗档被 HAL 拉长帧周期掉帧率' })
+          if (!this.corrAuto) {
+            Text('手动微调')
+              .fontSize(11)
+              .fontColor('#99FFFFFF')
+              .maxLines(1)
+            // 半毫秒步进是产品语义（恒定刻度梯，不进吸附设置页）：snapKey=null ⇒ 恒走刻度；
+            // 0.5 的整倍数在 number 里精确表示，ns 值经 ms 往返不丢刻度
+            PillSlider({
+              current: this.corrManualNs / 1_000_000,
+              lo: ExposureCorrection.MANUAL_MIN_NS / 1_000_000,
+              hi: ExposureCorrection.MANUAL_MAX_NS / 1_000_000,
+              snapKey: null,
+              ladder: this.manualLadder,
+              active: this.editable,
+              onValueChange: (msV: number): void => {
+                const ns: number = Math.round(msV * 2) * ExposureCorrection.MANUAL_STEP_NS;
+                this.corrManualNs = ns;
+                this.params.exposureCorrectionManualNs.value = ns;
+                this.onApply();
+              },
+              formatLabel: (msV: number): string => `${msV.toFixed(1)} ms`
+            })
+          }
         }
       } else {
         PillNote({ noteText: '切到手动曝光档后可调' })
