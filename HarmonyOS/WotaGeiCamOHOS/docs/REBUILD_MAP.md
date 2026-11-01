@@ -21,7 +21,7 @@
 | ui/dialog/CameraDialogs.kt | 375 | Camera.ets 各弹层 | 🔍 | 待比对 |
 | ui/dialog/AudioSourcePanel.kt | 233 | Camera.ets 音源面板 | 🔍 | 待比对 |
 | ui/design/PillPopup.kt | 510 | ui/PillPopup.ets | ✅ | 动效层（LocalMotion 淡入/0.94 长开）未迁=形态登记 |
-| ui/design/WotaSwitch.kt | 288 | ui/WotaSwitch.ets | 🔶→重建中 | 速度继承缺失→ springCurve(velocity) 重建（本批） |
+| ui/design/WotaSwitch.kt | 288 | ui/WotaSwitch.ets | ✅ | 速度继承已重建（springCurve(velocity) 初速度入口 + stiffness=(2π/r)²/c=2ζ√(mass·k) 换算面，17da517） |
 | ui/design/LikeHeart.kt | 281 | core/LikeBurst.ets + ui/LikeHeart.ets | ✅ | 数学全表+Canvas 宿主（71a74ce）；数字滚动刻意不迁 |
 | ui/design/Widgets.kt | 688 | 散布（wotaHudCard/HudTokens/…） | 🔍 | 待比对 |
 | ui/design/Tokens.kt | 315 | ui/HudTokens.ets | ✅ | 令牌化对齐（TOK 批） |
@@ -39,7 +39,7 @@
 | 安卓 | 鸿蒙 | verdict | 备注 |
 |---|---|---|---|
 | player/PlayerScreen.kt (1987) | pages/Player.ets (1771) | 🔍 | chrome 矩阵/亮度/AB/导出双模/修复面板在册；逐段待比对 |
-| player/CompareScreen.kt (1405) | pages/Compare.ets (1846) | 🔍 | ABP2/时间线/音轨/练习在册 |
+| player/CompareScreen.kt (1405) | pages/Compare.ets (1846) | ✅ | ABP2/时间线/音轨/练习/双画面 pinchZoom 在册（捏合缩放重建 0a082a8；单指语义 fingers:2 隔离对齐） |
 | media/GalleryScreen.kt (1430) | pages/Gallery.ets (1751) | 🔍 | 三页签/回收站/导入/改名/红心在册；❤ 宿主=全屏查看器（3651901 半边 N/A） |
 | pages/Index 路由 | entryability/Index | ✅ | |
 
@@ -63,5 +63,10 @@
    设置页「动效档」+ 全局闸（待批）。
 3. **LiquidMerge 速度继承三处**（❌）：相册 Pager snapAnimation/曲线扇面/dockSlide——
    springCurve 化逐处重建（待批，量大）。
-4. **CameraScreen/HudLayer/Settings/Player/Compare/Gallery 六大面逐段对拍**（🔍）：
-   按 CameraPills 先例（逐 composable 列清单→判 verdict→补缺）推进。
+4. **CameraScreen/HudLayer/Settings/Player/Gallery 五大面逐段对拍**（🔍）：
+   按 Compare 先例（逐区列清单→判 verdict→补缺）推进。已比对子项登记：
+   - 手势族：点按/双击/长按（TAP 仲裁 ✅）、双指捏合（Player/Compare ✅）、Dock 长按换栏
+     （🔶=J3b 已登记，编辑器 READOUT 拖拽在册）
+   - 标签/文案族：CameraDialogs 的 label 函数族 ✅（ParamFormat.ets 同源）
+5. **CameraDialogs.kt**：label 函数族 + PlayerScreen 工厂面——label 族已对齐（ParamFormat），
+   rememberPlayerEngine 工厂=N/A（生命周期模型不同，PlayerEngine.ets 直构），✅。
