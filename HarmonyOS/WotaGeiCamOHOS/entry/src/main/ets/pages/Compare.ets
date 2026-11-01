@@ -32,6 +32,7 @@ import { ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { SettingsStore } from '../ui/SettingsStore';
 import { AbRange, PlayerSpeedTiers } from '../player/PlayerModel';
+import { Pan, clampPan } from '../player/PlayerModel';
 import {
   AudioTrackKind, CompareAudioPlan, EngineCommand, EngineCommandKind, Side, applyOrderOf, audioPlanOf
 } from '../player/CompareAudio';
@@ -128,8 +129,46 @@ struct Compare {
 
   private leftEngine: PlayerEngine = new PlayerEngine();
   private rightEngine: PlayerEngine = new PlayerEngine();
+  // ---- 双画面捏合缩放/平移（上游 CompareScreen pinchZoom 的重建；1..4x、第二指才消费）----
+  @State private zoomL: number = 1;
+  @State private zoomR: number = 1;
+  @State private panLX: number = 0;
+  @State private panLY: number = 0;
+  @State private panRX: number = 0;
+  @State private panRY: number = 0;
+  private baseZoomL: number = 1;
+  private baseZoomR: number = 1;
+  private basePanLX: number = 0;
+  private basePanLY: number = 0;
+  private basePanRX: number = 0;
+  private basePanRY: number = 0;
+  /** 捏合宿主实测尺寸（onAreaChange 接管；首帧按 0 = 平移钳不生效，缩放仍可用） */
+  private paneW: number = 0;
+  private paneH: number = 0;
+
   private leftXc: XComponentController = new XComponentController();
   private rightXc: XComponentController = new XComponentController();
+
+  private paneTransform(zoom: number, px: number, py: number): ScaleOptions {
+    return { x: zoom, y: zoom, centerX: '50%', centerY: '50%' };
+  }
+
+  private paneTranslate(px: number, py: number): TranslateOptions {
+    return { x: px, y: py };
+  }
+
+  private clampL(): void {
+    const p: Pan = clampPan(this.panLX, this.panLY, this.zoomL, this.paneW, this.paneH);
+    this.panLX = p.x;
+    this.panLY = p.y;
+  }
+
+  private clampR(): void {
+    const p: Pan = clampPan(this.panRX, this.panRY, this.zoomR, this.paneW, this.paneH);
+    this.panRX = p.x;
+    this.panRY = p.y;
+  }
+
   private leftSid: string = '';
   private rightSid: string = '';
   private leftAttachStarted: boolean = false;
@@ -1302,12 +1341,44 @@ struct Compare {
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.leftXc })
           .accessibilityText('左片画面')
-          .accessibilityDescription('播放控制见底部控制条')
+          .accessibilityDescription('播放控制见底部控制条；双指缩放平移')
           .onLoad((): void => {
             this.onSurfaceLoaded(true);
           })
           .width('100%')
           .height('100%')
+          .scale(this.paneTransform(this.zoomL, this.panLX, this.panLY))
+          .translate(this.paneTranslate(this.panLX, this.panLY))
+          .gesture(
+            PinchGesture({ fingers: 2 })
+              .onActionStart((): void => {
+                this.baseZoomL = this.zoomL;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.zoomL = Math.min(4, Math.max(1, this.baseZoomL * e.scale));
+                this.clampL();
+              })
+          )
+          .gesture(
+            PanGesture({ fingers: 2, direction: PanDirection.All, distance: 1 })
+              .onActionStart((): void => {
+                this.basePanLX = this.panLX;
+                this.basePanLY = this.panLY;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.panLX = this.basePanLX + e.offsetX;
+                this.panLY = this.basePanLY + e.offsetY;
+                this.clampL();
+              })
+          )
+          .onAreaChange((_o: Area, a: Area): void => {
+            const w: number = a.width as number;
+            const h: number = a.height as number;
+            if (w > 0 && h > 0) {
+              this.paneW = w;
+              this.paneH = h;
+            }
+          })
         // T25 dormant 黑层：常驻透明层，只在左独播域外/左独播时由 decide 写回；不拦触摸
         if (BLACK_LAYER_ENABLED) {
           Column()
@@ -1374,12 +1445,44 @@ struct Compare {
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.rightXc })
           .accessibilityText('右片画面')
-          .accessibilityDescription('播放控制见底部控制条')
+          .accessibilityDescription('播放控制见底部控制条；双指缩放平移')
           .onLoad((): void => {
             this.onSurfaceLoaded(false);
           })
           .width('100%')
           .height('100%')
+          .scale(this.paneTransform(this.zoomR, this.panRX, this.panRY))
+          .translate(this.paneTranslate(this.panRX, this.panRY))
+          .gesture(
+            PinchGesture({ fingers: 2 })
+              .onActionStart((): void => {
+                this.baseZoomR = this.zoomR;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.zoomR = Math.min(4, Math.max(1, this.baseZoomR * e.scale));
+                this.clampR();
+              })
+          )
+          .gesture(
+            PanGesture({ fingers: 2, direction: PanDirection.All, distance: 1 })
+              .onActionStart((): void => {
+                this.basePanRX = this.panRX;
+                this.basePanRY = this.panRY;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.panRX = this.basePanRX + e.offsetX;
+                this.panRY = this.basePanRY + e.offsetY;
+                this.clampR();
+              })
+          )
+          .onAreaChange((_o: Area, a: Area): void => {
+            const w: number = a.width as number;
+            const h: number = a.height as number;
+            if (w > 0 && h > 0) {
+              this.paneW = w;
+              this.paneH = h;
+            }
+          })
         // T25 dormant 黑层（右）
         if (BLACK_LAYER_ENABLED) {
           Column()
