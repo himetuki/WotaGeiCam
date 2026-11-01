@@ -12,7 +12,7 @@
  * 登记平台面）。按压回弹 = PRESS 规格 + pressScale 0.97。
  */
 import { curves } from '@kit.ArkUI';
-import { LiquidSpring } from '../core/LiquidSpring';
+import { LiquidSpring, LiquidSpringSpec } from '../core/LiquidSpring';
 import { HudColor, PageColor } from './HudTokens';
 
 @Component
@@ -38,17 +38,23 @@ export struct WotaSwitch {
     return this.trackWidth - this.ball - 2 * this.inset;
   }
 
-  /** 弹簧到受控态落点（沿行程拉伸非拖尾：位置全程由弹簧驱动） */
-  private settle(): void {
+  /**
+   * 弹簧到受控态落点（沿行程拉伸非拖尾）：**速度继承**——松手瞬间的手指速度作为初速度
+   * 进入弹簧（上游 VelocityScope 语义的 ArkUI 对应面：curves.springCurve(velocity, mass,
+   * stiffness, damping)；stiffness=(2π/response)²、c=2ζ√(mass·k)，与 springMotion 同一
+   * 参数语义的物理式换算）。velocity=0 时与 springMotion 观感一致。
+   */
+  private settle(velocityVpPerS: number = 0): void {
     const target: number = this.isOn ? 1 : 0;
     if (this.ballPos === target) {
       return;
     }
-    this.getUIContext().animateTo(
-      { duration: 250, curve: curves.springMotion(LiquidSpring.OFFSET.response, LiquidSpring.OFFSET.damping) },
-      (): void => {
-        this.ballPos = target;
-      });
+    const spec: LiquidSpringSpec = LiquidSpring.OFFSET;
+    const curve: ICurve = curves.springCurve(velocityVpPerS, 1,
+      LiquidSpring.stiffnessOf(spec.response), LiquidSpring.dampingCoeffOf(spec.response, spec.damping));
+    this.getUIContext().animateTo({ duration: 350, curve: curve }, (): void => {
+      this.ballPos = target;
+    });
   }
 
   /** 拖动过中点即翻转（不按终点判定）：球当前渲染位置 + 手指增量过轨道中线 */
@@ -86,18 +92,19 @@ export struct WotaSwitch {
         .onActionUpdate((e: GestureEvent) => {
           this.flipAtMidpoint(e.offsetX);
         })
-        .onActionEnd((_e: GestureEvent) => {
+        .onActionEnd((e: GestureEvent) => {
           this.dragging = false;
           this.getUIContext().animateTo(
-            { duration: 250, curve: curves.springMotion(LiquidSpring.PRESS.response, LiquidSpring.PRESS.damping) },
+            { duration: 120, curve: curves.springMotion(LiquidSpring.PRESS.response, LiquidSpring.PRESS.damping) },
             (): void => {
               this.pressScale = 1;
             });
-          this.settle();
+          // 速度继承：松手速度直接进弹簧（vp/s；方向即拖动方向）
+          this.settle(e.velocityX);
         })
-        .onActionCancel((): void => {
+        .onActionCancel((e: GestureEvent) => {
           this.dragging = false;
-          this.settle();
+          this.settle(e !== undefined ? e.velocityX : 0);
         })
     )
     .onClick((): void => {

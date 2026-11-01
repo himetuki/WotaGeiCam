@@ -43,6 +43,20 @@ export class LiquidSpring {
       spec.damping >= 0.6 && spec.damping <= 0.9;
   }
 
+  /**
+   * springCurve(velocity, mass, stiffness, damping) 的换算面（速度继承用）：
+   * stiffness = (2π/response)²（上游同一式）；阻尼比 ζ=damping ⇒ 阻尼系数 c = 2ζ√(mass·k)
+   * （mass=1 ⇒ c = 2π·ζ/response）。velocity 直传（ArkUI 面的初速度入口）。
+   */
+  static stiffnessOf(response: number): number {
+    const omega: number = 2 * Math.PI / Math.max(0.05, response);
+    return omega * omega;
+  }
+
+  static dampingCoeffOf(response: number, dampingFraction: number, mass: number = 1): number {
+    return 2 * dampingFraction * Math.sqrt(mass * LiquidSpring.stiffnessOf(response));
+  }
+
   /** clamp 进合法域（NaN 回 FLOAT 出厂档——坏值宁可保守，不崩不抖） */
   static clamp(spec: LiquidSpringSpec): LiquidSpringSpec {
     if (!Number.isFinite(spec.response) || !Number.isFinite(spec.damping)) {

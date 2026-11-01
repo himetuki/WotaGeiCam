@@ -32,3 +32,14 @@ test('域钳：response 0.2~0.5、damping 0.6~0.9；坏值回 FLOAT 出厂档', 
   assertEq(0.32, bad.response, 'NaN 回 FLOAT');
   assertEq(0.65, bad.damping);
 });
+
+test('springCurve 换算面：stiffness=(2π/r)²、c=2ζ√(mass·k)', () => {
+  const r: number = 0.42;
+  const k: number = LiquidSpring.stiffnessOf(r);
+  const omega: number = 2 * Math.PI / r;
+  assertTrue(Math.abs(k - omega * omega) < 1e-9, 'k = ω²');
+  const c: number = LiquidSpring.dampingCoeffOf(r, 0.80, 1);
+  assertTrue(Math.abs(c - 2 * 0.80 * Math.sqrt(k)) < 1e-9, 'c = 2ζ√(mass·k)');
+  const c2: number = LiquidSpring.dampingCoeffOf(r, 0.80, 4);
+  assertTrue(Math.abs(c2 - 2 * c) < 1e-9, 'mass×4 ⇒ c×2（√4）');
+});
