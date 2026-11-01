@@ -4,7 +4,7 @@
  * ParamsPersistWiringGuardTest.kt（纯函数/纯 prefs 面；Compose 接线守卫本侧以
  * Camera.ets 的接入点人工核对，见交付报告）。
  *
- * 覆盖：① 24 键白名单契约（手写清单双向核对 + 排除清单）；② restore 每键正确值；
+ * 覆盖：① 26 键白名单契约（手写清单双向核对 + 排除清单；r42 起含等号档纠偏两项）；② restore 每键正确值；
  * ③ 坏值/缺失回默认；④ fps 钳制、快门/ISO/变焦 >0 门槛、LOCK 归一、屈光度负数归 0、
  * 尺寸串解析；⑤ 枚举串大小写与坏值；⑥ 会话影子语义（只写变化字段/幂等/影子前进/
  * 写失败重试/resync/requestedSize 意图）；⑦ 键名迁移（旧键 fps=24 → 新键缺失时读出 24）。
@@ -91,7 +91,7 @@ const EXPECTED_KEYS: Array<string> = [
   'default_wb_tint', 'default_zoom', 'default_flash', 'default_stabilize', 'default_af_mode',
   'default_mf_diopter', 'default_size', 'default_frame_effect', 'default_zebra_threshold',
   'default_zebra_density', 'default_peaking_strength', 'default_peaking_color', 'default_lens',
-  'default_arc_merge_deadband'
+  'default_arc_merge_deadband', 'correction_auto', 'correction_manual_ns'
 ];
 
 /** 排除清单的**上游实际键名**（renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode） */
@@ -100,7 +100,7 @@ const EXCLUDED_KEYS: Array<string> = [
   'curve_stack', 'arc_convert_mode'
 ];
 
-/** 把 24 个键都填成非默认合法值（restore 正例与迁移/会话用例共用） */
+/** 把 26 个键都填成非默认合法值（restore 正例与迁移/会话用例共用） */
 function fillAllKeys(p: FakeParamsPrefs): void {
   p.map.set('default_fps', 60);
   p.map.set('default_shutter_ns', 8_333_333);
@@ -126,19 +126,21 @@ function fillAllKeys(p: FakeParamsPrefs): void {
   p.map.set('default_peaking_color', 'BLUE');
   p.map.set('default_lens', 'TELEPHOTO');
   p.map.set('default_arc_merge_deadband', 25);
+  p.map.set('correction_auto', false);
+  p.map.set('correction_manual_ns', 2_000_000);
 }
 
 // ================================================================== 1. 白名单契约
 
-test('白名单 24 条且无重复', (): void => {
+test('白名单 26 条且无重复', (): void => {
   // 多一条 = 排他字段泄入（自动降级会被写成用户默认）；少一条 = 有字段漏档
-  assertEq(24, PARAMS_KEYS.length, '白名单条数');
-  assertEq(24, new Set<string>(PARAMS_KEYS).size, '去重后条数');
+  assertEq(26, PARAMS_KEYS.length, '白名单条数');
+  assertEq(26, new Set<string>(PARAMS_KEYS).size, '去重后条数');
 });
 
 test('白名单键名/顺序逐字等于上游拍板清单', (): void => {
   // 键名是持久化契约：手写清单与实现双向核对，顺序也钉（上游 KEYS 顺序）
-  assertEq(24, EXPECTED_KEYS.length, '手写清单条数');
+  assertEq(26, EXPECTED_KEYS.length, '手写清单条数');
   assertEq(EXPECTED_KEYS.join(','), PARAMS_KEYS.join(','), '键名与顺序逐字一致');
 });
 
@@ -152,7 +154,7 @@ test('排除清单一个都不许进白名单', (): void => {
 
 // ================================================================== 2. restore 正例
 
-test('restore 24 键逐项写回总线', (): void => {
+test('restore 26 键逐项写回总线', (): void => {
   const prefs: FakeParamsPrefs = new FakeParamsPrefs();
   fillAllKeys(prefs);
   const params: WotaParams = new WotaParams();
@@ -183,6 +185,23 @@ test('restore 24 键逐项写回总线', (): void => {
   assertEq(PeakingColor.BLUE as number, params.peakingColor.value as number, '峰值颜色');
   assertEq(LensType.TELEPHOTO as number, params.lens.value as number, '镜头档');
   assertEq(25, params.arcMergeDeadband.value, '补弧差分死区');
+  assertEq(false, params.exposureCorrectionAuto.value, '纠偏自动开关');
+  assertEq(2_000_000, params.exposureCorrectionManualNs.value, '手动微调 ns');
+});
+
+test('restore 纠偏两键脏值回落：缺键=自动开+0；越界钳回 0..8ms 域', (): void => {
+  const missing: FakeParamsPrefs = new FakeParamsPrefs();
+  const p1: WotaParams = new WotaParams();
+  ParamsPersist.restore(missing, p1);
+  assertTrue(p1.exposureCorrectionAuto.value, '缺键回默认开');
+  assertEq(0, p1.exposureCorrectionManualNs.value, '缺键回 0');
+  const dirty: FakeParamsPrefs = new FakeParamsPrefs();
+  dirty.map.set('correction_auto', 'yes');
+  dirty.map.set('correction_manual_ns', -99_000_000);
+  const p2: WotaParams = new WotaParams();
+  ParamsPersist.restore(dirty, p2);
+  assertTrue(p2.exposureCorrectionAuto.value, '布尔位类型不符回默认开');
+  assertEq(0, p2.exposureCorrectionManualNs.value, '负值钳回 0（负值区 2026-11-01 裁决去掉）');
 });
 
 test('restore 坏值与缺失逐项回落或钳制，绝不抛', (): void => {
@@ -345,9 +364,12 @@ function makeBusy(params: WotaParams): void {
   params.peakingColor.value = PeakingColor.BLUE;
   params.lens.value = LensType.TELEPHOTO;
   params.setArcMergeDeadband(25);
+  // r42 起入档两项：等号档纠偏自动关 + 手动 +2ms
+  params.exposureCorrectionAuto.value = false;
+  params.exposureCorrectionManualNs.value = 2_000_000;
 }
 
-test('会话 全动过后只写白名单 24 键且顺序一致', (): void => {
+test('会话 全动过后只写白名单 26 键且顺序一致', (): void => {
   const prefs: FakeParamsPrefs = new FakeParamsPrefs();
   const params: WotaParams = new WotaParams();
   const session: ParamsPersistSession = new ParamsPersistSession(prefs, params); // 影子先冻结
@@ -357,6 +379,8 @@ test('会话 全动过后只写白名单 24 键且顺序一致', (): void => {
   assertEq('3840x2160', prefs.map.get('default_size'), '尺寸写意图值串');
   assertEq('MANUAL', prefs.map.get('default_ae_mode'), 'AE 枚举写名');
   assertEq(25, prefs.map.get('default_arc_merge_deadband'), '死区写整数');
+  assertEq(false, prefs.map.get('correction_auto'), '纠偏开关写布尔');
+  assertEq(2_000_000, prefs.map.get('correction_manual_ns'), '手动微调写 ns 整数');
 });
 
 test('会话 只写变化字段，没动过的字段不写盘也不覆盖设置页', (): void => {
