@@ -474,10 +474,12 @@ export class ParamsPersist {
    * 机型域钳制不在本函数：起镜后 `applyAbility` 仍按能力收口。
    */
   static restore(prefs: ParamsPrefs, params: WotaParams): void {
-    // ① 帧率：产品档位区间钳（与上游 applyDefaults 同一口径）
+    // ① 帧率：产品档位区间钳（与上游 applyDefaults 同一口径）。走 setFps 单一写入者
+    //    （上游 docs/plan/28 §4.4）：冷启恢复时能力快照还没建（applyAbility 未跑），
+    //    行为与直写等价；留单一入口是为了「所有 fps 写入点都过 setFps」这条守卫不漏例外
     const fps: number = clampInt(prefs.getInt(KEY_DEFAULT_FPS, 25),
       WotaTiers.FPS[0], WotaTiers.FPS[WotaTiers.FPS.length - 1]);
-    params.fps.value = withValue(params.fps.value, fps);
+    params.setFps(withValue(params.fps.value, fps));
     // ② 快门（ns）：>0 才套；坏值跳过 = 维持出厂默认（最终设备域由 applyAbility 收口）
     const shutterNs: number = prefs.getInt(KEY_DEFAULT_SHUTTER_NS, 40_000_000);
     if (shutterNs > 0) {

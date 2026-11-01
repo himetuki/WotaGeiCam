@@ -405,6 +405,22 @@ export class GlRecorder {
     return part;
   }
 
+  /**
+   * 当前段已写字节（换段预提示的数据源，上游 36917e5 RecorderHealth.outputBytes 对应面）；
+   * lib 缺席/读取失败返回 -1 = 不可观测（"量不到"不是"超了"，判据按 false 处理）。
+   */
+  currentSegmentBytes(): number {
+    const lib: GlRecordLib | undefined = this.lib;
+    if (lib === undefined) {
+      return -1;
+    }
+    try {
+      return lib.getGpuWrittenBytes();
+    } catch (e) {
+      return -1;
+    }
+  }
+
   /** 页面 500ms 轮询：达到阈值 → 收当前段 → 新段；返回 ''/rotated:N/error:<code> */
   maybeRotate(ctx: common.Context, lib: GlRecordLib): string {
     if (this.fd < 0 || this.startParams === undefined) {

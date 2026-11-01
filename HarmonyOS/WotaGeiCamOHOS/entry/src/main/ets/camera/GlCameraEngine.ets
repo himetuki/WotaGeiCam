@@ -15,6 +15,7 @@ import { Diag } from '../diag/Diag';
 import { AeMode, Size, WotaTag } from '../core/Constants';
 import { CameraAbility } from '../core/CameraAbility';
 import { ExposureCorrection, ReadoutLatch } from '../core/ExposureCorrection';
+import { LowFpsHint, LowFpsWatch } from '../core/LowFpsWatch';
 import { WotaParams } from '../core/WotaParams';
 import { LensSlot, LensType, lensTypeName, maxVideoPixels, pickCapabilityDefault } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
@@ -137,9 +138,15 @@ export class GlCameraEngine {
   private exposureProbeStartMs: number = 0;
   private exposureProbeCooldownUntilMs: number = 0;
 
-  /** 实测帧率采样（onPreviewFrame 计数；窗口满 1s 折算回写 actualFps） */
-  private fpsSampleCount: number = 0;
-  private fpsSampleLastMs: number = 0;
+  // ---- 运行时帧率坍塌守卫（上游 91e6353+36917e5）----
+  // 计数在 frameStart 累加；采样由 fpsSamplerTimer 的**独立 1s 定时拍**驱动——不挂在帧回调上：
+  // HAL 完全断流（零回调）时帧路径整体停摆，挂在帧上的采样也会跟着失声，守卫对
+  // 「一颗帧都不来」的病态反而哑火（上游 2026-10-28 审查补盲区）。定时拍读计数即可把
+  // 零到达如实喂成 0fps。取景/录制全程运行；设备不在 OPEN_SUCCEED 时采样函数自己清提示。
+  private camFrameCount: number = 0;
+  private camRateLastMs: number = 0;
+  private lowFpsWatch: LowFpsWatch | undefined = undefined;
+  private fpsSamplerTimer: number = -1;
 
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
@@ -170,24 +177,80 @@ export class GlCameraEngine {
   }
 
   /**
-   * 预览帧到达（frameStart 回调面）：实测帧率采样 + 等号档读出探测。回调无 err 时才算有效帧。
+   * 预览帧到达（frameStart 回调面）：计数 + 等号档读出探测。回调无 err 时才算有效帧。
    */
   private onPreviewFrame(): void {
     const params: WotaParams | undefined = this.params;
     if (params === undefined || this.status !== DeviceStatus.OPEN_SUCCEED) {
       return;
     }
+    this.camFrameCount++;
+    this.feedExposureProbe(Date.now());
+  }
+
+  /**
+   * 一拍实测到帧率喂守卫（fpsSamplerTimer 1s 定时拍；上游 91e6353 sampleCameraRate 直译）。
+   * 状态翻转才写总线（LowFpsHint.sameAs 去重）；会话没开成功时不判也不留旧提示——
+   * 取景器都不在，"帧率低"无从谈起。换档（目标变了）换新守卫：旧账的宽限/连续/触发态
+   * 对新档位全是噪音。actualFps 同拍回写（r42 HUD 读数行的 fps 段与守卫同源同一拍）。
+   */
+  private sampleCameraRate(): void {
+    const params: WotaParams | undefined = this.params;
     const now: number = Date.now();
-    // 实测帧率（HUD 读数行）：1s 窗口计数折算；上游帧率守卫的告警行属 91e6353 移植批，本批不冒领
-    this.fpsSampleCount++;
-    if (this.fpsSampleLastMs === 0) {
-      this.fpsSampleLastMs = now;
-    } else if (now - this.fpsSampleLastMs >= ACTUAL_FPS_SAMPLE_MS) {
-      params.actualFps.value = this.fpsSampleCount * 1000 / (now - this.fpsSampleLastMs);
-      this.fpsSampleCount = 0;
-      this.fpsSampleLastMs = now;
+    const last: number = this.camRateLastMs;
+    this.camRateLastMs = now;
+    const count: number = this.camFrameCount;
+    this.camFrameCount = 0;
+    if (params === undefined) {
+      return;
     }
-    this.feedExposureProbe(now);
+    if (this.status !== DeviceStatus.OPEN_SUCCEED) {
+      this.lowFpsWatch = undefined;
+      if (params.lowFpsHint.value !== undefined) {
+        params.lowFpsHint.value = undefined;
+      }
+      if (params.actualFps.value !== undefined) {
+        params.actualFps.value = undefined;
+      }
+      return;
+    }
+    const target: number = params.fps.value.value;
+    if (target <= 0) {
+      return;
+    }
+    if (this.lowFpsWatch === undefined || !this.lowFpsWatch.targets(target)) {
+      this.lowFpsWatch = new LowFpsWatch(target);
+    }
+    if (last === 0) {
+      return; // 首拍只立基准（这段窗口跨了会话建立，速率不可信）
+    }
+    const measured: number = count * 1000 / Math.max(1, now - last);
+    params.actualFps.value = measured;
+    const alarm: boolean = this.lowFpsWatch.onSample(now, measured);
+    const hint: LowFpsHint | undefined =
+      alarm ? new LowFpsHint(target, Math.max(1, Math.round(measured))) : undefined;
+    const prev: LowFpsHint | undefined = params.lowFpsHint.value;
+    const unchanged: boolean = hint === undefined ? prev === undefined : hint.sameAs(prev);
+    if (!unchanged) {
+      Diag.i(WotaTag.ABILITY,
+        `帧率守卫：target=${target}fps 实测=${measured.toFixed(1)}fps ⇒ ${alarm ? '提示' : '解除'}`);
+      params.lowFpsHint.value = hint;
+    }
+  }
+
+  /** 守卫采样定时拍（start 建链成功后开；stop 收口；幂等） */
+  private startFpsSampler(): void {
+    this.stopFpsSampler();
+    this.fpsSamplerTimer = setInterval((): void => {
+      this.sampleCameraRate();
+    }, ACTUAL_FPS_SAMPLE_MS);
+  }
+
+  private stopFpsSampler(): void {
+    if (this.fpsSamplerTimer >= 0) {
+      clearInterval(this.fpsSamplerTimer);
+      this.fpsSamplerTimer = -1;
+    }
   }
 
   deviceStatus(): DeviceStatus {
@@ -384,6 +447,7 @@ export class GlCameraEngine {
       } catch (e) {
         Diag.w(WotaTag.ABILITY, `gl camera focusStateChange listener failed: ${e}`);
       }
+      this.startFpsSampler(); // 帧率守卫独立采样拍（零回调盲区补丁，36917e5）
       this.previewSizes = [];
       for (const p of profiles) {
         this.previewSizes.push(new Size(p.size.width, p.size.height));
@@ -633,6 +697,10 @@ export class GlCameraEngine {
     this.lastZoom = 1;
     this.status = DeviceStatus.CLOSE;
     // 等号档探测与实测遥测一并清账（上游口径：deviceStatus 退出 OPEN_SUCCEED 时清空）
+    this.stopFpsSampler();
+    this.lowFpsWatch = undefined;
+    this.camFrameCount = 0;
+    this.camRateLastMs = 0;
     this.recordingActive = false;
     this.exposureProbeActive = false;
     this.exposureProbeKey = undefined;
@@ -640,13 +708,12 @@ export class GlCameraEngine {
     this.exposureProbeLastMs = 0;
     this.exposureProbeFramesSeen = 0;
     this.exposureProbeCooldownUntilMs = 0;
-    this.fpsSampleCount = 0;
-    this.fpsSampleLastMs = 0;
     const params: WotaParams | undefined = this.params;
     if (params !== undefined) {
       params.actualSentExposureNs.value = undefined;
       params.actualCorrectionNs.value = undefined;
       params.actualFps.value = undefined;
+      params.lowFpsHint.value = undefined;
     }
   }
 }

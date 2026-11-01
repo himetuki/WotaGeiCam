@@ -13,6 +13,7 @@ import {
 } from './Constants';
 import { CameraAbility, FpsDecision, RangeF, shutterCeilingNs } from './CameraAbility';
 import { ReadoutLatch } from './ExposureCorrection';
+import { LowFpsHint } from './LowFpsWatch';
 import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
 import { resolveSizeFor, sizeCloseTo, VideoSizeCandidates } from './VideoSizePicker';
@@ -116,6 +117,28 @@ export class WotaParams {
   }
 
   readonly fps: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(25));
+
+  /**
+   * 最近一次 applyAbility 的能力快照：换帧率要按**新档位**重算快门/ISO 的可选域
+   * （快门上限吃 1/帧率档），否则 60fps→24fps 后快门滑杆还停在 1/60 上限
+   * （上游 Issue #1 Bug3：「快门滑条丢失、无法慢于 1/60」）。
+   */
+  private lastAbility: CameraAbility | undefined = undefined;
+
+  /**
+   * 换帧率的**唯一写入口**（上游 docs/plan/28 §4.4 方案 A）：写值 + 立即按新档位重算曝光域，
+   * range 与 value 同一拍收口。所有写入点（画幅弹窗 / 帧率弹窗 / 冷启恢复 / 引擎退档回写）
+   * 都必须走这里；绕开它直写 `fps.value` 会让快门可选域停在旧档位上——UI 显示的域与
+   * 下发侧 `clampShutterNs` 各说各话（反向就是「UI 摆着 1/24、实际按 1/60 录」的假读数）。
+   * 没能力快照时（冷启套默认档，相机还没开）只写值，域等 applyAbility 再算。
+   */
+  setFps(next: ParamState): void {
+    this.fps.value = next;
+    if (this.lastAbility !== undefined) {
+      this.applyExposure(this.lastAbility, Math.max(1, next.value));
+    }
+  }
+
   readonly shutter: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(40_000_000)); // ns，1/25
   readonly iso: StateFlow<ParamState> = new StateFlow<ParamState>(ParamState.of(100));
   readonly aeMode: StateFlow<AeMode> = new StateFlow<AeMode>(AeMode.AUTO);
@@ -180,6 +203,15 @@ export class WotaParams {
   /** 实际生效的纠偏值（等号档 + 手动档才有意义，undefined = 不适用）；引擎回写，UI 只读 */
   readonly actualCorrectionNs: StateFlow<number | undefined> = new StateFlow<number | undefined>(undefined);
 
+  /**
+   * 运行时帧率坍塌提示（上游 91e6353，2026-10-28 用户6/7 反馈；undefined = 无提示）。
+   * 帧率决议保证的是**下发值合法**，保证不了实际到帧率——变量档 `[5,30]` 暗场掉 5fps、
+   * 固定档被 HAL 在结果侧放宽（`[24,24]`→`[15,24]`）都发生过。引擎按 ~1s 一拍采样
+   * 实际到帧率喂 core/LowFpsWatch，持续低帧经这里发提示，HUD 警告行如实告知
+   * 「画面为什么卡」。判定与滞回全在 core（纯测）。
+   */
+  readonly lowFpsHint: StateFlow<LowFpsHint | undefined> = new StateFlow<LowFpsHint | undefined>(undefined);
+
 
   /**
    * 补弧合并差分死区 D（8bit luma 级）：Δluma > D 时整颗像素取被抽帧，否则保持保留帧。
@@ -204,6 +236,7 @@ export class WotaParams {
    * 顺序有依赖——快门上限要用帧率（≤1/fps），故帧率先算。
    */
   applyAbility(a: CameraAbility): void {
+    this.lastAbility = a;
     // 画幅先落档：帧率区间是按尺寸查的，顺序反过来会拿旧尺寸的区间去配新尺寸
     this.applySize(a);
     const targetFps: number = Math.max(1, this.fps.value.value);

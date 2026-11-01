@@ -100,6 +100,7 @@ export class WotaTiers {
     return WotaTiers.REQUIRED_SHUTTER_NS.has(ns);
   }
 
+
   // 色温/色调是「产品滑杆域」（u=(K-2000)/8000、v=(tint+50)/100），非设备能力
   static readonly KELVIN_MIN: number = 2000;
   static readonly KELVIN_MAX: number = 10_000;
@@ -594,4 +595,18 @@ export function capacityTierText(
     return capacityHoursText(freeMb, totalBitrateBps);
   }
   return freeSpaceShort(freeMb);
+}
+
+/**
+ * 换段预提示判据（纯函数，上游 36917e5 直译；2026-10-28 审查加固）：当前段已写字节达到
+ * [WotaTiers.MAX_FILE_BYTES] 的 85% ⇒ UI 提前告知"即将自动换段"。高码率档（50Mbps）下
+ * 3.5GiB 上限约 9.3 分钟就到，10 分钟以上的录制**必然**踩一次换段腿——换段本身有界且
+ * 受阻会明确失败，但可预期的一次抖动应当被告知而不是被当成 bug。
+ *
+ * @param outputBytes 当前段已落盘字节（GPU 链 getGpuWrittenBytes；**-1 = 不可观测**——
+ *   "量不到"不是"超了"，按 false 处理）
+ * @param capBytes 单段上限；默认产品常量，参数化只为纯测不必造 3.5GiB
+ */
+export function segmentCapApproached(outputBytes: number, capBytes: number = WotaTiers.MAX_FILE_BYTES): boolean {
+  return outputBytes >= 0 && outputBytes * 100 >= capBytes * 85;
 }

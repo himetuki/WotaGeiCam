@@ -63,7 +63,7 @@ import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { ContentPoint, PreviewBox, PreviewFit } from '../core/PreviewFit';
-import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size, WotaTiers } from '../core/Constants';
+import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size, WotaTiers, segmentCapApproached } from '../core/Constants';
 import { CameraAbility, FpsDecision, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
@@ -92,6 +92,7 @@ import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayo
 import { UserSettings } from '../core/UserSettings';
 import { FocusTapArbiter, FocusTapMath } from '../core/FocusTap';
 import { TapPoint } from '../core/Constants';
+import { LowFpsHint } from '../core/LowFpsWatch';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType, PageColor } from '../ui/HudTokens';
 import { HudPill } from '../ui/HudPill';
@@ -520,6 +521,10 @@ struct CameraPage {
   @State pillWbLabel: string = '自动';
   /** 等号档实测读数行（r42；上游 ExposureTelemetryReadout）：手动 AE 且实发曝光在场才显 */
   @State expTelemetryText: string = '';
+  // ---- 运行时告警三行（上游 91e6353+36917e5）：低帧守卫 / 换段预提示 / 近似档+手动预告知 ----
+  @State lowFpsNote: string = '';
+  @State segNearCap: boolean = false;
+  @State approxManual: boolean = false;
   /** 横屏帧率芯片文案（pickFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
   @State landFpsLabel: string = '30×';
   /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
@@ -998,7 +1003,9 @@ struct CameraPage {
         if (this.flashUnsupported) {
           this.flashOn = false;
         }
-        this.params.fps.value = ParamState.of(this.settings.fps);
+        // 走 setFps 单一写入者（上游 docs/plan/28 §4.4）：起镜预写档位也走唯一入口，
+        // 快门可选域与档位同一拍收口（applyAbility 紧随其后按新能力全量重算）
+        this.params.setFps(ParamState.of(this.settings.fps));
         this.params.applyAbility(refined);
         this.syncParamLabels();
       }
@@ -1074,6 +1081,9 @@ struct CameraPage {
     this.params.actualCorrectionNs.subscribe(recompute);
     this.params.exposureCorrectionAuto.subscribe(recompute);
     this.params.aeMode.subscribe(recompute);
+    // 低帧守卫告警行（上游 91e6353）：总线驱动；取景器不在（重开中/已关）时不显示——
+    // 会话关闭后采样停了，总线里可能残留上一场的提示，跟着设备状态机走
+    this.params.lowFpsHint.subscribe(recompute);
     this.refreshExpTelemetry();
   }
 
@@ -1092,6 +1102,10 @@ struct CameraPage {
     const corr: number | undefined = this.params.actualCorrectionNs.value;
     const corrPart: string = `${((corr === undefined ? 0 : corr) / 1_000_000).toFixed(1)} ms`;
     this.expTelemetryText = `${expPart} · ${fpsPart} · ${modePart} · ${corrPart}`;
+    const hint: LowFpsHint | undefined = this.params.lowFpsHint.value;
+    this.lowFpsNote = hint !== undefined && this.engine.deviceStatus() === DeviceStatus.OPEN_SUCCEED
+      ? `实际帧率只有约 ${hint.achievedFps}（目标 ${hint.targetFps}）：光线不足或快门过慢所限，画面会卡`
+      : '';
   }
 
   /** 快照当前参数到顶栏第二行/胶囊标签（AE AUTO 时 ISO 显示 AUTO、EV 仅非 MANUAL 显示、能力缺失 -） */
@@ -1121,6 +1135,10 @@ struct CameraPage {
     this.pillWbLabel = this.rowWb;
     // 横屏帧率芯片与 settings.fps 同源（pickFps → syncParamLabels 这一跳负责刷新）
     this.landFpsLabel = `${this.settings.fps}×`;
+    // 近似档+手动曝光组合预告知（上游 36917e5）：※ 档的区间下界不受 App 控制，暗光下 HAL
+    // 可以合法下探——r03 时代这一组合正是帧率坍塌主力，取景态就告知
+    const fpsState: ParamState = this.params.fps.value;
+    this.approxManual = !fpsState.exact && fpsState.enabled && this.params.aeMode.value === AeMode.MANUAL;
   }
 
   /**
@@ -1307,7 +1325,7 @@ struct CameraPage {
       return;
     }
     this.settings.fps = fps;
-    this.params.fps.value = ParamState.of(fps);
+    this.params.setFps(ParamState.of(fps)); // 单一写入者（§4.4）：换档即时重算快门可选域
     if (this.ability !== undefined) {
       this.params.applyAbility(this.ability);
     }
@@ -2401,6 +2419,8 @@ struct CameraPage {
           this.appendNotice(`分段轮转失败，已停止，保留已完成段：${rotateResult}`);
           return;
         }
+        // 换段预提示（上游 36917e5）：真实写入字节（不是估算）对上限；轮转后回落重新武装
+        this.segNearCap = segmentCapApproached(this.recorder.currentSegmentBytes());
         if (rotateResult.indexOf('rotated:') === 0) {
           this.message = `录制中 分段 ${rotateResult.substring('rotated:'.length)}`;
           if (this.healthTimer >= 0) {
@@ -2449,6 +2469,8 @@ struct CameraPage {
       clearInterval(this.recordTimer);
       this.recordTimer = -1;
     }
+    // 停录/轮询结束必须清掉换段预提示，否则下一场录制前顶栏还挂着上一场的旧行
+    this.segNearCap = false;
   }
 
   private requestStop(reason: string = ''): void {
@@ -2876,6 +2898,38 @@ struct CameraPage {
           right: HudSpec.SAFE_MARGIN,
           top: this.safeTop + HudSpace.S
         })
+
+        // ---------- 运行时告警三行（上游 91e6353+36917e5）：状态行排在读数条之上，
+        // WARN 色小字；换段预提示只在录制在场时有意义（与上游 segNearCap && recording 同闸）
+        if (this.lowFpsNote !== '' || (this.segNearCap && this.recording) || this.approxManual) {
+          Column({ space: 2 }) {
+            if (this.lowFpsNote !== '') {
+              Text(this.lowFpsNote)
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(2)
+            }
+            if (this.segNearCap && this.recording) {
+              Text('接近单段大小上限，即将自动换段写入新文件')
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(1)
+            }
+            if (this.approxManual) {
+              Text('当前帧率档为本机近似档：暗光下实际帧率可能低于所选值')
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(1)
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({
+            left: HudSpec.SAFE_MARGIN,
+            right: HudSpec.SAFE_MARGIN,
+            top: HudSpace.XS
+          })
+        }
 
         // ---------- 读数条（J3a：hud_items 位掩码驱动；**临时落位**在固定两行之下，J3b 挪进 READOUT
         // zone 并换 planReadoutRow 的同行裁决）。条目/分组/换行档全在 hudReadoutRowGroups()（J1/J2 算式）；
