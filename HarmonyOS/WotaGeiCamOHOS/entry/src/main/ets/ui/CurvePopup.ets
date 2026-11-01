@@ -30,6 +30,14 @@ const OPTION_HIT_SIZE: number = 48;
 const FAN_RADIUS: number = 64;
 const CURVE_SIDE: number = 200;
 const MIN_CURVE_SIDE: number = 120;
+// 命中手感三常量（29 §3.2，上游 bda89bb；单位 vp，与 side 同域）
+/** 端点角部扩展：命中区比画布四边各外扩的 dp（触点一半在画布外也抓得住端点） */
+const HIT_EXT: number = 12;
+/** 像素域命中半径（×面板等比），下限见下——归一化常数随面板放大相对手指变小 */
+const HIT_RADIUS_DP: number = 20;
+const HIT_RADIUS_MIN_DP: number = 14;
+/** 长按删除到时（29 §3.2-3）：未移动且按住到时 → 删中间点，手势即止 */
+const LONG_PRESS_DELETE_MS: number = 500;
 const PANEL_PAD: number = 10;
 const FAN_GAP: number = 6;
 const PANEL_BREATH: number = 12;
@@ -40,6 +48,20 @@ const RESIZE_HIT: number = 22;
 const FAN_ANGLES: Array<number> = [-90, -45, 0, 45, 90];
 
 const CHANNEL_COLORS: Array<string> = ['#FFFFFFFF', '#FFEF6A5A', '#FF6FCE8F', '#FF5FA8E8'];
+
+/** 「背景色趋势」（29 §2.2-3）：按通道的横向渐变两端色（0x33 α）；色标沿用 channelColor */
+function trendColorsOf(channel: number): Array<string> {
+  switch (channel) {
+    case ColorCurve.CHANNEL_RED:
+      return ['#33EF6A5A', '#3350C8D8'];
+    case ColorCurve.CHANNEL_GREEN:
+      return ['#336FCE8F', '#33D66AA0'];
+    case ColorCurve.CHANNEL_BLUE:
+      return ['#335FA8E8', '#33D8C050'];
+    default:
+      return ['#33111111', '#33EEEEEE'];
+  }
+}
 
 /** 直方图按通道取哪一组（29 §2.2-2）：R/G/B 各自的组，master 取亮度 Y */
 function histogramBaseOf(channel: number): number {
@@ -94,8 +116,10 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
   @State selected: number = -1;
   /** Down 是否认领到点（未认领的整手什么都不做，同上游「本次手势什么都不做」） */
   private gestureHadPoint: boolean = false;
-  /** 二次点按同一点的删除预记（Move 消旗，Up 消费） */
-  private pendingDelete: boolean = false;
+  /** 长按删除定时器（Down 认领到可删点起跑；Move/Up/Cancel 取消） */
+  private deleteTimer: number = -1;
+  /** 长按删除已成立：本手势余下的 Move/Up 全部忽略（手势即止，上游 deleted 同义） */
+  private gestureDead: boolean = false;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
 
@@ -182,6 +206,7 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
 
   aboutToDisappear(): void {
     this.stopHistogramPolling();
+    this.cancelDeleteTimer();
   }
 
   /** visible 翻转 → 直方图轮询启停 + 开窗时读持久边长（纯 UI 设置，不走默认值应用链） */
@@ -243,6 +268,14 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     ctx.clearRect(0, 0, side, side);
     ctx.fillStyle = '#FF000000';
     ctx.fillRect(0, 0, side, side);
+    // 背景色趋势（29 §2.2-3）：按通道着色的横向渐变（暗端通道色 → 高端补色），
+    // 透明度 0.2 档；master 用中性灰阶（不引入色偏）
+    const trend: Array<string> = trendColorsOf(this.channel);
+    const grad: CanvasGradient = ctx.createLinearGradient(0, 0, side, 0);
+    grad.addColorStop(0, trend[0]);
+    grad.addColorStop(1, trend[1]);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, side, side);
     // 直方图背景（画在网格/曲线**之下**）：只画**当前通道**那一组（29 §2.2 F2 按通道区分，
     // 上游 320a956）：R/G/B 各自的组，master 用亮度 Y（不再三色混排）；半透明 0x30 通道色，
     // 条宽 = side/64、条高 = 通道内归一计数 × side——随框缩放是几何自然结果
@@ -293,14 +326,25 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
       } else {
         ctx.lineTo(x, y);
       }
+  
+    // 输入/输出读数（29 §2.2-4 / §3.2-5）：选中控制点时显示 (x·255, y·255)，
+    // 未选中不占位；拖动随 points 实时更新——回答「该往哪个方向调」
+    if (this.selected >= 0 && this.selected < this.points.length) {
+      const sp: CurvePoint = this.points[this.selected];
+      ctx.fillStyle = '#FFFFFFFF';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(`${Math.round(sp.x * 255)} · ${Math.round(sp.y * 255)}`, 6, 14);
     }
+  }
     ctx.stroke();
     // 空心点：实心点在亮画面上会和曲线糊成一团；半径随 scale 等比（eb956f5）
     for (let i = 0; i < this.points.length; i++) {
       const p: CurvePoint = this.points[i];
       const cx: number = side * p.x;
       const cy: number = side * (1 - p.y);
-      const r: number = (i === this.selected ? 9 : 6.5) * scale;
+      // 端点略大（29 §3.2-2）：1.15×，与中间点可区分；选中继续放大
+      const endpoint: boolean = i === 0 || i === this.points.length - 1;
+      const r: number = (i === this.selected ? 9 : endpoint ? 7.5 : 6.5) * scale;
       ctx.fillStyle = i === this.selected ? channelColor(this.channel) : '#FFB8C4CE';
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -324,7 +368,14 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     return '#' + hex + argb.substring(3);
   }
 
-  /** 画布触控（ArkUI onTouch 直译上游 awaitEachGesture 拖点协议） */
+  /**
+   * 画布触控（上游 awaitEachGesture 拖点协议的 onTouch 直译；29 §3.2 手感三件）：
+   * ① 命中区外扩 [HIT_EXT]——落点先 clamp 回画布再换算（端点在四角，触点一半在外也抓住）；
+   * ② 命中半径走**像素域**（radiusDp × 面板等比，下限 [HIT_RADIUS_MIN_DP]）；
+   * ③ **长按删除**替换双击删除（29 §3.2-3 裁决：快双击误删是摩擦点）——未移动按住到时
+   *    删中间点、手势即止；端点不可删走普通拖动。抓点/删点震动：本侧无 VIBRATE 权限
+   *    （权限红线在册），N/A 登记。
+   */
   private onCanvasTouch(e: TouchEvent): void {
     if (!this.gpuMode) {
       return;
@@ -334,13 +385,18 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
       return;
     }
     const t = e.touches[0];
-    const gx: number = Math.min(1, Math.max(0, t.x / side));
-    const gy: number = Math.min(1, Math.max(0, 1 - t.y / side));
+    // 命中区外扩：命中层比画布四边各大 HIT_EXT，落点先 clamp 进画布域再归一（29 §3.2-1）
+    const cx: number = Math.min(side, Math.max(0, t.x - HIT_EXT));
+    const cy: number = Math.min(side, Math.max(0, t.y - HIT_EXT));
+    const gx: number = cx / side;
+    const gy: number = Math.min(1, Math.max(0, 1 - cy / side));
     if (e.type === TouchType.Down) {
       this.gestureHadPoint = false;
-      this.pendingDelete = false;
+      this.gestureDead = false;
       let working: Array<CurvePoint> = this.points;
-      let index: number = CurveEdit.hitTest(working, gx, gy);
+      // 命中半径走像素域（随面板放大同步变大），x/y 各自按画布宽/高归一
+      const radiusDp: number = Math.max(HIT_RADIUS_MIN_DP, HIT_RADIUS_DP * this.panelScale());
+      let index: number = CurveEdit.hitTestPx(working, gx, gy, radiusDp / side, radiusDp / side);
       if (index < 0) {
         const added: CurveInsertResult | undefined = CurveEdit.inserted(working, gx, gy);
         if (added !== undefined) {
@@ -350,21 +406,31 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
       }
       if (index >= 0) {
         this.gestureHadPoint = true;
-        const deletable: boolean = index > 0 && index < working.length - 1;
-        if (this.selected === index && deletable) {
-          this.pendingDelete = true;
-        }
         this.selected = index;
+        // 长按删除（29 §3.2-3）：仅中间点可删；未移动按住到时 → 删点、手势即止
+        if (index > 0 && index < working.length - 1) {
+          this.cancelDeleteTimer();
+          this.deleteTimer = setTimeout((): void => {
+            this.deleteTimer = -1;
+            if (this.gestureDead) {
+              return;
+            }
+            this.gestureDead = true;
+            this.commit(CurveEdit.removed(this.points, this.selected), true);
+            this.selected = -1;
+            this.drawCurve();
+          }, LONG_PRESS_DELETE_MS);
+        }
         this.commit(working, false);
       }
       return;
     }
     if (e.type === TouchType.Move) {
       // Down 里记下的工作点集与下标经 this.points/selected 承接（单指编辑，无并发手）
-      if (!this.gestureHadPoint) {
+      if (!this.gestureHadPoint || this.gestureDead) {
         return;
       }
-      this.pendingDelete = false;
+      this.cancelDeleteTimer(); // 移动即取消长按（moved 语义）
       const index: number = this.selected;
       if (index < 0) {
         return;
@@ -373,22 +439,22 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
       return;
     }
     if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
-      if (!this.gestureHadPoint) {
+      if (!this.gestureHadPoint || this.gestureDead) {
         return;
       }
-      this.gestureHadPoint = false;
+      this.cancelDeleteTimer();
       const index: number = this.selected;
       if (index < 0) {
         return;
       }
-      // 二次点按同一点＝删点（端点不可删）：Move 已消旗，Up 只认「Down 立旗且未移动」
-      if (this.pendingDelete) {
-        this.pendingDelete = false;
-        this.commit(CurveEdit.removed(this.points, index), true);
-        this.selected = -1;
-      } else {
-        this.commit(this.points, true);
-      }
+      this.commit(this.points, true);
+    }
+  }
+
+  private cancelDeleteTimer(): void {
+    if (this.deleteTimer >= 0) {
+      clearTimeout(this.deleteTimer);
+      this.deleteTimer = -1;
     }
   }
 
@@ -426,21 +492,24 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
               .width(CENTER_SIZE)
               .height(CENTER_SIZE)
 
-              Stack() {
+              // 命中区（29 §3.2-1）：比画布四边各外扩 HIT_EXT 的透明层——端点正好在画布
+              // 四角，触点一半落在画布外会被面板吃掉，「左下/右上端点抓不住」；落点在
+              // onCanvasTouch 里先 clamp 回画布再归一。画布圆角 clip 只裁绘制、不裁命中区
+              Stack({ alignContent: Alignment.Center }) {
                 Canvas(this.ctx)
                   .width(this.side())
                   .height(this.side())
                   .onReady((): void => {
                     this.drawCurve();
                   })
-                  .onTouch((e: TouchEvent): void => {
-                    this.onCanvasTouch(e);
-                  })
+                  .borderRadius(14)
+                  .clip(true)
               }
-              .width(this.side())
-              .height(this.side())
-              .borderRadius(14)
-              .clip(true)
+              .width(this.side() + 2 * HIT_EXT)
+              .height(this.side() + 2 * HIT_EXT)
+              .onTouch((e: TouchEvent): void => {
+                this.onCanvasTouch(e);
+              })
             }
             .padding(PANEL_PAD)
           }
