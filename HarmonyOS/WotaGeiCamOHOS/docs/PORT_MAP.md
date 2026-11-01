@@ -741,31 +741,44 @@ deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` +
 - 上游 32 键 vs 本侧 26 键：差集 = denoise/marker/glow/tone 各批未移植（非本批缺口）；
 - actualFps 采样是**读数**不是守卫：上游帧率坍塌守卫告警行（91e6353）未移植，不冒领。
 
-## 待移植台账（9cc36c5..e261fe9 未评审区间，2026-11-01 快照）
+## 上游基线推进（2026-11-01，9cc36c5 → e261fe9）
 
-基线停在 `9cc36c5`（推进规则：待评审队列全部评审完才动）。r42 族之外的 49 提交按族预分组，
-**逐条评审未做**，处置以届时评审为准：
+基线一次推进到 e261fe9（本地 main，未推送）。区间 52 提交逐条处置：r42 族四批（EXP-CORR）
++ 五批后续（批E fps/守卫链、批F WB 走线、批H1 亮度渐变）已落地；其余按平台裁定登记如下。
+**暂缓项已登记**（UPSTREAM_BASE 推进规则允许）：「平台面待批」= 纯层/判定已落或缺陷家族
+不可达，native/UI 接线面挂后续批（不冒领）。
 
-- **相机/曝光链**（建议下一批，与纠偏同域）：`45c8500` setFps 单一写入者+快门域收口、
-  `91e6353` 帧率坍塌守卫（批B 已铺 actualFps 采样底座）、`36917e5` 加固三项
-  （守卫补盲区/换段预提示/近似档预告知）、`813e83f` WB 取证遥测、`afa8471` 物理子头
-  AF 回退（OHOS 相机模型无逻辑/物理头同概念，需平台裁定）、WB 算法族
-  `c0ea34a`/`f4aeb36`/`ea5b26e`/`003c3b2`（绿幕根治依赖 HAL CCM 回报，OHOS 无等价
-  接口，评审时重点裁定）；
-- **UI/交互**：`5216e72` 取景器亮度跟随系统+渐变、`e7b7bf2` 播放页顶栏收起+浮动 dock、
-  `320a956`/`bda89bb` 曲线面板记忆/锚点手感、`66f88e0`+`1676a8a` TONE 胶囊（空梯教训
-  对本侧 PillSlider 空梯禁用占位同样适用）、`971d710`/`a3172e8` HUD 读数透字/叠加层
-  让位（本侧霜板结构不同构，需对照）、`03979da` 说明截行；
-- **后渲染导出/媒体**：`dcaf45b`/`ba9f0f4`/`09c19c9`/`a0ef71d`/`56631bc` 后渲染导出管线
-  （本侧 clip_exporter 是 remux 链，后渲染链 native 面）；`7b12162` 选片 MIME；`5f029e8`
-  A/B 打点死区；
-- **Glow**：`04d1c62`/`0b9d275` 预设删除+色盘自选、`350c671` 颜色模式+阈值域+导出面板；
-- **动效**：`81059e2`/`f0716fe`/`a3855c3`/`3651901` 液态 Q 弹（LiquidSpring/液态开关/红心；
-  ArkUI curves.springMotion 有天然对应面）；
-- **Android 导航/生命周期族**（黑屏链 13 提交 `3b20b5e`..`570ea50`）：NavHost 返回栈/
-  Activity 作用域是 Android 导航模型专属，本侧路由/页面栈不同构——**逐条评审后**再登记
-  N/A 或提炼平台无关思想（预览存活真身判据/看门狗），不预判；
-- **杂务/文档**：`e261fe9` r42 发布说明（安卓侧文档，无移植动作）。
+| 上游提交 | 鸿蒙处置 |
+|---|---|
+| `5be0cf9`+`8c30210`+`b2e5a8d` r42 等号档曝光纠偏 | ✅ **完整移植**（EXP-CORR 批 A–D：6b7c91c/8301c18/4864f08/14e377a，见上节） |
+| `45c8500` setFps 单一写入者 | ✅ **完整移植**（批E f3331fa：WotaParams.setFps + 四写入点收口 + 源码守卫） |
+| `91e6353` 帧率坍塌守卫 | ✅ **完整移植**（批E：core/LowFpsWatch + 引擎独立 1s 定时采样 + lowFpsHint + HUD 告警行） |
+| `36917e5` 加固三项 | ✅ **完整移植**（批E：零回调盲区=定时拍/segmentCapApproached 换段预提示/近似档+手动预告知） |
+| `c0ea34a` WB 模型两缺陷 | ✅ **语义随纯层落地**（批F 5e136db：WbPlan.ets 内 5500K 中性锚点+绿通道满额——本侧无 RGB 增益下发面，缺陷代码本身不存在） |
+| `f4aeb36` WB 算法兜底 | 🟡 **纯决策层已移植**（WbPlan.ets wbApplyPlan 三分支+归一化+全表用例）；GL 场景层乘增益的 native 面（uniform+NAPI 桥+提示 UI）**平台面待批**；halSupportsGains 对位=manualWhiteBalancePossible() |
+| `ea5b26e` 绿幕根治(identity CCM) | N/A——OHOS 无 COLOR_CORRECTION 接口面，identity CCM 缺陷代码本侧不存在（WbPlan.ets 头注释登记） |
+| `003c3b2` 设置往返绿帧 | N/A——本侧取景页 onPageHide 即 engine.stop()（无「覆盖期仍在跑」时间窗，缺陷家族不可达） |
+| `813e83f` WB 取证遥测 | N/A——request-vs-result 采纳判据依赖结果元数据读回，OHOS 无该 API 面（增益/CCM/中性点均不可读） |
+| `afa8471` 物理子头 AF 回退 | N/A（**评审裁定**）——Android 缺陷源自静态 characteristics 表（物理子设备表缺 AF 档）；OHOS AF 真值=打开会话的 isFocusModeSupported 活探测（能力协商），无静态表可误读；探测空 ⇒ AF 落 MANUAL 是协商后的诚实降级。真机若现同类误判再从证据立项 |
+| `5216e72` 亮度跟随系统+渐变 | ✅ **完整移植**（批H1 f6c6ede：BrightnessRampMath+WindowBrightness+设置两键+取景冷启/起播渐亮接线；起坡值 -1 跟随时 0.5 兜底已登记） |
+| `03979da` 说明截行 | N/A——本侧设置页说明行从不限行（rowHeader/switchRow 的 desc 无 maxLines），缺陷家族不可达 |
+| `1676a8a` TONE 空梯禁用 | N/A——本侧 TonePanel 四滑杆是连续 Slider+step0.01，不经 PillSlider 空梯闸，缺陷家族不可达 |
+| `971d710`+`a3172e8` HUD 让位 | N/A——修的是 Compose 霜板（wotaHudCard 97% 实底/叠加层 z 序）与 9sp 读数；本侧 HUD 是 T31 固定结构（读数条+Dock），霜板/叠加层压字问题结构不同构；真机走查若见同类再立项 |
+| `320a956` 曲线面板记忆+Y 直方图 | 🟡 **平台面待批**——HistogramMath 3→4 通道须与 native（gl_render.cpp 分箱+快照容量 192→256）同批改动；CurvePanelSize 纯层未落。两件合并挂「曲线面板增强批」 |
+| `bda89bb` 曲线锚点手感 | 🟡 **平台面待批**——CurveCanvas 拖点协议 UI 面（像素域命中/长按删除/端点双环），挂「曲线面板增强批」 |
+| `66f88e0` TONE 胶囊烘进 LUT | 🟡 **平台面待批**——TonePanel 四滑杆在册，tone→LUT 烘焙在 native GL 链（scene 层），挂「色调 LUT 批」；1676a8a 的空梯教训已由 ToneSliderRow 连续滑杆天然规避 |
+| `e7b7bf2` 播放页顶栏收起+浮动 dock | 🟡 **平台面待批**——本侧 Player.ets 是 T31 固定 chrome（顶栏+进度条），收起/浮动 dock 属页面结构重做，挂「播放器 chrome 批」 |
+| `dcaf45b`+`ba9f0f4`+`09c19c9`+`a0ef71d`+`56631bc` 后渲染导出族 | 🟡 **平台面待批**——本侧 ClipExporter 是 remux 链；后渲染管线（解码→降噪→Glow→重编码）= native arc_repair 式离线执行器一族，量级=T29 级独立批；上游配套缺陷（音轨混入/死枚举/双旋）随管线批一并落 |
+| `7b12162` 选片 MIME 放宽 | N/A——本侧 Compare 选右片走沙箱 MediaRepo（相对路径直读），无系统 picker MIME 门（2026-10-28 追赶轮同款裁定） |
+| `5f029e8` A/B 打点死区 | 🟡 **平台面待批**——clip-在-clickable-前 的命中区膨胀是 Compose 语义；本侧打点胶囊是 ArkUI 层叠，若真机复现同族死区再按 hitTestBehavior 取证立项 |
+| `04d1c62`+`0b9d275`+`350c671` Glow 预设删除/色盘/颜色模式 | 🟡 **平台面待批**——glow 参数模型纯层+native 链在册（e148891+6ad2d15），预设表/色盘/阈值域/导出配置面板=UI+参数面一批，挂「Glow 交互批」 |
+| `81059e2`+`f0716fe`+`a3855c3`+`3651901` 液态 Q 弹族 | 🟡 **平台面待批**——LiquidSpring 语义参数（response/damping）有 ArkUI curves.springMotion 天然对应面（response²·ω 映射需标定）；WotaSwitch 64×32/速度继承/红心动画=ArkUI 动画批，挂「动效语言批」 |
+| `3b20b5e`..`570ea50` 黑屏链 13 提交 | **逐条评审完成，主体 N/A**——NavHost 返回栈竞态/Activity 作用域/导出上收是 Android 导航模型专属；本侧路由（router.pushUrl+页面栈）不同构。提炼的平台无关件已各有落位：预览存活真身判据=批B 引擎态真值（isPreviewLive 同思想）、黑屏自愈=既有 healthMonitor/glFatal 链、导出宿主作用域=ClipExporter 页内会话。**「结构教训」（职责上收正确 owner）已随本节登记**。`8c10572`/`1e38c72` diag 留痕=N/A（DestinationPresence/Activity 生命周期探针无对应面） |
+| `e261fe9` r42 发布说明 | 无移植动作（安卓侧文档） |
+
+**「平台面待批」清单（按建议顺序）**：① 曲线面板增强批（320a956+bda89bb，native 直方图
+4 通道同批）② 色调 LUT 批（66f88e0）③ 后渲染导出批（dcaf45b 族，T29 级）④ Glow 交互批
+（04d1c62/0b9d275/350c671）⑤ 动效语言批（81059e2 族）⑥ 播放器 chrome 批（e7b7bf2）。
 
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
