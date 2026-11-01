@@ -160,7 +160,7 @@ object RequestApplier {
         // ---- SENSOR_EXPOSURE_TIME，AE 状态与帧周期不受影响；全部带默认值，旧构造点/旧用例不破。
         /** 自动微调曝光（默认 true）：开 = 实测 Δ+安全系数夹界取余量；关 = 手动滑杆值 */
         val correctionAuto: Boolean = true,
-        /** 手动微调滑杆（ns，-8ms..+8ms、0.5ms 步进；正值 = 更短更稳，负值 = 趋向满窗） */
+        /** 手动微调滑杆（ns，0..+8ms、0.5ms 步进；0 = 满窗直发） */
         val correctionManualNs: Long = 0L,
         /** 当前配置键下的实测拉长量 Δ（null = 没测到/键不匹配 ⇒ 自动档走 5% 下限） */
         val readoutDeltaNs: Long? = null,
@@ -523,7 +523,6 @@ object RequestApplier {
             // 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）：满窗（曝光==帧周期）落在
             // Camera2 合同的边界域，部分 HAL 会拉长帧周期 ⇒ 帧率掉档。发送侧永不发等号值——
             // 纠偏只动 SENSOR_EXPOSURE_TIME 这一个键：AE 状态、帧周期（节奏真值）、总线档位全部不动。
-            // 手动负值（趋向满窗）物理上不能越窗 ⇒ correctedExposureNs 收在帧周期（= 满窗直发）。
             val perFrame = frameDurationNs(fps)
             val marginNs = if (ExposureCorrection.applicable(p.shutterNs, fps)) {
                 when {

@@ -655,7 +655,10 @@ private fun ShutterPill(
                     )
                     WotaSwitch(
                         checked = corrAuto,
-                        onCheckedChange = { params.exposureCorrectionAuto.value = it }
+                        onCheckedChange = {
+                            params.exposureCorrectionAuto.value = it
+                            onPersist()
+                        }
                     )
                 }
                 NoteText(stringResource(R.string.cam_shutter_correction_auto_hint))
@@ -676,8 +679,8 @@ private fun ShutterPill(
                                 (ms * 2).roundToInt() * ExposureCorrection.MANUAL_STEP_NS
                         },
                         snapKey = null,
-                        ladder = (-16..16).map { it * 0.5f },
-                        format = { ms -> "%+.1f ms".format(ms) },
+                        ladder = (0..16).map { it * 0.5f },
+                        format = { ms -> "%.1f ms".format(ms) },
                         enabled = editable,
                         onValueChangeFinished = onPersist
                     )

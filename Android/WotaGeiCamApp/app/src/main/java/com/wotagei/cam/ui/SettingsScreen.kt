@@ -189,6 +189,13 @@ object WotaSettings {
     const val KEY_DENOISE_VIDEO = "denoise_video"
 
     /**
+     * 等号档曝光纠偏（2026-11-01 用户定版）：自动开关（默认 true）与手动滑杆值
+     * （ns，0..8_000_000、0.5ms 步进，自动关时生效）。与相机参数同一条"录制页即改即存"纪律。
+     */
+    const val KEY_CORRECTION_AUTO = "correction_auto"
+    const val KEY_CORRECTION_MANUAL_NS = "correction_manual_ns"
+
+    /**
      * 站位线的**间距与颜色**（2026-10-27 用户裁决）：只持久化这两项，
      * **线数不入档**——"启动时取景器能干净无线"是用户点名的口径，所以默认线数恒为
      * [com.wotagei.cam.core.MarkerLines.DEFAULT_COUNT]（0 = 关），上次开过几条不带进下次。

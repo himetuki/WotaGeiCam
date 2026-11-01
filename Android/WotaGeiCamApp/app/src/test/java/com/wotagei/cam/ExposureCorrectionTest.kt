@@ -56,9 +56,9 @@ class ExposureCorrectionTest {
     fun correctedExposureNeverExceedsFramePeriod() {
         assertEquals(38_000_000L, ExposureCorrection.correctedExposureNs(t25, 2_000_000L, t25))
         assertEquals(
-            "负值纠偏（趋向满窗）饱和在帧周期 = 满窗直发，这是合同不是设计",
+            "手动 0 = 满窗直发（等号），与改版前行为一致",
             t25,
-            ExposureCorrection.correctedExposureNs(t25, -8_000_000L, t25)
+            ExposureCorrection.correctedExposureNs(t25, 0L, t25)
         )
         assertEquals(
             "1/24@24：满窗 41_666_666 − 5% 下限 2_083_333 = 39_583_333",
@@ -74,9 +74,10 @@ class ExposureCorrectionTest {
 
     @Test
     fun manualSliderDomainIsClamped() {
-        assertEquals(-8_000_000L, ExposureCorrection.clampManualNs(-99_000_000L))
+        assertEquals("负值区已去掉：手改 prefs 的负值钳回 0", 0L, ExposureCorrection.clampManualNs(-99_000_000L))
         assertEquals(8_000_000L, ExposureCorrection.clampManualNs(99_000_000L))
         assertEquals(500_000L, ExposureCorrection.clampManualNs(500_000L))
+        assertEquals(0L, ExposureCorrection.clampManualNs(0L))
     }
 
     // ---------------------------------------------------------- 探测折算：中位数抗抖动、负 Δ 归 0

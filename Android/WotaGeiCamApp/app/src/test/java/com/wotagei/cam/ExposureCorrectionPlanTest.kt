@@ -108,14 +108,9 @@ class ExposureCorrectionPlanTest {
             RequestApplier.exposurePlan(state(), snapshot(t25, auto = false, manualNs = 500_000L)).exposureNs
         )
         assertEquals(
-            "手动 0 = 用户明确要满窗（等号直发，与改版前行为一致）",
+            "手动 0 = 用户明确要满窗（等号直发，与改版前行为一致；负值区 2026-11-01 裁决去掉）",
             t25,
             RequestApplier.exposurePlan(state(), snapshot(t25, auto = false, manualNs = 0L)).exposureNs
-        )
-        assertEquals(
-            "手动 −8ms ⇒ 越窗被合同上限截断，饱和在满窗",
-            t25,
-            RequestApplier.exposurePlan(state(), snapshot(t25, auto = false, manualNs = -8_000_000L)).exposureNs
         )
     }
 

@@ -17,8 +17,9 @@ package com.wotagei.cam.core
  */
 object ExposureCorrection {
 
-    /** 手动微调滑杆域：-8ms ~ +8ms，0.5ms 步进（正值 = 曝光更短更稳，负值 = 趋向满窗） */
-    const val MANUAL_MIN_NS = -8_000_000L
+    /** 手动微调滑杆域：0 ~ +8ms，0.5ms 步进（2026-11-01 用户裁决：负值区去掉——
+     *  负值在等号档只会被帧周期上限饱和成满窗直发，是查不到实效的假域） */
+    const val MANUAL_MIN_NS = 0L
     const val MANUAL_MAX_NS = 8_000_000L
     const val MANUAL_STEP_NS = 500_000L
 
@@ -65,15 +66,12 @@ object ExposureCorrection {
         return ((deltaNs ?: 0L).coerceAtLeast(0L) + AUTO_SAFETY_NS).coerceIn(floor, cap)
     }
 
-    /**
-     * 手动滑杆值即纠偏值：正值 = 从满窗再缩短（更稳）；负值 = 趋向满窗（更亮）。
-     * 负值在等号档会被物理上限（帧周期）截断——曝光不能超过帧周期，这是合同不是设计。
-     */
+    /** 手动滑杆值即纠偏值：正值 = 从满窗再缩短（更稳）；0 = 满窗直发（等号，与改版前一致）。 */
     fun manualMarginNs(sliderNs: Long): Long = clampManualNs(sliderNs)
 
     /**
      * 发送曝光 = 钳制后曝光 − 纠偏值，夹进 [1ns, 帧周期]。
-     * 上限封死「曝光越窗」（负值纠偏饱和在满窗 = 满窗直发）；下限防 0/负值。
+     * 上限封死「曝光越窗」（防御：手动 0 = 满窗直发是合法取值，只防溢出不到负）；下限防 0/负值。
      */
     fun correctedExposureNs(clampedNs: Long, marginNs: Long, perFrameNs: Long): Long =
         (clampedNs - marginNs).coerceIn(1L, perFrameNs)

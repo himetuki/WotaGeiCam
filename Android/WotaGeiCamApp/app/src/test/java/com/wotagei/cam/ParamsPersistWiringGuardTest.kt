@@ -36,6 +36,8 @@ class ParamsPersistWiringGuardTest {
         "default_arc_merge_deadband",
         // 2026-10-26：降噪两项（音频/画面）入档
         "denoise_audio", "denoise_video",
+        // 2026-11-01：等号档曝光纠偏两项入档（自动开关默认开 + 手动滑杆值 0..8ms）
+        "correction_auto", "correction_manual_ns",
         // 2026-10-27：站位线的间距与颜色入档（**线数刻意不入档**，见下面的专门用例）
         "default_marker_spread", "default_marker_color",
         // 2026-10-27：Glow 整份参数（复合串键）；2026-10-28：色调（KEY_TONE）+ 上屏渲染比例

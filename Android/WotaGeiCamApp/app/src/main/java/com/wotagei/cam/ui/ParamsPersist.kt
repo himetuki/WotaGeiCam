@@ -5,6 +5,7 @@ import com.wotagei.cam.core.AeMode
 import com.wotagei.cam.core.ArcMergeDeadband
 import com.wotagei.cam.core.AfMode
 import com.wotagei.cam.core.DisplayScale
+import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
 import com.wotagei.cam.core.FrameEffect
 import com.wotagei.cam.core.GlowParams
@@ -27,8 +28,9 @@ import com.wotagei.cam.core.encodeGlow
  * 语义 = **键即启动档位**（上次用过就是下次启动值）——与设置页默认档共用同一套键，
  * 不新造"默认 vs 上次"两套概念（拍板 Q1：共用）。[WotaSettings] 里那 19 个新键与
  * 5 个存量键（`default_fps`/`default_shutter_ns`/`default_bitrate`/`default_ref_lines`/
- * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项、Glow 一份与上屏档共同构成
- * 入档白名单 [KEYS]（30 项）。
+ * `level_enabled`）、2026-10-26 的降噪两项、2026-10-27 的站位线两项、Glow 一份与上屏档、
+ * 2026-11-01 的等号档纠偏两项（自动开关 + 手动滑杆值）共同构成
+ * 入档白名单 [KEYS]（32 项）。
  *
  * 两条链：
  * - **冷启恢复**：[restore] 读键 → 坏值回默认 → 写总线（`copy(value=)`，不碰 range/enabled/exact，
@@ -78,6 +80,9 @@ object ParamsPersist {
         WotaSettings.KEY_DEFAULT_ARC_MERGE_DEADBAND,
         WotaSettings.KEY_DENOISE_AUDIO,
         WotaSettings.KEY_DENOISE_VIDEO,
+        // 2026-11-01：等号档曝光纠偏两项（自动开关默认开 + 手动滑杆值）
+        WotaSettings.KEY_CORRECTION_AUTO,
+        WotaSettings.KEY_CORRECTION_MANUAL_NS,
         // 2026-10-27：站位线的间距与颜色入档；**线数刻意不入档**（用户口径：启动时取景器
         // 要干净无线 ⇒ 线数恒从 0 起步，见 restore 末尾那条注释与 KeyTable 守卫）
         WotaSettings.KEY_DEFAULT_MARKER_SPREAD,
@@ -185,6 +190,12 @@ object ParamsPersist {
         )
         // ㉒ 色调（29 §4.3，2026-10-28）：复合串一个键；坏串整份回恒等（decode 内部已 sanitize）
         params.tone.value = com.wotagei.cam.core.ToneParams.decode(prefs.getString(WotaSettings.KEY_TONE, null))
+        // ㉓ 等号档曝光纠偏（2026-11-01 用户定版）：自动开关布尔键；手动滑杆值钳回产品域
+        //    （0..8ms——负值区 2026-11-01 裁决去掉）。手改 prefs 的脏值最多回到域边界
+        params.exposureCorrectionAuto.value = prefs.getBoolean(WotaSettings.KEY_CORRECTION_AUTO, true)
+        params.exposureCorrectionManualNs.value = ExposureCorrection.clampManualNs(
+            prefs.getLong(WotaSettings.KEY_CORRECTION_MANUAL_NS, 0L)
+        )
     }
 
     /** LOCK 归一（Q5）：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO。 */
@@ -252,6 +263,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
     private var shBitrate = params.bitrate.value
     private var shDenoiseAudio = params.audioDenoise.value
     private var shDenoiseVideo = params.videoDenoise.value
+    private var shCorrectionAuto = params.exposureCorrectionAuto.value
+    private var shCorrectionManualNs = params.exposureCorrectionManualNs.value
     private var shMarkerSpread = params.markerSpread.value
     private var shMarkerColor = params.markerColor.value
     private var shGlow = params.glowParams.value
@@ -288,6 +301,8 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         val level = params.levelEnabled.value
         val denoiseAudio = params.audioDenoise.value
         val denoiseVideo = params.videoDenoise.value
+        val correctionAuto = params.exposureCorrectionAuto.value
+        val correctionManualNs = params.exposureCorrectionManualNs.value
         // 站位线只落间距与颜色：线数不进白名单（用户口径"启动时取景器干净无线"），
         // 所以这里**故意不读 params.markerCount**
         val markerSpread = params.markerSpread.value
@@ -303,6 +318,10 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
         if (bitrate != shBitrate) { editor.putInt(WotaSettings.KEY_DEFAULT_BITRATE, bitrate); dirty = true }
         if (denoiseAudio != shDenoiseAudio) { editor.putString(WotaSettings.KEY_DENOISE_AUDIO, denoiseAudio.key); dirty = true }
         if (denoiseVideo != shDenoiseVideo) { editor.putString(WotaSettings.KEY_DENOISE_VIDEO, denoiseVideo.key); dirty = true }
+        if (correctionAuto != shCorrectionAuto) { editor.putBoolean(WotaSettings.KEY_CORRECTION_AUTO, correctionAuto); dirty = true }
+        if (correctionManualNs != shCorrectionManualNs) {
+            editor.putLong(WotaSettings.KEY_CORRECTION_MANUAL_NS, correctionManualNs); dirty = true
+        }
         if (markerSpread != shMarkerSpread) { editor.putFloat(WotaSettings.KEY_DEFAULT_MARKER_SPREAD, markerSpread); dirty = true }
         if (markerColor != shMarkerColor) { editor.putString(WotaSettings.KEY_DEFAULT_MARKER_COLOR, markerColor.name); dirty = true }
         if (glow != shGlow) { editor.putString(WotaSettings.KEY_GLOW, encodeGlow(glow)); dirty = true }

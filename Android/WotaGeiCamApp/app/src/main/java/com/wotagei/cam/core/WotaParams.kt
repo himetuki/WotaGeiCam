@@ -150,7 +150,7 @@ class WotaParams(private val scope: CoroutineScope) {
 
     // ------------------------------------------------ 等号档曝光纠偏（2026-11-01 用户定版，docs/plan/31）
     // 三条铁律见 core.ExposureCorrection：只动发送侧曝光、总线保真、探测只在预览态。
-    // 首版不落盘（站位线先例：没经过真机复验的默认值不写进用户存储），重启回默认「自动开」。
+    // 落盘走 ParamsPersist（KEY_CORRECTION_AUTO 默认 true / KEY_CORRECTION_MANUAL_NS），即改即存。
 
     /**
      * 自动微调曝光（默认开）：开 = 发送侧按「实测拉长量 Δ + 安全系数」取余量（下限 5% 帧周期）；
@@ -160,8 +160,8 @@ class WotaParams(private val scope: CoroutineScope) {
     val exposureCorrectionAuto = MutableStateFlow(true)
 
     /**
-     * 手动微调滑杆（ns）：-8ms ~ +8ms、0.5ms 步进。正值 = 从满窗再缩短（更稳），
-     * 负值 = 趋向满窗（更亮；等号档被物理上限截断 = 满窗直发）。仅在自动关时生效。
+     * 手动微调滑杆（ns）：0 ~ +8ms、0.5ms 步进（2026-11-01 裁决负值区去掉）。
+     * 正值 = 从满窗再缩短（更稳）；0 = 满窗直发（等号，与改版前一致）。仅在自动关时生效。
      */
     val exposureCorrectionManualNs = MutableStateFlow(0L)
 

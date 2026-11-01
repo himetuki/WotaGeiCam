@@ -88,6 +88,9 @@ class ParamsPersistSessionTest {
         // 2026-10-26：降噪两项也在白名单里，必须一起动到非默认值（否则 flush 集合对不上白名单）
         audioDenoise.value = com.wotagei.cam.core.AudioDenoise.SYSTEM
         videoDenoise.value = com.wotagei.cam.core.VideoDenoise.GPU_BILATERAL
+        // 2026-11-01：等号档纠偏两项入档；自动开关翻转 + 手动滑杆推到非零（域 0..8ms）
+        exposureCorrectionAuto.value = false
+        exposureCorrectionManualNs.value = 2_000_000L
         // 2026-10-27：站位线间距与颜色入档；**线数故意调成非默认**，用来证明它不被落盘
         markerSpread.value = 0.85f
         markerColor.value = com.wotagei.cam.core.MarkerLineColor.CYAN
