@@ -764,21 +764,22 @@ deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` +
 | `03979da` 说明截行 | N/A——本侧设置页说明行从不限行（rowHeader/switchRow 的 desc 无 maxLines），缺陷家族不可达 |
 | `1676a8a` TONE 空梯禁用 | N/A——本侧 TonePanel 四滑杆是连续 Slider+step0.01，不经 PillSlider 空梯闸，缺陷家族不可达 |
 | `971d710`+`a3172e8` HUD 让位 | N/A——修的是 Compose 霜板（wotaHudCard 97% 实底/叠加层 z 序）与 9sp 读数；本侧 HUD 是 T31 固定结构（读数条+Dock），霜板/叠加层压字问题结构不同构；真机走查若见同类再立项 |
-| `320a956` 曲线面板记忆+Y 直方图 | 🟡 **平台面待批**——HistogramMath 3→4 通道须与 native（gl_render.cpp 分箱+快照容量 192→256）同批改动；CurvePanelSize 纯层未落。两件合并挂「曲线面板增强批」 |
-| `bda89bb` 曲线锚点手感 | 🟡 **平台面待批**——CurveCanvas 拖点协议 UI 面（像素域命中/长按删除/端点双环），挂「曲线面板增强批」 |
-| `66f88e0` TONE 胶囊烘进 LUT | 🟡 **平台面待批**——TonePanel 四滑杆在册，tone→LUT 烘焙在 native GL 链（scene 层），挂「色调 LUT 批」；1676a8a 的空梯教训已由 ToneSliderRow 连续滑杆天然规避 |
-| `e7b7bf2` 播放页顶栏收起+浮动 dock | 🟡 **平台面待批**——本侧 Player.ets 是 T31 固定 chrome（顶栏+进度条），收起/浮动 dock 属页面结构重做，挂「播放器 chrome 批」 |
-| `dcaf45b`+`ba9f0f4`+`09c19c9`+`a0ef71d`+`56631bc` 后渲染导出族 | 🟡 **平台面待批**——本侧 ClipExporter 是 remux 链；后渲染管线（解码→降噪→Glow→重编码）= native arc_repair 式离线执行器一族，量级=T29 级独立批；上游配套缺陷（音轨混入/死枚举/双旋）随管线批一并落 |
+| `320a956` 曲线面板记忆+Y 直方图 | ✅ **完整移植**（曲线批C1+C2：2038b7a 直方图 3→4 通道含 native 分箱/快照 256/NAPI + 170c67a CurvePanelSize 边长记忆/抬手落盘/重置回 200） |
+| `bda89bb` 曲线锚点手感 | ✅ **完整移植**（曲线批C3 ecf51d8：hitTestPx 像素域命中/端点角部扩展 ±12vp/长按删除替换双击/端点 1.15× + 背景色趋势渐变 + IO 读数；震动 N/A 无 VIBRATE 权限） |
+| `66f88e0` TONE 胶囊烘进 LUT | ✅ **完整移植**（色调批 b485a9e：本侧 tone 链等价在册，本批修 **setCurveEnabled 合取判据**——恒等曲线+非恒等色调时 LUT 被禁用、色调被静默丢掉；1676a8a N/A 维持） |
+| `e7b7bf2` 播放页顶栏收起+浮动 dock | ✅ **完整移植**（chrome 批 1cbedf7：playerChromeOf 状态矩阵唯一真源 + 顶栏持久收起落盘 + 浮动返回 + 拉出钮；bottomBar 本为覆盖层=浮动卡片等价结构，登记） |
+| `dcaf45b`+`ba9f0f4`+09c19c9+a0ef71d+56631bc 后渲染导出族 | 🟡 **决策面已移植**（导出批 74bfb85：SceneExportPlan 决策层全表——特效集/帧率/码率/PTS/区间判据；**native 管线面待批**：解码→GL 三趟→重编码 = arc_repair 同族量级独立批，五件管线缺陷随之落） |
 | `7b12162` 选片 MIME 放宽 | N/A——本侧 Compare 选右片走沙箱 MediaRepo（相对路径直读），无系统 picker MIME 门（2026-10-28 追赶轮同款裁定） |
-| `5f029e8` A/B 打点死区 | 🟡 **平台面待批**——clip-在-clickable-前 的命中区膨胀是 Compose 语义；本侧打点胶囊是 ArkUI 层叠，若真机复现同族死区再按 hitTestBehavior 取证立项 |
-| `04d1c62`+`0b9d275`+`350c671` Glow 预设删除/色盘/颜色模式 | 🟡 **平台面待批**——glow 参数模型纯层+native 链在册（e148891+6ad2d15），预设表/色盘/阈值域/导出配置面板=UI+参数面一批，挂「Glow 交互批」 |
-| `81059e2`+`f0716fe`+`a3855c3`+`3651901` 液态 Q 弹族 | 🟡 **平台面待批**——LiquidSpring 语义参数（response/damping）有 ArkUI curves.springMotion 天然对应面（response²·ω 映射需标定）；WotaSwitch 64×32/速度继承/红心动画=ArkUI 动画批，挂「动效语言批」 |
+| `5f029e8` A/B 打点死区 | N/A（**本日裁定**）——本侧打点胶囊是 ArkUI 按钮（无 Compose clip 命中区族，对照 Compare.ets 无 .clip() 修饰器）；真机若现同族死区再按 hitTestBehavior 取证立项 |
+| `04d1c62`+`0b9d275`+`350c671` Glow 预设删除/色盘/颜色模式 | ✅ **完整移植**（Glow 批 c972228：模型单色化+colorOnly+阈值域 0.6~1.0、native 单 tint+软边收敛、色盘画布+双击归零；震动 N/A 维持） |
+| `81059e2`+`f0716fe`+`a3855c3`+`3651901` 液态 Q 弹族 | ✅ **主体移植**（动效批 d75c7a6：LiquidSpring 纯层三规格+域钳 + WotaSwitch 液态开关（过中点翻转/弹簧落位/按压回弹）+ 纠偏开关换装；**红心 LikeBurst 装饰动画待批**——收藏面语义（toggleLike 链）不受影响） |
 | `3b20b5e`..`570ea50` 黑屏链 13 提交 | **逐条评审完成，主体 N/A**——NavHost 返回栈竞态/Activity 作用域/导出上收是 Android 导航模型专属；本侧路由（router.pushUrl+页面栈）不同构。提炼的平台无关件已各有落位：预览存活真身判据=批B 引擎态真值（isPreviewLive 同思想）、黑屏自愈=既有 healthMonitor/glFatal 链、导出宿主作用域=ClipExporter 页内会话。**「结构教训」（职责上收正确 owner）已随本节登记**。`8c10572`/`1e38c72` diag 留痕=N/A（DestinationPresence/Activity 生命周期探针无对应面） |
 | `e261fe9` r42 发布说明 | 无移植动作（安卓侧文档） |
 
-**「平台面待批」清单（按建议顺序）**：① 曲线面板增强批（320a956+bda89bb，native 直方图
-4 通道同批）② 色调 LUT 批（66f88e0）③ 后渲染导出批（dcaf45b 族，T29 级）④ Glow 交互批
-（04d1c62/0b9d275/350c671）⑤ 动效语言批（81059e2 族）⑥ 播放器 chrome 批（e7b7bf2）。
+**「平台面待批」余量（2026-11-02 消化后仅剩两项）**：① 后渲染导出 native 管线（dcaf45b
+族本体，arc_repair 同族量级独立批）② LikeBurst 红心装饰动画（81059e2 族余量，纯装饰）。
+其余待批方向（曲线/色调/Glow/chrome/动效主体）已全部消化落地（曲线 C1-C3 2038b7a/170c67a/
+ecf51d8、色调 b485a9e、Glow c972228、chrome 1cbedf7、动效 d75c7a6）。
 
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 

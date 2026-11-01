@@ -69,8 +69,10 @@ test('节点与线宽随scale等比', () => {
   assertTrue(popup.indexOf('ctx.lineWidth = 1 * scale') >= 0 &&
     popup.indexOf('ctx.lineWidth = 1.5 * scale') >= 0 &&
     popup.indexOf('ctx.lineWidth = 2 * scale') >= 0, '网格/y=x/折线线宽必须乘 scale');
-  assertTrue(popup.indexOf('(i === this.selected ? 9 : 6.5) * scale') >= 0,
-    '节点半径必须乘 scale');
+  // 半径仍乘 scale；端点 1.15×（7.5）与中间点可区分（29 §3.2-2）
+  assertTrue(popup.indexOf('? 9 : endpoint ? 7.5 : 6.5') >= 0 &&
+    popup.indexOf('* scale') >= 0,
+    '节点半径必须乘 scale（端点 7.5 与中间 6.5 可区分）');
 });
 
 // ------------------------------------------------------------------ CurveStack 编解码（curve_stack 持久化格式）
