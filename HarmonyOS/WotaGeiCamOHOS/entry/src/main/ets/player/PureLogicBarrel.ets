@@ -71,6 +71,7 @@ import { AudioDenoise, VideoDenoise, audioDenoiseNeedsCodec, denoiseKernelLite,
   effectiveVideoDenoise, videoDenoiseActive } from '../core/Denoise';
 import { HistogramMath } from '../core/HistogramMath';
 import { ExposureCorrection } from '../core/ExposureCorrection';
+import { WbApply, isIdentityGains, manualGains, wbApplyPlan } from '../core/WbPlan';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
 class NoopFlushScheduler implements FlushScheduler {
@@ -111,6 +112,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.hudLayoutCompileProbe();
     PureLogicBarrel.cameraCatchupCompileProbe();
     PureLogicBarrel.exposureCorrectionCompileProbe();
+    PureLogicBarrel.wbPlanCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -314,6 +316,19 @@ export class PureLogicBarrel {
     const delta: number = ExposureCorrection.probeDeltaNs([42_000_000, 44_000_000], 40_000_000);
     const period: number = ExposureCorrection.framePeriodNs(24);
     if (applicable && margin > 0 && corrected > 0 && manual >= 0 && delta >= 0 && period > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 手动白平衡走线决策（WB 兜底纯层）的编译探针：模型/归一化/三分支走线。
+   * 零副作用；GL 兜底的 native 面待平台批（登记 WbPlan.ets 头注释），本探针保住编译门。
+   */
+  private static wbPlanCompileProbe(): void {
+    const gains: Array<number> = manualGains(5500, 0);
+    const plan: WbApply = wbApplyPlan(true, false, 3200, 10);
+    const identity: boolean = isIdentityGains(plan.gains);
+    if (gains.length === 3 && !plan.byHal && plan.byGl && plan.noticeNeeded && !identity) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }
