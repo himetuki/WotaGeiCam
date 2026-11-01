@@ -79,6 +79,11 @@ export const getArcEffectiveMode: () => number;
 export const startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
   endMs: number, audioOrdinal: number, audioShiftUs?: number) => string;
 export const getClipExportStatus: () => string;
+/** 后渲染导出（决策口径对拍 player/SceneExportPlan.ets；glowSpec = encodeGlow 单串；取消是独立终态 cancel:） */
+export const startSceneExport: (inFd: number, inSize: number, outFd: number, startMs: number,
+  endMs: number, audioOrdinal: number, glowSpec: string, denoiseOn: number) => string;
+export const getSceneExportStatus: () => string;
+export const cancelSceneExport: () => void;
 export const cancelClipExport: () => void;
 export const probeClipTracks: (inFd: number, inSize: number) => string;
 

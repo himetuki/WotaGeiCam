@@ -15,6 +15,7 @@
 #include "arc_repair.h"
 #include "avscreen_probe.h"
 #include "clip_exporter.h"
+#include "scene_exporter.h"
 #include "codec_recorder.h"
 #include "gl_render.h"
 
@@ -513,6 +514,55 @@ static napi_value CancelClipExport(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+/** 后渲染导出：inFd/inSize/outFd/startMs/endMs/audioOrdinal/glowSpec/denoiseOn；返回 ''=已起跑 */
+static napi_value StartSceneExport(napi_env env, napi_callback_info info)
+{
+    size_t argc = 8;
+    napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 6) {
+        return MakeString(env, "args");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    int32_t outFd = -1;
+    int64_t startMs = 0;
+    int64_t endMs = 0;
+    int32_t audioOrdinal = -1;
+    char glowBuf[1024] = {0};
+    size_t glowLen = 0;
+    int32_t denoiseOn = 0;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    napi_get_value_int32(env, argv[2], &outFd);
+    napi_get_value_int64(env, argv[3], &startMs);
+    napi_get_value_int64(env, argv[4], &endMs);
+    napi_get_value_int32(env, argv[5], &audioOrdinal);
+    if (argc >= 7) {
+        napi_get_value_string_utf8(env, argv[6], glowBuf, sizeof(glowBuf) - 1, &glowLen);
+    }
+    if (argc >= 8) {
+        napi_get_value_int32(env, argv[7], &denoiseOn);
+    }
+    return MakeString(env, wota::SceneExporter::Instance().Start(inFd, inSize, outFd,
+        startMs, endMs, audioOrdinal, std::string(glowBuf), denoiseOn));
+}
+
+/** idle | running:<pct> | done:<id> | cancel:<detail> | failed:<reason>（cancel 是独立终态） */
+static napi_value GetSceneExportStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, wota::SceneExporter::Instance().Status());
+}
+
+static napi_value CancelSceneExport(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    (void)env;
+    wota::SceneExporter::Instance().Cancel();
+    return nullptr;
+}
+
 /** 只读轨探测："videoCount,audioCount"；失败 "err:<code>" */
 static napi_value ProbeClipTracks(napi_env env, napi_callback_info info)
 {
@@ -686,6 +736,9 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getAvScreenProbeStatus", nullptr, GetAvScreenProbeStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelAvScreenProbe", nullptr, CancelAvScreenProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startClipExport", nullptr, StartClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startSceneExport", nullptr, StartSceneExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getSceneExportStatus", nullptr, GetSceneExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelSceneExport", nullptr, CancelSceneExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getClipExportStatus", nullptr, GetClipExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelClipExport", nullptr, CancelClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeClipTracks", nullptr, ProbeClipTracks, nullptr, nullptr, nullptr, napi_default, nullptr},
