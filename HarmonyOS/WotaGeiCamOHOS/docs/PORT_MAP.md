@@ -768,18 +768,18 @@ deveco 知识检索（云端不可达已登记；改以本地 `devecocli docs` +
 | `bda89bb` 曲线锚点手感 | ✅ **完整移植**（曲线批C3 ecf51d8：hitTestPx 像素域命中/端点角部扩展 ±12vp/长按删除替换双击/端点 1.15× + 背景色趋势渐变 + IO 读数；震动 N/A 无 VIBRATE 权限） |
 | `66f88e0` TONE 胶囊烘进 LUT | ✅ **完整移植**（色调批 b485a9e：本侧 tone 链等价在册，本批修 **setCurveEnabled 合取判据**——恒等曲线+非恒等色调时 LUT 被禁用、色调被静默丢掉；1676a8a N/A 维持） |
 | `e7b7bf2` 播放页顶栏收起+浮动 dock | ✅ **完整移植**（chrome 批 1cbedf7：playerChromeOf 状态矩阵唯一真源 + 顶栏持久收起落盘 + 浮动返回 + 拉出钮；bottomBar 本为覆盖层=浮动卡片等价结构，登记） |
-| `dcaf45b`+`ba9f0f4`+09c19c9+a0ef71d+56631bc 后渲染导出族 | 🟡 **决策面已移植**（导出批 74bfb85：SceneExportPlan 决策层全表——特效集/帧率/码率/PTS/区间判据；**native 管线面待批**：解码→GL 三趟→重编码 = arc_repair 同族量级独立批，五件管线缺陷随之落） |
+| `dcaf45b`+`ba9f0f4`+`09c19c9`+`a0ef71d`+`56631bc` 后渲染导出族 | ✅ **完整移植**（决策面 74bfb85 + **native 管线 ca51f6e**：scene_exporter 离线执行器——解码→特效趟→重编码→AVMuxer，特效趟=实时链同式 CPU 镜像（双边 σ=0.08/Glow 软边收敛/单 tint 合成，GL→CPU 偏离登记）、音轨只拷选中轨（09c19c9）、旋转只写一次（56631bc）、cancel 独立终态（a0ef71d）+ **弹层接线 85632fe**：方式双选/无效果置灰/进度/取消） |
 | `7b12162` 选片 MIME 放宽 | N/A——本侧 Compare 选右片走沙箱 MediaRepo（相对路径直读），无系统 picker MIME 门（2026-10-28 追赶轮同款裁定） |
 | `5f029e8` A/B 打点死区 | N/A（**本日裁定**）——本侧打点胶囊是 ArkUI 按钮（无 Compose clip 命中区族，对照 Compare.ets 无 .clip() 修饰器）；真机若现同族死区再按 hitTestBehavior 取证立项 |
 | `04d1c62`+`0b9d275`+`350c671` Glow 预设删除/色盘/颜色模式 | ✅ **完整移植**（Glow 批 c972228：模型单色化+colorOnly+阈值域 0.6~1.0、native 单 tint+软边收敛、色盘画布+双击归零；震动 N/A 维持） |
-| `81059e2`+`f0716fe`+`a3855c3`+`3651901` 液态 Q 弹族 | ✅ **主体移植**（动效批 d75c7a6：LiquidSpring 纯层三规格+域钳 + WotaSwitch 液态开关（过中点翻转/弹簧落位/按压回弹）+ 纠偏开关换装；**红心 LikeBurst 装饰动画待批**——收藏面语义（toggleLike 链）不受影响） |
+| `81059e2`+`f0716fe`+`a3855c3`+`3651901` 液态 Q 弹族 | ✅ **完整移植**（动效批 d75c7a6 LiquidSpring+WotaSwitch + **红心 71a74ce**：LikeBurst 纯函数全表+LikeHeart 宿主（全屏查看器星钮）；播放器顶栏无收藏宿主=3651901 那半边 N/A 登记） |
 | `3b20b5e`..`570ea50` 黑屏链 13 提交 | **逐条评审完成，主体 N/A**——NavHost 返回栈竞态/Activity 作用域/导出上收是 Android 导航模型专属；本侧路由（router.pushUrl+页面栈）不同构。提炼的平台无关件已各有落位：预览存活真身判据=批B 引擎态真值（isPreviewLive 同思想）、黑屏自愈=既有 healthMonitor/glFatal 链、导出宿主作用域=ClipExporter 页内会话。**「结构教训」（职责上收正确 owner）已随本节登记**。`8c10572`/`1e38c72` diag 留痕=N/A（DestinationPresence/Activity 生命周期探针无对应面） |
 | `e261fe9` r42 发布说明 | 无移植动作（安卓侧文档） |
 
-**「平台面待批」余量（2026-11-02 消化后仅剩两项）**：① 后渲染导出 native 管线（dcaf45b
-族本体，arc_repair 同族量级独立批）② LikeBurst 红心装饰动画（81059e2 族余量，纯装饰）。
-其余待批方向（曲线/色调/Glow/chrome/动效主体）已全部消化落地（曲线 C1-C3 2038b7a/170c67a/
-ecf51d8、色调 b485a9e、Glow c972228、chrome 1cbedf7、动效 d75c7a6）。
+**「平台面待批」余量：清零（2026-11-02）**。后渲染导出 native 管线（ca51f6e+85632fe）与
+LikeBurst 红心（71a74ce）已落地；此前待批方向（曲线/色调/Glow/chrome/动效主体）亦全部
+消化（2038b7a/170c67a/ecf51d8/b485a9e/c972228/1cbedf7/d75c7a6）。区间 9cc36c5..e261fe9
+共 52 提交：✅ 完整移植 / N/A（带平台证据）全覆盖，无 🟡 存留。
 
 ## 交付批（HDG：HUD 读数顺序拖拽换位，2026-10-25）
 
