@@ -18,6 +18,7 @@
  */
 import { preferences } from '@kit.ArkData';
 import { BrightnessRampMath } from '../core/BrightnessRampMath';
+import { CurvePanelSize } from '../core/CurvePanelSize';
 import { common } from '@kit.AbilityKit';
 import { HudItems, Size, WotaTiers } from '../core/Constants';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
@@ -49,8 +50,40 @@ const KEY_TEXT_SCALE_CAMERA: string = 'text_scale_camera';
 const KEY_DIAG_ENABLED: string = 'diag_enabled';
 /** 诊断详细档（上游 WotaSettings.KEY_DIAG_VERBOSE，逐字一致） */
 const KEY_DIAG_VERBOSE: string = 'diag_verbose';
+/**
+ * 曲线面板边长（dp）独立读写（上游 5216e72…错——上游 320a956 WotaSettings 的两个直读写
+ * 同构）：纯 UI 设置**不走 CameraSettings 也没有默认值应用链**；弹窗开启时读、把手抬手/重置时写。
+ */
+export class CurvePanelSideStore {
+  static read(ctx: common.Context): number {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_CURVE_PANEL_SIDE_DP, 200);
+      return CurvePanelSize.readSideOf(typeof raw === 'number' ? raw as number : undefined);
+    } catch (e) {
+      Diag.w('WotaStore', `curve panel side read failed: ${e}`);
+      return CurvePanelSize.DEFAULT_SIDE_DP;
+    }
+  }
+
+  static write(ctx: common.Context, sideDp: number): void {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      store.putSync(KEY_CURVE_PANEL_SIDE_DP, sideDp);
+      store.flush();
+    } catch (e) {
+      Diag.w('WotaStore', `curve panel side write failed: ${e}`);
+    }
+  }
+}
+
 /** RGB 曲线栈持久串（上游 WotaSettings.KEY_CURVE_STACK，逐字一致；CURVE 批） */
 const KEY_CURVE_STACK: string = 'curve_stack';
+// 曲线面板**实际边长** dp（29 §1.2 F1，上游 curve_panel_side_dp 逐字）：存 dp 不存 scale——
+// 跨屏幕/转屏时 baseSide 会变，存 scale 会漂移。缺省 200，读取经 CurvePanelSize 读侧钳
+const KEY_CURVE_PANEL_SIDE_DP: string = 'curve_panel_side_dp';
 // 「启动后自动亮屏」延迟秒（0–10，0=关闭；上游 camera_brighten_delay_sec，5216e72）
 const KEY_CAMERA_BRIGHTEN_DELAY_SEC: string = 'camera_brighten_delay_sec';
 // 「起播渐亮」时长十分之一秒（0–30 步 5，0=关闭；上游 player_brighten_ramp_tenths）

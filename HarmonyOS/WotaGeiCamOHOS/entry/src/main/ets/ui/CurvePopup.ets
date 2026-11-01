@@ -8,7 +8,8 @@
  * 重置＝四通道回恒等 + 尺寸回默认最小；边拖边写总线（onCommit persist=false），
  * 抬手落盘（persist=true，Camera 写 curve_stack 持久化）。
  *
- * **eb956f5 右缘等比缩放**：panelScale 会话态 1=默认最小（200vp 设计档），只增不减；
+ * **eb956f5 右缘等比缩放 + 29 §1.2（320a956）存实际边长**：把手改 savedSide（dp）、
+ * 抬手落盘一次；重置写回 200；
  * 右缘 22vp 命中条横向拖拽 1:1 换算增量，coerceIn(1, maxScale)；节点半径（6.5/9）与
  * 线宽（2）随 scale 等比（放大为手指大的人服务，网格/y=x 背景不缩放）；扇面重置钮
  * 连尺寸一起复位。尺寸会话级不落盘——「默认最小值」语义即每次进入回到最小。
@@ -18,6 +19,9 @@
  * ③ 逐指针消费语义（isConsumed 整手让路）以 hitTestBehavior(Block) 的命中隔离替代。
  */
 import { ColorCurve, CurveEdit, CurveInsertResult, CurvePoint, CurveStack } from '../core/CurveModel';
+import { CurvePanelSize } from '../core/CurvePanelSize';
+import { CurvePanelSideStore } from './SettingsStore';
+import { common } from '@kit.AbilityKit';
 import { HistogramMath } from '../core/HistogramMath';
 
 const CENTER_SIZE: number = 48;
@@ -77,8 +81,11 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
   /** 直方图计数快照（3×64，R/G/B；150ms 轮询，弹窗可见才轮询） */
   @State histCounts: Array<number> | undefined = undefined;
   private histTimer: number = -1;
-  /** eb956f5：面板等比缩放，1 = 默认最小（只增不减）；会话级不落盘 */
-  @State panelScale: number = 1;
+  /**
+   * 29 §1.2 F1（上游 320a956）：**存实际边长 dp** 不存 scale——跨屏幕/转屏 baseSide 会变，
+   * 存 scale 会漂移。把手拖拽改 savedSide，**抬手才落盘一次**（不逐帧写存储）；重置写回 200。
+   */
+  @State savedSide: number = CurvePanelSize.DEFAULT_SIDE_DP;
   /** 弹窗可用区（关闭捕获层 onAreaChange 实测，缩放上限的输入） */
   @State availW: number = 0;
   @State availH: number = 0;
@@ -109,9 +116,19 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     return Math.max(MIN_CURVE_SIDE, Math.min(CURVE_SIDE, this.maxSide()));
   }
 
-  /** 曲线框边长 = 默认最小档 × panelScale，夹可用区上限（eb956f5） */
+  /**
+   * 曲线框边长：持久边长带组合期可用区二次钳（29 §1.2）——存储值比当前窗口大（换小屏/
+   * 分屏）缩回可用区、比最小值小抬回最小；dot/线宽随 side/baseSide 等比放大，与旧
+   * panelScale 语义逐字相同
+   */
   private side(): number {
-    return Math.min(this.baseSide() * this.panelScale, this.maxSide());
+    return CurvePanelSize.clamp(this.savedSide, this.maxSide(), MIN_CURVE_SIDE);
+  }
+
+  /** 面板相对设计档的等比（dot/线宽放大的输入，与旧 panelScale 同义） */
+  private panelScale(): number {
+    const base: number = this.baseSide();
+    return base > 0 ? this.side() / base : 1;
   }
 
   private pickChannel(channel: number): void {
@@ -130,10 +147,20 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     this.drawCurve();
   }
 
-  /** 重置钮（扇面）：回恒等之外连尺寸一起复位（eb956f5 需求③） */
+  /** 重置钮（扇面）：回恒等之外连尺寸一起复位并落盘（29 §1.2：重置写回 200） */
   private resetAllWithSize(): void {
     this.resetAll();
-    this.panelScale = 1;
+    this.savedSide = CurvePanelSize.DEFAULT_SIDE_DP;
+    this.writeSide();
+  }
+
+  /** 抬手/重置的落盘点（一次手势一次；写失败只记日志） */
+  private writeSide(): void {
+    const ctx: common.Context | undefined =
+      this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctx !== undefined) {
+      CurvePanelSideStore.write(ctx, this.savedSide);
+    }
   }
 
   /** 以总线现值做底只换本通道：拖动期间其它通道可能被改过，不能用手里的旧 stack 合 */
@@ -157,9 +184,14 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     this.stopHistogramPolling();
   }
 
-  /** visible 翻转 → 直方图轮询启停（native 采样开关由宿主页管，这里只管消费节奏） */
-  onVisibleChanged(): void {
+  /** visible 翻转 → 直方图轮询启停 + 开窗时读持久边长（纯 UI 设置，不走默认值应用链） */
+  private onVisibleChanged(): void {
     if (this.visible) {
+      const ctx: common.Context | undefined =
+        this.getUIContext().getHostContext() as common.Context | undefined;
+      if (ctx !== undefined) {
+        this.savedSide = CurvePanelSideStore.read(ctx);
+      }
       this.startHistogramPolling();
     } else {
       this.stopHistogramPolling();
@@ -206,7 +238,7 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     if (side <= 0) {
       return;
     }
-    const scale: number = this.panelScale;
+    const scale: number = this.panelScale();
     const dim: number = this.gpuMode ? 1 : 0.35;
     ctx.clearRect(0, 0, side, side);
     ctx.fillStyle = '#FF000000';
@@ -360,14 +392,11 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     }
   }
 
-  /** 右缘把手横拖（eb956f5）：1:1 换算 panelScale 增量，下限 1（默认最小）只增不减 */
+  /** 右缘把手横拖（eb956f5 + 29 §1.2）：1:1 换算**边长**增量（vp），下限 = 最小尺寸、上限 = 可用区 */
   private onHandlePan(e: PanGestureEvent): void {
-    const base: number = this.baseSide();
-    if (base <= 0) {
-      return;
-    }
-    const maxScale: number = this.maxSide() / base;
-    this.panelScale = Math.min(maxScale, Math.max(1, this.panelScale + e.offsetX / base));
+    const start: number = this.savedSide;
+    // 1:1 换算边长增量（vp）；上限 = 可用区、下限 = 最小尺寸（29 §1.2：clamp 收口一处）
+    this.savedSide = CurvePanelSize.clamp(start + e.offsetX, this.maxSide(), MIN_CURVE_SIDE);
     this.drawCurve();
   }
 
