@@ -130,7 +130,7 @@ interface GlLibApi extends GlRecordLib {
   getHistogramSnapshot: () => Int32Array | undefined;
   /** 光晕（追赶轮 Glow 接线）：参数十连发 + 运行期状态串（'off' | 'on:broken:scale:inW:inH:fps:rtW:rtH:clamped'） */
   setGlowParams: (enabled: number, threshold: number, soft: number, width: number, gain: number,
-    add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+    add: number, freq: number, blend: number, tint: number, colorOnly: number) => void;
   getGlowStatus: () => string;
   /** 画面降噪核档位：0 关 / 1 完整核 / 2 轻量核（台侧按负载分档，见 core/Denoise.ets） */
   setDenoiseLevel: (level: number) => void;
@@ -1393,7 +1393,7 @@ struct CameraPage {
     const s: GlowParams = p.sanitize();
     try {
       lib.setGlowParams(s.enabled ? 1 : 0, s.threshold, s.soft, s.width, s.gain, s.add, s.freq,
-        s.blend, s.colorA, s.colorB);
+        s.blend, s.color, s.colorOnly ? 1 : 0);
     } catch (e) {
       Diag.w(WOTA_RECORD_TAG, `setGlowParams failed: ${e}`);
     }

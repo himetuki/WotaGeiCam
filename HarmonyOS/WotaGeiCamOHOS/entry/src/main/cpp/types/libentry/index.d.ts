@@ -20,15 +20,16 @@ export const uploadCurveLut: (data: ArrayBuffer) => boolean;
 export const setFrostEnabled: (on: boolean) => void;
 /**
  * Glow 光晕（2026-10-28 批，上游 core/Glow.kt + camera/GlowBlurChain.kt）：
- * - setGlowParams：enabled 0/1；threshold 0..1、soft 0..0.5、width 0..0.2（RT 短边单位）、
- *   gain 0..4、add 0..1、freq 0..64、blend 0..1；colorA/colorB 为 32 位 ARGB 数值。
+ * - setGlowParams：enabled 0/1；threshold 0.6..1.0（2026-10-29 口径 60~100%）、soft 0..0.5、
+ *   width 0..0.2（RT 短边单位）、gain 0..4、add 0..1、freq 0..64、blend 0..1；
+ *   tint=ARGB（白 0xFFFFFFFF = 不改色，跟随原色）、colorOnly 0/1（1 = 仅色盘颜色）。
  *   native 侧越域钳制、NaN/Inf 回落出厂值（与上游 sanitize 同域）；打开动作给停用链一次重试。
  * - getGlowStatus：`off`，或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`；
  *   scale = 1/2/4（像素率 ≤40M/≤150M/其余），fps 未知按 30，rt 未建时两位为 0。
  * - setDenoiseLevel：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样）；0 时槽键归零、下一帧回收变体。
  */
 export const setGlowParams: (enabled: number, threshold: number, soft: number, width: number,
-  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+  gain: number, add: number, freq: number, blend: number, tint: number, colorOnly: number) => void;
 export const getGlowStatus: () => string;
 export const setDenoiseLevel: (level: number) => void;
 /**

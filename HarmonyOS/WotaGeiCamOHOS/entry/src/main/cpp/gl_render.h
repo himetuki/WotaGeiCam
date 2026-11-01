@@ -118,7 +118,7 @@ int WotaGlGetArcEffectiveMode();
  * 形状参数只换 uniform（不重建 program）；打开动作给停用链一次干净重试。
  */
 void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
-    float add, float freq, float blend, uint32_t colorA, uint32_t colorB);
+    float add, float freq, float blend, uint32_t tint, int colorOnly);
 
 /**
  * Glow 状态串：`off` 或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`。

@@ -236,8 +236,7 @@ struct ProgramLocs {
     GLint uGlowAdd = -1;
     GLint uGlowFreq = -1;
     GLint uGlowBlend = -1;
-    GLint uGlowColorA = -1;
-    GLint uGlowColorB = -1;
+    GLint uGlowTint = -1;
 };
 ProgramLocs g_passLocs;   // 直通（链接失败即无画面，永不删除）
 ProgramLocs g_slotLocs;   // 上屏效果槽（曲线/斑马/峰值之一）
@@ -269,8 +268,8 @@ struct GlowParams {
     float add = 0.0f;
     float freq = 0.0f;
     float blend = 0.6f;
-    uint32_t colorA = 0xFFFF3399u;
-    uint32_t colorB = 0xFF33E6FFu;
+    uint32_t tint = 0xFFFFFFFFu;   // 白 = 不改色（跟随光棒自身颜色）
+    int colorOnly = 0;             // 1 = 仅色盘颜色（拷贝趟上色，主 pass tint 传白）
 };
 GlowParams g_glowParams;
 /** 画面降噪档请求（0=关 1=完整 2=轻量；上游 DENOISE_LEVEL_* 同值） */
@@ -504,8 +503,7 @@ void FetchLocations(ProgramLocs& locs)
     locs.uGlowAdd = glGetUniformLocation(locs.program, "uGlowAdd");
     locs.uGlowFreq = glGetUniformLocation(locs.program, "uGlowFreq");
     locs.uGlowBlend = glGetUniformLocation(locs.program, "uGlowBlend");
-    locs.uGlowColorA = glGetUniformLocation(locs.program, "uGlowColorA");
-    locs.uGlowColorB = glGetUniformLocation(locs.program, "uGlowColorB");
+    locs.uGlowTint = glGetUniformLocation(locs.program, "uGlowTint");
 }
 
 /** 编译+链接一组 VS/FS 到指定槽；失败打印 info log 返回 false */
@@ -744,15 +742,12 @@ void BindGlowUniforms(const ProgramLocs& locs)
         if (locs.uGlowBlend >= 0) {
             glUniform1f(locs.uGlowBlend, g_glowParams.blend);
         }
-        float rgbA[3];
-        float rgbB[3];
-        GlowRgbOf(g_glowParams.colorA, rgbA);
-        GlowRgbOf(g_glowParams.colorB, rgbB);
-        if (locs.uGlowColorA >= 0) {
-            glUniform3f(locs.uGlowColorA, rgbA[0], rgbA[1], rgbA[2]);
-        }
-        if (locs.uGlowColorB >= 0) {
-            glUniform3f(locs.uGlowColorB, rgbB[0], rgbB[1], rgbB[2]);
+        // colorOnly 时颜色已在拷贝趟按亮部采样上色，主 pass 传白避免二次染色（上游同口径）
+        float tintRgb[3];
+        const uint32_t eff = g_glowParams.colorOnly != 0 ? 0xFFFFFFFFu : g_glowParams.tint;
+        GlowRgbOf(eff, tintRgb);
+        if (locs.uGlowTint >= 0) {
+            glUniform3f(locs.uGlowTint, tintRgb[0], tintRgb[1], tintRgb[2]);
         }
     } else {
         // 关着：零贡献（program 里仍有 Glow 段，靠 uniform 归零；与上游「关着时零成本」对齐到观感层）
@@ -1447,9 +1442,12 @@ struct FrostProgram {
     GLint uSrc = -1;
     GLint uOffset = -1;
     GLint uWeight = -1;
-    // 2026-10-28 Glow 链复用同一套离屏 program 结构：拷贝趟的亮部阈值两参
+    // 2026-10-28 Glow 链复用同一套离屏 program 结构：拷贝趟的亮部阈值两参 +
+    // 单色 tint/颜色模式两参（2026-10-29 350c671：拷贝趟按亮部采样上色）
     GLint uGlowThreshold = -1;
     GLint uGlowSoft = -1;
+    GLint uGlowTint = -1;
+    GLint uGlowColorOnly = -1;
 };
 
 FrostProgram g_frostCopy;
@@ -1596,6 +1594,8 @@ bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram
     out.uWeight = needWeight ? glGetUniformLocation(program, "uWeight[0]") : -1;
     out.uGlowThreshold = glGetUniformLocation(program, "uGlowThreshold");
     out.uGlowSoft = glGetUniformLocation(program, "uGlowSoft");
+    out.uGlowTint = glGetUniformLocation(program, "uGlowTint");
+    out.uGlowColorOnly = glGetUniformLocation(program, "uGlowColorOnly");
     return true;
 }
 
@@ -2246,6 +2246,15 @@ bool TickGlow()
     }
     if (g_glowCopy.uGlowSoft >= 0) {
         glUniform1f(g_glowCopy.uGlowSoft, g_glowParams.soft);
+    }
+    // 拷贝趟上色（350c671）：colorOnly=1 → pick = tint（仅色盘色）；0 → pick = 原色
+    float copyTint[3];
+    GlowRgbOf(g_glowParams.tint, copyTint);
+    if (g_glowCopy.uGlowTint >= 0) {
+        glUniform3f(g_glowCopy.uGlowTint, copyTint[0], copyTint[1], copyTint[2]);
+    }
+    if (g_glowCopy.uGlowColorOnly >= 0) {
+        glUniform1f(g_glowCopy.uGlowColorOnly, g_glowParams.colorOnly != 0 ? 1.0f : 0.0f);
     }
     DrawFullscreenQuad(g_glowCopy.aPosition, g_glowCopy.aTexCoord, g_posVbo, g_idUvVbo);
     errors += DrainGlErrors();
@@ -3387,19 +3396,20 @@ static float GlowClampF(float value, float lo, float hi, float fallback)
  * OnFrame 懒建仍兜底）。关掉只停跑、不删资源（再打开不重建、不闪）。
  */
 void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
-    float add, float freq, float blend, uint32_t colorA, uint32_t colorB)
+    float add, float freq, float blend, uint32_t tint, int colorOnly)
 {
     const bool was = g_glowParams.enabled;
     g_glowParams.enabled = enabled != 0;
-    g_glowParams.threshold = GlowClampF(threshold, 0.0f, 1.0f, 0.5f);
+    // 阈值域 0.6..1.0（2026-10-29 用户口径 60~100%；坏值回默认 0.7）
+    g_glowParams.threshold = GlowClampF(threshold, 0.6f, 1.0f, 0.7f);
     g_glowParams.soft = GlowClampF(soft, 0.0f, 0.5f, 0.05f);
     g_glowParams.width = GlowClampF(width, 0.0f, 0.2f, 0.02f);
     g_glowParams.gain = GlowClampF(gain, 0.0f, 4.0f, 1.0f);
     g_glowParams.add = GlowClampF(add, 0.0f, 1.0f, 0.0f);
     g_glowParams.freq = GlowClampF(freq, 0.0f, 64.0f, 0.0f);
     g_glowParams.blend = GlowClampF(blend, 0.0f, 1.0f, 0.6f);
-    g_glowParams.colorA = colorA & 0xFFFFFFFFu;
-    g_glowParams.colorB = colorB & 0xFFFFFFFFu;
+    g_glowParams.tint = tint & 0xFFFFFFFFu;
+    g_glowParams.colorOnly = colorOnly != 0 ? 1 : 0;
     if (g_glowParams.enabled && !was) {
         // 显式开启 = 给坏键/停用链一次重试（同一坏键不逐帧重试的口径不变）
         g_glowBroken = false;
@@ -3413,10 +3423,11 @@ void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, 
     }
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "glow params enabled=%{public}d th=%{public}.3f soft=%{public}.3f width=%{public}.3f "
-        "gain=%{public}.3f add=%{public}.3f freq=%{public}.2f blend=%{public}.3f a=%{public}u b=%{public}u",
+        "gain=%{public}.3f add=%{public}.3f freq=%{public}.2f blend=%{public}.3f "
+        "tint=%{public}u coloronly=%{public}d",
         g_glowParams.enabled ? 1 : 0, g_glowParams.threshold, g_glowParams.soft, g_glowParams.width,
         g_glowParams.gain, g_glowParams.add, g_glowParams.freq, g_glowParams.blend,
-        static_cast<unsigned>(g_glowParams.colorA), static_cast<unsigned>(g_glowParams.colorB));
+        static_cast<unsigned>(g_glowParams.tint), g_glowParams.colorOnly);
 }
 
 /**

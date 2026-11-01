@@ -257,8 +257,8 @@ static napi_value SetGlowParams(napi_env env, napi_callback_info info)
     double add = 0.0;
     double freq = 0.0;
     double blend = 0.6;
-    uint32_t colorA = 0xFFFF3399u;
-    uint32_t colorB = 0xFF33E6FFu;
+    uint32_t tint = 0xFFFFFFFFu;
+    int32_t colorOnly = 0;
     if (argc >= 10) {
         napi_get_value_int32(env, argv[0], &enabled);
         napi_get_value_double(env, argv[1], &threshold);
@@ -268,12 +268,12 @@ static napi_value SetGlowParams(napi_env env, napi_callback_info info)
         napi_get_value_double(env, argv[5], &add);
         napi_get_value_double(env, argv[6], &freq);
         napi_get_value_double(env, argv[7], &blend);
-        napi_get_value_uint32(env, argv[8], &colorA);
-        napi_get_value_uint32(env, argv[9], &colorB);
+        napi_get_value_uint32(env, argv[8], &tint);
+        napi_get_value_int32(env, argv[9], &colorOnly);
     }
     WotaGlSetGlowParams(enabled, static_cast<float>(threshold), static_cast<float>(soft),
         static_cast<float>(width), static_cast<float>(gain), static_cast<float>(add),
-        static_cast<float>(freq), static_cast<float>(blend), colorA, colorB);
+        static_cast<float>(freq), static_cast<float>(blend), tint, colorOnly);
     return nullptr;
 }
 

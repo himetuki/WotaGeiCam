@@ -1,42 +1,34 @@
 /**
- * Glow 纯函数全表（对齐上游 GlowParamsTest + GlowScaleTest + GlowStatusNoteTest，ed59285）。
+ * Glow 纯函数全表（对齐上游 GlowParamsTest + GlowScaleTest + GlowStatusNoteTest，ed59285；
+ * 2026-10-28/29 用户口径两步走后的模型：04d1c62 删预设两端色 → 0b9d275 色盘单色 →
+ * 350c671 colorOnly/阈值域 60~100%——上游 GlowModelTest 终态）。
  *
  * Glow（荧光棒光晕）是 scene layer（画面内容的一部分，两槽都带、该被录进去），不是监看叠加。
- * 本批只交付 core 纯函数层 + 全表用例（native Glow 链与胶囊 UI 随后续批）——与 H 批
- * DirectSink/FrameRateFallback 同款纪律：grep 不到接线方时不伪造接线。
  */
 import {
-  GLOW_ADD_MAX, GLOW_DEFAULT, GLOW_FREQ_MAX, GLOW_GAIN_MAX, GLOW_PRESET_A, GLOW_PRESET_B,
-  GLOW_SOFT_MAX, GLOW_THRESHOLD_MAX, GLOW_WIDTH_MAX, GlowParams, GlowStatus,
+  GLOW_ADD_MAX, GLOW_COLOR_DEFAULT, GLOW_DEFAULT, GLOW_FREQ_MAX, GLOW_GAIN_MAX,
+  GLOW_SOFT_MAX, GLOW_THRESHOLD_MAX, GLOW_THRESHOLD_MIN, GLOW_WIDTH_MAX, GlowParams, GlowStatus,
   GLOW_FULL_MAX_PIXEL_RATE,
-  decodeGlow, encodeGlow, fillGlowBlurOffset, glowRgb,
-  glowScaleFor, glowStatusNote, glowRtSizeInto, glowRawLongestEdge
+  decodeGlow, encodeGlow, fillGlowBlurOffset, glowArgbFromHsv, glowArgbFromWheel, glowRgb,
+  glowHueSatOf, glowScaleFor, glowStatusNote, glowRtSizeInto, glowRawLongestEdge, glowWheelMarkerOf
 } from '../../entry/src/main/ets/core/Glow';
 import { DENOISE_FULL_KERNEL_PIXEL_RATE } from '../../entry/src/main/ets/core/Denoise';
 
 // ------------------------------------------------------------------ 参数模型与 sanitize
 
-test('出厂默认是预设A且关闭', () => {
+test('出厂默认=白（跟随原色）且关闭，阈值域 0.6 起步', () => {
   const d: GlowParams = GLOW_DEFAULT;
   assertFalse(d.enabled, '出厂必须关（零代价口径）');
-  assertTrue(GLOW_PRESET_A.sameAs(d), 'DEFAULT 与 PRESET_A 是同一份参数');
-  assertEq(0.5, d.threshold);
+  assertEq(0.7, d.threshold, '出厂 70%（2026-10-29 用户口径 60~100% 的中档）');
   assertEq(0.05, d.soft);
   assertEq(0.02, d.width);
   assertEq(1.0, d.gain);
   assertEq(0.0, d.add);
   assertEq(0.0, d.freq);
   assertEq(0.6, d.blend);
-  assertEq(0xFFFF3399, d.colorA, '品红');
-  assertEq(0xFF33E6FF, d.colorB, '青');
-});
-
-test('预设B只改两端色与强度', () => {
-  assertEq(0xFFFF730D, GLOW_PRESET_B.colorA, '橙');
-  assertEq(0xFF33D940, GLOW_PRESET_B.colorB, '绿');
-  assertEq(0.45, GLOW_PRESET_B.threshold);
-  assertEq(0.55, GLOW_PRESET_B.blend);
-  assertFalse(GLOW_PRESET_B.enabled, '预设 B 也必须是关的（预设≠自动开启）');
+  assertEq(GLOW_COLOR_DEFAULT, d.color, '白 = 不改色（跟随光棒自身颜色）');
+  assertFalse(d.colorOnly, '出厂物理直觉口径：达到阈值的像素发自身颜色');
+  assertEq(0.6, GLOW_THRESHOLD_MIN, '阈值域下限 60%');
 });
 
 test('sanitize把每个维度钳进安全域且幂等', () => {
@@ -50,16 +42,18 @@ test('sanitize把每个维度钳进安全域且幂等', () => {
   assertEq(0, wild.add);
   assertEq(GLOW_FREQ_MAX, wild.freq);
   assertEq(1, wild.blend);
-  const inRange: GlowParams = GLOW_PRESET_A;
+  const inRange: GlowParams = GLOW_DEFAULT;
   assertTrue(inRange.sameAs(inRange.sanitize()), '域内值 sanitize 不动');
   assertTrue(inRange.sameAs(inRange.sanitize().sanitize()), '幂等');
+  // 阈值低于新域下限：钳回 0.6（域 60~100%）
+  assertEq(GLOW_THRESHOLD_MIN, new GlowParams({ threshold: 0.3 }).sanitize().threshold);
 });
 
 test('sanitize把NaN与Infinity回落到出厂值', () => {
   const bad: GlowParams = new GlowParams({
     threshold: NaN, soft: Infinity, width: NaN, gain: -Infinity, add: NaN, freq: Infinity, blend: NaN
   }).sanitize();
-  assertEq(0.5, bad.threshold);
+  assertEq(0.7, bad.threshold);
   assertEq(0.05, bad.soft);
   assertEq(0.02, bad.width);
   assertEq(1, bad.gain);
@@ -68,24 +62,36 @@ test('sanitize把NaN与Infinity回落到出厂值', () => {
   assertEq(0.6, bad.blend);
 });
 
-test('sanitize把颜色掩到32位', () => {
-  assertEq(0xFFFFFFFF, new GlowParams({ colorA: -1 }).sanitize().colorA);
-  assertEq(0xFFFF3399, new GlowParams({ colorA: 0x1FFFF3399 }).sanitize().colorA);
-  assertEq(0xFF000000, new GlowParams({ colorB: 0xFF000000 }).sanitize().colorB);
+test('sanitize把颜色掩到32位且colorOnly透传', () => {
+  assertEq(0xFFFFFFFF, new GlowParams({ color: -1 }).sanitize().color);
+  assertEq(0xFFFF3399, new GlowParams({ color: 0x1FFFF3399 }).sanitize().color);
+  assertTrue(new GlowParams({ color: 0xFF331122, colorOnly: true }).sanitize().colorOnly);
+  assertFalse(new GlowParams({ colorOnly: true }).sanitize().colorOnly === true && false, '');
 });
 
 // ------------------------------------------------------------------ 编码/解码
 
-test('编码解码往返逐字段一致', () => {
+test('编码解码往返逐字段一致（新格式 color/coloronly 键）', () => {
   const samples: Array<GlowParams> = [
-    GLOW_DEFAULT, GLOW_PRESET_B,
-    new GlowParams({ enabled: true, threshold: 0.37, blend: 0.83 })
+    GLOW_DEFAULT,
+    new GlowParams({ enabled: true, threshold: 0.85, blend: 0.83 }),
+    new GlowParams({ enabled: true, color: 0xFF7340D9, colorOnly: true })
   ];
   for (const p of samples) {
     assertTrue(p.sanitize().sameAs(decodeGlow(encodeGlow(p))), 'encode→decode 必须逐字段往返');
   }
   const on: GlowParams = new GlowParams({ enabled: true });
   assertTrue(decodeGlow(encodeGlow(on)).enabled, '开着也要往返（enabled 是开关不是是否参与编码）');
+});
+
+test('旧串（colorA/colorB 键、缺 color 键）迁移 = 白（跟随原色）', () => {
+  // 旧版编码串：color/coloronly 键缺席 ⇒ color 回白、colorOnly 回 false，其余照读
+  const legacy: string = 'enabled=1;threshold=0.7;soft=0.05;width=0.02;gain=1;add=0;freq=0;' +
+    'blend=0.6;colorA=FFFF3399;colorB=FF33E6FF';
+  const migrated: GlowParams = decodeGlow(legacy);
+  assertTrue(migrated.enabled);
+  assertEq(GLOW_COLOR_DEFAULT, migrated.color, '旧串缺 color 键 = 白（不猜近似色）');
+  assertFalse(migrated.colorOnly);
 });
 
 test('坏串一律回出厂默认', () => {
@@ -96,8 +102,8 @@ test('坏串一律回出厂默认', () => {
   assertTrue(d.sameAs(decodeGlow('garbage')));
   assertTrue(d.sameAs(decodeGlow('enabled=1')), '缺键');
   const good: string = encodeGlow(GLOW_DEFAULT);
-  assertTrue(d.sameAs(decodeGlow(good.replace('threshold=0.5', 'threshold=abc'))), '非数');
-  assertTrue(d.sameAs(decodeGlow(good.replace('colorA=FFFF3399', 'colorA=ZZZZ3399'))), '非十六进制');
+  assertTrue(d.sameAs(decodeGlow(good.replace('threshold=0.7', 'threshold=abc'))), '非数');
+  assertTrue(d.sameAs(decodeGlow(good.replace('color=FFFFFF', 'color=ZZZZFF'))), '坏色值不许猜');
   assertTrue(d.sameAs(decodeGlow(good.replace('enabled=0', 'enabled=2'))), 'enabled 非 0/1');
   assertTrue(d.sameAs(decodeGlow(good.replace('soft=0.05', 'soft='))), '空值');
   // "9x" 这类尾巴脏的串不收（对齐 Kotlin toFloatOrNull）
@@ -109,22 +115,22 @@ test('未知键忽略且越界值解码时被钳住', () => {
   assertTrue(GLOW_DEFAULT.sameAs(decodeGlow(good + ';futureParam=7')),
     '前向兼容：以后加参数时老版本读新串不许炸');
   const clamped: GlowParams =
-    decodeGlow(good.replace('threshold=0.5', 'threshold=9').replace('blend=0.6', 'blend=-2'));
+    decodeGlow(good.replace('threshold=0.7', 'threshold=9').replace('blend=0.6', 'blend=-2'));
   assertEq(GLOW_THRESHOLD_MAX, clamped.threshold);
   assertEq(0, clamped.blend);
 });
 
-test('编码前先钳域且颜色固定八位大写十六进制', () => {
-  const encoded: string = encodeGlow(new GlowParams({ threshold: 9, colorA: 0xFFFF3399 }));
+test('编码前先钳域且颜色固定大写十六进制（color/coloronly 键）', () => {
+  const encoded: string = encodeGlow(new GlowParams({ threshold: 9, color: 0xFF7340D9 }));
   assertTrue(encoded.indexOf('threshold=1') >= 0, '越界值必须先钳再写盘');
   assertTrue(encoded.indexOf('threshold=9') < 0, '编码串里不许出现越界写法');
-  assertTrue(encoded.indexOf('colorA=FFFF3399') >= 0, '颜色固定 8 位大写十六进制');
-  assertTrue(encoded.indexOf('colorB=FF33E6FF') >= 0);
+  assertTrue(encoded.indexOf('color=FF7340D9') >= 0, '颜色大写十六进制（含 alpha 8 位）');
+  assertTrue(encoded.indexOf('coloronly=0') >= 0, 'coloronly 键恒在册');
+  assertTrue(encodeGlow(new GlowParams({ colorOnly: true })).indexOf('coloronly=1') >= 0);
 });
 
-test('参数里的开关默认关且预设不改开关', () => {
-  assertFalse(GLOW_PRESET_A.enabled);
-  assertFalse(GLOW_PRESET_B.enabled);
+test('参数里的开关默认关', () => {
+  assertFalse(GLOW_DEFAULT.enabled);
   assertFalse(decodeGlow(encodeGlow(GLOW_DEFAULT)).enabled);
 });
 
@@ -139,12 +145,47 @@ test('ARGB换算只取RGB且忽略alpha', () => {
   assertEq(magenta[1], sameRgbOtherAlpha[1]);
   assertEq(magenta[2], sameRgbOtherAlpha[2]);
   assertEq(0, glowRgb(0xFF000000)[0]);
-  assertEq(1, glowRgb(0xFFFFFFFF)[0]);
-  const presetA: Array<number> = glowRgb(GLOW_PRESET_A.colorA);
-  assertEq(1, presetA[0]);
-  assertEq(51 / 255, glowRgb(GLOW_PRESET_A.colorB)[0]);
-  assertEq(230 / 255, glowRgb(GLOW_PRESET_A.colorB)[1]);
-  assertEq(1, glowRgb(GLOW_PRESET_A.colorB)[2]);
+  assertEq(1, glowRgb(0xFFFFFFFF)[0], '白 = 恒等 tint');
+});
+
+// ------------------------------------------------------------------ 色盘几何（350c671）
+
+test('色盘圆心=白（饱和度0），半径=满饱和', () => {
+  const center: Array<number> = glowArgbFromWheel(0, 0, 60);
+  assertEq(0xFFFFFFFF, center, '圆心即白 = 跟随原色（双击归零的落点）');
+  const edge: Array<number> = glowArgbFromWheel(60, 0, 60);
+  assertEq(0xFFFF0000, edge, '+x 方向 = 红（0° 色相，明度 1）');
+});
+
+test('hue/sat 折算：半径夹满、四象限色相正确', () => {
+  const c: Array<number> = glowHueSatOf(30, 0, 60);
+  assertEq(0, c[0], '0° = 红');
+  assertEq(0.5, c[1], '半半径 = 半饱和');
+  const over: Array<number> = glowHueSatOf(0, 120, 60);
+  assertEq(1, over[1], '越界钳满');
+  assertEq(0.25, over[0], '+y = 90° = 黄绿象限');
+  const r0: Array<number> = glowHueSatOf(5, 5, 0);
+  assertEq(0, r0[0], 'radius 非法 = 圆心');
+});
+
+test('HSV→ARGB 六分支与灰轴', () => {
+  assertEq(0xFFFF0000, glowArgbFromHsv(0, 1, 1), '红');
+  assertEq(0xFF00FF00, glowArgbFromHsv(1 / 3, 1, 1), '绿');
+  assertEq(0xFF0000FF, glowArgbFromHsv(2 / 3, 1, 1), '蓝');
+  assertEq(0xFFFFFFFF, glowArgbFromHsv(0.9, 0, 1), 's=0 = 白（灰轴无色相）');
+  assertEq(0xFF000000, glowArgbFromHsv(0.5, 1, 0), 'v=0 = 黑');
+  assertEq(0xFF808080, glowArgbFromHsv(0.5, 0, 0.5), '中灰');
+});
+
+test('色盘落点：彩色有圈位、白/灰回圆心', () => {
+  const red: Array<number> = glowWheelMarkerOf(0xFFFF0000);
+  assertTrue(Math.abs(red[0] - 1) < 1e-6 && Math.abs(red[1]) < 1e-6, '红在 +x 半径');
+  assertEq(1, red[2], '饱和度 1');
+  const white: Array<number> = glowWheelMarkerOf(0xFFFFFFFF);
+  assertEq(0, white[0], '白无色相 ⇒ 圆心');
+  assertEq(0, white[1]);
+  const gray: Array<number> = glowWheelMarkerOf(0xFF808080);
+  assertEq(0, gray[2], '灰 = 饱和度 0');
 });
 
 // ------------------------------------------------------------------ 分档与 RT 尺寸

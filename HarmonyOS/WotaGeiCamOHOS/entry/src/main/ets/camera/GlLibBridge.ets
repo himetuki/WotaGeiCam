@@ -79,8 +79,8 @@ export function setFrostEnabled(on: boolean): void {
 // 参数序是 native napi 注册表的字面契约（cpp/napi_init.cpp 同名口），调用点不得重排
 
 export function setGlowParams(enabled: number, threshold: number, soft: number, width: number,
-  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number): void {
-  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, colorA, colorB);
+  gain: number, add: number, freq: number, blend: number, tint: number, colorOnly: number): void {
+  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, tint, colorOnly);
 }
 
 /** 'off' 或 'on:<broken>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped>' */

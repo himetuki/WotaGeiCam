@@ -282,7 +282,7 @@ export class PureLogicBarrel {
    */
   private static cameraCatchupCompileProbe(): void {
     const glow: GlowParams = decodeGlow(encodeGlow(GLOW_DEFAULT));
-    const rgb: Array<number> = glowRgb(glow.colorA);
+    const rgb: Array<number> = glowRgb(glow.color);
     const scale: number = glowScaleFor(1920, 1080, 30);
     const blurOffset: Array<number> = [0, 0];
     fillGlowBlurOffset(blurOffset, 960, 540, 0.02, true);
