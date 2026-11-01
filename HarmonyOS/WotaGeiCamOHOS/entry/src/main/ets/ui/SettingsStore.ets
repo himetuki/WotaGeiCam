@@ -17,6 +17,7 @@
  * 读取失败/类型异常回默认值；保存失败记日志不抛。
  */
 import { preferences } from '@kit.ArkData';
+import { BrightnessRampMath } from '../core/BrightnessRampMath';
 import { common } from '@kit.AbilityKit';
 import { HudItems, Size, WotaTiers } from '../core/Constants';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
@@ -50,6 +51,10 @@ const KEY_DIAG_ENABLED: string = 'diag_enabled';
 const KEY_DIAG_VERBOSE: string = 'diag_verbose';
 /** RGB 曲线栈持久串（上游 WotaSettings.KEY_CURVE_STACK，逐字一致；CURVE 批） */
 const KEY_CURVE_STACK: string = 'curve_stack';
+// 「启动后自动亮屏」延迟秒（0–10，0=关闭；上游 camera_brighten_delay_sec，5216e72）
+const KEY_CAMERA_BRIGHTEN_DELAY_SEC: string = 'camera_brighten_delay_sec';
+// 「起播渐亮」时长十分之一秒（0–30 步 5，0=关闭；上游 player_brighten_ramp_tenths）
+const KEY_PLAYER_BRIGHTEN_RAMP_TENTHS: string = 'player_brighten_ramp_tenths';
 /**
  * 「用户显式选过镜头」持久化位 + 选中的槽位键（上游 0525fa2 LensPickPreference 语义对齐）：
  * false 期间冷启走能力协商默认（core/LensSlot.pickCapabilityDefault——后摄里最大视频档者，
@@ -87,6 +92,10 @@ export class CameraSettings {
   refLines: number = 0;
   /** 取景读数条位掩码（上游 hud_items；默认上屏四档，0 = 读数条整条不渲染） */
   hudItems: number = HudItems.DEFAULT_MASK;
+  /** 「启动后自动亮屏」延迟秒（0=关闭；冷启首次进取景页延迟后 7s 渐变到满亮度） */
+  cameraBrightenDelaySec: number = 1;
+  /** 「起播渐亮」时长十分之一秒（0=关闭；单播放页首次起播从当前亮度渐到满） */
+  playerBrightenRampTenths: number = 10;
   /**
    * HUD 位置表原文（上游 hud_layout，`HudLayoutTable.encode` 的 v2 串；空串 = 默认表）。
    * 本侧 J3b 只消费 READOUT 容器的条目顺序；容器位置/格子留给后续（编辑器本体见
@@ -182,6 +191,13 @@ export class SettingsStore {
       // 坏值（非有限数/负数）收口在 HudItems.maskOrDefault；类型不符（手改 prefs）按缺失回默认
       const hudRaw: preferences.ValueType = await store.get(KEY_HUD_ITEMS, s.hudItems);
       s.hudItems = typeof hudRaw === 'number' ? HudItems.maskOrDefault(hudRaw as number) : s.hudItems;
+      // 亮度两项：读侧钳（坏值/越界回默认，0=关闭是合法档不当坏值兜底）
+      const wakeRaw: preferences.ValueType = await store.get(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
+      s.cameraBrightenDelaySec =
+        BrightnessRampMath.cameraBrightenDelaySec(typeof wakeRaw === 'number' ? wakeRaw as number : undefined);
+      const playRaw: preferences.ValueType = await store.get(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
+      s.playerBrightenRampTenths =
+        BrightnessRampMath.playerBrightenRampTenths(typeof playRaw === 'number' ? playRaw as number : undefined);
       // 坏串（类型不符）当缺失 → 默认表；串本身的收口在 HudLayoutTable.decode（坏段丢弃/整表回默认）
       const layoutRaw: preferences.ValueType = await store.get(KEY_HUD_LAYOUT, s.hudLayout);
       s.hudLayout = typeof layoutRaw === 'string' ? layoutRaw as string : '';
@@ -253,6 +269,8 @@ export class SettingsStore {
       await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
       await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
       await store.put(KEY_HUD_ITEMS, s.hudItems);
+      await store.put(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
+      await store.put(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);

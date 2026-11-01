@@ -837,6 +837,40 @@ struct Settings {
    * 位运算全部走 `core/RefLine` 的纯函数（不许在这里手写 `mask ^ bit`）。
    * 水平线额外受「显示水平仪与俯仰仪」总开关约束（关掉就没有 roll 读数可画）。
    */
+  /**
+   * 亮度分组（上游 5216e72，docs/plan/29 §5.3）：「启动后自动亮屏」0–10s 步 1（0=关闭，
+   * 默认 1s；触发后 7s 渐变到满）+「起播渐亮」0–3.0s 步 0.5（0=关闭，默认 1.0s）。
+   * 两项都是纯 UI 设置：触发点每次直读，不走默认值应用链。
+   */
+  @Builder
+  private brightnessGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('亮度')
+      Column() {
+        this.optionRow('启动后自动亮屏', '冷启后第一次进取景页：延迟后 7 秒渐变到满亮度；0 = 跟随系统',
+          `${this.settings.cameraBrightenDelaySec}s`,
+          ['0s', '1s', '2s', '3s', '4s', '5s', '6s', '7s', '8s', '9s', '10s'],
+          this.settings.cameraBrightenDelaySec, (index: number): void => {
+            this.settings.cameraBrightenDelaySec = index;
+            this.persist();
+          })
+        this.cardDivider()
+        this.optionRow('起播渐亮', '单播放页首次起播时从当前亮度渐变到满；离开页面恢复',
+          `${(this.settings.playerBrightenRampTenths / 10).toFixed(1)}s`,
+          ['0s', '0.5s', '1.0s', '1.5s', '2.0s', '2.5s', '3.0s'],
+          Math.round(this.settings.playerBrightenRampTenths / 5), (index: number): void => {
+            this.settings.playerBrightenRampTenths = index * 5;
+            this.persist();
+          })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
   @Builder
   private refLineGroup() {
     Column({ space: SettingsVisual.HEAD_GAP }) {
@@ -1206,6 +1240,7 @@ struct Settings {
       this.recordGroup()
       this.sliderSnapGroup()
       this.levelGroup()
+      this.brightnessGroup()
       this.refLineGroup()
       this.uiOrientationGroup()
     }
@@ -1234,6 +1269,7 @@ struct Settings {
       this.recordGroup()
       this.sliderSnapGroup()
       this.levelGroup()
+      this.brightnessGroup()
       this.refLineGroup()
       this.monitorGroup()
       this.compareTickGroup()

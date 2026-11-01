@@ -93,6 +93,7 @@ import { UserSettings } from '../core/UserSettings';
 import { FocusTapArbiter, FocusTapMath } from '../core/FocusTap';
 import { TapPoint } from '../core/Constants';
 import { LowFpsHint } from '../core/LowFpsWatch';
+import { WindowBrightness } from '../ui/WindowBrightness';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType, PageColor } from '../ui/HudTokens';
 import { HudPill } from '../ui/HudPill';
@@ -137,6 +138,9 @@ interface GlLibApi extends GlRecordLib {
 
 const POLL_INTERVAL_MS: number = 100;
 const POLL_TIMEOUT_MS: number = 5000;
+/** 冷启亮屏闸（进程内一次）：上游「只在冷启后第一次进入取景页触发」的进程内闸 */
+let camBrightenArmed: boolean = true;
+
 const RECORD_WIDTH_1080: number = 1920;
 const RECORD_HEIGHT_1080: number = 1080;
 const RECORD_WIDTH_4K: number = 3840;
@@ -521,6 +525,9 @@ struct CameraPage {
   @State pillWbLabel: string = '自动';
   /** 等号档实测读数行（r42；上游 ExposureTelemetryReadout）：手动 AE 且实发曝光在场才显 */
   @State expTelemetryText: string = '';
+  /** 「启动后自动亮屏」（上游 5216e72，29 §5.3-①）：驱动器页面持有（离页必 restore） */
+  private winBrightness: WindowBrightness = new WindowBrightness();
+  private camBrightenTimer: number = -1;
   // ---- 运行时告警三行（上游 91e6353+36917e5）：低帧守卫 / 换段预提示 / 近似档+手动预告知 ----
   @State lowFpsNote: string = '';
   @State segNearCap: boolean = false;
@@ -703,6 +710,11 @@ struct CameraPage {
       this.healthPausedByHide = true;
     }
     this.stopHealthMonitor(); // 页面隐藏统一停健康巡检（录制中亦不后台读 native）
+    // 亮度渐变收尾（上游口径：延迟期间离开取消且不补触发；渐变中离开恢复进页前亮度）
+    this.cancelColdStartBrighten();
+    if (this.ctx !== undefined) {
+      this.winBrightness.cancelAndRestore(this.ctx);
+    }
     if (!this.recording) {
       this.stopStatusTimer();
       this.stopHealthMonitor();
@@ -710,6 +722,41 @@ struct CameraPage {
       this.engine.stop();
       this.cameraStarted = false;
       this.setKeepScreenOn(false);
+    }
+  }
+
+  /**
+   * 「启动后自动亮屏」（29 §5.3-①，上游 5216e72 直译）：只在**冷启后第一次进入取景页**
+   * 触发一次（进程内闸），延迟 0–10s（0=关闭，语义=全程跟随系统），之后 7s 内线性渐变到
+   * 满亮度；延迟期间离开取景页取消且**不补触发**。
+   */
+  private armColdStartBrighten(): void {
+    if (!camBrightenArmed) {
+      return;
+    }
+    camBrightenArmed = false; // 进程内一次：无论本页接下来走没走，闸都放下（取消不补触发）
+    const delaySec: number = this.settings.cameraBrightenDelaySec;
+    if (delaySec <= 0) {
+      return; // 0 = 关闭 = 全程跟随系统
+    }
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    this.camBrightenTimer = setTimeout((): void => {
+      this.camBrightenTimer = -1;
+      if (this.disposed || !this.pageVisible) {
+        return; // 延迟期间离开：不补触发
+      }
+      this.winBrightness.rampToFull(ctx, 7_000);
+    }, delaySec * 1_000);
+  }
+
+  /** 冷启亮屏延迟的取消（离页/销毁；渐变本体由 cancelAndRestore 收口） */
+  private cancelColdStartBrighten(): void {
+    if (this.camBrightenTimer >= 0) {
+      clearTimeout(this.camBrightenTimer);
+      this.camBrightenTimer = -1;
     }
   }
 
@@ -1010,6 +1057,7 @@ struct CameraPage {
         this.syncParamLabels();
       }
       this.startStatusTimer();
+      this.armColdStartBrighten();
       this.message = this.message === '' ? '取景就绪' : this.message;
     }).catch((e: Object): void => {
       this.startingCamera = false;

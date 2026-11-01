@@ -438,6 +438,7 @@ export class WotaTag {
   static readonly VIDEO_SIZE: string = 'WotaVideoSize';
   static readonly MEDIA: string = 'WotaMedia';
   static readonly MEDIA_REPO: string = 'WotaMediaRepo';
+  static readonly CORE: string = 'WotaCore';
 }
 
 /**

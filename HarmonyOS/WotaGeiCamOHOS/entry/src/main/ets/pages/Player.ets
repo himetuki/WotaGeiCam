@@ -22,6 +22,9 @@ import { ArcRepairProbeResult, ArcRepairResult, ArcRepairRunner } from '../recor
 import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
 import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
 import { HudColor, PageColor } from '../ui/HudTokens';
+import { WindowBrightness } from '../ui/WindowBrightness';
+import { SettingsStore, CameraSettings } from '../ui/SettingsStore';
+import { BrightnessRampMath } from '../core/BrightnessRampMath';
 
 interface PlayerParams {
   id: number;
@@ -53,6 +56,9 @@ struct Player {
   @State sliderValue: number = 0;
   @State sliderDragging: boolean = false;
   @State playing: boolean = false;
+  /** 「起播渐亮」（上游 5216e72，29 §5.3-②）：单页每次进入重新武装，首次起播渐变到满 */
+  private winBrightness: WindowBrightness = new WindowBrightness();
+  private playRampArmed: boolean = false;
   @State speed: number = PlayerSpeedTiers.DEFAULT;
   @State actualSpeed: number = PlayerSpeedTiers.DEFAULT;
   @State fps: number = 30;
@@ -109,6 +115,14 @@ struct Player {
   private repo: MediaRepo | undefined = undefined;
   private videoClip: VideoClip | undefined = undefined;
   private ctx: common.Context | undefined = undefined;
+
+/** 起播渐亮时长（十分之一秒；onPageShow 异步直读存储，0 = 关闭） */
+  private playBrightenTenths: number = 0;
+
+  /** 起播渐亮时长 ms：进页时读到的设置值折算（上游「每次触发直读 prefs」的异步等价） */
+  private playerBrightenRampMs(): number {
+    return this.playBrightenTenths * 100;
+  }
   private exportAbA: number = -1;
   private exportAbB: number = -1;
   private exportProbeSeq: number = 0;
@@ -185,6 +199,17 @@ struct Player {
 
   onPageShow(): void {
     this.pageVisible = true;
+    this.playRampArmed = true; // 起播渐亮每次进入重新武装（29 §5.3-②）
+    // 时长每次进入直读存储（上游同口径）；0 = 关闭
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx !== undefined) {
+      SettingsStore.load(ctx).then((st: CameraSettings): void => {
+        if (!this.disposed) {
+          this.playBrightenTenths = BrightnessRampMath.playerBrightenRampTenths(st.playerBrightenRampTenths);
+        }
+      }).catch((_e: Object): void => {
+      });
+    }
     // 不依赖 attachStarted：av 未就绪时 resumeTick 是安全空操作；后续 attach 成功会再显式 resume
     if (!this.disposed && this.fatalError === '') {
       this.engine.resumeTick();
@@ -196,6 +221,9 @@ struct Player {
 
   onPageHide(): void {
     this.pageVisible = false;
+    if (this.ctx !== undefined) {
+      this.winBrightness.cancelAndRestore(this.ctx); // 离开页面恢复进页前亮度（跟随系统）
+    }
     this.stopPageTimer();
     this.engine.suspendTick();
     this.cancelTapTimer();
@@ -353,6 +381,14 @@ struct Player {
       const e: PlayerEngine = this.engine;
       if (e.error !== '' && this.fatalError === '') {
         this.fatalError = e.error;
+      }
+      // 起播渐亮：单页首次「从未播放→播放」时从当前亮度渐变到满（0=关闭；暂停不重置）
+      if (e.playing && !this.playing && this.playRampArmed && this.ctx !== undefined) {
+        this.playRampArmed = false;
+        const rampMs: number = this.playerBrightenRampMs();
+        if (rampMs > 0) {
+          this.winBrightness.rampToFull(this.ctx, rampMs);
+        }
       }
       this.playing = e.playing;
       this.speed = e.speed;
