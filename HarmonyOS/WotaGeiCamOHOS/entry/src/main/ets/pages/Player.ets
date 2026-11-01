@@ -23,7 +23,8 @@ import { ArcRepairSessionModel } from '../record/ArcRepairSessionModel';
 import { ArcRateProbe, MeasuredSrcFps } from '../record/ArcKeepRule';
 import { HudColor, PageColor } from '../ui/HudTokens';
 import { WindowBrightness } from '../ui/WindowBrightness';
-import { SettingsStore, CameraSettings } from '../ui/SettingsStore';
+import { SettingsStore, CameraSettings, PlayerChromeStore } from '../ui/SettingsStore';
+import { PlayerChrome, playerChromeOf } from '../player/PlayerChrome';
 import { BrightnessRampMath } from '../core/BrightnessRampMath';
 
 interface PlayerParams {
@@ -69,6 +70,8 @@ struct Player {
   @State panX: number = 0;
   @State panY: number = 0;
   @State controlsVisible: boolean = true;
+  /** 顶栏持久收起（29 §6.3，上游 e7b7bf2）：进页读、点按写，冷启保持；chrome 矩阵唯一真源 */
+  @State topBarCollapsed: boolean = false;
   @State abA: number = -1;
   @State abB: number = -1;
   @State abLoop: boolean = false;
@@ -200,6 +203,11 @@ struct Player {
   onPageShow(): void {
     this.pageVisible = true;
     this.playRampArmed = true; // 起播渐亮每次进入重新武装（29 §5.3-②）
+    // 顶栏收起态（29 §6.3）：进页读（冷启保持）
+    const sctx: common.Context | undefined = this.ctx;
+    if (sctx !== undefined) {
+      this.topBarCollapsed = PlayerChromeStore.readCollapsed(sctx);
+    }
     // 时长每次进入直读存储（上游同口径）；0 = 关闭
     const ctx: common.Context | undefined = this.ctx;
     if (ctx !== undefined) {
@@ -1023,6 +1031,16 @@ struct Player {
         .onClick((): void => {
           this.quarterTurns = nextCcwQuarter(this.quarterTurns);
         })
+      // 收起（29 §6.3）：落盘持久，重进/冷启保持
+      Button('收起')
+        .fontSize(11)
+        .onClick((): void => {
+          this.topBarCollapsed = true;
+          const cctx: common.Context | undefined = this.ctx;
+          if (cctx !== undefined) {
+            PlayerChromeStore.writeCollapsed(cctx, true);
+          }
+        })
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 8 })
@@ -1530,9 +1548,31 @@ struct Player {
           )
         )
 
-      if (this.controlsVisible) {
+      // chrome 四层显隐 = playerChromeOf 一个出口（29 §6.3 状态矩阵唯一真源）
+      if (playerChromeOf(this.controlsVisible, this.topBarCollapsed).dock) {
         Column() {
-          this.topBar()
+          if (playerChromeOf(this.controlsVisible, this.topBarCollapsed).topBar) {
+            this.topBar()
+          }
+          // 「拉出」钮（29 §6.4）：只在顶栏收起时渲染；动作 = 展开顶栏并落盘
+          if (playerChromeOf(this.controlsVisible, this.topBarCollapsed).pullOut) {
+            Row() {
+              Blank()
+              Button('⌃ 顶栏')
+                .fontSize(11)
+                .backgroundColor('#FF1F7A4D')
+                .fontColor(Color.White)
+                .onClick((): void => {
+                  this.topBarCollapsed = false;
+                  const pctx: common.Context | undefined = this.ctx;
+                  if (pctx !== undefined) {
+                    PlayerChromeStore.writeCollapsed(pctx, false);
+                  }
+                })
+            }
+            .width('100%')
+            .padding({ left: 10, right: 10, top: 8 })
+          }
           Blank()
           Button(this.playing ? '⏸' : '▶')
             .fontSize(28)
@@ -1549,6 +1589,18 @@ struct Player {
         .width('100%')
         .height('100%')
         .hitTestBehavior(HitTestMode.Transparent)
+      }
+
+      // 浮动返回（29 §6.3）：完整顶栏不可见时恒在（收起/控件隐藏）——退出播放页的唯一
+      // 常驻出口；透明浮动款，不与「收起/控件隐藏」区分外观
+      if (playerChromeOf(this.controlsVisible, this.topBarCollapsed).floatingBack) {
+        Button('‹ 返回')
+          .fontSize(12)
+          .backgroundColor('#33000000')
+          .onClick((): void => {
+            this.getUIContext().getRouter().back();
+          })
+          .position({ x: 12, y: 48 })
       }
 
       if (this.metaNotice !== '') {
