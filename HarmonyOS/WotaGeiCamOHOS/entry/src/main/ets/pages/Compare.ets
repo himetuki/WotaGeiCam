@@ -255,12 +255,43 @@ struct Compare {
     }
     this.startTick();
     this.consumeDeferredRebuilds();
+    this.consumePracticeReturn();
     if (this.leftReady) {
       this.leftEngine.resumeTick();
     }
     if (this.rightReady) {
       this.rightEngine.resumeTick();
     }
+  }
+
+  /**
+   * 练习回归消费（上游 pendingRightId 的 OHOS 路径面）：录制页弹回后取走新片路径，
+   * 在媒体库里按路径反查成 clip 填右槽（chooseRight 走既有换片链：音轨重探/续播/历史）。
+   * 找不到（用户删了/还没扫到）只提示，不硬填。
+   */
+  private consumePracticeReturn(): void {
+    const path: string | undefined = comparePractice.takePendingRightPath();
+    if (path === undefined) {
+      return;
+    }
+    const repo: MediaRepo | undefined = this.repo;
+    if (repo === undefined) {
+      this.hint = '练习新片已保存，媒体库未就绪稍后自动可见';
+      return;
+    }
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (this.disposed) {
+        return;
+      }
+      const hit: VideoClip | undefined = list.find((c: VideoClip): boolean => c.path === path);
+      if (hit === undefined) {
+        this.hint = '练习新片已保存，暂未在媒体库找到';
+        return;
+      }
+      this.chooseRight(hit);
+    }).catch((e: Object): void => {
+      this.hint = `练习回归读取媒体库失败: ${e}`;
+    });
   }
 
   /** 隐藏期发生的 surface 重建在此消费：页面可见后才走 release/换引擎/attach（防隐藏期双开销） */

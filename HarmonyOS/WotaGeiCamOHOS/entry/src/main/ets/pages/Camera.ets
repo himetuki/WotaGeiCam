@@ -2680,6 +2680,20 @@ struct CameraPage {
     this.message = `录制: ${summary}${reasonText === '' ? '' : `（${reasonText}）`}`;
     this.lastStopSummary = summary;
     this.lastStopAtMs = Date.now();
+    // 「对着左片练」回归动线（上游 deliver 同构的 OHOS 面）：练习动线里录成的片 →
+    // 按**路径**记账并弹回对比页（对比页 onPageShow 消费填右片；普通录制 armed=false 不进）
+    if (saved && comparePractice.armed) {
+      const m: RegExpExecArray | null = new RegExp('lastPath=([^ ]+)').exec(summary);
+      if (m !== null && m[1] !== '') {
+        comparePractice.deliverPath(m[1]);
+        try {
+          this.getUIContext().getRouter().back();
+        } catch (e) {
+        }
+      } else {
+        comparePractice.armed = false; // 无路径：清意图防错配（自愈口径）
+      }
+    }
     if (this.engine.deviceStatus() !== DeviceStatus.OPEN_SUCCEED) {
       this.cameraStarted = false;
       this.resetCameraLabels();

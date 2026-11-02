@@ -94,3 +94,12 @@ test('接线：分屏对比动线三点在位（对比页发起/录制页消费/
     '左半压缩 = 变换（布局不重排，上游 graphicsLayer 同式）');
   assertTrue(camera.indexOf('AbRange(0, dur, true)') >= 0, '参考片整段循环');
 });
+
+test('练习回归路径通道：armed 才记账、取即清、普通录制拒绝', () => {
+  resetPractice();
+  assertFalse(comparePractice.deliverPath('/x/rec.mp4'), '未武装拒绝');
+  comparePractice.primeWith(42);
+  assertTrue(comparePractice.deliverPath('/x/rec.mp4'), '练习动线记账');
+  assertEq('/x/rec.mp4', comparePractice.takePendingRightPath() ?? '', '取走路径');
+  assertNull(comparePractice.takePendingRightPath(), '取即清');
+});
