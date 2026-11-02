@@ -48,15 +48,26 @@ function previewProfileFor(profiles: Array<camera.Profile>,
   if (profiles.length === 0) {
     return undefined;
   }
-  const hit: camera.Profile | undefined = profiles.find((p: camera.Profile): boolean =>
+  // **像素格式优先（2026-11-02 真机取证修复）**：预览经 OH_NativeImage 消费，只能吃
+  // RGBA_8888；真机预览档表里同尺寸常同时有 YUV_420_SP（1003）与 RGBA_8888（3），
+  // 只按尺寸取会命中 YUV 档 —— 帧被当 RGBA 采样，画面即「上半灰渐变+下半青绿紫蓝
+  // 条带」（用户真机截图实证）。故先收 RGBA 档池再按尺寸匹配；无 RGBA 档时才回退
+  // 全表（并打告警——那种设备上预览必然异常，至少有日志可归因）。
+  const rgba: Array<camera.Profile> = profiles.filter((p: camera.Profile): boolean =>
+    p.format === camera.CameraFormat.CAMERA_FORMAT_RGBA_8888);
+  const pool: Array<camera.Profile> = rgba.length > 0 ? rgba : profiles;
+  if (rgba.length === 0) {
+    Diag.w(WotaTag.ABILITY, 'preview profiles have no RGBA_8888 entry, fallback may garble');
+  }
+  const hit: camera.Profile | undefined = pool.find((p: camera.Profile): boolean =>
     sizeCloseTo(new Size(p.size.width, p.size.height), wantSize, VideoSizeCandidates.TOLERANCE_PX));
   if (hit !== undefined) {
     return hit;
   }
   const fallback1080: Size = new Size(1920, 1080);
-  const hit1080: camera.Profile | undefined = profiles.find((p: camera.Profile): boolean =>
+  const hit1080: camera.Profile | undefined = pool.find((p: camera.Profile): boolean =>
     sizeCloseTo(new Size(p.size.width, p.size.height), fallback1080, VideoSizeCandidates.TOLERANCE_PX));
-  return hit1080 ?? profiles[0];
+  return hit1080 ?? pool[0];
 }
 
 /** AF 状态遥测的拍点间隔（上游 4457e4a 方案F）：1s 一拍，d 级（详细档才记） */
@@ -480,7 +491,8 @@ export class GlCameraEngine {
       this.lastZoom = 1;
       this.lensInfo = new GlLensInfo(slot.type === LensType.FRONT, slot.ability.sensorOrientation);
       Diag.i(WotaTag.ABILITY,
-        `gl camera started lens=${slot.key} profile=${profile.size.width}x${profile.size.height}`);
+        `gl camera started lens=${slot.key} profile=${profile.size.width}x${profile.size.height}` +
+        ` format=${profile.format}`);
       return `gl camera started\nlens=${slot.key}\nprofile=${profile.size.width}x${profile.size.height}`;
     } catch (e) {
       Diag.e(WotaTag.ABILITY, `gl camera failed: ${e}`);
