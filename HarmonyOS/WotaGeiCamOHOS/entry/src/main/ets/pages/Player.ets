@@ -84,8 +84,16 @@ struct Player {
   @State exportPanelVisible: boolean = false;
   /** 导出方式（上游 ba9f0f4）：false=无损 remux；true=后渲染（重渲染进成片） */
   @State exportSceneMode: boolean = false;
-  /** 后渲染特效集（开面板时从落盘参数取一次；弹层内只读摘要——上游弹层内可调的面待批） */
+  /** 后渲染特效集（开面板时从落盘参数取一次；弹层内可**当场调**——只作用这一次导出，
+   * 不反写全局设置，上游 350c671 弹层口径） */
   @State sceneEffects: SceneExportEffects = new SceneExportEffects(undefined, false);
+  /** 弹层内可调的光晕参数副本（含阈值/增益/混合；开关关闭时不入 effects） */
+  @State exportGlowOn: boolean = false;
+  @State exportGlowThreshold: number = 0.7;
+  @State exportGlowGain: number = 1.0;
+  @State exportGlowBlend: number = 0.6;
+  @State exportGlowColor: number = 0xFFFFFFFF;
+  @State exportDenoiseOn: boolean = false;
   @State exportBusy: boolean = false;
   @State exportProbing: boolean = false;
   @State exportProgress: number = 0;
@@ -665,6 +673,48 @@ struct Player {
     return this.abA >= 0 && this.abB > this.abA && this.abB - this.abA >= MIN_KEEP_MS;
   }
 
+  /** 弹层内可调参数 → 本次导出的特效集（上游 sceneExportEffectsOf 同口径：glow 关 = 不应用） */
+  private rebuildSceneEffects(): void {
+    const glow: GlowParams = new GlowParams({
+      enabled: this.exportGlowOn,
+      threshold: this.exportGlowThreshold,
+      gain: this.exportGlowGain,
+      blend: this.exportGlowBlend,
+      color: this.exportGlowColor
+    });
+    this.sceneEffects = sceneExportEffectsOf(glow, this.exportDenoiseOn);
+  }
+
+  /** 弹层摘要行（与可调参数实时同源） */
+  private exportSceneEffectsSummary(): string {
+    return `光晕${this.exportGlowOn ? '开' : '关'} · 降噪${this.exportDenoiseOn ? '开' : '关'}`;
+  }
+
+  /** 导出配置行（label + Slider + 读数；弹层内可调，只作用本次导出） */
+  @Builder
+  private exportParamRow(label: string, value: number, lo: number, hi: number,
+    onChange: (v: number) => void, fmt: (v: number) => string) {
+    Row({ space: 6 }) {
+      Text(label)
+        .fontSize(10)
+        .fontColor(PageColor.TEXT_SECONDARY)
+        .width(40)
+      Slider({ value: value, min: lo, max: hi, step: 0.01 })
+        .layoutWeight(1)
+        .selectedColor('#FF1F7A4D')
+        .trackColor('#33FFFFFF')
+        .onChange((v: number, _mode: SliderChangeMode): void => {
+          onChange(v);
+        })
+      Text(fmt(Math.min(hi, Math.max(lo, value))))
+        .fontSize(10)
+        .fontColor(PageColor.TEXT_SECONDARY)
+        .width(44)
+        .textAlign(TextAlign.End)
+    }
+    .width('100%')
+  }
+
   /** 画面降噪落盘值（后渲染判据用；SettingsStore 是唯一真源） */
   private settingsVideoDenoise(): boolean {
     return this.videoDenoiseSetting;
@@ -699,9 +749,16 @@ struct Player {
     this.exportDoneSize = 0;
     this.exportAudioCount = 0;
     this.exportTrack = TrackChoice.NO_AUDIO;
-    // 后渲染特效集（上游 350c671 弹层口径）：开面板时取当前落盘值一次；无效果 ⇒ 后渲染置灰
+    // 后渲染特效集（上游 350c671 弹层口径）：开面板时取当前落盘值**作为弹层内可调初值**；
+    // 弹层里的修改只作用这一次导出，不反写设置（设置页仍是全局默认真源）
     const glow: GlowParams = GlowStore.load(ctx);
-    this.sceneEffects = sceneExportEffectsOf(glow, this.settingsVideoDenoise());
+    this.exportGlowOn = glow.enabled;
+    this.exportGlowThreshold = glow.threshold;
+    this.exportGlowGain = glow.gain;
+    this.exportGlowBlend = glow.blend;
+    this.exportGlowColor = glow.color;
+    this.exportDenoiseOn = this.settingsVideoDenoise();
+    this.sceneEffects = sceneExportEffectsOf(glow, this.exportDenoiseOn);
     const probeSeq: number = ++this.exportProbeSeq;
     ClipExporter.probe(ctx, clip).then((info: ClipTrackInfo):void => {
       if (this.disposed || probeSeq !== this.exportProbeSeq) {
@@ -748,6 +805,7 @@ struct Player {
     const range: ClipRange = new ClipRange(this.exportAbA, this.exportAbB);
     // 平移在起跑那一刻定版（与上游同口径）：导出期间同步读数被改写不影响本轮
     const shiftUs: number = this.exportAudioShiftUs();
+    this.rebuildSceneEffects();
     const sceneMode: boolean = this.exportSceneMode && this.sceneEffects.active();
     this.exportBusy = true;
     this.exportProgress = 0;
@@ -1533,11 +1591,55 @@ struct Player {
       }
       .width('100%')
       Text(this.exportSceneMode
-        ? `后渲染：${this.sceneEffects.glow !== undefined ? '光晕开' : '光晕关'} · ${this.sceneEffects.denoise ? '降噪开' : '降噪关'}（曲线不重套——录制期已烘进源片）`
+        ? `后渲染：${this.exportSceneEffectsSummary()}（曲线不重套——录制期已烘进源片）`
         : '无损：原流拷贝，不重编码')
         .fontSize(10)
         .fontColor(PageColor.TEXT_DIM)
         .width('100%')
+      if (this.exportSceneMode) {
+        // 导出配置面板（上游 350c671）：只作用本次导出、不反写设置
+        Row({ space: 8 }) {
+          Text('光晕')
+            .fontSize(11)
+            .fontColor(PageColor.TEXT_SECONDARY)
+          Toggle({ type: ToggleType.Switch, isOn: this.exportGlowOn })
+            .selectedColor('#FF1F7A4D')
+            .onChange((on: boolean): void => {
+              this.exportGlowOn = on;
+              this.rebuildSceneEffects();
+            })
+        }
+        .width('100%')
+        if (this.exportGlowOn) {
+          this.exportParamRow('阈值', this.exportGlowThreshold, 0.6, 1.0,
+            (v: number): void => {
+              this.exportGlowThreshold = v;
+              this.rebuildSceneEffects();
+            }, (v: number): string => `${Math.round(v * 100)}%`)
+          this.exportParamRow('增益', this.exportGlowGain, 0, 4,
+            (v: number): void => {
+              this.exportGlowGain = v;
+              this.rebuildSceneEffects();
+            }, (v: number): string => v.toFixed(2))
+          this.exportParamRow('混合', this.exportGlowBlend, 0, 1,
+            (v: number): void => {
+              this.exportGlowBlend = v;
+              this.rebuildSceneEffects();
+            }, (v: number): string => v.toFixed(2))
+        }
+        Row({ space: 8 }) {
+          Text('画面降噪')
+            .fontSize(11)
+            .fontColor(PageColor.TEXT_SECONDARY)
+          Toggle({ type: ToggleType.Switch, isOn: this.exportDenoiseOn })
+            .selectedColor('#FF1F7A4D')
+            .onChange((on: boolean): void => {
+              this.exportDenoiseOn = on;
+              this.rebuildSceneEffects();
+            })
+        }
+        .width('100%')
+      }
       Button('开始导出')
             .fontSize(12)
             .onClick((): void => {

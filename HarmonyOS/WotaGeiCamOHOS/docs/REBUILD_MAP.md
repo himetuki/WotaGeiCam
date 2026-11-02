@@ -38,7 +38,7 @@
 
 | 安卓 | 鸿蒙 | verdict | 备注 |
 |---|---|---|---|
-| player/PlayerScreen.kt (1987) | pages/Player.ets (1771) | 🔍 | chrome 矩阵/亮度/AB/导出双模/修复面板在册；逐段待比对 |
+| player/PlayerScreen.kt (1987) | pages/Player.ets (1771) | ✅ | 深区对拍完成：AB 行/倍速/声音/帧步进/缩放平移/chrome 矩阵/亮度/导出双模/修复面板逐项对齐；**导出配置面板补齐（本批）**——弹层内当场可调光晕开关+阈值(60~100%)/增益/混合+降噪开关，只作用本次导出不反写设置（上游 350c671）；收藏宿主无（3651901 半边 N/A 已登记） |
 | player/CompareScreen.kt (1405) | pages/Compare.ets (1846) | ✅ | ABP2/时间线/音轨/练习/双画面 pinchZoom 在册（捏合缩放重建 0a082a8；单指语义 fingers:2 隔离对齐） |
 | media/GalleryScreen.kt (1430) | pages/Gallery.ets (1751) | 🔍 | 三页签/回收站/导入/改名/红心在册；❤ 宿主=全屏查看器（3651901 半边 N/A） |
 | pages/Index 路由 | entryability/Index | ✅ | |
