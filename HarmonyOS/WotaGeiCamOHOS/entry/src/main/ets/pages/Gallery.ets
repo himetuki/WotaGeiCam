@@ -6,8 +6,10 @@
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
+import { curves } from '@kit.ArkUI';
 import { SettingsStore, CameraSettings } from '../ui/SettingsStore';
 import { LikeHeart } from '../ui/LikeHeart';
+import { LiquidSpring } from '../core/LiquidSpring';
 import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
@@ -1364,6 +1366,8 @@ struct Gallery {
         }
         if (this.listMode === LIST_FULLSCREEN) {
           Stack({ alignContent: Alignment.Bottom }) {
+            // 翻页吸附弹簧（上游 Pager snapAnimationSpec = motion.float 的对应面）：
+            // Swiper.curve 吃 ICurve，springMotion 即同语义液态吸附；velocity 由手势连续性继承
             Swiper() {
               ForEach(this.clips, (clip: VideoClip, idx: number): void => {
                 if (idx === this.fullscreenIndex) {
@@ -1389,6 +1393,9 @@ struct Gallery {
                 }
               }, (clip: VideoClip): string => clip.path)
             }
+            // 翻页吸附弹簧（上游 Pager snapAnimationSpec = motion.float 对应面）：Swiper.curve
+            // 吃 ICurve，springMotion 即同语义液态吸附；velocity 由手势连续性继承
+            .curve(curves.springMotion(LiquidSpring.FLOAT.response, LiquidSpring.FLOAT.damping))
             .loop(false)
             .index(this.fullscreenIndex)
             .onChange((idx: number): void => {

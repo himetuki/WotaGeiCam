@@ -148,6 +148,8 @@ struct Settings {
   @State downloadRead: number = 0;
   @State downloadTotal: number = -1;
   @State versionName: string = '1.0.0';
+  /** 包名（上游 BlockAbout InfoRow set_package 对应面；bundleName 单一真源 = bundleManager） */
+  @State bundleName: string = '';
   /** 版本号读不到时保持 0：任何可比 tag 都算「有新版」——宁可多提示一次，不漏更新 */
   private versionCode: number = 0;
   /** 探测取消探针（检查中点行 = 取消）；编排只在节点前查，置位后最坏再等一个探测超时 */
@@ -258,6 +260,7 @@ struct Settings {
       const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
         bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       this.versionName = info.versionName;
+      this.bundleName = info.appInfo !== undefined ? info.appInfo.name : info.name;
       this.versionCode = info.versionCode;
     } catch (e) {
       this.versionName = '未知';
@@ -1237,6 +1240,31 @@ struct Settings {
         .onClick((): void => {
           this.onVersionTap();
         })
+        // 包名（上游 BlockAbout InfoRow set_package 对应面）
+        if (this.bundleName !== '') {
+          this.cardDivider()
+          Row() {
+            Text('包名')
+              .fontSize(SettingsVisual.ROW_TITLE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .layoutWeight(1)
+            Text(this.bundleName)
+              .fontSize(SettingsVisual.VALUE)
+              .fontColor(SettingsVisual.BLUE)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 14, bottom: 14 })
+          .alignItems(VerticalAlign.Center)
+        }
+        // 数据边界说明（上游 set_about_note 逐字语义）
+        this.cardDivider()
+        Text('全部数据保存在本机；仅点「检查更新」时联网')
+          .fontSize(SettingsVisual.ROW_DESC)
+          .fontColor(SettingsVisual.TEXT_DIM)
+          .width('100%')
+          .padding({ top: 10, bottom: 4 })
         if (this.devUnlocked) {
           this.cardDivider()
           Row() {

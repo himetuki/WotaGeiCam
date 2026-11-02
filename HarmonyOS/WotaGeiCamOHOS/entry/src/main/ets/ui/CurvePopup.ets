@@ -19,7 +19,9 @@
  * ③ 逐指针消费语义（isConsumed 整手让路）以 hitTestBehavior(Block) 的命中隔离替代。
  */
 import { ColorCurve, CurveEdit, CurveInsertResult, CurvePoint, CurveStack } from '../core/CurveModel';
+import { curves } from '@kit.ArkUI';
 import { CurvePanelSize } from '../core/CurvePanelSize';
+import { LiquidSpring } from '../core/LiquidSpring';
 import { CurvePanelSideStore } from './SettingsStore';
 import { common } from '@kit.AbilityKit';
 import { HistogramMath } from '../core/HistogramMath';
@@ -159,7 +161,11 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
     this.channel = channel;
     this.points = CurveEdit.pointsOf(this.stack.curveOf(channel));
     this.selected = -1;
-    this.fanOpen = false;
+    this.getUIContext().animateTo(
+      { duration: 250, curve: curves.springMotion(LiquidSpring.FLOAT.response, LiquidSpring.FLOAT.damping) },
+      (): void => {
+        this.fanOpen = false;
+      });
     this.drawCurve();
   }
 
@@ -581,7 +587,11 @@ export struct CurvePopup {  @Prop @Watch('onVisibleChanged') visible: boolean = 
       }
       if (index === FAN_ANGLES.length - 1) {
         this.resetAllWithSize();
+        this.getUIContext().animateTo(
+      { duration: 250, curve: curves.springMotion(LiquidSpring.FLOAT.response, LiquidSpring.FLOAT.damping) },
+      (): void => {
         this.fanOpen = false;
+      });
       } else {
         this.pickChannel(index);
       }

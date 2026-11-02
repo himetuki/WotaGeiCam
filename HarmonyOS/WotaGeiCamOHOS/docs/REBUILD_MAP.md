@@ -15,7 +15,7 @@
 | ui/HudLayer.kt | 2155 | pages/Camera.ets HUD 区 + 读数条 | 🔍 | warn 三行 ✅（f3331fa）；音量表/水平仪/俯仰仪在册；逐段待比对 |
 | ui/HudLayout.kt | 2274 | core/HudLayout.ets (2787) | ✅ | J1-J3 移植在册；编辑器跨容器自由布局=产品决策待真机（PORT_MAP 登记） |
 | ui/HudLayoutEditor.kt | 1353 | pages/HudEditor.ets | 🔶 | READOUT 区拖拽 ✅；五容器自由布局无渲染面（T31 结构，登记） |
-| ui/SettingsScreen.kt | 2113 | pages/Settings.ets | 🔍 | 双栏/分组/亮度/滑杆吸附/诊断/更新在册；逐段待比对 |
+| ui/SettingsScreen.kt | 2113 | pages/Settings.ets | ✅ | 14/14 组对齐：默认/方向/动效(24345d5)/亮度(f6c6ede)/HUD/滑杆吸附/参考线/水平仪/对比/文本/权限/诊断/检查更新+版本/**关于**（包名+数据说明，本批）；STORAGE 组 N/A——MANAGE_ALL_FILES_ACCESS 是 Android 专属，本侧沙箱 MediaRepo 零媒体权限姿态（20aa0e0 同裁定） |
 | ui/dialog/CurvePopup.kt | 893 | ui/CurvePopup.ets | ✅ | 含缩放 eb956f5 + 320a956/bda89bb 全量（曲线批C1-C3） |
 | ui/dialog/BtSpeakerPanel.kt | 376 | pages/BtPanel.ets | 🔍 | 面板在册；逐段待比对 |
 | ui/dialog/CameraDialogs.kt | 375 | Camera.ets 各弹层 | 🔍 | 待比对 |
@@ -25,7 +25,7 @@
 | ui/design/LikeHeart.kt | 281 | core/LikeBurst.ets + ui/LikeHeart.ets | ✅ | 数学全表+Canvas 宿主（71a74ce）；数字滚动刻意不迁 |
 | ui/design/Widgets.kt | 688 | 散布（wotaHudCard/HudTokens/…） | 🔍 | 待比对 |
 | ui/design/Tokens.kt | 315 | ui/HudTokens.ets | ✅ | 令牌化对齐（TOK 批） |
-| ui/anim/LiquidMerge.kt | 981 | （无对应） | ❌缺失 | 速度继承/共享轴/容器变换——ArkUI 无共享轴对应面，逐项重建 |
+| ui/anim/LiquidMerge.kt | 981 | Gallery Swiper.curve + CurvePopup 扇面 animateTo | 🔶→推进中 | 三处速度继承：①相册翻页 ✅（Swiper.curve(springMotion FLOAT)，velocity 由手势连续性继承，本批）②曲线扇面 ✅（fanOpen 三处包 animateTo springMotion(FLOAT)，本批）③dockSlide N/A——本侧 Dock 是 T31 固定 2×4 结构，无「换栏滑动」宿主（LAND 批登记） |
 | ui/anim/Motion.kt | 264 | Settings.ets motionGroup + 各处 animateTo | 🔶 | 动效档（motion_mode 三档）已重建并接 LikeHeart 消费闸（本批）；全局闸只覆盖红心宿主，其余动效点（弹层/开关）逐个接线=续批；系统减少动效无 ArkUI 读取面（登记） |
 | ui/ParamsPersist.kt | 394 | ui/ParamsPersist.ets | ✅ | 键表 26（上游 32 的差集=未移植批键，登记） |
 | ui/FrostProbe.kt / FrostSpace.kt | 216/179 | （霜板链在 native） | 🔶 | 霜链 native 在册；探针面待比对 |
