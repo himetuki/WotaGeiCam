@@ -11,7 +11,7 @@
 | 安卓文件 | 行数 | 鸿蒙对应 | verdict | 备注/缺口 |
 |---|---|---|---|---|
 | ui/CameraScreen.kt | 4294 | pages/Camera.ets | 🔍待比对 | 点按对焦/锁定/TFC/曝光泵在册；逐段对拍待做 |
-| ui/CameraPills.kt | 1744 | ui/ParamPills.ets + Camera.ets 弹层面 + GlowPanel/TonePanel | 🔶 | 19 颗胶囊中 14 颗对齐（Size/Fps/Flash/Zoom=Dock 循环、RefLine=设置页+快切钮、Monitor=设置页，形态裁定在 PORT_MAP）；GlowColorWheel ✅（c972228）；Bitrate 弹层在册 |
+| ui/CameraPills.kt | 1744 | ui/ParamPills.ets + Camera.ets 弹层面 + GlowPanel/TonePanel | ✅ | 19 颗胶囊对齐收口：Bitrate 弹层 ✅、**Flash 四模式摊开弹层 ✅（本批——Dock 点按循环保留历史、弹层为上游同构主入口；MANUAL 档禁自动预闪与下发侧 flashPlan 同口径）**、Size/Fps/Zoom=Dock 循环（🔶 形态裁定在册）、RefLine=设置页+快切钮、Monitor=设置页；GlowColorWheel ✅（c972228） |
 | ui/HudLayer.kt | 2155 | pages/Camera.ets HUD 区 + 读数条 | 🔍 | warn 三行 ✅（f3331fa）；音量表/水平仪/俯仰仪在册；逐段待比对 |
 | ui/HudLayout.kt | 2274 | core/HudLayout.ets (2787) | ✅ | J1-J3 移植在册；编辑器跨容器自由布局=产品决策待真机（PORT_MAP 登记） |
 | ui/HudLayoutEditor.kt | 1353 | pages/HudEditor.ets | 🔶 | READOUT 区拖拽 ✅；五容器自由布局无渲染面（T31 结构，登记） |

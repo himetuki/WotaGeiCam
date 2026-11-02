@@ -412,6 +412,8 @@ struct CameraPage {
   @State freeMb: number = -1;
   @State zoomLabel: string = '1x';
   @State flashOn: boolean = false;
+  /** 闪光模式（上游 FlashPill 四模式摊开弹层：0 关 1 自动 2 开 3 常亮；Dock 点按循环保留） */
+  @State flashMode: number = 0;
   /** 画面降噪开关（settings.videoDenoise 的镜像 @State：横屏芯片选中态要刷新） */
   @State denoiseOn: boolean = false;
   /** engine 报闪光不支持后的禁用观感（仍可点出一次「该镜头不支持闪光/常亮」提示） */
@@ -1566,6 +1568,40 @@ struct CameraPage {
     }
   }
 
+  /**
+   * 闪光四模式弹层选档（上游 FlashPill 对应面）：关/自动/开/常亮一次摊开，不再靠连点循环。
+   * MANUAL/AE 档无法用 AE 驱动的自动闪（下发侧 flashPlan 同口径）——自动档仅 AE 参与档可选。
+   */
+  private applyFlashMode(mode: number): void {
+    if (!this.cameraStarted) {
+      return;
+    }
+    if (this.flashUnsupported) {
+      this.message = '该镜头不支持闪光/常亮';
+      return;
+    }
+    let flashMode: camera.FlashMode;
+    if (mode === 3) {
+      flashMode = camera.FlashMode.FLASH_MODE_ALWAYS_OPEN;
+    } else if (mode === 2) {
+      flashMode = camera.FlashMode.FLASH_MODE_OPEN;
+    } else if (mode === 1) {
+      flashMode = camera.FlashMode.FLASH_MODE_AUTO;
+    } else {
+      flashMode = camera.FlashMode.FLASH_MODE_CLOSE;
+    }
+    if (this.engine.applyFlash(flashMode)) {
+      this.flashMode = mode;
+      this.flashOn = mode === 3; // Dock 循环兼容面：常亮 = 开观感
+      this.flashUnsupported = false;
+      this.flushParamsNow();
+      this.closePill();
+    } else {
+      this.flashUnsupported = true;
+      this.message = '该镜头不支持闪光/常亮';
+    }
+  }
+
   private flashLabel(): string {
     return this.flashOn ? '闪光:常亮' : '闪光:关';
   }
@@ -2678,7 +2714,8 @@ struct CameraPage {
       return;
     }
     if (key === 'flash') {
-      this.toggleFlash();
+      // 上游 FlashPill 对应面：Dock 闪光 = 锚点弹层（四模式摊开），不再点按循环
+      this.openPill('flash', PILL_FLASH_ID);
       return;
     }
     if (key === 'bitrate') {
@@ -3794,6 +3831,34 @@ struct CameraPage {
               this.settings.bitrate = opt.value;
               this.persistSettings();
               this.closePill();
+            }
+          })
+        }
+      }
+      if (this.activePill === 'flash') {
+        WotaPillPopup({
+          anchor: this.pillAnchor,
+          panelTitle: '闪光灯',
+          onDismiss: (): void => {
+            this.closePill();
+          }
+        }) {
+          if (this.flashUnsupported) {
+            PillNote({ noteText: '该镜头不支持闪光/常亮' })
+          }
+          // 四模式一次摊开（上游 FlashPill）；AE 关闭（手动档）下自动预闪无语义 → 禁用自动档
+          PillChoices({
+            options: [
+              new PillOption(0, '关闭', true),
+              new PillOption(1, '自动', this.params.aeMode.value !== AeMode.MANUAL),
+              new PillOption(2, '闪光', true),
+              new PillOption(3, '常亮', true)
+            ],
+            selected: this.flashMode,
+            perRow: 4,
+            active: !this.flashUnsupported,
+            onPick: (opt: PillOption): void => {
+              this.applyFlashMode(opt.value);
             }
           })
         }
