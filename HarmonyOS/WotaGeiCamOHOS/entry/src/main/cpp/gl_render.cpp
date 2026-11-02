@@ -147,6 +147,8 @@ std::atomic<int32_t> g_glCallbacks{0};
 std::atomic<int32_t> g_glConsumed{0};
 std::atomic<int32_t> g_encoderSwapOk{0};
 std::atomic<int32_t> g_encoderSwapFail{0};
+/** 最近一次编码面 eglSwapBuffers 失败的 eglGetError（应用内 Diag 可读；0=尚未失败） */
+std::atomic<int32_t> g_encSwapErr{0};
 std::atomic<int32_t> g_arcDropped{0};
 
 int64_t NowSteadyNs()
@@ -1243,6 +1245,9 @@ bool DrawEncoderPass()
         g_encoderFrameIndex++; // 仅成功送帧推进输出序号（抽帧丢弃帧不推进）
     } else {
         g_encoderSwapFail++;
+        if (drawn) {
+            g_encSwapErr.store(static_cast<int>(eglGetError()));
+        }
     }
     // 恢复上屏上下文：失败视一次即中止（若上下文仍绑在编码面，下一帧上屏会画错面）。
     // 置 g_displayCtxLost，WotaGlRender 下一帧开头先重试绑定，未成功前跳过全部绘制。
@@ -1306,8 +1311,10 @@ bool EmitMendedPending()
     const EGLBoolean swapped = eglSwapBuffers(g_display, g_encSurface);
     if (swapped != EGL_TRUE) {
         g_encoderSwapFail++;
+        const int swapErr = static_cast<int>(eglGetError());
+        g_encSwapErr.store(swapErr);
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-            "mend emit swap failed err=%{public}d", static_cast<int>(eglGetError()));
+            "mend emit swap failed err=%{public}d", swapErr);
         return false;
     }
     g_encoderSwapOk++;
@@ -3551,8 +3558,10 @@ int WotaGlFlushArcPending()
             flushed = 1;
         } else {
             g_encoderSwapFail++;
+            const int swapErr = static_cast<int>(eglGetError());
+            g_encSwapErr.store(swapErr);
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "flush arc pending: swap failed err=%{public}d", static_cast<int>(eglGetError()));
+                "flush arc pending: swap failed err=%{public}d", swapErr);
         }
     } else {
         g_encoderSwapFail++;
@@ -3886,5 +3895,6 @@ std::string WotaGlGetYuvDiag()
     out += " wh=" + std::to_string(g_feedW) + "x" + std::to_string(g_feedH);
     out += " stRot=" + std::to_string(g_stRotDeg);
     out += " mat=" + std::to_string(g_hasBufferMatrix ? 1 : 0);
+    out += " encErr=" + std::to_string(g_encSwapErr.load());
     return out;
 }
