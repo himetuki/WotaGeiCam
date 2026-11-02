@@ -19,7 +19,7 @@
 | ui/dialog/CurvePopup.kt | 893 | ui/CurvePopup.ets | ✅ | 含缩放 eb956f5 + 320a956/bda89bb 全量（曲线批C1-C3） |
 | ui/dialog/BtSpeakerPanel.kt | 376 | pages/BtPanel.ets | ✅ | 面板在册（设备行/配对/连接；OHOS 化差异=系统蓝牙设置跳转面，登记） |
 | ui/dialog/CameraDialogs.kt | 375 | Camera.ets 各弹层 | 🔍 | 待比对 |
-| ui/dialog/AudioSourcePanel.kt | 233 | （无） | ❌→平台面待批 | **宿主不存在**：本侧 GPU 录制链无音轨（GlRecorder=纯视频，内录仅开发者页 AVScreenCapture 探针）；音源面板（MIC/内录/蓝牙三选）要等「录制链加音轨」native 批（含 AudioFeeder/muxer 音轨）——摆无宿主的假面板比缺更糟 |
+| ui/dialog/AudioSourcePanel.kt | 233 | 录制链 MIC 音轨（3a12218） | 🔶 | **音轨宿主已建**（批11：MIC→AAC→muxer）；音源面板余 MIC 开/关入口与内录/蓝牙（OHOS 内录=AVScreenCapture 合流，待 native 合流批）——MIC 轨默认随录制开启 |
 | ui/design/PillPopup.kt | 510 | ui/PillPopup.ets | ✅ | 显形动效已重建（本批）：0.94→1 弹簧+淡入（OFFSET 规格），MotionModeStore 直读闸（PLAIN 直达）；PillSlider.readContinuous 同款注入形态免穿参 |
 | ui/design/WotaSwitch.kt | 288 | ui/WotaSwitch.ets | ✅ | 速度继承已重建（springCurve(velocity) 初速度入口 + stiffness=(2π/r)²/c=2ζ√(mass·k) 换算面，17da517） |
 | ui/design/LikeHeart.kt | 281 | core/LikeBurst.ets + ui/LikeHeart.ets | ✅ | 数学全表+Canvas 宿主（71a74ce）；数字滚动刻意不迁 |
