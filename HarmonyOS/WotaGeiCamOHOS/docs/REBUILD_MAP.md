@@ -20,7 +20,7 @@
 | ui/dialog/BtSpeakerPanel.kt | 376 | pages/BtPanel.ets | 🔍 | 面板在册；逐段待比对 |
 | ui/dialog/CameraDialogs.kt | 375 | Camera.ets 各弹层 | 🔍 | 待比对 |
 | ui/dialog/AudioSourcePanel.kt | 233 | Camera.ets 音源面板 | 🔍 | 待比对 |
-| ui/design/PillPopup.kt | 510 | ui/PillPopup.ets | ✅ | 动效层（LocalMotion 淡入/0.94 长开）未迁=形态登记 |
+| ui/design/PillPopup.kt | 510 | ui/PillPopup.ets | ✅ | 显形动效已重建（本批）：0.94→1 弹簧+淡入（OFFSET 规格），MotionModeStore 直读闸（PLAIN 直达）；PillSlider.readContinuous 同款注入形态免穿参 |
 | ui/design/WotaSwitch.kt | 288 | ui/WotaSwitch.ets | ✅ | 速度继承已重建（springCurve(velocity) 初速度入口 + stiffness=(2π/r)²/c=2ζ√(mass·k) 换算面，17da517） |
 | ui/design/LikeHeart.kt | 281 | core/LikeBurst.ets + ui/LikeHeart.ets | ✅ | 数学全表+Canvas 宿主（71a74ce）；数字滚动刻意不迁 |
 | ui/design/Widgets.kt | 688 | 散布（wotaHudCard/HudTokens/…） | 🔍 | 待比对 |
@@ -59,8 +59,8 @@
 1. **WotaSwitch 速度继承**（🔶→✅）：`curves.springCurve(velocity, mass, stiffness, damping)`
    支持初速度——球落位改 springCurve（velocity 取 pan 端速度），stiffness=(2π/response)²、
    damping=2ζ√(mass·stiffness)（LiquidSpring.OFFSET 语义换算）。**本批执行**。
-2. **Motion.kt 统一动效闸**（🔶→推进中）：动效档设置+持久化+LikeHeart 消费闸已落
-   （本批）；弹层/开关/其余动效点的闸接线=续批；系统减少动效读取面=平台无 API（登记）。
+2. **Motion.kt 统一动效闸**（🔶→基本收口）：动效档设置+持久化 ✅；消费闸已接：LikeHeart
+   （PLAIN 不播）+ PillPopup 显形（PLAIN 直达，本批）。系统减少动效读取面=平台无 API（登记）。
 3. **LiquidMerge 速度继承三处**（❌）：相册 Pager snapAnimation/曲线扇面/dockSlide——
    springCurve 化逐处重建（待批，量大）。
 4. **CameraScreen/HudLayer/Settings/Player/Gallery 五大面逐段对拍**（🔍）：

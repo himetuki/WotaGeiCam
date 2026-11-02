@@ -54,6 +54,24 @@ const KEY_DIAG_VERBOSE: string = 'diag_verbose';
  * 曲线面板边长（dp）独立读写（上游 5216e72…错——上游 320a956 WotaSettings 的两个直读写
  * 同构）：纯 UI 设置**不走 CameraSettings 也没有默认值应用链**；弹窗开启时读、把手抬手/重置时写。
  */
+/**
+ * 动效档直读（PillSlider.readContinuous 同款注入形态：组件 aboutToAppear 现读 prefs，
+ * 免逐宿主穿参）。坏串/读失败回 FLUENT。
+ */
+export class MotionModeStore {
+  static read(ctx: common.Context): string {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_MOTION, 'FLUENT');
+      const v: string = typeof raw === 'string' ? raw as string : '';
+      return v === 'PLAIN' || v === 'FLUENT' || v === 'LIQUID' ? v : 'FLUENT';
+    } catch (e) {
+      return 'FLUENT';
+    }
+  }
+}
+
 /** 播放页顶栏收起态读写（纯 UI 设置：进页读、点按写，冷启保持） */
 export class PlayerChromeStore {
   static readCollapsed(ctx: common.Context): boolean {
