@@ -23,6 +23,7 @@
  * - 单侧进度：右片未选/报错时 positionMs/sliderValue 跟左钟（重建中保留 T，预录态不回落）。
  */
 import { common } from '@kit.AbilityKit';
+import { comparePractice } from '../player/ComparePractice';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { Diag } from '../diag/Diag';
 import { ClipFilter } from '../media/MediaTag';
@@ -1751,6 +1752,21 @@ struct Compare {
             .fontSize(11)
             .onClick((): void => {
               this.openHistory();
+            })
+          // 「对着左片练」（上游 CompareScreen 2026-10-04 方向 4）：primeWith 参考片后
+          // 压栈录制页——录制页首次组合取走并自动切分屏对比循环播放
+          Button('对着练')
+            .fontSize(11)
+            .enabled(this.leftClip !== undefined)
+            .onClick((): void => {
+              const lc: VideoClip | undefined = this.leftClip;
+              if (lc === undefined) {
+                return;
+              }
+              comparePractice.primeWith(lc.id);
+              this.getUIContext().getRouter().pushUrl({ url: 'pages/Camera' }).catch((e: Object): void => {
+                this.hint = `打开录制页失败: ${e}`;
+              });
             })
           Button(this.rightClip === undefined ? '选右片' : '换右片')
             .fontSize(11)

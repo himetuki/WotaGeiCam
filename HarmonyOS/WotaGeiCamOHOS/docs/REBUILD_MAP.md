@@ -10,7 +10,7 @@
 
 | 安卓文件 | 行数 | 鸿蒙对应 | verdict | 备注/缺口 |
 |---|---|---|---|---|
-| ui/CameraScreen.kt | 4294 | pages/Camera.ets | 🔶→推进中 | 深区对拍第一批完成：**站位线族 ✅ 全量重建（本批）**——core/MarkerLines（等距比例+域钳+六色板）+ ui/MarkerLineOverlay（内接框 Canvas，2vp/0.55）+ WotaParams 三流 + ParamsPersist 两键（间距/颜色入档、线数不入档）+ 圆钮（位）+ 透明控件浮层（+/线数/−+间距滑杆松手落盘）+ 长按六色选色浮层；其余区（分屏/双摄探针/手势簇细分）续批 |
+| ui/CameraScreen.kt | 4294 | pages/Camera.ets | 🔶→推进中 | 深区对拍两批完成：**站位线族 ✅ 全量重建（9eb441c）** + **分屏对比 ✅ 重建（本批）**——分屏圆钮（录制锁）+ 左半压缩=纯变换（transformOrigin 左缘中点，上游 graphicsLayer 同式）+ 右侧面板两态（模式列表：另镜头录制占位[与上游同占位]/实时对比播放/退出；对比态：内嵌 PlayerEngine 参考片循环+自动开播+内嵌选片列表）+ ComparePractice 动线接通（对比页「对着练」→ 录制页首次组合取半屏）；余项：录完弹回对比页填右片（pendingRightId 消费，需入库 id 时序面）续批；双摄并发探测=OHOS 相机模型无等价面（占位与上游同形） |
 | ui/CameraPills.kt | 1744 | ui/ParamPills.ets + Camera.ets 弹层面 + GlowPanel/TonePanel | ✅ | 19 颗胶囊对齐收口：Bitrate 弹层 ✅、**Flash 四模式摊开弹层 ✅（本批——Dock 点按循环保留历史、弹层为上游同构主入口；MANUAL 档禁自动预闪与下发侧 flashPlan 同口径）**、Size/Fps/Zoom=Dock 循环（🔶 形态裁定在册）、RefLine=设置页+快切钮、Monitor=设置页；GlowColorWheel ✅（c972228） |
 | ui/HudLayer.kt | 2155 | pages/Camera.ets HUD 区 + 读数条 | 🔍 | warn 三行 ✅（f3331fa）；音量表/水平仪/俯仰仪在册；逐段待比对 |
 | ui/HudLayout.kt | 2274 | core/HudLayout.ets (2787) | ✅ | J1-J3 移植在册；编辑器跨容器自由布局=产品决策待真机（PORT_MAP 登记） |

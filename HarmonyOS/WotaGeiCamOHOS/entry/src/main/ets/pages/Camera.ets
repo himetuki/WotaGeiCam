@@ -88,6 +88,11 @@ import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
 import { MarkerLineOverlay } from '../ui/MarkerLineOverlay';
 import { MarkerLineColor, MarkerLines } from '../core/MarkerLines';
+import { comparePractice } from '../player/ComparePractice';
+import { PlayerEngine } from '../player/PlayerEngine';
+import { MediaRepo, VideoClip } from '../media/MediaRepo';
+import { ClipFilter } from '../media/MediaTag';
+import { AbRange } from '../player/PlayerModel';
 import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
@@ -432,6 +437,21 @@ struct CameraPage {
   @State markerCount: number = 0;
   @State markerSpread: number = 0.6;
   @State markerColorArgb: number = 0xFFE6C700;
+  // ---- 分屏（上游 SplitPanel/SplitComparePlayer 的 OHOS 面，用户第 3 项）----
+  /** 分屏开关：完整录制页压到左半屏（只做变换、布局不重排），右侧模式面板/对比播放器 */
+  @State splitOn: boolean = false;
+  /** 右侧面板态：false = 模式列表；true = 实时对比播放器 */
+  @State splitCompareOn: boolean = false;
+  /** 对比播放器当前参考片名（'' = 未挂片） */
+  @State splitRefTitle: string = '';
+  /** 参考片选择列表（内嵌小面板，来自媒体库全部片） */
+  @State splitPickOpen: boolean = false;
+  @State splitClips: Array<VideoClip> = [];
+  private splitPlayer: PlayerEngine = new PlayerEngine();
+  private splitXc: XComponentController = new XComponentController();
+  private splitRef: VideoClip | undefined = undefined;
+  private splitSurfaceReady: boolean = false;
+  private splitRefId: number = -1;
   private markerDensity: number = 1;
   /** 画面降噪开关（settings.videoDenoise 的镜像 @State：横屏芯片选中态要刷新） */
   @State denoiseOn: boolean = false;
@@ -578,6 +598,15 @@ struct CameraPage {
     this.bindExposureTelemetry();
     // 等号档探测与实测遥测（r42）：引擎要读写参数总线（帧到达采样/探测闩锁/下发真值回写）
     this.engine.attachParams(this.params);
+    // 「对着左片练」动线（上游 2026-10-04）：对比页 primeWith 过参考片 ⇒ 首次组合即切分屏
+    // 对比并自动挂参考片循环播放；取即清（之后用户自己切分屏/退出不被旧意图拉回）
+    const practiceId: number | undefined = comparePractice.takeLeftId();
+    if (practiceId !== undefined) {
+      this.splitOn = true;
+      this.splitCompareOn = true;
+      this.splitRefId = practiceId;
+      this.loadSplitRefById(practiceId);
+    }
     this.initLevelSensor();
     this.applyImmersiveChrome();
     this.refreshHudReadoutMetrics();
@@ -2838,6 +2867,114 @@ struct CameraPage {
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
   }
 
+  // ---------------------------------------------------------------- 分屏（上游第 3 项）
+
+  /**
+   * 分屏开关（上游分屏圆钮同款）：录制中只给锁提示不切版（会话与文件已开写，
+   * 不能中途改版面）；退出分屏同时收起对比面板与练习播放器。
+   */
+  private toggleSplit(): void {
+    if (this.recording || this.stopPending) {
+      this.message = '录制中不可切换分屏，停止后可改';
+      return;
+    }
+    if (this.splitOn) {
+      this.splitOn = false;
+      this.splitCompareOn = false;
+      this.splitPickOpen = false;
+      this.releaseSplitPlayer();
+    } else {
+      this.splitOn = true;
+    }
+  }
+
+  /** 参考片 id → 媒体库片（练习动线用；找不到只提示不硬挂） */
+  private loadSplitRefById(id: number): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    const repo: MediaRepo = new MediaRepo(ctx);
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (this.disposed) {
+        return;
+      }
+      const hit: VideoClip | undefined = list.find((c: VideoClip): boolean => c.id === id);
+      if (hit === undefined) {
+        this.message = '练习参考片已不在媒体库';
+        return;
+      }
+      this.splitPick(hit);
+    }).catch((e: Object): void => {
+      this.message = `读取媒体库失败: ${e}`;
+    });
+  }
+
+  /** 内嵌选择列表：媒体库全部片（独立分屏对比时手选参考片） */
+  private openSplitPicker(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    const repo: MediaRepo = new MediaRepo(ctx);
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (!this.disposed) {
+        this.splitClips = list;
+        this.splitPickOpen = true;
+      }
+    }).catch((e: Object): void => {
+      this.message = `读取媒体库失败: ${e}`;
+    });
+  }
+
+  /** 挂参考片：换引擎实例（旧片先释放），表面就绪后 attach（未就绪走 onLoad 补挂） */
+  private splitPick(clip: VideoClip): void {
+    this.releaseSplitPlayer();
+    this.splitRef = clip;
+    this.splitRefTitle = clip.name;
+    this.splitPickOpen = false;
+    if (this.splitSurfaceReady) {
+      this.attachSplitPlayer();
+    }
+  }
+
+  private attachSplitPlayer(): void {
+    const clip: VideoClip | undefined = this.splitRef;
+    if (clip === undefined) {
+      return;
+    }
+    const sid: string = this.splitXc.getXComponentSurfaceId();
+    if (sid === '') {
+      return;
+    }
+    this.splitPlayer.attach(sid, clip, 30).then((err: string): void => {
+      if (this.disposed) {
+        return;
+      }
+      if (err !== '') {
+        this.message = `参考片加载失败: ${err}`;
+        return;
+      }
+      // 整段循环（练习场景：边看参考边跳）+ 自动开播（上游 autoAttach 同口径）
+      const dur: number = clip.durationMs;
+      if (dur > 0) {
+        this.splitPlayer.applyPersistedAb(new AbRange(0, dur, true));
+      }
+      this.splitPlayer.playPause();
+    }).catch((e: Object): void => {
+      this.message = `参考片加载失败: ${e}`;
+    });
+  }
+
+  private releaseSplitPlayer(): void {
+    try {
+      this.splitPlayer.release();
+    } catch (e) {
+    }
+    this.splitRef = undefined;
+    this.splitRefTitle = '';
+  }
+
   /** 站位线浮层定位：量圆钮窗口矩形（px）→ 换算 vp，贴其右下、右缘钳回安全边内 */
   private placeMarkerPanels(): void {
     let left: number = 0;
@@ -2890,6 +3027,10 @@ struct CameraPage {
 
   build() {
     Stack() {
+      // 分屏（上游第 3 项 / SplitPanel）：**只做变换、布局不重排**——把「预览+HUD+覆盖层」
+      // 整层缩到左半屏（transformOrigin 左缘中点，与上游 graphicsLayer 同式：
+      // x' = x·s 自然收进左半，y 以中线为原点纵向居中）；弹层/浮层挂在变换层之外不随缩放。
+      Stack() {
       XComponent({ id: 'wotaCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
       .accessibilityText('取景画面')
       .accessibilityDescription('点按对焦，长按锁定对焦')
@@ -3021,6 +3162,19 @@ struct CameraPage {
           // 回归修复：竖屏此前没有曲线入口（横屏左侧 float 有 RGB 曲线）——右起第三枚「曲」补上，
           // 横排三枚 40vp（3×40 + 2×6 = 132）不压顶栏两行读数，录制中也可开（曲线/LUT 上传与录制无冲突）。
           Row({ space: HudSpace.S }) {
+            Text('分')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(this.splitOn ? PageColor.ACCENT_BLUE : HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('分屏')
+              .onClick((): void => {
+                this.toggleSplit();
+              })
             Text('位')
               .fontSize(HudType.VALUE)
               .fontColor(HudColor.TEXT_PRIMARY)
@@ -3086,7 +3240,7 @@ struct CameraPage {
                 }
               })
           }
-          .width(178)
+          .width(224)
         }
         .width('100%')
         .height(HudSpec.TOP_BAR_HEIGHT + this.safeTop)
@@ -3858,6 +4012,146 @@ struct CameraPage {
       }
 
       // T21 高级参数就近浮层（最顶层：遮罩拦点按，量框后定位面板）
+      }
+      .width('100%')
+      .height('100%')
+      .scale(this.splitOn
+        ? { x: 0.5, y: 0.5, centerX: 0, centerY: '50%' }
+        : { x: 1, y: 1 })
+
+      // ---------- 右侧分屏面板（上游 SplitPanel）：模式列表 / 实时对比播放器 ----------
+      if (this.splitOn) {
+        Column({ space: 8 }) {
+          if (this.splitCompareOn) {
+            // 对比播放器态：顶行「返回」回模式列表（不退出分屏）+ 标题
+            Row({ space: 8 }) {
+              Button('‹ 返回')
+                .fontSize(11)
+                .onClick((): void => {
+                  this.splitCompareOn = false;
+                  this.splitPickOpen = false;
+                })
+              Text('实时对比播放')
+                .fontSize(12)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            // 内嵌练习播放器：独立引擎实例（整条相机链路一次都不碰）；整段循环 + 自动开播
+            Stack({ alignContent: Alignment.Center }) {
+              XComponent({ type: XComponentType.SURFACE, controller: this.splitXc })
+                .accessibilityText('练习参考画面')
+                .onLoad((): void => {
+                  this.splitSurfaceReady = true;
+                  if (this.splitRef !== undefined) {
+                    this.attachSplitPlayer();
+                  }
+                })
+                .width('100%')
+                .height('100%')
+              if (this.splitRef === undefined) {
+                Button('选择参考片')
+                  .fontSize(11)
+                  .onClick((): void => {
+                    this.openSplitPicker();
+                  })
+              }
+            }
+            .layoutWeight(1)
+            .width('100%')
+            .backgroundColor(Color.Black)
+            .borderRadius(10)
+            if (this.splitRefTitle !== '') {
+              Row({ space: 6 }) {
+                Text(this.splitRefTitle)
+                  .fontSize(10)
+                  .fontColor(PageColor.TEXT_SECONDARY)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Button('换片')
+                  .fontSize(10)
+                  .onClick((): void => {
+                    this.openSplitPicker();
+                  })
+              }
+              .width('100%')
+            }
+            if (this.splitPickOpen) {
+              // 内嵌参考片列表（媒体库全部片；点一行即挂片循环播放）
+              List({ space: 4 }) {
+                ForEach(this.splitClips, (c: VideoClip): void => {
+                  ListItem() {
+                    Text(c.name)
+                      .fontSize(11)
+                      .fontColor(HudColor.TEXT_PRIMARY)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                      .padding({ top: 6, bottom: 6 })
+                      .onClick((): void => {
+                        this.splitPick(c);
+                      })
+                  }
+                }, (c: VideoClip): string => `${c.id}`)
+              }
+              .height(140)
+              .width('100%')
+            }
+          } else {
+            Text('分屏')
+              .fontSize(12)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width('100%')
+            // 另镜头录制（上游同款占位：双摄并发探测在 OHOS 相机模型下无等价面，
+            // 点击只给提示——不摆一个点了没反应的假入口）
+            Button('另镜头录制（下一批）')
+              .fontSize(11)
+              .width('100%')
+              .onClick((): void => {
+                this.message = '另镜头录制在后续批次实现';
+              })
+            Button('实时对比播放')
+              .fontSize(11)
+              .width('100%')
+              .onClick((): void => {
+                this.splitCompareOn = true;
+                if (this.splitRef === undefined) {
+                  this.openSplitPicker();
+                }
+              })
+            Blank()
+            Button('退出分屏')
+              .fontSize(11)
+              .width('100%')
+              .onClick((): void => {
+                this.toggleSplit();
+              })
+          }
+          if (this.splitPickOpen && !this.splitCompareOn) {
+            List({ space: 4 }) {
+              ForEach(this.splitClips, (c: VideoClip): void => {
+                ListItem() {
+                  Text(c.name)
+                    .fontSize(11)
+                    .fontColor(HudColor.TEXT_PRIMARY)
+                    .maxLines(1)
+                    .onClick((): void => {
+                      this.splitPick(c);
+                    })
+                }
+              }, (c: VideoClip): string => `p${c.id}`)
+            }
+            .height(120)
+          }
+        }
+        .width('50%')
+        .height('100%')
+        .padding(10)
+        .position({ x: '50%', y: 0 })
+        .backgroundColor('#CC14161A')
+      }
+
       if (this.activePill === 'shutter') {
         ShutterPillPopup({
           anchor: this.pillAnchor,
