@@ -22,6 +22,6 @@ add_library(entry SHARED napi_init.cpp gl_render.cpp codec_recorder.cpp clip_exp
 # libnative_window.so：OH_NativeWindow_DestroyNativeWindow（编码器输入面回收）
 # libnative_avscreen_capture.so：T27-1 平台探针（OH_AVScreenCapture 音频缓冲取证）
 target_link_libraries(entry PUBLIC libace_napi.z.so libace_ndk.z.so libhilog_ndk.z.so libnative_image.so libnative_avscreen_capture.so
-    libnative_media_venc.so libnative_media_acodec.so libnative_media_avmuxer.so libnative_media_avsource.so
+    libnative_media_venc.so libnative_media_acodec.so libimage_receiver.so libohimage.so libnative_buffer.so libnative_media_avmuxer.so libnative_media_avsource.so
     libnative_media_avdemuxer.so libnative_media_vdec.so libnative_media_codecbase.so
     libnative_media_core.so libnative_window.so EGL GLESv3)

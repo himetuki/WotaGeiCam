@@ -123,6 +123,7 @@ import { LensSlot } from '../core/LensSlot';
 
 interface GlLibApi extends GlRecordLib {
   getInputSurfaceId: () => string;
+  createYuvPreview: (width: number, height: number) => string;
   getNativeImageError: () => string;
   setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
   setDisplayFit: (fitX: number, fitY: number) => void;
@@ -1051,7 +1052,11 @@ struct CameraPage {
       // 不认档位标签，上游 0525fa2）
       const startKey: string | undefined =
         this.settings.lensUserPicked && this.settings.lensKey !== '' ? this.settings.lensKey : undefined;
-      return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps);
+      return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps,
+        (w: number, h: number): string => {
+          const lib: GlLibApi | undefined = this.glLib;
+          return lib === undefined ? '' : lib.createYuvPreview(w, h);
+        });
     }).then((summary: string): void => {
       this.startingCamera = false;
       if (summary === 'cancelled') {

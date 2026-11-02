@@ -4,6 +4,8 @@
  * getNativeImageError：NativeImage 失败原因（空串 = 正常/尚未失败；create-failed / set-listener-failed / get-surface-id-failed）。
  */
 export const getInputSurfaceId: () => string;
+/** YUV 预览（设备仅 YUV_420_SP 时）：建 ImageReceiver 返回 SurfaceId；空串=失败 */
+export const createYuvPreview: (width: number, height: number) => string;
 export const getNativeImageError: () => string;
 export const setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
 /** WLB：上屏 letterbox 等比收缩因子（NDC 半域，1,1 = 铺满；编码面恒满幅） */

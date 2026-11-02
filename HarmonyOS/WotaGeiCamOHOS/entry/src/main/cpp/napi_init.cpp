@@ -104,6 +104,24 @@ static napi_value GetInputSurfaceId(napi_env env, napi_callback_info info)
     return result;
 }
 
+/** YUV 预览：建 ImageReceiver 并返回其 SurfaceId（空串=失败；页面据此回退原路径） */
+static napi_value CreateYuvPreview(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t w = 0;
+    int32_t h = 0;
+    if (argc >= 2) {
+        napi_get_value_int32(env, argv[0], &w);
+        napi_get_value_int32(env, argv[1], &h);
+    }
+    const std::string sid = WotaGlCreateYuvPreview(w, h);
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, sid.c_str(), sid.size(), &result);
+    return result;
+}
+
 /** ArkTS 出口：NativeImage 失败原因（空串 = 正常/尚未失败；页面据此结束轮询并显示原因） */
 static napi_value GetNativeImageError(napi_env env, napi_callback_info info)
 {
@@ -728,6 +746,7 @@ static napi_value Init(napi_env env, napi_value exports)
     // 不能因为 unwrap 失败就把 getInputSurfaceId 一起丢掉
     napi_property_descriptor desc[] = {
         {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"createYuvPreview", nullptr, CreateYuvPreview, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayGeometry", nullptr, SetDisplayGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayFit", nullptr, SetDisplayFit, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -27,6 +27,13 @@
 #include <GLES2/gl2ext.h> // GL_TEXTURE_EXTERNAL_OES
 #include <hilog/log.h>
 #include <native_image/native_image.h>
+#include <multimedia/image_framework/image/image_receiver_native.h>
+#include <multimedia/image_framework/image/image_native.h>
+#include <multimedia/image_framework/image_mdk.h>
+#include <native_buffer/native_buffer.h>
+#include <native_buffer/buffer_common.h>
+#include <native_window/buffer_handle.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <atomic>
@@ -347,6 +354,21 @@ float g_texMatrix[16] = {
     0.0f, 0.0f, 0.0f, 1.0f
 };
 std::string g_inputSurfaceId;
+// ---- YUV 预览帧源（2026-11-02 真机取证修复：设备预览仅 YUV_420_SP，NativeImage 按 RGBA）
+// 相机 → ImageReceiver(YUV) → 本侧转 RGBA → 写入内部 NativeImage 生产者面（RGBA）→
+// UpdateSurfaceImage → 现有 OES 采样/特效/编码全部着色器零改动复用。
+OH_ImageReceiverNative* g_receiver = nullptr;
+OH_NativeImage* g_feedImage = nullptr;
+OHNativeWindow* g_feedWindow = nullptr;
+GLuint g_feedTexId = 0;
+int32_t g_feedW = 0;
+int32_t g_feedH = 0;
+bool g_yuvMode = false;
+std::vector<uint8_t> g_rgbaScratch;
+int32_t g_pumpFailLogs = 0;
+/* 前向声明（绑定点位于定义之前） */
+GLuint ActiveFrameTexture();
+bool PumpYuvPreview();
 /** NativeImage 失败原因（空 = 正常）；页面按它区分「未就绪」与「创建失败」 */
 std::string g_nativeImageError;
 
@@ -974,7 +996,7 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
         glUniform2f(locs.uFit, applyFit ? g_fitX : 1.0f, applyFit ? g_fitY : 1.0f);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
@@ -1776,7 +1798,7 @@ bool RunFrostChain()
         glUniformMatrix4fv(g_frostCopy.uTexMatrix, 1, GL_FALSE, g_texMatrix);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (g_frostCopy.uFrame >= 0) {
         glUniform1i(g_frostCopy.uFrame, 0);
     }
@@ -2236,7 +2258,7 @@ bool TickGlow()
         glUniform2f(g_glowCopy.uFit, 1.0f, 1.0f); // 离屏 RT：恒等（尺寸本身已按档缩小）
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (g_glowCopy.uFrame >= 0) {
         glUniform1i(g_glowCopy.uFrame, 0);
     }
@@ -2430,7 +2452,7 @@ bool CreateNativeImage()
 {
     g_nativeImageError.clear();
     glGenTextures(1, &g_texId);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2463,6 +2485,266 @@ bool CreateNativeImage()
         return false;
     }
     return true;
+}
+
+/** 取当前帧源纹理：YUV 喂入模式用内部 RGBA NativeImage 的 OES 纹理，否则原生相机 NativeImage */
+GLuint ActiveFrameTexture()
+{
+    return g_yuvMode ? g_feedTexId : g_texId;
+}
+
+/** 喂入目标（内部 NativeImage，RGBA 生产者面）：懒建，需 GL context current */
+bool EnsureFeedTarget()
+{
+    if (g_feedImage != nullptr) {
+        return true;
+    }
+    if (g_feedW <= 0 || g_feedH <= 0) {
+        return false;
+    }
+    glGenTextures(1, &g_feedTexId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_feedTexId);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g_feedImage = OH_NativeImage_Create(g_feedTexId, GL_TEXTURE_EXTERNAL_OES);
+    if (g_feedImage == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed image create failed");
+        return false;
+    }
+    for (int i = 0; i < 16; i++) {
+        g_texMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    }
+    g_stRotDeg = 0;
+    uint64_t surfaceId = 0;
+    if (OH_NativeImage_GetSurfaceId(g_feedImage, &surfaceId) != 0) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed surfaceId failed");
+        return false;
+    }
+    if (OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &g_feedWindow) != 0 ||
+        g_feedWindow == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed window failed");
+        return false;
+    }
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_BUFFER_GEOMETRY, g_feedW, g_feedH);
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_FORMAT,
+        static_cast<int32_t>(NATIVEBUFFER_PIXEL_FMT_RGBA_8888));
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_USAGE,
+        static_cast<int32_t>(NATIVEBUFFER_USAGE_CPU_WRITE));
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "yuv feed target ready %{public}dx%{public}d", g_feedW, g_feedH);
+    return true;
+}
+
+/** YUV_420_SP → RGBA8888（BT.601 视频域；stride 逐行） */
+void ConvertYuvToRgba(const uint8_t* y, int32_t yStride, const uint8_t* uv, int32_t uvStride,
+    int32_t w, int32_t h, uint8_t* out)
+{
+    for (int32_t row = 0; row < h; ++row) {
+        const uint8_t* yRow = y + static_cast<int64_t>(row) * yStride;
+        const uint8_t* uvRow = uv + static_cast<int64_t>(row / 2) * uvStride;
+        uint8_t* o = out + static_cast<int64_t>(row) * w * 4;
+        for (int32_t col = 0; col < w; ++col) {
+            const int32_t Y = static_cast<int32_t>(yRow[col]) - 16;
+            const int32_t U = static_cast<int32_t>(uvRow[(col / 2) * 2]) - 128;
+            const int32_t V = static_cast<int32_t>(uvRow[(col / 2) * 2 + 1]) - 128;
+            int32_t r = (298 * Y + 409 * V + 128) >> 8;
+            int32_t g = (298 * Y - 100 * U - 208 * V + 128) >> 8;
+            int32_t b = (298 * Y + 516 * U + 128) >> 8;
+            o[col * 4] = static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
+            o[col * 4 + 1] = static_cast<uint8_t>(g < 0 ? 0 : (g > 255 ? 255 : g));
+            o[col * 4 + 2] = static_cast<uint8_t>(b < 0 ? 0 : (b > 255 ? 255 : b));
+            o[col * 4 + 3] = 255;
+        }
+    }
+}
+
+/** 拉一帧 YUV → 转 RGBA → 写入喂入面 → UpdateSurfaceImage（成功返回 true） */
+bool PumpYuvPreview()
+{
+    if (g_receiver == nullptr) {
+        return false;
+    }
+    OH_ImageNative* image = nullptr;
+    if (OH_ImageReceiverNative_ReadNextImage(g_receiver, &image) != IMAGE_SUCCESS || image == nullptr) {
+        return false;
+    }
+    bool ok = false;
+    do {
+        if (!EnsureFeedTarget()) {
+            break;
+        }
+        Image_Size size{};
+        if (OH_ImageNative_GetImageSize(image, &size) != IMAGE_SUCCESS) {
+            break;
+        }
+        uint32_t* types = nullptr;
+        size_t typeCount = 0;
+        if (OH_ImageNative_GetComponentTypes(image, &types, &typeCount) != IMAGE_SUCCESS ||
+            types == nullptr || typeCount == 0) {
+            break;
+        }
+        int32_t yIdx = -1;
+        int32_t uvIdx = -1;
+        for (size_t i = 0; i < typeCount; ++i) {
+            if (types[i] == OHOS_IMAGE_COMPONENT_FORMAT_YUV_Y) {
+                yIdx = static_cast<int32_t>(i);
+            } else if (types[i] == OHOS_IMAGE_COMPONENT_FORMAT_YUV_U) {
+                uvIdx = static_cast<int32_t>(i);
+            }
+        }
+        if (yIdx < 0) {
+            break;
+        }
+        OH_NativeBuffer* yBuf = nullptr;
+        OH_NativeBuffer* uvBuf = nullptr;
+        if (OH_ImageNative_GetByteBuffer(image, types[yIdx], &yBuf) != IMAGE_SUCCESS || yBuf == nullptr) {
+            break;
+        }
+        if (uvIdx >= 0 &&
+            OH_ImageNative_GetByteBuffer(image, types[uvIdx], &uvBuf) != IMAGE_SUCCESS) {
+            uvBuf = nullptr;
+        }
+        int32_t yStride = 0;
+        int32_t uvStride = 0;
+        if (OH_ImageNative_GetRowStride(image, types[yIdx], &yStride) != IMAGE_SUCCESS || yStride <= 0) {
+            yStride = static_cast<int32_t>(size.width);
+        }
+        if (uvIdx >= 0 &&
+            (OH_ImageNative_GetRowStride(image, types[uvIdx], &uvStride) != IMAGE_SUCCESS ||
+                uvStride <= 0)) {
+            uvStride = yStride;
+        }
+        void* yAddr = nullptr;
+        void* uvAddr = nullptr;
+        if (OH_NativeBuffer_Map(yBuf, &yAddr) != 0 || yAddr == nullptr) {
+            break;
+        }
+        if (uvBuf != nullptr && OH_NativeBuffer_Map(uvBuf, &uvAddr) != 0) {
+            uvAddr = nullptr;
+        }
+        const int32_t w = static_cast<int32_t>(size.width);
+        const int32_t h = static_cast<int32_t>(size.height);
+        if (uvAddr == nullptr) {
+            g_rgbaScratch.resize(static_cast<size_t>(w) * h * 4);
+            for (int32_t row = 0; row < h; ++row) {
+                for (int32_t col = 0; col < w; ++col) {
+                    const uint8_t v =
+                        static_cast<const uint8_t*>(yAddr)[static_cast<int64_t>(row) * yStride + col];
+                    uint8_t* o = g_rgbaScratch.data() + static_cast<int64_t>(row) * w * 4 + col * 4;
+                    o[0] = v;
+                    o[1] = v;
+                    o[2] = v;
+                    o[3] = 255;
+                }
+            }
+        } else {
+            g_rgbaScratch.resize(static_cast<size_t>(w) * h * 4);
+            ConvertYuvToRgba(static_cast<const uint8_t*>(yAddr), yStride,
+                static_cast<const uint8_t*>(uvAddr), uvStride, w, h, g_rgbaScratch.data());
+        }
+        OH_NativeBuffer_Unmap(yBuf);
+        if (uvBuf != nullptr) {
+            OH_NativeBuffer_Unmap(uvBuf);
+        }
+        OHNativeWindowBuffer* winBuf = nullptr;
+        int fenceFd = -1;
+        if (OH_NativeWindow_NativeWindowRequestBuffer(g_feedWindow, &winBuf, &fenceFd) != 0 ||
+            winBuf == nullptr) {
+            break;
+        }
+        BufferHandle* handle = OH_NativeWindow_GetBufferHandleFromNative(winBuf);
+        if (handle == nullptr) {
+            OH_NativeWindow_NativeWindowAbortBuffer(g_feedWindow, winBuf);
+            break;
+        }
+        uint8_t* dst = static_cast<uint8_t*>(handle->virAddr);
+        bool mapped = false;
+        if (dst == nullptr && handle->fd >= 0) {
+            void* m = mmap(nullptr, static_cast<size_t>(handle->size),
+                PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
+            if (m != MAP_FAILED) {
+                dst = static_cast<uint8_t*>(m);
+                mapped = true;
+            }
+        }
+        if (dst == nullptr) {
+            OH_NativeWindow_NativeWindowAbortBuffer(g_feedWindow, winBuf);
+            break;
+        }
+        const int32_t dstStride = handle->stride > 0 ? handle->stride : w * 4;
+        for (int32_t row = 0; row < h; ++row) {
+            std::memcpy(dst + static_cast<int64_t>(row) * dstStride,
+                g_rgbaScratch.data() + static_cast<int64_t>(row) * w * 4,
+                static_cast<size_t>(w) * 4);
+        }
+        if (mapped) {
+            munmap(dst, static_cast<size_t>(handle->size));
+        }
+        if (OH_NativeWindow_NativeWindowFlushBuffer(g_feedWindow, winBuf, fenceFd, Region{}) != 0) {
+            break;
+        }
+        if (OH_NativeImage_UpdateSurfaceImage(g_feedImage) != 0) {
+            if (g_pumpFailLogs < 5) {
+                g_pumpFailLogs++;
+                OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                    "yuv feed UpdateSurfaceImage failed err=%{public}d", static_cast<int>(eglGetError()));
+            }
+            break;
+        }
+        g_hasFrame = true;
+        ok = true;
+    } while (false);
+    OH_ImageNative_Release(image);
+    return ok;
+}
+
+/** 创建 YUV 预览接收器并返回其 SurfaceId（空串 = 失败，调用方回退原生 NativeImage 路径） */
+static std::string CreateYuvPreviewInternal(int32_t width, int32_t height)
+{
+    if (g_receiver != nullptr) {
+        return g_inputSurfaceId;
+    }
+    if (width <= 0 || height <= 0) {
+        return "";
+    }
+    OH_ImageReceiverOptions* options = nullptr;
+    if (OH_ImageReceiverOptions_Create(&options) != IMAGE_SUCCESS || options == nullptr) {
+        return "";
+    }
+    Image_Size size{};
+    size.width = static_cast<uint32_t>(width);
+    size.height = static_cast<uint32_t>(height);
+    OH_ImageReceiverOptions_SetSize(options, size);
+    OH_ImageReceiverOptions_SetCapacity(options, 6);
+    OH_ImageReceiverNative* receiver = nullptr;
+    const Image_ErrorCode created = OH_ImageReceiverNative_Create(options, &receiver);
+    OH_ImageReceiverOptions_Release(options);
+    if (created != IMAGE_SUCCESS || receiver == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+            "yuv receiver create failed code=%{public}d", static_cast<int>(created));
+        return "";
+    }
+    uint64_t surfaceId = 0;
+    if (OH_ImageReceiverNative_GetReceivingSurfaceId(receiver, &surfaceId) != IMAGE_SUCCESS) {
+        OH_ImageReceiverNative_Release(receiver);
+        return "";
+    }
+    g_receiver = receiver;
+    g_feedW = width;
+    g_feedH = height;
+    g_yuvMode = true;
+    g_inputSurfaceId = std::to_string(surfaceId);
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "yuv preview receiver ready %{public}dx%{public}d surfaceId=%{public}s",
+        width, height, g_inputSurfaceId.c_str());
+    return g_inputSurfaceId;
+}
+
+static bool YuvModeInternal()
+{
+    return g_yuvMode;
 }
 
 /** 拆 NativeImage：顺序 = 反注册 listener → destroy → 删纹理（均在 context current 时） */
@@ -2741,7 +3023,13 @@ void WotaGlRender(uint64_t timestamp)
     // 帧可用才拉起新帧（回调里只置位）；无帧时仅清屏（不画未完成纹理）
     bool newFrameConsumed = false;
     int64_t frameTs = 0;
-    if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
+    if (g_yuvMode) {
+        // YUV 预览帧源：轮询接收器拉帧 → 转 RGBA → 喂入面 → UpdateSurfaceImage
+        if (PumpYuvPreview()) {
+            newFrameConsumed = true;
+            g_glConsumed++;
+        }
+    } else if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
         if (OH_NativeImage_UpdateSurfaceImage(g_nativeImage) == 0) {
             OH_NativeImage_GetTransformMatrix(g_nativeImage, g_texMatrix);
             const int st = StRotationFromMatrix(g_texMatrix);
@@ -2821,7 +3109,7 @@ void WotaGlRender(uint64_t timestamp)
         glUniform2f(locs.uFit, g_fitX, g_fitY); // 上屏：letterbox 等比收缩
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
@@ -3480,4 +3768,15 @@ void WotaGlSetDenoiseLevel(int level)
     g_denoiseLevel = safe;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "video denoise level=%{public}d (0=off 1=full 2=lite; applied on next frame)", safe);
+}
+
+/* ---- 外部链接出口（匿名命名空间内的实现经此暴露给 napi） ---- */
+std::string WotaGlCreateYuvPreview(int32_t width, int32_t height)
+{
+    return CreateYuvPreviewInternal(width, height);
+}
+
+bool WotaGlYuvMode()
+{
+    return YuvModeInternal();
 }

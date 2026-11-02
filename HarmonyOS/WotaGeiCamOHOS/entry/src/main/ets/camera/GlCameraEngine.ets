@@ -378,7 +378,8 @@ export class GlCameraEngine {
    * 上游 0525fa2）→ 退 pickDefaultLens（档位标签）；wantSize 缺省 = 1080p（GlPreview 两参调用行为不变）。
    */
   async start(ctx: common.Context, nativeSurfaceId: string, slotKey?: string,
-    wantSize?: Size, fps?: number): Promise<string> {
+    wantSize?: Size, fps?: number,
+    yuvSurfaceProvider?: (w: number, h: number) => string): Promise<string> {
     try {
       await this.stop();
       if (nativeSurfaceId === '') {
@@ -416,6 +417,23 @@ export class GlCameraEngine {
       if (profile === undefined) {
         return 'gl camera failed: no preview profile';
       }
+      // 帧源通路（2026-11-02 真机取证修复）：RGBA 预览档 → 原生 NativeImage；否则
+      // （YUV_420_SP 等）→ ImageReceiver + RGBA 喂入（native 侧转换，OES 采样管线不变）
+      let cameraSurfaceId: string = nativeSurfaceId;
+      if (profile.format !== camera.CameraFormat.CAMERA_FORMAT_RGBA_8888) {
+        const yuvId: string = yuvSurfaceProvider === undefined
+          ? '' : yuvSurfaceProvider(profile.size.width, profile.size.height);
+        if (yuvId !== '') {
+          cameraSurfaceId = yuvId;
+          Diag.i(WotaTag.ABILITY,
+            `preview format=${profile.format} -> yuv receiver path`);
+        } else {
+          Diag.w(WotaTag.ABILITY,
+            `preview format=${profile.format} and yuv receiver unavailable (preview may garble)`);
+        }
+      } else {
+        Diag.i(WotaTag.ABILITY, `preview format=${profile.format} rgba native-image path`);
+      }
       const input: camera.CameraInput = mgr.createCameraInput(device);
       await input.open();
       this.input = input;
@@ -435,7 +453,7 @@ export class GlCameraEngine {
       });
       session.beginConfig();
       session.addInput(input);
-      const preview: camera.PreviewOutput = mgr.createPreviewOutput(profile, nativeSurfaceId);
+      const preview: camera.PreviewOutput = mgr.createPreviewOutput(profile, cameraSurfaceId);
       this.preview = preview;
       session.addOutput(preview);
       await session.commitConfig();
