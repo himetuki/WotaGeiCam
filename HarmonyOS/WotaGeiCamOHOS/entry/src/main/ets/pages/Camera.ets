@@ -123,7 +123,8 @@ import { LensSlot } from '../core/LensSlot';
 
 interface GlLibApi extends GlRecordLib {
   getInputSurfaceId: () => string;
-  createYuvPreview: (width: number, height: number) => string;
+  enableYuvFeed: (width: number, height: number) => string;
+  getYuvDiag: () => string;
   getNativeImageError: () => string;
   setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
   setDisplayFit: (fitX: number, fitY: number) => void;
@@ -1055,7 +1056,7 @@ struct CameraPage {
       return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps,
         (w: number, h: number): string => {
           const lib: GlLibApi | undefined = this.glLib;
-          return lib === undefined ? '' : lib.createYuvPreview(w, h);
+          return lib === undefined ? '' : lib.enableYuvFeed(w, h);
         });
     }).then((summary: string): void => {
       this.startingCamera = false;
@@ -1096,6 +1097,18 @@ struct CameraPage {
       this.zoomIndex = this.nearestZoomIndex(initialZoom);
       this.zoomLabel = `${initialZoom}x`;
       this.applyGeometry();
+      // YUV 帧源自检：起镜 2.5s 后把 native 取帧/喂入计数写进应用内日志。native hilog 不进
+      // 用户导出的日志件——黑屏/花屏现场只能靠这一行归因（acq=0 ⇒ 相机没往 NativeImage 面出帧；
+      // acq>0/fed=0 ⇒ 喂入面失败，ferr 给 EGL 错误码）。
+      const feedLib: GlLibApi | undefined = this.glLib;
+      if (feedLib !== undefined) {
+        setTimeout((): void => {
+          try {
+            Diag.i(WOTA_RECORD_TAG, `gl yuv feed ${feedLib.getYuvDiag()}`);
+          } catch (e) {
+          }
+        }, 2500);
+      }
       this.initNativeParams();
       // T21：起镜成功后能力落档（参数总线按会话期能力重算 range 并钳制当前值）；
       // fps 先对齐设置档（applyAbility 以总线 fps 档位为快门上限基准）

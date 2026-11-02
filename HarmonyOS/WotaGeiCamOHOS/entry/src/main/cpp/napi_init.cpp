@@ -104,8 +104,8 @@ static napi_value GetInputSurfaceId(napi_env env, napi_callback_info info)
     return result;
 }
 
-/** YUV 预览：建 ImageReceiver 并返回其 SurfaceId（空串=失败；页面据此回退原路径） */
-static napi_value CreateYuvPreview(napi_env env, napi_callback_info info)
+/** YUV 帧源：登记画幅并返回相机面 surfaceId（空串=不可用；页面据此回退原生 RGBA 路） */
+static napi_value EnableYuvFeed(napi_env env, napi_callback_info info)
 {
     size_t argc = 2;
     napi_value argv[2] = {nullptr, nullptr};
@@ -116,9 +116,19 @@ static napi_value CreateYuvPreview(napi_env env, napi_callback_info info)
         napi_get_value_int32(env, argv[0], &w);
         napi_get_value_int32(env, argv[1], &h);
     }
-    const std::string sid = WotaGlCreateYuvPreview(w, h);
+    const std::string sid = WotaGlEnableYuvFeed(w, h);
     napi_value result = nullptr;
     napi_create_string_utf8(env, sid.c_str(), sid.size(), &result);
+    return result;
+}
+
+/** YUV 帧源诊断（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh；Diag 导出定位用） */
+static napi_value GetYuvDiag(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string diag = WotaGlGetYuvDiag();
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, diag.c_str(), diag.size(), &result);
     return result;
 }
 
@@ -746,7 +756,8 @@ static napi_value Init(napi_env env, napi_value exports)
     // 不能因为 unwrap 失败就把 getInputSurfaceId 一起丢掉
     napi_property_descriptor desc[] = {
         {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"createYuvPreview", nullptr, CreateYuvPreview, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"enableYuvFeed", nullptr, EnableYuvFeed, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getYuvDiag", nullptr, GetYuvDiag, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayGeometry", nullptr, SetDisplayGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayFit", nullptr, SetDisplayFit, nullptr, nullptr, nullptr, napi_default, nullptr},

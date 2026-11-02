@@ -23,8 +23,12 @@ export function cancelAvScreenProbe(): void {
   glLib.cancelAvScreenProbe();
 }
 
-export function createYuvPreview(width: number, height: number): string {
-  return glLib.createYuvPreview(width, height);
+export function enableYuvFeed(width: number, height: number): string {
+  return glLib.enableYuvFeed(width, height);
+}
+
+export function getYuvDiag(): string {
+  return glLib.getYuvDiag();
 }
 
 export function getInputSurfaceId(): string {

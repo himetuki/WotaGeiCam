@@ -32,9 +32,15 @@ bool WotaGlReady();
  * EGL/NativeImage 未就绪时返回空串（ArkTS 侧轮询）。
  */
 std::string WotaGlGetInputSurfaceId();
-/** YUV 预览（真机仅 YUV_420_SP 的设备）：建 ImageReceiver 并返回其 SurfaceId（空串=失败） */
-std::string WotaGlCreateYuvPreview(int32_t width, int32_t height);
+/**
+ * 打开 YUV 帧源（真机仅 YUV_420_SP 的设备）：画幅登记 + 切「取相机原始缓冲自转 RGBA」通路，
+ * 返回相机输出面 surfaceId（= getInputSurfaceId；空串 = 不可用，调用方回退原生 RGBA 路）。
+ * 不新建任何面：相机仍写 NativeImage 面（真机实证唯一能收帧的消费面）。
+ */
+std::string WotaGlEnableYuvFeed(int32_t width, int32_t height);
 bool WotaGlYuvMode();
+/** YUV 帧源诊断串（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh），供 Diag 导出定位 */
+std::string WotaGlGetYuvDiag();
 
 /**
  * NativeImage 失败原因（空串 = 正常/尚未失败）：create-failed / set-listener-failed /

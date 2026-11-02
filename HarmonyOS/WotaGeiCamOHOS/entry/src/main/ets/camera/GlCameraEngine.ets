@@ -417,8 +417,9 @@ export class GlCameraEngine {
       if (profile === undefined) {
         return 'gl camera failed: no preview profile';
       }
-      // 帧源通路（2026-11-02 真机取证修复）：RGBA 预览档 → 原生 NativeImage；否则
-      // （YUV_420_SP 等）→ ImageReceiver + RGBA 喂入（native 侧转换，OES 采样管线不变）
+      // 帧源通路（2026-11-02 真机取证修复 v2）：RGBA 预览档 → 原生 NativeImage 采样；
+      // 否则（YUV_420_SP 等）→ 仍用 NativeImage 面（唯一实测能收帧的消费面），native 侧改走
+      // 「AcquireNativeWindowBuffer → CPU 转 RGBA → 内部喂入面」，OES 采样管线不变。
       let cameraSurfaceId: string = nativeSurfaceId;
       if (profile.format !== camera.CameraFormat.CAMERA_FORMAT_RGBA_8888) {
         const yuvId: string = yuvSurfaceProvider === undefined
@@ -426,10 +427,10 @@ export class GlCameraEngine {
         if (yuvId !== '') {
           cameraSurfaceId = yuvId;
           Diag.i(WotaTag.ABILITY,
-            `preview format=${profile.format} -> yuv receiver path`);
+            `preview format=${profile.format} -> yuv raw-feed path`);
         } else {
           Diag.w(WotaTag.ABILITY,
-            `preview format=${profile.format} and yuv receiver unavailable (preview may garble)`);
+            `preview format=${profile.format} and yuv feed unavailable (preview may garble)`);
         }
       } else {
         Diag.i(WotaTag.ABILITY, `preview format=${profile.format} rgba native-image path`);

@@ -4,8 +4,10 @@
  * getNativeImageError：NativeImage 失败原因（空串 = 正常/尚未失败；create-failed / set-listener-failed / get-surface-id-failed）。
  */
 export const getInputSurfaceId: () => string;
-/** YUV 预览（设备仅 YUV_420_SP 时）：建 ImageReceiver 返回 SurfaceId；空串=失败 */
-export const createYuvPreview: (width: number, height: number) => string;
+/** YUV 帧源（设备仅 YUV_420_SP 时）：画幅登记 + 取原始缓冲自转 RGBA；返回相机面 surfaceId，空串=不可用 */
+export const enableYuvFeed: (width: number, height: number) => string;
+/** YUV 帧源诊断（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh）；Diag 导出定位用 */
+export const getYuvDiag: () => string;
 export const getNativeImageError: () => string;
 export const setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
 /** WLB：上屏 letterbox 等比收缩因子（NDC 半域，1,1 = 铺满；编码面恒满幅） */
