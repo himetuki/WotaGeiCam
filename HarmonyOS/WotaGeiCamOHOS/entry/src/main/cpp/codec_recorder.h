@@ -85,6 +85,12 @@ public:
     /** Start 成功后编码器输入面（供 gl_render attach EGL 编码面）；Stop 后为空 */
     OHNativeWindow* EncoderWindow();
 
+    /**
+     * 麦克风 PCM 喂入（音轨链）：S16LE 交织、48kHz 立体声。返回空串 = 已接收；
+     * 非空 = 拒绝原因（音轨未开/忙/编码器错）。同步 AAC 编码 → 输出直接写 muxer。
+     */
+    std::string PushAudioPcm(const uint8_t* data, int32_t size);
+
 private:
     CodecRecorder() = default;
     ~CodecRecorder() = default;
@@ -120,6 +126,12 @@ private:
     /** muxer 写失败：停止送样并作为中止原因带回 ArkTS（samples 仅成功写入自增） */
     bool writeFailed_ = false;
     std::string lastError_;
+    // ---- 音轨链（2026-11-02，上游 AudioFeeder/音轨 muxer 的 OHOS 面）----
+    OH_AVCodec* audioCodec_ = nullptr;
+    int32_t audioTrack_ = -1;
+    int64_t audioPtsUs_ = 0;
+    int32_t audioSamples_ = 0;
+    bool audioEos_ = false;
 };
 
 #endif // WOTA_CODEC_RECORDER_H

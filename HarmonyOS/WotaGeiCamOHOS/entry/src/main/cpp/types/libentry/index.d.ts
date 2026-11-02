@@ -31,6 +31,8 @@ export const setFrostEnabled: (on: boolean) => void;
 export const setGlowParams: (enabled: number, threshold: number, soft: number, width: number,
   gain: number, add: number, freq: number, blend: number, tint: number, colorOnly: number) => void;
 export const getGlowStatus: () => string;
+/** 录制音轨 PCM 喂入（S16LE 交织 48k 立体声）；''=已接收，非空=拒绝原因 */
+export const pushAudioPcm: (pcm: ArrayBuffer) => string;
 export const setDenoiseLevel: (level: number) => void;
 /**
  * GL-4 GPU 录制最小切片（视频-only、单段）：

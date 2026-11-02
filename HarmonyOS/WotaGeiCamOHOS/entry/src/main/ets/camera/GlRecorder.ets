@@ -21,6 +21,7 @@ import {
 } from '../record/FrameLedger';
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
 import { SegmentPolicy } from '../record/SegmentPolicy';
+import { RecordAudioTap } from './RecordAudioTap';
 import { VideoStore } from '../record/VideoStore';
 
 /** libentry.so 录制出口（camera/GlLibBridge 的导出子集） */
@@ -224,6 +225,9 @@ export class GlRecorder {
       this.clearSession();
       return detail;
     }
+    // 音轨（2026-11-02）：MIC 采集 → native AAC/muxer；失败静默只记 W（视频照录，
+    // 与上游「内录/蓝牙未就绪降级为无音轨」同姿态——绝不阻塞录制）
+    RecordAudioTap.start();
     return '';
   }
 
@@ -538,6 +542,7 @@ export class GlRecorder {
     this.fd = -1;
     this.path = '';
     this.lib = undefined;
+    RecordAudioTap.stop();
     this.startParams = undefined;
     this.parts = [];
     this.partIndex = 0;

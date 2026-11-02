@@ -279,6 +279,27 @@ static napi_value SetGlowParams(napi_env env, napi_callback_info info)
 }
 
 /** Glow 状态串：off 或 on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1> */
+/** 音轨 PCM 喂入：S16LE 交织 48k 立体声；返回 ''=已接收，非空=拒绝原因 */
+static napi_value PushAudioPcm(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_value a=nullptr; napi_create_string_utf8(env,"args",4,&a); return a;
+    }
+    void* data = nullptr;
+    size_t len = 0;
+    napi_status st = napi_get_arraybuffer_info(env, argv[0], &data, &len);
+    if (st != napi_ok || data == nullptr || len == 0) {
+        napi_value b=nullptr; napi_create_string_utf8(env,"buffer",6,&b); return b;
+    }
+    const std::string r = CodecRecorder::Instance().PushAudioPcm(static_cast<const uint8_t*>(data), static_cast<int32_t>(len));
+    napi_value out = nullptr;
+    napi_create_string_utf8(env, r.c_str(), r.size(), &out);
+    return out;
+}
+
 static napi_value GetGlowStatus(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -720,6 +741,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setGlowParams", nullptr, SetGlowParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGlowStatus", nullptr, GetGlowStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"pushAudioPcm", nullptr, PushAudioPcm, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDenoiseLevel", nullptr, SetDenoiseLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startGpuRecord", nullptr, StartGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopGpuRecord", nullptr, StopGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
