@@ -13,7 +13,7 @@
 import { common } from '@kit.AbilityKit';
 import { CameraSettings, SettingsStore } from '../ui/SettingsStore';
 import { HudItem, HudItems } from '../core/Constants';
-import { HudEntry, HudLayoutTable, HudZone } from '../core/HudLayout';
+import { HudEntry, HudGridPlan, HudLayoutTable, HudZone, editorVisibleEntries, hudZoneAll, hudZoneKey } from '../core/HudLayout';
 import { HudDragOrder } from '../core/HudDragOrder';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType } from '../ui/HudTokens';
 import { WindowChrome } from '../ui/WindowChrome';
@@ -100,6 +100,35 @@ struct HudEditor {
     this.settings.hudLayout = rewritten.encode();
     this.order = rewritten.orderOf(HudZone.READOUT);
     this.persist();
+  }
+
+  /** 换区用的最小格网计划（换区写表用：可见集 + 保守格距/条目高；真机视觉再调） */
+  private zonePlan(): HudGridPlan {
+    return new HudGridPlan(
+      editorVisibleEntries(this.settings.levelEnabled),
+      3,
+      (_zone: HudZone): number => 56,
+      (_entry: HudEntry): number => 48
+    );
+  }
+
+  /**
+   * 换区（上游 HudLayoutEditor 跨五容器拖拽的表驱动 OHOS 面，用户 2026-11-02 裁决实现）：
+   * 条目按 hudZoneAll 顺序循环到下一容器并追加到该容器末尾——`moveEntryTo` 纯层负责
+   * 归一化/去重/格子书写，本页不手写串拼接；完整拖拽手感与真机视觉验收留真机。
+   */
+  private onMoveZone(entry: HudEntry): void {
+    const table: HudLayoutTable = HudLayoutTable.decode(this.settings.hudLayout);
+    const zones: Array<HudZone> = hudZoneAll();
+    const current: HudZone = table.sourceZoneOf(entry);
+    const at: number = zones.indexOf(current);
+    const next: HudZone = zones[(at + 1 + zones.length) % zones.length];
+    const targetLen: number = table.orderOf(next).length;
+    const rewritten: HudLayoutTable = table.moveEntryTo(entry, next, targetLen, this.zonePlan());
+    this.settings.hudLayout = rewritten.encode();
+    this.order = rewritten.orderOf(HudZone.READOUT);
+    this.persist();
+    this.message = `已移到 ${hudZoneKey(next)} 区`;
   }
 
   private onMoveUp(index: number): void {
@@ -270,6 +299,17 @@ struct HudEditor {
                     .enabled(index < this.order.length - 1)
                     .onClick((): void => {
                       this.onMoveDown(index);
+                    })
+                  Button('⇄')
+                    .fontSize(HudType.VALUE)
+                    .fontColor(HudColor.TEXT_SECONDARY)
+                    .height(HudTouch.BUTTON_HEIGHT)
+                    .width(HudTouch.BUTTON_HEIGHT)
+                    .borderRadius(HudShape.PILL_RADIUS)
+                    .backgroundColor(HudColor.PILL_BG)
+                    .accessibilityText('移到下一区')
+                    .onClick((): void => {
+                      this.onMoveZone(entry);
                     })
                   Toggle({ type: ToggleType.Switch, isOn: this.rowVisible(entry) })
                     .selectedColor(HudColor.ACCENT)

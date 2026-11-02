@@ -447,6 +447,8 @@ struct CameraPage {
   /** 参考片选择列表（内嵌小面板，来自媒体库全部片） */
   @State splitPickOpen: boolean = false;
   @State splitClips: Array<VideoClip> = [];
+  /** 另镜头录制可用态（双摄并发探测；空=本机不支持并发，chip 灰置+说明） */
+  @State splitLensSupported: boolean = false;
   private splitPlayer: PlayerEngine = new PlayerEngine();
   private splitXc: XComponentController = new XComponentController();
   private splitRef: VideoClip | undefined = undefined;
@@ -2899,6 +2901,10 @@ struct CameraPage {
       this.releaseSplitPlayer();
     } else {
       this.splitOn = true;
+      // 进入分屏时探一次双摄并发（上游 LaunchedEffect(splitOn) 同口径；录制中不切分屏已闸）
+      const ctx: common.Context | undefined = this.ctx;
+      this.splitLensSupported = ctx !== undefined && this.cameraStarted &&
+        this.engine.probeConcurrentPartners(ctx).length > 0;
     }
   }
 
@@ -4117,14 +4123,22 @@ struct CameraPage {
               .fontSize(12)
               .fontColor(HudColor.TEXT_PRIMARY)
               .width('100%')
-            // 另镜头录制（上游同款占位：双摄并发探测在 OHOS 相机模型下无等价面，
-            // 点击只给提示——不摆一个点了没反应的假入口）
+            // 另镜头录制（上游同款占位入口）：可用态来自双摄并发探测
+            // （getCameraConcurrentInfos）；可用也只是占位（上游同为占位），点击给提示；
+            // 不支持时灰置 + 如实说明（不摆一个点了必崩/没反应的假入口）
             Button('另镜头录制（下一批）')
               .fontSize(11)
               .width('100%')
+              .enabled(this.splitLensSupported)
               .onClick((): void => {
                 this.message = '另镜头录制在后续批次实现';
               })
+            if (!this.splitLensSupported) {
+              Text('本机不支持双摄并发（或相机未就绪）')
+                .fontSize(10)
+                .fontColor(PageColor.TEXT_DIM)
+                .width('100%')
+            }
             Button('实时对比播放')
               .fontSize(11)
               .width('100%')

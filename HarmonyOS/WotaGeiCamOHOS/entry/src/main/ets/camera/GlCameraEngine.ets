@@ -19,7 +19,7 @@ import { LowFpsHint, LowFpsWatch } from '../core/LowFpsWatch';
 import { WotaParams } from '../core/WotaParams';
 import { LensSlot, LensType, lensTypeName, maxVideoPixels, pickCapabilityDefault } from '../core/LensSlot';
 import { VideoSizeCandidates, sizeCloseTo } from '../core/VideoSizePicker';
-import { enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
+import { concurrentPartnersOf, enumerateKitLenses, findDeviceById, pickDefaultLens } from './KitLens';
 import { abilityRefineWithSession } from './KitAbility';
 import {
   ApplyReport, ExposurePlan, Snapshot, State, applySnapshot, exposurePlan, readoutKeyOf,
@@ -151,6 +151,23 @@ export class GlCameraEngine {
   /** 当前镜头方向信息（未起镜返回 undefined） */
   lastLensInfo(): GlLensInfo | undefined {
     return this.lensInfo;
+  }
+
+  /**
+   * 双摄并发伙伴探测（分屏「另镜头录制」可用态）：当前镜头 + 本机族；无会话/抛错回空。
+   * 只在用户进入分屏时按需调（查询本身便宜，但没必要每次起镜都问一次）。
+   */
+  probeConcurrentPartners(ctx: common.Context): Array<string> {
+    const slot: LensSlot | undefined = this.currentSlot;
+    if (slot === undefined) {
+      return [];
+    }
+    try {
+      const mgr: camera.CameraManager = camera.getCameraManager(ctx);
+      return concurrentPartnersOf(mgr, slot.logicId);
+    } catch (e) {
+      return [];
+    }
   }
 
   /** 参数总线注入（取景页 aboutToAppear 调一次；不注入则读出探测与实测遥测停用） */

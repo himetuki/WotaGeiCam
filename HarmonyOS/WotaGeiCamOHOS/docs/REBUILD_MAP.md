@@ -10,16 +10,16 @@
 
 | 安卓文件 | 行数 | 鸿蒙对应 | verdict | 备注/缺口 |
 |---|---|---|---|---|
-| ui/CameraScreen.kt | 4294 | pages/Camera.ets | 🔶→推进中 | 深区对拍两批完成：**站位线族 ✅ 全量重建（9eb441c）** + **分屏对比 ✅ 重建（本批）**——分屏圆钮（录制锁）+ 左半压缩=纯变换（transformOrigin 左缘中点，上游 graphicsLayer 同式）+ 右侧面板两态（模式列表：另镜头录制占位[与上游同占位]/实时对比播放/退出；对比态：内嵌 PlayerEngine 参考片循环+自动开播+内嵌选片列表）+ ComparePractice 动线接通（对比页「对着练」→ 录制页首次组合取半屏）；余项：录完弹回对比页填右片（pendingRightId 消费，需入库 id 时序面）续批；双摄并发探测=OHOS 相机模型无等价面（占位与上游同形） |
+| ui/CameraScreen.kt | 4294 | pages/Camera.ets | 🔶→推进中 | 深区对拍两批完成：**站位线族 ✅ 全量重建（9eb441c）** + **分屏对比 ✅ 重建（本批）**——分屏圆钮（录制锁）+ 左半压缩=纯变换（transformOrigin 左缘中点，上游 graphicsLayer 同式）+ 右侧面板两态（模式列表：另镜头录制占位[可用态=双摄并发探测**已实现**：getCameraConcurrentInfos，API18+，不支持时灰置+说明]/实时对比播放/退出；对比态：内嵌 PlayerEngine 参考片循环+自动开播+内嵌选片列表）+ ComparePractice 动线接通（对比页「对着练」→ 录制页首次组合取半屏）+ 录完弹回对比页填右片（3b09320 已闭环） |
 | ui/CameraPills.kt | 1744 | ui/ParamPills.ets + Camera.ets 弹层面 + GlowPanel/TonePanel | ✅ | 19 颗胶囊对齐收口：Bitrate 弹层 ✅、**Flash 四模式摊开弹层 ✅（本批——Dock 点按循环保留历史、弹层为上游同构主入口；MANUAL 档禁自动预闪与下发侧 flashPlan 同口径）**、Size/Fps/Zoom=Dock 循环（🔶 形态裁定在册）、RefLine=设置页+快切钮、Monitor=设置页；GlowColorWheel ✅（c972228） |
 | ui/HudLayer.kt | 2155 | pages/Camera.ets HUD 区 + 读数条 + HudLayout/HudMetrics/HudPageGrid/HudDragOrder | ✅ | 组件族对齐：HudEntryItem/ZoneBox/Grid/Dock/Readout/TopChrome/BottomZone/RecordButton/VolumeLeds/warnRows 逐项有对应（J1-J3+wx 三行批）；纯层 hudGridGap/hudGridRowPitchPx/bandLeftPx/zoneBandHeight 同源在册；形态偏离=T31 固定结构（五容器自由布局待真机，登记） |
 | ui/HudLayout.kt | 2274 | core/HudLayout.ets (2787) | ✅ | J1-J3 移植在册；编辑器跨容器自由布局=产品决策待真机（PORT_MAP 登记） |
-| ui/HudLayoutEditor.kt | 1353 | pages/HudEditor.ets | 🔶 | READOUT 区拖拽 ✅；五容器自由布局无渲染面（T31 结构，登记） |
+| ui/HudLayoutEditor.kt | 1353 | pages/HudEditor.ets | ✅ | READOUT 区拖拽 ✅ + **跨五容器换区编辑（2026-11-02 用户裁决实现）**：逐行「⇄」按 hudZoneAll 循环移动容器，全走 `moveEntryTo` 表驱动（归一化/去重/格子书写纯层收口；换区后条目唯一归属有守卫）；完整拖拽手感与真机视觉验收留真机 |
 | ui/SettingsScreen.kt | 2113 | pages/Settings.ets | ✅ | 14/14 组对齐：默认/方向/动效(24345d5)/亮度(f6c6ede)/HUD/滑杆吸附/参考线/水平仪/对比/文本/权限/诊断/检查更新+版本/**关于**（包名+数据说明，本批）；STORAGE 组 N/A——MANAGE_ALL_FILES_ACCESS 是 Android 专属，本侧沙箱 MediaRepo 零媒体权限姿态（20aa0e0 同裁定） |
 | ui/dialog/CurvePopup.kt | 893 | ui/CurvePopup.ets | ✅ | 含缩放 eb956f5 + 320a956/bda89bb 全量（曲线批C1-C3） |
 | ui/dialog/BtSpeakerPanel.kt | 376 | pages/BtPanel.ets | ✅ | 面板在册（设备行/配对/连接；OHOS 化差异=系统蓝牙设置跳转面，登记） |
 | ui/dialog/CameraDialogs.kt | 375 | Camera.ets 各弹层 | 🔍 | 待比对 |
-| ui/dialog/AudioSourcePanel.kt | 233 | 录制链 MIC 音轨 + 设置页「麦克风录音」开关 | ✅ | 音轨宿主（批11 MIC→AAC→muxer）+ 面板入口（本批：麦克风录音开关默认开、关=纯视频，录制起时现读 prefs 门控 RecordAudioTap；**内录/蓝牙**需 AVScreenCapture 合流=平台面待批，UI 已如实注明） |
+| ui/dialog/AudioSourcePanel.kt | 233 | 录制链 MIC 音轨 + 设置页「麦克风录音」开关 | ✅ | 音轨宿主（批11 MIC→AAC→muxer）+ 面板入口（批12 麦克风录音开关默认开、关=纯视频，起录现读门控）；**裁定**：内录=平台能力批次（AVScreenCapture 音视频合流，native 独立批；UI 已如实注明），蓝牙音源=**N/A**（OHOS A2DP 是输出路由，audio.SourceType 无蓝牙输入源，第三方无采集接口） |
 | ui/design/PillPopup.kt | 510 | ui/PillPopup.ets | ✅ | 显形动效已重建（本批）：0.94→1 弹簧+淡入（OFFSET 规格），MotionModeStore 直读闸（PLAIN 直达）；PillSlider.readContinuous 同款注入形态免穿参 |
 | ui/design/WotaSwitch.kt | 288 | ui/WotaSwitch.ets | ✅ | 速度继承已重建（springCurve(velocity) 初速度入口 + stiffness=(2π/r)²/c=2ζ√(mass·k) 换算面，17da517） |
 | ui/design/LikeHeart.kt | 281 | core/LikeBurst.ets + ui/LikeHeart.ets | ✅ | 数学全表+Canvas 宿主（71a74ce）；数字滚动刻意不迁 |

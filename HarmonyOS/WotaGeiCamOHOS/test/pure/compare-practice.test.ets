@@ -103,3 +103,21 @@ test('练习回归路径通道：armed 才记账、取即清、普通录制拒�
   assertEq('/x/rec.mp4', comparePractice.takePendingRightPath() ?? '', '取走路径');
   assertNull(comparePractice.takePendingRightPath(), '取即清');
 });
+
+test('接线：双摄并发探测两钉（getCameraConcurrentInfos 查询 + 分屏 chip 门控）', () => {
+  const { existsSync, readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
+  let dir: string = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(resolve(dir, 'entry/src/main/ets/core/CameraAbility.ets'))) {
+      break;
+    }
+    dir = resolve(dir, '..');
+  }
+  const lens: string = readFileSync(resolve(dir, 'entry/src/main/ets/camera/KitLens.ets'), 'utf8');
+  const camera: string = readFileSync(resolve(dir, 'entry/src/main/ets/pages/Camera.ets'), 'utf8');
+  assertTrue(lens.indexOf('getCameraConcurrentInfos') >= 0, '并发探测走官方 API');
+  assertTrue(camera.indexOf('probeConcurrentPartners') >= 0, '分屏进入时探一次');
+  assertTrue(camera.indexOf('splitLensSupported') >= 0 && camera.indexOf('本机不支持双摄并发') >= 0,
+    'chip 可用态门控 + 不支持说明');
+});
