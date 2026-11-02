@@ -86,6 +86,8 @@ import { FlushScheduler, ParamsFlushThrottle } from '../ui/ParamsFlushThrottle';
 import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
+import { MarkerLineOverlay } from '../ui/MarkerLineOverlay';
+import { MarkerLineColor, MarkerLines } from '../core/MarkerLines';
 import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
@@ -159,6 +161,8 @@ const PILL_DENOISE_ID: string = 'pill_denoise';
 const GLOW_STATUS_INTERVAL_MS: number = 500;
 /** 竖屏右上第三枚圆钮（曲线编辑入口；回归修复——横屏左侧 float 已有 RGB 曲线，竖屏此前无入口） */
 const PILL_CURVE_ID: string = 'pill_curve';
+/** 站位线圆钮（右上簇第四枚；控件浮层/选色浮层的锚点实测 id） */
+const MARKER_BTN_ID: string = 'marker_btn';
 
 /**
  * native 状态串 → core.GlowStatus（纯数据；enabled 由用户开关给，native 只报链侧事实）。
@@ -414,6 +418,21 @@ struct CameraPage {
   @State flashOn: boolean = false;
   /** 闪光模式（上游 FlashPill 四模式摊开弹层：0 关 1 自动 2 开 3 常亮；Dock 点按循环保留） */
   @State flashMode: number = 0;
+  // ---- 站位线（上游 CameraScreen 圆钮 + 两浮层，2026-10-27 交互定版）----
+  /** 控件浮层（+/线数/− + 间距滑杆；无卡片底透明）开合 */
+  @State markerPanelOpen: boolean = false;
+  /** 选色浮层（长按圆钮；6 色圆片）开合 */
+  @State markerColorOpen: boolean = false;
+  /** 圆钮窗口矩形（px；getRectangleById 实测，禁手算坐标） */
+  private markerAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** 浮层放置点（vp；贴圆钮右下、不越屏右缘） */
+  @State markerPanelX: number = 0;
+  @State markerPanelY: number = 0;
+  /** 站位线三参数镜像（@State 原语：StateFlow 变化不触发重渲染，订阅里刷新） */
+  @State markerCount: number = 0;
+  @State markerSpread: number = 0.6;
+  @State markerColorArgb: number = 0xFFE6C700;
+  private markerDensity: number = 1;
   /** 画面降噪开关（settings.videoDenoise 的镜像 @State：横屏芯片选中态要刷新） */
   @State denoiseOn: boolean = false;
   /** engine 报闪光不支持后的禁用观感（仍可点出一次「该镜头不支持闪光/常亮」提示） */
@@ -1113,6 +1132,16 @@ struct CameraPage {
     this.params.ev.subscribe(recompute);
     this.params.wbMode.subscribe(recompute);
     this.params.kelvin.subscribe(recompute);
+    // 站位线三参数镜像（值流 → 页面原语 State；覆盖层/浮层读镜像才重渲染）
+    const markerSync = (): void => {
+      this.markerCount = this.params.markerCount.value;
+      this.markerSpread = this.params.markerSpread.value;
+      this.markerColorArgb = this.params.markerColor.value.argb;
+    };
+    this.params.markerCount.subscribe(markerSync);
+    this.params.markerSpread.subscribe(markerSync);
+    this.params.markerColor.subscribe(markerSync);
+    markerSync();
     this.syncParamLabels();
   }
 
@@ -2809,6 +2838,56 @@ struct CameraPage {
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
   }
 
+  /** 站位线浮层定位：量圆钮窗口矩形（px）→ 换算 vp，贴其右下、右缘钳回安全边内 */
+  private placeMarkerPanels(): void {
+    let left: number = 0;
+    let top: number = 0;
+    let right: number = 0;
+    let bottom: number = 0;
+    try {
+      const info = this.getUIContext().getComponentUtils().getRectangleById(MARKER_BTN_ID);
+      this.markerAnchor = {
+        left: info.windowOffset.x,
+        top: info.windowOffset.y,
+        right: info.windowOffset.x + info.size.width,
+        bottom: info.windowOffset.y + info.size.height
+      };
+      left = this.markerAnchor.left;
+      top = this.markerAnchor.top;
+      right = this.markerAnchor.right;
+      bottom = this.markerAnchor.bottom;
+      const d = display.getDefaultDisplaySync();
+      this.markerDensity = d.densityPixels > 0 ? d.densityPixels : 1;
+    } catch (e) {
+      // 量不到（首帧未布局）：浮层贴屏右上下方兜底
+      this.markerDensity = 1;
+    }
+    const dens: number = this.markerDensity;
+    // 浮层宽约 240vp：右缘贴圆钮右缘、钳进屏宽 - 8vp；纵向贴圆钮下方 4vp
+    const panelW: number = 240;
+    const scrW: number = this.winWvp > 0 ? this.winWvp : 360;
+    const xVp: number = Math.max(8, Math.min(scrW - panelW - 8,
+      (right > 0 ? right / dens - panelW * 0.65 : scrW - panelW - 8)));
+    const yVp: number = bottom > 0 ? bottom / dens + 4 : 120;
+    this.markerPanelX = xVp;
+    this.markerPanelY = yVp;
+  }
+
+  private toggleMarkerPanel(): void {
+    this.markerColorOpen = false;
+    this.markerPanelOpen = !this.markerPanelOpen;
+    if (this.markerPanelOpen) {
+      this.placeMarkerPanels();
+    }
+    this.flushParamsNow(); // 关浮层是完成点：拖动期未落的间距值立即落一次
+  }
+
+  private openMarkerColor(): void {
+    this.markerPanelOpen = false;
+    this.markerColorOpen = true;
+    this.placeMarkerPanels();
+  }
+
   build() {
     Stack() {
       XComponent({ id: 'wotaCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
@@ -2828,6 +2907,16 @@ struct CameraPage {
           aspect: this.refLineAspect(),
           rollDegrees: this.levelRoll,
           showLevelLine: this.levelOn && this.levelAvailable
+        })
+      }
+      // 站位指示线（上游 MarkerLineOverlay 同通道：纯 UI 层、结构上进不了编码器）；
+      // 画在参考线之上（站位线是排练走位的主参考，压暗的参考线在其下）
+      if (this.markerCount !== 0) {
+        MarkerLineOverlay({
+          count: this.markerCount,
+          spread: this.markerSpread,
+          argb: this.markerColorArgb,
+          aspect: this.refLineAspect()
         })
       }
       // T31 渐变遮罩：上/下两条压暗带，保证白字在任何画面上可读（不拦触摸）。
@@ -2932,6 +3021,26 @@ struct CameraPage {
           // 回归修复：竖屏此前没有曲线入口（横屏左侧 float 有 RGB 曲线）——右起第三枚「曲」补上，
           // 横排三枚 40vp（3×40 + 2×6 = 132）不压顶栏两行读数，录制中也可开（曲线/LUT 上传与录制无冲突）。
           Row({ space: HudSpace.S }) {
+            Text('位')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(this.markerPanelOpen ? PageColor.ACCENT_BLUE : HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('站位线')
+              .id(MARKER_BTN_ID)
+              .onClick((): void => {
+                this.toggleMarkerPanel();
+              })
+              .gesture(
+                LongPressGesture({ repeat: false, duration: 500 })
+                  .onAction((): void => {
+                    this.openMarkerColor();
+                  })
+              )
             Text('曲')
               .fontSize(HudType.VALUE)
               .fontColor(HudColor.TEXT_PRIMARY)
@@ -2977,7 +3086,7 @@ struct CameraPage {
                 }
               })
           }
-          .width(132)
+          .width(178)
         }
         .width('100%')
         .height(HudSpec.TOP_BAR_HEIGHT + this.safeTop)
@@ -3991,6 +4100,100 @@ struct CameraPage {
             }
           }
         })
+      }
+      // ---------- 站位线浮层（上游 2026-10-27 交互定版）：**无卡片底透明浮层**，
+      // 控制 = [+/线数/− 一行 + 间距滑杆]，选色 = 长按圆钮出的六色圆片；均贴圆钮右下
+      if (this.markerPanelOpen || this.markerColorOpen) {
+        // 点外部关闭捕获层（透明，不拦底下的取景手势之外的面板操作）
+        Column()
+          .width('100%')
+          .height('100%')
+          .onClick((): void => {
+            this.markerPanelOpen = false;
+            this.markerColorOpen = false;
+            this.flushParamsNow();
+          })
+      }
+      if (this.markerPanelOpen) {
+        Column({ space: 6 }) {
+          Row({ space: 14 }) {
+            Text('−')
+              .fontSize(20)
+              .fontColor(Color.White)
+              .width(36)
+              .height(36)
+              .borderRadius(18)
+              .backgroundColor('#59FFFFFF')
+              .textAlign(TextAlign.Center)
+              .accessibilityText('减少站位线')
+              .onClick((): void => {
+                this.params.markerCount.value =
+                  MarkerLines.clampCount(this.params.markerCount.value - 1);
+              })
+            Text(`${this.markerCount}`)
+              .fontSize(22)
+              .fontColor(Color.White)
+              .fontWeight(FontWeight.Bold)
+              .textShadow({ radius: 3, color: Color.Black, offsetX: 1, offsetY: 1 })
+            Text('+')
+              .fontSize(20)
+              .fontColor(Color.White)
+              .width(36)
+              .height(36)
+              .borderRadius(18)
+              .backgroundColor('#59FFFFFF')
+              .textAlign(TextAlign.Center)
+              .accessibilityText('增加站位线')
+              .onClick((): void => {
+                this.params.markerCount.value =
+                  MarkerLines.clampCount(this.params.markerCount.value + 1);
+              })
+          }
+          .alignItems(VerticalAlign.Center)
+          // 间距滑杆 = 调「整组展开宽度」：等距线随之变疏/变密；松手落盘（间距入档）
+          Slider({
+            value: this.markerSpread,
+            min: MarkerLines.MIN_SPREAD,
+            max: MarkerLines.MAX_SPREAD,
+            step: 0.01
+          })
+            .width(220)
+            .selectedColor('#CCFFFFFF')
+            .trackColor('#33FFFFFF')
+            .onChange((v: number, mode: SliderChangeMode): void => {
+              this.params.markerSpread.value = MarkerLines.clampSpread(v);
+              if (mode === SliderChangeMode.End) {
+                this.flushParamsNow(); // 完成点写盘（与 PillSlider 同一纪律）
+              }
+            })
+        }
+        .position({ x: this.markerPanelX, y: this.markerPanelY })
+        .alignItems(HorizontalAlign.Center)
+      }
+      if (this.markerColorOpen) {
+        Row({ space: 8 }) {
+          ForEach(MarkerLineColor.ALL, (c: MarkerLineColor): void => {
+            Column()
+              .width(28)
+              .height(28)
+              .borderRadius(14)
+              .backgroundColor(c.argb)
+              .border({
+                width: c.argb === this.markerColorArgb ? 2 : 0,
+                color: Color.White
+              })
+              .accessibilityText(`站位线颜色：${c.label}`)
+              .onClick((): void => {
+                this.params.markerColor.value = c;
+                this.markerColorOpen = false;
+                this.flushParamsNow(); // 选色是离散完成点：当场落盘（颜色入档）
+              })
+          }, (c: MarkerLineColor): string => c.enumName())
+        }
+        .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+        .backgroundColor('#CC1C1C1E')
+        .borderRadius(18)
+        .position({ x: this.markerPanelX, y: this.markerPanelY })
       }
     }
     .width('100%')

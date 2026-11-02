@@ -29,6 +29,7 @@ import {
   WotaTiers, WbPreset
 } from '../core/Constants';
 import { ExposureCorrection } from '../core/ExposureCorrection';
+import { MarkerLineColor, MarkerLines } from '../core/MarkerLines';
 import { LensType } from '../core/LensSlot';
 import { ParamState, WotaParams } from '../core/WotaParams';
 
@@ -60,6 +61,9 @@ export const KEY_DEFAULT_LENS: string = 'default_lens';
 export const KEY_DEFAULT_ARC_MERGE_DEADBAND: string = 'default_arc_merge_deadband';
 // 2026-11-01：等号档曝光纠偏两项（自动开关默认开 + 手动滑杆值）——上游 r42 对齐
 export const KEY_CORRECTION_AUTO: string = 'correction_auto';
+// 2026-10-27/28：站位线**间距与颜色**入档（**线数刻意不入档**——「启动时取景器干净无线」）
+export const KEY_DEFAULT_MARKER_SPREAD: string = 'default_marker_spread';
+export const KEY_DEFAULT_MARKER_COLOR: string = 'default_marker_color';
 export const KEY_CORRECTION_MANUAL_NS: string = 'correction_manual_ns';
 
 /** 入档字段的键白名单（顺序照上游 `ParamsPersist.KEYS`；单测手写清单双向核对）。 */
@@ -89,7 +93,9 @@ export const PARAMS_KEYS: Array<string> = [
   KEY_DEFAULT_LENS,
   KEY_DEFAULT_ARC_MERGE_DEADBAND,
   KEY_CORRECTION_AUTO,
-  KEY_CORRECTION_MANUAL_NS
+  KEY_CORRECTION_MANUAL_NS,
+  KEY_DEFAULT_MARKER_SPREAD,
+  KEY_DEFAULT_MARKER_COLOR
 ];
 
 /**
@@ -547,6 +553,13 @@ export class ParamsPersist {
     params.exposureCorrectionAuto.value = prefs.getBool(KEY_CORRECTION_AUTO, true);
     params.exposureCorrectionManualNs.value = ExposureCorrection.clampManualNs(
       prefs.getInt(KEY_CORRECTION_MANUAL_NS, 0));
+    // ⑱ 站位线（上游 ⑱，2026-10-27）：**只恢复间距与颜色，线数不恢复**——用户口径「启动时
+    //    取景器能干净无线」，线数恒停在出厂 0（= 关），由用户当场用 +/− 调；间距越界钳回
+    //    产品域，颜色坏名回黄（存储值是枚举名，与上游 enum.name 逐字同域）
+    params.markerSpread.value =
+      MarkerLines.clampSpread(prefs.getFloat(KEY_DEFAULT_MARKER_SPREAD, MarkerLines.DEFAULT_SPREAD));
+    params.markerColor.value = MarkerLineColor.fromName(
+      prefs.getString(KEY_DEFAULT_MARKER_COLOR, 'YELLOW'));
   }
 
   /** LOCK 归一：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO（锁是瞬时态）。 */
@@ -598,6 +611,8 @@ export class ParamsPersistSession {
   private shArcDeadband: number = 0;
   private shCorrectionAuto: boolean = true;
   private shCorrectionManualNs: number = 0;
+  private shMarkerSpread: number = MarkerLines.DEFAULT_SPREAD;
+  private shMarkerColor: MarkerLineColor = MarkerLineColor.YELLOW;
 
   constructor(prefs: ParamsPrefs, params: WotaParams) {
     this.prefs = prefs;
@@ -638,6 +653,8 @@ export class ParamsPersistSession {
     this.shArcDeadband = this.params.arcMergeDeadband.value;
     this.shCorrectionAuto = this.params.exposureCorrectionAuto.value;
     this.shCorrectionManualNs = this.params.exposureCorrectionManualNs.value;
+    this.shMarkerSpread = this.params.markerSpread.value;
+    this.shMarkerColor = this.params.markerColor.value;
   }
 
   /**
@@ -674,6 +691,8 @@ export class ParamsPersistSession {
     const arcDeadband: number = this.params.arcMergeDeadband.value;
     const correctionAuto: boolean = this.params.exposureCorrectionAuto.value;
     const correctionManualNs: number = this.params.exposureCorrectionManualNs.value;
+    const markerSpread: number = this.params.markerSpread.value;
+    const markerColor: MarkerLineColor = this.params.markerColor.value;
 
     // 无差异：不 put、不 commit（一次空落盘也不做；影子与总线本来就一致）
     const changed: boolean = fps !== this.shFps || shutter !== this.shShutter ||
@@ -685,7 +704,8 @@ export class ParamsPersistSession {
       effect !== this.shEffect || zebraT !== this.shZebraT || zebraD !== this.shZebraD ||
       peakS !== this.shPeakS || peakC !== this.shPeakC || lens !== this.shLens ||
       arcDeadband !== this.shArcDeadband ||
-      correctionAuto !== this.shCorrectionAuto || correctionManualNs !== this.shCorrectionManualNs;
+      correctionAuto !== this.shCorrectionAuto || correctionManualNs !== this.shCorrectionManualNs ||
+      markerSpread !== this.shMarkerSpread || markerColor.enumName() !== this.shMarkerColor.enumName();
     if (!changed) {
       return true;
     }
@@ -770,6 +790,12 @@ export class ParamsPersistSession {
       // 上游是 putLong；本侧 ParamsPrefs 单 number 型且纠偏域 0..8_000_000 < 2^31，int 等价（登记）
       ok = this.prefs.putInt(KEY_CORRECTION_MANUAL_NS, Math.trunc(correctionManualNs)) && ok;
     }
+    if (markerSpread !== this.shMarkerSpread) {
+      ok = this.prefs.putFloat(KEY_DEFAULT_MARKER_SPREAD, markerSpread) && ok;
+    }
+    if (markerColor.enumName() !== this.shMarkerColor.enumName()) {
+      ok = this.prefs.putString(KEY_DEFAULT_MARKER_COLOR, markerColor.enumName()) && ok;
+    }
 
     if (!ok) {
       return false; // 写内存失败：影子保持旧值，下次 flush 重试
@@ -805,6 +831,8 @@ export class ParamsPersistSession {
     this.shArcDeadband = arcDeadband;
     this.shCorrectionAuto = correctionAuto;
     this.shCorrectionManualNs = correctionManualNs;
+    this.shMarkerSpread = markerSpread;
+    this.shMarkerColor = markerColor;
     return true;
   }
 }

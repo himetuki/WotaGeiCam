@@ -71,6 +71,7 @@ import { AudioDenoise, VideoDenoise, audioDenoiseNeedsCodec, denoiseKernelLite,
   effectiveVideoDenoise, videoDenoiseActive } from '../core/Denoise';
 import { HistogramMath } from '../core/HistogramMath';
 import { ExposureCorrection } from '../core/ExposureCorrection';
+import { MarkerLines } from '../core/MarkerLines';
 import { WbApply, isIdentityGains, manualGains, wbApplyPlan } from '../core/WbPlan';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
@@ -113,6 +114,7 @@ export class PureLogicBarrel {
     PureLogicBarrel.cameraCatchupCompileProbe();
     PureLogicBarrel.exposureCorrectionCompileProbe();
     PureLogicBarrel.wbPlanCompileProbe();
+    PureLogicBarrel.markerLinesCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -316,6 +318,16 @@ export class PureLogicBarrel {
     const delta: number = ExposureCorrection.probeDeltaNs([42_000_000, 44_000_000], 40_000_000);
     const period: number = ExposureCorrection.framePeriodNs(24);
     if (applicable && margin > 0 && corrected > 0 && manual >= 0 && delta >= 0 && period > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /** 站位指示线纯层探针（等距比例 + 域钳；零副作用） */
+  private static markerLinesCompileProbe(): void {
+    const xs: Array<number> = MarkerLines.lineXsFraction(3, 0.6);
+    const c: number = MarkerLines.clampCount(99);
+    const s: number = MarkerLines.clampSpread(0.01);
+    if (xs.length === 3 && c === 8 && s === 0.15) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

@@ -21,6 +21,7 @@ import {
   AeMode, AfMode, Flash, FrameEffect, PeakingColor, Size, Stabilize, WotaTiers, WbPreset
 } from '../../entry/src/main/ets/core/Constants';
 import { LensType } from '../../entry/src/main/ets/core/LensSlot';
+import { MarkerLineColor } from '../../entry/src/main/ets/core/MarkerLines';
 
 type PrefRaw = string | number | boolean;
 
@@ -91,7 +92,8 @@ const EXPECTED_KEYS: Array<string> = [
   'default_wb_tint', 'default_zoom', 'default_flash', 'default_stabilize', 'default_af_mode',
   'default_mf_diopter', 'default_size', 'default_frame_effect', 'default_zebra_threshold',
   'default_zebra_density', 'default_peaking_strength', 'default_peaking_color', 'default_lens',
-  'default_arc_merge_deadband', 'correction_auto', 'correction_manual_ns'
+  'default_arc_merge_deadband', 'correction_auto', 'correction_manual_ns',
+  'default_marker_spread', 'default_marker_color'
 ];
 
 /** 排除清单的**上游实际键名**（renderMode/sampleRate/audioEnabled/focusPoint/curve/arc_convert_mode） */
@@ -100,7 +102,7 @@ const EXCLUDED_KEYS: Array<string> = [
   'curve_stack', 'arc_convert_mode'
 ];
 
-/** 把 26 个键都填成非默认合法值（restore 正例与迁移/会话用例共用） */
+/** 把 28 个键都填成非默认合法值（restore 正例与迁移/会话用例共用） */
 function fillAllKeys(p: FakeParamsPrefs): void {
   p.map.set('default_fps', 60);
   p.map.set('default_shutter_ns', 8_333_333);
@@ -128,19 +130,21 @@ function fillAllKeys(p: FakeParamsPrefs): void {
   p.map.set('default_arc_merge_deadband', 25);
   p.map.set('correction_auto', false);
   p.map.set('correction_manual_ns', 2_000_000);
+  p.map.set('default_marker_spread', 0.85);
+  p.map.set('default_marker_color', 'GREEN');
 }
 
 // ================================================================== 1. 白名单契约
 
-test('白名单 26 条且无重复', (): void => {
+test('白名单 28 条且无重复', (): void => {
   // 多一条 = 排他字段泄入（自动降级会被写成用户默认）；少一条 = 有字段漏档
-  assertEq(26, PARAMS_KEYS.length, '白名单条数');
-  assertEq(26, new Set<string>(PARAMS_KEYS).size, '去重后条数');
+  assertEq(28, PARAMS_KEYS.length, '白名单条数');
+  assertEq(28, new Set<string>(PARAMS_KEYS).size, '去重后条数');
 });
 
 test('白名单键名/顺序逐字等于上游拍板清单', (): void => {
   // 键名是持久化契约：手写清单与实现双向核对，顺序也钉（上游 KEYS 顺序）
-  assertEq(26, EXPECTED_KEYS.length, '手写清单条数');
+  assertEq(28, EXPECTED_KEYS.length, '手写清单条数');
   assertEq(EXPECTED_KEYS.join(','), PARAMS_KEYS.join(','), '键名与顺序逐字一致');
 });
 
@@ -187,6 +191,9 @@ test('restore 26 键逐项写回总线', (): void => {
   assertEq(25, params.arcMergeDeadband.value, '补弧差分死区');
   assertEq(false, params.exposureCorrectionAuto.value, '纠偏自动开关');
   assertEq(2_000_000, params.exposureCorrectionManualNs.value, '手动微调 ns');
+  assertEq(0.85, params.markerSpread.value, '站位线间距');
+  assertEq(MarkerLineColor.GREEN.enumName(), params.markerColor.value.enumName(), '站位线颜色名');
+  assertEq(0, params.markerCount.value, '线数不入档：restore 后恒 0');
 });
 
 test('restore 纠偏两键脏值回落：缺键=自动开+0；越界钳回 0..8ms 域', (): void => {
@@ -367,9 +374,11 @@ function makeBusy(params: WotaParams): void {
   // r42 起入档两项：等号档纠偏自动关 + 手动 +2ms
   params.exposureCorrectionAuto.value = false;
   params.exposureCorrectionManualNs.value = 2_000_000;
+  params.markerSpread.value = 0.85;
+  params.markerColor.value = MarkerLineColor.GREEN;
 }
 
-test('会话 全动过后只写白名单 26 键且顺序一致', (): void => {
+test('会话 全动过后只写白名单 28 键且顺序一致', (): void => {
   const prefs: FakeParamsPrefs = new FakeParamsPrefs();
   const params: WotaParams = new WotaParams();
   const session: ParamsPersistSession = new ParamsPersistSession(prefs, params); // 影子先冻结

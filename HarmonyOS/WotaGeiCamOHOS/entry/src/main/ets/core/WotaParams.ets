@@ -13,6 +13,7 @@ import {
 } from './Constants';
 import { CameraAbility, FpsDecision, RangeF, shutterCeilingNs } from './CameraAbility';
 import { ReadoutLatch } from './ExposureCorrection';
+import { MarkerLineColor, MarkerLines } from './MarkerLines';
 import { LowFpsHint } from './LowFpsWatch';
 import { lensTypeName, LensType } from './LensSlot';
 import { CurveStack } from './CurveModel';
@@ -229,6 +230,14 @@ export class WotaParams {
   /** RGB 曲线：只走 GPU 渲染链（DIRECT 无片元 pass），恒等即关闭 */
   readonly curve: StateFlow<CurveStack> = new StateFlow<CurveStack>(CurveStack.IDENTITY);
   readonly refLines: StateFlow<number> = new StateFlow<number>(0); // RefLineType 位掩码
+  /**
+   * 站位指示线（2026-10-27 用户定版）：线数 0 = 关（没有独立开关，默认 0）；
+   * **线数不入档**（「启动时取景器干净无线」——冷启恒从 0 起），间距与颜色入档
+   * （ParamsPersist 的 default_marker_spread/default_marker_color 两键）。
+   */
+  readonly markerCount: StateFlow<number> = new StateFlow<number>(MarkerLines.DEFAULT_COUNT);
+  readonly markerSpread: StateFlow<number> = new StateFlow<number>(MarkerLines.DEFAULT_SPREAD);
+  readonly markerColor: StateFlow<MarkerLineColor> = new StateFlow<MarkerLineColor>(MarkerLineColor.YELLOW);
   readonly levelEnabled: StateFlow<boolean> = new StateFlow<boolean>(true);
 
   /**
