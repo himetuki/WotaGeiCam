@@ -72,6 +72,20 @@ export class MotionModeStore {
   }
 }
 
+/** 录制音轨开关直读（组件/录制器现读 prefs；坏值回默认开） */
+export class AudioSourceStore {
+  static readEnabled(ctx: common.Context): boolean {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_RECORD_AUDIO, true);
+      return raw === true;
+    } catch (e) {
+      return true;
+    }
+  }
+}
+
 /** 播放页顶栏收起态读写（纯 UI 设置：进页读、点按写，冷启保持） */
 export class PlayerChromeStore {
   static readCollapsed(ctx: common.Context): boolean {
@@ -132,6 +146,9 @@ const KEY_CURVE_PANEL_SIDE_DP: string = 'curve_panel_side_dp';
 const KEY_PLAYER_TOP_BAR_COLLAPSED: string = 'player_top_bar_collapsed';
 // 动效档（上游 motion_mode 逐字；PLAIN=简洁无动画 / FLUENT=流畅 / LIQUID=液态Q弹）
 const KEY_MOTION: string = 'motion_mode';
+// 录制音轨麦克风开关（2026-11-02 音轨链批）：默认开；关 = 录纯视频（上游音源面板
+// 「环境声」开关的 OHOS 面；内录/蓝牙需 AVScreenCapture 合流，登记待批）
+const KEY_RECORD_AUDIO: string = 'record_audio_enabled';
 // 「启动后自动亮屏」延迟秒（0–10，0=关闭；上游 camera_brighten_delay_sec，5216e72）
 const KEY_CAMERA_BRIGHTEN_DELAY_SEC: string = 'camera_brighten_delay_sec';
 // 「起播渐亮」时长十分之一秒（0–30 步 5，0=关闭；上游 player_brighten_ramp_tenths）
@@ -179,6 +196,8 @@ export class CameraSettings {
   playerBrightenRampTenths: number = 10;
   /** 动效档（MotionMode 名串：PLAIN/FLUENT/LIQUID；坏串回 FLUENT） */
   motionMode: string = 'FLUENT';
+  /** 录制音轨麦克风开关（默认开 = 录环境下声；关 = 纯视频） */
+  recordAudioEnabled: boolean = true;
   /**
    * HUD 位置表原文（上游 hud_layout，`HudLayoutTable.encode` 的 v2 串；空串 = 默认表）。
    * 本侧 J3b 只消费 READOUT 容器的条目顺序；容器位置/格子留给后续（编辑器本体见
@@ -281,6 +300,8 @@ export class SettingsStore {
       const playRaw: preferences.ValueType = await store.get(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
       s.playerBrightenRampTenths =
         BrightnessRampMath.playerBrightenRampTenths(typeof playRaw === 'number' ? playRaw as number : undefined);
+      const raRaw: preferences.ValueType = await store.get(KEY_RECORD_AUDIO, s.recordAudioEnabled);
+      s.recordAudioEnabled = typeof raRaw === 'boolean' ? raRaw as boolean : s.recordAudioEnabled;
       const motionRaw: preferences.ValueType = await store.get(KEY_MOTION, s.motionMode);
       const mv: string = typeof motionRaw === 'string' ? motionRaw as string : '';
       s.motionMode = mv === 'PLAIN' || mv === 'FLUENT' || mv === 'LIQUID' ? mv : 'FLUENT';
@@ -358,6 +379,7 @@ export class SettingsStore {
       await store.put(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
       await store.put(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
       await store.put(KEY_MOTION, s.motionMode);
+      await store.put(KEY_RECORD_AUDIO, s.recordAudioEnabled);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);

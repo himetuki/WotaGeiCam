@@ -786,6 +786,18 @@ struct Settings {
             this.persist();
           })
         this.cardDivider()
+        // 音源（上游 AudioSourcePanel 的 OHOS 面）：麦克风开关 + 内录/蓝牙注明
+        this.switchRow('麦克风录音', '录制时同时录环境下声；关闭 = 纯视频', this.settings.recordAudioEnabled,
+          true, (on: boolean): void => {
+            this.settings.recordAudioEnabled = on;
+            this.persist();
+          })
+        Text('内录（系统声音）与蓝牙音源需屏幕捕获合流，后续批次提供')
+          .fontSize(SettingsVisual.ROW_DESC)
+          .fontColor(SettingsVisual.TEXT_DIM)
+          .width('100%')
+          .padding({ top: 4, bottom: 4 })
+        this.cardDivider()
         this.optionRow('HUD 网格', '', this.settings.grid ? '开' : '关', ['开', '关'],
           this.settings.grid ? 0 : 1,
           (index: number): void => {

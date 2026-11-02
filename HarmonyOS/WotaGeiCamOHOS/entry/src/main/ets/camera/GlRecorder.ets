@@ -22,6 +22,7 @@ import {
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
 import { SegmentPolicy } from '../record/SegmentPolicy';
 import { RecordAudioTap } from './RecordAudioTap';
+import { AudioSourceStore } from '../ui/SettingsStore';
 import { VideoStore } from '../record/VideoStore';
 
 /** libentry.so 录制出口（camera/GlLibBridge 的导出子集） */
@@ -226,8 +227,11 @@ export class GlRecorder {
       return detail;
     }
     // 音轨（2026-11-02）：MIC 采集 → native AAC/muxer；失败静默只记 W（视频照录，
-    // 与上游「内录/蓝牙未就绪降级为无音轨」同姿态——绝不阻塞录制）
-    RecordAudioTap.start();
+    // 与上游「内录/蓝牙未就绪降级为无音轨」同姿态——绝不阻塞录制）。
+    // 开关 = 设置页「麦克风录音」（默认开）；现读 prefs（录制动作完成点，成本可忽略）
+    if (AudioSourceStore.readEnabled(ctx)) {
+      RecordAudioTap.start();
+    }
     return '';
   }
 
