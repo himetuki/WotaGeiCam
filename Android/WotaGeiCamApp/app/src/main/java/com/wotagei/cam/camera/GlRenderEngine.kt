@@ -2938,11 +2938,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 else -> Shaders.PASS_THROUGH_FS
             }
         }
-        if (!key.glow) return base
-        val withGlow = Shaders.glowFragment(base, key.effect) ?: return null
+        // Glow 按开关条件注入（关着不注入）；注入失败整条链接失败让回退阶梯降掉 glow。
+        // ⚠ 不能在这里 `return base` 短路——那会把 echo 一起挡掉（2026-11-05 真机缺陷：
+        // glow 默认关 ⇒ 残影在预览/成片恒不生效，后渲染却正常）。echo 注入必须独立于 glow。
+        val withGlow = if (key.glow) (Shaders.glowFragment(base, key.effect) ?: return null) else base
         if (!key.echo) return withGlow
-        // 残影包在 Glow 外层（applyEcho(applyGlow(...))：拖影作用于"已发光晕"的画面）
-        return Shaders.echoFragment(withGlow, key.effect, glowOn = true)
+        // 残影包在 Glow 外层（applyEcho(applyGlow(...))：拖影作用于"已发光晕"的画面）；
+        // glow 关着时 glowOn=false（echoFragment 锚点取未注入 Glow 的形态）
+        return Shaders.echoFragment(withGlow, key.effect, glowOn = key.glow)
     }
 
     /**

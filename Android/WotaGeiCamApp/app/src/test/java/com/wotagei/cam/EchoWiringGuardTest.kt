@@ -130,7 +130,10 @@ class EchoWiringGuardTest {
         assertTrue("echo 单开配 TEXTURE_VS_ECHO", link.contains("Shaders.TEXTURE_VS_ECHO"))
         val fragment = body("fragmentFor")
         assertTrue("片元必须经 echoFragment 注入", fragment.contains("echoFragment("))
-        assertTrue("glow 外层包残影（拖影作用于已发光晕的画面）", fragment.contains("glowOn = true"))
+        // 2026-11-05 真机缺陷回归：echo 注入必须独立于 glow（glowOn=key.glow）。旧写法
+        // `if (!key.glow) return base` 会在 glow 默认关时把 echo 一起挡掉 ⇒ 预览/成片恒无残影。
+        assertTrue("echo 注入 glowOn 必须传 key.glow（glow 关也能注 echo）", fragment.contains("glowOn = key.glow"))
+        assertFalse("不许回潮 glow 短路挡掉 echo", fragment.contains("if (!key.glow) return base"))
         assertTrue("两个槽的键都带 echo", body("syncMovieSlot").contains("echoOn()") && body("syncDisplaySlot").contains("echoOn()"))
     }
 
