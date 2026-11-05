@@ -90,7 +90,10 @@ internal class EchoChain(
     fun prepare() {
         if (broken) return
         if (accumProgram != 0) return
-        accumProgram = linkProgram(Shaders.TEXTURE_VS, Shaders.ECHO_ACCUM_FS)
+        // 必须用 TEXTURE_VS_ECHO：它输出矩阵变换的 vUv（采 OES 相机帧）+ 恒等的 vUvEcho（采上一枚
+        // 累积面）。prev 已在 RT 空间，只能按恒等坐标读；若同 vUv 再乘一次矩阵，反馈每帧给历史多叠
+        // 一次旋转/镜像 ⇒ 拖影相对真画面转置/对称（2026-11-05 r44 真机缺陷）。
+        accumProgram = linkProgram(Shaders.TEXTURE_VS_ECHO, Shaders.ECHO_ACCUM_FS)
         if (accumProgram == 0) return
         aPosition = GLES20.glGetAttribLocation(accumProgram, "aPosition")
         aTexCoord = GLES20.glGetAttribLocation(accumProgram, "aTexCoord")

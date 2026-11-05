@@ -167,6 +167,12 @@ class EchoWiringGuardTest {
 
     @Test
     fun `链写读不同体且失败退化成无拖影`() {
+        // 累积趟必须配 TEXTURE_VS_ECHO（双 UV：vUv 矩阵采 OES / vUvEcho 恒等采 prev）。
+        // 2026-11-05 r44 真机缺陷回归：配 TEXTURE_VS 会让 prev 也乘矩阵 ⇒ 拖影转置/对称。
+        assertTrue(
+            "累积趟必须配 TEXTURE_VS_ECHO（prev 采恒等坐标）",
+            chainBody("prepare").contains("linkProgram(Shaders.TEXTURE_VS_ECHO, Shaders.ECHO_ACCUM_FS)")
+        )
         // 乒乓：本帧画 acc[1-idx]、采 acc[idx]（同一张纹理自读自写 = feedback loop）
         assertTrue("写读不同体（乒乓）", chainBody("draw").contains("accFbo[1 - accIdx]") && chainBody("draw").contains("accTex[accIdx]"))
         assertTrue("画完交换", chainBody("draw").contains("accIdx = 1 - accIdx"))

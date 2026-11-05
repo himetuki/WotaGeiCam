@@ -795,12 +795,19 @@ vec3 applyGlow(vec3 c, vec2 uv) {
      *   `t = smoothstep(thr−0.05, thr+0.05, luma)` 把阈值以下压成 0（否则整个背景跟着重影）。
      *
      * `k = uEchoDecay`（0..1）就是拖影时长的全部：展开后第 i 帧前的回波权重是 k^i，
-     * 由 `echoDecayOf(倍数)` 换算。恒等 UV + `uTexMatrix`：与 Glow 拷贝趟同一套 RT 布局。
+     * 由 `echoDecayOf(倍数)` 换算。
+     *
+     * **双 UV 口径（2026-11-05 r44 真机缺陷修复，勿改回单 UV）**：配 [TEXTURE_VS_ECHO]——
+     * - `uFrame`（OES 相机帧）采 `vUv = M·aTexCoord`（乘 SurfaceTexture 矩阵取相机内容）；
+     * - `uEchoPrev`（上一枚累积面，**已在 RT 空间**）采 `vUvEcho = aTexCoord`（恒等）。
+     * prev 若也乘 M，反馈每帧给历史多叠一次旋转/镜像 ⇒ 拖影相对真画面转置/对称。
+     * 离线链 [SCENE_ECHO_ACCUM_FS] 无此坑：它从已拷成 2D 的 curTex 用恒等矩阵累积，两路都在恒等坐标。
      */
     val ECHO_ACCUM_FS = """
         #extension GL_OES_EGL_image_external : require
         precision mediump float;
         varying vec2 vUv;
+        varying vec2 vUvEcho;
         uniform samplerExternalOES uFrame;
         uniform sampler2D uEchoPrev;
         uniform float uEchoDecay;
@@ -808,7 +815,7 @@ vec3 applyGlow(vec3 c, vec2 uv) {
         uniform float uEchoThreshold;
         void main() {
             vec3 c = texture2D(uFrame, vUv).rgb;
-            vec3 prev = texture2D(uEchoPrev, vUv).rgb * uEchoDecay;
+            vec3 prev = texture2D(uEchoPrev, vUvEcho).rgb * uEchoDecay;
             if (uEchoMode < 0.5) {
                 gl_FragColor = vec4(max(c, prev), 1.0);
             } else {

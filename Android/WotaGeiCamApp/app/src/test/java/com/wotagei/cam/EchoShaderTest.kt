@@ -78,9 +78,14 @@ class EchoShaderTest {
         )
         assertTrue("相机帧用 samplerExternalOES", src.contains("uniform samplerExternalOES uFrame;"))
         assertTrue("历史面用 sampler2D", src.contains("uniform sampler2D uEchoPrev;"))
+        // 双 UV 口径（2026-11-05 r44 真机缺陷回归）：OES 相机帧采矩阵变换的 vUv，prev 累积面
+        // 已在 RT 空间必须采恒等的 vUvEcho；prev 若也乘矩阵 ⇒ 拖影相对真画面转置/对称。
+        assertTrue("必须声明恒等 varying vUvEcho", src.contains("varying vec2 vUvEcho;"))
+        assertTrue("相机帧采矩阵变换的 vUv", src.contains("vec3 c = texture2D(uFrame, vUv).rgb;"))
+        assertTrue("prev 必须采恒等 vUvEcho 且先乘衰减", src.contains("vec3 prev = texture2D(uEchoPrev, vUvEcho).rgb * uEchoDecay;"))
+        assertFalse("prev 不许采矩阵变换的 vUv（会转置/对称）", src.contains("texture2D(uEchoPrev, vUv)"))
         // 双模式（R2 §四.2）：保持亮度 = max（星轨式，背景零提亮）；提亮拖尾 = 高光阈值后加法
         assertTrue("保持亮度档必须是 max(c, prev)", src.contains("max(c, prev)"))
-        assertTrue("prev 必须先乘衰减", src.contains("vec3 prev = texture2D(uEchoPrev, vUv).rgb * uEchoDecay;"))
         assertTrue("提亮档必须做高光阈值切分", src.contains("smoothstep("))
         assertTrue("阈值 uniform", src.contains("uniform float uEchoThreshold;"))
         assertTrue("衰减 uniform", src.contains("uniform float uEchoDecay;"))
