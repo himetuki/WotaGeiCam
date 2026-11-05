@@ -134,7 +134,10 @@ import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.findActivity
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.wotagei.cam.ui.anim.LocalMotion
+import com.wotagei.cam.core.EchoMode
+import com.wotagei.cam.core.EchoParams
 import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.decodeEcho
 import com.wotagei.cam.core.decodeGlow
 import com.wotagei.cam.ui.widget.percentLadder
 import com.wotagei.cam.ui.design.LikeHeart
@@ -468,7 +471,11 @@ fun PlayerScreen(
     var clipDenoise by remember(clipMenu) {
         mutableStateOf(WotaSettings.videoDenoise(prefs) != com.wotagei.cam.core.VideoDenoise.OFF)
     }
-    val sceneEffects = remember(clipGlow, clipDenoise) { sceneExportEffectsOf(clipGlow, clipDenoise) }
+    // 残影（R2 第三路）：与光晕同口径——面板打开时从落盘 KEY_ECHO 初始化，改动只作用本次导出
+    var clipEcho by remember(clipMenu) {
+        mutableStateOf(decodeEcho(prefs.getString(WotaSettings.KEY_ECHO, null)).sanitize())
+    }
+    val sceneEffects = remember(clipGlow, clipDenoise, clipEcho) { sceneExportEffectsOf(clipGlow, clipDenoise, clipEcho) }
     var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     // 剪辑导出的音轨选择（2026-10-18 用户定版）：只导**用户选中的那一条**，默认环境音；
     // 不再"只认第一条"（双轨素材的内录被静默丢）也不再"多轨全导"。与播放选轨（selectedAudio）
@@ -934,8 +941,10 @@ fun PlayerScreen(
                     sceneEffects = sceneEffects,
                     glowCfg = clipGlow,
                     denoiseOn = clipDenoise,
+                    echoCfg = clipEcho,
                     onGlowChange = { clipGlow = it.sanitize() },
                     onDenoiseChange = { clipDenoise = it },
+                    onEchoChange = { clipEcho = it.sanitize() },
                     onPickMode = { clipMode = it },
                     onPickTrack = { clipTrack = it },
                     onExport = {
@@ -953,7 +962,7 @@ fun PlayerScreen(
                                 track = clipTrack,
                                 offsetMs = offset,
                                 postRender = clipMode == 1,
-                                effects = sceneExportEffectsOf(clipGlow, clipDenoise)
+                                effects = sceneExportEffectsOf(clipGlow, clipDenoise, clipEcho)
                             )
                         }
                     },
@@ -1261,8 +1270,11 @@ private fun ClipExportPopup(
     /** 本次导出的光晕参数（面板内可编辑；初始值来自落盘，不反写设置） */
     glowCfg: GlowParams,
     denoiseOn: Boolean,
+    /** 本次导出的残影参数（R2 第三路；面板内可编辑，初始值来自落盘，不反写设置） */
+    echoCfg: EchoParams,
     onGlowChange: (GlowParams) -> Unit,
     onDenoiseChange: (Boolean) -> Unit,
+    onEchoChange: (EchoParams) -> Unit,
     onPickMode: (Int) -> Unit,
     onPickTrack: (SelectedTrack) -> Unit,
     onExport: () -> Unit,
@@ -1368,9 +1380,9 @@ private fun ClipExportPopup(
                 style = MaterialTheme.typography.bodySmall,
                 color = WotaTextDim
             )
-            // 本次导出效果配置（2026-10-29 用户需求：后渲染导出不直接开渲，先在这里配光晕/降噪）
+            // 本次导出效果配置（2026-10-29 用户需求：后渲染导出不直接开渲，先在这里配光晕/降噪/残影）
             if (mode == 1) {
-                ExportEffectConfig(glowCfg, denoiseOn, onGlowChange, onDenoiseChange)
+                ExportEffectConfig(glowCfg, denoiseOn, echoCfg, onGlowChange, onDenoiseChange, onEchoChange)
             }
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
@@ -1389,15 +1401,18 @@ private fun ClipExportPopup(
 
 /**
  * 导出弹层里的「本次导出效果」配置（2026-10-29 用户需求）：
- * 光晕开/关 + 亮度阈值/强度/混合，降噪开/关。参数只作用于本次导出（见 [sceneExportEffectsOf]），
- * 初始值在面板打开时从落盘值读取；这里的改动不写设置页的默认值。
+ * 光晕开/关 + 亮度阈值/强度/混合，降噪开/关，残影开/关 + 模式/倍数/阈值/强度（R2 第三路）。
+ * 参数只作用于本次导出（见 [sceneExportEffectsOf]），初始值在面板打开时从落盘值读取；
+ * 这里的改动不写设置页的默认值。
  */
 @Composable
 private fun ExportEffectConfig(
     glow: GlowParams,
     denoiseOn: Boolean,
+    echo: EchoParams,
     onGlowChange: (GlowParams) -> Unit,
-    onDenoiseChange: (Boolean) -> Unit
+    onDenoiseChange: (Boolean) -> Unit,
+    onEchoChange: (EchoParams) -> Unit
 ) {
     Text(
         stringResource(R.string.player_clip_cfg_title),
@@ -1481,6 +1496,75 @@ private fun ExportEffectConfig(
             onClick = { onDenoiseChange(true) }
         )
     }
+    // ---- 残影（R2 第三路）：开/关 + 模式 + 倍数；提亮拖尾档再露阈值/强度
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            stringResource(R.string.player_clip_cfg_echo),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_off),
+            selected = !echo.enabled,
+            onClick = { onEchoChange(echo.copy(enabled = false)) }
+        )
+        WotaChip(
+            label = stringResource(R.string.player_clip_cfg_on),
+            selected = echo.enabled,
+            onClick = { onEchoChange(echo.copy(enabled = true)) }
+        )
+    }
+    if (echo.enabled) {
+        // 模式：保持亮度（max 星轨式）/ 提亮拖尾（高光加法），与录制页残影面板同口径
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            WotaChip(
+                label = stringResource(R.string.player_clip_cfg_echo_keep),
+                selected = echo.mode == EchoMode.KEEP_BRIGHTNESS,
+                onClick = { onEchoChange(echo.copy(mode = EchoMode.KEEP_BRIGHTNESS)) }
+            )
+            WotaChip(
+                label = stringResource(R.string.player_clip_cfg_echo_trail),
+                selected = echo.mode == EchoMode.TRAIL,
+                onClick = { onEchoChange(echo.copy(mode = EchoMode.TRAIL)) }
+            )
+        }
+        // 倍数 2..10（整数梯恒定吸附，不进设置页吸附开关）；换算 echoDecayOf 在决策/GL 层
+        PillSlider(
+            value = echo.multiplier.toFloat(), lo = 2f, hi = 10f,
+            onValueChange = { onEchoChange(echo.copy(multiplier = it.toInt())) },
+            snapKey = null,
+            ladder = (2..10).map { it.toFloat() },
+            step = 1f,
+            label = stringResource(R.string.player_clip_cfg_echo_multiplier),
+            format = { String.format(java.util.Locale.US, "%.0f×", it) }
+        )
+        if (echo.mode == EchoMode.TRAIL) {
+            PillSlider(
+                value = echo.threshold * 100f, lo = 60f, hi = 100f,
+                onValueChange = { onEchoChange(echo.copy(threshold = it / 100f)) },
+                snapKey = null,
+                ladder = percentLadder(60, 100, 5),
+                step = 5f,
+                label = stringResource(R.string.player_clip_cfg_echo_threshold),
+                format = { String.format(java.util.Locale.US, "%.0f%%", it) }
+            )
+            PillSlider(
+                value = echo.gain * 100f, lo = 0f, hi = 200f,
+                onValueChange = { onEchoChange(echo.copy(gain = it / 100f)) },
+                snapKey = null,
+                ladder = percentLadder(0, 200, 10),
+                step = 10f,
+                label = stringResource(R.string.player_clip_cfg_echo_gain),
+                format = { String.format(java.util.Locale.US, "%.0f%%", it) }
+            )
+        }
+    }
 }
 
 /**
@@ -1494,6 +1578,7 @@ private fun sceneEffectNote(effects: SceneExportEffects, mode: Int): String {
     val parts = buildList {
         if (effects.glow != null) add(stringResource(R.string.player_clip_scene_glow))
         if (effects.denoise) add(stringResource(R.string.player_clip_scene_denoise))
+        if (effects.echo != null) add(stringResource(R.string.player_clip_scene_echo))
     }
     // 曲线固定不在后渲染里：这句是用户口径的明面化，不随效果开关变化
     return stringResource(

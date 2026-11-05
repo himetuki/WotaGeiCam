@@ -86,25 +86,77 @@ class SceneExportWiringGuardTest {
     // ---------------------------------------------------------------- 参数来源
 
     @Test
-    fun `效果参数只来自光晕落盘键与降噪档`() {
+    fun `效果参数来自光晕残影落盘键与降噪档`() {
         assertTrue(
             "后渲染的效果必须现读 KEY_GLOW 落盘串（用户赎回设置里刚改的光晕）",
             playerSrc.contains("prefs.getString(WotaSettings.KEY_GLOW, null)")
         )
         assertTrue(
+            "残影必须现读 KEY_ECHO 落盘串（R2 第三路，与光晕同口径）",
+            playerSrc.contains("prefs.getString(WotaSettings.KEY_ECHO, null)")
+        )
+        assertTrue(
             "降噪档必须走 WotaSettings.videoDenoise（与设置页同一枚读取器）",
             playerSrc.contains("WotaSettings.videoDenoise(prefs)")
         )
-        // 2026-10-29：导出弹层内可直接配置（光晕开/关/阈值/强度/混合、降噪开/关），起跑那一刻取
-        // 面板当前配置的快照（导出期间再改不影响这一轮）
+        // 2026-10-29：导出弹层内可直接配置（光晕/降噪/残影），起跑那一刻取面板当前配置的快照
+        //（导出期间再改不影响这一轮）；2026-11-05 残影加入快照（R2 第三路）
         assertTrue(
-            "导出起跑时必须取面板当前配置的快照（sceneExportEffectsOf）",
-            playerSrc.contains("effects = sceneExportEffectsOf(clipGlow, clipDenoise)")
+            "导出起跑时必须取面板当前配置的快照（sceneExportEffectsOf 含残影）",
+            playerSrc.contains("effects = sceneExportEffectsOf(clipGlow, clipDenoise, clipEcho)")
         )
         assertTrue(
-            "决策层必须把 enabled=false 的光晕折成 null（关着就不该付 GPU 代价）",
+            "决策层必须把 enabled=false 的效果折成 null（关着就不该付 GPU 代价）",
             planSrc.contains("if (it.enabled) it else null")
         )
+    }
+
+    @Test
+    fun `残影是第三路效果且进active判据`() {
+        // 决策层：echo 维存在、active 含 echo、工厂函数读 echo
+        assertTrue("SceneExportEffects 必须有 echo 维", planSrc.contains("val echo: EchoParams?"))
+        assertTrue("active 必须含 echo（只开残影也能后渲染）", planSrc.contains("glow != null || denoise || echo != null"))
+        assertTrue("sceneExportEffectsOf 必须收 echo 形参", planSrc.contains("denoiseOn: Boolean, echo: EchoParams"))
+        // GL：echo 开时建累积面/合成趟，读原始帧累积，合成包在 glow 外层
+        assertTrue("GL 必须按 effects.echo 建乒乓累积面", glSrc.contains("if (effects.echo != null)"))
+        assertTrue("累积趟必须读原始 2D 帧 curTex（与实时链读原始 OES 同口径）", glSrc.contains("GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)"))
+        assertTrue("衰减必须走 echoDecayOf（与实时链同一换算）", glSrc.contains("echoDecayOf(echo.multiplier)"))
+        assertTrue("合成必须用残影合成趟 echoCompProgram", glSrc.contains("GLES20.glUseProgram(echoCompProgram)"))
+        // 渲染顺序：残影累积在 Glow 模糊之后，残影合成是写编码器面的最后一趟
+        val render = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(glSrc, "render"))
+        val blur = render.indexOf("blurProgram")
+        val acc = render.indexOf("echoAccProgram")
+        val echoComp = render.indexOf("GLES20.glUseProgram(echoCompProgram)")
+        assertTrue("render 必须含残影累积趟与合成趟", acc >= 0 && echoComp >= 0)
+        assertTrue("残影累积必须在 Glow 模糊之后", blur < acc)
+        assertTrue("残影合成必须在累积之后（它写编码器面）", acc < echoComp)
+        // glow 缺席时 uGlowSrc 绑黑纹理（光晕贡献为 0），不许漏兜底
+        assertTrue("echo 开但 glow 关时必须绑黑纹理兜底", glSrc.contains("if (glow != null) glowATex else blackTex"))
+        // 释放登记：乒乓面 + 黑纹理 + 两枚 program 都要删
+        assertTrue("releaseGl 必须删残影 program", glSrc.contains("echoAccProgram = 0; echoCompProgram = 0"))
+        assertTrue("releaseGl 必须删黑纹理", glSrc.contains("blackTex = 0"))
+    }
+
+    @Test
+    fun `残影着色器与实时链同源`() {
+        val acc = shader("SCENE_ECHO_ACCUM_FS")
+        // 2D 输入（离线帧已拷成 2D），双模式与实时 ECHO_ACCUM_FS 逐项同源
+        assertTrue("累积趟必须用 sampler2D（离线帧是 2D，不是 OES）", acc.contains("uniform sampler2D uSrc;"))
+        assertTrue("prev 必须先乘衰减", acc.contains("texture2D(uEchoPrev, vUv).rgb * uEchoDecay"))
+        assertTrue("保持亮度档必须是 max(c, prev)", acc.contains("max(c, prev)"))
+        assertTrue("提亮档必须做高光阈值切分", acc.contains("smoothstep("))
+        assertTrue("亮度按 Rec601 加权", acc.contains("0.299, 0.587, 0.114"))
+
+        val comp = shader("SCENE_COMPOSITE_ECHO_FS")
+        // 合成 = applyEcho(base + glow, echo)：残影包在 Glow 外层，与实时 echoFragment 同序
+        assertTrue("必须先合成 Glow 再叠残影", comp.contains("vec3 withGlow = c + g * uTint * (uGain + uAdd) * (uBlend * n)"))
+        assertTrue("残影必须作用在 withGlow 上", comp.contains("applyEcho(withGlow, e)"))
+        assertTrue("保持亮度档 max", comp.contains("return max(c, e);"))
+        assertTrue("提亮档加法叠回钳 1", comp.contains("return min(c + e * uEchoGain, vec3(1.0));"))
+        // 实时链的 applyEcho 也要真的同源（反证：不是离线自造一套）
+        val decl = shader("ECHO_DECL")
+        assertTrue("实时 applyEcho 保持亮度档同源", decl.contains("return max(c, e);"))
+        assertTrue("实时 applyEcho 提亮档同源", decl.contains("return min(c + e * uEchoGain, vec3(1.0));"))
     }
 
     // ---------------------------------------------------------------- 派发与 UI

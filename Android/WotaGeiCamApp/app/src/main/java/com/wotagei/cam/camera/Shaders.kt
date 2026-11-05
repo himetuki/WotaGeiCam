@@ -195,6 +195,73 @@ internal object Shaders {
         }
     """.trimIndent()
 
+    /**
+     * 后渲染导出的**残影累积趟**（R2 第三路，2026-11-05；2D 输入）：与实时链 [ECHO_ACCUM_FS]
+     * 逐项同源，只是相机帧已在 `acquire()` 里拷成 2D（`uSrc`），不再吃 OES。
+     * `acc = max(cur, k·prev)`（保持亮度）/ `highlight(cur) + k·prev`（提亮拖尾），
+     * `k = uEchoDecay`（由 `echoDecayOf(倍数)` 换算）。乒乓写读不同体， prev 首帧为黑 ⇒ 恒等。
+     */
+    val SCENE_ECHO_ACCUM_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uSrc;
+        uniform sampler2D uEchoPrev;
+        uniform float uEchoDecay;
+        uniform float uEchoMode;
+        uniform float uEchoThreshold;
+        void main() {
+            vec3 c = texture2D(uSrc, vUv).rgb;
+            vec3 prev = texture2D(uEchoPrev, vUv).rgb * uEchoDecay;
+            if (uEchoMode < 0.5) {
+                gl_FragColor = vec4(max(c, prev), 1.0);
+            } else {
+                float luma = dot(c, vec3(0.299, 0.587, 0.114));
+                float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
+                gl_FragColor = vec4(c * t + prev, 1.0);
+            }
+        }
+    """.trimIndent()
+
+    /**
+     * 后渲染导出的**残影合成趟**（R2 第三路）：`applyEcho(base + glow, echo)`——残影包在 Glow
+     * 外层，与实时链 `echoFragment` 的合成顺序逐项同源。Glow 缺席时 `uGlowSrc` 绑 1×1 黑纹理
+     * 且增益/混合置 0 ⇒ 光晕贡献为 0；残影缺席不会走到这条（调用方只在 echo 非 null 时用它）。
+     * `applyEcho` 双模式与实时链 `ECHO_DECL` 同源：max（保持亮度）/ 加法叠回钳 1（提亮拖尾）。
+     */
+    val SCENE_COMPOSITE_ECHO_FS = """
+        precision mediump float;
+        varying vec2 vUv;
+        uniform sampler2D uBase;
+        uniform sampler2D uGlowSrc;
+        uniform sampler2D uEchoSrc;
+        uniform vec3 uTint;
+        uniform float uGain;
+        uniform float uAdd;
+        uniform float uBlend;
+        uniform float uFreq;
+        uniform float uEchoMode;
+        uniform float uEchoGain;
+        float glowHash(vec2 p) {
+            vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            q += dot(q, q.yzx + 33.33);
+            return fract((q.x + q.y) * q.z);
+        }
+        vec3 applyEcho(vec3 c, vec3 e) {
+            if (uEchoMode < 0.5) {
+                return max(c, e);
+            }
+            return min(c + e * uEchoGain, vec3(1.0));
+        }
+        void main() {
+            vec3 c = texture2D(uBase, vUv).rgb;
+            vec3 g = texture2D(uGlowSrc, vUv).rgb;
+            float n = mix(1.0, glowHash(vUv * uFreq), step(0.0001, uFreq));
+            vec3 withGlow = c + g * uTint * (uGain + uAdd) * (uBlend * n);
+            vec3 e = texture2D(uEchoSrc, vUv).rgb;
+            gl_FragColor = vec4(applyEcho(withGlow, e), 1.0);
+        }
+    """.trimIndent()
+
     val PASS_THROUGH_2D_FS = """
         precision mediump float;
         varying vec2 vUv;

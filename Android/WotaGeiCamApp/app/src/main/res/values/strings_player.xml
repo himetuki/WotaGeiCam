@@ -114,9 +114,10 @@
     <string name="player_clip_mode_lossless">无损</string>
     <string name="player_clip_mode_scene">后渲染</string>
     <string name="player_clip_scene_lossless_note">不重编码，画面与你看到的一致（曲线/光晕/降噪都已是录制时的样子）</string>
-    <string name="player_clip_scene_none">当前未启用光晕或降噪，后渲染与无损结果一致</string>
+    <string name="player_clip_scene_none">当前未启用光晕、降噪或残影，后渲染与无损结果一致</string>
     <string name="player_clip_scene_glow">光晕</string>
     <string name="player_clip_scene_denoise">降噪</string>
+    <string name="player_clip_scene_echo">残影</string>
     <string name="player_clip_scene_sep"> + </string>
     <string name="player_clip_scene_summary">重编码，本次应用：%1$s</string>
     <string name="player_clip_scene_curve_note">。曲线是录制时烘进画面的，不在这里重复渲染</string>
@@ -129,6 +130,13 @@
     <string name="player_clip_cfg_threshold">光晕亮度阈值</string>
     <string name="player_clip_cfg_gain">光晕强度</string>
     <string name="player_clip_cfg_blend">光晕混合</string>
+    <!-- 残影（R2 第三路）：本次导出可配开/关 + 模式 + 倍数；提亮拖尾档再露阈值/强度 -->
+    <string name="player_clip_cfg_echo">残影</string>
+    <string name="player_clip_cfg_echo_keep">保持亮度</string>
+    <string name="player_clip_cfg_echo_trail">提亮拖尾</string>
+    <string name="player_clip_cfg_echo_multiplier">光弧倍数</string>
+    <string name="player_clip_cfg_echo_threshold">残影高光阈值</string>
+    <string name="player_clip_cfg_echo_gain">残影强度</string>
 
     <!-- 内录选轨（批 4）：双音轨片才有音轨 chip/同步/导出三控件；音轨识别口径见 TrackSync 头注 -->
     <string name="player_track_env">环境音</string>

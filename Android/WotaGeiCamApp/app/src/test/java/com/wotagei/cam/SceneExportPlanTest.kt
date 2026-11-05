@@ -1,11 +1,15 @@
 package com.wotagei.cam
 
+import com.wotagei.cam.core.EchoMode
+import com.wotagei.cam.core.EchoParams
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.VideoDenoise
+import com.wotagei.cam.core.encodeEcho
 import com.wotagei.cam.core.encodeGlow
 import com.wotagei.cam.core.glowArgbFromHsv
 import com.wotagei.cam.player.sceneExportBitrate
 import com.wotagei.cam.player.sceneExportEffects
+import com.wotagei.cam.player.sceneExportEffectsOf
 import com.wotagei.cam.player.sceneExportFps
 import com.wotagei.cam.player.sceneExportPtsUs
 import com.wotagei.cam.player.sceneExportShouldSubmit
@@ -64,6 +68,55 @@ class SceneExportPlanTest {
             assertTrue("$d 必须落成降噪开启", e.denoise)
             assertTrue("$d 单独存在时 active 必须为真", e.active)
         }
+    }
+
+    // ---------------------------------------------------------------- 残影（R2 第三路）
+
+    @Test
+    fun `残影缺键回出厂关且不影响active`() {
+        val e = sceneExportEffects(null, VideoDenoise.OFF, null)
+        assertNull("缺键=出厂=关，不许凭空造出残影", e.echo)
+        assertFalse("三项都关时 active=false", e.active)
+    }
+
+    @Test
+    fun `残影开启即应用且带完整参数`() {
+        val raw = encodeEcho(EchoParams(enabled = true, mode = EchoMode.TRAIL, multiplier = 4))
+        val e = sceneExportEffects(null, VideoDenoise.OFF, raw)
+        assertNotNull(e.echo)
+        assertTrue(e.echo!!.enabled)
+        assertEquals(EchoMode.TRAIL, e.echo!!.mode)
+        assertEquals(4, e.echo!!.multiplier)
+        assertTrue("只开残影时 active 必须为真", e.active)
+        assertNull("只开残影时光晕仍为 null", e.glow)
+        assertFalse("只开残影时降噪仍为 false", e.denoise)
+    }
+
+    @Test
+    fun `残影enabled_false折成null`() {
+        val raw = encodeEcho(EchoParams(enabled = false, multiplier = 6))
+        val e = sceneExportEffects(null, VideoDenoise.OFF, raw)
+        assertNull("关着的残影不该付 GPU 代价", e.echo)
+        assertFalse(e.active)
+    }
+
+    @Test
+    fun `残影坏串整份回默认关`() {
+        val e = sceneExportEffects(null, VideoDenoise.OFF, "enabled=1;mode=谁;multiplier=3")
+        assertNull("decodeEcho 坏串回默认（enabled=false）⇒ 折成 null", e.echo)
+        assertFalse(e.active)
+    }
+
+    @Test
+    fun `面板配置工厂收残影且折enabled`() {
+        // sceneExportEffectsOf：弹层当前配置快照；enabled=false 折 null，enabled=true 保留
+        val off = sceneExportEffectsOf(GlowParams.DEFAULT, false, EchoParams(enabled = false))
+        assertNull(off.echo)
+        assertFalse(off.active)
+        val on = sceneExportEffectsOf(GlowParams.DEFAULT, false, EchoParams(enabled = true, multiplier = 3))
+        assertNotNull(on.echo)
+        assertEquals(3, on.echo!!.multiplier)
+        assertTrue(on.active)
     }
 
     @Test

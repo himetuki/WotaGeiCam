@@ -15,7 +15,9 @@ import android.os.SystemClock
 import android.view.Surface
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
+import com.wotagei.cam.core.EchoMode
 import com.wotagei.cam.core.GlowParams
+import com.wotagei.cam.core.echoDecayOf
 import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.diag.Diag as Log
 import java.util.concurrent.CountDownLatch
@@ -23,13 +25,17 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 「内置播放器内后渲染导出」的 GL 引擎（2026-10-28 用户需求）：
- * 解码帧 → **2D 拷出 → 双边降噪（可选）→ 亮部提取 + 可分离高斯（可选）→ 合成** → 编码器输入面。
+ * 解码帧 → **2D 拷出 → 双边降噪（可选）→ 亮部提取 + 可分离高斯（可选）→ 残影累积（可选）→ 合成** → 编码器输入面。
  *
  * 与实时链的关系（[com.wotagei.cam.camera.GlRenderEngine]）：
- * - **只应用 scene layer 里用户点名的两项**：Glow 与画面降噪；**不做 RGB 曲线**（用户口径：
- *   曲线录制时已烘进成片，后渲染再套一次就是双倍）。也不做任何 monitor 层（斑马/峰值）。
+ * - **只应用 scene layer 里用户点名的项**：Glow、画面降噪、残影（R2 第三路）；**不做 RGB 曲线**
+ *   （用户口径：曲线录制时已烘进成片，后渲染再套一次就是双倍）。也不做任何 monitor 层（斑马/峰值）。
  * - 合成公式与 `GLOW_DECL` 的 applyGlow 逐项同源（同色光晕 + 单色 tint）：
  *   `c + glow × tint × (gain + add) × blend × 噪声`。
+ * - 残影与实时链 `EchoChain`/`ECHO_DECL` 同源：反馈累积面 `acc = f(cur, k·prev)`（乒乓），
+ *   合成 `applyEcho(base + glow, acc)`（残影包在 Glow 外层）。离线**全分辨率**跑、逐帧顺序，
+ *   累积面从黑起步（片头按可用回波数合成）；读的是 `acquire()` 拷出的原始 2D 帧（与实时链读
+ *   原始 OES 同口径），降噪/Glow 不改累积源。
  *
  * 为什么另起一套 EGL：与 [com.wotagei.cam.record.ArcRepairGl] 同源理由——实时引擎的 OES 纹理
  * 死绑相机 `SurfaceTexture` 与预览面，而这套的输入是**解码器**、输出只有编码器一面。
@@ -49,6 +55,8 @@ internal class SceneExportGl(
         private const val TAG = "WotaSceneGl"
         private const val UNIT_A = 0
         private const val UNIT_B = 1
+        /** 残影合成趟第三枚采样（base/glow/echo 三纹理同采）；ES2 保证 ≥8 单元 */
+        private const val UNIT_C = 2
         private const val OP_WAIT_MS = 15_000L
         private const val FRAME_WAIT_MS = 3_000L
 
@@ -74,6 +82,12 @@ internal class SceneExportGl(
     private var glowAFbo = 0
     private var glowBTex = 0
     private var glowBFbo = 0
+
+    // 残影（R2 第三路）：两张乒乓累积面 + 乒乓游标；blackTex 供「echo 开但 glow 关」时绑 uGlowSrc
+    private val echoAccTex = IntArray(2)
+    private val echoAccFbo = IntArray(2)
+    private var echoAccIdx = 0
+    private var blackTex = 0
 
     private var texture: SurfaceTexture? = null
     private var decoderSurface: Surface? = null
@@ -127,6 +141,33 @@ internal class SceneExportGl(
     private var compUAdd = -1
     private var compUBlend = -1
     private var compUFreq = -1
+
+    // 残影累积趟（SCENE_ECHO_ACCUM_FS）
+    private var echoAccProgram = 0
+    private var echoAccAPos = -1
+    private var echoAccATex = -1
+    private var echoAccUMatrix = -1
+    private var echoAccUSrc = -1
+    private var echoAccUPrev = -1
+    private var echoAccUDecay = -1
+    private var echoAccUMode = -1
+    private var echoAccUThreshold = -1
+
+    // 残影合成趟（SCENE_COMPOSITE_ECHO_FS：base + glow + echo）
+    private var echoCompProgram = 0
+    private var echoCompAPos = -1
+    private var echoCompATex = -1
+    private var echoCompUMatrix = -1
+    private var echoCompUBase = -1
+    private var echoCompUGlow = -1
+    private var echoCompUEcho = -1
+    private var echoCompUTint = -1
+    private var echoCompUGain = -1
+    private var echoCompUAdd = -1
+    private var echoCompUBlend = -1
+    private var echoCompUFreq = -1
+    private var echoCompUEchoMode = -1
+    private var echoCompUEchoGain = -1
 
     private var glReady = false
 
@@ -235,6 +276,21 @@ internal class SceneExportGl(
             glowBFbo = b.second
             ok = ok && glowAFbo != 0 && glowBFbo != 0
         }
+        // 残影（R2 第三路）：两张乒乓累积面，建好即清黑——首帧 prev=黑 ⇒ 两模式皆恒等，
+        // 片头按"可用回波数"自然起拖（R2 §五.5，不用复制帧凑数）。全分辨率，不降采样。
+        if (effects.echo != null) {
+            for (i in 0..1) {
+                val t = createTarget()
+                echoAccTex[i] = t.first
+                echoAccFbo[i] = t.second
+                ok = ok && echoAccFbo[i] != 0
+            }
+            echoAccIdx = 0
+            if (ok) clearEchoAcc()
+        }
+        // 1×1 黑纹理：echo 开但 glow 关时绑 uGlowSrc（光晕贡献为 0）；常驻一枚，成本可忽略
+        blackTex = createBlackTexture()
+        ok = ok && blackTex != 0
         if (!ok) {
             releaseGl()
             return false
@@ -245,8 +301,36 @@ internal class SceneExportGl(
         }
         drainGlError("sceneInit")
         glReady = true
-        Log.i(TAG, "就绪 ${widthPx}x$heightPx glow=${effects.glow != null} denoise=${effects.denoise}")
+        Log.i(TAG, "就绪 ${widthPx}x$heightPx glow=${effects.glow != null} denoise=${effects.denoise} echo=${effects.echo != null}")
         return true
+    }
+
+    /** 把两张残影累积面清成黑（首帧恒等起点）；只在 GL 线程、上下文 current 时调 */
+    private fun clearEchoAcc() {
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        for (i in 0..1) {
+            if (echoAccFbo[i] == 0) continue
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, echoAccFbo[i])
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+    }
+
+    /** 1×1 全黑 RGBA8（与实时链 createGlowBlackTexture 同口径）：echo 合成趟 glow 缺席时的兜底 */
+    private fun createBlackTexture(): Int {
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 1, 1, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, java.nio.ByteBuffer.allocateDirect(4)
+        )
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        return ids[0]
     }
 
     private fun chooseConfig(display: EGLDisplay): EGLConfig? {
@@ -391,6 +475,32 @@ internal class SceneExportGl(
             compUBlend = GLES20.glGetUniformLocation(compProgram, "uBlend")
             compUFreq = GLES20.glGetUniformLocation(compProgram, "uFreq")
         }
+        if (effects.echo != null) {
+            echoAccProgram = link(Shaders.TEXTURE_VS, Shaders.SCENE_ECHO_ACCUM_FS)
+            echoCompProgram = link(Shaders.TEXTURE_VS, Shaders.SCENE_COMPOSITE_ECHO_FS)
+            if (echoAccProgram == 0 || echoCompProgram == 0) return false
+            echoAccAPos = GLES20.glGetAttribLocation(echoAccProgram, "aPosition")
+            echoAccATex = GLES20.glGetAttribLocation(echoAccProgram, "aTexCoord")
+            echoAccUMatrix = GLES20.glGetUniformLocation(echoAccProgram, "uTexMatrix")
+            echoAccUSrc = GLES20.glGetUniformLocation(echoAccProgram, "uSrc")
+            echoAccUPrev = GLES20.glGetUniformLocation(echoAccProgram, "uEchoPrev")
+            echoAccUDecay = GLES20.glGetUniformLocation(echoAccProgram, "uEchoDecay")
+            echoAccUMode = GLES20.glGetUniformLocation(echoAccProgram, "uEchoMode")
+            echoAccUThreshold = GLES20.glGetUniformLocation(echoAccProgram, "uEchoThreshold")
+            echoCompAPos = GLES20.glGetAttribLocation(echoCompProgram, "aPosition")
+            echoCompATex = GLES20.glGetAttribLocation(echoCompProgram, "aTexCoord")
+            echoCompUMatrix = GLES20.glGetUniformLocation(echoCompProgram, "uTexMatrix")
+            echoCompUBase = GLES20.glGetUniformLocation(echoCompProgram, "uBase")
+            echoCompUGlow = GLES20.glGetUniformLocation(echoCompProgram, "uGlowSrc")
+            echoCompUEcho = GLES20.glGetUniformLocation(echoCompProgram, "uEchoSrc")
+            echoCompUTint = GLES20.glGetUniformLocation(echoCompProgram, "uTint")
+            echoCompUGain = GLES20.glGetUniformLocation(echoCompProgram, "uGain")
+            echoCompUAdd = GLES20.glGetUniformLocation(echoCompProgram, "uAdd")
+            echoCompUBlend = GLES20.glGetUniformLocation(echoCompProgram, "uBlend")
+            echoCompUFreq = GLES20.glGetUniformLocation(echoCompProgram, "uFreq")
+            echoCompUEchoMode = GLES20.glGetUniformLocation(echoCompProgram, "uEchoMode")
+            echoCompUEchoGain = GLES20.glGetUniformLocation(echoCompProgram, "uEchoGain")
+        }
         drainGlError("sceneBuildPrograms")
         return true
     }
@@ -415,6 +525,7 @@ internal class SceneExportGl(
 
     private fun render(ptsUs: Long): Boolean {
         val glow = effects.glow
+        val echo = effects.echo
         // 1) 降噪：cur → den（scene 顺序：降噪在 Glow 之前）
         var base = curTex
         if (effects.denoise) {
@@ -465,11 +576,60 @@ internal class SceneExportGl(
             }
             if (!vOk) return false
         }
+        // 2.5) 残影累积（R2 第三路）：读**原始 2D 帧** curTex（与实时链读原始 OES 同口径，
+        // 降噪/Glow 不改累积源）+ 上一枚累积面 → 新累积面，乒乓交换。逐帧顺序 ⇒ 拖尾连续。
+        if (echo != null) {
+            val accOk = drawTo(echoAccFbo[1 - echoAccIdx], echoAccProgram, echoAccAPos, echoAccATex, echoAccUMatrix, identity) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)
+                if (echoAccUSrc >= 0) GLES20.glUniform1i(echoAccUSrc, UNIT_A)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_B)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, echoAccTex[echoAccIdx])
+                if (echoAccUPrev >= 0) GLES20.glUniform1i(echoAccUPrev, UNIT_B)
+                if (echoAccUMatrix >= 0) GLES20.glUniformMatrix4fv(echoAccUMatrix, 1, false, identity, 0)
+                if (echoAccUDecay >= 0) GLES20.glUniform1f(echoAccUDecay, echoDecayOf(echo.multiplier))
+                if (echoAccUMode >= 0) GLES20.glUniform1f(echoAccUMode, if (echo.mode == EchoMode.TRAIL) 1f else 0f)
+                if (echoAccUThreshold >= 0) GLES20.glUniform1f(echoAccUThreshold, echo.threshold)
+            }
+            if (!accOk) return false
+            echoAccIdx = 1 - echoAccIdx
+        }
 
         if (!makeCurrent(encoderSurface)) return false
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, widthPx, heightPx)
-        if (glow != null) {
+        if (echo != null) {
+            // 残影合成趟：applyEcho(base + glow, echoAcc)——残影包在 Glow 外层（与实时链同序）。
+            // glow 缺席时 uGlowSrc 绑黑纹理且增益/混合置 0 ⇒ 光晕贡献为 0。
+            GLES20.glUseProgram(echoCompProgram)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, base)
+            if (echoCompUBase >= 0) GLES20.glUniform1i(echoCompUBase, UNIT_A)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_B)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (glow != null) glowATex else blackTex)
+            if (echoCompUGlow >= 0) GLES20.glUniform1i(echoCompUGlow, UNIT_B)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_C)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, echoAccTex[echoAccIdx])
+            if (echoCompUEcho >= 0) GLES20.glUniform1i(echoCompUEcho, UNIT_C)
+            if (echoCompUMatrix >= 0) GLES20.glUniformMatrix4fv(echoCompUMatrix, 1, false, identity, 0)
+            if (glow != null) {
+                val tint = if (glow.colorOnly) floatArrayOf(1f, 1f, 1f) else effects.glowTint
+                if (echoCompUTint >= 0) GLES20.glUniform3f(echoCompUTint, tint[0], tint[1], tint[2])
+                if (echoCompUGain >= 0) GLES20.glUniform1f(echoCompUGain, glow.gain)
+                if (echoCompUAdd >= 0) GLES20.glUniform1f(echoCompUAdd, glow.add)
+                if (echoCompUBlend >= 0) GLES20.glUniform1f(echoCompUBlend, glow.blend)
+                if (echoCompUFreq >= 0) GLES20.glUniform1f(echoCompUFreq, glow.freq)
+            } else {
+                if (echoCompUTint >= 0) GLES20.glUniform3f(echoCompUTint, 1f, 1f, 1f)
+                if (echoCompUGain >= 0) GLES20.glUniform1f(echoCompUGain, 0f)
+                if (echoCompUAdd >= 0) GLES20.glUniform1f(echoCompUAdd, 0f)
+                if (echoCompUBlend >= 0) GLES20.glUniform1f(echoCompUBlend, 0f)
+                if (echoCompUFreq >= 0) GLES20.glUniform1f(echoCompUFreq, 0f)
+            }
+            if (echoCompUEchoMode >= 0) GLES20.glUniform1f(echoCompUEchoMode, if (echo.mode == EchoMode.TRAIL) 1f else 0f)
+            if (echoCompUEchoGain >= 0) GLES20.glUniform1f(echoCompUEchoGain, echo.gain)
+            drawQuad(echoCompAPos, echoCompATex)
+        } else if (glow != null) {
             GLES20.glUseProgram(compProgram)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, base)
@@ -533,6 +693,8 @@ internal class SceneExportGl(
     // ---------------------------------------------------------------- 工具
 
     private fun unbindUnits() {
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_C)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_B)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
@@ -567,15 +729,18 @@ internal class SceneExportGl(
     private fun releaseGl() {
         glReady = false
         if (eglDisplay !== EGL14.EGL_NO_DISPLAY) makeCurrent(pbufferSurface)
-        for (p in intArrayOf(oesProgram, pass2dProgram, bilatProgram, brightProgram, blurProgram, compProgram)) {
+        for (p in intArrayOf(oesProgram, pass2dProgram, bilatProgram, brightProgram, blurProgram, compProgram, echoAccProgram, echoCompProgram)) {
             if (p != 0) GLES20.glDeleteProgram(p)
         }
         oesProgram = 0; pass2dProgram = 0; bilatProgram = 0
         brightProgram = 0; blurProgram = 0; compProgram = 0
-        for (i in intArrayOf(curFbo, denFbo, glowAFbo, glowBFbo)) if (i != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(i), 0)
-        for (t in intArrayOf(curTex, denTex, glowATex, glowBTex, oesTex)) if (t != 0) GLES20.glDeleteTextures(1, intArrayOf(t), 0)
+        echoAccProgram = 0; echoCompProgram = 0
+        for (i in intArrayOf(curFbo, denFbo, glowAFbo, glowBFbo, echoAccFbo[0], echoAccFbo[1])) if (i != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(i), 0)
+        for (t in intArrayOf(curTex, denTex, glowATex, glowBTex, echoAccTex[0], echoAccTex[1], blackTex, oesTex)) if (t != 0) GLES20.glDeleteTextures(1, intArrayOf(t), 0)
         curTex = 0; curFbo = 0; denTex = 0; denFbo = 0
         glowATex = 0; glowAFbo = 0; glowBTex = 0; glowBFbo = 0; oesTex = 0
+        echoAccTex[0] = 0; echoAccTex[1] = 0; echoAccFbo[0] = 0; echoAccFbo[1] = 0
+        echoAccIdx = 0; blackTex = 0
         val s = decoderSurface
         decoderSurface = null
         s?.release()

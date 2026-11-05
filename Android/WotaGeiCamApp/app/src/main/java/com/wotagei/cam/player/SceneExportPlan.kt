@@ -1,7 +1,9 @@
 package com.wotagei.cam.player
 
+import com.wotagei.cam.core.EchoParams
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.VideoDenoise
+import com.wotagei.cam.core.decodeEcho
 import com.wotagei.cam.core.decodeGlow
 import com.wotagei.cam.core.glowRgb
 
@@ -17,6 +19,9 @@ import com.wotagei.cam.core.glowRgb
  * - Glow：读落盘参数（`KEY_GLOW`，`decodeGlow` 缺键回出厂 = 关）；`enabled=false` 不应用。
  * - 降噪：`videoDenoise != OFF` 即应用 **GPU 双边**（离线没有 HAL 的 ISP，HAL 两档在这里只能
  *   退化成同一条双边核）；`denoiseKernelLite` 的分档语义不适用于离线（不追实时负载）。
+ * - 残影（R2 第三路，2026-11-05）：读落盘参数（`KEY_ECHO`，`decodeEcho` 缺键回出厂 = 关）；
+ *   `enabled=false` 不应用。离线逐帧顺序处理，反馈累积面从黑起步（片头按可用回波数合成，
+ *   与实时链同一 `echoDecayOf` 换算）；**全分辨率**跑（离线不追实时负载，不降采样）。
  * - 上屏档（DisplayScale）不参与：导出的永远是全分辨率帧。
  * - 曲线：**刻意不读** `KEY_CURVE_STACK`——录制期已烘进源片，再套一次会双倍。
  */
@@ -24,10 +29,12 @@ data class SceneExportEffects(
     /** null = 不应用光晕；非 null 已 sanitize（含 enabled=true 的完整参数） */
     val glow: GlowParams?,
     /** true = 应用 GPU 双边降噪 */
-    val denoise: Boolean
+    val denoise: Boolean,
+    /** null = 不应用残影；非 null 已 sanitize（含 enabled=true 的完整参数）。R2 第三路 */
+    val echo: EchoParams? = null
 ) {
     /** 至少一项在作用 = 后渲染导出与无损导出才有区别；都没有时 UI 应禁用该模式 */
-    val active: Boolean get() = glow != null || denoise
+    val active: Boolean get() = glow != null || denoise || echo != null
 
     /** 真实节点用的 tint（白 = 跟随原色） */
     val glowTint: FloatArray get() = glowRgb(glow?.color ?: 0xFFFFFFFFL)
@@ -44,15 +51,17 @@ data class SceneExportEffects(
  * 光晕/降噪参数在弹层初始化时取当前落盘值，用户在弹层里改的只作用于**这一次导出**，
  * 不反写设置（设置页仍是全局默认值的唯一归属）。纯函数，JVM 可测。
  */
-fun sceneExportEffectsOf(glow: GlowParams, denoiseOn: Boolean): SceneExportEffects =
+fun sceneExportEffectsOf(glow: GlowParams, denoiseOn: Boolean, echo: EchoParams): SceneExportEffects =
     SceneExportEffects(
         glow = glow.sanitize().let { if (it.enabled) it else null },
-        denoise = denoiseOn
+        denoise = denoiseOn,
+        echo = echo.sanitize().let { if (it.enabled) it else null }
     )
 
-fun sceneExportEffects(glowRaw: String?, videoDenoise: VideoDenoise): SceneExportEffects {
+fun sceneExportEffects(glowRaw: String?, videoDenoise: VideoDenoise, echoRaw: String? = null): SceneExportEffects {
     val glow = decodeGlow(glowRaw).sanitize().let { if (it.enabled) it else null }
-    return SceneExportEffects(glow = glow, denoise = videoDenoise != VideoDenoise.OFF)
+    val echo = decodeEcho(echoRaw).sanitize().let { if (it.enabled) it else null }
+    return SceneExportEffects(glow = glow, denoise = videoDenoise != VideoDenoise.OFF, echo = echo)
 }
 
 /** 编码帧率：源容器帧率可用就跟着源（钳 15..60），读不出按 30 */

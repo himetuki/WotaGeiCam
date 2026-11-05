@@ -27,10 +27,10 @@ import kotlin.coroutines.coroutineContext
 
 /**
  * 「内置播放器内后渲染导出」的管线（2026-10-28 用户需求）：
- * `MediaExtractor → MediaCodec 解码 → 可选 2D 双边降噪 → 可选 Glow（提取+模糊+合成） → MediaCodec 重编码 → MediaMuxer`。
+ * `MediaExtractor → MediaCodec 解码 → 可选 2D 双边降噪 → 可选 Glow（提取+模糊）→ 可选残影累积 → 合成 → MediaCodec 重编码 → MediaMuxer`。
  *
  * 与无损剪辑（[ClipExport]）的关系：那条是 `Extractor → Muxer` 的原样重封（不重编码）；
- * 这条是**重编码 + 场景层效果**，只应用用户点名的两项：**Glow 与画面降噪**。
+ * 这条是**重编码 + 场景层效果**，应用用户点名的项：**Glow、画面降噪、残影（R2 第三路）**。
  * **RGB 曲线刻意不做**（用户口径：曲线在录制时已烘进成片像素，再套一次是双倍）。
  *
  * 音轨：与 [ClipExport] 同一条选轨口径（ENV=容器第一条音频、CAP=第二条），样本按
@@ -71,7 +71,7 @@ class SceneExportRunner(private val ctx: Context) {
         // UI 已把无效果时的后渲染 chip 置灰；走到这里说明面板开着期间设置被改了。
         // 单独一枚 reason：报 RANGE 会让用户看到"保留段太短"这种假话
         if (!effects.active) {
-            Log.w(TAG, "后渲染被调用但没有可应用的效果（光晕关闭且降噪 OFF），不建空任务")
+            Log.w(TAG, "后渲染被调用但没有可应用的效果（光晕/残影关闭且降噪 OFF），不建空任务")
             return@withContext Failed(Reason.NO_EFFECT)
         }
 
@@ -326,7 +326,7 @@ class SceneExportRunner(private val ctx: Context) {
                 return@withContext Failed(Reason.COMMIT)
             }
             val id = ContentUris.parseId(pendingUri)
-            Log.i(TAG, "后渲染导出完成 id=$id ${sMs}..$eMs glow=${effects.glow != null} denoise=${effects.denoise} frames=$submitted")
+            Log.i(TAG, "后渲染导出完成 id=$id ${sMs}..$eMs glow=${effects.glow != null} denoise=${effects.denoise} echo=${effects.echo != null} frames=$submitted")
             Done(id, ClipRule.clipNameOf(src.name))
         } catch (e: CancellationException) {
             if (!sealed) runCatching { ctx.contentResolver.delete(pendingUri, null, null) }
