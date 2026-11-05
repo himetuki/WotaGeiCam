@@ -40,7 +40,7 @@ If you need an English / Indonesian (Bahasa Indonesia) interface, his build is r
 
 **🌟 Light-arc tool chain · film beautiful light arcs**
 - Forced slow shutter **1/24 · 1/25** full-window long exposure keeps arcs continuous; **equal-tier exposure correction** automatically leaves readout headroom to prevent frame drops.
-- **Afterimage (highlight trailing)**: multi-frame echo lengthens arcs, "keep brightness / brightened trail" dual modes, multiplier 2–10×, across preview / recording / re-rendered export.
+- **Afterimage (highlight trailing)**: multi-frame echo lengthens arcs, "keep brightness / brightened trail" dual modes, multiplier 2–10×, across preview / recording / re-rendered export. (Algorithm concept referenced from Bilibili creator 蒙德·究史尼's open-source 光弧倍增器 script — with thanks; see Light-arc tool chain below)
 - **In-recording extract + arc merge + offline arc repair**: devices without a native slow tier still keep continuous arcs.
 
 **🎯 Practice comparison · practice standard moves**
@@ -120,6 +120,8 @@ Listed by category below, each with its **location**, **how to open it**, and **
 | Afterimage (highlight trailing) | Bottom dock left "afterimage" pill (hidden by default) | Enable in Settings → Viewfinder persistent controls; pick mode (keep brightness / brightened trail) and multiplier 2–10×; preview / recording / re-rendered export; GPU only |
 | Offline arc repair | Player → Arc repair | Pick the target rate, GPU or CPU; writes a new file, never overwrites the original |
 | Merge threshold | Frame-rate panel / arc-repair panel / Settings → Startup defaults | Default 12 (0–32); higher is more conservative, lower merges noise; same rule for recording and offline, CPU and GPU |
+
+> The afterimage feature's **algorithm concept and product semantics** (multi-frame echo to lengthen arcs, keep-brightness / brightened-trail dual modes, multiplier tiers) reference the open-source script 光弧倍增器 (Light-arc Multiplier) by Bilibili creator [蒙德·究史尼](https://space.bilibili.com/8205741) — with sincere thanks. What was borrowed is the idea and semantics; **no source code was reused** — the shaders and implementation here were written independently, on a different technical approach (real-time GL feedback accumulation with arcs trailing behind the motion, rather than its offline Python sliding window that placed arcs ahead of it).
 
 ### Playback and library
 
