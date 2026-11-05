@@ -4293,15 +4293,20 @@ private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
 private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
     val aeMode by params.aeMode.observed()
     val sentNs by params.actualSentExposureNs.observed()
+    val shutterState by params.shutter.observed()
     val fpsMeasured by params.actualFps.observed()
     val corrAuto by params.exposureCorrectionAuto.observed()
     val corrNs by params.actualCorrectionNs.observed()
     if (aeMode != AeMode.MANUAL) return
     val sent = sentNs ?: return
     if (sent <= 0L) return
+    // 分数标按**设定快门**反推，不按实发值（2026-11-05 用户反馈）：等号档纠偏会把实发曝光
+    // 压低一个余量（1/24=41.67ms 纠 2.1ms → 实发 39.6ms），拿实发反推会标成 1/25，看着像快门
+    // 被改了。设定快门才是用户的锚（1/24）；实发 ms + 末尾余量读数共同呈现纠偏效果。
+    val refNs = shutterState.value.takeIf { it > 0L } ?: sent
     val expPart = "%.1f ms | 1/%d".format(
         sent / 1_000_000.0,
-        (WotaTiers.NS_PER_SECOND.toDouble() / sent).roundToInt().coerceAtLeast(1)
+        (WotaTiers.NS_PER_SECOND.toDouble() / refNs).roundToInt().coerceAtLeast(1)
     )
     val fpsPart = fpsMeasured?.let { "%.0f fps".format(it) } ?: "-- fps"
     val modePart = stringResource(if (corrAuto) R.string.cam_ae_auto else R.string.cam_ae_manual)
