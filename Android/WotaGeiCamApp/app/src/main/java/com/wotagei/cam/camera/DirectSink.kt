@@ -75,7 +75,7 @@ fun directDisplayMatrix(
  * 线程：全部方法可能被相机工作线程与主线程交替调用，状态用 @Volatile 收；
  * 回调 [onReconfigure] 固定抛回主线程（`TextureView` 只能在主线程改）。
  */
-class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowProvider {
+class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowProvider, EchoProvider {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -263,6 +263,28 @@ class DirectSink : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowP
             rtWidthPx = 0,
             rtHeightPx = 0,
             clamped = false
+        )
+    }
+
+    // endregion
+
+    // region 残影接缝（R2，2026-11-05）：DIRECT 下的回答恒为「在场但不可用」（与 Glow 同一条降级）
+
+    /** 用户选的残影参数（只存不用：DIRECT 没有 GL 管线可注入，UI 据此显示"在场但禁用"） */
+    @Volatile
+    private var echoParams = com.wotagei.cam.core.EchoParams.DEFAULT
+
+    override fun setEchoParams(params: com.wotagei.cam.core.EchoParams) {
+        echoParams = params.sanitize()
+    }
+
+    override fun isEchoAvailable(): Boolean = false
+
+    override fun echoStatus(): com.wotagei.cam.core.EchoStatus {
+        return com.wotagei.cam.core.EchoStatus(
+            available = false,
+            enabled = echoParams.enabled,
+            broken = false
         )
     }
 

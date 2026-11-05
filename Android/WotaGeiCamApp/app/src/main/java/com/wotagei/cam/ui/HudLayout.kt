@@ -135,6 +135,9 @@ data class HudEntry(val kind: HudEntryKind, val ordinal: Int) {
                 // （录制页与编辑页共用 [HudBottomBandEntry] 一个渲染入口，落位＝贴 Dock 左缘）。
                 // 此处把它登记进 BOTTOM 有序表，供"默认在最左""隐藏后不回默认"与跨容器搬移三件事用。
                 CamPill.DENOISE -> HudZone.BOTTOM
+                // 残影（R2，2026-11-05 用户指定「放在底Dock栏左侧」）：与降噪同一枚伴随条目槽、
+                // 排它**左侧**（= 左起第一颗）；同样不进等宽槽三格，同样经 HudBottomBandEntry 渲染
+                CamPill.ECHO -> HudZone.BOTTOM
                 CamPill.REFLINE, CamPill.MONITOR, CamPill.CURVE, CamPill.FLASH -> HudZone.LEFT
                 // Glow（2026-10-27 用户需求；24 §1.6）：scene layer，但**不进底栏**——底栏是
                 // `2S+R+2G+2P` 等宽槽特例，塞不下第 4 颗；左竖 Dock 按 308dp 的账装得下第 5 组
@@ -657,8 +660,11 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
                 HudEntry.of(CamPill.LEVEL), HudEntry.of(CamPill.VOLUME), HudEntry.of(CamPill.BT),
                 HudEntry.of(CamPill.ZOOM), HudEntry.of(CamPill.FOCUS), HudEntry.of(CamPill.STAB)
             )
-            // 降噪在镜头**之前** = 底栏左起（用户 2026-10-26："默认放在底部Dock栏左侧"）
-            HudZone.BOTTOM -> listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS))
+            // 残影在降噪**之前** = 底栏左起第一颗（用户 2026-11-05："放在底Dock栏左侧"），
+            // 降噪次之、镜头最后（用户 2026-10-26 的原话是"默认放在底部Dock栏左侧"）
+            HudZone.BOTTOM -> listOf(
+                HudEntry.of(CamPill.ECHO), HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)
+            )
             HudZone.READOUT -> HudItem.ALL.map { HudEntry.of(it) }
         }
 

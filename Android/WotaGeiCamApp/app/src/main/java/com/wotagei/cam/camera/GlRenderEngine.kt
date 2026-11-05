@@ -98,7 +98,7 @@ interface DisplaySurfaceReceiver {
  * 实例一次性：[release] 后不可复用（线程已退出），重建请 new 新实例。
  */
 class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, GlowProvider,
-    SurfaceTexture.OnFrameAvailableListener {
+    EchoProvider, SurfaceTexture.OnFrameAvailableListener {
 
     companion object {
         /** EGL14 未暴露该常量，取 Khronos 原值 EGL_OPENGL_ES3_BIT_KHR */
@@ -435,7 +435,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val uGlowAdd: Int,
         val uGlowFreq: Int,
         val uGlowBlend: Int,
-        val uGlowTint: Int
+        val uGlowTint: Int,
+        val uEchoSrc: Int,
+        val uEchoMode: Int,
+        val uEchoGain: Int
     )
 
     /**
@@ -525,6 +528,42 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     /** 上一次打出的 Glow 分档（档变才打日志，避免每帧刷屏） */
     private var glowLoggedScale = 0
+
+    // endregion
+
+    // region 残影（R2 高光拖影，2026-11-05；docs/research/R2 §四——scene layer，两槽都带、进成片）
+
+    /**
+     * 残影参数：UI 线程写、GL 线程读 ⇒ `@Volatile`（整体替换，无需锁）。
+     * **形状参数（模式/倍数/阈值/强度）只换 uniform**（不重建 program）；只有 `enabled`
+     * 进 [ProgramKey] 的 `echo` 一维——与 Glow 完全同族。
+     */
+    @Volatile
+    private var echoParams = com.wotagei.cam.core.EchoParams.DEFAULT
+
+    /**
+     * 残影累积链（一张反馈累积面、乒乓写读）。**只在 GL 线程创建/调用**；UI 线程只读
+     * [echoStatus]/[isEchoAvailable] 快照 ⇒ 引用本身 `@Volatile`。
+     */
+    @Volatile
+    private var echoChain: EchoChain? = null
+
+    /**
+     * 本帧可采样的累积面（0 = 未就绪，`drawPass` 退回 1×1 黑纹理——max(c,黑)=c 且
+     * c+0·gain=c，**两种模式下黑纹理都是恒等**）。链只在 `drawFrame` 里跑一次；
+     * ⚠ GL 线程独占，不加 @Volatile。
+     */
+    private var echoFrameTex = 0
+
+    /**
+     * 方向矩阵自上次累积面清零以来是否变过（R2 §五.2 护栏）：转屏/换前后摄后旧朝向的残影
+     * 留在面里会被当成本帧历史继续叠进成片。`consumeFrame`（GL 线程）置位，
+     * `drawEchoPass` 读取并清零 + `reset()`。GL 线程独占。
+     */
+    private var echoStaleSinceOrientationChange = false
+
+    /** 上一次累积时的模式（GL 线程独占）：模式切换 = 累积面语义切换，必须清零重开 */
+    private var echoAppliedTrailMode: Boolean? = null
 
     // endregion
 
@@ -1472,6 +1511,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         glowChain = GlowBlurChain(::link, ::drainGlError, positionBuffer)
         glowIdentityUv = glowIdentityTexCoords()
         glowBlackTex = createGlowBlackTexture()
+        // 残影累积链（R2，2026-11-05）：与 Glow 链同构、实例独立；黑纹理兜底复用 Glow 那枚
+        // 1×1（两处语义都是"贡献为零"，谁先建都不影响另一条）
+        echoChain = EchoChain(::link, ::drainGlError, positionBuffer)
 
         glReady = true
         // 首帧之前先把上屏槽建好（此时编码面尚未绑定 ⇒ movie 槽不建），
@@ -1746,6 +1788,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // Glow 离屏链：每帧一次，夹在成片槽同步与编码 pass 之间（§11.7 定版顺序）。
         // 它必须在 drawEncoderMended 之前跑——MEND 的 cur 渲染同样要采这张图。
         drawGlowPass(hasFrame)
+        // 残影累积面（R2）：同样每帧一次、同样只在新帧上累积（state-only 重画在函数内部早退）。
+        // 与 Glow 链同一条纪律：跑在编码 pass 之前，MEND 的 cur 渲染采到的是同一张累积面。
+        drawEchoPass(hasFrame)
 
         // 录制期转换（抽帧/补弧）只动编码支路；预览/霜/上屏各走各的，一帧不丢。
         // skip=true 的帧跳过编码 swap（帧序号不推进 ⇒ 输出节奏均匀）；MEND 通道内部失败会
@@ -2298,6 +2343,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 updateContentRect()
                 dirty = true
                 scheduleDraw()
+                // 残影护栏（R2 §五.2）：方向矩阵变了，累积面里的旧朝向残影必须作废
+                echoStaleSinceOrientationChange = true
             }
             lastDrawnTimestampNs = st.timestamp
             hasTextureData = true
@@ -2377,6 +2424,24 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             // 2026-10-28：同色光晕——不再上传色带两端色（见 Shaders.applyGlow 的注释）
         }
 
+        // 残影（R2，scene layer，两槽都带）：累积面在 drawFrame 里跑过（每帧一次），
+        // 这里只采样结果。链未就绪绑 1×1 黑纹理 ⇒ max(c,黑)=c 且 c+0·gain=c——两种模式下
+        // 黑纹理都是恒等，绝不为此切 program（切 program 会闪帧）。
+        val echoOn = p.applied.echo
+        if (echoOn) {
+            val echoTex = echoFrameTex.takeIf { it != 0 } ?: glowBlackTex
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ECHO_SRC_UNIT)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, echoTex)
+            if (p.uEchoSrc >= 0) GLES20.glUniform1i(p.uEchoSrc, ECHO_SRC_UNIT)
+            if (p.uEchoMode >= 0) {
+                GLES20.glUniform1f(
+                    p.uEchoMode,
+                    if (echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL) 1f else 0f
+                )
+            }
+            if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, echoParams.gain)
+        }
+
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
         buildTexCoords(encoderPass)
         if (p.aPosition >= 0) {
@@ -2392,6 +2457,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // "这张还挂在某个激活单元上"就当 feedback loop 报警（免费的保险，与霜链同一条理由）
         if (glowOn) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        }
+        // 残影那张同理（7 号单元；链下一帧要往两张乒乓里画）
+        if (echoOn) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ECHO_SRC_UNIT)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         }
@@ -2547,8 +2618,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     private fun prepareGlowPrograms() {
         val curveOn = curveBytes != null
         val denoise = denoiseLevelNow()
-        buildProgram(movieProgramKey(curveOn, denoise, glow = true), "movie")
-        buildProgram(displayProgramKey(wantEffect, curveOn, denoise, glow = true), "display")
+        buildProgram(movieProgramKey(curveOn, denoise, glow = true, echo = echoOn()), "movie")
+        buildProgram(displayProgramKey(wantEffect, curveOn, denoise, glow = true, echo = echoOn()), "display")
     }
 
     /**
@@ -2613,6 +2684,90 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     // endregion
 
+    // region 残影（R2，2026-11-05；与 Glow 同族：UI 写意图、GL 线程生效、状态可拉）
+
+    override fun setEchoParams(params: com.wotagei.cam.core.EchoParams) {
+        if (released.get()) return
+        val next = params.sanitize()
+        val wasOn = echoParams.enabled
+        echoParams = next
+        if (!next.enabled || wasOn) return
+        postGl {
+            // 显式开启 = 给含 echo 维度的坏键一次重试 + 链一次复活机会（同一坏键不逐帧重试的口径不变）；
+            // 累积面清零重开——上次开着的那段陈旧拖影不许带进新开的那一段
+            failedKeys.removeAll { it.echo }
+            echoChain?.resetAfterBreak()
+            echoChain?.prepare()
+            echoChain?.reset()
+            prepareEchoPrograms()
+        }
+    }
+
+    /** 本 sink 这一刻能否产出拖影（"能不能"与"开没开"分开，与 [isGlowAvailable] 同口径） */
+    override fun isEchoAvailable(): Boolean =
+        echoChain != null && !released.get() && echoChain?.isBrokenForDiagnostics() != true
+
+    override fun echoStatus(): com.wotagei.cam.core.EchoStatus {
+        val chain = echoChain
+        return com.wotagei.cam.core.EchoStatus(
+            available = (chain?.resultTex ?: 0) != 0,
+            enabled = echoParams.enabled,
+            broken = chain?.isBrokenForDiagnostics() == true
+        )
+    }
+
+    /** 预热 **echo=1** 的两个键（镜像 [prepareGlowPrograms]：只进缓存不绑槽，开那一下不掉帧） */
+    private fun prepareEchoPrograms() {
+        val curveOn = curveBytes != null
+        val denoise = denoiseLevelNow()
+        buildProgram(movieProgramKey(curveOn, denoise, glowOn(), echo = true), "movie")
+        buildProgram(displayProgramKey(wantEffect, curveOn, denoise, glowOn(), echo = true), "display")
+    }
+
+    /**
+     * 残影累积面：**每帧一次**，跟在 [drawGlowPass] 后面（编码 pass 之前）。
+     *
+     * 早退与 Glow 同四条，外加一条 R2 §五.1 的硬护栏：
+     * - **state-only 帧（`!hasFrame`）绝不累积**——`drawFrame` 存在无新帧的重画（切效果/改尺寸），
+     *   同一张 OES 帧被累积两次 = 拖影凭空多叠一层；
+     * - 关着 ⇒ 一次 GL 调用都不发（零代价口径）；
+     * - 既没编码面也没窗口面 / 空闲预览且上屏被节流 ⇒ 没有消费者，跳过。
+     *
+     * 护栏另两条在这里落地：方向矩阵变过（[echoStaleSinceOrientationChange]）或模式切换
+     * （[echoAppliedTrailMode]）先 `reset()` 清累积面；倍数变化不清——k 只影响往后的衰减，
+     * 已有拖影按新系数自然衰减出去。
+     */
+    private fun drawEchoPass(hasFrame: Boolean) {
+        if (!echoParams.enabled) return
+        if (!hasFrame) return
+        if (encoderEglSurface == null && windowEglSurface == null) return
+        if (encoderEglSurface == null && windowThrottled()) return
+        val uv = glowIdentityUv ?: return
+        val chain = echoChain ?: return
+        val trailMode = echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL
+        if (echoStaleSinceOrientationChange || echoAppliedTrailMode != null && echoAppliedTrailMode != trailMode) {
+            chain.reset()
+            echoStaleSinceOrientationChange = false
+        }
+        echoAppliedTrailMode = trailMode
+        val ok = chain.draw(
+            oesTextureId = oesTextureId,
+            texMatrix = stMatrix,
+            identityUv = uv,
+            frameWidthPx = wantFrameWidth,
+            frameHeightPx = wantFrameHeight,
+            scale = com.wotagei.cam.core.glowScaleFor(
+                wantFrameWidth, wantFrameHeight, if (encoderFps > 0) encoderFps else 30
+            ),
+            decay = com.wotagei.cam.core.echoDecayOf(echoParams.multiplier),
+            trailMode = trailMode,
+            threshold = echoParams.threshold
+        )
+        echoFrameTex = if (ok) chain.resultTex else 0
+    }
+
+    // endregion
+
     // region 对外：上屏降档（24 §2.3）
 
     /**
@@ -2655,6 +2810,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     private fun glowOn(): Boolean = glowParams.enabled
 
     /**
+     * 残影维度（R2 §四.5）：scene layer，两槽都带、进成片。与 [glowOn] 同一条纪律：
+     * `enabled` 一变，两槽的键就变（走会话缓存，不重编）。
+     */
+    private fun echoOn(): Boolean = echoParams.enabled
+
+    /**
      * **成片槽**同步：必须在编码 pass 之前调（[drawFrame]）。键 = [movieProgramKey]，effect 恒 NONE。
      *
      * 没有编码面就**不建** movie（空闲预览不白编一枚用不到的程序）：只清绑定、不删对象——
@@ -2664,7 +2825,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 坏键记进 [failedKeys]（同一坏键不逐帧重试）。
      */
     private fun syncMovieSlot() {
-        val wantMov = movieProgramKey(curveBytes != null, denoiseLevelNow(), glowOn())
+        val wantMov = movieProgramKey(curveBytes != null, denoiseLevelNow(), glowOn(), echoOn())
         if (encoderEglSurface == null) {
             movieSlot.clearBinding()
             syncEffectTextures()
@@ -2688,8 +2849,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val curveOn = curveBytes != null
         val denoise = denoiseLevelNow()
         val glow = glowOn()
-        val wantDisp = displayProgramKey(wantEffect, curveOn, denoise, glow)
-        val wantMov = movieProgramKey(curveOn, denoise, glow)
+        val echo = echoOn()
+        val wantDisp = displayProgramKey(wantEffect, curveOn, denoise, glow, echo)
+        val wantMov = movieProgramKey(curveOn, denoise, glow, echo)
         if (wantDisp == wantMov && movieSlot.program?.applied == wantMov) {
             // 两槽同键且成片那枚就是本键 ⇒ 直接共用（不新增编译、不新增显存）。
             // movie 走了回退（applied ≠ 请求键）时不共用：各按自己的键取一次，缓存键相同 ⇒
@@ -2777,7 +2939,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             }
         }
         if (!key.glow) return base
-        return Shaders.glowFragment(base, key.effect)
+        val withGlow = Shaders.glowFragment(base, key.effect) ?: return null
+        if (!key.echo) return withGlow
+        // 残影包在 Glow 外层（applyEcho(applyGlow(...))：拖影作用于"已发光晕"的画面）
+        return Shaders.echoFragment(withGlow, key.effect, glowOn = true)
     }
 
     /**
@@ -2821,9 +2986,14 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     /** 真正链接一枚 program 并取齐所有 location（[key] 即实际编译的键） */
     private fun linkProgram(key: ProgramKey): GlProgram? {
-        // Glow 是 program 维度：开着就用带 vUvGlow 的顶点源（关着时 TEXTURE_VS 一个字节不变）
+        // Glow/残影是 program 维度：各自开着就带各自的 varying（两个都关时 TEXTURE_VS 一个字节不变）
         val fragment = fragmentFor(key) ?: return null
-        val vertex = if (key.glow) Shaders.TEXTURE_VS_GLOW else Shaders.TEXTURE_VS
+        val vertex = when {
+            key.glow && key.echo -> Shaders.TEXTURE_VS_GLOW_ECHO
+            key.glow -> Shaders.TEXTURE_VS_GLOW
+            key.echo -> Shaders.TEXTURE_VS_ECHO
+            else -> Shaders.TEXTURE_VS
+        }
         val id = link(vertex, fragment)
         if (id == 0) return null
         if (key.denoise != DENOISE_LEVEL_OFF) {
@@ -2851,7 +3021,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             uGlowAdd = GLES20.glGetUniformLocation(id, "uGlowAdd"),
             uGlowFreq = GLES20.glGetUniformLocation(id, "uGlowFreq"),
             uGlowBlend = GLES20.glGetUniformLocation(id, "uGlowBlend"),
-            uGlowTint = GLES20.glGetUniformLocation(id, "uGlowTint")
+            uGlowTint = GLES20.glGetUniformLocation(id, "uGlowTint"),
+            uEchoSrc = GLES20.glGetUniformLocation(id, "uEchoSrc"),
+            uEchoMode = GLES20.glGetUniformLocation(id, "uEchoMode"),
+            uEchoGain = GLES20.glGetUniformLocation(id, "uEchoGain")
         )
     }
 
@@ -3033,6 +3206,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         }
         glowIdentityUv = null
         glowFrameTex = 0
+        // 残影链（2 纹理 + 2 FBO + 1 program）同一处收口；黑纹理随 Glow 那枚一起删，不重复登记
+        echoChain?.release()
+        echoChain = null
+        echoFrameTex = 0
+        echoStaleSinceOrientationChange = false
+        echoAppliedTrailMode = null
         // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
         // 这里兜「引擎直接销毁、没走过解绑」的那条路
         arcMendPass?.release()

@@ -217,6 +217,12 @@ object WotaSettings {
      */
     const val KEY_GLOW = "glow_params"
 
+    /**
+     * 残影（R2 高光拖影，2026-11-05）的**整份参数**：一个复合串键，`encodeEcho`/`decodeEcho`
+     * 纯函数负责往返（坏串整份回默认）——与 [KEY_GLOW] 同族的复合键口径。
+     */
+    const val KEY_ECHO = "echo_params"
+
     /** 诊断日志总开关（默认关，2026-10-13 用户裁决：避免不必要的空间占用；崩溃件不受它影响） */
     const val KEY_DIAG_ENABLED = "diag_enabled"
 

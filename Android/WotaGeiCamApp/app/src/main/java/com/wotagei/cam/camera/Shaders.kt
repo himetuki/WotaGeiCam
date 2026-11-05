@@ -680,6 +680,146 @@ vec3 applyGlow(vec3 c, vec2 uv) {
 
     // endregion
 
+    // region 残影（R2 高光拖影，2026-11-05；docs/research/R2 §四.2 双模式）
+
+    /**
+     * 残影版顶点源：多输出一条**不乘矩阵**的 `vUvEcho`（与 [TEXTURE_VS_GLOW] 的 vUvGlow 同一条
+     * 对齐推导：累积面按 `RT(q) = B(M·q)` 写入，主 pass 在同一 `aTexCoord` 处取回才能逐像素对齐）。
+     */
+    val TEXTURE_VS_ECHO = """
+        attribute vec4 aPosition;
+        attribute vec2 aTexCoord;
+        uniform mat4 uTexMatrix;
+        varying vec2 vUv;
+        varying vec2 vUvEcho;
+        void main() {
+            gl_Position = aPosition;
+            vUv = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+            vUvEcho = aTexCoord;
+        }
+    """.trimIndent()
+
+    /** Glow + 残影同时开的那枚顶点源（两条 varying 都要；单独任一开时不带多余插值） */
+    val TEXTURE_VS_GLOW_ECHO = """
+        attribute vec4 aPosition;
+        attribute vec2 aTexCoord;
+        uniform mat4 uTexMatrix;
+        varying vec2 vUv;
+        varying vec2 vUvGlow;
+        varying vec2 vUvEcho;
+        void main() {
+            gl_Position = aPosition;
+            vUv = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+            vUvGlow = aTexCoord;
+            vUvEcho = aTexCoord;
+        }
+    """.trimIndent()
+
+    /**
+     * 残影离屏链的**累积趟**片元源（R2 方案 B：单张反馈累积面，乒乓写读不同体）。
+     *
+     * `cur` 取**相机原帧**（与 GLOW_COPY_FS 同一条纪律：链每帧只跑一次，吃处理后的帧就得先跑一遍
+     * 主 pass，零代价当场破产；副作用"曲线压暗后拖影仍按光源真实亮度出现"是刻意登记的观感口径）。
+     *
+     * 双模式（R2 §四.2）由 `uEchoMode` 一颗 uniform 分派：
+     * - **0 = 保持亮度（max，星轨叠加法）**：`acc = max(cur, k·prev)`——逐像素取最大 ⇒ 静态背景
+     *   完全不动、只有光源画弧，弧是等亮度实心长条（B 站光弧倍增器默认档）；
+     * - **1 = 提亮拖尾（加法高光）**：只让亮度过阈值的像素进累积面 `acc = cur·t + k·prev`，
+     *   `t = smoothstep(thr−0.05, thr+0.05, luma)` 把阈值以下压成 0（否则整个背景跟着重影）。
+     *
+     * `k = uEchoDecay`（0..1）就是拖影时长的全部：展开后第 i 帧前的回波权重是 k^i，
+     * 由 `echoDecayOf(倍数)` 换算。恒等 UV + `uTexMatrix`：与 Glow 拷贝趟同一套 RT 布局。
+     */
+    val ECHO_ACCUM_FS = """
+        #extension GL_OES_EGL_image_external : require
+        precision mediump float;
+        varying vec2 vUv;
+        uniform samplerExternalOES uFrame;
+        uniform sampler2D uEchoPrev;
+        uniform float uEchoDecay;
+        uniform float uEchoMode;
+        uniform float uEchoThreshold;
+        void main() {
+            vec3 c = texture2D(uFrame, vUv).rgb;
+            vec3 prev = texture2D(uEchoPrev, vUv).rgb * uEchoDecay;
+            if (uEchoMode < 0.5) {
+                gl_FragColor = vec4(max(c, prev), 1.0);
+            } else {
+                float luma = dot(c, vec3(0.299, 0.587, 0.114));
+                float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
+                gl_FragColor = vec4(c * t + prev, 1.0);
+            }
+        }
+    """.trimIndent()
+
+    /** 注入段：varying + 3 颗 uniform + `applyEcho`（双模式合成；黑纹理兜底时两种模式都是恒等） */
+    private const val ECHO_DECL = """
+varying vec2 vUvEcho;
+uniform sampler2D uEchoSrc;
+uniform float uEchoMode;
+uniform float uEchoGain;
+vec3 applyEcho(vec3 c, vec2 uv) {
+    vec3 e = texture2D(uEchoSrc, uv).rgb;
+    if (uEchoMode < 0.5) {
+        return max(c, e);
+    }
+    return min(c + e * uEchoGain, vec3(1.0));
+}
+    """
+
+    /**
+     * 把残影注进一条**已存在的**片元源（可先经 [glowFragment]），返回新源码；锚点对不上返回
+     * **null**（调用方回退无残影并留日志）——与 Glow 同一条"绝不静默返回原串"纪律。
+     *
+     * 注入点与 [glowFragment] 一一对应（残影包在 Glow **外层**：`applyEcho(applyGlow(...))`，
+     * 拖影作用于"已发光晕"的画面 ⇒ 光晕本身也拖尾，两层叠加语义自然）：
+     * - **scene**（effect = NONE）：终写表达式整个包进 applyEcho；
+     * - **ZEBRA**：只包 else 分支（条纹是判读尺子，不许拖影；亮度判定仍用注入前的 c）；
+     * - **PEAKING**：包 `mix` 的底色项（描边色不染色）。
+     *
+     * [glowOn] 决定锚点文本：Glow 注入后 ZEBRA/PEAKING 的目标串变了（`c` 已被包成
+     * `applyGlow(c, vUvGlow)`），这里必须拿注入后的真实形态去数命中次数。
+     */
+    fun echoFragment(base: String, effect: FrameEffect, glowOn: Boolean): String? {
+        val mains = MAIN_DECL.findAll(base).toList()
+        if (mains.size != 1) return null
+        val mainAt = mains[0].range.first
+
+        val patched = when (effect) {
+            FrameEffect.ZEBRA -> {
+                val inner = if (glowOn) "applyGlow(c, vUvGlow)" else "c"
+                val target = "gl_FragColor = vec4($inner, 1.0);"
+                if (countOf(base, target) != 1) return null
+                base.replace(target, "gl_FragColor = vec4(applyEcho($inner, vUvEcho), 1.0);")
+            }
+            FrameEffect.PEAKING -> {
+                val target = if (glowOn) {
+                    "mix(applyGlow(c, vUvGlow), uColor, paint)"
+                } else {
+                    "mix(c, uColor, paint)"
+                }
+                if (countOf(base, target) != 1) return null
+                base.replace(
+                    target,
+                    if (glowOn) "mix(applyEcho(applyGlow(c, vUvGlow), vUvEcho), uColor, paint)"
+                    else "mix(applyEcho(c, vUvEcho), uColor, paint)"
+                )
+            }
+            FrameEffect.NONE -> {
+                val outs = SCENE_OUT.findAll(base).toList()
+                if (outs.size != 1) return null
+                val m = outs[0]
+                val expr = m.groupValues[1]
+                base.substring(0, m.range.first) +
+                    "gl_FragColor = vec4(applyEcho(" + expr + ", vUvEcho), 1.0);" +
+                    base.substring(m.range.last + 1)
+            }
+        }
+        return patched.substring(0, mainAt) + "\n" + ECHO_DECL + patched.substring(mainAt)
+    }
+
+    // endregion
+
     // region 毛玻璃离屏链（#84：三趟里后两趟的源；第一趟见 FROST_COPY_FS）
 
     /**

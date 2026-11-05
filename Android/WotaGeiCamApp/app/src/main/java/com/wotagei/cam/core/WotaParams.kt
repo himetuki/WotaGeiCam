@@ -99,6 +99,14 @@ class WotaParams(private val scope: CoroutineScope) {
     val glowParams = MutableStateFlow(GlowParams.DEFAULT)
 
     /**
+     * 残影（R2 高光拖影，2026-11-05）：Glow 的同构姊妹——整份参数一个流，形状参数都是
+     * uniform 级改动（`EchoProvider.setEchoParams` 不触发重画，录制中拖滑杆不会往成片塞
+     * 重复帧、也不会把同一张帧重复累积）。落盘由 [com.wotagei.cam.ui.ParamsPersist] 的
+     * 复合键负责（`encodeEcho`/`decodeEcho`）。
+     */
+    val echoParams = MutableStateFlow(com.wotagei.cam.core.EchoParams.DEFAULT)
+
+    /**
      * 上屏渲染比例（24 §2.3）：出厂 = 原片。**不重建相机会话**（结构签名里没有它），
      * 换引擎时由 UI 那条长键补发（与 Glow 同一条纪律）。
      */

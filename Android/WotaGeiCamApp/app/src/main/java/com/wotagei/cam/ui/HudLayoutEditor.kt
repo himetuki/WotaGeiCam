@@ -1303,6 +1303,11 @@ private fun editorCtx(
         toneActive = false,
         toneUsable = false,
         onToneClick = { },
+        // 残影（R2）同 Glow/TONE：编辑页不接引擎，恒"不可用"，点按无动作
+        echoLabel = stringResource(R.string.cam_pill_echo),
+        echoActive = false,
+        echoUsable = false,
+        onEchoClick = { },
         flash = Flash.OFF,
         lensLabel = stringResource(lensLabelRes(LensType.WIDE)),
         btConnected = false,

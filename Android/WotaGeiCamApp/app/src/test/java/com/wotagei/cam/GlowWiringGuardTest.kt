@@ -114,7 +114,8 @@ class GlowWiringGuardTest {
         val link = slice("linkProgram") ?: return bad + "linkProgram 定位失败"
         val fragment = slice("fragmentFor") ?: return bad + "fragmentFor 定位失败"
         if (!link.contains("Shaders.TEXTURE_VS_GLOW")) bad.add("glow=true 时必须配 TEXTURE_VS_GLOW")
-        if (!link.contains("else Shaders.TEXTURE_VS")) bad.add("glow=false 时必须配 TEXTURE_VS（源码逐字不变）")
+        // 2026-11-05（R2 残影）：顶点选择从 if/else 改成 when（四枚变体），兜底分支形态随之更新
+        if (!link.contains("else -> Shaders.TEXTURE_VS")) bad.add("glow=false 时必须配 TEXTURE_VS（源码逐字不变）")
         if (!fragment.contains("glowFragment(")) bad.add("片元必须经 glowFragment 注入")
         if (!fragment.contains("if (!key.glow) return base")) {
             bad.add("fragmentFor 必须先短路 glow=false（关着时一字节都不注入）")
@@ -173,8 +174,8 @@ class GlowWiringGuardTest {
         )
         assertTrue("预热必须只在 enabled 时做", body("replaceEncoderSurface").contains("glowParams.enabled"))
         val prewarm = body("prepareGlowPrograms")
-        assertTrue("成片槽的 glow=1 变体", prewarm.contains("movieProgramKey(curveOn, denoise, glow = true)"))
-        assertTrue("上屏槽的 glow=1 变体", prewarm.contains("displayProgramKey(wantEffect, curveOn, denoise, glow = true)"))
+        assertTrue("成片槽的 glow=1 变体", prewarm.contains("movieProgramKey(curveOn, denoise, glow = true, echo = echoOn())"))
+        assertTrue("上屏槽的 glow=1 变体", prewarm.contains("displayProgramKey(wantEffect, curveOn, denoise, glow = true, echo = echoOn())"))
         val release = body("releaseGl")
         assertTrue("releaseGl 必须收链", release.contains("glowChain?.release()"))
         assertTrue("releaseGl 必须删 1×1 黑纹理", release.contains("glowBlackTex"))
@@ -266,7 +267,7 @@ class GlowWiringGuardTest {
     private fun uiWiringIssues(pillsSrc: String): List<String> {
         val bad = ArrayList<String>()
         // 29 §4.4（2026-10-28）起 PillKey 末尾是 TONE：GLOW 仍在 TONE 之前
-        if (!pillsSrc.contains("DENOISE, GLOW, TONE }")) bad.add("PillKey 末尾必须有 GLOW, TONE")
+        if (!pillsSrc.contains("DENOISE, GLOW, TONE, ECHO }")) bad.add("PillKey 末尾必须有 GLOW, TONE, ECHO（2026-11-05 R2 加 ECHO）")
         if (!pillsSrc.contains("PillKey.MONITOR, PillKey.GLOW")) bad.add("GLOW 必须进录制可调白名单")
         if (!pillsSrc.contains("PillKey.GLOW to")) bad.add("pillAnchorWriters 缺 GLOW 一行（浮层会弹到屏幕原点）")
         if (!pillsSrc.contains("PillKey.GLOW -> GlowPill(")) bad.add("PillHost 缺 GLOW → GlowPill 分支")
@@ -297,9 +298,10 @@ class GlowWiringGuardTest {
 
     @Test
     fun `UI登记_枚举位掩码与持久化键的真值`() {
-        // 位掩码：GLOW 必须是新加的一位（版本 2 补位）；2026-10-28 起 schema=3（+TONE，不自动补位）
+        // 位掩码：GLOW 必须是新加的一位（版本 2 补位）；2026-10-28 起 schema=3（+TONE），
+        // 2026-11-05 起 schema=4（+ECHO，R2；两颗都不自动补位）
         assertEquals(16384, com.wotagei.cam.core.CamPill.GLOW.bit)
-        assertEquals(3, com.wotagei.cam.core.CamPill.MASK_SCHEMA)
+        assertEquals(4, com.wotagei.cam.core.CamPill.MASK_SCHEMA)
         assertEquals(
             com.wotagei.cam.core.CamPill.GLOW.bit,
             com.wotagei.cam.core.CamPill.ADDED_IN_SCHEMA[2]

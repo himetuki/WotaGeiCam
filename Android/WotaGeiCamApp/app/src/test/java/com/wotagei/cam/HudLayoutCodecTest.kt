@@ -94,8 +94,12 @@ class HudLayoutCodecTest {
                 .map { HudEntry.of(it) },
             t.orderOf(HudZone.RIGHT)
         )
-        // 2026-10-26：降噪（CamPill.DENOISE）加入底栏，排在镜头**左侧**（用户指定"底栏 Dock 左侧"）
-        assertEquals(listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)), t.orderOf(HudZone.BOTTOM))
+        // 2026-10-26：降噪（CamPill.DENOISE）加入底栏，排在镜头**左侧**（用户指定"底栏 Dock 左侧"）；
+        // 2026-11-05：残影（CamPill.ECHO）排到降噪**左侧**（用户指定"放在底Dock栏左侧"，R2）
+        assertEquals(
+            listOf(HudEntry.of(CamPill.ECHO), HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)),
+            t.orderOf(HudZone.BOTTOM)
+        )
         assertEquals(HudItem.ALL.map { HudEntry.of(it) }, t.orderOf(HudZone.READOUT))
         assertEachEntryOnce(t, "默认表")
         // 默认表的所有容器都在默认位置：位置表里没有任何绝对坐标
@@ -114,9 +118,10 @@ class HudLayoutCodecTest {
         assertEquals(zoomReadout, HudEntry.fromId("H6"))
         // GLOW 是新加的第 15 颗（P14）；再往后才是 ordinal 越界
         assertEquals(HudEntry.of(CamPill.GLOW), HudEntry.fromId("P14"))
-        // P15 = TONE（2026-10-28 第 16 颗）；ordinal 越界从 P16 起
+        // P15 = TONE（2026-10-28 第 16 颗）；P16 = ECHO（2026-11-05 第 17 颗，R2）；越界从 P17 起
         assertEquals(HudEntry.of(CamPill.TONE), HudEntry.fromId("P15"))
-        assertNull(HudEntry.fromId("P16"))
+        assertEquals(HudEntry.of(CamPill.ECHO), HudEntry.fromId("P16"))
+        assertNull(HudEntry.fromId("P17"))
         assertNull(HudEntry.fromId("H7"))
         assertNull(HudEntry.fromId("Z0"))
         assertNull(HudEntry.fromId(""))
@@ -366,9 +371,9 @@ class HudLayoutCodecTest {
         val afterReset = HudLayoutTable.default()
         assertEquals("重置＝整张表清回默认", HudLayoutTable.default(), afterReset)
         for (z in HudZone.ALL) assertTrue("${z.key} 段重置后必须回默认位置", afterReset.posOf(z).isDefault)
-        // 2026-10-26：底栏现有「降噪 + 镜头」两颗 ⇒ 不再 single()
+        // 2026-10-26：底栏现有「降噪 + 镜头」两颗 ⇒ 不再 single()；2026-11-05 起三颗（+ECHO）
         assertEquals(
-            listOf(HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)),
+            listOf(HudEntry.of(CamPill.ECHO), HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)),
             afterReset.orderOf(HudZone.BOTTOM)
         )
         // 「即时可重做」的模型前提：重置前那张表的串还完整可读回来（撤销靠的是它，不是内存里的手抄本）
@@ -465,7 +470,8 @@ class HudLayoutCodecTest {
         assertEquals(
             mapOf(
                 HudZone.TOP to 2, HudZone.LEFT to 6, HudZone.RIGHT to 6,
-                HudZone.READOUT to 7, HudZone.BOTTOM to 2
+                // 2026-11-05（R2）：ECHO 落底栏 ⇒ BOTTOM 2→3
+                HudZone.READOUT to 7, HudZone.BOTTOM to 3
             ), homes
         )
     }

@@ -102,8 +102,8 @@ class MonitorEffectEncoderGuardTest {
         if (keyFunAt < 0) return listOf("找不到 fun movieProgramKey 的声明")
         val braceAt = maskedKey.indexOf('{', keyFunAt)
         val decl = maskedKey.substring(keyFunAt, if (braceAt < 0) maskedKey.length else braceAt)
-        for (p in listOf("curve", "denoise", "glow")) {
-            if (!decl.contains(p)) bad.add("movieProgramKey 签名缺形参 $p（四维键要三维入参 + effect 恒 NONE）")
+        for (p in listOf("curve", "denoise", "glow", "echo")) {
+            if (!decl.contains(p)) bad.add("movieProgramKey 签名缺形参 $p（五维键要四维入参 + effect 恒 NONE）")
         }
         if (decl.contains("effect")) {
             bad.add("movieProgramKey 的签名里出现了 effect —— 成片键不许带监看维度，effect 恒 NONE 是唯一真源")
@@ -137,8 +137,8 @@ class MonitorEffectEncoderGuardTest {
         )
         // 另一条突变：签名里塞回 effect（成片键重新认识监看维度）
         val mutatedDecl = keyCode.replace(
-            "fun movieProgramKey(curve: Boolean, denoise: Int, glow: Boolean)",
-            "fun movieProgramKey(effect: FrameEffect, curve: Boolean, denoise: Int, glow: Boolean)"
+            "fun movieProgramKey(curve: Boolean, denoise: Int, glow: Boolean, echo: Boolean)",
+            "fun movieProgramKey(effect: FrameEffect, curve: Boolean, denoise: Int, glow: Boolean, echo: Boolean)"
         )
         assertTrue("签名加回 effect 形参的突变必须被守卫抓到", movieKeyIssues(mutatedDecl).isNotEmpty())
     }

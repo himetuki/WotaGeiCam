@@ -65,18 +65,19 @@ class PillInteractionGuardTest {
     }
 
     /**
-     * 21 根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛滑杆 + 2026-10-28 色调四条）：
+     * 24 根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛 + 2026-10-28 色调四条 +
+     * 2026-11-01 等号档手动微调 + 2026-11-05 残影两条，R2）：
      * 任一根漏传 `ladder` 就会退回连续滑杆，而纯函数测试仍全绿（审查 P3 的假绿口）。空 = 干净。
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 22) bad.add("PillSlider 调用点不是 22 处")
+        if (occurrences(src, "PillSlider(").size != 24) bad.add("PillSlider 调用点不是 24 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 22) bad.add("ladder = 参数不是 22 处（有滑杆退回连续模式）")
+        if (ladderArgs != 24) bad.add("ladder = 参数不是 24 处（有滑杆退回连续模式）")
         val panels = listOf(
             "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
-            "MonitorPill", "FpsPill", "GlowPill", "TonePill"
+            "MonitorPill", "FpsPill", "GlowPill", "TonePill", "EchoPill"
         )
         panels.forEach { fn ->
             val body = runCatching { bodyOf(src, fn) }.getOrNull()
@@ -152,15 +153,16 @@ class PillInteractionGuardTest {
     }
 
     @Test
-    fun `录制中可调白名单恰为八项`() {
+    fun `录制中可调白名单恰为九项`() {
         // 2026-10-27 B4：MONITOR 整组进白名单（只改 DISPLAY 槽，成片不变）
         // 2026-10-27 B7：GLOW 进白名单（scene layer：**会**改成片，但不触发重画、不产生重复帧）
         // 2026-10-28 F-E：TONE 按 Glow 同一先例进白名单（scene layer，29 §4.4-5 / §九-2）
+        // 2026-11-05（R2）：ECHO 按 Glow/TONE 同一先例进白名单（scene layer，不触发重画/不重复累积）
         assertEquals(
-            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW/TONE",
+            "可调白名单必须恰为 ISO/EV/WB/ZOOM/FOCUS/MONITOR/GLOW/TONE/ECHO",
             setOf(
                 PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
-                PillKey.MONITOR, PillKey.GLOW, PillKey.TONE
+                PillKey.MONITOR, PillKey.GLOW, PillKey.TONE, PillKey.ECHO
             ),
             RECORDING_EDITABLE_PILLS
         )

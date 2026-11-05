@@ -299,6 +299,8 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
         CamPill.GLOW -> PillKey.GLOW
         // TONE 有就近面板（同 Glow/监看一族）；曲线开整块面板才回 null
         CamPill.TONE -> PillKey.TONE
+        // 残影（R2）有就近面板（同 Glow/TONE 一族）
+        CamPill.ECHO -> PillKey.ECHO
         CamPill.CURVE -> null
         CamPill.LEVEL, CamPill.VOLUME -> null
     }
@@ -562,6 +564,11 @@ data class HudCtx(
     val toneActive: Boolean,
     val toneUsable: Boolean,
     val onToneClick: () -> Unit,
+    /** 残影胶囊（R2，2026-11-05）：读数文本（控件名「残影」）、"开着"标记、能力闸（DIRECT 在场但禁用）与点按 */
+    val echoLabel: String,
+    val echoActive: Boolean,
+    val echoUsable: Boolean,
+    val onEchoClick: () -> Unit,
     val flash: Flash,
     val lensLabel: String,
     val btConnected: Boolean,
@@ -800,6 +807,12 @@ fun HudEntryItem(
                 tier, ctx.toneLabel, ctx.toneActive,
                 anchor.then(modifier).alpha(if (ctx.toneUsable) 1f else 0.38f),
                 gatedClick(clicksAccepted, ctx.onToneClick), frost
+            )
+            // 残影（R2，2026-11-05）：scene layer，读数恒取控件名；DIRECT 下在场但禁用（与 Glow/TONE 同口径）
+            CamPill.ECHO -> TierChip(
+                tier, ctx.echoLabel, ctx.echoActive,
+                anchor.then(modifier).alpha(if (ctx.echoUsable) 1f else 0.38f),
+                gatedClick(clicksAccepted, ctx.onEchoClick), frost
             )
             CamPill.FLASH -> WotaIconButton(
                 image = flashIcon(ctx.flash),

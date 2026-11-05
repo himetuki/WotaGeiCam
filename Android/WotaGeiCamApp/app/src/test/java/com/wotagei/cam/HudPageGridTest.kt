@@ -283,8 +283,9 @@ class HudPageGridTest {
         assertTrue("编辑页必须列出被掩码关掉的闪光灯", e(CamPill.FLASH) in editorVisible)
         // 码率是唯一例外（10-01 布局批：Dock 外固定读数，不进两页的可见集）
         assertFalse("码率不进编辑页可见集", h(HudItem.BITRATE) in editorVisible)
-        // 2026-10-26 降噪 + 2026-10-27 Glow + 2026-10-28 TONE ⇒ 23 条目全集 − 码率 = 22 颗
-        assertEquals("编辑页可见集 = 全集 23 − 码率 = 22 颗", 22, editorVisible.size)
+        // 2026-10-26 降噪 + 2026-10-27 Glow + 2026-10-28 TONE + 2026-11-05 ECHO（R2）
+        // ⇒ 24 条目全集 − 码率 = 23 颗
+        assertEquals("编辑页可见集 = 全集 24 − 码率 = 23 颗", 23, editorVisible.size)
         // 水平仪的显示开关关掉时那颗整颗不渲染 ⇒ 编辑页不列（理由在 editorVisibleEntries 的 KDoc 里）
         assertFalse(
             "显示开关关掉水平仪时编辑页不列它", e(CamPill.LEVEL) in editorVisibleEntries(levelEnabled = false)

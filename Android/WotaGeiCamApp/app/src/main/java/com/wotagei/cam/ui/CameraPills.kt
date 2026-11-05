@@ -126,7 +126,7 @@ import androidx.compose.ui.input.pointer.pointerInput
  * 加值就等于改存量配置语义；右竖 Dock 的「对焦」本来也不属于可自定义读数。
  * 每个 key 的锚点写入方登记在 [pillAnchorWriters]，新增 key 必须同步那一行。
  */
-enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE, GLOW, TONE }
+enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS, REFLINE, MONITOR, FLASH, STAB, STORAGE, BT, DENOISE, GLOW, TONE, ECHO }
 
 /**
  * 录制中仍可调参的白名单（A4，2026-10-17 拍板）：其余胶囊录制中可开窗但控件只读。
@@ -145,11 +145,15 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
  * 2026-10-28（29 §4.4-5 / §九-2）：`TONE` 按 Glow 同一先例进白名单——scene layer，录制中改
  * 会改成片（已录的不变）；四条滑杆每拍写总线（tone 烘焙在调用线程，微秒级），不触发重画。
  * 面板常驻一句"进成片"的说明（`cam_tone_note`），不许静默。
+ *
+ * 2026-11-05（R2 残影）：`ECHO` 按 Glow/TONE 同一先例进白名单——scene layer，录制中改会改
+ * 接下来几帧的成片；`EchoProvider.setEchoParams` 不触发重画 ⇒ 不产生重复帧、也不重复累积
+ * （同一张 OES 帧被累积两次 = 拖影凭空多叠一层）。面板常驻"进成片"说明，不许静默。
  */
 internal val RECORDING_EDITABLE_PILLS =
     setOf(
         PillKey.ISO, PillKey.EV, PillKey.WB, PillKey.ZOOM, PillKey.FOCUS,
-        PillKey.MONITOR, PillKey.GLOW, PillKey.TONE
+        PillKey.MONITOR, PillKey.GLOW, PillKey.TONE, PillKey.ECHO
     )
 
 /** 录制中该弹窗是否可调（非录制态一律可调，含调用方尚未拿到能力时的初始化阶段） */
@@ -192,6 +196,7 @@ val pillAnchorWriters: Map<PillKey, String> = mapOf(
     PillKey.DENOISE to "HudLayer.HudEntryItem(DENOISE) → design.TierChip(modifier)，默认落底栏 Dock 左侧",
     PillKey.GLOW to "HudLayer.HudEntryItem(GLOW) → design.TierChip(modifier)，默认落左竖 Dock 第 5 组",
     PillKey.TONE to "HudLayer.HudEntryItem(TONE) → design.TierChip(modifier)，默认落左竖 Dock 第 6 组（显隐位默认关）",
+    PillKey.ECHO to "HudLayer.HudEntryItem(ECHO) → HudBottomBandEntry → design.TierChip(modifier)，默认落底栏 Dock 左侧伴随条目（Row 最左，显隐位默认关）",
     PillKey.MONITOR to "HudLayer.HudEntryItem(MONITOR) → design.WotaChip(modifier)",
     PillKey.FLASH to "HudLayer.HudEntryItem(FLASH) → design.WotaIconButton(modifier)",
     PillKey.SHUTTER to "HudLayer.HudEntryItem(HudItem.SHUTTER) → design.WotaChip(modifier)",
@@ -262,7 +267,13 @@ fun PillHost(
      * 24 §〇.1-4 的验收口径。DIRECT 下同样要传（`DirectSink` 也实现 [com.wotagei.cam.camera.GlowProvider]，
      * 回答 available=false，状态行照旧能打出"需切到使用 GPU"）。
      */
-    glowStatusProvider: () -> GlowStatus?
+    glowStatusProvider: () -> GlowStatus?,
+    /**
+     * 残影运行期状态（R2，2026-11-05）。**无默认值必传**（与 [glowStatusProvider] 同一条纪律）：
+     * 漏挂 = 停用/DIRECT 的状态行静默消失。DIRECT 下同样要传（`DirectSink` 也实现
+     * [com.wotagei.cam.camera.EchoProvider]，回答 available=false）。
+     */
+    echoStatusProvider: () -> com.wotagei.cam.core.EchoStatus?
 ) {
     val ability = slot?.ability
     // A4 录制中矩阵：所有弹窗都能开，只有白名单内的可调；其余控件禁用 + 顶部只读提示。
@@ -307,6 +318,9 @@ fun PillHost(
             anchor, params, editable, gpuMode, glowStatusProvider, onClose, onPersist
         )
         PillKey.TONE -> TonePill(anchor, params, editable, gpuMode, onClose, onPersist)
+        PillKey.ECHO -> EchoPill(
+            anchor, params, editable, gpuMode, echoStatusProvider, onClose, onPersist
+        )
         PillKey.BT -> {
             // 音源双开定版（2026-10-07）：环境音开关的真源是 params.audioEnabled（会话内生效，
             // 下次起录按它落音轨），与内录开关（controller 态）互相独立
@@ -1393,6 +1407,118 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
  * - DIRECT 无 GL 片元链，四条整体灰化 + 一句提示（与曲线面板口径一致，不自动切 GPU）；
  * - 复位语义（§九-1 推荐口径）：曲线归曲线、色调归色调——本面板内「归零」只清 tone。
  */
+/**
+ * 残影面板（R2 高光拖影，2026-11-05；docs/research/R2 §四.2 双模式）：
+ * 开关 → 合成模式（保持亮度 / 提亮拖尾）→ 光弧倍数预设（封顶 10，B 站 100× 翻车口径）→
+ * 拖尾模式专属的阈值/强度两滑杆 → 状态行（停用/DIRECT）。
+ *
+ * 滑杆不新增 SliderKey（与 Glow 面板同一条持久化契约纪律）：整数刻度梯 + snapKey=null。
+ */
+@Composable
+private fun EchoPill(
+    anchor: IntRect,
+    params: WotaParams,
+    editable: Boolean,
+    gpuMode: Boolean,
+    echoStatusProvider: () -> com.wotagei.cam.core.EchoStatus?,
+    onClose: () -> Unit,
+    onPersist: () -> Unit
+) {
+    val echo by params.echoParams.observed()
+    val status = echoStatusProvider()
+    val trail = echo.mode == com.wotagei.cam.core.EchoMode.TRAIL
+    fun write(next: com.wotagei.cam.core.EchoParams) {
+        params.echoParams.value = next.sanitize()
+    }
+    WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_echo_title)) {
+        if (!editable) Note(R.string.cam_recording_readonly)
+        // 常驻口径：进成片（与监看面板的"只上屏"相反；与 Glow/TONE 同一套说明纪律）
+        Note(R.string.cam_echo_note)
+
+        // ---- 开关（离散完成点，当场落盘）
+        PillChoices(
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_glow_off)),
+                PillOption(1, stringResource(R.string.cam_glow_on))
+            ),
+            selected = if (echo.enabled) 1 else 0,
+            columns = 2,
+            onPick = { opt ->
+                write(echo.copy(enabled = opt.value == 1))
+                onPersist()
+            },
+            enabled = editable
+        )
+
+        // ---- 合成模式（R2 §四.2 双模式；措辞沿用 B 站脚本勾选框原文）
+        Note(R.string.cam_echo_mode_title)
+        PillChoices(
+            options = listOf(
+                PillOption(0, stringResource(R.string.cam_echo_mode_keep)),
+                PillOption(1, stringResource(R.string.cam_echo_mode_trail))
+            ),
+            selected = if (trail) 1 else 0,
+            columns = 2,
+            onPick = { opt ->
+                write(
+                    echo.copy(
+                        mode = if (opt.value == 1) com.wotagei.cam.core.EchoMode.TRAIL
+                        else com.wotagei.cam.core.EchoMode.KEEP_BRIGHTNESS
+                    )
+                )
+                onPersist()
+            },
+            enabled = editable
+        )
+        Note(R.string.cam_echo_mode_hint)
+
+        // ---- 光弧倍数（2..10 预设；倍数→衰减换算在 core.echoDecayOf，面板只管档位）
+        PillChoices(
+            options = listOf(2, 3, 4, 6, 8, com.wotagei.cam.core.ECHO_MULTIPLIER_MAX).map {
+                PillOption(it, "${it}×")
+            },
+            selected = echo.multiplier,
+            columns = 3,
+            onPick = { opt ->
+                write(echo.copy(multiplier = opt.value))
+                onPersist()
+            },
+            enabled = editable
+        )
+        Note(R.string.cam_echo_multiplier_hint)
+
+        // ---- 拖尾模式专属（保持亮度档没有阈值/强度：max 不吃这两颗 uniform）
+        PillSlider(
+            value = echo.threshold * 100f, lo = 60f, hi = 100f, step = 5f,
+            enabled = editable && trail, label = stringResource(R.string.cam_echo_threshold),
+            snapKey = null, ladder = percentLadder(60, 100, 5), format = glowFmt(2),
+            onValueChange = { write(echo.copy(threshold = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+        Note(R.string.cam_echo_threshold_hint)
+        PillSlider(
+            value = echo.gain * 100f, lo = 0f, hi = 200f, step = 10f,
+            enabled = editable && trail, label = stringResource(R.string.cam_echo_gain),
+            snapKey = null, ladder = percentLadder(0, 200, 10), format = glowFmt(2),
+            onValueChange = { write(echo.copy(gain = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
+
+        // ---- 状态行（停用 / DIRECT）——空状态不占位
+        EchoStatusLine(status, echo.enabled, gpuMode)
+    }
+}
+
+@Composable
+private fun EchoStatusLine(
+    status: com.wotagei.cam.core.EchoStatus?,
+    enabled: Boolean,
+    gpuMode: Boolean
+) {
+    val noteRes = com.wotagei.cam.core.echoStatusNote(status, enabled, gpuMode) ?: return
+    NoteText(stringResource(noteRes))
+}
+
 @Composable
 private fun TonePill(
     anchor: IntRect,

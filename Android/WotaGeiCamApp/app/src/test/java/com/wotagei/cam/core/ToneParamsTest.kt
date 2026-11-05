@@ -155,8 +155,8 @@ class ToneParamsTest {
     @Test
     fun `注册清单_胶囊键锚点宿主与白名单都在`() {
         val pills = mainSource("ui/CameraPills.kt")
-        assertTrue("PillKey 必须含 TONE", pills.contains("DENOISE, GLOW, TONE }"))
-        assertTrue("录制中可调白名单必须含 TONE（按 Glow 先例）", pills.contains("PillKey.GLOW, PillKey.TONE"))
+        assertTrue("PillKey 必须含 TONE", pills.contains("DENOISE, GLOW, TONE, ECHO }"))
+        assertTrue("录制中可调白名单必须含 TONE（按 Glow 先例）", pills.contains("PillKey.GLOW, PillKey.TONE, PillKey.ECHO"))
         assertTrue("锚点写入方必须登记 TONE", pills.contains("PillKey.TONE to "))
         assertTrue("PillHost 必须有 TONE 分支", pills.contains("PillKey.TONE -> TonePill("))
         // 面板必须四条滑杆 + 进成片说明 + DIRECT 提示 + 归零
@@ -194,7 +194,8 @@ class ToneParamsTest {
         )
         val constants = mainSource("core/Constants.kt")
         assertTrue("DEFAULT_MASK 必须减去 TONE 位（默认关）", constants.contains("and TONE.bit.inv()"))
-        assertTrue("MASK_SCHEMA 必须 +1 到 3", constants.contains("const val MASK_SCHEMA = 3"))
+        // 2026-11-05（R2）：ECHO 再加一位 ⇒ schema 4；TONE/ECHO 都不自动补位，表不变
+        assertTrue("MASK_SCHEMA 必须 +1 到 4（TONE→3、ECHO→4）", constants.contains("const val MASK_SCHEMA = 4"))
         // TONE 不许登记进自动补位表（val 表：整行原文钉住）
         assertTrue(
             "自动补位表必须只有降噪与 Glow",

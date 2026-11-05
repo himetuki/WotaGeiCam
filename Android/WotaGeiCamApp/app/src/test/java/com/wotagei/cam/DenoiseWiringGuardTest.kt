@@ -101,13 +101,14 @@ class DenoiseWiringGuardTest {
     }
 
     @Test
-    fun `降噪胶囊默认落底栏最左且属于显隐列表`() {
+    fun `降噪胶囊默认落底栏左侧且属于显隐列表`() {
         val denoise = HudEntry.of(CamPill.DENOISE)
         assertTrue("降噪必须在胶囊显隐列表（CamPill.ALL 就是那张表）", CamPill.DENOISE in CamPill.ALL)
         assertEquals("归属容器 = 底栏", HudZone.BOTTOM, CamPill.DENOISE.homeZoneOf())
+        // 2026-11-05（R2）：残影加进底栏且排降噪左侧 ⇒ 默认序变【残影 → 降噪 → 镜头】
         assertEquals(
-            "底栏默认序必须【降噪 → 镜头】：用户在 Dock 左侧（其 ordinal 序在镜头之后，故顺序是显式写死的）",
-            listOf(denoise, HudEntry.of(CamPill.LENS)),
+            "底栏默认序必须【残影 → 降噪 → 镜头】：两颗伴随条目都在 Dock 左侧（ordinal 序在镜头之后，顺序显式写死）",
+            listOf(HudEntry.of(CamPill.ECHO), denoise, HudEntry.of(CamPill.LENS)),
             HudLayoutTable.default().orderOf(HudZone.BOTTOM)
         )
         // 位掩码：新位必须是**新加的一位**，不能挤占既有位（旧配置的 hud_pills 靠位序读回来）
@@ -117,7 +118,7 @@ class DenoiseWiringGuardTest {
 
     @Test
     fun `隐藏降噪不回默认位置`() {
-        // 隐藏不改表（与其余条目同一条纪律）：再打开还在底栏最左
+        // 隐藏不改表（与其余条目同一条纪律）：再打开还在原位（R2 后 = 残影右侧、镜头左侧）
         val t = HudLayoutTable.default()
         val visible = HudEntry.ALL.toSet() - HudEntry.of(CamPill.DENOISE)
         assertTrue(
@@ -125,9 +126,9 @@ class DenoiseWiringGuardTest {
             HudEntry.of(CamPill.DENOISE) !in t.visibleOrderOf(HudZone.BOTTOM, visible)
         )
         assertEquals(
-            "重新打开必须回到底栏最左（表没被隐藏动作改过）",
-            HudEntry.of(CamPill.DENOISE),
-            t.visibleOrderOf(HudZone.BOTTOM, HudEntry.ALL.toSet()).first()
+            "重新打开必须回到默认序原位（表没被隐藏动作改过）",
+            listOf(HudEntry.of(CamPill.ECHO), HudEntry.of(CamPill.DENOISE), HudEntry.of(CamPill.LENS)),
+            t.visibleOrderOf(HudZone.BOTTOM, HudEntry.ALL.toSet())
         )
     }
 

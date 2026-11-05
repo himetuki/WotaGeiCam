@@ -552,9 +552,9 @@ class HudLayoutGridTest {
         assertEquals(2, gridColsCapOf(HudZone.RIGHT))
         assertEquals(3, gridColsCapOf(HudZone.READOUT))
         assertEquals(1, gridColsCapOf(HudZone.TOP))
-        // 2026-10-26 降噪 / 2026-10-27 Glow 各 +1 ⇒ 行上限随条目总数 19→20→21
-        // 2026-10-26 降噪 / 2026-10-27 Glow / 2026-10-28 TONE 各 +1 ⇒ 行上限随条目总数 19→20→21→22
-        assertEquals(GridCell(1, 22), clampStoredCell(HudZone.LEFT, GridCell(99, 999)))
+        // 2026-10-26 降噪 / 2026-10-27 Glow / 2026-10-28 TONE / 2026-11-05 ECHO（R2）各 +1
+        // ⇒ 行上限随条目总数 19→20→21→22→23
+        assertEquals(GridCell(1, 23), clampStoredCell(HudZone.LEFT, GridCell(99, 999)))
         assertEquals(GridCell.DEFAULT, clampStoredCell(HudZone.LEFT, GridCell.DEFAULT))
     }
 
