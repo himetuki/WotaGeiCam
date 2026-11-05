@@ -330,7 +330,12 @@ class Camera2Engine(
             aeMode.map { Unit }, ev.map { Unit }, afMode.map { Unit },
             manualFocusDiopter.map { Unit }, zoom.map { Unit },
             wbMode.map { Unit }, kelvin.map { Unit }, tint.map { Unit },
-            stabilize.map { Unit }
+            stabilize.map { Unit },
+            // 等号档纠偏（方案 31，2026-11-05 真机缺陷修复）：微调只改发送侧 SENSOR_EXPOSURE_TIME，
+            // 属合并刷新。此前漏接 ⇒ 改微调开关/手动滑杆不触发重下发，HUD 实测读数与画面都要等
+            // 会话重建（进设置再退出）才变。自动档开关也靠这里起步——已闩锁时 cancelExposureProbe
+            // 提前 return 不 markDirty，唯有这条流能保证翻开关即刻重下发。
+            exposureCorrectionAuto.map { Unit }, exposureCorrectionManualNs.map { Unit }
         )
     }
 
