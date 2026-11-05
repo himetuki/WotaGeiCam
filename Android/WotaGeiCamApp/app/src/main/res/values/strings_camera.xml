@@ -322,6 +322,24 @@
     <string name="cam_glow_broken">Glow 已停用</string>
     <string name="cam_glow_clamped">受机型纹理上限，已夹到 %1$d×%2$d</string>
     <string name="cam_glow_direct">需切到「使用 GPU」才生效</string>
+
+    <!-- ============ 残影（R2 高光拖影，2026-11-05；docs/research/R2） ============ -->
+    <string name="cam_pill_echo">残影</string>
+    <string name="cam_echo_title">残影（高光拖影）</string>
+    <!-- 面板常驻口径：残影是 scene layer（与 Glow/TONE 同一套说明纪律，不许静默） -->
+    <string name="cam_echo_note">残影进成片（多帧叠加烘进像素），调参在下一个真帧生效</string>
+    <string name="cam_echo_mode_title">合成模式</string>
+    <!-- 双模式（R2 §四.2，并入 B 站光弧倍增器已验证语义）：措辞沿用其勾选框原文 -->
+    <string name="cam_echo_mode_keep">保持亮度</string>
+    <string name="cam_echo_mode_trail">提亮拖尾</string>
+    <string name="cam_echo_mode_hint">保持亮度 = 星轨式实心长弧，背景不动；提亮拖尾 = 只有高光拖出彗尾</string>
+    <string name="cam_echo_multiplier">光弧倍数</string>
+    <string name="cam_echo_multiplier_hint">倍数越高弧越长，高倍慎用（画面成糊）</string>
+    <string name="cam_echo_threshold">高光阈值</string>
+    <string name="cam_echo_threshold_hint">只有效果在「提亮拖尾」时参与；100% = 只让画面里最亮的像素拖尾</string>
+    <string name="cam_echo_gain">拖尾强度</string>
+    <string name="cam_echo_broken">残影已停用</string>
+    <string name="cam_echo_direct">需切到「使用 GPU」才生效</string>
     <string name="denoise_audio_off">关闭</string>
     <string name="denoise_audio_system">系统降噪</string>
     <string name="denoise_video_off">关闭</string>
