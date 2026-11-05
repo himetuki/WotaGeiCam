@@ -1,148 +1,222 @@
+<div align="center">
+
 # WotaGeiCam
+
+**An immature personal open-source camera project for daily WOTA-gei practice** — film beautiful light arcs, practice standard moves
 
 [![Build Release APKs](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-apk.yml/badge.svg)](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-apk.yml)
 [![Build Release HAPs](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-hap.yml/badge.svg)](https://github.com/himetuki/WotaGeiCam/actions/workflows/build-hap.yml)
+![Release](https://img.shields.io/github/v/release/himetuki/WotaGeiCam?color=7f3a9c&label=Release)
+![Platform](https://img.shields.io/badge/Platform-Android%20·%20HarmonyOS-e42b9f)
+![License](https://img.shields.io/github/license/himetuki/WotaGeiCam?color=9c1f7b)
 
-**[中文说明](README.md)**
+[中文](README.md) · [Download Releases](https://github.com/himetuki/WotaGeiCam/releases/latest) · [Feedback Issue](.github/ISSUE_TEMPLATE/bug-report-feature-request.md)
 
-A personal open-source camera project aimed at WOTA-gei / live-show filming: manual exposure and focus control, real-time RGB curve grading, customizable framing aids, and a tool chain built around light-stick arc shooting — forced slow shutter, frame-dropping with arc merging plus offline arc repair, ambient + internal-capture dual-audio recording, and dual-track comparison playback.
+</div>
 
-This is a hobby project by a single developer, not a mature product: the list of long-term-verified devices is short, and the differences between vendors' camera HALs far exceed what one person can explore. Known issues are listed honestly under [Known Issues and Limitations](#known-issues-and-limitations). If you run into odd behavior, please open an issue using the [issue template](.github/ISSUE_TEMPLATE/bug-report-feature-request.md) with your device model and symptoms (a diagnostic log is even better; the template follows issue #1's sections: bug reports / feature requests / research ideas). **Please do not open a public issue for security matters** — report them privately as described in the [security policy](SECURITY.md) — user feedback is the main way this project moves forward; patience with the rough edges is equally appreciated.
+## Community translation
 
-This repository is a single-tree monorepo: `Android/WotaGeiCamApp/` is the original Android project (the functional definition of the product), and `HarmonyOS/WotaGeiCamOHOS/` is the HarmonyOS port of the same product.
+[@mayday112](https://github.com/mayday112) created and keeps maintaining a translated build of the app with an English / Indonesian (Bahasa Indonesia) interface: [mayday112/WotaGeiCam](https://github.com/mayday112/WotaGeiCam), which fills exactly the gap one person cannot cover alone — sincere thanks for his work.
 
-> The project is in an early stage; features and UI iterate quickly. The latest version is whatever the [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest) page says.
+If you need an English / Indonesian (Bahasa Indonesia) interface, his build is recommended; issues and suggestions about the translation are welcome to be reported to him directly, and issues or suggestions about the app itself are welcome via the [issue template](.github/ISSUE_TEMPLATE/bug-report-feature-request.md). His build and this repository are built and signed independently; switching between them requires uninstalling and reinstalling (which wipes in-app settings and favourites). What the translated build includes is described in his repository.
+
+**Contents**
+
+- [✨ Highlights](#-highlights)
+- [Features](#features)（[Shooting controls](#shooting-controls) · [Framing aids](#framing-aids) · [Interface and motion](#interface-and-motion) · [Recording](#recording) · [Light-arc tool chain](#light-arc-tool-chain) · [Playback and library](#playback-and-library)）
+- [Roadmap](#roadmap)
+- [Known Issues and Limitations](#known-issues-and-limitations)
+- [Download](#download)
+- [Installation and upgrade](#installation-and-upgrade)
+- [Building from source](#building-from-source)
+- [CI](#ci)
+- [Diagnostic logs](#diagnostic-logs)
+- [Privacy](#privacy)
+- [License](#license)
+
+> The number of devices verified long-term is small, and vendor camera HAL differences are far more than one person can fully explore. Known issues are listed honestly under [Known Issues and Limitations](#known-issues-and-limitations); if you hit odd behavior, please open an issue via the [issue template](.github/ISSUE_TEMPLATE/bug-report-feature-request.md) with your device model and symptoms (a diagnostic log helps). **For security matters, use the private channel in the [security policy](SECURITY.md), not a public issue.** Your feedback is the main way this project moves forward; please bear with the defects and rough edges.
+
+## ✨ Highlights
+
+**🌟 Light-arc tool chain · film beautiful light arcs**
+- Forced slow shutter **1/24 · 1/25** full-window long exposure keeps arcs continuous; **equal-tier exposure correction** automatically leaves readout headroom to prevent frame drops.
+- **Afterimage (highlight trailing)**: multi-frame echo lengthens arcs, "keep brightness / brightened trail" dual modes, multiplier 2–10×, across preview / recording / re-rendered export.
+- **In-recording extract + arc merge + offline arc repair**: devices without a native slow tier still keep continuous arcs.
+
+**🎯 Practice comparison · practice standard moves**
+- **Split-screen reference**: one side plays a reference video (using its audio directly), the other records the subject, so the recorder can compare the subject's practice against the reference; the subject is being recorded and cannot watch-while-practicing, so the reference audio guides the rhythm.
+- **Dual-track comparison**: compare your practice side-by-side with the reference, switchable audio tracks, auto-aligned by audio.
+
+**🎵 Audio · play along with the accompaniment**
+- **Dual audio tracks** (ambient + internal capture), **audio denoise**, **Bluetooth speaker** volume / play control.
+
+**🎨 Real-time picture effects · baked into the recording**
+- **Glow**, **real-time RGB curve**, **picture denoise** (GPU bilateral, for night shadows).
+
+**🔍 Professional monitoring**
+- **Zebras / focus peaking** · **reference lines / grid** · **position lines** (separate from reference lines) · **level / pitch gauges**.
+
+> Single-tree monorepo: `Android/WotaGeiCamApp/` is the Android project (the functional definition), `HarmonyOS/WotaGeiCamOHOS/` is the HarmonyOS port of the same product (still in progress, not yet installable for daily use). Features and UI iterate quickly; the latest version is on [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest).
 
 ## Features
 
-The feature list below is based on the Android version (the functional definition of the product); the HarmonyOS version is a port of the same product and is being aligned item by item — see [`HarmonyOS/WotaGeiCamOHOS/docs/PORT_MAP.md`](HarmonyOS/WotaGeiCamOHOS/docs/PORT_MAP.md) for the porting map and progress; new Android features are ported over in batches.
+Listed by category below, each with its **location**, **how to open it**, and **usage**. Based on the Android version; the HarmonyOS version is a port of the same product, still in progress and not yet installable for daily use — see [`HarmonyOS/WotaGeiCamOHOS/docs/PORT_MAP.md`](HarmonyOS/WotaGeiCamOHOS/docs/PORT_MAP.md) for the map and progress.
 
 ### Shooting controls
-- Manual exposure: ISO / shutter / EV; the shutter supports forced 1/24 and 1/25 slow tiers (long exposure keeps light arcs continuous), and available tiers are validated against the current frame period
-- Frame-rate control (with frame-extraction conversion for non-exact tiers), white-balance color temperature, manual focus and zoom
-- Real-time RGB curve editing: the editor dialog can be scaled by dragging its right edge (proportionally; the default size is the minimum and only grows; nodes and line widths scale with the canvas), and the "reset" fan button restores the identity curve and collapses the dialog back to minimum size
-- Viewfinder gestures: tap to focus and meter; double-tap to focus and lock at that point; while locked, a single tap does not refocus (a hint is shown the first time); long-press to unlock and refocus there; in auto-exposure modes, a half-second long-press locks / unlocks AE; the focus panel also has lock / unlock entries
-- Parameter persistence: parameters changed on the recording page (ISO, shutter, frame rate, white balance, zoom, resolution, …) are remembered across restarts; sliders save on release
-- Graduated sliders: sliders run on per-device capability tiers while the readout shows the true value; the "slider snapping" settings page can switch each parameter to a continuous scale (e.g. zoom to 1.2×, 1.7×)
-- Tapping or long-pressing a parameter pill opens the nearest adjustment panel; during recording only ISO, exposure compensation, white balance, zoom and focus stay adjustable, everything else is read-only
-- Gesture-navigation adaptation: on devices with a bottom gesture bar ("the white pill"), the recording page's bottom dock automatically clears the gesture area (the shutter / knobs no longer fight the system bar), and the settings page and built-in player hide the navigation bar (no white band); 3-button devices are unchanged
-- Camera parameters are always read from device capabilities at runtime and adapt per device — no per-model values are hard-coded
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Manual exposure (shutter / ISO / EV) | Recording page, bottom-right readout block; tap a readout to open its panel | Drag sliders; during recording ISO / EV stay adjustable, shutter is read-only |
+| Forced slow shutter 1/24 · 1/25 | Shutter panel | Pick 1/24 or 1/25 (long exposure keeps arcs continuous); availability validated against the current frame period |
+| Equal-tier exposure correction | Shutter panel (shown at 1/24 / 1/25) | "Auto exposure trim" on by default to stop frame-period stretch dropping frames; manual slider 0–+8 ms when off; top-left measured readout line (manual exposure only) |
+| Frame rate | Bottom-right readout "frame rate"; tap | Pick a tier; ※ = device-approximate; non-exact tiers auto-extract during recording |
+| White balance | Bottom-right readout "white balance"; tap | Pick a preset or adjust color temperature / tint |
+| Focus / zoom | Right dock focus / zoom pills; or tap the viewfinder | Tap to focus + meter, double-tap to lock, long-press to unlock; half-second long-press locks / unlocks AE in auto mode |
+| Real-time RGB curve | Left dock "curve" pill | Drag nodes; dialog scales by dragging its right edge; "reset" restores identity |
+| Graduated sliders | Each parameter panel; Settings → Slider snapping | Snap to capability tiers by default (readout shows the true value); switch each parameter to continuous |
+| Parameter persistence | Automatic | Parameters changed on the recording page survive restarts; sliders save on release |
+| Gesture-navigation adaptation | Automatic | Bottom dock clears the gesture-bar area; parameters are read from device capabilities at runtime, no hard-coded model values |
 
 ### Framing aids
-- Zebras and focus peaking (adjustable threshold / density / intensity / color; these two do not work when not using GPU rendering)
-- Real-time glow compositing: highlight extraction + diffusion; two color modes — "pixel's own color" (highlights glow in their own hue) and "palette color only" (highlights glow in the single picked color); brightness threshold 60–100% (100% = only the brightest pixels of the frame glow); double-tap the palette to reset it; applied to both the preview monitor and the recording
-- Reference lines / grids: rule of thirds, diagonals, crosshair, broadcast safe frame, safe areas, grid, center markers, horizon line, upper / middle / lower red lines; multi-select
-- Level and pitch gauges (toggleable, with a light vibration when the device levels)
-- Audio volume meter and persistent readouts (shutter / frame rate / bitrate / ISO / EV / white balance / zoom), each individually hideable
-- Custom control layout: drag to arrange in the editor page; the dock and the readout block can be placed freely, and the nearest-panel popups follow each control's anchor
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Zebras / focus peaking | Left dock "monitor" pill | Pick the effect, adjust threshold / density / intensity / color; GPU rendering only |
+| Glow | Left dock "glow" pill | On/off + threshold / strength / blend; color modes "pixel's own / palette only"; preview and recording; GPU only |
+| Reference lines / grid | Left dock "reference line" button | Multi-select line types (thirds / diagonals / safe frame / grid, …); defaults in Settings → Reference lines |
+| Position lines | Top-bar right round button (left of the split button) | Tap to open the overlay for count / spacing, long-press to pick color; preview overlay only, not recorded, usable during recording |
+| Level / pitch gauges | Right dock | Light vibration when level; toggle in Settings → Framing aids |
+| Readout block | Bottom-right readout block | Shutter / frame rate / bitrate / ISO / EV / white balance / zoom; per-item show/hide in Settings → Viewfinder persistent controls |
+| Custom control layout | Settings → Viewfinder persistent controls → Edit controls | Drag to place the docks and readout block; panels follow each control's anchor |
 
 ### Interface and motion
-- Three motion styles (switchable in settings): **None** (degraded tier, short linear steps), **Fluent** (default, brief deceleration), **Liquid** (physics springs — state changes land on their target with momentum instead of stopping linearly; any scene that can be interrupted by a gesture picks up from the velocity at the moment of interruption rather than restarting from zero)
-- In the Liquid style, switches become "liquid gesture switches": a droplet thumb slides along the track, stretching longer along its travel and thinner across it the faster it moves (the elasticity lives in the moving body itself, not a trail); the track carries the state (on / off inverted); dragging past the midpoint flips immediately and releasing settles from the release velocity; a press that never travels is still a click. The other two styles keep the system-style switches
-- Favourite heart animation: tapping favourite makes the heart vanish, blooms a ring in place that hollows out from the middle, throws out seven pairs of coloured dots, and then springs the heart back in from nothing; un-favouriting just empties the heart. Same in the player top bar and inside the library
-- With system "reduce motion" or the **None** style, none of these effects play — the state still changes
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Motion style | Settings → Motion style | None / Fluent (default) / Liquid; Liquid uses physics springs and resumes from the current velocity after a gesture interrupts |
+| Liquid gesture switch | Switches in the Liquid style | Drag the thumb past the midpoint to flip; release settles from the release velocity |
+| Favourite heart animation | Player top bar / library favourite entry | Ring + coloured dots bloom on favourite; with system "reduce motion" or None, only the state changes |
+| Brightness | Settings → Brightness | Startup screen-on delay; player start fade-in |
+| Orientation / text size | Settings → Orientation / Text size | Landscape / portrait; readout and panel text size |
 
 ### Recording
-- Two recording engines; adjustable bitrate
-- Honest frame-rate reporting: the achieved frame rate is decided by the camera HAL — the app can only negotiate, not guarantee it. When the measured rate stays below ~70% of the selected tier, a top-bar warning shows the actual value ("the footage will stutter"); when the tier is a device-approximate tier (※) and manual exposure is on, the viewfinder pre-warns that low light may drop it further (see [Known Issues](#known-issues-and-limitations))
-- Honest white-balance fallback: when a device's HAL ignores manual color-temperature gains (capability not declared, or detected at runtime that the gains are not adopted), the app switches to a frame-layer algorithm and says so at runtime
-- Internal-capture audio track (optional): besides the ambient microphone track, audio being played by apps / the system can be captured into a second track; foreground service with a stop button in the notification; notification permission requested on first use on newer Android
-- Audio source and Bluetooth: the source panel switches ambient / capture, and offers media volume, play/pause and battery readouts for an external Bluetooth speaker (pairing happens in system settings); the "audio" control carries a pale-blue ring hinting the panel, turning accent-colored while capturing
-- The audio source is not remembered across cold starts: ambient by default, so the capture permission isn't requested every launch
-- Automatic segment rotation: when a single file reaches 3.5 GiB (FAT32-safe limit) a new segment starts automatically — names stay sequential and no content is lost; a top-bar pre-warning appears at 85% of the cap ("about to rotate"); if the platform stops recording on its own at the cap, already-finished segments are kept
-- Split-screen reference: the main view keeps recording while the right half loads a reference video for side-by-side shooting (the split toggle locks during recording; open it before you start)
-- Recording ramp-up buffering: video samples already encoded in the instant recording starts (before encoder / muxer are ready) are written in arrival order instead of being dropped
-- Frame ledger: per-stage frame counters (camera → render → encoder → muxer) summarized in one line at each segment end, visible in the diagnostic log export, to locate which stage drops frames
-- If segment re-build fails, the encoders / muxers built so far are reclaimed before retrying, so later recordings can still start
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Start / stop | Bottom dock center shutter | Tap to start / stop; two engines, bitrate in Settings → Startup defaults |
+| Dual audio (ambient + capture) | Right dock "audio" pill, opens the source panel | Switch ambient / capture; capture records system playback audio, needs notification permission; ambient by default on cold start |
+| Bluetooth speaker | Source panel | Media volume / play control / battery; pairing in system Bluetooth settings |
+| Split-screen reference | Top-bar right split button | One side plays a reference video (using its audio directly), the other records the subject, so the recorder can compare the subject's practice; the subject is being recorded and cannot watch-while-practicing, guided by the reference audio; open before recording, locked during recording |
+| Automatic segment rotation | Automatic | Rotates at 3.5 GiB per segment, names stay sequential; top-bar pre-warning at 85% |
+| Honest frame-rate / WB notices | Top-bar warning line | Warns when the achieved rate stays too low, or manual WB gains are not adopted (see [Known Issues](#known-issues-and-limitations)) |
+| Ramp-up buffer / rotation retry | Automatic | Samples at record start are written, not dropped; a failed rotation reclaims resources before retrying |
+| Frame ledger | Diagnostic log export | Per-segment camera → render → encoder → muxer frame totals, to locate the dropping stage |
 
 ### Light-arc tool chain
-- In-recording frame-rate conversion: when the device has no native 24 / 25 tier, recording extracts frames down to the selected rate — "auto-extract with arc merging" merges dropped frames into their neighbors to keep arcs continuous, "extract only" keeps the plain result; dropped frame slots are recorded in a `.drops.json` sidecar next to the output
-- Extraction phase aligns timestamps with a tolerance of 10% of the slot width to absorb jitter; long-run frame counts stay exact
-- Arc merging: whole-pixel selection + differential dead band, shared by recording and offline repair, CPU and GPU; the "merge threshold" slider (default 12, range 0–32) is adjustable in three places — the frame-rate panel, the player's arc-repair panel, and the settings defaults; higher is more conservative, lower merges noise in too
-- Offline arc repair: extraction + merging for existing footage (same semantics as the frame-rate panel), GPU-accelerated or pure CPU; results are written as new files and never overwrite the original; failed half-products are recycled and never enter the media library
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| In-recording extract + arc merge | Frame-rate readout panel (auto when no native 24/25 tier) | "Auto-extract with arc merging" keeps arcs continuous / "extract only"; dropped slots logged to a `.drops.json` sidecar |
+| Afterimage (highlight trailing) | Bottom dock left "afterimage" pill (hidden by default) | Enable in Settings → Viewfinder persistent controls; pick mode (keep brightness / brightened trail) and multiplier 2–10×; preview / recording / re-rendered export; GPU only |
+| Offline arc repair | Player → Arc repair | Pick the target rate, GPU or CPU; writes a new file, never overwrites the original |
+| Merge threshold | Frame-rate panel / arc-repair panel / Settings → Startup defaults | Default 12 (0–32); higher is more conservative, lower merges noise; same rule for recording and offline, CPU and GPU |
 
 ### Playback and library
-- Built-in media library: tags, favorites, trash, rename, share, long-press multi-select
-- Player: A-B loop, frame stepping, speed (0.1x–1x), pinch zoom/pan, horizontal mirror
-- Clip export: export by A/B range; audio track selectable (ambient by default; dual-track footage can switch to capture; single-track footage has ambient only), only the selected track is written; if the selected track has no samples in the range, the export falls back to video-only. Two export modes: **lossless** (no re-encode; the picture is exactly what was recorded) or **re-rendered** (re-encode with optional bilateral denoise and glow — choosing it reveals in-sheet controls for glow on/off, brightness threshold, strength, blend and denoise on/off, initialised from the current settings and applied to this export only; its quality cost and denoise strength vary by footage and device, with no quantified conclusion on high-noise material yet); re-render is greyed out automatically when there is nothing to apply; **leaving the player does not interrupt an export** — come back and the progress and result are still there
-- Dual-track comparison playback: one timeline + two video tracks (a side without footage stays black); audio switches between sides and between ambient / capture tracks, one track per side at a time, with audio-based alignment; comparison history is kept
-- Cold-start maintenance: cleans legacy temp-name leftovers and keeps the library index consistent with the files on disk; before archiving, target names are checked and existing files are never overwritten
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Media library | Recording page bottom dock thumbnail | All / Favorites / Trash; long-press multi-select to rename / share / delete |
+| Player | Tap a video in the library | A-B loop, frame stepping, speed 0.1x–1x, pinch zoom/pan, horizontal mirror |
+| Clip export | Player bottom dock A/B marks → Clip | Lossless (no re-encode) / re-rendered (re-encode with denoise + glow + afterimage, configured in-sheet, this export only); audio track selectable; leaving the player does not interrupt |
+| Dual-track comparison | Library long-press → Compare | Two video tracks + audio switching, audio-based auto alignment; comparison history kept |
+| Cold-start maintenance | Automatic | Cleans temp leftovers, keeps the library index consistent; archiving never overwrites existing files |
+
+## Roadmap
+
+Planned / under research, not yet landed:
+
+- [ ] **R1 · Metering mode selection**: selectable metering modes such as evaluative / center-weighted / spot; whether the effect is visible depends on the device HAL.
+- [ ] **Arc-repair small model**: repairs dead zones / breaks in light arcs, extending and filling from adjacent frames for more continuous arcs.
 
 ## Known Issues and Limitations
 
-An honest list of the currently known problem surface (verified through v0.0.11-r41; updated as feedback comes in):
+An honest list of the currently known problem surface (verified through v0.0.12-r01; updated as feedback comes in):
 
 - **Full-screen black after tapping back repeatedly on the settings page (fixed in r31–r41; upgrade if you are on an older build)**: device logs confirmed the cause is **not the camera** — with repeated back taps on the settings page, the second tap lands on the recording page that has just returned and pops it, and since it is the navigation start destination, the whole back stack is emptied; the UI framework then has nothing to draw: the screen is black with no controls, while the app stays alive and the back gesture still works. Since r40/r41 an in-page back can no longer pop the start destination (plus a 400 ms debounce), and any page whose UI gets torn down for more than 3 seconds recovers automatically; the camera pipeline now belongs to the window scope, so navigation races cannot touch camera state. On older builds (≤ v0.0.11-r30) please upgrade first.
 
 - **The achieved frame rate is decided by the camera HAL; the app can only negotiate, never guarantee it.** The frame-rate decision only guarantees "the value we send was declared by the device"; low light, slow shutters, or vendor policy can push the achieved rate below the selected tier. The app warns with the measured value once the rate stays below ~70% of the target, but **does not force-lock the tier** — forcing it freezes the viewfinder on some devices (the lesson of another, already-fixed defect). Some vendor HALs also widen the range beyond a requested fixed tier: on one Huawei device a requested `[24,24]` came back as `[15,24]` on the result side.
 - **Old versions (≤ v0.0.10-r03) have a severe frame-drop defect on devices with "wide" frame-rate ranges**: in manual exposure the sensor frame duration was sent as the range's lower bound, physically locking the achieved rate to a low value (measured 4.98 fps into a 25 fps container on one vivo device; lowering resolution / bitrate does not avoid it — it has nothing to do with encoding load). Fixed in v0.0.11-r01 — if you see "it stutters as soon as I record / as soon as the show starts" on an old version, upgrade first.
-- **Manual white balance depends on the device**: color-temperature gains require the `TRANSFORM_MATRIX` capability, and some devices (notably HarmonyOS phones running Android apps through a compatibility layer) declare it without actually adopting the gains. Two-stage fix since v0.0.11-r28: (1) the root cause of "enabling manual mode turns the whole frame green and the sliders do nothing" is fixed (gains were sent together with an identity color matrix; the app now freezes the matrix the camera's own auto white balance last computed); (2) devices that cannot adopt gains fall back to the frame-layer algorithm with an honest notice ("this device does not accept manual WB gains"); the fallback is a relative offset from auto white balance, varies by device, and still has no closed-loop calibration data. Known residual: right after returning from the settings page, some devices may show a single transitional blended frame (the camera re-attaching on the compatibility layer); it does not affect subsequent frames.
+- **Manual white balance depends on the device**: color-temperature gains require the `TRANSFORM_MATRIX` capability, and some devices (notably HarmonyOS phones running Android apps through a compatibility layer) declare it without actually adopting the gains. Two-stage fix since v0.0.11-r28: (1) the root cause of "enabling manual mode turns the whole frame green and the sliders do nothing" is fixed (gains were sent together with an identity color matrix; the app now freezes the matrix the camera's own auto white balance last computed); (2) devices that cannot adopt gains fall back to a frame-layer algorithm with an honest notice ("this device does not accept manual WB gains"); the fallback is a relative offset from auto white balance, varies by device, and still has no closed-loop calibration data. Known residual: right after returning from the settings page, some devices may show a single transitional blended frame (the camera re-attaching on the compatibility layer); it does not affect subsequent frames.
 - **High-bitrate long recordings will rotate segments**: the per-segment cap is 3.5 GiB (FAT32-safe); at 50 Mbps that is ~9 minutes, so any recording over 10 minutes **will** rotate once (with a pre-warning at 85%). The rotation window is bounded, a blocked rotation fails loudly and is accounted — but the brief hitch at that moment is expected.
-- **Framing aids depend on the GPU render path**: zebras and focus peaking do not work in DIRECT (non-GPU) mode (the app says so in place).
+- **Framing aids and scene effects depend on the GPU render path**: zebras, focus peaking, glow and afterimage do not work in DIRECT (non-GPU) mode (the app says so in place).
 - **HarmonyOS installation barrier**: the unsigned .hap is for structure verification only and will not install on retail devices; a signed profile must be issued by AGC/DevEco and include the target device's UDID.
 - **Limited test coverage**: long-term on-device verification covers only WIKO GAR-AN60, Huawei ALN-AL00 / ADY-AL00, vivo V2505A, and one emulator; low-end devices and niche ROMs are essentially untested, and the capability-negotiation code almost surely still has unseen behaviors there. If you hit one, the diagnostic log below is a huge help.
 
+
 ### Updates
-- In-app "check updates / download update": **the only network use, and only on your tap** — reads the latest version from GitHub Releases and downloads the package (with an HTTPS mirror chain fallback); no auto-check, no auto-download, no background networking
-- Before each download, every route (direct + mirrors) is speed-tested (256 KiB samples) and the fastest is picked, falling back in speed order; if all speed tests fail, the old "direct first, then mirror list" order is used
-- When a new version is found, the dialog shows that version's release notes (the GitHub Release text with Markdown stripped; notes read via direct or mirror are both shown; display only, never part of the install decision)
-- Download URLs are always rebuilt from repo constants with verified asset names over HTTPS; encoded IP literals and targets pointing at intranet / loopback are rejected; SHA-256 is read only from official GitHub APIs and compared locally after download — mismatches are discarded; before install, the package name and signature are checked against the installed app and mismatches are never handed to the system installer
+
+| Feature | Location · How to open | Usage |
+|---|---|---|
+| Check / download update | Settings → About → Check update | Networks only on tap; reads the latest GitHub Release; speed-tests routes and picks the fastest, falling back in speed order; no auto-check, no background networking |
+| Release notes | New-version dialog | Shows that version's Release text, display only |
+| Safety checks | Automatic | HTTPS only, intranet / loopback targets rejected; SHA-256 compared locally, mismatches discarded; package name and signature checked against the installed app before install |
 
 ## Download
 
-Grab it from [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest). Pushing a `vX.X.X` or `vX.X.X-rYY` tag produces both platforms' packages into the same Release, distinguished by the platform suffix before the extension (`-Android` / `-Harmony`):
+Download from [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest). Pushing a `vX.X.X` or `vX.X.X-rYY` tag produces both platforms' packages into the same Release, distinguished by the platform suffix before the extension (`-Android` / `-Harmony`):
 
 | File | Platform / fit |
 |---|---|
 | `WotaGeiCam-vX.X.X-rYY-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-universal-release-Android.apk` | Android: all devices (pick universal if unsure) |
-| `WotaGeiCam-vX.X.X-rYY-arm64-v8a-release-Android.apk` | Android: 64-bit ARM (most phones after 2016) |
-| `WotaGeiCam-vX.X.X-rYY-armeabi-v7a-release-Android.apk` | Android: 32-bit ARM legacy devices |
-| `WotaGeiCam-vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS (produced when signing secrets are absent; see install notes) |
+| `WotaGeiCam-vX.X.X-rYY-arm64-v8a-release-Android.apk` | Android: 64-bit ARM (most phones since 2016) |
+| `WotaGeiCam-vX.X.X-rYY-armeabi-v7a-release-Android.apk` | Android: 32-bit ARM older devices |
+| `WotaGeiCam-vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS (produced when signing Secrets are not configured; see installation notes below) |
 
-With HAP signing secrets configured, the Release also carries `vX.X.X-rYY-signed-Harmony.hap` plus `SHA256SUMS`.
+With HAP signing Secrets configured, the Release also includes `vX.X.X-rYY-signed-Harmony.hap` and a `SHA256SUMS`.
 
-The `X.X.X-rYY` in file names is the full version name; the number after `r` is the checkpoint index — bigger is newer. The in-app update check compares by the same rule. Historical versions (≤ `v0.0.9-r05`) use the old naming `WotaGeiCam-vX.Y.Z-*.apk` with only the Android four-piece set.
+The `X.X.X-rYY` in the file name is the full version name; the number after `r` is the checkpoint index, higher is newer; the in-app "check update" compares by the same rule. Historical versions (`v0.0.9-r05` and earlier) used the old naming `WotaGeiCam-vX.Y.Z-*.apk` and only had the Android four-piece set.
 
-## Install & upgrade
+## Installation and upgrade
 
 **Android**
-- Requires Android 10 (API 29) or later
+- Requirement: Android 10 (API 29) or later
 - Upgrades install over the top; **do not uninstall first** — uninstalling wipes in-app settings and the media-library archive
-- You can also check updates in-app and download there
-- Pure Kotlin, no native libraries — all four APKs are equivalent; packages embed a Baseline Profile (hot paths precompiled at install; faster cold start)
-- "All files access" exists from Android 11; on Android 10 the app labels it unsupported in-app (there, delete / rename only affects footage recorded by this app)
+- You can also check for updates and download in-app
+- Pure Kotlin, no native libraries; the four APKs are identical in content; a Baseline Profile is bundled (startup hot paths precompiled for faster cold starts)
+- "All files access" is available since Android 11; on Android 10 the app honestly marks it unsupported (delete / rename then only applies to videos recorded by this app)
 
 **HarmonyOS**
-- `*-unsigned-Harmony.hap` carries no release signature; structure verification only, not an install channel
-- For `*-signed-Harmony.hap`, the `profile.p7b` must be issued by AGC/DevEco and include the target device's UDID, otherwise retail devices will refuse it; development can use DevEco Studio auto-signing
+- `*-unsigned-Harmony.hap` carries no release signature and is for structure verification only, not a formal install channel
+- The `profile.p7b` in `*-signed-Harmony.hap` must be issued by AGC/DevEco and include the target device's UDID, or it will not install on retail devices; for development you can auto-sign in DevEco Studio and install
 
-## Build from source
+## Building from source
 
-**Android** (JDK 17 + Android SDK, Platform 34 / Build-Tools 33.0.1; SDK location provided the standard way: `ANDROID_HOME`, or `sdk.dir` in `Android/WotaGeiCamApp/local.properties`):
+**Android** (requires JDK 17 and the Android SDK, Platform 34 / Build-Tools 33.0.1; provide the SDK location the standard way: `ANDROID_HOME` or `sdk.dir` in `Android/WotaGeiCamApp/local.properties`):
 
 ```bash
 git clone https://github.com/himetuki/WotaGeiCam.git
 cd WotaGeiCam/Android/WotaGeiCamApp
-./gradlew :app:assembleDebug      # everyday build
-./gradlew :app:assembleRelease    # release build (signing below)
+./gradlew :app:assembleDebug      # day-to-day build
+./gradlew :app:assembleRelease    # release build (signing notes below)
 
-# A checkpoint-numbered build (version name 0.0.10-rNN, visible in-app; the property accepts 05 or r05)
+# Build with a checkpoint number (versionName 0.0.10-rNN, shown in settings; the property accepts 05 or r05)
 ./gradlew :app:assembleRelease -Prbuild=05
 ```
 
 ```bash
-# Run inside Android/WotaGeiCamApp/. The CI-equivalent "four-piece set"
-# (plain / universal / arm64-v8a / armeabi-v7a), built in two passes:
-# the second pass cleans the first pass's outputs, so copy them out in between.
+# Run in Android/WotaGeiCamApp/. The CI-matching "four-piece set"
+# (plain / universal / arm64-v8a / armeabi-v7a).
+# Two passes: build the three split APKs, copy them out, then build the non-split one —
+# the second pass clears the first pass's outputs from the output directory.
 ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam -Prbuild=05
 mkdir -p ../../apk-out && cp app/build/outputs/apk/release/*.apk ../../apk-out/
 ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam -Prbuild=05
 cp app/build/outputs/apk/release/*.apk ../../apk-out/
 ```
 
-Signing: the repo contains no signing material. For properly signed release packages, provide `keystore.properties` (`storeFile` / `storePassword` / `keyAlias` / `keyPassword`) and a keystore under `Android/WotaGeiCamApp/`; when absent, the release variant falls back to debug signing for local testing only. `org.gradle.java.home` in `Android/WotaGeiCamApp/gradle.properties` records the packaging machine's JDK path — change or delete it (falling back to `JAVA_HOME`) on machines with a different JDK; CI does the same.
+Signing notes: the repository contains no signing material. To produce a properly signed release, provide `keystore.properties` (with `storeFile` / `storePassword` / `keyAlias` / `keyPassword`) and the keystore file under `Android/WotaGeiCamApp/`; when missing, the release variant falls back to debug signing for local testing only. `org.gradle.java.home` in `Android/WotaGeiCamApp/gradle.properties` records the build machine's JDK location; if yours differs, edit that line or remove it and use `JAVA_HOME` (CI does the same).
 
-**HarmonyOS** (DevEco Studio's hvigor + HarmonyOS SDK):
+**HarmonyOS** (requires DevEco Studio's hvigor and the HarmonyOS SDK):
 
 ```bash
 cd HarmonyOS/WotaGeiCamOHOS
@@ -150,66 +224,66 @@ export DEVECO_SDK_HOME="$DEVECO_HOME/sdk"   # Windows Git Bash example
 ./hvigorw --mode module -p product=default assembleHap
 ```
 
-Output: `HarmonyOS/WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap`.
+The output is at `HarmonyOS/WotaGeiCamOHOS/entry/build/default/outputs/default/entry-default-unsigned.hap`.
 Pure-logic tests: `cd HarmonyOS/WotaGeiCamOHOS && node scripts/pure-test.mjs` (762 cases).
 
 ### Repository layout
 
 ```
 WotaGeiCam/
-├── Android/WotaGeiCamApp/     # Android Gradle project (tracked)
-├── HarmonyOS/WotaGeiCamOHOS/  # HarmonyOS DevEco project (tracked)
-├── .github/workflows/         # build-apk.yml + build-hap.yml (v* tag dual pipeline)
-├── tools/                     # local toolchain: android-sdk (SDK/emulators), avd (VMs),
+├── Android/WotaGeiCamApp/     # Android Gradle project (committed)
+├── HarmonyOS/WotaGeiCamOHOS/  # HarmonyOS DevEco project (committed)
+├── .github/workflows/         # build-apk.yml + build-hap.yml (v* tag, two pipelines)
+├── tools/                     # local toolchain: android-sdk (SDK/emulator), avd (VMs),
 │   │                          # trace_processor, etc.; together with node_modules/ docs/ research/
 │   │                          # deliverable/ agent-memory/ camera-knowledge/ .zcode/
-│   │                          # .mimosa/ these are local assets (gitignored)
+│   │                          # .mimosa/ these are local assets (gitignored, not committed)
 └── README.md LICENSE .gitignore .gitattributes
 ```
 
-The two projects never import each other; they share only product semantics and the release process. The HarmonyOS side tracks Android upstream changes via "read-only diff + manual porting" — see [`HarmonyOS/WotaGeiCamOHOS/docs/UPSTREAM_SYNC.md`](HarmonyOS/WotaGeiCamOHOS/docs/UPSTREAM_SYNC.md).
+The two projects never import each other; they share only product semantics and the release process. The HarmonyOS side tracks changes from the Android version via "read-only diff + manual porting" — see [`HarmonyOS/WotaGeiCamOHOS/docs/UPSTREAM_SYNC.md`](HarmonyOS/WotaGeiCamOHOS/docs/UPSTREAM_SYNC.md).
 
 ## CI
 
-Pushing a `v*` tag triggers both pipelines (manual runs with a checkpoint number also work); they build in parallel and upload assets to the same GitHub Release:
+Pushing a `v*` tag triggers both pipelines (you can also trigger manually from the Actions page with a checkpoint number); they build in parallel and the assets land in the same GitHub Release:
 
-- [build-apk.yml](.github/workflows/build-apk.yml): derives the checkpoint from the tag, builds the four versioned APKs (plain / universal / arm64-v8a / armeabi-v7a) plus mapping files in two passes, verifies all four and publishes
-- [build-hap.yml](.github/workflows/build-hap.yml): builds the HAP with Huawei's DevEco Linux CLI (bundled HarmonyOS 6.1.1 / API 24 SDK), including pure-logic tests and optional signing; toolchain version and SHA256 are pinned in the workflow, overridable via repo variables `HARMONY_CLI_TOOLS_URL` / `HARMONY_CLI_TOOLS_SHA256`
+- [build-apk.yml](.github/workflows/build-apk.yml): derives the checkpoint number from the tag, builds in two passes to produce the four versioned APKs (plain / universal / arm64-v8a / armeabi-v7a) and mapping files, verifies all four are present, then publishes
+- [build-hap.yml](.github/workflows/build-hap.yml): builds the HAP with Huawei's DevEco Linux command-line tools (bundled HarmonyOS 6.1.1 / API 24 SDK), including pure-logic tests and optional signing; the toolchain version and SHA256 are pinned in the workflow, overridable via the repo variables `HARMONY_CLI_TOOLS_URL` / `HARMONY_CLI_TOOLS_SHA256`
 
-Tags with a checkpoint (e.g. `v0.0.10-r05`): APK versionName carries `-r05`, and so do artifact names; HAP versionName only allows `number.number.number`, so the package keeps `versionName=0.0.10` while the r-number folds into `versionCode` (`1000000 + major*1e6 + minor*1e4 + patch*100 + r`); artifact names still carry `-r05`.
+When the tag carries a checkpoint number (e.g. `v0.0.10-r05`): the APK's versionName carries `-r05` and so does the artifact name; the HAP platform only allows a `digit.digit.digit` versionName, so the package has `versionName=0.0.10` with the r number folded into `versionCode` (formula `1000000 + major*1e6 + minor*1e4 + patch*100 + r`), while the artifact name still carries `-r05`.
 
 ### Actions Secrets
 
 | Secret | Purpose |
 | --- | --- |
 | `WOTA_KEYSTORE_BASE64` / `WOTA_KEYSTORE_PROPS` | Android release signing (p12/jks + properties) |
-| `HAP_KEYSTORE_BASE64` / `HAP_APP_CERT_BASE64` / `HAP_PROFILE_BASE64` | HAP signing trio (from DevEco auto-signing) |
+| `HAP_KEYSTORE_BASE64` / `HAP_APP_CERT_BASE64` / `HAP_PROFILE_BASE64` | HAP signing trio (exported from DevEco auto-signing) |
 | `HAP_KEY_ALIAS` / `HAP_KEY_PASSWORD` / `HAP_KEYSTORE_PASSWORD` | HAP key alias and passwords |
 
-Without HAP signing secrets, only unsigned .hap packages are produced.
+Without HAP signing Secrets configured, only the unsigned package is produced.
 
 ## Diagnostic logs
 
-When "something is off but I can't describe it" (e.g. capture rejected by the system, mid-recording failure), the app's log can be exported for triage (Android wording below):
+When something is "not working but hard to describe" (e.g. internal capture rejected by the system, or recording misbehaving mid-way), you can export the app log for the developer to locate the issue (described for Android below):
 
-- The app **ships with logging, off by default** (no storage cost; crash records bypass this switch and are kept regardless)
-- To capture an issue: Settings → "Diagnostic log" → enable "Record log" → reproduce once → "Share directly" opens the system share sheet; or "Export log" writes the merged report to `Documents/WotaGeiCam/`; enable "Verbose log" for more detail
-- "Clear log" wipes everything; the log rotates at 512 KB × 3 (~1.5 MB cap) and the exported report is capped at 2 MB overall
-- The report includes the recording frame-ledger summary (independent of the "Record log" switch) and crash records; logs **are generated locally and exported only by you**, contain no picture or sound, and are never uploaded
-- Note: because it is off by default, a problem that already happened leaves no trace — for flaky issues, turn logging on first, then reproduce
+- The app **has built-in logging, off by default** (takes no space; crash records are unaffected by this switch and still leave a scene on crash)
+- To capture an issue: Settings → "Diagnostic logs" → turn on "Record logs" → reproduce once → tap "Share directly" to open the system share sheet; or tap "Export log" to write the merged report to `Documents/WotaGeiCam/`; turn on "Verbose log" for finer detail
+- "Clear logs" empties them in one tap; log files rotate at 512 KB × 3 (~1.5 MB cap), and the exported report is capped at 2 MB overall
+- The exported report includes the recording frame-ledger summary (independent of the "Record logs" switch) and crash records; logs are **generated only on your device and exported only by you**, contain no picture or sound, and are never uploaded
+- Note: off by default means if you enable logging after a problem appears, the earlier scene is not kept — for unstable reproductions, enable logging first, then reproduce
 
 ## Privacy
 
-One principle on both platforms; the permission list below is the Android wording, the HarmonyOS port maps it to the HarmonyOS permission model.
+The same principle on both platforms: the permission and purpose details below are listed for Android; the HarmonyOS version implements them per the HarmonyOS permission model.
 
-- **The only networking is the in-app "check updates / download update", and only on your tap** (reads the latest version from GitHub Releases and downloads the package, with mirror fallback; SHA-256 recomputed locally after download, mismatches discarded) — no auto-check, no background traffic, no accounts
-- Nothing you shoot and no usage data is uploaded: no analytics, no ads, no third-party SDKs
-- Footage is written to local storage only; sharing exposes only finished videos, update packages, and diagnostic logs — never whole-storage access to the system share sheet
-- The internal-capture track uses the system audio-capture mechanism and only exists while recording (foreground service + persistent notification, one-tap stop)
-- Permissions and purposes (Android): camera / microphone (filming), media reading (library), all-files access (avoids the system picker when deleting or renaming footage not recorded by this app), Bluetooth (discovering and controlling an external speaker; on Android 10/11 the system requires location permission for Bluetooth scans, for that purpose only), notifications (Android 13+ capture foreground service), install-unknown-apps (in-app updates), network (update check/download only; a "network state" read-only permission comes with the playback component and performs no networking)
+- **The only network use is the in-app "check update / download update"**, and only when you tap it (reads the latest version from GitHub Releases and downloads the package, falling back along an HTTPS mirror chain on direct failure; after download the SHA-256 is recomputed locally and mismatches are discarded) — no auto-check, no background networking, no account system
+- No footage or usage data is uploaded: no analytics, no ads, no third-party analysis
+- Footage is written only to local storage; sharing exposes only three file types — finished videos, update packages, diagnostic logs — never handing the whole storage to the system share component
+- The internal-capture track uses the system audio-capture mechanism, active only while recording (foreground service + persistent notification, one-tap stop)
+- Permissions and purposes (Android): camera / microphone (filming), media read (library), all-files access (so deleting or renaming footage not recorded by this app does not trigger a system authorization dialog), Bluetooth (discover and control an external speaker; on Android 10/11 the system requires location permission for Bluetooth device scanning, used only for that), notifications (Android 13+ internal-capture persistent notification), install unknown apps (in-app update install), network (only for update check and download; plus the playback component's own read-only "network state" permission, which produces no network traffic)
 
 ## License
 
-The project is released under the [GNU GPL v3](LICENSE) (SPDX: `GPL-3.0-only`): the `Android/` subtree inherits the upstream Android project's GPL v3, and the HarmonyOS port is published under the same license.
+The whole project is released under the [GNU GPL v3](LICENSE) (SPDX: `GPL-3.0-only`). It started as Android-only and is now dual-version (Android + HarmonyOS); both projects are published under the same license.
 
 Copyright © 2026 himetuki
