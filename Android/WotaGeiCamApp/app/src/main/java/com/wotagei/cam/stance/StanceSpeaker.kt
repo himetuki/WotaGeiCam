@@ -1,11 +1,12 @@
 package com.wotagei.cam.stance
 
+import com.wotagei.cam.diag.Diag
+
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 
 /**
  * 站位播报器（M3a，§5.2）：预录素材拼接（非 TTS）。
@@ -36,7 +37,7 @@ class StanceSpeaker(context: Context) {
                 ids[name] = pool.load(afd, 1)
                 afd.close()
             } catch (e: Exception) {
-                Log.w(TAG, "语音占位缺失 voice/$name.wav：${e.message}")
+                Diag.w(TAG, "语音占位缺失 voice/$name.wav：${e.message}")
             }
         }
     }

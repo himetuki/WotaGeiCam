@@ -74,6 +74,9 @@ class StanceAnalysis(
         return reader!!.surface
     }
 
+    /** 供引擎 setAnalysisTarget(surface, reader) 的 reader 参数（所有权转移给引擎）。 */
+    fun reader(): ImageReader? = reader
+
     private fun processImage(image: Image) {
         try {
             if (!listening.get()) return

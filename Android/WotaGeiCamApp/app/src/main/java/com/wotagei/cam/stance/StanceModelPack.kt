@@ -1,8 +1,9 @@
 package com.wotagei.cam.stance
 
+import com.wotagei.cam.diag.Diag
+
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import java.io.File
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
@@ -59,7 +60,7 @@ object StanceModelPack {
         installBuiltin(context)
         val re = validateDir(builtin)
         if (re != null) return builtin to "builtin"
-        Log.w(TAG, "模型组双通道均无效")
+        Diag.w(TAG, "模型组双通道均无效")
         throw IllegalStateException("无有效模型组")
     }
 
@@ -102,7 +103,7 @@ object StanceModelPack {
             }
             true
         } catch (e: Exception) {
-            Log.w(TAG, "内置模型组复制失败：${e.message}")
+            Diag.w(TAG, "内置模型组复制失败：${e.message}")
             false
         }
     }

@@ -1,7 +1,8 @@
 package com.wotagei.cam.stance
 
+import com.wotagei.cam.diag.Diag
+
 import android.content.Context
-import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.Closeable
@@ -66,10 +67,10 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
                     gpuActive = true
                     backendName = "GPU"
                 } else {
-                    Log.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
+                    Diag.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
                 }
             } catch (e: Throwable) {
-                Log.w(TAG, "GPU delegate 初始化失败，回退 CPU：${e.message}")
+                Diag.w(TAG, "GPU delegate 初始化失败，回退 CPU：${e.message}")
                 runCatching { interpreter?.close() }
                 interpreter = null
                 runCatching { delegate?.close() }
@@ -95,7 +96,7 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
             itp.run(input, output)
             decode(output[0], nRows, nCols, w, h)
         } catch (e: Exception) {
-            Log.w(TAG, "推理失败：${e.message}")
+            Diag.w(TAG, "推理失败：${e.message}")
             emptyList()
         }
     }

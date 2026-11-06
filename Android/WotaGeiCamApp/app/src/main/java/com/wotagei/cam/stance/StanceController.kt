@@ -1,10 +1,11 @@
 package com.wotagei.cam.stance
 
+import com.wotagei.cam.diag.Diag
+
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.media.ImageReader
 import android.net.Uri
-import android.util.Log
 import android.view.Surface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -92,7 +93,7 @@ class StanceController private constructor(
             val meta = StanceModelPack.validateDir(dir)!!
             applyPack(dir, meta, source)
         } catch (e: Exception) {
-            Log.w(TAG, "模型组装配失败：${e.message}")
+            Diag.w(TAG, "模型组装配失败：${e.message}")
             _state.value = _state.value.copy(fallbackTip = "模型组装配失败：${e.message}")
         }
     }
@@ -230,6 +231,20 @@ class StanceController private constructor(
     fun importPack(context: Context, uri: Uri): Boolean {
         return try {
             StanceModelPack.importZip(context, uri)
+            val (dir, source) = StanceModelPack.activeDir(context)
+            val meta = StanceModelPack.validateDir(dir)!!
+            applyPack(dir, meta, source)
+            true
+        } catch (e: Exception) {
+            _state.value = _state.value.copy(fallbackTip = "导入失败：${e.message}（已保持内置模型组）")
+            false
+        }
+    }
+
+    /** 「自行存入模型」：扫描外部模型目录最新 zip 导入（用户十七稿通道）。 */
+    fun importFromExternalDir(context: Context): Boolean {
+        return try {
+            StanceModelPack.importLatestFromExternal(context)
             val (dir, source) = StanceModelPack.activeDir(context)
             val meta = StanceModelPack.validateDir(dir)!!
             applyPack(dir, meta, source)
