@@ -21,12 +21,31 @@ object StanceModelPack {
     private const val TAG = "StanceModelPack"
     const val SCHEMA = 1
 
-    /** 激活的模型组目录（filesDir 下；built-in=随包，user=用户导入）。 */
+    /** 激活的模型组目录（built-in=随包，user=用户导入）。 */
     fun builtinDir(context: Context): File =
         File(context.filesDir, "model_pack_builtin")
 
     fun userDir(context: Context): File =
         File(context.filesDir, "model_pack_user")
+
+    /**
+     * 「自行存入模型」目录（D20 用户口径）：App 专属外部目录——用户可在电脑 USB
+     * 或部分文件管理器直接放入 model_pack.zip，弹窗「扫描目录导入」一键激活。
+     * 完整路径在弹窗文本标注（用户要求：无法直接跳转就改文本标注）。
+     */
+    fun userExternalDir(context: Context): File {
+        val base = context.getExternalFilesDir(null) ?: File(context.filesDir, "external")
+        return File(base, "model_packs").apply { mkdirs() }
+    }
+
+    /** 扫描 [userExternalDir] 下最新的 zip 并导入（「自行存入模型」通道）。 */
+    fun importLatestFromExternal(context: Context): Map<String, Any?> {
+        val dir = userExternalDir(context)
+        val zip = dir.listFiles { f -> f.name.endsWith(".zip") }
+            ?.maxByOrNull { it.lastModified() }
+            ?: throw IllegalStateException("模型目录里没有 zip——先从电脑拷入 model_pack.zip")
+        return importZip(context, Uri.fromFile(zip))
+    }
 
     /** 当前激活目录：用户包有效 > 内置包（缓存校验结果，meta 级别）。 */
     fun activeDir(context: Context): Pair<File, String> {

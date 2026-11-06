@@ -59,6 +59,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.Accessibility
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Add
@@ -158,6 +159,11 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.stance.StanceController
+import com.wotagei.cam.stance.StanceModelPack
+import com.wotagei.cam.stance.StanceOverlay
+import com.wotagei.cam.stance.StancePopupContent
+import com.wotagei.cam.stance.StanceSpec
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessLabel
 import com.wotagei.cam.core.mediaAccessState
@@ -381,6 +387,19 @@ fun CameraScreen(
     // 用户两次点名落点问题（先"别漂画面中间"，再"别压右 Dock"），所以这里不写任何手算常量。
     var markerAnchorRect by remember { mutableStateOf<Rect?>(null) }
     var rightDockSlotRect by remember { mutableStateOf<Rect?>(null) }
+    // ---- 站位提示（方案 32 M3）：AI 自主站位判定（不绑站位线），预览态专属，
+    //      录制开始自动关闭（§5.1）、切前置关闭（D13）。Controller 是页面级单例。
+    val stanceCtrl = remember(app) { StanceController.get(app) }
+    val stanceState by stanceCtrl.state.observed()
+    var stanceControlsOpen by remember { mutableStateOf(false) }
+    var stanceAnchorRect by remember { mutableStateOf<Rect?>(null) }
+    // 模型组装配 + 引擎槽接缝（prepare 幂等；hooks 一次性注入）
+    remember(app) {
+        stanceCtrl.prepare(app)
+        stanceCtrl.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
+        stanceCtrl.detachHook = { ctrl.setAnalysisTarget(null) }
+        true
+    }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
     // 「进程内只套一次」挡住，在设置页改完回录制页看不到效果
     val settingsPrefs = remember(app) { WotaSettings.of(app) }
@@ -483,6 +502,16 @@ fun CameraScreen(
      * 面板仍按**未变换**的布局矩形定位，而那颗此刻已位移并淡到 alpha 0，浮层就飘在空位上。
      */
     LaunchedEffect(recording) { if (recording) pop = null }
+    // 站位提示联动（§5.1/D13）：录制开始 = 功能自动关闭（叠加+播报+推理全停，
+    // 开关重置）；切前置 = 直接关闭（前置自拍场景无人值守痛点不存在）。
+    LaunchedEffect(recording) {
+        if (recording && stanceState.enabled) stanceCtrl.setEnabled(app, false)
+    }
+    LaunchedEffect(lens) {
+        if (lens == LensType.FRONT && stanceState.enabled) {
+            stanceCtrl.disableForFrontLens(app)
+        }
+    }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
     val lockTipText = stringResource(R.string.cam_lock_tip)
@@ -1508,6 +1537,14 @@ fun CameraScreen(
                         modifier = Modifier.matchParentSize()
                     )
                 }
+                // 站位号位叠加（方案 32 M2c）：判定输出可视化——同站位线 View 层通道，
+                // 结构性不进成片；MISSING 画淡色透明人形外廓（D10）。
+                if (stanceState.enabled) {
+                    StanceOverlay(
+                        output = stanceState.output,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
                 FocusBox(
                     // 锁定期的数据源切换成锁定锚点（缺省画面中心，与引擎同一口径）；未锁路径一字不动
                     point = if (focusLocked) (focusLockPoint ?: TapPoint(0.5f, 0.5f)) else focusPoint,
@@ -1885,6 +1922,50 @@ fun CameraScreen(
                                 if (markerAnchorRect != r) markerAnchorRect = r
                             }
                     )
+                    // 站位提示圆钮（方案 32 M3b）：站位线钮**左侧**（padding 系数 *3）、同款
+                    // 圆形（同一 size/glyph 令牌）。点按 = 开/关透明浮层（StancePopupContent）。
+                    // 叠加/播报不进成片，且录制开始会自动关闭功能（§5.1）。
+                    WotaIconButton(
+                        image = Icons.Outlined.Accessibility,
+                        description = "站位提示",
+                        selected = stanceControlsOpen,
+                        onClick = { stanceControlsOpen = !stanceControlsOpen },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(
+                                end = HudEdgePad + (WotaHit.iconButton + TopRowGap) * 3,
+                                top = TopTopPad
+                            )
+                            .onGloballyPositioned {
+                                val r = it.boundsInWindow()
+                                if (stanceAnchorRect != r) stanceAnchorRect = r
+                            }
+                    )
+                    if (stanceControlsOpen) {
+                        Popup(
+                            popupPositionProvider = MarkerPopupPosition(
+                                anchor = stanceAnchorRect,
+                                rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                                gapPx = with(hudDensity) { WotaSpace.xs.roundToPx() },
+                                marginPx = with(hudDensity) { HudEdgePad.roundToPx() }
+                            ),
+                            onDismissRequest = { stanceControlsOpen = false },
+                            properties = PopupProperties(focusable = true)
+                        ) {
+                            StancePopupContent(
+                                state = stanceState,
+                                gpuAllowed = renderMode == RenderMode.GPU,
+                                modelDirText = "模型存放目录：${StanceModelPack.userExternalDir(app).absolutePath}",
+                                onEnabled = { stanceCtrl.setEnabled(app, it) },
+                                onBeta = { stanceCtrl.setBeta(app, it) },
+                                onBetaReset = { stanceCtrl.setBeta(app, StanceSpec.BETA_DEFAULT) },
+                                onMode = { m, n -> stanceCtrl.setMode(app, m, n) },
+                                onGpu = { stanceCtrl.setGpu(app, it) },
+                                onBrighten = { stanceCtrl.setBrighten(app, it) },
+                                onImportFromDir = { stanceCtrl.importFromExternalDir(app) },
+                            )
+                        }
+                    }
                     if (markerControlsOpen) {
                         // 浮层控件（用户点名「无弹窗式控件」「完全透明背景」）：+/线数/- 一行 +
                         // 间距滑杆一行，均水平；**无卡片背景**——控件直接浮在预览上（半透明白圆钮 +
