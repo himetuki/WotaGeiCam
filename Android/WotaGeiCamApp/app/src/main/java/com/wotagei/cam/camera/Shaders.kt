@@ -174,6 +174,9 @@ internal object Shaders {
      */
     val SCENE_COMPOSITE_FS = """
         precision mediump float;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+#endif
         varying vec2 vUv;
         uniform sampler2D uBase;
         uniform sampler2D uGlowSrc;
@@ -230,6 +233,9 @@ internal object Shaders {
      */
     val SCENE_COMPOSITE_ECHO_FS = """
         precision mediump float;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+#endif
         varying vec2 vUv;
         uniform sampler2D uBase;
         uniform sampler2D uGlowSrc;
@@ -660,6 +666,13 @@ $decl
      * - `n` 是频率噪声（0 = 干净）：`step(0.0001, freq)` 让 freq=0 时退化成乘 1，不做无谓的 hash。
      *
      * ES 1.00 没有 `noise()`，hash 取三次 fract 的经典廉价写法（纯算术、无纹理、无扩展）。
+     *
+     * **精度红线（2026-11-06 真机缺陷修复）**：这类 hash **必须在 highp 里算**。mediump（fp16）
+     * 下 `q += dot(q, q.yzx + 33.33)` 会把 q 抬到 ≈68（ulp 0.0625），末式 `(q.x+q.y)·q.z ≈ 9500`
+     * 的 ulp 高达 8——fract 只剩 ~8 个离散取值，整屏碎成多边形亮度拼块；freq 越大输入扫得越快，
+     * 拼块越小越密（真机表现即"白色三角形点云，频率越大越碎"）。故 glowHash 全体包在
+     * `GL_FRAGMENT_PRECISION_HIGH` 守卫里：支持 highp（一切现代 GPU）按 highp 算出细颗粒；
+     * 不支持则回退 n=1.0——干净无噪光晕，绝不输出精度垃圾。
      */
     private const val GLOW_DECL = """
 varying vec2 vUvGlow;
@@ -670,13 +683,22 @@ uniform float uGlowFreq;
 uniform float uGlowBlend;
 uniform vec3 uGlowTint;
 float glowHash(vec2 p) {
-    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+    highp vec3 q = fract(highp vec3(p.xyx) * highp vec3(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yzx + 33.33);
     return fract((q.x + q.y) * q.z);
+#else
+    return 1.0;
+#endif
 }
 vec3 applyGlow(vec3 c, vec2 uv) {
     vec3 glow = texture2D(uGlowSrc, uv).rgb;
-    float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+    highp vec2 hp = highp vec2(uv) * highp float(uGlowFreq);
+    float n = mix(1.0, glowHash(hp), step(0.0001, uGlowFreq));
+#else
+    float n = 1.0;
+#endif
     // 2026-10-28 用户口径（两步）：① 去掉色带 mix（旧版等于给光棒换色）；② 开放色盘自选单色。
     // tint 出厂 = 白 ⇒ 恒等，输出仍是"光棒自身颜色"的光晕；用户选色后光晕整体偏该色调。
     // add 是增益的加成项（仍乘提取出来的颜色），全画面不再被抬一层灰。

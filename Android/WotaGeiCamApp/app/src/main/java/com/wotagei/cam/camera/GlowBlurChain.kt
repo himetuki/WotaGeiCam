@@ -239,22 +239,35 @@ internal class GlowBlurChain(
 
         // ②③ 可分离高斯：横 → scratch，纵 → glow。sampler 单元与权重表在 buildPrograms 里传过，
         // 这里只剩每趟变化的 uOffset（与霜链同一套省法：uniform 属于 program，跨帧保留）
-        GLES20.glUseProgram(blurProgram)
-        if (fillGlowBlurOffset(offsetScratch, w, h, widthParam, horizontal = true)) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, scratchFbo)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, downTex)
-            if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, offsetScratch[0], offsetScratch[1])
-            drawQuad(blurAPosition, blurATexCoord, identityUv)
-            errors += drainGlError("glowBlurHorizontal")
+        //
+        // 9-tap 权重按 1 纹素间隔设计；width 大时 offset 远超间隔，单遍会退化成
+        // “远处亮斑的稀疏鬼影拷贝”——真机 2026-11-06：宽度拉满时整屏白色斑点云。
+        // 同核迭代模糊：多遍 H+V 卷积叠卷积，等效半径扩大且保持平滑；
+        // 迭代趟 H+V ping-pong，每趟后结果都回到 glowTex（合成趟的既定采样源）。
+        val blurPasses = 1 + when {
+            widthParam >= 0.12f -> 2
+            widthParam >= 0.05f -> 1
+            else -> 0
         }
-        if (fillGlowBlurOffset(offsetScratch, w, h, widthParam, horizontal = false)) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, glowFbo)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, scratchTex)
-            if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, offsetScratch[0], offsetScratch[1])
-            drawQuad(blurAPosition, blurATexCoord, identityUv)
-            errors += drainGlError("glowBlurVertical")
+        GLES20.glUseProgram(blurProgram)
+        repeat(blurPasses) { pass ->
+            val srcTex = if (pass == 0) downTex else glowTex
+            if (fillGlowBlurOffset(offsetScratch, w, h, widthParam, horizontal = true)) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, scratchFbo)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTex)
+                if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, offsetScratch[0], offsetScratch[1])
+                drawQuad(blurAPosition, blurATexCoord, identityUv)
+                errors += drainGlError("glowBlurHorizontal")
+            }
+            if (fillGlowBlurOffset(offsetScratch, w, h, widthParam, horizontal = false)) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, glowFbo)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + GLOW_SRC_UNIT)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, scratchTex)
+                if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, offsetScratch[0], offsetScratch[1])
+                drawQuad(blurAPosition, blurATexCoord, identityUv)
+                errors += drainGlError("glowBlurVertical")
+            }
         }
 
         restoreState(scissorWasEnabled)

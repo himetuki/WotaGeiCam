@@ -559,22 +559,32 @@ internal class SceneExportGl(
             if (!brightOk) return false
             val dx = glow.width * minOf(1f, heightPx.toFloat() / widthPx)
             val dy = glow.width * minOf(1f, widthPx.toFloat() / heightPx)
-            val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
-                if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
-                if (blurUMatrix >= 0) GLES20.glUniformMatrix4fv(blurUMatrix, 1, false, identity, 0)
-                if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, dx, 0f)
+            // 离线无实时帧预算；width 大时单遍 9-tap 抽样过远会退化成远处亮斑的鬼影拷贝
+            // （真机 2026-11-06）——同核迭代模糊（与实时链 GlowBlurChain 同一方案），多遍
+            // H+V 卷积叠卷积：等效半径扩大且保持平滑。
+            val blurPasses = 1 + when {
+                glow.width >= 0.12f -> 2
+                glow.width >= 0.05f -> 1
+                else -> 0
             }
-            if (!hOk) return false
-            val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowBTex)
-                if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
-                if (blurUMatrix >= 0) GLES20.glUniformMatrix4fv(blurUMatrix, 1, false, identity, 0)
-                if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, 0f, dy)
+            repeat(blurPasses) {
+                val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
+                    if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
+                    if (blurUMatrix >= 0) GLES20.glUniformMatrix4fv(blurUMatrix, 1, false, identity, 0)
+                    if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, dx, 0f)
+                }
+                if (!hOk) return false
+                val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowBTex)
+                    if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
+                    if (blurUMatrix >= 0) GLES20.glUniformMatrix4fv(blurUMatrix, 1, false, identity, 0)
+                    if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, 0f, dy)
+                }
+                if (!vOk) return false
             }
-            if (!vOk) return false
         }
         // 2.5) 残影累积（R2 第三路）：读**原始 2D 帧** curTex（与实时链读原始 OES 同口径，
         // 降噪/Glow 不改累积源）+ 上一枚累积面 → 新累积面，乒乓交换。逐帧顺序 ⇒ 拖尾连续。
