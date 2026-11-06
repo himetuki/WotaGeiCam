@@ -170,6 +170,11 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    // 站位模型组（方案 32 M2）：tflite 不压缩——Interpreter mmap 加载要求未压缩 assets
+    androidResources {
+        noCompress += "tflite"
+    }
 }
 
 ksp {
@@ -206,6 +211,13 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // 站位检测（方案 32 M2）：LiteRT(tflite)——CPU XNNPACK 兜底 + GPU delegate；
+    // minSdk 29 / arm64-v8a 满足；GPU delegate 兼容性由 GpuDelegate 内建白名单+失败回退 CPU
+    val tflite = "2.14.0"
+    implementation("org.tensorflow:tensorflow-lite:$tflite")
+    implementation("org.tensorflow:tensorflow-lite-gpu:$tflite")
+    implementation("org.tensorflow:tensorflow-lite-gpu-api:$tflite")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

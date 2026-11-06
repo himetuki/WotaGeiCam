@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "created_at": "2026-11-06 22:53",
+  "features": [
+    "cx",
+    "by",
+    "w",
+    "h",
+    "conf"
+  ],
+  "files": {
+    "head.json": "b0a2e82f430481cbed6dea58c81eef60d928110aea6f5b92bc01bab7f343bf0e",
+    "margins.json": "1f025b56bc12379f080300d7b777149b109a9bb56fa901335f7e2575f07020f3",
+    "yolo11n_fp32.tflite": "a1dce7d0570fe6433e24d6cf59e19b5d1c51c4a8116efe4b8d8f30676402ff20",
+    "yolo11n_int8.tflite": "f5db6799f69a016300ef4ec0c26e3cb62947a6478cd3457141e7ddc735278961"
+  },
+  "margins_sessions": [
+    "sess_20261106_153525.jsonl"
+  ],
+  "head_meta": {
+    "head_version": "v1-logreg",
+    "features": [
+      "cx",
+      "by",
+      "w",
+      "h",
+      "conf"
+    ],
+    "trained_at": "2026-11-06 15:59",
+    "n_samples": 6255,
+    "n_good": 6210,
+    "n_bad": 45,
+    "val_acc": 0.9706,
+    "sessions": [
+      "sess_20261106_153525.jsonl"
+    ]
+  },
+  "yolo": {
+    "backends": {
+      "cpu": "yolo11n_int8.tflite",
+      "gpu": "yolo11n_fp32.tflite",
+      "npu": "未接入（LiteRT Next/QNN 渐进，M2+ 探索）"
+    }
+  }
+}

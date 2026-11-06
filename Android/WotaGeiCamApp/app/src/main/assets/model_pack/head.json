@@ -1,0 +1,28 @@
+{
+  "coef": [
+    -4.409931,
+    0.622841,
+    23.094618,
+    -3.841949,
+    2.86942
+  ],
+  "intercept": -4.798581,
+  "meta": {
+    "head_version": "v1-logreg",
+    "features": [
+      "cx",
+      "by",
+      "w",
+      "h",
+      "conf"
+    ],
+    "trained_at": "2026-11-06 15:59",
+    "n_samples": 6255,
+    "n_good": 6210,
+    "n_bad": 45,
+    "val_acc": 0.9706,
+    "sessions": [
+      "sess_20261106_153525.jsonl"
+    ]
+  }
+}
