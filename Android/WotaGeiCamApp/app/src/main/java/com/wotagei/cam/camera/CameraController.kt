@@ -561,6 +561,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.setExtraTarget(surface, reader)
     }
 
+    /** 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话 */
+    fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
+        engine?.setAnalysisTarget(surface, reader)
+    }
+
     /** 批量写多个参数后手动统一下发一次（引擎自身已按 5ms 合并，通常不需要调） */
     fun applyParams() {
         engine?.markDirty()

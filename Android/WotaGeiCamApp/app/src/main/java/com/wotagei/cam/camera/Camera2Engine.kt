@@ -231,9 +231,14 @@ class Camera2Engine(
     @Volatile
     private var lastSentExposureText: String? = null
 
-    /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface；v0.0.1 不挂 YUV 分析流 */
+    /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface */
     private var extraSurface: Surface? = null
     private var extraReader: ImageReader? = null
+
+    /** 站位分析流：低分辨率 YUV（方案 32 M2）。独立槽位——与 DIRECT 录制面
+     *  （extraSurface）分开，互不顶替；GPU/DIRECT 两种渲染模式都进会话。 */
+    private var analysisSurface: Surface? = null
+    private var analysisReader: ImageReader? = null
 
     private var chosenFps: FpsPick? = null
     private var highSpeedActive = false
@@ -406,8 +411,10 @@ class Camera2Engine(
         workHandler.post {
             try {
                 stopImageReaders()
+                stopAnalysisReader()
                 teardownDevice()
                 extraSurface = null
+                analysisSurface = null
                 lens = null
                 ability = null
                 reqState = null
@@ -485,6 +492,29 @@ class Camera2Engine(
             structuralSignature = ""
             if (desiredPreview) ensureSession()
         }
+    }
+
+    /**
+     * 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话
+     * （[currentTargets]）。reader 由调用方创建，引擎在关闭序列里先停它（与 extra
+     * 同所有权语义——引擎会单方面 close，调用方回调须容忍）。
+     * 每次调用都清 structuralSignature 重建会话：挂/摘各一次，勿在 3fps 启停中反复。
+     */
+    fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
+        post {
+            if (reader !== analysisReader) stopAnalysisReader()
+            analysisSurface = surface
+            analysisReader = reader
+            structuralSignature = ""
+            if (desiredPreview) ensureSession()
+        }
+    }
+
+    private fun stopAnalysisReader() {
+        val reader = analysisReader ?: return
+        runCatching { reader.setOnImageAvailableListener(null, null) }
+        runCatching { reader.close() }
+        analysisReader = null
     }
 
     /**
@@ -667,11 +697,14 @@ class Camera2Engine(
         }
     }
 
-    /** 会话输出面集合由渲染模式决定（03 文档第 1 节：GPU 下录像面不进相机会话） */
+    /** 会话输出面集合由渲染模式决定（03 文档第 1 节：GPU 下录像面不进相机会话）；
+     *  站位分析流（D19/M2）独立槽位——两种渲染模式都追加进会话。 */
     private fun currentTargets(): List<Surface> {
         val base = sink.cameraTargets()
-        val extra = extraSurface ?: return base
-        return if (params.renderMode.value == RenderMode.DIRECT) base + extra else base
+        val withExtra = if (params.renderMode.value == RenderMode.DIRECT) {
+            (extraSurface?.let { base + it }) ?: base
+        } else base
+        return (analysisSurface?.let { withExtra + it }) ?: withExtra
     }
 
     private fun wantHighSpeed(): Boolean {
@@ -683,7 +716,7 @@ class Camera2Engine(
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
-        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|${sink.structuralToken()}"
+        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|an=${analysisSurface != null}|${sink.structuralToken()}"
 
     private fun ensureSession() {
         val dev = device
