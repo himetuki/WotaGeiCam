@@ -157,8 +157,19 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         return buf
     }
 
-    /** 输出 rows[nRows][nCols] → conf 过滤 → NMS → 归一化 PersonBox（帧占比）。 */
+    /**
+     * 输出 rows[nRows][nCols] → conf 过滤 → NMS → 归一化 PersonBox（帧占比）。
+     *
+     * 坐标尺度**按输出实际值域自适应**（真机实测教训）：litert 导出 wrapper 的输出
+     * **已归一化 0~1**（cx/cy/w/h 直接就是占比），而按 ultralytics 常规应是输入尺度
+     * 像素（0~448）——旧实现按像素 ÷inputW 把 0~1 坐标又缩小 448 倍 = 框缩成一个点
+     * =「根本没识别」（真机首测实锤）。解码前扫坐标 4 行的最大值：>2 视为像素尺度
+     * （÷inputW），≤2 视为已归一化（直用）。
+     */
     private fun decode(rows: Array<FloatArray>, nRows: Int, nCols: Int, w: Int, h: Int): List<PersonBox> {
+        var coordMax = 0f
+        for (r in 0 until 4) for (c in 0 until nCols step 16) coordMax = maxOf(coordMax, rows[r][c])
+        val normalized = coordMax <= 2f
         val cands = ArrayList<FloatArray>(16)
         for (c in 0 until nCols) {
             val score = rows[4][c]     // rows[4] = 类 0（person）分数行
@@ -166,18 +177,18 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
             cands.add(floatArrayOf(rows[0][c], rows[1][c], rows[2][c], rows[3][c], score))
         }
         val kept = nms(cands, IOU_THRESHOLD)
-        val sx = w.toFloat() / inputW
-        val sy = h.toFloat() / inputH
+        val sx = if (normalized) 1f else w.toFloat() / inputW
+        val sy = if (normalized) 1f else h.toFloat() / inputH
         return kept.map { a ->
             val cx = a[0] * sx
             val cy = a[1] * sy
             val bw = a[2] * sx
             val bh = a[3] * sy
             PersonBox(
-                cx = cx / w,
-                by = (cy + bh / 2) / h,
-                w = bw / w,
-                h = bh / h,
+                cx = cx,
+                by = cy + bh / 2,
+                w = bw,
+                h = bh,
                 conf = a[4],
             )
         }
