@@ -398,6 +398,12 @@ fun CameraScreen(
         stanceCtrl.prepare(app)
         stanceCtrl.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
         stanceCtrl.detachHook = { ctrl.setAnalysisTarget(null) }
+        // 分析流按预览画幅比选 YUV 档（否则分析帧与预览 FOV 不同，叠框/判定都偏）
+        stanceCtrl.targetAspectProvider = {
+            if (size.height > 0) size.width.toFloat() / size.height else null
+        }
+        // YUV 尺寸表从当前镜头的 characteristics 现取（枚举完成前回退默认档）
+        stanceCtrl.characteristicsProvider = { ctrl.currentCharacteristics() }
         true
     }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
@@ -1090,6 +1096,9 @@ fun CameraScreen(
     // 引擎每次重开会话都会重写裸 sensorOrientation，所以 UI 侧不能再"一次性覆盖"残余角——
     // 覆盖值会在停止录制 / 错误恢复 / 换镜头后被冲掉，真机 GPU 预览顺时针 90° 就是这么来的。
     val glOrientation = PreviewOrientation.normalize(sensorOrientation - deviceDegrees)
+    // 站位分析流的 YUV 缓冲在传感器坐标系：按同一"转正"角旋转后再推理，
+    // 否则竖持时把画面上/下当左/右判（叠加框也会躺倒）。
+    LaunchedEffect(glOrientation) { stanceCtrl.setRotation(glOrientation) }
     LaunchedEffect(glEngine, directSink, deviceDegrees) {
         glEngine?.setDisplayDegrees(deviceDegrees)
         directSink.setDisplayDegrees(deviceDegrees)

@@ -12,6 +12,11 @@ import android.view.Surface
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * 转正后的一帧（与输入同源，宽高可能已交换）。
+ */
+data class RotatedFrame(val pixels: IntArray, val width: Int, val height: Int)
+
+/**
  * 站位分析管线（M2a 帧源 + M2b 检测装配）：
  * [start] 创建 YUV ImageReader → 引擎 analysis 槽（[com.wotagei.cam.camera.CameraController.setAnalysisTarget]）
  * → 丢帧节流（≈3fps）→ YUV→RGBA → 预处理提亮（§6 可开关，默认关）→
@@ -49,6 +54,15 @@ class StanceAnalysis(
     @Volatile
     var brighten = false
 
+    /**
+     * 分析帧转正角（2026-11-07）：Camera2 的 YUV 缓冲永远在**传感器坐标系**，
+     * 竖持手机时相对预览是横过来的——不转就把"上/下"当"左/右"判，叠加框也跟着躺倒。
+     * 值 = normalize(sensorOrientation − displayRotation)，由宿主（CameraScreen）喂入。
+     * 非整 90 的机型按最近 90 取整（个别机型报 82/97）。
+     */
+    @Volatile
+    var rotationDegrees = 0
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
@@ -85,9 +99,11 @@ class StanceAnalysis(
             lastFrameMs = now
             val w = image.width
             val h = image.height
-            val rgba = yuv420ToRgba(image) ?: return
-            if (brighten) brightenRgba(rgba)
-            val boxes = detector?.detect(rgba, w, h, now) ?: return
+            val raw = yuv420ToRgba(image) ?: return
+            // 传感器坐标 → 显示坐标（与预览同一"转正"语义；否则方向判定左右颠倒）
+            val frame = rotateRgba(raw, w, h, rotationDegrees)
+            if (brighten) brightenRgba(frame.pixels)
+            val boxes = detector?.detect(frame.pixels, frame.width, frame.height, now) ?: return
             val out = engine.observe(FrameObs(now, boxes))
             mainHandler.post { if (!released.get()) onResult(out) }
         } catch (_: Exception) {
@@ -127,12 +143,64 @@ class StanceAnalysis(
          * 设备 YUV_420_888 输出尺寸选择：≤640 宽高的最大档（面积序）；
          * 列表为空（极罕见）回退 640x480。
          */
-        fun pickYuvSize(characteristics: CameraCharacteristics): Size {
+        fun pickYuvSize(characteristics: CameraCharacteristics): Size =
+            pickYuvSize(characteristics, targetAspect = null)
+
+        /**
+         * 带画幅比的尺寸选择（2026-11-07）：分析帧与预览/成片画幅不同会把归一化坐标
+         * 映射到不同 FOV——有人明明居中，叠加框却偏。优先在 ≤640 档里找与 [targetAspect]
+         * （传感器坐标，宽/高）相差 ≤8% 的尺寸，再取其中最大面积；没有匹配才退回最大面积。
+         */
+        fun pickYuvSize(characteristics: CameraCharacteristics, targetAspect: Float?): Size {
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888) ?: return DEFAULT_SIZE
-            val capped = sizes.filter { it.width <= 640 && it.height <= 640 }
-            if (capped.isEmpty()) return DEFAULT_SIZE
-            return capped.maxBy { it.width.toLong() * it.height }
+                ?: return DEFAULT_SIZE
+            val sizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: return DEFAULT_SIZE
+            val dims = sizes.map { it.width to it.height }
+            val pick = pickDims(dims, targetAspect) ?: return DEFAULT_SIZE
+            return sizes.firstOrNull { it.width == pick.first && it.height == pick.second }
+                ?: DEFAULT_SIZE
+        }
+
+        /**
+         * 尺寸选择纯函数（JVM 单测可测）：≤640 档内优先画幅比匹配（±8%），
+         * 同匹配档取最大面积；无匹配则取最大面积档。null = 无可用尺寸。
+         */
+        internal fun pickDims(sizes: List<Pair<Int, Int>>, targetAspect: Float?): Pair<Int, Int>? {
+            val capped = sizes.filter { it.first > 0 && it.second > 0 && it.first <= 640 && it.second <= 640 }
+            if (capped.isEmpty()) return null
+            if (targetAspect != null && targetAspect > 0f) {
+                val matching = capped.filter {
+                    val aspect = it.first.toFloat() / it.second
+                    kotlin.math.abs(aspect - targetAspect) <= targetAspect * 0.08f
+                }
+                if (matching.isNotEmpty()) return matching.maxBy { it.first.toLong() * it.second }
+            }
+            return capped.maxBy { it.first.toLong() * it.second }
+        }
+
+        /**
+         * RGBA 帧转正（2026-11-07，纯函数）：按顺时针 [degrees] 旋转，90/270 交换宽高。
+         * 非整 90 的传感器角（个别机型 82/97）按最近 90 取整——宁可偏 8°，也不能把画面躺倒。
+         */
+        fun rotateRgba(src: IntArray, w: Int, h: Int, degrees: Int): RotatedFrame {
+            val quarter = ((kotlin.math.round(degrees / 90f).toInt() % 4) + 4) % 4
+            if (quarter == 0) return RotatedFrame(src, w, h)
+            val swapped = quarter % 2 == 1
+            val outW = if (swapped) h else w
+            val outH = if (swapped) w else h
+            val out = IntArray(w * h)
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val px = src[y * w + x]
+                    val (dx, dy) = when (quarter) {
+                        1 -> (h - 1 - y) to x          // 90° 顺时针
+                        2 -> (w - 1 - x) to (h - 1 - y) // 180°
+                        else -> y to (w - 1 - x)        // 270° 顺时针（= 90° 逆时针）
+                    }
+                    out[dy * outW + dx] = px
+                }
+            }
+            return RotatedFrame(out, outW, outH)
         }
 
         /**

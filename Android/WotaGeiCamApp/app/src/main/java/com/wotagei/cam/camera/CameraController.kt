@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.ImageReader
 import android.view.Surface
@@ -564,6 +565,15 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话 */
     fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
         engine?.setAnalysisTarget(surface, reader)
+    }
+
+    /**
+     * 当前镜头的 `CameraCharacteristics`（站位分析流选 YUV 尺寸用，2026-11-07）。
+     * 不在枚举完成窗口时返回 null——调用方回退 640x480 默认档，不猜能力。
+     */
+    fun currentCharacteristics(): CameraCharacteristics? {
+        val id = ui.value.currentSlot?.logicId ?: return null
+        return runCatching { cameraManager().getCameraCharacteristics(id) }.getOrNull()
     }
 
     /** 批量写多个参数后手动统一下发一次（引擎自身已按 5ms 合并，通常不需要调） */

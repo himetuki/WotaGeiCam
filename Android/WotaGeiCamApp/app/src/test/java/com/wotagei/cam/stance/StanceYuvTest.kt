@@ -63,4 +63,70 @@ class StanceYuvTest {
     // pickYuvSize 依赖 CameraCharacteristics、DEFAULT_SIZE 是 android.util.Size——
     // 两者 JVM 不可测（工程无 Robolectric），逻辑以常量兜底（任何设备均有 640x480 可用），
     // 真机冒烟覆盖。
+
+    // ------------------------------------------------------------------
+    // 转正（2026-11-07）：YUV 缓冲在传感器坐标系，竖持时相对预览是横的
+    // ------------------------------------------------------------------
+
+    /** 2 宽 3 高：值 = 行主序 0..5。 */
+    private val src2x3 = intArrayOf(0, 1, 2, 3, 4, 5)
+
+    @Test
+    fun rotate_noneKeepsFrame() {
+        val f = StanceAnalysis.rotateRgba(src2x3, 2, 3, 0)
+        assertEquals(2, f.width)
+        assertEquals(3, f.height)
+        assertTrue(f.pixels contentEquals src2x3)
+    }
+
+    @Test
+    fun rotate_90cw_swapsAndMapsRows() {
+        val f = StanceAnalysis.rotateRgba(src2x3, 2, 3, 90)
+        assertEquals(3, f.width)
+        assertEquals(2, f.height)
+        // 原左列自下而上 = 新第一行
+        assertTrue(f.pixels contentEquals intArrayOf(4, 2, 0, 5, 3, 1))
+    }
+
+    @Test
+    fun rotate_180() {
+        val f = StanceAnalysis.rotateRgba(src2x3, 2, 3, 180)
+        assertEquals(2, f.width)
+        assertEquals(3, f.height)
+        assertTrue(f.pixels contentEquals intArrayOf(5, 4, 3, 2, 1, 0))
+    }
+
+    @Test
+    fun rotate_270cw_equals90ccw() {
+        val f = StanceAnalysis.rotateRgba(src2x3, 2, 3, 270)
+        assertEquals(3, f.width)
+        assertEquals(2, f.height)
+        assertTrue(f.pixels contentEquals intArrayOf(1, 3, 5, 0, 2, 4))
+    }
+
+    @Test
+    fun rotate_nonRightAngleRoundsToNearest90() {
+        // 个别机型 sensorOrientation 报 82/97：按最近 90 处理，不能把画面留在躺倒态
+        val f82 = StanceAnalysis.rotateRgba(src2x3, 2, 3, 82)
+        assertEquals(3, f82.width)
+        val f7 = StanceAnalysis.rotateRgba(src2x3, 2, 3, 7)
+        assertEquals(2, f7.width)   // 7° → 0
+    }
+
+    // ------------------------------------------------------------------
+    // YUV 尺寸选择（纯函数）：画幅比匹配优先，否则最大面积
+    // ------------------------------------------------------------------
+
+    @Test
+    fun pickDims_prefersMatchingAspect() {
+        val sizes = listOf(640 to 480, 640 to 360, 320 to 240)
+        // 目标 16:9 → 640x360（640x480 是 4:3，不匹配）
+        assertEquals(640 to 360, StanceAnalysis.pickDims(sizes, 16f / 9f))
+        // 目标 4:3 → 640x480
+        assertEquals(640 to 480, StanceAnalysis.pickDims(sizes, 4f / 3f))
+        // 不匹配任何档（如 21:9）→ 最大面积
+        assertEquals(640 to 480, StanceAnalysis.pickDims(sizes, 21f / 9f))
+        // 无 ≤640 档 → null（调用方回退默认）
+        assertEquals(null, StanceAnalysis.pickDims(listOf(1280 to 720), 16f / 9f))
+    }
 }

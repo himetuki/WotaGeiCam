@@ -54,6 +54,13 @@ class StanceController private constructor(
     /** 预取 characteristics（挂流前选 YUV 尺寸；引擎侧无 characteristics 缓存，由 UI 传入）。 */
     var characteristicsProvider: (() -> CameraCharacteristics?)? = null
 
+    /** 目标画幅比（传感器坐标，宽/高）：分析流按它选同比例 YUV 档，叠框才和预览对齐。 */
+    var targetAspectProvider: (() -> Float?)? = null
+
+    /** 分析帧转正角（sensorOrientation − displayRotation，由 UI 现算喂入）。 */
+    @Volatile
+    private var rotation = 0
+
     // ---- 持久化键（站位参数=实时旋钮，prefs 即改即存；不入 ParamsPersist 档案语义） ----
 
     fun loadPrefs(prefs: android.content.SharedPreferences) {
@@ -120,6 +127,7 @@ class StanceController private constructor(
         analysis.detector = det
         analysis.head = head
         analysis.brighten = _state.value.brighten
+        analysis.rotationDegrees = rotation
         this.analysis = analysis
         val headMeta = meta["head_meta"] as? Map<*, *>
         val version = buildString {
@@ -155,8 +163,9 @@ class StanceController private constructor(
         val a = analysis ?: return
         if (attached || recording) return
         val size = try {
-            characteristicsProvider?.invoke()?.let { StanceAnalysis.pickYuvSize(it) }
-                ?: StanceAnalysis.DEFAULT_SIZE
+            characteristicsProvider?.invoke()?.let {
+                StanceAnalysis.pickYuvSize(it, targetAspectProvider?.invoke())
+            } ?: StanceAnalysis.DEFAULT_SIZE
         } catch (_: Exception) {
             StanceAnalysis.DEFAULT_SIZE
         }
@@ -165,6 +174,12 @@ class StanceController private constructor(
         a.resumeListening()
         syncEngineParams()
         attachHook?.invoke(surface, a.reader())
+    }
+
+    /** 方向变化（转屏/换镜头）：分析帧转正角随之更新，已挂的管线立即生效。 */
+    fun setRotation(degrees: Int) {
+        rotation = ((degrees % 360) + 360) % 360
+        analysis?.rotationDegrees = rotation
     }
 
     /** M2c 接缝：宿主（CameraScreen）注入——挂/摘引擎 analysis 槽的真正实现。 */
