@@ -100,6 +100,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     private var engine: Camera2Engine? = null
+
+    /** 当前站位分析槽（面, reader）；引擎重建/换渲染模式后据此复位（2026-11-07）。 */
+    private var analysisTarget: Pair<Surface, ImageReader?>? = null
     private var boundSink: PreviewSink? = null
     private var lensSlots: List<LensSlot> = emptyList()
     private var pendingStart = false
@@ -209,6 +212,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } },
             onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } }
         ).also { it.attach() }
+        // 站位分析槽在引擎重建后要自动复位（预览自愈 forceRebind / 渲染模式切换都会换引擎）：
+        // 只还原仍有效的面；失效面由 StanceController 回场时重挂（onPageEnter 验 isSurfaceLive）。
+        analysisTarget?.let { (targetSurface, targetReader) ->
+            if (targetSurface.isValid) engine?.setAnalysisTarget(targetSurface, targetReader)
+        }
         if (pendingStart) start()
     }
 
@@ -562,9 +570,13 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.setExtraTarget(surface, reader)
     }
 
-    /** 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话 */
-    fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
-        engine?.setAnalysisTarget(surface, reader)
+    /** 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话。
+     * 返回 false = 引擎还没建（调用方保持未挂，等就绪点补挂）；摘槽恒成功。 */
+    fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null): Boolean {
+        analysisTarget = if (surface != null) surface to reader else null
+        val e = engine ?: return surface == null
+        e.setAnalysisTarget(surface, reader)
+        return true
     }
 
     /**

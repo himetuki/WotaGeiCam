@@ -508,11 +508,10 @@ fun CameraScreen(
      * 面板仍按**未变换**的布局矩形定位，而那颗此刻已位移并淡到 alpha 0，浮层就飘在空位上。
      */
     LaunchedEffect(recording) { if (recording) pop = null }
-    // 站位提示联动（§5.1/D13）：录制开始 = 功能自动关闭（叠加+播报+推理全停，
-    // 开关重置）；切前置 = 直接关闭（前置自拍场景无人值守痛点不存在）。
-    LaunchedEffect(recording) {
-        if (recording && stanceState.enabled) stanceCtrl.setEnabled(app, false)
-    }
+    // 站位提示联动（§5.1/D13）：录制窗口 = 叠加+播报+推理全停（**引擎分析槽不动**，
+// 只暂停本管线回调——MediaRecorder 面已在会话里时再摘槽重建会打断录制；停录自动恢复，
+// 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
+    LaunchedEffect(recording) { stanceCtrl.setRecordingActive(recording) }
     LaunchedEffect(lens) {
         if (lens == LensType.FRONT && stanceState.enabled) {
             stanceCtrl.disableForFrontLens(app)
@@ -754,6 +753,14 @@ fun CameraScreen(
                 ctrl.unbind(activeSink)
             }
         }
+    }
+
+    // ---- 站位提示的「在页/离页」接线（2026-11-07，必须排在相机 bind 之后：要引擎在）
+    // 离页只停听不摘槽（设置页覆盖期间相机可被保活，但站位播报不该在别的页面响）；
+    // 回场恢复；引擎重建/离页 unbind 让分析面失效时，回场自动重建 reader 再挂回去。
+    DisposableEffect(stanceCtrl) {
+        stanceCtrl.onPageEnter()
+        onDispose { stanceCtrl.onPageExit() }
     }
 
     // ---- 上屏面重挂（2026-10-30 黑屏三次取证）
@@ -1548,7 +1555,9 @@ fun CameraScreen(
                 }
                 // 站位号位叠加（方案 32 M2c）：判定输出可视化——同站位线 View 层通道，
                 // 结构性不进成片；MISSING 画淡色透明人形外廓（D10）。
-                if (stanceState.enabled) {
+                // 门控用 running 而非 enabled：录制窗口/离页期间"开关仍开但已暂停"，
+                // 叠加必须一起消失（§5.1 叠加+播报+推理全停）。
+                if (stanceState.running) {
                     StanceOverlay(
                         output = stanceState.output,
                         modifier = Modifier.matchParentSize()

@@ -502,6 +502,12 @@ class Camera2Engine(
      */
     fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
         post {
+            // 幂等（2026-11-07）：回场复用/引擎重建自愈后会重放同 (surface,reader)。
+            // 同目标照旧清签名，会把一条本来健康的会话白白重建一次（绿帧窗口/掉帧）。
+            if (surface === analysisSurface && reader === analysisReader) {
+                if (desiredPreview) applyRepeatingNow()
+                return@post
+            }
             if (reader !== analysisReader) stopAnalysisReader()
             analysisSurface = surface
             analysisReader = reader

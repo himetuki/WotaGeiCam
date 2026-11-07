@@ -314,6 +314,11 @@ class MainActivity : ComponentActivity() {
         // 诊断日志的「上一会话结束于」留痕：正常退出与"被系统杀/崩溃"因此可区分
         // （下次冷启会把这行写进日志——排障时第一个要回答的就是"上次是正常退出的吗"）
         if (isFinishing) com.wotagei.cam.diag.Diag.markCleanExit()
+        // 站位提示是 Activity 级单例（与 CameraController 同级）：退出时释放分析线程/
+        // Interpreter/SoundPool。配置变更（isFinishing=false）不释放——ViewModel 同样存活。
+        if (isFinishing) {
+            com.wotagei.cam.stance.StanceController.get(this).release()
+        }
         brightnessRamp.shutdown()
         super.onDestroy()
     }

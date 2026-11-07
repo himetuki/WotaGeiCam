@@ -9,6 +9,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Size
 import android.view.Surface
+import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -23,10 +24,11 @@ data class RotatedFrame(val pixels: IntArray, val width: Int, val height: Int)
  * [FrameDetector]（LiteRT 封装）→ [JudgementEngine.observe] → 结果回调（Main 线程）。
  *
  * 生命周期与挂/摘分工（M2c 宿主职责）：
- * - [start] 一次（线程+reader 常驻）；往引擎挂/摘走 controller.setAnalysisTarget(surface/null)
+ * - [start] 创建/复用（线程+reader 常驻；surface 失效——引擎在关闭序列会单方面 close——
+ *   则重建 reader 再返回新面）；往引擎挂/摘走 controller.setAnalysisTarget(surface/null)
  *   （每次 = 会话重建，挂/摘各一次勿反复）；
- * - [pauseListening]/[resumeListening] 只停/恢复本管线回调（引擎槽不动，录制窗口用）；
- * - reader 所有权在引擎（关闭序列会单方面 close），本类回调与 [release] 须容忍二次关闭。
+ * - [pauseListening]/[resumeListening] 只停/恢复本管线回调（引擎槽不动，录制窗口/离页用）；
+ * - [updateModel] 热换检测器/判定头/安全区（分析线程内替换并关闭旧检测器，不重建线程）。
  * 线程模型：单条 HandlerThread("WotaStanceAnalysis") 串行（采集/转换/推理 3fps×30~100ms 无并发压力）。
  */
 class StanceAnalysis(
@@ -37,7 +39,6 @@ class StanceAnalysis(
         fun detect(rgba: IntArray, w: Int, h: Int, tsMs: Long): List<PersonBox>
     }
 
-    private val started = AtomicBoolean(false)
     private val released = AtomicBoolean(false)
     private val listening = AtomicBoolean(false)
     private var reader: ImageReader? = null
@@ -48,7 +49,29 @@ class StanceAnalysis(
     /** 引擎与判定头（模型组装配；未就绪时帧被丢弃）。 */
     var engine = JudgementEngine(mode = JudgementEngine.MODE_AUTO, nManual = 1)
     var head: StanceHead? = null
+        private set
     var detector: FrameDetector? = null
+        private set
+
+    /**
+     * 热换模型（2026-11-07）：用户导入模型组 / 切换 GPU 加速时**复用同一条管线**
+     * （不重建 HandlerThread / ImageReader / 引擎会话），在分析线程内替换并关闭旧检测器。
+     * 旧实现每次 applyPack 都 new 一个 StanceAnalysis——旧线程、旧 reader、旧 Interpreter /
+     * GpuDelegate 全部悬空不关（泄漏），且引擎槽仍指着旧 reader ⇒ 新模型永远不生效。
+     */
+    fun updateModel(newDetector: FrameDetector?, newHead: StanceHead?, marginsJson: String? = null) {
+        val swap = {
+            // 安全区覆盖也在这里落：MARGIN_BANDS 是全局可变表，判定线程正在读它，
+            // 不能让装配线程并发改（旧实现由主线程直接 loadCalibratedBands）。
+            if (marginsJson != null) StanceSpec.loadCalibratedBands(marginsJson)
+            val old = detector
+            detector = newDetector
+            head = newHead
+            if (old !== newDetector) (old as? Closeable)?.let { runCatching { it.close() } }
+        }
+        val h = handler
+        if (h != null && !released.get()) h.post(swap) else swap()
+    }
 
     /** §6 预处理提亮开关（默认关；只进检测输入，不进预览/成片）。 */
     @Volatile
@@ -66,26 +89,58 @@ class StanceAnalysis(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * 创建 reader（YUV_420_888）与分析线程，返回供引擎 analysis 槽的 surface。
-     * 幂等：重复调用返回既有 surface。引擎侧挂载由宿主调
-     * controller.setAnalysisTarget(surface, reader)（reader 所有权转移给引擎）。
+     * 创建/复用 reader（YUV_420_888）与分析线程，返回供引擎 analysis 槽的 surface。
+     * 幂等：surface 仍有效时重复调用返回既有面。
+     * **失效重建（2026-11-07）**：引擎关闭序列会单方面 close reader（离页 unbind / 引擎重建），
+     * 旧实现只认 `started` 标志 → 回场把一张已关闭的 Surface 挂回会话（建会话
+     * `Surface abandoned`），站位从此静默失效。现在按 `surface.isValid` 判活并重建。
+     * reader 所有权仍转移给引擎；本类只保证"再给我一张能用的面"。
      */
     fun start(size: Size = DEFAULT_SIZE): Surface {
-        if (started.compareAndSet(false, true)) {
+        check(!released.get()) { "StanceAnalysis 已释放，不能再 start" }
+        val existing = reader
+        if (existing != null && existing.surface.isValid) return existing.surface
+        if (existing != null) {
+            runCatching { existing.setOnImageAvailableListener(null, null) }
+            runCatching { existing.close() }
+            reader = null
+        }
+        if (thread == null) {
             val t = HandlerThread("WotaStanceAnalysis").apply { start() }
             thread = t
             handler = Handler(t.looper)
-            reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
-            reader!!.setOnImageAvailableListener({ r ->
-                val image = try {
-                    r.acquireLatestImage() ?: return@setOnImageAvailableListener
-                } catch (_: Exception) {
-                    return@setOnImageAvailableListener   // 引擎单方面关闭 reader 的窗口
-                }
-                processImage(image)
-            }, handler)
         }
-        return reader!!.surface
+        val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+        r.setOnImageAvailableListener({ r2 ->
+            val image = try {
+                r2.acquireLatestImage() ?: return@setOnImageAvailableListener
+            } catch (_: Exception) {
+                return@setOnImageAvailableListener   // 引擎单方面关闭 reader 的窗口
+            }
+            processImage(image)
+        }, handler)
+        reader = r
+        return r.surface
+    }
+
+    /** 当前分析面是否仍可挂进相机会话（引擎重建/离页后判活用）。 */
+    fun isSurfaceLive(): Boolean = reader?.surface?.isValid == true
+
+    /**
+     * 引擎参数热更新（2026-11-07）：[JudgementEngine] 不是线程安全的，`observe()` 在本类
+     * 分析线程跑；UI 线程直接 setBeta/setMode 会与 observe 并发读写 pendingHits/done/
+     * countHist（偶发状态错乱或 ConcurrentModificationException 被单帧 catch 吞掉）。
+     * 统一投到分析线程执行；管线未起（handler 为空）时直接应用，挂流前再同步一次。
+     */
+    fun updateEngineConfig(beta: Float, mode: String, n: Int, brighten: Boolean) {
+        val apply = {
+            val e = engine
+            if (e.beta != beta) e.setBeta(beta)
+            if (e.mode != mode || e.nManual != n) e.setMode(mode, n)
+            this.brighten = brighten
+        }
+        val h = handler
+        if (h != null && !released.get()) h.post(apply) else apply()
     }
 
     /** 供引擎 setAnalysisTarget(surface, reader) 的 reader 参数（所有权转移给引擎）。 */

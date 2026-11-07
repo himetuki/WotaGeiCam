@@ -135,9 +135,18 @@ object StanceModelPack {
             } ?: throw IllegalStateException("无法读取所选文件")
             val meta = validateDir(tmp) ?: throw IllegalArgumentException(
                 "模型组校验失败（sha256/规格不符）——已保持内置模型组")
-            // 校验通过 → 就地替换 userDir
-            userDir(context).deleteRecursively()
-            tmp.renameTo(userDir(context))
+            // 校验通过 → 就地替换 userDir。renameTo 可能因跨卷/占用失败（旧实现忽略返回值 =
+            // 静默把用户包删了却没换上去），失败退化为复制；两者都失败才抛（内置包仍可用）。
+            val target = userDir(context)
+            target.deleteRecursively()
+            if (!tmp.renameTo(target)) {
+                if (target.exists()) target.deleteRecursively()
+                tmp.copyRecursively(target, overwrite = true)
+                tmp.deleteRecursively()
+                require(validateDir(target) != null) {
+                    "模型组落盘失败（拷贝后校验不过）——已回退内置模型组，请重试导入"
+                }
+            }
             return meta
         } finally {
             if (tmp.exists()) tmp.deleteRecursively()
