@@ -37,7 +37,7 @@ fun StancePopupContent(
     onBeta: (Float) -> Unit,
     onBetaReset: () -> Unit,
     onMode: (String, Int) -> Unit,
-    onGpu: (Boolean) -> Unit,
+    onGpuMode: (String) -> Unit,
     onBrighten: (Boolean) -> Unit,
     onImportFromDir: () -> Unit,
     modifier: Modifier = Modifier,
@@ -99,23 +99,30 @@ fun StancePopupContent(
                 }
             }
 
-            // ④ GPU/NPU 加速开关（联动设置页"使用GPU"=KEY_DEFAULT_RENDER==GPU）
+            // ④ GPU/NPU 加速三态（r03：自动=白名单裁决 / 强制=跳白名单实验（Maleoon 等
+            //    新 GPU 白名单未收录但有 GLES compute 能力，运行期验证失败自动回退） / 关）
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("GPU/NPU 加速", color = Color.White, fontSize = 13.sp)
-                    Text(
-                        if (state.gpuOn) "当前：${state.backendName}" else "当前：CPU",
-                        color = Color(0xFF9A9AA6), fontSize = 10.sp,
-                    )
+                Text("GPU/NPU 加速", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                ModeChip("自动", gpuAllowed && state.gpuMode == StanceDetector.MODE_AUTO) {
+                    onGpuMode(StanceDetector.MODE_AUTO)
                 }
-                WotaSwitch(checked = state.gpuOn, onCheckedChange = onGpu, enabled = gpuAllowed)
+                ModeChip("强制", gpuAllowed && state.gpuMode == StanceDetector.MODE_FORCE) {
+                    onGpuMode(StanceDetector.MODE_FORCE)
+                }
+                ModeChip("关", !gpuAllowed || state.gpuMode == StanceDetector.MODE_OFF) {
+                    onGpuMode(StanceDetector.MODE_OFF)
+                }
             }
-            if (!gpuAllowed) {
-                Text(
-                    "设置页「默认渲染模式」为 DIRECT（直显）时不可用——切回 GPU 渲染后可开。",
-                    color = Color(0xFF77777F), fontSize = 10.sp,
-                )
-            }
+            Text(
+                "当前：${state.backendName.ifEmpty { "CPU" }}" +
+                    if (gpuAllowed) "" else "（设置页渲染模式为 DIRECT，不可用）",
+                color = Color(0xFF9A9AA6), fontSize = 10.sp,
+            )
+            Text(
+                "自动=按兼容性白名单裁决；强制=跳过白名单实验（白名单未收录的新 GPU 如 " +
+                    "Maleoon 可能可用，推理验证失败会自动回退并提示）。",
+                color = Color(0xFF77777F), fontSize = 10.sp,
+            )
 
             // ⑤ 预处理提亮（夜间识别，§6 默认关）
             Row(verticalAlignment = Alignment.CenterVertically) {

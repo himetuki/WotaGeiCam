@@ -47,16 +47,24 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     var backendName: String = ""
         private set
 
+    /** GPU 回退原因（null=未回退/未尝试；UI 提示用——降级必提示）。 */
+    var gpuFallbackReason: String? = null
+        private set
+
     fun isLoaded(): Boolean = loaded
 
     fun isGpuActive(): Boolean = gpuActive
 
     /**
-     * 加载模型并建 Interpreter。preferGpu 且 gpuFile 存在 → 先试 GPU delegate，
-     * 白名单不通过/初始化失败 → 自动回退 CPU int8（返回 true 但 backendName 带回退标记）。
+     * 加载模型并建 Interpreter。gpuMode 三态（r03，用户二十稿：白名单外 ≠ 跑不了）：
+     * - **auto**：CompatibilityList 白名单裁决（现状）——不收录则回退 CPU；
+     * - **force**：**跳过白名单直接建 delegate**（用户自担风险的实验通道——Maleoon
+     *   等新 GPU 白名单未收录但有 GLES 3.1 compute 能力），建完跑一次 dummy 推理
+     *   做运行期验证（非 NaN + shape 合理），失败回退 CPU 并提示原因；
+     * - **off**：纯 CPU。
      * 张量布局不合规格（4 维输入 / float32 输出）→ 关掉已建资源并返回 false。
      */
-    fun load(int8File: File, gpuFile: File?, preferGpu: Boolean): Boolean {
+    fun load(int8File: File, gpuFile: File?, gpuMode: String): Boolean {
         close()
         loaded = false
         gpuActive = false
@@ -64,23 +72,33 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         // CPU 路线无论如何先备好（GPU 失败即回退）
         val cpuModel = loadModelBuffer(int8File)
         val cpuOpts = Interpreter.Options().setNumThreads(4)
-        if (preferGpu && gpuFile != null) {
+        if (gpuMode == MODE_FORCE && gpuFile != null ||
+            gpuMode == MODE_AUTO && gpuFile != null) {
             try {
                 val compat = org.tensorflow.lite.gpu.CompatibilityList()
-                if (compat.isDelegateSupportedOnThisDevice) {
-                    val d = GpuDelegate(compat.bestOptionsForThisDevice)
+                val whitelistPass = compat.isDelegateSupportedOnThisDevice
+                if (gpuMode == MODE_AUTO && !whitelistPass) {
+                    gpuFallbackReason = "GPU 兼容列表不通过（该机型/环境白名单外），已自动回退 CPU"
+                    Diag.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
+                } else {
+                    // force：跳过白名单（用户裁决 Maleoon 等新 GPU 有 GLES compute 能力，
+                    // 白名单只是"已知能工作"的规则库，不是能力探测）
+                    val d = if (whitelistPass) GpuDelegate(compat.bestOptionsForThisDevice) else GpuDelegate()
                     val gpuModel = loadModelBuffer(gpuFile)
                     val gpuOpts = Interpreter.Options().addDelegate(d)
-                    // load 阶段即建 interpreter 验证（白名单外的机型在构造期抛异常→回退）
                     interpreter = Interpreter(gpuModel, gpuOpts)
+                    bindTensorSpec()
+                    runtimeVerify(intp = interpreter!!)   // 运行期验证（force 路线的安全网）
                     delegate = d
                     gpuActive = true
-                    backendName = "GPU"
-                } else {
-                    Diag.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
+                    backendName = if (gpuMode == MODE_FORCE && !whitelistPass) "GPU（强制，白名单外）" else "GPU"
+                    Diag.i(TAG, "GPU delegate 就绪 mode=$gpuMode whitelist=$whitelistPass")
                 }
             } catch (e: Throwable) {
-                Diag.w(TAG, "GPU delegate 初始化失败，回退 CPU：${e.message}")
+                val why = if (gpuMode == MODE_FORCE && e is IllegalStateException) e.message
+                else "初始化失败（${e.message}）"
+                gpuFallbackReason = "GPU $why，已自动回退 CPU"
+                Diag.w(TAG, "GPU delegate 不可用，回退 CPU：${e.message}")
                 runCatching { interpreter?.close() }
                 interpreter = null
                 runCatching { delegate?.close() }
@@ -90,10 +108,10 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         if (!gpuActive) {
             interpreter = Interpreter(cpuModel, cpuOpts)
             // 回退标记：fallbackTip 依赖 backendName.contains("回退")——GPU 开着却回退必须让用户看见
-            backendName = if (preferGpu) "CPU（GPU 白名单外/初始化失败，已自动回退）" else "CPU"
+            backendName = if (gpuMode != MODE_OFF && gpuFile != null) "CPU（$gpuFallbackReason）" else "CPU"
         }
         return try {
-            bindTensorSpec()
+            if (!gpuActive) bindTensorSpec()
             loaded = true
             true
         } catch (e: Exception) {
@@ -101,6 +119,37 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
             close()
             false
         }
+    }
+
+    /**
+     * 运行期验证（force 路线安全网）：dummy 推理——输出必须有限（非 NaN/Inf）且
+     * person 分数行有界。白名单外机型常见故障模式=GL 编译失败抛异常（构造期已兜）
+     * 或静默输出垃圾（这里兜）。
+     */
+    private fun runtimeVerify(intp: Interpreter) {
+        val inTensor = intp.getInputTensor(0)
+        val (nchw, wh) = inputLayoutOf(inTensor.shape())
+        val (iw, ih) = wh
+        val dtype = inTensor.dataType()
+        val bytes = inTensor.shape().fold(1) { acc, d -> acc * d } *
+            (if (dtype == DataType.FLOAT32) 4 else 1)
+        val dummy = java.nio.ByteBuffer.allocateDirect(bytes).order(java.nio.ByteOrder.nativeOrder())
+        if (dtype == DataType.FLOAT32) {
+            val n = bytes / 4
+            repeat(n) { dummy.putFloat(0.5f) }
+        } else {
+            val fill = if (dtype == DataType.UINT8) 128.toByte() else 0.toByte()
+            while (dummy.position() < bytes) dummy.put(fill)
+        }
+        dummy.rewind()
+        val outShape = intp.getOutputTensor(0).shape()
+        val outCount = outShape.fold(1) { acc, d -> acc * d }
+        val outBuf = java.nio.ByteBuffer.allocateDirect(outCount * 4).order(java.nio.ByteOrder.nativeOrder())
+        intp.run(dummy, outBuf)
+        outBuf.rewind()
+        val outFloat = FloatArray(outCount) { outBuf.float }
+        require(outFloat.all { it.isFinite() }) { "GPU 推理输出含 NaN/Inf" }
+        Diag.i(TAG, "GPU 运行期验证通过（${if (nchw) "NCHW" else "NHWC"} ${iw}x$ih，输出 ${outFloat.size} 值有限）")
     }
 
     /** 从**模型实际张量**取输入布局/尺寸与输出 dtype（不再硬编码 448/NHWC）。 */
@@ -210,6 +259,11 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         private const val TAG = "StanceDetector"
         const val CONF_THRESHOLD = 0.25f
         const val IOU_THRESHOLD = 0.45f
+
+        /** GPU 模式三态（r03）：auto=白名单裁决 / force=跳白名单+运行期验证 / off=纯 CPU。 */
+        const val MODE_AUTO = "auto"
+        const val MODE_FORCE = "force"
+        const val MODE_OFF = "off"
 
         /**
          * 输入张量 shape → (是否 NCHW, [宽, 高])。

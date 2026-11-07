@@ -46,7 +46,7 @@ class StanceController private constructor(
         val nManual: Int = 1,
         val beta: Float = StanceSpec.BETA_DEFAULT,
         val brighten: Boolean = false,
-        val gpuOn: Boolean = false,
+        val gpuMode: String = StanceDetector.MODE_AUTO,
         val versionText: String = "",           // 模型组/判定头/安全区版本文本
         val fallbackTip: String? = null,        // 降级/错误提示（弹一次）
     )
@@ -100,7 +100,8 @@ class StanceController private constructor(
             nManual = prefs.getInt(Prefs.N, 1).coerceIn(1, 5),
             beta = prefs.getFloat(Prefs.BETA, StanceSpec.BETA_DEFAULT).coerceIn(StanceSpec.BETA_MIN, StanceSpec.BETA_MAX),
             brighten = prefs.getBoolean(Prefs.BRIGHTEN, false),
-            gpuOn = prefs.getBoolean(Prefs.GPU, false),
+            gpuMode = prefs.getString(Prefs.GPU_MODE, null)
+                ?: (if (prefs.getBoolean(Prefs.GPU_LEGACY, false)) StanceDetector.MODE_FORCE else StanceDetector.MODE_AUTO),
         )
     }
 
@@ -110,7 +111,10 @@ class StanceController private constructor(
         const val N = "stance_n"
         const val BETA = "stance_beta"
         const val BRIGHTEN = "stance_brighten"
-        const val GPU = "stance_gpu"
+
+        /** GPU 模式三态（r03）：auto/force/off。旧布尔键只读迁移一次，不再写。 */
+        const val GPU_MODE = "stance_gpu_mode"
+        const val GPU_LEGACY = "stance_gpu"
     }
 
     private fun prefs(context: Context) =
@@ -190,12 +194,13 @@ class StanceController private constructor(
     }
 
     private fun applyPack(dir: java.io.File, meta: Map<String, Any?>, source: String) {
+        dumpGpuEnvironment()
         val det = StanceDetector()
         try {
             val ok = det.load(
                 java.io.File(dir, "yolo11n_int8.tflite"),
                 java.io.File(dir, "yolo11n_fp32.tflite"),
-                preferGpu = _state.value.gpuOn,
+                gpuMode = _state.value.gpuMode,
             )
             if (!ok) throw IllegalStateException("检测模型不可加载（张量规格/文件异常）")
             // 先验模型后读标定：坏模型不能留下半套新安全区
@@ -418,10 +423,29 @@ class StanceController private constructor(
         syncEngineParams()
     }
 
-    /** GPU/NPU 加速开关（enabled 由 UI 联动设置页"使用GPU"=KEY_DEFAULT_RENDER==GPU）。 */
-    fun setGpu(context: Context, on: Boolean) {
-        _state.value = _state.value.copy(gpuOn = on)
-        prefs(context).edit().putBoolean(Prefs.GPU, on).apply()
+    /**
+     * GPU 环境 dump（r03）：SOC/Vulkan 硬事实进诊断日志——卓易通转发图形栈下
+     * "白名单不通过"到底缺什么，一次日志看清（GL 字符串需 GL 上下文，另由
+     * Detector 的 delegate 判定结果补充）。
+     */
+    private fun dumpGpuEnvironment() {
+        try {
+            val soc = listOf(
+                "SOC_MODEL=${android.os.Build.SOC_MODEL.takeIf { it.isNotEmpty() } ?: "?"}",
+                "SOC_MFR=${android.os.Build.SOC_MANUFACTURER.takeIf { it.isNotEmpty() } ?: "?"}",
+                "HW=${android.os.Build.HARDWARE}",
+            ).joinToString(" ")
+            val vk = "vulkan=${appContext.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_VULKAN_HARDWARE_VERSION)}" +
+                " vulkanCompute=${appContext.packageManager.hasSystemFeature("android.hardware.vulkan.compute")}"
+            Diag.i(TAG, "GPU 环境 $soc $vk")
+        } catch (_: Exception) {
+        }
+    }
+
+    /** GPU/NPU 加速三态（r03：auto/force/off；enabled 由 UI 联动设置页"使用GPU"=KEY_DEFAULT_RENDER==GPU）。 */
+    fun setGpuMode(context: Context, mode: String) {
+        _state.value = _state.value.copy(gpuMode = mode)
+        prefs(context).edit().putString(Prefs.GPU_MODE, mode).apply()
         // 换 backend = 换检测器；装配走后台线程（Interpreter + GpuDelegate 构造可达数百 ms），
         // 复用同一条分析管线（旧检测器在分析线程内关闭）
         reloadAsync(context.applicationContext)

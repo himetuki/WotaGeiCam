@@ -1975,7 +1975,7 @@ fun CameraScreen(
                                 onBeta = { stanceCtrl.setBeta(app, it) },
                                 onBetaReset = { stanceCtrl.setBeta(app, StanceSpec.BETA_DEFAULT) },
                                 onMode = { m, n -> stanceCtrl.setMode(app, m, n) },
-                                onGpu = { stanceCtrl.setGpu(app, it) },
+                                onGpuMode = { stanceCtrl.setGpuMode(app, it) },
                                 onBrighten = { stanceCtrl.setBrighten(app, it) },
                                 onImportFromDir = { stanceCtrl.importFromExternalDir(app) },
                             )
