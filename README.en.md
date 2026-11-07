@@ -44,6 +44,7 @@ If you need an English / Indonesian (Bahasa Indonesia) interface, his build is r
 - **In-recording extract + arc merge + offline arc repair**: devices without a native slow tier still keep continuous arcs.
 
 **🎯 Practice comparison · practice standard moves**
+- **AI stance hints**: in preview, detects stance and speaks a correction ("left / right / forward / backward"); missing / extra people and all-done each have their own prompt; pauses automatically while recording and resumes after.
 - **Split-screen reference**: one side plays a reference video (using its audio directly), the other records the subject, so the recorder can compare the subject's practice against the reference; the subject is being recorded and cannot watch-while-practicing, so the reference audio guides the rhythm.
 - **Dual-track comparison**: compare your practice side-by-side with the reference, switchable audio tracks, auto-aligned by audio.
 
@@ -85,6 +86,7 @@ Listed by category below, each with its **location**, **how to open it**, and **
 | Glow | Left dock "glow" pill | On/off + threshold / strength / blend; color modes "pixel's own / palette only"; preview and recording; GPU only |
 | Reference lines / grid | Left dock "reference line" button | Multi-select line types (thirds / diagonals / safe frame / grid, …); defaults in Settings → Reference lines |
 | Position lines | Top-bar right round button (left of the split button) | Tap to open the overlay for count / spacing, long-press to pick color; preview overlay only, not recorded, usable during recording |
+| AI stance hints | Top-bar right round button (left of the position-lines button) | Detects stance in preview and speaks the direction (left / right / forward / backward); 1–5 people, auto / manual count, precision β, night pre-brighten, GPU acceleration and model-pack import; settings persist immediately; pauses during recording and resumes after (see [Known Issues](#known-issues-and-limitations)) |
 | Level / pitch gauges | Right dock | Light vibration when level; toggle in Settings → Framing aids |
 | Readout block | Bottom-right readout block | Shutter / frame rate / bitrate / ISO / EV / white balance / zoom; per-item show/hide in Settings → Viewfinder persistent controls |
 | Custom control layout | Settings → Viewfinder persistent controls → Edit controls | Drag to place the docks and readout block; panels follow each control's anchor |
@@ -142,7 +144,9 @@ Planned / under research, not yet landed:
 
 ## Known Issues and Limitations
 
-An honest list of the currently known problem surface (verified through v0.0.12-r01; updated as feedback comes in):
+An honest list of the currently known problem surface (verified through v0.0.12-r02; updated as feedback comes in):
+
+- **AI stance hints are experimental (new in v0.0.12-r02)**: the detection model and judgement logic pass unit tests and model-tensor checks, but **on-device recognition accuracy has not been systematically verified** (especially in low light, at long distance, and with multiple people). The default safe-zone values come from a small set of PC-lab annotations; when moving to a new camera position or venue, adjust the precision β and "pre-brighten" first and treat the actual prompts as authoritative. The model pack can be replaced from a PC; a bad pack falls back to the built-in one automatically.
 
 - **Full-screen black after tapping back repeatedly on the settings page (fixed in r31–r41; upgrade if you are on an older build)**: device logs confirmed the cause is **not the camera** — with repeated back taps on the settings page, the second tap lands on the recording page that has just returned and pops it, and since it is the navigation start destination, the whole back stack is emptied; the UI framework then has nothing to draw: the screen is black with no controls, while the app stays alive and the back gesture still works. Since r40/r41 an in-page back can no longer pop the start destination (plus a 400 ms debounce), and any page whose UI gets torn down for more than 3 seconds recovers automatically; the camera pipeline now belongs to the window scope, so navigation races cannot touch camera state. On older builds (≤ v0.0.11-r30) please upgrade first.
 
