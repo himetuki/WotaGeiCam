@@ -114,7 +114,9 @@
     <string name="player_clip_mode_lossless">无损</string>
     <string name="player_clip_mode_scene">后渲染</string>
     <string name="player_clip_scene_lossless_note">不重编码，画面与你看到的一致（曲线/光晕/降噪都已是录制时的样子）</string>
-    <string name="player_clip_scene_none">当前未启用光晕、降噪或残影，后渲染与无损结果一致</string>
+    <!-- 无效果时的说明（2026-11-07 修订）：后渲染模式现在恒可选（否则进不了面板内的效果配置），
+         导出钮由 clipExportReady 拦住——文案必须告诉用户下一步做什么，不能只说"结果一致" -->
+    <string name="player_clip_scene_none">当前未启用光晕、降噪或残影——先打开下方任一效果，或切回无损</string>
     <string name="player_clip_scene_glow">光晕</string>
     <string name="player_clip_scene_denoise">降噪</string>
     <string name="player_clip_scene_echo">残影</string>

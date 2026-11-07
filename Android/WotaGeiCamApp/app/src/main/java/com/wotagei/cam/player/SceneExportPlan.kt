@@ -33,7 +33,10 @@ data class SceneExportEffects(
     /** null = 不应用残影；非 null 已 sanitize（含 enabled=true 的完整参数）。R2 第三路 */
     val echo: EchoParams? = null
 ) {
-    /** 至少一项在作用 = 后渲染导出与无损导出才有区别；都没有时 UI 应禁用该模式 */
+    /**
+     * 至少一项在作用 = 后渲染导出与无损导出才有区别；都没有时 UI 应禁用**导出钮**
+     * （后渲染模式本身仍可选——那是进面板内开效果的唯一入口，见 [clipExportReady]）
+     */
     val active: Boolean get() = glow != null || denoise || echo != null
 
     /** 真实节点用的 tint（白 = 跟随原色） */
@@ -63,6 +66,20 @@ fun sceneExportEffects(glowRaw: String?, videoDenoise: VideoDenoise, echoRaw: St
     val echo = decodeEcho(echoRaw).sanitize().let { if (it.enabled) it else null }
     return SceneExportEffects(glow = glow, denoise = videoDenoise != VideoDenoise.OFF, echo = echo)
 }
+
+/**
+ * 剪辑弹层的**导出钮**是否可点（2026-11-07 真机「后渲染点了没反应」修复的决策层）。
+ *
+ * - 无损恒可：重封不读效果参数；
+ * - 后渲染必须至少一项效果在作用：没有效果时重编码几分钟产出的像素与无损一致，
+ *   而"偷偷降级成无损"又会让用户以为效果生效了——只能拦住并讲清原因。
+ *
+ * 注意这条**只门导出钮、不门后渲染 chip**：chip 一旦按 [active] 置灰，冷态（光晕/降噪/残影
+ * 全关）就进不了面板内的效果配置区，用户永远没法当场把效果打开（2026-11-07 真机死锁）。
+ * 后渲染模式恒可选，选进来露出配置区；配好效果后 [active] 变真，导出钮才亮。
+ */
+fun clipExportReady(postRender: Boolean, effects: SceneExportEffects): Boolean =
+    !postRender || effects.active
 
 /** 编码帧率：源容器帧率可用就跟着源（钳 15..60），读不出按 30 */
 fun sceneExportFps(sourceFps: Int): Int =
