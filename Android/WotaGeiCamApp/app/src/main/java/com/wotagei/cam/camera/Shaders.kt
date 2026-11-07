@@ -667,14 +667,24 @@ $decl
      *
      * ES 1.00 没有 `noise()`，hash 取三次 fract 的经典廉价写法（纯算术、无纹理、无扩展）。
      *
-     * **精度红线（2026-11-06 真机缺陷修复）**：这类 hash **必须在 highp 里算**。mediump（fp16）
+     * **精度红线（2026-11-06 真机缺陷修复；2026-11-07 Maleoon 再兼容）**：这类 hash
+     * **必须在 highp 里算**。mediump（fp16）
      * 下 `q += dot(q, q.yzx + 33.33)` 会把 q 抬到 ≈68（ulp 0.0625），末式 `(q.x+q.y)·q.z ≈ 9500`
      * 的 ulp 高达 8——fract 只剩 ~8 个离散取值，整屏碎成多边形亮度拼块；freq 越大输入扫得越快，
      * 拼块越小越密（真机表现即"白色三角形点云，频率越大越碎"）。故 glowHash 全体包在
      * `GL_FRAGMENT_PRECISION_HIGH` 守卫里：支持 highp（一切现代 GPU）按 highp 算出细颗粒；
      * 不支持则回退 n=1.0——干净无噪光晕，绝不输出精度垃圾。
+     *
+     * **Maleoon 再兼容（2026-11-07 真机）**：Mate60/70 卓易通的 Maleoon GLSL 编译器
+     * **不认变量声明处的 `highp` 限定符与 `highp` 前缀构造器**（`highp vec3 q = …` 报
+     * `L0001: Expected literal or '(', got 'highp'`）——精度改为**注入段头部
+     * `precision highp float;` 语句覆盖**宿主的 mediump（重复声明后者生效，GLSL 基础
+     * 语义、任何编译器都认），函数体内变量不带精度限定符。精度语义与原修复等价。
      */
     private const val GLOW_DECL = """
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#endif
 varying vec2 vUvGlow;
 uniform sampler2D uGlowSrc;
 uniform float uGlowGain;
@@ -684,7 +694,7 @@ uniform float uGlowBlend;
 uniform vec3 uGlowTint;
 float glowHash(vec2 p) {
 #ifdef GL_FRAGMENT_PRECISION_HIGH
-    highp vec3 q = fract(highp vec3(p.xyx) * highp vec3(0.1031, 0.1030, 0.0973));
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yzx + 33.33);
     return fract((q.x + q.y) * q.z);
 #else
@@ -694,7 +704,7 @@ float glowHash(vec2 p) {
 vec3 applyGlow(vec3 c, vec2 uv) {
     vec3 glow = texture2D(uGlowSrc, uv).rgb;
 #ifdef GL_FRAGMENT_PRECISION_HIGH
-    highp vec2 hp = highp vec2(uv) * highp float(uGlowFreq);
+    vec2 hp = vec2(uv) * float(uGlowFreq);
     float n = mix(1.0, glowHash(hp), step(0.0001, uGlowFreq));
 #else
     float n = 1.0;
