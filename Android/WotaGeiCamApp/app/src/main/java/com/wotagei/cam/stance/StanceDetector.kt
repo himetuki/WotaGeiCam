@@ -89,7 +89,8 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         }
         if (!gpuActive) {
             interpreter = Interpreter(cpuModel, cpuOpts)
-            backendName = "CPU"
+            // 回退标记：fallbackTip 依赖 backendName.contains("回退")——GPU 开着却回退必须让用户看见
+            backendName = if (preferGpu) "CPU（GPU 白名单外/初始化失败，已自动回退）" else "CPU"
         }
         return try {
             bindTensorSpec()

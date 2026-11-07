@@ -93,3 +93,5 @@ desktop.ini
 /HarmonyOS/**/*-lock.json5
 /HarmonyOS/**/*.localbak*
 /.*.json
+logs/
+.reme/
