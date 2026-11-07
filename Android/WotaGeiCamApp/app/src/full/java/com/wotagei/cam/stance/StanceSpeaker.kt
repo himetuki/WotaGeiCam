@@ -48,6 +48,7 @@ class StanceSpeaker(context: Context) {
         if (tokens.isEmpty()) return
         pending.clear()
         pending.addAll(tokens)
+        pending.addLast("end")   // 角色口癖：每次轮询播报结尾一次（用户 r05 口径）
         queueGen++
         drain(queueGen)
     }
@@ -99,7 +100,7 @@ class StanceSpeaker(context: Context) {
         val WORD_FILES = listOf(
             "num_1", "num_2", "num_3", "num_4", "num_5",
             "dir_left", "dir_right", "dir_forward", "dir_backward",
-            "st_done", "all_done", "st_missing", "st_extra",
+            "st_done", "all_done", "st_missing", "st_extra", "end",
         )
     }
 }
