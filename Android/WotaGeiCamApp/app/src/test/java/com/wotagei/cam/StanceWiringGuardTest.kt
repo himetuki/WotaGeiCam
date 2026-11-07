@@ -73,8 +73,10 @@ class StanceWiringGuardTest {
         val setEnabled = bodyOf(controller, "setEnabled")
         assertTrue("录制中两向都拒绝调整", setEnabled.contains("if (recording)"))
         assertFalse("录制中调整状态而不重建会话", setEnabled.contains("setAnalysisTarget"))
+        assertTrue("前置镜头不许开启（D13）", setEnabled.contains("on && frontLens"))
         val screenBody = bodyOf(screen, "CameraScreen")
         assertTrue("录制态必须接线", screenBody.contains("stanceCtrl.setRecordingActive(recording)"))
+        assertTrue("镜头切换必须接线", screenBody.contains("stanceCtrl.setFrontLens(lens == LensType.FRONT)"))
     }
 
     @Test

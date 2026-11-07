@@ -512,11 +512,8 @@ fun CameraScreen(
 // 只暂停本管线回调——MediaRecorder 面已在会话里时再摘槽重建会打断录制；停录自动恢复，
 // 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
     LaunchedEffect(recording) { stanceCtrl.setRecordingActive(recording) }
-    LaunchedEffect(lens) {
-        if (lens == LensType.FRONT && stanceState.enabled) {
-            stanceCtrl.disableForFrontLens(app)
-        }
-    }
+    // 前置 = 直接关闭并重置开关（D13）；同时挡住"在前置下重新开启"（方向语义只对后置成立）。
+    LaunchedEffect(lens) { stanceCtrl.setFrontLens(lens == LensType.FRONT) }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
     val lockTipText = stringResource(R.string.cam_lock_tip)

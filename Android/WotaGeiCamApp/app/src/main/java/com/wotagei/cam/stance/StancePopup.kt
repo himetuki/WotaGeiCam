@@ -54,7 +54,7 @@ fun StancePopupContent(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("站位提示", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Text("预览态专属 · 录制中自动暂停，停录恢复", color = Color(0xFF9A9AA6), fontSize = 11.sp)
+                Text("预览态专属 · 仅后置镜头 · 录制中自动暂停，停录恢复", color = Color(0xFF9A9AA6), fontSize = 11.sp)
             }
             WotaSwitch(checked = state.enabled, onCheckedChange = onEnabled)
         }

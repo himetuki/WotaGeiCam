@@ -76,6 +76,11 @@ class StanceController private constructor(
     /** 用户开了开关但模型组/引擎尚未就绪：就绪点补挂一次。 */
     private var pendingAttach = false
 
+    /** 前置镜头标记（D13：前置不提供站位提示；录制窗口切镜头被 UI 锁住，留 pendingDetach 兜底）。 */
+    @Volatile
+    private var frontLens = false
+    private var pendingDetach = false
+
     /** 预取 characteristics（挂流前选 YUV 尺寸；引擎侧无 characteristics 缓存，由 UI 传入）。 */
     var characteristicsProvider: (() -> CameraCharacteristics?)? = null
 
@@ -245,6 +250,15 @@ class StanceController private constructor(
             _state.value = _state.value.copy(fallbackTip = "录制中不可调整站位提示——停录后再试")
             return
         }
+        if (on && frontLens) {
+            // D13：前置自拍场景没有无人值守痛点，方向语义也只对后置成立
+            _state.value = _state.value.copy(
+                enabled = false,
+                running = false,
+                fallbackTip = "前置镜头不提供站位提示——切回后置后再开",
+            )
+            return
+        }
         _state.value = _state.value.copy(enabled = on)
         prefs(context).edit().putBoolean(Prefs.ON, on).apply()
         if (on) attachAnalysis(context) else detachAnalysis(context)
@@ -313,6 +327,12 @@ class StanceController private constructor(
     /** 停录恢复（开关状态/持久化都不动——下一次开录仍自动暂停，无需用户重开）。 */
     fun resumeAfterRecording() {
         recording = false
+        if (pendingDetach) {
+            // 录制窗口内切了前置：当时摘槽会打断录制，停录后补摘
+            pendingDetach = false
+            detachAnalysis(appContext)
+            return
+        }
         maybeAttachAfterGate()
     }
 
@@ -341,9 +361,9 @@ class StanceController private constructor(
         _state.value = _state.value.copy(running = false, output = null)
     }
 
-    /** 门控放开（非录制 + 在页）时：已挂→恢复监听；未挂→补挂（含装配未完成的 pending）。 */
+    /** 门控放开（非录制 + 在页 + 后置）时：已挂→恢复监听；未挂→补挂（含装配未完成的 pending）。 */
     private fun maybeAttachAfterGate() {
-        if (!_state.value.enabled || recording || !onPage) return
+        if (!_state.value.enabled || recording || !onPage || frontLens) return
         val a = analysis
         if (a == null) {
             pendingAttach = true
@@ -357,11 +377,26 @@ class StanceController private constructor(
         }
     }
 
-    /** 切前置（D13：直接关闭开关重置）。 */
+    /**
+     * 镜头切换（D13）：前置 = 直接关闭并重置开关，切回后置需手动再开。
+     * 录制窗口内不摘槽（会打断录制）——记 pendingDetach，停录后补摘。
+     */
+    fun setFrontLens(front: Boolean) {
+        frontLens = front
+        if (front && _state.value.enabled) disableForFrontLens(appContext)
+    }
+
+    /** 切前置（D13：直接关闭开关重置；录制窗口只暂停，待停录补摘）。 */
     fun disableForFrontLens(context: Context) {
-        setEnabled(context, false)
+        _state.value = _state.value.copy(enabled = false, running = false, output = null)
+        prefs(context).edit().putBoolean(Prefs.ON, false).apply()
         analysis?.pauseListening()
-        _state.value = _state.value.copy(running = false, output = null)
+        pendingAttach = false
+        if (recording) {
+            pendingDetach = true
+        } else {
+            detachAnalysis(context)
+        }
     }
 
     /** 弹窗动作：β/模式/人数/提亮/加速开关（全部即改即存 + 热更新）。 */
@@ -429,6 +464,8 @@ class StanceController private constructor(
         prepared = false
         attached = false
         pendingAttach = false
+        pendingDetach = false
+        frontLens = false
         recording = false
         onPage = true
         _state.value = _state.value.copy(running = false, output = null, backendName = "")
