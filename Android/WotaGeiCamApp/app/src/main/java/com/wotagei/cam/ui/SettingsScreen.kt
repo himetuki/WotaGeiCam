@@ -1813,7 +1813,9 @@ private fun UpdateSection() {
                                 // 探测专用短读超时（P2-2）：最坏 5 节点 × (10s 连接 + 10s 读) ≈ 100s，不再挂数分钟
                                 { url -> UpdateDownloader.fetchJson(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS) },
                                 { url -> UpdateDownloader.fetchRedirectLocation(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS) },
-                                isCancelled = { probeCancelled.get() }
+                                isCancelled = { probeCancelled.get() },
+                                // 更新互斥（docs/plan/33）：full/lite 各推各包
+                                flavor = BuildConfig.FLAVOR
                             )
                         ) {
                             is ProbeResult.UpdateAvailable -> {

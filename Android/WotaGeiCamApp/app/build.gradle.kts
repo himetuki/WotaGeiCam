@@ -26,6 +26,11 @@ base {
     archivesName.set(apkBaseNameProp?.let { "$it-v$appVersionName" } ?: "app")
 }
 
+// 双 flavor（docs/plan/33）：full/lite 产物分目录输出（outputs/apk/<flavor>/<buildType>/），
+// flavor 段由打包脚本/CI 在拷贝时按目录补进文件名（AGP Kotlin DSL 的 per-variant
+// outputFileName 重命名与 DomainObjectCollection.all 重载歧义冲突，不在 Gradle 侧做）。
+// versionName/versionCode 不动（同版本互相覆盖安装、数据保留，用户裁决）。
+
 android {
     namespace = "com.wotagei.cam"
     compileSdk = 34

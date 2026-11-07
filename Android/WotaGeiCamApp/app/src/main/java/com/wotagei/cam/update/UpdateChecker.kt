@@ -225,9 +225,25 @@ object ReleaseJson {
         return true
     }
 
-    /** 挑 APK 附件：优先 universal（四件套里的通用包），没有则第一个 .apk；无 .apk 返回 null */
-    fun pickApkAsset(assets: List<ReleaseAsset>): ReleaseAsset? {
+    /**
+     * 挑 APK 附件：[flavor] 三态更新互斥（2026-11-07 用户裁决——有 AI 的只更新有 AI 包，
+     * 无 AI 的只更新无 AI 包）：
+     * - lite：**只认 -lite- 附件**（绝不推 full/通用包——lite 用户装 full 包会改变功能集）；
+     *   无 lite 附件 → null（不提示，保守：CompareVersions 同款保守哲学）；
+     * - full：优先 -full- 明确包，其次通用包（历史发版无 flavor 后缀），**绝不推 -lite- 包**；
+     * - null（旧调用/单测兼容）：旧行为（优先 universal，无则第一个 .apk）。
+     */
+    fun pickApkAsset(assets: List<ReleaseAsset>, flavor: String? = null): ReleaseAsset? {
         val apks = assets.filter { isSafeReleaseAssetName(it.name) }
+        if (flavor == "lite") {
+            return apks.firstOrNull { it.name.contains("-lite-", ignoreCase = true) }
+        }
+        if (flavor == "full") {
+            val notLite = apks.filterNot { it.name.contains("-lite", ignoreCase = true) }
+            return notLite.firstOrNull { it.name.contains("-full-", ignoreCase = true) }
+                ?: notLite.firstOrNull { it.name.contains("universal", ignoreCase = true) }
+                ?: notLite.firstOrNull()
+        }
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }
 
@@ -240,13 +256,13 @@ object ReleaseJson {
      * 当真会把合法更新判废；说明文字没有这个顾虑（只展示、不参与判断）。
      * 说明文本的书写约定见发版流程：一行 `SHA256: <64位十六进制>`。
      */
-    fun parse(json: String, extractSha256: Boolean): ReleaseInfo? {
+    fun parse(json: String, extractSha256: Boolean, flavor: String? = null): ReleaseInfo? {
         val tag = parseTag(json) ?: return null
         // body 只读一次：sha256 与 notes 取自同一段文本
         val body = stringValueAfterKey(json, "body")
         return ReleaseInfo(
             tag = tag,
-            asset = pickApkAsset(parseAssets(json)),
+            asset = pickApkAsset(parseAssets(json), flavor),
             sha256 = if (extractSha256) body?.let { parseSha256FromNotes(it) } else null,
             notes = body
         )
@@ -452,7 +468,9 @@ object RedirectProbe {
      * （如 `WotaGeiCam-v0.0.11-r01-universal-release-Android.apk`）。
      * 旧版资产（≤0.0.10-r05）不带项目名——更新器只匹配最新 release，新版上线自然切换，无兼容逻辑。
      */
-    fun guessUniversalAssetName(tag: String): String = "WotaGeiCam-$tag-universal-release-Android.apk"
+    fun guessUniversalAssetName(tag: String, flavor: String? = null): String =
+        if (flavor == "full" || flavor == "lite") "WotaGeiCam-$tag-$flavor-release-Android.apk"
+        else "WotaGeiCam-$tag-universal-release-Android.apk"
 }
 
 /** 探测结论：UI 只消费这个，不再自己比版本 */
@@ -493,26 +511,27 @@ fun probeLatestRelease(
     localVersionName: String,
     fetchJson: (String) -> String?,
     fetchRedirectLocation: (String) -> String?,
-    isCancelled: () -> Boolean = { false }
+    isCancelled: () -> Boolean = { false },
+    flavor: String? = null
 ): ProbeResult {
     // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信——提取 SHA-256 供下载后校验，
     // 同时把说明原文带给更新弹窗）
     if (isCancelled()) return ProbeResult.Cancelled
-    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, extractSha256 = true)?.let { return it }
+    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, extractSha256 = true, flavor = flavor)?.let { return it }
     // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）。
     // extractSha256=false：镜像可改写 body，转发来的哈希没有可信度，宁可不校验也不拿假哈希当真；
     // 说明原文照读（只用于弹窗展示，装不装得上仍由哈希与系统签名决定）。
     val chain = MirrorChain.probeChain()
     while (!chain.exhausted) {
         if (isCancelled()) return ProbeResult.Cancelled
-        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, extractSha256 = false)?.let { return it }
+        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, extractSha256 = false, flavor = flavor)?.let { return it }
         chain.advance()
     }
-    // 段 3：302 → tag → 推导 universal 资产名（无 size，下载时用 Content-Length）
+    // 段 3：302 → tag → 推导资产名（无 size，下载时用 Content-Length）
     if (isCancelled()) return ProbeResult.Cancelled
     fetchRedirectLocation(UpdateConfig.RELEASES_LATEST_PAGE)?.let { loc ->
         RedirectProbe.tagFromLocation(loc)?.let { tag ->
-            val assetName = RedirectProbe.guessUniversalAssetName(tag)
+            val assetName = RedirectProbe.guessUniversalAssetName(tag, flavor)
             return decide(
                 ReleaseInfo(tag, ReleaseAsset(assetName, UpdateConfig.directDownloadUrl(tag, assetName), null)),
                 localVersionName
@@ -528,9 +547,9 @@ fun probeLatestRelease(
  * [extractSha256] 只在段 1（api.github.com 官方端点）为 true：只有那时 body 里的 SHA-256 才可信；
  * 说明原文（notes）两段都读，只用于弹窗展示。
  */
-private fun jsonNode(json: String?, localVersionName: String, extractSha256: Boolean = false): ProbeResult? {
+private fun jsonNode(json: String?, localVersionName: String, extractSha256: Boolean = false, flavor: String? = null): ProbeResult? {
     json ?: return null
-    val info = ReleaseJson.parse(json, extractSha256 = extractSha256) ?: return null
+    val info = ReleaseJson.parse(json, extractSha256 = extractSha256, flavor = flavor) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
         info.asset != null -> {
