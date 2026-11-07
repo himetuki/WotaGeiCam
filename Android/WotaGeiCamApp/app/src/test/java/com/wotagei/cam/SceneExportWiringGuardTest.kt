@@ -15,7 +15,9 @@ import java.io.File
  * 2. **绝不做 RGB 曲线**：用户原话"不需要在内置播放器内做 RGB 曲线后渲染"——曲线是录制期
  *    scene layer，`GlRenderEngine.setCurve` 已把它烘进成片像素，离线再套一次就是双倍。
  *    所以整条离线链**不许出现任何曲线符号**（含 `KEY_CURVE_STACK` / `uCurve` / `setCurve`）；
- * 3. **无效果时不给用户"点了没反应"**：后渲染 chip 的 enabled 必须来自 `effects.active`。
+ * 3. **无效果时不给用户"点了没反应"**：后渲染 chip **恒可选**（冷态也要能进面板内的效果配置，
+ *    否则永远开不了效果）；无效果时由**导出钮**按 `clipExportReady` 置灰拦住重编码，且置灰
+ *    必须带 `valueColor`（`enabled` 本身不新造视觉，见 Widgets.kt 的注）。
  *
  * 另钉两条与 remux 路（[com.wotagei.cam.player.ClipExporter]）的**口径同源**，这两处一旦
  * 各写一份就会出"选了内录轨但没按偏移对齐"或"某类失败被谎报成重启可恢复"：
@@ -174,17 +176,32 @@ class SceneExportWiringGuardTest {
     }
 
     @Test
-    fun `后渲染chip无效果时置灰而不是偷偷降级`() {
+    fun `无效果时后渲染仍可进配置_导出钮拦住且看得见`() {
         val popup = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(playerSrc, "ClipExportPopup")
         )
         assertTrue("弹层必须有导出方式的两个 chip", popup.contains("player_clip_mode_lossless"))
         assertTrue(popup.contains("player_clip_mode_scene"))
-        assertTrue(
-            "后渲染 chip 的 enabled 必须来自 effects.active（无效果时点它=点了没反应）",
+        // 2026-11-07 真机（内测 r05）「后渲染点了没反应」的两个成因，逐条钉死不许回退：
+        // ① WotaChip 的 enabled 不新造视觉（Widgets.kt 的注）——按 effects.active 置灰后
+        //    chip 看起来与可点态一样；
+        // ② 效果配置区只在 mode==1 出现——冷态（光晕/降噪/残影全关）进不了 mode 1，
+        //    也就永远打不开配置区里的效果开关（死锁）。
+        assertFalse(
+            "后渲染 chip 不许再按 effects.active 置灰（冷态就进不了面板内的效果配置）",
             popup.contains("enabled = sceneEffects.active")
         )
-        assertTrue("弹层必须能选模式", popup.contains("onPickMode("))
+        assertTrue("弹层必须能选模式（后渲染恒可选）", popup.contains("onPickMode("))
+        // 拦住重编码：无效果时导出钮不可点，且必须能看出来（enabled 只关点击、不新造视觉）
+        assertTrue(
+            "导出钮必须按 clipExportReady(mode==1, effects) 置灰",
+            popup.contains("val exportReady = clipExportReady(mode == 1, sceneEffects)")
+        )
+        assertTrue(popup.contains("enabled = exportReady"))
+        assertTrue(
+            "置灰必须带 valueColor（enabled 本身不新造视觉）",
+            popup.contains("valueColor = if (exportReady) null else WotaTextDim")
+        )
         // 文案必须真的登记（丢了编译会红，但显式锁住防资源被挪走后守卫空转）
         val xml = stringsXml().readText(Charsets.UTF_8)
         for (name in listOf(

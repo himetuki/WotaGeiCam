@@ -1349,11 +1349,20 @@ private fun ClipExportPopup(
                     label = stringResource(R.string.player_track_cap),
                     selected = track == SelectedTrack.CAP,
                     enabled = dualReady,
+                    // enabled 本身不新造灰显视觉（Widgets.kt 的 [WotaChip] 注）：不补 valueColor
+                    // 就是"看起来能点、点了没反应"——双音轨片在引擎上报第二条音频组之前正是这个态
+                    valueColor = if (dualReady) null else WotaTextDim,
                     onClick = { onPickTrack(SelectedTrack.CAP) }
                 )
             }
             // 导出方式（2026-10-28）：无损 = 既有重封；后渲染 = 重编码并应用 Glow/降噪。
-            // 无效果时后渲染与无损结果一致，置灰而不是偷偷降级——"点了没反应"比置灰更糟
+            //
+            // 后渲染 chip **恒可点**（2026-11-07 真机「点后渲染没反应」修复）：此前这里按
+            // sceneEffects.active 置灰，但 WotaChip 的 enabled 不带视觉（Widgets.kt 的注），
+            // chip 看着与可点态一模一样；而效果配置区只在 mode==1 才出现 ⇒ 冷态（光晕/降噪/
+            // 残影全关）既点不进后渲染、也就永远打不开配置区里的效果开关（死锁）。
+            // 现在选进后渲染就露出配置区；一项效果都没开时由导出钮拦住（clipExportReady），
+            // 既不偷偷降级成无损，也不白跑几分钟重编码。
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1371,7 +1380,6 @@ private fun ClipExportPopup(
                 WotaChip(
                     label = stringResource(R.string.player_clip_mode_scene),
                     selected = mode == 1,
-                    enabled = sceneEffects.active,
                     onClick = { onPickMode(1) }
                 )
             }
@@ -1384,9 +1392,14 @@ private fun ClipExportPopup(
             if (mode == 1) {
                 ExportEffectConfig(glowCfg, denoiseOn, echoCfg, onGlowChange, onDenoiseChange, onEchoChange)
             }
+            val exportReady = clipExportReady(mode == 1, sceneEffects)
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
-                selected = true,
+                selected = exportReady,
+                // 不可点必须看得见：WotaChip 的 enabled 不新造视觉，灰显由 valueColor 表达
+                //（Widgets.kt 的 [enabled] 注）；"为什么不能点"由上一行的 sceneEffectNote 讲。
+                enabled = exportReady,
+                valueColor = if (exportReady) null else WotaTextDim,
                 onClick = onExport
             )
         } else {
