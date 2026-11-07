@@ -2,7 +2,7 @@ package com.wotagei.cam.stance
 
 import com.wotagei.cam.diag.Diag
 
-import android.content.Context
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.Closeable
@@ -20,11 +20,15 @@ import java.nio.channels.FileChannel
  * UI 文案按"GPU（NPU 自动探测）"表述）。GPU delegate 白名单外机型 load 时抛异常
  * → **自动回退 CPU 并标记**（降级必提示）。
  *
- * 输入 [1,448,448,3]：FLOAT32 → RGBA 像素 /255（RGB 序）；UINT8 → 直接 0~255。
- * 输出 [1,84,4116]：每列 anchor = [cx,cy,w,h, cls0..79]（像素，输入尺度），
- * person=类 0；解码 → conf 过滤 → NMS(IoU 0.45) → 归一化 [PersonBox]（帧占比，
+ * 输入布局**从模型张量读**（2026-11-07 修正）：本工程随包的 Ultralytics→MLIR 导出是
+ * **NCHW [1,3,448,448]**（不是 NHWC）——按 NHWC 写会把通道当像素交错，推理输出全错。
+ * 两种布局都支持，由 [inputLayoutOf] 从 shape 判定；FLOAT32 → 像素 /255，UINT8/INT8 →
+ * 原值字节。输出 [1,84,4116] 必须 FLOAT32（本工程两个模型均如此；其它类型在 load
+ * 期明确失败，不留静默误判）。
+ * 输出布局：每列 anchor = [cx,cy,w,h, cls0..79]（像素，输入尺度），person=类 0；
+ * 解码 → conf 过滤 → NMS(IoU 0.45) → 归一化 [PersonBox]（帧占比，
  * 与 PC 端 ultralytics 归一化同义——端侧直接 resize 无 letterbox，纵横比小幅拉伸可接受，M2 真机验证）。
- * 线程假设：detect 由 [StanceAnalysis] 单线程串行调用。
+ * 线程假设：detect 由 [StanceAnalysis] 单线程串行调用；缓冲复用因此无需加锁。
  */
 class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     private var interpreter: Interpreter? = null
@@ -34,6 +38,10 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     private var inputW = 448
     private var inputH = 448
     private var inputFloat = true
+    private var inputNchw = false
+    private var inputBuf: ByteBuffer? = null
+    private var outputBuf: Array<Array<FloatArray>>? = null
+    private var loggedRunFailure = false
 
     /** 当前加速层（UI 显示；含回退标记）。 */
     var backendName: String = ""
@@ -46,11 +54,13 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     /**
      * 加载模型并建 Interpreter。preferGpu 且 gpuFile 存在 → 先试 GPU delegate，
      * 白名单不通过/初始化失败 → 自动回退 CPU int8（返回 true 但 backendName 带回退标记）。
+     * 张量布局不合规格（4 维输入 / float32 输出）→ 关掉已建资源并返回 false。
      */
     fun load(int8File: File, gpuFile: File?, preferGpu: Boolean): Boolean {
         close()
         loaded = false
         gpuActive = false
+        loggedRunFailure = false
         // CPU 路线无论如何先备好（GPU 失败即回退）
         val cpuModel = loadModelBuffer(int8File)
         val cpuOpts = Interpreter.Options().setNumThreads(4)
@@ -81,8 +91,40 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
             interpreter = Interpreter(cpuModel, cpuOpts)
             backendName = "CPU"
         }
-        loaded = true
-        return true
+        return try {
+            bindTensorSpec()
+            loaded = true
+            true
+        } catch (e: Exception) {
+            Diag.w(TAG, "模型张量规格不支持：${e.message}")
+            close()
+            false
+        }
+    }
+
+    /** 从**模型实际张量**取输入布局/尺寸与输出 dtype（不再硬编码 448/NHWC）。 */
+    private fun bindTensorSpec() {
+        val itp = interpreter ?: throw IllegalStateException("interpreter 未就绪")
+        val inTensor = itp.getInputTensor(0)
+        val (nchw, wh) = inputLayoutOf(inTensor.shape())
+        val dtype = inTensor.dataType()
+        require(dtype == DataType.FLOAT32 || dtype == DataType.UINT8 || dtype == DataType.INT8) {
+            "输入 dtype 不支持：$dtype"
+        }
+        val outTensor = itp.getOutputTensor(0)
+        require(outTensor.dataType() == DataType.FLOAT32) {
+            "输出 dtype 必须 float32（当前 ${outTensor.dataType()}）；量化输出模型请重新导出为 float 输出"
+        }
+        require(outTensor.shape().size == 3) { "输出应为 [1,84,N]：${outTensor.shape().toList()}" }
+        require(outTensor.shape()[1] >= 5) { "输出行数不足 5（缺 person 类分数行）：${outTensor.shape().toList()}" }
+        inputNchw = nchw
+        inputW = wh[0]
+        inputH = wh[1]
+        inputFloat = dtype == DataType.FLOAT32
+        inputBuf = null
+        outputBuf = null
+        Diag.i(TAG, "模型张量：in=${inTensor.shape().toList()} $dtype layout=${if (nchw) "NCHW" else "NHWC"}" +
+            " out=${outTensor.shape().toList()} ${outTensor.dataType()}")
     }
 
     override fun detect(rgba: IntArray, w: Int, h: Int, tsMs: Long): List<PersonBox> {
@@ -92,39 +134,25 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
             val outShape = itp.getOutputTensor(0).shape()   // [1,84,4116]
             val nRows = outShape[1]
             val nCols = outShape[2]
-            val output = Array(1) { Array(nRows) { FloatArray(nCols) } }
+            val output = outputBuf?.takeIf { it.size == nRows && it[0].size == nCols }
+                ?: Array(1) { Array(nRows) { FloatArray(nCols) } }.also { outputBuf = it }
             itp.run(input, output)
             decode(output[0], nRows, nCols, w, h)
         } catch (e: Exception) {
-            Diag.w(TAG, "推理失败：${e.message}")
+            if (!loggedRunFailure) {
+                loggedRunFailure = true
+                Diag.w(TAG, "推理失败（后续同类错误不再重复打）：${e.message}")
+            }
             emptyList()
         }
     }
 
     private fun makeInput(rgba: IntArray, w: Int, h: Int): ByteBuffer {
-        val buf = ByteBuffer.allocateDirect(inputW * inputH * 3 * (if (inputFloat) 4 else 1))
-            .order(ByteOrder.nativeOrder())
-        val sx = w.toFloat() / inputW
-        val sy = h.toFloat() / inputH
-        for (y in 0 until inputH) {
-            val srcY = (y * sy).toInt().coerceIn(0, h - 1)
-            for (x in 0 until inputW) {
-                val px = rgba[srcY * w + (x * sx).toInt().coerceIn(0, w - 1)]
-                val r = (px shr 16) and 0xFF
-                val g = (px shr 8) and 0xFF
-                val bl = px and 0xFF
-                if (inputFloat) {
-                    buf.putFloat(r / 255f)
-                    buf.putFloat(g / 255f)
-                    buf.putFloat(bl / 255f)
-                } else {
-                    buf.put(r.toByte())
-                    buf.put(g.toByte())
-                    buf.put(bl.toByte())
-                }
-            }
-        }
-        buf.rewind()
+        val bytesPer = if (inputFloat) 4 else 1
+        val need = inputW * inputH * 3 * bytesPer
+        val buf = inputBuf?.takeIf { it.capacity() == need } ?: ByteBuffer.allocateDirect(need)
+            .order(ByteOrder.nativeOrder()).also { inputBuf = it }
+        fillInput(buf, rgba, w, h, inputW, inputH, inputNchw, inputFloat)
         return buf
     }
 
@@ -161,12 +189,77 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         delegate = null
         gpuActive = false
         loaded = false
+        inputBuf = null
+        outputBuf = null
+        loggedRunFailure = false
     }
 
     companion object {
         private const val TAG = "StanceDetector"
         const val CONF_THRESHOLD = 0.25f
         const val IOU_THRESHOLD = 0.45f
+
+        /**
+         * 输入张量 shape → (是否 NCHW, [宽, 高])。
+         * 本工程导出的 YOLO11n 是 [1,3,448,448]（NCHW）；也接受 [1,448,448,3]（NHWC）。
+         * 纯函数，JVM 单测钉死（2026-11-07 修 NHWC 误写）。
+         */
+        internal fun inputLayoutOf(shape: IntArray): Pair<Boolean, IntArray> {
+            require(shape.size == 4) { "检测模型输入应为 4 维：${shape.toList()}" }
+            val nchw = shape[1] == 3
+            val w = if (nchw) shape[3] else shape[2]
+            val h = if (nchw) shape[2] else shape[1]
+            require(w > 0 && h > 0) { "检测模型输入尺寸非法：${shape.toList()}" }
+            return nchw to intArrayOf(w, h)
+        }
+
+        /**
+         * 把 RGBA 帧按目标尺寸最近邻缩放写进模型输入缓冲（NCHW 平面序 / NHWC 像素交错）。
+         * 纯函数（Buffer 进、Buffer 出），JVM 单测小矩阵钉死通道顺序——**这次修复的回归锚**：
+         * NCHW 必须先写完整个 R 平面再 G、B，写成交错就是把颜色当坐标喂模型。
+         */
+        internal fun fillInput(
+            out: ByteBuffer, rgba: IntArray, w: Int, h: Int,
+            inputW: Int, inputH: Int, nchw: Boolean, floatInput: Boolean,
+        ) {
+            out.clear()
+            val sx = w.toFloat() / inputW
+            val sy = h.toFloat() / inputH
+            if (nchw) {
+                for (channel in 0 until 3) {
+                    val shift = 16 - channel * 8   // R=16 / G=8 / B=0
+                    for (y in 0 until inputH) {
+                        val srcY = (y * sy).toInt().coerceIn(0, h - 1)
+                        val row = srcY * w
+                        for (x in 0 until inputW) {
+                            val v = (rgba[row + (x * sx).toInt().coerceIn(0, w - 1)] shr shift) and 0xFF
+                            if (floatInput) out.putFloat(v / 255f) else out.put(v.toByte())
+                        }
+                    }
+                }
+            } else {
+                for (y in 0 until inputH) {
+                    val srcY = (y * sy).toInt().coerceIn(0, h - 1)
+                    val row = srcY * w
+                    for (x in 0 until inputW) {
+                        val px = rgba[row + (x * sx).toInt().coerceIn(0, w - 1)]
+                        val r = (px shr 16) and 0xFF
+                        val g = (px shr 8) and 0xFF
+                        val bl = px and 0xFF
+                        if (floatInput) {
+                            out.putFloat(r / 255f)
+                            out.putFloat(g / 255f)
+                            out.putFloat(bl / 255f)
+                        } else {
+                            out.put(r.toByte())
+                            out.put(g.toByte())
+                            out.put(bl.toByte())
+                        }
+                    }
+                }
+            }
+            out.rewind()
+        }
 
         private fun loadModelBuffer(file: File): ByteBuffer {
             val ch = RandomAccessFile(file, "r").channel
