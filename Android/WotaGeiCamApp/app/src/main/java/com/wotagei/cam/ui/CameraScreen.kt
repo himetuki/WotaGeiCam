@@ -159,11 +159,7 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.RenderMode
-import com.wotagei.cam.stance.StanceController
-import com.wotagei.cam.stance.StanceModelPack
-import com.wotagei.cam.stance.StanceOverlay
-import com.wotagei.cam.stance.StancePopupContent
-import com.wotagei.cam.stance.StanceSpec
+import com.wotagei.cam.stance.StanceFeature
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessLabel
 import com.wotagei.cam.core.mediaAccessState
@@ -389,21 +385,21 @@ fun CameraScreen(
     var rightDockSlotRect by remember { mutableStateOf<Rect?>(null) }
     // ---- 站位提示（方案 32 M3）：AI 自主站位判定（不绑站位线），预览态专属，
     //      录制开始自动关闭（§5.1）、切前置关闭（D13）。Controller 是页面级单例。
-    val stanceCtrl = remember(app) { StanceController.get(app) }
-    val stanceState by stanceCtrl.state.observed()
+    val stance = remember(app) { StanceFeature.get(app) }
+    val stanceState by stance.state.observed()
     var stanceControlsOpen by remember { mutableStateOf(false) }
     var stanceAnchorRect by remember { mutableStateOf<Rect?>(null) }
     // 模型组装配 + 引擎槽接缝（prepare 幂等；hooks 一次性注入）
     remember(app) {
-        stanceCtrl.prepare(app)
-        stanceCtrl.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
-        stanceCtrl.detachHook = { ctrl.setAnalysisTarget(null) }
+        stance.prepare(app)
+        stance.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
+        stance.detachHook = { ctrl.setAnalysisTarget(null) }
         // 分析流按预览画幅比选 YUV 档（否则分析帧与预览 FOV 不同，叠框/判定都偏）
-        stanceCtrl.targetAspectProvider = {
+        stance.targetAspectProvider = {
             if (size.height > 0) size.width.toFloat() / size.height else null
         }
         // YUV 尺寸表从当前镜头的 characteristics 现取（枚举完成前回退默认档）
-        stanceCtrl.characteristicsProvider = { ctrl.currentCharacteristics() }
+        stance.characteristicsProvider = { ctrl.currentCharacteristics() }
         true
     }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
@@ -511,9 +507,9 @@ fun CameraScreen(
     // 站位提示联动（§5.1/D13）：录制窗口 = 叠加+播报+推理全停（**引擎分析槽不动**，
 // 只暂停本管线回调——MediaRecorder 面已在会话里时再摘槽重建会打断录制；停录自动恢复，
 // 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
-    LaunchedEffect(recording) { stanceCtrl.setRecordingActive(recording) }
+    LaunchedEffect(recording) { stance.setRecordingActive(recording) }
     // 前置 = 直接关闭并重置开关（D13）；同时挡住"在前置下重新开启"（方向语义只对后置成立）。
-    LaunchedEffect(lens) { stanceCtrl.setFrontLens(lens == LensType.FRONT) }
+    LaunchedEffect(lens) { stance.setFrontLens(lens == LensType.FRONT) }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
     val lockTipText = stringResource(R.string.cam_lock_tip)
@@ -755,9 +751,9 @@ fun CameraScreen(
     // ---- 站位提示的「在页/离页」接线（2026-11-07，必须排在相机 bind 之后：要引擎在）
     // 离页只停听不摘槽（设置页覆盖期间相机可被保活，但站位播报不该在别的页面响）；
     // 回场恢复；引擎重建/离页 unbind 让分析面失效时，回场自动重建 reader 再挂回去。
-    DisposableEffect(stanceCtrl) {
-        stanceCtrl.onPageEnter()
-        onDispose { stanceCtrl.onPageExit() }
+    DisposableEffect(stance) {
+        stance.onPageEnter()
+        onDispose { stance.onPageExit() }
     }
 
     // ---- 上屏面重挂（2026-10-30 黑屏三次取证）
@@ -1102,7 +1098,7 @@ fun CameraScreen(
     val glOrientation = PreviewOrientation.normalize(sensorOrientation - deviceDegrees)
     // 站位分析流的 YUV 缓冲在传感器坐标系：按同一"转正"角旋转后再推理，
     // 否则竖持时把画面上/下当左/右判（叠加框也会躺倒）。
-    LaunchedEffect(glOrientation) { stanceCtrl.setRotation(glOrientation) }
+    LaunchedEffect(glOrientation) { stance.setRotation(glOrientation) }
     LaunchedEffect(glEngine, directSink, deviceDegrees) {
         glEngine?.setDisplayDegrees(deviceDegrees)
         directSink.setDisplayDegrees(deviceDegrees)
@@ -1555,10 +1551,7 @@ fun CameraScreen(
                 // 门控用 running 而非 enabled：录制窗口/离页期间"开关仍开但已暂停"，
                 // 叠加必须一起消失（§5.1 叠加+播报+推理全停）。
                 if (stanceState.running) {
-                    StanceOverlay(
-                        output = stanceState.output,
-                        modifier = Modifier.matchParentSize()
-                    )
+                    stance.Overlay(modifier = Modifier.matchParentSize())
                 }
                 FocusBox(
                     // 锁定期的数据源切换成锁定锚点（缺省画面中心，与引擎同一口径）；未锁路径一字不动
@@ -1967,18 +1960,8 @@ fun CameraScreen(
                             onDismissRequest = { stanceControlsOpen = false },
                             properties = PopupProperties(focusable = true)
                         ) {
-                            StancePopupContent(
-                                state = stanceState,
-                                gpuAllowed = renderMode == RenderMode.GPU,
-                                modelDirText = "模型存放目录：${StanceModelPack.userExternalDir(app).absolutePath}",
-                                onEnabled = { stanceCtrl.setEnabled(app, it) },
-                                onBeta = { stanceCtrl.setBeta(app, it) },
-                                onBetaReset = { stanceCtrl.setBeta(app, StanceSpec.BETA_DEFAULT) },
-                                onMode = { m, n -> stanceCtrl.setMode(app, m, n) },
-                                onGpuMode = { stanceCtrl.setGpuMode(app, it) },
-                                onBrighten = { stanceCtrl.setBrighten(app, it) },
-                                onImportFromDir = { stanceCtrl.importFromExternalDir(app) },
-                            )
+                            // 弹窗内容经桥分发（docs/plan/33）：full=完整控制面板，lite=宣传导流卡
+                            stance.ControlsPopup(gpuAllowed = renderMode == RenderMode.GPU)
                         }
                     }
                     if (markerControlsOpen) {

@@ -317,7 +317,7 @@ class MainActivity : ComponentActivity() {
         // 站位提示是 Activity 级单例（与 CameraController 同级）：退出时释放分析线程/
         // Interpreter/SoundPool。配置变更（isFinishing=false）不释放——ViewModel 同样存活。
         if (isFinishing) {
-            com.wotagei.cam.stance.StanceController.get(this).release()
+            com.wotagei.cam.stance.StanceFeature.get(this).release()
         }
         brightnessRamp.shutdown()
         super.onDestroy()
