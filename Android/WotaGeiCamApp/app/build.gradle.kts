@@ -48,6 +48,21 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // 双 flavor（docs/plan/33，2026-11-07 用户口令）：full=有 AI 站位（模型组+推理+控件），
+    // lite=无 AI 站位（仅保留站位圆钮导流：点击弹宣传浮层）。同包名同 versionCode——
+    // 两包可互相覆盖安装（数据保留），应用内更新按 flavor 各推各包（更新互斥在更新器层）。
+    // lite 的 versionName 带 "-lite" 后缀便于辨识；versionCode 不分。
+    flavorDimensions += "ai"
+    productFlavors {
+        create("full") {
+            dimension = "ai"
+        }
+        create("lite") {
+            dimension = "ai"
+            versionNameSuffix = "-lite"
+        }
+    }
+
     if (ciAbiSplits) {
         splits {
             abi {
