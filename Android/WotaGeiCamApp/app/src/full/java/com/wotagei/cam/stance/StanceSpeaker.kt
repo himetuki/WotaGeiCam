@@ -42,15 +42,20 @@ class StanceSpeaker(context: Context) {
         }
     }
 
-    /** 播报一句话（如「2号位，往左」）→ 拆词位入队顺序播。同文本节流由引擎负责。 */
+    /**
+     * 播报一句话（如「2号位，往左」）→ 拆词位入队顺序播。同文本节流由引擎负责。
+     * **口癖「的说」是一轮的句号**（用户 r06 口径修正）：一次轮询 = 引擎把全体状态
+     * 播完（可能跨多拍多条，节流 2s/条）——本轮**静默 [END_QUIET_MS]** 后补播一次
+     * end，轮内有新句则取消计时继续播。每句都带口癖是错的（用户澄清）。
+     */
     fun speak(text: String) {
         val tokens = tokenize(text)
         if (tokens.isEmpty()) return
         pending.clear()
         pending.addAll(tokens)
-        pending.addLast("end")   // 角色口癖：每次轮询播报结尾一次（用户 r05 口径）
         queueGen++
         drain(queueGen)
+        scheduleEnd(queueGen)
     }
 
     /** 「X号位，<词>」/「缺人」/「多人」/「全员，完成」→ 词位文件名序列。 */
@@ -82,7 +87,21 @@ class StanceSpeaker(context: Context) {
         pending.removeFirst()
         if (pending.isNotEmpty()) {
             mainHandler.postDelayed({ if (gen == queueGen) drain(gen) }, WORD_GAP_MS)
+        } else {
+            scheduleEnd(gen)   // 本句播完：若静默窗内无新句 → 口癖收尾
         }
+    }
+
+    /**
+     * 口癖收尾计时：[END_QUIET_MS] 内无新播报（= 本轮确实播完了）→ 播一次「的说」。
+     * 新 speak 会使 queueGen 前进、旧计时器自动失效（轮内继续播不误触）。
+     */
+    private fun scheduleEnd(gen: Int) {
+        mainHandler.postDelayed({
+            if (gen != queueGen || pending.isNotEmpty()) return@postDelayed
+            val id = ids["end"] ?: 0
+            if (id != 0) pool.play(id, 1f, 1f, 1, 0, 1f)
+        }, END_QUIET_MS)
     }
 
     /** 作废在途队列并释放。 */
@@ -95,6 +114,9 @@ class StanceSpeaker(context: Context) {
     companion object {
         private const val TAG = "StanceSpeaker"
         const val WORD_GAP_MS = 300L
+
+        /** 口癖静默窗：本轮播完后无新句达此时长才补「的说」（须 > 节流间隔 2s，防轮内误触）。 */
+        const val END_QUIET_MS = 2400L
 
         /** 词位文件名（assets 的 voice 目录下同名点 wav；用户素材同名替换零改码）。 */
         val WORD_FILES = listOf(
