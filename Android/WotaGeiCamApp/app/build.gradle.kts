@@ -227,12 +227,13 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // 站位检测（方案 32 M2）：LiteRT(tflite)——CPU XNNPACK 兜底 + GPU delegate；
-    // minSdk 29 / arm64-v8a 满足；GPU delegate 兼容性由 GpuDelegate 内建白名单+失败回退 CPU
+    // 站位检测（方案 32 M2 / 33 flavor 化）：LiteRT(tflite)——CPU XNNPACK 兜底 + GPU delegate；
+    // **仅 full 变体携带**（lite 无 AI 站位，连依赖都不进包）；minSdk 29 / arm64-v8a 满足；
+    // GPU delegate 兼容性由 GpuDelegate 内建白名单+失败回退 CPU
     val tflite = "2.14.0"
-    implementation("org.tensorflow:tensorflow-lite:$tflite")
-    implementation("org.tensorflow:tensorflow-lite-gpu:$tflite")
-    implementation("org.tensorflow:tensorflow-lite-gpu-api:$tflite")
+    "fullImplementation"("org.tensorflow:tensorflow-lite:$tflite")
+    "fullImplementation"("org.tensorflow:tensorflow-lite-gpu:$tflite")
+    "fullImplementation"("org.tensorflow:tensorflow-lite-gpu-api:$tflite")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
