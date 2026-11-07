@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** 检测器纯函数（NMS/IoU）+ 模型组校验逻辑单测（JVM；LiteRT/AAR 类不进 JVM 测试）。 */
+/** 检测器纯函数（NMS/IoU）+ 模型组校验逻辑单测（JVM；LiteRT/AAR 类不进 JVM 测试）。testFull 源集（33）。 */
 class StanceDetectorTest {
 
     private fun box(cx: Float, cy: Float, w: Float, h: Float, score: Float) =

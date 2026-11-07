@@ -223,10 +223,20 @@ class GlowShaderTest {
         // q += dot(... + 33.33) 后 q≈68（ulp 0.0625），末式 ≈9500（ulp 8）→ fract 只剩几个离散值，
         // 整屏碎成多边形亮度拼块（真机表现即“白色三角形点云，频率越大越碎”）。
         // 修复口径：hash 全体包在 GL_FRAGMENT_PRECISION_HIGH 守卫里按 highp 算；
-        // 不支持 highp 的老设备回退 n=1.0——干净无噪光晕，绝不输出精度垃圾。
+        // 2026-11-07 Maleoon 再兼容：变量级 highp 限定符被 Maleoon 卓易通编译器拒绝
+        // （L0001: Expected literal or '(', got 'highp'）→ 精度改注入段头部
+        // precision highp float 语句覆盖（重复声明后者生效），函数体内不再写 highp。
         assertTrue(
-            "hash 必须按 highp 算（mediump/fp16 下 33.33 加法会精度击穿成三角形拼块）",
-            g.contains("highp vec3 q = fract(highp vec3(p.xyx) * highp vec3(0.1031, 0.1030, 0.0973));")
+            "hash 必须在 highp 精度上下文里算（precision highp 语句覆盖宿主 mediump）",
+            g.contains("precision highp float;")
+        )
+        assertTrue(
+            "hash 算式本体不变（fract 三元组 + 0.1031 系数族）",
+            g.contains("vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));")
+        )
+        assertFalse(
+            "变量级 highp 是 Maleoon 编译器雷区，禁止回归",
+            g.contains("highp vec3 q") || g.contains("highp vec2 hp") || g.contains("highp float(uGlowFreq)")
         )
         assertTrue(
             "freq=0 时噪声必须退化成 1（step 门保留）",

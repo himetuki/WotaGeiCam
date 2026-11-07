@@ -42,17 +42,21 @@ class DiagGuardTest {
 
     @Test
     fun `全工程只有 diag 包可以用 android_util_Log`() {
-        // 直接扫源码树：除 diag/Diag.kt 外，任何文件出现 import android.util.Log 都判失败
-        val root = com.wotagei.cam.source.KotlinSourceScan.mainSourceFile("diag/Diag.kt").parentFile!!.parentFile!!
+        // 直接扫源码树（main+full+lite 三源集，docs/plan/33 flavor 化后 stance 在 src/full）：
+        // 除 diag/Diag.kt 外，任何文件出现 import android.util.Log 都判失败
+        val roots = com.wotagei.cam.source.KotlinSourceScan.allSourceRoots()
+        assertTrue("源码根探测失败——守卫不能在没有输入的情况下算通过", roots.isNotEmpty())
         val offenders = ArrayList<String>()
-        root.walkTopDown()
-            .filter { it.isFile && it.extension == "kt" }
-            .forEach { f ->
-                val rel = f.relativeTo(root).path.replace('\\', '/')
-                if (rel.startsWith("diag/")) return@forEach
-                val text = f.readText(Charsets.UTF_8)
-                if (text.contains("import android.util.Log")) offenders.add(rel)
-            }
+        for (root in roots) {
+            root.walkTopDown()
+                .filter { it.isFile && it.extension == "kt" }
+                .forEach { f ->
+                    val rel = f.relativeTo(root).path.replace('\\', '/')
+                    if (rel.startsWith("diag/")) return@forEach
+                    val text = f.readText(Charsets.UTF_8)
+                    if (text.contains("import android.util.Log")) offenders.add(rel)
+                }
+        }
         assertTrue("除 diag 包外不许再 import android.util.Log（漏一个就丢一个子系统的日志）：$offenders", offenders.isEmpty())
     }
 

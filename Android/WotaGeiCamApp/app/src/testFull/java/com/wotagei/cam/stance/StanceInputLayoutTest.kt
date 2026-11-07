@@ -14,6 +14,7 @@ import java.nio.ByteOrder
  * 随包 yolo11n_*.tflite 经 flatbuffer 实读为 **NCHW [1,3,448,448]**，
  * 而旧实现按 NHWC 像素交错写——推理输出全错（模型几何成立但检测结果无意义）。
  * 本文件钉死"通道平面顺序"与"从张量 shape 推导布局"，防再写反。
+ * testFull 源集（docs/plan/33：StanceDetector 在 src/full，lite 变体无此类）。
  */
 class StanceInputLayoutTest {
 

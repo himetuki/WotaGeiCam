@@ -10,6 +10,8 @@ import org.junit.Test
  * 判定核心单测：与 PC 试验台 tools/stance-lab/tests/test_core.py 逐用例镜像
  * （同输入同期望，规格文档 docs/plan/32 §1~§5，D8/D10/D14/D15/D19）。
  * 时间戳单位毫秒（PC 端秒 ×1000）。
+ *
+ * 位于 testFull 源集（docs/plan/33）：判定核心类在 src/full，lite 变体无此类。
  */
 class StanceEngineTest {
 

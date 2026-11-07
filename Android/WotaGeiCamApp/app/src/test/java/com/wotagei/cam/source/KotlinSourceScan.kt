@@ -31,6 +31,18 @@ internal object KotlinSourceScan {
     private const val MAIN_SRC = "src/main/java/com/wotagei/cam"
 
     /**
+     * flavor 源集根（docs/plan/33）：full=有 AI 站位、lite=无 AI 导流。
+     * 查找顺序 main → full → lite（同相对路径时 main 优先）——stance 包迁移到
+     * full 源集后，`mainSourceText("stance/…")` 类守卫靠这里的多根回退继续工作。
+     * （路径从 MAIN_SRC 派生，不写字面量。）
+     */
+    private val SOURCE_ROOTS = listOf(
+        MAIN_SRC,
+        MAIN_SRC.replaceFirst("main", "full"),
+        MAIN_SRC.replaceFirst("main", "lite"),
+    )
+
+    /**
      * 找到主源码里的某个文件。
      *
      * 工作目录不确定（Gradle 的单元测试任务默认在 `app/`，IDE 里跑可能在工程根或仓库根），
@@ -82,6 +94,21 @@ internal object KotlinSourceScan {
             hops++
         }
         return null
+    }
+
+    /**
+     * **全部源码根**（main + 存在的 flavor 源集）——「整仓禁令」类守卫用：
+     * DiagGuardTest 的 Log 红线在 stance 迁到 full 源集后仍需覆盖 AI 子系统。
+     * 路径从主源码根同构派生（flavor 根 = 把路径中的 src/main 段换成 src/full|lite），
+     * 探测本身复用 [mainSourceRootOrNull]（四组基目录 × 上溯 5 层的既有模式）。
+     */
+    fun allSourceRoots(): List<File> {
+        val mainRoot = mainSourceRootOrNull() ?: return emptyList()
+        val mainPath = mainRoot.absolutePath
+        return SOURCE_ROOTS.map { rel ->
+            val segment = rel.substringBefore("/java/")          // "src/main" | "src/full" | "src/lite"
+            File(mainPath.replaceFirst("/src/main/", "/$segment/"))
+        }.filter { it.isDirectory }
     }
 
     /**

@@ -6,6 +6,7 @@ import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * 站位提示（方案 32）M2 运行时接线守卫（2026-11-07 修复轮）。
@@ -17,12 +18,29 @@ import org.junit.Test
  * 4) 参数热更新跨线程改判定引擎状态（偶发状态撕裂，被单帧 catch 吞掉）；
  * 5) 录制窗口误摘分析槽 → 录制中重建相机会话；离页继续播报；退出不释放。
  * 每条都钉成对源码函数体的判据（与 DenoiseWiringGuardTest 同一手法）。
+ *
+ * **flavor 源集回退（docs/plan/33）**：stance 包迁移到 src/full 后，
+ * `stance/…` 相对路径的读取走 [flavorSourceText]（main → full → lite 顺序回退）。
  */
 class StanceWiringGuardTest {
 
-    private val controller = codeOnly(mainSourceText("stance/StanceController.kt"))
-    private val analysis = codeOnly(mainSourceText("stance/StanceAnalysis.kt"))
-    private val engine = codeOnly(mainSourceText("stance/StanceEngine.kt"))
+    /** main → full 回退的源码读取（flavor 源集迁移后的 stance 专属读取器）。 */
+    private fun flavorSourceText(relativePath: String): String {
+        require(!relativePath.contains("..")) { "非法相对路径: $relativePath" }
+        val mainFile = com.wotagei.cam.source.KotlinSourceScan.mainSourceFile("WotaApp.kt")
+        // main 源码根（WotaApp.kt 所在目录）→ 规范化分隔符 → 同构替换 src/main 段 → src/full
+        val camPath = mainFile.parentFile!!.absolutePath.replace('\\', '/')
+        val f = File(
+            camPath.replaceFirst("/src/main/", "/src/full/"),
+            relativePath,
+        )
+        check(f.isFile) { "flavor 源集找不到 $relativePath（$f）" }
+        return f.readText(Charsets.UTF_8)
+    }
+
+    private val controller = codeOnly(flavorSourceText("stance/StanceController.kt"))
+    private val analysis = codeOnly(flavorSourceText("stance/StanceAnalysis.kt"))
+    private val engine = codeOnly(flavorSourceText("stance/StanceEngine.kt"))
     private val cameraCtl = codeOnly(mainSourceText("camera/CameraController.kt"))
     private val screen = codeOnly(mainSourceText("ui/CameraScreen.kt"))
     private val mainActivity = codeOnly(mainSourceText("ui/MainActivity.kt"))
@@ -75,8 +93,9 @@ class StanceWiringGuardTest {
         assertFalse("录制中调整状态而不重建会话", setEnabled.contains("setAnalysisTarget"))
         assertTrue("前置镜头不许开启（D13）", setEnabled.contains("on && frontLens"))
         val screenBody = bodyOf(screen, "CameraScreen")
-        assertTrue("录制态必须接线", screenBody.contains("stanceCtrl.setRecordingActive(recording)"))
-        assertTrue("镜头切换必须接线", screenBody.contains("stanceCtrl.setFrontLens(lens == LensType.FRONT)"))
+        // flavor 桥接（docs/plan/33）后 CameraScreen 走 StanceFeature 门面
+        assertTrue("录制态必须接线", screenBody.contains("stance.setRecordingActive(recording)"))
+        assertTrue("镜头切换必须接线", screenBody.contains("stance.setFrontLens(lens == LensType.FRONT)"))
     }
 
     @Test
@@ -86,8 +105,8 @@ class StanceWiringGuardTest {
         val exit = bodyOf(controller, "onPageExit")
         assertTrue(exit.contains("pauseListening"))
         val screenBody = bodyOf(screen, "CameraScreen")
-        assertTrue(screenBody.contains("stanceCtrl.onPageEnter()"))
-        assertTrue(screenBody.contains("stanceCtrl.onPageExit()"))
+        assertTrue(screenBody.contains("stance.onPageEnter()"))
+        assertTrue(screenBody.contains("stance.onPageExit()"))
     }
 
     @Test
@@ -102,7 +121,8 @@ class StanceWiringGuardTest {
     @Test
     fun `退出窗口释放分析线程与模型`() {
         val destroy = bodyOf(mainActivity, "onDestroy")
-        assertTrue("finish 释放站位单例", destroy.contains("StanceController.get(this).release()"))
+        // flavor 桥接后 MainActivity 走 StanceFeature 门面释放
+        assertTrue("finish 释放站位单例", destroy.contains("StanceFeature.get(this).release()"))
         val release = bodyOf(controller, "release")
         assertTrue("装配线程也要收", release.contains("resetPackScope"))
     }

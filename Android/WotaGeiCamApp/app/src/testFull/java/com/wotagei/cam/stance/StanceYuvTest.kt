@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** YUV→RGBA 与提亮的纯函数单测（小矩阵钉死；M2a 帧源规格）。 */
+/** YUV→RGBA、转正与提亮的纯函数单测（小矩阵钉死；M2a 帧源规格）。testFull 源集（33）。 */
 class StanceYuvTest {
 
     /** 2x2 半分辨率 UV 的最小 YUV_420 布局（rowStride=width、pixelStride=1）。 */
@@ -60,6 +60,7 @@ class StanceYuvTest {
         assertEquals(255, (rgba[1] shr 16) and 0xFF)
         assertEquals(160, (rgba[2] shr 8) and 0xFF)
     }
+
     // pickYuvSize 依赖 CameraCharacteristics、DEFAULT_SIZE 是 android.util.Size——
     // 两者 JVM 不可测（工程无 Robolectric），逻辑以常量兜底（任何设备均有 640x480 可用），
     // 真机冒烟覆盖。
