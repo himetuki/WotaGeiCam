@@ -263,7 +263,7 @@ object ReleaseJson {
         return ReleaseInfo(
             tag = tag,
             asset = pickApkAsset(parseAssets(json), flavor),
-            sha256 = if (extractSha256) body?.let { parseSha256FromNotes(it) } else null,
+            sha256 = if (extractSha256) body?.let { parseSha256FromNotes(it, flavor) } else null,
             notes = body
         )
     }
@@ -272,8 +272,18 @@ object ReleaseJson {
      * 从 Release 说明文本提取 SHA-256（纯函数）：找 `SHA256` 后跟冒号（中英文皆容）与空白、
      * 再跟**恰好 64** 位十六进制的第一处（尾随不能再是 hex，防 65 位串误命中前 64 位）；
      * 命中返回**小写** hex，否则 null。
+     *
+     * **flavor 互斥（docs/plan/33）**：双包发版后说明里有两行——
+     * `SHA256: <full universal 哈希>`（兼容旧格式/旧更新器）与 `SHA256-lite: <lite 哈希>`。
+     * [flavor]=lite 时**只认 `SHA256-lite:` 行**（绝不回退通用行——那可能是 full 的哈希，
+     * 错配会让 lite 更新校验必败）；full/null 先找通用行（历史语义=full 主包）。
      */
-    fun parseSha256FromNotes(notes: String): String? {
+    fun parseSha256FromNotes(notes: String, flavor: String? = null): String? {
+        if (flavor == "lite") {
+            val lite = Regex("SHA256-lite\\s*[:：]\\s*([0-9a-fA-F]{64})(?![0-9a-fA-F])").find(notes)
+                ?: return null
+            return lite.groupValues[1].lowercase()
+        }
         val m = Regex("SHA256\\s*[:：]\\s*([0-9a-fA-F]{64})(?![0-9a-fA-F])").find(notes) ?: return null
         return m.groupValues[1].lowercase()
     }

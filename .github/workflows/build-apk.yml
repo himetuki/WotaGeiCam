@@ -153,7 +153,8 @@ jobs:
           name: android-${{ github.ref_name }}-apks
           path: |
             apk-out/*.apk
-            Android/WotaGeiCamApp/app/build/outputs/mapping/release/mapping.txt
+            Android/WotaGeiCamApp/app/build/outputs/mapping/fullRelease/mapping.txt
+            Android/WotaGeiCamApp/app/build/outputs/mapping/liteRelease/mapping.txt
           if-no-files-found: error
 
       # 与 build-hap.yml 共用同一个 v* Release：谁先跑完谁创建，另一个只上传资产。
@@ -184,26 +185,33 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber
 
-          # 应用内更新从 Release 说明的 `SHA256: <64位hex>` 行取 universal 包的校验值
+          # 应用内更新从 Release 说明的 SHA256 行取 universal 包的校验值
           # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
-          # 哈希，故构建完在此回填：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行
-          # → 追加本次 universal 包的哈希。无此行的更新仍可下载，但会退回"仅大小/名称"防线。
-          UNI=$(ls apk-out/*universal-release-Android.apk | head -n 1)
+          # 哈希，故构建完在此回填。docs/plan/33 双包后说明里有两行：
+          #   SHA256:      <full universal 哈希>（兼容旧格式：旧版 full 包更新器找这行）
+          #   SHA256-lite: <lite universal 哈希>（lite 变体更新器专用行——parseSha256FromNotes
+          #                的 lite 分支只认这行，绝不回退通用行，防 full/lite 哈希错配）
+          # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加本次两枚哈希。
+          UNI=$(ls apk-out/*full*universal-release-Android.apk | head -n 1)
+          UNI_LITE=$(ls apk-out/*lite*universal-release-Android.apk | head -n 1)
           SHA=$(sha256sum "$UNI" | cut -d' ' -f1)
+          SHA_LITE=$(sha256sum "$UNI_LITE" | cut -d' ' -f1)
           BODY=/tmp/release-body.md
           if [ -f "$NOTES" ]; then
-            grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
+            grep -vE '(^|[[:space:]>*-])SHA256(-lite)?[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
           else
             gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
-              | grep -vE '(^|[[:space:]>*-])SHA256[[:space:]]*[:：]' > "$BODY" || true
+              | grep -vE '(^|[[:space:]>*-])SHA256(-lite)?[[:space:]]*[:：]' > "$BODY" || true
           fi
           # 手写说明里若已带"校验和"小节标题就不再重复加，只补哈希行
           if ! grep -qE '^##+ .*校验和' "$BODY"; then
-            printf '\n## 校验和\n\n- universal 包 SHA256：\n' >> "$BODY"
-          elif ! grep -qE 'universal 包 SHA256' "$BODY"; then
-            printf '\n- universal 包 SHA256：\n' >> "$BODY"
+            printf '\n## 校验和\n\n- full 包 SHA256：\n- lite 包 SHA256：\n' >> "$BODY"
+          else
+            grep -q 'full 包 SHA256' "$BODY" || printf '\n- full 包 SHA256：\n' >> "$BODY"
+            grep -q 'lite 包 SHA256' "$BODY" || printf '\n- lite 包 SHA256：\n' >> "$BODY"
           fi
           printf 'SHA256: %s\n' "$SHA" >> "$BODY"
+          printf 'SHA256-lite: %s\n' "$SHA_LITE" >> "$BODY"
           gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
-          echo "release body finalized from ${NOTES} with universal sha256=$SHA"
+          echo "release body finalized from ${NOTES} with full sha256=$SHA lite sha256=$SHA_LITE"
 
