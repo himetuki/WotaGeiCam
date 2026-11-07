@@ -179,6 +179,20 @@ class StanceEngineTest {
     }
 
     @Test
+    fun single_subjectRightOfRoadside_judgesSubjectNotLeftmost() {
+        // 回归（2026-11-07）：主体在右侧、路人在左侧时，旧实现按 cx 取最左 → 判路人。
+        // D9 口径是"选主（conf×框高最大）为主体，其余背景忽略"，判定对象必须与 nEffective 同源。
+        val eng = engine()
+        eng.observe(obs(0, emptyList()))
+        val roadside = b(cx = 0.2f, h = 0.12f, conf = 0.6f)
+        val subject = b(cx = 0.7f, h = 0.45f, conf = 0.84f)
+        val out = eng.observe(obs(3000, listOf(roadside, subject)))
+        assertEquals(1, out.nEffective)
+        assertEquals(0, out.extra)
+        assertEquals(subject, out.slots[0].person)
+    }
+
+    @Test
     fun extra_reportsMany_ignoresSurplus() {
         val eng = engine(n = 2)
         eng.observe(obs(0, emptyList()))           // 占节流窗

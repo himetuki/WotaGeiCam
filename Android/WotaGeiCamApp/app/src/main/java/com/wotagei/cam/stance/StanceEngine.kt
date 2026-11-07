@@ -96,10 +96,12 @@ class JudgementEngine(
         }
         val n = nConfirmed ?: return EngineOutput(nEffective = gated.size, events = events)
 
-        // D8 分形态：单人选主（其余=背景忽略，不报多人）；多人中位距离过滤
+        // D8 分形态：单人选主（其余=背景忽略，不报多人）；多人中位距离过滤。
+        // 2026-11-07 修正：单人的判定对象必须就是 selectPrimary 选出的主体——旧实现后面
+        // 按 cx 取最左，主体右侧有路人时会去判路人（与 D9「选主为主体、其余忽略」相反）。
+        val primary = if (n == 1) selectPrimary(gated) else emptyList()
         val (effective, extra) = if (n == 1) {
-            val picked = selectPrimary(gated)
-            picked.size to 0
+            primary.size to 0
         } else {
             val eff = distanceFilter(gated)
             eff.size to maxOf(0, eff.size - n)
@@ -112,7 +114,7 @@ class JudgementEngine(
             val lines = throttled(obs.tsMs, Verdict.MISSING.speak)
             return EngineOutput(lines, slots, effective, n, 0, events)
         }
-        val people = gated.sortedBy { it.cx }.take(n)
+        val people = if (n == 1) primary else gated.sortedBy { it.cx }.take(n)
         if (extra > 0) {
             // 「多人」优先占节流窗（D14 循环照播）；判定照常，多余框被忽略
             val extraLine = throttled(obs.tsMs, Verdict.EXTRA.speak)
