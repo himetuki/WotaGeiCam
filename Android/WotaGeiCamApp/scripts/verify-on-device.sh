@@ -65,8 +65,8 @@ DEBUGGABLE=0
 case "$FLAGS" in *DEBUGGABLE*) DEBUGGABLE=1;; esac
 if [ "$MERGE_STAGE" = 1 ] && [ "$DEBUGGABLE" = 0 ]; then
   fail "merge stage needs the debugHook build (MERGE_HOOK lives there). Build & install it first:
-   cd $ROOT/WotaGeiCamApp && ./gradlew --offline :app:assembleDebugHook
-   \"$ADB\" install -r app/build/outputs/apk/debugHook/app-debugHook.apk   # install -r，严禁 uninstall"
+   cd $ROOT/WotaGeiCamApp && ./gradlew --offline :app:assembleFullDebugHook
+   \"$ADB\" install -r app/build/outputs/apk/full/debugHook/app-full-debugHook.apk   # install -r，严禁 uninstall"
 fi
 
 # --- 1. 唤醒并**等你亲手解锁**（脚本不碰密码）------------------------------

@@ -87,19 +87,30 @@ jobs:
       # 所以每遍跑完立刻拷进 apk-out 暂存，最后统一校验。
       # apkBaseName=WotaGeiCam：Gradle 产物名 WotaGeiCam-v<版本>-*.apk（用户 10-25 裁决：
       # 资产名必须带项目名）。下面 Rename 步骤统一改为 WotaGeiCam-v<版本>-*-Android.apk。
-      - name: Build split APKs (universal / arm64-v8a / armeabi-v7a)
+      - name: Build split APKs (full / lite × universal / arm64-v8a / armeabi-v7a)
         working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
+          ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           mkdir -p ../../apk-out
-          cp app/build/outputs/apk/release/*.apk ../../apk-out/
+          # flavor 段插进文件名（docs/plan/33 更新互斥：full/lite 各推各包）
+          for d in full lite; do
+            for f in app/build/outputs/apk/$d/release/*.apk; do
+              b=$(basename "$f" .apk)
+              cp "$f" "../../apk-out/${b}-$d.apk"
+            done
+          done
 
       # 第二遍：不分包的普通 release（复用编译缓存，只重新打包，很快）
-      - name: Build plain release APK
+      - name: Build plain release APKs (full / lite)
         working-directory: Android/WotaGeiCamApp
         run: |
-          ./gradlew :app:assembleRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
-          cp app/build/outputs/apk/release/*.apk ../../apk-out/
+          ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
+          for d in full lite; do
+            for f in app/build/outputs/apk/$d/release/*.apk; do
+              b=$(basename "$f" .apk)
+              cp "$f" "../../apk-out/${b}-$d.apk"
+            done
+          done
 
       # 统一改名（产物最终名）：WotaGeiCam-v0.0.11-r01-release.apk → WotaGeiCam-v0.0.11-r01-release-Android.apk。
       # 剥 WotaGeiCam- 暂存前缀、在 .apk 前插平台后缀 -Android；Gradle 侧 apkBaseName 保持不动。
@@ -117,14 +128,18 @@ jobs:
           echo "renamed $renamed APK(s)"
           ls -la apk-out
 
-      - name: Verify four APKs staged
+      - name: Verify APKs staged (full / lite × splits)
         run: |
           ls -la apk-out
-          count=$(ls apk-out/*.apk | wc -l)
-          if [ "$count" -ne 4 ]; then
-            echo "::error::expected 4 APKs, got $count"
-            exit 1
-          fi
+          # docs/plan/33：full 与 lite 各自的 split 三件套 + plain 一枚 = 各 4 枚，共 8 枚；
+          # flavor 段必须在名里（更新互斥：更新器按 -full-/-lite- 匹配资产）
+          for flavor in full lite; do
+            count=$(ls apk-out/*-$flavor-Android.apk 2>/dev/null | wc -l)
+            if [ "$count" -ne 4 ]; then
+              echo "::error::expected 4 $flavor APKs, got $count"
+              exit 1
+            fi
+          done
           # 最终名必须是 WotaGeiCam-v*-Android.apk（项目名是 10-25 用户裁决，不许再丢）
           bad=$(ls apk-out/*.apk | grep -Ev '/WotaGeiCam-v[^/]*-Android\.apk$' || true)
           if [ -n "$bad" ]; then
