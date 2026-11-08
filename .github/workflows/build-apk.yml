@@ -92,11 +92,12 @@ jobs:
         run: |
           ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PabiSplits=true -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           mkdir -p ../../apk-out
-          # flavor 段插进文件名（docs/plan/33 更新互斥：full/lite 各推各包）
+          # Gradle 产物名已含 flavor 段（WotaGeiCam-v<ver>-<flavor>[-<abi>]-release.apk），
+          # cp 不得再追加 -$d——否则名变 -full-universal-release-full-（双段），
+          # 下游 Publish 定位 universal 与更新器资产匹配都会错位。
           for d in full lite; do
             for f in app/build/outputs/apk/$d/release/*.apk; do
-              b=$(basename "$f" .apk)
-              cp "$f" "../../apk-out/${b}-$d.apk"
+              cp "$f" "../../apk-out/"
             done
           done
 
@@ -107,8 +108,7 @@ jobs:
           ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PapkBaseName=WotaGeiCam $EXTRA_PROPS --stacktrace
           for d in full lite; do
             for f in app/build/outputs/apk/$d/release/*.apk; do
-              b=$(basename "$f" .apk)
-              cp "$f" "../../apk-out/${b}-$d.apk"
+              cp "$f" "../../apk-out/"
             done
           done
 
@@ -192,8 +192,16 @@ jobs:
           #   SHA256-lite: <lite universal 哈希>（lite 变体更新器专用行——parseSha256FromNotes
           #                的 lite 分支只认这行，绝不回退通用行，防 full/lite 哈希错配）
           # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加本次两枚哈希。
-          UNI=$(ls apk-out/*full*universal-release-Android.apk | head -n 1)
-          UNI_LITE=$(ls apk-out/*lite*universal-release-Android.apk | head -n 1)
+          # 资产名形态：WotaGeiCam-v<tag>-<flavor>[-<abi>]-release-Android.apk（flavor 只有一个段，
+          # 由 Gradle 产物名提供；cp 不再补 -$d）。定位不到就硬失败——绝不让空哈希进 Release 正文
+          # （r05 首推踩过：模式写死单段名却匹配不到双段名，sha256sum '' 静默产出空行）。
+          UNI=$(ls apk-out/*-full-universal-release-Android.apk 2>/dev/null | head -n 1)
+          UNI_LITE=$(ls apk-out/*-lite-universal-release-Android.apk 2>/dev/null | head -n 1)
+          if [ -z "$UNI" ] || [ -z "$UNI_LITE" ]; then
+            echo "::error::universal APK 定位失败（full='$UNI' lite='$UNI_LITE'），哈希无法回填"
+            ls -la apk-out
+            exit 1
+          fi
           SHA=$(sha256sum "$UNI" | cut -d' ' -f1)
           SHA_LITE=$(sha256sum "$UNI_LITE" | cut -d' ' -f1)
           BODY=/tmp/release-body.md

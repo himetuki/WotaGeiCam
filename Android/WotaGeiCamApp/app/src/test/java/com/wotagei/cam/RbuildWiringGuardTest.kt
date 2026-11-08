@@ -72,6 +72,19 @@ class RbuildWiringGuardTest {
             listOf("两遍构建命令都必须引用 \$EXTRA_PROPS（分包/不分包各一处），现在只有 ${countOf(text, "\$EXTRA_PROPS")} 处")
         else emptyList()
 
+    /** flavor 双包命名契约（r05 首推踩坑：cp 重复插 flavor → 双段名 → Publish 定位不到 → 空哈希） */
+    private fun missingFlavorNamingWires(text: String): List<String> = listOf(
+        text.contains("apk-out/*-full-universal-release-Android.apk") to
+            "Publish 必须按单段名定位 full universal 包（apk-out/*-full-universal-release-Android.apk）",
+        text.contains("apk-out/*-lite-universal-release-Android.apk") to
+            "Publish 必须按单段名定位 lite universal 包（apk-out/*-lite-universal-release-Android.apk）",
+        text.contains("universal APK 定位失败") to
+            "定位失败必须硬失败（不许空哈希静默进 Release 正文）"
+    ).filter { (ok, _) -> !ok }.map { (_, why) -> why } +
+        if (countOf(text, "\${b}-\$d.apk") > 0)
+            listOf("cp 不得再追加 -\$d 到产物名（Gradle 产物已含 flavor，双段名打断 Publish/更新器匹配）")
+        else emptyList()
+
     @Test
     fun `gradle侧rbuild接线在位`() {
         val missing = missingGradleWires(gradleKts)
@@ -86,6 +99,15 @@ class RbuildWiringGuardTest {
         val missing = missingWorkflowWires(workflowYml)
         assertEquals(
             ".github/workflows/build-apk.yml 的 rbuild 接线断线：\n${missing.joinToString("\n")}",
+            emptyList<String>(), missing
+        )
+    }
+
+    @Test
+    fun `flavor双包命名契约在位`() {
+        val missing = missingFlavorNamingWires(workflowYml)
+        assertEquals(
+            ".github/workflows/build-apk.yml 的 flavor 命名契约断线：\n${missing.joinToString("\n")}",
             emptyList<String>(), missing
         )
     }
@@ -106,6 +128,14 @@ class RbuildWiringGuardTest {
         assertTrue(
             "删掉 workflow 的 rbuild 提取/透传后尺子必须红（否则判据空转）",
             missingWorkflowWires(ymlMutant).isNotEmpty()
+        )
+        // flavor 命名契约的突变体：恢复"cp 追加 -$d"与旧的死模式 ls
+        val flavorMutant = workflowYml
+            .replace("apk-out/*-full-universal-release-Android.apk", "apk-out/*full*universal-release-Android.apk")
+            .replace("cp \"\$f\" \"../../apk-out/\"", "cp \"\$f\" \"../../apk-out/\${b}-\$d.apk\"")
+        assertTrue(
+            "恢复双段名/死模式后尺子必须红（否则 flavor 判据空转）",
+            missingFlavorNamingWires(flavorMutant).isNotEmpty()
         )
     }
 }

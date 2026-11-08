@@ -282,6 +282,16 @@ class UpdateLogicTest {
             "https://github.com/himetuki/WotaGeiCam/releases/download/v0.0.8-r01/WotaGeiCam-v0.0.8-r01-universal-release-Android.apk",
             UpdateConfig.directDownloadUrl("v0.0.8-r01", "WotaGeiCam-v0.0.8-r01-universal-release-Android.apk")
         )
+        // 双包 flavor 分支：flavor 段唯一 + 保留 universal（r05 首推此处曾漏 universal，
+        // 段 3 兜底 URL 会 404；CI 实际资产名 WotaGeiCam-v0.0.12-r05-full-universal-release-Android.apk）
+        assertEquals(
+            "WotaGeiCam-v0.0.12-r05-full-universal-release-Android.apk",
+            RedirectProbe.guessUniversalAssetName("v0.0.12-r05", "full")
+        )
+        assertEquals(
+            "WotaGeiCam-v0.0.12-r05-lite-universal-release-Android.apk",
+            RedirectProbe.guessUniversalAssetName("v0.0.12-r05", "lite")
+        )
     }
 
     // ------------------------------------------------------------------ 段 1→2→3 编排（网络注入假身）

@@ -472,14 +472,14 @@ object RedirectProbe {
     }
 
     /**
-     * 段 3 无 JSON 资产列表，universal 包名从 tag 推导。命名以 CI workflow（build-apk.yml 产物四件套）
-     * 为准：资产名 = `WotaGeiCam-<tag>-universal-release-Android.apk`——**项目名前缀（2026-10-25 用户
-     * 裁决：资产名必须带项目名）+ v 前缀、扩展名前平台后缀 -Android**
-     * （如 `WotaGeiCam-v0.0.11-r01-universal-release-Android.apk`）。
-     * 旧版资产（≤0.0.10-r05）不带项目名——更新器只匹配最新 release，新版上线自然切换，无兼容逻辑。
+     * 段 3 无 JSON 资产列表，universal 包名从 tag 推导。命名以 CI workflow（build-apk.yml 产物）
+     * 为准：资产名 = `WotaGeiCam-<tag>-<flavor>-universal-release-Android.apk`（双包）或
+     * `WotaGeiCam-<tag>-universal-release-Android.apk`（单包旧版）——**项目名前缀（2026-10-25 用户
+     * 裁决：资产名必须带项目名）+ v 前缀、扩展名前平台后缀 -Android、flavor 段只有一个**。
+     * （旧版资产 ≤0.0.10-r05 不带项目名——更新器只匹配最新 release，新版上线自然切换，无兼容逻辑。）
      */
     fun guessUniversalAssetName(tag: String, flavor: String? = null): String =
-        if (flavor == "full" || flavor == "lite") "WotaGeiCam-$tag-$flavor-release-Android.apk"
+        if (flavor == "full" || flavor == "lite") "WotaGeiCam-$tag-$flavor-universal-release-Android.apk"
         else "WotaGeiCam-$tag-universal-release-Android.apk"
 }
 
