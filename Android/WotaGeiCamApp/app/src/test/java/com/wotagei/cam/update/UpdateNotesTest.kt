@@ -129,6 +129,22 @@ class UpdateNotesTest {
             "安装\n\n• 升级请直接覆盖安装。",
             ReleaseNotes.forDisplay("## 安装\n\nuniversal 包 SHA256: $hashHex\n- 升级请直接覆盖安装。")
         )
+        // 专用行（SHA256-full / SHA256-lite）与三条标签行同样隐去（2026-11-09 三行口径）
+        val tri = """
+            ## 校验和
+
+            - 兼容旧版（无 flavor）lite 包 SHA256：
+            - full 包 SHA256：
+            - lite 包 SHA256：
+            SHA256: $hashHex
+            SHA256-full: ${"2".repeat(64)}
+            SHA256-lite: ${"3".repeat(64)}
+            - 升级请直接覆盖安装。
+        """.trimIndent()
+        assertEquals(
+            "校验和\n\n• 升级请直接覆盖安装。",
+            ReleaseNotes.forDisplay(tri)
+        )
     }
 
     @Test

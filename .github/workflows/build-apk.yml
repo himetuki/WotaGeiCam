@@ -128,11 +128,36 @@ jobs:
           echo "renamed $renamed APK(s)"
           ls -la apk-out
 
-      - name: Verify APKs staged (full / lite × splits)
+      # 旧版兼容四件套（2026-11-09 用户裁决：≤v0.0.12-r01 的更新器没有 flavor 概念）：
+      # 把 lite 的 4 枚复制成**无 flavor 段**的旧命名（内容=lite）。
+      # 旧版两条路都会命中：段 1/2 挑「第一个含 universal 的资产」、段 3 按 tag 硬拼
+      # `WotaGeiCam-<tag>-universal-release-Android.apk`。正文通用 `SHA256:` 行因此必须是
+      # lite 哈希（回填见 Publish）；旧命名组的**上传顺序在 Publish 里排在其它 8 枚之前**，
+      # 保证"第一个 universal"就是这枚。
+      - name: Stage legacy-named lite copies (no flavor segment)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          staged=0
+          for f in apk-out/WotaGeiCam-v*-lite-*-Android.apk; do
+            dst="${f//-lite-/}"
+            cp "$f" "$dst"
+            cmp -s "$f" "$dst" || { echo "::error::legacy copy differs: $dst"; exit 1; }
+            staged=$((staged + 1))
+          done
+          if [ "$staged" -ne 4 ]; then
+            echo "::error::expected 4 legacy-named lite APKs, got $staged"
+            ls -la apk-out
+            exit 1
+          fi
+          echo "staged $staged legacy-named lite APK(s)"
+          ls -la apk-out
+
+      - name: Verify APKs staged (full / lite × splits + legacy)
         run: |
           ls -la apk-out
-          # docs/plan/33：full 与 lite 各自的 split 三件套 + plain 一枚 = 各 4 枚，共 8 枚；
-          # flavor 段必须在名里（更新互斥：更新器按 -full-/-lite- 匹配资产）。
+          # 12 枚口径（2026-11-09）：full 四件套 + lite 四件套 + 旧命名 lite 四件套。
+          # docs/plan/33：各 flavor 的 split 三件套 + plain 一枚 = 4；
           # 名形 -<flavor>[-<abi>]-release-Android.apk → flavor 后还有 release 段，
           # 故 glob 必须用 *-$flavor-*-Android.apk（r05 复推踩过：旧双段名恰好让
           # *-$flavor-Android.apk 命中尾部 flavor，单段名后该模式恒 0 枚）。
@@ -143,6 +168,18 @@ jobs:
               exit 1
             fi
           done
+          # 旧命名四件套（无 flavor 段，内容=lite）：旧版更新器的兼容入口
+          legacy=$(ls apk-out/*.apk 2>/dev/null | grep -v -- '-full-' | grep -v -- '-lite-' | wc -l)
+          if [ "$legacy" -ne 4 ]; then
+            echo "::error::expected 4 legacy-named lite APKs, got $legacy"
+            ls -la apk-out
+            exit 1
+          fi
+          total=$(ls apk-out/*.apk 2>/dev/null | wc -l)
+          if [ "$total" -ne 12 ]; then
+            echo "::error::expected 12 staged APKs, got $total"
+            exit 1
+          fi
           # 最终名必须是 WotaGeiCam-v*-Android.apk（项目名是 10-25 用户裁决，不许再丢）
           bad=$(ls apk-out/*.apk | grep -Ev '/WotaGeiCam-v[^/]*-Android\.apk$' || true)
           if [ -n "$bad" ]; then
@@ -186,43 +223,70 @@ jobs:
                 || gh release view "$GITHUB_REF_NAME" >/dev/null
             fi
           fi
-          gh release upload "$GITHUB_REF_NAME" apk-out/*.apk --clobber
-
-          # 应用内更新从 Release 说明的 SHA256 行取 universal 包的校验值
-          # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
-          # 哈希，故构建完在此回填。docs/plan/33 双包后说明里有两行：
-          #   SHA256:      <full universal 哈希>（兼容旧格式：旧版 full 包更新器找这行）
-          #   SHA256-lite: <lite universal 哈希>（lite 变体更新器专用行——parseSha256FromNotes
-          #                的 lite 分支只认这行，绝不回退通用行，防 full/lite 哈希错配）
-          # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加本次两枚哈希。
-          # 资产名形态：WotaGeiCam-v<tag>-<flavor>[-<abi>]-release-Android.apk（flavor 只有一个段，
-          # 由 Gradle 产物名提供；cp 不再补 -$d）。定位不到就硬失败——绝不让空哈希进 Release 正文
-          # （r05 首推踩过：模式写死单段名却匹配不到双段名，sha256sum '' 静默产出空行）。
-          UNI=$(ls apk-out/*-full-universal-release-Android.apk 2>/dev/null | head -n 1)
-          UNI_LITE=$(ls apk-out/*-lite-universal-release-Android.apk 2>/dev/null | head -n 1)
-          if [ -z "$UNI" ] || [ -z "$UNI_LITE" ]; then
-            echo "::error::universal APK 定位失败（full='$UNI' lite='$UNI_LITE'），哈希无法回填"
+          # 上传顺序（2026-11-09 12 枚口径）：旧命名 lite 四件套**先传**、其余 8 枚后传。
+          # 旧版更新器挑「第一个含 universal 的资产」，必须先看到旧命名那枚（内容=lite），
+          # 否则会挑到 full 版而正文通用哈希行是 lite → 校验必败。
+          shopt -s nullglob
+          legacy=(); rest=()
+          for f in apk-out/*.apk; do
+            case "$(basename "$f")" in
+              *-full-*|*-lite-*) rest+=("$f") ;;
+              *) legacy+=("$f") ;;
+            esac
+          done
+          if [ "${#legacy[@]}" -ne 4 ]; then
+            echo "::error::旧命名 APK 组应为 4 枚，实为 ${#legacy[@]}"
             ls -la apk-out
             exit 1
           fi
-          SHA=$(sha256sum "$UNI" | cut -d' ' -f1)
-          SHA_LITE=$(sha256sum "$UNI_LITE" | cut -d' ' -f1)
+          gh release upload "$GITHUB_REF_NAME" "${legacy[@]}" --clobber
+          gh release upload "$GITHUB_REF_NAME" "${rest[@]}" --clobber
+
+          # 应用内更新从 Release 说明的 SHA256 行取 universal 包的校验值
+          # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
+          # 哈希，故构建完在此回填。**三行语义（2026-11-09 用户裁决）**：
+          #   SHA256:      <旧命名 lite universal 哈希>——旧版更新器（≤v0.0.12-r01，无 flavor 概念）
+          #                唯一认识的一行；它下载的正是旧命名 lite 包，故哈希必须=该包内容。
+          #   SHA256-full: <full universal 哈希>——full 变体专用行（只认本行，不回退通用行）。
+          #   SHA256-lite: <lite universal 哈希>——lite 变体专用行（只认本行）。
+          # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加本次三行。
+          # 资产名形态：WotaGeiCam-v<tag>-<flavor>[-<abi>]-release-Android.apk（flavor 只有一个段）。
+          # 定位不到或不一致就硬失败——绝不让空哈希/错配哈希进 Release 正文
+          # （r05 首推踩过：模式写死单段名却匹配不到双段名，sha256sum '' 静默产出空行）。
+          FULL_UNI=$(ls apk-out/*-full-universal-release-Android.apk 2>/dev/null | head -n 1)
+          LITE_UNI=$(ls apk-out/*-lite-universal-release-Android.apk 2>/dev/null | head -n 1)
+          LEGACY_UNI=$(ls apk-out/*.apk 2>/dev/null | grep -v -- '-full-' | grep -v -- '-lite-' \
+            | grep -- '-universal-release-Android.apk$' | head -n 1)
+          if [ -z "$FULL_UNI" ] || [ -z "$LITE_UNI" ] || [ -z "$LEGACY_UNI" ]; then
+            echo "::error::universal APK 定位失败（full='$FULL_UNI' lite='$LITE_UNI' legacy='$LEGACY_UNI'），哈希无法回填"
+            ls -la apk-out
+            exit 1
+          fi
+          cmp -s "$LITE_UNI" "$LEGACY_UNI" || {
+            echo "::error::旧命名 universal 与 lite universal 内容不一致"
+            exit 1
+          }
+          SHA_FULL=$(sha256sum "$FULL_UNI" | cut -d' ' -f1)
+          SHA_LITE=$(sha256sum "$LITE_UNI" | cut -d' ' -f1)
+          SHA_COMPAT="$SHA_LITE"
           BODY=/tmp/release-body.md
           if [ -f "$NOTES" ]; then
-            grep -vE '(^|[[:space:]>*-])SHA256(-lite)?[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
+            grep -vE '(^|[[:space:]>*-])SHA256(-full|-lite)?[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
           else
             gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
-              | grep -vE '(^|[[:space:]>*-])SHA256(-lite)?[[:space:]]*[:：]' > "$BODY" || true
+              | grep -vE '(^|[[:space:]>*-])SHA256(-full|-lite)?[[:space:]]*[:：]' > "$BODY" || true
           fi
-          # 手写说明里若已带"校验和"小节标题就不再重复加，只补哈希行
+          # 手写说明里若已带"校验和"小节标题就不再重复加，只补标签行
           if ! grep -qE '^##+ .*校验和' "$BODY"; then
-            printf '\n## 校验和\n\n- full 包 SHA256：\n- lite 包 SHA256：\n' >> "$BODY"
+            printf '\n## 校验和\n\n- 兼容旧版（无 flavor）lite 包 SHA256：\n- full 包 SHA256：\n- lite 包 SHA256：\n' >> "$BODY"
           else
+            grep -q '兼容旧版（无 flavor）lite 包 SHA256' "$BODY" || printf '\n- 兼容旧版（无 flavor）lite 包 SHA256：\n' >> "$BODY"
             grep -q 'full 包 SHA256' "$BODY" || printf '\n- full 包 SHA256：\n' >> "$BODY"
             grep -q 'lite 包 SHA256' "$BODY" || printf '\n- lite 包 SHA256：\n' >> "$BODY"
           fi
-          printf 'SHA256: %s\n' "$SHA" >> "$BODY"
+          printf 'SHA256: %s\n' "$SHA_COMPAT" >> "$BODY"
+          printf 'SHA256-full: %s\n' "$SHA_FULL" >> "$BODY"
           printf 'SHA256-lite: %s\n' "$SHA_LITE" >> "$BODY"
           gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
-          echo "release body finalized from ${NOTES} with full sha256=$SHA lite sha256=$SHA_LITE"
+          echo "release body finalized: compat(lite)=$SHA_COMPAT full=$SHA_FULL lite=$SHA_LITE"
 

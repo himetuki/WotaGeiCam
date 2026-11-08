@@ -49,6 +49,30 @@ class UpdateSha256Test {
         assertNull("空文本不命中", ReleaseJson.parseSha256FromNotes(""))
     }
 
+    /**
+     * 三行语义（2026-11-09 用户裁决：旧版兼容包=lite）：
+     * 通用行服务旧版（无 flavor），必须=lite；full 只认 `SHA256-full:`（绝不回退通用行，
+     * 否则 full 必错配）；lite 只认 `SHA256-lite:`。
+     */
+    @Test
+    fun `说明提取_三行语义_通用行归旧版_full与lite各认专用行`() {
+        val compat = "1111111111111111111111111111111111111111111111111111111111111111"
+        val full = "2222222222222222222222222222222222222222222222222222222222222222"
+        val lite = "3333333333333333333333333333333333333333333333333333333333333333"
+        val notes = "AI 站位提示\n## 校验和\n" +
+            "- 兼容旧版（无 flavor）lite 包 SHA256：\n- full 包 SHA256：\n- lite 包 SHA256：\n" +
+            "SHA256: $compat\nSHA256-full: $full\nSHA256-lite: $lite"
+        // 旧版（无 flavor / null）= 通用行（它下载的旧命名包正是 lite 内容）
+        assertEquals(compat, ReleaseJson.parseSha256FromNotes(notes))
+        assertEquals(full, ReleaseJson.parseSha256FromNotes(notes, "full"))
+        assertEquals(lite, ReleaseJson.parseSha256FromNotes(notes, "lite"))
+        // full 缺专用行时必须判无哈希：绝不回退通用行（那行是 lite 哈希 → 必然错配）
+        val noFullLine = notes.lines().filterNot { it.startsWith("SHA256-full:") }.joinToString("\n")
+        assertNull("full 缺专用行不许回退通用行", ReleaseJson.parseSha256FromNotes(noFullLine, "full"))
+        val noLiteLine = notes.lines().filterNot { it.startsWith("SHA256-lite:") }.joinToString("\n")
+        assertNull("lite 缺专用行必须判无哈希", ReleaseJson.parseSha256FromNotes(noLiteLine, "lite"))
+    }
+
     // ------------------------------------------------------------------ 段1/段2 信任边界
 
     private fun jsonWithBody(body: String) =

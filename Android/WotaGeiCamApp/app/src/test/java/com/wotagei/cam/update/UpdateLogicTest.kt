@@ -231,6 +231,39 @@ class UpdateLogicTest {
         assertNull(ReleaseJson.parse("""{"assets": []}"""))
     }
 
+    /** 选包口径（12 枚资产，2026-11-09）：flavor 组内 universal 优先；旧版（无 flavor）命中旧命名
+     * universal（CI 上传顺序把旧命名组排在前面，所以"第一个 universal"就是它）。 */
+    @Test
+    fun `选包_12枚资产_full与lite各取universal_旧版取旧命名universal`() {
+        val names = listOf(
+            // 旧命名 lite 四件（CI 先上传）
+            "WotaGeiCam-v0.0.12-r05-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-armeabi-v7a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-universal-release-Android.apk",
+            // full 四件
+            "WotaGeiCam-v0.0.12-r05-full-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-full-armeabi-v7a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-full-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-full-universal-release-Android.apk",
+            // lite 四件
+            "WotaGeiCam-v0.0.12-r05-lite-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-lite-armeabi-v7a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-lite-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r05-lite-universal-release-Android.apk",
+        )
+        val assets = names.map { ReleaseAsset(it, "https://x/$it", 1L) }
+        assertEquals("full 必须取 universal（不是字母序在前的 arm64 分包）", names[7],
+            ReleaseJson.pickApkAsset(assets, "full")?.name)
+        assertEquals("lite 必须取 universal", names[11],
+            ReleaseJson.pickApkAsset(assets, "lite")?.name)
+        assertEquals("旧版（无 flavor）必须取旧命名 universal", names[3],
+            ReleaseJson.pickApkAsset(assets)?.name)
+        // 组内只有分包时退回该组第一个（不跨组、不放空）
+        assertEquals(names[4], ReleaseJson.pickApkAsset(listOf(assets[4], assets[5]), "full")?.name)
+        assertEquals(names[8], ReleaseJson.pickApkAsset(listOf(assets[8], assets[9]), "lite")?.name)
+    }
+
     /** 突变自证：JSON 里 tag 换掉，提取必须跟着变（防提取器把常量焊死） */
     @Test
     fun `JSON提取尺子自己能红_tag变化必须被提取出来`() {

@@ -81,7 +81,16 @@ class RbuildWiringGuardTest {
         text.contains("universal APK 定位失败") to
             "定位失败必须硬失败（不许空哈希静默进 Release 正文）",
         text.contains("apk-out/*-\$flavor-*-Android.apk") to
-            "Verify 计数 glob 必须允许 flavor 与 -Android 之间的 release 段（*-<flavor>-*-Android.apk）"
+            "Verify 计数 glob 必须允许 flavor 与 -Android 之间的 release 段（*-<flavor>-*-Android.apk）",
+        // 12 枚口径（2026-11-09）：旧版无 flavor 更新器靠旧命名 lite 四件套 + 通用 SHA256 行
+        text.contains("Stage legacy-named lite copies") to
+            "旧命名 lite 副本步骤必须在位（旧版更新器的兼容入口，内容=lite）",
+        text.contains("expected 12 staged APKs") to
+            "staged APK 总数必须校验为 12（full4 + lite4 + 旧命名 lite4）",
+        text.contains("SHA256-full: %s") to
+            "正文必须回填 SHA256-full 专用行（full 变体只认这行）",
+        text.contains("\"\${legacy[@]}\"") to
+            "旧命名组必须先上传（旧版挑第一个含 universal 的资产，必须是 lite 内容那枚）"
     ).filter { (ok, _) -> !ok }.map { (_, why) -> why } +
         if (countOf(text, "\${b}-\$d.apk") > 0)
             listOf("cp 不得再追加 -\$d 到产物名（Gradle 产物已含 flavor，双段名打断 Publish/更新器匹配）")

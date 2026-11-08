@@ -180,11 +180,12 @@
 | `WotaGeiCam-vX.X.X-rYY-full-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-full-universal-release-Android.apk` | Android full：全设备通用，**含 AI 站位提示**（拿不准选 universal） |
 | `WotaGeiCam-vX.X.X-rYY-lite-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-lite-universal-release-Android.apk` | Android lite：**无 AI 站位**（体积小约 21MB；与 full 可互相覆盖安装保留数据，更新各推各包） |
 | `WotaGeiCam-vX.X.X-rYY-full-arm64-v8a-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-full-armeabi-v7a-release-Android.apk` | Android full：按 ABI 分包（lite 同样有分包，命名把 full 换 lite） |
+| `WotaGeiCam-vX.X.X-rYY-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-universal-release-Android.apk`（及 `-arm64-v8a-` / `-armeabi-v7a-` 分包） | **兼容旧版**：无 flavor 段、**内容 = lite**——给 v0.0.12-r01 及更早版本的应用内自动更新用（那时的更新器只认识这种文件名）；手动下载请优先选上表的 full / lite |
 | `WotaGeiCam-vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS（未配置签名 Secrets 时产出；见下节安装注意）——当前与 lite 同功能口径 |
 
 配置 HAP 签名 Secrets 后，Release 里会另有 `vX.X.X-rYY-signed-Harmony.hap`，并附 `SHA256SUMS`。
 
-文件名中的 `X.X.X-rYY` 即完整版本名，`r` 后的数字是检查点序号，越大越新；应用内「检查更新」按同一规则比较，并按包类型（full / lite）只推对应安装包。历史版本（`v0.0.9-r05` 及更早）使用旧命名 `WotaGeiCam-vX.Y.Z-*.apk`，且只有 Android 四件套。
+文件名中的 `X.X.X-rYY` 即完整版本名，`r` 后的数字是检查点序号，越大越新；应用内「检查更新」按同一规则比较，并按包类型（full / lite）只推对应安装包。v0.0.12-r05 起一个版本共 12 枚 Android APK（full 4 + lite 4 + 兼容旧版 4）；**旧版（≤r01）自动更新会落到"兼容旧版"组（=lite 内容）**。应用内更新会依次尝试多个公共加速节点并按实测速度重排，节点失效自动跳过；全部失败请手动下载。历史版本（`v0.0.9-r05` 及更早）使用旧命名 `WotaGeiCam-vX.Y.Z-*.apk`，且只有 Android 四件套。
 
 ## 安装与升级
 
