@@ -90,7 +90,9 @@ class RbuildWiringGuardTest {
         text.contains("SHA256-full: %s") to
             "正文必须回填 SHA256-full 专用行（full 变体只认这行）",
         text.contains("\"\${legacy[@]}\"") to
-            "旧命名组必须先上传（旧版挑第一个含 universal 的资产，必须是 lite 内容那枚）"
+            "旧命名组必须先上传（旧版挑第一个含 universal 的资产，必须是 lite 内容那枚）",
+        text.contains("gh release upload \"\$GITHUB_REF_NAME\" \"\$f\" --clobber") to
+            "资产必须逐枚串行上传（gh 多文件上传会并发导致创建时间乱序，顺序契约随之失效）"
     ).filter { (ok, _) -> !ok }.map { (_, why) -> why } +
         if (countOf(text, "\${b}-\$d.apk") > 0)
             listOf("cp 不得再追加 -\$d 到产物名（Gradle 产物已含 flavor，双段名打断 Publish/更新器匹配）")

@@ -241,8 +241,16 @@ jobs:
             ls -la apk-out
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${legacy[@]}" --clobber
-          gh release upload "$GITHUB_REF_NAME" "${rest[@]}" --clobber
+          # 逐个上传（串行）：`gh release upload` 传多文件时会**并发**，资产创建时间乱序——
+          # 旧版更新器按「API 列表里第一个含 universal 的资产」挑包，必须保证旧命名组先落库。
+          # （2026-11-09 实测踩过：批量上传后 legacy universal 被排到最后，第一个 universal 变成
+          #  full 版；哈希拦截会判失败，但用户看到的是"更新失败"而不是"拿到 lite"。）
+          for f in "${legacy[@]}"; do
+            gh release upload "$GITHUB_REF_NAME" "$f" --clobber
+          done
+          for f in "${rest[@]}"; do
+            gh release upload "$GITHUB_REF_NAME" "$f" --clobber
+          done
 
           # 应用内更新从 Release 说明的 SHA256 行取 universal 包的校验值
           # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
