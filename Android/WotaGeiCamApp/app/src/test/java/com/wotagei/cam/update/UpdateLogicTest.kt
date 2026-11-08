@@ -231,16 +231,15 @@ class UpdateLogicTest {
         assertNull(ReleaseJson.parse("""{"assets": []}"""))
     }
 
-    /** 选包口径（12 枚资产，2026-11-09）：flavor 组内 universal 优先；旧版（无 flavor）命中旧命名
-     * universal（CI 上传顺序把旧命名组排在前面，所以"第一个 universal"就是它）。 */
+    /** 选包口径（9 枚资产，2026-11-09 用户裁决）：flavor 组内 universal 优先；旧版（无 flavor）
+     * 必须命中 compat 那枚——GitHub 的 assets 数组**按名字排序**返回，`-compat-` 字母序最前
+     * （'c' < 'f'(full) < 'l'(lite) < 'u'(universal)），所以"第一个含 universal 的资产"恒为它。 */
     @Test
-    fun `选包_12枚资产_full与lite各取universal_旧版取旧命名universal`() {
+    fun `选包_9枚资产_full与lite各取universal_旧版取compat包`() {
+        // 顺序 = GitHub API 返回顺序（按名字排序），不是上传顺序
         val names = listOf(
-            // 旧命名 lite 四件（CI 先上传）
-            "WotaGeiCam-v0.0.12-r05-arm64-v8a-release-Android.apk",
-            "WotaGeiCam-v0.0.12-r05-armeabi-v7a-release-Android.apk",
-            "WotaGeiCam-v0.0.12-r05-release-Android.apk",
-            "WotaGeiCam-v0.0.12-r05-universal-release-Android.apk",
+            // compat 兼容包（内容=lite）
+            "WotaGeiCam-v0.0.12-r05-compat-universal-release-Android.apk",
             // full 四件
             "WotaGeiCam-v0.0.12-r05-full-arm64-v8a-release-Android.apk",
             "WotaGeiCam-v0.0.12-r05-full-armeabi-v7a-release-Android.apk",
@@ -253,15 +252,15 @@ class UpdateLogicTest {
             "WotaGeiCam-v0.0.12-r05-lite-universal-release-Android.apk",
         )
         val assets = names.map { ReleaseAsset(it, "https://x/$it", 1L) }
-        assertEquals("full 必须取 universal（不是字母序在前的 arm64 分包）", names[7],
+        assertEquals("full 必须取 universal（不是字母序在前的 arm64 分包）", names[4],
             ReleaseJson.pickApkAsset(assets, "full")?.name)
-        assertEquals("lite 必须取 universal", names[11],
+        assertEquals("lite 必须取 universal", names[8],
             ReleaseJson.pickApkAsset(assets, "lite")?.name)
-        assertEquals("旧版（无 flavor）必须取旧命名 universal", names[3],
+        assertEquals("旧版（无 flavor）必须取 compat 包（=lite 内容）", names[0],
             ReleaseJson.pickApkAsset(assets)?.name)
         // 组内只有分包时退回该组第一个（不跨组、不放空）
-        assertEquals(names[4], ReleaseJson.pickApkAsset(listOf(assets[4], assets[5]), "full")?.name)
-        assertEquals(names[8], ReleaseJson.pickApkAsset(listOf(assets[8], assets[9]), "lite")?.name)
+        assertEquals(names[1], ReleaseJson.pickApkAsset(listOf(assets[1], assets[2]), "full")?.name)
+        assertEquals(names[5], ReleaseJson.pickApkAsset(listOf(assets[5], assets[6]), "lite")?.name)
     }
 
     /** 突变自证：JSON 里 tag 换掉，提取必须跟着变（防提取器把常量焊死） */
