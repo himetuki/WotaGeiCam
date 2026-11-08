@@ -490,12 +490,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     @Volatile
     private var glowParams = GlowParams.DEFAULT
 
-    /** 预换算的光晕 tint（`glowRgb` 只在参数变化时调，帧路径零分配；白 = 恒等 = 跟随原色） */
-    @Volatile
-    private var glowTint = glowRgb(GlowParams.DEFAULT.color)
-    /** true = 仅色盘颜色（拷贝趟已上色，主 pass 的 tint 必须传白，否则会二次染色） */
-    private var glowColorOnly = false
-    /** tint 恒等（白）：colorOnly 模式下主 pass 用（单元口径，不改变颜色） */
+    /**
+     * 合成趟 tint 恒等（白）。颜色**只**由拷贝趟的 `mix(c, uTint, uColorOnly)` 决定
+     * （false = 像素自身颜色 / true = 色盘颜色），模糊不改色 ⇒ 合成趟再乘任何非白 tint
+     * 都是把整圈光晕重新染色。2026-11-08 修复：旧实现 colorOnly=false 时传色盘色，
+     * 导致"像素自身颜色"模式下色盘一动光晕就跟着变色。
+     */
     private val GLOW_TINT_WHITE = floatArrayOf(1f, 1f, 1f)
 
     /**
@@ -2417,8 +2417,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uGlowFreq >= 0) GLES20.glUniform1f(p.uGlowFreq, glowParams.freq)
             if (p.uGlowBlend >= 0) GLES20.glUniform1f(p.uGlowBlend, glowParams.blend)
             if (p.uGlowTint >= 0) {
-                // colorOnly 时颜色已在拷贝趟按亮部采样，主 pass 传白避免二次染色
-                val t = if (glowColorOnly) GLOW_TINT_WHITE else glowTint
+                // 颜色已在拷贝趟按 uGlowColorOnly 定死（像素自身色 / 色盘色），主 pass tint 恒白
+                //（见 GLOW_TINT_WHITE 注；2026-11-08 修复 colorOnly=false 误传色盘色）
+                val t = GLOW_TINT_WHITE
                 GLES20.glUniform3f(p.uGlowTint, t[0], t[1], t[2])
             }
             // 2026-10-28：同色光晕——不再上传色带两端色（见 Shaders.applyGlow 的注释）
@@ -2562,9 +2563,6 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val next = params.sanitize()
         val wasOn = glowParams.enabled
         glowParams = next
-        // tint 预换算（颜色只在参数变化时算一次，帧路径零分配）
-        glowTint = glowRgb(next.color)
-        glowColorOnly = next.colorOnly
         if (!next.enabled || wasOn) return
         postGl {
             // 显式开启 = 给含 glow 维度的坏键一次重试（同一坏键不逐帧重试的口径不变）

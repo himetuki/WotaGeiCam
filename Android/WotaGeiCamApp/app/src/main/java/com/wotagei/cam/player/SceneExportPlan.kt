@@ -5,7 +5,6 @@ import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.VideoDenoise
 import com.wotagei.cam.core.decodeEcho
 import com.wotagei.cam.core.decodeGlow
-import com.wotagei.cam.core.glowRgb
 
 /**
  * 「内置播放器内后渲染导出」的**纯决策层**（2026-10-28 用户需求）：
@@ -38,9 +37,6 @@ data class SceneExportEffects(
      * （后渲染模式本身仍可选——那是进面板内开效果的唯一入口，见 [clipExportReady]）
      */
     val active: Boolean get() = glow != null || denoise || echo != null
-
-    /** 真实节点用的 tint（白 = 跟随原色） */
-    val glowTint: FloatArray get() = glowRgb(glow?.color ?: 0xFFFFFFFFL)
 }
 
 /**

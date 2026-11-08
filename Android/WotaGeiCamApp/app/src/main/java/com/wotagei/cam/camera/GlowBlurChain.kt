@@ -167,11 +167,12 @@ internal class GlowBlurChain(
      * @param frameWidthPx 相机帧宽（= 录制档；Glow 分档按它算，不按上屏档）
      * @param frameHeightPx 相机帧高
      * @param scale [com.wotagei.cam.core.glowScaleFor] 的分档（1/2/4）
-     * @param widthParam `GlowParams.width`（0..0.2，RT 短边为单位）
+     * @param widthParam `GlowParams.width`（0..0.08，RT 短边为单位；2026-11-08 由 0..0.2 收窄）
      * @param thresholdParam `GlowParams.threshold`（**亮部判定**：拷贝趟的 smoothstep 下界中心）
      * @param softParam `GlowParams.soft`（过渡带半宽；0 = 硬切；阈值接近 1 时在拷贝趟里向 1.0 收敛）
-     * @param tintParam 光晕颜色（`GlowParams.color` 的 RGB；`colorOnly=false` 时消费方需传白=不改变）
-     * @param colorOnlyParam true = 亮部直接取 tint 色（仅色盘颜色），false = 乘回原色
+     * @param tintParam 光晕颜色（`GlowParams.color` 的 RGB；**只在 colorOnly=true 时被采样**——
+     *   拷贝趟的 `mix(c, uTint, uColorOnly)` 在 false 时忽略 tint，传什么都行）
+     * @param colorOnlyParam true = 亮部直接取 tint 色（仅色盘颜色），false = 保留像素自身颜色
      * @return true = 本帧产出了可采样的光晕图
      */
     fun draw(

@@ -1459,13 +1459,14 @@ private fun ExportEffectConfig(
         )
     }
     if (glow.enabled) {
-        // 阈值 60..100（100% = 只给最亮像素加光晕）；强度/混合与录制页同名同义
+        // 阈值 80..100（2026-11-08 与录制页同口径收窄+细化：步长 5→1；100% = 只给最亮像素加光晕）；
+        // 强度/混合与录制页同名同义
         PillSlider(
-            value = glow.threshold * 100f, lo = 60f, hi = 100f,
+            value = glow.threshold * 100f, lo = 80f, hi = 100f,
             onValueChange = { onGlowChange(glow.copy(threshold = it / 100f)) },
             snapKey = null,
-            ladder = percentLadder(60, 100, 5),
-            step = 5f,
+            ladder = percentLadder(80, 100, 1),
+            step = 1f,
             label = stringResource(R.string.player_clip_cfg_threshold),
             format = { String.format(java.util.Locale.US, "%.0f%%", it) }
         )

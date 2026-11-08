@@ -121,9 +121,11 @@ internal object Shaders {
     """.trimIndent()
 
     /**
-     * 后渲染导出的**亮部提取**（2D 输入）：`c * smoothstep(threshold±soft, luma)`——
-     * 与 `GlowBlurChain` 的拷贝趟（GLOW_COPY_FS）同口径：乘回原色 ⇒ 光晕是原色的，
-     * 换成 tint 只由合成趟做（见 [SCENE_COMPOSITE_FS]）。
+     * 后渲染导出的**亮部提取**（2D 输入）：`pick * smoothstep(threshold±soft, luma)`——
+     * 与 `GlowBlurChain` 的拷贝趟（GLOW_COPY_FS）同口径。**光晕颜色在这里定死**（2026-10-29 起）：
+     * `pick = mix(c, uTint, uColorOnly)`，false = 像素自身颜色 / true = 色盘颜色；
+     * 合成趟 tint 恒白不再染色（2026-11-08 修复——旧口径"换成 tint 由合成趟做"正是
+     * 「像素自身颜色模式下色盘还在影响光晕」的根源，见 SceneExportGl.TINT_WHITE）。
      */
     val SCENE_BRIGHT_FS = """
         precision mediump float;

@@ -14,22 +14,22 @@ import org.junit.Test
 /**
  * Glow 参数模型的两条 2026-10-29 用户口径（纯 JVM）：
  *
- * 1. **亮度阈值域 60~100%**：100% = 只给画面里最亮的像素加光晕（软边在着色器里朝 1.0 收敛，
- *    见 GlowShaderTest）；低端不再允许 0（整帧发光没有意义）。
+ * 1. **亮度阈值域 80~100%**（2026-11-08 由 60~100 收窄——低段只出整屏薄雾）：100% = 只给画面里
+ *    最亮的像素加光晕（软边在着色器里朝 1.0 收敛，见 GlowShaderTest）；0 依旧不允许（整帧发光没有意义）。
  * 2. **光晕颜色模式**：关闭 = 亮部发像素自身颜色；开启 = 仅色盘选中颜色。落盘为可选键
  *    `coloronly`（旧串缺键 = 关闭，向后兼容；在但坏值 = 整串回默认，与 color 同一条"坏值不许猜"）。
  */
 class GlowModelTest {
 
     @Test
-    fun `阈值域与默认值都在60到100之间`() {
-        assertEquals(0.6f, GLOW_THRESHOLD_MIN, 1e-6f)
+    fun `阈值域与默认值都在80到100之间`() {
+        assertEquals(0.8f, GLOW_THRESHOLD_MIN, 1e-6f)
         assertEquals(1f, GLOW_THRESHOLD_MAX, 1e-6f)
         val d = GlowParams.DEFAULT
         assertTrue("默认阈值必须在域内", d.threshold in GLOW_THRESHOLD_MIN..GLOW_THRESHOLD_MAX)
-        assertEquals("0 阈值必须被钳到域下界", 0.6f, GlowParams(threshold = 0f).sanitize().threshold, 1e-6f)
+        assertEquals("0 阈值必须被钳到域下界", 0.8f, GlowParams(threshold = 0f).sanitize().threshold, 1e-6f)
         assertEquals("1.5 阈值必须被钳到域上界", 1f, GlowParams(threshold = 1.5f).sanitize().threshold, 1e-6f)
-        assertEquals("NaN 阈值必须回落默认", 0.7f, GlowParams(threshold = Float.NaN).sanitize().threshold, 1e-6f)
+        assertEquals("NaN 阈值必须回落默认", 0.85f, GlowParams(threshold = Float.NaN).sanitize().threshold, 1e-6f)
     }
 
     @Test

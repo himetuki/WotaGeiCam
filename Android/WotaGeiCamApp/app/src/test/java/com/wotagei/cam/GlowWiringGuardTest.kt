@@ -484,4 +484,36 @@ class GlowWiringGuardTest {
         val noAnchor = pills.replace("PillKey.GLOW to", "PillKey.GLOWX to")
         assertTrue("锚点登记突变必须报红", uiWiringIssues(noAnchor).any { it.contains("锚点") || it.contains("pillAnchorWriters") })
     }
+
+    // ------------------------------------------------------------------ 颜色模式接线（2026-11-08 修复）
+
+    /**
+     * 2026-11-08 真机缺陷：`colorOnly=false`（像素自身颜色）时合成趟传色盘色——拷贝趟已经把
+     * 像素自身颜色烘进光晕图，合成趟再乘一遍色盘色 ⇒ "像素自身颜色"模式下色盘一动光晕就跟着变色。
+     * 修复后颜色选择**只**发生在拷贝/亮部趟的 `mix(c, uTint, uColorOnly)`，两链合成趟 tint 恒白。
+     */
+    @Test
+    fun `合成趟tint恒白_颜色只在拷贝亮部趟定`() {
+        val flatEngine = KotlinSourceScan.flatten(engineSrc)
+        assertTrue(
+            "实时主 pass tint 必须恒白（GLOW_TINT_WHITE，见其注）",
+            flatEngine.contains("val t = GLOW_TINT_WHITE") &&
+                flatEngine.contains("GLES20.glUniform3f(p.uGlowTint, t[0], t[1], t[2])")
+        )
+        assertFalse("主 pass 不许再按 colorOnly 分岔传色盘色", flatEngine.contains("if (glowColorOnly)"))
+        assertFalse("glowTint 预换算字段必须删除（合成趟不再吃色盘色）", flatEngine.contains("glowTint"))
+        assertTrue(
+            "拷贝趟必须拿到色盘色（colorOnly=true 的唯一上色点）",
+            flatEngine.contains("tintParam = glowRgb(glowParams.color)")
+        )
+        val flatGl = KotlinSourceScan.flatten(
+            KotlinSourceScan.mainSourceText("player/SceneExportGl.kt")
+        )
+        assertFalse("导出合成趟不许再吃 effects.glowTint", flatGl.contains("effects.glowTint"))
+        assertEquals(
+            "导出两处合成趟（echo 版 + 纯 glow 版）必须都恒白",
+            2, KotlinSourceScan.occurrences(flatGl, "val tint = TINT_WHITE").size
+        )
+        assertTrue("导出亮部趟必须吃色盘色", flatGl.contains("glowRgb(glow.color)"))
+    }
 }

@@ -21,8 +21,8 @@ class GlowParamsTest {
         val d = GlowParams.DEFAULT
         assertEquals("出厂必须关（零代价口径）", false, d.enabled)
         // 逐字段点名：任何一个默认值被"顺手"改掉都要在这里有意识地改
-        // 2026-10-29 用户口径：阈值域改为 60~100%（100% = 只给最亮像素加光晕），默认取域内 0.7
-        assertEquals(0.7f, d.threshold)
+        // 2026-11-08 用户口径：阈值域 80~100%（步长 1%），默认随域内移取 0.85（原 60~100 默认 0.7）
+        assertEquals(0.85f, d.threshold)
         assertEquals(0.05f, d.soft)
         assertEquals(0.02f, d.width)
         assertEquals(1.0f, d.gain)
@@ -52,7 +52,7 @@ class GlowParamsTest {
         assertEquals(GLOW_FREQ_MAX, wild.freq)
         assertEquals(1f, wild.blend)
         // 域内值原样保留（幂等）
-        val inRange = GlowParams(threshold = 0.7f, soft = 0.1f, width = 0.05f, gain = 2f, add = 0.3f, freq = 8f, blend = 0.9f)
+        val inRange = GlowParams(threshold = 0.85f, soft = 0.1f, width = 0.05f, gain = 2f, add = 0.3f, freq = 8f, blend = 0.9f)
         assertEquals(inRange, inRange.sanitize())
         assertEquals(inRange, inRange.sanitize().sanitize())
     }
@@ -79,7 +79,7 @@ class GlowParamsTest {
             freq = Float.POSITIVE_INFINITY,
             blend = Float.NaN
         ).sanitize()
-        assertEquals(0.7f, bad.threshold)
+        assertEquals(0.85f, bad.threshold)
         assertEquals(0.05f, bad.soft)
         assertEquals(0.02f, bad.width)
         assertEquals(1f, bad.gain)
@@ -110,8 +110,8 @@ class GlowParamsTest {
             "freq=0.0;blend=0.55;colorA=FFFF730D;colorB=FF33D940"
         val decoded = decodeGlow(legacy)
         assertEquals(true, decoded.enabled)
-        // 2026-10-29：阈值域收到 60~100% ⇒ 旧串的 0.45 在解码时被钳到域下界 0.6（参数不丢、域随新口径）
-        assertEquals(0.6f, decoded.threshold)
+        // 2026-11-08：阈值域收到 80~100% ⇒ 旧串的 0.45 在解码时被钳到域下界 0.8（参数不丢、域随新口径）
+        assertEquals(0.8f, decoded.threshold)
         assertEquals(0.55f, decoded.blend)
         assertEquals(1.5f, decoded.gain)
         // 旧串没有 color 键 ⇒ 白（跟随原色），其余参数照读（升级不丢参数）
@@ -138,7 +138,7 @@ class GlowParamsTest {
         assertEquals(d, decodeGlow("enabled=1")) // 缺键
         // 单键坏：非数 / enabled 既不是 0 也不是 1
         val good = encodeGlow(GlowParams.DEFAULT)
-        assertEquals(d, decodeGlow(good.replace("threshold=0.5", "threshold=abc")))
+        assertEquals(d, decodeGlow(good.replace("threshold=0.85", "threshold=abc")))
         assertEquals(d, decodeGlow(good.replace("enabled=0", "enabled=2")))
         assertEquals(d, decodeGlow(good.replace("soft=0.05", "soft=")))
     }
@@ -149,7 +149,7 @@ class GlowParamsTest {
         // 前向兼容：以后加参数时老版本读新串不许炸
         assertEquals(GlowParams.DEFAULT, decodeGlow("$good;futureParam=7"))
         // 脏串（人手改过 prefs）解码后仍在安全域内
-        val clamped = decodeGlow(good.replace("threshold=0.7", "threshold=9").replace("blend=0.6", "blend=-2"))
+        val clamped = decodeGlow(good.replace("threshold=0.85", "threshold=9").replace("blend=0.6", "blend=-2"))
         assertEquals(GLOW_THRESHOLD_MAX, clamped.threshold)
         assertEquals(0f, clamped.blend)
     }

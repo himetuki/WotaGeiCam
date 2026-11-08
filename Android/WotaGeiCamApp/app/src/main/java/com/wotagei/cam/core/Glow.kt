@@ -28,13 +28,18 @@ data class GlowParams(
     /** 开关：映射成 [com.wotagei.cam.camera.ProgramKey] 的 `glow` 一维（换开关 = 换 program，走会话缓存） */
     val enabled: Boolean = false,
     /**
-     * 亮度阈值（**0.6..1.0**，2026-10-29 用户口径：滑杆域 60~100%）。超过才发光；
-     * **1.0 = 只给整个画面里最亮的像素加光晕**（软边朝 1.0 收敛，见 GLOW_COPY_FS 的 soft 压缩）。
+     * 亮度阈值（**0.8..1.0**，2026-11-08 用户口径：滑杆域由 60~100% 收窄到 80~100%、步长 5%→1%——
+     * 60~80 段只会给半幅画面罩薄雾，没有"给光源加光晕"的观感，砍掉；默认随域内移到 0.85）。
+     * 超过才发光；**1.0 = 只给整个画面里最亮的像素加光晕**（软边朝 1.0 收敛，见 GLOW_COPY_FS 的 soft 压缩）。
      */
-    val threshold: Float = 0.7f,
+    val threshold: Float = 0.85f,
     /** 0..0.5 阈值软边宽度（smoothstep 的过渡带） */
     val soft: Float = 0.05f,
-    /** 0..0.2 光晕扩散半径，以 **RT 短边** 为单位（各向同性，见 [fillGlowBlurOffset]） */
+    /**
+     * 0..0.08 光晕扩散半径，以 **RT 短边** 为单位（各向同性，见 [fillGlowBlurOffset]）。
+     * 2026-11-08 用户口径：域由 0..0.2 收窄到 0..0.08（滑杆 0~8%、步长 2%→0.5%）——
+     * 大半径段的观感收益远低于"整屏薄雾/稀疏鬼影"的代价。
+     */
     val width: Float = 0.02f,
     /** 0..4 光晕强度倍数（主 pass） */
     val gain: Float = 1.0f,
@@ -50,19 +55,19 @@ data class GlowParams(
      */
     val colorOnly: Boolean = false,
     /**
-     * 光晕颜色（ARGB Long；**白 = 不改色**，跟随光棒自身的颜色）。
+     * 光晕颜色（ARGB Long）。**只在 [colorOnly]=true 时参与**（2026-11-08 修复定版）：
+     * false = 达到阈值的像素发自身颜色的光晕，本字段完全不参与（色盘动了也不影响画面）；
+     * true = 只用本字段的颜色发光（白 = 白色光晕）。
      *
      * 2026-10-28 用户口径两步走：先删掉「预设 A/B + 两端色带」（那是给整片改色），
-     * 再允许**用色盘自选单色**——所以这里只有一个颜色、没有 A/B 两端：
-     * 白（出厂）⇒ 输出 = 原色 × 亮度（同色光晕）；选了颜色 ⇒ 原色 × 所选色（整体偏这个色调）。
-     * 色盘上点圆心就是白（饱和度 0），等于回到"跟随原色"。
+     * 再允许**用色盘自选单色**——所以这里只有一个颜色、没有 A/B 两端。
      */
     val color: Long = GLOW_COLOR_DEFAULT
 ) {
 
     /** 域钳之后的同一份参数（幂等）。落盘/下发前必须过这一关，见类注释 */
     fun sanitize(): GlowParams = copy(
-        threshold = glowClamp(threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.7f),
+        threshold = glowClamp(threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.85f),
         soft = glowClamp(soft, 0f, GLOW_SOFT_MAX, 0.05f),
         width = glowClamp(width, 0f, GLOW_WIDTH_MAX, 0.02f),
         gain = glowClamp(gain, 0f, GLOW_GAIN_MAX, 1f),
@@ -166,12 +171,15 @@ fun glowWheelMarkerOf(argb: Long): FloatArray {
 
 // ---------------------------------------------------------------------------------------------
 // 安全域（sanitize 与 UI 滑杆共用同一套端点，别在 UI 里再写一份）
+//
+// 2026-11-08 用户口径：阈值域 60~100 → 80~100（低段只出整屏薄雾）、宽度域 0~20 → 0~8；
+// 出厂默认值随域内移（threshold 0.7 → 0.85，保持"略高于域中低段"的相对位置）。
 // ---------------------------------------------------------------------------------------------
 
-const val GLOW_THRESHOLD_MIN = 0.6f
+const val GLOW_THRESHOLD_MIN = 0.8f
 const val GLOW_THRESHOLD_MAX = 1f
 const val GLOW_SOFT_MAX = 0.5f
-const val GLOW_WIDTH_MAX = 0.2f
+const val GLOW_WIDTH_MAX = 0.08f
 const val GLOW_GAIN_MAX = 4f
 const val GLOW_ADD_MAX = 1f
 const val GLOW_FREQ_MAX = 64f

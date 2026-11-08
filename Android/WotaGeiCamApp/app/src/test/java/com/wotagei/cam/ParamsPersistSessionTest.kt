@@ -95,8 +95,9 @@ class ParamsPersistSessionTest {
         markerSpread.value = 0.85f
         markerColor.value = com.wotagei.cam.core.MarkerLineColor.CYAN
         markerCount.value = 6
-        // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）
-        glowParams.value = com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.65f, blend = 0.83f)
+        // 2026-10-27：Glow 整份参数入档（复合串键；开启 + 动一个形状参数足够证往返）。
+        // 2026-11-08 阈值域收到 80~100 ⇒ 样本取域内 0.88（原 0.65 会被 sanitize 钳到 0.8，往返必炸）
+        glowParams.value = com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.88f, blend = 0.83f)
         // 2026-11-05（R2 残影）：同 Glow 的复合串键；开启 + 换模式 + 推倍数足够证往返
         echoParams.value = com.wotagei.cam.core.EchoParams(
             enabled = true, mode = com.wotagei.cam.core.EchoMode.TRAIL, multiplier = 4, threshold = 0.8f, gain = 1.5f
@@ -193,7 +194,7 @@ class ParamsPersistSessionTest {
         )
         assertEquals(
             "Glow 整份参数必须往返（复合串键）",
-            com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.65f, blend = 0.83f),
+            com.wotagei.cam.core.GlowParams(enabled = true, threshold = 0.88f, blend = 0.83f),
             back.glowParams.value
         )
         assertEquals(

@@ -1208,12 +1208,13 @@ private fun GlowPill(
         // 24 §1.6 的定版：**不新增 SliderKey**（那是持久化契约，加一个就要在设置页长一行）——
         // 一律「整数刻度梯 + snapKey = null」⇒ PillSlider 的 ladderOnly 分支：恒吸附、写回必落刻度。
         // 显示域 = 参数域 × 缩放（0..1 的参数用 0..100 的百分比格），于是落盘恒是两位小数。
-        // 阈值域 60..100（2026-10-29 用户口径）：低端不再放到 0（0 等于整帧发光，没有意义），
-        // 高端 100 = 只给画面里最亮的像素加光晕（软边在拷贝趟里朝 1.0 收敛）
+        // 阈值域 80..100（2026-11-08 用户口径：由 60..100 收窄——60~80 段只出整屏薄雾，
+        // 步长 5→1 细化；高端 100 = 只给画面里最亮的像素加光晕，软边在拷贝趟里朝 1.0 收敛）。
+        // 端点真源 GLOW_THRESHOLD_MIN/MAX，别在这里另写一份
         PillSlider(
-            value = glow.threshold * 100f, lo = 60f, hi = 100f, step = 5f,
+            value = glow.threshold * 100f, lo = 80f, hi = 100f, step = 1f,
             enabled = editable, label = stringResource(R.string.cam_glow_threshold),
-            snapKey = null, ladder = percentLadder(60, 100, 5), format = glowFmt(2),
+            snapKey = null, ladder = percentLadder(80, 100, 1), format = glowFmt(2),
             onValueChange = { write(glow.copy(threshold = it / 100f)) },
             onValueChangeFinished = onPersist
         )
@@ -1225,10 +1226,12 @@ private fun GlowPill(
             onValueChange = { write(glow.copy(soft = it / 100f)) },
             onValueChangeFinished = onPersist
         )
+        // 宽度域 0..8（2026-11-08 用户口径：由 0..20 收窄，步长 2→0.5 半档细化）；
+        // 端点真源 GLOW_WIDTH_MAX。半档梯 percentLadder 铺不出（整数步），这里显式铺 0..16 × 0.5
         PillSlider(
-            value = glow.width * 100f, lo = 0f, hi = 20f, step = 2f,
+            value = glow.width * 100f, lo = 0f, hi = 8f, step = 0.5f,
             enabled = editable, label = stringResource(R.string.cam_glow_width),
-            snapKey = null, ladder = percentLadder(0, 20, 2), format = glowFmt(2),
+            snapKey = null, ladder = (0..16).map { it * 0.5f }, format = glowFmt(2),
             onValueChange = { write(glow.copy(width = it / 100f)) },
             onValueChangeFinished = onPersist
         )

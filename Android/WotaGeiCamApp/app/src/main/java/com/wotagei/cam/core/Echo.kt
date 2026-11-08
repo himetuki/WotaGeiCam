@@ -61,7 +61,10 @@ enum class EchoMode { KEEP_BRIGHTNESS, TRAIL }
 const val ECHO_MULTIPLIER_MIN = 2
 const val ECHO_MULTIPLIER_MAX = 10
 
-/** TRAIL 阈值域：与 Glow 阈值共用同一套端点（60..100%），别在 UI 里再写一份 */
+/**
+ * TRAIL 阈值域：60..100%（2026-11-08 起 Glow 阈值下限单独收到 80、残影保持 60 不变——
+ * 残影拖的是高光轮廓，低阈值段仍有用，两域自此分家，别再"顺手同步"）。
+ */
 const val ECHO_THRESHOLD_MIN = 0.6f
 const val ECHO_THRESHOLD_MAX = 1f
 

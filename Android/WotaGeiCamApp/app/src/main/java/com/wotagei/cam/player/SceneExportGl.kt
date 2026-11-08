@@ -62,6 +62,14 @@ internal class SceneExportGl(
 
         /** 双边降噪的亮度差 σ（与实时链 GlRenderEngine 同一量级：0.12 偏保边，夜景暗部够用） */
         private const val BILATERAL_SIGMA_R = 0.12f
+
+        /**
+         * 合成趟 tint 恒等（白，与实时链 GLOW_TINT_WHITE 同口径）：颜色**只**由亮部趟的
+         * `mix(c, uTint, uColorOnly)` 决定（false = 像素自身颜色 / true = 色盘颜色），模糊不改色。
+         * 2026-11-08 修复：旧实现 colorOnly=false 时合成趟传色盘色，把本应跟随像素自身颜色的
+         * 光晕又乘了一遍色盘色（色盘一动光晕跟着变色）。
+         */
+        private val TINT_WHITE = floatArrayOf(1f, 1f, 1f)
     }
 
     private val thread = HandlerThread("WotaSceneExportGl").apply { start() }
@@ -623,14 +631,15 @@ internal class SceneExportGl(
             if (echoCompUEcho >= 0) GLES20.glUniform1i(echoCompUEcho, UNIT_C)
             if (echoCompUMatrix >= 0) GLES20.glUniformMatrix4fv(echoCompUMatrix, 1, false, identity, 0)
             if (glow != null) {
-                val tint = if (glow.colorOnly) floatArrayOf(1f, 1f, 1f) else effects.glowTint
+                // 合成趟 tint 恒白：颜色已在亮部趟按 uColorOnly 定死（见 TINT_WHITE 注）
+                val tint = TINT_WHITE
                 if (echoCompUTint >= 0) GLES20.glUniform3f(echoCompUTint, tint[0], tint[1], tint[2])
                 if (echoCompUGain >= 0) GLES20.glUniform1f(echoCompUGain, glow.gain)
                 if (echoCompUAdd >= 0) GLES20.glUniform1f(echoCompUAdd, glow.add)
                 if (echoCompUBlend >= 0) GLES20.glUniform1f(echoCompUBlend, glow.blend)
                 if (echoCompUFreq >= 0) GLES20.glUniform1f(echoCompUFreq, glow.freq)
             } else {
-                if (echoCompUTint >= 0) GLES20.glUniform3f(echoCompUTint, 1f, 1f, 1f)
+                if (echoCompUTint >= 0) GLES20.glUniform3f(echoCompUTint, TINT_WHITE[0], TINT_WHITE[1], TINT_WHITE[2])
                 if (echoCompUGain >= 0) GLES20.glUniform1f(echoCompUGain, 0f)
                 if (echoCompUAdd >= 0) GLES20.glUniform1f(echoCompUAdd, 0f)
                 if (echoCompUBlend >= 0) GLES20.glUniform1f(echoCompUBlend, 0f)
@@ -648,8 +657,9 @@ internal class SceneExportGl(
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
             if (compUGlow >= 0) GLES20.glUniform1i(compUGlow, UNIT_B)
             if (compUMatrix >= 0) GLES20.glUniformMatrix4fv(compUMatrix, 1, false, identity, 0)
-            // colorOnly 时亮部趟已按色盘色采样，这里传白（与实时链 GL_TINT_WHITE 同口径）
-            val tint = if (glow.colorOnly) floatArrayOf(1f, 1f, 1f) else effects.glowTint
+            // 合成趟 tint 恒白：颜色已在亮部趟按 uColorOnly 定死（像素自身色 / 色盘色），
+            // 2026-11-08 修复 colorOnly=false 误传色盘色（与实时链同口径，见 TINT_WHITE 注）
+            val tint = TINT_WHITE
             if (compUTint >= 0) GLES20.glUniform3f(compUTint, tint[0], tint[1], tint[2])
             if (compUGain >= 0) GLES20.glUniform1f(compUGain, glow.gain)
             if (compUAdd >= 0) GLES20.glUniform1f(compUAdd, glow.add)
