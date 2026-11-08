@@ -44,7 +44,7 @@ If you need an English / Indonesian (Bahasa Indonesia) interface, his build is r
 - **In-recording extract + arc merge + offline arc repair**: devices without a native slow tier still keep continuous arcs.
 
 **🎯 Practice comparison · practice standard moves**
-- **AI stance hints**: in preview, detects stance and speaks a correction ("left / right / forward / backward"); missing / extra people and all-done each have their own prompt; pauses automatically while recording and resumes after.
+- **AI stance hints**: in preview, detects stance and speaks a per-slot correction ("left / right / forward / backward") with a character voice and a closing tag at the end of each polling round; done / missing / extra people and all-done each have their own prompt; polling rhythm (in-round / between-round intervals) and judgement precision are adjustable; GPU acceleration has three modes; pauses automatically while recording and resumes after.
 - **Split-screen reference**: one side plays a reference video (using its audio directly), the other records the subject, so the recorder can compare the subject's practice against the reference; the subject is being recorded and cannot watch-while-practicing, so the reference audio guides the rhythm.
 - **Dual-track comparison**: compare your practice side-by-side with the reference, switchable audio tracks, auto-aligned by audio.
 
@@ -86,7 +86,7 @@ Listed by category below, each with its **location**, **how to open it**, and **
 | Glow | Left dock "glow" pill | On/off + threshold / strength / blend; color modes "pixel's own / palette only"; preview and recording; GPU only |
 | Reference lines / grid | Left dock "reference line" button | Multi-select line types (thirds / diagonals / safe frame / grid, …); defaults in Settings → Reference lines |
 | Position lines | Top-bar right round button (left of the split button) | Tap to open the overlay for count / spacing, long-press to pick color; preview overlay only, not recorded, usable during recording |
-| AI stance hints | Top-bar right round button (left of the position-lines button) | Detects stance in preview and speaks the direction (left / right / forward / backward); 1–5 people, auto / manual count, precision β, night pre-brighten, GPU acceleration and model-pack import; settings persist immediately; pauses during recording and resumes after (see [Known Issues](#known-issues-and-limitations)) |
+| AI stance hints | Top-bar right round button (left of the position-lines button) | Detects stance in preview and speaks a per-slot direction with a character voice (left / right / forward / backward); 1–5 people, auto / manual count, precision β, polling intervals (in-round / between rounds), night pre-brighten, GPU acceleration (auto / force / off) and model-pack import; settings persist immediately; pauses during recording and resumes after; **full variant only** — the lite build shows a guide on this button instead (see [Known Issues](#known-issues-and-limitations)) |
 | Level / pitch gauges | Right dock | Light vibration when level; toggle in Settings → Framing aids |
 | Readout block | Bottom-right readout block | Shutter / frame rate / bitrate / ISO / EV / white balance / zoom; per-item show/hide in Settings → Viewfinder persistent controls |
 | Custom control layout | Settings → Viewfinder persistent controls → Edit controls | Drag to place the docks and readout block; panels follow each control's anchor |
@@ -144,9 +144,9 @@ Planned / under research, not yet landed:
 
 ## Known Issues and Limitations
 
-An honest list of the currently known problem surface (verified through v0.0.12-r02; updated as feedback comes in):
+An honest list of the currently known problem surface (verified through v0.0.12-r05; updated as feedback comes in):
 
-- **AI stance hints are experimental (new in v0.0.12-r02)**: the detection model and judgement logic pass unit tests and model-tensor checks, but **on-device recognition accuracy has not been systematically verified** (especially in low light, at long distance, and with multiple people). The default safe-zone values come from a small set of PC-lab annotations; when moving to a new camera position or venue, adjust the precision β and "pre-brighten" first and treat the actual prompts as authoritative. The model pack can be replaced from a PC; a bad pack falls back to the built-in one automatically.
+- **AI stance hints are experimental (full variant carries them as of v0.0.12-r05)**: the detection model and judgement logic pass unit tests and model-tensor checks, but **on-device recognition accuracy has not been systematically verified** (especially in low light, at long distance, and with multiple people). The default safe-zone values come from a small set of PC-lab annotations; when moving to a new camera position or venue, adjust the precision β and "pre-brighten" first and treat the actual prompts as authoritative. The model pack can be replaced from a PC; a bad pack falls back to the built-in one automatically. The GPU "auto" mode is decided by the compatibility whitelist — GPUs outside it (e.g. some HiSilicon Maleoon devices) have been verified working on the "force" mode, with automatic fallback to CPU if runtime verification fails.
 
 - **Stance-hint voice is customizable (fork developers)**: the spoken prompts are 14 WAV files in `Android/WotaGeiCamApp/app/src/full/assets/voice/`, picked by filename contract: `num_1`–`num_5` (slot numbers), `dir_left` / `dir_right` / `dir_forward` / `dir_backward` (directions), `st_done` / `all_done` (done / all done), `st_missing` / `st_extra` (missing / extra), `end` (closing voice tag). Overwrite with same-named WAVs to customize — no code changes needed; full variant only, lite ships without them.
 
@@ -175,14 +175,15 @@ Download from [Releases](https://github.com/himetuki/WotaGeiCam/releases/latest)
 
 | File | Platform / fit |
 |---|---|
-| `WotaGeiCam-vX.X.X-rYY-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-universal-release-Android.apk` | Android: all devices (pick universal if unsure) |
-| `WotaGeiCam-vX.X.X-rYY-arm64-v8a-release-Android.apk` | Android: 64-bit ARM (most phones since 2016) |
+| `WotaGeiCam-vX.X.X-rYY-full-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-full-universal-release-Android.apk` | Android full: all devices, **with AI stance hints** (pick universal if unsure) |
+| `WotaGeiCam-vX.X.X-rYY-lite-release-Android.apk` / `WotaGeiCam-vX.X.X-rYY-lite-universal-release-Android.apk` | Android lite: **no AI stance hints** (~21 MB smaller; full and lite can overwrite-install each other keeping data; updates push per type) |
+| `WotaGeiCam-vX.X.X-rYY-full-arm64-v8a-release-Android.apk` / `-lite-arm64-v8a-…` / `-armeabi-v7a-…` | Android full / lite per-ABI splits (2016+ phones for arm64) |
 | `WotaGeiCam-vX.X.X-rYY-armeabi-v7a-release-Android.apk` | Android: 32-bit ARM older devices |
 | `WotaGeiCam-vX.X.X-rYY-unsigned-Harmony.hap` | HarmonyOS (produced when signing Secrets are not configured; see installation notes below) |
 
 With HAP signing Secrets configured, the Release also includes `vX.X.X-rYY-signed-Harmony.hap` and a `SHA256SUMS`.
 
-The `X.X.X-rYY` in the file name is the full version name; the number after `r` is the checkpoint index, higher is newer; the in-app "check update" compares by the same rule. Historical versions (`v0.0.9-r05` and earlier) used the old naming `WotaGeiCam-vX.Y.Z-*.apk` and only had the Android four-piece set.
+The `X.X.X-rYY` in the file name is the full version name; the number after `r` is the checkpoint index, higher is newer; the in-app "check update" compares by the same rule and pushes per package type (full only gets full, lite only gets lite). Historical versions (`v0.0.9-r05` and earlier) used the old naming `WotaGeiCam-vX.Y.Z-*.apk` and only had the Android four-piece set.
 
 ## Installation and upgrade
 
