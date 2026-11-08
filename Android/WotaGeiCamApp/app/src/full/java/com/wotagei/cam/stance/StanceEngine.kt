@@ -12,6 +12,8 @@ class JudgementEngine(
     mode: String = MODE_AUTO,
     nManual: Int = 1,
     beta: Float = StanceSpec.BETA_DEFAULT,
+    lineIntervalMs: Long = StanceSpec.LINE_INTERVAL_MS,
+    pollIntervalMs: Long = StanceSpec.POLL_INTERVAL_MS,
 ) {
     companion object {
         const val MODE_AUTO = "auto"
@@ -23,6 +25,14 @@ class JudgementEngine(
     var nManual: Int = nManual.coerceIn(1, 5)
         private set
     var beta: Float = beta
+        private set
+
+    /** 轮询内间隔：同轮相邻两条播报的最小间隔（用户 r06 口径：每号位播报时间间隔）。 */
+    var lineIntervalMs: Long = lineIntervalMs.coerceAtLeast(200)
+        private set
+
+    /** 轮询间间隔：上一轮播报结束到下一轮第一条播报的最小静默（用户 r06 口径）。 */
+    var pollIntervalMs: Long = pollIntervalMs.coerceAtLeast(200)
         private set
 
     var nConfirmed: Int? = null
@@ -51,6 +61,12 @@ class JudgementEngine(
             allDoneReported = false
         }
         this.beta = beta
+    }
+
+    /** 间隔参数热更新（不重置判定状态——只改播报节奏）。 */
+    fun setIntervals(lineMs: Long, pollMs: Long) {
+        lineIntervalMs = lineMs.coerceAtLeast(200)
+        pollIntervalMs = pollMs.coerceAtLeast(200)
     }
 
     /** 模式/人数变更（引擎内重锚；UI 直接调，worker 语义由调用方保证单线程）。 */
@@ -220,9 +236,16 @@ class JudgementEngine(
         return done
     }
 
-    /** 播报节流: 同文本重复需间隔 SPEAK_INTERVAL_MS；文本变化=状态转换，立即播。 */
+    /**
+     * 播报节流（r06 双间隔，用户口径）：
+     * - 距上一条播报 ≤ [lineIntervalMs] = 同轮之内 → 用轮内间隔（每号位播报间隔）；
+     * - 超过 = 上一轮已结束 → 新一轮第一条需距上一条 ≥ [pollIntervalMs]（轮间静默）。
+     * 同文本与异文本统一走此间隔（旧行为"异文本立即播"废止——轮内节奏由用户统一控制）。
+     */
     private fun throttled(tsMs: Long, text: String): List<String> {
-        return if (text != lastSpeakText || tsMs - lastSpeakMs >= StanceSpec.SPEAK_INTERVAL_MS) {
+        val sinceLast = tsMs - lastSpeakMs
+        val interval = if (sinceLast <= lineIntervalMs) lineIntervalMs else pollIntervalMs
+        return if (sinceLast >= interval) {
             lastSpeakMs = tsMs
             lastSpeakText = text
             listOf(text)

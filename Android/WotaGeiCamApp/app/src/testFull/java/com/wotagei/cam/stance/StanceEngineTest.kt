@@ -20,8 +20,15 @@ class StanceEngineTest {
 
     private fun obs(tsMs: Long, boxes: List<PersonBox>) = FrameObs(tsMs, boxes)
 
-    private fun engine(mode: String = JudgementEngine.MODE_MANUAL, n: Int = 1) =
-        JudgementEngine(mode = mode, nManual = n)
+    private fun engine(
+        mode: String = JudgementEngine.MODE_MANUAL,
+        n: Int = 1,
+        lineMs: Long = 200,
+        pollMs: Long = 200,
+    ) = JudgementEngine(
+        mode = mode, nManual = n,
+        lineIntervalMs = lineMs, pollIntervalMs = pollMs,
+    )
 
     /** 喂 nBeats 拍域内帧，返回最后一拍输出。 */
     private fun feedOk(eng: JudgementEngine, startMs: Long, nBeats: Int = StanceSpec.SMOOTH_WINDOW): EngineOutput {
@@ -257,13 +264,29 @@ class StanceEngineTest {
     }
 
     @Test
-    fun speakThrottle_sameText2s_changeImmediate() {
-        val eng = engine()
-        eng.observe(obs(0, listOf(b(cx = 0.9f))))   // 第一拍报「1号位，往右」
+    fun speakThrottle_pacingByIntervals() {
+        // r06 双间隔：lineInterval（轮内）与 pollInterval（轮间静默）各自生效
+        val eng = engine(lineMs = 2000, pollMs = 4000)
+        eng.observe(obs(0, listOf(b(cx = 0.9f))))    // 首拍（never 豁免）报「1号位，往右」
         val out1 = eng.observe(obs(1000, listOf(b(cx = 0.9f))))
-        assertTrue(out1.lines.isEmpty())             // 2s 内同文本节流
+        assertTrue("轮内 1s < lineInterval 静默", out1.lines.isEmpty())
         val out2 = eng.observe(obs(2500, listOf(b(cx = 0.9f))))
-        assertEquals(listOf("1号位，往右"), out2.lines)
+        assertTrue("2500ms > lineInterval 但 < pollInterval——轮间静默", out2.lines.isEmpty())
+        val out3 = eng.observe(obs(4200, listOf(b(cx = 0.9f))))
+        assertEquals(listOf("1号位，往右"), out3.lines)   // 轮间静默窗满
+    }
+
+    @Test
+    fun intervalDefaults_pacing() {
+        // 默认节奏钉子（r06）：轮内 2s 一条、轮间 4s 静默
+        val eng = engine(lineMs = StanceSpec.LINE_INTERVAL_MS, pollMs = StanceSpec.POLL_INTERVAL_MS)
+        eng.observe(obs(0, listOf(b(cx = 0.9f))))            // 首拍（never 豁免）
+        val out1 = eng.observe(obs(2100, listOf(b(cx = 0.9f))))
+        assertTrue("2100 > 轮内 2000 → 轮间静默窗（默认 4000）内", out1.lines.isEmpty())
+        val out1b = eng.observe(obs(3000, listOf(b(cx = 0.9f))))
+        assertTrue("3000 仍 < 轮间 4000 静默窗", out1b.lines.isEmpty())
+        val out2 = eng.observe(obs(4300, listOf(b(cx = 0.9f))))
+        assertEquals(listOf("1号位，往右"), out2.lines)   // ≥ 轮间 4000 静默窗满 → 播
     }
 
     @Test

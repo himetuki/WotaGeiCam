@@ -9,4 +9,6 @@ package com.wotagei.cam.stance
 data class StanceUi(
     val enabled: Boolean = false,
     val running: Boolean = false,
+    val lineIntervalMs: Long = 2000L,
+    val pollIntervalMs: Long = 4000L,
 )

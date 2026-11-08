@@ -48,6 +48,15 @@ object StanceSpec {
     /** §5.1 同文本播报节流（毫秒）。 */
     const val SPEAK_INTERVAL_MS = 2000L
 
+    /** 轮询内间隔默认：同轮相邻两条播报的最小间隔（r06，用户口径：每号位播报时间间隔）。 */
+    const val LINE_INTERVAL_MS = 2000L
+
+    /** 轮询间间隔默认：上一轮播报结束到下一轮第一条播报的最小静默。 */
+    const val POLL_INTERVAL_MS = 4000L
+    /** 间隔滑杆范围（两项设置共用）。 */
+    const val INTERVAL_MIN_MS = 500L
+    const val INTERVAL_MAX_MS = 10000L
+
     const val BETA_DEFAULT = 0.3f
     const val BETA_MIN = 0.05f
     const val BETA_MAX = 0.95f

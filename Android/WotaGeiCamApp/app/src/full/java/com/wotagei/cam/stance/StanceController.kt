@@ -47,6 +47,8 @@ class StanceController private constructor(
         val beta: Float = StanceSpec.BETA_DEFAULT,
         val brighten: Boolean = false,
         val gpuMode: String = StanceDetector.MODE_AUTO,
+        val lineIntervalMs: Long = StanceSpec.LINE_INTERVAL_MS,
+        val pollIntervalMs: Long = StanceSpec.POLL_INTERVAL_MS,
         val versionText: String = "",           // 模型组/判定头/安全区版本文本
         val fallbackTip: String? = null,        // 降级/错误提示（弹一次）
     )
@@ -100,6 +102,10 @@ class StanceController private constructor(
             nManual = prefs.getInt(Prefs.N, 1).coerceIn(1, 5),
             beta = prefs.getFloat(Prefs.BETA, StanceSpec.BETA_DEFAULT).coerceIn(StanceSpec.BETA_MIN, StanceSpec.BETA_MAX),
             brighten = prefs.getBoolean(Prefs.BRIGHTEN, false),
+            lineIntervalMs = prefs.getLong(Prefs.LINE_MS, StanceSpec.LINE_INTERVAL_MS)
+                .coerceIn(StanceSpec.INTERVAL_MIN_MS, StanceSpec.INTERVAL_MAX_MS),
+            pollIntervalMs = prefs.getLong(Prefs.POLL_MS, StanceSpec.POLL_INTERVAL_MS)
+                .coerceIn(StanceSpec.INTERVAL_MIN_MS, StanceSpec.INTERVAL_MAX_MS),
             gpuMode = prefs.getString(Prefs.GPU_MODE, null)
                 ?: (if (prefs.getBoolean(Prefs.GPU_LEGACY, false)) StanceDetector.MODE_FORCE else StanceDetector.MODE_AUTO),
         )
@@ -111,6 +117,8 @@ class StanceController private constructor(
         const val N = "stance_n"
         const val BETA = "stance_beta"
         const val BRIGHTEN = "stance_brighten"
+        const val LINE_MS = "stance_line_interval_ms"
+        const val POLL_MS = "stance_poll_interval_ms"
 
         /** GPU 模式三态（r03）：auto/force/off。旧布尔键只读迁移一次，不再写。 */
         const val GPU_MODE = "stance_gpu_mode"
@@ -244,7 +252,7 @@ class StanceController private constructor(
         val a = analysis ?: return
         val s = _state.value
         // 必须走分析线程：observe() 与参数写入并发会撕裂判定状态（见 updateEngineConfig）
-        a.updateEngineConfig(s.beta, s.mode, s.nManual, s.brighten)
+        a.updateEngineConfig(s.beta, s.mode, s.nManual, s.brighten, s.lineIntervalMs, s.pollIntervalMs)
     }
 
     /** 开/关站位提示（弹窗开关）。开=挂 analysis 槽+resume；关=摘槽（各一次会话重建）。 */
@@ -420,6 +428,22 @@ class StanceController private constructor(
     fun setBrighten(context: Context, on: Boolean) {
         _state.value = _state.value.copy(brighten = on)
         prefs(context).edit().putBoolean(Prefs.BRIGHTEN, on).apply()
+        syncEngineParams()
+    }
+
+    /** 轮询内间隔（每号位播报间隔，用户 r06 口径）。 */
+    fun setLineInterval(context: Context, ms: Long) {
+        val v = ms.coerceIn(StanceSpec.INTERVAL_MIN_MS, StanceSpec.INTERVAL_MAX_MS)
+        _state.value = _state.value.copy(lineIntervalMs = v)
+        prefs(context).edit().putLong(Prefs.LINE_MS, v).apply()
+        syncEngineParams()
+    }
+
+    /** 轮询间间隔（两轮之间的静默，用户 r06 口径）。 */
+    fun setPollInterval(context: Context, ms: Long) {
+        val v = ms.coerceIn(StanceSpec.INTERVAL_MIN_MS, StanceSpec.INTERVAL_MAX_MS)
+        _state.value = _state.value.copy(pollIntervalMs = v)
+        prefs(context).edit().putLong(Prefs.POLL_MS, v).apply()
         syncEngineParams()
     }
 

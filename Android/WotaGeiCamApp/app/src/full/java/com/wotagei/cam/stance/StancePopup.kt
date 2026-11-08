@@ -38,6 +38,8 @@ fun StancePopupContent(
     onBetaReset: () -> Unit,
     onMode: (String, Int) -> Unit,
     onGpuMode: (String) -> Unit,
+    onLineInterval: (Long) -> Unit,
+    onPollInterval: (Long) -> Unit,
     onBrighten: (Boolean) -> Unit,
     onImportFromDir: () -> Unit,
     modifier: Modifier = Modifier,
@@ -98,6 +100,10 @@ fun StancePopupContent(
                     StepButton("+") { onMode(JudgementEngine.MODE_MANUAL, state.nManual + 1) }
                 }
             }
+
+            // ③b 轮询节奏双间隔（用户 r06 口径：轮内每号位间隔 / 两轮之间静默）
+            IntervalSlider("轮询内间隔", "流程内每号位播报的间隔", state.lineIntervalMs, onLineInterval)
+            IntervalSlider("轮询间间隔", "两轮全流程播报之间的静默", state.pollIntervalMs, onPollInterval)
 
             // ④ GPU/NPU 加速三态（r03：自动=白名单裁决 / 强制=跳白名单实验（Maleoon 等
             //    新 GPU 白名单未收录但有 GLES compute 能力，运行期验证失败自动回退） / 关）
@@ -160,6 +166,27 @@ fun StancePopupContent(
                 Text(it, color = Color(0xFFFFAA55), fontSize = 10.sp)
             }
         }
+    }
+}
+
+@Composable
+private fun IntervalSlider(
+    label: String,
+    note: String,
+    valueMs: Long,
+    onChange: (Long) -> Unit,
+) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text("${valueMs / 1000.0}s", color = Color(0xFFFFCC66), fontSize = 12.sp)
+        }
+        androidx.compose.material3.Slider(
+            value = valueMs.toFloat(),
+            onValueChange = { onChange((it.toLong() / 500L) * 500L) },   // 0.5s 步进
+            valueRange = 500f..10000f,
+        )
+        Text(note, color = Color(0xFF9A9AA6), fontSize = 10.sp)
     }
 }
 

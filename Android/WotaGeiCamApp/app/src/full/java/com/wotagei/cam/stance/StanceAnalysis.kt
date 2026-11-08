@@ -132,11 +132,12 @@ class StanceAnalysis(
      * countHist（偶发状态错乱或 ConcurrentModificationException 被单帧 catch 吞掉）。
      * 统一投到分析线程执行；管线未起（handler 为空）时直接应用，挂流前再同步一次。
      */
-    fun updateEngineConfig(beta: Float, mode: String, n: Int, brighten: Boolean) {
+    fun updateEngineConfig(beta: Float, mode: String, n: Int, brighten: Boolean, lineIntervalMs: Long, pollIntervalMs: Long) {
         val apply = {
             val e = engine
             if (e.beta != beta) e.setBeta(beta)
             if (e.mode != mode || e.nManual != n) e.setMode(mode, n)
+            e.setIntervals(lineIntervalMs, pollIntervalMs)
             this.brighten = brighten
         }
         val h = handler

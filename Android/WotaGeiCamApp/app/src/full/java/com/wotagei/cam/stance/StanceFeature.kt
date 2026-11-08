@@ -31,7 +31,7 @@ class StanceFeature private constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val state: StateFlow<StanceUi> = ctrl.state
-        .map { StanceUi(enabled = it.enabled, running = it.running) }
+        .map { StanceUi(enabled = it.enabled, running = it.running, lineIntervalMs = it.lineIntervalMs, pollIntervalMs = it.pollIntervalMs) }
         .stateIn(scope, SharingStarted.Eagerly, StanceUi())
 
     fun prepare(context: Context) = ctrl.prepare(context)
@@ -93,6 +93,8 @@ class StanceFeature private constructor(
             onBetaReset = { ctrl.setBeta(appContext, StanceSpec.BETA_DEFAULT) },
             onMode = { m, n -> ctrl.setMode(appContext, m, n) },
             onGpuMode = { ctrl.setGpuMode(appContext, it) },
+            onLineInterval = { ctrl.setLineInterval(appContext, it) },
+            onPollInterval = { ctrl.setPollInterval(appContext, it) },
             onBrighten = { ctrl.setBrighten(appContext, it) },
             onImportFromDir = { ctrl.importFromExternalDir(appContext) },
         )
