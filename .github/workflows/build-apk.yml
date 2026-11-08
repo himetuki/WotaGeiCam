@@ -140,7 +140,9 @@ jobs:
           shopt -s nullglob
           staged=0
           for f in apk-out/WotaGeiCam-v*-lite-*-Android.apk; do
-            dst="${f//-lite-/}"
+            # 只删 "-lite" 段本身（保留前后连字符）：-r05-lite-arm64-… → -r05-arm64-…
+            # 若写成 ${f//-lite-/} 会把两侧连字符一并吃掉（r05arm64-…，实测踩过）
+            dst="${f//-lite}"
             cp "$f" "$dst"
             cmp -s "$f" "$dst" || { echo "::error::legacy copy differs: $dst"; exit 1; }
             staged=$((staged + 1))
