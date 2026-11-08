@@ -79,7 +79,9 @@ class RbuildWiringGuardTest {
         text.contains("apk-out/*-lite-universal-release-Android.apk") to
             "Publish 必须按单段名定位 lite universal 包（apk-out/*-lite-universal-release-Android.apk）",
         text.contains("universal APK 定位失败") to
-            "定位失败必须硬失败（不许空哈希静默进 Release 正文）"
+            "定位失败必须硬失败（不许空哈希静默进 Release 正文）",
+        text.contains("apk-out/*-\$flavor-*-Android.apk") to
+            "Verify 计数 glob 必须允许 flavor 与 -Android 之间的 release 段（*-<flavor>-*-Android.apk）"
     ).filter { (ok, _) -> !ok }.map { (_, why) -> why } +
         if (countOf(text, "\${b}-\$d.apk") > 0)
             listOf("cp 不得再追加 -\$d 到产物名（Gradle 产物已含 flavor，双段名打断 Publish/更新器匹配）")

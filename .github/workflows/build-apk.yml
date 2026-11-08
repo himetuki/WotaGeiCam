@@ -132,9 +132,12 @@ jobs:
         run: |
           ls -la apk-out
           # docs/plan/33：full 与 lite 各自的 split 三件套 + plain 一枚 = 各 4 枚，共 8 枚；
-          # flavor 段必须在名里（更新互斥：更新器按 -full-/-lite- 匹配资产）
+          # flavor 段必须在名里（更新互斥：更新器按 -full-/-lite- 匹配资产）。
+          # 名形 -<flavor>[-<abi>]-release-Android.apk → flavor 后还有 release 段，
+          # 故 glob 必须用 *-$flavor-*-Android.apk（r05 复推踩过：旧双段名恰好让
+          # *-$flavor-Android.apk 命中尾部 flavor，单段名后该模式恒 0 枚）。
           for flavor in full lite; do
-            count=$(ls apk-out/*-$flavor-Android.apk 2>/dev/null | wc -l)
+            count=$(ls apk-out/*-$flavor-*-Android.apk 2>/dev/null | wc -l)
             if [ "$count" -ne 4 ]; then
               echo "::error::expected 4 $flavor APKs, got $count"
               exit 1
