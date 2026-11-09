@@ -441,8 +441,8 @@ class GlowWiringGuardTest {
             if (src.contains(token)) bad.add("预设/色带残留：$token")
         }
         if (!src.contains("cam_glow_same_color")) bad.add("缺同色口径说明 cam_glow_same_color")
-        // 第二步（2026-10-28）：删预设之后必须有**色盘自选单色**入口
-        if (!src.contains("GlowColorWheel(")) bad.add("缺色盘入口 GlowColorWheel")
+        // 第二步（2026-10-28）：删预设之后必须有**色盘自选单色**入口（plan/35 起色盘泛化为 WotaColorWheel）
+        if (!src.contains("WotaColorWheel(")) bad.add("缺色盘入口 WotaColorWheel")
         if (!src.contains("cam_glow_color")) bad.add("色盘缺标签 cam_glow_color")
         return bad
     }

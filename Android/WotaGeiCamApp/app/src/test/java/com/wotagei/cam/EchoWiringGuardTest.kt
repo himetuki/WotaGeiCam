@@ -101,6 +101,10 @@ class EchoWiringGuardTest {
         assertTrue("衰减必须由倍数换算（否则倍数档位是死的）", b.contains("echoDecayOf(echoParams.multiplier)"))
         assertTrue("必须把模式交给链（否则模式切换无效）", b.contains("trailMode = trailMode"))
         assertTrue("必须把阈值交给链（否则提亮档阈值滑杆无效）", b.contains("threshold = echoParams.threshold"))
+        // 拖尾颜色补丁（docs/plan/35）：择/除门与容差必须由 core 纯函数推导交给链（不许引擎自造口径）
+        assertTrue("择/除门必须走 echoTrailMaskOf", b.contains("echoTrailMaskOf(echoParams)"))
+        assertTrue("补丁色必须走 echoTrailTintRgbOf", b.contains("echoTrailTintRgbOf(echoParams)"))
+        assertTrue("容差必须走 echoTrailTolOf", b.contains("echoTrailTolOf(echoParams)"))
         assertFalse("链只是产出累积面，不该引发重画", b.contains("requestRender"))
     }
 
@@ -116,10 +120,16 @@ class EchoWiringGuardTest {
             "drawEchoPass 必须读作废标记并调 reset()",
             b.contains("echoStaleSinceOrientationChange") && b.contains("chain.reset()")
         )
+        // docs/plan/35 E8：补丁档（trailColorMode/trailColor/trailTol）变化与模式切换同路清面——
+        // 旧门控攒下的残留拖尾不许带进新档（快照字段比对，倍数/阈值/强度不清）
         assertTrue(
-            "模式切换也必须清（旧模式的残影语义不许带进新模式）",
-            b.contains("echoAppliedTrailMode != null && echoAppliedTrailMode != trailMode")
+            "TRAIL 档切换也必须清（旧模式的残影语义不许带进新模式）",
+            b.contains("last.mode == com.wotagei.cam.core.EchoMode.TRAIL) != trailMode")
         )
+        assertTrue("补丁模式变化必须纳入清面判据", b.contains("last.trailColorMode != echoParams.trailColorMode"))
+        assertTrue("补丁色变化必须纳入清面判据", b.contains("last.trailColor != echoParams.trailColor"))
+        assertTrue("容差变化必须纳入清面判据", b.contains("last.trailTol != echoParams.trailTol"))
+        assertTrue("快照必须在累积后更新（否则每帧都清）", b.contains("echoAppliedTrailParams = echoParams"))
     }
 
     @Test
@@ -145,6 +155,11 @@ class EchoWiringGuardTest {
         assertTrue("必须传 uEchoSrc", b.contains("p.uEchoSrc"))
         assertTrue("必须传 uEchoMode", b.contains("p.uEchoMode"))
         assertTrue("必须传 uEchoGain", b.contains("p.uEchoGain"))
+        // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：合成趟的染色模式与补丁色必须设值，
+        // 模式由 echoTrailTintOf 推导（KB 档恒 0 = E7 的引擎侧清零）
+        assertTrue("必须传 uEchoTintMode", b.contains("p.uEchoTintMode"))
+        assertTrue("必须传 uEchoTint", b.contains("p.uEchoTint"))
+        assertTrue("染色模式必须走 echoTrailTintOf 推导", b.contains("echoTrailTintOf(echoParams)"))
         val drawAt = b.indexOf("glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)")
         // 解绑在 drawArrays **之后**的那次出现（第一次出现是绑定，别找错位置）
         val unbindAt = b.indexOf("GL_TEXTURE0 + ECHO_SRC_UNIT", drawAt)
@@ -160,7 +175,7 @@ class EchoWiringGuardTest {
         val release = body("releaseGl")
         assertTrue("releaseGl 必须收链", release.contains("echoChain?.release()"))
         assertTrue("releaseGl 必须清帧纹理/作废标记/模式缓存", release.contains("echoFrameTex = 0") &&
-            release.contains("echoStaleSinceOrientationChange = false") && release.contains("echoAppliedTrailMode = null"))
+            release.contains("echoStaleSinceOrientationChange = false") && release.contains("echoAppliedTrailParams = null"))
         val init = body("initGl")
         assertTrue("initGl 必须建链", init.contains("EchoChain(::link, ::drainGlError, positionBuffer)"))
     }

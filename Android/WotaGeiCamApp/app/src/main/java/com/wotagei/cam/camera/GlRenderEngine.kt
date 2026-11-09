@@ -438,7 +438,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val uGlowTint: Int,
         val uEchoSrc: Int,
         val uEchoMode: Int,
-        val uEchoGain: Int
+        val uEchoGain: Int,
+        val uEchoTintMode: Int,
+        val uEchoTint: Int
     )
 
     /**
@@ -562,8 +564,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      */
     private var echoStaleSinceOrientationChange = false
 
-    /** 上一次累积时的模式（GL 线程独占）：模式切换 = 累积面语义切换，必须清零重开 */
-    private var echoAppliedTrailMode: Boolean? = null
+    /**
+     * 上一次累积时的参数快照（GL 线程独占）：TRAIL 档切换（KB↔TRAIL）或拖尾补丁档变化
+     * （trailColorMode/trailColor/trailTol，docs/plan/35 E8——旧门控攒下的残留拖尾不许带进新档）
+     * 都必须清累积面；倍数/阈值/强度只换 uniform 不清（k 只影响往后的衰减）。
+     */
+    private var echoAppliedTrailParams: com.wotagei.cam.core.EchoParams? = null
 
     // endregion
 
@@ -2441,6 +2447,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 )
             }
             if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, echoParams.gain)
+            // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：染色模式与补丁色（echoTrailTintOf
+            // 对 KB 档恒 0 ⇒ 色逻辑不生效，E7 双保险的引擎侧那一半）
+            if (p.uEchoTintMode >= 0) {
+                GLES20.glUniform1f(p.uEchoTintMode, com.wotagei.cam.core.echoTrailTintOf(echoParams).toFloat())
+            }
+            val echoTintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
+            if (p.uEchoTint >= 0) GLES20.glUniform3f(p.uEchoTint, echoTintRgb[0], echoTintRgb[1], echoTintRgb[2])
         }
 
         val coords = if (encoderPass) encoderTexCoordBuffer else displayTexCoordBuffer
@@ -2731,8 +2744,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * - 关着 ⇒ 一次 GL 调用都不发（零代价口径）；
      * - 既没编码面也没窗口面 / 空闲预览且上屏被节流 ⇒ 没有消费者，跳过。
      *
-     * 护栏另两条在这里落地：方向矩阵变过（[echoStaleSinceOrientationChange]）或模式切换
-     * （[echoAppliedTrailMode]）先 `reset()` 清累积面；倍数变化不清——k 只影响往后的衰减，
+     * 护栏另两条在这里落地：方向矩阵变过（[echoStaleSinceOrientationChange]）或模式/补丁档切换
+     * （[echoAppliedTrailParams]）先 `reset()` 清累积面；倍数变化不清——k 只影响往后的衰减，
      * 已有拖影按新系数自然衰减出去。
      */
     private fun drawEchoPass(hasFrame: Boolean) {
@@ -2743,11 +2756,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         val uv = glowIdentityUv ?: return
         val chain = echoChain ?: return
         val trailMode = echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL
-        if (echoStaleSinceOrientationChange || echoAppliedTrailMode != null && echoAppliedTrailMode != trailMode) {
+        // docs/plan/35 E8：模式切换与补丁档（trailColorMode/trailColor/trailTol）变化同路清面——
+        // 旧门控攒下的拖尾留在面里会被新门控语义继续叠进成片。取整份快照比对四个字段，零分配。
+        val last = echoAppliedTrailParams
+        val patchChanged = last != null && (
+            (last.mode == com.wotagei.cam.core.EchoMode.TRAIL) != trailMode ||
+                last.trailColorMode != echoParams.trailColorMode ||
+                last.trailColor != echoParams.trailColor ||
+                last.trailTol != echoParams.trailTol
+            )
+        if (echoStaleSinceOrientationChange || patchChanged) {
             chain.reset()
             echoStaleSinceOrientationChange = false
         }
-        echoAppliedTrailMode = trailMode
+        echoAppliedTrailParams = echoParams
+        val tintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
         val ok = chain.draw(
             oesTextureId = oesTextureId,
             texMatrix = stMatrix,
@@ -2759,7 +2782,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             ),
             decay = com.wotagei.cam.core.echoDecayOf(echoParams.multiplier),
             trailMode = trailMode,
-            threshold = echoParams.threshold
+            threshold = echoParams.threshold,
+            // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5）：core 层纯函数推导，链上只查表
+            trailMask = com.wotagei.cam.core.echoTrailMaskOf(echoParams),
+            trailTintR = tintRgb[0],
+            trailTintG = tintRgb[1],
+            trailTintB = tintRgb[2],
+            trailTol = com.wotagei.cam.core.echoTrailTolOf(echoParams)
         )
         echoFrameTex = if (ok) chain.resultTex else 0
     }
@@ -3025,7 +3054,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             uGlowTint = GLES20.glGetUniformLocation(id, "uGlowTint"),
             uEchoSrc = GLES20.glGetUniformLocation(id, "uEchoSrc"),
             uEchoMode = GLES20.glGetUniformLocation(id, "uEchoMode"),
-            uEchoGain = GLES20.glGetUniformLocation(id, "uEchoGain")
+            uEchoGain = GLES20.glGetUniformLocation(id, "uEchoGain"),
+            uEchoTintMode = GLES20.glGetUniformLocation(id, "uEchoTintMode"),
+            uEchoTint = GLES20.glGetUniformLocation(id, "uEchoTint")
         )
     }
 
@@ -3212,7 +3243,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         echoChain = null
         echoFrameTex = 0
         echoStaleSinceOrientationChange = false
-        echoAppliedTrailMode = null
+        echoAppliedTrailParams = null
         // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
         // 这里兜「引擎直接销毁、没走过解绑」的那条路
         arcMendPass?.release()

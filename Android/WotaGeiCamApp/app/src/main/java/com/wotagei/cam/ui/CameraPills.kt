@@ -1281,7 +1281,7 @@ private fun GlowPill(
         )
         // 2026-10-28 用户口径（第二步）：删掉预设后**开放色盘自选单色**。
         // 2026-10-29：色盘 + 上面那枚模式开关配合；双击色盘归零（白）。
-        GlowColorWheel(current = glow.color, editable = editable) {
+        WotaColorWheel(current = glow.color, editable = editable) {
             write(glow.copy(color = it))
             onPersist()
         }
@@ -1297,17 +1297,28 @@ private fun glowFmt(decimals: Int): (Float) -> String =
     { String.format(Locale.US, "%.${decimals}f", it) }
 
 /**
- * Glow 色盘（2026-10-28 用户口径：预设删除后允许自选单色）。
+ * 通用色盘（2026-10-28 用户口径：预设删除后允许自选单色；plan/35 泛化给残影拖尾复用，
+ * 色盘几何与色相环两盘同一套 core 纯函数）。
  *
  * 几何全部收在 core 的纯函数里（[com.wotagei.cam.core.glowHueSatOf] /
  * [com.wotagei.cam.core.glowArgbFromWheel] / [com.wotagei.cam.core.glowWheelMarkerOf]），
  * 这里只负责画与拖：
  * - 外层 = 色相（角度，0° 在右、顺时针）；内层 = 饱和度（圆心 0 = 白）；
- * - **点圆心 = 白 = 跟随光棒原色**（出厂值）；明度恒 1，光强由「增益」滑杆管；
+ * - **点圆心 = 白 = 中性色**（Glow 出厂值 = 跟随光棒原色）；明度恒 1，光强归各面板的滑杆管；
  * - 选中点按参数色反算落点画环（白无彩 ⇒ 圆心）。
+ *
+ * [labelRes] 小标题随调用方给（Glow=光晕颜色 / Echo=拖尾颜色）；[onDoubleTap] 是 plan/35
+ * 的「双击回归默认」通道：非 null 时双击改调它（Echo：模式回 OFF + 色回白，见 EchoPill），
+ * 缺省 null 维持 Glow 口径——双击归零（白）。
  */
 @Composable
-private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> Unit) {
+internal fun WotaColorWheel(
+    current: Long,
+    editable: Boolean,
+    labelRes: Int = R.string.cam_glow_color,
+    onDoubleTap: (() -> Unit)? = null,
+    onPick: (Long) -> Unit
+) {
     val context = LocalContext.current
     val hueColors = listOf(
         Color(0xFFFF0000), Color(0xFFFFFF00), Color(0xFF00FF00),
@@ -1316,7 +1327,7 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
     val marker = remember(current) { com.wotagei.cam.core.glowWheelMarkerOf(current) }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
-            text = stringResource(R.string.cam_glow_color),
+            text = stringResource(labelRes),
             style = WotaType.label,
             color = WotaColor.textLo,
             maxLines = 1
@@ -1328,9 +1339,10 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
                 .border(1.dp, WotaColor.acrylicBorder, CircleShape)
                 .pointerInput(editable) {
                     if (!editable) return@pointerInput
-                    // 双击归零的状态（2026-10-29 用户口径）：两次按下间隔 < 350ms 且落点相距
-                    // < 40px 视为双击 ⇒ 颜色回白（单色模式下面板随之显示为中性）。
-                    // 双击的第一下照常取色、第二下归零，净结果 = 白。
+                    // 双击判定（2026-10-29 用户口径）：两次按下间隔 < 350ms 且落点相距
+                    // < 40px 视为双击 ⇒ 走「回归默认」通道。
+                    // 双击的第一下照常取色、第二下回归默认：Glow 归零（白，净结果 = 白），
+                    // Echo 回 OFF+白（plan/35，见组件 KDoc 的 onDoubleTap 说明）。
                     var lastTapAtMs = 0L
                     var lastTapPos = Offset.Zero
                     awaitEachGesture {
@@ -1350,8 +1362,10 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
                         val isDoubleTap = nowMs - lastTapAtMs < 350L &&
                             (down.position - lastTapPos).getDistance() < 40f
                         if (isDoubleTap) {
-                            // 双击 = 归零（白 = 中性，跟随像素颜色）
-                            onPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)
+                            // 双击：给了 onDoubleTap 就走调用方的「回归默认」通道（plan/35 Echo：
+                            // 模式回 OFF + 色回白），没给则维持 Glow 口径——归零（白 = 中性，跟随像素颜色）
+                            if (onDoubleTap != null) onDoubleTap()
+                            else onPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)
                             lastTapAtMs = 0L
                         } else {
                             pick(down.position)
@@ -1369,7 +1383,7 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
                         }
                     }
                 }
-                .semantics { contentDescription = context.getString(R.string.cam_glow_color) }
+                .semantics { contentDescription = context.getString(labelRes) }
         ) {
             val radius = size.minDimension / 2f
             // 色相扫掠 + 白色径向（圆心饱和 0）
@@ -1413,7 +1427,8 @@ private fun GlowColorWheel(current: Long, editable: Boolean, onPick: (Long) -> U
 /**
  * 残影面板（R2 高光拖影，2026-11-05；docs/research/R2 §四.2 双模式）：
  * 开关 → 合成模式（保持亮度 / 提亮拖尾）→ 光弧倍数预设（封顶 10，B 站 100× 翻车口径）→
- * 拖尾模式专属的阈值/强度两滑杆 → 状态行（停用/DIRECT）。
+ * 拖尾专属：颜色补丁（plan/35 加/减/择/除 四模式 + 色盘 + 择色容差）→ 阈值/强度两滑杆 →
+ * 状态行（停用/DIRECT）。
  *
  * 滑杆不新增 SliderKey（与 Glow 面板同一条持久化契约纪律）：整数刻度梯 + snapKey=null。
  */
@@ -1489,6 +1504,58 @@ private fun EchoPill(
             enabled = editable
         )
         Note(R.string.cam_echo_multiplier_hint)
+
+        // ---- 拖尾颜色补丁（plan/35，2026-11-09）：加/减/择/除 四模式，只在提亮拖尾档参与
+        //（U1：保持亮度档完全不参与；灰显口径与同段阈值/强度滑杆一致）
+        PillChoices(
+            options = listOf(
+                com.wotagei.cam.core.EchoTrailColorMode.OFF to R.string.cam_echo_tcm_off,
+                com.wotagei.cam.core.EchoTrailColorMode.ADD to R.string.cam_echo_tcm_add,
+                com.wotagei.cam.core.EchoTrailColorMode.SUBTRACT to R.string.cam_echo_tcm_sub,
+                com.wotagei.cam.core.EchoTrailColorMode.ONLY to R.string.cam_echo_tcm_only,
+                com.wotagei.cam.core.EchoTrailColorMode.EXCEPT to R.string.cam_echo_tcm_except
+            ).map { PillOption(it.first.ordinal, stringResource(it.second)) },
+            selected = echo.trailColorMode.ordinal,
+            columns = 3,
+            onPick = { opt ->
+                write(echo.copy(trailColorMode = com.wotagei.cam.core.EchoTrailColorMode.values()[opt.value]))
+                onPersist()
+            },
+            enabled = editable && trail
+        )
+        // 色盘拾色只写 trailColor（择/除的拖尾携带像素自身色，不加染，E5）；双击 = 回归默认
+        //（E2/U6：模式回 OFF + 色回白——不落「减色+白」这类危险组合，也不动用户其他参数）
+        WotaColorWheel(
+            current = echo.trailColor,
+            editable = editable && trail,
+            labelRes = R.string.cam_echo_trail_color,
+            onPick = {
+                write(echo.copy(trailColor = it))
+                onPersist()
+            },
+            onDoubleTap = {
+                write(
+                    echo.copy(
+                        trailColorMode = com.wotagei.cam.core.EchoTrailColorMode.OFF,
+                        trailColor = com.wotagei.cam.core.ECHO_TRAIL_COLOR_DEFAULT
+                    )
+                )
+                onPersist()
+            }
+        )
+        Note(R.string.cam_echo_tcm_note)
+        // 择色容差：只对择/除参与（加/减不筛源像素，E6 灰显）；显示域 %（梯 5..80 步 5），写回 /100
+        PillSlider(
+            value = echo.trailTol * 100f,
+            lo = com.wotagei.cam.core.ECHO_TRAIL_TOL_MIN * 100f,
+            hi = com.wotagei.cam.core.ECHO_TRAIL_TOL_MAX * 100f, step = 5f,
+            enabled = editable && trail && (echo.trailColorMode == com.wotagei.cam.core.EchoTrailColorMode.ONLY ||
+                echo.trailColorMode == com.wotagei.cam.core.EchoTrailColorMode.EXCEPT),
+            label = stringResource(R.string.cam_echo_trail_tol),
+            snapKey = null, ladder = percentLadder(5, 80, 5), format = glowFmt(2),
+            onValueChange = { write(echo.copy(trailTol = it / 100f)) },
+            onValueChangeFinished = onPersist
+        )
 
         // ---- 拖尾模式专属（保持亮度档没有阈值/强度：max 不吃这两颗 uniform）
         PillSlider(

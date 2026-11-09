@@ -233,12 +233,12 @@ class ParamsPersistWiringGuardTest {
     @Test
     fun `R4_二十一个滑杆调用点全接松手落盘`() {
         assertEquals(
-            "PillSlider 调用点数（拍板以实查 24 处为准；2026-10-28 +色调四条；2026-11-01 +等号档手动微调；2026-11-05 +残影两条，R2）",
-            24, occurrences(maskedPills, "PillSlider(").size
+            "PillSlider 调用点数（拍板以实查 25 处为准；2026-10-28 +色调四条；2026-11-01 +等号档手动微调；2026-11-05 +残影两条，R2；2026-11-09 +残影择色容差一条，plan/35）",
+            25, occurrences(maskedPills, "PillSlider(").size
         )
         assertEquals(
             "补传 onValueChangeFinished 的调用点数",
-            24, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
+            25, occurrences(maskedPills, "onValueChangeFinished = onPersist").size
         )
         // 十个带滑杆的面板逐个点名牌：漏挂一颗 = 该面板滑杆拖完被 force-stop 丢值
         val pillFns = listOf(

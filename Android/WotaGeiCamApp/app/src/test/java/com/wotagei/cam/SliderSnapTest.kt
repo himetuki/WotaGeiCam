@@ -120,14 +120,14 @@ class SliderSnapTest {
             bad.add("rememberSliderContinuous 没读 WotaSettings.sliderContinuous")
         }
 
-        // 3) 录制页 24 根滑杆逐个点名（17 根显式 null：3 根整数域 + Glow 七条 + 色调四条（29 §4.4）
-        //    + 等号档手动微调（2026-11-01）+ 残影两条（2026-11-05，R2，刻度梯恒定不进吸附设置页）；
-        //    7 根各点一次 SliderKey）
-        if (occurrences(pills, "PillSlider(") != 24) bad.add("PillSlider 调用点不是 24 处")
-        // 24 根全部点名（7 根各自的 SliderKey + 17 根显式 null）
-        if (occurrences(pills, "snapKey =") != 24) bad.add("有滑杆没点名 snapKey")
-        if (occurrences(pills, "snapKey = null") != 17) {
-            bad.add("整数域/色调滑杆（EV/斑马阈值/并入门槛 + Glow 七条 + TONE 四条 + 等号档手动微调 + 残影两条）必须显式传 snapKey = null，且恰好 17 处")
+        // 3) 录制页 25 根滑杆逐个点名（18 根显式 null：3 根整数域 + Glow 七条 + 色调四条（29 §4.4）
+        //    + 等号档手动微调（2026-11-01）+ 残影阈值/强度（2026-11-05，R2）+ 残影择色容差
+        //    （2026-11-09，plan/35，刻度梯恒定不进吸附设置页）；7 根各点一次 SliderKey）
+        if (occurrences(pills, "PillSlider(") != 25) bad.add("PillSlider 调用点不是 25 处")
+        // 25 根全部点名（7 根各自的 SliderKey + 18 根显式 null）
+        if (occurrences(pills, "snapKey =") != 25) bad.add("有滑杆没点名 snapKey")
+        if (occurrences(pills, "snapKey = null") != 18) {
+            bad.add("整数域/色调滑杆（EV/斑马阈值/并入门槛 + Glow 七条 + TONE 四条 + 等号档手动微调 + 残影三条）必须显式传 snapKey = null，且恰好 18 处")
         }
         SliderKey.entries.forEach { key ->
             val n = occurrences(pills, "snapKey = SliderKey.${key.name}")
@@ -151,9 +151,9 @@ class SliderSnapTest {
             bad.add("设置页并入门槛滑杆必须传 snapKey = null")
         }
         // 2026-10-29：播放器整数域滑杆 4 根（并入门槛 1 + 导出光晕阈值/强度/混合 3）；
-        // 2026-11-05（R2 第三路）+残影倍数/阈值/强度 3 根 ⇒ 共 7 根
-        if (occurrences(player, "snapKey = null") != 7) {
-            bad.add("播放器整数域滑杆（并入门槛 + 导出光晕三项 + 残影三项）必须都传 snapKey = null（当前 ${occurrences(player, "snapKey = null")} 处）")
+        // 2026-11-05（R2 第三路）+残影倍数/阈值/强度 3 根；2026-11-09（plan/35）+残影择色容差 1 根 ⇒ 共 8 根
+        if (occurrences(player, "snapKey = null") != 8) {
+            bad.add("播放器整数域滑杆（并入门槛 + 导出光晕三项 + 残影四项）必须都传 snapKey = null（当前 ${occurrences(player, "snapKey = null")} 处）")
         }
         return bad
     }

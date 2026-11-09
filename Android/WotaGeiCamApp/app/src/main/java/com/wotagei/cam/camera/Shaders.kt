@@ -214,6 +214,9 @@ internal object Shaders {
         uniform float uEchoDecay;
         uniform float uEchoMode;
         uniform float uEchoThreshold;
+        uniform vec3 uEchoTint;
+        uniform float uEchoMask;
+        uniform float uEchoTol;
         void main() {
             vec3 c = texture2D(uSrc, vUv).rgb;
             vec3 prev = texture2D(uEchoPrev, vUv).rgb * uEchoDecay;
@@ -222,6 +225,10 @@ internal object Shaders {
             } else {
                 float luma = dot(c, vec3(0.299, 0.587, 0.114));
                 float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
+                // 拖尾颜色补丁·择/除（docs/plan/35 U4/E1）：色度距离门（BT.601，亮度差不计入距离——
+                // 灯体亮度随曝光变、色相不变）；与既有亮度门相乘，不旁路。
+                float m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))));
+                t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);
                 gl_FragColor = vec4(c * t + prev, 1.0);
             }
         }
@@ -231,7 +238,8 @@ internal object Shaders {
      * 后渲染导出的**残影合成趟**（R2 第三路）：`applyEcho(base + glow, echo)`——残影包在 Glow
      * 外层，与实时链 `echoFragment` 的合成顺序逐项同源。Glow 缺席时 `uGlowSrc` 绑 1×1 黑纹理
      * 且增益/混合置 0 ⇒ 光晕贡献为 0；残影缺席不会走到这条（调用方只在 echo 非 null 时用它）。
-     * `applyEcho` 双模式与实时链 `ECHO_DECL` 同源：max（保持亮度）/ 加法叠回钳 1（提亮拖尾）。
+     * `applyEcho` 双模式与实时链 `ECHO_DECL` 同源：max（保持亮度）/ 加法叠回钳 1（提亮拖尾）；
+     * 拖尾颜色补丁·加/减（docs/plan/35）同源同款，只在 TRAIL 支路内染色。
      */
     val SCENE_COMPOSITE_ECHO_FS = """
         precision mediump float;
@@ -249,6 +257,8 @@ internal object Shaders {
         uniform float uFreq;
         uniform float uEchoMode;
         uniform float uEchoGain;
+        uniform vec3 uEchoTint;
+        uniform float uEchoTintMode;
         float glowHash(vec2 p) {
             vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
             q += dot(q, q.yzx + 33.33);
@@ -257,6 +267,10 @@ internal object Shaders {
         vec3 applyEcho(vec3 c, vec3 e) {
             if (uEchoMode < 0.5) {
                 return max(c, e);
+            }
+            // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：加=乘色（白=中性元），减=补色乘。
+            if (uEchoTintMode > 0.5) {
+                e *= (uEchoTintMode < 1.5) ? uEchoTint : (vec3(1.0) - uEchoTint);
             }
             return min(c + e * uEchoGain, vec3(1.0));
         }
@@ -847,6 +861,9 @@ vec3 applyGlow(vec3 c, vec2 uv) {
         uniform float uEchoDecay;
         uniform float uEchoMode;
         uniform float uEchoThreshold;
+        uniform vec3 uEchoTint;
+        uniform float uEchoMask;
+        uniform float uEchoTol;
         void main() {
             vec3 c = texture2D(uFrame, vUv).rgb;
             vec3 prev = texture2D(uEchoPrev, vUvEcho).rgb * uEchoDecay;
@@ -855,21 +872,31 @@ vec3 applyGlow(vec3 c, vec2 uv) {
             } else {
                 float luma = dot(c, vec3(0.299, 0.587, 0.114));
                 float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
+                // 拖尾颜色补丁·择/除（docs/plan/35 U4/E1）：色度距离门（BT.601，亮度差不计入距离——
+                // 灯体亮度随曝光变、色相不变）；与既有亮度门相乘，不旁路。
+                float m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))));
+                t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);
                 gl_FragColor = vec4(c * t + prev, 1.0);
             }
         }
     """.trimIndent()
 
-    /** 注入段：varying + 3 颗 uniform + `applyEcho`（双模式合成；黑纹理兜底时两种模式都是恒等） */
+    /** 注入段：varying + 5 颗 uniform + `applyEcho`（双模式合成 + 拖尾颜色补丁；黑纹理兜底时两种模式都是恒等） */
     private const val ECHO_DECL = """
 varying vec2 vUvEcho;
 uniform sampler2D uEchoSrc;
 uniform float uEchoMode;
 uniform float uEchoGain;
+uniform vec3 uEchoTint;
+uniform float uEchoTintMode;
 vec3 applyEcho(vec3 c, vec2 uv) {
     vec3 e = texture2D(uEchoSrc, uv).rgb;
     if (uEchoMode < 0.5) {
         return max(c, e);
+    }
+    // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：加=乘色（白=中性元），减=补色乘。
+    if (uEchoTintMode > 0.5) {
+        e *= (uEchoTintMode < 1.5) ? uEchoTint : (vec3(1.0) - uEchoTint);
     }
     return min(c + e * uEchoGain, vec3(1.0));
 }

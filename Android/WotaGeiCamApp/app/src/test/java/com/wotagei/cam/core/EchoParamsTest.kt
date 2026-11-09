@@ -119,6 +119,89 @@ class EchoParamsTest {
         assertEquals(ECHO_GAIN_MAX, decoded.gain, 0f)
     }
 
+    // ------------------------------------------------- 拖尾颜色补丁（docs/plan/35）
+
+    @Test
+    fun `补丁默认关且色白容差出厂`() {
+        // 出厂 = 补丁整体关闭，画面与无补丁逐字节一致（plan/35 E2）
+        assertEquals(EchoTrailColorMode.OFF, EchoParams.DEFAULT.trailColorMode)
+        assertEquals(ECHO_TRAIL_COLOR_DEFAULT, EchoParams.DEFAULT.trailColor)
+        assertEquals(0.3f, EchoParams.DEFAULT.trailTol, 0f)
+    }
+
+    @Test
+    fun `sanitize 补丁色掩码与容差域钳且幂等`() {
+        val dirty = EchoParams(
+            mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.ONLY,
+            trailColor = -0x100000000001L, trailTol = 9f
+        )
+        val s = dirty.sanitize()
+        assertEquals("脏高位掩掉", ECHO_ARGB_MASK and dirty.trailColor, s.trailColor)
+        assertEquals(ECHO_TRAIL_TOL_MAX, s.trailTol, 0f)
+        assertEquals(0.3f, EchoParams(trailTol = Float.NaN).sanitize().trailTol, 0f)
+        assertEquals(ECHO_TRAIL_TOL_MIN, EchoParams(trailTol = 0f).sanitize().trailTol, 0f)
+        assertEquals("域钳幂等", s, s.sanitize())
+    }
+
+    @Test
+    fun `补丁参数编解码往返精确`() {
+        for (m in EchoTrailColorMode.entries) {
+            val p = EchoParams(
+                enabled = true, mode = EchoMode.TRAIL, multiplier = 6,
+                trailColorMode = m, trailColor = 0xFF33CCL, trailTol = 0.45f
+            )
+            assertEquals("tcm=$m 往返", p, decodeEcho(encodeEcho(p)))
+        }
+    }
+
+    @Test
+    fun `旧串无补丁键解码回补丁出厂`() {
+        // v0.0.12-r05 及之前落盘的串没有 tcm/tc/ttol：缺键 = 出厂（前向兼容，不许炸）
+        val decoded = decodeEcho("enabled=1;mode=TRAIL;multiplier=4;threshold=0.85;gain=1.0")
+        assertEquals(EchoTrailColorMode.OFF, decoded.trailColorMode)
+        assertEquals(ECHO_TRAIL_COLOR_DEFAULT, decoded.trailColor)
+        assertEquals(0.3f, decoded.trailTol, 0f)
+    }
+
+    @Test
+    fun `补丁键坏值整串回默认不猜`() {
+        assertEquals(EchoParams.DEFAULT, decodeEcho("enabled=1;mode=TRAIL;multiplier=4;threshold=0.9;gain=1.0;tcm=谁"))
+        assertEquals(EchoParams.DEFAULT, decodeEcho("enabled=1;mode=TRAIL;multiplier=4;threshold=0.9;gain=1.0;tc=zz"))
+        assertEquals(
+            EchoParams.DEFAULT,
+            decodeEcho("enabled=1;mode=TRAIL;multiplier=4;threshold=0.9;gain=1.0;ttol=abc")
+        )
+    }
+
+    @Test
+    fun `uniform映射_KB档恒0_TRAIL档按补丁模式映射`() {
+        // E7 双保险的引擎半边：KB 档无论补丁模式是什么，mask/tint 都必须 0
+        for (m in EchoTrailColorMode.entries) {
+            val kb = EchoParams(mode = EchoMode.KEEP_BRIGHTNESS, trailColorMode = m)
+            assertEquals("KB mask m=$m", 0, echoTrailMaskOf(kb))
+            assertEquals("KB tint m=$m", 0, echoTrailTintOf(kb))
+        }
+        // TRAIL 档：择=1、除=2、其余 mask=0；加=1、减=2、其余 tint=0
+        assertEquals(1, echoTrailMaskOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.ONLY)))
+        assertEquals(2, echoTrailMaskOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.EXCEPT)))
+        assertEquals(0, echoTrailMaskOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.ADD)))
+        assertEquals(1, echoTrailTintOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.ADD)))
+        assertEquals(2, echoTrailTintOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.SUBTRACT)))
+        assertEquals(0, echoTrailTintOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.ONLY)))
+        assertEquals(0, echoTrailTintOf(EchoParams(mode = EchoMode.TRAIL, trailColorMode = EchoTrailColorMode.OFF)))
+    }
+
+    @Test
+    fun `uniform映射_补丁色与容差换算`() {
+        val rgb = echoTrailTintRgbOf(EchoParams(trailColor = 0xFFFF0000L))
+        assertEquals(1f, rgb[0], 1e-6f)
+        assertEquals(0f, rgb[1], 1e-6f)
+        assertEquals(0f, rgb[2], 1e-6f)
+        assertEquals(1f, echoTrailTintRgbOf(EchoParams.DEFAULT)[0], 1e-6f) // 白 = 中性元
+        assertEquals(0.45f, echoTrailTolOf(EchoParams(trailTol = 0.45f)), 1e-6f)
+        assertEquals(ECHO_TRAIL_TOL_MIN, echoTrailTolOf(EchoParams(trailTol = -1f)), 1e-6f)
+    }
+
     // ------------------------------------------------------------------ 状态行
 
     @Test

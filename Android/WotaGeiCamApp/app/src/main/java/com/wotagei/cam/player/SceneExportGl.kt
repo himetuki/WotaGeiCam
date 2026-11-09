@@ -18,6 +18,10 @@ import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.EchoMode
 import com.wotagei.cam.core.GlowParams
 import com.wotagei.cam.core.echoDecayOf
+import com.wotagei.cam.core.echoTrailMaskOf
+import com.wotagei.cam.core.echoTrailTintOf
+import com.wotagei.cam.core.echoTrailTintRgbOf
+import com.wotagei.cam.core.echoTrailTolOf
 import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.diag.Diag as Log
 import java.util.concurrent.CountDownLatch
@@ -160,6 +164,9 @@ internal class SceneExportGl(
     private var echoAccUDecay = -1
     private var echoAccUMode = -1
     private var echoAccUThreshold = -1
+    private var echoAccUTint = -1
+    private var echoAccUMask = -1
+    private var echoAccUTol = -1
 
     // 残影合成趟（SCENE_COMPOSITE_ECHO_FS：base + glow + echo）
     private var echoCompProgram = 0
@@ -176,6 +183,8 @@ internal class SceneExportGl(
     private var echoCompUFreq = -1
     private var echoCompUEchoMode = -1
     private var echoCompUEchoGain = -1
+    private var echoCompUEchoTintMode = -1
+    private var echoCompUEchoTint = -1
 
     private var glReady = false
 
@@ -495,6 +504,9 @@ internal class SceneExportGl(
             echoAccUDecay = GLES20.glGetUniformLocation(echoAccProgram, "uEchoDecay")
             echoAccUMode = GLES20.glGetUniformLocation(echoAccProgram, "uEchoMode")
             echoAccUThreshold = GLES20.glGetUniformLocation(echoAccProgram, "uEchoThreshold")
+            echoAccUTint = GLES20.glGetUniformLocation(echoAccProgram, "uEchoTint")
+            echoAccUMask = GLES20.glGetUniformLocation(echoAccProgram, "uEchoMask")
+            echoAccUTol = GLES20.glGetUniformLocation(echoAccProgram, "uEchoTol")
             echoCompAPos = GLES20.glGetAttribLocation(echoCompProgram, "aPosition")
             echoCompATex = GLES20.glGetAttribLocation(echoCompProgram, "aTexCoord")
             echoCompUMatrix = GLES20.glGetUniformLocation(echoCompProgram, "uTexMatrix")
@@ -508,6 +520,8 @@ internal class SceneExportGl(
             echoCompUFreq = GLES20.glGetUniformLocation(echoCompProgram, "uFreq")
             echoCompUEchoMode = GLES20.glGetUniformLocation(echoCompProgram, "uEchoMode")
             echoCompUEchoGain = GLES20.glGetUniformLocation(echoCompProgram, "uEchoGain")
+            echoCompUEchoTintMode = GLES20.glGetUniformLocation(echoCompProgram, "uEchoTintMode")
+            echoCompUEchoTint = GLES20.glGetUniformLocation(echoCompProgram, "uEchoTint")
         }
         drainGlError("sceneBuildPrograms")
         return true
@@ -608,6 +622,11 @@ internal class SceneExportGl(
                 if (echoAccUDecay >= 0) GLES20.glUniform1f(echoAccUDecay, echoDecayOf(echo.multiplier))
                 if (echoAccUMode >= 0) GLES20.glUniform1f(echoAccUMode, if (echo.mode == EchoMode.TRAIL) 1f else 0f)
                 if (echoAccUThreshold >= 0) GLES20.glUniform1f(echoAccUThreshold, echo.threshold)
+                // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5）：与实时链 drawEchoPass 同一推导（core 纯函数）
+                if (echoAccUMask >= 0) GLES20.glUniform1f(echoAccUMask, echoTrailMaskOf(echo).toFloat())
+                val echoTintRgb = echoTrailTintRgbOf(echo)
+                if (echoAccUTint >= 0) GLES20.glUniform3f(echoAccUTint, echoTintRgb[0], echoTintRgb[1], echoTintRgb[2])
+                if (echoAccUTol >= 0) GLES20.glUniform1f(echoAccUTol, echoTrailTolOf(echo))
             }
             if (!accOk) return false
             echoAccIdx = 1 - echoAccIdx
@@ -647,6 +666,10 @@ internal class SceneExportGl(
             }
             if (echoCompUEchoMode >= 0) GLES20.glUniform1f(echoCompUEchoMode, if (echo.mode == EchoMode.TRAIL) 1f else 0f)
             if (echoCompUEchoGain >= 0) GLES20.glUniform1f(echoCompUEchoGain, echo.gain)
+            // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：与实时链 drawPass 同一推导（E7：KB 档 tintMode 恒 0）
+            if (echoCompUEchoTintMode >= 0) GLES20.glUniform1f(echoCompUEchoTintMode, echoTrailTintOf(echo).toFloat())
+            val compTintRgb = echoTrailTintRgbOf(echo)
+            if (echoCompUEchoTint >= 0) GLES20.glUniform3f(echoCompUEchoTint, compTintRgb[0], compTintRgb[1], compTintRgb[2])
             drawQuad(echoCompAPos, echoCompATex)
         } else if (glow != null) {
             GLES20.glUseProgram(compProgram)

@@ -340,6 +340,15 @@
     <string name="cam_echo_gain">拖尾强度</string>
     <string name="cam_echo_broken">残影已停用</string>
     <string name="cam_echo_direct">需切到「使用 GPU」才生效</string>
+    <!-- 拖尾颜色补丁（plan/35，2026-11-09）：加/减/择/除 四模式，只在提亮拖尾档参与；双击色盘回归默认 -->
+    <string name="cam_echo_trail_color">拖尾颜色</string>
+    <string name="cam_echo_tcm_off">关</string>
+    <string name="cam_echo_tcm_add">加色</string>
+    <string name="cam_echo_tcm_sub">减色</string>
+    <string name="cam_echo_tcm_only">择色</string>
+    <string name="cam_echo_tcm_except">除色</string>
+    <string name="cam_echo_tcm_note">加色 = 拖尾染上所选颜色；减色 = 从拖尾中去掉所选颜色；择色 = 只有所选颜色的像素拖尾；除色 = 只让所选颜色以外的像素拖尾。双击色盘回归默认</string>
+    <string name="cam_echo_trail_tol">择色容差</string>
     <string name="denoise_audio_off">关闭</string>
     <string name="denoise_audio_system">系统降噪</string>
     <string name="denoise_video_off">关闭</string>

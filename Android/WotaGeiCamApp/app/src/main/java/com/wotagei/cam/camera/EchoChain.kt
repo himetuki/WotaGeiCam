@@ -76,6 +76,9 @@ internal class EchoChain(
     private var uDecay = -1
     private var uMode = -1
     private var uThreshold = -1
+    private var uTint = -1
+    private var uMask = -1
+    private var uTol = -1
 
     // 构造期一次性分配（每帧零分配）
     private val sizeScratch = IntArray(2)
@@ -103,6 +106,9 @@ internal class EchoChain(
         uDecay = GLES20.glGetUniformLocation(accumProgram, "uEchoDecay")
         uMode = GLES20.glGetUniformLocation(accumProgram, "uEchoMode")
         uThreshold = GLES20.glGetUniformLocation(accumProgram, "uEchoThreshold")
+        uTint = GLES20.glGetUniformLocation(accumProgram, "uEchoTint")
+        uMask = GLES20.glGetUniformLocation(accumProgram, "uEchoMask")
+        uTol = GLES20.glGetUniformLocation(accumProgram, "uEchoTol")
         drainGlError("echoBuildPrograms")
     }
 
@@ -128,6 +134,9 @@ internal class EchoChain(
      * 累积一趟：`acc[1-idx] ← f(OES 帧, k·acc[idx])`，随后乒乓交换。
      *
      * @param decay `echoDecayOf(倍数)`（0..1）；@param trailMode false = 保持亮度（max）
+     * @param trailMask 择/除门模式（`echoTrailMaskOf`：0=不筛 1=择 2=除）
+     * @param trailTintR 补丁色 R（0..1）；@param trailTintG 补丁色 G；@param trailTintB 补丁色 B
+     * @param trailTol 择/除色度容差（`echoTrailTolOf`，docs/plan/35 E6）
      * @return true = 本帧产出了可采样的累积面
      */
     fun draw(
@@ -139,7 +148,12 @@ internal class EchoChain(
         scale: Int,
         decay: Float,
         trailMode: Boolean,
-        threshold: Float
+        threshold: Float,
+        trailMask: Int,
+        trailTintR: Float,
+        trailTintG: Float,
+        trailTintB: Float,
+        trailTol: Float
     ): Boolean {
         if (broken || oesTextureId == 0) return false
         prepare()
@@ -180,6 +194,10 @@ internal class EchoChain(
         if (uDecay >= 0) GLES20.glUniform1f(uDecay, decay)
         if (uMode >= 0) GLES20.glUniform1f(uMode, if (trailMode) 1f else 0f)
         if (uThreshold >= 0) GLES20.glUniform1f(uThreshold, threshold)
+        // 拖尾颜色补丁·择/除（docs/plan/35）：mask/tol 只在 TRAIL 支路参与（KB 分支不执行，E7 双保险之一）
+        if (uMask >= 0) GLES20.glUniform1f(uMask, trailMask.toFloat())
+        if (uTint >= 0) GLES20.glUniform3f(uTint, trailTintR, trailTintG, trailTintB)
+        if (uTol >= 0) GLES20.glUniform1f(uTol, trailTol)
         drawQuad(identityUv)
         errors += drainGlError("echoAccumPass")
         restoreState(scissorWasEnabled)

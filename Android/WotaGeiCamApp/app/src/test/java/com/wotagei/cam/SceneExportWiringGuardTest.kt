@@ -123,6 +123,26 @@ class SceneExportWiringGuardTest {
         assertTrue("GL 必须按 effects.echo 建乒乓累积面", glSrc.contains("if (effects.echo != null)"))
         assertTrue("累积趟必须读原始 2D 帧 curTex（与实时链读原始 OES 同口径）", glSrc.contains("GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)"))
         assertTrue("衰减必须走 echoDecayOf（与实时链同一换算）", glSrc.contains("echoDecayOf(echo.multiplier)"))
+        // 拖尾颜色补丁（docs/plan/35）：离线两趟的 uniform 取位置与设值必须真的接上，
+        // 推导与实时链同一组 core 纯函数（不许离线自造一套口径）。锚点用变量名与调用名——
+        // codeOnly 会遮蔽字符串字面量内容，`"uEchoTint"` 这种字面量锚在 glSrc 上永远落空。
+        for (loc in listOf(
+            "echoAccUTint = GLES20.glGetUniformLocation",
+            "echoAccUMask = GLES20.glGetUniformLocation",
+            "echoAccUTol = GLES20.glGetUniformLocation",
+            "echoCompUEchoTintMode = GLES20.glGetUniformLocation",
+            "echoCompUEchoTint = GLES20.glGetUniformLocation"
+        )) {
+            assertTrue("离线两趟必须取补丁 uniform 位置（$loc）", glSrc.contains(loc))
+        }
+        assertTrue("累积趟必须设 uEchoMask（择/除门）", glSrc.contains("glUniform1f(echoAccUMask"))
+        assertTrue("累积趟必须设 uEchoTint（补丁色）", glSrc.contains("glUniform3f(echoAccUTint"))
+        assertTrue("累积趟必须设 uEchoTol（容差）", glSrc.contains("glUniform1f(echoAccUTol"))
+        assertTrue("累积趟门模式必须走 echoTrailMaskOf", glSrc.contains("echoTrailMaskOf(echo)"))
+        assertTrue("累积趟容差必须走 echoTrailTolOf", glSrc.contains("echoTrailTolOf(echo)"))
+        assertTrue("合成趟必须设 uEchoTintMode（加/减）", glSrc.contains("glUniform1f(echoCompUEchoTintMode"))
+        assertTrue("合成趟必须设 uEchoTint（补丁色）", glSrc.contains("glUniform3f(echoCompUEchoTint"))
+        assertTrue("合成趟染色模式必须走 echoTrailTintOf", glSrc.contains("echoTrailTintOf(echo)"))
         assertTrue("合成必须用残影合成趟 echoCompProgram", glSrc.contains("GLES20.glUseProgram(echoCompProgram)"))
         // 渲染顺序：残影累积在 Glow 模糊之后，残影合成是写编码器面的最后一趟
         val render = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(glSrc, "render"))
@@ -148,6 +168,20 @@ class SceneExportWiringGuardTest {
         assertTrue("保持亮度档必须是 max(c, prev)", acc.contains("max(c, prev)"))
         assertTrue("提亮档必须做高光阈值切分", acc.contains("smoothstep("))
         assertTrue("亮度按 Rec601 加权", acc.contains("0.299, 0.587, 0.114"))
+        // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5/E1）：三件套 uniform 与色度门算式与实时串逐句同源，
+        // 且插在亮度门之后、终写之前（只住 TRAIL 支路，E7）
+        for (u in listOf("uniform vec3 uEchoTint;", "uniform float uEchoMask;", "uniform float uEchoTol;")) {
+            assertTrue("累积趟缺补丁 uniform $u", acc.contains(u))
+        }
+        assertTrue("累积趟缺色度距离算式", acc.contains("length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114))))"))
+        assertTrue("累积趟缺择/除分派", acc.contains("t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);"))
+        assertTrue(
+            "累积趟的色度门必须在亮度门之后、终写之前",
+            acc.indexOf("float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);") <
+                acc.indexOf("float m = 1.0 - smoothstep(uEchoTol") &&
+                acc.indexOf("float m = 1.0 - smoothstep(uEchoTol") <
+                acc.indexOf("gl_FragColor = vec4(c * t + prev, 1.0);")
+        )
 
         val comp = shader("SCENE_COMPOSITE_ECHO_FS")
         // 合成 = applyEcho(base + glow, echo)：残影包在 Glow 外层，与实时 echoFragment 同序
@@ -155,10 +189,20 @@ class SceneExportWiringGuardTest {
         assertTrue("残影必须作用在 withGlow 上", comp.contains("applyEcho(withGlow, e)"))
         assertTrue("保持亮度档 max", comp.contains("return max(c, e);"))
         assertTrue("提亮档加法叠回钳 1", comp.contains("return min(c + e * uEchoGain, vec3(1.0));"))
+        // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：算子与位置同实时 ECHO_DECL（KB 早退后、TRAIL 终写前）
+        assertTrue("合成趟缺染色模式 uniform", comp.contains("uniform float uEchoTintMode;"))
+        assertTrue("合成趟缺补丁色 uniform", comp.contains("uniform vec3 uEchoTint;"))
+        assertTrue("合成趟缺加/减算子", comp.contains("e *= (uEchoTintMode < 1.5) ? uEchoTint : (vec3(1.0) - uEchoTint);"))
+        assertTrue(
+            "合成趟的染色必须位于 KB 分支之后、TRAIL 终写之前",
+            comp.indexOf("return max(c, e);") < comp.indexOf("e *= (uEchoTintMode < 1.5)") &&
+                comp.indexOf("e *= (uEchoTintMode < 1.5)") < comp.indexOf("return min(c + e * uEchoGain, vec3(1.0));")
+        )
         // 实时链的 applyEcho 也要真的同源（反证：不是离线自造一套）
         val decl = shader("ECHO_DECL")
         assertTrue("实时 applyEcho 保持亮度档同源", decl.contains("return max(c, e);"))
         assertTrue("实时 applyEcho 提亮档同源", decl.contains("return min(c + e * uEchoGain, vec3(1.0));"))
+        assertTrue("实时 applyEcho 加/减算子同源", decl.contains("e *= (uEchoTintMode < 1.5) ? uEchoTint : (vec3(1.0) - uEchoTint);"))
     }
 
     // ---------------------------------------------------------------- 派发与 UI

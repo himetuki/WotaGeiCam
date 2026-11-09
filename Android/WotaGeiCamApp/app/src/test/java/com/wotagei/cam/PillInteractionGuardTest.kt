@@ -65,16 +65,16 @@ class PillInteractionGuardTest {
     }
 
     /**
-     * 24 根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛 + 2026-10-28 色调四条 +
-     * 2026-11-01 等号档手动微调 + 2026-11-05 残影两条，R2）：
+     * 25 根滑杆必须全部接梯（A2 + 2026-10-17 并入门槛 + 2026-10-28 色调四条 +
+     * 2026-11-01 等号档手动微调 + 2026-11-05 残影两条，R2 + 2026-11-09 残影择色容差一条，plan/35）：
      * 任一根漏传 `ladder` 就会退回连续滑杆，而纯函数测试仍全绿（审查 P3 的假绿口）。空 = 干净。
      */
     private fun ladderIssues(src: String): List<String> {
         val bad = ArrayList<String>()
-        if (occurrences(src, "PillSlider(").size != 24) bad.add("PillSlider 调用点不是 24 处")
+        if (occurrences(src, "PillSlider(").size != 25) bad.add("PillSlider 调用点不是 25 处")
         // 快门面板另有 `val ladder = shutterLadder(...)`（梯的本地构造），参数字面量要减掉它才是调用点数
         val ladderArgs = occurrences(src, "ladder =").size - occurrences(src, "val ladder =").size
-        if (ladderArgs != 24) bad.add("ladder = 参数不是 24 处（有滑杆退回连续模式）")
+        if (ladderArgs != 25) bad.add("ladder = 参数不是 25 处（有滑杆退回连续模式）")
         val panels = listOf(
             "ShutterPill", "IsoPill", "EvPill", "WbPill", "ZoomPill", "FocusPill",
             "MonitorPill", "FpsPill", "GlowPill", "TonePill", "EchoPill"

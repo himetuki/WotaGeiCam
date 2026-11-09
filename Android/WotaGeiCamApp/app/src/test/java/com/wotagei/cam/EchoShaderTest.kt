@@ -23,7 +23,11 @@ class EchoShaderTest {
 
     private fun countOf(source: String, needle: String): Int = source.split(needle).size - 1
 
-    private val echoTokens = listOf("applyEcho", "vUvEcho", "uEchoSrc", "uEchoMode", "uEchoGain")
+    private val echoTokens = listOf(
+        "applyEcho", "vUvEcho", "uEchoSrc", "uEchoMode", "uEchoGain",
+        // docs/plan/35 拖尾颜色补丁：四个新 uniform 同属"关着 = 逐字不变"的零代价口径
+        "uEchoTint", "uEchoMask", "uEchoTol", "uEchoTintMode"
+    )
 
     // ------------------------------------------------------------------ echo=false：源码逐字不变
 
@@ -67,7 +71,7 @@ class EchoShaderTest {
         assertTrue(Shaders.TEXTURE_VS_GLOW_ECHO.contains("varying vec2 vUvGlow;"))
     }
 
-    // ------------------------------------------------------------------ 累积趟（ECHO_ACCUM_FS）
+    // ------------------------------------------------------------------ 累积趟（ECHO_ACCUM_FS 与离线 SCENE_ECHO_ACCUM_FS 同源）
 
     @Test
     fun `累积趟实现双模式而不是整帧叠加`() {
@@ -92,6 +96,43 @@ class EchoShaderTest {
         assertTrue("模式分派 uniform", src.contains("uniform float uEchoMode;"))
         assertTrue("亮度按 BT.601 权重", src.contains("dot(c, vec3(0.299, 0.587, 0.114))"))
         assertTrue("强制不透明", src.contains(", 1.0);"))
+    }
+
+    @Test
+    fun `两趟累积串都带拖尾颜色补丁的色度门且插在终写之前`() {
+        // docs/plan/35 U4/U5/E1：择/除 = 累积趟源像素色度门（BT.601，亮度差不计入距离——
+        // 灯体亮度随曝光变、色相不变），实时 ECHO_ACCUM_FS 与离线 SCENE_ECHO_ACCUM_FS 逐句同源。
+        val chromaDistance = "(uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))"
+        val gateMultiply = "t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);"
+        for ((name, src) in listOf(
+            "ECHO_ACCUM_FS" to Shaders.ECHO_ACCUM_FS,
+            "SCENE_ECHO_ACCUM_FS" to Shaders.SCENE_ECHO_ACCUM_FS
+        )) {
+            for (u in listOf("uniform vec3 uEchoTint;", "uniform float uEchoMask;", "uniform float uEchoTol;")) {
+                assertTrue("$name 缺补丁 uniform $u", src.contains(u))
+            }
+            assertTrue("$name 缺色度距离算式（BT.601）", src.contains("length((c - luma) - $chromaDistance)"))
+            assertTrue("$name 缺软边 0.1", src.contains("smoothstep(uEchoTol, uEchoTol + 0.1,"))
+            assertTrue("$name 缺择/除分派", src.contains(gateMultiply))
+            // 门必须与既有亮度门相乘（E4：不旁路）、插在终写 c * t + prev 之前
+            val lumaAt = src.indexOf("float luma = dot(c, vec3(0.299, 0.587, 0.114));")
+            val thresholdAt = src.indexOf("float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);")
+            val gateAt = src.indexOf("float m = 1.0 - smoothstep(uEchoTol")
+            val writeAt = src.indexOf("gl_FragColor = vec4(c * t + prev, 1.0);")
+            assertTrue("$name 锚点丢失（亮度门）", lumaAt >= 0 && thresholdAt >= 0)
+            assertTrue("$name 锚点丢失（色度门/终写）", gateAt >= 0 && writeAt >= 0)
+            assertTrue(
+                "$name 的色度门必须在亮度门之后、终写之前（只在 TRAIL 支路体内）",
+                lumaAt < thresholdAt && thresholdAt < gateAt && gateAt < writeAt
+            )
+            // KB 档分支里不许出现色度门（E7 双保险的着色器侧：色逻辑只住 TRAIL 分支）——
+            // 从 KB 终写往后找 uEchoMask，下一次出现必须落在 TRAIL 支路的终写之前
+            //（第一次出现是顶部 uniform 声明，不算）。
+            val kbEnd = src.indexOf("gl_FragColor = vec4(max(c, prev), 1.0);")
+            assertTrue("$name 锚点丢失（KB 分支）", kbEnd >= 0)
+            val maskAfterKb = src.indexOf("uEchoMask", kbEnd)
+            assertTrue("$name 的色度门必须住在 KB 之后的 TRAIL 支路里", maskAfterKb in (kbEnd + 1) until writeAt)
+        }
     }
 
     // ------------------------------------------------------------------ echo=true：scene 支路（含 glow 已注入的形态）
@@ -190,6 +231,32 @@ class EchoShaderTest {
             assertTrue("缺 uniform $uniform", e.contains(uniform))
         }
         assertEquals("注入段不许出现两次", 1, countOf(e, "vec3 applyEcho(vec3 c, vec2 uv) {"))
+    }
+
+    @Test
+    fun `两份applyEcho同源串的加减速算只在TRAIL支路`() {
+        // docs/plan/35 U2/U3/E3：加 = e *= tint（白=中性元）、减 = e *= 1−tint（补色乘）；
+        // 染色必须插在 KB 早退（max(c, e)）之后、TRAIL 终写（min(c + e·gain)）之前——
+        // KB 档提前 return，染色代码物理上够不到它（E7 双保险的着色器侧）。
+        val tintLine = "e *= (uEchoTintMode < 1.5) ? uEchoTint : (vec3(1.0) - uEchoTint);"
+        val sources = mapOf(
+            "ECHO_DECL 注入产物" to Shaders.echoFragment(Shaders.PASS_THROUGH_FS, FrameEffect.NONE, false)!!,
+            "SCENE_COMPOSITE_ECHO_FS" to Shaders.SCENE_COMPOSITE_ECHO_FS
+        )
+        for ((name, src) in sources) {
+            assertTrue("$name 缺染色模式 uniform", src.contains("uniform float uEchoTintMode;"))
+            assertTrue("$name 缺补丁色 uniform", src.contains("uniform vec3 uEchoTint;"))
+            assertTrue("$name 缺加/减算子", src.contains(tintLine))
+            assertTrue("$name 缺染色开关", src.contains("if (uEchoTintMode > 0.5) {"))
+            val kbAt = src.indexOf("return max(c, e);")
+            val tintAt = src.indexOf(tintLine)
+            val trailAt = src.indexOf("return min(c + e * uEchoGain, vec3(1.0));")
+            assertTrue("$name 锚点丢失", kbAt >= 0 && tintAt >= 0 && trailAt >= 0)
+            assertTrue(
+                "$name 的染色必须位于 KB 分支之后、TRAIL 终写之前",
+                kbAt < tintAt && tintAt < trailAt
+            )
+        }
     }
 
     // ------------------------------------------------------------------ 锚点对不上 → null
