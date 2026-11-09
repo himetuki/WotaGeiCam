@@ -40,7 +40,7 @@ If you need an English / Indonesian (Bahasa Indonesia) interface, his build is r
 
 **🌟 Light-arc tool chain · film beautiful light arcs**
 - Forced slow shutter **1/24 · 1/25** full-window long exposure keeps arcs continuous; **equal-tier exposure correction** automatically leaves readout headroom to prevent frame drops.
-- **Afterimage (highlight trailing)**: multi-frame echo lengthens arcs, "keep brightness / brightened trail" dual modes, multiplier 2–10×, across preview / recording / re-rendered export. (Algorithm concept referenced from Bilibili creator 蒙德·究史尼's open-source 光弧倍增器 script — with thanks; see Light-arc tool chain below)
+- **Afterimage (highlight trailing)**: multi-frame echo lengthens arcs, with "keep brightness / brightened trail" modes and a 2–10× multiplier; brightened trails support **Add / Subtract / Only / Except** color modes and double-tap palette reset across preview / recording / re-rendered export. (Algorithm concept referenced from Bilibili creator 蒙德·究史尼's open-source 光弧倍增器 script — with thanks; see Light-arc tool chain below)
 - **In-recording extract + arc merge + offline arc repair**: devices without a native slow tier still keep continuous arcs.
 
 **🎯 Practice comparison · practice standard moves**
@@ -119,9 +119,13 @@ Listed by category below, each with its **location**, **how to open it**, and **
 | Feature | Location · How to open | Usage |
 |---|---|---|
 | In-recording extract + arc merge | Frame-rate readout panel (auto when no native 24/25 tier) | "Auto-extract with arc merging" keeps arcs continuous / "extract only"; dropped slots logged to a `.drops.json` sidecar |
-| Afterimage (highlight trailing) | Bottom dock left "afterimage" pill (hidden by default) | Enable in Settings → Viewfinder persistent controls; pick mode (keep brightness / brightened trail) and multiplier 2–10×; preview / recording / re-rendered export; GPU only |
+| Afterimage (highlight trailing) | Bottom dock left "afterimage" pill (hidden by default) | Enable in Settings → Viewfinder persistent controls; pick mode (keep brightness / brightened trail) and multiplier 2–10×; brightened trails have threshold / strength controls; preview / recording / re-rendered export; GPU only |
+| Trail color | Afterimage panel → Brightened trail; or Player → Clip → Re-render → Afterimage | Off by default; Add tints the trail, Subtract removes the selected color components; Only lets matching bright pixels trail, Except lets the other bright pixels trail, both retaining the source pixels' own colors; keep-brightness mode is unaffected |
+| Color tolerance / palette reset | Trail color controls | Tolerance 5–80%, adjustable only for Only / Except; double-tap the palette to restore "Off + white" without changing other parameters; export-panel adjustments apply to that export only |
 | Offline arc repair | Player → Arc repair | Pick the target rate, GPU or CPU; writes a new file, never overwrites the original |
 | Merge threshold | Frame-rate panel / arc-repair panel / Settings → Startup defaults | Default 12 (0–32); higher is more conservative, lower merges noise; same rule for recording and offline, CPU and GPU |
+
+Trail color affects the trail, not the current source image. White/gray and colored pixels are matched separately: widening the tolerance does not select white/gray as a color. "Except red" still allows white; use "Except white" to exclude neutral pixels. Color selection cannot recover the original hue of pixels already clipped to white; use Add to tint white trails. Bright multi-frame accumulation can still saturate to white.
 
 > The afterimage feature's **algorithm concept and product semantics** (multi-frame echo to lengthen arcs, keep-brightness / brightened-trail dual modes, multiplier tiers) reference the open-source script 光弧倍增器 (Light-arc Multiplier) by Bilibili creator [蒙德·究史尼](https://space.bilibili.com/8205741) — with sincere thanks. What was borrowed is the idea and semantics; **no source code was reused** — the shaders and implementation here were written independently, on a different technical approach (real-time GL feedback accumulation with arcs trailing behind the motion, rather than its offline Python sliding window that placed arcs ahead of it).
 
