@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalConfiguration
@@ -1319,6 +1320,9 @@ internal fun WotaColorWheel(
     onDoubleTap: (() -> Unit)? = null,
     onPick: (Long) -> Unit
 ) {
+    // 手势协程不随颜色重启，但每次事件都须读取本次组合的回调（导出面板持有参数副本）。
+    val latestOnPick by rememberUpdatedState(onPick)
+    val latestOnDoubleTap by rememberUpdatedState(onDoubleTap)
     val context = LocalContext.current
     val hueColors = listOf(
         Color(0xFFFF0000), Color(0xFFFFFF00), Color(0xFF00FF00),
@@ -1352,7 +1356,7 @@ internal fun WotaColorWheel(
                         val c = Offset(size.width / 2f, size.height / 2f)
                         val r = minOf(size.width, size.height) / 2f
                         fun pick(pos: Offset) {
-                            onPick(
+                            latestOnPick(
                                 com.wotagei.cam.core.glowArgbFromWheel(
                                     pos.x - c.x, pos.y - c.y, r
                                 )
@@ -1364,8 +1368,8 @@ internal fun WotaColorWheel(
                         if (isDoubleTap) {
                             // 双击：给了 onDoubleTap 就走调用方的「回归默认」通道（plan/35 Echo：
                             // 模式回 OFF + 色回白），没给则维持 Glow 口径——归零（白 = 中性，跟随像素颜色）
-                            if (onDoubleTap != null) onDoubleTap()
-                            else onPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)
+                            latestOnDoubleTap?.invoke()
+                                ?: latestOnPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)
                             lastTapAtMs = 0L
                         } else {
                             pick(down.position)
@@ -1375,7 +1379,8 @@ internal fun WotaColorWheel(
                         while (true) {
                             val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                             if (change.pressed) {
-                                pick(change.position)
+                                // 双击复位后仍吃掉本次按压，但移动不能再把白色覆盖。
+                                if (!isDoubleTap) pick(change.position)
                                 change.consume()
                             } else {
                                 break

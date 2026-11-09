@@ -99,39 +99,33 @@ class EchoShaderTest {
     }
 
     @Test
-    fun `两趟累积串都带拖尾颜色补丁的色度门且插在终写之前`() {
-        // docs/plan/35 U4/U5/E1：择/除 = 累积趟源像素色度门（BT.601，亮度差不计入距离——
-        // 灯体亮度随曝光变、色相不变），实时 ECHO_ACCUM_FS 与离线 SCENE_ECHO_ACCUM_FS 逐句同源。
-        val chromaDistance = "(uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))"
-        val gateMultiply = "t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);"
-        for ((name, src) in listOf(
-            "ECHO_ACCUM_FS" to Shaders.ECHO_ACCUM_FS,
-            "SCENE_ECHO_ACCUM_FS" to Shaders.SCENE_ECHO_ACCUM_FS
-        )) {
+    fun `两趟筛色同源_峰值亮门与中性分类不影响旧档`() {
+        // 数学行为另由 scripts/test-echo-color-gles.py 直接执行真实 shader 回归；
+        // 此处只守两链同源与分支边界，不能再把公式文本在位当作像素行为已经正确。
+        val sources = listOf(Shaders.ECHO_ACCUM_FS, Shaders.SCENE_ECHO_ACCUM_FS)
+        assertEquals(
+            "预览录制与后渲染的选源数学必须相同",
+            sources[0].substringAfter("float luma =").substringBefore("gl_FragColor"),
+            sources[1].substringAfter("float luma =").substringBefore("gl_FragColor")
+        )
+        for (src in sources) {
             for (u in listOf("uniform vec3 uEchoTint;", "uniform float uEchoMask;", "uniform float uEchoTol;")) {
-                assertTrue("$name 缺补丁 uniform $u", src.contains(u))
+                assertTrue("缺补丁 uniform $u", src.contains(u))
             }
-            assertTrue("$name 缺色度距离算式（BT.601）", src.contains("length((c - luma) - $chromaDistance)"))
-            assertTrue("$name 缺软边 0.1", src.contains("smoothstep(uEchoTol, uEchoTol + 0.1,"))
-            assertTrue("$name 缺择/除分派", src.contains(gateMultiply))
-            // 门必须与既有亮度门相乘（E4：不旁路）、插在终写 c * t + prev 之前
-            val lumaAt = src.indexOf("float luma = dot(c, vec3(0.299, 0.587, 0.114));")
-            val thresholdAt = src.indexOf("float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);")
-            val gateAt = src.indexOf("float m = 1.0 - smoothstep(uEchoTol")
+            val legacyAt = src.indexOf("float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);")
+            val selectAt = src.indexOf("if (uEchoMask > 0.5) {")
+            val peakAt = src.indexOf("t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, peak);")
             val writeAt = src.indexOf("gl_FragColor = vec4(c * t + prev, 1.0);")
-            assertTrue("$name 锚点丢失（亮度门）", lumaAt >= 0 && thresholdAt >= 0)
-            assertTrue("$name 锚点丢失（色度门/终写）", gateAt >= 0 && writeAt >= 0)
-            assertTrue(
-                "$name 的色度门必须在亮度门之后、终写之前（只在 TRAIL 支路体内）",
-                lumaAt < thresholdAt && thresholdAt < gateAt && gateAt < writeAt
-            )
-            // KB 档分支里不许出现色度门（E7 双保险的着色器侧：色逻辑只住 TRAIL 分支）——
-            // 从 KB 终写往后找 uEchoMask，下一次出现必须落在 TRAIL 支路的终写之前
-            //（第一次出现是顶部 uniform 声明，不算）。
+            assertTrue("OFF/加/减保留旧亮门，择/除在分支内替换为峰值亮门", legacyAt >= 0 && legacyAt < selectAt && selectAt < peakAt && peakAt < writeAt)
+            assertTrue("归一化源色必须保护黑色分母", src.contains("c / max(peak, 0.0001)"))
+            assertTrue("目标色也必须归一化", src.contains("uEchoTint / max(tintPeak, 0.0001)"))
+            assertTrue("中性分类不能受容差放宽影响", src.contains("if (sat < 0.05 || tintSat < 0.05)"))
+            assertTrue("双方中性独立匹配", src.contains("m = (sat < 0.05 && tintSat < 0.05) ? 1.0 : 0.0;"))
+            assertTrue("彩色邻域保留软边", src.contains("smoothstep(uEchoTol, uEchoTol + 0.1, length(chroma - tintChroma))"))
+            assertTrue("除色必须是匹配的完整反值", src.contains("t *= (uEchoMask < 1.5) ? m : 1.0 - m;"))
+            assertFalse("不能继续用未归一化旧色度距离", src.contains("length((c - luma)"))
             val kbEnd = src.indexOf("gl_FragColor = vec4(max(c, prev), 1.0);")
-            assertTrue("$name 锚点丢失（KB 分支）", kbEnd >= 0)
-            val maskAfterKb = src.indexOf("uEchoMask", kbEnd)
-            assertTrue("$name 的色度门必须住在 KB 之后的 TRAIL 支路里", maskAfterKb in (kbEnd + 1) until writeAt)
+            assertTrue("筛色只住 TRAIL 支路，不影响 KB", kbEnd >= 0 && kbEnd < selectAt)
         }
     }
 

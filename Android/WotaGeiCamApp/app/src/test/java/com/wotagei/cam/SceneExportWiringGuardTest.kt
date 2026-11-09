@@ -168,20 +168,18 @@ class SceneExportWiringGuardTest {
         assertTrue("保持亮度档必须是 max(c, prev)", acc.contains("max(c, prev)"))
         assertTrue("提亮档必须做高光阈值切分", acc.contains("smoothstep("))
         assertTrue("亮度按 Rec601 加权", acc.contains("0.299, 0.587, 0.114"))
-        // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5/E1）：三件套 uniform 与色度门算式与实时串逐句同源，
-        // 且插在亮度门之后、终写之前（只住 TRAIL 支路，E7）
+        // r06 筛色回归：离线不能再保留会消灭彩色的旧色门；与实时链逐句一致。
         for (u in listOf("uniform vec3 uEchoTint;", "uniform float uEchoMask;", "uniform float uEchoTol;")) {
             assertTrue("累积趟缺补丁 uniform $u", acc.contains(u))
         }
-        assertTrue("累积趟缺色度距离算式", acc.contains("length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114))))"))
-        assertTrue("累积趟缺择/除分派", acc.contains("t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);"))
-        assertTrue(
-            "累积趟的色度门必须在亮度门之后、终写之前",
-            acc.indexOf("float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);") <
-                acc.indexOf("float m = 1.0 - smoothstep(uEchoTol") &&
-                acc.indexOf("float m = 1.0 - smoothstep(uEchoTol") <
-                acc.indexOf("gl_FragColor = vec4(c * t + prev, 1.0);")
+        assertEquals(
+            "离线筛色与实时同源（实际像素由 GLES 脚本验证）",
+            shader("ECHO_ACCUM_FS").substringAfter("float luma =").substringBefore("gl_FragColor"),
+            acc.substringAfter("float luma =").substringBefore("gl_FragColor")
         )
+        assertTrue("择除必须按峰值判亮", acc.contains("t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, peak);"))
+        assertTrue("白灰与彩色必须独立分类", acc.contains("if (sat < 0.05 || tintSat < 0.05)"))
+        assertTrue("累积趟缺择/除分派", acc.contains("t *= (uEchoMask < 1.5) ? m : 1.0 - m;"))
 
         val comp = shader("SCENE_COMPOSITE_ECHO_FS")
         // 合成 = applyEcho(base + glow, echo)：残影包在 Glow 外层，与实时 echoFragment 同序

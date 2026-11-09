@@ -12,6 +12,7 @@ import java.io.File
  * 这里钉的是"色盘三控件真的接进了两处面板、双击回归默认的锚在位、文案词条双语（有则）齐全"：
  *
  * - 色盘组件须已泛化为 WotaColorWheel（internal + 可选双击通道），Glow 与 Echo 各一枚调用；
+ * - 手势须读取两条最新回调、只以 editable 为 pointerInput 键；双击后消费按压但不再取色；
  * - EchoPill 须含模式五档写链（trailColorMode）、双击回归默认（ECHO_TRAIL_COLOR_DEFAULT）、
  *   容差滑杆接域常量（ECHO_TRAIL_TOL_MIN）与刻度梯（percentLadder(5, 80, 5)）；
  * - 播放器导出面板（ExportEffectConfig）须有同款三控件锚（作用于本地副本，不反写落盘）；
@@ -47,6 +48,92 @@ class EchoTrailColorUiGuardTest {
         assertTrue("EchoPill 须有一枚色盘调用", pillsBody("EchoPill").contains("WotaColorWheel("))
         assertFalse("旧名 GlowColorWheel( 不许残留", pillsCode.contains("GlowColorWheel("))
         assertTrue("导出面板须有一枚色盘调用", exportBody().contains("WotaColorWheel("))
+    }
+
+    private fun wheelBody(): String = pillsBody("WotaColorWheel")
+
+    private fun wheelCallbacksAreFresh(body: String): Boolean {
+        // 状态委托须建在手势协程之外；事件内只读取委托，不能缓存首次组合的回调。
+        val setup = body.substringBefore(".pointerInput")
+        val events = body.substringAfter("awaitEachGesture {", "")
+        val pick = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(body, "pick"))
+        return setup.contains("val latestOnPick by rememberUpdatedState(onPick)") &&
+            setup.contains("val latestOnDoubleTap by rememberUpdatedState(onDoubleTap)") &&
+            pick.contains("latestOnPick( com.wotagei.cam.core.glowArgbFromWheel(") &&
+            events.contains(
+                "if (isDoubleTap) { latestOnDoubleTap?.invoke() ?: " +
+                    "latestOnPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)"
+            ) &&
+            !Regex("""\b(onPick|onDoubleTap)\s*(\(|\?\.\s*invoke\s*\()""").containsMatchIn(events)
+    }
+
+    private fun wheelHasStablePointerKey(body: String): Boolean =
+        Regex("""\.pointerInput\s*\(([^)]*)\)\s*\{""").findAll(body)
+            .map { it.groupValues[1].trim() }.toList() == listOf("editable")
+
+    private fun wheelSuppressesDoubleTapPick(body: String): Boolean =
+        body.contains("while (true) { val change = awaitPointerEvent()") &&
+            body.contains(
+                "if (change.pressed) { if (!isDoubleTap) pick(change.position) " +
+                    "change.consume() } else { break }"
+            )
+
+    @Test
+    fun `色盘拾色与双击事件须调用最新回调`() {
+        assertTrue(
+            "两条回调须各经 rememberUpdatedState；pick、双击通道及默认白色分支须实际调用最新引用",
+            wheelCallbacksAreFresh(wheelBody())
+        )
+    }
+
+    @Test
+    fun `色盘pointerInput只能以editable为键避免重组打断拖动或双击`() {
+        assertTrue("颜色与回调不能进入 pointerInput 的键", wheelHasStablePointerKey(wheelBody()))
+    }
+
+    @Test
+    fun `色盘双击后持续消费到抬起但不再拾色覆盖复位`() {
+        assertTrue(
+            "pressed 分支取色须受 !isDoubleTap 保护，消费不能跟着该条件被跳过",
+            wheelSuppressesDoubleTapPick(wheelBody())
+        )
+    }
+
+    @Test
+    fun `尺子自己能红_旧回调重启键及双击续取色突变必红`() {
+        val wheel = wheelBody()
+        val callbackMutations = listOf(
+            "rememberUpdatedState(onPick)" to "remember { mutableStateOf(onPick) }",
+            "rememberUpdatedState(onDoubleTap)" to "remember { mutableStateOf(onDoubleTap) }",
+            "latestOnPick( com.wotagei.cam.core.glowArgbFromWheel(" to
+                "onPick( com.wotagei.cam.core.glowArgbFromWheel(",
+            "latestOnDoubleTap?.invoke()" to "onDoubleTap?.invoke()",
+            "?: latestOnPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)" to
+                "?: onPick(com.wotagei.cam.core.GLOW_COLOR_DEFAULT)"
+        )
+        for ((before, after) in callbackMutations) {
+            assertTrue("回调突变目标须存在：$before", wheel.contains(before))
+            assertFalse("旧回调突变须被捕获：$before", wheelCallbacksAreFresh(wheel.replace(before, after)))
+        }
+        for (key in listOf("current", "onPick", "onDoubleTap", "latestOnPick", "latestOnDoubleTap")) {
+            assertTrue("键突变目标须存在", wheel.contains(".pointerInput(editable)"))
+            assertFalse(
+                "增加 $key 键会重启手势，须被捕获",
+                wheelHasStablePointerKey(wheel.replace(".pointerInput(editable)", ".pointerInput(editable, $key)"))
+            )
+        }
+        val guardedPress = "if (!isDoubleTap) pick(change.position) change.consume()"
+        assertTrue("双击取色防线的突变目标须存在", wheel.contains(guardedPress))
+        for (replacement in listOf(
+            "pick(change.position) change.consume()",
+            "if (isDoubleTap) pick(change.position) change.consume()",
+            "if (!isDoubleTap) { pick(change.position) change.consume() }"
+        )) {
+            assertFalse(
+                "删除或反转双击防线、把消费放进防线均须被捕获：$replacement",
+                wheelSuppressesDoubleTapPick(wheel.replace(guardedPress, replacement))
+            )
+        }
     }
 
     @Test

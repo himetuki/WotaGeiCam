@@ -225,10 +225,24 @@ internal object Shaders {
             } else {
                 float luma = dot(c, vec3(0.299, 0.587, 0.114));
                 float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
-                // 拖尾颜色补丁·择/除（docs/plan/35 U4/E1）：色度距离门（BT.601，亮度差不计入距离——
-                // 灯体亮度随曝光变、色相不变）；与既有亮度门相乘，不旁路。
-                float m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))));
-                t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);
+                // 择/除按峰值判亮：BT.601 会让纯红/蓝在默认阈值下全灭（r06 真机回归）。
+                // 先区分白灰与彩色，再比较归一化 RGB；容差只放宽彩色邻域，不放行白灰。
+                if (uEchoMask > 0.5) {
+                    float peak = max(c.r, max(c.g, c.b));
+                    float tintPeak = max(uEchoTint.r, max(uEchoTint.g, uEchoTint.b));
+                    float sat = (peak - min(c.r, min(c.g, c.b))) / max(peak, 0.0001);
+                    float tintSat = (tintPeak - min(uEchoTint.r, min(uEchoTint.g, uEchoTint.b))) / max(tintPeak, 0.0001);
+                    float m;
+                    if (sat < 0.05 || tintSat < 0.05) {
+                        m = (sat < 0.05 && tintSat < 0.05) ? 1.0 : 0.0;
+                    } else {
+                        vec3 chroma = c / max(peak, 0.0001);
+                        vec3 tintChroma = uEchoTint / max(tintPeak, 0.0001);
+                        m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length(chroma - tintChroma));
+                    }
+                    t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, peak);
+                    t *= (uEchoMask < 1.5) ? m : 1.0 - m;
+                }
                 gl_FragColor = vec4(c * t + prev, 1.0);
             }
         }
@@ -872,10 +886,24 @@ vec3 applyGlow(vec3 c, vec2 uv) {
             } else {
                 float luma = dot(c, vec3(0.299, 0.587, 0.114));
                 float t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, luma);
-                // 拖尾颜色补丁·择/除（docs/plan/35 U4/E1）：色度距离门（BT.601，亮度差不计入距离——
-                // 灯体亮度随曝光变、色相不变）；与既有亮度门相乘，不旁路。
-                float m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length((c - luma) - (uEchoTint - dot(uEchoTint, vec3(0.299, 0.587, 0.114)))));
-                t *= (uEchoMask < 0.5) ? 1.0 : ((uEchoMask < 1.5) ? m : 1.0 - m);
+                // 择/除按峰值判亮：BT.601 会让纯红/蓝在默认阈值下全灭（r06 真机回归）。
+                // 先区分白灰与彩色，再比较归一化 RGB；容差只放宽彩色邻域，不放行白灰。
+                if (uEchoMask > 0.5) {
+                    float peak = max(c.r, max(c.g, c.b));
+                    float tintPeak = max(uEchoTint.r, max(uEchoTint.g, uEchoTint.b));
+                    float sat = (peak - min(c.r, min(c.g, c.b))) / max(peak, 0.0001);
+                    float tintSat = (tintPeak - min(uEchoTint.r, min(uEchoTint.g, uEchoTint.b))) / max(tintPeak, 0.0001);
+                    float m;
+                    if (sat < 0.05 || tintSat < 0.05) {
+                        m = (sat < 0.05 && tintSat < 0.05) ? 1.0 : 0.0;
+                    } else {
+                        vec3 chroma = c / max(peak, 0.0001);
+                        vec3 tintChroma = uEchoTint / max(tintPeak, 0.0001);
+                        m = 1.0 - smoothstep(uEchoTol, uEchoTol + 0.1, length(chroma - tintChroma));
+                    }
+                    t = smoothstep(uEchoThreshold - 0.05, uEchoThreshold + 0.05, peak);
+                    t *= (uEchoMask < 1.5) ? m : 1.0 - m;
+                }
                 gl_FragColor = vec4(c * t + prev, 1.0);
             }
         }

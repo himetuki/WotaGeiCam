@@ -36,7 +36,7 @@ data class EchoParams(
     val mode: EchoMode = EchoMode.KEEP_BRIGHTNESS,
     /** 光弧倍数 2..10（拍屏 N−1 次 = N 倍）；换算成衰减系数见 [echoDecayOf] */
     val multiplier: Int = 2,
-    /** TRAIL 模式的高光阈值 0.6..1.0（与 Glow 阈值同一域：低于它整个背景都会拖影） */
+    /** TRAIL 高光阈值 0.6..1.0：择/除按 RGB 峰值判亮，其余按 BT.601 亮度判亮，避免彩色被旧亮门抹掉 */
     val threshold: Float = 0.9f,
     /** TRAIL 模式的拖尾强度 0..2（主 pass 加法叠回的倍数） */
     val gain: Float = 1.0f,
@@ -50,7 +50,7 @@ data class EchoParams(
     val trailColorMode: EchoTrailColorMode = EchoTrailColorMode.OFF,
     /** 补丁色（ARGB Long，core 不引 Compose，与 [GlowParams.color] 同一口径）。加/减的目标色、择/除的色度距离目标 */
     val trailColor: Long = ECHO_TRAIL_COLOR_DEFAULT,
-    /** 择/除的色度相似容差 0.05..0.8（色度距离不含亮度，见 [echoTrailGateOf] 说明）；只对择/除参与 */
+    /** 择/除的归一化 RGB 色距容差 0.05..0.8；白灰与彩色独立分类，不受容差放宽影响（docs/plan/35 修订） */
     val trailTol: Float = 0.3f
 ) {
 
