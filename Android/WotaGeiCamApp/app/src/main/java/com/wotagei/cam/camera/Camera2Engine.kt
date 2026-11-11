@@ -62,6 +62,9 @@ enum class PreviewStatus { INIT, START, ING, STOP, ERROR }
 /** 录制状态机（与 record 包共用；中间态必须区分） */
 enum class RecordStatus { IDLE, PREPARE, START, STOPPING, ERROR }
 
+/** 分析流会话协商回执：仅陈述接纳结果，不改用户帧率或分析开关。 */
+enum class AnalysisSessionDecision { ABSENT, INCLUDED, BLOCKED_HIGH_SPEED }
+
 /**
  * Camera2 引擎：开关设备、建会话、下发 repeating、点按对焦、错误恢复。
  *
@@ -83,7 +86,9 @@ class Camera2Engine(
      * 可达上限，这里把"退到了多少"报给界面。用户口径：所有自动降档都要看得见——否则他只看到
      * 帧率自己变了，只会当成 bug。
      */
-    private val onFpsDowngraded: (Int) -> Unit = {}
+    private val onFpsDowngraded: (Int) -> Unit = {},
+    /** 工作线程上的分析流协商结果；由上层统一切回主线程并显示互斥原因。 */
+    private val onAnalysisSessionDecision: (AnalysisSessionDecision) -> Unit = {}
 ) {
 
     companion object {
@@ -236,13 +241,15 @@ class Camera2Engine(
     private var extraReader: ImageReader? = null
 
     /** 站位分析流：低分辨率 YUV（方案 32 M2）。独立槽位——与 DIRECT 录制面
-     *  （extraSurface）分开，互不顶替；GPU/DIRECT 两种渲染模式都进会话。 */
+     *  （extraSurface）分开，互不顶替；GPU/DIRECT 两种渲染模式都进会话。
+     *  reader 仅借用，释放权属于 CameraController；旧引擎不得解绑/关闭跨引擎重放的 reader。 */
     private var analysisSurface: Surface? = null
     private var analysisReader: ImageReader? = null
 
     private var chosenFps: FpsPick? = null
     private var highSpeedActive = false
     private var structuralSignature = ""
+    private var lastAnalysisDecision: AnalysisSessionDecision? = null
     private var desiredPreview = false
     private var sinkWaitRetries = 0
     private var reopenRetries = 0
@@ -390,8 +397,8 @@ class Camera2Engine(
     }
 
     /**
-     * 终止性关闭，顺序固定：停 ImageReader → 停 repeating → 关 session → 关 device → 清 Handler
-     * （乱序是 preview 泄漏与 ANR 的常见根因）
+     * 终止性关闭，顺序固定：停自有 ImageReader → 停 repeating → 关 session → 关 device → 清 Handler。
+     * 分析 reader 由 Controller 持有：这里只清借用引用，不能解绑/关闭新引擎可能已重放的 reader。
      */
     fun close() {
         lowFpsSampler.cancel()
@@ -411,10 +418,10 @@ class Camera2Engine(
         workHandler.post {
             try {
                 stopImageReaders()
-                stopAnalysisReader()
                 teardownDevice()
                 extraSurface = null
                 analysisSurface = null
+                analysisReader = null
                 lens = null
                 ability = null
                 reqState = null
@@ -496,9 +503,9 @@ class Camera2Engine(
 
     /**
      * 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话
-     * （[currentTargets]）。reader 由调用方创建，引擎在关闭序列里先停它（与 extra
-     * 同所有权语义——引擎会单方面 close，调用方回调须容忍）。
-     * 每次调用都清 structuralSignature 重建会话：挂/摘各一次，勿在 3fps 启停中反复。
+     * （[currentTargets]）。surface/reader 都只借用；调用方负责替换、摘槽和最终清理时
+     * 解绑 listener 并关闭 reader。与 extra 槽不同，引擎重建/关闭绝不触碰分析 reader 的释放权。
+     * 目标变化时清 structuralSignature 重建会话：挂/摘各一次，勿在 3fps 启停中反复。
      */
     fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null) {
         post {
@@ -508,19 +515,11 @@ class Camera2Engine(
                 if (desiredPreview) applyRepeatingNow()
                 return@post
             }
-            if (reader !== analysisReader) stopAnalysisReader()
             analysisSurface = surface
             analysisReader = reader
             structuralSignature = ""
             if (desiredPreview) ensureSession()
         }
-    }
-
-    private fun stopAnalysisReader() {
-        val reader = analysisReader ?: return
-        runCatching { reader.setOnImageAvailableListener(null, null) }
-        runCatching { reader.close() }
-        analysisReader = null
     }
 
     /**
@@ -703,14 +702,29 @@ class Camera2Engine(
         }
     }
 
-    /** 会话输出面集合由渲染模式决定（03 文档第 1 节：GPU 下录像面不进相机会话）；
-     *  站位分析流（D19/M2）独立槽位——两种渲染模式都追加进会话。 */
-    private fun currentTargets(): List<Surface> {
+    /**
+     * GPU 的录像面不进相机会话；分析槽只在普通会话接纳。
+     * constrained high-speed 不允许 YUV：保留分析意图与 reader，回普通档时自动恢复，不能靠录制期摘槽规避。
+     */
+    private fun currentTargets(highSpeed: Boolean, mode: RenderMode = params.renderMode.value): List<Surface> {
         val base = sink.cameraTargets()
-        val withExtra = if (params.renderMode.value == RenderMode.DIRECT) {
+        val withExtra = if (mode == RenderMode.DIRECT) {
             (extraSurface?.let { base + it }) ?: base
         } else base
-        return (analysisSurface?.let { withExtra + it }) ?: withExtra
+        return if (highSpeed) withExtra else (analysisSurface?.let { withExtra + it }) ?: withExtra
+    }
+
+    /** 建会话前同步回执；同一结果不重复提示，切回普通/摘槽时仍须交代状态变化。 */
+    private fun reportAnalysisDecision(highSpeed: Boolean) {
+        val decision = when {
+            analysisSurface == null -> AnalysisSessionDecision.ABSENT
+            highSpeed -> AnalysisSessionDecision.BLOCKED_HIGH_SPEED
+            else -> AnalysisSessionDecision.INCLUDED
+        }
+        if (decision == lastAnalysisDecision) return
+        lastAnalysisDecision = decision
+        runCatching { onAnalysisSessionDecision(decision) }
+            .onFailure { Log.w(TAG, "分析流协商回执异常：$decision", it) }
     }
 
     private fun wantHighSpeed(): Boolean {
@@ -722,7 +736,7 @@ class Camera2Engine(
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
-        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|an=${analysisSurface != null}|${sink.structuralToken()}"
+        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|an=${!highSpeed && analysisSurface != null}|${sink.structuralToken()}"
 
     private fun ensureSession() {
         val dev = device
@@ -730,7 +744,8 @@ class Camera2Engine(
             desiredPreview = true
             return
         }
-        val targets = currentTargets()
+        val highSpeed = wantHighSpeed()
+        val targets = currentTargets(highSpeed)
         if (targets.isEmpty()) {
             if (sinkWaitRetries < SINK_WAIT_MAX) {
                 sinkWaitRetries++
@@ -741,7 +756,7 @@ class Camera2Engine(
             return
         }
         sinkWaitRetries = 0
-        val highSpeed = wantHighSpeed()
+        reportAnalysisDecision(highSpeed)
         val sig = signatureOf(params.size.value, params.renderMode.value, highSpeed, targets)
         if (sig == structuralSignature && (session != null || highSpeedSession != null)) {
             applyRepeatingNow()
@@ -1134,10 +1149,7 @@ class Camera2Engine(
             val effectiveBuilder = reqBuilder ?: builder
             applyParams(effectiveBuilder, state)
             val request = effectiveBuilder.build()
-            val hs = highSpeedSession
-            val normal = session
-            if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
-            else normal?.setRepeatingRequest(request, captureCallback, workHandler)
+            submitRepeating(request)
         } catch (e: CameraAccessException) {
             Log.w(TAG, "repeating 下发失败：${paramSnapshot()}", e)
             failDevice(mapAccessReason(e.reason), "repeating 下发失败 reason=${e.reason}")
@@ -1158,6 +1170,14 @@ class Camera2Engine(
         }
     }
 
+    /** repeating 的平台出口：与参数计算分开，保持普通/高速回调选择及异常处理不变。 */
+    private fun submitRepeating(request: CaptureRequest) {
+        val hs = highSpeedSession
+        val normal = session
+        if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
+        else normal?.setRepeatingRequest(request, captureCallback, workHandler)
+    }
+
     private fun singleCapture(tag: String) {
         val builder = reqBuilder ?: return
         val state = reqState ?: return
@@ -1174,22 +1194,6 @@ class Camera2Engine(
             Log.w(TAG, "$tag 高速请求列表构造失败：${e.message}")
         } catch (e: IllegalStateException) {
             Log.w(TAG, "$tag 时会话已关闭")
-        }
-    }
-
-    /**
-     * 高速会话的帧计数回调（2026-10-17 帧账）：高速路原先传 `null` 回调，若直接复用
-     * [captureCallback] 会把「手动白平衡 500ms 保活」带进高速路（行为变更）。这里只做
-     * `onCaptureStarted` 自增，其余一概不碰，保证既有 request/callback 语义逐字不变。
-     */
-    private val frameCountCallback = object : CameraCaptureSession.CaptureCallback() {
-        override fun onCaptureStarted(
-            session: CameraCaptureSession,
-            request: CaptureRequest,
-            timestamp: Long,
-            frameNumber: Long
-        ) {
-            FrameLedger.onCameraStarted()
         }
     }
 
@@ -1304,6 +1308,30 @@ class Camera2Engine(
             } else {
                 wbAwbActiveFails = 0
             }
+        }
+    }
+
+    /**
+     * 高速重复请求只维护两本计数：started 帧账、completed 判活/采样心跳。
+     * 不复用普通回调，避免把手动 WB 保活、曝光探测和遥测带入高速路。
+     */
+    private val frameCountCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureStarted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            timestamp: Long,
+            frameNumber: Long
+        ) {
+            FrameLedger.onCameraStarted()
+        }
+
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
+            camResultCount++
+            camResultTotal++
         }
     }
 
@@ -1655,7 +1683,7 @@ class Camera2Engine(
         pushSinkFrameSize(pulse.size)
         if (previous != null && previous.highSpeed != highSpeed) chosenFps = null
         clampIsoToAbility()
-        val sig = signatureOf(pulse.size, pulse.renderMode, highSpeed, currentTargets())
+        val sig = signatureOf(pulse.size, pulse.renderMode, highSpeed, currentTargets(highSpeed, pulse.renderMode))
         if (sig != structuralSignature) {
             if (desiredPreview && device != null) ensureSession() else markDirty()
         } else {

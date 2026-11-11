@@ -90,6 +90,18 @@ class WbFallbackPlanTest {
         KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("core/CurveModel.kt"))
     }
 
+    // 仅在遮蔽文本中把具名对象声明头转为函数锚，两层 bodyOf 都保留唯一性与括号配平检查。
+    private fun normalCaptureCompleted(engine: String): String {
+        val callback = KotlinSourceScan.bodyOf(
+            engine.replace(
+                "private val captureCallback = object : CameraCaptureSession.CaptureCallback()",
+                "private fun captureCallback()"
+            ),
+            "captureCallback"
+        )
+        return KotlinSourceScan.bodyOf(callback, "onCaptureCompleted")
+    }
+
     @Test
     fun `兜底时请求侧必须留在自动白平衡`() {
         val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(requestSrc, "applyWhiteBalance"))
@@ -142,7 +154,7 @@ class WbFallbackPlanTest {
     @Test
     fun `引擎必须在3A还活着时抓种子并递进快照`() {
         val callback = KotlinSourceScan.flatten(
-            KotlinSourceScan.bodyOf(engineSrc, "onCaptureCompleted")
+            normalCaptureCompleted(engineSrc)
         )
         // 抓种子只看"回报的 CCM 不是我们冻结的"（3A 自己在跑），不局限自动档——
         // 冷启即手动/稳压窗期间请求走自动，种子必须能续上
@@ -180,7 +192,7 @@ class WbFallbackPlanTest {
         assertTrue("稳压窗必须参与裁决", fn.contains("wbHoldUntilMs"))
         // 探测门控覆盖稳压窗与种子未到手（都不是 HAL 拒绝的证据）
         val callback = KotlinSourceScan.flatten(
-            KotlinSourceScan.bodyOf(engineSrc, "onCaptureCompleted")
+            normalCaptureCompleted(engineSrc)
         )
         val glGuardIdx = callback.indexOf("if (wbByGlNow() || lastAwbCcm9 == null)")
         val probeIdx = callback.indexOf("val applied =")

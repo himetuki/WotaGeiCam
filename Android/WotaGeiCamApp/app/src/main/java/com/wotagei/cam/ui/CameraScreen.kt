@@ -394,6 +394,8 @@ fun CameraScreen(
         stance.prepare(app)
         stance.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
         stance.detachHook = { ctrl.setAnalysisTarget(null) }
+        // Controller 非配置销毁时，reader 的最终 close 也交给分析 owner，避免 Main 与在途帧并发。
+        ctrl.analysisOwnerRelease = { stance.onCameraControllerCleared() }
         // 分析流按预览画幅比选 YUV 档（否则分析帧与预览 FOV 不同，叠框/判定都偏）
         stance.targetAspectProvider = {
             if (size.height > 0) size.width.toFloat() / size.height else null
@@ -642,6 +644,10 @@ fun CameraScreen(
     // 帧率被自动降档（2026-10-26）：引擎在一次高速档请求失败后把 fps 退到普通表可达上限，
     // 走同一条 hint 通道报出去。用户口径：**所有自动降档都要看得见**——不说的话他只看到帧率
     // 自己变了，只会当成 bug（本轮之前这条路径是"什么都不做、取景器假死"）。
+    LaunchedEffect(ui.analysisDecision) { stance.onAnalysisSessionDecision(ui.analysisDecision) }
+    LaunchedEffect(stanceState.fallbackTip) {
+        stanceState.fallbackTip?.let { showTip(it) }
+    }
     LaunchedEffect(ctrl) {
         ctrl.fpsDowngraded.collect { to ->
             if (to == null) return@collect

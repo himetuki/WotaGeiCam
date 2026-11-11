@@ -104,8 +104,15 @@
     <string name="player_clip_too_short">保留段太短，圈长一点再导</string>
     <string name="player_clip_export">导出到媒体库</string>
     <string name="player_clip_cancel">取消导出</string>
+    <!-- 2026-11-10 用户报障：后渲染导出只有进度条没有百分比、弹层一关像无响应。
+         弹层内给百分比与「准备中」态；弹层外给一行常驻小字（与光弧修复同族）。 -->
+    <string name="player_clip_percent">%1$d%%</string>
+    <string name="player_clip_preparing">正在准备导出…</string>
+    <string name="player_clip_running">导出中 %1$d%%</string>
     <string name="player_clip_done">剪辑已导出到媒体库</string>
     <string name="player_clip_failed">导出失败，请重试</string>
+    <!-- 上一轮导出的资源 owner 仍在收尾：不是源/成片错误，提示稍后再试 -->
+    <string name="player_clip_busy">上一轮导出仍在收尾，请稍后再试</string>
     <!-- #4：commit 全败但成片字节已在盘上，保留待冷启救援（文案与"导出失败"分开，不吓用户） -->
     <string name="player_clip_commit_kept">导出完成但未收录，成片已保留，重启应用后自动恢复</string>
     <!-- 导出方式（2026-10-28）：无损=既有重封；后渲染=重编码并应用 Glow/降噪。

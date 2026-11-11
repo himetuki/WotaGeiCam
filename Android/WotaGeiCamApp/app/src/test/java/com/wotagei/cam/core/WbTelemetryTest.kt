@@ -90,12 +90,24 @@ class WbTelemetryTest {
 
     // -------------------------------------------------- ④ 引擎接线守卫
 
+    // 仅在遮蔽文本中把具名对象声明头转为函数锚，两层 bodyOf 都保留唯一性与括号配平检查。
+    private fun normalCaptureCompleted(engine: String): String {
+        val callback = KotlinSourceScan.bodyOf(
+            engine.replace(
+                "private val captureCallback = object : CameraCaptureSession.CaptureCallback()",
+                "private fun captureCallback()"
+            ),
+            "captureCallback"
+        )
+        return KotlinSourceScan.bodyOf(callback, "onCaptureCompleted")
+    }
+
     @Test
     fun `引擎结果回调必须挂白平衡遥测且走纯函数层`() {
         val code = KotlinSourceScan.codeOnly(
             KotlinSourceScan.mainSourceText("camera/Camera2Engine.kt")
         )
-        val body = KotlinSourceScan.bodyOf(code, "onCaptureCompleted")
+        val body = normalCaptureCompleted(code)
         assertTrue("onCaptureCompleted 必须调 logWbTelemetry（取证是 B3 的前置实据）", body.contains("logWbTelemetry("))
         val tele = KotlinSourceScan.bodyOf(code, "logWbTelemetry")
         // 增益读取抽在 gainsOf 助手（RggbChannelVector → 三元组），遥测体经它取数

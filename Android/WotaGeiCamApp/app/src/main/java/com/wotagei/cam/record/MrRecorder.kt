@@ -106,6 +106,9 @@ class MrRecorder(
     private var inputSurface: Surface? = null
     private var inputSurfaceAccepted = false
 
+    /** DIRECT 或 GPU persistent 被拒后的实例面换代时，保存并通知上层重挂新面。 */
+    @Volatile override var onInputSurfaceRecreated: ((Any) -> Unit)? = null
+
     /** prepare 成功后有效：DIRECT 返回 `getSurface()`，GPU 返回持久输入面（`setInputSurface` 被接受时） */
     override val surface: Any?
         get() = if (inputSurfaceAccepted) inputSurface else mrSurfaceSafely()

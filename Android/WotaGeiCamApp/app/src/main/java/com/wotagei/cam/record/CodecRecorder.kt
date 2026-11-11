@@ -288,12 +288,12 @@ class CodecRecorder(
         var fmtReady = false
         /** EOS 已入队（喂到哨兵 / 停止兜底 / 捕获源失效三路共用，恒只入队一次） */
         var eosQueued = false
-        /** 编码器已吐 EOS（本通道收尾完成） */
+        /** 编码器已吐 EOS，不再 dequeue；若 payload 仍在 held，写出并释放后才算整段收尾完成 */
         var done = false
 
         // ---- 以下为零样本防线（修复轮2 P3 起环境、内录两通道共用同一套口径）----
 
-        /** 编码器已吐出首个真实（非 EOS、非空）输出缓冲：addTrack 的前置判据 */
+        /** 编码器已吐出首个真实（非 CONFIG、非空，可同时携带 EOS）输出缓冲：addTrack 的前置判据 */
         var hasSample = false
         /** 通道废弃（收尾仍无真实样本）：startMuxerIfReady 按「未启用」处理 */
         var dropped = false
@@ -307,6 +307,7 @@ class CodecRecorder(
         var fedBytes = 0L
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
         var heldOutIdx = -1
+        var heldOffset = 0
         var heldPts = 0L
         var heldSize = 0
         var heldFlags = 0
@@ -888,8 +889,8 @@ class CodecRecorder(
      *   `codec.createInputSurface()` 取它自己的输入面。GPU 录制路（[prepareGpuVideoEncoder]）与
      *   ArcRepair 走这条：MediaCodec 的 `createPersistentInputSurface()` 是给 MediaRecorder 共享
      *   输入面的专用件，拿它当 EGL 渲染目标在真机上 `eglCreateWindowSurface` 直接失败
-     *   （EGL_BAD_ALLOC 0x3003，实测）。DIRECT 录制路（Camera2 当 producer）照旧传 persistent
-     *   输入面，行为逐字不变。
+     *   （EGL_BAD_ALLOC 0x3003，实测）。DIRECT 录制路（Camera2 当 producer）传 persistent
+     *   输入面，在 configure(null) 之后、start 之前用 setInputSurface 绑定；configure 的第二参是解码输出面。
      */
     internal fun createVideoEncoder(mime: String, p: RecordProfile, surface: Surface?): MediaCodec? {
         val name = findSurfaceEncoder(mime, p.width, p.height)
@@ -918,7 +919,9 @@ class CodecRecorder(
             if (p.timeLapse) setFloat(KEY_CAPTURE_RATE, p.captureRate)
         }
         return try {
-            codec.configure(fmt, surface, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            // persistent 输入面不属于 configure 的解码输出参数；首段和换段都必须显式绑定。
+            if (surface != null) codec.setInputSurface(surface)
             codec
         } catch (e: Exception) {
             Log.e(TAG, "video configure failed: ${e.javaClass.simpleName} ${e.message}")
@@ -1891,13 +1894,13 @@ class CodecRecorder(
             // （2026-10-08 真机现场 `trk=A;started=1;field=same;st=0` 那族）。放到循环开头即结构性消除。
             // writeSample 里另有逐轨单调兜底（[muxLastPtsUs]），两层都在：一层保序、一层保不死。
             if (a != null && envCh != null && envCh.heldOutIdx >= 0 && envCh.track >= 0 && muxStarted) {
-                bi.set(0, envCh.heldSize, envCh.heldPts, envCh.heldFlags)
+                bi.set(envCh.heldOffset, envCh.heldSize, envCh.heldPts, envCh.heldFlags)
                 segWrittenBytes += writeSample(mx, TRACK_ENV, envCh.track, a.getOutputBuffer(envCh.heldOutIdx), bi)
                 a.releaseOutputBuffer(envCh.heldOutIdx, false)
                 envCh.heldOutIdx = -1
             }
             if (c != null && capCh != null && capCh.heldOutIdx >= 0 && capCh.track >= 0 && muxStarted) {
-                bi.set(0, capCh.heldSize, capCh.heldPts, capCh.heldFlags)
+                bi.set(capCh.heldOffset, capCh.heldSize, capCh.heldPts, capCh.heldFlags)
                 segWrittenBytes += writeSample(mx, TRACK_CAP, capCh.track, c.getOutputBuffer(capCh.heldOutIdx), bi)
                 c.releaseOutputBuffer(capCh.heldOutIdx, false)
                 capCh.heldOutIdx = -1
@@ -1981,7 +1984,9 @@ class CodecRecorder(
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     idx >= 0 -> {
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                        if (!eos && bi.size > 0) {
+                        val config = bi.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                        // EOS 只标结束，末包仍可有真实帧；CONFIG 则只进格式，不得当样本写入或暂存。
+                        if (!config && bi.size > 0) {
                             if (muxStarted) {
                                 // 本拍容器刚启动（同拍更早的 startMuxerIfReady）：旧样本必须先补写，
                                 // 再写当前这枚较新的样本（同一轨 PTS 保序）
@@ -2022,7 +2027,8 @@ class CodecRecorder(
                     }
                 }
             }
-            if (a != null && envCh != null && !envCh.done) {
+            // held 槽占用时先等 muxer 放行，不再提前 dequeue 后续包（包含非空 EOS）。
+            if (a != null && envCh != null && !envCh.done && envCh.heldOutIdx < 0) {
                 val idx = a.dequeueOutputBuffer(bi, dequeueUs)
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true // 同视频路（P3 空闲退避输入）
@@ -2032,44 +2038,41 @@ class CodecRecorder(
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     idx >= 0 -> {
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        val payload = bi.size > 0 && (bi.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                        // 先处理有效负载，再处理结束标记；非空 EOS 也能成为本轨唯一的真实样本。
                         when {
-                            eos -> {
+                            envCh.dropped -> {
+                                if (payload) envCh.lateDrops++
                                 a.releaseOutputBuffer(idx, false)
-                                envCh.done = true
-                                // P3：与内录通道对称的零样本防线——收尾仍无真实样本（feeder
-                                // 产出首个 PCM 前死亡）→ 通道废弃，轨不进 muxer，启动闸按
-                                // 「未启用音频」重评，段照常成片而非整段作废
-                                if (!envCh.hasSample) {
-                                    envCh.dropped = true
-                                    if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
-                                }
                             }
-                            // 通道废弃后编码器迟到的真实样本照 release（既有行为）；这里只补记账：
-                            // 「废弃那一刻编码器还吐了多少」原来完全无迹，成片丢了多少无从判断
-                            envCh.dropped -> { envCh.lateDrops++; a.releaseOutputBuffer(idx, false) }
+                            !payload -> a.releaseOutputBuffer(idx, false) // 空缓冲/CONFIG 不建样本账
                             envCh.track >= 0 && muxStarted -> {
-                                // 正常路：muxer 已接纳本轨，照写
-                                if (bi.size > 0) {
-                                    segWrittenBytes += writeSample(mx, TRACK_ENV, envCh.track, a.getOutputBuffer(idx), bi)
-                                    aPtsLastUs = bi.presentationTimeUs
-                                }
+                                segWrittenBytes += writeSample(mx, TRACK_ENV, envCh.track, a.getOutputBuffer(idx), bi)
+                                aPtsLastUs = bi.presentationTimeUs
                                 a.releaseOutputBuffer(idx, false)
                             }
-                            envCh.heldOutIdx < 0 && bi.size > 0 -> {
-                                // muxer 尚未接纳本轨：首个真实样本暂存不释放，门开后补写
-                                //（与内录通道同构，「已产出样本 ⇒ 轨必有 ≥1 写入样本」）
+                            else -> {
+                                // 首个真实样本暂存不释放；槽空才允许 dequeue，后续包留给编码器保序。
                                 envCh.heldOutIdx = idx
+                                envCh.heldOffset = bi.offset
                                 envCh.heldPts = bi.presentationTimeUs
                                 envCh.heldSize = bi.size
                                 envCh.heldFlags = bi.flags
                                 envCh.hasSample = true
                             }
-                            else -> a.releaseOutputBuffer(idx, false) // 暂存已占/空缓冲：启动前样本照既有口径丢弃
+                        }
+                        if (eos) {
+                            envCh.done = true
+                            // 真正零样本才废轨；非空 EOS 的 held 必须等 muxer 启动后写出再整段退出。
+                            if (!envCh.hasSample) {
+                                envCh.dropped = true
+                                if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
+                            }
                         }
                     }
                 }
             }
-            if (c != null && capCh != null && !capCh.done) {
+            if (c != null && capCh != null && !capCh.done && capCh.heldOutIdx < 0) {
                 val idx = c.dequeueOutputBuffer(bi, dequeueUs)
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) drainProgress = true // 同视频路
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true // 同视频路（P3 空闲退避输入）
@@ -2079,46 +2082,41 @@ class CodecRecorder(
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     idx >= 0 -> {
                         val eos = bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        val payload = bi.size > 0 && (bi.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                        // 与环境通道同口径：EOS 不吞 payload，CONFIG 不冒充真实样本。
                         when {
-                            eos -> {
+                            capCh.dropped -> {
+                                if (payload) capCh.lateDrops++
                                 c.releaseOutputBuffer(idx, false)
-                                capCh.done = true
-                                // P0-a：收尾仍无任何真实样本 → 通道废弃，轨不进 muxer
-                                //（零样本轨会让 muxer.stop 抛异常、缺 moov 的坏片被提交）。
-                                // P1：废弃=未启用——可能正是内录轨挡着 muxer start，
-                                // 就地重评启动闸（dropped 通道此后恒按未启用处理，无重入问题）
-                                if (!capCh.hasSample) {
-                                    // 防重上报：窗满放弃已置 dropped 并报过 NO_SAMPLES，EOS 收尾不再重复；
-                                    // 失效收尾（capTornDown）已报 SOURCE_INACTIVE，废弃原因以更准的那条为准
-                                    if (!capCh.dropped && !capTornDown) {
-                                        val ctl = PlaybackCaptureController.get(ctx)
-                                        ctl.reportTrackLost(CaptureTrackLostReason.NO_SAMPLES, null)
-                                    }
-                                    capCh.dropped = true
-                                    if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
-                                }
                             }
-                            // 与环境通道同族：迟到样本照 release，只补记账（零样本废弃轨的丢弃量需要可查）
-                            capCh.dropped -> { capCh.lateDrops++; c.releaseOutputBuffer(idx, false) }
+                            !payload -> c.releaseOutputBuffer(idx, false)
                             capCh.track >= 0 && muxStarted -> {
-                                // 正常路：muxer 已接纳本轨，照写
-                                if (bi.size > 0) {
-                                    segWrittenBytes += writeSample(mx, TRACK_CAP, capCh.track, c.getOutputBuffer(idx), bi)
-                                    cPtsLastUs = bi.presentationTimeUs
-                                }
+                                segWrittenBytes += writeSample(mx, TRACK_CAP, capCh.track, c.getOutputBuffer(idx), bi)
+                                cPtsLastUs = bi.presentationTimeUs
                                 c.releaseOutputBuffer(idx, false)
                             }
-                            capCh.heldOutIdx < 0 && bi.size > 0 -> {
-                                // muxer 尚未接纳本轨（未 addTrack 或未 start）：首个真实样本暂存
-                                // 不释放，门开后补写——addTrack 前置判据 hasSample 由此而来，
-                                // 且「已产出样本 ⇒ 轨必有 ≥1 写入样本」结构成立（P0-a）
+                            else -> {
+                                // 槽空才 dequeue；首包完整保留 offset/size/PTS/flags，启动后先补写。
                                 capCh.heldOutIdx = idx
+                                capCh.heldOffset = bi.offset
                                 capCh.heldPts = bi.presentationTimeUs
                                 capCh.heldSize = bi.size
                                 capCh.heldFlags = bi.flags
                                 capCh.hasSample = true
                             }
-                            else -> c.releaseOutputBuffer(idx, false) // 暂存已占/空缓冲：启动前样本照既有口径丢弃
+                        }
+                        if (eos) {
+                            capCh.done = true
+                            // 真正零样本才废轨并放行 muxer，非空 EOS 已由上方记为 hasSample。
+                            if (!capCh.hasSample) {
+                                // 窗满/源失效已报告过，结束标记不重复上报。
+                                if (!capCh.dropped && !capTornDown) {
+                                    val ctl = PlaybackCaptureController.get(ctx)
+                                    ctl.reportTrackLost(CaptureTrackLostReason.NO_SAMPLES, null)
+                                }
+                                capCh.dropped = true
+                                if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
+                            }
                         }
                     }
                 }
@@ -2212,8 +2210,11 @@ class CodecRecorder(
                 if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)
                 if (c != null && capCh != null && !capCh.eosQueued) queueAudioEos(c, capCh)
             }
-            if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true)) {
-                // 收尾前最后一笔补写：muxer 刚启动就赶上视频 EOS 时，上一拍顶部还没轮到补写
+            if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true) &&
+                (envCh?.heldOutIdx ?: -1) < 0 && (capCh?.heldOutIdx ?: -1) < 0
+            ) {
+                // 非空音频 EOS 若仍在 held，下一拍顶部先写并释放；不能仅凭三轨均见 EOS 就退出。
+                // 收尾前最后一笔视频补写：muxer 刚启动就赶上视频 EOS 时，上一拍顶部还没轮到补写
                 if (muxStarted && preMuxBuffer?.size != 0) {
                     val lastFlushedPts = flushPreMuxSamples(mx, videoTrack)
                     if (lastFlushedPts > 0L) vPtsLastUs = lastFlushedPts

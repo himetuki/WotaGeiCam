@@ -99,7 +99,8 @@ object CompareVersions {
 
     /** 比较：>0 远端新、=0 相同、<0 本机新；任一侧解析失败返回 null */
     fun compare(localVersionName: String, remoteTag: String): Int? {
-        val local = parse(localVersionName) ?: return null
+        // 只有本地 lite 构建追加已知 -lite 后缀；远端 tag 仍按原语法严格解析，不吞任意后缀。
+        val local = parse(localVersionName.trim().removeSuffix("-lite")) ?: return null
         val remote = parse(remoteTag) ?: return null
         for (i in 0 until 3) {
             if (local.main[i] != remote.main[i]) return remote.main[i].compareTo(local.main[i])
@@ -244,7 +245,7 @@ object ReleaseJson {
      * - lite：**只在 -lite- 附件里挑，且 universal 优先**（绝不推 full/兼容包——lite 用户装 full
      *   会改变功能集）；无 lite 附件 → null（不提示，保守：CompareVersions 同款保守哲学）；
      * - full：优先 -full- 附件（universal 优先），其次通用包（历史发版无 flavor 后缀），
-     *   **绝不推 -lite- 包**；
+     *   **绝不推 -lite- 或 -compat- 包（compat 的内容也是 lite）**；
      * - null（旧调用/单测兼容）：旧行为（优先 universal，无则第一个 .apk）。
      *
      * **universal 优先是硬要求**（2026-11-09 修）：12 枚资产里 ABI 分包名按字母序排在 universal
@@ -262,9 +263,11 @@ object ReleaseJson {
             if (full.isNotEmpty()) {
                 return full.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: full.first()
             }
-            // 历史发版（无 flavor 后缀）：退回通用包，仍排除 lite
-            val notLite = apks.filterNot { it.name.contains("-lite", ignoreCase = true) }
-            return notLite.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: notLite.firstOrNull()
+            // 只回退真正无 flavor 的历史包；compat 是 lite 字节副本，不属于历史通用 full 包。
+            val historical = apks.filterNot {
+                it.name.contains("-lite", ignoreCase = true) || it.name.contains("-compat-", ignoreCase = true)
+            }
+            return historical.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: historical.firstOrNull()
         }
         return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
     }

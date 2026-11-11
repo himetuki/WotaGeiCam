@@ -17,6 +17,7 @@
 /camera-knowledge/
 /baseline/
 /.zcode/
+/tasks/
 .mimosa/
 /package.json
 /package-lock.json

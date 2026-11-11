@@ -134,8 +134,8 @@ Trail color affects the trail, not the current source image. White/gray and colo
 | Feature | Location · How to open | Usage |
 |---|---|---|
 | Media library | Recording page bottom dock thumbnail | All / Favorites / Trash; long-press multi-select to rename / share / delete |
-| Player | Tap a video in the library | A-B loop, frame stepping, speed 0.1x–1x, pinch zoom/pan, horizontal mirror |
-| Clip export | Player bottom dock A/B marks → Clip | Lossless (no re-encode) / re-rendered (re-encode with denoise + glow + afterimage, configured in-sheet, this export only); audio track selectable; leaving the player does not interrupt |
+| Player | Tap a video in the library | A-B loop, frame stepping, speed 0.1x–1x (pitch and timbre stay original; only time is stretched), pinch zoom/pan, horizontal mirror |
+| Clip export | Player bottom dock A/B marks → Clip | Lossless (no re-encode) / re-rendered (re-encode with denoise + glow + afterimage, configured in-sheet, this export only); audio track selectable; leaving the player does not interrupt; the sheet stays open with a preparing state / NN% progress, and a small progress line remains after it is closed |
 | Dual-track comparison | Library long-press → Compare | Two video tracks + audio switching, audio-based auto alignment; comparison history kept |
 | Cold-start maintenance | Automatic | Cleans temp leftovers, keeps the library index consistent; archiving never overwrites existing files |
 
@@ -148,7 +148,7 @@ Planned / under research, not yet landed:
 
 ## Known Issues and Limitations
 
-An honest list of the currently known problem surface (verified through v0.0.12-r05; updated as feedback comes in):
+An honest list of the currently known problem surface (verified through v0.0.12-r12; updated as feedback comes in):
 
 - **AI stance hints are experimental (full variant carries them as of v0.0.12-r05)**: the detection model and judgement logic pass unit tests and model-tensor checks, but **on-device recognition accuracy has not been systematically verified** (especially in low light, at long distance, and with multiple people). The default safe-zone values come from a small set of PC-lab annotations; when moving to a new camera position or venue, adjust the precision β and "pre-brighten" first and treat the actual prompts as authoritative. The model pack can be replaced from a PC; a bad pack falls back to the built-in one automatically. The GPU "auto" mode is decided by the compatibility whitelist — GPUs outside it (e.g. some HiSilicon Maleoon devices) have been verified working on the "force" mode, with automatic fallback to CPU if runtime verification fails.
 
@@ -162,6 +162,7 @@ An honest list of the currently known problem surface (verified through v0.0.12-
 - **High-bitrate long recordings will rotate segments**: the per-segment cap is 3.5 GiB (FAT32-safe); at 50 Mbps that is ~9 minutes, so any recording over 10 minutes **will** rotate once (with a pre-warning at 85%). The rotation window is bounded, a blocked rotation fails loudly and is accounted — but the brief hitch at that moment is expected.
 - **Framing aids and scene effects depend on the GPU render path**: zebras, focus peaking, glow and afterimage do not work in DIRECT (non-GPU) mode (the app says so in place).
 - **HarmonyOS installation barrier**: the unsigned .hap is for structure verification only and will not install on retail devices; a signed profile must be issued by AGC/DevEco and include the target device's UDID.
+- **AI stance hints on 16KB-page devices**: the TFLite native libraries shipped in the full variant are still mapped for 4KB pages, so AI stance hints may fail on first load on some Android 15/16 devices with 16KB pages; 4KB-page devices and the lite variant are unaffected.
 - **Limited test coverage**: long-term on-device verification covers only WIKO GAR-AN60, Huawei ALN-AL00 / ADY-AL00, vivo V2505A, and one emulator; low-end devices and niche ROMs are essentially untested, and the capability-negotiation code almost surely still has unseen behaviors there. If you hit one, the diagnostic log below is a huge help.
 
 

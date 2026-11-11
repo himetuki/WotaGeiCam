@@ -32,14 +32,13 @@ class ArcRepairGlStampGuardTest {
     private fun stampViolations(maskedGl: String, maskedRunner: String): List<String> {
         val bad = ArrayList<String>()
 
-        // ① 返回值：签名必须声明 Boolean，且真值必须来自 runCatching 的 isSuccess
+        // ① 返回/计次接线；EGL 正常 false、throw、成功及失败计数由 OfflineGlCompatibilityBridgeTest 真执行。
+        // 不再强制 runCatching.isSuccess：它只证明没抛异常，不能代表 EGL 返回 true。
         val r = regionOf(maskedGl, "stampPresentation")
         val sig = maskedGl.substring(maskedGl.lastIndexOf("private fun stampPresentation", r.start), r.start)
         if (!sig.contains("): Boolean")) bad.add("stampPresentation 必须返回 Boolean（调用方要能判失败）")
         val stamp = flatten(bodyOf(maskedGl, "stampPresentation"))
-        if (!stamp.contains("val ok = runCatching")) bad.add("打戳结果必须取自 runCatching")
-        if (!stamp.contains(".isSuccess")) bad.add("打戳结果必须取自 runCatching 的 isSuccess")
-        if (!stamp.contains("return ok")) bad.add("必须把 isSuccess 原样返回（恒 true = 吞掉失败）")
+        if (!stamp.contains("return ok")) bad.add("必须返回打戳结果（恒 true = 吞掉失败）")
         if (!stamp.contains("stampFailCount++")) bad.add("打戳失败必须计次（本链无 sidecar，日志就是全部痕迹）")
 
         // ② 消费 + 顺序：失败检查早于 swap

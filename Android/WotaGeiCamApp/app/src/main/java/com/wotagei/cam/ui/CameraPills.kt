@@ -790,6 +790,7 @@ private fun WbPill(
     onPersist: () -> Unit
 ) {
     val wbMode by params.wbMode.observed()
+    val renderMode by params.renderMode.observed()
     val kelvin by params.kelvin.observed()
     val tint by params.tint.observed()
     val names = WbPreset.values().map { stringResource(wbLabelRes(it)) }
@@ -808,7 +809,7 @@ private fun WbPill(
                     // （DIRECT 没有场景层，仍按不可用出）
                     else -> ability == null ||
                         ability.manualWhiteBalancePossible() ||
-                        params.renderMode.value == RenderMode.GPU
+                        renderMode == RenderMode.GPU
                 }
                 PillOption(p.ordinal, names[i], ok)
             },
@@ -823,7 +824,7 @@ private fun WbPill(
             // 运行时提示（2026-10-28 用户需求）：本机没声明手动白平衡增益支持时，手动档是靠
             // 画面算法落地的——必须讲在明处，否则用户会以为滑杆在改 HAL 的绝对色温。
             if (ability != null && !ability.manualWhiteBalancePossible() &&
-                params.renderMode.value == RenderMode.GPU
+                renderMode == RenderMode.GPU
             ) {
                 Note(R.string.cam_wb_gl_fallback)
             }

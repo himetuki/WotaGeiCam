@@ -256,6 +256,10 @@ internal class ArcMendPass {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
             Log.w(TAG_MEND, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}")
+            // 失败也要归还本次已生成的句柄：否则 ensure() 的 release 只能看到零值，
+            // 这些对象会在仍存活的相机 EGL 上下文里跨录制会话滞留。
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
             return 0 to 0
         }
         return tex to fbo

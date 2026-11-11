@@ -56,6 +56,64 @@ class UpdateLogicTest {
         assertFalse(CompareVersions.isNewerAvailable("garbage", "v0.1.0"))
     }
 
+    @Test
+    fun `D01_lite真实r版本名仍能发现更高r号`() {
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12-r07-lite", "v0.0.12-r08"))
+        assertTrue(CompareVersions.compare("0.0.12-r07-lite", "v0.0.12-r08")!! > 0)
+        // full 构建没有 flavor 后缀，保持原来的比较口径。
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12-r07", "v0.0.12-r08"))
+    }
+
+    @Test
+    fun `D01_lite有无r号均按主版本比较`() {
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12-lite", "v0.0.13"))
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12-r99-lite", "v0.0.13"))
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12-lite", "v0.0.12-r01"))
+        assertTrue(CompareVersions.isNewerAvailable("0.0.12", "v0.0.13"))
+    }
+
+    @Test
+    fun `D01_lite同版与旧版必须有可解析的比较结果`() {
+        assertEquals(0, CompareVersions.compare("0.0.12-r07-lite", "v0.0.12-r07"))
+        assertEquals(0, CompareVersions.compare("0.0.12-lite", "v0.0.12"))
+        assertTrue(CompareVersions.compare("0.0.12-r07-lite", "v0.0.12-r06")!! < 0)
+        assertTrue(CompareVersions.compare("0.0.13-lite", "v0.0.12-r99")!! < 0)
+        assertFalse(CompareVersions.isNewerAvailable("0.0.12-r07-lite", "v0.0.12-r07"))
+    }
+
+    @Test
+    fun `D01_只识别本地已知后缀_不放宽未知远端tag`() {
+        val unknownTags = listOf(
+            "v0.0.13-lite", "v0.0.13-full", "v0.0.13-compat", "v0.0.13-beta",
+            "v0.0.13-r01-lite", "v0.0.13-r01-x", "v0.0.13.1", "nonsense", ""
+        )
+        for (local in listOf("0.0.12-r07", "0.0.12-r07-lite")) {
+            for (remote in unknownTags) {
+                assertNull("未知远端 tag 不得被后缀规范化接受：$local -> $remote", CompareVersions.compare(local, remote))
+                assertFalse(CompareVersions.isNewerAvailable(local, remote))
+            }
+        }
+        for (local in listOf("0.0.12-beta", "0.0.12-r07-lite-extra", "0.0.12-r07-lite-lite", "garbage-lite")) {
+            assertNull("本地未知后缀不得被宽松截断：$local", CompareVersions.compare(local, "v0.0.13"))
+        }
+    }
+
+    @Test
+    fun `D01_lite真实版本经探测编排应返回新版而不是已最新`() {
+        val name = "WotaGeiCam-v0.0.12-r08-lite-universal-release-Android.apk"
+        val json = """{"tag_name":"v0.0.12-r08","assets":[{"name":"$name","browser_download_url":"https://example.invalid/$name","size":7}]}"""
+        val hit = mutableListOf<String>()
+        val result = probeLatestRelease(
+            localVersionName = "0.0.12-r07-lite",
+            fetchJson = { url -> hit.add(url); json },
+            fetchRedirectLocation = { throw AssertionError("段1成功后不得继续段3") },
+            flavor = "lite"
+        )
+        assertTrue("本地 -lite 后缀不能使真实探测误报 UpToDate：$result", result is ProbeResult.UpdateAvailable)
+        assertEquals(name, (result as ProbeResult.UpdateAvailable).assetName)
+        assertEquals(listOf(UpdateConfig.REPO_API_LATEST), hit)
+    }
+
     /** 突变自证：把比较函数退化成「恒不提示」，同尺必红 */
     @Test
     fun `版本比较尺子自己能红_恒等式突变体必报红`() {
@@ -261,6 +319,58 @@ class UpdateLogicTest {
         // 组内只有分包时退回该组第一个（不跨组、不放空）
         assertEquals(names[1], ReleaseJson.pickApkAsset(listOf(assets[1], assets[2]), "full")?.name)
         assertEquals(names[5], ReleaseJson.pickApkAsset(listOf(assets[5], assets[6]), "lite")?.name)
+    }
+
+    @Test
+    fun `D02_full缺组时不得选内容为lite的compat包`() {
+        val names = listOf(
+            "WotaGeiCam-v0.0.12-r08-compat-universal-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-lite-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-lite-universal-release-Android.apk"
+        )
+        val assets = names.map { ReleaseAsset(it, "https://example.invalid/$it", 7L) }
+        assertNull("full 组缺失时必须拒绝 compat（其字节是 lite），不是安全的历史 full 回退", ReleaseJson.pickApkAsset(assets, "full"))
+        assertEquals("lite 仍只选本组 universal", names[2], ReleaseJson.pickApkAsset(assets, "lite")?.name)
+        assertEquals("无 flavor 的旧调用仍保留 compat 行为", names[0], ReleaseJson.pickApkAsset(assets)?.name)
+    }
+
+    @Test
+    fun `D02_full缺组时大小写compat与split也不得作为历史包`() {
+        for (name in listOf(
+            "WotaGeiCam-v0.0.12-r08-COMPAT-universal-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-compat-arm64-v8a-release-Android.apk"
+        )) {
+            assertNull("兼容组的大小写和 ABI 形态都不是历史无 flavor 包：$name",
+                ReleaseJson.pickApkAsset(listOf(ReleaseAsset(name, "https://example.invalid/$name", 7L)), "full"))
+        }
+    }
+
+    @Test
+    fun `D02_full可回退真正无flavor历史包_但跳过前排compat`() {
+        val names = listOf(
+            "WotaGeiCam-v0.0.12-r08-compat-universal-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-universal-release-Android.apk"
+        )
+        val assets = names.map { ReleaseAsset(it, "https://example.invalid/$it", 7L) }
+        assertEquals("只排除已知 compat/lite，不得禁掉真正的无 flavor 历史包；仍优先 universal", names[3],
+            ReleaseJson.pickApkAsset(assets, "full")?.name)
+        assertEquals("历史包仅有分包时保持既定首个 APK 回退", names[1],
+            ReleaseJson.pickApkAsset(listOf(assets[1], assets[2]), "full")?.name)
+    }
+
+    @Test
+    fun `D02_full只有split时不跨组挑compat的universal`() {
+        val names = listOf(
+            "WotaGeiCam-v0.0.12-r08-compat-universal-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-full-arm64-v8a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-full-armeabi-v7a-release-Android.apk",
+            "WotaGeiCam-v0.0.12-r08-lite-universal-release-Android.apk"
+        )
+        val assets = names.map { ReleaseAsset(it, "https://example.invalid/$it", 7L) }
+        assertEquals("保留 full 组内首个 split 的既定策略，不借本次修复更改 ABI 支持边界", names[1],
+            ReleaseJson.pickApkAsset(assets, "full")?.name)
     }
 
     /** 突变自证：JSON 里 tag 换掉，提取必须跟着变（防提取器把常量焊死） */

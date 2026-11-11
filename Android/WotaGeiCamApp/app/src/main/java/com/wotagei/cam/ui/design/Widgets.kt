@@ -135,11 +135,12 @@ fun Modifier.wotaHudCard(
 ): Modifier {
     if (frost == null || !HudFrost.live) return this.wotaCard(shape)
     if (LocalPreviewOverlaysOn.current) {
-        // 97% 暖黑：白线透过来只剩 3%（≈8/255，肉眼不可辨）；仍保留同一套 1dp 高光边
-        return this
-            .clip(shape)
-            .background(WotaColor.bg.copy(alpha = 0.97f))
-            .border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
+        // 2026-11-10 二次反馈：97% 暖黑在左右黑边栏上等于"没有板"（用户报残影/降噪霜板变透明）。
+        // 改为**压暗的毛玻璃**：自己出板的卡片铺 75% hudScrim 并继续注册 GL 霜板（板还在，只是压暗）；
+        // 吃父板的胶囊不铺——父板已经压暗，叠第二层会黑成洞。参考线只透 25%，控件仍可读。
+        val edged = this.clip(shape).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
+        if (!frost.asPlate) return edged
+        return edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost))
     }
     val edged = this.clip(shape).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
     if (!frost.asPlate) return edged

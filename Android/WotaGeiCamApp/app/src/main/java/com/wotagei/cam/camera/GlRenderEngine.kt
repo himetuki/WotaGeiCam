@@ -1532,23 +1532,29 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     private fun chooseConfig(display: EGLDisplay): EGLConfig? {
-        val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8,
-            EGL14.EGL_GREEN_SIZE, 8,
-            EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT or EGL_OPENGL_ES3_BIT_KHR,
-            // 同时要 WINDOW 与 PBUFFER：前者给两路输出面，后者给无窗口态
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-            EGL14.EGL_NONE
-        )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val count = IntArray(1)
-        if (!EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, count, 0) || count[0] == 0) {
-            Log.w(TAG_GL, "eglChooseConfig 无可用配置 err=0x${eglErrorHex()}")
-            return null
+        // 位掩码要求全部满足：先保留双版本优先，无解时必须真正重选 ES2 配置。
+        for (renderable in intArrayOf(
+            EGL14.EGL_OPENGL_ES2_BIT or EGL_OPENGL_ES3_BIT_KHR,
+            EGL14.EGL_OPENGL_ES2_BIT,
+        )) {
+            val attribs = intArrayOf(
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RENDERABLE_TYPE, renderable,
+                // 同时要 WINDOW 与 PBUFFER：前者给两路输出面，后者给无窗口态
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val count = IntArray(1)
+            if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, count, 0) && count[0] > 0) {
+                configs[0]?.let { return it }
+            }
         }
-        return configs[0]
+        Log.w(TAG_GL, "eglChooseConfig 无可用配置 err=0x${eglErrorHex()}")
+        return null
     }
 
     private fun createContext(display: EGLDisplay, config: EGLConfig): EGLContext? {

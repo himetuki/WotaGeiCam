@@ -302,8 +302,9 @@ class SceneExportWiringGuardTest {
             runnerSrc.contains("Failed(Reason.COMMIT)")
         )
         assertTrue(
-            "muxer 没写成时必须报 MUXER（pending 行已删，不许谎报可恢复）",
-            runnerSrc.contains("fail(pendingUri, Reason.MUXER)")
+            "muxer 没写成时必须先由 owner 删 pending、再报 MUXER（不许谎报可恢复）",
+            Regex("""owner\.deletePending\(ctx\)\s*return@withContext Failed\(Reason\.MUXER\)""")
+                .containsMatchIn(runnerSrc)
         )
         // 导出宿主的映射：只有 COMMIT 才落到 ClipError.COMMIT
         assertTrue(

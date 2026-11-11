@@ -187,15 +187,21 @@ internal object Shaders {
         uniform float uAdd;
         uniform float uBlend;
         uniform float uFreq;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
         float glowHash(vec2 p) {
             vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
             q += dot(q, q.yzx + 33.33);
             return fract((q.x + q.y) * q.z);
         }
+#endif
         void main() {
             vec3 c = texture2D(uBase, vUv).rgb;
             vec3 g = texture2D(uGlowSrc, vUv).rgb;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
             float n = mix(1.0, glowHash(vUv * uFreq), step(0.0001, uFreq));
+#else
+            float n = 1.0;
+#endif
             gl_FragColor = vec4(c + g * uTint * (uGain + uAdd) * (uBlend * n), 1.0);
         }
     """.trimIndent()
@@ -273,11 +279,13 @@ internal object Shaders {
         uniform float uEchoGain;
         uniform vec3 uEchoTint;
         uniform float uEchoTintMode;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
         float glowHash(vec2 p) {
             vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
             q += dot(q, q.yzx + 33.33);
             return fract((q.x + q.y) * q.z);
         }
+#endif
         vec3 applyEcho(vec3 c, vec3 e) {
             if (uEchoMode < 0.5) {
                 return max(c, e);
@@ -291,7 +299,11 @@ internal object Shaders {
         void main() {
             vec3 c = texture2D(uBase, vUv).rgb;
             vec3 g = texture2D(uGlowSrc, vUv).rgb;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
             float n = mix(1.0, glowHash(vUv * uFreq), step(0.0001, uFreq));
+#else
+            float n = 1.0;
+#endif
             vec3 withGlow = c + g * uTint * (uGain + uAdd) * (uBlend * n);
             vec3 e = texture2D(uEchoSrc, vUv).rgb;
             gl_FragColor = vec4(applyEcho(withGlow, e), 1.0);

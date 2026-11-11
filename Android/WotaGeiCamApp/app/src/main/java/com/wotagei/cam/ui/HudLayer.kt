@@ -117,6 +117,7 @@ import com.wotagei.cam.ui.design.HudFrostCard
 import com.wotagei.cam.ui.design.HudInkLevel
 import com.wotagei.cam.ui.design.WotaChip
 import com.wotagei.cam.ui.design.WotaChipTier
+import com.wotagei.cam.ui.design.LocalPreviewOverlaysOn
 import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaDockChip
 import com.wotagei.cam.ui.design.WotaHit
@@ -1414,6 +1415,12 @@ fun HudDockZone(
     // 滑回写真矩形自愈；live 只用来决定 fill 让不让位（视觉）。
     val dockShape = RoundedCornerShape(WotaShape.radiusCard)
     val motion = LocalMotion.current
+    // 2026-11-10 用户报障：开部分参考线后，Dock 上残影/降噪那片的霜没了、线直接透过来。
+    // 根因就是这条第三路径：10-28 只给 wotaHudCard 与 wotaDockShell 补了叠加层口径，
+    // 竖 Dock 底板的本地拼链漏网——叠加层在画时它仍注册 GL 板且 fill 让位，参考线（Compose
+    // 叠加，天然在 GL 之上）直接压在板上。口径与 wotaDockShell 逐字同源：在画 ⇒ 不注册板 +
+    // 97% 之下同族实底兜底，关掉恢复霜观感。
+    val overlaysOn = LocalPreviewOverlaysOn.current
     CompositionLocalProvider(LocalHudFrostParent provides hudFrostInherit) {
         Column(
             modifier
@@ -1421,13 +1428,16 @@ fun HudDockZone(
                 // 与注册进 GL 的 plateRadiusPx 同一枚令牌，两处不会分叉
                 .clip(dockShape)
                 .border(WotaStroke.hairline, WotaColor.acrylicBorder, dockShape)
-                // fill 让位判据：霜真在屏上 **且** Dock 本身在屏内（滑出期写的是屏外哨兵，
-                // GL 没板可吃，fill 必须回来兜着——内容虽然整体离屏，滑回动画途中会路过屏内）
+                // fill：正常态让位给 GL 霜板；叠加层在画时**保留霜板、铺 75% 灰罩**（压暗的毛玻璃，
+                // 线只透 25%）——2026-11-10 二次反馈：97% 暖黑在黑边栏上等于没板；
+                // 霜关/滑出离屏 ⇒ 同一枚 hudScrim 兜底（滑回动画途中路过屏内也要有底）
                 .then(
-                    if (HudFrost.live && frostVisible) Modifier
+                    if (HudFrost.live && frostVisible && !overlaysOn) Modifier
                     else Modifier.background(WotaColor.hudScrim)
                 )
-                // 注册常驻（不读 live，防死锁）：frostVisible=false 写屏外哨兵，true 写实测矩形
+                // 注册常驻（不读 live，防死锁）：frostVisible=false 写屏外哨兵，true 写实测矩形。
+                // 叠加层在画时**照常注册**（与 wotaHudCard/wotaDockShell 的新口径一致）：
+                // 板还在，只是被上面的灰罩压暗
                 .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible))
                 // 10-01 布局批：Dock 随内部控件数量平滑变化宽高（用户指令；Motion 例外 #2，
                 // 规格见 MotionSpec.intSize，PLAIN 档同样走 scaled、reduced 时 0 时长直达）。

@@ -240,6 +240,11 @@ internal class SceneExportGl(
         runCatching { thread.join(1500) }
     }
 
+    /** release() 有界返回不代表 GL 线程已退出；准入判定必须看这条线程的真实活性。 */
+    fun glThreadAlive(): Boolean = thread.isAlive
+
+    fun exportThread(): Thread = thread
+
     // ---------------------------------------------------------------- 初始化
 
     private fun initGl(): Boolean {
@@ -700,7 +705,7 @@ internal class SceneExportGl(
         unbindUnits()
         val stamped = runCatching {
             EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderSurface, ptsUs * 1000L)
-        }.isSuccess
+        }.getOrElse { false }
         if (!stamped) {
             Log.w(TAG, "打戳失败 ⇒ 本帧判未发出（坏戳不可自愈）")
             return false

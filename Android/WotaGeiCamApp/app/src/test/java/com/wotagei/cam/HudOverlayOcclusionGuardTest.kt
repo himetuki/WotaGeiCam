@@ -54,16 +54,21 @@ class HudOverlayOcclusionGuardTest {
     // -------------------------------------------------- ② 叠加层不许压在 HUD 上
 
     @Test
-    fun `叠加层在画时HUD卡片必须不透明挡在上面`() {
-        // 扩展函数：定位名必须带接收者（KotlinSourceScan 的 regionsOf 认 `fun <name>(`）
+    fun `叠加层在画时HUD卡片必须压暗毛玻璃而不是黑掉`() {
+        // 2026-11-10 二次反馈：10-28 的 97% 暖黑在左右黑边栏上等于"没有板"（残影/降噪变透明）。
+        // 改为压暗的毛玻璃：75% hudScrim + 照常注册霜板（板还在，只是压暗；线只透 25%）。
         val card = KotlinSourceScan.bodyOf(widgets, "Modifier.wotaHudCard")
         assertTrue(
             "wotaHudCard 必须读 LocalPreviewOverlaysOn（否则霜板态下参考线画在卡片上）",
             card.contains("LocalPreviewOverlaysOn.current")
         )
         assertTrue(
-            "叠加层在画时必须给不透明实底（97% 暖黑）",
-            card.contains("WotaColor.bg.copy(alpha = 0.97f)")
+            "叠加层在画时必须用 hudScrim 压暗毛玻璃（97% 暖黑在黑边栏上等于没板）",
+            card.contains("WotaColor.hudScrim")
+        )
+        assertTrue(
+            "自己出板的卡片叠加层在画时仍要注册霜板（板要还在，只是压暗）",
+            card.contains("edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost))")
         )
         assertTrue(
             "录制页必须按「参考线或站位线在画」提供这个开关",
@@ -78,7 +83,13 @@ class HudOverlayOcclusionGuardTest {
             "摘掉叠加层分支后判据必须翻红",
             mutant.contains("if (LocalPreviewOverlaysOn.current) {")
         )
-        // 突变 2：录制页不再提供开关（默认 false ⇒ 回到旧行为）
+        // 突变 2：压暗改回 97% 暖黑（黑边栏上等于没板） ⇒ 判据翻红
+        val blackMutant = card.replace("WotaColor.hudScrim", "WotaColor.bg.copy(alpha = 0.97f)")
+        assertFalse(
+            "回退 97% 暖黑后守卫必须报红",
+            blackMutant.contains("WotaColor.hudScrim")
+        )
+        // 突变 3：录制页不再提供开关（默认 false ⇒ 回到旧行为）
         val screenMutant = KotlinSourceScan.flatten(screen)
             .replace("LocalPreviewOverlaysOn provides (refLines != 0 || markerCount > 0)", "")
         assertFalse(
@@ -88,26 +99,60 @@ class HudOverlayOcclusionGuardTest {
     }
 
     @Test
-    fun `底栏底板走的是霜壳_同样必须让叠加层`() {
+    fun `底栏霜壳叠加层在画时压暗保留霜板`() {
         // 底栏 Dock 的底板不是 wotaHudCard，而是 LiquidMerge 的 wotaDockShell（绘制期自绘轮廓 +
-        // 霜板注册）。2026-10-28 第一版只修了 wotaHudCard，真机复测站位线仍从卡片上透出来——
-        // 根因就在这里。三处判据：读开关 / 注册让路 / 97% 实底。
+        // 霜板注册）。2026-11-10 起：叠加层在画时不再摘板/黑掉，而是照常注册 + 75% 灰罩压暗。
         val shell = KotlinSourceScan.bodyOf(liquid, "Modifier.wotaDockShell")
         assertTrue("wotaDockShell 必须读 LocalPreviewOverlaysOn", shell.contains("LocalPreviewOverlaysOn.current"))
         assertTrue(
-            "叠加层在画时霜板注册必须让路（否则板还是画在叠加层之下）",
-            shell.contains("if (intent && frostSlot >= 0 && !overlaysOn) {")
+            "叠加层在画时霜板注册必须照常（板要还在，只是压暗）",
+            shell.contains("if (intent && frostSlot >= 0) {")
         )
         assertTrue(
-            "叠加层在画时底板必须给 97% 实底",
-            shell.contains("WotaColor.bg.copy(alpha = 0.97f)")
+            "叠加层在画时底板必须用 hudScrim 压暗",
+            shell.contains("WotaColor.hudScrim")
         )
         assertTrue(
-            "实底分支必须在「!live || overlaysOn」下触发（霜开着也要挡住线）",
+            "实底分支必须在「!live || overlaysOn」下触发（霜开着也要压线）",
             shell.contains("if (!live || overlaysOn) {")
         )
-        // 尺要能红：摘掉 overlaysOn 让路后判据翻红
-        val mutant = shell.replace("&& !overlaysOn) {", ") {")
-        assertFalse(mutant.contains("if (intent && frostSlot >= 0 && !overlaysOn) {"))
+        // 尺要能红：把注册重新按叠加层摘掉（回退 10-28 的摘板口径）后判据翻红
+        val mutant = shell.replace(
+            "if (intent && frostSlot >= 0) {",
+            "if (intent && frostSlot >= 0 && !overlaysOn) {"
+        )
+        assertFalse(
+            "回退摘板口径后守卫必须报红",
+            mutant.contains("if (intent && frostSlot >= 0) {")
+        )
+    }
+
+    @Test
+    fun `竖Dock底板叠加层在画时同样压暗保留霜板`() {
+        // 2026-11-10 用户报障（残影/降噪霜板消失）：竖 Dock 是第三条霜路径。修法与前两条统一：
+        // 叠加层在画时照常注册 GL 霜板 + 铺 75% hudScrim 压暗，不再切哨兵/黑掉。
+        val dock = KotlinSourceScan.bodyOf(hudLayer, "HudDockZone")
+        assertTrue("竖Dock底板必须读 LocalPreviewOverlaysOn", dock.contains("LocalPreviewOverlaysOn.current"))
+        assertTrue(
+            "叠加层在画时竖Dock底板必须用 hudScrim 压暗",
+            dock.contains("WotaColor.hudScrim")
+        )
+        assertTrue(
+            "叠加层在画时 GL 板注册必须照常（板要还在，只是压暗）",
+            dock.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible)")
+        )
+        assertTrue(
+            "fill 让位必须排除叠加层在画（在画时铺灰罩压线）",
+            dock.contains("HudFrost.live && frostVisible && !overlaysOn")
+        )
+        // 尺要能红：把注册重新按叠加层切哨兵后判据翻红
+        val mutant = dock.replace(
+            "hudFrostDockRegistrar(plateRadiusPx, frostVisible)",
+            "hudFrostDockRegistrar(plateRadiusPx, frostVisible && !overlaysOn)"
+        )
+        assertFalse(
+            "回退切哨兵口径后守卫必须报红",
+            mutant.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible)")
+        )
     }
 }

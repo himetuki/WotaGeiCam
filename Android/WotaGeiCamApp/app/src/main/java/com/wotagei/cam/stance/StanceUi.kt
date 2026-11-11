@@ -11,4 +11,5 @@ data class StanceUi(
     val running: Boolean = false,
     val lineIntervalMs: Long = 2000L,
     val pollIntervalMs: Long = 4000L,
+    val fallbackTip: String? = null,
 )

@@ -12,6 +12,10 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
+/** 下载/测速共用的连接边界：默认走安全重定向真身，JVM 回归只替换传输。 */
+internal typealias UpdateConnectionFactory =
+    (url: String, readTimeoutMs: Int, connectTimeoutMs: Int, deadlineNanos: Long?) -> HttpURLConnection?
+
 /**
  * 「检查更新」的**网络执行层**（update 包唯一允许出现 HttpURLConnection 的地方，守卫钉住）。
  * 零新依赖：HttpURLConnection 直用。
@@ -212,8 +216,30 @@ object UpdateDownloader {
         isCancelled: () -> Boolean,
         expectedSha256: String? = null,
         onSpeedTested: () -> Unit = {}
+    ): DownloadOutcome = downloadApk(
+        cacheDir = context.applicationContext.cacheDir,
+        directUrl = directUrl,
+        expectedSize = expectedSize,
+        onProgress = onProgress,
+        isCancelled = isCancelled,
+        expectedSha256 = expectedSha256,
+        onSpeedTested = onSpeedTested
+    )
+
+    /** 与公开入口共用同一下载编排；只让 JVM 测试注入缓存目录与连接，不复制下载/校验循环。 */
+    internal fun downloadApk(
+        cacheDir: File,
+        directUrl: String,
+        expectedSize: Long?,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
+        isCancelled: () -> Boolean,
+        expectedSha256: String? = null,
+        onSpeedTested: () -> Unit = {},
+        openConnection: UpdateConnectionFactory = { url, readTimeout, connectTimeout, deadline ->
+            openFollowing(url, readTimeout, connectTimeout, deadline)
+        }
     ): DownloadOutcome {
-        val dir = File(context.applicationContext.cacheDir, "updates")
+        val dir = File(cacheDir, "updates")
         dir.mkdirs()
         val assetName = directUrl.substringAfterLast('/')
         // 修复轮 P3-3：只清理 .part 半截文件与非本轮资产的文件——本轮 asset 的已完成 APK 可能
@@ -228,7 +254,7 @@ object UpdateDownloader {
         val part = File(dir, "$assetName.part${System.nanoTime()}")
 
         // 测速选路：并发测完再下（测速失败/超预算的渠道垫底仍保留，见 rankChannelsBySpeed）
-        val ordered = measureAndRank(downloadCandidates(directUrl), isCancelled)
+        val ordered = measureAndRank(downloadCandidates(directUrl), isCancelled, openConnection)
         if (isCancelled()) {
             part.delete()
             return DownloadOutcome.Cancelled
@@ -239,7 +265,7 @@ object UpdateDownloader {
                 part.delete()
                 return DownloadOutcome.Cancelled
             }
-            when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled)) {
+            when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled, openConnection)) {
                 is DownloadOutcome.Done -> {
                     // 重下同一资产时旧包还在：Windows 语义下 renameTo 对已存在目标会失败，必须先删旧再改名
                     //（此刻删的是刚下完的新包要顶掉的旧包，与 P3-3 保留旧包给安装器读不冲突——重下即用户已弃旧包）
@@ -247,7 +273,7 @@ object UpdateDownloader {
                     if (renamed) {
                         // SHA-256 端到端校验（v0.0.8）：哈希来自段 1 官方端点的 Release 说明（发版者写入）。
                         // 探测没给（段 2/3、旧版 notes）→ 跳过校验（不为 null 才读盘，省一次全量 IO），
-                        // 退回既有防线（PK+size+安装签名网）；给了且不匹配 → 镜像污染实锤，删包判失败。
+                        // 退回既有防线（PK+size+安装签名网）；给了且不匹配 → 拒收该渠道，删污染包后继续后备。
                         // 校验本身是读盘：IO 异常必须折算成失败——下载协程没有 CoroutineExceptionHandler，
                         // 抛出去就是未捕获异常杀进程（与 tryNode「任何异常都折算成失败」同纪律）。
                         val verified = runCatching {
@@ -260,9 +286,9 @@ object UpdateDownloader {
                         if (verified) {
                             return DownloadOutcome.Done(target, r.sizeBytes)
                         }
-                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），判镜像污染，删包")
+                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），删污染包并尝试下一渠道")
                         target.delete()
-                        return DownloadOutcome.Failed
+                        continue
                     } else {
                         part.delete()
                         return DownloadOutcome.Failed
@@ -286,14 +312,18 @@ object UpdateDownloader {
      * 各渠道并发测速并按速度排序；返回的列表已是下载顺序。
      * 线程池按渠道数开（上限 6）、daemon 线程，`finally` 里 shutdownNow——取消/异常都不留线程。
      */
-    private fun measureAndRank(candidates: List<String>, isCancelled: () -> Boolean): List<String> {
+    private fun measureAndRank(
+        candidates: List<String>,
+        isCancelled: () -> Boolean,
+        openConnection: UpdateConnectionFactory
+    ): List<String> {
         if (candidates.isEmpty()) return emptyList()
         val pool = Executors.newFixedThreadPool(minOf(candidates.size, 6)) { r ->
             Thread(r, "wota-update-speed").apply { isDaemon = true }
         }
         return try {
             val futures = candidates.map { url ->
-                url to pool.submit(Callable { measureOne(url, isCancelled) })
+                url to pool.submit(Callable { measureOne(url, isCancelled, openConnection) })
             }
             // 等结果同样受整段预算约束：[measureOne] 的 deadline 只在「开连接前」与「读循环顶」
             // 检查，单次 connect / read 阻塞与 DNS 解析都不受它打断——这里必须自带超时，
@@ -321,11 +351,15 @@ object UpdateDownloader {
      * 以下一律记 0（排序垫底但仍会尝试）：连不上、非 2xx、首块不是 APK 魔数（HTML 落地页）、没读到数据。
      * 计时从**发请求之前**算起，连接与首字节的延迟也计入——真实下载同样要付这笔钱。
      */
-    private fun measureOne(url: String, isCancelled: () -> Boolean): Long {
+    private fun measureOne(
+        url: String,
+        isCancelled: () -> Boolean,
+        openConnection: UpdateConnectionFactory
+    ): Long {
         if (isCancelled()) return 0
         val started = System.nanoTime()
         val deadline = started + SPEED_TEST_BUDGET_MS * 1_000_000L
-        val conn = openFollowing(
+        val conn = openConnection(
             url,
             SPEED_TEST_READ_TIMEOUT_MS,
             SPEED_TEST_CONNECT_TIMEOUT_MS,
@@ -402,9 +436,10 @@ object UpdateDownloader {
         part: File,
         expectedSize: Long?,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        openConnection: UpdateConnectionFactory
     ): DownloadOutcome {
-        val conn = openFollowing(url, READ_TIMEOUT_MS) ?: return DownloadOutcome.Failed
+        val conn = openConnection(url, READ_TIMEOUT_MS, CONNECT_TIMEOUT_MS, null) ?: return DownloadOutcome.Failed
         try {
             if (isCancelled()) return DownloadOutcome.Cancelled
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return DownloadOutcome.Failed

@@ -370,41 +370,37 @@ internal class ArcRepairGl(
     }
 
     private fun chooseConfig(display: EGLDisplay): EGLConfig? {
-        val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8,
-            EGL14.EGL_GREEN_SIZE, 8,
-            EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT or EGL_OPENGL_ES3_BIT_KHR,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-            // Android 特有属性（`EGL_RECORDABLE_ANDROID`，NDK 里是 `EGL_RECORDABLE_ANDROID_KHR` 同值）：
-            // 「EGL 输出要绑到编解码器输入面」时官方要求声明 recordable；缺它时部分驱动
-            // `eglCreateWindowSurface` 直接返回 EGL_BAD_ALLOC（真机实测 0x3003）。
-            // GlRenderEngine 没带也能跑，但那是绑 MediaRecorder 的面；转码这条路绑的是 MediaCodec
-            // 自己的输入面，实测必须带。EGL14 没有这个常量（属 EGL_KHR_recordable 扩展），故写字面量。
-            0x3142, 1,
-            EGL14.EGL_NONE
-        )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val count = IntArray(1)
-        if (!EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, count, 0) || count[0] == 0) {
-            // 带 recordable 选不出配置就退回不带的那组（老驱动可能不认扩展），宁可降级也别整块失败
-            Log.w(TAG_ARC_GL, "带 recordable 的 eglChooseConfig 无配置，退回通用属性重试")
-            val fallback = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT or EGL_OPENGL_ES3_BIT_KHR,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-                EGL14.EGL_NONE
-            )
-            if (!EGL14.eglChooseConfig(display, fallback, 0, configs, 0, 1, count, 0) || count[0] == 0) {
-                Log.w(TAG_ARC_GL, "eglChooseConfig 无可用配置 err=0x${eglErrorHex()}")
-                return null
+        // recordable 优先；每组属性都先选双版本，再重选 ES2，避免配置阶段堵住上下文回退。
+        for (recordable in booleanArrayOf(true, false)) {
+            if (!recordable) {
+                // 老驱动可能不认扩展，recordable 两档均无解后才退回通用属性。
+                Log.w(TAG_ARC_GL, "带 recordable 的 eglChooseConfig 无配置，退回通用属性重试")
+            }
+            for (renderable in intArrayOf(
+                EGL14.EGL_OPENGL_ES2_BIT or EGL_OPENGL_ES3_BIT_KHR,
+                EGL14.EGL_OPENGL_ES2_BIT,
+            )) {
+                val attribs = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, renderable,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                )
+                // EGL_RECORDABLE_ANDROID：MediaCodec 输入面在部分驱动上必须声明；
+                // EGL14 未暴露该常量，通用降级时完全移除扩展属性而非改为 false。
+                val suffix = if (recordable) intArrayOf(0x3142, 1, EGL14.EGL_NONE)
+                    else intArrayOf(EGL14.EGL_NONE)
+                val configs = arrayOfNulls<EGLConfig>(1)
+                val count = IntArray(1)
+                if (EGL14.eglChooseConfig(display, attribs + suffix, 0, configs, 0, 1, count, 0) && count[0] > 0) {
+                    configs[0]?.let { return it }
+                }
             }
         }
-        return configs[0]
+        Log.w(TAG_ARC_GL, "eglChooseConfig 无可用配置 err=0x${eglErrorHex()}")
+        return null
     }
 
     private fun createContext(display: EGLDisplay, config: EGLConfig): EGLContext? {
@@ -648,13 +644,14 @@ internal class ArcRepairGl(
             return false
         }
         val ptsNs = basePtsNs + ptsUs * 1000L
-        val ok = runCatching { EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderEglSurface, ptsNs) }
-            .onFailure {
-                stampFailCount++
-                Log.w(TAG_ARC_GL, "写呈现时间戳失败（累计 ${stampFailCount} 次）：${it.message}")
-            }
-            .isSuccess
-        if (!ok) Log.e(TAG_ARC_GL, "打戳失败 ⇒ 本次 emit 判失败，整任务终止（坏戳进容器不可自愈且用户不可见）")
+        val stamped = runCatching { EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderEglSurface, ptsNs) }
+        val ok = stamped.getOrDefault(false)
+        if (!ok) {
+            stampFailCount++
+            val detail = stamped.exceptionOrNull()?.message ?: "EGL 返回 false"
+            Log.w(TAG_ARC_GL, "写呈现时间戳失败（累计 ${stampFailCount} 次）：$detail")
+            Log.e(TAG_ARC_GL, "打戳失败 ⇒ 本次 emit 判失败，整任务终止（坏戳进容器不可自愈且用户不可见）")
+        }
         return ok
     }
 

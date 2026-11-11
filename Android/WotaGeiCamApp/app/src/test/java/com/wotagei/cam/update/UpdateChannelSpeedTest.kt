@@ -222,7 +222,7 @@ class UpdateChannelSpeedTest {
         assertTrue("良品必须先真的绿，否则突变体的红没有意义", wiringViolations(src).isEmpty())
         // 突变 1：把「测速排序」退化成直接用原序候选
         val noSpeed = src.replace(
-            "measureAndRank(downloadCandidates(directUrl), isCancelled)",
+            "measureAndRank(downloadCandidates(directUrl), isCancelled, openConnection)",
             "downloadCandidates(directUrl)"
         )
         assertTrue(

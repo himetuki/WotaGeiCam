@@ -7,7 +7,11 @@ import android.hardware.camera2.CameraCharacteristics
 import android.media.ImageReader
 import android.net.Uri
 import android.view.Surface
+import com.wotagei.cam.camera.AnalysisSessionDecision
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -56,12 +60,16 @@ class StanceController private constructor(
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    private val modelLock = Any()
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var modelGeneration = 0L
     @Volatile private var analysis: StanceAnalysis? = null
     @Volatile private var detector: StanceDetector? = null
     private var speaker: StanceSpeaker? = null
     private var attached = false
     private var prepared = false
     private var recording = false
+    private var analysisSessionDecision = AnalysisSessionDecision.ABSENT
 
     /**
      * 模型组装配串行线程（2026-11-07）：首启 copy 13.8MB + 全量 sha256 + Interpreter 构造，
@@ -157,6 +165,8 @@ class StanceController private constructor(
                 withContext(Dispatchers.Main) {
                     if (_state.value.enabled) maybeAttachAfterGate()
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     Diag.w(TAG, "模型组装配失败：${e.message}")
@@ -179,11 +189,13 @@ class StanceController private constructor(
      * 装配当前激活模型组（用户包优先 > 内置），**用户包加载失败自动回退内置**（D20）。
      * 装配复用既有 [StanceAnalysis] 管线（[StanceAnalysis.updateModel]），不重建线程/reader。
      */
-    private fun reloadActive(context: Context) {
+    private suspend fun reloadActive(context: Context) {
         val (dir, source) = StanceModelPack.activeDir(context)
         val meta = StanceModelPack.validateDir(dir) ?: throw IllegalStateException("模型组校验失败")
         try {
             applyPack(dir, meta, source)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (source != "user") throw e
             Diag.w(TAG, "用户模型组不可用，回退内置：${e.message}")
@@ -201,48 +213,83 @@ class StanceController private constructor(
         }
     }
 
-    private fun applyPack(dir: java.io.File, meta: Map<String, Any?>, source: String) {
+    private suspend fun applyPack(dir: java.io.File, meta: Map<String, Any?>, source: String) {
+        val request = currentCoroutineContext()
+        request.ensureActive()
+        val epoch = synchronized(modelLock) { modelGeneration }
         dumpGpuEnvironment()
-        val det = StanceDetector()
-        try {
-            val ok = det.load(
-                java.io.File(dir, "yolo11n_int8.tflite"),
-                java.io.File(dir, "yolo11n_fp32.tflite"),
-                gpuMode = _state.value.gpuMode,
-            )
-            if (!ok) throw IllegalStateException("检测模型不可加载（张量规格/文件异常）")
-            // 先验模型后读标定：坏模型不能留下半套新安全区
-            val head = StanceHead.fromJson(java.io.File(dir, "head.json").readText())
-            val marginsText = java.io.File(dir, "margins.json").readText()
-            val a = analysis ?: StanceAnalysis { out -> onOutput(out) }.also {
+        val head = StanceHead.fromJson(java.io.File(dir, "head.json").readText())
+        val marginsText = java.io.File(dir, "margins.json").readText()
+        val a = synchronized(modelLock) {
+            request.ensureActive()
+            if (epoch != modelGeneration) throw CancellationException("模型组装配已作废")
+            analysis ?: StanceAnalysis { out -> onOutput(out) }.also {
                 it.rotationDegrees = rotation
                 it.brighten = _state.value.brighten
                 analysis = it
             }
-            // 安全区覆盖与检测器一起在分析线程生效（MARGIN_BANDS 是全局可变，不能与 observe 并发写）
-            a.updateModel(det, head, marginsText)
-            detector = det
-            val headMeta = meta["head_meta"] as? Map<*, *>
-            val version = buildString {
-                append("模型组 ${meta["created_at"] ?: "?"}（$source）")
-                append("｜判定头 ${headMeta?.get("trained_at") ?: "?"} val_acc=${headMeta?.get("val_acc") ?: "?"}")
-                append("｜安全区 ${meta["margins_sessions"]?.toString()?.take(36)}…")
+        }
+        val headMeta = meta["head_meta"] as? Map<*, *>
+        val version = buildString {
+            append("模型组 ${meta["created_at"] ?: "?"}（$source）")
+            append("｜判定头 ${headMeta?.get("trained_at") ?: "?"} val_acc=${headMeta?.get("val_acc") ?: "?"}")
+            append("｜安全区 ${meta["margins_sessions"]?.toString()?.take(36)}…")
+        }
+        // native 创建/首验/热换/关闭在同一 owner；不可取消的 native 返回后再次验票再交接。
+        a.onAnalysis {
+            val next = StanceDetector()
+            try {
+                request.ensureActive()
+                val ok = next.load(
+                    java.io.File(dir, "yolo11n_int8.tflite"),
+                    java.io.File(dir, "yolo11n_fp32.tflite"),
+                    gpuMode = _state.value.gpuMode,
+                )
+                if (!ok) throw IllegalStateException("检测模型不可加载（张量规格/文件异常）")
+                synchronized(modelLock) {
+                    request.ensureActive()
+                    if (epoch != modelGeneration || analysis !== a) throw CancellationException("模型组装配已作废")
+                    next.onBackendChanged = { backend, reason ->
+                        synchronized(modelLock) {
+                            if (epoch == modelGeneration && detector === next) {
+                                val available = next.isLoaded()
+                                if (!available) {
+                                    a.pauseListening()
+                                    // Speaker 的队列归 Main；迟到通知还须验模型身份，不能停新模型的播报。
+                                    mainHandler.post {
+                                        synchronized(modelLock) {
+                                            if (epoch == modelGeneration && detector === next && !next.isLoaded()) speaker?.pause()
+                                        }
+                                    }
+                                }
+                                _state.value = _state.value.copy(
+                                    backendName = backend,
+                                    fallbackTip = reason,
+                                    running = available && _state.value.running,
+                                    output = if (available) _state.value.output else null,
+                                )
+                            }
+                        }
+                    }
+                    a.updateModel(next, head, marginsText)
+                    detector = next
+                    _state.value = _state.value.copy(
+                        backendName = next.backendName,
+                        versionText = version,
+                        fallbackTip = next.gpuFallbackReason ?: _state.value.fallbackTip,
+                    )
+                    syncEngineParams()
+                }
+            } catch (error: Throwable) {
+                next.close()
+                throw error
             }
-            _state.value = _state.value.copy(
-                backendName = det.backendName,
-                versionText = version,
-                fallbackTip = if (det.backendName.contains("回退")) "GPU 不可用已回退 CPU" else _state.value.fallbackTip,
-            )
-            syncEngineParams()
-        } catch (e: Exception) {
-            // 新检测器没交给管线就自己关掉，别把旧模型一起拖下水
-            det.close()
-            throw e
         }
     }
 
     /** 分析线程回调（Main 线程）：状态 + 播报 + 引擎参数同步（同步本身走分析线程，见下）。 */
     private fun onOutput(out: EngineOutput) {
+        if (!_state.value.enabled || recording || !onPage || frontLens || !_state.value.running) return
         _state.value = _state.value.copy(output = out)
         speaker?.let { sp -> out.lines.forEach { sp.speak(it) } }
         syncEngineParams()
@@ -279,8 +326,8 @@ class StanceController private constructor(
 
     private fun attachAnalysis(context: Context) {
         val a = analysis
-        if (a == null) {
-            // 模型组还在装配（异步）：记一笔，装配完成后补挂
+        if (a == null || detector?.isLoaded() != true) {
+            // 未装配或后端故障时只保留意图；会话接纳不能让不可用模型开始判定。
             pendingAttach = _state.value.enabled && onPage && !recording
             return
         }
@@ -293,13 +340,38 @@ class StanceController private constructor(
             StanceAnalysis.DEFAULT_SIZE
         }
         val surface = a.start(size)
-        a.resumeListening()
         syncEngineParams()
-        val hooked = attachHook?.invoke(surface, a.reader()) ?: true
+        val hooked = attachHook?.invoke(surface, a.reader()) ?: false
         attached = hooked
         pendingAttach = !hooked
-        if (!hooked) a.pauseListening()
-        _state.value = _state.value.copy(running = hooked)
+        val admitted = hooked && analysisSessionDecision == AnalysisSessionDecision.INCLUDED
+        if (admitted) {
+            speaker?.resume()
+            a.resumeListening()
+        } else {
+            speaker?.pause()
+            a.pauseListening()
+        }
+        _state.value = _state.value.copy(running = admitted)
+    }
+
+    /** 接纳的是分析槽意图，不是强行降帧率；高速拒绝期间保留同一 reader，普通档再恢复。 */
+    fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {
+        analysisSessionDecision = decision
+        if (decision == AnalysisSessionDecision.INCLUDED) {
+            if (_state.value.fallbackTip == HIGH_SPEED_TIP) _state.value = _state.value.copy(fallbackTip = null)
+            maybeAttachAfterGate()
+            return
+        }
+        analysis?.pauseListening()
+        speaker?.pause()
+        _state.value = _state.value.copy(
+            running = false,
+            output = null,
+            fallbackTip = if (decision == AnalysisSessionDecision.BLOCKED_HIGH_SPEED && _state.value.enabled) {
+                HIGH_SPEED_TIP
+            } else _state.value.fallbackTip,
+        )
     }
 
     /** 方向变化（转屏/换镜头）：分析帧转正角随之更新，已挂的管线立即生效。 */
@@ -316,6 +388,8 @@ class StanceController private constructor(
     var detachHook: (() -> Unit)? = null
 
     private fun detachAnalysis(context: Context) {
+        speaker?.pause()
+        analysis?.pauseListening()
         pendingAttach = false
         if (!attached) {
             _state.value = _state.value.copy(running = false, output = null)
@@ -333,6 +407,7 @@ class StanceController private constructor(
      */
     fun suspendForRecording() {
         recording = true
+        speaker?.pause()
         analysis?.pauseListening()
         _state.value = _state.value.copy(running = false, output = null)
     }
@@ -340,6 +415,7 @@ class StanceController private constructor(
     /** 停录恢复（开关状态/持久化都不动——下一次开录仍自动暂停，无需用户重开）。 */
     fun resumeAfterRecording() {
         recording = false
+        if (analysis == null || analysisSessionDecision == AnalysisSessionDecision.INCLUDED) speaker?.resume()
         if (pendingDetach) {
             // 录制窗口内切了前置：当时摘槽会打断录制，停录后补摘
             pendingDetach = false
@@ -367,9 +443,23 @@ class StanceController private constructor(
         maybeAttachAfterGate()
     }
 
+    /**
+     * 相机 Controller 销毁（非配置变更/系统回收）但站位功能意图仍在：不撤销开关，
+     * 只把 reader 的关闭交给分析 owner 排队；下次进页会重新 start 一张有效面。
+     */
+    fun onCameraControllerCleared() {
+        attached = false
+        pendingAttach = false
+        analysis?.pauseListening()
+        speaker?.pause()
+        analysis?.releaseReader()
+        _state.value = _state.value.copy(running = false, output = null)
+    }
+
     /** 预览页离开组合：停听 + 清叠加（相机可被别的页面保活，但站位播报不该在设置页响）。 */
     fun onPageExit() {
         onPage = false
+        speaker?.pause()
         analysis?.pauseListening()
         _state.value = _state.value.copy(running = false, output = null)
     }
@@ -382,7 +472,16 @@ class StanceController private constructor(
             pendingAttach = true
             return
         }
+        if (detector?.isLoaded() != true) {
+            pendingAttach = true
+            a.pauseListening()
+            speaker?.pause()
+            _state.value = _state.value.copy(running = false, output = null)
+            return
+        }
         if (attached) {
+            if (analysisSessionDecision != AnalysisSessionDecision.INCLUDED) return
+            speaker?.resume()
             a.resumeListening()
             _state.value = _state.value.copy(running = true)
         } else {
@@ -403,6 +502,7 @@ class StanceController private constructor(
     fun disableForFrontLens(context: Context) {
         _state.value = _state.value.copy(enabled = false, running = false, output = null)
         prefs(context).edit().putBoolean(Prefs.ON, false).apply()
+        speaker?.pause()
         analysis?.pauseListening()
         pendingAttach = false
         if (recording) {
@@ -454,11 +554,16 @@ class StanceController private constructor(
      */
     private fun dumpGpuEnvironment() {
         try {
-            val soc = listOf(
-                "SOC_MODEL=${android.os.Build.SOC_MODEL.takeIf { it.isNotEmpty() } ?: "?"}",
-                "SOC_MFR=${android.os.Build.SOC_MANUFACTURER.takeIf { it.isNotEmpty() } ?: "?"}",
-                "HW=${android.os.Build.HARDWARE}",
-            ).joinToString(" ")
+            // SOC 字段自 API 31 才存在；旧系统只读 HARDWARE，不能靠 catch Exception 接链接错误。
+            val soc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                listOf(
+                    "SOC_MODEL=${android.os.Build.SOC_MODEL.takeIf { it.isNotEmpty() } ?: "?"}",
+                    "SOC_MFR=${android.os.Build.SOC_MANUFACTURER.takeIf { it.isNotEmpty() } ?: "?"}",
+                    "HW=${android.os.Build.HARDWARE}",
+                ).joinToString(" ")
+            } else {
+                "HW=${android.os.Build.HARDWARE}"
+            }
             val vk = "vulkan=${appContext.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_VULKAN_HARDWARE_VERSION)}" +
                 " vulkanCompute=${appContext.packageManager.hasSystemFeature("android.hardware.vulkan.compute")}"
             Diag.i(TAG, "GPU 环境 $soc $vk")
@@ -501,26 +606,32 @@ class StanceController private constructor(
 
     /** 退出预览页/窗口销毁释放（Activity finish；配置变更不调——与 CameraController 同级）。 */
     fun release() {
+        val oldAnalysis = synchronized(modelLock) {
+            modelGeneration++
+            val old = analysis
+            analysis = null
+            detector = null
+            prepared = false
+            _state.value = _state.value.copy(running = false, output = null, backendName = "")
+            old
+        }
         detachHook?.invoke()
         resetPackScope()
-        analysis?.release()
-        detector?.close()
+        oldAnalysis?.release()
         speaker?.release()
-        analysis = null
-        detector = null
         speaker = null
-        prepared = false
         attached = false
         pendingAttach = false
         pendingDetach = false
         frontLens = false
         recording = false
+        analysisSessionDecision = AnalysisSessionDecision.ABSENT
         onPage = true
-        _state.value = _state.value.copy(running = false, output = null, backendName = "")
     }
 
     companion object {
         private const val TAG = "StanceController"
+        private const val HIGH_SPEED_TIP = "当前高速会话不支持站位分析，已暂停分析与播报；保留所选帧率，回普通档自动恢复"
         @Volatile
         private var instance: StanceController? = null
 

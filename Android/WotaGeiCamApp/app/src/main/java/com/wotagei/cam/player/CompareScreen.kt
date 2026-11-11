@@ -57,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -624,6 +625,9 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         }
     }
 
+    // pointerInput(Unit)长期驻留：通过State转交最新闭包，也同步setPlaying内的时间线/黑层状态。
+    val onDoubleTap by rememberUpdatedState { setPlaying(!playing) }
+
     Box(Modifier.fillMaxSize().background(WotaBg)) {
         // ① 视频层：铺满整屏（仿参考图的沉浸式）。单击显隐控制层、双击启停（TapArbiter 与
         //    单播放页同一套仲裁）；控制层没吃掉的空档，指头会落到这一层的 onTap 上。
@@ -636,7 +640,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         val now = SystemClock.uptimeMillis()
                         toggleJob?.cancel()
                         if (tapArbiter.onPointerUp(now) == TapArbiter.Decision.PlayPause) {
-                            setPlaying(!playing)
+                            onDoubleTap()
                         } else {
                             toggleJob = tapScope.launch {
                                 delay(DOUBLE_TAP_WINDOW_MS)

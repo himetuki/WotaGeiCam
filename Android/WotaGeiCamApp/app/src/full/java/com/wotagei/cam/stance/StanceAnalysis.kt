@@ -10,7 +10,12 @@ import android.os.Looper
 import android.util.Size
 import android.view.Surface
 import java.io.Closeable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 转正后的一帧（与输入同源，宽高可能已交换）。
@@ -41,6 +46,7 @@ class StanceAnalysis(
 
     private val released = AtomicBoolean(false)
     private val listening = AtomicBoolean(false)
+    private val generation = AtomicLong(0L)
     private var reader: ImageReader? = null
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
@@ -60,17 +66,47 @@ class StanceAnalysis(
      * GpuDelegate 全部悬空不关（泄漏），且引擎槽仍指着旧 reader ⇒ 新模型永远不生效。
      */
     fun updateModel(newDetector: FrameDetector?, newHead: StanceHead?, marginsJson: String? = null) {
-        val swap = {
-            // 安全区覆盖也在这里落：MARGIN_BANDS 是全局可变表，判定线程正在读它，
-            // 不能让装配线程并发改（旧实现由主线程直接 loadCalibratedBands）。
-            if (marginsJson != null) StanceSpec.loadCalibratedBands(marginsJson)
-            val old = detector
-            detector = newDetector
-            head = newHead
-            if (old !== newDetector) (old as? Closeable)?.let { runCatching { it.close() } }
+        val h = ensureAnalysisThread()
+        val apply: () -> Unit = {
+            if (!released.get()) swapModel(newDetector, newHead, marginsJson)
+            else (newDetector as? Closeable)?.let { runCatching { it.close() } }
         }
-        val h = handler
-        if (h != null && !released.get()) h.post(swap) else swap()
+        if (Thread.currentThread() === thread) apply()
+        else check(h.post(apply)) { "站位分析线程已停止" }
+    }
+
+    /** 模型 native 操作交给长期 owner；等待可取消，不能用超时后继续写入的 FutureTask。 */
+    suspend fun onAnalysis(block: () -> Unit) = suspendCancellableCoroutine<Unit> { continuation ->
+        val task = Runnable {
+            if (!continuation.isActive) return@Runnable
+            if (released.get()) {
+                continuation.resumeWithException(CancellationException("站位分析管线已释放"))
+                return@Runnable
+            }
+            try {
+                block()
+                continuation.resume(Unit)
+            } catch (error: Throwable) {
+                continuation.resumeWithException(error)
+            }
+        }
+        synchronized(this) {
+            if (released.get()) continuation.resumeWithException(CancellationException("站位分析管线已释放"))
+            else if (!ensureAnalysisThread().post(task)) {
+                continuation.resumeWithException(CancellationException("站位分析线程已停止"))
+            }
+        }
+    }
+
+    private fun swapModel(newDetector: FrameDetector?, newHead: StanceHead?, marginsJson: String?) {
+        // 安全区覆盖也在这里落：MARGIN_BANDS 是全局可变表，判定线程正在读它，
+        // 不能让装配线程并发改（旧实现由主线程直接 loadCalibratedBands）。
+        if (marginsJson != null) StanceSpec.loadCalibratedBands(marginsJson)
+        generation.incrementAndGet()
+        val old = detector
+        detector = newDetector
+        head = newHead
+        if (old !== newDetector) (old as? Closeable)?.let { runCatching { it.close() } }
     }
 
     /** §6 预处理提亮开关（默认关；只进检测输入，不进预览/成片）。 */
@@ -96,6 +132,15 @@ class StanceAnalysis(
      * `Surface abandoned`），站位从此静默失效。现在按 `surface.isValid` 判活并重建。
      * reader 所有权仍转移给引擎；本类只保证"再给我一张能用的面"。
      */
+    private fun ensureAnalysisThread(): Handler = synchronized(this) {
+        check(!released.get()) { "StanceAnalysis 已释放" }
+        handler ?: HandlerThread("WotaStanceAnalysis").apply {
+            start()
+            thread = this
+            handler = Handler(looper)
+        }.let { requireNotNull(handler) }
+    }
+
     fun start(size: Size = DEFAULT_SIZE): Surface {
         check(!released.get()) { "StanceAnalysis 已释放，不能再 start" }
         val existing = reader
@@ -105,11 +150,7 @@ class StanceAnalysis(
             runCatching { existing.close() }
             reader = null
         }
-        if (thread == null) {
-            val t = HandlerThread("WotaStanceAnalysis").apply { start() }
-            thread = t
-            handler = Handler(t.looper)
-        }
+        val analysisHandler = ensureAnalysisThread()
         val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
         r.setOnImageAvailableListener({ r2 ->
             val image = try {
@@ -118,7 +159,7 @@ class StanceAnalysis(
                 return@setOnImageAvailableListener   // 引擎单方面关闭 reader 的窗口
             }
             processImage(image)
-        }, handler)
+        }, analysisHandler)
         reader = r
         return r.surface
     }
@@ -150,6 +191,7 @@ class StanceAnalysis(
     private fun processImage(image: Image) {
         try {
             if (!listening.get()) return
+            val frameGeneration = generation.get()
             val now = System.currentTimeMillis()
             if (now - lastFrameMs < FRAME_INTERVAL_MS) return   // 丢帧节流 ≈3fps
             lastFrameMs = now
@@ -161,7 +203,9 @@ class StanceAnalysis(
             if (brighten) brightenRgba(frame.pixels)
             val boxes = detector?.detect(frame.pixels, frame.width, frame.height, now) ?: return
             val out = engine.observe(FrameObs(now, boxes))
-            mainHandler.post { if (!released.get()) onResult(out) }
+            mainHandler.post {
+                if (!released.get() && listening.get() && generation.get() == frameGeneration) onResult(out)
+            }
         } catch (_: Exception) {
             // 单帧失败不致断流（reader 被引擎单方面关闭时本回调可能再触发）
         } finally {
@@ -172,6 +216,7 @@ class StanceAnalysis(
     /** 停本管线回调（引擎槽不动——录制窗口期用，停录后 [resumeListening]）。 */
     fun pauseListening() {
         listening.set(false)
+        generation.incrementAndGet()
     }
 
     /** 恢复回调（默认关闭——[start] 后需显式 resume 才开始吃帧）。 */
@@ -179,15 +224,46 @@ class StanceAnalysis(
         listening.set(true)
     }
 
-    /** 彻底释放线程（reader 由引擎关闭序列兜底；二次关闭已在 runCatching 内容忍）。 */
-    fun release() {
-        if (!released.compareAndSet(false, true)) return
-        listening.set(false)
-        handler?.post {
+    /**
+     * 只回收当前 reader，保留分析线程/模型（相机 Controller 销毁但功能意图仍在时用）。
+     * 关闭排在分析 owner 线程：同队列会在途 processImage 先归还 Image，再封口 listener 并 close。
+     */
+    fun releaseReader() {
+        val close: () -> Unit = {
             runCatching { reader?.setOnImageAvailableListener(null, null) }
             runCatching { reader?.close() }
             reader = null
-            thread?.quitSafely()
+        }
+        val h = handler
+        if (h != null && !released.get() && Thread.currentThread() !== thread) {
+            if (!h.post(close)) close()
+        } else {
+            close()
+        }
+    }
+
+    /** 彻底释放线程并在同一 owner 线程关闭当前检测器。 */
+    fun release() {
+        synchronized(this) {
+            if (!released.compareAndSet(false, true)) return
+            listening.set(false)
+            generation.incrementAndGet()
+            val close: () -> Unit = {
+                runCatching { reader?.setOnImageAvailableListener(null, null) }
+                runCatching { reader?.close() }
+                reader = null
+                val old = detector
+                detector = null
+                head = null
+                (old as? Closeable)?.let { runCatching { it.close() } }
+                thread?.quitSafely()
+            }
+            val h = handler
+            if (h != null && Thread.currentThread() !== thread) {
+                if (!h.post(close)) close()
+            } else {
+                close()
+            }
         }
     }
 

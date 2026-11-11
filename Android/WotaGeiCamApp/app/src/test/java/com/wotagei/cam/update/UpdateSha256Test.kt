@@ -1,12 +1,20 @@
 package com.wotagei.cam.update
 
 import com.wotagei.cam.source.KotlinSourceScan
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * SHA-256 端到端校验链的**纯函数单测 + 接线守卫**（v0.0.8，2026-10-13）。
@@ -20,6 +28,9 @@ import java.io.File
  * 接线（downloadApk 真的调校验、UI 真的传哈希）用源文结构守卫钉——防校验被静默拆掉。
  */
 class UpdateSha256Test {
+
+    @get:Rule
+    val temporary = TemporaryFolder(File("build/tmp/update-download-test").apply { mkdirs() })
 
     // ------------------------------------------------------------------ 说明文本提取
 
@@ -120,23 +131,169 @@ class UpdateSha256Test {
     fun `sha256Hex_标准向量`() {
         assertEquals(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            UpdateDownloader.sha256Hex(File.createTempFile("empty", ".tmp").apply { deleteOnExit() })
+            UpdateDownloader.sha256Hex(temporary.newFile("empty.tmp"))
         )
-        val f = File.createTempFile("abc", ".tmp").apply { deleteOnExit(); writeText("abc") }
+        val f = temporary.newFile("abc.tmp").apply { writeText("abc") }
         assertEquals(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             UpdateDownloader.sha256Hex(f)
         )
         // 跨多块读取（>64KB buffer）也要对：64KB+1 字节的重复内容
-        val big = File.createTempFile("big", ".tmp").apply {
-            deleteOnExit(); writeText("x".repeat(64 * 1024) + "y")
+        val big = temporary.newFile("big.tmp").apply {
+            writeText("x".repeat(64 * 1024) + "y")
         }
         assertFalse(
             "64KB+1 不该等于 64KB 相同前缀的哈希",
             UpdateDownloader.sha256Hex(big) == UpdateDownloader.sha256Hex(
-                File.createTempFile("big2", ".tmp").apply { deleteOnExit(); writeText("x".repeat(64 * 1024) + "z") }
+                temporary.newFile("big2.tmp").apply { writeText("x".repeat(64 * 1024) + "z") }
             )
         )
+    }
+
+    // ------------------------------------------------------------------ D04：真实下载编排（只替换传输，不复制循环）
+
+    @Test
+    fun `D04_首节点同长度PK坏SHA后仍尝试健康后备且清掉污染`() {
+        val cache = temporary.newFolder("bad-then-good")
+        val candidates = UpdateDownloader.downloadCandidates(DOWNLOAD_URL)
+        val transport = ApkTransport { url ->
+            when (url) {
+                candidates[0] -> BAD_APK
+                candidates[1] -> GOOD_APK
+                else -> null
+            }
+        }
+        val target = File(cache, "updates/$ASSET_NAME")
+        transport.beforeDownload = { url ->
+            if (url == candidates[1]) {
+                assertFalse("开始后备节点前必须删除首节点污染包", target.exists())
+                assertTrue("首节点的 part 也不能遗留", target.parentFile!!.listFiles().orEmpty().isEmpty())
+            }
+        }
+        var speedCallbacks = 0
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            directUrl = DOWNLOAD_URL,
+            expectedSize = GOOD_APK.size.toLong(),
+            onProgress = { _, _ -> },
+            isCancelled = { false },
+            expectedSha256 = trustedSha256(),
+            onSpeedTested = { speedCallbacks++ },
+            openConnection = transport.open
+        )
+        assertEquals("坏响应与好响应必须同长度且都能过 PK 防线，确保真正命中 SHA 失败", GOOD_APK.size, BAD_APK.size)
+        assertTrue("首节点坏 SHA 只能拒该渠道，不能终止真实下载编排：$outcome", outcome is UpdateDownloader.DownloadOutcome.Done)
+        val done = outcome as UpdateDownloader.DownloadOutcome.Done
+        assertEquals(candidates.take(2), transport.attempted)
+        assertEquals(candidates.toSet(), transport.probed.toSet())
+        assertEquals(1, speedCallbacks)
+        assertEquals(target.canonicalFile, done.file.canonicalFile)
+        assertEquals(GOOD_APK.size.toLong(), done.sizeBytes)
+        assertArrayEquals("只有通过可信 SHA 的后备字节才可公开", GOOD_APK, done.file.readBytes())
+        assertEquals(listOf(ASSET_NAME), target.parentFile!!.listFiles().orEmpty().map { it.name })
+        assertTrue("每个真实响应必须断开连接", transport.connections.all { it.disconnected })
+    }
+
+    @Test
+    fun `D04_所有节点坏SHA必须尝试全链后失败且不残留APK或part`() {
+        val cache = temporary.newFolder("all-bad")
+        val transport = ApkTransport { BAD_APK }
+        val outcome = download(cache, transport, trustedSha256())
+        assertTrue("不能绕过 SHA 将污染包当成 Done", outcome is UpdateDownloader.DownloadOutcome.Failed)
+        assertEquals("必须在所有候选均校验失败后才报告全链失败", UpdateDownloader.downloadCandidates(DOWNLOAD_URL), transport.attempted)
+        assertTrue("全坏失败不得遗留 APK 或 part", File(cache, "updates").listFiles().orEmpty().isEmpty())
+        assertTrue(transport.connections.all { it.disconnected })
+    }
+
+    @Test
+    fun `D04_首节点正确SHA直接完成不碰后备`() {
+        val cache = temporary.newFolder("first-good")
+        val transport = ApkTransport { GOOD_APK }
+        val outcome = download(cache, transport, trustedSha256().uppercase())
+        assertTrue(outcome is UpdateDownloader.DownloadOutcome.Done)
+        assertEquals(listOf(DOWNLOAD_URL), transport.attempted)
+        assertArrayEquals(GOOD_APK, (outcome as UpdateDownloader.DownloadOutcome.Done).file.readBytes())
+        assertEquals(listOf(ASSET_NAME), File(cache, "updates").listFiles().orEmpty().map { it.name })
+    }
+
+    @Test
+    fun `D04_缺可信SHA保持既定PK和长度防线而非新增强制校验`() {
+        val cache = temporary.newFolder("without-hash")
+        val transport = ApkTransport { BAD_APK }
+        val outcome = download(cache, transport, null)
+        assertTrue("镜像探测和历史说明无可信哈希时仍保留原有行为", outcome is UpdateDownloader.DownloadOutcome.Done)
+        assertEquals(listOf(DOWNLOAD_URL), transport.attempted)
+        assertArrayEquals(BAD_APK, (outcome as UpdateDownloader.DownloadOutcome.Done).file.readBytes())
+    }
+
+    @Test
+    fun `D04_下载中取消清理part且不尝试后备`() {
+        val cache = temporary.newFolder("cancelled")
+        val transport = ApkTransport { GOOD_APK }
+        var cancelled = false
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            directUrl = DOWNLOAD_URL,
+            expectedSize = GOOD_APK.size.toLong(),
+            onProgress = { _, _ -> cancelled = true },
+            isCancelled = { cancelled },
+            expectedSha256 = trustedSha256(),
+            openConnection = transport.open
+        )
+        assertTrue(outcome is UpdateDownloader.DownloadOutcome.Cancelled)
+        assertEquals(listOf(DOWNLOAD_URL), transport.attempted)
+        assertTrue(File(cache, "updates").listFiles().orEmpty().isEmpty())
+        assertTrue(transport.connections.all { it.disconnected })
+    }
+
+    private fun download(cache: File, transport: ApkTransport, sha256: String?) = UpdateDownloader.downloadApk(
+        cacheDir = cache,
+        directUrl = DOWNLOAD_URL,
+        expectedSize = GOOD_APK.size.toLong(),
+        onProgress = { _, _ -> },
+        isCancelled = { false },
+        expectedSha256 = sha256,
+        openConnection = transport.open
+    )
+
+    /** 可信期望取自测试的固定好字节，不调用被测摘要 helper 来决定真假。 */
+    private fun trustedSha256(): String = MessageDigest.getInstance("SHA-256").digest(GOOD_APK)
+        .joinToString("") { "%02x".format(it) }
+
+    /** 测速连接均返回 null → 真实测速/排序自然给全 0，稳定保留生产候选顺序。无网络、无全局 hook。 */
+    private class ApkTransport(private val payload: (String) -> ByteArray?) {
+        val probed = ConcurrentLinkedQueue<String>()
+        val attempted = mutableListOf<String>()
+        val connections = mutableListOf<ApkConnection>()
+        var beforeDownload: (String) -> Unit = {}
+        val open: UpdateConnectionFactory = { url, _, _, deadline ->
+            if (deadline != null) {
+                probed.add(url)
+                null
+            } else {
+                attempted.add(url)
+                beforeDownload(url)
+                payload(url)?.let { bytes -> ApkConnection(url, bytes).also { connections.add(it) } }
+            }
+        }
+    }
+
+    /** 仅模拟 HTTP 响应边界；PK/长度/写盘/校验/节点循环全部仍执行生产代码。 */
+    private class ApkConnection(url: String, private val bytes: ByteArray) : HttpURLConnection(URL(url)) {
+        var disconnected = false
+        override fun connect() = Unit
+        override fun disconnect() { disconnected = true }
+        override fun usingProxy(): Boolean = false
+        override fun getResponseCode(): Int = HTTP_OK
+        override fun getContentLengthLong(): Long = bytes.size.toLong()
+        override fun getInputStream() = ByteArrayInputStream(bytes)
+    }
+
+    private companion object {
+        const val ASSET_NAME = "WotaGeiCam-v0.0.12-r08-full-universal-release-Android.apk"
+        val DOWNLOAD_URL = UpdateConfig.directDownloadUrl("v0.0.12-r08", ASSET_NAME)
+        val GOOD_APK = "PK-good-APK".toByteArray(Charsets.UTF_8)
+        val BAD_APK = "PK-evil-APK".toByteArray(Charsets.UTF_8)
     }
 
     // ------------------------------------------------------------------ 接线守卫（尺子自己能红）

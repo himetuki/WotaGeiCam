@@ -34,7 +34,7 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     private var interpreter: Interpreter? = null
     private var delegate: GpuDelegate? = null
     private var gpuActive = false
-    private var loaded = false
+    @Volatile private var loaded = false
     private var inputW = 448
     private var inputH = 448
     private var inputFloat = true
@@ -42,6 +42,11 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     private var inputBuf: ByteBuffer? = null
     private var outputBuf: Array<Array<FloatArray>>? = null
     private var loggedRunFailure = false
+    private var cpuModel: ByteBuffer? = null
+    private var terminalFailure: Exception? = null
+
+    /** 运行期后端变化也必须告知宿主，不能把 GPU 错误伪装为正常空检测。 */
+    var onBackendChanged: ((String, String?) -> Unit)? = null
 
     /** 当前加速层（UI 显示；含回退标记）。 */
     var backendName: String = ""
@@ -69,30 +74,33 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         loaded = false
         gpuActive = false
         loggedRunFailure = false
-        // CPU 路线无论如何先备好（GPU 失败即回退）
-        val cpuModel = loadModelBuffer(int8File)
+        // CPU 路线无论如何先备好（GPU 失败即回退）；运行期回退也复用这份映射。
+        cpuModel = loadModelBuffer(int8File)
         val cpuOpts = Interpreter.Options().setNumThreads(4)
         if (gpuMode == MODE_FORCE && gpuFile != null ||
             gpuMode == MODE_AUTO && gpuFile != null) {
+            var candidate: GpuDelegate? = null
             try {
-                val compat = org.tensorflow.lite.gpu.CompatibilityList()
-                val whitelistPass = compat.isDelegateSupportedOnThisDevice
-                if (gpuMode == MODE_AUTO && !whitelistPass) {
-                    gpuFallbackReason = "GPU 兼容列表不通过（该机型/环境白名单外），已自动回退 CPU"
-                    Diag.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
-                } else {
-                    // force：跳过白名单（用户裁决 Maleoon 等新 GPU 有 GLES compute 能力，
-                    // 白名单只是"已知能工作"的规则库，不是能力探测）
-                    val d = if (whitelistPass) GpuDelegate(compat.bestOptionsForThisDevice) else GpuDelegate()
-                    val gpuModel = loadModelBuffer(gpuFile)
-                    val gpuOpts = Interpreter.Options().addDelegate(d)
-                    interpreter = Interpreter(gpuModel, gpuOpts)
-                    bindTensorSpec()
-                    runtimeVerify(intp = interpreter!!)   // 运行期验证（force 路线的安全网）
-                    delegate = d
-                    gpuActive = true
-                    backendName = if (gpuMode == MODE_FORCE && !whitelistPass) "GPU（强制，白名单外）" else "GPU"
-                    Diag.i(TAG, "GPU delegate 就绪 mode=$gpuMode whitelist=$whitelistPass")
+                org.tensorflow.lite.gpu.CompatibilityList().use { compat ->
+                    val whitelistPass = compat.isDelegateSupportedOnThisDevice
+                    if (gpuMode == MODE_AUTO && !whitelistPass) {
+                        gpuFallbackReason = "GPU 兼容列表不通过（该机型/环境白名单外），已自动回退 CPU"
+                        Diag.w(TAG, "GPU delegate 兼容列表不通过，走 CPU")
+                    } else {
+                        // force：跳过白名单（用户裁决 Maleoon 等新 GPU 有 GLES compute 能力，
+                        // 白名单只是"已知能工作"的规则库，不是能力探测）
+                        candidate = if (whitelistPass) GpuDelegate(compat.bestOptionsForThisDevice) else GpuDelegate()
+                        val gpuModel = loadModelBuffer(gpuFile)
+                        val gpuOpts = Interpreter.Options().addDelegate(candidate)
+                        interpreter = Interpreter(gpuModel, gpuOpts)
+                        bindTensorSpec()
+                        runtimeVerify(intp = interpreter!!)   // 运行期验证（force 路线的安全网）
+                        delegate = candidate
+                        candidate = null // 资源所有权转交给字段，后续统一由 close 管理
+                        gpuActive = true
+                        backendName = if (gpuMode == MODE_FORCE && !whitelistPass) "GPU（强制，白名单外）" else "GPU"
+                        Diag.i(TAG, "GPU delegate 就绪 mode=$gpuMode whitelist=$whitelistPass")
+                    }
                 }
             } catch (e: Throwable) {
                 val why = if (gpuMode == MODE_FORCE && e is IllegalStateException) e.message
@@ -103,10 +111,13 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
                 interpreter = null
                 runCatching { delegate?.close() }
                 delegate = null
+                // Interpreter 构造/首验失败时 candidate 尚未转交字段，必须在这里回收。
+                runCatching { candidate?.close() }
+                candidate = null
             }
         }
         if (!gpuActive) {
-            interpreter = Interpreter(cpuModel, cpuOpts)
+            interpreter = Interpreter(requireNotNull(cpuModel), cpuOpts)
             // 回退标记：fallbackTip 依赖 backendName.contains("回退")——GPU 开着却回退必须让用户看见
             backendName = if (gpuMode != MODE_OFF && gpuFile != null) "CPU（$gpuFallbackReason）" else "CPU"
         }
@@ -178,22 +189,66 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
     }
 
     override fun detect(rgba: IntArray, w: Int, h: Int, tsMs: Long): List<PersonBox> {
-        val itp = interpreter ?: return emptyList()
+        terminalFailure?.let { throw it }
         return try {
-            val input = makeInput(rgba, w, h)
-            val outShape = itp.getOutputTensor(0).shape()   // [1,84,4116]
-            val nRows = outShape[1]
-            val nCols = outShape[2]
-            val output = outputBuf?.takeIf { it.size == nRows && it[0].size == nCols }
-                ?: Array(1) { Array(nRows) { FloatArray(nCols) } }.also { outputBuf = it }
-            itp.run(input, output)
-            decode(output[0], nRows, nCols, w, h)
+            detectWithCurrentBackend(rgba, w, h)
         } catch (e: Exception) {
-            if (!loggedRunFailure) {
-                loggedRunFailure = true
-                Diag.w(TAG, "推理失败（后续同类错误不再重复打）：${e.message}")
+            if (gpuActive) {
+                try {
+                    fallbackToCpu(e)
+                    return detectWithCurrentBackend(rgba, w, h)
+                } catch (cpuError: Exception) {
+                    failBackend(cpuError)
+                }
             }
-            emptyList()
+            failBackend(e)
+        }
+    }
+
+    /** 无可用后端的帧必须被分析层丢弃，不能以空框进入“缺人”判定。 */
+    private fun failBackend(error: Exception): Nothing {
+        close()
+        terminalFailure = error
+        backendName = "不可用"
+        gpuFallbackReason = "站位推理不可用（${error.message}），已停止判定，请重新加载模型"
+        logRunFailure(error)
+        onBackendChanged?.invoke(backendName, gpuFallbackReason)
+        throw error
+    }
+
+    private fun detectWithCurrentBackend(rgba: IntArray, w: Int, h: Int): List<PersonBox> {
+        val itp = interpreter ?: return emptyList()
+        val input = makeInput(rgba, w, h)
+        val outShape = itp.getOutputTensor(0).shape()   // [1,84,4116]
+        val nRows = outShape[1]
+        val nCols = outShape[2]
+        val output = outputBuf?.takeIf {
+            it.size == 1 && it[0].size == nRows && it[0].firstOrNull()?.size == nCols
+        } ?: Array(1) { Array(nRows) { FloatArray(nCols) } }.also { outputBuf = it }
+        itp.run(input, output)
+        return decode(output[0], nRows, nCols, w, h)
+    }
+
+    /** GPU 运行期失败不能以空框吞掉；关掉 GPU 后在同一分析线程重跑当前帧。 */
+    private fun fallbackToCpu(error: Throwable) {
+        val reason = "GPU 运行失败（${error.message}），已自动回退 CPU"
+        gpuFallbackReason = reason
+        runCatching { interpreter?.close() }
+        interpreter = null
+        runCatching { delegate?.close() }
+        delegate = null
+        gpuActive = false
+        interpreter = Interpreter(requireNotNull(cpuModel), Interpreter.Options().setNumThreads(4))
+        bindTensorSpec()
+        backendName = "CPU（$reason）"
+        onBackendChanged?.invoke(backendName, gpuFallbackReason)
+        Diag.w(TAG, reason)
+    }
+
+    private fun logRunFailure(error: Throwable) {
+        if (!loggedRunFailure) {
+            loggedRunFailure = true
+            Diag.w(TAG, "推理失败（后续同类错误不再重复打）：${error.message}")
         }
     }
 
@@ -252,6 +307,8 @@ class StanceDetector : StanceAnalysis.FrameDetector, Closeable {
         loaded = false
         inputBuf = null
         outputBuf = null
+        cpuModel = null
+        terminalFailure = null
         loggedRunFailure = false
     }
 

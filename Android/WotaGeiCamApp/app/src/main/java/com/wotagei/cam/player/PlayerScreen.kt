@@ -521,6 +521,7 @@ fun PlayerScreen(
                     // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，文案与
                     // "导出失败"分开——东西没丢，重启后自动恢复
                     ClipError.COMMIT -> R.string.player_clip_commit_kept
+                    ClipError.BUSY -> R.string.player_clip_busy
                     else -> R.string.player_clip_failed
                 }
             }
@@ -933,7 +934,14 @@ fun PlayerScreen(
                     onDismiss = { speedMenu = false }
                 )
             }
-            // 剪辑导出就近弹层（2026-10-04 方向 3）：锚在底栏剪辑钮上，导出中重开面板可看进度
+            // 剪辑导出就近弹层（2026-10-04 方向 3）：锚在底栏剪辑钮上。
+            // 2026-11-10 用户纠偏：onExport 里当初把 clipMenu 关了——「导出中重开面板可看进度」
+            // 实际变成了「面板永远关着」，进度条/百分比根本没机会出现（后渲染长准备期尤其像无响应）。
+            // 现在导出中弹层保持打开直接切进度态；LaunchedEffect 兜底自动弹开（跑起来那一刻若
+            // 弹层是关的）。用户仍可手动关（onDismiss），关了还有屏下常驻小字兜底。
+            LaunchedEffect(exportState.clipRunning) {
+                if (exportState.clipRunning) clipMenu = true
+            }
             if (controlsVisible && clipMenu) {
                 ClipExportPopup(
                     anchor = clipAnchor,
@@ -955,10 +963,10 @@ fun PlayerScreen(
                     onPickMode = { clipMode = it },
                     onPickTrack = { clipTrack = it },
                     onExport = {
-                        // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层
+                        // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层。
+                        // 不关弹层：导出中它就是进度面板（2026-11-10 用户纠偏，见上方 LaunchedEffect 注）
                         if (!exportState.clipRunning) {
                             engine.softPause(true)
-                            clipMenu = false
                             // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
                             val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
                             // 区间、选轨、方式、效果全部在起跑那一刻定版（快照进宿主）
@@ -996,7 +1004,11 @@ fun PlayerScreen(
                     onDismiss = { trackPickMenu = false }
                 )
             }
-            // 选轨导出就近弹层（批 4）：选轨结果 + 同步读数 + 导出/取消 + 进度；导出中重开可看进度
+            // 选轨导出就近弹层（批 4）：选轨结果 + 同步读数 + 导出/取消 + 进度。
+            // 2026-11-10 同剪辑导出纠偏：导出中弹层保持打开 + 跑起来那一刻自动弹开。
+            LaunchedEffect(exportState.trackRunning) {
+                if (exportState.trackRunning) trackExportMenu = true
+            }
             if (controlsVisible && trackExportMenu) {
                 TrackExportPopup(
                     anchor = trackExportAnchor,
@@ -1007,10 +1019,9 @@ fun PlayerScreen(
                     progress = exportState.trackProgress,
                     onExport = {
                         // 重入防护与选轨/偏移定版同剪辑导出口径：起跑那一刻锁快照，
-                        // 导出期间切轨/重跑同步不影响这一轮
+                        // 导出期间切轨/重跑同步不影响这一轮。不关弹层（进度态直接可见）
                         if (!exportState.trackRunning) {
                             engine.softPause(true)
-                            trackExportMenu = false
                             exportHost.startTrack(
                                 clip = clip,
                                 track = selectedAudio,
@@ -1076,6 +1087,31 @@ fun PlayerScreen(
                     style = MonoStyle,
                     color = WotaText,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 168.dp)
+                )
+            }
+            // 剪辑/选轨导出进行中的轻量反馈（2026-11-10 用户报障：进度只在弹层里、连百分比都
+            // 没有，弹层一关就像无响应）：一行等宽小字常驻，与光弧修复同族。三条同时在位时
+            // 各自错行（banner 120 → 光弧 168 → 剪辑 208 → 选轨 248），互不盖住。
+            if (exportState.clipRunning) {
+                Text(
+                    text = stringResource(
+                        R.string.player_clip_running,
+                        (exportState.clipProgress * 100f).toInt().coerceIn(0, 100)
+                    ),
+                    style = MonoStyle,
+                    color = WotaText,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 208.dp)
+                )
+            }
+            if (exportState.trackRunning) {
+                Text(
+                    text = stringResource(
+                        R.string.player_clip_running,
+                        (exportState.trackProgress * 100f).toInt().coerceIn(0, 100)
+                    ),
+                    style = MonoStyle,
+                    color = WotaText,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 248.dp)
                 )
             }
             // 偏离 1x 即显示：缩小也是合法观感（下限 0.1x），缩着却没倍率读数等于盲调
@@ -1321,15 +1357,33 @@ private fun ClipExportPopup(
             )
         }
         if (exporting) {
-            LinearProgressIndicator(
-                progress = progress,
-                // 定宽（修复轮 1/3 P1）：fillMaxWidth 会把弹层顶到 400dp 上限——「未导出」时 200dp
-                // 的弹窗在「导出中」当场加宽一倍、place() 重居中横向跳位，正是本批要消灭的
-                // 「fill 撑满最大宽」根因的漏网行。账：弹层 min 宽 200 − 壳左右内边距 20 = 180
-                modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
-                color = WotaColor.accent,
-                trackColor = WotaColor.outline
-            )
+            if (progress > 0f) {
+                LinearProgressIndicator(
+                    progress = progress,
+                    // 定宽（修复轮 1/3 P1）：fillMaxWidth 会把弹层顶到 400dp 上限——「未导出」时 200dp
+                    // 的弹窗在「导出中」当场加宽一倍、place() 重居中横向跳位，正是本批要消灭的
+                    // 「fill 撑满最大宽」根因的漏网行。账：弹层 min 宽 200 − 壳左右内边距 20 = 180
+                    modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
+                    color = WotaColor.accent,
+                    trackColor = WotaColor.outline
+                )
+                // 2026-11-10 用户报障：只有进度条没有百分比读数，等长区间里看不出在动。补一行
+                // 等宽百分比（与弹层外那行常驻小字同源，见 player_clip_running）
+                Text(
+                    stringResource(R.string.player_clip_percent, (progress * 100f).toInt().coerceIn(0, 100)),
+                    style = MonoStyle,
+                    color = WotaTextDim
+                )
+            } else {
+                // 准备期（insert/open/样本扫描/codec/GL 起跑）还没有已提交帧：给不确定进度条 +
+                // 「准备中」文案——静止的 0% 条最容易被当成无响应（2026-11-10 用户报障）
+                LinearProgressIndicator()
+                Text(
+                    stringResource(R.string.player_clip_preparing),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WotaTextDim
+                )
+            }
             WotaChip(
                 label = stringResource(R.string.player_clip_cancel),
                 selected = false,
@@ -1752,12 +1806,27 @@ private fun TrackExportPopup(
             color = WotaTextDim
         )
         if (exporting) {
-            LinearProgressIndicator(
-                progress = progress,
-                modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
-                color = WotaColor.accent,
-                trackColor = WotaColor.outline
-            )
+            if (progress > 0f) {
+                LinearProgressIndicator(
+                    progress = progress,
+                    modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
+                    color = WotaColor.accent,
+                    trackColor = WotaColor.outline
+                )
+                Text(
+                    stringResource(R.string.player_clip_percent, (progress * 100f).toInt().coerceIn(0, 100)),
+                    style = MonoStyle,
+                    color = WotaTextDim
+                )
+            } else {
+                // 与 ClipExportPopup 同口径：准备期给不确定进度条 + 文案，不拿静止 0% 条装死
+                LinearProgressIndicator()
+                Text(
+                    stringResource(R.string.player_clip_preparing),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WotaTextDim
+                )
+            }
             WotaChip(
                 label = stringResource(R.string.player_clip_cancel),
                 selected = false,

@@ -180,7 +180,7 @@ sealed interface ClipResult {
  * COMMIT 路径**保留 pending 行不删**（#4 定版，对齐 VideoStore.seal 的"只报不删"口径），
  * 冷启由 [com.wotagei.cam.record.StalePendingSweep.rescuePendingRows] 收录。
  */
-enum class ClipError { RANGE, OPEN, MUX, CANCELLED, COMMIT }
+enum class ClipError { RANGE, OPEN, MUX, CANCELLED, COMMIT, BUSY }
 
 /**
  * 执行器（录制管线之外的第二条"读源→写库"链路，入库走与 VideoStore 同一套 IS_PENDING 两段式

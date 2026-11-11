@@ -6,6 +6,7 @@ import android.media.ImageReader
 import android.view.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import com.wotagei.cam.camera.AnalysisSessionDecision
 import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.ui.dialog.observed
 import kotlinx.coroutines.CoroutineScope
@@ -31,7 +32,7 @@ class StanceFeature private constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val state: StateFlow<StanceUi> = ctrl.state
-        .map { StanceUi(enabled = it.enabled, running = it.running, lineIntervalMs = it.lineIntervalMs, pollIntervalMs = it.pollIntervalMs) }
+        .map { StanceUi(enabled = it.enabled, running = it.running, lineIntervalMs = it.lineIntervalMs, pollIntervalMs = it.pollIntervalMs, fallbackTip = it.fallbackTip) }
         .stateIn(scope, SharingStarted.Eagerly, StanceUi())
 
     fun prepare(context: Context) = ctrl.prepare(context)
@@ -44,22 +45,30 @@ class StanceFeature private constructor(
 
     fun setRotation(degrees: Int) = ctrl.setRotation(degrees)
 
+    fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) = ctrl.onAnalysisSessionDecision(decision)
+
     fun onPageEnter() = ctrl.onPageEnter()
 
     fun onPageExit() = ctrl.onPageExit()
 
+    fun onCameraControllerCleared() = ctrl.onCameraControllerCleared()
+
     fun release() {
-        ctrl.release()
-        scope.cancel()
+        synchronized(Companion) {
+            if (instance === this) {
+                ctrl.release()
+                scope.cancel()
+                instance = null
+            } else {
+                scope.cancel()
+            }
+        }
     }
 
-    // 对外统一 Unit 返回（Controller 侧的 Boolean 适配在此吸收——CameraScreen 的挂槽
-    // lambda 不需要关心 Controller 内部约定）
-    var attachHook: ((Surface, ImageReader?) -> Unit)?
-        get() = ctrl.attachHook?.let { h -> { s: Surface, r: ImageReader? -> h(s, r); Unit } }
-        set(value) {
-            ctrl.attachHook = value?.let { v -> { s: Surface, r: ImageReader? -> v(s, r); true } }
-        }
+    /** 挂槽回执直通：引擎未就绪或拒绝时不能伪造 running=true。 */
+    var attachHook: ((Surface, ImageReader?) -> Boolean)?
+        get() = ctrl.attachHook
+        set(value) { ctrl.attachHook = value }
 
     var detachHook: (() -> Unit)?
         get() = ctrl.detachHook

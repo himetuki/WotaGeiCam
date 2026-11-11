@@ -55,6 +55,20 @@ object PlayerSpeedTiers {
 }
 
 /**
+ * 倍速的音频口径（2026-11-10 用户二次确认）：**音高与音色保持 1.0，只把原声拉长时间**。
+ *
+ * 用户口径原文：0.1x/0.3x/0.5x/0.75x/1.0x 的音频“音色、音高要保持而不是变深沉，
+ * 仅呈现为原声拉长”。因此 pitch 恒 1.0 —— 不做磁带式变调（那会把男声压成低频轰鸣）。
+ * 时间拉伸由 media3 的 Sonic 完成；0.1x 这类极端慢放受平台算法限制，可能残留轻微机械感，
+ * 这是“原声不变调”的物理代价。若真机仍觉得刺耳，下一步的候选是“低于阈值静音/提示”
+ * 或换更高质量的时间拉伸器，不得改回随速度变调。
+ *
+ * 对比纠偏（[PlayerEngine.nudgeSpeedForSync]）同样保持 pitch=1.0、只微调 speed，
+ * 纠偏周期内音色不会漂。
+ */
+internal fun audioPitchFor(@Suppress("UNUSED_PARAMETER") speed: Float): Float = 1f
+
+/**
  * Media3 封装。
  *
  * 【两种"暂停"严格区分】（记录的真实 NPE 事故：官方 stepFrame 先调破坏性 pause() 再读 currentPosition）
@@ -311,7 +325,10 @@ class PlayerEngine(private val context: Context) {
     fun setSpeed(f: Float) {
         val tier = PlayerSpeedTiers.normalize(f)
         _speed.value = tier
-        player?.setPlaybackSpeed(tier)
+        val p = player ?: return
+        // 旧 setPlaybackSpeed 只动 speed（pitch 恒 1.0），低速档是极端 WSOLA 拉伸＝刺耳；
+        // 原声口径见 [audioPitchFor]（pitch 恒 1.0，只拉长时间）。speed 与 pitch 一次写齐，避免两次重配音频缓冲。
+        p.playbackParameters = androidx.media3.common.PlaybackParameters(tier, audioPitchFor(tier))
     }
 
     /**
@@ -331,8 +348,10 @@ class PlayerEngine(private val context: Context) {
         val target = (base * factor).toFloat()
         val current = p.playbackParameters.speed
         if (kotlin.math.abs(current - target) > 0.002f) {
-            // 直接构造新 PlaybackParameters（media3 1.1.1 无 buildUpon；pitch 我们从未改过，恒 1.0）
-            p.playbackParameters = androidx.media3.common.PlaybackParameters(target)
+            // 直接构造新 PlaybackParameters（media3 1.1.1 无 buildUpon）。pitch 咬住用户档
+            // （audioPitchFor(base)）不随微调漂：纠偏只产生 ≤±10% 的轻微 WSOLA 拉伸，不可闻；
+            // 若 pitch 也跟着 target 走，每个纠偏周期都会重采样一次音色，反而是可闻的嗒声。
+            p.playbackParameters = androidx.media3.common.PlaybackParameters(target, audioPitchFor(base))
         }
     }
 

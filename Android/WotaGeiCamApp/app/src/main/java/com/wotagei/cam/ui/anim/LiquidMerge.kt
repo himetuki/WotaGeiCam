@@ -675,7 +675,7 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             val r = DockShell.cornerRadiusPx(w, h)
             val left = DockShell.insetPx(boxW, w)
             val top = DockShell.insetPx(boxH, h)
-            if (intent && frostSlot >= 0 && !overlaysOn) {
+            if (intent && frostSlot >= 0) {
                 // 静止态不写表（一次事务 = 先把已发布那份整表抄进 scratch，再换引用）：
                 // 只有轮廓真的动了才重报。⚠ 比对必须**含节点原点**（frostOriginPx）：
                 // left/top/w/h 是节点局部量，页面往返/沉浸切换时节点原点会平移而局部几何
@@ -708,11 +708,12 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
             }
             // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）。
             // 霜在屏幕上时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）。
-            // 例外（2026-10-28）：叠加层（参考线/站位线）在画时**不让位**，且用 97% 暖黑——
-            // 白线/橙线透过来只剩 3%，控件因此稳在叠加层之上（见 LocalPreviewOverlaysOn 的 KDoc）
+            // 例外（2026-11-10 二次反馈后修正）：叠加层（参考线/站位线）在画时**不让位**，
+            // 但用 75% hudScrim 压暗毛玻璃——97% 暖黑在左右黑边栏上等于"没有板"，用户报霜板变透明；
+            // 75% 灰罩下板仍在、线只透 25%，控件稳在叠加层之上且仍可读
             if (!live || overlaysOn) {
                 drawRoundRect(
-                    color = if (overlaysOn) WotaColor.bg.copy(alpha = 0.97f) else WotaColor.hudScrim,
+                    color = WotaColor.hudScrim,
                     topLeft = Offset(left, top),
                     size = Size(w, h),
                     cornerRadius = CornerRadius(r, r)

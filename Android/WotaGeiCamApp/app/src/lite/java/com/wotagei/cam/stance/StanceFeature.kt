@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.media.ImageReader
 import android.view.Surface
+import com.wotagei.cam.camera.AnalysisSessionDecision
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -49,9 +50,13 @@ class StanceFeature private constructor(private val appContext: Context) {
 
     fun setRotation(degrees: Int) {}
 
+    fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {}
+
     fun onPageEnter() {}
 
     fun onPageExit() {}
+
+    fun onCameraControllerCleared() {}
 
     fun release() {}
 

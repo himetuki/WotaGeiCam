@@ -87,6 +87,8 @@ internal class EchoChain(
     private val scissorState = IntArray(1)
     private val programBackup = IntArray(1)
     private val fboBackup = IntArray(1)
+    private val clearColorBackup = FloatArray(4)
+    private val colorMaskBackup = BooleanArray(4)
     private var errorStreak = 0
 
     /** 开关从 OFF 打到 ON 时预编 program（毫秒级编译不落在帧路径上）；幂等 */
@@ -121,13 +123,29 @@ internal class EchoChain(
     fun reset() {
         if (broken || accFbo[0] == 0) return
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, fboBackup, 0)
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
-        for (i in 0..1) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[i])
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glGetFloatv(GLES20.GL_COLOR_CLEAR_VALUE, clearColorBackup, 0)
+        GLES20.glGetBooleanv(GLES20.GL_COLOR_WRITEMASK, colorMaskBackup, 0)
+        val scissorWasEnabled = GLES20.glIsEnabled(GLES20.GL_SCISSOR_TEST)
+        try {
+            // clear 不受 viewport 限制，但会受 scissor 和写掩码限制，必须临时解除。
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+            GLES20.glColorMask(true, true, true, true)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            for (i in 0..1) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[i])
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            }
+        } catch (failure: Throwable) {
+            failChain("累积面清黑异常")
+            throw failure
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboBackup[0])
+            GLES20.glClearColor(clearColorBackup[0], clearColorBackup[1], clearColorBackup[2], clearColorBackup[3])
+            GLES20.glColorMask(colorMaskBackup[0], colorMaskBackup[1], colorMaskBackup[2], colorMaskBackup[3])
+            if (scissorWasEnabled) GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+            else GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboBackup[0])
-        drainGlError("echoReset")
+        if (drainGlError("echoReset") > 0) failChain("累积面清黑失败")
     }
 
     /**
@@ -260,40 +278,50 @@ internal class EchoChain(
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
     }
 
-    /** 建两张乒乓 RT；尺寸变化即重建（重建 = 累积面清零，天然满足"换尺寸清历史"护栏） */
+    /** 建两张乒乓 RT；null 只分配存储，必须在首次采样前显式清黑（换尺寸也同路清历史）。 */
     private fun ensureRenderTarget(w: Int, h: Int): Boolean {
         deleteRenderTarget()
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, fboBackup, 0)
-        GLES20.glGenTextures(2, accTex, 0)
-        for (id in accTex) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexImage2D(
-                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
-            )
-        }
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
-        GLES20.glGenFramebuffers(2, accFbo, 0)
+        val previousFramebuffer = fboBackup[0]
         var complete = true
-        for (i in 0..1) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[i])
-            GLES20.glFramebufferTexture2D(
-                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, accTex[i], 0
-            )
-            complete = complete &&
-                (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE)
+        try {
+            GLES20.glGenTextures(2, accTex, 0)
+            for (id in accTex) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexImage2D(
+                    GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+                )
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GLES20.glGenFramebuffers(2, accFbo, 0)
+            for (i in 0..1) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, accFbo[i])
+                GLES20.glFramebufferTexture2D(
+                    GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, accTex[i], 0
+                )
+                complete = complete &&
+                    (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE)
+            }
+        } catch (failure: Throwable) {
+            deleteRenderTarget()
+            throw failure
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, previousFramebuffer)
         }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboBackup[0])
         if (drainGlError("echoRenderTarget") > 0) complete = false
         if (!complete) {
             Log.w(TAG_ECHO, "FBO 不完整，停用残影链（预览与成片其余部分照常）")
             deleteRenderTarget()
             return false
         }
+        // 早于建 RT 的 reset 无面可清；在两张 FBO 完整后补清，再允许 draw 采历史。
+        reset()
+        if (broken) return false
         rtW = w
         rtH = h
         accIdx = 0

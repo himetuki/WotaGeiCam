@@ -11,7 +11,8 @@ import com.wotagei.cam.diag.Diag as Log
 enum class LensType { SUPER_WIDE, WIDE, TELEPHOTO, SUPER_TELEPHOTO, AUTO, FRONT }
 
 /**
- * 一个可打开的镜头。ability 按「这颗镜头自己」的 characteristics 收，切镜头即整套换挡
+ * 一个镜头入口：openCamera 使用 logicId，非空 physicalId 经该设备的输出路由选择物理头。
+ * ability 按「这颗镜头自己」的 characteristics 收；厂商隐藏独立入口仍是待实际打开的候选。
  */
 data class LensSlot(
     val type: LensType,
@@ -39,24 +40,34 @@ private data class LensEntry(
 
 /**
  * 枚举镜头（第 3 步）：
- * 1. 镜头 id 用 [discoverCameraIds] 取，**不只信 `cameraIdList`**——真机取证：某 ROM 的 cameraIdList
- *    只给 2 颗，而 dumpsys 报 4 台 HAL 设备，按数字 id 仍能读能力并打开（隐藏了超广角子头与逻辑头）；
- * 2. 逻辑多摄（能力位 11，API 28+）按 `physicalCameraIds` 展开：子头若已被单独列出就不再重复，
- *    否则把没暴露的子头各自补成一颗镜头；子头全部已暴露时逻辑头本身不再占档
- *    （同一颗传感器列两遍会让档位互相打架，还会把组合头误标成某个焦段档）。
- *    **读不到 physicalCameraIds 时保留逻辑头本身**——不能因为展开失败就把这颗摄像头整颗丢掉
- *    （Android 10 上曾因 `SDK_INT >= R` 闸门让 hiddenPhysicals 恒空，逻辑后摄全部消失）；
+ * 1. 镜头候选用 [discoverCameraIds] 取，保留厂商实际能打开的数字隐藏扩展；可读能力本身不证明能独立打开。
+ * 2. 逻辑多摄（能力位 11，API 28+）按 `physicalCameraIds` 展开：公开且能力可读的独立入口不重复，
+ *    未公开物理头必须保留父逻辑 ID，并在输出面上选择物理 ID，不能拿数字探测结果当作独立入口证明。
+ *    只有所有子头都有公开、能力可读且有 PRIVATE 输出的替代入口时才可隐藏逻辑头；其余保留逻辑兜底，
+ *    包括物理集合为空、读取失败、子头全部或部分展开失败。
  * 3. 后摄按物理焦距升序整组归档（超广角→广角→长焦→超长焦），**多颗后摄各自成档，不只取第一个**；
  *    前摄统一 [LensType.FRONT]，靠 [LensSlot.key] 区分具体哪一颗；
  * 4. 能力按「这颗镜头自己」的 characteristics 收，切镜头整套换挡。
  */
 fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
-    val ids = discoverCameraIds(mgr)
-    val openable = ids.toSet()
+    val publicIds = (tryOrNullLens { mgr.cameraIdList.toList() } ?: emptyList()).toSet()
+    val ids = discoverCameraIds(mgr, publicIds)
+    val readable = ids.mapNotNull { id ->
+        tryOrNullLens { mgr.getCameraCharacteristics(id) }?.let { id to it }
+    }.toMap()
+    val independentIds = readable.filter { (id, cc) -> id in publicIds && hasPrivateOutput(cc) }.keys
+    val physicalIdsByParent = readable.mapValues { (_, cc) ->
+        val logical = tryOrNullLens { cc.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) }
+            ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) == true
+        if (logical) tryOrNullLens { cc.physicalCameraIds } ?: emptySet() else emptySet()
+    }
+    val publicPhysicalIds = physicalIdsByParent.filterKeys { it in publicIds }.values.flatten().toSet()
     val entries = mutableListOf<LensEntry>()
 
-    for (id in ids) {
-        val cc = tryOrNullLens { mgr.getCameraCharacteristics(id) } ?: continue
+    for ((id, cc) in readable) {
+        // 即使数字探测也读得到，已知属于公开逻辑设备的未公开物理头仍必须走父逻辑路由。
+        // 不在该集合里的隐藏厂商入口继续保留，不能用品牌/ID 黑名单删掉真实可用扩展。
+        if (id !in publicIds && id in publicPhysicalIds) continue
         val facing = tryOrNullLens { cc.get(CameraCharacteristics.LENS_FACING) }
             ?: CameraMetadata.LENS_FACING_BACK
         val front = facing == CameraMetadata.LENS_FACING_FRONT
@@ -64,20 +75,16 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
             ?: IntArray(0)
         val logical = capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
 
-        // physicalCameraIds 自 API 28 起可用；minSdk 29 不需要版本闸。读取失败返回空集，
-        // 交给 shouldHideLogicalHead 的"没有可展开子头 ⇒ 保留逻辑头"分支兜底。
-        val physicalIds: Set<String> =
-            if (logical) tryOrNullLens { cc.physicalCameraIds } ?: emptySet() else emptySet()
-        val hiddenPhysicals: List<String> = physicalIds
-            .sorted()
-            .filterNot { openable.contains(it) } // 已是独立镜头，不再当子头列一遍
+        // physicalCameraIds 自 API 28 起可用；集合读取失败也不能跳过可用逻辑头。
+        val physicalIds = physicalIdsByParent[id].orEmpty()
+        val hiddenPhysicals = physicalIds.sorted().filterNot { it in independentIds }
         if (shouldHideLogicalHead(logical, physicalIds, hiddenPhysicals)) continue
 
         entries += hiddenPhysicals.mapNotNull { pid ->
             val pcc = tryOrNullLens { mgr.getCameraCharacteristics(pid) } ?: return@mapNotNull null
             LensEntry(
-                logicId = pid,
-                physicalId = null,
+                logicId = id,
+                physicalId = pid,
                 focalMm = shortestFocalMm(pcc) ?: 0f,
                 eqFocal = eqFocalMmOf(pcc),
                 // 能力按物理头收：同一逻辑摄下超广角与长焦的 ISO/曝光/区域上限常常不同。
@@ -94,7 +101,7 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
                 front = front
             )
         }
-        if (logical) continue
+        // 走到这里即没有完整的公开独立替代集，展开是否成功都保留父逻辑兜底。
         entries += LensEntry(
             logicId = id,
             physicalId = null,
@@ -119,23 +126,27 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
 private const val HIDDEN_ID_PROBE_LIMIT = 10
 
 /**
- * 可打开的镜头 id = `cameraIdList` ∪ 按数字 id 探到的隐藏镜头。
- * 隐藏 id 必须同时满足「characteristics 可读」+「PRIVATE 输出表非空」才算一颗镜头，探不到的直接跳过。
+ * 可读的镜头候选 = `cameraIdList` ∪ 数字隐藏扩展；不在枚举期打开设备，也不把 PRIVATE 表当作独立可开证明。
+ * 已知物理头的路由与逻辑兜底由 [enumerateLenses] 处理，厂商独立候选仍交实际 openCamera 验证。
  */
-fun discoverCameraIds(mgr: CameraManager): List<String> {
-    val found = LinkedHashSet(tryOrNullLens { mgr.cameraIdList.toList() } ?: emptyList())
+fun discoverCameraIds(mgr: CameraManager): List<String> =
+    discoverCameraIds(mgr, tryOrNullLens { mgr.cameraIdList.toList() } ?: emptyList())
+
+private fun discoverCameraIds(mgr: CameraManager, publicIds: Collection<String>): List<String> {
+    val found = LinkedHashSet(publicIds)
     for (probe in 0 until HIDDEN_ID_PROBE_LIMIT) {
         val id = probe.toString()
         if (found.contains(id)) continue
         val cc = tryOrNullLens { mgr.getCameraCharacteristics(id) } ?: continue
-        val usable = tryOrNullLens {
-            cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                ?.getOutputSizes(ImageFormat.PRIVATE)?.isNotEmpty() == true
-        } ?: false
-        if (usable) found.add(id)
+        if (hasPrivateOutput(cc)) found.add(id)
     }
     return found.toList()
 }
+
+private fun hasPrivateOutput(cc: CameraCharacteristics): Boolean = tryOrNullLens {
+    cc.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        ?.getOutputSizes(ImageFormat.PRIVATE)?.isNotEmpty() == true
+} ?: false
 
 /** 未知焦距（部分 HAL 不给 LENS_INFO_AVAILABLE_FOCAL_LENGTHS）排最后，避免抢掉广角档 */
 private fun LensEntry.focalOrder(): Float = if (focalMm > 0f) focalMm else Float.MAX_VALUE

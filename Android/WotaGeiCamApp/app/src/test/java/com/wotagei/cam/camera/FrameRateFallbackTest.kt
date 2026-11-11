@@ -33,6 +33,18 @@ class FrameRateFallbackTest {
 
     private fun maskedMain(rel: String): String = codeOnly(mainSourceText(rel))
 
+    // 仅在遮蔽文本中把具名对象声明头转为函数锚，两层 bodyOf 都保留唯一性与括号配平检查。
+    private fun normalCaptureCompleted(engine: String): String {
+        val callback = bodyOf(
+            engine.replace(
+                "private val captureCallback = object : CameraCaptureSession.CaptureCallback()",
+                "private fun captureCallback()"
+            ),
+            "captureCallback"
+        )
+        return bodyOf(callback, "onCaptureCompleted")
+    }
+
     /**
      * 「计划→行为」桥：用例一律经它落到真函数上，测试里**不许另写一份算法**
      * （否则「改实现不改用例」时表照样全绿，正是静态证明最怕的假绿）。
@@ -318,7 +330,7 @@ class FrameRateFallbackTest {
     @Test
     fun `白平衡保活节流必须用单调钟`() {
         val engine = maskedMain("camera/Camera2Engine.kt")
-        val body = flatten(bodyOf(engine, "onCaptureCompleted"))
+        val body = flatten(normalCaptureCompleted(engine))
         assertTrue("保活节流必须读 SystemClock.elapsedRealtime()", body.contains("SystemClock.elapsedRealtime()"))
         assertTrue(
             "节流判据必须仍然在（换钟不许顺手把节流删了）",
@@ -338,7 +350,7 @@ class FrameRateFallbackTest {
         assertTrue("换回墙钟后尺子必须红", wallClock.contains("System.currentTimeMillis()"))
         assertTrue(
             "且必须真的被守卫抓住：elapsedRealtime 消失、currentTimeMillis 出现",
-            !flatten(bodyOf(wallClock, "onCaptureCompleted")).contains("SystemClock.elapsedRealtime()")
+            !flatten(normalCaptureCompleted(wallClock)).contains("SystemClock.elapsedRealtime()")
         )
     }
 }

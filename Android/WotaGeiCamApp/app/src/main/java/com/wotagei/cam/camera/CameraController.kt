@@ -51,7 +51,8 @@ data class CameraUiState(
      * 当前镜头槽位。档位会重复（多颗同焦段后摄/多颗前摄），UI 要高亮「正在使用」哪一颗时必须用它，
      * [currentLens] 只够显示档位名。
      */
-    val currentSlot: LensSlot? = null
+    val currentSlot: LensSlot? = null,
+    val analysisDecision: AnalysisSessionDecision = AnalysisSessionDecision.ABSENT
 )
 
 /**
@@ -100,9 +101,17 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     private var engine: Camera2Engine? = null
+    private var analysisSessionOwner: Any? = null
 
-    /** 当前站位分析槽（面, reader）；引擎重建/换渲染模式后据此复位（2026-11-07）。 */
+    /**
+     * 当前站位分析槽（面, reader）：reader 的释放权归创建它的分析 owner，Engine 与 Controller 只借用。
+     * bind/forceRebind 跨引擎重放时保留 reader 与 listener；摘槽/替换不在这里 close。
+     * [onCleared] 的最终兜底也优先委托 [analysisOwnerRelease]，避免 Main 与在途帧并发关闭。
+     */
     private var analysisTarget: Pair<Surface, ImageReader?>? = null
+
+    /** 宿主注入：Controller 销毁时把 reader 收尾排到分析 owner 线程；未注入才退回本层兜底。 */
+    var analysisOwnerRelease: (() -> Unit)? = null
     private var boundSink: PreviewSink? = null
     private var lensSlots: List<LensSlot> = emptyList()
     private var pendingStart = false
@@ -203,6 +212,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         }
         engine?.close()
         boundSink = sink
+        val sessionOwner = Any()
+        analysisSessionOwner = sessionOwner
         engine = Camera2Engine(
             context = getApplication(),
             params = params,
@@ -210,12 +221,20 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             scope = bus,
             onDeviceStatus = { status -> publishOnMain { ui.value = ui.value.copy(device = status) } },
             onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } },
-            onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } }
+            onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } },
+            onAnalysisSessionDecision = { decision -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(analysisDecision = decision)
+            } }
         ).also { it.attach() }
         // 站位分析槽在引擎重建后要自动复位（预览自愈 forceRebind / 渲染模式切换都会换引擎）：
         // 只还原仍有效的面；失效面由 StanceController 回场时重挂（onPageEnter 验 isSurfaceLive）。
         analysisTarget?.let { (targetSurface, targetReader) ->
-            if (targetSurface.isValid) engine?.setAnalysisTarget(targetSurface, targetReader)
+            if (targetSurface.isValid) {
+                engine?.setAnalysisTarget(targetSurface, targetReader)
+            } else {
+                // 面已失效：只摘槽，reader 由创建它的分析 owner 回收，Controller 不并发 close。
+                analysisTarget = null
+            }
         }
         if (pendingStart) start()
     }
@@ -233,8 +252,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 视图销毁时解绑，避免引擎持有已失效的 Surface */
     fun unbind(sink: PreviewSink) {
         if (boundSink !== sink) return
+        // 同页换 sink（DIRECT↔GPU）会先 unbind 旧面再 bind 新面：保留分析槽让 bind 重放，
+        // 否则站位开关还开着也会永久停在 ABSENT。reader 的释放权属于创建它的分析 owner。
         engine?.close()
         engine = null
+        analysisSessionOwner = null
+        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
     }
 
@@ -251,6 +274,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     fun forceRebind(sink: PreviewSink) {
         engine?.close()
         engine = null
+        analysisSessionOwner = null
+        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
         bind(sink)
         // 重建引擎只换了相机侧；上屏链若是死的（窗口面已失效/被摘掉），这里必须补一次重挂，
@@ -339,9 +364,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 停止预览并释放设备（离开相机页） */
     fun stop() {
         pendingStart = false
+        // 保留分析槽：再次 bind 时重放有效 reader；最终释放由分析 owner 负责。
         engine?.stopPreview()
         engine?.close()
         engine = null
+        analysisSessionOwner = null
+        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
     }
 
@@ -383,8 +411,20 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     override fun onCleared() {
         keepAliveJob?.cancel()
         keepAliveJob = null
+        // 非配置销毁（系统回收/不保留活动）不一定先走 StanceFeature.release：把 reader
+        // 关闭交给分析 owner 排队，确保最后一帧归还后才 close；无宿主回调才保留旧兜底。
+        val reader = analysisTarget?.second
+        analysisTarget = null
+        val release = analysisOwnerRelease
+        if (release != null) {
+            release()
+        } else {
+            closeAnalysisReader(reader)
+        }
         engine?.close()
         engine = null
+        analysisSessionOwner = null
+        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
         // GL 引擎的释放权在这里（页面 dispose 不再 release）：跨设置往返复用同一实例
         cachedGlSink?.release()
@@ -570,13 +610,33 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.setExtraTarget(surface, reader)
     }
 
-    /** 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话。
-     * 返回 false = 引擎还没建（调用方保持未挂，等就绪点补挂）；摘槽恒成功。 */
+    /**
+     * 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话。
+     * 非空 surface 对应 reader 的释放权交给 Controller，不随 Engine 的异步 close 转移。
+     * 返回 false 仅表示引擎还没建：槽与 reader 仍由本层保管，bind 时重放；摘槽恒成功。
+     */
     fun setAnalysisTarget(surface: Surface?, reader: ImageReader? = null): Boolean {
+        // reader 只借用：分析 owner 在自己的线程封口 listener 并等在途 Image 归还后关闭。
+        // Main 在这里 close 会让正在读 planes 的帧立即失效（R07）。
         analysisTarget = if (surface != null) surface to reader else null
+        val targetReader = analysisTarget?.second
         val e = engine ?: return surface == null
-        e.setAnalysisTarget(surface, reader)
+        e.setAnalysisTarget(surface, targetReader)
         return true
+    }
+
+    /** 随引擎终止或失效槽清理时直接回收，不为这些路径额外排入一次会话重建。 */
+    private fun clearAnalysisTarget() {
+        val reader = analysisTarget?.second
+        analysisTarget = null
+        closeAnalysisReader(reader)
+    }
+
+    /** 只由 Controller 领取释放权；先清槽/换槽再回收，重复摘槽不会重复关闭。 */
+    private fun closeAnalysisReader(reader: ImageReader?) {
+        if (reader == null) return
+        runCatching { reader.setOnImageAvailableListener(null, null) }
+        runCatching { reader.close() }
     }
 
     /**

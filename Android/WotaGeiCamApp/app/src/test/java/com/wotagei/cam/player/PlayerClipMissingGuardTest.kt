@@ -13,11 +13,13 @@ import java.io.File
  * 可空结果，不经吞 null 的 gated），路由版 PlayerScreen 的"查过且没有"空态由此可达。
  * 历史缺陷：clipById 曾复用 gated——builder 返回 null 时零发射，null 永远到不了消费侧，
  * PlayerScreen 停在 CircularProgressIndicator 无出口。钉住两件事：
- * - clipById 体内必须有直接 `emit(queryById(id)`（零发射/`?.let { emit` 吞 null 形态都算回退）；
+ * - clipById 必须把可空查询整体交给 emit，允许传入本地回收快照（零发射/吞 null 都算回退）；
  * - 路由重载里必须存在「查过且没有」的空态分支（player_clip_missing 文案），且不许自动返回、
  *   不许拦截返回键（自动返回/自动重试会吃掉用户对"片没了"的感知，属产品裁决）。
  */
 class PlayerClipMissingGuardTest {
+
+    private val nullableQueryEmission = Regex("""\bemit\(queryById\(id(?:,\s*s\.local)?\)""")
 
     /** 路由版 PlayerScreen 是重载之一，按体内调用 clipById 点名 */
     private fun routeBody(src: String): String {
@@ -33,25 +35,17 @@ class PlayerClipMissingGuardTest {
         val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("media/MediaRepo.kt"))
         val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "clipById"))
         assertTrue(
-            "clipById 体内必须有直接 emit(queryById(id)——" +
+            "clipById 必须整体 emit 可空查询（可带本地回收快照）——" +
                 "查无此片要作为一次 null 下发；复用 gated（builder null 零发射）会让播放页空态不可达",
-            body.contains("emit(queryById(id)")
+            nullableQueryEmission.containsMatchIn(body)
         )
         assertFalse(
             "clipById 不得写 ?.let { emit 吞 null 形态（null 是有效结果，必须直接下发）",
             body.contains("?.let { emit")
         )
         // 突变自证：emit 塞回 ?.let 内侧（gated 的吞 null 形态），同一把尺必须报红
-        val mutant = KotlinSourceScan.flatten(
-            KotlinSourceScan.bodyOf(
-                KotlinSourceScan.codeOnly(
-                    KotlinSourceScan.mainSourceText("media/MediaRepo.kt")
-                        .replace("emit(queryById(id)?.let { it.copy(", "queryById(id)?.let { emit(it.copy(")
-                ),
-                "clipById"
-            )
-        )
-        assertFalse("退回吞 null 形态后守卫必须报红", mutant.contains("emit(queryById(id)"))
+        val mutant = nullableQueryEmission.replace(body, "queryById(id)?.let { emit(")
+        assertFalse("退回吞 null 形态后守卫必须报红", nullableQueryEmission.containsMatchIn(mutant))
         assertTrue("突变体必须真的换成了吞 null 形态（替换不中 = 尺子没咬合）", mutant.contains("?.let { emit("))
     }
 
@@ -60,11 +54,11 @@ class PlayerClipMissingGuardTest {
         // 空态可达的前提链：clipById 必须真的把 null 下发到消费侧（吞 null 回退 = 下面的空态分支
         // 恒不可达，页面停在转圈）——完整专测见 `clipById必须直接emit可空结果_零发射或吞null形态必须报红`
         assertTrue(
-            "空态可达前提：clipById 必须直接 emit(queryById(id) 下发可空结果",
-            KotlinSourceScan.bodyOf(
+            "空态可达前提：clipById 必须整体 emit 可空查询结果",
+            nullableQueryEmission.containsMatchIn(KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(
                 KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("media/MediaRepo.kt")),
                 "clipById"
-            ).contains("emit(queryById(id)")
+            )))
         )
         val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/PlayerScreen.kt"))
         val body = KotlinSourceScan.flatten(routeBody(src))

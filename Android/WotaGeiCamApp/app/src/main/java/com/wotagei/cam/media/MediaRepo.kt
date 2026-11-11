@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -221,7 +222,7 @@ class MediaRepo private constructor(private val app: Context) {
         return triggers()
             .flatMapLatest { s ->
                 refreshGate.flatMapLatest { open ->
-                    if (open) flow<VideoClip?> { } else flow { emit(queryById(id)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) }) }
+                    if (open) flow<VideoClip?> { } else flow { emit(queryById(id, s.local)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) }) }
                 }
             }
             .flowOn(Dispatchers.IO)
@@ -450,14 +451,18 @@ class MediaRepo private constructor(private val app: Context) {
                 (scope == MediaScope.AllVideos || it.relativePath.contains(WOTA_DIR_KEYWORD))
         }
 
-    private fun queryById(id: Long): VideoClip? {
+    private suspend fun queryById(id: Long, localTrash: List<TrashItem>? = null): VideoClip? {
         val live = readCursor(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             "${MediaStore.Video.Media._ID} = ?",
             arrayOf(id.toString()),
             null
         ).firstOrNull()
-        return live ?: trashedMatching(MediaScope.AllVideos).firstOrNull { it.id == id }
+        val clip = live ?: trashedMatching(MediaScope.AllVideos).firstOrNull { it.id == id } ?: return null
+        if (SYSTEM_TRASH_SUPPORTED) return clip
+        // 三个单片出口共用状态投影；流式查询复用同拍快照，单次查询只取一拍本地记录。
+        val localUris = (localTrash ?: trashDao.observeAll().first()).map { it.uri }.toSet()
+        return clip.copy(isTrashed = trashedFor(clip, localUris))
     }
 
     private fun readCursor(
@@ -557,12 +562,15 @@ class MediaRepo private constructor(private val app: Context) {
 
     private fun filterByTab(list: List<VideoClip>, filter: ClipFilter, localTrash: List<TrashItem>): List<VideoClip> {
         val localUris = localTrash.map { it.uri }.toSet()
+        // API29 的本地状态也必须随条目下发，否则回收站里的三个还原入口仍认为它是正常片。
+        val projected = if (SYSTEM_TRASH_SUPPORTED) list else list.map {
+            it.copy(isTrashed = trashedFor(it, localUris))
+        }
         return when (filter) {
-            ClipFilter.All -> list.filter { !trashedFor(it, localUris) }
-            ClipFilter.Like -> list.filter { !trashedFor(it, localUris) && it.liked }
-            // 回收站 = 系统侧已进回收站（API 30+）/ 本地记录（API 29 退化路径），两者按系统是否支持分别取信
-            ClipFilter.Trash -> list.filter { trashedFor(it, localUris) }
-            is ClipFilter.Tagged -> list.filter { !trashedFor(it, localUris) && filter.tag in it.tags }
+            ClipFilter.All -> projected.filter { !it.isTrashed }
+            ClipFilter.Like -> projected.filter { !it.isTrashed && it.liked }
+            ClipFilter.Trash -> projected.filter { it.isTrashed }
+            is ClipFilter.Tagged -> projected.filter { !it.isTrashed && filter.tag in it.tags }
         }
     }
 
@@ -720,20 +728,13 @@ object ThumbLoader {
         val retriever = MediaMetadataRetriever()
         val mid = try {
             retriever.setDataSource(app, uri)
-            val durUs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val w = (px / 2).coerceAtLeast(64) * 2
-            val src = if (durUs > 0L) {
-                retriever.getFrameAtTime(durUs / 2, MediaMetadataRetriever.OPTION_CLOSEST)
-            } else {
-                retriever.frameAtTime
-            }
-            src?.let {
-                if (it.width <= w) it
-                else {
-                    val h = (it.height.toLong() * w / it.width.toLong()).toInt().coerceAtLeast(1)
-                    Bitmap.createScaledBitmap(it, w, h, true)
-                }
-            }
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            // duration 是毫秒，取帧要求微秒；乘500即中点，异常元数据也不能溢出成负时刻。
+            val timeUs = if (durationMs > 0L) durationMs.coerceAtMost(Long.MAX_VALUE / 500L) * 500L else -1L
+            val midpointUs = if (durationMs > Long.MAX_VALUE / 500L) Long.MAX_VALUE else timeUs
+            val bound = px.coerceAtLeast(1)
+            // API27+由解码器直接缩放，避免双并发4K源先分配两张全帧再缩小。
+            retriever.getScaledFrameAtTime(midpointUs, MediaMetadataRetriever.OPTION_CLOSEST, bound, bound)
         } catch (e: Exception) {
             null
         } finally {

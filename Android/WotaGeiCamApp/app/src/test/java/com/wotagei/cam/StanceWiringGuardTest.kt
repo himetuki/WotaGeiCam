@@ -67,7 +67,8 @@ class StanceWiringGuardTest {
     fun `安全区与检测器一起在分析线程生效`() {
         val update = bodyOf(analysis, "updateModel")
         assertTrue("margins 经分析线程落地", update.contains("marginsJson"))
-        assertTrue("loadCalibratedBands 在 swap 内", update.contains("StanceSpec.loadCalibratedBands"))
+        assertTrue("模型替换走 owner 的 swap", update.contains("swapModel("))
+        assertTrue("loadCalibratedBands 在 swap 内", bodyOf(analysis, "swapModel").contains("StanceSpec.loadCalibratedBands"))
         val start = bodyOf(analysis, "start")
         assertTrue("reader 失效必须重建（引擎会单方面 close）", start.contains("surface.isValid"))
     }
@@ -116,6 +117,19 @@ class StanceWiringGuardTest {
         assertTrue("失效面不还原（等回场重建 reader）", bind.contains("targetSurface.isValid"))
         val setTarget = bodyOf(cameraCtl, "setAnalysisTarget")
         assertTrue("挂摘回报是否成功（引擎未建 = false）", setTarget.contains("return surface == null"))
+    }
+
+    @Test
+    fun `Controller销毁时reader释放委托分析owner`() {
+        val screenBody = bodyOf(screen, "CameraScreen")
+        assertTrue(
+            "宿主必须把 Controller 销毁的 reader 收尾接给分析 owner",
+            screenBody.contains("analysisOwnerRelease = { stance.onCameraControllerCleared() }")
+        )
+        val cleared = bodyOf(cameraCtl, "onCleared")
+        assertTrue("onCleared 必须优先委托，不在 Main 直接 close", cleared.contains("analysisOwnerRelease"))
+        val owner = bodyOf(controller, "onCameraControllerCleared")
+        assertTrue("分析 owner 收尾必须排队关闭 reader", owner.contains("releaseReader()"))
     }
 
     @Test

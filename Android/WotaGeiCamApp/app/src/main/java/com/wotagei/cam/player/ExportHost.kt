@@ -117,6 +117,8 @@ class ExportHost(app: Application) : AndroidViewModel(app) {
                                 SceneExportRunner.Reason.RANGE -> ClipError.RANGE
                                 // 只有"已封轨、只是没清 IS_PENDING"才算 commit 保留口径
                                 SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT
+                                // 上一轮 owner / GL 线程仍未退出：不是源打不开，也不是成片损坏
+                                SceneExportRunner.Reason.BUSY -> ClipError.BUSY
                                 else -> ClipError.MUX
                             }
                         )

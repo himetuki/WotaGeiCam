@@ -28,7 +28,9 @@ class StanceSpeaker(context: Context) {
     private val ids = HashMap<String, Int>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pending = ArrayDeque<String>()
+    private val activeStreams = LinkedHashSet<Int>()
     private var queueGen = 0
+    private var paused = false
 
     init {
         for (name in WORD_FILES) {
@@ -49,13 +51,13 @@ class StanceSpeaker(context: Context) {
      * end，轮内有新句则取消计时继续播。每句都带口癖是错的（用户澄清）。
      */
     fun speak(text: String) {
+        if (paused) return
         val tokens = tokenize(text)
         if (tokens.isEmpty()) return
         pending.clear()
         pending.addAll(tokens)
         queueGen++
         drain(queueGen)
-        scheduleEnd(queueGen)
     }
 
     /** 「X号位，<词>」/「缺人」/「多人」/「全员，完成」→ 词位文件名序列。 */
@@ -82,8 +84,12 @@ class StanceSpeaker(context: Context) {
 
     private fun drain(gen: Int) {
         val next = pending.firstOrNull() ?: return
+        if (paused || gen != queueGen) return
         val id = ids[next] ?: 0
-        if (id != 0) pool.play(id, 1f, 1f, 1, 0, 1f)
+        if (id != 0) {
+            val stream = pool.play(id, 1f, 1f, 1, 0, 1f)
+            if (stream != 0) activeStreams += stream
+        }
         pending.removeFirst()
         if (pending.isNotEmpty()) {
             mainHandler.postDelayed({ if (gen == queueGen) drain(gen) }, WORD_GAP_MS)
@@ -99,15 +105,31 @@ class StanceSpeaker(context: Context) {
     private fun scheduleEnd(gen: Int) {
         mainHandler.postDelayed({
             if (gen != queueGen || pending.isNotEmpty()) return@postDelayed
+            if (paused) return@postDelayed
             val id = ids["end"] ?: 0
-            if (id != 0) pool.play(id, 1f, 1f, 1, 0, 1f)
+            if (id != 0) {
+                val stream = pool.play(id, 1f, 1f, 1, 0, 1f)
+                if (stream != 0) activeStreams += stream
+            }
         }, END_QUIET_MS)
+    }
+
+    /** 起录/离页时作废延迟任务并停掉已经交给 SoundPool 的 stream，池本身可复用。 */
+    fun pause() {
+        paused = true
+        queueGen++
+        pending.clear()
+        activeStreams.toList().forEach { pool.stop(it) }
+        activeStreams.clear()
+    }
+
+    fun resume() {
+        paused = false
     }
 
     /** 作废在途队列并释放。 */
     fun release() {
-        queueGen++
-        pending.clear()
+        pause()
         pool.release()
     }
 
