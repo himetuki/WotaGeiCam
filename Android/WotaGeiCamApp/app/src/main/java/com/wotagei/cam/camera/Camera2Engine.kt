@@ -452,6 +452,18 @@ class Camera2Engine(
         }
     }
 
+    /** 生命周期恢复也排到工作队列判活，不能越过已入队但尚未执行的 stopPreview。 */
+    fun resumePreview() {
+        post {
+            // 覆盖保活或重复恢复：原会话仍在就不重建、不重提 repeating。
+            if (isPreviewLive()) return@post
+            desiredPreview = true
+            sinkWaitRetries = 0
+            if (device == null) return@post     // 设备打开后由 onOpened 接着建会话
+            ensureSession()
+        }
+    }
+
     /** 只停画面、保留设备与能力快照（ON_PAUSE / 停止录制后用） */
     fun stopPreview() {
         post {

@@ -381,11 +381,10 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** ON_RESUME：设备还在就重起预览，被系统收回了就整条重开 */
     fun resume() {
         val e = engine ?: run { pendingStart = true; return }
-        // 预览真身一直在跑（覆盖保活回场）：不重提请求——同会话重发请求不闪绿，但
-        // "重启预览 + 首拍重提交"是否在桥上也干净没有证据，能不动就不动。判据用真身
-        // （2026-10-29 黑屏取证：缓存状态可能残留，早退会把相机卡死在黑屏态）
-        if (e.isPreviewLive()) return
-        if (e.deviceStatus == DeviceStatus.OPEN_SUCCEED) e.startPreview() else start()
+        // 设备失效时仍走原来的权限检查/镜头重开；预览恢复意图则始终入相机工作队列。
+        // 不能在主线程判活早退：pause 的 stop 可能还排着，旧会话此刻仍然「活着」。
+        if (e.deviceStatus != DeviceStatus.OPEN_SUCCEED) start()
+        e.resumePreview()
     }
 
     override fun onPause(owner: LifecycleOwner) {
