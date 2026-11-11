@@ -116,6 +116,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     private var lensSlots: List<LensSlot> = emptyList()
     private var pendingStart = false
     private var busyLoading = false
+    // Main 线程上的最新预览意图；IO 枚举返回后也必须重新核验，不能越过后来的暂停/关闭。
+    private var previewWanted = false
+    private var startupGeneration = 0L
 
     // ------------------------------------------------- 设置页覆盖保活（2026-10-29 手动白平衡绿帧）
 
@@ -252,6 +255,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** 视图销毁时解绑，避免引擎持有已失效的 Surface */
     fun unbind(sink: PreviewSink) {
         if (boundSink !== sink) return
+        previewWanted = false
+        startupGeneration++
+        pendingStart = false
         // 同页换 sink（DIRECT↔GPU）会先 unbind 旧面再 bind 新面：保留分析槽让 bind 重放，
         // 否则站位开关还开着也会永久停在 ABSENT。reader 的释放权属于创建它的分析 owner。
         engine?.close()
@@ -326,6 +332,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** 打开相机并起预览；权限缺失时只置 [CameraUiState.needsCameraPermission] 并等回调 */
     fun start() {
+        previewWanted = true
+        startupGeneration++
         if (engine == null) {
             pendingStart = true
             return
@@ -365,6 +373,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** 停止预览并释放设备（离开相机页） */
     fun stop() {
+        previewWanted = false
+        startupGeneration++
         pendingStart = false
         // 保留分析槽：再次 bind 时重放有效 reader；最终释放由分析 owner 负责。
         engine?.stopPreview()
@@ -377,11 +387,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** ON_PAUSE：停预览（停录由 record 包观察预览状态自行完成） */
     fun pause() {
+        previewWanted = false
+        startupGeneration++
+        pendingStart = false
         engine?.stopPreview()
     }
 
     /** ON_RESUME：设备还在就重起预览，被系统收回了就整条重开 */
     fun resume() {
+        previewWanted = true
+        startupGeneration++
         val e = engine ?: run { pendingStart = true; return }
         // 设备失效时仍走原来的权限检查/镜头重开；预览恢复意图则始终入相机工作队列。
         // 不能在主线程判活早退：pause 的 stop 可能还排着，旧会话此刻仍然「活着」。
@@ -410,6 +425,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     override fun onCleared() {
+        previewWanted = false
+        startupGeneration++
+        pendingStart = false
         keepAliveJob?.cancel()
         keepAliveJob = null
         // 非配置销毁（系统回收/不保留活动）不一定先走 StanceFeature.release：把 reader
@@ -473,6 +491,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     private fun openCurrentLens() {
         val e = engine ?: return
+        if (!previewWanted) return
+        val request = ++startupGeneration
         // 正在枚举时不能把这次请求丢掉：`pickSlot` 要给每颗镜头读 characteristics，
         // 几十到几百毫秒，期间连点两颗药丸是很常见的操作。丢掉会留下
         // 「params.lens 已经改成新档位、实际还开着旧镜头」的顶栏与取景不一致
@@ -484,7 +504,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         bus.launch {
             try {
                 val manager = cameraManager()
-                val slot = withContext(Dispatchers.IO) { pickSlot(manager) }
+                val slots = withContext(Dispatchers.IO) {
+                    runCatching { enumerateLenses(manager) }.getOrDefault(emptyList())
+                }
+                // IO 只产出候选，不写 Controller/参数态；暂停、后来的启动和替换引擎都能使结果失效。
+                if (!previewWanted || request != startupGeneration || engine !== e) return@launch
+                if (slots.isNotEmpty()) {
+                    lensSlots = slots
+                    dumpLenses(slots)
+                }
+                val slot = pickSlot()
                 if (slot == null) {
                     ui.value = ui.value.copy(device = DeviceStatus.OPEN_FAILED_INNER_ERROR)
                     return@launch
@@ -504,10 +533,10 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                 e.startPreview()
             } finally {
                 busyLoading = false
-                if (reloadWanted) {
-                    reloadWanted = false
-                    openCurrentLens()
-                }
+                // 只为仍有效的最新意图接力。旧结果被丢弃也要释放 busy，不能吞掉后来 resume/rebind。
+                val reload = reloadWanted || request != startupGeneration
+                reloadWanted = false
+                if (reload && previewWanted) openCurrentLens()
             }
         }
     }
@@ -515,16 +544,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     private fun cameraManager(): CameraManager =
         getApplication<Application>().getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
-    /** 每次换挡重新枚举（很轻，且能覆盖镜头被系统临时下线的情况） */
-    private fun pickSlot(manager: CameraManager): LensSlot? {
-        val slots = runCatching { enumerateLenses(manager) }.getOrDefault(emptyList())
-        if (slots.isNotEmpty()) {
-            lensSlots = slots
-            // 镜头枚举全量落日志（M1 门禁的字面）：哪颗物理头被归进哪个档、各自的最大视频档——
-            // 「画质只有 720p」「广角是定焦」这类反馈，没有这张表就无法判断是枚举归档问题
-            // 还是该颗镜头本来如此（2026-10-26 marble 反馈的取证缺口）
-            dumpLenses(slots)
-        }
+    /** 每次换挡重新枚举后，在 Main 上按最新选择解析槽位。 */
+    private fun pickSlot(): LensSlot? {
         // 能力协商的出厂默认（用户指令「能力协商，而非能力假设」）：从未显式选过镜头时不认
         // 档位标签，开后摄里最大视频档最大的那颗——个别机型会把小底定焦头归进「广角」档
         // （marble 实测：出厂「广角」最大 1600x1200 且定焦）。显式切换过一次后完全尊重选择。

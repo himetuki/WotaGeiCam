@@ -6,8 +6,11 @@ import org.junit.Assert.assertTrue
 import java.io.Closeable
 
 /** 复用 N12 的真实 Controller/Engine 桥，只补可控的设备打开与会话配置平台回调。 */
-internal class CameraRecoveryStartFixture(parent: ClassLoader) : Closeable {
-    val platform = N12CameraControllerFixture(parent, BOUNDARIES)
+internal class CameraRecoveryStartFixture(
+    parent: ClassLoader,
+    boundarySources: Map<String, String> = emptyMap(),
+) : Closeable {
+    val platform = N12CameraControllerFixture(parent, BOUNDARIES + boundarySources)
     val application = platform.application()
     val controller = platform.controller(application)
     val manager = platform.call(application, "getSystemService", "camera")!!
