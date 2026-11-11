@@ -277,6 +277,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         analysisSessionOwner = null
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
+        // 正常 start 已消化 pendingStart；替代引擎仍须重新履行这次自愈的启动请求。
+        pendingStart = true
         bind(sink)
         // 重建引擎只换了相机侧；上屏链若是死的（窗口面已失效/被摘掉），这里必须补一次重挂，
         // 否则"重建完还是黑"（2026-10-30 取证）。
@@ -652,9 +654,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.markDirty()
     }
 
-    /** 错误恢复：保留设备、重建会话 */
+    /** 错误恢复：尚未开镜头时走完整启动链，其余沿用引擎的设备/会话恢复。 */
     fun restartPreview() {
-        engine?.restartPreview()
+        val e = engine
+        // 初次枚举失败或刚替换的引擎还没有 lens，不能让 reopenLastLens 空转。
+        if (e == null || e.deviceStatus == DeviceStatus.CLOSE) start() else e.restartPreview()
     }
 
     init {
