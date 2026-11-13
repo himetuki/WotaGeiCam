@@ -168,11 +168,18 @@ object StanceModelPack {
         }
     }
 
-    /** 只清本类创建的平铺目录；不递归跟随链接或未知子目录。 */
+    /** 只清本类创建的平铺目录或暂存文件；不递归跟随链接或未知子目录。 */
     internal fun removeFlatDir(dir: File, delete: (File) -> Boolean = { it.delete() }): Boolean {
         if (!dir.exists()) return true
         val parent = dir.parentFile ?: return false
         if (Files.isSymbolicLink(dir.toPath()) || dir.canonicalFile.parentFile != parent.canonicalFile) return false
+        // createTempFile 成功、delete+mkdir 之间进程退出会留下同名普通文件。它不是目录树，
+        // 不能走 listFiles()==null 的“未知目录”分支，否则后续每次导入都被 stale 清理拒绝。
+        if (!dir.isDirectory) {
+            val removed = delete(dir) || !dir.exists()
+            if (!removed) Diag.w(TAG, "模型暂存文件清理失败，后续导入将先回收：${dir.name}")
+            return removed
+        }
         val files = dir.listFiles() ?: return false
         if (files.any { it.isDirectory && !Files.isSymbolicLink(it.toPath()) }) return false
         var removed = true

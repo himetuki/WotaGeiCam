@@ -288,6 +288,18 @@ class StancePackImportTest {
     }
 
     @Test
+    fun crashedStagingRegularFileIsReclaimedBeforeNextImport() {
+        val root = temp.newFolder()
+        // createTempFile 后、delete+mkdir 前进程退出会留下普通文件；它必须能被回收，
+        // 否则 stale 清单永远非空，后续每次导入都在清理阶段被拒绝。
+        val crashed = File(root, "model_pack_import_abandoned").apply { writeText("crash window") }
+        StanceModelPack.importStream(root, ByteArrayInputStream(zip(payload())))
+        assertFalse(crashed.exists())
+        assertNotNull(StanceModelPack.validateDir(File(root, "model_pack_user")))
+        assertClean(root)
+    }
+
+    @Test
     fun unknownNestedStagingIsNotRecursivelyDeletedOrAllowedToAccumulate() {
         val root = temp.newFolder()
         val stale = File(root, "model_pack_import_unknown").apply { mkdir() }
