@@ -140,7 +140,7 @@ enum class PillKey { SIZE, FPS, SHUTTER, ISO, EV, WB, ZOOM, FOCUS, BITRATE, LENS
  * 2026-10-27（24 号计划 B7）：`GLOW` 进白名单，但语义与 MONITOR **相反**——Glow 是 scene layer，
  * 录制中改它**会改接下来几帧的成片**（烘焙进像素，已录的不受影响）。允许调是因为：
  * ① `GlowProvider.setGlowParams` 不触发重画 ⇒ 不产生重复帧、不推进 PTS 网格；
- * ② 光晕是"现场可判断"的观感参数，10 分钟演出里需要边看边调（与监看同一个使用场景）。
+ * ② 光晕是"现场可判断"的观感参数——练习时单条 1~4 分钟、一个动作常反复重录，需要边看边调（与监看同一个使用场景）。
  * 面板常驻一句"进成片"的说明（`cam_glow_note`），不许静默。
  *
  * 2026-10-28（29 §4.4-5 / §九-2）：`TONE` 按 Glow 同一先例进白名单——scene layer，录制中改

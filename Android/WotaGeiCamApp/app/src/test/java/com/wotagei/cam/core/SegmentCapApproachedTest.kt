@@ -31,7 +31,8 @@ class SegmentCapApproachedTest {
     @Test
     fun `产品默认上限3点5GiB_85百分约3点19GB`() {
         // 真实标尺：3,758,096,384 × 0.85 = 3,194,381,926.4 ⇒ 首个达标字节 3,194,381,927；
-        // 50Mbps 下 ≈8.5 分钟开始提示，9.3 分钟整段到顶——10 分钟以上的录制必然先看到提示再看到换段
+        // 50Mbps 下 ≈8.5 分钟开始提示，9.3 分钟整段到顶——常态单条 1~4 分钟不会触发，
+        // 10 分钟以上的边界长录才会先看到提示再看到换段
         assertTrue(segmentCapApproached(3_194_381_927L))
         assertFalse(segmentCapApproached(3_194_381_926L))
     }

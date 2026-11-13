@@ -3100,8 +3100,9 @@ private class RecordRunner(
 
     /**
      * 换段预提示（2026-10-28 审查加固）：当前段已写字节 ≥ 单段上限 85% 时置真。
-     * 50Mbps 档约 9.3 分钟就到 3.5GiB，10 分钟以上的录制必然踩一次换段腿——提前告知，
-     * 用户看到换段瞬间的短促停顿不会当成 bug。数据源是 [RecorderHealth.outputBytes]
+     * 50Mbps 档约 9.3 分钟才到 3.5GiB；本项目常态单条 1~4 分钟，练习一般碰不到，
+     * 只有 10 分钟以上的边界长录才会踩一次换段腿——提前告知，用户看到换段瞬间的
+     * 短促停顿不会当成 bug。数据源是 [RecorderHealth.outputBytes]
      * （两引擎都能报真实字节），不是码率估算；-1（量不到）恒 false。
      * 分段轮转后 outputBytes 回落到新段的小值 ⇒ 提示自然消退，换段后自动重新武装。
      */
@@ -3664,7 +3665,8 @@ private class RecordRunner(
                 // 若引擎发生分段轮转且自检仍在跑，provider 源读到的是**已 commit 首段的大尺寸**，会把
                 // "当前段没在写"误喂成 HEALTHY。此前提成立的边界 = 自检窗口 ≪ 分段轮转耗时。
                 // **当前不可达**：窗口 3s vs 轮转数百秒（MR 阈值 = MAX_FILE_BYTES 3.5GiB，逼近上限才回调
-                // 换段；顶档 50Mbps 也要约 10 分钟）。**调大窗口或调小轮转阈值时必须重新审视这一处**。
+                // 换段；顶档 50Mbps 也要约 10 分钟，常态单条 1~4 分钟的练习不会触发）。
+                // **调大窗口或调小轮转阈值时必须重新审视这一处**。
                 // （同类"sessionSink 恒指首段"的坑另见 shouldDiscardAbandonedSink 的显式闸门。）
                 // 【性能留意】可疑路径上每拍（HEALTH_TICK_MS=180ms）一次 ContentResolver.query，3s 窗口最
                 // 多约 17 次，跑在 RecordRunner.handler 控制线程（与 stop/beginSession 同一消息队列）；正常
