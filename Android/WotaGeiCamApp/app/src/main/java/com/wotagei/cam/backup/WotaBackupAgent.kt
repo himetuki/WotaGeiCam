@@ -143,7 +143,16 @@ class WotaBackupAgent : BackupAgent() {
         private fun readPending(context: Context): PortableUserData.Snapshot? {
             val file = pendingFile(context)
             if (!file.exists() && !File(file.path + ".bak").exists()) return null
-            return AtomicFile(file).openRead().use { PortableUserData.read(it) }
+            val atomic = AtomicFile(file)
+            return try {
+                atomic.openRead().use { PortableUserData.read(it) }
+            } catch (e: PortableUserData.InvalidSnapshotException) {
+                // pending 只是可再生成的待匹配缓存；格式坏不可恢复，删掉避免每次备份/媒体加载都失败。
+                // 真实 IO 异常不在这里吞：调用方保留源，等存储恢复后重试。
+                atomic.delete()
+                Diag.w("WotaBackup", "待匹配快照格式无效，已丢弃派生缓存")
+                null
+            }
         }
 
         private fun writePending(context: Context, tags: List<PortableUserData.Tag>) {

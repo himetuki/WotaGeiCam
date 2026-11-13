@@ -104,6 +104,18 @@ class BackupRestoreLifecycleTest {
         }
     }
 
+    @Test fun `损坏的待匹配缓存只丢弃自身_备份仍能完成`() {
+        fixture().use { f ->
+            f.staged.delete()
+            f.pending.parentFile!!.mkdirs()
+            f.pending.writeBytes(byteArrayOf(1, 2, 3))
+            val exported = f.backup()
+            assertFalse("派生缓存损坏不能永久阻断 Auto Backup", f.pending.exists())
+            assertTrue(exported.tags.isEmpty())
+            assertFalse(f.staged.exists())
+        }
+    }
+
     @Test fun `bak恢复源可重试_媒体到齐后只补缺标签不覆盖本机时间`() = runBlocking {
         fixture().use { f ->
             val key = PortableUserData.MediaKey("Movies/", "old.mp4", 123L, 1000L)
