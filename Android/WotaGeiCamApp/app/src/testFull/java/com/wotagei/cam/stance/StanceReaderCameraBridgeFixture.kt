@@ -3,6 +3,7 @@ package com.wotagei.cam.stance
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import com.wotagei.cam.camera.N12CameraControllerFixture
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -89,8 +90,9 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
         requireRepeatingSession()
         runBlocking {
             withTimeout(5_000L) {
+                val request = currentCoroutineContext()
                 suspendCoroutine<Unit> { continuation ->
-                    val result = call(stance, "applyPack", pack, emptyMap<String, Any>(), "fixture", continuation)
+                    val result = call(stance, "applyPack", pack, emptyMap<String, Any>(), "fixture", request, continuation)
                     if (result !== COROUTINE_SUSPENDED) continuation.resume(Unit)
                 }
             }

@@ -36,7 +36,7 @@ export class UpdateConfig {
   /**
    * 镜像前缀（前缀 + 完整原始 URL），全表 HTTPS。明文代理（toolwa.com/github）被排除：
    * 中间人可替换包体。安全模型三层兜底：全表 HTTPS、下载后 SHA-256 端到端校验
-   * （哈希只从段 1 官方端点的 Release 说明提取）、安装侧自补校验（见 UpdateInstaller）。
+   * （HAP 哈希只从同 tag 的官方 SHA256SUMS 提取）、另存前复核（见 UpdateInstaller）。
    */
   static readonly MIRROR_PREFIXES: Array<string> = [
     'https://gh-proxy.com/',
@@ -54,6 +54,20 @@ export class UpdateConfig {
 
   static directDownloadUrl(tag: string, assetName: string): string {
     return `${UpdateConfig.DOWNLOAD_BASE}/${tag}/${assetName}`;
+  }
+
+  /** 哈希来源只能是本仓库、同 tag 下的官方 SHA256SUMS，不能由镜像或任意 URL 指定。 */
+  static sha256SumsUrlFor(directUrl: string): string | undefined {
+    const prefix: string = UpdateConfig.DOWNLOAD_BASE + '/';
+    if (!directUrl.startsWith(prefix)) {
+      return undefined;
+    }
+    const parts: Array<string> = directUrl.substring(prefix.length).split('/');
+    if (parts.length !== 2 || !new RegExp('^[vV]?[0-9]+\\.[0-9]+\\.[0-9]+(-r[0-9]+)?$').test(parts[0]) ||
+      !ReleaseJson.isSafeReleaseAssetName(parts[1])) {
+      return undefined;
+    }
+    return UpdateConfig.directDownloadUrl(parts[0], 'SHA256SUMS');
   }
 }
 
@@ -317,7 +331,7 @@ export class ReleaseJson {
     if (name === undefined || name.length < 1 || name.length > 255) {
       return false;
     }
-    if (!/\.hap$/i.test(name)) {
+    if (!new RegExp('^[A-Za-z0-9][A-Za-z0-9._-]*\\.hap$', 'i').test(name)) {
       return false;
     }
     if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
@@ -387,10 +401,11 @@ export class ReleaseJson {
 
   /**
    * `SHA256SUMS`（`<64位hex>  <文件名>` 每行一枚，binary 模式的 `*` 前缀容忍）→ 指定资产的哈希。
-   * 没有该资产名返回 undefined（老 Release 可能没这个资产 → 退回 PK + size 两道防线）。
+   * 没有该资产名或出现重名歧义返回 undefined；下载层据此停止，绝不退回结构校验放行。
    */
   static parseSha256Sums(text: string, assetName: string): string | undefined {
     const normalized: string = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let found: string | undefined = undefined;
     for (const line of normalized.split('\n')) {
       const t: string = line.trim();
       if (t === '') {
@@ -398,10 +413,13 @@ export class ReleaseJson {
       }
       const m: RegExpMatchArray | null = t.match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
       if (m !== null && m[2].trim() === assetName) {
-        return m[1].toLowerCase();
+        if (found !== undefined) {
+          return undefined;
+        }
+        found = m[1].toLowerCase();
       }
     }
-    return undefined;
+    return found;
   }
 
   // ------------------------------------------------------------------ 手写 JSON 提取（上游同构）
@@ -643,7 +661,7 @@ export class ProbeResult {
   downloadUrl: string;
   /** 探测未给大小 = -1（下载时用 Content-Length） */
   sizeBytes: number;
-  /** 段 1 才携带；undefined = 无可信哈希，下载退回 PK 魔数 + size 一致性 + 安装侧校验 */
+  /** 保留上游接口；HAP 不采用说明里的 APK 哈希，下载层另取同资产的官方 SHA256SUMS。 */
   sha256: string | undefined;
   /** 段 1/2 都携带（说明原文，弹窗展示时交给 ReleaseNotes.forDisplay） */
   notes: string | undefined;
@@ -692,7 +710,7 @@ export type FetchRedirectLocation = (url: string) => Promise<string | undefined>
  * 段 1→2→3 编排（上游 probeLatestRelease 直译，版本判据换成 versionCode）。
  *
  * - 段 1：直连 GitHub API，extractSha256=true（官方端点的说明可信）；
- * - 段 2：镜像前缀逐个代理同一 API，extractSha256=false（镜像可改写 body，宁可不校验）；
+ * - 段 2：镜像前缀逐个代理同一 API，extractSha256=false（镜像说明只展示，不作真实性依据）；
  *   说明原文照读（只用于弹窗展示）；
  * - 段 3：302 → tag → 推导资产名（OHOS 注入函数恒 undefined，此段实际跳过）。
  *

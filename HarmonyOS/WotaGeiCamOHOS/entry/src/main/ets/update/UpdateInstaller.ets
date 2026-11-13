@@ -3,19 +3,21 @@
  *
  * **平台事实（决定了本文件形态）**：HarmonyOS NEXT 不向三方应用开放静默安装/拉起系统安装器的
  * 接口（`INSTALL_BUNDLE` 属系统级权限），所以只能：
- * 1. 下载完成后做**结构核对**（PK 魔数 + 非空 + 体积与探测一致；与上游「包名/签名核对」同位）；
+ * 1. 下载完成与另存前都强制核对本资产的**官方 SHA-256**，PK/体积仅是附加结构检查；
  * 2. 经系统文件选择器把包**另存到用户可见目录**（DocumentViewPicker.save），用户在文件管理里
  *    点按安装——这一步由系统安装器接管，签名/profile 校验仍归系统；
  * 3. 同时提供「打开 Release 页」作为兜底入口。
  *
  * 与上游的差异登记：① 无「同包名 + 同签名证书集合」的程序化核对（OHOS 无读包体签名信息的
- * 公开 API），补偿是有密码学意义的 SHA-256（段 1 官方说明）与系统安装器的 profile 校验；
+ * 公开 API），补偿为直连官方 SHA256SUMS 的完整性校验；签名/profile 与安装资格仍由系统决定；
  * ② 不改 FileProvider/Intent，改走 picker 保存 + 浏览器兜底。
  */
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { picker } from '@kit.CoreFileKit';
 import { Diag } from '../diag/Diag';
+import { UpdateDownloader } from './UpdateDownloader';
+import { UpdateDownloadPure } from './UpdatePure';
 
 const TAG: string = 'WotaUpdate';
 
@@ -36,46 +38,20 @@ export class UpdateInstaller {
   /** HAP 扩展名（picker 的默认后缀与另存文件名都用它） */
   static readonly PACKAGE_SUFFIX: string = '.hap';
 
-  /**
-   * 交付前的最后一道结构核对（与下载完成时的校验同位，防中间态被换）：
-   * 文件存在、非空、首两字节 `PK`。
-   */
-  static verifyPackage(path: string): boolean {
-    let fd: number = -1;
-    try {
-      const stat: fileIo.Stat = fileIo.statSync(path);
-      if (stat.size < 2) {
-        return false;
-      }
-      fd = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY).fd;
-      const buf: ArrayBuffer = new ArrayBuffer(2);
-      const n: number = fileIo.readSync(fd, buf);
-      if (n !== 2) {
-        return false;
-      }
-      const b: Uint8Array = new Uint8Array(buf);
-      return b[0] === 0x50 && b[1] === 0x4b;
-    } catch (e) {
-      Diag.w(TAG, `更新包结构核对失败：${path}`, e as Error);
-      return false;
-    } finally {
-      if (fd >= 0) {
-        try {
-          fileIo.closeSync(fd);
-        } catch (e) {
-          // 只读句柄关闭失败不影响判据
-        }
-      }
-    }
+  /** 与下载完成共用同一条 fail-closed SHA 判据；这里没有包名/签名核对 API，不作虚假保证。 */
+  static verifyPackage(path: string, expectedSha256: string | undefined): boolean {
+    return UpdateDownloadPure.sha256Matches(expectedSha256, expectedSha256 === undefined ? '' :
+      UpdateDownloader.sha256HexOfFile(path)) && UpdateDownloader.hasPackageMagic(path);
   }
 
   /**
    * 经系统文件选择器另存 HAP（用户选目录，文件落进可见存储，可在文件管理里点按安装）。
    * 用户取消选择 → ok=false + message '已取消保存'（不是错误，UI 按中性提示）。
    */
-  static async saveAs(ctx: common.Context, sourcePath: string, fileName: string): Promise<SaveResult> {
-    if (!UpdateInstaller.verifyPackage(sourcePath)) {
-      return new SaveResult(false, '', '更新包已损坏，请重新下载');
+  static async saveAs(ctx: common.Context, sourcePath: string, fileName: string,
+    expectedSha256: string | undefined): Promise<SaveResult> {
+    if (!UpdateInstaller.verifyPackage(sourcePath, expectedSha256)) {
+      return new SaveResult(false, '', '更新包未通过官方 SHA-256 校验，已停止保存，请重新下载');
     }
     try {
       const docPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(ctx);
@@ -87,10 +63,14 @@ export class UpdateInstaller {
       if (uris.length === 0) {
         return new SaveResult(false, '', '已取消保存');
       }
+      // picker 等待期间缓存可能被重下/替换，复制前必须再验；后续复制同步完成，不跨异步间隙。
+      if (!UpdateInstaller.verifyPackage(sourcePath, expectedSha256)) {
+        return new SaveResult(false, '', '更新包已变化，未通过官方 SHA-256 校验，已停止保存');
+      }
       const destUri: string = uris[0];
       UpdateInstaller.copyToUri(sourcePath, destUri);
-      Diag.i(TAG, `更新包已另存：${destUri}`);
-      return new SaveResult(true, destUri, '已保存，请在文件管理中打开安装');
+      Diag.i(TAG, `官方 SHA-256 校验通过的更新包已另存：${destUri}`);
+      return new SaveResult(true, destUri, '已通过官方 SHA-256 并保存。请在文件管理中打开，签名与安装资格由系统确认');
     } catch (e) {
       Diag.e(TAG, `另存更新包失败`, e as Error);
       return new SaveResult(false, '', '保存失败，请稍后重试');
@@ -127,7 +107,10 @@ export class UpdateInstaller {
         if (n <= 0) {
           break;
         }
-        fileIo.writeSync(destFd, n === buf.byteLength ? buf : buf.slice(0, n));
+        const written: number = fileIo.writeSync(destFd, n === buf.byteLength ? buf : buf.slice(0, n));
+        if (written !== n) {
+          throw new Error('incomplete package copy');
+        }
       }
     } catch (e) {
       // 抛给 saveAs 的 catch 统一上屏（复制失败 = 保存失败）

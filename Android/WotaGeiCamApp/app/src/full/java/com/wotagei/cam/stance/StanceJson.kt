@@ -1,20 +1,21 @@
 package com.wotagei.cam.stance
 
 /**
- * 极简 JSON 解析（递归下降，~100 行）：站位模型组只需要
- * `{"coef":[…],"intercept":…,"meta":{…}}` 与 `{"bands":{"side":[lo,hi]}}` 两种
- * 扁平结构。自带解析的原因：org.json 在 JVM 单测是 stub（工程无 Robolectric），
- * 自带解析让判定核心全链纯 JVM 可测；端侧行为与 PC 端 json.loads 语义对齐。
- * 支持对象/数组/数字/字符串/true/false/null；不支持嵌套转义的奇技淫巧（模型组
- * 产物由 train_head.py/calibrate.py 生成，格式受控）。
+ * 模型组 JSON 的有界递归下降解析：端侧与 JVM 测试共用，不依赖 org.json 的平台 stub。
+ * 导入包不是可信生成物：拒绝重复键、尾随内容、非有限数和过深嵌套，不能靠调用方 catch
+ * 去兜 StackOverflowError。三个 JSON 文件共用同一边界。
  */
 internal object StanceJson {
+    const val MAX_TEXT_CHARS = 64 * 1024
+    private const val MAX_DEPTH = 32
 
     fun parse(text: String): Any? {
+        require(text.length <= MAX_TEXT_CHARS) { "模型 JSON 超过体积上限" }
         val p = Parser(text)
         p.skipWs()
-        val v = p.parseValue()
+        val v = p.parseValue(0)
         p.skipWs()
+        require(p.i == text.length) { "JSON 含尾随内容 @${p.i}" }
         return v
     }
 
@@ -22,14 +23,15 @@ internal object StanceJson {
         var i = 0
 
         fun skipWs() {
-            while (i < s.length && s[i].isWhitespace()) i++
+            while (i < s.length && s[i] in " \t\r\n") i++
         }
 
-        fun parseValue(): Any? {
+        fun parseValue(depth: Int): Any? {
+            require(depth <= MAX_DEPTH) { "模型 JSON 嵌套过深" }
             require(i < s.length) { "JSON 意外结束" }
             return when (s[i]) {
-                '{' -> parseObject()
-                '[' -> parseArray()
+                '{' -> parseObject(depth + 1)
+                '[' -> parseArray(depth + 1)
                 '"' -> parseString()
                 't' -> lit("true", true)
                 'f' -> lit("false", false)
@@ -44,19 +46,20 @@ internal object StanceJson {
             return v
         }
 
-        fun parseObject(): Map<String, Any?> {
-            i++ // {
+        private fun parseObject(depth: Int): Map<String, Any?> {
+            i++
             val m = LinkedHashMap<String, Any?>()
             skipWs()
             if (i < s.length && s[i] == '}') { i++; return m }
             while (true) {
                 skipWs()
                 val key = parseString()
+                require(!m.containsKey(key)) { "JSON 重复键：$key" }
                 skipWs()
                 require(i < s.length && s[i] == ':') { "JSON 缺冒号 @$i" }
                 i++
                 skipWs()
-                m[key] = parseValue()
+                m[key] = parseValue(depth)
                 skipWs()
                 when {
                     i < s.length && s[i] == ',' -> i++
@@ -66,14 +69,14 @@ internal object StanceJson {
             }
         }
 
-        private fun parseArray(): List<Any?> {
-            i++ // [
+        private fun parseArray(depth: Int): List<Any?> {
+            i++
             val l = ArrayList<Any?>()
             skipWs()
             if (i < s.length && s[i] == ']') { i++; return l }
             while (true) {
                 skipWs()
-                l.add(parseValue())
+                l.add(parseValue(depth))
                 skipWs()
                 when {
                     i < s.length && s[i] == ',' -> i++
@@ -84,33 +87,64 @@ internal object StanceJson {
         }
 
         private fun parseString(): String {
-            require(s[i] == '"') { "JSON 字符串应从引号开始 @$i" }
+            require(i < s.length && s[i] == '"') { "JSON 字符串应从引号开始 @$i" }
             i++
             val sb = StringBuilder()
-            while (true) {
-                val c = s[i]
-                when {
-                    c == '"' -> { i++; return sb.toString() }
-                    c == '\\' -> {
-                        i++
-                        when (val e = s[i]) {
+            while (i < s.length) {
+                val c = s[i++]
+                when (c) {
+                    '"' -> return sb.toString()
+                    '\\' -> {
+                        require(i < s.length) { "JSON 转义意外结束" }
+                        when (val e = s[i++]) {
+                            '"', '\\', '/' -> sb.append(e)
+                            'b' -> sb.append('\b')
+                            'f' -> sb.append('\u000C')
                             'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
                             't' -> sb.append('\t')
-                            'u' -> { sb.append(s.substring(i + 1, i + 5).toInt(16).toChar()); i += 4 }
-                            else -> sb.append(e)
+                            'u' -> {
+                                require(i + 4 <= s.length) { "JSON Unicode 转义不完整" }
+                                val code = s.substring(i, i + 4).toIntOrNull(16)
+                                require(code != null) { "JSON Unicode 转义非法" }
+                                sb.append(code.toChar())
+                                i += 4
+                            }
+                            else -> throw IllegalArgumentException("JSON 转义非法 @$i")
                         }
-                        i++
                     }
-                    else -> { sb.append(c); i++ }
+                    else -> {
+                        require(c >= ' ') { "JSON 字符串含未转义控制符" }
+                        sb.append(c)
+                    }
                 }
             }
+            throw IllegalArgumentException("JSON 字符串未闭合")
+        }
+
+        private fun digits() {
+            val start = i
+            while (i < s.length && s[i] in '0'..'9') i++
+            require(i > start) { "JSON 数字缺位 @$i" }
         }
 
         private fun parseNumber(): Double {
             val start = i
-            if (i < s.length && (s[i] == '-' || s[i] == '+')) i++
-            while (i < s.length && (s[i].isDigit() || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '-' || s[i] == '+')) i++
-            return s.substring(start, i).toDouble()
+            if (i < s.length && s[i] == '-') i++
+            require(i < s.length) { "JSON 数字意外结束" }
+            if (s[i] == '0') i++ else {
+                require(s[i] in '1'..'9') { "JSON 数字非法 @$i" }
+                digits()
+            }
+            if (i < s.length && s[i] == '.') { i++; digits() }
+            if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
+                i++
+                if (i < s.length && (s[i] == '-' || s[i] == '+')) i++
+                digits()
+            }
+            val v = s.substring(start, i).toDouble()
+            require(v.isFinite()) { "JSON 数字超出有限范围" }
+            return v
         }
     }
 }

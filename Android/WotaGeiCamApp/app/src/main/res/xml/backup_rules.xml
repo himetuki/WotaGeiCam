@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 29–30：只允许 BackupAgent 生成的设置/收藏快照；其余域默认拒绝。
+     不开放 root、sharedpref、database、external，模型/诊断/URI/设备状态/临时件均不迁移。 -->
+<full-backup-content>
+    <include domain="file" path="wota_user_backup.bin" />
+</full-backup-content>

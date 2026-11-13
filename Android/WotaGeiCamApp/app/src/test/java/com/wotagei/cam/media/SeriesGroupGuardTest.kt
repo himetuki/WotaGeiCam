@@ -396,8 +396,8 @@ class SeriesGroupGuardTest {
 
         // ③ 读侧：把 s.series / s.parts 换成空表（归组永远建不起来而真值表全绿）
         val noSeries = repoRaw.replace(
-            "annotateSeries(joinTags(queryMediaStore(scope), s.tags), s.series, s.parts)",
-            "annotateSeries(joinTags(queryMediaStore(scope), s.tags), emptyList(), emptyList())"
+            "annotateSeries(joinTags(raw, s.tags + restored), s.series, s.parts)",
+            "annotateSeries(joinTags(raw, s.tags + restored), emptyList(), emptyList())"
         )
         assertTrue("突变体③必须真的改了源码", noSeries != repoRaw)
         assertFalse(

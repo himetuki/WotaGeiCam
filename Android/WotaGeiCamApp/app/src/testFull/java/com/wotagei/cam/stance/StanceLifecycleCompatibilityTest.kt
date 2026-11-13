@@ -9,6 +9,17 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withTimeout
 
 /** 平台/JNI 桩只记录边界；不复制装配、detect、语音队列或暂停分支，不冒充真 GPU 推理。 */
 class StanceLifecycleCompatibilityTest {
@@ -252,6 +263,143 @@ class StanceLifecycleCompatibilityTest {
     }
 
     @Test
+    fun `坏导入不能取消冷启装配与待补挂意图`() = platform { p ->
+        val root = temporary.newFolder()
+        modelPack(File(root, "model_pack_user").apply { mkdir() })
+        val context = p.context(root)
+        val controller = controller(p, context)
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val imported = CountDownLatch(1)
+        val attached = CountDownLatch(1)
+        p.setStatic(INTERPRETER, "verifyEntered", entered)
+        p.setStatic(INTERPRETER, "verifyContinue", proceed)
+        setEnabledState(p, controller)
+        p.call(controller, "setAttachHook", { _: Any, _: Any? -> attached.countDown(); true })
+        p.call(controller, "onPageEnter")
+        p.call(controller, "reloadAsync", context)
+        val initial = p.field(controller, "packJob") as Job
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            p.call(controller, "importAsync", context, {
+                imported.countDown()
+                throw IllegalArgumentException("fixture bad zip")
+            })
+            packBarrier(p, controller)
+            assertTrue("坏导入排队时不可取消尚未完成的冷启", initial.isActive)
+            assertEquals(1L, imported.count)
+            proceed.countDown()
+            join(initial)
+            assertTrue(imported.await(5, TimeUnit.SECONDS))
+            packBarrier(p, controller)
+            assertTrue("初次装配仍须在就绪后补挂", attached.await(5, TimeUnit.SECONDS))
+            assertFalse(initial.isCancelled)
+            assertNotNull(p.field(controller, "detector"))
+            val state = (p.call(controller, "getState") as kotlinx.coroutines.flow.StateFlow<*>).value!!
+            assertTrue((p.call(state, "getFallbackTip") as String).contains("fixture bad zip"))
+        } finally {
+            proceed.countDown()
+            p.call(controller, "release")
+        }
+    }
+
+    @Test
+    fun `取消native装配后导入必须等旧owner关闭候选才取得事务锁`() = platform { p ->
+        val root = temporary.newFolder()
+        modelPack(File(root, "model_pack_user").apply { mkdir() })
+        val context = p.context(root)
+        val controller = controller(p, context)
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val imported = CountDownLatch(1)
+        val closedAtImport = java.util.concurrent.atomic.AtomicInteger(-1)
+        p.setStatic(INTERPRETER, "verifyEntered", entered)
+        p.setStatic(INTERPRETER, "verifyContinue", proceed)
+        p.call(controller, "reloadAsync", context)
+        val previous = p.field(controller, "packJob") as Job
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            p.call(controller, "reloadAsync", context)
+            val replacement = p.field(controller, "packJob") as Job
+            p.call(controller, "importAsync", context, {
+                closedAtImport.set(p.static(DELEGATE, "closed") as Int)
+                imported.countDown()
+                throw IllegalArgumentException("fixture no promotion")
+            })
+            packBarrier(p, controller)
+            assertTrue(previous.isCancelled)
+            assertFalse("取消协程不等于 native owner 已退出", previous.isCompleted)
+            assertTrue((p.field(controller, "packMutex") as Mutex).isLocked)
+            assertEquals("不能在旧包仍被读取时进入促活事务", 1L, imported.count)
+            assertEquals(null, p.field(controller, "detector"))
+            proceed.countDown()
+            assertTrue(imported.await(5, TimeUnit.SECONDS))
+            join(previous)
+            join(replacement)
+            assertTrue("旧候选须先在 owner 关闭", closedAtImport.get() >= 1)
+            assertEquals(2, p.static(DELEGATE, "created"))
+            assertEquals("取消票据不得交接旧候选", 1, p.static(DELEGATE, "closed"))
+            assertNotNull("新票据可以正常装配", p.field(controller, "detector"))
+        } finally {
+            proceed.countDown()
+            p.call(controller, "release")
+        }
+    }
+
+    @Test
+    fun `release退役执行器必须排空已接受的解锁恢复任务`() = platform { p ->
+        val root = temporary.newFolder()
+        modelPack(File(root, "model_pack_user").apply { mkdir() })
+        val context = p.context(root)
+        val controller = controller(p, context)
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val blocked = CountDownLatch(1)
+        val unblock = CountDownLatch(1)
+        val imported = CountDownLatch(1)
+        p.setStatic(INTERPRETER, "verifyEntered", entered)
+        p.setStatic(INTERPRETER, "verifyContinue", proceed)
+        p.call(controller, "reloadAsync", context)
+        val previous = p.field(controller, "packJob") as Job
+        val executor = p.field(controller, "packExecutor") as ExecutorService
+        val mutex = p.field(controller, "packMutex") as Mutex
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val analysis = requireNotNull(p.field(controller, "analysis"))
+            executor.execute {
+                blocked.countDown()
+                // 即使 shutdownNow 中断 blocker，也等显式放闩，确保恢复任务仍在待执行队列。
+                var waiting = true
+                while (waiting) {
+                    try { waiting = !unblock.await(5, TimeUnit.SECONDS) } catch (_: InterruptedException) { }
+                }
+            }
+            assertTrue(blocked.await(5, TimeUnit.SECONDS))
+            proceed.countDown()
+            p.onAnalysis(analysis)
+            assertTrue("owner 已退出，但恢复任务必须尚在旧 executor 排队", mutex.isLocked)
+            assertFalse(previous.isCompleted)
+            p.call(controller, "release")
+            assertSame("退役不能换锁绕过旧 owner", mutex, p.field(controller, "packMutex"))
+            p.call(controller, "importAsync", context, {
+                imported.countDown()
+                throw IllegalArgumentException("fixture no promotion")
+            })
+            unblock.countDown()
+            assertTrue("不能丢弃已接受的恢复任务而永久占锁", imported.await(5, TimeUnit.SECONDS))
+            join(previous)
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+            packBarrier(p, controller)
+            assertFalse(mutex.isLocked)
+            assertEquals("release 后的旧候选不可交接", null, p.field(controller, "detector"))
+        } finally {
+            proceed.countDown()
+            unblock.countDown()
+            p.call(controller, "release")
+        }
+    }
+
+    @Test
     fun `A07_高速回执暂停真实分析与语音但不摘槽不重置开关`() = platform { p ->
         val controller = controller(p)
         val analysis = p.stance("StanceAnalysis").constructors.single().newInstance({ _: Any -> Unit })
@@ -478,16 +626,24 @@ class StanceLifecycleCompatibilityTest {
         assertEquals(true, p.call(detector, "load", File(pack, "yolo11n_int8.tflite"), File(pack, "yolo11n_fp32.tflite"), mode))
         return detector
     }
-    private fun modelPack(): File = temporary.newFolder().apply {
+    private fun modelPack(dir: File = temporary.newFolder()): File = dir.apply {
         File(this, "yolo11n_int8.tflite").writeBytes(ByteArray(16))
         File(this, "yolo11n_fp32.tflite").writeBytes(ByteArray(16))
         File(this, "head.json").writeText("""{"coef":[0,0,0,0,0],"intercept":0}""")
-        File(this, "margins.json").writeText("""{"bands":{}}""")
+        File(this, "margins.json").writeText("""{"bands":{"left":[0.1,0.4],"right":[0.1,0.4],"bottom":[0.0,0.2]}}""")
+        val hashes = listFiles()!!.joinToString(",") { file -> "\"${file.name}\":\"${StanceModelPack.sha256Of(file)}\"" }
+        File(this, "pack.meta.json").writeText("""{"schema":1,"features":["cx","by","w","h","conf"],"files":{$hashes}}""")
     }
-    private fun controller(p: StanceLifecyclePlatform): Any = p.stance("StanceController")
-        .getDeclaredConstructor(p.type("android.content.Context")).apply { isAccessible = true }.newInstance(p.context())
+    private fun controller(p: StanceLifecyclePlatform, context: Any = p.context()): Any = p.stance("StanceController")
+        .getDeclaredConstructor(p.type("android.content.Context")).apply { isAccessible = true }.newInstance(context)
+    private fun packBarrier(p: StanceLifecyclePlatform, controller: Any) {
+        (p.field(controller, "packExecutor") as ExecutorService).submit {}.get(5, TimeUnit.SECONDS)
+    }
+    private fun join(job: Job) = runBlocking { withTimeout(5_000L) { job.join() } }
+    @OptIn(ExperimentalCoroutinesApi::class)
     private fun platform(body: (StanceLifecyclePlatform) -> Unit) {
-        StanceLifecyclePlatform(temporary.newFolder()).use(body)
+        Dispatchers.setMain(Dispatchers.Unconfined)
+        try { StanceLifecyclePlatform(temporary.newFolder()).use(body) } finally { Dispatchers.resetMain() }
     }
     companion object {
         private const val INTERPRETER = "org.tensorflow.lite.Interpreter"

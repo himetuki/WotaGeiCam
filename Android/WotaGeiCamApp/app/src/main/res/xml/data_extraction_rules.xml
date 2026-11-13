@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+：云备份与换机采用同一条正向白名单；新文件/新域不会自动获得迁移资格。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="wota_user_backup.bin" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="wota_user_backup.bin" />
+    </device-transfer>
+</data-extraction-rules>

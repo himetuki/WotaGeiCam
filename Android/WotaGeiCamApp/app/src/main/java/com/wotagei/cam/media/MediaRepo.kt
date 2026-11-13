@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import android.util.LruCache
 import android.util.Size
 import com.wotagei.cam.R
+import com.wotagei.cam.backup.WotaBackupAgent
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.Dispatchers
@@ -202,8 +203,17 @@ class MediaRepo private constructor(private val app: Context) {
         triggers()
             .flatMapLatest { s ->
                 gated {
+                    val raw = queryMediaStore(scope)
+                    val restored = try {
+                        WotaBackupAgent.restoreTags(app, raw)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "收藏迁移未完成，保留待匹配数据供下次重试", e)
+                        emptyList()
+                    }
                     filterByTab(
-                        annotateSeries(joinTags(queryMediaStore(scope), s.tags), s.series, s.parts),
+                        annotateSeries(joinTags(raw, s.tags + restored), s.series, s.parts),
                         filter,
                         s.local
                     )

@@ -3,7 +3,7 @@
  *
  * 逐项对照（鸿蒙面）：
  * ① update 请求目标安全门槛 —— 已由 update-channel-speed.test.ets 的新判据用例覆盖；
- * ② SHA 无期望值短路（不白读全量包体）；
+ * ② SHA 无可信期望值时停止下载（OHOS 无应用侧签名兜底，不能退回 PK + size）；
  * ③ 测速预算兜底（墙钟超时收口）——既有实现，本守卫钉存在性；
  * ④ 补弧离屏资源在解绑/销毁两条路都释放（native）；
  * ⑤ 帧率兜底探测——鸿蒙无阻塞探测（吃 clip 的 fpsHint）→ 登记 N/A；
@@ -81,10 +81,13 @@ test('clearFor_键全集与读写口径同源', () => {
 
 // ------------------------------------------------------------------ 接线守卫（②③④⑦）
 
-test('接线_SHA无期望值短路', () => {
+test('接线_SHA无可信期望值停止_有期望值强制核对_读失败不可越过闸门', () => {
   const dl: string = sourceText('entry/src/main/ets/update/UpdateDownloader.ets');
-  assertTrue(dl.indexOf('const actual: string = expectedSha === undefined\n          ? \'\' : UpdateDownloader.sha256HexOfFile(target);') >= 0,
-    '无期望哈希必须短路，不读全量包体');
+  const gate: number = dl.indexOf('if (expectedSha === undefined)');
+  assertTrue(gate >= 0 && gate < dl.indexOf('await UpdateDownloader.measureAndRank'),
+    '缺官方摘要时必须在任何镜像包传输前停止');
+  assertTrue(dl.indexOf('const actual: string = UpdateDownloader.sha256HexOfFile(part);') >= 0,
+    '有官方摘要的包必须计算实际哈希，无条件走统一严格校验');
   assertTrue(dl.indexOf('Diag.w(TAG, `更新包读取失败，无法校验') >= 0,
     '读盘异常必须在 sha256HexOfFile 内折成空串（不穿成未捕获异常）');
 });

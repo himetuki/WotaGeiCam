@@ -201,8 +201,22 @@ class UpdateSha256Test {
         val outcome = download(cache, transport, trustedSha256())
         assertTrue("不能绕过 SHA 将污染包当成 Done", outcome is UpdateDownloader.DownloadOutcome.Failed)
         assertEquals("必须在所有候选均校验失败后才报告全链失败", UpdateDownloader.downloadCandidates(DOWNLOAD_URL), transport.attempted)
-        assertTrue("全坏失败不得遗留 APK 或 part", File(cache, "updates").listFiles().orEmpty().isEmpty())
+        val remaining = File(cache, "updates").listFiles().orEmpty()
+        assertTrue("全坏失败不得遗留 APK 或 part：${remaining.map { it.name to it.length() }}", remaining.isEmpty())
         assertTrue(transport.connections.all { it.disconnected })
+    }
+
+    @Test
+    fun `D04_重下时全链坏SHA不能删除已有可信完成包`() {
+        val cache = temporary.newFolder("keep-trusted")
+        val target = File(cache, "updates/$ASSET_NAME").apply { parentFile!!.mkdirs(); writeBytes(GOOD_APK) }
+        val transport = ApkTransport { BAD_APK }
+        val outcome = download(cache, transport, trustedSha256())
+        assertTrue(outcome is UpdateDownloader.DownloadOutcome.Failed)
+        assertEquals(UpdateDownloader.downloadCandidates(DOWNLOAD_URL), transport.attempted)
+        assertTrue("坏镜像不能先发布再删掉原可信完成路径", target.isFile)
+        assertArrayEquals(GOOD_APK, target.readBytes())
+        assertEquals(listOf(ASSET_NAME), target.parentFile!!.listFiles().orEmpty().map { it.name })
     }
 
     @Test
@@ -310,14 +324,15 @@ class UpdateSha256Test {
             "downloadApk 必须调 sha256Matches(expectedSha256, …)——校验被拆 = 防污染核心失效",
             dl.contains("sha256Matches(expectedSha256")
         )
-        assertTrue("校验失败必须删包", dl.contains("target.delete()"))
+        assertTrue("校验失败必须删除未发布候选", dl.contains("part.delete()"))
+        assertTrue("SHA 必须在发布完成路径之前验证", dl.indexOf("sha256Matches(expectedSha256") < dl.indexOf("part.renameTo(target)"))
         val settings = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
         assertTrue(
             "UI 必须把探测得到的哈希传给下载（expectedSha256 = avail.sha256）",
             settings.contains("expectedSha256 = avail.sha256")
         )
         // 突变自证：校验判据被恒真短路（拆校验）后尺子必须红（目标串是纯代码，flatten 后必中）
-        val mutated = dl.replace("sha256Matches(expectedSha256, sha256Hex(target))", "true")
+        val mutated = dl.replace("sha256Matches(expectedSha256, sha256Hex(part))", "true")
         assertTrue("校验接线被恒真短路后尺子必须红", !mutated.contains("sha256Matches"))
     }
 

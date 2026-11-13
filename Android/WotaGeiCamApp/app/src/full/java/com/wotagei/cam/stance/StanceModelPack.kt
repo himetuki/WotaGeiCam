@@ -1,155 +1,247 @@
 package com.wotagei.cam.stance
 
-import com.wotagei.cam.diag.Diag
-
 import android.content.Context
 import android.net.Uri
+import com.wotagei.cam.diag.Diag
 import java.io.File
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.security.MessageDigest
+import java.nio.file.Files
 import java.util.zip.ZipInputStream
 
 /**
- * 模型组加载与校验（M2b，D20）：
- * **双通道**：① APK `assets/model_pack/` 内置（首启复制到 filesDir，随版本走）；
- * ② 用户自助导入——设置页 SAF 选 zip → 解压到 filesDir/model_pack_user → 校验激活。
- *
- * **校验与回退**（用户参与原则：一切自动降级必提示）：加载前校验
- * pack.meta.json 的 schema/features 与各文件 sha256；**校验失败自动回退内置模型组
- * 并标记**，绝不因用户替换坏文件导致功能瘫痪。
- * 三件套必须同批产出（meta 记录 trained_at/sessions）——防“新头+旧安全区”口径漂移。
+ * 模型组只有两个入口：APK assets 与用户明确点击的 zip 导入。两者共用目录规格校验；
+ * zip 先在同卷独占暂存目录内完整校验，再替换激活目录，失败保留原模型组。
+ * 包内 SHA 只证明三件套一致，不证明发布者身份；自训模型仍须由用户自行确认来源。
  */
 object StanceModelPack {
     private const val TAG = "StanceModelPack"
     const val SCHEMA = 1
+    internal const val MAX_JSON_BYTES = 64L * 1024
+    internal const val MAX_MODEL_BYTES = 64L * 1024 * 1024
+    internal const val MAX_PACK_BYTES = 128L * 1024 * 1024
+    private const val META = "pack.meta.json"
+    private val GPU_FILES = setOf("yolo11n_fp32.tflite", "yolo11n_fp16.tflite")
+    private val BASE_FILES = setOf("head.json", "margins.json", "yolo11n_int8.tflite")
+    private val BUILTIN_FILES = BASE_FILES + "yolo11n_fp32.tflite" + META
+    private val SHA256 = Regex("[0-9a-f]{64}")
 
-    /** 激活的模型组目录（built-in=随包，user=用户导入）。 */
-    fun builtinDir(context: Context): File =
-        File(context.filesDir, "model_pack_builtin")
+    fun builtinDir(context: Context): File = File(context.filesDir, "model_pack_builtin")
+    fun userDir(context: Context): File = File(context.filesDir, "model_pack_user")
 
-    fun userDir(context: Context): File =
-        File(context.filesDir, "model_pack_user")
-
-    /**
-     * 「自行存入模型」目录（D20 用户口径）：App 专属外部目录——用户可在电脑 USB
-     * 或部分文件管理器直接放入 model_pack.zip，弹窗「扫描目录导入」一键激活。
-     * 完整路径在弹窗文本标注（用户要求：无法直接跳转就改文本标注）。
-     */
+    /** 外部目录只存待导入文件，永不作为 Interpreter 的加载目录。 */
     fun userExternalDir(context: Context): File {
         val base = context.getExternalFilesDir(null) ?: File(context.filesDir, "external")
         return File(base, "model_packs").apply { mkdirs() }
     }
 
-    /** 扫描 [userExternalDir] 下最新的 zip 并导入（「自行存入模型」通道）。 */
     fun importLatestFromExternal(context: Context): Map<String, Any?> {
-        val dir = userExternalDir(context)
-        val zip = dir.listFiles { f -> f.name.endsWith(".zip") }
+        val zip = userExternalDir(context).listFiles { f -> f.isFile && f.name.endsWith(".zip") }
             ?.maxByOrNull { it.lastModified() }
             ?: throw IllegalStateException("模型目录里没有 zip——先从电脑拷入 model_pack.zip")
         return importZip(context, Uri.fromFile(zip))
     }
 
-    /** 当前激活目录：用户包有效 > 内置包（缓存校验结果，meta 级别）。 */
+    @Synchronized
     fun activeDir(context: Context): Pair<File, String> {
+        recoverPrevious(context.filesDir)
         val user = userDir(context)
-        val userMeta = validateDir(user)
-        if (userMeta != null) return user to "user"
+        if (validateDir(user) != null) return user to "user"
         val builtin = builtinDir(context)
-        val builtinMeta = validateDir(builtin)
-        if (builtinMeta != null) return builtin to "builtin"
-        // 双双无效：尝试从 assets 重铺内置
+        if (validateDir(builtin) != null) return builtin to "builtin"
         installBuiltin(context)
-        val re = validateDir(builtin)
-        if (re != null) return builtin to "builtin"
+        if (validateDir(builtin) != null) return builtin to "builtin"
         Diag.w(TAG, "模型组双通道均无效")
         throw IllegalStateException("无有效模型组")
     }
 
-    /** 目录校验：pack.meta.json 结构 + 各文件 sha256。返回 meta（null=无效）。 */
-    fun validateDir(dir: File): Map<String, Any?>? {
-        val metaFile = File(dir, "pack.meta.json")
-        if (!metaFile.isFile) return null
-        val meta = try {
-            @Suppress("UNCHECKED_CAST")
-            StanceJson.parse(metaFile.readText()) as? Map<String, Any?> ?: return null
-        } catch (_: Exception) {
-            return null
+    private fun fileLimit(name: String): Long =
+        if (name == META || name == "head.json" || name == "margins.json") MAX_JSON_BYTES
+        else if (name == "yolo11n_int8.tflite" || name in GPU_FILES) MAX_MODEL_BYTES
+        else throw IllegalArgumentException("模型组含未知文件")
+
+    /** 严格清单：四个载荷、一个 meta；拒绝路径、别名、符号链接及未登记文件。 */
+    fun validateDir(dir: File): Map<String, Any?>? = try {
+        validate(dir)
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun validate(dir: File): Map<String, Any?>? {
+        val root = dir.canonicalFile
+        if (!root.isDirectory || Files.isSymbolicLink(dir.toPath())) return null
+        val children = dir.listFiles()?.toList() ?: return null
+        if (children.size != 5) return null
+        var total = 0L
+        for (f in children) {
+            if (!f.isFile || f.canonicalFile != File(root, f.name)) return null
+            val size = f.length()
+            if (size <= 0 || size > fileLimit(f.name)) return null
+            total += size
+            if (total > MAX_PACK_BYTES) return null
         }
-        if ((meta["schema"] as? Double)?.toInt() != SCHEMA) return null
         @Suppress("UNCHECKED_CAST")
-        val features = (meta["features"] as? List<*>)?.map { it.toString() } ?: return null
-        if (features != StanceHeadSpec.FEATURES) return null
-        @Suppress("UNCHECKED_CAST")
-        val files = meta["files"] as? Map<String, Any?> ?: return null
-        if (files.isEmpty()) return null   // 空模型清单 = 无模型文件的空包，判无效
+        val meta = StanceJson.parse(readJson(File(dir, META))) as? Map<String, Any?> ?: return null
+        if (meta["schema"] != SCHEMA.toDouble()) return null
+        if (meta["features"] != StanceHeadSpec.FEATURES) return null
+        val files = meta["files"] as? Map<*, *> ?: return null
+        val gpu = GPU_FILES.singleOrNull { it in files } ?: return null
+        if (files.keys != BASE_FILES + gpu) return null
+        if (children.map { it.name }.toSet() != files.keys + META) return null
         for ((name, sha) in files) {
-            val f = File(dir, name)
-            if (!f.isFile) return null
-            if (sha256Of(f) != sha) return null
+            if (sha !is String || !SHA256.matches(sha)) return null
+            if (sha256Of(File(dir, name as String)) != sha) return null
         }
+        // JSON 也在激活前验结构，不能把坏判定头/安全区交给运行期再静默回退。
+        val head = StanceHead.fromJson(readJson(File(dir, "head.json")))
+        if (!head.intercept.isFinite() || head.coef.any { !it.isFinite() }) return null
+        StanceSpec.parseCalibratedBands(readJson(File(dir, "margins.json")))
         return meta
     }
 
-    /** 首启/兜底：从 assets 复制内置模型组到 filesDir（覆盖式，随版本更新）。 */
-    fun installBuiltin(context: Context): Boolean {
+    private fun readJson(file: File): String = file.inputStream().use {
+        limited(it, MAX_JSON_BYTES).readBytes().toString(Charsets.UTF_8)
+    }
+
+    @Synchronized
+    fun installBuiltin(context: Context): Boolean = try {
         val dir = builtinDir(context)
         dir.mkdirs()
-        val names = listOf("pack.meta.json", "margins.json", "head.json",
-            "yolo11n_int8.tflite", "yolo11n_fp32.tflite")
-        return try {
-            for (name in names) {
-                context.assets.open("model_pack/$name").use { input ->
-                    File(dir, name).outputStream().use { output -> input.copyTo(output) }
-                }
+        for (name in BUILTIN_FILES) {
+            context.assets.open("model_pack/$name").use { input ->
+                File(dir, name).outputStream().use { output -> limited(input, fileLimit(name)).copyTo(output) }
             }
-            true
-        } catch (e: Exception) {
-            Diag.w(TAG, "内置模型组复制失败：${e.message}")
-            false
+        }
+        validateDir(dir) != null
+    } catch (e: Exception) {
+        Diag.w(TAG, "内置模型组复制失败：${e.message}")
+        false
+    }
+
+    fun importZip(context: Context, uri: Uri): Map<String, Any?> =
+        context.contentResolver.openInputStream(uri)?.use { importStream(context.filesDir, it) }
+            ?: throw IllegalStateException("无法读取所选文件")
+
+    /** 平台无关的唯一导入事务，测试直接喂真实 zip/文件系统。move 仅供失败路径注入。 */
+    @Synchronized
+    internal fun importStream(
+        filesDir: File,
+        input: InputStream,
+        move: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
+    ): Map<String, Any?> {
+        recoverPrevious(filesDir)
+        val stale = filesDir.listFiles { f -> f.name.startsWith("model_pack_import_") }.orEmpty()
+        check(stale.map { removeFlatDir(it) }.all { it }) { "模型暂存文件仍被占用，已取消导入，请稍后重试" }
+        val staging = File.createTempFile("model_pack_import_", "", filesDir)
+        check(staging.delete() && staging.mkdir()) { "无法创建模型暂存目录" }
+        try {
+            unpack(input, staging)
+            val meta = validateDir(staging)
+                ?: throw IllegalArgumentException("模型组校验失败（清单/sha256/规格不符）")
+            val target = File(filesDir, "model_pack_user")
+            val previous = File(filesDir, "model_pack_previous")
+            check(!previous.exists()) { "原模型组待恢复，请重试" }
+            check(!Files.isSymbolicLink(target.toPath())) { "模型激活目录不可为链接" }
+            val hadPrevious = target.exists()
+            if (hadPrevious) check(move(target, previous)) { "无法保留原模型组，已取消导入" }
+            if (!move(staging, target)) {
+                if (hadPrevious) check(previous.renameTo(target)) { "原模型组待恢复，请重试" }
+                throw IllegalStateException("模型组激活失败，已保留原模型组")
+            }
+            removeFlatDir(previous)
+            return meta
+        } finally {
+            removeFlatDir(staging)
         }
     }
 
-    /**
-     * SAF 导入 zip（用户自助替换，D20）：解压到 userDir → 校验 → 成功返回 meta，
-     * 失败清残留并抛异常（UI 提示，激活仍是内置包）。
-     */
-    fun importZip(context: Context, uri: Uri): Map<String, Any?> {
-        val tmp = File(context.cacheDir, "model_pack_import")
-        tmp.deleteRecursively()
-        tmp.mkdirs()
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                ZipInputStream(input.buffered()).use { zip ->
-                    var entries = 0
-                    var entry = zip.nextEntry
-                    while (entry != null) {
-                        if (!entry.isDirectory) {
-                            val name = File(entry.name).name   // 只取文件名（防 zip 路径穿越）
-                            File(tmp, name).outputStream().use { zip.copyTo(it) }
-                            entries++
+    /** rename 之间进程退出：优先恢复最后一个有效包，绝不把半包当新包。 */
+    private fun recoverPrevious(filesDir: File) {
+        val target = File(filesDir, "model_pack_user")
+        val previous = File(filesDir, "model_pack_previous")
+        if (!previous.exists()) return
+        if (validateDir(target) != null) {
+            removeFlatDir(previous)
+        } else if (!target.exists() && validateDir(previous) != null) {
+            check(previous.renameTo(target)) { "原模型组恢复失败" }
+        }
+    }
+
+    /** 只清本类创建的平铺目录；不递归跟随链接或未知子目录。 */
+    internal fun removeFlatDir(dir: File, delete: (File) -> Boolean = { it.delete() }): Boolean {
+        if (!dir.exists()) return true
+        val parent = dir.parentFile ?: return false
+        if (Files.isSymbolicLink(dir.toPath()) || dir.canonicalFile.parentFile != parent.canonicalFile) return false
+        val files = dir.listFiles() ?: return false
+        if (files.any { it.isDirectory && !Files.isSymbolicLink(it.toPath()) }) return false
+        var removed = true
+        for (file in files) if (!delete(file)) removed = false
+        if (removed) removed = delete(dir)
+        if (!removed) Diag.w(TAG, "模型临时目录清理失败，后续导入将先回收：${dir.name}")
+        return removed
+    }
+
+    private fun unpack(input: InputStream, dir: File) {
+        ZipInputStream(limited(input, MAX_PACK_BYTES).buffered()).use { zip ->
+            val names = mutableSetOf<String>()
+            var wrapper: String? = null
+            var entries = 0
+            var total = 0L
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                require(++entries <= 6) { "模型 zip 条目过多" }
+                val raw = entry.name
+                require(!raw.contains('\\') && !raw.contains(':') && raw.length <= 100) { "模型 zip 路径非法" }
+                if (entry.isDirectory) {
+                    require(raw == "model_pack/" && wrapper != "root") { "模型 zip 目录非法" }
+                    require(zip.read() == -1) { "模型 zip 目录不可含数据" }
+                    wrapper = "model_pack"
+                } else {
+                    val parts = raw.split('/')
+                    val kind = if (parts.size == 1) "root" else "model_pack"
+                    require(parts.size == 1 || parts.size == 2 && parts[0] == "model_pack") { "模型 zip 路径非法" }
+                    require(wrapper == null || wrapper == kind) { "模型 zip 不得混用根目录与 model_pack 目录" }
+                    wrapper = kind
+                    val name = parts.last()
+                    val limit = fileLimit(name)
+                    require(names.add(name) && names.size <= 5) { "模型 zip 文件重复或过多" }
+                    require(entry.size <= limit) { "模型文件超过体积上限" }
+                    var size = 0L
+                    File(dir, name).outputStream().use { output ->
+                        val buf = ByteArray(16 * 1024)
+                        while (true) {
+                            val n = zip.read(buf)
+                            if (n < 0) break
+                            size += n
+                            total += n
+                            require(size <= limit && total <= MAX_PACK_BYTES) { "模型文件超过体积上限" }
+                            output.write(buf, 0, n)
                         }
-                        zip.closeEntry()
-                        entry = zip.nextEntry
                     }
-                    require(entries >= 5) { "zip 内文件不足（应有 pack.meta/margins/head/两个 tflite）" }
+                    require(size > 0) { "模型组含空文件" }
                 }
-            } ?: throw IllegalStateException("无法读取所选文件")
-            val meta = validateDir(tmp) ?: throw IllegalArgumentException(
-                "模型组校验失败（sha256/规格不符）——已保持内置模型组")
-            // 校验通过 → 就地替换 userDir。renameTo 可能因跨卷/占用失败（旧实现忽略返回值 =
-            // 静默把用户包删了却没换上去），失败退化为复制；两者都失败才抛（内置包仍可用）。
-            val target = userDir(context)
-            target.deleteRecursively()
-            if (!tmp.renameTo(target)) {
-                if (target.exists()) target.deleteRecursively()
-                tmp.copyRecursively(target, overwrite = true)
-                tmp.deleteRecursively()
-                require(validateDir(target) != null) {
-                    "模型组落盘失败（拷贝后校验不过）——已回退内置模型组，请重试导入"
-                }
+                zip.closeEntry()
             }
-            return meta
-        } finally {
-            if (tmp.exists()) tmp.deleteRecursively()
+            require(names.size == 5) { "模型 zip 必须含 meta/head/margins/两个 tflite" }
+        }
+    }
+
+    private fun limited(input: InputStream, max: Long): InputStream = object : FilterInputStream(input) {
+        var count = 0L
+        override fun read(): Int {
+            val n = super.read()
+            if (n >= 0) checkLimit(1)
+            return n
+        }
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val n = `in`.read(b, off, minOf(len.toLong(), max - count + 1).toInt())
+            if (n > 0) checkLimit(n)
+            return n
+        }
+        private fun checkLimit(n: Int) {
+            count += n
+            require(count <= max) { "模型文件超过体积上限" }
         }
     }
 
@@ -159,7 +251,7 @@ object StanceModelPack {
             val buf = ByteArray(64 * 1024)
             while (true) {
                 val n = input.read(buf)
-                if (n <= 0) break
+                if (n < 0) break
                 md.update(buf, 0, n)
             }
         }

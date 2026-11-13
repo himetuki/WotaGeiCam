@@ -12,12 +12,12 @@
  * 2. Content-Length 与实际字节数一致性（探测给了 size 时也查）；
  * 3. 落盘后首字节 `PK` 魔数（HAP 也是 zip；防镜像回 HTML 错误页）；
  * 4. 响应体上限（探测 4MiB / 包体 100MiB——平台 maxLimit 硬上限，登记偏离上游 2GiB）；
- * 5. SHA-256 端到端校验（哈希只信段 1 官方端点的 Release 说明）。
+ * 5. SHA-256 端到端校验（HAP 哈希只从本仓库同 tag 的官方 SHA256SUMS 取，缺失即停止）。
  *
  * **平台偏离（登记）**：ohos.net.http 自动跟随重定向且拿不到中间 `Location`，无法像上游那样
  * 手写逐跳跟随 + 每跳过安全门槛。补偿：每渠道 URL 在发请求前过 isSafeRemoteUrl（拒环回/私有），
- * 落盘后仍有 PK + size + SHA-256 三道；且 OHOS 侧没有「系统安装器按签名强校验」的等价物，
- * 安装前另做包名/完整性核对（见 UpdateInstaller）。
+ * 落盘后仍强制 PK + size + 官方 SHA-256；导出前再次验证，签名/profile 与安装资格交系统判断。
+ * 三方应用没有公开的包体签名核对或安装器拉起接口，不把结构检查冒充签名检查。
  */
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
@@ -41,23 +41,28 @@ export class DownloadOutcome {
   kind: DownloadKind;
   path: string;
   sizeBytes: number;
+  /** 完成态绑定本资产的官方摘要；导出时必须再次核对，不相信缓存路径本身。 */
+  sha256: string;
+  message: string;
 
-  constructor(kind: DownloadKind, path: string, sizeBytes: number) {
+  constructor(kind: DownloadKind, path: string, sizeBytes: number, sha256: string = '', message: string = '') {
     this.kind = kind;
     this.path = path;
     this.sizeBytes = sizeBytes;
+    this.sha256 = sha256;
+    this.message = message;
   }
 
-  static done(path: string, sizeBytes: number): DownloadOutcome {
-    return new DownloadOutcome(DownloadKind.DONE, path, sizeBytes);
+  static done(path: string, sizeBytes: number, sha256: string = ''): DownloadOutcome {
+    return new DownloadOutcome(DownloadKind.DONE, path, sizeBytes, sha256);
   }
 
   static cancelled(): DownloadOutcome {
     return new DownloadOutcome(DownloadKind.CANCELLED, '', 0);
   }
 
-  static failed(): DownloadOutcome {
-    return new DownloadOutcome(DownloadKind.FAILED, '', 0);
+  static failed(message: string = '下载失败，请检查网络后重试'): DownloadOutcome {
+    return new DownloadOutcome(DownloadKind.FAILED, '', 0, '', message);
   }
 }
 
@@ -139,8 +144,19 @@ export class UpdateDownloader {
    * 按实测速度降序下载；测速全失败时保持候选原序（直连优先 + 镜像表序）。
    */
   static async downloadPackage(ctx: common.Context, directUrl: string, expectedSize: number,
-    expectedSha256: string | undefined, onProgress: DownloadProgressListener,
-    isCancelled: () => boolean, onSpeedTested: () => void): Promise<DownloadOutcome> {
+    onProgress: DownloadProgressListener, isCancelled: () => boolean,
+    onSpeedTested: () => void): Promise<DownloadOutcome> {
+    if (isCancelled()) {
+      return DownloadOutcome.cancelled();
+    }
+    // 先确立官方信任根；镜像的说明、传入哈希、PK 魔数均不能替代它。
+    const expectedSha: string | undefined = await UpdateDownloader.resolveExpectedSha256(directUrl);
+    if (isCancelled()) {
+      return DownloadOutcome.cancelled();
+    }
+    if (expectedSha === undefined) {
+      return DownloadOutcome.failed('无法取得此更新包的官方 SHA-256，已停止下载。可打开 Release 页手动获取');
+    }
     const dir: string = `${ctx.cacheDir}/updates`;
     try {
       fileIo.mkdirSync(dir, true);
@@ -161,12 +177,6 @@ export class UpdateDownloader {
     // part 按代唯一：上一代已取消的读取不会被写进新一代的 part
     const part: string = `${dir}/${assetName}.part${Date.now()}`;
 
-    // HAP 的校验值：Release 说明里的 SHA256 行是安卓 APK 的（发版流水线由 build-apk.yml 回填），
-    // 与 HAP 不是同一枚资产 → 改读 CI 另外产出的 SHA256SUMS（直连 GitHub，不走镜像）。
-    // 拿不到（老 Release / 网络失败）→ undefined，退回 PK + size 两道防线。
-    const expectedSha: string | undefined =
-      await UpdateDownloader.resolveExpectedSha256(directUrl, expectedSha256);
-
     const candidates: Array<string> =
       UpdateDownloadPure.downloadCandidates(directUrl, UpdateConfig.MIRROR_PREFIXES);
     const ordered: Array<string> = await UpdateDownloader.measureAndRank(candidates, isCancelled);
@@ -183,7 +193,14 @@ export class UpdateDownloader {
       const r: DownloadOutcome =
         await UpdateDownloader.tryNode(url, part, expectedSize, onProgress, isCancelled);
       if (r.kind === DownloadKind.DONE) {
-        // 重下同一资产时旧包还在：先删旧再改名（rename 对已存在目标的行为平台相关）
+        // 临时件通过官方摘要后才获得正式路径；坏镜像不能移除或短暂替换旧的可信成品。
+        const actual: string = UpdateDownloader.sha256HexOfFile(part);
+        if (!UpdateDownloadPure.sha256Matches(expectedSha, actual)) {
+          Diag.e(TAG, `SHA-256 不匹配（期望=${expectedSha} 实际=${actual}），删临时件并尝试下一渠道`);
+          UpdateDownloader.removeQuietly(part);
+          continue;
+        }
+        // rename 对已存在目标的行为平台相关；只在新包验证成功后才替换旧成品。
         UpdateDownloader.removeQuietly(target);
         try {
           fileIo.renameSync(part, target);
@@ -192,17 +209,8 @@ export class UpdateDownloader {
           UpdateDownloader.removeQuietly(part);
           return DownloadOutcome.failed();
         }
-        // RISK：无期望哈希时短路——不白读 ~5MB 全量包体算一个用不上的摘要
-        // （对齐上游 f941799；读盘异常已由 sha256HexOfFile 内部折 ''，不会穿成未捕获异常）
-        const actual: string = expectedSha === undefined
-          ? '' : UpdateDownloader.sha256HexOfFile(target);
-        if (UpdateDownloadPure.sha256Matches(expectedSha, actual)) {
-          Diag.i(TAG, `更新包就绪：${target}（${r.sizeBytes}B）`);
-          return DownloadOutcome.done(target, r.sizeBytes);
-        }
-        Diag.e(TAG, `SHA-256 不匹配（期望=${expectedSha} 实际=${actual}），判镜像污染，删包`);
-        UpdateDownloader.removeQuietly(target);
-        return DownloadOutcome.failed();
+        Diag.i(TAG, `更新包已通过官方 SHA-256：${target}（${r.sizeBytes}B）`);
+        return DownloadOutcome.done(target, r.sizeBytes, expectedSha);
       }
       if (r.kind === DownloadKind.CANCELLED) {
         UpdateDownloader.removeQuietly(part);
@@ -211,7 +219,7 @@ export class UpdateDownloader {
       // 该渠道失败：试下一个（顺序已按测速从快到慢）
       UpdateDownloader.removeQuietly(part);
     }
-    return DownloadOutcome.failed();
+    return DownloadOutcome.failed('下载失败或官方 SHA-256 不匹配，未保留更新包。请重试或打开 Release 页');
   }
 
   /**
@@ -219,31 +227,22 @@ export class UpdateDownloader {
    * 再取同 tag 下的 `SHA256SUMS`（build-hap.yml 产出的资产，`sha256sum *.hap` 原文），
    * 按资产名匹配一行。**只走直连**：SUMS 若从镜像取，镜像可以同时换包和换哈希，校验就失去意义。
    */
-  private static async resolveExpectedSha256(directUrl: string,
-    expectedSha256: string | undefined): Promise<string | undefined> {
-    if (expectedSha256 !== undefined) {
-      return expectedSha256;
-    }
-    const assetSlash: number = directUrl.lastIndexOf('/');
-    if (assetSlash <= 0) {
+  private static async resolveExpectedSha256(directUrl: string): Promise<string | undefined> {
+    const sumsUrl: string | undefined = UpdateConfig.sha256SumsUrlFor(directUrl);
+    if (sumsUrl === undefined) {
+      Diag.w(TAG, '更新资产不是本仓库的规范直连地址，已拒绝');
       return undefined;
     }
-    const assetName: string = directUrl.substring(assetSlash + 1);
-    const tagSlash: number = directUrl.lastIndexOf('/', assetSlash - 1);
-    if (tagSlash < 0) {
-      return undefined;
-    }
-    const tag: string = directUrl.substring(tagSlash + 1, assetSlash);
-    const sumsUrl: string = UpdateConfig.directDownloadUrl(tag, 'SHA256SUMS');
+    const assetName: string = directUrl.substring(directUrl.lastIndexOf('/') + 1);
     const text: string | undefined =
       await UpdateDownloader.fetchJson(sumsUrl, UpdateDownloader.PROBE_READ_TIMEOUT_MS);
     if (text === undefined) {
-      Diag.i(TAG, `SHA256SUMS 不可用，本次只做 PK + size 校验：${sumsUrl}`);
+      Diag.w(TAG, `官方 SHA256SUMS 不可用，禁止交付更新包：${sumsUrl}`);
       return undefined;
     }
     const sha: string | undefined = ReleaseJson.parseSha256Sums(text, assetName);
     if (sha === undefined) {
-      Diag.i(TAG, `SHA256SUMS 里没有 ${assetName}，本次只做 PK + size 校验`);
+      Diag.w(TAG, `官方 SHA256SUMS 中没有 ${assetName} 的唯一有效摘要，禁止交付更新包`);
     }
     return sha;
   }

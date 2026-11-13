@@ -91,7 +91,18 @@ class MediaActions private constructor(
         }
         return try {
             val oldPath = clip.dataPath
-            val rows = withContext(Dispatchers.IO) { app.contentResolver.update(clip.uri, values, null, null) }
+            val rows = withContext(Dispatchers.IO) {
+                // 不能用可能陈旧的 clip.dataPath 搬身份：同 ID 已复用时，旧标签必须保持不匹配。
+                val before = queryDataPath(clip.uri)
+                withContext(NonCancellable) {
+                    val changed = app.contentResolver.update(clip.uri, values, null, null)
+                    if (changed > 0 && before != null) {
+                        // 只信成功后回查的真实 DATA；撞名后缀/清洗结果不能由请求名称推断。
+                        queryDataPath(clip.uri)?.let { after -> dao.movePathAfterRename(clip.id, before, after) }
+                    }
+                    changed
+                }
+            }
             if (rows > 0) {
                 repo.invalidate()
                 // MediaStore 改 DISPLAY_NAME 会连底层文件一起改名：sidecar（被抽帧位次档案）
@@ -125,6 +136,13 @@ class MediaActions private constructor(
         val ext = oldName.substringAfterLast('.', "")
         return if (ext.isEmpty() || name.endsWith(".$ext", ignoreCase = true)) name else "$name.$ext"
     }
+
+    @Suppress("DEPRECATION") // DATA 只用于受控改名前后确认身份，不以请求名称猜测路径。
+    private fun queryDataPath(uri: Uri): String? = runCatching {
+        app.contentResolver.query(uri, arrayOf(MediaStore.Video.Media.DATA), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getString(0)?.takeIf { it.isNotBlank() } else null
+        }
+    }.getOrNull()
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，拼装名与落盘名可能分叉 */
     private fun queryDisplayName(uri: Uri): String? = runCatching {

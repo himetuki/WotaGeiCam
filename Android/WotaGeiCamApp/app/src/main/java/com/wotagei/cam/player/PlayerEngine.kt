@@ -1,4 +1,4 @@
-// Media3 1.1.1 把 PlayerView/ExoPlayer.Builder/DefaultRenderersFactory 都标了 @UnstableApi，
+// Media3 的 PlayerView/ExoPlayer.Builder/DefaultRenderersFactory 带有 @UnstableApi，
 // 但这是官方推荐给非通用播放器的公开入口（AGP 会按 lint 报 UnsafeOptInUsageError），整文件认下来。
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
@@ -77,7 +77,7 @@ internal fun audioPitchFor(@Suppress("UNUSED_PARAMETER") speed: Float): Float = 
  *
  * 进度只有一个数据源：120ms 轮询 tick 同时产出 [positionMs]、[durationMs] 与 AB 回绕（/5）。
  *
- * 1.1.1 无 SeekParameters，精确逐帧待升级 Media3 后补（见 [stepFrame]）。
+ * 帧步进维持既有 seekTo 策略；SeekParameters 属 exoplayer 包，依赖维护不顺带改变寻帧语义。
  */
 class PlayerEngine(private val context: Context) {
 
@@ -233,8 +233,8 @@ class PlayerEngine(private val context: Context) {
             .setTrackSelector(selector)
             .build()
             .apply {
-                // 帧步进精度：Media3 1.1.1 无 SeekParameters（media3-common classes.jar 内不存在该类，
-                // Player 也无 setSeekParameters），精确逐帧待升级 Media3 后补；当前按帧栅格对齐目标后依赖 seekTo 的默认同步帧对齐（见 stepFrame）
+                // 帧步进按帧栅格对齐目标后交给 seekTo；保留原策略（见 stepFrame）。
+                // SeekParameters 在 exoplayer 而非 common 中；本轮升级不额外启用 EXACT。
                 addListener(listener)
                 repeatMode = Player.REPEAT_MODE_OFF
             }
@@ -304,7 +304,7 @@ class PlayerEngine(private val context: Context) {
      * 帧步进 / 帧后退。
      *
      * 目标一律对齐帧栅格（前进取 floor+1、后退取 ceil-1），反复点不会停在非帧首、来回点也不漂移；
-     * 1.1.1 无 SeekParameters，对齐只能在这里自己做（见类注释）。
+     * 这里只定义目标帧栅格，不把 seekTo 的实际解码落点冒充精确逐帧（见类注释）。
      * 不乐观覆写 [positionMs]（进度只由轮询回读，避免 seek 未完成时进度条回跳），
      * 连点不吞步靠 [pendingStepMs] 记住上一次已发出的目标。
      * 先 [softPause] 再读位置 —— 绝不能调破坏性 pause（NPE 事故）。

@@ -231,12 +231,16 @@ test('过期文件判据_删part与非本轮资产_保留本轮已完成包', ()
   assertEq(0, UpdateDownloadPure.staleFilesOf(['a.hap'], 'a.hap').length);
 });
 
-test('校验判据_无期望恒放行_有期望忽略大小写精确比对', () => {
-  assertTrue(UpdateDownloadPure.sha256Matches(undefined, 'anything'));
-  assertTrue(UpdateDownloadPure.sha256Matches('aa', 'aa'));
-  assertTrue(UpdateDownloadPure.sha256Matches('AA', 'aa'));
-  assertFalse(UpdateDownloadPure.sha256Matches('aa', 'ab'));
-  assertFalse(UpdateDownloadPure.sha256Matches('aa', ''));
+test('校验判据_无期望坏格式或读取失败一律拒绝_有效摘要忽略大小写', () => {
+  const sha: string = 'aB'.repeat(32);
+  assertFalse(UpdateDownloadPure.sha256Matches(undefined, sha));
+  assertFalse(UpdateDownloadPure.sha256Matches('', ''));
+  assertFalse(UpdateDownloadPure.sha256Matches('aa', 'aa'));
+  assertFalse(UpdateDownloadPure.sha256Matches('g'.repeat(64), 'g'.repeat(64)));
+  assertFalse(UpdateDownloadPure.sha256Matches(sha, ''));
+  assertFalse(UpdateDownloadPure.sha256Matches(sha, sha + '0'));
+  assertFalse(UpdateDownloadPure.sha256Matches(sha, '00'.repeat(32)));
+  assertTrue(UpdateDownloadPure.sha256Matches(sha, sha.toUpperCase()));
 });
 
 // ------------------------------------------------------------------ 尺子自己能红

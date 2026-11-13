@@ -145,6 +145,7 @@ struct Settings {
   @State downloadMeasuring: boolean = false;
   @State downloadDone: boolean = false;
   @State downloadFailed: boolean = false;
+  @State downloadFailureMessage: string = '';
   @State downloadRead: number = 0;
   @State downloadTotal: number = -1;
   @State versionName: string = '1.0.0';
@@ -156,6 +157,7 @@ struct Settings {
   private downloadGen: number = 0;
   private pendingAvailable: ProbeResult | undefined = undefined;
   private downloadedPath: string = '';
+  private downloadedSha256: string = '';
 
   aboutToAppear(): void {
     this.readVersion();
@@ -348,8 +350,11 @@ struct Settings {
     this.downloadFailed = false;
     this.downloadRead = 0;
     this.downloadTotal = avail.sizeBytes;
+    this.downloadFailureMessage = '';
+    this.downloadedPath = '';
+    this.downloadedSha256 = '';
     const gen: number = ++this.downloadGen;
-    UpdateDownloader.downloadPackage(ctx, avail.downloadUrl, avail.sizeBytes, avail.sha256,
+    UpdateDownloader.downloadPackage(ctx, avail.downloadUrl, avail.sizeBytes,
       (read: number, total: number): void => {
         if (gen === this.downloadGen) {
           this.downloadRead = read;
@@ -367,6 +372,7 @@ struct Settings {
         }
         if (o.kind === DownloadKind.DONE) {
           this.downloadedPath = o.path;
+          this.downloadedSha256 = o.sha256;
           this.downloadRead = o.sizeBytes;
           this.downloadTotal = o.sizeBytes;
           this.downloadMeasuring = false;
@@ -380,6 +386,7 @@ struct Settings {
         }
         this.downloadMeasuring = false;
         this.downloadFailed = true;
+        this.downloadFailureMessage = o.message;
       });
   }
 
@@ -399,10 +406,16 @@ struct Settings {
       return;
     }
     const name: string = this.downloadedPath.substring(this.downloadedPath.lastIndexOf('/') + 1);
-    const r: SaveResult = await UpdateInstaller.saveAs(ctx, this.downloadedPath, name);
+    const r: SaveResult = await UpdateInstaller.saveAs(ctx, this.downloadedPath, name, this.downloadedSha256);
     this.message = r.message;
     if (r.ok) {
       this.downloadVisible = false;
+    } else if (r.message !== '已取消保存') {
+      this.downloadDone = false;
+      this.downloadFailed = true;
+      this.downloadFailureMessage = r.message;
+      this.downloadedPath = '';
+      this.downloadedSha256 = '';
     }
   }
 
@@ -1387,7 +1400,7 @@ struct Settings {
     Stack({ alignContent: Alignment.Center }) {
       this.modalBackdrop()
       Column({ space: HudSpace.M }) {
-        Text(this.downloadDone ? '下载完成，可以安装'
+        Text(this.downloadDone ? '下载完成，官方 SHA-256 已验证'
           : (this.downloadFailed ? '下载失败，请稍后重试'
             : (this.downloadMeasuring ? '正在选择最快的下载通道…' : '正在下载更新')))
           .fontSize(HudType.TITLE)
@@ -1402,7 +1415,7 @@ struct Settings {
           }
           .width('100%')
         } else if (this.downloadDone) {
-          Text(`更新包 ${formatSize(this.downloadRead)} 已校验通过，另存后用文件管理打开安装`)
+          Text(`更新包 ${formatSize(this.downloadRead)} 与官方摘要一致。另存后用文件管理打开，签名/profile 与安装资格由系统确认`)
             .fontSize(HudType.VALUE)
             .fontColor(HudColor.TEXT_SECONDARY)
             .width('100%')
@@ -1440,6 +1453,20 @@ struct Settings {
           }
           .width('100%')
         } else if (this.downloadFailed) {
+          Text(this.downloadFailureMessage)
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_SECONDARY)
+            .width('100%')
+          Button('打开 Release 页')
+            .fontSize(HudType.VALUE)
+            .fontColor(HudColor.TEXT_SECONDARY)
+            .height(HudTouch.BUTTON_HEIGHT)
+            .borderRadius(HudShape.PILL_RADIUS)
+            .backgroundColor(HudColor.PILL_BG)
+            .width('100%')
+            .onClick((): void => {
+              this.openReleasePage();
+            })
           Row() {
             Button('关闭')
               .fontSize(HudType.VALUE)

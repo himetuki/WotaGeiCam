@@ -89,21 +89,24 @@ object StanceSpec {
     fun loadCalibratedBands(marginsJson: String?): Boolean {
         if (marginsJson.isNullOrBlank()) return false
         return try {
-            @Suppress("UNCHECKED_CAST")
-            val bands = (StanceJson.parse(marginsJson) as Map<String, Any?>)["bands"] as? Map<String, Any?>
-                ?: return false
-            val parsed = linkedMapOf<String, Pair<Float, Float>>()
-            for (side in MARGIN_BANDS.keys) {
-                val arr = bands[side] as? List<*> ?: return false
-                val lo = (arr[0] as Double).toFloat()
-                val hi = (arr[1] as Double).toFloat()
-                if (!(lo in 0f..1f && hi in 0f..1f && lo < hi)) return false
-                parsed[side] = lo to hi
-            }
-            parsed.forEach { (k, v) -> MARGIN_BANDS[k] = v }
+            parseCalibratedBands(marginsJson).forEach { (k, v) -> MARGIN_BANDS[k] = v }
             true
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /** 入包与运行期共用 Float 规格；解析无副作用，不会在验包时覆盖当前安全区。 */
+    internal fun parseCalibratedBands(json: String): Map<String, Pair<Float, Float>> {
+        val obj = StanceJson.parse(json) as? Map<*, *> ?: error("安全区缺对象")
+        val bands = obj["bands"] as? Map<*, *> ?: error("安全区缺 bands")
+        return listOf("left", "right", "bottom").associateWith { side ->
+            val arr = bands[side] as? List<*> ?: error("安全区缺 $side")
+            require(arr.size == 2) { "安全区 $side 必须有两个端点" }
+            val lo = (arr[0] as? Double)?.toFloat() ?: error("安全区端点非数字")
+            val hi = (arr[1] as? Double)?.toFloat() ?: error("安全区端点非数字")
+            require(lo in 0f..1f && hi in 0f..1f && lo < hi) { "安全区 $side 超界或 Float 精度下已退化" }
+            lo to hi
         }
     }
 }

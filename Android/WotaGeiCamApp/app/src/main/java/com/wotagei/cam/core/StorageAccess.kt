@@ -15,8 +15,8 @@ import android.provider.Settings
  * 要么持有 `MANAGE_EXTERNAL_STORAGE` 让 MediaProvider 跳过归属校验。既然框不能要，就只剩这一条，
  * 没有第三种可能 —— 所以这里要的不是"降级方案"，而是把这件事做到底的唯一做法。
  *
- * 该权限只能在系统设置里由用户亲手开一次（`ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION`），
- * 那是设置页、不是确认框；开完之后本应用所有删除/回收站/重命名都静默完成。
+ * 这是可选的便捷权限，首启/录制/查看/管理自录视频均不要求它；只在设置页由用户亲手开关。
+ * 拒绝时保留自录媒体操作，跨应用修改给出设置入口，不擅自提升权限或恢复已定版取消的系统确认框。
  */
 object WotaStorage {
 
@@ -52,15 +52,19 @@ object WotaStorage {
      */
     @SuppressLint("InlinedApi")
     fun openSettings(context: Context): Boolean {
-        // API 29 没有这个系统页：两个 action 都起不来，直接返回 false，别让 UI 以为跳成功了
-        if (!supportsAllFilesAccess()) return false
-        val candidates = listOf(
-            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                .setData(Uri.parse("package:${context.packageName}")),
-            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-        )
-        return candidates.any { intent ->
-            runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
+        return openSettingsFor(Build.VERSION.SDK_INT, context.packageName) { action, data ->
+            runCatching {
+                val intent = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (data != null) intent.data = Uri.parse(data)
+                context.startActivity(intent)
+            }.isSuccess
         }
+    }
+
+    /** 行为测试驱动同一条回退链：单应用设置 → 特殊权限总页；两者均不可用时明确返回失败。 */
+    internal fun openSettingsFor(sdk: Int, packageName: String, launch: (String, String?) -> Boolean): Boolean {
+        if (!supportsAllFilesAccessFor(sdk)) return false
+        return launch(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, "package:$packageName") ||
+            launch(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION, null)
     }
 }

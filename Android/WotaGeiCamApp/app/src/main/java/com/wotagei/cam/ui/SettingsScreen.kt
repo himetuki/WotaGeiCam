@@ -1105,7 +1105,10 @@ private fun BlockStorage() {
                 text = stringResource(if (granted) R.string.set_storage_on else R.string.set_storage_open),
                 selected = granted,
                 onClick = {
-                    com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)
+                    if (!com.wotagei.cam.core.WotaStorage.openSettings(storageCtx)) {
+                        android.widget.Toast.makeText(storageCtx, R.string.set_storage_open_failed,
+                            android.widget.Toast.LENGTH_LONG).show()
+                    }
                 }
             )
         }

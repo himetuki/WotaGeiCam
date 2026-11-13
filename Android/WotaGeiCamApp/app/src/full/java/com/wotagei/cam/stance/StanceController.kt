@@ -14,6 +14,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
@@ -74,8 +78,9 @@ class StanceController private constructor(
     /**
      * 模型组装配串行线程（2026-11-07）：首启 copy 13.8MB + 全量 sha256 + Interpreter 构造，
      * 旧实现发生在 CameraScreen 首帧组合里（主线程）——冷启被拖慢、低端机有 ANR 风险。
-     * 单线程保证"导入/切 GPU/首启"多次装配不并发。
+     * 单线程只管调度；跨分析 owner 挂起期间，由 packMutex 保证文件事务不与装配交错。
      */
+    private val packMutex = Mutex()
     private var packJob: Job? = null
     private var packExecutor: ExecutorService = newPackExecutor()
     private var packScope = CoroutineScope(SupervisorJob() + packExecutor.asCoroutineDispatcher())
@@ -161,7 +166,14 @@ class StanceController private constructor(
         packJob?.cancel()
         packJob = packScope.launch {
             try {
-                reloadActive(app)
+                val request = currentCoroutineContext()
+                packMutex.withLock {
+                    // native 不可抢停：等 owner 真正退出才解锁；仍用原请求验票，取消后不交接。
+                    withContext(NonCancellable) {
+                        request.ensureActive()
+                        reloadActive(app, request)
+                    }
+                }
                 withContext(Dispatchers.Main) {
                     if (_state.value.enabled) maybeAttachAfterGate()
                 }
@@ -180,7 +192,8 @@ class StanceController private constructor(
         packJob?.cancel()
         packJob = null
         packScope.cancel()
-        packExecutor.shutdownNow()
+        // 保留已接受的 continuation/解锁任务；强制清队列会让跨 scope 的 Mutex 永久占用。
+        packExecutor.shutdown()
         packExecutor = newPackExecutor()
         packScope = CoroutineScope(SupervisorJob() + packExecutor.asCoroutineDispatcher())
     }
@@ -189,11 +202,11 @@ class StanceController private constructor(
      * 装配当前激活模型组（用户包优先 > 内置），**用户包加载失败自动回退内置**（D20）。
      * 装配复用既有 [StanceAnalysis] 管线（[StanceAnalysis.updateModel]），不重建线程/reader。
      */
-    private suspend fun reloadActive(context: Context) {
+    private suspend fun reloadActive(context: Context, request: CoroutineContext) {
         val (dir, source) = StanceModelPack.activeDir(context)
         val meta = StanceModelPack.validateDir(dir) ?: throw IllegalStateException("模型组校验失败")
         try {
-            applyPack(dir, meta, source)
+            applyPack(dir, meta, source, request)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -206,15 +219,14 @@ class StanceController private constructor(
                 bMeta = StanceModelPack.validateDir(builtin)
             }
             if (bMeta == null) throw e
-            applyPack(builtin, bMeta, "builtin")
+            applyPack(builtin, bMeta, "builtin", request)
             _state.value = _state.value.copy(
                 fallbackTip = "用户模型组不可用（${e.message}），已回退内置模型组",
             )
         }
     }
 
-    private suspend fun applyPack(dir: java.io.File, meta: Map<String, Any?>, source: String) {
-        val request = currentCoroutineContext()
+    private suspend fun applyPack(dir: java.io.File, meta: Map<String, Any?>, source: String, request: CoroutineContext) {
         request.ensureActive()
         val epoch = synchronized(modelLock) { modelGeneration }
         dumpGpuEnvironment()
@@ -242,7 +254,8 @@ class StanceController private constructor(
                 request.ensureActive()
                 val ok = next.load(
                     java.io.File(dir, "yolo11n_int8.tflite"),
-                    java.io.File(dir, "yolo11n_fp32.tflite"),
+                    java.io.File(dir, "yolo11n_fp32.tflite").takeIf { it.isFile }
+                        ?: java.io.File(dir, "yolo11n_fp16.tflite"),
                     gpuMode = _state.value.gpuMode,
                 )
                 if (!ok) throw IllegalStateException("检测模型不可加载（张量规格/文件异常）")
@@ -580,28 +593,33 @@ class StanceController private constructor(
         reloadAsync(context.applicationContext)
     }
 
-    /** SAF 导入模型组（D20 用户自助替换）。解压在调用线程（用户动作），模型装配异步。 */
-    fun importPack(context: Context, uri: Uri): Boolean {
-        return try {
-            StanceModelPack.importZip(context, uri)
-            reloadAsync(context.applicationContext)
-            true
-        } catch (e: Exception) {
-            _state.value = _state.value.copy(fallbackTip = "导入失败：${e.message}（已保持内置模型组）")
-            false
+    /** 导入先验包，成功才替换装配请求；失败不能取消冷启/切 GPU 尚未完成的装配。 */
+    private fun importAsync(app: Context, action: () -> Unit) {
+        packScope.launch {
+            try {
+                packMutex.withLock { action() }
+                withContext(Dispatchers.Main) { reloadAsync(app) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    val tip = "导入失败：${e.message}（原模型组未变）"
+                    Diag.w(TAG, tip)
+                    _state.value = _state.value.copy(fallbackTip = tip)
+                }
+            }
         }
     }
 
-    /** 「自行存入模型」：扫描外部模型目录最新 zip 导入（用户十七稿通道）。 */
-    fun importFromExternalDir(context: Context): Boolean {
-        return try {
-            StanceModelPack.importLatestFromExternal(context)
-            reloadAsync(context.applicationContext)
-            true
-        } catch (e: Exception) {
-            _state.value = _state.value.copy(fallbackTip = "导入失败：${e.message}（已保持内置模型组）")
-            false
-        }
+    fun importPack(context: Context, uri: Uri) {
+        val app = context.applicationContext
+        importAsync(app) { StanceModelPack.importZip(app, uri) }
+    }
+
+    /** 外部目录仍须用户明确点击；和 SAF 走同一个导入事务。 */
+    fun importFromExternalDir(context: Context) {
+        val app = context.applicationContext
+        importAsync(app) { StanceModelPack.importLatestFromExternal(app) }
     }
 
     /** 退出预览页/窗口销毁释放（Activity finish；配置变更不调——与 CameraController 同级）。 */

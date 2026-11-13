@@ -4,7 +4,9 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.StrictMode
+import com.wotagei.cam.backup.WotaBackupAgent
 import com.wotagei.cam.diag.Diag
+import kotlinx.coroutines.runBlocking
 import com.wotagei.cam.record.CaptureFgService
 import com.wotagei.cam.ui.WotaSettings
 
@@ -32,6 +34,9 @@ class WotaApp : Application() {
         // ——总墙钟不变（这份读本来就串在 onCreate 里），只是把系统调用挪出主线程。
         val prefsPrefetched = java.util.concurrent.CountDownLatch(1)
         kotlin.concurrent.thread(start = true, isDaemon = true, name = "wota-prefs-prefetch") {
+            // 先重试系统恢复留下的快照，再预热设置；有界 IO 留在现有后台线程，不启动 Room。
+            runCatching { runBlocking { WotaBackupAgent.retryRestore(this@WotaApp) } }
+                .onFailure { Diag.w("WotaBackup", "启动迁移未完成，保留输入供媒体库或备份前重试") }
             runCatching {
                 val p = WotaSettings.of(this@WotaApp)
                 // 必须真等到「载入完成」：awaitLoadedLocked 在 Android 15 上对**等待方**也打

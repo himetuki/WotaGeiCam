@@ -18,8 +18,8 @@ import kotlinx.coroutines.flow.Flow
  * 与 MediaStore 解耦：文件被外部改动时标签记录仍在。
  *
  * 清理链路按 `mediaId` 走（`MediaActions.deleteForever` 里 `clearFor`）——  就是为防
- * id 复用把脏标签串到新视频上。[path] 目前是**预留列**：它 intended 的用途是「文件在系统相册里
- * 被删掉后回收孤儿标签」，那步对账还没实现，所以现在只有写入方在用，孤儿行只会让表变大。
+ * id 复用把脏标签串到新视频上。[path] 同时用于迁移导出的身份核对；受控改名只按原路径条件更新，
+ * 外部删除后的孤儿标签对账仍未实现，不能据同一个 MediaStore id 猜测归属。
  */
 @Entity(
     tableName = "media_tag",
@@ -76,6 +76,10 @@ interface MediaTagDao {
 
     @Query("DELETE FROM media_tag WHERE mediaId = :mediaId AND tag = :tag")
     suspend fun deleteOne(mediaId: Long, tag: String)
+
+    /** 受控改名成功后只搬同一原文件的标签，既不覆盖时间，也不认复用的 ID。 */
+    @Query("UPDATE media_tag SET path = :newPath WHERE mediaId = :mediaId AND path = :oldPath")
+    suspend fun movePathAfterRename(mediaId: Long, oldPath: String, newPath: String)
 
     /** 删除文件后必须清标签，否则 id 复用时脏标签会串到新视频上 */
     @Query("DELETE FROM media_tag WHERE mediaId IN (:mediaIds)")

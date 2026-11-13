@@ -10,6 +10,7 @@ import java.net.URLClassLoader
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 import kotlin.coroutines.resume
@@ -136,6 +137,8 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
         "android/content/Context.java" to """
             package android.content;
             public class Context {
+                public java.io.File filesDir;
+                public java.io.File getFilesDir(){return filesDir;}
                 public Context getApplicationContext(){return this;}
                 public android.content.pm.PackageManager getPackageManager(){return new android.content.pm.PackageManager();}
                 public android.content.res.AssetManager getAssets(){return new android.content.res.AssetManager();}
@@ -254,7 +257,9 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
     fun type(name: String): Class<*> = loader.loadClass(name)
     fun stance(name: String): Class<*> = type("com.wotagei.cam.stance.$name")
     fun instance(name: String): Any = stance(name).getConstructor().newInstance()
-    fun context(): Any = type("android.content.Context").getConstructor().newInstance()
+    fun context(filesDir: File? = null): Any = type("android.content.Context").getConstructor().newInstance().also {
+        inject(it, "filesDir", filesDir)
+    }
     fun setStatic(name: String, field: String, value: Any) = type(name).getField(field).set(null, value)
     fun static(name: String, field: String): Any = type(name).getField(field).get(null)
     fun events(): List<String> = (static("org.tensorflow.lite.Interpreter", "events") as List<*>).map { it.toString() }
@@ -271,8 +276,10 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
     }
     suspend fun callSuspendingInContext(target: Any, name: String, vararg args: Any?): Any? {
         val method = target.javaClass.declaredMethods.single { it.name == name }.apply { isAccessible = true }
-        return if (method.parameterCount == args.size) call(target, name, *args) else suspendCoroutine { continuation ->
-            val result = try { method.invoke(target, *args, continuation) } catch (e: InvocationTargetException) { throw e.targetException }
+        // applyPack 显式携带原请求票据；生产路径的 NonCancellable 等待不能替代这张取消票。
+        val actualArgs = if (name == "applyPack") arrayOf(*args, currentCoroutineContext()) else args
+        return if (method.parameterCount == actualArgs.size) call(target, name, *actualArgs) else suspendCoroutine { continuation ->
+            val result = try { method.invoke(target, *actualArgs, continuation) } catch (e: InvocationTargetException) { throw e.targetException }
             if (result !== COROUTINE_SUSPENDED) continuation.resume(result)
         }
     }

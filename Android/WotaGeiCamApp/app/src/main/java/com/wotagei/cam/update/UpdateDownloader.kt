@@ -267,32 +267,25 @@ object UpdateDownloader {
             }
             when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled, openConnection)) {
                 is DownloadOutcome.Done -> {
-                    // 重下同一资产时旧包还在：Windows 语义下 renameTo 对已存在目标会失败，必须先删旧再改名
-                    //（此刻删的是刚下完的新包要顶掉的旧包，与 P3-3 保留旧包给安装器读不冲突——重下即用户已弃旧包）
-                    val renamed = (if (target.exists()) target.delete() else true) && part.renameTo(target)
-                    if (renamed) {
-                        // SHA-256 端到端校验（v0.0.8）：哈希来自段 1 官方端点的 Release 说明（发版者写入）。
-                        // 探测没给（段 2/3、旧版 notes）→ 跳过校验（不为 null 才读盘，省一次全量 IO），
-                        // 退回既有防线（PK+size+安装签名网）；给了且不匹配 → 拒收该渠道，删污染包后继续后备。
-                        // 校验本身是读盘：IO 异常必须折算成失败——下载协程没有 CoroutineExceptionHandler，
-                        // 抛出去就是未捕获异常杀进程（与 tryNode「任何异常都折算成失败」同纪律）。
-                        val verified = runCatching {
-                            expectedSha256 == null ||
-                                sha256Matches(expectedSha256, sha256Hex(target))
-                        }.getOrElse { e ->
-                            Log.e(TAG, "SHA-256 校验读盘失败（${e.javaClass.simpleName}），判失败", e)
-                            false
-                        }
-                        if (verified) {
-                            return DownloadOutcome.Done(target, r.sizeBytes)
-                        }
-                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），删污染包并尝试下一渠道")
-                        target.delete()
-                        continue
-                    } else {
-                        part.delete()
-                        return DownloadOutcome.Failed
+                    // 先验候选再发布，坏镜像不能污染完成路径或删掉仍被安装器读取的旧可信包。
+                    // 无可信哈希时保留既定 PK/size/系统签名防线；读盘异常仍折算为该渠道失败。
+                    val verified = runCatching {
+                        expectedSha256 == null ||
+                            sha256Matches(expectedSha256, sha256Hex(part))
+                    }.getOrElse { e ->
+                        Log.e(TAG, "SHA-256 校验读盘失败（${e.javaClass.simpleName}），判失败", e)
+                        false
                     }
+                    if (!verified) {
+                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），删候选包并尝试下一渠道")
+                        part.delete()
+                        continue
+                    }
+                    // Windows renameTo 不覆盖已有文件；只有已通过校验的候选才可替换它。
+                    val renamed = (if (target.exists()) target.delete() else true) && part.renameTo(target)
+                    if (renamed) return DownloadOutcome.Done(target, r.sizeBytes)
+                    part.delete()
+                    return DownloadOutcome.Failed
                 }
                 is DownloadOutcome.Cancelled -> {
                     part.delete()

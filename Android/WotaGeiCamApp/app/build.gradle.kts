@@ -189,6 +189,9 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // AGP 8.1 不保证未压缩 .so 的 16KiB ZIP 对齐；压缩后由安装器解包加载。
+        // ELF 自身的 PT_LOAD 仍须 >=16KiB，不能靠此项掩盖旧 native 库。
+        jniLibs.useLegacyPackaging = true
     }
 
     // 站位模型组（方案 32 M2）：tflite 不压缩——Interpreter mmap 加载要求未压缩 assets
@@ -202,21 +205,21 @@ ksp {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2023.10.01")
+    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.activity:activity-compose:1.8.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.6.2")
-    implementation("androidx.navigation:navigation-compose:2.7.4")
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3:1.1.2")
+    implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.animation:animation")
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -226,21 +229,22 @@ dependencies {
     implementation("androidx.room:room-ktx:$room")
     ksp("androidx.room:room-compiler:$room")
 
-    val media3 = "1.1.1"
+    // 保持 compileSdk 34：1.5.x 起库自身使用 SDK 35，不在安全维护轮扩工具链。
+    val media3 = "1.4.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
 
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // 站位检测（方案 32 M2 / 33 flavor 化）：LiteRT(tflite)——CPU XNNPACK 兜底 + GPU delegate；
-    // **仅 full 变体携带**（lite 无 AI 站位，连依赖都不进包）；minSdk 29 / arm64-v8a 满足；
-    // GPU delegate 兼容性由 GpuDelegate 内建白名单+失败回退 CPU
-    val tflite = "2.14.0"
-    "fullImplementation"("org.tensorflow:tensorflow-lite:$tflite")
-    "fullImplementation"("org.tensorflow:tensorflow-lite-gpu:$tflite")
-    "fullImplementation"("org.tensorflow:tensorflow-lite-gpu-api:$tflite")
+    // LiteRT 1.x 保留 org.tensorflow.lite Interpreter/GPU API，只进 full；不与旧 TF AAR 混装。
+    // 1.4.2 的 CPU/GPU AAR 均含 arm64/v7a，ELF PT_LOAD 为 16KiB；设备推理另行验证。
+    val litert = "1.4.2"
+    "fullImplementation"("com.google.ai.edge.litert:litert:$litert")
+    "fullImplementation"("com.google.ai.edge.litert:litert-gpu:$litert")
+    "fullImplementation"("com.google.ai.edge.litert:litert-gpu-api:$litert")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")

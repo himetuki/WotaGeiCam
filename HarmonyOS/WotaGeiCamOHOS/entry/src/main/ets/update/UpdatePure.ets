@@ -113,16 +113,11 @@ export class UpdateDownloadPure {
     return out;
   }
 
-  /**
-   * 校验判据：expectedSha256 为 undefined（探测没给可信哈希：段 2/3 或旧版说明）恒放行
-   * ——退回既有防线（PK 魔数 + size 一致性 + 安装侧校验）；给了则必须与实际哈希
-   * **忽略大小写**相等。
-   */
+  /** 下载完成与导出共用的真实性闸：缺失/坏格式/读取失败均拒绝，不以 PK 或体积代替官方 SHA。 */
   static sha256Matches(expectedSha256: string | undefined, actualHex: string): boolean {
-    if (expectedSha256 === undefined) {
-      return true;
-    }
-    return expectedSha256.toLowerCase() === actualHex.toLowerCase();
+    const hex: RegExp = new RegExp('^[0-9a-fA-F]{64}$');
+    return expectedSha256 !== undefined && hex.test(expectedSha256) && hex.test(actualHex) &&
+      expectedSha256.toLowerCase() === actualHex.toLowerCase();
   }
 
   /** 只允许 HTTPS（镜像前缀或未来改表都不会悄悄降级成明文） */
