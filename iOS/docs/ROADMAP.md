@@ -5,10 +5,10 @@
 ## 基线与边界
 
 - Android / HarmonyOS 只读基线：`7394187`。工作分支：`port/ios-20261115`，主工作区新增 `iOS/`，不得改写既有提交或修改 `iOS/` 外既有文件。
-- 路线：独立原生 SwiftUI + AVFoundation + Metal；不使用 KMP，不导入其他平台代码。算法思想可参照，Swift/Metal 实现重新编写。
+- 路线：独立原生 UIKit + AVFoundation；不使用 KMP，不导入其他平台代码。基础界面和录制路径按 iOS 10 API 编写，SwiftUI 不进入最低系统路径。算法思想可参照，iOS 图像实现使用新写的 OpenGL ES / Metal / CPU 后端，不直接翻译 Android GL/GLSL。
 - 明确排除 AI 站位的识别、播报、模型推理、GPU 三态及占位接口；其他 Android 功能不得静默遗漏。
 - 核心场景：夜间 WOTA 艺练习，单条不超过 5 分钟（常态 1–4 分钟）。不将专业演出或长录作为产品承诺。
-- 最低部署暂定 iOS 16，等待逐项 API 可用性审计定版。iOS 26/27 为兼容目标，不代表已经取得对应 SDK、模拟器或真机验证。
+- 最低源码兼容目标改为 iOS 10，覆盖 iPhone 5（iOS 10.3.4，32位 armv7）与 iPhone 6（iOS 12.5.7，arm64）。现代 Xcode 是否仍能产出 armv7 必须由真实工具链核验；不能产出时保留旧 Xcode/设备构建说明，不把 iPhone 5 写成已打包验证。iOS 26/27 为新系统兼容目标，不代表已取得对应 SDK 或真机证据。
 - 无新增第三方运行依赖；full/lite 使用相同 Bundle ID 和独立构建配置。AI 被排除后两变体的差异必须实事求是，不捏造 AI 占位。
 - 无签名 `.xcarchive` / `.app` / `Payload/*.app` 结构 `.ipa` 只能由真实设备构建产生；侧载须由使用者重新签名。不得伪造构建或打包证据。
 - 临时文件、构建产物、DerivedData、截图只在 `iOS/` 内；不读取 `.env`、密钥、账户、签名等隐私配置。
@@ -36,11 +36,11 @@
 | ID | 领域与交付 | 依赖 | 并行组 | 源码/构建验收条件 | 状态 | 修订次数 |
 |---|---|---|---|---|---|---|
 | A1 | Android 非AI功能、设置、存储、页面映射；同步流程 | 无 | 1 | 源路径/行号存在，映射字段和覆盖核验入口可执行，逐行列构建或人工验证项 | 进行中 | 0 |
-| A2-S | Xcode 工程源、SwiftUI入口、预览实现、本地核心包、构建/打包入口 | 无 | 1 | 工程/plist结构核对；共享schemes/配置；权限/生命周期真实实现；接口供后续引用 | 进行中 | 0 |
+| A2-S | 旧设备可用的 UIKit 工程源、AVFoundation预览、基础参数入口、本地核心包、构建/打包入口 | 无 | 1 | 工程/plist结构核对；iOS10配置、权限/生命周期/预览与参数接口真实实现；接口供后续引用 | 进行中 | 0 |
 | A2-V | Apple设备目标编译与archive | A2-S | Apple工具门 | 真实macOS/Xcode上设备目标build/archive退出0；缺工具不得冒充通过 | 阻塞 | 0 |
 | B1 | format能力协商、低速快门、摄像头/分辨率/帧率 | A1,A2-S | 2 | 参数支持判断/可见降级代码、映射、人工清单齐全；编译归A2-V/R1 | 待派发 | 0 |
 | D1 | 媒体模型、收藏/回收站/对比历史、冷启动维护 | A1,A2-S | 2 | 三项维护/不覆盖/元数据一致性源码与逐行映射完整；人工清单 | 待派发 | 0 |
-| C1 | Metal反馈累积、回波、双模式、2–10× | A1,A2-S | 2 | 独立重写的Metal与Swift管线、引用/注入完整；真实Metal编译归A2-V/R1 | 待派发 | 0 |
+| C1 | OpenGL ES/Metal反馈累积、回波、双模式、2–10× | A1,A2-S | 2 | 独立重写的图像后端；iPhone5走OpenGL ES/CPU降级，新设备可走Metal；引用/注入完整，真实编译归A2-V/R1 | 待派发 | 0 |
 | F1 | 设置映射、full/lite、手动更新与变体分流 | A1,A2-S | 2 | 全键/类型映射；双配置入口；手动更新选择/校验源码；平台差异有裁决 | 待派发 | 0 |
 | B2 | 后处理录制、音轨、启停、中断与恢复 | B1,C1 | 3 | 录制/音轨/中断状态源码完整；监看不入成片；资源收尾路径可追溯 | 待派发 | 0 |
 | E1 | 播放、AB循环、逐帧、缩放平移 | A2-S,D1 | 3 | 原生播放与交互源码、页面映射、人工验证清单 | 待派发 | 0 |
@@ -54,9 +54,9 @@
 
 ## 已记录工程决策
 
-1. iOS UI 不照搬 Material；使用系统安全区、SwiftUI、原生 Action Sheet / confirmationDialog 和内联反馈。分屏布局属于产品决策，未代用户决定。
+1. iOS UI 不照搬 Material；最低路径使用 UIKit 的系统控件、Action Sheet 和内联反馈，较高系统可渐进采用 SwiftUI，但不得让其成为 iPhone5/6 依赖。分屏布局属于产品决策，未代用户决定。
 2. 新增 `iOS/` 独立工程，不修改根 ignore、现有 README、Android/HarmonyOS 同步基线、CI 或发版 tag。
-3. 采用本地 `WotaCore` Swift Package 容纳可独立测试的纯逻辑；平台能力仍由 AVFoundation/Metal 实现，不共享 Kotlin。
+3. 采用本地 `WotaCore` 容纳可复用的纯逻辑；基础平台能力由 AVFoundation 与兼容图像后端实现，不共享 Kotlin。若旧 Xcode 无法消费当前 Swift Package 工程格式，构建配置必须提供源码直接编译路径。
 4. Apple 工具证据：会话初查 `command -v xcodebuild` 与 `command -v swift` 均未找到；用户指定的 `ios-simulator@zcode-plugins-official` 显示 installed/enabled，但会话尚未暴露其 MCP 工具。继续核实公开能力说明，不能将“插件启用”写成模拟器或构建已通过。
 
 ## 升级规则

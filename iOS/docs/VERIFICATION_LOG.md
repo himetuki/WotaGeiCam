@@ -13,6 +13,12 @@
 - `wsl --exec sh -lc 'command -v swift; command -v clang; uname -m'`：只输出 `x86_64`；当前 WSL 同样没有 Swift 编译器，正在核实是否可在项目目录部署纯逻辑测试工具。
 - 初始路线图提交：`276c8ed docs(ios): establish isolated port roadmap and acceptance gates`；只包含三个新增 iOS 文档。`git diff --name-only 7394187 -- Android HarmonyOS` 无输出。
 
+## 2026-11-15 / 用户设备兼容修订
+
+- 用户补充最低设备可能为 iPhone 5/6，允许阉割高级功能，但必须保留基础 WOTA 录制参数调整和工具链。
+- 基础路线从 SwiftUI/iOS16 改为 UIKit/AVFoundation/iOS10 源码兼容；iPhone5 使用 OpenGL ES/CPU 降级，Metal 仅作为支持设备的后端。
+- iPhone5 的 armv7 与现代 Xcode 的实际产出能力尚未验证；iPhone6 的 arm64 也需真实 Apple 工具链编译。两者均不得以静态配置宣称已可安装。
+
 ## 2026-11-15 / 用户修订
 
 - 用户取消模拟器与全部测试工作，只要求移植、编译和打包；已通知A1/A2按新范围交付。
