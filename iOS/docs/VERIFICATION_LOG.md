@@ -27,7 +27,18 @@
 
 ## A1 / 源映射基线
 
-待子代理返回并由主代理核验。
+- 主代理执行 `python -I iOS/scripts/verify_source_inventory.py`：`checks=1643 failures=0` / `PASS`，退出0。
+- 已阅读映射索引及平台差异表，确认核心参数、iPhone5/6兼容、双工具链和待裁决项未静默遗漏；现有映射状态不代表实现通过。
+- `git diff --name-only -- Android HarmonyOS` 无输出。
+- 提交 `3027f1b docs(ios): add traceable Android migration mappings`：仅9个iOS映射/同步/核验文件。UIKit骨架仍在独立重构，未混入本提交。
+- A2重构中旧结构脚本引用已移除的SwiftUI文件曾退出1，待A2-S以新UIKit入口同步修复后重新核对。
+
+## 兼容性资料
+
+- Apple官方：<https://developer.apple.com/news/upcoming-requirements/?id=06062022a> 明确 Xcode14 仅编译64位应用，iOS10是最后支持32位App的iOS版本。
+- Apple官方Xcode14发布说明：<https://developer.apple.com/documentation/xcode-release-notes/xcode-14-release-notes>：不再支持armv7/armv7s/i386以及iOS11之前的部署目标。
+- 因此Legacy和Modern构建分别保留，禁止宣称单个现代Xcode已覆盖iPhone5。
+
 
 ## A2 / 工程骨架
 
