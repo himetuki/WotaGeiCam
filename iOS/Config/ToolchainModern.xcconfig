@@ -1,0 +1,12 @@
+// Modern 工具链片段：Xcode 14 及以后（含 Xcode 16），arm64 only。
+//
+// 现代 Xcode 不再构建 32 位 App，也不接受 iOS 10 部署目标，因此这里：
+// - 架构固定 arm64（不写 armv7，写了会构建失败）；
+// - 部署目标取 15.0（Xcode 16 公布的部署目标范围下限）。
+//   若使用 Xcode 15.x（范围 iOS 12–17），可自行下调，但不要低于 12.0。
+//
+// iPhone 5/5c 无法用本组合构建，必须走 ToolchainLegacy（Xcode 13 或更早）。
+IPHONEOS_DEPLOYMENT_TARGET = 15.0
+ARCHS = arm64
+VALID_ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO

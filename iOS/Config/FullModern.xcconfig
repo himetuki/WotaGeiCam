@@ -1,0 +1,5 @@
+// 组合配置：full 变体 + Modern 工具链（arm64 / iOS 15，Xcode 14+）。
+// 对应构建配置：Debug-Modern / Release-Modern。
+#include "Shared.xcconfig"
+#include "Full.xcconfig"
+#include "ToolchainModern.xcconfig"

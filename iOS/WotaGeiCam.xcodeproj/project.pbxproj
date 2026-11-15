@@ -1,0 +1,653 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+	/* Begin PBXBuildFile section */
+		660F8A8352E0F027EAD7EA90 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47EEB61C7C718559FF49F113 /* AppDelegate.swift */; };
+		BC8CFE9EA69B4E470119C1AA /* AppVariant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 262AA0C482E563352F80F8F5 /* AppVariant.swift */; };
+		6F8FBE34F1623384C933541B /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA2E2C6F4C958EC7BF02E8B /* main.swift */; };
+		C87EDFA5597F834173CD6FA6 /* CameraParameterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A8A0ACD2A64F1A2039CEE0A /* CameraParameterController.swift */; };
+		5B2894C0F4030141B3DC29F5 /* CameraPermissionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 533C11D0EAB36154A3873E55 /* CameraPermissionService.swift */; };
+		22489EF274EA748DA0A745A4 /* CameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 421F2D93359AED5DDF1C252D /* CameraPreviewView.swift */; };
+		C09B328F3B2B3B88D812DFDD /* CameraPreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB78F3973E085AD7C3C34378 /* CameraPreviewViewController.swift */; };
+		30949F82F233815BB15ECCEF /* CameraSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498EC1D29D10120B54AC1AF0 /* CameraSessionController.swift */; };
+		B8C13DA99E322B0D2BB90AE0 /* CameraParameterPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10145B20AC9CA3324A366765 /* CameraParameterPanelView.swift */; };
+		B895344C6FA2144E99FEB741 /* CameraStatusOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04AFB3285E4188C1FEB5CA7E /* CameraStatusOverlayView.swift */; };
+		9B689FB053D1DEF9C1B7B376 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9416E5BCD767A7E54270F61E /* Assets.xcassets */; };
+		27E694C5683E9D29F187E494 /* WotaCore in Frameworks */ = {isa = PBXBuildFile; productRef = 92A02F7C270B5270830CCE31 /* WotaCore */; };
+	/* End PBXBuildFile section */
+
+	/* Begin PBXFileReference section */
+		BF6EB9C7F7E25F9BE3E27B3E /* WotaGeiCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WotaGeiCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		47EEB61C7C718559FF49F113 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		262AA0C482E563352F80F8F5 /* AppVariant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVariant.swift; sourceTree = "<group>"; };
+		5CA2E2C6F4C958EC7BF02E8B /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		0A8A0ACD2A64F1A2039CEE0A /* CameraParameterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraParameterController.swift; sourceTree = "<group>"; };
+		533C11D0EAB36154A3873E55 /* CameraPermissionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPermissionService.swift; sourceTree = "<group>"; };
+		421F2D93359AED5DDF1C252D /* CameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewView.swift; sourceTree = "<group>"; };
+		AB78F3973E085AD7C3C34378 /* CameraPreviewViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewViewController.swift; sourceTree = "<group>"; };
+		498EC1D29D10120B54AC1AF0 /* CameraSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSessionController.swift; sourceTree = "<group>"; };
+		9416E5BCD767A7E54270F61E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		10145B20AC9CA3324A366765 /* CameraParameterPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraParameterPanelView.swift; sourceTree = "<group>"; };
+		04AFB3285E4188C1FEB5CA7E /* CameraStatusOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraStatusOverlayView.swift; sourceTree = "<group>"; };
+		78FF066F0A7EF746D8D59444 /* Full.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Full.xcconfig; sourceTree = "<group>"; };
+		9F714897A8E1BCB92C9C7533 /* FullLegacy.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = FullLegacy.xcconfig; sourceTree = "<group>"; };
+		3229E818D2CFEEC573C731E9 /* FullModern.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = FullModern.xcconfig; sourceTree = "<group>"; };
+		6FA7576E9D8BB66BB98CB301 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B229D53C993FC2410DBFE0EC /* Lite.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Lite.xcconfig; sourceTree = "<group>"; };
+		334530A6BDBD51E494F11868 /* LiteLegacy.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = LiteLegacy.xcconfig; sourceTree = "<group>"; };
+		B9EBB7C12E70F6CF148F79CA /* LiteModern.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = LiteModern.xcconfig; sourceTree = "<group>"; };
+		17C99846ED3AB004A6798EE5 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
+		536102C86BF476EFE68B1FC0 /* ToolchainLegacy.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ToolchainLegacy.xcconfig; sourceTree = "<group>"; };
+		CCF8342F7514708D84A11BDE /* ToolchainModern.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ToolchainModern.xcconfig; sourceTree = "<group>"; };
+	/* End PBXFileReference section */
+
+	/* Begin PBXFrameworksBuildPhase section */
+		37105AA956699F686147F805 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				27E694C5683E9D29F187E494 /* WotaCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+	/* End PBXFrameworksBuildPhase section */
+
+	/* Begin PBXGroup section */
+		C9A1CAB23675316A2A66D5A3 /* WotaGeiCam */ = {
+			isa = PBXGroup;
+			children = (
+				37A190D8A64D319129709007 /* WotaGeiCam */,
+				9D63E4A51732E53339B207D2 /* Config */,
+				E5E4ABB9E00FE819FC8AB60B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		37A190D8A64D319129709007 /* WotaGeiCam */ = {
+			isa = PBXGroup;
+			children = (
+				5003A31B4C4E2162D1CE8042 /* App */,
+				B3803B899428E8B457485D5F /* ArcRepair */,
+				9E59B7A2BE728CD4565A8831 /* Camera */,
+				FCC330B727DC444EAFB149AF /* Compare */,
+				46373258B681C627964C94C4 /* Library */,
+				46427EECCD4D9CDF9E891FAD /* Player */,
+				295BEF24D81159BC25A3E9C2 /* Recording */,
+				B69651E3232AA7CA04381514 /* Rendering */,
+				B423BEB0CD5527E18F10A0E2 /* Resources */,
+				51577FB13878D7777CA86D85 /* Settings */,
+				A7EFF4167B3CFAC426DC9F5A /* UI */,
+				5B9BBD7DB62A5949B4B4DC78 /* Update */,
+			);
+			path = WotaGeiCam;
+			sourceTree = "<group>";
+		};
+		5003A31B4C4E2162D1CE8042 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				47EEB61C7C718559FF49F113 /* AppDelegate.swift */,
+				262AA0C482E563352F80F8F5 /* AppVariant.swift */,
+				5CA2E2C6F4C958EC7BF02E8B /* main.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		B3803B899428E8B457485D5F /* ArcRepair */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = ArcRepair;
+			sourceTree = "<group>";
+		};
+		9E59B7A2BE728CD4565A8831 /* Camera */ = {
+			isa = PBXGroup;
+			children = (
+				0A8A0ACD2A64F1A2039CEE0A /* CameraParameterController.swift */,
+				533C11D0EAB36154A3873E55 /* CameraPermissionService.swift */,
+				421F2D93359AED5DDF1C252D /* CameraPreviewView.swift */,
+				AB78F3973E085AD7C3C34378 /* CameraPreviewViewController.swift */,
+				498EC1D29D10120B54AC1AF0 /* CameraSessionController.swift */,
+			);
+			path = Camera;
+			sourceTree = "<group>";
+		};
+		FCC330B727DC444EAFB149AF /* Compare */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Compare;
+			sourceTree = "<group>";
+		};
+		46373258B681C627964C94C4 /* Library */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Library;
+			sourceTree = "<group>";
+		};
+		46427EECCD4D9CDF9E891FAD /* Player */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Player;
+			sourceTree = "<group>";
+		};
+		295BEF24D81159BC25A3E9C2 /* Recording */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Recording;
+			sourceTree = "<group>";
+		};
+		B69651E3232AA7CA04381514 /* Rendering */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Rendering;
+			sourceTree = "<group>";
+		};
+		B423BEB0CD5527E18F10A0E2 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				9416E5BCD767A7E54270F61E /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		51577FB13878D7777CA86D85 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		A7EFF4167B3CFAC426DC9F5A /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				10145B20AC9CA3324A366765 /* CameraParameterPanelView.swift */,
+				04AFB3285E4188C1FEB5CA7E /* CameraStatusOverlayView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		5B9BBD7DB62A5949B4B4DC78 /* Update */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Update;
+			sourceTree = "<group>";
+		};
+		9D63E4A51732E53339B207D2 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				78FF066F0A7EF746D8D59444 /* Full.xcconfig */,
+				9F714897A8E1BCB92C9C7533 /* FullLegacy.xcconfig */,
+				3229E818D2CFEEC573C731E9 /* FullModern.xcconfig */,
+				6FA7576E9D8BB66BB98CB301 /* Info.plist */,
+				B229D53C993FC2410DBFE0EC /* Lite.xcconfig */,
+				334530A6BDBD51E494F11868 /* LiteLegacy.xcconfig */,
+				B9EBB7C12E70F6CF148F79CA /* LiteModern.xcconfig */,
+				17C99846ED3AB004A6798EE5 /* Shared.xcconfig */,
+				536102C86BF476EFE68B1FC0 /* ToolchainLegacy.xcconfig */,
+				CCF8342F7514708D84A11BDE /* ToolchainModern.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		E5E4ABB9E00FE819FC8AB60B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BF6EB9C7F7E25F9BE3E27B3E /* WotaGeiCam.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+	/* End PBXGroup section */
+
+	/* Begin PBXNativeTarget section */
+		91F5A9F7F00359A89C323AF8 /* WotaGeiCam */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2F7FBF07866A99E0ADFF73DF /* Build configuration list for PBXNativeTarget "WotaGeiCam" */;
+			buildPhases = (
+				3F860EDA279D965AD082E8BD /* Sources */,
+				37105AA956699F686147F805 /* Frameworks */,
+				5964CB2A3CAFC7482AC7B3E0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WotaGeiCam;
+			packageProductDependencies = (
+				92A02F7C270B5270830CCE31 /* WotaCore */,
+			);
+			productName = WotaGeiCam;
+			productReference = BF6EB9C7F7E25F9BE3E27B3E /* WotaGeiCam.app */;
+			productType = "com.apple.product-type.application";
+		};
+	/* End PBXNativeTarget section */
+
+	/* Begin PBXProject section */
+		A04158F650C4D313F7A1F56B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1200;
+				LastUpgradeCheck = 1200;
+				TargetAttributes = {
+					91F5A9F7F00359A89C323AF8 = {
+						CreatedOnToolsVersion = 12.0;
+					};
+				};
+			};
+			buildConfigurationList = E4F192B3B108996568A70EAC /* Build configuration list for PBXProject "WotaGeiCam" */;
+			compatibilityVersion = "Xcode 12.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = C9A1CAB23675316A2A66D5A3 /* WotaGeiCam */;
+			packageReferences = (
+				3B879622640AEA9D71B76FBD /* XCLocalSwiftPackageReference "Packages/WotaCore" */,
+			);
+			productRefGroup = E5E4ABB9E00FE819FC8AB60B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				91F5A9F7F00359A89C323AF8 /* WotaGeiCam */,
+			);
+		};
+	/* End PBXProject section */
+
+	/* Begin PBXResourcesBuildPhase section */
+		5964CB2A3CAFC7482AC7B3E0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9B689FB053D1DEF9C1B7B376 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+	/* End PBXResourcesBuildPhase section */
+
+	/* Begin PBXSourcesBuildPhase section */
+		3F860EDA279D965AD082E8BD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				660F8A8352E0F027EAD7EA90 /* AppDelegate.swift in Sources */,
+				BC8CFE9EA69B4E470119C1AA /* AppVariant.swift in Sources */,
+				6F8FBE34F1623384C933541B /* main.swift in Sources */,
+				C87EDFA5597F834173CD6FA6 /* CameraParameterController.swift in Sources */,
+				5B2894C0F4030141B3DC29F5 /* CameraPermissionService.swift in Sources */,
+				22489EF274EA748DA0A745A4 /* CameraPreviewView.swift in Sources */,
+				C09B328F3B2B3B88D812DFDD /* CameraPreviewViewController.swift in Sources */,
+				30949F82F233815BB15ECCEF /* CameraSessionController.swift in Sources */,
+				B8C13DA99E322B0D2BB90AE0 /* CameraParameterPanelView.swift in Sources */,
+				B895344C6FA2144E99FEB741 /* CameraStatusOverlayView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+	/* End PBXSourcesBuildPhase section */
+
+	/* Begin XCBuildConfiguration section */
+		C043246BED0026BE4ABC39A0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Debug";
+		};
+		DCEB2F0FABA89EA1AC088163 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = "Release";
+		};
+		62653E7A7B270782D93870F5 /* Debug-Lite */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Debug-Lite";
+		};
+		05758A86786F6957307CF213 /* Release-Lite */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = "Release-Lite";
+		};
+		4B0E5A8AB2FFB61656317F79 /* Debug-Modern */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Debug-Modern";
+		};
+		0ED26F9FE347A82AE0175CD1 /* Release-Modern */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = "Release-Modern";
+		};
+		A8FC27C17FC8313101F16F66 /* Debug-Lite-Modern */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Debug-Lite-Modern";
+		};
+		E5D77ED5D830831BB8297EF8 /* Release-Lite-Modern */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = "Release-Lite-Modern";
+		};
+		66963ECE847D4964EFE41E01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9F714897A8E1BCB92C9C7533 /* FullLegacy.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Debug";
+		};
+		26DE33C3ADC1F1F69F880EAC /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9F714897A8E1BCB92C9C7533 /* FullLegacy.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Release";
+		};
+		FDD08A4DB79D30ED3FD473AB /* Debug-Lite */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 334530A6BDBD51E494F11868 /* LiteLegacy.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Debug-Lite";
+		};
+		A4A46874CE6C6AB001570AC9 /* Release-Lite */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 334530A6BDBD51E494F11868 /* LiteLegacy.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Release-Lite";
+		};
+		6F25E4C98EDFE00914658AF9 /* Debug-Modern */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3229E818D2CFEEC573C731E9 /* FullModern.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Debug-Modern";
+		};
+		5900A697270495D1BDD19AC3 /* Release-Modern */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3229E818D2CFEEC573C731E9 /* FullModern.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Release-Modern";
+		};
+		B46D8CC601329A48154BD1D5 /* Debug-Lite-Modern */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B9EBB7C12E70F6CF148F79CA /* LiteModern.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Debug-Lite-Modern";
+		};
+		3F1294856326F0420CA86B79 /* Release-Lite-Modern */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B9EBB7C12E70F6CF148F79CA /* LiteModern.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = "Release-Lite-Modern";
+		};
+	/* End XCBuildConfiguration section */
+
+	/* Begin XCConfigurationList section */
+		E4F192B3B108996568A70EAC /* Build configuration list for PBXProject "WotaGeiCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C043246BED0026BE4ABC39A0 /* Debug */,
+				DCEB2F0FABA89EA1AC088163 /* Release */,
+				62653E7A7B270782D93870F5 /* Debug-Lite */,
+				05758A86786F6957307CF213 /* Release-Lite */,
+				4B0E5A8AB2FFB61656317F79 /* Debug-Modern */,
+				0ED26F9FE347A82AE0175CD1 /* Release-Modern */,
+				A8FC27C17FC8313101F16F66 /* Debug-Lite-Modern */,
+				E5D77ED5D830831BB8297EF8 /* Release-Lite-Modern */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2F7FBF07866A99E0ADFF73DF /* Build configuration list for PBXNativeTarget "WotaGeiCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				66963ECE847D4964EFE41E01 /* Debug */,
+				26DE33C3ADC1F1F69F880EAC /* Release */,
+				FDD08A4DB79D30ED3FD473AB /* Debug-Lite */,
+				A4A46874CE6C6AB001570AC9 /* Release-Lite */,
+				6F25E4C98EDFE00914658AF9 /* Debug-Modern */,
+				5900A697270495D1BDD19AC3 /* Release-Modern */,
+				B46D8CC601329A48154BD1D5 /* Debug-Lite-Modern */,
+				3F1294856326F0420CA86B79 /* Release-Lite-Modern */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	/* End XCConfigurationList section */
+
+	/* Begin XCLocalSwiftPackageReference section */
+		3B879622640AEA9D71B76FBD /* XCLocalSwiftPackageReference "Packages/WotaCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/WotaCore;
+		};
+	/* End XCLocalSwiftPackageReference section */
+
+	/* Begin XCSwiftPackageProductDependency section */
+		92A02F7C270B5270830CCE31 /* WotaCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B879622640AEA9D71B76FBD /* XCLocalSwiftPackageReference "Packages/WotaCore" */;
+			productName = WotaCore;
+		};
+	/* End XCSwiftPackageProductDependency section */
+
+	};
+	rootObject = A04158F650C4D313F7A1F56B /* Project object */;
+}

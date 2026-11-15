@@ -1,0 +1,7 @@
+// full 变体片段。
+// 单独使用不完整：必须由 Config/FullLegacy.xcconfig 或 Config/FullModern.xcconfig
+// 与 Shared.xcconfig、对应 Toolchain-*.xcconfig 一起 #include。
+WOTA_VARIANT = full
+WOTA_DISPLAY_NAME = WotaGeiCam
+PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) WOTA_FULL

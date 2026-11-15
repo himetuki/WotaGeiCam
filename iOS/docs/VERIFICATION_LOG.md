@@ -31,7 +31,7 @@
 - 已阅读映射索引及平台差异表，确认核心参数、iPhone5/6兼容、双工具链和待裁决项未静默遗漏；现有映射状态不代表实现通过。
 - `git diff --name-only -- Android HarmonyOS` 无输出。
 - 提交 `3027f1b docs(ios): add traceable Android migration mappings`：仅9个iOS映射/同步/核验文件。UIKit骨架仍在独立重构，未混入本提交。
-- A2重构中旧结构脚本引用已移除的SwiftUI文件曾退出1，待A2-S以新UIKit入口同步修复后重新核对。
+- A2重构中旧结构脚本引用已移除的SwiftUI文件曾退出1；A2-S现已改用UIKit入口，待主代理在并行模块收口后重新生成工程并核对。
 
 ## 兼容性资料
 
@@ -42,4 +42,10 @@
 
 ## A2 / 工程骨架
 
-待子代理返回并由主代理核验。
+- A2代理交付UIKit/iOS10骨架、经典objectVersion54工程、4个共享scheme、8个配置、Swift5.6核心包及inline路径。主代理已读取关键源码、配置和工程生成脚本。
+- 并行D1新增文件时，工作树 `generate_project.py --check` 与 `check_project.py` 返回1：只因新Library文件尚未收录。不得将这个状态报为全树通过。
+- 为独立验收A2，主代理将已暂存iOS文件用 `git checkout-index` 导出到工作区内新建 `.snapshot-a2-*` 目录，仅对快照运行静态结构检查：`checks=473` / `PASS` / `A2_SNAPSHOT_EXIT=0`。已即时清除快照目录。
+- `bash -n iOS/scripts/*.sh` 退出0。
+- `detect_apple_tools.sh` 退出69：缺xcodebuild/xcrun/xcode-select/plutil；未执行Apple编译、archive、真实IPA打包。
+- 修正生成工程CRLF引起的diff-check：iOS目录新增.gitattributes eol=lf、生成脚本强制LF；git diff --cached --check退出0。
+- 修正文档：本轮不使用模拟器、不测试；Modern最低iOS15不能装到iPhone6，iPhone6使用Legacy配置。A2源码结构通过不代表可运行或可安装。
