@@ -42,4 +42,26 @@ class SealMarkerTest {
         val discard = bodyOf(store, "discard")
         assertTrue("删行/删文件必须同时清标记（防已丢弃文件被标记为待发布）", discard.contains("SealMarker.clear("))
     }
+
+    @Test
+    fun `源码钉扎_补弧待发布同样经VideoStore封口落标记`() {
+        // 补弧与录制共用同一条链：VideoStore.seal → sealNeedsMarker → SealMarker.mark。
+        // pending 行 + 发布失败（PENDING_PUBLISH）必须在同一次封口里落 .sealed，冷启救援
+        // 才能把这行的等待门槛缩到 SEALED_RESCUE_MS；补弧若绕开 seal 自己写/清标记，
+        // 两条发布链的口径就分叉了（录制侧落、补弧侧不落，或反过来）。
+        val runner = codeOnly(mainSourceText("record/ArcRepairRunner.kt"))
+        val finish = bodyOf(runner, "finish")
+        assertTrue(
+            "补弧收尾必须经 VideoStore.seal 封口（标记随 commit 结果同拍落盘）",
+            finish.contains("st.seal(")
+        )
+        assertTrue(
+            "标记/丢弃必须由真实 commit 结果决定（arcPublishOutcome(keep, seg.committed)）",
+            finish.contains("arcPublishOutcome(keep, seg.committed)")
+        )
+        assertFalse(
+            "补弧不得绕过 seal 自己写/清标记（两套口径必然分叉）",
+            runner.contains("SealMarker.")
+        )
+    }
 }
