@@ -3445,7 +3445,9 @@ private class RecordRunner(
                     }
                 }
             }
-            // 首段：先确认相机会话本身可出帧（R01），再要求编码面确实挂到本次 Surface 上。
+            // 首段：先确认相机会话本身可出帧（R01），再要求编码面确实挂到**本次** Surface 上。
+            // R01：expected=surface —— 首段也必须是「本段编码面已挂」，不能沿用「任意面已绑定」
+            // 的乐观谓词：换代后旧绑定可能尚未解绑，首查恒真，编码器会把帧写进已死的旧面。
             when (awaitSessionReady(null, requireTargetHandoff = false)) {
                 WaitOutcome.READY -> Unit
                 WaitOutcome.STOPPED -> {
@@ -3459,12 +3461,12 @@ private class RecordRunner(
                     return true
                 }
             }
-            if (!awaitEncoderSurface()) {
+            if (!awaitEncoderSurface(surface)) {
                 if (stopRequested) {
                     teardownAbandonedSession(rec)
                     return false
                 }
-                Log.e(TAG_UI, "首段编码面未在预算内挂载（拒绝乐观 start）")
+                Log.e(TAG_UI, "首段编码面未在预算内挂载到本次 Surface（拒绝乐观 start）")
                 teardownAbandonedSession(rec)
                 failNow(RecordError.START_FAILED)
                 return true
@@ -4148,9 +4150,10 @@ private class RecordRunner(
     }
 
     /**
-     * 等编码面挂好（GL 挂面是 postGl 异步）。[expected] 传重挂路径的新面：必须等「新面已绑定」
+     * 等编码面挂好（GL 挂面是 postGl 异步）。[expected] 传本段/重挂路径的 Surface：必须等「该面已绑定」
      * ——换段时旧绑定还在，isOutputSurfaceBound 首查恒真、零等待，旧面会先于 GL 解绑被 release；
-     * 首段无旧绑定，null 保持既有「任意面已绑定」谓词不变。
+     * 首段同样传 [expected]（R01）：换代瞬间旧绑定尚未解，「任意面已绑定」的乐观谓词会零等待放行，
+     * 编码器写进已死的旧面。仅 null 时保持「任意面已绑定」的宽松谓词（仅留作无期望面的兜底）。
      * 返回 false = 预算内没挂好（或 [stopRequested]），调用方不得继续 start。
      */
     private fun awaitEncoderSurface(expected: Surface? = null): Boolean {

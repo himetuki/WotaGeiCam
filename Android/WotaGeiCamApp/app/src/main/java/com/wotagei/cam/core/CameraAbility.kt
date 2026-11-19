@@ -115,6 +115,19 @@ data class CameraAbility(
     fun manualExposurePossible(): Boolean = iso.ok() && exposureNs.ok()
 
     /**
+     * 手动曝光在**该帧率档位**下是否可进（Y04）：设备给手动曝光 + 「曝光范围 ∩ 一帧周期」非空。
+     *
+     * 与 [manualExposurePossible] 的分工：后者只问「这台机器给不给手动曝光」，不看当前帧率，
+     * 于是「设备最短曝光 20ms、用户在 60fps（帧周期 16.67ms）进手动档」这种组合也能进——两层
+     * 钳制互相打架（clampShutterNs 先压到 16.67ms 再抬回设备下限 20ms，曝光纠偏又压回 16.67ms），
+     * 最终下发一个落在设备范围之外的请求。交集为空 ⇒ 手动档没有合法解，档位准入必须禁入。
+     *
+     * 口径与 [WotaParams.applyExposure] 的「域非空」同源（同一支 [shutterCeilingNs]，不写第二份算式）。
+     */
+    fun manualExposurePossibleAt(fps: Int): Boolean =
+        manualExposurePossible() && manualShutterRoom(exposureNs, fps)
+
+    /**
      * 手动白平衡（色温/色调增益）在本机是否真能生效（2026-10-26 反馈 #6）：
      * 契约前提是 HAL 声明了 `TRANSFORM_MATRIX`。空集合 = 隐藏键拿不到（无法判定）
      * ⇒ 视为可用，保持既有行为（不因"查不到"而把用户已选的手动档弹掉）。
@@ -365,6 +378,19 @@ fun shutterCeilingNs(deviceMaxNs: Long, fpsHi: Int): Long {
     val raised = maxOf(deviceMaxNs, WotaTiers.REQUIRED_SHUTTER_NS.max())
     return minOf(raised, WotaTiers.SHUTTER_CAP_NS, WotaTiers.NS_PER_SECOND / fpsHi.coerceAtLeast(1))
 }
+
+/**
+ * 手动快门在 [fps] 下是否还有合法解 —— 「设备曝光范围 ∩ 一帧周期」交集非空（Y04）。
+ *
+ * 判据直接复用 [shutterCeilingNs]：`WotaParams.applyExposure` 写的域就是 `lo..shutterCeilingNs(hi, fps)`，
+ * 域非空 ⟺ `lo <= ceiling`。不另写一份 `minExposure <= 1e9/fps` 的算式——两份算式将来一定会
+ * 分叉成「面板说能选、下发被钳」或反过来（强制档抬上限那一步就在 ceiling 里面）。
+ *
+ * 能力缺失（[RangeI.closed]）或 fps 无效返回 false：调用方另有「能力缺失」的灰显分支，
+ * 这里只回答「这个组合有没有解」。
+ */
+fun manualShutterRoom(exposureNs: RangeI, fps: Int): Boolean =
+    exposureNs.ok() && fps > 0 && exposureNs.lo.toLong() <= shutterCeilingNs(exposureNs.hi.toLong(), fps)
 
 /**
  * 物理子头的 AF 模式回退（docs/plan/27，2026-10-28 落地；纯函数，JVM 全测）。

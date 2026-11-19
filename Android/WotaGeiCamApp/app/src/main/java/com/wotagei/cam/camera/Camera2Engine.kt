@@ -232,9 +232,30 @@ class Camera2Engine(
     private var exposureProbeStartMs = 0L
     private var exposureProbeCooldownUntilMs = 0L
 
+    /**
+     * Y01：探测的**独立超时**任务。帧回执是探测的唯一推进来源，帧流一断（停帧/卡流/换会话间隙）
+     * [feedExposureProbe] 里的超时分支就永远不会执行，探测态会一直挂着——等号请求滞留整场，
+     * 用户切回预览时才发现曝光被等号档改写。挂在引擎线程 delayed 上，与帧回执互为兜底。
+     */
+    private val exposureProbeTimeoutTask = Runnable {
+        if (!exposureProbeActive || exposureProbeKey == null) return@Runnable
+        val now = SystemClock.elapsedRealtime()
+        if (now - exposureProbeStartMs <= ExposureCorrection.PROBE_TIMEOUT_MS) return@Runnable
+        exposureProbeCooldownUntilMs = now + ExposureCorrection.PROBE_COOLDOWN_MS
+        cancelExposureProbe("超时（独立计时：帧回执中断）")
+    }
+
     /** 曝光下发的格式化快照（给帧率守卫行复用；null = 本场还没发过曝光键，即 AE 自动档） */
     @Volatile
     private var lastSentExposureText: String? = null
+
+    /**
+     * B01：本次 build 出来、**尚未提交成功**的送出曝光读数。applyParams 在 build 之前跑，
+     * 那时请求还没交给平台——只有 [submitRepeating] 的平台调用返回成功才允许由
+     * [publishSentExposure] 写进总线（提交前发布 = HUD 显示可能从未生效的值）。
+     */
+    private var pendingSentExposureNs: Long? = null
+    private var pendingSentCorrectionNs: Long? = null
 
     /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface */
     private var extraSurface: Surface? = null
@@ -924,7 +945,11 @@ class Camera2Engine(
                     highSpeedSession = null
                 }
                 session = configured
-                prepareBuilder(dev, targets)
+                if (!prepareBuilder(dev, targets)) {
+                    // R01/Y02：没有 builder 就没有 repeating，绝不能留下「configured 成功」的假就绪。
+                    failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话配置成功但 createCaptureRequest 失败")
+                    return
+                }
                 // 重开计数归零点（自 onOpened 挪来，2026-10-13）：只有会话真正配置成功才算
                 // "重开成功"——configure 连续失败的设备上 reopenRetries 得以累积到 REOPEN_MAX，
                 // scheduleReopen 触顶后停在失败态交 UI 恢复，不再无限重开
@@ -952,7 +977,7 @@ class Camera2Engine(
         }
 
     /** 模板按 AF 模式选：录像连续 → TEMPLATE_RECORD，拍照连续 → TEMPLATE_PREVIEW */
-    private fun prepareBuilder(dev: CameraDevice, targets: List<Surface>) {
+    private fun prepareBuilder(dev: CameraDevice, targets: List<Surface>): Boolean {
         val pictureCf = params.afMode.value.cam2Mode ==
             CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
         val template = if (pictureCf) CameraDevice.TEMPLATE_PREVIEW else CameraDevice.TEMPLATE_RECORD
@@ -960,7 +985,7 @@ class Camera2Engine(
             dev.createCaptureRequest(template)
         } catch (e: RuntimeException) {
             Log.w(TAG, "createCaptureRequest 失败：${e.message}")
-            return
+            return false
         }
         targets.forEach { surface -> builder.addTarget(surface) }
         reqBuilder = builder
@@ -972,6 +997,7 @@ class Camera2Engine(
         halNrLastLogged = null
         halNrLoggedOnce = false
         builderAeManual = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
+        return true
     }
 
     /**
@@ -1043,9 +1069,15 @@ class Camera2Engine(
                     "%.2fms(1/%d)".format(ms, (1_000_000_000L / it.coerceAtLeast(1L)))
                 } ?: "缺席"
             }
-            val clampNote = buildString {
-                if (state.exposureMinNs > 0 && sentExpNs != null && sentExpNs < state.exposureMinNs) append("min抬升 ")
-                if (state.exposureMaxNs > 0 && sentExpNs != null && sentExpNs > state.exposureMaxNs) append("max压回 ")
+            // B01：夹取判据吃「用户请求值 vs 设备范围」——拿已夹过的最终值跟范围比永远相等，
+            // 日志恒为 clamp=无，真发生过夹取也查不出来（帧率掉档取证最需要这一行）。
+            // 最终值与请求值不同时并排写出来：设备范围夹取、帧周期/1/10s 钳制、等号档纠偏
+            // 三种都会让 sent ≠ requested，各自的前两项由上面的设备范围判据区分。
+            val requestedNs = params.shutter.value.value
+            val clampNote = if (sentExpNs == null) "无" else buildString {
+                if (state.exposureMinNs > 0 && requestedNs < state.exposureMinNs) append("min抬升 ")
+                if (state.exposureMaxNs > 0 && requestedNs > state.exposureMaxNs) append("max压回 ")
+                if (requestedNs != sentExpNs) append("req=${requestedNs}ns→sent=${sentExpNs}ns")
             }.ifEmpty { "无" }
             Log.i(
                 TAG,
@@ -1062,8 +1094,11 @@ class Camera2Engine(
         // HUD 实测读数（方案 31，2026-11-01 用户定版）：实际下发曝光与生效纠偏值。
         // 手动档才有曝光可言（自动档三键缺席 ⇒ null）；非等号档纠偏不适用 ⇒ null——
         // 这两枚只进左上角读数行，与帧率守卫提示行互不相干。
-        params.actualSentExposureNs.value = sentExpNs
-        params.actualCorrectionNs.value =
+        // B01：这里只是**候选**——applyParams 在 build 之前跑，请求还没交给平台。真正写总线
+        // 要等 [submitRepeating] 的平台调用返回成功（[publishSentExposure]），否则 HUD 会显示
+        // 一个从未生效的值（无会话/请求被拒时尤其误导）。
+        pendingSentExposureNs = sentExpNs
+        pendingSentCorrectionNs =
             if (sentExpNs != null && ExposureCorrection.applicable(params.shutter.value.value, fpsValue())) {
                 (ExposureCorrection.framePeriodNs(fpsValue()) - sentExpNs).coerceAtLeast(0L)
             } else {
@@ -1124,6 +1159,8 @@ class Camera2Engine(
             exposureProbeFramesSeen = 0
             exposureProbeStartMs = now
             exposureProbeActive = true
+            // Y01：开一次探测就排一枚独立超时，帧回执中断时由它兜底退出（见 [exposureProbeTimeoutTask]）
+            if (threadRunning) workHandler.postDelayed(exposureProbeTimeoutTask, ExposureCorrection.PROBE_TIMEOUT_MS)
             markDirty() // 下一拍起发等号请求（量程本身）；不 mark 的话这一场还带着 5% 余量
             Log.i(TAG, "等号档读出探测开始 key=$key（预览态发等号请求；录制目标在场即中止）")
         }
@@ -1151,8 +1188,16 @@ class Camera2Engine(
         }
     }
 
-    /** 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量） */
-    private fun cancelExposureProbe(why: String) {
+    /**
+     * 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量）。
+     * 同时清掉在途的 [exposureProbeTimeoutTask]（Y01）：否则迟到的那枚超时会在探测已经
+     * 退出/换代之后又跑一次，把冷却账写在无关的世代上。
+     *
+     * [reapply] = false 用于拆除路径（[closeSessionQuietly]/[teardownDevice]）：只清探测态与
+     * 在途计时，不再 markDirty——拆会话前再排一次 flushTask 只会白发一轮等号请求。
+     */
+    private fun cancelExposureProbe(why: String, reapply: Boolean = true) {
+        workHandler.removeCallbacks(exposureProbeTimeoutTask)
         if (!exposureProbeActive && exposureProbeKey == null) return
         exposureProbeActive = false
         exposureProbeKey = null
@@ -1160,7 +1205,7 @@ class Camera2Engine(
         exposureProbeLastTsNs = 0L
         exposureProbeFramesSeen = 0
         Log.i(TAG, "等号档探测退出：$why")
-        markDirty()
+        if (reapply) markDirty()
     }
 
     private fun snapshot(halNoiseReductionMode: Int?): RequestApplier.Snapshot = with(params) {
@@ -1219,9 +1264,17 @@ class Camera2Engine(
             // 放在 try 内：与 syncFpsPick/apply/build 同一条 P1 纪律（任何 RuntimeException 不许穿透）。
             val manualNow = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
             if (builderAeManual != manualNow) {
-                device?.takeIf { builderTargets.isNotEmpty() }?.let { prepareBuilder(it, builderTargets) }
-                builderAeManual = manualNow
-                Log.i(TAG, "AE 档翻转 → 重建 repeating builder（manual=$manualNow），清 SENSOR 三键残留")
+                val rebuilt = device?.takeIf { builderTargets.isNotEmpty() }
+                    ?.let { prepareBuilder(it, builderTargets) } ?: false
+                if (rebuilt) {
+                    builderAeManual = manualNow
+                    Log.i(TAG, "AE 档翻转 → 重建 repeating builder（manual=$manualNow），清 SENSOR 三键残留")
+                } else {
+                    // Y02：重建失败时绝不能推进 builderAeManual——旧 builder 仍带旧档的 SENSOR
+                    // 三键残值，把账标成新档会让下一次 apply 以为键集已对齐而不再重试。
+                    // 保持差额，下一拍/下一次脏刷新继续尝试重建。
+                    Log.w(TAG, "AE 档翻转重建 builder 失败（manual=$manualNow），保持旧档账并等待重试")
+                }
             }
             // builder 可能刚被重建：apply 与 build 都必须落在新 builder 上——
             // 【2026-10-27 复审修掉的 P1】重建后若仍 build 旧 builder，翻转那一次下发的是
@@ -1263,8 +1316,16 @@ class Camera2Engine(
         }
         // 只有平台调用返回成功才把就绪快照推进到 ready（R01）——这是首录/换段唯一可信的
         // 「本世代会话已接纳帧请求」证据；调用抛异常时 applyRepeatingNow 的 catch 负责失败态。
+        // B01：送出曝光读数同一处发布——与「请求真的进了平台」用同一条证据线，不提前显示。
+        publishSentExposure()
         publishReadiness(configured = true, repeatingSubmitted = true)
         if (desiredPreview) publishPreview(PreviewStatus.ING)
+    }
+
+    /** B01：把本次**提交成功**的送出曝光读数发布到总线（HUD 只读）。 */
+    private fun publishSentExposure() {
+        params.actualSentExposureNs.value = pendingSentExposureNs
+        params.actualCorrectionNs.value = pendingSentCorrectionNs
     }
 
     private fun singleCapture(tag: String) {
@@ -2040,6 +2101,9 @@ class Camera2Engine(
         // 先使配置中的在途回调作废（session 字段此刻可能是 null，下面的 close 关不到它）
         sessionAttempt++
         publishReadiness(configured = false, repeatingSubmitted = false)
+        // Y01：拆会话必须同时拆探测窗——否则新会话的帧间隔会接着旧窗计数，把两个世代的采样
+        // 折算成一枚 Δ 闩锁进去；在途超时任务也要一起摘掉，不能让它在拆完之后再跑一次。
+        cancelExposureProbe("会话关闭", reapply = false)
         val hs = highSpeedSession
         val normal = session
         highSpeedSession = null

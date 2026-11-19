@@ -185,6 +185,27 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
         return session
     }
     fun frame(session: Any, frame: Long) { call(session, "emit", frame) }
+
+    /** 跑掉引擎线程上已排的 delayed 任务（flushTask / 等号探测独立超时等）；post 本身仍立即执行。 */
+    fun runDelayed(h: Harness) {
+        call(field(h.engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler"), "runDelayed")
+    }
+
+    fun delayedCount(h: Harness): Int =
+        call(field(h.engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler"), "delayedCount") as Int
+
+    /**
+     * 把参数总线上的某个数值档（[com.wotagei.cam.core.ParamState]，如 Shutter/Iso）整体换成新值。
+     * 只换 value，range/enabled 保持可用态——测试要的是「用户在可用档位上选了这个值」。
+     */
+    fun setParamValue(params: Any, property: String, value: Long) {
+        val flow = call(params, "get$property") ?: error("WotaParams 没有 $property")
+        val state = type("com.wotagei.cam.core.ParamState")
+            .declaredConstructors.single { it.parameterCount == 4 }
+            .newInstance(value, null, true, true)
+        call(flow, "setValue", state)
+    }
+
     fun ledger(): Long {
         val ledger = type("com.wotagei.cam.record.FrameLedger").getField("INSTANCE").get(null)
         return call(call(ledger, "snapshot")!!, "getCameraStarted") as Long
@@ -307,6 +328,12 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public boolean postDelayed(Runnable r,long ms){if(looper.closed)return false;delayed.add(r);return true;}
                     public void removeCallbacks(Runnable r){delayed.remove(r);}
                     public void removeCallbacksAndMessages(Object o){delayed.clear();}
+                    public int delayedCount(){return delayed.size();}
+                    public void runDelayed(){
+                        java.util.ArrayList<Runnable> copy=new java.util.ArrayList<>(delayed);
+                        delayed.clear();
+                        for(Runnable r:copy)r.run();
+                    }
                 }
             """,
             "android.os.SystemClock" to "package android.os; public class SystemClock {public static long now;public static long elapsedRealtime(){return now;}}",

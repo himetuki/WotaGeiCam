@@ -339,10 +339,14 @@ fun PillHost(
 @Composable
 private fun AeModeRow(params: WotaParams, ability: CameraAbility?, enabled: Boolean = true) {
     val aeMode by params.aeMode.observed()
+    val fps by params.fps.observed()
     val names = AeMode.values().map { stringResource(aeLabelRes(it)) }
     PillChoices(
         options = AeMode.values().mapIndexed { i, m ->
-            PillOption(m.ordinal, names[i], m != AeMode.MANUAL || ability?.manualExposurePossible() == true)
+            // Y04：手动档准入是**帧率相关**的——设备最短曝光长于一帧周期（如 20ms @60fps）时
+            // 这个手动组合没有合法解（clampShutterNs 与曝光纠偏会夹出越界请求），必须灰显。
+            // 判据与 applyModeGates 同源（manualExposurePossibleAt），不在这里另写一份帧周期算式。
+            PillOption(m.ordinal, names[i], m != AeMode.MANUAL || ability?.manualExposurePossibleAt(fps.value) == true)
         },
         selected = aeMode.ordinal,
         label = stringResource(R.string.cam_p_ae),
@@ -614,6 +618,10 @@ private fun ShutterPill(
     WotaPillPopup(anchor, onClose, title = stringResource(R.string.cam_p_shutter)) {
         // 快门不在录制中可调白名单（A4）：能开窗看档位，但控件全部禁用
         if (!editable) Note(R.string.cam_recording_readonly)
+        // Y04：设备最短曝光长于一帧周期时「曝光范围 ∩ 帧周期」交集为空（如 20ms @60fps）——
+        // 手动档已由 WotaParams.applyModeGates 回弹 AUTO、档位梯整排不可选。回弹必须可见：
+        // 把原因写在这个弹窗里，别让用户对着整排灰档猜。
+        if (!shutter.enabled) Note(R.string.cam_shutter_manual_no_room)
         AeModeRow(params, ability, enabled = editable)
         if (aeMode == AeMode.MANUAL) {
             // 档位可选性吃**帧率档位**（2026-10-04 r11/r10 口径）：下发帧周期与快门钳制都按档位
@@ -670,10 +678,15 @@ private fun ShutterPill(
                     )
                     WotaSwitch(
                         checked = corrAuto,
-                        onCheckedChange = {
-                            params.exposureCorrectionAuto.value = it
-                            onPersist()
-                        }
+                        // Y03：与同一弹窗的滑杆/AE 行共用 editable 门禁——只读态（录制中）下
+                        // 该开关既不能点（enabled），回执也不许写总线/落盘（走 null 不接线）。
+                        onCheckedChange = if (editable) {
+                            { on: Boolean ->
+                                params.exposureCorrectionAuto.value = on
+                                onPersist()
+                            }
+                        } else null,
+                        enabled = editable
                     )
                 }
                 NoteText(stringResource(R.string.cam_shutter_correction_auto_hint))
