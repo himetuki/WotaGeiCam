@@ -227,14 +227,14 @@ def check_ai_exclusion() -> None:
         count = read_text(path).count("排除（AI，不移植）")
         check(count >= 6, f"{name}: 明确排除 AI 的行数过少（{count} < 6）")
 
-    # iOS 源码树不得出现 stance / AI 占位符号
+    # 匹配标识符起始（含 snake_case / camelCase 分段），不要把 distance 等普通单词当作功能符号。
     swift_files = list((IOS_ROOT / "WotaGeiCam").rglob("*.swift")) + \
         list((IOS_ROOT / "Packages").rglob("*.swift"))
     check(len(swift_files) > 0, "iOS 源码树未找到任何 .swift 文件")
+    ai_symbol = re.compile(r"(?<![a-zA-Z0-9])(?:[Ww]ota)?[Ss]tance|(?<=[a-z0-9])Stance|(?<![a-zA-Z0-9])(?:WOTA)?STANCE")
     hits: list[str] = []
     for f in swift_files:
-        low = read_text(f).lower()
-        if "stance" in low or "wotastance" in low:
+        if ai_symbol.search(read_text(f)):
             hits.append(str(f.relative_to(REPO_ROOT)))
     check(not hits, f"iOS 源码树出现 AI 站位符号（应为零）：{hits}")
 
