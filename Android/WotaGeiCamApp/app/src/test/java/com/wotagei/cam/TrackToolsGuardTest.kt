@@ -90,10 +90,12 @@ class TrackToolsGuardTest {
                 sig.contains("anchor: androidx.compose.ui.unit.IntRect") && !sig.contains("IntRect =")
             )
         }
-        // 宿主编排侧：选轨快照与偏移必须原样送进 TrackExporter（2026-10-30 审查 🟡-1 上收）
+        // UI 快照保留「未同步」与 0ms 的区别，只有传给导出器时才把未同步转成 0。
+        val host = masked("player/ExportHost.kt")
+        assertTrue("宿主必须保留实际选轨和偏移快照", host.contains("ExportDetails.Track(track, offsetMs, offsetSource)"))
         assertTrue(
-            "ExportHost.startTrack 必须把选轨快照与偏移交给 TrackExporter",
-            masked("player/ExportHost.kt").contains("trackExporter.export(clip, track, offsetMs)")
+            "TrackExporter 必须使用快照里的实际选轨和偏移",
+            host.contains("val shift = offsetMs ?: 0L") && host.contains("trackExporter.export(clip, track, shift)")
         )
         // 红绿突变 1：拆掉双音轨门（恒显），同一把尺必须报红——这正是"单音轨也显示"的回归形态
         val mutantGate = playerScreenBody().replace("if (dualAudio)", "if (true)")

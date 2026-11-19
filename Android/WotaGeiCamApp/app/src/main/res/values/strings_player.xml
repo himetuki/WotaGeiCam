@@ -108,7 +108,10 @@
          弹层内给百分比与「准备中」态；弹层外给一行常驻小字（与光弧修复同族）。 -->
     <string name="player_clip_percent">%1$d%%</string>
     <string name="player_clip_preparing">正在准备导出…</string>
-    <string name="player_clip_running">导出中 %1$d%%</string>
+    <string name="player_clip_running">剪辑导出中 %1$d%%</string>
+    <string name="player_track_running">音轨导出中 %1$d%%</string>
+    <string name="player_clip_cancelling">正在结束导出…</string>
+    <string name="player_export_other_source">%1$s · %2$s</string>
     <string name="player_clip_done">剪辑已导出到媒体库</string>
     <string name="player_clip_failed">导出失败，请重试</string>
     <!-- 上一轮导出的资源 owner 仍在收尾：不是源/成片错误，提示稍后再试 -->

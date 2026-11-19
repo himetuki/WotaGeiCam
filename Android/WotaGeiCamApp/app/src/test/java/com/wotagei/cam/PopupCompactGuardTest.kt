@@ -133,14 +133,18 @@ class PopupCompactGuardTest {
     fun `剪辑导出体内禁fillMaxWidth进度条定宽`() {
         // 修复轮 1/3 P1：「导出中」的进度条 fillMaxWidth 会把 200dp 弹层顶回 400dp 上限、
         // place() 重居中横向跳位——紧凑化根因的漏网行，钉死
-        val clip = bodyOf(main("player/PlayerScreen.kt"), "ClipExportPopup")
+        val src = main("player/PlayerScreen.kt")
+        val clip = bodyOf(src, "ClipExportPopup")
+        val progress = bodyOf(src, "ExportProgressContent")
+        assertTrue("剪辑弹层接到定宽进度组件", clip.contains("ExportProgressContent(export, onCancel)"))
         assertTrue(
-            "ClipExportPopup 体内禁 fillMaxWidth（导出中宽度反弹+横向跳位）",
-            KotlinSourceScan.occurrences(clip, "fillMaxWidth").isEmpty()
+            "剪辑弹层及进度组件内禁 fillMaxWidth（导出中宽度反弹+横向跳位）",
+            KotlinSourceScan.occurrences(clip + progress, "fillMaxWidth").isEmpty()
         )
         assertTrue(
-            "进度条必须定宽（CLIP_POPUP_PROGRESS_WIDTH）",
-            clip.contains("CLIP_POPUP_PROGRESS_WIDTH")
+            "进度条在准备和确定态都必须定宽（CLIP_POPUP_PROGRESS_WIDTH）",
+            progress.contains("width(CLIP_POPUP_PROGRESS_WIDTH)") &&
+                KotlinSourceScan.occurrences(progress, "modifier = progressWidth").size == 2
         )
     }
 
@@ -191,7 +195,7 @@ class PopupCompactGuardTest {
         // 进度条定宽被改回 fillMaxWidth ⇒ 剪辑导出判据必红（P1 突变自证）
         val clipMutated = main("player/PlayerScreen.kt")
             .replace("width(CLIP_POPUP_PROGRESS_WIDTH)", "fillMaxWidth()")
-        val clipBody = bodyOf(clipMutated, "ClipExportPopup")
+        val clipBody = bodyOf(clipMutated, "ExportProgressContent")
         assertTrue(
             "进度条回退 fillMaxWidth 必须红",
             KotlinSourceScan.occurrences(clipBody, "fillMaxWidth").isNotEmpty() ||
