@@ -494,9 +494,13 @@ class WotaBackupAgent : BackupAgent() {
                 var cursorPath: String? = null
                 var key: PortableUserData.MediaKey? = null
                 var queryFailed = false
+                var rowSeen = false
                 try {
                     context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
-                        if (!c.moveToFirst() || c.isNull(0)) return@use
+                        if (!c.moveToFirst()) return@use
+                        // 行还在、只是 DATA/元数据暂时读不全（如刚改名的瞬时态）时，不能当成媒体已删除。
+                        rowSeen = true
+                        if (c.isNull(0)) return@use
                         val candidate = PortableUserData.MediaKey(c.getString(1).orEmpty(), c.getString(2).orEmpty(),
                             c.getLong(3), c.getLong(4))
                         if (candidate.valid()) {
@@ -526,19 +530,21 @@ class WotaBackupAgent : BackupAgent() {
                 } else {
                     // Y40：部分授权/查询缺失时，不可核验的本机标签不能从下一份备份里消失。
                     // 有历史指纹就沿用；没有历史指纹又不能证明已删除时，宁可本轮不备份。
+                    // 完整可见但游标仍有此行（DATA/尺寸暂时不完整）时媒体并未删除，同样沿用历史指纹。
+                    val metadataUnavailable = !canTrustAbsence || rowSeen
                     rows.forEach { row ->
                         val value = portableTag(row.tag) ?: return@forEach
                         val localKey = Triple(id, row.path, value)
                         val confirmed = previous[localKey]
-                        if (!canTrustAbsence) {
+                        if (metadataUnavailable) {
                             if (confirmed != null) {
                                 out += PortableUserData.Tag(confirmed.media, value, row.createdAt)
                                 if (nextKeys.add(localKey)) next += confirmed.copy(createdAt = row.createdAt)
-                            } else {
+                            } else if (!canTrustAbsence) {
                                 unverifiedWithoutProof = true
                             }
                         }
-                        // 完整可见时查无此行/指纹不完整 ⇒ 媒体已删除或已不可迁移，旧账本不能让它复活。
+                        // 完整可见且确认无此行 ⇒ 媒体已删除或已不可迁移，旧账本不能让它复活。
                     }
                 }
             }

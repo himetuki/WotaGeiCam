@@ -11,6 +11,11 @@ import java.io.File
 /** 真正调用生产 onRestoreFinished / WotaApp.onCreate / restoreTags / onFullBackup，失败仅注入平台 IO。 */
 class BackupRestoreLifecycleTest {
     private val keyA = PortableUserData.MediaKey("Movies/", "a.mp4", 123L, 1000L)
+    // 夹具的 MediaStore 游标只描述 id=7 这一行：DATA 指向 OLD_PATH，DISPLAY_NAME=old.mp4，
+    // 尺寸/时长 123/1000。导出指纹必须按这条真实行来断言，不能拿 pending 侧 a.mp4 冒充。
+    private val oldKey = PortableUserData.MediaKey(
+        "Movies/", BackupPlatformFixture.OLD_PATH.substringAfterLast('/'), 123L, 1000L
+    )
     private val a = PortableUserData.Tag(keyA, "like", 10L)
     private val b = PortableUserData.Tag(keyA.copy(name = "b.mp4"), "技巧", 20L)
     private val incoming get() = PortableUserData.Snapshot(mapOf("gallery_columns" to 3, "level_enabled" to true), listOf(b))
@@ -213,15 +218,36 @@ class BackupRestoreLifecycleTest {
             f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
             val complete = f.backup()
             assertEquals(1, complete.tags.size)
-            assertEquals(keyA, complete.tags.single().media)
+            assertEquals(oldKey, complete.tags.single().media)
             assertTrue("完整导出必须留下本机核验账本", f.ledger.isFile)
 
             f.script("denyQuery", true) // 模拟部分授权/卷不可见
             val partial = f.backup()
             assertEquals("不可见行的已有标签必须继续出现在下一份备份里", 1, partial.tags.size)
-            assertEquals(keyA, partial.tags.single().media)
+            assertEquals(oldKey, partial.tags.single().media)
             assertEquals("like", partial.tags.single().value)
             f.script("denyQuery", false)
+        }
+    }
+
+    @Test fun `Y40_活行元数据暂时不可读时沿用上次确认指纹`() {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
+            val complete = f.backup()
+            assertEquals(1, complete.tags.size)
+            assertEquals(oldKey, complete.tags.single().media)
+            assertTrue("完整导出必须留下本机核验账本", f.ledger.isFile)
+
+            // 行还在（moveToFirst=true），只是改名瞬时态下 DATA 暂时读不到；
+            // 完整权限下也不能把这条活行当成已删除，历史指纹必须沿用。
+            f.script("unreadableAfterRename", true)
+            f.script("name", "renamed (1).mp4")
+            f.script("path", BackupPlatformFixture.NEW_PATH)
+            val preserved = f.backup()
+            assertEquals("活行元数据暂时不可读时不能丢标签", 1, preserved.tags.size)
+            assertEquals(oldKey, preserved.tags.single().media)
+            assertEquals("like", preserved.tags.single().value)
+            assertEquals("账本必须继续保留已确认指纹", 1, f.readLedger().size)
         }
     }
 
@@ -283,7 +309,10 @@ class BackupRestoreLifecycleTest {
             val both = oldClips + newClips
             val first = f.restoreMedia(both).size
             val second = f.restoreMedia(both).size
-            assertEquals("两轮恢复后 80 条标签必须全部落库", 80, first + second)
+            // 上一轮已落库 60 条旧标签；本轮只交接放不下的 20 条新标签，
+            // 第二次再恢复同一批必须幂等（不能再重复落库）。
+            assertEquals("本轮只交接上次未落库的新标签", 20, first)
+            assertEquals("交接完成后重复恢复必须幂等", 0, second)
             assertFalse("源只在完整交接后才消费", f.staged.exists())
             assertFalse(f.pending.exists())
             assertEquals(80, f.rows.size)
@@ -305,7 +334,7 @@ class BackupRestoreLifecycleTest {
             f.script("mediaAccess", "ALL_FILES")
             val exported = f.backup()
             assertEquals(1, exported.tags.size)
-            assertEquals(keyA, exported.tags.single().media)
+            assertEquals(oldKey, exported.tags.single().media)
         }
     }
 
@@ -326,7 +355,7 @@ class BackupRestoreLifecycleTest {
             f.script("missingQuery", true)
             val preserved = f.backup()
             assertEquals("卷暂时不可见时，已确认标签必须继续留在下一份备份里", 1, preserved.tags.size)
-            assertEquals(keyA, preserved.tags.single().media)
+            assertEquals(oldKey, preserved.tags.single().media)
         }
     }
 

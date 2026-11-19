@@ -83,11 +83,12 @@ class MediaAccessTest {
     @Test
     fun `未挂载卷不算所有媒体可读`() {
         // 用字面量而不是 Android 常量，避免把平台 stub 事实带进纯函数单测。
+        // "mounted_ro" 才是 Environment.MEDIA_MOUNTED_READ_ONLY 的真实取值（不是 "mounted_read_only"）。
         assertTrue(mediaVolumesMountedFor(emptyList()))
         assertTrue(mediaVolumesMountedFor(listOf("mounted")))
-        assertTrue(mediaVolumesMountedFor(listOf("mounted", "mounted_read_only")))
+        assertTrue(mediaVolumesMountedFor(listOf("mounted", "mounted_ro")))
         assertFalse(mediaVolumesMountedFor(listOf("mounted", "unmounted")))
-        assertFalse(mediaVolumesMountedFor(listOf("mounted", "mounted_read_only", "unmounted")))
+        assertFalse(mediaVolumesMountedFor(listOf("mounted", "mounted_ro", "unmounted")))
     }
 
     @Test
