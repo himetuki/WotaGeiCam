@@ -809,12 +809,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     /**
-     * 当前镜头的 `CameraCharacteristics`（站位分析流选 YUV 尺寸用，2026-11-07）。
-     * 不在枚举完成窗口时返回 null——调用方回退 640x480 默认档，不猜能力。
+     * 当前镜头的 `CameraCharacteristics`（站位分析流选 YUV 尺寸用，2026-11-07；Y08）。
+     *
+     * **只读枚举期快照**：开关点击 / 回页补挂都在 Main 上走到这里，同步
+     * `CameraManager.getCameraCharacteristics` 在冷启或相机服务拥塞时会卡住入口。
+     * 枚举（[openCurrentLens] 的 IO 段）读到的 characteristics 已随 [LensSlot] 留下，
+     * 这里直接取回同一份；快照缺失（还没枚举完/旧槽位）返回 null，调用方回退 640x480，
+     * 不猜能力、也不在调用线程补查。
      */
     fun currentCharacteristics(): CameraCharacteristics? {
-        val id = ui.value.currentSlot?.logicId ?: return null
-        return runCatching { cameraManager().getCameraCharacteristics(id) }.getOrNull()
+        return ui.value.currentSlot?.characteristics
     }
 
     /** 批量写多个参数后手动统一下发一次（引擎自身已按 5ms 合并，通常不需要调） */
