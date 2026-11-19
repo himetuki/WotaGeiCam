@@ -145,7 +145,10 @@ class ManualExposureAdmissionTest {
         val bad = ArrayList<String>()
         val ae = runCatching { bodyOf(src, "AeModeRow") }.getOrNull()
             ?: return listOf("定位不到 AeModeRow 的体——守卫失去输入，不许算通过")
-        if (occurrences(ae, "manualExposurePossibleAt(").isEmpty()) {
+        // [occurrences] 是**词边界**匹配：needle 若以 `(` 收尾，紧随其后的实参首字符（`f`）
+        // 是标识符字符，调用永远不会被计数（`manualExposurePossibleAt(fps.value)` 这种单行
+        // 调用会假红）。这里按标识符本身判，括号由后一条「仍读旧判据」反向排除。
+        if (occurrences(ae, "manualExposurePossibleAt").isEmpty()) {
             bad.add("AeModeRow 的 MANUAL 准入没吃帧率（manualExposurePossibleAt）——60fps 下无解组合仍能进手动")
         }
         if (occurrences(ae, "manualExposurePossible(").isNotEmpty()) {

@@ -21,7 +21,15 @@ class CameraSentExposurePublishTest {
 
     @Test
     fun `送出曝光只在提交成功后发布且等于真实请求里的值`() {
-        CameraRecoveryStartFixture(javaClass.classLoader, boundaries).use { p ->
+        CameraRecoveryStartFixture(
+            javaClass.classLoader,
+            boundaries,
+            // 等号档用例必须声明 24/25 两档：默认能力表只有 [30,30]，引擎的通用退档会把
+            // 1/25 请求改写成 30fps 并按 1/30 钳制快门，等号档前提（40ms@25fps）在测试里
+            // 就不存在了，断言会落在「发送值 == 用户档位值」的假红上。
+            fpsRanges = "new android.util.Range[]{new android.util.Range<Integer>(24,24)," +
+                "new android.util.Range<Integer>(25,25),new android.util.Range<Integer>(30,30)}",
+        ).use { p ->
             p.bind()
             p.start()
             p.drain()

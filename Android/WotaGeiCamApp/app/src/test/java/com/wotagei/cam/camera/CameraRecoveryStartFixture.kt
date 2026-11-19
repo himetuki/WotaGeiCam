@@ -9,8 +9,22 @@ import java.io.Closeable
 internal class CameraRecoveryStartFixture(
     parent: ClassLoader,
     boundarySources: Map<String, String> = emptyMap(),
+    /**
+     * 能力表 `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` 的 Java 表达式。
+     *
+     * 默认只有 `[30,30]`（既有相机恢复用例的旧口径，行为不变）。等号档（1/24、1/25）的用例
+     * 必须显式声明对应档位：默认表里没有 24/25 时 [Camera2Engine.syncFpsPick] 的通用退档会把
+     * 总线 fps 改写成 30、并把快门按 1/30 钳制——等号档前提（40ms@25fps）在测试里根本不存在，
+     * 断言会落在「发送值 == 用户档位值」的假红上。
+     */
+    fpsRanges: String = DEFAULT_FPS_RANGES,
 ) : Closeable {
-    val platform = N12CameraControllerFixture(parent, BOUNDARIES + boundarySources)
+    val platform = N12CameraControllerFixture(
+        parent,
+        BOUNDARIES +
+            mapOf("android.hardware.camera2.CameraCharacteristics" to characteristics(fpsRanges)) +
+            boundarySources,
+    )
     val application = platform.application()
     val controller = platform.controller(application)
     val manager = platform.call(application, "getSystemService", "camera")!!
@@ -88,7 +102,11 @@ internal class CameraRecoveryStartFixture(
     }
 
     companion object {
-        private fun characteristics(): String {
+        /** 既有相机恢复用例的默认档位表（与旧 `characteristics()` 里的值逐字一致）。 */
+        internal const val DEFAULT_FPS_RANGES =
+            "new android.util.Range[]{new android.util.Range<Integer>(30,30)}"
+
+        private fun characteristics(fpsRanges: String): String {
             val keys = CameraCharacteristics::class.java.declaredFields
                 .filter { it.type.simpleName == "Key" }
                 .joinToString("\n") { field ->
@@ -104,7 +122,7 @@ internal class CameraRecoveryStartFixture(
                         Object value=null;
                         switch(key.name){
                             case "SCALER_STREAM_CONFIGURATION_MAP":value=new android.hardware.camera2.params.StreamConfigurationMap();break;
-                            case "CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES":value=new android.util.Range[]{new android.util.Range<Integer>(30,30)};break;
+                            case "CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES":value=$fpsRanges;break;
                             case "REQUEST_AVAILABLE_CAPABILITIES":case "CONTROL_AF_AVAILABLE_MODES":case "CONTROL_AWB_AVAILABLE_MODES":value=new int[]{0};break;
                             case "LENS_FACING":value=1;break;
                             case "SENSOR_ORIENTATION":value=90;break;
@@ -121,7 +139,6 @@ internal class CameraRecoveryStartFixture(
         }
 
         private val BOUNDARIES = mapOf(
-            "android.hardware.camera2.CameraCharacteristics" to characteristics(),
             "android.hardware.camera2.params.StreamConfigurationMap" to """
                 package android.hardware.camera2.params;
                 public class StreamConfigurationMap {
