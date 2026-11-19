@@ -258,6 +258,36 @@ class ParamsPersistSessionTest {
         assertEquals("影子没前进就会每次 flush 都写盘", 1, prefs.commitCount)
     }
 
+    @Test
+    fun `R13_纠偏A到B到A两次提交后磁盘回到A`() {
+        // A = 会话初值（自动开、手动 0），B = 用户改出的一组值。
+        // 仅当成功提交后两枚影子一起推进，第二次 A 才会被识别为差异重新落盘。
+        val aAuto = true
+        val aManual = 0L
+        val bAuto = false
+        val bManual = 2_000_000L
+        val prefs = FakePrefs()
+        val bus = params()
+        val session = ParamsPersistSession(prefs, bus)
+        bus.exposureCorrectionAuto.value = bAuto
+        bus.exposureCorrectionManualNs.value = bManual
+        assertTrue(session.flush())
+        assertEquals(bAuto, prefs.getBoolean(WotaSettings.KEY_CORRECTION_AUTO, aAuto))
+        assertEquals(bManual, prefs.getLong(WotaSettings.KEY_CORRECTION_MANUAL_NS, aManual))
+
+        // 改回会话初值 A：影子若停在 A，这两个键会被当成无差异跳过，磁盘留 B。
+        bus.exposureCorrectionAuto.value = aAuto
+        bus.exposureCorrectionManualNs.value = aManual
+        assertTrue(session.flush())
+        assertEquals("A→B→A 后自动开关必须回到 A", aAuto, prefs.getBoolean(WotaSettings.KEY_CORRECTION_AUTO, bAuto))
+        assertEquals("A→B→A 后手动值必须回到 A", aManual, prefs.getLong(WotaSettings.KEY_CORRECTION_MANUAL_NS, bManual))
+
+        // 再停一拍：影子已与磁盘一致，无关 flush 不许重复写这两枚键。
+        val commits = prefs.commitCount
+        assertTrue(session.flush())
+        assertEquals("影子推进后不应重复落盘", commits, prefs.commitCount)
+    }
+
     // -------------------------------------------------- 3. LOCK 归一（Q5）
 
     @Test
