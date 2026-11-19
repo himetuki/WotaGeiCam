@@ -22,7 +22,7 @@ import org.junit.Test
  * 3. **VideoClip 的 series 字段必须带默认值**：`readRows` 的构造点一个字都不改。
  * 4. **动作扇出**：多选条必须经 `expandSeriesTargets` 展开，否则「只把首段移进回收站」。
  * 5. **FullscreenBrowse 不许被改**：它吃扁平 `clips`，pager 语义零改动。
- * 6. **收尾**：`finishDelete` 必须调 `seriesDao.pruneOrphans()`。
+ * 6. **收尾**：删除收尾（`cleanupDeleted`）必须调 `seriesDao.pruneOrphans()`。
  *
  * 判据用哪把尺：**含字符串字面量的判据走原文**（`codeOnly` 会把字面量抹成空格，用它判必假），
  * 表达式体函数按声明切片（`bodyOf` 定位不到 `= xxx` 的函数，撞上会直接抛）。
@@ -195,13 +195,14 @@ class SeriesGroupGuardTest {
 
     @Test
     fun `finishDelete必须调pruneOrphans`() {
-        val fd = body("media/MediaActions.kt", "finishDelete")
-        assertTrue("必须先清成员（clearFor）", fd.contains("seriesDao.clearFor(ids)"))
+        val fd = body("media/MediaActions.kt", "cleanupDeleted")
+        // R09：清成员按 (mediaId, uri) 身份对，不许退回裸 ID（ID 复用会误删新片成员）
+        assertTrue("必须按身份对清成员（clearIdentity）", fd.contains("seriesDao.clearIdentity("))
         assertTrue("必须收掉没人指的系列空壳头（pruneOrphans）", fd.contains("seriesDao.pruneOrphans()"))
-        val clearAt = fd.indexOf("seriesDao.clearFor(ids)")
+        val clearAt = fd.indexOf("seriesDao.clearIdentity(")
         val pruneAt = fd.indexOf("seriesDao.pruneOrphans()")
         assertTrue("两个调用都得在", clearAt >= 0 && pruneAt >= 0)
-        assertTrue("prune 必须排在 clearFor 之后（反了就 prune 不掉刚清空的头）", pruneAt > clearAt)
+        assertTrue("prune 必须排在清成员之后（反了就 prune 不掉刚清空的头）", pruneAt > clearAt)
     }
 
     // ------------------------------------------------------------------ 第2轮返修·甲：卡片菜单作用域
@@ -391,7 +392,7 @@ class SeriesGroupGuardTest {
         assertTrue("突变体②必须真的改了源码", noPrune != actionsRaw)
         assertFalse(
             "摘掉 pruneOrphans 后收尾判据必须翻假",
-            flatten(bodyOf(codeOnly(noPrune), "finishDelete")).contains("seriesDao.pruneOrphans()")
+            flatten(bodyOf(codeOnly(noPrune), "cleanupDeleted")).contains("seriesDao.pruneOrphans()")
         )
 
         // ③ 读侧：把 s.series / s.parts 换成空表（归组永远建不起来而真值表全绿）
@@ -410,8 +411,8 @@ class SeriesGroupGuardTest {
         //   旧写法把 noPrune 喂给读侧切片、noFan 喂给 finishDelete 的 bodyOf——
         //   两个输入都在对方文件里，判据没等到就已炸「失去输入」，门禁 #1c 实测红）
         assertTrue(
-            "摘掉 pruneOrphans 后收尾判据的另半边（先 clearFor）必须仍绿",
-            flatten(bodyOf(codeOnly(noPrune), "finishDelete")).contains("seriesDao.clearFor(ids)")
+            "摘掉 pruneOrphans 后收尾判据的另半边（先按 (mediaId, uri) 身份对清账）必须仍绿",
+            flatten(bodyOf(codeOnly(noPrune), "cleanupDeleted")).contains("seriesDao.clearIdentity(")
         )
         assertTrue(
             "摘掉多选扇出后卡片菜单的扇出必须仍绿（同一判据族里的另一处接线不许被同一突变带走）",

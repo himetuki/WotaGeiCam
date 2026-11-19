@@ -106,7 +106,9 @@ class MediaCleanupTest {
             val dao = MediaRepo.get(ctx).db().tagDao()
 
             dao.insert(
-                MediaTag(mediaId = mediaId, path = name, tag = "wota-selftest", createdAt = System.currentTimeMillis())
+                // 身份对口径：彻底删除只清 (mediaId, pathKey) 双键都命中的标签。
+                // clipOf 的 dataPath=null ⇒ pathKey 是 uri 字符串（与 MediaActions 写入口径一致）。
+                MediaTag(mediaId = mediaId, path = created.toString(), tag = "wota-selftest", createdAt = System.currentTimeMillis())
             )
             val before = dao.observeAll().first().count { it.mediaId == mediaId }
             line("插入后该行的标签数=$before")

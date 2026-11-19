@@ -85,6 +85,15 @@ interface MediaTagDao {
     @Query("DELETE FROM media_tag WHERE mediaId IN (:mediaIds)")
     suspend fun clearFor(mediaIds: List<Long>)
 
+    /**
+     * 按**身份对**清标签：`(mediaId, path)` 双键必须同时命中。
+     *
+     * 彻底删除的收尾专用。裸 `mediaId` 在外部删片 + MediaStore 复用 ID 后会误清新片的标签；
+     * 双键匹配不上时宁可留下孤儿行（下次受控改名/迁移对账会处理），也绝不把旧片状态带到新片。
+     */
+    @Query("DELETE FROM media_tag WHERE mediaId = :mediaId AND path = :path")
+    suspend fun clearIdentity(mediaId: Long, path: String)
+
     @Query("SELECT * FROM media_tag")
     fun observeAll(): Flow<List<MediaTag>>
 
@@ -136,6 +145,15 @@ interface SeriesDao {
 
     @Query("DELETE FROM series_part WHERE mediaId IN (:mediaIds)")
     suspend fun clearFor(mediaIds: List<Long>)
+
+    /**
+     * 按**身份对**清系列成员：`(mediaId, uri)` 双键必须同时命中。
+     *
+     * 与 [MediaTagDao.clearIdentity] 同一条红线：裸 ID 在 MediaStore 复用后会误删新片的成员关系。
+     * 系列归组是跨进程稳定的弱关联，宁可留孤儿等 prune/对账，也不误伤同 ID 的新条目。
+     */
+    @Query("DELETE FROM series_part WHERE mediaId = :mediaId AND uri = :uri")
+    suspend fun clearIdentity(mediaId: Long, uri: String)
 
     /**
      * 读侧归组用的两条全表流（#5 Step 4c）。

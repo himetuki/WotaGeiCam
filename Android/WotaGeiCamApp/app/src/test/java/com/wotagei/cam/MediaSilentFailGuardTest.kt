@@ -86,7 +86,7 @@ class MediaSilentFailGuardTest {
     fun `批量删除失败必须逐条记日志`() {
         val b = rawBody("media/MediaActions.kt", "deleteOneByOne")
         assertTrue("每条删除失败都要记日志（只报一个总数事后无从复盘）", b.contains("Log.e(TAG,"))
-        assertTrue("日志要带 uri（定位是哪一条）", b.contains("uri=\${clip.uri}"))
+        assertTrue("日志要带 uri（定位是哪一条）", b.contains("uri=\${target.uri}"))
         assertTrue("日志要带异常类名", b.contains("\${err.javaClass.simpleName}"))
         assertTrue("日志要带 message", b.contains("\${err.message}"))
         assertTrue("异常对象本身也要传下去（栈才有取证价值）", b.contains("\${err.message}\", err)"))

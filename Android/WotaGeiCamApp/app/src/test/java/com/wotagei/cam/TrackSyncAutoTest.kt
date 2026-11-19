@@ -169,9 +169,9 @@ class TrackSyncAutoTest {
     @Test
     fun `删片收尾必须清理同步prefs`() {
         val src = codeOnly(mainSourceText("media/MediaActions.kt"))
-        val cleanup = flatten(bodyOf(src, "finishDelete"))
+        val cleanup = flatten(bodyOf(src, "cleanupDeleted"))
         assertTrue(
-            "finishDelete 的清理块必须调用 TrackSync.clearFor（否则删除后同步偏移残留）",
+            "cleanupDeleted 的清理块必须调用 TrackSync.clearFor（否则删除后同步偏移残留）",
             cleanup.contains("TrackSync.clearFor(")
         )
         // 突变：把清理调用删掉，尺子必须红
