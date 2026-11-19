@@ -312,13 +312,19 @@ class ExportCompatibilityBridgeTest {
             assertTrue("finally必须归还$event", p.events.contains(event))
         }
     }
+    /**
+     * Y30：音轨复制已从「视频 EOS 后整段透传」改成交错车道 [SceneAudioLane]。
+     * 测试仍跑**同一份真实字节码**的车道（arm 入点公式 = 生产 `sceneExportAudioSeekUs`，
+     * 判据/单调桥同源），不另写复制控制流。
+     */
     private fun copyAudio(p: ExportPlatformFixture, ex: Any, base: Long, shift: Long, end: Long, audioIdx: Int = 2) {
-        val muxer = p.type("android.media.MediaMuxer").getConstructor(java.io.FileDescriptor::class.java, Int::class.javaPrimitiveType)
-            .newInstance(java.io.FileDescriptor(), 0)
-        p.call(muxer, "addTrack", p.call(ex, "getTrackFormat", audioIdx))
+        val muxer = p.muxer()
+        val outTrack = p.call(muxer, "addTrack", p.call(ex, "getTrackFormat", audioIdx))
         p.call(muxer, "start")
+        val lane = p.lane(ex, audioIdx, muxer, base, shift, end)
         try {
-            p.call(p.runner(), "copyAudio", ex, audioIdx, 0, muxer, base, shift, end, Job())
+            p.call(lane, "arm", p.audioSeekUs(base, shift), outTrack)
+            p.call(lane, "drainAll")
         } finally {
             p.call(muxer, "release")
         }

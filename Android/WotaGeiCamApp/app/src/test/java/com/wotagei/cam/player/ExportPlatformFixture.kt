@@ -25,7 +25,12 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         "com.wotagei.cam.player.SceneExportRunner", "com.wotagei.cam.player.ClipExportKt",
         "com.wotagei.cam.player.RemuxOrientationKt", "com.wotagei.cam.media.VideoClip",
         "com.wotagei.cam.record.OrientationExportKt", "com.wotagei.cam.record.ArcRepairSession",
-        "com.wotagei.cam.record.ArcFail"
+        "com.wotagei.cam.record.ArcFail",
+        // 导出器、任务所有者和音频车道共用同一套 Android 边界桩。
+        "com.wotagei.cam.player.ClipExporter", "com.wotagei.cam.player.TrackExporter",
+        "com.wotagei.cam.player.RemuxOwner", "com.wotagei.cam.player.RemuxOwnerKt",
+        "com.wotagei.cam.player.RemuxWait", "com.wotagei.cam.player.ExportTerminal",
+        "com.wotagei.cam.player.SceneAudioLane", "com.wotagei.cam.record.MediaIdsKt"
     ) + if (realGl) setOf(
         "com.wotagei.cam.player.SceneExportGl",
         "com.wotagei.cam.record.ArcRepairGl",
@@ -84,13 +89,117 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
     suspend fun export(
         runner: Any, durationMs: Long = 3_000, startMs: Long = 0, endMs: Long = 2_000,
         track: SelectedTrack = SelectedTrack.ENV, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
         onProgress: (Float) -> Unit = {}
     ): Any = suspendCoroutine { continuation ->
         try {
             val result = call(runner, "export", clip(durationMs), startMs, endMs, track, offsetMs,
-                SceneExportEffects(null, true), onProgress, continuation)
+                SceneExportEffects(null, true), onLateOutcome, onProgress, continuation)
             if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
         } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    /** 构造隔离 loader 里的真实 [ClipExporter]（与 Runner 同一套 android.* 桩）。 */
+    fun clipExporter(): Any = newWithContext("com.wotagei.cam.player.ClipExporter")
+
+    /** 构造隔离 loader 里的真实 [TrackExporter]。 */
+    fun trackExporter(): Any = newWithContext("com.wotagei.cam.player.TrackExporter")
+
+    private fun newWithContext(name: String): Any {
+        val context = new("android.content.Context")
+        return type(name).getConstructor(context.javaClass).newInstance(context)
+    }
+
+    suspend fun clipExport(
+        exporter: Any, durationMs: Long = 3_000, startMs: Long = 0, endMs: Long = 2_000,
+        track: SelectedTrack = SelectedTrack.ENV, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
+        onProgress: (Float) -> Unit = {}
+    ): Any = suspendCoroutine { continuation ->
+        try {
+            val result = call(exporter, "export", clip(durationMs), startMs, endMs, track, offsetMs,
+                onLateOutcome, onProgress, continuation)
+            if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
+        } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    suspend fun trackExport(
+        exporter: Any, durationMs: Long = 3_000,
+        track: SelectedTrack = SelectedTrack.CAP, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
+        onProgress: (Float) -> Unit = {}
+    ): Any = suspendCoroutine { continuation ->
+        try {
+            val result = call(exporter, "export", clip(durationMs), track, offsetMs,
+                onLateOutcome, onProgress, continuation)
+            if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
+        } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    /** 构造隔离 loader 里的 Uri（与生产日志/验票同一套 android 桩：parseId 固定 42）。 */
+    fun uri(value: String): Any =
+        type("android.net.Uri").getConstructor(String::class.java).newInstance(value)
+
+    /**
+     * 真实 `deletePendingRowVerified`（RemuxOwnerKt 顶层函数）：删失败重试一次、两次未生效留痕。
+     * 只跑失败回收这一段，不替生产决定何时删行。
+     */
+    fun deletePendingRowVerified(ctx: Any, uri: Any, tag: String): Boolean {
+        val method = type("com.wotagei.cam.player.RemuxOwnerKt").declaredMethods
+            .single { it.name == "deletePendingRowVerified" && it.parameterCount == 3 }
+        method.isAccessible = true
+        return invoke { method.invoke(null, ctx, uri, tag) as Boolean }
+    }
+
+    /** 关闭并等某生产类的单 owner 执行器真正退出（每个隔离 loader 各有一份静态执行器）。 */
+    fun shutdownOwner(typeName: String, timeoutMs: Long): Boolean {
+        val executor = ownerExecutorOf(typeName)
+        executor.shutdown()
+        return executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    /** 等某生产类的单 owner 执行器空闲（activeCount 归 0 = 上一 owner 已收口、资源已归还）。 */
+    fun awaitOwnerIdle(typeName: String, timeoutMs: Long): Boolean {
+        val executor = ownerExecutorOf(typeName)
+        val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < end) {
+            if (executor.activeCount == 0) return true
+            Thread.sleep(10L)
+        }
+        return executor.activeCount == 0
+    }
+
+    private fun ownerExecutorOf(typeName: String): ThreadPoolExecutor {
+        val owner = type(typeName)
+        val onOuter = runCatching { owner.getDeclaredField("EXPORT_OWNER_EXECUTOR") }.getOrNull()
+        val field = onOuter ?: type("$typeName\$Companion").getDeclaredField("EXPORT_OWNER_EXECUTOR")
+        field.isAccessible = true
+        val target = if (onOuter != null) null else owner.getField("Companion").get(null)
+        return field.get(target) as ThreadPoolExecutor
+    }
+
+    /** 隔离 loader 里的真实音频车道（Y30）：构造后由调用方 arm/drain。 */
+    fun lane(ex: Any, audioIdx: Int, muxer: Any, baseUs: Long, shiftUs: Long, endUs: Long): Any =
+        type("com.wotagei.cam.player.SceneAudioLane").getDeclaredConstructor(
+            type("android.media.MediaExtractor"), Int::class.javaPrimitiveType,
+            type("android.media.MediaMuxer"), Long::class.javaPrimitiveType,
+            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+            kotlinx.coroutines.Job::class.java
+        ).newInstance(ex, audioIdx, muxer, baseUs, shiftUs, endUs, kotlinx.coroutines.Job())
+
+    /** 独立 muxer（addTrack 后 start），供车道单测使用。 */
+    fun muxer(): Any = type("android.media.MediaMuxer").getConstructor(
+        java.io.FileDescriptor::class.java, Int::class.javaPrimitiveType
+    ).newInstance(java.io.FileDescriptor(), 0)
+
+    /** 生产纯函数 sceneExportAudioSeekUs：车道入点与预扫共用同一枚反推公式。 */
+    fun audioSeekUs(baseUs: Long, shiftUs: Long): Long {
+        val method = type("com.wotagei.cam.player.SceneExportPlanKt")
+            .declaredMethods.single { it.name == "sceneExportAudioSeekUs" }
+        method.isAccessible = true
+        return invoke {
+            method.invoke(null, baseUs, shiftUs) as Long
+        }
     }
     fun writable(extractor: Any, baseUs: Long, shiftUs: Long, endRelUs: Long, trackIndex: Int = 2): Boolean {
         val method = type("com.wotagei.cam.player.ClipExportKt").declaredMethods.single { it.name == "audioTrackWritable" }
@@ -259,6 +368,8 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static final java.util.List<String> events = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
                     public static final java.util.List<Long> audioWritten = new java.util.ArrayList<>();
                     public static final java.util.List<Integer> audioTracks = new java.util.ArrayList<>();
+                    public static final java.util.List<Integer> audioReads = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+                    public static final java.util.List<Long> videoWritten = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
                     public static final java.util.List<Long> renderedSource = new java.util.ArrayList<>();
                     public static final java.util.List<Long> renderedPts = new java.util.ArrayList<>();
                     public static long[] videoPts = {0, 100000, 200000, 300000, 400000};
@@ -268,11 +379,14 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static int decoderEos = 0, encoderEos = 0, awaits = 0, acquiredOnly = 0;
                     public static int commitResult = 1, commitCalls = 0, stampMode = 1, swapCalls = 0, stampCalls = 0;
                     public static int[] commitResults;
+                    public static int deleteCalls = 0;
+                    public static int[] deleteResults;
+                    public static long sampleSizeOverride = 0L;
                     public static boolean renderOk = true, swapOk = true, stopThrows = false;
                     public static boolean glThreadAlive;
                     public static Thread glThread = new Thread();
                     public static int[] decoderReadyAfterInputs;
-                    public static Runnable afterAudioWrite, beforeAudioEof, afterStop, afterDecoded;
+                    public static Runnable afterAudioWrite, beforeAudioEof, afterStop, afterDecoded, afterVideoWrite;
                     public static long currentSource, clockStepMs, clockMs;
                     public static void add(String e) { events.add(e); }
                 }
@@ -335,13 +449,17 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         return result;
                     }
                     public int delete(android.net.Uri uri, String selection, String[] args) {
+                        int call=++probe.ExportScript.deleteCalls;
                         probe.ExportScript.add("pending.delete");
                         probe.ExportBlocking.note("delete.enter",uri.toString());
                         probe.ExportBlocking.note("pending.delete",uri.toString());
                         probe.ExportBlocking.pause("delete");
                         probe.ExportBlocking.release("pending",uri.toString());
                         probe.ExportBlocking.didReturn("delete",uri.toString());
-                        return 1;
+                        int[] results=probe.ExportScript.deleteResults;
+                        int result=results==null ? 1 : results[Math.min(call-1,results.length-1)];
+                        if (result < 0) throw new IllegalStateException("delete busy");
+                        return result;
                     }
                 }
             """,
@@ -445,11 +563,19 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     }
                     public int getSampleTrackIndex() { return currentTrack(); }
                     public long getSampleTime() { int t=currentTrack(); return t<0 ? -1L : (t==0 ? probe.ExportScript.videoPts : probe.ExportScript.audioPts)[positions[t]]; }
-                    public long getSampleSize() { return currentTrack()<0 ? -1L : 8L; }
+                    public long getSampleSize() {
+                        int t=currentTrack();
+                        if(t<0) return -1L;
+                        // Y30 超限样本注入只作用于音轨（视频路径的 getSampleSize 保持真实小样本）
+                        if(t>0 && probe.ExportScript.sampleSizeOverride>0) return probe.ExportScript.sampleSizeOverride;
+                        return 8L;
+                    }
                     public int getSampleFlags() { return currentTrack()==0 && probe.ExportScript.videoSync[positions[0]] ? 1:0; }
                     public int readSampleData(java.nio.ByteBuffer b,int offset) {
                         int t=currentTrack(); if(t<0) return -1;
-                        b.putInt(offset,positions[t]); b.putInt(offset+4,t); if(t==0) probe.ExportScript.reads++; return 8;
+                        b.putInt(offset,positions[t]); b.putInt(offset+4,t); if(t==0) probe.ExportScript.reads++;
+                        else probe.ExportScript.audioReads.add(positions[t]);
+                        return 8;
                     }
                     public boolean advance() {
                         int t=currentTrack(); if(t<0)return false; positions[t]++;
@@ -559,6 +685,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         if(tracks.get(track).startsWith("audio/")) {
                             probe.ExportScript.audioWritten.add(info.presentationTimeUs);probe.ExportScript.audioTracks.add(b.getInt(info.offset+4));
                             probe.ExportScript.add("audio.write"); if(probe.ExportScript.afterAudioWrite!=null) probe.ExportScript.afterAudioWrite.run();
+                        } else {
+                            probe.ExportScript.videoWritten.add(info.presentationTimeUs);probe.ExportScript.add("video.write");
+                            if(probe.ExportScript.afterVideoWrite!=null) probe.ExportScript.afterVideoWrite.run();
                         }
                     }
                     public void stop() {

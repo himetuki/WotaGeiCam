@@ -9,6 +9,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.ClassRule
 import org.junit.Test
@@ -55,6 +56,46 @@ class ExportBlockingCompatibilityTest {
     @Test
     fun `U05 render迟到返回不得在caller结束后再发布进度`() {
         cancelledLateCompletion("render")
+    }
+
+    /**
+     * Y32：预算到点与「已进入 commit」的时间顺序。等待方先拿 TIMEOUT 离开，但 commit 已经领到
+     * 许可并在之后返回成功：真实终态是 Done，必须按任务身份回填；watchdog 不得先把 TIMEOUT
+     * 写进 terminal 把迟到真话锁死。已封轨成片不许删。
+     */
+    @Test
+    fun `Y32 后渲染commit已进入时预算到点_迟到Done仍回填且不删封轨片`() {
+        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+            val probe = BlockingProbe(p)
+            probe.enable("commit")
+            p.script("commitResults", intArrayOf(1, 1))
+            p.script("clockStepMs", 1L)
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val caller = launchExport(p) { late.add(it) }
+            var endedBeforeRelease = false
+            var reason: String? = null
+            try {
+                check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞" }
+                // 已进入 commit 后把测试时钟推过等待预算：waiting 侧先结束，owner 仍阻塞。
+                p.script("clockStepMs", 1_000_000L)
+                endedBeforeRelease = caller.completed.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)
+                reason = caller.result.get()?.let { p.call(it, "getReason").toString() }
+            } finally {
+                probe.proceed.countDown()
+                caller.close()
+                assertTrue("放行后 owner 必须在有界时间内收口",
+                    p.awaitOwnerIdle(SCENE, CLEANUP_WAIT_MS))
+            }
+            assertEquals("预算到点必须先结束等待方", true, endedBeforeRelease)
+            assertEquals("等待方视角只能是 TIMEOUT（真话由迟到回填）", "TIMEOUT", reason)
+            assertEquals("已领取的 public 许可只发一次，不因等待方离开重试", 1, p.script("commitCalls"))
+            assertFalse("已封轨成片不得因等待方离开被删行", p.events.contains("pending.delete"))
+            assertEquals("迟到 Done 必须按任务身份回填一次", 1, late.size)
+            assertEquals("回填的是真实终态 Done", "Done", late.single()!!.javaClass.simpleName)
+            assertEquals("按任务身份带成片 id", 42L, p.call(late.single()!!, "getId") as Long)
+            assertTrue("收尾必须关掉本 loader 的生产执行器",
+                p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
     }
 
     @Test
@@ -167,7 +208,10 @@ class ExportBlockingCompatibilityTest {
     }
 
     /** 真实 suspend export 在独立线程起跑；放行与时钟由用例控制，出测试不再留后台 caller。 */
-    private fun launchExport(p: ExportPlatformFixture): ExportCaller {
+    private fun launchExport(
+        p: ExportPlatformFixture,
+        onLate: ((Any?) -> Unit)? = null
+    ): ExportCaller {
         val result = AtomicReference<Any?>()
         val error = AtomicReference<Throwable?>()
         val completed = CountDownLatch(1)
@@ -178,7 +222,7 @@ class ExportBlockingCompatibilityTest {
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         val job = scope.launch {
             try {
-                result.set(p.export(p.runner()))
+                result.set(p.export(p.runner(), onLateOutcome = onLate ?: {}))
             } catch (failure: Throwable) {
                 error.set(failure)
             } finally {
@@ -261,8 +305,8 @@ class ExportBlockingCompatibilityTest {
             for (event in listOf("decoder.release", "encoder.release", "muxer.release", "gl.release", "fd.close")) {
                 assertEquals("退出后资源须恰好归还：$event", 1, p.events.count { it == event })
             }
-            // 方向读取助手自己还会建/释放一枚短期 extractor，与主提取器各一次。
-            assertEquals("方向助手与主提取器各释放一次", 2, p.events.count { it == "extractor.release" })
+            // 方向读取助手自己的短期 extractor + 主提取器 + Y30 音频车道的独立 extractor，各释放一次。
+            assertEquals("方向助手/主提取器/音频车道各释放一次", 3, p.events.count { it == "extractor.release" })
         }
     }
 
@@ -428,6 +472,7 @@ class ExportBlockingCompatibilityTest {
         private const val ENTRY_WAIT_MS = 5_000L
         private const val CANCEL_WAIT_MS = 1_500L
         private const val CLEANUP_WAIT_MS = 5_000L
+        private const val SCENE = "com.wotagei.cam.player.SceneExportRunner"
         @ClassRule @JvmField
         val temporary = TemporaryFolder(File("build/tmp/export-u05-blocking-test").apply { mkdirs() })
         private val classes by lazy { ExportPlatformFixture.compile(temporary.newFolder("platform")) }
