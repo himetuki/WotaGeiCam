@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicLong
  *   环境+视频继续录——成片仍是合法 MP4（内录轨比另两轨短，播放器按轨长对齐），不中断录制；
  * - 停止顺序：codec.stop/release → muxer.stop/release → AudioRecord.stop/release。
  */
-class CodecRecorder(
+internal class CodecRecorder(
     private val ctx: Context,
     private val store: VideoStore,
     /** 输出路由探测（预校准只在 A2DP 时跑；默认实现零权限、失败按非 A2DP） */

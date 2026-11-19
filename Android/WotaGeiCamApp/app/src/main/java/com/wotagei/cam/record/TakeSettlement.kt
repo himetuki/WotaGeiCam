@@ -101,10 +101,8 @@ internal interface TakeSettlementBackend {
  * 结论进键 ⇒ "先失败后成功"补交付练习、"先成功后失败"清桥态——只按段集合去重会把后到
  * 的相反结论吞掉（练习被漏交付，或失败成片被当成练习交付）。
  */
-internal class TakeSettlementOwner(
-    private val scope: CoroutineScope,
-    private val inFlight: MutableMap<SettlementKey, Deferred<TakeSettlementOutcome>> = HashMap()
-) {
+internal class TakeSettlementOwner(private val scope: CoroutineScope) {
+    private val inFlight = HashMap<SettlementKey, Deferred<TakeSettlementOutcome>>()
 
     /**
      * 恰好一次的键：系列归属 + 会话起始时刻 + **已发布段的段序/uri 清单** + 成功结论。

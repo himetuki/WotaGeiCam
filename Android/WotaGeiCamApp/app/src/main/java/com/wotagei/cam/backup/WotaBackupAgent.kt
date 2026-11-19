@@ -143,7 +143,7 @@ class WotaBackupAgent : BackupAgent() {
             if (merged != null) {
                 // 先判断能否装进 4MiB 字节帽：能装就别把 IO/发布失败误当成容量问题，
                 // 否则一次真实写失败会被下面的分批逻辑反复重试，也会掩盖原始错误。
-                if (fitsInSnapshot(merged)) {
+                if (fitsInSnapshot(PortableUserData.Snapshot(emptyMap(), merged))) {
                     if (writePending(context, merged)) {
                         atomic.delete()
                         return true
