@@ -219,32 +219,37 @@
 
 **Android**（需要 JDK 17 与 Android SDK，Platform 34 / Build-Tools 33.0.1；SDK 位置按标准方式提供：`ANDROID_HOME` 或 `Android/WotaGeiCamApp/local.properties` 的 `sdk.dir`）：
 
+> 面向 Forker 与编码 Agent 的详细开发指南：[`Android/AGENT_GUIDE.md`](Android/AGENT_GUIDE.md)（目录结构、架构与线程归属、持久化键名字典、修改联动清单、测试入口）。
+
 ```bash
 git clone https://github.com/himetuki/WotaGeiCam.git
 cd WotaGeiCam/Android/WotaGeiCamApp
 ./gradlew :app:assembleFullDebug      # 日常构建（full = 有 AI 站位；lite = 无 AI 导流版）
 ./gradlew :app:assembleFullRelease    # 发布构建（签名说明见下）
 
-# 打带检查点号的包（版本名 0.0.10-rNN，设置页可见；属性接受 05 或 r05 两种写法）
+# 打带检查点号的包（版本名 0.0.12-rNN，设置页可见；属性接受 05 或 r05 两种写法）
 # 双 flavor：full / lite 各出一枚（lite 包名相同、体积小，无 AI 站位）
 ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -Prbuild=05
 ```
 
 ```bash
 # 在 Android/WotaGeiCamApp/ 目录下执行。与 CI 一致的双 flavor 全套
-# （full / lite × plain / universal / arm64-v8a / armeabi-v7a，共 8 枚）。
+# （full / lite × plain / universal / arm64-v8a / armeabi-v7a，共 8 枚；
+#  CI 另复制 1 枚 compat 兼容包，合计 9 枚）。
 # 分两遍构建：先分包（按 flavor 分目录输出），拷出后再打不分包——第二遍会清掉第一遍的产物。
+# Gradle 产物名已含 flavor 段，拷贝时不要再追加 -$d（否则会变成 xxx-full-universal-release-full- 双段名，
+# 下游更新器按资产名挑包会错位）。与 CI 的 build-apk.yml 保持同一写法。
 ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PabiSplits=true -PapkBaseName=WotaGeiCam -Prbuild=05
 mkdir -p ../../apk-out
 for d in full lite; do
   for f in app/build/outputs/apk/$d/release/*.apk; do
-    b=$(basename "$f" .apk); cp "$f" "../../apk-out/${b}-$d.apk"
+    cp "$f" "../../apk-out/"
   done
 done
 ./gradlew :app:assembleFullRelease :app:assembleLiteRelease -PapkBaseName=WotaGeiCam -Prbuild=05
 for d in full lite; do
   for f in app/build/outputs/apk/$d/release/*.apk; do
-    b=$(basename "$f" .apk); cp "$f" "../../apk-out/${b}-$d.apk"
+    cp "$f" "../../apk-out/"
   done
 done
 ```
