@@ -1395,7 +1395,12 @@ class Camera2Engine(
             camResultTotal++
             feedExposureProbe(session, result)
             logAeAfTelemetry(result)
-            val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
+            // Y06：手动白平衡判负必须归属到**产出这条回报的那支请求**，而不是回报到达时总线怎么想。
+            // 总线切到手动后，改档前发出的 AUTO 拍、种子/稳压窗里按自动走的拍、旧会话迟到的拍
+            // 都会晚 2~4 帧到；旧实现一律按「现在是手动」计负 ⇒ 冷启即手动/换会话后前几拍被误判
+            // 「HAL 不采纳增益」，白平衡被无故闩到画面算法。
+            val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value) &&
+                manualWbRequestOf(session, request)
             logWbTelemetry(result, manual)
             // 种子捕获：只要回报显示 3A 自己的色彩管理还在跑（模式不是 TRANSFORM_MATRIX），
             // HAL 回报的 CCM 就是"活"的，抓来当种子（500ms 节流）。手动 HAL 档回报的是我们
@@ -1414,7 +1419,11 @@ class Camera2Engine(
                 }
             }
             if (!manual) {
+                // Y06：不是「这一拍真的写了 OFF+TRANSFORM_MATRIX」的回报，一律不参与判负，
+                // 也不延续上一轮连续拍计数（连续必须是**连续的手动请求**结论）。
                 wbProbeFails = 0
+                wbAwbActiveFails = 0
+                wbAdoptFails = 0
                 return
             }
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
@@ -1627,6 +1636,26 @@ class Camera2Engine(
                 params.wbHalRejected.value ||
                 // 会话重建稳压窗：窗内先按自动走，WB 键整套装稳后再切手动
                 SystemClock.elapsedRealtime() < wbHoldUntilMs)
+
+    /**
+     * 这条回报是否来自**我们真的写了手动白平衡键**的请求（Y06 归属口径）：
+     * ① 会话身份：必须是当前会话——旧会话/旧世代迟到的回报按代数丢弃（切镜头必换会话，
+     *    所以这里同时锁住了镜头身份）；
+     * ② 请求实际写键：`CONTROL_AWB_MODE=OFF` 且 `COLOR_CORRECTION_MODE=TRANSFORM_MATRIX`。
+     *    [RequestApplier.applyWhiteBalance] 只在「手动档 + 种子已到手 + 不走画面算法」时写这对键；
+     *    种子窗、稳压窗、画面算法兜底写的都是 AUTO+FAST。总线现值不代表在途请求的键。
+     * 读键失败/缺键一律按「不是手动请求」处理：宁可少判负，不许把自动回报计进手动判负。
+     */
+    private fun manualWbRequestOf(session: CameraCaptureSession, request: CaptureRequest): Boolean {
+        // 普通回执只挂在普通会话上（高速会话走 frameCountCallback），比较当前会话即可；
+        // 会话重建后旧对象的迟到回执在这里被整体丢弃。
+        if (session !== this.session) return false
+        return runCatching {
+            request.get(CaptureRequest.CONTROL_AWB_MODE) == CaptureRequest.CONTROL_AWB_MODE_OFF &&
+                request.get(CaptureRequest.COLOR_CORRECTION_MODE) ==
+                CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+        }.getOrDefault(false)
+    }
 
     /** 增益采纳判据的相对容差（见 logWbTelemetry）：HAL 量化/归一化不算未采纳 */
     private val WB_ADOPT_TOL = 0.15f
