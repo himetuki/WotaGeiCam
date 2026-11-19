@@ -63,8 +63,13 @@ enum class PreviewStatus { INIT, START, ING, STOP, ERROR }
 /** 录制状态机（与 record 包共用；中间态必须区分） */
 enum class RecordStatus { IDLE, PREPARE, START, STOPPING, ERROR }
 
-/** 分析流会话协商回执：仅陈述接纳结果，不改用户帧率或分析开关。 */
-enum class AnalysisSessionDecision { ABSENT, INCLUDED, BLOCKED_HIGH_SPEED }
+/**
+ * 分析流会话协商回执：仅陈述接纳结果，不改用户帧率或分析开关。
+ *
+ * [INCLUDED] 只在普通会话**配置成功**后发布（Y69）——设备是否接受「基础输出 + 分析 YUV」的
+ * 组合是 HAL 的裁决，建会话前先报接纳等于替平台打包票；被拒时改发 [BLOCKED_COMBINATION]。
+ */
+enum class AnalysisSessionDecision { ABSENT, INCLUDED, BLOCKED_HIGH_SPEED, BLOCKED_COMBINATION }
 
 /**
  * Camera2 引擎：开关设备、建会话、下发 repeating、点按对焦、错误恢复。
@@ -272,6 +277,12 @@ class Camera2Engine(
     private var highSpeedActive = false
     private var structuralSignature = ""
     private var lastAnalysisDecision: AnalysisSessionDecision? = null
+
+    /**
+     * Y69：本镜头上普通会话已拒绝过「基础输出 + 分析 YUV」的组合。置位后分析面仍留在引擎
+     * （调用方意图、surface 与 reader 都不动），只是不再塞进会话；换镜头 / 用户重新挂槽才再试一次。
+     */
+    private var analysisCombinationRejected = false
     private var desiredPreview = false
     private var sinkWaitRetries = 0
     private var reopenRetries = 0
@@ -424,6 +435,8 @@ class Camera2Engine(
             reqState = RequestApplier.stateOf(slot.ability, params.size.value, highSpeedActive)
             chosenFps = null
             structuralSignature = ""
+            // Y69：换镜头 = 新设备会话，给分析组合一次重新协商的机会（同一挂槽只自动撤一次）
+            analysisCombinationRejected = false
             sink.setOrientation(slot.ability.sensorOrientation, slot.type == LensType.FRONT)
             pushSinkFrameSize(params.size.value)
             publishDevice(DeviceStatus.OPEN_ING)
@@ -576,6 +589,9 @@ class Camera2Engine(
             }
             analysisSurface = surface
             analysisReader = reader
+            // Y69：重新挂槽是用户显式重试——组合被拒过也要再协商一次（只对真正换了目标生效，
+            // 同目标重放仍走上面的幂等分支，避免拒绝后每次回场都白撞一次失败）。
+            analysisCombinationRejected = false
             structuralSignature = ""
             if (desiredPreview) ensureSession()
         }
@@ -814,26 +830,63 @@ class Camera2Engine(
     /**
      * GPU 的录像面不进相机会话；分析槽只在普通会话接纳。
      * constrained high-speed 不允许 YUV：保留分析意图与 reader，回普通档时自动恢复，不能靠录制期摘槽规避。
+     * Y69：普通会话拒过「基础输出 + 分析 YUV」组合时（[analysisCombinationRejected]）同样只保留
+     * 意图、不进会话——站位是可选增强，不能让它把预览/录制的建会话拖死。
      */
     private fun currentTargets(highSpeed: Boolean, mode: RenderMode = params.renderMode.value): List<Surface> {
         val base = sink.cameraTargets()
         val withExtra = if (mode == RenderMode.DIRECT) {
             (extraSurface?.let { base + it }) ?: base
         } else base
-        return if (highSpeed) withExtra else (analysisSurface?.let { withExtra + it }) ?: withExtra
+        val analysis = if (!highSpeed && !analysisCombinationRejected) analysisSurface else null
+        return analysis?.let { withExtra + it } ?: withExtra
     }
 
-    /** 建会话前同步回执；同一结果不重复提示，切回普通/摘槽时仍须交代状态变化。 */
+    /**
+     * 建会话前同步回执（Y69）：只宣布**此刻就能定论**的结果——没有分析面 = ABSENT，
+     * 高速会话按能力表硬性排除 YUV = BLOCKED_HIGH_SPEED，已拒过的组合 = BLOCKED_COMBINATION。
+     * 普通会话能否真的带上分析面是设备对组合的裁决，必须等 [sessionCallback] 的 onConfigured，
+     * 绝不在这里预支 INCLUDED（旧实现先报接纳，配置失败后整个设备重开仍带同一分析面）。
+     */
     private fun reportAnalysisDecision(highSpeed: Boolean) {
         val decision = when {
             analysisSurface == null -> AnalysisSessionDecision.ABSENT
             highSpeed -> AnalysisSessionDecision.BLOCKED_HIGH_SPEED
-            else -> AnalysisSessionDecision.INCLUDED
+            analysisCombinationRejected -> AnalysisSessionDecision.BLOCKED_COMBINATION
+            else -> return
         }
+        publishAnalysisDecision(decision)
+    }
+
+    /** 同一结果不重复提示；切回普通/摘槽时仍须交代状态变化。 */
+    private fun publishAnalysisDecision(decision: AnalysisSessionDecision) {
         if (decision == lastAnalysisDecision) return
         lastAnalysisDecision = decision
         runCatching { onAnalysisSessionDecision(decision) }
             .onFailure { Log.w(TAG, "分析流协商回执异常：$decision", it) }
+    }
+
+    /**
+     * Y69：普通会话组合被拒（[sessionCallback] 的 onConfigureFailed 或 createCaptureSession
+     * 同步抛 IAE）时的一次性自救。
+     *
+     * 分析流是**可选**输出：部分机型支持该 YUV 单流尺寸，却拒绝它与预览/编码面的组合。旧实现
+     * 走 failDevice → 自动重开，重开仍带同一个分析面 ⇒ 整场预览/录制被一个可选功能拖死
+     * （REOPEN_MAX 用尽后停在失败态）。这里只撤「进会话的分析面」：surface/reader 与调用方
+     * 意图原样保留（与 [AnalysisSessionDecision.BLOCKED_HIGH_SPEED] 同一口径），并向站位层
+     * 给出明确暂停原因 [AnalysisSessionDecision.BLOCKED_COMBINATION]；随后按基础输出重连一次。
+     *
+     * 一次挂槽只自动撤一次：撤完基础会话再失败就没有可选面可撤，自然落回既有 failDevice
+     * 自愈链路，不会形成「拒绝 → 重试 → 再拒绝」的循环。
+     */
+    private fun withdrawAnalysisAndRetry(reason: String): Boolean {
+        if (analysisSurface == null || analysisCombinationRejected) return false
+        Log.w(TAG, "分析组合被拒，撤分析面重试基础会话：$reason")
+        analysisCombinationRejected = true
+        structuralSignature = ""
+        publishAnalysisDecision(AnalysisSessionDecision.BLOCKED_COMBINATION)
+        if (desiredPreview) ensureSession()
+        return true
     }
 
     private fun wantHighSpeed(): Boolean {
@@ -846,7 +899,8 @@ class Camera2Engine(
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
-        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|an=${!highSpeed && analysisSurface != null}|${sink.structuralToken()}"
+        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|" +
+            "an=${!highSpeed && !analysisCombinationRejected && analysisSurface != null}|${sink.structuralToken()}"
 
     private fun ensureSession() {
         val dev = device
@@ -916,7 +970,9 @@ class Camera2Engine(
             else failDevice(mapAccessReason(e.reason), "createCaptureSession 失败 reason=${e.reason}")
         } catch (e: IllegalArgumentException) {
             if (highSpeed) downgradeHighSpeed("高速输出面组合不被支持")
-            else failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话输出面组合非法（尺寸/格式不受支持）")
+            else if (!withdrawAnalysisAndRetry("会话输出面组合非法（尺寸/格式不受支持）")) {
+                failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话输出面组合非法（尺寸/格式不受支持）")
+            }
         } catch (e: IllegalStateException) {
             // 手里的 CameraDevice 已被系统收回：createCaptureSession 抛 IllegalStateException。
             // 切渲染模式（换 sink → 重建会话）的瞬间最容易撞上；不接住就是工作线程直接崩掉，
@@ -973,6 +1029,12 @@ class Camera2Engine(
                 // 不在这里发布 ING（R01）：配置成功只证明会话对象可用，repeating 仍可能被 HAL
                 // 拒绝。等 applyRepeatingNow 的 setRepeatingRequest 真正返回成功再发布。
                 publishReadiness(configured = true, repeatingSubmitted = false)
+                // Y69：配置成功才确认接纳——这条普通会话确实把分析面带进了输出组合。
+                // 高速会话的 YUV 排除是能力表上的硬结论，已在建会话前报过 BLOCKED_HIGH_SPEED；
+                // 组合被拒后重连的基础会话没有分析面，不许在这里冒充 INCLUDED。
+                if (!highSpeed && analysisSurface != null && !analysisCombinationRejected) {
+                    publishAnalysisDecision(AnalysisSessionDecision.INCLUDED)
+                }
                 // 手动白平衡稳压窗（2026-10-29 用户真机报障）：设置页返回等场景会重建会话，
                 // 桥/HAL 对"一帧请求里的整套 WB 键"可能非原子生效——AWB_OFF 先落、矩阵/增益
                 // 后落，中间那几拍就是裸 OFF 的传感器原色绿。会话活起来的头一拍先按自动走，
@@ -988,7 +1050,9 @@ class Camera2Engine(
                 runCatching { failed.close() }
                 if (gen != generation || attempt != sessionAttempt) return
                 if (highSpeed) downgradeHighSpeed("高速会话 onConfigureFailed fps=${fpsValue()}")
-                else failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "普通会话 onConfigureFailed targets=${targets.size}")
+                else if (!withdrawAnalysisAndRetry("普通会话 onConfigureFailed targets=${targets.size}")) {
+                    failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "普通会话 onConfigureFailed targets=${targets.size}")
+                }
             }
         }
 

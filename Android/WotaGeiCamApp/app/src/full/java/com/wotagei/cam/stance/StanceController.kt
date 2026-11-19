@@ -393,18 +393,25 @@ class StanceController private constructor(
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {
         analysisSessionDecision = decision
         if (decision == AnalysisSessionDecision.INCLUDED) {
-            if (_state.value.fallbackTip == HIGH_SPEED_TIP) _state.value = _state.value.copy(fallbackTip = null)
+            if (_state.value.fallbackTip == HIGH_SPEED_TIP || _state.value.fallbackTip == COMBINATION_TIP) {
+                _state.value = _state.value.copy(fallbackTip = null)
+            }
             maybeAttachAfterGate()
             return
         }
         analysis?.pauseListening()
         speaker?.pause()
+        // 互斥原因必须说清（能力协商 + 降级必提示口径）：高速是"保留帧率、回普通档自动恢复"；
+        // 组合被拒（Y69）是设备不接受当前画幅下「预览/编码 + 分析 YUV」，换镜头或重新开分析会再协商一次。
         _state.value = _state.value.copy(
             running = false,
             output = null,
-            fallbackTip = if (decision == AnalysisSessionDecision.BLOCKED_HIGH_SPEED && _state.value.enabled) {
-                HIGH_SPEED_TIP
-            } else _state.value.fallbackTip,
+            fallbackTip = when {
+                !_state.value.enabled -> _state.value.fallbackTip
+                decision == AnalysisSessionDecision.BLOCKED_HIGH_SPEED -> HIGH_SPEED_TIP
+                decision == AnalysisSessionDecision.BLOCKED_COMBINATION -> COMBINATION_TIP
+                else -> _state.value.fallbackTip
+            },
         )
     }
 
@@ -687,6 +694,9 @@ class StanceController private constructor(
     companion object {
         private const val TAG = "StanceController"
         private const val HIGH_SPEED_TIP = "当前高速会话不支持站位分析，已暂停分析与播报；保留所选帧率，回普通档自动恢复"
+
+        /** Y69：设备拒绝了「预览/编码 + 分析 YUV」的组合——预览与录制不受影响，只是分析被暂停。 */
+        private const val COMBINATION_TIP = "当前画幅下设备不接受分析流与预览同时输出，已暂停站位分析与播报；换镜头或重新开启分析可再试"
         @Volatile
         private var instance: StanceController? = null
 

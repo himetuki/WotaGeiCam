@@ -86,7 +86,7 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
         call(camera, "bind", sink)
         call(camera, "start")
         pumpCameraAndMain()
-        // INCLUDED 是建会话前的协商回执，不代表参数下发成功；先验真实预览已提交 repeating。
+        // INCLUDED 只说明会话配置成功（Y69），不代表参数下发成功；先验真实预览已提交 repeating。
         requireRepeatingSession()
         runBlocking {
             withTimeout(5_000L) {

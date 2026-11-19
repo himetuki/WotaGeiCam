@@ -254,8 +254,11 @@ class CameraCompatibilityBridgeTest {
         val h = highSpeedCamera(p, fps = 30)
         p.analysis(h)
         p.open(h, p.slot("0"))
+        // Y69：INCLUDED 只在配置成功后确认，普通会话要投递真实 onConfigured 才看得到接纳回执。
+        p.configured()
         p.pulse(h, 50)
         p.pulse(h, 30)
+        p.configured()
         assertEquals(listOf(0, 1, 0), p.sessions.map { p.sessionType(it) })
         assertEquals(listOf(listOf("preview", "yuv-analysis"), listOf("preview"),
             listOf("preview", "yuv-analysis")), p.sessions.map { p.outputNames(it) })
@@ -282,6 +285,8 @@ class CameraCompatibilityBridgeTest {
         val h = highSpeedCamera(p, fps = 30)
         p.analysis(h)
         p.open(h, p.slot("0"))
+        // Y69：接纳要等配置成功；摘槽回执（ABSENT）仍是建会话前的同步结论。
+        p.configured()
         p.analysis(h, enabled = false)
         assertEquals(listOf(listOf("preview", "yuv-analysis"), listOf("preview")),
             p.sessions.map { p.outputNames(it) })

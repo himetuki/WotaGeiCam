@@ -173,6 +173,30 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
         call(h.engine, "onStructuralPulse", pulse)
     }
     fun sessionType(config: Any = sessions.last()): Int = call(config, "getSessionType") as Int
+
+    /** Y69：让平台拒绝带分析面的输出组合（「单流 YUV 支持、组合不支持」的缺陷形态）。 */
+    fun rejectAnalysisCombination(on: Boolean = true) { set(manager, "rejectAnalysisCombination", on) }
+
+    /**
+     * 投递「最近一次 createCaptureSession 配置成功」的真实平台回调。
+     * 只投递平台事件，不自己拼 StateCallback——配置结果是生产代码的判据（Y69 的 INCLUDED 确认点）。
+     */
+    fun configured(index: Int = sessions.size - 1) {
+        val config = sessions[index]
+        val session = new(
+            if (call(config, "getSessionType") as Int == 1)
+                "android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession"
+            else "android.hardware.camera2.CameraCaptureSession"
+        )
+        call(call(config, "getStateCallback")!!, "onConfigured", session)
+    }
+
+    /** 投递「最近一次 createCaptureSession 配置失败」的真实平台回调。 */
+    fun configureFailed(index: Int = sessions.size - 1) {
+        val config = sessions[index]
+        call(call(config, "getStateCallback")!!, "onConfigureFailed", new("android.hardware.camera2.CameraCaptureSession"))
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun outputs(config: Any = sessions.last()): List<Any> = call(config, "getOutputConfigurations") as List<Any>
     fun outputNames(config: Any = sessions.last()): List<String> = outputs(config).map { call(it, "getSurface").toString() }
@@ -374,6 +398,8 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                 package android.hardware.camera2;
                 public class CameraManager {
                     public String[] publicIds=new String[0];
+                    /** Y69：置位后拒绝带分析面的输出组合（其余组合照常成功）。 */
+                    public boolean rejectAnalysisCombination;
                     private final java.util.Map<String,CameraCharacteristics> cameras=new java.util.HashMap<>();
                     private final java.util.Set<String> openable=new java.util.HashSet<>();
                     public final java.util.List<String> opened=new java.util.ArrayList<>();
@@ -398,6 +424,15 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public void close(){probe.CameraEvents.all.add("device.close:"+id);}
                     public CaptureRequest.Builder createCaptureRequest(int template){return new CaptureRequest.Builder();}
                     public void createCaptureSession(android.hardware.camera2.params.SessionConfiguration config){
+                        // Y69 缺陷形态：设备支持该 YUV 单流尺寸，却拒绝它和预览/编码面的组合。
+                        if(manager.rejectAnalysisCombination){
+                            for(android.hardware.camera2.params.OutputConfiguration output:config.getOutputConfigurations()){
+                                if(String.valueOf(output.getSurface()).contains("yuv-analysis")){
+                                    probe.CameraEvents.all.add("reject:analysis");
+                                    throw new IllegalArgumentException("analysis combination rejected");
+                                }
+                            }
+                        }
                         manager.sessions.add(config);probe.CameraEvents.all.add("create:"+config.getSessionType());
                     }
                     public abstract static class StateCallback {
