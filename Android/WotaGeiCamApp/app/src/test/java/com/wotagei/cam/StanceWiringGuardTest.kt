@@ -96,7 +96,15 @@ class StanceWiringGuardTest {
         val screenBody = bodyOf(screen, "CameraScreen")
         // flavor 桥接（docs/plan/33）后 CameraScreen 走 StanceFeature 门面
         assertTrue("录制态必须接线", screenBody.contains("stance.setRecordingActive(recording)"))
-        assertTrue("镜头切换必须接线", screenBody.contains("stance.setFrontLens(lens == LensType.FRONT)"))
+        // Y70：镜头真值取**实际落定**的槽位，不是请求中的档位（切镜途中两者不一致）
+        assertTrue(
+            "镜头切换必须接线（实际镜头，非请求档位）",
+            screenBody.contains("stance.setFrontLens(ui.currentLens == LensType.FRONT)")
+        )
+        assertTrue(
+            "切镜未决必须停分析（Y70）",
+            screenBody.contains("stance.setLensSettling(ui.lensSwitching)")
+        )
     }
 
     @Test

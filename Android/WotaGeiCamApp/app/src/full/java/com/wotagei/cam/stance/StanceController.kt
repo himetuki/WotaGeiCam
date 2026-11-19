@@ -6,6 +6,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.media.ImageReader
 import android.net.Uri
+import android.util.Size
 import android.view.Surface
 import com.wotagei.cam.camera.AnalysisSessionDecision
 import kotlinx.coroutines.CancellationException
@@ -99,8 +100,21 @@ class StanceController private constructor(
     /** 预取 characteristics（挂流前选 YUV 尺寸；引擎侧无 characteristics 缓存，由 UI 传入）。 */
     var characteristicsProvider: (() -> CameraCharacteristics?)? = null
 
+    /**
+     * 实际生效镜头的标识（Y09/B14）：分析 reader 的复用键 = 该标识 + YUV 尺寸。
+     * 由 UI 喂 `ui.currentSlot?.key`（**实际槽位**，不是请求档位——与 Y70 同一条真值）。
+     */
+    var lensKeyProvider: (() -> String?)? = null
+
     /** 目标画幅比（传感器坐标，宽/高）：分析流按它选同比例 YUV 档，叠框才和预览对齐。 */
     var targetAspectProvider: (() -> Float?)? = null
+
+    /**
+     * 镜头切换未决（Y70）：从请求切镜到新槽位落定/新会话决策到达之前，旧会话的帧带着旧 FOV，
+     * 不能喂给已按新画幅构建的判定与叠框 ⇒ 先停分析；落定后由 [maybeAttachAfterGate] 恢复。
+     */
+    @Volatile
+    private var lensSettling = false
 
     /** 分析帧转正角（sensorOrientation − displayRotation，由 UI 现算喂入）。 */
     @Volatile
@@ -344,7 +358,7 @@ class StanceController private constructor(
             pendingAttach = _state.value.enabled && onPage && !recording
             return
         }
-        if (attached || recording || !onPage) return
+        if (attached || recording || !onPage || lensSettling) return
         val size = try {
             characteristicsProvider?.invoke()?.let {
                 StanceAnalysis.pickYuvSize(it, targetAspectProvider?.invoke())
@@ -352,7 +366,7 @@ class StanceController private constructor(
         } catch (_: Exception) {
             StanceAnalysis.DEFAULT_SIZE
         }
-        val surface = a.start(size)
+        val surface = a.start(size, readerKeyFor(size))
         syncEngineParams()
         val hooked = attachHook?.invoke(surface, a.reader()) ?: false
         attached = hooked
@@ -367,6 +381,13 @@ class StanceController private constructor(
         }
         _state.value = _state.value.copy(running = admitted)
     }
+
+    /**
+     * 分析 reader 的配置键（Y09/B14）：镜头 + 画幅（YUV 尺寸）任一变化都必须重开一张面。
+     * 镜头标识取「实际槽位」（[lensKeyProvider]，与 D13 的 frontLens 同一条真值）。
+     */
+    private fun readerKeyFor(size: Size): String =
+        "${lensKeyProvider?.invoke() ?: "lens?"}|${size.width}x${size.height}"
 
     /** 接纳的是分析槽意图，不是强行降帧率；高速拒绝期间保留同一 reader，普通档再恢复。 */
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {
@@ -477,9 +498,9 @@ class StanceController private constructor(
         _state.value = _state.value.copy(running = false, output = null)
     }
 
-    /** 门控放开（非录制 + 在页 + 后置）时：已挂→恢复监听；未挂→补挂（含装配未完成的 pending）。 */
+    /** 门控放开（非录制 + 在页 + 后置 + 镜头已落定）时：已挂→恢复监听；未挂→补挂（含装配未完成的 pending）。 */
     private fun maybeAttachAfterGate() {
-        if (!_state.value.enabled || recording || !onPage || frontLens) return
+        if (!_state.value.enabled || recording || !onPage || frontLens || lensSettling) return
         val a = analysis
         if (a == null) {
             pendingAttach = true
@@ -509,6 +530,22 @@ class StanceController private constructor(
     fun setFrontLens(front: Boolean) {
         frontLens = front
         if (front && _state.value.enabled) disableForFrontLens(appContext)
+    }
+
+    /**
+     * 镜头切换未决（Y70）：切镜窗口内先停分析——旧会话的帧带着旧 FOV，不能喂给按新画幅构建的
+     * 判定与叠框。落定（实际槽位已发布 / 新会话决策到达）后由 [maybeAttachAfterGate] 恢复。
+     */
+    fun setLensSettling(settling: Boolean) {
+        if (lensSettling == settling) return
+        lensSettling = settling
+        if (settling) {
+            speaker?.pause()
+            analysis?.pauseListening()
+            _state.value = _state.value.copy(running = false, output = null)
+        } else {
+            maybeAttachAfterGate()
+        }
     }
 
     /** 切前置（D13：直接关闭开关重置；录制窗口只暂停，待停录补摘）。 */

@@ -52,6 +52,11 @@ data class CameraUiState(
      * [currentLens] 只够显示档位名。
      */
     val currentSlot: LensSlot? = null,
+    /**
+     * 镜头切换未决（Y70）：从请求切镜到新槽位开好（[currentSlot] 更新）之前为真。
+     * 站位分析据此先停：旧会话的帧带着旧 FOV，不能喂给按新画幅构建的判定与叠框。
+     */
+    val lensSwitching: Boolean = false,
     val analysisDecision: AnalysisSessionDecision = AnalysisSessionDecision.ABSENT
 )
 
@@ -631,6 +636,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             return
         }
         busyLoading = true
+        // Y70：从这一刻到新槽位发布（currentSlot 更新）之间，旧会话的帧不再属于当前镜头——
+        // UI 据此让站位分析先停，别拿旧 FOV 的帧喂新画幅的判定。
+        ui.value = ui.value.copy(lensSwitching = true)
         bus.launch {
             try {
                 val manager = cameraManager()
@@ -663,6 +671,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                 e.startPreview()
             } finally {
                 busyLoading = false
+                // Y70：切换窗必须在这里闭合，而且必须**无条件**先落 false：
+                // 别写成「无接力才复位」——接力路径里 openCurrentLens 会在 `engine == null` /
+                // `!previewWanted` 时于置 true 之前早退，lensSwitching 就永久停在 true，站位分析
+                // 再也不接回。先 false 再接力置 true 是同一 Main 拍内的两写，StateFlow 合并后
+                // 观察者只看到最终态，不会多出一次 attach/detach。
+                if (ui.value.lensSwitching) ui.value = ui.value.copy(lensSwitching = false)
                 // 只为仍有效的最新意图接力。旧结果被丢弃也要释放 busy，不能吞掉后来 resume/rebind。
                 val reload = reloadWanted || request != startupGeneration
                 reloadWanted = false

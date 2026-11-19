@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -132,6 +133,111 @@ class StanceReaderCameraBridgeTest {
         assertEquals(listOf(owner), p.closeOwners(reader))
         val events = p.events(reader)
         assertTrue("close 必须晚于最后一帧归还：$events", events.lastIndexOf("image.return") < events.indexOf("reader.close"))
+    }
+
+    @Test
+    fun `Y09 排队回收的旧面不再交回新挂载且旧reader恰好关闭一次`() = platform { p ->
+        p.start(p.platform.sink("preview"))
+        assertEquals(1, p.emitCurrentSession())
+        assertNotNull("正向对照必须先有真实分析结果", p.output())
+        val analysis = p.analysis()
+        val owner = p.field(analysis, "thread") as Thread
+        val oldReader = p.reader()
+        val oldSurface = p.call(oldReader, "getSurface")!!
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        p.blockNextPlanes(oldReader, entered, proceed)
+        var liveWhileQueued = true
+        var oldClosedWhileQueued = -1
+        try {
+            p.emitWithoutWaiting()
+            assertTrue("必须卡在真实 planes 读取窗口", entered.await(5, TimeUnit.SECONDS))
+            // 真实链：Controller 销毁 → 分析 owner 排队回收 reader（关闭任务排在被卡住的那帧之后）
+            p.call(p.camera, "onCleared")
+            oldClosedWhileQueued = p.closeCount(oldReader)
+            // 排队回收期间旧面**仍是 valid**：旧口径（只看 isValid）会把它原样交回新会话，
+            // 而排队的关闭任务随即把它关死 ⇒ 新会话拿到僵尸面。
+            assertTrue("旧面此刻物理上仍有效（正是危险窗口）", p.surfaceLive(oldReader))
+            liveWhileQueued = p.call(analysis, "isSurfaceLive") as Boolean
+            // 重新挂载（站位开关仍开着）：真实 attach 链必须开新面
+            p.call(p.stance, "setEnabled", p.app, true)
+            p.pumpCameraAndMain()
+            val newReader = p.reader()
+            assertNotSame("已排队回收的面不许再交回引擎", oldReader, newReader)
+            assertNotSame("新挂载必须拿到新面", oldSurface, p.call(newReader, "getSurface"))
+        } finally {
+            proceed.countDown()
+        }
+        p.analysisIdle()
+        p.pumpCameraAndMain()
+        val newReader = p.reader()
+        assertFalse("排队回收中的面必须按不活上报（否则引擎会挂僵尸面）", liveWhileQueued)
+        assertEquals("旧 reader 不得在关闭任务运行前被关（在途 Image 还在读）", 0, oldClosedWhileQueued)
+        assertEquals("旧 reader 恰好关闭一次", 1, p.closeCount(oldReader))
+        assertEquals("关闭仍归分析 owner 线程", listOf(owner), p.closeOwners(oldReader))
+        assertEquals("新 reader 不许被旧关闭任务误杀", 0, p.closeCount(newReader))
+        assertTrue("新面必须仍可挂进会话", p.surfaceLive(newReader))
+    }
+
+    @Test
+    fun `B14 镜头或画幅键变化必须重开分析面而键不变复用同一面`() = platform { p ->
+        p.start(p.platform.sink("preview"))
+        assertEquals(1, p.emitCurrentSession())
+        val first = p.reader()
+        // 键不变（同一镜头同一画幅）：挂/摘一轮必须复用同一 reader——每开关一次就换面会重建会话
+        p.call(p.stance, "setEnabled", p.app, false)
+        p.pumpCameraAndMain()
+        p.call(p.stance, "setEnabled", p.app, true)
+        p.pumpCameraAndMain()
+        p.analysisIdle()
+        assertSame("键不变必须复用同一分析面", first, p.reader())
+        assertEquals("复用不得关闭旧面", 0, p.closeCount(first))
+
+        // 键变化（换镜头 / 4:3→16:9）：旧口径只看 isValid 会沿用旧尺寸的面，叠框坐标整体偏移
+        p.platform.set(p.stance, "lensKeyProvider", { "lens-other" })
+        p.call(p.stance, "setEnabled", p.app, false)
+        p.pumpCameraAndMain()
+        p.call(p.stance, "setEnabled", p.app, true)
+        p.pumpCameraAndMain()
+        val second = p.reader()
+        assertNotSame("镜头/画幅键变化必须重开分析面", first, second)
+        p.analysisIdle()
+        assertEquals("换键后旧面恰好关闭一次", 1, p.closeCount(first))
+        assertTrue("新面仍可挂进会话", p.surfaceLive(second))
+        assertEquals("新面不许被旧关闭任务误杀", 0, p.closeCount(second))
+    }
+
+    @Test
+    fun `Y70 切镜未决窗口内停分析且普通回执不得越过窗口恢复`() = platform { p ->
+        p.start(p.platform.sink("preview"))
+        assertEquals(1, p.emitCurrentSession())
+        val analysis = p.analysis()
+        assertTrue("正向对照：切镜前分析在跑", p.stanceState().let { p.call(it, "getRunning") } as Boolean)
+        assertTrue((p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean).get())
+
+        // 切镜开始：旧会话的帧属旧 FOV，必须先停
+        p.call(p.stance, "setLensSettling", true)
+        assertFalse("切镜窗口内必须停听", (p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean).get())
+        assertFalse("切镜窗口内不得报告 running", p.stanceState().let { p.call(it, "getRunning") } as Boolean)
+
+        // 窗口内的开关往返：挂槽请求被窗口挡住，不得提前把旧面挂回去
+        p.call(p.stance, "setEnabled", p.app, false)
+        p.pumpCameraAndMain()
+        p.call(p.stance, "setEnabled", p.app, true)
+        p.pumpCameraAndMain()
+        assertFalse("切镜窗口内不得挂槽", p.field(p.stance, "attached") as Boolean)
+        // 窗口内的 INCLUDED 回执（旧会话决策迟到）同样不得放行
+        p.relayDecision()
+        p.pumpCameraAndMain()
+        assertFalse("切镜窗口内迟到回执不得恢复分析", p.field(p.stance, "attached") as Boolean)
+        assertFalse((p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean).get())
+
+        // 槽位落定：按实际镜头重新补挂并恢复
+        p.call(p.stance, "setLensSettling", false)
+        p.pumpCameraAndMain()
+        assertTrue("落定后必须补挂", p.field(p.stance, "attached") as Boolean)
+        assertTrue("落定后必须恢复监听", (p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean).get())
+        assertTrue("落定后必须恢复 running", p.stanceState().let { p.call(it, "getRunning") } as Boolean)
     }
 
     private fun platform(body: (StanceReaderCameraBridgeFixture) -> Unit) {

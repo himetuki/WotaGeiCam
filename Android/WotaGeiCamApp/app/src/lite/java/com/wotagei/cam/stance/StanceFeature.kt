@@ -48,6 +48,9 @@ class StanceFeature private constructor(private val appContext: Context) {
 
     fun setFrontLens(front: Boolean) {}
 
+    /** 镜头切换未决（Y70）：lite 无分析管线，恒空。 */
+    fun setLensSettling(settling: Boolean) {}
+
     fun setRotation(degrees: Int) {}
 
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {}
@@ -64,6 +67,9 @@ class StanceFeature private constructor(private val appContext: Context) {
     var detachHook: (() -> Unit)? = null
     var targetAspectProvider: (() -> Float?)? = null
     var characteristicsProvider: (() -> CameraCharacteristics?)? = null
+
+    /** 实际生效镜头标识（Y09/B14）：lite 无 reader，恒空。 */
+    var lensKeyProvider: (() -> String?)? = null
 
     /** 无检测输出——lite 恒空叠加。 */
     @Composable

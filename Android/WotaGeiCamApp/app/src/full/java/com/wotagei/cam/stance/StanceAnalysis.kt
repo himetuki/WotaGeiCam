@@ -48,6 +48,16 @@ class StanceAnalysis(
     private val listening = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
     private var reader: ImageReader? = null
+    /**
+     * [reader] 的配置键（镜头+画幅，B14）：键变了必须重开一张——4:3→16:9 后沿用旧尺寸的面，
+     * 叠框坐标按预览尺寸缩放就会整体偏移（设备对两路输出的裁剪不一定相同）。
+     */
+    @Volatile private var readerKey: String? = null
+    /**
+     * 已排队回收、尚未真正关闭的实例（Y09）。[start] 绝不复用它（关闭任务随时会把它关死），
+     * [isSurfaceLive] 也按「不活」报——否则「已排队回收但面仍有效」会被交回新引擎。
+     */
+    @Volatile private var recycling: ImageReader? = null
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     private var lastFrameMs = 0L
@@ -141,16 +151,22 @@ class StanceAnalysis(
         }.let { requireNotNull(handler) }
     }
 
-    fun start(size: Size = DEFAULT_SIZE): Surface {
+    fun start(size: Size = DEFAULT_SIZE, key: String? = null): Surface {
         check(!released.get()) { "StanceAnalysis 已释放，不能再 start" }
-        val existing = reader
-        if (existing != null && existing.surface.isValid) return existing.surface
-        if (existing != null) {
-            runCatching { existing.setOnImageAvailableListener(null, null) }
-            runCatching { existing.close() }
-            reader = null
-        }
         val analysisHandler = ensureAnalysisThread()
+        val existing = reader
+        // 复用判据（B14/Y09）：面仍有效 **且** 配置键（镜头+画幅）相同 **且** 没在排队回收。
+        // 旧口径只看 isValid：新画幅会沿用按旧画幅开的面（叠框坐标乘预览尺寸就偏）；
+        // 已排队回收的面也会被交回新引擎（关闭任务随即把它关死，新会话拿到僵尸面）。
+        if (existing != null && existing.surface.isValid && existing !== recycling &&
+            (key == null || key == readerKey)
+        ) {
+            return existing.surface
+        }
+        // 旧面按**确切实例**交给分析 owner 排队关闭（Y09），不在这里同步 close。
+        // 已在回收队列里的实例不再入队第二次：releaseReader 刚排过队、start 立刻换键时会走到这里，
+        // 重复入队会让同一枚 reader 被关两次（验收口径是"恰好关闭一次"）。
+        if (existing != null && existing !== recycling) recycle(existing)
         val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
         r.setOnImageAvailableListener({ r2 ->
             val image = try {
@@ -161,11 +177,46 @@ class StanceAnalysis(
             processImage(image)
         }, analysisHandler)
         reader = r
+        readerKey = key
         return r.surface
     }
 
     /** 当前分析面是否仍可挂进相机会话（引擎重建/离页后判活用）。 */
-    fun isSurfaceLive(): Boolean = reader?.surface?.isValid == true
+    fun isSurfaceLive(): Boolean {
+        val r = reader
+        return r != null && r !== recycling && r.surface.isValid
+    }
+
+    /**
+     * 排队回收一枚**确切**的 reader（Y09）：关闭任务只持有 [target]，绝不重读可变字段。
+     *
+     * 旧实现闭包重读 `reader` 字段：排队期间 [start] 换上新实例时，旧任务会把**新**面关掉、
+     * 旧实例反而泄漏。排队回收期间该实例被 [recycling] 标记，[start]/[isSurfaceLive] 都不再认它。
+     */
+    private fun recycle(target: ImageReader) {
+        // 同一实例只入队一次：releaseReader 刚排过队、start 立刻换键（镜头/画幅变了）会再走到
+        // 这里——重复入队会让同一枚 reader 被关两次，验收口径是「恰好关闭一次」。
+        if (recycling === target) return
+        recycling = target
+        val close: () -> Unit = {
+            runCatching { target.setOnImageAvailableListener(null, null) }
+            runCatching { target.close() }
+            synchronized(this) {
+                if (recycling === target) recycling = null
+                if (reader === target) reader = null
+            }
+        }
+        val h = handler
+        if (h != null && !released.get() && Thread.currentThread() !== thread) {
+            if (!h.post(close)) {
+                // 线程已停：回收承诺无法再兑现，撤销标记并按调用线程尽力关闭（只会关这一枚）
+                synchronized(this) { if (recycling === target) recycling = null }
+                runCatching { target.close() }
+            }
+        } else {
+            close()
+        }
+    }
 
     /**
      * 引擎参数热更新（2026-11-07）：[JudgementEngine] 不是线程安全的，`observe()` 在本类
@@ -229,17 +280,8 @@ class StanceAnalysis(
      * 关闭排在分析 owner 线程：同队列会在途 processImage 先归还 Image，再封口 listener 并 close。
      */
     fun releaseReader() {
-        val close: () -> Unit = {
-            runCatching { reader?.setOnImageAvailableListener(null, null) }
-            runCatching { reader?.close() }
-            reader = null
-        }
-        val h = handler
-        if (h != null && !released.get() && Thread.currentThread() !== thread) {
-            if (!h.post(close)) close()
-        } else {
-            close()
-        }
+        // Y09：只回收当前这一枚，按实例排队；关掉后再清字段（期间已换新实例则保留新的）
+        reader?.let(::recycle)
     }
 
     /** 彻底释放线程并在同一 owner 线程关闭当前检测器。 */

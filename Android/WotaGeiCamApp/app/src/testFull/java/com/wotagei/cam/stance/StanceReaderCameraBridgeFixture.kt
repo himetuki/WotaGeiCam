@@ -58,7 +58,7 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
     fun call(target: Any, name: String, vararg args: Any?): Any? = platform.call(target, name, *args)
     fun field(target: Any, name: String): Any? = platform.field(target, name)
     fun analysis(): Any = requireNotNull(field(stance, "analysis"))
-    fun reader(): Any = requireNotNull(call(analysis(), "reader"))
+    fun reader(): Any = requireNotNull(call(analysis(), "reader")) { "分析管线当前没有 reader" }
     fun engine(): Any = platform.engineOf(camera)
     fun stanceState(): Any = (call(stance, "getState") as StateFlow<*>).value!!
     fun output(): Any? = call(stanceState(), "getOutput")

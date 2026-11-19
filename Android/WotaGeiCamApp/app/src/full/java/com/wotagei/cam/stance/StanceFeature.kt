@@ -43,6 +43,9 @@ class StanceFeature private constructor(
 
     fun setFrontLens(front: Boolean) = ctrl.setFrontLens(front)
 
+    /** 镜头切换未决（Y70）：切镜窗口内先停分析，槽位落定后由 Controller 自行补挂。 */
+    fun setLensSettling(settling: Boolean) = ctrl.setLensSettling(settling)
+
     fun setRotation(degrees: Int) = ctrl.setRotation(degrees)
 
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) = ctrl.onAnalysisSessionDecision(decision)
@@ -81,6 +84,11 @@ class StanceFeature private constructor(
     var characteristicsProvider: (() -> CameraCharacteristics?)?
         get() = ctrl.characteristicsProvider
         set(value) { ctrl.characteristicsProvider = value }
+
+    /** 实际生效镜头标识（Y09/B14）：分析 reader 的复用键 = 该标识 + YUV 尺寸。 */
+    var lensKeyProvider: (() -> String?)?
+        get() = ctrl.lensKeyProvider
+        set(value) { ctrl.lensKeyProvider = value }
 
     /** 号位叠加（判定输出可视化；View 层结构性不进成片）。 */
     @Composable

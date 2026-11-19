@@ -409,6 +409,9 @@ fun CameraScreen(
         }
         // YUV 尺寸表从当前镜头的 characteristics 现取（枚举完成前回退默认档）
         stance.characteristicsProvider = { ctrl.currentCharacteristics() }
+        // Y09/B14：分析 reader 的复用键取「实际槽位」（与 D13 的 frontLens 同一条真值）——
+        // 请求中的档位可能还没落到物理头，拿它当键会把旧 FOV 的 reader 复用到新镜头上。
+        stance.lensKeyProvider = { ctrl.state.value.currentSlot?.key }
         true
     }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
@@ -518,7 +521,15 @@ fun CameraScreen(
 // 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
     LaunchedEffect(recording) { stance.setRecordingActive(recording) }
     // 前置 = 直接关闭并重置开关（D13）；同时挡住"在前置下重新开启"（方向语义只对后置成立）。
-    LaunchedEffect(lens) { stance.setFrontLens(lens == LensType.FRONT) }
+    // Y70：判据取**实际落定**的镜头 [CameraUiState.currentLens]，不是请求中的 `lens`——
+    // 后者的档位在切镜途中已变，此时新会话还没开好，先把开关关掉会让用户在后摄上看到
+    // 「前置禁用」的假判定；而真正的切换窗口由 lensSwitching 负责先停分析。
+    // 两条写在同一协程里且 frontLens 在前：落定那一拍若先放行 settling，maybeAttachAfterGate
+    // 会在 frontLens 还没置位的窗口里把分析挂到前置上——拆成两条 effect 就没有这条顺序保证了。
+    LaunchedEffect(ui.currentLens, ui.lensSwitching) {
+        stance.setFrontLens(ui.currentLens == LensType.FRONT)
+        stance.setLensSettling(ui.lensSwitching)
+    }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
     val lockTipText = stringResource(R.string.cam_lock_tip)
