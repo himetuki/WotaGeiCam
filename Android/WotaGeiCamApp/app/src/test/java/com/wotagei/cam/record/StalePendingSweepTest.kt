@@ -252,7 +252,9 @@ class StalePendingSweepTest {
     fun `库一致性双向修补`() {
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
         val rec = bodyOf(sweep, "reconcileLibrary")
-        assertTrue("必须删坏行", rec.contains("deleteRow("))
+        val fix = bodyOf(sweep, "performFix")
+        assertTrue("库修补必须逐行走统一处置出口", rec.contains("fixRow(") && rec.contains("performFix("))
+        assertTrue("必须删坏行（唯一删行点在处置出口的 DELETE_ROW 分支）", fix.contains("deleteRow("))
         assertTrue("必须补入库", rec.contains("indexFile("))
         assertTrue("补入库只认我们自己的成片名（别人的文件一个都不碰）", rec.contains("isOurClipName("))
         assertTrue("必须有单轮上限（收敛于多轮，别让冷启扫全库）", sweep.contains("SWEEP_MAX_INDEX"))
@@ -419,16 +421,19 @@ class StalePendingSweepTest {
     // ---- ⑦ 2026-10-20 数据丢失收口：未知 ≠ 缺失 ----
 
     @Test
-    fun `救援删行判据必须把路径未知与文件确认缺失分开`() {
+    fun `救援不能再凭路径不可见删行_必须走三值状态`() {
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
-        val rescue = sweep.substringAfter("fun rescuePendingRows(")
-            .substringBefore("private fun queryPendingRows(")
+        val rescue = bodyOf(sweep, "rescuePendingRows")
+        assertTrue("救援必须逐行走统一处置出口", rescue.contains("fixRow(") && rescue.contains("performFix("))
         assertFalse(
-            "dataPath 为 null 是『路径未知』不是『文件缺失』——并进删行分支会在 provider 抖动时误删成片",
-            rescue.contains("f == null || !f.exists()")
+            "救援体内不得再直接凭 File.exists 分流（路径不可见 ≠ 文件缺失）",
+            rescue.contains("f.exists()") || rescue.contains("deleteRow(") || rescue.contains("unpendRow(")
         )
-        assertTrue("删行分支必须钉住「路径可查且不在盘」", rescue.contains("f != null && !f.exists()"))
-        assertTrue("路径未知必须有留原状的显式分支", rescue.contains("else if (f == null)"))
+        val fix = bodyOf(sweep, "fixRow")
+        assertTrue("单行判据必须装配三值文件状态", fix.contains("observeFile("))
+        assertTrue("单行判据必须走纯函数真值表", fix.contains("rowFixDecision("))
+        assertTrue("年龄门槛必须区分封口标记", fix.contains("sweepAgeOk("))
+        assertTrue("封口标记必须来自 SealMarker（唯一命名口径）", fix.contains("SealMarker.isSealed("))
     }
 
     @Test
