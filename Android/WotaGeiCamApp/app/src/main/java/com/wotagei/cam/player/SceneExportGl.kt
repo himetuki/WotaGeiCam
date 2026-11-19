@@ -440,7 +440,15 @@ internal class SceneExportGl(
         )
         val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        return if (status == GLES20.GL_FRAMEBUFFER_COMPLETE) tex to fbo else 0 to 0
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            // B03（2026-11-19）：失败也要归还本次已生成的句柄——否则调用方只看到 (0,0)、
+            // 无法回收，这些纹理/FBO 会在存活到收尾前的 EGL 上下文里滞留。
+            Log.w(TAG, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}（已归还句柄）")
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
+            return 0 to 0
+        }
+        return tex to fbo
     }
 
     private fun buildPrograms(): Boolean {
@@ -703,6 +711,13 @@ internal class SceneExportGl(
             drawQuad(pass2dAPos, pass2dATex)
         }
         unbindUnits()
+        // Y11（2026-11-19）：最终合成趟（直接 drawQuad，不经 drawTo）的 GL 错误必须在
+        // **打戳/swap 之前**拦截——旧顺序把 drain 放在 swap 之后且丢弃返回值，坏帧照样进容器、
+        // 导出结果报成功。判据语义回到「这一帧根本没发出去」。
+        if (drainGlError("sceneRender") > 0) {
+            Log.w(TAG, "本帧 GL 绘制有错 ⇒ 不提交（本帧判未发出）")
+            return false
+        }
         val stamped = runCatching {
             EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderSurface, ptsUs * 1000L)
         }.getOrElse { false }

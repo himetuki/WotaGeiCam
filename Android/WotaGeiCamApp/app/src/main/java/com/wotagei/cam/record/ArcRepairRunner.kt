@@ -1452,9 +1452,24 @@ private class ArcRepairSession(
     // region 收尾
 
     private fun finish(ok: Boolean, code: String?): ArcRepairResult {
-        // 顺序：codec → muxer（写 moov）→ 输出句柄 → EGL → 输入面 → extractor
+        // 顺序（Y28，2026-11-19 修订）：**GL → 编码器 codec → 输入面包装 → 解码器 → muxer**。
+        // [arcGl] 持有一枚建在编码器输入面上的 EGL 窗口面：先退出 GL/销毁 EGL，codec 才能安全
+        // 销毁那枚 native 面（旧序 codec 先 release，EGL 面悬在已销毁窗口上）。
+        val gl = arcGl
+        arcGl = null
+        gl?.release()
+        // 输入面包装（Surface）的最终释放要求 GL 线程确已退出：release() 已做有界 join，
+        // 仍未退出时**保留**——迟回收优于与在途 EGL 操作交叉（Y28 的跨资源释放窗口）。
+        val glGone = gl?.glThreadAlive() != true
         releaseCodec(vEnc)
         vEnc = null
+        val es = encSurface
+        encSurface = null
+        if (glGone) {
+            runCatching { es?.release() }
+        } else {
+            Log.w(TAG_ARC, "GL 线程未在收尾预算内退出：保留编码器输入面包装（由 GC 回收），避免跨线程释放交叉")
+        }
         releaseCodec(vDec)
         vDec = null
 
@@ -1471,11 +1486,6 @@ private class ArcRepairSession(
             false
         }
         if (m != null) runCatching { m.release() }
-        arcGl?.release()
-        arcGl = null
-        val es = encSurface
-        encSurface = null
-        runCatching { es?.release() }
 
         val t = target
         target = null

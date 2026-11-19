@@ -283,6 +283,33 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     @Volatile
     private var encoderNative: Surface? = null
 
+    /**
+     * 编码面**就绪身份快照**（R01/Y28 等待谓词的读对象）：native 面与 EGL 窗口面绑定成一个
+     * 不可变整体**一次性**发布。
+     *
+     * 为什么要这枚快照：此前 native 与 egl 是两个独立 volatile 字段，GL 线程逐个写——读方
+     * （录制控制线程的等待谓词）可能拿到**混合快照**（新 native + 旧 egl，或反之），谓词命中了
+     * 却并不是"GL 真的绑定在这枚面上"。快照只在 `eglCreateWindowSurface` 成功**之后**赋，
+     * 任何解绑/失活路径在置空字段的同时清掉它。
+     */
+    private class EncoderTarget(val native: Surface?, val egl: EGLSurface?) {
+        fun bound(): Boolean = native != null && egl != null
+    }
+
+    /** 跨线程读用的就绪身份快照；仅由 [publishEncoderTarget]/[clearEncoderTarget] 管理 */
+    @Volatile
+    private var encoderTarget: EncoderTarget? = null
+
+    /** 字段写完后**整体**发布（只许在面真正建好后调用） */
+    private fun publishEncoderTarget() {
+        encoderTarget = EncoderTarget(encoderNative, encoderEglSurface)
+    }
+
+    /** 失活/解绑前先清身份：读方不得再拿到"这枚面还绑着"的旧快照 */
+    private fun clearEncoderTarget() {
+        encoderTarget = null
+    }
+
     @Volatile
     private var encoderWidth = 0
 
@@ -1004,14 +1031,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         postGl { replaceEncoderSurface(surface, widthPx, heightPx) }
     }
 
-    /** 编码器面是否已绑定（录制侧可据此决定何时 start） */
-    fun isOutputSurfaceBound(): Boolean = encoderEglSurface != null
+    /**
+     * 编码器面是否已绑定（录制侧可据此决定何时 start）。
+     * 读**就绪身份快照**而不是逐个字段：快照是"绑定成功后整体发布"的单一原子读，
+     * 不会出现 native/egl 两个字段的混合快照；失活/解绑路径先清快照。
+     */
+    fun isOutputSurfaceBound(): Boolean = encoderTarget?.bound() == true && !released.get()
 
     /**
-     * 传入的 native 面是否就是**当前绑定**的编码面。换段重挂路径专用：轮转时旧绑定还没解，
-     * [isOutputSurfaceBound] 首查恒真、await 零等待——必须等「新面已绑定」才行。
+     * 传入的 native 面是否就是**当前绑定**的编码面（R01 的等待谓词）。
+     *
+     * 契约（不动）：只认**当前这个绑定身份**——本枚实例既是 GL 编码目标、又处于可写/已绑定状态，
+     * 而不是"任意目标/曾经的目标"。判据 = 快照身份相等 **且** 上下文未丢失（丢失瞬间快照可能
+     * 还没被清，`contextLost` 单独再兜一道）。
      */
-    fun isEncoderSurfaceNative(s: Surface?): Boolean = encoderNative === s
+    fun isEncoderSurfaceNative(s: Surface?): Boolean = !contextLost && encoderTarget?.native === s
 
     /** 编码器面尺寸（px），未绑定为 0x0 */
     fun outputSurfaceSize(): Pair<Int, Int> = encoderWidth to encoderHeight
@@ -1290,6 +1324,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY
     ) {
         if (released.get()) return
+        // B02（2026-11-19）：**相同输入直接跳过**。录制页的长键 effect 把 frameEffect/zebra/peaking
+        // 与 curveStack 绑在同一组键上——切一次斑马/峰值也会把 setCurve 用同值再调一遍，白烘一张
+        // LUT（TABLE_SIZE*3 次插值）再白跑一轮 syncMovieSlot/retrySlots/dirty+scheduleDraw，
+        // 录制中就是一次可观测的 GL 线程抖动。显式重试语义不受影响：重试只可能来自曲线/色调
+        // 真的改了（输入不等），同值同驱动再试一次没有新信息。
+        if (stack == lastCurveStack && tone == lastCurveTone) return
         lastCurveStack = stack
         lastCurveTone = tone
         bakeCurveLut()
@@ -1706,6 +1746,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 编码面/窗口面都已失效：心跳必须立刻归零，看门狗才能识别"渲染已死"而不是"没帧"
         encoderEglSurface = null
         encoderNative = null
+        // 身份快照随字段一起失效（读方不得再拿到"这枚面还绑着"的旧快照）
+        clearEncoderTarget()
         windowEglSurface = null
         windowNative = null
         lastWindowSwapNs = 0L
@@ -1772,6 +1814,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         encoderNative = null
         encoderWidth = 0
         encoderHeight = 0
+        // 解绑 = 读方不得再看到任何"已绑定"身份（R01 谓词靠它判"还没挂上"）
+        clearEncoderTarget()
         if (surface == null) {
             Log.i(TAG_GL, "编码器面已解除")
             // 成片槽的绑定只清引用（program 可能正被 display 共用 / 在会话缓存里等下一次起录）：
@@ -1807,6 +1851,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         encoderNative = surface
         encoderWidth = widthPx
         encoderHeight = heightPx
+        // 绑定成功后**整体**发布就绪身份快照：这是跨线程等待谓词唯一的读对象
+        publishEncoderTarget()
         encoderFrameIndex = 0
         encoderBaseNs = System.nanoTime()
         encoderLastPtsNs = 0L
@@ -1856,6 +1902,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
+        clearEncoderTarget()
         destroyEglSurface(pbufferSurface)
         pbufferSurface = null
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
@@ -2453,6 +2500,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
+        clearEncoderTarget()
         encoderWidth = 0
         encoderHeight = 0
         // movie 槽只清引用、不删 program：同一枚可能正被 display 槽共用 / 在会话缓存里等着复用，

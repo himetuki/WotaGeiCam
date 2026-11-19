@@ -19,6 +19,7 @@ import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.ArcMergeDeadband
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG_ARC_GL = "WotaArcRepairGl"
 
@@ -31,6 +32,12 @@ private const val EGL_OPENGL_ES3_BIT_KHR = 0x0040
 
 /** 单条 GL 命令（建面/绘制）的等待上限；超时按失败处理，绝不无限等 */
 private const val OP_WAIT_MS = 4_000L
+
+/**
+ * [ArcRepairGl.release] 等 GL 线程**真正退出**的上限（Y28）。释放编码器输入面的调用方必须
+ * 先确认本线程不会再碰那枚 EGL 窗口面；预算 = 单条 GL 命令 + 退线程余量。
+ */
+private const val RELEASE_JOIN_MS = OP_WAIT_MS + 1_000L
 
 /** 等解码器把一帧推上 SurfaceTexture 的上限 */
 private const val FRAME_WAIT_MS = 2_000L
@@ -253,26 +260,67 @@ internal class ArcRepairGl(
 
     // endregion
 
-    /** 释放全部 GL/EGL 资源并退出 GL 线程；幂等 */
+    /**
+     * 释放全部 GL/EGL 资源并退出 GL 线程；幂等。
+     *
+     * Y28（2026-11-19）：退出要**有界等真实结束**再返回。调用方（[ArcRepairRunner.finish]）
+     * 随后要释放编码器输入面——那枚 native 面正被本线程的 EGL 窗口面引用；只 post 一个
+     * releaseGl + quitSafely 就返回，调用方可能在 GL 线程仍在拆面时把 native 面 release 掉
+     * （跨资源释放窗口）。releaseGl 本身**不因超时被撤销**（它必须执行才能还 EGL 资源），
+     * 但本函数返回后调用方应查 [glThreadAlive] 决定是否还能安全释放输入面。
+     */
     fun release() {
         if (released) return
-        postAndWait(OP_WAIT_MS) {
+        // releaseGl 必须执行：这一条传 abandonOnTimeout=false（其余命令超时即作废，
+        // 否则"已经宣告失败"的操作还会在 GL 线程上再改一遍状态）。
+        postAndWait(OP_WAIT_MS, abandonOnTimeout = false) {
             releaseGl()
             true
         }
         released = true
         thread.quitSafely()
+        if (Thread.currentThread() === thread) return
+        try {
+            thread.join(RELEASE_JOIN_MS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        if (thread.isAlive) {
+            Log.w(TAG_ARC_GL, "GL 线程未在 ${RELEASE_JOIN_MS}ms 内退出：调用方不得释放编码器输入面")
+        }
     }
+
+    /** release() 有界 join 之后 GL 线程是否仍在跑（true ⇒ 不得释放它仍在引用的输入面） */
+    fun glThreadAlive(): Boolean = thread.isAlive
 
     // endregion
 
     // region GL 线程内部
 
-    private fun postAndWait(timeoutMs: Long, block: () -> Boolean): Boolean {
+    /**
+     * 投递一条 GL 命令并等待结果。
+     *
+     * @param abandonOnTimeout true（默认）= 超时后撤销排队中的这条命令并返回 false——调用方
+     *   已把这一步当失败继续，晚到的命令不许在已宣告失败的状态上再改一遍（Y28 的
+     *   "latch.await 超时不撤销 Handler 消息"缺陷）。false 仅给 [release] 的资源归还用：
+     *   那条命令**必须**执行，超时只影响调用方对线程是否已死的判断。
+     */
+    private fun postAndWait(
+        timeoutMs: Long,
+        abandonOnTimeout: Boolean = true,
+        block: () -> Boolean
+    ): Boolean {
         if (released) return false
         val latch = CountDownLatch(1)
         val out = booleanArrayOf(false)
-        handler.post {
+        val abandoned = AtomicBoolean(false)
+        val task = Runnable {
+            // 超时撤销与"刚开跑"的竞态窗口：撤不掉已开跑的这条（它会在做副作用），
+            // 调用方靠 release 的 join 兜底——不许在 GL 线程未死时释放它引用的资源。
+            if (abandoned.get()) {
+                latch.countDown()
+                return@Runnable
+            }
             out[0] = try {
                 block()
             } catch (e: Exception) {
@@ -281,11 +329,23 @@ internal class ArcRepairGl(
             }
             latch.countDown()
         }
+        if (!handler.post(task)) {
+            Log.w(TAG_ARC_GL, "GL 线程已退出，操作未入队")
+            return false
+        }
         return try {
-            latch.await(timeoutMs, TimeUnit.MILLISECONDS) && out[0]
+            val done = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!done) {
+                if (abandonOnTimeout) {
+                    abandoned.set(true)
+                    handler.removeCallbacks(task)
+                }
+                Log.w(TAG_ARC_GL, "GL 操作超时 ${timeoutMs}ms${if (abandonOnTimeout) "（已撤销排队中的一步）" else "（资源归还不撤销）"}")
+            }
+            done && out[0]
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            return false
+            false
         }
     }
 
@@ -473,6 +533,10 @@ internal class ArcRepairGl(
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
             Log.w(TAG_ARC_GL, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}")
+            // B03（2026-11-19）：失败也要归还本次已生成的句柄——否则调用方只看到 (0,0)、
+            // 无法回收，这些纹理/FBO 会在存活到任务收尾前的 EGL 上下文里滞留
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
             return 0 to 0
         }
         return tex to fbo
@@ -623,10 +687,18 @@ internal class ArcRepairGl(
         if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, identityMatrix, 0)
         drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
+        // Y11（2026-11-19）：本帧绘制趟的 GL 错误必须在**打戳/swap 之前**拦截并判失败——
+        // 旧顺序把 drain 放在 swap 之后且丢弃返回值，坏帧照样进容器，输出结果报成功
+        //（"画了但没上屏/画错了"只有日志知道）。判定回到"这一帧根本没发出去"这一性质上。
+        if (drainGlError("arcEmit") > 0) {
+            Log.w(TAG_ARC_GL, "本帧 GL 绘制有错 ⇒ 不提交（emit 判失败，整任务失败）")
+            return false
+        }
         // 失败检查**必须早于** eglSwapBuffers：不 swap 才有「这一帧根本没进容器」这个性质
         if (!stampPresentation(ptsUs)) return false
         val swapped = EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
         if (!swapped) Log.w(TAG_ARC_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
+        // swap 后的残留错误只记账（含 swap 自身失败路径）；帧是否提交已由 swapped 决定
         drainGlError("arcEmit")
         return swapped
     }

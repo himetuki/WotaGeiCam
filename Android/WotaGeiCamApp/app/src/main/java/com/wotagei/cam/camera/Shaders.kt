@@ -143,7 +143,7 @@ internal object Shaders {
             float lo = max(uThreshold - s, 0.0);
             float hi = uThreshold + s;
             // 边界在 fp16 下不可分辨时必须硬切（Y12）：mediump 的 ulp 在 1.0 附近 ≈0.0009766，
-            // 原先的 `lo + 0.0001` 余量会被舍回 lo ⇒ lo==hi，smoothstep 结果未定义
+            // 原先给 lo 加一小段余量的写法会被舍回 lo ⇒ lo==hi，smoothstep 结果未定义
             // （驱动相关 NaN 可污染导出帧）。threshold=1.0、soft=0 是 UI 允许的角点，
             // 这里只在 hi>lo（fp16 实际可表示）时调用 smoothstep，否则 step 硬阈值。
             float w;

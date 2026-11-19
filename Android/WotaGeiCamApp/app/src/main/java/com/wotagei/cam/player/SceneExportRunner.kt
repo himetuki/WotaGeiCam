@@ -405,7 +405,10 @@ class SceneExportRunner(private val ctx: Context) {
                                     val total = (endUs - basePtsUs).coerceAtLeast(1L)
                                     onProgress((outputPtsUs.toFloat() / total).coerceIn(0f, 0.99f))
                                 } else {
-                                    engine.acquireOnly()
+                                    // B07（2026-11-19）：消费帧也必须认失败——只 acquire 不渲染的
+                                    // 帧如果 updateTexImage/拷贝就错了，后面"已提交帧数"仍会照常
+                                    // 前进，终态却报成功。错误必须沿同一条 Reason.GL 失败出口进结果。
+                                    if (!engine.acquireOnly()) return@withContext fail(owner, Reason.GL)
                                 }
                             }
                             if (eos) decEos = true
@@ -525,15 +528,17 @@ class SceneExportRunner(private val ctx: Context) {
         } finally {
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
-            runCatching { encoder?.stop() }
-            runCatching { encoder?.release() }
-            runCatching { muxer?.release() }
+            // B07/Y28（2026-11-19 顺序修订）：GL **先于**编码器释放——engine 持有一枚建在
+            // enc 输入面（createInputSurface）上的 EGL 窗口面，反序会让 codec.release 先销毁
+            // 那枚 native 面、EGL 面悬空。release 是有界等待，线程仍活着就把准入关到实际退出。
             val engine = gl
             if (engine != null) {
                 engine.release()
-                // release 是“有界等待”，不代表 GL 线程真退出；线程仍活着就把准入关到实际退出。
                 if (engine.glThreadAlive()) SETTLING_GL_OWNER.set(engine.exportThread())
             }
+            runCatching { encoder?.stop() }
+            runCatching { encoder?.release() }
+            runCatching { muxer?.release() }
             runCatching { extractor?.release() }
         }
     }
