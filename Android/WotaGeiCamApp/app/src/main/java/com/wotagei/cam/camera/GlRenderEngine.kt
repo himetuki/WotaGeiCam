@@ -2102,11 +2102,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 失败次数照实计（段收尾行可查），且**不影响成片时间轴口径**：不推进 [encoderLastPtsNs]
      * 只是撤掉防回退的地板，下一帧仍由 `System.nanoTime()` 落自己的格（墙钟单调 ⇒ 戳仍单调）。
      */
-    private fun stampEncoderPresentation(encoder: EGLSurface) {
+    private fun stampEncoderPresentation(encoder: EGLSurface): Boolean {
         val fps = encoderFps
-        if (fps <= 0) return
+        // 不打戳的两种合法情形（fps=0 直注、显示未就绪）不是失败：调用方照常 swap。
+        if (fps <= 0) return true
         val display = eglDisplay
-        if (display === EGL14.EGL_NO_DISPLAY) return
+        if (display === EGL14.EGL_NO_DISPLAY) return true
         val nowNs = System.nanoTime()
         // 网格步长：NTSC 非整数档查表（见 ntscGridStepNs），其余走 1e9/fps。
         // 查表落空（该 fps 不在映射表里）时**退回整数步长**，绝不把 0 当步长传下去——
@@ -2133,22 +2134,34 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             stampAgeCount++
             if (driftNs > stampAgeMaxNs) stampAgeMaxNs = driftNs
         }
-        // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderAdaptivePtsNs]
+        // S1-M2-06 / Y10：**异常与布尔返回值都算失败**。EGL 正常返回 false 时 `runCatching`
+        // 仍是 Result.success，旧实现因此漏记失败并推进 `encoderLastPtsNs`——下一帧把一枚
+        // 从未写入的戳当网格地板，位次账与容器永久错位。这里只认 `true` 为写入成功。
+        val written = try {
+            if (EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs)) {
+                true
+            } else {
+                stampFailCount++
+                Log.w(TAG_GL, "写呈现时间戳失败：EGL 返回 false（pts=$ptsNs）")
+                false
+            }
+        } catch (t: Throwable) {
+            stampFailCount++
+            Log.w(TAG_GL, "写呈现时间戳失败：${t.message}")
+            false
+        }
+        if (!written) return false
+        // 空档观测只统计**真的写进容器**的戳：失败帧不计 gap（下一帧仍以旧戳为地板，
+        // 若此处先记一次，下一帧会重复计同一段空档）。纯函数 [encoderAdaptivePtsNs]
         // 把 slot 序号丢掉了，这里从两枚戳反推跨距，计空格总数与最大单次跨距。
         val gap = encoderSlotGap(encoderLastPtsNs, ptsNs, fps)
         if (gap > 0L) {
             stampGapSlots += gap
             if (gap > stampGapMaxSlots) stampGapMaxSlots = gap
         }
-        val written = runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
-            .onFailure {
-                stampFailCount++
-                Log.w(TAG_GL, "写呈现时间戳失败：${it.message}")
-            }
-            .isSuccess
-        if (!written) return
         encoderLastPtsNs = ptsNs
         encoderFrameIndex++
+        return true
     }
 
     /**
