@@ -27,6 +27,59 @@ class SeriesStoreGuardTest {
 
     private fun body(rel: String, fn: String) = flatten(bodyOf(masked(rel), fn))
 
+    /**
+     * 取函数体：**花括号体**走 [bodyOf]；**表达式体**（`): Int = Foo.bar(...)`）按签名括号配平截取。
+     *
+     * 为什么不能一律 [bodyOf]：生产后端 `writeSeries` 是单表达式转调（`= SeriesStore.record(...)`），
+     * `bodyOf` 只认 `{`，遇到表达式体会抛"找不到花括号体"——把**合法实现**判成守卫失效。
+     * 也不能退化成固定窗口文本：截取必须从签名右括号后的 `=` 起、按 `()[]{}` 配平到表达式结束；
+     * 函数被改名（一个 `fun fn(` 都找不到）仍然拿不到输入，保留原守卫"不许沉默通过"的语义。
+     *
+     * 同名声明可能有多处（接口声明 + 实现），只认**有体**的那一处。
+     */
+    private fun bodyOrExpr(rel: String, fn: String): String {
+        val src = masked(rel)
+        var at = src.indexOf("fun $fn(")
+        if (at < 0) throw AssertionError("找不到 fun $fn( —— 函数被改名/挪走，守卫失去输入")
+        while (at >= 0) {
+            // 参数表右括号（配平嵌套调用与默认值里的括号）
+            var i = src.indexOf('(', at)
+            var depth = 0
+            while (i < src.length) {
+                when (src[i]) {
+                    '(' -> depth++
+                    ')' -> {
+                        depth--
+                        if (depth == 0) break
+                    }
+                }
+                i++
+            }
+            var j = i + 1
+            // 跳过返回类型（`): Int = ...` / `): Int { ... }`）；行尾仍未遇到 = / { = 只有声明
+            while (j < src.length && src[j] != '{' && src[j] != '=' && src[j] != '\n') j++
+            if (j < src.length && src[j] == '{') return flatten(bodyOf(src.substring(at), fn))
+            if (j < src.length && src[j] == '=') {
+                // 表达式体：从 '=' 起按括号配平；深度归零后的行尾即结束
+                var k = j + 1
+                var d = 0
+                while (k < src.length) {
+                    when (src[k]) {
+                        '(', '[', '{' -> d++
+                        ')', ']', '}' -> d--
+                    }
+                    k++
+                    if (d == 0 && k < src.length && src[k] == '\n') break
+                }
+                val expr = src.substring(j, k)
+                if (expr.isBlank()) throw AssertionError("fun $fn 的表达式体截取为空——守卫失去输入")
+                return flatten(expr)
+            }
+            at = src.indexOf("fun $fn(", at + 1)
+        }
+        throw AssertionError("fun $fn 只有声明没有函数体 —— 实现被挪走，守卫失去输入")
+    }
+
     /** `CameraScreen` 的 collect 体：`runner.result.collect` 到 `runner.clearResult()` 之间 */
     private fun collectBlock(src: String): String {
         val at = src.indexOf("runner.result.collect")
@@ -64,7 +117,7 @@ class SeriesStoreGuardTest {
 
     @Test
     fun `所有者里必须真的调SeriesStore_record并带齐参数`() {
-        val owner = body("record/TakeSettlement.kt", "writeSeries")
+        val owner = bodyOrExpr("record/TakeSettlement.kt", "writeSeries")
         assertTrue("生产后端必须调 SeriesStore.record", owner.contains("SeriesStore.record("))
         assertTrue("必须传 seriesId", owner.contains("seriesId"))
         assertTrue("必须传会话起始时刻", owner.contains("startedAtMs"))
