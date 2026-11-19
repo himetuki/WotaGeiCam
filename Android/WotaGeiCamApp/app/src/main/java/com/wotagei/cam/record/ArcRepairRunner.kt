@@ -1452,26 +1452,23 @@ private class ArcRepairSession(
     // region 收尾
 
     private fun finish(ok: Boolean, code: String?): ArcRepairResult {
-        // 顺序（Y28，2026-11-19 修订）：**GL → 编码器 codec → 输入面包装 → 解码器 → muxer**。
-        // [arcGl] 持有一枚建在编码器输入面上的 EGL 窗口面：先退出 GL/销毁 EGL，codec 才能安全
-        // 销毁那枚 native 面（旧序 codec 先 release，EGL 面悬在已销毁窗口上）。
-        val gl = arcGl
-        arcGl = null
-        gl?.release()
-        // 输入面包装（Surface）的最终释放要求 GL 线程确已退出：release() 已做有界 join，
-        // 仍未退出时**保留**——迟回收优于与在途 EGL 操作交叉（Y28 的跨资源释放窗口）。
-        val glGone = gl?.glThreadAlive() != true
-        releaseCodec(vEnc)
-        vEnc = null
-        val es = encSurface
-        encSurface = null
-        if (glGone) {
-            runCatching { es?.release() }
-        } else {
-            Log.w(TAG_ARC, "GL 线程未在收尾预算内退出：保留编码器输入面包装（由 GC 回收），避免跨线程释放交叉")
+        val gl = arcGl.also { arcGl = null }
+        val decoder = vDec.also { vDec = null }
+        val encoder = vEnc.also { vEnc = null }
+        val input = encSurface.also { encSurface = null }
+        val stopDecoder = { releaseCodec(decoder) }
+        val releaseEncoder = {
+            releaseCodec(encoder)
+            runCatching { input?.release() }
+            Unit
         }
-        releaseCodec(vDec)
-        vDec = null
+        if (gl != null) {
+            // GL 管线可能仍在 native 命令里。把 codec 与输入面一并交给它，超时也由它收完。
+            gl.release(stopDecoder, releaseEncoder)
+        } else {
+            stopDecoder()
+            releaseEncoder()
+        }
 
         val m = muxer
         muxer = null

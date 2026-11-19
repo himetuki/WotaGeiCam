@@ -178,8 +178,8 @@ class DegradedKeepGuardTest {
             "降级呈现只认「错误就是那条降级码」（差一字宁可回落失败，绝不盖住更硬的失败）",
             finish.contains("degraded != null && degraded == error")
         )
-        // 无产物仍走失败：parts.isEmpty() 分支必须排在降级分支之前
-        val emptyAt = finish.indexOf("parts.isEmpty()")
+        // 无产物仍走失败：同步与迟到的已封段共用的清单为空时优先失败。
+        val emptyAt = finish.indexOf("mergedParts().isEmpty()")
         val degradedAt = finish.indexOf("degraded != null && degraded == error")
         assertTrue("锚点丢失：finish 没截到降级分支", degradedAt >= 0)
         assertTrue("无产物必须仍走失败呈现（parts.isEmpty 分支排在降级分支之前）", emptyAt in 0 until degradedAt)

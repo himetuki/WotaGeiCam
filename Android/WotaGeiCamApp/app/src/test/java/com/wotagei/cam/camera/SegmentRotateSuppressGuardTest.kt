@@ -93,7 +93,7 @@ class SegmentRotateSuppressGuardTest {
         assertTrue(
             "新面谓词必须是 native 面同一性判定（isOutputSurfaceBound 看不出新旧面）；" +
                 "R05/Y28：身份取自绑定时整体发布、失活先清的就绪快照，且上下文丢失后恒 false",
-            engine.contains("fun isEncoderSurfaceNative(s: Surface?): Boolean = !contextLost && encoderTarget?.native === s")
+            flatten(engine).contains("fun isEncoderSurfaceNative(s: Surface): Boolean = !contextLost && !released.get() && encoderTarget?.native === s")
         )
     }
 

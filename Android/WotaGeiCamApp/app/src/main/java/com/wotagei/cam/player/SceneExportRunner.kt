@@ -11,6 +11,7 @@ import android.media.MediaMuxer
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.view.Surface
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
@@ -221,6 +222,7 @@ class SceneExportRunner(private val ctx: Context) {
         var extractor: MediaExtractor? = null
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
+        var encoderInput: Surface? = null
         var muxer: MediaMuxer? = null
         var videoTrack = -1
         var muxerStarted = false
@@ -297,7 +299,7 @@ class SceneExportRunner(private val ctx: Context) {
                 val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 encoder = enc
                 enc.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                val inputSurface = enc.createInputSurface()
+                val inputSurface = enc.createInputSurface().also { encoderInput = it }
                 enc.start()
 
                 // ---- GL（先建，解码器要它的 Surface）
@@ -526,18 +528,25 @@ class SceneExportRunner(private val ctx: Context) {
             if (!sealed) owner.deletePending(ctx)
             Failed(mapError(e))
         } finally {
-            runCatching { decoder?.stop() }
-            runCatching { decoder?.release() }
-            // B07/Y28（2026-11-19 顺序修订）：GL **先于**编码器释放——engine 持有一枚建在
-            // enc 输入面（createInputSurface）上的 EGL 窗口面，反序会让 codec.release 先销毁
-            // 那枚 native 面、EGL 面悬空。release 是有界等待，线程仍活着就把准入关到实际退出。
+            val stopDecoder = {
+                runCatching { decoder?.stop() }
+                runCatching { decoder?.release() }
+                Unit
+            }
+            val releaseEncoder = {
+                runCatching { encoder?.stop() }
+                runCatching { encoder?.release() }
+                runCatching { encoderInput?.release() }
+                Unit
+            }
             val engine = gl
             if (engine != null) {
-                engine.release()
+                engine.release(stopDecoder, releaseEncoder)
                 if (engine.glThreadAlive()) SETTLING_GL_OWNER.set(engine.exportThread())
+            } else {
+                stopDecoder()
+                releaseEncoder()
             }
-            runCatching { encoder?.stop() }
-            runCatching { encoder?.release() }
             runCatching { muxer?.release() }
             runCatching { extractor?.release() }
         }

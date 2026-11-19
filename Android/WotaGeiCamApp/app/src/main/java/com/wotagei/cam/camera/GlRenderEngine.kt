@@ -1045,7 +1045,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 而不是"任意目标/曾经的目标"。判据 = 快照身份相等 **且** 上下文未丢失（丢失瞬间快照可能
      * 还没被清，`contextLost` 单独再兜一道）。
      */
-    fun isEncoderSurfaceNative(s: Surface?): Boolean = !contextLost && encoderTarget?.native === s
+    fun isEncoderSurfaceNative(s: Surface): Boolean =
+        !contextLost && !released.get() && encoderTarget?.native === s
 
     /** 编码器面尺寸（px），未绑定为 0x0 */
     fun outputSurfaceSize(): Pair<Int, Int> = encoderWidth to encoderHeight
@@ -1809,13 +1810,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 换面与解面两条出口一次收干净——旧面在此之后就不存在了，而新面若绑定失败会就地 return，
         // 放在后面会让上一段的账一直悬着，混进下一段成功的段收尾行里。
         drainStampObs(if (surface == null) "解面" else "换面")
+        // 平台销毁面可能阻塞，先撤下就绪身份。
+        clearEncoderTarget()
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
         encoderWidth = 0
         encoderHeight = 0
-        // 解绑 = 读方不得再看到任何"已绑定"身份（R01 谓词靠它判"还没挂上"）
-        clearEncoderTarget()
         if (surface == null) {
             Log.i(TAG_GL, "编码器面已解除")
             // 成片槽的绑定只清引用（program 可能正被 display 共用 / 在会话缓存里等下一次起录）：
@@ -1896,13 +1897,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     private fun teardownEgl() {
+        clearEncoderTarget()
         destroyEglSurface(windowEglSurface)
         windowEglSurface = null
         windowNative = null
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
-        clearEncoderTarget()
         destroyEglSurface(pbufferSurface)
         pbufferSurface = null
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
@@ -2497,10 +2498,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     private fun dropEncoderSurface() {
+        clearEncoderTarget()
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
-        clearEncoderTarget()
         encoderWidth = 0
         encoderHeight = 0
         // movie 槽只清引用、不删 program：同一枚可能正被 display 槽共用 / 在会话缓存里等着复用，

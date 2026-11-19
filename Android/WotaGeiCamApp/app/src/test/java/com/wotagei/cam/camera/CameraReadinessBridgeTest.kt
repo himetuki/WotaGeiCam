@@ -32,7 +32,8 @@ class CameraReadinessBridgeTest {
 
     @Test
     fun `录制面交接后旧ready快照必须被新会话世代取代`() = platform { p ->
-        startLive(p)
+        // GPU 的编码面归 GL，只有 DIRECT 会把这枚 Surface 交给 Camera2 的 repeating。
+        startLive(p, direct = true)
         val baseline = p.readiness()
         assertTrue(p.ready(baseline))
 

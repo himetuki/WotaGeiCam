@@ -9,17 +9,13 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
-import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
+import com.wotagei.cam.camera.OfflineGlWorker
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.ArcMergeDeadband
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import com.wotagei.cam.diag.Diag as Log
 
 private const val TAG_ARC_GL = "WotaArcRepairGl"
 
@@ -78,16 +74,13 @@ internal class ArcRepairGl(
     /** 差分死区归一值（`D/255.0`），离线会话内恒定：uniform 在每次合并绘制时下发 */
     private val deadbandLuma = ArcMergeDeadband.luma(deadband)
 
-    private val thread = HandlerThread("WotaArcRepairGl").apply { start() }
-    private val handler = Handler(thread.looper)
+    private val worker = OfflineGlWorker(TAG_ARC_GL)
 
     /** 解码器输出面；[start] 成功后有效 */
     @Volatile
     var decoderSurface: Surface? = null
         private set
 
-    @Volatile
-    private var released = false
     private var glReady = false
 
     /** 打戳失败累计次数（本链不产 sidecar，日志就是全部痕迹，故必须计次而不是只留一行） */
@@ -260,94 +253,17 @@ internal class ArcRepairGl(
 
     // endregion
 
-    /**
-     * 释放全部 GL/EGL 资源并退出 GL 线程；幂等。
-     *
-     * Y28（2026-11-19）：退出要**有界等真实结束**再返回。调用方（[ArcRepairRunner.finish]）
-     * 随后要释放编码器输入面——那枚 native 面正被本线程的 EGL 窗口面引用；只 post 一个
-     * releaseGl + quitSafely 就返回，调用方可能在 GL 线程仍在拆面时把 native 面 release 掉
-     * （跨资源释放窗口）。releaseGl 本身**不因超时被撤销**（它必须执行才能还 EGL 资源），
-     * 但本函数返回后调用方应查 [glThreadAlive] 决定是否还能安全释放输入面。
-     */
-    fun release() {
-        if (released) return
-        // releaseGl 必须执行：这一条传 abandonOnTimeout=false（其余命令超时即作废，
-        // 否则"已经宣告失败"的操作还会在 GL 线程上再改一遍状态）。
-        postAndWait(OP_WAIT_MS, abandonOnTimeout = false) {
-            releaseGl()
-            true
-        }
-        released = true
-        thread.quitSafely()
-        if (Thread.currentThread() === thread) return
-        try {
-            thread.join(RELEASE_JOIN_MS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        if (thread.isAlive) {
-            Log.w(TAG_ARC_GL, "GL 线程未在 ${RELEASE_JOIN_MS}ms 内退出：调用方不得释放编码器输入面")
-        }
+    /** GL 线程接手两侧 codec，在途命令完成后依序拆解码器、EGL 和编码器。 */
+    fun release(stopDecoder: () -> Unit, releaseEncoder: () -> Unit) {
+        worker.close(RELEASE_JOIN_MS, stopDecoder, ::releaseGl, releaseEncoder)
     }
-
-    /** release() 有界 join 之后 GL 线程是否仍在跑（true ⇒ 不得释放它仍在引用的输入面） */
-    fun glThreadAlive(): Boolean = thread.isAlive
 
     // endregion
 
     // region GL 线程内部
 
-    /**
-     * 投递一条 GL 命令并等待结果。
-     *
-     * @param abandonOnTimeout true（默认）= 超时后撤销排队中的这条命令并返回 false——调用方
-     *   已把这一步当失败继续，晚到的命令不许在已宣告失败的状态上再改一遍（Y28 的
-     *   "latch.await 超时不撤销 Handler 消息"缺陷）。false 仅给 [release] 的资源归还用：
-     *   那条命令**必须**执行，超时只影响调用方对线程是否已死的判断。
-     */
-    private fun postAndWait(
-        timeoutMs: Long,
-        abandonOnTimeout: Boolean = true,
-        block: () -> Boolean
-    ): Boolean {
-        if (released) return false
-        val latch = CountDownLatch(1)
-        val out = booleanArrayOf(false)
-        val abandoned = AtomicBoolean(false)
-        val task = Runnable {
-            // 超时撤销与"刚开跑"的竞态窗口：撤不掉已开跑的这条（它会在做副作用），
-            // 调用方靠 release 的 join 兜底——不许在 GL 线程未死时释放它引用的资源。
-            if (abandoned.get()) {
-                latch.countDown()
-                return@Runnable
-            }
-            out[0] = try {
-                block()
-            } catch (e: Exception) {
-                Log.e(TAG_ARC_GL, "GL 操作抛异常：${e.javaClass.simpleName} ${e.message}")
-                false
-            }
-            latch.countDown()
-        }
-        if (!handler.post(task)) {
-            Log.w(TAG_ARC_GL, "GL 线程已退出，操作未入队")
-            return false
-        }
-        return try {
-            val done = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-            if (!done) {
-                if (abandonOnTimeout) {
-                    abandoned.set(true)
-                    handler.removeCallbacks(task)
-                }
-                Log.w(TAG_ARC_GL, "GL 操作超时 ${timeoutMs}ms${if (abandonOnTimeout) "（已撤销排队中的一步）" else "（资源归还不撤销）"}")
-            }
-            done && out[0]
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            false
-        }
-    }
+    private fun postAndWait(timeoutMs: Long, block: () -> Boolean): Boolean =
+        worker.call(timeoutMs, block)
 
     private fun initGl(): Boolean {
         val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -404,7 +320,7 @@ internal class ArcRepairGl(
         // SurfaceTexture 必须在本线程、makeCurrent 之后建（构造期会把纹理 attach 到当前上下文）
         val st = SurfaceTexture(oesTextureId)
         st.setDefaultBufferSize(widthPx, heightPx)
-        st.setOnFrameAvailableListener({ onFrameAvailable() }, handler)
+        st.setOnFrameAvailableListener({ onFrameAvailable() }, worker.handler)
         texture = st
         decoderSurface = Surface(st)
 

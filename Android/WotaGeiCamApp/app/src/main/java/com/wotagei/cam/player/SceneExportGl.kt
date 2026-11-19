@@ -9,10 +9,9 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
 import android.view.Surface
+import com.wotagei.cam.camera.OfflineGlWorker
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.EchoMode
@@ -24,8 +23,6 @@ import com.wotagei.cam.core.echoTrailTintRgbOf
 import com.wotagei.cam.core.echoTrailTolOf
 import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.diag.Diag as Log
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * 「内置播放器内后渲染导出」的 GL 引擎（2026-10-28 用户需求）：
@@ -76,8 +73,7 @@ internal class SceneExportGl(
         private val TINT_WHITE = floatArrayOf(1f, 1f, 1f)
     }
 
-    private val thread = HandlerThread("WotaSceneExportGl").apply { start() }
-    private val handler = Handler(thread.looper)
+    private val worker = OfflineGlWorker(TAG)
 
     private var eglDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext = EGL14.EGL_NO_CONTEXT
@@ -202,9 +198,9 @@ internal class SceneExportGl(
     /** 解码器要写的面（管线线程拿它去 `decoder.configure`） */
     fun decoderOutputSurface(): Surface? = decoderSurface
 
-    fun start(): Boolean = onGl(false) { initGl() }
+    fun start(): Boolean = onGl { initGl() }
 
-    fun attachEncoderSurface(surface: Surface): Boolean = onGl(false) { createEncoderSurface(surface) }
+    fun attachEncoderSurface(surface: Surface): Boolean = onGl { createEncoderSurface(surface) }
 
     /** 等解码器推来一帧（[acquire] 消费它） */
     fun awaitFrame(timeoutMs: Long = FRAME_WAIT_MS): Boolean = synchronized(frameLock) {
@@ -223,27 +219,25 @@ internal class SceneExportGl(
     }
 
     /** 只消费这一帧（区间外的帧要解码出来才能继续，但不进编码器） */
-    fun acquireOnly(): Boolean = onGl(false) { acquire() }
+    fun acquireOnly(): Boolean = onGl { acquire() }
 
     /**
      * 消费一帧并渲染进编码器：[ptsUs] 相对导出起点的呈现时间（微秒）。
      * 打戳失败按"这一帧没发出去"处理（与 ArcRepairGl 同判据：坏戳不可自愈）。
      */
-    fun acquireAndRender(ptsUs: Long): Boolean = onGl(false) {
+    fun acquireAndRender(ptsUs: Long): Boolean = onGl {
         if (!acquire()) return@onGl false
         render(ptsUs)
     }
 
-    fun release() {
-        onGl(false) { releaseGl(); true }
-        thread.quitSafely()
-        runCatching { thread.join(1500) }
+    /** 将 codec 和输入面交给 GL 线程收尾。等待到期时，任务准入继续检查该线程的活性。 */
+    fun release(stopDecoder: () -> Unit, releaseEncoder: () -> Unit) {
+        worker.close(1_500L, stopDecoder, ::releaseGl, releaseEncoder)
     }
 
-    /** release() 有界返回不代表 GL 线程已退出；准入判定必须看这条线程的真实活性。 */
-    fun glThreadAlive(): Boolean = thread.isAlive
+    fun glThreadAlive(): Boolean = worker.thread.isAlive
 
-    fun exportThread(): Thread = thread
+    fun exportThread(): Thread = worker.thread
 
     // ---------------------------------------------------------------- 初始化
 
@@ -275,7 +269,7 @@ internal class SceneExportGl(
 
         val st = SurfaceTexture(oesTex)
         st.setDefaultBufferSize(widthPx, heightPx)
-        st.setOnFrameAvailableListener({ onFrameAvailable() }, handler)
+        st.setOnFrameAvailableListener({ onFrameAvailable() }, worker.handler)
         texture = st
         decoderSurface = Surface(st)
 
@@ -882,24 +876,5 @@ internal class SceneExportGl(
         return err
     }
 
-    /** 把一次调用投递到 GL 线程并阻塞等结果（EGL 上下文绑线程：任何 GL 调用都不许留在调用方线程） */
-    private fun <T> onGl(default: T, timeoutMs: Long = OP_WAIT_MS, block: () -> T): T {
-        if (Thread.currentThread() === thread) return block()
-        var result = default
-        val latch = CountDownLatch(1)
-        val posted = handler.post {
-            try {
-                result = block()
-            } catch (t: Throwable) {
-                Log.w(TAG, "GL 线程异常：${t.message}", t)
-            } finally {
-                latch.countDown()
-            }
-        }
-        if (!posted) return default
-        return if (latch.await(timeoutMs, TimeUnit.MILLISECONDS)) result else {
-            Log.w(TAG, "GL 操作超时 ${timeoutMs}ms")
-            default
-        }
-    }
+    private fun onGl(block: () -> Boolean): Boolean = worker.call(OP_WAIT_MS, block)
 }

@@ -26,7 +26,11 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         "com.wotagei.cam.player.RemuxOrientationKt", "com.wotagei.cam.media.VideoClip",
         "com.wotagei.cam.record.OrientationExportKt", "com.wotagei.cam.record.ArcRepairSession",
         "com.wotagei.cam.record.ArcFail"
-    ) + if (realGl) setOf("com.wotagei.cam.player.SceneExportGl", "com.wotagei.cam.record.ArcRepairGl") else emptySet()
+    ) + if (realGl) setOf(
+        "com.wotagei.cam.player.SceneExportGl",
+        "com.wotagei.cam.record.ArcRepairGl",
+        "com.wotagei.cam.camera.OfflineGlWorker"
+    ) else emptySet()
     private val loader = object : URLClassLoader(arrayOf(classes.toURI().toURL()), parent) {
         override fun loadClass(name: String, resolve: Boolean): Class<*> = synchronized(this) {
             val loaded = findLoadedClass(name) ?: when {
@@ -43,6 +47,8 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
             loaded
         }
     }
+
+    private val glInstances = mutableListOf<Any>()
 
     fun type(name: String): Class<*> = loader.loadClass(name)
     fun new(name: String): Any = type(name).getDeclaredConstructor().newInstance()
@@ -101,6 +107,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Long::class.javaPrimitiveType, Int::class.javaPrimitiveType
             ).newInstance(640, 480, basePtsNs, 0)
         }
+        glInstances += instance
         set(instance, "eglDisplay", new("android.opengl.EGLDisplay"))
         set(instance, "eglContext", new("android.opengl.EGLContext"))
         set(instance, if (scene) "encoderSurface" else "encoderEglSurface", new("android.opengl.EGLSurface"))
@@ -111,9 +118,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         // 真实构造只初始化会话数据；不调 run/open，不进行 native/输出装配。
         // 即使旧代码错误地计成功，也有合法回调，不能用未初始化字段的 NPE 冒充行为 RED。
         val uri = type("android.net.Uri").getConstructor(String::class.java).newInstance("content://source/1")
-        return type("com.wotagei.cam.record.ArcRepairSession").declaredConstructors.single { it.parameterCount == 8 }
+        return type("com.wotagei.cam.record.ArcRepairSession").declaredConstructors.single { it.parameterCount == 9 }
             .apply { isAccessible = true }
-            .newInstance(new("android.content.Context"), uri, true, 24, 0, 0, onProgress, { false })
+            .newInstance(new("android.content.Context"), uri, true, 24, 0, 0, 0L, onProgress, { false })
             .also { set(it, "arcGl", gl) }
     }
     /**
@@ -132,7 +139,19 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         return executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
-    override fun close() = loader.close()
+    override fun close() {
+        try {
+            val noop: () -> Unit = {}
+            for (gl in glInstances) {
+                call(gl, "release", noop, noop)
+                val worker = requireNotNull(field(gl, "worker"))
+                val owner = call(worker, "getThread") as Thread
+                check(!owner.isAlive) { "离线 GL 测试未释放线程 ${owner.name}" }
+            }
+        } finally {
+            loader.close()
+        }
+    }
 
     companion object {
         fun compile(root: File): File {
@@ -571,23 +590,60 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         return true;
                     }
                     public boolean acquireOnly(){probe.ExportScript.acquiredOnly++;return true;}
-                    public void release(){probe.ExportScript.add("gl.release");probe.ExportBlocking.release("gl",traceId);}
+                    public void release(kotlin.jvm.functions.Function0<kotlin.Unit> stopDecoder,
+                            kotlin.jvm.functions.Function0<kotlin.Unit> releaseEncoder){
+                        stopDecoder.invoke();
+                        probe.ExportScript.add("gl.release");probe.ExportBlocking.release("gl",traceId);
+                        releaseEncoder.invoke();
+                    }
                     public boolean glThreadAlive(){return probe.ExportScript.glThreadAlive;}
                     public Thread exportThread(){return probe.ExportScript.glThread;}
                 }
             """,
             "android.view.Surface" to "package android.view; public class Surface { public void release(){} }",
-            "android.os.Looper" to "package android.os; public class Looper {}",
+            "android.os.Looper" to """
+                package android.os;
+                public class Looper {
+                    private final java.util.ArrayDeque<Runnable> queue=new java.util.ArrayDeque<>();
+                    private boolean quitting;
+                    synchronized boolean post(Runnable task){
+                        if(quitting)return false;
+                        queue.addLast(task);notifyAll();return true;
+                    }
+                    synchronized void remove(Runnable task){queue.remove(task);}
+                    synchronized void quit(){quitting=true;notifyAll();}
+                    synchronized Runnable take() throws InterruptedException {
+                        while(queue.isEmpty()&&!quitting)wait();
+                        return queue.pollFirst();
+                    }
+                }
+            """,
             "android.os.HandlerThread" to """
                 package android.os;
                 public class HandlerThread extends Thread {
-                    private final Looper looper=new Looper(); public HandlerThread(String name){super(name);}
-                    public Looper getLooper(){return looper;} public boolean quitSafely(){return true;}
+                    private final Looper looper=new Looper(); public HandlerThread(String name){super(name);setDaemon(true);}
+                    private final java.util.concurrent.CountDownLatch dispatchExit=new java.util.concurrent.CountDownLatch(1);
+                    public Looper getLooper(){return looper;} public boolean quitSafely(){looper.quit();return true;}
+                    public boolean awaitDispatchExit() throws InterruptedException {
+                        return dispatchExit.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                    }
+                    @Override public void run(){
+                        try {
+                            Runnable task;
+                            while((task=looper.take())!=null)task.run();
+                        } catch(InterruptedException e){Thread.currentThread().interrupt();}
+                        finally {dispatchExit.countDown();}
+                    }
                 }
             """,
             "android.os.Handler" to """
                 package android.os;
-                public class Handler { public Handler(Looper l){} public boolean post(Runnable r){r.run();return true;} }
+                public class Handler {
+                    private final Looper looper;
+                    public Handler(Looper l){looper=l;}
+                    public boolean post(Runnable task){return looper.post(task);}
+                    public void removeCallbacks(Runnable task){looper.remove(task);}
+                }
             """,
             "android.graphics.SurfaceTexture" to """
                 package android.graphics;
@@ -613,6 +669,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static final EGLContext EGL_NO_CONTEXT=new EGLContext();
                     public static final EGLSurface EGL_NO_SURFACE=new EGLSurface();
                     public static boolean eglMakeCurrent(EGLDisplay d,EGLSurface a,EGLSurface b,EGLContext c){return true;}
+                    public static boolean eglDestroySurface(EGLDisplay d,EGLSurface s){return true;}
+                    public static boolean eglDestroyContext(EGLDisplay d,EGLContext c){return true;}
+                    public static boolean eglTerminate(EGLDisplay d){return true;}
                     public static boolean eglSwapBuffers(EGLDisplay d,EGLSurface s){probe.ExportScript.swapCalls++;probe.ExportScript.add("egl.swap");return probe.ExportScript.swapOk;}
                     public static int eglGetError(){return 0;}
                 }
@@ -631,6 +690,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 package android.opengl;
                 public class GLES20 {
                     public static void glBindFramebuffer(int target,int framebuffer){}
+                    public static void glDeleteProgram(int program){}
+                    public static void glDeleteFramebuffers(int count,int[] names,int offset){}
+                    public static void glDeleteTextures(int count,int[] names,int offset){}
                     public static void glViewport(int x,int y,int w,int h){}
                     public static void glUseProgram(int p){}
                     public static void glActiveTexture(int u){}
