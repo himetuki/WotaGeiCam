@@ -101,8 +101,16 @@ internal interface TakeSettlementBackend {
  * 结论进键 ⇒ "先失败后成功"补交付练习、"先成功后失败"清桥态——只按段集合去重会把后到
  * 的相反结论吞掉（练习被漏交付，或失败成片被当成练习交付）。
  */
-internal class TakeSettlementOwner(private val scope: CoroutineScope) {
-    private val inFlight = HashMap<SettlementKey, Deferred<TakeSettlementOutcome>>()
+internal class TakeSettlementOwner(
+    private val scope: CoroutineScope,
+    /** 结算去重表保留上限：超出后按插入顺序淘汰**已完成**的最老项（见 [evictCompletedLocked]） */
+    private val maxRetainedKeys: Int = 64,
+    /** 会话落库顺序链保留上限：同上，只淘汰已完成的会话链（未完成链仍被新任务 join 着） */
+    private val maxRetainedSessions: Int = 8
+) {
+    // 放在类体，不进构造签名：SettlementKey 是私有嵌套类型，出现在 internal 构造参数里
+    // 算不出合法签名（父树同修）
+    private val inFlight = LinkedHashMap<SettlementKey, Deferred<TakeSettlementOutcome>>()
 
     /**
      * 恰好一次的键：系列归属 + 会话起始时刻 + **已发布段的段序/uri 清单** + 成功结论。
@@ -125,7 +133,8 @@ internal class TakeSettlementOwner(private val scope: CoroutineScope) {
      * `join` 不抛。键相同的重复调用仍走 [inFlight] 去重，不会多跑。
      */
     private data class SessionId(val seriesId: Long, val startedAtMs: Long)
-    private val tail = HashMap<SessionId, Deferred<TakeSettlementOutcome>>()
+    // 进程级所有者与 App 同寿：两本表都必须有界（见 evictCompletedLocked）
+    private val tail = LinkedHashMap<SessionId, Deferred<TakeSettlementOutcome>>()
 
     fun settle(
         seriesId: Long,
@@ -148,11 +157,40 @@ internal class TakeSettlementOwner(private val scope: CoroutineScope) {
                 }
                 inFlight[key] = created
                 tail[session] = created
+                evictCompletedLocked(keepKey = key, keepSession = session)
                 created
             }
         }
         job.start()
         return job
+    }
+
+    /**
+     * 两本表的**容量上界**（调用方持锁）：进程级所有者与 App 同寿，不设界就是每录一场泄漏
+     * 一条键/一条会话链（键里握着段序 + uri 字符串）。
+     *
+     * 只淘汰**已完成**且不是本次新键/新会话的最老项：
+     * - 未完成的任务仍被调用方 `await` 着，删表不删对象，但重复调用会再造一笔（去重失效）；
+     * - 已完成项被淘汰后再收到同键重复调用，会重新跑一次结算——写库是 REPLACE upsert、
+     *   练习交付在桥态已清后返回 false，效果仍幂等，不会双交付。
+     * - 会话链只可能淘汰"全部落库都已结束"的旧链；新一轮结算取不到 prev 时，旧链的写早已完成，
+     *   落库顺序依旧成立。
+     */
+    private fun evictCompletedLocked(keepKey: SettlementKey, keepSession: SessionId) {
+        if (inFlight.size > maxRetainedKeys) {
+            val it = inFlight.entries.iterator()
+            while (it.hasNext() && inFlight.size > maxRetainedKeys) {
+                val e = it.next()
+                if (e.key != keepKey && e.value.isCompleted) it.remove()
+            }
+        }
+        if (tail.size > maxRetainedSessions) {
+            val it = tail.entries.iterator()
+            while (it.hasNext() && tail.size > maxRetainedSessions) {
+                val e = it.next()
+                if (e.key != keepSession && e.value.isCompleted) it.remove()
+            }
+        }
     }
 
     private suspend fun runSettlement(

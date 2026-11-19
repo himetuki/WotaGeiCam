@@ -11,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -279,5 +280,78 @@ class TakeSettlementTest {
         assertTrue("非干净成功必须清桥态", outcome.practiceCleared)
         assertTrue("不许交付半场成片", backend.deliveries.isEmpty())
         assertEquals(1, backend.clearCalls)
+    }
+
+    // ------------------------------------------------------------------ 容量上界（进程级所有者不许无限累积）
+
+    @Test
+    fun `结算去重表有容量上界_已完成的最老键被淘汰`() = runBlocking {
+        val backend = FakeBackend()
+        val o = TakeSettlementOwner(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            maxRetainedKeys = 2,
+            maxRetainedSessions = 8
+        )
+        // 同一会话、五个不同段集合 = 五枚不同键（迟到对账的正常形态）
+        val first = o.settle(7L, 1_000L, listOf(part(0)), true, false, backend)
+        first.await()
+        val second = o.settle(7L, 1_000L, listOf(part(0), part(1)), true, false, backend)
+        second.await()
+        val third = o.settle(7L, 1_000L, listOf(part(0), part(1), part(2)), true, false, backend)
+        third.await()
+        val fourth = o.settle(7L, 1_000L, listOf(part(0), part(1), part(2), part(3)), true, false, backend)
+        fourth.await()
+
+        assertNotSame(
+            "超出上界后最老的已完成键必须被淘汰（重跑一次效果幂等，但不许无限持有 uri 清单）",
+            first,
+            o.settle(7L, 1_000L, listOf(part(0)), true, false, backend)
+        )
+        assertSame(
+            "最近完成的键仍必须复用（恰好一次不被容量上界破坏）",
+            fourth,
+            o.settle(7L, 1_000L, listOf(part(0), part(1), part(2), part(3)), true, false, backend)
+        )
+    }
+
+    @Test
+    fun `容量淘汰只动已完成项_在途结算的重复调用仍拿到同一枚`() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val slow = FakeBackend(gate = gate)
+        val fast = FakeBackend()
+        val o = TakeSettlementOwner(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            maxRetainedKeys = 1,
+            maxRetainedSessions = 8
+        )
+        val inFlight = o.settle(7L, 1_000L, listOf(part(0)), true, false, slow)
+        // 塞满并溢出：在途那枚不能被淘汰（淘汰它等于同一场结算并发跑两笔）
+        repeat(4) { i ->
+            o.settle(8L + i, 1_000L + i, listOf(part(0)), true, false, fast).await()
+        }
+        assertSame(
+            "未完成的结算必须仍在去重表里（重复调用拿回同一枚 deferred）",
+            inFlight,
+            o.settle(7L, 1_000L, listOf(part(0)), true, false, slow)
+        )
+        gate.complete(Unit)
+        withTimeout(5_000) { inFlight.await() }
+    }
+
+    @Test
+    fun `会话链有容量上界_连续多场退页结算不累积`() = runBlocking {
+        val backend = FakeBackend()
+        val o = TakeSettlementOwner(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            maxRetainedKeys = 64,
+            maxRetainedSessions = 2
+        )
+        // 20 场连续录制（每场两笔：早期快照 + 迟到终态）：只验证不崩且每场都落库
+        repeat(20) { i ->
+            o.settle(100L + i, 1_000L + i, listOf(part(0)), true, false, backend).await()
+            o.settle(100L + i, 1_000L + i, listOf(part(0), part(1)), true, false, backend).await()
+        }
+        assertEquals("每场两笔都要落库（会话链淘汰不动已完成的写）", 40, backend.writeCalls.get())
+        assertEquals("最后一场的段集合完整", listOf(0, 1), backend.writes.last().map { it.partIndex })
     }
 }

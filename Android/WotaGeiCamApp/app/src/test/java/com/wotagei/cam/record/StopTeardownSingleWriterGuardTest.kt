@@ -190,8 +190,12 @@ class StopTeardownSingleWriterGuardTest {
     }
 
     /**
-     * R07：join 超时之后，**收尾责任必须真的移交给泵线程**——只记账返回而没有接手方，
+     * R07：join 超时之后，**收尾责任必须真的移交给唯一一方**——只记账返回而没有接手方，
      * feeders/编码面会一直占着、终态永远没有出口（用户/结算只剩收工那一刻的早期快照）。
+     *
+     * 2026-11-20 收口：旧布尔 `teardownDeferred` 在「判活超时」与「置位」之间有一个双方都不做
+     * 的窗口（泵线程读到 false 先退出）⇒ 改为 [TrailHandoff] 的两枚互斥 CAS，行为真值表在
+     * `TrailHandoffTest`，这里钉接线：超时闸必须请求移交，泵检查点必须走同一枚闸。
      */
     @Test
     fun `超时闸必须把收尾责任移交给泵线程`() {
@@ -200,8 +204,8 @@ class StopTeardownSingleWriterGuardTest {
             val ret = stop.indexOf("return finishWithoutTeardown()", g)
             val branch = stop.substring(g, ret)
             assertTrue(
-                "超时闸必须先置 teardownDeferred（泵线程退出时才知道该自己 finish）",
-                branch.contains("teardownDeferred = true")
+                "超时闸必须请求收尾移交（见 TrailHandoff：泵先越过检查点则本线程补做）",
+                branch.contains("handOffTail()")
             )
         }
         val rel = bodyOf(codec, "release")
@@ -210,14 +214,14 @@ class StopTeardownSingleWriterGuardTest {
         assertTrue("锚点丢失：release 没有超时闸", rg >= 0 && rret > rg)
         assertTrue(
             "release 超时闸也要移交（否则 feeders/编码面没人收）",
-            rel.substring(rg, rret).contains("teardownDeferred = true")
+            rel.substring(rg, rret).contains("handOffTail()")
         )
         val trail = bodyOf(codec, "pumpTrail")
         assertTrue("泵线程必须恒停环境 feeder（owner must clean feeders）", trail.contains("stopFeeder()"))
         assertTrue("泵线程必须恒停内录 feeder", trail.contains("stopCapFeeder()"))
         assertTrue(
-            "只有收尾被移交时才补 finish（正常停录由控制线程 finish，再收一次会清空段清单）",
-            trail.contains("if (!teardownDeferred) return")
+            "泵越过检查点且无人请求 ⇒ 宣告不接管（正常停录由控制线程 finish，再收一次会清空段清单）",
+            trail.contains("trail.pumpCheckpoint()")
         )
         assertTrue("延迟收尾必须真的结算终态", trail.contains("finish(engineError)"))
         assertTrue(
@@ -226,6 +230,16 @@ class StopTeardownSingleWriterGuardTest {
         )
         assertTrue("终态必须交付会话所有者（带会话键 + 真实结果）", trail.contains("RecorderDelivery.FinalResult("))
         assertTrue("泵循环退出必须走收尾（不许悄悄结束）", bodyOf(codec, "pumpLoop").contains("pumpTrail()"))
+        assertTrue(
+            "泵线程必须从 pumpEntry 进（pumpLoop 抛出时收尾也不许跳）",
+            bodyOf(codec, "pumpEntry").contains("pumpTrail()")
+        )
+        assertTrue("泵线程入口必须调用 pumpEntry", codec.contains("pumpEntry()"))
+        // 控制线程补做的收尾必须和泵线程同口径（finish + 放输入面），且只由移交闸授权
+        val hand = bodyOf(codec, "handOffTail")
+        assertTrue("补做收尾必须先问移交闸", hand.contains("trail.controlDefer()"))
+        assertTrue("补做收尾必须结算终态", hand.contains("finish(engineError)"))
+        assertTrue("补做收尾必须放输入面", hand.contains("s?.release()"))
     }
 
     /**

@@ -175,9 +175,12 @@ internal fun mergeSegments(
 ): List<VideoSegment> {
     if (extra.isEmpty()) return existing
     val seen = existing.mapTo(HashSet()) { it.partIndex }
-    val out = ArrayList<VideoSegment>(existing.size + extra.size)
+    val fresh = extra.filter { seen.add(it.partIndex) }
+    // 集合没变大 ⇒ 原样返回同一对象（结算键按引用/内容都不许被无谓翻新）
+    if (fresh.isEmpty()) return existing
+    val out = ArrayList<VideoSegment>(existing.size + fresh.size)
     out.addAll(existing)
-    for (s in extra) if (seen.add(s.partIndex)) out.add(s)
+    out.addAll(fresh)
     out.sortBy { it.partIndex }
     return out
 }

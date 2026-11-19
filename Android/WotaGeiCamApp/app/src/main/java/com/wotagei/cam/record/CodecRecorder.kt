@@ -611,10 +611,11 @@ internal class CodecRecorder(
     @Volatile override var onSessionDelivery: ((RecorderDelivery) -> Unit)? = null
 
     /**
-     * 控制线程 join 超时、已按「只记账不拆资源」返回（R07）：置位后泵线程退出时由
-     * [pumpTrail] 自己 finish 并交付终态。volatile 是因为泵线程必须先看见控制线程的放弃。
+     * 停录收尾的移交闸（R07 收口）：控制线程 join 超时后，延迟收尾（finish + 放输入面 +
+     * 交付终态）由泵线程或控制线程**恰好一方**执行。旧的布尔 `teardownDeferred` 在
+     * 「判活超时」与「置位」之间留了一个双方都不做的窗口，见 [TrailHandoff]。
      */
-    @Volatile private var teardownDeferred = false
+    private val trail = TrailHandoff()
 
     /** prepare 成功后即稳定可用：Camera2 录像面 / GL outputSurface 的写入目标 */
     override val surface: Any? get() = inputSurface
@@ -647,8 +648,8 @@ internal class CodecRecorder(
         denoiseInactive = false
         abandonSegment = false
         stopping = false
-        // 新会话不复用上一场的"收尾已交给泵线程"标记（本对象每会话新建，这里是双保险）
-        teardownDeferred = false
+        // 新会话不复用上一场的"收尾已交给泵线程"状态（本对象每会话新建，这里是双保险）
+        trail.reset()
         rotatePending = false
         // 帧账从新会话起算（诊断导出只留本次录制的段账，不混上一场）
         Log.clearFrameAccount()
@@ -1100,7 +1101,7 @@ internal class CodecRecorder(
             // 且 PCM 队列有 ~1.3s 深度冗余（QUEUE_CAPACITY=64），泵晚 10ms 起步根本追不上队列。
             // 故此处的调度档与采集档**故意不再相同**（原守卫钉死「两处都音频类」已随之作废）。
             runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT) }
-            pumpLoop()
+            pumpEntry()
         }, "WotaCodecMux").apply {
             start()
         }
@@ -1203,8 +1204,10 @@ internal class CodecRecorder(
             // 同样走「超时即只记账」闸：PREPARE/ERROR 下泵线程本就没起（loop==null，闸恒放行），
             // 但闸放在这里是为了**只有一处**决定"泵线程还活着时能不能拆"，不许各分支各写一份
             if (!joinLoop()) {
-                // R07：收尾职责已移交给泵线程（feeders/编码面/终态由 [pumpTrail] 收）
-                teardownDeferred = true
+                // R07：收尾职责移交泵线程（feeders/编码面/终态由 [pumpTrail] 收）。
+                // 泵若恰在判活与移交之间越过检查点，[handOffTail] 会由本线程补做并返回真实终态。
+                val late = handOffTail()
+                if (late != null) return late
                 settleRotateLegAtStop()
                 return finishWithoutTeardown()
             }
@@ -1227,8 +1230,10 @@ internal class CodecRecorder(
         // （2026-10-16：parts 已 COW 化，超时路径只**读快照**——在名单里是唯一获准的安全读，
         // 仍然不许 add/clear。）
         if (!joinLoop()) {
-            // R07：泵线程退出时自己 finish 并交付终态（feeders/编码面也由它收）
-            teardownDeferred = true
+            // R07：泵线程退出时自己 finish 并交付终态（feeders/编码面也由它收）。
+            // 泵若恰在判活与移交之间越过检查点（旧布尔闸双方都不做的窗口），由本线程补做。
+            val late = handOffTail()
+            if (late != null) return late
             settleRotateLegAtStop()
             return finishWithoutTeardown()
         }
@@ -1263,8 +1268,9 @@ internal class CodecRecorder(
         // 本对象每个会话新建一个（CameraScreen 收尾即 `recorder = null`），不复用 ⇒ 这里直接返回，
         // 不必把它复位成 IDLE；真拆不掉时也已经只剩进程退出这一条兜底。
         if (!joinLoop()) {
-            // R07：收尾职责交给泵线程（feeders/编码面/终态在 pumpTrail 里收）
-            teardownDeferred = true
+            // R07：收尾职责交给泵线程（feeders/编码面/终态在 pumpTrail 里收）；泵已越过检查点时
+            // 由本线程补做（见 [TrailHandoff]）
+            handOffTail()
             Log.e(TAG, "release 时泵线程仍未退出：只记账不拆资源（资源与封段由泵线程收尾自己完成）")
             return
         }
@@ -1345,6 +1351,25 @@ internal class CodecRecorder(
     // endregion
 
     // region 编码器循环
+
+    /**
+     * 泵线程入口（R07 所有者职责）：正常退出时 [pumpLoop] 末尾自己走 [pumpTrail]；只有
+     * [pumpLoop] **抛出**（封段/换段里的边界外异常）才会跳过那一行——收尾（停 feeders、放
+     * 编码面、移交终态）不许因为异常而消失，这里补跑一次。[TrailHandoff] 的检查点保证
+     * 补跑与正常收尾不会各做一遍。
+     */
+    private fun pumpEntry() {
+        var trailed = false
+        try {
+            pumpLoop()
+            trailed = true
+        } finally {
+            if (!trailed) {
+                runCatching { pumpTrail() }
+                    .onFailure { Log.e(TAG, "泵循环异常退出后的收尾失败：${it.message}") }
+            }
+        }
+    }
 
     private fun pumpLoop() {
         var keepGoing = true
@@ -1431,7 +1456,7 @@ internal class CodecRecorder(
         }
         if (engineError != null) Log.i(TAG, "codec loop end with ${engineError}")
         // R07：泵线程退出 = 本场收尾的权威完成事件。控制线程可能早已因 join 超时"只记账"
-        // 返回（teardownDeferred），资源与终态必须在这里收（见 [pumpTrail]）。
+        // 返回（收尾已移交，见 [TrailHandoff]），资源与终态必须在这里收（见 [pumpTrail]）。
         pumpTrail()
     }
 
@@ -1441,8 +1466,9 @@ internal class CodecRecorder(
      * - **feeders 恒停**：泵循环自己从不碰它们（只有 openNextSegment 换代时停旧建新）。正常停录时
      *   控制线程稍后也会停（幂等）；join 超时那次控制线程已只记账返回，这两条 AudioRecord 若没人
      *   停会一直占着采集（"owner must clean feeders"）。
-     * - **终态只在 [teardownDeferred] 时结算并交付**：正常停录的终态由控制线程 join 成功后的
-     *   `finish()` 交给 UI（这里再 finish 会把 parts 清空、控制线程随后拿到"空产物失败"）。
+     * - **终态只在移交成立时结算并交付**（[trail] 的检查点）：正常停录的终态由控制线程 join
+     *   成功后的 `finish()` 交给 UI（这里再 finish 会把 parts 清空、控制线程随后拿到"空产物失败"）；
+     *   join 超时后由 [TrailHandoff] 指定唯一一方执行延迟收尾，不存在双方都不做的窗口。
      * - **编码面**一并释放：控制线程的 release 走的是超时闸，到不了 `inputSurface.release()`；
      *   泵线程此刻已退出，释放没有并发（DIRECT 的 persistent 面与 GPU 的 per-codec 面都由本类持有）。
      */
@@ -1454,7 +1480,12 @@ internal class CodecRecorder(
         // 之后 release()/discardCurrent 的每一次有界调用都会拿到负数预算、判据永远"停摆"。
         // 这里清是安全的：停止路径的领取**不清**截止（见 settleRotateLegAtStop），清它的只能是泵线程。
         rotateLeg.endLeg()
-        if (!teardownDeferred) return
+        // 收尾移交的原子检查点（见 [TrailHandoff]）：无人请求 = 正常停录（控制线程 join 成功后
+        // 自己 finish）；本方法返回 false 也可能是控制线程已补做或正在做，均不许再动资源。
+        if (!trail.pumpCheckpoint()) {
+            Log.i(TAG, "泵线程越过收尾检查点：trail=${trail.stateName()}（不由泵线程做延迟收尾）")
+            return
+        }
         val out = finish(engineError)
         val s = inputSurface
         inputSurface = null
@@ -1468,6 +1499,28 @@ internal class CodecRecorder(
         runCatching {
             delivery(RecorderDelivery.FinalResult(seriesId, startedAtMs, out, attempt = attempt))
         }.onFailure { Log.w(TAG, "会话终态交付失败：${it.message}") }
+    }
+
+    /**
+     * join 超时后的收尾移交（R07 收口）：见 [TrailHandoff]。
+     *
+     * @return 控制线程**补做**的真实终态：泵线程已在「判活超时」与「请求移交」之间越过检查点，
+     *   它不会再碰任何资源，本线程 finish + 放输入面后把真实结果直接交给调用方（stop 的返回值
+     *   就是最终回执，不再依赖稍后才到的终态交付）；
+     *   null = 泵线程会（或正在）做延迟收尾，调用方按既有语义只记账返回早期快照。
+     */
+    private fun handOffTail(): RecordResult? {
+        if (!trail.controlDefer()) return null
+        val out = finish(engineError)
+        val s = inputSurface
+        inputSurface = null
+        s?.release()
+        Log.e(
+            TAG,
+            "泵线程在超时判定后已越过收尾检查点（trail=${trail.stateName()}）：控制线程补做收尾，" +
+                "返回真实终态 ${out.error ?: "ok"}"
+        )
+        return out
     }
 
     /**

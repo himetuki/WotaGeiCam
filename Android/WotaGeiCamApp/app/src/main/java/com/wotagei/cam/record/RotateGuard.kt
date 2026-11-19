@@ -3,6 +3,7 @@ package com.wotagei.cam.record
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -572,6 +573,80 @@ internal class OneShotHandoff<T : Any>(private val discard: (T) -> Unit) {
         val l = landed
         landed = null
         l
+    }
+}
+
+/**
+ * 停录收尾的**移交闸**（R07 收口，2026-11-20）：join 超时之后，延迟收尾（`finish` + 放输入面
+ * + 交付会话终态）必须**恰好一方**执行——泵线程或控制线程。
+ *
+ * # 缺陷形态（旧布尔 `teardownDeferred`）
+ * 控制线程 `joinLoop()` 在 `t.isAlive` 判活那刻泵线程还活着 ⇒ 返回 false；随后到置位
+ * `teardownDeferred = true` 之间有一个窗口：泵线程正好走完 `pumpTrail` 的检查，读到 false
+ * 就退出并跳过收尾 ⇒ **双方都不做**。feeders 停了（泵线程恒停），但终态没人 `finish`、
+ * 输入面没人释放、迟到修正永远不交付：用户/结算只剩收工那一刻的早期快照。
+ *
+ * # 为什么用两枚互斥 CAS 而不是"置位后再看活性"
+ * 「泵已宣告不接管」与「控制请求泵接管」在同一枚状态上原子二选一，先者定夺：
+ * - 泵先 `OPEN → SKIPPED`：控制只能 `SKIPPED → CONTROL` 补做（[controlDefer] 返回 true）；
+ * - 控制先 `OPEN → DEFERRED`：泵只能 `DEFERRED → PUMP` 接管（[pumpCheckpoint] 返回 true）。
+ * 任何交错下（含两线程同时起跑）恰好一方拿到 true，不存在"都没做"的窗口——不需要第二次
+ * 有界 join，也不靠"退出应该很快"这类时序假设。
+ */
+internal class TrailHandoff {
+
+    private val state = AtomicInteger(OPEN)
+
+    /**
+     * 泵线程越过收尾检查点（feeders 已停、腿账已清之后调用）。
+     *
+     * @return true = 本次由泵线程接管延迟收尾；false = 无人请求移交（正常停录）或另一方在做
+     */
+    fun pumpCheckpoint(): Boolean {
+        if (state.compareAndSet(OPEN, SKIPPED)) return false
+        return state.compareAndSet(DEFERRED, PUMP)
+    }
+
+    /**
+     * 控制线程 join 超时后请求移交。
+     *
+     * @return true = 泵已越过检查点且无人请求 ⇒ 由控制线程**补做**延迟收尾（此时泵线程已不再
+     *   触碰任何资源）；false = 泵会（或正在）接管，调用方只记账返回早期快照
+     */
+    fun controlDefer(): Boolean {
+        if (state.compareAndSet(OPEN, DEFERRED)) return false
+        return state.compareAndSet(SKIPPED, CONTROL)
+    }
+
+    /** 新会话 / 准备期复位（此时不该有在途的收尾：泵线程由 `prepare` 的生命周期保证已退出） */
+    fun reset() {
+        state.set(OPEN)
+    }
+
+    /** 诊断/测试用状态名（生产日志与守卫都靠它说清"谁接管"） */
+    fun stateName(): String = when (state.get()) {
+        OPEN -> "open"
+        DEFERRED -> "deferred"
+        PUMP -> "pump"
+        CONTROL -> "control"
+        else -> "skipped"
+    }
+
+    private companion object {
+        /** 泵循环还没到检查点，也无人请求移交 */
+        const val OPEN = 0
+
+        /** 控制线程请求泵接管延迟收尾 */
+        const val DEFERRED = 1
+
+        /** 泵线程正在做延迟收尾 */
+        const val PUMP = 2
+
+        /** 泵已宣告不接管，控制线程补做收尾 */
+        const val CONTROL = 3
+
+        /** 泵越过检查点且无人请求移交（正常停录：控制线程 join 成功后自己 finish） */
+        const val SKIPPED = 4
     }
 }
 
