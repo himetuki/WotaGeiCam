@@ -174,11 +174,14 @@ class VideoStore(private val ctx: Context) {
         try {
             when (sink) {
                 is OutputSink.Pending -> {
+                    SealMarker.clear(pathOf(sink))
                     val n = resolver.delete(sink.uri, null, null)
                     Log.i(TAG, "discard uri=${sink.uri} rows=$n")
                 }
-                is OutputSink.File ->
+                is OutputSink.File -> {
+                    SealMarker.clear(sink.f.absolutePath)
                     if (sink.f.exists() && !sink.f.delete()) Log.e(TAG, "discard file failed: ${sink.f.name}")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "discard failed: ${e.message}")
@@ -251,6 +254,9 @@ class VideoStore(private val ctx: Context) {
                 ok
             }
         }
+        // 封口与发布分离（R08）：发布了就清标记；封口成功但发布失败才落标记，冷启救援据此
+        // 只等 SealMarker.SEALED_RESCUE_MS（明确"已写好、只差发布"的行走快通道）。
+        if (sealNeedsMarker(keep, pending != null, committed)) SealMarker.mark(path) else SealMarker.clear(path)
         Log.i(
             TAG,
             "seal part=$partIndex keep=$keep bytes=${if (bytesUnknown < 0) "量不到" else bytesUnknown} dur=${durationMs}ms " +
