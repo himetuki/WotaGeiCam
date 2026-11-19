@@ -49,4 +49,3 @@ internal fun exposureProbeAllowed(
     correctionAuto &&
     correctionApplicable &&
     !alreadyLatched
-
