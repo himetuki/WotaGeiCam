@@ -149,6 +149,30 @@ class PortableUserDataTest {
         assertEquals(listOf(old), PortableUserData.mergeTags(listOf(old), emptyList()))
     }
 
+    @Test fun `R14_合并超限按余量分批交接且旧pending优先`() {
+        val old = (0 until 6000).map {
+            PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "old$it.mp4", 123L, 1000L), "like", it.toLong())
+        }
+        val incoming = (0 until 6000).map {
+            PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "new$it.mp4", 123L, 1000L), "n$it", it.toLong())
+        }
+        // 前置：12000 条整体合并确实触发容量上限。
+        try {
+            PortableUserData.mergeTags(old, incoming)
+            fail("12000 条必须触发容量上限")
+        } catch (_: IllegalArgumentException) { }
+        val (accepted, remaining) = PortableUserData.handoff(old, incoming)
+        val room = PortableUserData.MAX_TAGS - old.size
+        assertEquals("余量 = 总帽 - 旧 pending", room, accepted.size)
+        assertEquals("超出余量的新标签必须留在恢复源", incoming.size - room, remaining.size)
+        assertEquals(incoming.take(room), accepted)
+        assertEquals(incoming.drop(room), remaining)
+        // 与旧 pending 重复的 incoming 已经存在，视为交接完成，不占余量也不重复写。
+        val (duplicateAccepted, duplicateRemaining) = PortableUserData.handoff(listOf(old.first()), listOf(old.first()))
+        assertTrue(duplicateAccepted.isEmpty())
+        assertTrue(duplicateRemaining.isEmpty())
+    }
+
     @Test fun `累计限写在写入途中拒绝且真实文件从不超过4MiB`() {
         val app = requireNotNull(requireNotNull(main.parentFile).parentFile)
         val file = File(app, "build/tmp/backup-bounded-${System.nanoTime()}.bin")

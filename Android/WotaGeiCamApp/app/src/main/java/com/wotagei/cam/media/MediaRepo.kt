@@ -13,7 +13,9 @@ import android.util.LruCache
 import android.util.Size
 import com.wotagei.cam.R
 import com.wotagei.cam.backup.WotaBackupAgent
+import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.isMediaStoreVideoUri
+import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -200,7 +202,10 @@ class MediaRepo private constructor(private val app: Context) {
                 gated {
                     val raw = queryMediaStore(scope)
                     val restored = try {
-                        WotaBackupAgent.restoreTags(app, raw)
+                        // Y39：部分授权/未授权时可见集合不足以证明指纹唯一，迁移必须继续等待。
+                        val access = mediaAccessState(app)
+                        val complete = access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ
+                        WotaBackupAgent.restoreTags(app, raw, complete)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {

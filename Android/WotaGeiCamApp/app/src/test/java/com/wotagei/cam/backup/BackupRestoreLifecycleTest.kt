@@ -135,6 +135,121 @@ class BackupRestoreLifecycleTest {
         }
     }
 
+    @Test fun `R14_两份各六千条合并超限仍先消化旧pending_无死循环`() = runBlocking {
+        fixture().use { f ->
+            val oldTags = (0 until 6000).map {
+                PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "old$it.mp4", 123L, 1000L), "like", it.toLong())
+            }
+            val newTags = (0 until 6000).map {
+                PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "new$it.mp4", 123L, 1000L), "n$it", it.toLong())
+            }
+            f.write(f.pending, PortableUserData.Snapshot(emptyMap(), oldTags))
+            f.write(f.staged, PortableUserData.Snapshot(emptyMap(), newTags))
+
+            val oldClips = (0 until 6000).map {
+                f.clip(path = "/storage/emulated/0/Movies/old$it.mp4", name = "old$it.mp4", id = 100L + it)
+            }
+            assertEquals("旧 pending 的 6000 条必须先落 Room，而不是被合并异常挡住", 6000,
+                f.restoreMedia(oldClips).size)
+            assertTrue("未交接的新标签仍留在恢复源，供下一轮", f.staged.isFile)
+            assertTrue("合并超限时旧 pending 已消化，而不是无限重试", f.pending.exists())
+            assertTrue("pending 里不能再有未匹配的旧标签",
+                f.read(f.pending).tags.none { it.media.name.startsWith("old") })
+            assertEquals(6000, f.rows.size)
+
+            val newClips = (0 until 6000).map {
+                f.clip(path = "/storage/emulated/0/Movies/new$it.mp4", name = "new$it.mp4", id = 20_000L + it)
+            }
+            assertEquals("下一轮把恢复源交接并全部落库", 6000, f.restoreMedia(newClips).size)
+            assertFalse("源只在完整交接后才消费", f.staged.exists())
+            assertEquals(12_000, f.rows.size)
+        }
+    }
+
+    @Test fun `R15_新pending静默发布失败不消费恢复源_重试可用`() {
+        fixture().use { f ->
+            seed(f)
+            f.script("silentPublishPath", f.pending.path) // finishWrite 不报错也不发布
+            runCatching { f.restoreFinished() }
+            assertTrue("新 pending 未发布时恢复源仍有唯一副本", f.staged.isFile)
+            assertEquals("旧 pending 必须保持一致", listOf(a), f.read(f.pending).tags)
+            f.script("silentPublishPath", null)
+            f.restoreFinished()
+            assertFalse(f.staged.exists())
+            assertEquals(listOf(a, b), f.read(f.pending).tags)
+        }
+    }
+
+    @Test fun `Y39_同ID旧路径行不算已恢复_新路径标签会替换旧行`() = runBlocking {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 5L)
+            f.write(f.pending, PortableUserData.Snapshot(emptyMap(), listOf(a)))
+            val restored = f.restoreMedia(listOf(f.clip(path = BackupPlatformFixture.NEW_PATH, name = "a.mp4")))
+            assertEquals(1, restored.size)
+            assertEquals("ID 复用 + 旧行时必须按当前媒体路径落库", BackupPlatformFixture.NEW_PATH,
+                f.rows.single { it.tag == "like" }.path)
+            assertEquals("旧路径的脏行必须被清掉，不能留下同 ID+tag 两行", 1, f.rows.size)
+            assertFalse(f.pending.exists())
+        }
+    }
+
+    @Test fun `Y39_指纹不匹配或可见性不足时pending保留`() = runBlocking {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 5L)
+            f.write(f.pending, PortableUserData.Snapshot(emptyMap(), listOf(a)))
+            // 同 ID 的另一条视频（名称不同 ⇒ 指纹不同）不足以消费 pending。
+            assertTrue(f.restoreMedia(listOf(f.clip(path = BackupPlatformFixture.NEW_PATH, name = "different.mp4"))).isEmpty())
+            assertTrue(f.pending.exists())
+            // 部分授权：即使可见集合里有匹配项，也不足以证明同指纹的另一条不存在。
+            assertTrue(f.restoreMedia(listOf(f.clip()), visibilityComplete = false).isEmpty())
+            assertTrue(f.pending.exists())
+            assertEquals(1, f.rows.size)
+        }
+    }
+
+    @Test fun `Y40_部分可见导出保留不可见行上次确认的指纹`() {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
+            val complete = f.backup()
+            assertEquals(1, complete.tags.size)
+            assertEquals(keyA, complete.tags.single().media)
+            assertTrue("完整导出必须留下本机核验账本", f.ledger.isFile)
+
+            f.script("denyQuery", true) // 模拟部分授权/卷不可见
+            val partial = f.backup()
+            assertEquals("不可见行的已有标签必须继续出现在下一份备份里", 1, partial.tags.size)
+            assertEquals(keyA, partial.tags.single().media)
+            assertEquals("like", partial.tags.single().value)
+            f.script("denyQuery", false)
+        }
+    }
+
+    @Test fun `Y41_导出暂存落盘后进程终止_下次启动不当恢复输入`() {
+        fixture().use { f ->
+            assertTrue(f.stageExport(PortableUserData.Snapshot(mapOf("gallery_columns" to 9), listOf(a))))
+            assertTrue(f.staged.isFile)
+            assertTrue(f.exportMarker.isFile)
+            // 进程在 finally 清理前退出：没有 cleanupExport，直接进入下一次启动。
+            f.startup()
+            assertFalse("导出暂存必须按事务标记丢弃", f.staged.exists())
+            assertFalse(f.exportMarker.exists())
+            assertFalse("本机设置不能被自己的导出快照改写", f.disk.containsKey("gallery_columns"))
+            assertFalse("本机标签不能流入 pending", f.pending.exists())
+        }
+    }
+
+    @Test fun `Y41_陈旧标记不能吞掉真正的系统恢复输入`() {
+        fixture().use { f ->
+            f.write(f.staged, incoming)
+            f.exportMarker.writeText("1:1") // 指纹不匹配 ⇒ 不是本机导出暂存
+            f.startup()
+            assertFalse(f.staged.exists())
+            assertEquals(true, f.disk["level_enabled"])
+            assertEquals(listOf(b), f.read(f.pending).tags)
+            assertFalse(f.exportMarker.exists())
+        }
+    }
+
     companion object {
         @ClassRule @JvmField val temporary = TemporaryFolder(File("build/tmp/backup-restore-test").apply { mkdirs() })
         private lateinit var classes: File

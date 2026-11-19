@@ -40,10 +40,14 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
         }
     }
     val rows = arrayListOf<MediaTag>()
+    private var nextRowId = -1L
     var pathMoves = 0
         private set
     val staged = File(root, "files/${PortableUserData.FILE_NAME}")
     val pending = File(root, "noBackup/${PortableUserData.FILE_NAME}")
+    val exportMarker = File(root, "files/wota_user_backup.export")
+    val exportStaging = File(root, "files/wota_user_backup.bin.staging")
+    val ledger = File(root, "noBackup/wota_export_ledger.bin")
     private val agent: Any
     private val context: Any
 
@@ -56,8 +60,20 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                 "observeAll" -> flowOf(rows.toList())
                 "insert" -> {
                     val row = args!![0] as MediaTag
-                    rows.removeAll { it.mediaId == row.mediaId && it.tag == row.tag }
-                    rows += row
+                    // 与 SQLite 自增主键一致：id=0 生成新行，非 0 才按主键 REPLACE。
+                    if (row.id == 0L) {
+                        if (nextRowId < 0) nextRowId = rows.maxOfOrNull { it.id } ?: 0L
+                        rows += row.copy(id = ++nextRowId)
+                    } else {
+                        rows.removeAll { it.id == row.id }
+                        rows += row
+                    }
+                    Unit
+                }
+                "deleteOne" -> {
+                    val mediaId = args!![0] as Long
+                    val tag = args[1] as String
+                    rows.removeAll { it.mediaId == mediaId && it.tag == tag }
                     Unit
                 }
                 "movePathAfterRename" -> {
@@ -91,6 +107,14 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
     fun write(file: File, snapshot: PortableUserData.Snapshot) =
         file.outputStream().use { PortableUserData.write(snapshot, it) }
     fun read(file: File): PortableUserData.Snapshot = file.inputStream().use { PortableUserData.read(it) }
+    fun readLedger(): List<PortableUserData.ExportEntry> =
+        ledger.inputStream().use { PortableUserData.readExportLedger(it) }
+
+    /** 只跑生产的「暂存+发布」，不跑 finally 清理；用于模拟暂存落盘后进程被杀。 */
+    fun stageExport(snapshot: PortableUserData.Snapshot): Boolean {
+        val cls = type("com.wotagei.cam.backup.WotaBackupAgent")
+        return call(requireNotNull(cls.getField("Companion").get(null)), "stageForExport", context, snapshot) as Boolean
+    }
     private fun call(target: Any, name: String, vararg args: Any?): Any? = try {
         target.javaClass.methods.single { it.name.substringBefore('$') == name && it.parameterCount == args.size }
             .invoke(target, *args)
@@ -107,9 +131,10 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
         call(agent, "onFullBackup", type("android.app.backup.FullBackupDataOutput").getDeclaredConstructor().newInstance())
         return PortableUserData.read((script("published") as ByteArray).inputStream())
     }
-    suspend fun restoreMedia(clips: List<Any> = emptyList()): List<*> {
+    suspend fun restoreMedia(clips: List<Any> = emptyList(), visibilityComplete: Boolean = true): List<*> {
         val cls = type("com.wotagei.cam.backup.WotaBackupAgent")
-        return suspending(requireNotNull(cls.getField("Companion").get(null)), "restoreTags", context, clips) as List<*>
+        return suspending(requireNotNull(cls.getField("Companion").get(null)), "restoreTags", context, clips,
+            visibilityComplete) as List<*>
     }
     fun clip(path: String = OLD_PATH, name: String = "old.mp4", id: Long = 7L): Any {
         val uri = type("android.net.Uri").getConstructor(String::class.java).newInstance("content://media/external/video/media/$id")
@@ -156,8 +181,9 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                     public static java.io.File root;
                     public static final java.util.Map<String,Object> memory=new java.util.LinkedHashMap<>(), disk=new java.util.LinkedHashMap<>();
                     public static boolean commitOk=true, denyUpdate=false, unreadableAfterRename=false;
+                    public static boolean denyQuery=false;
                     public static int commits=0, pendingFailures=0, failedBytes=0, backupCalls=0, updateResult=1;
-                    public static String failWritePath, failReadPath;
+                    public static String failWritePath, failReadPath, silentPublishPath;
                     public static byte[] published;
                     public static String path="/storage/emulated/0/Movies/old.mp4", name="old.mp4";
                     public static final String actualName="renamed (1).mp4";
@@ -259,7 +285,9 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                         };
                     }
                     public void finishWrite(java.io.FileOutputStream out) throws java.io.IOException {
-                        out.getFD().sync();out.close();java.nio.file.Files.move(next.toPath(),base.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);bak.delete();
+                        out.getFD().sync();out.close();
+                        if(base.getPath().equals(probe.BackupScript.silentPublishPath))return;
+                        java.nio.file.Files.move(next.toPath(),base.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);bak.delete();
                     }
                     public void failWrite(java.io.FileOutputStream out) throws java.io.IOException {
                         probe.BackupScript.pendingFailures++;out.close();next.delete();
@@ -290,6 +318,7 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                         }return probe.BackupScript.updateResult;
                     }
                     public android.database.Cursor query(android.net.Uri u,String[] projection,String w,String[] a,String sort){
+                        if(probe.BackupScript.denyQuery)throw new SecurityException("injected query denial");
                         return new android.database.Cursor(){
                             public boolean moveToFirst(){return true;}
                             public String getString(int i){switch(projection[i]){
