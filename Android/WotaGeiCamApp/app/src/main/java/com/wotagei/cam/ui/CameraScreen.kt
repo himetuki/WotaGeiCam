@@ -4142,7 +4142,9 @@ private class RecordRunner(
                 val queried = out.parts.firstOrNull()?.uri?.let { queryDisplayName(it) }
                 val videoName = (PendingName.sidecarConvergeTarget(path, queried) ?: path)
                     .substringAfterLast('/')
-                val displayName = videoName.substringBeforeLast('.') + ArcDropLog.EXTENSION
+                // 规范名走 ArcDropLog.sidecarName 单一出口（与 File 通道/读取/清扫同一套规则）：
+                // 去掉成片最后一段扩展名再换 `.drops.json`，不在 UI 侧各拼一套
+                val displayName = ArcDropLog.sidecarName(videoName)
                 val viaStore = sessionStore?.writeSidecar(displayName, storeLog.encode().toByteArray()) != null
                 // 不回写 sidecarWritten/sidecarChannel：这两个标记唯一的下游是上面那段
                 // File 通道归位（已在本次改名之后走完），此处再赋值是死写（编译器告警）

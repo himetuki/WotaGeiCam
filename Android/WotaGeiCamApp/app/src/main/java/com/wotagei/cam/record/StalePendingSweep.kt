@@ -99,10 +99,12 @@ internal object StalePendingSweep {
         }
         for (f in archives) {
             val clipName = clipFor(f.name, dir)
-            // 重复判据必须对**真实归位目标**（clipName + .drops.json），不能只看"剥段后的档案名"：
-            // 两者不一致（真机幽灵档案少 `.mp4` 段）时，旧判据查不到目标已存在，
-            // `renameTo` 会把有效档案直接覆盖掉。目标已存在 ⇒ 本档案是重复件，删掉。
-            val twin = archiveTwinExists(f.name, clipName?.let { it + ArcDropLog.EXTENSION }, entries.map { it.name }.toHashSet())
+            // 重复判据必须对**真实归位目标**（[ArcDropLog.sidecarName] 的规范名，即剥掉
+            // `.mp4` 后的 `VID_x.drops.json`），不能只看"剥段后的档案名"：两者不一致时
+            // 旧判据查不到目标已存在，`renameTo` 会把有效档案直接覆盖掉。目标已存在 ⇒ 删掉。
+            // 名字必须走 sidecarName 单一出口——这里曾按 `成片名 + .drops.json` 拼成
+            // `VID_x.mp4.drops.json`，与读取侧（readFrom 按成片路径查）永远对不上号（B04）。
+            val twin = archiveTwinExists(f.name, clipName?.let { ArcDropLog.sidecarName(it) }, entries.map { it.name }.toHashSet())
             // 档案趟不探容器（JSON 不是媒体容器）：clipPlayable 显式传 null = 未探，计划里档案
             // 分支也不读它——探测只属于成片趟这一条结构由 StalePendingSweepTest 钉住
             val plan = sweepPlan(
@@ -400,9 +402,9 @@ internal object StalePendingSweep {
         ) > 0
     }.getOrDefault(false)
 
-    /** 成片目录（公共 Movies 下的固定相对路径，同 [VideoStore.RELATIVE_PATH]） */
-    @Suppress("DEPRECATION") // 公共目录定位：本工程持 MANAGE_EXTERNAL_STORAGE，走这条最稳
-    fun outputDir(): File = File(Environment.getExternalStorageDirectory(), VideoStore.RELATIVE_PATH)
+    /** 成片目录（公共 Movies 下的固定相对路径）。路径口径统一取 [VideoStore.outputDir] 单一出口——
+     *  清扫、空间探测、成片落地必须是同一块卷，分叉一次就会把别处当"文件不在"（B04 选卷）。 */
+    fun outputDir(): File = VideoStore.outputDir()
 
     /**
      * #4 导出链 pending 行救援：导出在 `muxer.stop()` 之后 commit 全败时**保留行不删**
@@ -532,9 +534,11 @@ internal data class SweepPlan(val action: SweepAction, val to: String?)
  * 档案"重复件"判据（纯函数，JVM 全测）：目录里是否已有这条档案的**真实归位目标**，
  * 或剥段后的同名条目。
  *
- * 为什么必须看 [targetName]：真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，
- * 归位目标是 `VID_x.mp4.drops.json`。旧判据只查剥段后的档案名（`VID_x.drops.json`），
- * 目标已存在时查不到 ⇒ `renameTo` 直接覆盖，有效档案被旧幽灵件顶掉。
+ * 为什么必须看 [targetName]：真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，归位目标
+ * （规范名，见 [ArcDropLog.sidecarName]）也是 `VID_x.drops.json`；但旧实现把目标拼成
+ * `VID_x.mp4.drops.json`，与规范名分叉——目标已存在时查不到 ⇒ `renameTo` 直接覆盖，
+ * 有效档案被旧幽灵件顶掉。现在调用侧统一喂规范名，本函数仍按"目标 + 剥段名"两条判，
+ * 防未来有人再传别的形态。
  *
  * 只有这两种情形算重复：两种名字指向同一份数据（档案只是"该成片的补弧账"），
  * 删掉待归位件不会少任何账目。
@@ -557,16 +561,18 @@ internal fun archiveTwinExists(
  * | 非 `pending` 形态 | 名字剥段后没变 | LEAVE（不是我们的东西） |
  * | 任何 | 比门槛新 | LEAVE（可能是正在录的那一段） |
  * | 侧车 `.drops.json` | 剥段后同名档案已在 | DELETE（重复档案，纯档案无数据损失） |
- * | 侧车 `.drops.json` | 对应成片找得到 | RENAME（归位到**成片真实名** + 扩展名） |
+ * | 侧车 `.drops.json` | 对应成片找得到 | RENAME（归位到**规范名** `成片名去扩展名 + .drops.json`） |
  * | 侧车 `.drops.json` | 对应成片也找不到 | DELETE（无主档案） |
  * | 成片 | 剥段后同名成片已在 | **LEAVE**（数据红线：成片绝不删） |
  * | 成片 | 容器打不开（或未探） | **LEAVE**（Q6：半截 MP4 一动不动，连名字都不动） |
  * | 成片 | 探过且打得开 | RENAME（去掉 pending 段） |
  *
- * 注意档案的**目标名取自成片真实名**（`clipName + ".drops.json"`），不是"剥段后的档案名"：真机实证
- * 那些幽灵档案的名字是 `…-VID_20261008_172951_262.drops.json`（**没有 `.mp4` 那一段**，因为当时落盘
- * 用的路径就少扩展名），而成片的规矩是 `成片路径 + .drops.json`（见 [ArcDropLog.sidecarFor]）——
- * 按"剥段后的档案名"摆回去，App 永远读不到它（[ArcDropLog.readFrom] 按成片路径查）。
+ * 注意档案的**目标名取自成片真实名**、且必须走 [ArcDropLog.sidecarName] 的**规范名**
+ * （`VID_x.mp4` → `VID_x.drops.json`），不是"成片名 + 扩展名"也不是"剥段后的档案名"：
+ * 真机实证那些幽灵档案的名字是 `…-VID_20261008_172951_262.drops.json`（**没有 `.mp4` 那一段**，
+ * 因为当时落盘用的路径就少扩展名），而成片侧读写的规矩是 `成片路径去扩展名 + .drops.json`
+ * （见 [ArcDropLog.sidecarFor]）。旧的 `成片名 + ".drops.json"` 拼出 `VID_x.mp4.drops.json`，
+ * App 永远读不到它（[ArcDropLog.readFrom] 按成片路径查）——B04 统一到规范名这一条出口。
  *
  * @param name 目录里的条目名
  * @param ageMs 条目距今毫秒（门槛见 [StalePendingSweep.SWEEP_STALE_MS]）
@@ -589,7 +595,7 @@ internal fun sweepPlan(
     return if (clean.endsWith(ArcDropLog.EXTENSION)) {
         when {
             cleanTwinExists -> SweepPlan(SweepAction.DELETE_ARCHIVE, null)
-            clipName != null -> SweepPlan(SweepAction.RENAME_ARCHIVE, clipName + ArcDropLog.EXTENSION)
+            clipName != null -> SweepPlan(SweepAction.RENAME_ARCHIVE, ArcDropLog.sidecarName(clipName))
             else -> SweepPlan(SweepAction.DELETE_ARCHIVE, null)
         }
     } else {

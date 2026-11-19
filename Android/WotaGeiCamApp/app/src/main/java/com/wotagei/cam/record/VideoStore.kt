@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.os.Environment
 import android.os.StatFs
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
@@ -14,7 +15,7 @@ import java.io.FileDescriptor
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.random.Random
+import java.util.concurrent.atomic.AtomicInteger
 
 /** `content://` 前缀判据：pending uri 走 FileDescriptor，其余走真实路径 */
 private const val SCHEME_CONTENT = "content"
@@ -22,12 +23,13 @@ private const val SCHEME_CONTENT = "content"
 /**
  * 录像文件输出与入库（``、04 文件 §5）：
  *
- * - 命名：`VID_yyyyMMdd_HHmmss_%03d.mp4`（`Locale.US`，3 位随机后缀防同秒撞名）；
+ * - 命名：`VID_yyyyMMdd_HHmmss_%03d.mp4`（`Locale.US`，3 位序号**进程内单调**防同秒撞名；
+ *   序号回绕/进程重启时由 [createPending] 的 provider 回查重试兜底）；
  * - 入库：MediaStore `IS_PENDING` 两段式——插入拿 pending uri（IS_PENDING=1）→ 写完 update 0；
  *   失败或废片必须 delete，否则相册留 0 字节幽灵条目；
  * - 全程不用 MediaScanner（pending 机制自带可见性）；
  * - 分段续写：本类给每一段取新 pending uri，引擎负责封段与重启；
- * - 空间门槛：`StatFs` 可用 < [WotaTiers.MIN_FREE_MB] 直接拒绝启动并给出原因码。
+ * - 空间门槛：`StatFs` **实际写入卷**可用 < [WotaTiers.MIN_FREE_MB] 直接拒绝启动并给出原因码。
  */
 class VideoStore(private val ctx: Context) {
 
@@ -37,6 +39,32 @@ class VideoStore(private val ctx: Context) {
         const val MIME_MP4 = "video/mp4"
         private const val NAME_STAMP = "yyyyMMdd_HHmmss"
         private const val MB = 1024L * 1024L
+
+        /** 同秒撞名时的重试次数（每次换下一个序号；4 次远超单秒可能的分段数） */
+        private const val NAME_RETRIES = 4
+
+        /**
+         * 3 位序号的进程内进位器。**不再用 `Random.nextInt(1000)`**：同秒内 1000 个值
+         * 随手抽，换段/自动重录挤在同一秒就有 1/1000 的撞名概率（撞了 provider 会自行加
+         * " (1)" 改名，拼装名与真实落盘名分叉）。单调递增把同秒内的碰撞概率压到 0；
+         * 回绕与跨进程重启的残余碰撞由 [createPending] 的 provider 回查重试兜住。
+         */
+        private val nameSeq = AtomicInteger(0)
+
+        /**
+         * 纯拼接（JVM 单测钉格式与序号规则）：`<prefix>VID_<stamp>_<seq%1000 三位>.mp4`。
+         * 负序号也归到 `[0,999]`（时钟/状态异常时不许拼出非法名）。
+         */
+        internal fun fileName(namePrefix: String, stamp: String, seq: Int): String =
+            String.format(Locale.US, "%sVID_%s_%03d.mp4", namePrefix, stamp, ((seq % 1000) + 1000) % 1000)
+
+        /**
+         * 公共成片目录（MediaStore 外部主卷的公共 Movies 根，与 [RELATIVE_PATH] 同一来源）。
+         * 空间探测与实际写入共用这一个路径口径，不与 [Context.getExternalFilesDir] 混用
+         * （应用专属目录在卷切换/多卷设备上可能不是同一块磁盘）。
+         */
+        @Suppress("DEPRECATION") // 公共目录定位：本工程持 MANAGE_EXTERNAL_STORAGE，与 StalePendingSweep 同口径
+        internal fun outputDir(): File = File(Environment.getExternalStorageDirectory(), RELATIVE_PATH)
     }
 
     /**
@@ -50,20 +78,32 @@ class VideoStore(private val ctx: Context) {
 
     private val resolver get() = ctx.contentResolver
 
-    /** 成片文件名；每段用各自创建时刻，同秒碰撞由 3 位随机后缀吸收。
+    /** 成片文件名；每段用各自创建时刻，同秒碰撞由**进程内单调**的 3 位序号吸收
      *  [namePrefix] 非空时置于时间戳前（如 "30fto24f_"：抽帧/编辑处理过的成片名上可辨，用户 2026-10-04 定版） */
     fun displayName(createdAtMs: Long = System.currentTimeMillis(), namePrefix: String = ""): String {
         val stamp = SimpleDateFormat(NAME_STAMP, Locale.US).format(Date(createdAtMs))
-        return String.format(Locale.US, "%sVID_%s_%03d.mp4", namePrefix, stamp, Random.nextInt(1000))
+        return fileName(namePrefix, stamp, nameSeq.getAndIncrement())
     }
 
-    /** 当前卷可用空间（MB）；取应用外部文件所在卷，避开已废弃的公共存储常量 */
+    /**
+     * 当前**实际写入卷**的可用空间（MB）。
+     *
+     * 成片与 sidecar 都落在 MediaStore 外部主卷的公共 [RELATIVE_PATH] 下，因此量那个目录
+     * 所在的卷才是真写入口径；[Context.getExternalFilesDir] 是应用专属目录，单卷设备上数值
+     * 相同、卷切换/多卷设备上未必。目录尚未创建（首次录制）时向上找已存在的祖先再量。
+     */
     fun freeSpaceMb(): Long = try {
-        val path = ctx.getExternalFilesDir(null) ?: ctx.filesDir
-        StatFs(path.absolutePath).availableBytes / MB
+        StatFs(freeSpaceProbe().absolutePath).availableBytes / MB
     } catch (e: IllegalArgumentException) {
         Log.e(TAG, "StatFs failed: ${e.message}")
         Long.MAX_VALUE // 探测失败不拦录制
+    }
+
+    /** 空间探测落点：公共成片目录 →（不存在则）最近的已存在祖先 → 应用目录兜底 */
+    private fun freeSpaceProbe(): File {
+        var probe: File? = outputDir()
+        while (probe != null && !probe.exists()) probe = probe.parentFile
+        return probe ?: ctx.getExternalFilesDir(null) ?: ctx.filesDir
     }
 
     /**
@@ -79,14 +119,23 @@ class VideoStore(private val ctx: Context) {
         return null
     }
 
-    /** 插入 pending 记录；失败返回 null（调用方按 [RecordError.NO_OUTPUT] 处理）。
+    /**
+     * 插入 pending 记录；失败返回 null（调用方按 [RecordError.NO_OUTPUT] 处理）。
      *  [namePrefix] 非空时置于成片名前（处理过片的可辨前缀，见 [displayName]） */
     fun createPending(partIndex: Int, namePrefix: String = ""): Uri? {
         checkFreeSpace()?.let {
             Log.e(TAG, "createPending rejected: $it")
             return null
         }
-        val name = displayName(namePrefix = namePrefix)
+        // 撞名两道保险：displayName 的序号进程内单调；序号回绕/进程重启撞上历史条目时，
+        // 以 **provider 回查为准**换下一个序号重试（查询失败按没撞处理，不因一次探测失败拒录）。
+        var name = displayName(namePrefix = namePrefix)
+        var tries = 0
+        while (tries < NAME_RETRIES && videoNameTaken(name)) {
+            Log.i(TAG, "name taken part=$partIndex name=$name, next seq")
+            name = displayName(namePrefix = namePrefix)
+            tries++
+        }
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)
@@ -94,18 +143,44 @@ class VideoStore(private val ctx: Context) {
             put(MediaStore.MediaColumns.MIME_TYPE, MIME_MP4)
         }
         return try {
-            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            // 选卷显式化：成片与 sidecar 必须落在**同一枚卷常量**（外部主卷）上，
+            // entries/cursor 查询仍走 EXTERNAL_CONTENT_URI（同卷的聚合口径）。
+            val uri = resolver.insert(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
             if (uri == null) {
                 Log.e(TAG, "insert returned null, part=$partIndex name=$name")
                 null
             } else {
-                Log.i(TAG, "pending part=$partIndex name=$name uri=$uri")
+                // 以 Provider 回查**最终名**为准：insert 撞名时 provider 会自行改名（" (1)" 式），
+                // 请求名不再等于真实落盘名。日志两侧都留，方能让之后的 sidecar 对号有据可查。
+                val actual = queryStr(uri, MediaStore.MediaColumns.DISPLAY_NAME)
+                if (actual != null && actual != name) {
+                    Log.w(TAG, "provider renamed part=$partIndex requested=$name actual=$actual")
+                } else {
+                    Log.i(TAG, "pending part=$partIndex name=${actual ?: name} uri=$uri")
+                }
                 uri
             }
         } catch (e: Exception) {
             Log.e(TAG, "insert failed: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Provider 里本目录是否已有同名条目（pending 行同进程可见，历史成片也查得到）。
+     * 查询失败按"没撞"处理——宁可让 provider 自己改名，也不因一次探测失败拒绝录制。
+     */
+    private fun videoNameTaken(name: String): Boolean = try {
+        resolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+            arrayOf(name, "$RELATIVE_PATH/"),
+            null
+        )?.use { it.count > 0 } ?: false
+    } catch (e: Exception) {
+        Log.w(TAG, "name probe failed: ${e.message}")
+        false
     }
 
     /** 写完清 pending 标志，相册立即可见（两段式的第二段，日志 "commit"） */
@@ -142,6 +217,9 @@ class VideoStore(private val ctx: Context) {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
             put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
         }
+        // 选卷与成片同源：Video 与 Files 都显式落在外部主卷（[MediaStore.VOLUME_EXTERNAL_PRIMARY]），
+        // 与 [createPending] 的插入卷是同一枚常量——分卷设备上 Files 落到别的卷时，
+        // ArcDropLog.readFrom 按成片路径拼出的 File 就找不到这份 sidecar（B04 选卷口径）。
         val uri = resolver.insert(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
         if (uri == null) {
             Log.e(TAG, "sidecar insert returned null name=$displayName")

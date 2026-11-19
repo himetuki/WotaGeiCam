@@ -84,7 +84,7 @@ class StalePendingSweepTest {
             ageMs = old, cleanTwinExists = false, clipName = "VID_20261008_172951_262.mp4", clipPlayable = null
         )
         assertEquals(SweepAction.RENAME_ARCHIVE, p.action)
-        assertEquals("VID_20261008_172951_262.mp4.drops.json", p.to)
+        assertEquals("VID_20261008_172951_262.drops.json", p.to)
     }
 
     @Test
@@ -110,7 +110,7 @@ class StalePendingSweepTest {
             old, cleanTwinExists = false, clipName = "30fto24f_VID_20261007_215240_909.mp4", clipPlayable = null
         )
         assertEquals(SweepAction.RENAME_ARCHIVE, archive.action)
-        assertEquals("30fto24f_VID_20261007_215240_909.mp4.drops.json", archive.to)
+        assertEquals("30fto24f_VID_20261007_215240_909.drops.json", archive.to)
     }
 
     @Test
@@ -339,10 +339,10 @@ class StalePendingSweepTest {
     // ---- 档案归位的覆盖/误删红线（2026-10-18） ----
 
     /**
-     * 档案"重复件"判据：必须对**真实归位目标**（`成片名 + .drops.json`）判，不能只看剥段后的
-     * 档案名。真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，归位目标是
-     * `VID_x.mp4.drops.json`；旧判据查的是 `VID_x.drops.json`，目标已存在时查不到 ⇒
-     * `renameTo` 直接覆盖，有效档案被旧幽灵件顶掉。
+     * 档案"重复件"判据：必须对**真实归位目标**（[ArcDropLog.sidecarName] 规范名）判，不能只看
+     * 剥段后的档案名。真机幽灵档案 `…-VID_x.drops.json` 少了 `.mp4` 段，规范名同样是
+     * `VID_x.drops.json`；旧实现把目标拼成 `VID_x.mp4.drops.json`，与规范名分叉 ⇒ 目标已存在
+     * 时查不到 ⇒ `renameTo` 直接覆盖，有效档案被旧幽灵件顶掉。
      */
     @Test
     fun `档案重复判据必须看真实归位目标`() {
@@ -350,8 +350,8 @@ class StalePendingSweepTest {
             "目标名已在目录里 ⇒ 重复（删待归位件，绝不覆盖目标）",
             archiveTwinExists(
                 archiveName = ".pending-9-VID_1.drops.json",
-                targetName = "VID_1.mp4.drops.json",
-                dirNames = setOf("VID_1.mp4.drops.json", ".pending-9-VID_1.drops.json")
+                targetName = "VID_1.drops.json",
+                dirNames = setOf("VID_1.drops.json", ".pending-9-VID_1.drops.json")
             )
         )
         assertTrue(
@@ -366,16 +366,16 @@ class StalePendingSweepTest {
             "目录里既没有目标也没有剥段同名条目 ⇒ 不是重复，应该归位",
             archiveTwinExists(
                 archiveName = ".pending-9-VID_1.drops.json",
-                targetName = "VID_1.mp4.drops.json",
+                targetName = "VID_1.drops.json",
                 dirNames = setOf(".pending-9-VID_1.drops.json", ".pending-9-VID_1.mp4")
             )
         )
         assertFalse(
             "只有自己这一条（目标名等于自己）⇒ 不算重复",
             archiveTwinExists(
-                archiveName = "VID_1.mp4.drops.json",
-                targetName = "VID_1.mp4.drops.json",
-                dirNames = setOf("VID_1.mp4.drops.json")
+                archiveName = "VID_1.drops.json",
+                targetName = "VID_1.drops.json",
+                dirNames = setOf("VID_1.drops.json")
             )
         )
     }
@@ -413,8 +413,8 @@ class StalePendingSweepTest {
         // 接线：档案趟必须把真实目标名喂进重复判据（喂剥段名 = 回到旧缺陷）
         val runOnce = flatten(bodyOf(sweep, "runOnce"))
         assertTrue(
-            "档案趟重复判据必须吃 targetName（成片名 + .drops.json）",
-            runOnce.contains("archiveTwinExists(f.name, clipName?.let { it + ArcDropLog.EXTENSION }")
+            "档案趟重复判据必须吃规范目标名（ArcDropLog.sidecarName 单一出口）",
+            runOnce.contains("archiveTwinExists(f.name, clipName?.let { ArcDropLog.sidecarName(it) }")
         )
     }
 
