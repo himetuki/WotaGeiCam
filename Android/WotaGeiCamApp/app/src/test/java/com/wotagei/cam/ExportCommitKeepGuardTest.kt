@@ -38,7 +38,7 @@ class ExportCommitKeepGuardTest {
     private fun keepSliceOf(code: String, rel: String): String {
         val a = code.indexOf("muxer.stop()")
         check(a >= 0) { "在 $rel 里定位 muxer.stop() 失败：收尾被改写，守卫失去输入，不许算通过" }
-        val needle = "ClipResult.Fail(ClipError.COMMIT)"
+        val needle = "return@withContext ClipResult.Fail(ClipError.COMMIT)"
         val b = code.indexOf(needle, a)
         check(b > a) { "在 $rel 里定位 COMMIT 保留分支失败（守卫失去输入，不许算通过）" }
         return code.substring(a, b + needle.length)
@@ -95,7 +95,9 @@ class ExportCommitKeepGuardTest {
         val anchor = "        } catch (e: Exception) {\n" +
             "            if (bytesComplete) {\n" +
             "                // 封轨后异常：成片字节已在盘上，删行 = 丢成片；与 commit 全败同口径保留待救援\n" +
-            "                Log.e(TAG, \"封轨后异常，成片已保留待救援 uri=\$pendingUri: \${e.message}\")\n" +
+            "                Log.e(TAG, \"封轨后异常，成片已保留待救援 id=\${mediaIdOf(pendingUri)}: \${e.message}\")\n" +
+            // Y32：终态先记账再返回（迟到回填按任务身份取真话）
+            "                terminal.reached(ClipResult.Fail(ClipError.COMMIT))\n" +
             "                return@withContext ClipResult.Fail(ClipError.COMMIT)\n" +
             "            } else {\n"
         val idx = raw.indexOf(anchor)

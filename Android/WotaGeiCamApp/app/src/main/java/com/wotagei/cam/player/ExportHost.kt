@@ -48,21 +48,15 @@ class ExportHost(app: Application) : AndroidViewModel(app) {
         offsetMs: Long,
         postRender: Boolean,
         effects: SceneExportEffects
-    ): Boolean = runExport(ExportDetails.Clip(aMs, bMs, clip.durationMs), clip) { onProgress ->
+    ): Boolean = runExport(ExportDetails.Clip(aMs, bMs, clip.durationMs), clip) { onProgress, onLate ->
         if (postRender) {
-            when (val r = sceneRunner.export(clip, aMs, bMs, track, offsetMs, effects) { onProgress(it) }) {
-                is SceneExportRunner.Done -> ClipResult.Done(r.id, r.name)
-                is SceneExportRunner.Failed -> ClipResult.Fail(
-                    when (r.reason) {
-                        SceneExportRunner.Reason.RANGE -> ClipError.RANGE
-                        SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT
-                        SceneExportRunner.Reason.BUSY -> ClipError.BUSY
-                        else -> ClipError.MUX
-                    }
-                )
-            }
+            sceneOutcome(
+                sceneRunner.export(clip, aMs, bMs, track, offsetMs, effects,
+                    onLateOutcome = { onLate(sceneOutcome(it)) }) { onProgress(it) }
+            )
         } else {
-            clipExporter.export(clip, aMs, bMs, track, offsetMs) { onProgress(it) }
+            clipExporter.export(clip, aMs, bMs, track, offsetMs,
+                onLateOutcome = { onLate(it) }) { onProgress(it) }
         }
     }
 
@@ -73,18 +67,24 @@ class ExportHost(app: Application) : AndroidViewModel(app) {
         offsetSource: TrackSync.Source?
     ): Boolean {
         val shift = offsetMs ?: 0L
-        return runExport(ExportDetails.Track(track, offsetMs, offsetSource), clip) { onProgress ->
-            trackExporter.export(clip, track, shift) { onProgress(it) }
+        return runExport(ExportDetails.Track(track, offsetMs, offsetSource), clip) { onProgress, onLate ->
+            trackExporter.export(clip, track, shift, onLateOutcome = { onLate(it) }) { onProgress(it) }
         }
     }
 
     private fun runExport(
         details: ExportDetails,
         clip: VideoClip,
-        run: suspend ((Float) -> Unit) -> ClipResult
-    ): Boolean = tasks.start(details, clip.uri.toString(), clip.name) { onProgress ->
+        run: suspend ((Float) -> Unit, (ClipResult) -> Unit) -> ClipResult
+    ): Boolean = tasks.start(
+        details,
+        clip.uri.toString(),
+        clip.name,
+        // 迟到终态（预算到点/取消后才真正提交完）也要刷索引：相册里确实多了/保留了一条
+        onLateOutcome = { late -> if (late is ClipResult.Done) repo.invalidate() }
+    ) { onProgress, onLate ->
         try {
-            run(onProgress).also { if (it is ClipResult.Done) repo.invalidate() }
+            run(onProgress, onLate).also { if (it is ClipResult.Done) repo.invalidate() }
         } catch (e: CancellationException) {
             Log.i(TAG, "导出已取消 type=${details.kind}")
             throw e
@@ -100,5 +100,18 @@ class ExportHost(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         bus.cancel()
+    }
+
+    /** 后渲染三态 → 剪辑链公开结果（正常返回与迟到回填共用同一映射，避免两套口径）。 */
+    private fun sceneOutcome(r: SceneExportRunner.Result): ClipResult = when (r) {
+        is SceneExportRunner.Done -> ClipResult.Done(r.id, r.name)
+        is SceneExportRunner.Failed -> ClipResult.Fail(
+            when (r.reason) {
+                SceneExportRunner.Reason.RANGE -> ClipError.RANGE
+                SceneExportRunner.Reason.COMMIT -> ClipError.COMMIT
+                SceneExportRunner.Reason.BUSY -> ClipError.BUSY
+                else -> ClipError.MUX
+            }
+        )
     }
 }

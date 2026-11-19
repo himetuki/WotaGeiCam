@@ -94,7 +94,7 @@ class PendingRowRescueGuardTest {
     @Test
     fun `源码钉扎_封口完整性必须先算box账目`() {
         val probe = sweepBody("extractable")
-        assertTrue("探测必须先验容器尾段账目（缺尾段不许晋升）", probe.contains("mp4TopLevelComplete("))
+        assertTrue("探测必须先验容器尾段账目和 moov，再查询轨道", probe.indexOf("MoovSeal.complete(") in 0 until probe.indexOf("MediaExtractor()"))
         assertTrue("仍须有视频轨", probe.contains("startsWith(") && probe.contains("KEY_MIME"))
     }
 }

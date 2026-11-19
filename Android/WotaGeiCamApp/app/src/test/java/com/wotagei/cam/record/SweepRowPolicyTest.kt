@@ -175,7 +175,7 @@ class SweepRowPolicyTest {
         assertTrue("目录列举确认缺失", observe.contains("parent.list()"))
         assertTrue("其余异常一律不可观测", observe.contains("RowFileState.UNOBSERVABLE"))
         val probe = bodyOf(sweep, "extractable")
-        assertTrue("探测先验 box 账目（缺尾段不晋升）", probe.contains("mp4TopLevelComplete("))
+        assertTrue("探测先验完整封口（缺尾段不晋升）", probe.contains("MoovSeal.complete("))
     }
 
     // ---- 合成 MP4 ----

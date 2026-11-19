@@ -46,7 +46,7 @@ internal enum class RowFix {
  * @param ageOk 年龄门槛（sealed 标记可缩短，见 [sweepAgeOk]）
  * @param volumeMounted 行所在卷在 [android.provider.MediaStore.getExternalVolumeNames] 里
  * @param rowMatches 按 URI 复核：行仍在且 DATA/DISPLAY_NAME 与快照一致
- * @param playable 容器尾段完整且有视频轨（[mp4TopLevelComplete] + 轨道探测）
+ * @param playable 容器尾段完整且有视频轨（[MoovSeal.complete] + 轨道探测）
  */
 internal fun rowFixDecision(
     pending: Boolean,
@@ -94,39 +94,47 @@ internal fun volumeVisible(volume: String?, visible: Set<String>?): Boolean =
  * @param fileLength 文件字节数
  * @param readAt (offset, count) → 恰好 count 字节，越界/读不全返回 null
  */
-internal fun mp4TopLevelComplete(fileLength: Long, readAt: (Long, Int) -> ByteArray?): Boolean {
+internal fun mp4TopLevelComplete(
+    fileLength: Long,
+    readAt: (Long, Int) -> ByteArray?,
+    requireMoov: Boolean = false
+): Boolean {
     if (fileLength < 8L) return false
     var off = 0L
     var boxes = 0
+    var haveMoov = false
     while (off < fileLength) {
-        // MP4 允许文件尾 1..7 字节的零填充；非零残留 = 某个 box 头被截断
-        if (fileLength - off < 8L) {
-            val tail = readAt(off, (fileLength - off).toInt()) ?: return false
-            return tail.all { it == 0.toByte() }
+        val remaining = fileLength - off
+        // 文件尾允许 1..7 字节零填充；非零残留视为截断的 box 头。
+        if (remaining < 8L) {
+            val tail = readAt(off, remaining.toInt()) ?: return false
+            if (tail.size != remaining.toInt() || tail.any { it != 0.toByte() }) return false
+            break
         }
-        if (boxes++ > MAX_MP4_BOXES) return false
+        if (boxes++ >= MAX_MP4_BOXES) return false
         val head = readAt(off, 8) ?: return false
-        if (head.size < 8) return false
-        var size = u32(head, 0)
-        var headerLen = 8L
-        when (size) {
-            0L -> return true // box 延伸到文件尾：自身即完整的最后一段
+        if (head.size != 8) return false
+        val size32 = u32(head, 0)
+        val headerLen = if (size32 == 1L) 16L else 8L
+        val size = when (size32) {
+            0L -> remaining // box 延伸到文件尾。
             1L -> {
-                val ext = readAt(off + 8, 8) ?: return false
-                if (ext.size < 8) return false
-                size = u64(ext, 0)
-                headerLen = 16L
+                if (remaining < headerLen) return false
+                val ext = readAt(off + 8L, 8) ?: return false
+                if (ext.size != 8) return false
+                u64(ext, 0)
             }
-            else -> if (size < 8L) return false
+            else -> size32
         }
-        if (size < headerLen) return false
-        if (size > fileLength - off) return false
+        if (size < headerLen || size > remaining) return false
+        if (u32(head, 4) == MOOV_TYPE) haveMoov = true
         off += size
     }
-    return true
+    return !requireMoov || haveMoov
 }
 
 private const val MAX_MP4_BOXES = 10_000
+private const val MOOV_TYPE = 0x6D6F6F76L
 
 private fun u32(b: ByteArray, at: Int): Long =
     ((b[at].toLong() and 0xFF) shl 24) or

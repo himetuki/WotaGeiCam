@@ -95,7 +95,7 @@ class TrackToolsGuardTest {
         assertTrue("宿主必须保留实际选轨和偏移快照", host.contains("ExportDetails.Track(track, offsetMs, offsetSource)"))
         assertTrue(
             "TrackExporter 必须使用快照里的实际选轨和偏移",
-            host.contains("val shift = offsetMs ?: 0L") && host.contains("trackExporter.export(clip, track, shift)")
+            host.contains("val shift = offsetMs ?: 0L") && host.contains("trackExporter.export(clip, track, shift,")
         )
         // 红绿突变 1：拆掉双音轨门（恒显），同一把尺必须报红——这正是"单音轨也显示"的回归形态
         val mutantGate = playerScreenBody().replace("if (dualAudio)", "if (true)")

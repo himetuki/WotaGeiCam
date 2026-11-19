@@ -1,6 +1,7 @@
 package com.wotagei.cam.player
 
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -76,6 +77,11 @@ internal data class ExportUiState(
 /**
  * 两类导出可并行。起跑、归还闸门、结果入队和跨线程进度校验共用一份原子快照。
  * 结果留在窗口宿主中，直到播放页按 taskId 确认。离页、取消或起跑新任务都不会清掉未读结果。
+ *
+ * Y32 迟到终态回填：owner 侧的提交（清 IS_PENDING）在 caller 已取消/预算到点离开后仍可能落地
+ * （成功 → 相册里多了成片；COMMIT 全败 → pending 行保留待救援）。这些真话经 [start] 的
+ * [onLateOutcome] 按**任务身份**回填：同一请求先到的结果不改写（终态单调），迟到值 upsert 进
+ * results（同请求已有条目 = 等待方先报了 BUSY/取消，迟到真话顶掉假话）。
  */
 internal class ExportTasks(private val scope: CoroutineScope) {
     private val nextId = AtomicLong()
@@ -86,15 +92,24 @@ internal class ExportTasks(private val scope: CoroutineScope) {
         details: ExportDetails,
         sourceUri: String,
         sourceName: String,
-        run: suspend ((Float) -> Unit) -> ClipResult
+        onLateOutcome: (ClipResult) -> Unit = {},
+        run: suspend (report: (Float) -> Unit, late: (ClipResult) -> Unit) -> ClipResult
     ): Boolean {
         val kind = details.kind
         if (state.value[kind] != null) return false
         val request = ExportRequest(nextId.incrementAndGet(), sourceUri, sourceName, details)
         var result: ClipResult? = null
+        // 迟到回填去重簿记：owner 侧回填先于 job 完成时，completion 不再重复入队。
+        val lateSettled = AtomicReference<ClipResult?>()
         // Main.immediate 上 BUSY 等结果可能同步返回。必须先完成登记再执行任务。
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            result = run { publishProgress(request, it) }
+            result = run({ publishProgress(request, it) }) { late ->
+                // 首次回填才生效：终态单调，owner 侧重复通知不改写已入账的真话。
+                if (lateSettled.compareAndSet(null, late)) {
+                    upsertResult(request, late)
+                    onLateOutcome(late)
+                }
+            }
         }
         val task = ExportTask(request, job)
         while (true) {
@@ -111,7 +126,9 @@ internal class ExportTasks(private val scope: CoroutineScope) {
                 if (previous[kind]?.request != request) previous
                 else {
                     val released = previous.withTask(kind, null)
-                    result?.let { released.copy(results = previous.results + ExportResultItem(request, it)) }
+                    // 迟到真话已按任务身份入账的，不再把等待方先报的假话（BUSY/取消）追加一遍。
+                    val value = if (lateSettled.get() != null) null else result
+                    value?.let { released.copy(results = previous.results + ExportResultItem(request, it)) }
                         ?: released
                 }
             }
@@ -126,6 +143,20 @@ internal class ExportTasks(private val scope: CoroutineScope) {
             val task = previous[request.kind]
             if (task == null || task.request != request || task.cancelling || bounded <= task.progress) previous
             else previous.withTask(request.kind, task.copy(progress = bounded))
+        }
+    }
+
+    /**
+     * 迟到真话按任务身份入账：同请求已有条目（等待方先报了 BUSY/取消）就顶掉它，没有就 append。
+     * 主线程之外也可能调（owner worker 线程），StateFlow.update 的 CAS 循环保证并发安全。
+     */
+    private fun upsertResult(request: ExportRequest, payload: ClipResult) {
+        mutableState.update { previous ->
+            val existing = previous.results.firstOrNull { it.request == request }
+            if (existing == null) previous.copy(results = previous.results + ExportResultItem(request, payload))
+            else previous.copy(results = previous.results.map {
+                if (it.request == request) it.copy(payload = payload) else it
+            })
         }
     }
 

@@ -12,7 +12,6 @@ import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
 import java.io.File
 import java.io.FileNotFoundException
-import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -468,15 +467,10 @@ internal object StalePendingSweep {
     }.getOrNull()
 
     /**
-     * 封口完整性判据（Y22 收口）：**容器尾段账目完整** + 打得开 + 有视频轨。
-     *
-     * 旧判据只有 `trackCount > 0`：缺尾段（mdat/moov 声明长度越过 EOF）的残片仍可能被解析出
-     * 轨道，于是被"救援"成相册里点开即坏的条目。现在先走 [mp4TopLevelComplete] 的 box 账目
-     * （合成字节流可单测），任何声明越界都当场判不完整；无损文件不受影响。
+     * 一次读取核对所有顶层 box 的长度与 moov，再由 MediaExtractor 确认存在可读视频轨。
      */
     private fun extractable(f: File): Boolean {
-        if (!f.isFile) return false
-        if (!mp4TopLevelComplete(f.length(), fileReader(f))) return false
+        if (!MoovSeal.complete(f)) return false
         val ex = MediaExtractor()
         return try {
             ex.setDataSource(f.absolutePath)
@@ -496,22 +490,6 @@ internal object StalePendingSweep {
         } finally {
             runCatching { ex.release() }
         }
-    }
-
-    /** 只读随机访问（box 头解析用；每次读一个头，读失败/越界返回 null） */
-    private fun fileReader(f: File): (Long, Int) -> ByteArray? = { offset, count ->
-        runCatching {
-            RandomAccessFile(f, "r").use { raf ->
-                if (offset < 0L || count <= 0 || offset > raf.length() - count) {
-                    null
-                } else {
-                    ByteArray(count).also {
-                        raf.seek(offset)
-                        raf.readFully(it)
-                    }
-                }
-            }
-        }.getOrNull()
     }
 
     /** 救援动作本体：只 update 清 IS_PENDING，绝不 delete */
