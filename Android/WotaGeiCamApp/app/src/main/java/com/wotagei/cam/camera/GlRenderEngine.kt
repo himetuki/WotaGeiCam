@@ -50,6 +50,13 @@ private const val TAG_GL = "WotaGl"
 private const val BYTES_PER_FLOAT = 4
 
 /**
+ * `EGL_CONTEXT_LOST`（Khronos EGL 1.5，0x300E）。Android 的 [EGL14] 没有导出这枚常量，
+ * 但它确实会从 `eglGetError()` 返回——不同机型在 GPU 复位/驱动重启/长时间后台后都可能遇到。
+ * R05 的唯一识别条件（见 [GlRenderEngine.handleContextLost]）。
+ */
+private const val EGL_CONTEXT_LOST = 0x300E
+
+/**
  * 窗口面入口契约（对 `PreviewSink` 的必要补充，不是改名）。
  *
  * `PreviewSink` 是「拉」模型（Camera2 侧调 [PreviewSink.cameraTargets] 取目标面），缺一条把
@@ -228,6 +235,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     @Volatile
     private var glReady = false
+
+    /**
+     * EGL 上下文已丢失（`EGL_CONTEXT_LOST`，0x300E）——**本实例从此不可复用**。
+     *
+     * R05：此前 `makeCurrent` 失败只打一行日志就 `return`，`drawFrame` 每帧空转、相机照常
+     * 出帧、屏上永久黑，看门狗只能看到「相机在出帧但上屏不换帧」而反复重挂面——重挂一个
+     * 已经失效的 EGL 上下文永远不会成功。现在把丢失当成**终态**上报：引擎停止一切绘制，
+     * 由所有权方（CameraController）释放本实例并整条重建（新 EGL/context/GL 资源/
+     * SurfaceTexture），不允许"还在旧上下文上继续画"的隐藏降级。
+     *
+     * 只由 GL 线程写；[isContextLost] 给任意线程读。
+     */
+    @Volatile
+    private var contextLost = false
+
+    /**
+     * 上下文丢失回调（GL 线程触发一次）。所有权方必须换掉本引擎实例：
+     * 旧实例的 EGL 对象已失效，任何 in-place 复用都是未定义行为。
+     */
+    @Volatile
+    var onContextLost: ((reason: String) -> Unit)? = null
 
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglConfig: EGLConfig? = null
@@ -837,7 +865,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /** EGL/GL 是否就绪（未就绪时 [cameraTargets] 返回空表） */
-    fun isReady(): Boolean = glReady && !released.get()
+    fun isReady(): Boolean = glReady && !released.get() && !contextLost
+
+    /** EGL 上下文是否已丢失；true = 本实例必须由所有权方释放并整条重建（R05） */
+    fun isContextLost(): Boolean = contextLost
 
     /** 相机帧进 GL 的累计数（单调；给预览自愈心跳用） */
     fun cameraFrameCount(): Long = cameraFrameTotal
@@ -1582,8 +1613,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     private fun makeCurrent(surface: EGLSurface?): Boolean {
         val s = surface ?: return false
+        // 已丢失的上下文不再尝试 makeCurrent：驱动只会继续报 CONTEXT_LOST，且会掩盖
+        // 真正的恢复入口（所有权方重建），所以这里直接拒绝。
+        if (contextLost) return false
         if (!EGL14.eglMakeCurrent(eglDisplay, s, s, eglContext)) {
-            Log.w(TAG_GL, "eglMakeCurrent 失败 err=0x${eglErrorHex()}")
+            val err = EGL14.eglGetError()
+            if (err == EGL_CONTEXT_LOST) {
+                handleContextLost("eglMakeCurrent")
+            } else {
+                Log.w(TAG_GL, "eglMakeCurrent 失败 err=0x${Integer.toHexString(err)}")
+            }
             return false
         }
         return true
@@ -1596,18 +1635,61 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (encoder) FrameLedger.onEncoderSwap(true)
             return true
         }
+        val err = EGL14.eglGetError()
         if (encoder) FrameLedger.onEncoderSwap(false)
-        Log.w(TAG_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
+        // CONTEXT_LOST 不是"这一帧没换成功"这么轻：整个上下文已经没了，后续每一帧都会失败。
+        // 必须升级为终态上报，否则录制/预览都会静默停在最后一帧（R05）。
+        if (err == EGL_CONTEXT_LOST) {
+            handleContextLost("eglSwapBuffers")
+        } else {
+            Log.w(TAG_GL, "eglSwapBuffers 失败 err=0x${Integer.toHexString(err)}")
+        }
         return false
     }
 
     /** 销毁前先解除 current，否则 eglDestroySurface 返回 EGL_BAD_ACCESS */
     private fun destroyEglSurface(surface: EGLSurface?) {
         if (surface == null) return
+        if (contextLost) return
         pbufferSurface?.let { makeCurrent(it) }
         if (!EGL14.eglDestroySurface(eglDisplay, surface)) {
-            Log.w(TAG_GL, "eglDestroySurface 失败 err=0x${eglErrorHex()}")
+            val err = EGL14.eglGetError()
+            if (err == EGL_CONTEXT_LOST) {
+                handleContextLost("eglDestroySurface")
+            } else {
+                Log.w(TAG_GL, "eglDestroySurface 失败 err=0x${Integer.toHexString(err)}")
+            }
         }
+    }
+
+    /**
+     * EGL 上下文丢失的**唯一入口**（R05）：只上报一次，绝不自愈。
+     *
+     * 为什么不自愈：本实例是单次生命周期对象（[release] 后不可复用），而丢失后所有 EGL
+     * 对象/GL 资源（program/texture/FBO/SurfaceTexture 绑定）都失效；在旧实例里重建一套
+     * 半新半旧的资源，正是"看起来恢复了、实际采样空纹理"的来源。所有权方必须：
+     * 关相机会话 → 释放本实例 → new 一个 GlRenderEngine → 重新 bind/start → 重挂显示面。
+     */
+    private fun handleContextLost(where: String) {
+        if (contextLost || released.get()) return
+        contextLost = true
+        glReady = false
+        dirty = false
+        newFrames = 0
+        windowAttached = false
+        acceptedDisplaySurface = null
+        // 编码面/窗口面都已失效：心跳必须立刻归零，看门狗才能识别"渲染已死"而不是"没帧"
+        encoderEglSurface = null
+        encoderNative = null
+        windowEglSurface = null
+        windowNative = null
+        lastWindowSwapNs = 0L
+        Log.w(
+            TAG_GL,
+            "EGL 上下文丢失（$where, err=0x300E）⇒ 本引擎失效，等待所有权方重建" +
+                "（相机帧照常到达但不再绘制/换帧）"
+        )
+        onContextLost?.invoke(where)
     }
 
     private fun replaceWindowSurface(surface: Surface?, widthPx: Int, heightPx: Int) {
@@ -1849,6 +1931,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 degradeArcConvert("直通编码面掉链")
             }
         }
+        // 编码 pass 里 makeCurrent/swap 可能刚把上下文判死（R05）：立即停手，不再跑上屏链，
+        // 也不触发 onFrameDrawn——那会让录制侧以为"这一帧画完了"。
+        if (contextLost) return
         // 上屏槽同步让到编码 pass **之后**：首次切监看那一次的 program 链接是毫秒级，
         // 不许让它挡在编码器的 swap 前面（与下面霜开关同一条纪律）。首帧仍成立：无编码面时
         // 编码 pass 是空操作，display 在同一帧的窗口 pass 之前建好。

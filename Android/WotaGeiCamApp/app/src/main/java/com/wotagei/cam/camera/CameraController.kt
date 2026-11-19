@@ -205,8 +205,86 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** GPU 预览引擎的**页面级缓存**：跨设置往返复用同一实例（SurfaceTexture 活着 = 会话不用重建）。释放权在 [onCleared]，页面 dispose 不再碰它 */
     private var cachedGlSink: GlRenderEngine? = null
 
+    /**
+     * GL 引擎代（R05）：每次因 EGL 上下文丢失而整条换掉缓存实例就 +1。
+     *
+     * CameraScreen 必须把它作为 `remember(renderMode, glSinkEpoch)` 的键——否则页面里的
+     * `activeSink` 还指向已失效的旧实例，恢复后 bind 的仍是死引擎。
+     */
+    private val glSinkEpochFlow = MutableStateFlow(0)
+    val glSinkEpoch: StateFlow<Int> = glSinkEpochFlow
+
+    /** 上下文丢失事件（reason）；一次性广播，恢复动作由本类自己完成，UI 只用于提示/取证 */
+    private val glContextLostFlow = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val glContextLost: SharedFlow<String> = glContextLostFlow
+
+    /** 恢复结果提示（成功/失败都不许静默；UI 走现有 tip/HUD 通道显示） */
+    private val glRecoveryNoticeFlow = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val glRecoveryNotice: SharedFlow<String> = glRecoveryNoticeFlow
+
+    /** 已处理过上下文丢失的实例（同一实例的回调只恢复一次；新实例身份不同，可再次恢复） */
+    private var glContextLossHandled: GlRenderEngine? = null
+
+    private fun newGlSink(): GlRenderEngine {
+        val sink = GlRenderEngine()
+        // onContextLost 在 GL 线程触发；publishOnMain 切到主线程串行化恢复动作
+        sink.onContextLost = { reason ->
+            publishOnMain { onGlContextLost(reason) }
+        }
+        return sink
+    }
+
     /** GPU 预览引擎取用口：首次创建，之后同一实例（组合销毁重建也拿回同一个） */
-    fun glSink(): GlRenderEngine = cachedGlSink ?: GlRenderEngine().also { cachedGlSink = it }
+    fun glSink(): GlRenderEngine = cachedGlSink ?: newGlSink().also { cachedGlSink = it }
+
+    /**
+     * R05：GL 上下文丢失后的**唯一恢复入口**（主线程）。
+     *
+     * 顺序不可换：先关相机会话（停止向死引擎喂帧）→ 释放旧引擎（其 EGL 对象已失效，
+     * 绝不复用）→ 新建实例 → 重新 bind/start → 请求重挂显示面。旧实例的释放**恰好一次**：
+     * 本方法是相机页面上唯一同时持有 `cachedGlSink` 与 `boundSink` 的路径。
+     *
+     * @param lost 触发本次恢复的实例；null = 手动恢复当前缓存实例。
+     * @return 新引擎；没有可恢复实例（或缓存已被别的路径替换）时返回当前缓存。
+     */
+    fun recoverGlSink(lost: GlRenderEngine? = null): GlRenderEngine? {
+        val old = lost ?: cachedGlSink ?: return null
+        // 恢复动作晚到（页面已切 DIRECT / 已被另一条路径换过）：只认当前缓存，不误杀新实例
+        if (cachedGlSink !== old) return cachedGlSink
+        old.onContextLost = null
+        // 相机会话仍指向旧 sink：先关，绝不把帧继续喂给失效上下文
+        engine?.close()
+        engine = null
+        analysisSessionOwner = null
+        boundSink = null
+        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
+        old.release()
+        cachedGlSink = null
+        val fresh = newGlSink()
+        cachedGlSink = fresh
+        glSinkEpochFlow.value += 1
+        // 页面还在（预览意图为真）才重开；页面已离场不许后台拉相机
+        if (previewWanted) {
+            pendingStart = true
+            bind(fresh)
+            requestDisplayReattach()
+            glRecoveryNoticeFlow.tryEmit("渲染上下文丢失，已重启渲染")
+        } else {
+            glRecoveryNoticeFlow.tryEmit("渲染上下文丢失，渲染引擎已重建（预览未在运行）")
+        }
+        Log.i("WotaCam", "GL 上下文恢复：旧引擎已释放，新引擎 epoch=${glSinkEpochFlow.value} 预览意图=$previewWanted")
+        return fresh
+    }
+
+    private fun onGlContextLost(reason: String) {
+        val lost = cachedGlSink ?: return
+        // 同一实例一次丢失只恢复一次（回调由 GL 线程发出，可能晚于页面切换）
+        if (glContextLossHandled === lost) return
+        glContextLossHandled = lost
+        Log.w("WotaCam", "GL 上下文丢失：$reason ⇒ 重建渲染引擎")
+        glContextLostFlow.tryEmit(reason)
+        recoverGlSink(lost)
+    }
 
     /** 枚举期间收到的换挡请求先记一笔，等当前这次跑完补做一次（不排队成一串，只做最后一次即可） */
     private var reloadWanted = false
@@ -474,8 +552,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
         // GL 引擎的释放权在这里（页面 dispose 不再 release）：跨设置往返复用同一实例
+        // 先摘丢失回调：销毁期的 teardown 失败不应再触发一次"恢复"
+        cachedGlSink?.onContextLost = null
         cachedGlSink?.release()
         cachedGlSink = null
+        glContextLossHandled = null
         bus.cancel()
     }
 
