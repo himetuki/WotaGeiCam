@@ -93,10 +93,14 @@ class StartChainBoundedGuardTest {
     /** 判代码结构（打点的四枚时间戳变量），不判日志字面量——codeOnly 会把字符串遮掉 */
     @Test
     fun `prepare必须留分步耗时打点结构`() {
+        // Y20 把资源建立段拆进 prepareSegment：open 打点在 prepare，venc/audio/mux 在 prepareSegment，
+        // 两边合看才是完整的起录分步链（拆掉任一枚仍然红）。
         val prepare = body("record/CodecRecorder.kt", "prepare")
+        val segment = body("record/CodecRecorder.kt", "prepareSegment")
+        val chain = prepare + segment
         listOf("val ptOpen =", "val ptVenc =", "val ptAudio =", "val ptMux =").forEach {
-            assertTrue("prepare 缺少分步打点 $it（REG-10 起录延迟攒数据的观测面，拆了 = 延迟黑盒回潮）", prepare.contains(it))
+            assertTrue("起录链缺少分步打点 $it（REG-10 起录延迟攒数据的观测面，拆了 = 延迟黑盒回潮）", chain.contains(it))
         }
-        assertTrue("打点必须汇总出 total（ptMux − pt0）", prepare.contains("ptMux - pt0"))
+        assertTrue("打点必须汇总出 total（ptMux − pt0）", segment.contains("ptMux - pt0"))
     }
 }

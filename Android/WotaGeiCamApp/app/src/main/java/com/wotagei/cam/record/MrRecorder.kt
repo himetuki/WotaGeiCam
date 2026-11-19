@@ -158,9 +158,16 @@ class MrRecorder(
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
+        // Y20：拿到输出句柄即登记所有权（target/currentSink）——下面的参数下发无论从哪个出口失败，
+        // reject() 都能关 fd、回收 pending；平台抛出的边界外运行时异常同样不许漏给调用方。
         target = t
         currentSink = sink
-        val effective = setupRecorder(p, sink, t)
+        val effective = try {
+            setupRecorder(p, sink, t)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "mr prepare threw: ${e.javaClass.simpleName} ${e.message}")
+            null
+        }
         if (effective == null) {
             reject(sink, RecordError.PREPARE_FAILED)
             return false
@@ -174,16 +181,23 @@ class MrRecorder(
         return true
     }
 
-    /** 参数下发；HEVC 不被支持时原地降级 H264 重试一次，返回真正生效的 profile */
+    /**
+     * 参数下发；HEVC 被拒时**释放失败实例**、用新实例按完整 H264 格式重试一次，返回真正生效的 profile。
+     *
+     * 重试必须换代：同一实例在一次失败的 configure 之后再 `reset→configure→prepare` 正是 2026-10-08
+     * 真机「第二轮不可靠」的形态（见类注），失败实例留在场上等于把首备也押上。`releaseEngine` 只拆
+     * 实例，不碰 [inputSurface]（persistent 面由 [applyConfig] 重挂到新实例上）。
+     */
     private fun setupRecorder(p: RecordProfile, sink: OutputSink, t: OutputTarget): RecordProfile? {
         val rec = ensureRecorder()
         val audio = p.audioUsable && AudioProbe.hasRecordPermission(ctx) &&
             AudioProbe.isSampleRateSupported(p.sampleRate, p.channels)
         if (applyConfig(rec, p, t, audio, encoderOf(p), sink)) return p
         if (!p.hevc) return null
-        Log.i(TAG, "hevc rejected by MediaRecorder, retry h264")
+        Log.i(TAG, "hevc rejected by MediaRecorder, release and retry h264 on a fresh instance")
+        releaseEngine()
         val plain = p.copy(codec = RecordProfile.CODEC_H264)
-        return if (applyConfig(rec, plain, t, audio, MediaRecorder.VideoEncoder.H264, sink)) plain else null
+        return if (applyConfig(ensureRecorder(), plain, t, audio, MediaRecorder.VideoEncoder.H264, sink)) plain else null
     }
 
     private fun encoderOf(p: RecordProfile): Int =
@@ -235,6 +249,11 @@ class MrRecorder(
         } catch (e: IOException) {
             Log.e(TAG, "applyConfig io failed: ${e.message}")
             false
+        } catch (e: RuntimeException) {
+            // Y20：平台在 setOutputFile/prepare 等边界抛出的运行时异常（ISE 之外）同样算"这次下发失败"，
+            // 让 setupRecorder 的 AVC 重试与 prepare 的 reject 收口都还有机会跑——不许整条链直接炸出去。
+            Log.e(TAG, "applyConfig threw: ${e.javaClass.simpleName} ${e.message}")
+            false
         }
     }
 
@@ -281,28 +300,41 @@ class MrRecorder(
             return RecordResult.fail(engineError ?: RecordError.BAD_STATE, clock.elapsedMs())
         }
         state = EngineState.STOPPING
-        // err 一律在 stopEngine() 之后再取：一帧没写时 stop 会抛异常，本段只能当废片
-        val dur = if (prev == EngineState.START) {
-            stopEngine()
-            clock.closeSegment()
-        } else {
-            clock.closeSegment()
-        }
+        // err 一律在收口之后再取：一帧没写时 stop 会抛异常，本段只能当废片
+        // Y19：容器**是否封口**取独立信号——`stop()` 正常返回就是 moov 已写完的证据；
+        // 801 自停（平台已封口、再 stop 必抛）是另一条确认。两者都不许从错误码反推。
+        val stopConfirmed = if (prev == EngineState.START) stopEngine() else false
+        val dur = clock.closeSegment()
         val err = stopErrorForKeep()
-        if (prev == EngineState.START) {
-            // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision。
-            // 801 自停是 MR 路真实的"容器已确认收尾"信号（平台已封口，再 stop 必抛），
-            // 必须传进判据；传恒 false 会把完整段按 STOP_FAILED 删掉。
-            sealCurrent(
-                dur,
-                segmentKeepDecision(
-                    abandoned = abandonSegment, ok = true, errorCode = err,
-                    durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
-                    containerFinalized = reachedMaxFilesize
+        when (prev) {
+            EngineState.START -> {
+                // 弃段意图（自检判废）压过"看着正常"：见 segmentKeepDecision。
+                // 801 自停是 MR 路真实的"容器已确认收尾"信号（平台已封口，再 stop 必抛），
+                // 必须传进判据；传恒 false 会把完整段按 STOP_FAILED 删掉。
+                sealCurrent(
+                    dur,
+                    segmentKeepDecision(
+                        abandoned = abandonSegment, ok = true, errorCode = err,
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                        containerFinalized = stopConfirmed || reachedMaxFilesize
+                    )
                 )
-            )
-        } else {
-            discardCurrent(err ?: RecordError.BAD_STATE)
+            }
+            EngineState.ERROR -> {
+                // 平台报错不代表容器一定坏了：先尝试一次收口（stop 正常返回 = 段可播）——
+                // 可挽救的整段成片不许因为一个瞬时 ENGINE_ERROR 就被删掉；抛异常才按废片收。
+                // 实例已被 failNow 释放时 stopEngine 返回 false，没有可挽救的口。
+                val salvageConfirmed = stopEngine()
+                sealCurrent(
+                    dur,
+                    segmentKeepDecision(
+                        abandoned = abandonSegment, ok = true, errorCode = err,
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                        containerFinalized = salvageConfirmed
+                    )
+                )
+            }
+            else -> discardCurrent(err ?: RecordError.BAD_STATE)
         }
         releaseEngine()
         val total = clock.elapsedMs()
@@ -339,7 +371,7 @@ class MrRecorder(
     override fun release() {
         when (state) {
             EngineState.START -> {
-                stopEngine()
+                val stopConfirmed = stopEngine()
                 val dur = clock.closeSegment()
                 // 弃段意图同 stop()：release 也是"停录"，弃段一律不 commit。
                 // 801 自停是 MR 路真实的"容器已确认收尾"信号，与 stop() 同口径传入。
@@ -349,13 +381,29 @@ class MrRecorder(
                         abandoned = abandonSegment, ok = true,
                         errorCode = stopErrorForKeep(),
                         durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
-                        containerFinalized = reachedMaxFilesize
+                        containerFinalized = stopConfirmed || reachedMaxFilesize
                     )
                 )
                 releaseEngine()
             }
             EngineState.PREPARE -> {
                 discardCurrent(RecordError.RELEASED)
+                releaseEngine()
+            }
+            EngineState.ERROR -> {
+                // release 也是会话收尾：ERROR 态先尝试可挽救收口（与 stop() 同口径）——
+                // 旧实现只 releaseEngine，当前段 pending 既没 commit 也没 discard ⇒ 幽灵行漏到冷启清扫。
+                val salvageConfirmed = stopEngine()
+                val dur = clock.closeSegment()
+                sealCurrent(
+                    dur,
+                    segmentKeepDecision(
+                        abandoned = abandonSegment, ok = true,
+                        errorCode = stopErrorForKeep(),
+                        durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
+                        containerFinalized = salvageConfirmed
+                    )
+                )
                 releaseEngine()
             }
             else -> releaseEngine()
@@ -432,6 +480,13 @@ class MrRecorder(
         // 才能证明换段链路活着。历史缺陷：这里曾要求 what==UNKNOWN 才往下走、却在 extra 里找
         // 801/802，判定序反转 ⇒ 只打日志不换段。判定本体在 mrRotateRequested（纯函数，可 JVM 测）。
         Log.i(TAG, "mr info what=$what extra=$extra")
+        // Y19：回调必须核对**实例归属**。换段会 release 旧实例、新建实例，旧实例排队中的
+        // 801/802 迟到（丢弃路径的收尾事件）若照收，会拿旧段的"触顶"去轮转**新段**——
+        // 新段刚开始就被换掉，甚至把 801 的封口语义错挂到新段的保留判据上。
+        if (mrCallbackIsStale(mr, rec)) {
+            Log.i(TAG, "mr info ignored: stale instance what=$what extra=$extra")
+            return
+        }
         if (mrRotateRequested(what, extra)) {
             // 801 = 平台已自行停录并封口：先记下这个收尾事实，封段判据据此放行完整段
             if (mrReachedMaxFilesize(what, extra)) reachedMaxFilesize = true
@@ -441,6 +496,11 @@ class MrRecorder(
 
     override fun onError(rec: MediaRecorder?, what: Int, extra: Int) {
         Log.e(TAG, "mr error what=$what extra=$extra")
+        // 同 onInfo：旧实例的迟到错误不许污染新段（engineError/ERROR 态会让看门狗把新段整场重启）
+        if (mrCallbackIsStale(mr, rec)) {
+            Log.w(TAG, "mr error ignored: stale instance what=$what extra=$extra")
+            return
+        }
         engineError = "${RecordError.ENGINE_ERROR}:$what:$extra"
         state = EngineState.ERROR
     }
@@ -469,7 +529,9 @@ class MrRecorder(
             if (state != EngineState.START) return
             Log.i(TAG, "file size event extra=$extra, restartRecord")
             legStart = SystemClock.elapsedRealtime()
-            stopEngine()
+            // Y19：stop() 正常返回 = 旧段容器已封口（独立于错误码的保留信号）；801 是平台已封口的
+            // 另一条确认。两条任一成立即可把完整段当有效成片，而不是按 STOP_FAILED 删掉。
+            val stopConfirmed = stopEngine()
             // 销毁旧实例（release + 置空）：下一段由 ensureRecorder 新建。release 异常吞在
             // releaseEngine 里——清理失败不该把换段打断，下一段的成败由 prepare/start 自己报。
             // 顺序不许反：必须在本段 stop 落定之后（文件已完整）、在 applyConfig 之前。
@@ -485,7 +547,7 @@ class MrRecorder(
                         abandoned = abandonSegment, ok = true,
                         errorCode = stopErrorForKeep(),
                         durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
-                        containerFinalized = reachedMaxFilesize
+                        containerFinalized = stopConfirmed || reachedMaxFilesize
                     )
                 )
             }
@@ -694,11 +756,17 @@ class MrRecorder(
      * 只 stop+reset，不 release：stop 之后该文件即完整可播（分段与停止共用）。
      * **实例生死由调用方紧跟处理**：停止与换段都在本函数之后调 [releaseEngine]——
      * 换段必须换代（同一实例第二轮 reset→configure→prepare 在真机上不可靠，见类注）。
+     *
+     * @return 容器是否**确认封口**（`stop()` 正常返回 = moov 已写完）。false 包含两种情形：
+     *   stop 抛异常（本段只能当废片）与实例已不在（[mr] 为 null，没有可挽救的口）。
+     *   它是 [segmentKeepDecision] 的 `containerFinalized` 独立信号，**不许**由错误码反推（Y19）。
      */
-    private fun stopEngine() {
-        val rec = mr ?: return
+    private fun stopEngine(): Boolean {
+        val rec = mr ?: return false
+        var confirmed = false
         try {
             rec.stop()
+            confirmed = true
         } catch (e: IllegalStateException) {
             // 「一帧都没进」的常见现象：本段按废片处理
             Log.e(TAG, "mr stop threw: ${e.message}")
@@ -712,6 +780,7 @@ class MrRecorder(
         } catch (e: RuntimeException) {
             Log.i(TAG, "mr reset after stop ignored")
         }
+        return confirmed
     }
 
     private fun sealCurrent(durationMs: Long, keep: Boolean) {

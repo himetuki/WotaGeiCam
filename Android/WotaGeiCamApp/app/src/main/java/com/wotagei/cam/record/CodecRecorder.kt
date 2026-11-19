@@ -695,25 +695,46 @@ internal class CodecRecorder(
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
+        // Y20：拿到输出句柄就**立即登记所有权**——此后任何出口（含下面的边界外运行时异常）
+        // 都能经 reject() 关 fd、回收 pending，不再依赖"调用方看见 false 才收拾"。
+        target = t
+        currentSink = sink
         val ptOpen = SystemClock.elapsedRealtime()
-        val mime = resolveVideoMime(p)
-        // GPU 路（EGL 当 producer）输入面必须 per-codec（[prepareGpuVideoEncoder]，真机实测
-        // persistent surface 挂 EGL 会 EGL_BAD_ALLOC）；DIRECT 路（Camera2 当 producer）保持
-        // persistent surface 跨会话复用的既有口径，行为不变。
-        val v: MediaCodec? = if (p.useGpu) {
-            prepareGpuVideoEncoder(mime, p)
-        } else {
-            val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
-            createVideoEncoder(mime, p, inSurf)
+        return try {
+            prepareSegment(p, sink, t, pt0, ptOpen)
+        } catch (e: RuntimeException) {
+            // 平台边界（MediaCodec/MediaMuxer 的 native 异常）不属于任何既有失败分支：
+            // 不许把它漏给调用方——UI 的 `if (!rec.prepare)` 收不到 false，fd/pending 就没人回收。
+            Log.e(TAG, "prepare 期边界外异常：${e.javaClass.simpleName} ${e.message}")
+            runCatching { closeSegmentEngine() }
+                .onFailure { Log.w(TAG, "prepare 异常后引擎回收失败：${it.message}") }
+            reject(sink, RecordError.PREPARE_FAILED)
+            false
         }
-        if (v == null) {
-            // t 已打开（fd 在手）但 target 字段还没轮到赋值，reject 的 target?.close() 够不着它：
-            // 必须在这里先关，否则 openAssetFileDescriptor 的 fd 一直悬到进程结束
-            t.close()
+    }
+
+    /**
+     * prepare 的**资源建立段**（输出句柄已登记为 [target] 之后）：建视频编码器 → 建音频 → 起 muxer。
+     *
+     * 拆成独立函数只为让 [prepare] 用一层 `try/catch(RuntimeException)` 覆盖**交接前的所有出口**
+     * （Y20）；本体内每个失败分支仍走各自的既有原因码。
+     */
+    private fun prepareSegment(
+        p: RecordProfile,
+        sink: OutputSink,
+        t: OutputTarget,
+        pt0: Long,
+        ptOpen: Long
+    ): Boolean {
+        val video = prepareVideoEncoder(p)
+        if (video == null) {
             closeSegmentEngine()
             reject(sink, RecordError.PREPARE_FAILED)
             return false
         }
+        val v = video.codec
+        // 实际生效的视频口径（HEVC 预筛/实配失败回退 AVC 后，码率与日志都必须按 AVC 算）
+        val vp = video.profile
         val ptVenc = SystemClock.elapsedRealtime()
         vCodec = v
         // 静音 / 无权限 / 采样率不支持 → 完全不初始化音频通路（环境、内录两轨一起关）；
@@ -743,14 +764,14 @@ internal class CodecRecorder(
         // 两轨**独立**降级（双开定版 2026-10-07）：环境编码器建失败只关环境（内录不连坐，
         // 反之亦然），与 833 行重建闸「环境路降级不该连坐健康的内录路」同一口径。
         // 旧「a 失败两条全关」只在 cap 前置=env 已建的时代必要，现在 c 自己判自己
+        // 以**实际生效的视频口径**为底（vp）：HEVC 回退 AVC 后 effectiveBitrate() 不再乘 0.9，
+        // 结果/日志/码率三处同一套数（Y17）。
         profile = when {
-            a == null && p.audioEnabled -> p.copy(audioEnabled = false)
-            c == null && p.captureAudio -> p.copy(captureAudio = false)
-            else -> p
+            a == null && p.audioEnabled -> vp.copy(audioEnabled = false)
+            c == null && p.captureAudio -> vp.copy(captureAudio = false)
+            else -> vp
         }
         val ptAudio = SystemClock.elapsedRealtime()
-        target = t
-        currentSink = sink
         if (!openMuxer(t, p.orientationHint)) {
             closeSegmentEngine()
             reject(sink, RecordError.NO_OUTPUT)
@@ -759,11 +780,47 @@ internal class CodecRecorder(
         val ptMux = SystemClock.elapsedRealtime()
         Log.i(TAG, "prepare steps: open=${ptOpen - pt0} venc=${ptVenc - ptOpen} " +
             "audio=${ptAudio - ptVenc} mux=${ptMux - ptAudio} total=${ptMux - pt0}ms（REG-10 起录延迟观测）")
-        Log.i(TAG, "codec prepared part=$partIndex ${p.width}x${p.height}@${p.fps} mime=$mime " +
-            "bps=${p.effectiveBitrate()} audio=${if (a == null) "off" else "${p.sampleRate}Hz/${p.channels}ch"} " +
+        Log.i(TAG, "codec prepared part=$partIndex ${vp.width}x${vp.height}@${vp.fps} mime=${video.mime} " +
+            "bps=${vp.effectiveBitrate()} audio=${if (a == null) "off" else "${p.sampleRate}Hz/${p.channels}ch"} " +
             "capture=${if (c == null) "off" else "on"} " +
             "hint=${p.orientationHint} gpu=${p.useGpu} maxFile=${WotaTiers.MAX_FILE_BYTES}")
         return true
+    }
+
+    /** 视频编码器的实际口径：MIME 与生效 profile 成对返回（[RecordProfile.hevc] 必须与 MIME 同真值） */
+    private class PreparedVideo(val codec: MediaCodec, val profile: RecordProfile, val mime: String)
+
+    /**
+     * 建视频编码器：**能力预筛 → 实配**两级回退（Y17）。
+     *
+     * 预筛（[resolveVideoMime]，能力表说支持）通过但实配 `configure` 失败时（ROM 宣称支持 HEVC、
+     * 真机拒收的已知形态），释放失败实例、按**完整 AVC 格式**重试一次。返回的 profile 固化**实际**
+     * codec —— 码率随 [RecordProfile.effectiveBitrate] 回到 AVC 口径（HEVC 的 ×0.9 不再参与），
+     * 结果与 sidecar 里记的也不再是"说 HEVC、实际 AVC"的假口径。
+     *
+     * @return null = 视频路彻底失败（调用方按 PREPARE_FAILED 收场）
+     */
+    private fun prepareVideoEncoder(p: RecordProfile): PreparedVideo? {
+        val mime = resolveVideoMime(p)
+        // 预筛回退（能力表没有 HEVC）同样要落到 profile 上，不能只换 MIME
+        val pre = if (mime == p.videoMime) p else p.copy(codec = RecordProfile.CODEC_H264)
+        openVideoEncoder(pre, mime)?.let { return PreparedVideo(it, pre, mime) }
+        if (!pre.hevc) return null
+        Log.i(TAG, "hevc rejected at configure, retry avc（释放失败实例后按完整格式重试一次）")
+        val avc = pre.copy(codec = RecordProfile.CODEC_H264)
+        val retried = openVideoEncoder(avc, MediaFormat.MIMETYPE_VIDEO_AVC) ?: return null
+        return PreparedVideo(retried, avc, MediaFormat.MIMETYPE_VIDEO_AVC)
+    }
+
+    /**
+     * 按路的差异建编码器：GPU 路输入面必须 per-codec（[prepareGpuVideoEncoder]）；DIRECT 路
+     * （Camera2 当 producer）保持 persistent surface 跨会话复用的既有口径，行为不变。
+     */
+    private fun openVideoEncoder(p: RecordProfile, mime: String): MediaCodec? = if (p.useGpu) {
+        prepareGpuVideoEncoder(mime, p)
+    } else {
+        val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
+        createVideoEncoder(mime, p, inSurf)
     }
 
     /** HEVC 只在「存在支持 Surface 输入且吃下该分辨率的编码器」时用，否则回退 H264 */

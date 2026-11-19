@@ -32,13 +32,17 @@ class RecorderGpuSurfaceGuardTest {
     @Test
     fun `CodecRecorder 的 GPU 路必须用 per-codec 输入面`() {
         val src = maskedMain("record/CodecRecorder.kt")
-        val prepare = bodyOf(src, "prepare")
+        // Y17 把预筛/实配两级回退收进 prepareVideoEncoder → openVideoEncoder，分叉点随之搬进后者。
+        // openVideoEncoder 是表达式体（bodyOf 只认花括号体），分叉结构按整份遮蔽源判。
+        val pickerAt = src.indexOf("if (p.useGpu)")
+        val gpuAt = src.indexOf("prepareGpuVideoEncoder(mime, p)")
+        val directAt = src.indexOf("MediaCodec.createPersistentInputSurface()", gpuAt)
         val gpu = bodyOf(src, "prepareGpuVideoEncoder")
 
-        // prepare 按 useGpu 分叉：GPU 支路走专用建立函数
+        // 建立入口按 useGpu 分叉：GPU 支路走专用建立函数
         assertTrue(
-            "prepare 必须按 p.useGpu 分叉选择输入面建立方式",
-            prepare.contains("if (p.useGpu)") && prepare.contains("prepareGpuVideoEncoder(mime, p)")
+            "建编码器必须按 p.useGpu 分叉选择输入面建立方式",
+            pickerAt >= 0 && gpuAt > pickerAt
         )
         // GPU 建立：configure 传 null（只建不绑）+ per-codec createInputSurface
         assertTrue(
@@ -52,7 +56,7 @@ class RecorderGpuSurfaceGuardTest {
         )
         assertTrue(
             "DIRECT 支路必须保留 persistent surface 复用（Camera2 当 producer 的既有口径）",
-            prepare.contains("MediaCodec.createPersistentInputSurface()")
+            gpuAt >= 0 && directAt > gpuAt && directAt - gpuAt < 400
         )
     }
 

@@ -64,12 +64,13 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
         }
     }
 
-    fun profile(gpu: Boolean = false): Any {
+    fun profile(gpu: Boolean = false, hevc: Boolean = false, bitrate: Int = 2_000_000): Any {
         // 参数对象也是真实生产类；仅构造固定测试输入，不仿写属性计算或录制决策。
         val klass = type("com.wotagei.cam.record.RecordProfile")
         val original = RecordProfile(
             width = 640, height = 480, fps = 30, captureRate = 30f,
-            bitrate = 2_000_000, codec = RecordProfile.CODEC_H264, sampleRate = 48_000,
+            bitrate = bitrate, codec = if (hevc) RecordProfile.CODEC_HEVC else RecordProfile.CODEC_H264,
+            sampleRate = 48_000,
             audioEnabled = false, orientationHint = 0, mirrored = false, useGpu = gpu
         )
         val ctor = klass.declaredConstructors.single { it.parameterCount == 17 }
@@ -180,10 +181,13 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                 package android.media;
                 public class MediaFormat {
                     public String kind;
-                    public static MediaFormat createVideoFormat(String mime, int w, int h) { return new MediaFormat(); }
-                    public static MediaFormat createAudioFormat(String mime, int sr, int ch) { return new MediaFormat(); }
+                    public String mime;
+                    public static MediaFormat createVideoFormat(String mime, int w, int h) { MediaFormat f = new MediaFormat(); f.mime = mime; return f; }
+                    public static MediaFormat createAudioFormat(String mime, int sr, int ch) { MediaFormat f = new MediaFormat(); f.mime = mime; return f; }
                     public void setInteger(String key, int value) {}
                     public void setFloat(String key, float value) {}
+                    /** Y15 的段内格式指纹要遍历键集（API 29+ 真 API 有）；空集=所有通知视作同格式 */
+                    public java.util.Set<String> getKeys() { return java.util.Collections.emptySet(); }
                 }
             """,
             "android.media.MediaCodecList" to """
@@ -197,7 +201,7 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                 package android.media;
                 public class MediaCodecInfo {
                     public boolean isEncoder() { return true; }
-                    public String[] getSupportedTypes() { return new String[] { "video/avc" }; }
+                    public String[] getSupportedTypes() { return new String[] { "video/avc", "video/hevc" }; }
                     public String getName() { return "test-avc"; }
                     public CodecCapabilities getCapabilitiesForType(String type) { return new CodecCapabilities(); }
                     public static class CodecCapabilities {
@@ -212,20 +216,31 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                 public class MediaCodec {
                     public static int sequence, persistentCount;
                     public static boolean rejectBinding;
+                    /** Y17：ROM 宣称支持 HEVC 但 configure 实拒（真机已知形态） */
+                    public static boolean rejectHevcConfigure;
+                    /** Y20：建实例即抛运行时异常（编码器资源耗尽/厂商实现崩溃的形态） */
+                    public static boolean throwOnCreate;
+                    /** 按尝试顺序记录 configure 收到的 mime（证明"HEVC 预筛通过、实配失败后按 AVC 重试"） */
+                    public static final java.util.List<String> configureMimes = new java.util.ArrayList<>();
                     public final String kind, id;
                     private final java.util.List<long[]> output = new java.util.ArrayList<>();
                     private final java.util.Map<Integer, java.nio.ByteBuffer> buffers = new java.util.HashMap<>();
                     private final java.util.Set<Integer> released = new java.util.HashSet<>();
                     private int cursor, nextIndex, exhausted;
                     public MediaCodec(String kind) { this.kind = kind; this.id = "codec" + (++sequence); }
-                    public static MediaCodec createByCodecName(String name) { return defaultVideo(); }
-                    public static MediaCodec createEncoderByType(String mime) { return defaultVideo(); }
+                    public static MediaCodec createByCodecName(String name) { if (throwOnCreate) throw new IllegalStateException("codec create failed"); return defaultVideo(); }
+                    public static MediaCodec createEncoderByType(String mime) { if (throwOnCreate) throw new IllegalStateException("codec create failed"); return defaultVideo(); }
                     private static MediaCodec defaultVideo() {
                         MediaCodec c = new MediaCodec("V"); c.event(-2); c.packet(32, 1, 1000000L, 0); c.packet(0, 4, 2000000L, 0); return c;
                     }
                     public static Surface createPersistentInputSurface() { persistentCount++; return new Surface("persistent" + persistentCount); }
                     public void configure(MediaFormat fmt, Surface output, MediaCrypto crypto, int flags) {
                         probe.Events.add(id + ".configure:" + output);
+                        String mime = fmt == null ? null : fmt.mime;
+                        configureMimes.add(String.valueOf(mime));
+                        if (rejectHevcConfigure && mime != null && mime.toLowerCase().contains("hevc")) {
+                            throw new IllegalArgumentException("hevc configure rejected");
+                        }
                     }
                     public void setInputSurface(Surface surface) {
                         probe.Events.add(id + ".bind:" + surface);
@@ -298,9 +313,20 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                 import android.view.Surface;
                 public class MediaRecorder {
                     public static boolean rejectPersistent;
+                    /** Y17（MR 路）：编码器族被平台拒绝（HEVC 不可用）——按 AVC 换代重试 */
+                    public static boolean rejectHevcEncoder;
+                    /** Y20：实例构造即抛运行时异常（平台边界崩溃形态） */
+                    public static boolean throwOnConstruct;
+                    /** Y20：prepare 抛 RuntimeException（applyConfig 的新兜底分支） */
+                    public static RuntimeException prepareThrow;
+                    /** Y19：stop 抛 ISE（一帧未写/平台已自停的形态） */
+                    public static boolean stopThrows;
                     public static int sequence;
                     private final String id = "mr" + (++sequence);
                     private final Surface surface = new Surface(id + "-input");
+                    public MediaRecorder() {
+                        if (throwOnConstruct) throw new IllegalStateException("MediaRecorder ctor failed");
+                    }
                     public interface OnInfoListener { void onInfo(MediaRecorder recorder, int what, int extra); }
                     public interface OnErrorListener { void onError(MediaRecorder recorder, int what, int extra); }
                     public Surface getSurface() { return surface; }
@@ -318,28 +344,38 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                     public void setAudioSamplingRate(int value) {}
                     public void setAudioChannels(int value) {}
                     public void setAudioEncodingBitRate(int value) {}
-                    public void setVideoEncoder(int value) {}
+                    public void setVideoEncoder(int value) {
+                        // AOSP 常量：H264=2、HEVC=5（编译期已内联进生产字节码，这里按值判）
+                        if (rejectHevcEncoder && value == 5) throw new IllegalArgumentException("hevc encoder rejected");
+                    }
                     public void setCaptureRate(double value) {}
                     public void setOrientationHint(int value) {}
                     public void setInputSurface(Surface value) { if (rejectPersistent) throw new IllegalArgumentException("拒绝 persistent"); }
                     public void setOnInfoListener(OnInfoListener value) {}
                     public void setOnErrorListener(OnErrorListener value) {}
-                    public void prepare() {}
+                    public void prepare() { if (prepareThrow != null) throw prepareThrow; }
                     public void start() { probe.Events.add(id + ".start"); }
-                    public void stop() { probe.Events.add(id + ".stop"); }
+                    public void stop() {
+                        probe.Events.add(id + ".stop");
+                        if (stopThrows) throw new IllegalStateException("stop failed");
+                    }
                     public void release() { probe.Events.add(id + ".release"); }
                 }
             """,
             "com.wotagei.cam.record.OutputTarget" to """
                 package com.wotagei.cam.record;
                 public class OutputTarget {
+                    public static int opens, closes;
                     public static final Companion Companion = new Companion();
                     public String getPath() { return "boundary.mp4"; }
                     public java.io.FileDescriptor getFileDescriptor() { return null; }
                     public boolean getUsable() { return true; }
-                    public void close() {}
+                    public void close() { closes++; }
                     public static class Companion {
-                        public OutputTarget open(android.content.Context ctx, OutputSink sink) { return new OutputTarget(); }
+                        public OutputTarget open(android.content.Context ctx, OutputSink sink) {
+                            opens++;
+                            return new OutputTarget();
+                        }
                     }
                 }
             """,
@@ -348,12 +384,13 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                 public class VideoStore {
                     public String checkFreeSpace() { return null; }
                     public long getSeriesId() { return 1L; }
-                    public void discard(OutputSink sink) {}
+                    public void discard(OutputSink sink) { probe.Events.add("store.discard"); }
                     public android.net.Uri createPending(int part, String prefix) { return new android.net.Uri("content://record/" + part); }
                     public static android.net.Uri createPending${'$'}default(VideoStore self, int part, String prefix, int mask, Object marker) {
                         return self.createPending(part, prefix);
                     }
                     public VideoSegment seal(OutputSink sink, int part, long start, long duration, boolean keep) {
+                        probe.Events.add("store.seal:" + part + ":" + duration + ":" + keep);
                         return new VideoSegment(null, "boundary.mp4", part, 1024L, start, duration, true);
                     }
                 }

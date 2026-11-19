@@ -273,6 +273,229 @@ class RecorderCompatibilityBridgeTest {
             listOf("V:0", "V:1", "A:0", "A:1", "C:0", "C:1"))
     }
 
+    // ---- Y17：HEVC 预筛通过但实际 configure 被拒 → 释放失败实例后按完整 AVC 重试 ----
+
+    /**
+     * 鉴别力：旧实现只有"能力表预筛"一层，configure 实拒直接走 PREPARE_FAILED。
+     * 本例让能力表说支持 HEVC（空口通过预筛）、configure 抛拒收，断言**两次 configure 真发生**、
+     * 失败实例被释放、重试落在新实例上，且生效 profile 的 codec 与码率都落到 AVC 口径。
+     */
+    @Test
+    fun `Y17 Codec实配被拒后按AVC重试且码率不乘HEVC系数`() = platform { p ->
+        p.static("android.media.MediaCodec", "rejectHevcConfigure", true)
+        val recorder = p.recorder()
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(hevc = true, bitrate = 0), p.sink()))
+            @Suppress("UNCHECKED_CAST")
+            val mimes = p.type("android.media.MediaCodec").getField("configureMimes").get(null) as List<String>
+            assertEquals(
+                "必须先按 HEVC 实配、被拒后再按 AVC 重试（两次 configure 都要真发生）",
+                listOf("video/hevc", "video/avc"), mimes
+            )
+            assertTrue("失败实例必须被释放（不许留在场上）", p.events.contains("codec1.release"))
+            val effective = p.field(recorder, "profile")!!
+            assertEquals("生效 profile 的 codec 必须固化成 AVC", false, p.call(effective, "getHevc"))
+            assertEquals(
+                "码率必须按 AVC 口径（640x480@30 自动表 8M；HEVC 0.9 不得再参与）",
+                8_000_000, p.call(effective, "effectiveBitrate")
+            )
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /**
+     * MR 参照路：平台在 setVideoEncoder(HEVC) 拒收（运行时异常）——必须**释放旧实例**、
+     * 在新实例上按 H264 重试（同一实例二次 configure 是 2026-10-08「第二轮不可靠」的形态）。
+     */
+    @Test
+    fun `Y17 MrRecorder HEVC被拒后换新实例按AVC重试`() = platform { p ->
+        p.static("android.media.MediaRecorder", "rejectHevcEncoder", true)
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(hevc = true, bitrate = 0), p.sink()))
+            assertTrue("失败实例必须 release（不许原地复用）", p.events.contains("mr1.release"))
+            val mr = p.field(recorder, "mr")!!
+            assertEquals("重试必须发生在新实例上", "mr2", p.field(mr, "id"))
+            val effective = p.field(recorder, "profile")!!
+            assertEquals(false, p.call(effective, "getHevc"))
+            assertEquals(8_000_000, p.call(effective, "effectiveBitrate"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    // ---- Y19：MR 换段/错误回调必须核实例；封口取独立信号；ERROR 态可挽救段保留 ----
+
+    /**
+     * 旧实例（被换代销毁的那一枚）排队中的 801/802 与 MEDIA_ERROR 迟到送达时，不许斩到新段：
+     * 判据是**对象身份**（见 [mrCallbackIsStale]）。同一条回调换当前实例送来必须照常生效，
+     * 证明不是"一刀切忽略"的假绿。
+     */
+    @Test
+    fun `Y19 旧实例迟到的换段与错误回调整条忽略_当前实例照常`() = platform { p ->
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            p.call(recorder, "start")
+            val current = p.field(recorder, "mr")!!
+            val stale = p.new("android.media.MediaRecorder")
+            p.events.clear()
+            p.call(recorder, "onInfo", stale, 802, 0)
+            p.call(recorder, "onError", stale, 1, 0)
+            assertEquals("旧实例的换段请求不许切新段", 0, p.field(recorder, "partIndex"))
+            assertNull("旧实例的错误不许把新段判废", p.field(recorder, "engineError"))
+            // 对照：当前实例的 802 必须真正换段（证明判据只拦旧实例）
+            p.call(recorder, "onInfo", current, 802, 0)
+            assertEquals(1, p.field(recorder, "partIndex"))
+            assertNull(p.field(recorder, "engineError"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /**
+     * ERROR 态不等于容器坏：stop 正常返回（moov 已写完）就可挽救整段。
+     * 旧实现 ERROR 态直接 discardCurrent ⇒ 这里会是 `store.seal:…:false`；修复后必须 keep=true。
+     */
+    @Test
+    fun `Y19 引擎报错但停录正常返回时保留可挽救段`() = platform { p ->
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            p.call(recorder, "start")
+            p.call(recorder, "onError", p.field(recorder, "mr"), 1, 0)
+            ageSegment(p, recorder, 2_000)
+            p.events.clear()
+            p.call(recorder, "stop")
+            val seal = p.events.single { it.startsWith("store.seal:0:") }
+            assertTrue("stop 正常返回 = 容器已封口，整段必须保留（实际 $seal）", seal.endsWith(":true"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /** 反面对照：ERROR 态 + stop 抛异常（容器确实没封口）⇒ 才按废片回收。 */
+    @Test
+    fun `Y19 引擎报错且收口抛异常时才按废片回收`() = platform { p ->
+        p.static("android.media.MediaRecorder", "stopThrows", true)
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            p.call(recorder, "start")
+            p.call(recorder, "onError", p.field(recorder, "mr"), 1, 0)
+            ageSegment(p, recorder, 2_000)
+            p.events.clear()
+            p.call(recorder, "stop")
+            val seal = p.events.single { it.startsWith("store.seal:0:") }
+            assertTrue("收口失败 = 容器没封口，只能按废片（实际 $seal）", seal.endsWith(":false"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /** release 也是会话收尾：ERROR 态不许只 releaseEngine 把当前 pending 晾成幽灵行。 */
+    @Test
+    fun `Y19 release在ERROR态也收口并保留可挽救段`() = platform { p ->
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            p.call(recorder, "start")
+            p.call(recorder, "onError", p.field(recorder, "mr"), 1, 0)
+            ageSegment(p, recorder, 2_000)
+            p.events.clear()
+            p.call(recorder, "release")
+            val seal = p.events.single { it.startsWith("store.seal:0:") }
+            assertTrue("release 收尾必须与 stop 同口径（实际 $seal）", seal.endsWith(":true"))
+            assertTrue("实例必须被释放", p.events.any { it.startsWith("mr") && it.endsWith(".release") })
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /**
+     * 801（平台已自行停录并封口）之后再 stop 必抛；此时"容器已封口"由 801 这条独立信号给出，
+     * 不许按 STOP_FAILED 把刚写完的整段删掉。
+     */
+    @Test
+    fun `Y19 801自停后的stop失败仍按已封口保留旧段`() = platform { p ->
+        p.static("android.media.MediaRecorder", "stopThrows", true)
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            p.call(recorder, "start")
+            // 保留判据同时受 MIN_KEEP_MS 约束：把本段拨到门槛之外，测的才是"801 已封口"这一条，
+            // 而不是 1ms 的废片（后者按 TOO_SHORT 删掉是对的）
+            ageSegment(p, recorder, 2_000)
+            p.events.clear()
+            p.call(recorder, "onInfo", p.field(recorder, "mr"), 801, 0)
+            assertEquals("801 必须触发换段", 1, p.field(recorder, "partIndex"))
+            val seal = p.events.single { it.startsWith("store.seal:0:") }
+            assertTrue("801 = 平台已封口，旧段必须保留（实际 $seal）", seal.endsWith(":true"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    // ---- Y20：prepare 期真正部分获取的输出句柄/pending 必须在收口层回收 ----
+
+    /**
+     * Codec 路：编码器创建抛运行时异常（不属于任何既有失败分支）——不许漏给调用方，
+     * 必须关掉已打开的 fd、回收 pending，并按 PREPARE_FAILED 收场。
+     */
+    @Test
+    fun `Y20 Codec prepare期运行时异常也收干净fd与pending`() = platform { p ->
+        p.static("android.media.MediaCodec", "throwOnCreate", true)
+        val recorder = p.recorder()
+        try {
+            assertEquals(false, p.call(recorder, "prepare", p.profile(), p.sink()))
+            assertEquals(
+                "拿到的输出句柄必须关闭（不许悬到进程结束）",
+                1, p.type("com.wotagei.cam.record.OutputTarget").getField("closes").get(null)
+            )
+            assertTrue("pending 必须回收（否则冷启清扫/幽灵条目）", p.events.contains("store.discard"))
+            assertEquals(RecordError.PREPARE_FAILED, p.field(recorder, "engineError"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /** MR 路：实例构造抛运行时异常（applyConfig 都还没进）——外层兜底也必须关 fd、回收 pending。 */
+    @Test
+    fun `Y20 MrRecorder构造期异常也不漏fd与pending`() = platform { p ->
+        p.static("android.media.MediaRecorder", "throwOnConstruct", true)
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(false, p.call(recorder, "prepare", p.profile(), p.sink()))
+            assertEquals(
+                "输出句柄必须关闭", 1,
+                p.type("com.wotagei.cam.record.OutputTarget").getField("closes").get(null)
+            )
+            assertTrue("pending 必须回收", p.events.contains("store.discard"))
+            assertEquals(RecordError.PREPARE_FAILED, p.field(recorder, "engineError"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
+    /** MR 路：prepare() 抛非 ISE 的运行时异常——applyConfig 的兜底分支必须把它翻成"本次下发失败"。 */
+    @Test
+    fun `Y20 MrRecorder applyConfig运行时异常按prepare失败收口`() = platform { p ->
+        p.static("android.media.MediaRecorder", "prepareThrow", RuntimeException("boundary boom"))
+        val recorder = p.recorder(mr = true)
+        try {
+            assertEquals(false, p.call(recorder, "prepare", p.profile(), p.sink()))
+            assertTrue("pending 必须回收", p.events.contains("store.discard"))
+            assertEquals(
+                "输出句柄必须关闭", 1,
+                p.type("com.wotagei.cam.record.OutputTarget").getField("closes").get(null)
+            )
+            assertEquals(RecordError.PREPARE_FAILED, p.field(recorder, "engineError"))
+        } finally {
+            p.call(recorder, "release")
+        }
+    }
+
     private data class Expected(
         val writes: List<String>, val tracks: List<String>, val releases: List<String>, val videoBuffered: Boolean = false
     )
@@ -328,6 +551,13 @@ class RecorderCompatibilityBridgeTest {
 
     private fun platform(block: (RecorderPlatformFixture) -> Unit) {
         RecorderPlatformFixture(classes, javaClass.classLoader).use(block)
+    }
+
+    /** 把当前段的起钟拨到 [ms] 毫秒之前（封段判据的 MIN_KEEP_MS 门槛要真跨过去，不许靠 sleep 拖测试）。 */
+    private fun ageSegment(p: RecorderPlatformFixture, recorder: Any, ms: Long) {
+        val clock = p.field(recorder, "clock")!!
+        val now = p.type("android.os.SystemClock").getMethod("elapsedRealtime").invoke(null) as Long
+        p.set(clock, "segmentStartMs", now - ms)
     }
 
     companion object {

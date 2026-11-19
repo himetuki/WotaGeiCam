@@ -32,14 +32,20 @@ class RecorderOutputCloseGuardTest {
     }
 
     @Test
-    fun `CodecRecorder 的 prepare 在编码器创建失败时要就地关 t`() {
+    fun `CodecRecorder 的 prepare 在编码器创建失败时要回收 t`() {
+        // Y20 起所有权先登记：target = t 在资源建立段之前落位，失败分支不再各自 t.close()，
+        // 统一走 reject 的 target?.close()——同一枚 fd 仍只关一次，且边界外运行时异常也被覆盖。
         val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(codecMasked, "prepare"))
-        // 此时 target 字段还没轮到赋值，reject 的 target?.close() 够不着这枚 t
+        val own = body.indexOf("target = t")
+        val segment = body.indexOf("prepareSegment(")
+        assertTrue("prepare 必须先登记 target（否则 reject 的 target?.close() 够不着这枚 t）", own >= 0)
+        assertTrue("登记必须发生在资源建立段之前（own=$own segment=$segment）", own in 0 until segment)
+        val seg = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(codecMasked, "prepareSegment"))
+        assertTrue("锚点丢失：没截到编码器创建失败分支", seg.contains("if (video == null)"))
         assertTrue(
-            "prepare 缺少编码器失败分支的 t.close()——首个 fd 从第一条失败路就开始漏",
-            body.contains("t.close()")
+            "编码器创建失败必须经 reject（由登记过的 target 统一关 fd）",
+            seg.contains("reject(sink, RecordError.PREPARE_FAILED)")
         )
-        assertTrue("锚点丢失：没截到编码器创建", body.contains("createVideoEncoder(mime, p, inSurf)"))
     }
 
     @Test
