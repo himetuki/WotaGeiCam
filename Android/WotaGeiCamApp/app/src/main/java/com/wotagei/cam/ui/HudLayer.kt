@@ -126,6 +126,7 @@ import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.WotaStroke
 import com.wotagei.cam.ui.design.hudFrostDockRegistrar
+import com.wotagei.cam.ui.design.rememberFrostSlot
 import com.wotagei.cam.ui.design.hudFrostInherit
 import com.wotagei.cam.ui.design.hudFrostPlate
 import com.wotagei.cam.ui.design.pillAnchor
@@ -312,7 +313,8 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
 /**
  * 霜的 UI 侧唯一状态机：**底板的纯色 fill 该不该让位**只看这一个值。
  *
- * 判据是 `设置开关 ∧ GL 真贴了板`（[com.wotagei.cam.camera.FrostCardTable.isPlatesDrawn]），
+ * 判据是 `设置开关 ∧ 这一槽真贴出了 GL 板`（GL 在 swap 成功后发布的逐槽覆盖位，
+ * [com.wotagei.cam.camera.FrostCardTable.coveredSlotMask]；整页 [live] 只是它的粗判），
  * 不是"开关开着"——差别就在能不能守住「关掉要能完整回到现在的观感」这条：
  * DIRECT 模式、离屏链被坏驱动停用、相机还没出帧、窗口面被回收，这几种情况下开关可能仍是开的，
  * 但屏幕上一块板都没有。此时若让 fill 让位，卡片就变成"压在实时画面上的透明描边框"，
@@ -339,9 +341,25 @@ internal object HudFrost {
     /** 轮询周期（只在开关开着时跑）：可用性翻转最多晚一个周期被看见，真机延迟未量 */
     private const val REFRESH_MS = 200L
 
-    /** 底板 fill 让位态：只有 GL 真贴了板才 true（组合期读它，写它必须在主线程） */
+    /** 底板 fill 让位态（整页）：只要**任一**槽位真贴出 GL 板就 true（组合期读它） */
     var live by mutableStateOf(false)
         private set
+
+    /**
+     * 逐槽覆盖位快照（Y14）：bit `s` = 槽 s 这一帧真有 GL 霜上屏。
+     *
+     * 与 [live] 的分工：整页 [live] 只是"有没有任一块板"的粗判（样式/诊断用），
+     * **fill 让位必须逐板问**——完全落在信箱黑边上的板被 [com.wotagei.cam.camera.frostUvInto]
+     * 跳过（与画面无交集 ⇒ 一块都没画），拿整页 live 给它让位就只剩透明描边框。
+     * 由 200ms 轮询从 [com.wotagei.cam.camera.FrostCardTable.coveredSlotMask] 抄来，
+     * 只在这个值真变时才写（Compose 只在读它的节点上重组）。
+     */
+    var coveredMask by mutableIntStateOf(0)
+        private set
+
+    /** UI 侧逐板判据：槽 [slot] 这一拍有 GL 板吗（-1 = 没注册/槽满 ⇒ 恒 false，保留本地底） */
+    fun isCovered(slot: Int): Boolean =
+        slot in 0 until FrostCardTable.SLOT_CAPACITY && (coveredMask and (1 shl slot)) != 0
 
     /**
      * 设置开关的**意图**：开着就该往矩形表里喂卡片。
@@ -349,7 +367,8 @@ internal object HudFrost {
      * ⚠ 这条与 [live] 必须是两个值，不能合并。曾经注册点用 `live` 当"要不要写卡片"的闸门，
      * 于是形成启动死锁：卡片要 `live` 才写 → `live` 要 GL 画过板才真 → GL 要表里有卡片才画得出。
      * 真机上的表现是开关翻了背板纹丝不动（背板区开/关两帧只有 2.0% 像素变化，
-     * 而同两帧纯预览参照区自己就变了 24.5%）。分工：**[intent] 管喂表，[live] 管让位。**
+     * 而同两帧纯预览参照区自己就变了 24.5%）。分工：**[intent] 管喂表，逐槽 [coveredMask] 管让位**
+     * （[live] 只是"有没有任一块板"的粗判，样式/诊断用）。
      */
     var intent by mutableStateOf(false)
         private set
@@ -438,6 +457,7 @@ internal object HudFrost {
         prefs = null
         intent = false
         live = false
+        coveredMask = 0
     }
 
     /** 开关意图变了：开 ⇒ 起轮询；关 ⇒ 停轮询并当场把 fill 收回来（不等下一帧） */
@@ -452,16 +472,25 @@ internal object HudFrost {
             mainHandler.postDelayed(tick, REFRESH_MS)
         } else {
             live = false
+            coveredMask = 0
         }
     }
 
     private fun refreshAvailability() {
         if (!intent) {
             if (live) live = false
+            if (coveredMask != 0) coveredMask = 0
             return
         }
         refreshHeader()
-        val drawn = FrostCardTable.isPlatesDrawn()
+        // 逐槽覆盖位（Y14）：GL 在 swap 成功之后发布；这里只做镜像 + 去重。
+        // 整页 live 由它派生（有任一位 ⇒ 有板），两者同一次读取，不会出现"某槽说有、整页说无"。
+        val mask = FrostCardTable.coveredSlotMask()
+        if (mask != coveredMask) {
+            Diag.i("FrostDock", "covered -> 0x${mask.toString(16)}")
+            coveredMask = mask
+        }
+        val drawn = mask != 0
         if (drawn != live) {
             Diag.i("FrostDock", "live -> $drawn")
             live = drawn
@@ -1409,12 +1438,15 @@ fun HudDockZone(
     // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）。
     //
     // 这里**不走 wotaHudCard** 而是本地拼链（用户 2026-10-04「Dock 背影未收回」修复）：
-    // wotaHudCard 入口被 HudFrost.live 短路——滑出+面板期其他板退场把 GL 表清空、drew=0、
+    // wotaHudCard 入口被开关意图短路——滑出+面板期其他板退场把 GL 表清空、drew=0、
     // live 翻 false，恢复时 registrar 被 live 挡在门外，板永久回不来（死锁真机实证）。
     // 因此注册（hudFrostDockRegistrar）常驻且不读 live：滑出期写屏外哨兵让 GL 停画（背影修），
-    // 滑回写真矩形自愈；live 只用来决定 fill 让不让位（视觉）。
+    // 滑回写真矩形自愈；逐槽覆盖位只用来决定 fill 让不让位（视觉，Y14：本槽真贴出板才让）。
     val dockShape = RoundedCornerShape(WotaShape.radiusCard)
     val motion = LocalMotion.current
+    // 槽位与 fill 判据共用同一枚（Y14）：两处各领一枚会把判据绑到别的板身上
+    val frostSlot = rememberFrostSlot(HudFrost.intent)
+    val frostCovered = HudFrost.isCovered(frostSlot)
     // 2026-11-10 用户报障：开部分参考线后，Dock 上残影/降噪那片的霜没了、线直接透过来。
     // 根因就是这条第三路径：10-28 只给 wotaHudCard 与 wotaDockShell 补了叠加层口径，
     // 竖 Dock 底板的本地拼链漏网——叠加层在画时它仍注册 GL 板且 fill 让位，参考线（Compose
@@ -1432,13 +1464,13 @@ fun HudDockZone(
                 // 线只透 25%）——2026-11-10 二次反馈：97% 暖黑在黑边栏上等于没板；
                 // 霜关/滑出离屏 ⇒ 同一枚 hudScrim 兜底（滑回动画途中路过屏内也要有底）
                 .then(
-                    if (HudFrost.live && frostVisible && !overlaysOn) Modifier
+                    if (frostCovered && frostVisible && !overlaysOn) Modifier
                     else Modifier.background(WotaColor.hudScrim)
                 )
                 // 注册常驻（不读 live，防死锁）：frostVisible=false 写屏外哨兵，true 写实测矩形。
                 // 叠加层在画时**照常注册**（与 wotaHudCard/wotaDockShell 的新口径一致）：
                 // 板还在，只是被上面的灰罩压暗
-                .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible))
+                .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible, frostSlot))
                 // 10-01 布局批：Dock 随内部控件数量平滑变化宽高（用户指令；Motion 例外 #2，
                 // 规格见 MotionSpec.intSize，PLAIN 档同样走 scaled、reduced 时 0 时长直达）。
                 // 位置必须排在 clip/border **之后**（链上更内侧）：外层节点画的是内层上报的尺寸——

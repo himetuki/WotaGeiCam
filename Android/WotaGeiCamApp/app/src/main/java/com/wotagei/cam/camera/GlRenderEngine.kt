@@ -772,6 +772,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      */
     private val frostTableCopy = FloatArray(FrostCardTable.TABLE_FLOATS)
 
+    /**
+     * [frostTableCopy] 各压实块的**原始槽位号**（Y14，构造期定长，零分配）。
+     * 压实会丢掉槽位身份；逐槽覆盖位必须按它回填，否则 bit 会打到别的卡身上。
+     */
+    private val frostTableSlots = IntArray(FrostCardTable.SLOT_CAPACITY)
+
+    /**
+     * 本窗口帧真贴出的板位掩码（GL 线程独占；[drawFrostPlates] 写，[finishWindowFrame] 在
+     * swap 成功后交给 [FrostCardTable.reportPlatesCovered]）。
+     *
+     * 为什么不在 drawFrostPlates 里直接回报（Y14）：swap 可能失败，画的板没上屏，
+     * 先发布覆盖位会让 UI 撤掉底色而屏幕上根本没有板。只在**真换帧成功**之后发布。
+     */
+    private var frostFrameCovered = 0
+
     /** [frostTableCopy] 里压实后的卡片数（读表成功才有值；0 = 这帧一块板都不画） */
     private var frostTableCards = 0
 
@@ -2318,6 +2333,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 这一步只在窗口面里发生，[drawEncoderPass] 走的是另一条完整独立的路（同一条"绝不碰霜"红线）
         drawFrostPlates()
         if (!swap(window)) {
+            // 画的板没上屏 ⇒ 立刻整页撤报（含逐槽位）：UI 必须把纯色底画回来。
+            // 不得在 swap 之前发布 live——否则失败帧会让"屏上根本没有板"的卡片失去底色。
+            FrostCardTable.reportPlatesCovered(0)
             // 「画面全黑但应用活着」的头号静默路径（2026-10-30 真机录屏对账）：swap 失败就地
             // 摘除窗口面，之后 drawFrame 退到 pbuffer——相机帧照常消费、UI 照常响应，唯独
             // 屏幕全黑，且此前一行日志都不留。必须留痕：下一份日志先搜这一行。
@@ -2327,6 +2345,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             // 看门狗的 forceRebind 兜底
             onWindowSurfaceDropped?.invoke()
         } else {
+            // 真换帧成功之后才发布逐槽覆盖位（Y14）：此刻板确实已经在屏幕上
+            FrostCardTable.reportPlatesCovered(frostFrameCovered)
             lastWindowSwapNs = System.nanoTime()
             // 上屏心跳（单调）：只有 swap 成功才算"屏上真的换了一帧"，
             // 这条计数是「相机活着但整屏黑」唯一能观测到的死亡信号
@@ -2366,8 +2386,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /**
-     * 上屏画板（#84 步骤 2）：读一张矩形表、贴若干块「霜 + 圆角 + 底板色」，然后把"这帧真贴了板"
-     * 回报给 [FrostCardTable]，UI 侧据此决定底板的纯色 fill 让不让位。
+     * 上屏画板（#84 步骤 2）：读一张矩形表、贴若干块「霜 + 圆角 + 底板色」，把**这一帧真贴出板的槽位**
+     * 记成位掩码；掩码先落在 [frostFrameCovered]，等 [finishWindowFrame] 的 swap 真成功之后才交给
+     * [FrostCardTable.reportPlatesCovered]——UI 侧逐板据此决定底板的纯色 fill 让不让位（Y14）。
      *
      * 三条口径值得写明白：
      * - **读表与画板在同一条 GL 线程上**，所以表里的矩形与 `publishedFrost` 的等比画面矩形是同一帧的账，
@@ -2376,19 +2397,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * - 读表**不会失败也不会撞车**：一次 `tryReadInto` 拿到的就是某一整代的完整表（-1 只在调用方
      *   数组太短时出现，本类的 [frostTableCopy] 按 [FrostCardTable.TABLE_FLOATS] 定长，永不触发）；
      *   读到的表为空（`frostTableCards == 0`，HUD 还没注册板 / 表被停用）就一块都不画；
-     * - 快照为 null（开关刚关、链停用、还没出帧）时报 false ⇒ 旧的纯色 fill 立刻回来，
+     * - 逐槽位回报（而不是"有任一块就算整页有"）：与画面**无交集**的板（信箱黑边）会被
+     *   [FrostPlatePass] 跳过、不占掩码位 ⇒ UI 保留那几块的本地纯色底。整页的
+     *   [FrostCardTable.isPlatesDrawn] 由掩码派生（有任一位 ⇒ true），只是粗判/诊断用。
+     * - 快照为 null（开关刚关、链停用、还没出帧）时掩码为 0，swap 之后撤报 ⇒ 旧的纯色 fill 立刻回来，
      *   这一条是"关掉要能完整回到现在的观感"的可证部分。
      *
      * ⚠ **本函数不是每帧都跑到**：[drawWindowPass] 被 `windowThrottled()` 早退的那些帧（上屏帧率高于
-     * [MAX_DISPLAY_FPS] 时的节流帧）压根不进这里，既不贴板也不回报 ⇒ [FrostCardTable.isPlatesDrawn]
-     * 在节流间隔里保持上一帧的值。节流帧本来就不上屏，所以这不是漏报，但"每帧回报"那句话别说满。
+     * [MAX_DISPLAY_FPS] 时的节流帧）压根不进这里，既不贴板也不回报 ⇒ 逐槽覆盖位在节流间隔里保持上一帧
+     * 的值。节流帧本来就不上屏，所以这不是漏报，但"每帧回报"那句话别说满。
      */
     private fun drawFrostPlates() {
         val snapshot = publishedFrost
         val pass = frostPlatePass
-        val read = FrostCardTable.tryReadInto(frostTableCopy)
+        val read = FrostCardTable.tryReadInto(frostTableCopy, frostTableSlots)
         if (read >= 0) frostTableCards = read
-        val drew = if (snapshot != null && pass != null && frostTableCards > 0) {
+        val covered = if (snapshot != null && pass != null && frostTableCards > 0) {
             val rect = snapshot.contentRectInViewPx
             pass.draw(
                 texId = snapshot.textureId,
@@ -2401,16 +2425,19 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 viewWidthPx = windowWidth,
                 viewHeightPx = windowHeight,
                 table = frostTableCopy,
-                cardCount = frostTableCards
+                cardCount = frostTableCards,
+                cardSlots = frostTableSlots
             )
         } else {
             0
         }
+        // 本帧结果先落在 GL 线程字段上；**不在这里回报**——swap 成功后由 [finishWindowFrame]
+        // 发布（Y14：画了但没上屏的帧不许让 UI 撤底色）
+        frostFrameCovered = covered
         // 霜探针（#84）：只做镜像写，不参与任何判断——这帧"表里几块、实画几块、快照在不在"如实留档
         frostDiagSnapshotPublished = snapshot != null
         frostDiagTableCards = frostTableCards
-        frostDiagDrewPlates = drew
-        FrostCardTable.reportPlatesDrawn(drew > 0)
+        frostDiagDrewPlates = Integer.bitCount(covered)
     }
 
     private fun dropWindowSurface() {
@@ -3396,6 +3423,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         arcMendPass = null
         publishedFrost = null
         frostTableCards = 0
+        frostFrameCovered = 0
         frostDiagSnapshotPublished = false
         frostDiagTableCards = -1
         frostDiagDrewPlates = -1

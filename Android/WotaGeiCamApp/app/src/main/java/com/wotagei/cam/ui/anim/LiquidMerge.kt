@@ -5,7 +5,6 @@ import android.graphics.Matrix
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -30,6 +29,7 @@ import com.wotagei.cam.ui.design.WotaColor
 import com.wotagei.cam.ui.design.WotaMotion
 import com.wotagei.cam.ui.design.WotaStroke
 import com.wotagei.cam.ui.design.frostScrimAlphaFor
+import com.wotagei.cam.ui.design.rememberFrostSlot
 import com.wotagei.cam.ui.viewLocalOriginInto
 import com.wotagei.cam.ui.windowOriginInto
 import kotlin.math.hypot
@@ -592,12 +592,13 @@ fun Modifier.mergeAnchor(scene: MergeScene, target: Int): Modifier =
  * `RoundedCornerShape(percent = 50)` 在同一个盒子上的形状**逐像素同形**（那枚 shape 的半径也是短轴一半），
  * 所以静止态没有观感变化，变的只是"轮廓跟着 p 一起缩"。
  *
- * ## #84 步骤 2 之后：fill 只在霜没在屏幕上时画
- * [com.wotagei.cam.ui.HudFrost.live] 为 true 时这一层不再自绘 fill，而是把**当前可见矩形**注册进
- * `camera/FrostCardTable`，由 GL 在预览 blit 之后贴「霜 + 圆角 + 底板色」（A2 混合路线，
- * docs/plan/14 §二）。描边、录制键、两颗条目一概不动。注册走绘制期而不是布局期，是因为可见轮廓每帧
+ * ## #84 步骤 2 之后：fill 只在本槽真有霜时让位
+ * 开关意图开着时这一层把**当前可见矩形**注册进 `camera/FrostCardTable`，由 GL 在预览 blit 之后贴
+ * 「霜 + 圆角 + 底板色」（A2 混合路线，docs/plan/14 §二）。fill 是否让位看**逐槽覆盖位**
+ * （GL swap 成功后发布）：本槽没有板（黑边无交集 / 还没出帧 / 链停用）就照旧自绘 fill，
+ * 只有本槽真贴出板时才让位。描边、录制键、两颗条目一概不动。注册走绘制期而不是布局期，是因为可见轮廓每帧
  * 随 p 收拢而布局盒锁死；半径送「短边一半」的负数哨兵，与 [DockShell.cornerRadiusPx] 同一个数、
- * 两边不各写一份。live 为 false（开关关 / DIRECT / 离屏链停用）时这里就是**改前那一段代码**，逐字同观感。
+ * 两边不各写一份。开关关时这里就是**改前那一段代码**，逐字同观感。
  *
  * ## 为什么自绘而不是继续用 wotaCard
  * `wotaCard` 的填充是 `clip(shape).background(color)`、描边是 `border(width, color, shape)`，
@@ -636,7 +637,7 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     // 与 drawWithCache 的 size 出自同一次布局，所以窗口坐标在这里是量得出的。
     // live 管"这一层 fill 让不让位"，intent 管"要不要注册进矩形表"。两者不能并成一个：
     // 用 live 去闸注册会启动死锁（卡片要 live 才写、live 要画过板才真、画板要卡片才有）。
-    val live = HudFrost.live
+    // Y14：fill 让位改成**逐槽**判据（本槽真贴出 GL 板才让），整页 live 不能代表黑边上的板。
     val intent = HudFrost.intent
     // 承载预览盒坐标（录制页由 CameraScreen provide）：非空 ⇒ 可见矩形在**视图局部坐标**里量，
     // 分屏那层祖先 graphicsLayer 缩放被 localPositionOf 抵消；为空（编辑控件页）⇒ 回退窗口系。
@@ -644,7 +645,8 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     // 2026-10-28 用户报障：参考线/站位线（Compose 叠加层）会压在底 Dock 上——因为霜板是 GL 画的
     // （预览图层，比叠加层更下）。叠加层在画时：不再让位给霜板，改画 97% 暖黑实底把线挡在下面。
     val overlaysOn = LocalPreviewOverlaysOn.current
-    val frostSlot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
+    val frostSlot = rememberFrostSlot(intent)
+    val frostCovered = HudFrost.isCovered(frostSlot)
     // 比对缓存：left/top/w/h + **节点原点 x/y**（六元）。原点必须进比对——页面往返/沉浸切换
     // 会平移节点而未动局部几何，漏比它就是「GL 板留在旧位置与 fill 分离」
     // （2026-10-04 真机 56px 分离实证）。视图局部系口径下这个原点是**视图局部**原点：
@@ -652,11 +654,6 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
     val frostLast = remember { FloatArray(6) }
     val frostOriginPx = remember { FloatArray(2) }
     val frostAlpha = frostScrimAlphaFor(HudInkLevel.SECONDARY)
-    DisposableEffect(frostSlot) {
-        onDispose {
-            if (frostSlot >= 0) FrostCardTable.releaseSlot(frostSlot)
-        }
-    }
     return this then Modifier
         .onGloballyPositioned { coords ->
             // 节点原点：视图局部系优先（与注册矩形同一坐标系），预览盒未登记时回退旧窗口系。
@@ -707,11 +704,13 @@ fun Modifier.wotaDockShell(collapsedSize: Dp, progress: () -> Float): Modifier {
                 }
             }
             // 填充铺满形状本身（= 旧的 clip(shape) + background 那一层）。
-            // 霜在屏幕上时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）。
+            // 本槽真有 GL 霜时这一层让位：0xBF 的 fill 会把底下的霜全盖死，等于没做（docs/plan/14 §二）。
+            // Y14：判据是**逐槽**覆盖位而不是整页 live——底栏落进信箱黑边时 GL 一块没画，
+            // 整页 live 可能仍被别的板撑着；此时必须保留本地底，否则底栏只剩一圈描边。
             // 例外（2026-11-10 二次反馈后修正）：叠加层（参考线/站位线）在画时**不让位**，
             // 但用 75% hudScrim 压暗毛玻璃——97% 暖黑在左右黑边栏上等于"没有板"，用户报霜板变透明；
             // 75% 灰罩下板仍在、线只透 25%，控件稳在叠加层之上且仍可读
-            if (!live || overlaysOn) {
+            if (!frostCovered || overlaysOn) {
                 drawRoundRect(
                     color = WotaColor.hudScrim,
                     topLeft = Offset(left, top),
