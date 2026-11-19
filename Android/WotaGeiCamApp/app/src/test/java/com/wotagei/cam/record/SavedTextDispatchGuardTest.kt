@@ -234,12 +234,13 @@ class SavedTextDispatchGuardTest {
             collect.contains("val plan = recordTextPlan(result)")
         )
         val invalidateAt = collect.indexOf("repo.invalidate()")
-        val okAt = collect.indexOf("if (result.ok)")
+        // 前缀匹配（不要求右括号）：ok 判定现在与 settlement.await() 组合成一条 if
+        val okAt = collect.indexOf("if (result.ok")
         assertTrue("凡含已保存分段必须刷新相册", invalidateAt >= 0)
         assertTrue("ok 判定必须排在刷新之后（只有练习交付与失败清桥态认 ok）", okAt > invalidateAt)
         assertTrue(
-            "分段归组也必须排在刷新之后、同一分支内（混合结果的分段同样要归组）",
-            collect.indexOf("SeriesStore.record(") > invalidateAt
+            "分段归组也必须排在刷新之后、同一分支内（混合结果的分段同样要归组；Y21 起交会话所有者）",
+            collect.indexOf("TakeSettlement.settle(") > invalidateAt
         )
         // 突变自证：把刷新挪回 ok 分支（旧缺陷形态：失败/混合路径不刷新相册）——
         // 真身不变量是"刷新排在 ok 判定之前"，突变后不变量翻假（守卫生效）
@@ -248,7 +249,7 @@ class SavedTextDispatchGuardTest {
         assertTrue("突变体必须真的改了源码", mutated != raw)
         val mutatedCollect = codeOnly(mutated).substringAfter("runner.result.collect")
             .substringBefore("runner.clearResult()")
-        val mOkAt = mutatedCollect.indexOf("if (result.ok)")
+        val mOkAt = mutatedCollect.indexOf("if (result.ok")
         val mInvalidateAt = mutatedCollect.indexOf("repo.invalidate()")
         assertTrue(
             "刷新退回只认 ok 后不变量必须翻假（ok 判定先于刷新出现）",

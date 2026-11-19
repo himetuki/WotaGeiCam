@@ -10,16 +10,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 录制收尾落库的**接线与红线守卫**（#5 Step 4b）。
+ * 录制收尾落库的**接线与红线守卫**（#5 Step 4b；Y21 迁移到会话所有者）。
  *
- * [SeriesStoreTest] 钉纯逻辑真值表；这里钉的是「纯逻辑之外、只有源码能看见」的四件事：
- * 1. **接线**：`CameraScreen` 的 `result.collect` 里必须调 `SeriesStore.record(...)`，
- *    且必须传 `result.parts` 与 `result.seriesId`——传错成 `emptyList()` 或首段 uri 的话，
- *    归组永远建不起来，而真值表全绿。
+ * [SeriesStoreTest] 钉纯逻辑真值表；这里钉的是「纯逻辑之外、只有源码能看见」的五件事：
+ * 1. **接线搬家**：`CameraScreen` 的 `result.collect` 不再内联 `SeriesStore.record`，而是把
+ *    `result.parts / result.seriesId / runner.sessionStartedAtMs` 交给进程级所有者
+ *    `TakeSettlement.settle(...)`；页面退场只取消 `await`，不取消落库。
  * 2. **0 归属门槛**：`seriesId == 0L` 直接返回（不是所有录制路径都有系列归属）。
- * 3. **抗取消**：整段 `NonCancellable + Dispatchers.IO`——调用点在组合作用域的 `collect` 里，
- *    不抗取消就是"用户在写库途中离场 ⇒ 归组静默丢失"，且丢得毫无痕迹。
- * 4. **异常不许冒进 UI**：`runCatching` + `Log.e`，写库失败只是"归组没记上"，不许把录制页带崩。
+ * 3. **事务化**：系列头与成员行必须在同一个 `db.withTransaction` 里写（Y21）。
+ * 4. **抗取消**：整段 `NonCancellable + Dispatchers.IO`——调用方作用域被取消也不许写一半。
+ * 5. **异常不许冒进 UI**：`runCatching` + `Log.e`，写库失败只是"归组没记上"。
  */
 class SeriesStoreGuardTest {
 
@@ -35,14 +35,40 @@ class SeriesStoreGuardTest {
     }
 
     @Test
-    fun `录制成功分支必须调用SeriesStore_record并带上parts与seriesId`() {
+    fun `录制收尾必须交给会话所有者且带上parts_seriesId与会话起始时刻`() {
         val collect = collectBlock(masked("ui/CameraScreen.kt"))
-        assertTrue("result.ok 分支必须调 SeriesStore.record（不调 = 分段永远归不了组）", collect.contains("SeriesStore.record("))
-        assertTrue("必须传 result.parts（传首段 uri 或 emptyList 都建不起组）", collect.contains("result.parts"))
-        assertTrue("必须传 result.seriesId", collect.contains("result.seriesId"))
-        assertTrue("必须传本会话起始时刻（runner.sessionStartedAtMs）", collect.contains("runner.sessionStartedAtMs"))
-        // 取消不许被 runCatching 吞掉（吞掉后协程会在已取消的作用域里继续 collect）
-        assertTrue("CancellationException 必须原样抛回", collect.contains("catch (ce: CancellationException)") && collect.contains("throw ce"))
+        assertTrue(
+            "result 分支必须调 TakeSettlement.settle（内联 SeriesStore.record 会在退页时被取消）",
+            collect.contains("TakeSettlement.settle(")
+        )
+        assertTrue("必须传 result.parts（传首段 uri 或 emptyList 都建不起组）", collect.contains("parts = result.parts"))
+        assertTrue("必须传 result.seriesId", collect.contains("seriesId = result.seriesId"))
+        assertTrue(
+            "必须传本会话起始时刻（runner.sessionStartedAtMs）",
+            collect.contains("startedAtMs = runner.sessionStartedAtMs")
+        )
+        assertTrue("必须传结果成功态（练习只交付干净成功）", collect.contains("resultOk = result.ok"))
+        assertTrue(
+            "必须传练习武装快照（所有者决定交付/清桥态）",
+            collect.contains("practiceArmed = ComparePractice.armed")
+        )
+        assertTrue(
+            "页内导航必须等所有者的交付结论（被取消时所有者仍继续落库）",
+            collect.contains("settlement.await().practiceDelivered")
+        )
+        assertFalse(
+            "UI 不许再内联 SeriesStore.record（归组已搬到进程级所有者）",
+            collect.contains("SeriesStore.record(")
+        )
+    }
+
+    @Test
+    fun `所有者里必须真的调SeriesStore_record并带齐参数`() {
+        val owner = body("record/TakeSettlement.kt", "writeSeries")
+        assertTrue("生产后端必须调 SeriesStore.record", owner.contains("SeriesStore.record("))
+        assertTrue("必须传 seriesId", owner.contains("seriesId"))
+        assertTrue("必须传会话起始时刻", owner.contains("startedAtMs"))
+        assertTrue("必须把段映射成 SeriesPartInput", owner.contains("SeriesPartInput("))
     }
 
     @Test
@@ -52,7 +78,8 @@ class SeriesStoreGuardTest {
         assertTrue("纯函数算出空（不足两段）直接返回", rec.contains("if (rows.isEmpty()) return"))
         assertTrue("必须 upsert 系列头（MediaSeries）", rec.contains("upsertSeries("))
         assertTrue("必须逐段 upsert 成员（SeriesPart）", rec.contains("upsertPart("))
-        assertTrue("必须抗取消（组合作用域的 collect 里离场会漏记）", rec.contains("NonCancellable + Dispatchers.IO"))
+        assertTrue("系列头与成员行必须同一事务（Y21）", rec.contains("db.withTransaction"))
+        assertTrue("必须抗取消（调用方作用域被取消也不许写一半）", rec.contains("NonCancellable + Dispatchers.IO"))
         assertTrue("写库异常必须吞掉", rec.contains("runCatching"))
         assertTrue("写库失败必须留日志", rec.contains("Log.e("))
     }
@@ -71,11 +98,11 @@ class SeriesStoreGuardTest {
         val storeRaw = mainSourceText("media/SeriesStore.kt")
 
         // ① 接线：把 result.parts 换成空列表（归组建不起来，真值表却全绿）
-        val noParts = screenRaw.replace("result.seriesId, runner.sessionStartedAtMs, result.parts", "result.seriesId, runner.sessionStartedAtMs, emptyList()")
+        val noParts = screenRaw.replace("parts = result.parts", "parts = emptyList()")
         assertTrue("突变体①必须真的改了源码", noParts != screenRaw)
-        assertFalse("传 emptyList 时接线判据必须翻假", collectBlock(codeOnly(noParts)).contains("result.parts"))
+        assertFalse("传 emptyList 时接线判据必须翻假", collectBlock(codeOnly(noParts)).contains("parts = result.parts"))
 
-        // ② 抗取消：把 NonCancellable 摘掉（离场即漏记，且毫无痕迹）
+        // ② 抗取消：把 NonCancellable 摘掉（取消即写一半，且毫无痕迹）
         val noNc = storeRaw.replace("NonCancellable + Dispatchers.IO", "Dispatchers.IO")
         assertTrue("突变体②必须真的改了源码", noNc != storeRaw)
         assertFalse(
@@ -97,11 +124,19 @@ class SeriesStoreGuardTest {
             flatten(bodyOf(codeOnly(noNc), "record")).contains("if (seriesId == 0L) return")
         )
         assertTrue(
-            "摘掉 0 归属门槛不得牵连接线。门槛住在 media/SeriesStore.kt、接线判据吃的是 " +
-                "ui/CameraScreen.kt——两个判据的输入互不相干，所以这里对 CameraScreen 原文校验；" +
-                "旧写法把 noZero（SeriesStore 的突变体）喂给 collectBlock，" +
-                "在 SeriesStore.kt 里找 runner.result.collect 必然炸「失去输入」（门禁 #1c 实测）",
-            collectBlock(codeOnly(screenRaw)).contains("SeriesStore.record(")
+            "摘掉 0 归属门槛不得牵连接线（两个判据的输入互不相干）",
+            collectBlock(codeOnly(screenRaw)).contains("TakeSettlement.settle(")
+        )
+    }
+
+    @Test
+    fun `突变自证：事务被拆开后守卫必红`() {
+        val storeRaw = mainSourceText("media/SeriesStore.kt")
+        val noTx = storeRaw.replace("db.withTransaction {", "run {")
+        assertTrue("突变体必须真的改了源码", noTx != storeRaw)
+        assertFalse(
+            "拆掉事务后系列头/成员行不再原子（Y21 回潮）",
+            flatten(bodyOf(codeOnly(noTx), "record")).contains("db.withTransaction")
         )
     }
 
@@ -120,14 +155,25 @@ class SeriesStoreGuardTest {
             "门槛必须落在纯函数里（挪回 record 里就 JVM 测不到，改成 <1 也不会红）",
             flatten(bodyOf(store, "seriesPartsToRecord")).contains("rows.size < MIN_SERIES_PARTS")
         )
+        assertTrue(
+            "未发布段过滤必须落在纯函数里（Y21：committed=false 不许进系列）",
+            flatten(bodyOf(store, "seriesPartsToRecord")).contains("if (!p.committed)")
+        )
 
-        // 突变自证：把 < MIN_SERIES_PARTS 改成 < 1，判据必须翻红
+        // 突变自证 1：把 < MIN_SERIES_PARTS 改成 < 1，判据必须翻红
         val raw = mainSourceText("media/SeriesStore.kt")
         val mutant = raw.replace("rows.size < MIN_SERIES_PARTS", "rows.size < 1")
         assertTrue("突变体必须真的改了源码（没改动 = 这条自证什么也证明不了）", mutant != raw)
         assertFalse(
             "门槛被改成 < 1 后判据必须翻假",
             flatten(bodyOf(codeOnly(mutant), "seriesPartsToRecord")).contains("rows.size < MIN_SERIES_PARTS")
+        )
+        // 突变自证 2：摘掉未发布过滤，判据必须翻红
+        val noCommitted = raw.replace("if (!p.committed) return@mapNotNull null", "")
+        assertTrue("突变体必须真的改了源码", noCommitted != raw)
+        assertFalse(
+            "摘掉未发布过滤后判据必须翻假",
+            flatten(bodyOf(codeOnly(noCommitted), "seriesPartsToRecord")).contains("if (!p.committed)")
         )
     }
 }

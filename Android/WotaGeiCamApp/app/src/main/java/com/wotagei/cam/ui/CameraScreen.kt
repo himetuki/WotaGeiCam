@@ -2,7 +2,6 @@ package com.wotagei.cam.ui
 
 import android.app.Activity
 import android.Manifest
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
@@ -169,7 +168,6 @@ import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
-import com.wotagei.cam.media.SeriesStore
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
@@ -215,6 +213,7 @@ import com.wotagei.cam.record.MIN_OUTPUT_BYTES
 import com.wotagei.cam.record.PlaybackCaptureController
 import com.wotagei.cam.record.VIDEO_WINDOW_MS
 import com.wotagei.cam.record.FULL_WINDOW_MS
+import com.wotagei.cam.record.TakeSettlement
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.audioTrackPlan
 import com.wotagei.cam.record.engineWatchdogTrips
@@ -251,7 +250,6 @@ import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.MarkerLineOverlay
 import com.wotagei.cam.ui.widget.RefLineOverlay
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -566,34 +564,26 @@ fun CameraScreen(
                 // 凡结果含已保存分段就刷新相册（含失败/降级/join 超时路径，2026-10-16 "录制结果
                 // 如实化"）：旧实现只认 ok，失败/混合路径下已 commit 的片段要等退出重进才可见。
                 repo.invalidate()
-                // 分段归组落库（#5）：一次录制的多段写进 media_series/series_part，媒体库据此
-                // 把它们归成一组。必须在 invalidate **之后**落：invalidate 触发的重查与写库并发，
-                // 写完的 observe 流会再触发一次，届时成员关系已在库里。
-                // 重录沿用同一 seriesId，upsert 是 REPLACE ⇒ 只保留最终 attempt 的 parts。
-                // 整段 NonCancellable（SeriesStore 内部）：用户在写库途中离场不许把归组漏掉。
-                // 取消必须原样抛回（同 launchOp 口径）：runCatching 会把 CancellationException 一并吞掉，
-                // 吞掉之后这个协程会在已取消的作用域里继续 collect，闸门与后续逻辑全乱。
-                try {
-                    SeriesStore.record(repo.db(), result.seriesId, runner.sessionStartedAtMs, result.parts)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (e: Throwable) {
-                    Log.e(TAG_UI, "分段归组落库调用失败 seriesId=${result.seriesId}", e)
-                }
+                // 分段归组与练习交付交**进程级会话所有者**（Y21 / R07 同族收口）：页面组合作用域
+                // 在退页时会被取消，旧内联写库/交付会被截断在半路（漏归组、漏交付）。所有者持有
+                // 与页面生死无关的作用域，这里只在自己还活着时等待导航结论；等待被取消不影响
+                // 落库与交付——对比页回程读 ComparePractice.pendingRightId，不依赖本页存活。
+                val settlement = TakeSettlement.settle(
+                    db = repo.db(),
+                    seriesId = result.seriesId,
+                    startedAtMs = runner.sessionStartedAtMs,
+                    parts = result.parts,
+                    resultOk = result.ok,
+                    practiceArmed = ComparePractice.armed,
+                )
                 // 结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口）：判定（哪个标志出哪件事、
                 // 混合结果走「已保存 N 段」）全在 recordTextPlan 纯函数里，这里只做资源渲染——
                 // 理由与附注各成一族、任两件同时命中谁也不许盖谁。
                 showTip(app.recordText(plan))
                 // 练习闭环（2026-10-04 方向 4）：对比页发来的录制**干净成功**才弹栈回对比页，把新片
-                // 填右槽；非干净成功（半场成片）不交付、清桥态（同失败路：留在本页），不许把
-                // 上次练习的尾巴错配到本次半场录上。pending uri 自带 MediaStore id，此刻 IS_PENDING
-                // 已清，回程查询即刻可见；deliver 只在桥 armed 时认账，普通录制不受影响
-                if (result.ok) {
-                    val practiceId = result.uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
-                    if (practiceId != null && ComparePractice.deliver(practiceId)) onPracticeFinish()
-                } else {
-                    ComparePractice.armed = false
-                }
+                // 填右槽；非干净成功（半场成片）由所有者在同一结算里清桥态，且不交付未发布段
+                // （Y21「练习回程核对发布状态」）。deliver 只在桥 armed 时认账，普通录制不受影响。
+                if (result.ok && settlement.await().practiceDelivered) onPracticeFinish()
             } else {
                 // 无产物失败清掉桥态（留在本页看错误），不弹栈
                 ComparePractice.armed = false

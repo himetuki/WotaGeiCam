@@ -11,11 +11,12 @@ import org.junit.Test
  * `parseId` 做成入参，把 `ContentUris`/`Uri` 两个 Android 类型挡在测试之外。
  *
  * 覆盖的规则：
- * 1. `uriStr` 为 null 的段**不收**（没登记进 MediaStore 的段在媒体库里根本不存在）；
- * 2. `parseId` 解析不出的段**跳过**（`mediaId` 是主键的一半，塞 0 会让整组挂到不存在的媒体上）；
- * 3. 字段逐字对得上（seriesId / partIndex / mediaId / uri / durationMs 一路传下去）；
- * 4. 乱序输入保持引擎给的段序，读侧才排得出序；
- * 5. 门槛：有效段 < 2 ⇒ 返回空（单段不成系列）。
+ * 1. `committed == false` 的段**不收**（`IS_PENDING` 未清 = 相册不可见，收进系列就是孤儿行）；
+ * 2. `uriStr` 为 null 的段**不收**（没登记进 MediaStore 的段在媒体库里根本不存在）；
+ * 3. `parseId` 解析不出的段**跳过**（`mediaId` 是主键的一半，塞 0 会让整组挂到不存在的媒体上）；
+ * 4. 字段逐字对得上（seriesId / partIndex / mediaId / uri / durationMs 一路传下去）；
+ * 5. 乱序输入保持引擎给的段序，读侧才排得出序；
+ * 6. 门槛：有效段 < 2 ⇒ 返回空（单段不成系列）。
  *
  * 突变自证见末尾：把 ① 门槛改成 `< 1`、② 去掉 uri 空段过滤，两个突变体都必须与真规则**行数不同**。
  */
@@ -48,6 +49,35 @@ class SeriesStoreTest {
         )
         assertEquals("uri 为空的段必须跳过", 2, rows.size)
         assertEquals(listOf(0, 2), rows.map { it.partIndex })
+    }
+
+    /** Y21：发布未成功的段不许进系列（练习回程只认已发布段） */
+    @Test
+    fun `未发布段不收`() {
+        val rows = SeriesStore.seriesPartsToRecord(
+            7L,
+            listOf(
+                p(0, 100L),
+                SeriesPartInput(1, "content://media/external/video/media/101", 2_000L, committed = false),
+                p(2, 102L)
+            ),
+            parse
+        )
+        assertEquals("committed=false 的段必须跳过", 2, rows.size)
+        assertEquals(listOf(0, 2), rows.map { it.partIndex })
+    }
+
+    @Test
+    fun `全部未发布同样不成系列`() {
+        val rows = SeriesStore.seriesPartsToRecord(
+            7L,
+            listOf(
+                SeriesPartInput(0, "content://media/external/video/media/100", 1_000L, committed = false),
+                SeriesPartInput(1, "content://media/external/video/media/101", 1_000L, committed = false)
+            ),
+            parse
+        )
+        assertTrue("只有 committed 段才可能凑成系列", rows.isEmpty())
     }
 
     @Test
@@ -144,5 +174,36 @@ class SeriesStoreTest {
         assertEquals("对照组：真规则下 3 段进 2 段出", 2, real.size)
         assertEquals("突变体二必须真的偏离（空段也收 ⇒ 3 段进 3 段出）", 3, mutant.size)
         assertTrue("两个突变体必须与真规则分叉，否则这条自证什么也证明不了", real.size != mutant.size)
+    }
+
+    /**
+     * 突变体三：去掉 `if (!p.committed) return@mapNotNull null`（未发布段也收）。
+     *
+     * 真偏离：3 段（其中 1 段 committed=false）输入下，真规则出 2 行、突变体出 3 行。
+     */
+    private fun mutantKeepUncommitted(
+        seriesId: Long,
+        parts: List<SeriesPartInput>,
+        parseId: (String) -> Long?
+    ): List<SeriesPart> {
+        val rows = parts.mapNotNull { p ->
+            val uriStr = p.uriStr ?: return@mapNotNull null
+            val mediaId = parseId(uriStr) ?: return@mapNotNull null
+            SeriesPart(seriesId, p.partIndex, mediaId, uriStr, p.durationMs)
+        }
+        return if (rows.size < MIN_SERIES_PARTS) emptyList() else rows // ← 唯一的差别
+    }
+
+    @Test
+    fun `突变自证三：未发布段也收则真值表分叉`() {
+        val mixed = listOf(
+            p(0, 100L),
+            SeriesPartInput(1, "content://media/external/video/media/101", 2_000L, committed = false),
+            p(2, 102L)
+        )
+        val real = SeriesStore.seriesPartsToRecord(7L, mixed, parse)
+        val mutant = mutantKeepUncommitted(7L, mixed, parse)
+        assertEquals("对照组：真规则下 3 段进 2 段出", 2, real.size)
+        assertEquals("突变体三必须真的偏离（未发布段也收 ⇒ 3 段）", 3, mutant.size)
     }
 }
