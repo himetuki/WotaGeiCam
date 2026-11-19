@@ -227,6 +227,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         // 真实构造只初始化会话数据；不调 run/open，不进行 native/输出装配。
         // 即使旧代码错误地计成功，也有合法回调，不能用未初始化字段的 NPE 冒充行为 RED。
         val uri = type("android.net.Uri").getConstructor(String::class.java).newInstance("content://source/1")
+        // 准备期的截止时间也从投递起算；夹具使用与平台桩一致的起始时间。
         return type("com.wotagei.cam.record.ArcRepairSession").declaredConstructors.single { it.parameterCount == 9 }
             .apply { isAccessible = true }
             .newInstance(new("android.content.Context"), uri, true, 24, 0, 0, 0L, onProgress, { false })
