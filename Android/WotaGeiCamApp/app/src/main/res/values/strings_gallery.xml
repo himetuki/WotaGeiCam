@@ -24,6 +24,10 @@
     <!-- 空态 -->
     <string name="gallery_empty">这里还没有视频</string>
     <string name="gallery_trash_empty">回收站是空的</string>
+    <!-- 读取失败 / 权限受限（Y26）：空列表不再冒充真空库 -->
+    <string name="gallery_media_permission">没有媒体读取权限，看不到视频。请到系统设置里允许读取媒体</string>
+    <string name="gallery_media_access_limited">仅授权了部分视频，其余视频在系统权限里不可见</string>
+    <string name="gallery_media_query_failed">无法读取媒体库，请稍后重试</string>
 
     <!-- 图标朗读与菜单 -->
     <string name="gallery_desc_back">返回</string>

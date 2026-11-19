@@ -236,6 +236,7 @@ class MediaCompatibilityTest {
                 public class MediaStore {
                     public static class Video { public static class Media {
                         public static android.net.Uri EXTERNAL_CONTENT_URI = new android.net.Uri("content://media/external/video/media");
+                        public static android.net.Uri getContentUri(String volume) { return new android.net.Uri("content://media/"+volume+"/video/media"); }
                     } }
                 }
             """.trimIndent(),

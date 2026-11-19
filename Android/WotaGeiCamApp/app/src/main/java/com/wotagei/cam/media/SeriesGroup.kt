@@ -145,4 +145,15 @@ object SeriesGroup {
             if (group != null && group.size >= MIN_GROUP_SIZE) group else listOf(c)
         }.distinct()
     }
+
+    /**
+     * 组级动作的代表段（Y27）：`partIndex` 最小者，脏数据排最后。
+     *
+     * [expandSeriesTargets] 保留的是 `all` 的输入顺序（媒体库是 DATE_ADDED DESC），
+     * 直接取 `first()` 会落到较晚的一段；组卡对比等动作必须用首段。
+     */
+    fun representativeOf(clips: List<VideoClip>): VideoClip? {
+        val i = representativePartIndex(clips.map { it.partIndex })
+        return if (i < 0) null else clips[i]
+    }
 }

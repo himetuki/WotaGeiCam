@@ -223,7 +223,10 @@ class SeriesGroupGuardTest {
     @Test
     fun `菜单的批量动作必须吃展开后的列表且单片语义族留在代表段`() {
         val menu = body("media/GalleryScreen.kt", "CardMenu")
-        assertTrue("代表段必须取 targets.first()", menu.contains("clip = targets.first()"))
+        assertTrue(
+            "代表段必须是 partIndex 最小者（Y27：展开顺序是 DATE_ADDED DESC，targets.first() 可能反而是较晚分段）",
+            menu.contains("clip = SeriesGroup.representativeOf(targets) ?: targets.first()")
+        )
         assertTrue("分享必须扇出到 targets", menu.contains("ops.share(targets)"))
         assertTrue("移入回收站必须扇出到 targets", menu.contains("ops.moveToTrash(targets)"))
         assertTrue("还原必须扇出到 targets", menu.contains("ops.restoreFromTrash(targets)"))

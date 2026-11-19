@@ -83,10 +83,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.wotagei.cam.R
+import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.needsMediaAccessHint
 import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.player.WotaPlayerSurface
 import com.wotagei.cam.ui.WotaSettings
@@ -213,6 +218,46 @@ fun GalleryScreen(
     // **编排的结果**而不是真相，照旧显示"这里还没有视频"会被读成"视频全没了"。
     // 它不是持久化开关、不进 remember：闸门是仓库级进程状态，UI 只订阅。
     val listRefreshing by repo.listRefreshing.collectState(false)
+    // Y26：四态要分开——加载中 / 真空 / 读取失败 / 权限受限。三者都是仓库级只读流。
+    val listFailure by repo.listFailure.collectState(null)
+    val listLoaded by repo.listLoaded.collectState(false)
+    val accessState by repo.mediaAccess.collectState(null)
+
+    // 回前台重验媒体权限：用户从系统设置撤权/授权后回来，列表与缩略图必须主动失效（Y26）。
+    // 与 CompareScreen 的 practiceOwner 同一写法；observer 注册时会补发当前状态，首次组合即探测。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, repo) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) repo.refreshAccess()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 权限变化的那一刻，旧选择/旧菜单/旧确认框/旧系列面板都指向可能已不可见的行：一并作废。
+    // 首次探测（prev == null）不清——那时本来就没有选择。
+    var lastAccess by remember { mutableStateOf<MediaAccessState?>(null) }
+    LaunchedEffect(accessState) {
+        val now = accessState ?: return@LaunchedEffect
+        val prev = lastAccess
+        lastAccess = now
+        if (prev != null && prev != now) {
+            selectedIds = emptySet()
+            menuTargets = null
+            purgeIds = emptySet()
+            seriesSheet = null
+        }
+    }
+
+    // Y27：选中/待删集合必须与当前可见行求交。外部删片、撤权、别的页签操作导致列表收窄后，
+    // 旧 id 不能再留在选择条/确认框里（否则动作会作用到已不存在的条目，或标题报错数量）。
+    val liveIds = remember(clips) { clips.mapTo(HashSet()) { it.id } }
+    LaunchedEffect(liveIds) {
+        val kept = pruneSelection(selectedIds, liveIds)
+        if (kept != selectedIds) selectedIds = kept
+        val purgeKept = pruneSelection(purgeIds, liveIds)
+        if (purgeKept != purgeIds) purgeIds = purgeKept
+    }
 
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -270,6 +315,13 @@ fun GalleryScreen(
                     onSelect = { i, tab -> tabIndex = i; filter = tab.filter }
                 )
 
+                // 权限受限但列表仍有内容（自录视频在 NONE/PARTIAL 下依然可见）时，
+                // 空态文案落不到屏上；这条窄横幅把「为什么别家的视频不见了」说清楚（Y26）。
+                val accessHint = accessState
+                if (clips.isNotEmpty() && accessHint != null && needsMediaAccessHint(accessHint)) {
+                    MediaAccessBanner(accessHint)
+                }
+
                 // 页签 / 布局切换：整块内容侧滑淡入。BOM 2023.10.01 落在 foundation 1.5.4，
                 // 没有 animateItemPlacement，逐行位移动不了；这里只加 graphicsLayer，
                 // 不重建 LazyGrid，免得两副网格同时解码缩略图。
@@ -304,12 +356,24 @@ fun GalleryScreen(
                 ) {
                     val isTrash = filter is ClipFilter.Trash
                     when (mode) {
-                        ListMode.Timeline -> TimelineList(clips, isTrash, listRefreshing, onOpen, onMenu = openMenu)
+                        ListMode.Timeline -> TimelineList(
+                            clips,
+                            isTrash,
+                            listRefreshing,
+                            accessState,
+                            listFailure,
+                            listLoaded,
+                            onOpen,
+                            onMenu = openMenu
+                        )
                         ListMode.Grid -> ClipGrid(
                             clips = clips,
                             columns = gridColumns,
                             isTrash = isTrash,
                             refreshing = listRefreshing,
+                            access = accessState,
+                            listFailure = listFailure,
+                            loaded = listLoaded,
                             selectedIds = selectedIds,
                             onOpen = onOpen,
                             onMenu = openMenu,
@@ -318,7 +382,7 @@ fun GalleryScreen(
                                 selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
                             }
                         )
-                        ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, onOpen, onCompare, ops)
+                        ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, accessState, listFailure, listLoaded, onOpen, onCompare, ops)
                     }
                 }
 
@@ -364,14 +428,19 @@ fun GalleryScreen(
                             )
                         },
                         confirmButton = {
-                            TextButton(onClick = {
-                                purgeIds = emptySet()
-                                ops.deleteForever(
-                                    doomed,
-                                    pop = { selectedIds = emptySet() },
-                                    refresh = { repo.invalidate() }
-                                )
-                            }) { Text(stringResource(R.string.ok), color = WotaRec) }
+                            TextButton(
+                                enabled = doomed.isNotEmpty(),
+                                onClick = {
+                                    purgeIds = emptySet()
+                                    if (doomed.isNotEmpty()) {
+                                        ops.deleteForever(
+                                            doomed,
+                                            pop = { selectedIds = emptySet() },
+                                            refresh = { repo.invalidate() }
+                                        )
+                                    }
+                                }
+                            ) { Text(stringResource(R.string.ok), color = WotaRec) }
                         },
                         dismissButton = {
                             TextButton(onClick = { purgeIds = emptySet() }) { Text(stringResource(R.string.cancel)) }
@@ -422,16 +491,24 @@ fun GalleryScreen(
     // menuTargets 钉的是图标按下那一刻的片快照（组卡是多片的快照），批量操作的 repo.invalidate()
     // 重发可能在菜单打开之后才落地，菜单就拿着旧快照干活——收藏项对旧状态取反，撞上刚生效的
     // 批量收藏就是两次空写、零反馈（机理分析见下方 CardMenu 收藏项注释）。这里每个 id 都重新
-    // 解析当前列表里的最新一份；整组都不在了（极端时序）才回退快照，保证菜单仍可操作。
+    // 解析当前列表里的最新一份。
+    //
+    // Y27：**全部失配即关闭**，不再 `.ifEmpty { requested }` 回退旧快照——旧快照里的行已经
+    // 不可见，动作会打到已删/已撤权的条目上。部分失配只保留仍在列表里的成员（组动作因此
+    // 不会扇出到幽灵段）。
     menuTargets?.takeIf { it.isNotEmpty() }?.let { requested ->
         val targets = requested.mapNotNull { r -> clips.firstOrNull { it.id == r.id } }
-            .ifEmpty { requested }
-        CardMenu(
-            targets = targets,
-            ops = ops,
-            onDismiss = { menuTargets = null },
-            onCompare = { onCompare(targets.first().id) }
-        )
+        if (targets.isEmpty()) {
+            LaunchedEffect(requested) { menuTargets = null }
+        } else {
+            CardMenu(
+                targets = targets,
+                ops = ops,
+                onDismiss = { menuTargets = null },
+                // 组卡对比必须开代表段（首段），不能拿输入顺序的第一个（可能是较晚分段，Y27）
+                onCompare = { onCompare(SeriesGroup.representativeOf(targets)?.id ?: targets.first().id) }
+            )
+        }
     }
 }
 
@@ -631,6 +708,9 @@ private fun TimelineList(
     clips: List<VideoClip>,
     isTrash: Boolean,
     refreshing: Boolean,
+    access: MediaAccessState?,
+    listFailure: MediaListFailure?,
+    loaded: Boolean,
     onOpen: (Long) -> Unit,
     onMenu: (VideoClip) -> Unit
 ) {
@@ -639,7 +719,7 @@ private fun TimelineList(
     val scrolling by remember { derivedStateOf { listState.isScrollInProgress } }
     LaunchedEffect(scrolling) { ThumbLoader.paused = scrolling }
     DisposableEffect(Unit) { onDispose { ThumbLoader.paused = false } }
-    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing, access, listFailure, loaded)
     if (emptyState != GalleryEmptyState.LIST) {
         EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
@@ -807,6 +887,9 @@ private fun ClipGrid(
     columns: Int,
     isTrash: Boolean,
     refreshing: Boolean,
+    access: MediaAccessState?,
+    listFailure: MediaListFailure?,
+    loaded: Boolean,
     selectedIds: Set<Long>,
     onOpen: (Long) -> Unit,
     onMenu: (VideoClip) -> Unit,
@@ -817,7 +900,7 @@ private fun ClipGrid(
     val scrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
     LaunchedEffect(scrolling) { ThumbLoader.paused = scrolling }
     DisposableEffect(Unit) { onDispose { ThumbLoader.paused = false } }
-    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing, access, listFailure, loaded)
     if (emptyState != GalleryEmptyState.LIST) {
         EmptySlot(emptyState, if (isTrash) R.string.gallery_trash_empty else R.string.gallery_empty)
         return
@@ -1032,7 +1115,9 @@ private fun SeriesPartRow(part: VideoClip, onOpen: () -> Unit, onMenu: () -> Uni
  */
 @Composable
 private fun CardMenu(targets: List<VideoClip>, ops: MediaOps, onDismiss: () -> Unit, onCompare: () -> Unit) {
-    val clip = targets.first()
+    // Y27：组卡的单片动作（收藏/标签/重命名/对比）必须落在代表段（首段），
+    // 不能拿输入顺序第一个——媒体库是 DATE_ADDED DESC，那是较晚的一段。
+    val clip = SeriesGroup.representativeOf(targets) ?: targets.first()
     val repo = rememberMediaRepo()
     var tagDialog by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
@@ -1161,11 +1246,14 @@ fun MediaTagDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) {
 private fun FullscreenBrowse(
     clips: List<VideoClip>,
     refreshing: Boolean,
+    access: MediaAccessState?,
+    listFailure: MediaListFailure?,
+    loaded: Boolean,
     onOpen: (Long) -> Unit,
     onCompare: (Long) -> Unit,
     ops: MediaOps
 ) {
-    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing)
+    val emptyState = galleryEmptyState(clips.isEmpty(), refreshing, access, listFailure, loaded)
     if (emptyState != GalleryEmptyState.LIST) {
         EmptySlot(emptyState, R.string.gallery_empty)
         return
@@ -1178,7 +1266,11 @@ private fun FullscreenBrowse(
     val pos by engine.positionMs.collectState(0L)
     val dur by engine.durationMs.collectState(0L)
 
-    LaunchedEffect(page, clips) {
+    // B08：键必须是**当前片的 URI**，不是整个 clips 列表。收藏/标签/删除都会 invalidate，
+    // 以 clips 为键会在同一条片重发列表时重新 attach + softPause(false)——用户刚暂停的视频
+    // 被重新拉起，进度回到 0。只有换页（当前 URI 变化）才该换源。
+    val currentUri = clips.getOrNull(page)?.uri
+    LaunchedEffect(currentUri) {
         val clip = clips.getOrNull(page) ?: return@LaunchedEffect
         engine.attach(clip.uri)
         engine.softPause(false)
@@ -1350,8 +1442,11 @@ fun VideoThumbnail(
     contentScale: ContentScale = ContentScale.Crop
 ) {
     val app = LocalContext.current.applicationContext
-    var bitmap by remember(uri, px) { mutableStateOf(ThumbLoader.peek(uri, px)) }
-    LaunchedEffect(uri, px) {
+    // 代数进组合键（Y26）：撤权后 ThumbLoader.invalidateAll 推进代数，屏内记忆的旧 Bitmap
+    // 跟着换代重取——只清 LruCache 的话这里仍会显示已不可读的缩略图。
+    val gen by ThumbLoader.generation.collectState(0)
+    var bitmap by remember(uri, px, gen) { mutableStateOf(ThumbLoader.peek(uri, px)) }
+    LaunchedEffect(uri, px, gen) {
         if (bitmap == null) bitmap = ThumbLoader.load(app, uri, px)
     }
     Box(modifier.background(WotaSurfaceAlt), contentAlignment = Alignment.Center) {
@@ -1370,24 +1465,40 @@ fun VideoThumbnail(
 }
 
 /**
- * 内容区「空」那一刻的三种形态（**纯函数**，JVM 单测直接驱动，也是运行时的唯一判据）。
+ * 内容区「空」那一刻的形态（**纯函数**，JVM 单测直接驱动，也是运行时的唯一判据）。
  *
  * 2026-10-02 真机观察项：播放器「彻底删除」的收尾是「关闸 → 清缓存 → 出栈 → 开闸 → 重查」，
  * 那 1.1s 里 [MediaRepo.listRefreshing] 为 true、列表**故意**不下发。返回的媒体库是一次新组合，
  * `collectAsState(emptyList())` 只有空列表可显示 ⇒ 照旧显示"这里还没有视频"就是让用户以为
  * 自己十三条视频没了（刺眼且误导）。闸门一开真实快照自然替换，所以那一刻的真相是"刷新中"。
  *
- * 两条边界写在这里，因为它们是这条判据的全部语义：
- * - **列表不为空时闸门不参与**（返回 [GalleryEmptyState.LIST]）：闸门期内 `collectAsState`
- *   保留的是**上一份**列表（媒体库内批量删除就是这一形态），不能被判成"刷新中"而清空内容；
- * - **闸门关着且列表为空** 才是真的空（返回 [GalleryEmptyState.EMPTY]）：首帧查询还没回来、
- *   或这个库这个页签本来就没有视频，都走这一支。
+ * 2026-11-19（Y26）再拆四态：查询失败（[MediaListFailure]）、未授权/部分授权（[MediaAccessState]）、
+ * 首查未回（[MediaRepo.listLoaded] == false）不再与"真空库"同形。优先级刻意写成：
+ * 列表非空 → 刷新中 → 权限失败 → 未授权 → 查询失败 → 加载中 → 部分授权 → 真空。
+ *
+ * 边界：**列表不为空时一切空态标记都不参与**（返回 [GalleryEmptyState.LIST]）：闸门期内
+ * `collectAsState` 保留的是**上一份**列表（媒体库内批量删除就是这一形态），不能被判成
+ * "刷新中"而清空内容；权限横幅（[MediaAccessBanner]）在列表非空时另行说明受限。
  */
-internal enum class GalleryEmptyState { LIST, REFRESHING, EMPTY }
+internal enum class GalleryEmptyState { LIST, LOADING, REFRESHING, EMPTY, LIMITED, PERMISSION, FAILURE }
 
-internal fun galleryEmptyState(clipsEmpty: Boolean, listRefreshing: Boolean): GalleryEmptyState = when {
+internal fun galleryEmptyState(
+    clipsEmpty: Boolean,
+    listRefreshing: Boolean,
+    access: MediaAccessState? = null,
+    listFailure: MediaListFailure? = null,
+    loaded: Boolean = true
+): GalleryEmptyState = when {
+    // 列表非空时一切状态标记都不参与（闸门期内保留的是上一份列表，不能判成刷新中而清空）
     !clipsEmpty -> GalleryEmptyState.LIST
+    // 闸门押后与首查未回都是「等一下」，但一个来自删除编排、一个来自冷启
     listRefreshing -> GalleryEmptyState.REFRESHING
+    // 查询失败要压过「授权正常」的猜测：SecurityException 已经是最直接的现场
+    listFailure == MediaListFailure.PERMISSION -> GalleryEmptyState.PERMISSION
+    access == MediaAccessState.NONE -> GalleryEmptyState.PERMISSION
+    listFailure == MediaListFailure.QUERY -> GalleryEmptyState.FAILURE
+    !loaded -> GalleryEmptyState.LOADING
+    access == MediaAccessState.PARTIAL_READ -> GalleryEmptyState.LIMITED
     else -> GalleryEmptyState.EMPTY
 }
 
@@ -1398,9 +1509,35 @@ internal fun galleryEmptyState(clipsEmpty: Boolean, listRefreshing: Boolean): Ga
 @Composable
 private fun EmptySlot(state: GalleryEmptyState, emptyTextRes: Int) {
     when (state) {
+        GalleryEmptyState.LOADING -> RefreshHint()
         GalleryEmptyState.REFRESHING -> RefreshHint()
         GalleryEmptyState.EMPTY -> EmptyHint(stringResource(emptyTextRes))
+        GalleryEmptyState.LIMITED -> EmptyHint(stringResource(R.string.gallery_media_access_limited))
+        GalleryEmptyState.PERMISSION -> EmptyHint(stringResource(R.string.gallery_media_permission))
+        GalleryEmptyState.FAILURE -> EmptyHint(stringResource(R.string.gallery_media_query_failed))
         GalleryEmptyState.LIST -> Unit
+    }
+}
+
+/**
+ * 权限受限但列表仍有内容时的窄横幅（Y26）：NONE/PARTIAL 下自录视频依然可见，
+ * 空态文案落不到屏上，这条把「其余视频为什么不见了」说清楚。
+ */
+@Composable
+private fun MediaAccessBanner(state: MediaAccessState) {
+    val text = stringResource(
+        if (state == MediaAccessState.NONE) R.string.gallery_media_permission
+        else R.string.gallery_media_access_limited
+    )
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(WotaSurfaceAlt)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = WotaTextDim)
     }
 }
 
