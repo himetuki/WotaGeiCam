@@ -59,9 +59,10 @@ class GlowParamsTest {
 
     @Test
     fun `角点_threshold1_soft0_经sanitize仍可达`() {
-        // 🟡-6（docs/reviews/1029/29-shader-bright-corner.md）：SCENE_BRIGHT_FS 的 hi 修复式
-        // max(th+soft, lo+0.0001) 以「角点 (1f, 0f) 仍是合法输入」为前提——域若被收窄，
-        // shader 防御的覆盖面就在静默中改变。域改动必须在这里有意识地改。
+        // 🟡-6（docs/reviews/1029/29-shader-bright-corner.md）：SCENE_BRIGHT_FS 的角点语义
+        // 以「(1f, 0f) 仍是合法输入」为前提——Y12 起 shader 不再加 0.0001 余量，而是
+        // hi>lo 才 smoothstep、相等则 step 硬切。域若被收窄，这条覆盖就在静默中改变；
+        // 域改动必须在这里有意识地改。
         val corner = GlowParams(threshold = 1f, soft = 0f).sanitize()
         assertEquals(GLOW_THRESHOLD_MAX, corner.threshold)
         assertEquals(0f, corner.soft)

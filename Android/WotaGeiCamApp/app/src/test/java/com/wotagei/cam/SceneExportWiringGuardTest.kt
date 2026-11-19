@@ -351,21 +351,25 @@ class SceneExportWiringGuardTest {
         assertTrue("亮部保留、暗部压零：颜色 × w", bright.contains("vec4(pick * w, 1.0)"))
         assertTrue(
             "软边必须朝 1.0 收敛（阈值 100% = 只给最亮像素加光晕，与 GLOW_COPY_FS 同口径）",
-            bright.contains("min(uSoft, max(1.0 - uThreshold, 0.0) + 0.0001)")
+            bright.contains("min(uSoft, max(1.0 - uThreshold, 0.0))")
         )
         assertTrue("亮度取 Rec601 三通道加权（与 GLOW_COPY_FS 同口径）", bright.contains("0.299, 0.587, 0.114"))
-        // 🟡-6 角点防御（2026-10-29，docs/reviews/1029/29-shader-bright-corner.md）：hi 的
-        // 1.0 截断曾在唯一角点 (threshold=1.0, soft=0) 吃掉 +0.0001 余量 ⇒ lo==hi ⇒
-        // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。修复式勿叠加 1.0 上限——叠加在
-        // 同一角点仍截回 lo==hi，等于没修（29 专档「修复方向」二次校核结论）。
+        // Y12：fp16 下 1.0 附近的 ulp≈0.0009766，任何 `+0.0001` 余量都会被舍回 ⇒ lo==hi ⇒
+        // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。现在只在 hi>lo 时 smoothstep，
+        // 边界不可分辨则 step 硬切；与 GLOW_COPY_FS 逐字同口径。
         assertTrue(
-            "hi 必须是 max(uThreshold + s, lo + 0.0001)（s = 压缩后的软边；edge0<edge1 恒成立，与 GLOW_COPY_FS 同款防御）",
-            bright.contains("max(uThreshold + s, lo + 0.0001)")
+            "过渡带上界 = uThreshold + s（不再用加法余量伪造 edge0<edge1）",
+            bright.contains("float hi = uThreshold + s;")
+        )
+        assertTrue(
+            "边界不可分辨时必须硬切（if 保证 smoothstep 的 edge0<edge1）",
+            bright.contains("if (hi > lo) {") && bright.contains("step(uThreshold, l)")
         )
         assertFalse(
             "不许再出现 1.0 截断（min(uThreshold + uSoft 形态 = 角点退化回潮）",
             bright.contains("min(uThreshold + uSoft")
         )
+        assertFalse("不许再用 `lo + 0.0001` 余量（Y12 根因）", bright.contains("lo + 0.0001"))
 
         val blur = shader("SCENE_BLUR_FS")
         // 9 tap 权重与实时链 GlowBlurChain 的 gaussianSource 逐字同源

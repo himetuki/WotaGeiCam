@@ -105,16 +105,25 @@ class GlowShaderTest {
         assertTrue("软边 uniform", src.contains("uniform float uGlowSoft;"))
         assertTrue(
             "软边必须朝 1.0 收敛（阈值 100% = 只给最亮像素加光晕，2026-10-29 用户口径）",
-            src.contains("min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0) + 0.0001)")
+            src.contains("min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0))")
+        )
+        assertFalse(
+            "不许再用 +0.0001 余量（fp16 在 1.0 附近 ulp≈0.0009766，会被舍回；Y12）",
+            src.contains("0.0) + 0.0001)")
         )
         assertTrue(
             "过渡带下界 = threshold - soft（压缩后的软边）",
             src.contains("uGlowThreshold - soft,")
         )
         assertTrue(
-            "过渡带上界必须 max(...) 兜底：smoothstep 要求 edge0 < edge1",
-            src.contains("max(uGlowThreshold + soft, lo + 0.0001)")
+            "过渡带上界 = threshold + soft（不再用加法余量伪造 edge0<edge1）",
+            src.contains("float hi = uGlowThreshold + soft;")
         )
+        assertTrue(
+            "边界不可分辨时必须硬切（smoothstep 的 edge0<edge1 由 if 保证）",
+            src.contains("if (hi > lo) {") && src.contains("step(uGlowThreshold, luma)")
+        )
+        assertFalse("hi 不许再用 `lo + 0.0001` 兜底（Y12 根因）", src.contains("lo + 0.0001"))
         assertTrue("亮度按 BT.601 权重", src.contains("dot(c, vec3(0.299, 0.587, 0.114))"))
         assertTrue(
             "亮部颜色必须按模式二选一：仅色盘颜色 / 像素自身颜色",
@@ -123,6 +132,25 @@ class GlowShaderTest {
         assertTrue("亮部保留、暗部压零：颜色 × t", src.contains("gl_FragColor = vec4(pick * t, 1.0);"))
         assertTrue("强制不透明", src.contains(", 1.0);"))
         assertFalse("Glow 的拷贝趟不许退化回霜的纯拷贝", src.contains("FROST"))
+    }
+
+    @Test
+    fun `场景导出的亮部提取与实时链同口径`() {
+        // Y12：两趟 shader 必须在 fp16 角点给出同一语义（threshold=1/soft=0 → 硬切）。
+        // 只修实时链会让导出的光晕在 100% 档整帧发灰，而预览正常——最难看的一种分叉。
+        val src = Shaders.SCENE_BRIGHT_FS
+        assertTrue(
+            "导出链软边也必须朝 1.0 收敛",
+            src.contains("min(uSoft, max(1.0 - uThreshold, 0.0))")
+        )
+        assertFalse("导出链不许保留会被 fp16 舍回的加法余量", src.contains("0.0) + 0.0001)"))
+        assertTrue("过渡带下界同构", src.contains("uThreshold - s,"))
+        assertTrue("过渡带上界同构", src.contains("float hi = uThreshold + s;"))
+        assertTrue(
+            "边界不可分辨时必须与实时链一样硬切",
+            src.contains("if (hi > lo) {") && src.contains("step(uThreshold, l)")
+        )
+        assertFalse("hi 不许再用 `lo + 0.0001`", src.contains("lo + 0.0001"))
     }
 
     // ------------------------------------------------------------------ glow=true：scene 支路
