@@ -71,7 +71,23 @@ class MediaActions private constructor(
 
     // region 收藏 / tag
 
+    /**
+     * 裸 `mediaId` 台账写入前的**唯一性**闸门（Y27）。
+     *
+     * Room 台账（`media_tag` / `series_part`）仍以全局 Long `mediaId` 为键——schema 不动，
+     * 改键就会触发破坏性迁移、清空用户的收藏/标签/回收站/系列。但聚合 MediaStore 上
+     * 不同卷的 `_ID` 可以重号：同一 id 在当前可见快照里命中多条不同行时，收藏/tag
+     * 无法无歧义地归属。此时显式拒绝并回横幅（[R.string.gallery_row_ambiguous]），
+     * 不拿第一行猜。唯一命中/查无此行照旧写入，既有行为不变。
+     */
+    private suspend fun ambiguousLedgerRefusal(clip: VideoClip): MediaOp? {
+        if (!repo.ledgerMediaIdIsAmbiguous(clip.id)) return null
+        Log.w(TAG, "台账写入被拒：mediaId=${clip.id} 跨卷重号，无法确定标签归属 uri=${clip.uri}")
+        return MediaOp.Message(R.string.gallery_row_ambiguous)
+    }
+
     suspend fun setLike(clip: VideoClip, liked: Boolean): MediaOp {
+        ambiguousLedgerRefusal(clip)?.let { return it }
         val path = clip.pathKey()
         withContext(Dispatchers.IO) {
             if (liked) dao.insert(MediaTag(mediaId = clip.id, path = path, tag = TagSpace.LIKE, createdAt = System.currentTimeMillis()))
@@ -83,6 +99,7 @@ class MediaActions private constructor(
 
     suspend fun addTag(clip: VideoClip, rawTag: String): MediaOp {
         val tag = TagSpace.normalize(rawTag) ?: return MediaOp.Message(R.string.media_tag_invalid)
+        ambiguousLedgerRefusal(clip)?.let { return it }
         withContext(Dispatchers.IO) {
             dao.insert(MediaTag(mediaId = clip.id, path = clip.pathKey(), tag = tag, createdAt = System.currentTimeMillis()))
         }
@@ -91,6 +108,7 @@ class MediaActions private constructor(
     }
 
     suspend fun removeTag(clip: VideoClip, tag: String): MediaOp {
+        ambiguousLedgerRefusal(clip)?.let { return it }
         withContext(Dispatchers.IO) { dao.deleteOne(clip.id, tag) }
         repo.invalidate()
         return MediaOp.Done

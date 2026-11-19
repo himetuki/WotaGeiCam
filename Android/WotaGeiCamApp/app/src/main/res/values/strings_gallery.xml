@@ -76,6 +76,9 @@
     <string name="media_share_no_app">没有可用于分享的应用</string>
     <string name="media_need_all_files">到设置页打开「所有文件访问」，之后删改本机任何视频都不再弹系统框</string>
     <string name="media_share_trashed">回收站里的视频要先还原才能分享</string>
+    <!-- Y27：不同存储卷上的 _ID 可以重号；列表键已改真实行 URI，但播放/对比路由与
+         Room 台账仍按裸 Long，命中重号时显式拒绝，不拿第一行猜 -->
+    <string name="gallery_row_ambiguous">存在同号视频，无法确定要操作的是哪一条，本次操作已取消</string>
 
     <!-- 分段系列（#5 Step 4c）：归组只是视觉折叠，不做任何媒体字节拼接 -->
     <string name="gallery_series_count">共 %1$d 段</string>

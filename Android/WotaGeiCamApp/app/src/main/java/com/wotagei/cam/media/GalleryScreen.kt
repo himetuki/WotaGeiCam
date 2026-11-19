@@ -181,18 +181,20 @@ fun GalleryScreen(
     var menuTargets by remember { mutableStateOf<List<VideoClip>?>(null) }
     // 网格组卡展开的子段弹层：只钉 seriesId，面板自己按当前 clips 重新解析（理由同 menuTargets）
     var seriesSheet by remember { mutableStateOf<Long?>(null) }
-    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
-    var purgeIds by remember { mutableStateOf(setOf<Long>()) }
+    // 选择/待删集合的键是**真实行 URI**（Y27）：聚合 MediaStore 上不同卷的 `_ID` 会重号，
+    // 用裸 id 做键会把另一卷的同号行一起选中/一起删。
+    var selectedKeys by remember { mutableStateOf(setOf<String>()) }
+    var purgeKeys by remember { mutableStateOf(setOf<String>()) }
 
-    LaunchedEffect(filter, scope, mode) { selectedIds = emptySet() }
+    LaunchedEffect(filter, scope, mode) { selectedKeys = emptySet() }
 
     // 2026-10-02 真机实测交互缺陷修复：多选态没有独立出口——长按进多选后按系统 BACK 直接
     // popBackStack 关掉整个媒体库，缺了通用相册惯例的「第一段退多选、第二段才退页面」两段式。
     // 只在多选态启用回调：普通浏览态不注册，BACK 仍走 NavHost 默认 popBackStack，与旧版逐字节
-    // 等价，系统返回手势的预测性回退也不受影响（我们依旧不拦）。批量彻底删除确认框（purgeIds）
+    // 等价，系统返回手势的预测性回退也不受影响（我们依旧不拦）。批量彻底删除确认框（purgeKeys）
     // 开着时 BACK 先落进 AlertDialog 自己的窗口（onDismissRequest），走不到这里；万一走到
     // （跨窗口语义变化），也不能替用户把整个媒体库退出去，故维持只清多选态这一档。
-    BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds = emptySet() }
+    BackHandler(enabled = selectedKeys.isNotEmpty()) { selectedKeys = emptySet() }
 
     // 这两条 Flow **必须 remember**：`repo.clips(...)` / `repo.customTags()` 每次调用都造一条新的
     // 冷管道，而 `collectAsState` 的 producer 以 **Flow 实例**为 key —— 不 remember 就等于
@@ -242,22 +244,36 @@ fun GalleryScreen(
         val prev = lastAccess
         lastAccess = now
         if (prev != null && prev != now) {
-            selectedIds = emptySet()
+            selectedKeys = emptySet()
             menuTargets = null
-            purgeIds = emptySet()
+            purgeKeys = emptySet()
             seriesSheet = null
         }
     }
 
     // Y27：选中/待删集合必须与当前可见行求交。外部删片、撤权、别的页签操作导致列表收窄后，
-    // 旧 id 不能再留在选择条/确认框里（否则动作会作用到已不存在的条目，或标题报错数量）。
-    val liveIds = remember(clips) { clips.mapTo(HashSet()) { it.id } }
-    LaunchedEffect(liveIds) {
-        val kept = pruneSelection(selectedIds, liveIds)
-        if (kept != selectedIds) selectedIds = kept
-        val purgeKept = pruneSelection(purgeIds, liveIds)
-        if (purgeKept != purgeIds) purgeIds = purgeKept
+    // 旧行不能再留在选择条/确认框里（否则动作会作用到已不存在的条目，或标题报错数量）。
+    // 键是行 URI：跨卷同号的两条行各算各的，不会互相残留/误选。
+    val liveKeys = remember(clips) { clips.mapTo(HashSet()) { rowKeyOf(it) } }
+    LaunchedEffect(liveKeys) {
+        val kept = pruneSelection(selectedKeys, liveKeys)
+        if (kept != selectedKeys) selectedKeys = kept
+        val purgeKept = pruneSelection(purgeKeys, liveKeys)
+        if (purgeKept != purgeKeys) purgeKeys = purgeKept
     }
+
+    // Y27：同一 mediaId 命中多条不同卷行时，任何只吃 Long 的出口都没有无歧义映射。
+    // 列表键/选择/菜单重解析已全部走行 URI；剩下打开/对比的路由仍只吃 Long
+    // （player/{mediaId}、compare?leftMediaId=），命中歧义就显式拒绝并回横幅。
+    val ambiguousIds = remember(clips) { ambiguousMediaIds(rowIdentities(clips)) }
+    val openRow: (VideoClip) -> Unit = { clip ->
+        if (clip.id in ambiguousIds) banner = R.string.gallery_row_ambiguous else onOpen(clip.id)
+    }
+    val compareRow: (VideoClip) -> Unit = { clip ->
+        if (clip.id in ambiguousIds) banner = R.string.gallery_row_ambiguous else onCompare(clip.id)
+    }
+    // 菜单目标按行 URI 重新解析：裸 id 重号时 `firstOrNull { it.id == r.id }` 会拿另一卷的行。
+    val liveByKey = remember(clips) { clips.associateBy { rowKeyOf(it) } }
 
     DisposableEffect(ops) {
         ops.onMessage = { res -> banner = res }
@@ -305,7 +321,7 @@ fun GalleryScreen(
                     onBack = {
                         // 2026-10-02 真机实测交互缺陷修复：与 BACK 同一条两段式契约——多选态下顶栏 X
                         // 第一段只退出多选（恢复普通浏览），普通态才关掉整个媒体库。
-                        if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack()
+                        if (selectedKeys.isNotEmpty()) selectedKeys = emptySet() else onBack()
                     }
                 )
 
@@ -363,7 +379,7 @@ fun GalleryScreen(
                             accessState,
                             listFailure,
                             listLoaded,
-                            onOpen,
+                            openRow,
                             onMenu = openMenu
                         )
                         ListMode.Grid -> ClipGrid(
@@ -374,19 +390,21 @@ fun GalleryScreen(
                             access = accessState,
                             listFailure = listFailure,
                             loaded = listLoaded,
-                            selectedIds = selectedIds,
-                            onOpen = onOpen,
+                            selectedKeys = selectedKeys,
+                            onOpen = openRow,
                             onMenu = openMenu,
                             onOpenSeries = { sid -> seriesSheet = sid },
                             onToggleSelect = { c ->
-                                selectedIds = if (c.id in selectedIds) selectedIds - c.id else selectedIds + c.id
+                                val key = rowKeyOf(c)
+                                selectedKeys =
+                                    if (key in selectedKeys) selectedKeys - key else selectedKeys + key
                             }
                         )
-                        ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, accessState, listFailure, listLoaded, onOpen, onCompare, ops)
+                        ListMode.Fullscreen -> FullscreenBrowse(clips, listRefreshing, accessState, listFailure, listLoaded, openRow, compareRow, ops)
                     }
                 }
 
-                // 多选条从底边升起。退出动画期间 selectedIds 已清空，动作数据钉在最后一次的
+                // 多选条从底边升起。退出动画期间 selectedKeys 已清空，动作数据钉在最后一次的
                 // 快照上，否则滑出过程中会闪一帧「已选 0 个」。
                 //
                 // ⚠ **组级动作扇出**（#5 Step 4c）：多选里点中的是代表段，但分享 / 收藏 / 移入回收站 /
@@ -394,7 +412,7 @@ fun GalleryScreen(
                 // 「只把首段移进回收站、其余段还在原地」的半截状态。
                 // 扇出靠 `picked` 展开即可：既有的 ops 全都是「收一个 List」或「逐项调用」的形状，
                 // 不需要为归组另开一套批量重载。
-                val picked = SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)
+                val picked = SeriesGroup.expandSeriesTargets(clips.filter { rowKeyOf(it) in selectedKeys }, clips)
                 var barSnapshot by remember { mutableStateOf(picked) }
                 if (picked.isNotEmpty()) barSnapshot = picked
                 AnimatedVisibility(
@@ -409,17 +427,17 @@ fun GalleryScreen(
                         onLike = { barSnapshot.forEach { ops.setLike(it, true) } },
                         onTrash = { ops.moveToTrash(barSnapshot) },
                         onRestore = { ops.restoreFromTrash(barSnapshot) },
-                        onPurge = { purgeIds = barSnapshot.map { it.id }.toSet() },
-                        onClear = { selectedIds = emptySet() }
+                        onPurge = { purgeKeys = barSnapshot.mapTo(HashSet()) { rowKeyOf(it) } },
+                        onClear = { selectedKeys = emptySet() }
                     )
                 }
 
                 // 批量彻底删除必须先过我们自己的确认框：改成直删之后没有系统授权框兜着了，
                 // 少这一层就是「误触一次 = 不可恢复地删掉整批」（2026-09-27 真机误删过 19 个测试片）
-                if (purgeIds.isNotEmpty()) {
-                    val doomed = clips.filter { it.id in purgeIds }
+                if (purgeKeys.isNotEmpty()) {
+                    val doomed = clips.filter { rowKeyOf(it) in purgeKeys }
                     AlertDialog(
-                        onDismissRequest = { purgeIds = emptySet() },
+                        onDismissRequest = { purgeKeys = emptySet() },
                         title = { Text(stringResource(R.string.gallery_purge_title_many, doomed.size)) },
                         text = {
                             Text(
@@ -431,11 +449,11 @@ fun GalleryScreen(
                             TextButton(
                                 enabled = doomed.isNotEmpty(),
                                 onClick = {
-                                    purgeIds = emptySet()
+                                    purgeKeys = emptySet()
                                     if (doomed.isNotEmpty()) {
                                         ops.deleteForever(
                                             doomed,
-                                            pop = { selectedIds = emptySet() },
+                                            pop = { selectedKeys = emptySet() },
                                             refresh = { repo.invalidate() }
                                         )
                                     }
@@ -443,7 +461,7 @@ fun GalleryScreen(
                             ) { Text(stringResource(R.string.ok), color = WotaRec) }
                         },
                         dismissButton = {
-                            TextButton(onClick = { purgeIds = emptySet() }) { Text(stringResource(R.string.cancel)) }
+                            TextButton(onClick = { purgeKeys = emptySet() }) { Text(stringResource(R.string.cancel)) }
                         },
                         containerColor = WotaSurface
                     )
@@ -478,7 +496,7 @@ fun GalleryScreen(
             SeriesSheet(
                 seriesId = sid,
                 clips = clips,
-                onOpen = onOpen,
+                onOpen = openRow,
                 onDismiss = { seriesSheet = null },
                 onPartMenu = { part -> menuTargets = listOf(part) },
                 onGroupMenu = { rep -> menuTargets = SeriesGroup.expandSeriesTargets(listOf(rep), clips) }
@@ -495,9 +513,9 @@ fun GalleryScreen(
     //
     // Y27：**全部失配即关闭**，不再 `.ifEmpty { requested }` 回退旧快照——旧快照里的行已经
     // 不可见，动作会打到已删/已撤权的条目上。部分失配只保留仍在列表里的成员（组动作因此
-    // 不会扇出到幽灵段）。
+    // 不会扇出到幽灵段）。重解析按**行 URI**：跨卷同号时按裸 id 会拿另一卷的行顶替。
     menuTargets?.takeIf { it.isNotEmpty() }?.let { requested ->
-        val targets = requested.mapNotNull { r -> clips.firstOrNull { it.id == r.id } }
+        val targets = requested.mapNotNull { r -> liveByKey[rowKeyOf(r)] }
         if (targets.isEmpty()) {
             LaunchedEffect(requested) { menuTargets = null }
         } else {
@@ -505,8 +523,9 @@ fun GalleryScreen(
                 targets = targets,
                 ops = ops,
                 onDismiss = { menuTargets = null },
-                // 组卡对比必须开代表段（首段），不能拿输入顺序的第一个（可能是较晚分段，Y27）
-                onCompare = { onCompare(SeriesGroup.representativeOf(targets)?.id ?: targets.first().id) }
+                // 组卡对比必须开代表段（首段），不能拿输入顺序的第一个（可能是较晚分段，Y27）；
+                // 代表段的 id 若跨卷重号，open/compare 路由无法无歧义解析 ⇒ 显式拒绝。
+                onCompare = { compareRow(SeriesGroup.representativeOf(targets) ?: targets.first()) }
             )
         }
     }
@@ -711,7 +730,7 @@ private fun TimelineList(
     access: MediaAccessState?,
     listFailure: MediaListFailure?,
     loaded: Boolean,
-    onOpen: (Long) -> Unit,
+    onOpen: (VideoClip) -> Unit,
     onMenu: (VideoClip) -> Unit
 ) {
     val app = LocalContext.current.applicationContext
@@ -729,13 +748,13 @@ private fun TimelineList(
     // 折叠是**纯视觉**的 —— 不做任何媒体字节拼接（那要解码 + 重编码时间线，本仓没有这能力）。
     // 展开态只活在屏内 remember 里，不持久化。
     val entries = remember(clips) { SeriesGroup.galleryEntries(clips) }
-    val entryByRep = remember(entries) { entries.associateBy { it.clip.id } }
+    val entryByRep = remember(entries) { entries.associateBy { rowKeyOf(it.clip) } }
     var expandedSeries by remember { mutableStateOf(emptySet<Long>()) }
 
     // 每天只保留**代表段**那一行：组内其余成员已经在 parts 里，不许再单独出行
     // （否则一次录制会在列表里重复出现两遍）。这一步必须在 LazyColumn 之外算：
     // LazyListScope.forEach 的 lambda 不是 @Composable，里面调 remember 编译不过。
-    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(it.id) } }
+    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(rowKeyOf(it)) } }
     val groups = remember(reps, app) { groupTimeline(reps, app) }
 
     LazyColumn(
@@ -752,8 +771,8 @@ private fun TimelineList(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                 )
             }
-            items(g.clips, key = { "c_${it.id}" }) { clip ->
-                val entry = entryByRep[clip.id]
+            items(g.clips, key = { rowKeyOf(it) }) { clip ->
+                val entry = entryByRep[rowKeyOf(clip)]
                 val sid = entry?.seriesId
                 val count = entry?.seriesCount
                 val isSeries = count != null
@@ -769,7 +788,7 @@ private fun TimelineList(
                                 if (sid != null) {
                                     expandedSeries =
                                         if (open) expandedSeries - sid else expandedSeries + sid
-                                } else onOpen(clip.id)
+                                } else onOpen(clip)
                             }
                             .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -842,11 +861,11 @@ private fun TimelineList(
 
 /** 展开态下的子段行：缩进一档 + 前缀序号，视觉上明确是「属于上面那一次录制」 */
 @Composable
-private fun TimelinePartRow(part: VideoClip, onOpen: (Long) -> Unit) {
+private fun TimelinePartRow(part: VideoClip, onOpen: (VideoClip) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { onOpen(part.id) }
+            .clickable { onOpen(part) }
             .padding(start = 44.dp, end = 14.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -890,8 +909,8 @@ private fun ClipGrid(
     access: MediaAccessState?,
     listFailure: MediaListFailure?,
     loaded: Boolean,
-    selectedIds: Set<Long>,
-    onOpen: (Long) -> Unit,
+    selectedKeys: Set<String>,
+    onOpen: (VideoClip) -> Unit,
     onMenu: (VideoClip) -> Unit,
     onOpenSeries: (Long) -> Unit,
     onToggleSelect: (VideoClip) -> Unit
@@ -911,8 +930,8 @@ private fun ClipGrid(
     // 只保留代表段那一行：组内其余成员已经在 parts 里（网格里由子段弹层列出），不许再单独占格。
     // 归组算在 LazyVerticalGrid 之外：LazyGridScope.forEach 的 lambda 不是 @Composable，里面调 remember 编译不过。
     val entries = remember(clips) { SeriesGroup.galleryEntries(clips) }
-    val entryByRep = remember(entries) { entries.associateBy { it.clip.id } }
-    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(it.id) } }
+    val entryByRep = remember(entries) { entries.associateBy { rowKeyOf(it.clip) } }
+    val reps = remember(clips, entries) { clips.filter { entryByRep.containsKey(rowKeyOf(it)) } }
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
@@ -922,22 +941,22 @@ private fun ClipGrid(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        items(reps, key = { "c_${it.id}" }) { clip ->
-            val entry = entryByRep[clip.id]
+        items(reps, key = { rowKeyOf(it) }) { clip ->
+            val entry = entryByRep[rowKeyOf(clip)]
             val sid = entry?.seriesId
             // seriesCount 是带自定义 getter 的属性，Kotlin 不会对它 smart cast ⇒ 提到局部 val
             val count = entry?.seriesCount
             ClipCard(
                 clip = clip,
-                selected = clip.id in selectedIds,
+                selected = rowKeyOf(clip) in selectedKeys,
                 // 角标与时间线同一套令牌与文案（strings_gallery.xml 的 gallery_series_count）
                 subtitle = if (entry != null && count != null) {
                     stringResource(R.string.gallery_series_count, count) + " · " + formatDuration(entry.totalDurationMs)
                 } else null,
                 onClick = {
-                    if (selectedIds.isNotEmpty()) onToggleSelect(clip)
+                    if (selectedKeys.isNotEmpty()) onToggleSelect(clip)
                     // 组卡点开列子段（网格里没有内联展开的余地）；单片卡照旧去播放
-                    else if (sid != null) onOpenSeries(sid) else onOpen(clip.id)
+                    else if (sid != null) onOpenSeries(sid) else onOpen(clip)
                 },
                 onLongClick = { onToggleSelect(clip) },
                 onMenu = { onMenu(clip) }
@@ -1020,7 +1039,7 @@ private fun ClipCard(
 private fun SeriesSheet(
     seriesId: Long,
     clips: List<VideoClip>,
-    onOpen: (Long) -> Unit,
+    onOpen: (VideoClip) -> Unit,
     onDismiss: () -> Unit,
     onPartMenu: (VideoClip) -> Unit,
     onGroupMenu: (VideoClip) -> Unit
@@ -1058,7 +1077,7 @@ private fun SeriesSheet(
             }
             DividerLine()
             entry.parts.forEach { part ->
-                SeriesPartRow(part = part, onOpen = { onOpen(part.id) }, onMenu = { onPartMenu(part) })
+                SeriesPartRow(part = part, onOpen = { onOpen(part) }, onMenu = { onPartMenu(part) })
             }
         }
     }
@@ -1249,8 +1268,8 @@ private fun FullscreenBrowse(
     access: MediaAccessState?,
     listFailure: MediaListFailure?,
     loaded: Boolean,
-    onOpen: (Long) -> Unit,
-    onCompare: (Long) -> Unit,
+    onOpen: (VideoClip) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     ops: MediaOps
 ) {
     val emptyState = galleryEmptyState(clips.isEmpty(), refreshing, access, listFailure, loaded)
@@ -1295,6 +1314,9 @@ private fun FullscreenBrowse(
     HorizontalPager(
         state = pagerState,
         flingBehavior = pagerFling,
+        // Pager 的页键也必须是真实行 URI（Y27）：默认的 index 键在列表顺序变化时会错位，
+        // 而跨卷同号的两条行若按 id 做键会重复（重复键直接崩）。
+        key = { index -> clips.getOrNull(index)?.let { rowKeyOf(it) } ?: index },
         modifier = Modifier.fillMaxSize()
     ) { index ->
         val clip = clips.getOrNull(index) ?: return@HorizontalPager
@@ -1338,8 +1360,8 @@ private fun FullscreenBrowse(
                             Icon(Icons.Outlined.Restore, contentDescription = stringResource(R.string.gallery_menu_restore))
                         }
                     }
-                    IconButton(onClick = { onCompare(clip.id) }) { Icon(Icons.Outlined.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
-                    IconButton(onClick = { onOpen(clip.id) }) { Icon(Icons.Outlined.Fullscreen, contentDescription = stringResource(R.string.gallery_open_player)) }
+                    IconButton(onClick = { onCompare(clip) }) { Icon(Icons.Outlined.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
+                    IconButton(onClick = { onOpen(clip) }) { Icon(Icons.Outlined.Fullscreen, contentDescription = stringResource(R.string.gallery_open_player)) }
                 }
             }
         }
@@ -1392,7 +1414,7 @@ fun ClipPickerDialog(title: String, onPick: (VideoClip) -> Unit, onDismiss: () -
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        items(clips, key = { "p_${it.id}" }) { clip ->
+                        items(clips, key = { rowKeyOf(it) }) { clip ->
                             Box(Modifier.clickable { onPick(clip) }) {
                                 VideoThumbnail(clip.uri, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(6.dp)))
                             }
