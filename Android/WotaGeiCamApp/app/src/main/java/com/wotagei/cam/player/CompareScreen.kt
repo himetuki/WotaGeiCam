@@ -131,6 +131,37 @@ private val PlayIconSize = 36.dp
 private val PlayGlyphSize = 26.dp
 
 /**
+ * 左侧片 `clipById` 查询尚未回包的哨兵（Y36）：与「查过且没有」（收到 null）区分开。
+ * 与单播放页同一套查询契约（[MediaRepo.clipById] 对查无此片会发射一次 null），但哨兵不跨文件
+ * 复用（PlayerScreen 里的那枚是 private）：对比页自己的组合生命周期只认自己这枚。
+ */
+private object CompareLeftQueryPending
+
+/**
+ * 右片选择代次门（Y35）：Picker 回调、历史面板、练习回填等**所有能改写右槽的入口**共享一枚
+ * 单调代次。每次用户动作先取 [newRequest]（或 [invalidate] 作废在途请求），异步结果落地前
+ * 必须用 [isCurrent] 复核——旧 Picker 过校验后等授权/慢 provider 期间用户改选历史片或再次
+ * 打开选择器又取消，晚到的旧回调/失败探测不得再写右槽或错误横幅。
+ *
+ * 只在主线程使用（ActivityResult 回调、组合事件、练习 ON_RESUME 与主线程协程续体），
+ * 因此不做额外同步；代次本身是纯值，JVM 单测可直打。
+ */
+internal class RightPickGate {
+    private var generation: Int = 0
+
+    /** 登记一次新的右片选择动作，返回该次请求的代次（其后所有写入都要带着它复核） */
+    fun newRequest(): Int = ++generation
+
+    /** 作废所有在途请求（再次打开选择器/取消选择/历史改选等「最新用户动作」） */
+    fun invalidate() {
+        generation++
+    }
+
+    /** 该代次的异步结果是否仍是当前最新的一次选择 */
+    fun isCurrent(token: Int): Boolean = token == generation
+}
+
+/**
  * 双视频对比同步播放页（需求 27 行原文流程）：
  * 1. 媒体库打开的视频进左；2. 右侧从内置媒体库 / 手机相册再选一个；
  * 3. 同步模式二选一：基于音频自动同步（[AudioSync]）或手动拖左右独立进度条；
@@ -143,14 +174,35 @@ fun CompareScreen(
     onPractice: () -> Unit,
     repo: MediaRepo = rememberMediaRepo()
 ) {
-    val left by repo.clipById(leftMediaId).collectState(null)
-    val c = left
-    if (c == null) {
-        Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = WotaAccent)
+    // Y36：与单片页同款「查过且没有」哨兵。clipById 对不存在的 ID 会发射一次 null；若把
+    // initial=null 直接当共值，初始加载与查无此片不可区分，页面永远停在转圈、返回键也无出口。
+    // 这里只在哨兵态转圈；收到 null（片被删/库行不可见）必须给缺失态并保留返回入口。
+    val state by repo.clipById(leftMediaId).collectState(CompareLeftQueryPending)
+    val c = state as? VideoClip
+    when {
+        state === CompareLeftQueryPending -> {
+            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = WotaAccent)
+            }
         }
-    } else {
-        CompareContent(left = c, onBack = onBack, onPractice = onPractice)
+        c == null -> {
+            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        stringResource(R.string.player_clip_missing),
+                        color = WotaText,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    WotaIconButton(
+                        image = Icons.Outlined.ArrowBack,
+                        description = stringResource(R.string.gallery_desc_back),
+                        onClick = onBack
+                    )
+                }
+            }
+        }
+        else -> CompareContent(left = c, onBack = onBack, onPractice = onPractice)
     }
 }
 
@@ -176,10 +228,17 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
      */
     var accessPrompt by remember { mutableStateOf<MediaAccessState?>(null) }
     /**
-     * 选片请求序号：云相册/远程 provider 的解析可能阻塞数秒，用户等不及再点一次时
-     * 先后两次的结果可能乱序返回。只应用最新一次的结果，旧的失败/弹层不许盖在新选择上。
+     * 右片选择代次（Y35）：Picker 回调、历史面板、练习回填等全部写入口共享这一枚门。
+     * 旧的 `pickSeq` 只在 Picker 首次解析后校验一次，历史改选/练习回填/取消都不推进代次，
+     * 慢 provider 晚到的旧回调仍会越过最新选择写回右槽。
      */
-    var pickSeq by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val pickGate = remember { RightPickGate() }
+    /**
+     * 右槽成功换片（含重复选同一条 URI）的修订号：`r?.uri` 不变时 LaunchedEffect 不会重跑，
+     * 同 URI 重选就收不到 PlayerEngine.attach 的失败重试分支；把它并入 attach/编排/起播三个
+     * effect 的 key，选片动作每次都重新走一遍挂载与起播。
+     */
+    var rightRevision by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     var dragUnified by remember { mutableStateOf<Float?>(null) }
     var dragLeft by remember { mutableStateOf<Float?>(null) }
     var dragRight by remember { mutableStateOf<Float?>(null) }
@@ -287,10 +346,15 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
      * URI 优先后失败按 [MediaRepo.pickClipByUri] 的细分阶段记录：`无回程URI` /
      * `不可读` / `非视频MIME` / `解码失败`（未知异常兜底「读取失败」）；
      * [id] 仅对库内来源有意义，外来来源恒 0。
+     *
+     * [token] 是本次选择动作的代次（[RightPickGate]）：权限探测在 IO 上挂起期间用户可能已经
+     * 改选历史片/取消选择，回来必须先复核代次，旧失败不得再弹权限框或横幅。
      */
-    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String) {
+    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String, token: Int) {
         // 权限探测里有 isExternalStorageManager 的 binder 调用：放 IO 上做，横幅仍回主线程写
         val access = withContext(Dispatchers.IO) { mediaAccessState(app) }
+        // 探测期间用户改选：这次失败已不是最新意图，丢弃（含权限弹层/横幅/日志）
+        if (!pickGate.isCurrent(token)) return
         // 形态也要记：MediaStore 条目之外的来源（照片选择器/文档 provider）与「权限不足」
         // 是两条完全不同的修法，日志里必须先分清
         val mediaShape = isMediaStoreVideoUri(uri)
@@ -310,6 +374,22 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         }
     }
 
+    /**
+     * 右槽写入的**唯一落地点**（Y35）：代次复核通过才真正换片，并推进 [rightRevision]。
+     * Picker 成功回程、历史面板点选、练习回填全部经这里；任何旁路直接写 `right =` 都会让
+     * 代次门失效（守卫测试锁“CompareContent 内只有此处写右槽”）。
+     *
+     * @return 是否真的写入（false = 结果已过期，调用方不得再清/写横幅等旁路状态）
+     */
+    fun acceptRightClip(clip: VideoClip, token: Int): Boolean {
+        if (!pickGate.isCurrent(token)) return false
+        right = clip
+        rightRevision++
+        offsetMs.value = 0L
+        CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
+        return true
+    }
+
     // 右侧视频改走系统图库选择器（ACTION_PICK 直开系统相册）：测试机无 GMS，
     // Photo Picker 会退化成文档界面，ACTION_PICK 才是用户熟悉的相册入口。
     //
@@ -326,30 +406,34 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 个别相册把结果放 ClipData 而不是 data：两个都取，都没有才判「没选成」
             val uri = result.data?.data
                 ?: result.data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-            val seq = ++pickSeq
+            val token = pickGate.newRequest()
             tapScope.launch {
                 if (uri == null) {
-                    reportPickFailure(null, 0L, "无回程URI")
+                    reportPickFailure(null, 0L, "无回程URI", token)
                     return@launch
                 }
                 val outcome = repo.pickClipByUri(uri)
                 // 慢 provider 让先后两次选片乱序返回时，只认最新一次的请求
-                if (seq != pickSeq) return@launch
+                if (!pickGate.isCurrent(token)) return@launch
                 val clip = outcome.clip
                 if (clip == null) {
                     // 失败阶段细分（28 §3.4-2）：不可读/非视频MIME/解码失败直接进日志 stage，
                     // 授权全开还失败的 case 从此一条日志定位
-                    reportPickFailure(uri, 0L, outcome.fail?.label ?: "读取失败")
+                    reportPickFailure(uri, 0L, outcome.fail?.label ?: "读取失败", token)
                 } else {
-                    // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读
+                    // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读。
+                    // 它是挂起调用（IO 上做 binder），回来再复核一次代次——期间历史改选也算新意图
                     persistPickReadPermission(app, uri)
-                    accessPrompt = null
-                    banner = null
-                    right = clip
-                    offsetMs.value = 0L
-                    CompareHistory.record(prefs, clip.id, uri.toString(), left.id)
+                    if (acceptRightClip(clip, token)) {
+                        accessPrompt = null
+                        banner = null
+                    }
                 }
             }
+        } else {
+            // 用户取消也是「最新动作」：作废仍在等 provider/授权的旧 Picker 回程，
+            // 否则旧结果会在取消之后突然把右片换掉
+            pickGate.invalidate()
         }
     }
 
@@ -357,6 +441,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         // 不加 FLAG_GRANT_READ_URI_PERMISSION：它只对启动 intent 自己的 uri 有意义，
         // 结果 uri 的读授权由相册在 result 里自行授予
         banner = null
+        // 新一次选择动作立刻作废所有在途旧回程（无论随后选成还是取消）
+        pickGate.invalidate()
         // 没有 handler（个别 ROM 不注册 ACTION_PICK）时 launch 会抛 ActivityNotFoundException，
         // 不接住就是主线程崩溃；按普通失败提示处理
         runCatching {
@@ -379,12 +465,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             if (id != null) {
                 ComparePractice.pendingRightId = null
                 tapScope.launch {
+                    // 练习回填也是一次新的右槽选择（Y35）：先取代次作废在途 Picker 回程，
+                    // 查库挂起期间旧 Picker 晚到也不得越权写入
+                    val token = pickGate.newRequest()
                     val clip = repo.clipByIdOnce(id)
-                    if (clip != null) {
-                        right = clip
-                        offsetMs.value = 0L
-                        CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
-                    }
+                    if (clip != null) acceptRightClip(clip, token)
                 }
             }
         }
@@ -404,7 +489,9 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         // 域判定看见（REPEAT_ONE 会把位置缩回 0，域判定就永远读不出"左已尽"）
     }
     val r = right
-    LaunchedEffect(r?.uri) {
+    // rightRevision：同 URI 重选时 `r?.uri` 键不变，旧版不会重跑 attach，引擎的错误重试分支
+    // （attach 对同 URI 且 error=true 会 prepare+seek 0）就收不到调用；每次右槽落账都 ++
+    LaunchedEffect(r?.uri, rightRevision) {
         val clip = r ?: return@LaunchedEffect
         rightEngine.attach(clip.uri)
         // 右引擎不开 REPEAT_ONE：它会先于左视频绕回导致错位，绕回改由低频编排 tick 跟随主钟
@@ -478,7 +565,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     geo = timelineGeo(),
                     leftLiveMs = leftEngine.livePositionMs(),
                     rightLiveMs = rightEngine.livePositionMs(),
-                    userPlaying = leftEngine.isPlaying.value || rightEngine.isPlaying.value,
+                    // Y37：播放意图读**独立会话态** wantPlaying，不读两引擎瞬时 isPlaying 并集。
+                    // 双屏等长片同时播完时两台 ExoPlayer 都先落 isPlaying=false，并集会把这拍
+                    // 误判成「用户暂停」，时间线末回绕分支被跳过（停在末帧），回绕意图丢失。
+                    // 并集只留给 UI 启停按钮的图标态，不进 decide。
+                    userPlaying = wantPlaying,
                     abLoopActive = leftEngine.ab.value.let { it.loopEnabled && it.valid },
                     timelineLoop = timelineLoop,
                     dragging = dragLeft != null || dragRight != null || dragUnified != null,
@@ -502,7 +593,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             cmdBlackR = cmd.blackRight
         }
     }
-    LaunchedEffect(r?.uri) {
+    LaunchedEffect(r?.uri, rightRevision) {
         orchestrateLoop()
     }
 
@@ -577,10 +668,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 中途挂上的右轨没有任何起播路径；左轨还可能被选片器 round-trip 的 ON_STOP 软暂停压着。
     // 这里在 attach 之后补一发：用户没显式暂停过（wantPlaying 在册）就按 setPlaying 的
     // 素材感知语义把整条时间线送进播放；显式暂停过则保持静止等手点。key 与 attach effect
-    // 同为 r?.uri 且声明序在后 ⇒ attach 落位后才跑（Compose effect 按声明序启动）。
+    // 同为 (r?.uri, rightRevision) 且声明序在后 ⇒ attach 落位后才跑（Compose effect 按声明序启动）。
     // 选片是用户动作，把它唤起的播放与「回前台不自动续播」（无用户动作、无 effect 重跑）
     // 区分开，两者不冲突。
-    LaunchedEffect(r?.uri) {
+    LaunchedEffect(r?.uri, rightRevision) {
         if (r != null && wantPlaying) setPlaying(true)
     }
 
@@ -1099,9 +1190,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                 prefs = prefs,
                 repo = repo,
                 onPick = { clip ->
-                    right = clip
-                    offsetMs.value = 0L
-                    CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
+                    // 历史改选也是最新右片动作（Y35）：取代次作废在途 Picker 回程，
+                    // 晚到的旧 Picker 结果不得覆盖这次选择
+                    val token = pickGate.newRequest()
+                    acceptRightClip(clip, token)
                     historyOpen = false
                 }
             )

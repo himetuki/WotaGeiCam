@@ -362,6 +362,41 @@ class CompareTimelineTest {
     }
 
     @Test
+    fun `双屏同时ENDED_回绕与重新起播由用户意图驱动`() {
+        // Y37 回归锚：两片等长、同时跑到尾。真实轮询这一拍两台 ExoPlayer 的 isPlaying 都为
+        // false（瞬时观测），但用户的播放意图从未暂停。decide 的输入是**独立意图**，不是
+        // isPlaying 并集——若接线层把并集喂进来，这拍会被当成用户暂停而停在末帧。
+        val g = TimelineGeometry(leftDurMs = 10_000L, rightDurMs = 10_000L, offsetMs = 0L)
+        val wrap = CompareTimeline.decide(
+            input(
+                geo = g,
+                leftLive = 10_000L,
+                rightLive = 10_000L,
+                userPlaying = true,
+                timelineLoop = true
+            )
+        )
+        assertEquals("双 ENDED + 循环开：必须统一回绕到 Tmin", 0L, wrap.seekLeftMs)
+        assertEquals(0L, wrap.seekRightMs)
+        assertTrue("回绕后两侧都必须重新起播", wrap.resumeLeft && wrap.resumeRight)
+        assertFalse(wrap.pauseLeft || wrap.pauseRight)
+        assertFalse(wrap.blackLeft || wrap.blackRight)
+        // 同位置但用户显式暂停（意图 false）：末帧停驻，不得回绕/自动重启
+        val paused = CompareTimeline.decide(
+            input(
+                geo = g,
+                leftLive = 10_000L,
+                rightLive = 10_000L,
+                userPlaying = false,
+                timelineLoop = true
+            )
+        )
+        assertNull(paused.seekLeftMs)
+        assertNull(paused.seekRightMs)
+        assertFalse(paused.resumeLeft || paused.resumeRight)
+    }
+
+    @Test
     fun `时间线末_循环关停末帧且不自动重启`() {
         val g = TimelineGeometry(leftDurMs = 10_000L, rightDurMs = 20_000L, offsetMs = 0L)
         // 循环关、播完停末帧：isPlaying 已落的自然播完（userPlaying=false）不回绕

@@ -55,6 +55,22 @@ class CompareTimelineWiringGuardTest {
     }
 
     @Test
+    fun `编排拍播放意图读独立会话态_不读瞬时isPlaying并集`() {
+        val body = KotlinSourceScan.flatten(body("player/CompareScreen.kt", "orchestrateLoop"))
+        assertTrue(
+            "Y37：decide 的 userPlaying 必须喂会话意图 wantPlaying（独立于引擎瞬时 isPlaying）。" +
+                "双屏等长片同时播完时两台引擎都先落 isPlaying=false，并集会把这一拍误判成用户暂停，" +
+                "时间线末回绕被跳过，自动回绕意图丢失。",
+            body.contains("userPlaying = wantPlaying")
+        )
+        assertFalse(
+            "orchestrateLoop 不得再用 leftEngine.isPlaying.value || rightEngine.isPlaying.value 当播放意图" +
+                "（并集只许给 UI 启停图标态使用）",
+            body.contains("isPlaying.value ||")
+        )
+    }
+
+    @Test
     fun `旧纠偏循环三分枝与LoopMode_ONE不许回流`() {
         val content = body("player/CompareScreen.kt", "CompareContent")
         assertFalse(

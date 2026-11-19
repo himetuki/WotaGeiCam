@@ -1,6 +1,7 @@
 package com.wotagei.cam.player
 
 import com.wotagei.cam.source.KotlinSourceScan
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -64,5 +65,40 @@ class PlaybackSpeedAudioGuardTest {
         // 尺要能红：pitch 改成跟 base 变调（磁带口径）后判据翻红
         val mutant = body.replace("audioPitchFor(base)", "base")
         assertFalse("pitch 跟 base 变调后守卫必须报红", mutant.contains("audioPitchFor(base)"))
+    }
+
+    /**
+     * Y34 回归：右 ExoPlayer 尚未建立时先设 0.3×，新实例 build 必须先把缓存档位套上再挂片起播，
+     * 不得以默认 1.0× 起步等下一次同步。纯函数部分直打「0.3× → speed=0.3、pitch=1」；
+     * 接线部分钉 build() 读的是 `_speed.value` 缓存，而不是常量默认档。
+     */
+    @Test
+    fun `先设倍速再build_新实例套用缓存档位且pitch为1`() {
+        val cached = cachedPlaybackOf(0.3f)
+        assertEquals("缓存速度必须是用户先设的 0.3×（不是默认 1.0×）", 0.3f, cached.speed, 0f)
+        assertEquals("慢放保持原声音高（pitch 恒 1.0）", 1f, cached.pitch, 0f)
+        // 归一化口径与 setSpeed 同源：非档位值就近落档
+        assertEquals(0.3f, cachedPlaybackOf(0.31f).speed, 0f)
+
+        val setSpeed = KotlinSourceScan.bodyOf(engine, "setSpeed")
+        assertTrue(
+            "setSpeed 必须先落缓存（_speed.value = tier）：否则 build 时读不到用户在实例建立前设的档位",
+            setSpeed.contains("_speed.value = tier")
+        )
+        val build = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(engine, "build"))
+        assertTrue(
+            "build() 必须用 cachedPlaybackOf(_speed.value) 取缓存档位（读默认常量 = 右片按 1.0× 起播）",
+            build.contains("cachedPlaybackOf(_speed.value)")
+        )
+        val atParams = build.indexOf("playbackParameters =")
+        val atBind = build.indexOf("boundViews.toList()")
+        assertTrue("build() 必须给新实例写 playbackParameters", atParams >= 0)
+        assertTrue(
+            "缓存 PlaybackParameters 必须在挂片/挂视图之前写入（先应用再起播）",
+            atBind < 0 || atParams < atBind
+        )
+        // 尺要能红：把 build 的缓存读取换成默认档，判据翻红
+        val mutant = build.replace("cachedPlaybackOf(_speed.value)", "cachedPlaybackOf(PlayerSpeedTiers.DEFAULT)")
+        assertFalse("build 退回默认档后守卫必须报红", mutant.contains("cachedPlaybackOf(_speed.value)"))
     }
 }

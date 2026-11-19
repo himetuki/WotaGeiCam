@@ -86,7 +86,9 @@ data class DecideInput(
     val geo: TimelineGeometry,
     val leftLiveMs: Long,
     val rightLiveMs: Long,
-    /** 用户期望播放（两引擎 isPlaying 并集）；paused 时主钟不动、纠偏照跑（与旧循环同口径） */
+    /** 用户播放意图（对比页 wantPlaying 会话态；**不是**两引擎瞬时 isPlaying 并集——双片同时
+     * ENDED 时并集先落 false，会把这拍误判成用户暂停而丢掉时间线回绕意图）；paused 时主钟
+     * 不动、纠偏照跑（与旧循环同口径） */
     val userPlaying: Boolean,
     /** AB 段循环激活（loopEnabled 且 A/B 合法）：回绕归 abWrapHook，decide 不抢 */
     val abLoopActive: Boolean,
