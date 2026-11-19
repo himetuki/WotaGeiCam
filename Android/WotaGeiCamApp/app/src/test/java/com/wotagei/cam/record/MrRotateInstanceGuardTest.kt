@@ -104,23 +104,23 @@ class MrRotateInstanceGuardTest {
      * GPU 退回路换 GL 绑定），否则帧进不去、新段静默零帧。判定走纯函数
      * [rotateSurfaceHandoffNeeded]（本体与身份用例在 `RecordHealthTest`），且：
      * - 必须由该判定把门（不许无条件回调：默认档 GPU 面跨实例不变，白重挂有代价）；
-     * - 必须包 `runCatching`（接线方抛异常不许把换段折断，与 CodecRecorder 的重挂同口径）；
-     * - 必须早于 `mr?.start()`（与首段"先挂牌再 start"同口径）。
+     * - 回调缺失或失败时弃掉新段，保留此前已封口的段；
+     * - 必须先完成交接，再调用 `mr?.start()`。
      */
     @Test
     fun `换段面交接必须走纯函数且先于 start`() {
         val rot = bodyOf(src, "rotateSegment")
         val judge = rot.indexOf("if (rotateSurfaceHandoffNeeded(")
-        val hook = rot.indexOf("onInputSurfaceRecreated?.invoke(")
-        val guard = rot.indexOf("runCatching")
+        val hook = rot.indexOf("checkNotNull(onInputSurfaceRecreated)(exposed)")
+        val guard = rot.indexOf("runCatching", judge)
+        val failed = rot.indexOf("if (handoff.isFailure)", hook)
         val start = rot.indexOf("mr?.start()")
-        assertTrue("换段必须用纯函数 rotateSurfaceHandoffNeeded 把门（判定不许内联、也不许无条件回调）", judge >= 0)
-        assertTrue("换段必须调接线方钩子 onInputSurfaceRecreated?.invoke(", hook >= 0)
-        assertTrue("钩子调用必须包 runCatching（接线方抛异常不许折断换段）", guard >= 0)
-        assertTrue("锚点丢失：没截到 mr?.start()", start >= 0)
-        assertTrue("判定必须早于钩子", judge < hook)
-        assertTrue("钩子必须在 runCatching 之内（先判后包）", guard < hook)
-        assertTrue("面交接必须早于 start（start 之后挂面 = 头几帧落进无人消费的旧面）", hook < start)
+        assertTrue("换段必须使用面身份判据", judge >= 0)
+        assertTrue("接线方必须确认交接后才允许开始", guard > judge && hook > guard && start > hook)
+        assertTrue("交接失败必须在 start 前收尾退出", failed in (hook + 1) until start)
+        val failureBranch = rot.substring(failed, start).substringBefore("exposedSurface = exposed")
+        assertTrue(failureBranch.contains("failNow(") && failureBranch.contains("dropOutput = true"))
+        assertTrue(failureBranch.contains("return"))
     }
 
     /**

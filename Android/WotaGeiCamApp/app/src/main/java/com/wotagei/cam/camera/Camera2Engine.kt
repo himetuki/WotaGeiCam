@@ -297,7 +297,7 @@ class Camera2Engine(
     @Volatile
     private var readiness = CameraSessionReadiness()
 
-    /** DIRECT 录制面世代：每次 setExtraTarget（含换段新面）递增，旧就绪快照不能匹配新交接。 */
+    /** 当前 DIRECT 交接编号，由 Controller 分配，跨引擎重放时保持不变。 */
     private var recordingTargetEpoch = 0
 
     /**
@@ -306,6 +306,9 @@ class Camera2Engine(
      */
     @Volatile
     private var recordingWindowActive = false
+
+    /** 最近一次成功提交的 repeating 是否用了等号探测曝光。仅相机线程读写。 */
+    private var repeatingUsedExposureProbe = false
 
     /** 自动重开的在途任务（R03）：新意图/新重开必须能撤掉旧回调，不能让迟到回调复活预览。 */
     private var reopenTask: Runnable? = null
@@ -541,17 +544,14 @@ class Camera2Engine(
      * 追加输出面。DIRECT 模式下 record 包把 MediaRecorder 的 surface 交进来，会话形状随之重建；
      * reader 非 null 时由引擎在关闭序列里先停它。
      */
-    fun setExtraTarget(surface: Surface?, reader: ImageReader? = null) {
+    fun setExtraTarget(surface: Surface?, reader: ImageReader?, handoffEpoch: Int) {
         post {
             if (reader !== extraReader) stopImageReaders()
             extraSurface = surface
             extraReader = reader
-            // 即使是同一枚 Surface 重设（换段复挂），也要经过一次「面世代 → 会话重建 → repeating
-            // 重新接纳」的完整交接；只比 Surface 身份会让旧 ready 快照蒙混过关。
-            recordingTargetEpoch++
-            // 等号档探测（方案 31）：录制目标在场必须**立刻**退出探测态——探测发的是等号请求，
-            // 决不能带进录制。进冷却，录完回预览后重探。
-            if (surface != null) cancelExposureProbe("录制目标在场")
+            recordingTargetEpoch = handoffEpoch
+            // 会话马上换面。在旧 builder 上重发会让同一 Surface 的旧请求冒充本次交接。
+            if (surface != null) cancelExposureProbe("录制目标在场", reapply = false)
             structuralSignature = ""
             publishReadiness(configured = false, repeatingSubmitted = false)
             if (desiredPreview) ensureSession()
@@ -733,8 +733,10 @@ class Camera2Engine(
         post {
             if (recordingWindowActive == active) return@post
             recordingWindowActive = active
-            if (active) cancelExposureProbe("录制窗口")
+            if (active) cancelExposureProbe("录制窗口", reapply = false)
             publishReadiness()
+            // GPU 沿用原相机会话。必须等正常曝光请求取代已提交的满窗探测，才允许开始编码。
+            if (active && repeatingUsedExposureProbe) applyRepeatingNow()
         }
     }
 
@@ -748,8 +750,11 @@ class Camera2Engine(
             configured = configured,
             repeatingSubmitted = repeatingSubmitted,
             recordingTargetPresent = extraSurface != null,
-            recordingTargetEpoch = recordingTargetEpoch,
-            recordingWindow = recordingWindowActive
+            recordingTargetEpoch = if (
+                repeatingSubmitted && extraSurface?.let { target -> builderTargets.any { it === target } } == true
+            ) recordingTargetEpoch else 0,
+            recordingWindow = recordingWindowActive,
+            exposureProbeSubmitted = repeatingSubmitted && repeatingUsedExposureProbe
         )
     }
 
@@ -913,9 +918,7 @@ class Camera2Engine(
         runCatching { dead.close() }
         if (stale) return
         device = null
-        session = null
-        highSpeedSession = null
-        reqBuilder = null
+        closeSessionQuietly()
         desiredPreview = false
         structuralSignature = ""
         publishPreview(PreviewStatus.STOP)
@@ -1318,6 +1321,7 @@ class Camera2Engine(
         // 「本世代会话已接纳帧请求」证据；调用抛异常时 applyRepeatingNow 的 catch 负责失败态。
         // B01：送出曝光读数同一处发布——与「请求真的进了平台」用同一条证据线，不提前显示。
         publishSentExposure()
+        repeatingUsedExposureProbe = exposureProbeActive
         publishReadiness(configured = true, repeatingSubmitted = true)
         if (desiredPreview) publishPreview(PreviewStatus.ING)
     }

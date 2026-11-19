@@ -14,9 +14,8 @@ import org.junit.Test
  * 首段（GPU 路）起录在 JVM 单测里跑不到 [com.wotagei.cam.ui.RecordRunner] 的控制线程链，
  * 所以「首段必须把本次编码面传进等待谓词、超时必须判废」用 [KotlinSourceScan] 钉住。
  *
- * 口径：`awaitEncoderSurface(expected)` 只有在 expected == null 时才允许用「任意面已绑定」的
- * 宽松谓词；首段与换段都必须传本段 Surface，走 `isEncoderSurfaceNative(expected)` 身份判定——
- * 换代瞬间旧绑定尚未解绑，宽松谓词会零等待放行，编码器把帧写进已死的旧 producer（静默零帧）。
+ * 首段与换段都必须传本段 Surface，走 `isEncoderSurfaceNative(expected)` 身份判定。
+ * 换代瞬间旧绑定可能尚未解绑，等待任意面会让编码器在新面绑定之前启动。
  */
 class CameraFirstSegmentGuardTest {
 
@@ -54,8 +53,7 @@ class CameraFirstSegmentGuardTest {
 
     /**
      * 首段/换段必须都传本段 Surface；空 = 合规。
-     * 注意：`awaitEncoderSurface(expected: Surface? = null)` 的**声明**里带默认值，
-     * 但调用点必须显式给面——残留一处 `awaitEncoderSurface()` 就等于保留了一条乐观放行路。
+     * `awaitEncoderSurface` 只接收非空 Surface，防止调用方退回「任意面已绑」的谓词。
      */
     private fun firstSegmentIssues(masked: String): List<String> {
         val issues = ArrayList<String>()
@@ -92,14 +90,11 @@ class CameraFirstSegmentGuardTest {
         val body = runCatching { bodyOf(masked, "awaitEncoderSurface") }.getOrNull()
             ?: return listOf("定位不到 awaitEncoderSurface 的体")
         val issues = ArrayList<String>()
-        if (occurrences(body, "isEncoderSurfaceNative(expected)").isEmpty()) {
-            issues.add("awaitEncoderSurface 非空 expected 分支没有走 isEncoderSurfaceNative 身份判定")
+        if (!body.contains("return !sessionAborted() && gl.isEncoderSurfaceNative(expected)")) {
+            issues.add("返回就绪前必须同时确认本次面身份与未中止")
         }
-        if (occurrences(body, "isOutputSurfaceBound()").isEmpty()) {
-            issues.add("awaitEncoderSurface 的 null 兜底分支丢了 isOutputSurfaceBound")
-        }
-        if (occurrences(body, "stopRequested").isEmpty()) {
-            issues.add("awaitEncoderSurface 轮询没带 stopRequested——停止请求不能打断等待窗")
+        if (body.contains("isOutputSurfaceBound()")) {
+            issues.add("首段和换段均不得按任意面绑定放行")
         }
         return issues
     }
@@ -129,7 +124,7 @@ class CameraFirstSegmentGuardTest {
     fun `尺子自己能红_等待谓词退回任意面必报红`() {
         assertTrue("真身必须绿", predicateIssues(maskedScreen).isEmpty())
         val mutant = maskedScreen.replace(
-            "if (expected == null) gl.isOutputSurfaceBound() else gl.isEncoderSurfaceNative(expected)",
+            "gl.isEncoderSurfaceNative(expected)",
             "gl.isOutputSurfaceBound()"
         )
         assertTrue("等待谓词退回「任意面已绑定」后判据必须红", predicateIssues(mutant).isNotEmpty())

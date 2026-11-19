@@ -11,8 +11,8 @@ package com.wotagei.cam.camera
  * @property attempt 会话配置世代（每次 close/重建递增；旧回调不能把它写回）
  * @property configured 当前世代的会话已配置成功
  * @property repeatingSubmitted 当前世代已成功提交 repeating（失败时保持 false）
- * @property recordingTargetPresent DIRECT 录制面是否在会话形状里
- * @property recordingTargetEpoch 录制面每次变更递增（同一 Surface 重设也算一次交接）
+ * @property recordingTargetPresent 已登记 DIRECT 录制面（配置中也可为真）
+ * @property recordingTargetEpoch repeating 实际接纳的交接编号，未接纳为 0
  * @property recordingWindow 录制业务窗口（含 PREPARE）是否打开
  */
 data class CameraSessionReadiness(
@@ -22,10 +22,15 @@ data class CameraSessionReadiness(
     val repeatingSubmitted: Boolean = false,
     val recordingTargetPresent: Boolean = false,
     val recordingTargetEpoch: Int = 0,
-    val recordingWindow: Boolean = false
+    val recordingWindow: Boolean = false,
+    val exposureProbeSubmitted: Boolean = false
 ) {
     /** 真正可出帧：配置成功且 repeating 已被接纳，而不是状态流里的乐观 ING。 */
     val ready: Boolean get() = configured && repeatingSubmitted
+
+    internal fun canStartRecording(expectedHandoff: Int?): Boolean =
+        ready && recordingWindow && !exposureProbeSubmitted &&
+            (expectedHandoff == null || (expectedHandoff != 0 && recordingTargetEpoch == expectedHandoff))
 }
 
 /**

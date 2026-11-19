@@ -37,10 +37,12 @@ class CameraReadinessBridgeTest {
         assertTrue(p.ready(baseline))
 
         val encoder = p.platform.surface("encoder")
-        p.platform.call(p.controller, "setRecordingTarget", encoder, null)
+        val handoff = p.platform.call(p.controller, "setRecordingTarget", encoder, null) as Int
+        assertNotEquals(0, handoff)
         p.drain()
 
         val rebuilding = p.readiness()
+        assertEquals("已登记的面尚未被 repeating 接纳", 0, p.recordingTargetEpoch(rebuilding))
         assertFalse("换面后新会话尚未配置，不能沿用旧 ready", p.ready(rebuilding))
         assertNotEquals(p.attempt(baseline), p.attempt(rebuilding))
         assertEquals(
@@ -52,12 +54,42 @@ class CameraReadinessBridgeTest {
         p.completeSession(1)
         val handedOff = p.readiness()
         assertTrue(p.ready(handedOff))
+        assertEquals("repeating 只确认本次交接", handoff, p.recordingTargetEpoch(handedOff))
         assertNotEquals("旧快照不能匹配交接后的会话", p.attempt(baseline), p.attempt(handedOff))
         assertNotEquals(
             "旧 fast-fail 快照也不能当作新会话",
             p.attempt(rebuilding),
             p.attempt(handedOff)
         )
+    }
+
+    @Test
+    fun `同一录制面重新交接只接受最新会话`() = platform { p ->
+        startLive(p, direct = true)
+        p.platform.call(p.controller, "setRecordingActive", true)
+        val encoder = p.platform.surface("encoder")
+
+        val first = p.platform.call(p.controller, "setRecordingTarget", encoder, null) as Int
+        p.drain()
+        p.completeSession(1)
+        assertEquals(first, p.recordingTargetEpoch(p.readiness()))
+
+        val replaced = p.platform.call(p.controller, "setRecordingTarget", encoder, null) as Int
+        assertNotEquals(first, replaced)
+        assertEquals("相机线程尚未处理交接时仍只能读到旧编号", first, p.recordingTargetEpoch(p.readiness()))
+        p.drain()
+        val latest = p.platform.call(p.controller, "setRecordingTarget", encoder, null) as Int
+        assertNotEquals(replaced, latest)
+        p.drain()
+        assertEquals(4, p.sessions())
+
+        p.completeSession(2)
+        assertEquals(0, p.recordingTargetEpoch(p.readiness()))
+        assertFalse(p.ready(p.readiness()))
+        assertTrue(p.sessionCloseCount(2) >= 1)
+        p.completeSession(3)
+        assertTrue(p.ready(p.readiness()))
+        assertEquals(latest, p.recordingTargetEpoch(p.readiness()))
     }
 
     @Test
@@ -84,9 +116,10 @@ class CameraReadinessBridgeTest {
     fun `录制窗口True跨引擎重放且录制面在新引擎重放`() = platform { p ->
         startLive(p, direct = true)
         val encoder = p.platform.surface("encoder")
-        p.platform.call(p.controller, "setRecordingTarget", encoder, null)
+        val handoff = p.platform.call(p.controller, "setRecordingTarget", encoder, null) as Int
         p.drain()
         p.completeSession(1)
+        assertEquals(handoff, p.recordingTargetEpoch(p.readiness()))
         p.platform.call(p.controller, "setRecordingActive", true)
 
         p.platform.call(p.controller, "unbind", p.sink)
@@ -100,8 +133,10 @@ class CameraReadinessBridgeTest {
             "新引擎会话必须同时包含预览面与重放的录制面",
             p.outputNames(2).containsAll(listOf("recovery-preview", "encoder"))
         )
-        assertEquals("录制窗口必须跨引擎重放", true, p.recordingWindow(p.readiness()))
+        assertTrue("录制窗口必须跨引擎重放", p.recordingWindow(p.readiness()))
+        assertEquals("替代引擎还未接纳目标", 0, p.recordingTargetEpoch(p.readiness()))
         p.completeSession(2)
+        assertEquals("重放保留 Controller 分配的原交接号", handoff, p.recordingTargetEpoch(p.readiness()))
         p.assertLive()
     }
 

@@ -143,7 +143,9 @@ class RecordTextPlanTest {
         val cases = listOf(
             AutoStopRules.REASON_BATTERY to R.string.cam_record_saved_auto_battery_short,
             AutoStopRules.REASON_STORAGE to R.string.cam_record_saved_auto_storage_short,
-            AutoStopRules.REASON_CAMERA_LOST to R.string.cam_record_saved_auto_camera_lost_short
+            AutoStopRules.REASON_CAMERA_LOST to R.string.cam_record_saved_auto_camera_lost_short,
+            // R05：GL 上下文丢失是"渲染组件重启"，短附注必须说渲染、不许复用相机句
+            AutoStopRules.REASON_GL_CONTEXT_LOST to R.string.cam_record_saved_auto_gl_context_lost_short
         )
         for ((reason, shortRes) in cases) {
             val plan = planOf(
@@ -206,7 +208,9 @@ class RecordTextPlanTest {
         val cases = listOf(
             Triple(1, AutoStopRules.REASON_BATTERY, R.string.cam_record_saved_auto_battery),
             Triple(1, AutoStopRules.REASON_STORAGE, R.string.cam_record_saved_auto_storage),
-            Triple(2, AutoStopRules.REASON_CAMERA_LOST, R.string.cam_record_saved_auto_camera_lost)
+            Triple(2, AutoStopRules.REASON_CAMERA_LOST, R.string.cam_record_saved_auto_camera_lost),
+            // R05：干净成功整句必须是"渲染组件重启"专用句（不许挂相机丢失的理由）
+            Triple(1, AutoStopRules.REASON_GL_CONTEXT_LOST, R.string.cam_record_saved_auto_gl_lost)
         )
         for ((parts, reason, res) in cases) {
             val plan = planOf(result(parts = parts, autoStopReason = reason))
@@ -296,11 +300,16 @@ class RecordTextPlanTest {
     fun `已知自动停录原因枚举_每枚都必须出短附注`() {
         val fields = AutoStopRules::class.java.fields.filter { it.name.startsWith("REASON_") }
         // 尺子自己能红：反射若捞空（字段改名/修饰符变化），下面的循环会空转全绿——挡在门口
-        assertTrue("反射枚举须至少捞到现存三枚常量（捞空 = 守卫输入失守）", fields.size >= 3)
+        assertTrue("反射枚举须至少捞到现存四枚常量（捞空 = 守卫输入失守）", fields.size >= 4)
         assertTrue(
-            "现存三枚必须都在枚举里（漏枚 = 过滤条件失守，守卫输入不完整）",
+            "现存四枚必须都在枚举里（漏枚 = 过滤条件失守，守卫输入不完整）",
             fields.map { it.get(null) }.containsAll(
-                listOf(AutoStopRules.REASON_BATTERY, AutoStopRules.REASON_STORAGE, AutoStopRules.REASON_CAMERA_LOST)
+                listOf(
+                    AutoStopRules.REASON_BATTERY,
+                    AutoStopRules.REASON_STORAGE,
+                    AutoStopRules.REASON_CAMERA_LOST,
+                    AutoStopRules.REASON_GL_CONTEXT_LOST
+                )
             )
         )
         for (f in fields) {

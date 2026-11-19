@@ -16,6 +16,19 @@ class SessionReadinessTest {
     }
 
     @Test
+    fun `录制必须收到本次面交接及录制窗口的就绪回执`() {
+        val old = CameraSessionReadiness(
+            configured = true, repeatingSubmitted = true, recordingTargetEpoch = 1, recordingWindow = true
+        )
+        assertTrue(old.canStartRecording(1))
+        assertFalse(old.copy(generation = 2, attempt = 3).canStartRecording(2))
+        assertFalse(old.copy(recordingTargetEpoch = 2, repeatingSubmitted = false).canStartRecording(2))
+        assertFalse(old.copy(recordingWindow = false).canStartRecording(null))
+        assertFalse(old.copy(exposureProbeSubmitted = true).canStartRecording(null))
+        assertTrue(old.copy(recordingTargetEpoch = 0).canStartRecording(null))
+    }
+
+    @Test
     fun `recordingWindowBlocksExposureProbeEvenWithoutDirectSurface`() {
         val base = ProbeInputs(deviceOpen = true, manualAe = true, correctionAuto = true, applicable = true)
         assertTrue(allowed(base))

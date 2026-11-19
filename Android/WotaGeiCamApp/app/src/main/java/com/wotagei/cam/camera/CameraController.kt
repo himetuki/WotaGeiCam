@@ -100,7 +100,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         fpsDowngrade.value = null
     }
 
-    private var engine: Camera2Engine? = null
+    @Volatile private var engine: Camera2Engine? = null
     private var analysisSessionOwner: Any? = null
 
     /**
@@ -114,7 +114,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
      * DIRECT 录制面（R04）：跨引擎重建/换段都要原样重放给新引擎。只保管身份，**不拥有生命周期**
      * ——Surface 由 Recorder 段实例创建并释放，Controller 绝不能 close。
      */
-    private var recordingTarget: Pair<Surface, ImageReader?>? = null
+    private data class RecordingTarget(val surface: Surface, val reader: ImageReader?, val epoch: Int)
+
+    private val recordingTargetLock = Any()
+    private var recordingTarget: RecordingTarget? = null
+    private var recordingTargetEpoch = 0
 
     /**
      * 录制业务窗口（含 PREPARE，R02/R04）：page/activity 看门狗在窗口内不得 restartPreview /
@@ -222,14 +226,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     private val glRecoveryNoticeFlow = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val glRecoveryNotice: SharedFlow<String> = glRecoveryNoticeFlow
 
-    /** 已处理过上下文丢失的实例（同一实例的回调只恢复一次；新实例身份不同，可再次恢复） */
-    private var glContextLossHandled: GlRenderEngine? = null
-
     private fun newGlSink(): GlRenderEngine {
         val sink = GlRenderEngine()
         // onContextLost 在 GL 线程触发；publishOnMain 切到主线程串行化恢复动作
         sink.onContextLost = { reason ->
-            publishOnMain { onGlContextLost(reason) }
+            publishOnMain { onGlContextLost(sink, reason) }
         }
         return sink
     }
@@ -252,37 +253,34 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         // 恢复动作晚到（页面已切 DIRECT / 已被另一条路径换过）：只认当前缓存，不误杀新实例
         if (cachedGlSink !== old) return cachedGlSink
         old.onContextLost = null
-        // 相机会话仍指向旧 sink：先关，绝不把帧继续喂给失效上下文
-        engine?.close()
-        engine = null
-        analysisSessionOwner = null
-        boundSink = null
-        ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
+        val wasBound = boundSink === old
+        // 只有还连着旧 sink 的相机会话需要拆除。已切到 DIRECT 时，迟到的 GL 回调不碰当前会话。
+        if (wasBound) {
+            engine?.close()
+            engine = null
+            analysisSessionOwner = null
+            boundSink = null
+            ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
+        }
         old.release()
-        cachedGlSink = null
-        val fresh = newGlSink()
+        val fresh = if (wasBound && previewWanted) newGlSink() else null
         cachedGlSink = fresh
         glSinkEpochFlow.value += 1
-        // 页面还在（预览意图为真）才重开；页面已离场不许后台拉相机
-        if (previewWanted) {
+        if (fresh != null) {
             pendingStart = true
             bind(fresh)
             requestDisplayReattach()
-            glRecoveryNoticeFlow.tryEmit("渲染上下文丢失，已重启渲染")
-        } else {
-            glRecoveryNoticeFlow.tryEmit("渲染上下文丢失，渲染引擎已重建（预览未在运行）")
+            glRecoveryNoticeFlow.tryEmit("渲染中断，正在恢复预览")
         }
         Log.i("WotaCam", "GL 上下文恢复：旧引擎已释放，新引擎 epoch=${glSinkEpochFlow.value} 预览意图=$previewWanted")
         return fresh
     }
 
-    private fun onGlContextLost(reason: String) {
-        val lost = cachedGlSink ?: return
-        // 同一实例一次丢失只恢复一次（回调由 GL 线程发出，可能晚于页面切换）
-        if (glContextLossHandled === lost) return
-        glContextLossHandled = lost
+    private fun onGlContextLost(lost: GlRenderEngine, reason: String) {
+        // 回调由 GL 线程发出，可能在已经换过实例后才抵达 Main。
+        if (cachedGlSink !== lost) return
+        if (boundSink === lost) glContextLostFlow.tryEmit(reason)
         Log.w("WotaCam", "GL 上下文丢失：$reason ⇒ 重建渲染引擎")
-        glContextLostFlow.tryEmit(reason)
         recoverGlSink(lost)
     }
 
@@ -313,9 +311,15 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             params = params,
             sink = sink,
             scope = bus,
-            onDeviceStatus = { status -> publishOnMain { ui.value = ui.value.copy(device = status) } },
-            onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } },
-            onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } },
+            onDeviceStatus = { status -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(device = status)
+            } },
+            onPreviewStatus = { status -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(preview = status)
+            } },
+            onFpsDowngraded = { to -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) fpsDowngrade.value = to
+            } },
             onAnalysisSessionDecision = { decision -> publishOnMain {
                 if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(analysisDecision = decision)
             } }
@@ -332,11 +336,13 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         }
         // 录制面跨引擎重建重放（R04）：GPU 路不适用（面走 GL），DIRECT 面失效只摘槽——Surface
         // 的所有权在 Recorder 段实例，Controller 不 close，避免误杀仍在收尾的编码器。
-        recordingTarget?.let { (targetSurface, targetReader) ->
-            if (targetSurface.isValid) {
-                engine?.setExtraTarget(targetSurface, targetReader)
-            } else {
-                recordingTarget = null
+        synchronized(recordingTargetLock) {
+            recordingTarget?.let { target ->
+                if (target.surface.isValid) {
+                    engine?.setExtraTarget(target.surface, target.reader, target.epoch)
+                } else {
+                    recordingTarget = null
+                }
             }
         }
         if (engine != null) engine?.setRecordingWindowActive(recordingActive)
@@ -483,7 +489,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine = null
         analysisSessionOwner = null
         // 关相机 = 录制链已无面可交接；只摘引用，Surface 仍由 Recorder 段实例释放。
-        recordingTarget = null
+        synchronized(recordingTargetLock) { recordingTarget = null }
         recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
@@ -547,7 +553,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         analysisSessionOwner = null
-        recordingTarget = null
+        synchronized(recordingTargetLock) { recordingTarget = null }
         recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
@@ -556,7 +562,6 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         cachedGlSink?.onContextLost = null
         cachedGlSink?.release()
         cachedGlSink = null
-        glContextLossHandled = null
         bus.cancel()
     }
 
@@ -737,10 +742,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     // ------------------------------------------------- 与其他模块的接缝
 
     /** record 包登记编码面；GPU 模式下引擎不会把它挂进相机会话（由 GL 承接） */
-    fun setRecordingTarget(surface: Surface?, reader: ImageReader? = null) {
-        // null = 段收尾主动摘面；非 null = 首段/换段交接。两者都记进 Controller，引擎重建时重放。
-        recordingTarget = if (surface != null) surface to reader else null
-        engine?.setExtraTarget(surface, reader)
+    fun setRecordingTarget(surface: Surface?, reader: ImageReader? = null): Int = synchronized(recordingTargetLock) {
+        val epoch = if (surface == null) 0 else ++recordingTargetEpoch
+        recordingTarget = surface?.let { RecordingTarget(it, reader, epoch) }
+        engine?.setExtraTarget(surface, reader, epoch)
+        epoch
     }
 
     /**

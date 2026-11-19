@@ -162,7 +162,9 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     }
     fun open(h: Harness, slot: Any) { call(h.engine, "open", slot); call(h.engine, "startPreview") }
     fun analysis(h: Harness, enabled: Boolean = true) { call(h.engine, "setAnalysisTarget", if (enabled) h.analysis else null, null) }
-    fun extra(h: Harness, enabled: Boolean = true) { call(h.engine, "setExtraTarget", if (enabled) h.extra else null, null) }
+    fun extra(h: Harness, enabled: Boolean = true) {
+        call(h.engine, "setExtraTarget", if (enabled) h.extra else null, null, if (enabled) 1 else 0)
+    }
     fun pulse(h: Harness, fps: Int) {
         fps(h.params, fps)
         val pulse = type("com.wotagei.cam.camera.Camera2Engine\$Pulse").declaredConstructors.single().apply {

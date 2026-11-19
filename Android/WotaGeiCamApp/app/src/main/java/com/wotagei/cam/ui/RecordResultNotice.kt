@@ -62,6 +62,9 @@ internal fun recordTextPlan(result: RecordResult): RecordTextPlan? {
             RecordTextLine(R.string.cam_record_saved_auto_storage, listOf(dur))
         !partial && result.autoStopReason == AutoStopRules.REASON_CAMERA_LOST ->
             RecordTextLine(R.string.cam_record_saved_auto_camera_lost, listOf(dur))
+        // R05：GL 上下文丢失是"渲染组件重启"，不是相机被收回——原因要如实，不许复用相机丢失句
+        !partial && result.autoStopReason == AutoStopRules.REASON_GL_CONTEXT_LOST ->
+            RecordTextLine(R.string.cam_record_saved_auto_gl_lost, listOf(dur))
         else -> RecordTextLine(R.string.cam_record_saved, listOf(dur))
     }
     val notes = buildList {
@@ -110,6 +113,7 @@ internal fun autoStopNote(reason: String?): Int? = when (reason) {
     AutoStopRules.REASON_BATTERY -> R.string.cam_record_saved_auto_battery_short
     AutoStopRules.REASON_STORAGE -> R.string.cam_record_saved_auto_storage_short
     AutoStopRules.REASON_CAMERA_LOST -> R.string.cam_record_saved_auto_camera_lost_short
+    AutoStopRules.REASON_GL_CONTEXT_LOST -> R.string.cam_record_saved_auto_gl_context_lost_short
     else -> null
 }
 

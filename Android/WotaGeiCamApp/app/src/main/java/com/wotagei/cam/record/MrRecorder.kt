@@ -518,12 +518,17 @@ class MrRecorder(
             // - GPU 的 setInputSurface 退回路（个别 ROM 拒绝 persistent 面）：面同样随实例换代，
             //   GL 还画在旧面上。
             // 默认档（GPU + persistent 面被接受）面跨实例不变 ⇒ 恒不回调 ⇒ GL/相机侧零改动。
-            // 必须早于 mr?.start()（与首段"先挂牌再 start"同口径），回调异常就地吞掉不折断换段。
+            // 必须早于 mr?.start()。交接失败只判废本段，之前已封好的段仍保留。
             val exposed = surface
             if (rotateSurfaceHandoffNeeded(exposedSurface, exposed) && exposed != null) {
                 Log.i(TAG, "segment surface changed, handoff to caller")
-                runCatching { onInputSurfaceRecreated?.invoke(exposed) }
-                    .onFailure { Log.w(TAG, "segment surface handoff threw: ${it.message}") }
+                val handoff = runCatching {
+                    checkNotNull(onInputSurfaceRecreated)(exposed)
+                }
+                if (handoff.isFailure) {
+                    failNow("${RecordError.ENGINE_ERROR}:ROTATE_REBIND", dropOutput = true)
+                    return
+                }
             }
             exposedSurface = exposed
             mr?.start()
