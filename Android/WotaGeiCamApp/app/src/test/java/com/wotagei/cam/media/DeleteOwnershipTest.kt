@@ -2,16 +2,16 @@ package com.wotagei.cam.media
 
 import com.wotagei.cam.source.KotlinSourceScan
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -33,8 +33,34 @@ class DeleteOwnershipTest {
         pathKey = "/storage/emulated/0/Movies/WotaGeiCam/Camera/VID_$id.mp4",
         dataPath = "/storage/emulated/0/Movies/WotaGeiCam/Camera/VID_$id.mp4",
         name = "VID_$id.mp4",
-        isTrashed = false
+        isTrashed = false,
+        dateAddedSec = 100L,
+        sizeBytes = 1_000L,
+        relativePath = "Movies/WotaGeiCam/Camera/"
     )
+
+    @Test
+    fun `同一 URI 的替换文件无法命中旧删除条件`() {
+        val selected = target(1)
+        val original = checkNotNull(selected.deleteSelection(systemTrash = true))
+        val replacement = checkNotNull(selected.copy(dateAddedSec = 101L).deleteSelection(systemTrash = true))
+        assertEquals("_display_name = ? AND date_added = ? AND _size = ? AND is_pending = 0 AND _data = ? AND is_trashed = ?", original.where)
+        assertEquals(listOf(selected.name, "100", "1000", selected.dataPath, "0"), original.args)
+        assertEquals(original.where, replacement.where)
+        assertFalse(original.args == replacement.args)
+    }
+
+    @Test
+    fun `不可见 DATA 的条目仍绑定相对目录及媒体元数据`() {
+        val selected = target(1).copy(dataPath = null, isTrashed = true)
+        val modern = checkNotNull(selected.deleteSelection(systemTrash = true))
+        val legacy = checkNotNull(selected.deleteSelection(systemTrash = false))
+        assertTrue(modern.where.contains("relative_path = ? AND is_trashed = ?"))
+        assertEquals(listOf(selected.name, "100", "1000", selected.relativePath, "1"), modern.args)
+        assertFalse(legacy.where.contains("is_trashed"))
+        assertEquals(modern.args.dropLast(1), legacy.args)
+        assertEquals(null, selected.copy(name = "").deleteSelection(systemTrash = true))
+    }
 
     @Test
     fun `删除返回0行不记成功也不清sidecar`() = runBlocking {
@@ -82,40 +108,34 @@ class DeleteOwnershipTest {
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val entered = CompletableDeferred<Unit>()
         val gate = CompletableDeferred<Unit>()
-        val deletedIds = CopyOnWriteArrayList<Long>()
-        val physical = CountDownLatch(2)
-
-        val caller = launch(Dispatchers.Default) {
-            runOnDeleteOwner(owner) {
-                val batch = deleteBatch(
-                    targets = listOf(target(1), target(2)),
-                    deleteRow = { t ->
-                        if (t.mediaId == 1L) {
-                            entered.complete(Unit)
-                            gate.await()
-                        }
-                        physical.countDown()
-                        RowDeleteResult(rows = 1)
-                    },
-                    clearSidecar = {}
-                )
-                deletedIds.addAll(batch.deleted.map { it.mediaId })
+        val settled = CompletableDeferred<DeleteBatch>()
+        try {
+            val caller = launch {
+                runOnDeleteOwner(owner) {
+                    val batch = deleteBatch(
+                        targets = listOf(target(1), target(2)),
+                        deleteRow = { t ->
+                            if (t.mediaId == 1L) {
+                                entered.complete(Unit)
+                                gate.await()
+                            }
+                            RowDeleteResult(rows = 1)
+                        },
+                        clearSidecar = {}
+                    )
+                    settled.complete(batch)
+                }
             }
-        }
-
-        assertTrue("第一行删除必须先进入挂起点", entered.await())
-        caller.cancel()
-        assertTrue(
-            "所有者线程必须在调用方取消后才被放行（证明取消没有传到独立作用域）",
+            withTimeout(5_000) { entered.await() }
+            caller.cancel()
+            withTimeout(5_000) { caller.join() }
+            assertFalse("调用方退出时不得抢先结账", settled.isCompleted)
             gate.complete(Unit)
-        )
-        assertTrue(
-            "调用方取消后剩余行仍须删完（旧实现会停在第一条）",
-            physical.await(5, TimeUnit.SECONDS)
-        )
-        val deadline = System.currentTimeMillis() + 5_000
-        while (deletedIds.size < 2 && System.currentTimeMillis() < deadline) Thread.sleep(5)
-        assertEquals("所有者必须交回完整账目", listOf(1L, 2L), deletedIds.toList())
+            val batch = withTimeout(5_000) { settled.await() }
+            assertEquals("所有者必须交回完整账目", listOf(1L, 2L), batch.deleted.map { it.mediaId })
+        } finally {
+            owner.cancel()
+        }
     }
 
     @Test
@@ -146,7 +166,12 @@ class DeleteOwnershipTest {
         val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("media/MediaActions.kt"))
         val del = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "deleteOneByOne"))
         assertTrue("物理删除必须交给独立所有者", del.contains("runOnDeleteOwner(deleteOwner)"))
-        assertTrue("成功判据必须看影响行数", del.contains("attempt.rows"))
+        assertTrue("真实删除和清账都在后台", del.contains("withContext(Dispatchers.IO)") &&
+            del.contains("deleteBatch(targets, ::deleteMediaRow, ::clearDeletedSidecar)") &&
+            del.contains("cleanupDeleted(result.deleted)"))
+        val deleteRow = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "deleteMediaRow"))
+        assertTrue("删除必须把身份条件交给 Provider", deleteRow.contains("resolver.delete(uri, selection.where, args)") &&
+            deleteRow.contains("putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection.where)"))
 
         val cleanup = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "cleanupDeleted"))
         assertTrue("Room 清账必须在事务里", cleanup.contains("withTransaction"))
@@ -155,10 +180,9 @@ class DeleteOwnershipTest {
         assertFalse("不许退回裸 ID 清标签（ID 复用会误清新片）", cleanup.contains("dao.clearFor("))
         assertFalse("不许退回裸 ID 清系列（ID 复用会误删新片成员）", cleanup.contains("seriesDao.clearFor("))
 
-        val fin = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "finishDelete"))
         assertTrue(
             "调用方已取消（退页）时不许再替它出栈：pop 必须过存活令牌",
-            fin.contains("if (callerToken.isActive()) pop()")
+            del.contains("if (callerToken.isActive()) pop()")
         )
         assertTrue(
             "UI 门面必须把调用屏的作用域当存活令牌（不是恒真）",

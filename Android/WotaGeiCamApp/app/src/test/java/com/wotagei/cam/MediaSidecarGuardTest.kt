@@ -35,14 +35,11 @@ class MediaSidecarGuardTest {
 
     @Test
     fun `回收站态彻底删除按原名补删sidecar`() {
-        val body = KotlinSourceScan.flatten(
-            KotlinSourceScan.bodyOf(maskedMain("media/MediaActions.kt"), "deleteOneByOne")
-        )
-        assertTrue(
-            "deleteOneByOne 对回收站态行必须按目录+原显示名补删 sidecar（系统回收站把底层文件改名成 " +
-                ".trashed-<ts>-<原名>，DATA 列跟着变，只删 dataPath 侧会留下孤儿档案）",
-            body.contains("deleteFor(originPath)")
-        )
+        val source = maskedMain("media/MediaActions.kt")
+        val owner = KotlinSourceScan.bodyOf(source, "deleteOneByOne")
+        val sidecar = KotlinSourceScan.bodyOf(source, "clearDeletedSidecar")
+        assertTrue(owner.contains("withContext(Dispatchers.IO)") && owner.contains("::clearDeletedSidecar"))
+        assertTrue(sidecar.contains("originalTrashPath()") && sidecar.contains("deleteFor(originPath)"))
     }
 
     @Test

@@ -1,17 +1,17 @@
 package com.wotagei.cam
 
 import android.app.Instrumentation
-import android.content.ContentValues
 import android.content.Context
+import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
-import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.wotagei.cam.media.MediaActions
+import com.wotagei.cam.media.MediaOp
 import com.wotagei.cam.media.MediaRepo
 import com.wotagei.cam.media.MediaTag
-import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.VideoStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -36,98 +36,79 @@ class MediaCleanupTest {
     private val ctx: Context = ApplicationProvider.getApplicationContext()
 
     private fun line(text: String) {
-        instr.sendStatus(android.app.Activity.RESULT_OK, android.os.Bundle().apply { putString("wota", text) })
+        instr.sendStatus(android.app.Activity.RESULT_OK, Bundle().apply { putString("wota", text) })
     }
-
-    private fun clipOf(id: Long, uri: Uri, name: String): VideoClip = VideoClip(
-        id = id,
-        uri = uri,
-        name = name,
-        dataPath = null,
-        relativePath = VideoStore.RELATIVE_PATH,
-        dateAddedSec = System.currentTimeMillis() / 1000L,
-        sizeBytes = 0L,
-        durationMs = 0L,
-        width = 0,
-        height = 0,
-        mimeType = VideoStore.MIME_MP4,
-        tags = emptySet(),
-        isTrashed = false
-    )
-
-    /**
-     * MediaStore 行是否还在：按 `_ID=?` 在集合 uri 上数行。
-     *
-     * 不能用 `query(单行 uri)` 的 `cursor.count`：那条路在本机测出来恒为 0（commit 刚成功也查不到），
-     * 拿它断言"已删除"会退化成空断言 —— 假绿比不测更坏。
-     */
-    private fun rowCount(id: Long): Int = countBy("${MediaStore.Video.Media._ID}=?", arrayOf(id.toString()))
-
-    private fun countBy(selection: String, args: Array<String>): Int = ctx.contentResolver.query(
-        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-        arrayOf(MediaStore.Video.Media._ID),
-        selection,
-        args,
-        null
-    )?.use { it.count } ?: -1
-
-    /** 单行 uri 上取 DISPLAY_NAME：查不到就返回 null，只用于诊断输出 */
-    private fun queryDisplayName(uri: Uri): String? = runCatching {
-        ctx.contentResolver.query(uri, arrayOf(MediaStore.Video.Media.DISPLAY_NAME), null, null, null)?.use { c ->
-            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
-        }
-    }.getOrNull()
 
     @Test
     fun deleteForeverClearsTagsAndTrashRows() = runBlocking {
         val store = VideoStore(ctx)
         val uri = store.createPending(0)
         assertNotNull("建 pending 行失败（存储或权限问题）", uri)
-        val created = uri!!
-        // insert 返回的 uri 末段就是 _ID，比再查一次可靠
-        val mediaId = created.lastPathSegment?.toLongOrNull() ?: error("uri 里取不到 _ID：$created")
+        val created = checkNotNull(uri)
+        val mediaId = checkNotNull(created.lastPathSegment?.toLongOrNull())
+        val repo = MediaRepo.get(ctx)
+        val db = repo.db()
+        val actions = MediaActions.get(ctx)
+        var fixtureTag: MediaTag? = null
+        var fixtureUri: String? = null
+        var deleted = false
         try {
-            /**
-             * 必须先写点字节：本机实测「0 字节的 pending 行 commit 成功（update 命中 1 行）但之后
-             * 按 _ID / DISPLAY_NAME 都查不到，而集合里其他行照常可见」—— MediaProvider 不把空文件当有效媒体。
-             * 不写这一段的话，后面「标签清零」「行数归零」两条断言会对着一条本来就不存在的行**空过**（假绿）。
-             */
-            ctx.contentResolver.openOutputStream(created)?.use { it.write(ByteArray(4096)) }
+            // 0 字节的行即使清了 pending 也可能查不到。先写字节，确保下面的行数断言有对照。
+            checkNotNull(ctx.contentResolver.openOutputStream(created)).use { it.write(ByteArray(4096)) }
             assertTrue("commit 失败，测不下去", store.commit(created))
-            val pendingName = queryDisplayName(created)
-            line(
-                "uri=$created _ID=$mediaId；按 _ID 命中=${rowCount(mediaId)}；" +
-                    "按 DISPLAY_NAME 命中=${countBy("${MediaStore.Video.Media.DISPLAY_NAME}=?", arrayOf(pendingName ?: "?"))}；" +
-                    "本应用可见视频行总数=${countBy("1=1", emptyArray())}"
+            val clip = checkNotNull(repo.clipByIdOnce(mediaId)) { "公开后查不到测试行" }
+            val key = clip.uri.toString()
+            fixtureUri = key
+            val tag = MediaTag(
+                mediaId = mediaId,
+                path = clip.dataPath ?: key,
+                tag = "wota-selftest",
+                createdAt = System.currentTimeMillis()
             )
-            val alive = rowCount(mediaId)
-            assertEquals("commit 之后自己的行查不到，后面的断言都不可信", 1, alive)
-            val name = store.displayName()
-            val dao = MediaRepo.get(ctx).db().tagDao()
+            fixtureTag = tag
+            db.tagDao().insert(tag)
+            assertTrue(tag.tag in db.tagDao().tagsOf(mediaId))
 
-            dao.insert(
-                // 身份对口径：彻底删除只清 (mediaId, pathKey) 双键都命中的标签。
-                // clipOf 的 dataPath=null ⇒ pathKey 是 uri 字符串（与 MediaActions 写入口径一致）。
-                MediaTag(mediaId = mediaId, path = created.toString(), tag = "wota-selftest", createdAt = System.currentTimeMillis())
-            )
-            val before = dao.observeAll().first().count { it.mediaId == mediaId }
-            line("插入后该行的标签数=$before")
-            assertEquals(1, before)
+            // 同 URI 的过期快照必须让 Provider 匹配到 0 行，真实行与标签都应保留。
+            val stale = clip.copy(sizeBytes = clip.sizeBytes + 1)
+            var popCalls = 0
+            val staleResult = actions.deleteForever(listOf(stale), pop = { popCalls++ }, refresh = {})
+            assertTrue(staleResult is MediaOp.Message)
+            assertEquals("未删除就不能出栈", 0, popCalls)
+            assertEquals(clip.sizeBytes, repo.clipByIdOnce(mediaId)?.sizeBytes)
+            assertTrue(tag.tag in db.tagDao().tagsOf(mediaId))
 
-            MediaActions.get(ctx).deleteForever(listOf(clipOf(mediaId, created, name)), pop = {}, refresh = {})
+            assertEquals(MediaOp.Done, actions.moveToTrash(listOf(clip)))
+            val trashed = checkNotNull(repo.clipByIdOnce(mediaId)) { "回收站查不到测试行" }
+            assertTrue(trashed.isTrashed)
+            assertTrue(db.trashDao().observeAll().first().any { it.uri == key })
 
-            val after = dao.observeAll().first().count { it.mediaId == mediaId }
-            line("删除后该行的标签数=$after；MediaStore 命中行数=${rowCount(mediaId)}")
-            assertEquals("删完还剩残留标签 → id 复用时会串到新视频", 0, after)
-            assertEquals("记录没被真删", 0, rowCount(mediaId))
+            val result = actions.deleteForever(listOf(trashed), pop = {}, refresh = {})
+            assertEquals(MediaOp.Done, result)
+            deleted = true
+            assertEquals(null, repo.clipByIdOnce(mediaId))
+            assertTrue(tag.tag !in db.tagDao().tagsOf(mediaId))
+            assertTrue(db.trashDao().observeAll().first().none { it.uri == key })
 
-            // 复跑一次确认幂等：对已消失的行再删不应抛
-            MediaActions.get(ctx).deleteForever(listOf(clipOf(mediaId, created, name)), pop = {}, refresh = {})
-            line("重复删除未抛异常，OK")
+            // 重复请求应明确未命中，也不能把同身份后来写入的账目误清。
+            db.tagDao().insert(tag)
+            assertTrue(actions.deleteForever(listOf(trashed), pop = {}, refresh = {}) is MediaOp.Message)
+            assertTrue(tag.tag in db.tagDao().tagsOf(mediaId))
+            line("测试行已删除，过期请求与重复请求均保留未命中行的账目")
         } finally {
-            // 只清自己这一行；失败也不影响用户数据
-            if (rowCount(mediaId) > 0) runCatching { ctx.contentResolver.delete(created, null, null) }
-            line("清理自建测试行完成，残留行数=${rowCount(mediaId)}")
+            fixtureTag?.let { db.tagDao().clearIdentity(it.mediaId, it.path) }
+            fixtureUri?.let { db.trashDao().remove(it) }
+            if (!deleted) runCatching {
+                val resolver = ctx.contentResolver
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    resolver.delete(created, Bundle().apply {
+                        putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+                        putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                    })
+                } else {
+                    resolver.delete(created, null, null)
+                }
+            }
         }
     }
 }

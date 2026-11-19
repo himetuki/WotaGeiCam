@@ -2,9 +2,11 @@ package com.wotagei.cam.media
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * 一条彻底删除目标的**身份对**：MediaStore `_ID` + 该条目的路径/URI 键。
@@ -23,8 +25,73 @@ internal data class DeleteTarget(
     val pathKey: String,
     val dataPath: String?,
     val name: String,
-    val isTrashed: Boolean
+    val isTrashed: Boolean,
+    val dateAddedSec: Long,
+    val sizeBytes: Long,
+    val relativePath: String
 )
+
+internal data class DeleteSelection(val where: String, val args: List<String>)
+
+/** 条件随 delete 一起送到 MediaStore，避免查完旧行、实际删除时同一 URI 已被替换。 */
+internal fun DeleteTarget.deleteSelection(systemTrash: Boolean): DeleteSelection? {
+    val path = dataPath?.takeIf { it.isNotBlank() }
+    if (name.isBlank() || dateAddedSec <= 0L || sizeBytes < 0L || (path == null && relativePath.isBlank())) {
+        return null
+    }
+    val location = if (path == null) "relative_path" else "_data"
+    val where = "_display_name = ? AND date_added = ? AND _size = ? AND is_pending = 0 AND $location = ?"
+    val args = listOf(name, dateAddedSec.toString(), sizeBytes.toString(), path ?: relativePath)
+    return if (systemTrash) {
+        DeleteSelection("$where AND is_trashed = ?", args + if (isTrashed) "1" else "0")
+    } else {
+        DeleteSelection(where, args)
+    }
+}
+
+/** 系统回收站的 DATA 有归档前缀，标签和位次档案仍以原路径为键。 */
+internal fun DeleteTarget.originalTrashPath(): String? {
+    val path = dataPath ?: return null
+    if (!isTrashed) return null
+    val fileName = path.substringAfterLast('/')
+    val archived = fileName.removePrefix(".trashed-").takeIf { it != fileName } ?: return null
+    val original = archived.substringAfter('-', "")
+    if (archived.substringBefore('-').toLongOrNull() == null || original.isBlank() ||
+        original == "." || original == ".." || '/' in original || '\\' in original
+    ) return null
+    val dir = path.substringBeforeLast('/', "")
+    return if (dir.isEmpty()) null else "$dir/$original"
+}
+
+/** 每个清账批次只释放自己的持有权，最后一个批次结束才公布新的列表快照。 */
+internal class MediaListRefreshGate(private val invalidate: () -> Unit) {
+    private val lock = Any()
+    private val held = MutableStateFlow(false)
+    val state = held.asStateFlow()
+    private var holders = 0
+
+    fun hold(): AutoCloseable {
+        synchronized(lock) {
+            holders++
+            held.value = true
+        }
+        var released = false
+        return AutoCloseable {
+            synchronized(lock) {
+                if (released) return@AutoCloseable
+                released = true
+                holders--
+                if (holders == 0) {
+                    try {
+                        invalidate()
+                    } finally {
+                        held.value = holders > 0
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** 单行物理删除的结果：`rows` 是 ContentResolver 报的影响行数（不是"没抛异常"） */
 internal data class RowDeleteResult(
@@ -98,17 +165,13 @@ internal suspend fun deleteBatch(
  *
  * 这是 R09 的核心隔离：`deleteForever` 的调用方是播放页/媒体库页的 `rememberCoroutineScope`。
  * 用户在删除途中退页时，那个作用域会被取消。若物理删除与清账仍跑在调用方协程里，就会出现
- * 「文件已删一半、Room 没清、刷新闸门没开」的半账状态。把整批放到 [owner]（应用级
- * `SupervisorJob + Dispatchers.IO`）后，调用方取消只影响"谁来消费结果"，不影响已经开始的
- * 不可逆动作。
- *
- * 等待用 [NonCancellable]：调用方即使已取消，也已发起的所有权工作必须被等到完成，
- * 不许把 CancellationException 当成"没发生过"。
+ * 「文件已删一半、Room 没清、刷新闸门没开」的半账状态。把整批放到应用级 [owner] 后，
+ * 调用方可以结束等待，不会取消已交给所有者的删除。已经取消的调用方不能发起新删除。
  */
 internal suspend fun <T> runOnDeleteOwner(
     owner: CoroutineScope,
     block: suspend CoroutineScope.() -> T
 ): T {
-    val job = owner.async { block() }
-    return withContext(NonCancellable) { job.await() }
+    currentCoroutineContext().ensureActive()
+    return owner.async(block = block).await()
 }

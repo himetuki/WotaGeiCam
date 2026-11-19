@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -147,19 +148,13 @@ class MediaRepo private constructor(private val app: Context) {
      * 列表刷新闸门。删除链路先关闸（Room 清标签会立刻触发列表重算），
      * pop 之后再开闸 ——  定版：列表刷新必须晚于播放页出栈，否则 pager 用陈旧 position 越界。
      */
-    private val refreshGate = MutableStateFlow(false)
+    private val listRefreshOwners = MediaListRefreshGate(::invalidate)
+    private val refreshGate = listRefreshOwners.state
 
-    fun holdListRefresh() {
-        refreshGate.value = true
-    }
-
-    fun releaseListRefresh() {
-        refreshGate.value = false
-        invalidate()
-    }
+    internal fun holdListRefresh(): AutoCloseable = listRefreshOwners.hold()
 
     /**
-     * 闸门当前态的**只读视图**（UI 侧唯一入口，写入仍只有 [holdListRefresh] / [releaseListRefresh]）。
+     * 闸门当前态的只读视图。每个删除批次通过 [holdListRefresh] 取得自己的持有权。
      *
      * 为什么只放一个 StateFlow 出去、不让 UI 调那两个写方法：闸门的开合是删除收尾的编排
      * （见 [runDeleteFinish]），UI 只该"知道"它，不该"参与"它。
@@ -173,7 +168,7 @@ class MediaRepo private constructor(private val app: Context) {
     val listRefreshing: StateFlow<Boolean> get() = refreshGate
 
     fun invalidate() {
-        version.value += 1
+        version.update { it + 1 }
     }
 
     fun db(): WotaDb = db
