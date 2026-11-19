@@ -149,6 +149,15 @@ class PortableUserDataTest {
         assertEquals(listOf(old), PortableUserData.mergeTags(listOf(old), emptyList()))
     }
 
+    @Test fun `失败提交后重试仍重新提交相等值设置`() {
+        // commit(false) 可能已改内存但未落盘；重试时当前映射里已有等值键，
+        // 若按「键存在就跳过」过滤，editor 会变成空提交，磁盘永远补不上。
+        val restored = mapOf("gallery_columns" to 3, "level_enabled" to true)
+        val current = mapOf("level_enabled" to true, "compare_history" to "local-only")
+        assertEquals(mapOf("gallery_columns" to 3, "level_enabled" to true),
+            PortableUserData.settingsToRestore(restored, current))
+    }
+
     @Test fun `R14_合并超限按余量分批交接且旧pending优先`() {
         val old = (0 until 6000).map {
             PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "old$it.mp4", 123L, 1000L), "like", it.toLong())

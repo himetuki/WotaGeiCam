@@ -81,6 +81,16 @@ class MediaAccessTest {
     }
 
     @Test
+    fun `未挂载卷不算所有媒体可读`() {
+        // 用字面量而不是 Android 常量，避免把平台 stub 事实带进纯函数单测。
+        assertTrue(mediaVolumesMountedFor(emptyList()))
+        assertTrue(mediaVolumesMountedFor(listOf("mounted")))
+        assertTrue(mediaVolumesMountedFor(listOf("mounted", "mounted_read_only")))
+        assertFalse(mediaVolumesMountedFor(listOf("mounted", "unmounted")))
+        assertFalse(mediaVolumesMountedFor(listOf("mounted", "mounted_read_only", "unmounted")))
+    }
+
+    @Test
     fun `MediaStore 视频集合 URI 才认作可反查 id`() {
         assertTrue(
             isMediaStoreVideoUriParts(

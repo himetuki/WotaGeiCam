@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.os.storage.StorageManager
 import androidx.core.content.ContextCompat
 
 /**
@@ -85,6 +87,23 @@ fun mediaAccessState(context: Context): MediaAccessState {
         granted(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
     return mediaAccessStateFor(sdk, full, partial, WotaStorage.hasAllFilesAccess())
 }
+
+/**
+ * 纯函数：所有卷是否都可读。MediaStore 的 `content://media/external/...` 是合成卷，
+ * 取出的行只覆盖**当前已挂载**的卷；SD 卡/OTG 被拔出后，其行会静默消失而不是查询报错。
+ * 指纹匹配必须把「卷没挂载」也算成可见性不完整，否则同一指纹的另一条会被当成不存在。
+ */
+internal fun mediaVolumesMountedFor(states: List<String>): Boolean =
+    states.all { it == Environment.MEDIA_MOUNTED || it == Environment.MEDIA_MOUNTED_READ_ONLY }
+
+/**
+ * 运行时探测存储卷是否全部可读。平台不支持/查询失败时按「已挂载」处理：
+ * 这是派生判据，宁可让迁移在正常设备上继续，也不把一次临时故障变成永久拒绝。
+ */
+fun allMediaVolumesMounted(context: Context): Boolean = runCatching {
+    val manager = context.getSystemService(StorageManager::class.java) ?: return@runCatching true
+    mediaVolumesMountedFor(manager.storageVolumes.map { it.state ?: Environment.MEDIA_UNKNOWN })
+}.getOrDefault(true)
 
 /** 诊断导出/日志用的可读标签（枚举名进导出件不好读，统一走这里） */
 fun mediaAccessLabel(state: MediaAccessState): String = when (state) {

@@ -14,6 +14,7 @@ import android.util.Size
 import com.wotagei.cam.R
 import com.wotagei.cam.backup.WotaBackupAgent
 import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.allMediaVolumesMounted
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag as Log
@@ -200,11 +201,15 @@ class MediaRepo private constructor(private val app: Context) {
         triggers()
             .flatMapLatest { s ->
                 gated {
-                    val raw = queryMediaStore(scope)
+                    val query = queryMediaStore(scope)
+                    val raw = query.clips
                     val restored = try {
-                        // Y39：部分授权/未授权时可见集合不足以证明指纹唯一，迁移必须继续等待。
+                        // Y39：部分授权/未授权、卷未挂载或查询只返回半截时，可见集合都不足以
+                        // 证明指纹唯一；迁移必须继续等待，不能把标签贴到看不见的重复候选上。
                         val access = mediaAccessState(app)
-                        val complete = access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ
+                        val complete = query.complete &&
+                            (access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ) &&
+                            allMediaVolumesMounted(app)
                         WotaBackupAgent.restoreTags(app, raw, complete)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
@@ -428,7 +433,10 @@ class MediaRepo private constructor(private val app: Context) {
             projectionBase.toTypedArray()
         }
 
-    private fun queryMediaStore(scope: MediaScope): List<VideoClip> {
+    /** 一次列表查询的可见性：查询中途失败时 [clips] 可能只是半截，不能当完整集合做迁移匹配。 */
+    private data class MediaQuery(val clips: List<VideoClip>, val complete: Boolean)
+
+    private fun queryMediaStore(scope: MediaScope): MediaQuery {
         // IS_PENDING 门：写一半的 pending 记录对 owner 的查询默认可见（只对外部 app 隐藏），
         // 不挡的话录制中/剪辑导出中回到媒体库，网格里会出现 0 字节幽灵条目，点开是半成品文件；
         // 「commit 后相册立即可见」由该门 + 完成侧 invalidate 共同成立
@@ -443,19 +451,23 @@ class MediaRepo private constructor(private val app: Context) {
         } else {
             arrayOf("video/%")
         }
+        var complete = true
         val live = readCursor(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             selection,
             args,
             "${MediaStore.Video.Media.DATE_ADDED} DESC"
-        )
-        val trashed = trashedMatching(scope)
-        return if (trashed.isEmpty()) live else live + trashed
+        ) { complete = false }
+        val trashed = trashedMatching(scope) { complete = false }
+        return MediaQuery(if (trashed.isEmpty()) live else live + trashed, complete)
     }
 
     /** 回收站行只能单独查，所以作用域过滤改在内存里做 */
-    private fun trashedMatching(scope: MediaScope): List<VideoClip> =
-        readTrashed().filter {
+    private fun trashedMatching(
+        scope: MediaScope,
+        onFailure: (Throwable) -> Unit = {}
+    ): List<VideoClip> =
+        readTrashed(onFailure).filter {
             // 再认一次列值：万一某个 ROM 对 MATCH_ONLY 支持不完整，也不该把在用的成片漏进回收站页签
             it.isTrashed && it.mimeType.startsWith("video/") &&
                 (scope == MediaScope.AllVideos || it.relativePath.contains(WOTA_DIR_KEYWORD))
@@ -479,7 +491,8 @@ class MediaRepo private constructor(private val app: Context) {
         contentUri: Uri,
         selection: String?,
         args: Array<String>?,
-        sort: String?
+        sort: String?,
+        onFailure: (Throwable) -> Unit = {}
     ): List<VideoClip> {
         val out = ArrayList<VideoClip>()
         val resolver = app.contentResolver
@@ -490,6 +503,7 @@ class MediaRepo private constructor(private val app: Context) {
         }.onFailure {
             // 语义不变：失败仍返回（可能是空的）out。补日志只为把"媒体库列表空"从
             // 「本来就没视频」和「查询炸了」这两种现场里区分出来——不记就永远无从判断。
+            onFailure(it)
             Log.e(TAG, "查询失败 uri=$contentUri selection=$selection → 按空/半截列表返回", it)
         }
         return out
@@ -507,7 +521,7 @@ class MediaRepo private constructor(private val app: Context) {
      * 全是 `isTrashed=false`，`filterByTab` 的回收站判据又只看本地表 —— 结果会是每条成片在网格里出现两遍。
      * 29 上本地 `trash_item` 表才是唯一权威（见 [SYSTEM_TRASH_SUPPORTED]），直接返回空。
      */
-    private fun readTrashed(): List<VideoClip> {
+    private fun readTrashed(onFailure: (Throwable) -> Unit = {}): List<VideoClip> {
         if (!SYSTEM_TRASH_SUPPORTED) return emptyList()
         val out = ArrayList<VideoClip>()
         val queryArgs = Bundle().apply {
@@ -523,6 +537,7 @@ class MediaRepo private constructor(private val app: Context) {
         }.onFailure {
             // 同上：失败仍返回空列表（回收站页签显示空），只是把失败现场留下来。
             // 不记的话「回收站是空的」与「系统回收站查询炸了」在界面上长得一模一样。
+            onFailure(it)
             Log.e(TAG, "回收站查询失败（API ${Build.VERSION.SDK_INT}）→ 按空列表返回", it)
         }
         return out

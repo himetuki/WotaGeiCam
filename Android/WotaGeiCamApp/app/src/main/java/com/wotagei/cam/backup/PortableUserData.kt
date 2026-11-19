@@ -87,9 +87,19 @@ internal object PortableUserData {
         if (valid && value != null) key to value else null
     }.toMap()
 
-    /** 恢复是补充，不覆盖目标设备已存在的用户设置。 */
+    /**
+     * 恢复是补充，不覆盖目标设备已存在的用户设置。
+     *
+     * 值相同也要再次提交：上一次 `commit(false)` 可能已改内存但没落盘，重试时
+     * `current` 里已经有这个键；若按「键存在就跳过」过滤，editor 会变成空提交，
+     * 真实 SharedPreferences 不会因为空提交把内存里的值补写回磁盘。只重写与备份值
+     * 相等的键，既不改目标设备已有的不同设置，又能在下一次成功提交时真正落盘。
+     */
     fun settingsToRestore(restored: Map<String, *>, current: Map<String, *>): Map<String, Any> =
-        settingsOf(restored).filterKeys { it !in current }
+        settingsOf(restored).filter { (key, value) ->
+            val existing = current[key]
+            existing == null || existing == value
+        }
 
     /** 同一媒体的同一标签只保留一份，已有待匹配项优先，重复 restore 不累积数据。 */
     fun mergeTags(existing: List<Tag>, incoming: List<Tag>): List<Tag> =

@@ -70,7 +70,8 @@ class BackupRestoreLifecycleTest {
             seed(f)
             val source = f.staged.readBytes()
             f.script("commitOk", false)
-            runCatching { f.backup() }
+            val aborted = runCatching { f.backup() }
+            assertTrue("无法完整交接时必须让本轮备份失败，不能正常返回空快照", aborted.isFailure)
             assertTrue(f.staged.isFile)
             assertArrayEquals(source, f.staged.readBytes())
             assertEquals("持久化失败必须在super备份前中止", 0, f.script("backupCalls"))
@@ -247,6 +248,125 @@ class BackupRestoreLifecycleTest {
             assertEquals(true, f.disk["level_enabled"])
             assertEquals(listOf(b), f.read(f.pending).tags)
             assertFalse(f.exportMarker.exists())
+        }
+    }
+
+    @Test fun `R14_条数未超但字节超4MiB时也分批交接_旧pending先消化`() = runBlocking {
+        fixture().use { f ->
+            val big = "p".repeat(60_000)
+            val oldTags = (0 until 60).map {
+                PortableUserData.Tag(PortableUserData.MediaKey(big + "/", "old$it.mp4", 123L, 1000L), "like", it.toLong())
+            }
+            val newTags = (0 until 20).map {
+                PortableUserData.Tag(PortableUserData.MediaKey(big + "/", "new$it.mp4", 123L, 1000L), "n$it", it.toLong())
+            }
+            f.write(f.pending, PortableUserData.Snapshot(emptyMap(), oldTags))
+            f.write(f.staged, PortableUserData.Snapshot(emptyMap(), newTags))
+            // 80 条远低于 10000 条帽，但每条 60KB 路径会让整体超过 4MiB 字节帽；
+            // mergeTags 不会抛，必须按字节余量分批，旧 pending 不能因此永久卡住。
+            val oldClips = (0 until 60).map {
+                f.clip(path = "/storage/emulated/0/$big/old$it.mp4", name = "old$it.mp4", id = 100L + it,
+                    relativePath = big + "/")
+            }
+            assertEquals(60, f.restoreMedia(oldClips).size)
+            assertTrue("未交接的大批量新标签必须留在恢复源", f.staged.isFile)
+            val pending = f.read(f.pending).tags
+            assertTrue("旧标签必须先消化，不能被字节帽挡住", pending.none { it.media.name.startsWith("old") })
+            assertTrue("待匹配缓存只剩本次未交接的新标签", pending.all { it.media.name.startsWith("new") })
+            assertEquals(60, f.rows.size)
+
+            // 下一轮再带旧+新媒体：先匹配本机已有缓存，再由源补上仍放不下的新标签，不丢一条。
+            val newClips = (0 until 20).map {
+                f.clip(path = "/storage/emulated/0/$big/new$it.mp4", name = "new$it.mp4", id = 20_000L + it,
+                    relativePath = big + "/")
+            }
+            val both = oldClips + newClips
+            val first = f.restoreMedia(both).size
+            val second = f.restoreMedia(both).size
+            assertEquals("两轮恢复后 80 条标签必须全部落库", 80, first + second)
+            assertFalse("源只在完整交接后才消费", f.staged.exists())
+            assertFalse(f.pending.exists())
+            assertEquals(80, f.rows.size)
+        }
+    }
+
+    @Test fun `Y40_部分可见且无历史指纹时中止备份保留上一份`() {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
+            f.script("mediaAccess", "PARTIAL_READ")
+            f.script("denyQuery", true)
+            val aborted = runCatching { f.backup() }
+            assertTrue("无法核验又无历史指纹时必须让本轮备份失败，不能提交少标签备份", aborted.isFailure)
+            assertEquals("中止不能调用系统备份覆盖上一份", 0, f.script("backupCalls"))
+            assertFalse("中止不得留下导出快照", f.staged.exists())
+            assertFalse("中止不得留下导出标记", f.exportMarker.exists())
+            // 用户补全权限后仍能正常备份。
+            f.script("denyQuery", false)
+            f.script("mediaAccess", "ALL_FILES")
+            val exported = f.backup()
+            assertEquals(1, exported.tags.size)
+            assertEquals(keyA, exported.tags.single().media)
+        }
+    }
+
+    @Test fun `Y40_卷未挂载时不提交少标签备份_有历史指纹则保留`() {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
+            f.script("volumesMounted", false)
+            f.script("missingQuery", true) // SD/OTG 拔出：行静默消失，查询不报错
+            val aborted = runCatching { f.backup() }
+            assertTrue("卷未挂载又无历史指纹时不能提交少标签备份", aborted.isFailure)
+            assertEquals("中止不能调用系统备份覆盖上一份", 0, f.script("backupCalls"))
+
+            f.script("volumesMounted", true)
+            f.script("missingQuery", false)
+            assertEquals(1, f.backup().tags.size) // 完整可见时建立已确认指纹账本
+
+            f.script("volumesMounted", false)
+            f.script("missingQuery", true)
+            val preserved = f.backup()
+            assertEquals("卷暂时不可见时，已确认标签必须继续留在下一份备份里", 1, preserved.tags.size)
+            assertEquals(keyA, preserved.tags.single().media)
+        }
+    }
+
+    @Test fun `Y40_完整可见时已删除媒体不靠旧账本复活`() {
+        fixture().use { f ->
+            f.rows += com.wotagei.cam.media.MediaTag(7L, 7L, BackupPlatformFixture.OLD_PATH, "like", 10L)
+            val complete = f.backup()
+            assertEquals(1, complete.tags.size)
+            assertTrue("完整导出必须留下本机核验账本", f.ledger.isFile)
+
+            f.script("missingQuery", true) // 完整权限下 MediaStore 查无此行 ⇒ 媒体已删除
+            val afterDelete = f.backup()
+            assertTrue("已删除媒体不能靠上一份账本重新出现在备份里", afterDelete.tags.isEmpty())
+            assertFalse("确认删除后旧账本条目应清掉", f.ledger.exists())
+        }
+    }
+
+    @Test fun `Y41_标记只剩bak时仍丢弃中断导出`() {
+        fixture().use { f ->
+            assertTrue(f.stageExport(PortableUserData.Snapshot(mapOf("gallery_columns" to 9), listOf(a))))
+            val markerBak = File(f.exportMarker.path + ".bak")
+            assertTrue("模拟 finishWrite 前被挪到 .bak 的中断标记", f.exportMarker.renameTo(markerBak))
+            f.startup()
+            assertFalse("只剩 .bak 标记也必须丢弃本机导出", f.staged.exists())
+            assertFalse("清理必须连 .bak 一起删", markerBak.exists())
+            assertFalse(f.exportMarker.exists())
+            assertFalse("本机设置不能被自己的导出快照改写", f.disk.containsKey("gallery_columns"))
+            assertFalse("本机标签不能流入 pending", f.pending.exists())
+        }
+    }
+
+    @Test fun `Y41_无标记时清理AtomicFile临时件且不当恢复输入`() {
+        fixture().use { f ->
+            val stale = File(f.staged.path + ".new")
+            f.write(stale, incoming) // 只有 .new，没有 base/标记/.bak
+            f.startup()
+            assertFalse("陈旧 .new 必须清理", stale.exists())
+            assertFalse(f.staged.exists())
+            assertFalse("陈旧临时件不能当恢复输入", f.disk.containsKey("level_enabled"))
+            assertFalse(f.pending.exists())
         }
     }
 

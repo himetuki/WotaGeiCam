@@ -1,5 +1,6 @@
 package com.wotagei.cam.backup
 
+import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.media.MediaTag
 import com.wotagei.cam.media.MediaTagDao
 import kotlinx.coroutines.CoroutineScope
@@ -136,10 +137,15 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
         return suspending(requireNotNull(cls.getField("Companion").get(null)), "restoreTags", context, clips,
             visibilityComplete) as List<*>
     }
-    fun clip(path: String = OLD_PATH, name: String = "old.mp4", id: Long = 7L): Any {
+    fun clip(
+        path: String = OLD_PATH,
+        name: String = "old.mp4",
+        id: Long = 7L,
+        relativePath: String = "Movies/"
+    ): Any {
         val uri = type("android.net.Uri").getConstructor(String::class.java).newInstance("content://media/external/video/media/$id")
         return type("com.wotagei.cam.media.VideoClip").declaredConstructors.single { it.parameterCount == 16 }
-            .newInstance(id, uri, name, path, "Movies/", 0L, 123L, 1000L, 640, 480,
+            .newInstance(id, uri, name, path, relativePath, 0L, 123L, 1000L, 640, 480,
                 "video/mp4", emptySet<String>(), false, null, null, 1)
     }
     suspend fun rename(clip: Any, name: String = "renamed"): Any? {
@@ -162,7 +168,8 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
             // Android 单测编译类路径不含 javax.tools，按本仓既有 fixture 用反射访问运行测试的 JDK。
             val compiler = requireNotNull(Class.forName("javax.tools.ToolProvider")
                 .getMethod("getSystemJavaCompiler").invoke(null)) { "测试需要现有 JDK" }
-            val classpath = listOf(MediaTagDao::class.java, kotlin.Unit::class.java, CoroutineScope::class.java)
+            val classpath = listOf(MediaTagDao::class.java, kotlin.Unit::class.java, CoroutineScope::class.java,
+                MediaAccessState::class.java)
                 .map { File(requireNotNull(it.protectionDomain).codeSource.location.toURI()).absolutePath }
                 .distinct().joinToString(File.pathSeparator)
             val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java,
@@ -181,9 +188,11 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                     public static java.io.File root;
                     public static final java.util.Map<String,Object> memory=new java.util.LinkedHashMap<>(), disk=new java.util.LinkedHashMap<>();
                     public static boolean commitOk=true, denyUpdate=false, unreadableAfterRename=false;
-                    public static boolean denyQuery=false;
+                    public static boolean denyQuery=false, missingQuery=false;
                     public static int commits=0, pendingFailures=0, failedBytes=0, backupCalls=0, updateResult=1;
                     public static String failWritePath, failReadPath, silentPublishPath;
+                    public static String mediaAccess="ALL_FILES";
+                    public static boolean volumesMounted=true;
                     public static byte[] published;
                     public static String path="/storage/emulated/0/Movies/old.mp4", name="old.mp4";
                     public static final String actualName="renamed (1).mp4";
@@ -214,6 +223,9 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                         public boolean commit(){
                             BackupScript.commits++; BackupScript.memory.putAll(changes);
                             if(!BackupScript.commitOk)return false;
+                            // 真实 SharedPreferences 的空 editor 提交不触发落盘；只有带改动的
+                            // 成功提交才会把内存写回磁盘。用于钉住「失败提交后重试必须再带改动」。
+                            if(changes.isEmpty())return true;
                             BackupScript.disk.clear();BackupScript.disk.putAll(BackupScript.memory);return true;
                         }
                     }
@@ -319,6 +331,7 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
                     }
                     public android.database.Cursor query(android.net.Uri u,String[] projection,String w,String[] a,String sort){
                         if(probe.BackupScript.denyQuery)throw new SecurityException("injected query denial");
+                        if(probe.BackupScript.missingQuery)return null;
                         return new android.database.Cursor(){
                             public boolean moveToFirst(){return true;}
                             public String getString(int i){switch(projection[i]){
@@ -357,6 +370,17 @@ internal class BackupPlatformFixture(classes: File, val root: File) : Closeable 
             """,
             "com.wotagei.cam.core.WotaStorage" to """
                 package com.wotagei.cam.core;public class WotaStorage {public static final WotaStorage INSTANCE=new WotaStorage();public boolean hasAllFilesAccess(){return true;}public boolean supportsAllFilesAccess(){return true;}}
+            """,
+            "com.wotagei.cam.core.MediaAccessKt" to """
+                package com.wotagei.cam.core;
+                public final class MediaAccessKt {
+                    public static MediaAccessState mediaAccessState(android.content.Context c){
+                        return MediaAccessState.valueOf(probe.BackupScript.mediaAccess);
+                    }
+                    public static boolean allMediaVolumesMounted(android.content.Context c){
+                        return probe.BackupScript.volumesMounted;
+                    }
+                }
             """,
             "com.wotagei.cam.ui.WotaSettings" to """
                 package com.wotagei.cam.ui;public class WotaSettings {public static final WotaSettings INSTANCE=new WotaSettings();public android.content.SharedPreferences of(android.content.Context c){return c.getSharedPreferences("wota_settings",0);}public boolean diagVerbose(android.content.SharedPreferences p){return false;}public boolean diagEnabled(android.content.SharedPreferences p){return false;}}

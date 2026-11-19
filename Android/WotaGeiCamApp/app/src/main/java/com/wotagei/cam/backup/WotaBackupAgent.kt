@@ -10,6 +10,9 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.AtomicFile
 import androidx.room.withTransaction
+import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.allMediaVolumesMounted
+import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.media.MediaTag
 import com.wotagei.cam.media.TagSpace
@@ -23,6 +26,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.io.OutputStream
 import java.util.zip.CRC32
 
 /**
@@ -44,24 +49,27 @@ class WotaBackupAgent : BackupAgent() {
     override fun onFullBackup(data: FullBackupDataOutput) = runBlocking {
         restoreMutex.withLock {
             // 先交接系统恢复源；交接不成功（容量合并不下/暂存失败）绝不覆盖源文件。
+            // 必须让本轮备份**失败**而不是正常返回：正常返回会让系统把「没有快照」当成
+            // 最新一份成功备份，上一份云端标签/设置反而被这次空提交覆盖。
             if (!consumeRestoreLocked(this@WotaBackupAgent)) {
-                Diag.w("WotaBackup", "恢复源尚未交接，跳过本轮备份并保留源供后续重试")
-                return@withLock
+                Diag.w("WotaBackup", "恢复源尚未交接，中止本轮备份并保留源供后续重试")
+                throw IOException("恢复源尚未交接，保留上一份备份")
             }
             var published = false
             try {
                 val settings = PortableUserData.settingsOf(getSharedPreferences(PortableUserData.PREFS_NAME, MODE_PRIVATE).all)
                 val pending = readPending(this@WotaBackupAgent)?.tags.orEmpty()
                 val tags = exportTags(this@WotaBackupAgent)
+                    ?: throw IOException("部分标签无法核验，保留上一份备份")
                 val snapshot = try {
                     PortableUserData.Snapshot(settings, PortableUserData.mergeTags(pending, tags))
                 } catch (e: IllegalArgumentException) {
                     Diag.w("WotaBackup", "本轮导出合并超过上限，保留旧备份并等待标签消化", e)
-                    return@withLock
+                    throw IOException("本轮导出合并超过上限，保留上一份备份", e)
                 }
                 if (!stageForExport(this@WotaBackupAgent, snapshot)) {
-                    Diag.w("WotaBackup", "导出暂存未确认发布，跳过本轮备份")
-                    return@withLock
+                    Diag.w("WotaBackup", "导出暂存未确认发布，中止本轮备份")
+                    throw IOException("导出暂存未确认发布，保留上一份备份")
                 }
                 published = true
                 super.onFullBackup(data)
@@ -133,12 +141,19 @@ class WotaBackupAgent : BackupAgent() {
                 null
             }
             if (merged != null) {
-                if (!writePending(context, merged)) {
+                // 先判断能否装进 4MiB 字节帽：能装就别把 IO/发布失败误当成容量问题，
+                // 否则一次真实写失败会被下面的分批逻辑反复重试，也会掩盖原始错误。
+                if (fitsInSnapshot(merged)) {
+                    if (writePending(context, merged)) {
+                        atomic.delete()
+                        return true
+                    }
                     Diag.w("WotaBackup", "待匹配快照未确认发布，保留恢复源供重试")
                     return false
                 }
-                atomic.delete()
-                return true
+                // 条数没超但字节超 4MiB 时 mergeTags 不会抛；这里不能直接放弃，
+                // 否则和条数超限一样会永远卡在同一个合并上。统一落到下面的分批交接。
+                Diag.w("WotaBackup", "待匹配快照超过字节帽，改按余量分批交接")
             }
             val (accepted, remaining) = PortableUserData.handoff(oldTags, snapshot.tags)
             if (accepted.isEmpty()) {
@@ -264,20 +279,21 @@ class WotaBackupAgent : BackupAgent() {
             if (target.exists() || File(target.path + ".bak").exists()) return false
             if (!writeSnapshot(staging, snapshot)) return false
             val fingerprint = fingerprintOf(staging) ?: run {
-                staging.delete()
+                AtomicFile(staging).delete()
                 return false
             }
             if (!writeFingerprint(state, fingerprint)) {
-                staging.delete()
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
                 return false
             }
             if (!staging.renameTo(target)) {
-                staging.delete()
-                state.delete()
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
                 return false
             }
             if (fingerprintOf(target) != fingerprint) {
-                state.delete()
+                AtomicFile(state).delete()
                 AtomicFile(target).delete()
                 return false
             }
@@ -285,11 +301,16 @@ class WotaBackupAgent : BackupAgent() {
         }
 
         private fun cleanupExport(context: Context, published: Boolean) {
-            if (published) AtomicFile(File(context.filesDir, PortableUserData.FILE_NAME)).delete()
+            val target = File(context.filesDir, PortableUserData.FILE_NAME)
+            if (published) {
+                AtomicFile(target).delete()
+            } else {
+                // 没发布时 target 可能是真正的系统恢复源，绝不能删；只清掉本进程的
+                // AtomicFile 临时件（target 的 .bak 仍留给 openRead 恢复）。
+                File(target.path + ".new").delete()
+            }
             for (name in listOf(EXPORT_STAGING_NAME, EXPORT_STATE_NAME)) {
-                val file = File(context.filesDir, name)
-                file.delete()
-                File(file.path + ".new").delete()
+                AtomicFile(File(context.filesDir, name)).delete()
             }
         }
 
@@ -297,22 +318,25 @@ class WotaBackupAgent : BackupAgent() {
         private fun discardInterruptedExportLocked(context: Context) {
             val staging = File(context.filesDir, EXPORT_STAGING_NAME)
             val state = File(context.filesDir, EXPORT_STATE_NAME)
-            if (!state.exists()) {
-                staging.delete()
-                File(staging.path + ".new").delete()
+            val target = File(context.filesDir, PortableUserData.FILE_NAME)
+            // 标记写入本身走 AtomicFile：进程在 finishWrite 前退出时，旧标记可能只剩
+            // `.bak`（base 已被 startWrite 挪走）。只认 base 会把这类中断导出漏成恢复源。
+            if (!state.exists() && !File(state.path + ".bak").exists()) {
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
+                File(target.path + ".new").delete()
                 return
             }
             val expected = readFingerprint(state)
-            val target = File(context.filesDir, PortableUserData.FILE_NAME)
             val ours = expected != null && target.isFile && fingerprintOf(target) == expected
             if (ours) {
                 AtomicFile(target).delete()
                 Diag.w("WotaBackup", "丢弃上次进程中断留下的导出暂存，不当作恢复输入")
+            } else {
+                File(target.path + ".new").delete()
             }
-            staging.delete()
-            File(staging.path + ".new").delete()
-            state.delete()
-            File(state.path + ".new").delete()
+            AtomicFile(staging).delete()
+            AtomicFile(state).delete()
         }
 
         private data class Fingerprint(val size: Long, val crc: Long)
@@ -357,8 +381,9 @@ class WotaBackupAgent : BackupAgent() {
         }
 
         private fun readFingerprint(file: File): Fingerprint? = try {
-            if (!file.exists()) null else {
-                val parts = file.readText().split(':')
+            if (!file.exists() && !File(file.path + ".bak").exists()) null else {
+                // 走 AtomicFile.openRead 才能在 base 缺失时由 `.bak` 恢复出上一次完整标记。
+                val parts = AtomicFile(file).openRead().use { it.readBytes().toString(Charsets.UTF_8) }.split(':')
                 if (parts.size == 2) Fingerprint(parts[0].toLong(), parts[1].toLong()) else null
             }
         } catch (e: Exception) {
@@ -396,6 +421,20 @@ class WotaBackupAgent : BackupAgent() {
         }
 
         /**
+         * 只按真实编码规则量一次字节数，不落盘；用于区分「超过 4MiB 字节帽」和
+         * 「写盘/发布本身失败」。后者必须原样保留源重试，不能被分批交接吞成容量问题。
+         */
+        private fun fitsInSnapshot(snapshot: PortableUserData.Snapshot): Boolean = try {
+            PortableUserData.write(snapshot, object : OutputStream() {
+                override fun write(b: Int) = Unit
+                override fun write(b: ByteArray, off: Int, len: Int) = Unit
+            })
+            true
+        } catch (_: IOException) {
+            false
+        }
+
+        /**
          * R15：`AtomicFile.finishWrite()` 没有失败回执，平台实现可能只记日志。
          * 写完必须回读并逐项比对归一化快照，确认新内容真的发布后才允许调用方消费源。
          */
@@ -428,19 +467,33 @@ class WotaBackupAgent : BackupAgent() {
             }
         }
 
+        /** 权限、卷挂载与查询任一不足时，MediaStore 的空/半截结果都不能证明标签对应的媒体不存在。 */
+        private fun backupVisibilityComplete(context: Context): Boolean = runCatching {
+            val access = mediaAccessState(context)
+            (access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ) &&
+                allMediaVolumesMounted(context)
+        }.getOrDefault(false)
+
+        /**
+         * @return null = 有本机标签本轮无法核验、也没有历史已确认指纹；调用方必须中止备份，
+         * 不能用一份少标签的快照覆盖上一份完整云端备份。
+         */
         @Suppress("DEPRECATION") // DATA 仅用于确认旧 tag 仍属于同一文件；不会写入迁移快照。
-        private suspend fun exportTags(context: Context): List<PortableUserData.Tag> {
+        private suspend fun exportTags(context: Context): List<PortableUserData.Tag>? {
             val tags = WotaDb.get(context).tagDao().observeAll().first()
             val previous = readLedger(context).associateBy { Triple(it.mediaId, it.path, it.tag) }
+            val visibilityComplete = backupVisibilityComplete(context)
             val out = arrayListOf<PortableUserData.Tag>()
             val next = arrayListOf<PortableUserData.ExportEntry>()
             val nextKeys = HashSet<Triple<Long, String, String>>()
+            var unverifiedWithoutProof = false
             val projection = arrayOf(MediaStore.Video.Media.DATA, MediaStore.Video.Media.RELATIVE_PATH,
                 MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DURATION)
             for ((id, rows) in tags.groupBy { it.mediaId }) {
                 val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
                 var cursorPath: String? = null
                 var key: PortableUserData.MediaKey? = null
+                var queryFailed = false
                 try {
                     context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
                         if (!c.moveToFirst() || c.isNull(0)) return@use
@@ -451,12 +504,16 @@ class WotaBackupAgent : BackupAgent() {
                             key = candidate
                         }
                     }
-                } catch (e: SecurityException) {
-                    // 未授予/部分授权：本轮算不出指纹，下面用导出账本保留上次已确认的指纹。
-                    Diag.w("WotaBackup", "部分收藏当前不可读，改用上次已确认的迁移指纹")
+                } catch (e: Exception) {
+                    // 未授予/部分授权/卷不可读/单行查询异常：本轮算不出指纹，
+                    // 下面用导出账本保留上次已确认的指纹；没有账本就只能中止本轮。
+                    queryFailed = true
+                    Diag.w("WotaBackup", "部分收藏当前不可读，改用上次已确认的迁移指纹", e)
                 }
                 val resolvedKey = key
                 val resolvedPath = cursorPath
+                // 只有「权限/卷都完整且该行查询没失败」时，查无此行才可以当成媒体已删除。
+                val canTrustAbsence = visibilityComplete && !queryFailed
                 if (resolvedKey != null && resolvedPath != null) {
                     rows.filter { it.path == resolvedPath }.forEach { row ->
                         val value = portableTag(row.tag) ?: return@forEach
@@ -468,17 +525,28 @@ class WotaBackupAgent : BackupAgent() {
                     }
                 } else {
                     // Y40：部分授权/查询缺失时，不可核验的本机标签不能从下一份备份里消失。
-                    // 只保留仍对应当前 Room 行的旧指纹；删除的行不会在这里复活。
+                    // 有历史指纹就沿用；没有历史指纹又不能证明已删除时，宁可本轮不备份。
                     rows.forEach { row ->
                         val value = portableTag(row.tag) ?: return@forEach
                         val localKey = Triple(id, row.path, value)
-                        val confirmed = previous[localKey] ?: return@forEach
-                        out += PortableUserData.Tag(confirmed.media, value, row.createdAt)
-                        if (nextKeys.add(localKey)) next += confirmed.copy(createdAt = row.createdAt)
+                        val confirmed = previous[localKey]
+                        if (!canTrustAbsence) {
+                            if (confirmed != null) {
+                                out += PortableUserData.Tag(confirmed.media, value, row.createdAt)
+                                if (nextKeys.add(localKey)) next += confirmed.copy(createdAt = row.createdAt)
+                            } else {
+                                unverifiedWithoutProof = true
+                            }
+                        }
+                        // 完整可见时查无此行/指纹不完整 ⇒ 媒体已删除或已不可迁移，旧账本不能让它复活。
                     }
                 }
             }
             writeLedger(context, next)
+            if (unverifiedWithoutProof) {
+                Diag.w("WotaBackup", "部分标签无法核验且无历史指纹，保留上一份备份")
+                return null
+            }
             return out.distinctBy { it.media to it.value }
         }
 
