@@ -464,7 +464,15 @@ fun CameraScreen(
     val recDb by runner.volumeDb.observed()
     // 换段预提示（2026-10-28 审查加固）：pollTask 按真实写入字节置位，录制结束自动清
     val segNearCap by runner.segNearCap.observed()
-    val recording = recStatus == RecordStatus.START || recStatus == RecordStatus.PREPARE ||
+    // B13：起录按下的本地闩锁 = 合成 PREPARE。insert + 编码器准备要 1~2s，这段里 runner.status
+    // 还没离开 IDLE；按钮若等状态回流才变忙碌，第二按会再排一次 start——工作线程拒非 IDLE 的
+    // 重复 start，那一按等于被静默吞掉。闩锁在按下的同一下拉响（同一次点击里立即可见），
+    // 状态机一旦自己接管（离开 IDLE）就交还，此后按真实 PREPARE/START 语义走。
+    var startQueued by remember { mutableStateOf(false) }
+    LaunchedEffect(recStatus) {
+        if (recStatus != RecordStatus.IDLE) startQueued = false
+    }
+    val recording = startQueued || recStatus == RecordStatus.START || recStatus == RecordStatus.PREPARE ||
         recStatus == RecordStatus.STOPPING
 
     var sheet by remember { mutableStateOf(Sheet.NONE) }
@@ -1662,7 +1670,7 @@ fun CameraScreen(
         focusUsable = focusUsable,
         flashUsable = canFlash,
         recording = recStatus == RecordStatus.START,
-        busy = recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
+        busy = startQueued || recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
         // 计时与状态是**读数**不是入口：给它们挂 onClick 只会让人以为点开有配置项（§37 第 4 条）
         recStateLabel = when (recStatus) {
             RecordStatus.PREPARE -> stringResource(R.string.cam_state_prepare)
@@ -1814,6 +1822,9 @@ fun CameraScreen(
                 // 准备期（insert+prepare+挂面窗 1~2s）点停止不许静默吞：挂 pendingStop，
                 // 会话进 START 后立即停（2026-10-07 真机"一次停止点击未生效"的根因）
                 recStatus == RecordStatus.PREPARE -> runner.requestStopWhenReady()
+                // B13：上一按已排起录、真实 PREPARE 还没回流（按钮已按合成 PREPARE 画忙碌）：
+                // 同一段准备期的第二按不许再排一次 start。
+                startQueued -> Unit
                 recStatus != RecordStatus.IDLE -> Unit
                 ui.preview != PreviewStatus.ING -> showTip(app.getString(R.string.cam_wait_preview))
                 else -> {
@@ -1825,6 +1836,9 @@ fun CameraScreen(
                         params.renderMode.value = RenderMode.GPU
                         showTip(app.getString(R.string.cam_arc_switch_gpu))
                     } else {
+                        // B13：闩锁必须先于 runner.start 拉响——start 只是 handler.post，
+                        // 状态回流到 PREPARE 之前还有一整拍，同一次点击链上的第二按靠它挡住。
+                        startQueued = true
                         runner.start(
                             width = size.width,
                             height = size.height,
