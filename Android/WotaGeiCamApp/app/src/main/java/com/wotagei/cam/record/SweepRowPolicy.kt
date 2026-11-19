@@ -39,14 +39,40 @@ internal enum class RowFix {
 }
 
 /**
+ * 行所在**具体卷**（纯函数）：只有拿到真实卷名，行 URI / 行操作才钉得住"哪一条行"。
+ *
+ * `VOLUME_NAME` 可能是合成卷 `external`（旧版本反查/老行）：它是**跨所有卷**的聚合集合，
+ * 再用 `_ID` 拼条目就是聚合 URI + id——跨卷 `_ID` 可以重号，会打开/删/救援另一卷的同号行
+ * （Y22）。读不到卷名（null/空串）同样拼不回具体卷。两种都返回 null ⇒ 调用方只能按
+ * 不可观测处理（只标记，不动行）。
+ */
+internal fun concreteRowVolume(volume: String?): String? {
+    val v = volume?.trim().orEmpty()
+    return if (v.isEmpty() || v == SYNTHETIC_VOLUME_EXTERNAL) null else v
+}
+
+/** `MediaStore.VOLUME_EXTERNAL` 的值：纯函数文件不引 android.jar（JVM 测试可直跑） */
+private const val SYNTHETIC_VOLUME_EXTERNAL = "external"
+
+/**
+ * owner 闸门（纯函数）：明确属于**别的包**的成片行一律不碰（删行连带删文件，救援会改别人的
+ * pending 态，两者都是动别人的数据）。`OWNER_PACKAGE_NAME` 只在 API 30+ 有值，null/空串 =
+ * 当前系统读不到 ⇒ 保持老行为（不据此拒绝，否则老设备上所有行都会被拒）。
+ */
+internal fun ownerAllowed(owner: String?, ourPackage: String): Boolean =
+    owner.isNullOrEmpty() || owner == ourPackage
+
+/**
  * 单行处置（纯函数）。
  *
  * @param pending 行 IS_PENDING=1
  * @param state [RowFileState]
  * @param ageOk 年龄门槛（sealed 标记可缩短，见 [sweepAgeOk]）
  * @param volumeMounted 行所在卷在 [android.provider.MediaStore.getExternalVolumeNames] 里
- * @param rowMatches 按 URI 复核：行仍在且 DATA/DISPLAY_NAME 与快照一致
+ *   且卷名能构造具体集合（见 [concreteRowVolume]）。
+ * @param rowMatches 按具体卷条目 URI 复核，行仍在且身份与快照一致
  * @param playable 容器尾段完整且有视频轨（[MoovSeal.complete] + 轨道探测）
+ * @param ownerOurs 行的 OWNER_PACKAGE_NAME 是我们的（或本系统读不到，见 [ownerAllowed]）
  */
 internal fun rowFixDecision(
     pending: Boolean,
@@ -54,8 +80,12 @@ internal fun rowFixDecision(
     ageOk: Boolean,
     volumeMounted: Boolean,
     rowMatches: Boolean,
-    playable: Boolean
+    playable: Boolean,
+    ownerOurs: Boolean
 ): RowFix {
+    // 他人的行先挡死：任何分支都不许动（不进删行、不进救援，连不可观测标记都省了——
+    // 那不是我们的行，连"我们在管它"都不该记录）
+    if (!ownerOurs) return RowFix.KEEP
     if (!ageOk) return RowFix.KEEP
     if (state == RowFileState.UNOBSERVABLE) return RowFix.MARK_UNOBSERVABLE
     if (state == RowFileState.ABSENT) {

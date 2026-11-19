@@ -224,7 +224,12 @@ class StalePendingSweepTest {
     @Test
     fun `目录内精确匹配必须叠 RELATIVE_PATH`() {
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
-        assertTrue("改名必须走 provider（有行的文件自己 rename 会让行指空）", sweep.contains("MediaStore.Video.Media.EXTERNAL_CONTENT_URI"))
+        // renameRow 是表达式体（`= runCatching {`），bodyOf 只认花括号体 ⇒ 按成员边界切片
+        val rename = sweep.substringAfter("private fun renameRow(").substringBefore("\n    private fun ")
+        assertTrue(
+            "改名必须走 provider（有行的文件自己 rename 会让行指空），且只落在主卷集合（Y22 错卷同名不许改）",
+            rename.contains("contentResolver.update(") && rename.contains("PRIMARY_VIDEO_URI")
+        )
         assertTrue("DISPLAY_NAME 不唯一，必须叠 RELATIVE_PATH", sweep.contains("MediaStore.MediaColumns.RELATIVE_PATH"))
         assertTrue("顺带兜一次 IS_PENDING=0（历史 insert 在飞残留可能停在 pending 态）", sweep.contains("MediaStore.MediaColumns.IS_PENDING"))
         assertTrue("侧车随成片一起搬（复用成片改名的单一出口）", sweep.contains("ArcDropLog.renameFor("))

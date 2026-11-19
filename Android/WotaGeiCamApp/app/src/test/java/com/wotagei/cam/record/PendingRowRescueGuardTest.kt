@@ -44,8 +44,8 @@ class PendingRowRescueGuardTest {
         // 删行只许出现在 DELETE_ROW 分支
         if (!deleteBranch.contains("deleteRow(")) return false
         if (rescueOnly.contains("deleteRow(") || markBranch.contains("deleteRow(")) return false
-        // 救援只许 update 清 pending
-        if (!rescueOnly.contains("unpendRow(app, row.id)")) return false
+        // 救援只许 update 清 pending（且只清具体卷条目 URI 那一条，见 SweepRowIdentityGuardTest）
+        if (!rescueOnly.contains("unpendRow(app, row)")) return false
         if (deleteBranch.contains("unpendRow(")) return false
         // 不可观测必须留标记日志
         if (!markBranch.contains("Log.w(")) return false
@@ -70,8 +70,8 @@ class PendingRowRescueGuardTest {
         val mutant = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(
                 raw.replace(
-                    Regex.fromLiteral("unpendRow(app, row.id)"),
-                    "deleteRow(app, row.id)"
+                    Regex.fromLiteral("unpendRow(app, row)"),
+                    "deleteRow(app, row)"
                 ),
                 "performFix"
             )

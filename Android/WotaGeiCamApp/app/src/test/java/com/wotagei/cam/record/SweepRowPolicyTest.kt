@@ -5,20 +5,27 @@ import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Y22 冷启清扫判据的**桥测**：三值文件状态、删行前的卷/URI 复核、缺尾段容器不晋升。
+ * Y22 冷启清扫判据的**桥测**：三值文件状态、删行前的卷/URI 复核、缺尾段容器不晋升、
+ * owner 闸门与"具体卷"门。
  *
  * 旧实现把 `!File(path).exists()` 当"文件缺失"并删行：FUSE 路径不可见、卷离线、过期 DATA
  * 都会让 stat 回 false，删行 = MediaStore 连带删掉还在盘上的成片。现在纯函数
  * [rowFixDecision] 给出真值表，[mp4TopLevelComplete] 用合成 box 流证明"缺尾段"可判，
  * 接线守卫钉住 Android 侧只喂事实、不做第二套判断。
+ *
+ * 2026-11-20 增量：行身份必须钉在**具体卷 + _ID** 上（聚合集合跨卷重号），owner 明确是
+ * 别的包的成片行一律不碰。这两条在 [rowFixDecision] / [concreteRowVolume] /
+ * [ownerAllowed] 上全表，接线钉扎见 `SweepRowIdentityGuardTest`。
  */
 class SweepRowPolicyTest {
 
     private val old = StalePendingSweep.SWEEP_STALE_MS + 1
+    private val us = "com.wotagei.cam"
 
     // ---- 文件状态三值 ----
 
@@ -29,14 +36,14 @@ class SweepRowPolicyTest {
             RowFix.MARK_UNOBSERVABLE,
             rowFixDecision(
                 pending = false, state = RowFileState.UNOBSERVABLE, ageOk = true,
-                volumeMounted = true, rowMatches = true, playable = true
+                volumeMounted = true, rowMatches = true, playable = true, ownerOurs = true
             )
         )
         assertEquals(
             RowFix.MARK_UNOBSERVABLE,
             rowFixDecision(
                 pending = true, state = RowFileState.UNOBSERVABLE, ageOk = true,
-                volumeMounted = true, rowMatches = true, playable = true
+                volumeMounted = true, rowMatches = true, playable = true, ownerOurs = true
             )
         )
     }
@@ -46,17 +53,17 @@ class SweepRowPolicyTest {
         assertEquals(
             "确认缺失 + 卷可见 + 行仍是同一行：坏行可删",
             RowFix.DELETE_ROW,
-            rowFixDecision(false, RowFileState.ABSENT, true, true, true, playable = false)
+            rowFixDecision(false, RowFileState.ABSENT, true, true, true, playable = false, ownerOurs = true)
         )
         assertEquals(
             "卷查询不到 ⇒ 不可观测（卷可能只是暂时离线）",
             RowFix.MARK_UNOBSERVABLE,
-            rowFixDecision(false, RowFileState.ABSENT, true, false, true, playable = false)
+            rowFixDecision(false, RowFileState.ABSENT, true, false, true, playable = false, ownerOurs = true)
         )
         assertEquals(
             "按 URI 复核不上（行被替换/路径漂移）⇒ 不可观测",
             RowFix.MARK_UNOBSERVABLE,
-            rowFixDecision(false, RowFileState.ABSENT, true, true, false, playable = false)
+            rowFixDecision(false, RowFileState.ABSENT, true, true, false, playable = false, ownerOurs = true)
         )
     }
 
@@ -65,28 +72,49 @@ class SweepRowPolicyTest {
         assertEquals(
             "完整 + 有视频轨：pending 行只清 IS_PENDING",
             RowFix.RESCUE_ROW,
-            rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = true)
+            rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = true, ownerOurs = true)
         )
         assertEquals(
             "缺尾段/无视频轨：不许晋升（相册里点开即坏的条目）",
             RowFix.KEEP,
-            rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = false)
+            rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = false, ownerOurs = true)
         )
         assertEquals(
             "已发布的行不需要处置",
             RowFix.KEEP,
-            rowFixDecision(false, RowFileState.PRESENT, true, true, true, playable = true)
+            rowFixDecision(false, RowFileState.PRESENT, true, true, true, playable = true, ownerOurs = true)
         )
         assertEquals(
             "卷不可见时不碰",
             RowFix.KEEP,
-            rowFixDecision(true, RowFileState.PRESENT, true, false, true, playable = true)
+            rowFixDecision(true, RowFileState.PRESENT, true, false, true, playable = true, ownerOurs = true)
+        )
+    }
+
+    @Test
+    fun `他人的行一律不碰_删与救援都不许`() {
+        // owner 明确是别的包：确认缺失也不许删（删行连带删文件 = 删别人的成片）
+        assertEquals(
+            "他人行 + 文件确认缺失 + 其它条件全绿 ⇒ 仍不删",
+            RowFix.KEEP,
+            rowFixDecision(false, RowFileState.ABSENT, true, true, true, playable = false, ownerOurs = false)
+        )
+        // 他人行 + pending + 完整：也不许替它清 IS_PENDING（改别人的行状态同样是动别人的数据）
+        assertEquals(
+            "他人行 + pending 完整 ⇒ 不救援",
+            RowFix.KEEP,
+            rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = true, ownerOurs = false)
+        )
+        assertEquals(
+            "他人行不可观测 ⇒ 连标记都省（不是我们的行，不记录我们在管它）",
+            RowFix.KEEP,
+            rowFixDecision(true, RowFileState.UNOBSERVABLE, true, true, true, playable = true, ownerOurs = false)
         )
     }
 
     @Test
     fun `年龄门槛_封口标记只缩短等待不跳过完整性`() {
-        assertEquals("普通遗留一分钟不碰", RowFix.KEEP, rowFixDecision(true, RowFileState.PRESENT, false, true, true, playable = true))
+        assertEquals("普通遗留一分钟不碰", RowFix.KEEP, rowFixDecision(true, RowFileState.PRESENT, false, true, true, playable = true, ownerOurs = true))
         val tenMin = 10L * 60L * 1000L
         assertFalse("无标记的 pending 行 10 分钟仍不够（在飞导出是分钟级）", sweepAgeOk(tenMin, sealed = false))
         assertTrue("带封口标记 5 分钟即可进救援", sweepAgeOk(tenMin, sealed = true))
@@ -100,6 +128,26 @@ class SweepRowPolicyTest {
         assertFalse("卷枚举查询失败", volumeVisible("external_primary", null))
         assertFalse("卷不在可用集合", volumeVisible("1234-5678", setOf("external_primary")))
         assertTrue(volumeVisible("external_primary", setOf("external_primary")))
+    }
+
+    @Test
+    fun `具体卷名_合成卷与读不到都不许钉行URI`() {
+        // 合成卷 external = 跨所有卷的聚合集合：拿它 + _ID 拼条目就是"聚合 URI + id"（Y22 原病）
+        assertNull("合成卷 external 不是具体卷", concreteRowVolume("external"))
+        assertNull("读不到卷名", concreteRowVolume(null))
+        assertNull("空卷名", concreteRowVolume(""))
+        assertNull("空白卷名", concreteRowVolume("   "))
+        assertEquals("主卷是真卷名（不是合成卷）", "external_primary", concreteRowVolume("external_primary"))
+        assertEquals("可移动卷按 UUID 认", "1234-5678", concreteRowVolume("1234-5678"))
+        assertEquals("首尾空白不算身份差异", "1234-5678", concreteRowVolume(" 1234-5678 "))
+    }
+
+    @Test
+    fun `owner闸门_读不到不拒_别的包拒绝`() {
+        assertTrue("本系统读不到 owner 列（API 29）⇒ 不据此拒绝", ownerAllowed(null, us))
+        assertTrue("空串按读不到处理", ownerAllowed("", us))
+        assertTrue("我们自己的行", ownerAllowed(us, us))
+        assertFalse("别的包的行", ownerAllowed("com.example.other", us))
     }
 
     // ---- 缺尾段容器 ----
