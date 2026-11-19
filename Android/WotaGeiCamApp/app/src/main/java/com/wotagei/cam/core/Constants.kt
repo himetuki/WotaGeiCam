@@ -322,9 +322,16 @@ enum class CamPill(val bit: Int, val labelRes: Int) {
         /**
          * 把 [fromSchema] 版的掩码升级到当前版：只 OR 进"从那一版之后新加的位"。
          * 纯函数（JVM 全测）：`fromSchema` 已是当前版 ⇒ 原样返回，幂等。
+         *
+         * 2026-11-19（Y38）：只遍历**明确支持的历史版本**（0..MASK_SCHEMA-1）。
+         * 非法负值（备份恢复可注入）与未来版本一律原样返回——负值若直接进
+         * `(fromSchema+1)..MASK_SCHEMA` 会从 `Int.MIN_VALUE+1` 起迭代到 4（约 21 亿次），
+         * 取景页组合期同步调用会把主线程拖死。未来版本没有"要补的位"，同样不必迁移。
          */
-        fun migrateMask(mask: Int, fromSchema: Int): Int =
-            ((fromSchema + 1)..MASK_SCHEMA).fold(mask) { acc, v -> acc or (ADDED_IN_SCHEMA[v] ?: 0) }
+        fun migrateMask(mask: Int, fromSchema: Int): Int = when {
+            fromSchema >= MASK_SCHEMA || fromSchema < 0 -> mask
+            else -> ((fromSchema + 1)..MASK_SCHEMA).fold(mask) { acc, v -> acc or (ADDED_IN_SCHEMA[v] ?: 0) }
+        }
 
         /** 掩码里“没置位”的那些就是要隐藏的胶囊 */
         fun hiddenOf(mask: Int): Set<CamPill> = ALL.filter { mask and it.bit == 0 }.toSet()

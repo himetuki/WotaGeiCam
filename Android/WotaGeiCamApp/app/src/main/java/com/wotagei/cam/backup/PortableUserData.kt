@@ -63,7 +63,8 @@ internal object PortableUserData {
     fun settingsOf(all: Map<String, *>): Map<String, Any> = all.mapNotNull { (key, value) ->
         val valid = key in SETTING_KEYS && when (key) {
             in BOOLEAN_KEYS -> value is Boolean
-            in INT_KEYS -> value is Int
+            in INT_KEYS -> value is Int &&
+                (key != "hud_pills_schema" || value >= 0)
             in LONG_KEYS -> value is Long
             in FLOAT_KEYS -> value is Float && value.isFinite()
             else -> value is String && value.length <= MAX_STRING_BYTES &&

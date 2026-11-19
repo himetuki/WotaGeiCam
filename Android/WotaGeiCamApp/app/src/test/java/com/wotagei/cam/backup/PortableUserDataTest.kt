@@ -125,6 +125,17 @@ class PortableUserDataTest {
         assertFalse(PortableUserData.uniqueCandidates(listOf(keys.first().copy(size = 0))) { it }.isNotEmpty())
     }
 
+    @Test fun `Y38备份接收端拒绝非法低值schema并保留未来版本`() {
+        // 负版本号会让取景页迁移从 Int.MIN_VALUE+1 迭代到当前版；接收端直接拒绝。
+        assertEquals(emptyMap<String, Any>(), PortableUserData.settingsOf(mapOf("hud_pills_schema" to -1)))
+        assertEquals(emptyMap<String, Any>(), PortableUserData.settingsOf(mapOf("hud_pills_schema" to Int.MIN_VALUE)))
+        // 未来版本是有界的（读取侧只做原样返回），保留下来避免旧版把用户掩码当 0 版重新补位。
+        assertEquals(mapOf<String, Any>("hud_pills_schema" to 1_000_000_000),
+            PortableUserData.settingsOf(mapOf("hud_pills_schema" to 1_000_000_000)))
+        assertEquals(mapOf<String, Any>("hud_pills_schema" to 0),
+            PortableUserData.settingsOf(mapOf("hud_pills_schema" to 0)))
+    }
+
     @Test fun `恢复补缺不覆盖本机设置且合并去重原有pending`() {
         val current = mapOf("gallery_columns" to 5, "compare_history" to "local-only")
         assertEquals(mapOf("level_enabled" to true), PortableUserData.settingsToRestore(
