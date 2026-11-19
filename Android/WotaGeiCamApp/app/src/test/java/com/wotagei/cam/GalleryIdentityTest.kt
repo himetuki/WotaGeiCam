@@ -1,5 +1,6 @@
 package com.wotagei.cam
 
+import com.wotagei.cam.media.failClosedIfAmbiguous
 import com.wotagei.cam.media.pruneSelection
 import com.wotagei.cam.media.representativePartIndex
 import com.wotagei.cam.source.KotlinSourceScan
@@ -36,6 +37,18 @@ class GalleryIdentityTest {
         assertEquals("全 null 时取第一个（与 groupSpans 稳定排序一致）", 0, representativePartIndex(listOf(null, null)))
         assertEquals(0, representativePartIndex(listOf(5)))
         assertEquals("空列表没有代表段", -1, representativePartIndex(emptyList()))
+    }
+
+    @Test
+    fun `裸ID反查只认唯一命中_跨卷同号即关死`() {
+        assertEquals("唯一命中才是答案", 7L, failClosedIfAmbiguous(listOf(7L)))
+        assertEquals("查无此行", null, failClosedIfAmbiguous(emptyList<Long>()))
+        assertEquals(
+            "跨卷同号命中两行 = 无法判定是哪一条 → 关死（不拿第一行）",
+            null,
+            failClosedIfAmbiguous(listOf(7L, 7L))
+        )
+        assertEquals("三行同样关死", null, failClosedIfAmbiguous(listOf(1L, 2L, 3L)))
     }
 
     // ---------- 接线 ----------
@@ -94,6 +107,27 @@ class GalleryIdentityTest {
         assertTrue(
             "手选 URI 反查必须按 URI 自带卷查（聚合集合上不同卷的 _ID 可以重号）",
             pick.contains("queryById(id, volume = uri.pathSegments.first())")
+        )
+    }
+
+    @Test
+    fun `裸ID反查多行命中按查无此片返回`() {
+        val q = flattened("media/MediaRepo.kt", "queryById")
+        assertTrue("live 查询必须取回全部命中行再裁决", q.contains("failClosedIfAmbiguous(live)"))
+        assertTrue("多行命中必须走关死分支", q.contains("live.size > 1"))
+        assertFalse(
+            "不得再对聚合查询直接取第一条活行（旧写法会把同号另一卷的视频顶上来）",
+            q.contains(").firstOrNull()")
+        )
+        assertTrue("回收站兜底也必须先裁决", q.contains("failClosedIfAmbiguous(trashHits)"))
+        assertTrue("回收站多行命中同样关死", q.contains("trashHits.size > 1"))
+        assertTrue(
+            "带卷反查时回收站兜底也要按卷收窄，另一卷同号的废片不能顶替",
+            q.contains("it.uri.pathSegments.firstOrNull() == concreteVolume")
+        )
+        assertTrue(
+            "旧深链的合成卷名 external 仍须当聚合卷处理（否则老 URI 反查会看不见跨卷行）",
+            q.contains("it != MediaStore.VOLUME_EXTERNAL")
         )
     }
 }

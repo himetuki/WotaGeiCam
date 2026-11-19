@@ -99,6 +99,16 @@ internal fun accessRefreshInvalidates(prev: MediaAccessState?, next: MediaAccess
     prev != null && (prev != next || next == MediaAccessState.PARTIAL_READ)
 
 /**
+ * 裸 `_ID` 反查的唯一命中裁决（Y27，纯函数）。
+ *
+ * 聚合集合（`content://media/external/video/media`）上不同卷的 `_ID` **可以重号**：
+ * 0 行 = 查无此片；1 行 = 唯一答案；≥2 行 = 光凭 ID 无法判定是哪一条。最后一种返回 null，
+ * 调用方据此按「查无此片」关死——宁可让一条旧 ID 深链失效，也不能静默拿第一行
+ * （那可能把同号的另一卷视频当成目标，播放/删除都会落到错误条目上）。
+ */
+internal fun <T> failClosedIfAmbiguous(hits: List<T>): T? = hits.singleOrNull()
+
+/**
  * provider 的类型声明是否**明确**不是视频（纯函数，JVM 可测）。
  * 只拒确定非视频的声明；`application/octet-stream`、`binary/octet-stream`、空声明等
  * 类型不明的放行交给解码探测——部分 provider 对 MP4 就报 octet-stream，直接拒会误杀
@@ -571,19 +581,38 @@ class MediaRepo private constructor(private val app: Context) {
         // 录制/导出中的半成品当成可播条目（列表已挡住，反查链不能再漏一条，Y26）
         //
         // 有卷名时按卷查（Y27）：聚合 external 上不同卷的 _ID 可以重号，只按 _ID 查会
-        // 命中同号的另一条视频。没有卷名的旧入口（纯 id 路由）只能退回聚合集合。
-        val collection = if (volume.isNullOrBlank()) {
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        } else {
-            MediaStore.Video.Media.getContentUri(volume)
-        }
+        // 命中同号的另一条视频。没有卷名的旧入口（纯 id 路由/旧深链）只能退回聚合集合，
+        // 此时命中多行即无法判定，按「查无此片」关死（[failClosedIfAmbiguous]）。
+        // "external" 是跨所有卷的合成卷名而不是真实卷——旧深链就长这样，照旧走聚合集合。
+        val concreteVolume = volume?.takeIf { it.isNotBlank() && it != MediaStore.VOLUME_EXTERNAL }
+        val collection = concreteVolume?.let { MediaStore.Video.Media.getContentUri(it) }
+            ?: MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         val live = readCursor(
             collection,
             "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0",
             arrayOf(id.toString()),
             null
-        ).firstOrNull()
-        val clip = live ?: trashedMatching(MediaScope.AllVideos).firstOrNull { it.id == id } ?: return null
+        )
+        val liveHit = failClosedIfAmbiguous(live)
+        if (liveHit == null && live.size > 1) {
+            Log.w(TAG, "裸 ID 反查命中 ${live.size} 行同号视频（跨卷重号）id=$id → 按查无此片返回")
+            return null
+        }
+        // 回收站兜底同样按卷收窄：手选 URI 带着原卷回来，不能让另一卷同号的废片顶替；
+        // 无卷名的旧入口命多行同样关死。
+        val trashHits = if (liveHit != null) {
+            emptyList()
+        } else {
+            trashedMatching(MediaScope.AllVideos).filter {
+                it.id == id && (concreteVolume == null || it.uri.pathSegments.firstOrNull() == concreteVolume)
+            }
+        }
+        val trashHit = failClosedIfAmbiguous(trashHits)
+        if (trashHit == null && trashHits.size > 1) {
+            Log.w(TAG, "回收站裸 ID 反查命中 ${trashHits.size} 行同号视频 id=$id → 按查无此片返回")
+            return null
+        }
+        val clip = liveHit ?: trashHit ?: return null
         if (SYSTEM_TRASH_SUPPORTED) return clip
         // 三个单片出口共用状态投影；流式查询复用同拍快照，单次查询只取一拍本地记录。
         val localUris = (localTrash ?: trashDao.observeAll().first()).map { it.uri }.toSet()
