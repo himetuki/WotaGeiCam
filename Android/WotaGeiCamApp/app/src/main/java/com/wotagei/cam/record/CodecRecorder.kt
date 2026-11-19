@@ -302,6 +302,13 @@ internal class CodecRecorder(
         var feedDropped = 0
         /** 喂码时数据长于输入缓冲被截断的枚数（记账；不进任何判定） */
         var feedTruncated = 0
+        /**
+         * 停止/轮转尾段被迫放弃的 PCM 包数（Y16：抽干窗口到硬上限时仍留在队列/手里的真实包）。
+         * 旧实现停录当拍就发 EOS，这些包永远进不了编码器也没人记账——"停止时刻砍掉一段
+         * 固定长度尾音"在日志里与"本来就断流"不可区分。赋值而非累加（见 [tailEosFor]）：
+         * EOS 入队失败下拍重试时按当时真实积压重算，不会重复计数。不参与任何判定。
+         */
+        var eosDrops = 0
         /** 本段已成功喂进编码器的真实 PCM 字节账（EOS 哨兵/喂码失败不计）：内录静音判读的有效时长来源 */
         var fedBytes = 0L
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
@@ -2016,6 +2023,9 @@ internal class CodecRecorder(
         // 录制中静音巡检的节拍起点（0 = 本段未巡过；elapsedRealtime 域，单写者推进）
         var lastSilenceProbeMs = 0L
         var videoTrack = -1
+        // 已建视频轨的格式指纹（Y15）：同段第二次 FORMAT_CHANGED 只有指纹相同才放行（见 [videoFmtAction]）。
+        // 段内局部：换段重建编码器/muxer 后从零起算
+        var videoFmtKey: String? = null
         var muxStarted = false
         var videoDone = false
         var videoEosQueued = false
@@ -2152,10 +2162,29 @@ internal class CodecRecorder(
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        videoTrack = mx.addTrack(v.getOutputFormat())
-                        healthVideoTrackAdded = true // 自检第一格：编码器产出格式、muxer 建轨成功
-                        if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
-                        Log.i(TAG, "video track=$videoTrack fmt=${v.getOutputFormat()}")
+                        // Y15：同一段里 FORMAT_CHANGED 可能重复投递（编码器重配 / ROM 行为）。
+                        // 旧实现无条件 addTrack：muxer 已启动时建轨是非法状态（泵线程当场被炸掉），
+                        // 启动前则多建一条无样本轨。每段只建一次；已建轨后指纹变了 = 真换格式，
+                        // 旧轨的 csd/轨头已写死，继续写新格式样本只会产出花屏/坏容器 ⇒ 段级错误码。
+                        val nextKey = videoFormatKey(v.getOutputFormat())
+                        when (videoFmtAction(videoTrack >= 0, videoFmtKey, nextKey)) {
+                            VideoFmtAction.ADD_TRACK -> {
+                                videoTrack = mx.addTrack(v.getOutputFormat())
+                                videoFmtKey = nextKey
+                                healthVideoTrackAdded = true // 自检第一格：编码器产出格式、muxer 建轨成功
+                                if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
+                                Log.i(TAG, "video track=$videoTrack fmt=${v.getOutputFormat()}")
+                            }
+                            VideoFmtAction.IGNORE_SAME ->
+                                Log.i(TAG, "video fmt repeat (same fingerprint), keep track=$videoTrack")
+                            VideoFmtAction.FAIL_CHANGED -> {
+                                Log.e(TAG, "video fmt changed mid-segment track=$videoTrack old=$videoFmtKey new=$nextKey")
+                                // 段级错误码（卡片修复方向）：容器若已收尾，已写样本按降级呈现保留；
+                                // 退出形态与抽干超时同款（post-loop 照常记账/收尾）
+                                engineError = engineError ?: "${RecordError.ENGINE_ERROR}:FMT"
+                                break
+                            }
+                        }
                     }
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
@@ -2383,9 +2412,12 @@ internal class CodecRecorder(
                 // P2：双通道 EOS 兜底**每轮重试**（置位=真正入队，那一拍 dequeueInputBuffer(0)
                 // 返回 -1 就下一轮再来）——锁进 deadline==0L 单发门的话，满负荷拍点 EOS 丢失、
                 // done 恒不置位 → 抽干超时误废整段（单段录制即整条丢失）。
+                // Y16：EOS 不许越过 feeder 队列（旧实现当拍直发 ⇒ 最长 ~2.7s 尾音被段界 drain()
+                // 静默丢弃）。有积压时本拍继续喂（喂码块排在停止块之前，每拍 1 包，积压几百 ms
+                // 内排空），窗口到硬上限才带积压强行 EOS，未喂进去的包计入 [AudioChannel.eosDrops]。
                 // 重试上界仍是 deadline（静默预算 DRAIN_LIMIT_MS 顺延后的当前值）
-                if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)
-                if (c != null && capCh != null && !capCh.eosQueued) queueAudioEos(c, capCh)
+                if (a != null && envCh != null && !envCh.eosQueued) tailEosFor(a, envCh, "env", ef?.pending() ?: 0, drainTimedOut)
+                if (c != null && capCh != null && !capCh.eosQueued) tailEosFor(c, capCh, "cap", cf?.pending() ?: 0, drainTimedOut)
             }
             if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true) &&
                 (envCh?.heldOutIdx ?: -1) < 0 && (capCh?.heldOutIdx ?: -1) < 0
@@ -2449,6 +2481,8 @@ internal class CodecRecorder(
                 "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
                 "喂码丢弃=${envCh?.feedDropped ?: 0}/${capCh?.feedDropped ?: 0} " +
                 "截断=${envCh?.feedTruncated ?: 0}/${capCh?.feedTruncated ?: 0} " +
+                // Y16 尾账：停止/轮转抽干到硬上限时被 EOS 越过的 PCM 包数（环境/内录分开）
+                "尾弃=${envCh?.eosDrops ?: 0}/${capCh?.eosDrops ?: 0} " +
                 // pts 单调兜底的两枚账（见 [muxPtsFixes]）：等值是设计内同格多帧，真倒退才是异常
                 "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
@@ -2555,6 +2589,29 @@ internal class CodecRecorder(
         }
     }
 
+    /**
+     * 编码器输出格式的**段内指纹**（Y15，仅供 [videoFmtAction] 判"是不是同一次格式"）。
+     *
+     * 取 `getKeys()` 的全量键集（API 29 起可用，minSdk 29）排序后逐键拍平：重复的
+     * FORMAT_CHANGED 携带的格式逐键相等，真换格式（分辨率/码流参数/csd 长度变化）必然会打出
+     * 不同的串。标量按 int→long→float→string 逐档尝试取值（`MediaFormat` 只有按类型取值器，
+     * 类型不匹配会抛 ClassCastException，靠 `runCatching` 退档）；csd 一类的 ByteBuffer 值只记
+     * "存在"不记内容——同一段中间隔一次的重复通知里 csd 字节不会不同，逐字节比较反而会为了
+     * 一个几乎不存在的形态引入逐键 IO。
+     *
+     * 本函数碰 [MediaFormat]（JVM 单测构造不出来），所以判定本身留给纯函数 [videoFmtAction]，
+     * 这里只负责把格式拍平成可比较的串；结构接线由 `VideoFmtTrackGuardTest` 按源文本钉住。
+     */
+    private fun videoFormatKey(f: MediaFormat): String =
+        f.getKeys().sorted().joinToString(";") { k ->
+            val v = runCatching { f.getInteger(k).toString() }.getOrNull()
+                ?: runCatching { f.getLong(k).toString() }.getOrNull()
+                ?: runCatching { f.getFloat(k).toString() }.getOrNull()
+                ?: runCatching { f.getString(k) }.getOrNull()
+                ?: "buf" // ByteBuffer 值（csd-0/1 等）：只记存在
+            "$k=$v"
+        }
+
     /** PTS 统一到本段基准（两轨同一时钟，分段后不出现倒退） */
     private fun writeSample(mx: MediaMuxer, kind: String, track: Int, buf: ByteBuffer?, info: MediaCodec.BufferInfo): Int {
         if (track < 0 || buf == null) return 0
@@ -2626,6 +2683,10 @@ internal class CodecRecorder(
      * 失效路径的兜底 EOS（[queueAudioEos]）据此不再重复入队。
      */
     private fun feedAudioInput(codec: MediaCodec, src: AudioFeeder, ch: AudioChannel) {
+        // Y16：两轨统一输入关闭状态。EOS 已入队后既不许再消费队列（EOS 之后的包编码器不会再
+        // 接收，喂进去只会被静默吃掉），也不许再抢输入槽——环境活动入口自带 !eosQueued 守卫，
+        // 内录两个入口没有；把判据收进这里，三个入口同口径，漏加守卫不会再复现。
+        if (ch.eosQueued) return
         val pkt = ch.heldPkt ?: src.poll(0) ?: return
         val idx = codec.dequeueInputBuffer(0)
         if (idx < 0) {
@@ -2664,6 +2725,33 @@ internal class CodecRecorder(
         val idx = codec.dequeueInputBuffer(0)
         if (idx < 0) return
         queueEosOn(codec, idx, ch)
+    }
+
+    /**
+     * 停止/轮转时的**尾音收口**（Y16，停录停止门内每拍重试）：先问纯判定 [audioEosAction]。
+     *
+     * - [AudioEosAction.QUEUE_EOS]：队列与手里都已排空 ⇒ 正常发 EOS（旧行为，尾音已进编码器）；
+     * - [AudioEosAction.FEED_THEN_DEFER]：还有积压 ⇒ 本拍不发 EOS。喂码块在停止块**之前**，
+     *   所以本拍已多喂一包；下拍继续，直到排空或抽干窗口到期；
+     * - [AudioEosAction.FORCE_EOS]：抽干窗口到硬上限（编码器已卡死）⇒ 带积压发 EOS，并把
+     *   **永远进不了编码器**的真实包数写进 [AudioChannel.eosDrops]（段收尾行打印）。
+     *   赋值不是累加：queueInputBuffer 失败时下一拍还会重试，按当时真实积压重算才不重复计数。
+     *
+     * 手里的包若是 EOS 哨兵（pts<0），它不是被弃的 PCM，只计队列里的真实包。
+     */
+    private fun tailEosFor(codec: MediaCodec, ch: AudioChannel, label: String, pending: Int, drainExpired: Boolean) {
+        when (audioEosAction(pending, ch.heldPkt != null, drainExpired)) {
+            AudioEosAction.QUEUE_EOS -> queueAudioEos(codec, ch)
+            AudioEosAction.FEED_THEN_DEFER -> Unit
+            AudioEosAction.FORCE_EOS -> {
+                val heldReal = if (ch.heldPkt?.ptsUs?.let { it >= 0 } == true) 1 else 0
+                ch.eosDrops = pending + heldReal
+                if (ch.eosDrops > 0) {
+                    Log.w(TAG, "drain expired: $label tail EOS with backlog, unfed packets=${ch.eosDrops}")
+                }
+                queueAudioEos(codec, ch)
+            }
+        }
     }
 
     private fun queueEosOn(codec: MediaCodec, idx: Int, ch: AudioChannel) {
@@ -2995,3 +3083,60 @@ internal data class DrainTick(
     /** 本拍是否判超时 */
     val timedOut: Boolean
 )
+
+/**
+ * 同段重复视频 FORMAT_CHANGED 的处置（Y15 纯函数，JVM 全表单测）。
+ *
+ * 【缺陷形态】`MediaCodec.INFO_OUTPUT_FORMAT_CHANGED` 不是"只来一次"的事件：编码器重配、个别
+ * ROM 的重复上报都会再发一条。旧代码在该分支**无条件** `addTrack`：
+ * - muxer 已 `start()` 后建轨是非法状态 ⇒ `IllegalStateException` 直接炸掉泵线程（整场录制
+ *   以 LOOP 错误结束）；
+ * - 启动前重复建轨则留下一条永远没有样本的空轨（muxer 轨道数多于实际码流，部分播放器当坏片）。
+ *
+ * 【判据】卡片修复方向：每段只建一次视频轨；已建轨后的**实际格式变化**走段级错误码。三态：
+ * - 本段尚未建轨（[trackBuilt] false）⇒ [ADD_TRACK]（首轨，正常路径）；
+ * - 已建轨且格式指纹相同（[previousKey] == [nextKey]）⇒ [IGNORE_SAME]（只是重复通知）；
+ * - 已建轨但指纹不同 ⇒ [FAIL_CHANGED]：旧轨的 csd/轨头已写死，继续写新参数集的样本只会产出
+ *   花屏/坏容器，按段级错误码收段（容器已收尾时由 `segmentKeepDecision` 的 finalized 口径
+ *   保留并按降级呈现——不把可播的已完成部分当废片删）。
+ *
+ * @param previousKey 已建轨时的格式指纹（= `videoFormatKey(输出格式)`）；未建轨时为 null
+ * @param nextKey 本次通知的格式指纹
+ */
+internal enum class VideoFmtAction { ADD_TRACK, IGNORE_SAME, FAIL_CHANGED }
+
+internal fun videoFmtAction(
+    trackBuilt: Boolean,
+    previousKey: String?,
+    nextKey: String
+): VideoFmtAction = when {
+    !trackBuilt -> VideoFmtAction.ADD_TRACK
+    previousKey != null && previousKey == nextKey -> VideoFmtAction.IGNORE_SAME
+    // 已建轨但指纹缺失/变化：无法证明"同一次格式"，宁可段级报错也不混写
+    else -> VideoFmtAction.FAIL_CHANGED
+}
+
+/**
+ * 停止/轮转时音频输入面的收尾动作（Y16 纯函数，JVM 全表单测）。
+ *
+ * 【缺陷形态】旧代码在 `stopping || rotatePending` 块里每拍直接 `queueAudioEos`：EOS 直接入
+ * 编码器输入，而 [AudioFeeder] 队列里可能还压着最多 ~2.7s（64 包 × ~42.7ms）PCM。EOS 一入队，
+ * 喂码门 `!eosQueued` 永久关闭，这些包再也进不了编码器，段边界 `drain()` 只能把它们记成丢弃——
+ * "停止那一刻砍掉固定长度尾音"，且与"本来就没声音"在日志里不可区分。
+ *
+ * 【为什么可以排空】采集线程（~42.7ms/包）远比泵线程消费（每拍 1 包、拍长 2~8ms）慢，常规积压
+ * 几百毫秒内排空，仍在既有抽干窗口（[CodecRecorder.DRAIN_LIMIT_MS] 顺延至硬上限）内。因此：
+ * - 队列与手里都已排空（[pending] 0 且 [held] false）⇒ [QUEUE_EOS]（旧行为，尾音完整）；
+ * - 抽干窗口已到期（[drainExpired]）⇒ [FORCE_EOS]：编码器已卡死/太慢，带积压发 EOS 并由
+ *   调用点把未喂进去的包数记账（单独统计被弃包数，卡片修复方向）；
+ * - 其余 ⇒ [FEED_THEN_DEFER]：这一拍先不发 EOS，下一拍继续喂。
+ *
+ * 判定序：到期优先于"已排空"只为让到期拍与记账同拍（排空时 eosDrops=0，两态等价）。
+ */
+internal enum class AudioEosAction { QUEUE_EOS, FEED_THEN_DEFER, FORCE_EOS }
+
+internal fun audioEosAction(pending: Int, held: Boolean, drainExpired: Boolean): AudioEosAction = when {
+    drainExpired -> AudioEosAction.FORCE_EOS
+    pending <= 0 && !held -> AudioEosAction.QUEUE_EOS
+    else -> AudioEosAction.FEED_THEN_DEFER
+}
