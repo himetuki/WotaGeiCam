@@ -3,6 +3,7 @@ package com.wotagei.cam
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.media.GalleryEmptyState
 import com.wotagei.cam.media.MediaListFailure
+import com.wotagei.cam.media.accessRefreshInvalidates
 import com.wotagei.cam.media.galleryEmptyState
 import com.wotagei.cam.media.listFailureFor
 import com.wotagei.cam.source.KotlinSourceScan
@@ -134,14 +135,42 @@ class GalleryAccessStateTest {
     fun `回前台重验_权限变化才失效_首次探测不清`() {
         val repo = body("media/MediaRepo.kt", "refreshAccess")
         assertTrue("refreshAccess 必须真的探测权限", repo.contains("mediaAccessState("))
+        assertTrue("失效判定必须收敛到纯函数", repo.contains("accessRefreshInvalidates(prev, next)"))
         assertTrue("权限变化必须触发列表重查", repo.contains("invalidate()"))
         assertTrue("权限变化必须清缩略图缓存并推进代数", repo.contains("ThumbLoader.invalidateAll()"))
-        val firstProbe = repo.indexOf("if (prev == null) return")
+        val decision = repo.indexOf("if (!accessRefreshInvalidates(prev, next)) return")
         val evict = repo.indexOf("ThumbLoader.invalidateAll()")
         assertTrue(
-            "首次探测（prev == null）必须在失效之前返回：那之前没有任何旧数据可清",
-            firstProbe in 0 until evict
+            "判定为「无需失效」必须在失效之前返回：首次探测与同枚举非部分授权都没有旧数据可清",
+            decision in 0 until evict
         )
+        assertFalse(
+            "不得再只比枚举：prev == next 提前返回会把同枚举的部分授权重选吞掉",
+            repo.contains("if (prev == next) return")
+        )
+    }
+
+    @Test
+    fun `同一枚举的部分授权重选也必须让列表与缩略图失效`() {
+        // 首次探测只记录状态
+        assertFalse(accessRefreshInvalidates(null, MediaAccessState.PARTIAL_READ))
+        assertFalse(accessRefreshInvalidates(null, MediaAccessState.NONE))
+        // 同枚举内只有 PARTIAL_READ 的可见集合可能变（Android 14 可反复重选可见项）
+        assertTrue(
+            "PARTIAL_READ → PARTIAL_READ 也必须失效：重选后可见集合已换一批",
+            accessRefreshInvalidates(MediaAccessState.PARTIAL_READ, MediaAccessState.PARTIAL_READ)
+        )
+        for (same in listOf(MediaAccessState.ALL_FILES, MediaAccessState.FULL_READ, MediaAccessState.NONE)) {
+            assertFalse(
+                "同一枚举的非部分授权重验没有可见集合变化（$same）",
+                accessRefreshInvalidates(same, same)
+            )
+        }
+        // 枚举变化一律失效
+        assertTrue(accessRefreshInvalidates(MediaAccessState.FULL_READ, MediaAccessState.NONE))
+        assertTrue(accessRefreshInvalidates(MediaAccessState.NONE, MediaAccessState.FULL_READ))
+        assertTrue(accessRefreshInvalidates(MediaAccessState.FULL_READ, MediaAccessState.ALL_FILES))
+        assertTrue(accessRefreshInvalidates(MediaAccessState.PARTIAL_READ, MediaAccessState.FULL_READ))
     }
 
     @Test

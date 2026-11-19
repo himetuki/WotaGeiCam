@@ -86,6 +86,19 @@ internal fun listFailureFor(error: Throwable?): MediaListFailure? = when {
 internal data class MediaListRead(val clips: List<VideoClip>, val failure: MediaListFailure?)
 
 /**
+ * 回前台重验后是否必须让旧列表与缩略图一起失效（Y26，纯函数）。
+ *
+ * - 首次探测（[prev] == null）：只记录状态——此刻还没有任何旧数据可清；
+ * - 枚举变了：可见行集一定变了（撤权/授权/所有文件访问之间切换）；
+ * - **枚举没变但仍是 [MediaAccessState.PARTIAL_READ]**：Android 14 的「选择部分照片/视频」
+ *   允许反复重选，前后两次都停在 PARTIAL_READ，可见集合却换了一批。只比枚举会把这次
+ *   重验当成「没变化」提前返回，旧条目与旧缩略图就顶着新权限继续显示——Y26 的残缺口。
+ *   保守方向是多查一次：一次列表读 + 一次缓存清空没有副作用，漏查才是错的。
+ */
+internal fun accessRefreshInvalidates(prev: MediaAccessState?, next: MediaAccessState): Boolean =
+    prev != null && (prev != next || next == MediaAccessState.PARTIAL_READ)
+
+/**
  * provider 的类型声明是否**明确**不是视频（纯函数，JVM 可测）。
  * 只拒确定非视频的声明；`application/octet-stream`、`binary/octet-stream`、空声明等
  * 类型不明的放行交给解码探测——部分 provider 对 MP4 就报 octet-stream，直接拒会误杀
@@ -222,23 +235,29 @@ class MediaRepo private constructor(private val app: Context) {
     val listLoaded: StateFlow<Boolean> get() = listLoadedState
 
     /**
-     * 回前台重验媒体权限（Y26）。权限变化时主动让旧列表与缩略图失效：
+     * 回前台重验媒体权限（Y26）。判定见 [accessRefreshInvalidates]；真要失效时：
      *
      * 1. `invalidate()` 触发列表重查——撤权后 MediaStore 的行集变小，旧条目由新快照替换；
      * 2. [ThumbLoader.invalidateAll] 清空缩略图缓存并推进代数——**只清缓存不清代数**的话，
      *    屏内 `remember(uri, px)` 仍抱着旧 Bitmap，已撤权的缩略图会继续显示。
      *
-     * 首次探测（prev == null）不做失效：此刻还没有任何旧数据可清。
+     * 首次探测（prev == null）只记录状态，不做失效：此刻还没有任何旧数据可清。
+     * 同一枚举内的部分授权重选（重选了一批可见项）也算变化——枚举相同不等于可见集合相同，
+     * 必须同样重查列表并清缩略图，否则旧行/旧图会顶着新权限留在屏上。
      */
     fun refreshAccess() {
         val next = mediaAccessState(app)
         val prev = access.value
-        if (prev == next) return
         access.value = next
-        if (prev == null) return
+        if (!accessRefreshInvalidates(prev, next)) return
         ThumbLoader.invalidateAll()
         invalidate()
-        Log.i(TAG, "媒体访问变化 ${mediaAccessLabel(prev)} → ${mediaAccessLabel(next)}，列表与缩略图缓存失效")
+        val reason = if (prev == next) {
+            "部分授权重选（${mediaAccessLabel(next)}）可见集合可能已变"
+        } else {
+            "媒体访问变化 ${mediaAccessLabel(prev!!)} → ${mediaAccessLabel(next)}"
+        }
+        Log.i(TAG, "$reason，列表与缩略图缓存失效")
     }
 
     fun invalidate() {
