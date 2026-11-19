@@ -8,7 +8,7 @@
 ![Release](https://img.shields.io/github/v/release/himetuki/WotaGeiCam?color=7f3a9c&label=Release)
 ![License](https://img.shields.io/github/license/himetuki/WotaGeiCam?color=9c1f7b)
 
-[完整文档 / 鸿蒙版](../README.md) · [下载 Releases](https://github.com/himetuki/WotaGeiCam/releases/latest) · [反馈 Issue](../.github/ISSUE_TEMPLATE/bug-report-feature-request.md)
+[完整文档 / 鸿蒙版](../README.md) · [Forker / Agent 开发指南](AGENT_GUIDE.md) · [下载 Releases](https://github.com/himetuki/WotaGeiCam/releases/latest) · [反馈 Issue](../.github/ISSUE_TEMPLATE/bug-report-feature-request.md)
 
 </div>
 
@@ -191,6 +191,8 @@
 - 「所有文件访问」自 Android 11 起提供，Android 10 上应用内如实标注为不支持（此时删除 / 重命名只对本应用录制的视频生效）
 
 ## 从源码构建
+
+> 面向 Forker 与编码 Agent 的[安卓开发指南](AGENT_GUIDE.md)包含当前 full / lite 构建路径、文件职责、架构与线程归属、持久化键名字典、修改联动清单和测试入口；深入开发请先读该指南。
 
 ```bash
 # 需要 JDK 17 与 Android SDK（Platform 34 / Build-Tools 33.0.1；SDK 位置按标准方式提供：
