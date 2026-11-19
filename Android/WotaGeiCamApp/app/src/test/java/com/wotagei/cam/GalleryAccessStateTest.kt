@@ -1,11 +1,14 @@
 package com.wotagei.cam
 
 import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.media.AccessRefresh
 import com.wotagei.cam.media.GalleryEmptyState
 import com.wotagei.cam.media.MediaListFailure
-import com.wotagei.cam.media.accessRefreshInvalidates
+import com.wotagei.cam.media.accessRefreshMode
 import com.wotagei.cam.media.galleryEmptyState
 import com.wotagei.cam.media.listFailureFor
+import com.wotagei.cam.media.thumbKeyShouldEvict
+import com.wotagei.cam.media.thumbKeyUri
 import com.wotagei.cam.source.KotlinSourceScan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,8 +19,10 @@ import org.junit.Test
  * Y26：媒体库查询失败显示为空、撤权后既有列表/缩略图无主动失效。
  *
  * 修复把「空」拆成七态（加载中 / 刷新中 / 真空 / 部分授权 / 未授权 / 查询失败 / 列表），
- * 回前台重验权限；权限变化时 `invalidate()` 重查列表，`ThumbLoader.invalidateAll()` 清缓存
- * 并推进代数（屏内 Bitmap 跟着换代）。本测试同时钉真值表与接线，验收口径：
+ * 回前台重验权限；权限**枚举变化**时 `invalidate()` 重查列表，`ThumbLoader.invalidateAll()`
+ * 清缓存并推进代数（屏内 Bitmap 跟着换代）；同一枚举的 PARTIAL_READ 重选只重查列表并
+ * **定向**驱逐确实不再可见的行（[AccessRefresh.TARGETED]），不再每次回前台全量清空。
+ * 本测试同时钉真值表与接线，验收口径：
  * 「撤权后回前台 → 列表呈现权限态而非空/旧数据；缩略图缓存随之失效」。
  */
 class GalleryAccessStateTest {
@@ -126,24 +131,99 @@ class GalleryAccessStateTest {
         }
     }
 
-    // ---------- 三、接线：权限变化必须真的让旧列表/旧缩略图失效 ----------
+    // ---------- 三、失效档位真值表 ----------
+
+    @Test
+    fun `首次探测只记录状态_不失效`() {
+        assertEquals(AccessRefresh.NONE, accessRefreshMode(null, MediaAccessState.PARTIAL_READ))
+        assertEquals(AccessRefresh.NONE, accessRefreshMode(null, MediaAccessState.NONE))
+        assertEquals(AccessRefresh.NONE, accessRefreshMode(null, MediaAccessState.FULL_READ))
+    }
+
+    @Test
+    fun `同一枚举只有PARTIAL_READ重选定向失效`() {
+        assertEquals(
+            "PARTIAL_READ → PARTIAL_READ：可见集合可能换了一批，列表必须重查、缩略图定向清理",
+            AccessRefresh.TARGETED,
+            accessRefreshMode(MediaAccessState.PARTIAL_READ, MediaAccessState.PARTIAL_READ)
+        )
+        for (same in listOf(MediaAccessState.ALL_FILES, MediaAccessState.FULL_READ, MediaAccessState.NONE)) {
+            assertEquals(
+                "同一枚举的非部分授权重验没有可见集合变化（$same）",
+                AccessRefresh.NONE,
+                accessRefreshMode(same, same)
+            )
+        }
+    }
+
+    @Test
+    fun `枚举变化一律全量失效`() {
+        assertEquals(AccessRefresh.FULL, accessRefreshMode(MediaAccessState.FULL_READ, MediaAccessState.NONE))
+        assertEquals(AccessRefresh.FULL, accessRefreshMode(MediaAccessState.NONE, MediaAccessState.FULL_READ))
+        assertEquals(AccessRefresh.FULL, accessRefreshMode(MediaAccessState.FULL_READ, MediaAccessState.ALL_FILES))
+        assertEquals(AccessRefresh.FULL, accessRefreshMode(MediaAccessState.PARTIAL_READ, MediaAccessState.FULL_READ))
+    }
+
+    // ---------- 四、缩略图键解析与定向驱逐 ----------
+
+    @Test
+    fun `缩略图缓存键取回行URI_URI自身含@也不截断`() {
+        assertEquals(
+            "content://media/external/video/media/7",
+            thumbKeyUri("content://media/external/video/media/7@512@3")
+        )
+        assertEquals(
+            "content://media/1234-5678/video/media/7",
+            thumbKeyUri("content://media/1234-5678/video/media/7@512@0")
+        )
+        assertEquals(
+            "content://media/external/video/media/7?x=a@b",
+            thumbKeyUri("content://media/external/video/media/7?x=a@b@256@9")
+        )
+        assertEquals(null, thumbKeyUri("garbage"))
+        assertEquals("只有一个 @ 不是合法缓存键", null, thumbKeyUri("content://media/x/7@512"))
+        assertEquals(null, thumbKeyUri("@512@0"))
+    }
+
+    @Test
+    fun `定向驱逐只碰不再可见的媒体行`() {
+        val visible = setOf("content://media/external/video/media/7")
+        assertFalse(
+            "仍在可见集合里的行不许清（清了整屏缩略图白重解码）",
+            thumbKeyShouldEvict("content://media/external/video/media/7@512@1", visible)
+        )
+        assertTrue(
+            "确实不再可见的媒体行必须驱逐",
+            thumbKeyShouldEvict("content://media/external/video/media/8@512@1", visible)
+        )
+        assertFalse(
+            "外来 provider 的缩略图没有对应的列表可见集合，不参与清理",
+            thumbKeyShouldEvict("content://com.example.picker/1@512@1", visible)
+        )
+        assertFalse("解析不出 URI 的键跳过，不猜", thumbKeyShouldEvict("garbage", visible))
+    }
+
+    // ---------- 五、接线：权限变化必须真的让旧列表/旧缩略图失效 ----------
 
     private fun body(rel: String, fn: String): String =
         KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText(rel)), fn))
 
     @Test
-    fun `回前台重验_权限变化才失效_首次探测不清`() {
+    fun `回前台重验_首次探测不清_枚举变化全量失效`() {
         val repo = body("media/MediaRepo.kt", "refreshAccess")
         assertTrue("refreshAccess 必须真的探测权限", repo.contains("mediaAccessState("))
-        assertTrue("失效判定必须收敛到纯函数", repo.contains("accessRefreshInvalidates(prev, next)"))
+        assertTrue("失效判定必须收敛到纯函数", repo.contains("accessRefreshMode(prev, next)"))
+        assertTrue("无需失效必须在失效动作之前返回", repo.contains("if (mode == AccessRefresh.NONE) return"))
         assertTrue("权限变化必须触发列表重查", repo.contains("invalidate()"))
-        assertTrue("权限变化必须清缩略图缓存并推进代数", repo.contains("ThumbLoader.invalidateAll()"))
-        val decision = repo.indexOf("if (!accessRefreshInvalidates(prev, next)) return")
-        val evict = repo.indexOf("ThumbLoader.invalidateAll()")
-        assertTrue(
-            "判定为「无需失效」必须在失效之前返回：首次探测与同枚举非部分授权都没有旧数据可清",
-            decision in 0 until evict
-        )
+        assertTrue("枚举变化必须走全量分支", repo.contains("if (mode == AccessRefresh.FULL)"))
+        assertTrue("全量分支必须清缩略图缓存并推进代数", repo.contains("ThumbLoader.invalidateAll()"))
+        assertTrue("同枚举部分授权必须走定向分支", repo.contains("retainVisibleThumbs()"))
+
+        val full = repo.indexOf("if (mode == AccessRefresh.FULL)")
+        val evictAll = repo.indexOf("ThumbLoader.invalidateAll()")
+        val targeted = repo.indexOf("} else {")
+        assertTrue("全量分支必须包住 invalidateAll", full >= 0 && evictAll > full)
+        assertTrue("定向分支在全量分支之后（else），不许把 invalidateAll 漏进定向路径", targeted > evictAll)
         assertFalse(
             "不得再只比枚举：prev == next 提前返回会把同枚举的部分授权重选吞掉",
             repo.contains("if (prev == next) return")
@@ -151,26 +231,19 @@ class GalleryAccessStateTest {
     }
 
     @Test
-    fun `同一枚举的部分授权重选也必须让列表与缩略图失效`() {
-        // 首次探测只记录状态
-        assertFalse(accessRefreshInvalidates(null, MediaAccessState.PARTIAL_READ))
-        assertFalse(accessRefreshInvalidates(null, MediaAccessState.NONE))
-        // 同枚举内只有 PARTIAL_READ 的可见集合可能变（Android 14 可反复重选可见项）
-        assertTrue(
-            "PARTIAL_READ → PARTIAL_READ 也必须失效：重选后可见集合已换一批",
-            accessRefreshInvalidates(MediaAccessState.PARTIAL_READ, MediaAccessState.PARTIAL_READ)
-        )
-        for (same in listOf(MediaAccessState.ALL_FILES, MediaAccessState.FULL_READ, MediaAccessState.NONE)) {
-            assertFalse(
-                "同一枚举的非部分授权重验没有可见集合变化（$same）",
-                accessRefreshInvalidates(same, same)
-            )
-        }
-        // 枚举变化一律失效
-        assertTrue(accessRefreshInvalidates(MediaAccessState.FULL_READ, MediaAccessState.NONE))
-        assertTrue(accessRefreshInvalidates(MediaAccessState.NONE, MediaAccessState.FULL_READ))
-        assertTrue(accessRefreshInvalidates(MediaAccessState.FULL_READ, MediaAccessState.ALL_FILES))
-        assertTrue(accessRefreshInvalidates(MediaAccessState.PARTIAL_READ, MediaAccessState.FULL_READ))
+    fun `同枚举部分授权重选只定向驱逐不可见缩略图`() {
+        val retain = body("media/MediaRepo.kt", "retainVisibleThumbs")
+        assertTrue("必须按当前权限重读全量可见行（不限于当前页签）", retain.contains("queryMediaStore(MediaScope.AllVideos)"))
+        assertTrue("可见集合必须用真实行 URI（裸 _ID 跨卷会撞）", retain.contains("it.uri.toString()"))
+        assertTrue("必须交给定向驱逐", retain.contains("ThumbLoader.retainMediaRows(visible)"))
+        assertTrue("读失败必须留下现场（并按保守集合清理）", retain.contains("if (read.failure != null)"))
+
+        val rows = body("media/MediaRepo.kt", "retainMediaRows")
+        assertTrue("必须遍历当前全部缓存键", rows.contains("cache.snapshot()"))
+        assertTrue("只驱逐判据命中的键", rows.contains("thumbKeyShouldEvict(key, visibleUris)"))
+        assertTrue("驱逐动作是 remove", rows.contains("cache.remove(key)"))
+        assertFalse("定向路径不许全量 evictAll（那会退化成高频清空）", rows.contains("evictAll"))
+        assertFalse("定向路径不推进代数（屏内可见行 Bitmap 仍有效）", rows.contains("generationState.value"))
     }
 
     @Test
@@ -215,7 +288,7 @@ class GalleryAccessStateTest {
         assertTrue("必须订阅首查完成标记", screen.contains("repo.listLoaded"))
         assertTrue("ON_RESUME 必须重验权限", screen.contains("Lifecycle.Event.ON_RESUME"))
         assertTrue("重验入口必须是 refreshAccess", screen.contains("repo.refreshAccess()"))
-        assertTrue("权限变化必须清选择", screen.contains("selectedIds = emptySet()"))
+        assertTrue("权限变化必须清选择", screen.contains("selectedKeys = emptySet()"))
         assertTrue("权限变化必须关菜单", screen.contains("menuTargets = null"))
     }
 

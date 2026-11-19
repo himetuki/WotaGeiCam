@@ -19,8 +19,10 @@ import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessLabel
 import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag as Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +33,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -86,17 +89,23 @@ internal fun listFailureFor(error: Throwable?): MediaListFailure? = when {
 internal data class MediaListRead(val clips: List<VideoClip>, val failure: MediaListFailure?)
 
 /**
- * 回前台重验后是否必须让旧列表与缩略图一起失效（Y26，纯函数）。
+ * 回前台重验后要做的失效档位（Y26，纯函数）。
  *
- * - 首次探测（[prev] == null）：只记录状态——此刻还没有任何旧数据可清；
- * - 枚举变了：可见行集一定变了（撤权/授权/所有文件访问之间切换）；
- * - **枚举没变但仍是 [MediaAccessState.PARTIAL_READ]**：Android 14 的「选择部分照片/视频」
- *   允许反复重选，前后两次都停在 PARTIAL_READ，可见集合却换了一批。只比枚举会把这次
- *   重验当成「没变化」提前返回，旧条目与旧缩略图就顶着新权限继续显示——Y26 的残缺口。
- *   保守方向是多查一次：一次列表读 + 一次缓存清空没有副作用，漏查才是错的。
+ * - [NONE]：首次探测（还没有旧数据）或同枚举的非部分授权重验（可见集合没变）；
+ * - [FULL]：授权枚举变了（撤权/授权/所有文件访问之间切换）——列表重查 + 缩略图全量换代；
+ * - [TARGETED]：枚举没变但仍是 [MediaAccessState.PARTIAL_READ]——Android 14 的
+ *   「选择部分照片/视频」允许反复重选，前后两次都停在 PARTIAL_READ，可见集合却换了一批。
+ *   列表必须重查；缩略图只清**确实不再可见**的行，不再每次回前台都全量清空/推进代数
+ *   （高频清空会让整屏缩略图反复重解码，而留在屏上的行本来仍然可读）。
  */
-internal fun accessRefreshInvalidates(prev: MediaAccessState?, next: MediaAccessState): Boolean =
-    prev != null && (prev != next || next == MediaAccessState.PARTIAL_READ)
+internal enum class AccessRefresh { NONE, FULL, TARGETED }
+
+internal fun accessRefreshMode(prev: MediaAccessState?, next: MediaAccessState): AccessRefresh = when {
+    prev == null -> AccessRefresh.NONE
+    prev != next -> AccessRefresh.FULL
+    next == MediaAccessState.PARTIAL_READ -> AccessRefresh.TARGETED
+    else -> AccessRefresh.NONE
+}
 
 /**
  * 裸 `_ID` 反查的唯一命中裁决（Y27，纯函数）。
@@ -165,6 +174,10 @@ data class VideoClip(
  *
  * 键是 `mediaId`（Room 里 `series_part.mediaId` 指向 MediaStore `_ID`）。
  * 命中不了的行原样返回：单段片逐字不变。
+ *
+ * **跨卷同号不能认**（Y27）：`_ID` 只在卷内唯一，SD 卡上同号的另一条视频若也按 id
+ * 盖成系列成员，会和真正的分段一起从列表消失。`SeriesPart.uri` 已存录制时的行 URI，
+ * 按卷比对（[sameStorageVolume]，合成卷 `external` 与主卷等价）；解析不出版本行原样返回。
  */
 internal fun annotateSeries(
     clips: List<VideoClip>,
@@ -177,6 +190,7 @@ internal fun annotateSeries(
     parts.forEach { byMedia[it.mediaId] = it }
     return clips.map { c ->
         val p = byMedia[c.id] ?: return@map c
+        if (!sameStorageVolume(p.uri, c.uri.toString())) return@map c
         c.copy(
             seriesId = p.seriesId,
             partIndex = p.partIndex,
@@ -195,6 +209,14 @@ class MediaRepo private constructor(private val app: Context) {
     private val tagDao = db.tagDao()
     private val trashDao = db.trashDao()
     private val seriesDao = db.seriesDao()
+
+    /**
+     * 权限重验的**旁路**协程（Y26）：同枚举部分授权重选时要重读一次全量可见行，
+     * 再按结果只驱逐确实不可见的缩略图。不能借用调用屏的 scope —— 回前台事件来自
+     * Lifecycle，屏可能正在重建；也不能把这次读塞进 `refreshAccess()` 的同步路径，
+     * 那会把 ON_RESUME 的首帧拖在一次 MediaStore 查询后面。
+     */
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val version = MutableStateFlow(0L)
 
@@ -245,29 +267,90 @@ class MediaRepo private constructor(private val app: Context) {
     val listLoaded: StateFlow<Boolean> get() = listLoadedState
 
     /**
-     * 回前台重验媒体权限（Y26）。判定见 [accessRefreshInvalidates]；真要失效时：
+     * 回前台重验媒体权限（Y26）。判定见 [accessRefreshMode]：
      *
-     * 1. `invalidate()` 触发列表重查——撤权后 MediaStore 的行集变小，旧条目由新快照替换；
-     * 2. [ThumbLoader.invalidateAll] 清空缩略图缓存并推进代数——**只清缓存不清代数**的话，
-     *    屏内 `remember(uri, px)` 仍抱着旧 Bitmap，已撤权的缩略图会继续显示。
-     *
-     * 首次探测（prev == null）只记录状态，不做失效：此刻还没有任何旧数据可清。
-     * 同一枚举内的部分授权重选（重选了一批可见项）也算变化——枚举相同不等于可见集合相同，
-     * 必须同样重查列表并清缩略图，否则旧行/旧图会顶着新权限留在屏上。
+     * - [AccessRefresh.FULL]（枚举变化）：`invalidate()` 重查列表；[ThumbLoader.invalidateAll]
+     *   清空缓存并推进代数——**只清缓存不清代数**的话，屏内 `remember(uri, px)` 仍抱着旧
+     *   Bitmap，已撤权的缩略图会继续显示。
+     * - [AccessRefresh.TARGETED]（同枚举 PARTIAL_READ 重选）：`invalidate()` 重查列表；
+     *   缩略图**只驱逐确实不再可见的行**（[retainVisibleThumbs]），不再每次回前台全量清空。
+     *   留在屏上的行仍可读，缓存本来有效；消失的行随列表快照一起离开组合，缓存里它们的
+     *   条目随后异步丢掉即可，不需要推进代数。
+     * - [AccessRefresh.NONE]：首次探测只记录状态；同枚举非部分授权重验可见集合没变。
      */
     fun refreshAccess() {
         val next = mediaAccessState(app)
         val prev = access.value
         access.value = next
-        if (!accessRefreshInvalidates(prev, next)) return
-        ThumbLoader.invalidateAll()
+        val mode = accessRefreshMode(prev, next)
+        if (mode == AccessRefresh.NONE) return
         invalidate()
-        val reason = if (prev == next) {
-            "部分授权重选（${mediaAccessLabel(next)}）可见集合可能已变"
+        if (mode == AccessRefresh.FULL) {
+            ThumbLoader.invalidateAll()
+            Log.i(TAG, "媒体访问变化 ${mediaAccessLabel(prev!!)} → ${mediaAccessLabel(next)}，列表与缩略图全量失效")
         } else {
-            "媒体访问变化 ${mediaAccessLabel(prev!!)} → ${mediaAccessLabel(next)}"
+            retainVisibleThumbs()
+            Log.i(TAG, "部分授权重选（${mediaAccessLabel(next)}），列表重查并只清理已不可见行的缩略图")
         }
-        Log.i(TAG, "$reason，列表与缩略图缓存失效")
+    }
+
+    /**
+     * 同枚举部分授权重选的**定向**缩略图清理：按当前权限重读全量可见行，
+     * 只驱逐缓存里 URI 已不在该集合中的媒体缩略图（[ThumbLoader.retainMediaRows]）。
+     *
+     * 读失败时按空集合保守清理：此时无法证明哪一行仍可见，宁可让仍可见的行重解码一次，
+     * 也不把已撤权行的缩略图留在缓存里。全程只 `cache.remove`，不推进代数——
+     * 屏内已组合的可见行 Bitmap 仍是有效内容。
+     */
+    private fun retainVisibleThumbs() {
+        refreshScope.launch {
+            val read = queryMediaStore(MediaScope.AllVideos)
+            if (read.failure != null) {
+                Log.w(TAG, "权限重验时全量可见行读取失败（${read.failure}）→ 保守清空媒体缩略图缓存")
+            }
+            val visible = read.clips.mapTo(HashSet()) { it.uri.toString() }
+            ThumbLoader.retainMediaRows(visible)
+        }
+    }
+
+    /**
+     * 裸 `mediaId` 是否**无法无歧义地写 Room 台账**（Y27）。
+     *
+     * `media_tag` / `series_part` 仍以全局 Long `mediaId` 为键（schema 不动，见 WotaDb），
+     * 而聚合 MediaStore 集合上不同卷的 `_ID` 可以重号。若同一 id 在当前可见快照里命中
+     * 多条不同卷行，收藏/tag 写入会把标签挂到无法确定的那一条上——此时返回 true，
+     * 调用方显式拒绝并回横幅，不拿第一行猜。
+     *
+     * 查询失败同样返回 true（fail closed）：证明不了唯一，就不写。
+     * 系统回收站的行也在快照内（回收站页签可对它们做收藏/tag）；API 29 的本地回收站
+     * 记录指向的文件已物理删除，不参与「当前可见行」判定。
+     */
+    internal suspend fun ledgerMediaIdIsAmbiguous(id: Long): Boolean {
+        return withContext(Dispatchers.IO) {
+            val failures = ArrayList<Throwable>()
+            val live = readCursor(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0",
+                arrayOf(id.toString()),
+                null,
+                failures
+            )
+            val trashed = trashedMatching(MediaScope.AllVideos, failures)
+            if (failures.isNotEmpty()) {
+                Log.w(TAG, "无法确认 mediaId=$id 是否跨卷重号（读取失败 ${failures.first()}）→ 台账写入关死")
+                return@withContext true
+            }
+            val distinctRows = (live + trashed).asSequence()
+                .filter { it.id == id }
+                .map { it.uri.toString() }
+                .distinct()
+                .take(2)
+                .count()
+            if (distinctRows > 1) {
+                Log.w(TAG, "mediaId=$id 命中多条不同卷的行 → 无法确定标签/收藏归属，台账写入关死")
+            }
+            distinctRows > 1
+        }
     }
 
     fun invalidate() {
@@ -850,6 +933,34 @@ fun formatSize(bytes: Long): String {
     }
 }
 
+/** 媒体库缩略图缓存键前缀：只有这些键参与「按可见行清理」，外来 provider 的缩略图不碰 */
+private const val MEDIA_URI_PREFIX = "content://media/"
+
+/**
+ * 从 [ThumbLoader.bitmapKey] 的 `"$uri@$px@$gen"` 里取回行 URI（Y26，纯函数）。
+ *
+ * 取**最后两个** `@` 之前的部分：URI 自身允许含 `@`（路径/查询里都可能出现），
+ * 从右往左切才不会被截断。格式不符返回 null（调用方跳过，不猜）。
+ */
+internal fun thumbKeyUri(key: String): String? {
+    val gen = key.lastIndexOf('@')
+    if (gen <= 0) return null
+    val px = key.lastIndexOf('@', gen - 1)
+    if (px <= 0) return null
+    return key.substring(0, px).takeIf { it.isNotEmpty() }
+}
+
+/**
+ * 该缓存键是否应因「行已不可见」被驱逐（Y26，纯函数）。
+ *
+ * 只处理媒体库 URI：`content://media/...` 之外的缓存（照片选择器等外来来源）没有
+ * 对应的列表可见集合，不参与清理。可见集合为空 = 保守清空全部媒体缩略图。
+ */
+internal fun thumbKeyShouldEvict(key: String, visibleUris: Set<String>): Boolean {
+    val uri = thumbKeyUri(key) ?: return false
+    return uri.startsWith(MEDIA_URI_PREFIX) && uri !in visibleUris
+}
+
 /**
  * 缩略图加载：ContentResolver.loadThumbnail（API 29+）失败回退 MediaMetadataRetriever。
  * 并发限 2；列表滑动中由 [paused] 暂停新请求（06 文档性能节）。
@@ -933,11 +1044,28 @@ object ThumbLoader {
     }
 
     /**
-     * 全量失效（Y26 撤权路径）：清空缓存并推进代数。
+     * 全量失效（Y26 撤权/授权枚举变化）：清空缓存并推进代数。
      * 两个动作缺一不可——`evictAll` 管仓库缓存，代数管屏内已组合的 Bitmap。
      */
     fun invalidateAll() {
         cache.evictAll()
         generationState.value += 1
+    }
+
+    /**
+     * **定向**失效（Y26 同枚举部分授权重选）：只驱逐确实不再可见的媒体行缩略图。
+     *
+     * 与 [invalidateAll] 的分工：可见集合换了一批时，留在屏上的行仍可读、缓存仍有效；
+     * 消失的行会随列表快照离开组合。此时全量清空 + 推进代数会让整屏缩略图白白重解码，
+     * 每次回前台都清一次。这里只 `remove` 不在 [visibleUris] 里的媒体键，不动代数。
+     *
+     * 遍历 [LruCache.snapshot] 而不是缓存自己记录键：LruCache 的淘汰是被动的，
+     * 快照是唯一能拿到当前全部键的公开入口；`remove` 在遍历副本上执行是安全的。
+     */
+    fun retainMediaRows(visibleUris: Set<String>) {
+        val keys = cache.snapshot().keys
+        keys.forEach { key ->
+            if (thumbKeyShouldEvict(key, visibleUris)) cache.remove(key)
+        }
     }
 }
