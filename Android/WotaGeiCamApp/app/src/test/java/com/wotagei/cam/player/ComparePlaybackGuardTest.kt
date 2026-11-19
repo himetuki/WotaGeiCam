@@ -54,6 +54,20 @@ class ComparePlaybackGuardTest {
             "update 的 engine.bind 必须保留（幂等增益）",
             iUpdate >= 0 && surface.indexOf("engine.bind(view)", iUpdate) >= 0
         )
+        assertTrue(
+            "B08：AndroidView 释放时必须 engine.unbind(view)（Pager 换页/离屏后 boundViews " +
+                "不能再握着已脱离组合的视图与 Surface）",
+            surface.contains("onRelease = { view -> engine.unbind(view) }")
+        )
+    }
+
+    /** B08：全屏自动播放不能以整列表为键（收藏/标签 invalidate 会把刚暂停的视频重新拉起） */
+    @Test
+    fun `全屏自动播放effect键必须是当前URI`() {
+        val browse = KotlinSourceScan.flatten(body("media/GalleryScreen.kt", "FullscreenBrowse"))
+        assertTrue("必须取出当前页 URI 作为键", browse.contains("val currentUri = clips.getOrNull(page)?.uri"))
+        assertTrue("effect 必须以当前 URI 为键", browse.contains("LaunchedEffect(currentUri)"))
+        assertFalse("不许再以整个 clips 列表为键", browse.contains("LaunchedEffect(page, clips)"))
     }
 
     // ---------------------------------------------------------------- 黑层绘制顺序（双黑真因）

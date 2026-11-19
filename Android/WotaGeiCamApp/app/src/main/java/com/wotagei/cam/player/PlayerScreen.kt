@@ -324,7 +324,10 @@ fun WotaPlayerSurface(
             engine.bind(view)
             view
         },
-        update = { view -> engine.bind(view) }
+        update = { view -> engine.bind(view) },
+        // B08：Pager 换页/离屏时会释放旧 AndroidView。必须 unbind，否则引擎的 boundViews
+        // 一直握着已脱离组合的视图（及其 Surface），下次 build() 回推还会找到它。
+        onRelease = { view -> engine.unbind(view) }
     )
 }
 
