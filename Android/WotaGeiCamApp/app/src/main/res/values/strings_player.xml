@@ -29,6 +29,7 @@
     <string name="player_arc_cpu_note">兼容模式</string>
     <string name="player_arc_note">抽掉多余帧转到所选帧率，被抽帧的画面并入前后帧保持光弧连贯；后台处理生成新视频，不改原片</string>
     <string name="player_arc_done">修复完成，已存入相册</string>
+    <string name="player_arc_pending_publish">修复已完成，文件已保存待发布（相册暂不可见）</string>
     <string name="player_arc_failed">修复失败</string>
     <string name="player_arc_no_need">源帧率不高于目标帧率，没有帧可抽</string>
     <string name="player_arc_running">修复中 %1$d%%</string>

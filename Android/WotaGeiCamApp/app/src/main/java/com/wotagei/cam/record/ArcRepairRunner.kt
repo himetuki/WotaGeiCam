@@ -14,6 +14,7 @@ import android.os.SystemClock
 import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
 import com.wotagei.cam.core.ArcMergeDeadband
+import com.wotagei.cam.media.MediaRepo
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -80,6 +81,13 @@ object ArcRepairError {
     /** 超时保护触发 */
     const val TIMEOUT = "ARC_TIMEOUT"
 
+    /**
+     * 已封口但 IS_PENDING 两次清除都失败：成片字节在盘上、容器也完整，但 MediaStore 行仍处于
+     * pending，本应用列表（IS_PENDING=0 门）与系统相册都看不到。不是纯成功，也不是"失败已回收"；
+     * UI 必须提示「已保存待发布」，冷启救援会在门槛后把它收进相册。
+     */
+    const val PUBLISH_PENDING = "ARC_PUBLISH_PENDING"
+
     /** 其它运行期异常，附 `:异常类名` */
     const val ENGINE = "ARC_ENGINE"
 }
@@ -96,7 +104,13 @@ data class ArcRepairResult(
     val path: String?,
     val bytes: Long,
     val error: String?,
-    val note: String? = null
+    val note: String? = null,
+    /**
+     * 已封口待发布：文件/路径/字节都已就绪（[uri]/[path]/[bytes] 非空），但 `IS_PENDING=0`
+     * 两次都没清成功，媒体索引里暂时不可见。此时 [ok] 必须为 false（不是纯成功），
+     * UI 按 [error] == [ArcRepairError.PUBLISH_PENDING] 给「已保存待发布」专门文案。
+     */
+    val pendingPublish: Boolean = false
 )
 
 /**
@@ -122,6 +136,25 @@ fun arcRepairOk(muxStarted: Boolean, videoTrackAdded: Boolean, writtenVideoSampl
  * 让 stop 抛（见 [arcRepairOk] 的零样本说明），这条判据把"容器没封口"从成功里剔出去。
  */
 internal fun arcRepairKeep(ok: Boolean, muxStopOk: Boolean): Boolean = ok && muxStopOk
+
+/**
+ * 修复产物从「封口」走到「公开/索引」的最终三态（纯函数，JVM 全表）：
+ *
+ * - [PUBLISHED]：muxer 封口 + `seal` 清 IS_PENDING 命中行 ⇒ 文件、发布、索引三格全成立；
+ * - [PENDING_PUBLISH]：muxer 封口但两次 commit 都失败。文件仍在盘上（VideoStore 不删），
+ *   只是 pending 行对媒体库不可见。**绝不能报纯成功**，否则用户以为进了相册；
+ * - [DISCARDED]：keep=false（容器没封口/零样本），产物已按故意丢弃处理。
+ *
+ * 旧实现只看 `keep` 就返回 `ArcRepairResult(true, ...)`，把 PENDING_PUBLISH 当成功。
+ */
+internal enum class ArcPublishOutcome { PUBLISHED, PENDING_PUBLISH, DISCARDED }
+
+internal fun arcPublishOutcome(keep: Boolean, committed: Boolean): ArcPublishOutcome = when {
+    !keep -> ArcPublishOutcome.DISCARDED
+    committed -> ArcPublishOutcome.PUBLISHED
+    else -> ArcPublishOutcome.PENDING_PUBLISH
+}
+
 
 /**
  * 光弧修复的**后台执行器**（用户需求第 7 项）：把一段视频处理成"插帧后"的新文件并入库。
@@ -1350,10 +1383,34 @@ private class ArcRepairSession(
             else -> code ?: ArcRepairError.ENGINE
         }
         val seg = st.seal(sk, 0, 0L, if (keep) durationMs else 0L, keep = keep)
-        return if (keep) {
-            ArcRepairResult(true, seg.uri, seg.path, seg.bytes, null, note)
-        } else {
-            ArcRepairResult(false, null, null, 0L, failCode ?: ArcRepairError.ENGINE, note)
+        return when (arcPublishOutcome(keep, seg.committed)) {
+            ArcPublishOutcome.PUBLISHED -> {
+                // 发布成功后才由任务所有者刷新索引：媒体库 IS_PENDING=0 门现在能看见这一行。
+                // 不在 pending 分支刷新（那一行仍被 pending 门挡住，刷了也只会多做一次全量查询）。
+                MediaRepo.get(ctx).invalidate()
+                ArcRepairResult(true, seg.uri, seg.path, seg.bytes, null, note)
+            }
+            ArcPublishOutcome.PENDING_PUBLISH -> {
+                // 成片已封口且字节在盘上，只是两次清 IS_PENDING 都失败。必须报"待发布"而非成功：
+                // 媒体库/系统相册此刻都看不到它，用户继续以为修复完成就是骗他。
+                Log.e(
+                    TAG_ARC,
+                    "修复产物已封口但两轮发布均失败，保留 pending 行待冷启救援：" +
+                        "uri=${seg.uri} bytes=${seg.bytes} path=${seg.path}"
+                )
+                ArcRepairResult(
+                    ok = false,
+                    uri = seg.uri,
+                    path = seg.path,
+                    bytes = seg.bytes,
+                    error = ArcRepairError.PUBLISH_PENDING,
+                    note = note,
+                    pendingPublish = true
+                )
+            }
+            ArcPublishOutcome.DISCARDED -> {
+                ArcRepairResult(false, null, null, 0L, failCode ?: ArcRepairError.ENGINE, note)
+            }
         }
     }
 

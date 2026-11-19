@@ -582,10 +582,12 @@ fun PlayerScreen(
         when (arcStatus) {
             ArcRepairStatus.DONE -> banner = R.string.player_arc_done
             ArcRepairStatus.FAILED ->
-                banner = if (arcRunner.result.value?.error == ArcRepairError.NO_NEED) {
-                    R.string.player_arc_no_need
-                } else {
-                    R.string.player_arc_failed
+                banner = when {
+                    arcRunner.result.value?.error == ArcRepairError.NO_NEED -> R.string.player_arc_no_need
+                    // 已封口待发布不是普通失败：文件在盘上，只是 IS_PENDING 没清掉。
+                    // 文案必须让用户知道"已保存"，否则会以为白修一遍。
+                    arcRunner.result.value?.pendingPublish == true -> R.string.player_arc_pending_publish
+                    else -> R.string.player_arc_failed
                 }
             else -> Unit
         }
