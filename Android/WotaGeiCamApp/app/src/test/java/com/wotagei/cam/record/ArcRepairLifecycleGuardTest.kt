@@ -25,15 +25,17 @@ class ArcRepairLifecycleGuardTest {
     @Test
     fun `运行中离开页面_任务结束后线程必须自行退出`() {
         val start = flatten(bodyOf(src, "start"))
+        assertTrue("start 的正常/取消两条收尾都必须走 finishTask", start.contains("finishTask("))
+        val finish = flatten(bodyOf(src, "finishTask"))
         assertTrue(
-            "start 任务末尾必须读 quitAfterTask 并 quitSafely（否则运行中离开页面后线程永久驻留）",
-            start.contains("if (quitAfterTask) thread.quitSafely()")
+            "任务收尾必须读 quitAfterTask 并 quitSafely（否则运行中离开页面后线程永久驻留）",
+            finish.contains("if (quitAfterTask) thread.quitSafely()")
         )
         val shutdown = flatten(bodyOf(src, "shutdownAfterTask"))
         assertTrue("必须先登记退线程意图", shutdown.contains("quitAfterTask = true"))
         assertTrue("空闲时必须立即退", shutdown.contains("if (!busy) thread.quitSafely()"))
-        // 不能把取消语义混进来：shutdownAfterTask 不许置 cancelRequested
-        assertFalse("shutdownAfterTask 不许取消用户已发起的修复", shutdown.contains("cancelRequested = true"))
+        // 不能把取消语义混进来：shutdownAfterTask 不许动任务取消门
+        assertFalse("shutdownAfterTask 不许取消用户已发起的修复", shutdown.contains("gate.cancel("))
     }
 
     @Test

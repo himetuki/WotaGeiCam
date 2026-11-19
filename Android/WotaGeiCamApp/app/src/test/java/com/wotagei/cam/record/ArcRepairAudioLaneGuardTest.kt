@@ -92,7 +92,7 @@ class ArcRepairAudioLaneGuardTest {
         assertEquals("良品必须先真的绿", 0, laneViolations(raw).size)
 
         val drainLine = "        for (lane in audioLanes) lane.drainUpTo(limitUs)"
-        val loopHead = "        idxs.forEachIndexed { li, ti ->\n            val ex = MediaExtractor()"
+        val loopHead = "        idxs.forEachIndexed { li, ti ->\n            checkAbort()\n            val ex = MediaExtractor()"
         assertTrue("突变锚点丢失：没截到聚合 drain 行", raw.contains(drainLine))
         assertTrue("突变锚点丢失：没截到逐轨循环头", raw.contains(loopHead))
 
