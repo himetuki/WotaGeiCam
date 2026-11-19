@@ -135,14 +135,20 @@ class RotateStallGuardTest {
         assertTrue("越界判定必须走桥函数", settleBody.contains("rotateStallDecision("))
         assertTrue("越界必须置 ROTATE_STALL 失败码", settleBody.contains("rotateStallError("))
         assertTrue("腿耗时必须折成丢帧账", settleBody.contains("rotateLostMs("))
-        // 锚串随 2026-10-11 #16 的 AtomicLong 化迁移：读清必须是一次 CAS（getAndSet），不是裸读裸清
-        assertTrue("腿起点必须原子读清（裸读裸清会与控制线程抢成双加）", settleBody.contains("rotateLegStartMs.getAndSet(0L)"))
+        // Y18：结算权由 RotateLegLedger.claim 的 CAS 领取（先到者独得，后到者得 0），
+        // 预算另由不可变截止时刻派生——两本账分开（详见 RotateLegSettleGuardTest）
+        assertTrue("腿结算必须领 RotateLegLedger.claim（CAS 恰好一次）", settleBody.contains("rotateLeg.claim()"))
+        assertTrue("泵线程是腿终点，必须清截止时刻", settleBody.contains("rotateLeg.endLeg()"))
         assertTrue("非轮转腿必须早退（不许判失败）", settleBody.contains("if (!judgeStall) return"))
 
         assertTrue(
-            "预算常量必须被函数体引用（只声明不引用=没接线）",
-            bodyOf(codec, "rotateBudgetLeftMs").contains("ROTATE_LEG_BUDGET_MS") &&
-                bodyOf(codec, "rotateBudgetLeftMs").contains("STORE_CALL_BUDGET_MS")
+            "预算常量必须接进腿账（只声明不引用=没接线）",
+            codec.contains("legBudgetMs = ROTATE_LEG_BUDGET_MS") &&
+                codec.contains("idleBudgetMs = STORE_CALL_BUDGET_MS")
+        )
+        assertTrue(
+            "预算必须由腿账派生（不许在函数体里另写一份起钟算术）",
+            bodyOf(codec, "rotateBudgetLeftMs").contains("rotateLeg.budgetLeftMs()")
         )
     }
 
@@ -343,7 +349,7 @@ class RotateStallGuardTest {
         assertTrue("release 必须复位", bodyOf(codec, "release").contains("resetRotateBooks()"))
         assertTrue("finish 必须复位（结果已取出，账不能漏进下一次）", bodyOf(codec, "finish").contains("resetRotateBooks()"))
         val reset = bodyOf(codec, "resetRotateBooks")
-        assertTrue("复位必须清腿起点（AtomicLong 化后走 set）", reset.contains("rotateLegStartMs.set(0L)"))
+        assertTrue("复位必须清腿账（预算/领取权/截止时刻一起回零）", reset.contains("rotateLeg.reset()"))
         assertTrue("复位必须清入库超时位", reset.contains("rotateStoreTimedOut = false"))
         assertTrue("复位必须清段账", reset.contains("segLostMs.clear()"))
         assertTrue("复位必须清累计账", reset.contains("rotateLoss.clear()"))

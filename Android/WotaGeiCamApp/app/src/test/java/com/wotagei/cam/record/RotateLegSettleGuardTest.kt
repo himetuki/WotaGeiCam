@@ -7,145 +7,26 @@ import com.wotagei.cam.source.KotlinSourceScan.regionOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 换段腿的**双端结算必须互斥**（2026-10-11）。
+ * 换段腿的**双端结算接线**（2026-10-11 起，Y18 改接）。
  *
- * 背景：腿起点原先是 `@Volatile Long`。volatile 只保证「读到的值新」，**不保证「读-算-清-加」
- * 这四步原子**——控制线程读出 start、泵线程抢先结算清 0、控制线程再 add，同一条腿记两遍，
- * [RotateLossLedger] 读数虚高约一份部分腿。
+ * 历史：腿起点原先是 `@Volatile Long`，两处结算（泵线程 [CodecRecorder.settleRotateLeg] 与控制线程
+ * [CodecRecorder.settleRotateLegAtStop]）各自「读-算-清-加」，读与清之间有窗口 ⇒ 同一条腿记两遍。
+ * 第一版修法用 `AtomicLong.getAndSet(0L)` 把「读 + 清」做成一次 CAS，双加被结构性排除。
  *
- * 修法：`AtomicLong.getAndSet(0L)` 把「读 + 清」做成一次 CAS，谁先消费谁独得 start，
- * 另一侧必得 0 早退 ⇒ 双加在结构上不可能，零窗口零锁。
+ * Y18 暴露出这枚变量**兼职三件事**：预算起钟、丢失结算锁、腿终点。停止路径一领结算就顺手清了腿，
+ * 在途泵线程的预算读数退回腿外（详见 [RotateLegLedger]）。现在是两件独立的账：
+ * - 结算权：`claim()`（CAS，先到者独得），**不动**预算；
+ * - 腿终点：只有泵线程 `endLeg()`/`pumpTrail()` 清；停止路径**只领不清**。
  *
- * ⚠ **控制线程那一笔 `rotateLoss.add(lost)` 不能删**：`rotateLoss.totalMs` 被
+ * 本守卫钉接线形状（两件事没有漂回一枚变量），行为真值表在 [RotateLegLedgerTest]。
+ * 「控制线程那一笔 `rotateLoss.add(lost)` 不能删」：`rotateLoss.totalMs` 被
  * `finishWithoutTeardown` 拿去生成**用户可见**的失败结果，删了用户看到的丢失量就少算。
  */
 class RotateLegSettleGuardTest {
 
     private val codec = codeOnly(mainSourceText("record/CodecRecorder.kt"))
-
-    /**
-     * 腿结算的本地同构模型：两处结算各自「`getAndSet(0L)` 消费 → 算 lost → `rotateLoss.add`」。
-     * 生产侧形状由下面的「结构体检」钉住，这份模型不会悄悄漂走。
-     *
-     * 控制线程那侧拆成 [controlRead]/[controlAdd] 两相：读与入账之间的缝隙正是裸读不清位
-     * 形态的**竞态窗口**所在，[settleAtStop] 背靠背调两相 = 无并发，runRace 里把泵线程
-     * 插进缝里 = 真实交错的确定性模拟。
-     *
-     * @param rawAtStop true = 把控制线程那侧退回成旧形态（裸读不清位），用于突变自证
-     */
-    private class LegModel(private val rawAtStop: Boolean = false) {
-        val start = AtomicLong(0L)
-        val loss = RotateLossLedger()
-
-        fun begin(now: Long) { start.set(now) }
-
-        /** 泵线程侧：与生产 [CodecRecorder.settleRotateLeg] 同构 */
-        fun settlePump(now: Long) {
-            val s = start.getAndSet(0L)
-            if (s == 0L) return
-            loss.add(now - s)
-        }
-
-        /** 控制线程侧第 1 相「读+清」：真身 = getAndSet 原子读清；突变体 = 裸读不清 */
-        fun controlRead(): Long = if (rawAtStop) start.get() else start.getAndSet(0L)
-
-        /** 控制线程侧第 2 相「入账」：读到 0 = 别人已消费，早退 */
-        fun controlAdd(read: Long, now: Long) {
-            if (read == 0L) return
-            loss.add(now - read)
-        }
-
-        /** 控制线程侧：与生产 [CodecRecorder.settleRotateLegAtStop] 同构（两相背靠背 = 无并发） */
-        fun settleAtStop(now: Long) = controlAdd(controlRead(), now)
-    }
-
-    private val legMs = 5_000L
-
-    @Test
-    fun `有序双结算_先停录后泵线程只记一份`() {
-        val m = LegModel()
-        m.begin(1_000L)
-        m.settleAtStop(1_000L + legMs)   // 控制线程先到
-        m.settlePump(1_000L + legMs)      // 泵线程后到，必得 0 早退
-        assertEquals("累计丢失必须只有一份", legMs, m.loss.totalMs)
-        assertEquals("次数必须只有一次", 1, m.loss.count)
-    }
-
-    @Test
-    fun `有序双结算_先泵线程后停录只记一份`() {
-        val m = LegModel()
-        m.begin(1_000L)
-        m.settlePump(1_000L + legMs)      // 泵线程先到
-        m.settleAtStop(1_000L + legMs)    // 控制线程后到，必得 0 早退
-        assertEquals("累计丢失必须只有一份", legMs, m.loss.totalMs)
-        assertEquals("次数必须只有一次", 1, m.loss.count)
-    }
-
-    /**
-     * 突变自证：把控制线程那侧退回**裸读不清位**（旧缺陷形态），在真实竞态的交错下必须双加。
-     *
-     * 双加的窗口在「读」与「入账」**之间**：控制线程裸读到腿起点后被打断，泵线程整段结算
-     * （getAndSet 消费掉同一枚），控制线程再拿陈旧读数入账。整体调用的顺序模拟里：
-     * - 控制线程先完整结算 ⇒ 裸读不清位，泵线程后到仍消费同一枚 ⇒ 双加（缺陷可见）；
-     * - 泵线程先完整结算 ⇒ 控制线程再裸读读到的已是 0、早退 ⇒ **不**双加——那不是尺子钝，
-     *   是该顺序下缺陷本就不发生（旧版把两种整体顺序都断言成双加，是期望写错，
-     *   门禁 #1c 实测 stopFirst=false 红成 expected:<10000> but was:<5000>）。
-     *
-     * 所以突变体的自证在**交错形态**下做，并配上「真身在同一交错下不双加」的对照——
-     * 同一把交错尺，只有裸读会双加，这才是真牙齿（真身那相 getAndSet 原子读清，
-     * 泵线程插进来只能读到 0 早退）。
-     */
-    @Test
-    fun `尺子自己能红_控制线程裸读不清位必双加`() {
-        val now = 1_000L + legMs
-
-        /** 整体调用（无并发）：控制线程读+入账背靠背。每次都新建模型：账本跨调用累加（假红） */
-        fun runWhole(rawAtStop: Boolean, stopFirst: Boolean): Pair<Long, Int> {
-            val m = LegModel(rawAtStop = rawAtStop)
-            m.begin(1_000L)
-            if (stopFirst) {
-                m.settleAtStop(now); m.settlePump(now)
-            } else {
-                m.settlePump(now); m.settleAtStop(now)
-            }
-            return m.loss.totalMs to m.loss.count
-        }
-
-        /** 真实竞态的交错模拟：控制线程裸读 → 泵线程整段结算 → 控制线程拿陈旧读数入账 */
-        fun runRace(rawAtStop: Boolean): Pair<Long, Int> {
-            val m = LegModel(rawAtStop = rawAtStop)
-            m.begin(1_000L)
-            val read = m.controlRead()
-            m.settlePump(now)
-            m.controlAdd(read, now)
-            return m.loss.totalMs to m.loss.count
-        }
-
-        // 真身：两种整体顺序都只记一份（谁先消费谁独得，另一侧必得 0 早退）
-        listOf(true, false).forEach { stopFirst ->
-            val (gTotal, gCount) = runWhole(false, stopFirst)
-            assertEquals("stopFirst=$stopFirst 真身总量必须一份", legMs, gTotal)
-            assertEquals("stopFirst=$stopFirst 真身次数必须一次", 1, gCount)
-        }
-        // 突变体（裸读不清位）在整体调用下：控制线程先结算的顺序双加；
-        // 泵先到的顺序不双加——窗口没赶上，这正是缺陷的边界，要钉住而不是假装它恒现
-        val (b1Total, b1Count) = runWhole(true, stopFirst = true)
-        assertEquals("控制线程先结算时裸读不清位必须双加", 2 * legMs, b1Total)
-        assertEquals("次数必须变两次", 2, b1Count)
-        val (b2Total, b2Count) = runWhole(true, stopFirst = false)
-        assertEquals("泵线程先结算时控制线程裸读读到的已是 0——本顺序下双加本就不发生", legMs, b2Total)
-        assertEquals("次数仍是一次", 1, b2Count)
-        // 交错形态（真实竞态）：同一把尺，真身不双加、突变体双加
-        val (gTotal, gCount) = runRace(false)
-        assertEquals("同一交错下真身仍只记一份（getAndSet 把读清做成一步，泵线程必得 0 早退）", legMs, gTotal)
-        assertEquals("真身次数一次", 1, gCount)
-        val (bTotal, bCount) = runRace(true)
-        assertEquals("裸读不清位在真实交错下必须双加", 2 * legMs, bTotal)
-        assertEquals("突变体次数两次", 2, bCount)
-    }
 
     // ---- 结构体检（真身与突变体同吃） ----
 
@@ -153,38 +34,61 @@ class RotateLegSettleGuardTest {
         val bad = ArrayList<String>()
         val settle = bodyOf(maskedCodec, "settleRotateLeg")
         val atStop = bodyOf(maskedCodec, "settleRotateLegAtStop")
-        listOf("settleRotateLeg" to settle, "settleRotateLegAtStop" to atStop).forEach { (name, body) ->
-            if (!body.contains("rotateLegStartMs.getAndSet(0L)")) {
-                bad.add("$name 必须用 rotateLegStartMs.getAndSet(0L) 原子读清")
-            }
-            if (body.contains("rotateLegStartMs = 0L")) {
-                bad.add("$name 不许用裸 `rotateLegStartMs = 0L` 清位（读-清-加非原子，双加窗口仍在）")
-            }
+
+        if (!settle.contains("rotateLeg.claim()")) {
+            bad.add("settleRotateLeg 必须领 [RotateLegLedger.claim]（结算权恰好一次）")
         }
-        // 控制线程那一笔不许被删：rotateLoss.totalMs 是用户可见失败结果的丢失量
+        if (!settle.contains("rotateLeg.endLeg()")) {
+            bad.add("settleRotateLeg 是腿终点，必须清截止时刻")
+        }
+        if (!atStop.contains("rotateLeg.claim()")) {
+            bad.add("settleRotateLegAtStop 必须领 claim（否则这条腿的丢失量没人记）")
+        }
+        if (atStop.contains("rotateLeg.endLeg()")) {
+            bad.add("停止路径不许清截止时刻（泵线程还卡在腿里，清了预算就回到腿外的 3s）")
+        }
+        if (atStop.contains("rotateLeg.reset()")) {
+            bad.add("停止路径不许复位腿账（会重开领取权 + 清截止，两本账一起串）")
+        }
         if (!atStop.contains("rotateLoss.add(lost)")) {
             bad.add("控制线程那一笔 rotateLoss.add(lost) 不许删（用户可见失败结果靠它）")
         }
-        if (!bodyOf(maskedCodec, "beginRotateLeg").contains("rotateLegStartMs.set(")) {
-            bad.add("beginRotateLeg 必须走 set(...)（AtomicLong 没有裸赋值）")
+        if (!bodyOf(maskedCodec, "beginRotateLeg").contains("rotateLeg.begin()")) {
+            bad.add("beginRotateLeg 必须起钟（设不可变截止 + 重开领取权）")
         }
-        if (!bodyOf(maskedCodec, "resetRotateBooks").contains("rotateLegStartMs.set(0L)")) {
-            bad.add("resetRotateBooks 必须走 set(0L)")
+        if (!bodyOf(maskedCodec, "resetRotateBooks").contains("rotateLeg.reset()")) {
+            bad.add("resetRotateBooks 必须复位腿账")
         }
-        if (!Regex("private val rotateLegStartMs = AtomicLong").containsMatchIn(maskedCodec)) {
-            bad.add("rotateLegStartMs 必须是 AtomicLong（@Volatile 不保证读-清-加原子）")
+        if (!bodyOf(maskedCodec, "pumpTrail").contains("rotateLeg.endLeg()")) {
+            bad.add("泵线程异常退出也要清截止（否则 release 的每次有界调用都判停摆）")
         }
-        if (Regex("@Volatile\\s+private var rotateLegStartMs").containsMatchIn(maskedCodec)) {
-            bad.add("旧的 `@Volatile var` 形态不许复活（它是本缺陷的成因）")
+        val budget = bodyOf(maskedCodec, "rotateBudgetLeftMs")
+        if (!budget.contains("rotateLeg.budgetLeftMs()")) {
+            bad.add("预算必须只由 RotateLegLedger.budgetLeftMs 派生")
+        }
+        if (budget.contains("claim") || budget.contains("endLeg")) {
+            bad.add("预算不许参与结算领取/腿终点（Y18 的串台成因）")
+        }
+        if (!Regex("private val rotateLeg = RotateLegLedger\\(").containsMatchIn(maskedCodec)) {
+            bad.add("腿账必须住在一枚 RotateLegLedger 里（预算/领取权/终点三件事分开）")
+        }
+        if (!maskedCodec.contains("legBudgetMs = ROTATE_LEG_BUDGET_MS")) {
+            bad.add("腿预算常量必须真接进腿账（只声明不接线）")
+        }
+        if (!maskedCodec.contains("idleBudgetMs = STORE_CALL_BUDGET_MS")) {
+            bad.add("腿外预算常量必须真接进腿账")
+        }
+        if (maskedCodec.contains("rotateLegStartMs")) {
+            bad.add("旧的共用起钟变量 rotateLegStartMs 不许复活（预算与结算共用的成因）")
         }
         return bad
     }
 
-    /** 把 [settleRotateLegAtStop] 体内的某段文本换掉（不动另一处结算，避免锚串两处同时命中） */
-    private fun mutateAtStop(src: String, from: String, to: String): String {
-        val r = regionOf(src, "settleRotateLegAtStop")
+    /** 把某个函数体内的某段文本换掉（不动其它函数里的同名锚串） */
+    private fun mutateIn(src: String, funName: String, from: String, to: String): String {
+        val r = regionOf(src, funName)
         val body = src.substring(r.start, r.end)
-        assertTrue("突变锚点没截到：$from", body.contains(from))
+        assertTrue("突变锚点没截到：$funName 里没有 $from", body.contains(from))
         return src.substring(0, r.start) + body.replace(from, to) + src.substring(r.end)
     }
 
@@ -199,16 +103,49 @@ class RotateLegSettleGuardTest {
         assertEquals("良品接线必须先绿", 0, legViolations(codec).size)
         val mutants = listOf(
             Triple(
-                "控制线程退回裸读不清位（缺陷形态）",
-                mutateAtStop(codec, "rotateLegStartMs.getAndSet(0L)", "rotateLegStartMs.get()"),
+                "停止路径顺手清截止（Y18 缺陷形态）",
+                mutateIn(codec, "settleRotateLegAtStop", "rotateLeg.claim()", "rotateLeg.claim()\n        rotateLeg.endLeg()"),
                 true
             ),
-            Triple("控制线程退回裸赋值清位", mutateAtStop(codec, "rotateLegStartMs.getAndSet(0L)", "rotateLegStartMs = 0L"), true),
-            Triple("删掉控制线程那一笔 add", mutateAtStop(codec, "rotateLoss.add(lost)", "Unit"), true),
-            Triple("泵线程退回裸读不清位", codec.replace("val start = rotateLegStartMs.getAndSet(0L)", "val start = rotateLegStartMs.get()"), true),
-            Triple("AtomicLong 退回 @Volatile var", codec.replace("private val rotateLegStartMs = AtomicLong(0L)", "private var rotateLegStartMs = 0L"), true),
+            Triple(
+                "停止路径退回复位腿账",
+                mutateIn(codec, "settleRotateLegAtStop", "rotateLeg.claim()", "rotateLeg.reset()"),
+                true
+            ),
+            Triple(
+                "删掉控制线程那一笔 add",
+                mutateIn(codec, "settleRotateLegAtStop", "rotateLoss.add(lost)", "Unit"),
+                true
+            ),
+            Triple(
+                "泵线程不再清截止",
+                mutateIn(codec, "settleRotateLeg", "rotateLeg.endLeg()", "Unit"),
+                true
+            ),
+            Triple(
+                "泵线程异常退出路径不再清截止",
+                mutateIn(codec, "pumpTrail", "rotateLeg.endLeg()", "Unit"),
+                true
+            ),
+            Triple(
+                "预算拿结算领取权当来源（两本账又合回一枚）",
+                mutateIn(codec, "rotateBudgetLeftMs", "rotateLeg.budgetLeftMs()", "rotateLeg.claim().toLong()"),
+                true
+            ),
+            Triple(
+                "旧共用起钟变量复活",
+                codec.replace(
+                    "private val rotateLeg = RotateLegLedger(",
+                    "private val rotateLegStartMs = 0L\n    private val rotateLeg = RotateLegLedger("
+                ),
+                true
+            ),
             // 对照组：只改注释不许引发红（尺子不许对无害改动过敏）
-            Triple("对照组：只改注释", codec.replace("private val rotateLegStartMs = AtomicLong(0L)", "private val rotateLegStartMs = AtomicLong(0L) // 注释"), false)
+            Triple(
+                "对照组：只改注释",
+                mutateIn(codec, "settleRotateLegAtStop", "rotateLeg.claim()", "rotateLeg.claim() // 注释"),
+                false
+            )
         )
         mutants.forEach { (name, mutated, shouldBeRed) ->
             val red = legViolations(mutated)
