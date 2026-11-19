@@ -6,7 +6,6 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.occurrences
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -214,8 +213,9 @@ class CameraFpsUnifiedDecisionTest {
     /** 最近一次 build 出来的请求里的 `CONTROL_AE_TARGET_FPS_RANGE` 上下界 */
     private fun assertRequestRange(p: CameraRecoveryStartFixture, label: String, lo: Int, hi: Int) {
         val request = builtRequests(p).lastOrNull() ?: error("$label：没有任何 build 过的请求")
-        val range = request["CONTROL_AE_TARGET_FPS_RANGE"]
-        assertNotNull("$label：请求必须带 CONTROL_AE_TARGET_FPS_RANGE", range)
+        val range = checkNotNull(request["CONTROL_AE_TARGET_FPS_RANGE"]) {
+            "$label：请求必须带 CONTROL_AE_TARGET_FPS_RANGE"
+        }
         assertEquals("$label：区间下界", lo, p.platform.call(range, "getLower"))
         assertEquals("$label：区间上界", hi, p.platform.call(range, "getUpper"))
     }

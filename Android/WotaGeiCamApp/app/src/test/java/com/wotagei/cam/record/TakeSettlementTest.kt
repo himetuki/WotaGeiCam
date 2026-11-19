@@ -315,7 +315,7 @@ class TakeSettlementTest {
     }
 
     @Test
-    fun `容量淘汰只动已完成项_在途结算的重复调用仍拿到同一枚`() = runBlocking {
+    fun `容量淘汰只动已完成项_在途结算的重复调用仍拿到同一枚`() = runBlocking<Unit> {
         val gate = CompletableDeferred<Unit>()
         val slow = FakeBackend(gate = gate)
         val fast = FakeBackend()

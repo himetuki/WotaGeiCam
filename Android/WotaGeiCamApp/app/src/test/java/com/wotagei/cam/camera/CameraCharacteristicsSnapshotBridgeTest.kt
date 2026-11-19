@@ -55,8 +55,7 @@ class CameraCharacteristicsSnapshotBridgeTest {
                 "枚举完成且已有当前槽位时必须能拿到 characteristics 快照（不再现查）",
                 snapshot
             )
-            val slot = p.state("CurrentSlot")
-            assertNotNull("当前槽位必须已发布", slot)
+            val slot = checkNotNull(p.state("CurrentSlot")) { "当前槽位必须已发布" }
             assertSame(
                 "快照必须就是槽位里留下的那一份（不是另起一次查询）",
                 snapshot,
