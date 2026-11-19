@@ -34,6 +34,9 @@ class RotateStallGuardTest {
     private val notice = codeOnly(mainSourceText("ui/RecordResultNotice.kt"))
     private val guard = codeOnly(mainSourceText("record/RotateGuard.kt"))
 
+    /** 封口段的独立发布路（R06）：发布等待窗与换段预算必须两本账 */
+    private val sealedPub = codeOnly(mainSourceText("record/SealedPublication.kt"))
+
     /**
      * 文案资源文件（`res/values/strings_camera.xml`）：从主源码定位到模块目录后逐级上溯查找。
      * 找不到**必须抛**——守卫不能在没有输入的情况下算通过（与 `KotlinSourceScan` 同口径）。
@@ -60,9 +63,32 @@ class RotateStallGuardTest {
 
         val seal = bodyOf(codec, "sealCurrent")
         assertTrue("sealCurrent 必须经有界关 fd", seal.contains("closeTargetBounded()"))
-        assertTrue("sealCurrent 必须经有界封段", seal.contains("sealBounded("))
+        // R06：封口段的发布改走独立发布路（不吃换段腿预算），执行体拆成 sealOnPublisher
+        assertTrue(
+            "sealCurrent 必须把封口段交给独立发布路（同步等待窗 + 迟到补发）",
+            seal.contains("sealedPublisher.publish(draft) { sealOnPublisher(")
+        )
         assertFalse("sealCurrent 不许直接 target?.close()（关 fd 也走 MediaProvider）", seal.contains("target?.close()"))
-        assertFalse("sealCurrent 不许直接 store.seal", seal.contains("store.seal("))
+        assertFalse("sealCurrent 不许直接 store.seal（发布执行体只在发布线程上跑）", seal.contains("store.seal("))
+        assertFalse(
+            "发布不许再吃换段腿预算（预算尽就不发布 = 整段永久 IS_PENDING）",
+            seal.contains("rotateBudgetLeftMs()")
+        )
+        assertTrue(
+            "发布执行体必须真的调 store.seal（不是只声明不接线）",
+            bodyOf(codec, "sealOnPublisher").contains("store.seal(")
+        )
+        // 发布等待窗必须独立成账：常量住在发布路文件里，且不引用换段预算/单次入库预算
+        assertTrue("发布等待窗常量必须声明", sealedPub.contains("PUBLISH_WAIT_MS = 3_000L"))
+        assertTrue("等待窗必须真正被 await 使用", sealedPub.contains("done.await(waitMs, TimeUnit.MILLISECONDS)"))
+        assertTrue(
+            "预算为 0 也必须照发（R06 路径一：不许没预算就不发布）",
+            sealedPub.contains("if (waitMs <= 0L) synchronized(lock) { givenUp.add(draft.partIndex) }")
+        )
+        assertFalse(
+            "发布等待窗不许拿换段预算当自己的预算（调一个连带另一个）",
+            sealedPub.contains("ROTATE_LEG_BUDGET_MS") || sealedPub.contains("STORE_CALL_BUDGET_MS")
+        )
 
         val disc = bodyOf(codec, "discardCurrent")
         assertFalse("discardCurrent 不许直接 target?.close()", disc.contains("target?.close()"))
@@ -70,7 +96,6 @@ class RotateStallGuardTest {
 
         // 有界封装本体：必须真用执行器 + 用腿预算（不是自造的常数）
         assertTrue(bodyOf(codec, "createPendingBounded").contains("storeIo.run(rotateBudgetLeftMs())"))
-        assertTrue(bodyOf(codec, "sealBounded").contains("storeIo.run(rotateBudgetLeftMs())"))
         assertTrue(bodyOf(codec, "openTargetBounded").contains("storeIo.run(rotateBudgetLeftMs())"))
         // 清账（关 fd）要留下限：腿预算已尽也得把句柄收掉，否则 fd 泄漏
         assertTrue(bodyOf(codec, "closeBounded").contains("cleanupBudgetMs(rotateBudgetLeftMs())"))
@@ -218,9 +243,9 @@ class RotateStallGuardTest {
             "失败码必须带上环节游标",
             codec.contains("rotateStallError(rotateLoss.totalMs, rotateFailStage)")
         )
-        // 每个环节都要在腿上真被记过一次（常量声明不算接线）
+        // 每个环节都要在腿上真被记过一次（常量声明不算接线）。
+        // SEAL 自 R06 起不再由换段腿发出——已封段的发布移出了换段预算（见 SealedPublication）。
         for ((stage, where) in listOf(
-            "RotateStage.SEAL" to "sealBounded",
             "RotateStage.INSERT" to "createPendingBounded",
             "RotateStage.OPEN" to "openTargetBounded",
             "RotateStage.ENCODE" to "openNextSegment",
@@ -231,6 +256,10 @@ class RotateStallGuardTest {
             val body = bodyOf(codec, where)
             assertTrue("$where 必须记过 $stage", body.contains(stage))
         }
+        assertFalse(
+            "发布已移出换段腿，不许再把 SEAL 记成腿环节（否则封口慢会被误报成换段受阻）",
+            codec.contains("RotateStage.SEAL")
+        )
         val note = bodyOf(codec, "noteRotateStage")
         assertTrue("只记第一个失败的环节（后续是连锁反应）", note.contains("if (rotateFailStage.isEmpty())"))
         // 遮蔽器会把字符串字面量抹成空白，所以这里按赋值形态判（别拿空串字面量当锚点）

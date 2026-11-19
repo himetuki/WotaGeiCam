@@ -91,26 +91,43 @@ internal interface TakeSettlementBackend {
 /**
  * 结算所有者本体。
  *
- * **恰好一次**：同一场结算（`seriesId + startedAt + 已发布段集合`）只启动一个任务，
+ * **恰好一次**：同一场结算（`seriesId + startedAt + 已发布段集合 + 成功结论`）只启动一个任务，
  * 重复调用拿回同一枚 [Deferred]。键里刻意**不含** `armed`——武装状态是发起那一刻的快照，
  * 后面的桥态变化不许让同一场录制再交付一次。
  *
  * **迟到对账**：R06 的迟到 commit 会改变已发布段集合 ⇒ 键变化 ⇒ 以新集合再结算一次
  * （`SeriesStore` 的 upsert 是 REPLACE，成员行收敛到最终集合，不会留下旧段的孤儿行）。
+ * R07 的迟到终态可能只改正**结论**不改段集合（join 超时快照判失败、泵线程收尾成功）：
+ * 结论进键 ⇒ "先失败后成功"补交付练习、"先成功后失败"清桥态——只按段集合去重会把后到
+ * 的相反结论吞掉（练习被漏交付，或失败成片被当成练习交付）。
  */
 internal class TakeSettlementOwner(
     private val scope: CoroutineScope,
     private val inFlight: MutableMap<SettlementKey, Deferred<TakeSettlementOutcome>> = HashMap()
 ) {
 
-    /** 恰好一次的键：系列归属 + 会话起始时刻 + **已发布段的段序/uri 清单**（不含 armed 快照） */
+    /**
+     * 恰好一次的键：系列归属 + 会话起始时刻 + **已发布段的段序/uri 清单** + 成功结论。
+     * 前三项相同而结论相反（R07 迟到终态改正 join 超时快照）是**两笔不同结算**：只按段集合
+     * 去重会把后到的相反结论吞掉（该交付的不交付、该清桥态的不清）。不含 `armed` 快照。
+     */
     private data class SettlementKey(
         val seriesId: Long,
         val startedAtMs: Long,
-        val parts: List<Pair<Int, String?>>
+        val parts: List<Pair<Int, String?>>,
+        val resultOk: Boolean
     )
 
     private val lock = Any()
+
+    /**
+     * 同一会话的**落库顺序**（发起顺序）：R06 的迟到段会让后发起的结算带更大集合，两笔并发落库
+     * 时"先发起但完成更晚"的旧集合会把系列成员写回旧集合（REPLACE 缩水）。链上等待前一笔完成
+     * 再写，后发起的集合必定最后落库（调用顺序即收敛方向）；异常/取消由 runSettlement 自己收住，
+     * `join` 不抛。键相同的重复调用仍走 [inFlight] 去重，不会多跑。
+     */
+    private data class SessionId(val seriesId: Long, val startedAtMs: Long)
+    private val tail = HashMap<SessionId, Deferred<TakeSettlementOutcome>>()
 
     fun settle(
         seriesId: Long,
@@ -121,11 +138,20 @@ internal class TakeSettlementOwner(
         backend: TakeSettlementBackend
     ): Deferred<TakeSettlementOutcome> {
         val committed = committedSettledParts(parts)
-        val key = settlementKey(seriesId, startedAtMs, committed)
+        val key = settlementKey(seriesId, startedAtMs, committed, resultOk)
         val job = synchronized(lock) {
-            inFlight[key] ?: scope.async(start = CoroutineStart.LAZY) {
-                runSettlement(seriesId, startedAtMs, committed, resultOk, practiceArmed, backend)
-            }.also { inFlight[key] = it }
+            inFlight[key] ?: run {
+                val session = SessionId(seriesId, startedAtMs)
+                val prev = tail[session]
+                val created = scope.async(start = CoroutineStart.LAZY) {
+                    // 前一笔（更小的集合 / 相反结论）先落库，再落这一笔——顺序由发起顺序决定
+                    prev?.join()
+                    runSettlement(seriesId, startedAtMs, committed, resultOk, practiceArmed, backend)
+                }
+                inFlight[key] = created
+                tail[session] = created
+                created
+            }
         }
         job.start()
         return job
@@ -166,11 +192,13 @@ internal class TakeSettlementOwner(
     private fun settlementKey(
         seriesId: Long,
         startedAtMs: Long,
-        committed: List<SettledPart>
+        committed: List<SettledPart>,
+        resultOk: Boolean
     ): SettlementKey = SettlementKey(
         seriesId = seriesId,
         startedAtMs = startedAtMs,
-        parts = committed.map { it.partIndex to it.uriStr }
+        parts = committed.map { it.partIndex to it.uriStr },
+        resultOk = resultOk
     )
 }
 
@@ -229,5 +257,27 @@ internal object TakeSettlement {
         resultOk = resultOk,
         practiceArmed = practiceArmed,
         backend = AndroidTakeSettlementBackend(db)
+    )
+
+    /**
+     * 迟到对账的**段视图**入口（R06/R07）：调用方（[RecordSession]）已持有 [SettledPart] 视图
+     * （迟到事件的结算视图在交付时就定型），避免"VideoSegment → SettledPart"二次反推。
+     * 调用方自带后端（引擎侧会话交付没有页面/仓库句柄），但仍走**同一枚所有者**——
+     * 与 UI 的正常结算按同一个键去重，不会交付两次。
+     */
+    fun settleView(
+        backend: TakeSettlementBackend,
+        seriesId: Long,
+        startedAtMs: Long,
+        parts: List<SettledPart>,
+        resultOk: Boolean,
+        practiceArmed: Boolean
+    ): Deferred<TakeSettlementOutcome> = owner.settle(
+        seriesId = seriesId,
+        startedAtMs = startedAtMs,
+        parts = parts,
+        resultOk = resultOk,
+        practiceArmed = practiceArmed,
+        backend = backend
     )
 }

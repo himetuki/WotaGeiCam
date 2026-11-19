@@ -199,6 +199,61 @@ class TakeSettlementTest {
     }
 
     @Test
+    fun `同段集合的相反结论是两笔结算_失败改正必须补交付`() = runBlocking {
+        val backend = FakeBackend()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val o = owner(scope)
+        val parts = listOf(part(0))
+
+        // R07：join 超时快照判失败（段已发布、段集合不变）
+        o.settle(7L, 1_000L, parts, resultOk = false, practiceArmed = true, backend = backend).await()
+        assertEquals("失败快照只清桥态", 1, backend.clearCalls)
+        assertTrue(backend.deliveries.isEmpty())
+
+        // 泵线程迟到终态把结论改正为成功：同一段集合也必须再结算一次并补交付
+        o.settle(7L, 1_000L, parts, resultOk = true, practiceArmed = true, backend = backend).await()
+        assertEquals("结论改正必须落第二笔库（REPLACE 收敛）", 2, backend.writeCalls.get())
+        assertEquals("成功结论必须补交付首段", listOf(0), backend.deliveries.map { it.partIndex })
+    }
+
+    /** 第一笔写很慢、第二笔很快：不串行时第二笔会先落库，最后留下的反而是旧集合 */
+    private class SlowFirstBackend : TakeSettlementBackend {
+        val order = CopyOnWriteArrayList<List<Int>>()
+        val calls = AtomicInteger()
+
+        override suspend fun writeSeries(
+            seriesId: Long,
+            startedAtMs: Long,
+            parts: List<SettledPart>
+        ): Int {
+            if (calls.incrementAndGet() == 1) Thread.sleep(300)
+            order += parts.map { it.partIndex }
+            return parts.size
+        }
+
+        override fun deliverPractice(part: SettledPart): Boolean = true
+
+        override fun clearPractice() = Unit
+    }
+
+    @Test
+    fun `同一会话的迟到结算必须按发起顺序落库_旧集合不许最后写回`() = runBlocking {
+        val backend = SlowFirstBackend()
+        val o = owner(CoroutineScope(SupervisorJob() + Dispatchers.IO))
+        // 发起顺序 = 收敛方向：先 [0]，迟到段到齐后 [0,1]
+        val early = o.settle(7L, 1_000L, listOf(part(0)), resultOk = true, practiceArmed = false, backend = backend)
+        val grown = o.settle(7L, 1_000L, listOf(part(0), part(1)), resultOk = true, practiceArmed = false, backend = backend)
+        early.await()
+        grown.await()
+
+        assertEquals(
+            "后发起的更大集合必须最后落库（REPLACE 收敛，不许缩水）",
+            listOf(listOf(0), listOf(0, 1)),
+            backend.order
+        )
+    }
+
+    @Test
     fun `写库异常被收住_如实上报且不拖累练习交付`() = runBlocking {
         val backend = FakeBackend(failWrite = true)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

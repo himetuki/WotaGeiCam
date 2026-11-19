@@ -251,6 +251,70 @@ internal fun sealedPartsResult(
 }
 
 /**
+ * 会话级交付事件（R07）：控制线程（stop/release）等泵线程超时、按「只记账不拆资源」返回之后，
+ * 引擎仍必须把**真实结论**交出去——否则用户/结算拿到的只是收工那一刻的早期快照，
+ * 迟到落地的段与泵线程自己的终态永远无人认领（相册里看得见、结果与系列里对不上）。
+ *
+ * 两个事件都带会话键（`seriesId + 会话起始墙钟`，与 UI 结算键同一套）；线程可能是泵线程或
+ * 发布线程，接线方必须线程安全（生产 = `RecordSession` 内部加锁）。
+ *
+ * 为什么是内部类型：结算视图（[SettledPart]）与发布分类（[PublishClass]）都是包内实现细节，
+ * 放进公开的 [Recorder] 契约就要把整条内部口径一起公开。引擎实现 [SessionDeliverySink]，
+ * 接线方（同模块）按该内部接口取用；[MrRecorder] 不实现，行为与旧版逐字一致。
+ */
+internal sealed interface RecorderDelivery {
+
+    /**
+     * 已封段在发布等待窗过后才落地的结论（发布线程发出，**分类是实际结果**）。
+     * [settled] 是这段的结算视图（生产由 [VideoSegment.toSettledPart] 给出；废弃/失败为 null）：
+     * 独立成字段是为了让"结算视图从哪来"在交付处就定型，消费方不再二次反推。
+     */
+    data class LatePart(
+        val seriesId: Long,
+        val startedAtMs: Long,
+        val partIndex: Int,
+        /** 保留段（已发布/未发布）的段视图；废弃/发布失败为 null */
+        val segment: VideoSegment?,
+        val classification: PublishClass,
+        val settled: SettledPart? = segment?.toSettledPart(),
+        /**
+         * 本会话内的第几次尝试（0 = 首录，自检重录逐次 +1）。结算键必须带它：同一场录制
+         * （`seriesId + startedAtMs` 不变）的自检重录会换一枚引擎，被判废的那次尝试的迟到终态
+         * 不许串进重录成功那次——否则一次"整段作废"的收尾会把最终成功洗成失败（或反之）。
+         */
+        val attempt: Int = 0
+    ) : RecorderDelivery
+
+    /**
+     * 泵线程退出时自己收尾得到的会话终态（只在控制线程 join 超时、收尾职责已交给泵线程时发出；
+     * 正常停录的终态由控制线程 [Recorder.stop] 的返回值承载，不重复交付）。
+     */
+    data class FinalResult(
+        val seriesId: Long,
+        val startedAtMs: Long,
+        val result: RecordResult,
+        val settled: List<SettledPart> = result.parts.map { it.toSettledPart() },
+        /** 尝试序号（见 [LatePart.attempt]）：自检重录各尝试的迟到终态不许互相串场 */
+        val attempt: Int = 0
+    ) : RecorderDelivery
+}
+
+/**
+ * 会话交付通道（R07）的内部接口：只有带超时收尾形态的引擎（[CodecRecorder]）实现。
+ * 接线方必须在 `start` 前绑定会话身份；交付可能来自泵线程/发布线程，接线方负责线程安全。
+ */
+internal interface SessionDeliverySink {
+    var onSessionDelivery: ((RecorderDelivery) -> Unit)?
+
+    /**
+     * 绑定本次会话身份（`seriesId` + 会话起始墙钟 + 尝试序号），与 UI 结算键同源。
+     * 尝试序号必须带：自检重录沿用同一 `seriesId/startedAtMs`，只有它能区分"被判废的那次"
+     * 与"重录成功的那次"（见 [RecorderDelivery.LatePart.attempt]）。
+     */
+    fun bindSession(seriesId: Long, startedAtMs: Long, attempt: Int)
+}
+
+/**
  * 引擎内部状态（04 文件 §6）。对外状态机由 `camera/Camera2Engine` 的 `RecordStatus` 承载，
  * 本包只用它守住 prepare/start/stop 的调用顺序。
  */

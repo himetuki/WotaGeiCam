@@ -171,6 +171,7 @@ import com.wotagei.cam.core.WotaTiers
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.media.WotaDb
 import com.wotagei.cam.player.AudioTrackKind
 import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.LoopMode
@@ -185,6 +186,7 @@ import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.AudioTrack
+import com.wotagei.cam.record.AndroidTakeSettlementBackend
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
@@ -201,11 +203,15 @@ import com.wotagei.cam.record.RecordError
 import com.wotagei.cam.record.RecordHealthWindow
 import com.wotagei.cam.record.RecordProfile
 import com.wotagei.cam.record.RecordResult
+import com.wotagei.cam.record.RecordSession
 import com.wotagei.cam.record.Recorder
+import com.wotagei.cam.record.RecorderDelivery
 import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.RetryAction
 import com.wotagei.cam.record.RotateFailLog
 import com.wotagei.cam.record.STORE_CALL_BUDGET_MS
+import com.wotagei.cam.record.SessionDelta
+import com.wotagei.cam.record.SessionDeliverySink
 import com.wotagei.cam.record.HealthVerdict
 import com.wotagei.cam.record.muxRecoveredCode
 import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
@@ -444,7 +450,7 @@ fun CameraScreen(
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
 
-    val runner = remember(ctrl) { RecordRunner(app, params, ctrl) }
+    val runner = remember(ctrl) { RecordRunner(app, params, ctrl, { repo.db() }) }
     // 设备丢失转移检测器（跨重组保活）：观察钩子的"上一拍设备态"住在这里，纯函数折叠见 CameraLostWatch
     val cameraLostWatch = remember { CameraLostWatch() }
     val recStatus by runner.status.observed()
@@ -590,6 +596,16 @@ fun CameraScreen(
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
             runner.clearResult()
+        }
+    }
+    // 迟到对账增量（R06/R07）：停录那一刻之后才 commit 的段 / 泵线程延迟收尾的终态。
+    // 不补提示（同一场录制已经给过结果文案），只把相册与回看字段刷新到与结果一致。
+    LaunchedEffect(runner) {
+        runner.lateResult.collect { delta ->
+            if (delta == null) return@collect
+            lastUri = delta.result.uri ?: lastUri
+            repo.invalidate()
+            runner.clearLateResult()
         }
     }
     // 自检自动重录提示：走既有 hint 通道（含淡出约 2.6s），不弹错误窗、status 全程 START。
@@ -3039,7 +3055,12 @@ private fun writeFocusPoint(params: WotaParams, point: TapPoint) {
 private class RecordRunner(
     private val app: Context,
     private val params: WotaParams,
-    private val ctrl: CameraController
+    private val ctrl: CameraController,
+    /**
+     * 会话结算后端的数据来源（R06/R07 迟到对账用）：停录线程在结果交出前就要登记会话并发起
+     * 首次结算——不能等页面的 `result.collect`（退页/取消会让那条路整段消失）。
+     */
+    private val dbProvider: () -> WotaDb
 ) {
 
     private val thread = HandlerThread("WotaRecordCtl").apply { start() }
@@ -3087,6 +3108,13 @@ private class RecordRunner(
     val elapsedMs = MutableStateFlow(0L)
     val volumeDb = MutableStateFlow(MIN_DB - 40f)
     val result = MutableStateFlow<RecordResult?>(null)
+
+    /**
+     * 迟到对账带来的结果视图增量（R06：发布等待窗后才 commit 的段、R07：泵线程延迟收尾的终态）。
+     * 只用于刷新相册/回看字段——提示已在停录那一刻给过，不重复弹；读走即清（同 [retryNotice]
+     * 的 StateFlow 去重口径，不清的话第二次迟到事件发不出来）。
+     */
+    val lateResult = MutableStateFlow<SessionDelta?>(null)
 
     /**
      * 换段预提示（2026-10-28 审查加固）：当前段已写字节 ≥ 单段上限 85% 时置真。
@@ -3142,6 +3170,11 @@ private class RecordRunner(
 
     fun clearRetryNotice() {
         retryNotice.value = null
+    }
+
+    /** UI 读走迟到对账增量后清槽（StateFlow 相等去重：清了才收得到下一次） */
+    fun clearLateResult() {
+        lateResult.value = null
     }
 
     /** UI 读走环境音丢失提示后清槽（StateFlow 相等去重：清了才收得到下一次同因事件） */
@@ -3298,6 +3331,21 @@ private class RecordRunner(
         sessionSink = sink
         val rec = Recorders.create(app, profile, store)
         recorder = rec
+        // 会话身份（R07 交付键）与交付通道：迟到发布/泵线程终态回到本页，由 RecordSession
+        // 合并去重后补结算（页面退场不影响：结算任务在进程级作用域里跑）。
+        // 只有带超时收尾形态的引擎实现该内部接口（MR 路不实现，行为与旧版逐字一致）。
+        (rec as? SessionDeliverySink)?.let { sink ->
+            sink.bindSession(store.seriesId, sessionStartedAtMs, attempt)
+            sink.onSessionDelivery = { delivery ->
+                RecordSession.onDelivery(delivery)?.let { lateResult.value = it }
+                if (delivery is RecorderDelivery.FinalResult) {
+                    Log.i(
+                        TAG_UI,
+                        "泵线程延迟收尾终态：error=${delivery.result.error} parts=${delivery.result.parts.size}"
+                    )
+                }
+            }
+        }
         if (!rec.prepare(profile, sink)) {
             rec.release()
             // prepare 内部已按原因码记日志；这里把余量不足与通用失败区分给 UI
@@ -3794,6 +3842,20 @@ private class RecordRunner(
         val out = rec.stop()
         rec.release()
         recorder = null
+        // R06/R07 收尾责任：停录线程在结果交出前**登记会话并发起首次结算**（不依赖页面 collect——
+        // 退页/取消会让那条协程整段消失）。页面的 result.collect 仍按既有接线再调一次
+        // TakeSettlement.settle：同一个键 ⇒ 拿回同一枚任务，恰好一次。迟到发布（R06）与泵线程
+        // 延迟终态（R07）经 onSessionDelivery → RecordSession 合并去重后补结算。
+        runCatching {
+            RecordSession.record(
+                backend = AndroidTakeSettlementBackend(dbProvider()),
+                seriesId = out.seriesId,
+                startedAtMs = sessionStartedAtMs,
+                result = out,
+                practiceArmed = ComparePractice.armed,
+                attempt = attempt
+            )
+        }.onFailure { Log.w(TAG_UI, "会话登记失败（归组/练习交付走页面路径兜底）：${it.message}") }
         // 换段受阻账（2026-10-08 真机缺陷）：这台 ROM 吞掉应用日志，"哪一环卡住、丢了多久"只能靠
         // 落盘账目分辨。只在真出事时写（失败码或丢过内容），与成片同目录，adb 直接 pull。
         // 降级段（error 已置空、degradedCode 有值，如收尾抽干超时但容器收尾正常）同样落账：

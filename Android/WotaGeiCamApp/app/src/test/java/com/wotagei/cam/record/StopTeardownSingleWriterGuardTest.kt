@@ -144,7 +144,8 @@ class StopTeardownSingleWriterGuardTest {
      * 并发容器与「泵线程单写者」纪律的**一致性钉**（2026-10-16）：join 超时路径要安全带出
      * "此刻已封段"快照，`parts` 从 ArrayList 换成 CopyOnWriteArrayList；名单 KDoc 必须写明
      * 新口径（容器 + 只读快照是唯一获准的例外），且 add/clear 的写者纪律一字不动（add 只有
-     * 泵线程 sealCurrent 一处；clear 只许在确认泵线程已停的收尾里）。
+     * addPart 一处——泵线程同步封段与发布线程迟到补发共用、按段序去重；clear 只许在确认泵线程
+     * 已停的收尾里）。
      */
     @Test
     fun `已封段容器必须并发安全且与双触名单一致`() {
@@ -152,10 +153,19 @@ class StopTeardownSingleWriterGuardTest {
             "parts 必须是 CopyOnWriteArrayList（ArrayList 的并发 add/clear 会丢一条已封段）",
             Regex("private val parts = CopyOnWriteArrayList<VideoSegment>\\(\\)").containsMatchIn(codec)
         )
-        // 单写者：add 只有一处，且在 sealCurrent（泵线程封段唯一入口）体内
+        // 单写者：add 只有一处，且在 addPart（R06 起它是泵线程封段与发布线程迟到补发的唯一写口）
         //（锚串不带尾括号：occurrences 的词边界判定会把 `parts.add(seg` 的 `s` 当标识符续写而漏计）
         assertEquals("parts.add 必须唯一（多一处 = 多一个写者）", 1, occurrences(codec, "parts.add").size)
-        assertTrue("add 必须落在 sealCurrent（泵线程封段唯一入口）里", bodyOf(codec, "sealCurrent").contains("parts.add(seg)"))
+        assertTrue(
+            "唯一写口必须落在 addPart（同步封段与迟到补发共用）",
+            bodyOf(codec, "addPart").contains("parts.add(seg)")
+        )
+        assertTrue("泵线程封段必须经 addPart 落清单", bodyOf(codec, "sealCurrent").contains("addPart("))
+        assertTrue("迟到发布也必须经同一写口", bodyOf(codec, "onLatePublished").contains("addPart("))
+        assertTrue(
+            "同一段不许写两遍（发布台账与同步路径是同一结果的两份引用）",
+            bodyOf(codec, "addPart").contains("parts.any { it.partIndex == seg.partIndex }")
+        )
         assertEquals("parts.clear 只许出现在三处收尾", 3, occurrences(codec, "parts.clear()").size)
         for (fn in listOf("prepare", "release", "finish")) {
             assertTrue("$fn 必须清 parts（会话级容器不许跨会话残留）", bodyOf(codec, fn).contains("parts.clear()"))
@@ -177,6 +187,64 @@ class StopTeardownSingleWriterGuardTest {
             pump.contains("closeSegmentEngine()")
         )
         assertTrue("泵线程必须仍调 sealCurrent（它是封段的唯一执行者）", pump.contains("sealCurrent("))
+    }
+
+    /**
+     * R07：join 超时之后，**收尾责任必须真的移交给泵线程**——只记账返回而没有接手方，
+     * feeders/编码面会一直占着、终态永远没有出口（用户/结算只剩收工那一刻的早期快照）。
+     */
+    @Test
+    fun `超时闸必须把收尾责任移交给泵线程`() {
+        val stop = bodyOf(codec, "stop")
+        for (g in gatesIn(stop)) {
+            val ret = stop.indexOf("return finishWithoutTeardown()", g)
+            val branch = stop.substring(g, ret)
+            assertTrue(
+                "超时闸必须先置 teardownDeferred（泵线程退出时才知道该自己 finish）",
+                branch.contains("teardownDeferred = true")
+            )
+        }
+        val rel = bodyOf(codec, "release")
+        val rg = rel.indexOf("if (!joinLoop())")
+        val rret = rel.indexOf("return", rg)
+        assertTrue("锚点丢失：release 没有超时闸", rg >= 0 && rret > rg)
+        assertTrue(
+            "release 超时闸也要移交（否则 feeders/编码面没人收）",
+            rel.substring(rg, rret).contains("teardownDeferred = true")
+        )
+        val trail = bodyOf(codec, "pumpTrail")
+        assertTrue("泵线程必须恒停环境 feeder（owner must clean feeders）", trail.contains("stopFeeder()"))
+        assertTrue("泵线程必须恒停内录 feeder", trail.contains("stopCapFeeder()"))
+        assertTrue(
+            "只有收尾被移交时才补 finish（正常停录由控制线程 finish，再收一次会清空段清单）",
+            trail.contains("if (!teardownDeferred) return")
+        )
+        assertTrue("延迟收尾必须真的结算终态", trail.contains("finish(engineError)"))
+        assertTrue(
+            "编码面必须由泵线程释放（release 超时闸到不了那一步）",
+            trail.contains("inputSurface = null") && trail.contains("s?.release()")
+        )
+        assertTrue("终态必须交付会话所有者（带会话键 + 真实结果）", trail.contains("RecorderDelivery.FinalResult("))
+        assertTrue("泵循环退出必须走收尾（不许悄悄结束）", bodyOf(codec, "pumpLoop").contains("pumpTrail()"))
+    }
+
+    /**
+     * R06：封口段的发布必须独立成路，并把**实际结果分类**交回会话（迟到 commit 成功后
+     * 已发布段集合变化 ⇒ 结算键变化 ⇒ 归组/练习回程能收敛到最终集合）。
+     */
+    @Test
+    fun `迟到发布必须经独立发布路交回会话`() {
+        assertTrue("封段必须走发布路", bodyOf(codec, "sealCurrent").contains("sealedPublisher.publish("))
+        val late = bodyOf(codec, "onLatePublished")
+        assertTrue("迟到段必须补进段清单", late.contains("addPart("))
+        assertTrue("迟到结论必须带实际发布分类", late.contains("classification = part.classification"))
+        assertTrue("迟到结论必须交会话所有者", late.contains("RecorderDelivery.LatePart("))
+        assertTrue("迟到段视图必须是保留段视图（废弃/失败为 null）", late.contains("part.visibleSegment()"))
+        assertTrue(
+            "收尾段视图必须并上发布台账（同步 + 迟到），否则结果与相册对不上",
+            bodyOf(codec, "buildResult").contains("mergedParts()") &&
+                bodyOf(codec, "finishWithoutTeardown").contains("sealedPublisher.publishedSegments()")
+        )
     }
 
     @Test
