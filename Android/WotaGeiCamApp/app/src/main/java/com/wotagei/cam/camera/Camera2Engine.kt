@@ -269,6 +269,26 @@ class Camera2Engine(
      */
     private var sessionAttempt = 0
 
+    /**
+     * 会话就绪快照（R01）：`previewStatus` 是意图流，B 站/首录/换段需要的是「本世代会话已配置
+     * 且 repeating 已被接纳」。只由引擎线程写，UI/录制线程读整份不可变快照。
+     */
+    @Volatile
+    private var readiness = CameraSessionReadiness()
+
+    /** DIRECT 录制面世代：每次 setExtraTarget（含换段新面）递增，旧就绪快照不能匹配新交接。 */
+    private var recordingTargetEpoch = 0
+
+    /**
+     * 录制业务窗口（含 PREPARE，R02）：GPU 路编码面不进相机会话，只看 extraSurface 会漏掉
+     * GPU 录制期；由 RecordRunner 显式开关，探测/等号纠偏在窗口内一律不启动。
+     */
+    @Volatile
+    private var recordingWindowActive = false
+
+    /** 自动重开的在途任务（R03）：新意图/新重开必须能撤掉旧回调，不能让迟到回调复活预览。 */
+    private var reopenTask: Runnable? = null
+
     // 点按对焦上下文
     private var tapAfModeOverride: Int? = null
     private var tapAfRegions: List<MeteringRectangle>? = null
@@ -505,10 +525,14 @@ class Camera2Engine(
             if (reader !== extraReader) stopImageReaders()
             extraSurface = surface
             extraReader = reader
+            // 即使是同一枚 Surface 重设（换段复挂），也要经过一次「面世代 → 会话重建 → repeating
+            // 重新接纳」的完整交接；只比 Surface 身份会让旧 ready 快照蒙混过关。
+            recordingTargetEpoch++
             // 等号档探测（方案 31）：录制目标在场必须**立刻**退出探测态——探测发的是等号请求，
             // 决不能带进录制。进冷却，录完回预览后重探。
             if (surface != null) cancelExposureProbe("录制目标在场")
             structuralSignature = ""
+            publishReadiness(configured = false, repeatingSubmitted = false)
             if (desiredPreview) ensureSession()
         }
     }
@@ -671,7 +695,42 @@ class Camera2Engine(
      * 卡死在没人重启的死态：页面在、HUD 在、预览全黑，只有重进页面才可能恢复。
      */
     fun isPreviewLive(): Boolean =
-        threadRunning && device != null && session != null && desiredPreview
+        threadRunning && device != null && session != null && desiredPreview &&
+            readiness.ready && readiness.attempt == sessionAttempt
+
+    /**
+     * 当前就绪快照（R01）。调用方必须比较 `generation/attempt/recordingTargetEpoch`：
+     * 只看到 `ready==true` 可能仍是发起交接前的旧会话，不能据此开始录制。
+     */
+    fun sessionReadiness(): CameraSessionReadiness = readiness
+
+    /**
+     * 录制窗口开关（R02）。窗口内：曝光等号探测必须完全退出（探测请求不能进录制），
+     * 并且取消已闩锁/在途探测，避免录制中途因一次脏刷新改写 SENSOR 三键。
+     */
+    fun setRecordingWindowActive(active: Boolean) {
+        post {
+            if (recordingWindowActive == active) return@post
+            recordingWindowActive = active
+            if (active) cancelExposureProbe("录制窗口")
+            publishReadiness()
+        }
+    }
+
+    private fun publishReadiness(
+        configured: Boolean = readiness.configured,
+        repeatingSubmitted: Boolean = readiness.repeatingSubmitted
+    ) {
+        readiness = CameraSessionReadiness(
+            generation = generation,
+            attempt = sessionAttempt,
+            configured = configured,
+            repeatingSubmitted = repeatingSubmitted,
+            recordingTargetPresent = extraSurface != null,
+            recordingTargetEpoch = recordingTargetEpoch,
+            recordingWindow = recordingWindowActive
+        )
+    }
 
     /**
      * 真身四项的快照（诊断行用）：回场没复用成功时，把**哪一项断了**留在日志里——
@@ -870,7 +929,9 @@ class Camera2Engine(
                 // "重开成功"——configure 连续失败的设备上 reopenRetries 得以累积到 REOPEN_MAX，
                 // scheduleReopen 触顶后停在失败态交 UI 恢复，不再无限重开
                 reopenRetries = 0
-                publishPreview(PreviewStatus.ING)
+                // 不在这里发布 ING（R01）：配置成功只证明会话对象可用，repeating 仍可能被 HAL
+                // 拒绝。等 applyRepeatingNow 的 setRepeatingRequest 真正返回成功再发布。
+                publishReadiness(configured = true, repeatingSubmitted = false)
                 // 手动白平衡稳压窗（2026-10-29 用户真机报障）：设置页返回等场景会重建会话，
                 // 桥/HAL 对"一帧请求里的整套 WB 键"可能非原子生效——AWB_OFF 先落、矩阵/增益
                 // 后落，中间那几拍就是裸 OFF 的传感器原色绿。会话活起来的头一拍先按自动走，
@@ -1025,7 +1086,8 @@ class Camera2Engine(
 
     /** 读出闩锁的配置键（方案 31 §3）：读出时间随镜头/画幅/fps 变，键不匹配即重探 */
     private fun readoutKeyNow(): String =
-        "${params.lens.value.name}|${params.size.value.width}x${params.size.value.height}|${fpsValue()}"
+        "g$generation|a$sessionAttempt|${lens?.key ?: params.lens.value.name}|" +
+            "${params.size.value.width}x${params.size.value.height}|${fpsValue()}"
 
     /**
      * 等号档读出探测（方案 31 §3，2026-11-01 用户定版）：挂在 [captureCallback] 每帧回执上。
@@ -1033,15 +1095,22 @@ class Camera2Engine(
      * 条件一破立刻退出探测态（等号请求不能漏进任何别的状态）。前 [EXPOSURE_PROBE_WARMUP_FRAMES]
      * 拍是换挡热身（等号请求生效 + HAL 换 FD 需要几拍），不采；采满 [ExposureCorrection.PROBE_SAMPLES]
      * 个间隔即折算中位数落闩锁，下一拍下发就带纠偏。
+     *
+     * 归属（Y01/R02）：回执必须来自**当前会话**；旧会话/旧世代的迟到帧只能丢弃，绝不能拿它
+     * 取消新探测或把旧间隔混进新闩锁。录制窗口内（含 GPU）一律不探测。
      */
-    private fun feedExposureProbe(result: TotalCaptureResult) {
+    private fun feedExposureProbe(session: CameraCaptureSession, result: TotalCaptureResult) {
+        if (session !== this.session) return
         val key = readoutKeyNow()
-        val shouldProbe = deviceStatus == DeviceStatus.OPEN_SUCCEED &&
-            extraSurface == null &&
-            params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL &&
-            params.exposureCorrectionAuto.value &&
-            ExposureCorrection.applicable(params.shutter.value.value, fpsValue()) &&
-            params.readoutLatch.value?.takeIf { it.key == key } == null
+        val shouldProbe = exposureProbeAllowed(
+            deviceOpen = deviceStatus == DeviceStatus.OPEN_SUCCEED,
+            directSurfacePresent = extraSurface != null,
+            recordingWindow = recordingWindowActive,
+            manualAe = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL,
+            correctionAuto = params.exposureCorrectionAuto.value,
+            correctionApplicable = ExposureCorrection.applicable(params.shutter.value.value, fpsValue()),
+            alreadyLatched = params.readoutLatch.value?.takeIf { it.key == key } != null
+        )
         if (!shouldProbe) {
             cancelExposureProbe("条件退出")
             return
@@ -1186,8 +1255,16 @@ class Camera2Engine(
     private fun submitRepeating(request: CaptureRequest) {
         val hs = highSpeedSession
         val normal = session
-        if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
-        else normal?.setRepeatingRequest(request, captureCallback, workHandler)
+        if (hs != null) {
+            hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
+        } else {
+            // 无会话不能算提交成功：不能让就绪快照停在 configured=true / submitted=false 之外
+            normal?.setRepeatingRequest(request, captureCallback, workHandler) ?: return
+        }
+        // 只有平台调用返回成功才把就绪快照推进到 ready（R01）——这是首录/换段唯一可信的
+        // 「本世代会话已接纳帧请求」证据；调用抛异常时 applyRepeatingNow 的 catch 负责失败态。
+        publishReadiness(configured = true, repeatingSubmitted = true)
+        if (desiredPreview) publishPreview(PreviewStatus.ING)
     }
 
     private fun singleCapture(tag: String) {
@@ -1231,7 +1308,7 @@ class Camera2Engine(
         ) {
             camResultCount++
             camResultTotal++
-            feedExposureProbe(result)
+            feedExposureProbe(session, result)
             logAeAfTelemetry(result)
             val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
             logWbTelemetry(result, manual)
@@ -1369,6 +1446,7 @@ class Camera2Engine(
     private var camResultCount = 0L
 
     /** 结果回调**进程内单调累计**（只增不重置）：预览自愈心跳的唯一相机侧判据，见 [frameResultCount] */
+    @Volatile
     private var camResultTotal = 0L
     private var camRateLastMs = 0L
     private var lowFpsWatch: LowFpsWatch? = null
@@ -1904,10 +1982,33 @@ class Camera2Engine(
             return
         }
         reopenRetries++
-        postDelayed(REOPEN_DELAY_MS) { reopenLastLens() }
+        // R03：自动重开必须绑定发起时的设备世代与预览意图。迟到回调若能无条件 reopen，
+        // 会在 stopPreview / 用户换镜头 / 页面退出之后把相机重新拉起来（后台偷跑、镜头回跳）。
+        val expectedGeneration = generation
+        reopenTask?.let { workHandler.removeCallbacks(it) }
+        val task = Runnable {
+            reopenTask = null
+            if (!threadRunning || !desiredPreview) {
+                Log.i(TAG, "自动重开已作废：预览意图已撤销（gen=$expectedGeneration）")
+                return@Runnable
+            }
+            if (expectedGeneration != generation) {
+                Log.i(TAG, "自动重开已作废：设备世代已变（$expectedGeneration→$generation）")
+                return@Runnable
+            }
+            reopenLastLens(expectedGeneration)
+        }
+        reopenTask = task
+        workHandler.postDelayed(task, REOPEN_DELAY_MS)
     }
 
-    private fun reopenLastLens() {
+    private fun reopenLastLens(expectedGeneration: Int? = null) {
+        if (expectedGeneration != null &&
+            (!threadRunning || !desiredPreview || expectedGeneration != generation)
+        ) {
+            Log.i(TAG, "重开镜头跳过：意图/世代已变（期望=$expectedGeneration 当前=$generation）")
+            return
+        }
         val slot = lens ?: return
         desiredPreview = true
         open(slot)
@@ -1938,6 +2039,7 @@ class Camera2Engine(
     private fun closeSessionQuietly() {
         // 先使配置中的在途回调作废（session 字段此刻可能是 null，下面的 close 关不到它）
         sessionAttempt++
+        publishReadiness(configured = false, repeatingSubmitted = false)
         val hs = highSpeedSession
         val normal = session
         highSpeedSession = null

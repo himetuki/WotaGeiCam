@@ -110,6 +110,19 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
      */
     private var analysisTarget: Pair<Surface, ImageReader?>? = null
 
+    /**
+     * DIRECT 录制面（R04）：跨引擎重建/换段都要原样重放给新引擎。只保管身份，**不拥有生命周期**
+     * ——Surface 由 Recorder 段实例创建并释放，Controller 绝不能 close。
+     */
+    private var recordingTarget: Pair<Surface, ImageReader?>? = null
+
+    /**
+     * 录制业务窗口（含 PREPARE，R02/R04）：page/activity 看门狗在窗口内不得 restartPreview /
+     * forceRebind，否则会在编码器已拿面、会话正在交接时拆掉相机。由 RecordRunner 显式开关。
+     */
+    @Volatile
+    private var recordingActive = false
+
     /** 宿主注入：Controller 销毁时把 reader 收尾排到分析 owner 线程；未注入才退回本层兜底。 */
     var analysisOwnerRelease: (() -> Unit)? = null
     private var boundSink: PreviewSink? = null
@@ -239,6 +252,16 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                 analysisTarget = null
             }
         }
+        // 录制面跨引擎重建重放（R04）：GPU 路不适用（面走 GL），DIRECT 面失效只摘槽——Surface
+        // 的所有权在 Recorder 段实例，Controller 不 close，避免误杀仍在收尾的编码器。
+        recordingTarget?.let { (targetSurface, targetReader) ->
+            if (targetSurface.isValid) {
+                engine?.setExtraTarget(targetSurface, targetReader)
+            } else {
+                recordingTarget = null
+            }
+        }
+        if (engine != null) engine?.setRecordingWindowActive(recordingActive)
         if (pendingStart) start()
     }
 
@@ -381,6 +404,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         analysisSessionOwner = null
+        // 关相机 = 录制链已无面可交接；只摘引用，Surface 仍由 Recorder 段实例释放。
+        recordingTarget = null
+        recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
     }
@@ -443,6 +469,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         analysisSessionOwner = null
+        recordingTarget = null
+        recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
         // GL 引擎的释放权在这里（页面 dispose 不再 release）：跨设置往返复用同一实例
@@ -629,8 +657,24 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** record 包登记编码面；GPU 模式下引擎不会把它挂进相机会话（由 GL 承接） */
     fun setRecordingTarget(surface: Surface?, reader: ImageReader? = null) {
+        // null = 段收尾主动摘面；非 null = 首段/换段交接。两者都记进 Controller，引擎重建时重放。
+        recordingTarget = if (surface != null) surface to reader else null
         engine?.setExtraTarget(surface, reader)
     }
+
+    /**
+     * 录制业务窗口（R02/R04）。RecordRunner 在 PREPARE 前置真、停录收尾后置假；
+     * 看门狗与曝光探测都以它为准，不能只看 `extraSurface`（GPU 录制没有额外相机面）。
+     */
+    fun setRecordingActive(active: Boolean) {
+        recordingActive = active
+        engine?.setRecordingWindowActive(active)
+    }
+
+    fun isRecordingActive(): Boolean = recordingActive
+
+    /** 当前引擎的会话就绪快照（R01）；null = 还没绑引擎。 */
+    fun sessionReadiness(): CameraSessionReadiness? = engine?.sessionReadiness()
 
     /**
      * 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话。

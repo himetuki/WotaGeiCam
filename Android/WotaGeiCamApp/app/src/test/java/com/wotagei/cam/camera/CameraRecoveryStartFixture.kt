@@ -18,6 +18,12 @@ internal class CameraRecoveryStartFixture(
 
     fun bind() { platform.call(controller, "bind", sink) }
     fun start() { platform.call(controller, "start") }
+    fun renderMode(name: String) {
+        val params = platform.call(controller, "getParams") ?: error("CameraController 没有 params")
+        val flow = platform.call(params, "getRenderMode") ?: error("WotaParams 没有 renderMode")
+        val value = platform.type("com.wotagei.cam.core.RenderMode").getField(name).get(null)
+        platform.call(flow, "setValue", value)
+    }
     fun retry() { platform.call(controller, "restartPreview") }
     fun rebind() { platform.call(controller, "forceRebind", sink) }
     fun engine(): Any = platform.engineOf(controller)
@@ -47,6 +53,25 @@ internal class CameraRecoveryStartFixture(
     fun completeSession(index: Int, engine: Any = engine()) {
         platform.call(manager, "completeSession", index)
         drain(engine)
+    }
+
+    fun readiness(engine: Any = engine()): Any =
+        platform.call(engine, "sessionReadiness") ?: error("真实 Camera2Engine 没有就绪快照")
+
+    fun ready(r: Any): Boolean = platform.call(r, "getReady") as Boolean
+    fun attempt(r: Any): Int = platform.call(r, "getAttempt") as Int
+    fun recordingWindow(r: Any): Boolean = platform.call(r, "getRecordingWindow") as Boolean
+    fun recordingTargetEpoch(r: Any): Int = platform.call(r, "getRecordingTargetEpoch") as Int
+
+    fun runDelayed(engine: Any = engine()) {
+        val handler = platform.field(engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler")
+        platform.call(handler, "runDelayed")
+        drain(engine)
+    }
+
+    fun delayedCount(engine: Any = engine()): Int {
+        val handler = platform.field(engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler")
+        return platform.call(handler, "delayedCount") as Int
     }
 
     fun assertLive(engine: Any = engine()) {
@@ -128,6 +153,12 @@ internal class CameraRecoveryStartFixture(
                     public void removeCallbacks(Runnable r){queue.removeIf(item->item==r);delayed.removeIf(item->item==r);}
                     public void removeCallbacksAndMessages(Object token){queue.clear();delayed.clear();}
                     public void drain(){while(!queue.isEmpty()){queue.removeFirst().run();}}
+                    public int delayedCount(){return delayed.size();}
+                    public void runDelayed(){
+                        java.util.ArrayList<Runnable> copy=new java.util.ArrayList<>(delayed);
+                        delayed.clear();
+                        for(Runnable r:copy)r.run();
+                    }
                 }
             """,
             "android.hardware.camera2.CameraManager" to """

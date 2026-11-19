@@ -134,6 +134,7 @@ import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.wotagei.cam.R
 import com.wotagei.cam.bt.BtSpeakerController
 import com.wotagei.cam.camera.CameraController
+import com.wotagei.cam.camera.CameraSessionReadiness
 import com.wotagei.cam.camera.DeviceStatus
 import com.wotagei.cam.camera.DirectSink
 import com.wotagei.cam.camera.GlRenderEngine
@@ -831,6 +832,7 @@ fun CameraScreen(
             // 不许把那时的"没帧"当死态去自愈拉起（r31 的看门狗没这道闸，后台会被反复重启相机）
             val pageOkay = !s.needsCameraPermission &&
                 runner.status.value == RecordStatus.IDLE &&
+                !ctrl.isRecordingActive() &&
                 owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
 
             val cam = ctrl.frameResultCount()
@@ -3207,6 +3209,9 @@ private class RecordRunner(
     @Volatile
     private var stopRequested = false
 
+    /** R01 等待结果：TIMEOUT 必须显式失败，严禁沿用「超时也继续 start」的旧口径。 */
+    private enum class WaitOutcome { READY, STOPPED, TIMEOUT }
+
     /** 上次自动停录巡检时刻（`SystemClock.elapsedRealtime()`；0 = 本会话还没查过）。控制线程单写者。 */
     private var lastAutoStopCheckAt = 0L
 
@@ -3251,6 +3256,9 @@ private class RecordRunner(
                 return@post
             }
             status.value = RecordStatus.PREPARE
+            // R02/R04：录制窗口从 PREPARE 就打开（insert/编码器准备也要挡住看门狗与等号探测），
+            // 断点收尾在 stopInternal / failNow / shutdown 三处统一关闭。
+            ctrl.setRecordingActive(true)
             pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
             stopRequested = false // 同上：上一会话的停止取消信号不带进新会话
             ambientLostNotified = false // 环境音提示按"一次录制一条"复位（重录 attempt 间不去重）
@@ -3376,17 +3384,38 @@ private class RecordRunner(
             return false
         }
         if (renderMode == RenderMode.DIRECT) {
+            // R01：交接前抓基线；只认「本次面交接之后新配置且 repeating 被接纳」的快照，
+            // 旧会话的 ready 不能当作首段/换段就绪（乐观 start 正是编码器拿不到帧的根因）。
+            val baseline = ctrl.sessionReadiness()
             ctrl.setRecordingTarget(surface)
             // 换段重挂（2026-10-08）：换段会销毁旧引擎实例，而 DIRECT 的编码面来自实例本身
             //（`getSurface()` 的 producer 属实例）⇒ 面随换代而换，相机会话必须改指新面；不改指的话
-            // 相机把帧写进已释放实例的 producer，下一段静默零帧。首段口径不变（下发 + 等预览回 ING）
+            // 相机把帧写进已释放实例的 producer，下一段静默零帧。首段口径不变（下发 + 等新就绪）
             rec.onInputSurfaceRecreated = { newSurface ->
                 (newSurface as? Surface)?.let { s ->
+                    val segmentBaseline = ctrl.sessionReadiness()
                     ctrl.setRecordingTarget(s)
-                    awaitPreview(PreviewStatus.ING)
+                    if (awaitSessionReady(segmentBaseline, requireTargetHandoff = true) != WaitOutcome.READY &&
+                        !stopRequested
+                    ) {
+                        Log.e(TAG_UI, "换段编码面未在预算内完成会话交接，停止录制避免静默零帧段")
+                        handler.post { if (status.value == RecordStatus.START) stopAsync() }
+                    }
                 }
             }
-            awaitPreview(PreviewStatus.ING)
+            when (awaitSessionReady(baseline, requireTargetHandoff = true)) {
+                WaitOutcome.READY -> Unit
+                WaitOutcome.STOPPED -> {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                WaitOutcome.TIMEOUT -> {
+                    Log.e(TAG_UI, "首段编码面会话交接未就绪（拒绝乐观 start）")
+                    teardownAbandonedSession(rec)
+                    failNow(RecordError.START_FAILED)
+                    return true
+                }
+            }
         } else {
             // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
             // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
@@ -3407,13 +3436,39 @@ private class RecordRunner(
                     gl?.markSegmentRotating()
                     try {
                         gl?.setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)
-                        awaitEncoderSurface(s)
+                        if (!awaitEncoderSurface(s) && !stopRequested) {
+                            Log.e(TAG_UI, "换段编码面未在预算内挂载，停止录制避免静默零帧段")
+                            handler.post { if (status.value == RecordStatus.START) stopAsync() }
+                        }
                     } finally {
                         gl?.clearSegmentRotating()
                     }
                 }
             }
-            awaitEncoderSurface()
+            // 首段：先确认相机会话本身可出帧（R01），再要求编码面确实挂到本次 Surface 上。
+            when (awaitSessionReady(null, requireTargetHandoff = false)) {
+                WaitOutcome.READY -> Unit
+                WaitOutcome.STOPPED -> {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                WaitOutcome.TIMEOUT -> {
+                    Log.e(TAG_UI, "首段相机会话未就绪（拒绝乐观 start）")
+                    teardownAbandonedSession(rec)
+                    failNow(RecordError.START_FAILED)
+                    return true
+                }
+            }
+            if (!awaitEncoderSurface()) {
+                if (stopRequested) {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                Log.e(TAG_UI, "首段编码面未在预算内挂载（拒绝乐观 start）")
+                teardownAbandonedSession(rec)
+                failNow(RecordError.START_FAILED)
+                return true
+            }
         }
         // 停止检查点③：面已下发、等待窗结束（含被停止提前打断）——rec.start 前最后一道闸，
         // 收尾与检查点②同一套共用判废收尾
@@ -3824,6 +3879,7 @@ private class RecordRunner(
             if (status.value != RecordStatus.IDLE) status.value = RecordStatus.IDLE
             // 幂等早退也是"停止收尾完成"：取消信号在此清账（调用方多为检查点让出后的补收尾）
             stopRequested = false
+            ctrl.setRecordingActive(false)
             return
         }
         polling = false
@@ -4032,6 +4088,9 @@ private class RecordRunner(
         }
         // 停止收尾完成：取消信号清账（显示值 out.durationMs 是引擎结算值，下一场 start 从零起算）
         stopRequested = false
+        // R02/R04：录制窗口关闭放在最后——上面的 setRecordingTarget(null) 已经摘面，
+        // 之后再允许看门狗/等号探测介入，不会拆到仍在收尾的编码面。
+        ctrl.setRecordingActive(false)
     }
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */
@@ -4044,6 +4103,9 @@ private class RecordRunner(
     private fun failNow(code: String) {
         polling = false
         recorder = null
+        // 起录失败不走 stopInternal：录制窗口必须在这里也关掉，否则 page/activity 看门狗
+        // 会误以为录制仍在进行而长期不介入预览自愈。
+        ctrl.setRecordingActive(false)
         status.value = RecordStatus.ERROR
         result.value = RecordResult.fail(code)
         handler.postDelayed({ if (status.value == RecordStatus.ERROR) status.value = RecordStatus.IDLE }, 80L)
@@ -4051,28 +4113,48 @@ private class RecordRunner(
     }
 
     /**
-     * 会话重建是异步的（DIRECT 换了输出面），等预览回到 ING 再 start，避免编码器拿不到帧。
-     * 轮询条件带 [stopRequested]：停止请求把等待窗立即打断（≤ 一个 POLL_SLICE_MS），
-     * 未就绪返回后由 beginSession 检查点③走停止分支。
+     * R01：等待「本次交接之后的新会话」真正可出帧。与旧的 `preview == ING` 不同：
+     * - 只认 [CameraSessionReadiness.ready]（会话配置成功 + repeating 已被接纳），不看意图流；
+     * - [baseline] 非空时要求世代/会话世代/录制面世代发生变化，旧就绪快照一律不算；
+     * - [requireTargetHandoff] 用于 DIRECT 换面：必须看到本次面世代推进。
+     * 返回 [WaitOutcome] 而不是静默放行——调用方据 TIMEOUT 明确判起录失败。
      */
-    private fun awaitPreview(target: PreviewStatus) {
+    private fun awaitSessionReady(
+        baseline: CameraSessionReadiness?,
+        requireTargetHandoff: Boolean
+    ): WaitOutcome {
         var waited = 0L
-        while (waited < WAIT_MS && !stopRequested) {
-            if (ctrl.state.value.preview == target) return
+        while (waited < WAIT_MS) {
+            if (stopRequested) return WaitOutcome.STOPPED
+            val now = ctrl.sessionReadiness()
+            if (now != null && now.ready && readinessAdvanced(baseline, now, requireTargetHandoff)) {
+                return WaitOutcome.READY
+            }
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        // 被停止提前打断不算超时，不告警（正常超时仍按既有口径留一行）
-        if (!stopRequested) Log.w(TAG_UI, "等待预览会话重建超时，继续 start")
+        return if (stopRequested) WaitOutcome.STOPPED else WaitOutcome.TIMEOUT
+    }
+
+    private fun readinessAdvanced(
+        baseline: CameraSessionReadiness?,
+        now: CameraSessionReadiness,
+        requireTargetHandoff: Boolean
+    ): Boolean {
+        if (baseline == null) return true
+        if (now.generation != baseline.generation) return true
+        if (now.attempt != baseline.attempt) return true
+        return !requireTargetHandoff || now.recordingTargetEpoch != baseline.recordingTargetEpoch
     }
 
     /**
      * 等编码面挂好（GL 挂面是 postGl 异步）。[expected] 传重挂路径的新面：必须等「新面已绑定」
      * ——换段时旧绑定还在，isOutputSurfaceBound 首查恒真、零等待，旧面会先于 GL 解绑被 release；
      * 首段无旧绑定，null 保持既有「任意面已绑定」谓词不变。
+     * 返回 false = 预算内没挂好（或 [stopRequested]），调用方不得继续 start。
      */
-    private fun awaitEncoderSurface(expected: Surface? = null) {
-        val gl = glProvider() ?: return
+    private fun awaitEncoderSurface(expected: Surface? = null): Boolean {
+        val gl = glProvider() ?: return false
         fun arrived(): Boolean =
             if (expected == null) gl.isOutputSurfaceBound() else gl.isEncoderSurfaceNative(expected)
         var waited = 0L
@@ -4081,13 +4163,7 @@ private class RecordRunner(
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行。
-        // 被停止提前打断不算超时（检查点③会收走半成品），不告警
-        if (!arrived()) {
-            if (!stopRequested) {
-                Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
-            }
-        }
+        return arrived()
     }
 
     private fun buildProfile(

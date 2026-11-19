@@ -238,6 +238,16 @@ class MainActivity : ComponentActivity() {
                 // 组合不在场 = 整窗黑（连 UI 都没了）：相机侧的任何自愈都没有意义，
                 // 交给 armCompositionGuard 统一处理，这里直接跳过判活。
                 if (composedRoute != ROUTE_CAMERA) continue
+                // R04：录制窗口（含 PREPARE/换段）内不得在底下拆会话或重建引擎——编码器已拿面，
+                // 重建会把在写的段变成零帧/坏段。窗口期间只把计时器推平；结束后重新计满再介入。
+                if (ctrl.isRecordingActive()) {
+                    camGrowAtMs = nowMs
+                    dispGrowAtMs = nowMs
+                    camSeenFrames = false
+                    restarted = false
+                    reattachTries = 0
+                    continue
+                }
                 val cam = ctrl.frameResultCount()
                 if (cam != null && cam != camLast) {
                     if (!camSeenFrames) {
