@@ -157,7 +157,7 @@ class ManualExposureAdmissionTest {
         val shutter = runCatching { bodyOf(src, "ShutterPill") }.getOrNull()
             ?: return bad + "定位不到 ShutterPill 的体——守卫失去输入"
         if (occurrences(shutter, "cam_shutter_manual_no_room").isEmpty()) {
-            bad.add("ShutterPill 没把「手动快门无解」的原因写给用户（自动回弹不许静默）")
+            bad.add("ShutterPill 没把「手动快门无解」的原因写给用户（cam_shutter_manual_no_room；自动回弹不许静默）")
         }
         if (occurrences(shutter, "!shutter.enabled").isEmpty()) {
             bad.add("ShutterPill 的提示没有挂在快门域置灰条件上")
