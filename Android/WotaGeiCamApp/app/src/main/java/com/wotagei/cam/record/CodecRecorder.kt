@@ -363,12 +363,23 @@ internal class CodecRecorder(
      */
     private var muxPtsEqualFixes = 0
 
+    /**
+     * **负戳夹紧**（候选戳早于本段基准 [segBaseUs]，[writeSample] 里夹到 0）的次数与最大提前量。
+     *
+     * [muxPtsMaxEarlyUs] = 所有被夹样本里"早得最多"的那一枚（μs），量级必须能在段尾汇总里看到，
+     * 否则分段处的音画偏移无从判断；逐样本明细只留首条（B06），其余只计数。
+     */
+    private var muxPtsClampFixes = 0
+    private var muxPtsMaxEarlyUs = 0L
+
     /** 逐轨 pts 账复位（新段起算：换段后是新 muxer，没有历史） */
     private fun resetMuxPtsBooks() {
         java.util.Arrays.fill(muxLastPtsUs, -1L)
         muxPtsFixes = 0
         muxPtsMaxBackUs = 0L
         muxPtsEqualFixes = 0
+        muxPtsClampFixes = 0
+        muxPtsMaxEarlyUs = 0L
     }
     private var aacMinBuf = 0
     private var audioSource = 0
@@ -2538,10 +2549,10 @@ internal class CodecRecorder(
                 "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
                 "喂码丢弃=${envCh?.feedDropped ?: 0}/${capCh?.feedDropped ?: 0} " +
                 "截断=${envCh?.feedTruncated ?: 0}/${capCh?.feedTruncated ?: 0} " +
-                // Y16 尾账：停止/轮转抽干到硬上限时被 EOS 越过的 PCM 包数（环境/内录分开）
+                // 停止或换段达到硬上限时，分别汇总环境和内录尾包。
                 "尾弃=${envCh?.eosDrops ?: 0}/${capCh?.eosDrops ?: 0} " +
-                // pts 单调兜底的两枚账（见 [muxPtsFixes]）：等值是设计内同格多帧，真倒退才是异常
-                "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
+                // 同格等值、真倒退与负戳夹紧分别记账。
+                "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) 夹紧=${muxPtsClampFixes}(最大提前${muxPtsMaxEarlyUs}us) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms " +
                 "内录静音[$capSilenceInfo]"
@@ -2676,7 +2687,15 @@ internal class CodecRecorder(
         if (shifted < 0L) {
             // 基准取的是换段瞬间的 nanoTime，音频包可能在那之前就已入队：夹紧会把这几帧往前挪，
             // 量级必须能在日志里看到，否则分段处的音画偏移无从判断（本机无高帧率能力，改语义前先取证）
-            Log.w(TAG, "段 $partIndex pts 早于基准 ${-shifted}us，已夹紧 track=$track")
+            // B06：逐样本刷 w 会按帧级淹掉日志——首条留明细，其余只计数，量级进段尾汇总
+            muxPtsClampFixes++
+            if (-shifted > muxPtsMaxEarlyUs) muxPtsMaxEarlyUs = -shifted
+            if (muxPtsClampFixes == 1) {
+                Log.w(
+                    TAG,
+                    "段 $partIndex pts 早于基准 ${-shifted}us，已夹紧 track=$track（同类后续只计数，段尾汇总）"
+                )
+            }
             info.presentationTimeUs = 0L
         } else {
             info.presentationTimeUs = shifted
@@ -2691,17 +2710,26 @@ internal class CodecRecorder(
             val fix = monotonicPts(lastUs, info.presentationTimeUs)
             if (fix.advanced) {
                 if (info.presentationTimeUs == lastUs) {
-                    // 同格等值：只计数 + d 级留痕，逐帧刷 w 是本条要治的洪泛
+                    // 同格等值：只计数 + 首枚 d 级留痕（逐帧刷屏正是本条要治的洪泛）
                     muxPtsEqualFixes++
-                    Log.d(TAG, "轨 $track pts 与上一枚同格相等（$lastUs）⇒ 推进 1µs（同格设计内，不计异常）")
+                    if (muxPtsEqualFixes == 1) {
+                        Log.d(
+                            TAG,
+                            "轨 $track pts 与上一枚同格相等（$lastUs）⇒ 推进 1µs（同格设计内，不计异常；后续只计数）"
+                        )
+                    }
                 } else {
                     muxPtsFixes++
                     if (fix.backUs > muxPtsMaxBackUs) muxPtsMaxBackUs = fix.backUs
-                    Log.w(
-                        TAG,
-                        "轨 $track pts 倒退（cur=${info.presentationTimeUs} last=$lastUs）" +
-                            "⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us）"
-                    )
+                    // B06：首条留明细（轨号/两枚戳/倒退量都要能对现场），后续只计数——
+                    // 量级与次数由段尾汇总行统一给出，连续倒退按帧级刷 w 会淹掉日志
+                    if (muxPtsFixes == 1) {
+                        Log.w(
+                            TAG,
+                            "轨 $track pts 倒退（cur=${info.presentationTimeUs} last=$lastUs）" +
+                                "⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us；同类后续只计数，段尾汇总）"
+                        )
+                    }
                 }
             }
             info.presentationTimeUs = fix.ptsUs

@@ -150,13 +150,13 @@ class VideoStore(private val ctx: Context) {
                 Log.e(TAG, "insert returned null, part=$partIndex name=$name")
                 null
             } else {
-                // 以 Provider 回查**最终名**为准：insert 撞名时 provider 会自行改名（" (1)" 式），
-                // 请求名不再等于真实落盘名。日志两侧都留，方能让之后的 sidecar 对号有据可查。
+                // Provider 可能在撞名时自行改名。回查并记录是否改名，媒体行只记数字 ID。
                 val actual = queryStr(uri, MediaStore.MediaColumns.DISPLAY_NAME)
+                val id = mediaIdOf(uri)
                 if (actual != null && actual != name) {
-                    Log.w(TAG, "provider renamed part=$partIndex requested=$name actual=$actual")
+                    Log.w(TAG, "provider renamed part=$partIndex id=$id")
                 } else {
-                    Log.i(TAG, "pending part=$partIndex name=${actual ?: name} uri=$uri")
+                    Log.i(TAG, "pending part=$partIndex id=$id")
                 }
                 uri
             }
@@ -189,7 +189,7 @@ class VideoStore(private val ctx: Context) {
         val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
         return try {
             val n = resolver.update(uri, values, null, null)
-            Log.i(TAG, "commit uri=$uri rows=$n")
+            Log.i(TAG, "commit id=${mediaIdOf(uri)} rows=$n")
             n > 0
         } catch (e: Exception) {
             Log.e(TAG, "commit failed: ${e.message}")
@@ -254,7 +254,7 @@ class VideoStore(private val ctx: Context) {
                 is OutputSink.Pending -> {
                     SealMarker.clear(pathOf(sink))
                     val n = resolver.delete(sink.uri, null, null)
-                    Log.i(TAG, "discard uri=${sink.uri} rows=$n")
+                    Log.i(TAG, "discard id=${mediaIdOf(sink.uri)} rows=$n")
                 }
                 is OutputSink.File -> {
                     SealMarker.clear(sink.f.absolutePath)
@@ -327,7 +327,7 @@ class VideoStore(private val ctx: Context) {
                 // 字节已经在盘上，这时候删记录就是把用户的成片丢掉
                 val ok = commit(pending.uri) || commit(pending.uri)
                 if (!ok) {
-                    Log.e(TAG, "COMMIT_PENDING part=$partIndex uri=${pending.uri} 清 IS_PENDING 失败，相册可能看不到")
+                    Log.e(TAG, "COMMIT_PENDING part=$partIndex id=${mediaIdOf(pending.uri)} 清 IS_PENDING 失败，相册可能看不到")
                 }
                 ok
             }
@@ -338,7 +338,7 @@ class VideoStore(private val ctx: Context) {
         Log.i(
             TAG,
             "seal part=$partIndex keep=$keep bytes=${if (bytesUnknown < 0) "量不到" else bytesUnknown} dur=${durationMs}ms " +
-                "uri=${pending?.uri} committed=$committed"
+                "id=${mediaIdOf(pending?.uri)} committed=$committed"
         )
         return VideoSegment(pending?.uri, path, partIndex, bytes, startMs, durationMs, committed)
     }
@@ -376,7 +376,7 @@ class OutputTarget private constructor(
                     if (sink.uri.scheme == SCHEME_CONTENT) {
                         val afd = ctx.contentResolver.openAssetFileDescriptor(sink.uri, "rw")
                         if (afd == null) {
-                            Log.e(TAG, "openAssetFileDescriptor null: ${sink.uri}")
+                            Log.e(TAG, "openAssetFileDescriptor null: id=${mediaIdOf(sink.uri)}")
                             null
                         } else {
                             OutputTarget(sink, null, afd.fileDescriptor, afd)

@@ -278,7 +278,7 @@ class ArcRepairRunner(private val ctx: Context) {
         } else {
             progress.value.coerceAtMost(arcRepairProgress(ArcProgressStage.FINALIZE, 0, 0))
         }
-        Log.i(TAG_ARC, "任务结束 ok=${out.ok} err=${out.error} uri=${out.uri} note=${out.note}")
+        Log.i(TAG_ARC, "任务结束 ok=${out.ok} err=${out.error} id=${mediaIdOf(out.uri)} note=${out.note}")
         // 页面已离开：结果已写回 StateFlow，本线程没有后续任务，收尾后自行退出。
         // 从 handler 线程调用 quitSafely() 是合法的（当前消息处理完后终止 Looper）。
         if (quitAfterTask) thread.quitSafely()
@@ -427,6 +427,14 @@ private class ArcRepairSession(
     private var vPtsFixes = 0
     private var vPtsMaxBackUs = 0L
 
+    /**
+     * 写样本失败计数（视频 / 音频 lane 合计）：逐样本失败是既有口径（不中断修复），
+     * 但 B06 要求首条留异常明细、后续只计数，收尾给一行汇总——按帧刷 e 级会淹掉日志。
+     * 失败码仍记 [writeFailCode]，与计数互不影响。
+     */
+    private var videoWriteFails = 0
+    private var audioWriteFails = 0
+
     /** 抽帧计划与它的流式桥（open() 里建，主循环逐帧问指令） */
     private lateinit var flow: ArcRepairFlow
 
@@ -482,6 +490,12 @@ private class ArcRepairSession(
         } catch (e: Error) {
             code = "${ArcRepairError.ENGINE}:${e.javaClass.simpleName}"
             Log.e(TAG_ARC, "修复错误：${e.javaClass.simpleName} ${e.message}")
+        } finally {
+            // 写样本失败汇总（B06）：逐样本 e 级只留首条，收尾必须把总数说清楚（否则"部分失败"
+            // 与"一直失败"在日志里无法区分）。放 finally：中途 ArcFail 退出也要给出计数。
+            if (videoWriteFails > 0 || audioWriteFails > 0) {
+                Log.i(TAG_ARC, "写样本失败 视频=$videoWriteFails 音频=$audioWriteFails（首条异常见上文）")
+            }
         }
         return finish(ok, code)
     }
@@ -1296,7 +1310,8 @@ private class ArcRepairSession(
         if (fix.advanced) {
             vPtsFixes++
             if (fix.backUs > vPtsMaxBackUs) vPtsMaxBackUs = fix.backUs
-            Log.d(TAG_ARC, "视频轨 pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us）")
+            // B06：首条留明细，其余只计数（终止汇总给计数与最大倒退量）
+            if (vPtsFixes == 1) Log.d(TAG_ARC, "视频轨 pts 修正 cur=$norm → ${fix.ptsUs}（back=${fix.backUs}us；后续只计数）")
         }
         vMuxLastPtsUs = fix.ptsUs
         // ⚠ flags 必须跟着样本走：MediaMuxer 靠 BufferInfo.flags 里的 BUFFER_FLAG_KEY_FRAME 标同步帧。
@@ -1310,7 +1325,9 @@ private class ArcRepairSession(
         } catch (e: Exception) {
             // 吞异常是既有口径（逐样本失败不中断修复），但必须留痕：零样本时 run() 靠这个码
             // 把失败归因到 MUX 而不是误报 NO_VIDEO（与 CodecRecorder.writeSample 同语义）
-            Log.e(TAG_ARC, "写视频样本失败：${e.message}")
+            // B06：首条带异常明细，后续只计数（按帧刷 e 级会淹掉日志），收尾给汇总行
+            videoWriteFails++
+            if (videoWriteFails == 1) Log.e(TAG_ARC, "写视频样本失败：${e.message}（同类后续只计数，收尾汇总）")
             writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
         }
         drainAudioUpTo(norm)
@@ -1422,7 +1439,10 @@ private class ArcRepairSession(
                 if (fix.advanced) {
                     ptsFixes++
                     if (fix.backUs > ptsMaxBackUs) ptsMaxBackUs = fix.backUs
-                    Log.d(TAG_ARC, "音频轨${label} pts 修正 cur=$outPts → ${fix.ptsUs}（back=${fix.backUs}us）")
+                    // 与视频轨同口径（B06）：首条留明细，其余只计数
+                    if (ptsFixes == 1) {
+                        Log.d(TAG_ARC, "音频轨${label} pts 修正 cur=$outPts → ${fix.ptsUs}（back=${fix.backUs}us；后续只计数）")
+                    }
                 }
                 muxLastPtsUs = fix.ptsUs
                 bufInfo.set(0, pendingSize, fix.ptsUs, 0)
@@ -1430,7 +1450,11 @@ private class ArcRepairSession(
                     m.writeSampleData(muxTrack, buf, bufInfo)
                 } catch (e: Exception) {
                     // 与视频写失败同口径：吞异常不中断，但留 MUX 失败码（音轨整废时归因不误报）
-                    Log.e(TAG_ARC, "写音频样本失败（${label}）：${e.message}")
+                    // B06：首条带异常明细，后续只计数（lane 多、样本密，按帧刷 e 级会淹掉日志）
+                    audioWriteFails++
+                    if (audioWriteFails == 1) {
+                        Log.e(TAG_ARC, "写音频样本失败（${label}）：${e.message}（同类后续只计数，收尾汇总）")
+                    }
                     writeFailCode = writeFailCode ?: "${ArcRepairError.ENGINE}:MUX"
                 }
                 pending = false
