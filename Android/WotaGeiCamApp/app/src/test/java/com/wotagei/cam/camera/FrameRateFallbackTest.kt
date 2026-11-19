@@ -193,8 +193,9 @@ class FrameRateFallbackTest {
         assertTrue("良品必须先真的绿，否则后面突变体的红没有意义", engineViolations(engine).isEmpty())
         // 突变 1：把纯函数调用换回内联算式（保留旧谓词）
         val inlined = engine.replace(
-            // 锚串随 2026-10-11 #15 迁移：cap 算式抽成 fpsCap() 单一真源（供退档日志复用）
-            "return FrameRateFallback.ceilingFps(state.fpsRanges, fpsCap())",
+            // 锚串随 Y05 迁移：退档候选改为普通表真源（`ranges` 局部 = normalFpsRangesOf 回退），
+            // 纯函数调用本身仍是唯一算式出口，突变体照旧把算式内联回旧谓词。
+            "return FrameRateFallback.ceilingFps(ranges, fpsCap())",
             "var best = 0\n        for (r in state.fpsRanges) {\n            val usable = minOf(r.hi, cap)\n" +
                 "            if (usable > r.lo && usable > best) best = usable\n        }\n" +
                 "        return if (best > 0) best else (state.fpsRanges.minOfOrNull { it.hi } ?: 25)"
@@ -246,9 +247,11 @@ class FrameRateFallbackTest {
         val r = regionOf(codeOnly(rawEngine), "syncFpsPick")
         val sync = flatten(rawEngine.substring(r.start, r.end))
         val at = sync.indexOf("if (ceiling <= 0) {")
-        val end = sync.indexOf("return }", at)
+        // Y05 起 [Camera2Engine.syncFpsPick] 返回 Boolean（true = 决议要求换会话模态），
+        // 早退分支以 `return false` 收尾——锚点跟着签名走，分支内容断言一字未松。
+        val end = sync.indexOf("return false }", at)
         assertTrue("锚点丢失：没截到 ceiling<=0 早退分支（分支形态改了或被删）", at >= 0 && end > at)
-        return sync.substring(at, end + "return }".length)
+        return sync.substring(at, end + "return false }".length)
     }
 
     /** [fpsCap] 的函数体（原文切片，同上口径） */

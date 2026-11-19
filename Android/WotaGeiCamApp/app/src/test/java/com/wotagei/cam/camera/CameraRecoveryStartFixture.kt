@@ -40,6 +40,25 @@ internal class CameraRecoveryStartFixture(
     }
     fun retry() { platform.call(controller, "restartPreview") }
     fun rebind() { platform.call(controller, "forceRebind", sink) }
+
+    /**
+     * 用户/持久化层把一档 fps 写进总线（走 [com.wotagei.cam.core.WotaParams.setFps] 单一写入者）。
+     *
+     * 表内档位按 UI onPick 的口径给 range+exact；表外档位照 UI 的 `decideFps == null` 分支给
+     * `range=null, enabled=true, exact=false`——引擎必须自己退档，而不是依赖 UI 先灰显。
+     */
+    fun setFps(
+        value: Int,
+        range: ClosedRange<Int>? = null,
+        enabled: Boolean = true,
+        exact: Boolean = false,
+    ) {
+        val params = platform.call(controller, "getParams") ?: error("CameraController 没有 params")
+        val ctor = platform.type("com.wotagei.cam.core.ParamState")
+            .declaredConstructors.single { it.parameterCount == 4 }
+        val next = ctor.newInstance(value, range, enabled, exact)
+        platform.call(params, "setFps", next)
+    }
     fun engine(): Any = platform.engineOf(controller)
     fun drain(engine: Any = engine()) { platform.drain(engine) }
     fun opened(): Int = platform.call(manager, "getOpenCount") as Int

@@ -21,6 +21,7 @@ import android.view.Surface
 import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
+import com.wotagei.cam.core.FpsDecision
 import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
@@ -417,8 +418,9 @@ class Camera2Engine(
             if (slot.ability.isLegacy()) {
                 Log.w(TAG, "镜头 ${slot.logicId} 是 LEGACY 等级，手动参数可能不生效")
             }
-            highSpeedActive = slot.ability.highSpeedCapable &&
-                slot.ability.needsHighSpeed(params.size.value, fpsValue())
+            // Y05：开镜时同一拍就吃 [CameraAbility.decideFps]——会话模态不再另写
+            // `highSpeedCapable && needsHighSpeed(...)` 的第二份判据（与 UI 落档/请求区间同源）。
+            highSpeedActive = slot.ability.decideFps(params.size.value, fpsValue())?.highSpeed == true
             reqState = RequestApplier.stateOf(slot.ability, params.size.value, highSpeedActive)
             chosenFps = null
             structuralSignature = ""
@@ -699,6 +701,16 @@ class Camera2Engine(
     private fun fpsValue(): Int = params.fps.value.value
 
     /**
+     * 一档帧率的**完整决议**（Y05 单一出口）：普通表先来、普通表覆盖不了才看高速表。
+     *
+     * 会话类型（[wantHighSpeed]/[onStructuralPulse]）、下发区间与退档（[syncFpsPick]）、
+     * 通知（[onFpsDowngraded]）都消费这一支——与 UI 的可选性/※ 标记同一个
+     * [com.wotagei.cam.core.CameraAbility.decideFps]。null = 两张表都不覆盖该档。
+     */
+    private fun fpsDecision(target: Int): FpsDecision? =
+        ability?.decideFps(params.size.value, target)
+
+    /**
      * 把「相机帧尺寸」推给输出面（GPU 侧要用它设 SurfaceTexture 默认缓冲与等比适配源比例）。
      * sink 的 onSizeChanged 语义是相机帧而非视图尺寸，视图尺寸由 UI 侧自己给（03 文档第 3 节）。
      */
@@ -826,10 +838,11 @@ class Camera2Engine(
 
     private fun wantHighSpeed(): Boolean {
         val a = ability ?: return false
-        if (!a.highSpeedCapable) return false
-        // 帧率普通会话覆盖不了（厂商把 50/60 只放进高速表，如 vivo V2520A）⇒ 高速会话；
-        // 旧阈值 fps > 60 会让 50/60 落回普通会话，而普通流根本没有这两档
-        return a.needsHighSpeed(params.size.value, fpsValue())
+        // Y05：会话类型吃 [fpsDecision] 的同一条结论（普通表先来、覆盖不了才看高速表）。
+        // 旧实现另算一遍 `needsHighSpeed`：与 UI 落档/请求区间用的 decideFps 是两份判据，
+        // 两边各改一次就会「界面按普通档显示、引擎按高速档开会话」。
+        // 非高速机型不需要额外预判：fpsRangesFor(size, true) 会退回普通表，决议只会给 false。
+        return a.decideFps(params.size.value, fpsValue())?.highSpeed == true
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
@@ -1261,7 +1274,14 @@ class Camera2Engine(
         // （flushTask 与 onConfigured 都无包装）→ 引擎线程未捕获即进程死亡。一并纳入，
         // 让下面的分类 catch 对「下发前的最后计算」同样生效。
         try {
-            syncFpsPick(writeBack = true)
+            if (syncFpsPick(writeBack = true)) {
+                // Y05：帧率决议要求的会话模态与当前会话不一致（高速 ↔ 普通）。本拍**不 build**
+                // ——旧会话照旧下发另一张表的区间会出现「界面 120、HAL 跑 30）。换会话后由
+                // onConfigured 的 applyRepeatingNow 重放（syncFpsPick 已把总线值/通知做完）。
+                structuralSignature = ""
+                ensureSession()
+                return
+            }
             // AE 档翻转（反馈 #1 方案A）：SENSOR 三键在自动档必须从请求里**缺席**，
             // 而 builder 无删键 ⇒ 整个重建（键集天然自洽，applyParams 随后全量重放其余键）。
             // 放在 try 内：与 syncFpsPick/apply/build 同一条 P1 纪律（任何 RuntimeException 不许穿透）。
@@ -1723,26 +1743,33 @@ class Camera2Engine(
     /**
      * 每次下发前对齐 fps：固定 [f,f] 优先，否则落可变范围并标 exact=false；
      * 总线值与快门上限的回写只在 [writeBack] 为真时做（避免在拍照通道里改用户值）。
+     *
+     * 返回 true = **决议要求的会话模态与当前会话不一致**（高速 ↔ 普通），调用方必须先重建
+     * 会话再下发；本函数已经把它能做的回写/通知做完（Y05）。
      */
-    private fun syncFpsPick(writeBack: Boolean) {
-        val state = reqState ?: return
+    private fun syncFpsPick(writeBack: Boolean): Boolean {
+        val state = reqState ?: return false
         val target = fpsValue()
-        val normal = RequestApplier.pickFps(state.fpsRanges, target, state.highSpeed)
-        if (normal != null) {
-            if (chosenFps != normal) {
+        // Y05：UI 可选性、会话类型、下发区间、退档与提示全部消费同一条 [decideFps] 决议
+        //（普通表先来、普通表覆盖不了才看高速表）。旧实现在这里读 state.fpsRanges +
+        // state.highSpeed 再选一遍，等于给"下发走哪张表"开了第二份判据。
+        val decision = fpsDecision(target)
+        if (decision != null && decision.highSpeed == state.highSpeed) {
+            val pick = decision.pick
+            if (chosenFps != pick) {
                 // 帧率决议留痕（2026-10-26）：50/60 这类"区间内由 HAL 定"的档，事后只能靠这行
                 // 判断到底下发成了什么；ranges 一并打出来，机型差异（表长什么样）不用重编就能核。
                 // 这就是"给适配留的口子"：真机 logcat 一行 `adb logcat -s WotaCam | grep 帧率决议`
                 Log.i(
                     TAG,
-                    "帧率决议 fps=$target -> [${normal.lo},${normal.hi}] exact=${normal.exact} " +
+                    "帧率决议 fps=$target -> [${pick.lo},${pick.hi}] exact=${pick.exact} " +
                         "highSpeed=${state.highSpeed} ranges=[${rangesSummary(state.fpsRanges)}]"
                 )
             }
-            chosenFps = normal
+            chosenFps = pick
             if (writeBack) {
                 // 总线保持用户档位（24 就是 24），不可用固定范围时用 exact 标记「※」
-                writeBackFps(target, normal.exact)
+                writeBackFps(target, pick.exact)
                 // 帧周期钳制吃**范围下界**（2026-10-04 r26 与 r10/r11 同源）：lo=档位（[24,30] 的
                 // lo=24），1/24 的 41.67ms 在合法域 [1/30, 1/24] 内不再被 hi=30 钳回 1/30——
                 // 旧口径在回写时就把强制档改写掉，r10 的下发修正根本见不到 1/24
@@ -1750,7 +1777,20 @@ class Camera2Engine(
                 // 50/60 档放行 1/30 死档（帧周期 20ms 装不下），见 Snapshot.fpsTarget 的说明
                 clampShutterToFrame(target)
             }
-            return
+            return false
+        }
+        if (decision != null) {
+            // 决议落在**另一张表**（会话模态还没跟上）：不能把另一张表的区间发进本会话
+            //（会发生「界面 60、HAL 跑 120」）。拍照通道不重建会话，沿用本会话上一份区间。
+            if (!writeBack) return false
+            Log.w(
+                TAG,
+                "帧率决议要求换会话模态：fps=$target 决议hs=${decision.highSpeed} " +
+                    "会话hs=${state.highSpeed} ranges=[${rangesSummary(state.fpsRanges)}]"
+            )
+            writeBackFps(target, decision.pick.exact)
+            clampShutterToFrame(target)
+            return true
         }
         // target 完全不在设备能力内（多为 120/240 无高帧率）：退到可达上限并报一次高帧率失败
         val ceiling = ceilingFps(state)
@@ -1764,20 +1804,31 @@ class Camera2Engine(
             Log.w(
                 TAG,
                 "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围且无退档目标，保持 $target；" +
-                    "ranges=[${rangesSummary(state.fpsRanges)}] cap=$capText ceiling=$ceiling " +
+                    "ranges=[${rangesSummary(state.fpsRanges)}] normal=[${rangesSummary(normalFpsRangesOf())}] " +
+                    "cap=$capText ceiling=$ceiling " +
                     "判定=保持总线原值·不回写帧率·不发高帧率失败态"
             )
-            return
+            return false
         }
-        val fallback = RequestApplier.pickFps(state.fpsRanges, ceiling, false) ?: return
+        // Y05：退档区间也走同一决议出口（普通表优先）——不再单独 pickFps(state.fpsRanges)：
+        // 高速态下那张表是高速表，退档会回写一个"界面说 120、HAL 实际跑 30"的值。
+        val fallback = fpsDecision(ceiling)?.pick
+            ?: RequestApplier.pickFps(normalFpsRangesOf(), ceiling, false)
+            ?: return false
         chosenFps = fallback
         if (writeBack) {
             Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围，退到 $ceiling")
             publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)
             writeBackFps(ceiling, fallback.exact)
             clampShutterToFrame(ceiling)
+            // Y05：通用退档同样是「用户看得见的档位变化」，必须走与 downgradeHighSpeed
+            // 同一个通知出口——旧实现只改总线，界面上的帧率自己变了却没有提示。
+            onFpsDowngraded(ceiling)
             if (device != null) publishDevice(DeviceStatus.OPEN_SUCCEED)
+            // 从高速会话退到普通区间必须换会话，否则旧会话照旧下发高速表里的区间
+            return state.highSpeed || highSpeedActive
         }
+        return false
     }
 
     private fun clampShutterToFrame(fps: Int) {
@@ -1801,7 +1852,12 @@ class Camera2Engine(
      */
     // 保持**花括号体**：既有接线守卫用 bodyOf 定位本函数体，改成表达式体会让守卫直接失去输入。
     private fun ceilingFps(state: RequestApplier.State): Int {
-        return FrameRateFallback.ceilingFps(state.fpsRanges, fpsCap())
+        // Y05：退档候选只认**普通表**——与 downgradeHighSpeed 同一条真源（normalFpsRangesOf）。
+        // 旧口径吃 state.fpsRanges：高速态下那是高速表（hi 全 ≥120），通用退档会写回一个
+        // 「界面说 120、HAL 实际跑 30」的值。ability 缺失（normal 表为空）时退回状态表：
+        // 实际不可达（ability 与 reqState 同一处置空），留作防御而不是另写一份候选来源。
+        val ranges = normalFpsRangesOf().ifEmpty { state.fpsRanges }
+        return FrameRateFallback.ceilingFps(ranges, fpsCap())
     }
 
     /**
@@ -1832,7 +1888,10 @@ class Camera2Engine(
     private fun onStructuralPulse(pulse: Pulse) {
         val slotAbility = ability ?: return
         val previous = reqState
-        val highSpeed = slotAbility.highSpeedCapable && slotAbility.needsHighSpeed(pulse.size, pulse.fps)
+        // Y05：会话类型与 [syncFpsPick] 的下发区间吃**同一条 decideFps 决议**（普通表先来）。
+        // 旧实现是 `highSpeedCapable && needsHighSpeed(...)`——判据与 UI 落档用的 decideFps
+        // 各写一份，覆盖范围一旦（哪怕是理论上的）分叉，就会出现「档位是普通档、会话是高速」。
+        val highSpeed = slotAbility.decideFps(pulse.size, pulse.fps)?.highSpeed == true
         // 每次结构脉冲都重建能力快照：fps 档位表、4K 门禁、active array 都跟着尺寸/分支变
         reqState = RequestApplier.stateOf(slotAbility, pulse.size, highSpeed)
         pushSinkFrameSize(pulse.size)
@@ -1998,7 +2057,8 @@ class Camera2Engine(
             return
         }
         Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：$reason，fps 退到 $ceiling")
-        val pick = RequestApplier.pickFps(normalRanges, ceiling, false) ?: return
+        // Y05：退档区间也走同一决议出口（普通表优先；ceiling 本就取自普通表，决议必命中普通档）
+        val pick = fpsDecision(ceiling)?.pick ?: RequestApplier.pickFps(normalRanges, ceiling, false) ?: return
         highSpeedActive = false
         chosenFps = pick
         writeBackFps(ceiling, pick.exact)
