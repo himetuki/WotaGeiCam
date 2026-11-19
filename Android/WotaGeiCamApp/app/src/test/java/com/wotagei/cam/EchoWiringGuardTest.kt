@@ -56,7 +56,7 @@ class EchoWiringGuardTest {
     @Test
     fun `setEchoParams绝不触发重画`() {
         val b = body("setEchoParams")
-        assertTrue("锚点丢失：setEchoParams 里没截到 enabled 判定", b.contains("next.enabled"))
+        assertTrue("锚点丢失：setEchoParams 里没截到 enabled 判定", b.contains("!latest.enabled"))
         assertFalse("setEchoParams 不许调 requestRender（录制中会多一帧重复帧且重复累积）", b.contains("requestRender"))
         assertFalse("setEchoParams 不许置 dirty", b.contains("dirty = true"))
         assertFalse("setEchoParams 不许直接排帧", b.contains("scheduleDraw"))
@@ -85,7 +85,8 @@ class EchoWiringGuardTest {
     @Test
     fun `drawEchoPass的早退与每帧一次`() {
         val b = body("drawEchoPass")
-        assertTrue("关着必须一次 GL 调用都不发（零代价口径）", b.contains("!echoParams.enabled"))
+        assertTrue("必须读本帧固定快照（Y13）", b.contains("val p = echoFrameParams"))
+        assertTrue("关着必须一次 GL 调用都不发（零代价口径）", b.contains("!p.enabled"))
         assertTrue(
             "state-only 帧绝不累积（R2 §五.1：同一张 OES 帧画两次 = 拖影多叠一层）",
             b.contains("if (!hasFrame) return")
@@ -98,43 +99,46 @@ class EchoWiringGuardTest {
             "空闲预览被上屏节流的帧不跑链（编码面在位时不许省：编码器每帧都要这张累积面）",
             b.contains("encoderEglSurface == null && windowThrottled()")
         )
-        assertTrue("衰减必须由倍数换算（否则倍数档位是死的）", b.contains("echoDecayOf(echoParams.multiplier)"))
+        assertTrue("衰减必须由倍数换算（否则倍数档位是死的）", b.contains("echoDecayOf(p.multiplier)"))
         assertTrue("必须把模式交给链（否则模式切换无效）", b.contains("trailMode = trailMode"))
-        assertTrue("必须把阈值交给链（否则提亮档阈值滑杆无效）", b.contains("threshold = echoParams.threshold"))
+        assertTrue("必须把阈值交给链（否则提亮档阈值滑杆无效）", b.contains("threshold = p.threshold"))
         // 拖尾颜色补丁（docs/plan/35）：择/除门与容差必须由 core 纯函数推导交给链（不许引擎自造口径）
-        assertTrue("择/除门必须走 echoTrailMaskOf", b.contains("echoTrailMaskOf(echoParams)"))
-        assertTrue("补丁色必须走 echoTrailTintRgbOf", b.contains("echoTrailTintRgbOf(echoParams)"))
-        assertTrue("容差必须走 echoTrailTolOf", b.contains("echoTrailTolOf(echoParams)"))
+        assertTrue("择/除门必须走 echoTrailMaskOf", b.contains("echoTrailMaskOf(p)"))
+        assertTrue("补丁色必须走 echoTrailTintRgbOf", b.contains("echoTrailTintRgbOf(p)"))
+        assertTrue("容差必须走 echoTrailTolOf", b.contains("echoTrailTolOf(p)"))
         assertFalse("链只是产出累积面，不该引发重画", b.contains("requestRender"))
+        assertFalse("帧循环不许读 UI 意图（跨代交错的根因）", b.contains("echoParams"))
     }
 
     @Test
     fun `方向变化与模式切换必须清累积面`() {
-        // R2 §五.2：方向矩阵变过（consumeFrame 置位）或模式切换 ⇒ reset() 清累积面
+        // R2 §五.2：方向矩阵变过（consumeFrame 置位）⇒ drawEchoPass reset() 清累积面
         assertTrue(
             "consumeFrame 的 stChanged 分支必须置位残影作废标记",
             body("consumeFrame").contains("echoStaleSinceOrientationChange = true")
         )
-        val b = body("drawEchoPass")
+        val pass = body("drawEchoPass")
         assertTrue(
             "drawEchoPass 必须读作废标记并调 reset()",
-            b.contains("echoStaleSinceOrientationChange") && b.contains("chain.reset()")
+            pass.contains("echoStaleSinceOrientationChange") && pass.contains("chain.reset()")
         )
-        // docs/plan/35 E8：补丁档（trailColorMode/trailColor/trailTol）变化与模式切换同路清面——
-        // 旧门控攒下的残留拖尾不许带进新档（快照字段比对，倍数/阈值/强度不清）
+        // docs/plan/35 E8 + Y13：补丁档（trailColorMode/trailColor/trailTol）变化与模式切换同路清面，
+        // 但比对与清面必须在 setEchoParams 的同一次 GL 操作里（参数生效与历史面清零不许分成两条路），
+        // 帧循环只认快照，不再逐帧比对并回写已应用快照。
+        val set = body("setEchoParams")
         assertTrue(
             "TRAIL 档切换也必须清（旧模式的残影语义不许带进新模式）",
-            b.contains("last.mode == com.wotagei.cam.core.EchoMode.TRAIL) != trailMode")
+            set.contains("(prev.mode == com.wotagei.cam.core.EchoMode.TRAIL) != (latest.mode == com.wotagei.cam.core.EchoMode.TRAIL)")
         )
-        assertTrue("补丁模式变化必须纳入清面判据", b.contains("last.trailColorMode != echoParams.trailColorMode"))
-        assertTrue("补丁色变化必须纳入清面判据", b.contains("last.trailColor != echoParams.trailColor"))
-        assertTrue("容差变化必须纳入清面判据", b.contains("last.trailTol != echoParams.trailTol"))
-        assertTrue("快照必须在累积后更新（否则每帧都清）", b.contains("echoAppliedTrailParams = echoParams"))
+        assertTrue("补丁模式变化必须纳入清面判据", set.contains("prev.trailColorMode != latest.trailColorMode"))
+        assertTrue("补丁色变化必须纳入清面判据", set.contains("prev.trailColor != latest.trailColor"))
+        assertTrue("容差变化必须纳入清面判据", set.contains("prev.trailTol != latest.trailTol"))
+        assertTrue("语义切换分支必须清累积面", set.contains("} else if (trailChanged) { echoChain?.reset() }"))
     }
 
     @Test
     fun `echo维度进program键且着色器按开关分版本`() {
-        assertTrue("echoOn() 必须取 echoParams.enabled", engine.contains("fun echoOn(): Boolean = echoParams.enabled"))
+        assertTrue("echoOn() 必须取已生效参数（Y13：与 program 键同代）", engine.contains("fun echoOn(): Boolean = echoLiveParams.enabled"))
         val link = body("linkProgram")
         assertTrue("glow+echo 双开配 TEXTURE_VS_GLOW_ECHO", link.contains("Shaders.TEXTURE_VS_GLOW_ECHO"))
         assertTrue("echo 单开配 TEXTURE_VS_ECHO", link.contains("Shaders.TEXTURE_VS_ECHO"))
@@ -159,7 +163,8 @@ class EchoWiringGuardTest {
         // 模式由 echoTrailTintOf 推导（KB 档恒 0 = E7 的引擎侧清零）
         assertTrue("必须传 uEchoTintMode", b.contains("p.uEchoTintMode"))
         assertTrue("必须传 uEchoTint", b.contains("p.uEchoTint"))
-        assertTrue("染色模式必须走 echoTrailTintOf 推导", b.contains("echoTrailTintOf(echoParams)"))
+        assertTrue("染色模式必须走 echoTrailTintOf 推导（Y13：读本帧快照）", b.contains("echoTrailTintOf(frameEcho)"))
+        assertFalse("合成槽不许读 UI 意图（与累积面必须同代）", b.contains("echoParams"))
         val drawAt = b.indexOf("glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)")
         // 解绑在 drawArrays **之后**的那次出现（第一次出现是绑定，别找错位置）
         val unbindAt = b.indexOf("GL_TEXTURE0 + ECHO_SRC_UNIT", drawAt)
@@ -174,8 +179,13 @@ class EchoWiringGuardTest {
         assertTrue("上屏槽的 echo=1 变体", prewarm.contains("displayProgramKey(wantEffect, curveOn, denoise, glowOn(), echo = true)"))
         val release = body("releaseGl")
         assertTrue("releaseGl 必须收链", release.contains("echoChain?.release()"))
-        assertTrue("releaseGl 必须清帧纹理/作废标记/模式缓存", release.contains("echoFrameTex = 0") &&
-            release.contains("echoStaleSinceOrientationChange = false") && release.contains("echoAppliedTrailParams = null"))
+        assertTrue(
+            "releaseGl 必须清帧纹理/作废标记/两代参数",
+            release.contains("echoFrameTex = 0") &&
+                release.contains("echoStaleSinceOrientationChange = false") &&
+                release.contains("echoLiveParams = com.wotagei.cam.core.EchoParams.DEFAULT") &&
+                release.contains("echoFrameParams = com.wotagei.cam.core.EchoParams.DEFAULT")
+        )
         val init = body("initGl")
         assertTrue("initGl 必须建链", init.contains("EchoChain(::link, ::drainGlError, positionBuffer)"))
     }
@@ -242,13 +252,16 @@ class EchoWiringGuardTest {
     @Test
     fun `尺子自己能红_去掉stateOnly护栏或写死开关必红`() {
         // 突变 1：state-only 帧也累积（R2 §五.1 护栏被删）
-        val noGuard = engine.replace("    private fun drawEchoPass(hasFrame: Boolean) {\n        if (!echoParams.enabled) return\n        if (!hasFrame) return", "    private fun drawEchoPass(hasFrame: Boolean) {\n        if (!echoParams.enabled) return")
+        val noGuard = engine.replace(
+            "val p = echoFrameParams\n        if (!p.enabled) return\n        if (!hasFrame) return",
+            "val p = echoFrameParams\n        if (!p.enabled) return"
+        )
         assertTrue(
             "删掉 hasFrame 护栏的突变必须被这条判据看见",
             !KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(noGuard, "drawEchoPass")).contains("if (!hasFrame) return")
         )
         // 突变 2：echoOn 写死 false（开关不进 program 键 = 能点无效果）
-        val stuckOff = engine.replace("fun echoOn(): Boolean = echoParams.enabled", "fun echoOn(): Boolean = false")
-        assertFalse("写死 echoOn 的突变必须被抓", stuckOff.contains("fun echoOn(): Boolean = echoParams.enabled"))
+        val stuckOff = engine.replace("fun echoOn(): Boolean = echoLiveParams.enabled", "fun echoOn(): Boolean = false")
+        assertFalse("写死 echoOn 的突变必须被抓", stuckOff.contains("fun echoOn(): Boolean = echoLiveParams.enabled"))
     }
 }

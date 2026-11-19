@@ -593,11 +593,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     private var echoStaleSinceOrientationChange = false
 
     /**
-     * 上一次累积时的参数快照（GL 线程独占）：TRAIL 档切换（KB↔TRAIL）或拖尾补丁档变化
-     * （trailColorMode/trailColor/trailTol，docs/plan/35 E8——旧门控攒下的残留拖尾不许带进新档）
-     * 都必须清累积面；倍数/阈值/强度只换 uniform 不清（k 只影响往后的衰减）。
+     * GL 线程当前**生效**的残影参数（Y13）。与 [echoParams]（UI 意图，@Volatile）分离：
+     * 意图整体替换后经 `postGl` 落到这里，并与"是否需要清累积面"在**同一次 GL 操作**里完成。
+     *
+     * 为什么不能直接读 [echoParams]：旧实现先发布参数、再排队清面，两条路之间会插进一帧——
+     * 该帧用**新参数**累积到**旧参数**留下的历史面上（跨代交错），随后清面把这一帧抹掉，
+     * 观感是启用/切档后的第一帧拖影颜色/门控错乱。GL 线程独占写，不加 @Volatile。
      */
-    private var echoAppliedTrailParams: com.wotagei.cam.core.EchoParams? = null
+    private var echoLiveParams = com.wotagei.cam.core.EchoParams.DEFAULT
+
+    /**
+     * 本帧的残影参数快照（Y13）：`drawFrame` 开头一次性取 [echoLiveParams]，
+     * 累积趟（[drawEchoPass]）与两条合成槽（[drawPass]）都只读它——同一帧的 uniform
+     * 必须与同一帧的累积面同代，不能各自再读一次可变字段。
+     */
+    private var echoFrameParams = com.wotagei.cam.core.EchoParams.DEFAULT
 
     // endregion
 
@@ -1877,6 +1887,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
         // 成片槽先同步（编码 pass 要用它）；上屏槽的同步让到编码 pass 之后（§3.9.2-2）。
         // 没有编码面时 syncMovieSlot 只清绑定、不建 program（空闲预览不白编一枚用不到的）。
+        // Y13：本帧残影参数在**任何 pass 之前**一次性定版；下面的累积、program 键与两条合成槽
+        // 都取自同一代，帧内绝不再读 UI 意图（echoParams）。
+        echoFrameParams = echoLiveParams
         syncMovieSlot()
 
         // Glow 离屏链：每帧一次，夹在成片槽同步与编码 pass 之间（§11.7 定版顺序）。
@@ -2540,6 +2553,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 黑纹理都是恒等，绝不为此切 program（切 program 会闪帧）。
         val echoOn = p.applied.echo
         if (echoOn) {
+            // Y13：合成趟只读本帧快照——与 drawEchoPass 的累积面同代，绝不读 UI 意图字段
+            val frameEcho = echoFrameParams
             val echoTex = echoFrameTex.takeIf { it != 0 } ?: glowBlackTex
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ECHO_SRC_UNIT)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, echoTex)
@@ -2547,16 +2562,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uEchoMode >= 0) {
                 GLES20.glUniform1f(
                     p.uEchoMode,
-                    if (echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL) 1f else 0f
+                    if (frameEcho.mode == com.wotagei.cam.core.EchoMode.TRAIL) 1f else 0f
                 )
             }
-            if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, echoParams.gain)
+            if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, frameEcho.gain)
             // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：染色模式与补丁色（echoTrailTintOf
             // 对 KB 档恒 0 ⇒ 色逻辑不生效，E7 双保险的引擎侧那一半）
             if (p.uEchoTintMode >= 0) {
-                GLES20.glUniform1f(p.uEchoTintMode, com.wotagei.cam.core.echoTrailTintOf(echoParams).toFloat())
+                GLES20.glUniform1f(p.uEchoTintMode, com.wotagei.cam.core.echoTrailTintOf(frameEcho).toFloat())
             }
-            val echoTintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
+            val echoTintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(frameEcho)
             if (p.uEchoTint >= 0) GLES20.glUniform3f(p.uEchoTint, echoTintRgb[0], echoTintRgb[1], echoTintRgb[2])
         }
 
@@ -2804,17 +2819,44 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     override fun setEchoParams(params: com.wotagei.cam.core.EchoParams) {
         if (released.get()) return
         val next = params.sanitize()
-        val wasOn = echoParams.enabled
+        // 与上一次下发的意图逐字段相同 ⇒ 不必再排一次 GL 操作（滑杆拖回同值、重组的常见情形）
+        if (echoParams == next) return
+        // echoParams 只作 UI 意图快照（echoStatus 用）；GL 帧循环绝不读它（Y13）
         echoParams = next
-        if (!next.enabled || wasOn) return
         postGl {
-            // 显式开启 = 给含 echo 维度的坏键一次重试 + 链一次复活机会（同一坏键不逐帧重试的口径不变）；
-            // 累积面清零重开——上次开着的那段陈旧拖影不许带进新开的那一段
-            failedKeys.removeAll { it.echo }
-            echoChain?.resetAfterBreak()
-            echoChain?.prepare()
-            echoChain?.reset()
-            prepareEchoPrograms()
+            if (released.get()) return@postGl
+            // 取**执行时刻**的最新意图：同一批下发里的中间态（开→关→开）不该先落地一帧
+            val latest = echoParams
+            if (echoLiveParams == latest) return@postGl
+            val prev = echoLiveParams
+            val wasOn = prev.enabled
+            // Y13：参数生效与"是否需要清累积面"在**同一次 GL 操作**里落地。旧实现先发布参数、
+            // 再排队清面，两条路之间会插进一帧用新参数累积旧历史面的跨代交错。
+            echoLiveParams = latest
+            if (!latest.enabled) return@postGl
+            // 开启（含关→开）必须清面重开；TRAIL 语义切换（TRAIL 档或补丁档
+            // trailColorMode/trailColor/trailTol，docs/plan/35 E8）同样清面——旧门控攒下的
+            // 残留拖尾不许带进新语义。倍数/阈值/强度只换 uniform 不清（k 只影响往后的衰减）。
+            val trailChanged = wasOn && (
+                (prev.mode == com.wotagei.cam.core.EchoMode.TRAIL) !=
+                    (latest.mode == com.wotagei.cam.core.EchoMode.TRAIL) ||
+                    prev.trailColorMode != latest.trailColorMode ||
+                    prev.trailColor != latest.trailColor ||
+                    prev.trailTol != latest.trailTol
+                )
+            if (!wasOn) {
+                // 显式开启 = 给含 echo 维度的坏键一次重试 + 链一次复活机会（同一坏键不逐帧重试的口径不变）；
+                // 累积面清零重开——上次开着的那段陈旧拖影不许带进新开的那一段
+                failedKeys.removeAll { it.echo }
+                echoChain?.resetAfterBreak()
+                echoChain?.prepare()
+                echoChain?.reset()
+                prepareEchoPrograms()
+            } else if (trailChanged) {
+                echoChain?.reset()
+            }
+            // 不置 dirty/不排帧（EchoProvider 口径：拖滑杆不许往成片塞重复帧）；
+            // 新参数从下一个真帧起生效，state-only 重画不会累积（drawEchoPass 的 hasFrame 护栏）。
         }
     }
 
@@ -2848,33 +2890,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * - 关着 ⇒ 一次 GL 调用都不发（零代价口径）；
      * - 既没编码面也没窗口面 / 空闲预览且上屏被节流 ⇒ 没有消费者，跳过。
      *
-     * 护栏另两条在这里落地：方向矩阵变过（[echoStaleSinceOrientationChange]）或模式/补丁档切换
-     * （[echoAppliedTrailParams]）先 `reset()` 清累积面；倍数变化不清——k 只影响往后的衰减，
-     * 已有拖影按新系数自然衰减出去。
+     * 护栏另两条：方向矩阵变过（[echoStaleSinceOrientationChange]）在这里 `reset()` 清累积面；
+     * 开启与模式/补丁档切换的清面由 [setEchoParams] 在参数生效的同一次 GL 操作里做（Y13），
+     * 保证"新参数 + 旧历史面"不会交错一帧。倍数变化不清——k 只影响往后的衰减，已有拖影按新系数自然衰减出去。
      */
     private fun drawEchoPass(hasFrame: Boolean) {
-        if (!echoParams.enabled) return
+        // Y13：本帧固定快照——累积与两条合成槽同一代参数，绝不中途再读可变字段
+        val p = echoFrameParams
+        if (!p.enabled) return
         if (!hasFrame) return
         if (encoderEglSurface == null && windowEglSurface == null) return
         if (encoderEglSurface == null && windowThrottled()) return
         val uv = glowIdentityUv ?: return
         val chain = echoChain ?: return
-        val trailMode = echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL
-        // docs/plan/35 E8：模式切换与补丁档（trailColorMode/trailColor/trailTol）变化同路清面——
-        // 旧门控攒下的拖尾留在面里会被新门控语义继续叠进成片。取整份快照比对四个字段，零分配。
-        val last = echoAppliedTrailParams
-        val patchChanged = last != null && (
-            (last.mode == com.wotagei.cam.core.EchoMode.TRAIL) != trailMode ||
-                last.trailColorMode != echoParams.trailColorMode ||
-                last.trailColor != echoParams.trailColor ||
-                last.trailTol != echoParams.trailTol
-            )
-        if (echoStaleSinceOrientationChange || patchChanged) {
+        val trailMode = p.mode == com.wotagei.cam.core.EchoMode.TRAIL
+        // R2 §五.2：转屏/换前后摄后旧朝向的残影留在面里会被当成本帧历史继续叠进成片。
+        // TRAIL 语义切换的清面由 setEchoParams 在同一 GL 操作里完成（Y13，不再逐帧比对）。
+        if (echoStaleSinceOrientationChange) {
             chain.reset()
             echoStaleSinceOrientationChange = false
         }
-        echoAppliedTrailParams = echoParams
-        val tintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
+        val tintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(p)
         val ok = chain.draw(
             oesTextureId = oesTextureId,
             texMatrix = stMatrix,
@@ -2884,15 +2920,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             scale = com.wotagei.cam.core.glowScaleFor(
                 wantFrameWidth, wantFrameHeight, if (encoderFps > 0) encoderFps else 30
             ),
-            decay = com.wotagei.cam.core.echoDecayOf(echoParams.multiplier),
+            decay = com.wotagei.cam.core.echoDecayOf(p.multiplier),
             trailMode = trailMode,
-            threshold = echoParams.threshold,
+            threshold = p.threshold,
             // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5）：core 层纯函数推导，链上只查表
-            trailMask = com.wotagei.cam.core.echoTrailMaskOf(echoParams),
+            trailMask = com.wotagei.cam.core.echoTrailMaskOf(p),
             trailTintR = tintRgb[0],
             trailTintG = tintRgb[1],
             trailTintB = tintRgb[2],
-            trailTol = com.wotagei.cam.core.echoTrailTolOf(echoParams)
+            trailTol = com.wotagei.cam.core.echoTrailTolOf(p)
         )
         echoFrameTex = if (ok) chain.resultTex else 0
     }
@@ -2943,8 +2979,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     /**
      * 残影维度（R2 §四.5）：scene layer，两槽都带、进成片。与 [glowOn] 同一条纪律：
      * `enabled` 一变，两槽的键就变（走会话缓存，不重编）。
+     *
+     * 取 [echoLiveParams]（GL 线程已生效的那一代）而不是 UI 意图：program 键必须与
+     * `drawPass` 读到的本帧快照同代，否则会出现"键说没开、uniform 却按开着采黑图"的错帧。
+     * 只在 GL 线程调用（syncMovieSlot/syncDisplaySlot/prepareGlowPrograms）。
      */
-    private fun echoOn(): Boolean = echoParams.enabled
+    private fun echoOn(): Boolean = echoLiveParams.enabled
 
     /**
      * **成片槽**同步：必须在编码 pass 之前调（[drawFrame]）。键 = [movieProgramKey]，effect 恒 NONE。
@@ -3347,7 +3387,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         echoChain = null
         echoFrameTex = 0
         echoStaleSinceOrientationChange = false
-        echoAppliedTrailParams = null
+        // 本引擎单次使用；复活（R05 上下文重建）走新实例，参数从默认代重新开始
+        echoLiveParams = com.wotagei.cam.core.EchoParams.DEFAULT
+        echoFrameParams = com.wotagei.cam.core.EchoParams.DEFAULT
         // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
         // 这里兜「引擎直接销毁、没走过解绑」的那条路
         arcMendPass?.release()
