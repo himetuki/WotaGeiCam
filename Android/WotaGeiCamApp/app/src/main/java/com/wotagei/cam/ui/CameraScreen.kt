@@ -135,6 +135,8 @@ import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.wotagei.cam.R
 import com.wotagei.cam.bt.BtSpeakerController
 import com.wotagei.cam.camera.CameraController
+import com.wotagei.cam.camera.CameraPulse
+import com.wotagei.cam.camera.CameraWatchClock
 import com.wotagei.cam.camera.DeviceStatus
 import com.wotagei.cam.camera.DirectSink
 import com.wotagei.cam.camera.GlRenderEngine
@@ -835,15 +837,16 @@ fun CameraScreen(
     // 本节留在组合里、以 ctrl 为键——录制页被弹出栈时组合销毁，页面不可见也不该后台拉相机；
     // 回到页面会重新布防（各计数归零重来）。
     LaunchedEffect(ctrl, activeSink) {
-        var camLast = ctrl.frameResultCount() ?: -1L
-        var camGrowAtMs = SystemClock.elapsedRealtime()
+        // Y07：判活基准必须与帧计数**同代**读出。引擎换代（bind/forceRebind 新建引擎）时
+        // 计数从 0 起步，只比 `cam != camLast` 会把 0 当成"涨了"：新引擎一帧没出也算活着，
+        // 自愈基准被往后推。这里三代一体（代/计数/基准时刻），换代只重建基线不算进展。
+        val clock = CameraWatchClock(SystemClock.elapsedRealtime())
         var camMiss = 0
         var dispLast = ctrl.displayFrameCount() ?: -1L
         var dispGrowAtMs = SystemClock.elapsedRealtime()
-        // 上屏判据要等相机**真的出过帧**才启用：相机还没开起来时"屏上没换帧"是必然的，
-        // 那时去重挂面只会把首帧推得更晚（慢机型开相机要 1.5s+）
-        var camSeenFrames = false
         var reattachTries = 0
+        // 上屏判据要等相机**真的出过帧**才启用（见下方 clock.everSawFrames）：相机还没开起来时
+        // "屏上没换帧"是必然的，那时去重挂面只会把首帧推得更晚（慢机型开相机要 1.5s+）
         while (true) {
             delay(1000)
             val nowMs = SystemClock.elapsedRealtime()
@@ -855,15 +858,21 @@ fun CameraScreen(
                 !ctrl.isRecordingActive() &&
                 owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
 
-            val cam = ctrl.frameResultCount()
-            if (cam != null && cam != camLast) {
-                if (!camSeenFrames) {
-                    camSeenFrames = true
+            val health = ctrl.cameraHealth()
+            val cam = health?.frameCount
+            when (clock.observe(health, nowMs)) {
+                // 换代（含首次采样）：新基线，0 帧不算进展，只重开一段自愈宽限。
+                CameraPulse.REBASED -> {
                     dispGrowAtMs = nowMs
+                    camMiss = 0
                 }
-                camLast = cam
-                camGrowAtMs = nowMs
-                camMiss = 0
+                // 本代第一帧：真的出图了，上屏判据从这一刻启用。
+                CameraPulse.FIRST_FRAMES -> {
+                    dispGrowAtMs = nowMs
+                    camMiss = 0
+                }
+                CameraPulse.ADVANCED -> camMiss = 0
+                CameraPulse.STILL -> Unit
             }
             val disp = ctrl.displayFrameCount()
             if (disp != null && disp != dispLast) {
@@ -872,24 +881,22 @@ fun CameraScreen(
                 reattachTries = 0
             }
             if (!pageOkay) {
-                camGrowAtMs = nowMs
+                clock.arm(nowMs)
                 dispGrowAtMs = nowMs
                 camMiss = 0
                 reattachTries = 0
                 continue
             }
             // ① 相机侧：连续 2.5s 无新帧才算可疑（相机打开本身约 1s，避免开局误触）
-            val camDeadMs = nowMs - camGrowAtMs
+            val camDeadMs = nowMs - clock.grewAtMs
             if (camDeadMs >= 2_500L) {
                 camMiss++
                 when {
                     cam == null && camMiss >= 2 -> {
                         Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
                         ctrl.bind(activeSink)
-                        camLast = -1L
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                         camMiss = 0
                     }
                     cam == null -> Unit
@@ -908,17 +915,15 @@ fun CameraScreen(
                             "预览自愈：重启预览后仍无帧 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）"
                         )
                         ctrl.forceRebind(activeSink)
-                        camLast = -1L
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                         camMiss = 0
                     }
                 }
                 continue
             }
             // ② 上屏侧：相机在出帧而屏上不换帧——只有重挂承载面能救（重启相机做不到）
-            if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 1_500L) {
+            if (disp != null && clock.everSawFrames && nowMs - dispGrowAtMs >= 1_500L) {
                 reattachTries++
                 Log.w(
                     TAG_UI,
@@ -929,10 +934,8 @@ fun CameraScreen(
                 if (reattachTries >= 3) {
                     Log.w(TAG_UI, "预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                     ctrl.forceRebind(activeSink)
-                    camLast = -1L
-                    camGrowAtMs = nowMs
+                    clock.arm(nowMs)
                     dispGrowAtMs = nowMs
-                    camSeenFrames = false
                     reattachTries = 0
                 } else {
                     ctrl.requestDisplayReattach()

@@ -101,6 +101,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     @Volatile private var engine: Camera2Engine? = null
+
+    /**
+     * 引擎代（Y07）：每次 [bind] 新建引擎 +1。帧计数只在同一代内可比，替代引擎的
+     * `camResultTotal` 从 0 起步，看门狗必须换代重建基线，不能把 0 当成进展。
+     */
+    private var engineEpoch = 0L
     private var analysisSessionOwner: Any? = null
 
     /**
@@ -306,6 +312,8 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         boundSink = sink
         val sessionOwner = Any()
         analysisSessionOwner = sessionOwner
+        // Y07：新引擎的帧计数从 0 起步——换代发号让看门狗能区分"换引擎"与"真涨帧"。
+        engineEpoch++
         engine = Camera2Engine(
             context = getApplication(),
             params = params,
@@ -403,6 +411,14 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     /** 相机结果回调累计数（给预览自愈心跳用；null = 引擎不在） */
     fun frameResultCount(): Long? = engine?.frameResultCount()
+
+    /**
+     * 相机存活快照（Y07）：**代数与单调帧计数同代读出**，替代裸 [frameResultCount] 的跨代比较。
+     * 看门狗用 [CameraWatchClock] 消费：换代 = 重建基线（0 帧不算进展），首帧到达才推进基准。
+     * null = 引擎不在（调用方按"无引擎"计时，不许拿旧代计数继续判活）。
+     */
+    fun cameraHealth(): CameraHealth? =
+        engine?.let { CameraHealth(engineEpoch, it.frameResultCount()) }
 
     /**
      * 上屏帧累计数（窗口面 swap 成功数，单调）。**与 [frameResultCount] 是两条独立的心跳**：

@@ -52,6 +52,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.CameraController
+import com.wotagei.cam.camera.CameraPulse
+import com.wotagei.cam.camera.CameraWatchClock
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.ClipRule
@@ -214,12 +216,12 @@ class MainActivity : ComponentActivity() {
         if (ctrl == null) return
         if (previewWatchJob?.isActive == true) return
         previewWatchJob = lifecycleScope.launch {
-            var camLast = -1L
-            var camGrowAtMs = SystemClock.elapsedRealtime()
+            // Y07：判活基准必须与帧计数同代读出。引擎换代（bind/forceRebind 新建引擎）时
+            // 计数从 0 起步，旧实现只比 `cam != camLast` 会把 0 当成"涨了"，误判活着、
+            // 把自愈基准往后推 —— 新引擎实际一帧没出也会被当成有进展。
+            val clock = CameraWatchClock(SystemClock.elapsedRealtime())
             var dispLast = -1L
             var dispGrowAtMs = SystemClock.elapsedRealtime()
-            // 上屏判据要等相机真的出过帧才启用（相机还没起来时"屏上没帧"是必然的）
-            var camSeenFrames = false
             var restarted = false
             var reattachTries = 0
             while (isActive) {
@@ -228,9 +230,8 @@ class MainActivity : ComponentActivity() {
                 val nowMs = SystemClock.elapsedRealtime()
                 // 只在真正可见时判（后台/其它页不算）
                 if (lifecycle.currentState != Lifecycle.State.RESUMED) {
-                    camGrowAtMs = nowMs
+                    clock.arm(nowMs)
                     dispGrowAtMs = nowMs
-                    camSeenFrames = false
                     restarted = false
                     reattachTries = 0
                     continue
@@ -241,22 +242,27 @@ class MainActivity : ComponentActivity() {
                 // R04：录制窗口（含 PREPARE/换段）内不得在底下拆会话或重建引擎——编码器已拿面，
                 // 重建会把在写的段变成零帧/坏段。窗口期间只把计时器推平；结束后重新计满再介入。
                 if (ctrl.isRecordingActive()) {
-                    camGrowAtMs = nowMs
+                    clock.arm(nowMs)
                     dispGrowAtMs = nowMs
-                    camSeenFrames = false
                     restarted = false
                     reattachTries = 0
                     continue
                 }
-                val cam = ctrl.frameResultCount()
-                if (cam != null && cam != camLast) {
-                    if (!camSeenFrames) {
-                        camSeenFrames = true
+                val health = ctrl.cameraHealth()
+                val cam = health?.frameCount
+                when (clock.observe(health, nowMs)) {
+                    // 换代（含首次采样）：只是重建基线，**0 帧不算进展**。
+                    CameraPulse.REBASED -> {
                         dispGrowAtMs = nowMs
+                        restarted = false
                     }
-                    camLast = cam
-                    camGrowAtMs = nowMs
-                    restarted = false
+                    // 本代第一帧：真的出图了，上屏判据从这一刻启用。
+                    CameraPulse.FIRST_FRAMES -> {
+                        dispGrowAtMs = nowMs
+                        restarted = false
+                    }
+                    CameraPulse.ADVANCED -> restarted = false
+                    CameraPulse.STILL -> Unit
                 }
                 val disp = ctrl.displayFrameCount()
                 if (disp != null && disp != dispLast) {
@@ -264,14 +270,13 @@ class MainActivity : ComponentActivity() {
                     dispGrowAtMs = nowMs
                     reattachTries = 0
                 }
-                val camDeadMs = nowMs - camGrowAtMs
+                val camDeadMs = nowMs - clock.grewAtMs
                 if (camDeadMs >= 4_000L) {
                     if (cam == null) {
                         Log.w("WotaWatch", "Activity 级预览自愈：引擎不在 ⇒ 重新绑定")
                         ctrl.currentSink()?.let { ctrl.bind(it) }
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                     } else if (!restarted) {
                         restarted = true
                         Log.w("WotaWatch", "Activity 级预览自愈：${camDeadMs}ms 无相机帧 ⇒ 重启预览")
@@ -280,15 +285,14 @@ class MainActivity : ComponentActivity() {
                     } else if (camDeadMs >= 10_000L) {
                         Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                         restarted = false
                     }
                     continue
                 }
                 // 上屏侧：相机在出帧而屏上不换帧（r31 的盲区）——重启相机没用，只能重挂面
-                if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 2_500L) {
+                if (disp != null && clock.everSawFrames && nowMs - dispGrowAtMs >= 2_500L) {
                     reattachTries++
                     Log.w(
                         "WotaWatch",
@@ -299,8 +303,7 @@ class MainActivity : ComponentActivity() {
                     if (reattachTries >= 3) {
                         Log.w("WotaWatch", "Activity 级预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        camGrowAtMs = nowMs
-                        camSeenFrames = false
+                        clock.arm(nowMs)
                         reattachTries = 0
                     } else {
                         ctrl.requestDisplayReattach()
