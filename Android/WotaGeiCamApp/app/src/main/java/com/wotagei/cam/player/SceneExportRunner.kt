@@ -269,17 +269,17 @@ class SceneExportRunner(private val ctx: Context) {
                 val srcFps = vFormat.intOr(MediaFormat.KEY_FRAME_RATE, 0)
                 val srcBitrate = vFormat.intOr(MediaFormat.KEY_BIT_RATE, 0)
 
-                // ---- 时间基准：入点之后第一个**视频样本**的源 PTS。
-                // 必须先扫出来（只读样本头、不解码），因为音轨预扫和「建不建音轨」都发生在
-                // muxer.start() 之前，而 start() 一过就再也不能 addTrack
-                ex.selectTrack(vIdx)
-                ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-                while (ex.sampleTime in 0 until startUs) {
-                    if (!ex.advance()) break
+                // 用已有的样本头扫描同时定位最早呈现 PTS 与最后一个界内样本。
+                // 解码序首个界内样本可能是 P 帧。用它定零会把较早呈现的 B 帧压到同一时刻。
+                val scan = scanTargetSamples(ex, vIdx, startUs, endUs, job)
+                val basePtsUs = if (scan.safe) {
+                    scan.firstPtsUs ?: return@withContext fail(owner, Reason.RANGE)
+                } else {
+                    // 部分访问单元与输出帧不保证一一对应，音画共同使用用户指定的入点。
+                    startUs
                 }
-                val basePtsUs = ex.sampleTime
-                if (basePtsUs < 0L || basePtsUs >= endUs) return@withContext fail(owner, Reason.RANGE)
-                // 内录轨按同步偏移平移（与 ClipExport 同一枚纯函数，别在别处再写一份）
+                val lastTargetIndex = if (scan.safe) scan.lastIndex else -1
+                val boundedInput = lastTargetIndex >= 0
                 val shiftUs = TrackRule.shiftUsFor(track, offsetMs)
 
                 // ---- 编码器（surface 输入）
@@ -325,7 +325,7 @@ class SceneExportRunner(private val ctx: Context) {
                 val audioTrack = if (audioFormat != null && audioIdx >= 0 &&
                     audioTrackWritable(
                         ex, audioIdx, basePtsUs, shiftUs, endUs - basePtsUs,
-                        AUDIO_TAIL_TOLERANCE
+                        AUDIO_TAIL_TOLERANCE, seekUs = sceneExportAudioSeekUs(basePtsUs, shiftUs)
                     )
                 ) {
                     muxer?.addTrack(audioFormat) ?: -1
@@ -336,13 +336,6 @@ class SceneExportRunner(private val ctx: Context) {
                     -1
                 }
 
-                // 先只读样本头扫出目标区间的最后一个视频样本索引：这能证明“后面没有界内样本”，
-                // 而不像输出 PTS 前缀那样把未来单调当安全前提。扫描只 advance()，不解码、不读数据。
-                // 含 PARTIAL_FRAME 的输入可能一个样本不是完整访问单元，退回读到 EOF 的保守路径。
-                val scan = if (endUs > startUs) scanTargetSamples(ex, vIdx, startUs, endUs) else null
-                val lastTargetIndex = scan?.takeIf { it.safe }?.lastIndex ?: -1
-                val expectedTargets = scan?.takeIf { it.safe }?.expected ?: 0
-                val boundedInput = lastTargetIndex >= 0
                 ex.selectTrack(vIdx)
                 ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
 
@@ -402,12 +395,15 @@ class SceneExportRunner(private val ctx: Context) {
                                 // 只会停在最新一帧，后续提交帧的时机会错位
                                 if (!engine.awaitFrame()) return@withContext fail(owner, Reason.GL)
                                 if (submit) {
-                                    if (!engine.acquireAndRender(sceneExportPtsUs(ptsUs, basePtsUs))) {
+                                    val outputPtsUs = sceneExportPtsUs(ptsUs, basePtsUs)
+                                    // 样本扫描与解码器若给出互相矛盾的时间轴，不发布错误的成片。
+                                    if (outputPtsUs < 0L) return@withContext fail(owner, Reason.RANGE)
+                                    if (!engine.acquireAndRender(outputPtsUs)) {
                                         return@withContext fail(owner, Reason.GL)
                                     }
                                     submitted++
                                     val total = (endUs - basePtsUs).coerceAtLeast(1L)
-                                    onProgress(((ptsUs - basePtsUs).toFloat() / total).coerceIn(0f, 0.99f))
+                                    onProgress((outputPtsUs.toFloat() / total).coerceIn(0f, 0.99f))
                                 } else {
                                     engine.acquireOnly()
                                 }
@@ -444,12 +440,12 @@ class SceneExportRunner(private val ctx: Context) {
                     }
                 }
 
-                if (boundedInput && submitted != expectedTargets.toLong()) {
+                if (boundedInput && submitted != scan.expected.toLong()) {
                     // 有界路径依赖“样本=完整访问单元且与输出帧一一对应”。若实跑数量不符，
                     // 宁可显式失败也不发布缺帧成片；此时尚未封轨，pending 由 owner 回收。
                     Log.w(
                         TAG,
-                        "有界输入核验失败：目标样本=$expectedTargets 实际提交=$submitted"
+                        "有界输入核验失败：目标样本=${scan.expected} 实际提交=$submitted"
                     )
                     return@withContext fail(owner, Reason.RANGE)
                 }
@@ -542,43 +538,51 @@ class SceneExportRunner(private val ctx: Context) {
         }
     }
 
-    private data class TargetSampleScan(val lastIndex: Int, val expected: Int, val safe: Boolean)
+    private data class TargetSampleScan(
+        val lastIndex: Int,
+        val expected: Int,
+        val firstPtsUs: Long?,
+        val safe: Boolean
+    )
 
     /**
-     * 只读样本头定位目标区间的最后一个视频样本；不解码、不读 payload。
-     * 含 [MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME] 时一个样本可能不是完整访问单元，
-     * 无法把“最后目标样本”等同于“最后目标输出帧”，返回 safe=false 让调用方读源到尾。
+     * 只扫描样本头，定位目标区间的最早呈现时刻与最后一个解码序索引。
+     * 部分访问单元无法建立样本与帧的映射，此时保持完整的解码输入。
      */
     private fun scanTargetSamples(
         ex: MediaExtractor,
         videoTrack: Int,
         startUs: Long,
-        endUs: Long
-    ): TargetSampleScan = runCatching {
-        for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
+        endUs: Long,
+        job: Job?
+    ): TargetSampleScan {
         ex.selectTrack(videoTrack)
-        ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-        var index = 0
-        var lastIndex = -1
-        var expected = 0
-        var safe = true
-        while (true) {
-            // EOF 的唯一判据是样本索引 -1；开放 GOP 的负 PTS 是合法前导，不能当文件结束。
-            val track = ex.sampleTrackIndex
-            if (track < 0) break
-            val pts = ex.sampleTime
-            if (track == videoTrack) {
-                if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) safe = false
-                if (pts >= startUs && pts < endUs) {
+        try {
+            ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            var index = 0
+            var lastIndex = -1
+            var expected = 0
+            var minPts = Long.MAX_VALUE
+            while (ex.sampleTrackIndex >= 0) {
+                job?.ensureActive()
+                // 开放 GOP 的负 PTS 是合法前导。EOF 只由 sampleTrackIndex/advance 确定。
+                if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) {
+                    return TargetSampleScan(-1, 0, null, false)
+                }
+                val pts = ex.sampleTime
+                if (sceneExportShouldSubmit(pts, startUs, endUs)) {
+                    minPts = minOf(minPts, pts)
                     lastIndex = index
                     expected++
                 }
                 index++
+                if (!ex.advance()) break
             }
-            if (!ex.advance()) break
+            return TargetSampleScan(lastIndex, expected, minPts.takeIf { expected > 0 }, true)
+        } finally {
+            ex.unselectTrack(videoTrack)
         }
-        TargetSampleScan(lastIndex, expected, safe)
-    }.getOrElse { TargetSampleScan(-1, 0, false) }
+    }
 
     // ---------------------------------------------------------------- 音轨
 
@@ -606,7 +610,7 @@ class SceneExportRunner(private val ctx: Context) {
         // 5.2 Mbps、AAC 帧里夹着 20KB 的巨块）
         for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
         ex.selectTrack(audioIdx)
-        ex.seekTo(basePtsUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        ex.seekTo(sceneExportAudioSeekUs(basePtsUs, shiftUs), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         val endRelUs = endUs - basePtsUs
         val info = MediaCodec.BufferInfo()
         var buf: ByteBuffer = ByteBuffer.allocateDirect(INITIAL_AUDIO_BUF)

@@ -89,7 +89,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
     fun writable(extractor: Any, baseUs: Long, shiftUs: Long, endRelUs: Long, trackIndex: Int = 2): Boolean {
         val method = type("com.wotagei.cam.player.ClipExportKt").declaredMethods.single { it.name == "audioTrackWritable" }
         method.isAccessible = true
-        return invoke { method.invoke(null, extractor, trackIndex, baseUs, shiftUs, endRelUs, 8) as Boolean }
+        return invoke { method.invoke(null, extractor, trackIndex, baseUs, shiftUs, endRelUs, 8, baseUs) as Boolean }
     }
     fun gl(scene: Boolean, basePtsNs: Long = 0L): Any {
         val instance = if (scene) {

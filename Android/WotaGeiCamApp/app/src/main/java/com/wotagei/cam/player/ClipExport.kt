@@ -131,8 +131,8 @@ object ClipRule {
 /**
  * 预扫一条音轨：在 `[baseUs, baseUs + endRelUs]` 内是否至少有**一枚**会被写出的样本。
  *
- * 调用方约束：本函数会把 extractor 的选择与游标全部挪走（只留这一条轨、seek 到 [baseUs]），
- * 返回后必须重新 `selectTrack` 并从 [baseUs] 重新定位。
+ * 本函数会挪走 extractor 的选择与游标（只留这一条轨、seek 到 [seekUs]）。
+ * 返回后调用方必须重新选轨。混合读取原轨的剪辑/选轨导出沿用 [baseUs] 定位，独立音轨读取可以传反推入点。
  *
  * 条件封轨与拷贝循环同口径：连续 [tailTolerance] 枚越界样本判该轨已结束（B 帧重排容忍）。
  */
@@ -142,11 +142,12 @@ internal fun audioTrackWritable(
     baseUs: Long,
     shiftUs: Long,
     endRelUs: Long?,
-    tailTolerance: Int = 8
+    tailTolerance: Int = 8,
+    seekUs: Long = baseUs
 ): Boolean {
     for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
     ex.selectTrack(track)
-    ex.seekTo(baseUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+    ex.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
     var outOfRange = 0
     try {
         while (outOfRange < tailTolerance) {

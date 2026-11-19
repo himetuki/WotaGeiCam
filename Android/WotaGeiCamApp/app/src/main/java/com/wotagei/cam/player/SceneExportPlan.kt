@@ -89,11 +89,13 @@ fun sceneExportBitrate(sourceBitrate: Int): Int =
     if (sourceBitrate in 1_000_000..200_000_000) sourceBitrate else 8_000_000
 
 /**
- * 输出帧的呈现时间戳（微秒）：源 PTS 减首帧基准，负值钳 0。
- * 解码器从关键帧起喂，早于入点的帧不进编码器（由 [sceneExportShouldSubmit] 判）。
+ * 源 PTS 减音画共同基准。调用方必须在提交前拒绝负值，以免不同帧被压到同一时刻。
  */
-fun sceneExportPtsUs(sourcePtsUs: Long, basePtsUs: Long): Long =
-    (sourcePtsUs - basePtsUs).coerceAtLeast(0L)
+fun sceneExportPtsUs(sourcePtsUs: Long, basePtsUs: Long): Long = sourcePtsUs - basePtsUs
+
+/** 从 `source - base + shift >= 0` 反推音频读取起点。解码器与原始音轨各自定位。 */
+internal fun sceneExportAudioSeekUs(basePtsUs: Long, shiftUs: Long): Long =
+    (basePtsUs - shiftUs).coerceAtLeast(0L)
 
 /** 这一帧该不该进编码器：源 PTS ∈ [startUs, endUs)（区间外只解码、不提交） */
 fun sceneExportShouldSubmit(sourcePtsUs: Long, startUs: Long, endUs: Long): Boolean =
