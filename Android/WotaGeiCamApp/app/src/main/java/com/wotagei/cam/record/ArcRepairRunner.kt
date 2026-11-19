@@ -34,6 +34,19 @@ private const val ENC_DRAIN_LIMIT_MS = 3_000L
 private const val DEADLINE_FACTOR = 8L
 private const val DEADLINE_EXTRA_MS = 120_000L
 
+/**
+ * 准备期（打开源/量帧率/预扫音轨/建编解码器）的独立截止。
+ * 旧实现只在主循环建 deadline：源在 setDataSource/帧率遍历上卡住时任务可以无限期挂着，
+ * 取消也要等 open() 自己返回才有检查点。60s 覆盖冷启动大文件的一次完整预扫。
+ */
+private const val PREPARE_DEADLINE_MS = 60_000L
+
+/** 准备期循环里每扫这么多条样本查一次取消/截止（大文件也不至于几百毫秒才响应一次） */
+private const val ABORT_CHECK_STRIDE = 64
+
+/** 音频可写性预扫的样本上限（防病态容器把建轨前检查拖死；超过上限按不可写处理，只影响该 lane） */
+private const val MAX_AUDIO_PRESCAN_SAMPLES = 100_000
+
 /** 统计源帧数时的上限（防畸形容器把计数循环拖死） */
 private const val MAX_SRC_FRAMES = 2_000_000
 
@@ -170,10 +183,18 @@ class ArcRepairRunner(private val ctx: Context) {
     private val thread = HandlerThread("WotaArcRepair").apply { start() }
     private val handler = Handler(thread.looper)
 
-    @Volatile
-    private var cancelRequested = false
+    /**
+     * 任务所有权/取消门（Y23）：**投递之前**在主线程领 token，拿不到说明已有任务在跑。
+     * 旧实现先 post 再查 `busy`，两次 start 依次入队后会真的跑两轮；`stopAsync` 的进程级
+     * 标志又会被排队中的 start 在消息内复位，取消被下一轮吞掉。现在取消按 token 记账。
+     */
+    private val gate = ArcRepairTaskGate()
 
-    /** 同一时刻只允许一个任务（管线本身占满这条线程） */
+    /** 当前持有所有权的 token（0 = 空闲）；仅 [start] 写入、任务收尾清零 */
+    @Volatile
+    private var activeToken = 0L
+
+    /** 同一时刻只允许一个任务（管线本身占满这条线程）；仅用于 shutdownAfterTask 的排队判断 */
     @Volatile
     private var busy = false
 
@@ -205,16 +226,25 @@ class ArcRepairRunner(private val ctx: Context) {
         deadband: Int = ArcMergeDeadband.deadband,
         capOffsetMs: Int = 0
     ) {
+        // 所有权在**调用线程**领取（Y23）：拿到 token 才代表这一轮真的存在，未拿到直接忽略。
+        // 这样连续 start 两次只有第一轮会执行，也不会出现"排队后再复位取消"。
+        val token = gate.begin() ?: run {
+            Log.i(TAG_ARC, "已有任务在跑，忽略重复 start")
+            return
+        }
+        activeToken = token
+        busy = true
+        status.value = ArcRepairStatus.RUNNING
+        progress.value = arcRepairProgress(ArcProgressStage.PREPARE, 0, 0)
+        result.value = null
+        val startedAtMs = SystemClock.elapsedRealtime()
         handler.post {
-            if (busy) {
-                Log.i(TAG_ARC, "已有任务在跑，忽略重复 start")
+            // token 可能在 post 之后、执行之前被 stopAsync 取消（排队/准备期取消立即生效）
+            if (!gate.isCurrent(token) || gate.isCancelled(token)) {
+                Log.i(TAG_ARC, "任务在排队期被取消")
+                finishTask(token, ArcRepairResult(false, null, null, 0L, ArcRepairError.CANCELLED))
                 return@post
             }
-            busy = true
-            cancelRequested = false
-            status.value = ArcRepairStatus.RUNNING
-            progress.value = 0f
-            result.value = null
             val out = try {
                 ArcRepairSession(
                     ctx = ctx,
@@ -223,33 +253,46 @@ class ArcRepairRunner(private val ctx: Context) {
                     dstFps = dstFps,
                     deadband = ArcMergeDeadband.clamp(deadband),
                     capOffsetMs = capOffsetMs,
+                    taskStartedAtMs = startedAtMs,
                     onProgress = { progress.value = it },
-                    cancelled = { cancelRequested }
+                    cancelled = { gate.isCancelled(token) }
                 ).run()
             } catch (e: Throwable) {
                 // 会话内部已把异常转成结果；这里再兜一层，保证"绝不崩"
                 Log.e(TAG_ARC, "会话未按预期返回：${e.javaClass.simpleName} ${e.message}")
                 ArcRepairResult(false, null, null, 0L, "${ArcRepairError.ENGINE}:${e.javaClass.simpleName}")
             }
-            busy = false
-            result.value = out
-            status.value = if (out.ok) ArcRepairStatus.DONE else ArcRepairStatus.FAILED
-            progress.value = if (out.ok) 1f else progress.value
-            Log.i(TAG_ARC, "任务结束 ok=${out.ok} err=${out.error} uri=${out.uri} note=${out.note}")
-            // 页面已离开：结果已写回 StateFlow，本线程没有后续任务，收尾后自行退出。
-            // 从 handler 线程调用 quitSafely() 是合法的（当前消息处理完后终止 Looper）。
-            if (quitAfterTask) thread.quitSafely()
+            finishTask(token, out)
         }
     }
 
-    /** 请求取消（非阻塞）：管线在每个循环里检查，收尾时弃掉半成品 */
+    /** 一轮任务收尾：先归还所有权，再写结果/状态，最后按需退线程 */
+    private fun finishTask(token: Long, out: ArcRepairResult) {
+        gate.end(token)
+        if (activeToken == token) activeToken = 0L
+        busy = false
+        result.value = out
+        status.value = if (out.ok) ArcRepairStatus.DONE else ArcRepairStatus.FAILED
+        progress.value = if (out.ok) {
+            arcRepairProgress(ArcProgressStage.PUBLISHED, 0, 0)
+        } else {
+            progress.value.coerceAtMost(arcRepairProgress(ArcProgressStage.FINALIZE, 0, 0))
+        }
+        Log.i(TAG_ARC, "任务结束 ok=${out.ok} err=${out.error} uri=${out.uri} note=${out.note}")
+        // 页面已离开：结果已写回 StateFlow，本线程没有后续任务，收尾后自行退出。
+        // 从 handler 线程调用 quitSafely() 是合法的（当前消息处理完后终止 Looper）。
+        if (quitAfterTask) thread.quitSafely()
+    }
+
+    /** 请求取消（非阻塞）：只取消当前持有所有权的那一轮；准备期各检查点会立即抛 CANCELLED */
     fun stopAsync() {
-        cancelRequested = true
+        val token = activeToken
+        if (token != 0L) gate.cancel(token)
     }
 
     /** 退出页面：同步等收尾完成，保证 pending 记录不会留成幽灵条目 */
     fun shutdown() {
-        cancelRequested = true
+        stopAsync()
         val latch = CountDownLatch(1)
         handler.post {
             latch.countDown()
@@ -299,9 +342,17 @@ private class ArcRepairSession(
     private val deadband: Int,
     /** 播放页缓存的同步偏移（ms，正=内录晚）；只作用于双音轨第 2 条，单音轨恒 0 */
     private val capOffsetMs: Int,
+    /** 本轮任务**投递前**的时刻（Y23）：准备期也要有截止，不能等主循环才起算 */
+    private val taskStartedAtMs: Long,
     private val onProgress: (Float) -> Unit,
     private val cancelled: () -> Boolean
 ) {
+
+    /**
+     * 当前阶段的截止时刻。准备期（open）用 [PREPARE_DEADLINE_MS]；读到源时长后扩成
+     * `时长×DEADLINE_FACTOR + 余量`，主循环与收尾共用同一枚绝对时刻。
+     */
+    private var deadlineMs = taskStartedAtMs + PREPARE_DEADLINE_MS
 
     private var store: VideoStore? = null
     private var sink: OutputSink? = null
@@ -315,6 +366,13 @@ private class ArcRepairSession(
 
     private var videoTrack = -1
     private var muxStarted = false
+
+    /**
+     * 音频轨是否已加入 muxer（Y25）：延迟到第一帧解码后、muxer.start 之前才 addTrack。
+     * 只有那时 [decodePtsBase] 才是**拷贝真正使用的时基**，预扫与拷贝才能共用同一判据；
+     * open() 里提前建轨正是"预扫说可写、实际零样本"的来源。
+     */
+    private var audioTracksAdded = false
 
     /** 本会话已**成功**写出的视频样本数（写失败不计数）：成功判据第三格，见 [arcRepairOk] */
     private var writtenVideoSamples = 0
@@ -351,6 +409,13 @@ private class ArcRepairSession(
 
     /** muxer 写样本失败的失败码：run() 收尾时优先于 NO_VIDEO（与 CodecRecorder.writeSample 的 :MUX 映射同语义） */
     private var writeFailCode: String? = null
+
+    /**
+     * 编码器排空失败的失败码（Y24）：dequeue 异常或末次排空超时。
+     * 旧实现把 `videoDone=true` 后照样返回成功，末帧被吞也判完成；现在由 [arcRunVerdict]
+     * 把它带进结果码（非纯成功）。
+     */
+    private var encodeFailCode: String? = null
 
     /**
      * #8 单调兜底账本（桥见 [monotonicPts]，与录制链 CodecRecorder.writeSample 同口径）：
@@ -392,8 +457,15 @@ private class ArcRepairSession(
             // 成功判据走纯函数 arcRepairOk（JVM 全表单测）：muxer 启动 + 视频轨已建 + 视频样本
             // 真的写出去过。只拦"零样本整废"（盘满时逐样本写失败 ⇒ 成片只剩 ftyp 头也曾被报成功），
             // "部分样本失败"仍算成功（可播但缺帧的产物改判失败代价不对称，取舍见 arcRepairOk 注释）。
-            ok = arcRepairOk(muxStarted, videoTrack >= 0, writtenVideoSamples)
-            if (!ok) code = code ?: writeFailCode ?: ArcRepairError.NO_VIDEO
+            // Y24：编码器排空异常/末次超时留下的 encodeFailCode 必须把结果从"纯成功"里剔出去。
+            val verdict = arcRunVerdict(
+                ok = arcRepairOk(muxStarted, videoTrack >= 0, writtenVideoSamples),
+                encodeFail = encodeFailCode,
+                writeFail = writeFailCode,
+                fallback = ArcRepairError.NO_VIDEO
+            )
+            ok = verdict.ok
+            if (!ok && code == null) code = verdict.code
             // 修正汇总（#8，B 帧源预期行为）：逐样本明细在 d 档（默认关），终止只落一条 i 级。
             // 插值用 ${} 花括号形式（与 CodecRecorder 段尾汇总同款）：源码守卫只认花括号里的代码
             val aPtsFixes = audioLanes.sumOf { it.ptsFixes }
@@ -417,6 +489,9 @@ private class ArcRepairSession(
     // region 打开与建轨
 
     private fun open() {
+        // 排队期/准备期的取消必须在这里就生效（Y23）：旧实现只有主循环每轮才看 cancel，
+        // setDataSource/帧率预扫/建编解码器这段几十秒里点取消没有任何反应。
+        checkAbort()
         val videoEx = MediaExtractor()
         vEx = videoEx
         try {
@@ -424,6 +499,7 @@ private class ArcRepairSession(
         } catch (e: IOException) {
             throw ArcFail(ArcRepairError.SOURCE)
         }
+        checkAbort()
         val vTrack = findTrack(videoEx, "video/")
         if (vTrack < 0) throw ArcFail(ArcRepairError.SOURCE)
         videoEx.selectTrack(vTrack)
@@ -452,13 +528,17 @@ private class ArcRepairSession(
         val rawDeltas = ArrayList<Long>(512)
         var prevSampleUs = -1L
         var scanned = 0
-        while (scanned < MAX_SRC_FRAMES && videoEx.sampleTime >= 0L) {
+        // Y25：EOF 以**样本存在性**（sampleSize）判定，不看 sampleTime 的符号——B04 已确认
+        // 负 PTS 前导是合法样本，旧条件 `sampleTime >= 0` 会在首枚负前导处提前收工、退回容器帧率。
+        while (scanned < MAX_SRC_FRAMES && videoEx.sampleSize >= 0L) {
             val t = videoEx.sampleTime
             if (prevSampleUs >= 0L) rawDeltas.add(t - prevSampleUs)
             prevSampleUs = t
             scanned++
+            if (scanned % ABORT_CHECK_STRIDE == 0) checkAbort()
             if (!videoEx.advance()) break
         }
+        checkAbort()
         srcRate = ArcRateProbe.measuredSrcFps(rawDeltas, containerFps.toLong(), 1L)
         srcFps = srcRate.roundedInt()
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
@@ -470,11 +550,15 @@ private class ArcRepairSession(
             countSamples(videoEx)
         }
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-        // 视频首样本 PTS（容器时间轴）：内录 lane 的零样本预扫用它做保守基准。
-        // 首样本（解码序）PTS ≥ 首帧显示 PTS，用它算出的可写性只会更严，不会漏掉"全负"。
-        val videoBasePtsUs = videoEx.sampleTime.coerceAtLeast(0L)
+        // 音频可写判据**不再**在这里预扫（Y25）：那会让预扫与拷贝各用一个时基
+        // （旧预扫吃视频首样本 PTS，拷贝吃首帧显示 PTS）。统一在 muxer.start 之前、
+        // decodePtsBase 已确定时跑一次，见 startMuxerIfReady。
         if (dstFps <= 0) throw ArcFail(ArcRepairError.SOURCE)
         if (srcRate.atMostInt(dstFps)) throw ArcFail(ArcRepairError.NO_NEED)
+        // 源时长已知：准备期截止扩成正式任务截止（主循环与收尾共用这一枚绝对时刻）
+        deadlineMs = taskStartedAtMs +
+            (if (durationMs > 0) durationMs * DEADLINE_FACTOR else DEADLINE_EXTRA_MS) + DEADLINE_EXTRA_MS
+        checkAbort()
         val plan = ArcRepairPlan.of(srcFrames, srcRate.num, srcRate.den, dstFps)
         if (plan.dstFrames <= 0) throw ArcFail(ArcRepairError.SOURCE)
         dstTotal = plan.dstFrames
@@ -493,7 +577,8 @@ private class ArcRepairSession(
         // track2 内录 AudioPlaybackCapture）。单轨时代 findTrack 命中即返回，内录轨被整体丢掉
         // ——本缺陷点。枚举复用视频 extractor（数轨不动样本游标）；建 lane 时每轨**各配一枚新
         // extractor**：同一 extractor 只能 select 一条轨（约束不变，×N）。
-        audioLanes = openAudioLanes(audioTrackIndices(videoEx), videoBasePtsUs)
+        audioLanes = openAudioLanes(audioTrackIndices(videoEx))
+        checkAbort()
 
         // 输出与封装。成片名带抽帧前缀（"30fto24f_"，源=实测帧率）：名字上可辨本片被抽过帧
         val st = VideoStore(ctx)
@@ -505,21 +590,12 @@ private class ArcRepairSession(
         val t = OutputTarget.open(ctx, sk) ?: throw ArcFail(RecordError.NO_OUTPUT)
         target = t
         muxer = openMuxer(t, hint)
+        checkAbort()
+        // 音频轨**不在这里 addTrack**（Y25）：等首帧解码后由 startMuxerIfReady 用拷贝真正
+        // 使用的时基（decodePtsBase）逐 lane 验收，零可写样本的 lane 直接不建轨。提前建轨
+        // 会在"只有视频起点前短样本"的分布上留下零样本轨，muxer.stop 抛错、整份产物被回收。
         for (lane in audioLanes) {
-            // 源音频不是封装器认识的格式（或 csd 缺失）时，宁可没有该音轨也不整单失败；
-            // addTrack 失败只降级本 lane（done + 释放），不连坐其他音轨
-            lane.muxTrack = try {
-                muxer!!.addTrack(lane.format)
-            } catch (e: Exception) {
-                Log.i(TAG_ARC, "音频轨 ${lane.label} 加入失败，该轨改无音轨继续：${e.message}")
-                -1
-            }
-            if (lane.muxTrack >= 0) {
-                Log.i(TAG_ARC, "音频轨已加（直拷）label=${lane.label} srcTrack=${lane.trackIndex} muxTrack=${lane.muxTrack}")
-            } else {
-                lane.done = true
-                lane.release()
-            }
+            Log.i(TAG_ARC, "音频 lane 待建轨（start 前验收可写性）label=${lane.label} srcTrack=${lane.trackIndex}")
         }
 
         // 编码器（复用 CodecRecorder 的能力探测与参数口径）。
@@ -657,9 +733,10 @@ private class ArcRepairSession(
     }
 
     /** 每条 audio/ 轨建一条 lane、各配一枚新 extractor；单轨打开失败只弃该轨，按无音频继续 */
-    private fun openAudioLanes(idxs: List<Int>, videoBasePtsUs: Long): List<AudioCopyLane> {
+    private fun openAudioLanes(idxs: List<Int>): List<AudioCopyLane> {
         val lanes = ArrayList<AudioCopyLane>(idxs.size)
         idxs.forEachIndexed { li, ti ->
+            checkAbort()
             val ex = MediaExtractor()
             try {
                 ex.setDataSource(ctx, src, null)
@@ -671,20 +748,9 @@ private class ArcRepairSession(
                 } else {
                     0L
                 }
-                val lane = AudioCopyLane("audio$li", ex, ex.getTrackFormat(ti), ti, shiftUs)
-                // 零样本 lane 防线（与 ClipExport 的 audioTrackWritable 同目的）：内录被整体
-                // 前移时可能一个样本都落不进 [0, ...]，addTrack 后零样本会让 muxer.stop() 抛错，
-                // 整份修复产物被回收。建轨前先确认至少一枚可写样本，没有就不建。
-                if (!lane.hasWritableSample(videoBasePtsUs)) {
-                    Log.i(
-                        TAG_ARC,
-                        "音频轨 ${lane.label} 平移后无可写样本（shift=${shiftUs}us base=$videoBasePtsUs），" +
-                            "不建轨（防零样本轨崩 muxer）"
-                    )
-                    lane.release()
-                } else {
-                    lanes.add(lane)
-                }
+                // 零样本 lane 防线（Y25）：可写性不再在这里预扫，建 lane 只负责打开提取器；
+                // 真正的"至少一枚可写样本"验收在 startMuxerIfReady（与拷贝同一时基、同一判据）。
+                lanes.add(AudioCopyLane("audio$li", ex, ex.getTrackFormat(ti), ti, shiftUs))
             } catch (e: IOException) {
                 Log.i(TAG_ARC, "音频轨 ti=$ti 建 lane 失败，该轨按无音频继续：${e.message}")
                 runCatching { ex.release() }
@@ -704,7 +770,8 @@ private class ArcRepairSession(
     private fun countSamples(ex: MediaExtractor): Int {
         var n = 0
         while (n < MAX_SRC_FRAMES) {
-            if (ex.sampleTime < 0L) break
+            // 同帧率预扫：EOF 认样本存在性，负 PTS 前导是合法样本
+            if (ex.sampleSize < 0L) break
             n++
             if (!ex.advance()) break
         }
@@ -738,12 +805,10 @@ private class ArcRepairSession(
         val decInfo = MediaCodec.BufferInfo()
         var inputEos = false
         var decOutDone = false
-        val deadline = SystemClock.elapsedRealtime() +
-            (if (durationMs > 0) durationMs * DEADLINE_FACTOR else DEADLINE_EXTRA_MS) + DEADLINE_EXTRA_MS
+        // 截止从**任务投递前**起算（Y23 由 open 建立，见 deadlineMs），不再只从主循环起算
 
         while (!videoDone || !audioAllDone()) {
-            if (cancelled()) throw ArcFail(ArcRepairError.CANCELLED)
-            if (SystemClock.elapsedRealtime() > deadline) throw ArcFail(ArcRepairError.TIMEOUT)
+            checkAbort()
 
             if (!inputEos && feedDecoderInput(dec)) inputEos = true
 
@@ -752,35 +817,24 @@ private class ArcRepairSession(
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
-                idx >= 0 -> {
-                    val eos = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                    if (eos) {
-                        // 解码 EOS：先把尾巴上的滞留帧/补弧按计划发出（末帧也必须是保留帧），
-                        // 再交棒给编码器 EOS
-                        if (useGpu) execGpu(flow.onSourceEos()) else execCpu(flow.onSourceEos())
-                        runCatching { dec.releaseOutputBuffer(idx, false) }
-                        decOutDone = true
-                    } else if (decInfo.size > 0) {
-                        // 该解码帧的源时间轴 PTS（归一化到首帧），**只用于去重判距**——
-                        // v2 输出 PTS 取均匀目标帧率步长（第 j 帧 = j/dstFps），
-                        // 输出时长 = 保留帧数/dstFps ≈ 源时长，与源 PTS 抖动解耦
-                        if (decodePtsBase < 0L) decodePtsBase = decInfo.presentationTimeUs
-                        val ptsUs = (decInfo.presentationTimeUs - decodePtsBase).coerceAtLeast(0L)
-                        // 去重：源容器里常有空/重复样本（真机实测：1.875s 的片子只有 45 个有效包，
-                        // 却有 124 个样本），解码器会把它们全吐出来。按"距上一个已采用帧不足半个源帧长"
-                        // 判重丢弃——被灌水的帧会搅乱抽帧节奏（把该保留的位次占掉）。
-                        // M6-01：阈值跟有理数真值（它决定"哪些源帧被采用"；整数视图会带偏）
-                        val minGapUs = if (srcRate.num > 0) 500_000L * srcRate.den / srcRate.num else 0L
-                        if (srcIndex > 0 && ptsUs - prevPtsUs < minGapUs) {
-                            runCatching { dec.releaseOutputBuffer(idx, false) }
+                    idx >= 0 -> {
+                        val eos = decInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        // Y24：平台会把最后一帧与 EOS 合在同一枚输出缓冲。旧实现的
+                        // `if (eos) … else if (size > 0)` 先走 EOS 分支，带 payload 的末帧被直接
+                        // release，最后一帧永久丢失。顺序必须是「先处理有效载荷，再交接 EOS」；
+                        // 零长度 EOS 才是没有 payload 的那种。
+                        if (decInfo.size > 0) {
+                            handleDecodedFrame(dec, idx, decInfo)
                         } else {
-                            prevPtsUs = ptsUs
-                            processSourceFrame(dec, idx)
+                            runCatching { dec.releaseOutputBuffer(idx, false) }
                         }
-                    } else {
-                        runCatching { dec.releaseOutputBuffer(idx, false) }
+                        if (eos) {
+                            // 解码 EOS：先把尾巴上的滞留帧/补弧按计划发出（末帧也必须是保留帧），
+                            // 再交棒给编码器 EOS
+                            if (useGpu) execGpu(flow.onSourceEos()) else execCpu(flow.onSourceEos())
+                            decOutDone = true
+                        }
                     }
-                }
                 }
             } else if (!encEosSent) {
                 // 解码走完：给编码器发 EOS，之后只剩排空
@@ -800,6 +854,35 @@ private class ArcRepairSession(
 
         // 收尾：把音频尾巴也写进去
         drainAudioUpTo(Long.MAX_VALUE)
+    }
+
+    /**
+     * 一枚**带 payload** 的解码输出（含与 EOS 合帧的那一枚，见 mainLoop 的顺序）。
+     * 去重判据只看源时间轴 PTS（输出 PTS 是均匀目标步长，与源 PTS 抖动解耦）。
+     */
+    private fun handleDecodedFrame(dec: MediaCodec, idx: Int, info: MediaCodec.BufferInfo) {
+        // 该解码帧的源时间轴 PTS（归一化到首帧），**只用于去重判距**——
+        // v2 输出 PTS 取均匀目标帧率步长（第 j 帧 = j/dstFps），
+        // 输出时长 = 保留帧数/dstFps ≈ 源时长，与源 PTS 抖动解耦
+        if (decodePtsBase < 0L) decodePtsBase = info.presentationTimeUs
+        val ptsUs = (info.presentationTimeUs - decodePtsBase).coerceAtLeast(0L)
+        // 去重：源容器里常有空/重复样本（真机实测：1.875s 的片子只有 45 个有效包，
+        // 却有 124 个样本），解码器会把它们全吐出来。按"距上一个已采用帧不足半个源帧长"
+        // 判重丢弃——被灌水的帧会搅乱抽帧节奏（把该保留的位次占掉）。
+        // M6-01：阈值跟有理数真值（它决定"哪些源帧被采用"；整数视图会带偏）
+        val minGapUs = if (srcRate.num > 0) 500_000L * srcRate.den / srcRate.num else 0L
+        if (srcIndex > 0 && ptsUs - prevPtsUs < minGapUs) {
+            runCatching { dec.releaseOutputBuffer(idx, false) }
+        } else {
+            prevPtsUs = ptsUs
+            processSourceFrame(dec, idx)
+        }
+    }
+
+    /** 取消/截止检查唯一入口：取消立即生效（准备期与主循环同一口径） */
+    private fun checkAbort() {
+        val reason = arcAbortReason(cancelled(), SystemClock.elapsedRealtime(), deadlineMs)
+        if (reason != null) throw ArcFail(reason)
     }
 
     /** @return true = 已排空输入（EOS 已入队） */
@@ -1083,10 +1166,10 @@ private class ArcRepairSession(
         }
     }
 
-    /** 每发出一枚保留帧就 +1 并刷新进度（总输出帧数 = 保留帧数，见 [ArcRepairPlan]） */
+    /** 每发出一枚保留帧就 +1 并刷新进度（封口前封顶 0.95，见 [arcRepairProgress]） */
     private fun countOutput(n: Int) {
         outputsDone += n
-        onProgress(ArcRepairPlan.progressOf(outputsDone, dstTotal))
+        onProgress(arcRepairProgress(ArcProgressStage.PROCESS, outputsDone, dstTotal))
     }
 
     // endregion
@@ -1104,7 +1187,9 @@ private class ArcRepairSession(
             val idx = try {
                 enc.dequeueOutputBuffer(bi, timeoutUs)
             } catch (e: IllegalStateException) {
+                // Y24：排空异常不再只是"置 videoDone 后照常成功"——失败码进结果，物不判纯成功
                 Log.e(TAG_ARC, "编码器出队异常：${e.message}")
+                encodeFailCode = encodeFailCode ?: "${ArcRepairError.ENGINE}:ENC"
                 videoDone = true
                 return
             }
@@ -1122,6 +1207,8 @@ private class ArcRepairSession(
                     if (deadline == 0L) deadline = SystemClock.elapsedRealtime() + ENC_DRAIN_LIMIT_MS
                     if (SystemClock.elapsedRealtime() > deadline) {
                         Log.e(TAG_ARC, "编码器排空超时")
+                        // 末次排空超时 = 最后一帧可能没吐出来，不能算纯成功（Y24）
+                        encodeFailCode = encodeFailCode ?: ArcRepairError.TIMEOUT
                         videoDone = true
                         return
                     }
@@ -1142,6 +1229,7 @@ private class ArcRepairSession(
 
     private fun startMuxerIfReady(m: MediaMuxer) {
         if (videoTrack < 0 || muxStarted) return
+        addAudioTracksIfReady(m)
         try {
             m.start()
             muxStarted = true
@@ -1152,6 +1240,48 @@ private class ArcRepairSession(
             )
         } catch (e: IllegalStateException) {
             Log.e(TAG_ARC, "muxer start 失败：${e.message}")
+        }
+    }
+
+    /**
+     * 音频轨**延迟建轨**（Y25）：此刻首帧已解码，[decodePtsBase] 就是拷贝真正使用的时基。
+     * 用与 [AudioCopyLane.drainUpTo] 相同的 [arcAudioOutPtsUs] 判据逐 lane 验收，
+     * 零可写样本的 lane 直接不 addTrack（防止零样本轨让 muxer.stop 失败、整份产物被回收）。
+     */
+    private fun addAudioTracksIfReady(m: MediaMuxer) {
+        if (audioTracksAdded) return
+        audioTracksAdded = true
+        val basePtsUs = decodePtsBase
+        if (basePtsUs < 0L) {
+            // 理论上 start 前至少已解出一帧；拿不到就按 0 处理并留日志（不静默换口径）
+            Log.w(TAG_ARC, "音频建轨时首帧基准仍未知，按 0 验收（拷贝侧会以首枚音频样本为基）")
+        }
+        val base = if (basePtsUs >= 0L) basePtsUs else 0L
+        for (lane in audioLanes) {
+            if (lane.muxTrack >= 0) continue
+            if (!lane.hasWritableSample(base)) {
+                Log.i(
+                    TAG_ARC,
+                    "音频轨 ${lane.label} 在该时基下无可写样本（shift=${lane.shiftUs}us base=$base），" +
+                        "不建轨（防零样本轨崩 muxer）"
+                )
+                lane.done = true
+                lane.release()
+                continue
+            }
+            lane.muxTrack = try {
+                m.addTrack(lane.format)
+            } catch (e: Exception) {
+                // 源音频不是封装器认识的格式（或 csd 缺失）：宁可没有该音轨也不整单失败
+                Log.i(TAG_ARC, "音频轨 ${lane.label} 加入失败，该轨改无音轨继续：${e.message}")
+                -1
+            }
+            if (lane.muxTrack >= 0) {
+                Log.i(TAG_ARC, "音频轨已加（直拷）label=${lane.label} srcTrack=${lane.trackIndex} muxTrack=${lane.muxTrack}")
+            } else {
+                lane.done = true
+                lane.release()
+            }
         }
     }
 
@@ -1228,23 +1358,21 @@ private class ArcRepairSession(
         /**
          * 平移后是否至少有一枚样本能落进 muxer 时间轴（PTS ≥ 0）。
          *
-         * [basePtsUs] 取视频首样本 PTS（容器时间轴）：drain 时实际用 `decodePtsBase`（首帧显示
-         * PTS，可能更小），所以按更大的 base 预判"可写"只会更保守，不会把全负轨误判成可写。
-         * 查完必须把 extractor 游标还原到轨道起点，后续 drainUpTo 仍从 0 读。
+         * **与 [drainUpTo] 共用 [arcAudioOutPtsUs] 和同一个 [basePtsUs]**（Y25）：本函数由
+         * [addAudioTracksIfReady] 在 muxer.start 前调用，传入的正是拷贝将使用的 `decodePtsBase`。
+         * 旧实现用视频首样本 PTS 做保守基准，但 `decodePtsBase`（首帧显示 PTS）可能更大 ⇒
+         * 预扫判"可写"、实际写入 0 枚。EOF 以样本存在性（`sampleSize < 0`）识别，
+         * 负 PTS 前导仍是合法样本。查完必须把 extractor 游标还原到轨道起点，drain 仍从 0 读。
          */
         fun hasWritableSample(basePtsUs: Long): Boolean {
-            val needPtsUs = basePtsUs - shiftUs
-            return try {
-                ex.seekTo(needPtsUs.coerceAtLeast(0L), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-                // 音频帧通常全是 sync 点，一次 seek 就落到位；最多再看几枚，防个别容器给出前一个 sync
+            try {
                 var guard = 0
-                while (guard++ < 4) {
-                    val size = ex.sampleSize
-                    if (size < 0L) return false
-                    if (ex.sampleTime >= needPtsUs) return true
+                while (guard++ < MAX_AUDIO_PRESCAN_SAMPLES) {
+                    if (ex.sampleSize < 0L) return false
+                    if (arcAudioOutPtsUs(ex.sampleTime, basePtsUs, shiftUs) >= 0L) return true
                     if (!ex.advance()) return false
                 }
-                false
+                return false
             } finally {
                 runCatching { ex.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC) }
             }
@@ -1275,19 +1403,9 @@ private class ArcRepairSession(
                 if (ptsBase < 0L) {
                     ptsBase = if (decodePtsBase >= 0L) decodePtsBase else pendingPts
                 }
-                val norm = pendingPts - ptsBase
-                if (norm < 0L) {
-                    // 视频起点之前的音频（音轨早启动的源）：丢弃，不挤在 0 点造成非单调/重播
-                    pending = false
-                    if (!ex.advance()) {
-                        done = true
-                        return
-                    }
-                    continue
-                }
-                // 同步偏移只作用于内录 lane（环境 lane shiftUs=0）。平移后仍为负的样本丢弃，
-                // 不 clip 到 0：同刻多样本会破坏 muxer 单调约束；穿插上限也按平移后的时刻算。
-                val outPts = norm + shiftUs
+                // 与建轨预扫同一判据、同一时基（Y25）：视频起点之前或平移后仍为负的样本丢弃，
+                // 不挤在 0 点造成非单调/重播；穿插上限按平移后的时刻算。
+                val outPts = arcAudioOutPtsUs(pendingPts, ptsBase, shiftUs)
                 if (outPts < 0L) {
                     pending = false
                     if (!ex.advance()) {
@@ -1376,12 +1494,18 @@ private class ArcRepairSession(
         // 保留判据必须同时含「样本写成功」与「muxer 封口成功」：只过前者会把无 moov 的坏容器
         // commit 进相册（零样本音轨/盘满时 stop 会抛）。失败时 keep=false 由 seal 回收 pending，
         // 源片不在这条路上，不受影响。
-        val keep = arcRepairKeep(ok, muxStopOk)
+        // Y23：封口/发布前最后一次验取消——准备期/音频尾拷/两次发布之间都要能停。取消发生在
+        // stop 之后也按取消处理（不把用户已撤销的产物 commit 进相册）。
+        val cancelledNow = cancelled()
+        val keep = arcRepairKeep(ok, muxStopOk) && !cancelledNow
         val failCode = when {
             keep -> null
+            cancelledNow -> ArcRepairError.CANCELLED
             ok && !muxStopOk -> "${ArcRepairError.ENGINE}:MUX_CLOSE"
             else -> code ?: ArcRepairError.ENGINE
         }
+        // 封口前进度封顶 0.98（不到 100%）：stop/清 IS_PENDING 还没做完
+        onProgress(arcRepairProgress(ArcProgressStage.FINALIZE, outputsDone, dstTotal))
         val seg = st.seal(sk, 0, 0L, if (keep) durationMs else 0L, keep = keep)
         return when (arcPublishOutcome(keep, seg.committed)) {
             ArcPublishOutcome.PUBLISHED -> {
