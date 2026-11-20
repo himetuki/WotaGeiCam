@@ -57,9 +57,12 @@ import com.wotagei.cam.camera.CameraWatchClock
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.ClipRule
+import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
+import com.wotagei.cam.player.PracticeReturn
 import com.wotagei.cam.player.TrackRule
+import com.wotagei.cam.player.practiceReturnPlan
 import com.wotagei.cam.record.StalePendingSweep
 import com.wotagei.cam.ui.anim.EXTRA_MERGE_HOOK
 import com.wotagei.cam.ui.anim.MergeDebugHook
@@ -349,6 +352,7 @@ class MainActivity : ComponentActivity() {
         applyMergeHook(intent)
         applyFrostProbe(intent)
         applyCompareProbe(intent)
+        applyHudRecompProbe(intent)
         // 冷启维护清扫（一次性、后台线程）：把历史遗留的 `.pending-<id>-` 条目收干净——成片去掉
         // pending 段（它还带着难看名字挂在相册里）、无主/重复的 sidecar 档案删除。三条安全边界
         // （只认自己的命名形态 / 只碰 1 小时以上的 / 进程内只跑一次）与「成片永不删」红线见
@@ -391,6 +395,7 @@ class MainActivity : ComponentActivity() {
         applyMergeHook(intent)
         applyFrostProbe(intent)
         applyCompareProbe(intent)
+        applyHudRecompProbe(intent)
     }
 
     /**
@@ -413,6 +418,14 @@ class MainActivity : ComponentActivity() {
     /** 对比播放黑屏探针的唯一写入入口：与 [applyFrostProbe] 同一套纪律（见 [CompareProbe] 的类注释） */
     private fun applyCompareProbe(intent: Intent?) {
         CompareProbe.apply(intent?.getBooleanExtra(EXTRA_COMPARE_PROBE, false) == true)
+    }
+
+    /**
+     * B12 重组测量入口的唯一写入入口：与 [applyCompareProbe] 同一套纪律
+     * （见 [HudRecompProbe] 的类注释）。只在 debugHook/probe 变体可点亮。
+     */
+    private fun applyHudRecompProbe(intent: Intent?) {
+        HudRecompProbe.apply(intent?.getBooleanExtra(EXTRA_HUD_RECOMP_PROBE, false) == true)
     }
 }
 
@@ -560,9 +573,27 @@ private fun WotaRoot() {
                         // 一并弹掉属预期；对比页不在栈内（异常动线）时保底回普通弹栈。该回调只在
                         // ComparePractice.deliver 成功（练习桥 armed）时被调，普通录制路径零影响。
                         onPracticeFinish = {
-                            // 程序化定向返回（非用户手势）：栈上必有录制页在 COMPARE 之下，
-                            // 不会触发"弹掉栈底"竞态，故不走 navigateBack 的栈底不变量
-                            if (!nav.popBackStack(WotaNav.COMPARE, false)) nav.popBackStack()
+                            // 程序化定向返回（非用户手势）不走 navigateBack 的防抖，但黑屏不变量
+                            // 必须自己守（Y51）：① 发起页身份已失效的过期回调不动作；
+                            // ② 保底裸弹只在栈上还有下层页时成立，绝不把根栈弹空。
+                            // currentBackStack 是 NavController 的公开快照（按条目 id 判身份，
+                            // 不能用 getBackStackEntry：它按 route/destinationId 查，不认条目 id）。
+                            val stack = nav.currentBackStack.value
+                            val originId = ComparePractice.takeOrigin()
+                            val originAlive = originId == null || stack.any { it.id == originId }
+                            val compareInStack = stack.any { it.destination.route == WotaNav.COMPARE }
+                            when (practiceReturnPlan(
+                                compareInStack = compareInStack,
+                                originAlive = originAlive,
+                                // currentBackStack 含 NavGraph 条目，不能拿 size 判"还有下层页"；
+                                // previousBackStackEntry 已跳过图条目，与普通 popBackStack 的语义一致
+                                canPopOne = nav.previousBackStackEntry != null
+                            )) {
+                                PracticeReturn.TO_COMPARE -> nav.popBackStack(WotaNav.COMPARE, false)
+                                PracticeReturn.POP_ONE -> nav.popBackStack()
+                                // 过期发起者/已是唯一页：停在录制页，交给系统返回正常结束 Activity
+                                PracticeReturn.STAY -> Unit
+                            }
                         }
                     )
                 }
@@ -689,9 +720,12 @@ private fun applyPageMode(activity: Activity?, route: String?) {
             )
         }
         // 设置页（2026-10-29 用户反馈）：只藏导航栏（顶部状态栏保留，设置页顶栏本来就在状态栏下）。
-        // 不藏的话底部滑动区/小白条会把滚动列表最后一行压出一段白带
+        // 不藏的话底部滑动区/小白条会把滚动列表最后一行压出一段白带。
+        // Y59：从全沉浸的录制页直接进设置页时，状态栏仍是隐藏态——这里必须**显式恢复** statusBars，
+        // 只调 hide(navigationBars) 不会把上一页藏掉的顶栏带回来（与播放器双栏隐藏对照）。
         route == ROUTE_SETTINGS -> {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.show(WindowInsetsCompat.Type.statusBars())
             controller.hide(WindowInsetsCompat.Type.navigationBars())
         }
         else -> controller.show(WindowInsetsCompat.Type.systemBars())

@@ -32,6 +32,18 @@ class LiquidSwitchWiringTest {
         KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/dialog/AudioSourcePanel.kt"))
     }
 
+    /** 液态开关函数体（Y57 的守卫只看这一枚组件内部） */
+    private val switchBody by lazy {
+        KotlinSourceScan.bodyOf(switchSrc, "LiquidGestureSwitch")
+    }
+
+    /** 手势收尾段：从 `finally {` 到函数体尾（清理语句必须落在这段里） */
+    private fun finallyBlock(text: String): String {
+        val flat = KotlinSourceScan.flatten(text)
+        val i = flat.indexOf("finally {")
+        return if (i < 0) "" else flat.substring(i)
+    }
+
     @Test
     fun `只有液态档换成液态开关_其余档保持Material3原样`() {
         assertTrue(
@@ -86,6 +98,63 @@ class LiquidSwitchWiringTest {
         assertTrue(
             "拉伸参数必须来自设计稿（上限 0.4 / 分母 600 px/s）",
             switchSrc.contains("StretchMax = 0.4f") && switchSrc.contains("StretchVelocityScalePx = 600f")
+        )
+    }
+
+    // ------------------------------------------------------------------ Y57：跨中点手势不中断 + finally 清理
+
+    @Test
+    fun `跨中点翻转不许换掉手势键`() {
+        val flat = KotlinSourceScan.flatten(switchBody)
+        assertTrue(
+            "手势键必须只由「可交互 + 行程」决定（checked 变化来自手势自己，不能反过来取消手势）",
+            flat.contains("pointerInput(interactive, travelPx)")
+        )
+        assertFalse(
+            "checked 不许进 pointerInput 键：过中点回调翻转它 → 重组换键 → 当前手势被取消",
+            flat.contains("pointerInput(interactive, checked")
+        )
+        assertTrue(
+            "checked 的最新值必须经 rememberUpdatedState 读取",
+            flat.contains("rememberUpdatedState(checked)")
+        )
+        assertTrue(
+            "手势内的翻转判断必须读本段手势自己的逻辑档（不等重组回灌）",
+            flat.contains("if (past != gestureChecked)") && flat.contains("gestureChecked = past")
+        )
+        assertTrue(
+            "松手落位也必须读本段手势的逻辑档",
+            flat.contains("val target = if (gestureChecked) travelPx else 0f")
+        )
+        // 突变自证：把 checked 放回键里 → 上面第一条必须变红
+        val mutant = switchSrc.replace(
+            "pointerInput(interactive, travelPx)",
+            "pointerInput(interactive, checked, travelPx)"
+        )
+        assertTrue("突变体必须真的改到了源码", mutant != switchSrc)
+        assertFalse(
+            "把 checked 放回手势键后守卫必须变红",
+            KotlinSourceScan.flatten(mutant).contains("pointerInput(interactive, travelPx)")
+        )
+    }
+
+    @Test
+    fun `取消路径必须由finally清空拖动状态`() {
+        val f = finallyBlock(switchBody)
+        assertTrue("手势必须有 finally 清理段（正常/取消/异常都从这里出去）", f.isNotEmpty())
+        assertTrue("按压态要复位", f.contains("pressing = false"))
+        assertTrue("拖动残余要清空（取消后不许停在半路）", f.contains("dragX = null"))
+        assertTrue("速度要清零", f.contains("dragVelocity = 0f"))
+        assertTrue(
+            "取消路径要把拇指从当前位置落回本段手势的逻辑档",
+            f.contains("if (!handled && moved && at != null)")
+        )
+        // 突变自证：finally 改成普通块（清理不再保证执行）→ 识别不到清理段
+        val mutant = switchBody.replace("} finally {", "} run {")
+        assertTrue("突变体必须真的改到了源码", mutant != switchBody)
+        assertTrue(
+            "清理不在 finally 里时守卫必须变红",
+            finallyBlock(mutant).isEmpty()
         )
     }
 }

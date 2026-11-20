@@ -27,10 +27,40 @@ object ComparePractice {
     @Volatile
     private var pendingLeftId: Long? = null
 
-    /** 对比页发起练习：记参考片并武装意图（[armed] 同步置真） */
-    fun primeWith(leftId: Long) {
+    /**
+     * 发起练习的那枚对比页导航条目 id（`NavBackStackEntry.id`，Y51）。
+     * 回程时先核对它是否仍在返回栈上：过期回调（发起页已被别的动线弹掉）不动作，
+     * 免得「定向回对比页」落在一枚已失效的身份上。
+     */
+    @Volatile
+    var armedOrigin: String? = null
+
+    /**
+     * 对比页发起练习：记参考片并武装意图（[armed] 同步置真）。
+     * @param originEntryId 发起页的导航条目 id；测试/旧调用点可不传（null = 不校验发起者）
+     */
+    fun primeWith(leftId: Long, originEntryId: String? = null) {
         pendingLeftId = leftId
+        armedOrigin = originEntryId
         armed = true
+    }
+
+    /** 回程核对用：取走发起者身份（读后即清，同一意图只结算一次） */
+    fun takeOrigin(): String? {
+        val id = armedOrigin
+        armedOrigin = null
+        return id
+    }
+
+    /**
+     * 对比页 ON_RESUME 自愈：丢弃整条过期意图（含发起者身份）。
+     * 与逐字段手清相比，这里多清 [armedOrigin]，否则旧发起页 id 会留给下一次回程核对。
+     */
+    fun disarm() {
+        armed = false
+        pendingRightId = null
+        armedOrigin = null
+        pendingLeftId = null
     }
 
     /**
@@ -54,3 +84,28 @@ object ComparePractice {
         return true
     }
 }
+
+/** 练习录成后的回程动作（Y51）：裸弹栈只作定向弹栈的保底，且必须还有下层页可退 */
+enum class PracticeReturn { TO_COMPARE, POP_ONE, STAY }
+
+/**
+ * 练习录成回程决策（纯函数，Y51）。
+ *
+ * 黑屏不变量：普通返回 `NavController.popBackStack` 有
+ * 「起始目的地不弹」守卫，练习回程是程序化导航、不走那条守卫，所以这里自己判：
+ * - [originAlive] = false：发起练习的对比页已不在返回栈上（过期回调）→ 不动作；
+ * - 对比页在栈上 → 定向弹回对比页；
+ * - 对比页不在栈上 → 只有 [canPopOne]（栈上除当前页外还有下层页）才普通弹一层，
+ *   否则宁可停在原页也不把返回栈清空（清空 = NavHost 无内容 = 整窗黑）。
+ *
+ * @param compareInStack 对比页路线是否仍在返回栈上
+ * @param originAlive 发起者身份是否仍有效（未记录发起者时调用方传 true）
+ * @param canPopOne 当前栈顶之下是否还有页（`previousBackStackEntry != null`）
+ */
+fun practiceReturnPlan(compareInStack: Boolean, originAlive: Boolean, canPopOne: Boolean): PracticeReturn =
+    when {
+        !originAlive -> PracticeReturn.STAY
+        compareInStack -> PracticeReturn.TO_COMPARE
+        canPopOne -> PracticeReturn.POP_ONE
+        else -> PracticeReturn.STAY
+    }

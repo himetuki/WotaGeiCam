@@ -121,6 +121,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -133,6 +135,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.R
 import com.wotagei.cam.bt.BtSpeakerController
 import com.wotagei.cam.camera.CameraController
@@ -173,6 +176,8 @@ import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.core.popupWidthCapPx
+import com.wotagei.cam.media.SeriesStore
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
@@ -305,6 +310,7 @@ private fun findHostActivity(ctx: Context): MainActivity? {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 @Suppress("LongMethod")
 fun CameraScreen(
     onOpenGallery: () -> Unit,
@@ -312,6 +318,12 @@ fun CameraScreen(
     onPracticeFinish: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // B12 测量入口：组合体起点时间戳（探针关闭时恒 0）。前面再串一枚编译期常量
+    // BuildConfig.HUD_RECOMP_PROBE：debug/release 里它是 false（javac 常量），Kotlin 折叠后
+    // 整句连 @Volatile 读都不剩——正常变体的关闭态是真正的零开销。
+    // 终点在函数末尾，两者之差就是"这份 UI 自己在一帧里花掉多少组合时间"——审查 B12 要的就是这个数。
+    val hudProbeStartNs =
+        if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) System.nanoTime() else 0L
     val context = LocalContext.current
     val app = remember(context) { context.applicationContext }
     val owner = LocalLifecycleOwner.current
@@ -822,7 +834,11 @@ fun CameraScreen(
     // SurfaceTexture ⇒ 引擎重接窗口面。重启预览/重建引擎都动不到这条链（相机本来就在出帧）。
     // 请求来自两处看门狗（页面内 + Activity 级），这里只负责把它落成一次视图重建。
     var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }
-    LaunchedEffect(ctrl) {
+    // 键必须带 activeSink（Y52）：GPU↔DIRECT 切换后旧收集器若继续存活，重挂请求会把
+    // 计数/日志写进**旧持有者**，新建承载视图的纪元不推进（画面仍是黑的）。收集器与
+    // 计数持有者同键 ⇒ 换 sink 时旧协程取消、新协程以新持有者起步，600ms 限频窗口也随
+    // 持有者重来（换面本身就是一次重建，不该被上一面的限频吞掉）。
+    LaunchedEffect(ctrl, activeSink) {
         // 限频 600ms：swap 连环失败时（挂上又立刻失败）不至于无限重建视图；
         // 连环失败的最终兜底仍是看门狗的 forceRebind
         var lastAt = 0L
@@ -1082,6 +1098,10 @@ fun CameraScreen(
     // 同一条纪律：录制态也是组合期 Boolean，而双击入口由 pointerInput(Unit) 首帧闭包捕获——
     // 直接读 `recording` 会把首帧值固化，录制中双击仍能上锁（审查 P1）。装进稳定持有者现读。
     val recordingNow by rememberUpdatedState(recording)
+    // Y56 同款：能力枚举完成/换镜头会改 focusUsable，而点按手势层同样只捕获首帧闭包——
+    // 直接读 `focusUsable` 会让"首帧能力未知（默认可用）"固化，定焦镜头上点焦照发。
+    // 装进稳定持有者后闭包现读，切镜头/枚举完成即生效。
+    val focusUsableNow by rememberUpdatedState(focusUsable)
     /** 普通点焦三处写点共用：记最近点按处 + 先置 null 再写（StateFlow 去重会吞同一点重触） */
     val focusTapAt: (TapPoint) -> Unit = { point ->
         lastFocusTap = point
@@ -1669,7 +1689,7 @@ fun CameraScreen(
                         .tapFocus(
                             onTap = { point ->
                                 when {
-                                    !focusUsable -> Unit
+                                    !focusUsableNow -> Unit
                                     // 锁定期轻触不重焦（防误触字面要求）：首次轻触给一句提示
                                     focusLocked -> showLockedTapTip()
                                     else -> focusTapAt(point)
@@ -1677,7 +1697,7 @@ fun CameraScreen(
                             },
                             onDoubleTap = { point ->
                                 when {
-                                    !focusUsable -> Unit
+                                    !focusUsableNow -> Unit
                                     // 锁定期双击按轻触同款处理（不重焦、给提示）；未锁时是该点锁定入口
                                     focusLocked -> showLockedTapTip()
                                     else -> lockFocusAt(point)
@@ -1713,6 +1733,10 @@ fun CameraScreen(
     val topBarTotalBps = bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
     val topBarSizeLabel = sizeText(size)
     val topBarWidths = rememberCapacityTextWidths(freeMb, topBarTotalBps, topBarSizeLabel)
+    // B12：单量 HudCtx 这一段汇集（含 stringResource/String.format 的标签计算）的耗时，
+    // 回答"组合耗时里 HudCtx 占几成"；探针关闭时恒 0，不进入计时分支
+    val hudCtxStartNs =
+        if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) System.nanoTime() else 0L
     val hudCtx = HudCtx(
         // 能力闸两颗（2026-10-26 口径反转）：给不了时胶囊**在场但禁用**（HudEntryItem 画半透明，
         // 点击给解释），不再整颗隐藏——隐藏会在钉格上留洞且用户无从理解（见 visibleEntries 处注释）
@@ -1917,6 +1941,10 @@ fun CameraScreen(
             }
         }
     )
+    // 终点同样先过编译期常量：debug/release 整句消失，连这枚"起点恒 0"的判空都不留。
+    if (BuildConfig.HUD_RECOMP_PROBE && hudCtxStartNs != 0L) {
+        HudRecompProbe.onCtxAssembled(System.nanoTime() - hudCtxStartNs)
+    }
 
     /** 卡片本体的窗口矩形进实测表：值真变了才写。布局期写状态会重组，空转一次就是白掉一帧 */
     fun putCardRect(zone: HudZone, rect: IntRect) {
@@ -2061,6 +2089,26 @@ fun CameraScreen(
                                 if (stanceAnchorRect != r) stanceAnchorRect = r
                             }
                     )
+                    // Y55：浮层**内容**实测宽上限（不是只钳滑杆）。右缘目标 = 锚点右缘与右 Dock 槽
+                    // 左缘取小（与 [MarkerPopupPosition] 同源），再让出左缘最小边距：内容宽不超
+                    // 该值时，左缘钳制与右缘目标才同时成立。锚点落点不动，只是内容变窄——控件层
+                    // 与选色层用 FlowRow 换行/折行，站位面板按宽收缩，窄窗下依然可用。
+                    val stancePopupMaxWidth = remember(stanceAnchorRect, rightDockSlotRect, hudDensity) {
+                        popupContentMaxWidthOf(
+                            anchor = stanceAnchorRect,
+                            rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                            density = hudDensity,
+                            fallback = 320.dp
+                        )
+                    }
+                    val markerPopupMaxWidth = remember(markerAnchorRect, rightDockSlotRect, hudDensity) {
+                        popupContentMaxWidthOf(
+                            anchor = markerAnchorRect,
+                            rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                            density = hudDensity,
+                            fallback = 220.dp
+                        )
+                    }
                     if (stanceControlsOpen) {
                         Popup(
                             popupPositionProvider = MarkerPopupPosition(
@@ -2072,8 +2120,13 @@ fun CameraScreen(
                             onDismissRequest = { stanceControlsOpen = false },
                             properties = PopupProperties(focusable = true)
                         ) {
-                            // 弹窗内容经桥分发（docs/plan/33）：full=完整控制面板，lite=宣传导流卡
-                            stance.ControlsPopup(gpuAllowed = renderMode == RenderMode.GPU)
+                            // 弹窗内容经桥分发（docs/plan/33）：full=完整控制面板，lite=宣传导流卡。
+                            // Y55：外层按实测可用宽收缩（min 由内容侧 264dp 兜住，incoming max 更小时自动降）；
+                            // 不加 min/max 常量，宽度仍由内容决定，只是不再越过右 Dock 槽左缘。
+                            stance.ControlsPopup(
+                                gpuAllowed = renderMode == RenderMode.GPU,
+                                modifier = Modifier.widthIn(max = stancePopupMaxWidth)
+                            )
                         }
                     }
                     if (markerControlsOpen) {
@@ -2101,12 +2154,19 @@ fun CameraScreen(
                                 onDispose { Log.i(TAG_UI, "marker 控件层 dispose") }
                             }
                             Column(
+                                modifier = Modifier.widthIn(max = markerPopupMaxWidth),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.m)
+                                // +/线数/-：用 FlowRow 而非 Row——窄窗可用宽不足时线数/− 换到
+                                // 第二行（仍居中、仍可点），而不是把内容顶过右 Dock 槽左缘。
+                                // 1.6.8 的 FlowRow 不认 itemVerticalAlignment，计数文本用同高 Box 居中。
+                                FlowRow(
+                                    verticalArrangement = Arrangement.spacedBy(WotaSpace.xs),
+                                    horizontalArrangement = Arrangement.spacedBy(
+                                        WotaSpace.m,
+                                        Alignment.CenterHorizontally
+                                    )
                                 ) {
                                     MarkerClusterButton(
                                         image = Icons.Outlined.Remove,
@@ -2116,18 +2176,24 @@ fun CameraScreen(
                                                 MarkerLines.clampCount(markerCount - 1)
                                         }
                                     )
-                                    Text(
-                                        text = markerCount.toString(),
-                                        style = MaterialTheme.typography.titleLarge.copy(
-                                            shadow = Shadow(
-                                                color = Color.Black,
-                                                offset = Offset(1f, 1f),
-                                                blurRadius = 3f
-                                            )
-                                        ),
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = WotaSpace.s)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .height(MarkerClusterButtonSize)
+                                            .padding(horizontal = WotaSpace.s),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = markerCount.toString(),
+                                            style = MaterialTheme.typography.titleLarge.copy(
+                                                shadow = Shadow(
+                                                    color = Color.Black,
+                                                    offset = Offset(1f, 1f),
+                                                    blurRadius = 3f
+                                                )
+                                            ),
+                                            color = Color.White
+                                        )
+                                    }
                                     MarkerClusterButton(
                                         image = Icons.Outlined.Add,
                                         description = stringResource(R.string.cam_marker_add),
@@ -2148,7 +2214,11 @@ fun CameraScreen(
                                     // 纪律——拖拽中途不写盘，避免每帧 commit
                                     onValueChangeFinished = { persist.flush() },
                                     valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
-                                    modifier = Modifier.width(220.dp)
+                                    // 宽屏保持 220dp；窄窗/分屏按实测可用宽收缩（Y55），
+                                    // 否则左缘钳制会把右缘顶过右 Dock 槽左缘
+                                    modifier = Modifier
+                                        .widthIn(max = minOf(220.dp, markerPopupMaxWidth))
+                                        .fillMaxWidth()
                                 )
                             }
                         }
@@ -2167,12 +2237,18 @@ fun CameraScreen(
                             onDismissRequest = { markerColorPop = false },
                             properties = PopupProperties(focusable = true)
                         ) {
-                            Row(
+                            // 选色格同样按实测可用宽折行（Y55）：上限套在卡片外，含 padding
+                            // 一起算，右缘不会越 Dock；宽窗仍是单行六色，窄窗折成两行。
+                            FlowRow(
                                 Modifier
+                                    .widthIn(max = markerPopupMaxWidth)
                                     .wotaCard()
                                     .padding(WotaSpace.s),
-                                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s),
-                                verticalAlignment = Alignment.CenterVertically
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    WotaSpace.s,
+                                    Alignment.CenterHorizontally
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
                             ) {
                                 MarkerLineColor.ALL.forEach { c ->
                                     val selected = c == markerColor
@@ -2208,6 +2284,16 @@ fun CameraScreen(
                     // #84 霜探针：debugHook 变体 + adb extra 才组合（见 FrostProbe 的类注释）。
                     // 挂 TopStart：默认横屏下左上角不与顶栏（居中）或左 Dock（中段）相压；只画不收指
                     FrostProbeOverlay(glEngine, Modifier.align(Alignment.TopStart))
+                    // B12 重组测量：debugHook/probe 变体 + adb extra 才组合（见 HudRecompProbe 的类注释）。
+                    // 让在霜探针读数下方，避免同角叠放互挡；偏移是探针专用常量，不进布局账。
+                    // 外层编译期常量：debug/release 整段被折叠掉，连 mountEnabled 的状态读都不发生。
+                    if (BuildConfig.HUD_RECOMP_PROBE) {
+                        HudRecompProbeOverlay(
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .padding(top = HUD_RECOMP_PROBE_TOP_DP.dp)
+                        )
+                    }
                     // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
                     // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
                     // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
@@ -2405,11 +2491,9 @@ fun CameraScreen(
                     //（OPEN_FAILED_*）才给「重试/去设置」。2026-10-30 真机视频实锤：回场重开的
                     // ~1s 里 device 还没到 OPEN_ING（枚举能力中）或已回到 CLOSE，这行失败文案
                     // 直接把用户吓退（按返回 = 接一整段黑屏），是黑屏反馈链的起爆点。
-                    opening = ui.preview != PreviewStatus.ERROR && (
-                        ui.device == DeviceStatus.OPEN_ING ||
-                            ui.device == DeviceStatus.CLOSE ||
-                            ui.device == DeviceStatus.OPEN_SUCCEED
-                        ),
+                    // Y60：缺相机权限是确定态，直呈拒权提示——否则 CLOSE/INIT 且缺权限时
+                    // 转圈盖住「去设置」入口，权限弹窗关掉后用户无路可走（判定见 previewGateOpening）。
+                    opening = previewGateOpening(ui),
                     needPermission = ui.needsCameraPermission,
                     modifier = Modifier.fillMaxSize(),
                     onRetry = {
@@ -2561,6 +2645,11 @@ fun CameraScreen(
                 )
             }
         }
+    }
+    // B12 终点：非 Composable 语句，画完这棵子树再记一笔。
+    // 前置编译期常量 ⇒ debug/release 整句消失；只有 debugHook/probe 才可能走到。
+    if (BuildConfig.HUD_RECOMP_PROBE && hudProbeStartNs != 0L) {
+        HudRecompProbe.onBodyComposed(System.nanoTime() - hudProbeStartNs)
     }
 }
 
@@ -4517,6 +4606,36 @@ private fun BoxScope.BottomBandChips(
 }
 
 /**
+ * +/− 圆钮直径（2026-10-27 二轮定版）：按钮自身与计数文本的同高 Box 共用这一枚常量，
+ * 保证 FlowRow 换行时行内三者仍以同一中轴对齐。
+ */
+private val MarkerClusterButtonSize = 40.dp
+
+/**
+ * Y55：浮层**内容**宽上限（dp），由实测落点反推。
+ *
+ * [MarkerPopupPosition] 把右缘对齐到 `min(anchor.right, rightKeepOutPx)`，再整块钳进窗口、
+ * 至少留 [HudEdgePad]。内容宽 > `rightLimit - margin` 时，左缘钳制会把右缘顶过目标
+ * （窄窗/分屏最易出现）——70bb902 只钳了间距滑杆，+/线数/−、六色格与站位面板仍会越界。
+ * 这里把同一条算术前移到内容侧：上限 = 右缘目标 − 左缘边距；**锚点落点本身不变**，
+ * 只是内容变窄（控件层与选色层换行，站位面板按宽收缩），窄窗下依然可用。
+ *
+ * 锚点未实测到时给 [fallback]：下一帧实测值到达即改，与 [MarkerPopupPosition] 的回落一致。
+ */
+private fun popupContentMaxWidthOf(
+    anchor: Rect?,
+    rightKeepOutPx: Int?,
+    density: Density,
+    fallback: Dp
+): Dp {
+    val a = anchor ?: return fallback
+    val rightLimit = minOf(a.right.roundToInt(), rightKeepOutPx ?: Int.MAX_VALUE)
+    return with(density) {
+        popupWidthCapPx(rightLimit, HudEdgePad.roundToPx()).toDp()
+    }
+}
+
+/**
  * 站位线浮层的定位（2026-10-27 三轮）：**贴着圆钮右下**，不漂画面中间、也不压右 Dock。
  *
  * 三条约束都来自实测矩形（[anchor] = 圆钮、[rightKeepOutPx] = 右 Dock 槽左缘），
@@ -4570,7 +4689,7 @@ private fun MarkerClusterButton(
 ) {
     Box(
         Modifier
-            .size(40.dp)
+            .size(MarkerClusterButtonSize)
             .clip(CircleShape)
             .background(Color.White.copy(alpha = 0.35f))
             .clickable(onClick = onClick),

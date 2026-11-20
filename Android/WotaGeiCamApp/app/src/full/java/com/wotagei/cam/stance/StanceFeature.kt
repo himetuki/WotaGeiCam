@@ -6,6 +6,7 @@ import android.media.ImageReader
 import android.view.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import com.wotagei.cam.camera.AnalysisSessionDecision
 import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.ui.dialog.observed
@@ -107,9 +108,14 @@ class StanceFeature private constructor(
         StanceOverlay(output = s.output, geometry = s.geometry, modifier = modifier)
     }
 
-    /** 浮层内容（完整控制面板：总开关/精确度/人数/加速三态/提亮/模型目录/版本）。 */
+    /**
+     * 浮层内容（完整控制面板：总开关/精确度/人数/加速三态/提亮/模型目录/版本）。
+     *
+     * [modifier] 由调用方给：CameraScreen 按实测右缘目标传入 `widthIn(max = …)`（Y55），
+     * 窄窗/分屏时面板整体收缩而不是越过右 Dock 槽左缘。
+     */
     @Composable
-    fun ControlsPopup(gpuAllowed: Boolean) {
+    fun ControlsPopup(gpuAllowed: Boolean, modifier: Modifier = Modifier) {
         val s by ctrl.state.observed()
         StancePopupContent(
             state = s,
@@ -124,6 +130,7 @@ class StanceFeature private constructor(
             onPollInterval = { ctrl.setPollInterval(appContext, it) },
             onBrighten = { ctrl.setBrighten(appContext, it) },
             onImportFromDir = { ctrl.importFromExternalDir(appContext) },
+            modifier = modifier,
         )
     }
 

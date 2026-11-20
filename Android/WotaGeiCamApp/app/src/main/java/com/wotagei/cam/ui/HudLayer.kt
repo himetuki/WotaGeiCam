@@ -92,6 +92,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.core.CamPill
@@ -1063,17 +1064,40 @@ fun BoxScope.HudZoneBox(
     // 霜的宿主登记（#84 步骤 2）：五枚容器各登记一次，引用计数到 0 才撤定时器与 prefs 监听。
     // 挂在这里而不是某枚具体容器的理由是：只要 HUD 在屏幕上，就总得有人盯 GL 的可用回报。
     HudFrost.Host()
+    // B12 测量入口：子层入组计数，用来对照「父层组合率 → 子层是不是整棵重入」
+    // （≈1:1 即跳过没生效）。前面串一枚编译期常量：debug/release 里
+    // BuildConfig.HUD_RECOMP_PROBE 是 false（javac 常量），Kotlin 折叠后连
+    // @Volatile 读都不剩——正常变体的关闭态是真正的零开销。
+    if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) HudRecompProbe.onZoneBox()
     val density = LocalDensity.current
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
     // [bandExtra] 要贴卡片左缘，而"卡片在槽里居没居中"只有本层知道 ⇒ 两份实测宽收在这里
     var slotWpx by remember { mutableIntStateOf(0) }
     var cardWpx by remember { mutableIntStateOf(0) }
+    // 绝对 y 的手势避让（Y61）要卡片高才能算下缘上限；与 cardWpx 同一处实测
+    var cardHpx by remember { mutableIntStateOf(0) }
+    // 底栏默认定位用 `BottomBarOuterPadV + systemGestures.bottom` 让开手势区；绝对 y 必须同一笔账
+    val bottomGesturePx = WindowInsets.systemGestures.getBottom(density)
+    val bottomOuterPadPx = with(density) { BottomBarOuterPadV.roundToPx() }
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
     val bottomYOnly = zone == HudZone.BOTTOM && placement.yDp >= 0
     val absolute = !bottomYOnly && (placement.xDp >= 0 || placement.yDp >= 0)
     val slot = when {
         bottomYOnly -> Modifier.align(Alignment.TopStart).fillMaxWidth()
-            .offset { IntOffset(0, px(placement.yDp)) }
+            .offset {
+                // 绝对 y 与默认定位同用一笔手势避让（Y61）：表里存到带底（clampZoneYRange
+                // 只扣卡片高）时，渲染必须把卡片下缘抬到「外距 + 手势区」之上，否则拉小白条
+                // 会先撞上底栏。已有存量位置也在这一层被一并纠正，不必改表语义。
+                IntOffset(
+                    0,
+                    bottomAbsoluteYOffsetPx(
+                        yPx = px(placement.yDp),
+                        cardHeightPx = cardHpx,
+                        bandHeightPx = with(density) { area.height.dp.toPx() }.roundToInt(),
+                        bottomAvoidPx = bottomOuterPadPx + bottomGesturePx
+                    )
+                )
+            }
         // 钳过的绝对坐标 → 布局偏移：pillAnchor 回报的窗口矩形跟着视觉位置一起走
         absolute -> Modifier.align(Alignment.TopStart)
             .offset { IntOffset(px(placement.xDp), px(placement.yDp)) }
@@ -1126,6 +1150,7 @@ fun BoxScope.HudZoneBox(
                     val s = coords.size
                     // 卡片宽同时喂给 [bandExtra]：贴卡片左缘要的"卡片在槽里居中"只有这里知道
                     cardWpx = s.width
+                    cardHpx = s.height
                     onCardRect(IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height))
                 }
                 .graphicsLayer {
@@ -1154,6 +1179,28 @@ fun BoxScope.HudZoneBox(
  */
 internal fun bandLeftPx(slotWidthPx: Int, cardWidthPx: Int, absolutePlacement: Boolean): Int =
     if (absolutePlacement) 0 else ((slotWidthPx - cardWidthPx) / 2f).roundToInt()
+
+/**
+ * 底栏「只认 y」绝对定位的**手势安全上限**（Y61，纯函数）。
+ *
+ * 默认底栏分支靠 `padding(bottom = 外距 + systemGestures.bottom)` 让开手势区；绝对 y 分支原先
+ * 只有一个裸 offset，表里的 y 又只被 [clampZoneYRange] 钳到「卡片高」为止，于是拖到最低的底栏
+ * 下缘正好压进小白条热区（拉手势条误触快门，或反之）。
+ *
+ * 这里把卡片下缘钳到 `带高 − 外距 − 手势区` 之上。取"上移"而不是压缩卡片：底栏的尺寸账
+ * （键心 = 可视水平中心）不能被改。
+ *
+ * @param yPx 表里的绝对 y（px，带顶为 0；调用方已保证 ≥ 0）
+ * @param cardHeightPx 卡片实测高（首帧为 0 ⇒ 只钳 y ≤ 带高 − 避让，第二帧即收敛）
+ * @param bandHeightPx 安全区带高（录制页/编辑页的 [HudAreaDp.height]）
+ * @param bottomAvoidPx 底栏外距 + 系统手势区高（与默认分支同一笔账）
+ */
+internal fun bottomAbsoluteYOffsetPx(
+    yPx: Int,
+    cardHeightPx: Int,
+    bandHeightPx: Int,
+    bottomAvoidPx: Int
+): Int = yPx.coerceAtMost((bandHeightPx - cardHeightPx - bottomAvoidPx).coerceAtLeast(0))
 
 // ------------------------------------------------------------------ 五枚容器的内容
 

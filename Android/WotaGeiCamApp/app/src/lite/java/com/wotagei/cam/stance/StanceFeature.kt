@@ -94,12 +94,17 @@ class StanceFeature private constructor(private val appContext: Context) {
     fun Overlay(modifier: Modifier) {
     }
 
-    /** 宣传浮层（用户 2026-11-07 口径原文文案）。 */
+    /**
+     * 宣传浮层（用户 2026-11-07 口径原文文案）。
+     *
+     * [modifier] 由调用方给：CameraScreen 按实测右缘目标传入 `widthIn(max = …)`（Y55），
+     * 窄窗/分屏时面板整体收缩而不是越过右 Dock 槽左缘。
+     */
     @Suppress("UNUSED_PARAMETER")
     @Composable
-    fun ControlsPopup(gpuAllowed: Boolean) {
+    fun ControlsPopup(gpuAllowed: Boolean, modifier: Modifier = Modifier) {
         Column(
-            Modifier
+            modifier
                 .widthIn(min = 264.dp, max = 320.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .background(Color(0xCC1C1C24))

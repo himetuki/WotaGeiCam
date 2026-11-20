@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -142,6 +143,11 @@ private fun LiquidGestureSwitch(
     val travelPx = with(density) { (TrackWidth - ThumbSize - ThumbPad * 2).toPx() }
     val padPx = with(density) { ThumbPad.toPx() }
 
+    // Y57：手势协程跨重组读最新 checked / 回调。手势键里**不放 checked**（见下面 pointerInput）——
+    // 过中点就会回调翻转 checked，若它在键里，重组换键会把整段手势取消（拖到一半松手作废）。
+    val checkedState = rememberUpdatedState(checked)
+    val onCheckedChangeState = rememberUpdatedState(onCheckedChange)
+
     // 位置：一根 Animatable，手势与弹簧写同一个值（设计稿 "ONE POSITION, WRITTEN TWO WAYS"）。
     // px 单位：拉伸公式的速度分母（600 px/s）与设计稿同量纲。
     val x = remember { Animatable(0f) }
@@ -198,54 +204,81 @@ private fun LiquidGestureSwitch(
                 }
             }
             .then(
-                if (!interactive) Modifier else Modifier.pointerInput(interactive, checked, travelPx) {
+                // Y57：手势键只有「可交互 + 行程」，**不含 checked**。跨中点回调翻转 checked 是本控件
+                // 的既定行为（"拖动即状态"），把它放进键会让每次翻转都换一次键、取消当前手势——
+                // 手指还在屏上，协程已经没了，松手的落位与速度继承全部作废。最新值改读 State。
+                if (!interactive) Modifier else Modifier.pointerInput(interactive, travelPx) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val tracker = VelocityTracker()
                         tracker.addPosition(down.uptimeMillis, down.position)
                         pressing = true
+                        // 本段手势自己的逻辑档：翻转后立刻写它，后续判断只读它，不等 checked 的重组回灌
+                        // （同一帧里快速来回拖也不会拿旧值去比）
+                        var gestureChecked = checkedState.value
+                        var grab: Float? = null
                         var moved = false
-
-                        val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ ->
-                            change.consume()
-                        }
-                        if (slopChange != null) {
-                            moved = true
-                            // 偏移在**第一次移动**时才取（设计稿的教训：按下就取会让液滴瞬移到手指下）
-                            val grab = slopChange.position.x - (dragX ?: x.value)
-                            trackHorizontalDrag(tracker, slopChange.id) { at, velocity ->
-                                val next = (at - grab).coerceIn(0f, travelPx)
-                                dragX = next
-                                dragVelocity = velocity
-                                // 过中点立刻翻转：轨道在手指下就回应（不必等松手）
-                                val past = next > travelPx / 2f
-                                if (past != checked) onCheckedChange?.invoke(past)
+                        var handled = false
+                        try {
+                            val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ ->
+                                change.consume()
                             }
-                        }
-                        pressing = false
-                        val released = dragX
-                        dragX = null
-                        if (!moved) {
-                            // 没移动过 = 一次点击（开关要是开关）
-                            onCheckedChange?.invoke(!checked)
-                        } else {
-                            val at = released ?: x.value
-                            // 从离手位置 + 离手速度接着落位；若这一帧手上速度约等于 0（其实是
-                            // 上一段动画在飞），用 x 自己的速度续上——绝不"归零重启"
-                            val v0 = if (abs(dragVelocity) > 1f) dragVelocity else x.velocity
-                            val target = if (checked) travelPx else 0f
-                            scope.launch {
-                                x.snapTo(at)
-                                if (hardSnap) {
-                                    x.snapTo(target)
-                                } else {
-                                    // 速度继承：`initialVelocity` 就是"离手瞬间的速度"，
-                                    // 不是速度归零后重启（设计稿的 ANIMATABLE 口径）
-                                    x.animateTo(target, SettleSpring, initialVelocity = v0)
+                            if (slopChange != null) {
+                                moved = true
+                                // 偏移在**第一次移动**时才取（设计稿的教训：按下就取会让液滴瞬移到手指下）
+                                grab = slopChange.position.x - (dragX ?: x.value)
+                                trackHorizontalDrag(tracker, slopChange.id) { at, velocity ->
+                                    val next = (at - grab!!).coerceIn(0f, travelPx)
+                                    dragX = next
+                                    dragVelocity = velocity
+                                    // 过中点立刻翻转：轨道在手指下就回应（不必等松手）
+                                    val past = next > travelPx / 2f
+                                    if (past != gestureChecked) {
+                                        gestureChecked = past
+                                        onCheckedChangeState.value?.invoke(past)
+                                    }
+                                }
+                            }
+                            handled = true
+                            val released = dragX
+                            dragX = null
+                            if (!moved) {
+                                // 没移动过 = 一次点击（开关要是开关）
+                                gestureChecked = !gestureChecked
+                                onCheckedChangeState.value?.invoke(gestureChecked)
+                            } else {
+                                val at = released ?: x.value
+                                // 从离手位置 + 离手速度接着落位；若这一帧手上速度约等于 0（其实是
+                                // 上一段动画在飞），用 x 自己的速度续上——绝不"归零重启"
+                                val v0 = if (abs(dragVelocity) > 1f) dragVelocity else x.velocity
+                                val target = if (gestureChecked) travelPx else 0f
+                                scope.launch {
+                                    x.snapTo(at)
+                                    if (hardSnap) {
+                                        x.snapTo(target)
+                                    } else {
+                                        // 速度继承：`initialVelocity` 就是"离手瞬间的速度"，
+                                        // 不是速度归零后重启（设计稿的 ANIMATABLE 口径）
+                                        x.animateTo(target, SettleSpring, initialVelocity = v0)
+                                    }
+                                }
+                            }
+                        } finally {
+                            // Y57：正常收尾、取消、异常都从这里出去。清理留在 try 尾部时，手势被取消
+                            // （父容器抢指针 / 页面切换）会留下 pressing=true、dragX 停在半路——下一次
+                            // 手势从旧位置起跑、拇指悬在中间。取消路径还要落回本段手势的逻辑档。
+                            pressing = false
+                            dragVelocity = 0f
+                            val at = dragX
+                            dragX = null
+                            if (!handled && moved && at != null) {
+                                val target = if (gestureChecked) travelPx else 0f
+                                scope.launch {
+                                    x.snapTo(at)
+                                    if (hardSnap) x.snapTo(target) else x.animateTo(target, SettleSpring)
                                 }
                             }
                         }
-                        dragVelocity = 0f
                     }
                 }
             ),

@@ -78,6 +78,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.navigation.NavBackStackEntry
 import com.wotagei.cam.R
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.isMediaStoreVideoUri
@@ -467,8 +468,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         val obs = LifecycleEventObserver { _, event ->
             if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
             if (ComparePractice.armed) {
-                ComparePractice.armed = false
-                ComparePractice.pendingRightId = null
+                // 整条意图丢弃（含发起者 id）：旧发起页身份不能留给下一次回程核对（Y51）
+                ComparePractice.disarm()
             }
             val id = ComparePractice.pendingRightId
             if (id != null) {
@@ -1109,7 +1110,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                 selected = false,
                                 onClick = {
                                     setPlaying(false)
-                                    ComparePractice.primeWith(left.id)
+                                    // 记发起页身份（Y51）：回程弹栈前核对它是否仍在栈上，
+                                    // 过期回调不再落错栈顶。测试环境本地 LifecycleOwner 不是
+                                    // 导航条目，投射失败即 null（回程退回不校验发起者）。
+                                    ComparePractice.primeWith(
+                                        left.id,
+                                        (practiceOwner as? NavBackStackEntry)?.id
+                                    )
                                     onPractice()
                                 }
                             )
