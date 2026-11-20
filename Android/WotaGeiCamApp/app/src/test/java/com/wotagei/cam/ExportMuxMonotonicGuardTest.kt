@@ -147,17 +147,31 @@ class ExportMuxMonotonicGuardTest {
     // ---- 修复链（record/ArcRepairRunner.kt）：writeVideo / drainUpTo（每条音频 lane）两条写入支 ----
     // 与导出链不同，这里两条支各是独立函数体，bodyOf 直接定位、天然互不遮蔽
 
+    private fun arcVideoWriteHolds(body: String): Boolean {
+        val bridge = body.indexOf("val fix = monotonicPts(vMuxLastPtsUs, norm)")
+        val writeback = body.indexOf("vMuxLastPtsUs = fix.ptsUs")
+        // 只钉 PTS 数据流。尾帧标志由 ArcRepairEncoderTailTest 单独核对。
+        val setPts = Regex("""vBufInfo\.set\(\s*bi\.offset,\s*bi\.size,\s*fix\.ptsUs\s*,""")
+            .find(body)?.range?.first ?: return false
+        val muxWrite = body.indexOf("m.writeSampleData(videoTrack, buf, vBufInfo)")
+        return bridge >= 0 && writeback > bridge && setPts > writeback && muxWrite > setPts
+    }
+
     @Test
     fun `修复链视频写前过单调桥`() {
         val body = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "writeVideo")
         )
-        assertTrue(
-            "ArcRepairRunner.writeVideo 必须过 monotonicPts 桥（重编码输出 PTS 也可能非严格递增，同轨倒退照样抛 Muxer 异常）",
-            body.contains("monotonicPts(") &&
-                body.contains("vMuxLastPtsUs = fix.ptsUs") &&
-                body.contains("vBufInfo.set(bi.offset, bi.size, fix.ptsUs, bi.flags)")
+        assertTrue("封装器必须收到带修正 PTS 的缓冲描述", arcVideoWriteHolds(body))
+    }
+
+    @Test
+    fun `突变_修复链把原始视频PTS写进封装器必红`() {
+        val body = KotlinSourceScan.flatten(
+            KotlinSourceScan.bodyOf(maskedMain("record/ArcRepairRunner.kt"), "writeVideo")
         )
+        assertTrue(arcVideoWriteHolds(body))
+        assertFalse(arcVideoWriteHolds(body.replaceFirst("fix.ptsUs,", "norm,")))
     }
 
     @Test

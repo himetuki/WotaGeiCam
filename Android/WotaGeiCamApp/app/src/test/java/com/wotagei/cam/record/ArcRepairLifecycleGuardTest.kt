@@ -9,11 +9,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 光弧修复执行器的生命周期/异常路径守卫（两条真实泄漏）。
+ * 光弧修复执行器的生命周期/异常路径守卫。
  *
- * 1. 播放页在 `status == RUNNING` 时 onDispose 跳过 shutdown()：任务结束后没有任何 quitSafely
- *    调用 ⇒ 每次"运行中离开播放页"永久多一条 WotaArcRepair 线程。现在 onDispose 一律调
- *    `shutdownAfterTask()`（不取消任务，任务末尾自行退线程）。
+ * 1. Y23：任务所有者迁出播放页 `remember`（执行器不再持有状态源，宿主负责收尾）；
+ *    执行器入队失败必须归还所有权（旧实现先写 RUNNING 再 post，post 失败留下永久 RUNNING 幽灵任务）。
  * 2. `openAudioLanes` 只捕 IOException：非 IOException 时当前 extractor 与已建 lane 都只在
  *    局部变量里，finish() 的 audioLanes 还看不到它们 ⇒ 原生 extractor 泄漏。现在异常路径
  *    先全部 release 再把异常抛给会话收尾。
@@ -23,29 +22,53 @@ class ArcRepairLifecycleGuardTest {
     private val src by lazy { codeOnly(mainSourceText("record/ArcRepairRunner.kt")) }
 
     @Test
-    fun `运行中离开页面_任务结束后线程必须自行退出`() {
+    fun `任务收尾必须先归还所有权再交付终态_线程按需自退`() {
         val start = flatten(bodyOf(src, "start"))
-        assertTrue("start 的正常/取消两条收尾都必须走 finishTask", start.contains("finishTask("))
+        assertTrue("start 的排队取消/正常两条收尾都必须走 finishTask", start.contains("finishTask("))
         val finish = flatten(bodyOf(src, "finishTask"))
+        val end = finish.indexOf("gate.end(token)")
+        val deliver = finish.indexOf("onResult(out)")
+        assertTrue("收尾必须先归还所有权", end >= 0)
+        assertTrue("终态必须经 onResult 交付宿主", deliver >= 0)
+        assertTrue("先归还所有权再交付（回调里起跑新一轮不会被自己挡回）", end < deliver)
         assertTrue(
-            "任务收尾必须读 quitAfterTask 并 quitSafely（否则运行中离开页面后线程永久驻留）",
+            "任务收尾必须读 quitAfterTask 并 quitSafely（否则宿主销毁后线程永久驻留）",
             finish.contains("if (quitAfterTask) thread.quitSafely()")
         )
         val shutdown = flatten(bodyOf(src, "shutdownAfterTask"))
         assertTrue("必须先登记退线程意图", shutdown.contains("quitAfterTask = true"))
-        assertTrue("空闲时必须立即退", shutdown.contains("if (!busy) thread.quitSafely()"))
+        assertTrue(
+            "空闲时必须立即退（判据走所有权门，不许再维护第二枚 busy）",
+            shutdown.contains("if (!gate.hasTask()) thread.quitSafely()")
+        )
         // 不能把取消语义混进来：shutdownAfterTask 不许动任务取消门
         assertFalse("shutdownAfterTask 不许取消用户已发起的修复", shutdown.contains("gate.cancel("))
     }
 
     @Test
-    fun `播放页离开时必须走不取消任务的收尾`() {
+    fun `播放页不再持有任务_状态与终态归Activity宿主`() {
         val player = codeOnly(mainSourceText("player/PlayerScreen.kt"))
-        val dispose = player.substringAfter("DisposableEffect(arcRunner)").substringBefore("val pos by")
-        assertTrue("onDispose 必须调 shutdownAfterTask", dispose.contains("shutdownAfterTask()"))
         assertFalse(
-            "不得再按 RUNNING 跳过收尾（跳过 = 线程永久驻留）",
-            dispose.contains("status.value != ArcRepairStatus.RUNNING")
+            "页面不得再自己构造执行器（remember + ArcRepairRunner = 退页即丢状态、重进另起一条并行）",
+            player.contains("remember(app) { ArcRepairRunner(")
+        )
+        assertTrue("页面必须经 Activity 作用域宿主取任务", player.contains("ArcRepairHost.of("))
+        val host = flatten(codeOnly(mainSourceText("player/ArcRepairHost.kt")))
+        assertTrue("宿主收尾必须走不取消任务的路径（用户已发起的修复要写完）", host.contains("shutdownAfterTask()"))
+        assertFalse("宿主收尾不得无差别取消（onCleared 不是用户取消）", host.contains("runner.shutdown()"))
+    }
+
+    @Test
+    fun `执行器入队失败不得留下幽灵RUNNING`() {
+        val start = flatten(bodyOf(src, "start"))
+        assertTrue("start 必须拿到 handler.post 的受理结果", start.contains("val posted = handler.post"))
+        assertTrue("线程已退时必须归还所有权", start.contains("gate.end(token)"))
+        val guard = start.substringAfter("if (!posted)").substringBefore("return token")
+        assertTrue("拒绝起跑必须返回 null（调用方据此回滚槽位并按忙提示）", guard.contains("return null"))
+        assertFalse("执行器不得再持有 MutableStateFlow（状态已迁到宿主账本）", src.contains("MutableStateFlow"))
+        assertFalse(
+            "执行器不得再有第二枚 activeToken/busy 记账",
+            src.contains("private var activeToken") || src.contains("private var busy")
         )
     }
 

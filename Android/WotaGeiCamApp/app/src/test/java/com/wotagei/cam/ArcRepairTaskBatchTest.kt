@@ -10,6 +10,7 @@ import com.wotagei.cam.record.arcRepairProgress
 import com.wotagei.cam.record.arcRunVerdict
 import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
+import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -205,8 +206,21 @@ class ArcRepairTaskBatchTest {
         val post = start.indexOf("handler.post")
         assertTrue("start 必须在 post 之前领所有权", begin >= 0 && post > begin)
         assertFalse("不得再在消息内复位进程级 cancelRequested", start.contains("cancelRequested = false"))
-        val stop = bodyOf(src, "stopAsync")
-        assertTrue("stopAsync 必须按当前 token 取消", stop.contains("gate.cancel("))
+        assertTrue("start 必须把 token 交还调用方（null = 忙，宿主据此回滚槽位）", start.contains("return token"))
+        val cancel = bodyOf(src, "cancel")
+        assertTrue("取消必须按 token 落到所有权门（晚取消不串新一轮）", cancel.contains("gate.cancel(token)"))
+    }
+
+    @Test
+    fun `源码钉扎_任务身份绑定来源URI与代数`() {
+        val tasks = flatten(codeOnly(mainSourceText("record/ArcRepairTasks.kt")))
+        assertTrue("取消必须按 identity 匹配（来源 URI + 代数），不许无参取消当前轮", tasks.contains("run.request != request"))
+        assertTrue("确认必须按 taskId 移除", tasks.contains("filterNot { it.request.taskId == taskId }"))
+        assertTrue("起跑必须单槽（已有任务在跑直接拒绝，不排队）", tasks.contains("if (previous.running != null) return false"))
+        assertTrue("终态到达必须照实入队（取消与完成赛跑也不改判）", tasks.contains("results + ArcRepairResultItem"))
+        val host = flatten(codeOnly(mainSourceText("player/ArcRepairHost.kt")))
+        assertTrue("宿主必须按来源 URI 起跑", host.contains("clip.uri.toString()"))
+        assertTrue("取消出口必须交给执行器 token", host.contains("onCancel = runner::cancel"))
     }
 
     @Test

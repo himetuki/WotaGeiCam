@@ -34,6 +34,10 @@
     <string name="player_arc_no_need">源帧率不高于目标帧率，没有帧可抽</string>
     <string name="player_arc_running">修复中 %1$d%%</string>
     <string name="player_arc_busy">已有修复任务在跑</string>
+    <!-- Y23：取消入口只在本片确实有一轮在跑时出现；取消与完成赛跑时照实展示真结果 -->
+    <string name="player_arc_cancel">取消本次修复</string>
+    <string name="player_arc_cancelling">正在取消…</string>
+    <string name="player_arc_cancelled">修复已取消</string>
 
     <!-- 倍速档位（需求：0.1 / 0.3 / 0.5 / 0.75 / 1.0） -->
     <string name="player_speed_current">倍速 %1$s</string>

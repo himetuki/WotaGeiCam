@@ -113,6 +113,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -130,9 +131,9 @@ import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaOps
 import com.wotagei.cam.media.rememberMediaRepo
-import com.wotagei.cam.record.ArcRepairError
-import com.wotagei.cam.record.ArcRepairRunner
-import com.wotagei.cam.record.ArcRepairStatus
+import com.wotagei.cam.record.ArcRepairResult
+import com.wotagei.cam.record.ArcResultKind
+import com.wotagei.cam.record.arcResultKind
 import com.wotagei.cam.ui.ParamsPersistSession
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.findActivity
@@ -401,10 +402,20 @@ fun PlayerScreen(
 
     // 光弧修复后台执行器（用户需求第 7 项）：Context 取 applicationContext，避免把 Activity 钉在
     // 一条可能跑几十秒的后台线程上。**只由按钮触发**，这里没有任何自动启动。
+    // Y23：任务所有者迁到 [ArcRepairHost]（Activity 作用域，跨退页/配置重建存活）。旧实现把
+    // runner 挂在本页 remember 上：退页后状态与终态整份消失，重进页面还会另起一条 runner 与
+    // 在跑的任务并行。页面只按 `(来源 URI, 代数)` 展示/取消/确认，不再持有任务本身。
     val app = LocalContext.current.applicationContext
-    val arcRunner = remember(app) { ArcRepairRunner(app) }
-    val arcStatus by arcRunner.status.collectState(ArcRepairStatus.IDLE)
-    val arcProgress by arcRunner.progress.collectState(0f)
+    val arcContext = LocalContext.current
+    val arcActivity = remember(arcContext) { arcContext.findActivity() }
+    val arcOwner = (arcActivity as? ViewModelStoreOwner) ?: LocalViewModelStoreOwner.current
+    val arcHost = remember(arcOwner) {
+        ArcRepairHost.of(checkNotNull(arcOwner) { "PlayerScreen 需要可用的 ViewModelStoreOwner" })
+    }
+    val arcState by arcHost.state.collectAsStateWithLifecycle()
+    val arcSourceUri = clip.uri.toString()
+    // 只有本片在跑时才把入口标成"在忙"、把进度画到本片上；别的片在跑时入口仍可点，点了给忙提示
+    val arcRun = arcState.runningFor(arcSourceUri)
     var arcMenu by remember { mutableStateOf(false) }
     var arcAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     // 抽帧目标帧率：产品口径 = 强制档两枚（24/25），默认 24；源实测帧率由管线自己量（容器会撒谎）
@@ -418,13 +429,6 @@ fun PlayerScreen(
         WotaParams(CoroutineScope(Dispatchers.Unconfined)).also { WotaSettings.applyDefaults(prefs, it) }
     }
     val arcPersist = remember(prefs, arcParams) { ParamsPersistSession(prefs, arcParams) }
-    // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
-    // 置真并等 3s 收尾，等于丢掉用户已经发起的修复。shutdownAfterTask() 只登记"任务结束后退线程"：
-    // 空闲立即退，忙碌则由 start 任务末尾自行 quitSafely。旧实现在 RUNNING 时直接跳过 shutdown()，
-    // 任务结束后再无 quit 调用 ⇒ 每次"运行中离开播放页"都永久多一条 WotaArcRepair 线程。
-    DisposableEffect(arcRunner) {
-        onDispose { arcRunner.shutdownAfterTask() }
-    }
 
     val pos by engine.positionMs.collectState(0L)
     val dur by engine.durationMs.collectState(clip.durationMs)
@@ -540,6 +544,18 @@ fun PlayerScreen(
         }
     }
 
+    // 光弧修复终态（Y23）：结果归 [ArcRepairHost]，本页只负责展示与按代数确认。退页/重建后
+    // 结果仍在宿主里（不静默丢），别的片的结果也照实提示"哪条 + 结果"，但**绝不**自动打开
+    // 修复弹层——只有那颗按钮能开窗（导出那边的"自动开进度窗"语义不搬过来）。
+    val arcNotice = arcState.latestResult()?.takeIf { banner == null && exportNotice == null }
+    LaunchedEffect(arcHost, exportLifecycle, arcNotice?.request?.taskId) {
+        val item = arcNotice ?: return@LaunchedEffect
+        exportLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            delay(2600)
+            arcHost.acknowledge(item.request.taskId)
+        }
+    }
+
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
     val tapArbiter = remember { TapArbiter(DOUBLE_TAP_WINDOW_MS) }
     var toggleJob by remember { mutableStateOf<Job?>(null) }
@@ -579,22 +595,8 @@ fun PlayerScreen(
     LaunchedEffect(playError) {
         if (playError) banner = R.string.player_error
     }
-    // 后台修复的终态提示走现成反馈条（2.6s 自动隐）；进行中的进度另给一行小字，见下面 Box。
-    // NO_NEED（源实测帧率不高于目标，没有帧可抽）不是故障，给专门文案避免吓到用户
-    LaunchedEffect(arcStatus) {
-        when (arcStatus) {
-            ArcRepairStatus.DONE -> banner = R.string.player_arc_done
-            ArcRepairStatus.FAILED ->
-                banner = when {
-                    arcRunner.result.value?.error == ArcRepairError.NO_NEED -> R.string.player_arc_no_need
-                    // 已封口待发布不是普通失败：文件在盘上，只是 IS_PENDING 没清掉。
-                    // 文案必须让用户知道"已保存"，否则会以为白修一遍。
-                    arcRunner.result.value?.pendingPublish == true -> R.string.player_arc_pending_publish
-                    else -> R.string.player_arc_failed
-                }
-            else -> Unit
-        }
-    }
+    // 后台修复的终态提示由**宿主**的结果队列驱动（见下方 arcNotice）：结果留在宿主直到本页
+    // 确认，退页/配置重建都不会丢；别的片的结果也不静默吞掉，但绝不自动打开修复弹层。
 
     val duration = if (dur > 0L) dur else clip.durationMs
     val fraction = dragFrac ?: if (duration > 0L) (pos.toFloat() / duration.toFloat()) else 0f
@@ -812,7 +814,7 @@ fun PlayerScreen(
                                 BarIconSlot(
                                     Icons.Outlined.AutoFixHigh,
                                     stringResource(R.string.player_arc_repair),
-                                    accent = arcStatus == ArcRepairStatus.RUNNING
+                                    accent = arcRun != null
                                 ) { arcMenu = !arcMenu }
                             }
                             // 掐头去尾导出入口（2026-10-04 方向 3）：区间=A/B 标记。导出中亮 accent，
@@ -1029,24 +1031,20 @@ fun PlayerScreen(
                     anchor = arcAnchor,
                     dstFps = arcDstFps,
                     params = arcParams,
+                    running = arcRun != null,
+                    cancelling = arcRun?.cancelling == true,
                     onPersist = { arcPersist.flush() },
                     onPickFps = { arcDstFps = it },
                     onPick = { useGpu ->
                         arcMenu = false
-                        // 重复启动保护：管线本身同一时刻只跑一条（runner.busy 也会兜一层），
-                        // 这里给个明确提示，避免用户以为点第二下没反应。DONE/FAILED 不算在忙，
-                        // 允许接着再修一条（runner.start 会自行重置 result/progress）。
-                        if (arcStatus == ArcRepairStatus.RUNNING) {
-                            banner = R.string.player_arc_busy
-                        } else {
-                            arcRunner.start(
-                                clip.uri,
-                                useGpu,
-                                arcDstFps,
-                                capOffsetMs = syncedOffsetMs?.toInt() ?: 0
-                            )
-                        }
+                        // 重复启动保护：执行槽在宿主侧（跨退页/重建），已有任务（本片或别片）一律
+                        // 按忙提示，绝不再排第二轮。终态送达后槽位自动归还，可以接着修下一条。
+                        val accepted = arcState.running == null &&
+                            arcHost.start(clip, useGpu, arcDstFps, capOffsetMs = syncedOffsetMs?.toInt() ?: 0)
+                        if (!accepted) banner = R.string.player_arc_busy
                     },
+                    // 取消按 (来源 URI, 代数) 落到宿主：只撤销本片这一轮，旧代数的迟到取消无效
+                    onCancel = { arcRun?.let { arcHost.cancel(it.request) } },
                     onDismiss = { arcMenu = false }
                 )
             }
@@ -1058,6 +1056,12 @@ fun PlayerScreen(
                     val result = stringResource(exportResultRes(exportNotice))
                     if (exportNotice.request.sourceUri == sourceUri) result else stringResource(
                         R.string.player_export_other_source, exportNotice.request.sourceName, result
+                    )
+                }
+                arcNotice != null -> {
+                    val result = stringResource(arcResultRes(arcNotice.payload))
+                    if (arcNotice.request.sourceUri == sourceUri) result else stringResource(
+                        R.string.player_export_other_source, arcNotice.request.sourceName, result
                     )
                 }
                 else -> null
@@ -1080,9 +1084,11 @@ fun PlayerScreen(
             }
             // 后台修复进行中的轻量反馈：一行等宽小字，不占控件栏、不挡画面、与控制栏显隐无关。
             // 位置压在反馈条上方（banner 走 120dp），两条同时在位时不会互相盖住。
-            if (arcStatus == ArcRepairStatus.RUNNING) {
+            // 进度与"取消中"都取自宿主那一轮（本片身份）；别的片在跑时不往本片画进度。
+            if (arcRun != null) {
                 Text(
-                    text = stringResource(R.string.player_arc_running, (arcProgress * 100f).toInt()),
+                    text = if (arcRun.cancelling) stringResource(R.string.player_arc_cancelling)
+                    else stringResource(R.string.player_arc_running, (arcRun.progress * 100f).toInt()),
                     style = MonoStyle,
                     color = WotaText,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 168.dp)
@@ -1781,7 +1787,21 @@ private fun TrackExportPopup(
     }
 }
 
+/**
+ * 光弧修复终态的文案映射（Y23：终态只认宿主交付的 [ArcRepairResult]，不再读执行器上"最后一次状态"）。
+ * 归类真值表在 [arcResultKind]（纯函数，JVM 全表）；这里只负责"哪一类配哪句"。
+ */
 @StringRes
+internal fun arcResultRes(result: ArcRepairResult): Int = when (arcResultKind(result)) {
+    ArcResultKind.DONE -> R.string.player_arc_done
+    ArcResultKind.CANCELLED -> R.string.player_arc_cancelled
+    ArcResultKind.NO_NEED -> R.string.player_arc_no_need
+    // 已封口待发布不是普通失败：文件在盘上，只是 IS_PENDING 没清掉。
+    // 文案必须让用户知道"已保存"，否则会以为白修一遍。
+    ArcResultKind.PENDING_PUBLISH -> R.string.player_arc_pending_publish
+    ArcResultKind.FAILED -> R.string.player_arc_failed
+}
+
 internal fun exportResultRes(item: ExportResultItem): Int = when (val result = item.payload) {
     is ClipResult.Done -> when (item.request.kind) {
         ExportKind.CLIP -> R.string.player_clip_done
@@ -1876,9 +1896,13 @@ private fun ArcRepairPopup(
     anchor: androidx.compose.ui.unit.IntRect,
     dstFps: Int,
     params: WotaParams,
+    /** 本片是否已有一轮在跑（Y23：取消入口就挂在弹层里，按来源 URI+代数只撤销本片这一轮） */
+    running: Boolean,
+    cancelling: Boolean,
     onPersist: () -> Unit,
     onPickFps: (Int) -> Unit,
     onPick: (Boolean) -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val deadband by params.arcMergeDeadband.collectAsState()
@@ -1983,6 +2007,23 @@ private fun ArcRepairPopup(
                             color = WotaTextDim
                         )
                     }
+                }
+            }
+            // 取消入口（Y23）：只在本片确实有一轮在跑时出现，按 (来源 URI, 代数) 落到宿主；
+            // 取消与完成赛跑时照实展示真结果（宿主不会把已发布的结果改判成"已取消"）。
+            if (running) {
+                TextButton(
+                    onClick = onCancel,
+                    enabled = !cancelling,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = if (cancelling) stringResource(R.string.player_arc_cancelling)
+                        else stringResource(R.string.player_arc_cancel),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WotaText
+                    )
                 }
             }
             Text(

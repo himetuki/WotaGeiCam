@@ -15,7 +15,13 @@ internal class ArcRepairTaskGate {
 
     private var nextToken = 0L
     private var currentToken = 0L
-    private val cancelled = HashSet<Long>()
+
+    /**
+     * 取消记在**当前轮**上（0 = 未取消）。旧实现用 `HashSet<Long>` 记账：
+     * 任务结束时如果取消比收尾更晚到，条目会永久留在集合里（长时间使用会攒下无界集合），
+     * 而"取消一个已结束的 token"本来就不该有任何效力——取消只对**持有所有权的那一轮**有效。
+     */
+    private var cancelToken = 0L
 
     /** 领取本轮所有权；已有任务在跑返回 null（调用方必须原样忽略，不排队） */
     @Synchronized
@@ -23,27 +29,31 @@ internal class ArcRepairTaskGate {
         if (currentToken != 0L) return null
         nextToken += 1L
         currentToken = nextToken
-        cancelled.remove(currentToken)
+        cancelToken = 0L
         return currentToken
     }
 
-    /** 请求取消某一轮（非阻塞；未知/已结束 token 忽略） */
+    /** 请求取消某一轮（非阻塞）：只接受当前轮的 token，迟到的取消碰不到新一轮 */
     @Synchronized
     fun cancel(token: Long) {
-        if (token != 0L) cancelled.add(token)
+        if (token != 0L && token == currentToken) cancelToken = token
     }
 
     @Synchronized
-    fun isCancelled(token: Long): Boolean = token in cancelled
+    fun isCancelled(token: Long): Boolean = token != 0L && token == cancelToken
 
     @Synchronized
     fun isCurrent(token: Long): Boolean = token == currentToken
+
+    /** 是否仍有任务持有所有权（收尾时判"空闲即可退线程"） */
+    @Synchronized
+    fun hasTask(): Boolean = currentToken != 0L
 
     /** 本轮收尾：只归还自己持有的所有权（迟到的旧 token 不得清掉新一轮） */
     @Synchronized
     fun end(token: Long) {
         if (currentToken == token) {
-            cancelled.remove(token)
+            cancelToken = 0L
             currentToken = 0L
         }
     }
@@ -99,6 +109,19 @@ internal fun arcAudioOutPtsUs(samplePtsUs: Long, ptsBaseUs: Long, shiftUs: Long)
 /** 序列上「至少一枚可写样本」的纯判据（测试用桩序列直接驱动，与 [arcAudioOutPtsUs] 同口径） */
 internal fun arcAudioHasWritable(samplePtsUs: List<Long>, ptsBaseUs: Long, shiftUs: Long): Boolean =
     samplePtsUs.any { arcAudioOutPtsUs(it, ptsBaseUs, shiftUs) >= 0L }
+
+/**
+ * 编码器输出缓冲「该不该当样本写进 muxer」的纯判据（Y24 真值表，JVM 可全测）。
+ *
+ * 只看**有无负载**与**是否配置帧**，判断里**不得出现 EOS**：平台会把末帧与
+ * `BUFFER_FLAG_END_OF_STREAM` 合在同一枚输出缓冲上，拿 `!eos` 当写条件会把这一枚末帧
+ * 直接 release——成片比抽帧计划少一帧、尾部补弧被削，容器时长与音频尾巴对不上。
+ * 配置帧（csd）已随 `outputFormat` 进 addTrack，不能再当样本写；零长度 EOS 没有负载。
+ *
+ * @return true = 先写这枚样本，再交接 EOS
+ */
+internal fun arcEncSampleWritable(sizeBytes: Int, codecConfig: Boolean): Boolean =
+    sizeBytes > 0 && !codecConfig
 
 /**
  * 运行收尾的**成功/失败裁决**（纯函数，JVM 全表）。
