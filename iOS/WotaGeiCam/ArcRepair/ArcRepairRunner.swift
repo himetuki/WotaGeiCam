@@ -976,6 +976,11 @@ private final class ArcRepairSession {
                 case .failed(let message):
                     self.library.cancelPending(handle, completion: nil)
                     self.abort(code: .noOutput, message: "入库失败：\(message)")
+                case .publishFailed(let message):
+                    // 修复成片已完整封装；发布失败只保留暂存文件，不删成片。
+                    self.abort(code: .noOutput,
+                               message: "入库失败：\(message)。成片已保留为暂存文件，下次启动会尝试救援。",
+                               retainPending: true)
                 }
             }
         }
@@ -1016,7 +1021,7 @@ private final class ArcRepairSession {
         }
     }
 
-    private func abort(code: ArcRepairFailureCode, message: String) {
+    private func abort(code: ArcRepairFailureCode, message: String, retainPending: Bool = false) {
         guard !finished else { return }
         finished = true
         let handle = pendingHandle
@@ -1031,7 +1036,7 @@ private final class ArcRepairSession {
         pendingPixelBuffer = nil
         accumulatedPixelBuffer = nil
         audioLanes = []
-        if let handle = handle {
+        if let handle = handle, !retainPending {
             library.cancelPending(handle, completion: nil)
         }
         let report: ArcRepairReport

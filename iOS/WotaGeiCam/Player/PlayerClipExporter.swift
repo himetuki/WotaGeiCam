@@ -307,6 +307,12 @@ final class PlayerClipExporter {
                 self.finish(.completed(URL(fileURLWithPath: path), notes: notes))
             case .failed(let message):
                 self.discard(work.handle, outcome: .failed(PlayerClipExportFailure(.mux, "无法发布剪辑：\(message)")))
+            case .publishFailed(let message):
+                // 导出文件已完整写入暂存区；发布失败不能删成片，留给冷启维护救援。
+                self.finish(.failed(PlayerClipExportFailure(
+                    .mux,
+                    "无法发布剪辑：\(message)。成片已保留为暂存文件，下次启动会尝试救援。"
+                )))
             }
         }
     }

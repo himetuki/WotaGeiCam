@@ -6,7 +6,10 @@ import WotaCore
 /// 区分成片已经落盘和发布前失败。索引暂不可写时仍可回放已保存的文件。
 enum MediaCommitOutcome {
     case published(MediaItem, indexWarning: String?)
+    /// 暂存文件本身不可用（无视频轨/时长）⇒ 调用方可以清理。
     case failed(String)
+    /// 暂存文件有效但改名/发布失败（如目标名已存在）⇒ 调用方必须保留暂存文件。
+    case publishFailed(String)
 }
 
 /// 改名结果。
@@ -175,7 +178,9 @@ final class MediaLibrary {
                     )
                 }
             } catch {
-                MediaLibrary.deliver(MediaCommitOutcome.failed("\(error)"), completion)
+                // 走到这里说明暂存文件已通过视频轨/时长校验，只是改名/发布失败。
+                // 不能按 `.failed` 让调用方 cancelPending——那会删掉完整成片。
+                MediaLibrary.deliver(MediaCommitOutcome.publishFailed("\(error)"), completion)
             }
         }
     }

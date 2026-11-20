@@ -207,6 +207,10 @@ final class CameraRecordingCoordinator {
                 if let closingNote = take.closingNote { messages.append(closingNote) }
                 self.finish(take, with: .saved(item, messages))
             case .failed(let reason): self.discard(take, reason: "入库失败：\(reason)")
+            case .publishFailed(let reason):
+                // 录像已完整封装，只是最终名发布失败（如目标名被占用）。
+                // 保留暂存文件交给冷启维护救援；绝不能在这里 cancelPending 删除成片。
+                self.finish(take, with: .failed("入库失败：\(reason)。录像已保留为暂存文件，下次启动会尝试救援。"))
             }
         }
     }

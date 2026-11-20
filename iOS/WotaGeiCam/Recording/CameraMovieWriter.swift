@@ -54,6 +54,8 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var notes: [String] = []
     private var takingSamples = false
     private var failure: String?
+    /// 音频是可选轨：编码器拒收样本时降级为无声，不把整段录像判死。
+    private var audioFailure: String?
     private var finishing = false
     private var finishReply: ((Result) -> Void)?
 
@@ -156,6 +158,7 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     private func appendAudio(_ sample: CMSampleBuffer, at pts: CMTime) {
+        guard audioFailure == nil else { return }
         guard let first = firstPTS, let input = audioInput, let writer = writer,
               writer.status == .writing, CMTimeCompare(pts, first) >= 0 else { return }
         if let last = lastAudioPTS, CMTimeCompare(pts, last) <= 0 {
@@ -167,7 +170,13 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             return
         }
         guard input.append(sample) else {
-            fail(writer.error?.localizedDescription ?? "音频样本写入失败。")
+            let message = writer.error?.localizedDescription ?? "音频样本写入失败。"
+            if writer.status == .writing, failure == nil {
+                // 音频编码器拒收（采样率/声道/磁盘等）只降级音轨，视频继续写。
+                degradeAudio(message)
+            } else {
+                fail(message)
+            }
             return
         }
         audioCount += 1
@@ -287,6 +296,14 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         post(.failed(message))
     }
 
+    /// 音频是可选轨：写失败后停止送音频，封装时仍保存完整视频。
+    private func degradeAudio(_ message: String) {
+        guard audioFailure == nil else { return }
+        audioFailure = message
+        notes.append("音频写入中断（\(message)），本次按无声保存。")
+        post(.note("音频写入中断，已改为保存无声录像。"))
+    }
+
     private func finishAtBoundary(_ note: String) {
         takingSamples = false
         post(.stop(note))
@@ -336,7 +353,9 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                         return
                     }
                     var resultNotes = Array(self.notes.dropFirst())
-                    if self.audioInput != nil && (self.audioCount == 0 || asset.tracks(withMediaType: .audio).isEmpty) {
+                    if let audioFailure = self.audioFailure {
+                        resultNotes.append("音频写入失败（\(audioFailure)），已保存无声录像。")
+                    } else if self.audioInput != nil && (self.audioCount == 0 || asset.tracks(withMediaType: .audio).isEmpty) {
                         resultNotes.append("未收到可用的麦克风音轨，已保存无声录像。")
                     }
                     if self.droppedVideo > 0 || self.droppedAudio > 0 {
