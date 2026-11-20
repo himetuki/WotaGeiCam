@@ -163,7 +163,7 @@ Legacy（iPhone5/armv7）无托管 Xcode 13.4.1，需自建 macOS12 runner，本
 已实际执行（真实退出码）：
 
 - `generate_project.py --check`（package 与 inline 两种登记模式均一致，48 个源文件收录）；
-- `check_project.py`（1502 项检查 PASS：工程/plist/xcconfig/scheme/隐私清单/源映射全绿）；
+- `check_project.py`（1504 项检查 PASS：工程/plist/xcconfig/scheme/隐私清单/源映射/Metal 参考副本全绿）；
 - `verify_source_inventory.py`（1643 项 Android→iOS 功能与参数映射核对 PASS）；
 - `.github/workflows/build-ipa.yml` YAML 结构解析通过；
 - `bash -n scripts/*.sh`、`detect_apple_tools.sh` 及各 Apple 脚本的参数校验分支。

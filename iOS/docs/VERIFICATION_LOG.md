@@ -95,3 +95,46 @@
 - `check_project.py` → checks=1502 PASS，退出0；`--core-mode inline` → checks=1532 PASS；
 - `verify_source_inventory.py` → checks=1643 failures=0，退出0；
 - 工作流 YAML 结构解析 → jobs=['structure-checks','build-unsigned-ipa']，matrix 2 项。
+
+## 2026-11-21 / 只读审计与修复轮（本分支 8 个提交，未推送）
+
+审计口径：Windows 无 Swift/Xcode，只有静态源码审查 + 三个本地脚本；**没有 Apple 编译证据**。
+四路只读审计覆盖 Camera/Recording、Library/Settings/Update/ArcRepair、Player/Compare/Rendering、
+WotaCore/scripts/CI；所有结论先以当前源码复核，再修复。
+
+已修复（对应提交）：
+
+- `d596f3c` 编译阻断：`CompareDecideCommands` 三处实参顺序违反 Swift 声明顺序；
+  `UIAccessibility.post`（iOS 11+）与 `UIColor.systemBlue`（iOS 13+）在 Legacy iOS 10 目标无门控；
+  `setAutoExposure` 的可选闭包方法引用改为显式闭包。
+- `7da4020` 数据丢失：录音/剪辑/补弧在暂存文件已完整封装、仅最终名发布失败时，
+  不再 `cancelPending` 删除成片；新增 `MediaCommitOutcome.publishFailed` 区分「暂存无效」与「发布失败」。
+  音频 append 失败降级为无声录像，不再让整段录像判死。
+- `7480745` 索引/路径：瞬时索引读失败保留原文件并拒绝写入；坏索引备份失败禁止覆盖；
+  `mediaId` 上限防溢出；改名目标必须是自有成片名；索引重绑失败回滚改名；
+  sidecar 归位统一走 `sidecarFileName(forVideoFileName:)`；批量补录只写一次索引；
+  `default_size` 尺寸上限/乘法溢出防护；采样率用 Int64 距离防 armv7 `Int32.min` 溢出。
+- `89d52b3` 备份：`importBackup` 返回 `ImportResult`（设置条数 + 标签）；
+  媒体库按跨端指纹导出标签，导入时只对唯一、非回收站匹配做加法合并。
+- `68af674` 播放器/GPU：从末帧拖回中间后状态离开 `.ended`；恢复播放的异步 seek 用代际令牌防暂停被覆盖；
+  逐帧播放态隐式暂停；Metal/GLES 同步后检查 GPU 错误并抛 `readbackFailed`；非整数帧率按真实周期取整。
+- `d2718d0` 资源/CI：更新 JSON 响应 1 MiB 流式上限；CI 的 tag/branch 前缀经 env + 白名单字符，
+  不再拼进 `run` 脚本；IPA 资产名与 CI 实际产物一致；Metal 只保留内嵌源并新增参考副本一致性检查；
+  设置页复用 cell，target 随 cell 释放。
+- `e5e46a6` 并发：ArcRepair 的 `finished` 统一走 `stateLock`；播放器旧 asset 元数据回填不再覆盖新素材。
+- `bc8ed67` 索引留证：顶层 JSON 可解析但个别行被丢弃时，先复制原始索引到 `corrupt-*` 再继续。
+
+本轮静态证据：
+
+- `python -I iOS/scripts/check_project.py` → `checks=1504` PASS（新增 2 条 Metal 一致性检查）；
+- `python -I iOS/scripts/verify_source_inventory.py` → `checks=1643 failures=0` PASS；
+- `python -I iOS/scripts/generate_project.py --check` → OK；
+- `.github/workflows/build-ipa.yml` YAML 解析通过。
+
+未完成 / 不声称：
+
+- Apple 编译、archive、unsigned IPA、真机安装：本机无工具链，仍未执行。
+- 录音音频声道（固定 2ch）与设备单声道麦克风的实际兼容、录制方向是否需写 `AVAssetWriterInput.transform`：
+  仓库事实不足，列入真机验证，不在本轮猜改。
+- AppIcon / Legacy 启动图、PrivacyInfo 的 SystemBootTime 类别是否保留：需产品/设备侧确认。
+- Mimosa 完整安全扫描在本轮未取得结论（`scanner_enobufs`），**不得据此宣称项目安全**。

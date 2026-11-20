@@ -150,8 +150,9 @@
   这样 Android 生成的备份也能读；`stance_*` 在 `settingsOf` 阶段被剔除。
 - 拒绝：坏版本、越界长度、截断、**尾随数据**（`atEnd`）、重复键。
 - **无自动联网、无自动上传**：导出/导入都是显式本地调用（UI 走系统分享 / 文件选择器）。
-- 标签（媒体指纹）结构保留并与 Android 互认（`MediaKey`/`mergeTags`/`uniqueCandidates`/`matches`），
-  但当前无媒体库落地，导入的 tags 交回调用方（Library 任务处理）。
+- 标签（媒体指纹）已接线：`MediaLibrary.backupTags` 按跨端指纹（目录带尾斜杠 + 独立 `name`）
+  导出，`restoreBackupTags` 只对唯一、非回收站的指纹匹配做加法合并；`ImportResult` 把设置条数
+  与待重绑标签一起交回调用方。指纹结构仍与 Android `MediaKey`/`mergeTags` 互认。
 
 ### 5.1 编解码语义核对（P1-01 修正后）
 
@@ -314,7 +315,7 @@ final class UpdateChecker {                                     // Update/
 - **做**：键清单、枚举与持久化口径、类型化 store、冷启 restore、影子 diff flush、复合串编解码、
   备份二进制编解码 + additive 恢复、更新纯逻辑（版本比较/资产挑选/说明清洗/镜像链/探测编排）、
   SHA-256（纯 Swift）、一个原生 `UITableViewController` 设置页、`Update/` 的 URLSession 网络实现。
-- **不做（有意）**：`hud_layout` 的结构化编解码与拖放 UI（归 G）；库元数据/标签落库（归 D1）；
+- **不做（有意）**：`hud_layout` 的结构化编解码与拖放 UI（归 G）；
   更新包的 App 内下载/安装（iOS 无等价，归外部工具）；`AVCaptureSession` 侧的参数套用（归 B1）；
   权限状态区与「所有文件访问」区（映射 S-070/S-071，平台无等价，待裁决）。
 - **不动**：`App/`、`Camera/`、`Library/`、`UI/`、`Config/`、`project.pbxproj`、`scripts/`、共享映射、
