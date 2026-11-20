@@ -1,14 +1,15 @@
-# WotaGeiCam iOS 移植骨架（A2，UIKit / iOS 10 基线）
+# WotaGeiCam iOS 原生移植（UIKit / iOS 10 基线，无签名侧载）
 
-本目录是 Android → iOS 的独立原生移植工程。当前交付是 **可结构校验的 UIKit 最小骨架 + 经典
-Xcode 工程 + 双工具链无签名构建/归档/打包入口**，不包含录制、渲染、播放、媒体库、设置或 AI 站位。
+本目录是 Android → iOS 的独立原生移植工程。当前已交付**基础录制参数链、图像后处理回波、
+片库/播放器/双片对比、A/B 剪辑、离线光弧修复、设置与备份、Full/Lite 双变体**的完整源码，
+外加经典 Xcode 工程、双工具链无签名构建/归档/打包入口与 GitHub Actions 无签名 IPA 工作流。
+**不含 AI 站位**（按约束全量排除，也不留占位接口）。
 
 - Android 基线：`7394187`（只读参考，未修改）。
-- Android 参考模块：`Android/WotaGeiCamApp/`；本任务未修改 `Android/`、`HarmonyOS/`、
-  `ROADMAP`、`AGENTS`、映射文档或 Git 状态。
+- Android 参考模块：`Android/WotaGeiCamApp/`；未修改 `Android/`、`HarmonyOS/`。
 - 技术栈：`Swift 5.6 语言兼容 + UIKit + AVFoundation`；本地纯逻辑包 `WotaCore`；**无任何第三方依赖**。
 - 用户口径（本任务硬约束）：最低要能支持 iPhone 5/6；功能可裁剪，但**基础 WOTA 艺录制参数调整
-  与工具链必须保留**。因此本骨架暂停 SwiftUI / iOS 16 方向，改为 UIKit + iOS 10 兼容基线。
+  与工具链必须保留**。因此暂停 SwiftUI / iOS 16 方向，采用 UIKit + iOS 10 兼容基线。
 
 ## 1. SwiftUI 文件替换清单（本任务实际改动）
 
@@ -109,12 +110,17 @@ iOS/
   Packages/WotaCore/            # 纯逻辑 Swift Package（swift-tools-version 5.6、.iOS(.v10)、无第三方、无测试 target）
   WotaGeiCam/
     App/                        # main.swift(UIApplicationMain)、AppDelegate、AppVariant
-    Camera/                     # 权限、串行会话控制器、真实预览、取景页、参数控制器
-    UI/                         # 状态/错误反馈浮层、最小参数面板（原生 UIKit，无 Material）
-    Rendering/ Recording/ ArcRepair/ Library/ Player/ Compare/ Settings/ Update/  # 后续任务（当前为空目录）
-    Resources/                  # Assets.xcassets（AccentColor）
+    Camera/                     # 权限、会话控制器（BGRA/防抖/方向）、真实预览、取景页、参数控制器与能力探测
+    UI/                         # 状态/错误反馈浮层、参数面板、片库页（原生 UIKit，无 Material）
+    Rendering/                  # Metal / OpenGL ES / CPU 三后端 + shader（arm64 Metal，iOS10 全后端可用）
+    Recording/                  # 录像协调器、AVAssetWriter、AAC 音频、段边界与空间门
+    ArcRepair/                  # 离线光弧修复：状态机计划 + AVAssetReader/Writer 直拷音轨
+    Library/                    # 媒体库：索引、暂存句柄、发布对账、维护清扫
+    Player/ Compare/            # 播放器、A/B 持久化与剪辑导出、双片对比（共享时间轴）
+    Settings/ Update/           # 设置页、用户备份、应用内更新检查（不装 IPA）
+    Resources/                  # Assets.xcassets（AccentColor）+ PrivacyInfo.xcprivacy（隐私清单）
   WotaGeiCam.xcodeproj/         # 经典工程 + 4 个共享 scheme
-  scripts/                      # generate_project / check_project + Apple 构建/归档/打包入口
+  scripts/                      # generate_project / check_project / verify_source_inventory + Apple 构建/归档/打包入口
 ```
 
 ## 7. 命令入口
@@ -145,21 +151,33 @@ bash iOS/scripts/package_unsigned_ipa.sh \
 `lipo` 切片与 IPA 内 `Payload/*.app`；本机无 Apple 工具时同样返回 **69**。本机不预置任何
 `.app` / `.ipa` / `.xcarchive`（检查脚本会拒绝伪造产物）。
 
+### CI 工作流（`.github/workflows/build-ipa.yml`，Modern 无签名 IPA）
+
+仓库根的 Actions 工作流与安卓/HAP 并列：`v*` 标签推送或 Actions 页手动触发，先在 ubuntu 上跑结构
+检查，再在 **macos-15 + Xcode 16.4** 上按 scheme/配置对执行 archive 与 IPA 打包，上传 unsigned
+IPA、`.app`、`.xcarchive` 与 SHA-256 清单。不需要签名 Secrets。
+Legacy（iPhone5/armv7）无托管 Xcode 13.4.1，需自建 macOS12 runner，本工作流不覆盖。
+
 ## 8. 本机实际验证状态（Windows Git Bash，无 Apple 工具）
 
-已实际执行（真实退出码见下节“证据”）：`check_project.py`、`generate_project.py --check`、
-`bash -n scripts/*.sh`、`detect_apple_tools.sh`、`apple_build.sh`、`apple_archive.sh`、
-`package_unsigned_ipa.sh` 的参数校验分支。
+已实际执行（真实退出码）：
+
+- `generate_project.py --check`（package 与 inline 两种登记模式均一致，48 个源文件收录）；
+- `check_project.py`（1502 项检查 PASS：工程/plist/xcconfig/scheme/隐私清单/源映射全绿）；
+- `verify_source_inventory.py`（1643 项 Android→iOS 功能与参数映射核对 PASS）；
+- `.github/workflows/build-ipa.yml` YAML 结构解析通过；
+- `bash -n scripts/*.sh`、`detect_apple_tools.sh` 及各 Apple 脚本的参数校验分支。
 
 未执行（阻塞于本机没有 Apple 工具链，**不是代码通过**）：
 
 - `xcodebuild build` / `xcodebuild archive` / Swift 编译 / 无签名 IPA 打包：**未执行**。
 - 本轮**不使用模拟器**，不交付截图、不编写或执行测试套件；当前没有模拟器或测试证据。
 - 旧工具链（Xcode 13.4.1）与新工具链（Xcode 14+）的**实际编译均未在本机执行**；
-  本机为 Windows，无 `xcodebuild`/`xcrun`/`xcode-select`/`plutil`。
+  本机为 Windows，无 `xcodebuild`/`xcrun`/`swiftc`。Swift 级编译错误只能由 macOS CI 或
+  用户机器的真实构建暴露。
 
 因此当前版本**不能称为“可运行版本”**；“插件已启用”或文件存在都不等于运行证明。
-在 macOS + Xcode 13.4.1（Legacy）与 Xcode 14+（Modern）上执行上节命令即可补齐编译证据。
+在 macOS + Xcode 上执行上节命令（或触发 CI 工作流）即可补齐编译证据。
 
 ## 9. 后续任务（B1 及之后）可修改的文件与稳定接口
 
@@ -194,11 +212,15 @@ bash iOS/scripts/package_unsigned_ipa.sh \
 - 设备分工：D1/F1 只新增 `Library/` / `Settings/` / `Update/` 及各自 Core 文件，不改动本骨架文件；
   渲染/Metal 扩展由 C1/集成代理新增，`--core-mode inline` 也会自动收录其子目录文件。
 
-## 10. Info.plist 权限文案（摘要）
+## 10. Info.plist 权限文案与隐私清单（摘要）
 
 - `NSCameraUsageDescription`：说明 WOTA 艺录制需用后置相机取景与录像。
 - `NSMicrophoneUsageDescription`：说明 WOTA 艺录制需用麦克风录制现场应援声作为音轨。
-- `NSPhotoLibraryAddUsageDescription`：说明 WOTA 艺录制完成后需把视频保存到系统照片图库。
+- 不写入系统照片图库（成片只进 app 沙盒片库），因此**不声明**
+  `NSPhotoLibraryAddUsageDescription`（检查脚本强制其不存在）。
+- `Resources/PrivacyInfo.xcprivacy`：`NSPrivacyTracking = false`，不收集任何数据；
+  四类 Required Reason API 与理由编号（UserDefaults CA92.1 / FileTimestamp C617.1+3B52.1 /
+  DiskSpace E174.1 / SystemBootTime 35F9.1）与代码实际用途一一对应，已登记进 Resources 阶段。
 
 均为具体用途描述，无占位文案（检查脚本会拒绝 TODO/占位词）。
 

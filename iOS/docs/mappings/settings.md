@@ -51,7 +51,7 @@
 | S-030 | default_marker_color | 见实现（站位线颜色） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:205 | iOS/WotaGeiCam/Settings/ | 待实现 |
 | S-031 | glow_params | 整份参数（缺键回出厂=关） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:218 | iOS/WotaGeiCam/Settings/ | 待实现 |
 | S-032 | tone_params | 整份参数（复合串键） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:300 | iOS/WotaGeiCam/Settings/ | 待实现 |
-| S-033 | display_scale | FULL（上屏渲染比例枚举名） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:211 | iOS/WotaGeiCam/Settings/ | 待实现 |
+| S-033 | display_scale | ORIG（上屏渲染比例枚举名，缺键回出厂） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:211 | iOS/WotaGeiCam/Settings/ | 待实现 |
 | S-034 | echo_params | 整份参数（缺键回出厂=关） | 取景辅助 | Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/SettingsScreen.kt:224 | iOS/WotaGeiCam/Settings/ | 待实现 |
 
 > 白名单内 **markerCount（站位线线数）刻意不入档**（每次从 0 起步）；`glow_params`/`echo_params`/`tone_params`

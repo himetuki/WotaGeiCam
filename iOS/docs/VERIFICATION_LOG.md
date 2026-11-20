@@ -49,3 +49,49 @@
 - `detect_apple_tools.sh` 退出69：缺xcodebuild/xcrun/xcode-select/plutil；未执行Apple编译、archive、真实IPA打包。
 - 修正生成工程CRLF引起的diff-check：iOS目录新增.gitattributes eol=lf、生成脚本强制LF；git diff --cached --check退出0。
 - 修正文档：本轮不使用模拟器、不测试；Modern最低iOS15不能装到iPhone6，iPhone6使用Legacy配置。A2源码结构通过不代表可运行或可安装。
+
+## 2026-11-20 / 打包就绪轮（回答 /goal「是否达到可打包构建的程度」）
+
+结论：**本地可验证项全部通过；Swift 级编译仍无证据（本机无 Apple 工具链），
+达到可打包构建的最后实证交给新增 CI 工作流。** 未宣称已编译或已出包。
+
+已完成项：
+
+- 工程重生成（package 模式）：`python -I iOS/scripts/generate_project.py` — sources=48、
+  resources=2（Assets.xcassets + PrivacyInfo.xcprivacy）、groups=15、8 配置、4 scheme；
+  此前约 40 个未收录 Swift 文件全部进入 Sources 阶段。
+- 两种登记模式一致性：`generate_project.py --check --core-mode package` 与
+  `--core-mode inline` 均 PASS（inline 1532 项）；磁盘最终态为 package 模式。
+- `check_project.py`：1502 项 PASS。更新三处过时断言：方向 owner 改查会话控制器
+  （`setPreviewVideoConnection` 内 `videoOrientation`）、照片图库权限键改为必须不存在、
+  新增 PrivacyInfo.xcprivacy 内容断言（四类 API + 理由编号逐一钉死）与 Resources 收录；
+  支持 `--core-mode` 传递。
+- `verify_source_inventory.py`：checks=1643 failures=0 PASS。
+- `.github/workflows/build-ipa.yml` 新增并经 YAML 结构解析（jobs×2、matrix 2 项、
+  push tags v* + workflow_dispatch）：ubuntu 结构检查先行，macos-15 上 Modern 双变体
+  archive → unsigned IPA 打包（Payload 回读校验）→ 上传 .app/.xcarchive/.ipa/SHA256SUMS。
+  仅新增该文件，未改动既有工作流；不需要签名 Secrets。
+- 源码收口（均为已定位阻断项，非新功能）：
+  CPU 后端像素缓冲锁失败改为抛错，杜绝交出未写入面；ArcRepair 字体类型
+  `UIFontTextStyle`→`UIFont.TextStyle`；片库暂存编号接入唯一分配（进程号×百万桶+序号），
+  发布/取消/读取按 pendingId 重算暂存名校验句柄身份；发布改名后属性读取失败按
+  「已保存+警告」回报（`publishResult`/`MediaPublishResult`，替换旧 `publish`）。
+- 文档同步：README（功能集/目录/命令/CI/权限与隐私清单口径）、ROADMAP 状态复核节、
+  D1-media.md 发布签名与行号、mappings F-011 32→34 键、S-033 FULL→ORIG。
+- 清理 iOS/scripts/__pycache__。
+
+未完成项 / 阻塞项：
+
+- Apple 编译、archive、无签名 IPA 打包、真机安装：**本机 Windows 无 xcodebuild/xcrun/
+  swiftc**，各脚本缺工具分支返回 69，不伪造成功。这是当前唯一实质阻塞，
+  由 macOS CI（工作流）或用户机器真实构建暴露 Swift 级问题。
+- Legacy iPhone5/armv7：无托管 Xcode 13.4.1，需自建 macOS12 runner，本轮不覆盖。
+- 真机相机能力、armv7 运行行为：只列人工验证清单，不入自动验收。
+
+证据（命令与退出码摘要）：
+
+- `python -I iOS/scripts/generate_project.py` → sources=48 written=5，退出0；
+- `generate_project.py --check`（package）→ OK，退出0；`--core-mode inline --check` → OK，退出0；
+- `check_project.py` → checks=1502 PASS，退出0；`--core-mode inline` → checks=1532 PASS；
+- `verify_source_inventory.py` → checks=1643 failures=0，退出0；
+- 工作流 YAML 结构解析 → jobs=['structure-checks','build-unsigned-ipa']，matrix 2 项。
