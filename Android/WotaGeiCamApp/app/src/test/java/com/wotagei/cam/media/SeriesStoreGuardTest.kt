@@ -88,33 +88,23 @@ class SeriesStoreGuardTest {
     }
 
     @Test
-    fun `录制收尾必须交给会话所有者且带上parts_seriesId与会话起始时刻`() {
-        val collect = collectBlock(masked("ui/CameraScreen.kt"))
-        assertTrue(
-            "result 分支必须调 TakeSettlement.settle（内联 SeriesStore.record 会在退页时被取消）",
-            collect.contains("TakeSettlement.settle(")
-        )
-        assertTrue("必须传 result.parts（传首段 uri 或 emptyList 都建不起组）", collect.contains("parts = result.parts"))
-        assertTrue("必须传 result.seriesId", collect.contains("seriesId = result.seriesId"))
-        assertTrue(
-            "必须传本会话起始时刻（runner.sessionStartedAtMs）",
-            collect.contains("startedAtMs = runner.sessionStartedAtMs")
-        )
-        assertTrue("必须传结果成功态（练习只交付干净成功）", collect.contains("resultOk = result.ok"))
-        assertTrue(
-            "必须传练习武装快照（所有者决定交付/清桥态）",
-            collect.contains("practiceArmed = ComparePractice.armed")
-        )
-        assertTrue(
-            "页内导航必须等所有者的交付结论（被取消时所有者仍继续落库）",
-            collect.contains("settlement.await().practiceDelivered")
+    fun `录制收尾必须交给会话所有者且带齐会话身份`() {
+        val screen = masked("ui/CameraScreen.kt")
+        val stop = bodyOf(screen, "stopInternal")
+        assertTrue("停录登记必须调 RecordSession.record（唯一结算入口）", stop.contains("RecordSession.record("))
+        assertTrue("必须带引擎终态结果（parts/seriesId 在 out 上）", stop.contains("result = out"))
+        assertTrue("必须带本会话系列身份", stop.contains("seriesId = sessionSeriesId"))
+        assertTrue("必须带本会话起始时刻", stop.contains("startedAtMs = sessionStartedAtMs"))
+        assertTrue("必须带停录那一刻的练习武装快照", stop.contains("practiceArmed = practiceArmedAtStop"))
+        assertFalse(
+            "页面 collect 不得再自行结算（同一键两处发起会重复交付）",
+            collectBlock(screen).contains("TakeSettlement.settle(")
         )
         assertFalse(
-            "UI 不许再内联 SeriesStore.record（归组已搬到进程级所有者）",
-            collect.contains("SeriesStore.record(")
+            "UI 不许内联 SeriesStore.record（归组已搬到进程级所有者）",
+            stop.contains("SeriesStore.record(")
         )
     }
-
     @Test
     fun `所有者里必须真的调SeriesStore_record并带齐参数`() {
         val owner = bodyOrExpr("record/TakeSettlement.kt", "writeSeries")
@@ -150,10 +140,13 @@ class SeriesStoreGuardTest {
         val screenRaw = mainSourceText("ui/CameraScreen.kt")
         val storeRaw = mainSourceText("media/SeriesStore.kt")
 
-        // ① 接线：把 result.parts 换成空列表（归组建不起来，真值表却全绿）
-        val noParts = screenRaw.replace("parts = result.parts", "parts = emptyList()")
-        assertTrue("突变体①必须真的改了源码", noParts != screenRaw)
-        assertFalse("传 emptyList 时接线判据必须翻假", collectBlock(codeOnly(noParts)).contains("parts = result.parts"))
+        // ① 接线：丢掉会话起始时刻（结算键退化成 0，迟到结论全被拆成另一场）
+        val noStart = screenRaw.replace("startedAtMs = sessionStartedAtMs", "startedAtMs = 0L")
+        assertTrue("突变体①必须真的改了源码", noStart != screenRaw)
+        assertFalse(
+            "丢掉会话起始时刻后接线判据必须翻假",
+            bodyOf(codeOnly(noStart), "stopInternal").contains("startedAtMs = sessionStartedAtMs")
+        )
 
         // ② 抗取消：把 NonCancellable 摘掉（取消即写一半，且毫无痕迹）
         val noNc = storeRaw.replace("NonCancellable + Dispatchers.IO", "Dispatchers.IO")
@@ -178,7 +171,7 @@ class SeriesStoreGuardTest {
         )
         assertTrue(
             "摘掉 0 归属门槛不得牵连接线（两个判据的输入互不相干）",
-            collectBlock(codeOnly(screenRaw)).contains("TakeSettlement.settle(")
+            bodyOf(codeOnly(screenRaw), "stopInternal").contains("RecordSession.record(")
         )
     }
 
