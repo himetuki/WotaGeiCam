@@ -224,14 +224,15 @@ class StalePendingSweepTest {
     @Test
     fun `目录内精确匹配必须叠 RELATIVE_PATH`() {
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
-        // renameRow 是表达式体（`= runCatching {`），bodyOf 只认花括号体 ⇒ 按成员边界切片
-        val rename = sweep.substringAfter("private fun renameRow(").substringBefore("\n    private fun ")
-        assertTrue(
-            "改名必须走 provider（有行的文件自己 rename 会让行指空），且只落在主卷集合（Y22 错卷同名不许改）",
-            rename.contains("contentResolver.update(") && rename.contains("PRIMARY_VIDEO_URI")
-        )
+        val lookup = bodyOf(sweep, "queryRenameRows")
+        val rename = bodyOf(sweep, "renameRow")
+        val update = sweep.substringAfter("private fun updateRow(").substringBefore("\n}")
+        assertTrue("只在主卷查询，兼查实际路径与目录中的旧显示名", lookup.contains("PRIMARY_VIDEO_URI") &&
+            lookup.contains("file.absolutePath") && lookup.contains("file.name"))
         assertTrue("DISPLAY_NAME 不唯一，必须叠 RELATIVE_PATH", sweep.contains("MediaStore.MediaColumns.RELATIVE_PATH"))
-        assertTrue("顺带兜一次 IS_PENDING=0（历史 insert 在飞残留可能停在 pending 态）", sweep.contains("MediaStore.MediaColumns.IS_PENDING"))
+        assertTrue("改名走复核后的单条目条件写入", rename.contains("queryRowByUri(") &&
+            rename.contains("updateRow(app, row") && update.contains("rowItemUri(row)"))
+        assertTrue("历史 pending 行改名时一并发布", rename.contains("if (row.pending) put(MediaStore.MediaColumns.IS_PENDING, 0)"))
         assertTrue("侧车随成片一起搬（复用成片改名的单一出口）", sweep.contains("ArcDropLog.renameFor("))
     }
 
@@ -246,10 +247,14 @@ class StalePendingSweepTest {
         // 这里按标记切片（切片到下一个 `private fun` 为止），不靠 bodyOf
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
         val clip = sweep.substringAfter("private fun apply(").substringBefore("\n    private fun ").substringAfter("RENAME_CLIP ->")
-        assertTrue("成片分支必须先判'有没有行'", clip.contains("rowExists("))
-        assertTrue("有行时必须走 provider 改名", clip.contains("renameRow("))
-        assertTrue("provider 改名失败必须就地放弃（不许回退 fs rename）", clip.contains("return@runCatching false"))
-        assertTrue("判据次序：rowExists 必须早于 fs rename", clip.indexOf("rowExists(") < clip.indexOf("f.renameTo("))
+        val empty = clip.indexOf("if (rows.isEmpty())")
+        val fsRename = clip.indexOf("f.renameTo(")
+        val onlyRow = clip.indexOf("rows.singleOrNull() ?: return@runCatching false")
+        val providerRename = clip.indexOf("!renameRow(app, row, to.name)")
+        assertTrue("只有查明零行才允许文件改名", empty >= 0 && fsRename > empty)
+        assertTrue("已有索引须确认唯一条目及其磁盘路径，再交给 Provider",
+            onlyRow > fsRename && providerRename > onlyRow && clip.contains("row.dataPath != f.absolutePath"))
+        assertTrue("Provider 改名失败后就地保留", clip.substring(providerRename).contains("return@runCatching false"))
     }
 
     /** 库一致性修补：删"行在文件不在"的坏行 + 给"有文件没行"的成片补一次系统扫描入库 */
@@ -444,14 +449,15 @@ class StalePendingSweepTest {
     @Test
     fun `行查询失败必须当未知处理_不许落到 fs rename`() {
         val sweep = codeOnly(mainSourceText("record/StalePendingSweep.kt"))
-        val rowExists = sweep.substringAfter("private fun rowExists(").substringBefore("\n    }")
-        assertTrue("rowExists 必须三值（Boolean?，null=查不出）", rowExists.contains("): Boolean? = runCatching {"))
         val clip = sweep.substringAfter("private fun apply(")
             .substringBefore("\n    private fun ")
             .substringAfter("RENAME_CLIP ->")
-        assertTrue(
-            "查不出有无行必须保持不动（走 fs rename 赌错就是坏行事故重演）",
-            clip.contains("hasRow == null")
-        )
+        assertTrue("null 游标和查询失败均不能当作零行",
+            clip.contains("queryRenameRows(app, f) ?: return@runCatching false"))
+        val rec = bodyOf(sweep, "reconcileLibrary")
+        assertTrue("目录查询失败不能触发补入库", rec.contains("queryRows(app) ?: return 0"))
+        val query = sweep.substringAfter("private fun querySweepRows(").substringBefore("\n    @Suppress")
+        assertTrue("null 游标须保留 null", query.contains("cursor?.use"))
+        assertFalse("未知不能变成空列表", query.contains("orEmpty()"))
     }
 }

@@ -62,6 +62,52 @@ private const val SYNTHETIC_VOLUME_EXTERNAL = "external"
 internal fun ownerAllowed(owner: String?, ourPackage: String): Boolean =
     owner.isNullOrEmpty() || owner == ourPackage
 
+internal data class SweepWriteSelection(val where: String, val args: List<String>)
+
+/**
+ * 与具体卷条目 URI 一起交给 Provider。空字段用 IS NULL 原样核对，文件名/路径只作为绑定值。
+ * API 30+ 的修改代数比秒级日期更精确；API 29 不查询也不比较新列。
+ */
+internal fun sweepWriteSelection(
+    displayName: String?,
+    dataPath: String?,
+    relativePath: String?,
+    addedSec: Long,
+    sizeBytes: Long?,
+    modifiedSec: Long?,
+    pending: Boolean,
+    owner: String?,
+    generationModified: Long?,
+    hasGeneration: Boolean
+): SweepWriteSelection? {
+    if (displayName.isNullOrBlank() || dataPath.isNullOrBlank() || relativePath.isNullOrBlank() ||
+        addedSec <= 0L || (hasGeneration && generationModified == null)
+    ) return null
+    val clauses = ArrayList<String>(10)
+    val args = ArrayList<String>(10)
+    fun match(column: String, value: String?) {
+        if (value == null) {
+            clauses += "$column IS NULL"
+        } else {
+            clauses += "$column = ?"
+            args += value
+        }
+    }
+    match("_display_name", displayName)
+    match("_data", dataPath)
+    match("relative_path", relativePath)
+    match("date_added", addedSec.toString())
+    match("_size", sizeBytes?.toString())
+    match("date_modified", modifiedSec?.toString())
+    match("is_pending", if (pending) "1" else "0")
+    if (hasGeneration) {
+        match("owner_package_name", owner)
+        match("generation_modified", generationModified?.toString())
+        match("is_trashed", "0")
+    }
+    return SweepWriteSelection(clauses.joinToString(" AND "), args)
+}
+
 /**
  * 单行处置（纯函数）。
  *
@@ -95,6 +141,7 @@ internal fun rowFixDecision(
     // PRESENT：永不删除
     if (!volumeMounted) return RowFix.KEEP
     if (!pending) return RowFix.KEEP
+    if (!rowMatches) return RowFix.MARK_UNOBSERVABLE
     // 封口标记不能替代完整性校验：缺尾段/无视频轨一律不晋升
     if (!playable) return RowFix.KEEP
     return RowFix.RESCUE_ROW

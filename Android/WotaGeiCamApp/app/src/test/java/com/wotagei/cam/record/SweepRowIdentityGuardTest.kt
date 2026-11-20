@@ -49,26 +49,35 @@ class SweepRowIdentityGuardTest {
         if (!item.contains("concreteRowVolume(")) return false
         if (!item.contains("getContentUri(") || !item.contains("withAppendedId(")) return false
         if (item.contains("EXTERNAL_CONTENT_URI")) return false
-        // 四路动作只许拿 rowItemUri 拼出的 URI，且不许再出现聚合集合的点操作
-        for (fn in listOf("observeFile", "queryRowByUri", "deleteRow", "unpendRow")) {
+        for (fn in listOf("observeFile", "queryRowByUri", "deleteRow", "updateRow")) {
             val b = section(src, fn)
-            if (!b.contains("rowItemUri(")) return false
-            if (b.contains("EXTERNAL_CONTENT_URI")) return false
+            if (!b.contains("rowItemUri(row)") || b.contains("EXTERNAL_CONTENT_URI")) return false
         }
-        // 行查询 + 按名字查/改名只落在主卷集合
-        for (fn in listOf("queryRows", "queryPendingRows", "rowExists", "renameRow")) {
+        for (fn in listOf("queryRowsInDir", "queryRenameRows")) {
             val b = section(src, fn)
-            if (!b.contains("PRIMARY_VIDEO_URI")) return false
-            if (b.contains("EXTERNAL_CONTENT_URI")) return false
+            if (!b.contains("querySweepRows(app, PRIMARY_VIDEO_URI")) return false
         }
-        // 判据装配：owner 闸门与具体卷都必须真的进纯判据
+        if (!section(src, "queryRows").contains("queryRowsInDir(")) return false
+        if (!section(src, "queryPendingRows").contains("queryRowsInDir(")) return false
+        if (!section(src, "unpendRow").contains("row.pending && updateRow(")) return false
+        val rename = section(src, "renameRow")
+        if (!rename.contains("updateRow(app, row") || !rename.contains("queryRowByUri(app, row) != row")) return false
+        if (!rename.contains("ownerAllowed(row.owner, app.packageName)")) return false
+
         val fix = section(src, "fixRow")
         if (!fix.contains("rowFixDecision(")) return false
-        if (!fix.contains("ownerOurs = ownerAllowed(")) return false
+        if (!fix.contains("val ownerOurs = ownerAllowed(")) return false
         if (!fix.contains("volumeVisible(concreteRowVolume(")) return false
-        // owner 投影：API 30+ 才加列，且按列名取（不靠固定下标）
-        if (!src.contains("BASE_ROW_COLUMNS + COL_OWNER")) return false
-        if (!src.contains("Build.VERSION_CODES.R")) return false
+        if (!fix.contains("queryRowByUri(app, row) == row")) return false
+        for (fn in listOf("deleteRow", "updateRow")) {
+            val operation = section(src, fn)
+            if (!operation.contains("writeSelection(row) ?: return@runCatching false")) return false
+            if (!operation.contains("sweepArgs(selection.where, args, pendingMatch(row))")) return false
+            if (!operation.contains("includePendingOnQ(uri), ") || !operation.contains("selection.where, args)")) return false
+        }
+        val projection = src.substringAfter("private val rowProjection:").substringBefore("private val started")
+        if (!projection.contains("Build.VERSION.SDK_INT >= Build.VERSION_CODES.R")) return false
+        if (!projection.contains("BASE_ROW_COLUMNS + COL_OWNER + COL_GENERATION")) return false
         if (!section(src, "readRow").contains("getColumnIndex(COL_OWNER)")) return false
         // 行快照必须带卷（具体行 URI 的唯一来源）
         if (!src.contains("MediaStore.MediaColumns.VOLUME_NAME")) return false
@@ -128,6 +137,24 @@ class SweepRowIdentityGuardTest {
             "API 29 上查询 owner 未知列会整条查询抛掉（库修补退化成全目录重扫），必须报红",
             holds(mutant)
         )
+    }
+
+    @Test
+    fun `条件失配不会当作已经删除或救援`() {
+        val delete = section(sweep, "deleteRow")
+        val update = section(sweep, "updateRow")
+        val rescue = section(sweep, "performFix").substringAfter("RowFix.RESCUE_ROW ->")
+            .substringBefore("RowFix.MARK_UNOBSERVABLE ->")
+        assertTrue(delete.contains("rows > 0"))
+        assertTrue(update.contains("affected > 0"))
+        assertTrue(rescue.contains("if (unpendRow(app, row)) { SealMarker.clear(row.dataPath)"))
+    }
+
+    @Test
+    fun `突变_Provider写入丢掉行身份条件必红`() {
+        assertTrue(holds(sweep))
+        val mutant = sweep.replace("sweepArgs(selection.where, args, pendingMatch(row))", "sweepArgs(null, null, pendingMatch(row))")
+        assertFalse(holds(mutant))
     }
 
     private companion object {

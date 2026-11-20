@@ -75,6 +75,11 @@ class SweepRowPolicyTest {
             rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = true, ownerOurs = true)
         )
         assertEquals(
+            "即使文件完整，复核发现行已变更也不许晋升",
+            RowFix.MARK_UNOBSERVABLE,
+            rowFixDecision(true, RowFileState.PRESENT, true, true, false, playable = true, ownerOurs = true)
+        )
+        assertEquals(
             "缺尾段/无视频轨：不许晋升（相册里点开即坏的条目）",
             RowFix.KEEP,
             rowFixDecision(true, RowFileState.PRESENT, true, true, true, playable = false, ownerOurs = true)
@@ -148,6 +153,44 @@ class SweepRowPolicyTest {
         assertTrue("空串按读不到处理", ownerAllowed("", us))
         assertTrue("我们自己的行", ownerAllowed(us, us))
         assertFalse("别的包的行", ownerAllowed("com.example.other", us))
+    }
+
+    @Test
+    fun `新旧Provider条件同时核对路径日期尺寸与pending`() {
+        val name = "artist's VID_1.mp4"
+        val path = "/storage/emulated/0/Movies/Wota/$name"
+        val rel = "Movies/Wota/"
+        val common = "_display_name = ? AND _data = ? AND relative_path = ? AND date_added = ? AND " +
+            "_size = ? AND date_modified = ? AND is_pending = ?"
+        val args = listOf(name, path, rel, "10", "250", "20", "1")
+        val q = sweepWriteSelection(name, path, rel, 10, 250, 20, true, null, null, hasGeneration = false)
+        assertEquals(SweepWriteSelection(common, args), q)
+        val r = sweepWriteSelection(name, path, rel, 10, 250, 20, true, us, 30, hasGeneration = true)
+        assertEquals(
+            SweepWriteSelection(common + " AND owner_package_name = ? AND generation_modified = ? AND is_trashed = ?",
+                args + listOf(us, "30", "0")),
+            r
+        )
+    }
+
+    @Test
+    fun `可空元数据须核对null_关键身份缺失拒写`() {
+        val match = sweepWriteSelection("VID_1.mp4", "/Movies/VID_1.mp4", "Movies/",
+            10, null, null, false, null, 30, hasGeneration = true)
+        assertEquals(
+            SweepWriteSelection(
+                "_display_name = ? AND _data = ? AND relative_path = ? AND date_added = ? AND " +
+                    "_size IS NULL AND date_modified IS NULL AND is_pending = ? AND " +
+                    "owner_package_name IS NULL AND generation_modified = ? AND is_trashed = ?",
+                listOf("VID_1.mp4", "/Movies/VID_1.mp4", "Movies/", "10", "0", "30", "0")
+            ),
+            match
+        )
+        assertNull(sweepWriteSelection(null, "/Movies/VID_1.mp4", "Movies/", 10, 25, 20, true, us, 30, true))
+        assertNull(sweepWriteSelection("VID_1.mp4", null, "Movies/", 10, 25, 20, true, us, 30, true))
+        assertNull(sweepWriteSelection("VID_1.mp4", "/Movies/VID_1.mp4", "", 10, 25, 20, true, us, 30, true))
+        assertNull(sweepWriteSelection("VID_1.mp4", "/Movies/VID_1.mp4", "Movies/", 0, 25, 20, true, us, 30, true))
+        assertNull(sweepWriteSelection("VID_1.mp4", "/Movies/VID_1.mp4", "Movies/", 10, 25, 20, true, us, null, true))
     }
 
     // ---- 缺尾段容器 ----

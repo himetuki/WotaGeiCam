@@ -1,5 +1,6 @@
 package com.wotagei.cam.record
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -9,6 +10,7 @@ import android.media.MediaFormat
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
@@ -63,27 +65,27 @@ internal object StalePendingSweep {
     private val PRIMARY_VIDEO_URI: Uri
         get() = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
-    /** owner 列：`OWNER_PACKAGE_NAME` 只从 API 30 起存在（投影按版本拼，见 [rowProjection]） */
+    /** API 30+ 专用列；旧 Provider 遇到未知列会拒绝整条查询。 */
     private const val COL_OWNER = "owner_package_name"
+    private const val COL_GENERATION = MediaStore.MediaColumns.GENERATION_MODIFIED
 
-    /** 行快照基础列（[Row] 的下标顺序即此顺序）：身份、路径、年龄、pending、卷 */
+    /** 行快照基础列（[readRow] 的下标顺序即此顺序）：身份、路径、年龄、pending、卷 */
     private val BASE_ROW_COLUMNS = listOf(
         MediaStore.MediaColumns._ID,
         MediaStore.MediaColumns.DISPLAY_NAME,
         MediaStore.MediaColumns.DATA,
         MediaStore.MediaColumns.DATE_ADDED,
         MediaStore.MediaColumns.IS_PENDING,
-        MediaStore.MediaColumns.VOLUME_NAME
+        MediaStore.MediaColumns.VOLUME_NAME,
+        MediaStore.MediaColumns.RELATIVE_PATH,
+        MediaStore.MediaColumns.SIZE,
+        MediaStore.MediaColumns.DATE_MODIFIED
     )
 
-    /**
-     * 行投影：API 30+ 追加 owner 列。
-     * **不能无条件加**：API 29 上查询未知列直接抛，[queryRows] 走 runCatching 回 null，
-     * 库一致性趟会把整个图库当"没行"再扫一遍（每次都白扫全目录）。
-     */
+    /** API 29 不查询 owner 和修改代数，避免 Provider 拒绝整条查询。 */
     private val rowProjection: Array<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            (BASE_ROW_COLUMNS + COL_OWNER).toTypedArray()
+            (BASE_ROW_COLUMNS + COL_OWNER + COL_GENERATION).toTypedArray()
         } else {
             BASE_ROW_COLUMNS.toTypedArray()
         }
@@ -157,8 +159,10 @@ internal object StalePendingSweep {
      * 不可观测只落标记日志，绝不动行。删除与补入库共用 [SWEEP_MAX_INDEX] 预算。
      */
     private fun reconcileLibrary(app: Context, dir: File, now: Long): Int {
-        val rows = queryRows(app).orEmpty()
+        // 查询失败或主卷不可见，不能拿空列表判断所有文件都缺索引。
         val volumes = visibleVolumes(app)
+        if (!volumeVisible(MediaStore.VOLUME_EXTERNAL_PRIMARY, volumes)) return 0
+        val rows = queryRows(app) ?: return 0
         var fixed = 0
         for (row in rows) {
             if (fixed >= SWEEP_MAX_INDEX) break
@@ -181,30 +185,22 @@ internal object StalePendingSweep {
      * 纯判据在 [rowFixDecision]；这里只负责把 Android 侧的事实取齐。
      */
     private fun fixRow(app: Context, row: Row, nowMs: Long, volumes: Set<String>?): RowFix {
+        val ownerOurs = ownerAllowed(row.owner, app.packageName)
+        if (!ownerOurs) return RowFix.KEEP
         val sealed = row.pending && SealMarker.isSealed(row.dataPath)
         val ageOk = sweepAgeOk(nowMs - row.addedMs, sealed)
-        val state = observeFile(app, row)
-        // 卷必须**同时**满足两条才是可用：在 getExternalVolumeNames 里 + 卷名能拼具体集合。
-        // 合成卷 external / 卷名读不到的行走不到具体行 URI（[rowItemUri] 回 null），
-        // 复核与处置都无从谈起，按卷不可用处理（只标记/不碰）。
+        if (!ageOk) return RowFix.KEEP
         val volumeMounted = volumeVisible(concreteRowVolume(row.volume), volumes)
-        // 只有可能删行时才付按 URI 复核的查询成本（PRESENT 永不删）
-        val rowMatches = state == RowFileState.PRESENT || run {
-            val fresh = queryRowByUri(app, row)
-            fresh != null && fresh.dataPath == row.dataPath && fresh.displayName == row.displayName &&
-                ownerAllowed(fresh.owner, app.packageName)
-        }
-        val playable = state == RowFileState.PRESENT && row.pending &&
+        if (!volumeMounted) return RowFix.MARK_UNOBSERVABLE
+        val state = observeFile(app, row)
+        // 按具体 URI 复核两种写操作；已发布且在盘的行不做额外查询。
+        val needsCheck = state == RowFileState.ABSENT || (state == RowFileState.PRESENT && row.pending)
+        val rowMatches = needsCheck && queryRowByUri(app, row) == row
+        val playable = rowMatches && state == RowFileState.PRESENT && row.pending &&
             row.dataPath?.let { extractable(File(it)) } == true
-        val fix = rowFixDecision(
-            row.pending, state, ageOk, volumeMounted, rowMatches, playable,
-            ownerOurs = ownerAllowed(row.owner, app.packageName)
-        )
+        val fix = rowFixDecision(row.pending, state, ageOk, volumeMounted, rowMatches, playable, ownerOurs)
         if (fix == RowFix.KEEP && row.pending && state == RowFileState.PRESENT && !playable) {
-            Log.w(TAG, "救援：pending 文件未通过封口校验（缺尾段/无视频轨），留原状 ${row.displayName} path=${row.dataPath}")
-        }
-        if (fix == RowFix.KEEP && row.pending && ageOk && !volumeMounted) {
-            Log.w(TAG, "救援：行卷不可用或卷名非具体卷，暂不处置 ${row.displayName} volume=${row.volume}")
+            Log.w(TAG, "救援：pending 文件未通过封口校验（缺尾段/无视频轨），留原状 id=${row.id}")
         }
         return fix
     }
@@ -246,19 +242,39 @@ internal object StalePendingSweep {
      * 本目录下的行快照：只在**主外部卷**上查（[PRIMARY_VIDEO_URI]）。聚合集合上按
      * RELATIVE_PATH 匹配会把 SD 卡同路径的行也收进来，后面的行操作就有错卷风险（Y22）。
      */
-    private fun queryRows(app: Context): List<Row>? = runCatching {
-        val out = ArrayList<Row>()
-        app.contentResolver.query(
-            PRIMARY_VIDEO_URI,
-            rowProjection,
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-            arrayOf("${VideoStore.RELATIVE_PATH}/"),
-            null
-        )?.use { c ->
-            while (c.moveToNext()) out += readRow(c)
+    private fun queryRows(app: Context): List<Row>? = queryRowsInDir(app, VideoStore.RELATIVE_PATH)
+
+    private fun queryRowsInDir(app: Context, relativePath: String, pendingOnly: Boolean = false): List<Row>? {
+        val pendingClause = if (pendingOnly) " AND ${MediaStore.MediaColumns.IS_PENDING}=1" else ""
+        val where = "${MediaStore.MediaColumns.RELATIVE_PATH}=?$pendingClause"
+        return querySweepRows(app, PRIMARY_VIDEO_URI, where, arrayOf("$relativePath/"))
+    }
+
+    /** 查询失败与成功但零行有别。查询集合时显式包含本应用可见的 pending 行。 */
+    private fun querySweepRows(
+        app: Context,
+        uri: Uri,
+        where: String? = null,
+        args: Array<String>? = null
+    ): List<Row>? = runCatching {
+        val resolver = app.contentResolver
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            resolver.query(uri, rowProjection, sweepArgs(where, args, MediaStore.MATCH_INCLUDE), null)
+        } else {
+            resolver.query(includePendingOnQ(uri), rowProjection, where, args, null)
         }
-        out
+        cursor?.use { c -> buildList { while (c.moveToNext()) add(readRow(c)) } }
     }.getOrNull()
+
+    @Suppress("DEPRECATION") // API 29 没有 QUERY_ARG_MATCH_PENDING。
+    private fun includePendingOnQ(uri: Uri): Uri = MediaStore.setIncludePending(uri)
+
+    private fun sweepArgs(where: String?, args: Array<String>?, matchPending: Int): Bundle = Bundle().apply {
+        if (where != null) putString(ContentResolver.QUERY_ARG_SQL_SELECTION, where)
+        if (args != null) putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+        putInt(MediaStore.QUERY_ARG_MATCH_PENDING, matchPending)
+        putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_EXCLUDE)
+    }
 
     /**
      * 行的**具体卷**条目 URI（Y22 的唯一拼法）：`VOLUME_NAME` → 卷集合 → 挂 `_ID`。
@@ -276,13 +292,12 @@ internal object StalePendingSweep {
      */
     private fun queryRowByUri(app: Context, row: Row): Row? = runCatching {
         val uri = rowItemUri(row) ?: return@runCatching null
-        app.contentResolver.query(uri, rowProjection, null, null, null)
-            ?.use { c -> if (c.moveToFirst()) readRow(c) else null }
+        querySweepRows(app, uri)?.singleOrNull()
     }.getOrNull()
 
     private fun readRow(c: Cursor): Row {
-        // owner 列只在 API 30+ 的投影里；-1（不存在）按"读不到"处理（见 [ownerAllowed]）
         val ownerIdx = c.getColumnIndex(COL_OWNER)
+        val generationIdx = c.getColumnIndex(COL_GENERATION)
         return Row(
             id = c.getLong(0),
             displayName = c.getString(1),
@@ -290,7 +305,11 @@ internal object StalePendingSweep {
             addedMs = c.getLong(3) * 1000L,
             pending = c.getInt(4) != 0,
             volume = c.getString(5),
-            owner = if (ownerIdx >= 0) c.getString(ownerIdx) else null
+            relativePath = c.getString(6),
+            sizeBytes = if (c.isNull(7)) null else c.getLong(7),
+            modifiedSec = if (c.isNull(8)) null else c.getLong(8),
+            owner = if (ownerIdx >= 0) c.getString(ownerIdx) else null,
+            generationModified = if (generationIdx < 0 || c.isNull(generationIdx)) null else c.getLong(generationIdx)
         )
     }
 
@@ -341,11 +360,30 @@ internal object StalePendingSweep {
      */
     private fun deleteRow(app: Context, row: Row): Boolean = runCatching {
         val uri = rowItemUri(row) ?: return@runCatching false
-        app.contentResolver.delete(uri, null, null) > 0
+        val selection = writeSelection(row) ?: return@runCatching false
+        val args = selection.args.toTypedArray()
+        val resolver = app.contentResolver
+        val rows = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            resolver.delete(uri, sweepArgs(selection.where, args, pendingMatch(row)))
+        } else {
+            resolver.delete(includePendingOnQ(uri), selection.where, args)
+        }
+        rows > 0
     }.getOrDefault(false)
 
-    /** 交系统扫描入库（`MediaScannerConnection` 是"文件已在磁盘、行还没有"的正解；不写文件） */
+    /** 复查之后行仍可能变化；Provider 必须带原快照的条件执行写入。 */
+    private fun writeSelection(row: Row): SweepWriteSelection? = sweepWriteSelection(
+        row.displayName, row.dataPath, row.relativePath, row.addedMs / 1000L,
+        row.sizeBytes, row.modifiedSec, row.pending, row.owner, row.generationModified,
+        hasGeneration = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    )
+
+    private fun pendingMatch(row: Row): Int =
+        if (row.pending) MediaStore.MATCH_ONLY else MediaStore.MATCH_EXCLUDE
+
+    /** 无库行的文件也必须通过与救援同一把封口尺，才交系统扫描。 */
     private fun indexFile(app: Context, f: File): Boolean = runCatching {
+        if (!extractable(f)) return@runCatching false
         MediaScannerConnection.scanFile(app, arrayOf(f.absolutePath), null) { _, _ -> }
         true
     }.getOrDefault(false)
@@ -354,14 +392,18 @@ internal object StalePendingSweep {
      * 库行快照（[reconcileLibrary] / [rescuePendingRows] 用）。
      * [owner] 只从 API 30+ 的投影里有值（null = 当前系统读不到，见 [ownerAllowed]）。
      */
-    private class Row(
+    private data class Row(
         val id: Long,
         val displayName: String?,
         val dataPath: String?,
         val addedMs: Long,
         val pending: Boolean,
         val volume: String?,
-        val owner: String?
+        val relativePath: String?,
+        val sizeBytes: Long?,
+        val modifiedSec: Long?,
+        val owner: String?,
+        val generationModified: Long?
     )
 
     /**
@@ -410,18 +452,15 @@ internal object StalePendingSweep {
                 //   无行 ⇒ 本来就没人索引它，自己 rename 才是对的。
                 //   **查不出有无行（provider 查询失败）⇒ 同"有行"处理：不动**——
                 //   fs rename 赌"无行"赌错就是坏行事故重演，宁可留原名等下一轮。
-                val hasRow = rowExists(app, f.name)
-                if (hasRow == null) {
-                    Log.w(TAG, "清扫：行查询失败无法判定有无行，保持不动 ${f.name}")
-                    return@runCatching false
-                }
-                if (hasRow) {
-                    if (!renameRow(app, f.name, to.name)) {
-                        Log.w(TAG, "清扫：有行的成片 provider 改名失败，保持原名不动 ${f.name}")
+                val rows = queryRenameRows(app, f) ?: return@runCatching false
+                if (rows.isEmpty()) {
+                    if (to.exists() || !f.renameTo(to)) return@runCatching false
+                } else {
+                    val row = rows.singleOrNull() ?: return@runCatching false
+                    if (row.dataPath != f.absolutePath || !renameRow(app, row, to.name)) {
+                        Log.w(TAG, "清扫：无法确认或改名，保持原状 id=${row.id}")
                         return@runCatching false
                     }
-                } else if (to != f && !f.renameTo(to)) {
-                    return@runCatching false
                 }
                 // 同名侧车一起搬（复用成片改名的既有单一出口，命名规则不分叉）
                 ArcDropLog.renameFor(f.absolutePath, to.absolutePath)
@@ -431,42 +470,22 @@ internal object StalePendingSweep {
         }
     }.getOrDefault(false)
 
-    /**
-     * 目录内是否已有这一行的成片（`renameRow` 的前置判据：**有行才必须走 provider**）。
-     * 三值：true=有行 / false=确无行 / **null=查不出**（provider 异常/忙，含 query 回空 cursor）。
-     * 查不出时调用方必须按"可能有行"处理，绝不能落到 fs rename——赌错方向就是
-     * 2026-10-08 坏行事故（provider 失败回退 fs rename、10 条成片变坏行）的重演。
-     *
-     * Y22：只在**主外部卷**集合上按名字查。聚合集合上同名同相对路径的 SD 卡行会被当成本卷的行，
-     * 改名就打到别人的文件上（DISPLAY_NAME 不唯一，SELECTION 的 RELATIVE_PATH 也不带卷）。
-     */
-    private fun rowExists(app: Context, name: String): Boolean? = runCatching {
-        app.contentResolver.query(
-            PRIMARY_VIDEO_URI,
-            arrayOf(MediaStore.MediaColumns._ID),
-            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-            arrayOf(name, "${VideoStore.RELATIVE_PATH}/"),
-            null
-        )?.use { it.count > 0 }
-    }.getOrNull()
+    /** pending 文件在磁盘和 MediaStore 的名字可以不同，按实际路径和目录内旧名一起查。 */
+    private fun queryRenameRows(app: Context, file: File): List<Row>? {
+        val relPath = relativePathOf(file.parentFile ?: return null) ?: return null
+        val where = "${MediaStore.MediaColumns.DATA}=? OR " +
+            "(${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?)"
+        return querySweepRows(app, PRIMARY_VIDEO_URI, where, arrayOf(file.absolutePath, file.name, "$relPath/"))
+    }
 
-    /**
-     * 经 MediaStore 去掉 pending 段（顺带 `IS_PENDING=0` 兜一次：历史上"insert 在飞时被杀"的残留
-     * 可能停在 pending 态，那样它在相册里永远不可见）。**目录内精确匹配**：`DISPLAY_NAME` 不唯一，
-     * 必须叠 `RELATIVE_PATH`（Android 10+ 列）；Y22 起再钉在**主外部卷**集合上（错卷同名行不许改）。
-     */
-    private fun renameRow(app: Context, oldName: String, newName: String): Boolean = runCatching {
-        val values = ContentValues().apply {
+    /** 复核具体条目后才改名及解除 pending，条件仍随 update 送给 Provider。 */
+    private fun renameRow(app: Context, row: Row, newName: String): Boolean {
+        if (!ownerAllowed(row.owner, app.packageName) || queryRowByUri(app, row) != row) return false
+        return updateRow(app, row, ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, newName)
-            put(MediaStore.MediaColumns.IS_PENDING, 0)
-        }
-        app.contentResolver.update(
-            PRIMARY_VIDEO_URI,
-            values,
-            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-            arrayOf(oldName, "${VideoStore.RELATIVE_PATH}/")
-        ) > 0
-    }.getOrDefault(false)
+            if (row.pending) put(MediaStore.MediaColumns.IS_PENDING, 0)
+        })
+    }
 
     /** 成片目录（公共 Movies 下的固定相对路径）。路径口径统一取 [VideoStore.outputDir] 单一出口——
      *  清扫、空间探测、成片落地必须是同一块卷，分叉一次就会把别处当"文件不在"（B04 选卷）。 */
@@ -512,23 +531,9 @@ internal object StalePendingSweep {
         return acted
     }
 
-/**
-     * 查某相对路径下 owner 可见的 pending 行（IS_PENDING=1 对 owner 默认可见，只对外部 app 隐藏）。
-     * Y22：只在**主外部卷**集合上查——救援目录只可能挂在主卷，聚合集合上同路径的 SD 卡行不是我们的。
-     */
-    private fun queryPendingRows(app: Context, relPath: String): List<Row> = runCatching {
-        val out = ArrayList<Row>()
-        app.contentResolver.query(
-            PRIMARY_VIDEO_URI,
-            rowProjection,
-            "${MediaStore.MediaColumns.IS_PENDING}=1 AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-            arrayOf("$relPath/"),
-            null
-        )?.use { c ->
-            while (c.moveToNext()) out += readRow(c)
-        }
-        out
-    }.getOrDefault(emptyList())
+    /** 只查主卷目录下可见的 pending 行；查询失败时本趟没有可处置的行。 */
+    private fun queryPendingRows(app: Context, relPath: String): List<Row> =
+        queryRowsInDir(app, relPath, pendingOnly = true).orEmpty()
 
     /** 目录 File → MediaStore RELATIVE_PATH（与 [outputDir] 的构造互逆）；不在外部存储根下返回 null */
     private fun relativePathOf(dir: File): String? = runCatching {
@@ -562,14 +567,22 @@ internal object StalePendingSweep {
         }
     }
 
-    /** 清除指定卷内这一行的 IS_PENDING。无法解析到具体卷时保留原状。 */
-    private fun unpendRow(app: Context, row: Row): Boolean = runCatching {
+    /** 清除指定卷内这一行的 IS_PENDING。只有 Provider 确认更新后才能清封口标记。 */
+    private fun unpendRow(app: Context, row: Row): Boolean = row.pending && updateRow(
+        app, row, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+    )
+
+    private fun updateRow(app: Context, row: Row, values: ContentValues): Boolean = runCatching {
         val uri = rowItemUri(row) ?: return@runCatching false
-        app.contentResolver.update(
-            uri,
-            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-            null, null
-        ) > 0
+        val selection = writeSelection(row) ?: return@runCatching false
+        val args = selection.args.toTypedArray()
+        val resolver = app.contentResolver
+        val affected = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            resolver.update(uri, values, sweepArgs(selection.where, args, pendingMatch(row)))
+        } else {
+            resolver.update(includePendingOnQ(uri), values, selection.where, args)
+        }
+        affected > 0
     }.getOrDefault(false)
 }
 
