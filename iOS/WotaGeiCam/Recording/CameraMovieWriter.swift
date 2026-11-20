@@ -215,7 +215,7 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             renderer = RenderBackendFactory.makeEchoBackend()
             if let renderer = renderer { notes.append("成片回波 · \(renderer.kind.displayName)") }
         }
-        if setup.audioAttached { addAudio(to: writer, sampleRate: config.sampleRate) }
+        if setup.audioAttached { addAudio(to: writer, sampleRate: config.sampleRate, channels: config.channels) }
         guard writer.startWriting() else {
             throw WriteError(writer.error?.localizedDescription ?? "编码器无法启动。")
         }
@@ -229,10 +229,10 @@ final class CameraMovieWriter: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                             width, height, fps, codec.displayName, Double(rate) / 1_000_000, audio), at: 0)
     }
 
-    private func addAudio(to writer: AVAssetWriter, sampleRate: Int) {
+    private func addAudio(to writer: AVAssetWriter, sampleRate: Int, channels: Int) {
         let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC,
                                       AVSampleRateKey: sampleRate,
-                                      AVNumberOfChannelsKey: 1,
+                                      AVNumberOfChannelsKey: max(1, channels),
                                       AVEncoderBitRateKey: RecordingBitratePolicy.audioBitRate]
         guard writer.canApply(outputSettings: settings, forMediaType: .audio) else {
             notes.append("音频编码器不接受此采样率，本次录像无声。")
