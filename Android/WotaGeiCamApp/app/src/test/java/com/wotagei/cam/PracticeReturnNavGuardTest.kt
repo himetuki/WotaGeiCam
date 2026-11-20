@@ -31,8 +31,13 @@ assertTrue(
             main.contains("PracticeReturn.TO_COMPARE -> nav.popBackStack(WotaNav.COMPARE, false)")
         )
         assertTrue(
-            "对比页是否在栈内必须按当前返回栈快照判（不是一次可能抛错的 route 查询）",
-            main.contains("val compareInStack = stack.any { it.destination.route == WotaNav.COMPARE }")
+            "对比页在栈内必须用公开 API 的 route 查询（runCatching 兜住缺页），并取到条目本身",
+            main.contains("val compareEntry = runCatching { nav.getBackStackEntry(WotaNav.COMPARE) }.getOrNull()")
+        )
+        assertTrue("决策输入取 compareEntry != null", main.contains("compareInStack = compareEntry != null"))
+        assertFalse(
+            "不许使用 @RestrictTo(LIBRARY_GROUP) 的 currentBackStack（Lint RestrictedApi 会报错）",
+            main.contains("nav.currentBackStack.value")
         )
     }
 
@@ -63,7 +68,7 @@ assertTrue(
         )
         assertTrue(
             "发起者失效时计划函数拿到的 originAlive 必须为 false，而不是被忽略",
-            main.contains("val originAlive = originId == null || stack.any { it.id == originId }")
+            main.contains("val originAlive = originId == null || compareEntry?.id == originId")
         )
         assertTrue(
             "回程决策必须走纯计划函数（可桥测的单一真源）",

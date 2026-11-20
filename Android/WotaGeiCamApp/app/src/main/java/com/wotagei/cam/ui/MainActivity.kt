@@ -576,16 +576,15 @@ private fun WotaRoot() {
                             // 程序化定向返回（非用户手势）不走 navigateBack 的防抖，但黑屏不变量
                             // 必须自己守（Y51）：① 发起页身份已失效的过期回调不动作；
                             // ② 保底裸弹只在栈上还有下层页时成立，绝不把根栈弹空。
-                            // currentBackStack 是 NavController 的公开快照（按条目 id 判身份，
-                            // 不能用 getBackStackEntry：它按 route/destinationId 查，不认条目 id）。
-                            val stack = nav.currentBackStack.value
+                            // 只用公开 API：currentBackStack 带 @RestrictTo(LIBRARY_GROUP)，应用层
+                            // 调用属受限 API。getBackStackEntry 返回指定 route 的最新条目（含 id），
+                            // 足够核对"发起练习的那枚对比页是否仍是栈上这一枚"。
+                            val compareEntry = runCatching { nav.getBackStackEntry(WotaNav.COMPARE) }.getOrNull()
                             val originId = ComparePractice.takeOrigin()
-                            val originAlive = originId == null || stack.any { it.id == originId }
-                            val compareInStack = stack.any { it.destination.route == WotaNav.COMPARE }
+                            val originAlive = originId == null || compareEntry?.id == originId
                             when (practiceReturnPlan(
-                                compareInStack = compareInStack,
+                                compareInStack = compareEntry != null,
                                 originAlive = originAlive,
-                                // currentBackStack 含 NavGraph 条目，不能拿 size 判"还有下层页"；
                                 // previousBackStackEntry 已跳过图条目，与普通 popBackStack 的语义一致
                                 canPopOne = nav.previousBackStackEntry != null
                             )) {
