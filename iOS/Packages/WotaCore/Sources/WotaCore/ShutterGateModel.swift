@@ -207,10 +207,18 @@ public enum CameraShutterGate {
     /// 1/10s 防手抖钳制。
     public static let shutterCapNanoseconds: Int64 = RecordingTiers.shutterCapNanoseconds
 
-    /// 帧率 → 帧周期（整除，与 `AVFrameRateRange` 的纳秒口径一致）。
+    /// 帧率 → 帧周期（纳秒）。
+    /// 整数档（24/25/30/50/60/120/240）保持与 Android `NS_PER_SECOND / denom` 相同的整除口径；
+    /// 非整数档（29.97/23.976 等）按真实帧率四舍五入，不能被 `Int64(frameRate)` 截断成 29/23。
     public static func frameDurationNanoseconds(frameRate: Double) -> Int64 {
-        guard frameRate > 0 else { return 0 }
-        return RecordingTiers.nanosecondsPerSecond / Int64(frameRate)
+        guard frameRate > 0, frameRate.isFinite else { return 0 }
+        let rounded = frameRate.rounded()
+        if rounded >= 1, Swift.abs(frameRate - rounded) < 0.000_000_1 {
+            return RecordingTiers.nanosecondsPerSecond / Int64(rounded)
+        }
+        let exact = (Double(RecordingTiers.nanosecondsPerSecond) / frameRate).rounded()
+        guard exact.isFinite, exact >= 1, exact <= Double(Int64.max) else { return 0 }
+        return Int64(exact)
     }
 
     /// 该帧率下 sensor 曝光的**上界**：不得超过帧周期（否则丢帧），也不得超过 1/10s。

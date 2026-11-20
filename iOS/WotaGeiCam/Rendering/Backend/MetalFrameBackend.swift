@@ -130,6 +130,9 @@ public final class MetalFrameBackend: FrameRenderBackend {
             _ = inputTexture
             _ = outputTexture
             CVMetalTextureCacheFlush(cache, 0)
+            if let error = commandBuffer.error {
+                throw RenderBackendError.readbackFailed(reason: "Metal 命令缓冲失败：\(error.localizedDescription)")
+            }
         }
         return RenderFrameOutput(pixelBuffer: output, width: width, height: height,
                                  pixelFormat: kCVPixelFormatType_32BGRA)
@@ -175,6 +178,9 @@ public final class MetalFrameBackend: FrameRenderBackend {
             _ = inputTexture
             _ = outputTexture
             CVMetalTextureCacheFlush(cache, 0)
+            if let error = commandBuffer.error {
+                throw RenderBackendError.readbackFailed(reason: "Metal 命令缓冲失败：\(error.localizedDescription)")
+            }
         }
         return RenderFrameOutput(pixelBuffer: output, width: width, height: height,
                                  pixelFormat: kCVPixelFormatType_32BGRA)

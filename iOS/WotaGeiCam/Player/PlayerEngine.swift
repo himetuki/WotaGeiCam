@@ -54,6 +54,8 @@ final class PlayerEngine: NSObject {
     /// 已发出但尚未落地的步进目标（秒）；对齐 Android `pendingStepMs`。
     private var pendingStepSeconds: Double?
     private var pendingStepTicks: Int = 0
+    /// 播放意图代际：暂停/新 seek/换片都会递增，异步 seek 完成回调据此判断意图是否仍有效。
+    private var resumeToken: Int = 0
 
     private var state: PlayerPlaybackState = .idle {
         didSet {
@@ -123,6 +125,7 @@ final class PlayerEngine: NSObject {
     /// 没失败过则保持「不重建 player」语义（对齐 Android `attach`）。
     func attach(url: URL) {
         guard !isReleased else { return }
+        resumeToken += 1
         let key = PlayerABStore.mediaKey(for: url)
         if mediaKey == key, player != nil {
             if state.isFailure {
@@ -161,6 +164,7 @@ final class PlayerEngine: NSObject {
 
     private func restartSameMedia(url: URL, key: String) {
         // 旧 item 的 KVO / 通知必须先摘干净，否则会残留对已换下 item 的观察。
+        resumeToken += 1
         removeItemObservers()
         let asset = AVURLAsset(url: url, options: nil)
         let item = AVPlayerItem(asset: asset)
@@ -231,9 +235,13 @@ final class PlayerEngine: NSObject {
         guard !isReleased, let player = player else { return }
         if !paused {
             pendingStepSeconds = nil
+            // 每次起播都是一次新意图；在途的 seek 完成回调不得再覆盖之后的暂停。
+            resumeToken += 1
+            let token = resumeToken
             if state == .ended {
-                seek(to: .zero, commit: true) { [weak self] finished in
-                    guard let self = self, finished, !self.isReleased else { return }
+                seekInternal(to: .zero, commit: true, invalidateResume: false) { [weak self] finished in
+                    guard let self = self, finished, !self.isReleased,
+                          self.resumeToken == token else { return }
                     self.player?.rate = self.speed
                     self.state = .playing
                 }
@@ -243,6 +251,7 @@ final class PlayerEngine: NSObject {
             state = .playing
             return
         }
+        resumeToken += 1
         player.rate = 0
         state = .paused
     }
@@ -253,10 +262,22 @@ final class PlayerEngine: NSObject {
 
     /// 定位（秒）。`commit` 走完成回调，失败必须回给调用方。
     func seek(to seconds: Double, commit: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        seekInternal(to: seconds, commit: commit, invalidateResume: true, completion: completion)
+    }
+
+    /// `invalidateResume == false` 只给 `softPause(false)`/循环回绕的内部零 seek 用：
+    /// 它们自己已持有代际，不能再递增，否则完成回调会把自己作废。
+    private func seekInternal(
+        to seconds: Double,
+        commit: Bool,
+        invalidateResume: Bool,
+        completion: ((Bool) -> Void)?
+    ) {
         guard !isReleased, let player = player else {
             completion?(false)
             return
         }
+        if invalidateResume { resumeToken += 1 }
         let upper = durationSeconds > 0 ? durationSeconds : seconds
         let clamped = max(0, min(seconds, upper))
         let target = CMTime(seconds: clamped, preferredTimescale: preferredTimescale)
@@ -268,6 +289,10 @@ final class PlayerEngine: NSObject {
                     if finished {
                         self.positionSeconds = clamped
                         self.onProgress?(self.positionSeconds, self.durationSeconds)
+                        // 从末帧拖回中间后，状态必须离开 `.ended`，否则下一次播放会跳回片头。
+                        if self.state == .ended, clamped < self.durationSeconds - 0.001 {
+                            self.state = .paused
+                        }
                     }
                     self.onSeekCompleted?(finished)
                     completion?(finished)
@@ -276,6 +301,9 @@ final class PlayerEngine: NSObject {
         } else {
             player.seek(to: target)
             positionSeconds = clamped
+            if state == .ended, clamped < durationSeconds - 0.001 {
+                state = .paused
+            }
             self.onProgress?(positionSeconds, durationSeconds)
             completion?(true)
         }
@@ -329,6 +357,8 @@ final class PlayerEngine: NSObject {
                 failure: .invalidTimebase
             )
         }
+        // 与 Android 同口径：播放中按逐帧先隐式暂停，不要求用户先手动暂停。
+        if state == .playing { softPause(true) }
         guard state != .playing, item.status == .readyToPlay else {
             return rejectStep(.notPaused, target: positionSeconds)
         }
@@ -525,8 +555,11 @@ final class PlayerEngine: NSObject {
             self.onProgress?(self.positionSeconds, self.durationSeconds)
             // 单视频循环：AB 未激活时到结尾回 0 继续播（`actionAtItemEnd = .none` 只停住，不会自动重放）。
             if self.loopMode == .one, !self.abRange.isLoopActive {
-                self.seek(to: .zero, commit: true) { [weak self] finished in
+                self.resumeToken += 1
+                let token = self.resumeToken
+                self.seekInternal(to: .zero, commit: true, invalidateResume: false) { [weak self] finished in
                     guard let self = self, finished, !self.isReleased,
+                          self.resumeToken == token,
                           self.loopMode == .one, !self.abRange.isLoopActive else { return }
                     self.player?.rate = self.speed
                     self.state = .playing
@@ -614,6 +647,7 @@ final class PlayerEngine: NSObject {
     func release() {
         guard !isReleased else { return }
         isReleased = true
+        resumeToken += 1
         if let timeObserver = timeObserver {
             player?.removeTimeObserver(timeObserver)
         }

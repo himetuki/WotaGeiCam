@@ -179,6 +179,8 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
             }
             glViewport(0, 0, GLsizei(width), GLsizei(height))
 
+            // 只检查本帧绘制产生的错误：先清掉建纹理/FBO 阶段的陈旧错误。
+            clearGLErrors()
             if params.isEnabled {
                 let echoIndex = 1 - accIndex
                 drawComposite(base: inputName, echo: accTexture[echoIndex], params: params, attrib: compositeAttrib)
@@ -192,9 +194,13 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
             // 同步帧契约：CPU/编码器会在 process* 返回后读取输出，必须等 GPU 真正完成，
             // 而非仅提交命令流。Metal 后端用 waitUntilCompleted()，这里用 glFinish() 对应。
             glFinish()
+            let readbackError = glGetError()
             CVOpenGLESTextureCacheFlush(cache, 0)
             _ = outputTexture
             _ = inputTexture
+            if readbackError != GLenum(GL_NO_ERROR) {
+                throw RenderBackendError.readbackFailed(reason: "OpenGL ES 读回失败（glGetError=\(readbackError)）")
+            }
         }
         return RenderFrameOutput(pixelBuffer: output, width: width, height: height,
                                  pixelFormat: kCVPixelFormatType_32BGRA)
@@ -220,6 +226,7 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
             let writeIndex = 1 - accIndex
             glBindFramebuffer(GLenum(GL_FRAMEBUFFER), accFramebuffer[writeIndex])
             glViewport(0, 0, GLsizei(width), GLsizei(height))
+            clearGLErrors()
             if hasHistory {
                 drawArcMerge(kept: accTexture[accIndex], dropped: inputName,
                              deadbandLuma: deadbandLuma, attrib: arcAttrib)
@@ -244,9 +251,13 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
             // 同步帧契约：CPU/编码器会在 process* 返回后读取输出，必须等 GPU 真正完成，
             // 而非仅提交命令流。Metal 后端用 waitUntilCompleted()，这里用 glFinish() 对应。
             glFinish()
+            let readbackError = glGetError()
             CVOpenGLESTextureCacheFlush(cache, 0)
             _ = outputTexture
             _ = inputTexture
+            if readbackError != GLenum(GL_NO_ERROR) {
+                throw RenderBackendError.readbackFailed(reason: "OpenGL ES 读回失败（glGetError=\(readbackError)）")
+            }
         }
         return RenderFrameOutput(pixelBuffer: output, width: width, height: height,
                                  pixelFormat: kCVPixelFormatType_32BGRA)
@@ -257,6 +268,11 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
     }
 
     // MARK: 绘制
+
+    /// 清空当前上下文累积的 GL 错误（`glGetError` 每次只取出一个）。
+    private func clearGLErrors() {
+        while glGetError() != GLenum(GL_NO_ERROR) {}
+    }
 
     private func drawEchoAccumulation(input: GLuint, writeIndex: Int, params: RenderEffectParameters, width: Int, height: Int) {
         glBindFramebuffer(GLenum(GL_FRAMEBUFFER), accFramebuffer[writeIndex])
