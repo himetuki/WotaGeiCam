@@ -194,6 +194,8 @@ final class PlayerEngine: NSObject {
             guard let self = self, !self.isReleased else { return }
             DispatchQueue.main.async {
                 guard let self = self, !self.isReleased else { return }
+                // 旧 asset 的异步回填不得覆盖换片后的时长/帧率。
+                guard self.playerItem?.asset === asset else { return }
                 var duration = 0.0
                 let durationStatus = asset.statusOfValue(forKey: "duration", error: nil)
                 if durationStatus == .loaded {

@@ -203,6 +203,26 @@ private final class ArcRepairSession {
         }
     }
 
+    /// `finished` 同时被 owner 队列和任意线程的 `requestCancel` 访问，统一走锁。
+    private func isFinished() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return finished
+    }
+
+    /// 首次置位返回 true；已结束返回 false（用于拒绝重复报告）。
+    @discardableResult
+    private func markFinished() -> Bool {
+        stateLock.lock()
+        if finished {
+            stateLock.unlock()
+            return false
+        }
+        finished = true
+        stateLock.unlock()
+        return true
+    }
+
     /// 可从任意线程调用：只标记取消并 cancelReading（中止 blocked 的解码读取）。
     func requestCancel() {
         stateLock.lock()
@@ -909,7 +929,7 @@ private final class ArcRepairSession {
     }
 
     private func completeWriting(writer: AVAssetWriter) {
-        guard !finished else { return }
+        guard !isFinished() else { return }
         if isCancelled {
             writer.cancelWriting()
             abort(code: .cancelled, message: "已取消，未生成新片。")
@@ -951,7 +971,7 @@ private final class ArcRepairSession {
                         self.abort(code: .noOutput, message: "入库后没有绝对路径。")
                         return
                     }
-                    self.finished = true
+                    guard self.markFinished() else { return }
                     self.stateLock.lock()
                     let snapshot = self.readers
                     self.readers = []
@@ -1022,8 +1042,7 @@ private final class ArcRepairSession {
     }
 
     private func abort(code: ArcRepairFailureCode, message: String, retainPending: Bool = false) {
-        guard !finished else { return }
-        finished = true
+        guard markFinished() else { return }
         let handle = pendingHandle
         pendingHandle = nil
         releaseReadersAndRenderer()
