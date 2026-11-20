@@ -178,7 +178,11 @@ final class CameraPreviewViewController: UIViewController {
         recorder.privateNotice = { [weak self] note in
             self?.notice = note
             self?.render()
-            UIAccessibility.post(notification: .announcement, argument: note)
+            // `UIAccessibility.post(notification:argument:)` 是 iOS 11+；Legacy 目标（iOS 10）
+            // 不能引用该符号，因此只在支持的系统上播报，旧系统保持静默。
+            if #available(iOS 11.0, *) {
+                UIAccessibility.post(notification: .announcement, argument: note)
+            }
         }
     }
 

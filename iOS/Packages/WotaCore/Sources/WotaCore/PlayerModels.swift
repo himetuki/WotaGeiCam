@@ -549,10 +549,10 @@ public enum CompareTimeline {
             return commands
 
         case .rightSolo:
-            return CompareDecideCommands(blackLeft: true, pauseLeft: true)
+            return CompareDecideCommands(pauseLeft: true, blackLeft: true)
 
         case .leftSolo:
-            return CompareDecideCommands(blackRight: true, pauseRight: true)
+            return CompareDecideCommands(pauseRight: true, blackRight: true)
 
         case .timelineEnd:
             if input.userPlaying, !input.dragging, input.timelineLoop, !input.abLoopActive {
@@ -562,10 +562,10 @@ public enum CompareTimeline {
                 return CompareDecideCommands(
                     seekLeft: g.leftTarget(t),
                     seekRight: g.rightTarget(t),
-                    resumeLeft: leftAtT,
-                    resumeRight: rightAtT,
                     pauseLeft: !leftAtT,
                     pauseRight: !rightAtT,
+                    resumeLeft: leftAtT,
+                    resumeRight: rightAtT,
                     blackLeft: !leftAtT,
                     blackRight: !rightAtT
                 )

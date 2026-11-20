@@ -20,6 +20,9 @@ import WotaCore
 /// 在 `PlayerClipExporter`（进度/取消/结果/失败均显式回调，不在中途静默丢任务）。
 final class PlayerViewController: UIViewController {
 
+    /// iOS 13 的 `.systemBlue` 同色值；Legacy（iOS 10）不能引用系统动态色。
+    private static let activeTint = UIColor(red: 0, green: 0.478, blue: 1, alpha: 1)
+
     // MARK: - 依赖
 
     private let engine: PlayerEngine
@@ -538,9 +541,9 @@ final class PlayerViewController: UIViewController {
         } else {
             trackBView.isHidden = true
         }
-        aButton.tintColor = range.start.isValid ? .systemBlue : .white
-        bButton.tintColor = range.end.isValid ? .systemBlue : .white
-        loopButton.tintColor = range.loopEnabled ? .systemBlue : .white
+        aButton.tintColor = range.start.isValid ? PlayerViewController.activeTint : .white
+        bButton.tintColor = range.end.isValid ? PlayerViewController.activeTint : .white
+        loopButton.tintColor = range.loopEnabled ? PlayerViewController.activeTint : .white
     }
 
     // MARK: - 动作

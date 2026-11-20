@@ -345,7 +345,9 @@ final class CameraCaptureControls {
                 self.setExposure(iso: current.ability.hasManualISO ? current.state.iso : nil,
                                  milliseconds: current.ability.hasManualISO ? nil : current.state.exposureDurationSeconds.map { $0 * 1_000 })
             } else {
-                self.adjust(self.camera.setAutoExposure) { self.store.setDefaultAeMode(.auto) }
+                self.adjust({ self.camera.setAutoExposure(completion: $0) }) {
+                    self.store.setDefaultAeMode(.auto)
+                }
             }
         }]
         let bias = snapshot.exposure
