@@ -255,7 +255,17 @@ final class MediaLibrary {
             let oldRelativePath = identity.relativePath
             do {
                 let renamed = try self.fileStore.rename(entry: entry, to: newName)
-                self.maintenance.remapIdentity(oldRelativePath: oldRelativePath, newEntry: renamed)
+                do {
+                    try self.maintenance.remapIdentity(oldRelativePath: oldRelativePath, newEntry: renamed)
+                } catch {
+                    // 文件已改名但索引没跟上：把文件搬回原名，保持索引/磁盘一致。
+                    let rolledBack = (try? self.fileStore.rename(entry: renamed, to: identity.fileName)) != nil
+                    let message = rolledBack
+                        ? "索引写入失败，已回滚改名：\(error)"
+                        : "索引写入失败且回滚改名失败，文件现为 \(renamed.fileName)：\(error)"
+                    MediaLibrary.deliver(MediaRenameOutcome.failed(message), completion)
+                    return
+                }
                 self.refreshIdentityMetadata(mediaId: mediaId, entry: renamed)
                 let item = self.assembleItems().first { $0.mediaId == mediaId }
                 MediaLibrary.deliver(MediaRenameOutcome.renamed(item ?? self.mediaItem(identity: identity, entry: renamed, state: self.indexStore.currentState())), completion)
@@ -472,6 +482,7 @@ final class MediaLibrary {
         try? fileStore.ensureDirectories()
         let state = indexStore.currentState()
         var knownPaths = Set(state.identities.map { $0.relativePath })
+        var missing: [MediaFileEntry] = []
         for entry in fileStore.enumerateLibraryVideos() {
             let relativePath = entry.relativeDirectory + "/" + entry.fileName
             if let identity = state.identities.first(where: { $0.relativePath == relativePath }) {
@@ -480,9 +491,13 @@ final class MediaLibrary {
                 }
                 continue
             }
-            if maintenance.adopt(entry: entry) {
-                knownPaths.insert(relativePath)
+            // 批量补录：一次 `apply` 写完整表，避免 N 个新文件做 N 次整表序列化（O(N²)）。
+            if knownPaths.insert(relativePath).inserted {
+                missing.append(entry)
             }
+        }
+        if !missing.isEmpty {
+            _ = maintenance.adopt(entries: missing)
         }
     }
 

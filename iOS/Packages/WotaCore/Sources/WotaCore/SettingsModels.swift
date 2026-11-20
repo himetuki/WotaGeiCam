@@ -27,12 +27,32 @@ public enum WotaTiers {
     public static let maxFileBytes: Int64 = 3_758_096_384
     /// 录像前余量门槛。
     public static let minFreeMB: Int64 = 200
+
+    /// 把任意来源（含备份/手改）的采样率钳到产品档位；用 Int64 计算距离，
+    /// 避免 armv7（32 位 Int）上 `abs(48000 - Int32.min)` 溢出陷阱。
+    public static func clampSampleRate(_ value: Int) -> Int {
+        if sampleRates.contains(value) { return value }
+        var best = defaultSampleRate
+        var distance = Int64.max
+        for tier in sampleRates {
+            let current = Swift.abs(Int64(tier) - Int64(value))
+            if current < distance {
+                distance = current
+                best = tier
+            }
+        }
+        return best
+    }
 }
 
 // MARK: - 尺寸 `WxH`
 
 /// 画幅尺寸（键 `default_size` 的 `"WxH"` 串格式）。
 public struct WotaVideoSize: Equatable {
+    /// 产品域上限：任何设备/备份都不该超过 16384 的单边尺寸。
+    /// 同时保证 `width * height` 在 32 位 `Int`（armv7）上不会溢出。
+    public static let maxDimension = 16_384
+
     public var width: Int
     public var height: Int
 
@@ -53,7 +73,9 @@ public struct WotaVideoSize: Equatable {
         let parts = raw.split(separator: "x", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return nil }
         guard let w = Int(parts[0]), let h = Int(parts[1]) else { return nil }
-        guard w > 0 && h > 0 else { return nil }
+        guard w > 0, h > 0, w <= maxDimension, h <= maxDimension else { return nil }
+        // `pixelCount` 是 `width * height`；拒绝会让 armv7 上的 Int 乘法溢出的组合。
+        guard !w.multipliedReportingOverflow(by: h).overflow else { return nil }
         return WotaVideoSize(width: w, height: h)
     }
 }

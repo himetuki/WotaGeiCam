@@ -126,7 +126,14 @@ final class MediaLibraryMaintenance {
             // 双保险：目标已存在绝不 rename（Linux/Unix rename 语义是替换）。
             if FileManager.default.fileExists(atPath: destination.path) { return false }
             guard let renamed = try? fileStore.rename(entry: entry, to: target) else { return false }
-            remapIdentity(oldRelativePath: entry.relativeDirectory + "/" + entry.fileName, newEntry: renamed)
+            do {
+                try remapIdentity(oldRelativePath: entry.relativeDirectory + "/" + entry.fileName, newEntry: renamed)
+            } catch {
+                // 索引没跟上就回滚文件名，避免标签/系列与文件失联。
+                _ = try? fileStore.rename(entry: renamed, to: entry.fileName)
+                MediaLibraryLog.error("清扫改名回滚（索引写入失败）：\(entry.fileName) -> \(target)：\(error)")
+                return false
+            }
             MediaLibraryLog.info("清扫：成片去 pending 段 \(entry.fileName) -> \(target)")
             return true
         case .renameArchive, .deleteArchive:
@@ -136,7 +143,7 @@ final class MediaLibraryMaintenance {
 
     private func applyArchive(entry: MediaFileEntry, directory: URL, directoryNames: Set<String>, now: Int64) -> Bool {
         let clipName = clipFor(archiveName: entry.fileName, entries: directoryNames)
-        let targetName = clipName.map { $0 + MediaStorageLayout.sidecarExtension }
+        let targetName = clipName.map { MediaStorageLayout.sidecarFileName(forVideoFileName: $0) }
         let twin = MediaSweepPlanner.archiveTwinExists(
             archiveName: entry.fileName, targetName: targetName, directoryNames: directoryNames
         )
@@ -234,7 +241,13 @@ final class MediaLibraryMaintenance {
                 let destination = directory.appendingPathComponent(clean, isDirectory: false)
                 if FileManager.default.fileExists(atPath: destination.path) { continue }
                 guard let renamed = try? fileStore.rename(entry: entry, to: clean) else { continue }
-                remapIdentity(oldRelativePath: entry.relativeDirectory + "/" + entry.fileName, newEntry: renamed)
+                // 救援是「把可播 pending 文件改名」；索引重绑失败不回滚（否则救援白做）。
+                // 下一次 synchronizeWithDisk/reconcile 会按新文件名补录。
+                do {
+                    try remapIdentity(oldRelativePath: entry.relativeDirectory + "/" + entry.fileName, newEntry: renamed)
+                } catch {
+                    MediaLibraryLog.error("救援改名后索引重绑失败（保留新名）：\(entry.fileName) -> \(clean)：\(error)")
+                }
                 MediaLibraryLog.info("救援：pending 成片收录 \(entry.fileName) -> \(clean)")
                 acted += 1
             }
@@ -298,9 +311,17 @@ final class MediaLibraryMaintenance {
     func adopt(entry: MediaFileEntry, metadata: MediaItemAssembler.ProbedMetadata? = nil) -> Bool {
         let relativePath = entry.relativeDirectory + "/" + entry.fileName
         guard let probe = metadata ?? MediaItemAssembler.probe(url: entry.url) else { return false }
+        var adopted = false
         do {
             try indexStore.apply { s in
-                if s.identities.contains(where: { $0.relativePath == relativePath }) { return }
+                if s.identities.contains(where: { $0.relativePath == relativePath }) {
+                    adopted = true // 已存在视为成功（幂等）
+                    return
+                }
+                guard s.nextMediaId > 0, s.nextMediaId < Int64.max else {
+                    MediaLibraryLog.error("补入库失败 \(entry.fileName)：mediaId 已到上限，拒绝溢出分配")
+                    return
+                }
                 let id = s.nextMediaId
                 s.nextMediaId = id + 1
                 s.identities.append(LibraryIdentity(
@@ -314,18 +335,64 @@ final class MediaLibraryMaintenance {
                     addedAtMs: entry.createdAtMs > 0 ? entry.createdAtMs : LibraryFileStore.currentTimeMilliseconds(),
                     modifiedAtMs: entry.modifiedAtMs
                 ))
+                adopted = true
             }
-            return true
+            return adopted
         } catch {
             MediaLibraryLog.error("补入库失败 \(entry.fileName)：\(error)")
             return false
         }
     }
 
+    /// 批量补录（一次索引写）：先逐个探测，再在一个事务里分配 id。
+    /// 返回成功补录的条数；探测失败的文件跳过，不影响其他文件。
+    @discardableResult
+    func adopt(entries: [MediaFileEntry]) -> Int {
+        guard !entries.isEmpty else { return 0 }
+        var prepared: [(entry: MediaFileEntry, probe: MediaItemAssembler.ProbedMetadata)] = []
+        for entry in entries {
+            if let probe = MediaItemAssembler.probe(url: entry.url) {
+                prepared.append((entry, probe))
+            }
+        }
+        guard !prepared.isEmpty else { return 0 }
+        var adopted = 0
+        do {
+            try indexStore.apply { s in
+                for item in prepared {
+                    let relativePath = item.entry.relativeDirectory + "/" + item.entry.fileName
+                    if s.identities.contains(where: { $0.relativePath == relativePath }) { continue }
+                    guard s.nextMediaId > 0, s.nextMediaId < Int64.max else { break }
+                    let id = s.nextMediaId
+                    s.nextMediaId = id + 1
+                    s.identities.append(LibraryIdentity(
+                        mediaId: id,
+                        relativeDirectory: item.entry.relativeDirectory,
+                        fileName: item.entry.fileName,
+                        sizeBytes: item.entry.sizeBytes,
+                        durationMs: item.probe.durationMs,
+                        width: item.probe.width,
+                        height: item.probe.height,
+                        addedAtMs: item.entry.createdAtMs > 0
+                            ? item.entry.createdAtMs
+                            : LibraryFileStore.currentTimeMilliseconds(),
+                        modifiedAtMs: item.entry.modifiedAtMs
+                    ))
+                    adopted += 1
+                }
+            }
+            return adopted
+        } catch {
+            MediaLibraryLog.error("批量补入库失败（\(prepared.count) 个文件）：\(error)")
+            return 0
+        }
+    }
+
     /// 改名后把身份行重绑到新名（保留 mediaId ⇒ 标签/系列不失联）。
-    func remapIdentity(oldRelativePath: String, newEntry: MediaFileEntry) {
+    /// 落盘失败必须抛给调用方：文件已改名而索引没跟上时，调用方要回滚改名。
+    func remapIdentity(oldRelativePath: String, newEntry: MediaFileEntry) throws {
         let newRelativePath = newEntry.relativeDirectory + "/" + newEntry.fileName
-        try? indexStore.apply { s in
+        try indexStore.apply { s in
             for index in s.identities.indices where s.identities[index].relativePath == oldRelativePath {
                 s.identities[index].fileName = newEntry.fileName
                 s.identities[index].relativeDirectory = newEntry.relativeDirectory

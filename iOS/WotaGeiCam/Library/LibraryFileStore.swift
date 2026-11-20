@@ -362,6 +362,12 @@ final class LibraryFileStore {
             throw MediaFileError.invalidName(rawName)
         }
         let newName = MediaStorageLayout.ensuringSuffix(sanitized, like: entry.fileName)
+        // 改名后仍必须是本工程自有成片形态（不能把 VID_x.mp4 改成 foo.mp4）：
+        // 否则 `isOwned` 会拒绝它，永久删除会清索引却删不掉字节。
+        guard MediaStorageLayout.isOwnedVideoFileName(newName),
+              !MediaPendingName.isPendingMarked(newName) else {
+            throw MediaFileError.invalidName(rawName)
+        }
         let directoryURL = entry.url.deletingLastPathComponent()
         let destination = directoryURL.appendingPathComponent(newName, isDirectory: false)
 

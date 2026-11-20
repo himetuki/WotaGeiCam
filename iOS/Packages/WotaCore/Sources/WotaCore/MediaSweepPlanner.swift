@@ -25,7 +25,7 @@ public struct MediaSweepPlan {
 /// | 非 pending 形态 | 名字剥段后没变 | `.leave`（不是我们的东西） |
 /// | 任何 | 比门槛新 | `.leave`（可能是正在录的那一段） |
 /// | 侧车 `.drops.json` | 剥段后同名档案已在 | `.deleteArchive`（重复档案，纯档案无数据损失） |
-/// | 侧车 `.drops.json` | 对应成片找得到 | `.renameArchive`（归位到成片真实名 + 扩展名） |
+/// | 侧车 `.drops.json` | 对应成片找得到 | `.renameArchive`（归位到 `sidecarFileName` 规范名） |
 /// | 侧车 `.drops.json` | 对应成片也找不到 | `.deleteArchive`（无主档案） |
 /// | 成片 | 剥段后同名成片已在 | `.leave`（数据红线：成片绝不删） |
 /// | 成片 | 容器打不开（或未探） | `.leave`（半截 MP4 一动不动，连名字都不动） |
@@ -64,7 +64,12 @@ public enum MediaSweepPlanner {
         if clean.hasSuffix(MediaStorageLayout.sidecarExtension) {
             if cleanTwinExists { return MediaSweepPlan(action: .deleteArchive, targetName: nil) }
             if let clip = clipName {
-                return MediaSweepPlan(action: .renameArchive, targetName: clip + MediaStorageLayout.sidecarExtension)
+                // 目标必须走唯一命名口径（剥掉成片扩展名再加 `.drops.json`）。
+                // 旧写法 `clip + ".drops.json"` 会拼出 `VID_x.mp4.drops.json`，读取侧永远找不到。
+                return MediaSweepPlan(
+                    action: .renameArchive,
+                    targetName: MediaStorageLayout.sidecarFileName(forVideoFileName: clip)
+                )
             }
             return MediaSweepPlan(action: .deleteArchive, targetName: nil)
         }
@@ -76,7 +81,8 @@ public enum MediaSweepPlanner {
 
     /// 档案「重复件」判据（纯函数），与 Android `archiveTwinExists` 对齐。
     ///
-    /// 必须看真实归位目标 `targetName`（`clipName + ".drops.json"`），不能只看「剥段后的档案名」：
+    /// 必须看真实归位目标 `targetName`（`MediaStorageLayout.sidecarFileName(forVideoFileName:)`），
+/// 不能只看「剥段后的档案名」：
     /// 两者不一致（幽灵档案少 `.mp4` 段）时，旧判据查不到目标已存在，rename 会把有效档案覆盖掉。
     public static func archiveTwinExists(
         archiveName: String,

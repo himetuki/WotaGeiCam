@@ -201,7 +201,7 @@ struct LibraryIndexState {
         var state = LibraryIndexState()
         state.identities = (dict["identities"] as? [Any])?.compactMap {
             ($0 as? [String: Any]).flatMap(LibraryIdentity.from)
-        } ?? []
+        }?.filter { $0.mediaId > 0 && $0.mediaId < Int64.max } ?? []
         state.tags = (dict["tags"] as? [Any])?.compactMap {
             ($0 as? [String: Any]).flatMap(LibraryTag.from)
         } ?? []
@@ -218,7 +218,9 @@ struct LibraryIndexState {
         state.nextMediaId = LibraryIndexJSON.int64(dict["nextMediaId"]) ?? 1
         if state.nextMediaId < 1 { state.nextMediaId = 1 }
         // 防御：把 nextMediaId 顶到已有 id 之上，避免手改/坏档导致 id 复用。
-        if let maxId = state.identities.map({ $0.mediaId }).max(), state.nextMediaId <= maxId {
+        // `maxId + 1` 只在安全范围内计算；真正分配时（adopt）还会再挡一次 Int64.max。
+        if let maxId = state.identities.map({ $0.mediaId }).max(),
+           maxId < Int64.max, state.nextMediaId <= maxId {
             state.nextMediaId = maxId + 1
         }
         return state

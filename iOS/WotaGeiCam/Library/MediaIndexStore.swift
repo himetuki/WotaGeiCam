@@ -20,6 +20,11 @@ final class MediaIndexStore {
     private let lock = NSLock()
     private var state: LibraryIndexState = .empty
     private var loaded = false
+    /// 索引存在但本次读不出来（瞬时 I/O 失败）时的原因；`loaded` 保持 false，
+    /// 下一次访问会重试，且 `apply` 拒绝写入，避免用空状态覆盖原索引。
+    private var loadFailure: String?
+    /// 索引已确认损坏但备份失败：原文件仍在，禁止任何写入覆盖它。
+    private var writeBlocked = false
 
     init(paths: MediaLibraryPaths) {
         self.paths = paths
@@ -38,6 +43,12 @@ final class MediaIndexStore {
         lock.lock()
         defer { lock.unlock() }
         loadLockedIfNeeded()
+        guard loaded else {
+            throw MediaIndexError.persistFailed(loadFailure ?? "索引读取失败，已停止写入以保护原文件")
+        }
+        guard !writeBlocked else {
+            throw MediaIndexError.persistFailed(loadFailure ?? "索引损坏且备份失败，已停止写入以保护原文件")
+        }
         let previous = state
         var next = state
         transform(&next)
@@ -55,30 +66,63 @@ final class MediaIndexStore {
 
     private func loadLockedIfNeeded() {
         if loaded { return }
-        loaded = true
         let url = paths.indexFileURL
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: url.path) else {
             state = .empty
+            loaded = true
+            loadFailure = nil
             return
         }
+
+        // 读取失败 ≠ 格式损坏：瞬时 I/O 失败必须保留旧文件并允许重试，
+        // 不能按坏索引备份后从空状态重建（那会永久丢掉标签/回收站/系列）。
+        let data: Data
         do {
-            let data = try Data(contentsOf: url)
-            let object = try JSONSerialization.jsonObject(with: data, options: [])
-            if let parsed = LibraryIndexState.from(object) {
-                state = parsed
-            } else {
-                backUpCorruptIndex(reason: "顶层结构不符")
-                state = .empty
-            }
+            data = try Data(contentsOf: url)
         } catch {
-            // 坏索引：改名备份后从空索引重建；媒体文件不动。
-            backUpCorruptIndex(reason: "\(error)")
+            loadFailure = "索引读取失败：\(error)"
+            MediaLibraryLog.error("索引读取失败，保留原文件待重试：\(error)")
+            return
+        }
+
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data, options: [])
+        } catch {
+            handleCorruptIndex(reason: "\(error)")
+            return
+        }
+        guard let parsed = LibraryIndexState.from(object) else {
+            handleCorruptIndex(reason: "顶层结构不符")
+            return
+        }
+        state = parsed
+        loaded = true
+        loadFailure = nil
+        writeBlocked = false
+    }
+
+    /// 已确认格式损坏：先备份再重建。备份失败时保留原文件并禁止写入。
+    private func handleCorruptIndex(reason: String) {
+        if backUpCorruptIndex(reason: reason) {
             state = .empty
+            loaded = true
+            loadFailure = nil
+            writeBlocked = false
+        } else {
+            state = .empty
+            loaded = true
+            writeBlocked = true
+            loadFailure = "索引损坏且备份失败（\(reason)），已停止写入以保护原文件"
+            MediaLibraryLog.error(loadFailure ?? "索引损坏且备份失败")
         }
     }
 
     private func persistLocked(_ state: LibraryIndexState) throws {
+        if writeBlocked {
+            throw MediaIndexError.persistFailed(loadFailure ?? "索引损坏且备份失败，禁止覆盖原文件")
+        }
         let fileManager = FileManager.default
         let directory = paths.privateDirectoryURL
         if !fileManager.fileExists(atPath: directory.path) {
@@ -101,10 +145,11 @@ final class MediaIndexStore {
         }
     }
 
-    private func backUpCorruptIndex(reason: String) {
+    @discardableResult
+    private func backUpCorruptIndex(reason: String) -> Bool {
         let fileManager = FileManager.default
         let url = paths.indexFileURL
-        guard fileManager.fileExists(atPath: url.path) else { return }
+        guard fileManager.fileExists(atPath: url.path) else { return true }
         let backup = paths.corruptIndexBackupURL(timestampMs: MediaIndexStore.currentTimeMilliseconds())
         do {
             if fileManager.fileExists(atPath: backup.path) {
@@ -112,8 +157,10 @@ final class MediaIndexStore {
             }
             try fileManager.moveItem(at: url, to: backup)
             MediaLibraryLog.error("索引损坏（\(reason)），已备份到 \(backup.lastPathComponent) 并从空索引重建；媒体文件未改动")
+            return true
         } catch {
             MediaLibraryLog.error("索引损坏且备份失败（\(reason)）：\(error)")
+            return false
         }
     }
 

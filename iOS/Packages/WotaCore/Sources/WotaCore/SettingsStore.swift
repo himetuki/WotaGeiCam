@@ -241,7 +241,9 @@ public final class WotaSettingsStore {
         return MotionMode.parse(name: storedString(WotaSettingsKeys.motionMode))
     }
     public func defaultSampleRate() -> Int {
-        return storedInt(WotaSettingsKeys.defaultSampleRate, WotaTiers.defaultSampleRate)
+        return WotaTiers.clampSampleRate(
+            storedInt(WotaSettingsKeys.defaultSampleRate, WotaTiers.defaultSampleRate)
+        )
     }
     public func defaultRenderMode() -> RenderMode {
         return storedString(WotaSettingsKeys.defaultRenderMode) == RenderMode.direct.rawValue ? .direct : .gpu

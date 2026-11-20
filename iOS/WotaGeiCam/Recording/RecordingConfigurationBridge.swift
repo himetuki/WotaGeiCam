@@ -272,15 +272,7 @@ struct RecordingConfigurationBridge {
     }
 
     private static func nearestSampleRate(to sampleRate: Int) -> Int {
-        var best = RecordingTiers.defaultAudioSampleRate
-        var distance = Int.max
-        for tier in RecordingTiers.audioSampleRates {
-            let current = Swift.abs(tier - sampleRate)
-            if current < distance {
-                distance = current
-                best = tier
-            }
-        }
-        return best
+        // 用共享的 Int64 距离实现，armv7 上也不会因 `Int32.min` 溢出。
+        return WotaTiers.clampSampleRate(sampleRate)
     }
 }
