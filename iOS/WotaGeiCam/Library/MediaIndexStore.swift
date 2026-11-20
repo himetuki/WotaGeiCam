@@ -97,10 +97,44 @@ final class MediaIndexStore {
             handleCorruptIndex(reason: "顶层结构不符")
             return
         }
+        // 顶层可解析但个别行缺字段时，`from` 会丢弃坏行；先复制一份原始索引留证，
+        // 避免下一次 apply 把清洗后的状态写回、坏行对应元数据永久消失。
+        if indexRowsWereDropped(object, parsed: parsed) {
+            preserveRawIndexCopy(reason: "部分索引行无法解析")
+        }
         state = parsed
         loaded = true
         loadFailure = nil
         writeBlocked = false
+    }
+
+    private func indexRowsWereDropped(_ object: Any, parsed: LibraryIndexState) -> Bool {
+        guard let dict = object as? [String: Any] else { return false }
+        func rawCount(_ key: String) -> Int {
+            return (dict[key] as? [Any])?.count ?? 0
+        }
+        return rawCount("identities") != parsed.identities.count
+            || rawCount("tags") != parsed.tags.count
+            || rawCount("trash") != parsed.trash.count
+            || rawCount("series") != parsed.series.count
+            || rawCount("seriesParts") != parsed.seriesParts.count
+    }
+
+    /// 原文件仍在（只复制不留空窗）：坏行证据保留，后续写入仍走原子替换。
+    private func preserveRawIndexCopy(reason: String) {
+        let fileManager = FileManager.default
+        let url = paths.indexFileURL
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        let backup = paths.corruptIndexBackupURL(timestampMs: MediaIndexStore.currentTimeMilliseconds())
+        do {
+            if fileManager.fileExists(atPath: backup.path) {
+                try fileManager.removeItem(at: backup)
+            }
+            try fileManager.copyItem(at: url, to: backup)
+            MediaLibraryLog.error("索引\(reason)，原始副本已保存到 \(backup.lastPathComponent)；本次按可解析行继续")
+        } catch {
+            MediaLibraryLog.error("索引\(reason)，原始副本保存失败：\(error)")
+        }
     }
 
     /// 已确认格式损坏：先备份再重建。备份失败时保留原文件并禁止写入。
