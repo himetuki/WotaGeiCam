@@ -117,11 +117,11 @@ armv7 直接 `return nil`。运行期再叠加 `MTLCreateSystemDefaultDevice()` 
 累积面重建或 `resetEchoHistory()` 后会先用一次 clear pass 清黑两张乒乓面（累积趟只清写面，prev 面必须单独清），
 否则首帧会把未初始化/陈旧的 prev 面当历史叠加。
 
-Metal 着色器**运行期现场编译**：`.metal` 在当前经典工程里被 generator 收作**资源**而非编译源
-（`scripts/generate_project.py` 的 `SOURCE_EXTENSIONS={".swift"}`，**本任务不改脚本**），故后端经
-`device.makeLibrary(source:options:)` 编译文本；文本由 `EchoMetalShaders.source(in:)`
-（`Shaders/EchoMetalShaders.swift:15`）先读 bundle 内 `EchoKernels.metal`、缺失则回退内嵌源
-（`embeddedSource` `:27`，与资源逐字一致）。后续若把 `.metal` 接入构建输，本文件可直接编译、后端无需改。
+Metal 着色器**运行期现场编译**：经典工程不把 `.metal` 收进 Sources/Resources（Xcode 对 `.metal`
+有专门编译语义，放 Resources 不是可移植做法），故后端经 `device.makeLibrary(source:options:)`
+编译内嵌文本；文本由 `EchoMetalShaders.source()`（`Shaders/EchoMetalShaders.swift`）返回
+`embeddedSource`。`Rendering/Resources/EchoKernels.metal` 是供审阅的参考副本，
+`check_project.py` 校验两者逐行一致，避免双份漂移。
 
 ### 5.2 OpenGL ES 2（iOS 10 / iPhone 5 可用）
 
@@ -247,8 +247,8 @@ P1-05 审查（`docs/reviews/ios2026-11-19/P1-05-opengles-backend.md`）修复�
   以上均为**源码级修复**，无 Apple 工具链验证，不声称编译通过。
 - **静态核对**：`WotaCore/RenderEchoParameters.swift` 与 `ArcMergeParameters.swift` 逐项复核域钳、复合串
   解码、派生量与死区选择，**未发现确证缺陷**，本轮未改动。`Rendering/**` 内未使用 iOS 13+ 或 iOS 10 之外 API。
-- **.metal 唯一性**：`iOS/` 内仅有 `Rendering/Resources/EchoKernels.metal` 一个 `.metal` 文件，被
-  `EchoMetalShaders.source(in:)` 引用（构建未收纳时回退内嵌源）；未发现重复或无引用的 `.metal`，无需主代理处理。
+- **.metal 唯一性**：`iOS/` 内仅有 `Rendering/Resources/EchoKernels.metal` 一个 `.metal` 参考副本，
+  运行期不读取它（只使用 `EchoMetalShaders.embeddedSource`）；`check_project.py` 校验参考副本与内嵌源一致。
 - 已做的静态核对：`python -I iOS/scripts/check_project.py` 对本层新文件**无禁令牌命中**
   （`import SwiftUI`/`Combine`/`@MainActor`/`UTType`/` await `/`Task {` 等 FORBIDDEN_TOKENS 均未出现在
   Render/Glow/Arc 文件中），无 `stance`。该脚本当前仅报「新 `.swift` 未被 Sources 阶段收录」与

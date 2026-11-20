@@ -484,13 +484,12 @@ public enum WotaRedirectProbe {
         return tag
     }
 
-    /// 段 3 无 JSON 资产列表，iPad universal 包名从 tag 推导（iOS 资产名后缀 `-iOS.ipa`）；
-    /// flavor 段只有一个，与 Android CI 命名规则同构。
+    /// 段 3 无 JSON 资产列表，IPA 名从 tag 推导。
+    /// 必须与 `.github/workflows/build-ipa.yml` 的实际产物一致：
+    /// `<prefix>-unsigned-iOS-WotaGeiCam-<Full-Modern|Lite-Modern>.ipa`（prefix 即 tag）。
     public static func guessUniversalAssetName(tag: String, flavor: String? = nil) -> String {
-        if flavor == "full" || flavor == "lite" {
-            return "WotaGeiCam-\(tag)-\(flavor!)-universal-release-iOS.ipa"
-        }
-        return "WotaGeiCam-\(tag)-universal-release-iOS.ipa"
+        let label = flavor == "lite" ? "Lite-Modern" : "Full-Modern"
+        return "\(tag)-unsigned-iOS-WotaGeiCam-\(label).ipa"
     }
 }
 

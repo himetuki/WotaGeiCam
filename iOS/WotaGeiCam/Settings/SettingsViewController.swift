@@ -21,6 +21,11 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
         @objc func fired(_ sender: UIControl) { handler(sender) }
     }
 
+    /// 可复用设置行：target 挂在 cell 上，随 cell 一起释放；不再用全局数组无界累积。
+    private final class SettingsCell: UITableViewCell {
+        var controlTarget: ControlTarget?
+    }
+
     private enum RowKind {
         case value(String)
         case disclosure
@@ -41,7 +46,6 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
     }
 
     private var sections: [Section] = []
-    private var targets: [ControlTarget] = []
 
     /// 文档导入在后台串行执行：安全作用域 + 最多 4 MiB 的读取可能触及 iCloud/第三方 provider，
     /// 不能阻塞主线程；UserDefaults 本身线程安全，结果统一回主线程更新 UI。
@@ -59,7 +63,6 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        targets.removeAll()
         tableView.reloadData()
     }
 
@@ -303,7 +306,10 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let row = sections[indexPath.section].rows[indexPath.row]
-        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+        let cell = (tableView.dequeueReusableCell(withIdentifier: "SettingsCell") as? SettingsCell)
+            ?? SettingsCell(style: .value1, reuseIdentifier: "SettingsCell")
+        // 复用前先断开旧 target；随后按本行重新挂一个，生命周期与 cell 绑定。
+        cell.controlTarget = nil
         cell.textLabel?.text = row.title
         cell.accessoryView = nil
         cell.accessoryType = .none
@@ -325,7 +331,7 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
                 set(switchView.isOn)
             }
             toggle.addTarget(target, action: #selector(ControlTarget.fired(_:)), for: .valueChanged)
-            targets.append(target)
+            cell.controlTarget = target
             cell.accessoryView = toggle
 
         case .stepper(let get, let minimum, let maximum, let step, let set, let format):
@@ -341,7 +347,7 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
                 cell?.detailTextLabel?.text = format(stepperView.value)
             }
             stepper.addTarget(target, action: #selector(ControlTarget.fired(_:)), for: .valueChanged)
-            targets.append(target)
+            cell.controlTarget = target
             cell.accessoryView = stepper
 
         case .segmented(let titles, let selected, let set):
@@ -352,7 +358,7 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
                 set(seg.selectedSegmentIndex)
             }
             control.addTarget(target, action: #selector(ControlTarget.fired(_:)), for: .valueChanged)
-            targets.append(target)
+            cell.controlTarget = target
             cell.accessoryView = control
         }
 
@@ -456,7 +462,6 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
                 // 标签按跨端指纹在媒体库里重绑；设置已经落盘，标签失败不回滚设置。
                 MediaLibrary.shared.restoreBackupTags(result.tags) { [weak self] restoredTags in
                     guard let self = self else { return }
-                    self.targets.removeAll()
                     self.tableView.reloadData()
                     let tagsText = result.tags.isEmpty
                         ? ""

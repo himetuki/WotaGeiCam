@@ -6,23 +6,19 @@ import Foundation
 // 与 `EchoGLESShaders` 同源、同语义、**同样不是** Android `Shaders.kt` 的翻译：
 // 输入/输出都是普通 `texture2d<float>`（BGRA8，来自 `CVPixelBuffer`），没有 OES/相机外部纹理。
 //
-// 运行期取源策略（老 SDK 兼容）：先尝试从 bundle 读 `EchoKernels.metal`（若后续经典工程把它编译进资源），
-// 读不到就用本文件内嵌的 `embeddedSource`。两条路文本一致 ⇒ 单一真源、不漂移。
+// 运行期取源策略：经典工程不把 `.metal` 收进 Sources/Resources（Xcode 对 `.metal` 有专门编译语义，
+// 放 Resources 不是可移植做法），因此**只使用内嵌 `embeddedSource`**。
+// `Rendering/Resources/EchoKernels.metal` 是供审阅的参考副本；`check_project.py` 校验两者逐行一致。
 // Metal 语法保持在 Metal 1.0 / iOS 10 档（`texture2d<T>`、无 `[[function_constant]]`、无 `texture2d<T>` 新 API）。
 
 enum EchoMetalShaders {
 
-    /// 优先读 bundle 内的 `EchoKernels.metal`，否则回退内嵌源。
-    static func source(in bundle: Bundle = .main) -> String {
-        if let url = bundle.url(forResource: "EchoKernels", withExtension: "metal"),
-           let text = try? String(contentsOf: url, encoding: .utf8),
-           !text.isEmpty {
-            return text
-        }
+    /// 运行期唯一源：内嵌文本（不再尝试读不存在的 bundle 资源）。
+    static func source() -> String {
         return embeddedSource
     }
 
-    /// 内嵌 Metal 源（与 `Rendering/Resources/EchoKernels.metal` 逐字一致）。
+    /// 内嵌 Metal 源（与 `Rendering/Resources/EchoKernels.metal` 逐行一致，由检查脚本钉住）。
     static let embeddedSource = """
     #include <metal_stdlib>
     using namespace metal;

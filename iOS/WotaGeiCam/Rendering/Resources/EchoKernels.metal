@@ -1,14 +1,3 @@
-// EchoKernels.metal —— WotaGeiCam iOS 回波 / 补弧 Metal 着色器（iOS 侧新写，非 Android 翻译）
-//
-// 语法固定在 Metal 1.0 / iOS 10 档：使用 texture2d<T>、stage_in、constant buffer；
-// 不使用 [[function_constant]]、不使用 Metal 2.0+ 的 texture2d 新接口。
-//
-// 本文件与 `WotaGeiCam/Rendering/Shaders/EchoMetalShaders.swift` 的内嵌源**逐字一致**。
-// 当前经典工程（iOS/scripts/generate_project.py）只把 .swift 收作编译源、其余扩展名收作资源，
-// 因此运行期由 `EchoMetalShaders.source(in:)` 读取本资源（或在缺失时回退内嵌源）后
-// 经 `MTLDevice.makeLibrary(source:options:)` 现场编译。后续若把 .metal 接入构建输，
-// 本文件即可直接编译，无需改动后端。
-
 #include <metal_stdlib>
 using namespace metal;
 

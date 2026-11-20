@@ -553,6 +553,32 @@ def main() -> int:
         if not balanced(strip_swift_comments(swift_file.read_text(encoding="utf-8"))):
             check(False, f"Swift 源括号不配对：{swift_file.relative_to(IOS_ROOT)}")
 
+    # Metal 参考副本必须与运行期内嵌源一致（经典工程不把 .metal 放进 Resources，
+    # 运行期只读 EchoMetalShaders.embeddedSource；两份文本靠本检查防漂移）。
+    metal_swift_path = IOS_ROOT / "WotaGeiCam/Rendering/Shaders/EchoMetalShaders.swift"
+    metal_ref_path = IOS_ROOT / "WotaGeiCam/Rendering/Resources/EchoKernels.metal"
+    if metal_swift_path.is_file() and metal_ref_path.is_file():
+        metal_swift = metal_swift_path.read_text(encoding="utf-8")
+        embedded_match = re.search(
+            r'static let embeddedSource = """\n(.*?)\n    """',
+            metal_swift,
+            re.DOTALL,
+        )
+        check(embedded_match is not None, "EchoMetalShaders 缺 embeddedSource 多行字符串")
+        if embedded_match is not None:
+            embedded_lines = [line.strip() for line in embedded_match.group(1).splitlines() if line.strip()]
+            reference_lines = [
+                line.strip()
+                for line in metal_ref_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            check(
+                embedded_lines == reference_lines,
+                "EchoMetalShaders.embeddedSource 与 EchoKernels.metal 参考副本不一致",
+            )
+    else:
+        check(False, "缺 EchoMetalShaders.swift 或 EchoKernels.metal")
+
     gitignore = (IOS_ROOT / ".gitignore").read_text(encoding="utf-8")
     for token in [".build/", "DerivedData/", "*.xcarchive", "*.ipa", "xcuserdata/"]:
         check(token in gitignore, f"iOS/.gitignore 缺 {token}")

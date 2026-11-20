@@ -294,9 +294,9 @@ final class MediaLibrary {
             var restored = 0
             do {
                 try self.indexStore.apply { s in
-                    var existing = Set(s.tags.map { "\($0.mediaId)\u{0}\($0.tag)" })
+                    var existing = Set(s.tags.map { String($0.mediaId) + "\u{0}" + $0.tag })
                     for row in pending {
-                        let key = "\(row.mediaId)\u{0}\(row.tag)"
+                        let key = String(row.mediaId) + "\u{0}" + row.tag
                         if existing.contains(key) { continue }
                         s.tags.append(row)
                         existing.insert(key)

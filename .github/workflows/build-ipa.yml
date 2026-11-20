@@ -62,13 +62,23 @@ jobs:
 
       - name: Resolve artifact prefix (tag 名或 branch-sha7)
         id: prefix
+        env:
+          # ref 由不可信输入（tag/branch 名）组成；只经 env 传给 shell，
+          # 绝不再以 `${{ }}` 形式拼进 run 脚本，避免命令注入。
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
-          PREFIX=""
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            PREFIX="${GITHUB_REF_NAME}"
+          if [[ "${REF}" == refs/tags/* ]]; then
+            PREFIX="${REF_NAME}"
           else
-            BRANCH="$(echo "${GITHUB_REF##*/}" | tr '/' '-')"
-            PREFIX="${GITHUB_SHA::7}-${BRANCH}"
+            BRANCH="${REF_NAME//\//-}"
+            PREFIX="${SHA:0:7}-${BRANCH}"
+          fi
+          # 白名单字符，防止空格/引号/反引号/命令替换进入后续路径。
+          PREFIX="$(printf '%s' "${PREFIX}" | tr -cd 'A-Za-z0-9._-')"
+          if [[ -z "${PREFIX}" ]]; then
+            PREFIX="${SHA:0:7}"
           fi
           echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
 
@@ -76,18 +86,22 @@ jobs:
         run: bash iOS/scripts/apple_archive.sh "${{ matrix.scheme }}" "${{ matrix.configuration }}"
 
       - name: Package unsigned IPA (Payload 回读校验后才落盘)
+        env:
+          PREFIX: ${{ steps.prefix.outputs.prefix }}
         run: |
           ARCHIVE="iOS/.build/Archives/${{ matrix.scheme }}-${{ matrix.configuration }}.xcarchive"
           APP="$ARCHIVE/Products/Applications/WotaGeiCam.app"
           bash iOS/scripts/package_unsigned_ipa.sh \
             --app "$APP" \
-            --output "iOS/.build/unsigned/${{ steps.prefix.outputs.prefix }}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
+            --output "iOS/.build/unsigned/${PREFIX}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
 
       - name: Collect SHA-256 sums
+        env:
+          PREFIX: ${{ steps.prefix.outputs.prefix }}
         run: |
           set -euo pipefail
           OUT_DIR="iOS/.build/unsigned"
-          IPA="$OUT_DIR/${{ steps.prefix.outputs.prefix }}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
+          IPA="$OUT_DIR/${PREFIX}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
           APP_DIR="$OUT_DIR/WotaGeiCam-${{ matrix.label }}.app"
           cp -R "iOS/.build/Archives/${{ matrix.scheme }}-${{ matrix.configuration }}.xcarchive/Products/Applications/WotaGeiCam.app" "$APP_DIR"
           EXEC_NAME="$(plutil -extract CFBundleExecutable raw "$APP_DIR/Info.plist")"
