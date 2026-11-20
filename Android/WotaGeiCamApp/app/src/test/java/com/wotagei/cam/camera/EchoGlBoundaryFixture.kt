@@ -60,14 +60,33 @@ internal class EchoGlBoundaryFixture(classes: File, parent: ClassLoader) : Close
     }
 
     /** 公开 draw 是缺陷复现入口；没有在调用前偷偷给生产 RT 清零。 */
-    fun draw(w: Int = 8, h: Int = 6, trail: Boolean = false, rotated: Boolean = false): Boolean {
+    fun draw(
+        w: Int = 8,
+        h: Int = 6,
+        trail: Boolean = false,
+        rotated: Boolean = false,
+        decay: Float = 0.8f,
+        threshold: Float = 0.8f,
+        trailMask: Int = 0,
+        tintR: Float = 1f,
+        tintG: Float = 1f,
+        tintB: Float = 1f,
+        tol: Float = 0.1f
+    ): Boolean {
         val matrix = if (rotated) {
             floatArrayOf(0f, 1f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 0f, 0f, 1f)
         } else {
             floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)
         }
-        return call("draw", 77, matrix, uv, w, h, 1, 0.8f, trail, 0.8f, 0, 1f, 1f, 1f, 0.1f) as Boolean
+        return call(
+            "draw", 77, matrix, uv, w, h, 1, decay, trail, threshold, trailMask,
+            tintR, tintG, tintB, tol
+        ) as Boolean
     }
+
+    /** Y13：最近一次真实 draw 写进累积 uniform 的标量（按 uniform 名查）。 */
+    fun uniformFloat(name: String): Float = gl("probeUniformFloat", name) as Float
+    fun uniformVec3(name: String): List<Float> = (gl("probeUniformVec3", name) as FloatArray).toList()
 
     /** 单独执行真实分配，以便检查首个 draw 之前两张存储；不写 accTex/accFbo/accIdx。 */
     fun allocate(w: Int = 8, h: Int = 6): Boolean = call("ensureRenderTarget", w, h) as Boolean
@@ -203,6 +222,8 @@ internal class EchoGlBoundaryFixture(classes: File, parent: ClassLoader) : Close
                     static final Map<Integer,Map<Integer,Integer>> bindings=new HashMap<>();
                     static final Map<Integer,Program> programs=new HashMap<>();
                     static final Map<Integer,Integer> uniformInts=new HashMap<>();
+                    static final Map<Integer,Float> uniformFloats=new HashMap<>();
+                    static final Map<Integer,float[]> uniformVec3s=new HashMap<>();
                     static final List<Integer> samples=new ArrayList<>(), writes=new ArrayList<>();
                     static final Set<Integer> fbos=new HashSet<>();
                     static int nextId=100, nextLocation=1, framebuffer=0, program=0, active=TEXTURE0;
@@ -261,8 +282,26 @@ internal class EchoGlBoundaryFixture(classes: File, parent: ClassLoader) : Close
                     }
                     public static int glGetAttribLocation(int id,String name) { return name.equals("aPosition") ? 0 : 1; }
                     public static void glUniform1i(int location,int value) { uniformInts.put(location,value); }
-                    public static void glUniform1f(int location,float value) {}
-                    public static void glUniform3f(int location,float r,float g,float b) {}
+                    public static void glUniform1f(int location,float value) { uniformFloats.put(location,value); }
+                    public static void glUniform3f(int location,float r,float g,float b) {
+                        uniformVec3s.put(location,new float[]{r,g,b});
+                    }
+                    static Integer uniformLocation(String name) {
+                        for(Program p:programs.values()) {
+                            Integer loc=p.locations.get(name);
+                            if(loc!=null) return loc;
+                        }
+                        return null;
+                    }
+                    public static float probeUniformFloat(String name) {
+                        Integer loc=uniformLocation(name);
+                        return loc==null ? Float.NaN : uniformFloats.getOrDefault(loc,Float.NaN);
+                    }
+                    public static float[] probeUniformVec3(String name) {
+                        Integer loc=uniformLocation(name);
+                        return loc==null ? new float[]{Float.NaN,Float.NaN,Float.NaN}
+                            : uniformVec3s.getOrDefault(loc,new float[]{Float.NaN,Float.NaN,Float.NaN});
+                    }
                     public static void glUniformMatrix4fv(int location,int count,boolean transpose,float[] value,int offset) {}
                     public static void glUseProgram(int id) { program=id; }
                     public static void glDeleteProgram(int id) { programs.remove(id); }

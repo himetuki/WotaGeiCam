@@ -41,6 +41,20 @@ class OfflineGlCompatibilityBridgeTest {
     }
 
     @Test
+    fun `Y11 合成趟有GL错误时本帧必须判未发出且不swap`() = platform { p ->
+        val gl = p.gl(scene = true)
+        // 初始化已排空；现在注入一枚 GL_INVALID_ENUM，让最终合成趟后的 drain 看见错误。
+        p.script("glErrorCount", 1)
+        assertFalse("有 GL 错误的帧绝不能当成功帧", p.call(gl, "render", 33_333L) as Boolean)
+        assertEquals("错误必须在打戳前拦截", 0, p.script("stampCalls"))
+        assertEquals("坏帧不得 swap 进容器", 0, p.script("swapCalls"))
+        assertTrue(
+            "必须留下可排查的告警：${p.events}",
+            p.events.any { it.contains("GL 绘制有错") }
+        )
+    }
+
+    @Test
     fun `B03 Scene打戳成功但swap失败仍不是成功帧`() = platform { p ->
         p.script("swapOk", false)
         assertFalse(p.call(p.gl(scene = true), "render", 33_333L) as Boolean)

@@ -24,6 +24,7 @@ import com.wotagei.cam.core.WotaTag
 import com.wotagei.cam.core.dumpLenses
 import com.wotagei.cam.core.enumerateLenses
 import com.wotagei.cam.core.pickCapabilityDefault
+import com.wotagei.cam.core.resolveLensSlot
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -700,10 +701,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             }
         }
         // 先认槽位（同档位多颗时才准），再退到档位名，最后退到列表首颗
-        return lensSlots.firstOrNull { it.key == chosenSlotKey }
-            ?: lensSlots.firstOrNull { it.type == params.lens.value }
-            ?: lensSlots.firstOrNull { it.type == LensType.WIDE }
-            ?: lensSlots.firstOrNull()
+        return resolveLensSlot(lensSlots, chosenSlotKey, params.lens.value)
     }
 
     /** 切镜头 = 整套能力换挡：重收 range 并回填默认值 */

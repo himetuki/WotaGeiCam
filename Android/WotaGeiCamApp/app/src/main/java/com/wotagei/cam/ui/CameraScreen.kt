@@ -829,21 +829,15 @@ fun CameraScreen(
     // 「相机活着、屏幕全黑」这一档的**唯一**出路：承载视图整体重建 ⇒ 新 TextureView ⇒ 新
     // SurfaceTexture ⇒ 引擎重接窗口面。重启预览/重建引擎都动不到这条链（相机本来就在出帧）。
     // 请求来自两处看门狗（页面内 + Activity 级），这里只负责把它落成一次视图重建。
-    var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }
+    val reattachEpoch = remember(activeSink) { ReattachEpoch { SystemClock.elapsedRealtime() } }
     // 键必须带 activeSink（Y52）：GPU↔DIRECT 切换后旧收集器若继续存活，重挂请求会把
     // 计数/日志写进**旧持有者**，新建承载视图的纪元不推进（画面仍是黑的）。收集器与
     // 计数持有者同键 ⇒ 换 sink 时旧协程取消、新协程以新持有者起步，600ms 限频窗口也随
     // 持有者重来（换面本身就是一次重建，不该被上一面的限频吞掉）。
     LaunchedEffect(ctrl, activeSink) {
-        // 限频 600ms：swap 连环失败时（挂上又立刻失败）不至于无限重建视图；
-        // 连环失败的最终兜底仍是看门狗的 forceRebind
-        var lastAt = 0L
         ctrl.displayReattach.collect {
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastAt < 600L) return@collect
-            lastAt = now
-            Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${surfaceEpoch + 1}")
-            surfaceEpoch++
+            if (!reattachEpoch.request()) return@collect
+            Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${reattachEpoch.epoch}")
         }
     }
 
@@ -1097,7 +1091,8 @@ fun CameraScreen(
     // Y56 同款：能力枚举完成/换镜头会改 focusUsable，而点按手势层同样只捕获首帧闭包——
     // 直接读 `focusUsable` 会让"首帧能力未知（默认可用）"固化，定焦镜头上点焦照发。
     // 装进稳定持有者后闭包现读，切镜头/枚举完成即生效。
-    val focusUsableNow by rememberUpdatedState(focusUsable)
+    val focusUsableLatest = remember { LatestBoolean(focusUsable) }
+    focusUsableLatest.update(focusUsable)
     /** 普通点焦三处写点共用：记最近点按处 + 先置 null 再写（StateFlow 去重会吞同一点重触） */
     val focusTapAt: (TapPoint) -> Unit = { point ->
         lastFocusTap = point
@@ -1639,7 +1634,7 @@ fun CameraScreen(
             ) {
                 // 承载视图按 surfaceEpoch 重建（上屏面重挂自愈）：换 key = 换 TextureView，
                 // 新 SurfaceTexture 会让引擎重接窗口面——黑屏里"相机活着、屏不换帧"的唯一出路
-                key(surfaceEpoch) {
+                key(reattachEpoch.epoch) {
                     CameraSurface(
                         mode = renderMode,
                         sink = activeSink,
@@ -1685,7 +1680,7 @@ fun CameraScreen(
                         .tapFocus(
                             onTap = { point ->
                                 when {
-                                    !focusUsableNow -> Unit
+                                    !focusUsableLatest.value -> Unit
                                     // 锁定期轻触不重焦（防误触字面要求）：首次轻触给一句提示
                                     focusLocked -> showLockedTapTip()
                                     else -> focusTapAt(point)
@@ -1693,7 +1688,7 @@ fun CameraScreen(
                             },
                             onDoubleTap = { point ->
                                 when {
-                                    !focusUsableNow -> Unit
+                                    !focusUsableLatest.value -> Unit
                                     // 锁定期双击按轻触同款处理（不重焦、给提示）；未锁时是该点锁定入口
                                     focusLocked -> showLockedTapTip()
                                     else -> lockFocusAt(point)

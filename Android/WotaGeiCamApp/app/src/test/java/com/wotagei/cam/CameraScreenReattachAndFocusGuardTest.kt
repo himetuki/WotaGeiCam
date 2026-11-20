@@ -34,7 +34,15 @@ class CameraScreenReattachAndFocusGuardTest {
         )
         assertTrue(
             "计数持有者必须按 activeSink 重建（与收集器同键），换 sink 后旧计数不再被改写",
-            flat.contains("var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }")
+            flat.contains("val reattachEpoch = remember(activeSink) { ReattachEpoch")
+        )
+        assertTrue(
+            "收集器必须通过新持有者推进（旧 sink 的迟到请求只动旧纪元）",
+            flat.contains("reattachEpoch.request()")
+        )
+        assertTrue(
+            "承载视图必须按新持有者的纪元重建",
+            flat.contains("key(reattachEpoch.epoch)")
         )
     }
 
@@ -43,9 +51,9 @@ class CameraScreenReattachAndFocusGuardTest {
     @Test
     fun `点按对焦的可用性判据走 rememberUpdatedState`() {
         assertTrue(
-            "focusUsable 必须装进 rememberUpdatedState（Y56）：pointerInput(Unit) 只捕获首帧闭包，" +
+            "focusUsable 必须装进稳定持有者（Y56）：pointerInput(Unit) 只捕获首帧闭包，" +
                 "直接读组合期 Boolean 会把默认可用固化",
-            flat.contains("val focusUsableNow by rememberUpdatedState(focusUsable)")
+            flat.contains("val focusUsableLatest = remember { LatestBoolean(focusUsable) }")
         )
     }
 
@@ -56,8 +64,8 @@ class CameraScreenReattachAndFocusGuardTest {
         val start = flat.indexOf(".tapFocus(")
         assertTrue("点按/双击手势必须仍挂在预览容器上", start >= 0)
         val gesture = flat.substring(start, minOf(flat.length, start + 900))
-        val nowReads = Regex("!focusUsableNow -> Unit").findAll(gesture).count()
-        assertEquals("轻触与双击必须各自现读 focusUsableNow（共 2 处）", 2, nowReads)
+        val nowReads = Regex("!focusUsableLatest.value -> Unit").findAll(gesture).count()
+        assertEquals("轻触与双击必须各自现读 focusUsableLatest（共 2 处）", 2, nowReads)
         assertFalse(
             "旧的组合期快照分支不许留在手势回调里",
             gesture.contains("!focusUsable -> Unit")

@@ -53,8 +53,6 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.CameraController
-import com.wotagei.cam.camera.CameraPulse
-import com.wotagei.cam.camera.CameraWatchClock
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.ClipRule
@@ -220,97 +218,50 @@ class MainActivity : ComponentActivity() {
         if (ctrl == null) return
         if (previewWatchJob?.isActive == true) return
         previewWatchJob = lifecycleScope.launch {
-            // Y07：判活基准必须与帧计数同代读出。引擎换代（bind/forceRebind 新建引擎）时
-            // 计数从 0 起步，旧实现只比 `cam != camLast` 会把 0 当成"涨了"，误判活着、
-            // 把自愈基准往后推 —— 新引擎实际一帧没出也会被当成有进展。
-            val clock = CameraWatchClock(SystemClock.elapsedRealtime())
-            var dispLast = -1L
-            var dispGrowAtMs = SystemClock.elapsedRealtime()
-            var restarted = false
-            var reattachTries = 0
+            // Y07/R04：判活状态机见 PreviewWatchdog（录制窗口内只推平计时，不拆会话）。
+            val watchdog = PreviewWatchdog(SystemClock.elapsedRealtime())
             while (isActive) {
                 delay(1000)
                 if (watchRoute != ROUTE_CAMERA) break
                 val nowMs = SystemClock.elapsedRealtime()
                 // 只在真正可见时判（后台/其它页不算）
                 if (lifecycle.currentState != Lifecycle.State.RESUMED) {
-                    clock.arm(nowMs)
-                    dispGrowAtMs = nowMs
-                    restarted = false
-                    reattachTries = 0
+                    watchdog.hold(nowMs)
                     continue
                 }
                 // 组合不在场 = 整窗黑（连 UI 都没了）：相机侧的任何自愈都没有意义，
                 // 交给 armCompositionGuard 统一处理，这里直接跳过判活。
                 if (composedRoute != ROUTE_CAMERA) continue
-                // R04：录制窗口（含 PREPARE/换段）内不得在底下拆会话或重建引擎——编码器已拿面，
-                // 重建会把在写的段变成零帧/坏段。窗口期间只把计时器推平；结束后重新计满再介入。
-                if (ctrl.isRecordingActive()) {
-                    clock.arm(nowMs)
-                    dispGrowAtMs = nowMs
-                    restarted = false
-                    reattachTries = 0
-                    continue
-                }
-                val health = ctrl.cameraHealth()
-                val cam = health?.frameCount
-                when (clock.observe(health, nowMs)) {
-                    // 换代（含首次采样）：只是重建基线，**0 帧不算进展**。
-                    CameraPulse.REBASED -> {
-                        dispGrowAtMs = nowMs
-                        restarted = false
-                    }
-                    // 本代第一帧：真的出图了，上屏判据从这一刻启用。
-                    CameraPulse.FIRST_FRAMES -> {
-                        dispGrowAtMs = nowMs
-                        restarted = false
-                    }
-                    CameraPulse.ADVANCED -> restarted = false
-                    CameraPulse.STILL -> Unit
-                }
-                val disp = ctrl.displayFrameCount()
-                if (disp != null && disp != dispLast) {
-                    dispLast = disp
-                    dispGrowAtMs = nowMs
-                    reattachTries = 0
-                }
-                val camDeadMs = nowMs - clock.grewAtMs
-                if (camDeadMs >= 4_000L) {
-                    if (cam == null) {
+                when (val tick = watchdog.tick(
+                    nowMs,
+                    ctrl.isRecordingActive(),
+                    ctrl::cameraHealth,
+                    ctrl::displayFrameCount
+                )) {
+                    PreviewWatchTick.None -> Unit
+                    PreviewWatchTick.RebindMissingEngine -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：引擎不在 ⇒ 重新绑定")
                         ctrl.currentSink()?.let { ctrl.bind(it) }
-                        clock.arm(nowMs)
-                        dispGrowAtMs = nowMs
-                    } else if (!restarted) {
-                        restarted = true
-                        Log.w("WotaWatch", "Activity 级预览自愈：${camDeadMs}ms 无相机帧 ⇒ 重启预览")
+                    }
+                    is PreviewWatchTick.RestartPreview -> {
+                        Log.w("WotaWatch", "Activity 级预览自愈：${tick.deadMs}ms 无相机帧 ⇒ 重启预览")
                         ctrl.restartPreview()
-                        dispGrowAtMs = nowMs
-                    } else if (camDeadMs >= 10_000L) {
+                    }
+                    PreviewWatchTick.RebindStuckEngine -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        clock.arm(nowMs)
-                        dispGrowAtMs = nowMs
-                        restarted = false
                     }
-                    continue
-                }
-                // 上屏侧：相机在出帧而屏上不换帧（r31 的盲区）——重启相机没用，只能重挂面
-                if (disp != null && clock.everSawFrames && nowMs - dispGrowAtMs >= 2_500L) {
-                    reattachTries++
-                    Log.w(
-                        "WotaWatch",
-                        "Activity 级预览自愈：相机在出帧但上屏无帧 ${nowMs - dispGrowAtMs}ms" +
-                            "（hasSurface=${ctrl.hasDisplaySurface()} 第${reattachTries}次）⇒ 重挂显示面"
-                    )
-                    dispGrowAtMs = nowMs
-                    if (reattachTries >= 3) {
+                    is PreviewWatchTick.ReattachDisplay -> {
+                        Log.w(
+                            "WotaWatch",
+                            "Activity 级预览自愈：相机在出帧但上屏无帧 ${tick.blindMs}ms" +
+                                "（hasSurface=${ctrl.hasDisplaySurface()} 第${tick.tries}次）⇒ 重挂显示面"
+                        )
+                        ctrl.requestDisplayReattach()
+                    }
+                    PreviewWatchTick.RebindAfterReattach -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        clock.arm(nowMs)
-                        reattachTries = 0
-                    } else {
-                        ctrl.requestDisplayReattach()
                     }
                 }
             }

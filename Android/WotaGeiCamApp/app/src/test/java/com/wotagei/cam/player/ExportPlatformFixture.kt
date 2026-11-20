@@ -379,6 +379,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static int audioCount = 2, reorderDepth = 0, reads = 0, decoded = 0;
                     public static int decoderEos = 0, encoderEos = 0, awaits = 0, acquiredOnly = 0;
                     public static int commitResult = 1, commitCalls = 0, stampMode = 1, swapCalls = 0, stampCalls = 0;
+                    public static int glErrorCount = 0, glErrorCalls = 0;
                     public static int[] commitResults;
                     public static int deleteCalls = 0;
                     public static int[] deleteResults;
@@ -867,7 +868,13 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static void glVertexAttribPointer(int a,int n,int type,boolean norm,int stride,java.nio.Buffer b){}
                     public static void glDrawArrays(int mode,int first,int count){}
                     public static void glDisableVertexAttribArray(int a){}
-                    public static int glGetError(){return 0;}
+                    public static int glGetError(){
+                        if(probe.ExportScript.glErrorCalls<probe.ExportScript.glErrorCount){
+                            probe.ExportScript.glErrorCalls++;
+                            return 0x0500;
+                        }
+                        return 0;
+                    }
                 }
             """
         )

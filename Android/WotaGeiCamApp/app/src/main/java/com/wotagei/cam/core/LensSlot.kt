@@ -237,6 +237,19 @@ fun pickCapabilityDefault(slots: List<LensSlot>): LensSlot? =
         ?.takeIf { slot -> slot.ability.videoSizes.maxOfOrNull { it.pixels } ?: 0L > 0L }
 
 /**
+ * 请求档位 → 实际槽位（纯函数）：先认显式槽位，再认请求档位，最后退到广角档与清单首颗。
+ *
+ * **Y70**：后两级回退可能落在与请求档位**不同**的镜头上——极端情形是设备只有前置可开，
+ * 用户请求后置却回退到前置。调用方必须把返回值当作「实际生效镜头」发布（currentSlot /
+ * currentLens），站位分析的 D13 真值从实际槽位读；拿请求档位判断前置会让「前置禁开」失效。
+ */
+fun resolveLensSlot(slots: List<LensSlot>, chosenKey: String?, requested: LensType): LensSlot? =
+    slots.firstOrNull { it.key == chosenKey }
+        ?: slots.firstOrNull { it.type == requested }
+        ?: slots.firstOrNull { it.type == LensType.WIDE }
+        ?: slots.firstOrNull()
+
+/**
  * 「用户显式选过镜头」的持久化位：能力协商默认（[pickCapabilityDefault]）只对**从未选过**
  * 的用户生效；用户在镜头面板里切过一次，之后每次冷启都完全尊重持久化的档位/槽位。
  *

@@ -699,6 +699,58 @@ class StanceLifecycleCompatibilityTest {
     }
 
     @Test
+    fun `Y70_请求后置实际回退前置时关闭开关且切镜窗口先停分析`() = platform { p ->
+        val controller = controller(p)
+        val analysis = p.stance("StanceAnalysis").constructors.single().newInstance({ _: Any -> Unit })
+        val speaker = p.stance("StanceSpeaker").getConstructor(p.type("android.content.Context")).newInstance(p.context())
+        p.inject(controller, "analysis", analysis)
+        p.inject(controller, "speaker", speaker)
+        p.inject(controller, "attached", true)
+        setEnabledState(p, controller)
+        val listening = p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean
+        // 恢复分支要求检测器已装载（否则按「装配未完成」挂起，不恢复监听）
+        val detector = loadedDetector(p)
+        p.inject(controller, "detector", detector)
+        var detached = 0
+        p.call(controller, "setDetachHook", { detached++ })
+        try {
+            analysisDecision(p, controller, "INCLUDED")
+            p.call(analysis, "resumeListening")
+
+            // 切镜未决（实际槽位尚未发布）：即使请求档位已回到后置，也必须先停分析；
+            // 落定（settling=false）且仍在后置时才允许恢复。
+            p.call(controller, "setLensSettling", true)
+            assertFalse("切镜未决必须停听", listening.get())
+            var state = requireNotNull(
+                (p.call(controller, "getState") as kotlinx.coroutines.flow.StateFlow<*>).value
+            )
+            assertEquals(false, p.call(state, "getRunning"))
+            p.call(controller, "setLensSettling", false)
+            assertTrue("落定且在后置时恢复监听", listening.get())
+            state = requireNotNull((p.call(controller, "getState") as kotlinx.coroutines.flow.StateFlow<*>).value)
+            assertEquals(true, p.call(state, "getRunning"))
+
+            // 设备只有前置可开：请求 WIDE 经 resolveLensSlot 回退到 FRONT（core 侧已单测），
+            // 录制页按实际槽位调 setFrontLens(true) —— D13 必须关闭并重置开关。
+            p.call(controller, "setFrontLens", true)
+            state = requireNotNull((p.call(controller, "getState") as kotlinx.coroutines.flow.StateFlow<*>).value)
+            assertEquals("前置必须关闭开关（D13）", false, p.call(state, "getEnabled"))
+            assertEquals(false, p.call(state, "getRunning"))
+            assertFalse("前置必须停听", listening.get())
+            assertEquals("非录制态切前置要摘槽", 1, detached)
+            assertFalse(p.field(controller, "attached") as Boolean)
+
+            // 前置落定后再收到 settling=false：开关已关，绝不能被错误地重新挂回。
+            p.call(controller, "setLensSettling", true)
+            p.call(controller, "setLensSettling", false)
+            assertFalse("前置关闭后 settling 落定不得恢复", listening.get())
+        } finally {
+            p.call(detector, "close")
+            p.call(controller, "release")
+        }
+    }
+
+    @Test
     fun `N07_释放门面使下一窗口可重建状态订阅而非复用取消作用域`() = platform { p ->
         val controller = controller(p)
         val unsafeType = Class.forName("sun.misc.Unsafe")
