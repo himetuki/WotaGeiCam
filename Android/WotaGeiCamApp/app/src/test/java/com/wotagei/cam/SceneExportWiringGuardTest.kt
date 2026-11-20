@@ -288,12 +288,14 @@ class SceneExportWiringGuardTest {
         // 真机抓到的缺陷（r10）：MediaExtractor 的选择是**累加**的，编码循环里视频轨还选着，
         // 只 select 音轨 ⇒ 读到音视频交错样本 ⇒ 整帧视频被当 AAC 样本写进音轨
         //（成片音轨码率 5.2 Mbps、AAC 帧间夹着 20KB 巨块，播放器报 channel element 未分配）。
-        // Y30 起占用音轨的动作在车道 arm()（独立提取器 + 先撤全部选择，双保险）。
-        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(laneSrc, "arm"))
+        // Y30 起占用音轨拆成 prepare（撤选/选轨/seek）→ addTrack → arm；撤选/选轨仍在
+        // prepare 内，且 Runner 必须先 prepare 成功再 addTrack（见 SceneAudioLaneTest 的
+        // “Y30 Runner先prepare成功再addTrack”守卫）。
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(laneSrc, "prepare"))
         val unselect = body.indexOf("unselectTrack(i)")
         val select = body.indexOf("selectTrack(audioIdx)")
-        assertTrue("arm 必须先 unselectTrack 全部轨（否则音轨混进视频样本）", unselect >= 0)
-        assertTrue("arm 必须选中音轨", select >= 0)
+        assertTrue("prepare 必须先 unselectTrack 全部轨（否则音轨混进视频样本）", unselect >= 0)
+        assertTrue("prepare 必须选中音轨", select >= 0)
         assertTrue("取消选择必须早于 selectTrack(audioIdx)", unselect < select)
     }
 

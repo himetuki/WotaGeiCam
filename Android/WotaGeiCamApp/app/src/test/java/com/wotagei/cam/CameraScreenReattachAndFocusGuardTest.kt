@@ -18,19 +18,28 @@ class CameraScreenReattachAndFocusGuardTest {
     private val flat: String by lazy {
         KotlinSourceScan.flatten(KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/CameraScreen.kt")))
     }
+    private val ctrlSrc: String by lazy {
+        KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("camera/CameraController.kt"))
+    }
 
     // ---------------------------------------------------------------- Y52
 
     @Test
     fun `重挂收集器以 ctrl 与 activeSink 为键`() {
+        // 2026-11-20 独立复核：只对整文件查 "LaunchedEffect(ctrl, activeSink)" 会被同一文件
+        // 另一个看门狗 effect 满足（:871），收集器退回 LaunchedEffect(ctrl) 也照样绿。
+        // 这里把断言收窄到 displayReattach.collect 之前的那一段。
+        val collectAt = flat.indexOf("displayReattach.collect")
+        assertTrue("必须存在 displayReattach 收集器", collectAt > 0)
+        val collectorBlock = flat.substring(maxOf(0, collectAt - 400), collectAt)
         assertTrue(
             "displayReattach 收集器必须同时以 ctrl 与 activeSink 为键（Y52）：只认 ctrl 时" +
                 "GPU↔DIRECT 切换后旧收集器写给旧计数持有者，新承载视图的 epoch 不推进",
-            flat.contains("LaunchedEffect(ctrl, activeSink)")
+            collectorBlock.contains("LaunchedEffect(ctrl, activeSink)")
         )
         assertFalse(
-            "不许退回只认 ctrl 的旧键形态",
-            flat.contains("LaunchedEffect(ctrl) { var lastAt = 0L")
+            "收集器不许退回只认 ctrl 的旧键形态",
+            collectorBlock.contains("LaunchedEffect(ctrl) {")
         )
         assertTrue(
             "计数持有者必须按 activeSink 重建（与收集器同键），换 sink 后旧计数不再被改写",
@@ -43,6 +52,12 @@ class CameraScreenReattachAndFocusGuardTest {
         assertTrue(
             "承载视图必须按新持有者的纪元重建",
             flat.contains("key(reattachEpoch.epoch)")
+        )
+        // Y52 同拍：recoverGlSink 先 bind 新 sink 再 request，组合还没重组；replay=0 会把
+        // 请求只送给旧收集器。replay=1 让新收集器启动时补收这一枚。
+        assertTrue(
+            "displayReattach 必须 replay=1（否则同一拍发出的重挂请求新收集器收不到）",
+            ctrlSrc.contains("MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 1)")
         )
     }
 

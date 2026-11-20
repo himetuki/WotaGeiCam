@@ -362,7 +362,10 @@ class SceneExportRunner(private val ctx: Context) {
                         ax.setDataSource(ctx, src.uri, null)
                         audioExtractor = ax
                         val lane = SceneAudioLane(ax, audioIdx, muxer!!, basePtsUs, shiftUs, endUs, job)
-                        lane.arm(sceneExportAudioSeekUs(basePtsUs, shiftUs), muxer!!.addTrack(audioFormat))
+                        // Y30：prepare 成功后才 addTrack。若反过来（addTrack 做 arm 的实参），
+                        // select/seek 失败时 muxer 已留下零样本音轨，stop 会抛异常并删掉整份视频。
+                        lane.prepare(sceneExportAudioSeekUs(basePtsUs, shiftUs))
+                        lane.arm(muxer!!.addTrack(audioFormat))
                         audioLane = lane
                     }.onFailure {
                         Log.w(TAG, "音频车道起不来，本片只导出视频：${it.message}")

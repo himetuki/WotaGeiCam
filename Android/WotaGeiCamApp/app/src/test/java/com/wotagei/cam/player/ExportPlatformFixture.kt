@@ -386,6 +386,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static long sampleSizeOverride = 0L;
                     public static boolean renderOk = true, swapOk = true, stopThrows = false;
                     public static boolean stopThrowsError = false;
+                    public static boolean selectThrows = false;
                     public static String rowData;
                     public static int rowQueries = 0;
                     public static boolean glThreadAlive;
@@ -575,7 +576,10 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         if(track>0) { f.setInteger("sample-rate",48000); f.setInteger("channel-count",2); }
                         return f;
                     }
-                    public void selectTrack(int track) { selected.add(track); probe.ExportScript.add("select:"+track); }
+                    public void selectTrack(int track) {
+                        if(probe.ExportScript.selectThrows) throw new IllegalStateException("injected select failure");
+                        selected.add(track); probe.ExportScript.add("select:"+track);
+                    }
                     public void unselectTrack(int track) { selected.remove(track); probe.ExportScript.add("unselect:"+track); }
                     public void seekTo(long time,int mode) {
                         for(int track:selected) {

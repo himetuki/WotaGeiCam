@@ -359,14 +359,20 @@ class StanceAnalysis(
             lastFrameMs = now
             val w = image.width
             val h = image.height
-            // B15：YUV 三平面先拷进 owner 线程复用缓冲，随后**立即归还 Image**，
-            // 不再让 ImageReader 的 2 个槽位被整段推理占住（转换/旋转/推理都用副本）。
-            val raw = (try {
-                yuv420ToRgba(image, scratch)
+            // B15：YUV 三平面先拷进 owner 线程复用缓冲，**拷贝完立即归还 Image**（不再让
+            // ImageReader 的 2 个槽位被转换/旋转/推理占住）；转换只用副本，Image 已关闭。
+            val yuv = (try {
+                copyYuv420(image, scratch)
             } finally {
                 runCatching { image.close() }
                 imageClosed = true
             }) ?: return
+            val raw = yuv420ToRgba(
+                yuv.y, yuv.u, yuv.v, yuv.width, yuv.height,
+                yuv.yRowStride, yuv.uvRowStride, yuv.uvPixStride,
+                yuv.vRowStride, yuv.vPixStride,
+                scratch.rgba(yuv.width * yuv.height),
+            )
             // 传感器坐标 → 显示坐标（与预览同一"转正"语义；否则方向判定左右颠倒）
             val frame = rotateRgba(raw, w, h, rotationDegrees, scratch.rotated(w * h))
             if (brighten) brightenRgba(frame.pixels)
@@ -382,8 +388,25 @@ class StanceAnalysis(
         }
     }
 
-    /** B15：把 Image 三平面拷进复用缓冲（不做转换；Image 可在返回后立即关闭）。 */
-    private fun yuv420ToRgba(image: Image, scratch: FrameScratch): IntArray? {
+    /** B15：Image 三平面拷贝的元数据；数组指向 [FrameScratch] 的复用缓冲。 */
+    private data class YuvFrame(
+        val y: ByteArray,
+        val u: ByteArray,
+        val v: ByteArray,
+        val width: Int,
+        val height: Int,
+        val yRowStride: Int,
+        val uvRowStride: Int,
+        val uvPixStride: Int,
+        val vRowStride: Int,
+        val vPixStride: Int,
+    )
+
+    /**
+     * B15：只把 Image 三平面拷进复用缓冲（不做转换）；返回后调用方必须立即关闭 Image。
+     * 这样 ImageReader 的槽位只在拷贝期间被占，转换/旋转/推理都在副本上跑。
+     */
+    private fun copyYuv420(image: Image, scratch: FrameScratch): YuvFrame? {
         if (image.format != ImageFormat.YUV_420_888) return null
         val w = image.width
         val h = image.height
@@ -397,10 +420,9 @@ class StanceAnalysis(
         yP.buffer.get(yBuf, 0, ySize)
         uP.buffer.get(uBuf, 0, uSize)
         vP.buffer.get(vBuf, 0, vSize)
-        return yuv420ToRgba(
+        return YuvFrame(
             yBuf, uBuf, vBuf, w, h,
             yP.rowStride, uP.rowStride, uP.pixelStride, vP.rowStride, vP.pixelStride,
-            scratch.rgba(w * h),
         )
     }
 

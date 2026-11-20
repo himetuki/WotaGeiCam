@@ -1,5 +1,6 @@
 package com.wotagei.cam.stance
 
+import com.wotagei.cam.source.KotlinSourceScan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -316,6 +317,25 @@ class StanceReaderCameraBridgeTest {
             (p.field(analysis, "listening") as java.util.concurrent.atomic.AtomicBoolean).get(),
         )
         assertFalse("撤销后不得报告 running", p.stanceState().let { p.call(it, "getRunning") } as Boolean)
+    }
+
+    @Test
+    fun `B15 三平面拷贝完立即关闭Image后再做RGBA转换`() {
+        val src = KotlinSourceScan.codeOnly(
+            File("src/full/java/com/wotagei/cam/stance/StanceAnalysis.kt").readText(Charsets.UTF_8)
+        )
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "processImage"))
+        val copyAt = body.indexOf("copyYuv420(image, scratch)")
+        val closeAt = body.indexOf("image.close()")
+        val convertAt = body.indexOf("yuv420ToRgba(")
+        assertTrue("processImage 必须先调用 copyYuv420", copyAt >= 0)
+        assertTrue("拷贝后必须先关闭 Image（finally 紧跟 copyYuv420）", closeAt in (copyAt + 1) until convertAt)
+        assertTrue("关闭 Image 之后才做 RGBA 转换", convertAt > closeAt)
+        assertTrue(
+            "转换只能读拷贝后的副本（yuv.y/u/v），不得再碰 Image",
+            body.substring(convertAt).contains("yuv.y") &&
+                !body.contains("yuv420ToRgba(image, scratch)")
+        )
     }
 
     private fun platform(body: (StanceReaderCameraBridgeFixture) -> Unit) {

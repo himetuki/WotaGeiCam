@@ -75,12 +75,26 @@ internal class SceneAudioLane(
      * 占用音轨：**必须先全部取消选择**。MediaExtractor 的选择是累加的，主提取器在编码循环里
      * 还选着视频轨；不撤就会读到音视频交错的样本流——音轨里混进整帧视频（真机实测：成片音轨
      * 码率 5.2 Mbps、AAC 帧里夹着 20KB 巨块）。这里用独立提取器 + 先撤全部选择，双保险。
+     *
+     * Y30 顺序：`prepare` 只做撤选/选轨/seek，**成功后才允许 `addTrack`**（见 [arm]）。
+     * 若 seek/select 抛异常，调用方不得先建音轨——否则 muxer 会留下零样本轨，`stop()` 抛异常
+     * 并把本来完好的视频一起删掉。
      */
-    fun arm(seekUs: Long, track: Int) {
-        outTrack = track
+    fun prepare(seekUs: Long) {
         for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
         ex.selectTrack(audioIdx)
         ex.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+    }
+
+    /** prepare 成功后占用 muxer 音轨号；调用前不得先 `addTrack`。 */
+    fun arm(track: Int) {
+        outTrack = track
+    }
+
+    /** 兼容既有直调测试：先 prepare 再 arm（生产路径拆成两步以钉住顺序）。 */
+    fun arm(seekUs: Long, track: Int) {
+        prepare(seekUs)
+        arm(track)
     }
 
     /**

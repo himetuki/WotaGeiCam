@@ -1,7 +1,9 @@
 package com.wotagei.cam.player
 
+import com.wotagei.cam.source.KotlinSourceScan
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.ClassRule
@@ -98,6 +100,51 @@ class SceneAudioLaneTest {
         )
         assertEquals("段尾汇总一条 i 级（B06）", 1,
             p.events.count { it == "info:音轨写入=20 pts修正=0(back=0us)" })
+    }
+
+    @Test
+    fun `Y30 prepare失败不得先建音轨`() = platform { p ->
+        p.script("selectThrows", true)
+        val ex = p.new("android.media.MediaExtractor")
+        val muxer = p.muxer()
+        val lane = p.lane(ex, 2, muxer, 0L, 0L, 1_000_000L)
+        try {
+            try {
+                p.call(lane, "prepare", p.audioSeekUs(0L, 0L))
+                fail("select 失败必须抛出，交给 Runner 回退为纯视频")
+            } catch (_: Exception) {
+                // 预期：prepare 的 select/seek 失败
+            }
+            assertEquals(
+                "prepare 失败时 outTrack 必须仍是 -1",
+                -1, (p.field(lane, "outTrack") as Number).toInt()
+            )
+            assertEquals(
+                "prepare 失败时不得向 muxer 建音轨（否则零样本轨会让 stop 删掉整份视频）",
+                0, p.events.count { it.startsWith("track.add:audio/") }
+            )
+            p.call(lane, "arm", 7)
+            assertEquals(
+                "只有 prepare 成功后 arm 才写入轨号",
+                7, (p.field(lane, "outTrack") as Number).toInt()
+            )
+        } finally {
+            p.script("selectThrows", false)
+            p.call(muxer, "release")
+        }
+    }
+
+    @Test
+    fun `Y30 Runner先prepare成功再addTrack`() {
+        val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportRunner.kt"))
+        val prepareAt = src.indexOf("lane.prepare(")
+        val addAt = src.indexOf("muxer!!.addTrack(audioFormat)")
+        assertTrue("Runner 必须调用 lane.prepare", prepareAt >= 0)
+        assertTrue("addTrack 必须在 prepare 之后求值", addAt > prepareAt)
+        assertFalse(
+            "不得再把 addTrack 作为 arm 的实参（实参先于方法体求值）",
+            src.contains("lane.arm(sceneExportAudioSeekUs")
+        )
     }
 
     private fun platform(block: suspend (ExportPlatformFixture) -> Unit) = runBlocking {

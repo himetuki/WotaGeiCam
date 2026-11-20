@@ -439,7 +439,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     // ------------------------------------------------- 上屏面重挂（黑屏自愈第三级）
 
-    private val reattachRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    // Y52 同拍重挂：recoverGlSink 在主线程同一拍先 bind 新 sink、再 requestDisplayReattach；
+    // 此时组合尚未重组，旧 collector 仍是唯一订阅者。replay=0 会把请求只送给旧持有者，
+    // 新 collector 启动后收不到，新承载视图的 epoch 不推进。replay=1 让新 collector 补收这一枚；
+    // 重复一次重挂是幂等的（只重建一次承载视图），而漏掉会让新 GL 引擎一直没有窗口面。
+    private val reattachRequests = MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 1)
 
     /**
      * 上屏面重挂请求：页面收到后**重建承载视图**（新 `TextureView` ⇒ 新 `SurfaceTexture` ⇒
