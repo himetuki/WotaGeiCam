@@ -15,6 +15,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         window.rootViewController = CameraPreviewViewController()
         window.makeKeyAndVisible()
         self.window = window
+        MediaLibrary.runStartupMaintenance()
         return true
     }
 }

@@ -33,16 +33,9 @@ final class CameraPreviewView: UIView {
         configure()
     }
 
-    /// 当前工程锁定竖屏取景。
-    ///
-    /// `AVCaptureConnection.videoOrientation` 自 iOS 6 起可用，覆盖 iOS 10 及以上；
-    /// iOS 17 起官方推荐 `videoRotationAngle`，但那需要支持 iOS 17 SDK 的构建，
-    /// 这里不使用，以保证 legacy（iOS 10）工具链也能编译。
-    func updateVideoOrientation() {
-        guard let connection = previewLayer.connection else { return }
-        if connection.isVideoOrientationSupported {
-            connection.videoOrientation = .portrait
-        }
+    /// 主线程获取图层的连接。方向和防抖都由会话队列管理。
+    func registerConnection(with controller: CameraSessionController) {
+        controller.setPreviewVideoConnection(previewLayer.connection)
     }
 
     private func configure() {

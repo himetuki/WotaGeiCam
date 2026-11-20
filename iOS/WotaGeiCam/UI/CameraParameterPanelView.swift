@@ -3,32 +3,27 @@ import UIKit
 import WotaCore
 #endif
 
-/// 最小 WOTA 录制参数面板（UIKit，iOS 10 基线）。
-///
-/// 只展示并调整**基础**相机参数：当前格式/帧率（只读）、曝光目标偏置、手电筒。
-/// 分辨率/帧率切换、码率等录制档位协商属于后续录制任务，这里不做，
-/// 以免在缺少设备能力判断的情况下写入未经降级的参数。
-final class CameraParameterPanelView: UIView {
+/// 可滚动的取景参数抽屉。小屏只占用部分取景区，启停按钮始终留在抽屉外。
+final class CameraParameterPanelView: UIView, UITableViewDataSource, UITableViewDelegate {
+    struct Row {
+        let title: String
+        let value: String
+        let action: ((UIView) -> Void)?
 
-    var onTorchChanged: ((Bool) -> Void)?
-    var onExposureChanged: ((Float) -> Void)?
-    var onRefresh: (() -> Void)?
+        init(_ title: String, _ value: String, action: ((UIView) -> Void)? = nil) {
+            self.title = title
+            self.value = value
+            self.action = action
+        }
+    }
 
-    private let headerButton = UIButton(type: .system)
-    private let refreshButton = UIButton(type: .system)
-    private let summaryLabel = UILabel()
+    struct Section {
+        let title: String
+        let rows: [Row]
+    }
 
-    private let contentStack = UIStackView()
-    private let deviceLabel = UILabel()
-    private let formatLabel = UILabel()
-    private let exposureTitleLabel = UILabel()
-    private let exposureValueLabel = UILabel()
-    private let exposureSlider = UISlider()
-    private let torchTitleLabel = UILabel()
-    private let torchSwitch = UISwitch()
-    private let notesLabel = UILabel()
-
-    private var isExpanded = true
+    private let table = UITableView(frame: .zero, style: .plain)
+    private var sections: [Section] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -40,149 +35,87 @@ final class CameraParameterPanelView: UIView {
         configure()
     }
 
-    // MARK: - 对外接口
-
-    func update(with snapshot: CameraParameterSnapshot) {
-        deviceLabel.text = "设备：\(snapshot.deviceName)（\(snapshot.deviceModel)）"
-        formatLabel.text = "当前格式：\(snapshot.resolution)，\(snapshot.frameRate)"
-        summaryLabel.text = "\(snapshot.resolution) · \(snapshot.frameRate)"
-
-        exposureSlider.minimumValue = snapshot.exposure.minimum
-        exposureSlider.maximumValue = snapshot.exposure.isAdjustable
-            ? snapshot.exposure.maximum
-            : snapshot.exposure.minimum + 1
-        exposureSlider.value = snapshot.exposure.clamp(snapshot.exposureValue)
-        exposureSlider.isEnabled = snapshot.exposure.isAdjustable
-        exposureValueLabel.text = snapshot.exposure.isAdjustable
-            ? String(format: "曝光补偿 %+.1f EV", snapshot.exposureValue)
-            : "曝光补偿：设备不支持"
-
-        torchSwitch.isEnabled = snapshot.torchAvailable
-        torchSwitch.setOn(snapshot.torchEnabled, animated: false)
-        torchTitleLabel.text = snapshot.torchAvailable ? "手电筒" : "手电筒（不可用）"
-
-        notesLabel.text = snapshot.notes.joined(separator: "\n")
-        notesLabel.isHidden = snapshot.notes.isEmpty
+    func update(_ sections: [Section]) {
+        self.sections = sections
+        table.reloadData()
     }
-
-    // MARK: - 构建
 
     private func configure() {
-        backgroundColor = UIColor(white: 0, alpha: 0.55)
-        layer.cornerRadius = 20
+        backgroundColor = UIColor(white: 0.08, alpha: 0.94)
+        layer.cornerRadius = 18
         clipsToBounds = true
-
-        headerButton.setTitle("参数面板", for: .normal)
-        headerButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
-        headerButton.setTitleColor(.white, for: .normal)
-        headerButton.contentHorizontalAlignment = .left
-        headerButton.addTarget(self, action: #selector(handleToggle), for: .touchUpInside)
-
-        refreshButton.setTitle("刷新", for: .normal)
-        refreshButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-        refreshButton.setTitleColor(UIColor(white: 1, alpha: 0.85), for: .normal)
-        refreshButton.addTarget(self, action: #selector(handleRefresh), for: .touchUpInside)
-
-        summaryLabel.font = UIFont.systemFont(ofSize: 12)
-        summaryLabel.textColor = UIColor(white: 1, alpha: 0.65)
-
-        configureContentStack()
-
-        let headerRow = UIStackView(arrangedSubviews: [headerButton, refreshButton])
-        headerRow.axis = .horizontal
-        headerRow.alignment = .center
-        headerRow.spacing = 8
-        headerButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let rootStack = UIStackView(arrangedSubviews: [headerRow, summaryLabel, contentStack])
-        rootStack.axis = .vertical
-        rootStack.spacing = 10
-        rootStack.alignment = .fill
-        rootStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(rootStack)
-
+        table.backgroundColor = .clear
+        table.separatorColor = UIColor(white: 1, alpha: 0.16)
+        table.indicatorStyle = .white
+        table.rowHeight = UITableView.automaticDimension
+        table.estimatedRowHeight = 46
+        table.dataSource = self
+        table.delegate = self
+        table.alwaysBounceVertical = false
+        table.tableFooterView = UIView(frame: .zero)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(table)
         NSLayoutConstraint.activate([
-            rootStack.topAnchor.constraint(equalTo: topAnchor, constant: 14),
-            rootStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-            rootStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            rootStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            table.topAnchor.constraint(equalTo: topAnchor),
+            table.bottomAnchor.constraint(equalTo: bottomAnchor),
+            table.leadingAnchor.constraint(equalTo: leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
-
-        updateToggleTitle()
     }
 
-    private func configureContentStack() {
-        deviceLabel.font = UIFont.systemFont(ofSize: 13)
-        deviceLabel.textColor = .white
-        deviceLabel.numberOfLines = 0
+    func numberOfSections(in tableView: UITableView) -> Int { sections.count }
 
-        formatLabel.font = UIFont.systemFont(ofSize: 13)
-        formatLabel.textColor = .white
-        formatLabel.numberOfLines = 0
-
-        exposureTitleLabel.font = UIFont.systemFont(ofSize: 13)
-        exposureTitleLabel.textColor = .white
-        exposureValueLabel.font = UIFont.systemFont(ofSize: 12)
-        exposureValueLabel.textColor = UIColor(white: 1, alpha: 0.65)
-        exposureValueLabel.textAlignment = .right
-
-        exposureSlider.addTarget(self, action: #selector(handleExposureChanged), for: .valueChanged)
-        exposureSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let exposureTitleRow = UIStackView(arrangedSubviews: [exposureTitleLabel, exposureValueLabel])
-        exposureTitleRow.axis = .horizontal
-        exposureTitleRow.alignment = .center
-        exposureTitleRow.spacing = 8
-
-        torchTitleLabel.font = UIFont.systemFont(ofSize: 13)
-        torchTitleLabel.textColor = .white
-        torchSwitch.addTarget(self, action: #selector(handleTorchChanged), for: .valueChanged)
-        torchSwitch.setContentHuggingPriority(.required, for: .horizontal)
-
-        let torchRow = UIStackView(arrangedSubviews: [torchTitleLabel, torchSwitch])
-        torchRow.axis = .horizontal
-        torchRow.alignment = .center
-        torchRow.spacing = 8
-
-        notesLabel.font = UIFont.systemFont(ofSize: 12)
-        notesLabel.textColor = UIColor(white: 1, alpha: 0.7)
-        notesLabel.numberOfLines = 0
-
-        contentStack.axis = .vertical
-        contentStack.spacing = 10
-        contentStack.alignment = .fill
-        [
-            deviceLabel,
-            formatLabel,
-            exposureTitleRow,
-            exposureSlider,
-            torchRow,
-            notesLabel,
-        ].forEach { contentStack.addArrangedSubview($0) }
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        sections[section].rows.count
     }
 
-    private func updateToggleTitle() {
-        headerButton.setTitle(isExpanded ? "参数面板 ▾" : "参数面板 ▸", for: .normal)
-        contentStack.isHidden = !isExpanded
+    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let header = UITableViewHeaderFooterView(reuseIdentifier: nil)
+        header.contentView.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        let label = UILabel()
+        label.font = UIFont.preferredFont(forTextStyle: .caption1)
+        label.adjustsFontForContentSizeCategory = true
+        label.text = sections[section].title
+        label.textColor = UIColor(white: 0.83, alpha: 1)
+        label.accessibilityTraits = .header
+        label.translatesAutoresizingMaskIntoConstraints = false
+        header.contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: header.contentView.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: header.contentView.trailingAnchor, constant: -16),
+            label.centerYAnchor.constraint(equalTo: header.contentView.centerYAnchor),
+        ])
+        return header
     }
 
-    // MARK: - 交互
-
-    @objc private func handleToggle() {
-        isExpanded = !isExpanded
-        updateToggleTitle()
+    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        max(30, UIFont.preferredFont(forTextStyle: .caption1).lineHeight + 12)
     }
 
-    @objc private func handleRefresh() {
-        onRefresh?()
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let row = sections[indexPath.section].rows[indexPath.row]
+        let cell = tableView.dequeueReusableCell(withIdentifier: "Parameter")
+            ?? UITableViewCell(style: .value1, reuseIdentifier: "Parameter")
+        cell.backgroundColor = .clear
+        cell.textLabel?.font = UIFont.preferredFont(forTextStyle: .subheadline)
+        cell.detailTextLabel?.font = UIFont.preferredFont(forTextStyle: .footnote)
+        cell.textLabel?.adjustsFontForContentSizeCategory = true
+        cell.detailTextLabel?.adjustsFontForContentSizeCategory = true
+        cell.textLabel?.text = row.title
+        cell.detailTextLabel?.text = row.value
+        cell.textLabel?.textColor = .white
+        cell.detailTextLabel?.textColor = UIColor(white: 0.78, alpha: 1)
+        cell.accessoryType = row.action == nil ? .none : .disclosureIndicator
+        cell.selectionStyle = row.action == nil ? .none : .default
+        let selection = UIView()
+        selection.backgroundColor = UIColor(white: 1, alpha: 0.13)
+        cell.selectedBackgroundView = selection
+        return cell
     }
 
-    @objc private func handleExposureChanged() {
-        exposureValueLabel.text = String(format: "曝光补偿 %+.1f EV", exposureSlider.value)
-        onExposureChanged?(exposureSlider.value)
-    }
-
-    @objc private func handleTorchChanged() {
-        onTorchChanged?(torchSwitch.isOn)
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard let cell = tableView.cellForRow(at: indexPath) else { return }
+        sections[indexPath.section].rows[indexPath.row].action?(cell)
     }
 }
