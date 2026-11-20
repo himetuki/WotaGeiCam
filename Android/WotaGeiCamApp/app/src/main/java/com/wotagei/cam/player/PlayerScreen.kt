@@ -87,6 +87,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -465,7 +466,7 @@ fun PlayerScreen(
     var topBarCollapsed by remember { mutableStateOf(WotaSettings.playerTopBarCollapsed(prefs)) }
     val chrome = playerChromeOf(controlsVisible, topBarCollapsed)
     var banner by remember { mutableStateOf<Int?>(null) }
-    val zoom = remember { mutableStateOf(1f) }
+    val zoom = remember { mutableFloatStateOf(1f) }
     // 双指平移（2026-10-04）：与缩放同一手势，域由 pinchZoom 内 clampPan 夹住，捏回 1x 自动归零
     val pan = remember { mutableStateOf(Offset.Zero) }
     var dragFrac by remember { mutableStateOf<Float?>(null) }
@@ -639,7 +640,7 @@ fun PlayerScreen(
                         })
                     }
             ) {
-                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value, pan = pan.value, mirror = mirrored)
+                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.floatValue, pan = pan.value, mirror = mirrored)
                 // 转圈只代表"还没画面"：IDLE（未起播）与 BUFFERING（缓冲中）。
                 // STATE_ENDED 是播完停在末帧，不是加载——判据漏了它就会在播完那一刻
                 // 凭空转圈且不消失（用户 2026-10-01 反馈的"播完后出现加载动画"即此）；
@@ -1126,9 +1127,9 @@ fun PlayerScreen(
                 )
             }
             // 偏离 1x 即显示：缩小也是合法观感（下限 0.1x），缩着却没倍率读数等于盲调
-            if (zoom.value > 1.01f || zoom.value < 0.99f) {
+            if (zoom.floatValue > 1.01f || zoom.floatValue < 0.99f) {
                 Text(
-                    text = stringResource(R.string.player_zoom, zoom.value),
+                    text = stringResource(R.string.player_zoom, zoom.floatValue),
                     style = MonoStyle,
                     color = WotaTextDim,
                     modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout)).padding(top = 56.dp)

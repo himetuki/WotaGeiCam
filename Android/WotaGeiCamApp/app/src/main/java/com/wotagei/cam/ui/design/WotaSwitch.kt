@@ -14,6 +14,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -155,7 +156,7 @@ private fun LiquidGestureSwitch(
     // 落位动画统一投到这枚组合作用域上——它与页面同寿命，恰是"这次开关交互"的边界
     val scope = rememberCoroutineScope()
     var dragX by remember { mutableStateOf<Float?>(null) }
-    var dragVelocity by remember { mutableStateOf(0f) }
+    var dragVelocity by remember { mutableFloatStateOf(0f) }
     var pressing by remember { mutableStateOf(false) }
 
     // 目标位置随 checked 变化（拖动中由手势自己写，这里不抢）

@@ -49,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -688,11 +689,11 @@ private val LocalSettingsCardPad = compositionLocalOf { 12.dp }
 private fun BlockDefault(prefs: SharedPreferences) {
     // 帧率/快门两行已删（R1/2026-10-16 拍板）：这两项只在录制页改，由 ParamsPersistSession
     // 落盘到同一个 default_fps / default_shutter_ns 键（键与恢复链都没动），设置页不再重复出档
-    var defaultBitrate by remember { mutableStateOf(WotaSettings.defaultBitrate(prefs)) }
-    var defaultSampleRate by remember { mutableStateOf(WotaSettings.defaultSampleRate(prefs)) }
+    var defaultBitrate by remember { mutableIntStateOf(WotaSettings.defaultBitrate(prefs)) }
+    var defaultSampleRate by remember { mutableIntStateOf(WotaSettings.defaultSampleRate(prefs)) }
     var defaultRender by remember { mutableStateOf(WotaSettings.defaultRenderMode(prefs)) }
     var defaultMuted by remember { mutableStateOf(WotaSettings.defaultAudioMuted(prefs)) }
-    var defaultDeadband by remember { mutableStateOf(WotaSettings.arcMergeDeadband(prefs)) }
+    var defaultDeadband by remember { mutableIntStateOf(WotaSettings.arcMergeDeadband(prefs)) }
     // 并入门槛要写**同一个**总线 setter（参数域钳制 + 同步发布 ArcMergeDeadband 快照都在里面）：
     // 设置页本来不持有参数总线，照 HudLayoutEditor 的惯例造一份本地总线（开机默认档照常套上），别处不读它。
     val settingsParams = remember(prefs) {
@@ -870,8 +871,8 @@ private fun BlockMotion(prefs: SharedPreferences) {
 @Composable
 private fun BlockBrightness(prefs: SharedPreferences) {
     // 读侧已钳（29 §5.5），这里只管展示选中档；0 档 = 关闭（TierPicker 的 zeroValue 提供双击归零）
-    var brightenDelay by remember { mutableStateOf(WotaSettings.cameraBrightenDelaySec(prefs)) }
-    var playerRamp by remember { mutableStateOf(WotaSettings.playerBrightenRampTenths(prefs)) }
+    var brightenDelay by remember { mutableIntStateOf(WotaSettings.cameraBrightenDelaySec(prefs)) }
+    var playerRamp by remember { mutableIntStateOf(WotaSettings.playerBrightenRampTenths(prefs)) }
     // TierPicker 的 items/format 是普通 lambda（非 composable 上下文），文案先在外面取好、
     // 带参格式化走 context.getString——stringResource 只能出现在组合里
     val context = LocalContext.current
@@ -916,7 +917,7 @@ private fun BlockBrightness(prefs: SharedPreferences) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BlockHud(prefs: SharedPreferences, onOpenHudEditor: () -> Unit) {
-    var hudMask by remember { mutableStateOf(WotaSettings.hudItems(prefs)) }
+    var hudMask by remember { mutableIntStateOf(WotaSettings.hudItems(prefs)) }
     var pillMask by remember { mutableIntStateOf(WotaSettings.hudPills(prefs)) }
     // 毛玻璃背板（#84 步骤 2）：默认关，只有这一颗 Switch 会把它打开（没有别的写入方）
     var frostBlur by remember { mutableStateOf(WotaSettings.frostBlurEnabled(prefs)) }
@@ -1123,7 +1124,7 @@ private fun BlockStorage() {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BlockRefline(prefs: SharedPreferences) {
-    var defaultRefLines by remember { mutableStateOf(WotaSettings.defaultRefLines(prefs)) }
+    var defaultRefLines by remember { mutableIntStateOf(WotaSettings.defaultRefLines(prefs)) }
 
     SettingGroup(stringResource(R.string.set_group_refline))
     Card {
@@ -1206,7 +1207,7 @@ private fun BlockLevel(prefs: SharedPreferences) {
 @Composable
 private fun BlockCompare(prefs: SharedPreferences) {
     // 对比播放编排节拍（r02）：越界脏值读侧已钳，这里只管展示选中档
-    var compareTick by remember { mutableStateOf(WotaSettings.compareTickMs(prefs)) }
+    var compareTick by remember { mutableIntStateOf(WotaSettings.compareTickMs(prefs)) }
 
     SettingGroup(stringResource(R.string.set_group_compare))
     Card {
@@ -1228,11 +1229,11 @@ private fun BlockCompare(prefs: SharedPreferences) {
 
 @Composable
 private fun BlockText(prefs: SharedPreferences) {
-    var scaleCamera by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
+    var scaleCamera by remember { mutableFloatStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_CAMERA)) }
     var scaleSettings by remember {
-        mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
+        mutableFloatStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_SETTINGS))
     }
-    var scaleDialog by remember { mutableStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_DIALOG)) }
+    var scaleDialog by remember { mutableFloatStateOf(WotaSettings.textScale(prefs, WotaSettings.KEY_TEXT_SCALE_DIALOG)) }
 
     SettingGroup(stringResource(R.string.set_group_text))
     Card {
@@ -1272,7 +1273,7 @@ private fun BlockText(prefs: SharedPreferences) {
 @Composable
 private fun BlockPerm() {
     val context = LocalContext.current
-    var permTick by remember { mutableStateOf(0) }
+    var permTick by remember { mutableIntStateOf(0) }
     val perms = remember(context, permTick) { permissionRows(context) }
 
     // 从系统设置页返回后重新查一次权限状态

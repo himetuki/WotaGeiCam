@@ -70,6 +70,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -190,9 +191,9 @@ fun GalleryScreen(
     val prefs = remember(app) { WotaSettings.of(app) }
     var scope by remember { mutableStateOf(MediaScope.WotaLibrary) }
     var mode by remember { mutableStateOf(ListMode.Grid) }
-    var gridColumns by remember { mutableStateOf(WotaSettings.galleryColumns(prefs)) }
+    var gridColumns by remember { mutableIntStateOf(WotaSettings.galleryColumns(prefs)) }
     var filter by remember { mutableStateOf<ClipFilter>(ClipFilter.All) }
-    var tabIndex by remember { mutableStateOf(0) }
+    var tabIndex by remember { mutableIntStateOf(0) }
     var banner by remember { mutableStateOf<Int?>(null) }
     // 菜单作用域：存的是「这次要真正动到的片」的**展开结果**，不是那一枚代表段
     var menuTargets by remember { mutableStateOf<List<VideoClip>?>(null) }
@@ -1396,7 +1397,7 @@ fun ClipPickerDialog(title: String, onPick: (VideoClip) -> Unit, onDismiss: () -
     val wotaLabel = stringResource(R.string.gallery_scope_wota)
     val albumLabel = stringResource(R.string.gallery_scope_album)
     val tabLabels = listOf(wotaLabel, albumLabel)
-    var tabIndex by remember { mutableStateOf(0) }
+    var tabIndex by remember { mutableIntStateOf(0) }
     val clips by repo.clips(scope, ClipFilter.All).collectState(emptyList())
     val gridState = rememberLazyGridState()
     val scrolling by remember { derivedStateOf { gridState.isScrollInProgress } }

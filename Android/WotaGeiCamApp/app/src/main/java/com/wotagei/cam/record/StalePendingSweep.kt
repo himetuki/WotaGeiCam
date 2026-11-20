@@ -1,5 +1,6 @@
 package com.wotagei.cam.record
 
+import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
@@ -269,6 +270,9 @@ internal object StalePendingSweep {
     @Suppress("DEPRECATION") // API 29 没有 QUERY_ARG_MATCH_PENDING。
     private fun includePendingOnQ(uri: Uri): Uri = MediaStore.setIncludePending(uri)
 
+    // InlinedApi：QUERY_ARG_MATCH_* / MATCH_* 是编译期内联的字符串与整数常量；
+    // 这里只在 SDK_INT >= R 的分支里读，API 29 分支走 setIncludePending，运行期安全。
+    @SuppressLint("InlinedApi")
     private fun sweepArgs(where: String?, args: Array<String>?, matchPending: Int): Bundle = Bundle().apply {
         if (where != null) putString(ContentResolver.QUERY_ARG_SQL_SELECTION, where)
         if (args != null) putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
@@ -378,6 +382,8 @@ internal object StalePendingSweep {
         hasGeneration = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     )
 
+    // InlinedApi：MATCH_ONLY/MATCH_EXCLUDE 是编译期内联常量，仅在 R+ 的删除分支使用。
+    @SuppressLint("InlinedApi")
     private fun pendingMatch(row: Row): Int =
         if (row.pending) MediaStore.MATCH_ONLY else MediaStore.MATCH_EXCLUDE
 

@@ -82,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -494,7 +495,7 @@ fun CameraScreen(
     var sheet by remember { mutableStateOf(Sheet.NONE) }
     var hint by remember { mutableStateOf<String?>(null) }
     var lastUri by remember { mutableStateOf<Uri?>(null) }
-    var freeMb by remember { mutableStateOf(0L) }
+    var freeMb by remember { mutableLongStateOf(0L) }
 
     // ---- 分屏（用户第 3 项）：把**完整录制页**压到左半屏，右侧让给模式面板。
     // 压缩只做 graphicsLayer 变换、布局参数一个都没动 ⇒ 参数/参考线/用户摆好的位置全部**结构性保持**
@@ -1155,7 +1156,7 @@ fun CameraScreen(
         buddies.value = found
         Log.i("WotaSplit", "concurrent buddies=${found.joinToString(",")} camera=$id")
     }
-    var deviceDegrees by remember { mutableStateOf(0) }
+    var deviceDegrees by remember { mutableIntStateOf(0) }
     LaunchedEffect(owner, ui.device) { deviceDegrees = readDeviceDegrees(context) }
     // 正反向横屏（90↔270）窗口尺寸不变，onSizeChanged 不会触发，必须另挂显示监听才能跟着转
     DisposableEffect(app) {

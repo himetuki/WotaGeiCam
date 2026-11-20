@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  项目级 Lint 口径（2026-11-20 收口）。
+
+  这里忽略的三类检查不是“代码缺陷被掩盖”，而是已评估的**发布基线与产品边界**：
+  - GradleDependency：16 条“有更新版本”提示。本项目冻结在已通过 3112/2940 单测、
+    Lint、双变体组装的版本组合上；升级 Room/Media3/LiteRT 等大版本需要联网拉新依赖、
+    重新做行为与二进制回归，属于独立升级任务，不能在收口轮里用“改版本号”换绿。
+  - OldTargetApi：targetSdk 34 是当前已验收的发布契约；升 35 需要安装新平台 SDK
+    并重跑全部行为回归（含权限/前台服务/媒体存储），同样另立任务。
+  - ChromeOsAbiSupport：产品支持矩阵是 arm64-v8a / armeabi-v7a 真机，ChromeOS
+    x86_64 不在支持范围（也没有对应的 LiteRT/相机验证面），不为一条不存在的目标加 ABI。
+  InlinedApi 不在此处全局忽略：5 处 MediaStore 常量是编译期内联值，已在
+  StalePendingSweep 的 R+ 分支就地 @SuppressLint 并写明运行期判据。
+-->
+<lint>
+    <issue id="GradleDependency" severity="ignore" />
+    <issue id="OldTargetApi" severity="ignore" />
+    <issue id="ChromeOsAbiSupport" severity="ignore" />
+</lint>

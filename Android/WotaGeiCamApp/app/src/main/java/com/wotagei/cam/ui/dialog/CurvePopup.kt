@@ -34,6 +34,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -122,13 +124,13 @@ fun CurvePopup(
         stringResource(R.string.cam_curve_ch_blue)
     )
     val resetLabel = stringResource(R.string.cam_curve_reset_all)
-    var channel by remember { mutableStateOf(ColorCurve.CHANNEL_MASTER) }
+    var channel by remember { mutableIntStateOf(ColorCurve.CHANNEL_MASTER) }
     var fanOpen by remember { mutableStateOf(false) }
 
     // 本通道的编辑态：只在换通道时重建。points 绝不能进 pointerInput 的 key——
     // 拖动每帧都在改 points，一改 key 手势就被重启，曲线会「拖不住」
     var points by remember(channel) { mutableStateOf(CurveEdit.pointsOf(stack.curveOf(channel))) }
-    var selected by remember(channel) { mutableStateOf(-1) }
+    var selected by remember(channel) { mutableIntStateOf(-1) }
     val livePoints = rememberUpdatedState(points)
     // 画布手势进行中：拖动帧必须直贴（snap），morph 补间只留给换通道/重置的整条跳变。
     // 快拖的单帧偏移会超过 morph 的 0.08「跳变」判据，而每帧新 target 都把动画重启回
@@ -139,7 +141,7 @@ fun CurvePopup(
     // 缩小；扇面「重置」同时复位。**29 §1.2 F1（2026-10-28）改存实际边长 dp**：scale 是
     // 相对 baseSide 的比值，跨屏幕/转屏 baseSide 会变，存 scale 会漂移；把手拖拽改的是
     // savedSide，**抬手才落盘一次**（不逐帧写 prefs），重置写回 200。
-    var savedSide by remember { mutableStateOf(WotaSettings.curvePanelSideDp(prefs)) }
+    var savedSide by remember { mutableFloatStateOf(WotaSettings.curvePanelSideDp(prefs)) }
     var panelPx by remember { mutableStateOf(IntSize.Zero) }
 
     // 直方图快照轮询（弹窗可见才轮询；GL 侧 4Hz 采样，这里 150ms 拉一次进状态）

@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -479,7 +480,7 @@ private fun WotaRoot() {
     //    实录）。录制页没有页内返回钮，这条路径只来自转场迟到的误点；想退出用系统返回。
     // ② 防抖：转场 ~300ms，400ms 内的第二次 pop 是同一次手滑的余波，一律忽略。
     // ③ 系统返回不走这里：返回栈只剩起始页时由系统正常结束 Activity（既有实测行为）。
-    var lastPopAt by remember { mutableStateOf(0L) }
+    var lastPopAt by remember { mutableLongStateOf(0L) }
     fun navigateBack(): Boolean {
         if (nav.currentDestination?.id == nav.graph.startDestinationId) return false
         val now = android.os.SystemClock.elapsedRealtime()

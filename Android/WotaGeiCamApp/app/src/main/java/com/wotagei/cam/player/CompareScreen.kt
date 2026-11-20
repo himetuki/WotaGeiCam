@@ -55,6 +55,9 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -240,7 +243,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     var right by remember { mutableStateOf<VideoClip?>(null) }
     var manual by remember { mutableStateOf(false) }
-    val offsetMs = remember { mutableStateOf(0L) }
+    val offsetMs = remember { mutableLongStateOf(0L) }
     var syncing by remember { mutableStateOf(false) }
     var banner by remember { mutableStateOf<Int?>(null) }
     /**
@@ -317,8 +320,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 手势本体复用单播放页那条 pinchZoom（1..4x + 双指平移，第二指才消费，单指滑动不受影响）。
     // 一指各压一栏的双指手势两边都凑不齐两指、两栏都不动，这是自然语义，不需要特殊处理。
     // 左/右标签在 graphicsLayer 之外，缩放时保持原大不跟着糊。
-    val zoomL = remember { mutableStateOf(1f) }
-    val zoomR = remember { mutableStateOf(1f) }
+    val zoomL = remember { mutableFloatStateOf(1f) }
+    val zoomR = remember { mutableFloatStateOf(1f) }
     // 双指平移（2026-10-04）：同样两窗各自独立；pane Box 已 clipToBounds，越界绘制天然裁掉
     val panL = remember { mutableStateOf(Offset.Zero) }
     val panR = remember { mutableStateOf(Offset.Zero) }
@@ -345,7 +348,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 选轨是会话态：换片（含切边）复位回环境轨，口径与单播放页一致
     var audioTrack by remember(audioSideUri) { mutableStateOf(AudioTrackKind.ENV) }
     // 当前音频侧的容器音轨数（MediaExtractor 探测，IO 线程，按 uri 记忆）：>=2 才亮音轨选 pill
-    var audioSideTrackCount by remember(audioSideUri) { mutableStateOf(0) }
+    var audioSideTrackCount by remember(audioSideUri) { mutableIntStateOf(0) }
     // 「当前音频侧是不是双音轨片」的**唯一真源**（MediaExtractor 探测）：UI 的 chip 门与
     // CompareAudio 的行为门同吃这一位。旧实现 UI 门用 countAudioTracks、行为门却用引擎上报的
     // audioGroups.size —— 两源不一致时会「UI 能选、点了没效果」或「双音轨片看不到 chip」。
@@ -410,7 +413,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         if (!pickGate.isCurrent(token)) return false
         right = clip
         rightRevision++
-        offsetMs.value = 0L
+        offsetMs.longValue = 0L
         CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
         return true
     }
@@ -521,7 +524,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         rightEngine.attach(clip.uri)
         // 右引擎不开 REPEAT_ONE：它会先于左视频绕回导致错位，绕回改由低频编排 tick 跟随主钟
         rightEngine.loopMode = LoopMode.OFF
-        rightEngine.seekTo(leftEngine.positionMs.value + offsetMs.value)
+        rightEngine.seekTo(leftEngine.positionMs.value + offsetMs.longValue)
     }
 
     // ---- PR 式双轨时间线：几何、统一 seek、当前时刻（片 2/片 3 的落点都在这三枚上） ----
@@ -531,7 +534,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         TimelineGeometry(
             leftDurMs = leftEngine.durationMs.value.takeIf { it > 0L } ?: left.durationMs,
             rightDurMs = rightEngine.durationMs.value.takeIf { it > 0L } ?: (right?.durationMs ?: 0L),
-            offsetMs = offsetMs.value
+            offsetMs = offsetMs.longValue
         )
 
     /** 当前时间线时刻：按素材域取主钟（双素材/左独播=左钟，右独播=右钟−off，末=Tmax） */
@@ -653,7 +656,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 统一轴全部时间线化（r02）：进度条 fraction、A/B 刻度都是 (x−Tmin)/(Tmax−Tmin)，
     // 当前时刻按素材域取主钟。off=0 时 Tmin=0、Tmax=max(L,R)，双素材段观感与旧单左轴一致
     val rDur = if (rightDur > 0L) rightDur else r?.durationMs ?: 0L
-    val geoNow = TimelineGeometry(leftDuration, rDur, offsetMs.value)
+    val geoNow = TimelineGeometry(leftDuration, rDur, offsetMs.longValue)
     val timelineSpan = geoNow.tMax - geoNow.tMin
     val timelineNow = CompareTimeline.resolveT(geoNow, leftPos, rightPos, domBlackL, domBlackR)
     val unifiedFrac = dragUnified ?: if (timelineSpan > 0L) {
@@ -711,7 +714,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 右独播域：主钟=右，步进右引擎（stepFrame 内部 softPause(true)）再把素材位
             // 换算回时间线 T′=素材位−off；跨域另一轨的 park/唤醒交给编排拍
             val target = rightEngine.stepFrame(fwd)
-            seekTimeline(target - offsetMs.value)
+            seekTimeline(target - offsetMs.longValue)
         } else {
             // 双素材域/左独播域：主钟=左。步进=暂停态逐帧看，从钟也要就地停住，
             // 否则它继续走钟、画面两半一动一静（旧实现先 softPause 右引擎同款）
@@ -726,7 +729,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         launchSync(app, left, clip) { res ->
             syncing = false
             if (res.ok) {
-                offsetMs.value = res.offsetMs
+                offsetMs.longValue = res.offsetMs
                 // r03 重锚：旧形态 seekTo(leftPos+offset) 隐含 T=leftLive，只在双素材域成立，
                 // 独播域发起对齐会把左 park 位错当锚点（负值 coerce 0 的老边角同族）。改走
                 // 统一轴重锚：T 取回调时刻的 currentTimelineMs()（对齐期间时间线在走也不跳，
@@ -777,14 +780,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // clipToBounds：镜像/缩放是绘制期变换（graphicsLayer 默认不裁剪），不裁会越过
             // 2dp 分隔线压到邻栏（审查 P2；单页全屏无感，分栏后任何一次捏合都可见）
             Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL, panL)) {
-                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, pan = panL.value, mirror = mirror == 1 || mirror == 3)
+                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.floatValue, pan = panL.value, mirror = mirror == 1 || mirror == 3)
                 // dormant 轨黑层：常驻节点 alpha 0/1 切换（增删节点会闪帧）。Box 无指针
                 // 处理器不构成命中目标，事件照旧落到画面层；角标在它之后组合、不被盖住。
                 // **alpha 必须在 background 之前**：modifier 链左为外、右为内，`alpha` 只会作用在
                 // 它右边的绘制上；写成 `.background(Black).alpha(x)` 时黑底在黑层之外恒不透明，
                 // 两窗就被常驻纯黑永久盖死（2026-10-06 双黑真因，与 domBlack 位无关）。
                 Box(Modifier.fillMaxSize().alpha(if (domBlackL) 1f else 0f).background(Color.Black))
-                ZoomBadge(zoomL.value, Modifier.align(Alignment.TopStart).padding(8.dp))
+                ZoomBadge(zoomL.floatValue, Modifier.align(Alignment.TopStart).padding(8.dp))
                 SideLabel(stringResource(R.string.compare_left, left.name), Modifier.align(Alignment.TopEnd))
             }
             Box(Modifier.width(2.dp).fillMaxHeight().background(WotaDivider)) {}
@@ -802,10 +805,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         )
                     }
                 } else {
-                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
+                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.floatValue, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
                     // alpha 在 background 之前（同上：反过来黑底恒不透明 → 右窗永久黑）
                     Box(Modifier.fillMaxSize().alpha(if (domBlackR) 1f else 0f).background(Color.Black))
-                    ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
+                    ZoomBadge(zoomR.floatValue, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
                     // 右窗旋转钮（观看辅助，逆时针 90°/按）：计划原定右上角与左上 ZoomBadge 对称，
                     // 但右上角已被片名标签 SideLabel 占着（叠放互相遮），按「避开已有控件」条款
@@ -982,7 +985,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                         val rightLive = rightEngine.livePositionMs()
                                         leftEngine.seekTo(target)
                                         dragLeft = null
-                                        offsetMs.value = rightLive - target
+                                        offsetMs.longValue = rightLive - target
                                     },
                                     modifier = Modifier.weight(1f)
                                 )
@@ -1002,7 +1005,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                         val leftLive = leftEngine.livePositionMs()
                                         rightEngine.seekTo(target)
                                         dragRight = null
-                                        offsetMs.value = target - leftLive
+                                        offsetMs.longValue = target - leftLive
                                     },
                                     modifier = Modifier.weight(1f)
                                 )
@@ -1074,7 +1077,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             TimePill(formatDuration(leftPos))
-                            TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.value)))
+                            TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.longValue)))
                             // 第三格=时间线总长（off=0 且右片不长于左片时数值与旧口径一致）
                             TimePill(formatDuration(timelineSpan))
                             // 剪辑语义：当前在播的音频在哪条视频轨的哪条音轨（两条视频轨由左右两窗表达）。
@@ -1292,7 +1295,7 @@ private fun CompareHistorySheet(
     // 解析直接用 LaunchedEffect 自己的协程（一次性反查 clipByIdOnce 自带 IO 切换），不丢进外部 scope：
     // 外部 scope 在换 key 重解析时不会取消上一个任务，旧结果可能反过来盖掉刚删完的新列表。
     var items by remember { mutableStateOf<List<Pair<CompareHistory.Entry, VideoClip?>>>(emptyList()) }
-    var refresh by remember { mutableStateOf(0) }
+    var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(refresh) {
         val resolved = ArrayList<Pair<CompareHistory.Entry, VideoClip?>>()
         CompareHistory.entries(prefs).forEach { entry ->
