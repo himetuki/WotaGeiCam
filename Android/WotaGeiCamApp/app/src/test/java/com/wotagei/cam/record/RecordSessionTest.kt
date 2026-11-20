@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -34,6 +35,17 @@ class RecordSessionTest {
     private fun part(i: Int, committed: Boolean = true): SettledPart = SettledPart(
         partIndex = i,
         uriStr = "content://media/external/video/media/${100 + i}",
+        durationMs = 1_000L,
+        committed = committed
+    )
+
+    /** 发布路实际交出的段视图（JVM 单测没有 MediaStore uri，用 path 判"文件在盘上"） */
+    private fun sealedSeg(i: Int, committed: Boolean = true): VideoSegment = VideoSegment(
+        uri = null,
+        path = "/tmp/part$i.mp4",
+        partIndex = i,
+        bytes = 1_000L,
+        startMs = i * 1_000L,
         durationMs = 1_000L,
         committed = committed
     )
@@ -329,6 +341,159 @@ class RecordSessionTest {
     }
 
     @Test
+    fun `临时快照不结算_泵线程终态与迟到发布到齐后才权威交付`() = runBlocking {
+        val backend = FakeBackend()
+        val s = session()
+        // 停录 join 超时：泵线程还在跑，真实错误为 null，只有 1 段未落地发布
+        val provisional = result(path = null).copy(terminal = false, pendingPublications = 1)
+        assertNull(
+            "临时快照（terminal=false）不是结论，绝不许结算/清桥/交付",
+            RecordSession.record(backend, 7L, s, provisional, practiceArmed = true, settled = emptyList())
+        )
+        Thread.sleep(100)
+        assertEquals("临时快照不写系列", 0, backend.writeCalls.get())
+        assertEquals("临时快照不交付练习", 0, backend.deliveries.size)
+        assertEquals("临时快照不清练习桥", 0, backend.clearCalls.get())
+
+        // 迟到发布先落地（段已公开、pending 归零），但泵线程还没交终态 ⇒ 仍不许结算
+        val mid = RecordSession.onDelivery(
+            RecorderDelivery.LatePart(
+                seriesId = 7L,
+                startedAtMs = s,
+                partIndex = 0,
+                segment = sealedSeg(0),
+                classification = PublishClass.PUBLISHED,
+                settled = part(0),
+                pendingPublications = 0
+            )
+        )
+        assertNotNull("段视图必须随迟到发布更新", mid)
+        val midDelta = mid!!
+        assertFalse("引擎未终态 ⇒ 不许当成权威结论", midDelta.terminal)
+        assertNull("引擎未终态 ⇒ 不许交付结算", midDelta.settlement)
+        Thread.sleep(100)
+        assertEquals("发布落地但引擎未终态不许结算", 0, backend.writeCalls.get())
+
+        // 泵线程延迟收尾的真实终态（同一身份、带同样的段）
+        val terminal = RecordSession.onDelivery(
+            RecorderDelivery.FinalResult(
+                seriesId = 7L,
+                startedAtMs = s,
+                result = result(path = "/tmp/part0.mp4"),
+                settled = listOf(part(0))
+            )
+        )
+        assertNotNull(terminal)
+        val finalDelta = terminal!!
+        assertTrue("引擎终态 + 发布静默 = 权威结论", finalDelta.terminal)
+        assertTrue("有保留段、无真实错误 ⇒ 权威成功", finalDelta.result.ok)
+        assertNotNull("权威结论必须给出结算任务", finalDelta.settlement)
+        awaitDeliveries(backend, 1)
+        assertEquals("迟到发布与终态到齐后恰好结算一次", 1, backend.writeCalls.get())
+        assertEquals("成功且武装 ⇒ 交付首段", listOf(0), backend.deliveries.map { it.partIndex })
+        assertEquals(0, backend.clearCalls.get())
+    }
+
+    @Test
+    fun `终态但发布pending不算失败_迟到发布落地后重算权威成功`() = runBlocking {
+        val backend = FakeBackend()
+        val s = session()
+        // 正常停录：引擎已终态，但封口段还在发布路（pending=1），零产物视图的 error 必须为 null
+        val pending = result(path = null).copy(terminal = true, pendingPublications = 1)
+        assertNull(
+            "发布路未静默不许结算",
+            RecordSession.record(backend, 7L, s, pending, practiceArmed = true, settled = emptyList())
+        )
+        assertEquals("pending 不是失败", null, pending.error)
+        Thread.sleep(100)
+        assertEquals(0, backend.writeCalls.get())
+        assertEquals(0, backend.clearCalls.get())
+
+        val delta = RecordSession.onDelivery(
+            RecorderDelivery.LatePart(
+                seriesId = 7L,
+                startedAtMs = s,
+                partIndex = 0,
+                segment = sealedSeg(0),
+                classification = PublishClass.PUBLISHED,
+                settled = part(0),
+                pendingPublications = 0
+            )
+        )
+        assertNotNull(delta)
+        val grown = delta!!
+        assertTrue("发布落地后必须重算为权威", grown.terminal)
+        assertTrue("迟到成功必须能定稿为成功（不许停在 pending）", grown.result.ok)
+        assertNull(grown.result.error)
+        assertNotNull("权威成功必须补结算", grown.settlement)
+        awaitDeliveries(backend, 1)
+        awaitWrites(backend, 1)
+        assertEquals("pending 从来不是失败 ⇒ 不许清练习桥", 0, backend.clearCalls.get())
+    }
+
+    @Test
+    fun `零产物发布失败落地后给可查失败码且不伪装成功`() = runBlocking {
+        val backend = FakeBackend()
+        val s = session()
+        val pending = result(path = null).copy(terminal = true, pendingPublications = 1)
+        assertNull(
+            RecordSession.record(backend, 7L, s, pending, practiceArmed = true, settled = emptyList())
+        )
+        val delta = RecordSession.onDelivery(
+            RecorderDelivery.LatePart(
+                seriesId = 7L,
+                startedAtMs = s,
+                partIndex = 0,
+                segment = null,
+                classification = PublishClass.FAILED,
+                settled = null,
+                pendingPublications = 0
+            )
+        )
+        assertNotNull(delta)
+        val failed = delta!!
+        assertTrue(failed.terminal)
+        assertFalse("发布失败不许伪装成功", failed.result.ok)
+        assertEquals(
+            "零产物 + 发布真实失败 ⇒ 可查的发布失败码（不是 TOO_SHORT）",
+            "${RecordError.ENGINE_ERROR}:PUBLISH",
+            failed.result.error
+        )
+        assertNotNull(failed.settlement)
+        awaitClears(backend, 1)
+        assertEquals("失败不许交付练习", 0, backend.deliveries.size)
+    }
+
+    @Test
+    fun `错误尝试或错误系列的迟到发布不进入当前会话`() = runBlocking {
+        val backend = FakeBackend()
+        val s = session()
+        val job = RecordSession.record(
+            backend, 7L, s, result(), practiceArmed = true, settled = listOf(part(0)), attempt = 1
+        )!!
+        withTimeout(5_000) { job.await() }
+        awaitWrites(backend, 1)
+        awaitDeliveries(backend, 1)
+
+        assertNull(
+            "被判废尝试（attempt 0）的迟到发布只许进缓冲，不许作用到 attempt 1",
+            RecordSession.onDelivery(
+                RecorderDelivery.LatePart(7L, s, 9, sealedSeg(9), PublishClass.PUBLISHED, part(9), attempt = 0)
+            )
+        )
+        assertNull(
+            "别的系列同起始时间的迟到事件同样必须隔离",
+            RecordSession.onDelivery(
+                RecorderDelivery.LatePart(8L, s, 9, sealedSeg(9), PublishClass.PUBLISHED, part(9), attempt = 1)
+            )
+        )
+        Thread.sleep(100)
+        assertEquals("错误身份的迟到事件不许补结算", 1, backend.writeCalls.get())
+        assertEquals(1, backend.deliveries.size)
+        assertEquals(0, backend.clearCalls.get())
+    }
+
+    @Test
     fun `练习武装是停录快照_后续登记不改变`() = runBlocking {
         val backend = FakeBackend()
         val s = session()
@@ -417,6 +582,81 @@ class RecordSessionTest {
                 RecorderDelivery.LatePart(7L, old, 9, null, PublishClass.PUBLISHED, part(9))
             )
         )
+    }
+
+    @Test
+    fun `R06 迟到发布先到而终态快照晚到不得把段写回待发布`() {
+        val backend = FakeBackend()
+        val s = session()
+        val interim = result().copy(
+            terminal = false,
+            pendingPublications = 1,
+            pendingPartIds = setOf(1)
+        )
+        RecordSession.record(backend, 7L, s, interim, practiceArmed = false, settled = listOf(part(0)))
+        assertNotNull(
+            "迟到段必须产生增量",
+            RecordSession.onDelivery(
+                RecorderDelivery.LatePart(7L, s, 1, sealedSeg(1), PublishClass.PUBLISHED, part(1), pendingPublications = 0)
+            )
+        )
+        // 停录那一刻生成的终态快照：发布路当时还有 1 段未落地。它比迟到结论晚到。
+        val stale = result().copy(
+            terminal = true,
+            pendingPublications = 1,
+            pendingPartIds = setOf(1),
+            parts = listOf(sealedSeg(0))
+        )
+        val final = RecordSession.onDelivery(RecorderDelivery.FinalResult(7L, s, stale, listOf(part(0))))
+        assertNotNull(final)
+        assertTrue("已收到结论的段不得被终态快照复活成 pending", final!!.result.authoritative)
+        assertEquals(0, final.result.pendingPublications)
+        awaitWrites(backend, 1)
+        assertEquals(listOf(0, 1), backend.writes.last().map { it.partIndex })
+    }
+
+    @Test
+    fun `R06 终态先到而迟到发布后到也必须收敛到权威结论`() {
+        val backend = FakeBackend()
+        val s = session()
+        val interim = result().copy(
+            terminal = false,
+            pendingPublications = 1,
+            pendingPartIds = setOf(1)
+        )
+        RecordSession.record(backend, 7L, s, interim, practiceArmed = false, settled = listOf(part(0)))
+        val stale = result().copy(
+            terminal = true,
+            pendingPublications = 1,
+            pendingPartIds = setOf(1),
+            parts = listOf(sealedSeg(0))
+        )
+        val final = RecordSession.onDelivery(RecorderDelivery.FinalResult(7L, s, stale, listOf(part(0))))
+        assertNotNull(final)
+        assertFalse("发布路仍有一段未落地前不是权威结论", final!!.result.authoritative)
+        val late = RecordSession.onDelivery(
+            RecorderDelivery.LatePart(7L, s, 1, sealedSeg(1), PublishClass.PUBLISHED, part(1), pendingPublications = 0)
+        )
+        assertNotNull(late)
+        assertTrue("最后一段落地后必须立刻权威", late!!.result.authoritative)
+        awaitWrites(backend, 1)
+        assertEquals(listOf(0, 1), backend.writes.last().map { it.partIndex })
+    }
+
+    @Test
+    fun `R07 迟到终态只修正时长也必须再结算一次`() {
+        val backend = FakeBackend()
+        val s = session()
+        RecordSession.record(backend, 7L, s, result(), practiceArmed = false, settled = listOf(part(0)))
+        awaitWrites(backend, 1)
+        assertEquals(1_000L, backend.writes.last().single().durationMs)
+        val corrected = result().copy(terminal = true, pendingPartIds = emptySet())
+        val delta = RecordSession.onDelivery(
+            RecorderDelivery.FinalResult(7L, s, corrected, listOf(part(0).copy(durationMs = 2_500L)))
+        )
+        assertNotNull("时长修正属于不同结算键，必须再落库一次", delta)
+        awaitWrites(backend, 2)
+        assertEquals(2_500L, backend.writes.last().single().durationMs)
     }
 
     // ------------------------------------------------------------------ 纯函数

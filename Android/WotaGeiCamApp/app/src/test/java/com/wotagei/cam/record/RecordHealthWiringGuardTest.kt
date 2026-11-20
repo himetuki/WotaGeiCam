@@ -352,7 +352,11 @@ class RecordHealthWiringGuardTest {
         assertTrue("锚点丢失：healthCheckLoop 没截到 HEALTHY 分支", healthy >= 0)
         assertTrue("锚点丢失：healthCheckLoop 没截到看门狗挂载", arm >= 0)
         assertTrue("看门狗必须在 HEALTHY 分支挂（判定顺序不许前移）", arm > healthy)
-        assertTrue("HEALTHY 仍须归零 attempt（下一次起录从满机会算）", body.contains("attempt = 0"))
+        // 2026-11-20 收尾身份：attempt 是引擎会话身份（停录登记/迟到终态的对账键），只能单调；
+        // 自检重试预算另用 healthRestartCount，HEALTHY 只清预算、绝不回退身份（回退会与
+        // 被判废那次尝试的迟到终态撞键，把重录成功的会话洗成失败）。
+        assertTrue("HEALTHY 只清自检重试预算（下一次起录从满机会算）", body.contains("healthRestartCount = 0"))
+        assertFalse("HEALTHY 不许把 attempt 归零（引擎身份单调，撞键会串场）", body.contains("attempt = 0"))
         assertFalse(
             "起录路径不许直接挂看门狗（会挤掉自检的自动重录）",
             bodyOf(masked, "beginSession").contains("engineWatchdogTask")

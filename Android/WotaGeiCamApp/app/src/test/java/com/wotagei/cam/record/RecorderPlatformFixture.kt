@@ -371,6 +371,7 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
                     public java.io.FileDescriptor getFileDescriptor() { return null; }
                     public boolean getUsable() { return true; }
                     public void close() { closes++; }
+                    public void closeStrict() { closes++; }
                     public static class Companion {
                         public OutputTarget open(android.content.Context ctx, OutputSink sink) {
                             opens++;

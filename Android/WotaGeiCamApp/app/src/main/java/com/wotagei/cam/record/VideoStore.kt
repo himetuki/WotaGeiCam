@@ -359,13 +359,23 @@ class OutputTarget private constructor(
 
     val uri: Uri? get() = (sink as? OutputSink.Pending)?.uri
 
-    /** 关输出句柄（MediaMuxer/MediaRecorder 释放之后再调） */
+    /**
+     * 关输出句柄（MediaMuxer/MediaRecorder 释放之后再调）。
+     *
+     * 旧路径吞异常（收摊尽量不抛），**发布线程不许用这一版**：清 `IS_PENDING` 前必须确认
+     * fd 真的关了；关闭失败 = 本段发布失败（[closeStrict] 抛出，由发布线程归入 FAILED）。
+     */
     fun close() {
         try {
-            held?.close()
+            closeStrict()
         } catch (e: Exception) {
             Log.i(TAG, "close output target: ${e.message}")
         }
+    }
+
+    /** 严格关闭：关闭失败向上抛（发布线程据此判 FAILED，绝不在未确认关闭的句柄上发布） */
+    fun closeStrict() {
+        held?.close()
     }
 
     companion object {

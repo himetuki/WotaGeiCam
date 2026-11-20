@@ -32,10 +32,10 @@ import java.io.IOException
  * 都没留下，UI 计时冻结且无提示。出货应用 StaCam 的同款分段流程是 stop → release（字段置 null）
  * → 500ms → 新实例 → 重挂输入面 → prepare → start（smali `x5/b.e()`），本类照此口径换代。
  */
-class MrRecorder(
+internal class MrRecorder(
     private val ctx: Context,
     private val store: VideoStore
-) : Recorder, MediaRecorder.OnInfoListener, MediaRecorder.OnErrorListener {
+) : Recorder, MediaRecorder.OnInfoListener, MediaRecorder.OnErrorListener, SessionDeliverySink {
 
     companion object {
         /** 段间隔：stop 与 re-prepare 之间留时间让文件系统落盘（restartRecord） */
@@ -81,7 +81,31 @@ class MrRecorder(
     @Volatile private var sessionError: String? = null
 
     private val clock = ElapsedClock()
-    private val parts = ArrayList<VideoSegment>()
+    // 发布线程会并发追加迟到落地的段；COW 让"控制线程清单快照 + 迟到结论"的结构性安全成立
+    private val parts = java.util.concurrent.CopyOnWriteArrayList<VideoSegment>()
+
+    /**
+     * 已封口段的独立发布路（R06）：与 Codec 路同一实现，封口/清 IS_PENDING 不再压进换段腿或
+     * stop 的同步路径；超时结论经 [sessionRelay] 交会话所有者，后续以同一会话键补账。
+     */
+    private val sessionRelay = SessionRelay()
+    private val sealedPublisher = SealedPublisher(PUBLISH_WAIT_MS, sessionRelay::onLate)
+    @Volatile private var sessionSeriesId = 0L
+    @Volatile private var sessionStartedAtMs = 0L
+    @Volatile private var sessionAttempt = 0
+
+    @Volatile override var onSessionDelivery: ((RecorderDelivery) -> Unit)? = null
+        set(value) {
+            field = value
+            sessionRelay.attach(value)
+        }
+
+    override fun bindSession(seriesId: Long, startedAtMs: Long, attempt: Int) {
+        sessionSeriesId = seriesId
+        sessionStartedAtMs = startedAtMs
+        sessionAttempt = attempt
+        sessionRelay.bind(seriesId, startedAtMs, attempt)
+    }
     private var partIndex = 0
     private var partStartMs = 0L
 
@@ -297,7 +321,9 @@ class MrRecorder(
         val prev = state
         if (prev == EngineState.IDLE) {
             if (parts.isNotEmpty()) return buildResult(engineError)
+            // 空首段仍属本会话：系列归属来自 store，不取决于这次有没有封出段（与 Codec 路同口径）。
             return RecordResult.fail(engineError ?: RecordError.BAD_STATE, clock.elapsedMs())
+                .copy(seriesId = store.seriesId)
         }
         state = EngineState.STOPPING
         // err 一律在收口之后再取：一帧没写时 stop 会抛异常，本段只能当废片
@@ -342,10 +368,29 @@ class MrRecorder(
         // 保证"旧段确实失败过"不会从最终 RecordResult 里消失）
         val effective = err ?: sessionError
         // 无产物也要把换段丢帧账带上（与 CodecRecorder.finish 同口径：换段受阻时用户唯一能看到的
-        // 解释就是"整段丢了 N 秒"，不能因为没成片就把账抹掉）
-        val out = if (parts.isEmpty()) RecordResult.fail(effective ?: RecordError.TOO_SHORT, total, rotateLoss.totalMs)
-        else buildResult(effective)
-        Log.i(TAG, "mr stop total=${total}ms parts=${parts.size} code=${out.error}")
+        // 解释就是"整段丢了 N 秒"，不能因为没成片就把账抹掉）。
+        // 发布路仍在跑（快照 pending 非空）时不是失败：交 terminal=true + 确切待发布段序，
+        // 迟到结论把集合消空后由会话所有者收敛为权威结论（R06/R07）。
+        val snap = sealedPublisher.snapshot()
+        val merged = mergedParts()
+        val out = when {
+            merged.isNotEmpty() -> buildResult(effective)
+            effective != null -> RecordResult.fail(effective, total, rotateLoss.totalMs)
+                .copy(seriesId = store.seriesId, pendingPublications = snap.pendingPartIds.size, pendingPartIds = snap.pendingPartIds)
+            snap.pendingPartIds.isNotEmpty() -> buildResult(null)
+            else -> RecordResult.fail(RecordError.TOO_SHORT, total, rotateLoss.totalMs)
+                .copy(seriesId = store.seriesId)
+        }
+        if (snap.pendingPartIds.isNotEmpty()) {
+            // 终止结论先交给会话所有者（可能有迟到结论先到，RecordSession 会缓冲后合并）。
+            val sink = onSessionDelivery
+            if (sink != null && sessionStartedAtMs > 0L) {
+                runCatching {
+                    sink(RecorderDelivery.FinalResult(sessionSeriesId, sessionStartedAtMs, out, attempt = sessionAttempt))
+                }
+            }
+        }
+        Log.i(TAG, "mr stop total=${total}ms parts=${out.parts.size} pending=${out.pendingPartIds?.size ?: 0} code=${out.error}")
         state = EngineState.IDLE
         engineError = null
         sessionError = null
@@ -382,7 +427,9 @@ class MrRecorder(
                         errorCode = stopErrorForKeep(),
                         durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
                         containerFinalized = stopConfirmed || reachedMaxFilesize
-                    )
+                    ),
+                    // release 是最后一次收口机会：有界等一次同步结论，超时仍由发布路补交。
+                    waitMs = PUBLISH_WAIT_MS
                 )
                 releaseEngine()
             }
@@ -402,7 +449,9 @@ class MrRecorder(
                         errorCode = stopErrorForKeep(),
                         durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
                         containerFinalized = salvageConfirmed
-                    )
+                    ),
+                    // release 是最后一次收口机会：有界等一次同步结论，超时仍由发布路补交。
+                    waitMs = PUBLISH_WAIT_MS
                 )
                 releaseEngine()
             }
@@ -541,6 +590,7 @@ class MrRecorder(
             // 801 自停是 MR 路真实的"容器已确认收尾"信号：它由平台封口后发出，此时 stop()
             // 必抛 STOP_FAILED；不把它传进判据就会把刚写完的整段有效文件按废片删掉。
             timedLegStep("seal") {
+                // 换段腿绝不等发布：fd 关闭与清 IS_PENDING 由发布路继续，迟到结论回会话。
                 sealCurrent(
                     dur,
                     segmentKeepDecision(
@@ -548,7 +598,8 @@ class MrRecorder(
                         errorCode = stopErrorForKeep(),
                         durationMs = dur, minKeepMs = RecordProfile.MIN_KEEP_MS,
                         containerFinalized = stopConfirmed || reachedMaxFilesize
-                    )
+                    ),
+                    waitMs = 0L
                 )
             }
             Thread.sleep(SEGMENT_GAP_MS)
@@ -707,19 +758,25 @@ class MrRecorder(
      * `muxDiag` 恒空/0/""），也不数视频样本位次（`segVideoSamples` 恒空表，转换会话恒走 Codec）。
      */
     private fun buildResult(err: String?): RecordResult {
-        val first = parts.firstOrNull()
+        val merged = mergedParts()
+        val snap = sealedPublisher.snapshot()
+        val pendingIds = snap.pendingPartIds
+        val first = merged.firstOrNull()
         return RecordResult(
             uri = first?.uri,
             path = first?.path,
-            bytes = parts.sumOf { it.bytes },
+            bytes = merged.sumOf { it.bytes },
             durationMs = clock.elapsedMs(),
             error = err,
             seriesId = store.seriesId,
-            parts = parts.toList(),
-            uncommitted = parts.count { !it.committed },
+            parts = merged,
+            uncommitted = merged.count { !it.committed },
             segLostMs = segLostMs.toList(),
             lostMs = rotateLoss.totalMs,
-            rotateStalls = rotateLoss.count
+            rotateStalls = rotateLoss.count,
+            pendingPublications = pendingIds.size,
+            pendingPartIds = pendingIds,
+            publicationFailures = snap.outcomes.count { it.classification == PublishClass.FAILED }
         )
     }
 
@@ -783,26 +840,50 @@ class MrRecorder(
         return confirmed
     }
 
-    private fun sealCurrent(durationMs: Long, keep: Boolean) {
+    /**
+     * 封口并发布当前段（R06）：fd 关闭与 MediaStore 发布都在发布路上按序完成，
+     * [waitMs] 只决定调用方等多久拿同步结论（换段/释放传 0，停止传发布等待窗）。
+     * 超时不是失败：结论经 [sessionRelay] 以同一会话键补交。
+     */
+    private fun sealCurrent(durationMs: Long, keep: Boolean, waitMs: Long = PUBLISH_WAIT_MS) {
         val sink = currentSink ?: return
-        // 先关输出句柄再 commit/discard：文件写完、大小统计到位之后才能清 IS_PENDING
-        target?.close()
-        target = null
+        val t = target
+        val index = partIndex
+        val start = partStartMs
         currentSink = null
-        val seg = store.seal(sink, partIndex, partStartMs, durationMs, keep)
+        target = null
+        val draft = SealedDraft(index, start, durationMs, keep)
+        val published = sealedPublisher.publish(
+            draft = draft,
+            waitMs = waitMs,
+            close = t?.let { { it.closeStrict() } },
+            block = { store.seal(sink, index, start, durationMs, keep) }
+        )
         // 废片不能进 parts：seal 已经把这条 MediaStore 记录删掉了，列进去就会让
         // buildResult 拿到一个不存在的 uri，out.ok 成立 → UI 报「已保存」而文件其实没了
-        if (keep) parts.add(seg)
+        published?.visibleSegment()?.let { parts.add(it) }
     }
 
     private fun discardCurrent(code: String) {
         val sink = currentSink ?: return
         Log.i(TAG, "discard unusable output: $code")
-        target?.close()
+        val t = target
+        val index = partIndex
+        val start = partStartMs
         target = null
         currentSink = null
-        store.seal(sink, partIndex, partStartMs, 0L, keep = false)
+        // 丢弃不需要同步结论：只提交，绝不让一次卡住的 Provider 拖住失败收尾。
+        sealedPublisher.publish(
+            draft = SealedDraft(index, start, 0L, keep = false),
+            waitMs = 0L,
+            close = t?.let { { it.closeStrict() } },
+            block = { store.seal(sink, index, start, 0L, keep = false) }
+        )
     }
+
+    /** 控制线程清单 + 发布台账（同步与迟到）的一致视图；按段序去重 */
+    private fun mergedParts(): List<VideoSegment> =
+        mergeSegments(parts.toList(), sealedPublisher.publishedSegments())
 
     private fun releaseEngine() {
         val rec = mr ?: return

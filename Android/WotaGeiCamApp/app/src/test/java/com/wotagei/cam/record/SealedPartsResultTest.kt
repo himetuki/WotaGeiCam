@@ -12,8 +12,10 @@ import org.junit.Test
  * 背景（2026-10-16 "录制结果如实化"）：joinLoop 超时时泵线程仍活着，收尾只能"只记账不拆资源"，
  * 但那份结果必须**如实**带出"此刻已封段"——旧行为返回无产物的失败结果，用户被告知全丢、
  * 相册里却躺着 N 段。桥函数是"快照 → 结果字段"的唯一落点，这里逐字段钉住：
- * 1. 空快照 = 旧失败形态**逐字不变**（[RecordResult.fail]：不带 seriesId/rotateStalls/
- *    latePending/ambientLost——旧构造点行为不许漂）；
+ * 1. 空快照 = 旧失败形态**除 seriesId 外逐字不变**（[RecordResult.fail]：不带 rotateStalls/
+ *    latePending/ambientLost）。**seriesId 例外**是 R06/R07 的收尾身份要求（2026-11-20）：
+ *    空首段不是"没有会话"，停录登记与迟到发布对账必须同一个系列键，否则迟到的 commit
+ *    永远认领不到（旧口径 seriesId=0 正是缺陷本身，见 `RecordingSettlementIdentityGuardTest`）；
  * 2. 非空快照如实映射 uri/path/bytes/分段清单/登记未成功数/能安全读的账，且**不清 error**
  *    （诊断码必须可查：UI 呈现计划把它翻成软附注，落的仍是同一条码）；
  * 3. 逐段样本/丢失账（泵线程单写者的普通容器，快照那一刻可能正在被写）**一律不带**（宁缺勿假）。
@@ -53,8 +55,9 @@ class SealedPartsResultTest {
         assertEquals("时长照旧", 5_000L, out.durationMs)
         assertEquals("丢失账照旧带上（用户唯一能看到的解释）", 1_234L, out.lostMs)
         assertEquals("现场快照照旧带上（排查通道）", "diag", out.muxDiag)
-        // 旧 RecordResult.fail 形态：这四枚不在场（旧构造点行为逐字不变，谁顺手"补全"谁改行为）
-        assertEquals("空快照不带 seriesId（旧 fail 形态）", 0L, out.seriesId)
+        // 旧 RecordResult.fail 形态：这三枚不在场（旧构造点行为逐字不变，谁顺手"补全"谁改行为）。
+        // seriesId 例外：空首段仍属本会话，迟到发布/终态对账要靠它认领（R06/R07 收尾身份）。
+        assertEquals("空快照也必须带会话系列号（否则迟到对账永远不是同一个键）", 7L, out.seriesId)
         assertEquals("空快照不带 rotateStalls（旧 fail 形态）", 0, out.rotateStalls)
         assertEquals("空快照不带 latePending（旧 fail 形态）", 0L, out.latePending)
         assertFalse("空快照不带 ambientLost（旧 fail 形态）", out.ambientLost)

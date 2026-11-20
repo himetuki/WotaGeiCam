@@ -196,10 +196,11 @@ class DegradedKeepGuardTest {
             finish.contains("degraded != null && degraded == error")
         )
         // 无产物仍走失败：同步与迟到的已封段共用的清单为空时优先失败。
-        val emptyAt = finish.indexOf("mergedParts().isEmpty()")
+        assertTrue("finish 必须先合并已封段视图（含迟到发布台账）", finish.contains("val merged = mergedParts()"))
+        val emptyAt = finish.indexOf("merged.isEmpty()")
         val degradedAt = finish.indexOf("degraded != null && degraded == error")
         assertTrue("锚点丢失：finish 没截到降级分支", degradedAt >= 0)
-        assertTrue("无产物必须仍走失败呈现（parts.isEmpty 分支排在降级分支之前）", emptyAt in 0 until degradedAt)
+        assertTrue("无产物必须仍走失败呈现（空段失败分支排在降级分支之前）", emptyAt in 0 until degradedAt)
         // RecordResult 轻量字段：默认 null，其它路径行为不变
         assertTrue(
             "RecordResult 必须有 degradedCode 字段且默认 null（旧构造点行为逐字不变）",

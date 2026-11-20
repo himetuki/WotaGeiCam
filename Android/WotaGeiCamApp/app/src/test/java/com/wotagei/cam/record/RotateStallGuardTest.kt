@@ -62,11 +62,23 @@ class RotateStallGuardTest {
         assertFalse("nextSegment 不许直接调 store.discard", next.contains("store.discard("))
 
         val seal = bodyOf(codec, "sealCurrent")
-        assertTrue("sealCurrent 必须经有界关 fd", seal.contains("closeTargetBounded()"))
-        // R06：封口段的发布改走独立发布路（不吃换段腿预算），执行体拆成 sealOnPublisher
+        // fd 关闭权随段移交发布线程（2026-11-20 收尾守卫）：泵线程不许自己关。
+        // 关闭是**严格**的（closeStrict 抛错 ⇒ 段 FAILED、发布块不跑），不套 BoundedStore：
+        // 套 500ms 就允许"close 还在后台跑、发布已经清 IS_PENDING"。
+        assertFalse("sealCurrent 不许在泵线程上直接关 fd", seal.contains("closeTargetBounded()"))
+        assertTrue("sealCurrent 必须把输出目标从字段摘走（所有权交发布线程）", seal.contains("target = null"))
+        assertTrue("关闭动作必须走严格 closeStrict（抛错交给发布线程分类）", seal.contains("closeStrict()"))
+        assertFalse("关闭不许再套 BoundedStore（超时会让发布与仍在关闭的 fd 赛跑）", seal.contains("storeIo.run("))
+        assertFalse("发布等待窗不许再用 cleanupBudgetMs 之类收摊预算", seal.contains("cleanupBudgetMs("))
+        // R06：封口段的发布改走独立发布路（不吃换段腿预算），执行体拆成顶层 sealOnPublisher
         assertTrue(
-            "sealCurrent 必须把封口段交给独立发布路（同步等待窗 + 迟到补发）",
-            seal.contains("sealedPublisher.publish(draft) { sealOnPublisher(")
+            "sealCurrent 必须把关闭动作与封口段一并交给独立发布路（close 先于 publish）",
+            seal.contains("sealedPublisher.publish(") && seal.contains("closeStrict()")
+        )
+        assertTrue(
+            "换段路径只提交不等待（waitMs=0），停止路径才在有界等待",
+            seal.contains("val publishWaitMs = if (stopping) PUBLISH_WAIT_MS else 0L") &&
+                seal.contains("waitMs = publishWaitMs")
         )
         assertFalse("sealCurrent 不许直接 target?.close()（关 fd 也走 MediaProvider）", seal.contains("target?.close()"))
         assertFalse("sealCurrent 不许直接 store.seal（发布执行体只在发布线程上跑）", seal.contains("store.seal("))
@@ -76,7 +88,7 @@ class RotateStallGuardTest {
         )
         assertTrue(
             "发布执行体必须真的调 store.seal（不是只声明不接线）",
-            bodyOf(codec, "sealOnPublisher").contains("store.seal(")
+            bodyOf(sealedPub, "sealOnPublisher").contains("store.seal(")
         )
         // 发布等待窗必须独立成账：常量住在发布路文件里，且不引用换段预算/单次入库预算
         assertTrue("发布等待窗常量必须声明", sealedPub.contains("PUBLISH_WAIT_MS = 3_000L"))

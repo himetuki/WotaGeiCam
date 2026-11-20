@@ -608,13 +608,19 @@ internal class CodecRecorder(
     }
 
     /**
+     * 发布线程 → 会话所有者的窄通道（R06/R07）：发布线程只持有这个对象（身份 + 交付函数），
+     * **不持有 recorder/feeders/输入面/Activity**，即使 Provider 挂住也不会钉住整条 UI 资源链。
+     */
+    private val sessionRelay = SessionRelay()
+
+    /**
      * 已封段的**独立发布路**（R06）：封口后的「查 SIZE/DATA → 清 IS_PENDING / 删记录」不再吃
      * 换段腿预算，也不许"没预算就不发布"（旧 `sealBounded` 对 `timeoutMs <= 0` 直接判超时，
      * 整段永久 `IS_PENDING=1`）。等待窗 [PUBLISH_WAIT_MS] 只决定当轮能否同步拿回结论：
-     * 超时不取消调用（binder 无取消接口），结论稍后经 [onLatePublished] 补进段清单并交会话所有者。
+     * 超时不取消调用（binder 无取消接口），结论稍后经 [SessionRelay] 补进段清单并交会话所有者。
      */
     private val sealedPublisher =
-        SealedPublisher(PUBLISH_WAIT_MS) { part -> onLatePublished(part) }
+        SealedPublisher(PUBLISH_WAIT_MS, sessionRelay::onLate)
 
     /** 会话身份（R07 交付键）：[bindSession] 写入，泵线程/发布线程读取 ⇒ @Volatile */
     @Volatile private var sessionSeriesId = 0L
@@ -624,9 +630,13 @@ internal class CodecRecorder(
 
     /**
      * 会话级交付通道（[Recorder] 契约）：可能从泵线程/发布线程回调，接线方负责线程安全
-     * （生产 = `RecordSession` 内部加锁）。
+     * （生产 = `RecordSession` 内部加锁）。发布线程只经 [sessionRelay] 拿到它，不捕获本对象。
      */
     @Volatile override var onSessionDelivery: ((RecorderDelivery) -> Unit)? = null
+        set(value) {
+            field = value
+            sessionRelay.attach(value)
+        }
 
     /**
      * 停录收尾的移交闸（R07 收口）：控制线程 join 超时后，延迟收尾（finish + 放输入面 +
@@ -649,6 +659,7 @@ internal class CodecRecorder(
         sessionSeriesId = seriesId
         sessionStartedAtMs = startedAtMs
         sessionAttempt = attempt
+        sessionRelay.bind(seriesId, startedAtMs, attempt)
         Log.i(TAG, "session bound series=$seriesId started=$startedAtMs attempt=$attempt")
     }
 
@@ -1430,20 +1441,29 @@ internal class CodecRecorder(
     // region 编码器循环
 
     /**
-     * 泵线程入口（R07 所有者职责）：正常退出时 [pumpLoop] 末尾自己走 [pumpTrail]；只有
-     * [pumpLoop] **抛出**（封段/换段里的边界外异常）才会跳过那一行——收尾（停 feeders、放
-     * 编码面、移交终态）不许因为异常而消失，这里补跑一次。[TrailHandoff] 的检查点保证
-     * 补跑与正常收尾不会各做一遍。
+     * 泵线程入口（R07 所有者职责）：正常退出与**任何 Throwable** 都必须走 [pumpTrail]——收尾
+     * （停 feeders、拆当前段、放编码面、移交终态）不许因为异常而消失。
+     *
+     * 旧实现把 `pumpTrail()` 放在 `pumpLoop` 末尾、只在 `pumpLoop` 正常返回后置 trailed=true：
+     * `pumpTrail` 自己抛错时 `pumpLoop` 不返回 ⇒ finally 又跑一次 pumpTrail（双重终态/双重交付）；
+     * `pumpLoop` 抛出 Error 时则连第一错误都没记下。这里改成唯一一次 finally 收尾，异常先记
+     * **首个真实错误**（engineError 首错优先，不被后续连锁异常覆盖）。
      */
     private fun pumpEntry() {
-        var trailed = false
+        var pumpThrew: Throwable? = null
         try {
             pumpLoop()
-            trailed = true
+        } catch (t: Throwable) {
+            pumpThrew = t
+            Log.e(TAG, "泵循环异常退出：${t.javaClass.simpleName} ${t.message}")
+            // 首错优先：pumpLoop 内已记过具体环节码（MUX_CLOSE/LOOP 等）就不覆盖
+            engineError = engineError ?: "${RecordError.ENGINE_ERROR}:LOOP"
         } finally {
-            if (!trailed) {
-                runCatching { pumpTrail() }
-                    .onFailure { Log.e(TAG, "泵循环异常退出后的收尾失败：${it.message}") }
+            try {
+                pumpTrail()
+            } catch (t: Throwable) {
+                Log.e(TAG, "泵线程收尾异常：${t.javaClass.simpleName} ${t.message}")
+                if (pumpThrew == null) engineError = engineError ?: "${RecordError.ENGINE_ERROR}:TRAIL"
             }
         }
     }
@@ -1532,9 +1552,8 @@ internal class CodecRecorder(
             keepGoing = wantRotate && rotated && engineError == null
         }
         if (engineError != null) Log.i(TAG, "codec loop end with ${engineError}")
-        // R07：泵线程退出 = 本场收尾的权威完成事件。控制线程可能早已因 join 超时"只记账"
-        // 返回（收尾已移交，见 [TrailHandoff]），资源与终态必须在这里收（见 [pumpTrail]）。
-        pumpTrail()
+        // R07：泵线程退出 = 本场收尾的权威完成事件。收尾由 [pumpEntry] 的 finally 统一执行
+        // （正常退出/Throwable 都恰好一次；这里再调会双重终态）。
     }
 
     /**
@@ -1550,32 +1569,71 @@ internal class CodecRecorder(
      *   泵线程此刻已退出，释放没有并发（DIRECT 的 persistent 面与 GPU 的 per-codec 面都由本类持有）。
      */
     private fun pumpTrail() {
-        stopFeeder()
-        stopCapFeeder()
+        // 每一步单独隔离：停 feeder 失败不许跳过终态结算/输入面释放/会话交付；先记**首个**
+        // 真实异常（engineError 首错优先），后续连锁异常只留日志。旧实现一抛就整段收尾消失。
+        var firstFailure: Throwable? = null
+        fun isolated(step: String, body: () -> Unit) {
+            try {
+                body()
+            } catch (t: Throwable) {
+                if (firstFailure == null) firstFailure = t
+                Log.e(TAG, "泵线程收尾步骤 $step 异常：${t.javaClass.simpleName} ${t.message}")
+                engineError = engineError ?: "${RecordError.ENGINE_ERROR}:TRAIL"
+            }
+        }
+        isolated("stopFeeder") { stopFeeder() }
+        isolated("stopCapFeeder") { stopCapFeeder() }
         // 泵线程退出 = 换段腿的绝对终点（Y18）：正常路径由 settleRotateLeg 清，但异常退出
         // （runSegment/nextSegment 抛出、循环早退）可能没走到那一行——截止时刻若留下来，
         // 之后 release()/discardCurrent 的每一次有界调用都会拿到负数预算、判据永远"停摆"。
         // 这里清是安全的：停止路径的领取**不清**截止（见 settleRotateLegAtStop），清它的只能是泵线程。
-        rotateLeg.endLeg()
+        isolated("rotateLeg.endLeg") { rotateLeg.endLeg() }
         // 收尾移交的原子检查点（见 [TrailHandoff]）：无人请求 = 正常停录（控制线程 join 成功后
         // 自己 finish）；本方法返回 false 也可能是控制线程已补做或正在做，均不许再动资源。
         if (!trail.pumpCheckpoint()) {
             Log.i(TAG, "泵线程越过收尾检查点：trail=${trail.stateName()}（不由泵线程做延迟收尾）")
             return
         }
-        val out = finish(engineError)
-        val s = inputSurface
-        inputSurface = null
-        s?.release()
-        Log.e(TAG, "泵线程延迟收尾完成（控制线程已只记账返回）：${out.error ?: "ok"}，交付会话终态")
-        val delivery = onSessionDelivery ?: return
-        val seriesId = sessionSeriesId
-        val startedAtMs = sessionStartedAtMs
-        if (startedAtMs <= 0L) return
-        val attempt = sessionAttempt
-        runCatching {
-            delivery(RecorderDelivery.FinalResult(seriesId, startedAtMs, out, attempt = attempt))
-        }.onFailure { Log.w(TAG, "会话终态交付失败：${it.message}") }
+        // 泵线程接管延迟收尾：异常退出时可能还留着一枚未封的 currentSink/target。它是本线程的
+        // 单写者资源，必须由本线程按废片收掉（keep=false），否则 fd/pending 悬到进程结束。
+        isolated("teardownCurrent") {
+            if (currentSink != null) discardCurrentAtTeardown(engineError ?: "TEARDOWN")
+            else closeTargetBounded()
+        }
+        var out: RecordResult? = null
+        isolated("finish") { out = finish(engineError) }
+        isolated("releaseInputSurface") {
+            val s = inputSurface
+            inputSurface = null
+            s?.release()
+        }
+        val settled = out ?: return
+        Log.e(TAG, "泵线程延迟收尾完成（控制线程已只记账返回）：${settled.error ?: "ok"}，交付会话终态")
+        isolated("deliverFinalResult") {
+            val delivery = onSessionDelivery ?: return@isolated
+            val seriesId = sessionSeriesId
+            val startedAtMs = sessionStartedAtMs
+            if (startedAtMs <= 0L) return@isolated
+            val attempt = sessionAttempt
+            delivery(RecorderDelivery.FinalResult(seriesId, startedAtMs, settled, attempt = attempt))
+        }
+    }
+
+    /** 延迟收尾时的未封段：按废片丢弃（固定入库预算，不受已结束的换段腿预算影响） */
+    private fun discardCurrentAtTeardown(code: String) {
+        val sink = currentSink ?: run {
+            closeTargetBounded()
+            return
+        }
+        Log.i(TAG, "teardown discard unsealed output: $code")
+        closeTargetBounded()
+        currentSink = null
+        val r = storeIo.run(STORE_CALL_BUDGET_MS) {
+            store.seal(sink, partIndex, partStartMs, 0L, keep = false)
+        }
+        if (r is Bounded.TimedOut) {
+            Log.e(TAG, "teardown 回收未封段超时（${STORE_CALL_BUDGET_MS}ms，记录留给系统兜底清扫）")
+        }
     }
 
     /**
@@ -1601,34 +1659,11 @@ internal class CodecRecorder(
     }
 
     /**
-     * 迟到发布结论（发布线程，R06）：保留段经 [addPart] 补进段清单（唯一另一条写口，按段序去重），
-     * 并把**实际发布分类**交会话所有者补结算（迟到 commit 成功 ⇒ 已发布段集合变化 ⇒ 新结算键）。
+     * 迟到发布结论现在经 [SessionRelay] 直接交会话所有者（发布线程不捕获本 recorder）。
+     * 已封段证据在 [SealedPublisher] 台账里，[mergedParts] 收尾时并上；迟到事件本身带
+     * 段视图与发布分类，SessionDelta 会把它并进结果视图。
      */
-    private fun onLatePublished(part: PublishedPart) {
-        val segment = part.visibleSegment()
-        segment?.let { addPart(it) }
-        Log.i(
-            TAG,
-            "迟到发布落地 part=${part.draft.partIndex} class=${part.classification} " +
-                "series=$sessionSeriesId"
-        )
-        val delivery = onSessionDelivery ?: return
-        val startedAtMs = sessionStartedAtMs
-        if (startedAtMs <= 0L) return
-        val attempt = sessionAttempt
-        runCatching {
-            delivery(
-                RecorderDelivery.LatePart(
-                    seriesId = sessionSeriesId,
-                    startedAtMs = startedAtMs,
-                    partIndex = part.draft.partIndex,
-                    segment = segment,
-                    classification = part.classification,
-                    attempt = attempt
-                )
-            )
-        }.onFailure { Log.w(TAG, "迟到发布交付失败：${it.message}") }
-    }
+
 
     /**
      * 换段腿起钟（泵线程）。腿的定义：从编码器被拆到新段 `codec.start()` 返回（见 [ROTATE_LEG_BUDGET_MS]）。
@@ -1830,20 +1865,9 @@ internal class CodecRecorder(
     }
 
     /**
-     * 封口后的发布执行体（R06）：**只在发布线程上跑**。查 SIZE/DATA + 清 IS_PENDING / 删记录
-     * 全走 MediaProvider，旧实现把这一串压在换段腿预算里，预算被吃光就永远不发布。
-     * 拆成独立函数让源码守卫能断言「泵线程路径上不再直接出现 store.seal」。
+     * 封口后的发布执行体已移到 `SealedPublication.kt` 的顶层函数：发布线程只捕获
+     * `VideoStore + sink`，不捕获 recorder（挂起的 Provider 不许钉住 feeders/输入面/Activity）。
      */
-    private fun sealOnPublisher(
-        sink: OutputSink,
-        index: Int,
-        startMs: Long,
-        durationMs: Long,
-        keep: Boolean
-    ): VideoSegment {
-        // 块体而非表达式体：源码守卫用 bodyOf 解花括号体（表达式体会让守卫失去输入直接抛）
-        return store.seal(sink, index, startMs, durationMs, keep)
-    }
 
     /**
      * 分段：换 pending uri、重建 codec+muxer（输入面与采集线程沿用），并在本线程内重启。
@@ -2908,13 +2932,22 @@ internal class CodecRecorder(
      */
     private fun finishWithoutTeardown(): RecordResult {
         val lost = rotateLoss.totalMs
-        // 错误码：已有原因码就保留；否则按"停止时换段腿未返回"记换段受阻（带丢失账与环节游标，
-        // UI 侧呈现计划把失败码语义转成不吓人的附注）。绝不返回"成功但零产物"。
-        val err = engineError ?: rotateStallError(lost, rotateFailStage)
+        // 临时快照只带**真实**错误：没有错误就不许伪造 TOO_SHORT / ROTATE_STALL。泵线程还活着，
+        // 当前段可能尚未封口；发布路也可能还在清 IS_PENDING——这些都是 pending，不是失败。
+        val err = engineError
         // 已封段只读快照：COW 的 toList 与泵线程的 add 结构性互不干扰；再并上发布路已落地
-        // （含迟到）的保留段，空快照时桥函数退回旧失败形态
-        val sealed = mergeSegments(parts.toList(), sealedPublisher.publishedSegments())
-        Log.e(TAG, "停止时泵线程未退出：只记账不拆资源（已封 ${sealed.size} 段如实带出，封段由泵线程自己收），失败码 $err")
+        // （含迟到）的保留段。当前段也算未落地（泵线程会封它），所以 pending 要加 1。
+        val snap = sealedPublisher.snapshot()
+        val sealed = mergeSegments(parts.toList(), snap.outcomes.mapNotNull { it.visibleSegment() })
+        // 当前段也算未落地（泵线程会封它）：按确切段序并入待发布集合，而不是给计数 +1。
+        val pendingIds = if (currentSink != null) snap.pendingPartIds + partIndex else snap.pendingPartIds
+        val pending = pendingIds.size
+        val failures = snap.outcomes.count { it.classification == PublishClass.FAILED }
+        Log.e(
+            TAG,
+            "停止时泵线程未退出：只记账不拆资源（已封 ${sealed.size} 段，pending=$pending，" +
+                "发布失败=$failures，封段由泵线程自己收），真实错误=${err ?: "none"}"
+        )
         return sealedPartsResult(
             sealed = sealed,
             err = err,
@@ -2924,7 +2957,12 @@ internal class CodecRecorder(
             rotateStalls = rotateLoss.count,
             muxDiag = muxFailDetail,
             ambientLost = ambientLost,
-            latePending = latePendingReaped
+            latePending = latePendingReaped,
+            // 这不是终态：泵线程/发布线程之后的结论拥有改正权
+            terminal = false,
+            pendingPublications = pending,
+            pendingPartIds = pendingIds,
+            publicationFailures = failures
         )
     }
 
@@ -3045,22 +3083,37 @@ internal class CodecRecorder(
 
     private fun sealCurrent(durationMs: Long, keep: Boolean) {
         val sink = currentSink ?: return
-        // 输出句柄先关，再发布（写完才清 IS_PENDING）。**两步都有界**：关 fd / 查 SIZE、DATA /
-        // 清 IS_PENDING 全走 MediaProvider，这台机在 33MB 级 pending 文件收尾上会长时间不返回
-        closeTargetBounded()
-        currentSink = null
         // 段号/起点在**泵线程**上取好再交给发布线程（发布线程稍后跑，字段可能已被下一轮改写）
         val index = partIndex
         val startMs = partStartMs
-        // R06：发布走独立路——不吃换段腿预算，预算为 0 也照发；等待窗内拿到结论就直接落盘清单，
-        // 超时返回 null = 结论稍后经 [onLatePublished] 补发（发布不可取消，晚到 commit 仍会落地）。
+        // 输出句柄的**所有权**在此摘走（泵线程不再持有 target/currentSink），关闭动作整体交给
+        // 发布线程：关闭与发布（查 SIZE/DATA、清 IS_PENDING）必须同一枚线程按序完成——旧实现
+        // `closeTargetBounded()` 超时返回后 fd 还开着，发布线程就去清 IS_PENDING 了（与 close
+        // 赛跑）。关闭是**严格**的（closeStrict 抛错 ⇒ 整段 FAILED，发布块不跑），不再套
+        // BoundedStore：套了 500ms 就允许"close 还在后台跑、发布已经清 IS_PENDING"。
+        val targetToClose = target
+        target = null
+        currentSink = null
+        // R06：发布走独立路——不吃换段腿预算，预算为 0 也照发。**换段路径只提交不等待**
+        // （waitMs=0）：旧实现内联等 3s，会把下一段的建 pending/开 target 预算吃光；停止路径
+        // 才在调用方这边有界等（PUBLISH_WAIT_MS，发布本身永不取消）。
+        val publishWaitMs = if (stopping) PUBLISH_WAIT_MS else 0L
         val draft = SealedDraft(index, startMs, durationMs, keep)
-        val part = sealedPublisher.publish(draft) { sealOnPublisher(sink, index, startMs, durationMs, keep) }
+        val part = sealedPublisher.publish(
+            draft,
+            waitMs = publishWaitMs,
+            close = {
+                // 严格关闭：失败必须冒泡给发布线程归入 FAILED（close 内吞异常会让发布在
+                // 未确认关闭的 fd 上清 IS_PENDING）。
+                targetToClose?.closeStrict()
+                Log.i(TAG, "output target closed（发布线程内完成）part=$index")
+            }
+        ) { sealOnPublisher(store, sink, index, startMs, durationMs, keep) }
         // 每段最终 committed 状态要能在日志里逐段看见（R06 验收：长录换段时分辨"发布了没有"）
         Log.i(
             TAG,
-            "封段发布 part=$index keep=$keep class=${part?.classification ?: "pending(等待窗)"} " +
-                "committed=${part?.segment?.committed}"
+            "封段发布 part=$index keep=$keep wait=${publishWaitMs}ms " +
+                "class=${part?.classification ?: "pending(发布路)"} committed=${part?.segment?.committed}"
         )
         // 废片不能进 parts：keep=false 在发布路里已归为 DISCARDED（visibleSegment 为 null）；
         // 发布失败的段也不进（不许伪造一个"已保存"段）
@@ -3095,6 +3148,8 @@ internal class CodecRecorder(
     private fun buildResult(err: String?): RecordResult {
         // 段清单 = 泵线程已封段 + 发布路台账里已落地（含迟到）的保留段，按段序去重
         val sealed = mergedParts()
+        // 段集与待发布集合取同一份一致快照（两次读之间可能有发布完成，账会自相矛盾）
+        val snap = sealedPublisher.snapshot()
         val first = sealed.firstOrNull()
         return RecordResult(
             uri = first?.uri,
@@ -3114,7 +3169,11 @@ internal class CodecRecorder(
             muxDiag = muxFailDetail,
             // 环境音丢失进结果（S1-M3-05）：ok 时 UI 在「已保存」上附注；与 degradedCode 同时命中
             // 走组合文案（两件事互不矛盾）。失败结果（parts 为空）文案由错误码承担，不带本注
-            ambientLost = ambientLost
+            ambientLost = ambientLost,
+            // 发布路尚未落地的确切段序：非空时结果不是权威结论（ok 恒 false），迟到结论按段消账
+            pendingPublications = snap.pendingPartIds.size,
+            pendingPartIds = snap.pendingPartIds,
+            publicationFailures = snap.outcomes.count { it.classification == PublishClass.FAILED }
         )
     }
 
@@ -3126,15 +3185,59 @@ internal class CodecRecorder(
         val degraded = degradedCode
         // 有迟到落地但未同步返回的保留段也算产物：判"有没有成片"必须看合并视图，
         // 否则会把"文件已在盘上"报成零产物失败
+        val merged = mergedParts()
+        val snap = sealedPublisher.snapshot()
+        val pendingIds = snap.pendingPartIds
+        val pending = pendingIds.size
+        val failures = snap.outcomes.count { it.classification == PublishClass.FAILED }
+        // 空产物 + 发布路仍在跑 = **pending，不是失败**（R06/R07 的核心）：不许伪造
+        // TOO_SHORT/ROTATE_STALL。泵线程已终态（terminal=true），但真正的成功/失败要等
+        // 发布路静默（pending==0）才能定稿；迟到结论会带 remaining 交付给会话所有者。
+        val effectiveError = when {
+            error != null -> error
+            merged.isNotEmpty() -> null
+            pending > 0 -> null
+            // 发布路已静默、零产物：真实失败。发布自身 FAILED 优先给出可查的发布码；
+            // 其余（弃段/零样本）沿用旧的 TOO_SHORT。
+            failures > 0 -> "${RecordError.ENGINE_ERROR}:PUBLISH"
+            else -> RecordError.TOO_SHORT
+        }
         val out = when {
-            mergedParts().isEmpty() ->
-                RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+            merged.isEmpty() && effectiveError == null ->
+                // 零产物但发布路仍在跑：不是失败，只是"还没定稿"。terminal=true 表示引擎已停，
+                // pending>0 让会话所有者在发布结论到齐前不许把它当成功/失败结算。
+                RecordResult(
+                    uri = null,
+                    path = null,
+                    bytes = 0L,
+                    durationMs = clock.elapsedMs(),
+                    error = null,
+                    seriesId = store.seriesId,
+                    lostMs = lost,
+                    muxDiag = muxFailDetail,
+                    terminal = true,
+                    pendingPublications = pending,
+                    pendingPartIds = pendingIds,
+                    publicationFailures = failures
+                )
+            merged.isEmpty() ->
+                // 空首段仍属于本会话：系列的归属来自 store，不取决于这次有没有封出段。
+                // 丢了它，stopInternal 会按 seriesId=0 登记，迟到的发布/终态（真实系列号）
+                // 永远合并不进来（R06/R07 的收尾身份必须与引擎 bindSession 同源）。
+                RecordResult.fail(effectiveError ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+                    .copy(
+                        seriesId = store.seriesId,
+                        terminal = true,
+                        pendingPublications = pending,
+                        pendingPartIds = pendingIds,
+                        publicationFailures = failures
+                    )
             // 降级呈现：有产物 + 降级码 ⇒ 按成功呈现（error 置空、ok==true、degradedCode 带诊断原文），
             // UI 走"已保存 + 末尾可能不完整"文案——文件确实在盘上、moov 已写完，说成"失败"是骗人。
             // **只在错误就是那条降级码时成立**：engineError 是首错优先、不会换码，相等即同一回事；
             // 万一不等（将来引入并行的第二错误源）宁可回落失败呈现，绝不拿降级码盖住更硬的失败
             degraded != null && degraded == error -> buildResult(null).copy(degradedCode = degraded)
-            else -> buildResult(error)
+            else -> buildResult(effectiveError)
         }
         state = EngineState.IDLE
         engineError = null

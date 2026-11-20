@@ -44,6 +44,9 @@ internal data class SettledPart(
 internal fun committedSettledParts(parts: List<SettledPart>): List<SettledPart> =
     parts.asSequence()
         .filter { it.committed && !it.uriStr.isNullOrBlank() }
+        // 同段序重复时保留**已记账的那一份**（调用方按到达顺序传入：RecordSession 的
+        // mergeSettled 也把已有段放在迟到段之前）。换成后到者会让已写入 Room 的成员行
+        // 指向被替换的旧 uri，反而留下孤儿。
         .distinctBy { it.partIndex }
         .sortedBy { it.partIndex }
         .toList()
@@ -120,7 +123,8 @@ internal class TakeSettlementOwner(
     private data class SettlementKey(
         val seriesId: Long,
         val startedAtMs: Long,
-        val parts: List<Pair<Int, String?>>,
+        // 段序、uri 与时长：迟到终态只修正时长时也必须落库一次，不能被同 uri 旧键吞掉
+        val parts: List<Triple<Int, String?, Long>>,
         val resultOk: Boolean
     )
 
@@ -158,10 +162,12 @@ internal class TakeSettlementOwner(
                 inFlight[key] = created
                 tail[session] = created
                 evictCompletedLocked(keepKey = key, keepSession = session)
+                // 在锁内启动：同一会话的下一次结算会 join 这枚 LAZY Deferred，若把启动留给
+                // 锁外的调用方，调用方一旦异常退出，整条会话链就永远等一枚从未启动的任务。
+                created.start()
                 created
             }
         }
-        job.start()
         return job
     }
 
@@ -211,8 +217,8 @@ internal class TakeSettlementOwner(
             is PracticeDecision.Deliver ->
                 delivered = runCatching { backend.deliverPractice(d.part) }.getOrDefault(false)
             PracticeDecision.Clear -> {
-                runCatching { backend.clearPractice() }
-                cleared = true
+                // 清桥失败不得报"已清"（与交付侧对称）：失败成片被当成练习交付的复现条件之一
+                cleared = runCatching { backend.clearPractice() }.isSuccess
             }
             PracticeDecision.Leave -> Unit
         }
@@ -233,7 +239,7 @@ internal class TakeSettlementOwner(
     ): SettlementKey = SettlementKey(
         seriesId = seriesId,
         startedAtMs = startedAtMs,
-        parts = committed.map { it.partIndex to it.uriStr },
+        parts = committed.map { Triple(it.partIndex, it.uriStr, it.durationMs) },
         resultOk = resultOk
     )
 }

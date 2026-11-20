@@ -161,7 +161,10 @@ class SealedPublicationTest {
 
     @Test
     fun `迟到回调抛错不许炸发布线程`() {
-        val publisher = SealedPublisher(waitMs = 0L) { throw IllegalStateException("callback bug") }
+        val publisher = SealedPublisher(
+            waitMs = 0L,
+            onLate = { _: PublishedPart -> throw IllegalStateException("callback bug") }
+        )
         val taken = publisher.publish(draft(6)) { seg(6) }
         assertNull(taken)
         awaitUntil("迟到的结果仍然落账") { publisher.publishedSegments().any { it.partIndex == 6 } }
@@ -173,6 +176,186 @@ class SealedPublicationTest {
         publisher.publish(draft(7)) { seg(7) }
         assertEquals(1, publisher.outcomes().count { it.draft.partIndex == 7 })
         assertTrue(publisher.publishedSegments().count { it.partIndex == 7 } == 1)
+    }
+
+    // ------------------------------------------------------------------ 关闭所有权（先关后发布）
+
+    /** close 与 publish 必须在同一枚线程上按序完成：close 未返回前绝不允许发布块开跑 */
+    @Test
+    fun `发布前必须先在发布线程上关闭fd`() {
+        val publisher = SealedPublisher(waitMs = 2_000L)
+        val order = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val threads = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        val taken = publisher.publish(
+            draft(8),
+            close = {
+                threads["close"] = Thread.currentThread().id
+                order.add("close")
+            }
+        ) {
+            threads["publish"] = Thread.currentThread().id
+            order.add("publish")
+            seg(8)
+        }
+        assertNotNull(taken)
+        assertEquals(
+            "close 没有返回，发布块绝不能先跑（未关 fd 就清 IS_PENDING = 与 close 赛跑）",
+            listOf("close", "publish"),
+            order.toList()
+        )
+        assertEquals(
+            "关闭与发布必须同一枚线程（跨线程就是两路并发碰同一枚 fd）",
+            threads["close"], threads["publish"]
+        )
+    }
+
+    /** close 超过等待窗：调用线程按 null 返回（不伪造结论），发布照常完成、迟到补发恰一次 */
+    @Test
+    fun `关闭超过等待窗不取消发布_迟到结论仍补发`() {
+        val lateCalls = AtomicInteger(0)
+        val published = CountDownLatch(1)
+        val publisher = SealedPublisher(waitMs = 60L) { _ ->
+            lateCalls.incrementAndGet()
+            published.countDown()
+        }
+        val closeCalls = AtomicInteger(0)
+        val taken = publisher.publish(draft(9), close = {
+            closeCalls.incrementAndGet()
+            Thread.sleep(250)
+        }) { seg(9, bytes = 8_888L) }
+        assertNull("窗内没完成 ⇒ 只交回 null（不许伪造结论）", taken)
+        assertTrue("关闭超时不取消发布（fd 最终必须有人关）", published.await(2, TimeUnit.SECONDS))
+        assertEquals("close 恰好一次", 1, closeCalls.get())
+        assertEquals("迟到结论只许补发一次", 1, lateCalls.get())
+        assertEquals(8_888L, publisher.publishedSegments().single { it.partIndex == 9 }.bytes)
+    }
+
+    /** close 抛错 = 整段按失败分类，发布块根本不跑：不许在未关闭的句柄上清 IS_PENDING */
+    @Test
+    fun `关闭抛错则整段判失败且发布块不执行`() {
+        val publisher = SealedPublisher(waitMs = 2_000L)
+        val publishRan = AtomicInteger(0)
+        val taken = publisher.publish(draft(10), close = { throw IllegalStateException("fd gone") }) {
+            publishRan.incrementAndGet()
+            seg(10)
+        }
+        assertNotNull(taken)
+        assertEquals(PublishClass.FAILED, taken!!.classification)
+        assertNull("失败段没有段视图", taken.visibleSegment())
+        assertEquals("close 失败绝不能继续发布", 0, publishRan.get())
+        assertTrue("失败结论同样留档", publisher.outcomes().any { it.draft.partIndex == 10 })
+        assertTrue(publisher.publishedSegments().isEmpty())
+    }
+
+    /**
+     * 严格关闭被 Provider 闩住时：发布块**一步都不许跑**，直到 close 返回。
+     * 这是旧缺陷的直接回归（close 超时返回后发布线程已去查 SIZE/清 IS_PENDING）。
+     */
+    @Test
+    fun `关闭被闩住时发布块绝不先跑_释放后才开始`() {
+        val publisher = SealedPublisher(waitMs = 0L)
+        val closeEntered = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
+        val publishRan = AtomicInteger(0)
+        val publishDone = CountDownLatch(1)
+        try {
+            val taken = publisher.publish(draft(12), waitMs = 0L, close = {
+                closeEntered.countDown()
+                // 模拟卡住的 fd 关闭：闩住直到测试放行（永不释放就会挂住发布线程，用例自带 finally 兜底）
+                releaseClose.await(3, TimeUnit.SECONDS)
+            }) {
+                publishRan.incrementAndGet()
+                publishDone.countDown()
+                seg(12)
+            }
+            assertNull("零等待只提交、不冒充结论", taken)
+            assertTrue("close 必须真的在发布线程上开跑", closeEntered.await(2, TimeUnit.SECONDS))
+            assertEquals("close 未返回 ⇒ 发布块绝不许先跑", 0, publishRan.get())
+            assertEquals("close 未返回 ⇒ 结论不许落账", 0, publisher.outcomes().size)
+        } finally {
+            releaseClose.countDown()
+        }
+        assertTrue("释放后发布必须继续（close 超时/挂起不取消发布）", publishDone.await(2, TimeUnit.SECONDS))
+        awaitUntil("释放后结论落账") { publisher.outcomes().any { it.draft.partIndex == 12 } }
+        assertEquals("close 恰好一次、发布恰好一次", 1, publishRan.get())
+    }
+
+    /**
+     * 发布 Provider 被闩住时，换段路径的零等待提交必须**立即返回**：换段腿不许把下一段的
+     * insert/open 预算耗在等待发布上（旧实现内联等 3s）。
+     */
+    @Test
+    fun `发布被闩住时零等待提交立即返回_不拖住换段腿`() {
+        val publisher = SealedPublisher(waitMs = 0L)
+        val blockEntered = CountDownLatch(1)
+        val releaseBlock = CountDownLatch(1)
+        val publishDone = CountDownLatch(1)
+        try {
+            val startedNs = System.nanoTime()
+            val taken = publisher.publish(draft(13)) {
+                blockEntered.countDown()
+                releaseBlock.await(3, TimeUnit.SECONDS)
+                publishDone.countDown()
+                seg(13)
+            }
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNs)
+            assertNull("零等待提交不交回结论", taken)
+            assertTrue(
+                "零等待提交必须立即返回（实测 ${elapsedMs}ms，发布被闩住也不许等）",
+                elapsedMs < 500L
+            )
+            assertTrue("发布线程仍必须真的开跑", blockEntered.await(2, TimeUnit.SECONDS))
+            assertEquals("发布未落地前 pendingCount 必须如实报 1", 1, publisher.pendingCount())
+        } finally {
+            releaseBlock.countDown()
+        }
+        assertTrue("释放后发布完成", publishDone.await(2, TimeUnit.SECONDS))
+        awaitUntil("释放后 pending 归零") { publisher.pendingCount() == 0 }
+    }
+
+    @Test
+    fun `关闭被闩住时迟到的剩余pending数按提交台账计算`() {
+        val late = ArrayList<Pair<Int, Int>>()
+        // 双参构造：第二参是"本次结论落账后还剩几段"（会话所有者据此判断发布路是否静默）
+        val withRemaining = SealedPublisher(waitMs = 0L) { part, remaining ->
+            synchronized(late) { late.add(part.draft.partIndex to remaining) }
+        }
+        val closeGate = CountDownLatch(1)
+        withRemaining.publish(draft(14), waitMs = 0L, close = { closeGate.await(2, TimeUnit.SECONDS) }) { seg(14) }
+        withRemaining.publish(draft(15), waitMs = 0L) { seg(15) }
+        awaitUntil("第二段先落账并报 remaining=1") {
+            synchronized(late) { late.contains(15 to 1) }
+        }
+        closeGate.countDown()
+        awaitUntil("第一段随后落账并报 remaining=0") {
+            synchronized(late) { late.contains(14 to 0) }
+        }
+        awaitUntil("发布路静默后 pendingCount 必须为 0") { withRemaining.pendingCount() == 0 }
+    }
+
+    /** 同一段重复提交幂等早退：不起第二枚发布线程、close/发布各至多一次 */
+    @Test
+    fun `同一段重复提交幂等早退不重复发布`() {
+        val publisher = SealedPublisher(waitMs = 2_000L)
+        val publishRuns = AtomicInteger(0)
+        val closeRuns = AtomicInteger(0)
+        val first = publisher.publish(draft(11), close = { closeRuns.incrementAndGet() }) {
+            publishRuns.incrementAndGet()
+            seg(11)
+        }
+        assertNotNull(first)
+        val dup = publisher.publish(draft(11), close = { closeRuns.incrementAndGet() }) {
+            publishRuns.incrementAndGet()
+            seg(11, bytes = 999_999L)
+        }
+        assertNull("重复提交回 null（发布权已被首次提交占住）", dup)
+        assertEquals("close 只跑一次", 1, closeRuns.get())
+        assertEquals("发布块只跑一次", 1, publishRuns.get())
+        assertEquals("台账里同一段只有一份结论", 1, publisher.outcomes().count { it.draft.partIndex == 11 })
+        assertEquals(
+            "结论取首次发布的真实结果，不被重入洗掉",
+            1_000L, publisher.publishedSegments().single { it.partIndex == 11 }.bytes
+        )
     }
 
     // ------------------------------------------------------------------ 段清单合并（纯函数）

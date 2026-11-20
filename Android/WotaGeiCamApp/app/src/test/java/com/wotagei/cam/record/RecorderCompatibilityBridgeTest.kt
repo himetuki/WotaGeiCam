@@ -111,7 +111,7 @@ class RecorderCompatibilityBridgeTest {
     fun `A02 GPU接受persistent跨段同面不通知`() = mrRotate(gpu = true)
 
     @Test
-    fun `A02 回调抛错仍按MR既定策略启动新段`() = mrRotate(gpu = false, callbackThrows = true)
+    fun `A02 换面回调抛错必须判废新段而不是静默零帧`() = mrRotate(gpu = false, callbackThrows = true)
 
     private fun mrRotate(gpu: Boolean, rejected: Boolean = false, callbackThrows: Boolean = false) = platform { p ->
         p.static("android.media.MediaRecorder", "rejectPersistent", rejected)
@@ -129,6 +129,17 @@ class RecorderCompatibilityBridgeTest {
             p.call(recorder, "start")
             p.events.clear()
             p.call(recorder, "onInfo", null, 802, 0)
+            if (callbackThrows) {
+                // 接线方拿不到新面 = 之后每一帧都写进旧容器/黑洞：宁可判废本段，不许静默零帧。
+                assertEquals(
+                    "换面回调抛错必须显式失败",
+                    "ENGINE_ERROR:ROTATE_REBIND",
+                    p.field(recorder, "engineError")
+                )
+                assertEquals("新段序号已推进（失败段随后按废片回收）", 1, p.field(recorder, "partIndex"))
+                assertFalse("新实例不许启动", p.events.contains("mr2.start"))
+                return@platform
+            }
             val current = p.call(recorder, "getSurface")
             assertEquals("必须真正走完新实例prepare与start", 1, p.field(recorder, "partIndex"))
             assertNull(p.field(recorder, "engineError"))
@@ -337,6 +348,8 @@ class RecorderCompatibilityBridgeTest {
         val recorder = p.recorder(mr = true)
         try {
             assertEquals(true, p.call(recorder, "prepare", p.profile(), p.sink()))
+            // 与生产接线一致：换面时必须有人接收新面，否则生产会显式判废（ROTATE_REBIND）。
+            p.call(recorder, "setOnInputSurfaceRecreated", { _: Any -> })
             p.call(recorder, "start")
             val current = p.field(recorder, "mr")!!
             val stale = p.new("android.media.MediaRecorder")

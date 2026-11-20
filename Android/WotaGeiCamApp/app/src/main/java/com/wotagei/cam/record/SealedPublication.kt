@@ -16,8 +16,9 @@ import java.util.concurrent.TimeUnit
  * # 本文件的职责
  * - [PUBLISH_WAIT_MS]：发布**自己的**等待窗，与换段预算完全无关——**即使预算为 0 也照样启动**
  *   （R06 路径一：不许"没预算就不发布"）；
- * - [SealedPublisher]：把 `store.seal` 放到一枚守护线程上跑，预算内完成就直接交回真实结果；
- *   超时则**不取消**那枚调用（binder 无取消接口），完成时经 [SealedPublisher] 的迟到回调补发；
+ * - [SealedPublisher]：把 fd 关闭与 `store.seal` 放到**同一枚**守护线程上按序跑（先关后发布），
+ *   预算内完成就直接交回真实结果；超时则**不取消**那枚调用（binder 无取消接口），完成时经
+ *   [SealedPublisher] 的迟到回调补发；同一段重复提交幂等早退；
  * - [PublishedPart] / [PublishClass]：**发布者实际返回什么就记什么**，不许按"看着成功"反推。
  *   特别注意 `store.seal(keep=false)` 的返回值是 `committed=true`（它删了记录）——旧口径会把
  *   废片误当"已发布"，这里用 [PublishClass.DISCARDED] 独立分类，废片绝不进 `parts`/系列结算。
@@ -86,15 +87,32 @@ internal fun classifyPublished(
  *
  * 线程协议（确定性，见 `SealedPublicationTest`）：
  * 1. 调用线程 `publish` 启动工作线程后，按 [waitMs] 等 [CountDownLatch]；
- * 2. 工作线程先写结果、再 `countDown`；迟到回调只在调用方**确实已放弃等待**时发一次
- *    （`givenUp` 集合由调用线程在超时后置入；两端都在锁内改，见 [publish]）；
+ * 2. 工作线程先执行 [publish] 的 `close`（关 fd）、再跑发布 `block`，最后写结果、`countDown`；
+ *    迟到回调只在调用方**确实已放弃等待**时发一次（`givenUp` 集合由调用线程在超时后置入；
+ *    两端都在锁内改，见 [publish]）；
  * 3. 结果台账（[publishedSegments]）保留每一段的真实结论，供收尾时取"已落地但迟到"的段；
- * 4. 迟到回调抛异常只吞掉留痕——不许把发布线程的栈炸掉（结果已经落账）。
+ * 4. 迟到回调抛异常只吞掉留痕——不许把发布线程的栈炸掉（结果已经落账）；
+ * 5. 同一段（`partIndex` 相同）重复提交是**幂等早退**：只许一枚发布线程，fd 关闭与
+ *    清 IS_PENDING 各至多一次（重复提交回 null，结论仍经台账/迟到回调带出）。
  */
+/** 发布路的单次一致视图（见 [SealedPublisher.snapshot]） */
+internal data class PublicationSnapshot(
+    val outcomes: List<PublishedPart>,
+    val pendingPartIds: Set<Int>
+)
+
 internal class SealedPublisher(
     private val waitMs: Long = PUBLISH_WAIT_MS,
-    private val onLate: (PublishedPart) -> Unit = {}
+    /**
+     * 真正迟到的结论（调用方已放弃等待）补发一次。第二参 = 本次结论落账后**还剩几段**
+     * 未落地（0 = 发布路已静默）：会话所有者据此判断"终态是否已完整"，不必猜。
+     */
+    private val onLate: (PublishedPart, Int) -> Unit = { _, _ -> }
 ) {
+
+    /** 兼容旧接线（只需要结论、不关心剩余 pending 数）：生产已改用双参版本 */
+    constructor(waitMs: Long = PUBLISH_WAIT_MS, onLate: (PublishedPart) -> Unit) :
+        this(waitMs, { part, _ -> onLate(part) })
 
     private val lock = Any()
 
@@ -104,34 +122,67 @@ internal class SealedPublisher(
     /** 调用线程已放弃等待的段序：工作线程完成时据此决定是否走迟到回调 */
     private val givenUp = HashSet<Int>()
 
+    /** 已启动发布线程的段序：同一段不许起第二枚发布线程（fd 关闭/清 IS_PENDING 只该走一次） */
+    private val submitted = HashSet<Int>()
+
     /**
      * 提交一段发布。
      *
+     * @param waitMs 本次调用方愿意等多久拿同步结论。换段路径传 0（只提交、绝不吃下一腿预算）；
+     *   停止路径传 [PUBLISH_WAIT_MS]（只在调用方有界等待，发布本身永不取消）。
+     * @param close 输出句柄的**严格关闭**动作（生产 = `target.closeStrict()`）。**由发布线程
+     *   在 [block] 之前执行**：关闭与发布在同一枚线程上按序完成，调用线程不许先关（旧实现
+     *   `closeTargetBounded()` 超时返回后，fd 还开着，发布线程就去查 SIZE/清 IS_PENDING 了）。
+     *   抛错 = 关闭失败 ⇒ 整段 FAILED，[block] 根本不跑（绝不在未关闭的句柄上发布）。
+     *   null = 无需关闭（纯行为测试用）。
      * @param block 真正会走 MediaProvider 的发布动作（生产 = `VideoStore.seal`）
-     * @return 预算内完成 = 真实结论；null = 仍在发布路（**不是失败**，结论稍后经 [onLate] 补发）
+     * @return 预算内完成 = 真实结论；null = 仍在发布路（**不是失败**，结论稍后经 [onLate] 补发；
+     *   同一段重复提交也回 null——首次提交已占住发布权，结论仍会经台账/迟到回调带出）
      */
-    fun publish(draft: SealedDraft, block: () -> VideoSegment): PublishedPart? {
+    fun publish(
+        draft: SealedDraft,
+        waitMs: Long = this.waitMs,
+        close: (() -> Unit)? = null,
+        block: () -> VideoSegment
+    ): PublishedPart? {
+        synchronized(lock) {
+            // 幂等闸：同一段只许一枚发布线程。重入（迟到对账把同一段又交上来）直接早退——
+            // 不另起线程、不重复关 fd、不重复清 IS_PENDING；结论由首次提交统一落账补发。
+            if (!submitted.add(draft.partIndex)) return null
+        }
         // 预算为 0 也照样启动：R06 路径一修的就是"没预算就不发布"。此时直接按"已放弃等待"记。
         if (waitMs <= 0L) synchronized(lock) { givenUp.add(draft.partIndex) }
         val done = CountDownLatch(1)
         var value: VideoSegment? = null
         var failure: Throwable? = null
         val worker = Thread({
-            try {
-                value = block()
-            } catch (t: Throwable) {
-                failure = t
-            } finally {
-                val part = classifyPublished(draft, value, failure)
-                var notify = false
-                synchronized(lock) {
-                    results[draft.partIndex] = part
-                    if (givenUp.remove(draft.partIndex)) notify = true
+            // 先关后发布（同一枚线程按序）：close 抛错同样按失败分类，绝不在未关闭的句柄上清 IS_PENDING
+            if (close != null) {
+                try {
+                    close()
+                } catch (t: Throwable) {
+                    failure = t
                 }
-                done.countDown()
-                // 回调自己抛错只吞掉：结果已落账，不许把发布线程的栈炸掉（纯 Kotlin 文件，不引 android.util.Log）
-                if (notify) runCatching { onLate(part) }
             }
+            if (failure == null) {
+                try {
+                    value = block()
+                } catch (t: Throwable) {
+                    failure = t
+                }
+            }
+            val part = classifyPublished(draft, value, failure)
+            var notify = false
+            var pendingAfter = 0
+            synchronized(lock) {
+                results[draft.partIndex] = part
+                // 落账之后再数：同一线程的其它段可能已先完成，这里给的是"此刻仍在发布路"的段数
+                pendingAfter = submitted.size - results.size
+                if (givenUp.remove(draft.partIndex)) notify = true
+            }
+            done.countDown()
+            // 回调自己抛错只吞掉：结果已落账，不许把发布线程的栈炸掉（纯 Kotlin 文件，不引 android.util.Log）
+            if (notify) runCatching { onLate(part, pendingAfter) }
         }, "WotaSealPub-${draft.partIndex}")
         worker.isDaemon = true
         worker.start()
@@ -154,6 +205,26 @@ internal class SealedPublisher(
         return synchronized(lock) { results[draft.partIndex] }
     }
 
+    /** 发布路还没落地的段数（0 = 所有已提交段都有真实结论；重复提交不重复计数） */
+    fun pendingCount(): Int = synchronized(lock) { submitted.size - results.size }
+
+    /**
+     * 同一把锁下的**一致快照**：已落地结论 + 尚未落地的确切段序。
+     * 消费方（收尾结果、会话所有者）必须用同一快照同时读两者；分开读会在两次读之间
+     * 插入一次发布完成，出现"结论清单里有这段、待发布集合里也有"的自相矛盾账。
+     */
+    fun snapshot(): PublicationSnapshot = synchronized(lock) {
+        PublicationSnapshot(
+            outcomes = results.values.sortedBy { it.draft.partIndex },
+            pendingPartIds = submitted.filterNot { it in results }.toSet()
+        )
+    }
+
+    /** 已落地且分类为 [PublishClass.FAILED] 的段数（发布真实失败，不是"还在等"） */
+    fun publicationFailures(): Int = synchronized(lock) {
+        results.values.count { it.classification == PublishClass.FAILED }
+    }
+
     /** 已落地的保留段（同步 + 迟到），按段序排好；废片/失败不在列 */
     fun publishedSegments(): List<VideoSegment> = synchronized(lock) {
         results.values.mapNotNull { it.visibleSegment() }.sortedBy { it.partIndex }
@@ -166,9 +237,73 @@ internal class SealedPublisher(
 }
 
 /**
- * 段清单合并（纯函数）：以 `partIndex` 为唯一键，`existing` 优先（泵线程已写进 `parts` 的那枚
- * 与发布台账里的同一段是**同一结果的两份引用**，不重复、不覆盖），补齐迟到段后按段序排序。
+ * 发布线程 → 会话所有者的**窄通道**（R06/R07 保留边界）。
+ *
+ * 发布线程会一直持有提交时捕获的对象，直到 Provider 返回（可能很久）。因此它**不许**捕获
+ * `CodecRecorder`：那会把 recorder / feeders / inputSurface / Activity 整条链一起钉在挂起的
+ * 发布线程上。这里只保留会话身份（三个不可变量）和一个交付函数；即使发布线程挂住，被留住的
+ * 也只是这条窄通道。交付函数的生产接线必须是**进程级**会话所有者（`RecordSession`），
+ * 不许捕获 Activity/录制页。
  */
+internal class SessionRelay {
+    @Volatile private var seriesId = 0L
+    @Volatile private var startedAtMs = 0L
+    @Volatile private var attempt = 0
+    @Volatile private var delivery: ((RecorderDelivery) -> Unit)? = null
+
+    fun bind(seriesId: Long, startedAtMs: Long, attempt: Int) {
+        this.seriesId = seriesId
+        this.startedAtMs = startedAtMs
+        this.attempt = attempt
+    }
+
+    fun attach(sink: ((RecorderDelivery) -> Unit)?) {
+        delivery = sink
+    }
+
+    /** 发布线程调用：结论落账后把实际分类 + 剩余未落地段数交给会话所有者（失败只留台账） */
+    fun onLate(part: PublishedPart, pendingAfter: Int) {
+        val series = seriesId
+        val started = startedAtMs
+        val attempt = attempt
+        val sink = delivery ?: return
+        if (started <= 0L) return
+        val segment = part.visibleSegment()
+        runCatching {
+            sink(
+                RecorderDelivery.LatePart(
+                    seriesId = series,
+                    startedAtMs = started,
+                    partIndex = part.draft.partIndex,
+                    segment = segment,
+                    classification = part.classification,
+                    attempt = attempt,
+                    pendingPublications = pendingAfter
+                )
+            )
+        }
+    }
+}
+
+/**
+ * 发布执行体（R06）：**只在发布线程上跑**，且不捕获引擎实例。查 SIZE/DATA + 清 IS_PENDING /
+ * 删记录全走 MediaProvider，旧实现把这一串压在换段腿预算里，预算被吃光就永远不发布。
+ * 拆成顶层函数让源码守卫能断言「泵线程路径上不再直接出现 store.seal」，同时发布线程只捕获
+ * `VideoStore` + sink（不捕获 recorder/feeders/输入面）。
+ */
+internal fun sealOnPublisher(
+    store: VideoStore,
+    sink: OutputSink,
+    index: Int,
+    startMs: Long,
+    durationMs: Long,
+    keep: Boolean
+): VideoSegment {
+    // 块体而非表达式体：源码守卫用 bodyOf 解花括号体（表达式体会让守卫失去输入直接抛）
+    return store.seal(sink, index, startMs, durationMs, keep)
+}
+
+
 internal fun mergeSegments(
     existing: List<VideoSegment>,
     extra: List<VideoSegment>

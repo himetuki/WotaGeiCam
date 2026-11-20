@@ -225,7 +225,7 @@ class SavedTextDispatchGuardTest {
      *（用户要退出重进才看见；"失败/混合结果不刷新相册"正是本轮三合一的第二条）。
      */
     @Test
-    fun `相册刷新必须认已保存分段而不是只认ok`() {
+    fun `相册刷新必须认已保存分段且页面不再自行结算`() {
         val collect = screenMasked().substringAfter("runner.result.collect")
             .substringBefore("runner.clearResult()")
         assertTrue("锚点丢失：collect 切片为空", collect.isNotEmpty())
@@ -234,26 +234,24 @@ class SavedTextDispatchGuardTest {
             collect.contains("val plan = recordTextPlan(result)")
         )
         val invalidateAt = collect.indexOf("repo.invalidate()")
-        // 前缀匹配（不要求右括号）：ok 判定现在与 settlement.await() 组合成一条 if
-        val okAt = collect.indexOf("if (result.ok")
         assertTrue("凡含已保存分段必须刷新相册", invalidateAt >= 0)
-        assertTrue("ok 判定必须排在刷新之后（只有练习交付与失败清桥态认 ok）", okAt > invalidateAt)
-        assertTrue(
-            "分段归组也必须排在刷新之后、同一分支内（混合结果的分段同样要归组；Y21 起交会话所有者）",
-            collect.indexOf("TakeSettlement.settle(") > invalidateAt
+        assertFalse(
+            "页面不得自行结算：唯一入口是 stopInternal 的 RecordSession 登记（Y21/R07）",
+            collect.contains("TakeSettlement.settle(")
         )
-        // 突变自证：把刷新挪回 ok 分支（旧缺陷形态：失败/混合路径不刷新相册）——
-        // 真身不变量是"刷新排在 ok 判定之前"，突变后不变量翻假（守卫生效）
+        val clearAt = collect.indexOf("if (result.authoritative)")
+        assertTrue("零产物失败只许在权威结论上清练习桥", clearAt > invalidateAt)
+        // 突变自证：把刷新挪进权威清桥分支（失败/混合/临时快照都不再刷新相册）——不变量翻假
         val raw = mainSourceText("ui/CameraScreen.kt")
-        val mutated = raw.replace("repo.invalidate()", "if (result.ok) { repo.invalidate() }")
+        val mutated = raw.replace("repo.invalidate()", "if (result.authoritative) { repo.invalidate() }")
         assertTrue("突变体必须真的改了源码", mutated != raw)
         val mutatedCollect = codeOnly(mutated).substringAfter("runner.result.collect")
             .substringBefore("runner.clearResult()")
-        val mOkAt = mutatedCollect.indexOf("if (result.ok")
+        val mClearAt = mutatedCollect.indexOf("if (result.authoritative)")
         val mInvalidateAt = mutatedCollect.indexOf("repo.invalidate()")
         assertTrue(
-            "刷新退回只认 ok 后不变量必须翻假（ok 判定先于刷新出现）",
-            mOkAt >= 0 && mOkAt < mInvalidateAt
+            "刷新退回只认权威结论后不变量必须翻假",
+            mClearAt >= 0 && mClearAt < mInvalidateAt
         )
     }
 }

@@ -611,29 +611,17 @@ fun CameraScreen(
                 // 凡结果含已保存分段就刷新相册（含失败/降级/join 超时路径，2026-10-16 "录制结果
                 // 如实化"）：旧实现只认 ok，失败/混合路径下已 commit 的片段要等退出重进才可见。
                 repo.invalidate()
-                // 分段归组与练习交付交**进程级会话所有者**（Y21 / R07 同族收口）：页面组合作用域
-                // 在退页时会被取消，旧内联写库/交付会被截断在半路（漏归组、漏交付）。所有者持有
-                // 与页面生死无关的作用域，这里只在自己还活着时等待导航结论；等待被取消不影响
-                // 落库与交付——对比页回程读 ComparePractice.pendingRightId，不依赖本页存活。
-                val settlement = TakeSettlement.settle(
-                    db = repo.db(),
-                    seriesId = result.seriesId,
-                    startedAtMs = runner.sessionStartedAtMs,
-                    parts = result.parts,
-                    resultOk = result.ok,
-                    practiceArmed = ComparePractice.armed,
-                )
+                // 分段归组与练习交付的唯一入口是**进程级会话所有者**（RecordSession →
+                // TakeSettlement，Y21/R07）：页面不再自行结算。stopInternal 登记时已按会话键
+                // 发起首次结算，迟到发布/终态由同一槽按确切段序对账；本页只消费它的增量。
                 // 结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口）：判定（哪个标志出哪件事、
                 // 混合结果走「已保存 N 段」）全在 recordTextPlan 纯函数里，这里只做资源渲染——
                 // 理由与附注各成一族、任两件同时命中谁也不许盖谁。
                 showTip(app.recordText(plan))
-                // 练习闭环（2026-10-04 方向 4）：对比页发来的录制**干净成功**才弹栈回对比页，把新片
-                // 填右槽；非干净成功（半场成片）由所有者在同一结算里清桥态，且不交付未发布段
-                // （Y21「练习回程核对发布状态」）。deliver 只在桥 armed 时认账，普通录制不受影响。
-                if (result.ok && settlement.await().practiceDelivered) onPracticeFinish()
             } else {
-                // 无产物失败清掉桥态（留在本页看错误），不弹栈
-                ComparePractice.armed = false
+                // 只有**权威**的零产物失败才清练习桥：临时快照/发布仍在途时清掉，会漏掉随后
+                // 迟到落地的成片（R07）。权威结论的练习交付统一在 lateResult 增量里等待。
+                if (result.authoritative) ComparePractice.armed = false
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
             runner.clearResult()
@@ -646,6 +634,13 @@ fun CameraScreen(
             if (delta == null) return@collect
             lastUri = delta.result.uri ?: lastUri
             repo.invalidate()
+            // 练习闭环：只有权威结论（terminal 且发布路静默）才等待结算任务；
+            // 交付成功即弹回对比页。重复增量里 deliverPractice 已在桥态清空后返回 false。
+            val job = delta.settlement
+            if (delta.terminal && job != null && delta.practiceArmed) {
+                val delivered = runCatching { job.await().practiceDelivered }.getOrDefault(false)
+                if (delivered) onPracticeFinish()
+            }
             runner.clearLateResult()
         }
     }
@@ -3283,6 +3278,14 @@ private class RecordRunner(
         private set
 
     /**
+     * 本会话的系列归属（与 [sessionStore] 同生，重录不换）。
+     *
+     * **不依赖结果里有没有段**：空首段/零产物失败也用同一个系列号登记结算与迟到对账；
+     * 否则引擎按 `store.seriesId` 交付、页面按 0 登记，两边永远不是同一个键（R06/R07）。
+     */
+    val sessionSeriesId: Long get() = sessionStore?.seriesId ?: 0L
+
+    /**
      * 当前尝试创建的输出 sink：重录时作为丢弃兜底（引擎 discardCurrent 已删，重复删幂等）。
      *
      * ⚠ **只在 [beginSession] 赋值一次**，引擎发生分段轮转后它指向的仍是**首段**——那时首段已封段
@@ -3290,8 +3293,18 @@ private class RecordRunner(
      */
     private var sessionSink: OutputSink? = null
 
-    /** 自检已自动重录次数（0 = 首次尝试）；触顶 [MAX_RESTART_ATTEMPTS] 即明确失败 */
+    /**
+     * 自检已自动重录次数（0 = 首次尝试）；触顶 [MAX_RESTART_ATTEMPTS] 即明确失败。
+     * **这是引擎身份，不是重试预算**：同一会话内只增不减（R07 迟到终态的结算键靠它隔离
+     * 被判废那次与重录成功那次）。健康检查通过后也不许归零，否则会话键会与旧尝试撞车。
+     */
     private var attempt = 0
+
+    /**
+     * 当前自检窗口内已用掉的重录次数（只服务 [retryActionOf] 的预算判定）。
+     * 健康检查通过后可以归零（自检链结束），绝不影响 [attempt] 的引擎身份。
+     */
+    private var healthRestartCount = 0
 
     val status = MutableStateFlow(RecordStatus.IDLE)
     val elapsedMs = MutableStateFlow(0L)
@@ -3471,6 +3484,7 @@ private class RecordRunner(
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
+            healthRestartCount = 0
             sessionArgs = SessionArgs(width, height, fps, sensorOrientation, deviceDegrees, front, arcConvert, captureAudio)
             sessionStore = VideoStore(app)
             // 系列起始时刻：与 sessionStore 同一刻打点（重录沿用同一会话，不刷新）
@@ -3945,7 +3959,8 @@ private class RecordRunner(
     /**
      * 起录自检：起录后**两档窗口**内问引擎"真在产出吗"（三格见 [com.wotagei.cam.record.healthVerdict]）。
      * 判废且还有机会就 [abandonAndRestart] 从零重录；触顶走 [RecordError.SELF_CHECK_FAILED]。
-     * 健康即停检查（attempt 归零）。全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
+     * 健康即停检查（只清自检重试预算 [healthRestartCount]；[attempt] 是引擎会话身份，单调不回退）。
+     * 全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
      *
      * 【窗口口径】视频路（`videoTrackAdded`）吃短窗 [VIDEO_WINDOW_MS]：编码器 1.2s 都没建起来
      * （EGL_BAD_ALLOC 那次）短窗即抓。含音轨就绪的完整三格吃长窗 [FULL_WINDOW_MS]：`muxer` 启动要等
@@ -4014,12 +4029,15 @@ private class RecordRunner(
         when (verdict) {
             HealthVerdict.WAIT -> handler.postDelayed(healthCheckTask, HEALTH_TICK_MS)
             HealthVerdict.HEALTHY -> {
-                attempt = 0
+                // 只清自检重试预算；`attempt` 是当前引擎的会话身份，**不许回退**：
+                // 重录到 attempt 1 后若归零，停录登记会与 attempt 0 的迟到终态撞键，
+                // 缓冲里的失败结论会把这次成功会话洗成失败（R07/Y21 漏交付）。
+                healthRestartCount = 0
                 // 起录窗口内的健全性已确认：从这里起交给录制中途看门狗（引擎中途判废不再无声）。
                 // 自检链自身到此结束（不再重投），看门狗是**另一条**自续链，只认错误码。
                 handler.post(engineWatchdogTask)
             }
-            HealthVerdict.UNHEALTHY -> when (retryActionOf(attempt, window, verdict)) {
+            HealthVerdict.UNHEALTHY -> when (retryActionOf(healthRestartCount, window, verdict)) {
                 RetryAction.RESTART -> abandonAndRestart()
                 RetryAction.GIVE_UP -> {
                     Log.w(TAG_UI, "录制自检未过且重录触顶（attempt=$attempt code=${h.errorCode}）")
@@ -4063,6 +4081,7 @@ private class RecordRunner(
         Log.i(TAG_UI, "录制自检未过，丢弃本段并自动重录（第 ${attempt + 1} 次重录）")
         teardownAbandonedSession(rec)
         attempt++
+        healthRestartCount++
         retryNotice.value = R.string.record_auto_retry
         // 返回 false = 重录途中被停止请求打断（检查点①②③已收走半成品），补状态收尾
         if (!beginSession()) stopInternal()
@@ -4121,6 +4140,9 @@ private class RecordRunner(
         }
         polling = false
         status.value = RecordStatus.STOPPING
+        // 收尾身份由会话持有：系列号来自本会话 store（空首段也有身份），练习武装取"停录那一刻"
+        // 的快照——release/迟到收尾再久，也不许拿后来变过的桥态给同一场录制二次交付。
+        val practiceArmedAtStop = ComparePractice.armed
         // 停止期先于一切拆解动作置位：此后 GL 侧任何编码失败都是「面已死」的拆解伪影而非
         // 会话中真失败，引擎侧 degradeArcConvert 看到该位不再清账换模式——否则晚到的帧撞死面
         // （codec.stop 即输入面失效 → swap EGL_BAD_ALLOC）会触发降级，把已记好的位次账/实测帧率
@@ -4133,20 +4155,21 @@ private class RecordRunner(
             if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
         }
         val out = rec.stop()
-        rec.release()
+        // release 失败不许吞掉会话登记：登记与迟到对账是泵线程终态的唯一认领口。
+        runCatching { rec.release() }.onFailure { Log.w(TAG_UI, "停录 release 失败（泵线程/资源自收）：${it.message}") }
         recorder = null
         // R06/R07 收尾责任：停录线程在结果交出前**登记会话并发起首次结算**（不依赖页面 collect——
-        // 退页/取消会让那条协程整段消失）。页面的 result.collect 仍按既有接线再调一次
-        // TakeSettlement.settle：同一个键 ⇒ 拿回同一枚任务，恰好一次。迟到发布（R06）与泵线程
-        // 延迟终态（R07）经 onSessionDelivery → RecordSession 合并去重后补结算。
+        // 退页/取消会让那条协程整段消失）。页面只消费同一所有者的增量（含这里当场权威的那份），
+        // 不再自行结算；迟到发布（R06）与泵线程延迟终态（R07）经 onSessionDelivery 合并补账。
         runCatching {
             RecordSession.record(
                 backend = AndroidTakeSettlementBackend(dbProvider()),
-                seriesId = out.seriesId,
+                seriesId = sessionSeriesId,
                 startedAtMs = sessionStartedAtMs,
                 result = out,
-                practiceArmed = ComparePractice.armed,
-                attempt = attempt
+                practiceArmed = practiceArmedAtStop,
+                attempt = attempt,
+                onDelta = { d -> lateResult.value = d }
             )
         }.onFailure { Log.w(TAG_UI, "会话登记失败（归组/练习交付走页面路径兜底）：${it.message}") }
         // 换段受阻账（2026-10-08 真机缺陷）：这台 ROM 吞掉应用日志，"哪一环卡住、丢了多久"只能靠
