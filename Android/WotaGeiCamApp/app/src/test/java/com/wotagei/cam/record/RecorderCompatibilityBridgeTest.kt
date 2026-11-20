@@ -563,7 +563,7 @@ class RecorderCompatibilityBridgeTest {
     }
 
     private fun platform(block: (RecorderPlatformFixture) -> Unit) {
-        RecorderPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use(block)
+        RecorderPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use(block)
     }
 
     /** 把当前段的起钟拨到 [ms] 毫秒之前（封段判据的 MIN_KEEP_MS 门槛要真跨过去，不许靠 sleep 拖测试）。 */

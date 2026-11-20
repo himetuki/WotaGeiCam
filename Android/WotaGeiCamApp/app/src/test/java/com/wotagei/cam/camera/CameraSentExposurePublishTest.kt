@@ -22,7 +22,7 @@ class CameraSentExposurePublishTest {
     @Test
     fun `送出曝光只在提交成功后发布且等于真实请求里的值`() {
         CameraRecoveryStartFixture(
-            javaClass.classLoader,
+            javaClass.classLoader!!,
             boundaries,
             // 等号档用例必须声明 24/25 两档：默认能力表只有 [30,30]，引擎的通用退档会把
             // 1/25 请求改写成 30fps 并按 1/30 钳制快门，等号档前提（40ms@25fps）在测试里

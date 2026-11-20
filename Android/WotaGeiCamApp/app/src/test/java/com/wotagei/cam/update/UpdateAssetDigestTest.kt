@@ -88,7 +88,6 @@ class UpdateAssetDigestTest {
 
     @Test
     fun `Y44_只有分包但说明里只有universal旧摘要_拒绝选择`() {
-        val universalName = "WotaGeiCam-v0.0.12-r09-full-universal-release-Android.apk"
         val arm64Name = "WotaGeiCam-v0.0.12-r09-full-arm64-v8a-release-Android.apk"
         // 发版说明还是旧的 SHA256-full: 行（绑定 universal），但这次发行没有 universal 资产。
         val payload = releaseJson(

@@ -53,5 +53,5 @@ class N12CameraControllerRebindBridgeTest {
     }
 
     private fun platform(block: (N12CameraControllerFixture) -> Unit) =
-        N12CameraControllerFixture(requireNotNull(javaClass.classLoader)).use(block)
+        N12CameraControllerFixture(requireNotNull(javaClass.classLoader!!)).use(block)
 }

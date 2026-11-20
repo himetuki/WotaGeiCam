@@ -171,7 +171,7 @@ class EglConfigCompatibilityTest {
         configure: EglConfigPlatformFixture.() -> Unit,
         assertions: (EglConfigPlatformFixture) -> Unit,
     ) {
-        EglConfigPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        EglConfigPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             p.configure()
             assertFalse("pbuffer 故意失败：不能以 ready=false 单独作为成功证据", p.start(arc))
             assertEquals("必须真正进入生产初始化，不能只构造空壳", 1, p.number("initializeCalls"))

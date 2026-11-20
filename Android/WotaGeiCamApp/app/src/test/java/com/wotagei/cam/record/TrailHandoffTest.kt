@@ -61,6 +61,7 @@ class TrailHandoffTest {
         var legacyDeferred = false
         val pumpWouldTail = legacyDeferred // 泵在 pumpTrail 里读到 false
         legacyDeferred = true              // 控制线程随后置位（泵已经退出）
+        assertTrue("控制线程已置位，但泵不会再回来消费", legacyDeferred)
         assertFalse("缺陷形态复现：旧布尔闸在「判活后、置位前」的窗口里双方都不做", pumpWouldTail)
 
         // 同一时序的交接闸：泵先越过检查点（false），控制线程必须补做（true）

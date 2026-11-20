@@ -34,7 +34,7 @@ class CameraCharacteristicsSnapshotBridgeTest {
     @Test
     fun `枚举完成后反复取当前特性不再查CameraManager`() {
         CameraRecoveryStartFixture(
-            javaClass.classLoader,
+            javaClass.classLoader!!,
             boundarySources = mapOf("android.hardware.camera2.CameraManager" to COUNTING_MANAGER)
         ).use { p ->
             p.bind()

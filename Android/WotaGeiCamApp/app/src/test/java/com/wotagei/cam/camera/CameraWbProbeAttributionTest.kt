@@ -39,7 +39,7 @@ class CameraWbProbeAttributionTest {
 
     @Test
     fun `AUTO回报与旧会话迟到回报都不计入手动判负`() {
-        CameraRecoveryStartFixture(javaClass.classLoader, stubs()).use { p ->
+        CameraRecoveryStartFixture(javaClass.classLoader!!, stubs()).use { p ->
             p.bind()
             p.start()
             p.drain()
@@ -204,13 +204,13 @@ class CameraWbProbeAttributionTest {
     private fun request(p: CameraRecoveryStartFixture, manual: Boolean): Any =
         p.platform.type("android.hardware.camera2.CaptureRequest")
             .getMethod("wb", Boolean::class.javaPrimitiveType)
-            .invoke(null, manual)
+            .invoke(null, manual)!!
 
     /** HAL 不采纳的回报：CCM 回声 FAST + AWB 还在 SEARCHING */
     private fun failingResult(p: CameraRecoveryStartFixture): Any =
         p.platform.type("android.hardware.camera2.TotalCaptureResult")
             .getMethod("failing")
-            .invoke(null)
+            .invoke(null)!!
 
     /**
      * 直接喂生产回执（真实 Engine 的普通 captureCallback）。`lastWbKeepAliveMs` 置负只为让

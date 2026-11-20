@@ -318,7 +318,7 @@ class MediaCompatibilityTest {
         val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java, OutputStream::class.java, OutputStream::class.java, Array<String>::class.java)
         assertEquals(0, run.invoke(compiler, null, null, null,
             (listOf("-proc:none", "-encoding", "UTF-8", "-d", classes.absolutePath) + files.map { it.absolutePath }).toTypedArray()))
-        BoundaryLoader(classes, requireNotNull(javaClass.classLoader), sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet()).use(body)
+        BoundaryLoader(classes, requireNotNull(javaClass.classLoader!!), sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet()).use(body)
     }
 
     private class BoundaryLoader(classes: File, parent: ClassLoader, private val platform: Set<String>) :

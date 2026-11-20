@@ -90,7 +90,7 @@ class CameraLifecycleBridgeTest {
     }
 
     private fun platform(block: (N12CameraControllerFixture, Any, Any, Any) -> Unit) =
-        N12CameraControllerFixture(checkNotNull(javaClass.classLoader), boundaries).use { p ->
+        N12CameraControllerFixture(checkNotNull(javaClass.classLoader!!), boundaries).use { p ->
             val controller = p.controller(p.application())
             p.call(controller, "bind", p.sink("lifecycle-preview"))
             val engine = p.engineOf(controller)

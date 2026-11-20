@@ -54,7 +54,7 @@ class SubcameraAfFallbackTest {
     }
 
     private fun platform(block: (CameraPlatformFixture) -> Unit) {
-        CameraPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use(block)
+        CameraPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use(block)
     }
 
     companion object {

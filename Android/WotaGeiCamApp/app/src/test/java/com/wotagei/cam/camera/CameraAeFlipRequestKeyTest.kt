@@ -18,7 +18,7 @@ class CameraAeFlipRequestKeyTest {
 
     @Test
     fun `手动切AUTO后的真实repeating请求不得残留SENSOR三键`() {
-        CameraRecoveryStartFixture(javaClass.classLoader, boundaries).use { p ->
+        CameraRecoveryStartFixture(javaClass.classLoader!!, boundaries).use { p ->
             p.bind()
             p.start()
             p.drain()
@@ -62,7 +62,7 @@ class CameraAeFlipRequestKeyTest {
     // ------------------------------------------------------------------ 平台边界（只记录请求键）
 
     private fun enumValue(p: CameraRecoveryStartFixture, type: String, name: String): Any =
-        p.platform.type(type).getField(name).get(null)
+        p.platform.type(type).getField(name).get(null)!!
 
     /** 每个 build 出来的请求的键名集合（顺序 = build 顺序；平台桩只记录，不改生产语义）。 */
     private fun builtRequests(p: CameraRecoveryStartFixture): List<List<String>> {

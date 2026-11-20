@@ -65,15 +65,15 @@ class ExportBlockingCompatibilityTest {
      */
     @Test
     fun `Y32 后渲染commit已进入时预算到点_迟到Done仍回填且不删封轨片`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("commit")
             p.script("commitResults", intArrayOf(1, 1))
             p.script("clockStepMs", 1L)
             val late = Collections.synchronizedList(mutableListOf<Any?>())
             val caller = launchExport(p) { late.add(it) }
-            var endedBeforeRelease = false
-            var reason: String? = null
+            var endedBeforeRelease: Boolean
+            var reason: String?
             try {
                 check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞" }
                 // 已进入 commit 后把测试时钟推过等待预算：waiting 侧先结束，owner 仍阻塞。
@@ -106,11 +106,11 @@ class ExportBlockingCompatibilityTest {
      */
     @Test
     fun `Y32 取消后commit已领许可返回成功_迟到Done仍回填且封轨标记清除`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("commit")
             p.script("commitResults", intArrayOf(1, 1))
-            val row = File(temporary.root, "scene-seal-done/out42.mp4").apply { parentFile.mkdirs() }
+            val row = File(temporary.root, "scene-seal-done/out42.mp4").apply { parentFile!!.mkdirs() }
             p.script("rowData", row.absolutePath)
             val marker = File(row.absolutePath + ".sealed")
             val late = Collections.synchronizedList(mutableListOf<Any?>())
@@ -141,9 +141,9 @@ class ExportBlockingCompatibilityTest {
     /** Y32：后渲染 commit 两连败 → 保留行待救援，真话按 COMMIT 上报，封轨标记留在盘上。 */
     @Test
     fun `Y32 后渲染commit两连败_真话COMMIT且封轨标记保留待救援`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
             p.script("commitResults", intArrayOf(0, 0))
-            val row = File(temporary.root, "scene-seal-keep/out42.mp4").apply { parentFile.mkdirs() }
+            val row = File(temporary.root, "scene-seal-keep/out42.mp4").apply { parentFile!!.mkdirs() }
             p.script("rowData", row.absolutePath)
             val marker = File(row.absolutePath + ".sealed")
             val late = Collections.synchronizedList(mutableListOf<Any?>())
@@ -159,7 +159,7 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 准备期open永久阻塞时预算到点由独立等待侧先结束caller`() {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("open")
             // 先用 1ms 步进让 deadline 由测试时钟基准建立，进入阻塞后再跳跃到预算之外。
@@ -189,7 +189,7 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 失败清理delete阻塞时预算到点caller先结束且资源随后归还`() {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("delete")
             p.script("renderOk", false)
@@ -219,7 +219,7 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 GL线程未真正退出时拒绝第二套资源退出后才恢复准入`() {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             // 用真实存活线程代表“有界 release 已返回、GL owner 实际仍卡在 native”的窗口。
             val settling = Thread {
                 try {
@@ -292,7 +292,7 @@ class ExportBlockingCompatibilityTest {
     }
 
     private fun cancelledLateCompletion(stage: String, commitResults: IntArray? = null) {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             p.script("commitResults", commitResults)
@@ -370,7 +370,7 @@ class ExportBlockingCompatibilityTest {
     }
 
     private fun cancellationWhileBlocked(stage: String, expectFd: Boolean) {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             val callerBodyExited = CountDownLatch(1)

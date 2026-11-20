@@ -186,6 +186,6 @@ class CameraReadinessBridgeTest {
     }
 
     private fun platform(block: (CameraRecoveryStartFixture) -> Unit) {
-        CameraRecoveryStartFixture(javaClass.classLoader).use(block)
+        CameraRecoveryStartFixture(javaClass.classLoader!!).use(block)
     }
 }

@@ -102,7 +102,7 @@ class CameraExposureProbeRequestGenerationTest {
     }
 
     private fun platform(block: (CameraPlatformFixture) -> Unit) {
-        CameraPlatformFixture(classes, javaClass.classLoader).use(block)
+        CameraPlatformFixture(classes, javaClass.classLoader!!).use(block)
     }
 
     companion object {

@@ -43,7 +43,7 @@ class RemuxBlockingCompatibilityTest {
         p.script("clockStepMs", 1L)
         val exporter = p.clipExporter()
         val caller = launchClip(p, exporter)
-        var endedBeforeRelease = false
+        var endedBeforeRelease: Boolean
         try {
             check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 insert 阻塞：${probe.detail()}" }
             // insert 在导出主体之前：生产主循环还没来得及建立任何检查点，只能靠独立等待侧计时。
@@ -87,7 +87,7 @@ class RemuxBlockingCompatibilityTest {
         probe.enable(OPEN)
         p.script("clockStepMs", 1L)
         val caller = launchClip(p, p.clipExporter())
-        var endedBeforeRelease = false
+        var endedBeforeRelease: Boolean
         try {
             check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 open 阻塞：${probe.detail()}" }
             p.script("clockStepMs", 1_000_000L)
@@ -118,7 +118,7 @@ class RemuxBlockingCompatibilityTest {
         p.script("clockStepMs", 1L)
         val exporter = p.trackExporter()
         val caller = launchTrack(p, exporter)
-        var endedBeforeRelease = false
+        var endedBeforeRelease: Boolean
         try {
             check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 insert 阻塞：${probe.detail()}" }
             p.script("clockStepMs", 1_000_000L)
@@ -155,7 +155,7 @@ class RemuxBlockingCompatibilityTest {
         p.script("clockStepMs", 1L)
         val late = Collections.synchronizedList(mutableListOf<Any?>())
         val caller = launchClip(p, p.clipExporter(), onLate = { late.add(it) })
-        var endedBeforeRelease = false
+        var endedBeforeRelease: Boolean
         try {
             check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞：${probe.detail()}" }
             p.script("clockStepMs", 1_000_000L)
@@ -193,7 +193,7 @@ class RemuxBlockingCompatibilityTest {
         probe.enable(COMMIT)
         p.script("clockStepMs", 1L)
         p.script("commitResults", intArrayOf(1, 1))
-        val row = File(temporary.root, "seal-late-done/out42.mp4").apply { parentFile.mkdirs() }
+        val row = File(temporary.root, "seal-late-done/out42.mp4").apply { parentFile!!.mkdirs() }
         p.script("rowData", row.absolutePath)
         val marker = File(row.absolutePath + ".sealed")
         val late = Collections.synchronizedList(mutableListOf<Any?>())
@@ -229,7 +229,7 @@ class RemuxBlockingCompatibilityTest {
         p.script("clockStepMs", 1L)
         // 已领许可那次零行；放弃已赢后不得再发起第二次公开提交。
         p.script("commitResults", intArrayOf(0, 1))
-        val row = File(temporary.root, "seal-late-commit/out42.mp4").apply { parentFile.mkdirs() }
+        val row = File(temporary.root, "seal-late-commit/out42.mp4").apply { parentFile!!.mkdirs() }
         p.script("rowData", row.absolutePath)
         val marker = File(row.absolutePath + ".sealed")
         val late = Collections.synchronizedList(mutableListOf<Any?>())
@@ -256,7 +256,7 @@ class RemuxBlockingCompatibilityTest {
     @Test
     fun `Y32 选轨封轨即落标记_commit成功即清`() = platform { p ->
         p.script("commitResults", intArrayOf(1, 1))
-        val row = File(temporary.root, "track-seal-done/out42.mp4").apply { parentFile.mkdirs() }
+        val row = File(temporary.root, "track-seal-done/out42.mp4").apply { parentFile!!.mkdirs() }
         p.script("rowData", row.absolutePath)
         val marker = File(row.absolutePath + ".sealed")
         val late = Collections.synchronizedList(mutableListOf<Any?>())
@@ -371,7 +371,7 @@ class RemuxBlockingCompatibilityTest {
     }
 
     private fun platform(block: suspend (ExportPlatformFixture) -> Unit) = runBlocking {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { block(it) }
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { block(it) }
     }
 
     companion object {

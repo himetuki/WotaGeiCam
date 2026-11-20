@@ -16,6 +16,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ExportTasksTest {
     private val clip = ExportDetails.Clip(0L, 500L, 1000L)
     private val track = ExportDetails.Track(SelectedTrack.CAP, -25L, TrackSync.Source.MANUAL)

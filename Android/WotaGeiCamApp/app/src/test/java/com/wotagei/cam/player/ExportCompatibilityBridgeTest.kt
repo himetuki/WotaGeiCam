@@ -351,7 +351,7 @@ class ExportCompatibilityBridgeTest {
     }
     private data class Work(val reads: Int, val decoded: Int, val awaits: Int, val acquireOnly: Int)
     private fun platform(block: suspend (ExportPlatformFixture) -> Unit) = runBlocking {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { block(it) }
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { block(it) }
     }
     companion object {
         @ClassRule @JvmField

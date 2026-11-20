@@ -60,7 +60,7 @@ class RemuxSampleCapTest {
     }
 
     private fun platform(block: suspend (ExportPlatformFixture) -> Unit) = runBlocking {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { block(it) }
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { block(it) }
     }
 
     companion object {

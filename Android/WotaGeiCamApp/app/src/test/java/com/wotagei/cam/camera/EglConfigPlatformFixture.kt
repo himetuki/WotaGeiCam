@@ -79,9 +79,7 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
     private fun call(name: String): Any? = unwrap {
         requireNotNull(engine).javaClass.getDeclaredMethod(name).apply { isAccessible = true }.invoke(engine)
     }
-    private val noopCallback = object : kotlin.jvm.functions.Function0<Unit> {
-        override fun invoke() {}
-    }
+    private val noopCallback: () -> Unit = {}
 
     /**
      * 真实 release：GlRenderEngine 是 0 参；ArcRepairGl 现签名是

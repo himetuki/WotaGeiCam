@@ -182,7 +182,7 @@ class OfflineGlCompatibilityBridgeTest {
 
     private fun eglEvents(p: ExportPlatformFixture): List<String> = p.events.filter { it.startsWith("egl.") }
     private fun platform(block: (ExportPlatformFixture) -> Unit) {
-        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader), realGl = true).use(block)
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!), realGl = true).use(block)
     }
     companion object {
         @ClassRule @JvmField

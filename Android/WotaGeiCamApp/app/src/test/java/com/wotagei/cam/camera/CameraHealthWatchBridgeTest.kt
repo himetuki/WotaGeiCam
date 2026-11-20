@@ -98,7 +98,7 @@ class CameraHealthWatchBridgeTest {
 
     @Test
     fun `控制器换代发号_替代引擎从零帧起步且首帧才推进真实时钟`() {
-        CameraRecoveryStartFixture(javaClass.classLoader).use { p ->
+        CameraRecoveryStartFixture(javaClass.classLoader!!).use { p ->
             p.bind()
             val first = health(p) ?: error("bind 之后必须有引擎健康快照")
             assertEquals("新引擎在出帧前计数必须是 0", 0L, frameCount(p, first))

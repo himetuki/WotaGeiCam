@@ -573,7 +573,7 @@ class RecordSessionTest {
         val old = session()
         RecordSession.record(backend, 7L, old, result(), false, listOf(part(0)))!!
         // 后面再来 8 场（达到上限）：最老一场连槽带缓冲被淘汰，槽里的 WotaDb 引用随之释放
-        repeat(8) { i ->
+        repeat(8) {
             RecordSession.record(backend, 7L, session(), result(), false, listOf(part(0)))
         }
         assertNull(

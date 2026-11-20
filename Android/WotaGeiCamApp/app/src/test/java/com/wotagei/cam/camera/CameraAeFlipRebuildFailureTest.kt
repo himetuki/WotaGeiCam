@@ -17,7 +17,7 @@ class CameraAeFlipRebuildFailureTest {
 
     @Test
     fun `AUTO重建失败时不得用残留三键的旧builder下发 恢复后必须换干净builder`() {
-        CameraRecoveryStartFixture(javaClass.classLoader, boundaries).use { p ->
+        CameraRecoveryStartFixture(javaClass.classLoader!!, boundaries).use { p ->
             p.bind()
             p.start()
             p.drain()
@@ -68,7 +68,7 @@ class CameraAeFlipRebuildFailureTest {
     }
 
     private fun enumValue(p: CameraRecoveryStartFixture, type: String, name: String): Any =
-        p.platform.type(type).getField(name).get(null)
+        p.platform.type(type).getField(name).get(null)!!
 
     private fun setCreateFailure(p: CameraRecoveryStartFixture, value: Boolean) {
         p.platform.type("android.hardware.camera2.CameraDevice")

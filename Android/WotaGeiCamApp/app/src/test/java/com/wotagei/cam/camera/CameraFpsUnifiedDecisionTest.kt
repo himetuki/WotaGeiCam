@@ -35,7 +35,7 @@ class CameraFpsUnifiedDecisionTest {
     @Test
     fun `表外档位退到普通表上限且总线请求通知三处一致`() {
         CameraRecoveryStartFixture(
-            javaClass.classLoader,
+            javaClass.classLoader!!,
             recordingRequests(),
             fpsRanges = "new android.util.Range[]{new android.util.Range<Integer>(25,25)," +
                 "new android.util.Range<Integer>(30,30)}",
