@@ -382,11 +382,16 @@ class HudRecompProbeTest {
             ""
         )
         assertTrue("删掉一枚必须判红", hudProbeFieldMismatch(missing))
-        // 多点亮一枚（release 里 never 的闸门被打开）
-        val openedInRelease = gradleKts.replace(
-            "buildConfigField(\"boolean\", \"HUD_RECOMP_PROBE\", \"false\")\n        }\n    }",
-            "buildConfigField(\"boolean\", \"HUD_RECOMP_PROBE\", \"true\")\n        }\n    }"
-        )
+        // 多点亮一枚（release 里 never 的闸门被打开）。锚点不能写成 "HUD_RECOMP_PROBE 后面紧跟 }"：
+        // 同一变体以后还会加别的探针字段（PERF_PROBE 就是 P3 加的），那种写法会随无关字段一起失效。
+        // 这里从 `release {` 起只替换第一处 false，语义仍是"把 release 里的闸门打开"。
+        val releaseAt = gradleKts.indexOf("        release {")
+        require(releaseAt > 0) { "build.gradle.kts 里必须仍有 release {} 块" }
+        val openedInRelease = gradleKts.substring(0, releaseAt) +
+            gradleKts.substring(releaseAt).replaceFirst(
+                "buildConfigField(\"boolean\", \"HUD_RECOMP_PROBE\", \"false\")",
+                "buildConfigField(\"boolean\", \"HUD_RECOMP_PROBE\", \"true\")"
+            )
         assertTrue("release 里点亮必须判红", hudProbeFieldMismatch(openedInRelease))
     }
 }
