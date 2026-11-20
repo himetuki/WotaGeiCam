@@ -157,7 +157,12 @@ internal class SceneAudioLane(
         lastPts = fix.ptsUs
         @Suppress("WrongConstant") // sampleFlags 与 BUFFER_FLAG_* 同值体系（同 ClipExport）
         info.set(0, n, fix.ptsUs, ex.sampleFlags)
-        muxer.writeSampleData(outTrack, buf, info)
+        val t0 = if (ExportPerfProbe.enabled) System.nanoTime() else 0L
+        try {
+            muxer.writeSampleData(outTrack, buf, info)
+        } finally {
+            if (t0 != 0L) ExportPerfProbe.onWrite(System.nanoTime() - t0)
+        }
         written++
     }
 }

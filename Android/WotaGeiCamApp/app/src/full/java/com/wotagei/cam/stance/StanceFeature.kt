@@ -143,7 +143,25 @@ class StanceFeature private constructor(
                 instance ?: StanceFeature(
                     context.applicationContext,
                     StanceController.get(context.applicationContext),
-                ).also { instance = it }
+                ).also {
+                    it.applyProbeEnable()
+                    instance = it
+                }
             }
+    }
+
+    /**
+     * B15 真机取证钩子（仅 `PERF_PROBE` 变体，release/debug 恒关）。
+     *
+     * probe 构建启动即把站位开关置开：取证读数不能依赖"点开弹窗再点开关"这条 UI 通道
+     * （真机上弹窗与点按会被同一手势判成外部触摸而立刻关闭，且弹窗可点性随机型不同）。
+     * 开关照常落盘 `Prefs.ON`，与手动打开走同一条 `setEnabled` 路径（未进页时由
+     * [StanceController.onPageEnter] 补挂），因此测到的就是真实分析路径。
+     */
+    private fun applyProbeEnable() {
+        if (!com.wotagei.cam.BuildConfig.PERF_PROBE) return
+        if (ctrl.state.value.enabled) return
+        StancePerfProbe.note("probe auto-enable")
+        ctrl.setEnabled(appContext, true)
     }
 }

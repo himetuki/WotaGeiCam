@@ -478,7 +478,7 @@ class SceneExportRunner(private val ctx: Context) {
                                         val out = enc.getOutputBuffer(idx)!!
                                         out.position(encInfo.offset)
                                         out.limit(encInfo.offset + encInfo.size)
-                                        muxer!!.writeSampleData(videoTrack, out, encInfo)
+                                        writePerf { muxer!!.writeSampleData(videoTrack, out, encInfo) }
                                     }
                                     enc.releaseOutputBuffer(idx, false)
                                     if (eosEnc) break
@@ -520,7 +520,7 @@ class SceneExportRunner(private val ctx: Context) {
                                 val out = enc.getOutputBuffer(idx)!!
                                 out.position(encInfo.offset)
                                 out.limit(encInfo.offset + encInfo.size)
-                                muxer!!.writeSampleData(videoTrack, out, encInfo)
+                                writePerf { muxer!!.writeSampleData(videoTrack, out, encInfo) }
                             }
                             enc.releaseOutputBuffer(idx, false)
                             if (eosEnc) encDone = true
@@ -537,7 +537,12 @@ class SceneExportRunner(private val ctx: Context) {
                 audioLane?.drainAll()
                 // 包括最后一包/advance 到 EOF 的取消窄窗：未完成音轨不能继续封轨公开。
                 coroutineContext.ensureActive()
-                muxer!!.stop()
+                ExportPerfProbe.onStopStart()
+                try {
+                    muxer!!.stop()
+                } finally {
+                    ExportPerfProbe.onStopEnd()
+                }
                 sealed = true
                 owner.markSealed()
                 // 封轨即落旁路标记：commit 全败、取消、封轨后异常都保留行，冷启救援据此快速收。
@@ -728,5 +733,15 @@ class SceneExportRunner(private val ctx: Context) {
 
         /** 音轨"连续越界即封轨"的容忍样本数（AAC 帧间无重排，与 ClipExport 同一枚值） */
         private const val AUDIO_TAIL_TOLERANCE = 8
+    }
+}
+
+/** Y30 探针：只包一层 writeSampleData 计时，异常也记账（export 失败路径同样要看背压）。 */
+private inline fun writePerf(block: () -> Unit) {
+    val t0 = if (ExportPerfProbe.enabled) System.nanoTime() else 0L
+    try {
+        block()
+    } finally {
+        if (t0 != 0L) ExportPerfProbe.onWrite(System.nanoTime() - t0)
     }
 }

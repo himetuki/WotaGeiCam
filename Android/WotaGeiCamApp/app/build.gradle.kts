@@ -123,6 +123,8 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "false")
             // B12 重组测量入口：与上面三枚同一条纪律（仅 debugHook/probe 为 true，见 ui/HudRecompProbe.kt）
             buildConfigField("boolean", "HUD_RECOMP_PROBE", "false")
+            // B15/Y30 真机性能探针：仅 debugHook/probe 为 true（见 StancePerfProbe / ExportPerfProbe）
+            buildConfigField("boolean", "PERF_PROBE", "false")
         }
         /**
          * #73 的取证变体：**可调试 + R8 + 独立包名 + debug 签名**（Y64）。
@@ -160,6 +162,8 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "true")
             // B12 重组测量入口：同一纪律（debugHook 出证据，见 ui/HudRecompProbe.kt）
             buildConfigField("boolean", "HUD_RECOMP_PROBE", "true")
+            // B15/Y30 真机性能探针：同一纪律
+            buildConfigField("boolean", "PERF_PROBE", "true")
         }
         /**
          * #74 加的**取证构建**：可调试 + **不混淆** + 独立包名 + debug 签名（Y64），并且是 `testBuildType`。
@@ -188,6 +192,8 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "true")
             // B12 重组测量入口：probe 变体同样带（不混淆，仪器/JVM 取证都走它）
             buildConfigField("boolean", "HUD_RECOMP_PROBE", "true")
+            // B15/Y30 真机性能探针：probe 变体同样带
+            buildConfigField("boolean", "PERF_PROBE", "true")
         }
         release {
             isMinifyEnabled = true
@@ -199,6 +205,8 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "false")
             // B12 重组测量入口：release 里连字段都不该点亮（见 ui/HudRecompProbe.kt 闸门）
             buildConfigField("boolean", "HUD_RECOMP_PROBE", "false")
+            // B15/Y30 真机性能探针：release 恒 false
+            buildConfigField("boolean", "PERF_PROBE", "false")
         }
     }
 

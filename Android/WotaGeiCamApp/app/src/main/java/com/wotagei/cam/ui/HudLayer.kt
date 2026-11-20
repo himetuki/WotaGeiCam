@@ -1082,6 +1082,22 @@ fun BoxScope.HudZoneBox(
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
     val bottomYOnly = zone == HudZone.BOTTOM && placement.yDp >= 0
     val absolute = !bottomYOnly && (placement.xDp >= 0 || placement.yDp >= 0)
+    if (BuildConfig.PERF_PROBE) {
+        // Y61 真机取证（仅 probe 变体；release/debug 的本常量恒 false，整段被编译器折叠掉）：
+        // 一次性打出底栏外距 + 系统手势区高度，用来把「底栏最低位」与小白条热区的对照从推算变成实测。
+        // 只记 bottom：左右/上的 getter 在这个 Compose 版本要 layoutDirection，取证用不上。
+        // 心跳重复（2s）而不是只打一次：真机 logcat 只有 ~4 秒窗口，一次性行很容易被冲掉。
+        LaunchedEffect(Unit) {
+            while (true) {
+                Diag.i(
+                    "WotaUi",
+                    "Y61 gestureBottomPx=$bottomGesturePx outerPadPx=$bottomOuterPadPx " +
+                        "density=${density.density} zone=$zone yDp=${placement.yDp} bottomOnly=$bottomYOnly"
+                )
+                kotlinx.coroutines.delay(2_000)
+            }
+        }
+    }
     val slot = when {
         bottomYOnly -> Modifier.align(Alignment.TopStart).fillMaxWidth()
             .offset {

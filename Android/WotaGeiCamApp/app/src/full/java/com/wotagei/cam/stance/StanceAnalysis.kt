@@ -351,12 +351,14 @@ class StanceAnalysis(
 
     private fun processImage(image: Image) {
         var imageClosed = false
+        var perfStart = 0L
         try {
             if (!listening.get()) return
             val frameGeneration = generation.get()
             val now = System.currentTimeMillis()
             if (now - lastFrameMs < FRAME_INTERVAL_MS) return   // 丢帧节流 ≈3fps
             lastFrameMs = now
+            if (StancePerfProbe.enabled) perfStart = System.nanoTime()
             val w = image.width
             val h = image.height
             // B15：YUV 三平面先拷进 owner 线程复用缓冲，**拷贝完立即归还 Image**（不再让
@@ -385,6 +387,7 @@ class StanceAnalysis(
             // 单帧失败不致断流（reader 被引擎单方面关闭时本回调可能再触发）
         } finally {
             if (!imageClosed) runCatching { image.close() }
+            if (perfStart != 0L) StancePerfProbe.onFrame(System.nanoTime() - perfStart)
         }
     }
 

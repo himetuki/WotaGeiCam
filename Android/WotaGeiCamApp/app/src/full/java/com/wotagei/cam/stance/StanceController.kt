@@ -440,6 +440,7 @@ class StanceController private constructor(
 
     /** 开/关站位提示（弹窗开关）。开=挂 analysis 槽+resume；关=摘槽（各一次会话重建）。 */
     fun setEnabled(context: Context, on: Boolean) {
+        StancePerfProbe.note("setEnabled on=$on rec=$recording front=$frontLens now=${_state.value.enabled}")
         if (recording) {
             // 录制窗口两向都拒绝：挂/摘槽都会重建相机会话（MediaRecorder 面在会话里）——
             // 状态保持录制前的样子（本功能录制时暂停，不是关闭），停录后自动恢复。
@@ -467,9 +468,18 @@ class StanceController private constructor(
         if (a == null || detector?.isLoaded() != true) {
             // 未装配或后端故障时只保留意图；会话接纳不能让不可用模型开始判定。
             pendingAttach = _state.value.enabled && onPage && !recording
+            StancePerfProbe.note(
+                "attach pending analysis=${a != null} loaded=${detector?.isLoaded()} page=$onPage rec=$recording"
+            )
             return
         }
-        if (attached || attachPending || recording || !onPage || frontLens || lensSettling) return
+        if (attached || attachPending || recording || !onPage || frontLens || lensSettling) {
+            StancePerfProbe.note(
+                "attach skip attached=$attached pending=$attachPending rec=$recording " +
+                    "page=$onPage front=$frontLens settling=$lensSettling"
+            )
+            return
+        }
         val size = analysisSizeForCurrentTarget()
         // Y08：尺寸只从枚举快照算；reader 的创建/复用/回收全部投给分析 owner 线程。
         // Main 上不出现 CameraManager 查询，也不出现 ImageReader 准备。
@@ -477,6 +487,7 @@ class StanceController private constructor(
         val intent = attachIntent
         val key = readerKeyFor(size)
         attachPending = true
+        StancePerfProbe.note("attach start size=$size key=$key")
         a.startAsync(size, key) { surface, reader ->
             onAnalysisSurfaceReady(intent, a, size, key, surface, reader)
         }
@@ -494,24 +505,37 @@ class StanceController private constructor(
         surface: Surface?,
         reader: ImageReader?,
     ) {
-        if (intent != attachIntent) return
+        if (intent != attachIntent) {
+            StancePerfProbe.note("surface stale intent=$intent cur=$attachIntent")
+            return
+        }
         attachPending = false
-        if (analysis !== source || attached || recording || !onPage || frontLens || lensSettling || !_state.value.enabled) return
+        if (analysis !== source || attached || recording || !onPage || frontLens || lensSettling || !_state.value.enabled) {
+            StancePerfProbe.note(
+                "surface rejected src=${analysis === source} attached=$attached rec=$recording " +
+                    "page=$onPage front=$frontLens settling=$lensSettling enabled=${_state.value.enabled}"
+            )
+            return
+        }
         if (detector?.isLoaded() != true) {
             pendingAttach = true
+            StancePerfProbe.note("surface pending: detector not loaded")
             return
         }
         if (key != readerKeyFor(analysisSizeForCurrentTarget())) {
+            StancePerfProbe.note("surface key changed, re-attach")
             attachAnalysis()
             return
         }
         if (surface == null || reader == null) {
             pendingAttach = true
             _state.update { it.copy(fallbackTip = ALLOCATION_TIP) }
+            StancePerfProbe.note("surface allocation failed (null surface/reader)")
             return
         }
         syncEngineParams()
         val hooked = attachHook?.invoke(surface, reader) ?: false
+        StancePerfProbe.note("surface hook hooked=$hooked size=$size key=$key")
         attached = hooked
         attachedReaderKey = key.takeIf { hooked }
         analysisStreamSize = size.takeIf { hooked }
@@ -643,6 +667,7 @@ class StanceController private constructor(
     /** 预览页进入组合：开关仍开则恢复监听（离页期间只是暂停，不摘槽）。 */
     fun onPageEnter() {
         onPage = true
+        StancePerfProbe.note("pageEnter enabled=${_state.value.enabled} analysis=${analysis != null} loaded=${detector?.isLoaded()}")
         if (!_state.value.enabled) return
         val a = analysis
         // 引擎可能在上次离页时关闭了分析 reader（unbind/重建）——面已死就按"未挂"重来
@@ -676,7 +701,13 @@ class StanceController private constructor(
 
     /** 门控放开（非录制 + 在页 + 后置 + 镜头已落定）时：已挂→恢复监听；未挂→补挂（含装配未完成的 pending）。 */
     private fun maybeAttachAfterGate() {
-        if (!_state.value.enabled || recording || !onPage || frontLens || lensSettling) return
+        if (!_state.value.enabled || recording || !onPage || frontLens || lensSettling) {
+            StancePerfProbe.note(
+                "gate blocked enabled=${_state.value.enabled} rec=$recording page=$onPage " +
+                    "front=$frontLens settling=$lensSettling"
+            )
+            return
+        }
         val a = analysis
         if (a == null) {
             pendingAttach = true
