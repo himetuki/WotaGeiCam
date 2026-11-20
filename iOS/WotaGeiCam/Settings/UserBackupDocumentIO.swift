@@ -21,7 +21,7 @@ enum UserBackupDocumentIO {
     }
 
     /// 从存储导出快照并写入临时文件，返回文件 URL（失败返回 nil）。
-    /// `tags` 由调用方提供（当前无媒体库实现时传空数组）。
+    /// `tags` 由媒体库按当前索引提供；无标签时传空数组。
     ///
     /// `Data.write(options: .atomic)` 先写同目录临时文件再原子替换，不会留下半份快照；
     /// 也不再先删旧文件（那会制造“旧文件已删、新文件未写”的空窗）。
@@ -38,12 +38,12 @@ enum UserBackupDocumentIO {
     }
 
     /// 从用户选择的文件导入（additive：只补当前不存在的键，不覆盖已存在值含 false/0）。
-    /// 返回本次实际写入的键数；读取失败/超过 4 MiB/格式错误返回 nil。
+    /// 返回设置写入条数与待重绑标签；读取失败/超过 4 MiB/格式错误返回 nil。
     ///
     /// 4 MiB 上限在**真实读取路径**上强制：`readAtMost` 最多只分配 `maxBytes + 1` 字节，
     /// 不会像 `Data(contentsOf:)` 那样先把整文件读进内存。调用方负责选择文件（系统文档选择器），
     /// 这里只读本地/安全作用域文件，不联网。
-    static func importFromFile(url: URL, into store: WotaSettingsStore) -> Int? {
+    static func importFromFile(url: URL, into store: WotaSettingsStore) -> WotaUserBackup.ImportResult? {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 

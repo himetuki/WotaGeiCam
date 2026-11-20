@@ -408,16 +408,20 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
     // MARK: - 备份
 
     private func exportBackup() {
-        guard let url = UserBackupDocumentIO.exportToFile(store: store) else {
-            presentMessage(title: "导出失败", message: "生成备份快照失败。")
-            return
+        // 标签在媒体库索引里；先取快照再写文件（回调在主队列）。
+        MediaLibrary.shared.backupTags { [weak self] tags in
+            guard let self = self else { return }
+            guard let url = UserBackupDocumentIO.exportToFile(store: self.store, tags: tags) else {
+                self.presentMessage(title: "导出失败", message: "生成备份快照失败。")
+                return
+            }
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            if let popover = activity.popoverPresentationController {
+                popover.sourceView = self.view
+                popover.sourceRect = CGRect(x: self.view.bounds.midX, y: self.view.bounds.midY, width: 1, height: 1)
+            }
+            self.present(activity, animated: true, completion: nil)
         }
-        let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        if let popover = activity.popoverPresentationController {
-            popover.sourceView = view
-            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
-        }
-        present(activity, animated: true, completion: nil)
     }
 
     private func importBackup() {
@@ -441,16 +445,26 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
     private func applyImport(from url: URL) {
         let store = self.store
         importQueue.async { [weak self] in
-            let count = UserBackupDocumentIO.importFromFile(url: url, into: store)
+            let result = UserBackupDocumentIO.importFromFile(url: url, into: store)
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if let count = count {
-                    self.targets.removeAll()
-                    self.tableView.reloadData()
-                    self.presentMessage(title: "导入完成", message: "已补充 \(count) 项设置（不覆盖已有值）。")
-                } else {
+                guard let result = result else {
                     self.presentMessage(title: "导入失败",
                                        message: "文件不是有效的备份快照、超过 4 MiB 上限，或格式/版本不受支持。")
+                    return
+                }
+                // 标签按跨端指纹在媒体库里重绑；设置已经落盘，标签失败不回滚设置。
+                MediaLibrary.shared.restoreBackupTags(result.tags) { [weak self] restoredTags in
+                    guard let self = self else { return }
+                    self.targets.removeAll()
+                    self.tableView.reloadData()
+                    let tagsText = result.tags.isEmpty
+                        ? ""
+                        : "、\(restoredTags)/\(result.tags.count) 个标签"
+                    self.presentMessage(
+                        title: "导入完成",
+                        message: "已补充 \(result.settingsApplied) 项设置\(tagsText)（不覆盖已有值）。"
+                    )
                 }
             }
         }

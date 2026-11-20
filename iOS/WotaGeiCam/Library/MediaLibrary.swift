@@ -212,6 +212,125 @@ final class MediaLibrary {
         mutateTag(mediaId: mediaId, tag: tag, add: false, completion: completion)
     }
 
+    /// 导出备份标签：标签行 → 跨端媒体指纹（相对路径/名/大小/时长）。
+    /// 指纹不完整的条目跳过（与 Android `PortableUserData.MediaKey.valid()` 同口径）。
+    func backupTags(completion: @escaping ([WotaUserBackup.Tag]) -> Void) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let state = self.indexStore.currentState()
+            var byId: [Int64: LibraryIdentity] = [:]
+            for identity in state.identities where byId[identity.mediaId] == nil {
+                byId[identity.mediaId] = identity
+            }
+            var out: [WotaUserBackup.Tag] = []
+            for row in state.tags {
+                guard let identity = byId[row.mediaId] else { continue }
+                // Android 侧 `relativePath` 是 MediaStore 目录（带尾斜杠）+ 单独的 name；
+                // 这里必须同一口径，不能把文件名塞进 relativePath，否则跨端指纹永远对不上。
+                let key = MediaLibrary.backupKey(
+                    relativeDirectory: identity.relativeDirectory,
+                    fileName: identity.fileName,
+                    size: identity.sizeBytes,
+                    durationMs: identity.durationMs
+                )
+                guard key.isValid else { continue }
+                out.append(WotaUserBackup.Tag(media: key, value: row.tag, createdAt: row.createdAtMs))
+            }
+            MediaLibrary.deliver(out, completion)
+        }
+    }
+
+    /// 导入备份标签：只对「指纹唯一匹配」的候选落地，加法合并且不覆盖已有标签。
+    /// 返回本次实际新增的标签数；候选被回收站隐藏/指纹不唯一时跳过（对齐 Android）。
+    func restoreBackupTags(_ tags: [WotaUserBackup.Tag], completion: ((Int) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let state = self.indexStore.currentState()
+            let trashedIds = Set(state.trash.map { $0.mediaId })
+            let trashedPaths = Set(state.trash.map { $0.relativePath })
+            var candidates: [WotaUserBackup.MediaKey: [LibraryIdentity]] = [:]
+            for identity in state.identities {
+                guard identity.mediaId > 0,
+                      !trashedIds.contains(identity.mediaId),
+                      !trashedPaths.contains(identity.relativePath) else { continue }
+                let key = MediaLibrary.backupKey(
+                    relativeDirectory: identity.relativeDirectory,
+                    fileName: identity.fileName,
+                    size: identity.sizeBytes,
+                    durationMs: identity.durationMs
+                )
+                guard key.isValid else { continue }
+                candidates[key, default: []].append(identity)
+            }
+
+            var pending: [LibraryTag] = []
+            for tag in tags {
+                // 兼容两种历史写法：目录（Android 带尾斜杠）或目录+文件名（早期 iOS）。
+                let key = MediaLibrary.canonicalBackupKey(tag.media)
+                guard let matches = candidates[key], matches.count == 1 else { continue }
+                let identity = matches[0]
+                let value: String
+                if tag.value == MediaTagSpace.like {
+                    value = MediaTagSpace.like
+                } else if let normalized = MediaTagSpace.normalize(tag.value) {
+                    value = normalized
+                } else {
+                    continue
+                }
+                if state.tags.contains(where: { $0.mediaId == identity.mediaId && $0.tag == value }) {
+                    continue
+                }
+                pending.append(LibraryTag(
+                    mediaId: identity.mediaId,
+                    path: identity.relativePath,
+                    tag: value,
+                    createdAtMs: tag.createdAt
+                ))
+            }
+            guard !pending.isEmpty else {
+                MediaLibrary.deliver(0, completion)
+                return
+            }
+            var restored = 0
+            do {
+                try self.indexStore.apply { s in
+                    var existing = Set(s.tags.map { "\($0.mediaId)\u{0}\($0.tag)" })
+                    for row in pending {
+                        let key = "\(row.mediaId)\u{0}\(row.tag)"
+                        if existing.contains(key) { continue }
+                        s.tags.append(row)
+                        existing.insert(key)
+                        restored += 1
+                    }
+                }
+                MediaLibrary.deliver(restored, completion)
+            } catch {
+                MediaLibraryLog.error("备份标签写入失败：\(error)")
+                MediaLibrary.deliver(0, completion)
+            }
+        }
+    }
+
+    /// 备份指纹（跨端口径）：`relativePath` 只放目录且带尾斜杠，文件名单独放 `name`。
+    private static func backupKey(relativeDirectory: String, fileName: String,
+                                  size: Int64, durationMs: Int64) -> WotaUserBackup.MediaKey {
+        var directory = relativeDirectory
+        if !directory.hasSuffix("/") { directory += "/" }
+        return WotaUserBackup.MediaKey(relativePath: directory, name: fileName,
+                                       size: size, durationMs: durationMs)
+    }
+
+    /// 把备份里的 `relativePath` 归一成「目录 + 尾斜杠」；若它误含文件名则剥掉。
+    private static func canonicalBackupKey(_ key: WotaUserBackup.MediaKey) -> WotaUserBackup.MediaKey {
+        var directory = key.relativePath
+        if !directory.hasSuffix("/") { directory += "/" }
+        if directory.hasSuffix("/" + key.name) {
+            directory = String(directory.dropLast(key.name.count))
+        }
+        return WotaUserBackup.MediaKey(relativePath: directory, name: key.name,
+                                       size: key.size, durationMs: key.durationMs)
+    }
+
     private func mutateTag(mediaId: Int64, tag: String, add: Bool, completion: ((Bool) -> Void)?) {
         queue.async { [weak self] in
             guard let self = self else { return }

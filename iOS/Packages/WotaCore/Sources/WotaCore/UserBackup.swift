@@ -131,6 +131,18 @@ public enum WotaUserBackup {
         }
     }
 
+    /// 导入结果：设置已写入的条数 + 需要由媒体库按指纹重绑的标签。
+    /// 标签不在这里落地，因为 `WotaCore` 不依赖平台媒体库。
+    public struct ImportResult {
+        public var settingsApplied: Int
+        public var tags: [Tag]
+
+        public init(settingsApplied: Int, tags: [Tag]) {
+            self.settingsApplied = settingsApplied
+            self.tags = tags
+        }
+    }
+
     // MARK: - 白名单过滤 / 加法恢复
 
     /// 只保留白名单内、类型正确、字符串长度合规的设置。
@@ -288,9 +300,9 @@ public enum WotaUserBackup {
         return Snapshot(settings: settingsOf(settings), tags: mergeTags(existing: [], incoming: validTags))
     }
 
-    /// 导入：加法恢复（不覆盖已存在键），返回本次实际写入的键数。tags 交回调用方（无媒体库时不落地）。
+    /// 导入：设置加法恢复（不覆盖已存在键），并交回标签供媒体库按指纹重绑。
     @discardableResult
-    public static func importBackup(_ data: Data, into store: WotaSettingsStore) throws -> Int {
+    public static func importBackup(_ data: Data, into store: WotaSettingsStore) throws -> ImportResult {
         let snapshot = try decode(data)
         var current: [String: WotaBackupValue] = [:]
         for key in WotaSettingsKeys.backupKeys {
@@ -301,7 +313,7 @@ public enum WotaUserBackup {
             store.setRawValue(value, forKey: key)
         }
         if !toRestore.isEmpty { store.flush() }
-        return toRestore.count
+        return ImportResult(settingsApplied: toRestore.count, tags: snapshot.tags)
     }
 
     // MARK: - 内部
