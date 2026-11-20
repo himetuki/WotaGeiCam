@@ -196,6 +196,13 @@ class WotaParams(private val scope: CoroutineScope) {
     /** 实际生效的纠偏值（等号档 + 手动档才有意义，null = 不适用）；引擎回写，UI 只读 */
     val actualCorrectionNs = MutableStateFlow<Long?>(null)
 
+    /**
+     * HAL **结果侧**回报的实际曝光（`SENSOR_EXPOSURE_TIME`，null = 未观测/会话不在）。
+     * 与 [actualSentExposureNs]（我方写进请求的值）独立：设备范围夹取、HAL 改写、等号档处理
+     * 只体现在这里。引擎按 500ms 节流采样，UI 只读。
+     */
+    val actualHalExposureNs = MutableStateFlow<Long?>(null)
+
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
     val tint = MutableStateFlow(ParamState(0))

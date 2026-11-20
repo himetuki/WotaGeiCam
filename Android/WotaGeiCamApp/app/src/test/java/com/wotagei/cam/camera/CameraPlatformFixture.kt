@@ -212,6 +212,19 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     }
     fun frame(session: Any, frame: Long) { call(session, "emit", frame) }
 
+    /** Y01：让回执带上指定请求实例（不是当前 repeating 请求时即「旧请求迟到」）。 */
+    fun frameFrom(session: Any, request: Any, frame: Long) {
+        call(session, "emitFrom", request, frame)
+    }
+
+    /** B01：结果侧可控的 SENSOR_TIMESTAMP / SENSOR_EXPOSURE_TIME。 */
+    fun frameWithResult(session: Any, request: Any, frame: Long, tsNs: Long?, exposureNs: Long?) {
+        call(session, "emitFrom", request, frame, tsNs, exposureNs)
+    }
+
+    /** 平台当前记录的那支 repeating 请求（普通会话）。 */
+    fun requestOf(session: Any): Any = field(session, "request") ?: error("会话还没有 repeating 请求")
+
     /** 跑掉引擎线程上已排的 delayed 任务（flushTask / 等号探测独立超时等）；post 本身仍立即执行。 */
     fun runDelayed(h: Harness) {
         call(field(h.engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler"), "runDelayed")
@@ -314,7 +327,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
             public class CaptureResult {
                 public static class Key<T>{public final String name;public Key(String n){name=n;}public String getName(){return name;}}
                 ${keys(CaptureResult::class.java)}
-                public <T>T get(Key<T> key){return null;}
+                public Long sensorTimestampNs, sensorExposureNs;
+                @SuppressWarnings("unchecked") public <T>T get(Key<T> key){
+                    Object value=null;
+                    if("SENSOR_TIMESTAMP".equals(key.name))value=sensorTimestampNs;
+                    else if("SENSOR_EXPOSURE_TIME".equals(key.name))value=sensorExposureNs;
+                    return (T)value;
+                }
             }
         """
 
@@ -467,7 +486,16 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public int setRepeatingRequest(CaptureRequest r,CaptureCallback c,android.os.Handler h){request=r;callback=c;return 1;}
                     public int capture(CaptureRequest r,CaptureCallback c,android.os.Handler h){return 1;}
                     public void stopRepeating(){}public void close(){}
-                    public void emit(long frame){if(callback==null)throw new AssertionError("生产出口没有绑定回调");callback.onCaptureStarted(this,request,frame*1000000,frame);callback.onCaptureCompleted(this,request,new TotalCaptureResult());}
+                    public void emit(long frame){emitFrom(request,frame);}
+                    /** Y01：允许指定回执归属的请求实例（模拟同会话在途的旧请求回执）。 */
+                    public void emitFrom(CaptureRequest r,long frame){emitFrom(r,frame,null,null);}
+                    /** B01：结果侧带 SENSOR_TIMESTAMP / SENSOR_EXPOSURE_TIME 的可控回执。 */
+                    public void emitFrom(CaptureRequest r,long frame,Long sensorTimestampNs,Long sensorExposureNs){
+                        if(callback==null)throw new AssertionError("生产出口没有绑定回调");
+                        TotalCaptureResult result=new TotalCaptureResult(sensorTimestampNs,sensorExposureNs);
+                        callback.onCaptureStarted(this,r,frame*1000000,frame);
+                        callback.onCaptureCompleted(this,r,result);
+                    }
                     public abstract static class StateCallback {public abstract void onConfigured(CameraCaptureSession s);public abstract void onConfigureFailed(CameraCaptureSession s);}
                     public static class CaptureCallback {
                         public void onCaptureStarted(CameraCaptureSession s,CaptureRequest r,long timestamp,long frame){}
@@ -483,7 +511,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public int captureBurst(java.util.List<CaptureRequest> requests,CaptureCallback c,android.os.Handler h){return 1;}
                 }
             """,
-            "android.hardware.camera2.TotalCaptureResult" to "package android.hardware.camera2; public class TotalCaptureResult extends CaptureResult {}",
+            "android.hardware.camera2.TotalCaptureResult" to """
+                package android.hardware.camera2;
+                public class TotalCaptureResult extends CaptureResult {
+                    public TotalCaptureResult(){}
+                    public TotalCaptureResult(Long ts,Long exp){sensorTimestampNs=ts;sensorExposureNs=exp;}
+                }
+            """,
             "com.wotagei.cam.diag.Diag" to """
                 package com.wotagei.cam.diag;
                 public class Diag {

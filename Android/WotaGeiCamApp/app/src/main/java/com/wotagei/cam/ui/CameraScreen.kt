@@ -4570,17 +4570,20 @@ private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
 
 /**
  * 「预览：<档位>」下方的**实测读数行**（2026-11-01 用户定版，docs/plan/31）：
- * 实际曝光（`XX ms | 1/YY`）· 实际帧率（`XX fps`）· 纠偏模式（自动/手动）· 纠偏值（`X.X ms`）。
+ * 实际曝光（`XX ms | 1/YY`）· HAL 回报曝光（`HAL XX ms | 1/YY`，B01 独立读数）· 实际帧率
+ * （`XX fps`）· 纠偏模式（自动/手动）· 纠偏值（`X.X ms`）。
  *
  * - 数据同源帧率守卫（~1s 采样）与曝光下发留痕（applyParams 逐次回写总线），但**渲染互不相干**：
  *   帧率过低提示是告警行（lowFpsHint），这一行是常态读数，各占各的位；
  * - 只在手动曝光（AE_OFF）且有实际下发值时显示——自动档三键缺席，"实际曝光"无从谈起；
+ * - HAL 回报与送出值并排（B01）：两者不等即 HAL 夹取/改写，排障时一眼能看出"发的和跑的不一样"；
  * - 样式与 [DisplayScaleReadout] 同一套（红描边 + 半透明灰、9sp），钉在它正下方一行的位置。
  */
 @Composable
 private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
     val aeMode by params.aeMode.observed()
     val sentNs by params.actualSentExposureNs.observed()
+    val halNs by params.actualHalExposureNs.observed()
     val shutterState by params.shutter.observed()
     val fpsMeasured by params.actualFps.observed()
     val corrAuto by params.exposureCorrectionAuto.observed()
@@ -4596,10 +4599,21 @@ private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
         sent / 1_000_000.0,
         (WotaTiers.NS_PER_SECOND.toDouble() / refNs).roundToInt().coerceAtLeast(1)
     )
+    // B01：HAL 结果侧独立读数，与送出值并排；分数标同样按实发值反推（HAL 值就是实际跑的）
+    val halPart = halNs?.takeIf { it > 0L }?.let {
+        "HAL %.1f ms | 1/%d".format(
+            it / 1_000_000.0,
+            (WotaTiers.NS_PER_SECOND.toDouble() / it).roundToInt().coerceAtLeast(1)
+        )
+    }
     val fpsPart = fpsMeasured?.let { "%.0f fps".format(it) } ?: "-- fps"
     val modePart = stringResource(if (corrAuto) R.string.cam_ae_auto else R.string.cam_ae_manual)
     val corrPart = "%.1f ms".format((corrNs ?: 0L) / 1_000_000.0)
-    val text = "$expPart · $fpsPart · $modePart · $corrPart"
+    val text = buildString {
+        append(expPart)
+        if (halPart != null) append(" · ").append(halPart)
+        append(" · ").append(fpsPart).append(" · ").append(modePart).append(" · ").append(corrPart)
+    }
     val density = LocalDensity.current
     val gap = with(density) { 4.dp.roundToPx() }
     // DisplayScaleReadout 的正文行高（12sp）：这一行钉在它下面一行，避免两行文字叠在一起

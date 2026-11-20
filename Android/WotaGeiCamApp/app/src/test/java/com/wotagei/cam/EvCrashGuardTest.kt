@@ -185,8 +185,8 @@ class EvCrashGuardTest {
             apply.contains("val effectiveBuilder = reqBuilder ?: builder")
         )
         assertTrue(
-            "apply 必须写 effectiveBuilder",
-            apply.contains("applyParams(effectiveBuilder, state)")
+            "apply 必须写 effectiveBuilder（Y02：并带上同一份快照）",
+            apply.contains("applyParams(effectiveBuilder, state, snap)")
         )
         assertTrue(
             "build 必须吃 effectiveBuilder（build 旧 builder = 翻转修复静默失效）",
