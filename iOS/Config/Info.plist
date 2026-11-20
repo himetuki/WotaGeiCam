@@ -23,11 +23,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>WOTA 艺录制需要使用后置相机拍摄舞蹈与应援动作的实时预览，并用于后续录像。</string>
+	<string>使用相机预览并录制 WOTA 艺练习中的动作和荧光棒轨迹，录像保存在应用片库。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>WOTA 艺录制需要使用麦克风录制现场应援声与环境音，作为后续录像的音轨。</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>WOTA 艺录制完成录像后，需要将视频保存到系统照片图库，方便回看和分享。</string>
+	<string>开启现场声时，使用麦克风把练习音乐与现场应援声录入 WOTA 艺视频。</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import argparse
 import plistlib
 import re
 import subprocess
@@ -156,7 +157,19 @@ def swift_sources() -> list[Path]:
     return files
 
 
+def parse_core_mode() -> str:
+    parser = argparse.ArgumentParser(description="检查 iOS 工程结构（静态）")
+    parser.add_argument(
+        "--core-mode",
+        choices=["package", "inline"],
+        default="package",
+        help="与工程登记模式对账：package=本地 SwiftPM，inline=WotaCore 源码直编",
+    )
+    return parser.parse_args().core_mode
+
+
 def main() -> int:
+    core_mode = parse_core_mode()
     required_files = [
         ".gitignore",
         "README.md",
@@ -186,6 +199,7 @@ def main() -> int:
         "WotaGeiCam/UI/CameraStatusOverlayView.swift",
         "WotaGeiCam/UI/CameraParameterPanelView.swift",
         "WotaGeiCam/Resources/Assets.xcassets/Contents.json",
+        "WotaGeiCam/Resources/PrivacyInfo.xcprivacy",
         "Packages/WotaCore/Package.swift",
         "Packages/WotaCore/Sources/WotaCore/CameraSessionStateMachine.swift",
         "Packages/WotaCore/Sources/WotaCore/RecordingFileNaming.swift",
@@ -239,7 +253,17 @@ def main() -> int:
     check("UIApplicationMain" in main_swift, "main.swift 未使用 UIApplicationMain 入口")
     check("UIViewController" in preview_controller, "取景页不是 UIViewController")
     check("AVCaptureVideoPreviewLayer" in preview_view, "预览不是 AVCaptureVideoPreviewLayer")
-    check("videoOrientation" in preview_view, "预览未使用 iOS 10 可用的 videoOrientation")
+    # 方向控制的所有者是会话控制器：预览宿主 registerConnection 把图层连接交给
+    # setPreviewVideoConnection，由会话队列在 isVideoOrientationSupported 时设置方向。
+    check(
+        "videoOrientation" in session_controller,
+        "会话控制器未使用 iOS 10 可用的 videoOrientation 控制录制方向",
+    )
+    check(
+        "func setPreviewVideoConnection(" in session_controller
+        and "connection.isVideoOrientationSupported" in session_controller,
+        "会话控制器缺 setPreviewVideoConnection 方向注册入口（含支持判断）",
+    )
     check(
         "videoRotationAngle" not in strip_swift_comments(preview_view),
         "预览使用了 iOS 17 API videoRotationAngle（iOS 10 不可用）",
@@ -308,19 +332,21 @@ def main() -> int:
             check("#available(iOS 11" in code, f"{relative} 使用了 safeAreaLayoutGuide 但没有 iOS 11 可用性门")
 
     # Info.plist：权限文案必须具体指向 WOTA 艺录制，且没有占位词。
+    # 本应用不向照片图库写入（成片只进 app 沙盒片库），故图库权限键必须不存在。
     if INFO_PLIST.is_file():
         with INFO_PLIST.open("rb") as handle:
             plist = plistlib.load(handle)
         camera = str(plist.get("NSCameraUsageDescription", ""))
         microphone = str(plist.get("NSMicrophoneUsageDescription", ""))
-        photo_add = str(plist.get("NSPhotoLibraryAddUsageDescription", ""))
+        check(
+            "NSPhotoLibraryAddUsageDescription" not in plist,
+            "应用不写照片图库，不应保留 NSPhotoLibraryAddUsageDescription",
+        )
         check("WOTA" in camera and "相机" in camera, "NSCameraUsageDescription 未具体说明 WOTA 艺录制相机用途")
         check("WOTA" in microphone and "麦克风" in microphone, "NSMicrophoneUsageDescription 未具体说明 WOTA 艺录制麦克风用途")
-        check("WOTA" in photo_add and "照片图库" in photo_add, "NSPhotoLibraryAddUsageDescription 未具体说明保存用途")
         for key, value in {
             "NSCameraUsageDescription": camera,
             "NSMicrophoneUsageDescription": microphone,
-            "NSPhotoLibraryAddUsageDescription": photo_add,
         }.items():
             lowered = value.lower()
             check(
@@ -394,7 +420,20 @@ def main() -> int:
         check("com.apple.product-type.bundle.unit-test" not in pbx, "当前交付不应包含测试 target")
         check("INFOPLIST_FILE = Config/Info.plist;" in pbx, "缺 INFOPLIST_FILE 指向 Config/Info.plist")
         check("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;" in pbx, "缺 AccentColor 设置")
-        check("relativePath = Packages/WotaCore;" in pbx, "缺本地包引用 Packages/WotaCore（package 模式）")
+        if core_mode == "package":
+            check("relativePath = Packages/WotaCore;" in pbx, "缺本地包引用 Packages/WotaCore（package 模式）")
+        else:
+            check(
+                "relativePath = Packages/WotaCore;" not in pbx,
+                "inline 模式不应引用本地 SwiftPM 包",
+            )
+            check("WotaCore (inline)" in pbx, "inline 模式缺 WotaCore (inline) 组")
+            inline_core_dir = IOS_ROOT / "Packages" / "WotaCore" / "Sources" / "WotaCore"
+            for core_file in sorted(p for p in inline_core_dir.rglob("*.swift") if p.is_file()):
+                check(
+                    f"{core_file.name} in Sources */" in pbx,
+                    f"WotaCore 内联源文件未被 Sources 阶段收录：{core_file.name}",
+                )
 
         for name, _, _ in [
             ("Debug", "", True),
@@ -415,6 +454,55 @@ def main() -> int:
             name = swift_file.name
             check(f"{name} in Sources */" in pbx, f"源文件未被 Sources 阶段收录：{name}")
         check("Assets.xcassets in Resources */" in pbx, "Assets.xcassets 未被 Resources 阶段收录")
+
+    # 隐私清单（Apple PrivacyInfo.xcprivacy）：声明、理由与 Resources 收录。
+    privacy_path = IOS_ROOT / "WotaGeiCam/Resources/PrivacyInfo.xcprivacy"
+    if privacy_path.is_file():
+        if PROJECT.is_file():
+            check(
+                "PrivacyInfo.xcprivacy in Resources */" in PROJECT.read_text(encoding="utf-8"),
+                "PrivacyInfo.xcprivacy 未被 Resources 阶段收录",
+            )
+        try:
+            with privacy_path.open("rb") as handle:
+                privacy = plistlib.load(handle)
+        except Exception as error:  # noqa: BLE001 - 检查器只报告解析失败原因
+            check(False, f"PrivacyInfo.xcprivacy plist 解析失败：{error}")
+            privacy = None
+        if privacy is not None:
+            check(privacy.get("NSPrivacyTracking") is False, "NSPrivacyTracking 必须为 false")
+            check(privacy.get("NSPrivacyTrackingDomains") == [], "NSPrivacyTrackingDomains 必须为空数组")
+            check(
+                privacy.get("NSPrivacyCollectedDataTypes") == [],
+                "本应用不收集任何数据（NSPrivacyCollectedDataTypes 必须为空数组）",
+            )
+            entries = privacy.get("NSPrivacyAccessedAPITypes")
+            expected = {
+                "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
+                "NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1", "3B52.1"],
+                "NSPrivacyAccessedAPICategoryDiskSpace": ["E174.1"],
+                "NSPrivacyAccessedAPICategorySystemBootTime": ["35F9.1"],
+            }
+            check(isinstance(entries, list) and bool(entries), "NSPrivacyAccessedAPITypes 必须是非空数组")
+            mapped: dict[str, list] = {}
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict):
+                    category = entry.get("NSPrivacyAccessedAPIType")
+                    reasons = entry.get("NSPrivacyAccessedAPITypeReasons")
+                    mapped[category] = reasons if isinstance(reasons, list) else []
+            for category, reasons in expected.items():
+                actual = mapped.get(category)
+                check(
+                    actual is not None and actual == reasons,
+                    f"PrivacyInfo.xcprivacy 类别/理由不符：{category} 期望 {reasons}，实际 {actual}",
+                )
+            reason_pattern = re.compile(r"^[A-Z0-9]{2,4}\.[1-9][0-9]*$")
+            for category, reasons in mapped.items():
+                for reason in reasons:
+                    check(
+                        bool(reason_pattern.match(str(reason))),
+                        f"PrivacyInfo.xcprivacy 的理由编号格式非法：{category} / {reason}",
+                    )
 
     # schemes：Legacy / Modern × full / lite。
     for scheme_name, debug_config, release_config in [
@@ -441,10 +529,10 @@ def main() -> int:
         check('BlueprintName = "WotaGeiCam"' in text, f"{scheme_name} 未指向 WotaGeiCam")
         check("TestableReference" not in text, f"{scheme_name} 不应包含测试项")
 
-    # 工程文件必须与源码目录一致：调用生成器自检。
+    # 工程文件必须与源码目录一致：调用生成器自检（按本次指定的登记模式对账）。
     if GENERATOR.is_file():
         result = subprocess.run(
-            [sys.executable, str(GENERATOR), "--check"],
+            [sys.executable, str(GENERATOR), "--check", "--core-mode", core_mode],
             capture_output=True,
             text=True,
             cwd=str(IOS_ROOT),
