@@ -128,18 +128,35 @@ import com.wotagei.cam.ui.anim.MotionMode
 /**
  * 导航路由常量（UI 层 NavHost 照此注册）：
  * - `gallery` 媒体库
- * - `player/{mediaId}` 单视频播放页
- * - `compare?leftMediaId={leftMediaId}` 双视频对比（右视频页内选取）
+ * - `player/{mediaId}?row={row}` 单视频播放页
+ * - `compare?leftMediaId={leftMediaId}&row={row}` 双视频对比（右视频页内选取）
+ *
+ * `row`（真实行 URI）是**可选查询参数**（Y27）：新发起的播放/对比都带上它，加载走
+ * [com.wotagei.cam.media.MediaRepo.clipByRowUri]，回收站里同号的另一卷片不可能被顶上来；
+ * 历史裸 ID 深链没有这个参数，仍按原路（`clipById` 唯一命中，多行即关死）加载。
+ * 把行身份放进**同一个**路由模板而不是另开平行目的地：系统栏/常亮/亮度/练习回程这些
+ * 「按路由常量判定」的外壳逻辑都只认这一枚模板，不会再分裂出第二套口径。
  */
 object WotaNav {
     const val GALLERY = "gallery"
-    const val PLAYER = "player/{mediaId}"
+    const val PLAYER = "player/{mediaId}?row={row}"
     const val PLAYER_ARG = "mediaId"
-    const val COMPARE = "compare?leftMediaId={leftMediaId}"
+    const val PLAYER_ROW_ARG = "row"
+    const val COMPARE = "compare?leftMediaId={leftMediaId}&row={row}"
     const val COMPARE_ARG_LEFT = "leftMediaId"
+    const val COMPARE_ROW_ARG = "row"
 
-    fun player(mediaId: Long): String = "player/$mediaId"
-    fun compare(leftMediaId: Long): String = "compare?leftMediaId=$leftMediaId"
+    /** 正常播放路由：id 供历史深链/标题，行 URI 供按卷加载（编码后才进查询参数） */
+    fun player(mediaId: Long, row: Uri): String =
+        "player/$mediaId?$PLAYER_ROW_ARG=${Uri.encode(row.toString())}"
+
+    /** 正常对比路由：左片同上，右片仍由页内选取 */
+    fun compare(leftMediaId: Long, row: Uri): String =
+        "compare?$COMPARE_ARG_LEFT=$leftMediaId&$COMPARE_ROW_ARG=${Uri.encode(row.toString())}"
+
+    /** 路由参数 → 行 URI：缺参/空值 = 历史裸 ID 深链（null）；形状由 `mediaRowRefOf` 另行判定 */
+    fun rowUriOf(raw: String?): Uri? =
+        raw?.takeIf { it.isNotBlank() }?.let { Uri.parse(Uri.decode(it)) }
 }
 
 /** 页签切换入场位移：比胶囊按下缩放的反馈更明显，但不到半个屏，免得读成「整页在跑」 */
@@ -162,8 +179,8 @@ private val SUBTAB_LINE_GAP = 8.dp
  */
 @Composable
 fun GalleryScreen(
-    onOpen: (Long) -> Unit,
-    onCompare: (Long) -> Unit,
+    onOpen: (VideoClip) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     onBack: () -> Unit,
     repo: MediaRepo = rememberMediaRepo(),
     ops: MediaOps = rememberMediaOps()
@@ -262,16 +279,11 @@ fun GalleryScreen(
         if (purgeKept != purgeKeys) purgeKeys = purgeKept
     }
 
-    // Y27：同一 mediaId 命中多条不同卷行时，任何只吃 Long 的出口都没有无歧义映射。
-    // 列表键/选择/菜单重解析已全部走行 URI；剩下打开/对比的路由仍只吃 Long
-    // （player/{mediaId}、compare?leftMediaId=），命中歧义就显式拒绝并回横幅。
-    val ambiguousIds = remember(clips) { ambiguousMediaIds(rowIdentities(clips)) }
-    val openRow: (VideoClip) -> Unit = { clip ->
-        if (clip.id in ambiguousIds) banner = R.string.gallery_row_ambiguous else onOpen(clip.id)
-    }
-    val compareRow: (VideoClip) -> Unit = { clip ->
-        if (clip.id in ambiguousIds) banner = R.string.gallery_row_ambiguous else onCompare(clip.id)
-    }
+    // Y27：打开/对比现在把**整条行**交出去（`clip.uri` 随路由进播放/对比页），加载按具体卷钉行；
+    // 跨卷同号不再需要在这里显式拒绝——行 URI 本身就是无歧义身份（见 `WotaNav`）。
+    // 裸 Long 出口（玩家/对比左片的旧深链）仍由 MediaRepo 的唯一命中判据把关，不在这里分流。
+    val openRow: (VideoClip) -> Unit = { clip -> onOpen(clip) }
+    val compareRow: (VideoClip) -> Unit = { clip -> onCompare(clip) }
     // 菜单目标按行 URI 重新解析：裸 id 重号时 `firstOrNull { it.id == r.id }` 会拿另一卷的行。
     val liveByKey = remember(clips) { clips.associateBy { rowKeyOf(it) } }
 
@@ -524,7 +536,7 @@ fun GalleryScreen(
                 ops = ops,
                 onDismiss = { menuTargets = null },
                 // 组卡对比必须开代表段（首段），不能拿输入顺序的第一个（可能是较晚分段，Y27）；
-                // 代表段的 id 若跨卷重号，open/compare 路由无法无歧义解析 ⇒ 显式拒绝。
+                // 代表段带着自己的真实行 URI 进路由，跨卷同号也不会拿错片。
                 onCompare = { compareRow(SeriesGroup.representativeOf(targets) ?: targets.first()) }
             )
         }
@@ -1213,7 +1225,9 @@ private fun RenameDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) 
 @Composable
 fun MediaTagDialog(clip: VideoClip, ops: MediaOps, onDismiss: () -> Unit) {
     val repo = rememberMediaRepo()
-    val tags by repo.db().tagDao().observeTagsOf(clip.id).collectState(clip.tags.toList())
+    val pathKeys = remember(clip.uri, clip.dataPath, clip.isTrashed) { clip.tagPathKeys() }
+    val tagRows by remember(repo, clip.id) { repo.db().tagDao().observeRowsOf(clip.id) }.collectState(null)
+    val tags = tagRows?.let { tagsForRow(it, pathKeys) } ?: clip.tags
     var input by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,

@@ -128,7 +128,7 @@ class MediaCompatibilityTest {
         val tagType = loader.loadClass("com.wotagei.cam.media.MediaTagDao")
         inject("tagDao", Proxy.newProxyInstance(loader, arrayOf(tagType)) { _, method, _ ->
             when (method.name) {
-                "tagsOf" -> emptyList<String>()
+                "rowsOf" -> emptyList<Any>()
                 "observeAll" -> flowOf(emptyList<Any>())
                 else -> error("意外调用 ${method.name}")
             }
@@ -222,6 +222,15 @@ class MediaCompatibilityTest {
                 public class ContentResolver {
                     public android.graphics.Bitmap loadThumbnail(android.net.Uri uri, android.util.Size size, android.os.CancellationSignal signal) { return null; }
                     public android.database.Cursor query(android.net.Uri uri, String[] projection, String selection, String[] args, String sort) { return new android.database.FixtureCursor(); }
+                    public android.database.Cursor query(android.net.Uri uri, String[] projection, android.os.Bundle args, android.os.CancellationSignal signal) { return new android.database.FixtureCursor(); }
+                }
+            """.trimIndent(),
+            "android/os/Bundle.java" to """
+                package android.os;
+                public class Bundle {
+                    public void putString(String key, String value) {}
+                    public void putStringArray(String key, String[] value) {}
+                    public void putInt(String key, int value) {}
                 }
             """.trimIndent(),
             "android/content/ContentUris.java" to """

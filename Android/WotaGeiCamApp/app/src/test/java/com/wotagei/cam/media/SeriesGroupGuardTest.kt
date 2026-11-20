@@ -141,11 +141,15 @@ class SeriesGroupGuardTest {
         assertTrue("查不到归属的行必须原样返回（单段片逐字不变）", ann.contains("?: return@map c"))
         assertTrue(
             "跨卷同号不能盖成系列成员（否则 SD 卡同号片和真分段一起从列表消失）",
-            ann.contains("sameStorageVolume(p.uri, c.uri.toString())")
+            ann.contains("sameStorageVolume(it.uri, c.uri.toString(), sameIdRows)")
         )
         assertTrue(
-            "跨卷命中必须原样返回，不拿 id 硬认",
-            ann.contains("if (!sameStorageVolume(p.uri, c.uri.toString())) return@map c")
+            "同 id 可能挂着多条成员记录：逐条按卷比，命中不了就原样返回（不拿 id 硬认）",
+            ann.contains("firstOrNull {") && ann.contains("?: return@map c")
+        )
+        assertTrue(
+            "同 id 的不同行 URI 数必须数出来（旧账合成卷别名只认主卷的唯一行）",
+            ann.contains("rowUris")
         )
     }
 

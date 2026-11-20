@@ -571,21 +571,32 @@ private fun WotaRoot() {
         composable(WotaNav.GALLERY) {
             DestinationPresence(windowOwner, WotaNav.GALLERY) {
                 GalleryEntryScreen(
-                    onOpen = { id -> nav.navigate(WotaNav.player(id)) },
-                    onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
+                    // Y27：新发起的播放/对比都带真实行 URI（路由查询参数），加载按具体卷钉行
+                    onOpen = { clip -> nav.navigate(WotaNav.player(clip.id, clip.uri)) },
+                    onCompare = { clip -> nav.navigate(WotaNav.compare(clip.id, clip.uri)) },
                     onBack = { navigateBack() }
                 )
             }
         }
         composable(
             route = WotaNav.PLAYER,
-            arguments = listOf(navArgument(WotaNav.PLAYER_ARG) { type = NavType.LongType })
+            arguments = listOf(
+                navArgument(WotaNav.PLAYER_ARG) { type = NavType.LongType },
+                // 行 URI 是可选查询参数：历史裸 ID 深链没有它，仍按 id 唯一命中加载
+                navArgument(WotaNav.PLAYER_ROW_ARG) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            )
         ) { entry ->
             DestinationPresence(windowOwner, WotaNav.PLAYER) {
                 PlayerScreen(
                     mediaId = entry.arguments?.getLong(WotaNav.PLAYER_ARG) ?: -1L,
+                    rowUri = WotaNav.rowUriOf(entry.arguments?.getString(WotaNav.PLAYER_ROW_ARG)),
                     onBack = { navigateBack() },
-                    onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
+                    // 对比左片沿用本页这条真实行：从回收站打开也只会带上它自己那条行
+                    onCompare = { clip -> nav.navigate(WotaNav.compare(clip.id, clip.uri)) },
                     // 起播渐亮（29 §5.3-②）：页面只上报"起播了"，武装闸与窗口写入收口在 MainActivity
                     onPlaybackStarted = { windowOwner?.onPlayerPlaybackStarted() }
                 )
@@ -594,12 +605,18 @@ private fun WotaRoot() {
         composable(
             route = WotaNav.COMPARE,
             arguments = listOf(
-                navArgument(WotaNav.COMPARE_ARG_LEFT) { type = NavType.LongType; defaultValue = -1L }
+                navArgument(WotaNav.COMPARE_ARG_LEFT) { type = NavType.LongType; defaultValue = -1L },
+                navArgument(WotaNav.COMPARE_ROW_ARG) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
             )
         ) { entry ->
             DestinationPresence(windowOwner, WotaNav.COMPARE) {
                 CompareScreen(
                     leftMediaId = entry.arguments?.getLong(WotaNav.COMPARE_ARG_LEFT) ?: -1L,
+                    leftRowUri = WotaNav.rowUriOf(entry.arguments?.getString(WotaNav.COMPARE_ROW_ARG)),
                     onBack = { navigateBack() },
                     onPractice = { nav.navigate(ROUTE_CAMERA) }
                 )

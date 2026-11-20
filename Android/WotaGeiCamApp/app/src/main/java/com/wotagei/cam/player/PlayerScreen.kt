@@ -5,6 +5,7 @@
 package com.wotagei.cam.player
 
 import android.graphics.Color
+import android.net.Uri
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -343,20 +344,30 @@ internal fun nextCcwQuarter(q: Int): Int = ((q % 4) + 3) % 4
 /** clipById 查询尚未回包的哨兵（collectState 的 initial）：与"查过且没有"（收到 null）区分开 */
 private object ClipQueryPending
 
-/** 路由版：/player/{mediaId} —— UI 层只需传 id */
+/**
+ * 路由版：/player/{mediaId}?row={row} —— UI 层传 id + **真实行 URI**。
+ *
+ * 行 URI 优先（Y27）：按具体卷钉行加载（[com.wotagei.cam.media.MediaRepo.clipByRowUri]），
+ * 回收站里同号的另一卷活片不可能被顶上来。没有行 URI 的历史裸 ID 深链仍走
+ * [com.wotagei.cam.media.MediaRepo.clipById]（唯一命中；多行命中即按查无此片关死）。
+ * 行 URI 形状不合法（旧聚合别名等）时同样落到「片已不在」空态，**不退回裸 id** 猜。
+ */
 @Composable
 fun PlayerScreen(
     mediaId: Long,
+    rowUri: Uri?,
     onBack: () -> Unit,
-    onCompare: (Long) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     repo: com.wotagei.cam.media.MediaRepo = rememberMediaRepo(),
     ops: MediaOps = rememberMediaOps(),
     onPlaybackStarted: () -> Unit = {}
 ) {
-    // 契约：clipById 对"查过且没有"（片被外部删掉/回收站清掉）会发射一次 null（MediaRepo.clipById
-    // 专用管道直接 emit 可空结果，不走吞 null 的 gated）。首次发射（片在 → VideoClip、片没了 → null）
-    // 顶掉哨兵：借它区分"还在查"与"片已消失"，后者必须给空态出口，不许停在转圈；也不许自动返回/自动重试
-    val state by repo.clipById(mediaId).collectState(ClipQueryPending)
+    // 契约：clipById / clipByRowUri 对"查过且没有"（片被外部删掉/回收站清掉）会发射一次 null
+    // （MediaRepo 专用管道直接 emit 可空结果，不走吞 null 的 gated）。首次发射（片在 → VideoClip、
+    // 片没了 → null）顶掉哨兵：借它区分"还在查"与"片已消失"，后者必须给空态出口，不许停在转圈；
+    // 也不许自动返回/自动重试
+    val state by (if (rowUri != null) repo.clipByRowUri(rowUri) else repo.clipById(mediaId))
+        .collectState(ClipQueryPending)
     val c = state as? VideoClip
     when {
         state === ClipQueryPending -> {
@@ -393,7 +404,7 @@ fun PlayerScreen(
 fun PlayerScreen(
     clip: VideoClip,
     onBack: () -> Unit,
-    onCompare: (Long) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     ops: MediaOps = rememberMediaOps(),
     onPlaybackStarted: () -> Unit = {}
 ) {
@@ -663,7 +674,7 @@ fun PlayerScreen(
                         if (clip.isTrashed) ops.restoreFromTrash(listOf(clip)) else ops.moveToTrash(listOf(clip))
                     },
                     onPurge = { purgeDialog = true },
-                    onCompare = { onCompare(clip.id) },
+                    onCompare = { onCompare(clip) },
                     // 收起（29 §6.3）：落盘持久，重进/冷启保持
                     onCollapse = {
                         topBarCollapsed = true

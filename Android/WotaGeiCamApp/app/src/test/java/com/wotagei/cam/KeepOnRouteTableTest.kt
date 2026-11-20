@@ -27,8 +27,8 @@ class KeepOnRouteTableTest {
     fun `其余页面一律不常亮`() {
         assertFalse("媒体库不常亮", keepScreenOnForRoute("gallery"))
         assertFalse("设置页不常亮", keepScreenOnForRoute("settings"))
-        assertFalse("播放页不常亮（路由模板形态）", keepScreenOnForRoute("player/{mediaId}"))
-        assertFalse("对比页不常亮（路由模板形态）", keepScreenOnForRoute("compare?leftMediaId={leftMediaId}"))
+        assertFalse("播放页不常亮（路由模板形态）", keepScreenOnForRoute("player/{mediaId}?row={row}"))
+        assertFalse("对比页不常亮（路由模板形态）", keepScreenOnForRoute("compare?leftMediaId={leftMediaId}&row={row}"))
     }
 
     @Test

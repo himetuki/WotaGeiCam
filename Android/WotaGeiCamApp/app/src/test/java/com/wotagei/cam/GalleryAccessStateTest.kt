@@ -273,9 +273,9 @@ class GalleryAccessStateTest {
 
     @Test
     fun `单片ID查询必须显式带IS_PENDING门`() {
-        val q = body("media/MediaRepo.kt", "queryById")
+        val q = body("media/MediaRepo.kt", "queryRowsById")
         assertTrue(
-            "queryById 必须显式 IS_PENDING=0（列表挡住了 pending 行，单条反查链不能再漏一条）",
+            "单片查询必须显式 IS_PENDING=0（列表挡住了 pending 行，单条反查链不能再漏一条）",
             q.contains("IS_PENDING")
         )
     }

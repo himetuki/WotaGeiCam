@@ -1,5 +1,6 @@
 package com.wotagei.cam.media
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
@@ -176,8 +177,10 @@ data class VideoClip(
  * 命中不了的行原样返回：单段片逐字不变。
  *
  * **跨卷同号不能认**（Y27）：`_ID` 只在卷内唯一，SD 卡上同号的另一条视频若也按 id
- * 盖成系列成员，会和真正的分段一起从列表消失。`SeriesPart.uri` 已存录制时的行 URI，
- * 按卷比对（[sameStorageVolume]，合成卷 `external` 与主卷等价）；解析不出版本行原样返回。
+ * 盖成系列成员，会和真正的分段一起从列表消失。同一 id 可能挂着多条成员记录（id 复用
+ * 的历史残留），所以先按 id 收成表再逐条按卷比对，取**第一条**与本行同卷的；
+ * `SeriesPart.uri` 已存录制时的行 URI，按卷比对（[sameStorageVolume]）——旧账的合成卷
+ * `external` 只有在该 id 的可见行唯一时才认主卷（否则无法证明是哪一行），解析不出版本行原样返回。
  */
 internal fun annotateSeries(
     clips: List<VideoClip>,
@@ -186,11 +189,16 @@ internal fun annotateSeries(
 ): List<VideoClip> {
     if (series.isEmpty() && parts.isEmpty()) return clips
     val partCount = series.associate { it.seriesId to it.partCount }
-    val byMedia = HashMap<Long, SeriesPart>(parts.size)
-    parts.forEach { byMedia[it.mediaId] = it }
+    // 同一 id 的多条成员记录逐条留着（旧实现 last-wins 会把能对上的那条挤掉）
+    val byMedia = HashMap<Long, MutableList<SeriesPart>>(parts.size)
+    parts.forEach { byMedia.getOrPut(it.mediaId) { ArrayList(1) }.add(it) }
+    // 同 id 命中的**不同行 URI** 数：合成卷账键只有在唯一时才允许认主卷（Y27）
+    val rowUris = HashMap<Long, MutableSet<String>>(clips.size)
+    clips.forEach { rowUris.getOrPut(it.id) { HashSet(1) }.add(it.uri.toString()) }
     return clips.map { c ->
-        val p = byMedia[c.id] ?: return@map c
-        if (!sameStorageVolume(p.uri, c.uri.toString())) return@map c
+        val sameIdRows = rowUris[c.id]?.size ?: 1
+        val p = byMedia[c.id]?.firstOrNull { sameStorageVolume(it.uri, c.uri.toString(), sameIdRows) }
+            ?: return@map c
         c.copy(
             seriesId = p.seriesId,
             partIndex = p.partIndex,
@@ -313,44 +321,11 @@ class MediaRepo private constructor(private val app: Context) {
         }
     }
 
-    /**
-     * 裸 `mediaId` 是否**无法无歧义地写 Room 台账**（Y27）。
-     *
-     * `media_tag` / `series_part` 仍以全局 Long `mediaId` 为键（schema 不动，见 WotaDb），
-     * 而聚合 MediaStore 集合上不同卷的 `_ID` 可以重号。若同一 id 在当前可见快照里命中
-     * 多条不同卷行，收藏/tag 写入会把标签挂到无法确定的那一条上——此时返回 true，
-     * 调用方显式拒绝并回横幅，不拿第一行猜。
-     *
-     * 查询失败同样返回 true（fail closed）：证明不了唯一，就不写。
-     * 系统回收站的行也在快照内（回收站页签可对它们做收藏/tag）；API 29 的本地回收站
-     * 记录指向的文件已物理删除，不参与「当前可见行」判定。
-     */
-    internal suspend fun ledgerMediaIdIsAmbiguous(id: Long): Boolean {
-        return withContext(Dispatchers.IO) {
-            val failures = ArrayList<Throwable>()
-            val live = readCursor(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0",
-                arrayOf(id.toString()),
-                null,
-                failures
-            )
-            val trashed = trashedMatching(MediaScope.AllVideos, failures)
-            if (failures.isNotEmpty()) {
-                Log.w(TAG, "无法确认 mediaId=$id 是否跨卷重号（读取失败 ${failures.first()}）→ 台账写入关死")
-                return@withContext true
-            }
-            val distinctRows = (live + trashed).asSequence()
-                .filter { it.id == id }
-                .map { it.uri.toString() }
-                .distinct()
-                .take(2)
-                .count()
-            if (distinctRows > 1) {
-                Log.w(TAG, "mediaId=$id 命中多条不同卷的行 → 无法确定标签/收藏归属，台账写入关死")
-            }
-            distinctRows > 1
-        }
+    /** 裸键台账只有在 live + 回收站的唯一真实行仍是所选快照时才可写（Y27）。 */
+    internal fun canWriteLedgerFor(clip: VideoClip): Boolean {
+        val failures = ArrayList<Throwable>(2)
+        val hits = queryRowsById(clip.id, failures = failures)
+        return failures.isEmpty() && ledgerWriteMatches(clip.ledgerRow(), hits.map { it.ledgerRow() })
     }
 
     fun invalidate() {
@@ -389,6 +364,7 @@ class MediaRepo private constructor(private val app: Context) {
                     listFailureState.value = read.failure
                     listLoadedState.value = true
                     val raw = read.clips
+                    val local = if (read.failure == null) reconcileLegacyTrashAliases(s.local) else s.local
                     val restored = try {
                         // Y39：部分授权/未授权、卷未挂载或查询只返回半截时，可见集合都不足以
                         // 证明指纹唯一；迁移必须继续等待，不能把标签贴到看不见的重复候选上。
@@ -406,7 +382,7 @@ class MediaRepo private constructor(private val app: Context) {
                     filterByTab(
                         annotateSeries(joinTags(raw, s.tags + restored), s.series, s.parts),
                         filter,
-                        s.local
+                        local
                     )
                 }
             }
@@ -423,7 +399,39 @@ class MediaRepo private constructor(private val app: Context) {
         return triggers()
             .flatMapLatest { s ->
                 refreshGate.flatMapLatest { open ->
-                    if (open) flow<VideoClip?> { } else flow { emit(queryById(id, s.local)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) }) }
+                    if (open) flow<VideoClip?> { } else flow {
+                        emit(queryById(id, s.local)?.let { clip ->
+                            clip.copy(tags = tagsForRow(s.tags.filter { it.mediaId == id }, clip.tagPathKeys()))
+                        })
+                    }
+                }
+            }
+            .flowOn(Dispatchers.IO)
+    }
+
+    /**
+     * 按**真实行 URI** 单条查询（Y27 正常播放/对比路由的唯一入口）。
+     *
+     * 行 URI 自带具体卷：解出 `(卷, _ID)` 后按卷集合查，回收站兜底也按卷收窄——
+     * 回收站里同号的另一卷活片不可能顶替（`clipById` 的裸 id 入口只能 fail-closed，
+     * 这里没有歧义可关）。形状不符（旧聚合 `external` 别名、非视频集合、非法 id）
+     * 按「没有这一行」下发一次 null，**不退回裸 id** 猜。
+     *
+     * 标签仍按本行路径匹配（[tagsForRow]），不额外查询同号行。闸门与 [clipById] 同口径。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun clipByRowUri(rowUri: Uri): Flow<VideoClip?> {
+        val ref = mediaRowRefOf(rowUri.toString()) ?: return flow { emit(null) }
+        return triggers()
+            .flatMapLatest { s ->
+                refreshGate.flatMapLatest { open ->
+                    if (open) flow<VideoClip?> { } else flow {
+                        emit(
+                            queryById(ref.mediaId, s.local, ref.volume)?.let { clip ->
+                                clip.copy(tags = tagsForRow(s.tags.filter { it.mediaId == ref.mediaId }, clip.tagPathKeys()))
+                            }
+                        )
+                    }
                 }
             }
             .flowOn(Dispatchers.IO)
@@ -443,7 +451,7 @@ class MediaRepo private constructor(private val app: Context) {
         // 定位本函数，表达式体会让守卫失去输入
         return withContext(Dispatchers.IO) {
             val clip = queryById(id)
-            clip?.copy(tags = tagDao.tagsOf(id).toSet())
+            clip?.copy(tags = tagsForRow(tagDao.rowsOf(id), clip.tagPathKeys()))
         }
     }
 
@@ -513,7 +521,15 @@ class MediaRepo private constructor(private val app: Context) {
         // 手选 URI 自带真实卷（Y27）：按卷反查，聚合查询上同号另一卷的行不能顶替
         val hit = queryById(id, volume = uri.pathSegments.first()) ?: return null
         // 标签是增强信息：Room 抖动不该把一条已命中的可播片判成「读取失败」
-        return hit.copy(tags = runCatching { tagDao.tagsOf(id).toSet() }.getOrDefault(emptySet()))
+        val tags = try {
+            tagsForRow(tagDao.rowsOf(id), hit.tagPathKeys())
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "选片标签查询失败 mediaId=$id", e)
+            emptySet()
+        }
+        return hit.copy(tags = tags)
     }
 
     /**
@@ -598,6 +614,28 @@ class MediaRepo private constructor(private val app: Context) {
 
     fun trashItems(): Flow<List<TrashItem>> = trashDao.observeAll().flowOn(Dispatchers.IO)
 
+    /** API 29 旧回收账只在未按页签/目录收窄的查询上确认；不把失败或不可见当作已经迁移。 */
+    private suspend fun reconcileLegacyTrashAliases(items: List<TrashItem>): List<TrashItem> {
+        if (SYSTEM_TRASH_SUPPORTED) return items
+        val aliases = items.filter { legacyAggregateRowRefOf(it.uri) != null }
+        if (aliases.isEmpty()) return items
+        val access = mediaAccessState(app)
+        if ((access != MediaAccessState.FULL_READ && access != MediaAccessState.ALL_FILES) ||
+            !allMediaVolumesMounted(app)
+        ) return items
+        var changed = false
+        for (item in aliases) {
+            val failures = ArrayList<Throwable>(1)
+            val hits = queryRowsById(item.mediaId, failures = failures)
+            if (failures.isNotEmpty()) continue
+            val probes = hits.map { RowProbe(it.uri.toString(), it.name, it.relativePath) }
+            val target = legacyTrashAliasTarget(item.uri, item.name, item.origin, probes) ?: continue
+            // 数据库单句检查冲突；不依赖先前的台账快照来判断主键是否仍然空着。
+            if (trashDao.rewriteUri(item.uri, target, item.name, item.origin, item.deletedAt) > 0) changed = true
+        }
+        return if (changed) trashDao.observeAll().first() else items
+    }
+
     // region MediaStore
 
     private val projectionBase = listOf(
@@ -660,46 +698,26 @@ class MediaRepo private constructor(private val app: Context) {
         }
 
     private suspend fun queryById(id: Long, localTrash: List<TrashItem>? = null, volume: String? = null): VideoClip? {
-        // 单片反查也必须显式带 IS_PENDING=0：pending 行对 owner 可见，单独按 _ID 查会把
-        // 录制/导出中的半成品当成可播条目（列表已挡住，反查链不能再漏一条，Y26）
-        //
-        // 有卷名时按卷查（Y27）：聚合 external 上不同卷的 _ID 可以重号，只按 _ID 查会
-        // 命中同号的另一条视频。没有卷名的旧入口（纯 id 路由/旧深链）只能退回聚合集合，
-        // 此时命中多行即无法判定，按「查无此片」关死（[failClosedIfAmbiguous]）。
-        // "external" 是跨所有卷的合成卷名而不是真实卷——旧深链就长这样，照旧走聚合集合。
-        val concreteVolume = volume?.takeIf { it.isNotBlank() && it != MediaStore.VOLUME_EXTERNAL }
-        val collection = concreteVolume?.let { MediaStore.Video.Media.getContentUri(it) }
-            ?: MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        val live = readCursor(
-            collection,
-            "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0",
-            arrayOf(id.toString()),
-            null
-        )
-        val liveHit = failClosedIfAmbiguous(live)
-        if (liveHit == null && live.size > 1) {
-            Log.w(TAG, "裸 ID 反查命中 ${live.size} 行同号视频（跨卷重号）id=$id → 按查无此片返回")
-            return null
-        }
-        // 回收站兜底同样按卷收窄：手选 URI 带着原卷回来，不能让另一卷同号的废片顶替；
-        // 无卷名的旧入口命多行同样关死。
-        val trashHits = if (liveHit != null) {
-            emptyList()
-        } else {
-            trashedMatching(MediaScope.AllVideos).filter {
-                it.id == id && (concreteVolume == null || it.uri.pathSegments.firstOrNull() == concreteVolume)
-            }
-        }
-        val trashHit = failClosedIfAmbiguous(trashHits)
-        if (trashHit == null && trashHits.size > 1) {
-            Log.w(TAG, "回收站裸 ID 反查命中 ${trashHits.size} 行同号视频 id=$id → 按查无此片返回")
-            return null
-        }
-        val clip = liveHit ?: trashHit ?: return null
+        val failures = ArrayList<Throwable>(2)
+        val hits = queryRowsById(id, volume, failures)
+        if (failures.isNotEmpty()) return null
+        val clip = failClosedIfAmbiguous(hits) ?: return null
         if (SYSTEM_TRASH_SUPPORTED) return clip
         // 三个单片出口共用状态投影；流式查询复用同拍快照，单次查询只取一拍本地记录。
         val localUris = (localTrash ?: trashDao.observeAll().first()).map { it.uri }.toSet()
         return clip.copy(isTrashed = trashedFor(clip, localUris))
+    }
+
+    /** 单次限定 ID 的 Provider 查询同时包含 live / trash；不先到先得，也不全表扫描回收站。 */
+    private fun queryRowsById(id: Long, volume: String? = null, failures: MutableList<Throwable>): List<VideoClip> {
+        val concreteVolume = volume?.takeIf { it.isNotBlank() && it != MediaStore.VOLUME_EXTERNAL }
+        val collection = concreteVolume?.let { MediaStore.Video.Media.getContentUri(it) }
+            ?: MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val selection = "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0"
+        val hits = readCursor(collection, selection, arrayOf(id.toString()), null, failures, includeTrash = SYSTEM_TRASH_SUPPORTED)
+        return hits.filter { it.id == id &&
+            (concreteVolume == null || mediaRowRefOf(it.uri.toString())?.volume == concreteVolume) }
+            .distinctBy { it.uri.toString() }
     }
 
     private fun readCursor(
@@ -707,12 +725,21 @@ class MediaRepo private constructor(private val app: Context) {
         selection: String?,
         args: Array<String>?,
         sort: String?,
-        failures: MutableList<Throwable>? = null
+        failures: MutableList<Throwable>? = null,
+        includeTrash: Boolean = false
     ): List<VideoClip> {
         val out = ArrayList<VideoClip>()
         val resolver = app.contentResolver
         runCatching {
-            val cursor = resolver.query(contentUri, projection, selection, args, sort)
+            val cursor = if (includeTrash && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                resolver.query(contentUri, projection, Bundle().apply {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+                    putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+                }, null)
+            } else {
+                resolver.query(contentUri, projection, selection, args, sort)
+            }
             if (cursor == null) {
                 // 返回 null 与「查到 0 行」是两件事：前者是 provider 故障，后者才是真空库
                 failures?.add(IllegalStateException("query returned null"))
@@ -812,11 +839,16 @@ class MediaRepo private constructor(private val app: Context) {
 
     // endregion
 
+    /**
+     * 标签联表（Y27 读端）：一次建索引；不因同号另一行被隐藏/卸载而改变标签归属。
+     */
     private fun joinTags(raw: List<VideoClip>, tags: List<MediaTag>): List<VideoClip> {
         if (tags.isEmpty()) return raw
-        val byId = HashMap<Long, MutableSet<String>>()
-        tags.forEach { t -> byId.getOrPut(t.mediaId) { HashSet() }.add(t.tag) }
-        return raw.map { c -> c.copy(tags = byId[c.id] ?: emptySet()) }
+        val byId = tags.groupBy { it.mediaId }
+        return raw.map { clip ->
+            val candidates = byId[clip.id] ?: return@map clip
+            clip.copy(tags = tagsForRow(candidates, clip.tagPathKeys()))
+        }
     }
 
     private fun filterByTab(list: List<VideoClip>, filter: ClipFilter, localTrash: List<TrashItem>): List<VideoClip> {

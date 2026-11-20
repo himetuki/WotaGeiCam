@@ -50,9 +50,10 @@ internal fun DeleteTarget.deleteSelection(systemTrash: Boolean): DeleteSelection
 }
 
 /** 系统回收站的 DATA 有归档前缀，标签和位次档案仍以原路径为键。 */
-internal fun DeleteTarget.originalTrashPath(): String? {
-    val path = dataPath ?: return null
-    if (!isTrashed) return null
+internal fun DeleteTarget.originalTrashPath(): String? =
+    if (isTrashed) dataPath?.let(::originalTrashPath) else null
+
+internal fun originalTrashPath(path: String): String? {
     val fileName = path.substringAfterLast('/')
     val archived = fileName.removePrefix(".trashed-").takeIf { it != fileName } ?: return null
     val original = archived.substringAfter('-', "")

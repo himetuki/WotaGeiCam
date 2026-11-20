@@ -54,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -166,43 +167,51 @@ internal class RightPickGate {
  * 1. 媒体库打开的视频进左；2. 右侧从内置媒体库 / 手机相册再选一个；
  * 3. 同步模式二选一：基于音频自动同步（[AudioSync]）或手动拖左右独立进度条；
  * 4. 两视频下方一条统一进度条 + 统一启停 + AB 循环 + 帧步进/退，统一轴以左视频为基准，右视频按 offsetMs 平移。
+ *
+ * 左片加载（Y27）：有真实行 URI 时按具体卷钉行（[MediaRepo.clipByRowUri]），回收站里同号的
+ * 另一卷活片不可能被顶上来；没有行 URI 的历史裸 ID 深链仍走 [MediaRepo.clipById]（唯一命中，
+ * 多行即关死）。行 URI 形状不合法按「加载不出」处理，不退回裸 id 猜。
  */
 @Composable
 fun CompareScreen(
     leftMediaId: Long,
+    leftRowUri: Uri?,
     onBack: () -> Unit,
     onPractice: () -> Unit,
     repo: MediaRepo = rememberMediaRepo()
 ) {
-    // Y36：与单片页同款「查过且没有」哨兵。clipById 对不存在的 ID 会发射一次 null；若把
-    // initial=null 直接当共值，初始加载与查无此片不可区分，页面永远停在转圈、返回键也无出口。
-    // 这里只在哨兵态转圈；收到 null（片被删/库行不可见）必须给缺失态并保留返回入口。
-    val state by repo.clipById(leftMediaId).collectState(CompareLeftQueryPending)
-    val c = state as? VideoClip
-    when {
-        state === CompareLeftQueryPending -> {
-            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = WotaAccent)
-            }
+    // 左片身份变化时一并重建查询与页面状态。Y36：只有哨兵态转圈；查询发出 null 后给出返回入口。
+    key(repo, leftMediaId, leftRowUri) {
+        val lookup = remember {
+            if (leftRowUri != null) repo.clipByRowUri(leftRowUri) else repo.clipById(leftMediaId)
         }
-        c == null -> {
-            Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        stringResource(R.string.player_clip_missing),
-                        color = WotaText,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    WotaIconButton(
-                        image = Icons.Outlined.ArrowBack,
-                        description = stringResource(R.string.gallery_desc_back),
-                        onClick = onBack
-                    )
+        val state by lookup.collectState(CompareLeftQueryPending)
+        val c = state as? VideoClip
+        when {
+            state === CompareLeftQueryPending -> {
+                Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = WotaAccent)
                 }
             }
+            c == null -> {
+                Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            stringResource(R.string.player_clip_missing),
+                            color = WotaText,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        WotaIconButton(
+                            image = Icons.Outlined.ArrowBack,
+                            description = stringResource(R.string.gallery_desc_back),
+                            onClick = onBack
+                        )
+                    }
+                }
+            }
+            else -> CompareContent(left = c, onBack = onBack, onPractice = onPractice)
         }
-        else -> CompareContent(left = c, onBack = onBack, onPractice = onPractice)
     }
 }
 
