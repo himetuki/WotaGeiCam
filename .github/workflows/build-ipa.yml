@@ -1,0 +1,106 @@
+# 无签名 iOS IPA 打包（monorepo 版，Modern 工具链：iOS 15 / arm64）
+#
+# 与安卓/HAP 的分工对齐：一个 v* 标签同时触发三条流水线；本流水线产出 **unsigned**
+# IPA（口径同鸿蒙 unsigned HAP），供用户自行重签侧载。
+# Legacy iPhone5/armv7 需要 Xcode <= 13.4.1，GitHub 托管 runner 没有该工具链，
+# 需自建 macOS12 runner，本工作流暂不覆盖 Legacy 档。
+#
+# 工具链：macos-15 + Xcode 16.4；固定 -sdk iphoneos / generic/platform=iOS，
+# CODE_SIGNING_ALLOWED=NO，不需要任何签名 Secrets。
+# 结构检查（经典 pbxproj / plist / Android 源映射）在 ubuntu 上先行通过才上 macOS。
+#
+# 产物：<tag 或 branch-sha7>-unsigned-iOS-WotaGeiCam-{Full,Lite}-Modern.ipa，
+#       连同同次 archive 的 .app 与 .xcarchive 一起上传为 Actions artifact。
+name: Build unsigned IPA (iOS)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structure-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Project structure checks (classic pbxproj / plist / source inventory)
+        run: |
+          python3 iOS/scripts/generate_project.py --check
+          python3 iOS/scripts/check_project.py
+          python3 iOS/scripts/verify_source_inventory.py
+
+  build-unsigned-ipa:
+    needs: structure-checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scheme: WotaGeiCamModern
+            configuration: Release-Modern
+            label: Full-Modern
+          - scheme: WotaGeiCamLiteModern
+            configuration: Release-Lite-Modern
+            label: Lite-Modern
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Re-verify project structure before device build
+        run: |
+          python3 iOS/scripts/generate_project.py --check
+          python3 iOS/scripts/check_project.py
+
+      - name: Resolve artifact prefix (tag 名或 branch-sha7)
+        id: prefix
+        run: |
+          PREFIX=""
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            PREFIX="${GITHUB_REF_NAME}"
+          else
+            BRANCH="$(echo "${GITHUB_REF##*/}" | tr '/' '-')"
+            PREFIX="${GITHUB_SHA::7}-${BRANCH}"
+          fi
+          echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive (iphoneos, generic/platform=iOS, unsigned)
+        run: bash iOS/scripts/apple_archive.sh "${{ matrix.scheme }}" "${{ matrix.configuration }}"
+
+      - name: Package unsigned IPA (Payload 回读校验后才落盘)
+        run: |
+          ARCHIVE="iOS/.build/Archives/${{ matrix.scheme }}-${{ matrix.configuration }}.xcarchive"
+          APP="$ARCHIVE/Products/Applications/WotaGeiCam.app"
+          bash iOS/scripts/package_unsigned_ipa.sh \
+            --app "$APP" \
+            --output "iOS/.build/unsigned/${{ steps.prefix.outputs.prefix }}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
+
+      - name: Collect SHA-256 sums
+        run: |
+          set -euo pipefail
+          OUT_DIR="iOS/.build/unsigned"
+          IPA="$OUT_DIR/${{ steps.prefix.outputs.prefix }}-unsigned-iOS-WotaGeiCam-${{ matrix.label }}.ipa"
+          APP_DIR="$OUT_DIR/WotaGeiCam-${{ matrix.label }}.app"
+          cp -R "iOS/.build/Archives/${{ matrix.scheme }}-${{ matrix.configuration }}.xcarchive/Products/Applications/WotaGeiCam.app" "$APP_DIR"
+          EXEC_NAME="$(plutil -extract CFBundleExecutable raw "$APP_DIR/Info.plist")"
+          shasum -a 256 "$APP_DIR/$EXEC_NAME" "$IPA" > "$OUT_DIR/SHA256SUMS-iOS-${{ matrix.label }}.txt"
+          cat "$OUT_DIR/SHA256SUMS-iOS-${{ matrix.label }}.txt"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wotageicam-ios-unsigned-ipa-${{ matrix.label }}
+          path: |
+            iOS/.build/unsigned/*.ipa
+            iOS/.build/unsigned/*.txt
+            iOS/.build/unsigned/*.app
+            iOS/.build/Archives/*.xcarchive
+          if-no-files-found: error
