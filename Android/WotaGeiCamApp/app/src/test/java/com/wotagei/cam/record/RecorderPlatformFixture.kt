@@ -111,7 +111,7 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
             val classes = File(root, "classes").apply { mkdirs() }
             val sources = SOURCES.map { (name, source) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(source.trimIndent())
                 }
             }
@@ -119,7 +119,7 @@ internal class RecorderPlatformFixture(classes: File, parent: ClassLoader) : Clo
             val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
             assertNotNull("需要已有 JDK，禁止下载测试依赖", compiler)
             val classpath = listOf(Recorder::class.java, kotlin.Unit::class.java).map {
-                File(it.protectionDomain.codeSource.location.toURI()).absolutePath
+                File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath
             }.distinct().joinToString(File.pathSeparator)
             val options = listOf("-proc:none", "-encoding", "UTF-8", "-classpath", classpath, "-d", classes.absolutePath)
             val compile = Class.forName("javax.tools.Tool").getMethod(

@@ -36,7 +36,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -47,6 +47,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -605,7 +606,7 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.Outlined.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.set_back), tint = WotaText)
                 }
                 Text(
                     text = stringResource(R.string.set_title),
@@ -1381,6 +1382,13 @@ private fun BlockDiag(prefs: SharedPreferences) {
     // 正在跑的动作（null = 空闲）：三颗按钮各自显示忙态，互不串台
     var busy by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
+    // B09：日志占用要枚举目录（磁盘 IO），不许在组合期同步跑在主线程。
+    // null = 还没算出来，显示占位；每次动作/清除后 bump [usageTick] 重算。
+    var usageBytes by remember { mutableStateOf<Long?>(null) }
+    var usageTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(usageTick) {
+        usageBytes = withContext(Dispatchers.IO) { Diag.usedBytes() }
+    }
     val ACTION_SHARE = "share"
     val ACTION_EXPORT = "export"
     val ACTION_CLEAR = "clear"
@@ -1437,7 +1445,10 @@ private fun BlockDiag(prefs: SharedPreferences) {
         )
         Spacer(Modifier.height(6.dp))
         Line()
-        InfoRow(stringResource(R.string.set_diag_size), formatBytes(Diag.usedBytes()))
+        InfoRow(
+            stringResource(R.string.set_diag_size),
+            usageBytes?.let { formatBytes(it) } ?: "…"
+        )
         Line()
         InfoRow(stringResource(R.string.set_diag_path), Diag.workingDir()?.absolutePath ?: "—")
         Spacer(Modifier.height(8.dp))
@@ -1460,6 +1471,7 @@ private fun BlockDiag(prefs: SharedPreferences) {
                             (context.applicationContext as? Application)?.let { Diag.exportForShare(it) }
                         }
                         busy = null
+                        usageTick++
                         if (res == null) {
                             status = context.getString(R.string.set_diag_share_failed)
                         } else {
@@ -1481,6 +1493,7 @@ private fun BlockDiag(prefs: SharedPreferences) {
                             (context.applicationContext as? Application)?.let { Diag.export(it) }
                         }
                         busy = null
+                        usageTick++
                         status = if (res == null) {
                             context.getString(R.string.set_diag_export_failed)
                         } else {
@@ -1493,8 +1506,9 @@ private fun BlockDiag(prefs: SharedPreferences) {
                     }
                 }
             )
-            // 清除（2026-10-13 用户裁决）：删净文件 + 清内存缓冲；清完 status 变更触发重组，
-            // 上方「日志占用」InfoRow 在重组时重读 Diag.usedBytes()，数字随之归零
+            // 清除（2026-10-13 用户裁决）：删净文件 + 清内存缓冲。
+            // Y50：按**实际删除结果**给成功/部分/失败文案，不再一律显示"已清除"；
+            // 同时 bump usageTick，占用行回到 IO 线程重算（B09）。
             ChipCell(
                 text = stringResource(R.string.set_diag_clear),
                 selected = false,
@@ -1503,9 +1517,20 @@ private fun BlockDiag(prefs: SharedPreferences) {
                     busy = ACTION_CLEAR
                     status = null
                     scope.launch {
-                        withContext(Dispatchers.IO) { Diag.clear() }
+                        val res = withContext(Dispatchers.IO) { Diag.clear() }
                         busy = null
-                        status = context.getString(R.string.set_diag_cleared)
+                        usageTick++
+                        status = when (res.state) {
+                            Diag.DiagClearState.CLEARED -> context.getString(R.string.set_diag_cleared)
+                            Diag.DiagClearState.PARTIAL -> context.getString(
+                                R.string.set_diag_clear_partial, res.removed, res.failed
+                            )
+                            Diag.DiagClearState.FAILED -> if (res.failed > 0) {
+                                context.getString(R.string.set_diag_clear_failed, res.failed)
+                            } else {
+                                context.getString(R.string.set_diag_clear_error)
+                            }
+                        }
                     }
                 }
             )
@@ -2077,7 +2102,7 @@ private fun UpdateDownloadDialog(
                     Spacer(Modifier.height(8.dp))
                     if (total > 0) {
                         LinearProgressIndicator(
-                            progress = (state.bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f),
+                            progress = { (state.bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) },
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

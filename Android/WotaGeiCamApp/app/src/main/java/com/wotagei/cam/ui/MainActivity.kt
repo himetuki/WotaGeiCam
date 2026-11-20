@@ -512,7 +512,7 @@ private fun WotaRoot() {
             // 控制器引用也不再依赖"条目恰好在栈上"。
             val cameraCtrl = windowOwner?.let { CameraController.of(it) }
             if (cameraCtrl != null) {
-                windowOwner?.previewCtrl = cameraCtrl
+                windowOwner.previewCtrl = cameraCtrl
                 if (destination.route == ROUTE_CAMERA) {
                     cameraCtrl.cancelPreviewKeepAlive()
                 } else {

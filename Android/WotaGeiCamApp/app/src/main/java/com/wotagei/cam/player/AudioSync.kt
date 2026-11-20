@@ -100,8 +100,8 @@ object AudioSync {
 
             extractor.selectTrack(trackIndex)
             val format = extractor.getTrackFormat(trackIndex)
-            codec = MediaCodec.createDecoderByType(mime)
-            val dec = codec ?: return null
+            val dec = MediaCodec.createDecoderByType(mime)
+            codec = dec
             dec.configure(format, null, null, 0)
             dec.start()
 
@@ -159,7 +159,7 @@ object AudioSync {
                             val bytes = ByteArray(bufferInfo.size)
                             outBuf.position(bufferInfo.offset)
                             outBuf.get(bytes, 0, bufferInfo.size)
-                            raw.appendPcm(bytes, channels, encoding)
+                            raw.appendPcm(bytes, encoding)
                         }
                         dec.releaseOutputBuffer(outIndex, false)
                         if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
@@ -205,7 +205,7 @@ object AudioSync {
             data = data.copyOf(size)
         }
 
-        fun appendPcm(bytes: ByteArray, channels: Int, encoding: Int) {
+        fun appendPcm(bytes: ByteArray, encoding: Int) {
             when (encoding) {
                 AudioFormat.ENCODING_PCM_FLOAT -> {
                     val n = bytes.size / 4

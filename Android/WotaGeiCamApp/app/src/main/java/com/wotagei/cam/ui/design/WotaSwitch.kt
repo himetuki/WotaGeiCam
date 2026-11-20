@@ -204,7 +204,6 @@ private fun LiquidGestureSwitch(
                         val tracker = VelocityTracker()
                         tracker.addPosition(down.uptimeMillis, down.position)
                         pressing = true
-                        var grab: Float? = null
                         var moved = false
 
                         val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ ->
@@ -213,9 +212,9 @@ private fun LiquidGestureSwitch(
                         if (slopChange != null) {
                             moved = true
                             // 偏移在**第一次移动**时才取（设计稿的教训：按下就取会让液滴瞬移到手指下）
-                            grab = slopChange.position.x - (dragX ?: x.value)
+                            val grab = slopChange.position.x - (dragX ?: x.value)
                             trackHorizontalDrag(tracker, slopChange.id) { at, velocity ->
-                                val next = (at - grab!!).coerceIn(0f, travelPx)
+                                val next = (at - grab).coerceIn(0f, travelPx)
                                 dragX = next
                                 dragVelocity = velocity
                                 // 过中点立刻翻转：轨道在手指下就回应（不必等松手）

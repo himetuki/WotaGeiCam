@@ -73,7 +73,9 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
     }
     fun engineField(name: String): Any? = requireNotNull(engine).javaClass.getDeclaredField(name)
         .apply { isAccessible = true }.get(engine)
-    fun sentinel(name: String): Any = loader.loadClass("android.opengl.EGL14").getField(name).get(null)
+    fun sentinel(name: String): Any = requireNotNull(
+        loader.loadClass("android.opengl.EGL14").getField(name).get(null)
+    )
     private fun call(name: String): Any? = unwrap {
         requireNotNull(engine).javaClass.getDeclaredMethod(name).apply { isAccessible = true }.invoke(engine)
     }
@@ -89,7 +91,7 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
             val classes = File(root, "classes").apply { mkdirs() }
             val sources = SOURCES.map { (name, body) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(body.trimIndent())
                 }
             }

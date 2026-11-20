@@ -291,7 +291,7 @@ class EchoInitializationBehaviorTest {
     }
 
     private fun platform(block: (EchoGlBoundaryFixture) -> Unit) {
-        EchoGlBoundaryFixture(classes, javaClass.classLoader).use(block)
+        EchoGlBoundaryFixture(classes, requireNotNull(javaClass.classLoader)).use(block)
     }
 
     companion object {

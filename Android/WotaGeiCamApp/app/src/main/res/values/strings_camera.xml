@@ -337,7 +337,6 @@
     <string name="cam_echo_mode_keep">保持亮度</string>
     <string name="cam_echo_mode_trail">提亮拖尾</string>
     <string name="cam_echo_mode_hint">保持亮度 = 星轨式实心长弧，背景不动；提亮拖尾 = 只有高光拖出彗尾</string>
-    <string name="cam_echo_multiplier">光弧倍数</string>
     <string name="cam_echo_multiplier_hint">倍数越高弧越长，高倍慎用（画面成糊）</string>
     <string name="cam_echo_threshold">高光阈值</string>
     <string name="cam_echo_threshold_hint">只有效果在「提亮拖尾」时参与；100% = 只让画面里最亮的像素拖尾</string>
@@ -370,7 +369,6 @@
     <string name="cam_marker">站位线</string>
     <string name="cam_marker_add">加一条站位线</string>
     <string name="cam_marker_remove">减一条站位线</string>
-    <string name="cam_marker_color_title">站位线颜色</string>
     <string name="marker_color_yellow">黄色</string>
     <string name="marker_color_cyan">青色</string>
     <string name="marker_color_magenta">品红</string>

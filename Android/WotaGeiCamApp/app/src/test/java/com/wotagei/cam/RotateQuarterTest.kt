@@ -79,8 +79,8 @@ class RotateQuarterTest {
             body.contains("pinchZoom(zoom, pan)")
         )
         assertTrue(
-            "分屏练习播放器缺逆时针旋转钮（Icons.Outlined.RotateLeft）：竖屏参考片转不了角度",
-            body.contains("Icons.Outlined.RotateLeft")
+            "分屏练习播放器缺逆时针旋转钮（Icons.AutoMirrored.Outlined.RotateLeft）：竖屏参考片转不了角度",
+            body.contains("Icons.AutoMirrored.Outlined.RotateLeft")
         )
         assertTrue(
             "分屏练习播放器缺旋转态到度数的换算（rotation = rotationQuarter * 90）：" +

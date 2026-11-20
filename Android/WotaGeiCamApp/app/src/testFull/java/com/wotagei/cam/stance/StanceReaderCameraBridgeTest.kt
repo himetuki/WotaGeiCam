@@ -68,8 +68,8 @@ class StanceReaderCameraBridgeTest {
         val entered = CountDownLatch(1)
         val proceed = CountDownLatch(1)
         p.blockNextPlanes(reader, entered, proceed)
-        var closesBeforeReturn = -1
-        var returnedWhileBlocked = -1
+        var closesBeforeReturn: Int
+        var returnedWhileBlocked: Int
         try {
             p.emitWithoutWaiting()
             assertTrue("必须卡在真实 listener 已 acquire 且 processImage 正读取 planes 的窗口", entered.await(5, TimeUnit.SECONDS))
@@ -110,8 +110,8 @@ class StanceReaderCameraBridgeTest {
         val entered = CountDownLatch(1)
         val proceed = CountDownLatch(1)
         p.blockNextPlanes(reader, entered, proceed)
-        var closesBeforeReturn = -1
-        var returnedWhileBlocked = -1
+        var closesBeforeReturn: Int
+        var returnedWhileBlocked: Int
         try {
             p.emitWithoutWaiting()
             assertTrue("必须卡在真实 planes 读取窗口", entered.await(5, TimeUnit.SECONDS))
@@ -241,6 +241,6 @@ class StanceReaderCameraBridgeTest {
     }
 
     private fun platform(body: (StanceReaderCameraBridgeFixture) -> Unit) {
-        StanceReaderCameraBridgeFixture(temporary.newFolder(), javaClass.classLoader).use(body)
+        StanceReaderCameraBridgeFixture(temporary.newFolder(), requireNotNull(javaClass.classLoader)).use(body)
     }
 }

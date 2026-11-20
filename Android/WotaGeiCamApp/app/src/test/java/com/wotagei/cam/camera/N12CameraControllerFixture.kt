@@ -202,7 +202,7 @@ internal class N12CameraControllerFixture(
             ) + boundarySources
             val sources = generated.map { (name, source) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(source.trimIndent())
                 }
             }
@@ -215,7 +215,7 @@ internal class N12CameraControllerFixture(
                 kotlin.Unit::class.java,
                 CoroutineScope::class.java,
                 Context::class.java
-            ).map { File(it.protectionDomain.codeSource.location.toURI()).absolutePath }
+            ).map { File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath }
                 .distinct()
                 .joinToString(File.pathSeparator)
             val args = listOf(

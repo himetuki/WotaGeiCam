@@ -279,7 +279,6 @@ fun PillHost(
     val ability = slot?.ability
     // A4 录制中矩阵：所有弹窗都能开，只有白名单内的可调；其余控件禁用 + 顶部只读提示。
     val editable = !recording || pillEditableDuringRecording(key)
-    val halModes = halNoiseReductionModes
     when (key) {
         PillKey.SIZE -> SizePill(
             anchor, params, ability, editable, gpuMode, previewContentSize,

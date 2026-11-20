@@ -662,7 +662,6 @@ class HudLayoutGridTest {
         assertEquals("预留 4 档 ⇒ 带内 10 档也只许用 4 档（growth 传 0 = 拖不出预留）", 4, box.rows)
         assertEquals(GridCell(0, 3), clampCellToBox(GridCell(0, 99), box, contentHeightPx = 0, rowPitchPx = 30))
         // ② 坏数据那一档（手改 prefs / 预留之后又藏了一颗）：格网**会长高**，但别人的左上角照旧
-        val table = HudLayoutTable.default()
         val over = listOf(
             com.wotagei.cam.ui.HudGridItem(e(CamPill.REFLINE), GridCell(0, 0)),
             com.wotagei.cam.ui.HudGridItem(e(CamPill.MONITOR), GridCell(0, 1)),
@@ -723,7 +722,6 @@ class HudLayoutGridTest {
     @Test
     fun splittingThePairKeepsTheReservedPitchAndTheOldModelWouldHaveMovedEveryone() {
         val table = HudLayoutTable.default()
-        val before = table.gridItems(HudZone.RIGHT, planAll)
         // 拆对：把音量表摆到第 5 档，配对那一格从此只剩姿态仪 100 宽
         val split = table.placeEntryAt(e(CamPill.VOLUME), HudZone.RIGHT, 1, GridCell(0, 5), planAll)
             .gridItems(HudZone.RIGHT, planAll)

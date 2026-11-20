@@ -267,12 +267,12 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         fun compile(root: File): File {
             val classes = File(root, "classes").apply { mkdirs() }
             val files = SOURCES.map { (name, source) ->
-                File(root, name.replace('.', '/') + ".java").apply { parentFile.mkdirs(); writeText(source.trimIndent()) }
+                File(root, name.replace('.', '/') + ".java").apply { requireNotNull(parentFile).mkdirs(); writeText(source.trimIndent()) }
             }
             val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
             assertNotNull("需要工程现有 JDK；平台桩编译失败不算有效 RED", compiler)
             val classpath = listOf(SceneExportEffects::class.java, kotlin.Unit::class.java).map {
-                File(it.protectionDomain.codeSource.location.toURI()).absolutePath
+                File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath
             }.distinct().joinToString(File.pathSeparator)
             val options = listOf("-proc:none", "-encoding", "UTF-8", "-classpath", classpath, "-d", classes.absolutePath)
             val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java,

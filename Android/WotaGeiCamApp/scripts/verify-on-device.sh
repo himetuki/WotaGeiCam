@@ -42,6 +42,11 @@ else
 fi
 MERGE_STAGE=0
 [ "${1:-}" = "--merge" ] && MERGE_STAGE=1
+# Y64：debugHook 不再与正式包共用包名（applicationIdSuffix=.debughook + debug 证书），
+# 取证阶段必须操作它自己的包；否则 dumpsys/am start 会落到正式包上。
+if [ "$MERGE_STAGE" = 1 ]; then
+  PKG="com.wotagei.cam.debughook"
+fi
 
 fail() { echo "!! ABORT: $*"; exit 1; }
 note() { echo "-- $*"; }

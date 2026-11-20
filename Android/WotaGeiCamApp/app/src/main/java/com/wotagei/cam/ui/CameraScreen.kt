@@ -63,7 +63,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Remove
-import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.automirrored.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.ViewWeek
 import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
@@ -2831,7 +2831,7 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                 // 逆时针旋转钮：右缘竖直居中（不遮画面主体、不与下方控制行/进度条重叠），
                 // 点按转 90°，四分之一圈循环
                 WotaIconButton(
-                    image = Icons.Outlined.RotateLeft,
+                    image = Icons.AutoMirrored.Outlined.RotateLeft,
                     description = stringResource(R.string.player_rotate_ccw),
                     onClick = { rotationQuarter = nextCcwQuarter(rotationQuarter) },
                     modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)

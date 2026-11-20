@@ -409,7 +409,6 @@ private class ArcRepairSession(
         // 一位、25.4 整成 25 会误判无需抽帧），整数视图只喂日志/进度/成片名前缀
         // M6-05：帧距保 **Long** 精度——>2³¹µs 的轨道断层若先降 Int 再进滤噪窗，回卷值可能恰好
         // 落进合法窗、毒化中位数；Long 判据把它原样挡在窗外（整数源逐点行为不变，见 ArcRateProbe）
-        var srcFrames = 0
         val rawDeltas = ArrayList<Long>(512)
         var prevSampleUs = -1L
         var scanned = 0
@@ -429,7 +428,7 @@ private class ArcRepairSession(
         videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
         // 源帧数按时长 × 实测帧率估算，只喂进度分母与计划日志；输出由解码顺序驱动
         // （真机实测遍历计数不可靠，见 v1 注释；时长缺失时才退回数样本）
-        srcFrames = if (durationMs > 0 && srcRate.num > 0) {
+        val srcFrames = if (durationMs > 0 && srcRate.num > 0) {
             ((durationMs * srcRate.num + 500L * srcRate.den) / (1000L * srcRate.den)).toInt().coerceAtLeast(1)
         } else {
             countSamples(videoEx)

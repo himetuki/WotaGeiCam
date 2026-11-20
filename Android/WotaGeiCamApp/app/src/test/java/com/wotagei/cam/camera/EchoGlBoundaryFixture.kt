@@ -148,7 +148,7 @@ internal class EchoGlBoundaryFixture(classes: File, parent: ClassLoader) : Close
             val classes = File(root, "classes").apply { mkdirs() }
             val sources = SOURCES.map { (name, body) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(body.trimIndent())
                 }
             }

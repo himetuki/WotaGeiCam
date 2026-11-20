@@ -60,20 +60,21 @@ class LiquidSpringMotionTest {
     @Test
     fun `液态档三档规格都必须是真弹簧且落在给定参数域内`() {
         val liquid = MotionSpec(MotionMode.LIQUID, 1f)
-        val float = liquid.float as SpringSpec<*>
+        val floatSpec = liquid.float
+        // 速度继承的前提：规格必须是弹簧。tween 没有"初速度"概念，换掉就红
+        assertTrue("液态档 float 必须是 SpringSpec", floatSpec is SpringSpec<*>)
+        val float = floatSpec as SpringSpec<*>
         val offset = liquid.offset as SpringSpec<*>
         val press = liquid.press as SpringSpec<*>
         // 主弹簧：明显回弹档（damping 0.6~0.7），周期取中位
         assertEquals("主弹簧阻尼必须落在 0.6~0.7 的回弹档", 0.65f, float.dampingRatio, 0.0001f)
-        assertEquals("主弹簧周期 0.32s", stiffnessOf(0.32f), float.stiffness as Float, 0.5f)
+        assertEquals("主弹簧周期 0.32s", stiffnessOf(0.32f), float.stiffness, 0.5f)
         // 位移：更长周期 + 更高阻尼（大块面不吃"甩"）
         assertEquals("位移弹簧阻尼必须落在 0.8 档（克制回弹）", 0.80f, offset.dampingRatio, 0.0001f)
-        assertEquals("位移弹簧周期 0.42s", stiffnessOf(0.42f), offset.stiffness as Float, 0.5f)
+        assertEquals("位移弹簧周期 0.42s", stiffnessOf(0.42f), offset.stiffness, 0.5f)
         // 按压：极短周期 + 近临界阻尼（跟手、几乎不复弹）
         assertEquals("按压弹簧必须近临界阻尼", 0.90f, press.dampingRatio, 0.0001f)
-        assertEquals("按压弹簧周期 0.2s（跟手）", stiffnessOf(0.2f), press.stiffness as Float, 0.5f)
-        // 速度继承的前提：规格必须是弹簧。tween 没有"初速度"概念，换掉就红
-        assertTrue("液态档 float 必须是 SpringSpec", float is SpringSpec<*>)
+        assertEquals("按压弹簧周期 0.2s（跟手）", stiffnessOf(0.2f), press.stiffness, 0.5f)
         assertEquals(
             "液态档 offset 必须带零可见阈值（离散类型要收尾，否则动画永不到 0）",
             androidx.compose.ui.unit.IntOffset.Zero,
@@ -115,7 +116,7 @@ class LiquidSpringMotionTest {
     fun `取证倍率必须落在刚度上而不是时长上`() {
         val normal = MotionSpec(MotionMode.LIQUID, 1f).float as SpringSpec<*>
         val slow = MotionSpec(MotionMode.LIQUID, 4f).float as SpringSpec<*>
-        assertEquals("×4 倍率 = 刚度除 4（同形状、慢四倍）", (normal.stiffness as Float) / 4f, slow.stiffness as Float, 0.5f)
+        assertEquals("×4 倍率 = 刚度除 4（同形状、慢四倍）", normal.stiffness / 4f, slow.stiffness, 0.5f)
         assertEquals("倍率不许改动阻尼（形状不许变）", normal.dampingRatio, slow.dampingRatio, 0.0001f)
         // 反证：直接 spring() 手写刚度且不除倍率的实现会红
         val naive = spring<Float>(dampingRatio = 0.65f, stiffness = 986.96f)

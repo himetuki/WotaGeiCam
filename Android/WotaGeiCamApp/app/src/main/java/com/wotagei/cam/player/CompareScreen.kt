@@ -35,12 +35,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.automirrored.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -203,7 +203,7 @@ fun CompareScreen(
                         )
                         Spacer(Modifier.height(8.dp))
                         WotaIconButton(
-                            image = Icons.Outlined.ArrowBack,
+                            image = Icons.AutoMirrored.Outlined.ArrowBack,
                             description = stringResource(R.string.gallery_desc_back),
                             onClick = onBack
                         )
@@ -796,7 +796,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     // 落右缘竖直居中——离上方芯片行/片名标签、下方控制层都最远。钮在 surface 层
                     // 之外，ZoomBadge/片名标签这些角标天然不随旋转移动
                     WotaIconButton(
-                        image = Icons.Outlined.RotateLeft,
+                        image = Icons.AutoMirrored.Outlined.RotateLeft,
                         description = stringResource(R.string.player_rotate_ccw),
                         onClick = { rotateR = nextCcwQuarter(rotateR) },
                         modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
@@ -837,7 +837,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             WotaIconButton(
-                                image = Icons.Outlined.ArrowBack,
+                                image = Icons.AutoMirrored.Outlined.ArrowBack,
                                 description = stringResource(R.string.gallery_desc_back),
                                 onClick = onBack,
                                 size = BarIconSize,
@@ -913,7 +913,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     modifier = Modifier.align(Alignment.TopStart)
                 ) {
                     WotaIconButton(
-                        image = Icons.Outlined.ArrowBack,
+                        image = Icons.AutoMirrored.Outlined.ArrowBack,
                         description = stringResource(R.string.gallery_desc_back),
                         onClick = onBack,
                         modifier = Modifier.padding(6.dp),

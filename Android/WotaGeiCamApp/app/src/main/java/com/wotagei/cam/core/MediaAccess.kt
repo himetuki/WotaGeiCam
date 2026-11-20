@@ -1,6 +1,7 @@
 package com.wotagei.cam.core
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -75,11 +76,17 @@ fun needsMediaAccessHint(state: MediaAccessState): Boolean =
  * 媒体读权限按 SDK 分档：33+ 走细分权限，以下回退旧存储权限。
  * 与 `WotaSettings.mediaReadPermission()` 同一支（后者委托到这里），避免两处版本闸分叉。
  */
+// READ_MEDIA_VIDEO 是编译期内联的字符串常量，取它不产生旧版本成员访问；档位由形参 sdk 决定
+// （JVM 测试也按模拟档位喂它），29/30 上根本不会走到这一支。lint 只看常量声明 API 级别。
+@SuppressLint("InlinedApi")
 fun mediaReadPermissionFor(sdk: Int): String =
     if (sdk >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_VIDEO
     else Manifest.permission.READ_EXTERNAL_STORAGE
 
 /** 运行时探测当前四态（失败归 [MediaAccessState.NONE]，绝不抛） */
+// READ_MEDIA_VISUAL_USER_SELECTED 同理（API 34 的内联字符串常量），且下一行的 `sdk >= 34`
+// 短路保证旧系统不求值部分授权探测；这里的 `&&` 右侧只在 34+ 才执行。
+@SuppressLint("InlinedApi")
 fun mediaAccessState(context: Context): MediaAccessState {
     val sdk = Build.VERSION.SDK_INT
     val full = granted(context, mediaReadPermissionFor(sdk))

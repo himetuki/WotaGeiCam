@@ -583,7 +583,7 @@ class FrostCardTableTest {
     fun `测试专用的清账入口不许出现在生产代码里`() {
         // resetForTests 会把「首写方线程」的登记清掉，等于绕过前提①——它只能活在单测里。
         // 这条守卫让那个后门一旦被接进 main 就变红，而不是靠人记得。
-        val root = KotlinSourceScan.mainSourceFile("camera/FrostBlur.kt").parentFile.parentFile
+        val root = requireNotNull(KotlinSourceScan.mainSourceFile("camera/FrostBlur.kt").parentFile?.parentFile)
         val ktFiles = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
         assertTrue("一个 main 源码文件都没扫到，守卫在空转（$ktFiles.size）", ktFiles.size > 20)
         val hits = ktFiles.filter { KotlinSourceScan.codeOnly(it.readText(Charsets.UTF_8)).contains(".resetForTests(") }

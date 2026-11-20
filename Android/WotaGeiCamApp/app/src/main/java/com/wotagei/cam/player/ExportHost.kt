@@ -1,5 +1,6 @@
 package com.wotagei.cam.player
 
+import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
@@ -28,6 +29,8 @@ class ExportHost(app: Application) : AndroidViewModel(app) {
             ViewModelProvider(owner)[ExportHost::class.java]
     }
 
+    // 存的是 applicationContext（生命周期=进程），不是 Activity；lint 的 ViewModel 分支不区分两者。
+    @SuppressLint("StaticFieldLeak")
     private val ctx: Context = app.applicationContext
     private val repo: MediaRepo = MediaRepo.get(ctx)
     private val bus = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)

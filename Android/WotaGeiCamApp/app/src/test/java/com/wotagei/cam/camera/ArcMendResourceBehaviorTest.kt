@@ -111,7 +111,7 @@ class ArcMendResourceBehaviorTest {
     }
 
     private fun platform(block: (ArcMendGlBoundaryFixture) -> Unit) {
-        val pass = ArcMendGlBoundaryFixture(classes, javaClass.classLoader)
+        val pass = ArcMendGlBoundaryFixture(classes, requireNotNull(javaClass.classLoader))
         try {
             block(pass)
         } finally {

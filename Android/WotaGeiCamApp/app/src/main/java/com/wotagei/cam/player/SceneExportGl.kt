@@ -542,7 +542,7 @@ internal class SceneExportGl(
         val st = texture ?: return false
         st.updateTexImage()
         st.getTransformMatrix(stMatrix)
-        val ok = drawTo(curFbo, oesProgram, oesAPos, oesATex, oesUMatrix, identity) {
+        val ok = drawTo(curFbo, oesProgram, oesAPos, oesATex) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
             if (oesUFrame >= 0) GLES20.glUniform1i(oesUFrame, UNIT_A)
@@ -558,7 +558,7 @@ internal class SceneExportGl(
         // 1) 降噪：cur → den（scene 顺序：降噪在 Glow 之前）
         var base = curTex
         if (effects.denoise) {
-            val ok = drawTo(denFbo, bilatProgram, bilatAPos, bilatATex, bilatUMatrix, identity) {
+            val ok = drawTo(denFbo, bilatProgram, bilatAPos, bilatATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)
                 if (bilatUFrame >= 0) GLES20.glUniform1i(bilatUFrame, UNIT_A)
@@ -571,7 +571,7 @@ internal class SceneExportGl(
         }
         // 2) Glow：亮部提取 → 横/纵模糊；3) 合成到编码器面
         if (glow != null) {
-            val brightOk = drawTo(glowAFbo, brightProgram, brightAPos, brightATex, brightUMatrix, identity) {
+            val brightOk = drawTo(glowAFbo, brightProgram, brightAPos, brightATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, base)
                 if (brightUSrc >= 0) GLES20.glUniform1i(brightUSrc, UNIT_A)
@@ -597,7 +597,7 @@ internal class SceneExportGl(
                 else -> 0
             }
             repeat(blurPasses) {
-                val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex) {
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
                     if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
@@ -605,7 +605,7 @@ internal class SceneExportGl(
                     if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, dx, 0f)
                 }
                 if (!hOk) return false
-                val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex) {
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowBTex)
                     if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
@@ -618,7 +618,7 @@ internal class SceneExportGl(
         // 2.5) 残影累积（R2 第三路）：读**原始 2D 帧** curTex（与实时链读原始 OES 同口径，
         // 降噪/Glow 不改累积源）+ 上一枚累积面 → 新累积面，乒乓交换。逐帧顺序 ⇒ 拖尾连续。
         if (echo != null) {
-            val accOk = drawTo(echoAccFbo[1 - echoAccIdx], echoAccProgram, echoAccAPos, echoAccATex, echoAccUMatrix, identity) {
+            val accOk = drawTo(echoAccFbo[1 - echoAccIdx], echoAccProgram, echoAccAPos, echoAccATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)
                 if (echoAccUSrc >= 0) GLES20.glUniform1i(echoAccUSrc, UNIT_A)
@@ -731,8 +731,6 @@ internal class SceneExportGl(
         program: Int,
         aPos: Int,
         aTex: Int,
-        uMatrix: Int,
-        matrix: FloatArray,
         bindUniforms: () -> Unit
     ): Boolean {
         if (!glReady || program == 0 || fbo == 0) return false

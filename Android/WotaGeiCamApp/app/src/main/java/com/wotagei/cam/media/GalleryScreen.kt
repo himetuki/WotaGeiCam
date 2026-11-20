@@ -41,7 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteForever
 import androidx.compose.material.icons.outlined.Favorite
@@ -824,7 +824,7 @@ private fun TimelineList(
                                 text = if (isSeries) {
                                     // 角标：共 N 段 · 总时长
                                     stringResource(R.string.gallery_series_count, count!!) +
-                                        " · " + formatDuration(entry!!.totalDurationMs)
+                                        " · " + formatDuration(entry.totalDurationMs)
                                 } else {
                                     "${formatDuration(clip.durationMs)} · ${formatSize(clip.sizeBytes)}"
                                 },
@@ -1374,7 +1374,7 @@ private fun FullscreenBrowse(
                             Icon(Icons.Outlined.Restore, contentDescription = stringResource(R.string.gallery_menu_restore))
                         }
                     }
-                    IconButton(onClick = { onCompare(clip) }) { Icon(Icons.Outlined.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
+                    IconButton(onClick = { onCompare(clip) }) { Icon(Icons.AutoMirrored.Outlined.CompareArrows, contentDescription = stringResource(R.string.gallery_menu_compare)) }
                     IconButton(onClick = { onOpen(clip) }) { Icon(Icons.Outlined.Fullscreen, contentDescription = stringResource(R.string.gallery_open_player)) }
                 }
             }

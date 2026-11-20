@@ -45,10 +45,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteForever
@@ -929,7 +929,7 @@ fun PlayerScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Outlined.ArrowBack,
+                        Icons.AutoMirrored.Outlined.ArrowBack,
                         contentDescription = stringResource(R.string.gallery_desc_back),
                         // 淡阴影替代卡底：亮画面上可辨，又不挡画面（29 §6.3 已确认允许）
                         tint = WotaText,
@@ -2083,7 +2083,7 @@ private fun PlayerTopBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 顶栏 7 枚圆钮压到 30dp：M3 IconButton 强制 ≥48dp，七个就把文件名挤成「…」
-        BarIconSlot(Icons.Outlined.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
+        BarIconSlot(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
         Text(
             clip.name,
             style = MaterialTheme.typography.titleMedium,
@@ -2091,7 +2091,7 @@ private fun PlayerTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(horizontal = 2.dp)
         )
-        BarIconSlot(Icons.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
+        BarIconSlot(Icons.AutoMirrored.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
         // 收藏红心（2026-10-30 用户需求）：Bencho "Like" 的红心动画（绽放环 + 七对彩点 +
         // 红心弹出，无数字滚动）。图标已经分状态、标签也必须跟着分——原来恒报「已收藏」，
         // 未收藏的成片读屏也说成已收藏。
@@ -2194,7 +2194,6 @@ internal fun Modifier.pinchZoom(
                         }
                     }
                     pressed.isEmpty() -> {
-                        baseDist = 0f
                         break
                     }
                     else -> baseDist = 0f

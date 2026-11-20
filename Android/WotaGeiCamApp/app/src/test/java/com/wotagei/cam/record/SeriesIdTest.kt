@@ -87,6 +87,7 @@ class SeriesIdTest {
 
     /** 突变体二：返回常量（最粗的退化） */
     private object ConstantGen {
+        @Suppress("UNUSED_PARAMETER") // 突变体按同一签名返回常量
         fun next(nowMs: Long): Long = 42L
     }
 

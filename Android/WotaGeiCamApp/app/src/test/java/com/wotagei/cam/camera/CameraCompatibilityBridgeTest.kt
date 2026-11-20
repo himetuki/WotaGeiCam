@@ -299,7 +299,7 @@ class CameraCompatibilityBridgeTest {
         return p.engine(fps, gpu)
     }
     private fun platform(block: (CameraPlatformFixture) -> Unit) {
-        CameraPlatformFixture(classes, javaClass.classLoader).use(block)
+        CameraPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use(block)
     }
     companion object {
         @JvmField @ClassRule

@@ -319,7 +319,7 @@ class RotateStallTest {
         val slowFail = io.run(20L) { Thread.sleep(400L); throw IllegalStateException("late boom") }
         assertTrue("慢调用的异常不许回抛（调用方已判超时，只认 TimedOut）", slowFail is Bounded.TimedOut)
         // 3) 快调用里的 null 是合法值（泛型 T 本身可空），不许与"没拿到"混为一谈
-        val nullOk = io.run(2_000L) { null as String? }
+        val nullOk = io.run<String?>(2_000L) { null }
         assertTrue("null 必须是 Done(null) 而不是 TimedOut", nullOk is Bounded.Done)
         assertNull("值必须原样为 null", (nullOk as Bounded.Done).value)
     }

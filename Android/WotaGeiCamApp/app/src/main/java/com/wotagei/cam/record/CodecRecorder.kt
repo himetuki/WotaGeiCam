@@ -892,6 +892,8 @@ internal class CodecRecorder(
             Log.e(TAG, "codec list unavailable: ${e.message}")
             return null
         }
+        // 厂商编码器仍用这两个旧常量上报 YUV420 布局；Flexible 之外必须逐项比对，不能省。
+        @Suppress("DEPRECATION")
         val priority = intArrayOf(
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,

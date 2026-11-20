@@ -110,6 +110,7 @@ data class RecordProfile(
  * @param front             前置镜头：公式多 180°（见上）
  * @param direct            是否 DIRECT（不使用 GPU）渲染模式（不参与取值）
  */
+@Suppress("UNUSED_PARAMETER") // `direct` 是契约形参：取值与结果无关（tests 钉住），不可删
 fun recordOrientationHint(sensorOrientation: Int, deviceDegrees: Int, front: Boolean, direct: Boolean): Int =
     normalizeDegrees(sensorOrientation - deviceDegrees + if (front) 180 else 0)
 

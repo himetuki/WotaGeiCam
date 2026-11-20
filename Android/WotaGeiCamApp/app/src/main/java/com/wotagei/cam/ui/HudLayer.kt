@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
@@ -336,6 +337,10 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
  * （算式与它唯一的推断量都写在 `camera/frostViewOriginInto`）。注册点写卡片矩形之前会先调这里一次，
  * 所以那一次事务里"根"与"卡片"出自同一次布局。
  */
+// 单例按引用计数持有 View/SharedPreferences，但生命周期是**闭合**的：attach() 只在 hosts 0→1
+// 记 root，detach() 在 hosts 1→0 时 root=null / prefs=null 并注销监听（见两个函数）。
+// lint 看不到这对配对，按"静态单例一律按泄漏"报；这里显式豁免并指回清零点。
+@SuppressLint("StaticFieldLeak")
 internal object HudFrost {
 
     /** 轮询周期（只在开关开着时跑）：可用性翻转最多晚一个周期被看见，真机延迟未量 */
@@ -509,7 +514,7 @@ internal object HudFrost {
      */
     fun refreshHeader() {
         val r = root ?: return
-        val p = prefs ?: return
+        if (prefs == null) return
         if (r.width <= 0 || r.height <= 0) return
         r.getLocationInWindow(locationInWindow)
         WotaColor.hudFrostTintRgb(tintScratch)
@@ -1680,11 +1685,11 @@ fun BoxScope.HudTopChrome(
     effect: FrameEffect,
     renderMode: RenderMode,
     lowFpsNote: String?,
-    segNearCap: Boolean = false,
-    approxManual: Boolean = false,
     onSettingsClick: () -> Unit,
     onHeightChanged: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    segNearCap: Boolean = false,
+    approxManual: Boolean = false
 ) {
     val density = LocalDensity.current
     val motion = LocalMotion.current
@@ -2132,7 +2137,7 @@ private fun RecordButton(
                     androidx.compose.animation.core.keyframes {
                         durationMillis = 1_600
                         0.94f at 0
-                        1.14f at 800 with androidx.compose.animation.core.LinearOutSlowInEasing
+                        1.14f at 800 using androidx.compose.animation.core.LinearOutSlowInEasing
                         0.94f at 1_600
                     }
                 )

@@ -28,7 +28,7 @@ import org.junit.Test
 class ClipByIdOnceGateGuardTest {
 
     /** 「一次性反查且无收流回退」的判定本体（良品与突变体走同一把尺） */
-    private fun onceOnlyHolds(raw: String, rel: String, funName: String, expected: Int): Boolean {
+    private fun onceOnlyHolds(raw: String, funName: String, expected: Int): Boolean {
         val body = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(KotlinSourceScan.codeOnly(raw), funName)
         )
@@ -74,7 +74,7 @@ class ClipByIdOnceGateGuardTest {
         val raw = mainText("player/CompareScreen.kt")
         assertTrue(
             "CompareContent（练习回程一处；手选右片走 clipByUri）必须走 clipByIdOnce，且切片内不得残留 .first()/.firstOrNull()",
-            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 1)
+            onceOnlyHolds(raw, "CompareContent", expected = 1)
         )
     }
 
@@ -83,7 +83,7 @@ class ClipByIdOnceGateGuardTest {
         val raw = mainText("player/CompareScreen.kt")
         assertTrue(
             "CompareHistorySheet 必须走 clipByIdOnce（面板逐条反查，关闸期 .first() 会逐条挂起）",
-            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareHistorySheet", expected = 1)
+            onceOnlyHolds(raw, "CompareHistorySheet", expected = 1)
         )
     }
 
@@ -92,7 +92,7 @@ class ClipByIdOnceGateGuardTest {
         val raw = mainText("ui/CameraScreen.kt")
         assertTrue(
             "SplitComparePlayer（练习参考片自动挂载一处；手选片走 clipByUri）必须走 clipByIdOnce",
-            onceOnlyHolds(raw, "ui/CameraScreen.kt", "SplitComparePlayer", expected = 1)
+            onceOnlyHolds(raw, "SplitComparePlayer", expected = 1)
         )
     }
 
@@ -100,7 +100,7 @@ class ClipByIdOnceGateGuardTest {
     fun `突变_消费点改回first收流必红`() {
         val raw = mainText("player/CompareScreen.kt")
         assertTrue("良品必须先真的绿，否则突变体的红没有意义",
-            onceOnlyHolds(raw, "player/CompareScreen.kt", "CompareContent", expected = 1))
+            onceOnlyHolds(raw, "CompareContent", expected = 1))
         // 突变：某一点改回 clipById(id).first()（文本级突变不编译，只验尺子会红）
         val mutant = raw.replace(
             Regex.fromLiteral("repo.clipByIdOnce(id)"),
@@ -108,7 +108,7 @@ class ClipByIdOnceGateGuardTest {
         )
         assertFalse(
             "消费点改回 .first() 后守卫必须报红（真偏离：零发射流上挂起整个关闸期）",
-            onceOnlyHolds(mutant, "player/CompareScreen.kt", "CompareContent", expected = 1)
+            onceOnlyHolds(mutant, "CompareContent", expected = 1)
         )
     }
 }

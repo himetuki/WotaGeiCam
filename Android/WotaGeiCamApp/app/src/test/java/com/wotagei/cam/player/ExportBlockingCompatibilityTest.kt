@@ -100,14 +100,14 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 准备期open永久阻塞时预算到点由独立等待侧先结束caller`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("open")
             // 先用 1ms 步进让 deadline 由测试时钟基准建立，进入阻塞后再跳跃到预算之外。
             p.script("clockStepMs", 1L)
             val caller = launchExport(p)
-            var endedBeforeRelease = false
-            var reason: String? = null
+            var endedBeforeRelease: Boolean
+            var reason: String?
             try {
                 check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 open 阻塞" }
                 // 生产主循环还没建立 deadline，必须靠独立等待侧。
@@ -130,14 +130,14 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 失败清理delete阻塞时预算到点caller先结束且资源随后归还`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("delete")
             p.script("renderOk", false)
             p.script("clockStepMs", 1L)
             val caller = launchExport(p)
-            var endedBeforeRelease = false
-            var reason: String? = null
+            var endedBeforeRelease: Boolean
+            var reason: String?
             try {
                 check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 delete 阻塞" }
                 p.script("clockStepMs", 1_000_000L)
@@ -160,7 +160,7 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 GL线程未真正退出时拒绝第二套资源退出后才恢复准入`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
             // 用真实存活线程代表“有界 release 已返回、GL owner 实际仍卡在 native”的窗口。
             val settling = Thread {
                 try {
@@ -233,7 +233,7 @@ class ExportBlockingCompatibilityTest {
     }
 
     private fun cancelledLateCompletion(stage: String, commitResults: IntArray? = null) {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             p.script("commitResults", commitResults)
@@ -250,9 +250,9 @@ class ExportBlockingCompatibilityTest {
             val scope = CoroutineScope(SupervisorJob() + dispatcher)
             val ownerExecutor = ownerExecutor(p)
             var caller: Job? = null
-            var endedBeforeRelease = false
-            var ownerExited = false
-            var progressAtCancel = -1
+            var endedBeforeRelease: Boolean
+            var ownerExited: Boolean
+            var progressAtCancel: Int
             try {
                 val runner = p.runner()
                 caller = scope.launch {
@@ -311,7 +311,7 @@ class ExportBlockingCompatibilityTest {
     }
 
     private fun cancellationWhileBlocked(stage: String, expectFd: Boolean) {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             val callerBodyExited = CountDownLatch(1)
@@ -325,10 +325,10 @@ class ExportBlockingCompatibilityTest {
             val dispatcher = executor.asCoroutineDispatcher()
             val scope = CoroutineScope(SupervisorJob() + dispatcher)
             var caller: Job? = null
-            var endedBeforeProceed = false
-            var returnedAfterProceed = false
-            var resourcesDrained = false
-            var noPrematureRelease = false
+            var endedBeforeProceed: Boolean
+            var returnedAfterProceed: Boolean
+            var resourcesDrained: Boolean
+            var noPrematureRelease: Boolean
             val issues = mutableListOf<String>()
             try {
                 // 先构造真实Runner；缺构造/类加载失败不能被下面的取消断言冒充行为RED。

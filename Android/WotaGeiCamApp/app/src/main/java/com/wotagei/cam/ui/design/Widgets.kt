@@ -601,8 +601,8 @@ fun WotaIconButton(
 fun WotaOutlineIcon(
     image: ImageVector,
     description: String,
-    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
     size: Dp = 26.dp,
     glyph: Dp = 15.dp,
     stroke: Dp = 1.5.dp,

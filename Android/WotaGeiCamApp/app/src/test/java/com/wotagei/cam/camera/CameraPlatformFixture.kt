@@ -113,7 +113,7 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     fun physical(slot: Any): String? = call(slot, "getPhysicalId") as String?
     fun ability(slot: Any): Any = call(slot, "getAbility")!!
     fun abilityOf(id: String): Any {
-        val companion = type("com.wotagei.cam.core.CameraAbility").getField("Companion").get(null)
+        val companion = requireNotNull(type("com.wotagei.cam.core.CameraAbility").getField("Companion").get(null))
         return call(companion, "from", id, call(manager, "getCameraCharacteristics", id), null)!!
     }
     fun slot(id: String, physical: String? = null): Any {
@@ -246,7 +246,7 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     }
 
     fun ledger(): Long {
-        val ledger = type("com.wotagei.cam.record.FrameLedger").getField("INSTANCE").get(null)
+        val ledger = requireNotNull(type("com.wotagei.cam.record.FrameLedger").getField("INSTANCE").get(null))
         return call(call(ledger, "snapshot")!!, "getCameraStarted") as Long
     }
     override fun close() {
@@ -272,13 +272,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                 "android.hardware.camera2.CaptureResult" to resultSource()
             )
             val sources = generated.map { (name, source) ->
-                File(root, name.replace('.', '/') + ".java").apply { parentFile.mkdirs(); writeText(source.trimIndent()) }
+                File(root, name.replace('.', '/') + ".java").apply { requireNotNull(parentFile).mkdirs(); writeText(source.trimIndent()) }
             }
             val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
             assertNotNull("使用已有宿主 JDK，不下载任何依赖", compiler)
             val classpath = listOf(Camera2Engine::class.java, kotlin.Unit::class.java,
                 CoroutineScope::class.java, Context::class.java).map {
-                File(it.protectionDomain.codeSource.location.toURI()).absolutePath
+                File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath
             }.distinct().joinToString(File.pathSeparator)
             val args = listOf("-proc:none", "-encoding", "UTF-8", "-classpath", classpath, "-d", classes.absolutePath) +
                 sources.map { it.absolutePath }

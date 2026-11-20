@@ -26,11 +26,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -125,7 +125,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
                 enabled = editable || scanning
             ) {
                 Icon(
-                    if (scanning) Icons.Filled.BluetoothSearching else Icons.Filled.Bluetooth,
+                    if (scanning) Icons.AutoMirrored.Filled.BluetoothSearching else Icons.Filled.Bluetooth,
                     contentDescription = stringResource(
                         if (scanning) R.string.bt_stop_scan else R.string.bt_start_scan
                     ),
@@ -239,7 +239,7 @@ fun BtSpeakerPanel(controller: BtSpeakerController, editable: Boolean) {
 
         // 音量：滑杆只吃 0..1，档位换算留在这里，maxVolume 一律运行时取
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(Icons.Filled.VolumeUp, contentDescription = stringResource(R.string.bt_volume), tint = WotaTextDim)
+            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = stringResource(R.string.bt_volume), tint = WotaTextDim)
             val fraction = if (maxVolume <= 0) 0f else (volume.toFloat() / maxVolume).coerceIn(0f, 1f)
             Slider(
                 value = fraction,

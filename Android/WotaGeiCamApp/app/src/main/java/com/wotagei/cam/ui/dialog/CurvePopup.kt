@@ -784,9 +784,9 @@ private fun CurveCanvas(
     enabled: Boolean,
     animateJump: Boolean,
     scale: Float,
+    modifier: Modifier = Modifier,
     histogram: IntArray? = null,
-    channel: Int = ColorCurve.CHANNEL_MASTER,
-    modifier: Modifier = Modifier
+    channel: Int = ColorCurve.CHANNEL_MASTER
 ) {
     val target = remember(points) { ColorCurve(points).table(64) }
     val motion = LocalMotion.current
@@ -856,9 +856,9 @@ private fun CurveCanvas(
         }
         val grid = WotaColor.acrylicBorder.copy(alpha = 0.15f * dim)
         for (i in 1..2) {
-            val t = i / 3f
-            drawLine(grid, Offset(w * t, 0f), Offset(w * t, h), 1.dp.toPx())
-            drawLine(grid, Offset(0f, h * t), Offset(w, h * t), 1.dp.toPx())
+            val gridThird = i / 3f
+            drawLine(grid, Offset(w * gridThird, 0f), Offset(w * gridThird, h), 1.dp.toPx())
+            drawLine(grid, Offset(0f, h * gridThird), Offset(w, h * gridThird), 1.dp.toPx())
         }
         // y=x 基准线：曲线贴着它即等于不改变
         drawLine(WotaColor.outline.copy(alpha = 0.8f * dim), Offset(0f, h), Offset(w, 0f), 1.5.dp.toPx())

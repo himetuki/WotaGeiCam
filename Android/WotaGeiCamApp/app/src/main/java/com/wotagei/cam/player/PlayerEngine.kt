@@ -509,7 +509,7 @@ class PlayerEngine(private val context: Context) {
         val pos = p.currentPosition.coerceAtLeast(0L)
         resolvePendingStep(pos)
         _positionMs.value = pos
-        val dur = p.duration?.coerceAtLeast(0L) ?: 0L
+        val dur = p.duration.coerceAtLeast(0L)
         if (dur != _durationMs.value) _durationMs.value = dur
 
         val ab = _ab.value
@@ -533,7 +533,7 @@ class PlayerEngine(private val context: Context) {
 
     private fun refreshDurations() {
         val p = player ?: return
-        _durationMs.value = p.duration?.coerceAtLeast(0L) ?: 0L
+        _durationMs.value = p.duration.coerceAtLeast(0L)
     }
 
     private fun readFrameRate(tracks: Tracks) {

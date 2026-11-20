@@ -31,6 +31,22 @@ base {
 // outputFileName 重命名与 DomainObjectCollection.all 重载歧义冲突，不在 Gradle 侧做）。
 // versionName/versionCode 不动（同版本互相覆盖安装、数据保留，用户裁决）。
 
+// Y63：正式签名配置必须**完整**才算就绪——storeFile/storePassword/keyAlias/keyPassword
+// 四项齐全，且 storeFile 指向的 keystore 真存在。缺一项就视为"没有正式签名"，
+// 绝不再回退 debug 签名去产出"看起来像 release"的包。
+// 注意：这里只在文件存在时读取本机私密配置，不打印任何属性值。
+val ksFile = rootProject.file("keystore.properties")
+val ksProps = Properties()
+val ksLoaded = ksFile.isFile && runCatching {
+    ksFile.inputStream().use { ksProps.load(it) }
+}.isSuccess
+val ksStoreFile = ksProps.getProperty("storeFile")?.trim().orEmpty()
+val ksReady = ksLoaded && ksStoreFile.isNotEmpty() &&
+    listOf("storePassword", "keyAlias", "keyPassword").all {
+        !ksProps.getProperty(it).isNullOrBlank()
+    } &&
+    rootProject.file(ksStoreFile).isFile
+
 android {
     namespace = "com.wotagei.cam"
     compileSdk = 34
@@ -79,26 +95,23 @@ android {
         }
     }
 
+    // Y63：正式签名配置必须**完整**才算就绪（判据在文件顶部 ksReady）——
+    // 缺一项就视为"没有正式签名"，绝不再回退 debug 签名去产出"看起来像 release"的包。
     signingConfigs {
         create("wota") {
-            // keystore.properties 不入库；缺失时 release 回退 debug 签名（见 README 已知缺口）
-            val ks = rootProject.file("keystore.properties")
-            if (ks.exists()) {
-                val p = Properties().apply { ks.inputStream().use { load(it) } }
-                storeFile = rootProject.file(p.getProperty("storeFile"))
-                storePassword = p.getProperty("storePassword")
-                keyAlias = p.getProperty("keyAlias")
-                keyPassword = p.getProperty("keyPassword")
+            // keystore.properties 不入库；只有四项齐全时才真正装上签名材料。
+            // 缺配置的后果由文件末尾的 release 任务闸门处理（fail fast），不是回退 debug。
+            if (ksReady) {
+                storeFile = rootProject.file(ksStoreFile)
+                storePassword = ksProps.getProperty("storePassword")
+                keyAlias = ksProps.getProperty("keyAlias")
+                keyPassword = ksProps.getProperty("keyPassword")
             }
         }
     }
 
-    // r13 用的那张证书（keystore.properties 在则用它，不在则退回 debug 签名，与 release 同一条判据）
-    val wotaSign = if (rootProject.file("keystore.properties").exists()) {
-        signingConfigs.getByName("wota")
-    } else {
-        signingConfigs.getByName("debug")
-    }
+    // release 只有在正式签名就绪时才绑定签名；否则保持 unsigned，并由任务闸门拒绝打包。
+    val wotaSign = if (ksReady) signingConfigs.getByName("wota") else null
 
     buildTypes {
         debug {
@@ -110,14 +123,20 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "false")
         }
         /**
-         * #73 的取证变体：**release 同签名 + debuggable=true**。
+         * #73 的取证变体：**可调试 + R8 + 独立包名 + debug 签名**（Y64）。
          *
          * 为什么要这么拧：这台华为测试机上没有 `screenrecord`（实测 `inaccessible or not found`），
          * `screencap` 单张 464–541ms，而 FLUENT 档 `WotaMotion.COMMIT_MS = 750ms` ⇒ 整个动画窗口只够拍 1 帧，
          * 中间态只能靠**应用内把进度钉死**来取证。而钉进度的入口不能留给用户误触，
-         * 又不能走 `BuildConfig.DEBUG`：换装 debug 包签名不同 ⇒ 必须 `adb uninstall` ⇒ 清空 `wota_settings`
-         * 与 `wota_media.db`（用户设置与收藏，本项目的硬红线）。
-         * 所以另开一枚与 r13 **同签名**的变体：`adb install -r` 覆盖即装即换、不动数据，
+         * 又不能走 `BuildConfig.DEBUG`。
+         *
+         * Y64：早先这枚变体与 release **同包名、同正式证书**，于是它会成为正式包的覆盖安装候选，
+         * 且承接设备上的用户数据、又开着调试与 Intent 探针——取证产物一旦脱离受控设备就很危险。
+         * 现在改为 `applicationIdSuffix=".debughook"` + debug 签名：
+         * - 与正式包**可共存**，各自独立的数据目录，取证包只碰自己的数据；
+         * - 不再需要为了保留数据而覆盖正式包，`adb uninstall` 正式包也永远不会因它发生；
+         * - 正式制品里不可能出现这枚包（CI 只从 release 目录取产物，并另有人证守卫）。
+         *
          * 钩子的开关由 [MERGE_HOOK] 这条 buildConfigField 挡（只在 debugHook 为 true，release 恒 false）。
          *
          * `matchingFallbacks` 是给"依赖只带 debug/release 两种构建类型属性"的 AAR 一个退路，
@@ -127,8 +146,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             isDebuggable = true
+            applicationIdSuffix = ".debughook"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = wotaSign
+            // Y64：取证包用本机 debug 证书，与正式包彻底分离（不再共用 wotaSign）
+            signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
             // #84 霜探针：与 MERGE_HOOK 同一条纪律（debugHook 出证据，release/debug 恒关，见 ui/FrostProbe.kt）
@@ -137,13 +158,13 @@ android {
             buildConfigField("boolean", "COMPARE_PROBE", "true")
         }
         /**
-         * #74 加的**取证构建**：release 同签名 + debuggable + **不混淆**，并且是 `testBuildType`。
+         * #74 加的**取证构建**：可调试 + **不混淆** + 独立包名 + debug 签名（Y64），并且是 `testBuildType`。
          *
          * 为什么要单独一枚，而不是复用 `debugHook` 或直接跑默认的 debug：
-         * AGP 的仪器测试只跟 `testBuildType` 那一条变体走（默认 `debug`）。默认值在这台机上是**危险**的——
-         * debug 包与 release 两张证书，装上就必须先 `adb uninstall`，而那会清空 `wota_settings` 与
-         * `wota_media.db`（用户设置、收藏、tag）。把 `testBuildType` 钉到一枚与 release 同签名的变体上，
-         * "跑仪器测试"与"不许清用户数据"就同时成立，不用每次靠人记住别用错命令。
+         * AGP 的仪器测试只跟 `testBuildType` 那一条变体走（默认 `debug`）。默认 debug 与正式包
+         * **包名相同、证书不同**，装上就必须先 `adb uninstall`，而那会清空 `wota_settings` 与
+         * `wota_media.db`（用户设置、收藏、tag）。`probe` 用独立包名 + debug 证书：
+         * 仪器测试包与正式包各自独立，既不碰正式包的数据，也不需要卸载正式包。
          *
          * 与 `debugHook` 的差别只有一处：**这里不混淆**。R8 会把测试 APK 里的 `@Test` 类名改掉，
          * `am instrument -e class com.wotagei.cam.XxxTest#method` 就点不到方法了；
@@ -154,7 +175,9 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             isDebuggable = true
-            signingConfig = wotaSign
+            applicationIdSuffix = ".probe"
+            // Y64：仪器测试包同样与正式包分离，用本机 debug 证书
+            signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release", "debug")
             buildConfigField("boolean", "MERGE_HOOK", "true")
             buildConfigField("boolean", "FROST_PROBE", "true")
@@ -199,6 +222,36 @@ android {
         noCompress += "tflite"
     }
 }
+
+/**
+ * Y63 的 fail-fast 闸门：没有完整正式签名时，**任何真正要产出/安装 release 包的任务**都直接失败。
+ *
+ * 为什么不用"配置期看到 keystore 缺失就整体失败"：本机日常要跑 assembleFullProbe / debug，
+ * 它们不需要正式签名。闸门挂在 task graph 上，只有任务图里真的出现
+ * `assemble*Release` / `bundle*Release` / `package*Release` / `install*Release` 时才拦——
+ * 包括 `./gradlew build` / `assemble` 这种"间接带上 release"的入口（图里会出现具体变体任务）。
+ *
+ * 为什么不做"unsigned release"：本仓库的发布链路（build-apk.yml）一定会注入 keystore，
+ * 本地缺配置只可能是漏配/换机；此时产出 unsigned 包同样会混进交付物，反而不如直接失败明确。
+ */
+val releasePackagingTask = Regex("(?i)^(assemble|bundle|package|install).*release$")
+gradle.taskGraph.whenReady(object : org.gradle.api.Action<org.gradle.api.execution.TaskExecutionGraph> {
+    override fun execute(graph: org.gradle.api.execution.TaskExecutionGraph) {
+        if (!ksReady) {
+            val offending = graph.allTasks.firstOrNull { releasePackagingTask.matches(it.name) }
+            if (offending != null) {
+                throw GradleException(
+                    "缺少完整的正式签名配置，已拒绝产出 release 包（任务：${offending.path}）。\n" +
+                        "要求：$ksFile 存在，且 storeFile/storePassword/keyAlias/keyPassword 四项齐全、" +
+                        "storeFile 指向的 keystore 文件存在。\n" +
+                        "本机只验证功能请用 :app:assembleFullProbe 或 :app:assembleFullDebug；\n" +
+                        "需要正式包时把 keystore.properties 与 keystore 放回 Android/WotaGeiCamApp/（勿入库），" +
+                        "CI 由 WOTA_KEYSTORE_BASE64 / WOTA_KEYSTORE_PROPS 注入。绝不回退 debug 签名。"
+                )
+            }
+        }
+    }
+})
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
