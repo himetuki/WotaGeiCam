@@ -15,6 +15,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 /**
  * SHA-256 端到端校验链的**纯函数单测 + 接线守卫**（v0.0.8，2026-10-13）。
@@ -260,6 +264,309 @@ class UpdateSha256Test {
         assertTrue(transport.connections.all { it.disconnected })
     }
 
+    // ------------------------------------------------------------------ Y45：发布临界区与原子替换
+
+    @Test
+    fun `Y45_校验通过后取消不得改写旧完成包`() {
+        val cache = temporary.newFolder("cancel-before-publish")
+        val target = File(cache, "updates/$ASSET_NAME").apply {
+            parentFile!!.mkdirs(); writeBytes(OLD_APK)
+        }
+        val transport = ApkTransport { GOOD_APK }
+        var cancelled = false
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            selection = UpdateSelection.legacy(DOWNLOAD_URL, GOOD_APK.size.toLong(), trustedSha256()),
+            onProgress = { read, total -> if (total > 0 && read >= total) cancelled = true },
+            isCancelled = { cancelled },
+            openConnection = transport.open
+        )
+        assertTrue("取消落在「校验通过 → 发布」之间必须按取消收尾：$outcome", outcome is UpdateDownloader.DownloadOutcome.Cancelled)
+        assertArrayEquals("旧完成包必须原样保留（旧任务不得改写完成路径）", OLD_APK, target.readBytes())
+        assertEquals(listOf(ASSET_NAME), target.parentFile!!.listFiles().orEmpty().map { it.name })
+    }
+
+    @Test
+    fun `Y45_换代后旧任务不得发布完成包`() {
+        val cache = temporary.newFolder("superseded-before-publish")
+        val target = File(cache, "updates/$ASSET_NAME").apply {
+            parentFile!!.mkdirs(); writeBytes(OLD_APK)
+        }
+        val transport = ApkTransport { GOOD_APK }
+        var current = true
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            selection = UpdateSelection.legacy(DOWNLOAD_URL, GOOD_APK.size.toLong(), trustedSha256()),
+            onProgress = { read, total -> if (total > 0 && read >= total) current = false },
+            isCancelled = { false },
+            isCurrent = { current },
+            openConnection = transport.open
+        )
+        assertTrue("被新一代顶替必须返回 Superseded：$outcome", outcome is UpdateDownloader.DownloadOutcome.Superseded)
+        assertArrayEquals("旧完成包必须原样保留", OLD_APK, target.readBytes())
+        assertEquals(listOf(ASSET_NAME), target.parentFile!!.listFiles().orEmpty().map { it.name })
+    }
+
+    @Test
+    fun `Y45_原子发布失败保留旧完成包_跨目录暂存拒绝`() {
+        val cache = temporary.newFolder("publish-failure")
+        val target = File(cache, "updates/$ASSET_NAME").apply {
+            parentFile!!.mkdirs(); writeBytes(OLD_APK)
+        }
+        assertFalse("候选不存在时发布必须失败", UpdateDownloader.publishCandidate(File(cache, "updates/missing.part"), target))
+        assertArrayEquals("发布失败不得先删旧包", OLD_APK, target.readBytes())
+
+        val otherDir = temporary.newFolder("other-staging")
+        val crossDirPart = File(otherDir, "candidate.part").apply { writeBytes(GOOD_APK) }
+        assertFalse(
+            "跨目录暂存不是原子替换，必须拒绝",
+            UpdateDownloader.publishCandidate(crossDirPart, target)
+        )
+        assertTrue("拒绝后候选仍归调用方清理", crossDirPart.isFile)
+        assertArrayEquals(OLD_APK, target.readBytes())
+    }
+
+    @Test
+    fun `Y45_发布前最后一次复核失效_旧包与候选均原样保留`() {
+        val cache = temporary.newFolder("publish-recheck")
+        val dir = File(cache, "updates").apply { mkdirs() }
+        val target = File(dir, ASSET_NAME).apply { writeBytes(OLD_APK) }
+        val part = File(dir, "$ASSET_NAME.part1").apply { writeBytes(GOOD_APK) }
+        assertFalse(
+            "改名前一瞬复核失败必须拒绝发布",
+            UpdateDownloader.publishCandidate(part, target) { false }
+        )
+        assertArrayEquals("复核失效不得改写旧完成包", OLD_APK, target.readBytes())
+        assertTrue("复核失效不得搬走候选文件", part.isFile)
+    }
+
+    @Test
+    fun `Y45_发布helper在每次落地动作前一瞬复核_没有检查后空窗`() {
+        val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt"))
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "publishCandidate"))
+        val check1 = body.indexOf("if (!canPublish()) return false")
+        val rename1 = body.indexOf("part.renameTo(target)")
+        val check2 = body.indexOf("if (!canPublish()) return false", check1 + 1)
+        val atomicMove = body.indexOf("Files.move(")
+        val check3 = body.indexOf("if (!canPublish()) return false", check2 + 1)
+        val backupRename = body.indexOf("target.renameTo(backup)")
+        assertTrue("同目录 rename 前必须复核：$body", check1 >= 0 && rename1 > check1)
+        assertTrue("原子替换前必须复核且中间不得先动旧包", check2 > check1 && atomicMove > check2)
+        assertTrue("保底换位搬走旧包前必须再复核", check3 > check2 && backupRename > check3)
+    }
+
+    @Test
+    fun `Y45_非原子换位中断后启动时恢复旧完成包`() {
+        val cache = temporary.newFolder("recover-backup")
+        val dir = File(cache, "updates").apply { mkdirs() }
+        val target = File(dir, ASSET_NAME)
+        val backup = File(dir, "$ASSET_NAME.old1738888888888").apply { writeBytes(OLD_APK) }
+        assertTrue("完成路径缺失且存在 .old 备份时必须恢复", UpdateDownloader.recoverCompletedTarget(dir, target))
+        assertArrayEquals(OLD_APK, target.readBytes())
+        assertFalse("恢复后备份不再保留", backup.exists())
+        assertFalse("完成路径已存在时不做多余搬动", UpdateDownloader.recoverCompletedTarget(dir, target))
+    }
+
+    // ------------------------------------------------------------------ Y45 收口：提交闸桥测（确定性竞态）
+
+    /**
+     * 闸的终态语义（纯 JVM）：三态一去不回，已取消/已顶替的闸提交必须被拒且**一次都不执行发布**。
+     * 这是「所有权/取消核对与实际发布同一临界区」的最小判据。
+     */
+    @Test
+    fun `Y45_闸终态一去不回_已取消或已顶替的提交必须被拒且不执行发布`() {
+        val cancelledGate = UpdateAttemptGate()
+        assertFalse("ACTIVE 时 isCancelled 必须为 false", cancelledGate.isCancelled)
+        assertTrue("ACTIVE 时仍是当前代", cancelledGate.isCurrent)
+        assertTrue(cancelledGate.cancel())
+        assertFalse("终态一去不回：已取消不能再顶替", cancelledGate.supersede())
+        val publishedAfterCancel = AtomicBoolean(false)
+        assertFalse(
+            "已取消的闸必须拒绝提交",
+            cancelledGate.commitIfActive {
+                publishedAfterCancel.set(true)
+                true
+            }
+        )
+        assertFalse("拒绝时发布动作一次都不许执行", publishedAfterCancel.get())
+
+        val supersededGate = UpdateAttemptGate()
+        assertTrue(supersededGate.supersede())
+        assertFalse("终态一去不回：已顶替不能再取消", supersededGate.cancel())
+        val publishedAfterSupersede = AtomicBoolean(false)
+        assertFalse(
+            "已顶替的闸必须拒绝提交",
+            supersededGate.commitIfActive {
+                publishedAfterSupersede.set(true)
+                true
+            }
+        )
+        assertFalse(publishedAfterSupersede.get())
+        assertFalse("被顶替的代不再当前", supersededGate.isCurrent)
+
+        // 每代一枚闸：旧代取消/顶替绝不能波及新一代
+        val oldGate = UpdateAttemptGate()
+        val newGate = UpdateAttemptGate()
+        oldGate.cancel()
+        assertFalse("旧代取消不得影响新一代", newGate.isCancelled)
+        assertTrue("新一代必须仍可提交", newGate.commitIfActive { true })
+    }
+
+    /**
+     * **权限/提交边界的确定性竞态**：提交线程持闸锁停在发布动作里（等价于「已核对 ACTIVE，
+     * 正在改名」），取消线程此时必须排队——放开前取消不得返回，放开后提交先落定、取消随后生效。
+     *
+     * 「尺子自己能红」：若 [UpdateAttemptGate.commitIfActive] 不在锁内核对/执行（先判定后出锁再
+     * publish），取消线程会在持锁窗口里直接完成，`isAlive` 断言立即红。
+     */
+    @Test
+    fun `Y45_桥_取消与提交争同一把锁_提交临界区内取消必须排队`() {
+        val gate = UpdateAttemptGate()
+        val inPublish = CountDownLatch(1)
+        val releasePublish = CountDownLatch(1)
+        val commitDone = CountDownLatch(1)
+        val published = AtomicBoolean(false)
+        var committed = false
+
+        val committer = thread(name = "y45-committer") {
+            committed = gate.commitIfActive {
+                published.set(true)
+                inPublish.countDown()
+                releasePublish.await(5, TimeUnit.SECONDS)
+                true
+            }
+            commitDone.countDown()
+        }
+        assertTrue("提交必须真的进到临界区内（否则本测试没测到等待点）", inPublish.await(5, TimeUnit.SECONDS))
+
+        val cancelStarted = CountDownLatch(1)
+        val cancelReturned = AtomicBoolean(false)
+        val canceller = thread(name = "y45-canceller") {
+            cancelStarted.countDown()
+            gate.cancel()
+            cancelReturned.set(true)
+        }
+        assertTrue(cancelStarted.await(5, TimeUnit.SECONDS))
+        canceller.join(250)
+        assertTrue("取消在提交临界区内不得抢先完成（否则仍有核对→落地空窗）", canceller.isAlive)
+        assertFalse("临界区未放行前提交不许先返回", commitDone.await(0, TimeUnit.MILLISECONDS))
+
+        releasePublish.countDown()
+        assertTrue("提交必须完成", commitDone.await(5, TimeUnit.SECONDS))
+        committer.join(5_000)
+        canceller.join(5_000)
+        assertTrue("进临界区时仍是 ACTIVE，发布必须真的落地", committed && published.get())
+        assertTrue("取消在提交之后才生效（UI 仍按本代标志丢弃回执）", cancelReturned.get())
+        assertTrue(gate.isCancelled)
+    }
+
+    /**
+     * **校验收尾（最后一读已翻闸）→ 提交**的桥测：取消/顶替都只能从**本代闸**表达
+     * （isCancelled/isCurrent 回调恒放行——证明拦下发布的是闸，不是旧回调）。
+     * 完成路径必须保持旧字节，且目录里只剩旧完成包（本代候选由本任务清理）。
+     */
+    @Test
+    fun `Y45_桥_校验后取消闸_旧完成包保留且只清本代候选`() {
+        val cache = temporary.newFolder("gate-cancel-before-publish")
+        val target = File(cache, "updates/$ASSET_NAME").apply {
+            parentFile!!.mkdirs(); writeBytes(OLD_APK)
+        }
+        val gate = UpdateAttemptGate()
+        val transport = ApkTransport { GOOD_APK }
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            selection = UpdateSelection.legacy(DOWNLOAD_URL, GOOD_APK.size.toLong(), trustedSha256()),
+            onProgress = { read, total -> if (total > 0 && read >= total) gate.cancel() },
+            isCancelled = { false },
+            isCurrent = { true },
+            publishGate = gate,
+            openConnection = transport.open
+        )
+        assertTrue("闸在提交前被取消必须判取消：$outcome", outcome is UpdateDownloader.DownloadOutcome.Cancelled)
+        assertArrayEquals("旧完成包必须原样保留", OLD_APK, target.readBytes())
+        assertEquals(
+            "本代候选必须清掉、不得留下新字节或别人的文件",
+            listOf(ASSET_NAME),
+            target.parentFile!!.listFiles().orEmpty().map { it.name }
+        )
+        assertTrue(gate.isCancelled)
+    }
+
+    @Test
+    fun `Y45_桥_校验后顶替闸_旧完成包保留且只清本代候选`() {
+        val cache = temporary.newFolder("gate-supersede-before-publish")
+        val target = File(cache, "updates/$ASSET_NAME").apply {
+            parentFile!!.mkdirs(); writeBytes(OLD_APK)
+        }
+        val gate = UpdateAttemptGate()
+        val transport = ApkTransport { GOOD_APK }
+        val outcome = UpdateDownloader.downloadApk(
+            cacheDir = cache,
+            selection = UpdateSelection.legacy(DOWNLOAD_URL, GOOD_APK.size.toLong(), trustedSha256()),
+            onProgress = { read, total -> if (total > 0 && read >= total) gate.supersede() },
+            isCancelled = { false },
+            isCurrent = { true },
+            publishGate = gate,
+            openConnection = transport.open
+        )
+        assertTrue("闸在提交前被顶替必须判 Superseded：$outcome", outcome is UpdateDownloader.DownloadOutcome.Superseded)
+        assertArrayEquals("旧完成包必须原样保留", OLD_APK, target.readBytes())
+        assertEquals(
+            listOf(ASSET_NAME),
+            target.parentFile!!.listFiles().orEmpty().map { it.name }
+        )
+    }
+
+    /**
+     * **启动恢复 vs 发布**的互斥桥测：发布线程持共享互斥停在第一次复核钩子里（改名前），
+     * 此时恢复线程必须排队——否则非原子换位的临时缺位窗口里，恢复会把旧 `.old` 备份搬回，
+     * 覆盖刚发布的字节。放开后发布落定，恢复只看到「目标已存在」而放弃。
+     *
+     * 「尺子自己能红」：若 [UpdateDownloader.recoverCompletedTarget] 不持发布互斥，恢复线程
+     * 会在发布未落定时直接返回，`isAlive` 断言立即红。
+     */
+    @Test
+    fun `Y45_桥_启动恢复与发布互斥_恢复不得越过未落定的发布`() {
+        val cache = temporary.newFolder("recover-vs-publish")
+        val dir = File(cache, "updates").apply { mkdirs() }
+        val target = File(dir, ASSET_NAME).apply { writeBytes(OLD_APK) }
+        val staleBackup = File(dir, "$ASSET_NAME.old1738888888888").apply { writeBytes(OLD_APK) }
+        val part = File(dir, "$ASSET_NAME.part42").apply { writeBytes(GOOD_APK) }
+
+        val inPublish = CountDownLatch(1)
+        val releasePublish = CountDownLatch(1)
+        val publishDone = CountDownLatch(1)
+        var published = false
+        val publisher = thread(name = "y45-publisher") {
+            published = UpdateDownloader.publishCandidate(part, target) {
+                inPublish.countDown()
+                releasePublish.await(5, TimeUnit.SECONDS)
+                true
+            }
+            publishDone.countDown()
+        }
+        assertTrue("发布必须进到互斥区内（否则本测试没测到等待点）", inPublish.await(5, TimeUnit.SECONDS))
+
+        val recoveryStarted = CountDownLatch(1)
+        var recoveryResult: Boolean? = null
+        val recovery = thread(name = "y45-recovery") {
+            recoveryStarted.countDown()
+            recoveryResult = UpdateDownloader.recoverCompletedTarget(dir, target)
+        }
+        assertTrue(recoveryStarted.await(5, TimeUnit.SECONDS))
+        recovery.join(500)
+        assertTrue("发布持锁期间启动恢复不得插队（会把旧备份搬回覆盖新字节）", recovery.isAlive)
+
+        releasePublish.countDown()
+        assertTrue("发布必须完成", publishDone.await(5, TimeUnit.SECONDS))
+        publisher.join(5_000)
+        recovery.join(5_000)
+        assertTrue("发布必须成功", published)
+        assertEquals("发布落定后恢复只能看到目标已存在并放弃", false, recoveryResult)
+        assertArrayEquals("完成路径必须是刚发布的字节", GOOD_APK, target.readBytes())
+        assertTrue("恢复不得搬走旧备份（未发生换位，备份仍归清理）", staleBackup.isFile)
+    }
+
     private fun download(cache: File, transport: ApkTransport, sha256: String?) = UpdateDownloader.downloadApk(
         cacheDir = cache,
         directUrl = DOWNLOAD_URL,
@@ -308,12 +615,13 @@ class UpdateSha256Test {
         val DOWNLOAD_URL = UpdateConfig.directDownloadUrl("v0.0.12-r08", ASSET_NAME)
         val GOOD_APK = "PK-good-APK".toByteArray(Charsets.UTF_8)
         val BAD_APK = "PK-evil-APK".toByteArray(Charsets.UTF_8)
+        val OLD_APK = "PK-old-APK".toByteArray(Charsets.UTF_8)
     }
 
     // ------------------------------------------------------------------ 接线守卫（尺子自己能红）
 
     @Test
-    fun `接线_downloadApk必须调校验_UI必须传哈希`() {
+    fun `接线_downloadApk必须调校验_UI必须传选择绑定`() {
         val dl = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(
                 KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt")),
@@ -325,23 +633,147 @@ class UpdateSha256Test {
             dl.contains("sha256Matches(expectedSha256")
         )
         assertTrue("校验失败必须删除未发布候选", dl.contains("part.delete()"))
-        assertTrue("SHA 必须在发布完成路径之前验证", dl.indexOf("sha256Matches(expectedSha256") < dl.indexOf("part.renameTo(target)"))
+        val sha = dl.indexOf("sha256Matches(expectedSha256")
+        val publish = dl.indexOf("publishCandidate(part, target)")
+        assertTrue("SHA 必须在发布完成路径之前验证", sha >= 0 && publish > sha)
+        val finalOwnerCheck = dl.indexOf("isCurrent()", sha)
+        assertTrue(
+            "发布临界区必须在摘要校验之后、原子替换之前重查代数（Y45）",
+            finalOwnerCheck in (sha until publish)
+        )
         val settings = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
         assertTrue(
-            "UI 必须把探测得到的哈希传给下载（expectedSha256 = avail.sha256）",
-            settings.contains("expectedSha256 = avail.sha256")
+            "UI 必须把探测结果的选择绑定交给下载（tag/flavor/资产/ABI/摘要同源）",
+            settings.contains("selection = avail.selection")
+        )
+        assertTrue(
+            "UI 必须把本代身份交给下载器在发布临界区复核（Y45）",
+            settings.contains("isCurrent = { downloadGenFlag === genCancelled }")
+        )
+        assertTrue(
+            "UI 必须用官方 JSON 的最终落地来源校验（Y43）",
+            settings.contains("fetchJsonSource = {") &&
+                settings.contains("UpdateDownloader.fetchJsonSource(")
         )
         // 突变自证：校验判据被恒真短路（拆校验）后尺子必须红（目标串是纯代码，flatten 后必中）
-        val mutated = dl.replace("sha256Matches(expectedSha256, sha256Hex(part))", "true")
+        val mutated = dl.replace("sha256Matches(expectedSha256, actual)", "true")
         assertTrue("校验接线被恒真短路后尺子必须红", !mutated.contains("sha256Matches"))
     }
 
     /**
-     * 校验步的异常兜底与「无哈希不读盘」：重算是**读盘**，IO 异常穿出函数就是协程未捕获异常
-     * （下载协程没有 CoroutineExceptionHandler → 杀进程）；期望哈希为 null 时更不该白读一遍 5MB。
+     * Y45 收口的接线体检：提交闸必须真的夹住「校验 → 发布」，发布与启动恢复必须共用一把互斥，
+     * UI 的取消/顶替必须走同一枚闸。全部 needle 取代码侧（字符串字面量已被遮蔽）。
+     */
+    private fun gateWiringViolations(src: String, settings: String): List<String> {
+        val bad = ArrayList<String>()
+        val dl = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "downloadApk"))
+        val sha = dl.indexOf("sha256Matches(expectedSha256")
+        val commit = dl.indexOf("publishGate.commitIfActive { publishCandidate(part, target) }")
+        if (commit < 0) {
+            bad.add("downloadApk 没有把发布动作交给本代提交闸（核对与落地不在同一临界区）")
+        } else if (sha < 0 || commit < sha) {
+            bad.add("提交临界区必须在校验之后（发布时机失去输入）")
+        }
+        if (!dl.contains("if (!isCurrent()) {")) {
+            bad.add("downloadApk 缺发布前代数复核")
+        }
+        val commitBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "commitIfActive"))
+        if (!commitBody.contains("lock.withLock")) {
+            bad.add("commitIfActive 没有持闸锁核对/发布（取消可与提交插队）")
+        }
+        if (!commitBody.contains("state != State.ACTIVE")) {
+            bad.add("commitIfActive 没有核对 ACTIVE 终态")
+        }
+        listOf("inputStream", "readBytes", "openConnection", "tryNode", "sha256Hex").forEach { io ->
+            if (commitBody.contains(io)) bad.add("提交临界区内出现大体量 I/O（$io）：取消/UI 会被拖住")
+        }
+        val publishBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "publishCandidate"))
+        if (!publishBody.contains("PUBLISH_MUTEX.withLock")) {
+            bad.add("publishCandidate 没持共享发布互斥（与启动恢复可交错改完成路径）")
+        }
+        val recoverBody = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "recoverCompletedTarget"))
+        if (!recoverBody.contains("PUBLISH_MUTEX.withLock")) {
+            bad.add("recoverCompletedTarget 没持共享发布互斥（启动恢复可把旧备份搬回覆盖新发布）")
+        }
+        if (!settings.contains("val genGate = UpdateAttemptGate()")) {
+            bad.add("UI 每代没有新建提交闸")
+        }
+        if (!settings.contains("downloadGate?.supersede()")) {
+            bad.add("UI 开新代前没有顶替旧代闸（旧代仍可提交）")
+        }
+        if (!settings.contains("downloadGate?.cancel()")) {
+            bad.add("UI 取消没有翻本代闸（取消只能等旧回调，发布仍有空窗）")
+        }
+        if (!settings.contains("publishGate = genGate")) {
+            bad.add("UI 没把本代闸交给下载器")
+        }
+        val androidEntry = KotlinSourceScan.flatten(
+            src.substringAfter("fun downloadApk(").substringBefore("fun downloadApk(")
+        )
+        if (!androidEntry.contains("context: Context") ||
+            !androidEntry.contains("selection = selection") ||
+            !androidEntry.contains("publishGate = publishGate")
+        ) {
+            bad.add("Android 下载入口未把本代闸转交给缓存目录下载实现")
+        }
+        if (!settings.contains("isCurrent = { downloadGenFlag === genCancelled }")) {
+            bad.add("UI 没把本代身份交给下载器复核")
+        }
+        return bad
+    }
+
+    @Test
+    fun `Y45_提交闸接线_发布在闸内_恢复共用互斥_UI取消顶替同闸`() {
+        val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt"))
+        val settings = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
+        val violations = gateWiringViolations(src, settings)
+        assertEquals("Y45 提交闸接线发现断点：\n${violations.joinToString("\n")}", emptyList<String>(), violations)
+
+        // 突变 1：发布绕过闸（回到「先核对后发布」的旧形态）→ 必须红
+        val noGate = src.replace(
+            "publishGate.commitIfActive { publishCandidate(part, target) }",
+            "publishCandidate(part, target)"
+        )
+        assertTrue(
+            "发布绕过提交闸后尺子必须红",
+            gateWiringViolations(noGate, settings).any { it.contains("提交闸") }
+        )
+        // 突变 2：提交闸不持锁（先判终态再出锁发布）→ 必须红
+        val noLock = src.replace("return lock.withLock {", "return run {")
+        assertTrue(
+            "提交闸去掉锁后尺子必须红",
+            gateWiringViolations(noLock, settings).any { it.contains("持闸锁") }
+        )
+        // 突变 3：启动恢复不再与发布互斥 → 必须红
+        val recoverNoLock = src.replace(
+            "internal fun recoverCompletedTarget(dir: File, target: File): Boolean {\n        return PUBLISH_MUTEX.withLock {",
+            "internal fun recoverCompletedTarget(dir: File, target: File): Boolean {\n        return run {"
+        )
+        assertTrue(
+            "启动恢复去掉发布互斥后尺子必须红",
+            gateWiringViolations(recoverNoLock, settings).any { it.contains("recoverCompletedTarget") }
+        )
+        // 突变 4：UI 取消不翻闸 → 必须红
+        val uiNoCancel = settings.replace("downloadGate?.cancel()", "")
+        assertTrue(
+            "UI 取消不翻闸后尺子必须红",
+            gateWiringViolations(src, uiNoCancel).any { it.contains("取消") }
+        )
+        // 突变 5：UI 开新代不顶替旧代闸 → 必须红
+        val uiNoSupersede = settings.replace("downloadGate?.supersede()", "")
+        assertTrue(
+            "UI 不顶替旧代闸后尺子必须红",
+            gateWiringViolations(src, uiNoSupersede).any { it.contains("顶替") }
+        )
+    }
+
+    /**
+     * 校验步的异常兜底：重算实际摘要是**读盘**（Y43 起每次 Done 都带实际字节身份，不能再按
+     * 「无期望哈希就不读」短路），IO 异常穿出函数就是协程未捕获异常（下载协程没有
+     * CoroutineExceptionHandler → 杀进程）。
      */
     @Test
-    fun `接线_校验读盘异常必须折算失败_无期望不读盘`() {
+    fun `接线_校验读盘异常必须折算失败_实际摘要随Done返回`() {
         val dl = KotlinSourceScan.flatten(
             KotlinSourceScan.bodyOf(
                 KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt")),
@@ -350,24 +782,22 @@ class UpdateSha256Test {
         )
         assertTrue(
             "校验必须包在 runCatching 里（读盘异常折算失败，不穿成未捕获异常）",
-            dl.contains("runCatching {")
+            dl.contains("runCatching { sha256Hex(part) }")
         )
         assertTrue(
-            "无期望哈希必须短路（Kotlin 实参先求值，不短路就会白读一遍整个 APK）",
-            dl.contains("expectedSha256 == null ||")
+            "每次成功候选都必须重算实际摘要（Y43：安装闸用它对账下载字节）",
+            dl.contains("sha256Matches(expectedSha256, actual)")
+        )
+        assertTrue(
+            "Done 必须携带实际摘要与选择绑定",
+            dl.contains("DownloadOutcome.Done(target, r.sizeBytes, selection, actual)")
         )
         assertTrue("读盘失败必须记日志", dl.contains("Log.e(TAG,"))
         // 日志文案要在**原文**里核（codeOnly 会把字符串字面量内容遮蔽掉）
         val raw = KotlinSourceScan.mainSourceText("update/UpdateDownloader.kt")
         assertTrue("读盘失败的日志要能认出来", raw.contains("SHA-256 校验读盘失败"))
-        // 突变 1：拆掉 null 短路 → 无哈希也全量读盘
-        val noShortCircuit = dl.replace("expectedSha256 == null ||", "")
-        assertTrue(
-            "去掉 null 短路后尺子必须报红",
-            !noShortCircuit.contains("expectedSha256 == null ||")
-        )
-        // 突变 2：异常不再兜底（回到裸调用）
-        val noGuard = dl.replace("runCatching {", "run {")
-        assertTrue("去掉 runCatching 后尺子必须报红", !noGuard.contains("runCatching {"))
+        // 突变 1：拆掉读盘兜底 → IO 异常会穿出协程
+        val noGuard = dl.replace("runCatching { sha256Hex(part) }", "sha256Hex(part)")
+        assertTrue("去掉 runCatching 后尺子必须报红", !noGuard.contains("runCatching { sha256Hex(part) }"))
     }
 }

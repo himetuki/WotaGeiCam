@@ -31,13 +31,18 @@ class UpdateInstallerTrustTest {
     }
 
     @Test
-    fun `install 必须先过包名与签名校验`() {
+    fun `install 必须先过包名签名摘要与变体校验`() {
         val src = codeOnly(mainSourceText("update/UpdateInstaller.kt"))
-        val install = flatten(bodyOf(src, "install"))
-        assertTrue("install 必须先调 isTrustedUpdate", install.contains("isTrustedUpdate(context, file)"))
-        val trust = flatten(bodyOf(src, "isTrustedUpdate"))
-        assertTrue("必须核对包名", trust.contains("archive.packageName != context.packageName"))
-        assertTrue("必须读归档签名", trust.contains("signingInfo") && trust.contains("apkContentsSigners"))
-        assertTrue("必须与已安装应用签名集合比对", trust.contains("sameSignerSet("))
+        val launch = flatten(bodyOf(src, "launchVerified"))
+        assertTrue("启动安装前必须重新算当前字节的 SHA", launch.contains("sha256Hex(file)"))
+        assertTrue("启动安装前必须过纯判据 verifyArtifact", launch.contains("verifyArtifact("))
+        val trust = flatten(bodyOf(src, "verifyArtifact"))
+        assertTrue("必须核对包名", trust.contains("archive.packageName != installedPackage"))
+        assertTrue("必须读归档签名并与已安装集合比对", trust.contains("sameSignerSet(archive.signers, installedSigners)"))
+        assertTrue("必须核对下载完成时记录的实际摘要", trust.contains("expectedActualSha256"))
+        assertTrue("必须核对探测得到的可信摘要", trust.contains("selection.expectedSha256"))
+        assertTrue("必须按 tag 绑定 versionName", trust.contains("selection.expectedVersionName"))
+        assertTrue("必须拒绝 debuggable 取证包（Y64）", trust.contains("archive.debuggable"))
+        assertTrue("必须核对 ABI 段", trust.contains("selection.abi.presentIn(archive.abis)"))
     }
 }

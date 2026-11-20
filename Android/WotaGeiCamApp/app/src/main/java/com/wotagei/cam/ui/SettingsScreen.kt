@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.os.Build
 import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.diag.Diag
 import kotlinx.coroutines.CoroutineScope
@@ -106,8 +107,11 @@ import com.wotagei.cam.ui.widget.decodeContinuousSliders
 import com.wotagei.cam.ui.widget.encodeContinuousSliders
 import com.wotagei.cam.update.ProbeResult
 import com.wotagei.cam.update.ReleaseNotes
+import com.wotagei.cam.update.UpdateAttemptGate
 import com.wotagei.cam.update.UpdateDownloader
 import com.wotagei.cam.update.UpdateInstaller
+import com.wotagei.cam.update.UpdateInstaller.InstallRejection
+import com.wotagei.cam.update.UpdateInstaller.InstallResult
 import com.wotagei.cam.update.probeLatestRelease
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1788,8 +1792,13 @@ private data class UpdateDownloadState(
     val totalBytes: Long = -1L,
     val done: Boolean = false,
     val failed: Boolean = false,
-    val installFailed: Boolean = false,
-    val file: java.io.File? = null,
+    /**
+     * 安装启动失败是**独立终态**（Y46）：不与 done 并存，携带 [UpdateInstaller.InstallResult.Rejected]
+     * 的原因与下载产物；对话标题/动作行先判它，再判下载态。
+     */
+    val installFailure: InstallResult.Rejected? = null,
+    /** 下载产物（Done 携带选择绑定与实际摘要，安装/重试都复用它，不按文件名重建） */
+    val artifact: UpdateDownloader.DownloadOutcome.Done? = null,
     /** 正在给各渠道测速选路（还没开始真正下载，进度数字尚无意义） */
     val measuring: Boolean = false
 )
@@ -1813,6 +1822,9 @@ private fun UpdateSection() {
     // 行点击（检查）永不触碰下载标志——共享标志被新一轮复位会让旧下载协程复活/迟到回执弹框
     val probeCancelled = remember { AtomicBoolean(false) }
     var downloadGenFlag by remember { mutableStateOf<AtomicBoolean?>(null) }
+    // Y45 收口：每代提交闸。取消/顶替与「校验后发布」争同一把锁（见 UpdateAttemptGate），
+    // 新一代开跑前先把上一代闸顶替掉（旧代从此无法再提交发布，甚至还在校验中也一样）。
+    var downloadGate by remember { mutableStateOf<UpdateAttemptGate?>(null) }
 
     val statusRes = when (rowState) {
         UpdateRowState.Idle -> R.string.set_update_idle
@@ -1843,7 +1855,15 @@ private fun UpdateSection() {
                                 { url -> UpdateDownloader.fetchRedirectLocation(url, UpdateDownloader.PROBE_READ_TIMEOUT_MS) },
                                 isCancelled = { probeCancelled.get() },
                                 // 更新互斥（docs/plan/33）：full/lite 各推各包
-                                flavor = BuildConfig.FLAVOR
+                                flavor = BuildConfig.FLAVOR,
+                                // Y44：设备 ABI 顺序决定多个分包优先级；未知 ABI 段一律不选
+                                deviceAbis = Build.SUPPORTED_ABIS.toList(),
+                                // Y43：官方 API 正文只在最终落地主机仍属官方时可信（镜像段传 null 沿用旧流程）
+                                fetchJsonSource = { url, allowedHosts ->
+                                    UpdateDownloader.fetchJsonSource(
+                                        url, allowedHosts, UpdateDownloader.PROBE_READ_TIMEOUT_MS
+                                    )
+                                }
                             )
                         ) {
                             is ProbeResult.UpdateAvailable -> {
@@ -1887,15 +1907,19 @@ private fun UpdateSection() {
             onDownload = {
                 available = null
                 // 修复轮 P2：取消标志按代隔离——每轮下载新建 AtomicBoolean 捕获进协程闭包，
-                // 迟到的旧代回执以本代标志判生死，跨代复位从此不可能
+                // 迟到的旧代回执以本代标志判生死，跨代复位从此不可能。
+                // Y45 收口：本代同时领一枚提交闸；旧代闸先顶替（旧代从此进不了发布临界区）。
                 val genCancelled = AtomicBoolean(false)
+                val genGate = UpdateAttemptGate()
                 downloadGenFlag = genCancelled
+                downloadGate?.supersede()
+                downloadGate = genGate
                 download = UpdateDownloadState(measuring = true)
                 scope.launch(Dispatchers.IO) {
                     val outcome = UpdateDownloader.downloadApk(
                         context = context,
-                        directUrl = avail.downloadUrl,
-                        expectedSize = avail.sizeBytes,
+                        // Y43/Y44：把用户确认的 tag/flavor/资产名/ABI/该资产摘要作为一个不可变选择交给下载器
+                        selection = avail.selection,
                         onProgress = { read, total ->
                             // 修复轮 P3-1（末轮）：进度只许「本代仍是当前可见代」时写——
                             // 旧代迟到的进度不许碰新一代的进度对话框
@@ -1904,13 +1928,16 @@ private fun UpdateSection() {
                             }
                         },
                         isCancelled = { genCancelled.get() },
-                        expectedSha256 = avail.sha256,
                         // 测速选路结束（开始真正下载）：同一条按代隔离纪律
                         onSpeedTested = {
                             if (downloadGenFlag === genCancelled) {
                                 download = download?.copy(measuring = false)
                             }
-                        }
+                        },
+                        // Y45：下载器在摘要校验后的发布临界区再核一次本代是否仍是当前代
+                        isCurrent = { downloadGenFlag === genCancelled },
+                        // Y45 收口：本代提交闸——「校验通过 → 落地」的核对与发布在同一临界区完成
+                        publishGate = genGate
                     )
                     // 修复轮 P3-1（末轮）：回执写回前判代——旧代（已被新一代顶替）一律整体丢弃，
                     // 不许无条件清 download（那会把新一代的对话框清掉、令其隐形下载且不可取消）
@@ -1923,10 +1950,13 @@ private fun UpdateSection() {
                                     bytesRead = outcome.sizeBytes,
                                     totalBytes = outcome.sizeBytes,
                                     done = true,
-                                    file = outcome.file
+                                    artifact = outcome
                                 )
                             }
                         UpdateDownloader.DownloadOutcome.Cancelled -> download = null
+                        // 被同代/新一代顶替：本代回执不得清掉当前对话框（上面已判代，这里只在
+                        // 仍属当前代时收尾；正常路径不会到达）。
+                        UpdateDownloader.DownloadOutcome.Superseded -> download = null
                         UpdateDownloader.DownloadOutcome.Failed ->
                             // 同上：已取消的失败回执丢弃（对话框已关，别翻出来）
                             if (!genCancelled.get()) download = UpdateDownloadState(failed = true)
@@ -1941,18 +1971,33 @@ private fun UpdateSection() {
         UpdateDownloadDialog(
             state = dl,
             onCancel = {
-                // 只操作本代下载标志（修复轮 P2：按代隔离，行点击/新一轮探测永不触碰它）
+                // 只操作本代下载标志（修复轮 P2：按代隔离，行点击/新一轮探测永不触碰它）。
+                // Y45 收口：同时翻本代提交闸——闸把取消与发布收进同一把锁，正在临界区的提交
+                // 要么在取消生效前完成（回执按 genCancelled 丢弃）、要么被闸拒绝（旧包保留）。
+                // 锁内只有内存判断与短促改名，UI 线程不为下载 I/O 等待。
                 downloadGenFlag?.set(true)
+                downloadGate?.cancel()
                 download = null
             },
             onClose = { download = null },
             onInstall = {
-                val file = dl.file
-                if (file != null && UpdateInstaller.install(context, file)) {
-                    download = null
-                    rowState = UpdateRowState.Idle
+                // Y43：安装闸只接受下载产出的 Done（选择绑定 + 实际摘要都在里面），不再按文件名重建。
+                val artifact = dl.artifact
+                if (artifact == null) {
+                    download = dl.copy(
+                        done = false,
+                        installFailure = InstallResult.Rejected(InstallRejection.FILE_MISSING)
+                    )
                 } else {
-                    download = dl.copy(installFailed = true)
+                    when (val result = UpdateInstaller.install(context, artifact)) {
+                        InstallResult.Started -> {
+                            download = null
+                            rowState = UpdateRowState.Idle
+                        }
+                        // Y46：安装失败是独立终态——清掉 done，保留原因与产物（重试复用同一份字节）。
+                        is InstallResult.Rejected ->
+                            download = dl.copy(done = false, installFailure = result)
+                    }
                 }
             }
         )
@@ -2026,17 +2071,18 @@ private fun UpdatePromptDialog(
     }
 }
 
-/** 下载进度对话框：n% + 已下/总 MB + 取消；完成换「安装」，失败换「关闭」 */
+/** 下载进度对话框：n% + 已下/总 MB + 取消；完成换「安装」，失败/安装拒绝换「关闭 + 重试」 */
 @Composable
 private fun UpdateDownloadDialog(
     state: UpdateDownloadState,
     onCancel: () -> Unit,
     onClose: () -> Unit,
-    onInstall: () -> Unit
+    onInstall: () -> Unit,
+    onRetryInstall: () -> Unit = onInstall
 ) {
     // 修复轮 P3-1：下载中外部点击/返回键不再触发取消（误触会丢掉整个下载），
     // onDismissRequest 置空，取消只走显式「取消」钮；完成/失败态保留外部关闭
-    Dialog(onDismissRequest = { if (state.done || state.failed || state.installFailed) onClose() }) {
+    Dialog(onDismissRequest = { if (state.done || state.failed || state.installFailure != null) onClose() }) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2044,20 +2090,36 @@ private fun UpdateDownloadDialog(
                 .background(WotaColor.surface)
                 .padding(20.dp)
         ) {
+            // Y46：安装启动失败先于 done 判定——两态不再可能同时渲染成「下载完成」。
             val title = when {
+                state.installFailure != null -> stringResource(R.string.set_update_install_failed)
                 state.measuring -> stringResource(R.string.set_update_selecting_channel)
                 state.done -> stringResource(R.string.set_update_ready_to_install)
                 state.failed -> stringResource(R.string.set_update_download_failed)
-                state.installFailed -> stringResource(R.string.set_update_install_failed)
                 else -> stringResource(R.string.set_update_downloading)
             }
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (state.failed || state.installFailed) WotaRec else WotaText
+                color = if (state.failed || state.installFailure != null) WotaRec else WotaText
             )
             Spacer(Modifier.height(10.dp))
             when {
+                state.installFailure != null -> {
+                    // 明确原因 + 重试入口：不是「下载完成」，而是安装闸拒绝/启动失败。
+                    Text(
+                        text = stringResource(installFailureText(state.installFailure.reason)),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = WotaColor.textMid
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    UpdateDialogActions(
+                        listOf(
+                            stringResource(R.string.set_update_close) to onClose,
+                            stringResource(R.string.set_update_install_retry) to onRetryInstall
+                        )
+                    )
+                }
                 state.measuring -> {
                     // 测速选路：各渠道并发采样（每路至多 256KiB / 共约 1~6s），还没有可报的进度
                     LinearProgressIndicator(
@@ -2075,7 +2137,7 @@ private fun UpdateDownloadDialog(
                         listOf(stringResource(R.string.set_update_install) to onInstall)
                     )
                 }
-                state.failed || state.installFailed -> {
+                state.failed -> {
                     UpdateDialogActions(
                         listOf(stringResource(R.string.set_update_close) to onClose)
                     )
@@ -2113,6 +2175,27 @@ private fun UpdateDownloadDialog(
                 }
             }
         }
+    }
+}
+
+/**
+ * 安装闸拒绝原因 → 用户可读文案（Y46）。原因是安装器暴露的稳定枚举，UI 只做映射；
+ * 技术细节（包名/版本/ABI 对照）留在日志里，弹窗只说用户下一步能做什么。
+ */
+@StringRes
+private fun installFailureText(reason: InstallRejection): Int {
+    return when (reason) {
+        InstallRejection.FILE_MISSING,
+        InstallRejection.UNREADABLE -> R.string.set_update_install_reason_unreadable
+        InstallRejection.DIGEST_MISMATCH -> R.string.set_update_install_reason_digest
+        InstallRejection.PACKAGE_MISMATCH -> R.string.set_update_install_reason_package
+        InstallRejection.SIGNER_MISMATCH -> R.string.set_update_install_reason_signer
+        InstallRejection.DEBUGGABLE_ARCHIVE -> R.string.set_update_install_reason_debuggable
+        InstallRejection.VERSION_MISMATCH -> R.string.set_update_install_reason_version
+        InstallRejection.FLAVOR_MISMATCH -> R.string.set_update_install_reason_flavor
+        InstallRejection.ABI_MISMATCH -> R.string.set_update_install_reason_abi
+        InstallRejection.PROVIDER_FAILED,
+        InstallRejection.LAUNCH_FAILED -> R.string.set_update_install_failed
     }
 }
 

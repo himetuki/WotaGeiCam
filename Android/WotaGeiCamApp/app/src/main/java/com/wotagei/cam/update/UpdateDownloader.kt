@@ -7,14 +7,84 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** 下载/测速共用的连接边界：默认走安全重定向真身，JVM 回归只替换传输。 */
 internal typealias UpdateConnectionFactory =
     (url: String, readTimeoutMs: Int, connectTimeoutMs: Int, deadlineNanos: Long?) -> HttpURLConnection?
+
+/** 跟随重定向后的连接 + 最终落地 URL（Y43：可信标记必须绑定最终来源） */
+internal data class TrackedConnection(val connection: HttpURLConnection, val finalUrl: String)
+
+internal typealias UpdateTrackedConnectionFactory =
+    (url: String, readTimeoutMs: Int, connectTimeoutMs: Int, deadlineNanos: Long?) -> TrackedConnection?
+
+/**
+ * 单次下载尝试（一代）的**提交闸**（Y45 收口）。
+ *
+ * 残余缺陷：`isCancelled`/`isCurrent` 只是「回调时刻」的快照——校验（SHA 读盘）结束后、
+ * 文件系统调用落地前的那道缝里，取消/换代随时可以插进来，旧任务仍可能把完成路径改写掉。
+ * 任务卡要求「所有权/取消核对与实际发布在同一临界区」，所以闸把终态与锁收进同一个对象：
+ *
+ * - 状态只有三条路：[ACTIVE] →（[cancel]）→ CANCELLED /（[supersede]）→ SUPERSEDED，一去不回；
+ * - [commitIfActive]：持锁核对终态 → **仍持锁**执行发布动作 → 落盘才算提交。取消/换代线程
+ *   与提交线程争同一把锁，「核对 → 落地」之间不可能再插进终态翻转（锁内无等待点）；
+ * - [isCancelled] 给下载循环当快照探针（读 `@Volatile` 标志，不取锁）：取消延迟生效没关系，
+ *   发布的最终裁决权在 [commitIfActive] 锁内那一票。
+ *
+ * 锁内只做内存判断与短促的文件系统改名（毫秒级，无网络/无全量读盘），UI 线程即使直接调
+ * [cancel]/[supersede] 也只是短暂排队，不存在「为等 I/O 阻塞界面」的形态。
+ */
+class UpdateAttemptGate {
+
+    /** 终态：提交前必须仍是 ACTIVE */
+    enum class State { ACTIVE, CANCELLED, SUPERSEDED }
+
+    private val lock = ReentrantLock()
+    @Volatile
+    private var state = State.ACTIVE
+
+    /** 快照取消探针（下载循环逐块检查用；不加锁，最终裁决在 [commitIfActive]） */
+    val isCancelled: Boolean
+        get() = state == State.CANCELLED
+
+    /** 快照所有权探针：本代是否仍是当前代（被新一代顶替后恒 false） */
+    val isCurrent: Boolean
+        get() = state != State.SUPERSEDED
+
+    /** 用户取消：只有 ACTIVE 能翻，终态一去不回（取消与换代互相不覆盖） */
+    fun cancel(): Boolean = transition(State.CANCELLED)
+
+    /** 被新一代顶替：同上 */
+    fun supersede(): Boolean = transition(State.SUPERSEDED)
+
+    private fun transition(next: State): Boolean = lock.withLock {
+        if (state != State.ACTIVE) return@withLock false
+        state = next
+        true
+    }
+
+    /**
+     * **提交临界区**：持锁核对「未取消且仍是当前代」，通过则**仍持锁**执行 [publish]
+     * 并以它的结果为结论。返回 false 时发布动作未被允许（或未执行），旧完成包保持原样。
+     *
+     * [publish] 内部不得再走会与取消/换代争锁的路径——它拿到的窗口里终态不可能翻转。
+     */
+    fun commitIfActive(publish: () -> Boolean): Boolean {
+        return lock.withLock {
+            if (state != State.ACTIVE) return@withLock false
+            publish()
+        }
+    }
+}
 
 /**
  * 「检查更新」的**网络执行层**（update 包唯一允许出现 HttpURLConnection 的地方，守卫钉住）。
@@ -93,6 +163,15 @@ object UpdateDownloader {
 
     private const val BUFFER_SIZE = 64 * 1024
 
+    /**
+     * **完成路径变更互斥**（Y45 收口）：进程内所有对 `updates/<资产名>` 完成路径的改动
+     * ——已校验候选的发布（[publishCandidate]）与启动时的备份复原（[recoverCompletedTarget]）
+     * ——都必须持这把锁。启动恢复同样会搬动完成路径：不互斥的话，恢复的 `.old` 搬回
+     * 可能与旧代任务的原子替换交错，把刚发布的字节换回旧备份。
+     * 锁内只有短促的文件系统改名，无网络/无读盘，不构成可感知的持锁等待。
+     */
+    private val PUBLISH_MUTEX = ReentrantLock()
+
     // ------------------------------------------------------------------ 响应体上限（纯判定，JVM 全测）
 
     /**
@@ -135,13 +214,47 @@ object UpdateDownloader {
      * 探测调用方传 [PROBE_READ_TIMEOUT_MS] 短读超时（P2-2），下载目录之外不共用 30s。
      */
     fun fetchJson(url: String, readTimeoutMs: Int = READ_TIMEOUT_MS): String? {
-        // Accept 必须在连接建立前挂上：openFollowing 内部会先读 responseCode 判重定向，
-        // 请求那时候就发出去了，之后再 setRequestProperty 不生效
-        val conn = openFollowing(
-            url, readTimeoutMs, accept = "application/vnd.github+json"
-        ) ?: return null
+        return fetchJsonSource(url, allowedHosts = null, readTimeoutMs = readTimeoutMs)?.body
+    }
+
+    /**
+     * 与 [fetchJson] 相同，但额外返回**最终落地 URL**，并在 [allowedHosts] 非 null 时把它作为
+     * 整段结论的准入条件（Y43）：官方 API 的 302 只能落在官方 API 主机；落到别处时正文一律作废，
+     * 免得镜像用「看起来像 GitHub」的非白名单落地页提供假版本/假摘要。镜像段传 null，沿用旧流程。
+     */
+    fun fetchJsonSource(
+        url: String,
+        allowedHosts: Set<String>?,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
+    ): FetchedJson? = fetchJsonSource(
+        url = url,
+        allowedHosts = allowedHosts,
+        readTimeoutMs = readTimeoutMs,
+        openTracked = { target, read, connect, deadline ->
+            openFollowingTracked(
+                target, read, connect, deadline,
+                allowedHosts = allowedHosts,
+                accept = "application/vnd.github+json"
+            )
+        }
+    )
+
+    /** JVM 可注入的正文读取（传输层只替换连接，重定向来源校验仍走生产逻辑）。 */
+    internal fun fetchJsonSource(
+        url: String,
+        allowedHosts: Set<String>?,
+        readTimeoutMs: Int,
+        openTracked: UpdateTrackedConnectionFactory
+    ): FetchedJson? {
+        val tracked = openTracked(url, readTimeoutMs, CONNECT_TIMEOUT_MS, null) ?: return null
+        val conn = tracked.connection
         try {
             if (conn.responseCode !in 200..299) return null
+            // 落地主机必须在允许集合内：正文可能来自非官方镜像，不能拿它当可信说明。
+            if (allowedHosts != null && !RedirectProbe.hostAllowed(tracked.finalUrl, allowedHosts)) {
+                Log.e(TAG, "探测最终落地主机不可信（${tracked.finalUrl}），丢弃正文")
+                return null
+            }
             // 响应体必须有帽：显式超帽直接拒；无 Content-Length 时靠限流读取兜（镜像不可信）
             if (!probeBytesAllowed(conn.contentLengthLong)) return null
             val body = ByteArrayOutputStream()
@@ -158,7 +271,7 @@ object UpdateDownloader {
                     }
                 }
             }
-            return body.toString("UTF-8")
+            return FetchedJson(body.toString("UTF-8"), tracked.finalUrl)
         } catch (e: Exception) {
             return null
         } finally {
@@ -183,11 +296,23 @@ object UpdateDownloader {
 
     /** 下载结论：UI 只消费这个 */
     sealed interface DownloadOutcome {
-        /** 已落盘并校验通过（file 在 cacheDir/updates/ 下，可直接交 FileProvider） */
-        data class Done(val file: File, val sizeBytes: Long) : DownloadOutcome
+        /**
+         * 已落盘并校验通过（file 在 cacheDir/updates/ 下，可直接交 FileProvider）。
+         * [selection] 是下载时接收的**不可变绑定**，[actualSha256] 是对最终字节重新计算的实际摘要；
+         * 安装器必须用两者核对「交给系统的字节 = 用户确认的发行/变体/资产」，不能只看文件名。
+         */
+        data class Done(
+            val file: File,
+            val sizeBytes: Long,
+            val selection: UpdateSelection,
+            val actualSha256: String
+        ) : DownloadOutcome
 
         /** 用户取消（.part 已清理） */
         object Cancelled : DownloadOutcome
+
+        /** 被同代/新一代任务顶替：候选已清理，完成路径未被本任务改写 */
+        object Superseded : DownloadOutcome
 
         /** 链上所有节点都失败（.part 已清理） */
         object Failed : DownloadOutcome
@@ -210,6 +335,25 @@ object UpdateDownloader {
      */
     fun downloadApk(
         context: Context,
+        selection: UpdateSelection,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
+        isCancelled: () -> Boolean,
+        onSpeedTested: () -> Unit = {},
+        isCurrent: () -> Boolean = { true },
+        publishGate: UpdateAttemptGate? = null
+    ): DownloadOutcome = downloadApk(
+        cacheDir = context.applicationContext.cacheDir,
+        selection = selection,
+        onProgress = onProgress,
+        isCancelled = isCancelled,
+        onSpeedTested = onSpeedTested,
+        isCurrent = isCurrent,
+        publishGate = publishGate
+    )
+
+    /** 旧调用兼容入口：tag/flavor 绑定退化为 URL 反推（安装闸只做包名/签名/摘要核对）。 */
+    fun downloadApk(
+        context: Context,
         directUrl: String,
         expectedSize: Long?,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
@@ -229,25 +373,33 @@ object UpdateDownloader {
     /** 与公开入口共用同一下载编排；只让 JVM 测试注入缓存目录与连接，不复制下载/校验循环。 */
     internal fun downloadApk(
         cacheDir: File,
-        directUrl: String,
-        expectedSize: Long?,
+        selection: UpdateSelection,
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
         isCancelled: () -> Boolean,
-        expectedSha256: String? = null,
         onSpeedTested: () -> Unit = {},
+        isCurrent: () -> Boolean = { true },
+        publishGate: UpdateAttemptGate? = null,
         openConnection: UpdateConnectionFactory = { url, readTimeout, connectTimeout, deadline ->
             openFollowing(url, readTimeout, connectTimeout, deadline)
         }
     ): DownloadOutcome {
         val dir = File(cacheDir, "updates")
         dir.mkdirs()
-        val assetName = directUrl.substringAfterLast('/')
+        val assetName = selection.assetName
+        val directUrl = selection.downloadUrl
+        val expectedSize = selection.sizeBytes
+        val expectedSha256 = selection.expectedSha256
+        val target = File(dir, assetName)
+        // 非原子回退（仅不支持原子替换的文件系统）可能把旧完成包暂放到 .old<nanoTime>；
+        // 若上次在换位途中退出，先把最近的可用备份恢复到完成路径，再进常规清理。
+        // 恢复同样会改写完成路径：`recoverCompletedTarget` 内部持发布互斥，与发布提交
+        // （含旧代迟到的提交）互斥开。
+        recoverCompletedTarget(dir, target)
         // 修复轮 P3-3：只清理 .part 半截文件与非本轮资产的文件——本轮 asset 的已完成 APK 可能
         // 还被系统安装器读着（用户关了对话框去安装器），不能一把梭全删
         val names = dir.listFiles()?.map { it.name } ?: emptyList()
         val stale = staleFilesOf(names, assetName).toSet()
         dir.listFiles()?.filter { it.name in stale }?.forEach { it.delete() }
-        val target = File(dir, assetName)
         // 修复轮 P2：part 文件按代唯一（.part<nanoTime>）——上一代已取消协程在 read 返回后仍可能
         // 落最后一块（≤64KB）再自检到取消，它的 chunk 写入与 part.delete() 都只落在自己的 part 上，
         // 绝不与新一代下载交错写同一文件；旧代残留由下轮 staleFilesOf 清掉
@@ -259,45 +411,185 @@ object UpdateDownloader {
             part.delete()
             return DownloadOutcome.Cancelled
         }
+        if (!isCurrent()) {
+            part.delete()
+            return DownloadOutcome.Superseded
+        }
         onSpeedTested()
         for (url in ordered) {
             if (isCancelled()) {
                 part.delete()
                 return DownloadOutcome.Cancelled
             }
+            if (!isCurrent()) {
+                part.delete()
+                return DownloadOutcome.Superseded
+            }
             when (val r = tryNode(url, part, expectedSize, onProgress, isCancelled, openConnection)) {
-                is DownloadOutcome.Done -> {
+                is NodeOutcome.Downloaded -> {
                     // 先验候选再发布，坏镜像不能污染完成路径或删掉仍被安装器读取的旧可信包。
-                    // 无可信哈希时保留既定 PK/size/系统签名防线；读盘异常仍折算为该渠道失败。
-                    val verified = runCatching {
-                        expectedSha256 == null ||
-                            sha256Matches(expectedSha256, sha256Hex(part))
-                    }.getOrElse { e ->
+                    // **每次成功下载都重算实际摘要**（Y43）：即使本次没有可信期望哈希，实际字节
+                    // 身份也要随 Done 交给安装器，防止下载完成→安装启动之间文件被替换。
+                    val actual = runCatching { sha256Hex(part) }.getOrElse { e ->
                         Log.e(TAG, "SHA-256 校验读盘失败（${e.javaClass.simpleName}），判失败", e)
-                        false
+                        null
                     }
-                    if (!verified) {
-                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际≠），删候选包并尝试下一渠道")
+                    if (actual == null) {
                         part.delete()
                         continue
                     }
-                    // Windows renameTo 不覆盖已有文件；只有已通过校验的候选才可替换它。
-                    val renamed = (if (target.exists()) target.delete() else true) && part.renameTo(target)
-                    if (renamed) return DownloadOutcome.Done(target, r.sizeBytes)
+                    if (!sha256Matches(expectedSha256, actual)) {
+                        Log.e(TAG, "SHA-256 校验不匹配（期望=$expectedSha256 实际=$actual），删候选包并尝试下一渠道")
+                        part.delete()
+                        continue
+                    }
+                    // 回调快照复核（旧调用入口的终态只在这里表达；生产入口另有提交闸裁决）
+                    if (isCancelled()) {
+                        part.delete()
+                        return DownloadOutcome.Cancelled
+                    }
+                    if (!isCurrent()) {
+                        part.delete()
+                        return DownloadOutcome.Superseded
+                    }
+                    // Y45 收口：**提交临界区**。校验（SHA 读盘）之后、落地之前的那道缝里，取消/换代
+                    // 仍可插队——回调快照（isCancelled/isCurrent）保证不了「核对与发布同窗」。
+                    // 生产入口（带闸）把终态与锁收进同一对象：持锁核对 ACTIVE → **仍持锁**执行发布
+                    // → 落盘才算提交；cancel()/supersede() 与 commit 争同一把锁，临界区内终态不可能
+                    // 翻转。旧调用入口（无闸）保持回调复核 + 助手内逐次复核的旧语义。
+                    // publishCandidate 内部持共享发布互斥，把「旧任务提交」与「新一代下载入口的
+                    // 启动恢复」互斥开：recoverCompletedTarget 也会搬动完成路径。
+                    val committed = if (publishGate != null) {
+                        publishGate.commitIfActive { publishCandidate(part, target) }
+                    } else {
+                        // 旧入口无闸：保留「每次改名前一瞬复核回调」的既有防线
+                        publishCandidate(part, target) { !isCancelled() && isCurrent() }
+                    }
+                    if (committed) {
+                        return DownloadOutcome.Done(target, r.sizeBytes, selection, actual)
+                    }
+                    // 提交被拒：候选归本任务清理，完成路径未被本任务触碰
                     part.delete()
+                    if (publishGate != null) {
+                        if (publishGate.isCancelled) return DownloadOutcome.Cancelled
+                        if (!publishGate.isCurrent) return DownloadOutcome.Superseded
+                    } else {
+                        if (isCancelled()) return DownloadOutcome.Cancelled
+                        if (!isCurrent()) return DownloadOutcome.Superseded
+                    }
+                    Log.e(TAG, "已校验候选无法原子发布到 ${target.name}，保留旧完成包并判失败")
                     return DownloadOutcome.Failed
                 }
-                is DownloadOutcome.Cancelled -> {
+                NodeOutcome.Cancelled -> {
                     part.delete()
                     return DownloadOutcome.Cancelled
                 }
                 // 该渠道失败：试下一个（顺序已按测速从快到慢）
-                is DownloadOutcome.Failed -> Unit
+                NodeOutcome.Failed -> Unit
             }
         }
         part.delete()
         return DownloadOutcome.Failed
     }
+
+    /**
+     * 同目录暂存 → 完成路径的原子替换（Y45）。**旧完成包在新候选成功落位前始终保留**：
+     * - POSIX 的 [File.renameTo] 对同目录已有目标就是原子替换（旧名字一次指向新 inode）；
+     * - Windows 的 renameTo 不覆盖，退到 `ATOMIC_MOVE + REPLACE_EXISTING`（MoveFileEx 语义）；
+     * - 两者都不支持的文件系统才做「旧包先搬到 .old、再换位、失败搬回」的保底；临时缺失窗口
+     *   只在非原子文件系统上存在，且旧字节仍留有备份，下次启动由 [recoverCompletedTarget] 复原。
+     *
+     * 暂存文件必须与目标同目录：跨目录 rename 在多数平台退化为复制+删除，不再原子。
+     *
+     * [canPublish] 在**每次真正改名/替换的前一瞬**复核取消与代数，把「检查 → 落地」窗口压到
+     * 单条文件系统调用之前；返回 false 时旧完成包保持原样（保底换位也不会先搬走旧包）。
+     *
+     * 整个发布动作持 [PUBLISH_MUTEX]：与启动恢复（[recoverCompletedTarget]）串行，两处对完成
+     * 路径的改名不会交错。持锁期间只有同目录改名，无网络/无读盘。
+     */
+    internal fun publishCandidate(
+        part: File,
+        target: File,
+        canPublish: () -> Boolean = { true }
+    ): Boolean {
+        return PUBLISH_MUTEX.withLock {
+            if (!part.isFile) return false
+            val partDir = part.absoluteFile.parentFile ?: return false
+            val targetDir = target.absoluteFile.parentFile ?: return false
+            val sameDir = runCatching {
+                partDir.canonicalFile == targetDir.canonicalFile
+            }.getOrDefault(false)
+            if (!sameDir) {
+                Log.e(TAG, "候选与完成路径不在同一目录，拒绝非原子发布：${part.path} → ${target.path}")
+                return false
+            }
+            // 1) 同目录 rename：POSIX 原子替换；目标不存在时各平台都成功。
+            if (!canPublish()) return false
+            if (part.renameTo(target)) return true
+            if (!target.exists()) return false
+            // 2) 原子替换目标（不先删旧包；失败时旧包仍完好）。
+            if (!canPublish()) return false
+            try {
+                Files.move(
+                    part.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+                return true
+            } catch (e: AtomicMoveNotSupportedException) {
+                Log.e(TAG, "文件系统不支持原子替换，改用保留旧包的换位保底", e)
+            } catch (e: Exception) {
+                Log.e(TAG, "原子替换失败，改用保留旧包的换位保底（${e.javaClass.simpleName}）", e)
+            }
+            // 3) 保底：旧包先搬备份，再换新；失败把旧包搬回完成路径。
+            if (!canPublish()) return false
+            val backup = File(targetDir, "${target.name}.old${System.nanoTime()}")
+            if (!target.renameTo(backup)) return false
+            if (part.renameTo(target)) {
+                backup.delete()
+                return true
+            }
+            if (!backup.renameTo(target)) {
+                Log.e(TAG, "发布失败且旧完成包未能搬回：备份=${backup.path}")
+            }
+            false
+        }
+    }
+
+    /** 上次非原子换位中断后的复原：完成路径缺失时把最近的 .old 备份搬回。持 [PUBLISH_MUTEX] 与发布串行。 */
+    internal fun recoverCompletedTarget(dir: File, target: File): Boolean {
+        return PUBLISH_MUTEX.withLock {
+            if (target.exists()) return false
+            val backup = dir.listFiles { f ->
+                f.isFile && f.name.startsWith("${target.name}.old")
+            }?.maxByOrNull { it.lastModified() } ?: return false
+            backup.renameTo(target).also { restored ->
+                if (restored) Log.e(TAG, "已把上次未完成的旧完成包恢复回 ${target.name}")
+            }
+        }
+    }
+
+    /** 旧调用兼容入口：URL 反推 tag/资产名，flavor 未知（安装闸只核对可核对的字段）。 */
+    internal fun downloadApk(
+        cacheDir: File,
+        directUrl: String,
+        expectedSize: Long?,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
+        isCancelled: () -> Boolean,
+        expectedSha256: String? = null,
+        onSpeedTested: () -> Unit = {},
+        openConnection: UpdateConnectionFactory = { url, readTimeout, connectTimeout, deadline ->
+            openFollowing(url, readTimeout, connectTimeout, deadline)
+        }
+    ): DownloadOutcome = downloadApk(
+        cacheDir = cacheDir,
+        selection = UpdateSelection.legacy(directUrl, expectedSize, expectedSha256),
+        onProgress = onProgress,
+        isCancelled = isCancelled,
+        onSpeedTested = onSpeedTested,
+        openConnection = openConnection
+    )
 
     // ------------------------------------------------------------------ 测速真身（并发）
 
@@ -423,7 +715,16 @@ object UpdateDownloader {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** 单节点尝试：成功落 part / 取消 / 失败三态，任何异常都折算成失败（换下一个节点） */
+    /**
+     * 单节点尝试的内部三态：只有落盘完成才证明文件字节就位，选择绑定与实际摘要由外层
+     * 在发布前复核，这里不得伪造 [DownloadOutcome.Done] 的契约。
+     */
+    private sealed interface NodeOutcome {
+        data class Downloaded(val sizeBytes: Long) : NodeOutcome
+        object Cancelled : NodeOutcome
+        object Failed : NodeOutcome
+    }
+
     private fun tryNode(
         url: String,
         part: File,
@@ -431,19 +732,19 @@ object UpdateDownloader {
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit,
         isCancelled: () -> Boolean,
         openConnection: UpdateConnectionFactory
-    ): DownloadOutcome {
-        val conn = openConnection(url, READ_TIMEOUT_MS, CONNECT_TIMEOUT_MS, null) ?: return DownloadOutcome.Failed
+    ): NodeOutcome {
+        val conn = openConnection(url, READ_TIMEOUT_MS, CONNECT_TIMEOUT_MS, null) ?: return NodeOutcome.Failed
         try {
-            if (isCancelled()) return DownloadOutcome.Cancelled
-            if (conn.responseCode != HttpURLConnection.HTTP_OK) return DownloadOutcome.Failed
+            if (isCancelled()) return NodeOutcome.Cancelled
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return NodeOutcome.Failed
             val declared = conn.contentLengthLong.takeIf { it > 0 }
             // 探测给的 size 与响应头对不上：源不对劲，换节点
             if (expectedSize != null && declared != null && declared != expectedSize) {
-                return DownloadOutcome.Failed
+                return NodeOutcome.Failed
             }
             // 磁盘侧帽也先查头：显式声明超限就不必开流写盘
             if (declared != null && bytesOverLimit(declared, MAX_APK_BYTES)) {
-                return DownloadOutcome.Failed
+                return NodeOutcome.Failed
             }
             val total = declared ?: expectedSize ?: -1L
             var read = 0L
@@ -451,7 +752,7 @@ object UpdateDownloader {
                 part.outputStream().use { out ->
                     val buf = ByteArray(BUFFER_SIZE)
                     while (true) {
-                        if (isCancelled()) return DownloadOutcome.Cancelled
+                        if (isCancelled()) return NodeOutcome.Cancelled
                         // 停滞兜底 = 30s 读超时（P2-1：应用层 8s 检查在 read 阻塞语义下不可达，已删）
                         val n = input.read(buf)
                         if (n < 0) break
@@ -459,22 +760,22 @@ object UpdateDownloader {
                             read += n
                             // 无 Content-Length 且探测未给 size 时响应体长度未知：磁盘侧同样要帽
                             //（超帽按该节点失败处理，半截 .part 由下轮覆盖/终途 delete 清理）
-                            if (bytesOverLimit(read, MAX_APK_BYTES)) return DownloadOutcome.Failed
+                            if (bytesOverLimit(read, MAX_APK_BYTES)) return NodeOutcome.Failed
                             out.write(buf, 0, n)
                             onProgress(read, total)
                         }
                     }
                 }
             }
-            if (total > 0 && read != total) return DownloadOutcome.Failed
-            if (!isApkMagic(part)) return DownloadOutcome.Failed
-            return DownloadOutcome.Done(part, read)
+            if (total > 0 && read != total) return NodeOutcome.Failed
+            if (!isApkMagic(part)) return NodeOutcome.Failed
+            return NodeOutcome.Downloaded(read)
         } catch (e: IOException) {
             part.delete()
-            return DownloadOutcome.Failed
+            return NodeOutcome.Failed
         } catch (e: Exception) {
             part.delete()
-            return DownloadOutcome.Failed
+            return NodeOutcome.Failed
         } finally {
             conn.disconnect()
         }
@@ -690,15 +991,18 @@ object UpdateDownloader {
     /**
      * 跟随重定向的连接：最多 [MAX_REDIRECTS] 跳，**每一跳都重新过** [isSafeRemoteUrl]
      * （`https → http` 降级、跳内网/环回一律中止）。[deadlineNanos] 非 null 时每跳前查预算。
-     * 返回的连接已停在非 3xx 响应上（2xx 或 4xx/5xx 由调用方判）；任何失败返回 null。
+     * [allowedHosts] 非 null 时**每一跳目的地**也必须在允许集合内（Y43：官方 API/Release 路径
+     * 的 302 只能落在官方主机，别把正文从 evil 镜像带回来）；返回的连接已停在非 3xx 响应上
+     * （2xx 或 4xx/5xx 由调用方判）；任何失败返回 null。
      */
-    private fun openFollowing(
+    private fun openFollowingTracked(
         url: String,
         readTimeoutMs: Int,
         connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
         deadlineNanos: Long? = null,
+        allowedHosts: Set<String>? = null,
         accept: String? = null
-    ): HttpURLConnection? {
+    ): TrackedConnection? {
         var current = url
         var hops = 0
         while (hops <= MAX_REDIRECTS) {
@@ -710,17 +1014,35 @@ object UpdateDownloader {
                 conn.disconnect()
                 return null
             }
-            if (code !in 300..399) return conn
+            if (code !in 300..399) return TrackedConnection(conn, current)
             val location = conn.getHeaderField("Location")
             conn.disconnect()
             if (location.isNullOrBlank()) return null
-            current = try {
+            val next = try {
                 URL(URL(current), location).toString()
             } catch (e: Exception) {
                 return null
             }
+            if (allowedHosts != null && !RedirectProbe.hostAllowed(next, allowedHosts)) {
+                Log.e(TAG, "重定向目的地不在允许主机内（$next），中止请求")
+                return null
+            }
+            current = next
             hops++
         }
         return null
+    }
+
+    /** 只返回连接（下载/测速用）——重定向目标仍逐跳过安全门槛。 */
+    private fun openFollowing(
+        url: String,
+        readTimeoutMs: Int,
+        connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
+        deadlineNanos: Long? = null,
+        accept: String? = null
+    ): HttpURLConnection? {
+        return openFollowingTracked(
+            url, readTimeoutMs, connectTimeoutMs, deadlineNanos, accept = accept
+        )?.connection
     }
 }
