@@ -69,8 +69,29 @@ class StanceWiringGuardTest {
         assertTrue("margins 经分析线程落地", update.contains("marginsJson"))
         assertTrue("模型替换走 owner 的 swap", update.contains("swapModel("))
         assertTrue("loadCalibratedBands 在 swap 内", bodyOf(analysis, "swapModel").contains("StanceSpec.loadCalibratedBands"))
-        val start = bodyOf(analysis, "start")
-        assertTrue("reader 失效必须重建（引擎会单方面 close）", start.contains("surface.isValid"))
+        // Y08：分配（ImageReader 创建）必须整体搬到分析 owner，Main 只投递。
+        val start = bodyOf(analysis, "startAsync")
+        assertTrue("分配必须投递到分析 owner", start.contains("h.post"))
+        assertFalse("调用线程不得同步创建 reader（Y08）", start.contains("ImageReader.newInstance"))
+        val allocate = bodyOf(analysis, "allocate")
+        assertTrue("reader 失效必须重建（引擎会单方面 close）", allocate.contains("surface.isValid"))
+        assertTrue("reader 只在分析 owner 创建", allocate.contains("ImageReader.newInstance"))
+        assertTrue("交付前重新核验归属票据", bodyOf(analysis, "deliver").contains("ticket"))
+    }
+
+    @Test
+    fun `叠加坐标必须经实测几何映射而不是直接缩放归一化坐标`() {
+        val overlay = codeOnly(flavorSourceText("stance/StanceOverlay.kt"))
+        val body = bodyOf(overlay, "StanceOverlay")
+        assertTrue("必须走几何映射", body.contains("geometry.mapAnalysisRect("))
+        assertTrue("没有几何就不画（不猜）", body.contains("geometry == null"))
+        assertTrue("缺位锚点落在预览内容区内", body.contains("previewContentRect("))
+
+        val geometry = codeOnly(mainSourceText("stance/StanceGeometry.kt"))
+        assertTrue("裁剪比必须带证据等级", geometry.contains("GeometryEvidence"))
+        assertTrue("分析流→裁剪区", geometry.contains("streamToCrop("))
+        assertTrue("裁剪区→预览流", geometry.contains("cropToStream("))
+        assertTrue("屏幕空间镜像", geometry.contains("1f - display.right"))
     }
 
     @Test
@@ -88,7 +109,8 @@ class StanceWiringGuardTest {
         assertTrue("录制暂停回调", suspend.contains("pauseListening"))
         assertFalse("录制中不许摘分析槽（会重建相机会话打断录制）", suspend.contains("detach"))
         val resume = bodyOf(controller, "resumeAfterRecording")
-        assertTrue("停录恢复", resume.contains("maybeAttachAfterGate"))
+        assertTrue("停录恢复前重新核对镜头与画幅", resume.contains("onAnalysisTargetChanged()"))
+        assertTrue(bodyOf(controller, "onAnalysisTargetChanged").contains("maybeAttachAfterGate()"))
         val setEnabled = bodyOf(controller, "setEnabled")
         assertTrue("录制中两向都拒绝调整", setEnabled.contains("if (recording)"))
         assertFalse("录制中调整状态而不重建会话", setEnabled.contains("setAnalysisTarget"))
@@ -110,7 +132,7 @@ class StanceWiringGuardTest {
     @Test
     fun `离页停听回场恢复`() {
         val enter = bodyOf(controller, "onPageEnter")
-        assertTrue(enter.contains("maybeAttachAfterGate"))
+        assertTrue(enter.contains("onAnalysisTargetChanged()"))
         val exit = bodyOf(controller, "onPageExit")
         assertTrue(exit.contains("pauseListening"))
         val screenBody = bodyOf(screen, "CameraScreen")

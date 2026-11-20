@@ -41,12 +41,17 @@ class StanceFeature private constructor(
 
     fun setRecordingActive(active: Boolean) = ctrl.setRecordingActive(active)
 
+    /** B16：设置页渲染模式 ↔ 推理加速准入（弹窗与装配同口径）。 */
+    fun setRenderGpuAllowed(allowed: Boolean) = ctrl.setRenderGpuAllowed(allowed)
+
     fun setFrontLens(front: Boolean) = ctrl.setFrontLens(front)
 
     /** 镜头切换未决（Y70）：切镜窗口内先停分析，槽位落定后由 Controller 自行补挂。 */
     fun setLensSettling(settling: Boolean) = ctrl.setLensSettling(settling)
 
     fun setRotation(degrees: Int) = ctrl.setRotation(degrees)
+
+    fun onAnalysisTargetChanged() = ctrl.onAnalysisTargetChanged()
 
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) = ctrl.onAnalysisSessionDecision(decision)
 
@@ -90,11 +95,16 @@ class StanceFeature private constructor(
         get() = ctrl.lensKeyProvider
         set(value) { ctrl.lensKeyProvider = value }
 
+    /** 预览流实际几何（B14）：叠加映射只认 sink 实测尺寸/转正/镜像与裁剪证据。 */
+    var previewGeometryProvider: (() -> PreviewStreamGeometry?)?
+        get() = ctrl.previewGeometryProvider
+        set(value) { ctrl.previewGeometryProvider = value }
+
     /** 号位叠加（判定输出可视化；View 层结构性不进成片）。 */
     @Composable
     fun Overlay(modifier: androidx.compose.ui.Modifier) {
         val s by ctrl.state.observed()
-        StanceOverlay(output = s.output, modifier = modifier)
+        StanceOverlay(output = s.output, geometry = s.geometry, modifier = modifier)
     }
 
     /** 浮层内容（完整控制面板：总开关/精确度/人数/加速三态/提亮/模型目录/版本）。 */

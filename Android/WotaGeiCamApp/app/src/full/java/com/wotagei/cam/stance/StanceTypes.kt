@@ -145,7 +145,11 @@ data class SlotState(
     val person: PersonBox? = null,
 )
 
-/** 一拍的对外输出。lines=本轮应播报文本（有序）；events=诊断事件。 */
+/**
+ * 一拍的对外输出。lines=本轮应播报文本（有序）；events=诊断事件。
+ * roundEnded=true 表示本拍 lines 的最后一句话是本轮（当前遍历全部号位）的收尾——
+ * 播报器据此在**最后一个词播完**后接「的说」，不再用固定静默窗猜轮末（Y74）。
+ */
 data class EngineOutput(
     val lines: List<String> = emptyList(),
     val slots: List<SlotState> = emptyList(),
@@ -153,6 +157,7 @@ data class EngineOutput(
     val nConfirmed: Int? = null,
     val extra: Int = 0,
     val events: List<String> = emptyList(),
+    val roundEnded: Boolean = false,
 )
 
 /** 外框四边（D19：left/right/bottom 三边距参与判定；top 仅记录不判）。 */
@@ -189,11 +194,48 @@ fun selectPrimary(boxes: List<PersonBox>): List<PersonBox> {
     return listOf(candidates.maxBy { it.conf * it.h })
 }
 
-/** §2 自动模式人数确认: 连续 STABLE_WINDOW 拍一致才确认；未达成一致返回末值。 */
+/**
+ * §2 自动模式人数确认（R20）：连续 STABLE_WINDOW 拍**一致且 ≥1** 才确认。
+ * - 零人不参与确认：WOTA 的典型流程是先架机再入镜，前几拍空场不能把人数锁成 0；
+ * - 窗口不一致（如 [0,0,0,0,2]）继续观察，不取末值一步锁定；
+ * - 未达成一致返回 null（调用方保持「待确认」，继续吃帧）。
+ */
 fun countConfirmedOf(history: List<Int>): Int? {
     if (history.size < StanceSpec.STABLE_WINDOW) return null
     val window = history.takeLast(StanceSpec.STABLE_WINDOW)
-    return if (window.all { it == window[0] }) window[0] else window.last()
+    val n = window.first()
+    if (n <= 0) return null
+    return if (window.all { it == n }) n else null
+}
+
+/**
+ * 分析帧缓冲池（B15）：YUV 三平面、RGBA、旋转输出按最大尺寸复用。
+ * 只在 [StanceAnalysis] 的单条分析线程内使用，因此无需加锁；尺寸变大才换新数组。
+ * 纯 JVM 类，单测直接钉住「同一尺寸重复取用不重新分配」。
+ */
+internal class FrameScratch {
+    private var y = ByteArray(0)
+    private var u = ByteArray(0)
+    private var v = ByteArray(0)
+    private var rgba = IntArray(0)
+    private var rotated = IntArray(0)
+
+    fun yuv(ySize: Int, uSize: Int, vSize: Int): Triple<ByteArray, ByteArray, ByteArray> {
+        if (y.size < ySize) y = ByteArray(ySize)
+        if (u.size < uSize) u = ByteArray(uSize)
+        if (v.size < vSize) v = ByteArray(vSize)
+        return Triple(y, u, v)
+    }
+
+    fun rgba(size: Int): IntArray {
+        if (rgba.size < size) rgba = IntArray(size)
+        return rgba
+    }
+
+    fun rotated(size: Int): IntArray {
+        if (rotated.size < size) rotated = IntArray(size)
+        return rotated
+    }
 }
 
 private fun horizontalVerdict(cx: Float, target: Float, half: Float): Verdict = when {

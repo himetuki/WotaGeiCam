@@ -110,7 +110,7 @@ class CameraFpsUnifiedDecisionTest {
             bad.add("syncFpsPick 的通用退档没发 onFpsDowngraded——用户只看到帧率自己变了")
         }
         if (occurrences(sync, "pickFps(state.fpsRanges").isNotEmpty()) {
-            bad.add("退档区间仍直接吃 state.fpsRanges（高速态下那是高速表，写回值对不上普通流）")
+            bad.add("退档区间仍直接吃 pickFps(state.fpsRanges)（高速态下那是高速表，写回值对不上普通流）")
         }
         val ceiling = bodyOf(src, "ceilingFps")
         if (occurrences(ceiling, "normalFpsRangesOf").isEmpty()) {

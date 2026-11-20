@@ -298,6 +298,17 @@ class Camera2Engine(
     }
 
     /**
+     * B14：预览流共享裁剪区的**实测**宽高比（`CaptureResult.SCALER_CROP_REGION`），只读留痕。
+     *
+     * 站位叠加要把「已转正分析帧」的归一化坐标落到预览画幅上，必须先知道 Camera2 实际给这批
+     * 输出裁了什么区——输出画幅与裁剪区不同时，平台按文档**居中裁掉多余部分**。这里只读回执键，
+     * 不构造/不修改请求、不参与曝光与帧率决议（与曝光 owner 的边界：本字段只被站位侧读取）。
+     * null = 预览帧回执尚未到达（叠加侧回退枚举 active-array，并如实标注证据等级）。
+     */
+    @Volatile
+    private var sensorCropAspectValue: Float? = null
+
+    /**
      * Y01：探测的**独立超时**任务。帧回执是探测的唯一推进来源，帧流一断（停帧/卡流/换会话间隙）
      * [feedExposureProbe] 里的超时分支就永远不会执行，探测态会一直挂着——等号请求滞留整场，
      * 用户切回预览时才发现曝光被等号档改写。挂在引擎线程 delayed 上，与帧回执互为兜底。
@@ -811,6 +822,21 @@ class Camera2Engine(
      * 只看到 `ready==true` 可能仍是发起交接前的旧会话，不能据此开始录制。
      */
     fun sessionReadiness(): CameraSessionReadiness = readiness
+
+    /**
+     * B14：当前会话实测的裁剪区宽高比（`SCALER_CROP_REGION` 宽/高）。只读；null = 还没收到
+     * 普通会话的帧回执。分析流与预览流共享同一裁剪区，叠加映射用它还原真实取景范围。
+     */
+    fun sensorCropAspect(): Float? = sensorCropAspectValue
+
+    /** 每帧一次的单键读取；失败/缺失保持上一次值，绝不让诊断键异常打断帧回调。 */
+    private fun rememberSensorCrop(result: TotalCaptureResult) {
+        val crop = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.SCALER_CROP_REGION)
+        }.getOrNull() ?: return
+        if (crop.width() <= 0 || crop.height() <= 0) return
+        sensorCropAspectValue = crop.width().toFloat() / crop.height()
+    }
 
     /**
      * 录制窗口开关（R02）。窗口内：曝光等号探测必须完全退出（探测请求不能进录制），
@@ -1622,6 +1648,10 @@ class Camera2Engine(
         ) {
             camResultCount++
             camResultTotal++
+            // B14：裁剪读数只认当前普通会话实际下发的 repeating；迟到帧不能改新画幅。
+            if (session === this@Camera2Engine.session && request === lastSubmittedRepeatingRequest) {
+                rememberSensorCrop(result)
+            }
             feedExposureProbe(session, request, result)
             sampleHalExposure(session, result)
             logAeAfTelemetry(result)
@@ -2474,6 +2504,7 @@ class Camera2Engine(
         // Y01：请求世代证据一并作废——新会话的回执不允许与旧会话提交的请求实例比对通过。
         lastSubmittedRepeatingRequest = null
         lastSubmittedHighSpeedRequests = null
+        sensorCropAspectValue = null
         // Y02：拆会话后旧 builder 已经不在了，重建重试没有意义；下一场由 onConfigured 重新建。
         workHandler.removeCallbacks(aeFlipRetryTask)
         aeFlipRetryAttempt = 0

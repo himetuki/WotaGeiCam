@@ -79,7 +79,22 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
     private fun call(name: String): Any? = unwrap {
         requireNotNull(engine).javaClass.getDeclaredMethod(name).apply { isAccessible = true }.invoke(engine)
     }
-    fun release() { if (engine != null) call("release") }
+    private val noopCallback = object : kotlin.jvm.functions.Function0<Unit> {
+        override fun invoke() {}
+    }
+
+    /**
+     * 真实 release：GlRenderEngine 是 0 参；ArcRepairGl 现签名是
+     * `release(stopDecoder, releaseEncoder)`（两侧 codec 由调用方交回 GL 线程排队关）。
+     * 旧夹具只按名字找 0 参方法，Arc 支路从来没真正走到清理就在 NoSuchMethodException 上红。
+     * 这里按实际签名喂两个空操作回调，断言仍然要求真实 EGL 资源回收与幂等。
+     */
+    fun release() {
+        val target = engine ?: return
+        val method = target.javaClass.declaredMethods.single { it.name == "release" }
+        val args = if (method.parameterCount == 2) arrayOf(noopCallback, noopCallback) else emptyArray()
+        unwrap { method.apply { isAccessible = true }.invoke(target, *args) }
+    }
     private fun <T> unwrap(block: () -> T): T = try { block() } catch (error: InvocationTargetException) {
         throw error.targetException
     }

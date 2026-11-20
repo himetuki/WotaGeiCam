@@ -835,6 +835,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         return ui.value.currentSlot?.characteristics
     }
 
+    /**
+     * B14：当前引擎实测的裁剪区宽高比（`SCALER_CROP_REGION`）。只读旁路，不触发会话重建；
+     * 引擎不在或帧回执未到时返回 null（叠加侧回退枚举 active-array 并标注证据等级）。
+     */
+    fun sensorCropAspect(): Float? = engine?.sensorCropAspect()
+
     /** 批量写多个参数后手动统一下发一次（引擎自身已按 5ms 合并，通常不需要调） */
     fun applyParams() {
         engine?.markDirty()

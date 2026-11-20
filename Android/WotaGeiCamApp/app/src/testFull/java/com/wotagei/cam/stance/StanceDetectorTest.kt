@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
 
@@ -53,13 +54,13 @@ class StanceDetectorTest {
         try {
             val dir = File(root, "pack")
             dir.mkdirs()
-            // 造三件套（tflite 用小占位文件——校验只对 sha256/结构）
+            // 造一套结构合法的模型组：tflite 用测试夹具的最小 TFL3 元数据（不加载权重）。
             File(dir, "margins.json").writeText(
                 """{"bands":{"left":[0.278,0.430],"right":[0.270,0.387],"bottom":[0.000,0.051]}}""")
             File(dir, "head.json").writeText(
                 """{"coef":[0,0,0,0,5],"intercept":-3}""")
-            File(dir, "yolo11n_int8.tflite").writeText("fake-int8")
-            File(dir, "yolo11n_fp32.tflite").writeText("fake-fp32")
+            File(dir, "yolo11n_int8.tflite").writeBytes(StanceTestFixtures.tflite())
+            File(dir, "yolo11n_fp32.tflite").writeBytes(StanceTestFixtures.tflite())
             val files = listOf("margins.json", "head.json", "yolo11n_int8.tflite", "yolo11n_fp32.tflite")
             val shas = files.associateWith { StanceModelPack.sha256Of(File(dir, it)) }
             val meta = """{"schema":1,"features":["cx","by","w","h","conf"],
@@ -92,6 +93,46 @@ class StanceDetectorTest {
             File(dir, "pack.meta.json").writeText(
                 """{"schema":1,"features":["cx","by","w","h","conf"],"files":{}}""")
             assertNull(StanceModelPack.validateDir(dir))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun modelBuffer_读入后立即释放文件句柄() {
+        val root = createTempDir()
+        try {
+            val bytes = ByteArray(4096) { (it % 251).toByte() }
+            val model = File(root, "yolo11n_int8.tflite").apply { writeBytes(bytes) }
+            val buf = StanceDetector.loadModelBuffer(model)
+            assertEquals("整文件必须读满", bytes.size, buf.remaining())
+            assertEquals(0, buf.get(0).toInt() and 0xFF)
+            assertEquals(4095 % 251, buf.get(4095).toInt() and 0xFF)
+            // R16：导入回滚会删/改名模型组目录。FileChannel.map 在 Windows 上会独占文件句柄，
+            // 让回滚误判「原模型组待恢复」；整读方案在 buffer 存活期间也必须能改名/删除。
+            val moved = File(root, "renamed.tflite")
+            assertTrue("模型文件仍被检测器占用（改名失败）", model.renameTo(moved))
+            assertTrue("模型文件仍被检测器占用（删除失败）", moved.delete())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun modelBuffer_拒绝空文件与缺失文件() {
+        val root = createTempDir()
+        try {
+            val empty = File(root, "empty.tflite").apply { writeBytes(ByteArray(0)) }
+            try {
+                StanceDetector.loadModelBuffer(empty)
+                fail("空模型文件必须被拒绝")
+            } catch (_: IllegalArgumentException) {
+            }
+            try {
+                StanceDetector.loadModelBuffer(File(root, "missing.tflite"))
+                fail("缺失模型文件必须被拒绝")
+            } catch (_: IllegalArgumentException) {
+            }
         } finally {
             root.deleteRecursively()
         }

@@ -9,6 +9,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Size
 import android.view.Surface
+import com.wotagei.cam.diag.Diag
 import java.io.Closeable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -47,7 +48,7 @@ class StanceAnalysis(
     private val released = AtomicBoolean(false)
     private val listening = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
-    private var reader: ImageReader? = null
+    @Volatile private var reader: ImageReader? = null
     /**
      * [reader] 的配置键（镜头+画幅，B14）：键变了必须重开一张——4:3→16:9 后沿用旧尺寸的面，
      * 叠框坐标按预览尺寸缩放就会整体偏移（设备对两路输出的裁剪不一定相同）。
@@ -62,8 +63,18 @@ class StanceAnalysis(
     private var handler: Handler? = null
     private var lastFrameMs = 0L
 
+    /**
+     * 分配代（Y08）：每次 [startAsync] +1；[releaseReader]/[release] 也 +1 使在途分配作废。
+     * 创建/复用/回收判定与 [ImageReader.newInstance] 全部在与分析帧同一条 owner 线程串行执行，
+     * 调用方（Main）只投递请求，不再同步准备 reader。
+     */
+    private val allocation = AtomicLong(0L)
+
     /** 引擎与判定头（模型组装配；未就绪时帧被丢弃）。 */
     var engine = JudgementEngine(mode = JudgementEngine.MODE_AUTO, nManual = 1)
+
+    /** B15：仅分析 owner 线程使用，YUV/RGBA/旋转缓冲跨帧复用。 */
+    private val scratch = FrameScratch()
     var head: StanceHead? = null
         private set
     var detector: FrameDetector? = null
@@ -75,10 +86,15 @@ class StanceAnalysis(
      * 旧实现每次 applyPack 都 new 一个 StanceAnalysis——旧线程、旧 reader、旧 Interpreter /
      * GpuDelegate 全部悬空不关（泄漏），且引擎槽仍指着旧 reader ⇒ 新模型永远不生效。
      */
-    fun updateModel(newDetector: FrameDetector?, newHead: StanceHead?, marginsJson: String? = null) {
+    fun updateModel(
+        newDetector: FrameDetector?,
+        newHead: StanceHead?,
+        marginsJson: String? = null,
+        modelFingerprint: String? = null,
+    ) {
         val h = ensureAnalysisThread()
         val apply: () -> Unit = {
-            if (!released.get()) swapModel(newDetector, newHead, marginsJson)
+            if (!released.get()) swapModel(newDetector, newHead, marginsJson, modelFingerprint)
             else (newDetector as? Closeable)?.let { runCatching { it.close() } }
         }
         if (Thread.currentThread() === thread) apply()
@@ -108,15 +124,47 @@ class StanceAnalysis(
         }
     }
 
-    private fun swapModel(newDetector: FrameDetector?, newHead: StanceHead?, marginsJson: String?) {
+    /** 当前判定语义指纹（只在这些值变化时重置引擎；纯后端切换必须保留判定状态，Y68）。 */
+    private var marginsSnapshot: String? = null
+    private var headSnapshot: String? = null
+    private var modelSnapshot: String? = null
+
+    private fun headSemantics(h: StanceHead?): String? =
+        h?.let { "${it.coef.joinToString(",")}|${it.intercept}" }
+
+    private fun swapModel(
+        newDetector: FrameDetector?,
+        newHead: StanceHead?,
+        marginsJson: String?,
+        modelFingerprint: String?,
+    ) {
         // 安全区覆盖也在这里落：MARGIN_BANDS 是全局可变表，判定线程正在读它，
         // 不能让装配线程并发改（旧实现由主线程直接 loadCalibratedBands）。
-        if (marginsJson != null) StanceSpec.loadCalibratedBands(marginsJson)
+        val marginsChanged = marginsJson != null && marginsJson != marginsSnapshot
+        if (marginsJson != null) {
+            StanceSpec.loadCalibratedBands(marginsJson)
+            marginsSnapshot = marginsJson
+        }
+        val newHeadKey = headSemantics(newHead)
+        // 首次装配 headSnapshot=null 不算“换头”，避免冷启就清掉用户刚恢复的状态。
+        val headChanged = headSnapshot != null && newHeadKey != headSnapshot
+        val modelChanged = modelFingerprint != null && modelSnapshot != null &&
+            modelFingerprint != modelSnapshot
+        val semanticsChanged = marginsChanged || headChanged || modelChanged
+
         generation.incrementAndGet()
         val old = detector
         detector = newDetector
         head = newHead
+        engine.setHead(newHead)
+        if (modelFingerprint != null) modelSnapshot = modelFingerprint
+        headSnapshot = newHeadKey
         if (old !== newDetector) (old as? Closeable)?.let { runCatching { it.close() } }
+        if (semanticsChanged) {
+            // 新旧标定/判定头/检测模型不能混用旧观测：人数锁定、锚点、平滑/完成态全部重来。
+            engine.reset()
+            Diag.i(TAG, "判定语义变化，引擎状态已重置（margins=$marginsChanged head=$headChanged model=$modelChanged）")
+        }
     }
 
     /** §6 预处理提亮开关（默认关；只进检测输入，不进预览/成片）。 */
@@ -151,9 +199,38 @@ class StanceAnalysis(
         }.let { requireNotNull(handler) }
     }
 
-    fun start(size: Size = DEFAULT_SIZE, key: String? = null): Surface {
-        check(!released.get()) { "StanceAnalysis 已释放，不能再 start" }
-        val analysisHandler = ensureAnalysisThread()
+    /**
+     * 请求一张可挂进相机会话的分析面（Y08：**分配归分析 owner 线程**）。
+     *
+     * 调用方（Main）只做一次投递；复用判定、旧面排队回收、[ImageReader.newInstance] 与
+     * listener 绑定全部在 "WotaStanceAnalysis" 线程串行执行。成功结果经 [mainHandler] 交付在
+     * **Main 线程**，交付前再验一次分配代/实例身份：过期请求不回调，刚创建但未交付的 reader
+     * 仍归本管线（下次请求复用，或被 [releaseReader]/[release] 回收），不会被误关。
+     *
+     * [onReady] 在 Main 交付当前分配结果。失败时交付空面，解除调用方的在途标记，等下次门控重试。
+     * 已释放或已被更新请求取代时，调用方会同时作废原意图，无须回调。
+     */
+    fun startAsync(
+        size: Size = DEFAULT_SIZE,
+        key: String? = null,
+        onReady: (Surface?, ImageReader?) -> Unit,
+    ) {
+        val ticket = allocation.incrementAndGet()
+        val h = try {
+            ensureAnalysisThread()
+        } catch (_: IllegalStateException) {
+            deliver(null, ticket, onReady)
+            return
+        }
+        if (!h.post { allocate(size, key, ticket, onReady) }) deliver(null, ticket, onReady)
+    }
+
+    /**
+     * owner 线程上的分配决策：与 [processImage] 同一条串行队列，不会与在途帧的回收交错。
+     * 任何一步失败都保持“没有新面”的诚实状态，不伪报可挂。
+     */
+    private fun allocate(size: Size, key: String?, ticket: Long, onReady: (Surface?, ImageReader?) -> Unit) {
+        if (released.get() || ticket != allocation.get()) return
         val existing = reader
         // 复用判据（B14/Y09）：面仍有效 **且** 配置键（镜头+画幅）相同 **且** 没在排队回收。
         // 旧口径只看 isValid：新画幅会沿用按旧画幅开的面（叠框坐标乘预览尺寸就偏）；
@@ -161,24 +238,57 @@ class StanceAnalysis(
         if (existing != null && existing.surface.isValid && existing !== recycling &&
             (key == null || key == readerKey)
         ) {
-            return existing.surface
+            deliver(existing, ticket, onReady)
+            return
         }
         // 旧面按**确切实例**交给分析 owner 排队关闭（Y09），不在这里同步 close。
-        // 已在回收队列里的实例不再入队第二次：releaseReader 刚排过队、start 立刻换键时会走到这里，
+        // 已在回收队列里的实例不再入队第二次：releaseReader 刚排过队、startAsync 立刻换键时会走到这里，
         // 重复入队会让同一枚 reader 被关两次（验收口径是"恰好关闭一次"）。
         if (existing != null && existing !== recycling) recycle(existing)
-        val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
-        r.setOnImageAvailableListener({ r2 ->
-            val image = try {
-                r2.acquireLatestImage() ?: return@setOnImageAvailableListener
-            } catch (_: Exception) {
-                return@setOnImageAvailableListener   // 引擎单方面关闭 reader 的窗口
+        val h = checkNotNull(handler)
+        val r = try {
+            ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+        } catch (e: Exception) {
+            Diag.w(TAG, "分析面分配失败：${e.javaClass.simpleName}")
+            deliver(null, ticket, onReady)
+            return
+        }
+        val listeningReady = runCatching {
+            r.setOnImageAvailableListener({ r2 ->
+                val image = try {
+                    r2.acquireLatestImage() ?: return@setOnImageAvailableListener
+                } catch (_: Exception) {
+                    return@setOnImageAvailableListener
+                }
+                processImage(image)
+            }, h)
+        }.isSuccess
+        val adopted = synchronized(this) {
+            if (!listeningReady || released.get() || ticket != allocation.get()) false
+            else {
+                reader = r
+                readerKey = key
+                true
             }
-            processImage(image)
-        }, analysisHandler)
-        reader = r
-        readerKey = key
-        return r.surface
+        }
+        if (!adopted) runCatching { r.close() }
+        deliver(r.takeIf { adopted }, ticket, onReady)
+    }
+
+    /**
+     * 把成功分配的结果交付到 Main。交付与 controller 的挂/摘槽同线程（Main 串行），
+     * 检查通过后不会再有 Main 侧动作插进“检查 → attachHook”之间；owner 侧仍可能因换键/释放
+     * 把这一枚排队回收，所以实例身份与回收标记也要再验（Y09 僵尸面）。
+     */
+    private fun deliver(target: ImageReader?, ticket: Long, onReady: (Surface?, ImageReader?) -> Unit) {
+        mainHandler.post {
+            if (ticket != allocation.get()) return@post
+            val ready = synchronized(this) {
+                target?.takeIf { !released.get() && it === reader && it !== recycling }
+            }
+            val surface = ready?.let { runCatching { it.surface }.getOrNull() }?.takeIf { it.isValid }
+            onReady(surface, ready.takeIf { surface != null })
+        }
     }
 
     /** 当前分析面是否仍可挂进相机会话（引擎重建/离页后判活用）。 */
@@ -240,6 +350,7 @@ class StanceAnalysis(
     fun reader(): ImageReader? = reader
 
     private fun processImage(image: Image) {
+        var imageClosed = false
         try {
             if (!listening.get()) return
             val frameGeneration = generation.get()
@@ -248,9 +359,16 @@ class StanceAnalysis(
             lastFrameMs = now
             val w = image.width
             val h = image.height
-            val raw = yuv420ToRgba(image) ?: return
+            // B15：YUV 三平面先拷进 owner 线程复用缓冲，随后**立即归还 Image**，
+            // 不再让 ImageReader 的 2 个槽位被整段推理占住（转换/旋转/推理都用副本）。
+            val raw = (try {
+                yuv420ToRgba(image, scratch)
+            } finally {
+                runCatching { image.close() }
+                imageClosed = true
+            }) ?: return
             // 传感器坐标 → 显示坐标（与预览同一"转正"语义；否则方向判定左右颠倒）
-            val frame = rotateRgba(raw, w, h, rotationDegrees)
+            val frame = rotateRgba(raw, w, h, rotationDegrees, scratch.rotated(w * h))
             if (brighten) brightenRgba(frame.pixels)
             val boxes = detector?.detect(frame.pixels, frame.width, frame.height, now) ?: return
             val out = engine.observe(FrameObs(now, boxes))
@@ -260,8 +378,30 @@ class StanceAnalysis(
         } catch (_: Exception) {
             // 单帧失败不致断流（reader 被引擎单方面关闭时本回调可能再触发）
         } finally {
-            runCatching { image.close() }
+            if (!imageClosed) runCatching { image.close() }
         }
+    }
+
+    /** B15：把 Image 三平面拷进复用缓冲（不做转换；Image 可在返回后立即关闭）。 */
+    private fun yuv420ToRgba(image: Image, scratch: FrameScratch): IntArray? {
+        if (image.format != ImageFormat.YUV_420_888) return null
+        val w = image.width
+        val h = image.height
+        val yP = image.planes[0]
+        val uP = image.planes[1]
+        val vP = image.planes[2]
+        val ySize = yP.buffer.remaining()
+        val uSize = uP.buffer.remaining()
+        val vSize = vP.buffer.remaining()
+        val (yBuf, uBuf, vBuf) = scratch.yuv(ySize, uSize, vSize)
+        yP.buffer.get(yBuf, 0, ySize)
+        uP.buffer.get(uBuf, 0, uSize)
+        vP.buffer.get(vBuf, 0, vSize)
+        return yuv420ToRgba(
+            yBuf, uBuf, vBuf, w, h,
+            yP.rowStride, uP.rowStride, uP.pixelStride, vP.rowStride, vP.pixelStride,
+            scratch.rgba(w * h),
+        )
     }
 
     /** 停本管线回调（引擎槽不动——录制窗口期用，停录后 [resumeListening]）。 */
@@ -280,6 +420,8 @@ class StanceAnalysis(
      * 关闭排在分析 owner 线程：同队列会在途 processImage 先归还 Image，再封口 listener 并 close。
      */
     fun releaseReader() {
+        // Y08/Y09 交界：作废在途分配——已经在路上的交付不得把即将回收的面挂回新会话。
+        allocation.incrementAndGet()
         // Y09：只回收当前这一枚，按实例排队；关掉后再清字段（期间已换新实例则保留新的）
         reader?.let(::recycle)
     }
@@ -290,6 +432,7 @@ class StanceAnalysis(
             if (!released.compareAndSet(false, true)) return
             listening.set(false)
             generation.incrementAndGet()
+            allocation.incrementAndGet()   // 让在途分配在 owner 队列上自检作废，不再交付/创建
             val close: () -> Unit = {
                 runCatching { reader?.setOnImageAvailableListener(null, null) }
                 runCatching { reader?.close() }
@@ -310,6 +453,7 @@ class StanceAnalysis(
     }
 
     companion object {
+        private const val TAG = "StanceAnalysis"
         const val FRAME_INTERVAL_MS = 333L   // ≈3fps（§6 推理节拍）
         val DEFAULT_SIZE = Size(640, 480)
 
@@ -356,13 +500,19 @@ class StanceAnalysis(
          * RGBA 帧转正（2026-11-07，纯函数）：按顺时针 [degrees] 旋转，90/270 交换宽高。
          * 非整 90 的传感器角（个别机型 82/97）按最近 90 取整——宁可偏 8°，也不能把画面躺倒。
          */
-        fun rotateRgba(src: IntArray, w: Int, h: Int, degrees: Int): RotatedFrame {
+        fun rotateRgba(
+            src: IntArray,
+            w: Int,
+            h: Int,
+            degrees: Int,
+            reuse: IntArray? = null,
+        ): RotatedFrame {
             val quarter = ((kotlin.math.round(degrees / 90f).toInt() % 4) + 4) % 4
             if (quarter == 0) return RotatedFrame(src, w, h)
             val swapped = quarter % 2 == 1
             val outW = if (swapped) h else w
             val outH = if (swapped) w else h
-            val out = IntArray(w * h)
+            val out = reuse?.takeIf { it.size >= w * h } ?: IntArray(w * h)
             for (y in 0 until h) {
                 for (x in 0 until w) {
                     val px = src[y * w + x]
@@ -403,8 +553,9 @@ class StanceAnalysis(
             width: Int, height: Int,
             yRowStride: Int, uvRowStride: Int, uvPixStride: Int,
             vRowStride: Int = uvRowStride, vPixStride: Int = uvPixStride,
+            reuse: IntArray? = null,
         ): IntArray {
-            val out = IntArray(width * height)
+            val out = reuse?.takeIf { it.size >= width * height } ?: IntArray(width * height)
             for (row in 0 until height) {
                 val yRow = row * yRowStride
                 val uvRow = row / 2 * uvRowStride

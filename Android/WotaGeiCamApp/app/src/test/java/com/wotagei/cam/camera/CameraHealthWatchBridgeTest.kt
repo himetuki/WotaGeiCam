@@ -346,7 +346,14 @@ class CameraHealthWatchBridgeTest {
     private fun deliverFrame(p: CameraRecoveryStartFixture, engine: Any = p.engine()) {
         val callback = p.platform.field(engine, "frameCountCallback")
             ?: error("真实 Camera2Engine 没有 frameCountCallback")
-        p.platform.call(callback, "onCaptureCompleted", null, null, null)
+        // 生产回调参数是平台非空类型；反射喂 null 会在 Kotlin 入口的空检查处直接 NPE。
+        // 桩回执只用于帧账，三段都给真实实例，不放松被测判据。
+        p.platform.call(
+            callback, "onCaptureCompleted",
+            p.platform.new("android.hardware.camera2.CameraCaptureSession"),
+            p.platform.new("android.hardware.camera2.CaptureRequest"),
+            p.platform.new("android.hardware.camera2.TotalCaptureResult"),
+        )
     }
 
     @Suppress("UNCHECKED_CAST")

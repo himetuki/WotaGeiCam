@@ -271,8 +271,11 @@ class CameraWbProbeAttributionTest {
                     }
                     public static CaptureRequest wb(boolean manual){
                         java.util.Map<String,Object> v=new java.util.HashMap<>();
+                        // 真值取自 SDK：AWB_OFF=0 / AWB_AUTO=1；
+                        // COLOR_CORRECTION_MODE_TRANSFORM_MATRIX=0 / FAST=1（旧桩把 CCM 写反了，
+                        // 于是「手动请求」实际带的是 FAST，判负分支自然永不生效）。
                         v.put(CONTROL_AWB_MODE.name, manual?0:1);
-                        v.put(COLOR_CORRECTION_MODE.name, manual?1:0);
+                        v.put(COLOR_CORRECTION_MODE.name, manual?0:1);
                         return new CaptureRequest(v);
                     }
                     public static class Builder {
@@ -296,7 +299,7 @@ class CameraWbProbeAttributionTest {
                     /** HAL 不采纳：CCM 回声 FAST，AWB 仍在 SEARCHING */
                     public static TotalCaptureResult failing(){
                         java.util.Map<String,Object> v=new java.util.HashMap<>();
-                        v.put(COLOR_CORRECTION_MODE.name, 0);
+                        v.put(COLOR_CORRECTION_MODE.name, 1); // FAST=1（旧桩写成 0=TRANSFORM_MATRIX，等于回报「已采纳」）
                         v.put(CONTROL_AWB_STATE.name, 1);
                         return new TotalCaptureResult(v);
                     }

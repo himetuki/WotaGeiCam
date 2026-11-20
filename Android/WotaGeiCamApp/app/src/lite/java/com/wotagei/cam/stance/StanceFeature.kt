@@ -52,6 +52,9 @@ class StanceFeature private constructor(private val appContext: Context) {
     fun setRecordingActive(active: Boolean) {}   // 无录制联动诉求（功能恒关）
 
     @Suppress("UNUSED_PARAMETER")
+    fun setRenderGpuAllowed(allowed: Boolean) {}   // B16：lite 无推理装配
+
+    @Suppress("UNUSED_PARAMETER")
     fun setFrontLens(front: Boolean) {}
 
     /** 镜头切换未决（Y70）：lite 无分析管线，恒空。 */
@@ -63,6 +66,8 @@ class StanceFeature private constructor(private val appContext: Context) {
 
     @Suppress("UNUSED_PARAMETER")
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {}
+
+    fun onAnalysisTargetChanged() {}
 
     fun onPageEnter() {}
 
@@ -79,6 +84,9 @@ class StanceFeature private constructor(private val appContext: Context) {
 
     /** 实际生效镜头标识（Y09/B14）：lite 无 reader，恒空。 */
     var lensKeyProvider: (() -> String?)? = null
+
+    /** 预览流实际几何（B14）：lite 无叠加，恒空。 */
+    var previewGeometryProvider: (() -> PreviewStreamGeometry?)? = null
 
     /** 无检测输出——lite 恒空叠加。 */
     @Suppress("UNUSED_PARAMETER")

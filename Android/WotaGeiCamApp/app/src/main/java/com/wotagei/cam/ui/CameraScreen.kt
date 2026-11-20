@@ -10,6 +10,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.content.res.Configuration
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
@@ -161,6 +162,7 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.stance.PreviewStreamGeometry
 import com.wotagei.cam.stance.StanceFeature
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessLabel
@@ -398,6 +400,8 @@ fun CameraScreen(
     var stanceAnchorRect by remember { mutableStateOf<Rect?>(null) }
     // 模型组装配 + 引擎槽接缝（prepare 幂等；hooks 一次性注入）
     remember(app) {
+        // B16：装配前先同步渲染门（首帧 renderMode），避免 DIRECT 冷启按 GPU 偏好先装配一遍。
+        stance.setRenderGpuAllowed(renderMode == RenderMode.GPU)
         stance.prepare(app)
         stance.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
         stance.detachHook = { ctrl.setAnalysisTarget(null) }
@@ -528,15 +532,18 @@ fun CameraScreen(
 // 只暂停本管线回调——MediaRecorder 面已在会话里时再摘槽重建会打断录制；停录自动恢复，
 // 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
     LaunchedEffect(recording) { stance.setRecordingActive(recording) }
+    // B16：设置页切渲染模式 = 推理加速准入变化；与弹窗「GPU/NPU 加速」显示/装配同口径。
+    LaunchedEffect(renderMode) { stance.setRenderGpuAllowed(renderMode == RenderMode.GPU) }
     // 前置 = 直接关闭并重置开关（D13）；同时挡住"在前置下重新开启"（方向语义只对后置成立）。
     // Y70：判据取**实际落定**的镜头 [CameraUiState.currentLens]，不是请求中的 `lens`——
     // 后者的档位在切镜途中已变，此时新会话还没开好，先把开关关掉会让用户在后摄上看到
     // 「前置禁用」的假判定；而真正的切换窗口由 lensSwitching 负责先停分析。
     // 两条写在同一协程里且 frontLens 在前：落定那一拍若先放行 settling，maybeAttachAfterGate
     // 会在 frontLens 还没置位的窗口里把分析挂到前置上——拆成两条 effect 就没有这条顺序保证了。
-    LaunchedEffect(ui.currentLens, ui.lensSwitching) {
+    LaunchedEffect(ui.currentSlot?.key, ui.currentLens, ui.lensSwitching, size) {
         stance.setFrontLens(ui.currentLens == LensType.FRONT)
         stance.setLensSettling(ui.lensSwitching)
+        stance.onAnalysisTargetChanged()
     }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
@@ -1169,6 +1176,48 @@ fun CameraScreen(
         val w = if (swapped) size.height else size.width
         val h = if (swapped) size.width else size.height
         if (h <= 0) 16f / 9f else w.toFloat() / h.toFloat()
+    }
+    // B14：站位叠加的几何证据。来源全部是可测/枚举量——
+    //   DIRECT = `DirectSink.streamSize()`（实际写进 ST 的缓冲尺寸，可能按能力表换挡）；
+    //   GPU    = `GlRenderEngine.streamSize()`（`onSizeChanged` 写进 GL 纹理的相机帧尺寸）；
+    //   转正角 = 与画幅布局同一个 `glOrientation`；镜像 = 前置镜头的屏幕空间镜像；
+    //   裁剪比 = 先取本会话帧回执的 `SCALER_CROP_REGION`，未到时才回退枚举 active-array，
+    //   证据等级随几何一起下传（[StanceOverlayGeometry.evidence]），不把回退值当实测。
+    // 提供器只读快照、不做查询与分配；Controller 在判定输出到达/转正角变化时各取一次。
+    remember(stance, renderMode, directSink, glOrientation, isFront, slot) {
+        stance.previewGeometryProvider = {
+            val (streamW, streamH) = if (renderMode == RenderMode.GPU) {
+                ctrl.glSink().streamSize()
+            } else {
+                directSink.streamSize()
+            }
+            if (streamW <= 0 || streamH <= 0) {
+                null
+            } else {
+                PreviewStreamGeometry(
+                    width = streamW,
+                    height = streamH,
+                    rotationDegrees = glOrientation,
+                    mirrored = isFront,
+                    measuredCropAspect = ctrl.sensorCropAspect(),
+                    activeArrayAspect = slot?.characteristics?.let { c ->
+                        runCatching {
+                            val r = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                                ?: return@runCatching null
+                            if (r.width() > 0 && r.height() > 0) {
+                                r.width().toFloat() / r.height()
+                            } else {
+                                null
+                            }
+                        }.getOrNull()
+                    },
+                )
+            }
+        }
+        true
+    }
+    DisposableEffect(stance) {
+        onDispose { stance.previewGeometryProvider = null }
     }
 
     // ---- 生命周期：ON_PAUSE 停录 + 停预览（02 文档 §7）
@@ -1836,9 +1885,10 @@ fun CameraScreen(
                         params.renderMode.value = RenderMode.GPU
                         showTip(app.getString(R.string.cam_arc_switch_gpu))
                     } else {
-                        // B13：闩锁必须先于 runner.start 拉响——start 只是 handler.post，
-                        // 状态回流到 PREPARE 之前还有一整拍，同一次点击链上的第二按靠它挡住。
+                        // B13：先闩住请求，填平 start 投递到 PREPARE 回流之间的窗口。
                         startQueued = true
+                        // Y71：先同步停播报，再投递起录，避免麦克风收进提示尾音。
+                        stance.setRecordingActive(true)
                         runner.start(
                             width = size.width,
                             height = size.height,

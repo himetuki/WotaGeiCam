@@ -960,6 +960,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /**
+     * B14：相机帧缓冲的**实际**尺寸（[onSizeChanged] 写入的取景帧，不是视图尺寸）。
+     * 只读旁路，不参与任何 GL/请求路径；站位叠加用它把分析帧坐标映射到预览画幅。
+     * 0x0 = 会话还没建好，调用方当作「无几何证据」处理。
+     */
+    fun streamSize(): Pair<Int, Int> = wantFrameWidth to wantFrameHeight
+
+    /**
      * @param sensorOrientation 来自 CameraCharacteristics；预览与录像共用同一旋转，保证方向一致
      * @param mirrored 前置摄像头取 true（镜像只作用在屏幕空间，上屏与录出的方向因此一致）
      */
