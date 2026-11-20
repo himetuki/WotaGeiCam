@@ -3563,9 +3563,9 @@ private class RecordRunner(
         // 会话身份（R07 交付键）与交付通道：迟到发布/泵线程终态回到本页，由 RecordSession
         // 合并去重后补结算（页面退场不影响：结算任务在进程级作用域里跑）。
         // 只有带超时收尾形态的引擎实现该内部接口（MR 路不实现，行为与旧版逐字一致）。
-        (rec as? SessionDeliverySink)?.let { sink ->
-            sink.bindSession(store.seriesId, sessionStartedAtMs, attempt)
-            sink.onSessionDelivery = { delivery ->
+        (rec as? SessionDeliverySink)?.let { deliverySink ->
+            deliverySink.bindSession(store.seriesId, sessionStartedAtMs, attempt)
+            deliverySink.onSessionDelivery = { delivery ->
                 RecordSession.onDelivery(delivery)?.let { lateResult.value = it }
                 if (delivery is RecorderDelivery.FinalResult) {
                     Log.i(

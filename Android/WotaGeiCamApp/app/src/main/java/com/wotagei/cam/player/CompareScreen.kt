@@ -137,7 +137,21 @@ private val PlayGlyphSize = 26.dp
  * 与单播放页同一套查询契约（[MediaRepo.clipById] 对查无此片会发射一次 null），但哨兵不跨文件
  * 复用（PlayerScreen 里的那枚是 private）：对比页自己的组合生命周期只认自己这枚。
  */
-private object CompareLeftQueryPending
+internal object CompareLeftQueryPending
+
+/**
+ * Y36 左片查询的三态判定（纯函数）：哨兵 = 还在查；null = 查过且没有；其余 = 有片。
+ * 放在组合外是为了让「加载中 / 缺失 / 有片」能用真值表钉住，而不是只靠源码字符串守卫。
+ */
+internal enum class CompareLeftPhase { PENDING, MISSING, READY }
+
+internal fun compareLeftPhase(state: Any?): CompareLeftPhase {
+    return when {
+        state === CompareLeftQueryPending -> CompareLeftPhase.PENDING
+        state == null -> CompareLeftPhase.MISSING
+        else -> CompareLeftPhase.READY
+    }
+}
 
 /**
  * 右片选择代次门（Y35）：Picker 回调、历史面板、练习回填等**所有能改写右槽的入口**共享一枚
@@ -187,14 +201,13 @@ fun CompareScreen(
             if (leftRowUri != null) repo.clipByRowUri(leftRowUri) else repo.clipById(leftMediaId)
         }
         val state by lookup.collectState(CompareLeftQueryPending)
-        val c = state as? VideoClip
-        when {
-            state === CompareLeftQueryPending -> {
+        when (compareLeftPhase(state)) {
+            CompareLeftPhase.PENDING -> {
                 Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = WotaAccent)
                 }
             }
-            c == null -> {
+            CompareLeftPhase.MISSING -> {
                 Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
@@ -211,7 +224,9 @@ fun CompareScreen(
                     }
                 }
             }
-            else -> CompareContent(left = c, onBack = onBack, onPractice = onPractice)
+            CompareLeftPhase.READY -> CompareContent(
+                left = state as VideoClip, onBack = onBack, onPractice = onPractice
+            )
         }
     }
 }

@@ -2,6 +2,7 @@ package com.wotagei.cam.camera
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.ClassRule
 import org.junit.Test
@@ -83,6 +84,31 @@ class CameraExposureProbeLifecycleTest {
         p.call(h.engine, "setRecordingWindowActive", false)
         p.frame(session, 9L)
         assertTrue("窗口关闭且冷却已过必须能重探", p.field(h.engine, "exposureProbeActive") as Boolean)
+    }
+
+    @Test
+    fun `同名梯级换物理镜头必须重开探测窗`() = platform { p ->
+        val h = manualProbeHarness(p)
+        val session = p.repeating(h, highSpeed = false)
+        p.frame(session, 1L)
+        val firstKey = p.field(h.engine, "exposureProbeKey") as String
+        assertEquals("首拍只开窗，不采样", 1, p.field(h.engine, "exposureProbeFramesSeen"))
+
+        // 尺寸/帧率/档位都不变，只把镜头身份换成同一逻辑头的另一颗物理头：
+        // 读出时间随镜头变，键必须变 ⇒ 旧窗（含热身计数）作废，从首拍重新开窗。
+        val otherLens = p.slot("0", physical = "0")
+        h.engine.javaClass.getDeclaredField("lens").apply { isAccessible = true }.set(h.engine, otherLens)
+        p.frame(session, 2L)
+
+        val secondKey = p.field(h.engine, "exposureProbeKey") as String
+        assertNotEquals("换物理镜头后探测键必须变化（否则沿用别颗镜头的读出时间）", firstKey, secondKey)
+        assertTrue("新键必须带上新的物理头身份", secondKey.contains("#0"))
+        assertEquals(
+            "新镜头必须从首拍重新开窗，旧窗采样不得混入",
+            1,
+            p.field(h.engine, "exposureProbeFramesSeen")
+        )
+        assertTrue("换镜头后仍满足准入，探测必须保持 active", p.field(h.engine, "exposureProbeActive") as Boolean)
     }
 
     /**

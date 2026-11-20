@@ -321,7 +321,7 @@ class ClipExporter(private val ctx: Context) {
         var baseUs = -1L
         // 封轨即落 SealMarker（与 VideoStore.seal 同口径）：commit 全败/取消/封轨后异常都会保留
         // pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
-        var sealedPath: String? = null
+        var sealedPath: String?
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)

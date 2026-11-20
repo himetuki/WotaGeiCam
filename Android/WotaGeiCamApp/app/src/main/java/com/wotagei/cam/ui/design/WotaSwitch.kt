@@ -216,7 +216,7 @@ private fun LiquidGestureSwitch(
                         // 本段手势自己的逻辑档：翻转后立刻写它，后续判断只读它，不等 checked 的重组回灌
                         // （同一帧里快速来回拖也不会拿旧值去比）
                         var gestureChecked = checkedState.value
-                        var grab: Float? = null
+                        var grab: Float
                         var moved = false
                         var handled = false
                         try {
@@ -228,7 +228,7 @@ private fun LiquidGestureSwitch(
                                 // 偏移在**第一次移动**时才取（设计稿的教训：按下就取会让液滴瞬移到手指下）
                                 grab = slopChange.position.x - (dragX ?: x.value)
                                 trackHorizontalDrag(tracker, slopChange.id) { at, velocity ->
-                                    val next = (at - grab!!).coerceIn(0f, travelPx)
+                                    val next = (at - grab).coerceIn(0f, travelPx)
                                     dragX = next
                                     dragVelocity = velocity
                                     // 过中点立刻翻转：轨道在手指下就回应（不必等松手）

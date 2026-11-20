@@ -173,7 +173,7 @@ internal class SealedPublisher(
             }
             val part = classifyPublished(draft, value, failure)
             var notify = false
-            var pendingAfter = 0
+            var pendingAfter: Int
             synchronized(lock) {
                 results[draft.partIndex] = part
                 // 落账之后再数：同一线程的其它段可能已先完成，这里给的是"此刻仍在发布路"的段数
