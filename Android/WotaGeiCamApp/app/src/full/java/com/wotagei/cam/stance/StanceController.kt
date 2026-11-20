@@ -583,9 +583,7 @@ class StanceController private constructor(
         // 只有**当前已挂会话**才发布几何：摘槽/离页/切镜未决期间的转屏不得把旧 reader 的
         // 画幅映射留在 UiState 里（重挂后由第一帧输出重新构建）。
         val geometry = if (attached) buildOverlayGeometry() else null
-        if (_state.value.geometry != geometry) {
-            _state.value = _state.value.copy(geometry = geometry)
-        }
+        _state.update { if (it.geometry != geometry) it.copy(geometry = geometry) else it }
     }
 
     /** M2c 接缝：宿主（CameraScreen）注入——挂引擎 analysis 槽的真正实现。
@@ -720,7 +718,7 @@ class StanceController private constructor(
         if (settling) {
             speaker?.pause()
             analysis?.pauseListening()
-            _state.value = _state.value.copy(running = false, output = null, geometry = null)
+            _state.update { it.copy(running = false, output = null, geometry = null) }
         } else {
             maybeAttachAfterGate()
         }

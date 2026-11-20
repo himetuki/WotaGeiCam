@@ -1091,6 +1091,52 @@ class StanceLifecycleCompatibilityTest {
         }
     }
 
+    @Test
+    fun `Y72_转屏切镜与装配交错不得丢后端与版本文案`() = platform { p ->
+        // 先钉结构：UiState 只许 update{}，读-改-写整对象会在并发下把别人的字段写回旧值。
+        val source = File("src/full/java/com/wotagei/cam/stance/StanceController.kt")
+            .readText(Charsets.UTF_8).lineSequence().joinToString("\n")
+        val code = com.wotagei.cam.source.KotlinSourceScan.codeOnly(source)
+        assertFalse(
+            "Y72：禁止 _state.value = _state.value.copy(...)（旧快照覆盖并发写入）",
+            code.contains("_state.value = _state.value.copy")
+        )
+
+        val controller = controller(p)
+        val pack = modelPack()
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(2)
+        val errors = java.util.Collections.synchronizedList(ArrayList<Throwable>())
+        val packer = Thread {
+            try {
+                start.await()
+                repeat(40) { p.callSuspending(controller, "applyPack", pack, emptyMap<String, Any>(), "fixture") }
+            } catch (t: Throwable) { errors += t } finally { done.countDown() }
+        }.also { it.start() }
+        val rotator = Thread {
+            try {
+                start.await()
+                repeat(200) { i ->
+                    p.call(controller, "setRotation", (i % 4) * 90)
+                    p.call(controller, "setLensSettling", true)
+                    p.call(controller, "setLensSettling", false)
+                }
+            } catch (t: Throwable) { errors += t } finally { done.countDown() }
+        }.also { it.start() }
+        try {
+            start.countDown()
+            assertTrue("并发压测必须收敛", done.await(30, TimeUnit.SECONDS))
+            assertTrue("并发压测不能抛异常：$errors", errors.isEmpty())
+            val state = stateValue(p, controller)
+            assertTrue("转屏/切镜的旧快照不得覆盖装配写的后端", (p.call(state, "getBackendName") as String).isNotEmpty())
+            assertTrue("转屏/切镜的旧快照不得覆盖装配写的版本文案", (p.call(state, "getVersionText") as String).contains("模型组"))
+        } finally {
+            packer.join(5_000)
+            rotator.join(5_000)
+            p.call(controller, "release")
+        }
+    }
+
     private fun frameObs(p: StanceLifecyclePlatform, ts: Long): Any {
         val box = p.stance("PersonBox").getConstructor(
             Float::class.javaPrimitiveType,
