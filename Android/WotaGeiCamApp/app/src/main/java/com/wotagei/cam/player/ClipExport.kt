@@ -12,6 +12,7 @@ import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
+import com.wotagei.cam.record.SealMarker
 import com.wotagei.cam.record.exportOrientationHint
 import com.wotagei.cam.record.monotonicPts
 import com.wotagei.cam.record.mediaIdOf
@@ -56,6 +57,17 @@ object ClipRule {
 
     /** 剪辑成片子目录（媒体库按 WotaGeiCam 关键字收录，Clip 子目录自然在库内） */
     const val RELATIVE_PATH = "Movies/WotaGeiCam/Clip"
+
+    /**
+     * 单枚样本字节上限（剪辑/选轨两条无损重封链同一枚值，Y30）。
+     *
+     * 真实 4K 高码率关键帧在数百 KB~低 MB 量级，32 MiB 高出实况一个数量级；超过它视为容器
+     * 声明的样本大小损坏（坏 index/错位读取），按声明盲目扩容会吃到 GB 级分配、`toInt()*2`
+     * 还会整数溢出。超限一律显式失败（pending 由 owner 按未封轨口径回收），不静默降级、
+     * 不按声明大小无限扩容。后渲染音轨车道的 4 MiB 单样本上限（SceneAudioLane）是同一口径的
+     * 音频侧专门值。
+     */
+    const val MAX_REMUX_SAMPLE_BYTES = 32L * 1024 * 1024
 
     /**
      * 入出点规范化：起点非负、终点不超片长、终点必须晚于起点、保留段不短于 [MIN_KEEP_MS]。
@@ -171,6 +183,18 @@ internal fun audioTrackWritable(
     } finally {
         runCatching { ex.unselectTrack(track) }
     }
+}
+
+/**
+ * 重封链（剪辑/选轨）的单枚样本缓冲扩容（Y30）：容量不够按声明大小翻倍，但声明大小超过
+ * [ClipRule.MAX_REMUX_SAMPLE_BYTES] 一律显式失败——旧 `size*2` 扩容在样本大小声明损坏时
+ * 会无限吃内存（见常量注）。失败走调用方既有的未封轨异常路径（回收 pending），不静默截断。
+ */
+internal fun growRemuxSampleBuffer(buf: ByteBuffer, size: Long): ByteBuffer {
+    if (size > ClipRule.MAX_REMUX_SAMPLE_BYTES) {
+        throw IllegalStateException("样本 ${size}B 超过单样本上限 ${ClipRule.MAX_REMUX_SAMPLE_BYTES}B")
+    }
+    return if (size > buf.capacity()) ByteBuffer.allocate(size.toInt() * 2) else buf
 }
 
 /** 导出结果：[Done] 带 MediaStore 媒体 id（pending uri 自带，commit 前已定） */
@@ -295,6 +319,9 @@ class ClipExporter(private val ctx: Context) {
         // copy() 的入点关键帧时刻：封轨后取消/全败都要照成功路径写 sidecar，
         // 提到 try 外面是为了让 catch 分支也拿得到（只在 bytesComplete 之后才可能是有效值）
         var baseUs = -1L
+        // 封轨即落 SealMarker（与 VideoStore.seal 同口径）：commit 全败/取消/封轨后异常都会保留
+        // pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
+        var sealedPath: String? = null
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)
@@ -311,6 +338,11 @@ class ClipExporter(private val ctx: Context) {
                     bytesComplete = true
                     // 封轨后行不许删：owner 记 sealed，之后任何迟到异常都不再触碰 pending。
                     owner.markSealed()
+                    // 封轨即落旁路标记（与 VideoStore.seal 同口径）：commit 全败、取消、封轨后
+                    // 异常都保留 pending 行，冷启救援据此走 SEALED_RESCUE_MS 快通道。
+                    // 路径查询失败只少一条加速线索，不影响成片与提交。
+                    sealedPath = queryData(pendingUri)
+                    SealMarker.mark(sealedPath)
                     // 清 pending 失败必须改口上报：IS_PENDING 残留时 MediaStore 对外隐藏该行，
                     // 用户会看到"导出成功"却在相册里找不到成片，且事后无锚点可归因。
                     // 每次公开提交都重新领许可：放弃已赢时不得再发起新的 Binder 调用；已领许可的那次
@@ -336,6 +368,8 @@ class ClipExporter(private val ctx: Context) {
                         return@withContext ClipResult.Fail(ClipError.COMMIT)
                     }
                     writeSidecar(src, pendingUri, baseUs)
+                    // 发布成功：清掉封轨旁路标记（对齐 VideoStore.seal 的"发布了就清标记"）
+                    SealMarker.clear(sealedPath)
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id $sMs..$eMs ms baseUs=$baseUs")
                     ClipResult.Done(id, ClipRule.clipNameOf(src.name)).also { terminal.reached(it) }
@@ -409,7 +443,8 @@ class ClipExporter(private val ctx: Context) {
             while (baseUs < 0) {
                 val size = ex.sampleSize // 注意：getSampleSize 返回 long（android-34 javap 实证）
                 if (size < 0) throw IllegalStateException("no sync frame before EOF")
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) baseUs = ex.sampleTime
                 else ex.advance()
@@ -462,7 +497,8 @@ class ClipExporter(private val ctx: Context) {
                 job?.ensureActive()
                 val size = ex.sampleSize // getSampleSize 返回 long；写入路径用 int 版
                 if (size < 0) break // EOF（尾轨先到头是常态，另一轨继续）
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 val isVideo = ex.sampleTrackIndex == videoTrack
                 val rel = ex.sampleTime - baseUs

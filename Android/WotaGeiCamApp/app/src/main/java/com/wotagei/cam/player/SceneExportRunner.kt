@@ -15,6 +15,7 @@ import android.view.Surface
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
+import com.wotagei.cam.record.SealMarker
 import com.wotagei.cam.record.decoderFormatOf
 import com.wotagei.cam.record.exportOrientationHint
 import com.wotagei.cam.record.mediaIdOf
@@ -135,11 +136,10 @@ class SceneExportRunner(private val ctx: Context) {
         val settled = AtomicBoolean(false)
         // caller 结算与 owner 终态记账分开：预算到点只结算 caller（TIMEOUT），**不能**先写 terminal，
         // 否则已进入 commit 的迟到 Done 会被 TIMEOUT 抢占，真话永远回填不了（Y32）。
+        // 结算必须对"送达"诚实：CAS 赢了但等待方已经取消/超时离开时，这次结果并没有送达，
+        // 返回 false 让 worker 走 onLateOutcome 按任务身份回填（Y32），不许把没送到的终态当已结算。
         val settle: (Result) -> Boolean = { result ->
-            if (settled.compareAndSet(false, true)) {
-                resumeIfActive(continuation, result)
-                true
-            } else false
+            settled.compareAndSet(false, true) && resumeIfActive(continuation, result)
         }
         val finish: (Result) -> Boolean = { result ->
             terminal.reached(result)
@@ -190,7 +190,9 @@ class SceneExportRunner(private val ctx: Context) {
                     terminal.peek()
                 } catch (failure: Throwable) {
                     Log.w(TAG, "后渲染导出 owner 异常：${failure.message}", failure)
-                    Failed(Reason.ENCODER)
+                    // 封轨后异常/取消已记账 COMMIT（真话）：Error 也要把已发生的终态交出去，
+                    // 不能改写成 ENCODER 让"成片在盘上"被谎报成没写成（Y32）。
+                    terminal.peek() ?: Failed(Reason.ENCODER)
                 } finally {
                     owner.workerJob.cancel()
                     watchdog.interrupt()
@@ -234,6 +236,9 @@ class SceneExportRunner(private val ctx: Context) {
 
         lateinit var pendingUri: android.net.Uri
         var sealed = false
+        // 封轨即落 SealMarker（与 ClipExport/VideoStore.seal 同口径）：commit 全败/取消/封轨后
+        // 异常都保留 pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
+        var sealedPath: String? = null
         var submitted = 0L
         var gl: SceneExportGl? = null
         var extractor: MediaExtractor? = null
@@ -532,6 +537,10 @@ class SceneExportRunner(private val ctx: Context) {
                 muxer!!.stop()
                 sealed = true
                 owner.markSealed()
+                // 封轨即落旁路标记：commit 全败、取消、封轨后异常都保留行，冷启救援据此快速收。
+                // 路径查询失败只少一条加速线索，不影响成片与提交。
+                sealedPath = queryData(pendingUri)
+                SealMarker.mark(sealedPath)
             }
 
             // ---- 提交（与 ClipExport 同一条 IS_PENDING 口径；commit 全败保留行待冷启救援）
@@ -551,16 +560,25 @@ class SceneExportRunner(private val ctx: Context) {
                 terminal.reached(Failed(Reason.COMMIT))
                 return@withContext Failed(Reason.COMMIT)
             }
+            // 发布成功：清掉封轨旁路标记（对齐 VideoStore.seal 的"发布了就清标记"）
+            SealMarker.clear(sealedPath)
             val id = ContentUris.parseId(pendingUri)
             Log.i(TAG, "后渲染导出完成 id=$id ${sMs}..$eMs glow=${effects.glow != null} denoise=${effects.denoise} echo=${effects.echo != null} frames=$submitted")
             Done(id, ClipRule.clipNameOf(src.name)).also { terminal.reached(it) }
         } catch (e: CancellationException) {
-            if (!sealed) owner.deletePending(ctx)
+            // 封轨后取消：成片字节已在盘上，行必须保留，且把"已保留待救援"记成公开终态，
+            // 否则等待方离开后这次结局没有任何人知道（Y32）。
+            if (!sealed) owner.deletePending(ctx) else terminal.reached(Failed(Reason.COMMIT))
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "后渲染导出失败：${e.message}", e)
-            if (!sealed) owner.deletePending(ctx)
-            Failed(mapError(e))
+            if (!sealed) {
+                owner.deletePending(ctx)
+                Failed(mapError(e))
+            } else {
+                // 封轨后异常：没写成的是 IS_PENDING 清除，不是成片——不许报 MUXER/ENCODER 谎称没写成
+                terminal.peek() ?: Failed(Reason.COMMIT)
+            }
         } finally {
             val stopDecoder = {
                 runCatching { decoder?.stop() }
@@ -651,6 +669,13 @@ class SceneExportRunner(private val ctx: Context) {
         ctx.contentResolver.update(uri, values, null, null) > 0
     }.getOrDefault(false)
 
+    /** pending 记录的真实路径（DATA 列）；封轨标记与它同目录同名（与 ClipExport 同一口径） */
+    private fun queryData(uri: android.net.Uri): String? = runCatching {
+        ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
+        }
+    }.getOrNull()
+
     private fun fail(owner: ExportOwner, reason: Reason): Failed {
         owner.deletePending(ctx)
         return Failed(reason)
@@ -693,8 +718,9 @@ class SceneExportRunner(private val ctx: Context) {
 
         private fun resumeIfActive(
             continuation: kotlinx.coroutines.CancellableContinuation<Result>, result: Result
-        ) {
-            if (continuation.isActive) runCatching { continuation.resume(result) }
+        ): Boolean {
+            if (!continuation.isActive) return false
+            return runCatching { continuation.resume(result); true }.getOrDefault(false)
         }
 
         /** 音轨"连续越界即封轨"的容忍样本数（AAC 帧间无重排，与 ClipExport 同一枚值） */

@@ -119,7 +119,12 @@ internal fun deletePendingRowVerified(ctx: Context, uri: Uri, tag: String): Bool
  * 修法与 Scene 导出同构：caller 的等待由本对象单独计时（预算 = max(时长, 尾点)×4 下限 60s，再 +60s
  * 收尾余量），预算到点或取消都让 caller **立刻返回**（BUSY/取消），worker 线程继续负责迟到资源
  * 的登记与回收；闸门是单 owner 零等待队列的执行器，忙时立即拒绝（新任务得 BUSY，不排队堆积）。
- * 已领许可进入的提交若在取消后返回成功，终态经 [ExportTerminal] 回填。
+ * 已领许可进入的提交若在取消后返回成功，终态经 [ExportTerminal] 回填——**取消不吞结局**。
+ *
+ * 边界（可恢复的等待 vs 不可回收的挂死）：本对象只保证"等待方不被扣住"。同步 Provider/native 调用
+ * 本身不可打断，等待方离开后 owner 线程仍会停在那次调用上直到它返回；返回后的迟到资源由 owner
+ * 登记并回收一次、不再公开提交。若某次调用**永不返回**，那个单 owner 闸门就永久 BUSY（不排队、
+ * 不积压），这是平台/Provider 的责任边界：导出层不伪造低质量兜底，也不提前释放仍被平台持有的行。
  */
 internal object RemuxWait {
     private const val WATCHDOG_POLL_MS = 25L
@@ -131,7 +136,8 @@ internal object RemuxWait {
 
     /**
      * 在 [executor] 上以单 owner 方式跑 [body]；null 返回 = 闸门忙或等待预算到点（调用方报 BUSY）。
-     * [body] 自己负责清理；本函数只在 caller 已离开且 [terminal] 记下了公开终态时回填 [onLateOutcome]。
+     * [body] 自己负责清理。caller 已离开（取消/预算到点）时，[terminal] 里记下的公开终态仍会经
+     * [onLateOutcome] 回填一次；owner 收口却没有任何公开终态时，仍在等待的 caller 立即结算为 null。
      */
     suspend fun <T : Any> bounded(
         executor: ThreadPoolExecutor,
@@ -198,9 +204,15 @@ internal object RemuxWait {
                     owner.workerJob.cancel()
                     watchdog.interrupt()
                 }
-                if (result != null && !finish(result) && !cancelled.get()) {
-                    // caller 还在：FINISH 已失败只能是预算到点后的迟到完成。
-                    runCatching { onLateOutcome(result) }
+                if (result != null) {
+                    // finish 失败 = 等待方没有收到这个值（已取消或预算到点）。公开终态是"已经发生"
+                    // 的事实（成片已提交入库 / 行已保留待救援），取消只表示等待方离开，不许把结局
+                    // 一起吞掉：一律按任务身份回填一次（Y32），由 [ExportTasks.upsertResult] 去重。
+                    if (!finish(result)) runCatching { onLateOutcome(result) }
+                } else {
+                    // owner 收口却没有任何公开终态（异常终止/块返回 null）：仍在等待的调用方必须
+                    // 当场结算（BUSY 口径），不许吊到等待预算到点；已取消的等待方由 finish 判定不恢复。
+                    finish(null)
                 }
             }
         } catch (_: RejectedExecutionException) {

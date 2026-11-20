@@ -384,6 +384,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static int[] deleteResults;
                     public static long sampleSizeOverride = 0L;
                     public static boolean renderOk = true, swapOk = true, stopThrows = false;
+                    public static boolean stopThrowsError = false;
+                    public static String rowData;
+                    public static int rowQueries = 0;
                     public static boolean glThreadAlive;
                     public static Thread glThread = new Thread();
                     public static int[] decoderReadyAfterInputs;
@@ -418,6 +421,26 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 package android.content;
                 public class ContentUris { public static long parseId(android.net.Uri uri) { return 42L; } }
             """,
+            "android.database.Cursor" to """
+                package android.database;
+                public interface Cursor extends java.io.Closeable {
+                    boolean moveToFirst();
+                    boolean isNull(int columnIndex);
+                    String getString(int columnIndex);
+                    void close();
+                }
+            """,
+            "android.database.MatrixCursor" to """
+                package android.database;
+                public class MatrixCursor implements Cursor {
+                    private final String value;
+                    public MatrixCursor(String value) { this.value = value; }
+                    public boolean moveToFirst() { return true; }
+                    public boolean isNull(int columnIndex) { return value == null; }
+                    public String getString(int columnIndex) { return value; }
+                    public void close() {}
+                }
+            """,
             "android.content.ContentResolver" to """
                 package android.content;
                 public class ContentResolver {
@@ -448,6 +471,12 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         probe.ExportBlocking.didReturn("commit",uri.toString());
                         if (result < 0) throw new IllegalStateException("provider busy");
                         return result;
+                    }
+                    public android.database.Cursor query(android.net.Uri uri, String[] projection, String selection, String[] args, String sortOrder) {
+                        probe.ExportScript.rowQueries++;
+                        probe.ExportScript.add("row.query");
+                        String data=probe.ExportScript.rowData;
+                        return data==null ? null : new android.database.MatrixCursor(data);
                     }
                     public int delete(android.net.Uri uri, String selection, String[] args) {
                         int call=++probe.ExportScript.deleteCalls;
@@ -482,7 +511,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 package android.provider;
                 public class MediaStore {
                     public static class MediaColumns {
-                        public static final String DISPLAY_NAME="_display_name", MIME_TYPE="mime_type", RELATIVE_PATH="relative_path", IS_PENDING="is_pending";
+                        public static final String DISPLAY_NAME="_display_name", MIME_TYPE="mime_type", RELATIVE_PATH="relative_path", IS_PENDING="is_pending", DATA="_data";
                     }
                     public static class Video { public static class Media extends MediaColumns {
                         public static final android.net.Uri EXTERNAL_CONTENT_URI = new android.net.Uri("content://video");
@@ -567,8 +596,8 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public long getSampleSize() {
                         int t=currentTrack();
                         if(t<0) return -1L;
-                        // Y30 超限样本注入只作用于音轨（视频路径的 getSampleSize 保持真实小样本）
-                        if(t>0 && probe.ExportScript.sampleSizeOverride>0) return probe.ExportScript.sampleSizeOverride;
+                        // Y30 超限样本注入对音轨（车道 4MiB 上限）与视频轨（重封链 32MiB 上限）同口径
+                        if(probe.ExportScript.sampleSizeOverride>0) return probe.ExportScript.sampleSizeOverride;
                         return 8L;
                     }
                     public int getSampleFlags() { return currentTrack()==0 && probe.ExportScript.videoSync[positions[0]] ? 1:0; }
@@ -692,7 +721,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         }
                     }
                     public void stop() {
-                        probe.ExportScript.add("muxer.stop"); if(probe.ExportScript.stopThrows) throw new IllegalStateException("unsealed");
+                        probe.ExportScript.add("muxer.stop");
+                        if(probe.ExportScript.stopThrows) throw new IllegalStateException("unsealed");
+                        if(probe.ExportScript.stopThrowsError) throw new OutOfMemoryError("injected owner death");
                         if(probe.ExportScript.afterStop!=null)probe.ExportScript.afterStop.run();
                     }
                     public void release() {

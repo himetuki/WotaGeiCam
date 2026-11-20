@@ -98,6 +98,65 @@ class ExportBlockingCompatibilityTest {
         }
     }
 
+    /**
+     * Y32：等待方**取消**（不是预算到点）+ commit 已领许可。旧实现 `settle` 在 continuation
+     * 不活跃时仍返回 true（谎报"已送达"），取消后的迟到 Done 被静默吞掉：相册索引不刷新、
+     * UI 永远停在"已取消"。现在 settle 只在真的 resume 后返回 true，迟到真话必须回填一次。
+     * 同时钉住封轨标记：封轨即落、发布成功即清（冷启救援的 5 分钟快通道路径）。
+     */
+    @Test
+    fun `Y32 取消后commit已领许可返回成功_迟到Done仍回填且封轨标记清除`() {
+        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+            val probe = BlockingProbe(p)
+            probe.enable("commit")
+            p.script("commitResults", intArrayOf(1, 1))
+            val row = File(temporary.root, "scene-seal-done/out42.mp4").apply { parentFile.mkdirs() }
+            p.script("rowData", row.absolutePath)
+            val marker = File(row.absolutePath + ".sealed")
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val caller = launchExport(p) { late.add(it) }
+            try {
+                check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞" }
+                assertTrue("封轨即落 SealMarker（commit 尚在途）", marker.isFile)
+                caller.job.cancel()
+                assertTrue("取消必须立刻结束等待方", caller.completed.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS))
+                assertTrue(
+                    "等待方因取消离开（不是生产异常）",
+                    caller.error.get() is CancellationException
+                )
+            } finally {
+                probe.proceed.countDown()
+                caller.close()
+                assertTrue("放行后 owner 必须在有界时间内收口", p.awaitOwnerIdle(SCENE, CLEANUP_WAIT_MS))
+            }
+            assertEquals("已进入的 public 许可只发一次，取消不重试", 1, p.script("commitCalls"))
+            assertFalse("已封轨成片不得因取消被删行", p.events.contains("pending.delete"))
+            assertEquals("取消后迟到 Done 必须回填一次（不许因等待方不活跃被吞）", 1, late.size)
+            assertEquals("回填的是真实终态 Done", "Done", late.single()!!.javaClass.simpleName)
+            assertFalse("发布成功必须清掉封轨标记", marker.isFile)
+            assertTrue("收尾必须关掉本 loader 的生产执行器", p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
+    }
+
+    /** Y32：后渲染 commit 两连败 → 保留行待救援，真话按 COMMIT 上报，封轨标记留在盘上。 */
+    @Test
+    fun `Y32 后渲染commit两连败_真话COMMIT且封轨标记保留待救援`() {
+        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+            p.script("commitResults", intArrayOf(0, 0))
+            val row = File(temporary.root, "scene-seal-keep/out42.mp4").apply { parentFile.mkdirs() }
+            p.script("rowData", row.absolutePath)
+            val marker = File(row.absolutePath + ".sealed")
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val result = runBlocking { p.export(p.runner(), onLateOutcome = { late.add(it) }) }
+            assertEquals("commit 全败必须报 COMMIT（不是 MUXER/ENCODER）",
+                "COMMIT", p.call(result, "getReason").toString())
+            assertFalse("封轨成片不得被删行", p.events.contains("pending.delete"))
+            assertTrue("保留待救援的成片必须留下 SealMarker（冷启 5 分钟快通道）", marker.isFile)
+            assertTrue("等待方还在时真话直接送达，不走迟到回填", late.isEmpty())
+            assertTrue(p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
+    }
+
     @Test
     fun `U05 准备期open永久阻塞时预算到点由独立等待侧先结束caller`() {
         ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader)).use { p ->

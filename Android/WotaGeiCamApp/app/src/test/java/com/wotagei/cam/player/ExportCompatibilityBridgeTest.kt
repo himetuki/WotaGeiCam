@@ -161,6 +161,8 @@ class ExportCompatibilityBridgeTest {
         val job = Job()
         p.script("afterStop", Runnable { job.cancel() })
         assertTrue(cancelledExport(p, job))
+        // caller 取消立即返回，owner 的 commit/finally 仍在后台：先等它退出再读资源账。
+        assertTrue("取消后 owner 必须在有界时间内完成清理", p.awaitOwnerQuiescence(5_000L))
         assertEquals(1, p.events.count { it == "muxer.stop" })
         assertFalse(p.events.contains("pending.delete"))
         assertResourcesReleased(p)

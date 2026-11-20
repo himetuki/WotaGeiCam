@@ -12,6 +12,7 @@ import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
+import com.wotagei.cam.record.SealMarker
 import com.wotagei.cam.record.exportOrientationHint
 import com.wotagei.cam.record.monotonicPts
 import com.wotagei.cam.record.mediaIdOf
@@ -156,6 +157,9 @@ class TrackExporter(private val ctx: Context) {
         coroutineContext.ensureActive()
         // muxer.stop() 已过 = 容器里是完整合法 MP4：此后的失败一律保留行不删（与 ClipExporter 同口径）
         var bytesComplete = false
+        // 封轨即落 SealMarker（与 VideoStore.seal 同口径）：commit 全败/取消/封轨后异常都保留
+        // pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
+        var sealedPath: String? = null
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)
@@ -172,6 +176,10 @@ class TrackExporter(private val ctx: Context) {
                     bytesComplete = true
                     // 封轨后行不许删：owner 记 sealed，之后任何迟到异常都不再触碰 pending
                     owner.markSealed()
+                    // 封轨即落旁路标记（与 VideoStore.seal 同口径）：commit 全败、取消、封轨后
+                    // 异常都保留 pending 行，冷启救援据此走 SEALED_RESCUE_MS 快通道。
+                    sealedPath = queryData(pendingUri)
+                    SealMarker.mark(sealedPath)
                     // 清 pending 失败必须改口上报（与 ClipExporter 同一处置）：IS_PENDING 残留时
                     // MediaStore 对外隐藏该行，用户看到"导出成功"却在相册里找不到成片且无锚点可归因。
                     // 每次公开提交重新领许可：放弃已赢时不得再发起新的 Binder 调用（Y31）；
@@ -196,6 +204,8 @@ class TrackExporter(private val ctx: Context) {
                         return@withContext ClipResult.Fail(ClipError.COMMIT)
                     }
                     writeSidecar(src, pendingUri)
+                    // 发布成功：清掉封轨旁路标记（对齐 VideoStore.seal 的"发布了就清标记"）
+                    SealMarker.clear(sealedPath)
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id track=$track offsetMs=$offsetMs")
                     ClipResult.Done(id, TrackRule.nameOf(src.name)).also { terminal.reached(it) }
@@ -266,7 +276,8 @@ class TrackExporter(private val ctx: Context) {
             while (baseUs < 0) {
                 val size = ex.sampleSize
                 if (size < 0) throw IllegalStateException("no sync frame at start")
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) baseUs = ex.sampleTime
                 else ex.advance()
@@ -310,7 +321,8 @@ class TrackExporter(private val ctx: Context) {
                 job?.ensureActive()
                 val size = ex.sampleSize
                 if (size < 0) break // 两轨都到底
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleTrackIndex == videoTrack) {
                     // baseUs 是"首个**读到**的样本"，全片导出从 0 读起它必是同步帧——但它**不等于**首样本：
