@@ -153,6 +153,40 @@ class GlowShaderTest {
         assertFalse("hi 不许再用 `lo + 0.0001`", src.contains("lo + 0.0001"))
     }
 
+    @Test
+    fun `阈值满档软边零的角点必须与硬阈值逐值一致_CPU参照`() {
+        // Y12：按两条 shader 的同式写一份 CPU 参照。threshold=1.0、soft=0 时
+        // lo==hi，必须走 step 分支；旧写法给 lo 加 0.0001 会被 fp16 舍回 1.0，
+        // smoothstep(1,1,x) 在驱动上未定义，整帧可能发灰。
+        fun smoothstep(e0: Float, e1: Float, x: Float): Float {
+            val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
+            return t * t * (3f - 2f * t)
+        }
+        fun mask(luma: Float, threshold: Float, softIn: Float): Float {
+            val soft = minOf(softIn, maxOf(1f - threshold, 0f))
+            val lo = maxOf(threshold - soft, 0f)
+            val hi = threshold + soft
+            return if (hi > lo) smoothstep(lo, hi, luma) else if (luma >= threshold) 1f else 0f
+        }
+
+        val threshold = 1f
+        val soft = minOf(0f, maxOf(1f - threshold, 0f))
+        assertFalse(
+            "角点必须走 step 分支（lo==hi 时不能调用 smoothstep）",
+            (threshold + soft) > maxOf(threshold - soft, 0f)
+        )
+        for (i in 0..100) {
+            val luma = i / 100f
+            val expected = if (luma >= threshold) 1f else 0f
+            assertEquals("luma=$luma 必须与硬阈值逐值一致", expected, mask(luma, threshold, 0f), 0f)
+        }
+        // 过渡带正常存在时才允许 smoothstep，并保持单调 0→1
+        val mid = mask(0.5f, 0.5f, 0.2f)
+        assertTrue("过渡带内必须是软值", mid in 0f..1f)
+        assertEquals("下界以下压零", 0f, mask(0.2f, 0.5f, 0.2f), 0f)
+        assertEquals("上界以上保留", 1f, mask(0.8f, 0.5f, 0.2f), 0f)
+    }
+
     // ------------------------------------------------------------------ glow=true：scene 支路
 
     @Test

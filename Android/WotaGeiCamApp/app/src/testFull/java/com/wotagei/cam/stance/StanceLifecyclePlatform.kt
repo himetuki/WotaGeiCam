@@ -301,6 +301,7 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
             public class Interpreter implements java.io.Closeable {
                 public static boolean failGpuConstructor,failCpuConstructor,failVerify,failNextDetect;
                 public static int failCpuCapacity=-1;
+                public static float verifyCoord=0f;
                 public static java.util.concurrent.CountDownLatch verifyEntered,verifyContinue;
                 public static final java.util.List<String> events=new java.util.concurrent.CopyOnWriteArrayList<>();
                 public static final java.util.List<Object> outputs=new java.util.ArrayList<>();
@@ -329,6 +330,7 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
                         catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}
                     }
                     if(gpu&&verify&&failVerify)throw new IllegalStateException("fixture GPU verify");
+                    if(verify&&verifyCoord!=0f){((java.nio.ByteBuffer)output).putFloat(0,verifyCoord);}
                     if(gpu&&!verify&&failNextDetect){failNextDetect=false;throw new IllegalStateException("fixture GPU runtime");}
                     if(!verify){
                         outputs.add(output);

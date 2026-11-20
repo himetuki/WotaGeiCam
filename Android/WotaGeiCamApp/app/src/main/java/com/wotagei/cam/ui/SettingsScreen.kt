@@ -2091,12 +2091,17 @@ private fun UpdateDownloadDialog(
                 .padding(20.dp)
         ) {
             // Y46：安装启动失败先于 done 判定——两态不再可能同时渲染成「下载完成」。
-            val title = when {
-                state.installFailure != null -> stringResource(R.string.set_update_install_failed)
-                state.measuring -> stringResource(R.string.set_update_selecting_channel)
-                state.done -> stringResource(R.string.set_update_ready_to_install)
-                state.failed -> stringResource(R.string.set_update_download_failed)
-                else -> stringResource(R.string.set_update_downloading)
+            val title = when (updateDialogPhase(
+                installFailurePresent = state.installFailure != null,
+                measuring = state.measuring,
+                done = state.done,
+                failed = state.failed
+            )) {
+                UpdateDialogPhase.INSTALL_FAILED -> stringResource(R.string.set_update_install_failed)
+                UpdateDialogPhase.MEASURING -> stringResource(R.string.set_update_selecting_channel)
+                UpdateDialogPhase.DONE -> stringResource(R.string.set_update_ready_to_install)
+                UpdateDialogPhase.FAILED -> stringResource(R.string.set_update_download_failed)
+                UpdateDialogPhase.DOWNLOADING -> stringResource(R.string.set_update_downloading)
             }
             Text(
                 text = title,
@@ -2176,6 +2181,25 @@ private fun UpdateDownloadDialog(
             }
         }
     }
+}
+
+/**
+ * Y46 更新弹窗的展示阶段（纯函数）：安装失败是独立终态，优先级高于 done/failed。
+ * 放在组合外是为了用真值表钉住「失败不能被下载完成文案盖掉」，而不是只靠源码字符串守卫。
+ */
+internal enum class UpdateDialogPhase { INSTALL_FAILED, MEASURING, DONE, FAILED, DOWNLOADING }
+
+internal fun updateDialogPhase(
+    installFailurePresent: Boolean,
+    measuring: Boolean,
+    done: Boolean,
+    failed: Boolean
+): UpdateDialogPhase = when {
+    installFailurePresent -> UpdateDialogPhase.INSTALL_FAILED
+    measuring -> UpdateDialogPhase.MEASURING
+    done -> UpdateDialogPhase.DONE
+    failed -> UpdateDialogPhase.FAILED
+    else -> UpdateDialogPhase.DOWNLOADING
 }
 
 /**

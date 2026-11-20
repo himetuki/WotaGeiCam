@@ -4,6 +4,9 @@ import com.wotagei.cam.source.KotlinSourceScan.bodyOf
 import com.wotagei.cam.source.KotlinSourceScan.codeOnly
 import com.wotagei.cam.source.KotlinSourceScan.flatten
 import com.wotagei.cam.source.KotlinSourceScan.mainSourceText
+import com.wotagei.cam.ui.UpdateDialogPhase
+import com.wotagei.cam.ui.updateDialogPhase
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,11 +22,40 @@ import org.junit.Test
 class UpdateInstallUiTest {
 
     @Test
+    fun `安装失败与下载完成并存时阶段必须判失败`() {
+        assertEquals(
+            "installFailure 必须压过 done（旧缺陷：弹窗显示下载完成）",
+            UpdateDialogPhase.INSTALL_FAILED,
+            updateDialogPhase(installFailurePresent = true, measuring = false, done = true, failed = false)
+        )
+        assertEquals(
+            "测速阶段优先于尚未完成的下载",
+            UpdateDialogPhase.MEASURING,
+            updateDialogPhase(installFailurePresent = false, measuring = true, done = false, failed = false)
+        )
+        assertEquals(
+            "下载完成",
+            UpdateDialogPhase.DONE,
+            updateDialogPhase(installFailurePresent = false, measuring = false, done = true, failed = false)
+        )
+        assertEquals(
+            "下载失败",
+            UpdateDialogPhase.FAILED,
+            updateDialogPhase(installFailurePresent = false, measuring = false, done = false, failed = true)
+        )
+        assertEquals(
+            "下载中",
+            UpdateDialogPhase.DOWNLOADING,
+            updateDialogPhase(installFailurePresent = false, measuring = false, done = false, failed = false)
+        )
+    }
+
+    @Test
     fun `安装失败是独立终态且优先于下载完成显示`() {
         val src = codeOnly(mainSourceText("ui/SettingsScreen.kt"))
         val dialog = flatten(bodyOf(src, "UpdateDownloadDialog"))
-        val failure = dialog.indexOf("state.installFailure != null")
-        val done = dialog.indexOf("state.done ->")
+        val failure = dialog.indexOf("UpdateDialogPhase.INSTALL_FAILED")
+        val done = dialog.indexOf("UpdateDialogPhase.DONE")
         assertTrue("对话框必须先判 installFailure：$dialog", failure >= 0 && done > failure)
         assertTrue("失败态必须提供重试入口", dialog.contains("set_update_install_retry"))
         assertTrue("失败态必须显示具体原因映射", dialog.contains("installFailureText(state.installFailure.reason)"))

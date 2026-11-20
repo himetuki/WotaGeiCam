@@ -745,6 +745,26 @@ class StanceLifecycleCompatibilityTest {
     }
 
     @Test
+    fun `Y73_越域输出必须判失败并回退CPU`() = platform { p ->
+        // 假 Interpreter 的 verify 路径往输出缓冲写一个远离画面尺寸的坐标。
+        p.setStatic(INTERPRETER, "verifyCoord", 1e9f)
+        val detector = loadedDetector(p, "force")
+        try {
+            assertFalse("越域坐标不得判 GPU 就绪", p.call(detector, "isGpuActive") as Boolean)
+            val reason = p.call(detector, "getGpuFallbackReason") as String
+            assertTrue("回退原因必须点名运行期验证失败：$reason", reason.contains("运行期验证失败"))
+            assertEquals("force 仍必须尝试默认 delegate", 1, p.static(DELEGATE, "created"))
+            assertEquals(
+                "force 不查兼容列表（越域判定不依赖白名单）",
+                0,
+                p.static("org.tensorflow.lite.gpu.CompatibilityList", "created")
+            )
+        } finally {
+            p.call(detector, "close")
+        }
+    }
+
+    @Test
     fun `N09_GPU运行失败且CPU也不可用时不能继续报GPU就绪`() = platform { p ->
         val detector = loadedDetector(p)
         val changes = mutableListOf<String>()
