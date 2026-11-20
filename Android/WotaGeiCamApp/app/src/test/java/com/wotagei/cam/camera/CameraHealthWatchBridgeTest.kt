@@ -169,6 +169,57 @@ class CameraHealthWatchBridgeTest {
     private val healthSrc by lazy {
         codeOnly(KotlinSourceScan.mainSourceText("camera/CameraHealth.kt"))
     }
+    private val watchSrc by lazy {
+        codeOnly(KotlinSourceScan.mainSourceText("ui/PreviewWatchdog.kt"))
+    }
+
+    /** Activity 级看门狗的**接线**：判活逻辑已抽到 [PreviewWatchdog]，这里只钉它仍走同代快照与上屏心跳。 */
+    private fun activityWiringIssues(src: String): List<String> {
+        val bad = ArrayList<String>()
+        val body = runCatching { flatten(bodyOf(src, "onRouteForPreviewWatch")) }.getOrNull()
+            ?: return listOf("定位不到 Activity 看门狗接线体——守卫失去输入")
+        if (occurrences(body, "val watchdog = PreviewWatchdog").isEmpty()) {
+            bad.add("Activity 看门狗没有可测状态机——录制门控只能靠源码字符串")
+        }
+        if (occurrences(body, "watchdog.tick(").isEmpty()) {
+            bad.add("Activity 看门狗没驱动状态机 tick")
+        }
+        if (occurrences(body, "ctrl::cameraHealth").isEmpty()) {
+            bad.add("看门狗没读相机健康快照——代数与帧计数不是同代读出")
+        }
+        if (occurrences(body, "ctrl::displayFrameCount").isEmpty()) {
+            bad.add("看门狗没读上屏心跳——相机活着而屏不换帧时无法自愈")
+        }
+        if (occurrences(body, "PreviewWatchTick.ReattachDisplay").isEmpty() ||
+            occurrences(body, "ctrl.requestDisplayReattach()").isEmpty()
+        ) {
+            bad.add("上屏无帧没有落到「重挂承载面」——重启相机救不了这一档")
+        }
+        return bad
+    }
+
+    /** 状态机自身：仍必须消费同代裁决与上屏心跳（抽出来不等于可以退化）。 */
+    private fun stateMachineIssues(src: String): List<String> {
+        val bad = ArrayList<String>()
+        val tick = runCatching { flatten(bodyOf(src, "tick")) }.getOrNull()
+            ?: return listOf("定位不到 PreviewWatchdog.tick 的体——守卫失去输入")
+        if (occurrences(tick, "clock.observe(snapshot, nowMs)").isEmpty()) {
+            bad.add("状态机没消费代数裁决（REBASED/FIRST_FRAMES/STILL）")
+        }
+        if (occurrences(tick, "clock.grewAtMs").isEmpty()) {
+            bad.add("无帧计时没用时钟基准——换代/0 帧会被当成进展")
+        }
+        if (occurrences(tick, "clock.everSawFrames").isEmpty()) {
+            bad.add("上屏判据没吃时钟 everSawFrames")
+        }
+        if (occurrences(tick, "displayFrames()").isEmpty()) {
+            bad.add("状态机没读上屏心跳")
+        }
+        if (occurrences(src, "camLast").isNotEmpty()) {
+            bad.add("仍有裸 camLast 跨代比较（替代引擎 0 帧会被当成涨帧）")
+        }
+        return bad
+    }
 
     private fun watchdogIssues(src: String): List<String> {
         val bad = ArrayList<String>()
@@ -244,21 +295,22 @@ class CameraHealthWatchBridgeTest {
         return bad
     }
 
-    private val activityWatchBody by lazy {
-        flatten(bodyOf(activitySrc, "onRouteForPreviewWatch"))
-    }
-
     @Test
     fun `两处看门狗都走同代健康快照`() {
         assertEquals(
-            "Activity 级看门狗接线缺件：\n${watchdogIssues(activityWatchBody).joinToString("\n")}",
+            "Activity 级看门狗接线缺件：\n${activityWiringIssues(activitySrc).joinToString("\n")}",
             emptyList<String>(),
-            watchdogIssues(activityWatchBody)
+            activityWiringIssues(activitySrc)
         )
         assertEquals(
             "页面级看门狗接线缺件：\n${watchdogIssues(screenSrc).joinToString("\n")}",
             emptyList<String>(),
             watchdogIssues(screenSrc)
+        )
+        assertEquals(
+            "Activity 看门狗状态机缺件：\n${stateMachineIssues(watchSrc).joinToString("\n")}",
+            emptyList<String>(),
+            stateMachineIssues(watchSrc)
         )
     }
 
@@ -281,8 +333,9 @@ class CameraHealthWatchBridgeTest {
         // 真身必须绿：否则下面的突变"红"可能来自守卫本身坏掉。
         assertTrue(controllerIssues(ctrlSrc).isEmpty())
         assertTrue(clockIssues(healthSrc).isEmpty())
-        assertTrue(watchdogIssues(activityWatchBody).isEmpty())
+        assertTrue(activityWiringIssues(activitySrc).isEmpty())
         assertTrue(watchdogIssues(screenSrc).isEmpty())
+        assertTrue(stateMachineIssues(watchSrc).isEmpty())
 
         // 突变 1：门面不发号（缺陷原形：跨代计数不可比）。
         val noEpoch = ctrlSrc.replace("engineEpoch++", "")
@@ -305,25 +358,29 @@ class CameraHealthWatchBridgeTest {
             clockIssues(noRebase).any { it.contains("换代") }
         )
 
-        // 突变 4：Activity 看门狗退回裸计数比较。
-        val rawCompare = activityWatchBody.replace(
-            "clock.observe(health, nowMs)",
+        // 突变 4：Activity 看门狗改回裸帧计数（健康快照接线被摘掉）。
+        val rawActivity = activitySrc.replace("ctrl::cameraHealth", "ctrl::frameResultCount")
+        assertTrue(
+            "Activity 看门狗不读健康快照必须红",
+            activityWiringIssues(rawActivity).any { it.contains("健康快照") }
+        )
+        val noReattach = activitySrc.replace("PreviewWatchTick.ReattachDisplay", "PreviewWatchTick.None")
+        assertTrue(
+            "Activity 看门狗丢掉重挂分支必须红",
+            activityWiringIssues(noReattach).any { it.contains("重挂") }
+        )
+
+        // 突变 5：状态机不消费代数裁决（把 observe 结果固定成 STILL）。
+        val rawCompare = watchSrc.replace(
+            "clock.observe(snapshot, nowMs)",
             "CameraPulse.STILL"
         )
         assertTrue(
             "不消费代数裁决必须红",
-            watchdogIssues(rawCompare).any { it.contains("代数裁决") }
-        )
-        val reintroduced = activityWatchBody.replace(
-            "val clock = CameraWatchClock(",
-            "var camLast = -1L\nval clock = CameraWatchClock("
-        )
-        assertTrue(
-            "退回裸 camLast 必须红",
-            watchdogIssues(reintroduced).any { it.contains("camLast") }
+            stateMachineIssues(rawCompare).any { it.contains("代数裁决") }
         )
 
-        // 突变 5：页面看门狗读裸计数而不是健康快照。
+        // 突变 6：页面看门狗读裸计数而不是健康快照。
         val rawHealth = screenSrc.replace("ctrl.cameraHealth()", "ctrl.frameResultCount()")
         assertTrue(
             "页面看门狗不走健康快照必须红",
