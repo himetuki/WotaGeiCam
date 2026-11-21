@@ -403,7 +403,11 @@ apple_validate_build_settings() {
   full_name="$(apple_trim "$(apple_setting "$file" FULL_PRODUCT_NAME)")"
   target_dir="$(apple_trim "$(apple_setting "$file" TARGET_BUILD_DIR)")"
 
-  [ "$sdk" = "iphoneos" ] || apple_fail 65 "SDKROOT=${sdk}，要求 iphoneos。"
+  # SDKROOT 会随 Xcode 版本携带版本号（Xcode 16.4 实测 iphoneos18.5），只要求 iphoneos 前缀。
+  case "$sdk" in
+    iphoneos*) ;;
+    *) apple_fail 65 "SDKROOT=${sdk}，要求 iphoneos 系列。" ;;
+  esac
   [ "$platform" = "iphoneos" ] || apple_fail 65 "PLATFORM_NAME=${platform}，要求 iphoneos。"
   [ "$resolved_config" = "$configuration" ] || \
     apple_fail 65 "实际构建配置=${resolved_config}，与请求的 $configuration 不符。"
