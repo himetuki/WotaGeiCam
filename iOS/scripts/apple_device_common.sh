@@ -324,20 +324,25 @@ apple_validate_device_app() {
     apple_fail 65 "架构不匹配：实际=[$archs_norm]，$profile 期望=[$expected_archs]。"
 
   for arch in $archs_norm; do
-    # 2>&1 而非丢弃 stderr：诊断期要把 otool 的真实输出带进失败信息（r14 CI 实证 -hv 输出为空）。
+    # otool -hv 的值行：新 Xcode（16.4 实测）首字段是 MH_MAGIC_64 符号名，旧版是 0xfeedfacf 十六进制；
+    # 两种形态都要能匹配。stderr 一并捕获，失败时把真实输出带回日志。
     otool_out="$(apple_otool -arch "$arch" -hv "$exec_path" 2>&1 || true)"
-    header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}')"
+    header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*(MH_MAGIC|0x[0-9a-fA-F]+)/ {print; exit}')"
     if [ -z "$header" ]; then
       # 回退：某些 otool 对薄二进制不接受 -arch 过滤，去掉 -arch 再读一次。
       otool_out="$(apple_otool -hv "$exec_path" 2>&1 || true)"
-      header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}')"
+      header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*(MH_MAGIC|0x[0-9a-fA-F]+)/ {print; exit}')"
     fi
     if [ -z "$header" ]; then
       snippet="$(printf '%s' "$otool_out" | head -c 400 | tr '\n' '|')"
       apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：${exec_path}（otool 输出：${snippet:-<empty>}）"
     fi
     filetype="$(printf '%s\n' "$header" | awk '{print $5}')"
-    [ "$filetype" = "2" ] || apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=${filetype}）。"
+    # 旧格式 filetype=2（数值），新格式=EXECUTE（符号名）。
+    case "$filetype" in
+      2|EXECUTE) ;;
+      *) apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=${filetype}）。" ;;
+    esac
 
     loads="$(apple_otool -arch "$arch" -l "$exec_path" 2>&1)" || \
       apple_fail 65 "otool 无法读取 $arch 的 load commands：${exec_path}（otool 输出：$(printf '%s' "$loads" | head -c 400 | tr '\n' '|')）"
@@ -348,7 +353,8 @@ apple_validate_device_app() {
       build_platform="$(apple_trim "$build_platform")"
       build_min_os="$(apple_trim "$build_min_os")"
       case "$build_platform" in
-        IOS) ;;
+        # otool 新旧输出形态不同：数字 2 = iOS，符号 IOS 同义。
+        IOS|2) ;;
         *SIMULATOR*|IOSSIMULATOR) apple_fail 65 "$arch 的 LC_BUILD_VERSION platform=${build_platform}，拒绝模拟器产物。" ;;
         *) apple_fail 65 "$arch 的 LC_BUILD_VERSION platform=${build_platform:-<missing>}，不是 IOS。" ;;
       esac
