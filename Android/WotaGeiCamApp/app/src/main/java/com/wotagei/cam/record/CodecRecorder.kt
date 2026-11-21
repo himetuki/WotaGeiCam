@@ -14,7 +14,6 @@ import com.wotagei.cam.core.WotaTiers
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 自研管线：`MediaCodec + MediaMuxer + AudioRecord`（04 文件 §3：fps > 60 的高速路径；
@@ -46,12 +45,12 @@ import java.util.concurrent.atomic.AtomicLong
  *   环境+视频继续录——成片仍是合法 MP4（内录轨比另两轨短，播放器按轨长对齐），不中断录制；
  * - 停止顺序：codec.stop/release → muxer.stop/release → AudioRecord.stop/release。
  */
-class CodecRecorder(
+internal class CodecRecorder(
     private val ctx: Context,
     private val store: VideoStore,
     /** 输出路由探测（预校准只在 A2DP 时跑；默认实现零权限、失败按非 A2DP） */
     private val routeProbe: AudioRouteProbe = AndroidAudioRouteProbe(ctx)
-) : Recorder {
+) : Recorder, SessionDeliverySink {
 
     companion object {
         /**
@@ -113,7 +112,7 @@ class CodecRecorder(
          * 宽限）；"腿内停止 ⇒ 走 finishWithoutTeardown"这条组合修复前就在，不是本轮引入。
          *
          * 【轮转路径同样吃这条上限】抽干起点就发了 EOS，窗口内相机新帧进不了编码器 = 丢帧；
-         * 而轮转丢帧账（rotateLegStartMs）从 beginRotateLeg 起算、**不含抽干段**——抽干拖多久，
+         * 而轮转丢帧账（换段腿，见 [RotateLegLedger]）从 beginRotateLeg 起算、**不含抽干段**——抽干拖多久，
          * 就有多久的丢帧不入账。不许为了"多等"把轮转丢帧窗口拉大。
          */
         internal const val DRAIN_HARD_LIMIT_MS = 1_900L
@@ -303,6 +302,13 @@ class CodecRecorder(
         var feedDropped = 0
         /** 喂码时数据长于输入缓冲被截断的枚数（记账；不进任何判定） */
         var feedTruncated = 0
+        /**
+         * 停止/轮转尾段被迫放弃的 PCM 包数（Y16：抽干窗口到硬上限时仍留在队列/手里的真实包）。
+         * 旧实现停录当拍就发 EOS，这些包永远进不了编码器也没人记账——"停止时刻砍掉一段
+         * 固定长度尾音"在日志里与"本来就断流"不可区分。赋值而非累加（见 [tailEosFor]）：
+         * EOS 入队失败下拍重试时按当时真实积压重算，不会重复计数。不参与任何判定。
+         */
+        var eosDrops = 0
         /** 本段已成功喂进编码器的真实 PCM 字节账（EOS 哨兵/喂码失败不计）：内录静音判读的有效时长来源 */
         var fedBytes = 0L
         /** 首个真实样本的输出缓冲暂存（等 addTrack+muxer start 后补写；-1=无）及其 BufferInfo 快照 */
@@ -357,12 +363,23 @@ class CodecRecorder(
      */
     private var muxPtsEqualFixes = 0
 
+    /**
+     * **负戳夹紧**（候选戳早于本段基准 [segBaseUs]，[writeSample] 里夹到 0）的次数与最大提前量。
+     *
+     * [muxPtsMaxEarlyUs] = 所有被夹样本里"早得最多"的那一枚（μs），量级必须能在段尾汇总里看到，
+     * 否则分段处的音画偏移无从判断；逐样本明细只留首条（B06），其余只计数。
+     */
+    private var muxPtsClampFixes = 0
+    private var muxPtsMaxEarlyUs = 0L
+
     /** 逐轨 pts 账复位（新段起算：换段后是新 muxer，没有历史） */
     private fun resetMuxPtsBooks() {
         java.util.Arrays.fill(muxLastPtsUs, -1L)
         muxPtsFixes = 0
         muxPtsMaxBackUs = 0L
         muxPtsEqualFixes = 0
+        muxPtsClampFixes = 0
+        muxPtsMaxEarlyUs = 0L
     }
     private var aacMinBuf = 0
     private var audioSource = 0
@@ -492,20 +509,21 @@ class CodecRecorder(
     // ---- 换段腿的有界化与丢帧账（2026-10-08 真机缺陷修复，判定/记账见 RotateGuard.kt）----
 
     /**
-     * 换段腿起点（`elapsedRealtime`；0 = 当前不在换段腿里）。**编码器被拆的那一刻**起钟——
-     * 此后进来的帧写不进任何容器 = 丢帧窗口开启。泵线程写、停止路径（控制线程）读。
-     *
-     * 为什么是 [AtomicLong] 而不是 @Volatile Long：结算有**两处**——泵线程的 [settleRotateLeg]
-     * 与控制线程的 [settleRotateLegAtStop]。@Volatile 只保证「读到的值新」，不保证
-     * 「读-算-清-加」这四步原子：控制线程读出 start、泵线程抢先结算清 0、控制线程再 add
-     * ⇒ 同一条腿记两遍，[rotateLoss] 读数虚高约一份部分腿（用户可见的失败结果里的丢失量也会多算）。
-     * `getAndSet(0L)` 把「读 + 清」做成**一次 CAS**：谁先消费谁拿到 start，另一侧必得 0 早退，
-     * 双加在结构上不可能发生，零窗口零锁。
+     * 换段腿截止时刻账（Y18，见 [RotateLegLedger]）：预算、丢失结算领取权、腿终点三件事分开。
+     * 旧形态是一枚 `AtomicLong rotateLegStartMs`，`getAndSet(0L)` 同时「领结算」和「清腿」——
+     * 停止路径在泵线程还卡在腿里时领走结算，[rotateBudgetLeftMs] 随即退回腿外的
+     * [STORE_CALL_BUDGET_MS]：控制线程收尾凭空多 3s 预算（"只记账不拆资源"失效）、在途泵的
+     * 下一轮有界调用也不再按腿内预算判停摆。现在领取权只由 [RotateLegLedger.claim] 消费，
+     * 截止时刻只有泵线程（[settleRotateLeg]/[pumpTrail]）能清。
      *
      * 「控制线程那一笔不能删」：[rotateLoss.totalMs] 被 [finishWithoutTeardown] 拿去生成
      * **用户可见**的失败结果，删掉用户看到的丢失量就少算一份。
      */
-    private val rotateLegStartMs = AtomicLong(0L)
+    private val rotateLeg = RotateLegLedger(
+        legBudgetMs = ROTATE_LEG_BUDGET_MS,
+        idleBudgetMs = STORE_CALL_BUDGET_MS,
+        now = { SystemClock.elapsedRealtime() }
+    )
 
     /** 本腿里是否有入库调用撞了有界上限（泵线程与停止路径都可能置位 ⇒ @Volatile） */
     @Volatile
@@ -589,6 +607,44 @@ class CodecRecorder(
         runCatching { t.close() }.onFailure { Log.w(TAG, "晚到的 output target 关闭失败：${it.message}") }
     }
 
+    /**
+     * 发布线程 → 会话所有者的窄通道（R06/R07）：发布线程只持有这个对象（身份 + 交付函数），
+     * **不持有 recorder/feeders/输入面/Activity**，即使 Provider 挂住也不会钉住整条 UI 资源链。
+     */
+    private val sessionRelay = SessionRelay()
+
+    /**
+     * 已封段的**独立发布路**（R06）：封口后的「查 SIZE/DATA → 清 IS_PENDING / 删记录」不再吃
+     * 换段腿预算，也不许"没预算就不发布"（旧 `sealBounded` 对 `timeoutMs <= 0` 直接判超时，
+     * 整段永久 `IS_PENDING=1`）。等待窗 [PUBLISH_WAIT_MS] 只决定当轮能否同步拿回结论：
+     * 超时不取消调用（binder 无取消接口），结论稍后经 [SessionRelay] 补进段清单并交会话所有者。
+     */
+    private val sealedPublisher =
+        SealedPublisher(PUBLISH_WAIT_MS, sessionRelay::onLate)
+
+    /** 会话身份（R07 交付键）：[bindSession] 写入，泵线程/发布线程读取 ⇒ @Volatile */
+    @Volatile private var sessionSeriesId = 0L
+    @Volatile private var sessionStartedAtMs = 0L
+    /** 本引擎实例对应的尝试序号（自检重录逐次 +1）：同系列不同尝试的迟到结论不许互相串场 */
+    @Volatile private var sessionAttempt = 0
+
+    /**
+     * 会话级交付通道（[Recorder] 契约）：可能从泵线程/发布线程回调，接线方负责线程安全
+     * （生产 = `RecordSession` 内部加锁）。发布线程只经 [sessionRelay] 拿到它，不捕获本对象。
+     */
+    @Volatile override var onSessionDelivery: ((RecorderDelivery) -> Unit)? = null
+        set(value) {
+            field = value
+            sessionRelay.attach(value)
+        }
+
+    /**
+     * 停录收尾的移交闸（R07 收口）：控制线程 join 超时后，延迟收尾（finish + 放输入面 +
+     * 交付终态）由泵线程或控制线程**恰好一方**执行。旧的布尔 `teardownDeferred` 在
+     * 「判活超时」与「置位」之间留了一个双方都不做的窗口，见 [TrailHandoff]。
+     */
+    private val trail = TrailHandoff()
+
     /** prepare 成功后即稳定可用：Camera2 录像面 / GL outputSurface 的写入目标 */
     override val surface: Any? get() = inputSurface
 
@@ -598,6 +654,14 @@ class CodecRecorder(
      * DIRECT 路面是 persistent surface 跨段复用，本钩子不置位（永不回调）。
      */
     @Volatile override var onInputSurfaceRecreated: ((Any) -> Unit)? = null
+
+    override fun bindSession(seriesId: Long, startedAtMs: Long, attempt: Int) {
+        sessionSeriesId = seriesId
+        sessionStartedAtMs = startedAtMs
+        sessionAttempt = attempt
+        sessionRelay.bind(seriesId, startedAtMs, attempt)
+        Log.i(TAG, "session bound series=$seriesId started=$startedAtMs attempt=$attempt")
+    }
 
     // region 准备
 
@@ -613,6 +677,8 @@ class CodecRecorder(
         denoiseInactive = false
         abandonSegment = false
         stopping = false
+        // 新会话不复用上一场的"收尾已交给泵线程"状态（本对象每会话新建，这里是双保险）
+        trail.reset()
         rotatePending = false
         // 帧账从新会话起算（诊断导出只留本次录制的段账，不混上一场）
         Log.clearFrameAccount()
@@ -644,32 +710,53 @@ class CodecRecorder(
             return false
         }
         // 2026-10-12 有界化：openAssetFileDescriptor 同样走 MediaProvider（与 insert 同族卡顿前科），
-        // prepare 期不在换段腿（rotateLegStartMs=0）→ rotateBudgetLeftMs() 自动给 STORE_CALL_BUDGET_MS；
+        // prepare 期不在换段腿（[RotateLegLedger.active] 为假）→ rotateBudgetLeftMs() 给 STORE_CALL_BUDGET_MS；
         // 超时回 null → 下方 reject(NO_OUTPUT) 判起录失败，与泵路/换段腿同一套 BoundedStore 体系
         val t = openTargetBounded(sink)
         if (t == null || !t.usable) {
             reject(sink, RecordError.NO_OUTPUT)
             return false
         }
+        // Y20：拿到输出句柄就**立即登记所有权**——此后任何出口（含下面的边界外运行时异常）
+        // 都能经 reject() 关 fd、回收 pending，不再依赖"调用方看见 false 才收拾"。
+        target = t
+        currentSink = sink
         val ptOpen = SystemClock.elapsedRealtime()
-        val mime = resolveVideoMime(p)
-        // GPU 路（EGL 当 producer）输入面必须 per-codec（[prepareGpuVideoEncoder]，真机实测
-        // persistent surface 挂 EGL 会 EGL_BAD_ALLOC）；DIRECT 路（Camera2 当 producer）保持
-        // persistent surface 跨会话复用的既有口径，行为不变。
-        val v: MediaCodec? = if (p.useGpu) {
-            prepareGpuVideoEncoder(mime, p)
-        } else {
-            val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
-            createVideoEncoder(mime, p, inSurf)
+        return try {
+            prepareSegment(p, sink, t, pt0, ptOpen)
+        } catch (e: RuntimeException) {
+            // 平台边界（MediaCodec/MediaMuxer 的 native 异常）不属于任何既有失败分支：
+            // 不许把它漏给调用方——UI 的 `if (!rec.prepare)` 收不到 false，fd/pending 就没人回收。
+            Log.e(TAG, "prepare 期边界外异常：${e.javaClass.simpleName} ${e.message}")
+            runCatching { closeSegmentEngine() }
+                .onFailure { Log.w(TAG, "prepare 异常后引擎回收失败：${it.message}") }
+            reject(sink, RecordError.PREPARE_FAILED)
+            false
         }
-        if (v == null) {
-            // t 已打开（fd 在手）但 target 字段还没轮到赋值，reject 的 target?.close() 够不着它：
-            // 必须在这里先关，否则 openAssetFileDescriptor 的 fd 一直悬到进程结束
-            t.close()
+    }
+
+    /**
+     * prepare 的**资源建立段**（输出句柄已登记为 [target] 之后）：建视频编码器 → 建音频 → 起 muxer。
+     *
+     * 拆成独立函数只为让 [prepare] 用一层 `try/catch(RuntimeException)` 覆盖**交接前的所有出口**
+     * （Y20）；本体内每个失败分支仍走各自的既有原因码。
+     */
+    private fun prepareSegment(
+        p: RecordProfile,
+        sink: OutputSink,
+        t: OutputTarget,
+        pt0: Long,
+        ptOpen: Long
+    ): Boolean {
+        val video = prepareVideoEncoder(p)
+        if (video == null) {
             closeSegmentEngine()
             reject(sink, RecordError.PREPARE_FAILED)
             return false
         }
+        val v = video.codec
+        // 实际生效的视频口径（HEVC 预筛/实配失败回退 AVC 后，码率与日志都必须按 AVC 算）
+        val vp = video.profile
         val ptVenc = SystemClock.elapsedRealtime()
         vCodec = v
         // 静音 / 无权限 / 采样率不支持 → 完全不初始化音频通路（环境、内录两轨一起关）；
@@ -699,14 +786,14 @@ class CodecRecorder(
         // 两轨**独立**降级（双开定版 2026-10-07）：环境编码器建失败只关环境（内录不连坐，
         // 反之亦然），与 833 行重建闸「环境路降级不该连坐健康的内录路」同一口径。
         // 旧「a 失败两条全关」只在 cap 前置=env 已建的时代必要，现在 c 自己判自己
+        // 以**实际生效的视频口径**为底（vp）：HEVC 回退 AVC 后 effectiveBitrate() 不再乘 0.9，
+        // 结果/日志/码率三处同一套数（Y17）。
         profile = when {
-            a == null && p.audioEnabled -> p.copy(audioEnabled = false)
-            c == null && p.captureAudio -> p.copy(captureAudio = false)
-            else -> p
+            a == null && p.audioEnabled -> vp.copy(audioEnabled = false)
+            c == null && p.captureAudio -> vp.copy(captureAudio = false)
+            else -> vp
         }
         val ptAudio = SystemClock.elapsedRealtime()
-        target = t
-        currentSink = sink
         if (!openMuxer(t, p.orientationHint)) {
             closeSegmentEngine()
             reject(sink, RecordError.NO_OUTPUT)
@@ -715,11 +802,47 @@ class CodecRecorder(
         val ptMux = SystemClock.elapsedRealtime()
         Log.i(TAG, "prepare steps: open=${ptOpen - pt0} venc=${ptVenc - ptOpen} " +
             "audio=${ptAudio - ptVenc} mux=${ptMux - ptAudio} total=${ptMux - pt0}ms（REG-10 起录延迟观测）")
-        Log.i(TAG, "codec prepared part=$partIndex ${p.width}x${p.height}@${p.fps} mime=$mime " +
-            "bps=${p.effectiveBitrate()} audio=${if (a == null) "off" else "${p.sampleRate}Hz/${p.channels}ch"} " +
+        Log.i(TAG, "codec prepared part=$partIndex ${vp.width}x${vp.height}@${vp.fps} mime=${video.mime} " +
+            "bps=${vp.effectiveBitrate()} audio=${if (a == null) "off" else "${p.sampleRate}Hz/${p.channels}ch"} " +
             "capture=${if (c == null) "off" else "on"} " +
             "hint=${p.orientationHint} gpu=${p.useGpu} maxFile=${WotaTiers.MAX_FILE_BYTES}")
         return true
+    }
+
+    /** 视频编码器的实际口径：MIME 与生效 profile 成对返回（[RecordProfile.hevc] 必须与 MIME 同真值） */
+    private class PreparedVideo(val codec: MediaCodec, val profile: RecordProfile, val mime: String)
+
+    /**
+     * 建视频编码器：**能力预筛 → 实配**两级回退（Y17）。
+     *
+     * 预筛（[resolveVideoMime]，能力表说支持）通过但实配 `configure` 失败时（ROM 宣称支持 HEVC、
+     * 真机拒收的已知形态），释放失败实例、按**完整 AVC 格式**重试一次。返回的 profile 固化**实际**
+     * codec —— 码率随 [RecordProfile.effectiveBitrate] 回到 AVC 口径（HEVC 的 ×0.9 不再参与），
+     * 结果与 sidecar 里记的也不再是"说 HEVC、实际 AVC"的假口径。
+     *
+     * @return null = 视频路彻底失败（调用方按 PREPARE_FAILED 收场）
+     */
+    private fun prepareVideoEncoder(p: RecordProfile): PreparedVideo? {
+        val mime = resolveVideoMime(p)
+        // 预筛回退（能力表没有 HEVC）同样要落到 profile 上，不能只换 MIME
+        val pre = if (mime == p.videoMime) p else p.copy(codec = RecordProfile.CODEC_H264)
+        openVideoEncoder(pre, mime)?.let { return PreparedVideo(it, pre, mime) }
+        if (!pre.hevc) return null
+        Log.i(TAG, "hevc rejected at configure, retry avc（释放失败实例后按完整格式重试一次）")
+        val avc = pre.copy(codec = RecordProfile.CODEC_H264)
+        val retried = openVideoEncoder(avc, MediaFormat.MIMETYPE_VIDEO_AVC) ?: return null
+        return PreparedVideo(retried, avc, MediaFormat.MIMETYPE_VIDEO_AVC)
+    }
+
+    /**
+     * 按路的差异建编码器：GPU 路输入面必须 per-codec（[prepareGpuVideoEncoder]）；DIRECT 路
+     * （Camera2 当 producer）保持 persistent surface 跨会话复用的既有口径，行为不变。
+     */
+    private fun openVideoEncoder(p: RecordProfile, mime: String): MediaCodec? = if (p.useGpu) {
+        prepareGpuVideoEncoder(mime, p)
+    } else {
+        val inSurf = inputSurface ?: MediaCodec.createPersistentInputSurface().also { inputSurface = it }
+        createVideoEncoder(mime, p, inSurf)
     }
 
     /** HEVC 只在「存在支持 Surface 输入且吃下该分辨率的编码器」时用，否则回退 H264 */
@@ -780,6 +903,8 @@ class CodecRecorder(
             Log.e(TAG, "codec list unavailable: ${e.message}")
             return null
         }
+        // 厂商编码器仍用这两个旧常量上报 YUV420 布局；Flexible 之外必须逐项比对，不能省。
+        @Suppress("DEPRECATION")
         val priority = intArrayOf(
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,
@@ -1064,7 +1189,7 @@ class CodecRecorder(
             // 且 PCM 队列有 ~1.3s 深度冗余（QUEUE_CAPACITY=64），泵晚 10ms 起步根本追不上队列。
             // 故此处的调度档与采集档**故意不再相同**（原守卫钉死「两处都音频类」已随之作废）。
             runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT) }
-            pumpLoop()
+            pumpEntry()
         }, "WotaCodecMux").apply {
             start()
         }
@@ -1167,6 +1292,10 @@ class CodecRecorder(
             // 同样走「超时即只记账」闸：PREPARE/ERROR 下泵线程本就没起（loop==null，闸恒放行），
             // 但闸放在这里是为了**只有一处**决定"泵线程还活着时能不能拆"，不许各分支各写一份
             if (!joinLoop()) {
+                // R07：收尾职责移交泵线程（feeders/编码面/终态由 [pumpTrail] 收）。
+                // 泵若恰在判活与移交之间越过检查点，[handOffTail] 会由本线程补做并返回真实终态。
+                val late = handOffTail()
+                if (late != null) return late
                 settleRotateLegAtStop()
                 return finishWithoutTeardown()
             }
@@ -1189,6 +1318,10 @@ class CodecRecorder(
         // （2026-10-16：parts 已 COW 化，超时路径只**读快照**——在名单里是唯一获准的安全读，
         // 仍然不许 add/clear。）
         if (!joinLoop()) {
+            // R07：泵线程退出时自己 finish 并交付终态（feeders/编码面也由它收）。
+            // 泵若恰在判活与移交之间越过检查点（旧布尔闸双方都不做的窗口），由本线程补做。
+            val late = handOffTail()
+            if (late != null) return late
             settleRotateLegAtStop()
             return finishWithoutTeardown()
         }
@@ -1223,6 +1356,9 @@ class CodecRecorder(
         // 本对象每个会话新建一个（CameraScreen 收尾即 `recorder = null`），不复用 ⇒ 这里直接返回，
         // 不必把它复位成 IDLE；真拆不掉时也已经只剩进程退出这一条兜底。
         if (!joinLoop()) {
+            // R07：收尾职责交给泵线程（feeders/编码面/终态在 pumpTrail 里收）；泵已越过检查点时
+            // 由本线程补做（见 [TrailHandoff]）
+            handOffTail()
             Log.e(TAG, "release 时泵线程仍未退出：只记账不拆资源（资源与封段由泵线程收尾自己完成）")
             return
         }
@@ -1255,7 +1391,7 @@ class CodecRecorder(
 
     /** 换段腿/丢帧账复位（新会话、新段序列与释放三处共用同一份口径，不许各写一份） */
     private fun resetRotateBooks() {
-        rotateLegStartMs.set(0L)
+        rotateLeg.reset()
         rotateStoreTimedOut = false
         pendingLegLostMs = 0L
         pendingLegLostFrames = 0L
@@ -1304,6 +1440,34 @@ class CodecRecorder(
 
     // region 编码器循环
 
+    /**
+     * 泵线程入口（R07 所有者职责）：正常退出与**任何 Throwable** 都必须走 [pumpTrail]——收尾
+     * （停 feeders、拆当前段、放编码面、移交终态）不许因为异常而消失。
+     *
+     * 旧实现把 `pumpTrail()` 放在 `pumpLoop` 末尾、只在 `pumpLoop` 正常返回后置 trailed=true：
+     * `pumpTrail` 自己抛错时 `pumpLoop` 不返回 ⇒ finally 又跑一次 pumpTrail（双重终态/双重交付）；
+     * `pumpLoop` 抛出 Error 时则连第一错误都没记下。这里改成唯一一次 finally 收尾，异常先记
+     * **首个真实错误**（engineError 首错优先，不被后续连锁异常覆盖）。
+     */
+    private fun pumpEntry() {
+        var pumpThrew: Throwable? = null
+        try {
+            pumpLoop()
+        } catch (t: Throwable) {
+            pumpThrew = t
+            Log.e(TAG, "泵循环异常退出：${t.javaClass.simpleName} ${t.message}")
+            // 首错优先：pumpLoop 内已记过具体环节码（MUX_CLOSE/LOOP 等）就不覆盖
+            engineError = engineError ?: "${RecordError.ENGINE_ERROR}:LOOP"
+        } finally {
+            try {
+                pumpTrail()
+            } catch (t: Throwable) {
+                Log.e(TAG, "泵线程收尾异常：${t.javaClass.simpleName} ${t.message}")
+                if (pumpThrew == null) engineError = engineError ?: "${RecordError.ENGINE_ERROR}:TRAIL"
+            }
+        }
+    }
+
     private fun pumpLoop() {
         var keepGoing = true
         while (keepGoing) {
@@ -1335,6 +1499,8 @@ class CodecRecorder(
             // 【单写者】下面这两步是 codec/muxer/target/currentSink/parts 的**唯一**拆除与封段入口：
             // 控制线程（stop/release）在 joinLoop 超时时只记账、绝不进来抢（双触名单见
             // settleRotateLegAtStop 的 KDoc；parts 已 COW 化后那份"记账"里可以包含只读快照）。
+            // R06：封口段的发布移到独立发布线程后，parts 多了**一条经 addPart 的迟到补发写口**
+            // （COW 并发安全 + 按段序去重）；拆除仍只在本线程。
             // 正常停录由 Thread.join 提供 happens-before，不受影响。
             // 先拆 codec/muxer（moov 写完）再封段提交，顺序反了相册会拿到半截文件
             closeSegmentEngine()
@@ -1386,13 +1552,124 @@ class CodecRecorder(
             keepGoing = wantRotate && rotated && engineError == null
         }
         if (engineError != null) Log.i(TAG, "codec loop end with ${engineError}")
+        // R07：泵线程退出 = 本场收尾的权威完成事件。收尾由 [pumpEntry] 的 finally 统一执行
+        // （正常退出/Throwable 都恰好一次；这里再调会双重终态）。
     }
+
+    /**
+     * 泵线程退出收尾（R07）。
+     *
+     * - **feeders 恒停**：泵循环自己从不碰它们（只有 openNextSegment 换代时停旧建新）。正常停录时
+     *   控制线程稍后也会停（幂等）；join 超时那次控制线程已只记账返回，这两条 AudioRecord 若没人
+     *   停会一直占着采集（"owner must clean feeders"）。
+     * - **终态只在移交成立时结算并交付**（[trail] 的检查点）：正常停录的终态由控制线程 join
+     *   成功后的 `finish()` 交给 UI（这里再 finish 会把 parts 清空、控制线程随后拿到"空产物失败"）；
+     *   join 超时后由 [TrailHandoff] 指定唯一一方执行延迟收尾，不存在双方都不做的窗口。
+     * - **编码面**一并释放：控制线程的 release 走的是超时闸，到不了 `inputSurface.release()`；
+     *   泵线程此刻已退出，释放没有并发（DIRECT 的 persistent 面与 GPU 的 per-codec 面都由本类持有）。
+     */
+    private fun pumpTrail() {
+        // 每一步单独隔离：停 feeder 失败不许跳过终态结算/输入面释放/会话交付；先记**首个**
+        // 真实异常（engineError 首错优先），后续连锁异常只留日志。旧实现一抛就整段收尾消失。
+        var firstFailure: Throwable? = null
+        fun isolated(step: String, body: () -> Unit) {
+            try {
+                body()
+            } catch (t: Throwable) {
+                if (firstFailure == null) firstFailure = t
+                Log.e(TAG, "泵线程收尾步骤 $step 异常：${t.javaClass.simpleName} ${t.message}")
+                engineError = engineError ?: "${RecordError.ENGINE_ERROR}:TRAIL"
+            }
+        }
+        isolated("stopFeeder") { stopFeeder() }
+        isolated("stopCapFeeder") { stopCapFeeder() }
+        // 泵线程退出 = 换段腿的绝对终点（Y18）：正常路径由 settleRotateLeg 清，但异常退出
+        // （runSegment/nextSegment 抛出、循环早退）可能没走到那一行——截止时刻若留下来，
+        // 之后 release()/discardCurrent 的每一次有界调用都会拿到负数预算、判据永远"停摆"。
+        // 这里清是安全的：停止路径的领取**不清**截止（见 settleRotateLegAtStop），清它的只能是泵线程。
+        isolated("rotateLeg.endLeg") { rotateLeg.endLeg() }
+        // 收尾移交的原子检查点（见 [TrailHandoff]）：无人请求 = 正常停录（控制线程 join 成功后
+        // 自己 finish）；本方法返回 false 也可能是控制线程已补做或正在做，均不许再动资源。
+        if (!trail.pumpCheckpoint()) {
+            Log.i(TAG, "泵线程越过收尾检查点：trail=${trail.stateName()}（不由泵线程做延迟收尾）")
+            return
+        }
+        // 泵线程接管延迟收尾：异常退出时可能还留着一枚未封的 currentSink/target。它是本线程的
+        // 单写者资源，必须由本线程按废片收掉（keep=false），否则 fd/pending 悬到进程结束。
+        isolated("teardownCurrent") {
+            if (currentSink != null) discardCurrentAtTeardown(engineError ?: "TEARDOWN")
+            else closeTargetBounded()
+        }
+        var out: RecordResult? = null
+        isolated("finish") { out = finish(engineError) }
+        isolated("releaseInputSurface") {
+            val s = inputSurface
+            inputSurface = null
+            s?.release()
+        }
+        val settled = out ?: return
+        Log.e(TAG, "泵线程延迟收尾完成（控制线程已只记账返回）：${settled.error ?: "ok"}，交付会话终态")
+        isolated("deliverFinalResult") {
+            val delivery = onSessionDelivery ?: return@isolated
+            val seriesId = sessionSeriesId
+            val startedAtMs = sessionStartedAtMs
+            if (startedAtMs <= 0L) return@isolated
+            val attempt = sessionAttempt
+            delivery(RecorderDelivery.FinalResult(seriesId, startedAtMs, settled, attempt = attempt))
+        }
+    }
+
+    /** 延迟收尾时的未封段：按废片丢弃（固定入库预算，不受已结束的换段腿预算影响） */
+    private fun discardCurrentAtTeardown(code: String) {
+        val sink = currentSink ?: run {
+            closeTargetBounded()
+            return
+        }
+        Log.i(TAG, "teardown discard unsealed output: $code")
+        closeTargetBounded()
+        currentSink = null
+        val r = storeIo.run(STORE_CALL_BUDGET_MS) {
+            store.seal(sink, partIndex, partStartMs, 0L, keep = false)
+        }
+        if (r is Bounded.TimedOut) {
+            Log.e(TAG, "teardown 回收未封段超时（${STORE_CALL_BUDGET_MS}ms，记录留给系统兜底清扫）")
+        }
+    }
+
+    /**
+     * join 超时后的收尾移交（R07 收口）：见 [TrailHandoff]。
+     *
+     * @return 控制线程**补做**的真实终态：泵线程已在「判活超时」与「请求移交」之间越过检查点，
+     *   它不会再碰任何资源，本线程 finish + 放输入面后把真实结果直接交给调用方（stop 的返回值
+     *   就是最终回执，不再依赖稍后才到的终态交付）；
+     *   null = 泵线程会（或正在）做延迟收尾，调用方按既有语义只记账返回早期快照。
+     */
+    private fun handOffTail(): RecordResult? {
+        if (!trail.controlDefer()) return null
+        val out = finish(engineError)
+        val s = inputSurface
+        inputSurface = null
+        s?.release()
+        Log.e(
+            TAG,
+            "泵线程在超时判定后已越过收尾检查点（trail=${trail.stateName()}）：控制线程补做收尾，" +
+                "返回真实终态 ${out.error ?: "ok"}"
+        )
+        return out
+    }
+
+    /**
+     * 迟到发布结论现在经 [SessionRelay] 直接交会话所有者（发布线程不捕获本 recorder）。
+     * 已封段证据在 [SealedPublisher] 台账里，[mergedParts] 收尾时并上；迟到事件本身带
+     * 段视图与发布分类，SessionDelta 会把它并进结果视图。
+     */
+
 
     /**
      * 换段腿起钟（泵线程）。腿的定义：从编码器被拆到新段 `codec.start()` 返回（见 [ROTATE_LEG_BUDGET_MS]）。
      */
     private fun beginRotateLeg() {
-        rotateLegStartMs.set(SystemClock.elapsedRealtime())
+        rotateLeg.begin()
         // 帧账上界起点：腿内的相机/预览回调数（不是精确丢帧，见 pendingLegLostFrames）
         rotateLegFramesBase = FrameLedger.snapshot().glCallbacks
         rotateStoreTimedOut = false
@@ -1407,11 +1684,13 @@ class CodecRecorder(
     /**
      * 换段腿的剩余预算（ms）：腿内按 [ROTATE_LEG_BUDGET_MS] 递减，腿外（停止封段等）用
      * [STORE_CALL_BUDGET_MS]。<=0 = 预算已尽 ⇒ 下一次有界调用直接判超时（不许再发无预算的调用）。
+     *
+     * Y18：只由 [RotateLegLedger] 的**不可变截止时刻**派生——停止路径领走丢失结算**不许**
+     * 把预算重新发出来（旧形态 `getAndSet(0L)` 会：stop 超时时在途换段拿到一份腿外 3s 预算）。
      */
     private fun rotateBudgetLeftMs(): Long {
-        val start = rotateLegStartMs.get()
-        if (start == 0L) return STORE_CALL_BUDGET_MS
-        return ROTATE_LEG_BUDGET_MS - (SystemClock.elapsedRealtime() - start)
+        // 块体而非表达式体：源码守卫用 bodyOf 解花括号体（表达式体会让守卫失去输入直接抛）
+        return rotateLeg.budgetLeftMs()
     }
 
     /** 入库调用撞上限（或无预算可发）时的记账：本腿结算会据此判明确失败 */
@@ -1439,8 +1718,10 @@ class CodecRecorder(
      *   封段：那份耗时该记进丢失账、但**不许**判失败——封段慢不等于录制受阻）
      */
     private fun settleRotateLeg(judgeStall: Boolean) {
-        // 读 + 清一次做完：泵线程与控制线程的结算只有一方能拿到非零 start（见字段 KDoc）
-        val start = rotateLegStartMs.getAndSet(0L)
+        // 领取权与腿终点分开（Y18）：泵线程是腿走完的那一方 ⇒ 领结算 + **清截止时刻**；
+        // 停止路径只领结算、不清截止（见 settleRotateLegAtStop 与 RotateLegLedger）
+        val start = rotateLeg.claim()
+        rotateLeg.endLeg()
         if (start == 0L) return
         val legMs = SystemClock.elapsedRealtime() - start
         val lost = rotateLostMs(legMs)
@@ -1492,10 +1773,14 @@ class CodecRecorder(
      * 最坏是读到略旧的值，不产生写写冲突。
      */
     private fun settleRotateLegAtStop() {
-        // 与 [settleRotateLeg] 互斥：腿起点由双方 `getAndSet(0L)` **消费**，先到者独得，后到者必得 0 早退。
+        // 与 [settleRotateLeg] 互斥：结算权由 [RotateLegLedger.claim] 的 CAS **消费**，先到者独得，
+        // 后到者必得 0 早退。**只领结算、不清截止时刻**（Y18）：泵线程还卡在腿里，截止时刻若被
+        // 这里清掉，预算读数会退回腿外的 STORE_CALL_BUDGET_MS——控制线程收尾凭空多 3s 预算，
+        // 在途泵的下一轮有界调用也不再按腿内预算判停摆（两本账串台）。腿终点由泵线程
+        // [settleRotateLeg] / [pumpTrail] 清。
         // 下面这一笔 `rotateLoss.add(lost)` **不许删**（用户可见失败结果里的丢失量靠它），
-        // 也不许再加第二笔——双加已被上面的原子读清结构性地排除。
-        val start = rotateLegStartMs.getAndSet(0L)
+        // 也不许再加第二笔——双加已被上面的 CAS 结构性地排除。
+        val start = rotateLeg.claim()
         if (start == 0L) return
         val legMs = SystemClock.elapsedRealtime() - start
         val lost = rotateLostMs(legMs)
@@ -1532,13 +1817,15 @@ class CodecRecorder(
 
     /** 建一枚新 pending（有界）：超时/失败回 null；晚到的那枚经 [pendingHandoff] 就地回收 */
     private fun createPendingBounded(partIndex: Int): Uri? {
-        pendingHandoff.reset()
+        // Y18：先换代再发调用——闭包捕获代号，上一代那条死线程晚到的 insert 会被拒收并回收，
+        // 不许冒充本代输出；判停摆也只撤本代交接权（见 [OneShotHandoff]）
+        val gen = pendingHandoff.reset()
         val r = storeIo.run(rotateBudgetLeftMs()) {
-            pendingHandoff.publish(store.createPending(partIndex))
+            pendingHandoff.publish(gen, store.createPending(partIndex))
         }
         return when (r) {
             is Bounded.Done -> if (r.value) {
-                pendingHandoff.claim()
+                pendingHandoff.claim(gen)
             } else {
                 // insert 当场返回空（真机那条"第 1~2 次换段就死"的死法）：也是 INSERT 环节
                 noteRotateStage(RotateStage.INSERT)
@@ -1547,7 +1834,7 @@ class CodecRecorder(
             Bounded.TimedOut -> {
                 noteStoreTimeout("createPending")
                 noteRotateStage(RotateStage.INSERT)
-                discardBounded(pendingHandoff.abandon())
+                discardBounded(pendingHandoff.abandon(gen))
                 null
             }
         }
@@ -1562,34 +1849,25 @@ class CodecRecorder(
 
     /** 打开输出目标（有界）：超时回 null；晚到的那枚自己关掉（fd 不许悬到进程结束） */
     private fun openTargetBounded(sink: OutputSink): OutputTarget? {
-        targetHandoff.reset()
-        val r = storeIo.run(rotateBudgetLeftMs()) { targetHandoff.publish(OutputTarget.open(ctx, sink)) }
+        // Y18：同 pending 闸——代号把"上一次尝试晚到的 fd"挡在本代之外（拒收 → 锁外 close）
+        val gen = targetHandoff.reset()
+        val r = storeIo.run(rotateBudgetLeftMs()) { targetHandoff.publish(gen, OutputTarget.open(ctx, sink)) }
         return when (r) {
-            is Bounded.Done -> if (r.value) targetHandoff.claim() else null
+            is Bounded.Done -> if (r.value) targetHandoff.claim(gen) else null
             Bounded.TimedOut -> {
                 noteStoreTimeout("OutputTarget.open")
                 noteRotateStage(RotateStage.OPEN)
                 // 交接闸里已落地的那枚由我们自己关（晚到的由 discard 回调关）
-                targetHandoff.abandon()?.let { closeBounded(it) }
+                targetHandoff.abandon(gen)?.let { closeBounded(it) }
                 null
             }
         }
     }
 
-    /** 封一段并入库（有界）：超时回 null（晚到的 commit 仍会把文件落地，内容不丢） */
-    private fun sealBounded(sink: OutputSink, durationMs: Long, keep: Boolean): VideoSegment? {
-        val r = storeIo.run(rotateBudgetLeftMs()) {
-            store.seal(sink, partIndex, partStartMs, durationMs, keep)
-        }
-        return when (r) {
-            is Bounded.Done -> r.value
-            Bounded.TimedOut -> {
-                noteStoreTimeout("store.seal")
-                noteRotateStage(RotateStage.SEAL)
-                null
-            }
-        }
-    }
+    /**
+     * 封口后的发布执行体已移到 `SealedPublication.kt` 的顶层函数：发布线程只捕获
+     * `VideoStore + sink`，不捕获 recorder（挂起的 Provider 不许钉住 feeders/输入面/Activity）。
+     */
 
     /**
      * 分段：换 pending uri、重建 codec+muxer（输入面与采集线程沿用），并在本线程内重启。
@@ -1631,7 +1909,7 @@ class CodecRecorder(
         val p = profile ?: return false
         // 腿预算已被前面的入库调用吃光就不再往下走：后面全是编码器/muxer 的 native 重建（无上限可给），
         // 预算既尽就该交回 pumpLoop 按 ROTATE_STALL 明确失败，而不是带着没预算的腿继续赌
-        if (rotateLegStartMs.get() != 0L && rotateBudgetLeftMs() <= 0L) {
+        if (rotateLeg.active() && rotateBudgetLeftMs() <= 0L) {
             noteStoreTimeout("rotate budget spent")
             return false
         }
@@ -1839,6 +2117,9 @@ class CodecRecorder(
         // 录制中静音巡检的节拍起点（0 = 本段未巡过；elapsedRealtime 域，单写者推进）
         var lastSilenceProbeMs = 0L
         var videoTrack = -1
+        // 已建视频轨的格式指纹（Y15）：同段第二次 FORMAT_CHANGED 只有指纹相同才放行（见 [videoFmtAction]）。
+        // 段内局部：换段重建编码器/muxer 后从零起算
+        var videoFmtKey: String? = null
         var muxStarted = false
         var videoDone = false
         var videoEosQueued = false
@@ -1975,10 +2256,29 @@ class CodecRecorder(
                 if (idx >= 0 || idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) anyOutThisTick = true
                 when {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        videoTrack = mx.addTrack(v.getOutputFormat())
-                        healthVideoTrackAdded = true // 自检第一格：编码器产出格式、muxer 建轨成功
-                        if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
-                        Log.i(TAG, "video track=$videoTrack fmt=${v.getOutputFormat()}")
+                        // Y15：同一段里 FORMAT_CHANGED 可能重复投递（编码器重配 / ROM 行为）。
+                        // 旧实现无条件 addTrack：muxer 已启动时建轨是非法状态（泵线程当场被炸掉），
+                        // 启动前则多建一条无样本轨。每段只建一次；已建轨后指纹变了 = 真换格式，
+                        // 旧轨的 csd/轨头已写死，继续写新格式样本只会产出花屏/坏容器 ⇒ 段级错误码。
+                        val nextKey = videoFormatKey(v.getOutputFormat())
+                        when (videoFmtAction(videoTrack >= 0, videoFmtKey, nextKey)) {
+                            VideoFmtAction.ADD_TRACK -> {
+                                videoTrack = mx.addTrack(v.getOutputFormat())
+                                videoFmtKey = nextKey
+                                healthVideoTrackAdded = true // 自检第一格：编码器产出格式、muxer 建轨成功
+                                if (!muxStarted) muxStarted = startMuxerIfReady(mx, videoTrack, envCh, capCh)
+                                Log.i(TAG, "video track=$videoTrack fmt=${v.getOutputFormat()}")
+                            }
+                            VideoFmtAction.IGNORE_SAME ->
+                                Log.i(TAG, "video fmt repeat (same fingerprint), keep track=$videoTrack")
+                            VideoFmtAction.FAIL_CHANGED -> {
+                                Log.e(TAG, "video fmt changed mid-segment track=$videoTrack old=$videoFmtKey new=$nextKey")
+                                // 段级错误码（卡片修复方向）：容器若已收尾，已写样本按降级呈现保留；
+                                // 退出形态与抽干超时同款（post-loop 照常记账/收尾）
+                                engineError = engineError ?: "${RecordError.ENGINE_ERROR}:FMT"
+                                break
+                            }
+                        }
                     }
                     idx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     idx == INFO_OUTPUT_BUFFERS_CHANGED -> Unit
@@ -2206,9 +2506,12 @@ class CodecRecorder(
                 // P2：双通道 EOS 兜底**每轮重试**（置位=真正入队，那一拍 dequeueInputBuffer(0)
                 // 返回 -1 就下一轮再来）——锁进 deadline==0L 单发门的话，满负荷拍点 EOS 丢失、
                 // done 恒不置位 → 抽干超时误废整段（单段录制即整条丢失）。
+                // Y16：EOS 不许越过 feeder 队列（旧实现当拍直发 ⇒ 最长 ~2.7s 尾音被段界 drain()
+                // 静默丢弃）。有积压时本拍继续喂（喂码块排在停止块之前，每拍 1 包，积压几百 ms
+                // 内排空），窗口到硬上限才带积压强行 EOS，未喂进去的包计入 [AudioChannel.eosDrops]。
                 // 重试上界仍是 deadline（静默预算 DRAIN_LIMIT_MS 顺延后的当前值）
-                if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)
-                if (c != null && capCh != null && !capCh.eosQueued) queueAudioEos(c, capCh)
+                if (a != null && envCh != null && !envCh.eosQueued) tailEosFor(a, envCh, "env", ef?.pending() ?: 0, drainTimedOut)
+                if (c != null && capCh != null && !capCh.eosQueued) tailEosFor(c, capCh, "cap", cf?.pending() ?: 0, drainTimedOut)
             }
             if (videoDone && (envCh?.done ?: true) && (capCh?.done ?: true) &&
                 (envCh?.heldOutIdx ?: -1) < 0 && (capCh?.heldOutIdx ?: -1) < 0
@@ -2272,8 +2575,10 @@ class CodecRecorder(
                 "环境丢弃=${envCh?.lateDrops ?: 0} 内录丢弃=${capCh?.lateDrops ?: 0} " +
                 "喂码丢弃=${envCh?.feedDropped ?: 0}/${capCh?.feedDropped ?: 0} " +
                 "截断=${envCh?.feedTruncated ?: 0}/${capCh?.feedTruncated ?: 0} " +
-                // pts 单调兜底的两枚账（见 [muxPtsFixes]）：等值是设计内同格多帧，真倒退才是异常
-                "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) " +
+                // 停止或换段达到硬上限时，分别汇总环境和内录尾包。
+                "尾弃=${envCh?.eosDrops ?: 0}/${capCh?.eosDrops ?: 0} " +
+                // 同格等值、真倒退与负戳夹紧分别记账。
+                "pts修正=${muxPtsFixes}(等值${muxPtsEqualFixes}) 夹紧=${muxPtsClampFixes}(最大提前${muxPtsMaxEarlyUs}us) " +
                 "bytes=$segWrittenBytes 视频=${vPtsLastUs / 1000f}ms 环境=${aPtsLastUs / 1000f}ms 内录=${cPtsLastUs / 1000f}ms " +
                 "墙钟=${(System.nanoTime() - segStartNs) / 1_000_000f}ms " +
                 "内录静音[$capSilenceInfo]"
@@ -2378,6 +2683,29 @@ class CodecRecorder(
         }
     }
 
+    /**
+     * 编码器输出格式的**段内指纹**（Y15，仅供 [videoFmtAction] 判"是不是同一次格式"）。
+     *
+     * 取 `getKeys()` 的全量键集（API 29 起可用，minSdk 29）排序后逐键拍平：重复的
+     * FORMAT_CHANGED 携带的格式逐键相等，真换格式（分辨率/码流参数/csd 长度变化）必然会打出
+     * 不同的串。标量按 int→long→float→string 逐档尝试取值（`MediaFormat` 只有按类型取值器，
+     * 类型不匹配会抛 ClassCastException，靠 `runCatching` 退档）；csd 一类的 ByteBuffer 值只记
+     * "存在"不记内容——同一段中间隔一次的重复通知里 csd 字节不会不同，逐字节比较反而会为了
+     * 一个几乎不存在的形态引入逐键 IO。
+     *
+     * 本函数碰 [MediaFormat]（JVM 单测构造不出来），所以判定本身留给纯函数 [videoFmtAction]，
+     * 这里只负责把格式拍平成可比较的串；结构接线由 `VideoFmtTrackGuardTest` 按源文本钉住。
+     */
+    private fun videoFormatKey(f: MediaFormat): String =
+        f.getKeys().sorted().joinToString(";") { k ->
+            val v = runCatching { f.getInteger(k).toString() }.getOrNull()
+                ?: runCatching { f.getLong(k).toString() }.getOrNull()
+                ?: runCatching { f.getFloat(k).toString() }.getOrNull()
+                ?: runCatching { f.getString(k) }.getOrNull()
+                ?: "buf" // ByteBuffer 值（csd-0/1 等）：只记存在
+            "$k=$v"
+        }
+
     /** PTS 统一到本段基准（两轨同一时钟，分段后不出现倒退） */
     private fun writeSample(mx: MediaMuxer, kind: String, track: Int, buf: ByteBuffer?, info: MediaCodec.BufferInfo): Int {
         if (track < 0 || buf == null) return 0
@@ -2385,7 +2713,15 @@ class CodecRecorder(
         if (shifted < 0L) {
             // 基准取的是换段瞬间的 nanoTime，音频包可能在那之前就已入队：夹紧会把这几帧往前挪，
             // 量级必须能在日志里看到，否则分段处的音画偏移无从判断（本机无高帧率能力，改语义前先取证）
-            Log.w(TAG, "段 $partIndex pts 早于基准 ${-shifted}us，已夹紧 track=$track")
+            // B06：逐样本刷 w 会按帧级淹掉日志——首条留明细，其余只计数，量级进段尾汇总
+            muxPtsClampFixes++
+            if (-shifted > muxPtsMaxEarlyUs) muxPtsMaxEarlyUs = -shifted
+            if (muxPtsClampFixes == 1) {
+                Log.w(
+                    TAG,
+                    "段 $partIndex pts 早于基准 ${-shifted}us，已夹紧 track=$track（同类后续只计数，段尾汇总）"
+                )
+            }
             info.presentationTimeUs = 0L
         } else {
             info.presentationTimeUs = shifted
@@ -2400,17 +2736,26 @@ class CodecRecorder(
             val fix = monotonicPts(lastUs, info.presentationTimeUs)
             if (fix.advanced) {
                 if (info.presentationTimeUs == lastUs) {
-                    // 同格等值：只计数 + d 级留痕，逐帧刷 w 是本条要治的洪泛
+                    // 同格等值：只计数 + 首枚 d 级留痕（逐帧刷屏正是本条要治的洪泛）
                     muxPtsEqualFixes++
-                    Log.d(TAG, "轨 $track pts 与上一枚同格相等（$lastUs）⇒ 推进 1µs（同格设计内，不计异常）")
+                    if (muxPtsEqualFixes == 1) {
+                        Log.d(
+                            TAG,
+                            "轨 $track pts 与上一枚同格相等（$lastUs）⇒ 推进 1µs（同格设计内，不计异常；后续只计数）"
+                        )
+                    }
                 } else {
                     muxPtsFixes++
                     if (fix.backUs > muxPtsMaxBackUs) muxPtsMaxBackUs = fix.backUs
-                    Log.w(
-                        TAG,
-                        "轨 $track pts 倒退（cur=${info.presentationTimeUs} last=$lastUs）" +
-                            "⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us）"
-                    )
+                    // B06：首条留明细（轨号/两枚戳/倒退量都要能对现场），后续只计数——
+                    // 量级与次数由段尾汇总行统一给出，连续倒退按帧级刷 w 会淹掉日志
+                    if (muxPtsFixes == 1) {
+                        Log.w(
+                            TAG,
+                            "轨 $track pts 倒退（cur=${info.presentationTimeUs} last=$lastUs）" +
+                                "⇒ 推进到 ${fix.ptsUs}（倒退 ${fix.backUs}us；同类后续只计数，段尾汇总）"
+                        )
+                    }
                 }
             }
             info.presentationTimeUs = fix.ptsUs
@@ -2449,6 +2794,10 @@ class CodecRecorder(
      * 失效路径的兜底 EOS（[queueAudioEos]）据此不再重复入队。
      */
     private fun feedAudioInput(codec: MediaCodec, src: AudioFeeder, ch: AudioChannel) {
+        // Y16：两轨统一输入关闭状态。EOS 已入队后既不许再消费队列（EOS 之后的包编码器不会再
+        // 接收，喂进去只会被静默吃掉），也不许再抢输入槽——环境活动入口自带 !eosQueued 守卫，
+        // 内录两个入口没有；把判据收进这里，三个入口同口径，漏加守卫不会再复现。
+        if (ch.eosQueued) return
         val pkt = ch.heldPkt ?: src.poll(0) ?: return
         val idx = codec.dequeueInputBuffer(0)
         if (idx < 0) {
@@ -2487,6 +2836,33 @@ class CodecRecorder(
         val idx = codec.dequeueInputBuffer(0)
         if (idx < 0) return
         queueEosOn(codec, idx, ch)
+    }
+
+    /**
+     * 停止/轮转时的**尾音收口**（Y16，停录停止门内每拍重试）：先问纯判定 [audioEosAction]。
+     *
+     * - [AudioEosAction.QUEUE_EOS]：队列与手里都已排空 ⇒ 正常发 EOS（旧行为，尾音已进编码器）；
+     * - [AudioEosAction.FEED_THEN_DEFER]：还有积压 ⇒ 本拍不发 EOS。喂码块在停止块**之前**，
+     *   所以本拍已多喂一包；下拍继续，直到排空或抽干窗口到期；
+     * - [AudioEosAction.FORCE_EOS]：抽干窗口到硬上限（编码器已卡死）⇒ 带积压发 EOS，并把
+     *   **永远进不了编码器**的真实包数写进 [AudioChannel.eosDrops]（段收尾行打印）。
+     *   赋值不是累加：queueInputBuffer 失败时下一拍还会重试，按当时真实积压重算才不重复计数。
+     *
+     * 手里的包若是 EOS 哨兵（pts<0），它不是被弃的 PCM，只计队列里的真实包。
+     */
+    private fun tailEosFor(codec: MediaCodec, ch: AudioChannel, label: String, pending: Int, drainExpired: Boolean) {
+        when (audioEosAction(pending, ch.heldPkt != null, drainExpired)) {
+            AudioEosAction.QUEUE_EOS -> queueAudioEos(codec, ch)
+            AudioEosAction.FEED_THEN_DEFER -> Unit
+            AudioEosAction.FORCE_EOS -> {
+                val heldReal = if (ch.heldPkt?.ptsUs?.let { it >= 0 } == true) 1 else 0
+                ch.eosDrops = pending + heldReal
+                if (ch.eosDrops > 0) {
+                    Log.w(TAG, "drain expired: $label tail EOS with backlog, unfed packets=${ch.eosDrops}")
+                }
+                queueAudioEos(codec, ch)
+            }
+        }
     }
 
     private fun queueEosOn(codec: MediaCodec, idx: Int, ch: AudioChannel) {
@@ -2556,12 +2932,22 @@ class CodecRecorder(
      */
     private fun finishWithoutTeardown(): RecordResult {
         val lost = rotateLoss.totalMs
-        // 错误码：已有原因码就保留；否则按"停止时换段腿未返回"记换段受阻（带丢失账与环节游标，
-        // UI 侧呈现计划把失败码语义转成不吓人的附注）。绝不返回"成功但零产物"。
-        val err = engineError ?: rotateStallError(lost, rotateFailStage)
-        // 已封段只读快照：COW 的 toList 与泵线程的 add 结构性互不干扰；空快照时桥函数退回旧失败形态
-        val sealed = parts.toList()
-        Log.e(TAG, "停止时泵线程未退出：只记账不拆资源（已封 ${sealed.size} 段如实带出，封段由泵线程自己收），失败码 $err")
+        // 临时快照只带**真实**错误：没有错误就不许伪造 TOO_SHORT / ROTATE_STALL。泵线程还活着，
+        // 当前段可能尚未封口；发布路也可能还在清 IS_PENDING——这些都是 pending，不是失败。
+        val err = engineError
+        // 已封段只读快照：COW 的 toList 与泵线程的 add 结构性互不干扰；再并上发布路已落地
+        // （含迟到）的保留段。当前段也算未落地（泵线程会封它），所以 pending 要加 1。
+        val snap = sealedPublisher.snapshot()
+        val sealed = mergeSegments(parts.toList(), snap.outcomes.mapNotNull { it.visibleSegment() })
+        // 当前段也算未落地（泵线程会封它）：按确切段序并入待发布集合，而不是给计数 +1。
+        val pendingIds = if (currentSink != null) snap.pendingPartIds + partIndex else snap.pendingPartIds
+        val pending = pendingIds.size
+        val failures = snap.outcomes.count { it.classification == PublishClass.FAILED }
+        Log.e(
+            TAG,
+            "停止时泵线程未退出：只记账不拆资源（已封 ${sealed.size} 段，pending=$pending，" +
+                "发布失败=$failures，封段由泵线程自己收），真实错误=${err ?: "none"}"
+        )
         return sealedPartsResult(
             sealed = sealed,
             err = err,
@@ -2571,7 +2957,12 @@ class CodecRecorder(
             rotateStalls = rotateLoss.count,
             muxDiag = muxFailDetail,
             ambientLost = ambientLost,
-            latePending = latePendingReaped
+            latePending = latePendingReaped,
+            // 这不是终态：泵线程/发布线程之后的结论拥有改正权
+            terminal = false,
+            pendingPublications = pending,
+            pendingPartIds = pendingIds,
+            publicationFailures = failures
         )
     }
 
@@ -2692,17 +3083,56 @@ class CodecRecorder(
 
     private fun sealCurrent(durationMs: Long, keep: Boolean) {
         val sink = currentSink ?: return
-        // 输出句柄先关，再 commit/discard（写完才清 IS_PENDING）。**两步都有界**：关 fd / 查 SIZE、DATA /
-        // 清 IS_PENDING 全走 MediaProvider，这台机在 33MB 级 pending 文件收尾上会长时间不返回（真机
-        // 现场：段已写满 31.5MB、计时冻结、无新文件、无残留——正是卡在这两步之间的形态）
-        closeTargetBounded()
+        // 段号/起点在**泵线程**上取好再交给发布线程（发布线程稍后跑，字段可能已被下一轮改写）
+        val index = partIndex
+        val startMs = partStartMs
+        // 输出句柄的**所有权**在此摘走（泵线程不再持有 target/currentSink），关闭动作整体交给
+        // 发布线程：关闭与发布（查 SIZE/DATA、清 IS_PENDING）必须同一枚线程按序完成——旧实现
+        // `closeTargetBounded()` 超时返回后 fd 还开着，发布线程就去清 IS_PENDING 了（与 close
+        // 赛跑）。关闭是**严格**的（closeStrict 抛错 ⇒ 整段 FAILED，发布块不跑），不再套
+        // BoundedStore：套了 500ms 就允许"close 还在后台跑、发布已经清 IS_PENDING"。
+        val targetToClose = target
+        target = null
         currentSink = null
-        val seg = sealBounded(sink, durationMs, keep) ?: return
-        // 废片不能进 parts：seal 已经把这条 MediaStore 记录删掉了，列进去就会让
-        // buildResult 拿到一个不存在的 uri，out.ok 成立 → UI 报「已保存」而文件其实没了
-        // （超时的情况下 seg 为 null：晚到的 commit 仍会把文件落地，只是不进 parts 清单）
-        if (keep) parts.add(seg)
+        // R06：发布走独立路——不吃换段腿预算，预算为 0 也照发。**换段路径只提交不等待**
+        // （waitMs=0）：旧实现内联等 3s，会把下一段的建 pending/开 target 预算吃光；停止路径
+        // 才在调用方这边有界等（PUBLISH_WAIT_MS，发布本身永不取消）。
+        val publishWaitMs = if (stopping) PUBLISH_WAIT_MS else 0L
+        val draft = SealedDraft(index, startMs, durationMs, keep)
+        val part = sealedPublisher.publish(
+            draft,
+            waitMs = publishWaitMs,
+            close = {
+                // 严格关闭：失败必须冒泡给发布线程归入 FAILED（close 内吞异常会让发布在
+                // 未确认关闭的 fd 上清 IS_PENDING）。
+                targetToClose?.closeStrict()
+                Log.i(TAG, "output target closed（发布线程内完成）part=$index")
+            }
+        ) { sealOnPublisher(store, sink, index, startMs, durationMs, keep) }
+        // 每段最终 committed 状态要能在日志里逐段看见（R06 验收：长录换段时分辨"发布了没有"）
+        Log.i(
+            TAG,
+            "封段发布 part=$index keep=$keep wait=${publishWaitMs}ms " +
+                "class=${part?.classification ?: "pending(发布路)"} committed=${part?.segment?.committed}"
+        )
+        // 废片不能进 parts：keep=false 在发布路里已归为 DISCARDED（visibleSegment 为 null）；
+        // 发布失败的段也不进（不许伪造一个"已保存"段）
+        part?.visibleSegment()?.let { addPart(it) }
     }
+
+    /**
+     * 已封段的**唯一写口**：泵线程 [sealCurrent] 与发布线程迟到补发共用（`parts` 是
+     * CopyOnWriteArrayList，本身并发安全）。按段序去重：同一段在同步路径已落清单时，
+     * 迟到台账里的同一结果不许再写一遍（合并视图也按段序去重，两处口径一致）。
+     */
+    private fun addPart(seg: VideoSegment) {
+        if (parts.any { it.partIndex == seg.partIndex }) return
+        parts.add(seg)
+    }
+
+    /** 收尾时的段清单视图：泵线程清单快照 + 发布路台账（含迟到落地），按段序去重合并 */
+    private fun mergedParts(): List<VideoSegment> =
+        mergeSegments(parts.toList(), sealedPublisher.publishedSegments())
 
     private fun discardCurrent(code: String) {
         val sink = currentSink ?: return
@@ -2716,16 +3146,20 @@ class CodecRecorder(
     }
 
     private fun buildResult(err: String?): RecordResult {
-        val first = parts.firstOrNull()
+        // 段清单 = 泵线程已封段 + 发布路台账里已落地（含迟到）的保留段，按段序去重
+        val sealed = mergedParts()
+        // 段集与待发布集合取同一份一致快照（两次读之间可能有发布完成，账会自相矛盾）
+        val snap = sealedPublisher.snapshot()
+        val first = sealed.firstOrNull()
         return RecordResult(
             uri = first?.uri,
             path = first?.path,
-            bytes = parts.sumOf { it.bytes },
+            bytes = sealed.sumOf { it.bytes },
             durationMs = clock.elapsedMs(),
             error = err,
             seriesId = store.seriesId,
-            parts = parts.toList(),
-            uncommitted = parts.count { !it.committed },
+            parts = sealed,
+            uncommitted = sealed.count { !it.committed },
             segVideoSamples = segSampleCounts.toList(),
             segLostMs = segLostMs.toList(),
             lostMs = rotateLoss.totalMs,
@@ -2735,7 +3169,11 @@ class CodecRecorder(
             muxDiag = muxFailDetail,
             // 环境音丢失进结果（S1-M3-05）：ok 时 UI 在「已保存」上附注；与 degradedCode 同时命中
             // 走组合文案（两件事互不矛盾）。失败结果（parts 为空）文案由错误码承担，不带本注
-            ambientLost = ambientLost
+            ambientLost = ambientLost,
+            // 发布路尚未落地的确切段序：非空时结果不是权威结论（ok 恒 false），迟到结论按段消账
+            pendingPublications = snap.pendingPartIds.size,
+            pendingPartIds = snap.pendingPartIds,
+            publicationFailures = snap.outcomes.count { it.classification == PublishClass.FAILED }
         )
     }
 
@@ -2745,15 +3183,61 @@ class CodecRecorder(
         // 见 RecordError.ROTATE_STALL 与 recordResultText 的文案映射）
         val lost = rotateLoss.totalMs
         val degraded = degradedCode
+        // 有迟到落地但未同步返回的保留段也算产物：判"有没有成片"必须看合并视图，
+        // 否则会把"文件已在盘上"报成零产物失败
+        val merged = mergedParts()
+        val snap = sealedPublisher.snapshot()
+        val pendingIds = snap.pendingPartIds
+        val pending = pendingIds.size
+        val failures = snap.outcomes.count { it.classification == PublishClass.FAILED }
+        // 空产物 + 发布路仍在跑 = **pending，不是失败**（R06/R07 的核心）：不许伪造
+        // TOO_SHORT/ROTATE_STALL。泵线程已终态（terminal=true），但真正的成功/失败要等
+        // 发布路静默（pending==0）才能定稿；迟到结论会带 remaining 交付给会话所有者。
+        val effectiveError = when {
+            error != null -> error
+            merged.isNotEmpty() -> null
+            pending > 0 -> null
+            // 发布路已静默、零产物：真实失败。发布自身 FAILED 优先给出可查的发布码；
+            // 其余（弃段/零样本）沿用旧的 TOO_SHORT。
+            failures > 0 -> "${RecordError.ENGINE_ERROR}:PUBLISH"
+            else -> RecordError.TOO_SHORT
+        }
         val out = when {
-            parts.isEmpty() ->
-                RecordResult.fail(error ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+            merged.isEmpty() && effectiveError == null ->
+                // 零产物但发布路仍在跑：不是失败，只是"还没定稿"。terminal=true 表示引擎已停，
+                // pending>0 让会话所有者在发布结论到齐前不许把它当成功/失败结算。
+                RecordResult(
+                    uri = null,
+                    path = null,
+                    bytes = 0L,
+                    durationMs = clock.elapsedMs(),
+                    error = null,
+                    seriesId = store.seriesId,
+                    lostMs = lost,
+                    muxDiag = muxFailDetail,
+                    terminal = true,
+                    pendingPublications = pending,
+                    pendingPartIds = pendingIds,
+                    publicationFailures = failures
+                )
+            merged.isEmpty() ->
+                // 空首段仍属于本会话：系列的归属来自 store，不取决于这次有没有封出段。
+                // 丢了它，stopInternal 会按 seriesId=0 登记，迟到的发布/终态（真实系列号）
+                // 永远合并不进来（R06/R07 的收尾身份必须与引擎 bindSession 同源）。
+                RecordResult.fail(effectiveError ?: RecordError.TOO_SHORT, clock.elapsedMs(), lost, muxFailDetail)
+                    .copy(
+                        seriesId = store.seriesId,
+                        terminal = true,
+                        pendingPublications = pending,
+                        pendingPartIds = pendingIds,
+                        publicationFailures = failures
+                    )
             // 降级呈现：有产物 + 降级码 ⇒ 按成功呈现（error 置空、ok==true、degradedCode 带诊断原文），
             // UI 走"已保存 + 末尾可能不完整"文案——文件确实在盘上、moov 已写完，说成"失败"是骗人。
             // **只在错误就是那条降级码时成立**：engineError 是首错优先、不会换码，相等即同一回事；
             // 万一不等（将来引入并行的第二错误源）宁可回落失败呈现，绝不拿降级码盖住更硬的失败
             degraded != null && degraded == error -> buildResult(null).copy(degradedCode = degraded)
-            else -> buildResult(error)
+            else -> buildResult(effectiveError)
         }
         state = EngineState.IDLE
         engineError = null
@@ -2789,3 +3273,60 @@ internal data class DrainTick(
     /** 本拍是否判超时 */
     val timedOut: Boolean
 )
+
+/**
+ * 同段重复视频 FORMAT_CHANGED 的处置（Y15 纯函数，JVM 全表单测）。
+ *
+ * 【缺陷形态】`MediaCodec.INFO_OUTPUT_FORMAT_CHANGED` 不是"只来一次"的事件：编码器重配、个别
+ * ROM 的重复上报都会再发一条。旧代码在该分支**无条件** `addTrack`：
+ * - muxer 已 `start()` 后建轨是非法状态 ⇒ `IllegalStateException` 直接炸掉泵线程（整场录制
+ *   以 LOOP 错误结束）；
+ * - 启动前重复建轨则留下一条永远没有样本的空轨（muxer 轨道数多于实际码流，部分播放器当坏片）。
+ *
+ * 【判据】卡片修复方向：每段只建一次视频轨；已建轨后的**实际格式变化**走段级错误码。三态：
+ * - 本段尚未建轨（[trackBuilt] false）⇒ [ADD_TRACK]（首轨，正常路径）；
+ * - 已建轨且格式指纹相同（[previousKey] == [nextKey]）⇒ [IGNORE_SAME]（只是重复通知）；
+ * - 已建轨但指纹不同 ⇒ [FAIL_CHANGED]：旧轨的 csd/轨头已写死，继续写新参数集的样本只会产出
+ *   花屏/坏容器，按段级错误码收段（容器已收尾时由 `segmentKeepDecision` 的 finalized 口径
+ *   保留并按降级呈现——不把可播的已完成部分当废片删）。
+ *
+ * @param previousKey 已建轨时的格式指纹（= `videoFormatKey(输出格式)`）；未建轨时为 null
+ * @param nextKey 本次通知的格式指纹
+ */
+internal enum class VideoFmtAction { ADD_TRACK, IGNORE_SAME, FAIL_CHANGED }
+
+internal fun videoFmtAction(
+    trackBuilt: Boolean,
+    previousKey: String?,
+    nextKey: String
+): VideoFmtAction = when {
+    !trackBuilt -> VideoFmtAction.ADD_TRACK
+    previousKey != null && previousKey == nextKey -> VideoFmtAction.IGNORE_SAME
+    // 已建轨但指纹缺失/变化：无法证明"同一次格式"，宁可段级报错也不混写
+    else -> VideoFmtAction.FAIL_CHANGED
+}
+
+/**
+ * 停止/轮转时音频输入面的收尾动作（Y16 纯函数，JVM 全表单测）。
+ *
+ * 【缺陷形态】旧代码在 `stopping || rotatePending` 块里每拍直接 `queueAudioEos`：EOS 直接入
+ * 编码器输入，而 [AudioFeeder] 队列里可能还压着最多 ~2.7s（64 包 × ~42.7ms）PCM。EOS 一入队，
+ * 喂码门 `!eosQueued` 永久关闭，这些包再也进不了编码器，段边界 `drain()` 只能把它们记成丢弃——
+ * "停止那一刻砍掉固定长度尾音"，且与"本来就没声音"在日志里不可区分。
+ *
+ * 【为什么可以排空】采集线程（~42.7ms/包）远比泵线程消费（每拍 1 包、拍长 2~8ms）慢，常规积压
+ * 几百毫秒内排空，仍在既有抽干窗口（[CodecRecorder.DRAIN_LIMIT_MS] 顺延至硬上限）内。因此：
+ * - 队列与手里都已排空（[pending] 0 且 [held] false）⇒ [QUEUE_EOS]（旧行为，尾音完整）；
+ * - 抽干窗口已到期（[drainExpired]）⇒ [FORCE_EOS]：编码器已卡死/太慢，带积压发 EOS 并由
+ *   调用点把未喂进去的包数记账（单独统计被弃包数，卡片修复方向）；
+ * - 其余 ⇒ [FEED_THEN_DEFER]：这一拍先不发 EOS，下一拍继续喂。
+ *
+ * 判定序：到期优先于"已排空"只为让到期拍与记账同拍（排空时 eosDrops=0，两态等价）。
+ */
+internal enum class AudioEosAction { QUEUE_EOS, FEED_THEN_DEFER, FORCE_EOS }
+
+internal fun audioEosAction(pending: Int, held: Boolean, drainExpired: Boolean): AudioEosAction = when {
+    drainExpired -> AudioEosAction.FORCE_EOS
+    pending <= 0 && !held -> AudioEosAction.QUEUE_EOS
+    else -> AudioEosAction.FEED_THEN_DEFER
+}

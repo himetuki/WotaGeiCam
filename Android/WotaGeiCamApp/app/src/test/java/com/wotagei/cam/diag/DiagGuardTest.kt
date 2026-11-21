@@ -169,9 +169,9 @@ class DiagGuardTest {
         assertFalse("崩溃写入函数体内不许出现 enabled 短路（崩溃件必须无条件落盘）", crash.contains("enabled"))
         // 突变自证：往崩溃路径塞一道总开关 ⇒ 判据必红（证明判据真看得见这个函数体）
         val mutant = diag.replace(
-            "File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)",
+            "crashFile.writeText(text)",
             "if (!enabled) return\n" +
-                "File(dir, diagCrashName(diagFileStamp(System.currentTimeMillis()))).writeText(text)"
+                "crashFile.writeText(text)"
         )
         assertFalse("对照突变体必须真的改动", mutant == diag)
         assertTrue("崩溃路径被开关卡住后判据必须报出来", bodyOf(mutant, "installCrashHandler").contains("enabled"))

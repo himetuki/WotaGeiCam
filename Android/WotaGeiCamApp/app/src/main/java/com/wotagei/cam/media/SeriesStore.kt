@@ -2,8 +2,8 @@ package com.wotagei.cam.media
 
 import android.content.ContentUris
 import android.net.Uri
+import androidx.room.withTransaction
 import com.wotagei.cam.diag.Diag as Log
-import com.wotagei.cam.record.VideoSegment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -24,7 +24,13 @@ internal const val MIN_SERIES_PARTS = 2
 internal data class SeriesPartInput(
     val partIndex: Int,
     val uriStr: String?,
-    val durationMs: Long
+    val durationMs: Long,
+    /**
+     * 该段是否已在 MediaStore 发布成功（`IS_PENDING=0`）。默认 true 保持既有调用点的三参形态；
+     * `false` 的段在媒体库里不可见，**不许**收进 `series_part`（否则是永久孤儿行，且练习回程
+     * 会拿到一个相册里看不到的文件）。迟到发布由 R06 对账路径在真正 commit 后重新结算。
+     */
+    val committed: Boolean = true
 )
 
 /**
@@ -39,10 +45,11 @@ internal data class SeriesPartInput(
  * 这与 `media_tag` 同源同暴露面（本仓既有已接受）；本 app 删除则由 `clearFor` + `pruneOrphans` 主动清。
  *
  * # 为什么整段 [NonCancellable]
- * 调用点在录制页的 `LaunchedEffect(runner) { runner.result.collect { … } }` 里，那是**组合作用域**：
- * 用户在写库途中离场（按 Home / 返回 / 切页）会把协程取消在半路 ⇒ 分段漏记 ⇒ 归组静默丢失。
- * 与 `MediaActions.runDeleteFinish` 同一个道理：这段是与调用方生死无关的自愈动作，不去指望
- * 调用方"恰好还没死"。只抗取消，**不抗进程被杀**（后台被系统杀掉时的漏记本片不做对账）。
+ * 调用方是录制会话的**进程级结算所有者**（`record/TakeSettlement.kt`），但本函数仍保留
+ * [NonCancellable]：调用方作用域被取消（进程收尾、测试注入）时，已开始的系列+成员事务必须
+ * 写完，否则会留下半个系列。与 `MediaActions.runDeleteFinish` 同一个道理：这段是与调用方生死
+ * 无关的自愈动作，不去指望调用方"恰好还没死"。只抗取消，**不抗进程被杀**（后台被系统杀掉时
+ * 的漏记本片不做对账）。
  *
  * # 为什么异常全吞
  * 写库失败只是"归组没记上"，绝不许让 `SQLiteFullException` 冒进 UI 把录制页带崩。
@@ -53,20 +60,36 @@ internal object SeriesStore {
      * 落库一条系列记录 + 逐段成员关系。
      *
      * 门槛：[seriesId] 为 0（没有归属）或纯函数算不出成系列（[seriesPartsToRecord] 返回空）
-     * ⇒ 直接返回，什么都不写。
+     * ⇒ 直接返回 0，什么都不写。
+     *
+     * **事务化**（Y21）：系列头与成员行必须在同一事务里落。旧实现两次独立调用，进程在
+     * `upsertSeries` 之后、成员行之前被杀会留下一个 `partCount=N` 却没有任何成员的空壳头；
+     * 读侧虽然按「成员 ≥2」忽略它，但表会无界增长，且重录 REPLACE 前的中间态对并发观察者可见。
+     *
+     * @return 实际写入的成员行数（0 = 未达门槛/无归属/写库失败；调用方据此判断是否登记成功）
      */
-    suspend fun record(db: WotaDb, seriesId: Long, startedAtMs: Long, parts: List<VideoSegment>) {
-        if (seriesId == 0L) return
-        val inputs = parts.map { SeriesPartInput(it.partIndex, it.uri?.toString(), it.durationMs) }
-        val rows = seriesPartsToRecord(seriesId, inputs)
-        if (rows.isEmpty()) return
-        withContext(NonCancellable + Dispatchers.IO) {
+    suspend fun record(
+        db: WotaDb,
+        seriesId: Long,
+        startedAtMs: Long,
+        parts: List<SeriesPartInput>
+    ): Int {
+        if (seriesId == 0L) return 0
+        val rows = seriesPartsToRecord(seriesId, parts)
+        if (rows.isEmpty()) return 0
+        return withContext(NonCancellable + Dispatchers.IO) {
             runCatching {
-                val dao = db.seriesDao()
-                dao.upsertSeries(MediaSeries(seriesId = seriesId, startedAt = startedAtMs, partCount = rows.size))
-                rows.forEach { dao.upsertPart(it) }
-            }.onFailure {
+                db.withTransaction {
+                    val dao = db.seriesDao()
+                    dao.upsertSeries(
+                        MediaSeries(seriesId = seriesId, startedAt = startedAtMs, partCount = rows.size)
+                    )
+                    rows.forEach { dao.upsertPart(it) }
+                }
+                rows.size
+            }.getOrElse {
                 Log.e(TAG, "分段归组落库失败 seriesId=$seriesId parts=${rows.size}", it)
+                0
             }
         }
     }
@@ -75,6 +98,8 @@ internal object SeriesStore {
      * 分段 → 成员行的纯函数（抽出来是为了能 JVM 单测：Room 要 Context，测不了）。
      *
      * 规则：
+     * - `committed == false` 的段**不收**（`IS_PENDING` 还没清 = 相册里看不到；收进系列就是
+     *   永久孤儿行，练习回程也会打开一个不存在的文件）；
      * - `uriStr` 为 null 的段**不收**（没登记进 MediaStore 的段在媒体库里根本不存在，
      *   收了就是永久孤儿行，还会让 `partCount` 与实际可见成员对不上）；
      * - [parseId] 解析不出 id 的段**跳过**（`series_part.mediaId` 是主键的一半，塞 0 会让
@@ -94,6 +119,7 @@ internal object SeriesStore {
         parseId: (String) -> Long? = { s -> runCatching { ContentUris.parseId(Uri.parse(s)) }.getOrNull() }
     ): List<SeriesPart> {
         val rows = parts.mapNotNull { p ->
+            if (!p.committed) return@mapNotNull null
             val uriStr = p.uriStr ?: return@mapNotNull null
             val mediaId = parseId(uriStr) ?: return@mapNotNull null
             SeriesPart(

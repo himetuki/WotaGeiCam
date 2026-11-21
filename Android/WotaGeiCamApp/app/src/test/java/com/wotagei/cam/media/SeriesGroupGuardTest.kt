@@ -22,7 +22,7 @@ import org.junit.Test
  * 3. **VideoClip 的 series 字段必须带默认值**：`readRows` 的构造点一个字都不改。
  * 4. **动作扇出**：多选条必须经 `expandSeriesTargets` 展开，否则「只把首段移进回收站」。
  * 5. **FullscreenBrowse 不许被改**：它吃扁平 `clips`，pager 语义零改动。
- * 6. **收尾**：`finishDelete` 必须调 `seriesDao.pruneOrphans()`。
+ * 6. **收尾**：删除收尾（`cleanupDeleted`）必须调 `seriesDao.pruneOrphans()`。
  *
  * 判据用哪把尺：**含字符串字面量的判据走原文**（`codeOnly` 会把字面量抹成空格，用它判必假），
  * 表达式体函数按声明切片（`bodyOf` 定位不到 `= xxx` 的函数，撞上会直接抛）。
@@ -139,6 +139,18 @@ class SeriesGroupGuardTest {
         assertTrue("必须带出 partIndex", ann.contains("partIndex = p.partIndex"))
         assertTrue("必须带出 partCount（取 media_series 那一列）", ann.contains("seriesParts = partCount[p.seriesId]"))
         assertTrue("查不到归属的行必须原样返回（单段片逐字不变）", ann.contains("?: return@map c"))
+        assertTrue(
+            "跨卷同号不能盖成系列成员（否则 SD 卡同号片和真分段一起从列表消失）",
+            ann.contains("sameStorageVolume(it.uri, c.uri.toString(), sameIdRows)")
+        )
+        assertTrue(
+            "同 id 可能挂着多条成员记录：逐条按卷比，命中不了就原样返回（不拿 id 硬认）",
+            ann.contains("firstOrNull {") && ann.contains("?: return@map c")
+        )
+        assertTrue(
+            "同 id 的不同行 URI 数必须数出来（旧账合成卷别名只认主卷的唯一行）",
+            ann.contains("rowUris")
+        )
     }
 
     @Test
@@ -161,7 +173,7 @@ class SeriesGroupGuardTest {
         )
         assertTrue("时间线必须调 SeriesGroup.galleryEntries（不调 = 归组永远不生效）", tl.contains("SeriesGroup.galleryEntries("))
         assertTrue("展开态必须是屏内 remember（不持久化）", tl.contains("var expandedSeries by remember { mutableStateOf(emptySet<Long>()) }"))
-        assertTrue("只保留代表段出行（否则一次录制会在列表里出现两遍）", tl.contains("entryByRep.containsKey(it.id)"))
+        assertTrue("只保留代表段出行（否则一次录制会在列表里出现两遍）", tl.contains("entryByRep.containsKey(rowKeyOf(it))"))
         assertTrue("系列行必须内联列出子段", tl.contains("TimelinePartRow("))
         assertTrue("组标题取代表段", tl.contains("entry?.title"))
         assertTrue("角标必须走 stringResource（Compose 里不许出现面向用户的中文串）", tl.contains("R.string.gallery_series_count"))
@@ -173,7 +185,7 @@ class SeriesGroupGuardTest {
             "多选必须经 SeriesGroup.expandSeriesTargets 展开（否则「只把首段移进回收站、其余还在原地」）。" +
                 "锚串必须钉到多选这一处完整调用：第 2 轮返修·甲之后卡片菜单/组卡菜单各有自己的扇出，" +
                 "整文件找符号会漏掉「多选被摘掉」这一种退化（门禁 #1c 实测）",
-            masked("media/GalleryScreen.kt").contains("SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)")
+            masked("media/GalleryScreen.kt").contains("SeriesGroup.expandSeriesTargets(clips.filter { rowKeyOf(it) in selectedKeys }, clips)")
         )
         val fan = exprBody(
             mainSourceText("media/SeriesGroup.kt"),
@@ -195,13 +207,14 @@ class SeriesGroupGuardTest {
 
     @Test
     fun `finishDelete必须调pruneOrphans`() {
-        val fd = body("media/MediaActions.kt", "finishDelete")
-        assertTrue("必须先清成员（clearFor）", fd.contains("seriesDao.clearFor(ids)"))
+        val fd = body("media/MediaActions.kt", "cleanupDeleted")
+        // R09：清成员按 (mediaId, uri) 身份对，不许退回裸 ID（ID 复用会误删新片成员）
+        assertTrue("必须按身份对清成员（clearIdentity）", fd.contains("seriesDao.clearIdentity("))
         assertTrue("必须收掉没人指的系列空壳头（pruneOrphans）", fd.contains("seriesDao.pruneOrphans()"))
-        val clearAt = fd.indexOf("seriesDao.clearFor(ids)")
+        val clearAt = fd.indexOf("seriesDao.clearIdentity(")
         val pruneAt = fd.indexOf("seriesDao.pruneOrphans()")
         assertTrue("两个调用都得在", clearAt >= 0 && pruneAt >= 0)
-        assertTrue("prune 必须排在 clearFor 之后（反了就 prune 不掉刚清空的头）", pruneAt > clearAt)
+        assertTrue("prune 必须排在清成员之后（反了就 prune 不掉刚清空的头）", pruneAt > clearAt)
     }
 
     // ------------------------------------------------------------------ 第2轮返修·甲：卡片菜单作用域
@@ -222,7 +235,10 @@ class SeriesGroupGuardTest {
     @Test
     fun `菜单的批量动作必须吃展开后的列表且单片语义族留在代表段`() {
         val menu = body("media/GalleryScreen.kt", "CardMenu")
-        assertTrue("代表段必须取 targets.first()", menu.contains("clip = targets.first()"))
+        assertTrue(
+            "代表段必须是 partIndex 最小者（Y27：展开顺序是 DATE_ADDED DESC，targets.first() 可能反而是较晚分段）",
+            menu.contains("clip = SeriesGroup.representativeOf(targets) ?: targets.first()")
+        )
         assertTrue("分享必须扇出到 targets", menu.contains("ops.share(targets)"))
         assertTrue("移入回收站必须扇出到 targets", menu.contains("ops.moveToTrash(targets)"))
         assertTrue("还原必须扇出到 targets", menu.contains("ops.restoreFromTrash(targets)"))
@@ -254,11 +270,11 @@ class SeriesGroupGuardTest {
         }
         assertTrue(
             "网格只保留代表段占格（组内其余成员交给子段弹层，否则一次录制在网格里出现两遍）",
-            grid.contains("clips.filter { entryByRep.containsKey(it.id) }")
+            grid.contains("clips.filter { entryByRep.containsKey(rowKeyOf(it)) }")
         )
         assertTrue("组卡角标必须走 stringResource（Compose 里不许出现面向用户的中文串）", grid.contains("R.string.gallery_series_count"))
         assertTrue("组卡点开必须走子段弹层而不是直接进播放页", grid.contains("onOpenSeries(sid)"))
-        assertTrue("单片卡仍照旧进播放页", grid.contains("onOpen(clip.id)"))
+        assertTrue("单片卡仍照旧进播放页", grid.contains("onOpen(clip)"))
     }
 
     @Test
@@ -376,14 +392,14 @@ class SeriesGroupGuardTest {
 
         // ① 扇出：把 expandSeriesTargets 换回原样 picked
         val noFan = screenRaw.replace(
-            "SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)",
-            "clips.filter { it.id in selectedIds }"
+            "SeriesGroup.expandSeriesTargets(clips.filter { rowKeyOf(it) in selectedKeys }, clips)",
+            "clips.filter { rowKeyOf(it) in selectedKeys }"
         )
         assertTrue("突变体①必须真的改了源码", noFan != screenRaw)
         assertFalse(
             "摘掉扇出后扇出接线判据必须翻假（判据钉的是多选这一处完整调用；" +
                 "文件里卡片菜单/组卡菜单的扇出与此无关，不许拿它们顶数）",
-            codeOnly(noFan).contains("SeriesGroup.expandSeriesTargets(clips.filter { it.id in selectedIds }, clips)")
+            codeOnly(noFan).contains("SeriesGroup.expandSeriesTargets(clips.filter { rowKeyOf(it) in selectedKeys }, clips)")
         )
 
         // ② 收尾：摘掉 pruneOrphans
@@ -391,7 +407,7 @@ class SeriesGroupGuardTest {
         assertTrue("突变体②必须真的改了源码", noPrune != actionsRaw)
         assertFalse(
             "摘掉 pruneOrphans 后收尾判据必须翻假",
-            flatten(bodyOf(codeOnly(noPrune), "finishDelete")).contains("seriesDao.pruneOrphans()")
+            flatten(bodyOf(codeOnly(noPrune), "cleanupDeleted")).contains("seriesDao.pruneOrphans()")
         )
 
         // ③ 读侧：把 s.series / s.parts 换成空表（归组永远建不起来而真值表全绿）
@@ -410,8 +426,8 @@ class SeriesGroupGuardTest {
         //   旧写法把 noPrune 喂给读侧切片、noFan 喂给 finishDelete 的 bodyOf——
         //   两个输入都在对方文件里，判据没等到就已炸「失去输入」，门禁 #1c 实测红）
         assertTrue(
-            "摘掉 pruneOrphans 后收尾判据的另半边（先 clearFor）必须仍绿",
-            flatten(bodyOf(codeOnly(noPrune), "finishDelete")).contains("seriesDao.clearFor(ids)")
+            "摘掉 pruneOrphans 后收尾判据的另半边（先按 (mediaId, uri) 身份对清账）必须仍绿",
+            flatten(bodyOf(codeOnly(noPrune), "cleanupDeleted")).contains("seriesDao.clearIdentity(")
         )
         assertTrue(
             "摘掉多选扇出后卡片菜单的扇出必须仍绿（同一判据族里的另一处接线不许被同一突变带走）",

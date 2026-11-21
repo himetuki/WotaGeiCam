@@ -77,6 +77,12 @@ interface MediaTagDao {
     @Query("DELETE FROM media_tag WHERE mediaId = :mediaId AND tag = :tag")
     suspend fun deleteOne(mediaId: Long, tag: String)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertUnclaimed(tag: MediaTag): Long
+
+    @Query("DELETE FROM media_tag WHERE mediaId = :mediaId AND tag = :tag AND path IN (:paths)")
+    suspend fun deleteForPaths(mediaId: Long, tag: String, paths: List<String>)
+
     /** 受控改名成功后只搬同一原文件的标签，既不覆盖时间，也不认复用的 ID。 */
     @Query("UPDATE media_tag SET path = :newPath WHERE mediaId = :mediaId AND path = :oldPath")
     suspend fun movePathAfterRename(mediaId: Long, oldPath: String, newPath: String)
@@ -85,19 +91,23 @@ interface MediaTagDao {
     @Query("DELETE FROM media_tag WHERE mediaId IN (:mediaIds)")
     suspend fun clearFor(mediaIds: List<Long>)
 
+    /**
+     * 按**身份对**清标签：`(mediaId, path)` 双键必须同时命中。
+     *
+     * 彻底删除的收尾专用。裸 `mediaId` 在外部删片 + MediaStore 复用 ID 后会误清新片的标签；
+     * 双键匹配不上时宁可留下孤儿行（下次受控改名/迁移对账会处理），也绝不把旧片状态带到新片。
+     */
+    @Query("DELETE FROM media_tag WHERE mediaId = :mediaId AND path = :path")
+    suspend fun clearIdentity(mediaId: Long, path: String)
+
     @Query("SELECT * FROM media_tag")
     fun observeAll(): Flow<List<MediaTag>>
 
-    @Query("SELECT tag FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
-    fun observeTagsOf(mediaId: Long): Flow<List<String>>
+    @Query("SELECT * FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
+    fun observeRowsOf(mediaId: Long): Flow<List<MediaTag>>
 
-    /**
-     * 一次性查询某片的标签（#7 [com.wotagei.cam.media.MediaRepo.clipByIdOnce] 用）：
-     * 与 [observeTagsOf] 同一条 SQL，只是非 Flow。⚠ 只加方法、不动实体、不加 @Index
-     * （schema 变更 = 撞 fallbackToDestructiveMigration 清空用户标签，绝对红线）。
-     */
-    @Query("SELECT tag FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
-    suspend fun tagsOf(mediaId: Long): List<String>
+    @Query("SELECT * FROM media_tag WHERE mediaId = :mediaId ORDER BY createdAt")
+    suspend fun rowsOf(mediaId: Long): List<MediaTag>
 
     @Query("DELETE FROM media_tag")
     suspend fun clearAll()
@@ -114,6 +124,17 @@ interface TrashDao {
 
     @Query("DELETE FROM trash_item WHERE uri IN (:uris)")
     suspend fun removeAll(uris: List<String>)
+
+    /**
+     * 旧聚合账键 → 具名卷行 URI 的**归一改写**（Y27）。只在判据（[legacyTrashAliasTarget]）
+     * 证明「唯一且确认同一行」后调用；可能改写主键值，SQL 允许，schema 不动。
+     */
+    @Query("""
+        UPDATE trash_item SET uri = :newUri
+        WHERE uri = :oldUri AND name = :name AND origin = :origin AND deletedAt = :deletedAt
+          AND NOT EXISTS (SELECT 1 FROM trash_item WHERE uri = :newUri)
+    """)
+    suspend fun rewriteUri(oldUri: String, newUri: String, name: String, origin: String, deletedAt: Long): Int
 
     @Query("SELECT * FROM trash_item ORDER BY deletedAt DESC")
     fun observeAll(): Flow<List<TrashItem>>
@@ -136,6 +157,15 @@ interface SeriesDao {
 
     @Query("DELETE FROM series_part WHERE mediaId IN (:mediaIds)")
     suspend fun clearFor(mediaIds: List<Long>)
+
+    /**
+     * 按**身份对**清系列成员：`(mediaId, uri)` 双键必须同时命中。
+     *
+     * 与 [MediaTagDao.clearIdentity] 同一条红线：裸 ID 在 MediaStore 复用后会误删新片的成员关系。
+     * 系列归组是跨进程稳定的弱关联，宁可留孤儿等 prune/对账，也不误伤同 ID 的新条目。
+     */
+    @Query("DELETE FROM series_part WHERE mediaId = :mediaId AND uri = :uri")
+    suspend fun clearIdentity(mediaId: Long, uri: String)
 
     /**
      * 读侧归组用的两条全表流（#5 Step 4c）。

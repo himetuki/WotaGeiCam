@@ -12,8 +12,10 @@ import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
+import com.wotagei.cam.record.SealMarker
 import com.wotagei.cam.record.exportOrientationHint
 import com.wotagei.cam.record.monotonicPts
+import com.wotagei.cam.record.mediaIdOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +23,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -98,13 +103,44 @@ class TrackExporter(private val ctx: Context) {
         /** commit 延时重试两档（与 ClipExporter 同一套：共 4 次尝试 = 立即 2 + 延时 2） */
         private const val COMMIT_RETRY_DELAY_1_MS = 1500L
         private const val COMMIT_RETRY_DELAY_2_MS = 3000L
+
+        /** 选轨导出的单 owner 闸门：零等待队列，上一任务未收口时新请求立即 BUSY（不排队堆积） */
+        internal val EXPORT_OWNER_EXECUTOR = ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, SynchronousQueue(),
+            { task -> Thread(task, EXPORT_OWNER_THREAD).apply { isDaemon = true } }
+        )
+        private const val EXPORT_OWNER_THREAD = "WotaTrackExportOwner"
     }
 
     /**
      * 全片选轨导出。[offsetMs] 用 [TrackSync.cachedOffsetMs] 的持久化值（未同步传 0）。
      * [onProgress] 0..1（IO 线程回调，写 Compose State 是线程安全的）。
+     * [onLateOutcome] caller 已离开（取消/预算到点）后才落地的公开终态，按任务身份回填。
      */
     suspend fun export(
+        src: VideoClip,
+        track: SelectedTrack,
+        offsetMs: Long,
+        onLateOutcome: (ClipResult) -> Unit = {},
+        onProgress: (Float) -> Unit
+    ): ClipResult {
+        // 终态记账 + 独立等待侧：与 ClipExporter 逐条同口径（Y31/Y32）
+        val terminal = ExportTerminal<ClipResult>()
+        val result = RemuxWait.bounded(
+            EXPORT_OWNER_EXECUTOR,
+            RemuxWait.budgetMs(src.durationMs),
+            EXPORT_OWNER_THREAD,
+            TAG,
+            terminal,
+            onLateOutcome
+        ) { owner -> exportBody(owner, terminal, src, track, offsetMs, onProgress) }
+        return result ?: ClipResult.Fail(ClipError.BUSY)
+    }
+
+    /** owner 侧主体：所有同步 Provider/native 调用都在这里跑，caller 离开后仍由本 owner 收口。 */
+    private suspend fun exportBody(
+        owner: RemuxOwner,
+        terminal: ExportTerminal<ClipResult>,
         src: VideoClip,
         track: SelectedTrack,
         offsetMs: Long,
@@ -112,9 +148,18 @@ class TrackExporter(private val ctx: Context) {
     ): ClipResult = withContext(Dispatchers.IO) {
         val pendingUri = insertPending(TrackRule.nameOf(src.name))
             ?: return@withContext ClipResult.Fail(ClipError.OPEN)
+        // insert 返回后立即交给 owner 登记，再验放弃票（U05 纪律：取消方不持有也不回收资源）
+        if (!owner.registerPending(pendingUri)) {
+            owner.deletePending(ctx)
+            throw CancellationException("track export abandoned")
+        }
         val job = coroutineContext[Job]
+        coroutineContext.ensureActive()
         // muxer.stop() 已过 = 容器里是完整合法 MP4：此后的失败一律保留行不删（与 ClipExporter 同口径）
         var bytesComplete = false
+        // 封轨即落 SealMarker（与 VideoStore.seal 同口径）：commit 全败/取消/封轨后异常都保留
+        // pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
+        var sealedPath: String?
         try {
             val afd = ctx.contentResolver.openAssetFileDescriptor(pendingUri, "rw")
                 ?: return@withContext fail(pendingUri, ClipError.OPEN)
@@ -129,30 +174,41 @@ class TrackExporter(private val ctx: Context) {
                     copy(src, track, TrackRule.shiftUsFor(track, offsetMs), job, muxer, onProgress)
                     muxer.stop()
                     bytesComplete = true
+                    // 封轨后行不许删：owner 记 sealed，之后任何迟到异常都不再触碰 pending
+                    owner.markSealed()
+                    // 封轨即落旁路标记（与 VideoStore.seal 同口径）：commit 全败、取消、封轨后
+                    // 异常都保留 pending 行，冷启救援据此走 SEALED_RESCUE_MS 快通道。
+                    sealedPath = queryData(pendingUri)
+                    SealMarker.mark(sealedPath)
                     // 清 pending 失败必须改口上报（与 ClipExporter 同一处置）：IS_PENDING 残留时
                     // MediaStore 对外隐藏该行，用户看到"导出成功"却在相册里找不到成片且无锚点可归因。
+                    // 每次公开提交重新领许可：放弃已赢时不得再发起新的 Binder 调用（Y31）；
+                    // 已领许可的提交若在取消后返回成功，终态由 terminal 记账并回填（Y32）。
                     // 失败多半是 Provider 瞬时忙：立即重试 1 次 + 延时 1.5s/3s 各再试 1 次（共 4 次）
-                    var committed = commit(pendingUri)
-                    if (!committed) committed = commit(pendingUri)
-                    if (!committed) {
-                        Log.w(TAG, "commit 立即两连败，转延时重试 uri=$pendingUri")
+                    var committed = owner.commitPermitted() && commit(pendingUri)
+                    if (!committed && owner.commitPermitted()) committed = commit(pendingUri)
+                    if (!committed && owner.commitPermitted()) {
+                        Log.w(TAG, "commit 立即两连败，转延时重试 id=${mediaIdOf(pendingUri)}")
                         committed = delayedCommit(pendingUri, job, COMMIT_RETRY_DELAY_1_MS)
                     }
-                    if (!committed) {
+                    if (!committed && owner.commitPermitted()) {
                         committed = delayedCommit(pendingUri, job, COMMIT_RETRY_DELAY_2_MS)
                     }
                     if (!committed) {
-                        // 全败：成片字节已在盘上，删行 = 丢成片（MediaStore 删行连带删文件）。
+                        // 全败/取消：成片字节已在盘上，删行 = 丢成片（MediaStore 删行连带删文件）。
                         // 保留 pending 行，冷启由 StalePendingSweep.rescuePendingRows 收录；
                         // sidecar 照成功路径同款写（#6：全片直写无平移），被救援回的成片档案要完整
-                        Log.e(TAG, "commit 全败（共 4 次）uri=$pendingUri，成片保留待冷启救援")
+                        Log.e(TAG, "commit 未生效（取消或两连败），成片保留待冷启救援 id=${mediaIdOf(pendingUri)}")
                         writeSidecar(src, pendingUri)
+                        terminal.reached(ClipResult.Fail(ClipError.COMMIT))
                         return@withContext ClipResult.Fail(ClipError.COMMIT)
                     }
                     writeSidecar(src, pendingUri)
+                    // 发布成功：清掉封轨旁路标记（对齐 VideoStore.seal 的"发布了就清标记"）
+                    SealMarker.clear(sealedPath)
                     val id = ContentUris.parseId(pendingUri)
                     Log.i(TAG, "done id=$id track=$track offsetMs=$offsetMs")
-                    ClipResult.Done(id, TrackRule.nameOf(src.name))
+                    ClipResult.Done(id, TrackRule.nameOf(src.name)).also { terminal.reached(it) }
                 } finally {
                     runCatching { muxer.release() }
                 }
@@ -161,8 +217,9 @@ class TrackExporter(private val ctx: Context) {
             if (bytesComplete) {
                 // 成片已封轨：取消也不删行（同全败口径），留待冷启救援。
                 // sidecar 与 commit 全败分支同款写，被救援回的成片档案才完整
-                Log.i(TAG, "取消但成片已封轨，保留 pending 行待冷启救援 uri=$pendingUri")
+                Log.i(TAG, "取消但成片已封轨，保留 pending 行待冷启救援 id=${mediaIdOf(pendingUri)}")
                 writeSidecar(src, pendingUri)
+                terminal.reached(ClipResult.Fail(ClipError.COMMIT))
             } else {
                 fail(pendingUri, ClipError.CANCELLED)
             }
@@ -170,7 +227,8 @@ class TrackExporter(private val ctx: Context) {
         } catch (e: Exception) {
             if (bytesComplete) {
                 // 封轨后异常：成片字节已在盘上，删行 = 丢成片；与 commit 全败同口径保留待救援
-                Log.e(TAG, "封轨后异常，成片已保留待救援 uri=$pendingUri: ${e.message}")
+                Log.e(TAG, "封轨后异常，成片已保留待救援 id=${mediaIdOf(pendingUri)}: ${e.message}")
+                terminal.reached(ClipResult.Fail(ClipError.COMMIT))
                 return@withContext ClipResult.Fail(ClipError.COMMIT)
             } else {
                 Log.e(TAG, "export failed: ${e.message}")
@@ -218,7 +276,8 @@ class TrackExporter(private val ctx: Context) {
             while (baseUs < 0) {
                 val size = ex.sampleSize
                 if (size < 0) throw IllegalStateException("no sync frame at start")
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) baseUs = ex.sampleTime
                 else ex.advance()
@@ -262,7 +321,8 @@ class TrackExporter(private val ctx: Context) {
                 job?.ensureActive()
                 val size = ex.sampleSize
                 if (size < 0) break // 两轨都到底
-                if (size > buf.capacity()) buf = ByteBuffer.allocate(size.toInt() * 2)
+                // Y30：单枚样本有上界（声明损坏时按声明无限扩容会吃光内存）
+                buf = growRemuxSampleBuffer(buf, size)
                 ex.readSampleData(buf, 0)
                 if (ex.sampleTrackIndex == videoTrack) {
                     // baseUs 是"首个**读到**的样本"，全片导出从 0 读起它必是同步帧——但它**不等于**首样本：
@@ -341,7 +401,7 @@ class TrackExporter(private val ctx: Context) {
         delay(delayMs)
         job?.ensureActive()
         if (commit(uri)) return true
-        Log.w(TAG, "commit 延时重试仍败 uri=$uri delayMs=$delayMs")
+        Log.w(TAG, "commit 延时重试仍败 id=${mediaIdOf(uri)} delayMs=$delayMs")
         return false
     }
 
@@ -383,17 +443,18 @@ class TrackExporter(private val ctx: Context) {
             null, null
         ) > 0
     }.getOrElse {
-        Log.e(TAG, "commit 抛异常 uri=$uri: ${it.message}")
+        Log.e(TAG, "commit 抛异常 id=${mediaIdOf(uri)}: ${it.message}")
         false
     }
 
     /**
-     * 写一半（muxer.stop 之前）的失败/取消收尾：删 pending 记录，不留 0 字节幽灵条目。
+     * 写一半（muxer.stop 之前）的失败/取消收尾：删 pending 记录并核对受影响行数，不留 0 字节幽灵条目。
      * muxer.stop 之后的失败**不走这里**（成片字节在盘上，删行 = 丢成片，见类注）。
+     * 删失败留痕（行还在，冷启救援可接手），不把"尽力删"谎报成已删（Y32）。
      */
     private fun fail(uri: android.net.Uri, reason: ClipError): ClipResult {
-        runCatching { ctx.contentResolver.delete(uri, null, null) }
-        Log.i(TAG, "failed reason=$reason")
+        deletePendingRowVerified(ctx, uri, TAG)
+        Log.i(TAG, "failed reason=$reason id=${mediaIdOf(uri)}")
         return ClipResult.Fail(reason)
     }
 

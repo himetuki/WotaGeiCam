@@ -109,7 +109,9 @@ class StanceEngineTest {
     }
 
     @Test
-    fun countConfirm_window() {
+    fun countConfirm_window_requiresFullAgreement() {
+        // R20：窗口必须**整窗一致且 ≥1**；旧实现把 [1,1,1,1,2] 直接锁成 2，
+        // 会在有人进出镜头的拍点上瞬间改人数（实测抖动根因）。
         val hist = mutableListOf<Int>()
         repeat(StanceSpec.STABLE_WINDOW - 1) {
             hist.add(1)
@@ -117,8 +119,41 @@ class StanceEngineTest {
         }
         hist.add(1)
         assertEquals(1, countConfirmedOf(hist)!!)
-        hist.add(2)   // 窗口被打破 → 未达成一致返回末值（语义由引擎处理）
+        hist.add(2)   // 窗口被打破 → 继续观察，不许取末值一步锁定
+        assertNull(countConfirmedOf(hist))
+        hist.add(2)
+        assertNull(countConfirmedOf(hist))
+        repeat(StanceSpec.STABLE_WINDOW) { hist.add(2) }
         assertEquals(2, countConfirmedOf(hist)!!)
+    }
+
+    @Test
+    fun countConfirm_zeroNeverLocks() {
+        // R20：先架机再入镜的典型流程——空场若干拍不能把人数锁成 0。
+        val hist = mutableListOf<Int>()
+        repeat(StanceSpec.STABLE_WINDOW * 2) {
+            hist.add(0)
+            assertNull(countConfirmedOf(hist))
+        }
+        // 入镜后仍需整窗一致才确认。
+        repeat(StanceSpec.STABLE_WINDOW - 1) {
+            hist.add(1)
+            assertNull(countConfirmedOf(hist))
+        }
+        hist.add(1)
+        assertEquals(1, countConfirmedOf(hist)!!)
+    }
+
+    @Test
+    fun autoMode_zeroFrames_neverConfirm() {
+        val eng = engine(JudgementEngine.MODE_AUTO)
+        var out: EngineOutput? = null
+        repeat(StanceSpec.STABLE_WINDOW + 3) { i ->
+            out = eng.observe(obs(300L * i, emptyList()))
+        }
+        val result = requireNotNull(out)
+        assertNull(result.nConfirmed)
+        assertTrue(result.slots.isEmpty())
     }
 
     @Test
@@ -217,8 +252,119 @@ class StanceEngineTest {
     }
 
     // ------------------------------------------------------------------
-    // 引擎：判定 / 滞回 / 平滑 / 播报
+    // 引擎：R18 号位隔离 / R19 轮转播报 / R17 判定头接线
     // ------------------------------------------------------------------
+
+    @Test
+    fun twoSlots_sameFrame_countOwnSamples() {
+        // R18：同拍两个号位一个 OK、一个「往后」，滑动窗必须各记各的；
+        // 旧实现共享一条 pendingHits，交替 verdict 每拍清窗，两边都永远完不成。
+        val eng = engine(n = 2)
+        val ok = b(cx = 0.3f, by = 0.75f, h = 0.6f)
+        val back = b(cx = 0.7f, by = 0.95f, h = 0.6f)
+        var out: EngineOutput? = null
+        for (i in 0 until StanceSpec.SMOOTH_WINDOW) {
+            out = eng.observe(obs(300L * i, listOf(ok, back)))
+        }
+        assertTrue("1 号位三拍 OK 应完成", out!!.slots[0].done)
+        assertFalse("2 号位持续往后不应完成", out.slots[1].done)
+        assertTrue(out.lines.none { it == "全员，完成" })
+    }
+
+    @Test
+    fun roadsideLeftmost_doesNotTakeSlotOrOffsetAnchors() {
+        // Y65：计数、排序、锚定、判定必须同源（都用 distanceFilter 之后的集合）——
+        // 左侧远处路人不能抢 1 号位、不能把锚点整体左移。
+        val eng = engine(n = 2)
+        val roadside = b(cx = 0.05f, h = 0.12f)   // 高度离群 → 路人
+        val left = b(cx = 0.2f, h = 0.6f)
+        val right = b(cx = 0.8f, h = 0.6f)
+        val out = eng.observe(obs(0, listOf(roadside, left, right)))
+        assertEquals(2, out.nEffective)
+        assertEquals(listOf(0.2f, 0.8f), out.slots.map { it.person!!.cx })
+        assertTrue("两个练习者都在各自锚点上，应判 OK", out.slots.all { it.verdict == Verdict.OK })
+        assertTrue(out.lines.none { it == Verdict.EXTRA.speak })
+    }
+
+    @Test
+    fun threeSlots_sameFrame_windowAdvancesOncePerFrame() {
+        // R18：三人同拍 OK，平滑窗按**帧数**推进；旧实现把同一拍的 3 次调用当 3 个样本，
+        // 第一拍就把窗口填满（三倍速）。
+        val eng = engine(n = 3)
+        val people = listOf(b(cx = 0.2f), b(cx = 0.5f), b(cx = 0.8f))
+        for (i in 0 until StanceSpec.SMOOTH_WINDOW - 1) {
+            val out = eng.observe(obs(300L * i, people))
+            assertTrue("第 ${i + 1} 拍窗口未满，任何号位都不许完成", out.slots.none { it.done })
+        }
+        val out = eng.observe(obs(300L * (StanceSpec.SMOOTH_WINDOW - 1), people))
+        assertEquals("满窗后三个号位同拍完成", 3, out.slots.count { it.done })
+    }
+
+    @Test
+    fun twoSlots_rotation_lineThenEndOfRound() {
+        // R19：一轮内先 1 号位、再 2 号位，最后一条才 roundEnded；
+        // 下一轮重新等 pollInterval，不许 1 号位垄断每一拍。
+        val eng = engine(n = 2, lineMs = 200, pollMs = 200)
+        val a = b(cx = 0.3f, by = 0.95f, h = 0.6f)   // 两个都「往后」，保持待播
+        val b2 = b(cx = 0.7f, by = 0.95f, h = 0.6f)
+        val out0 = eng.observe(obs(0, listOf(a, b2)))
+        assertEquals(listOf("1号位，往后"), out0.lines)
+        assertFalse("本轮还有 2 号位，不能提前打轮末", out0.roundEnded)
+        val out1 = eng.observe(obs(200, listOf(a, b2)))
+        assertEquals(listOf("2号位，往后"), out1.lines)
+        assertTrue("轮内最后一条必须打轮末", out1.roundEnded)
+        val out2 = eng.observe(obs(400, listOf(a, b2)))
+        assertEquals("轮末后新轮从 1 号位重新开始", listOf("1号位，往后"), out2.lines)
+        assertFalse(out2.roundEnded)
+    }
+
+    @Test
+    fun allDoneThrottled_reportedOnNextBeat() {
+        // R19：完成句被轮间静默节流时不得标记已报——下一拍静默窗满必须补报，不许永久丢失。
+        val eng = engine(lineMs = 2000, pollMs = 4000)
+        eng.observe(obs(0, listOf(b(cx = 0.9f))))          // 先占节流窗：报「1号位，往右」
+        var out: EngineOutput? = null
+        for (i in 1 until StanceSpec.SMOOTH_WINDOW + 1) {  // 改判清窗后仍需三拍 OK → allDone 落在静默窗内
+            out = eng.observe(obs(300L * i, listOf(b())))
+        }
+        assertTrue("第三拍应已完成", out!!.slots[0].done)
+        assertTrue("静默窗内完成句必须被节流", out.lines.isEmpty())
+        val out2 = eng.observe(obs(4200, listOf(b())))     // ≥ pollInterval 静默窗
+        assertEquals(listOf("全员，完成"), out2.lines)
+        val out3 = eng.observe(obs(8000, listOf(b())))
+        assertTrue("补报后不再重复", out3.lines.isEmpty())
+    }
+
+    @Test
+    fun singleSlot_lineIsRoundEnded() {
+        val eng = engine()
+        val out = eng.observe(obs(0, listOf(b(cx = 0.9f))))
+        assertEquals(listOf("1号位，往右"), out.lines)
+        assertTrue("单号位一句即轮末", out.roundEnded)
+    }
+
+    @Test
+    fun head_participatesInSingleLivePath() {
+        // R17：head 必须真正进入单人实时判定（旧实现只导入不接线）。
+        // 这组权重对任意输入都给 P(good)≈1 → 几何「往右」也应放宽为 OK。
+        val eng = engine()
+        eng.setHead(
+            StanceHead.fromJson(
+                """{"coef":[0.0,0.0,0.0,0.0,0.0],"intercept":10.0,
+                    "meta":{"head_version":"test-always-ok","features":["cx","by","w","h","conf"]}}"""
+            )
+        )
+        var out: EngineOutput? = null
+        for (i in 0 until StanceSpec.SMOOTH_WINDOW) {
+            out = eng.observe(obs(300L * i, listOf(b(cx = 0.9f))))
+        }
+        assertEquals(Verdict.OK, out!!.slots[0].verdict)
+        assertTrue("head 放宽后应三拍完成", out.slots[0].done)
+        assertTrue(eng.isDone)
+        // Y68：只换头引用，不重置既有完成态（语义变化由分析管线裁决 reset）。
+        eng.setHead(null)
+        assertTrue("setHead 不得私自清状态", eng.isDone)
+    }
 
     @Test
     fun okFlow_reportsAllDone_onceAndKeepsWatching() {

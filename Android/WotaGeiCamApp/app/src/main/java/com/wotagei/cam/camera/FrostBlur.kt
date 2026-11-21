@@ -601,8 +601,9 @@ fun frostCoverOfSdf(signedDistancePx: Float, aaPx: Float): Float {
  * - `ui/` 主线程（**唯一写方**）：[writeHeader] / [writeCard] / [acquireSlot] / [releaseSlot] / [setUiEnabled]；
  *   各枚底板在自己的布局回调里写自己那一格，所以一格一次事务；写之前 HUD 会顺手刷一次表头，
  *   于是"视图原点与卡片矩形出自同一次布局"在实践里成立（引用交换保证的是不撕裂，不是同一次布局）。
- * - GL 线程：[tryReadInto]（读）与 [reportPlatesDrawn]（回报"这帧真画了板"）。
- * - `ui/` 主线程读：[isPlatesDrawn] / [hasUiEnabled]。
+ * - GL 线程：[tryReadInto]（读）与 [reportPlatesCovered]（swap 成功后回报"哪些槽位真贴出了板"；
+ *   [reportPlatesDrawn] 是整页粗口径，仍用于"链关掉/引擎销毁 ⇒ 撤报"）。
+ * - `ui/` 主线程读：[isPlateCovered]（逐板让位判据）/ [coveredSlotMask] / [isPlatesDrawn] / [hasUiEnabled]。
  *
  * 这张表**不是**容器归属的真源——控件在哪枚容器里仍由 `ui/CameraPills.kt` 的 `pillAnchorWriters`
  * 与 `HudLayer` 的位置表说了算；这里只记"这一格当前有这么一块板"，槽位随布局节点生死。
@@ -696,6 +697,21 @@ object FrostCardTable {
 
     @Volatile
     private var platesDrawn = false
+
+    /**
+     * 逐槽覆盖位（Y14）：bit `s` = 槽 s 这一帧真贴出了 GL 板。
+     *
+     * 为什么整页一个布尔不够：参考线关掉时，画面内任一板画成功就会把 [platesDrawn] 翻真，
+     * 而**完全落在信箱黑边上的板**被 [frostUvInto] 跳过、一块都没画——UI 却按整页 live
+     * 把这枚板的纯色 fill 一起撤了，结果是"透明描边框"。逐槽位让 UI 只撤真有两块之一的那块：
+     * 有 GL 板 ⇒ 让位；没有 ⇒ 保留本地底（二者必居其一）。
+     *
+     * 只由 GL 线程在**窗口 swap 成功之后**写（[reportPlatesCovered]）；UI 读它判让位。
+     */
+    @Volatile
+    private var coveredSlots = 0
+
+    private const val SLOT_MASK = (1 shl SLOT_CAPACITY) - 1
 
     /** 首写方线程 id（-1 = 还没人写过）；前提①的登记处，只在 [monitor] 里写 */
     @Volatile
@@ -840,12 +856,14 @@ object FrostCardTable {
      *
      * 返回 ≥0 = 有效卡片数，第 i 块在 `out[HEADER_FLOATS + i * SLOT_FLOATS]`（**压实**过：只在场的槽位
      * 才占一块，读方不用跳过空槽）；表头恒在 `out[0 until HEADER_FLOATS]`。
+     * 传了 [slotsOut] 时同下标处写回该块的**原始槽位号**（Y14：GL 回报逐槽覆盖位要靠它；
+     * 压实会丢掉槽位身份，只按 i 回报会把 bit 打到别的卡身上）。[slotsOut] 不够长时只写放得下的前几项。
      * 返回 -1 只有一种成因：`out` 太短（调用方数组是构造期按 [TABLE_FLOATS] 定的，正常永不触发）。
      * 换了双缓冲之后**读方不会再"撞车"**：引用交换本身就是一次完整发布，没有重试上限可言，
      * 于是也就没有"沿用上一帧副本"这条退路需要维持（引擎那一侧的双缓冲副本数组仍留着，见
      * [GlRenderEngine.drawFrostPlates]）。
      */
-    fun tryReadInto(out: FloatArray): Int {
+    fun tryReadInto(out: FloatArray, slotsOut: IntArray? = null): Int {
         if (out.size < TABLE_FLOATS) return -1
         return synchronized(monitor) {
             val src = published
@@ -856,6 +874,7 @@ object FrostCardTable {
                 if (src[base + CARD_PRESENT] == 0f) continue
                 val dst = HEADER_FLOATS + written * SLOT_FLOATS
                 for (k in 0 until SLOT_FLOATS) out[dst + k] = src[base + k]
+                if (slotsOut != null && written < slotsOut.size) slotsOut[written] = slot
                 written++
             }
             written
@@ -863,15 +882,51 @@ object FrostCardTable {
     }
 
     /**
-     * GL 线程回报：这一帧到底画没画板（唯一一条 GL→UI 的反向通道，单布尔不给撕裂机会）。
+     * GL 线程回报：这一帧到底画没画板（整页粗口径；逐槽信息走 [reportPlatesCovered]）。
+     *
+     * 生产绘制路径已改报逐槽掩码；本函数仍用于"链关掉 / 引擎销毁 ⇒ 撤报"那几条路，
+     * 以及单测里整页翻转的自证。传 false 时**连逐槽位一起清**（否则"板没了但某槽还说覆盖"
+     * 会让那枚卡永久不画底）。
      *
      * ⚠ 口径：**每个真画了的窗口帧回报一次**，不是"每帧"。上屏被 [GlRenderEngine] 的
      * `windowThrottled()` 节流掉的那一帧连 [drawFrostPlates] 都不进，因此既不贴板也不回报 ⇒
      * [isPlatesDrawn] 在节流间隔里保持上一帧的值（节流帧本来就不该画，所以这不是漏报）。
      */
     fun reportPlatesDrawn(drawn: Boolean) {
+        if (!drawn) {
+            // 整页撤报必须连逐槽位一起清：否则"板没了但某槽还说覆盖"会让那枚卡永久不画底
+            if (coveredSlots != 0) coveredSlots = 0
+            if (platesDrawn) platesDrawn = false
+            return
+        }
+        if (!platesDrawn) platesDrawn = true
+    }
+
+    /**
+     * GL 线程回报：这一帧**哪些槽位真贴出了板**（Y14，[drawFrostPlates] 在窗口 swap 成功后调）。
+     *
+     * 与 [reportPlatesDrawn] 的分工：这里带逐槽信息，[platesDrawn] 由它派生（有任一位 ⇒ 整页 live）。
+     * 传 0 = 这一帧一块都没画（或 swap 失败 ⇒ 画的没上屏）：整页 live 与逐槽位一起撤。
+     */
+    fun reportPlatesCovered(mask: Int) {
+        // 负数掩码当"没画"处理：`-1 and SLOT_MASK` 会把所有槽位都点亮，那是最坏的一种假 live
+        val next = if (mask <= 0) 0 else mask and SLOT_MASK
+        if (coveredSlots != next) coveredSlots = next
+        val drawn = next != 0
         if (platesDrawn != drawn) platesDrawn = drawn
     }
+
+    /**
+     * UI 侧读：槽 [slot] 这一帧有 GL 板吗。
+     *
+     * 让位判据必须逐板：整页 [isPlatesDrawn] 只回答"有任一块画出来了"，拿它给所有板让位，
+     * 会把完全落在黑边上（[frostUvInto] 无交集 ⇒ 一块没画）的板的本地底一起撤掉（Y14）。
+     */
+    fun isPlateCovered(slot: Int): Boolean =
+        slot in 0 until SLOT_CAPACITY && (coveredSlots and (1 shl slot)) != 0
+
+    /** UI 轮询用：当前逐槽覆盖位的一整份快照（bit s = 槽 s 有板） */
+    fun coveredSlotMask(): Int = coveredSlots
 
     /** UI 侧读：GL 现在真在画板吗（false = 底板保持旧的纯色 fill，观感与接霜前逐字相同） */
     fun isPlatesDrawn(): Boolean = platesDrawn
@@ -901,6 +956,7 @@ object FrostCardTable {
             disabledReason = null
             writerThreadId = -1L
             platesDrawn = false
+            coveredSlots = 0
             leased.fill(false)
             freeSlots.clear()
             for (i in SLOT_CAPACITY - 1 downTo 0) freeSlots.addLast(i)

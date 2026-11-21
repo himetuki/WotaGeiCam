@@ -10,6 +10,9 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.AtomicFile
 import androidx.room.withTransaction
+import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.allMediaVolumesMounted
+import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.media.MediaTag
 import com.wotagei.cam.media.TagSpace
@@ -18,16 +21,26 @@ import com.wotagei.cam.media.WotaDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.io.OutputStream
+import java.util.zip.CRC32
 
 /**
  * Auto Backup / 换机只备份一份有界的用户数据快照；XML 白名单永远不直接开放运行目录或原始 DB。
  * 设置按键筛选；收藏/标签按相对路径、名称、大小、时长匹配，不复制本机 MediaStore ID。
  * 视频由系统相册/用户自行迁移；未到齐或尚未授权的媒体留待媒体库可读时匹配，不误贴到同 ID 新片。
+ *
+ * 2026-11-19 的持久化边界（R14/R15/Y39/Y40/Y41）：
+ * - 恢复源只有在设置和新 pending 都**回读确认**后才消费；发布失败/容量合并不下时保留源。
+ * - 合并超限不再让媒体库重试永久失败：旧 pending 仍先匹配消化，源留待下一轮再交接。
+ * - 导出先写 `.staging` 并落一个带指纹的事务标记，再发布为白名单文件；进程若在暂存后退出，
+ *   下次启动按标记丢弃本机导出，绝不把本机标签当系统恢复输入。
+ * - 部分授权/查询失败的 Room 行用本机导出账本保留最后已确认的便携指纹（Y40）。
  */
 class WotaBackupAgent : BackupAgent() {
     override fun onBackup(oldState: ParcelFileDescriptor?, data: BackupDataOutput?, newState: ParcelFileDescriptor?) = Unit
@@ -35,18 +48,35 @@ class WotaBackupAgent : BackupAgent() {
 
     override fun onFullBackup(data: FullBackupDataOutput) = runBlocking {
         restoreMutex.withLock {
-            // 恢复源与导出暂存共用白名单文件：先完成交接；失败必须在暂存/清理的 try 之前退出。
-            consumeRestoreLocked(this@WotaBackupAgent)
-            val staged = File(filesDir, PortableUserData.FILE_NAME)
+            // 先交接系统恢复源；交接不成功（容量合并不下/暂存失败）绝不覆盖源文件。
+            // 必须让本轮备份**失败**而不是正常返回：正常返回会让系统把「没有快照」当成
+            // 最新一份成功备份，上一份云端标签/设置反而被这次空提交覆盖。
+            if (!consumeRestoreLocked(this@WotaBackupAgent)) {
+                Diag.w("WotaBackup", "恢复源尚未交接，中止本轮备份并保留源供后续重试")
+                throw IOException("恢复源尚未交接，保留上一份备份")
+            }
+            var published = false
             try {
                 val settings = PortableUserData.settingsOf(getSharedPreferences(PortableUserData.PREFS_NAME, MODE_PRIVATE).all)
                 val pending = readPending(this@WotaBackupAgent)?.tags.orEmpty()
                 val tags = exportTags(this@WotaBackupAgent)
-                writeSnapshot(staged, PortableUserData.Snapshot(settings, PortableUserData.mergeTags(pending, tags)))
+                    ?: throw IOException("部分标签无法核验，保留上一份备份")
+                val snapshot = try {
+                    PortableUserData.Snapshot(settings, PortableUserData.mergeTags(pending, tags))
+                } catch (e: IllegalArgumentException) {
+                    Diag.w("WotaBackup", "本轮导出合并超过上限，保留旧备份并等待标签消化", e)
+                    throw IOException("本轮导出合并超过上限，保留上一份备份", e)
+                }
+                if (!stageForExport(this@WotaBackupAgent, snapshot)) {
+                    Diag.w("WotaBackup", "导出暂存未确认发布，中止本轮备份")
+                    throw IOException("导出暂存未确认发布，保留上一份备份")
+                }
+                published = true
                 super.onFullBackup(data)
             } finally {
-                // 整段与恢复共锁，媒体库重试不会把正在导出的快照误当恢复输入消费。
-                AtomicFile(staged).delete()
+                // 整段与恢复共锁；只有本轮暂存确实发布后才删白名单文件，
+                // 绝不在暂存失败时误删可能存在的系统恢复输入。
+                cleanupExport(this@WotaBackupAgent, published)
             }
         }
     }
@@ -60,6 +90,10 @@ class WotaBackupAgent : BackupAgent() {
     }
 
     companion object {
+        internal const val EXPORT_STATE_NAME = "wota_user_backup.export"
+        internal const val EXPORT_STAGING_NAME = "wota_user_backup.bin.staging"
+        internal const val LEDGER_NAME = "wota_export_ledger.bin"
+
         private val restoreMutex = Mutex()
 
         /** 启动预热、系统恢复回调共用；只交接有界快照，不查媒体库或创建 Room。 */
@@ -67,10 +101,14 @@ class WotaBackupAgent : BackupAgent() {
             restoreMutex.withLock { consumeRestoreLocked(context) }
         }
 
-        /** 调用方持有 restoreMutex；合法源仅在两处持久化都成功后消费，任何 IO 失败均留源。 */
-        private fun consumeRestoreLocked(context: Context) {
+        /**
+         * 调用方持有 restoreMutex；合法源仅在两处持久化都成功后消费，任何 IO 失败均留源。
+         * @return false = 设置已提交，但 pending 尚未交接（容量/发布失败）；源必须保留。
+         */
+        private fun consumeRestoreLocked(context: Context): Boolean {
+            discardInterruptedExportLocked(context)
             val file = File(context.filesDir, PortableUserData.FILE_NAME)
-            if (!file.exists() && !File(file.path + ".bak").exists()) return
+            if (!file.exists() && !File(file.path + ".bak").exists()) return true
             val atomic = AtomicFile(file)
             val snapshot = try {
                 atomic.openRead().use { PortableUserData.read(it) }
@@ -78,7 +116,7 @@ class WotaBackupAgent : BackupAgent() {
                 // 已完整读到、但格式/版本无效的输入不是可重试 IO；不触碰旧 prefs/pending。
                 atomic.delete()
                 Diag.w("WotaBackup", "迁移快照格式无效，已丢弃损坏输入")
-                return
+                return true
             }
             val prefs = context.getSharedPreferences(PortableUserData.PREFS_NAME, Context.MODE_PRIVATE)
             val editor = prefs.edit()
@@ -93,52 +131,269 @@ class WotaBackupAgent : BackupAgent() {
             }
             // commit(false) 也可能已改内存；即使重试时没有缺键，仍提交以确保真正落盘。
             check(editor.commit()) { "迁移设置落盘失败" }
-            writePending(context, PortableUserData.mergeTags(readPending(context)?.tags.orEmpty(), snapshot.tags))
-            atomic.delete()
+            val oldTags = readPending(context)?.tags.orEmpty()
+            val merged = try {
+                PortableUserData.mergeTags(oldTags, snapshot.tags)
+            } catch (_: IllegalArgumentException) {
+                // R14：两份各自合法的 6000 条快照合并超 10,000 条上限。不能整体交接，
+                // 但也不能在这里抛——restoreTags 每次重试都会先走本函数，抛错会让旧 pending
+                // 永远没机会消化。下面改为「旧 pending 原样保留 + 新标签按余量分批交接」。
+                null
+            }
+            if (merged != null) {
+                // 先判断能否装进 4MiB 字节帽：能装就别把 IO/发布失败误当成容量问题，
+                // 否则一次真实写失败会被下面的分批逻辑反复重试，也会掩盖原始错误。
+                if (fitsInSnapshot(PortableUserData.Snapshot(emptyMap(), merged))) {
+                    if (writePending(context, merged)) {
+                        atomic.delete()
+                        return true
+                    }
+                    Diag.w("WotaBackup", "待匹配快照未确认发布，保留恢复源供重试")
+                    return false
+                }
+                // 条数没超但字节超 4MiB 时 mergeTags 不会抛；这里不能直接放弃，
+                // 否则和条数超限一样会永远卡在同一个合并上。统一落到下面的分批交接。
+                Diag.w("WotaBackup", "待匹配快照超过字节帽，改按余量分批交接")
+            }
+            val (accepted, remaining) = PortableUserData.handoff(oldTags, snapshot.tags)
+            if (accepted.isEmpty()) {
+                // 旧 pending 已占满上限：先让媒体库把旧条目消化掉，源保持原样。
+                Diag.w("WotaBackup", "旧待匹配已占满上限，保留恢复源等待旧条目消化")
+                return false
+            }
+            val fitted = fitPending(context, oldTags, accepted) ?: run {
+                Diag.w("WotaBackup", "分批交接写入失败，保留恢复源供重试")
+                return false
+            }
+            val leftovers = accepted.drop(fitted.size) + remaining
+            if (leftovers.isEmpty()) {
+                atomic.delete()
+                return true
+            }
+            // 已接手的标签已确认落盘；未接手的写回恢复源，下一轮旧 pending 缩小后继续。
+            if (!writeSnapshot(file, PortableUserData.Snapshot(emptyMap(), leftovers))) {
+                Diag.w("WotaBackup", "未交接标签回写恢复源失败，保留原源供重试")
+                return false
+            }
+            return false
         }
 
-        /** 媒体库查询在 IO 线程调用；仅返回本次成功重绑定的标签，不改 Room schema 或原有标签。 */
-        internal suspend fun restoreTags(context: Context, clips: List<VideoClip>): List<MediaTag> =
-            withContext(Dispatchers.IO) {
-                restoreMutex.withLock {
-                    // 权限/媒体到齐后的实际查询也重试交接，不只读取此前成功落盘的 pending。
-                    consumeRestoreLocked(context)
-                    val snapshot = readPending(context) ?: return@withLock emptyList()
-                    // 一次建索引，匹配 O(媒体数 + 标签数)；指纹不完整/跨卷同名多候选均不恢复。
-                    val byKey = PortableUserData.uniqueCandidates(clips.filter { it.id > 0 && !it.isTrashed }) {
-                        it.portableKey()
-                    }
-                    val restored = arrayListOf<MediaTag>()
-                    val remaining = arrayListOf<PortableUserData.Tag>()
-                    for (tag in snapshot.tags) {
-                        val clip = byKey[tag.media]
-                        if (clip == null) {
-                            remaining += tag
-                            continue
-                        }
-                        val value = portableTag(tag.value) ?: continue
-                        restored += MediaTag(mediaId = clip.id, path = clip.dataPath ?: clip.uri.toString(),
-                            tag = value, createdAt = tag.createdAt)
-                    }
-                    if (remaining.size == snapshot.tags.size) return@withLock emptyList()
-                    // Room 的发射会取消旧 flatMapLatest；落库+消费 pending 必须完整收尾，不能插一条就重试一轮。
-                    withContext(NonCancellable) {
-                        val db = WotaDb.get(context)
-                        val dao = db.tagDao()
-                        db.withTransaction {
-                            val local = dao.observeAll().first().groupBy { it.mediaId }
-                                .mapValues { (_, tags) -> tags.map { it.tag }.toSet() }
-                            restored.forEach { row -> if (row.tag !in local[row.mediaId].orEmpty()) dao.insert(row) }
-                        }
-                        writePending(context, remaining)
-                    }
-                    restored
+        /**
+         * 在 10,000 条 / 4MiB 双帽内找最大的可发布前缀；先试满额，字节超帽再二分。
+         * 任一次 [writePending] 成功即已回读确认，失败的前缀不会覆盖上一次成功内容。
+         */
+        private fun fitPending(
+            context: Context,
+            existing: List<PortableUserData.Tag>,
+            accepted: List<PortableUserData.Tag>
+        ): List<PortableUserData.Tag>? {
+            if (writePending(context, existing + accepted)) return accepted
+            var low = 0
+            var high = accepted.size - 1
+            var best: List<PortableUserData.Tag>? = null
+            while (low <= high) {
+                val mid = (low + high) / 2
+                val candidate = accepted.subList(0, mid)
+                if (writePending(context, existing + candidate)) {
+                    best = candidate
+                    low = mid + 1
+                } else {
+                    high = mid - 1
                 }
             }
+            return best
+        }
+
+        /**
+         * 媒体库查询在 IO 线程调用；仅返回本次成功重绑定的标签，不改 Room schema 或原有标签。
+         * 2 参重载供既有调用方/单测按「完整可见」处理；MediaRepo 会传实际权限态。
+         */
+        internal suspend fun restoreTags(context: Context, clips: List<VideoClip>): List<MediaTag> =
+            restoreTags(context, clips, visibilityComplete = true)
+
+        internal suspend fun restoreTags(
+            context: Context,
+            clips: List<VideoClip>,
+            visibilityComplete: Boolean
+        ): List<MediaTag> = withContext(Dispatchers.IO) {
+            restoreMutex.withLock {
+                // 权限/媒体到齐后的实际查询也重试交接，不只读取此前成功落盘的 pending。
+                // 容量超限时交接返回 false，但旧 pending 仍继续匹配（R14 不能死锁）。
+                consumeRestoreLocked(context)
+                val snapshot = readPending(context) ?: return@withLock emptyList()
+                // Y39：部分授权/卷不可见时，同一指纹可能还有一条看不见的候选；
+                // 本次可见集合不足以消除歧义，全部保留待匹配，绝不消费 pending。
+                if (!visibilityComplete) return@withLock emptyList()
+                // 一次建索引，匹配 O(媒体数 + 标签数)；指纹不完整/跨卷同名多候选均不恢复。
+                val byKey = PortableUserData.uniqueCandidates(clips.filter { it.id > 0 && !it.isTrashed }) {
+                    it.portableKey()
+                }
+                val restored = arrayListOf<MediaTag>()
+                val remaining = arrayListOf<PortableUserData.Tag>()
+                for (tag in snapshot.tags) {
+                    val clip = byKey[tag.media]
+                    if (clip == null) {
+                        remaining += tag
+                        continue
+                    }
+                    val value = portableTag(tag.value) ?: continue
+                    restored += MediaTag(mediaId = clip.id, path = clip.dataPath ?: clip.uri.toString(),
+                        tag = value, createdAt = tag.createdAt)
+                }
+                if (remaining.size == snapshot.tags.size) return@withLock emptyList()
+                // Room 的发射会取消旧 flatMapLatest；落库+消费 pending 必须完整收尾，不能插一条就重试一轮。
+                withContext(NonCancellable) {
+                    val db = WotaDb.get(context)
+                    val dao = db.tagDao()
+                    db.withTransaction {
+                        val local = dao.observeAll().first().groupBy { it.mediaId }
+                        restored.forEach { row ->
+                            // Y39：mediaId+tag 相同还不够，既有行必须属于同一路径才算已恢复。
+                            // ID 被复用时旧行会在这里先删后插，而不是被误判跳过；表上没有
+                            // (mediaId,tag) 唯一约束，单靠 @Insert(REPLACE) 会留下旧路径脏行。
+                            val sameMedia = local[row.mediaId].orEmpty()
+                            if (sameMedia.any { it.tag == row.tag && it.path == row.path }) {
+                                return@forEach
+                            }
+                            if (sameMedia.any { it.tag == row.tag }) dao.deleteOne(row.mediaId, row.tag)
+                            dao.insert(row)
+                        }
+                    }
+                    writePending(context, remaining)
+                }
+                restored
+            }
+        }
+
+        /**
+         * 导出暂存 + 发布（Y41）：先写独立 `.staging` 并落指纹标记，确认发布后才进入白名单路径。
+         * 进程若在暂存落盘后退出，启动时 [discardInterruptedExportLocked] 会按指纹识别并丢弃，
+         * 不会把本机标签当成系统恢复输入。
+         */
+        internal fun stageForExport(context: Context, snapshot: PortableUserData.Snapshot): Boolean {
+            val staging = File(context.filesDir, EXPORT_STAGING_NAME)
+            val target = File(context.filesDir, PortableUserData.FILE_NAME)
+            val state = File(context.filesDir, EXPORT_STATE_NAME)
+            File(staging.path + ".new").delete()
+            // 正常流程开始前恢复源已消费；这里再遇既存文件说明状态异常，绝不覆盖。
+            if (target.exists() || File(target.path + ".bak").exists()) return false
+            if (!writeSnapshot(staging, snapshot)) return false
+            val fingerprint = fingerprintOf(staging) ?: run {
+                AtomicFile(staging).delete()
+                return false
+            }
+            if (!writeFingerprint(state, fingerprint)) {
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
+                return false
+            }
+            if (!staging.renameTo(target)) {
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
+                return false
+            }
+            if (fingerprintOf(target) != fingerprint) {
+                AtomicFile(state).delete()
+                AtomicFile(target).delete()
+                return false
+            }
+            return true
+        }
+
+        private fun cleanupExport(context: Context, published: Boolean) {
+            val target = File(context.filesDir, PortableUserData.FILE_NAME)
+            if (published) {
+                AtomicFile(target).delete()
+            } else {
+                // 没发布时 target 可能是真正的系统恢复源，绝不能删；只清掉本进程的
+                // AtomicFile 临时件（target 的 .bak 仍留给 openRead 恢复）。
+                File(target.path + ".new").delete()
+            }
+            for (name in listOf(EXPORT_STAGING_NAME, EXPORT_STATE_NAME)) {
+                AtomicFile(File(context.filesDir, name)).delete()
+            }
+        }
+
+        /** 只有指纹与标记一致的导出暂存才丢弃；不匹配的文件按真正的系统恢复源保留。 */
+        private fun discardInterruptedExportLocked(context: Context) {
+            val staging = File(context.filesDir, EXPORT_STAGING_NAME)
+            val state = File(context.filesDir, EXPORT_STATE_NAME)
+            val target = File(context.filesDir, PortableUserData.FILE_NAME)
+            // 标记写入本身走 AtomicFile：进程在 finishWrite 前退出时，旧标记可能只剩
+            // `.bak`（base 已被 startWrite 挪走）。只认 base 会把这类中断导出漏成恢复源。
+            if (!state.exists() && !File(state.path + ".bak").exists()) {
+                AtomicFile(staging).delete()
+                AtomicFile(state).delete()
+                File(target.path + ".new").delete()
+                return
+            }
+            val expected = readFingerprint(state)
+            val ours = expected != null && target.isFile && fingerprintOf(target) == expected
+            if (ours) {
+                AtomicFile(target).delete()
+                Diag.w("WotaBackup", "丢弃上次进程中断留下的导出暂存，不当作恢复输入")
+            } else {
+                File(target.path + ".new").delete()
+            }
+            AtomicFile(staging).delete()
+            AtomicFile(state).delete()
+        }
+
+        private data class Fingerprint(val size: Long, val crc: Long)
+
+        private fun fingerprintOf(file: File): Fingerprint? = try {
+            val crc = CRC32()
+            var size = 0L
+            file.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    crc.update(buffer, 0, n)
+                    size += n
+                }
+            }
+            Fingerprint(size, crc.value)
+        } catch (e: Exception) {
+            null
+        }
+
+        private fun writeFingerprint(file: File, fingerprint: Fingerprint): Boolean {
+            val text = "${fingerprint.size}:${fingerprint.crc}"
+            val atomic = AtomicFile(file)
+            val output = try {
+                atomic.startWrite()
+            } catch (e: Exception) {
+                return false
+            }
+            try {
+                output.write(text.toByteArray(Charsets.UTF_8))
+                atomic.finishWrite(output)
+            } catch (e: Exception) {
+                atomic.failWrite(output)
+                return false
+            }
+            return try {
+                atomic.openRead().use { it.readBytes().toString(Charsets.UTF_8) == text }
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        private fun readFingerprint(file: File): Fingerprint? = try {
+            if (!file.exists() && !File(file.path + ".bak").exists()) null else {
+                // 走 AtomicFile.openRead 才能在 base 缺失时由 `.bak` 恢复出上一次完整标记。
+                val parts = AtomicFile(file).openRead().use { it.readBytes().toString(Charsets.UTF_8) }.split(':')
+                if (parts.size == 2) Fingerprint(parts[0].toLong(), parts[1].toLong()) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
 
         private fun VideoClip.portableKey() = PortableUserData.MediaKey(relativePath, name, sizeBytes, durationMs)
         private fun portableTag(value: String): String? = if (value == TagSpace.LIKE) value else TagSpace.normalize(value)
         private fun pendingFile(context: Context) = File(context.noBackupFilesDir, PortableUserData.FILE_NAME)
+        private fun ledgerFile(context: Context) = File(context.noBackupFilesDir, LEDGER_NAME)
 
         private fun readPending(context: Context): PortableUserData.Snapshot? {
             val file = pendingFile(context)
@@ -155,48 +410,190 @@ class WotaBackupAgent : BackupAgent() {
             }
         }
 
-        private fun writePending(context: Context, tags: List<PortableUserData.Tag>) {
+        /** @return true = 新 pending 已发布（或已确认清空）；false = 保留旧 pending/恢复源。 */
+        private fun writePending(context: Context, tags: List<PortableUserData.Tag>): Boolean {
             val file = pendingFile(context)
-            if (tags.isEmpty()) AtomicFile(file).delete()
-            else writeSnapshot(file, PortableUserData.Snapshot(emptyMap(), tags))
+            if (tags.isEmpty()) {
+                AtomicFile(file).delete()
+                return true
+            }
+            return writeSnapshot(file, PortableUserData.Snapshot(emptyMap(), tags))
         }
 
-        private fun writeSnapshot(file: File, snapshot: PortableUserData.Snapshot) {
+        /**
+         * 只按真实编码规则量一次字节数，不落盘；用于区分「超过 4MiB 字节帽」和
+         * 「写盘/发布本身失败」。后者必须原样保留源重试，不能被分批交接吞成容量问题。
+         */
+        private fun fitsInSnapshot(snapshot: PortableUserData.Snapshot): Boolean = try {
+            PortableUserData.write(snapshot, object : OutputStream() {
+                override fun write(b: Int) = Unit
+                override fun write(b: ByteArray, off: Int, len: Int) = Unit
+            })
+            true
+        } catch (_: IOException) {
+            false
+        }
+
+        /**
+         * R15：`AtomicFile.finishWrite()` 没有失败回执，平台实现可能只记日志。
+         * 写完必须回读并逐项比对归一化快照，确认新内容真的发布后才允许调用方消费源。
+         */
+        private fun writeSnapshot(file: File, snapshot: PortableUserData.Snapshot): Boolean {
             val atomic = AtomicFile(file)
-            val output = atomic.startWrite()
+            val output = try {
+                atomic.startWrite()
+            } catch (e: Exception) {
+                Diag.w("WotaBackup", "快照暂存打开失败，保留旧文件", e)
+                return false
+            }
             try {
                 PortableUserData.write(snapshot, output)
                 atomic.finishWrite(output)
             } catch (e: Exception) {
                 atomic.failWrite(output)
-                throw e
+                Diag.w("WotaBackup", "快照写入失败，保留旧文件", e)
+                return false
+            }
+            return try {
+                val published = atomic.openRead().use { PortableUserData.read(it) }
+                val expected = PortableUserData.normalized(snapshot)
+                if (published == expected) true else {
+                    Diag.w("WotaBackup", "快照回读与本次提交不一致，视为未发布")
+                    false
+                }
+            } catch (e: Exception) {
+                Diag.w("WotaBackup", "快照发布后回读失败，视为未发布", e)
+                false
             }
         }
 
+        /** 权限、卷挂载与查询任一不足时，MediaStore 的空/半截结果都不能证明标签对应的媒体不存在。 */
+        private fun backupVisibilityComplete(context: Context): Boolean = runCatching {
+            val access = mediaAccessState(context)
+            (access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ) &&
+                allMediaVolumesMounted(context)
+        }.getOrDefault(false)
+
+        /**
+         * @return null = 有本机标签本轮无法核验、也没有历史已确认指纹；调用方必须中止备份，
+         * 不能用一份少标签的快照覆盖上一份完整云端备份。
+         */
         @Suppress("DEPRECATION") // DATA 仅用于确认旧 tag 仍属于同一文件；不会写入迁移快照。
-        private suspend fun exportTags(context: Context): List<PortableUserData.Tag> {
+        private suspend fun exportTags(context: Context): List<PortableUserData.Tag>? {
             val tags = WotaDb.get(context).tagDao().observeAll().first()
+            val previous = readLedger(context).associateBy { Triple(it.mediaId, it.path, it.tag) }
+            val visibilityComplete = backupVisibilityComplete(context)
             val out = arrayListOf<PortableUserData.Tag>()
+            val next = arrayListOf<PortableUserData.ExportEntry>()
+            val nextKeys = HashSet<Triple<Long, String, String>>()
+            var unverifiedWithoutProof = false
             val projection = arrayOf(MediaStore.Video.Media.DATA, MediaStore.Video.Media.RELATIVE_PATH,
                 MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DURATION)
             for ((id, rows) in tags.groupBy { it.mediaId }) {
                 val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                var cursorPath: String? = null
+                var key: PortableUserData.MediaKey? = null
+                var queryFailed = false
+                var rowSeen = false
                 try {
                     context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
-                        if (!c.moveToFirst() || c.isNull(0)) return@use
-                        val key = PortableUserData.MediaKey(c.getString(1).orEmpty(), c.getString(2).orEmpty(),
+                        if (!c.moveToFirst()) return@use
+                        // 行还在、只是 DATA/元数据暂时读不全（如刚改名的瞬时态）时，不能当成媒体已删除。
+                        rowSeen = true
+                        if (c.isNull(0)) return@use
+                        val candidate = PortableUserData.MediaKey(c.getString(1).orEmpty(), c.getString(2).orEmpty(),
                             c.getLong(3), c.getLong(4))
-                        if (!key.valid()) return@use
-                        rows.filter { it.path == c.getString(0) }.forEach { row ->
-                            portableTag(row.tag)?.let { out += PortableUserData.Tag(key, it, row.createdAt) }
+                        if (candidate.valid()) {
+                            cursorPath = c.getString(0)
+                            key = candidate
                         }
                     }
-                } catch (e: SecurityException) {
-                    // 未授予/部分授权只导出可确认身份的收藏，不把不可读内容的本机 ID 当迁移身份。
-                    Diag.w("WotaBackup", "部分收藏当前不可读，未纳入迁移快照")
+                } catch (e: Exception) {
+                    // 未授予/部分授权/卷不可读/单行查询异常：本轮算不出指纹，
+                    // 下面用导出账本保留上次已确认的指纹；没有账本就只能中止本轮。
+                    queryFailed = true
+                    Diag.w("WotaBackup", "部分收藏当前不可读，改用上次已确认的迁移指纹", e)
+                }
+                val resolvedKey = key
+                val resolvedPath = cursorPath
+                // 只有「权限/卷都完整且该行查询没失败」时，查无此行才可以当成媒体已删除。
+                val canTrustAbsence = visibilityComplete && !queryFailed
+                if (resolvedKey != null && resolvedPath != null) {
+                    rows.filter { it.path == resolvedPath }.forEach { row ->
+                        val value = portableTag(row.tag) ?: return@forEach
+                        out += PortableUserData.Tag(resolvedKey, value, row.createdAt)
+                        val localKey = Triple(id, row.path, value)
+                        if (nextKeys.add(localKey)) {
+                            next += PortableUserData.ExportEntry(id, row.path, value, resolvedKey, row.createdAt)
+                        }
+                    }
+                } else {
+                    // Y40：部分授权/查询缺失时，不可核验的本机标签不能从下一份备份里消失。
+                    // 有历史指纹就沿用；没有历史指纹又不能证明已删除时，宁可本轮不备份。
+                    // 完整可见但游标仍有此行（DATA/尺寸暂时不完整）时媒体并未删除，同样沿用历史指纹。
+                    val metadataUnavailable = !canTrustAbsence || rowSeen
+                    rows.forEach { row ->
+                        val value = portableTag(row.tag) ?: return@forEach
+                        val localKey = Triple(id, row.path, value)
+                        val confirmed = previous[localKey]
+                        if (metadataUnavailable) {
+                            if (confirmed != null) {
+                                out += PortableUserData.Tag(confirmed.media, value, row.createdAt)
+                                if (nextKeys.add(localKey)) next += confirmed.copy(createdAt = row.createdAt)
+                            } else if (!canTrustAbsence) {
+                                unverifiedWithoutProof = true
+                            }
+                        }
+                        // 完整可见且确认无此行 ⇒ 媒体已删除或已不可迁移，旧账本不能让它复活。
+                    }
                 }
             }
-            return out
+            writeLedger(context, next)
+            if (unverifiedWithoutProof) {
+                Diag.w("WotaBackup", "部分标签无法核验且无历史指纹，保留上一份备份")
+                return null
+            }
+            return out.distinctBy { it.media to it.value }
+        }
+
+        private fun readLedger(context: Context): List<PortableUserData.ExportEntry> {
+            val file = ledgerFile(context)
+            if (!file.exists() && !File(file.path + ".bak").exists()) return emptyList()
+            return try {
+                AtomicFile(file).openRead().use { PortableUserData.readExportLedger(it) }
+            } catch (e: Exception) {
+                // 账本只是「上次已确认指纹」的派生缓存；坏账本不能阻断备份本身。
+                Diag.w("WotaBackup", "导出账本不可读，按空账本继续", e)
+                emptyList()
+            }
+        }
+
+        private fun writeLedger(context: Context, entries: List<PortableUserData.ExportEntry>): Boolean {
+            val file = ledgerFile(context)
+            if (entries.isEmpty()) {
+                AtomicFile(file).delete()
+                return true
+            }
+            val atomic = AtomicFile(file)
+            val output = try {
+                atomic.startWrite()
+            } catch (e: Exception) {
+                return false
+            }
+            try {
+                PortableUserData.writeExportLedger(entries, output)
+                atomic.finishWrite(output)
+            } catch (e: Exception) {
+                atomic.failWrite(output)
+                Diag.w("WotaBackup", "导出账本写入失败", e)
+                return false
+            }
+            return try {
+                val published = atomic.openRead().use { PortableUserData.readExportLedger(it) }
+                published == PortableUserData.normalizedLedger(entries)
+            } catch (e: Exception) {
+                false
+            }
         }
     }
 }

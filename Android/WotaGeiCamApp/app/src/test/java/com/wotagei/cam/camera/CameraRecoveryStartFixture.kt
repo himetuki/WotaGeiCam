@@ -9,8 +9,22 @@ import java.io.Closeable
 internal class CameraRecoveryStartFixture(
     parent: ClassLoader,
     boundarySources: Map<String, String> = emptyMap(),
+    /**
+     * 能力表 `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` 的 Java 表达式。
+     *
+     * 默认只有 `[30,30]`（既有相机恢复用例的旧口径，行为不变）。等号档（1/24、1/25）的用例
+     * 必须显式声明对应档位：默认表里没有 24/25 时 [Camera2Engine.syncFpsPick] 的通用退档会把
+     * 总线 fps 改写成 30、并把快门按 1/30 钳制——等号档前提（40ms@25fps）在测试里根本不存在，
+     * 断言会落在「发送值 == 用户档位值」的假红上。
+     */
+    fpsRanges: String = DEFAULT_FPS_RANGES,
 ) : Closeable {
-    val platform = N12CameraControllerFixture(parent, BOUNDARIES + boundarySources)
+    val platform = N12CameraControllerFixture(
+        parent,
+        BOUNDARIES +
+            mapOf("android.hardware.camera2.CameraCharacteristics" to characteristics(fpsRanges)) +
+            boundarySources,
+    )
     val application = platform.application()
     val controller = platform.controller(application)
     val manager = platform.call(application, "getSystemService", "camera")!!
@@ -18,8 +32,33 @@ internal class CameraRecoveryStartFixture(
 
     fun bind() { platform.call(controller, "bind", sink) }
     fun start() { platform.call(controller, "start") }
+    fun renderMode(name: String) {
+        val params = platform.call(controller, "getParams") ?: error("CameraController 没有 params")
+        val flow = platform.call(params, "getRenderMode") ?: error("WotaParams 没有 renderMode")
+        val value = platform.type("com.wotagei.cam.core.RenderMode").getField(name).get(null)
+        platform.call(flow, "setValue", value)
+    }
     fun retry() { platform.call(controller, "restartPreview") }
     fun rebind() { platform.call(controller, "forceRebind", sink) }
+
+    /**
+     * 用户/持久化层把一档 fps 写进总线（走 [com.wotagei.cam.core.WotaParams.setFps] 单一写入者）。
+     *
+     * 表内档位按 UI onPick 的口径给 range+exact；表外档位照 UI 的 `decideFps == null` 分支给
+     * `range=null, enabled=true, exact=false`——引擎必须自己退档，而不是依赖 UI 先灰显。
+     */
+    fun setFps(
+        value: Int,
+        range: ClosedRange<Int>? = null,
+        enabled: Boolean = true,
+        exact: Boolean = false,
+    ) {
+        val params = platform.call(controller, "getParams") ?: error("CameraController 没有 params")
+        val ctor = platform.type("com.wotagei.cam.core.ParamState")
+            .declaredConstructors.single { it.parameterCount == 4 }
+        val next = ctor.newInstance(value, range, enabled, exact)
+        platform.call(params, "setFps", next)
+    }
     fun engine(): Any = platform.engineOf(controller)
     fun drain(engine: Any = engine()) { platform.drain(engine) }
     fun opened(): Int = platform.call(manager, "getOpenCount") as Int
@@ -49,6 +88,25 @@ internal class CameraRecoveryStartFixture(
         drain(engine)
     }
 
+    fun readiness(engine: Any = engine()): Any =
+        platform.call(engine, "sessionReadiness") ?: error("真实 Camera2Engine 没有就绪快照")
+
+    fun ready(r: Any): Boolean = platform.call(r, "getReady") as Boolean
+    fun attempt(r: Any): Int = platform.call(r, "getAttempt") as Int
+    fun recordingWindow(r: Any): Boolean = platform.call(r, "getRecordingWindow") as Boolean
+    fun recordingTargetEpoch(r: Any): Int = platform.call(r, "getRecordingTargetEpoch") as Int
+
+    fun runDelayed(engine: Any = engine()) {
+        val handler = platform.field(engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler")
+        platform.call(handler, "runDelayed")
+        drain(engine)
+    }
+
+    fun delayedCount(engine: Any = engine()): Int {
+        val handler = platform.field(engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler")
+        return platform.call(handler, "delayedCount") as Int
+    }
+
     fun assertLive(engine: Any = engine()) {
         assertTrue("必须通过真实 open/configure/repeating 链恢复预览", platform.call(engine, "isPreviewLive") as Boolean)
         assertEquals("ING", platform.call(engine, "getPreviewStatus").toString())
@@ -63,7 +121,11 @@ internal class CameraRecoveryStartFixture(
     }
 
     companion object {
-        private fun characteristics(): String {
+        /** 既有相机恢复用例的默认档位表（与旧 `characteristics()` 里的值逐字一致）。 */
+        internal const val DEFAULT_FPS_RANGES =
+            "new android.util.Range[]{new android.util.Range<Integer>(30,30)}"
+
+        private fun characteristics(fpsRanges: String): String {
             val keys = CameraCharacteristics::class.java.declaredFields
                 .filter { it.type.simpleName == "Key" }
                 .joinToString("\n") { field ->
@@ -79,7 +141,7 @@ internal class CameraRecoveryStartFixture(
                         Object value=null;
                         switch(key.name){
                             case "SCALER_STREAM_CONFIGURATION_MAP":value=new android.hardware.camera2.params.StreamConfigurationMap();break;
-                            case "CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES":value=new android.util.Range[]{new android.util.Range<Integer>(30,30)};break;
+                            case "CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES":value=$fpsRanges;break;
                             case "REQUEST_AVAILABLE_CAPABILITIES":case "CONTROL_AF_AVAILABLE_MODES":case "CONTROL_AWB_AVAILABLE_MODES":value=new int[]{0};break;
                             case "LENS_FACING":value=1;break;
                             case "SENSOR_ORIENTATION":value=90;break;
@@ -96,7 +158,6 @@ internal class CameraRecoveryStartFixture(
         }
 
         private val BOUNDARIES = mapOf(
-            "android.hardware.camera2.CameraCharacteristics" to characteristics(),
             "android.hardware.camera2.params.StreamConfigurationMap" to """
                 package android.hardware.camera2.params;
                 public class StreamConfigurationMap {
@@ -128,6 +189,12 @@ internal class CameraRecoveryStartFixture(
                     public void removeCallbacks(Runnable r){queue.removeIf(item->item==r);delayed.removeIf(item->item==r);}
                     public void removeCallbacksAndMessages(Object token){queue.clear();delayed.clear();}
                     public void drain(){while(!queue.isEmpty()){queue.removeFirst().run();}}
+                    public int delayedCount(){return delayed.size();}
+                    public void runDelayed(){
+                        java.util.ArrayList<Runnable> copy=new java.util.ArrayList<>(delayed);
+                        delayed.clear();
+                        for(Runnable r:copy)r.run();
+                    }
                 }
             """,
             "android.hardware.camera2.CameraManager" to """

@@ -2,6 +2,8 @@ package com.wotagei.cam.record
 
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -341,6 +343,75 @@ internal class RotateLossLedger {
     }
 }
 
+/**
+ * 换段腿的**截止时刻账**（Y18）：预算、丢失结算领取权、腿终点三件事各占一个状态。
+ *
+ * 旧形态（一枚 `AtomicLong rotateLegStartMs`）把三件事压在同一枚变量上：`getAndSet(0L)` 既是
+ * 「领取这条腿的丢失结算」又顺手「清掉腿」⇒ 停止路径在泵线程**还卡在腿里**时领走结算，
+ * [budgetLeftMs] 随即退回腿外的 [idleBudgetMs]：
+ * - 控制线程收尾的关句柄/回收调用**凭空多出 3s 预算**（"只记账不拆资源"名存实亡，stop 又被拉长）；
+ * - 在途泵线程的下一轮有界调用也拿到腿外预算 ⇒ 预算判据（[budgetLeftMs] <= 0 即停摆）失效。
+ * 这就是 Y18 的「预算与丢失结算共用起钟」：stop 超时 + 在途换段交错时两本账串台。
+ *
+ * 现在三者分开：
+ * - **截止时刻不可变**：[begin] 写入，只有腿真正结束（泵线程 [endLeg]）才清；
+ * - **[claim] 只领丢失结算权**（CAS，恰好一次），**绝不**触碰预算；
+ * - 预算恒由「现在 vs 截止时刻」派生，腿外才给 [idleBudgetMs]。
+ *
+ * @param now 单调时钟（生产 = `SystemClock.elapsedRealtime`；测试注入假钟）
+ */
+internal class RotateLegLedger(
+    private val legBudgetMs: Long,
+    private val idleBudgetMs: Long,
+    private val now: () -> Long
+) {
+
+    private val startMs = AtomicLong(0L)
+    private val deadlineMs = AtomicLong(0L)
+    /** true = 本腿结算权已被领走（或根本没有腿）：[claim] 必得 0 */
+    private val claimed = AtomicBoolean(true)
+
+    /** 腿起钟（泵线程）：设截止时刻并重开领取权；@return 腿起点（丢失量按它算） */
+    fun begin(): Long {
+        val t = now()
+        startMs.set(t)
+        deadlineMs.set(t + legBudgetMs)
+        // 领取权最后重开：让「起点已写、领取权仍关」的那一瞬 claim 得 0（宁可漏记刚起钟的
+        // 零丢失腿，也不许领到紧邻上一次腿的旧起点）
+        claimed.set(false)
+        return t
+    }
+
+    /** 腿内按不可变截止时刻递减；腿外（没有腿）给单次入库预算 */
+    fun budgetLeftMs(): Long {
+        val d = deadlineMs.get()
+        return if (d == 0L) idleBudgetMs else d - now()
+    }
+
+    /** 是否在腿里：预算口径与失败判据共用这一件事（只读，不参与领取权） */
+    fun active(): Boolean = deadlineMs.get() != 0L
+
+    /** 腿终点（**只许泵线程**在腿真正走完时调）：预算不许活到腿外 */
+    fun endLeg() {
+        deadlineMs.set(0L)
+    }
+
+    /**
+     * 领取本腿的丢失结算权（泵线程/停止路径各一次，先到者独得）。
+     * **只影响领取权，不动预算**（Y18 的关键：停止路径领取后，在途泵的预算仍是腿内的负数）。
+     *
+     * @return 腿起点（ms）；0 = 已被对方领走 / 当前没有腿
+     */
+    fun claim(): Long = if (claimed.compareAndSet(false, true)) startMs.get() else 0L
+
+    /** 无腿复位（新会话/新段序列/释放）：起点与截止时刻清零，领取权关到「没有腿可领」 */
+    fun reset() {
+        startMs.set(0L)
+        deadlineMs.set(0L)
+        claimed.set(true)
+    }
+}
+
 /** 有界调用的两种结果（超时**不是**失败值，调用方必须分开处理） */
 internal sealed interface Bounded<out T> {
     data class Done<T>(val value: T) : Bounded<T>
@@ -403,65 +474,179 @@ internal class BoundedStore(private val tag: String = "WotaStoreIo") {
  * 为什么需要：`Resolver.insert` **不可取消**——泵线程判超时之后，那枚入库线程还在跑，它可能
  * 在"判超时 → 回收 → 重试"之后才真正插进一行。建新 pending 又是这一腿里唯一**不可幂等**的调用，
  * 没人管就是幽灵条目（`IS_PENDING=1` 的 `.pending-<id>-…`）。所以交接必须做成**无竞态窗口**的
- * 四步，全部在同一把锁里：
- * 1. 入库线程把 pending 交给闸（[publish]）：此时若已判停摆、或闸里已有一枚（上一次尝试的死线程
- *    留下的），**就地回收**——本腿的闸只允许一枚在场；
- * 2. 泵线程判停摆时撤走交接权（[abandon]），并回收**已经交上来**的那一枚；
- * 3. 泵线程成功时取走 pending（[claim]）；
- * 4. 每次尝试开始前复位（[reset]）：上一轮留在闸里的那一枚没人要了，就地回收。
- * 无论两个线程谁先谁后、也无论重试几轮，每枚 pending 只可能被上交或被回收，二者必居其一
- * ⇒ 结构上无幽灵。
+ * 几件事，全部在同一把锁里判定：
+ * 1. 入库线程把结果交给闸（[publish]）：此时若已判停摆、或它来自**已经结束的那一代尝试**
+ *    （上一次尝试的死线程晚到的落地）、或本代槽里已有一枚，就地判拒（回收在锁外）；
+ * 2. 泵线程判停摆时撤走交接权（[abandon]），并取回**已经交上来**的那一枚；
+ * 3. 泵线程成功时取走结果（[claim]）；
+ * 4. 每次尝试开始前换代（[reset]）：代号 +1，上一代留在闸里的那一枚没人要了，
+ *    由 [reset] 在锁外回收（不许只丢引用）。
  *
- * @param discard 回收动作（由调用方包成"有界 + 不阻塞泵线程"的形态）；调用方应顺带记账
+ * # 代号（Y18）
+ * 「复位重开交接槽」原先只有一把布尔/一个槽：寄存器复位**之后**、上一次尝试那条死线程才
+ * 把行插进去，它会被当成**本代**的上交而 [claim] 走——旧的 pending 冒充当前段的输出；
+ * 真正属于本代的上交反而被「闸里已有一枚」拒掉回收。现在 [reset] 返回递增代号，[publish]/
+ * [claim]/[abandon] 都带上代号：旧代（或复位前就发出的调用）一律拒收 + 回收，`claim` 也只认
+ * 本代 ⇒ 跨尝试不会串。
+ *
+ * # 回收在锁外（Y18）
+ * 被判拒的那一枚（典型：迟到插入的 pending，回收要走一次 MediaProvider delete，最多
+ * [STORE_CALL_BUDGET_MS]）**不许**在 `synchronized` 里回收：那会把泵线程/下一轮入库线程堵在
+ * 交接闸的锁上，等于把一次入库调用串行灌进唯一的产出线程。[reset] 交出的上一代遗留同样按这个
+ * 口径处理（由它自己在锁外回收）。
+ *
+ * @param discard 锁外回收动作（由调用方包成"有界 + 不阻塞泵线程"的形态）；调用方应顺带记账
  *   （迟到落地的 insert 是要能看见的：`RotateFailLog` 的 `late=` 字段）
  */
 internal class OneShotHandoff<T : Any>(private val discard: (T) -> Unit) {
 
     private val lock = Any()
+    /** 当前尝试代号（[reset] 每次 +1；0 = 还没开过代，任何 publish/claim 都拒收） */
+    private var generation = 0L
     private var abandoned = false
     private var landed: T? = null
 
-    /** 入库线程侧：@return true = 已上交（结果由 [claim] 取）；false = 已判停摆/已有在场/本就为空 */
-    fun publish(v: T?): Boolean = synchronized(lock) {
-        when {
-            v == null -> false
-            abandoned -> {
-                discard(v)
-                false
-            }
-            // 闸里已有一枚 = 上一次尝试的死线程仍在跑（重试场景）：本腿只认最新那一枚，
-            // 旧的那枚就地回收（不回收就是幽灵，回收了它仍是一条合法的新 pending 行）
-            landed != null -> {
-                discard(v)
-                false
-            }
-            else -> {
-                landed = v
-                true
-            }
+    /**
+     * 换代：上一代留在槽里的那一枚由本方法在**锁外**回收。
+     *
+     * @return 本代代号（交给 [publish]/[claim]/[abandon]；闭包捕获它，旧代调用自然被拒）
+     */
+    fun reset(): Long {
+        // 换代与"把上一代遗留交出来"在同一把锁里完成；回收（可能是一次入库调用）放到锁外
+        val (gen, stale) = synchronized(lock) {
+            generation++
+            abandoned = false
+            val s = landed
+            landed = null
+            generation to s
         }
+        stale?.let(discard)
+        return gen
     }
 
-    /** 泵线程侧：撤走交接权（判停摆），返回已交上来、需要调用方回收的那一枚 */
-    fun abandon(): T? = synchronized(lock) {
+    /**
+     * 入库线程侧：@return true = 已上交本代（结果由 [claim] 取）；false = 已判停摆/闸里已有/
+     * 不属于本代/空值。被判拒的有值结果一律在**锁外**回收。
+     */
+    fun publish(gen: Long, v: T?): Boolean {
+        if (v == null) return false
+        var reject: T? = null
+        val ok = synchronized(lock) {
+            when {
+                gen != generation -> {
+                    reject = v
+                    false
+                }
+                abandoned -> {
+                    reject = v
+                    false
+                }
+                // 闸里已有一枚 = 本代已经交上来过（同一次尝试的重复落地）：本代只认一枚，
+                // 先到的那枚保留、后到的就地回收（不回收就是幽灵，回收了它仍是一条合法的新 pending 行）
+                landed != null -> {
+                    reject = v
+                    false
+                }
+                else -> {
+                    landed = v
+                    true
+                }
+            }
+        }
+        // 回收在锁外：这里可能是一次 MediaProvider delete（有界最多 3s），不许占着交接闸的锁
+        reject?.let(discard)
+        return ok
+    }
+
+    /** 泵线程侧：撤走本代交接权（判停摆），返回已交上来、需要调用方回收的那一枚 */
+    fun abandon(gen: Long): T? = synchronized(lock) {
+        if (gen != generation) return@synchronized null
         abandoned = true
         val l = landed
         landed = null
         l
     }
 
-    /** 泵线程侧：本腿成功，取走 pending */
-    fun claim(): T? = synchronized(lock) {
+    /** 泵线程侧：本代成功，取走结果（不属于本代的调用拿不到任何东西） */
+    fun claim(gen: Long): T? = synchronized(lock) {
+        if (gen != generation) return@synchronized null
         val l = landed
         landed = null
         l
     }
+}
 
-    /** 每次尝试/每次换段前复位：留在闸里的那一枚没人要了，**必须回收**（不许只是丢掉引用） */
-    fun reset() = synchronized(lock) {
-        abandoned = false
-        landed?.let(discard)
-        landed = null
+/**
+ * 停录收尾的**移交闸**（R07 收口，2026-11-20）：join 超时之后，延迟收尾（`finish` + 放输入面
+ * + 交付会话终态）必须**恰好一方**执行——泵线程或控制线程。
+ *
+ * # 缺陷形态（旧布尔 `teardownDeferred`）
+ * 控制线程 `joinLoop()` 在 `t.isAlive` 判活那刻泵线程还活着 ⇒ 返回 false；随后到置位
+ * `teardownDeferred = true` 之间有一个窗口：泵线程正好走完 `pumpTrail` 的检查，读到 false
+ * 就退出并跳过收尾 ⇒ **双方都不做**。feeders 停了（泵线程恒停），但终态没人 `finish`、
+ * 输入面没人释放、迟到修正永远不交付：用户/结算只剩收工那一刻的早期快照。
+ *
+ * # 为什么用两枚互斥 CAS 而不是"置位后再看活性"
+ * 「泵已宣告不接管」与「控制请求泵接管」在同一枚状态上原子二选一，先者定夺：
+ * - 泵先 `OPEN → SKIPPED`：控制只能 `SKIPPED → CONTROL` 补做（[controlDefer] 返回 true）；
+ * - 控制先 `OPEN → DEFERRED`：泵只能 `DEFERRED → PUMP` 接管（[pumpCheckpoint] 返回 true）。
+ * 任何交错下（含两线程同时起跑）恰好一方拿到 true，不存在"都没做"的窗口——不需要第二次
+ * 有界 join，也不靠"退出应该很快"这类时序假设。
+ */
+internal class TrailHandoff {
+
+    private val state = AtomicInteger(OPEN)
+
+    /**
+     * 泵线程越过收尾检查点（feeders 已停、腿账已清之后调用）。
+     *
+     * @return true = 本次由泵线程接管延迟收尾；false = 无人请求移交（正常停录）或另一方在做
+     */
+    fun pumpCheckpoint(): Boolean {
+        if (state.compareAndSet(OPEN, SKIPPED)) return false
+        return state.compareAndSet(DEFERRED, PUMP)
+    }
+
+    /**
+     * 控制线程 join 超时后请求移交。
+     *
+     * @return true = 泵已越过检查点且无人请求 ⇒ 由控制线程**补做**延迟收尾（此时泵线程已不再
+     *   触碰任何资源）；false = 泵会（或正在）接管，调用方只记账返回早期快照
+     */
+    fun controlDefer(): Boolean {
+        if (state.compareAndSet(OPEN, DEFERRED)) return false
+        return state.compareAndSet(SKIPPED, CONTROL)
+    }
+
+    /** 新会话 / 准备期复位（此时不该有在途的收尾：泵线程由 `prepare` 的生命周期保证已退出） */
+    fun reset() {
+        state.set(OPEN)
+    }
+
+    /** 诊断/测试用状态名（生产日志与守卫都靠它说清"谁接管"） */
+    fun stateName(): String = when (state.get()) {
+        OPEN -> "open"
+        DEFERRED -> "deferred"
+        PUMP -> "pump"
+        CONTROL -> "control"
+        else -> "skipped"
+    }
+
+    private companion object {
+        /** 泵循环还没到检查点，也无人请求移交 */
+        const val OPEN = 0
+
+        /** 控制线程请求泵接管延迟收尾 */
+        const val DEFERRED = 1
+
+        /** 泵线程正在做延迟收尾 */
+        const val PUMP = 2
+
+        /** 泵已宣告不接管，控制线程补做收尾 */
+        const val CONTROL = 3
+
+        /** 泵越过检查点且无人请求移交（正常停录：控制线程 join 成功后自己 finish） */
+        const val SKIPPED = 4
     }
 }
 

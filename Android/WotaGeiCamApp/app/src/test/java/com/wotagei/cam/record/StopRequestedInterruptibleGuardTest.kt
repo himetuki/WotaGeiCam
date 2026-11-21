@@ -83,7 +83,7 @@ class StopRequestedInterruptibleGuardTest {
     }
 
     @Test
-    fun `beginSession必须有至少两处stopRequested检查点且返回Boolean`() {
+    fun `beginSession必须有至少两处中止检查点且返回Boolean`() {
         // 返回值契约：false = 被停止（调用方 start/abandonAndRestart 据此补 stopInternal 收尾）
         assertTrue(
             "beginSession 必须声明返回 Boolean（调用方要靠它区分『真正起录』与『被停止』）",
@@ -93,36 +93,33 @@ class StopRequestedInterruptibleGuardTest {
         // 正向锚点：证明切到的是真身（PREPARE 期 pendingStop 语义保留不动）
         assertTrue("锚点丢失：beginSession 没截到 pendingStop 消费点", begin.contains("if (pendingStop)"))
         assertTrue("被停止出口必须 return false（调用方据此收尾）", begin.contains("return false"))
-        val checkpoints = occurrences(begin, "if (stopRequested)").size
+        // R05 起判据统一为 sessionAborted()（用户停止 ∨ 本会话起录途中 GL 上下文丢失）：
+        // 检查点形态从 `if (stopRequested)` 变为 `if (sessionAborted())`，判据核必须含 stopRequested。
+        val checkpoints = occurrences(begin, "if (sessionAborted())").size
         assertTrue(
-            "beginSession 体内 stopRequested 检查点必须 ≥2 处（createPending 成功后 / prepare 成功后 / " +
+            "beginSession 体内中止检查点必须 ≥2 处（createPending 成功后 / prepare 成功后 / " +
                 "await 返回后至少占两处），实际 $checkpoints 处——阻塞步之间没有检查点 = 停止要等这一步走完",
             checkpoints >= 2
         )
+        assertTrue(
+            "中止判据核必须含 stopRequested（换名不许把用户停止语义弄丢）",
+            body("sessionAborted").contains("stopRequested")
+        )
         // 突变自证：检查点判据全部替换成恒假后计数必须归零（尺子能红）
-        val mutated = begin.replace("if (stopRequested)", "if (pendingStop)")
-        assertEquals("突变体（检查点被拆）必须让计数归零", 0, occurrences(mutated, "if (stopRequested)").size)
+        val mutated = begin.replace("if (sessionAborted())", "if (pendingStop)")
+        assertEquals("突变体（检查点被拆）必须让计数归零", 0, occurrences(mutated, "if (sessionAborted())").size)
     }
 
     @Test
-    fun `awaitPreview与awaitEncoderSurface轮询条件必须含stopRequested`() {
-        val preview = body("awaitPreview")
-        assertTrue("锚点丢失：awaitPreview 没截到等待窗", preview.contains("WAIT_MS"))
-        assertTrue(
-            "awaitPreview 轮询条件必须含 !stopRequested——否则挂面等待窗(≤1.5s)内点停止要干等满窗",
-            preview.contains("!stopRequested")
-        )
-        val encoder = body("awaitEncoderSurface")
-        assertTrue("锚点丢失：awaitEncoderSurface 没截到等待窗", encoder.contains("WAIT_MS"))
-        assertTrue(
-            "awaitEncoderSurface 轮询条件必须含 !stopRequested（同 awaitPreview 口径）",
-            encoder.contains("!stopRequested")
-        )
-        // 突变自证：轮询条件里的取消判据被拆后尺子必须红
-        val mutatedPreview = preview.replace("!stopRequested", "")
-        val mutatedEncoder = encoder.replace("!stopRequested", "")
-        assertFalse("awaitPreview 拆掉取消判据后尺子必须红", mutatedPreview.contains("stopRequested"))
-        assertFalse("awaitEncoderSurface 拆掉取消判据后尺子必须红", mutatedEncoder.contains("stopRequested"))
+    fun `相机会话与编码面等待都能被中止`() {
+        val cancellableWait = "while (waited < WAIT_MS && !sessionAborted()"
+        for (name in listOf("awaitSessionReady", "awaitEncoderSurface")) {
+            val wait = body(name)
+            assertTrue("$name 的每一轮等待都必须检查中止信号", wait.contains(cancellableWait))
+            val mutant = wait.replace(cancellableWait, "while (waited < WAIT_MS")
+            assertFalse("$name 拆掉轮询的中止判据必须判红", mutant.contains(cancellableWait))
+        }
+        assertTrue(body("sessionAborted").contains("stopRequested"))
     }
 
     @Test

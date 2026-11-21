@@ -4,10 +4,12 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.RecoverableSecurityException
 import android.app.RemoteAction
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
 import com.wotagei.cam.diag.Diag as Log
 import androidx.compose.runtime.Composable
@@ -15,7 +17,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.room.withTransaction
 import com.wotagei.cam.core.WotaStorage
+import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.player.TrackSync
 import com.wotagei.cam.R
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -49,32 +54,50 @@ class MediaActions private constructor(
     private val trashDao get() = repo.db().trashDao()
     private val seriesDao get() = repo.db().seriesDao()
 
+    /**
+     * 彻底删除的独立所有者（R09）：从首次不可逆删除起，物理删除、sidecar 清理、
+     * Room 清账与刷新闸门都由它负责。不能借用调用屏的 `rememberCoroutineScope` ——
+     * 用户删到一半退页就会把不可逆动作取消在半路。
+     *
+     * 跑在 Main.immediate 是**刻意**的：`pop`（导航出栈）与 Compose 状态写回一直由删除收尾
+     * 在调用方主线程上执行，换到后台线程会踩 NavController 的线程约束。真正碰盘的三段
+     * （contentResolver.delete / sidecar / Room 事务与缩略图）各自 `withContext(Dispatchers.IO)`，
+     * 主线程上不会发生文件 IO。
+     */
+    private val deleteOwner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     /** 授权后续链路里再次冒出的请求（批量删到第 N 个才需要授权）经此回调重投 UI */
     var opSink: ((MediaOp) -> Unit)? = null
 
     // region 收藏 / tag
 
-    suspend fun setLike(clip: VideoClip, liked: Boolean): MediaOp {
-        val path = clip.pathKey()
-        withContext(Dispatchers.IO) {
-            if (liked) dao.insert(MediaTag(mediaId = clip.id, path = path, tag = TagSpace.LIKE, createdAt = System.currentTimeMillis()))
-            else dao.deleteOne(clip.id, TagSpace.LIKE)
-        }
-        repo.invalidate()
-        return MediaOp.Done
-    }
+    suspend fun setLike(clip: VideoClip, liked: Boolean): MediaOp = writeTag(clip, TagSpace.LIKE, liked)
 
     suspend fun addTag(clip: VideoClip, rawTag: String): MediaOp {
         val tag = TagSpace.normalize(rawTag) ?: return MediaOp.Message(R.string.media_tag_invalid)
-        withContext(Dispatchers.IO) {
-            dao.insert(MediaTag(mediaId = clip.id, path = clip.pathKey(), tag = tag, createdAt = System.currentTimeMillis()))
-        }
-        repo.invalidate()
-        return MediaOp.Done
+        return writeTag(clip, tag, true)
     }
 
-    suspend fun removeTag(clip: VideoClip, tag: String): MediaOp {
-        withContext(Dispatchers.IO) { dao.deleteOne(clip.id, tag) }
+    suspend fun removeTag(clip: VideoClip, tag: String): MediaOp = writeTag(clip, tag, false)
+
+    /** 保留现有 Room schema；同号的离线卷已有标签时也不能被 REPLACE 覆盖。 */
+    private suspend fun writeTag(clip: VideoClip, tag: String, add: Boolean): MediaOp {
+        val applied = withContext(Dispatchers.IO) {
+            if (!repo.canWriteLedgerFor(clip)) return@withContext false
+            val paths = clip.tagPathKeys()
+            if (add) {
+                val row = MediaTag(mediaId = clip.id, path = clip.tagPathForWrite(), tag = tag,
+                    createdAt = System.currentTimeMillis())
+                dao.insertUnclaimed(row) != -1L || dao.rowsOf(clip.id).any { it.tag == tag && it.path in paths }
+            } else {
+                dao.deleteForPaths(clip.id, tag, paths.toList())
+                true
+            }
+        }
+        if (!applied) {
+            Log.w(TAG, "台账写入被拒：mediaId=${clip.id} 无法确认所选行仍是唯一归属")
+            return MediaOp.Message(R.string.gallery_row_ambiguous)
+        }
         repo.invalidate()
         return MediaOp.Done
     }
@@ -248,11 +271,16 @@ class MediaActions private constructor(
      * 删文件 → 250ms → pop 播放页 → 900ms → 刷列表。
      * 期间 [MediaRepo.holdListRefresh] 关闸，Room 清标签引发的列表重算不下发，保证刷新晚于出栈。
      */
-    suspend fun deleteForever(clips: List<VideoClip>, pop: () -> Unit, refresh: () -> Unit): MediaOp {
+    internal suspend fun deleteForever(
+        clips: List<VideoClip>,
+        pop: () -> Unit,
+        refresh: () -> Unit,
+        callerToken: DeleteCallerToken = DeleteCallerToken.ALWAYS
+    ): MediaOp {
         if (clips.isEmpty()) return MediaOp.Done
         // 一律直删，绝不借系统授权框：有「所有文件访问」时连别的 app 录的行也能静默删掉；
         // 没有就报我们自己的文案，让他去系统设置开一次（那个英文框已从代码里彻底移除）
-        return deleteOneByOne(clips, pop, refresh)
+        return deleteOneByOne(clips, pop, refresh, callerToken)
     }
 
     /**
@@ -260,93 +288,97 @@ class MediaActions private constructor(
      *
      * 收尾只清**真删掉的**那些行的 media_tag / series_part / 缩略图缓存：MediaStore `_ID` 会复用，
      * 漏清会把旧标签串到新视频上，删掉的文件也还会在相册里留一张旧缩略图。
+     *
+     * R09：整批（含物理删除、sidecar、Room 清账、pop/开闸/refresh）都放进 [deleteOwner]。
+     * 调用方取消只决定"还要不要出栈"，不会把已经开始的不可逆动作取消在半路。
      */
     private suspend fun deleteOneByOne(
         pending: List<VideoClip>,
         pop: () -> Unit,
-        refresh: () -> Unit
+        refresh: () -> Unit,
+        callerToken: DeleteCallerToken
     ): MediaOp {
-        val done = ArrayList<VideoClip>()
-        var failed = 0
-        // 「删不掉」有两种完全不同的原因：缺「所有文件访问」去改别人录的行（SecurityException），
-        // 与其它异常（行已被移走、provider 报错等）。混着只报一句「删除失败」既没法对症，
-        // 事后也无从复盘——逐条留痕，并单独记住是不是权限问题，文案才敢据此分岔。
-        var permissionDenied = false
-        for (clip in pending) {
-            val err: Exception? = withContext(Dispatchers.IO) {
-                try {
-                    // ContentResolver 没有单参 delete(Uri)（android.jar 只有 3 参旧签名与 API 30+ Bundle 版），
-                    // minSdk 29 只能用 where=null/args=null 的整行删除
-                    app.contentResolver.delete(clip.uri, null, null)
-                    null
-                } catch (se: SecurityException) {
-                    se
-                } catch (e: Exception) {
-                    e
-                }
-            }
-            if (err == null) {
-                // 连带删被抽帧位次 sidecar（2026-10-03 定版：sidecar 随视频生命周期走，不留残留）
-                clip.dataPath?.let { p ->
-                    com.wotagei.cam.record.ArcDropLog.deleteFor(p)
-                    // API 30+ 系统回收站会把底层文件改名成 .trashed-<ts>-<原名>（DATA 列跟着变），
-                    // 而 sidecar 仍挂在原显示名下：按目录+原名补删一次，否则「回收站→彻底删除」
-                    // 留下孤儿档案；非回收站项两者同路径，不进这支
-                    if (clip.isTrashed) {
-                        val dir = p.substringBeforeLast('/', "")
-                        val originPath = if (dir.isEmpty()) clip.name else "$dir/${clip.name}"
-                        if (originPath != p) com.wotagei.cam.record.ArcDropLog.deleteFor(originPath)
+        val targets = pending.map { it.toDeleteTarget() }
+        return runOnDeleteOwner(deleteOwner) {
+            val batch = runDeleteFinish(
+                popDelayMs = POP_DELAY_MS,
+                refreshDelayMs = REFRESH_DELAY_MS,
+                hold = repo::holdListRefresh,
+                deleteAndReconcile = {
+                    withContext(Dispatchers.IO) {
+                        val result = deleteBatch(targets, ::deleteMediaRow, ::clearDeletedSidecar)
+                        cleanupDeleted(result.deleted)
+                        result
                     }
-                }
-                done += clip
-                continue
-            }
-
-            // 删不掉就是缺「所有文件访问」去改别人录的行。绝不退回去弹系统那个英文框：
-            // 计数后继续删剩余项，收尾统一按权限状态给一句我们自己的文案（deniedRes）
-            Log.e(TAG, "彻底删除失败 uri=${clip.uri} ${err.javaClass.simpleName}: ${err.message}", err)
-            if (err is SecurityException) permissionDenied = true
-            failed++
+                },
+                // 调用方退场后，导航回调可能弹掉另一张屏。已交给所有者的清账照常完成。
+                pop = { if (callerToken.isActive()) pop() },
+                refresh = refresh
+            )
+            if (batch.failed > 0) {
+                MediaOp.Message(deniedRes(R.string.media_delete_failed, batch.permissionDenied))
+            } else MediaOp.Done
         }
-        finishDelete(done, pop, refresh)
-        return if (failed > 0) {
-            // 只有真是 SecurityException 才提「去开权限」；其它失败原因给通用失败文案，
-            // 否则用户会被引导去开一个跟本次失败无关的权限
-            MediaOp.Message(deniedRes(R.string.media_delete_failed, permissionDenied))
-        } else MediaOp.Done
+    }
+
+    private fun deleteMediaRow(target: DeleteTarget): RowDeleteResult {
+        val uri = Uri.parse(target.uri)
+        val systemTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        val selection = target.deleteSelection(systemTrash)
+        if (!isMediaStoreVideoUri(uri) || uri.lastPathSegment?.toLongOrNull() != target.mediaId || selection == null) {
+            Log.w(TAG, "彻底删除未开始：媒体身份不完整")
+            return RowDeleteResult(rows = 0)
+        }
+        val args = selection.args.toTypedArray()
+        return try {
+            val resolver = app.contentResolver
+            val rows = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                resolver.delete(uri, Bundle().apply {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection.where)
+                    putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+                    if (target.isTrashed) putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+                })
+            } else {
+                resolver.delete(uri, selection.where, args)
+            }
+            if (rows <= 0) Log.w(TAG, "彻底删除未命中所选媒体行 rows=$rows")
+            RowDeleteResult(rows = rows)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (err: Exception) {
+            Log.e(TAG, "彻底删除失败 ${err.javaClass.simpleName}", err)
+            RowDeleteResult(rows = 0, permissionDenied = err is SecurityException, error = err)
+        }
+    }
+
+    private fun clearDeletedSidecar(target: DeleteTarget) {
+        val path = target.dataPath ?: return
+        com.wotagei.cam.record.ArcDropLog.deleteFor(path)
+        // 回收站改名时 sidecar 仍挂原名。如果该位置已有其他成片，保留它的 sidecar。
+        val originPath = target.originalTrashPath() ?: return
+        if (!java.io.File(originPath).exists()) com.wotagei.cam.record.ArcDropLog.deleteFor(originPath)
     }
 
     /**
-     * 删后的收尾编排（关闸 → 清 Room/缓存 → POP_DELAY → pop → REFRESH_DELAY → 开闸 → refresh）
-     * 全部委托给顶层 [runDeleteFinish]：那段时序必须抗取消，理由见那边的长注释。
-     * 抽成顶层还能让 JVM 单测直接驱动这段时序（MediaRepo 要 Context/Room，测试里造不出来）。
+     * 删后清账：Room 三表在**同一事务**里按身份对清理，随后清回收站、同步偏移与缩略图缓存。
+     * 事务回滚只会留下可重试的孤儿行；物理文件已经删掉，绝不让半清账把错误身份带给复用后的新片。
      */
-    private suspend fun finishDelete(clips: List<VideoClip>, pop: () -> Unit, refresh: () -> Unit) {
-        runDeleteFinish(
-            clipDeleted = clips.isNotEmpty(),
-            popDelayMs = POP_DELAY_MS,
-            refreshDelayMs = REFRESH_DELAY_MS,
-            hold = { repo.holdListRefresh() },
-            cleanup = {
-                withContext(Dispatchers.IO) {
-                    val ids = clips.map { it.id }
-                    dao.clearFor(ids)
-                    seriesDao.clearFor(ids)
-                    // 成员被清干净后收掉没人指的系列空壳头（#5 Step 4d）：
-                    // clearFor 只删 series_part，media_series 的头会留下一个谁也不指的 seriesId，
-                    // 不清的话表会无界增长。读侧本来就按「成员 ≥ 2 才成组」忽略它，这纯粹是收尾。
-                    seriesDao.pruneOrphans()
-                    trashDao.removeAll(clips.map { it.uri.toString() })
-                    // 同步偏移也按 uri 键存（TrackSync）：不清的话 MediaStore 复用 _ID 给新片时，
-                    // 新片会命中旧片的「已校准 + 旧偏移」，音画被按上一片的偏移平移
-                    TrackSync.clearFor(app, clips.map { it.uri })
-                    clips.forEach { ThumbLoader.evict(it.uri) }
-                }
-            },
-            pop = pop,
-            release = { repo.releaseListRefresh() },
-            refresh = refresh
-        )
+    private suspend fun cleanupDeleted(deleted: List<DeleteTarget>) {
+        if (deleted.isEmpty()) return
+        val uris = deleted.map { it.uri }
+        repo.db().withTransaction {
+            deleted.forEach {
+                dao.clearIdentity(it.mediaId, it.pathKey)
+                // 系统回收站暂改 DATA，入回收站之前的标签仍以原地址为键。
+                it.originalTrashPath()?.let { path -> dao.clearIdentity(it.mediaId, path) }
+                seriesDao.clearIdentity(it.mediaId, it.uri)
+            }
+            seriesDao.pruneOrphans()
+            trashDao.removeAll(uris)
+        }
+        // 旧同步偏移和缩略图不能继续挂在可能被 MediaStore 复用的 URI 上。
+        TrackSync.clearFor(app, uris.map { Uri.parse(it) })
+        uris.forEach { ThumbLoader.evict(Uri.parse(it)) }
     }
 
     // endregion
@@ -399,60 +431,31 @@ class MediaActions private constructor(
 }
 
 /**
- * 彻底删除的收尾时序：
- * 关闸 →（真删掉了才）清 media_tag/series_part/trash_item/缩略图缓存 → POP_DELAY → pop 播放页出栈
- * → REFRESH_DELAY → 开闸（内含 invalidate）→ refresh()。
- *
- * 抽成顶层挂起函数只为两件事：JVM 单测能直接驱动这段时序（[MediaRepo] 要 Context + Room，
- * 单测里造不出来），以及让「必须抗取消」这件事只在一个地方成立。
- *
- * **为什么整段必须 [NonCancellable]**（2026-10-02 真机缺陷，两轮录像-删除周期均复现）：
- * 这条链跑在**调用方屏的组合作用域**里 —— [MediaOps.launchOp] 用构造时传入的 CoroutineScope，
- * 而 [rememberMediaOps] 给的正是调用屏自己的 `rememberCoroutineScope()`。播放器「彻底删除」时
- * `pop = onBack` 语义就是「离开播放页」：PlayerScreen 一离屏，组合作用域连同挂起的
- * `delay(REFRESH_DELAY_MS)` 一起被取消，取消点恰好落在开闸之前 ——
- * [MediaRepo.releaseListRefresh] 永不执行，[MediaRepo.refreshGate] 永远停在 true。
- * 闸门是进程级的 MutableStateFlow，`clips`/`clipById` 全走它：闸门卡死 ⇒ 媒体库「全部/收藏/
- * 回收站」全是空列表、切页签与滚动都不恢复、再点开别的视频也只剩转圈，**只能杀进程重进**
- * （重启后 13 条完整、文件无损，是闸门没开而不是数据丢了）。媒体库内批量删除能活下来纯属侥幸：
- * 它的 pop 只清多选态、屏不离场，组合作用域还活着，同一条时序才走得完。
- * 关闸-开闸本质是一次**与调用方生死无关**的仓库自愈动作，所以用 NonCancellable 兜住，
- * 不去指望调用方「恰好还没死」。
- *
- * 为什么这与上一轮「`remember(repo, scope, filter)` 消除每重组重开查询」不冲突：
- * 那一轮改的是 **Flow 实例的缓存键**（GalleryScreen.kt 189–190 行的 remember），让冷管道不随
- * 重组重建，省下的是「每重组取消并重开一轮 MediaStore + Room 查询」的 churn；这里一个字节都
- * 没碰那条键，改的是**同一条已 remember 的管道的生产者能不能活着走到开闸**。两者方向正交：
- * 前者压重组开销，后者保证仓库级闸门不会把生产者永久掐死。键不动 ⇒ 上轮收益原样保留，
- * 修掉的只是「闸门关了再也开不了」这种进程级锁死。也不需要用 MediaStore content observer
- * 兜底：列表刷新本来就由 [MediaRepo.invalidate] 版本号驱动，移入回收站/收藏/tag 全靠它，
- * 链路是通的，缺的只是删除收尾能活着走到 invalidate 那一步。
+ * 在应用所有者内关闸，再删除并清账。成功时保留出栈与列表刷新的顺序，避免 Pager 先收到新列表。
+ * 全部未命中时留在当前页显示失败。正常完成、取消和异常都只释放本批次的刷新持有权。
  */
 internal suspend fun runDeleteFinish(
-    clipDeleted: Boolean,
     popDelayMs: Long,
     refreshDelayMs: Long,
-    hold: () -> Unit,
-    cleanup: suspend () -> Unit,
+    hold: () -> AutoCloseable,
+    deleteAndReconcile: suspend () -> DeleteBatch,
     pop: () -> Unit,
-    release: () -> Unit,
     refresh: () -> Unit
-) {
-    withContext(NonCancellable) {
+): DeleteBatch {
+    return withContext(NonCancellable) {
+        val lease = hold()
         try {
-            if (clipDeleted) {
-                hold()
-                cleanup()
+            val batch = deleteAndReconcile()
+            if (batch.deleted.isNotEmpty()) {
+                delay(popDelayMs)
+                runCatching(pop)
+                delay(refreshDelayMs)
             }
-            delay(popDelayMs)
-            runCatching(pop)
-            delay(refreshDelayMs)
+            batch
         } finally {
-            // 开闸无条件执行：闸门卡在 true 的代价是媒体库永久空列表（杀进程才恢复），
-            // 比让异常继续冒出去严重得多。pop/refresh 抛错也照旧吞掉保住收尾（与原实现一致）。
-            release()
+            lease.close()
+            runCatching(refresh)
         }
-        runCatching(refresh)
     }
 }
 
@@ -482,7 +485,13 @@ class MediaOps internal constructor(
     fun moveToTrash(clips: List<VideoClip>) = launchOp { actions.moveToTrash(clips) }
     fun restoreFromTrash(clips: List<VideoClip>) = launchOp { actions.restoreFromTrash(clips) }
     fun deleteForever(clips: List<VideoClip>, pop: () -> Unit, refresh: () -> Unit = {}) =
-        launchOp { actions.deleteForever(clips, pop, refresh) }
+        launchOp {
+            actions.deleteForever(
+                clips, pop, refresh,
+                // 调用方作用域就是屏的组合作用域：它死了就不再替用户出栈，但清账仍归 owner。
+                callerToken = DeleteCallerToken { scope.isActive }
+            )
+        }
 
     /**
      * #46 定版：回收站态的行**不分享**。FileProvider 递出去的是真实路径，而系统回收站会把文件
@@ -560,3 +569,16 @@ fun rememberMediaOps(actions: MediaActions = rememberMediaActions()): MediaOps {
 }
 
 private fun VideoClip.pathKey(): String = dataPath ?: uri.toString()
+
+/** 列表快照 → 删除身份对：`(mediaId, pathKey/dataPath/uri)` 一起带到所有者线程，清账不靠裸 ID。 */
+private fun VideoClip.toDeleteTarget(): DeleteTarget = DeleteTarget(
+    mediaId = id,
+    uri = uri.toString(),
+    pathKey = pathKey(),
+    dataPath = dataPath,
+    name = name,
+    isTrashed = isTrashed,
+    dateAddedSec = dateAddedSec,
+    sizeBytes = sizeBytes,
+    relativePath = relativePath
+)

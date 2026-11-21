@@ -117,6 +117,8 @@
     <string name="cam_shutter_correction_auto">自动微调曝光</string>
     <string name="cam_shutter_correction_auto_hint">自动微调曝光以稳帧</string>
     <string name="cam_shutter_correction_manual">手动微调</string>
+    <!-- Y04：设备最短曝光长于一帧周期（如 20ms @60fps）时手动快门无解——手动档回弹 AUTO 的原因 -->
+    <string name="cam_shutter_manual_no_room">当前帧率下本机最短曝光长于一帧，手动快门没有可用档位（已按自动曝光运行）</string>
     <string name="cam_display_scale_note">只影响取景器上屏的渲染分辨率，成片画质不变。调低会把 GPU 帧预算让给录制、补弧与降噪，减少 4K 下的掉帧与发热。</string>
     <string name="cam_display_scale_current">当前：原片</string>
     <string name="cam_display_scale_current_rt">当前：%1$d（上屏 %2$d×%3$d）</string>
@@ -203,6 +205,7 @@
     <string name="cam_record_saved_auto_battery">电量过低已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_storage">存储空间不足已自动停录，已保存 %1$s</string>
     <string name="cam_record_saved_auto_camera_lost">相机被其它应用占用或被系统收回，录制已停止，已保存 %1$s</string>
+    <string name="cam_record_saved_auto_gl_lost">画面渲染组件意外重启，录制已停止，已保存 %1$s</string>
     <!-- 短原因附注（2026-10-16 收尾批）：有已保存分段但非干净成功（partial）时，原因句被
          「已保存 N 段」/「已保存，时长」占用，"为什么自己停了"降为一条并列短附注——用户拍板
          "该提醒的照旧"；不带时长（时长只由原因句带一次）、无占位符。干净成功路径仍走上面三条
@@ -210,6 +213,7 @@
     <string name="cam_record_saved_auto_battery_short">；因电量过低自动停止</string>
     <string name="cam_record_saved_auto_storage_short">；因存储空间不足自动停止</string>
     <string name="cam_record_saved_auto_camera_lost_short">；因相机被收回而停止</string>
+    <string name="cam_record_saved_auto_gl_context_lost_short">；因画面渲染意外重启而停止</string>
     <!-- 混合/join 超时如实化（2026-10-16）：有已保存分段但非干净成功时，原因句只为"存了几段"——
          旧形态是整句「录制失败」，而片其实已在相册。%1$d=段数、%2$s=时长（时长只由原因句带一次）；
          单段**不**走本条（沿用上面「已保存 %1$s」措辞："已保存 1 段"是口语倒退，不许出现） -->
@@ -333,7 +337,6 @@
     <string name="cam_echo_mode_keep">保持亮度</string>
     <string name="cam_echo_mode_trail">提亮拖尾</string>
     <string name="cam_echo_mode_hint">保持亮度 = 星轨式实心长弧，背景不动；提亮拖尾 = 只有高光拖出彗尾</string>
-    <string name="cam_echo_multiplier">光弧倍数</string>
     <string name="cam_echo_multiplier_hint">倍数越高弧越长，高倍慎用（画面成糊）</string>
     <string name="cam_echo_threshold">高光阈值</string>
     <string name="cam_echo_threshold_hint">只有效果在「提亮拖尾」时参与；100% = 只让画面里最亮的像素拖尾</string>
@@ -366,7 +369,6 @@
     <string name="cam_marker">站位线</string>
     <string name="cam_marker_add">加一条站位线</string>
     <string name="cam_marker_remove">减一条站位线</string>
-    <string name="cam_marker_color_title">站位线颜色</string>
     <string name="marker_color_yellow">黄色</string>
     <string name="marker_color_cyan">青色</string>
     <string name="marker_color_magenta">品红</string>

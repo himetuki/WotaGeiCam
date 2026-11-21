@@ -95,6 +95,7 @@ internal class ArcMendGlBoundaryFixture(classes: File, parent: ClassLoader) : Cl
     private fun ints(name: String, vararg args: Any?): List<Int> =
         (gl(name, *args) as IntArray).toList()
 
+    @Suppress("UNCHECKED_CAST") // 反射夹具：T 由调用方按被测签名的返回值声明
     private fun <T> call(name: String, vararg args: Any?): T = unwrap {
         passClass.declaredMethods.single { it.name == name && it.parameterCount == args.size }
             .apply { isAccessible = true }
@@ -129,7 +130,7 @@ internal class ArcMendGlBoundaryFixture(classes: File, parent: ClassLoader) : Cl
             val classes = File(root, "classes").apply { mkdirs() }
             val sources = SOURCES.map { (name, body) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(body.trimIndent())
                 }
             }

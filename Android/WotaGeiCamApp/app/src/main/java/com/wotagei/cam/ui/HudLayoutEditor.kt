@@ -636,12 +636,10 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
      */
     fun dropContainer(zone: HudZone) {
         val rect = local(zoneRects[zone]) ?: return
-        // 两枚竖 Dock 各读自己那份 area（10-01 第 5 项：只避真横向重叠的邻居），其余三枚仍读 baseArea
-        val area = when (zone) {
-            HudZone.LEFT -> leftArea
-            HudZone.RIGHT -> rightArea
-            else -> baseArea
-        }
+        // 落位区域必须与渲染侧同一个选择（Y54）：两枚竖 Dock 各读自己的避让账，读数块读
+        // readoutArea（y 带让开底栏），其余三枚读基础区。统一用 baseArea 会让读数块拖到
+        // 边界时入档 y 落在渲染不允许的位置（松手所见与重开后的位置分叉）。
+        val area = dropAreaFor(zone, baseArea, leftArea, rightArea, readoutArea)
         val w = pxToDp(rect.width.toFloat(), density.density)
         val h = pxToDp(rect.height.toFloat(), density.density)
         val x = pxToDp(rect.left.toFloat(), density.density) + pxToDp(dragShift.x, density.density)
@@ -853,21 +851,20 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 shiftYPx = shiftYOf(HudZone.BOTTOM),
                 nativeTopMinDp = 0,   // 同上：非顶栏容器不读这条下限
                 onCardRect = { if (zoneRects[HudZone.BOTTOM] != it) zoneRects[HudZone.BOTTOM] = it },
-                // 降噪那颗（2026-10-26）：与录制页**同一个渲染入口 + 同一条落位账**（贴 Dock 左缘、
-                // 装不下退安全区左缘）。编辑页多两点：①它经 ctx.anchorOf 报矩形 ⇒ 进 [entryRects]、
+                // 降噪/残影（2026-10-26 / R2）：与录制页**同一个渲染入口 + 同一条落位账**（贴 Dock 左缘、
+                // 装不下退安全区左缘）。编辑页多两点：①它们经 ctx.anchorOf 报矩形 ⇒ 进 [entryRects]、
                 // **可拖**（用户能把它搬去别的容器，拖拽裁决照旧走 entryAtPointer）；
                 // ②不留录制页那条"再上移一条带"的第三档——这页是排版预览，与容器重叠时看得见也
                 // 拖得动，不必再挪走，多一档反而会让"我摆的位置"与看到的对不上。
+                // Y58：集合纳入 ECHO（出厂归底栏、伴随序在 DENOISE 前）——只画 DENOISE 时，
+                // 旧配置把 ECHO 留在了底栏却在这页没有可拖入口，看不到也搬不走。
                 bandExtra = { dockLeftPx ->
-                    val denoiseEntry = HudEntry.of(CamPill.DENOISE)
-                    if (denoiseEntry in visibleEntries && draft.sourceZoneOf(denoiseEntry) == HudZone.BOTTOM) {
+                    val bandEntries = editorBottomBandEntries(visibleEntries) { draft.sourceZoneOf(it) }
+                    if (bandEntries.isNotEmpty()) {
                         var chipWpx by remember { mutableIntStateOf(0) }
                         val gapPx = with(density) { WotaSpace.s.toPx() }
                         val edgePx = with(density) { HudEdgePad.toPx() }
-                        HudBottomBandEntry(
-                            entry = denoiseEntry,
-                            ctx = ctx,
-                            clicksAccepted = true,
+                        Row(
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
                                 .offset {
@@ -876,8 +873,17 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                                         0
                                     )
                                 }
-                                .onSizeChanged { if (it.width != chipWpx) chipWpx = it.width }
-                        )
+                                .onSizeChanged { if (it.width != chipWpx) chipWpx = it.width },
+                            horizontalArrangement = Arrangement.spacedBy(WotaSpace.s)
+                        ) {
+                            bandEntries.forEach { bandEntry ->
+                                HudBottomBandEntry(
+                                    entry = bandEntry,
+                                    ctx = ctx,
+                                    clicksAccepted = true
+                                )
+                            }
+                        }
                     }
                 }
             ) {
@@ -1065,11 +1071,14 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     // 有未保存改动时这颗亮着，让"改了还没落盘"在视觉上有落点
                     selected = draft != saved,
                     onClick = {
-                        // commit() 的返回值就是"这次真落盘了吗"：没落成不许说"已保存"
+                        // commit() 的返回值就是"这次真落盘了吗"：没落成不许说"已保存"，
+                        // 也不许推进已保存基线（Y53）——否则高亮熄灭、重试入口消失
                         val ok = WotaSettings.setHudLayout(prefs, draft)
-                        saved = draft
-                        undoRaw = null
-                        resetArmed = false
+                        saved = savedAfterCommit(ok, saved, draft)
+                        if (ok) {
+                            undoRaw = null
+                            resetArmed = false
+                        }
                         hint = if (ok) {
                             context.getString(R.string.hud_edit_saved)
                         } else {
@@ -1087,12 +1096,18 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                             resetArmed = true
                             hint = context.getString(R.string.hud_edit_reset_arm_tip)
                         } else {
-                            // 重置 = 删键（缺键就是默认表）；「撤销」靠的是把重置前那一份串原样写回来
-                            undoRaw = WotaSettings.hudLayout(prefs).encode()
+                            // 重置 = 删键（缺键就是默认表）；「撤销」靠的是把重置前那一份串原样写回来。
+                            // 只有删键真成功才记撤销串、放掉确认武装（Y53）：失败时草稿仍按默认表
+                            // 显示（用户的意图是重置），但已保存基线不推进 + 确认态保留 = 重试入口可用。
+                            val prevRaw = WotaSettings.hudLayout(prefs).encode()
                             val ok = WotaSettings.clearHudLayout(prefs)
-                            draft = HudLayoutTable.default()
-                            saved = draft
-                            resetArmed = false
+                            val target = HudLayoutTable.default()
+                            draft = target
+                            saved = savedAfterCommit(ok, saved, target)
+                            if (ok) {
+                                undoRaw = prevRaw
+                                resetArmed = false
+                            }
                             hint = if (ok) {
                                 context.getString(R.string.hud_edit_reset_done)
                             } else {
@@ -1109,8 +1124,10 @@ fun HudLayoutEditorScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                             val back = HudLayoutTable.decode(raw)
                             val ok = WotaSettings.setHudLayout(prefs, back)
                             draft = back
-                            saved = back
-                            undoRaw = null
+                            // 撤销同样按写盘回执推进基线（Y53）：失败时草稿显示撤销结果，
+                            // 但基线不动、撤销入口保留 = 可以再点一次重试
+                            saved = savedAfterCommit(ok, saved, back)
+                            if (ok) undoRaw = null
                             hint = if (ok) {
                                 context.getString(R.string.hud_edit_undo_done)
                             } else {

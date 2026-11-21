@@ -125,6 +125,17 @@ class PortableUserDataTest {
         assertFalse(PortableUserData.uniqueCandidates(listOf(keys.first().copy(size = 0))) { it }.isNotEmpty())
     }
 
+    @Test fun `Y38备份接收端拒绝非法低值schema并保留未来版本`() {
+        // 负版本号会让取景页迁移从 Int.MIN_VALUE+1 迭代到当前版；接收端直接拒绝。
+        assertEquals(emptyMap<String, Any>(), PortableUserData.settingsOf(mapOf("hud_pills_schema" to -1)))
+        assertEquals(emptyMap<String, Any>(), PortableUserData.settingsOf(mapOf("hud_pills_schema" to Int.MIN_VALUE)))
+        // 未来版本是有界的（读取侧只做原样返回），保留下来避免旧版把用户掩码当 0 版重新补位。
+        assertEquals(mapOf<String, Any>("hud_pills_schema" to 1_000_000_000),
+            PortableUserData.settingsOf(mapOf("hud_pills_schema" to 1_000_000_000)))
+        assertEquals(mapOf<String, Any>("hud_pills_schema" to 0),
+            PortableUserData.settingsOf(mapOf("hud_pills_schema" to 0)))
+    }
+
     @Test fun `恢复补缺不覆盖本机设置且合并去重原有pending`() {
         val current = mapOf("gallery_columns" to 5, "compare_history" to "local-only")
         assertEquals(mapOf("level_enabled" to true), PortableUserData.settingsToRestore(
@@ -136,6 +147,39 @@ class PortableUserDataTest {
         assertEquals(listOf(old, incoming[1]), merged)
         assertEquals(merged, PortableUserData.mergeTags(merged, incoming))
         assertEquals(listOf(old), PortableUserData.mergeTags(listOf(old), emptyList()))
+    }
+
+    @Test fun `失败提交后重试仍重新提交相等值设置`() {
+        // commit(false) 可能已改内存但未落盘；重试时当前映射里已有等值键，
+        // 若按「键存在就跳过」过滤，editor 会变成空提交，磁盘永远补不上。
+        val restored = mapOf("gallery_columns" to 3, "level_enabled" to true)
+        val current = mapOf("level_enabled" to true, "compare_history" to "local-only")
+        assertEquals(mapOf("gallery_columns" to 3, "level_enabled" to true),
+            PortableUserData.settingsToRestore(restored, current))
+    }
+
+    @Test fun `R14_合并超限按余量分批交接且旧pending优先`() {
+        val old = (0 until 6000).map {
+            PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "old$it.mp4", 123L, 1000L), "like", it.toLong())
+        }
+        val incoming = (0 until 6000).map {
+            PortableUserData.Tag(PortableUserData.MediaKey("Movies/", "new$it.mp4", 123L, 1000L), "n$it", it.toLong())
+        }
+        // 前置：12000 条整体合并确实触发容量上限。
+        try {
+            PortableUserData.mergeTags(old, incoming)
+            fail("12000 条必须触发容量上限")
+        } catch (_: IllegalArgumentException) { }
+        val (accepted, remaining) = PortableUserData.handoff(old, incoming)
+        val room = PortableUserData.MAX_TAGS - old.size
+        assertEquals("余量 = 总帽 - 旧 pending", room, accepted.size)
+        assertEquals("超出余量的新标签必须留在恢复源", incoming.size - room, remaining.size)
+        assertEquals(incoming.take(room), accepted)
+        assertEquals(incoming.drop(room), remaining)
+        // 与旧 pending 重复的 incoming 已经存在，视为交接完成，不占余量也不重复写。
+        val (duplicateAccepted, duplicateRemaining) = PortableUserData.handoff(listOf(old.first()), listOf(old.first()))
+        assertTrue(duplicateAccepted.isEmpty())
+        assertTrue(duplicateRemaining.isEmpty())
     }
 
     @Test fun `累计限写在写入途中拒绝且真实文件从不超过4MiB`() {

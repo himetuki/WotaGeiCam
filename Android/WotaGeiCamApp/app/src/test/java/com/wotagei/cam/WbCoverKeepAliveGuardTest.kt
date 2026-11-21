@@ -170,12 +170,15 @@ class WbCoverKeepAliveGuardTest {
         assertTrue(
             "两处看门狗都要认上屏心跳并落到「重挂承载面」（重启相机救不了这一档）",
             screenSrc.contains("ctrl.displayFrameCount()") && screenSrc.contains("ctrl.requestDisplayReattach()") &&
-                activitySrc.contains("ctrl.displayFrameCount()") &&
+                (activitySrc.contains("ctrl.displayFrameCount()") ||
+                    activitySrc.contains("ctrl::displayFrameCount")) &&
                 activitySrc.contains("ctrl.requestDisplayReattach()")
         )
         assertTrue(
-            "重挂必须真的重建承载视图（CameraSurface 按 epoch 换 key）",
-            screenSrc.contains("key(surfaceEpoch) {") && screenSrc.contains("ctrl.displayReattach.collect")
+            "重挂必须真的重建承载视图（CameraSurface 按纪元换 key）",
+            (screenSrc.contains("key(surfaceEpoch) {") ||
+                screenSrc.contains("key(reattachEpoch.epoch) {")) &&
+                screenSrc.contains("ctrl.displayReattach.collect")
         )
     }
 

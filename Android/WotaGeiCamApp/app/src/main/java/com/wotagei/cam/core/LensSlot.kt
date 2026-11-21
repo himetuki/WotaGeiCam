@@ -22,6 +22,18 @@ data class LensSlot(
     val ability: CameraAbility
 ) {
     /**
+     * 枚举期读到的 `CameraCharacteristics` 快照（Y08）。
+     *
+     * 站位分析开流要先按 YUV 输出尺寸选档；旧实现每次点开关 / 回页补挂都在**调用线程**
+     * （Main）重新 `CameraManager.getCameraCharacteristics`，冷启或相机服务拥塞时把入口卡住。
+     * 这里把枚举期（IO 线程）已经读过的那一份留下来，attach 路径只读快照、不再查相机服务。
+     *
+     * **不进 data class 相等**：槽位身份是 [key]；同一槽位两次枚举拿到不同对象不代表槽位变了。
+     * null = 非枚举路径构造的槽位（测试/旧数据），调用方回退默认档。
+     */
+    var characteristics: CameraCharacteristics? = null
+
+    /**
      * 槽位唯一键。档位会重复（多颗同焦段后摄、多颗前摄），只有键能唯一指认一颗镜头，
      * 所以「当前镜头 / 切镜头」一律按 key 走，[type] 只作展示与兜底。
      */
@@ -35,7 +47,9 @@ private data class LensEntry(
     val focalMm: Float,
     val eqFocal: Float,
     val ability: CameraAbility,
-    val front: Boolean
+    val front: Boolean,
+    /** 枚举期读到的**父逻辑头** characteristics（Y08 快照，见 [LensSlot.characteristics]） */
+    val characteristics: CameraCharacteristics,
 )
 
 /**
@@ -98,7 +112,10 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
                             ?: IntArray(0)).toSet()
                     } else null
                 ),
-                front = front
+                front = front,
+                // 分析流的会话挂在**父逻辑头**上：YUV 尺寸仍按父头 characteristics 选档
+                //（旧 currentCharacteristics() 用的也是 logicId 那一份）。
+                characteristics = cc
             )
         }
         // 走到这里即没有完整的公开独立替代集，展开是否成功都保留父逻辑兜底。
@@ -108,7 +125,8 @@ fun enumerateLenses(mgr: CameraManager): List<LensSlot> {
             focalMm = shortestFocalMm(cc) ?: 0f,
             eqFocal = eqFocalMmOf(cc),
             ability = CameraAbility.from(id, cc),
-            front = front
+            front = front,
+            characteristics = cc
         )
     }
 
@@ -159,7 +177,7 @@ private fun LensEntry.toSlot(type: LensType): LensSlot = LensSlot(
     physicalId = physicalId,
     eqFocal = if (eqFocal > 0f) eqFocal else focalMm,
     ability = ability
-)
+).also { it.characteristics = characteristics }
 
 /**
  * 纯函数：逻辑多摄头是否该从档位表里隐藏。
@@ -217,6 +235,19 @@ fun pickCapabilityDefault(slots: List<LensSlot>): LensSlot? =
     slots.filter { it.type != LensType.FRONT }
         .maxByOrNull { slot -> slot.ability.videoSizes.maxOfOrNull { it.pixels } ?: 0L }
         ?.takeIf { slot -> slot.ability.videoSizes.maxOfOrNull { it.pixels } ?: 0L > 0L }
+
+/**
+ * 请求档位 → 实际槽位（纯函数）：先认显式槽位，再认请求档位，最后退到广角档与清单首颗。
+ *
+ * **Y70**：后两级回退可能落在与请求档位**不同**的镜头上——极端情形是设备只有前置可开，
+ * 用户请求后置却回退到前置。调用方必须把返回值当作「实际生效镜头」发布（currentSlot /
+ * currentLens），站位分析的 D13 真值从实际槽位读；拿请求档位判断前置会让「前置禁开」失效。
+ */
+fun resolveLensSlot(slots: List<LensSlot>, chosenKey: String?, requested: LensType): LensSlot? =
+    slots.firstOrNull { it.key == chosenKey }
+        ?: slots.firstOrNull { it.type == requested }
+        ?: slots.firstOrNull { it.type == LensType.WIDE }
+        ?: slots.firstOrNull()
 
 /**
  * 「用户显式选过镜头」的持久化位：能力协商默认（[pickCapabilityDefault]）只对**从未选过**

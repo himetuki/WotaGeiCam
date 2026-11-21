@@ -204,5 +204,5 @@ class CameraStartupIntentBridgeTest {
     }
 
     private fun platform(block: (CameraStartupIntentFixture) -> Unit) =
-        CameraStartupIntentFixture(requireNotNull(javaClass.classLoader)).use(block)
+        CameraStartupIntentFixture(requireNotNull(javaClass.classLoader!!)).use(block)
 }

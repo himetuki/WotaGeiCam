@@ -191,7 +191,9 @@ class AmbientTrackLostGuardTest {
                 "minBuf>0 与权限都在，属「能力面本应可行却没成」）",
             codecBody("startFeederOrDropAudio").contains("reportAmbientLost(")
         )
-        val prepare = codecBody("prepare")
+        // Y20 把资源建立段拆进 prepareSegment（prepare 只留所有权登记 + 一层异常收口），
+        // R2 的判据跟着搬，语义不变：仍是 prepare 期（同一调用链）环境编码器建失败的上报闸。
+        val prepare = codecBody("prepareSegment")
         assertTrue(
             "R2 prepare 期环境编码器建失败必须上报，判据必须带「真尝试过」（minBuf>0 && p.audioEnabled）" +
                 "——权限缺失/参数不支持（minBuf=0）是产品明确的纯视频降级，不许从这里上报",
@@ -212,7 +214,7 @@ class AmbientTrackLostGuardTest {
                     "if (a == null && minBuf > 0 && p.audioEnabled) reportAmbientLost(",
                     "if (a == null) reportAmbientLost("
                 ),
-                "prepare"
+                "prepareSegment"
             )
         )
         assertFalse("R2 判据放宽后守卫必须报红", m.contains("minBuf > 0 && p.audioEnabled) reportAmbientLost("))

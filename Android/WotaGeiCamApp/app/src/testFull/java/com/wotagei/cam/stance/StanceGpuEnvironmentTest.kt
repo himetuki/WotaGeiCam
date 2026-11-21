@@ -92,7 +92,7 @@ class StanceGpuEnvironmentTest {
         )
         val files = sources.map { (path, source) ->
             File(root, path).apply {
-                parentFile.mkdirs()
+                requireNotNull(parentFile).mkdirs()
                 writeText(source)
             }
         }
@@ -105,7 +105,7 @@ class StanceGpuEnvironmentTest {
         )
         assertEquals("平台边界桩必须成功编译", 0, compile.invoke(compiler, null, null, null, (options + files.map { it.absolutePath }).toTypedArray()))
 
-        DiagnosticLoader(classes, javaClass.classLoader).use { loader ->
+        DiagnosticLoader(classes, requireNotNull(javaClass.classLoader)).use { loader ->
             val build = loader.loadClass("android.os.Build")
             if (sdk < 31) {
                 assertThrows(NoSuchFieldException::class.java) { build.getDeclaredField("SOC_MODEL") }

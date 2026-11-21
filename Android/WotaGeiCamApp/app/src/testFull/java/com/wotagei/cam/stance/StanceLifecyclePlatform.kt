@@ -132,16 +132,112 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
         """,
         "android/content/res/AssetManager.java" to """
             package android.content.res;
-            public class AssetManager {public AssetFileDescriptor openFd(String name){return new AssetFileDescriptor(name);}}
+            public class AssetManager {
+                public static final java.util.Map<String,byte[]> files=new java.util.HashMap<>();
+                public AssetFileDescriptor openFd(String name){return new AssetFileDescriptor(name);}
+                public java.io.InputStream open(String name){
+                    byte[] bytes=files.get(name);
+                    return new java.io.ByteArrayInputStream(bytes==null?new byte[0]:bytes);
+                }
+            }
+        """,
+        "android/content/SharedPreferences.java" to """
+            package android.content;
+            public interface SharedPreferences {
+                boolean getBoolean(String k,boolean d); String getString(String k,String d);
+                int getInt(String k,int d); long getLong(String k,long d); float getFloat(String k,float d);
+                Editor edit();
+                interface Editor {
+                    Editor putBoolean(String k,boolean v); Editor putString(String k,String v);
+                    Editor putInt(String k,int v); Editor putLong(String k,long v); Editor putFloat(String k,float v); void apply();
+                }
+                class Impl implements SharedPreferences,Editor {
+                    private final java.util.Map<String,Object> data=new java.util.HashMap<>();
+                    public boolean getBoolean(String k,boolean d){return (Boolean)data.getOrDefault(k,d);}
+                    public String getString(String k,String d){return (String)data.getOrDefault(k,d);}
+                    public int getInt(String k,int d){return (Integer)data.getOrDefault(k,d);}
+                    public long getLong(String k,long d){return (Long)data.getOrDefault(k,d);}
+                    public float getFloat(String k,float d){return (Float)data.getOrDefault(k,d);}
+                    public Editor edit(){return this;}
+                    public Editor putBoolean(String k,boolean v){data.put(k,v);return this;}
+                    public Editor putString(String k,String v){data.put(k,v);return this;}
+                    public Editor putInt(String k,int v){data.put(k,v);return this;}
+                    public Editor putLong(String k,long v){data.put(k,v);return this;}
+                    public Editor putFloat(String k,float v){data.put(k,v);return this;}
+                    public void apply(){}
+                }
+            }
         """,
         "android/content/Context.java" to """
             package android.content;
             public class Context {
+                public static final String AUDIO_SERVICE="audio";
+                public static final int MODE_PRIVATE=0;
                 public java.io.File filesDir;
+                private android.media.AudioManager audioManager;
+                private final SharedPreferences prefs=new SharedPreferences.Impl();
                 public java.io.File getFilesDir(){return filesDir;}
+                public SharedPreferences getSharedPreferences(String name,int mode){return prefs;}
                 public Context getApplicationContext(){return this;}
+                public Object getSystemService(String name){
+                    if(AUDIO_SERVICE.equals(name)){
+                        if(audioManager==null)audioManager=new android.media.AudioManager();
+                        return audioManager;
+                    }
+                    return null;
+                }
                 public android.content.pm.PackageManager getPackageManager(){return new android.content.pm.PackageManager();}
                 public android.content.res.AssetManager getAssets(){return new android.content.res.AssetManager();}
+            }
+        """,
+        "android/media/AudioManager.java" to """
+            package android.media;
+            public class AudioManager {
+                public static final int STREAM_MUSIC=3;
+                public static final int AUDIOFOCUS_GAIN=1;
+                public static final int AUDIOFOCUS_LOSS=-1;
+                public static final int AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK=3;
+                public static final int AUDIOFOCUS_REQUEST_GRANTED=1;
+                public static final int AUDIOFOCUS_REQUEST_FAILED=0;
+                public static boolean grant=true;
+                public static int requests,abandons;
+                public static OnAudioFocusChangeListener current;
+                public interface OnAudioFocusChangeListener {void onAudioFocusChange(int change);}
+                public int requestAudioFocus(OnAudioFocusChangeListener listener,int stream,int gain){
+                    requests++; current=listener;
+                    return grant?AUDIOFOCUS_REQUEST_GRANTED:AUDIOFOCUS_REQUEST_FAILED;
+                }
+                public int requestAudioFocus(AudioFocusRequest request){
+                    requests++; current=request.listener;
+                    return grant?AUDIOFOCUS_REQUEST_GRANTED:AUDIOFOCUS_REQUEST_FAILED;
+                }
+                public int abandonAudioFocus(OnAudioFocusChangeListener listener){
+                    abandons++; if(current==listener)current=null;
+                    return AUDIOFOCUS_REQUEST_GRANTED;
+                }
+                public int abandonAudioFocusRequest(AudioFocusRequest request){
+                    abandons++; if(current==request.listener)current=null;
+                    return AUDIOFOCUS_REQUEST_GRANTED;
+                }
+                public static void change(int value){
+                    OnAudioFocusChangeListener l=current;
+                    if(l!=null)l.onAudioFocusChange(value);
+                }
+                public static void reset(){grant=true;requests=0;abandons=0;current=null;}
+            }
+        """,
+        "android/media/AudioFocusRequest.java" to """
+            package android.media;
+            public class AudioFocusRequest {
+                final AudioManager.OnAudioFocusChangeListener listener;
+                AudioFocusRequest(AudioManager.OnAudioFocusChangeListener listener){this.listener=listener;}
+                public static class Builder {
+                    private AudioManager.OnAudioFocusChangeListener listener;
+                    public Builder(int gain){}
+                    public Builder setAudioAttributes(AudioAttributes attributes){return this;}
+                    public Builder setOnAudioFocusChangeListener(AudioManager.OnAudioFocusChangeListener listener){this.listener=listener;return this;}
+                    public AudioFocusRequest build(){return new AudioFocusRequest(listener);}
+                }
             }
         """,
         "android/media/AudioAttributes.java" to """
@@ -204,6 +300,8 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
             package org.tensorflow.lite;
             public class Interpreter implements java.io.Closeable {
                 public static boolean failGpuConstructor,failCpuConstructor,failVerify,failNextDetect;
+                public static int failCpuCapacity=-1;
+                public static float verifyCoord=0f;
                 public static java.util.concurrent.CountDownLatch verifyEntered,verifyContinue;
                 public static final java.util.List<String> events=new java.util.concurrent.CopyOnWriteArrayList<>();
                 public static final java.util.List<Object> outputs=new java.util.ArrayList<>();
@@ -217,10 +315,12 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
                 public Interpreter(java.nio.ByteBuffer model,Options options){
                     gpu=options.gpu; event(gpu?"gpu:new":"cpu:new");
                     if(gpu&&failGpuConstructor)throw new IllegalStateException("fixture GPU constructor");
-                    if(!gpu&&failCpuConstructor)throw new IllegalStateException("fixture CPU constructor");
+                    if(!gpu&&(failCpuConstructor||model.capacity()==failCpuCapacity))throw new IllegalStateException("fixture CPU constructor");
                 }
                 public Tensor getInputTensor(int i){return new Tensor(){public int[] shape(){return new int[]{1,3,2,2};} public DataType dataType(){return DataType.FLOAT32;}};}
                 public Tensor getOutputTensor(int i){return new Tensor(){public int[] shape(){return new int[]{1,5,2};} public DataType dataType(){return DataType.FLOAT32;}};}
+                public int getInputTensorCount(){return 1;}
+                public int getOutputTensorCount(){return 1;}
                 public void run(Object input,Object output){
                     boolean verify=output instanceof java.nio.ByteBuffer;
                     event((gpu?"gpu:":"cpu:")+(verify?"verify":"detect"));
@@ -230,6 +330,7 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
                         catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}
                     }
                     if(gpu&&verify&&failVerify)throw new IllegalStateException("fixture GPU verify");
+                    if(verify&&verifyCoord!=0f){((java.nio.ByteBuffer)output).putFloat(0,verifyCoord);}
                     if(gpu&&!verify&&failNextDetect){failNextDetect=false;throw new IllegalStateException("fixture GPU runtime");}
                     if(!verify){
                         outputs.add(output);
@@ -245,23 +346,23 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
     val loader: ClassLoader
     private val boundary: BoundaryLoader
     init {
-        val files = sources.map { (path, source) -> File(root, path).apply { parentFile.mkdirs(); writeText(source.trimIndent()) } }
+        val files = sources.map { (path, source) -> File(root, path).apply { parentFile?.mkdirs(); writeText(source.trimIndent()) } }
         val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
         val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java, OutputStream::class.java, OutputStream::class.java, Array<String>::class.java)
         assertEquals("平台/JNI 边界必须先成功编译", 0, run.invoke(compiler, null, null, null,
             (listOf("-proc:none", "-encoding", "UTF-8", "-d", classes.absolutePath) + files.map { it.absolutePath }).toTypedArray()))
-        boundary = BoundaryLoader(classes, javaClass.classLoader, sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet())
+        boundary = BoundaryLoader(classes, requireNotNull(javaClass.classLoader), sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet())
         loader = boundary
     }
 
     fun type(name: String): Class<*> = loader.loadClass(name)
     fun stance(name: String): Class<*> = type("com.wotagei.cam.stance.$name")
-    fun instance(name: String): Any = stance(name).getConstructor().newInstance()
-    fun context(filesDir: File? = null): Any = type("android.content.Context").getConstructor().newInstance().also {
+    fun instance(name: String): Any = requireNotNull(stance(name).getConstructor().newInstance())
+    fun context(filesDir: File? = null): Any = requireNotNull(type("android.content.Context").getConstructor().newInstance()).also {
         inject(it, "filesDir", filesDir)
     }
     fun setStatic(name: String, field: String, value: Any) = type(name).getField(field).set(null, value)
-    fun static(name: String, field: String): Any = type(name).getField(field).get(null)
+    fun static(name: String, field: String): Any = requireNotNull(type(name).getField(field).get(null))
     fun events(): List<String> = (static("org.tensorflow.lite.Interpreter", "events") as List<*>).map { it.toString() }
     fun mainIdle() = type("android.os.Looper").getMethod("idle").invoke(static("android.os.Looper", "MAIN"))
     fun advance(ms: Long) = type("android.os.Looper").getMethod("advanceBy", Long::class.javaPrimitiveType).invoke(static("android.os.Looper", "MAIN"), ms)
@@ -288,6 +389,38 @@ internal class StanceLifecyclePlatform(root: File) : Closeable {
         val task = FutureTask { action(); Unit }
         check(call(handler, "post", task) == true)
         task.get(5L, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Y08：分析面分配归 owner 线程后，测试入口统一为「投递 → owner 排空 → Main 交付」。
+     * 返回前必须真的收到 onReady（与旧同步 start 的返回语义对齐），否则后续 emit 会读空 reader。
+     */
+    fun startAnalysis(analysis: Any) {
+        val size = type("android.util.Size")
+            .getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .newInstance(2, 2)
+        var delivered = false
+        val ready: (Any?, Any?) -> Unit = { surface, reader ->
+            delivered = surface != null && reader != null
+        }
+        call(analysis, "startAsync", size, null, ready)
+        onAnalysis(analysis)
+        mainIdle()
+        check(delivered) { "分析面分配未在 owner 排空后交付到 Main（Y08）" }
+    }
+
+    /**
+     * Y08：挂槽分配在分析 owner 排队，测试必须排空 owner + Main 才能观察到 attachHook 与会话挂载。
+     * 只排到 Controller 认为已挂上为止；不 sleep，不依赖墙钟时序。
+     */
+    fun settleAttach(controller: Any, timeoutMs: Long = 5_000L) {
+        val analysis = field(controller, "analysis") ?: return
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            onAnalysis(analysis)
+            mainIdle()
+            if (field(controller, "attached") == true) return
+        }
     }
     fun emit(analysis: Any) {
         inject(analysis, "lastFrameMs", 0L)

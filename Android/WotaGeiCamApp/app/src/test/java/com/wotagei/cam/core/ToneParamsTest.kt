@@ -115,7 +115,6 @@ class ToneParamsTest {
     @Test
     fun `色调作用在曲线之前_先tone后master后通道`() {
         // 同一条抬亮曲线（master 线性 ×2）：tone 抬黑后暗部先被抬、再被曲线放大
-        val stack = CurveStack.decode("0:0;1:1;;") // 需要合法四段；改用直接构造
         val s = CurveStack(
             master = ColorCurve(listOf(ColorCurve.Point(0f, 0f), ColorCurve.Point(1f, 1f))),
             red = ColorCurve(listOf(ColorCurve.Point(0f, 0f), ColorCurve.Point(1f, 2f))),

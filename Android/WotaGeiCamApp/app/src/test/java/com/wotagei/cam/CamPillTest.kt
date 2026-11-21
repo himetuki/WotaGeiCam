@@ -98,4 +98,24 @@ class CamPillTest {
         // 位掩码要能塞进一个 Int 持久化，超到 1<<31 就存不下了
         assertTrue(bits.max() <= 1 shl 30)
     }
+
+    @Test
+    fun Y38_illegalAndFutureSchemaMigrateBoundedWithoutTouchingMask() {
+        // 备份恢复可注入任意 Int：负值若直接进 (from+1)..MASK_SCHEMA 会迭代约 21 亿次，
+        // 取景页组合期同步调用即卡死。非法低值与未来版本都必须原样返回、迭代次数有界。
+        val mask = CamPill.DEFAULT_MASK and CamPill.GLOW.bit.inv()
+        assertEquals(mask, CamPill.migrateMask(mask, -1))
+        assertEquals(mask, CamPill.migrateMask(mask, Int.MIN_VALUE))
+        assertEquals(mask, CamPill.migrateMask(mask, 1_000_000_000))
+        assertEquals(mask, CamPill.migrateMask(mask, CamPill.MASK_SCHEMA + 7))
+
+        // 正对照：真正支持的历史版本仍然补位，修复不能把迁移一起关掉。
+        assertEquals(CamPill.DEFAULT_MASK, CamPill.migrateMask(mask, 1))
+        // 取景页真实读取入口（WotaSettings.hudPills）同样有界。
+        val prefs = FakePrefs().apply {
+            map[com.wotagei.cam.ui.WotaSettings.KEY_HUD_PILLS] = mask
+            map[com.wotagei.cam.ui.WotaSettings.KEY_HUD_PILLS_SCHEMA] = Int.MIN_VALUE
+        }
+        assertEquals(mask, com.wotagei.cam.ui.WotaSettings.hudPills(prefs))
+    }
 }

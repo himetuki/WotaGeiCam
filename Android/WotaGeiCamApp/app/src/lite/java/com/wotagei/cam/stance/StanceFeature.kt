@@ -38,19 +38,36 @@ class StanceFeature private constructor(private val appContext: Context) {
     private val _state = MutableStateFlow(StanceUi())
     val state: StateFlow<StanceUi> = _state.asStateFlow()
 
+    // lite 侧这些方法必须与 src/full 的同名门面保持相同签名（CameraScreen 只认这一份契约），
+    // 但 lite 没有模型/推理可消费参数，所以按契约保留形参并显式标注未使用。
+    @Suppress("UNUSED_PARAMETER")
     fun prepare(context: Context) {}          // 无模型组可装配
 
+    @Suppress("UNUSED_PARAMETER")
     fun setEnabled(context: Context, on: Boolean) {
         _state.value = _state.value.copy(enabled = on)
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun setRecordingActive(active: Boolean) {}   // 无录制联动诉求（功能恒关）
 
+    @Suppress("UNUSED_PARAMETER")
+    fun setRenderGpuAllowed(allowed: Boolean) {}   // B16：lite 无推理装配
+
+    @Suppress("UNUSED_PARAMETER")
     fun setFrontLens(front: Boolean) {}
 
+    /** 镜头切换未决（Y70）：lite 无分析管线，恒空。 */
+    @Suppress("UNUSED_PARAMETER")
+    fun setLensSettling(settling: Boolean) {}
+
+    @Suppress("UNUSED_PARAMETER")
     fun setRotation(degrees: Int) {}
 
+    @Suppress("UNUSED_PARAMETER")
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) {}
+
+    fun onAnalysisTargetChanged() {}
 
     fun onPageEnter() {}
 
@@ -65,16 +82,29 @@ class StanceFeature private constructor(private val appContext: Context) {
     var targetAspectProvider: (() -> Float?)? = null
     var characteristicsProvider: (() -> CameraCharacteristics?)? = null
 
+    /** 实际生效镜头标识（Y09/B14）：lite 无 reader，恒空。 */
+    var lensKeyProvider: (() -> String?)? = null
+
+    /** 预览流实际几何（B14）：lite 无叠加，恒空。 */
+    var previewGeometryProvider: (() -> PreviewStreamGeometry?)? = null
+
     /** 无检测输出——lite 恒空叠加。 */
+    @Suppress("UNUSED_PARAMETER")
     @Composable
     fun Overlay(modifier: Modifier) {
     }
 
-    /** 宣传浮层（用户 2026-11-07 口径原文文案）。 */
+    /**
+     * 宣传浮层（用户 2026-11-07 口径原文文案）。
+     *
+     * [modifier] 由调用方给：CameraScreen 按实测右缘目标传入 `widthIn(max = …)`（Y55），
+     * 窄窗/分屏时面板整体收缩而不是越过右 Dock 槽左缘。
+     */
+    @Suppress("UNUSED_PARAMETER")
     @Composable
-    fun ControlsPopup(gpuAllowed: Boolean) {
+    fun ControlsPopup(gpuAllowed: Boolean, modifier: Modifier = Modifier) {
         Column(
-            Modifier
+            modifier
                 .widthIn(min = 264.dp, max = 320.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .background(Color(0xCC1C1C24))

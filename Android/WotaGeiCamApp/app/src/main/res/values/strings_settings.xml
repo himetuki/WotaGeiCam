@@ -115,11 +115,21 @@
     <string name="set_update_install">安装</string>
     <string name="set_update_download_failed">下载失败，请稍后重试</string>
     <string name="set_update_install_failed">无法启动系统安装</string>
+    <string name="set_update_install_retry">重试安装</string>
+    <!-- 安装闸拒绝原因（Y46：失败态必须说清原因并给重试入口，不能仍显示「下载完成」） -->
+    <string name="set_update_install_reason_unreadable">安装包已丢失或无法读取，请重新下载</string>
+    <string name="set_update_install_reason_digest">安装包校验不一致（可能被替换），请重新下载</string>
+    <string name="set_update_install_reason_package">安装包不是本应用，已拒绝安装</string>
+    <string name="set_update_install_reason_signer">安装包签名与应用不一致，已拒绝安装</string>
+    <string name="set_update_install_reason_debuggable">已拒绝安装可调试取证包</string>
+    <string name="set_update_install_reason_version">安装包版本与所选更新不一致，请重新下载</string>
+    <string name="set_update_install_reason_flavor">安装包变体与所选更新不一致，请重新下载</string>
+    <string name="set_update_install_reason_abi">安装包 ABI 与设备不匹配，请重新下载</string>
     <string name="set_update_close">关闭</string>
     <string name="set_update_size_unknown">大小未知</string>
     <!-- 所有文件访问：删改本机任何视频都不弹系统英文确认框的前提 -->
     <string name="set_group_storage">所有文件访问</string>
-    <string name="set_storage_note">可选权限，仅为方便删改其他应用的视频；录制、查看和管理自录视频不需要它。打开后，删除、回收站、还原、重命名无需逐次系统确认；不开则仅改动本应用的视频，可随时回此处开关。</string>
+    <string name="set_storage_note">可选权限。系统里这项叫「所有文件访问」：授予后，系统层面会允许本应用读写共享存储中的全部文件（不止视频）；本应用只把它用于跨应用视频的删除、回收站、还原与重命名，不会读取或上传其他文件。录制、查看和管理自录视频不需要它。不授予时：自录视频照常管理；改动其他应用的视频会失败并提示回到这里开启，本应用不会自动提升权限。可随时回此处开关。</string>
     <string name="set_storage_open">去系统设置打开</string>
     <string name="set_storage_on">已开启</string>
     <string name="set_storage_open_failed">无法打开系统授权页，可在系统设置中查找「特殊应用权限 → 所有文件访问」。不开启仍可管理自录视频。</string>

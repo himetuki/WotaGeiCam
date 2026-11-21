@@ -50,7 +50,6 @@ object WotaStorage {
      *
      * @return 有没有真的跳出去（false 时调用方给提示，别让用户点了没反应）
      */
-    @SuppressLint("InlinedApi")
     fun openSettings(context: Context): Boolean {
         return openSettingsFor(Build.VERSION.SDK_INT, context.packageName) { action, data ->
             runCatching {
@@ -62,6 +61,9 @@ object WotaStorage {
     }
 
     /** 行为测试驱动同一条回退链：单应用设置 → 特殊权限总页；两者均不可用时明确返回失败。 */
+    // 两条 ACTION_* 是编译期内联的字符串常量，API 30 才声明，但取常量不访问旧系统成员；
+    // 且上一行 supportsAllFilesAccessFor(sdk) 已按档位短路（29 上直接 return false）。
+    @SuppressLint("InlinedApi")
     internal fun openSettingsFor(sdk: Int, packageName: String, launch: (String, String?) -> Boolean): Boolean {
         if (!supportsAllFilesAccessFor(sdk)) return false
         return launch(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, "package:$packageName") ||

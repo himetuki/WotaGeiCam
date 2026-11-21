@@ -13,6 +13,7 @@ import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +34,7 @@ import com.wotagei.cam.ui.anim.MotionMode
 import com.wotagei.cam.ui.theme.WotaRec
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -178,14 +180,24 @@ fun LikeHeart(
     var beat by remember { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
     val pulse = remember { Animatable(1f) }
+    var burstJob by remember { mutableStateOf<Job?>(null) }
 
     fun press() {
         val next = !liked
         onToggle(next)
-        if (!next || !playEffect) return
+        // 每次按下都推进 beat（效果层以它为组合键，见下方 key(beat)）；
+        // B10：取消收藏必须撤销已在飞的动画，不能 let it finish。
         beat++
+        burstJob?.cancel()
+        burstJob = null
+        if (!next || !playEffect) {
+            playing = false
+            // 取消停在当前进度；效果层已隐藏，归零让下一次收藏从同一状态起跑
+            scope.launch { pulse.snapTo(0f) }
+            return
+        }
         playing = true
-        scope.launch {
+        burstJob = scope.launch {
             pulse.snapTo(0f)
             pulse.animateTo(
                 1f,
@@ -208,55 +220,59 @@ fun LikeHeart(
         contentAlignment = Alignment.Center
     ) {
         if (playing) {
-            // 效果层：环 + 彩点。t 在绘制期读（Animatable.value 是快照状态）⇒ 每帧只重画这一层。
-            // requiredSize 故意大于 48dp 触控盒：彩点要甩到盒子外面去（Box 默认不裁切）
-            Canvas(Modifier.requiredSize(80.dp)) {
-                val t = pulse.value
-                val center = Offset(size.width / 2f, size.height / 2f)
-                val dp = density.density
+            // B10：beat 是组合键——一次收藏对应一次效果层实例；取消后再收藏也不会复用
+            // 上一轮动画节点的记忆状态（pulse 本身仍是共享的 Animatable）。
+            key(beat) {
+                // 效果层：环 + 彩点。t 在绘制期读（Animatable.value 是快照状态）⇒ 每帧只重画这一层。
+                // requiredSize 故意大于 48dp 触控盒：彩点要甩到盒子外面去（Box 默认不裁切）
+                Canvas(Modifier.requiredSize(80.dp)) {
+                    val t = pulse.value
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val dp = density.density
 
-                // 绽放环：实心圆 → 环 → 淡出（边框占半径的比例按设计稿收缩）
-                val bloomScale = LikeBurst.bloomScale(t)
-                val borderFrac = LikeBurst.bloomBorderFraction(t)
-                val alpha = LikeBurst.bloomAlpha(t)
-                if (alpha > 0f && borderFrac > 0f) {
-                    val radius = BloomRadiusDp * dp * bloomScale
-                    val stroke = (radius * borderFrac).coerceAtLeast(0.5f)
-                    val color = lerp(WotaRec, BloomPurple, LikeBurst.bloomPurple(t))
-                    drawCircle(
-                        color = color.copy(alpha = alpha),
-                        radius = (radius - stroke / 2f).coerceAtLeast(0.1f),
-                        center = center,
-                        style = Stroke(width = stroke)
-                    )
-                }
+                    // 绽放环：实心圆 → 环 → 淡出（边框占半径的比例按设计稿收缩）
+                    val bloomScale = LikeBurst.bloomScale(t)
+                    val borderFrac = LikeBurst.bloomBorderFraction(t)
+                    val alpha = LikeBurst.bloomAlpha(t)
+                    if (alpha > 0f && borderFrac > 0f) {
+                        val radius = BloomRadiusDp * dp * bloomScale
+                        val stroke = (radius * borderFrac).coerceAtLeast(0.5f)
+                        val color = lerp(WotaRec, BloomPurple, LikeBurst.bloomPurple(t))
+                        drawCircle(
+                            color = color.copy(alpha = alpha),
+                            radius = (radius - stroke / 2f).coerceAtLeast(0.1f),
+                            center = center,
+                            style = Stroke(width = stroke)
+                        )
+                    }
 
-                // 七对彩点：各自辐条 + 侧向错位（设计稿的 --side / --far）
-                val dotP = LikeBurst.dotProgress(t)
-                if (dotP >= 0f) {
-                    val dotR = DotDp * dp
-                    for (k in 0 until 7) {
-                        val angle = Math.toRadians((k * (360.0 / 7.0) - 90.0))
-                        val ux = cos(angle).toFloat()
-                        val uy = sin(angle).toFloat()
-                        for (pair in 0 until 2) {
-                            val side = if (pair == 0) -DotSideDp else DotSideDp
-                            val far = if (pair == 0) 0f else DotFarDp
-                            val radial = LikeBurst.dotRadiusPx(dotP, FlyDefault, far) * dp
-                            val lateral = LikeBurst.dotSidePx(dotP, side) * dp
-                            val p = Offset(
-                                center.x + ux * radial - uy * lateral,
-                                center.y + uy * radial + ux * lateral
-                            )
-                            val scale = LikeBurst.dotScale(dotP)
-                            val a = LikeBurst.dotAlpha(dotP)
-                            if (scale > 0f && a > 0f) {
-                                val idx = if (pair == 0) k else k + 3
-                                drawCircle(
-                                    color = Confetti[idx % Confetti.size].copy(alpha = a),
-                                    radius = dotR * scale,
-                                    center = p
+                    // 七对彩点：各自辐条 + 侧向错位（设计稿的 --side / --far）
+                    val dotP = LikeBurst.dotProgress(t)
+                    if (dotP >= 0f) {
+                        val dotR = DotDp * dp
+                        for (k in 0 until 7) {
+                            val angle = Math.toRadians((k * (360.0 / 7.0) - 90.0))
+                            val ux = cos(angle).toFloat()
+                            val uy = sin(angle).toFloat()
+                            for (pair in 0 until 2) {
+                                val side = if (pair == 0) -DotSideDp else DotSideDp
+                                val far = if (pair == 0) 0f else DotFarDp
+                                val radial = LikeBurst.dotRadiusPx(dotP, FlyDefault, far) * dp
+                                val lateral = LikeBurst.dotSidePx(dotP, side) * dp
+                                val p = Offset(
+                                    center.x + ux * radial - uy * lateral,
+                                    center.y + uy * radial + ux * lateral
                                 )
+                                val scale = LikeBurst.dotScale(dotP)
+                                val a = LikeBurst.dotAlpha(dotP)
+                                if (scale > 0f && a > 0f) {
+                                    val idx = if (pair == 0) k else k + 3
+                                    drawCircle(
+                                        color = Confetti[idx % Confetti.size].copy(alpha = a),
+                                        radius = dotR * scale,
+                                        center = p
+                                    )
+                                }
                             }
                         }
                     }

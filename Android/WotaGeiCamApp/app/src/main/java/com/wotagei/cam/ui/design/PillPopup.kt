@@ -328,6 +328,10 @@ fun PillSlider(
     // 违反"拖动必落刻度"的验收口径）——禁用比假连续诚实（审查 P3）
     val ladderOnly = ladderInUse != null
     val ticks = ladderInUse?.takeIf { it.size >= 2 }
+    // B11：这一帧到底能不能拖，只由这一枚布尔说了算——Slider 的 enabled 与数值颜色都读它。
+    // 原先数值颜色只读外层 enabled：梯不足两点（空梯）时滑杆已经禁拖，读数却还是亮色，
+    // 看着像"能调却没反应"。判据抽成纯函数（JVM 用例见 PillSliderDisabledGuardTest）。
+    val interactive = pillSliderInteractive(enabled, usable, ticks?.size, ladderOnly)
     val tickRange = if (ticks != null) 0f..(ticks.size - 1).toFloat() else if (usable) lo..hi else 0f..1f
     // 当前值不在梯上（旧版本持久化恢复）时滑杆停在最近刻度，读数仍显示真实值；首次拖动后落梯
     val sliderValue = if (ticks != null) nearestLadderIndex(shown, ticks).toFloat() else shown
@@ -363,7 +367,7 @@ fun PillSlider(
                 },
                 valueRange = tickRange,
                 steps = if (ticks != null) ticks.size - 2 else 0,
-                enabled = enabled && (ticks != null || (usable && !ladderOnly)),
+                enabled = interactive,
                 onValueChangeFinished = onValueChangeFinished,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(
@@ -375,13 +379,34 @@ fun PillSlider(
             Text(
                 text = format(shown),
                 style = WotaType.mono.copy(fontSize = 12.sp, lineHeight = 15.sp),
-                color = if (enabled) WotaColor.textHi else WotaColor.textLo,
+                color = if (interactive) WotaColor.textHi else WotaColor.textLo,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(min = 54.dp).padding(start = 6.dp)
             )
         }
     }
+}
+
+/**
+ * [PillSlider] 这一帧是否可交互（B11）：**Slider 的 enabled 与数值颜色共用这一枚判据**，不许两处各判一次。
+ *
+ * 四条口径与滑杆既有的行为逐条对齐：
+ * - 梯存在且至少两点（[tickCount] ≥ 2）→ 只有刻度可拖；
+ * - 梯存在但不足两点（[ladderOnly] 且 [tickCount] 为 null）→ 禁用，**不静默退回连续滑杆**；
+ * - 无梯（设置页关掉吸附）且域可用 → 连续滑杆可拖；
+ * - 域退化（`hi <= lo`）或调用方 [enabled] = false → 禁用。
+ *
+ * 抽成纯函数是为了让 JVM 用例直接打"空梯 → 禁用"这一条，不必起 Compose 运行时。
+ */
+internal fun pillSliderInteractive(
+    enabled: Boolean,
+    usableDomain: Boolean,
+    tickCount: Int?,
+    ladderOnly: Boolean
+): Boolean {
+    val hasTicks = tickCount != null && tickCount >= 2
+    return enabled && (hasTicks || (usableDomain && !ladderOnly))
 }
 
 /**

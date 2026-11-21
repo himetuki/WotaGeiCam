@@ -9,16 +9,13 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
-import com.wotagei.cam.diag.Diag as Log
 import android.view.Surface
+import com.wotagei.cam.camera.OfflineGlWorker
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.ArcMergeDeadband
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import com.wotagei.cam.diag.Diag as Log
 
 private const val TAG_ARC_GL = "WotaArcRepairGl"
 
@@ -31,6 +28,12 @@ private const val EGL_OPENGL_ES3_BIT_KHR = 0x0040
 
 /** 单条 GL 命令（建面/绘制）的等待上限；超时按失败处理，绝不无限等 */
 private const val OP_WAIT_MS = 4_000L
+
+/**
+ * [ArcRepairGl.release] 等 GL 线程**真正退出**的上限（Y28）。释放编码器输入面的调用方必须
+ * 先确认本线程不会再碰那枚 EGL 窗口面；预算 = 单条 GL 命令 + 退线程余量。
+ */
+private const val RELEASE_JOIN_MS = OP_WAIT_MS + 1_000L
 
 /** 等解码器把一帧推上 SurfaceTexture 的上限 */
 private const val FRAME_WAIT_MS = 2_000L
@@ -71,16 +74,13 @@ internal class ArcRepairGl(
     /** 差分死区归一值（`D/255.0`），离线会话内恒定：uniform 在每次合并绘制时下发 */
     private val deadbandLuma = ArcMergeDeadband.luma(deadband)
 
-    private val thread = HandlerThread("WotaArcRepairGl").apply { start() }
-    private val handler = Handler(thread.looper)
+    private val worker = OfflineGlWorker(TAG_ARC_GL)
 
     /** 解码器输出面；[start] 成功后有效 */
     @Volatile
     var decoderSurface: Surface? = null
         private set
 
-    @Volatile
-    private var released = false
     private var glReady = false
 
     /** 打戳失败累计次数（本链不产 sidecar，日志就是全部痕迹，故必须计次而不是只留一行） */
@@ -253,41 +253,17 @@ internal class ArcRepairGl(
 
     // endregion
 
-    /** 释放全部 GL/EGL 资源并退出 GL 线程；幂等 */
-    fun release() {
-        if (released) return
-        postAndWait(OP_WAIT_MS) {
-            releaseGl()
-            true
-        }
-        released = true
-        thread.quitSafely()
+    /** GL 线程接手两侧 codec，在途命令完成后依序拆解码器、EGL 和编码器。 */
+    fun release(stopDecoder: () -> Unit, releaseEncoder: () -> Unit) {
+        worker.close(RELEASE_JOIN_MS, stopDecoder, ::releaseGl, releaseEncoder)
     }
 
     // endregion
 
     // region GL 线程内部
 
-    private fun postAndWait(timeoutMs: Long, block: () -> Boolean): Boolean {
-        if (released) return false
-        val latch = CountDownLatch(1)
-        val out = booleanArrayOf(false)
-        handler.post {
-            out[0] = try {
-                block()
-            } catch (e: Exception) {
-                Log.e(TAG_ARC_GL, "GL 操作抛异常：${e.javaClass.simpleName} ${e.message}")
-                false
-            }
-            latch.countDown()
-        }
-        return try {
-            latch.await(timeoutMs, TimeUnit.MILLISECONDS) && out[0]
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            return false
-        }
-    }
+    private fun postAndWait(timeoutMs: Long, block: () -> Boolean): Boolean =
+        worker.call(timeoutMs, block)
 
     private fun initGl(): Boolean {
         val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -344,7 +320,7 @@ internal class ArcRepairGl(
         // SurfaceTexture 必须在本线程、makeCurrent 之后建（构造期会把纹理 attach 到当前上下文）
         val st = SurfaceTexture(oesTextureId)
         st.setDefaultBufferSize(widthPx, heightPx)
-        st.setOnFrameAvailableListener({ onFrameAvailable() }, handler)
+        st.setOnFrameAvailableListener({ onFrameAvailable() }, worker.handler)
         texture = st
         decoderSurface = Surface(st)
 
@@ -473,6 +449,10 @@ internal class ArcRepairGl(
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
             Log.w(TAG_ARC_GL, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}")
+            // B03（2026-11-19）：失败也要归还本次已生成的句柄——否则调用方只看到 (0,0)、
+            // 无法回收，这些纹理/FBO 会在存活到任务收尾前的 EGL 上下文里滞留
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
             return 0 to 0
         }
         return tex to fbo
@@ -623,10 +603,18 @@ internal class ArcRepairGl(
         if (pass2dUTexMatrix >= 0) GLES20.glUniformMatrix4fv(pass2dUTexMatrix, 1, false, identityMatrix, 0)
         drawQuad(pass2dAPosition, pass2dATexCoord)
         unbindUnits()
+        // Y11（2026-11-19）：本帧绘制趟的 GL 错误必须在**打戳/swap 之前**拦截并判失败——
+        // 旧顺序把 drain 放在 swap 之后且丢弃返回值，坏帧照样进容器，输出结果报成功
+        //（"画了但没上屏/画错了"只有日志知道）。判定回到"这一帧根本没发出去"这一性质上。
+        if (drainGlError("arcEmit") > 0) {
+            Log.w(TAG_ARC_GL, "本帧 GL 绘制有错 ⇒ 不提交（emit 判失败，整任务失败）")
+            return false
+        }
         // 失败检查**必须早于** eglSwapBuffers：不 swap 才有「这一帧根本没进容器」这个性质
         if (!stampPresentation(ptsUs)) return false
         val swapped = EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
         if (!swapped) Log.w(TAG_ARC_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
+        // swap 后的残留错误只记账（含 swap 自身失败路径）；帧是否提交已由 swapped 决定
         drainGlError("arcEmit")
         return swapped
     }

@@ -6,6 +6,7 @@ import android.media.ImageReader
 import android.view.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import com.wotagei.cam.camera.AnalysisSessionDecision
 import com.wotagei.cam.diag.Diag
 import com.wotagei.cam.ui.dialog.observed
@@ -41,9 +42,17 @@ class StanceFeature private constructor(
 
     fun setRecordingActive(active: Boolean) = ctrl.setRecordingActive(active)
 
+    /** B16：设置页渲染模式 ↔ 推理加速准入（弹窗与装配同口径）。 */
+    fun setRenderGpuAllowed(allowed: Boolean) = ctrl.setRenderGpuAllowed(allowed)
+
     fun setFrontLens(front: Boolean) = ctrl.setFrontLens(front)
 
+    /** 镜头切换未决（Y70）：切镜窗口内先停分析，槽位落定后由 Controller 自行补挂。 */
+    fun setLensSettling(settling: Boolean) = ctrl.setLensSettling(settling)
+
     fun setRotation(degrees: Int) = ctrl.setRotation(degrees)
+
+    fun onAnalysisTargetChanged() = ctrl.onAnalysisTargetChanged()
 
     fun onAnalysisSessionDecision(decision: AnalysisSessionDecision) = ctrl.onAnalysisSessionDecision(decision)
 
@@ -82,16 +91,31 @@ class StanceFeature private constructor(
         get() = ctrl.characteristicsProvider
         set(value) { ctrl.characteristicsProvider = value }
 
+    /** 实际生效镜头标识（Y09/B14）：分析 reader 的复用键 = 该标识 + YUV 尺寸。 */
+    var lensKeyProvider: (() -> String?)?
+        get() = ctrl.lensKeyProvider
+        set(value) { ctrl.lensKeyProvider = value }
+
+    /** 预览流实际几何（B14）：叠加映射只认 sink 实测尺寸/转正/镜像与裁剪证据。 */
+    var previewGeometryProvider: (() -> PreviewStreamGeometry?)?
+        get() = ctrl.previewGeometryProvider
+        set(value) { ctrl.previewGeometryProvider = value }
+
     /** 号位叠加（判定输出可视化；View 层结构性不进成片）。 */
     @Composable
     fun Overlay(modifier: androidx.compose.ui.Modifier) {
         val s by ctrl.state.observed()
-        StanceOverlay(output = s.output, modifier = modifier)
+        StanceOverlay(output = s.output, geometry = s.geometry, modifier = modifier)
     }
 
-    /** 浮层内容（完整控制面板：总开关/精确度/人数/加速三态/提亮/模型目录/版本）。 */
+    /**
+     * 浮层内容（完整控制面板：总开关/精确度/人数/加速三态/提亮/模型目录/版本）。
+     *
+     * [modifier] 由调用方给：CameraScreen 按实测右缘目标传入 `widthIn(max = …)`（Y55），
+     * 窄窗/分屏时面板整体收缩而不是越过右 Dock 槽左缘。
+     */
     @Composable
-    fun ControlsPopup(gpuAllowed: Boolean) {
+    fun ControlsPopup(gpuAllowed: Boolean, modifier: Modifier = Modifier) {
         val s by ctrl.state.observed()
         StancePopupContent(
             state = s,
@@ -106,6 +130,7 @@ class StanceFeature private constructor(
             onPollInterval = { ctrl.setPollInterval(appContext, it) },
             onBrighten = { ctrl.setBrighten(appContext, it) },
             onImportFromDir = { ctrl.importFromExternalDir(appContext) },
+            modifier = modifier,
         )
     }
 
@@ -118,7 +143,25 @@ class StanceFeature private constructor(
                 instance ?: StanceFeature(
                     context.applicationContext,
                     StanceController.get(context.applicationContext),
-                ).also { instance = it }
+                ).also {
+                    it.applyProbeEnable()
+                    instance = it
+                }
             }
+    }
+
+    /**
+     * B15 真机取证钩子（仅 `PERF_PROBE` 变体，release/debug 恒关）。
+     *
+     * probe 构建启动即把站位开关置开：取证读数不能依赖"点开弹窗再点开关"这条 UI 通道
+     * （真机上弹窗与点按会被同一手势判成外部触摸而立刻关闭，且弹窗可点性随机型不同）。
+     * 开关照常落盘 `Prefs.ON`，与手动打开走同一条 `setEnabled` 路径（未进页时由
+     * [StanceController.onPageEnter] 补挂），因此测到的就是真实分析路径。
+     */
+    private fun applyProbeEnable() {
+        if (!com.wotagei.cam.BuildConfig.PERF_PROBE) return
+        if (ctrl.state.value.enabled) return
+        StancePerfProbe.note("probe auto-enable")
+        ctrl.setEnabled(appContext, true)
     }
 }

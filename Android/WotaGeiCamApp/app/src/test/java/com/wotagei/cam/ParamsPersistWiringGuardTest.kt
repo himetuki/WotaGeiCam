@@ -143,6 +143,23 @@ class ParamsPersistWiringGuardTest {
         keyNames.filter { occurrences(masked, it).size < 3 }
             .map { "$it 在 ParamsPersist.kt 里引用不足 3 处（KEYS 表/restore/flush 三者缺一）" }
 
+    /**
+     * 差异检测项与提交成功后的影子推进必须逐键对齐（R13）。
+     * 每个 `if (值 != 影子) { ... put(...) }` 都要在 `if (ok) {` 块里出现 `影子 = 值`；
+     * 新增键只写检测/put、漏了影子推进，这条会红。空 = 对齐。
+     */
+    private fun shadowAdvanceIssues(masked: String): List<String> {
+        val pairs = Regex("""if \((\w+) != (sh\w+)\)""").findAll(masked)
+            .map { it.groupValues[1] to it.groupValues[2] }.toList()
+        if (pairs.isEmpty()) return listOf("定位不到任何差异检测项——守卫失去输入")
+        val okAt = masked.indexOf("if (ok) {")
+        if (okAt < 0) return listOf("定位不到提交成功块 if (ok)——影子推进守卫失去输入")
+        val success = masked.substring(okAt)
+        return pairs.filter { (value, shadow) ->
+            !Regex("""\b${Regex.escape(shadow)}\s*=\s*${Regex.escape(value)}\b""").containsMatchIn(success)
+        }.map { (value, shadow) -> "差异检测项 $value 在提交成功后漏推进 $shadow（R13 同类：A→B→A 会落盘旧值）" }
+    }
+
     // ------------------------------------------------------------------ 真身断言
 
     @Test
@@ -182,6 +199,15 @@ class ParamsPersistWiringGuardTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun `R13_差异检测键集合与影子推进键集合逐键对齐`() {
+        assertEquals("影子推进核对：", emptyList<String>(), shadowAdvanceIssues(maskedPersist))
+        // 尺子自证：删掉 R13 修复的两行之一，必须报出对应键。
+        val mutant = maskedPersist.replace("shCorrectionManualNs = correctionManualNs", "Unit")
+        val issues = shadowAdvanceIssues(mutant)
+        assertTrue("漏推进 correctionManualNs 必须红：$issues", issues.any { "shCorrectionManualNs" in it })
     }
 
     @Test

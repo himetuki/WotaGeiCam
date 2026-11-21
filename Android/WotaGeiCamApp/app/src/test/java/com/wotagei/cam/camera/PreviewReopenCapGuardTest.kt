@@ -48,15 +48,17 @@ class PreviewReopenCapGuardTest {
     @Test
     fun `reopenRetries归零必须在onConfigured成功侧`() {
         val configured = body("onConfigured")
-        // 正向锚点：证明切到的是 onConfigured 真身
-        assertTrue("锚点丢失：onConfigured 没截到预览发布", configured.contains("publishPreview(PreviewStatus.ING)"))
+        // 正向锚点：证明切到的是 onConfigured 真身（R01 起 ING 只在 repeating 接纳后发布，
+        // 这里改成「会话配置成功」的就绪发布锚点）
+        val anchor = "publishReadiness(configured = true, repeatingSubmitted = false)"
+        assertTrue("锚点丢失：onConfigured 没截到会话配置成功就绪发布", configured.contains(anchor))
         val reset = configured.indexOf("reopenRetries = 0")
-        val publish = configured.indexOf("publishPreview(PreviewStatus.ING)")
+        val publish = configured.indexOf(anchor)
         assertTrue(
             "onConfigured 成功侧必须归零 reopenRetries（只有会话真正建起来才算重开成功）",
             reset >= 0
         )
-        assertTrue("归零应落在 publishPreview(ING) 附近（reset=$reset publish=$publish）", reset in 0 until publish)
+        assertTrue("归零应落在就绪发布之前（reset=$reset publish=$publish）", reset in 0 until publish)
         // 突变自证：归零被拆后尺子必须红
         val mutated = configured.replace("reopenRetries = 0", "Unit")
         assertTrue("onConfigured 归零被拆后尺子必须红", !mutated.contains("reopenRetries = 0"))

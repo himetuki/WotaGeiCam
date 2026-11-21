@@ -140,24 +140,41 @@ class DegradedKeepGuardTest {
 
     /**
      * MR 路（[MrRecorder]）三个封段点：`ok = true` 不变（MR 没有 Codec 路的段循环失败信号），
-     * 但 `containerFinalized` 不能再恒 false——801（MAX_FILESIZE_REACHED）是平台已停录并封口的
-     * **真实收尾信号**，必须传 `reachedMaxFilesize`。恒 false 会把 801 后 stop() 抛出的
-     * STOP_FAILED 当坏容器，删掉刚写完的整段有效文件。谁把它改回恒 false（或放宽成恒 true），
-     * 这条守卫必须红。
+     * 但 `containerFinalized` 不能再恒 false——收尾信号只有两种正身：
+     * 1. 801（MAX_FILESIZE_REACHED）平台自停 ⇒ `reachedMaxFilesize`（正常路径还要叠加
+     *    `stopConfirmed`：stop() 正常返回同样是已封口，而且能把"容器封好了但运行期有错误码"的
+     *    段保下来）；
+     * 2. ERROR 态挽救 ⇒ `salvageConfirmed`（唯一一次 stop 尝试成功；Y19 的可挽救路径）。
+     * 恒 false 会把 801 后 stop() 抛出的 STOP_FAILED 当坏容器删掉整段；恒 true 会把坏容器放行。
      */
     @Test
-    fun `MrRecorder 三个封段点必须把 801 收尾信号传给 containerFinalized`() {
+    fun `MrRecorder 封段点必须把确认过收尾的信号传给 containerFinalized`() {
+        val allowed = setOf("stopConfirmed || reachedMaxFilesize", "salvageConfirmed")
+        fun exprs(b: String): List<String> =
+            Regex("containerFinalized = ([^,\\n)]+)").findAll(b).map { it.groupValues[1].trim() }.toList()
         for (fn in listOf("stop", "release", "rotateSegment")) {
             val b = mrBody(fn)
             assertTrue("$fn 必须走 segmentKeepDecision", b.contains("segmentKeepDecision("))
             assertTrue("$fn 的 ok 必须恒 true（MR 路无段循环失败信号，与旧四参判据等价）", b.contains("ok = true"))
+            val got = exprs(b)
+            assertFalse("$fn 封段点必须传 containerFinalized（缺失 = 旧恒 false 形态）", got.isEmpty())
+            assertTrue("$fn 的 containerFinalized 实参只能是 $allowed，实际 $got", got.all { it in allowed })
             assertTrue(
-                "$fn 的 containerFinalized 必须由 reachedMaxFilesize 给出（恒 false = 801 自停后删掉完整段）",
-                b.contains("containerFinalized = reachedMaxFilesize")
+                "$fn 必须保留 801 自停信号（删掉 reachedMaxFilesize = 801 自停后删整段）",
+                got.any { it.contains("reachedMaxFilesize") }
             )
-            assertFalse("$fn 的 containerFinalized 不得写死 false", b.contains("containerFinalized = false"))
-            assertFalse("$fn 的 containerFinalized 不得写死 true（坏容器也会被放行）", b.contains("containerFinalized = true"))
+            if (fn != "rotateSegment") {
+                assertTrue(
+                    "$fn 的 ERROR 态挽救分支必须用 stop 成功（salvageConfirmed）作收尾信号",
+                    got.any { it == "salvageConfirmed" }
+                )
+            }
+            assertFalse("$fn 的 containerFinalized 不得写死 false", got.any { it == "false" })
+            assertFalse("$fn 的 containerFinalized 不得写死 true（坏容器也会被放行）", got.any { it == "true" })
         }
+        // 突变自证：把正常路径写回常量 false（旧缺陷形态），同一把尺必须报红
+        val mutated = exprs(mrBody("stop").replace("containerFinalized = stopConfirmed || reachedMaxFilesize", "containerFinalized = false"))
+        assertFalse("写成常量 false 后守卫必须报红", mutated.isNotEmpty() && mutated.all { it in allowed })
     }
 
     // ------------------------------------------------------------------ 降级呈现接线
@@ -178,11 +195,12 @@ class DegradedKeepGuardTest {
             "降级呈现只认「错误就是那条降级码」（差一字宁可回落失败，绝不盖住更硬的失败）",
             finish.contains("degraded != null && degraded == error")
         )
-        // 无产物仍走失败：parts.isEmpty() 分支必须排在降级分支之前
-        val emptyAt = finish.indexOf("parts.isEmpty()")
+        // 无产物仍走失败：同步与迟到的已封段共用的清单为空时优先失败。
+        assertTrue("finish 必须先合并已封段视图（含迟到发布台账）", finish.contains("val merged = mergedParts()"))
+        val emptyAt = finish.indexOf("merged.isEmpty()")
         val degradedAt = finish.indexOf("degraded != null && degraded == error")
         assertTrue("锚点丢失：finish 没截到降级分支", degradedAt >= 0)
-        assertTrue("无产物必须仍走失败呈现（parts.isEmpty 分支排在降级分支之前）", emptyAt in 0 until degradedAt)
+        assertTrue("无产物必须仍走失败呈现（空段失败分支排在降级分支之前）", emptyAt in 0 until degradedAt)
         // RecordResult 轻量字段：默认 null，其它路径行为不变
         assertTrue(
             "RecordResult 必须有 degradedCode 字段且默认 null（旧构造点行为逐字不变）",

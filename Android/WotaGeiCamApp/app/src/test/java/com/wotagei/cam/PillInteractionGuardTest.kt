@@ -132,6 +132,52 @@ class PillInteractionGuardTest {
         return bad
     }
 
+    /**
+     * 等号档「微调自动」开关（`WotaSwitch`）必须与同一弹窗的滑杆/AE 行**共用 editable 门禁**。
+     * 空 = 干净。
+     *
+     * 只补 `enabled = editable` 只挡住手点：回执仍在 ⇒ 无障碍/合成点击（`performClick`）照样
+     * 能把 `exposureCorrectionAuto` 写进总线并 `onPersist()` 落盘——只读态“看得见改不了”的语义
+     * 要两层一起断（点不动 + 写不进），这与同弹窗滑杆 `enabled = editable` 是同一条线。
+     */
+    private fun shutterCorrectionSwitchIssues(src: String): List<String> {
+        val body = runCatching { bodyOf(src, "ShutterPill") }.getOrNull()
+            ?: return listOf("定位不到 ShutterPill 的体——守卫失去输入，不许算通过")
+        val flat = flatten(body)
+        val calls = occurrences(flat, "WotaSwitch(")
+        if (calls.isEmpty()) return listOf("ShutterPill 里找不到等号档微调自动开关（WotaSwitch 调用消失）")
+        val bad = ArrayList<String>()
+        calls.forEach { at ->
+            val args = parenBody(flat, at + "WotaSwitch".length)?.let(::flatten)
+            if (args == null || occurrences(args, "enabled = editable").isEmpty()) {
+                bad.add("等号档开关没有吃 editable：只读态（录制中）仍可点")
+            }
+            if (args == null || occurrences(args, "onCheckedChange = if (editable)").isEmpty()) {
+                bad.add("等号档开关的回执没走 editable 门禁：只读态仍会写总线并落盘")
+            }
+            if (args != null && occurrences(args, "else null").isEmpty()) {
+                bad.add("等号档开关缺 else null 分支：只读态留下了可触发的回执")
+            }
+        }
+        return bad
+    }
+
+    /** `openParenAt` 处起配对的整段实参（flatten 后括号仍成对；配不上返回 null） */
+    private fun parenBody(text: String, openParenAt: Int): String? {
+        if (openParenAt >= text.length || text[openParenAt] != '(') return null
+        var depth = 0
+        for (i in openParenAt until text.length) {
+            when (text[i]) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return text.substring(openParenAt + 1, i)
+                }
+            }
+        }
+        return null
+    }
+
     @Test
     fun `读数与镜头点按长按都开弹窗`() {        assertEquals("HudLayer 点按接线断点：\n${hudTapIssues(hud).joinToString("\n")}", emptyList<String>(), hudTapIssues(hud))
     }
@@ -254,6 +300,32 @@ class PillInteractionGuardTest {
         assertTrue(
             "CameraScreen 必须把录制态装进 rememberUpdatedState",
             screen.contains("val recordingNow by rememberUpdatedState(recording)")
+        )
+    }
+
+    @Test
+    fun `等号档微调自动开关与滑杆共用只读门禁`() {
+        assertEquals(
+            "等号档开关门禁缺口：\n${shutterCorrectionSwitchIssues(pills).joinToString("\n")}",
+            emptyList<String>(),
+            shutterCorrectionSwitchIssues(pills)
+        )
+    }
+
+    @Test
+    fun `尺子自己能红_等号档开关退回可写必红`() {
+        assertTrue("真身必须绿", shutterCorrectionSwitchIssues(pills).isEmpty())
+        // 突变 1：回执退回无门禁（只读态仍能写总线/落盘）
+        assertTrue(
+            "回执退回无门禁必须红",
+            shutterCorrectionSwitchIssues(pills.replace("onCheckedChange = if (editable)", "onCheckedChange ="))
+                .any { it.contains("回执") }
+        )
+        // 突变 2：enabled 退回常量（只读态仍可点）
+        assertTrue(
+            "开关退回可点必须红",
+            shutterCorrectionSwitchIssues(pills.replace("enabled = editable", "enabled = true"))
+                .any { it.contains("仍可点") }
         )
     }
 

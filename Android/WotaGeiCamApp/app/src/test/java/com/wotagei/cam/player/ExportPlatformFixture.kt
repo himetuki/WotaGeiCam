@@ -25,8 +25,17 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         "com.wotagei.cam.player.SceneExportRunner", "com.wotagei.cam.player.ClipExportKt",
         "com.wotagei.cam.player.RemuxOrientationKt", "com.wotagei.cam.media.VideoClip",
         "com.wotagei.cam.record.OrientationExportKt", "com.wotagei.cam.record.ArcRepairSession",
-        "com.wotagei.cam.record.ArcFail"
-    ) + if (realGl) setOf("com.wotagei.cam.player.SceneExportGl", "com.wotagei.cam.record.ArcRepairGl") else emptySet()
+        "com.wotagei.cam.record.ArcFail",
+        // 导出器、任务所有者和音频车道共用同一套 Android 边界桩。
+        "com.wotagei.cam.player.ClipExporter", "com.wotagei.cam.player.TrackExporter",
+        "com.wotagei.cam.player.RemuxOwner", "com.wotagei.cam.player.RemuxOwnerKt",
+        "com.wotagei.cam.player.RemuxWait", "com.wotagei.cam.player.ExportTerminal",
+        "com.wotagei.cam.player.SceneAudioLane", "com.wotagei.cam.record.MediaIdsKt"
+    ) + if (realGl) setOf(
+        "com.wotagei.cam.player.SceneExportGl",
+        "com.wotagei.cam.record.ArcRepairGl",
+        "com.wotagei.cam.camera.OfflineGlWorker"
+    ) else emptySet()
     private val loader = object : URLClassLoader(arrayOf(classes.toURI().toURL()), parent) {
         override fun loadClass(name: String, resolve: Boolean): Class<*> = synchronized(this) {
             val loaded = findLoadedClass(name) ?: when {
@@ -43,6 +52,8 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
             loaded
         }
     }
+
+    private val glInstances = mutableListOf<Any>()
 
     fun type(name: String): Class<*> = loader.loadClass(name)
     fun new(name: String): Any = type(name).getDeclaredConstructor().newInstance()
@@ -78,18 +89,122 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
     suspend fun export(
         runner: Any, durationMs: Long = 3_000, startMs: Long = 0, endMs: Long = 2_000,
         track: SelectedTrack = SelectedTrack.ENV, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
         onProgress: (Float) -> Unit = {}
     ): Any = suspendCoroutine { continuation ->
         try {
             val result = call(runner, "export", clip(durationMs), startMs, endMs, track, offsetMs,
-                SceneExportEffects(null, true), onProgress, continuation)
+                SceneExportEffects(null, true), onLateOutcome, onProgress, continuation)
             if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
         } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    /** 构造隔离 loader 里的真实 [ClipExporter]（与 Runner 同一套 android.* 桩）。 */
+    fun clipExporter(): Any = newWithContext("com.wotagei.cam.player.ClipExporter")
+
+    /** 构造隔离 loader 里的真实 [TrackExporter]。 */
+    fun trackExporter(): Any = newWithContext("com.wotagei.cam.player.TrackExporter")
+
+    private fun newWithContext(name: String): Any {
+        val context = new("android.content.Context")
+        return type(name).getConstructor(context.javaClass).newInstance(context)
+    }
+
+    suspend fun clipExport(
+        exporter: Any, durationMs: Long = 3_000, startMs: Long = 0, endMs: Long = 2_000,
+        track: SelectedTrack = SelectedTrack.ENV, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
+        onProgress: (Float) -> Unit = {}
+    ): Any = suspendCoroutine { continuation ->
+        try {
+            val result = call(exporter, "export", clip(durationMs), startMs, endMs, track, offsetMs,
+                onLateOutcome, onProgress, continuation)
+            if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
+        } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    suspend fun trackExport(
+        exporter: Any, durationMs: Long = 3_000,
+        track: SelectedTrack = SelectedTrack.CAP, offsetMs: Long = 0,
+        onLateOutcome: (Any?) -> Unit = {},
+        onProgress: (Float) -> Unit = {}
+    ): Any = suspendCoroutine { continuation ->
+        try {
+            val result = call(exporter, "export", clip(durationMs), track, offsetMs,
+                onLateOutcome, onProgress, continuation)
+            if (result !== COROUTINE_SUSPENDED) continuation.resume(result!!)
+        } catch (e: Throwable) { continuation.resumeWithException(e) }
+    }
+
+    /** 构造隔离 loader 里的 Uri（与生产日志/验票同一套 android 桩：parseId 固定 42）。 */
+    fun uri(value: String): Any =
+        type("android.net.Uri").getConstructor(String::class.java).newInstance(value)
+
+    /**
+     * 真实 `deletePendingRowVerified`（RemuxOwnerKt 顶层函数）：删失败重试一次、两次未生效留痕。
+     * 只跑失败回收这一段，不替生产决定何时删行。
+     */
+    fun deletePendingRowVerified(ctx: Any, uri: Any, tag: String): Boolean {
+        val method = type("com.wotagei.cam.player.RemuxOwnerKt").declaredMethods
+            .single { it.name == "deletePendingRowVerified" && it.parameterCount == 3 }
+        method.isAccessible = true
+        return invoke { method.invoke(null, ctx, uri, tag) as Boolean }
+    }
+
+    /** 关闭并等某生产类的单 owner 执行器真正退出（每个隔离 loader 各有一份静态执行器）。 */
+    fun shutdownOwner(typeName: String, timeoutMs: Long): Boolean {
+        val executor = ownerExecutorOf(typeName)
+        executor.shutdown()
+        return executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    /** 等某生产类的单 owner 执行器空闲（activeCount 归 0 = 上一 owner 已收口、资源已归还）。 */
+    fun awaitOwnerIdle(typeName: String, timeoutMs: Long): Boolean {
+        val executor = ownerExecutorOf(typeName)
+        val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < end) {
+            if (executor.activeCount == 0) return true
+            Thread.sleep(10L)
+        }
+        return executor.activeCount == 0
+    }
+
+    private fun ownerExecutorOf(typeName: String): ThreadPoolExecutor {
+        val owner = type(typeName)
+        val onOuter = runCatching { owner.getDeclaredField("EXPORT_OWNER_EXECUTOR") }.getOrNull()
+        val field = onOuter ?: type("$typeName\$Companion").getDeclaredField("EXPORT_OWNER_EXECUTOR")
+        field.isAccessible = true
+        val target = if (onOuter != null) null else owner.getField("Companion").get(null)
+        return field.get(target) as ThreadPoolExecutor
+    }
+
+    /** 隔离 loader 里的真实音频车道（Y30）：构造后由调用方 arm/drain。 */
+    fun lane(ex: Any, audioIdx: Int, muxer: Any, baseUs: Long, shiftUs: Long, endUs: Long): Any =
+        type("com.wotagei.cam.player.SceneAudioLane").getDeclaredConstructor(
+            type("android.media.MediaExtractor"), Int::class.javaPrimitiveType,
+            type("android.media.MediaMuxer"), Long::class.javaPrimitiveType,
+            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+            kotlinx.coroutines.Job::class.java
+        ).newInstance(ex, audioIdx, muxer, baseUs, shiftUs, endUs, kotlinx.coroutines.Job())
+
+    /** 独立 muxer（addTrack 后 start），供车道单测使用。 */
+    fun muxer(): Any = type("android.media.MediaMuxer").getConstructor(
+        java.io.FileDescriptor::class.java, Int::class.javaPrimitiveType
+    ).newInstance(java.io.FileDescriptor(), 0)
+
+    /** 生产纯函数 sceneExportAudioSeekUs：车道入点与预扫共用同一枚反推公式。 */
+    fun audioSeekUs(baseUs: Long, shiftUs: Long): Long {
+        val method = type("com.wotagei.cam.player.SceneExportPlanKt")
+            .declaredMethods.single { it.name == "sceneExportAudioSeekUs" }
+        method.isAccessible = true
+        return invoke {
+            method.invoke(null, baseUs, shiftUs) as Long
+        }
     }
     fun writable(extractor: Any, baseUs: Long, shiftUs: Long, endRelUs: Long, trackIndex: Int = 2): Boolean {
         val method = type("com.wotagei.cam.player.ClipExportKt").declaredMethods.single { it.name == "audioTrackWritable" }
         method.isAccessible = true
-        return invoke { method.invoke(null, extractor, trackIndex, baseUs, shiftUs, endRelUs, 8) as Boolean }
+        return invoke { method.invoke(null, extractor, trackIndex, baseUs, shiftUs, endRelUs, 8, baseUs) as Boolean }
     }
     fun gl(scene: Boolean, basePtsNs: Long = 0L): Any {
         val instance = if (scene) {
@@ -101,6 +216,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Long::class.javaPrimitiveType, Int::class.javaPrimitiveType
             ).newInstance(640, 480, basePtsNs, 0)
         }
+        glInstances += instance
         set(instance, "eglDisplay", new("android.opengl.EGLDisplay"))
         set(instance, "eglContext", new("android.opengl.EGLContext"))
         set(instance, if (scene) "encoderSurface" else "encoderEglSurface", new("android.opengl.EGLSurface"))
@@ -111,9 +227,10 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         // 真实构造只初始化会话数据；不调 run/open，不进行 native/输出装配。
         // 即使旧代码错误地计成功，也有合法回调，不能用未初始化字段的 NPE 冒充行为 RED。
         val uri = type("android.net.Uri").getConstructor(String::class.java).newInstance("content://source/1")
-        return type("com.wotagei.cam.record.ArcRepairSession").declaredConstructors.single { it.parameterCount == 8 }
+        // 准备期的截止时间也从投递起算；夹具使用与平台桩一致的起始时间。
+        return type("com.wotagei.cam.record.ArcRepairSession").declaredConstructors.single { it.parameterCount == 9 }
             .apply { isAccessible = true }
-            .newInstance(new("android.content.Context"), uri, true, 24, 0, 0, onProgress, { false })
+            .newInstance(new("android.content.Context"), uri, true, 24, 0, 0, 0L, onProgress, { false })
             .also { set(it, "arcGl", gl) }
     }
     /**
@@ -132,18 +249,30 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
         return executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
-    override fun close() = loader.close()
+    override fun close() {
+        try {
+            val noop: () -> Unit = {}
+            for (gl in glInstances) {
+                call(gl, "release", noop, noop)
+                val worker = requireNotNull(field(gl, "worker"))
+                val owner = call(worker, "getThread") as Thread
+                check(!owner.isAlive) { "离线 GL 测试未释放线程 ${owner.name}" }
+            }
+        } finally {
+            loader.close()
+        }
+    }
 
     companion object {
         fun compile(root: File): File {
             val classes = File(root, "classes").apply { mkdirs() }
             val files = SOURCES.map { (name, source) ->
-                File(root, name.replace('.', '/') + ".java").apply { parentFile.mkdirs(); writeText(source.trimIndent()) }
+                File(root, name.replace('.', '/') + ".java").apply { requireNotNull(parentFile).mkdirs(); writeText(source.trimIndent()) }
             }
             val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
             assertNotNull("需要工程现有 JDK；平台桩编译失败不算有效 RED", compiler)
             val classpath = listOf(SceneExportEffects::class.java, kotlin.Unit::class.java).map {
-                File(it.protectionDomain.codeSource.location.toURI()).absolutePath
+                File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath
             }.distinct().joinToString(File.pathSeparator)
             val options = listOf("-proc:none", "-encoding", "UTF-8", "-classpath", classpath, "-d", classes.absolutePath)
             val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java,
@@ -240,6 +369,8 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static final java.util.List<String> events = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
                     public static final java.util.List<Long> audioWritten = new java.util.ArrayList<>();
                     public static final java.util.List<Integer> audioTracks = new java.util.ArrayList<>();
+                    public static final java.util.List<Integer> audioReads = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+                    public static final java.util.List<Long> videoWritten = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
                     public static final java.util.List<Long> renderedSource = new java.util.ArrayList<>();
                     public static final java.util.List<Long> renderedPts = new java.util.ArrayList<>();
                     public static long[] videoPts = {0, 100000, 200000, 300000, 400000};
@@ -248,12 +379,20 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static int audioCount = 2, reorderDepth = 0, reads = 0, decoded = 0;
                     public static int decoderEos = 0, encoderEos = 0, awaits = 0, acquiredOnly = 0;
                     public static int commitResult = 1, commitCalls = 0, stampMode = 1, swapCalls = 0, stampCalls = 0;
+                    public static int glErrorCount = 0, glErrorCalls = 0;
                     public static int[] commitResults;
+                    public static int deleteCalls = 0;
+                    public static int[] deleteResults;
+                    public static long sampleSizeOverride = 0L;
                     public static boolean renderOk = true, swapOk = true, stopThrows = false;
+                    public static boolean stopThrowsError = false;
+                    public static boolean selectThrows = false;
+                    public static String rowData;
+                    public static int rowQueries = 0;
                     public static boolean glThreadAlive;
                     public static Thread glThread = new Thread();
                     public static int[] decoderReadyAfterInputs;
-                    public static Runnable afterAudioWrite, beforeAudioEof, afterStop, afterDecoded;
+                    public static Runnable afterAudioWrite, beforeAudioEof, afterStop, afterDecoded, afterVideoWrite;
                     public static long currentSource, clockStepMs, clockMs;
                     public static void add(String e) { events.add(e); }
                 }
@@ -283,6 +422,26 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
             "android.content.ContentUris" to """
                 package android.content;
                 public class ContentUris { public static long parseId(android.net.Uri uri) { return 42L; } }
+            """,
+            "android.database.Cursor" to """
+                package android.database;
+                public interface Cursor extends java.io.Closeable {
+                    boolean moveToFirst();
+                    boolean isNull(int columnIndex);
+                    String getString(int columnIndex);
+                    void close();
+                }
+            """,
+            "android.database.MatrixCursor" to """
+                package android.database;
+                public class MatrixCursor implements Cursor {
+                    private final String value;
+                    public MatrixCursor(String value) { this.value = value; }
+                    public boolean moveToFirst() { return true; }
+                    public boolean isNull(int columnIndex) { return value == null; }
+                    public String getString(int columnIndex) { return value; }
+                    public void close() {}
+                }
             """,
             "android.content.ContentResolver" to """
                 package android.content;
@@ -315,14 +474,24 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         if (result < 0) throw new IllegalStateException("provider busy");
                         return result;
                     }
+                    public android.database.Cursor query(android.net.Uri uri, String[] projection, String selection, String[] args, String sortOrder) {
+                        probe.ExportScript.rowQueries++;
+                        probe.ExportScript.add("row.query");
+                        String data=probe.ExportScript.rowData;
+                        return data==null ? null : new android.database.MatrixCursor(data);
+                    }
                     public int delete(android.net.Uri uri, String selection, String[] args) {
+                        int call=++probe.ExportScript.deleteCalls;
                         probe.ExportScript.add("pending.delete");
                         probe.ExportBlocking.note("delete.enter",uri.toString());
                         probe.ExportBlocking.note("pending.delete",uri.toString());
                         probe.ExportBlocking.pause("delete");
                         probe.ExportBlocking.release("pending",uri.toString());
                         probe.ExportBlocking.didReturn("delete",uri.toString());
-                        return 1;
+                        int[] results=probe.ExportScript.deleteResults;
+                        int result=results==null ? 1 : results[Math.min(call-1,results.length-1)];
+                        if (result < 0) throw new IllegalStateException("delete busy");
+                        return result;
                     }
                 }
             """,
@@ -344,7 +513,7 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 package android.provider;
                 public class MediaStore {
                     public static class MediaColumns {
-                        public static final String DISPLAY_NAME="_display_name", MIME_TYPE="mime_type", RELATIVE_PATH="relative_path", IS_PENDING="is_pending";
+                        public static final String DISPLAY_NAME="_display_name", MIME_TYPE="mime_type", RELATIVE_PATH="relative_path", IS_PENDING="is_pending", DATA="_data";
                     }
                     public static class Video { public static class Media extends MediaColumns {
                         public static final android.net.Uri EXTERNAL_CONTENT_URI = new android.net.Uri("content://video");
@@ -407,7 +576,10 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         if(track>0) { f.setInteger("sample-rate",48000); f.setInteger("channel-count",2); }
                         return f;
                     }
-                    public void selectTrack(int track) { selected.add(track); probe.ExportScript.add("select:"+track); }
+                    public void selectTrack(int track) {
+                        if(probe.ExportScript.selectThrows) throw new IllegalStateException("injected select failure");
+                        selected.add(track); probe.ExportScript.add("select:"+track);
+                    }
                     public void unselectTrack(int track) { selected.remove(track); probe.ExportScript.add("unselect:"+track); }
                     public void seekTo(long time,int mode) {
                         for(int track:selected) {
@@ -426,11 +598,19 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     }
                     public int getSampleTrackIndex() { return currentTrack(); }
                     public long getSampleTime() { int t=currentTrack(); return t<0 ? -1L : (t==0 ? probe.ExportScript.videoPts : probe.ExportScript.audioPts)[positions[t]]; }
-                    public long getSampleSize() { return currentTrack()<0 ? -1L : 8L; }
+                    public long getSampleSize() {
+                        int t=currentTrack();
+                        if(t<0) return -1L;
+                        // Y30 超限样本注入对音轨（车道 4MiB 上限）与视频轨（重封链 32MiB 上限）同口径
+                        if(probe.ExportScript.sampleSizeOverride>0) return probe.ExportScript.sampleSizeOverride;
+                        return 8L;
+                    }
                     public int getSampleFlags() { return currentTrack()==0 && probe.ExportScript.videoSync[positions[0]] ? 1:0; }
                     public int readSampleData(java.nio.ByteBuffer b,int offset) {
                         int t=currentTrack(); if(t<0) return -1;
-                        b.putInt(offset,positions[t]); b.putInt(offset+4,t); if(t==0) probe.ExportScript.reads++; return 8;
+                        b.putInt(offset,positions[t]); b.putInt(offset+4,t); if(t==0) probe.ExportScript.reads++;
+                        else probe.ExportScript.audioReads.add(positions[t]);
+                        return 8;
                     }
                     public boolean advance() {
                         int t=currentTrack(); if(t<0)return false; positions[t]++;
@@ -540,10 +720,15 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         if(tracks.get(track).startsWith("audio/")) {
                             probe.ExportScript.audioWritten.add(info.presentationTimeUs);probe.ExportScript.audioTracks.add(b.getInt(info.offset+4));
                             probe.ExportScript.add("audio.write"); if(probe.ExportScript.afterAudioWrite!=null) probe.ExportScript.afterAudioWrite.run();
+                        } else {
+                            probe.ExportScript.videoWritten.add(info.presentationTimeUs);probe.ExportScript.add("video.write");
+                            if(probe.ExportScript.afterVideoWrite!=null) probe.ExportScript.afterVideoWrite.run();
                         }
                     }
                     public void stop() {
-                        probe.ExportScript.add("muxer.stop"); if(probe.ExportScript.stopThrows) throw new IllegalStateException("unsealed");
+                        probe.ExportScript.add("muxer.stop");
+                        if(probe.ExportScript.stopThrows) throw new IllegalStateException("unsealed");
+                        if(probe.ExportScript.stopThrowsError) throw new OutOfMemoryError("injected owner death");
                         if(probe.ExportScript.afterStop!=null)probe.ExportScript.afterStop.run();
                     }
                     public void release() {
@@ -571,23 +756,60 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                         return true;
                     }
                     public boolean acquireOnly(){probe.ExportScript.acquiredOnly++;return true;}
-                    public void release(){probe.ExportScript.add("gl.release");probe.ExportBlocking.release("gl",traceId);}
+                    public void release(kotlin.jvm.functions.Function0<kotlin.Unit> stopDecoder,
+                            kotlin.jvm.functions.Function0<kotlin.Unit> releaseEncoder){
+                        stopDecoder.invoke();
+                        probe.ExportScript.add("gl.release");probe.ExportBlocking.release("gl",traceId);
+                        releaseEncoder.invoke();
+                    }
                     public boolean glThreadAlive(){return probe.ExportScript.glThreadAlive;}
                     public Thread exportThread(){return probe.ExportScript.glThread;}
                 }
             """,
             "android.view.Surface" to "package android.view; public class Surface { public void release(){} }",
-            "android.os.Looper" to "package android.os; public class Looper {}",
+            "android.os.Looper" to """
+                package android.os;
+                public class Looper {
+                    private final java.util.ArrayDeque<Runnable> queue=new java.util.ArrayDeque<>();
+                    private boolean quitting;
+                    synchronized boolean post(Runnable task){
+                        if(quitting)return false;
+                        queue.addLast(task);notifyAll();return true;
+                    }
+                    synchronized void remove(Runnable task){queue.remove(task);}
+                    synchronized void quit(){quitting=true;notifyAll();}
+                    synchronized Runnable take() throws InterruptedException {
+                        while(queue.isEmpty()&&!quitting)wait();
+                        return queue.pollFirst();
+                    }
+                }
+            """,
             "android.os.HandlerThread" to """
                 package android.os;
                 public class HandlerThread extends Thread {
-                    private final Looper looper=new Looper(); public HandlerThread(String name){super(name);}
-                    public Looper getLooper(){return looper;} public boolean quitSafely(){return true;}
+                    private final Looper looper=new Looper(); public HandlerThread(String name){super(name);setDaemon(true);}
+                    private final java.util.concurrent.CountDownLatch dispatchExit=new java.util.concurrent.CountDownLatch(1);
+                    public Looper getLooper(){return looper;} public boolean quitSafely(){looper.quit();return true;}
+                    public boolean awaitDispatchExit() throws InterruptedException {
+                        return dispatchExit.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                    }
+                    @Override public void run(){
+                        try {
+                            Runnable task;
+                            while((task=looper.take())!=null)task.run();
+                        } catch(InterruptedException e){Thread.currentThread().interrupt();}
+                        finally {dispatchExit.countDown();}
+                    }
                 }
             """,
             "android.os.Handler" to """
                 package android.os;
-                public class Handler { public Handler(Looper l){} public boolean post(Runnable r){r.run();return true;} }
+                public class Handler {
+                    private final Looper looper;
+                    public Handler(Looper l){looper=l;}
+                    public boolean post(Runnable task){return looper.post(task);}
+                    public void removeCallbacks(Runnable task){looper.remove(task);}
+                }
             """,
             "android.graphics.SurfaceTexture" to """
                 package android.graphics;
@@ -613,6 +835,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static final EGLContext EGL_NO_CONTEXT=new EGLContext();
                     public static final EGLSurface EGL_NO_SURFACE=new EGLSurface();
                     public static boolean eglMakeCurrent(EGLDisplay d,EGLSurface a,EGLSurface b,EGLContext c){return true;}
+                    public static boolean eglDestroySurface(EGLDisplay d,EGLSurface s){return true;}
+                    public static boolean eglDestroyContext(EGLDisplay d,EGLContext c){return true;}
+                    public static boolean eglTerminate(EGLDisplay d){return true;}
                     public static boolean eglSwapBuffers(EGLDisplay d,EGLSurface s){probe.ExportScript.swapCalls++;probe.ExportScript.add("egl.swap");return probe.ExportScript.swapOk;}
                     public static int eglGetError(){return 0;}
                 }
@@ -631,6 +856,9 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                 package android.opengl;
                 public class GLES20 {
                     public static void glBindFramebuffer(int target,int framebuffer){}
+                    public static void glDeleteProgram(int program){}
+                    public static void glDeleteFramebuffers(int count,int[] names,int offset){}
+                    public static void glDeleteTextures(int count,int[] names,int offset){}
                     public static void glViewport(int x,int y,int w,int h){}
                     public static void glUseProgram(int p){}
                     public static void glActiveTexture(int u){}
@@ -644,7 +872,13 @@ internal class ExportPlatformFixture(classes: File, parent: ClassLoader, realGl:
                     public static void glVertexAttribPointer(int a,int n,int type,boolean norm,int stride,java.nio.Buffer b){}
                     public static void glDrawArrays(int mode,int first,int count){}
                     public static void glDisableVertexAttribArray(int a){}
-                    public static int glGetError(){return 0;}
+                    public static int glGetError(){
+                        if(probe.ExportScript.glErrorCalls<probe.ExportScript.glErrorCount){
+                            probe.ExportScript.glErrorCalls++;
+                            return 0x0500;
+                        }
+                        return 0;
+                    }
                 }
             """
         )

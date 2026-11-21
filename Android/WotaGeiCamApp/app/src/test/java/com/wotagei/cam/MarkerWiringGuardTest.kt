@@ -36,7 +36,11 @@ class MarkerWiringGuardTest {
     private fun colorPopBody(): String {
         val i = screen.indexOf("if (markerColorPop) {")
         assertTrue("选色弹窗必须在场", i >= 0)
-        return screen.substring(i, minOf(i + 1600, screen.length))
+        // 用下一段稳定代码作右界：早先写死 +1600 字符，Y55 给选色窗加注释后
+        // “MarkerLineColor.ALL.forEach” 被挤出窗口，守卫假红。
+        val j = screen.indexOf("FrostProbeOverlay(", i + 1)
+        assertTrue("选色窗之后必须仍有 HUD 叠层段（右界锚点）", j > i)
+        return screen.substring(i, j)
     }
 
     @Test

@@ -5,6 +5,7 @@
 package com.wotagei.cam.player
 
 import android.graphics.Color
+import android.net.Uri
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -44,10 +45,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteForever
@@ -86,7 +87,9 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -104,14 +107,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -126,9 +133,9 @@ import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.rememberMediaOps
 import com.wotagei.cam.media.rememberMediaRepo
-import com.wotagei.cam.record.ArcRepairError
-import com.wotagei.cam.record.ArcRepairRunner
-import com.wotagei.cam.record.ArcRepairStatus
+import com.wotagei.cam.record.ArcRepairResult
+import com.wotagei.cam.record.ArcResultKind
+import com.wotagei.cam.record.arcResultKind
 import com.wotagei.cam.ui.ParamsPersistSession
 import com.wotagei.cam.ui.WotaSettings
 import com.wotagei.cam.ui.findActivity
@@ -320,7 +327,10 @@ fun WotaPlayerSurface(
             engine.bind(view)
             view
         },
-        update = { view -> engine.bind(view) }
+        update = { view -> engine.bind(view) },
+        // B08：Pager 换页/离屏时会释放旧 AndroidView。必须 unbind，否则引擎的 boundViews
+        // 一直握着已脱离组合的视图（及其 Surface），下次 build() 回推还会找到它。
+        onRelease = { view -> engine.unbind(view) }
     )
 }
 
@@ -335,20 +345,30 @@ internal fun nextCcwQuarter(q: Int): Int = ((q % 4) + 3) % 4
 /** clipById 查询尚未回包的哨兵（collectState 的 initial）：与"查过且没有"（收到 null）区分开 */
 private object ClipQueryPending
 
-/** 路由版：/player/{mediaId} —— UI 层只需传 id */
+/**
+ * 路由版：/player/{mediaId}?row={row} —— UI 层传 id + **真实行 URI**。
+ *
+ * 行 URI 优先（Y27）：按具体卷钉行加载（[com.wotagei.cam.media.MediaRepo.clipByRowUri]），
+ * 回收站里同号的另一卷活片不可能被顶上来。没有行 URI 的历史裸 ID 深链仍走
+ * [com.wotagei.cam.media.MediaRepo.clipById]（唯一命中；多行命中即按查无此片关死）。
+ * 行 URI 形状不合法（旧聚合别名等）时同样落到「片已不在」空态，**不退回裸 id** 猜。
+ */
 @Composable
 fun PlayerScreen(
     mediaId: Long,
+    rowUri: Uri?,
     onBack: () -> Unit,
-    onCompare: (Long) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     repo: com.wotagei.cam.media.MediaRepo = rememberMediaRepo(),
     ops: MediaOps = rememberMediaOps(),
     onPlaybackStarted: () -> Unit = {}
 ) {
-    // 契约：clipById 对"查过且没有"（片被外部删掉/回收站清掉）会发射一次 null（MediaRepo.clipById
-    // 专用管道直接 emit 可空结果，不走吞 null 的 gated）。首次发射（片在 → VideoClip、片没了 → null）
-    // 顶掉哨兵：借它区分"还在查"与"片已消失"，后者必须给空态出口，不许停在转圈；也不许自动返回/自动重试
-    val state by repo.clipById(mediaId).collectState(ClipQueryPending)
+    // 契约：clipById / clipByRowUri 对"查过且没有"（片被外部删掉/回收站清掉）会发射一次 null
+    // （MediaRepo 专用管道直接 emit 可空结果，不走吞 null 的 gated）。首次发射（片在 → VideoClip、
+    // 片没了 → null）顶掉哨兵：借它区分"还在查"与"片已消失"，后者必须给空态出口，不许停在转圈；
+    // 也不许自动返回/自动重试
+    val state by (if (rowUri != null) repo.clipByRowUri(rowUri) else repo.clipById(mediaId))
+        .collectState(ClipQueryPending)
     val c = state as? VideoClip
     when {
         state === ClipQueryPending -> {
@@ -385,7 +405,7 @@ fun PlayerScreen(
 fun PlayerScreen(
     clip: VideoClip,
     onBack: () -> Unit,
-    onCompare: (Long) -> Unit,
+    onCompare: (VideoClip) -> Unit,
     ops: MediaOps = rememberMediaOps(),
     onPlaybackStarted: () -> Unit = {}
 ) {
@@ -394,10 +414,20 @@ fun PlayerScreen(
 
     // 光弧修复后台执行器（用户需求第 7 项）：Context 取 applicationContext，避免把 Activity 钉在
     // 一条可能跑几十秒的后台线程上。**只由按钮触发**，这里没有任何自动启动。
+    // Y23：任务所有者迁到 [ArcRepairHost]（Activity 作用域，跨退页/配置重建存活）。旧实现把
+    // runner 挂在本页 remember 上：退页后状态与终态整份消失，重进页面还会另起一条 runner 与
+    // 在跑的任务并行。页面只按 `(来源 URI, 代数)` 展示/取消/确认，不再持有任务本身。
     val app = LocalContext.current.applicationContext
-    val arcRunner = remember(app) { ArcRepairRunner(app) }
-    val arcStatus by arcRunner.status.collectState(ArcRepairStatus.IDLE)
-    val arcProgress by arcRunner.progress.collectState(0f)
+    val arcContext = LocalContext.current
+    val arcActivity = remember(arcContext) { arcContext.findActivity() }
+    val arcOwner = (arcActivity as? ViewModelStoreOwner) ?: LocalViewModelStoreOwner.current
+    val arcHost = remember(arcOwner) {
+        ArcRepairHost.of(checkNotNull(arcOwner) { "PlayerScreen 需要可用的 ViewModelStoreOwner" })
+    }
+    val arcState by arcHost.state.collectAsStateWithLifecycle()
+    val arcSourceUri = clip.uri.toString()
+    // 只有本片在跑时才把入口标成"在忙"、把进度画到本片上；别的片在跑时入口仍可点，点了给忙提示
+    val arcRun = arcState.runningFor(arcSourceUri)
     var arcMenu by remember { mutableStateOf(false) }
     var arcAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     // 抽帧目标帧率：产品口径 = 强制档两枚（24/25），默认 24；源实测帧率由管线自己量（容器会撒谎）
@@ -411,13 +441,6 @@ fun PlayerScreen(
         WotaParams(CoroutineScope(Dispatchers.Unconfined)).also { WotaSettings.applyDefaults(prefs, it) }
     }
     val arcPersist = remember(prefs, arcParams) { ParamsPersistSession(prefs, arcParams) }
-    // 退出页面：把 HandlerThread 收干净，但**正在跑的任务不掐**——shutdown() 会把 cancelRequested
-    // 置真并等 3s 收尾，等于丢掉用户已经发起的修复。shutdownAfterTask() 只登记"任务结束后退线程"：
-    // 空闲立即退，忙碌则由 start 任务末尾自行 quitSafely。旧实现在 RUNNING 时直接跳过 shutdown()，
-    // 任务结束后再无 quit 调用 ⇒ 每次"运行中离开播放页"都永久多一条 WotaArcRepair 线程。
-    DisposableEffect(arcRunner) {
-        onDispose { arcRunner.shutdownAfterTask() }
-    }
 
     val pos by engine.positionMs.collectState(0L)
     val dur by engine.durationMs.collectState(clip.durationMs)
@@ -443,7 +466,7 @@ fun PlayerScreen(
     var topBarCollapsed by remember { mutableStateOf(WotaSettings.playerTopBarCollapsed(prefs)) }
     val chrome = playerChromeOf(controlsVisible, topBarCollapsed)
     var banner by remember { mutableStateOf<Int?>(null) }
-    val zoom = remember { mutableStateOf(1f) }
+    val zoom = remember { mutableFloatStateOf(1f) }
     // 双指平移（2026-10-04）：与缩放同一手势，域由 pinchZoom 内 clampPan 夹住，捏回 1x 自动归零
     val pan = remember { mutableStateOf(Offset.Zero) }
     var dragFrac by remember { mutableStateOf<Float?>(null) }
@@ -465,8 +488,19 @@ fun PlayerScreen(
         if (hostActivity is androidx.lifecycle.ViewModelStoreOwner) ExportHost.of(hostActivity)
         else ExportHost.of(checkNotNull(storeOwner) { "PlayerScreen 需要可用的 ViewModelStoreOwner" })
     }
-    val exportState by exportHost.state.collectState(ExportUiState())
-    var clipMenu by remember { mutableStateOf(false) }
+    val exportState by exportHost.state.collectAsStateWithLifecycle()
+    val sourceUri = clip.uri.toString()
+    var exportMenu by remember(sourceUri) { mutableStateOf<ExportKind?>(null) }
+    var lastAutoOpened by remember(sourceUri) { mutableLongStateOf(0L) }
+    val latestExport = exportState.latestFor(sourceUri)
+    LaunchedEffect(latestExport) {
+        // 只因新任务打开一次。用户收起或另一条任务先结束时，旧窗不会再抢焦点。
+        if (latestExport != null && latestExport.taskId > lastAutoOpened) {
+            lastAutoOpened = latestExport.taskId
+            exportMenu = latestExport.kind
+        }
+    }
+    val clipMenu = exportMenu == ExportKind.CLIP
     // 导出方式：0 = 无损重封（既有）、1 = 后渲染（重编码）
     var clipMode by remember { mutableIntStateOf(0) }
     // 导出效果配置（2026-10-29 用户需求：后渲染导出必须有配置界面，不能直接开渲）：
@@ -483,7 +517,10 @@ fun PlayerScreen(
         mutableStateOf(decodeEcho(prefs.getString(WotaSettings.KEY_ECHO, null)).sanitize())
     }
     val sceneEffects = remember(clipGlow, clipDenoise, clipEcho) { sceneExportEffectsOf(clipGlow, clipDenoise, clipEcho) }
-    var clipAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var clipAnchor by remember(sourceUri) { mutableStateOf(IntRect.Zero) }
+    val clipExport = exportState.clip
+    val trackExport = exportState.track
+    var trackProgressAnchor by remember(sourceUri, trackExport?.request?.taskId) { mutableStateOf(IntRect.Zero) }
     // 剪辑导出的音轨选择（2026-10-18 用户定版）：只导**用户选中的那一条**，默认环境音；
     // 不再"只认第一条"（双轨素材的内录被静默丢）也不再"多轨全导"。与播放选轨（selectedAudio）
     // 分开：换播放轨不该偷偷改导出内容，反之亦然。
@@ -505,37 +542,30 @@ fun PlayerScreen(
     var trackPickMenu by remember { mutableStateOf(false) }
     var trackPickAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
     var trackSyncAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
-    var trackExportMenu by remember { mutableStateOf(false) }
-    var trackExportAnchor by remember { mutableStateOf(androidx.compose.ui.unit.IntRect.Zero) }
+    var trackExportAnchor by remember(sourceUri) { mutableStateOf(IntRect.Zero) }
     val audioGroups by engine.audioGroups.collectState(emptyList<Tracks.Group>())
 
-    // 导出结果 → 横幅（文案归页面，宿主不碰 UI 资源）。不在场时完成的导出，结果留在
-    // 宿主状态里，回到播放页照样弹一次；消费后必须 clearResult（同值去重）
-    LaunchedEffect(exportState.result, exportState.resultKind) {
-        val r = exportState.result ?: return@LaunchedEffect
-        banner = when (exportState.resultKind) {
-            ExportKind.CLIP -> when (r) {
-                is ClipResult.Done -> R.string.player_clip_done
-                is ClipResult.Fail -> when (r.reason) {
-                    ClipError.RANGE -> R.string.player_clip_too_short
-                    // commit 全败但成片字节已在盘上（#4）：行保留待冷启救援，文案与
-                    // "导出失败"分开——东西没丢，重启后自动恢复
-                    ClipError.COMMIT -> R.string.player_clip_commit_kept
-                    ClipError.BUSY -> R.string.player_clip_busy
-                    else -> R.string.player_clip_failed
-                }
-            }
-            // 选轨档：RANGE 不在失败域（无出点截断），只分 commit 保留与普通失败
-            ExportKind.TRACK -> when (r) {
-                is ClipResult.Done -> R.string.player_track_export_done
-                is ClipResult.Fail -> if (r.reason == ClipError.COMMIT) {
-                    R.string.player_track_commit_kept
-                } else {
-                    R.string.player_track_export_failed
-                }
-            }
+    // 顺次展现；页面在前台完整呈现一条后才确认。退页或其他提示占用横幅时，结果仍留在宿主。
+    val exportNotice = exportState.results.firstOrNull().takeIf { banner == null }
+    val exportLifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(exportHost, exportLifecycle, exportNotice?.request?.taskId) {
+        val item = exportNotice ?: return@LaunchedEffect
+        exportLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            delay(2600)
+            exportHost.acknowledge(item.request.taskId)
         }
-        exportHost.clearResult()
+    }
+
+    // 光弧修复终态（Y23）：结果归 [ArcRepairHost]，本页只负责展示与按代数确认。退页/重建后
+    // 结果仍在宿主里（不静默丢），别的片的结果也照实提示"哪条 + 结果"，但**绝不**自动打开
+    // 修复弹层——只有那颗按钮能开窗（导出那边的"自动开进度窗"语义不搬过来）。
+    val arcNotice = arcState.latestResult()?.takeIf { banner == null && exportNotice == null }
+    LaunchedEffect(arcHost, exportLifecycle, arcNotice?.request?.taskId) {
+        val item = arcNotice ?: return@LaunchedEffect
+        exportLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            delay(2600)
+            arcHost.acknowledge(item.request.taskId)
+        }
     }
 
     // 控件栏没有任何自动隐藏：显隐只由画面单击决定，静置、播放中、拖动进度、帧步进都不会让它消失
@@ -577,20 +607,8 @@ fun PlayerScreen(
     LaunchedEffect(playError) {
         if (playError) banner = R.string.player_error
     }
-    // 后台修复的终态提示走现成反馈条（2.6s 自动隐）；进行中的进度另给一行小字，见下面 Box。
-    // NO_NEED（源实测帧率不高于目标，没有帧可抽）不是故障，给专门文案避免吓到用户
-    LaunchedEffect(arcStatus) {
-        when (arcStatus) {
-            ArcRepairStatus.DONE -> banner = R.string.player_arc_done
-            ArcRepairStatus.FAILED ->
-                banner = if (arcRunner.result.value?.error == ArcRepairError.NO_NEED) {
-                    R.string.player_arc_no_need
-                } else {
-                    R.string.player_arc_failed
-                }
-            else -> Unit
-        }
-    }
+    // 后台修复的终态提示由**宿主**的结果队列驱动（见下方 arcNotice）：结果留在宿主直到本页
+    // 确认，退页/配置重建都不会丢；别的片的结果也不静默吞掉，但绝不自动打开修复弹层。
 
     val duration = if (dur > 0L) dur else clip.durationMs
     val fraction = dragFrac ?: if (duration > 0L) (pos.toFloat() / duration.toFloat()) else 0f
@@ -622,7 +640,7 @@ fun PlayerScreen(
                         })
                     }
             ) {
-                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.value, pan = pan.value, mirror = mirrored)
+                WotaPlayerSurface(engine = engine, modifier = Modifier.fillMaxSize(), scale = zoom.floatValue, pan = pan.value, mirror = mirrored)
                 // 转圈只代表"还没画面"：IDLE（未起播）与 BUFFERING（缓冲中）。
                 // STATE_ENDED 是播完停在末帧，不是加载——判据漏了它就会在播完那一刻
                 // 凭空转圈且不消失（用户 2026-10-01 反馈的"播完后出现加载动画"即此）；
@@ -657,7 +675,7 @@ fun PlayerScreen(
                         if (clip.isTrashed) ops.restoreFromTrash(listOf(clip)) else ops.moveToTrash(listOf(clip))
                     },
                     onPurge = { purgeDialog = true },
-                    onCompare = { onCompare(clip.id) },
+                    onCompare = { onCompare(clip) },
                     // 收起（29 §6.3）：落盘持久，重进/冷启保持
                     onCollapse = {
                         topBarCollapsed = true
@@ -808,7 +826,7 @@ fun PlayerScreen(
                                 BarIconSlot(
                                     Icons.Outlined.AutoFixHigh,
                                     stringResource(R.string.player_arc_repair),
-                                    accent = arcStatus == ArcRepairStatus.RUNNING
+                                    accent = arcRun != null
                                 ) { arcMenu = !arcMenu }
                             }
                             // 掐头去尾导出入口（2026-10-04 方向 3）：区间=A/B 标记。导出中亮 accent，
@@ -817,8 +835,8 @@ fun PlayerScreen(
                                 BarIconSlot(
                                     Icons.Outlined.ContentCut,
                                     stringResource(R.string.player_clip),
-                                    accent = exportState.clipRunning
-                                ) { clipMenu = !clipMenu }
+                                    accent = clipExport?.request?.sourceUri == sourceUri
+                                ) { exportMenu = ExportKind.CLIP.takeUnless { exportMenu == it } }
                             }
                             // 内录选轨三控件（批 4，仅双音轨片渲染）：chip 选轨就近弹窗、同步跑
                             // TrackSync、导出就近弹窗。同步中/导出中亮 accent（"在忙"记号同前语义）
@@ -871,8 +889,8 @@ fun PlayerScreen(
                                     BarIconSlot(
                                         Icons.Outlined.FileDownload,
                                         stringResource(R.string.player_track_export),
-                                        accent = exportState.trackRunning
-                                    ) { trackExportMenu = !trackExportMenu }
+                                        accent = trackExport?.request?.sourceUri == sourceUri
+                                    ) { exportMenu = ExportKind.TRACK.takeUnless { exportMenu == it } }
                                 }
                             }
                         }
@@ -912,7 +930,7 @@ fun PlayerScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Outlined.ArrowBack,
+                        Icons.AutoMirrored.Outlined.ArrowBack,
                         contentDescription = stringResource(R.string.gallery_desc_back),
                         // 淡阴影替代卡底：亮画面上可辨，又不挡画面（29 §6.3 已确认允许）
                         tint = WotaText,
@@ -934,22 +952,14 @@ fun PlayerScreen(
                     onDismiss = { speedMenu = false }
                 )
             }
-            // 剪辑导出就近弹层（2026-10-04 方向 3）：锚在底栏剪辑钮上。
-            // 2026-11-10 用户纠偏：onExport 里当初把 clipMenu 关了——「导出中重开面板可看进度」
-            // 实际变成了「面板永远关着」，进度条/百分比根本没机会出现（后渲染长准备期尤其像无响应）。
-            // 现在导出中弹层保持打开直接切进度态；LaunchedEffect 兜底自动弹开（跑起来那一刻若
-            // 弹层是关的）。用户仍可手动关（onDismiss），关了还有屏下常驻小字兜底。
-            LaunchedEffect(exportState.clipRunning) {
-                if (exportState.clipRunning) clipMenu = true
-            }
-            if (controlsVisible && clipMenu) {
+            // 两类导出只占一个弹层。等待锚点布局完成后再创建有焦点的窗口。
+            if (chrome.dock && clipMenu && clipAnchor != IntRect.Zero) {
                 ClipExportPopup(
                     anchor = clipAnchor,
                     aMs = ab.aMs,
                     bMs = ab.bMs,
                     durationMs = duration,
-                    exporting = exportState.clipRunning,
-                    progress = exportState.clipProgress,
+                    export = clipExport,
                     track = clipTrack,
                     dualReady = audioGroups.size >= 2,
                     mode = clipMode,
@@ -963,14 +973,9 @@ fun PlayerScreen(
                     onPickMode = { clipMode = it },
                     onPickTrack = { clipTrack = it },
                     onExport = {
-                        // 重入防护：同帧双击极端下重组还没把导出钮换成进度条，这里再挡一层。
-                        // 不关弹层：导出中它就是进度面板（2026-11-10 用户纠偏，见上方 LaunchedEffect 注）
-                        if (!exportState.clipRunning) {
-                            engine.softPause(true)
-                            // 偏移在起跑那一刻读缓存（导出期间后台后校准/手动同步改了读数不影响本轮）
-                            val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
-                            // 区间、选轨、方式、效果全部在起跑那一刻定版（快照进宿主）
-                            exportHost.startClip(
+                        // 区间、选轨、偏移、方式和效果在起跑时定版。弹层原位切换到进度。
+                        val offset = TrackSync.cachedOffsetMs(app, clip.uri) ?: 0L
+                        if (exportHost.startClip(
                                 clip = clip,
                                 aMs = ab.aMs,
                                 bMs = ab.bMs,
@@ -979,10 +984,10 @@ fun PlayerScreen(
                                 postRender = clipMode == 1,
                                 effects = sceneExportEffectsOf(clipGlow, clipDenoise, clipEcho)
                             )
-                        }
+                        ) engine.softPause(true)
                     },
-                    onCancel = { exportHost.cancelClip() },
-                    onDismiss = { clipMenu = false }
+                    onCancel = { clipExport?.request?.let(exportHost::cancel) },
+                    onDismiss = { if (exportMenu == ExportKind.CLIP) exportMenu = null }
                 )
             }
 
@@ -1004,33 +1009,32 @@ fun PlayerScreen(
                     onDismiss = { trackPickMenu = false }
                 )
             }
-            // 选轨导出就近弹层（批 4）：选轨结果 + 同步读数 + 导出/取消 + 进度。
-            // 2026-11-10 同剪辑导出纠偏：导出中弹层保持打开 + 跑起来那一刻自动弹开。
-            LaunchedEffect(exportState.trackRunning) {
-                if (exportState.trackRunning) trackExportMenu = true
+            // 锚在选轨按钮；当前片没有这个入口时，运行中的任务仍可由常驻进度打开。
+            val trackAnchor = if (dualAudio && trackExportAnchor != IntRect.Zero) {
+                trackExportAnchor
+            } else {
+                trackProgressAnchor
             }
-            if (controlsVisible && trackExportMenu) {
+            if (chrome.dock && exportMenu == ExportKind.TRACK && trackAnchor != IntRect.Zero &&
+                (dualAudio || trackExport != null)
+            ) {
                 TrackExportPopup(
-                    anchor = trackExportAnchor,
+                    anchor = trackAnchor,
                     track = selectedAudio,
                     syncedOffsetMs = syncedOffsetMs,
                     syncedSource = syncedSource,
-                    exporting = exportState.trackRunning,
-                    progress = exportState.trackProgress,
+                    export = trackExport,
                     onExport = {
-                        // 重入防护与选轨/偏移定版同剪辑导出口径：起跑那一刻锁快照，
-                        // 导出期间切轨/重跑同步不影响这一轮。不关弹层（进度态直接可见）
-                        if (!exportState.trackRunning) {
-                            engine.softPause(true)
-                            exportHost.startTrack(
+                        if (exportHost.startTrack(
                                 clip = clip,
                                 track = selectedAudio,
-                                offsetMs = syncedOffsetMs ?: 0L
+                                offsetMs = syncedOffsetMs,
+                                offsetSource = syncedSource
                             )
-                        }
+                        ) engine.softPause(true)
                     },
-                    onCancel = { exportHost.cancelTrack() },
-                    onDismiss = { trackExportMenu = false }
+                    onCancel = { trackExport?.request?.let(exportHost::cancel) },
+                    onDismiss = { if (exportMenu == ExportKind.TRACK) exportMenu = null }
                 )
             }
 
@@ -1039,31 +1043,42 @@ fun PlayerScreen(
                     anchor = arcAnchor,
                     dstFps = arcDstFps,
                     params = arcParams,
+                    running = arcRun != null,
+                    cancelling = arcRun?.cancelling == true,
                     onPersist = { arcPersist.flush() },
                     onPickFps = { arcDstFps = it },
                     onPick = { useGpu ->
                         arcMenu = false
-                        // 重复启动保护：管线本身同一时刻只跑一条（runner.busy 也会兜一层），
-                        // 这里给个明确提示，避免用户以为点第二下没反应。DONE/FAILED 不算在忙，
-                        // 允许接着再修一条（runner.start 会自行重置 result/progress）。
-                        if (arcStatus == ArcRepairStatus.RUNNING) {
-                            banner = R.string.player_arc_busy
-                        } else {
-                            arcRunner.start(
-                                clip.uri,
-                                useGpu,
-                                arcDstFps,
-                                capOffsetMs = syncedOffsetMs?.toInt() ?: 0
-                            )
-                        }
+                        // 重复启动保护：执行槽在宿主侧（跨退页/重建），已有任务（本片或别片）一律
+                        // 按忙提示，绝不再排第二轮。终态送达后槽位自动归还，可以接着修下一条。
+                        val accepted = arcState.running == null &&
+                            arcHost.start(clip, useGpu, arcDstFps, capOffsetMs = syncedOffsetMs?.toInt() ?: 0)
+                        if (!accepted) banner = R.string.player_arc_busy
                     },
+                    // 取消按 (来源 URI, 代数) 落到宿主：只撤销本片这一轮，旧代数的迟到取消无效
+                    onCancel = { arcRun?.let { arcHost.cancel(it.request) } },
                     onDismiss = { arcMenu = false }
                 )
             }
 
             // 反馈条从底边浮起再淡出；文案钉在快照上，否则退场那帧会闪成空条
-            val msg = banner
-            var msgSnapshot by remember { mutableStateOf<Int?>(null) }
+            val msg = when {
+                banner != null -> stringResource(checkNotNull(banner))
+                exportNotice != null -> {
+                    val result = stringResource(exportResultRes(exportNotice))
+                    if (exportNotice.request.sourceUri == sourceUri) result else stringResource(
+                        R.string.player_export_other_source, exportNotice.request.sourceName, result
+                    )
+                }
+                arcNotice != null -> {
+                    val result = stringResource(arcResultRes(arcNotice.payload))
+                    if (arcNotice.request.sourceUri == sourceUri) result else stringResource(
+                        R.string.player_export_other_source, arcNotice.request.sourceName, result
+                    )
+                }
+                else -> null
+            }
+            var msgSnapshot by remember { mutableStateOf("") }
             if (msg != null) msgSnapshot = msg
             AnimatedVisibility(
                 visible = msg != null,
@@ -1077,13 +1092,15 @@ fun PlayerScreen(
                         .clip(RoundedCornerShape(10.dp))
                         .background(WotaSurface)
                         .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) { Text(stringResource(msgSnapshot ?: 0), style = MaterialTheme.typography.bodyMedium) }
+                ) { Text(msgSnapshot, style = MaterialTheme.typography.bodyMedium) }
             }
             // 后台修复进行中的轻量反馈：一行等宽小字，不占控件栏、不挡画面、与控制栏显隐无关。
             // 位置压在反馈条上方（banner 走 120dp），两条同时在位时不会互相盖住。
-            if (arcStatus == ArcRepairStatus.RUNNING) {
+            // 进度与"取消中"都取自宿主那一轮（本片身份）；别的片在跑时不往本片画进度。
+            if (arcRun != null) {
                 Text(
-                    text = stringResource(R.string.player_arc_running, (arcProgress * 100f).toInt()),
+                    text = if (arcRun.cancelling) stringResource(R.string.player_arc_cancelling)
+                    else stringResource(R.string.player_arc_running, (arcRun.progress * 100f).toInt()),
                     style = MonoStyle,
                     color = WotaText,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 168.dp)
@@ -1092,32 +1109,27 @@ fun PlayerScreen(
             // 剪辑/选轨导出进行中的轻量反馈（2026-11-10 用户报障：进度只在弹层里、连百分比都
             // 没有，弹层一关就像无响应）：一行等宽小字常驻，与光弧修复同族。三条同时在位时
             // 各自错行（banner 120 → 光弧 168 → 剪辑 208 → 选轨 248），互不盖住。
-            if (exportState.clipRunning) {
-                Text(
-                    text = stringResource(
-                        R.string.player_clip_running,
-                        (exportState.clipProgress * 100f).toInt().coerceIn(0, 100)
-                    ),
-                    style = MonoStyle,
-                    color = WotaText,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 208.dp)
+            if (clipExport != null) {
+                ExportProgressLine(
+                    task = clipExport,
+                    currentSourceUri = sourceUri,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 208.dp),
+                    onOpen = { exportMenu = ExportKind.CLIP }
                 )
             }
-            if (exportState.trackRunning) {
-                Text(
-                    text = stringResource(
-                        R.string.player_clip_running,
-                        (exportState.trackProgress * 100f).toInt().coerceIn(0, 100)
-                    ),
-                    style = MonoStyle,
-                    color = WotaText,
+            if (trackExport != null) {
+                ExportProgressLine(
+                    task = trackExport,
+                    currentSourceUri = sourceUri,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 248.dp)
+                        .pillAnchor { trackProgressAnchor = it },
+                    onOpen = { exportMenu = ExportKind.TRACK }
                 )
             }
             // 偏离 1x 即显示：缩小也是合法观感（下限 0.1x），缩着却没倍率读数等于盲调
-            if (zoom.value > 1.01f || zoom.value < 0.99f) {
+            if (zoom.floatValue > 1.01f || zoom.floatValue < 0.99f) {
                 Text(
-                    text = stringResource(R.string.player_zoom, zoom.value),
+                    text = stringResource(R.string.player_zoom, zoom.floatValue),
                     style = MonoStyle,
                     color = WotaTextDim,
                     modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout)).padding(top = 56.dp)
@@ -1304,8 +1316,7 @@ private fun ClipExportPopup(
     aMs: Long,
     bMs: Long,
     durationMs: Long,
-    exporting: Boolean,
-    progress: Float,
+    export: ExportTask?,
     track: SelectedTrack,
     dualReady: Boolean,
     mode: Int,
@@ -1324,17 +1335,17 @@ private fun ClipExportPopup(
     onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val range = ClipRule.normalize(aMs, bMs, durationMs)
+    val details = export?.request?.details as? ExportDetails.Clip
+    val displayDuration = details?.durationMs ?: durationMs
+    val range = ClipRule.normalize(details?.aMs ?: aMs, details?.bMs ?: bMs, displayDuration)
     WotaPillPopup(
         anchor = anchor,
         onDismiss = onDismiss,
-        // 定宽废（2026-10-05 紧凑化）：只给进度条/导出钮留一个下限，读数行按内容走
         modifier = Modifier.widthIn(min = CLIP_POPUP_MIN_WIDTH),
         title = stringResource(R.string.player_clip_title)
     ) {
-        // 区间读数行只在有合法区间时出现；「导出中」的进度与取消**优先于**区间判断——
-        // 否则导出中途用户清了 A/B 再重开面板，进度条会被"先圈 A/B"引导文案顶掉，
-        // 任务还在后台跑却无处可看进度、无处可取消（任务归属仍在本页 scope，退出页面才会终止）
+        // 进度窗的区间跟随任务快照，编辑 A/B 或换片后仍显示实际导出的区间。
+        if (export != null) ExportSourceLabel(export.request)
         if (range != null) {
             Text(
                 stringResource(R.string.player_clip_in, formatDuration(range.first)),
@@ -1350,45 +1361,14 @@ private fun ClipExportPopup(
                 stringResource(
                     R.string.player_clip_keep,
                     formatDuration(range.second - range.first),
-                    formatDuration(durationMs)
+                    formatDuration(displayDuration)
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = WotaTextDim
             )
         }
-        if (exporting) {
-            if (progress > 0f) {
-                LinearProgressIndicator(
-                    progress = progress,
-                    // 定宽（修复轮 1/3 P1）：fillMaxWidth 会把弹层顶到 400dp 上限——「未导出」时 200dp
-                    // 的弹窗在「导出中」当场加宽一倍、place() 重居中横向跳位，正是本批要消灭的
-                    // 「fill 撑满最大宽」根因的漏网行。账：弹层 min 宽 200 − 壳左右内边距 20 = 180
-                    modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
-                    color = WotaColor.accent,
-                    trackColor = WotaColor.outline
-                )
-                // 2026-11-10 用户报障：只有进度条没有百分比读数，等长区间里看不出在动。补一行
-                // 等宽百分比（与弹层外那行常驻小字同源，见 player_clip_running）
-                Text(
-                    stringResource(R.string.player_clip_percent, (progress * 100f).toInt().coerceIn(0, 100)),
-                    style = MonoStyle,
-                    color = WotaTextDim
-                )
-            } else {
-                // 准备期（insert/open/样本扫描/codec/GL 起跑）还没有已提交帧：给不确定进度条 +
-                // 「准备中」文案——静止的 0% 条最容易被当成无响应（2026-11-10 用户报障）
-                LinearProgressIndicator()
-                Text(
-                    stringResource(R.string.player_clip_preparing),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = WotaTextDim
-                )
-            }
-            WotaChip(
-                label = stringResource(R.string.player_clip_cancel),
-                selected = false,
-                onClick = onCancel
-            )
+        if (export != null) {
+            ExportProgressContent(export, onCancel)
         } else if (range != null) {
             // 音轨选择：只导选中的那一条。单音轨片只亮环境音；内录项在引擎尚未上报第二条
             // 音频组时置灰（与 TrackPickPopup 同口径——点了没反应比置灰更糟）
@@ -1760,38 +1740,40 @@ private fun TrackExportPopup(
     track: SelectedTrack,
     syncedOffsetMs: Long?,
     syncedSource: TrackSync.Source?,
-    exporting: Boolean,
-    progress: Float,
+    export: ExportTask?,
     onExport: () -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val details = export?.request?.details as? ExportDetails.Track
+    val displayTrack = details?.selected ?: track
+    val displayOffset = if (details != null) details.offsetMs else syncedOffsetMs
+    val displaySource = if (details != null) details.offsetSource else syncedSource
     WotaPillPopup(
         anchor = anchor,
         onDismiss = onDismiss,
         modifier = Modifier.widthIn(min = CLIP_POPUP_MIN_WIDTH),
         title = stringResource(R.string.player_track_export_title)
     ) {
+        if (export != null) ExportSourceLabel(export.request)
         Text(
             stringResource(
                 R.string.player_track_export_track,
-                stringResource(if (track == SelectedTrack.ENV) R.string.player_track_env else R.string.player_track_cap)
+                stringResource(if (displayTrack == SelectedTrack.ENV) R.string.player_track_env else R.string.player_track_cap)
             ),
             style = MaterialTheme.typography.bodySmall,
             color = WotaText
         )
-        val sourceLabel = when (syncedSource) {
+        val sourceLabel = when (displaySource) {
             TrackSync.Source.AUTO -> R.string.player_track_sync_auto
-            TrackSync.Source.MANUAL -> R.string.player_track_sync_manual
-            // 读数在而来源读不到只会出现在旧版手写 prefs 的脏数据上：按老的手动记录显示
-            null -> R.string.player_track_sync_manual
+            TrackSync.Source.MANUAL, null -> R.string.player_track_sync_manual
         }
         Text(
-            if (syncedOffsetMs != null) {
+            if (displayOffset != null) {
                 stringResource(
                     R.string.player_track_sync_source_fmt,
                     stringResource(sourceLabel),
-                    TrackSync.signedMs(syncedOffsetMs)
+                    TrackSync.signedMs(displayOffset)
                 )
             } else {
                 stringResource(R.string.player_track_sync_none)
@@ -1805,33 +1787,8 @@ private fun TrackExportPopup(
             style = MaterialTheme.typography.bodySmall,
             color = WotaTextDim
         )
-        if (exporting) {
-            if (progress > 0f) {
-                LinearProgressIndicator(
-                    progress = progress,
-                    modifier = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH),
-                    color = WotaColor.accent,
-                    trackColor = WotaColor.outline
-                )
-                Text(
-                    stringResource(R.string.player_clip_percent, (progress * 100f).toInt().coerceIn(0, 100)),
-                    style = MonoStyle,
-                    color = WotaTextDim
-                )
-            } else {
-                // 与 ClipExportPopup 同口径：准备期给不确定进度条 + 文案，不拿静止 0% 条装死
-                LinearProgressIndicator()
-                Text(
-                    stringResource(R.string.player_clip_preparing),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = WotaTextDim
-                )
-            }
-            WotaChip(
-                label = stringResource(R.string.player_clip_cancel),
-                selected = false,
-                onClick = onCancel
-            )
+        if (export != null) {
+            ExportProgressContent(export, onCancel)
         } else {
             WotaChip(
                 label = stringResource(R.string.player_clip_export),
@@ -1840,6 +1797,102 @@ private fun TrackExportPopup(
             )
         }
     }
+}
+
+/**
+ * 光弧修复终态的文案映射（Y23：终态只认宿主交付的 [ArcRepairResult]，不再读执行器上"最后一次状态"）。
+ * 归类真值表在 [arcResultKind]（纯函数，JVM 全表）；这里只负责"哪一类配哪句"。
+ */
+@StringRes
+internal fun arcResultRes(result: ArcRepairResult): Int = when (arcResultKind(result)) {
+    ArcResultKind.DONE -> R.string.player_arc_done
+    ArcResultKind.CANCELLED -> R.string.player_arc_cancelled
+    ArcResultKind.NO_NEED -> R.string.player_arc_no_need
+    // 已封口待发布不是普通失败：文件在盘上，只是 IS_PENDING 没清掉。
+    // 文案必须让用户知道"已保存"，否则会以为白修一遍。
+    ArcResultKind.PENDING_PUBLISH -> R.string.player_arc_pending_publish
+    ArcResultKind.FAILED -> R.string.player_arc_failed
+}
+
+internal fun exportResultRes(item: ExportResultItem): Int = when (val result = item.payload) {
+    is ClipResult.Done -> when (item.request.kind) {
+        ExportKind.CLIP -> R.string.player_clip_done
+        ExportKind.TRACK -> R.string.player_track_export_done
+    }
+    is ClipResult.Fail -> when (result.reason) {
+        ClipError.COMMIT -> when (item.request.kind) {
+            ExportKind.CLIP -> R.string.player_clip_commit_kept
+            ExportKind.TRACK -> R.string.player_track_commit_kept
+        }
+        ClipError.RANGE -> R.string.player_clip_too_short
+        ClipError.BUSY -> R.string.player_clip_busy
+        else -> when (item.request.kind) {
+            ExportKind.CLIP -> R.string.player_clip_failed
+            ExportKind.TRACK -> R.string.player_track_export_failed
+        }
+    }
+}
+
+@Composable
+private fun ExportSourceLabel(request: ExportRequest) {
+    Text(
+        request.sourceName,
+        style = MaterialTheme.typography.bodySmall,
+        color = WotaTextDim,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+    )
+}
+
+@Composable
+private fun ExportProgressContent(task: ExportTask, onCancel: () -> Unit) {
+    val progressWidth = Modifier.width(CLIP_POPUP_PROGRESS_WIDTH)
+    val progress = task.progress
+    if (task.cancelling || progress == 0f) {
+        LinearProgressIndicator(modifier = progressWidth)
+        Text(
+            stringResource(if (task.cancelling) R.string.player_clip_cancelling else R.string.player_clip_preparing),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaTextDim
+        )
+    } else {
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = progressWidth,
+            color = WotaColor.accent,
+            trackColor = WotaColor.outline
+        )
+        Text(
+            stringResource(R.string.player_clip_percent, (progress * 100f).toInt()),
+            style = MonoStyle,
+            color = WotaTextDim
+        )
+    }
+    if (!task.cancelling) {
+        WotaChip(label = stringResource(R.string.player_clip_cancel), selected = false, onClick = onCancel)
+    }
+}
+
+@Composable
+private fun ExportProgressLine(task: ExportTask, currentSourceUri: String, modifier: Modifier, onOpen: () -> Unit) {
+    val label = if (task.cancelling) {
+        stringResource(R.string.player_clip_cancelling)
+    } else {
+        stringResource(
+            if (task.request.kind == ExportKind.CLIP) R.string.player_clip_running else R.string.player_track_running,
+            (task.progress * 100f).toInt()
+        )
+    }
+    Text(
+        text = if (task.request.sourceUri == currentSourceUri) label else stringResource(
+            R.string.player_export_other_source, task.request.sourceName, label
+        ),
+        style = MonoStyle,
+        color = WotaText,
+        modifier = modifier.widthIn(max = 320.dp).clickable(onClick = onOpen),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+    )
 }
 
 /**
@@ -1855,9 +1908,13 @@ private fun ArcRepairPopup(
     anchor: androidx.compose.ui.unit.IntRect,
     dstFps: Int,
     params: WotaParams,
+    /** 本片是否已有一轮在跑（Y23：取消入口就挂在弹层里，按来源 URI+代数只撤销本片这一轮） */
+    running: Boolean,
+    cancelling: Boolean,
     onPersist: () -> Unit,
     onPickFps: (Int) -> Unit,
     onPick: (Boolean) -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val deadband by params.arcMergeDeadband.collectAsState()
@@ -1964,6 +2021,23 @@ private fun ArcRepairPopup(
                     }
                 }
             }
+            // 取消入口（Y23）：只在本片确实有一轮在跑时出现，按 (来源 URI, 代数) 落到宿主；
+            // 取消与完成赛跑时照实展示真结果（宿主不会把已发布的结果改判成"已取消"）。
+            if (running) {
+                TextButton(
+                    onClick = onCancel,
+                    enabled = !cancelling,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = if (cancelling) stringResource(R.string.player_arc_cancelling)
+                        else stringResource(R.string.player_arc_cancel),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WotaText
+                    )
+                }
+            }
             Text(
                 stringResource(R.string.player_arc_note),
                 style = MaterialTheme.typography.labelSmall,
@@ -2010,7 +2084,7 @@ private fun PlayerTopBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 顶栏 7 枚圆钮压到 30dp：M3 IconButton 强制 ≥48dp，七个就把文件名挤成「…」
-        BarIconSlot(Icons.Outlined.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
+        BarIconSlot(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.gallery_desc_back), onClick = onBack)
         Text(
             clip.name,
             style = MaterialTheme.typography.titleMedium,
@@ -2018,7 +2092,7 @@ private fun PlayerTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(horizontal = 2.dp)
         )
-        BarIconSlot(Icons.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
+        BarIconSlot(Icons.AutoMirrored.Outlined.CompareArrows, stringResource(R.string.gallery_menu_compare), onClick = onCompare)
         // 收藏红心（2026-10-30 用户需求）：Bencho "Like" 的红心动画（绽放环 + 七对彩点 +
         // 红心弹出，无数字滚动）。图标已经分状态、标签也必须跟着分——原来恒报「已收藏」，
         // 未收藏的成片读屏也说成已收藏。
@@ -2121,7 +2195,6 @@ internal fun Modifier.pinchZoom(
                         }
                     }
                     pressed.isEmpty() -> {
-                        baseDist = 0f
                         break
                     }
                     else -> baseDist = 0f

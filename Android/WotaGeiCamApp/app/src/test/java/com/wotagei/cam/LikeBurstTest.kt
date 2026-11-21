@@ -66,7 +66,9 @@ class LikeBurstTest {
     @Test
     fun `组件只播收藏那一下且没有数字滚动`() {
         val src = KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/design/LikeHeart.kt"))
-        assertTrue("取消收藏不播效果（只掏空）", src.contains("if (!next || !playEffect) return"))
+        assertTrue("取消收藏不播效果（只掏空）", src.contains("if (!next || !playEffect)"))
+        assertTrue("B10：取消收藏必须撤销在飞动画", src.contains("burstJob?.cancel()"))
+        assertTrue("B10：beat 必须作为效果层的组合键", src.contains("key(beat)"))
         assertTrue("PLAIN/reduced 档不播（设计稿 reduced-motion 同理）", src.contains("motion.mode != MotionMode.PLAIN && motion.durationMs != 0"))
         assertTrue("主进度总时长来自设计稿", src.contains("DURATION_MS = 820"))
         // 用户明确"不要数字变化"：底片不许出现任何位数/滚轮实现

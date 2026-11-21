@@ -9,6 +9,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.ClassRule
 import org.junit.Test
@@ -57,16 +58,115 @@ class ExportBlockingCompatibilityTest {
         cancelledLateCompletion("render")
     }
 
+    /**
+     * Y32：预算到点与「已进入 commit」的时间顺序。等待方先拿 TIMEOUT 离开，但 commit 已经领到
+     * 许可并在之后返回成功：真实终态是 Done，必须按任务身份回填；watchdog 不得先把 TIMEOUT
+     * 写进 terminal 把迟到真话锁死。已封轨成片不许删。
+     */
+    @Test
+    fun `Y32 后渲染commit已进入时预算到点_迟到Done仍回填且不删封轨片`() {
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
+            val probe = BlockingProbe(p)
+            probe.enable("commit")
+            p.script("commitResults", intArrayOf(1, 1))
+            p.script("clockStepMs", 1L)
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val caller = launchExport(p) { late.add(it) }
+            var endedBeforeRelease: Boolean
+            var reason: String?
+            try {
+                check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞" }
+                // 已进入 commit 后把测试时钟推过等待预算：waiting 侧先结束，owner 仍阻塞。
+                p.script("clockStepMs", 1_000_000L)
+                endedBeforeRelease = caller.completed.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)
+                reason = caller.result.get()?.let { p.call(it, "getReason").toString() }
+            } finally {
+                probe.proceed.countDown()
+                caller.close()
+                assertTrue("放行后 owner 必须在有界时间内收口",
+                    p.awaitOwnerIdle(SCENE, CLEANUP_WAIT_MS))
+            }
+            assertEquals("预算到点必须先结束等待方", true, endedBeforeRelease)
+            assertEquals("等待方视角只能是 TIMEOUT（真话由迟到回填）", "TIMEOUT", reason)
+            assertEquals("已领取的 public 许可只发一次，不因等待方离开重试", 1, p.script("commitCalls"))
+            assertFalse("已封轨成片不得因等待方离开被删行", p.events.contains("pending.delete"))
+            assertEquals("迟到 Done 必须按任务身份回填一次", 1, late.size)
+            assertEquals("回填的是真实终态 Done", "Done", late.single()!!.javaClass.simpleName)
+            assertEquals("按任务身份带成片 id", 42L, p.call(late.single()!!, "getId") as Long)
+            assertTrue("收尾必须关掉本 loader 的生产执行器",
+                p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
+    }
+
+    /**
+     * Y32：等待方**取消**（不是预算到点）+ commit 已领许可。旧实现 `settle` 在 continuation
+     * 不活跃时仍返回 true（谎报"已送达"），取消后的迟到 Done 被静默吞掉：相册索引不刷新、
+     * UI 永远停在"已取消"。现在 settle 只在真的 resume 后返回 true，迟到真话必须回填一次。
+     * 同时钉住封轨标记：封轨即落、发布成功即清（冷启救援的 5 分钟快通道路径）。
+     */
+    @Test
+    fun `Y32 取消后commit已领许可返回成功_迟到Done仍回填且封轨标记清除`() {
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
+            val probe = BlockingProbe(p)
+            probe.enable("commit")
+            p.script("commitResults", intArrayOf(1, 1))
+            val row = File(temporary.root, "scene-seal-done/out42.mp4").apply { parentFile!!.mkdirs() }
+            p.script("rowData", row.absolutePath)
+            val marker = File(row.absolutePath + ".sealed")
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val caller = launchExport(p) { late.add(it) }
+            try {
+                check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 commit 阻塞" }
+                assertTrue("封轨即落 SealMarker（commit 尚在途）", marker.isFile)
+                caller.job.cancel()
+                assertTrue("取消必须立刻结束等待方", caller.completed.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS))
+                assertTrue(
+                    "等待方因取消离开（不是生产异常）",
+                    caller.error.get() is CancellationException
+                )
+            } finally {
+                probe.proceed.countDown()
+                caller.close()
+                assertTrue("放行后 owner 必须在有界时间内收口", p.awaitOwnerIdle(SCENE, CLEANUP_WAIT_MS))
+            }
+            assertEquals("已进入的 public 许可只发一次，取消不重试", 1, p.script("commitCalls"))
+            assertFalse("已封轨成片不得因取消被删行", p.events.contains("pending.delete"))
+            assertEquals("取消后迟到 Done 必须回填一次（不许因等待方不活跃被吞）", 1, late.size)
+            assertEquals("回填的是真实终态 Done", "Done", late.single()!!.javaClass.simpleName)
+            assertFalse("发布成功必须清掉封轨标记", marker.isFile)
+            assertTrue("收尾必须关掉本 loader 的生产执行器", p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
+    }
+
+    /** Y32：后渲染 commit 两连败 → 保留行待救援，真话按 COMMIT 上报，封轨标记留在盘上。 */
+    @Test
+    fun `Y32 后渲染commit两连败_真话COMMIT且封轨标记保留待救援`() {
+        ExportPlatformFixture(classes, javaClass.classLoader!!).use { p ->
+            p.script("commitResults", intArrayOf(0, 0))
+            val row = File(temporary.root, "scene-seal-keep/out42.mp4").apply { parentFile!!.mkdirs() }
+            p.script("rowData", row.absolutePath)
+            val marker = File(row.absolutePath + ".sealed")
+            val late = Collections.synchronizedList(mutableListOf<Any?>())
+            val result = runBlocking { p.export(p.runner(), onLateOutcome = { late.add(it) }) }
+            assertEquals("commit 全败必须报 COMMIT（不是 MUXER/ENCODER）",
+                "COMMIT", p.call(result, "getReason").toString())
+            assertFalse("封轨成片不得被删行", p.events.contains("pending.delete"))
+            assertTrue("保留待救援的成片必须留下 SealMarker（冷启 5 分钟快通道）", marker.isFile)
+            assertTrue("等待方还在时真话直接送达，不走迟到回填", late.isEmpty())
+            assertTrue(p.shutdownOwner(SCENE, CLEANUP_WAIT_MS))
+        }
+    }
+
     @Test
     fun `U05 准备期open永久阻塞时预算到点由独立等待侧先结束caller`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("open")
             // 先用 1ms 步进让 deadline 由测试时钟基准建立，进入阻塞后再跳跃到预算之外。
             p.script("clockStepMs", 1L)
             val caller = launchExport(p)
-            var endedBeforeRelease = false
-            var reason: String? = null
+            var endedBeforeRelease: Boolean
+            var reason: String?
             try {
                 check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 open 阻塞" }
                 // 生产主循环还没建立 deadline，必须靠独立等待侧。
@@ -89,14 +189,14 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 失败清理delete阻塞时预算到点caller先结束且资源随后归还`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable("delete")
             p.script("renderOk", false)
             p.script("clockStepMs", 1L)
             val caller = launchExport(p)
-            var endedBeforeRelease = false
-            var reason: String? = null
+            var endedBeforeRelease: Boolean
+            var reason: String?
             try {
                 check(probe.entered.await(ENTRY_WAIT_MS, TimeUnit.MILLISECONDS)) { "未进入真实 delete 阻塞" }
                 p.script("clockStepMs", 1_000_000L)
@@ -119,7 +219,7 @@ class ExportBlockingCompatibilityTest {
 
     @Test
     fun `U05 GL线程未真正退出时拒绝第二套资源退出后才恢复准入`() {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             // 用真实存活线程代表“有界 release 已返回、GL owner 实际仍卡在 native”的窗口。
             val settling = Thread {
                 try {
@@ -167,7 +267,10 @@ class ExportBlockingCompatibilityTest {
     }
 
     /** 真实 suspend export 在独立线程起跑；放行与时钟由用例控制，出测试不再留后台 caller。 */
-    private fun launchExport(p: ExportPlatformFixture): ExportCaller {
+    private fun launchExport(
+        p: ExportPlatformFixture,
+        onLate: ((Any?) -> Unit)? = null
+    ): ExportCaller {
         val result = AtomicReference<Any?>()
         val error = AtomicReference<Throwable?>()
         val completed = CountDownLatch(1)
@@ -178,7 +281,7 @@ class ExportBlockingCompatibilityTest {
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         val job = scope.launch {
             try {
-                result.set(p.export(p.runner()))
+                result.set(p.export(p.runner(), onLateOutcome = onLate ?: {}))
             } catch (failure: Throwable) {
                 error.set(failure)
             } finally {
@@ -189,7 +292,7 @@ class ExportBlockingCompatibilityTest {
     }
 
     private fun cancelledLateCompletion(stage: String, commitResults: IntArray? = null) {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             p.script("commitResults", commitResults)
@@ -206,9 +309,9 @@ class ExportBlockingCompatibilityTest {
             val scope = CoroutineScope(SupervisorJob() + dispatcher)
             val ownerExecutor = ownerExecutor(p)
             var caller: Job? = null
-            var endedBeforeRelease = false
-            var ownerExited = false
-            var progressAtCancel = -1
+            var endedBeforeRelease: Boolean
+            var ownerExited: Boolean
+            var progressAtCancel: Int
             try {
                 val runner = p.runner()
                 caller = scope.launch {
@@ -261,13 +364,13 @@ class ExportBlockingCompatibilityTest {
             for (event in listOf("decoder.release", "encoder.release", "muxer.release", "gl.release", "fd.close")) {
                 assertEquals("退出后资源须恰好归还：$event", 1, p.events.count { it == event })
             }
-            // 方向读取助手自己还会建/释放一枚短期 extractor，与主提取器各一次。
-            assertEquals("方向助手与主提取器各释放一次", 2, p.events.count { it == "extractor.release" })
+            // 方向读取助手自己的短期 extractor + 主提取器 + Y30 音频车道的独立 extractor，各释放一次。
+            assertEquals("方向助手/主提取器/音频车道各释放一次", 3, p.events.count { it == "extractor.release" })
         }
     }
 
     private fun cancellationWhileBlocked(stage: String, expectFd: Boolean) {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { p ->
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { p ->
             val probe = BlockingProbe(p)
             probe.enable(stage)
             val callerBodyExited = CountDownLatch(1)
@@ -281,10 +384,10 @@ class ExportBlockingCompatibilityTest {
             val dispatcher = executor.asCoroutineDispatcher()
             val scope = CoroutineScope(SupervisorJob() + dispatcher)
             var caller: Job? = null
-            var endedBeforeProceed = false
-            var returnedAfterProceed = false
-            var resourcesDrained = false
-            var noPrematureRelease = false
+            var endedBeforeProceed: Boolean
+            var returnedAfterProceed: Boolean
+            var resourcesDrained: Boolean
+            var noPrematureRelease: Boolean
             val issues = mutableListOf<String>()
             try {
                 // 先构造真实Runner；缺构造/类加载失败不能被下面的取消断言冒充行为RED。
@@ -428,6 +531,7 @@ class ExportBlockingCompatibilityTest {
         private const val ENTRY_WAIT_MS = 5_000L
         private const val CANCEL_WAIT_MS = 1_500L
         private const val CLEANUP_WAIT_MS = 5_000L
+        private const val SCENE = "com.wotagei.cam.player.SceneExportRunner"
         @ClassRule @JvmField
         val temporary = TemporaryFolder(File("build/tmp/export-u05-blocking-test").apply { mkdirs() })
         private val classes by lazy { ExportPlatformFixture.compile(temporary.newFolder("platform")) }

@@ -35,12 +35,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.automirrored.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +54,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -77,6 +81,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.navigation.NavBackStackEntry
 import com.wotagei.cam.R
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.isMediaStoreVideoUri
@@ -131,26 +136,101 @@ private val PlayIconSize = 36.dp
 private val PlayGlyphSize = 26.dp
 
 /**
+ * 左侧片 `clipById` 查询尚未回包的哨兵（Y36）：与「查过且没有」（收到 null）区分开。
+ * 与单播放页同一套查询契约（[MediaRepo.clipById] 对查无此片会发射一次 null），但哨兵不跨文件
+ * 复用（PlayerScreen 里的那枚是 private）：对比页自己的组合生命周期只认自己这枚。
+ */
+internal object CompareLeftQueryPending
+
+/**
+ * Y36 左片查询的三态判定（纯函数）：哨兵 = 还在查；null = 查过且没有；其余 = 有片。
+ * 放在组合外是为了让「加载中 / 缺失 / 有片」能用真值表钉住，而不是只靠源码字符串守卫。
+ */
+internal enum class CompareLeftPhase { PENDING, MISSING, READY }
+
+internal fun compareLeftPhase(state: Any?): CompareLeftPhase {
+    return when {
+        state === CompareLeftQueryPending -> CompareLeftPhase.PENDING
+        state == null -> CompareLeftPhase.MISSING
+        else -> CompareLeftPhase.READY
+    }
+}
+
+/**
+ * 右片选择代次门（Y35）：Picker 回调、历史面板、练习回填等**所有能改写右槽的入口**共享一枚
+ * 单调代次。每次用户动作先取 [newRequest]（或 [invalidate] 作废在途请求），异步结果落地前
+ * 必须用 [isCurrent] 复核——旧 Picker 过校验后等授权/慢 provider 期间用户改选历史片或再次
+ * 打开选择器又取消，晚到的旧回调/失败探测不得再写右槽或错误横幅。
+ *
+ * 只在主线程使用（ActivityResult 回调、组合事件、练习 ON_RESUME 与主线程协程续体），
+ * 因此不做额外同步；代次本身是纯值，JVM 单测可直打。
+ */
+internal class RightPickGate {
+    private var generation: Int = 0
+
+    /** 登记一次新的右片选择动作，返回该次请求的代次（其后所有写入都要带着它复核） */
+    fun newRequest(): Int = ++generation
+
+    /** 作废所有在途请求（再次打开选择器/取消选择/历史改选等「最新用户动作」） */
+    fun invalidate() {
+        generation++
+    }
+
+    /** 该代次的异步结果是否仍是当前最新的一次选择 */
+    fun isCurrent(token: Int): Boolean = token == generation
+}
+
+/**
  * 双视频对比同步播放页（需求 27 行原文流程）：
  * 1. 媒体库打开的视频进左；2. 右侧从内置媒体库 / 手机相册再选一个；
  * 3. 同步模式二选一：基于音频自动同步（[AudioSync]）或手动拖左右独立进度条；
  * 4. 两视频下方一条统一进度条 + 统一启停 + AB 循环 + 帧步进/退，统一轴以左视频为基准，右视频按 offsetMs 平移。
+ *
+ * 左片加载（Y27）：有真实行 URI 时按具体卷钉行（[MediaRepo.clipByRowUri]），回收站里同号的
+ * 另一卷活片不可能被顶上来；没有行 URI 的历史裸 ID 深链仍走 [MediaRepo.clipById]（唯一命中，
+ * 多行即关死）。行 URI 形状不合法按「加载不出」处理，不退回裸 id 猜。
  */
 @Composable
 fun CompareScreen(
     leftMediaId: Long,
+    leftRowUri: Uri?,
     onBack: () -> Unit,
     onPractice: () -> Unit,
     repo: MediaRepo = rememberMediaRepo()
 ) {
-    val left by repo.clipById(leftMediaId).collectState(null)
-    val c = left
-    if (c == null) {
-        Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = WotaAccent)
+    // 左片身份变化时一并重建查询与页面状态。Y36：只有哨兵态转圈；查询发出 null 后给出返回入口。
+    key(repo, leftMediaId, leftRowUri) {
+        val lookup = remember {
+            if (leftRowUri != null) repo.clipByRowUri(leftRowUri) else repo.clipById(leftMediaId)
         }
-    } else {
-        CompareContent(left = c, onBack = onBack, onPractice = onPractice)
+        val state by lookup.collectState(CompareLeftQueryPending)
+        when (compareLeftPhase(state)) {
+            CompareLeftPhase.PENDING -> {
+                Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = WotaAccent)
+                }
+            }
+            CompareLeftPhase.MISSING -> {
+                Box(Modifier.fillMaxSize().background(WotaBg), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            stringResource(R.string.player_clip_missing),
+                            color = WotaText,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        WotaIconButton(
+                            image = Icons.AutoMirrored.Outlined.ArrowBack,
+                            description = stringResource(R.string.gallery_desc_back),
+                            onClick = onBack
+                        )
+                    }
+                }
+            }
+            CompareLeftPhase.READY -> CompareContent(
+                left = state as VideoClip, onBack = onBack, onPractice = onPractice
+            )
+        }
     }
 }
 
@@ -163,7 +243,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
 
     var right by remember { mutableStateOf<VideoClip?>(null) }
     var manual by remember { mutableStateOf(false) }
-    val offsetMs = remember { mutableStateOf(0L) }
+    val offsetMs = remember { mutableLongStateOf(0L) }
     var syncing by remember { mutableStateOf(false) }
     var banner by remember { mutableStateOf<Int?>(null) }
     /**
@@ -176,10 +256,17 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
      */
     var accessPrompt by remember { mutableStateOf<MediaAccessState?>(null) }
     /**
-     * 选片请求序号：云相册/远程 provider 的解析可能阻塞数秒，用户等不及再点一次时
-     * 先后两次的结果可能乱序返回。只应用最新一次的结果，旧的失败/弹层不许盖在新选择上。
+     * 右片选择代次（Y35）：Picker 回调、历史面板、练习回填等全部写入口共享这一枚门。
+     * 旧的 `pickSeq` 只在 Picker 首次解析后校验一次，历史改选/练习回填/取消都不推进代次，
+     * 慢 provider 晚到的旧回调仍会越过最新选择写回右槽。
      */
-    var pickSeq by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val pickGate = remember { RightPickGate() }
+    /**
+     * 右槽成功换片（含重复选同一条 URI）的修订号：`r?.uri` 不变时 LaunchedEffect 不会重跑，
+     * 同 URI 重选就收不到 PlayerEngine.attach 的失败重试分支；把它并入 attach/编排/起播三个
+     * effect 的 key，选片动作每次都重新走一遍挂载与起播。
+     */
+    var rightRevision by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     var dragUnified by remember { mutableStateOf<Float?>(null) }
     var dragLeft by remember { mutableStateOf<Float?>(null) }
     var dragRight by remember { mutableStateOf<Float?>(null) }
@@ -233,8 +320,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 手势本体复用单播放页那条 pinchZoom（1..4x + 双指平移，第二指才消费，单指滑动不受影响）。
     // 一指各压一栏的双指手势两边都凑不齐两指、两栏都不动，这是自然语义，不需要特殊处理。
     // 左/右标签在 graphicsLayer 之外，缩放时保持原大不跟着糊。
-    val zoomL = remember { mutableStateOf(1f) }
-    val zoomR = remember { mutableStateOf(1f) }
+    val zoomL = remember { mutableFloatStateOf(1f) }
+    val zoomR = remember { mutableFloatStateOf(1f) }
     // 双指平移（2026-10-04）：同样两窗各自独立；pane Box 已 clipToBounds，越界绘制天然裁掉
     val panL = remember { mutableStateOf(Offset.Zero) }
     val panR = remember { mutableStateOf(Offset.Zero) }
@@ -261,7 +348,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 选轨是会话态：换片（含切边）复位回环境轨，口径与单播放页一致
     var audioTrack by remember(audioSideUri) { mutableStateOf(AudioTrackKind.ENV) }
     // 当前音频侧的容器音轨数（MediaExtractor 探测，IO 线程，按 uri 记忆）：>=2 才亮音轨选 pill
-    var audioSideTrackCount by remember(audioSideUri) { mutableStateOf(0) }
+    var audioSideTrackCount by remember(audioSideUri) { mutableIntStateOf(0) }
     // 「当前音频侧是不是双音轨片」的**唯一真源**（MediaExtractor 探测）：UI 的 chip 门与
     // CompareAudio 的行为门同吃这一位。旧实现 UI 门用 countAudioTracks、行为门却用引擎上报的
     // audioGroups.size —— 两源不一致时会「UI 能选、点了没效果」或「双音轨片看不到 chip」。
@@ -287,10 +374,15 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
      * URI 优先后失败按 [MediaRepo.pickClipByUri] 的细分阶段记录：`无回程URI` /
      * `不可读` / `非视频MIME` / `解码失败`（未知异常兜底「读取失败」）；
      * [id] 仅对库内来源有意义，外来来源恒 0。
+     *
+     * [token] 是本次选择动作的代次（[RightPickGate]）：权限探测在 IO 上挂起期间用户可能已经
+     * 改选历史片/取消选择，回来必须先复核代次，旧失败不得再弹权限框或横幅。
      */
-    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String) {
+    suspend fun reportPickFailure(uri: Uri?, id: Long, stage: String, token: Int) {
         // 权限探测里有 isExternalStorageManager 的 binder 调用：放 IO 上做，横幅仍回主线程写
         val access = withContext(Dispatchers.IO) { mediaAccessState(app) }
+        // 探测期间用户改选：这次失败已不是最新意图，丢弃（含权限弹层/横幅/日志）
+        if (!pickGate.isCurrent(token)) return
         // 形态也要记：MediaStore 条目之外的来源（照片选择器/文档 provider）与「权限不足」
         // 是两条完全不同的修法，日志里必须先分清
         val mediaShape = isMediaStoreVideoUri(uri)
@@ -310,6 +402,22 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         }
     }
 
+    /**
+     * 右槽写入的**唯一落地点**（Y35）：代次复核通过才真正换片，并推进 [rightRevision]。
+     * Picker 成功回程、历史面板点选、练习回填全部经这里；任何旁路直接写 `right =` 都会让
+     * 代次门失效（守卫测试锁“CompareContent 内只有此处写右槽”）。
+     *
+     * @return 是否真的写入（false = 结果已过期，调用方不得再清/写横幅等旁路状态）
+     */
+    fun acceptRightClip(clip: VideoClip, token: Int): Boolean {
+        if (!pickGate.isCurrent(token)) return false
+        right = clip
+        rightRevision++
+        offsetMs.longValue = 0L
+        CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
+        return true
+    }
+
     // 右侧视频改走系统图库选择器（ACTION_PICK 直开系统相册）：测试机无 GMS，
     // Photo Picker 会退化成文档界面，ACTION_PICK 才是用户熟悉的相册入口。
     //
@@ -326,30 +434,34 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 个别相册把结果放 ClipData 而不是 data：两个都取，都没有才判「没选成」
             val uri = result.data?.data
                 ?: result.data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-            val seq = ++pickSeq
+            val token = pickGate.newRequest()
             tapScope.launch {
                 if (uri == null) {
-                    reportPickFailure(null, 0L, "无回程URI")
+                    reportPickFailure(null, 0L, "无回程URI", token)
                     return@launch
                 }
                 val outcome = repo.pickClipByUri(uri)
                 // 慢 provider 让先后两次选片乱序返回时，只认最新一次的请求
-                if (seq != pickSeq) return@launch
+                if (!pickGate.isCurrent(token)) return@launch
                 val clip = outcome.clip
                 if (clip == null) {
                     // 失败阶段细分（28 §3.4-2）：不可读/非视频MIME/解码失败直接进日志 stage，
                     // 授权全开还失败的 case 从此一条日志定位
-                    reportPickFailure(uri, 0L, outcome.fail?.label ?: "读取失败")
+                    reportPickFailure(uri, 0L, outcome.fail?.label ?: "读取失败", token)
                 } else {
-                    // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读
+                    // 持久读授权是 best-effort：历史条目日后重播同一条 uri 时仍可读。
+                    // 它是挂起调用（IO 上做 binder），回来再复核一次代次——期间历史改选也算新意图
                     persistPickReadPermission(app, uri)
-                    accessPrompt = null
-                    banner = null
-                    right = clip
-                    offsetMs.value = 0L
-                    CompareHistory.record(prefs, clip.id, uri.toString(), left.id)
+                    if (acceptRightClip(clip, token)) {
+                        accessPrompt = null
+                        banner = null
+                    }
                 }
             }
+        } else {
+            // 用户取消也是「最新动作」：作废仍在等 provider/授权的旧 Picker 回程，
+            // 否则旧结果会在取消之后突然把右片换掉
+            pickGate.invalidate()
         }
     }
 
@@ -357,6 +469,8 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         // 不加 FLAG_GRANT_READ_URI_PERMISSION：它只对启动 intent 自己的 uri 有意义，
         // 结果 uri 的读授权由相册在 result 里自行授予
         banner = null
+        // 新一次选择动作立刻作废所有在途旧回程（无论随后选成还是取消）
+        pickGate.invalidate()
         // 没有 handler（个别 ROM 不注册 ACTION_PICK）时 launch 会抛 ActivityNotFoundException，
         // 不接住就是主线程崩溃；按普通失败提示处理
         runCatching {
@@ -372,19 +486,18 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         val obs = LifecycleEventObserver { _, event ->
             if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
             if (ComparePractice.armed) {
-                ComparePractice.armed = false
-                ComparePractice.pendingRightId = null
+                // 整条意图丢弃（含发起者 id）：旧发起页身份不能留给下一次回程核对（Y51）
+                ComparePractice.disarm()
             }
             val id = ComparePractice.pendingRightId
             if (id != null) {
                 ComparePractice.pendingRightId = null
                 tapScope.launch {
+                    // 练习回填也是一次新的右槽选择（Y35）：先取代次作废在途 Picker 回程，
+                    // 查库挂起期间旧 Picker 晚到也不得越权写入
+                    val token = pickGate.newRequest()
                     val clip = repo.clipByIdOnce(id)
-                    if (clip != null) {
-                        right = clip
-                        offsetMs.value = 0L
-                        CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
-                    }
+                    if (clip != null) acceptRightClip(clip, token)
                 }
             }
         }
@@ -404,12 +517,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         // 域判定看见（REPEAT_ONE 会把位置缩回 0，域判定就永远读不出"左已尽"）
     }
     val r = right
-    LaunchedEffect(r?.uri) {
+    // rightRevision：同 URI 重选时 `r?.uri` 键不变，旧版不会重跑 attach，引擎的错误重试分支
+    // （attach 对同 URI 且 error=true 会 prepare+seek 0）就收不到调用；每次右槽落账都 ++
+    LaunchedEffect(r?.uri, rightRevision) {
         val clip = r ?: return@LaunchedEffect
         rightEngine.attach(clip.uri)
         // 右引擎不开 REPEAT_ONE：它会先于左视频绕回导致错位，绕回改由低频编排 tick 跟随主钟
         rightEngine.loopMode = LoopMode.OFF
-        rightEngine.seekTo(leftEngine.positionMs.value + offsetMs.value)
+        rightEngine.seekTo(leftEngine.positionMs.value + offsetMs.longValue)
     }
 
     // ---- PR 式双轨时间线：几何、统一 seek、当前时刻（片 2/片 3 的落点都在这三枚上） ----
@@ -419,7 +534,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         TimelineGeometry(
             leftDurMs = leftEngine.durationMs.value.takeIf { it > 0L } ?: left.durationMs,
             rightDurMs = rightEngine.durationMs.value.takeIf { it > 0L } ?: (right?.durationMs ?: 0L),
-            offsetMs = offsetMs.value
+            offsetMs = offsetMs.longValue
         )
 
     /** 当前时间线时刻：按素材域取主钟（双素材/左独播=左钟，右独播=右钟−off，末=Tmax） */
@@ -478,7 +593,11 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     geo = timelineGeo(),
                     leftLiveMs = leftEngine.livePositionMs(),
                     rightLiveMs = rightEngine.livePositionMs(),
-                    userPlaying = leftEngine.isPlaying.value || rightEngine.isPlaying.value,
+                    // Y37：播放意图读**独立会话态** wantPlaying，不读两引擎瞬时 isPlaying 并集。
+                    // 双屏等长片同时播完时两台 ExoPlayer 都先落 isPlaying=false，并集会把这拍
+                    // 误判成「用户暂停」，时间线末回绕分支被跳过（停在末帧），回绕意图丢失。
+                    // 并集只留给 UI 启停按钮的图标态，不进 decide。
+                    userPlaying = wantPlaying,
                     abLoopActive = leftEngine.ab.value.let { it.loopEnabled && it.valid },
                     timelineLoop = timelineLoop,
                     dragging = dragLeft != null || dragRight != null || dragUnified != null,
@@ -502,7 +621,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             cmdBlackR = cmd.blackRight
         }
     }
-    LaunchedEffect(r?.uri) {
+    LaunchedEffect(r?.uri, rightRevision) {
         orchestrateLoop()
     }
 
@@ -537,7 +656,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 统一轴全部时间线化（r02）：进度条 fraction、A/B 刻度都是 (x−Tmin)/(Tmax−Tmin)，
     // 当前时刻按素材域取主钟。off=0 时 Tmin=0、Tmax=max(L,R)，双素材段观感与旧单左轴一致
     val rDur = if (rightDur > 0L) rightDur else r?.durationMs ?: 0L
-    val geoNow = TimelineGeometry(leftDuration, rDur, offsetMs.value)
+    val geoNow = TimelineGeometry(leftDuration, rDur, offsetMs.longValue)
     val timelineSpan = geoNow.tMax - geoNow.tMin
     val timelineNow = CompareTimeline.resolveT(geoNow, leftPos, rightPos, domBlackL, domBlackR)
     val unifiedFrac = dragUnified ?: if (timelineSpan > 0L) {
@@ -577,10 +696,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
     // 中途挂上的右轨没有任何起播路径；左轨还可能被选片器 round-trip 的 ON_STOP 软暂停压着。
     // 这里在 attach 之后补一发：用户没显式暂停过（wantPlaying 在册）就按 setPlaying 的
     // 素材感知语义把整条时间线送进播放；显式暂停过则保持静止等手点。key 与 attach effect
-    // 同为 r?.uri 且声明序在后 ⇒ attach 落位后才跑（Compose effect 按声明序启动）。
+    // 同为 (r?.uri, rightRevision) 且声明序在后 ⇒ attach 落位后才跑（Compose effect 按声明序启动）。
     // 选片是用户动作，把它唤起的播放与「回前台不自动续播」（无用户动作、无 effect 重跑）
     // 区分开，两者不冲突。
-    LaunchedEffect(r?.uri) {
+    LaunchedEffect(r?.uri, rightRevision) {
         if (r != null && wantPlaying) setPlaying(true)
     }
 
@@ -595,7 +714,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // 右独播域：主钟=右，步进右引擎（stepFrame 内部 softPause(true)）再把素材位
             // 换算回时间线 T′=素材位−off；跨域另一轨的 park/唤醒交给编排拍
             val target = rightEngine.stepFrame(fwd)
-            seekTimeline(target - offsetMs.value)
+            seekTimeline(target - offsetMs.longValue)
         } else {
             // 双素材域/左独播域：主钟=左。步进=暂停态逐帧看，从钟也要就地停住，
             // 否则它继续走钟、画面两半一动一静（旧实现先 softPause 右引擎同款）
@@ -610,7 +729,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
         launchSync(app, left, clip) { res ->
             syncing = false
             if (res.ok) {
-                offsetMs.value = res.offsetMs
+                offsetMs.longValue = res.offsetMs
                 // r03 重锚：旧形态 seekTo(leftPos+offset) 隐含 T=leftLive，只在双素材域成立，
                 // 独播域发起对齐会把左 park 位错当锚点（负值 coerce 0 的老边角同族）。改走
                 // 统一轴重锚：T 取回调时刻的 currentTimelineMs()（对齐期间时间线在走也不跳，
@@ -661,14 +780,14 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
             // clipToBounds：镜像/缩放是绘制期变换（graphicsLayer 默认不裁剪），不裁会越过
             // 2dp 分隔线压到邻栏（审查 P2；单页全屏无感，分栏后任何一次捏合都可见）
             Box(Modifier.weight(split).fillMaxHeight().clipToBounds().pinchZoom(zoomL, panL)) {
-                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.value, pan = panL.value, mirror = mirror == 1 || mirror == 3)
+                WotaPlayerSurface(engine = leftEngine, modifier = Modifier.fillMaxSize(), scale = zoomL.floatValue, pan = panL.value, mirror = mirror == 1 || mirror == 3)
                 // dormant 轨黑层：常驻节点 alpha 0/1 切换（增删节点会闪帧）。Box 无指针
                 // 处理器不构成命中目标，事件照旧落到画面层；角标在它之后组合、不被盖住。
                 // **alpha 必须在 background 之前**：modifier 链左为外、右为内，`alpha` 只会作用在
                 // 它右边的绘制上；写成 `.background(Black).alpha(x)` 时黑底在黑层之外恒不透明，
                 // 两窗就被常驻纯黑永久盖死（2026-10-06 双黑真因，与 domBlack 位无关）。
                 Box(Modifier.fillMaxSize().alpha(if (domBlackL) 1f else 0f).background(Color.Black))
-                ZoomBadge(zoomL.value, Modifier.align(Alignment.TopStart).padding(8.dp))
+                ZoomBadge(zoomL.floatValue, Modifier.align(Alignment.TopStart).padding(8.dp))
                 SideLabel(stringResource(R.string.compare_left, left.name), Modifier.align(Alignment.TopEnd))
             }
             Box(Modifier.width(2.dp).fillMaxHeight().background(WotaDivider)) {}
@@ -686,17 +805,17 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                         )
                     }
                 } else {
-                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.value, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
+                    WotaPlayerSurface(engine = rightEngine, modifier = Modifier.fillMaxSize(), scale = zoomR.floatValue, pan = panR.value, rotation = rotateR * 90, mirror = mirror == 2 || mirror == 3)
                     // alpha 在 background 之前（同上：反过来黑底恒不透明 → 右窗永久黑）
                     Box(Modifier.fillMaxSize().alpha(if (domBlackR) 1f else 0f).background(Color.Black))
-                    ZoomBadge(zoomR.value, Modifier.align(Alignment.TopStart).padding(8.dp))
+                    ZoomBadge(zoomR.floatValue, Modifier.align(Alignment.TopStart).padding(8.dp))
                     SideLabel(stringResource(R.string.compare_right, r.name), Modifier.align(Alignment.TopEnd))
                     // 右窗旋转钮（观看辅助，逆时针 90°/按）：计划原定右上角与左上 ZoomBadge 对称，
                     // 但右上角已被片名标签 SideLabel 占着（叠放互相遮），按「避开已有控件」条款
                     // 落右缘竖直居中——离上方芯片行/片名标签、下方控制层都最远。钮在 surface 层
                     // 之外，ZoomBadge/片名标签这些角标天然不随旋转移动
                     WotaIconButton(
-                        image = Icons.Outlined.RotateLeft,
+                        image = Icons.AutoMirrored.Outlined.RotateLeft,
                         description = stringResource(R.string.player_rotate_ccw),
                         onClick = { rotateR = nextCcwQuarter(rotateR) },
                         modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
@@ -737,7 +856,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             WotaIconButton(
-                                image = Icons.Outlined.ArrowBack,
+                                image = Icons.AutoMirrored.Outlined.ArrowBack,
                                 description = stringResource(R.string.gallery_desc_back),
                                 onClick = onBack,
                                 size = BarIconSize,
@@ -813,7 +932,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                     modifier = Modifier.align(Alignment.TopStart)
                 ) {
                     WotaIconButton(
-                        image = Icons.Outlined.ArrowBack,
+                        image = Icons.AutoMirrored.Outlined.ArrowBack,
                         description = stringResource(R.string.gallery_desc_back),
                         onClick = onBack,
                         modifier = Modifier.padding(6.dp),
@@ -866,7 +985,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                         val rightLive = rightEngine.livePositionMs()
                                         leftEngine.seekTo(target)
                                         dragLeft = null
-                                        offsetMs.value = rightLive - target
+                                        offsetMs.longValue = rightLive - target
                                     },
                                     modifier = Modifier.weight(1f)
                                 )
@@ -886,7 +1005,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                         val leftLive = leftEngine.livePositionMs()
                                         rightEngine.seekTo(target)
                                         dragRight = null
-                                        offsetMs.value = target - leftLive
+                                        offsetMs.longValue = target - leftLive
                                     },
                                     modifier = Modifier.weight(1f)
                                 )
@@ -958,7 +1077,7 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             TimePill(formatDuration(leftPos))
-                            TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.value)))
+                            TimePill(stringResource(R.string.compare_offset, formatDuration(offsetMs.longValue)))
                             // 第三格=时间线总长（off=0 且右片不长于左片时数值与旧口径一致）
                             TimePill(formatDuration(timelineSpan))
                             // 剪辑语义：当前在播的音频在哪条视频轨的哪条音轨（两条视频轨由左右两窗表达）。
@@ -1009,7 +1128,13 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                                 selected = false,
                                 onClick = {
                                     setPlaying(false)
-                                    ComparePractice.primeWith(left.id)
+                                    // 记发起页身份（Y51）：回程弹栈前核对它是否仍在栈上，
+                                    // 过期回调不再落错栈顶。测试环境本地 LifecycleOwner 不是
+                                    // 导航条目，投射失败即 null（回程退回不校验发起者）。
+                                    ComparePractice.primeWith(
+                                        left.id,
+                                        (practiceOwner as? NavBackStackEntry)?.id
+                                    )
                                     onPractice()
                                 }
                             )
@@ -1099,9 +1224,10 @@ private fun CompareContent(left: VideoClip, onBack: () -> Unit, onPractice: () -
                 prefs = prefs,
                 repo = repo,
                 onPick = { clip ->
-                    right = clip
-                    offsetMs.value = 0L
-                    CompareHistory.record(prefs, clip.id, clip.uri.toString(), left.id)
+                    // 历史改选也是最新右片动作（Y35）：取代次作废在途 Picker 回程，
+                    // 晚到的旧 Picker 结果不得覆盖这次选择
+                    val token = pickGate.newRequest()
+                    acceptRightClip(clip, token)
                     historyOpen = false
                 }
             )
@@ -1169,7 +1295,7 @@ private fun CompareHistorySheet(
     // 解析直接用 LaunchedEffect 自己的协程（一次性反查 clipByIdOnce 自带 IO 切换），不丢进外部 scope：
     // 外部 scope 在换 key 重解析时不会取消上一个任务，旧结果可能反过来盖掉刚删完的新列表。
     var items by remember { mutableStateOf<List<Pair<CompareHistory.Entry, VideoClip?>>>(emptyList()) }
-    var refresh by remember { mutableStateOf(0) }
+    var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(refresh) {
         val resolved = ArrayList<Pair<CompareHistory.Entry, VideoClip?>>()
         CompareHistory.entries(prefs).forEach { entry ->

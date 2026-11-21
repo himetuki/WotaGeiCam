@@ -245,6 +245,35 @@ fun mrReachedMaxFilesize(what: Int, extra: Int): Boolean =
             extra == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED)
 
 /**
+ * MR 路「这条 info/error 回调来自旧实例」的判定（纯函数，JVM 全表单测）。
+ *
+ * 【为什么回调必须验身份】[MrRecorder] 换段走「stop → release → 新实例」，但 `MediaRecorder`
+ * 的 `EventHandler` 把回调投递进**创建它时那个 Looper 的消息队列**，平台不保证「release 之后
+ * 队列里不会有已入队的事件」。真机形态：旧实例的 801/802 或 `MEDIA_ERROR` 在换代之后才送达
+ * `onInfo(mr = 旧实例, ...)` / `onError(mr = 旧实例, ...)`。若照单全收：
+ * - 旧实例迟到的 802/801 会被当成**新段**的换段请求 ⇒ 刚起的新段被立刻切断，换段计数空转；
+ * - 旧实例迟到的 `MEDIA_ERROR` 会把**新段**判废（`failNow`）⇒ 正常录制被一条过期通知杀掉。
+ * 两者都是「上一段的尾巴斩到下一段的头」。
+ *
+ * 【判据只能取身份，取不到代号】平台回调只带 `MediaRecorder` 实例本身，**不携带**任何代次/
+ * 序号，且同一实例的迟到事件与实时事件在载荷上完全一致（`what`/`extra` 相同）——没有任何可用
+ * 的「这是第几代」字段。所以唯一有效的防护是**身份比较**：回调里的实例不是当前在用的那个 ⇒
+ * 旧事件，忽略。
+ *
+ * 【null 的取舍】`reset()` 之后平台可能以 null 实例投递残余事件；此外 JVM 桥测试历史上直接
+ * 以 `onInfo(null, 802, 0)` 驱动换段（平台回调的真实性由 fixture 负责，不受此函数管辖）。
+ * 因此 `callback == null` **不算陈旧**（返回 false，照旧放行）：把 null 当陈旧会把测试与
+ * 「平台以 null 投递合法残余」两种情形一起误杀，而这不会放过真正的 stale——真 stale 一定带
+ * 着旧实例引用。换段是否放行仍由 [mrRotateRequested] 与实例状态把关。
+ *
+ * @param current 当前在用的录制实例（[MrRecorder.mr]）
+ * @param callback 平台回调送来的实例（可为 null）
+ * @return true = 来自旧实例，必须忽略；false = 当前实例或无名（null），照常处理
+ */
+fun mrCallbackIsStale(current: Any?, callback: Any?): Boolean =
+    callback != null && callback !== current
+
+/**
  * 换段「编码输入面交接」判定（纯函数）：新实例的对外编码面是不是**另一个对象**。
  *
  * 【为什么换段要判这件事】2026-10-08 起 [MrRecorder] 换段走「stop → 销毁旧实例 → 新实例

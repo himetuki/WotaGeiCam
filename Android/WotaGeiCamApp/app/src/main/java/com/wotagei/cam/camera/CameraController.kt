@@ -24,6 +24,7 @@ import com.wotagei.cam.core.WotaTag
 import com.wotagei.cam.core.dumpLenses
 import com.wotagei.cam.core.enumerateLenses
 import com.wotagei.cam.core.pickCapabilityDefault
+import com.wotagei.cam.core.resolveLensSlot
 import com.wotagei.cam.diag.Diag as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,11 @@ data class CameraUiState(
      * [currentLens] 只够显示档位名。
      */
     val currentSlot: LensSlot? = null,
+    /**
+     * 镜头切换未决（Y70）：从请求切镜到新槽位开好（[currentSlot] 更新）之前为真。
+     * 站位分析据此先停：旧会话的帧带着旧 FOV，不能喂给按新画幅构建的判定与叠框。
+     */
+    val lensSwitching: Boolean = false,
     val analysisDecision: AnalysisSessionDecision = AnalysisSessionDecision.ABSENT
 )
 
@@ -100,7 +106,13 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         fpsDowngrade.value = null
     }
 
-    private var engine: Camera2Engine? = null
+    @Volatile private var engine: Camera2Engine? = null
+
+    /**
+     * 引擎代（Y07）：每次 [bind] 新建引擎 +1。帧计数只在同一代内可比，替代引擎的
+     * `camResultTotal` 从 0 起步，看门狗必须换代重建基线，不能把 0 当成进展。
+     */
+    private var engineEpoch = 0L
     private var analysisSessionOwner: Any? = null
 
     /**
@@ -109,6 +121,23 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
      * [onCleared] 的最终兜底也优先委托 [analysisOwnerRelease]，避免 Main 与在途帧并发关闭。
      */
     private var analysisTarget: Pair<Surface, ImageReader?>? = null
+
+    /**
+     * DIRECT 录制面（R04）：跨引擎重建/换段都要原样重放给新引擎。只保管身份，**不拥有生命周期**
+     * ——Surface 由 Recorder 段实例创建并释放，Controller 绝不能 close。
+     */
+    private data class RecordingTarget(val surface: Surface, val reader: ImageReader?, val epoch: Int)
+
+    private val recordingTargetLock = Any()
+    private var recordingTarget: RecordingTarget? = null
+    private var recordingTargetEpoch = 0
+
+    /**
+     * 录制业务窗口（含 PREPARE，R02/R04）：page/activity 看门狗在窗口内不得 restartPreview /
+     * forceRebind，否则会在编码器已拿面、会话正在交接时拆掉相机。由 RecordRunner 显式开关。
+     */
+    @Volatile
+    private var recordingActive = false
 
     /** 宿主注入：Controller 销毁时把 reader 收尾排到分析 owner 线程；未注入才退回本层兜底。 */
     var analysisOwnerRelease: (() -> Unit)? = null
@@ -192,8 +221,80 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     /** GPU 预览引擎的**页面级缓存**：跨设置往返复用同一实例（SurfaceTexture 活着 = 会话不用重建）。释放权在 [onCleared]，页面 dispose 不再碰它 */
     private var cachedGlSink: GlRenderEngine? = null
 
+    /**
+     * GL 引擎代（R05）：每次因 EGL 上下文丢失而整条换掉缓存实例就 +1。
+     *
+     * CameraScreen 必须把它作为 `remember(renderMode, glSinkEpoch)` 的键——否则页面里的
+     * `activeSink` 还指向已失效的旧实例，恢复后 bind 的仍是死引擎。
+     */
+    private val glSinkEpochFlow = MutableStateFlow(0)
+    val glSinkEpoch: StateFlow<Int> = glSinkEpochFlow
+
+    /** 上下文丢失事件（reason）；一次性广播，恢复动作由本类自己完成，UI 只用于提示/取证 */
+    private val glContextLostFlow = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val glContextLost: SharedFlow<String> = glContextLostFlow
+
+    /** 恢复结果提示（成功/失败都不许静默；UI 走现有 tip/HUD 通道显示） */
+    private val glRecoveryNoticeFlow = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val glRecoveryNotice: SharedFlow<String> = glRecoveryNoticeFlow
+
+    private fun newGlSink(): GlRenderEngine {
+        val sink = GlRenderEngine()
+        // onContextLost 在 GL 线程触发；publishOnMain 切到主线程串行化恢复动作
+        sink.onContextLost = { reason ->
+            publishOnMain { onGlContextLost(sink, reason) }
+        }
+        return sink
+    }
+
     /** GPU 预览引擎取用口：首次创建，之后同一实例（组合销毁重建也拿回同一个） */
-    fun glSink(): GlRenderEngine = cachedGlSink ?: GlRenderEngine().also { cachedGlSink = it }
+    fun glSink(): GlRenderEngine = cachedGlSink ?: newGlSink().also { cachedGlSink = it }
+
+    /**
+     * R05：GL 上下文丢失后的**唯一恢复入口**（主线程）。
+     *
+     * 顺序不可换：先关相机会话（停止向死引擎喂帧）→ 释放旧引擎（其 EGL 对象已失效，
+     * 绝不复用）→ 新建实例 → 重新 bind/start → 请求重挂显示面。旧实例的释放**恰好一次**：
+     * 本方法是相机页面上唯一同时持有 `cachedGlSink` 与 `boundSink` 的路径。
+     *
+     * @param lost 触发本次恢复的实例；null = 手动恢复当前缓存实例。
+     * @return 新引擎；没有可恢复实例（或缓存已被别的路径替换）时返回当前缓存。
+     */
+    fun recoverGlSink(lost: GlRenderEngine? = null): GlRenderEngine? {
+        val old = lost ?: cachedGlSink ?: return null
+        // 恢复动作晚到（页面已切 DIRECT / 已被另一条路径换过）：只认当前缓存，不误杀新实例
+        if (cachedGlSink !== old) return cachedGlSink
+        old.onContextLost = null
+        val wasBound = boundSink === old
+        // 只有还连着旧 sink 的相机会话需要拆除。已切到 DIRECT 时，迟到的 GL 回调不碰当前会话。
+        if (wasBound) {
+            engine?.close()
+            engine = null
+            analysisSessionOwner = null
+            boundSink = null
+            ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
+        }
+        old.release()
+        val fresh = if (wasBound && previewWanted) newGlSink() else null
+        cachedGlSink = fresh
+        glSinkEpochFlow.value += 1
+        if (fresh != null) {
+            pendingStart = true
+            bind(fresh)
+            requestDisplayReattach()
+            glRecoveryNoticeFlow.tryEmit("渲染中断，正在恢复预览")
+        }
+        Log.i("WotaCam", "GL 上下文恢复：旧引擎已释放，新引擎 epoch=${glSinkEpochFlow.value} 预览意图=$previewWanted")
+        return fresh
+    }
+
+    private fun onGlContextLost(lost: GlRenderEngine, reason: String) {
+        // 回调由 GL 线程发出，可能在已经换过实例后才抵达 Main。
+        if (cachedGlSink !== lost) return
+        if (boundSink === lost) glContextLostFlow.tryEmit(reason)
+        Log.w("WotaCam", "GL 上下文丢失：$reason ⇒ 重建渲染引擎")
+        recoverGlSink(lost)
+    }
 
     /** 枚举期间收到的换挡请求先记一笔，等当前这次跑完补做一次（不排队成一串，只做最后一次即可） */
     private var reloadWanted = false
@@ -217,14 +318,22 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         boundSink = sink
         val sessionOwner = Any()
         analysisSessionOwner = sessionOwner
+        // Y07：新引擎的帧计数从 0 起步——换代发号让看门狗能区分"换引擎"与"真涨帧"。
+        engineEpoch++
         engine = Camera2Engine(
             context = getApplication(),
             params = params,
             sink = sink,
             scope = bus,
-            onDeviceStatus = { status -> publishOnMain { ui.value = ui.value.copy(device = status) } },
-            onPreviewStatus = { status -> publishOnMain { ui.value = ui.value.copy(preview = status) } },
-            onFpsDowngraded = { to -> publishOnMain { fpsDowngrade.value = to } },
+            onDeviceStatus = { status -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(device = status)
+            } },
+            onPreviewStatus = { status -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(preview = status)
+            } },
+            onFpsDowngraded = { to -> publishOnMain {
+                if (analysisSessionOwner === sessionOwner) fpsDowngrade.value = to
+            } },
             onAnalysisSessionDecision = { decision -> publishOnMain {
                 if (analysisSessionOwner === sessionOwner) ui.value = ui.value.copy(analysisDecision = decision)
             } }
@@ -239,6 +348,18 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                 analysisTarget = null
             }
         }
+        // 录制面跨引擎重建重放（R04）：GPU 路不适用（面走 GL），DIRECT 面失效只摘槽——Surface
+        // 的所有权在 Recorder 段实例，Controller 不 close，避免误杀仍在收尾的编码器。
+        synchronized(recordingTargetLock) {
+            recordingTarget?.let { target ->
+                if (target.surface.isValid) {
+                    engine?.setExtraTarget(target.surface, target.reader, target.epoch)
+                } else {
+                    recordingTarget = null
+                }
+            }
+        }
+        if (engine != null) engine?.setRecordingWindowActive(recordingActive)
         if (pendingStart) start()
     }
 
@@ -298,6 +419,14 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     fun frameResultCount(): Long? = engine?.frameResultCount()
 
     /**
+     * 相机存活快照（Y07）：**代数与单调帧计数同代读出**，替代裸 [frameResultCount] 的跨代比较。
+     * 看门狗用 [CameraWatchClock] 消费：换代 = 重建基线（0 帧不算进展），首帧到达才推进基准。
+     * null = 引擎不在（调用方按"无引擎"计时，不许拿旧代计数继续判活）。
+     */
+    fun cameraHealth(): CameraHealth? =
+        engine?.let { CameraHealth(engineEpoch, it.frameResultCount()) }
+
+    /**
      * 上屏帧累计数（窗口面 swap 成功数，单调）。**与 [frameResultCount] 是两条独立的心跳**：
      * 前者证明"相机在出帧"，它证明"屏上真的换了一帧"。2026-10-30 真机日志里出现过相机 3A
      * 遥测照常 1Hz、GL 一帧未画的黑屏——只有这一条能观测到那种死法。
@@ -310,7 +439,11 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
 
     // ------------------------------------------------- 上屏面重挂（黑屏自愈第三级）
 
-    private val reattachRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    // Y52 同拍重挂：recoverGlSink 在主线程同一拍先 bind 新 sink、再 requestDisplayReattach；
+    // 此时组合尚未重组，旧 collector 仍是唯一订阅者。replay=0 会把请求只送给旧持有者，
+    // 新 collector 启动后收不到，新承载视图的 epoch 不推进。replay=1 让新 collector 补收这一枚；
+    // 重复一次重挂是幂等的（只重建一次承载视图），而漏掉会让新 GL 引擎一直没有窗口面。
+    private val reattachRequests = MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 1)
 
     /**
      * 上屏面重挂请求：页面收到后**重建承载视图**（新 `TextureView` ⇒ 新 `SurfaceTexture` ⇒
@@ -381,6 +514,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         analysisSessionOwner = null
+        // 关相机 = 录制链已无面可交接；只摘引用，Surface 仍由 Recorder 段实例释放。
+        synchronized(recordingTargetLock) { recordingTarget = null }
+        recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
     }
@@ -443,9 +579,13 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
         engine?.close()
         engine = null
         analysisSessionOwner = null
+        synchronized(recordingTargetLock) { recordingTarget = null }
+        recordingActive = false
         ui.value = ui.value.copy(analysisDecision = AnalysisSessionDecision.ABSENT)
         boundSink = null
         // GL 引擎的释放权在这里（页面 dispose 不再 release）：跨设置往返复用同一实例
+        // 先摘丢失回调：销毁期的 teardown 失败不应再触发一次"恢复"
+        cachedGlSink?.onContextLost = null
         cachedGlSink?.release()
         cachedGlSink = null
         bus.cancel()
@@ -501,6 +641,9 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             return
         }
         busyLoading = true
+        // Y70：从这一刻到新槽位发布（currentSlot 更新）之间，旧会话的帧不再属于当前镜头——
+        // UI 据此让站位分析先停，别拿旧 FOV 的帧喂新画幅的判定。
+        ui.value = ui.value.copy(lensSwitching = true)
         bus.launch {
             try {
                 val manager = cameraManager()
@@ -533,6 +676,12 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
                 e.startPreview()
             } finally {
                 busyLoading = false
+                // Y70：切换窗必须在这里闭合，而且必须**无条件**先落 false：
+                // 别写成「无接力才复位」——接力路径里 openCurrentLens 会在 `engine == null` /
+                // `!previewWanted` 时于置 true 之前早退，lensSwitching 就永久停在 true，站位分析
+                // 再也不接回。先 false 再接力置 true 是同一 Main 拍内的两写，StateFlow 合并后
+                // 观察者只看到最终态，不会多出一次 attach/detach。
+                if (ui.value.lensSwitching) ui.value = ui.value.copy(lensSwitching = false)
                 // 只为仍有效的最新意图接力。旧结果被丢弃也要释放 busy，不能吞掉后来 resume/rebind。
                 val reload = reloadWanted || request != startupGeneration
                 reloadWanted = false
@@ -556,10 +705,7 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
             }
         }
         // 先认槽位（同档位多颗时才准），再退到档位名，最后退到列表首颗
-        return lensSlots.firstOrNull { it.key == chosenSlotKey }
-            ?: lensSlots.firstOrNull { it.type == params.lens.value }
-            ?: lensSlots.firstOrNull { it.type == LensType.WIDE }
-            ?: lensSlots.firstOrNull()
+        return resolveLensSlot(lensSlots, chosenSlotKey, params.lens.value)
     }
 
     /** 切镜头 = 整套能力换挡：重收 range 并回填默认值 */
@@ -628,9 +774,26 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     // ------------------------------------------------- 与其他模块的接缝
 
     /** record 包登记编码面；GPU 模式下引擎不会把它挂进相机会话（由 GL 承接） */
-    fun setRecordingTarget(surface: Surface?, reader: ImageReader? = null) {
-        engine?.setExtraTarget(surface, reader)
+    fun setRecordingTarget(surface: Surface?, reader: ImageReader? = null): Int = synchronized(recordingTargetLock) {
+        val epoch = if (surface == null) 0 else ++recordingTargetEpoch
+        recordingTarget = surface?.let { RecordingTarget(it, reader, epoch) }
+        engine?.setExtraTarget(surface, reader, epoch)
+        epoch
     }
+
+    /**
+     * 录制业务窗口（R02/R04）。RecordRunner 在 PREPARE 前置真、停录收尾后置假；
+     * 看门狗与曝光探测都以它为准，不能只看 `extraSurface`（GPU 录制没有额外相机面）。
+     */
+    fun setRecordingActive(active: Boolean) {
+        recordingActive = active
+        engine?.setRecordingWindowActive(active)
+    }
+
+    fun isRecordingActive(): Boolean = recordingActive
+
+    /** 当前引擎的会话就绪快照（R01）；null = 还没绑引擎。 */
+    fun sessionReadiness(): CameraSessionReadiness? = engine?.sessionReadiness()
 
     /**
      * 站位分析流挂/摘（方案 32 M2）：独立槽位，GPU/DIRECT 两种渲染模式都进会话。
@@ -662,13 +825,23 @@ class CameraController(app: Application) : AndroidViewModel(app), DefaultLifecyc
     }
 
     /**
-     * 当前镜头的 `CameraCharacteristics`（站位分析流选 YUV 尺寸用，2026-11-07）。
-     * 不在枚举完成窗口时返回 null——调用方回退 640x480 默认档，不猜能力。
+     * 当前镜头的 `CameraCharacteristics`（站位分析流选 YUV 尺寸用，2026-11-07；Y08）。
+     *
+     * **只读枚举期快照**：开关点击 / 回页补挂都在 Main 上走到这里，同步
+     * `CameraManager.getCameraCharacteristics` 在冷启或相机服务拥塞时会卡住入口。
+     * 枚举（[openCurrentLens] 的 IO 段）读到的 characteristics 已随 [LensSlot] 留下，
+     * 这里直接取回同一份；快照缺失（还没枚举完/旧槽位）返回 null，调用方回退 640x480，
+     * 不猜能力、也不在调用线程补查。
      */
     fun currentCharacteristics(): CameraCharacteristics? {
-        val id = ui.value.currentSlot?.logicId ?: return null
-        return runCatching { cameraManager().getCameraCharacteristics(id) }.getOrNull()
+        return ui.value.currentSlot?.characteristics
     }
+
+    /**
+     * B14：当前引擎实测的裁剪区宽高比（`SCALER_CROP_REGION`）。只读旁路，不触发会话重建；
+     * 引擎不在或帧回执未到时返回 null（叠加侧回退枚举 active-array 并标注证据等级）。
+     */
+    fun sensorCropAspect(): Float? = engine?.sensorCropAspect()
 
     /** 批量写多个参数后手动统一下发一次（引擎自身已按 5ms 合并，通常不需要调） */
     fun applyParams() {

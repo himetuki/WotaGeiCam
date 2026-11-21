@@ -75,7 +75,7 @@ class ExportTrackSelectionGuardTest {
             // 页面把快照交给宿主（track = clipTrack / offsetMs = offset），宿主原样送进导出器
             flatten(player).contains("track = clipTrack") &&
                 flatten(player).contains("offsetMs = offset") &&
-                host.contains("clipExporter.export(clip, aMs, bMs, track, offsetMs)")
+                host.contains("clipExporter.export(clip, aMs, bMs, track, offsetMs,")
         )
         assertTrue("选轨必须是按片重置的会话态", player.contains("var clipTrack by remember(clip.uri)"))
     }

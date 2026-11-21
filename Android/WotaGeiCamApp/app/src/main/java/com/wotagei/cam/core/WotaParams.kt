@@ -78,7 +78,12 @@ class WotaParams(private val scope: CoroutineScope) {
      */
     fun setFps(next: ParamState<Int>) {
         fps.value = next
-        lastAbility?.let { applyExposure(it, next.value) }
+        lastAbility?.let {
+            applyExposure(it, next.value)
+            // Y04：换到更快的档位后，原有手动组合可能变成「最短曝光 > 帧周期」的无解组合，
+            // 准入必须同一拍重判（否则 UI 还停在手动档，下发的是越界请求）。
+            applyModeGates(it, next.value)
+        }
     }
 
     /**
@@ -191,6 +196,13 @@ class WotaParams(private val scope: CoroutineScope) {
     /** 实际生效的纠偏值（等号档 + 手动档才有意义，null = 不适用）；引擎回写，UI 只读 */
     val actualCorrectionNs = MutableStateFlow<Long?>(null)
 
+    /**
+     * HAL **结果侧**回报的实际曝光（`SENSOR_EXPOSURE_TIME`，null = 未观测/会话不在）。
+     * 与 [actualSentExposureNs]（我方写进请求的值）独立：设备范围夹取、HAL 改写、等号档处理
+     * 只体现在这里。引擎按 500ms 节流采样，UI 只读。
+     */
+    val actualHalExposureNs = MutableStateFlow<Long?>(null)
+
     val wbMode = MutableStateFlow(WbPreset.AUTO)
     val kelvin = MutableStateFlow(ParamState(5500))
     val tint = MutableStateFlow(ParamState(0))
@@ -257,7 +269,7 @@ class WotaParams(private val scope: CoroutineScope) {
         applyZoom(a)
         applyFocus(a)
         applyWhiteBalance(a)
-        applyModeGates(a)
+        applyModeGates(a, targetFps)
 
         // activeArray 随镜头变化，旧点按坐标语义失效（换算依赖 activeArray）
         focusPoint.value = null
@@ -408,8 +420,22 @@ class WotaParams(private val scope: CoroutineScope) {
         if (!sizeCloseTo(size.value, picked, VideoSizeCandidates.TOLERANCE_PX)) size.value = picked
     }
 
-    private fun applyModeGates(a: CameraAbility) {
-        if (aeMode.value == AeMode.MANUAL && !a.manualExposurePossible()) aeMode.value = AeMode.AUTO
+    /**
+     * 模式闸（能力换了就得重判）：AE 手动档的准入是**帧率相关**的，所以和曝光域同一拍、
+     * 吃同一支镜头帧率档位 [fps]（Y04）。
+     */
+    private fun applyModeGates(a: CameraAbility, fps: Int) {
+        // Y04：设备给手动曝光 ≠ 这个帧率下手动曝光有解。「设备最短曝光 20ms + 60fps」这种组合
+        // 进 MANUAL 后，clampShutterNs 会把快门抬到设备下限、曝光纠偏再压回帧周期 ⇒ 下发越界请求。
+        // 与能力缺失同一条「做不到就回弹」的纪律，但必须可归因（一行写清是哪条分支回弹的）。
+        if (aeMode.value == AeMode.MANUAL && !a.manualExposurePossibleAt(fps)) {
+            aeMode.value = AeMode.AUTO
+            com.wotagei.cam.diag.Diag.w(
+                "WotaExp",
+                "手动曝光回弹 AUTO：manualPossible=${a.manualExposurePossible()} fps=$fps" +
+                    " exposureNs=${a.exposureNs}（该帧率下曝光范围与帧周期无交集，手动快门无解）"
+            )
+        }
         if (!a.flashAvailable) flash.value = Flash.OFF
         stabilize.value = when (stabilize.value) {
             Stabilize.OIS -> if (a.oisAvailable) Stabilize.OIS else Stabilize.OFF

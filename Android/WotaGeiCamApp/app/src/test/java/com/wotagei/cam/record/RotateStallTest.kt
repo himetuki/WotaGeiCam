@@ -319,7 +319,7 @@ class RotateStallTest {
         val slowFail = io.run(20L) { Thread.sleep(400L); throw IllegalStateException("late boom") }
         assertTrue("慢调用的异常不许回抛（调用方已判超时，只认 TimedOut）", slowFail is Bounded.TimedOut)
         // 3) 快调用里的 null 是合法值（泛型 T 本身可空），不许与"没拿到"混为一谈
-        val nullOk = io.run(2_000L) { null as String? }
+        val nullOk = io.run<String?>(2_000L) { null }
         assertTrue("null 必须是 Done(null) 而不是 TimedOut", nullOk is Bounded.Done)
         assertNull("值必须原样为 null", (nullOk as Bounded.Done).value)
     }
@@ -378,9 +378,10 @@ class RotateStallTest {
     fun `交接闸_正常腿可取走pending`() {
         val dropped = ArrayList<String>()
         val h = OneShotHandoff<String> { dropped.add(it) }
-        assertTrue("首次交给闸", h.publish("u1"))
-        assertEquals("取走", "u1", h.claim())
-        assertNull("取走即空", h.claim())
+        val gen = h.reset()
+        assertTrue("首次交给闸", h.publish(gen, "u1"))
+        assertEquals("取走", "u1", h.claim(gen))
+        assertNull("取走即空", h.claim(gen))
         assertTrue("没有垃圾回收", dropped.isEmpty())
     }
 
@@ -388,8 +389,9 @@ class RotateStallTest {
     fun `交接闸_判停摆后晚到的pending就地回收`() {
         val dropped = ArrayList<String>()
         val h = OneShotHandoff<String> { dropped.add(it) }
-        assertNull("先判停摆：没有已落地的那枚", h.abandon())
-        assertFalse("停摆后再交上来=不上交", h.publish("late"))
+        val gen = h.reset()
+        assertNull("先判停摆：没有已落地的那枚", h.abandon(gen))
+        assertFalse("停摆后再交上来=不上交", h.publish(gen, "late"))
         assertEquals("晚到的那枚必须被回收（否则相册留 IS_PENDING 幽灵）", listOf("late"), dropped)
     }
 
@@ -397,24 +399,26 @@ class RotateStallTest {
     fun `交接闸_先落地再判停摆_由泵线程回收`() {
         val dropped = ArrayList<String>()
         val h = OneShotHandoff<String> { dropped.add(it) }
-        assertTrue(h.publish("u1"))
-        assertEquals("判停摆要把已落地的那枚交出来回收", "u1", h.abandon())
+        val gen = h.reset()
+        assertTrue(h.publish(gen, "u1"))
+        assertEquals("判停摆要把已落地的那枚交出来回收", "u1", h.abandon(gen))
         assertTrue("回收由调用方做（交接闸只负责交出来）", dropped.isEmpty())
-        assertNull("已交出即空", h.abandon())
+        assertNull("已交出即空", h.abandon(gen))
     }
 
     @Test
-    fun `交接闸_空值与复位`() {
+    fun `交接闸_空值与换代`() {
         val dropped = ArrayList<String>()
         val h = OneShotHandoff<String> { dropped.add(it) }
-        assertFalse("insert 失败（null）不算交接", h.publish(null))
+        val g1 = h.reset()
+        assertFalse("insert 失败（null）不算交接", h.publish(g1, null))
         assertTrue(dropped.isEmpty())
-        assertTrue(h.publish("u1"))
-        h.reset()
-        assertEquals("复位必须就地回收上一轮留在闸里的那一枚（只丢引用=幽灵）", listOf("u1"), dropped)
-        assertNull("复位要清空上一腿的落地值", h.claim())
-        assertTrue("复位后重新可用", h.publish("u2"))
-        assertEquals("u2", h.claim())
+        assertTrue(h.publish(g1, "u1"))
+        val g2 = h.reset()
+        assertEquals("换代必须就地回收上一代留在闸里的那一枚（只丢引用=幽灵）", listOf("u1"), dropped)
+        assertNull("换代要清空上一代的落地值", h.claim(g2))
+        assertTrue("换代后重新可用", h.publish(g2, "u2"))
+        assertEquals("u2", h.claim(g2))
     }
 
     @Test
@@ -423,10 +427,11 @@ class RotateStallTest {
         // 不许让两枚 pending 同时在场（旧的那枚没人管就是幽灵），也不许把新插入的那枚丢掉
         val dropped = ArrayList<String>()
         val h = OneShotHandoff<String> { dropped.add(it) }
-        assertTrue("第一次尝试上交", h.publish("stale"))
-        assertFalse("第二次尝试的同腿插入必须被拒（闸里已有在场的那枚）", h.publish("fresh"))
+        val gen = h.reset()
+        assertTrue("第一次尝试上交", h.publish(gen, "stale"))
+        assertFalse("第二次尝试的同腿插入必须被拒（闸里已有在场的那枚）", h.publish(gen, "fresh"))
         assertEquals("被拒的那枚必须就地回收（不许留两枚）", listOf("fresh"), dropped)
-        assertEquals("在场的那枚仍可取走（本腿只认一枚，可用的那枚不丢）", "stale", h.claim())
+        assertEquals("在场的那枚仍可取走（本腿只认一枚，可用的那枚不丢）", "stale", h.claim(gen))
     }
 
     @Test
@@ -436,15 +441,16 @@ class RotateStallTest {
         repeat(200) {
             val handed = java.util.Collections.synchronizedList(ArrayList<String>())
             val h = OneShotHandoff<String> { handed.add(it) }
+            val gen = h.reset()
             val gate = CountDownLatch(1)
             val worker = Thread {
                 gate.await()
-                h.publish("u")
+                h.publish(gen, "u")
             }
             worker.isDaemon = true
             worker.start()
             gate.countDown()
-            val reclaimed = h.abandon()
+            val reclaimed = h.abandon(gen)
             worker.join(2_000L)
             val total = handed.size + (if (reclaimed != null) 1 else 0)
             assertEquals("第 $it 轮：u 必须恰好被处置一次（回收或上交）", 1, total)

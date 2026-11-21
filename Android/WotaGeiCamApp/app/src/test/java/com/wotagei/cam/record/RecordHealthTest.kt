@@ -569,6 +569,31 @@ class RecordHealthTest {
         assertFalse("两面都取不到 ⇒ 不交接", rotateSurfaceHandoffNeeded(null, null))
     }
 
+    // ------------------------------------------------------------------ mrCallbackIsStale
+
+    /**
+     * MR 回调（迟到）归属全表：判据只能是**对象身份**，因为平台回调不携带代次。
+     *
+     * 头两行是防护本体；`null` 那两行是历史口径（桥测试与平台残余事件都以 null 投递）——
+     * 把 null 判成陈旧会让既有的换段接线测试全红，且不会放过任何真 stale。
+     * 末尾那对"结构相等、身份不同"的替身专门钉住 `!==`（写成 `!=` 会判成同一声道而放行）。
+     */
+    @Test
+    fun `mrCallbackIsStale 只按对象身份判旧实例`() {
+        val current = Any()
+        assertFalse("当前实例的回调 ⇒ 处理", mrCallbackIsStale(current, current))
+        assertTrue("另一个实例 ⇒ 旧回调，忽略", mrCallbackIsStale(current, Any()))
+        assertFalse("null 回调（平台残余/桥测试口径）⇒ 不按陈旧拦", mrCallbackIsStale(current, null))
+        assertTrue("当前实例已置空而回调带着实例 ⇒ 旧回调", mrCallbackIsStale(null, Any()))
+        assertFalse("两边都无名 ⇒ 放行（是否换段另有实例状态把关）", mrCallbackIsStale(null, null))
+
+        val a = FakeSurfaceLike(3)
+        val b = FakeSurfaceLike(3)
+        assertEquals("前置：替身必须结构相等（否则测不出身份/相等的区别）", a, b)
+        assertFalse("同一对象 ⇒ 处理", mrCallbackIsStale(a, a))
+        assertTrue("结构相等但非同一对象 ⇒ 仍算旧实例（不许按 equals 判）", mrCallbackIsStale(a, b))
+    }
+
     // ------------------------------------------------------------------ engineWatchdogTrips
 
     /**

@@ -12,7 +12,8 @@ import org.junit.Test
 
 /**
  * 预校准接线守卫（重行为在真机，JVM 锁源文结构）：
- * - beginSession 顺序：prepare → 检查点② → preflight → 复查 `stopRequested || pendingStop` → setRecordingTarget；
+ * - beginSession 顺序：prepare → 检查点② → preflight → 复查 `sessionAborted() || pendingStop` → setRecordingTarget；
+ *   （R05：取消信号统一走 sessionAborted()——其核含 stopRequested，另把"本会话途中 GL 上下文丢失"并入）
  * - feedAudioInput 真的把 ptsShiftUs 加进喂编码器的 PTS；
  * - 每段新建的 cap AudioChannel 继承会话级 preCalShiftUs（环境恒 0）。
  *
@@ -25,13 +26,13 @@ class PreflightWiringGuardTest {
     private fun beginSessionOrderViolations(body: String): List<String> {
         val b = flatten(body)
         val prepare = b.indexOf("rec.prepare(profile, sink)")
-        val cancelDef = b.indexOf("val preflightCancelled = { stopRequested || pendingStop }")
+        val cancelDef = b.indexOf("val preflightCancelled = { sessionAborted() || pendingStop }")
         val preflight = b.indexOf("rec.preflightAudioSync(preflightCancelled)")
         val recheck = b.indexOf("if (preflightCancelled())", if (preflight >= 0) preflight else 0)
         val target = b.indexOf("ctrl.setRecordingTarget(surface)")
         val bad = ArrayList<String>()
         if (prepare < 0) bad.add("找不到 rec.prepare")
-        if (cancelDef < 0) bad.add("预校准取消信号必须同时看 stopRequested 与 pendingStop")
+        if (cancelDef < 0) bad.add("预校准取消信号必须同时看 sessionAborted()（含 stopRequested）与 pendingStop")
         if (preflight < 0) bad.add("beginSession 未调用 rec.preflightAudioSync")
         if (target < 0) bad.add("找不到 ctrl.setRecordingTarget(surface)")
         if (prepare >= 0 && preflight >= 0 && prepare >= preflight) {
@@ -54,10 +55,10 @@ class PreflightWiringGuardTest {
             emptyList<String>(),
             beginSessionOrderViolations(body)
         )
-        // 突变 1：取消信号退回只看 stopRequested（PREPARE 点停打不断 800ms 采集）
+        // 突变 1：取消信号漏 pendingStop（PREPARE 点停打不断 800ms 采集）
         val mutantLambda = body.replace(
-            "val preflightCancelled = { stopRequested || pendingStop }",
-            "val preflightCancelled = { stopRequested }"
+            "val preflightCancelled = { sessionAborted() || pendingStop }",
+            "val preflightCancelled = { sessionAborted() }"
         )
         assertTrue("取消信号漏 pendingStop 的突变体必须报红", beginSessionOrderViolations(mutantLambda).isNotEmpty())
         // 突变 2：事后不复查（白等后仍 start）

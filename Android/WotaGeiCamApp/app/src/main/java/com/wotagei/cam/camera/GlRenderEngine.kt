@@ -50,6 +50,13 @@ private const val TAG_GL = "WotaGl"
 private const val BYTES_PER_FLOAT = 4
 
 /**
+ * `EGL_CONTEXT_LOST`（Khronos EGL 1.5，0x300E）。Android 的 [EGL14] 没有导出这枚常量，
+ * 但它确实会从 `eglGetError()` 返回——不同机型在 GPU 复位/驱动重启/长时间后台后都可能遇到。
+ * R05 的唯一识别条件（见 [GlRenderEngine.handleContextLost]）。
+ */
+private const val EGL_CONTEXT_LOST = 0x300E
+
+/**
  * 窗口面入口契约（对 `PreviewSink` 的必要补充，不是改名）。
  *
  * `PreviewSink` 是「拉」模型（Camera2 侧调 [PreviewSink.cameraTargets] 取目标面），缺一条把
@@ -229,6 +236,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     @Volatile
     private var glReady = false
 
+    /**
+     * EGL 上下文已丢失（`EGL_CONTEXT_LOST`，0x300E）——**本实例从此不可复用**。
+     *
+     * R05：此前 `makeCurrent` 失败只打一行日志就 `return`，`drawFrame` 每帧空转、相机照常
+     * 出帧、屏上永久黑，看门狗只能看到「相机在出帧但上屏不换帧」而反复重挂面——重挂一个
+     * 已经失效的 EGL 上下文永远不会成功。现在把丢失当成**终态**上报：引擎停止一切绘制，
+     * 由所有权方（CameraController）释放本实例并整条重建（新 EGL/context/GL 资源/
+     * SurfaceTexture），不允许"还在旧上下文上继续画"的隐藏降级。
+     *
+     * 只由 GL 线程写；[isContextLost] 给任意线程读。
+     */
+    @Volatile
+    private var contextLost = false
+
+    /**
+     * 上下文丢失回调（GL 线程触发一次）。所有权方必须换掉本引擎实例：
+     * 旧实例的 EGL 对象已失效，任何 in-place 复用都是未定义行为。
+     */
+    @Volatile
+    var onContextLost: ((reason: String) -> Unit)? = null
+
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglConfig: EGLConfig? = null
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -254,6 +282,33 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     /** 编码面的 Surface 本体。GL 线程写、录制控制线程经 [isEncoderSurfaceNative] 读 → 必须 @Volatile */
     @Volatile
     private var encoderNative: Surface? = null
+
+    /**
+     * 编码面**就绪身份快照**（R01/Y28 等待谓词的读对象）：native 面与 EGL 窗口面绑定成一个
+     * 不可变整体**一次性**发布。
+     *
+     * 为什么要这枚快照：此前 native 与 egl 是两个独立 volatile 字段，GL 线程逐个写——读方
+     * （录制控制线程的等待谓词）可能拿到**混合快照**（新 native + 旧 egl，或反之），谓词命中了
+     * 却并不是"GL 真的绑定在这枚面上"。快照只在 `eglCreateWindowSurface` 成功**之后**赋，
+     * 任何解绑/失活路径在置空字段的同时清掉它。
+     */
+    private class EncoderTarget(val native: Surface?, val egl: EGLSurface?) {
+        fun bound(): Boolean = native != null && egl != null
+    }
+
+    /** 跨线程读用的就绪身份快照；仅由 [publishEncoderTarget]/[clearEncoderTarget] 管理 */
+    @Volatile
+    private var encoderTarget: EncoderTarget? = null
+
+    /** 字段写完后**整体**发布（只许在面真正建好后调用） */
+    private fun publishEncoderTarget() {
+        encoderTarget = EncoderTarget(encoderNative, encoderEglSurface)
+    }
+
+    /** 失活/解绑前先清身份：读方不得再拿到"这枚面还绑着"的旧快照 */
+    private fun clearEncoderTarget() {
+        encoderTarget = null
+    }
 
     @Volatile
     private var encoderWidth = 0
@@ -565,11 +620,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     private var echoStaleSinceOrientationChange = false
 
     /**
-     * 上一次累积时的参数快照（GL 线程独占）：TRAIL 档切换（KB↔TRAIL）或拖尾补丁档变化
-     * （trailColorMode/trailColor/trailTol，docs/plan/35 E8——旧门控攒下的残留拖尾不许带进新档）
-     * 都必须清累积面；倍数/阈值/强度只换 uniform 不清（k 只影响往后的衰减）。
+     * GL 线程当前**生效**的残影参数（Y13）。与 [echoParams]（UI 意图，@Volatile）分离：
+     * 意图整体替换后经 `postGl` 落到这里，并与"是否需要清累积面"在**同一次 GL 操作**里完成。
+     *
+     * 为什么不能直接读 [echoParams]：旧实现先发布参数、再排队清面，两条路之间会插进一帧——
+     * 该帧用**新参数**累积到**旧参数**留下的历史面上（跨代交错），随后清面把这一帧抹掉，
+     * 观感是启用/切档后的第一帧拖影颜色/门控错乱。GL 线程独占写，不加 @Volatile。
      */
-    private var echoAppliedTrailParams: com.wotagei.cam.core.EchoParams? = null
+    private var echoLiveParams = com.wotagei.cam.core.EchoParams.DEFAULT
+
+    /**
+     * 本帧的残影参数快照（Y13）：`drawFrame` 开头一次性取 [echoLiveParams]，
+     * 累积趟（[drawEchoPass]）与两条合成槽（[drawPass]）都只读它——同一帧的 uniform
+     * 必须与同一帧的累积面同代，不能各自再读一次可变字段。
+     */
+    private var echoFrameParams = com.wotagei.cam.core.EchoParams.DEFAULT
 
     // endregion
 
@@ -734,6 +799,21 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      */
     private val frostTableCopy = FloatArray(FrostCardTable.TABLE_FLOATS)
 
+    /**
+     * [frostTableCopy] 各压实块的**原始槽位号**（Y14，构造期定长，零分配）。
+     * 压实会丢掉槽位身份；逐槽覆盖位必须按它回填，否则 bit 会打到别的卡身上。
+     */
+    private val frostTableSlots = IntArray(FrostCardTable.SLOT_CAPACITY)
+
+    /**
+     * 本窗口帧真贴出的板位掩码（GL 线程独占；[drawFrostPlates] 写，[finishWindowFrame] 在
+     * swap 成功后交给 [FrostCardTable.reportPlatesCovered]）。
+     *
+     * 为什么不在 drawFrostPlates 里直接回报（Y14）：swap 可能失败，画的板没上屏，
+     * 先发布覆盖位会让 UI 撤掉底色而屏幕上根本没有板。只在**真换帧成功**之后发布。
+     */
+    private var frostFrameCovered = 0
+
     /** [frostTableCopy] 里压实后的卡片数（读表成功才有值；0 = 这帧一块板都不画） */
     private var frostTableCards = 0
 
@@ -837,7 +917,10 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /** EGL/GL 是否就绪（未就绪时 [cameraTargets] 返回空表） */
-    fun isReady(): Boolean = glReady && !released.get()
+    fun isReady(): Boolean = glReady && !released.get() && !contextLost
+
+    /** EGL 上下文是否已丢失；true = 本实例必须由所有权方释放并整条重建（R05） */
+    fun isContextLost(): Boolean = contextLost
 
     /** 相机帧进 GL 的累计数（单调；给预览自愈心跳用） */
     fun cameraFrameCount(): Long = cameraFrameTotal
@@ -875,6 +958,13 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             scheduleDraw()
         }
     }
+
+    /**
+     * B14：相机帧缓冲的**实际**尺寸（[onSizeChanged] 写入的取景帧，不是视图尺寸）。
+     * 只读旁路，不参与任何 GL/请求路径；站位叠加用它把分析帧坐标映射到预览画幅。
+     * 0x0 = 会话还没建好，调用方当作「无几何证据」处理。
+     */
+    fun streamSize(): Pair<Int, Int> = wantFrameWidth to wantFrameHeight
 
     /**
      * @param sensorOrientation 来自 CameraCharacteristics；预览与录像共用同一旋转，保证方向一致
@@ -948,14 +1038,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         postGl { replaceEncoderSurface(surface, widthPx, heightPx) }
     }
 
-    /** 编码器面是否已绑定（录制侧可据此决定何时 start） */
-    fun isOutputSurfaceBound(): Boolean = encoderEglSurface != null
+    /**
+     * 编码器面是否已绑定（录制侧可据此决定何时 start）。
+     * 读**就绪身份快照**而不是逐个字段：快照是"绑定成功后整体发布"的单一原子读，
+     * 不会出现 native/egl 两个字段的混合快照；失活/解绑路径先清快照。
+     */
+    fun isOutputSurfaceBound(): Boolean = encoderTarget?.bound() == true && !released.get()
 
     /**
-     * 传入的 native 面是否就是**当前绑定**的编码面。换段重挂路径专用：轮转时旧绑定还没解，
-     * [isOutputSurfaceBound] 首查恒真、await 零等待——必须等「新面已绑定」才行。
+     * 传入的 native 面是否就是**当前绑定**的编码面（R01 的等待谓词）。
+     *
+     * 契约（不动）：只认**当前这个绑定身份**——本枚实例既是 GL 编码目标、又处于可写/已绑定状态，
+     * 而不是"任意目标/曾经的目标"。判据 = 快照身份相等 **且** 上下文未丢失（丢失瞬间快照可能
+     * 还没被清，`contextLost` 单独再兜一道）。
      */
-    fun isEncoderSurfaceNative(s: Surface?): Boolean = encoderNative === s
+    fun isEncoderSurfaceNative(s: Surface): Boolean =
+        !contextLost && !released.get() && encoderTarget?.native === s
 
     /** 编码器面尺寸（px），未绑定为 0x0 */
     fun outputSurfaceSize(): Pair<Int, Int> = encoderWidth to encoderHeight
@@ -1234,6 +1332,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         tone: com.wotagei.cam.core.ToneParams = com.wotagei.cam.core.ToneParams.IDENTITY
     ) {
         if (released.get()) return
+        // B02（2026-11-19）：**相同输入直接跳过**。录制页的长键 effect 把 frameEffect/zebra/peaking
+        // 与 curveStack 绑在同一组键上——切一次斑马/峰值也会把 setCurve 用同值再调一遍，白烘一张
+        // LUT（TABLE_SIZE*3 次插值）再白跑一轮 syncMovieSlot/retrySlots/dirty+scheduleDraw，
+        // 录制中就是一次可观测的 GL 线程抖动。显式重试语义不受影响：重试只可能来自曲线/色调
+        // 真的改了（输入不等），同值同驱动再试一次没有新信息。
+        if (stack == lastCurveStack && tone == lastCurveTone) return
         lastCurveStack = stack
         lastCurveTone = tone
         bakeCurveLut()
@@ -1582,8 +1686,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
     private fun makeCurrent(surface: EGLSurface?): Boolean {
         val s = surface ?: return false
+        // 已丢失的上下文不再尝试 makeCurrent：驱动只会继续报 CONTEXT_LOST，且会掩盖
+        // 真正的恢复入口（所有权方重建），所以这里直接拒绝。
+        if (contextLost) return false
         if (!EGL14.eglMakeCurrent(eglDisplay, s, s, eglContext)) {
-            Log.w(TAG_GL, "eglMakeCurrent 失败 err=0x${eglErrorHex()}")
+            val err = EGL14.eglGetError()
+            if (err == EGL_CONTEXT_LOST) {
+                handleContextLost("eglMakeCurrent")
+            } else {
+                Log.w(TAG_GL, "eglMakeCurrent 失败 err=0x${Integer.toHexString(err)}")
+            }
             return false
         }
         return true
@@ -1596,18 +1708,63 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (encoder) FrameLedger.onEncoderSwap(true)
             return true
         }
+        val err = EGL14.eglGetError()
         if (encoder) FrameLedger.onEncoderSwap(false)
-        Log.w(TAG_GL, "eglSwapBuffers 失败 err=0x${eglErrorHex()}")
+        // CONTEXT_LOST 不是"这一帧没换成功"这么轻：整个上下文已经没了，后续每一帧都会失败。
+        // 必须升级为终态上报，否则录制/预览都会静默停在最后一帧（R05）。
+        if (err == EGL_CONTEXT_LOST) {
+            handleContextLost("eglSwapBuffers")
+        } else {
+            Log.w(TAG_GL, "eglSwapBuffers 失败 err=0x${Integer.toHexString(err)}")
+        }
         return false
     }
 
     /** 销毁前先解除 current，否则 eglDestroySurface 返回 EGL_BAD_ACCESS */
     private fun destroyEglSurface(surface: EGLSurface?) {
         if (surface == null) return
+        if (contextLost) return
         pbufferSurface?.let { makeCurrent(it) }
         if (!EGL14.eglDestroySurface(eglDisplay, surface)) {
-            Log.w(TAG_GL, "eglDestroySurface 失败 err=0x${eglErrorHex()}")
+            val err = EGL14.eglGetError()
+            if (err == EGL_CONTEXT_LOST) {
+                handleContextLost("eglDestroySurface")
+            } else {
+                Log.w(TAG_GL, "eglDestroySurface 失败 err=0x${Integer.toHexString(err)}")
+            }
         }
+    }
+
+    /**
+     * EGL 上下文丢失的**唯一入口**（R05）：只上报一次，绝不自愈。
+     *
+     * 为什么不自愈：本实例是单次生命周期对象（[release] 后不可复用），而丢失后所有 EGL
+     * 对象/GL 资源（program/texture/FBO/SurfaceTexture 绑定）都失效；在旧实例里重建一套
+     * 半新半旧的资源，正是"看起来恢复了、实际采样空纹理"的来源。所有权方必须：
+     * 关相机会话 → 释放本实例 → new 一个 GlRenderEngine → 重新 bind/start → 重挂显示面。
+     */
+    private fun handleContextLost(where: String) {
+        if (contextLost || released.get()) return
+        contextLost = true
+        glReady = false
+        dirty = false
+        newFrames = 0
+        windowAttached = false
+        acceptedDisplaySurface = null
+        // 编码面/窗口面都已失效：心跳必须立刻归零，看门狗才能识别"渲染已死"而不是"没帧"
+        encoderEglSurface = null
+        encoderNative = null
+        // 身份快照随字段一起失效（读方不得再拿到"这枚面还绑着"的旧快照）
+        clearEncoderTarget()
+        windowEglSurface = null
+        windowNative = null
+        lastWindowSwapNs = 0L
+        Log.w(
+            TAG_GL,
+            "EGL 上下文丢失（$where, err=0x300E）⇒ 本引擎失效，等待所有权方重建" +
+                "（相机帧照常到达但不再绘制/换帧）"
+        )
+        onContextLost?.invoke(where)
     }
 
     private fun replaceWindowSurface(surface: Surface?, widthPx: Int, heightPx: Int) {
@@ -1660,6 +1817,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 换面与解面两条出口一次收干净——旧面在此之后就不存在了，而新面若绑定失败会就地 return，
         // 放在后面会让上一段的账一直悬着，混进下一段成功的段收尾行里。
         drainStampObs(if (surface == null) "解面" else "换面")
+        // 平台销毁面可能阻塞，先撤下就绪身份。
+        clearEncoderTarget()
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
@@ -1700,6 +1859,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         encoderNative = surface
         encoderWidth = widthPx
         encoderHeight = heightPx
+        // 绑定成功后**整体**发布就绪身份快照：这是跨线程等待谓词唯一的读对象
+        publishEncoderTarget()
         encoderFrameIndex = 0
         encoderBaseNs = System.nanoTime()
         encoderLastPtsNs = 0L
@@ -1743,6 +1904,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     private fun teardownEgl() {
+        clearEncoderTarget()
         destroyEglSurface(windowEglSurface)
         windowEglSurface = null
         windowNative = null
@@ -1795,6 +1957,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
 
         // 成片槽先同步（编码 pass 要用它）；上屏槽的同步让到编码 pass 之后（§3.9.2-2）。
         // 没有编码面时 syncMovieSlot 只清绑定、不建 program（空闲预览不白编一枚用不到的）。
+        // Y13：本帧残影参数在**任何 pass 之前**一次性定版；下面的累积、program 键与两条合成槽
+        // 都取自同一代，帧内绝不再读 UI 意图（echoParams）。
+        echoFrameParams = echoLiveParams
         syncMovieSlot()
 
         // Glow 离屏链：每帧一次，夹在成片槽同步与编码 pass 之间（§11.7 定版顺序）。
@@ -1849,6 +2014,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 degradeArcConvert("直通编码面掉链")
             }
         }
+        // 编码 pass 里 makeCurrent/swap 可能刚把上下文判死（R05）：立即停手，不再跑上屏链，
+        // 也不触发 onFrameDrawn——那会让录制侧以为"这一帧画完了"。
+        if (contextLost) return
         // 上屏槽同步让到编码 pass **之后**：首次切监看那一次的 program 链接是毫秒级，
         // 不许让它挡在编码器的 swap 前面（与下面霜开关同一条纪律）。首帧仍成立：无编码面时
         // 编码 pass 是空操作，display 在同一帧的窗口 pass 之前建好。
@@ -2017,11 +2185,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * 失败次数照实计（段收尾行可查），且**不影响成片时间轴口径**：不推进 [encoderLastPtsNs]
      * 只是撤掉防回退的地板，下一帧仍由 `System.nanoTime()` 落自己的格（墙钟单调 ⇒ 戳仍单调）。
      */
-    private fun stampEncoderPresentation(encoder: EGLSurface) {
+    private fun stampEncoderPresentation(encoder: EGLSurface): Boolean {
         val fps = encoderFps
-        if (fps <= 0) return
+        // 不打戳的两种合法情形（fps=0 直注、显示未就绪）不是失败：调用方照常 swap。
+        if (fps <= 0) return true
         val display = eglDisplay
-        if (display === EGL14.EGL_NO_DISPLAY) return
+        if (display === EGL14.EGL_NO_DISPLAY) return true
         val nowNs = System.nanoTime()
         // 网格步长：NTSC 非整数档查表（见 ntscGridStepNs），其余走 1e9/fps。
         // 查表落空（该 fps 不在映射表里）时**退回整数步长**，绝不把 0 当步长传下去——
@@ -2048,22 +2217,34 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             stampAgeCount++
             if (driftNs > stampAgeMaxNs) stampAgeMaxNs = driftNs
         }
-        // 观测 S1-M2-03：空档（跳格数 >1）在 App 侧第一次留痕。纯函数 [encoderAdaptivePtsNs]
+        // S1-M2-06 / Y10：**异常与布尔返回值都算失败**。EGL 正常返回 false 时 `runCatching`
+        // 仍是 Result.success，旧实现因此漏记失败并推进 `encoderLastPtsNs`——下一帧把一枚
+        // 从未写入的戳当网格地板，位次账与容器永久错位。这里只认 `true` 为写入成功。
+        val written = try {
+            if (EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs)) {
+                true
+            } else {
+                stampFailCount++
+                Log.w(TAG_GL, "写呈现时间戳失败：EGL 返回 false（pts=$ptsNs）")
+                false
+            }
+        } catch (t: Throwable) {
+            stampFailCount++
+            Log.w(TAG_GL, "写呈现时间戳失败：${t.message}")
+            false
+        }
+        if (!written) return false
+        // 空档观测只统计**真的写进容器**的戳：失败帧不计 gap（下一帧仍以旧戳为地板，
+        // 若此处先记一次，下一帧会重复计同一段空档）。纯函数 [encoderAdaptivePtsNs]
         // 把 slot 序号丢掉了，这里从两枚戳反推跨距，计空格总数与最大单次跨距。
         val gap = encoderSlotGap(encoderLastPtsNs, ptsNs, fps)
         if (gap > 0L) {
             stampGapSlots += gap
             if (gap > stampGapMaxSlots) stampGapMaxSlots = gap
         }
-        val written = runCatching { EGLExt.eglPresentationTimeANDROID(display, encoder, ptsNs) }
-            .onFailure {
-                stampFailCount++
-                Log.w(TAG_GL, "写呈现时间戳失败：${it.message}")
-            }
-            .isSuccess
-        if (!written) return
         encoderLastPtsNs = ptsNs
         encoderFrameIndex++
+        return true
     }
 
     /**
@@ -2207,6 +2388,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 这一步只在窗口面里发生，[drawEncoderPass] 走的是另一条完整独立的路（同一条"绝不碰霜"红线）
         drawFrostPlates()
         if (!swap(window)) {
+            // 画的板没上屏 ⇒ 立刻整页撤报（含逐槽位）：UI 必须把纯色底画回来。
+            // 不得在 swap 之前发布 live——否则失败帧会让"屏上根本没有板"的卡片失去底色。
+            FrostCardTable.reportPlatesCovered(0)
             // 「画面全黑但应用活着」的头号静默路径（2026-10-30 真机录屏对账）：swap 失败就地
             // 摘除窗口面，之后 drawFrame 退到 pbuffer——相机帧照常消费、UI 照常响应，唯独
             // 屏幕全黑，且此前一行日志都不留。必须留痕：下一份日志先搜这一行。
@@ -2216,6 +2400,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             // 看门狗的 forceRebind 兜底
             onWindowSurfaceDropped?.invoke()
         } else {
+            // 真换帧成功之后才发布逐槽覆盖位（Y14）：此刻板确实已经在屏幕上
+            FrostCardTable.reportPlatesCovered(frostFrameCovered)
             lastWindowSwapNs = System.nanoTime()
             // 上屏心跳（单调）：只有 swap 成功才算"屏上真的换了一帧"，
             // 这条计数是「相机活着但整屏黑」唯一能观测到的死亡信号
@@ -2255,8 +2441,9 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     /**
-     * 上屏画板（#84 步骤 2）：读一张矩形表、贴若干块「霜 + 圆角 + 底板色」，然后把"这帧真贴了板"
-     * 回报给 [FrostCardTable]，UI 侧据此决定底板的纯色 fill 让不让位。
+     * 上屏画板（#84 步骤 2）：读一张矩形表、贴若干块「霜 + 圆角 + 底板色」，把**这一帧真贴出板的槽位**
+     * 记成位掩码；掩码先落在 [frostFrameCovered]，等 [finishWindowFrame] 的 swap 真成功之后才交给
+     * [FrostCardTable.reportPlatesCovered]——UI 侧逐板据此决定底板的纯色 fill 让不让位（Y14）。
      *
      * 三条口径值得写明白：
      * - **读表与画板在同一条 GL 线程上**，所以表里的矩形与 `publishedFrost` 的等比画面矩形是同一帧的账，
@@ -2265,19 +2452,22 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * - 读表**不会失败也不会撞车**：一次 `tryReadInto` 拿到的就是某一整代的完整表（-1 只在调用方
      *   数组太短时出现，本类的 [frostTableCopy] 按 [FrostCardTable.TABLE_FLOATS] 定长，永不触发）；
      *   读到的表为空（`frostTableCards == 0`，HUD 还没注册板 / 表被停用）就一块都不画；
-     * - 快照为 null（开关刚关、链停用、还没出帧）时报 false ⇒ 旧的纯色 fill 立刻回来，
+     * - 逐槽位回报（而不是"有任一块就算整页有"）：与画面**无交集**的板（信箱黑边）会被
+     *   [FrostPlatePass] 跳过、不占掩码位 ⇒ UI 保留那几块的本地纯色底。整页的
+     *   [FrostCardTable.isPlatesDrawn] 由掩码派生（有任一位 ⇒ true），只是粗判/诊断用。
+     * - 快照为 null（开关刚关、链停用、还没出帧）时掩码为 0，swap 之后撤报 ⇒ 旧的纯色 fill 立刻回来，
      *   这一条是"关掉要能完整回到现在的观感"的可证部分。
      *
      * ⚠ **本函数不是每帧都跑到**：[drawWindowPass] 被 `windowThrottled()` 早退的那些帧（上屏帧率高于
-     * [MAX_DISPLAY_FPS] 时的节流帧）压根不进这里，既不贴板也不回报 ⇒ [FrostCardTable.isPlatesDrawn]
-     * 在节流间隔里保持上一帧的值。节流帧本来就不上屏，所以这不是漏报，但"每帧回报"那句话别说满。
+     * [MAX_DISPLAY_FPS] 时的节流帧）压根不进这里，既不贴板也不回报 ⇒ 逐槽覆盖位在节流间隔里保持上一帧
+     * 的值。节流帧本来就不上屏，所以这不是漏报，但"每帧回报"那句话别说满。
      */
     private fun drawFrostPlates() {
         val snapshot = publishedFrost
         val pass = frostPlatePass
-        val read = FrostCardTable.tryReadInto(frostTableCopy)
+        val read = FrostCardTable.tryReadInto(frostTableCopy, frostTableSlots)
         if (read >= 0) frostTableCards = read
-        val drew = if (snapshot != null && pass != null && frostTableCards > 0) {
+        val covered = if (snapshot != null && pass != null && frostTableCards > 0) {
             val rect = snapshot.contentRectInViewPx
             pass.draw(
                 texId = snapshot.textureId,
@@ -2290,16 +2480,19 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
                 viewWidthPx = windowWidth,
                 viewHeightPx = windowHeight,
                 table = frostTableCopy,
-                cardCount = frostTableCards
+                cardCount = frostTableCards,
+                cardSlots = frostTableSlots
             )
         } else {
             0
         }
+        // 本帧结果先落在 GL 线程字段上；**不在这里回报**——swap 成功后由 [finishWindowFrame]
+        // 发布（Y14：画了但没上屏的帧不许让 UI 撤底色）
+        frostFrameCovered = covered
         // 霜探针（#84）：只做镜像写，不参与任何判断——这帧"表里几块、实画几块、快照在不在"如实留档
         frostDiagSnapshotPublished = snapshot != null
         frostDiagTableCards = frostTableCards
-        frostDiagDrewPlates = drew
-        FrostCardTable.reportPlatesDrawn(drew > 0)
+        frostDiagDrewPlates = Integer.bitCount(covered)
     }
 
     private fun dropWindowSurface() {
@@ -2312,6 +2505,7 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     }
 
     private fun dropEncoderSurface() {
+        clearEncoderTarget()
         destroyEglSurface(encoderEglSurface)
         encoderEglSurface = null
         encoderNative = null
@@ -2442,6 +2636,8 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         // 黑纹理都是恒等，绝不为此切 program（切 program 会闪帧）。
         val echoOn = p.applied.echo
         if (echoOn) {
+            // Y13：合成趟只读本帧快照——与 drawEchoPass 的累积面同代，绝不读 UI 意图字段
+            val frameEcho = echoFrameParams
             val echoTex = echoFrameTex.takeIf { it != 0 } ?: glowBlackTex
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + ECHO_SRC_UNIT)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, echoTex)
@@ -2449,16 +2645,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             if (p.uEchoMode >= 0) {
                 GLES20.glUniform1f(
                     p.uEchoMode,
-                    if (echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL) 1f else 0f
+                    if (frameEcho.mode == com.wotagei.cam.core.EchoMode.TRAIL) 1f else 0f
                 )
             }
-            if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, echoParams.gain)
+            if (p.uEchoGain >= 0) GLES20.glUniform1f(p.uEchoGain, frameEcho.gain)
             // 拖尾颜色补丁·加/减（docs/plan/35 U2/U3/E3）：染色模式与补丁色（echoTrailTintOf
             // 对 KB 档恒 0 ⇒ 色逻辑不生效，E7 双保险的引擎侧那一半）
             if (p.uEchoTintMode >= 0) {
-                GLES20.glUniform1f(p.uEchoTintMode, com.wotagei.cam.core.echoTrailTintOf(echoParams).toFloat())
+                GLES20.glUniform1f(p.uEchoTintMode, com.wotagei.cam.core.echoTrailTintOf(frameEcho).toFloat())
             }
-            val echoTintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
+            val echoTintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(frameEcho)
             if (p.uEchoTint >= 0) GLES20.glUniform3f(p.uEchoTint, echoTintRgb[0], echoTintRgb[1], echoTintRgb[2])
         }
 
@@ -2706,17 +2902,44 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     override fun setEchoParams(params: com.wotagei.cam.core.EchoParams) {
         if (released.get()) return
         val next = params.sanitize()
-        val wasOn = echoParams.enabled
+        // 与上一次下发的意图逐字段相同 ⇒ 不必再排一次 GL 操作（滑杆拖回同值、重组的常见情形）
+        if (echoParams == next) return
+        // echoParams 只作 UI 意图快照（echoStatus 用）；GL 帧循环绝不读它（Y13）
         echoParams = next
-        if (!next.enabled || wasOn) return
         postGl {
-            // 显式开启 = 给含 echo 维度的坏键一次重试 + 链一次复活机会（同一坏键不逐帧重试的口径不变）；
-            // 累积面清零重开——上次开着的那段陈旧拖影不许带进新开的那一段
-            failedKeys.removeAll { it.echo }
-            echoChain?.resetAfterBreak()
-            echoChain?.prepare()
-            echoChain?.reset()
-            prepareEchoPrograms()
+            if (released.get()) return@postGl
+            // 取**执行时刻**的最新意图：同一批下发里的中间态（开→关→开）不该先落地一帧
+            val latest = echoParams
+            if (echoLiveParams == latest) return@postGl
+            val prev = echoLiveParams
+            val wasOn = prev.enabled
+            // Y13：参数生效与"是否需要清累积面"在**同一次 GL 操作**里落地。旧实现先发布参数、
+            // 再排队清面，两条路之间会插进一帧用新参数累积旧历史面的跨代交错。
+            echoLiveParams = latest
+            if (!latest.enabled) return@postGl
+            // 开启（含关→开）必须清面重开；TRAIL 语义切换（TRAIL 档或补丁档
+            // trailColorMode/trailColor/trailTol，docs/plan/35 E8）同样清面——旧门控攒下的
+            // 残留拖尾不许带进新语义。倍数/阈值/强度只换 uniform 不清（k 只影响往后的衰减）。
+            val trailChanged = wasOn && (
+                (prev.mode == com.wotagei.cam.core.EchoMode.TRAIL) !=
+                    (latest.mode == com.wotagei.cam.core.EchoMode.TRAIL) ||
+                    prev.trailColorMode != latest.trailColorMode ||
+                    prev.trailColor != latest.trailColor ||
+                    prev.trailTol != latest.trailTol
+                )
+            if (!wasOn) {
+                // 显式开启 = 给含 echo 维度的坏键一次重试 + 链一次复活机会（同一坏键不逐帧重试的口径不变）；
+                // 累积面清零重开——上次开着的那段陈旧拖影不许带进新开的那一段
+                failedKeys.removeAll { it.echo }
+                echoChain?.resetAfterBreak()
+                echoChain?.prepare()
+                echoChain?.reset()
+                prepareEchoPrograms()
+            } else if (trailChanged) {
+                echoChain?.reset()
+            }
+            // 不置 dirty/不排帧（EchoProvider 口径：拖滑杆不许往成片塞重复帧）；
+            // 新参数从下一个真帧起生效，state-only 重画不会累积（drawEchoPass 的 hasFrame 护栏）。
         }
     }
 
@@ -2750,33 +2973,27 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
      * - 关着 ⇒ 一次 GL 调用都不发（零代价口径）；
      * - 既没编码面也没窗口面 / 空闲预览且上屏被节流 ⇒ 没有消费者，跳过。
      *
-     * 护栏另两条在这里落地：方向矩阵变过（[echoStaleSinceOrientationChange]）或模式/补丁档切换
-     * （[echoAppliedTrailParams]）先 `reset()` 清累积面；倍数变化不清——k 只影响往后的衰减，
-     * 已有拖影按新系数自然衰减出去。
+     * 护栏另两条：方向矩阵变过（[echoStaleSinceOrientationChange]）在这里 `reset()` 清累积面；
+     * 开启与模式/补丁档切换的清面由 [setEchoParams] 在参数生效的同一次 GL 操作里做（Y13），
+     * 保证"新参数 + 旧历史面"不会交错一帧。倍数变化不清——k 只影响往后的衰减，已有拖影按新系数自然衰减出去。
      */
     private fun drawEchoPass(hasFrame: Boolean) {
-        if (!echoParams.enabled) return
+        // Y13：本帧固定快照——累积与两条合成槽同一代参数，绝不中途再读可变字段
+        val p = echoFrameParams
+        if (!p.enabled) return
         if (!hasFrame) return
         if (encoderEglSurface == null && windowEglSurface == null) return
         if (encoderEglSurface == null && windowThrottled()) return
         val uv = glowIdentityUv ?: return
         val chain = echoChain ?: return
-        val trailMode = echoParams.mode == com.wotagei.cam.core.EchoMode.TRAIL
-        // docs/plan/35 E8：模式切换与补丁档（trailColorMode/trailColor/trailTol）变化同路清面——
-        // 旧门控攒下的拖尾留在面里会被新门控语义继续叠进成片。取整份快照比对四个字段，零分配。
-        val last = echoAppliedTrailParams
-        val patchChanged = last != null && (
-            (last.mode == com.wotagei.cam.core.EchoMode.TRAIL) != trailMode ||
-                last.trailColorMode != echoParams.trailColorMode ||
-                last.trailColor != echoParams.trailColor ||
-                last.trailTol != echoParams.trailTol
-            )
-        if (echoStaleSinceOrientationChange || patchChanged) {
+        val trailMode = p.mode == com.wotagei.cam.core.EchoMode.TRAIL
+        // R2 §五.2：转屏/换前后摄后旧朝向的残影留在面里会被当成本帧历史继续叠进成片。
+        // TRAIL 语义切换的清面由 setEchoParams 在同一 GL 操作里完成（Y13，不再逐帧比对）。
+        if (echoStaleSinceOrientationChange) {
             chain.reset()
             echoStaleSinceOrientationChange = false
         }
-        echoAppliedTrailParams = echoParams
-        val tintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(echoParams)
+        val tintRgb = com.wotagei.cam.core.echoTrailTintRgbOf(p)
         val ok = chain.draw(
             oesTextureId = oesTextureId,
             texMatrix = stMatrix,
@@ -2786,15 +3003,15 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
             scale = com.wotagei.cam.core.glowScaleFor(
                 wantFrameWidth, wantFrameHeight, if (encoderFps > 0) encoderFps else 30
             ),
-            decay = com.wotagei.cam.core.echoDecayOf(echoParams.multiplier),
+            decay = com.wotagei.cam.core.echoDecayOf(p.multiplier),
             trailMode = trailMode,
-            threshold = echoParams.threshold,
+            threshold = p.threshold,
             // 拖尾颜色补丁·择/除（docs/plan/35 U4/U5）：core 层纯函数推导，链上只查表
-            trailMask = com.wotagei.cam.core.echoTrailMaskOf(echoParams),
+            trailMask = com.wotagei.cam.core.echoTrailMaskOf(p),
             trailTintR = tintRgb[0],
             trailTintG = tintRgb[1],
             trailTintB = tintRgb[2],
-            trailTol = com.wotagei.cam.core.echoTrailTolOf(echoParams)
+            trailTol = com.wotagei.cam.core.echoTrailTolOf(p)
         )
         echoFrameTex = if (ok) chain.resultTex else 0
     }
@@ -2845,8 +3062,12 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
     /**
      * 残影维度（R2 §四.5）：scene layer，两槽都带、进成片。与 [glowOn] 同一条纪律：
      * `enabled` 一变，两槽的键就变（走会话缓存，不重编）。
+     *
+     * 取 [echoLiveParams]（GL 线程已生效的那一代）而不是 UI 意图：program 键必须与
+     * `drawPass` 读到的本帧快照同代，否则会出现"键说没开、uniform 却按开着采黑图"的错帧。
+     * 只在 GL 线程调用（syncMovieSlot/syncDisplaySlot/prepareGlowPrograms）。
      */
-    private fun echoOn(): Boolean = echoParams.enabled
+    private fun echoOn(): Boolean = echoLiveParams.enabled
 
     /**
      * **成片槽**同步：必须在编码 pass 之前调（[drawFrame]）。键 = [movieProgramKey]，effect 恒 NONE。
@@ -3249,13 +3470,16 @@ class GlRenderEngine : PreviewSink, DisplaySurfaceReceiver, FrostBlurProvider, G
         echoChain = null
         echoFrameTex = 0
         echoStaleSinceOrientationChange = false
-        echoAppliedTrailParams = null
+        // 本引擎单次使用；复活（R05 上下文重建）走新实例，参数从默认代重新开始
+        echoLiveParams = com.wotagei.cam.core.EchoParams.DEFAULT
+        echoFrameParams = com.wotagei.cam.core.EchoParams.DEFAULT
         // 补弧离屏通道（5 张编码尺寸纹理）同理：正常路径在解绑编码面时就放了，
         // 这里兜「引擎直接销毁、没走过解绑」的那条路
         arcMendPass?.release()
         arcMendPass = null
         publishedFrost = null
         frostTableCards = 0
+        frostFrameCovered = 0
         frostDiagSnapshotPublished = false
         frostDiagTableCards = -1
         frostDiagDrewPlates = -1

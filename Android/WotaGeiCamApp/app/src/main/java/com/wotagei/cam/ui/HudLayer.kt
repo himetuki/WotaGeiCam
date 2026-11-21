@@ -1,5 +1,6 @@
 package com.wotagei.cam.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
@@ -91,6 +92,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.R
 import com.wotagei.cam.camera.FrostCardTable
 import com.wotagei.cam.core.CamPill
@@ -126,6 +128,7 @@ import com.wotagei.cam.ui.design.WotaShape
 import com.wotagei.cam.ui.design.WotaSpace
 import com.wotagei.cam.ui.design.WotaStroke
 import com.wotagei.cam.ui.design.hudFrostDockRegistrar
+import com.wotagei.cam.ui.design.rememberFrostSlot
 import com.wotagei.cam.ui.design.hudFrostInherit
 import com.wotagei.cam.ui.design.hudFrostPlate
 import com.wotagei.cam.ui.design.pillAnchor
@@ -312,7 +315,8 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
 /**
  * 霜的 UI 侧唯一状态机：**底板的纯色 fill 该不该让位**只看这一个值。
  *
- * 判据是 `设置开关 ∧ GL 真贴了板`（[com.wotagei.cam.camera.FrostCardTable.isPlatesDrawn]），
+ * 判据是 `设置开关 ∧ 这一槽真贴出了 GL 板`（GL 在 swap 成功后发布的逐槽覆盖位，
+ * [com.wotagei.cam.camera.FrostCardTable.coveredSlotMask]；整页 [live] 只是它的粗判），
  * 不是"开关开着"——差别就在能不能守住「关掉要能完整回到现在的观感」这条：
  * DIRECT 模式、离屏链被坏驱动停用、相机还没出帧、窗口面被回收，这几种情况下开关可能仍是开的，
  * 但屏幕上一块板都没有。此时若让 fill 让位，卡片就变成"压在实时画面上的透明描边框"，
@@ -334,14 +338,34 @@ internal fun HudEntry.pillKey(): PillKey? = pill?.let { p ->
  * （算式与它唯一的推断量都写在 `camera/frostViewOriginInto`）。注册点写卡片矩形之前会先调这里一次，
  * 所以那一次事务里"根"与"卡片"出自同一次布局。
  */
+// 单例按引用计数持有 View/SharedPreferences，但生命周期是**闭合**的：attach() 只在 hosts 0→1
+// 记 root，detach() 在 hosts 1→0 时 root=null / prefs=null 并注销监听（见两个函数）。
+// lint 看不到这对配对，按"静态单例一律按泄漏"报；这里显式豁免并指回清零点。
+@SuppressLint("StaticFieldLeak")
 internal object HudFrost {
 
     /** 轮询周期（只在开关开着时跑）：可用性翻转最多晚一个周期被看见，真机延迟未量 */
     private const val REFRESH_MS = 200L
 
-    /** 底板 fill 让位态：只有 GL 真贴了板才 true（组合期读它，写它必须在主线程） */
+    /** 底板 fill 让位态（整页）：只要**任一**槽位真贴出 GL 板就 true（组合期读它） */
     var live by mutableStateOf(false)
         private set
+
+    /**
+     * 逐槽覆盖位快照（Y14）：bit `s` = 槽 s 这一帧真有 GL 霜上屏。
+     *
+     * 与 [live] 的分工：整页 [live] 只是"有没有任一块板"的粗判（样式/诊断用），
+     * **fill 让位必须逐板问**——完全落在信箱黑边上的板被 [com.wotagei.cam.camera.frostUvInto]
+     * 跳过（与画面无交集 ⇒ 一块都没画），拿整页 live 给它让位就只剩透明描边框。
+     * 由 200ms 轮询从 [com.wotagei.cam.camera.FrostCardTable.coveredSlotMask] 抄来，
+     * 只在这个值真变时才写（Compose 只在读它的节点上重组）。
+     */
+    var coveredMask by mutableIntStateOf(0)
+        private set
+
+    /** UI 侧逐板判据：槽 [slot] 这一拍有 GL 板吗（-1 = 没注册/槽满 ⇒ 恒 false，保留本地底） */
+    fun isCovered(slot: Int): Boolean =
+        slot in 0 until FrostCardTable.SLOT_CAPACITY && (coveredMask and (1 shl slot)) != 0
 
     /**
      * 设置开关的**意图**：开着就该往矩形表里喂卡片。
@@ -349,7 +373,8 @@ internal object HudFrost {
      * ⚠ 这条与 [live] 必须是两个值，不能合并。曾经注册点用 `live` 当"要不要写卡片"的闸门，
      * 于是形成启动死锁：卡片要 `live` 才写 → `live` 要 GL 画过板才真 → GL 要表里有卡片才画得出。
      * 真机上的表现是开关翻了背板纹丝不动（背板区开/关两帧只有 2.0% 像素变化，
-     * 而同两帧纯预览参照区自己就变了 24.5%）。分工：**[intent] 管喂表，[live] 管让位。**
+     * 而同两帧纯预览参照区自己就变了 24.5%）。分工：**[intent] 管喂表，逐槽 [coveredMask] 管让位**
+     * （[live] 只是"有没有任一块板"的粗判，样式/诊断用）。
      */
     var intent by mutableStateOf(false)
         private set
@@ -438,6 +463,7 @@ internal object HudFrost {
         prefs = null
         intent = false
         live = false
+        coveredMask = 0
     }
 
     /** 开关意图变了：开 ⇒ 起轮询；关 ⇒ 停轮询并当场把 fill 收回来（不等下一帧） */
@@ -452,16 +478,25 @@ internal object HudFrost {
             mainHandler.postDelayed(tick, REFRESH_MS)
         } else {
             live = false
+            coveredMask = 0
         }
     }
 
     private fun refreshAvailability() {
         if (!intent) {
             if (live) live = false
+            if (coveredMask != 0) coveredMask = 0
             return
         }
         refreshHeader()
-        val drawn = FrostCardTable.isPlatesDrawn()
+        // 逐槽覆盖位（Y14）：GL 在 swap 成功之后发布；这里只做镜像 + 去重。
+        // 整页 live 由它派生（有任一位 ⇒ 有板），两者同一次读取，不会出现"某槽说有、整页说无"。
+        val mask = FrostCardTable.coveredSlotMask()
+        if (mask != coveredMask) {
+            Diag.i("FrostDock", "covered -> 0x${mask.toString(16)}")
+            coveredMask = mask
+        }
+        val drawn = mask != 0
         if (drawn != live) {
             Diag.i("FrostDock", "live -> $drawn")
             live = drawn
@@ -480,7 +515,7 @@ internal object HudFrost {
      */
     fun refreshHeader() {
         val r = root ?: return
-        val p = prefs ?: return
+        if (prefs == null) return
         if (r.width <= 0 || r.height <= 0) return
         r.getLocationInWindow(locationInWindow)
         WotaColor.hudFrostTintRgb(tintScratch)
@@ -1029,17 +1064,56 @@ fun BoxScope.HudZoneBox(
     // 霜的宿主登记（#84 步骤 2）：五枚容器各登记一次，引用计数到 0 才撤定时器与 prefs 监听。
     // 挂在这里而不是某枚具体容器的理由是：只要 HUD 在屏幕上，就总得有人盯 GL 的可用回报。
     HudFrost.Host()
+    // B12 测量入口：子层入组计数，用来对照「父层组合率 → 子层是不是整棵重入」
+    // （≈1:1 即跳过没生效）。前面串一枚编译期常量：debug/release 里
+    // BuildConfig.HUD_RECOMP_PROBE 是 false（javac 常量），Kotlin 折叠后连
+    // @Volatile 读都不剩——正常变体的关闭态是真正的零开销。
+    if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) HudRecompProbe.onZoneBox()
     val density = LocalDensity.current
     fun px(dpValue: Int): Int = with(density) { dpValue.dp.toPx() }.roundToInt()
     // [bandExtra] 要贴卡片左缘，而"卡片在槽里居没居中"只有本层知道 ⇒ 两份实测宽收在这里
     var slotWpx by remember { mutableIntStateOf(0) }
     var cardWpx by remember { mutableIntStateOf(0) }
+    // 绝对 y 的手势避让（Y61）要卡片高才能算下缘上限；与 cardWpx 同一处实测
+    var cardHpx by remember { mutableIntStateOf(0) }
+    // 底栏默认定位用 `BottomBarOuterPadV + systemGestures.bottom` 让开手势区；绝对 y 必须同一笔账
+    val bottomGesturePx = WindowInsets.systemGestures.getBottom(density)
+    val bottomOuterPadPx = with(density) { BottomBarOuterPadV.roundToPx() }
     // 底栏是"只认 y"的那枚容器：绝对 y + 哨兵 x，横向继续走系统居中
     val bottomYOnly = zone == HudZone.BOTTOM && placement.yDp >= 0
     val absolute = !bottomYOnly && (placement.xDp >= 0 || placement.yDp >= 0)
+    if (BuildConfig.PERF_PROBE) {
+        // Y61 真机取证（仅 probe 变体；release/debug 的本常量恒 false，整段被编译器折叠掉）：
+        // 一次性打出底栏外距 + 系统手势区高度，用来把「底栏最低位」与小白条热区的对照从推算变成实测。
+        // 只记 bottom：左右/上的 getter 在这个 Compose 版本要 layoutDirection，取证用不上。
+        // 心跳重复（2s）而不是只打一次：真机 logcat 只有 ~4 秒窗口，一次性行很容易被冲掉。
+        LaunchedEffect(Unit) {
+            while (true) {
+                Diag.i(
+                    "WotaUi",
+                    "Y61 gestureBottomPx=$bottomGesturePx outerPadPx=$bottomOuterPadPx " +
+                        "density=${density.density} zone=$zone yDp=${placement.yDp} bottomOnly=$bottomYOnly"
+                )
+                kotlinx.coroutines.delay(2_000)
+            }
+        }
+    }
     val slot = when {
         bottomYOnly -> Modifier.align(Alignment.TopStart).fillMaxWidth()
-            .offset { IntOffset(0, px(placement.yDp)) }
+            .offset {
+                // 绝对 y 与默认定位同用一笔手势避让（Y61）：表里存到带底（clampZoneYRange
+                // 只扣卡片高）时，渲染必须把卡片下缘抬到「外距 + 手势区」之上，否则拉小白条
+                // 会先撞上底栏。已有存量位置也在这一层被一并纠正，不必改表语义。
+                IntOffset(
+                    0,
+                    bottomAbsoluteYOffsetPx(
+                        yPx = px(placement.yDp),
+                        cardHeightPx = cardHpx,
+                        bandHeightPx = with(density) { area.height.dp.toPx() }.roundToInt(),
+                        bottomAvoidPx = bottomOuterPadPx + bottomGesturePx
+                    )
+                )
+            }
         // 钳过的绝对坐标 → 布局偏移：pillAnchor 回报的窗口矩形跟着视觉位置一起走
         absolute -> Modifier.align(Alignment.TopStart)
             .offset { IntOffset(px(placement.xDp), px(placement.yDp)) }
@@ -1092,6 +1166,7 @@ fun BoxScope.HudZoneBox(
                     val s = coords.size
                     // 卡片宽同时喂给 [bandExtra]：贴卡片左缘要的"卡片在槽里居中"只有这里知道
                     cardWpx = s.width
+                    cardHpx = s.height
                     onCardRect(IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height))
                 }
                 .graphicsLayer {
@@ -1120,6 +1195,28 @@ fun BoxScope.HudZoneBox(
  */
 internal fun bandLeftPx(slotWidthPx: Int, cardWidthPx: Int, absolutePlacement: Boolean): Int =
     if (absolutePlacement) 0 else ((slotWidthPx - cardWidthPx) / 2f).roundToInt()
+
+/**
+ * 底栏「只认 y」绝对定位的**手势安全上限**（Y61，纯函数）。
+ *
+ * 默认底栏分支靠 `padding(bottom = 外距 + systemGestures.bottom)` 让开手势区；绝对 y 分支原先
+ * 只有一个裸 offset，表里的 y 又只被 [clampZoneYRange] 钳到「卡片高」为止，于是拖到最低的底栏
+ * 下缘正好压进小白条热区（拉手势条误触快门，或反之）。
+ *
+ * 这里把卡片下缘钳到 `带高 − 外距 − 手势区` 之上。取"上移"而不是压缩卡片：底栏的尺寸账
+ * （键心 = 可视水平中心）不能被改。
+ *
+ * @param yPx 表里的绝对 y（px，带顶为 0；调用方已保证 ≥ 0）
+ * @param cardHeightPx 卡片实测高（首帧为 0 ⇒ 只钳 y ≤ 带高 − 避让，第二帧即收敛）
+ * @param bandHeightPx 安全区带高（录制页/编辑页的 [HudAreaDp.height]）
+ * @param bottomAvoidPx 底栏外距 + 系统手势区高（与默认分支同一笔账）
+ */
+internal fun bottomAbsoluteYOffsetPx(
+    yPx: Int,
+    cardHeightPx: Int,
+    bandHeightPx: Int,
+    bottomAvoidPx: Int
+): Int = yPx.coerceAtMost((bandHeightPx - cardHeightPx - bottomAvoidPx).coerceAtLeast(0))
 
 // ------------------------------------------------------------------ 五枚容器的内容
 
@@ -1409,12 +1506,15 @@ fun HudDockZone(
     // 半径取 WotaShape.radiusCard 那一档（与 Shape 同源，两处不会分叉）。
     //
     // 这里**不走 wotaHudCard** 而是本地拼链（用户 2026-10-04「Dock 背影未收回」修复）：
-    // wotaHudCard 入口被 HudFrost.live 短路——滑出+面板期其他板退场把 GL 表清空、drew=0、
+    // wotaHudCard 入口被开关意图短路——滑出+面板期其他板退场把 GL 表清空、drew=0、
     // live 翻 false，恢复时 registrar 被 live 挡在门外，板永久回不来（死锁真机实证）。
     // 因此注册（hudFrostDockRegistrar）常驻且不读 live：滑出期写屏外哨兵让 GL 停画（背影修），
-    // 滑回写真矩形自愈；live 只用来决定 fill 让不让位（视觉）。
+    // 滑回写真矩形自愈；逐槽覆盖位只用来决定 fill 让不让位（视觉，Y14：本槽真贴出板才让）。
     val dockShape = RoundedCornerShape(WotaShape.radiusCard)
     val motion = LocalMotion.current
+    // 槽位与 fill 判据共用同一枚（Y14）：两处各领一枚会把判据绑到别的板身上
+    val frostSlot = rememberFrostSlot(HudFrost.intent)
+    val frostCovered = HudFrost.isCovered(frostSlot)
     // 2026-11-10 用户报障：开部分参考线后，Dock 上残影/降噪那片的霜没了、线直接透过来。
     // 根因就是这条第三路径：10-28 只给 wotaHudCard 与 wotaDockShell 补了叠加层口径，
     // 竖 Dock 底板的本地拼链漏网——叠加层在画时它仍注册 GL 板且 fill 让位，参考线（Compose
@@ -1432,13 +1532,13 @@ fun HudDockZone(
                 // 线只透 25%）——2026-11-10 二次反馈：97% 暖黑在黑边栏上等于没板；
                 // 霜关/滑出离屏 ⇒ 同一枚 hudScrim 兜底（滑回动画途中路过屏内也要有底）
                 .then(
-                    if (HudFrost.live && frostVisible && !overlaysOn) Modifier
+                    if (frostCovered && frostVisible && !overlaysOn) Modifier
                     else Modifier.background(WotaColor.hudScrim)
                 )
                 // 注册常驻（不读 live，防死锁）：frostVisible=false 写屏外哨兵，true 写实测矩形。
                 // 叠加层在画时**照常注册**（与 wotaHudCard/wotaDockShell 的新口径一致）：
                 // 板还在，只是被上面的灰罩压暗
-                .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible))
+                .then(Modifier.hudFrostDockRegistrar(plateRadiusPx, frostVisible, frostSlot))
                 // 10-01 布局批：Dock 随内部控件数量平滑变化宽高（用户指令；Motion 例外 #2，
                 // 规格见 MotionSpec.intSize，PLAIN 档同样走 scaled、reduced 时 0 时长直达）。
                 // 位置必须排在 clip/border **之后**（链上更内侧）：外层节点画的是内层上报的尺寸——
@@ -1648,11 +1748,11 @@ fun BoxScope.HudTopChrome(
     effect: FrameEffect,
     renderMode: RenderMode,
     lowFpsNote: String?,
-    segNearCap: Boolean = false,
-    approxManual: Boolean = false,
     onSettingsClick: () -> Unit,
     onHeightChanged: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    segNearCap: Boolean = false,
+    approxManual: Boolean = false
 ) {
     val density = LocalDensity.current
     val motion = LocalMotion.current
@@ -2100,7 +2200,7 @@ private fun RecordButton(
                     androidx.compose.animation.core.keyframes {
                         durationMillis = 1_600
                         0.94f at 0
-                        1.14f at 800 with androidx.compose.animation.core.LinearOutSlowInEasing
+                        1.14f at 800 using androidx.compose.animation.core.LinearOutSlowInEasing
                         0.94f at 1_600
                     }
                 )

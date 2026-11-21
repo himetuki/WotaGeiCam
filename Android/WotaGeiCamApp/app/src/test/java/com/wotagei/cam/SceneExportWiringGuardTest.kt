@@ -31,6 +31,8 @@ class SceneExportWiringGuardTest {
     // （两条路径都要真接上、COMMIT 与 MUXER 必须分开报），只是派发/映射的锚点跟着代码搬家。
     private val hostSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/ExportHost.kt")) }
     private val runnerSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportRunner.kt")) }
+    // Y30：音轨复制搬进交错车道 [SceneAudioLane]；判据/单调桥/先撤轨选择的守卫随之落在这里。
+    private val laneSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneAudioLane.kt")) }
     private val glSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportGl.kt")) }
     private val planSrc by lazy { KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("player/SceneExportPlan.kt")) }
     private val shadersRaw by lazy { KotlinSourceScan.mainSourceText("camera/Shaders.kt") }
@@ -266,13 +268,14 @@ class SceneExportWiringGuardTest {
             "内录轨偏移必须走 TrackRule.shiftUsFor（与无损剪辑/选轨导出同一枚值）",
             runnerSrc.contains("TrackRule.shiftUsFor(track, offsetMs)")
         )
+        // Y30 起写出循环在独立音频车道里，判据仍必须复用同一批纯函数（不许车道自造一份）
         assertTrue(
             "负 PTS 丢弃判据必须走 ClipRule.keepSample（导出侧单一真源）",
-            runnerSrc.contains("ClipRule.keepSample(")
+            laneSrc.contains("ClipRule.keepSample(")
         )
         assertTrue(
             "写出前必须过逐轨单调桥 monotonicPts（同轨倒退会让 MPEG4Writer 抛异常）",
-            runnerSrc.contains("monotonicPts(")
+            laneSrc.contains("monotonicPts(")
         )
         assertTrue(
             "音轨必须先预扫是否可写（零样本轨会让 muxer.stop 抛异常并删掉整份输出）",
@@ -283,13 +286,16 @@ class SceneExportWiringGuardTest {
     @Test
     fun `音轨拷贝必须先取消全部轨选择`() {
         // 真机抓到的缺陷（r10）：MediaExtractor 的选择是**累加**的，编码循环里视频轨还选着，
-        // copyAudio 只 select 音轨 ⇒ 读到音视频交错样本 ⇒ 整帧视频被当 AAC 样本写进音轨
+        // 只 select 音轨 ⇒ 读到音视频交错样本 ⇒ 整帧视频被当 AAC 样本写进音轨
         //（成片音轨码率 5.2 Mbps、AAC 帧间夹着 20KB 巨块，播放器报 channel element 未分配）。
-        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(runnerSrc, "copyAudio"))
+        // Y30 起占用音轨拆成 prepare（撤选/选轨/seek）→ addTrack → arm；撤选/选轨仍在
+        // prepare 内，且 Runner 必须先 prepare 成功再 addTrack（见 SceneAudioLaneTest 的
+        // “Y30 Runner先prepare成功再addTrack”守卫）。
+        val body = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(laneSrc, "prepare"))
         val unselect = body.indexOf("unselectTrack(i)")
         val select = body.indexOf("selectTrack(audioIdx)")
-        assertTrue("copyAudio 必须先 unselectTrack 全部轨（否则音轨混进视频样本）", unselect >= 0)
-        assertTrue("copyAudio 必须选中音轨", select >= 0)
+        assertTrue("prepare 必须先 unselectTrack 全部轨（否则音轨混进视频样本）", unselect >= 0)
+        assertTrue("prepare 必须选中音轨", select >= 0)
         assertTrue("取消选择必须早于 selectTrack(audioIdx)", unselect < select)
     }
 
@@ -351,21 +357,25 @@ class SceneExportWiringGuardTest {
         assertTrue("亮部保留、暗部压零：颜色 × w", bright.contains("vec4(pick * w, 1.0)"))
         assertTrue(
             "软边必须朝 1.0 收敛（阈值 100% = 只给最亮像素加光晕，与 GLOW_COPY_FS 同口径）",
-            bright.contains("min(uSoft, max(1.0 - uThreshold, 0.0) + 0.0001)")
+            bright.contains("min(uSoft, max(1.0 - uThreshold, 0.0))")
         )
         assertTrue("亮度取 Rec601 三通道加权（与 GLOW_COPY_FS 同口径）", bright.contains("0.299, 0.587, 0.114"))
-        // 🟡-6 角点防御（2026-10-29，docs/reviews/1029/29-shader-bright-corner.md）：hi 的
-        // 1.0 截断曾在唯一角点 (threshold=1.0, soft=0) 吃掉 +0.0001 余量 ⇒ lo==hi ⇒
-        // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。修复式勿叠加 1.0 上限——叠加在
-        // 同一角点仍截回 lo==hi，等于没修（29 专档「修复方向」二次校核结论）。
+        // Y12：fp16 下 1.0 附近的 ulp≈0.0009766，任何 `+0.0001` 余量都会被舍回 ⇒ lo==hi ⇒
+        // smoothstep 未定义（驱动相关 NaN 可污染导出帧）。现在只在 hi>lo 时 smoothstep，
+        // 边界不可分辨则 step 硬切；与 GLOW_COPY_FS 逐字同口径。
         assertTrue(
-            "hi 必须是 max(uThreshold + s, lo + 0.0001)（s = 压缩后的软边；edge0<edge1 恒成立，与 GLOW_COPY_FS 同款防御）",
-            bright.contains("max(uThreshold + s, lo + 0.0001)")
+            "过渡带上界 = uThreshold + s（不再用加法余量伪造 edge0<edge1）",
+            bright.contains("float hi = uThreshold + s;")
+        )
+        assertTrue(
+            "边界不可分辨时必须硬切（if 保证 smoothstep 的 edge0<edge1）",
+            bright.contains("if (hi > lo) {") && bright.contains("step(uThreshold, l)")
         )
         assertFalse(
             "不许再出现 1.0 截断（min(uThreshold + uSoft 形态 = 角点退化回潮）",
             bright.contains("min(uThreshold + uSoft")
         )
+        assertFalse("不许再用 `lo + 0.0001` 余量（Y12 根因）", bright.contains("lo + 0.0001"))
 
         val blur = shader("SCENE_BLUR_FS")
         // 9 tap 权重与实时链 GlowBlurChain 的 gaussianSource 逐字同源

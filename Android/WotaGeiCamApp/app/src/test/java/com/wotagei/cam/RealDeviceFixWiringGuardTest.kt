@@ -46,10 +46,12 @@ class RealDeviceFixWiringGuardTest {
             stop.contains("PendingName::stripPendingJunk")
         )
         // createPending 的 insert 名不带前缀逻辑不动：_pending 侧不许被误加剥名（insert 名本来干净）
+        // B04 起撞名重试（var + provider 回查）是允许的，但**名字必须仍由 displayName 生成**，
+        // 不许在 insert 侧另拼一套（否则序号/前缀/扩展名规则立刻分叉）
         val store = maskedMain("record/VideoStore.kt")
         assertTrue(
-            "createPending 的 insert 名保持 displayName 直插（那一段没毛病，不许画蛇添足）",
-            bodyOf(store, "createPending").contains("val name = displayName(namePrefix = namePrefix)")
+            "createPending 的 insert 名必须由 displayName 生成（撞名重试只许换序号，不许另拼文件名）",
+            bodyOf(store, "createPending").contains("displayName(namePrefix = namePrefix)")
         )
     }
 
@@ -116,7 +118,9 @@ class RealDeviceFixWiringGuardTest {
 
     @Test
     fun `内录轨不再挂在环境编码器之下`() {
-        val prepare = bodyOf(maskedMain("record/CodecRecorder.kt"), "prepare")
+        // Y20 把资源建立段拆进 prepareSegment（prepare 只留所有权登记 + 一层异常收口）；
+        // 音频接线全在这段里，守卫跟着搬，判定内容不变。
+        val prepare = bodyOf(maskedMain("record/CodecRecorder.kt"), "prepareSegment")
         assertTrue(
             "minBuf 必须按「环境或内录任一要建」起算（仅内录组合合法）",
             prepare.contains("(p.audioUsable || p.captureAudio)")
@@ -130,10 +134,10 @@ class RealDeviceFixWiringGuardTest {
             prepare.contains("if (minBuf > 0 && p.captureAudio) createAudioEncoder(p, minBuf)") &&
                 !prepare.contains("p.captureAudio && a != null")
         )
-        // 两轨独立降级：a 失败不再连坐关 cap
+        // 两轨独立降级：a 失败不再连坐关 cap（Y17 起降级底稿是实际生效的视频口径 vp，不是入参 p）
         assertTrue(
             "降级必须逐轨独立（a==null 只关环境，不再两条全关）",
-            prepare.contains("a == null && p.audioEnabled -> p.copy(audioEnabled = false)")
+            prepare.contains("a == null && p.audioEnabled -> vp.copy(audioEnabled = false)")
         )
         // 仅内录时 aacMinBuf 不得被误清（分段轮转重建 cap 编码器还吃它）
         assertTrue(

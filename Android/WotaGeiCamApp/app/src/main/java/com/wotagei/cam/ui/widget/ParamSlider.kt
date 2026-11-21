@@ -141,7 +141,8 @@ fun TierPicker(
                     TierPill(
                         text = item.label,
                         selected = item.value == selected,
-                        supported = item.supported && enabled,
+                        supported = item.supported,
+                        enabled = enabled,
                         onClick = { if (item.supported) onPick(item.value) else onUnsupported() },
                         onLongPress = { if (domain != null && enabled) continuous = true }
                     )
@@ -240,12 +241,21 @@ internal fun snap(value: Float, step: Float, lo: Float, hi: Float): Float {
 
 // ------------------------------------------------------------------ 内部件
 
+/**
+ * 一枚档位药丸。两个禁用维度**必须分开消费**（B11）：
+ * - [supported] = 本机不支持：仍可点（点了走上层"本机不支持"提示），但灰显；
+ * - [enabled] = 控件整体禁用：连点击都不许发生（`combinedClickable(enabled = ...)`），一并灰显。
+ *
+ * 早先调用方把 `enabled` 折进 `supported`，但 `combinedClickable` 没有 `enabled` 消费者，
+ * 外层禁用时点一下仍会 `onPick`——灰着却能改值，比不灰更糟。
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TierPill(
     text: String,
     selected: Boolean,
     supported: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit
 ) {
@@ -265,10 +275,16 @@ private fun TierPill(
     // 只有 3.91:1 不过 AA 正文，对 #0A59F7 5.55:1 过（见 WotaColor.accentSurface 注）
     val tierFill = if (selected) WotaColor.accentSurface else Color.Transparent
     val tierAlpha by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (supported) 1f else 0.35f,
+        targetValue = if (supported && enabled) 1f else 0.35f,
         animationSpec = motion.float
     )
-    val tierTextColor = if (selected) WotaColor.onAccent else WotaColor.textHi
+    // 禁用时数值色也退到暗阶（与 PillSlider 的 B11 口径同一枚"禁用态灰显"）：只靠 alpha 时
+    // 选中档的白字在 accentSurface 上仍显得"活着"
+    val tierTextColor = when {
+        !enabled -> WotaColor.textLo
+        selected -> WotaColor.onAccent
+        else -> WotaColor.textHi
+    }
     Row(
         modifier = Modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
@@ -277,6 +293,7 @@ private fun TierPill(
             .background(tierFill)
             .clip(WotaShape.pill)
             .combinedClickable(
+                enabled = enabled,
                 onClick = onClick,
                 onLongClick = onLongPress,
                 interactionSource = interaction,
@@ -330,7 +347,8 @@ private fun ValueHeader(
                 }
         )
         if (sliderMode != null && onToggleSlider != null) {
-            IconButton(onClick = onToggleSlider, modifier = Modifier.size(28.dp)) {
+            // B11：整体禁用时"药丸/滑杆"入口也不许切换（否则灰着还能改输入方式）
+            IconButton(onClick = onToggleSlider, modifier = Modifier.size(28.dp), enabled = enabled) {
                 Icon(
                     imageVector = if (sliderMode) Icons.Filled.Tune else Icons.Filled.ExpandMore,
                     contentDescription = stringResource(R.string.cam_switch_input_mode),

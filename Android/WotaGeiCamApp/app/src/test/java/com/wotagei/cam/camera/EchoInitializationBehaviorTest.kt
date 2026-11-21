@@ -173,6 +173,33 @@ class EchoInitializationBehaviorTest {
     }
 
     @Test
+    fun `Y13_累积后切模式的新一帧必须用新参数且历史已清`() = platform { p ->
+        seedExistingHistory(p)
+        // 旧代：保持亮度档（mode=0），k=0.8、阈值 0.8、补丁色白
+        assertTrue(p.draw(trail = false, decay = 0.8f, threshold = 0.8f))
+        assertEquals("旧代累积趟必须真的落 uniform", 0f, p.uniformFloat("uEchoMode"), 0f)
+        assertEquals(0.8f, p.uniformFloat("uEchoDecay"), 1e-6f)
+
+        // 切档：生产侧 setEchoParams 在同一个 GL 操作里清历史并安装新代；
+        // 链侧按同一顺序复现——先 reset（两张面必须全黑），再按新参数累积。
+        p.reset()
+        assertBothBlack(p)
+        assertTrue(
+            p.draw(
+                trail = true, decay = 0.5f, threshold = 0.3f,
+                trailMask = 2, tintR = 1f, tintG = 0f, tintB = 0f, tol = 0.2f
+            )
+        )
+        assertEquals("切档后累积必须用新模式的 uniform", 1f, p.uniformFloat("uEchoMode"), 0f)
+        assertEquals(0.5f, p.uniformFloat("uEchoDecay"), 1e-6f)
+        assertEquals(0.3f, p.uniformFloat("uEchoThreshold"), 1e-6f)
+        assertEquals("择/除门必须切到新档", 2f, p.uniformFloat("uEchoMask"), 0f)
+        assertEquals("补丁色必须切到新档", listOf(1f, 0f, 0f), p.uniformVec3("uEchoTint"))
+        assertEquals(0.2f, p.uniformFloat("uEchoTol"), 1e-6f)
+        assertTrue("新一帧必须产出可采样面", p.defined(p.resultTex))
+    }
+
+    @Test
     fun `release删除两张GL纹理和FBO并撤掉结果`() = platform { p ->
         seedExistingHistory(p)
         assertTrue(p.draw())
@@ -291,7 +318,7 @@ class EchoInitializationBehaviorTest {
     }
 
     private fun platform(block: (EchoGlBoundaryFixture) -> Unit) {
-        EchoGlBoundaryFixture(classes, javaClass.classLoader).use(block)
+        EchoGlBoundaryFixture(classes, requireNotNull(javaClass.classLoader!!)).use(block)
     }
 
     companion object {

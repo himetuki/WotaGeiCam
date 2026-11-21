@@ -68,7 +68,7 @@ class HudOverlayOcclusionGuardTest {
         )
         assertTrue(
             "自己出板的卡片叠加层在画时仍要注册霜板（板要还在，只是压暗）",
-            card.contains("edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost))")
+            card.contains("edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost, slot))")
         )
         assertTrue(
             "录制页必须按「参考线或站位线在画」提供这个开关",
@@ -113,8 +113,8 @@ class HudOverlayOcclusionGuardTest {
             shell.contains("WotaColor.hudScrim")
         )
         assertTrue(
-            "实底分支必须在「!live || overlaysOn」下触发（霜开着也要压线）",
-            shell.contains("if (!live || overlaysOn) {")
+            "实底分支必须在「!frostCovered || overlaysOn」下触发（霜开着也要压线；Y14 逐槽判据）",
+            shell.contains("if (!frostCovered || overlaysOn) {")
         )
         // 尺要能红：把注册重新按叠加层摘掉（回退 10-28 的摘板口径）后判据翻红
         val mutant = shell.replace(
@@ -139,20 +139,20 @@ class HudOverlayOcclusionGuardTest {
         )
         assertTrue(
             "叠加层在画时 GL 板注册必须照常（板要还在，只是压暗）",
-            dock.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible)")
+            dock.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible, frostSlot)")
         )
         assertTrue(
-            "fill 让位必须排除叠加层在画（在画时铺灰罩压线）",
-            dock.contains("HudFrost.live && frostVisible && !overlaysOn")
+            "fill 让位必须排除叠加层在画（在画时铺灰罩压线；Y14 逐槽覆盖位判据）",
+            dock.contains("if (frostCovered && frostVisible && !overlaysOn)")
         )
         // 尺要能红：把注册重新按叠加层切哨兵后判据翻红
         val mutant = dock.replace(
-            "hudFrostDockRegistrar(plateRadiusPx, frostVisible)",
-            "hudFrostDockRegistrar(plateRadiusPx, frostVisible && !overlaysOn)"
+            "hudFrostDockRegistrar(plateRadiusPx, frostVisible, frostSlot)",
+            "hudFrostDockRegistrar(plateRadiusPx, frostVisible && !overlaysOn, frostSlot)"
         )
         assertFalse(
             "回退切哨兵口径后守卫必须报红",
-            mutant.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible)")
+            mutant.contains("hudFrostDockRegistrar(plateRadiusPx, frostVisible, frostSlot)")
         )
     }
 }

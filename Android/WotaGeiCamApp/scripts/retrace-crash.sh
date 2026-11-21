@@ -10,7 +10,9 @@
 #
 # 用法（项目根目录的 Git Bash 里）：
 #   bash WotaGeiCamApp/scripts/retrace-crash.sh <崩溃栈.txt> <mapping.txt 或 .txt.gz>
-#   bash WotaGeiCamApp/scripts/retrace-crash.sh --selftest     # 人造一条栈自证链路（plan/15 的门禁）
+#   bash WotaGeiCamApp/scripts/retrace-crash.sh --selftest [完整变体名]
+#     # 人造一条栈自证链路（plan/15 的门禁）。不给变体名时按
+#     # fullRelease → liteRelease → fullDebugHook → liteDebugHook 顺序找现成 mapping。
 #
 # 本机坑（都踩过，写死在脚本里）：
 #   - retrace.bat 是 Windows 程序，不认 MSYS 路径 ⇒ 一律 cygpath -w 转过再传；
@@ -60,14 +62,36 @@ prepare_mapping() { # $1=传入的 mapping 路径；gz 就地解到 .tmp，返�
 SELFTEST=0
 STACK=""
 MAP=""
+MAP_VARIANT=""
 if [ "${1:-}" = "--selftest" ]; then
   SELFTEST=1
-  MAP="$ROOT/WotaGeiCamApp/app/build/outputs/mapping/release/mapping.txt"
-  [ -f "$MAP" ] || fail "selftest 需要现成的 release mapping（先出一次 release/debugHook 包）"
+  # B17：mapping 按 AGP 完整变体名输出（fullRelease/liteRelease/fullDebugHook/liteDebugHook），
+  # 不再有裸 release/ 目录。显式给变体名时只认完整名；不给则按固定顺序找现成目录。
+  REQUESTED="${2:-}"
+  MAPPING_ROOT="$ROOT/WotaGeiCamApp/app/build/outputs/mapping"
+  if [ -n "$REQUESTED" ]; then
+    case "$REQUESTED" in
+      fullRelease|liteRelease|fullDebugHook|liteDebugHook) ;;
+      *) fail "selftest 变体只认 fullRelease / liteRelease / fullDebugHook / liteDebugHook：$REQUESTED" ;;
+    esac
+    MAP="$MAPPING_ROOT/$REQUESTED/mapping.txt"
+    [ -f "$MAP" ] || fail "selftest 需要现成的 $REQUESTED mapping（先出一次该变体包）"
+    MAP_VARIANT="$REQUESTED"
+  else
+    for candidate in fullRelease liteRelease fullDebugHook liteDebugHook; do
+      if [ -f "$MAPPING_ROOT/$candidate/mapping.txt" ]; then
+        MAP="$MAPPING_ROOT/$candidate/mapping.txt"
+        MAP_VARIANT="$candidate"
+        break
+      fi
+    done
+    [ -n "$MAP" ] || fail "selftest 找不到现成 mapping（先出一次 release/debugHook 包，或显式传完整变体名）"
+  fi
+  note "selftest: 使用 mapping 变体=$MAP_VARIANT"
 else
   STACK="${1:-}"
   MAP="${2:-}"
-  [ -n "$STACK" ] && [ -f "$STACK" ] || fail "用法: retrace-crash.sh <崩溃栈.txt> <mapping.txt[.gz]>（或 --selftest）"
+  [ -n "$STACK" ] && [ -f "$STACK" ] || fail "用法: retrace-crash.sh <崩溃栈.txt> <mapping.txt[.gz]>（或 --selftest [完整变体名]）"
   [ -n "$MAP" ] && [ -f "$MAP" ] || fail "mapping 不存在: $MAP"
 fi
 

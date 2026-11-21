@@ -527,11 +527,13 @@ class DualTrackGuardTest {
         )
         // 内包一层 if (deadline == 0L) 的变体同样要红：停止门内，dl 块自身那处之外、
         // 到兜底 EOS 调用之间不得再出现 deadline == 0L（门区域从 `if (stopping` 起算，
-        // 失效兜底支路的 queueAudioEos(c, capCh) 在循环更早处，不能作为定位锚）
+        // 失效兜底支路的 queueAudioEos(c, capCh) 在循环更早处，不能作为定位锚）。
+        // Y16 起停止门的 EOS 经 tailEosFor（先判积压/抽干到期，再决定是否发 EOS）——
+        // 锚串随之改为 tailEosFor 调用；每拍重试的口径不变（EOS 仍不在 deadline 单发门内）。
         val gateAt = seg.indexOf("if (stopping || rotatePending)")
         val dlAt = seg.indexOf("deadline == 0L", gateAt)
-        val eosAAt = seg.indexOf("queueAudioEos(a, envCh)", gateAt)
-        val eosCAt = seg.indexOf("queueAudioEos(c, capCh)", eosAAt)
+        val eosAAt = seg.indexOf("tailEosFor(a, envCh", gateAt)
+        val eosCAt = seg.indexOf("tailEosFor(c, capCh", eosAAt)
         assertTrue("停止门内必须有 dl 块与双通道兜底 EOS（顺序：dl 块 → env → cap）", dlAt in 0 until eosAAt && eosAAt < eosCAt)
         val second = seg.indexOf("deadline == 0L", dlAt + 1)
         assertFalse(
@@ -545,12 +547,12 @@ class DualTrackGuardTest {
         )
         assertTrue(mutated.contains("&& deadline == 0L"))
         val m2 = mutated.replace(
-            "if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh)",
-            "if (deadline == 0L) { if (a != null && envCh != null && !envCh.eosQueued) queueAudioEos(a, envCh) }"
+            "tailEosFor(a, envCh,",
+            "if (deadline == 0L) { tailEosFor(a, envCh,"
         )
         val mGate = m2.indexOf("if (stopping || rotatePending")
         val mDl = m2.indexOf("deadline == 0L", mGate)
-        val mEos = m2.indexOf("queueAudioEos(a, envCh)", mGate)
+        val mEos = m2.indexOf("tailEosFor(a, envCh", mGate)
         assertTrue(m2.indexOf("deadline == 0L", mDl + 1).let { it in 0 until mEos })
     }
 

@@ -453,7 +453,7 @@ internal class FrostBlurChain(
  *   自己开过的顶点属性下标 / 取样单元上的纹理绑定；
  * - **绝不碰编码器**：本类只被 [GlRenderEngine.drawWindowPass] 调用，`drawEncoderPass` 里一个引用都不许出现
  *   （有源码级用例守着，见 `FrostEncoderGuardTest`）；
- * - **失败就退化成"没有板"**：program 编不出来 ⇒ [broken] 置位并删干净，此后返回 0 块板，
+ * - **失败就退化成"没有板"**：program 编不出来 ⇒ [broken] 置位并删干净，此后回报 0 位覆盖，
  *   上层因此报"UI 侧继续画旧的纯色 fill"，观感与接霜前逐字相同。
  *
  * @param linkProgram 与 [FrostBlurChain] 共用引擎那枚 `link()`（同一份退避与日志口径）
@@ -502,8 +502,12 @@ internal class FrostPlatePass(
      * @param viewWidthPx viewHeightPx 承载视图尺寸（= 那条 EGL 窗口面尺寸，NDC 的分母）
      * @param table [FrostCardTable.tryReadInto] 读进调用方副本的那一份（表头 + 压实后的卡片块）
      * @param cardCount 那一份里压实后的卡片数（`<=0` 直接返回 0）
-     * @return 真画出去的板数（0 = 一帧都没画；调用方据此向 [FrostCardTable.reportPlatesDrawn] 回报，
-     *         UI 侧再决定底板的纯色 fill 让不让位）
+     * @param cardSlots 与 [table] 压实块同下标的**原始槽位号**（[FrostCardTable.tryReadInto] 的
+     *   `slotsOut`）；用来把"真画了"回报到正确的槽位上（Y14——压实后第 i 块不等于槽 i）
+     * @return 真画出去的板**位掩码**（bit s = 槽 s 这块板这一帧画了；0 = 一块都没画）。
+     *   调用方在 swap 成功后交给 [FrostCardTable.reportPlatesCovered]；`Integer.bitCount` 即板数。
+     *   逐槽回报而不是只报个数：完全落在信箱黑边上的板会被 [frostUvInto] 跳过，UI 必须继续画
+     *   它自己的纯色底（"GL 板或 Compose 底二选一必在"）。
      */
     fun draw(
         texId: Int,
@@ -516,7 +520,8 @@ internal class FrostPlatePass(
         viewWidthPx: Int,
         viewHeightPx: Int,
         table: FloatArray,
-        cardCount: Int
+        cardCount: Int,
+        cardSlots: IntArray
     ): Int {
         if (broken || texId == 0 || cardCount <= 0) return 0
         if (viewWidthPx <= 0 || viewHeightPx <= 0) return 0
@@ -553,7 +558,7 @@ internal class FrostPlatePass(
         val tintBlue = table[FrostCardTable.HEADER_TINT_BLUE]
 
         val scissorWasEnabled = saveState()
-        var drew = 0
+        var coveredMask = 0
         GLES20.glViewport(0, 0, viewWidthPx, viewHeightPx)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
@@ -600,12 +605,16 @@ internal class FrostPlatePass(
             if (uRadiusPxLoc >= 0) GLES20.glUniform1f(uRadiusPxLoc, radiusPx)
             if (uAlphaLoc >= 0) GLES20.glUniform1f(uAlphaLoc, table[base + FrostCardTable.CARD_ALPHA])
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            drew++
+            // Y14：把这一块记到**原始槽位**上（压实块下标只对本次读表有效）
+            val slot = if (i < cardSlots.size) cardSlots[i] else -1
+            if (slot in 0 until FrostCardTable.SLOT_CAPACITY) {
+                coveredMask = coveredMask or (1 shl slot)
+            }
         }
         val errors = drainGlError("frostPlatePass")
         restoreState(scissorWasEnabled)
         if (errors > 0) return 0
-        return drew
+        return coveredMask
     }
 
     /**

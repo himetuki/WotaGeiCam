@@ -44,6 +44,9 @@
     <string name="set_diag_verbose_note">只对「记录日志」生效：开着时默认只记关键事件，再打开此项连调试细节一起记，日志会变多。</string>
     <string name="set_diag_clear">清除日志</string>
     <string name="set_diag_cleared">已清除</string>
+    <string name="set_diag_clear_partial">部分清除：已删除 %1$d 件，%2$d 件被系统占用未能删除，稍后可再试</string>
+    <string name="set_diag_clear_failed">清除失败：%1$d 件未能删除（可能被系统占用），请重试</string>
+    <string name="set_diag_clear_error">清除失败：操作异常，日志可能仍占用存储，请重试</string>
     <string name="set_diag_size">日志占用</string>
     <string name="set_diag_path">日志目录</string>
     <string name="set_diag_share">直接分享</string>

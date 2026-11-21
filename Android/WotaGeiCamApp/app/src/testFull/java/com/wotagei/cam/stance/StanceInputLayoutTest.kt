@@ -95,4 +95,76 @@ class StanceInputLayoutTest {
         assertEquals(0f, actual[2], 1e-6f)
         assertEquals(80f / 255f, actual[3], 1e-6f)
     }
+
+    // ------------------------------------------------------------------
+    // Y66：输出坐标归一到输入张量尺度（不是分析帧像素）
+    // ------------------------------------------------------------------
+
+    private fun outputRows(cx: Float, cy: Float, w: Float, h: Float, score: Float): Array<FloatArray> =
+        Array(5) { FloatArray(2) }.also { rows ->
+            // 两列都写同样坐标：第一列分数低被过滤，但坐标仍参与尺度探测（真实输出亦然）。
+            for (c in 0..1) {
+                rows[0][c] = cx
+                rows[1][c] = cy
+                rows[2][c] = w
+                rows[3][c] = h
+            }
+            rows[4][1] = score
+            rows[4][0] = 0.01f   // 低于阈值，必须被过滤
+        }
+
+    @Test
+    fun decode_pixelScaleUsesModelInputNotFramePixels() {
+        // 模型输出是 448×448 输入尺度像素；旧实现乘 w/inputW 留在帧像素域，
+        // 消费者再按占比解释 → 框被放大到画面外。这里钉死 ÷448。
+        val box = StanceDetector().decode(outputRows(224f, 224f, 112f, 224f, 0.9f), 2).single()
+        assertEquals(0.5f, box.cx, 1e-6f)
+        assertEquals(0.75f, box.by, 1e-6f)
+        assertEquals(0.25f, box.w, 1e-6f)
+        assertEquals(0.5f, box.h, 1e-6f)
+    }
+
+    @Test
+    fun decode_alreadyNormalizedCoordsStayInUnitDomain() {
+        val box = StanceDetector().decode(outputRows(0.5f, 0.5f, 0.25f, 0.5f, 0.9f), 2).single()
+        assertEquals(0.5f, box.cx, 1e-6f)
+        assertEquals(0.75f, box.by, 1e-6f)
+        assertEquals(0.25f, box.w, 1e-6f)
+        assertEquals(0.5f, box.h, 1e-6f)
+    }
+
+    // Y66/R16：清单显式声明坐标单位后，解码必须服从声明，而不是再猜值域。
+
+    @Test
+    fun decode_declaredNormalizedDoesNotDivideByInputSize() {
+        val box = StanceDetector()
+            .decode(outputRows(0.5f, 0.5f, 0.25f, 0.5f, 0.9f), 2, StanceModelPack.COORD_NORMALIZED)
+            .single()
+        assertEquals(0.5f, box.cx, 1e-6f)
+        assertEquals(0.75f, box.by, 1e-6f)
+        assertEquals(0.25f, box.w, 1e-6f)
+        assertEquals(0.5f, box.h, 1e-6f)
+    }
+
+    @Test
+    fun decode_declaredPixelNormalizesAgainstInputTensor() {
+        // 显式 pixel 声明按输入张量 448 归一化，而不是分析帧像素；消费者拿到的始终是占比。
+        val box = StanceDetector()
+            .decode(outputRows(224f, 224f, 112f, 224f, 0.9f), 2, StanceModelPack.COORD_PIXEL)
+            .single()
+        assertEquals(0.5f, box.cx, 1e-6f)
+        assertEquals(0.75f, box.by, 1e-6f)
+        assertEquals(0.25f, box.w, 1e-6f)
+        assertEquals(0.5f, box.h, 1e-6f)
+    }
+
+    @Test
+    fun decode_rejectsUnknownDeclaredCoordinateUnit() {
+        try {
+            StanceDetector().decode(outputRows(224f, 224f, 112f, 224f, 0.9f), 2, "pixels")
+            fail("未知坐标单位必须拒绝，不能静默按自适应处理")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("未知坐标单位"))
+        }
+    }
 }

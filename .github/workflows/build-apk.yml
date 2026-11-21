@@ -9,6 +9,8 @@
 # 签名：keystore 与密码不进 git，启动时从 Actions Secrets 还原——
 #   WOTA_KEYSTORE_BASE64 = 发布 keystore 的 base64（单行）
 #   WOTA_KEYSTORE_PROPS  = keystore.properties 的完整文本
+# 发布门（Y63/Y64）：Secrets 缺失或 APK 可调试/证书不一致时**硬失败**，不产 debug 签名 release；
+# 发布正文同时写入逐资产 SHA256-asset 行（Y44），ABI 分包各用各的摘要。
 name: Build Release APKs
 
 on:
@@ -53,9 +55,18 @@ jobs:
           WOTA_KEYSTORE_BASE64: ${{ secrets.WOTA_KEYSTORE_BASE64 }}
           WOTA_KEYSTORE_PROPS: ${{ secrets.WOTA_KEYSTORE_PROPS }}
         run: |
+          set -euo pipefail
           mkdir -p Android/WotaGeiCamApp/keystore
           printf '%s' "$WOTA_KEYSTORE_BASE64" | base64 -d > Android/WotaGeiCamApp/keystore/wotageicam-release.jks
           printf '%s\n' "$WOTA_KEYSTORE_PROPS" > Android/WotaGeiCamApp/keystore.properties
+          # Y63：缺 Secrets 时 Gradle 会静默回退 debug 签名，产出无法覆盖安装的「release」包。
+          # 发布流水线必须先失败在这里，而不是把 debug 证书的包传上 Release。
+          test -s Android/WotaGeiCamApp/keystore/wotageicam-release.jks \
+            || { echo "::error::WOTA_KEYSTORE_BASE64 未配置或为空——拒绝产出 debug 签名 release"; exit 1; }
+          for key in storeFile storePassword keyAlias keyPassword; do
+            grep -Eq "^${key}=.+" Android/WotaGeiCamApp/keystore.properties \
+              || { echo "::error::keystore.properties 缺 ${key}——拒绝产出 debug 签名 release"; exit 1; }
+          done
 
       # gradle.properties 里的 org.gradle.java.home 是本机 JDK 绝对路径，CI 上不存在，删掉后用
       # setup-java 的 JAVA_HOME；gradlew 在库里是 100644，Linux 上必须补 chmod。
@@ -186,6 +197,42 @@ jobs:
             exit 1
           fi
 
+      # Y63/Y64 发布门：正式制品不许 debuggable，且全部 9 枚证书指纹一致。取证包（debugHook/probe）
+      # 只在本地产出；若未来误把 debug 变体塞进 apk-out，这里会在上传前失败。证书一致性同时挡住
+      # 「部分 flavor 回退 debug 签名」——那样的包无法与已安装正式版同签覆盖。
+      - name: Verify release APKs are non-debuggable and share one signer
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/33.0.1"
+          test -x "$BT/aapt" || { echo "::error::缺少 aapt：$BT/aapt"; exit 1; }
+          test -x "$BT/apksigner" || { echo "::error::缺少 apksigner：$BT/apksigner"; exit 1; }
+          fingerprint=""
+          count=0
+          for f in apk-out/*.apk; do
+            if "$BT/aapt" dump badging "$f" | grep -q '^application-debuggable'; then
+              echo "::error::$(basename "$f") 是 debuggable 包，禁止发布"
+              exit 1
+            fi
+            fp=$("$BT/apksigner" verify --print-certs "$f" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
+            if [ -z "$fp" ]; then
+              echo "::error::$(basename "$f") 无签名证书（或 apksigner 解析失败）"
+              exit 1
+            fi
+            if [ -z "$fingerprint" ]; then
+              fingerprint="$fp"
+            elif [ "$fp" != "$fingerprint" ]; then
+              echo "::error::$(basename "$f") 证书指纹 $fp 与其它制品 $fingerprint 不一致"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          if [ "$count" -ne 9 ]; then
+            echo "::error::发布门只看到 $count 枚 APK（应为 9）"
+            exit 1
+          fi
+          echo "release gate passed: 9 APKs, debuggable=false, signer=$fingerprint"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -245,14 +292,15 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "$f" --clobber
           done
 
-          # 应用内更新从 Release 说明的 SHA256 行取 universal 包的校验值
-          # （UpdateChecker.parseSha256FromNotes，只认官方端点段 1 的 body）。CI 不能预先知道
-          # 哈希，故构建完在此回填。**三行语义（2026-11-09 用户裁决）**：
+          # 应用内更新从 Release 说明的 SHA256 行取校验值。**逐资产行是新契约**（Y44）：
+          #   SHA256-asset: <资产名> <64 hex>——每枚 APK 一行；安装器只信与所选资产**同名**的行，
+          #     universal 缺失回退 ABI 分包时不会再把 universal 摘要套到分包头上。
+          # 旧三行保留给旧版更新器（语义不变，2026-11-09 用户裁决）：
           #   SHA256:      <compat 包哈希>——旧版更新器（≤v0.0.12-r01，无 flavor 概念）**唯一**认识
           #                的一行；旧版挑到的正是 compat 那枚（内容=lite），故它必须=lite 哈希。
           #   SHA256-full: <full universal 哈希>——full 变体专用行（只认本行，不回退通用行）。
           #   SHA256-lite: <lite universal 哈希>——lite 变体专用行（只认本行）。
-          # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加本次三行。
+          # 回填逻辑：以手写说明（若有）或现有 body 为底 → 去掉旧哈希行 → 追加逐资产 9 行 + 旧三行。
           # 资产名形态：WotaGeiCam-v<tag>-<flavor|compat>[-<abi>]-release-Android.apk。
           # 定位不到或不一致就硬失败——绝不让空哈希/错配哈希进 Release 正文
           # （r05 首推踩过：模式写死单段名却匹配不到双段名，sha256sum '' 静默产出空行）。
@@ -271,12 +319,29 @@ jobs:
           SHA_FULL=$(sha256sum "$FULL_UNI" | cut -d' ' -f1)
           SHA_LITE=$(sha256sum "$LITE_UNI" | cut -d' ' -f1)
           SHA_COMPAT="$SHA_LITE"
+          # 逐资产摘要必须覆盖全部 9 枚（含两侧 ABI 分包与 plain 包）；资产名用 basename，
+          # 与更新器从下载 URL 取到的名字一致。
+          ASSET_HASHES=/tmp/release-asset-hashes.txt
+          : > "$ASSET_HASHES"
+          for f in apk-out/*.apk; do
+            name=$(basename "$f")
+            sum=$(sha256sum "$f" | cut -d' ' -f1)
+            if ! printf '%s' "$sum" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::$(basename "$f") 的 SHA-256 非法：'$sum'"
+              exit 1
+            fi
+            printf 'SHA256-asset: %s %s\n' "$name" "$sum" >> "$ASSET_HASHES"
+          done
+          if [ "$(wc -l < "$ASSET_HASHES")" -ne 9 ]; then
+            echo "::error::逐资产摘要行数不是 9：$(wc -l < "$ASSET_HASHES")"
+            exit 1
+          fi
           BODY=/tmp/release-body.md
           if [ -f "$NOTES" ]; then
-            grep -vE '(^|[[:space:]>*-])SHA256(-full|-lite)?[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
+            grep -vE '(^|[[:space:]>*-])SHA256(-asset|-full|-lite)?[[:space:]]*[:：]' "$NOTES" > "$BODY" || true
           else
             gh release view "$GITHUB_REF_NAME" --json body --jq '.body // ""' \
-              | grep -vE '(^|[[:space:]>*-])SHA256(-full|-lite)?[[:space:]]*[:：]' > "$BODY" || true
+              | grep -vE '(^|[[:space:]>*-])SHA256(-asset|-full|-lite)?[[:space:]]*[:：]' > "$BODY" || true
           fi
           # 手写说明里若已带"校验和"小节标题就不再重复加，只补标签行
           if ! grep -qE '^##+ .*校验和' "$BODY"; then
@@ -286,9 +351,13 @@ jobs:
             grep -q 'full 包 SHA256' "$BODY" || printf '\n- full 包 SHA256：\n' >> "$BODY"
             grep -q 'lite 包 SHA256' "$BODY" || printf '\n- lite 包 SHA256：\n' >> "$BODY"
           fi
+          if ! grep -q '逐资产 SHA256' "$BODY"; then
+            printf '\n- 逐资产 SHA256（安装器按资产名校验）：\n' >> "$BODY"
+          fi
+          cat "$ASSET_HASHES" >> "$BODY"
           printf 'SHA256: %s\n' "$SHA_COMPAT" >> "$BODY"
           printf 'SHA256-full: %s\n' "$SHA_FULL" >> "$BODY"
           printf 'SHA256-lite: %s\n' "$SHA_LITE" >> "$BODY"
           gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
-          echo "release body finalized: compat(lite)=$SHA_COMPAT full=$SHA_FULL lite=$SHA_LITE"
+          echo "release body finalized: 9 per-asset hashes + compat(lite)=$SHA_COMPAT full=$SHA_FULL lite=$SHA_LITE"
 

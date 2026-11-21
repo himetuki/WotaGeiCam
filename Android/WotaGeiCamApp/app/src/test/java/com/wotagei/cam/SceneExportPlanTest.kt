@@ -151,10 +151,10 @@ class SceneExportPlanTest {
     }
 
     @Test
-    fun `呈现时间戳减基准且不落负`() {
+    fun `呈现时间戳保留与共同基准的真实差值`() {
         assertEquals(0L, sceneExportPtsUs(1_500_000L, 1_500_000L))
         assertEquals(500_000L, sceneExportPtsUs(2_000_000L, 1_500_000L))
-        assertEquals("基准前的帧钳 0，不写负戳", 0L, sceneExportPtsUs(1_000_000L, 1_500_000L))
+        assertEquals("调用方可识别并拒绝早于基准的输出", -500_000L, sceneExportPtsUs(1_000_000L, 1_500_000L))
     }
 
     @Test

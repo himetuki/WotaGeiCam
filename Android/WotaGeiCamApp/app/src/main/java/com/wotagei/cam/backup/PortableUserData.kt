@@ -13,7 +13,8 @@ internal object PortableUserData {
     const val PREFS_NAME = "wota_settings"
     const val MAX_BYTES = 4 * 1024 * 1024
     private const val VERSION = 1
-    private const val MAX_TAGS = 10000
+    private const val LEDGER_VERSION = 1
+    internal const val MAX_TAGS = 10000
     private const val MAX_STRING_BYTES = 65536
 
     /** 明确的键白名单：新增设置须显式评估能否迁移；尤其不能把 compare_history 的 URI 带走。 */
@@ -46,6 +47,19 @@ internal object PortableUserData {
     data class Tag(val media: MediaKey, val value: String, val createdAt: Long)
     data class Snapshot(val settings: Map<String, Any>, val tags: List<Tag>)
 
+    /**
+     * 本机导出账本条目（Y40）：把 Room 行身份（mediaId + path + tag）与最后一次
+     * **可核验**时得到的便携指纹绑在一起。部分授权/查询失败时不能重新算出指纹，
+     * 但下一份备份仍要保留这些已有标签，不能因为本轮看不见就把它们从备份集合里抹掉。
+     */
+    data class ExportEntry(
+        val mediaId: Long,
+        val path: String,
+        val tag: String,
+        val media: MediaKey,
+        val createdAt: Long
+    )
+
     /** 格式损坏可丢弃；原始输入流的 IO 异常不包装，留给调用方保源重试。 */
     class InvalidSnapshotException(message: String, cause: Exception? = null) : IOException(message, cause)
 
@@ -63,7 +77,8 @@ internal object PortableUserData {
     fun settingsOf(all: Map<String, *>): Map<String, Any> = all.mapNotNull { (key, value) ->
         val valid = key in SETTING_KEYS && when (key) {
             in BOOLEAN_KEYS -> value is Boolean
-            in INT_KEYS -> value is Int
+            in INT_KEYS -> value is Int &&
+                (key != "hud_pills_schema" || value >= 0)
             in LONG_KEYS -> value is Long
             in FLOAT_KEYS -> value is Float && value.isFinite()
             else -> value is String && value.length <= MAX_STRING_BYTES &&
@@ -72,13 +87,39 @@ internal object PortableUserData {
         if (valid && value != null) key to value else null
     }.toMap()
 
-    /** 恢复是补充，不覆盖目标设备已存在的用户设置。 */
+    /**
+     * 恢复是补充，不覆盖目标设备已存在的用户设置。
+     *
+     * 值相同也要再次提交：上一次 `commit(false)` 可能已改内存但没落盘，重试时
+     * `current` 里已经有这个键；若按「键存在就跳过」过滤，editor 会变成空提交，
+     * 真实 SharedPreferences 不会因为空提交把内存里的值补写回磁盘。只重写与备份值
+     * 相等的键，既不改目标设备已有的不同设置，又能在下一次成功提交时真正落盘。
+     */
     fun settingsToRestore(restored: Map<String, *>, current: Map<String, *>): Map<String, Any> =
-        settingsOf(restored).filterKeys { it !in current }
+        settingsOf(restored).filter { (key, value) ->
+            val existing = current[key]
+            existing == null || existing == value
+        }
 
     /** 同一媒体的同一标签只保留一份，已有待匹配项优先，重复 restore 不累积数据。 */
     fun mergeTags(existing: List<Tag>, incoming: List<Tag>): List<Tag> =
         (existing + incoming).distinctBy { it.media to it.value }.also { require(it.size <= MAX_TAGS) }
+
+    /**
+     * R14：整体合并超限时按余量分批交接。旧 pending 原样优先保留；incoming 中与旧 pending
+     * 重复的条目已存在于 pending，视为交接完成，不占余量。
+     * @return (可并入 pending 的标签, 本轮放不下、必须留在恢复源里的新标签)
+     */
+    fun handoff(existing: List<Tag>, incoming: List<Tag>): Pair<List<Tag>, List<Tag>> {
+        val seen = existing.mapTo(HashSet()) { it.media to it.value }
+        val accepted = ArrayList<Tag>()
+        val remaining = ArrayList<Tag>()
+        for (tag in incoming) {
+            if (!seen.add(tag.media to tag.value)) continue
+            if (existing.size + accepted.size < MAX_TAGS) accepted += tag else remaining += tag
+        }
+        return accepted to remaining
+    }
 
     /** 一次建索引，只保留完整且唯一的指纹；runtime 不按每条标签重复扫描全部媒体。 */
     fun <T> uniqueCandidates(items: List<T>, keyOf: (T) -> MediaKey): Map<MediaKey, T> =
@@ -88,30 +129,19 @@ internal object PortableUserData {
     /** 只对唯一、完整匹配的媒体恢复标签；同名/同 ID 均不足为凭。 */
     fun matches(key: MediaKey, candidates: List<MediaKey>): Boolean = key in uniqueCandidates(candidates) { it }
 
-    fun write(snapshot: Snapshot, output: OutputStream) {
-        val settings = settingsOf(snapshot.settings)
+    /** 快照落盘/回读都使用同一份归一化结果；R15 用它做「发布后回读逐字节等价」校验。 */
+    fun normalized(snapshot: Snapshot): Snapshot {
         val tags = snapshot.tags.filter { it.media.valid() && it.value.isNotBlank() && it.value.length <= 128 }
             .distinctBy { it.media to it.value }.also { require(it.size <= MAX_TAGS) }
-        val out = DataOutputStream(object : OutputStream() {
-            private var written = 0
-            private fun checkLimit(count: Int) {
-                if (count > MAX_BYTES - written) throw IOException("备份超过上限")
-            }
-            override fun write(value: Int) {
-                checkLimit(1)
-                output.write(value)
-                written++
-            }
-            override fun write(bytes: ByteArray, offset: Int, length: Int) {
-                checkLimit(length)
-                output.write(bytes, offset, length)
-                written += length
-            }
-            override fun flush() = output.flush()
-        })
+        return Snapshot(settingsOf(snapshot.settings), tags)
+    }
+
+    fun write(snapshot: Snapshot, output: OutputStream) {
+        val canonical = normalized(snapshot)
+        val out = cappedOutput(output)
         out.writeInt(VERSION)
-        out.writeInt(settings.size)
-        settings.forEach { (key, value) ->
+        out.writeInt(canonical.settings.size)
+        canonical.settings.forEach { (key, value) ->
             out.text(key)
             when (value) {
                 is Boolean -> { out.writeByte(1); out.writeBoolean(value) }
@@ -121,8 +151,8 @@ internal object PortableUserData {
                 is String -> { out.writeByte(5); out.text(value) }
             }
         }
-        out.writeInt(tags.size)
-        tags.forEach { tag ->
+        out.writeInt(canonical.tags.size)
+        canonical.tags.forEach { tag ->
             out.text(tag.media.relativePath)
             out.text(tag.media.name)
             out.writeLong(tag.media.size)
@@ -135,17 +165,11 @@ internal object PortableUserData {
 
     /** 不使用 Java 反序列化；坏版本、越界长度、截断与尾随数据全部拒绝，调用方不应用半份快照。 */
     fun read(input: InputStream): Snapshot {
-        val buffer = ByteArray(8192)
-        val bytes = ByteArrayOutputStream()
-        while (true) {
-            val n = input.read(buffer)
-            if (n < 0) break
-            if (bytes.size() + n > MAX_BYTES) throw InvalidSnapshotException("备份超过上限")
-            bytes.write(buffer, 0, n)
-        }
-        // 从这里起只解析内存字节，异常明确是坏格式；上面的真实读取异常原样传播，不能误删源。
+        // 真实流读取放在 try 外：存储 IO 故障必须原样抛给调用方保源重试，不能伪装成坏格式被删。
+        val bytes = readBounded(input)
         return try {
-            val data = DataInputStream(bytes.toByteArray().inputStream())
+            // 从这里起只解析内存字节，异常明确是坏格式。
+            val data = DataInputStream(bytes.inputStream())
             require(data.readInt() == VERSION) { "不支持的备份版本" }
             val settings = linkedMapOf<String, Any>()
             repeat(data.count(SETTING_KEYS.size)) {
@@ -166,11 +190,87 @@ internal object PortableUserData {
                     .also { require(it.media.valid() && it.value.isNotBlank() && it.value.length <= 128) }
             }
             require(data.read() == -1) { "备份存在尾随数据" }
-            Snapshot(settingsOf(settings), tags.distinctBy { it.media to it.value })
+            normalized(Snapshot(settings, tags))
         } catch (e: Exception) {
             throw InvalidSnapshotException("备份格式或版本无效", e)
         }
     }
+
+    /** 导出账本归一化：只保留可迁移的本机行身份 + 最后一次核验到的便携指纹。 */
+    fun normalizedLedger(entries: List<ExportEntry>): List<ExportEntry> =
+        entries.filter {
+            it.mediaId > 0 && it.path.isNotBlank() && it.path.length <= MAX_STRING_BYTES &&
+                it.path.toByteArray(Charsets.UTF_8).size <= MAX_STRING_BYTES &&
+                it.tag.isNotBlank() && it.tag.length <= 128 && it.media.valid()
+        }.distinctBy { Triple(it.mediaId, it.path, it.tag) }
+            .also { require(it.size <= MAX_TAGS) }
+
+    /** 本机导出账本与云备份同帽：坏版本/截断/尾随/超量都拒绝，避免半份账本覆盖旧指纹。 */
+    fun writeExportLedger(entries: List<ExportEntry>, output: OutputStream) {
+        val canonical = normalizedLedger(entries)
+        val out = cappedOutput(output)
+        out.writeInt(LEDGER_VERSION)
+        out.writeInt(canonical.size)
+        canonical.forEach { entry ->
+            out.writeLong(entry.mediaId)
+            out.text(entry.path)
+            out.text(entry.tag)
+            out.writeLong(entry.createdAt)
+            out.text(entry.media.relativePath)
+            out.text(entry.media.name)
+            out.writeLong(entry.media.size)
+            out.writeLong(entry.media.durationMs)
+        }
+        out.flush()
+    }
+
+    fun readExportLedger(input: InputStream): List<ExportEntry> = try {
+        val data = DataInputStream(readBounded(input).inputStream())
+        require(data.readInt() == LEDGER_VERSION) { "不支持的导出账本版本" }
+        val entries = List(data.count(MAX_TAGS)) {
+            val mediaId = data.readLong()
+            val path = data.text()
+            val tag = data.text()
+            val createdAt = data.readLong()
+            val media = MediaKey(data.text(), data.text(), data.readLong(), data.readLong())
+            ExportEntry(mediaId, path, tag, media, createdAt)
+                .also { require(it.media.valid() && it.path.isNotBlank() && it.tag.isNotBlank() && it.tag.length <= 128) }
+        }
+        require(data.read() == -1) { "导出账本存在尾随数据" }
+        normalizedLedger(entries)
+    } catch (e: Exception) {
+        throw InvalidSnapshotException("导出账本格式或版本无效", e)
+    }
+
+    private fun readBounded(input: InputStream): ByteArray {
+        val buffer = ByteArray(8192)
+        val bytes = ByteArrayOutputStream()
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            if (bytes.size() + n > MAX_BYTES) throw InvalidSnapshotException("备份超过上限")
+            bytes.write(buffer, 0, n)
+        }
+        return bytes.toByteArray()
+    }
+
+    private fun cappedOutput(output: OutputStream): DataOutputStream = DataOutputStream(object : OutputStream() {
+        private var written = 0
+        private fun checkLimit(count: Int) {
+            if (count > MAX_BYTES - written) throw IOException("备份超过上限")
+        }
+        override fun write(value: Int) {
+            checkLimit(1)
+            output.write(value)
+            written++
+        }
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            checkLimit(length)
+            output.write(bytes, offset, length)
+            written += length
+        }
+        override fun flush() = output.flush()
+    })
 
     private fun DataInputStream.count(max: Int): Int = readInt().also { require(it in 0..max) }
     private fun DataInputStream.text(): String = ByteArray(count(MAX_STRING_BYTES))

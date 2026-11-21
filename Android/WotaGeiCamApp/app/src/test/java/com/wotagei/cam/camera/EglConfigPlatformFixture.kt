@@ -73,11 +73,45 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
     }
     fun engineField(name: String): Any? = requireNotNull(engine).javaClass.getDeclaredField(name)
         .apply { isAccessible = true }.get(engine)
-    fun sentinel(name: String): Any = loader.loadClass("android.opengl.EGL14").getField(name).get(null)
+
+    /** R05/Y10：只为行为测试构造引擎，不执行 start（EGL 配置由 U01 用例另测）。 */
+    fun newEngine(): Any {
+        check(engine == null) { "engine already created" }
+        engine = loader.loadClass("com.wotagei.cam.camera.GlRenderEngine").getDeclaredConstructor().newInstance()
+        return requireNotNull(engine)
+    }
+    fun setEngineField(name: String, value: Any?) {
+        requireNotNull(engine).javaClass.getDeclaredField(name).apply { isAccessible = true }.set(engine, value)
+    }
+    fun callEngine(name: String, vararg args: Any?): Any? = unwrap {
+        val method = requireNotNull(engine).javaClass.declaredMethods.single {
+            it.name == name && it.parameterCount == args.size
+        }
+        method.apply { isAccessible = true }.invoke(engine, *args)
+    }
+    fun newSurface(id: String): Any = loader.loadClass("android.opengl.EGLSurface")
+        .getConstructor(String::class.java).newInstance(id)
+    fun display(): Any = requireNotNull(probe.getField("DISPLAY").get(null))
+    fun sentinel(name: String): Any = requireNotNull(
+        loader.loadClass("android.opengl.EGL14").getField(name).get(null)
+    )
     private fun call(name: String): Any? = unwrap {
         requireNotNull(engine).javaClass.getDeclaredMethod(name).apply { isAccessible = true }.invoke(engine)
     }
-    fun release() { if (engine != null) call("release") }
+    private val noopCallback: () -> Unit = {}
+
+    /**
+     * 真实 release：GlRenderEngine 是 0 参；ArcRepairGl 现签名是
+     * `release(stopDecoder, releaseEncoder)`（两侧 codec 由调用方交回 GL 线程排队关）。
+     * 旧夹具只按名字找 0 参方法，Arc 支路从来没真正走到清理就在 NoSuchMethodException 上红。
+     * 这里按实际签名喂两个空操作回调，断言仍然要求真实 EGL 资源回收与幂等。
+     */
+    fun release() {
+        val target = engine ?: return
+        val method = target.javaClass.declaredMethods.single { it.name == "release" }
+        val args = if (method.parameterCount == 2) arrayOf(noopCallback, noopCallback) else emptyArray()
+        unwrap { method.apply { isAccessible = true }.invoke(target, *args) }
+    }
     private fun <T> unwrap(block: () -> T): T = try { block() } catch (error: InvocationTargetException) {
         throw error.targetException
     }
@@ -89,7 +123,7 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
             val classes = File(root, "classes").apply { mkdirs() }
             val sources = SOURCES.map { (name, body) ->
                 File(root, name.replace('.', '/') + ".java").apply {
-                    parentFile.mkdirs()
+                    requireNotNull(parentFile).mkdirs()
                     writeText(body.trimIndent())
                 }
             }
@@ -120,6 +154,8 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
                     public static final List<String> events=new ArrayList<>(),created=new ArrayList<>(),
                         contextAttempts=new ArrayList<>(),violations=new ArrayList<>();
                     public static boolean failEs3,failEs2,rejectRecordable;
+                    public static boolean presentOk=true;
+                    public static int presentCalls,presentAt;
                     // 1=false（留下正 count/毒 config）；2=true+num0（留下毒 config）。不按调用次序给答案。
                     public static int chooseFault;
                     public static int getDisplayCalls,initializeCalls,terminateCalls,destroyContextCalls,
@@ -251,6 +287,16 @@ internal class EglConfigPlatformFixture(classes: File, parent: ClassLoader) : Cl
                         EglProbe.events.add("display.terminated");return valid;
                     }
                     public static int eglGetError(){int error=EglProbe.lastError;EglProbe.lastError=0x3000;return error;}
+                }
+            """,
+            "android.opengl.EGLExt" to """
+                package android.opengl;
+                import probe.EglProbe;
+                public class EGLExt {
+                    public static boolean eglPresentationTimeANDROID(EGLDisplay d,EGLSurface s,long time){
+                        EglProbe.presentCalls++;EglProbe.presentAt=EglProbe.presentCalls;
+                        return EglProbe.presentOk;
+                    }
                 }
             """,
             "android.os.Looper" to """

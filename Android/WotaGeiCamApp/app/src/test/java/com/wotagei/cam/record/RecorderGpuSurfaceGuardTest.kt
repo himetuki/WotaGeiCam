@@ -32,13 +32,17 @@ class RecorderGpuSurfaceGuardTest {
     @Test
     fun `CodecRecorder 的 GPU 路必须用 per-codec 输入面`() {
         val src = maskedMain("record/CodecRecorder.kt")
-        val prepare = bodyOf(src, "prepare")
+        // Y17 把预筛/实配两级回退收进 prepareVideoEncoder → openVideoEncoder，分叉点随之搬进后者。
+        // openVideoEncoder 是表达式体（bodyOf 只认花括号体），分叉结构按整份遮蔽源判。
+        val pickerAt = src.indexOf("if (p.useGpu)")
+        val gpuAt = src.indexOf("prepareGpuVideoEncoder(mime, p)")
+        val directAt = src.indexOf("MediaCodec.createPersistentInputSurface()", gpuAt)
         val gpu = bodyOf(src, "prepareGpuVideoEncoder")
 
-        // prepare 按 useGpu 分叉：GPU 支路走专用建立函数
+        // 建立入口按 useGpu 分叉：GPU 支路走专用建立函数
         assertTrue(
-            "prepare 必须按 p.useGpu 分叉选择输入面建立方式",
-            prepare.contains("if (p.useGpu)") && prepare.contains("prepareGpuVideoEncoder(mime, p)")
+            "建编码器必须按 p.useGpu 分叉选择输入面建立方式",
+            pickerAt >= 0 && gpuAt > pickerAt
         )
         // GPU 建立：configure 传 null（只建不绑）+ per-codec createInputSurface
         assertTrue(
@@ -52,7 +56,7 @@ class RecorderGpuSurfaceGuardTest {
         )
         assertTrue(
             "DIRECT 支路必须保留 persistent surface 复用（Camera2 当 producer 的既有口径）",
-            prepare.contains("MediaCodec.createPersistentInputSurface()")
+            gpuAt >= 0 && directAt > gpuAt && directAt - gpuAt < 400
         )
     }
 
@@ -117,27 +121,11 @@ class RecorderGpuSurfaceGuardTest {
             begin.contains("rec.onInputSurfaceRecreated = ") &&
                 // 锚串随 2026-10-11 #2 的 NTSC 参数迁移（setOutputSurface 新增 ntsc 形参）
                 begin.contains("setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)") &&
-                begin.contains("awaitEncoderSurface()")
+                begin.contains("awaitEncoderSurface(s)")
         )
-        // 等面超时不许静默放行（P3-3，与 awaitPreview 口径对齐）；字面量被遮蔽，
-        // 锚定「未挂载即 if + Log.w(TAG_UI…)」的代码形态
         val await = bodyOf(screen, "awaitEncoderSurface")
-        assertTrue(
-            "awaitEncoderSurface 超时必须留 Log.w（对齐 awaitPreview 口径）",
-            await.contains("if (!arrived())") &&
-                await.contains("Log.w(TAG_UI")
-        )
-        // 2026-10-07 换段窗口修复：轮转时旧绑定还在，isOutputSurfaceBound 首查恒真 =
-        // 零等待 + 旧面未解绑先 release。重挂路径必须等「传入的新面」，首段路径保持旧谓词
-        assertTrue(
-            "awaitEncoderSurface 重挂路径必须等传入的新面（isEncoderSurfaceNative）；" +
-                "改回 isOutputSurfaceBound = 换段等待名存实亡",
-            await.contains("gl.isEncoderSurfaceNative(expected)")
-        )
-        assertTrue(
-            "awaitEncoderSurface 首段路径必须保持既有谓词（无旧绑定，任意面已绑定语义正确）",
-            await.contains("gl.isOutputSurfaceBound()")
-        )
+        assertTrue("必须返回实际绑定结果", await.contains("return !sessionAborted() && gl.isEncoderSurfaceNative(expected)"))
+        assertFalse("首段与换段均需要准确的面身份", await.contains("gl.isOutputSurfaceBound()"))
     }
 
     /**
@@ -164,11 +152,15 @@ class RecorderGpuSurfaceGuardTest {
             "DIRECT 换段钩子体内必须改指相机会话目标（setRecordingTarget）",
             rehand > hookAt
         )
-        // 预览等待：DIRECT 支路应有**两处**（首段挂牌一处、换段钩子一处），少一处即换段没等会话回来
-        assertEquals(
-            "DIRECT 支路的 awaitPreview(ING) 必须恰好两处（首段 + 换段钩子）",
-            2,
-            KotlinSourceScan.occurrences(directBranch, "awaitPreview(PreviewStatus.ING)").size
+        assertTrue(
+            "首段必须等本次交接号，超时走起录失败",
+            directBranch.contains("when (awaitSessionReady(firstHandoff))") &&
+                directBranch.contains("failNow(RecordError.START_FAILED)")
+        )
+        assertTrue(
+            "换段必须等本次交接号，交接失败禁止 start",
+            directBranch.contains("val handoff = ctrl.setRecordingTarget(s)") &&
+                directBranch.contains("check(awaitSessionReady(handoff) == WaitOutcome.READY)")
         )
     }
 

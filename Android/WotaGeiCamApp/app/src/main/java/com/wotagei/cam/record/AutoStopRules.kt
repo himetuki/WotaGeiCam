@@ -52,6 +52,14 @@ object AutoStopRules {
     const val REASON_CAMERA_LOST = "CAMERA_LOST"
 
     /**
+     * [RecordResult.autoStopReason] 载荷：**GL 渲染上下文丢失**（R05，`EGL_CONTEXT_LOST`）导致
+     * 录制被显式停止。语义与 [REASON_CAMERA_LOST] 同族——「已录部分已保存」的正常收尾，
+     * **不是**失败（error 必须保持 null）。本段编码器输入面绑在旧引擎的 EGLSurface 上，
+     * 换新引擎续录必然断轨，所以只收尾、不重挂。
+     */
+    const val REASON_GL_CONTEXT_LOST = "GL_CONTEXT_LOST"
+
+    /**
      * 电量停录判据（纯函数）：[levelPct] ≤ [BATTERY_STOP_PCT] 即停。
      * 读数无效（<0 = 粘性广播缺 EXTRA_LEVEL/EXTRA_SCALE 或尚未收到）**不停**——
      * 宁可漏一次巡检，也不许拿无效读数误停用户正在录的内容。

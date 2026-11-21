@@ -400,6 +400,11 @@ class ParamsPersistSession(private val prefs: SharedPreferences, private val par
             shDisplayScale = displayScale
             shRefLines = refLines
             shLevel = level
+            // 2026-11-19（R13）：纠偏两键也是差异检测项，必须与其余键一起推进影子。
+            // 漏推进会让 A→B→A 的第二次 A 以「与影子相同」被跳过，磁盘留下 B；
+            // 停留 B 时后续无关 flush 又会重复写这两枚键。
+            shCorrectionAuto = correctionAuto
+            shCorrectionManualNs = correctionManualNs
         }
         return ok
     }

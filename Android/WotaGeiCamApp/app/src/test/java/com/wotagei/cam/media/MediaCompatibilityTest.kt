@@ -128,7 +128,7 @@ class MediaCompatibilityTest {
         val tagType = loader.loadClass("com.wotagei.cam.media.MediaTagDao")
         inject("tagDao", Proxy.newProxyInstance(loader, arrayOf(tagType)) { _, method, _ ->
             when (method.name) {
-                "tagsOf" -> emptyList<String>()
+                "rowsOf" -> emptyList<Any>()
                 "observeAll" -> flowOf(emptyList<Any>())
                 else -> error("意外调用 ${method.name}")
             }
@@ -222,6 +222,15 @@ class MediaCompatibilityTest {
                 public class ContentResolver {
                     public android.graphics.Bitmap loadThumbnail(android.net.Uri uri, android.util.Size size, android.os.CancellationSignal signal) { return null; }
                     public android.database.Cursor query(android.net.Uri uri, String[] projection, String selection, String[] args, String sort) { return new android.database.FixtureCursor(); }
+                    public android.database.Cursor query(android.net.Uri uri, String[] projection, android.os.Bundle args, android.os.CancellationSignal signal) { return new android.database.FixtureCursor(); }
+                }
+            """.trimIndent(),
+            "android/os/Bundle.java" to """
+                package android.os;
+                public class Bundle {
+                    public void putString(String key, String value) {}
+                    public void putStringArray(String key, String[] value) {}
+                    public void putInt(String key, int value) {}
                 }
             """.trimIndent(),
             "android/content/ContentUris.java" to """
@@ -236,6 +245,7 @@ class MediaCompatibilityTest {
                 public class MediaStore {
                     public static class Video { public static class Media {
                         public static android.net.Uri EXTERNAL_CONTENT_URI = new android.net.Uri("content://media/external/video/media");
+                        public static android.net.Uri getContentUri(String volume) { return new android.net.Uri("content://media/"+volume+"/video/media"); }
                     } }
                 }
             """.trimIndent(),
@@ -308,7 +318,7 @@ class MediaCompatibilityTest {
         val run = Class.forName("javax.tools.Tool").getMethod("run", InputStream::class.java, OutputStream::class.java, OutputStream::class.java, Array<String>::class.java)
         assertEquals(0, run.invoke(compiler, null, null, null,
             (listOf("-proc:none", "-encoding", "UTF-8", "-d", classes.absolutePath) + files.map { it.absolutePath }).toTypedArray()))
-        BoundaryLoader(classes, requireNotNull(javaClass.classLoader), sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet()).use(body)
+        BoundaryLoader(classes, requireNotNull(javaClass.classLoader!!), sources.keys.map { it.removeSuffix(".java").replace('/', '.') }.toSet()).use(body)
     }
 
     private class BoundaryLoader(classes: File, parent: ClassLoader, private val platform: Set<String>) :

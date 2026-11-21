@@ -1,5 +1,7 @@
 package com.wotagei.cam.update
 
+import java.net.URL
+
 /**
  * 「检查更新」的**纯逻辑层**（2026-10-06，用户批准解除 INTERNET 红线后的第一批网络代码）：
  * - [UpdateConfig]：仓库常量与镜像前缀表（顺序即优先级）；
@@ -22,6 +24,16 @@ object UpdateConfig {
 
     /** 段 3：releases/latest 页面（302 → /releases/tag/<tag>） */
     const val RELEASES_LATEST_PAGE = "https://github.com/himetuki/WotaGeiCam/releases/latest"
+
+    /**
+     * 官方 API 请求允许落在哪些主机（Y43）：段 1 的「说明正文可信」标记必须绑定**重定向后的最终来源**，
+     * 不能只看用户填的起始 URL。api.github.com 正常不重定向；任何把它引到别的主机的 302 都按失败处理，
+     * 以免代理/中间设备用「官方 URL 发起、镜像正文落地」的方式伪造可信 SHA。
+     */
+    val OFFICIAL_API_HOSTS = setOf("api.github.com")
+
+    /** releases/latest 页面 302 的 Location 只接受 GitHub 官方页面（防 Location 指向任意主机）。 */
+    val OFFICIAL_RELEASE_HOSTS = setOf("github.com", "www.github.com")
 
     /** 下载直连前缀（releases/download/<tag>/<asset>） */
     const val DOWNLOAD_BASE = "https://github.com/himetuki/WotaGeiCam/releases/download"
@@ -83,6 +95,118 @@ object UpdateConfig {
 
     fun directDownloadUrl(tag: String, assetName: String): String = "$DOWNLOAD_BASE/$tag/$assetName"
 }
+
+/**
+ * 资产名里的 ABI 段（CI 命名：`WotaGeiCam-<tag>-<flavor|compat>[-<abi>]-release-Android.apk`）。
+ *
+ * Y44 的根因是「选到 ABI 分包、却拿 universal 的摘要去校验」；把资产名解析成枚举后，摘要与
+ * ABI 都跟具体资产名绑定，而不是跟 flavor 绑死。[UNKNOWN] 表示出现了本工程不认识的 ABI 段，
+ * 安装闸一律拒绝（宁可让用户手动下载，也不装一个来源说不清的包）。
+ */
+enum class UpdateAbi(val token: String) {
+    UNIVERSAL("universal"),
+    ARM64_V8A("arm64-v8a"),
+    ARMEABI_V7A("armeabi-v7a"),
+    UNKNOWN("");
+
+    /** 当前设备是否能用这枚资产（universal 恒可用；分包看 Build.SUPPORTED_ABIS） */
+    fun supportedBy(deviceAbis: List<String>): Boolean = when (this) {
+        UNIVERSAL -> true
+        ARM64_V8A -> deviceAbis.any { it.equals("arm64-v8a", ignoreCase = true) }
+        ARMEABI_V7A -> deviceAbis.any {
+            it.equals("armeabi-v7a", ignoreCase = true) || it.equals("armeabi", ignoreCase = true)
+        }
+        UNKNOWN -> false
+    }
+
+    /**
+     * APK 内容是否像这枚资产声明的那样（安装前最后一道 ABI 绑定）。
+     * `lib/` 下没有本机 so 时（纯 Java 依赖的 APK）无法从归档判断，按「不矛盾」放行；
+     * 有 so 时则要求声明的 ABI 段真实存在。
+     */
+    fun presentIn(archiveAbis: Set<String>): Boolean = when (this) {
+        UNIVERSAL -> true
+        ARM64_V8A -> archiveAbis.isEmpty() || archiveAbis.any { it.equals("arm64-v8a", ignoreCase = true) }
+        ARMEABI_V7A -> archiveAbis.isEmpty() || archiveAbis.any {
+            it.equals("armeabi-v7a", ignoreCase = true) || it.equals("armeabi", ignoreCase = true)
+        }
+        UNKNOWN -> false
+    }
+
+    companion object {
+        fun fromAssetName(name: String): UpdateAbi = when {
+            name.contains("-arm64-v8a-", ignoreCase = true) -> ARM64_V8A
+            name.contains("-armeabi-v7a-", ignoreCase = true) -> ARMEABI_V7A
+            name.contains("-universal-", ignoreCase = true) -> UNIVERSAL
+            // 旧版单包资产名没有 ABI/flavor 段，内容是 universal。已知 x86 段则明确拒绝。
+            name.contains("-x86", ignoreCase = true) -> UNKNOWN
+            else -> UNIVERSAL
+        }
+    }
+}
+
+/**
+ * 一次更新选择的**不可变绑定**（Y43）：发行 tag + flavor + 具体资产名 + ABI + 该资产摘要。
+ *
+ * 下载器只接收这个对象，产出的 [UpdateDownloader.DownloadOutcome.Done] 会把它与实际字节摘要
+ * 一起带回；安装器再用它核对归档包名/versionName/flavor/ABI/摘要。这样「用户在弹窗里看到的
+ * 版本」与「最终交给安装器的字节」不再是两条可以各自被替换的路径。
+ *
+ * [expectedSha256] 为 null 只表示「本次探测没有可信摘要」（镜像段/旧说明），**不表示**可以跳过
+ * 其余绑定：versionName 必须与 tag 对应，flavor 后缀必须一致，ABI 必须与设备/归档相符。
+ */
+data class UpdateSelection(
+    val releaseTag: String,
+    val flavor: String?,
+    val assetName: String,
+    val abi: UpdateAbi,
+    val expectedSha256: String?,
+    val sizeBytes: Long?,
+    val downloadUrl: String
+) {
+    init {
+        require(flavor == null || flavor == "full" || flavor == "lite") { "未知 flavor：$flavor" }
+        require(assetName.isNotEmpty() && downloadUrl.endsWith("/$assetName")) {
+            "下载 URL 与资产名未绑定：$downloadUrl / $assetName"
+        }
+    }
+
+    /** 该 tag + flavor 对应的 versionName（lite 带 -lite 后缀；与 build.gradle.kts 的命名一致） */
+    val expectedVersionName: String
+        get() {
+            val base = releaseTag.trim().removePrefix("v").removePrefix("V")
+            return if (flavor == "lite") "$base-lite" else base
+        }
+
+    companion object {
+        fun normalizeFlavor(value: String?): String? = when (value?.trim()?.lowercase()) {
+            "full" -> "full"
+            "lite" -> "lite"
+            else -> null
+        }
+
+        /**
+         * 旧调用/纯下载测试的兼容构造：tag 从 GitHub 下载 URL 反推，flavor 未知（null），
+         * 因而安装闸不拿它做 versionName 绑定（生产路径一律走探测结果里的 flavor）。
+         */
+        fun legacy(downloadUrl: String, sizeBytes: Long?, expectedSha256: String?): UpdateSelection {
+            val assetName = downloadUrl.substringAfterLast('/')
+            val tag = downloadUrl.substringBeforeLast('/').substringAfterLast('/')
+            return UpdateSelection(
+                releaseTag = tag,
+                flavor = null,
+                assetName = assetName,
+                abi = UpdateAbi.fromAssetName(assetName),
+                expectedSha256 = expectedSha256,
+                sizeBytes = sizeBytes,
+                downloadUrl = downloadUrl
+            )
+        }
+    }
+}
+
+/** 探测响应的正文 + 最终落地 URL（Y43：可信标记必须绑定重定向后的来源）。 */
+data class FetchedJson(val body: String, val finalUrl: String)
 
 /** 版本比较（用户裁决的规则，纯函数） */
 object CompareVersions {
@@ -184,9 +308,10 @@ data class ReleaseAsset(val name: String, val url: String, val sizeBytes: Long?)
 
 /**
  * latest release 的最小结论：tag + 挑出来的 APK 附件 + 说明原文。
- * [sha256] = 发版者写在 Release 说明里的 universal 包 SHA-256（十六进制小写）。只有**段 1
- * （api.github.com 官方端点）**才提取——镜像转发的 body 不可信，拿假哈希当真会把合法更新判废；
- * null = 无可信哈希，下载退回现有防线（PK 魔数 + size 一致性 + 安装签名网）。
+ * [sha256] = 发版者写在 Release 说明里、**与 [asset] 同名绑定**的 SHA-256（十六进制小写）。
+ * 只有**段 1（api.github.com 官方端点且最终来源仍是该主机）**才提取——镜像转发的 body 不可信，
+ * 拿假哈希当真会把合法更新判废；null = 该资产没有可信哈希（旧说明/镜像段），下载仍保留 PK 魔数、
+ * size、versionName/flavor/ABI 与安装签名网。**绝不拿 universal 的摘要去校验 ABI 分包**（Y44）。
  * [notes] = 同一份说明原文（Markdown，未加工），供更新弹窗展示。**段 1/段 2 都读**（2026-10-21
  * 用户裁决：都走镜像了，安装包本就可能被换，一段说明文字不必再设门槛）；它只用于展示，
  * 不参与任何判断——装不装得上仍由 SHA-256（段 1）与系统安装签名决定。
@@ -251,46 +376,147 @@ object ReleaseJson {
      * **universal 优先是硬要求**（2026-11-09 修）：12 枚资产里 ABI 分包名按字母序排在 universal
      * 之前（-arm64-v8a- / -armeabi-v7a-），只按"第一个含 flavor 段"会挑到 arm64 分包，
      * armeabi-v7a 设备直接装不上。选包顺序固定为 flavor 组内 universal → 组内第一个。
+     *
+     * **[digests] 非空时**（段 1 官方说明）优先选「有同名摘要」的资产；universal 仍优先于 ABI 分包。
+     * 只有 ABI 分包可用时（universal 缺失），[requireDigestForAbiSplits]=true 会拒绝没有
+     * 分包摘要的候选（Y44 验收：仅有分包 + 其摘要 → 通过；无摘要 → 拒绝）。[deviceAbis]
+     * 用于多个分包里挑当前设备真能装的，顺序与 Build.SUPPORTED_ABIS 一致。
      */
-    fun pickApkAsset(assets: List<ReleaseAsset>, flavor: String? = null): ReleaseAsset? {
+    fun pickApkAsset(
+        assets: List<ReleaseAsset>,
+        flavor: String? = null,
+        digests: Map<String, String> = emptyMap(),
+        requireDigestForAbiSplits: Boolean = false,
+        deviceAbis: List<String> = emptyList()
+    ): ReleaseAsset? {
         val apks = assets.filter { isSafeReleaseAssetName(it.name) }
-        if (flavor == "lite") {
-            val lite = apks.filter { it.name.contains("-lite-", ignoreCase = true) }
-            return lite.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: lite.firstOrNull()
-        }
-        if (flavor == "full") {
-            val full = apks.filter { it.name.contains("-full-", ignoreCase = true) }
-            if (full.isNotEmpty()) {
-                return full.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: full.first()
+        val scoped = when (flavor) {
+            "lite" -> apks.filter { it.name.contains("-lite-", ignoreCase = true) }
+            "full" -> {
+                val full = apks.filter { it.name.contains("-full-", ignoreCase = true) }
+                if (full.isNotEmpty()) full else apks.filterNot {
+                    // 只回退真正无 flavor 的历史包；compat 是 lite 字节副本，不属于历史通用 full 包。
+                    it.name.contains("-lite", ignoreCase = true) || it.name.contains("-compat-", ignoreCase = true)
+                }
             }
-            // 只回退真正无 flavor 的历史包；compat 是 lite 字节副本，不属于历史通用 full 包。
-            val historical = apks.filterNot {
-                it.name.contains("-lite", ignoreCase = true) || it.name.contains("-compat-", ignoreCase = true)
-            }
-            return historical.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: historical.firstOrNull()
+            else -> apks
         }
-        return apks.firstOrNull { it.name.contains("universal", ignoreCase = true) } ?: apks.firstOrNull()
+        if (scoped.isEmpty()) return null
+
+        // 只有名字里显式带 `-universal-` 的才是 universal 首选；无 ABI/flavor 段的旧包
+        // 在 [UpdateAbi.fromAssetName] 里同样按 universal 语义看待，但它们不是「显式 universal」，
+        // 必须留在后面的组内首个回退，不能抢占 explicit universal 的位置。
+        val universal = scoped.filter { it.name.contains("-universal-", ignoreCase = true) }
+        if (universal.isNotEmpty()) {
+            // universal 优先；有同名摘要的那枚优先（同一组通常只有一枚 universal）。
+            return universal.firstOrNull { digests.containsKey(it.name) } ?: universal.first()
+        }
+
+        val splits = scoped.filter { UpdateAbi.fromAssetName(it.name) != UpdateAbi.UNKNOWN }
+        if (splits.isEmpty()) return null
+        val deviceOrdered = if (deviceAbis.isEmpty()) {
+            splits
+        } else {
+            val supported = splits.filter { UpdateAbi.fromAssetName(it.name).supportedBy(deviceAbis) }
+            supported.sortedBy { asset ->
+                val abi = UpdateAbi.fromAssetName(asset.name)
+                deviceAbis.indexOfFirst { it.equals(abi.token, ignoreCase = true) }
+                    .let { if (it < 0) Int.MAX_VALUE else it }
+            }
+        }
+        if (deviceOrdered.isEmpty()) return null
+        if (requireDigestForAbiSplits) {
+            return deviceOrdered.firstOrNull { digests.containsKey(it.name) }
+        }
+        return deviceOrdered.first()
     }
 
     fun parse(json: String): ReleaseInfo? = parse(json, extractSha256 = false)
 
     /**
      * 说明原文（body）**总是**读出来交给 [ReleaseInfo.notes]（弹窗展示，段 1/2 都有）；
-     * [extractSha256]=true 时额外从同一段文本提取发版者写入的 universal 包 SHA-256。
-     * **哈希只允许段 1（api.github.com 官方端点）开**：镜像转发的 body 代理可改，拿假哈希
-     * 当真会把合法更新判废；说明文字没有这个顾虑（只展示、不参与判断）。
-     * 说明文本的书写约定见发版流程：一行 `SHA256: <64位十六进制>`。
+     * [extractSha256]=true 时额外从同一段文本提取发版者写入的摘要，并**按资产名绑定**：
+     * - 逐资产行：`SHA256-asset: <资产名> <64位十六进制>`（Y44 推荐的新写法，可写多行）；
+     * - 旧三行：`SHA256:` / `SHA256-full:` / `SHA256-lite:` 只绑定到对应 flavor 的 **universal**
+     *   资产名（历史语义保留；绝不移交给 ABI 分包）。
+     * **哈希只允许段 1（api.github.com 官方端点且最终来源可信）开**：镜像转发的 body 代理可改，
+     * 拿假哈希当真会把合法更新判废；说明文字没有这个顾虑（只展示、不参与判断）。
      */
-    fun parse(json: String, extractSha256: Boolean, flavor: String? = null): ReleaseInfo? {
+    fun parse(
+        json: String,
+        extractSha256: Boolean,
+        flavor: String? = null,
+        deviceAbis: List<String> = emptyList()
+    ): ReleaseInfo? {
         val tag = parseTag(json) ?: return null
         // body 只读一次：sha256 与 notes 取自同一段文本
         val body = stringValueAfterKey(json, "body")
+        val assets = parseAssets(json)
+        val digests = if (extractSha256) resolveAssetDigests(assets, body.orEmpty(), flavor) else emptyMap()
+        val asset = pickApkAsset(
+            assets = assets,
+            flavor = flavor,
+            digests = digests,
+            requireDigestForAbiSplits = extractSha256,
+            deviceAbis = deviceAbis
+        )
         return ReleaseInfo(
             tag = tag,
-            asset = pickApkAsset(parseAssets(json), flavor),
-            sha256 = if (extractSha256) body?.let { parseSha256FromNotes(it, flavor) } else null,
+            asset = asset,
+            sha256 = asset?.let { digests[it.name] },
             notes = body
         )
+    }
+
+    /**
+     * 把说明文本里的摘要解析成「资产名 → 摘要」映射（纯函数，Y44）。
+     * 逐资产行优先；旧 flavor 行只给同 flavor 的 universal 资产兜底；通用行只给旧版
+     * 无 flavor 的 universal 资产兜底。**同一份摘要不会跨资产名复用**。
+     */
+    fun resolveAssetDigests(
+        assets: List<ReleaseAsset>,
+        notes: String,
+        flavor: String?
+    ): Map<String, String> {
+        if (notes.isEmpty() || assets.isEmpty()) return emptyMap()
+        val perAsset = parseAssetDigests(notes)
+        val legacyUniversal = parseSha256FromNotes(notes, flavor)
+        val out = LinkedHashMap<String, String>()
+        for (asset in assets) {
+            val digest = perAsset[asset.name]
+                ?: legacyUniversal?.takeIf { isLegacyUniversalFor(asset.name, flavor) }
+            if (digest != null) out[asset.name] = digest
+        }
+        return out
+    }
+
+    /** 逐资产摘要行：`SHA256-asset: <安全资产名> <64 hex>`（资产名允许字母数字点下划线连字符） */
+    private val ASSET_SHA_LINE =
+        Regex("SHA256-asset\\s*[:：]\\s*([A-Za-z0-9._-]+\\.apk)\\s+([0-9a-fA-F]{64})(?![0-9a-fA-F])")
+
+    /** 解析逐资产摘要行；同一资产重复出现时以第一行为准（防后写的行覆盖可信值） */
+    fun parseAssetDigests(notes: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        ASSET_SHA_LINE.findAll(notes).forEach { m ->
+            val name = m.groupValues[1]
+            if (isSafeReleaseAssetName(name) && !out.containsKey(name)) {
+                out[name] = m.groupValues[2].lowercase()
+            }
+        }
+        return out
+    }
+
+    /** 旧三行只与「对应 flavor 的 universal 包」绑定，不能落到 ABI 分包头上 */
+    private fun isLegacyUniversalFor(assetName: String, flavor: String?): Boolean {
+        if (!assetName.contains("-universal-", ignoreCase = true)) return false
+        val full = assetName.contains("-full-", ignoreCase = true)
+        val lite = assetName.contains("-lite-", ignoreCase = true)
+        val compat = assetName.contains("-compat-", ignoreCase = true)
+        return when (flavor) {
+            "full" -> full
+            "lite" -> lite
+            else -> !full && !lite && !compat
+        }
     }
 
     /**
@@ -445,6 +671,10 @@ object ReleaseNotes {
     /** 机器用的哈希行：`SHA256:` / `SHA256-full:` / `SHA256-lite:` + 64 位十六进制（整行隐去） */
     private val HASH_LINE = Regex("SHA256(-full|-lite)?\\s*[:：]\\s*[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 
+    /** 逐资产摘要行：`SHA256-asset: <资产名> <64 hex>`（Y44；正文里也是机器用行，整行隐去） */
+    private val ASSET_HASH_LINE =
+        Regex("SHA256-asset\\s*[:：]\\s*[A-Za-z0-9._-]+\\.apk\\s+[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+
     /** 只有标签、哈希在下一行的写法（发版说明的真实形态：`- universal 包 SHA256：`） */
     private val HASH_LABEL_ONLY = Regex("^.*SHA256\\s*[:：]\\s*$")
 
@@ -463,7 +693,9 @@ object ReleaseNotes {
         val out = ArrayList<String>()
         for (line in raw.replace("\r\n", "\n").replace('\r', '\n').split('\n')) {
             val trimmed = line.trim()
-            if (HASH_LINE.containsMatchIn(trimmed) || HASH_LABEL_ONLY.matches(trimmed)) continue
+            if (HASH_LINE.containsMatchIn(trimmed) || ASSET_HASH_LINE.containsMatchIn(trimmed) ||
+                HASH_LABEL_ONLY.matches(trimmed)
+            ) continue
             if (trimmed.isEmpty()) {
                 out.add("")
                 continue
@@ -495,6 +727,22 @@ object ReleaseNotes {
 
 /** 段 3：releases/latest 页 302 → tag 解析与资产名推导 */
 object RedirectProbe {
+
+    /**
+     * 段 3 的 Location **必须落在 GitHub 官方发布页**（Y43）：路径里出现 `/releases/tag/` 还不够，
+     * 恶意镜像完全可以回一个 `https://evil.example/x/releases/tag/v9.9.9` 把版本号抬到任意值。
+     * 主机不在 [UpdateConfig.OFFICIAL_RELEASE_HOSTS] 时整段结论作废，让更新失败而不是弹假版本。
+     */
+    fun trustedTagFromLocation(location: String): String? {
+        if (!hostAllowed(location, UpdateConfig.OFFICIAL_RELEASE_HOSTS)) return null
+        return tagFromLocation(location)
+    }
+
+    /** 最终落地 URL 的主机是否在允许集合内（Y43：可信标记必须绑定重定向后的来源） */
+    fun hostAllowed(url: String, allowed: Set<String>): Boolean {
+        val host = runCatching { URL(url).host }.getOrNull()?.lowercase() ?: return false
+        return host in allowed
+    }
 
     /** `.../releases/tag/v0.0.8-r01`（尾斜杠容忍）→ `v0.0.8-r01`；不是 tag 路径返回 null */
     fun tagFromLocation(location: String): String? {
@@ -532,8 +780,25 @@ sealed interface ProbeResult {
         val downloadUrl: String,
         val sizeBytes: Long?,
         val sha256: String? = null,
-        val notes: String? = null
-    ) : ProbeResult
+        val notes: String? = null,
+        /** 本次探测所属 flavor（BuildConfig.FLAVOR）；段 3 推导的资产名也必须与它一致 */
+        val flavor: String? = null
+    ) : ProbeResult {
+        /** 资产名解析出的 ABI（Y44：摘要/ABI/资产名三者同源） */
+        val abi: UpdateAbi get() = UpdateAbi.fromAssetName(assetName)
+
+        /** 交给下载器的不可变绑定（Y43） */
+        val selection: UpdateSelection
+            get() = UpdateSelection(
+                releaseTag = latestTag,
+                flavor = UpdateSelection.normalizeFlavor(flavor),
+                assetName = assetName,
+                abi = abi,
+                expectedSha256 = sha256,
+                sizeBytes = sizeBytes,
+                downloadUrl = downloadUrl
+            )
+    }
 
     /** 已是最新 */
     object UpToDate : ProbeResult
@@ -546,8 +811,10 @@ sealed interface ProbeResult {
 }
 
 /**
- * 段 1→2→3 编排。网络以两个函数注入（UpdateDownloader 提供真身、单测给假身）：
+ * 段 1→2→3 编排。网络以函数注入（UpdateDownloader 提供真身、单测给假身）：
  * - [fetchJson]：GET 返回正文；任何失败（连不上/非 2xx/超时）返回 null（快速跳过下一节点）；
+ * - [fetchJsonSource]（可选，生产路径用）：与 [fetchJson] 相同，但额外返回**最终落地 URL**，
+ *   从而让「官方说明可信」绑定重定向后的来源（Y43）；不传则沿用旧的「起始 URL 可信」语义；
  * - [fetchRedirectLocation]：GET 不跟随重定向，返回 Location 头；失败 null；
  * - [isCancelled]：取消探针，「检查中点行 = 取消」——编排在**每个节点前**检查，
  *   置位即跳过剩余节点返回 [ProbeResult.Cancelled]。节点内部（已发出的请求）不可打断，
@@ -558,29 +825,49 @@ fun probeLatestRelease(
     fetchJson: (String) -> String?,
     fetchRedirectLocation: (String) -> String?,
     isCancelled: () -> Boolean = { false },
-    flavor: String? = null
+    flavor: String? = null,
+    deviceAbis: List<String> = emptyList(),
+    fetchJsonSource: ((url: String, allowedHosts: Set<String>?) -> FetchedJson?)? = null
 ): ProbeResult {
     // 段 1：直连 GitHub API（官方端点：Release 说明 body 可信——提取 SHA-256 供下载后校验，
-    // 同时把说明原文带给更新弹窗）
+    // 同时把说明原文带给更新弹窗）。Y43：可信不仅看起始 URL，还要看最终落地主机。
     if (isCancelled()) return ProbeResult.Cancelled
-    jsonNode(fetchJson(UpdateConfig.REPO_API_LATEST), localVersionName, extractSha256 = true, flavor = flavor)?.let { return it }
+    val direct = fetchJsonSource?.invoke(UpdateConfig.REPO_API_LATEST, UpdateConfig.OFFICIAL_API_HOSTS)
+    // Y43 双保险：生产传输层已按 allowedHosts 拒绝非官方最终来源；编排层再核一次，
+    // 注入方/未来调用方传错也拿不到「可信说明」标记（宁可这一段无结论，也不信错来源的哈希）。
+    val directBody = if (fetchJsonSource == null) {
+        fetchJson(UpdateConfig.REPO_API_LATEST)
+    } else {
+        direct?.takeIf { RedirectProbe.hostAllowed(it.finalUrl, UpdateConfig.OFFICIAL_API_HOSTS) }?.body
+    }
+    jsonNode(
+        directBody, localVersionName, extractSha256 = directBody != null,
+        flavor = flavor, deviceAbis = deviceAbis
+    )?.let { return it }
     // 段 2：镜像前缀逐个代理同一 API（gh-proxy 系对 api 路径支持不一，失败快速跳过）。
     // extractSha256=false：镜像可改写 body，转发来的哈希没有可信度，宁可不校验也不拿假哈希当真；
-    // 说明原文照读（只用于弹窗展示，装不装得上仍由哈希与系统签名决定）。
+    // 说明原文照读（只用于弹窗展示，装不装得上仍由摘要 + versionName/flavor/ABI + 系统签名决定）。
     val chain = MirrorChain.probeChain()
     while (!chain.exhausted) {
         if (isCancelled()) return ProbeResult.Cancelled
-        jsonNode(fetchJson(chain.urlFor(UpdateConfig.REPO_API_LATEST)), localVersionName, extractSha256 = false, flavor = flavor)?.let { return it }
+        val url = chain.urlFor(UpdateConfig.REPO_API_LATEST)
+        val body = fetchJsonSource?.invoke(url, null)?.body ?: fetchJson(url)
+        jsonNode(
+            body, localVersionName, extractSha256 = false,
+            flavor = flavor, deviceAbis = deviceAbis
+        )?.let { return it }
         chain.advance()
     }
-    // 段 3：302 → tag → 推导资产名（无 size，下载时用 Content-Length）
+    // 段 3：302 → tag → 推导资产名（无 size，下载时用 Content-Length）。
+    // Y43：Location 主机必须是 GitHub 官方发布页，否则整段作废。
     if (isCancelled()) return ProbeResult.Cancelled
     fetchRedirectLocation(UpdateConfig.RELEASES_LATEST_PAGE)?.let { loc ->
-        RedirectProbe.tagFromLocation(loc)?.let { tag ->
+        RedirectProbe.trustedTagFromLocation(loc)?.let { tag ->
             val assetName = RedirectProbe.guessUniversalAssetName(tag, flavor)
             return decide(
                 ReleaseInfo(tag, ReleaseAsset(assetName, UpdateConfig.directDownloadUrl(tag, assetName), null)),
-                localVersionName
+                localVersionName,
+                flavor
             )
         }
     }
@@ -588,21 +875,29 @@ fun probeLatestRelease(
 }
 
 /**
- * 一个 JSON 节点的结论：null = 该节点无结论（解析失败，或「有新版但拿不到 .apk 附件」——继续下一段）；
- * 非 null = 终局结论（UpToDate / UpdateAvailable），编排立即返回。
- * [extractSha256] 只在段 1（api.github.com 官方端点）为 true：只有那时 body 里的 SHA-256 才可信；
+ * 一个 JSON 节点的结论：null = 该节点无结论（解析失败，或「有新版但拿不到可校验的 .apk 附件」——
+ * 继续下一段）；非 null = 终局结论（UpToDate / UpdateAvailable），编排立即返回。
+ * [extractSha256] 只在段 1（官方端点且最终来源可信）为 true：只有那时 body 里的摘要才可信；
  * 说明原文（notes）两段都读，只用于弹窗展示。
  */
-private fun jsonNode(json: String?, localVersionName: String, extractSha256: Boolean = false, flavor: String? = null): ProbeResult? {
+private fun jsonNode(
+    json: String?,
+    localVersionName: String,
+    extractSha256: Boolean = false,
+    flavor: String? = null,
+    deviceAbis: List<String> = emptyList()
+): ProbeResult? {
     json ?: return null
-    val info = ReleaseJson.parse(json, extractSha256 = extractSha256, flavor = flavor) ?: return null
+    val info = ReleaseJson.parse(
+        json, extractSha256 = extractSha256, flavor = flavor, deviceAbis = deviceAbis
+    ) ?: return null
     return when {
         !CompareVersions.isNewerAvailable(localVersionName, info.tag) -> ProbeResult.UpToDate
         info.asset != null -> {
             // 段 2 的 JSON 可能被镜像改写：URL 字段一律不信，用可信仓库常量 + 已校验资产名重建
             val url = UpdateConfig.directDownloadUrl(info.tag, info.asset.name)
             ProbeResult.UpdateAvailable(
-                info.tag, info.asset.name, url, info.asset.sizeBytes, info.sha256, info.notes
+                info.tag, info.asset.name, url, info.asset.sizeBytes, info.sha256, info.notes, flavor
             )
         }
         else -> null
@@ -610,13 +905,14 @@ private fun jsonNode(json: String?, localVersionName: String, extractSha256: Boo
 }
 
 /** 段 3 的资产是推导出来的（恒非 null），结论只有最新/有新版两态 */
-private fun decide(info: ReleaseInfo, localVersionName: String): ProbeResult {
+private fun decide(info: ReleaseInfo, localVersionName: String, flavor: String?): ProbeResult {
     val asset = info.asset!!
     return if (!CompareVersions.isNewerAvailable(localVersionName, info.tag)) {
         ProbeResult.UpToDate
     } else {
         ProbeResult.UpdateAvailable(
-            info.tag, asset.name, UpdateConfig.directDownloadUrl(info.tag, asset.name), asset.sizeBytes
+            info.tag, asset.name, UpdateConfig.directDownloadUrl(info.tag, asset.name),
+            asset.sizeBytes, flavor = flavor
         )
     }
 }

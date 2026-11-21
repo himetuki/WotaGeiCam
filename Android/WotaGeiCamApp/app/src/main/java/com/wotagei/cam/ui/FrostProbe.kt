@@ -121,6 +121,7 @@ internal fun frostProbeText(glEngine: GlRenderEngine?): String {
         .append(" live=").append(if (HudFrost.live) 1 else 0)
         .append(" hdr=").append(if (hdrUi) 1 else 0)
         .append(" rep=").append(if (FrostCardTable.isPlatesDrawn()) 1 else 0)
+        .append(" cov=0x").append(FrostCardTable.coveredSlotMask().toString(16))
         .append(" slots=").append(FrostCardTable.usedSlotCount())
     sb.append("\nrd cards=").append(glEngine.frostDiagTableCards)
         .append(" drew=").append(glEngine.frostDiagDrewPlates)

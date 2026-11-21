@@ -74,11 +74,35 @@ data class ArcDropLog(
 
         const val EXTENSION = ".drops.json"
 
-        /** 成片路径 → sidecar 路径（同目录同名换扩展名） */
-        fun sidecarFor(videoPath: String): String {
-            val dot = videoPath.lastIndexOf('.')
-            val stem = if (dot > 0) videoPath.substring(0, dot) else videoPath
+        /**
+         * 成片**文件名** → sidecar 文件名：**去掉最后一段扩展名**再换 `.drops.json`
+         * （`VID_x.mp4` → `VID_x.drops.json`）。
+         *
+         * 【全生产口径的唯一出口】成片名只有最后一段扩展名是"格式"，时间戳与 `VID_` 里的点
+         * 都不该被动。清扫侧曾按"成片名 + `.drops.json`"拼目标（`VID_x.mp4.drops.json`），
+         * 与 [sidecarFor]/[readFrom] 这一套对不上——App 按成片路径查 sidecar 永远查不到那份档案。
+         * 现在清扫、CameraScreen 的 MediaStore 兜底都调本函数，不再各拼一套。
+         *
+         * 幂等：传进来已经是 sidecar 名（以 [EXTENSION] 结尾）就原样返回——清扫的"剥段名"
+         * 恰好就是规范名，重复套一层扩展名会拼出 `….drops.json.drops.json`（真机 r20 踩过）。
+         */
+        fun sidecarName(videoName: String): String {
+            if (videoName.endsWith(EXTENSION)) return videoName
+            val dot = videoName.lastIndexOf('.')
+            val stem = if (dot > 0) videoName.substring(0, dot) else videoName
             return stem + EXTENSION
+        }
+
+        /**
+         * 成片路径 → sidecar 路径（同目录同名换扩展名）。
+         *
+         * 目录与文件名**分开**处理：目录名里的点（如 `…/版本1.2/`）不许被当成扩展名截掉——
+         * 旧实现直接对整条路径 `lastIndexOf('.')`，目录带点时 sidecar 会落到别的目录名下。
+         */
+        fun sidecarFor(videoPath: String): String {
+            val slash = maxOf(videoPath.lastIndexOf('/'), videoPath.lastIndexOf('\\'))
+            if (slash < 0) return sidecarName(videoPath)
+            return videoPath.substring(0, slash + 1) + sidecarName(videoPath.substring(slash + 1))
         }
 
         fun writeTo(videoPath: String, log: ArcDropLog): Boolean = runCatching {

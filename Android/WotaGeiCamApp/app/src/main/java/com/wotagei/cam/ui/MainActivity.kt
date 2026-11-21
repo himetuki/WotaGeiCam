@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,9 +56,12 @@ import com.wotagei.cam.camera.CameraController
 import com.wotagei.cam.core.UIOrientation
 import com.wotagei.cam.media.WotaNav
 import com.wotagei.cam.player.ClipRule
+import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.CompareScreen
 import com.wotagei.cam.player.PlayerScreen
+import com.wotagei.cam.player.PracticeReturn
 import com.wotagei.cam.player.TrackRule
+import com.wotagei.cam.player.practiceReturnPlan
 import com.wotagei.cam.record.StalePendingSweep
 import com.wotagei.cam.ui.anim.EXTRA_MERGE_HOOK
 import com.wotagei.cam.ui.anim.MergeDebugHook
@@ -214,86 +218,50 @@ class MainActivity : ComponentActivity() {
         if (ctrl == null) return
         if (previewWatchJob?.isActive == true) return
         previewWatchJob = lifecycleScope.launch {
-            var camLast = -1L
-            var camGrowAtMs = SystemClock.elapsedRealtime()
-            var dispLast = -1L
-            var dispGrowAtMs = SystemClock.elapsedRealtime()
-            // 上屏判据要等相机真的出过帧才启用（相机还没起来时"屏上没帧"是必然的）
-            var camSeenFrames = false
-            var restarted = false
-            var reattachTries = 0
+            // Y07/R04：判活状态机见 PreviewWatchdog（录制窗口内只推平计时，不拆会话）。
+            val watchdog = PreviewWatchdog(SystemClock.elapsedRealtime())
             while (isActive) {
                 delay(1000)
                 if (watchRoute != ROUTE_CAMERA) break
                 val nowMs = SystemClock.elapsedRealtime()
                 // 只在真正可见时判（后台/其它页不算）
                 if (lifecycle.currentState != Lifecycle.State.RESUMED) {
-                    camGrowAtMs = nowMs
-                    dispGrowAtMs = nowMs
-                    camSeenFrames = false
-                    restarted = false
-                    reattachTries = 0
+                    watchdog.hold(nowMs)
                     continue
                 }
                 // 组合不在场 = 整窗黑（连 UI 都没了）：相机侧的任何自愈都没有意义，
                 // 交给 armCompositionGuard 统一处理，这里直接跳过判活。
                 if (composedRoute != ROUTE_CAMERA) continue
-                val cam = ctrl.frameResultCount()
-                if (cam != null && cam != camLast) {
-                    if (!camSeenFrames) {
-                        camSeenFrames = true
-                        dispGrowAtMs = nowMs
-                    }
-                    camLast = cam
-                    camGrowAtMs = nowMs
-                    restarted = false
-                }
-                val disp = ctrl.displayFrameCount()
-                if (disp != null && disp != dispLast) {
-                    dispLast = disp
-                    dispGrowAtMs = nowMs
-                    reattachTries = 0
-                }
-                val camDeadMs = nowMs - camGrowAtMs
-                if (camDeadMs >= 4_000L) {
-                    if (cam == null) {
+                when (val tick = watchdog.tick(
+                    nowMs,
+                    ctrl.isRecordingActive(),
+                    ctrl::cameraHealth,
+                    ctrl::displayFrameCount
+                )) {
+                    PreviewWatchTick.None -> Unit
+                    PreviewWatchTick.RebindMissingEngine -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：引擎不在 ⇒ 重新绑定")
                         ctrl.currentSink()?.let { ctrl.bind(it) }
-                        camGrowAtMs = nowMs
-                        dispGrowAtMs = nowMs
-                        camSeenFrames = false
-                    } else if (!restarted) {
-                        restarted = true
-                        Log.w("WotaWatch", "Activity 级预览自愈：${camDeadMs}ms 无相机帧 ⇒ 重启预览")
+                    }
+                    is PreviewWatchTick.RestartPreview -> {
+                        Log.w("WotaWatch", "Activity 级预览自愈：${tick.deadMs}ms 无相机帧 ⇒ 重启预览")
                         ctrl.restartPreview()
-                        dispGrowAtMs = nowMs
-                    } else if (camDeadMs >= 10_000L) {
+                    }
+                    PreviewWatchTick.RebindStuckEngine -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：10s 仍无帧 ⇒ 整条重建引擎")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        camGrowAtMs = nowMs
-                        dispGrowAtMs = nowMs
-                        camSeenFrames = false
-                        restarted = false
                     }
-                    continue
-                }
-                // 上屏侧：相机在出帧而屏上不换帧（r31 的盲区）——重启相机没用，只能重挂面
-                if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 2_500L) {
-                    reattachTries++
-                    Log.w(
-                        "WotaWatch",
-                        "Activity 级预览自愈：相机在出帧但上屏无帧 ${nowMs - dispGrowAtMs}ms" +
-                            "（hasSurface=${ctrl.hasDisplaySurface()} 第${reattachTries}次）⇒ 重挂显示面"
-                    )
-                    dispGrowAtMs = nowMs
-                    if (reattachTries >= 3) {
+                    is PreviewWatchTick.ReattachDisplay -> {
+                        Log.w(
+                            "WotaWatch",
+                            "Activity 级预览自愈：相机在出帧但上屏无帧 ${tick.blindMs}ms" +
+                                "（hasSurface=${ctrl.hasDisplaySurface()} 第${tick.tries}次）⇒ 重挂显示面"
+                        )
+                        ctrl.requestDisplayReattach()
+                    }
+                    PreviewWatchTick.RebindAfterReattach -> {
                         Log.w("WotaWatch", "Activity 级预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                         ctrl.currentSink()?.let { ctrl.forceRebind(it) }
-                        camGrowAtMs = nowMs
-                        camSeenFrames = false
-                        reattachTries = 0
-                    } else {
-                        ctrl.requestDisplayReattach()
                     }
                 }
             }
@@ -336,6 +304,7 @@ class MainActivity : ComponentActivity() {
         applyMergeHook(intent)
         applyFrostProbe(intent)
         applyCompareProbe(intent)
+        applyHudRecompProbe(intent)
         // 冷启维护清扫（一次性、后台线程）：把历史遗留的 `.pending-<id>-` 条目收干净——成片去掉
         // pending 段（它还带着难看名字挂在相册里）、无主/重复的 sidecar 档案删除。三条安全边界
         // （只认自己的命名形态 / 只碰 1 小时以上的 / 进程内只跑一次）与「成片永不删」红线见
@@ -378,6 +347,7 @@ class MainActivity : ComponentActivity() {
         applyMergeHook(intent)
         applyFrostProbe(intent)
         applyCompareProbe(intent)
+        applyHudRecompProbe(intent)
     }
 
     /**
@@ -400,6 +370,14 @@ class MainActivity : ComponentActivity() {
     /** 对比播放黑屏探针的唯一写入入口：与 [applyFrostProbe] 同一套纪律（见 [CompareProbe] 的类注释） */
     private fun applyCompareProbe(intent: Intent?) {
         CompareProbe.apply(intent?.getBooleanExtra(EXTRA_COMPARE_PROBE, false) == true)
+    }
+
+    /**
+     * B12 重组测量入口的唯一写入入口：与 [applyCompareProbe] 同一套纪律
+     * （见 [HudRecompProbe] 的类注释）。只在 debugHook/probe 变体可点亮。
+     */
+    private fun applyHudRecompProbe(intent: Intent?) {
+        HudRecompProbe.apply(intent?.getBooleanExtra(EXTRA_HUD_RECOMP_PROBE, false) == true)
     }
 }
 
@@ -453,7 +431,7 @@ private fun WotaRoot() {
     //    实录）。录制页没有页内返回钮，这条路径只来自转场迟到的误点；想退出用系统返回。
     // ② 防抖：转场 ~300ms，400ms 内的第二次 pop 是同一次手滑的余波，一律忽略。
     // ③ 系统返回不走这里：返回栈只剩起始页时由系统正常结束 Activity（既有实测行为）。
-    var lastPopAt by remember { mutableStateOf(0L) }
+    var lastPopAt by remember { mutableLongStateOf(0L) }
     fun navigateBack(): Boolean {
         if (nav.currentDestination?.id == nav.graph.startDestinationId) return false
         val now = android.os.SystemClock.elapsedRealtime()
@@ -499,7 +477,7 @@ private fun WotaRoot() {
             // 控制器引用也不再依赖"条目恰好在栈上"。
             val cameraCtrl = windowOwner?.let { CameraController.of(it) }
             if (cameraCtrl != null) {
-                windowOwner?.previewCtrl = cameraCtrl
+                windowOwner.previewCtrl = cameraCtrl
                 if (destination.route == ROUTE_CAMERA) {
                     cameraCtrl.cancelPreviewKeepAlive()
                 } else {
@@ -547,9 +525,26 @@ private fun WotaRoot() {
                         // 一并弹掉属预期；对比页不在栈内（异常动线）时保底回普通弹栈。该回调只在
                         // ComparePractice.deliver 成功（练习桥 armed）时被调，普通录制路径零影响。
                         onPracticeFinish = {
-                            // 程序化定向返回（非用户手势）：栈上必有录制页在 COMPARE 之下，
-                            // 不会触发"弹掉栈底"竞态，故不走 navigateBack 的栈底不变量
-                            if (!nav.popBackStack(WotaNav.COMPARE, false)) nav.popBackStack()
+                            // 程序化定向返回（非用户手势）不走 navigateBack 的防抖，但黑屏不变量
+                            // 必须自己守（Y51）：① 发起页身份已失效的过期回调不动作；
+                            // ② 保底裸弹只在栈上还有下层页时成立，绝不把根栈弹空。
+                            // 只用公开 API：currentBackStack 带 @RestrictTo(LIBRARY_GROUP)，应用层
+                            // 调用属受限 API。getBackStackEntry 返回指定 route 的最新条目（含 id），
+                            // 足够核对"发起练习的那枚对比页是否仍是栈上这一枚"。
+                            val compareEntry = runCatching { nav.getBackStackEntry(WotaNav.COMPARE) }.getOrNull()
+                            val originId = ComparePractice.takeOrigin()
+                            val originAlive = originId == null || compareEntry?.id == originId
+                            when (practiceReturnPlan(
+                                compareInStack = compareEntry != null,
+                                originAlive = originAlive,
+                                // previousBackStackEntry 已跳过图条目，与普通 popBackStack 的语义一致
+                                canPopOne = nav.previousBackStackEntry != null
+                            )) {
+                                PracticeReturn.TO_COMPARE -> nav.popBackStack(WotaNav.COMPARE, false)
+                                PracticeReturn.POP_ONE -> nav.popBackStack()
+                                // 过期发起者/已是唯一页：停在录制页，交给系统返回正常结束 Activity
+                                PracticeReturn.STAY -> Unit
+                            }
                         }
                     )
                 }
@@ -558,21 +553,32 @@ private fun WotaRoot() {
         composable(WotaNav.GALLERY) {
             DestinationPresence(windowOwner, WotaNav.GALLERY) {
                 GalleryEntryScreen(
-                    onOpen = { id -> nav.navigate(WotaNav.player(id)) },
-                    onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
+                    // Y27：新发起的播放/对比都带真实行 URI（路由查询参数），加载按具体卷钉行
+                    onOpen = { clip -> nav.navigate(WotaNav.player(clip.id, clip.uri)) },
+                    onCompare = { clip -> nav.navigate(WotaNav.compare(clip.id, clip.uri)) },
                     onBack = { navigateBack() }
                 )
             }
         }
         composable(
             route = WotaNav.PLAYER,
-            arguments = listOf(navArgument(WotaNav.PLAYER_ARG) { type = NavType.LongType })
+            arguments = listOf(
+                navArgument(WotaNav.PLAYER_ARG) { type = NavType.LongType },
+                // 行 URI 是可选查询参数：历史裸 ID 深链没有它，仍按 id 唯一命中加载
+                navArgument(WotaNav.PLAYER_ROW_ARG) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            )
         ) { entry ->
             DestinationPresence(windowOwner, WotaNav.PLAYER) {
                 PlayerScreen(
                     mediaId = entry.arguments?.getLong(WotaNav.PLAYER_ARG) ?: -1L,
+                    rowUri = WotaNav.rowUriOf(entry.arguments?.getString(WotaNav.PLAYER_ROW_ARG)),
                     onBack = { navigateBack() },
-                    onCompare = { id -> nav.navigate(WotaNav.compare(id)) },
+                    // 对比左片沿用本页这条真实行：从回收站打开也只会带上它自己那条行
+                    onCompare = { clip -> nav.navigate(WotaNav.compare(clip.id, clip.uri)) },
                     // 起播渐亮（29 §5.3-②）：页面只上报"起播了"，武装闸与窗口写入收口在 MainActivity
                     onPlaybackStarted = { windowOwner?.onPlayerPlaybackStarted() }
                 )
@@ -581,12 +587,18 @@ private fun WotaRoot() {
         composable(
             route = WotaNav.COMPARE,
             arguments = listOf(
-                navArgument(WotaNav.COMPARE_ARG_LEFT) { type = NavType.LongType; defaultValue = -1L }
+                navArgument(WotaNav.COMPARE_ARG_LEFT) { type = NavType.LongType; defaultValue = -1L },
+                navArgument(WotaNav.COMPARE_ROW_ARG) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
             )
         ) { entry ->
             DestinationPresence(windowOwner, WotaNav.COMPARE) {
                 CompareScreen(
                     leftMediaId = entry.arguments?.getLong(WotaNav.COMPARE_ARG_LEFT) ?: -1L,
+                    leftRowUri = WotaNav.rowUriOf(entry.arguments?.getString(WotaNav.COMPARE_ROW_ARG)),
                     onBack = { navigateBack() },
                     onPractice = { nav.navigate(ROUTE_CAMERA) }
                 )
@@ -659,9 +671,12 @@ private fun applyPageMode(activity: Activity?, route: String?) {
             )
         }
         // 设置页（2026-10-29 用户反馈）：只藏导航栏（顶部状态栏保留，设置页顶栏本来就在状态栏下）。
-        // 不藏的话底部滑动区/小白条会把滚动列表最后一行压出一段白带
+        // 不藏的话底部滑动区/小白条会把滚动列表最后一行压出一段白带。
+        // Y59：从全沉浸的录制页直接进设置页时，状态栏仍是隐藏态——这里必须**显式恢复** statusBars，
+        // 只调 hide(navigationBars) 不会把上一页藏掉的顶栏带回来（与播放器双栏隐藏对照）。
         route == ROUTE_SETTINGS -> {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.show(WindowInsetsCompat.Type.statusBars())
             controller.hide(WindowInsetsCompat.Type.navigationBars())
         }
         else -> controller.show(WindowInsetsCompat.Type.systemBars())

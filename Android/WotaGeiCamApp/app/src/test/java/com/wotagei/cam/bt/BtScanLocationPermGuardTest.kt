@@ -117,7 +117,7 @@ class BtScanLocationPermGuardTest {
                 val f = File(base, rel)
                 if (f.isFile) return f.readText(Charsets.UTF_8)
             }
-            dir = dir.parentFile
+            dir = dir.parentFile ?: throw AssertionError("已到文件系统根仍未找到 AndroidManifest.xml")
         }
         throw AssertionError("找不到 AndroidManifest.xml——守卫不能在没有输入的情况下算通过")
     }

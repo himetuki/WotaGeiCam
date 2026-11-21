@@ -8,6 +8,7 @@
     "h",
     "conf"
   ],
+  "coord": "normalized",
   "files": {
     "head.json": "b0a2e82f430481cbed6dea58c81eef60d928110aea6f5b92bc01bab7f343bf0e",
     "margins.json": "1f025b56bc12379f080300d7b777149b109a9bb56fa901335f7e2575f07020f3",

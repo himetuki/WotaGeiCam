@@ -165,7 +165,16 @@ class BtSpeakerController(context: Context) {
         }
 
         override fun onServiceDisconnected(profile: Int) {
-            if (profile == BluetoothProfile.A2DP) a2dp = null
+            if (profile != BluetoothProfile.A2DP) return
+            // Y47：只清 a2dp 会留下两处假状态——
+            // 1) proxyRequested 仍是 true，requestProxy() 永远短路，代理再也不会回来；
+            // 2) UI 仍抱着断连前的快照，不重查就一直是"已连接"。
+            // 这里立即发一版断开态（refresh → rebuild：profile=null ⇒ connected=false、active=null），
+            // 再把申请位清掉，并在权限仍有效时单入口重试（onServiceConnected 回来会再 refresh）。
+            a2dp = null
+            proxyRequested = false
+            // refresh 是唯一重试入口：它会在代理缺失且权限有效时重新 requestProxy
+            refresh()
         }
     }
 
@@ -206,6 +215,9 @@ class BtSpeakerController(context: Context) {
         if (closed) return
         _hasPermission.value = missingPermissions().isEmpty()
         _adapterEnabled.value = runCatching { adapter?.isEnabled }.getOrNull() == true
+        // Y47：代理缺失（服务被系统回收/断开）且权限仍有效时，从这一条入口重新申请。
+        // requestProxy 自带 proxyRequested 去重，反复 refresh 不会重复绑定。
+        if (a2dp == null && hasConnectPermission()) requestProxy()
         _locationServiceOff.value =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.S && locationServiceDisabled()
         syncVolume()
@@ -368,7 +380,8 @@ class BtSpeakerController(context: Context) {
      */
     fun connect(device: BtDevice): Boolean {
         _openSettings.value = true
-        Log.w(TAG, "connect ${device.address} delegated to system bluetooth settings")
+        // Y48：日志不落设备地址（导出件/分享件不带 MAC）；只保留"是不是音箱"这一条排查信息
+        Log.w(TAG, "connect delegated to system bluetooth settings (speaker=${device.isSpeaker})")
         return false
     }
 

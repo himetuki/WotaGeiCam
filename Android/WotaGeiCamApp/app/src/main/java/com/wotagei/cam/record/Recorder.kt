@@ -188,10 +188,42 @@ data class RecordResult(
      * （[RecorderHealth.ambientLost] 通道）。
      * false = 正常或引擎不报（默认，MR 路与旧构造点行为逐字不变）。
      */
-    val ambientLost: Boolean = false
+    val ambientLost: Boolean = false,
+    /**
+     * false = 这是**临时快照**（典型：`stop()` 的 join 超时返回，泵线程/发布线程仍在收尾）。
+     * 临时快照可以带已封段与真实丢失账，但**不是**最终成功/失败结论；UI 不许据此清练习桥、
+     * 交付练习或把"还在发布"渲染成硬失败。泵线程终态/迟到发布完成会以同一会话身份
+     * `(seriesId, startedAtMs, attempt)` 再交付一次权威结论。默认 true（旧构造点行为不变）。
+     */
+    val terminal: Boolean = true,
+    /**
+     * 还有几段已封口、但发布结论尚未落地（`IS_PENDING` 是否已清还不知道）。>0 时：
+     * - 结果不是权威结论（[ok] 恒 false）；
+     * - 若同时 `terminal=true`，表示引擎已停、只剩发布路在收，**不是失败**；
+     * - 迟到发布完成后以新的结果版本补齐（见 `RecorderDelivery.LatePart.pendingPublications`）。
+     * 默认 0（旧构造点行为不变）。
+     */
+    val pendingPublications: Int = 0,
+    /**
+     * 尚未落地的**确切段序**（与 [pendingPublications] 同源，但可被迟到结论按段消账）。
+     * null = 旧构造点/夹具未提供段集；生产收尾一律带上，会话所有者据此按段减去已交付结论，
+     * 不再用"还剩几段"的计数覆盖：终态快照可能比迟到结论更早成型，计数回写会把已发布段
+     * 重新算成待发布，系列归组与练习交付永远等不到权威结论（R06/R07）。
+     */
+    val pendingPartIds: Set<Int>? = null,
+    /** 本次发布路真实失败（close 抛错/发布块抛错）的段数；只在没有其它产物时负责给出失败码 */
+    val publicationFailures: Int = 0
 ) {
-    /** 有可用产物且无错误 */
-    val ok: Boolean get() = error == null && (uri != null || path != null)
+    /**
+     * 有可用产物、无错误，且**结论已经权威**（引擎终态 + 发布路静默）。
+     * 临时快照即使已带段也不许返回 true：练习交付/清桥态只能发生在权威结论上。
+     */
+    val ok: Boolean
+        get() = authoritative && error == null && (uri != null || path != null)
+
+    /** 结果已到权威时刻（引擎终态且没有未落地发布）；UI 可据此决定是否提示最终结论 */
+    val authoritative: Boolean
+        get() = terminal && (pendingPartIds?.isEmpty() ?: (pendingPublications == 0))
 
     companion object {
         /**
@@ -218,21 +250,53 @@ data class RecordResult(
  * [seriesId] 是构造期常量——这几枚可安全带出。
  *
  * @param sealed 已封段快照（空 = 退回 [RecordResult.fail] 的旧形态，字段逐字不变）
- * @param err 非空失败/降级诊断码（调用方保证非空；用户面文案由 UI 侧呈现计划按"已保存 N 段"重写）
+ * @param err 非空失败/降级诊断码；**null 仅在"临时快照且没有任何真实错误"时合法**（发布/封段仍在路上，
+ *   不许伪造 TOO_SHORT/ROTATE_STALL 把 pending 说成失败）。用户面文案由 UI 侧呈现计划按
+ *   "已保存 N 段 / 收尾中"重写。
+ * @param terminal false = 泵线程仍活着，这份只是临时快照；最终结论由终态交付改正
+ * @param pendingPublications 发布路尚未落地的段数（见 [RecordResult.pendingPublications]）
+ * @param publicationFailures 发布路真实失败段数（见 [RecordResult.publicationFailures]）
  */
 internal fun sealedPartsResult(
     sealed: List<VideoSegment>,
-    err: String,
+    err: String?,
     durationMs: Long,
     seriesId: Long,
     lostMs: Long,
     rotateStalls: Int,
     muxDiag: String,
     ambientLost: Boolean,
-    latePending: Long
+    latePending: Long,
+    terminal: Boolean = true,
+    pendingPublications: Int = 0,
+    pendingPartIds: Set<Int>? = null,
+    publicationFailures: Int = 0
 ): RecordResult {
     val first = sealed.firstOrNull()
-        ?: return RecordResult.fail(err, durationMs, lostMs, muxDiag)
+        // 空首段不是"没有会话"：失败结果仍要带系列归属，否则停录线程按 0 登记、发布线程按
+        // 真实 seriesId 交付，两边永远不是同一个会话键（R06 迟到 commit 的段无人认领）。
+        ?: run {
+            val empty = if (err != null) {
+                RecordResult.fail(err, durationMs, lostMs, muxDiag)
+            } else {
+                RecordResult(
+                    uri = null,
+                    path = null,
+                    bytes = 0L,
+                    durationMs = durationMs,
+                    error = null,
+                    lostMs = lostMs,
+                    muxDiag = muxDiag
+                )
+            }
+            return empty.copy(
+                seriesId = seriesId,
+                terminal = terminal,
+                pendingPublications = pendingPublications,
+                pendingPartIds = pendingPartIds,
+                publicationFailures = publicationFailures
+            )
+        }
     return RecordResult(
         uri = first.uri,
         path = first.path,
@@ -246,8 +310,78 @@ internal fun sealedPartsResult(
         rotateStalls = rotateStalls,
         latePending = latePending,
         muxDiag = muxDiag,
-        ambientLost = ambientLost
+        ambientLost = ambientLost,
+        terminal = terminal,
+        pendingPublications = pendingPublications,
+        pendingPartIds = pendingPartIds,
+        publicationFailures = publicationFailures
     )
+}
+
+/**
+ * 会话级交付事件（R07）：控制线程（stop/release）等泵线程超时、按「只记账不拆资源」返回之后，
+ * 引擎仍必须把**真实结论**交出去——否则用户/结算拿到的只是收工那一刻的早期快照，
+ * 迟到落地的段与泵线程自己的终态永远无人认领（相册里看得见、结果与系列里对不上）。
+ *
+ * 两个事件都带会话键（`seriesId + 会话起始墙钟`，与 UI 结算键同一套）；线程可能是泵线程或
+ * 发布线程，接线方必须线程安全（生产 = `RecordSession` 内部加锁）。
+ *
+ * 为什么是内部类型：结算视图（[SettledPart]）与发布分类（[PublishClass]）都是包内实现细节，
+ * 放进公开的 [Recorder] 契约就要把整条内部口径一起公开。引擎实现 [SessionDeliverySink]，
+ * 接线方（同模块）按该内部接口取用；[MrRecorder] 不实现，行为与旧版逐字一致。
+ */
+internal sealed interface RecorderDelivery {
+
+    /**
+     * 已封段在发布等待窗过后才落地的结论（发布线程发出，**分类是实际结果**）。
+     * [settled] 是这段的结算视图（生产由 [VideoSegment.toSettledPart] 给出；废弃/失败为 null）：
+     * 独立成字段是为了让"结算视图从哪来"在交付处就定型，消费方不再二次反推。
+     */
+    data class LatePart(
+        val seriesId: Long,
+        val startedAtMs: Long,
+        val partIndex: Int,
+        /** 保留段（已发布/未发布）的段视图；废弃/发布失败为 null */
+        val segment: VideoSegment?,
+        val classification: PublishClass,
+        val settled: SettledPart? = segment?.toSettledPart(),
+        /**
+         * 本会话内的第几次尝试（0 = 首录，自检重录逐次 +1）。结算键必须带它：同一场录制
+         * （`seriesId + startedAtMs` 不变）的自检重录会换一枚引擎，被判废的那次尝试的迟到终态
+         * 不许串进重录成功那次——否则一次"整段作废"的收尾会把最终成功洗成失败（或反之）。
+         */
+        val attempt: Int = 0,
+        /** 本次结论落账后发布路还剩几段未落地（0 = 发布路已静默，终态可定稿） */
+        val pendingPublications: Int = 0
+    ) : RecorderDelivery
+
+    /**
+     * 泵线程退出时自己收尾得到的会话终态（只在控制线程 join 超时、收尾职责已交给泵线程时发出；
+     * 正常停录的终态由控制线程 [Recorder.stop] 的返回值承载，不重复交付）。
+     */
+    data class FinalResult(
+        val seriesId: Long,
+        val startedAtMs: Long,
+        val result: RecordResult,
+        val settled: List<SettledPart> = result.parts.map { it.toSettledPart() },
+        /** 尝试序号（见 [LatePart.attempt]）：自检重录各尝试的迟到终态不许互相串场 */
+        val attempt: Int = 0
+    ) : RecorderDelivery
+}
+
+/**
+ * 会话交付通道（R07）的内部接口：只有带超时收尾形态的引擎（[CodecRecorder]）实现。
+ * 接线方必须在 `start` 前绑定会话身份；交付可能来自泵线程/发布线程，接线方负责线程安全。
+ */
+internal interface SessionDeliverySink {
+    var onSessionDelivery: ((RecorderDelivery) -> Unit)?
+
+    /**
+     * 绑定本次会话身份（`seriesId` + 会话起始墙钟 + 尝试序号），与 UI 结算键同源。
+     * 尝试序号必须带：自检重录沿用同一 `seriesId/startedAtMs`，只有它能区分"被判废的那次"
+     * 与"重录成功的那次"（见 [RecorderDelivery.LatePart.attempt]）。
+     */
+    fun bindSession(seriesId: Long, startedAtMs: Long, attempt: Int)
 }
 
 /**

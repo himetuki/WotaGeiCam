@@ -1,5 +1,6 @@
 package com.wotagei.cam.media
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
@@ -13,10 +14,16 @@ import android.util.LruCache
 import android.util.Size
 import com.wotagei.cam.R
 import com.wotagei.cam.backup.WotaBackupAgent
+import com.wotagei.cam.core.MediaAccessState
+import com.wotagei.cam.core.allMediaVolumesMounted
 import com.wotagei.cam.core.isMediaStoreVideoUri
+import com.wotagei.cam.core.mediaAccessLabel
+import com.wotagei.cam.core.mediaAccessState
 import com.wotagei.cam.diag.Diag as Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +33,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -52,6 +61,62 @@ enum class PickFailStage(val label: String) {
 
 /** [MediaRepo.pickClipByUri] 的出口：成功 [clip] 非 null 且 [fail] 为 null；失败反之 */
 data class PickOutcome(val clip: VideoClip?, val fail: PickFailStage?)
+
+/**
+ * 媒体库**列表读**失败的类别（Y26）。
+ *
+ * 查询失败原先被 `runCatching` 收敛成空列表，界面上与「本来就没有视频」完全同形；
+ * 撤权后又没有主动失效，旧列表/缩略图会一直留在屏上。这里把失败分成两类：
+ * - [PERMISSION]：provider 抛 SecurityException（撤权、权限门收紧）；
+ * - [QUERY]：其余查询故障（provider 忙、数据库损坏、返回 null cursor）。
+ *
+ * 纯函数 [listFailureFor] 是唯一分类点，JVM 单测直接驱动。
+ */
+internal enum class MediaListFailure { PERMISSION, QUERY }
+
+/** 异常 → 失败类别；null（未失败）→ null。只把 SecurityException 归为权限，别的原因不得引用户去开权限。 */
+internal fun listFailureFor(error: Throwable?): MediaListFailure? = when {
+    error == null -> null
+    error is SecurityException -> MediaListFailure.PERMISSION
+    else -> MediaListFailure.QUERY
+}
+
+/**
+ * 一次列表读的**同帧结果**：列表 + 失败类别。
+ *
+ * 两者必须一起返回：只给列表的话，调用侧只能靠「空」猜失败（又把两种事实混成一团）；
+ * 只给失败的话，半截列表（cursor 中途抛错）就丢了已经读到的行。
+ */
+internal data class MediaListRead(val clips: List<VideoClip>, val failure: MediaListFailure?)
+
+/**
+ * 回前台重验后要做的失效档位（Y26，纯函数）。
+ *
+ * - [NONE]：首次探测（还没有旧数据）或同枚举的非部分授权重验（可见集合没变）；
+ * - [FULL]：授权枚举变了（撤权/授权/所有文件访问之间切换）——列表重查 + 缩略图全量换代；
+ * - [TARGETED]：枚举没变但仍是 [MediaAccessState.PARTIAL_READ]——Android 14 的
+ *   「选择部分照片/视频」允许反复重选，前后两次都停在 PARTIAL_READ，可见集合却换了一批。
+ *   列表必须重查；缩略图只清**确实不再可见**的行，不再每次回前台都全量清空/推进代数
+ *   （高频清空会让整屏缩略图反复重解码，而留在屏上的行本来仍然可读）。
+ */
+internal enum class AccessRefresh { NONE, FULL, TARGETED }
+
+internal fun accessRefreshMode(prev: MediaAccessState?, next: MediaAccessState): AccessRefresh = when {
+    prev == null -> AccessRefresh.NONE
+    prev != next -> AccessRefresh.FULL
+    next == MediaAccessState.PARTIAL_READ -> AccessRefresh.TARGETED
+    else -> AccessRefresh.NONE
+}
+
+/**
+ * 裸 `_ID` 反查的唯一命中裁决（Y27，纯函数）。
+ *
+ * 聚合集合（`content://media/external/video/media`）上不同卷的 `_ID` **可以重号**：
+ * 0 行 = 查无此片；1 行 = 唯一答案；≥2 行 = 光凭 ID 无法判定是哪一条。最后一种返回 null，
+ * 调用方据此按「查无此片」关死——宁可让一条旧 ID 深链失效，也不能静默拿第一行
+ * （那可能把同号的另一卷视频当成目标，播放/删除都会落到错误条目上）。
+ */
+internal fun <T> failClosedIfAmbiguous(hits: List<T>): T? = hits.singleOrNull()
 
 /**
  * provider 的类型声明是否**明确**不是视频（纯函数，JVM 可测）。
@@ -110,6 +175,12 @@ data class VideoClip(
  *
  * 键是 `mediaId`（Room 里 `series_part.mediaId` 指向 MediaStore `_ID`）。
  * 命中不了的行原样返回：单段片逐字不变。
+ *
+ * **跨卷同号不能认**（Y27）：`_ID` 只在卷内唯一，SD 卡上同号的另一条视频若也按 id
+ * 盖成系列成员，会和真正的分段一起从列表消失。同一 id 可能挂着多条成员记录（id 复用
+ * 的历史残留），所以先按 id 收成表再逐条按卷比对，取**第一条**与本行同卷的；
+ * `SeriesPart.uri` 已存录制时的行 URI，按卷比对（[sameStorageVolume]）——旧账的合成卷
+ * `external` 只有在该 id 的可见行唯一时才认主卷（否则无法证明是哪一行），解析不出版本行原样返回。
  */
 internal fun annotateSeries(
     clips: List<VideoClip>,
@@ -118,10 +189,16 @@ internal fun annotateSeries(
 ): List<VideoClip> {
     if (series.isEmpty() && parts.isEmpty()) return clips
     val partCount = series.associate { it.seriesId to it.partCount }
-    val byMedia = HashMap<Long, SeriesPart>(parts.size)
-    parts.forEach { byMedia[it.mediaId] = it }
+    // 同一 id 的多条成员记录逐条留着（旧实现 last-wins 会把能对上的那条挤掉）
+    val byMedia = HashMap<Long, MutableList<SeriesPart>>(parts.size)
+    parts.forEach { byMedia.getOrPut(it.mediaId) { ArrayList(1) }.add(it) }
+    // 同 id 命中的**不同行 URI** 数：合成卷账键只有在唯一时才允许认主卷（Y27）
+    val rowUris = HashMap<Long, MutableSet<String>>(clips.size)
+    clips.forEach { rowUris.getOrPut(it.id) { HashSet(1) }.add(it.uri.toString()) }
     return clips.map { c ->
-        val p = byMedia[c.id] ?: return@map c
+        val sameIdRows = rowUris[c.id]?.size ?: 1
+        val p = byMedia[c.id]?.firstOrNull { sameStorageVolume(it.uri, c.uri.toString(), sameIdRows) }
+            ?: return@map c
         c.copy(
             seriesId = p.seriesId,
             partIndex = p.partIndex,
@@ -141,25 +218,27 @@ class MediaRepo private constructor(private val app: Context) {
     private val trashDao = db.trashDao()
     private val seriesDao = db.seriesDao()
 
+    /**
+     * 权限重验的**旁路**协程（Y26）：同枚举部分授权重选时要重读一次全量可见行，
+     * 再按结果只驱逐确实不可见的缩略图。不能借用调用屏的 scope —— 回前台事件来自
+     * Lifecycle，屏可能正在重建；也不能把这次读塞进 `refreshAccess()` 的同步路径，
+     * 那会把 ON_RESUME 的首帧拖在一次 MediaStore 查询后面。
+     */
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val version = MutableStateFlow(0L)
 
     /**
      * 列表刷新闸门。删除链路先关闸（Room 清标签会立刻触发列表重算），
      * pop 之后再开闸 ——  定版：列表刷新必须晚于播放页出栈，否则 pager 用陈旧 position 越界。
      */
-    private val refreshGate = MutableStateFlow(false)
+    private val listRefreshOwners = MediaListRefreshGate(::invalidate)
+    private val refreshGate = listRefreshOwners.state
 
-    fun holdListRefresh() {
-        refreshGate.value = true
-    }
-
-    fun releaseListRefresh() {
-        refreshGate.value = false
-        invalidate()
-    }
+    internal fun holdListRefresh(): AutoCloseable = listRefreshOwners.hold()
 
     /**
-     * 闸门当前态的**只读视图**（UI 侧唯一入口，写入仍只有 [holdListRefresh] / [releaseListRefresh]）。
+     * 闸门当前态的只读视图。每个删除批次通过 [holdListRefresh] 取得自己的持有权。
      *
      * 为什么只放一个 StateFlow 出去、不让 UI 调那两个写方法：闸门的开合是删除收尾的编排
      * （见 [runDeleteFinish]），UI 只该"知道"它，不该"参与"它。
@@ -172,8 +251,85 @@ class MediaRepo private constructor(private val app: Context) {
      */
     val listRefreshing: StateFlow<Boolean> get() = refreshGate
 
+    /**
+     * 媒体读取权限四态（Y26）：UI 只在屏内订阅，重验入口是 [refreshAccess]。
+     * null = 尚未探测（首次组合前），UI 按「加载中」处理，不能当成未授权。
+     */
+    private val access = MutableStateFlow<MediaAccessState?>(null)
+    val mediaAccess: StateFlow<MediaAccessState?> get() = access
+
+    /** 最近一次列表读的失败类别；成功查询会把它清回 null。 */
+    private val listFailureState = MutableStateFlow<MediaListFailure?>(null)
+
+    /**
+     * 失败类别只给同模块的媒体库屏消费；`MediaListFailure` 保持 internal，
+     * 不把仓库内部诊断枚举升成对外 API（需要公开时再逐条评审）。
+     */
+    internal val listFailure: StateFlow<MediaListFailure?> get() = listFailureState
+
+    /**
+     * 是否至少完成过一次列表读。false = 首帧查询还没回来（加载中），
+     * 与「查过且确实为空」必须分开——否则冷启会先闪一下「这里还没有视频」。
+     */
+    private val listLoadedState = MutableStateFlow(false)
+    val listLoaded: StateFlow<Boolean> get() = listLoadedState
+
+    /**
+     * 回前台重验媒体权限（Y26）。判定见 [accessRefreshMode]：
+     *
+     * - [AccessRefresh.FULL]（枚举变化）：`invalidate()` 重查列表；[ThumbLoader.invalidateAll]
+     *   清空缓存并推进代数——**只清缓存不清代数**的话，屏内 `remember(uri, px)` 仍抱着旧
+     *   Bitmap，已撤权的缩略图会继续显示。
+     * - [AccessRefresh.TARGETED]（同枚举 PARTIAL_READ 重选）：`invalidate()` 重查列表；
+     *   缩略图**只驱逐确实不再可见的行**（[retainVisibleThumbs]），不再每次回前台全量清空。
+     *   留在屏上的行仍可读，缓存本来有效；消失的行随列表快照一起离开组合，缓存里它们的
+     *   条目随后异步丢掉即可，不需要推进代数。
+     * - [AccessRefresh.NONE]：首次探测只记录状态；同枚举非部分授权重验可见集合没变。
+     */
+    fun refreshAccess() {
+        val next = mediaAccessState(app)
+        val prev = access.value
+        access.value = next
+        val mode = accessRefreshMode(prev, next)
+        if (mode == AccessRefresh.NONE) return
+        invalidate()
+        if (mode == AccessRefresh.FULL) {
+            ThumbLoader.invalidateAll()
+            Log.i(TAG, "媒体访问变化 ${mediaAccessLabel(prev!!)} → ${mediaAccessLabel(next)}，列表与缩略图全量失效")
+        } else {
+            retainVisibleThumbs()
+            Log.i(TAG, "部分授权重选（${mediaAccessLabel(next)}），列表重查并只清理已不可见行的缩略图")
+        }
+    }
+
+    /**
+     * 同枚举部分授权重选的**定向**缩略图清理：按当前权限重读全量可见行，
+     * 只驱逐缓存里 URI 已不在该集合中的媒体缩略图（[ThumbLoader.retainMediaRows]）。
+     *
+     * 读失败时按空集合保守清理：此时无法证明哪一行仍可见，宁可让仍可见的行重解码一次，
+     * 也不把已撤权行的缩略图留在缓存里。全程只 `cache.remove`，不推进代数——
+     * 屏内已组合的可见行 Bitmap 仍是有效内容。
+     */
+    private fun retainVisibleThumbs() {
+        refreshScope.launch {
+            val read = queryMediaStore(MediaScope.AllVideos)
+            if (read.failure != null) {
+                Log.w(TAG, "权限重验时全量可见行读取失败（${read.failure}）→ 保守清空媒体缩略图缓存")
+            }
+            val visible = read.clips.mapTo(HashSet()) { it.uri.toString() }
+            ThumbLoader.retainMediaRows(visible)
+        }
+    }
+
+    /** 裸键台账只有在 live + 回收站的唯一真实行仍是所选快照时才可写（Y27）。 */
+    internal fun canWriteLedgerFor(clip: VideoClip): Boolean {
+        val failures = ArrayList<Throwable>(2)
+        val hits = queryRowsById(clip.id, failures = failures)
+        return failures.isEmpty() && ledgerWriteMatches(clip.ledgerRow(), hits.map { it.ledgerRow() })
+    }
+
     fun invalidate() {
-        version.value += 1
+        version.update { it + 1 }
     }
 
     fun db(): WotaDb = db
@@ -203,9 +359,20 @@ class MediaRepo private constructor(private val app: Context) {
         triggers()
             .flatMapLatest { s ->
                 gated {
-                    val raw = queryMediaStore(scope)
+                    val read = queryMediaStore(scope)
+                    // 查询失败单独回报；即使已读到部分行，也不能据此恢复标签。
+                    listFailureState.value = read.failure
+                    listLoadedState.value = true
+                    val raw = read.clips
+                    val local = if (read.failure == null) reconcileLegacyTrashAliases(s.local) else s.local
                     val restored = try {
-                        WotaBackupAgent.restoreTags(app, raw)
+                        // Y39：部分授权/未授权、卷未挂载或查询只返回半截时，可见集合都不足以
+                        // 证明指纹唯一；迁移必须继续等待，不能把标签贴到看不见的重复候选上。
+                        val access = mediaAccessState(app)
+                        val complete = read.failure == null &&
+                            (access == MediaAccessState.ALL_FILES || access == MediaAccessState.FULL_READ) &&
+                            allMediaVolumesMounted(app)
+                        WotaBackupAgent.restoreTags(app, raw, complete)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -215,7 +382,7 @@ class MediaRepo private constructor(private val app: Context) {
                     filterByTab(
                         annotateSeries(joinTags(raw, s.tags + restored), s.series, s.parts),
                         filter,
-                        s.local
+                        local
                     )
                 }
             }
@@ -232,7 +399,39 @@ class MediaRepo private constructor(private val app: Context) {
         return triggers()
             .flatMapLatest { s ->
                 refreshGate.flatMapLatest { open ->
-                    if (open) flow<VideoClip?> { } else flow { emit(queryById(id, s.local)?.let { it.copy(tags = s.tags.filter { t -> t.mediaId == id }.map { t -> t.tag }.toSet()) }) }
+                    if (open) flow<VideoClip?> { } else flow {
+                        emit(queryById(id, s.local)?.let { clip ->
+                            clip.copy(tags = tagsForRow(s.tags.filter { it.mediaId == id }, clip.tagPathKeys()))
+                        })
+                    }
+                }
+            }
+            .flowOn(Dispatchers.IO)
+    }
+
+    /**
+     * 按**真实行 URI** 单条查询（Y27 正常播放/对比路由的唯一入口）。
+     *
+     * 行 URI 自带具体卷：解出 `(卷, _ID)` 后按卷集合查，回收站兜底也按卷收窄——
+     * 回收站里同号的另一卷活片不可能顶替（`clipById` 的裸 id 入口只能 fail-closed，
+     * 这里没有歧义可关）。形状不符（旧聚合 `external` 别名、非视频集合、非法 id）
+     * 按「没有这一行」下发一次 null，**不退回裸 id** 猜。
+     *
+     * 标签仍按本行路径匹配（[tagsForRow]），不额外查询同号行。闸门与 [clipById] 同口径。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun clipByRowUri(rowUri: Uri): Flow<VideoClip?> {
+        val ref = mediaRowRefOf(rowUri.toString()) ?: return flow { emit(null) }
+        return triggers()
+            .flatMapLatest { s ->
+                refreshGate.flatMapLatest { open ->
+                    if (open) flow<VideoClip?> { } else flow {
+                        emit(
+                            queryById(ref.mediaId, s.local, ref.volume)?.let { clip ->
+                                clip.copy(tags = tagsForRow(s.tags.filter { it.mediaId == ref.mediaId }, clip.tagPathKeys()))
+                            }
+                        )
+                    }
                 }
             }
             .flowOn(Dispatchers.IO)
@@ -252,7 +451,7 @@ class MediaRepo private constructor(private val app: Context) {
         // 定位本函数，表达式体会让守卫失去输入
         return withContext(Dispatchers.IO) {
             val clip = queryById(id)
-            clip?.copy(tags = tagDao.tagsOf(id).toSet())
+            clip?.copy(tags = tagsForRow(tagDao.rowsOf(id), clip.tagPathKeys()))
         }
     }
 
@@ -319,9 +518,18 @@ class MediaRepo private constructor(private val app: Context) {
         if (!isMediaStoreVideoUri(uri)) return null
         // 末段超出 Long 范围时不要整条判死：交给外来分支按 URI 直读
         val id = runCatching { ContentUris.parseId(uri) }.getOrNull() ?: return null
-        val hit = queryById(id) ?: return null
+        // 手选 URI 自带真实卷（Y27）：按卷反查，聚合查询上同号另一卷的行不能顶替
+        val hit = queryById(id, volume = uri.pathSegments.first()) ?: return null
         // 标签是增强信息：Room 抖动不该把一条已命中的可播片判成「读取失败」
-        return hit.copy(tags = runCatching { tagDao.tagsOf(id).toSet() }.getOrDefault(emptySet()))
+        val tags = try {
+            tagsForRow(tagDao.rowsOf(id), hit.tagPathKeys())
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "选片标签查询失败 mediaId=$id", e)
+            emptySet()
+        }
+        return hit.copy(tags = tags)
     }
 
     /**
@@ -406,6 +614,28 @@ class MediaRepo private constructor(private val app: Context) {
 
     fun trashItems(): Flow<List<TrashItem>> = trashDao.observeAll().flowOn(Dispatchers.IO)
 
+    /** API 29 旧回收账只在未按页签/目录收窄的查询上确认；不把失败或不可见当作已经迁移。 */
+    private suspend fun reconcileLegacyTrashAliases(items: List<TrashItem>): List<TrashItem> {
+        if (SYSTEM_TRASH_SUPPORTED) return items
+        val aliases = items.filter { legacyAggregateRowRefOf(it.uri) != null }
+        if (aliases.isEmpty()) return items
+        val access = mediaAccessState(app)
+        if ((access != MediaAccessState.FULL_READ && access != MediaAccessState.ALL_FILES) ||
+            !allMediaVolumesMounted(app)
+        ) return items
+        var changed = false
+        for (item in aliases) {
+            val failures = ArrayList<Throwable>(1)
+            val hits = queryRowsById(item.mediaId, failures = failures)
+            if (failures.isNotEmpty()) continue
+            val probes = hits.map { RowProbe(it.uri.toString(), it.name, it.relativePath) }
+            val target = legacyTrashAliasTarget(item.uri, item.name, item.origin, probes) ?: continue
+            // 数据库单句检查冲突；不依赖先前的台账快照来判断主键是否仍然空着。
+            if (trashDao.rewriteUri(item.uri, target, item.name, item.origin, item.deletedAt) > 0) changed = true
+        }
+        return if (changed) trashDao.observeAll().first() else items
+    }
+
     // region MediaStore
 
     private val projectionBase = listOf(
@@ -418,7 +648,10 @@ class MediaRepo private constructor(private val app: Context) {
         MediaStore.Video.Media.HEIGHT,
         MediaStore.Video.Media.RELATIVE_PATH,
         MediaStore.Video.Media.DATA,
-        MediaStore.Video.Media.MIME_TYPE
+        MediaStore.Video.Media.MIME_TYPE,
+        // 行所在卷（Y27）：聚合 EXTERNAL_CONTENT_URI 会把 SD 卡上的行也报成 `external`，
+        // 写操作/播放按这个字段拼回**真实卷**的 URI，保留原始卷身份
+        MediaStore.MediaColumns.VOLUME_NAME
     )
 
     private val projection: Array<String>
@@ -428,7 +661,7 @@ class MediaRepo private constructor(private val app: Context) {
             projectionBase.toTypedArray()
         }
 
-    private fun queryMediaStore(scope: MediaScope): List<VideoClip> {
+    private fun queryMediaStore(scope: MediaScope): MediaListRead {
         // IS_PENDING 门：写一半的 pending 记录对 owner 的查询默认可见（只对外部 app 隐藏），
         // 不挡的话录制中/剪辑导出中回到媒体库，网格里会出现 0 字节幽灵条目，点开是半成品文件；
         // 「commit 后相册立即可见」由该门 + 完成侧 invalidate 共同成立
@@ -443,53 +676,81 @@ class MediaRepo private constructor(private val app: Context) {
         } else {
             arrayOf("video/%")
         }
+        val failures = ArrayList<Throwable>(2)
         val live = readCursor(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             selection,
             args,
-            "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            "${MediaStore.Video.Media.DATE_ADDED} DESC",
+            failures
         )
-        val trashed = trashedMatching(scope)
-        return if (trashed.isEmpty()) live else live + trashed
+        val trashed = trashedMatching(scope, failures)
+        val clips = if (trashed.isEmpty()) live else live + trashed
+        return MediaListRead(clips, listFailureFor(failures.firstOrNull()))
     }
 
     /** 回收站行只能单独查，所以作用域过滤改在内存里做 */
-    private fun trashedMatching(scope: MediaScope): List<VideoClip> =
-        readTrashed().filter {
+    private fun trashedMatching(scope: MediaScope, failures: MutableList<Throwable>? = null): List<VideoClip> =
+        readTrashed(failures).filter {
             // 再认一次列值：万一某个 ROM 对 MATCH_ONLY 支持不完整，也不该把在用的成片漏进回收站页签
             it.isTrashed && it.mimeType.startsWith("video/") &&
                 (scope == MediaScope.AllVideos || it.relativePath.contains(WOTA_DIR_KEYWORD))
         }
 
-    private suspend fun queryById(id: Long, localTrash: List<TrashItem>? = null): VideoClip? {
-        val live = readCursor(
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            "${MediaStore.Video.Media._ID} = ?",
-            arrayOf(id.toString()),
-            null
-        ).firstOrNull()
-        val clip = live ?: trashedMatching(MediaScope.AllVideos).firstOrNull { it.id == id } ?: return null
+    private suspend fun queryById(id: Long, localTrash: List<TrashItem>? = null, volume: String? = null): VideoClip? {
+        val failures = ArrayList<Throwable>(2)
+        val hits = queryRowsById(id, volume, failures)
+        if (failures.isNotEmpty()) return null
+        val clip = failClosedIfAmbiguous(hits) ?: return null
         if (SYSTEM_TRASH_SUPPORTED) return clip
         // 三个单片出口共用状态投影；流式查询复用同拍快照，单次查询只取一拍本地记录。
         val localUris = (localTrash ?: trashDao.observeAll().first()).map { it.uri }.toSet()
         return clip.copy(isTrashed = trashedFor(clip, localUris))
     }
 
+    /** 单次限定 ID 的 Provider 查询同时包含 live / trash；不先到先得，也不全表扫描回收站。 */
+    private fun queryRowsById(id: Long, volume: String? = null, failures: MutableList<Throwable>): List<VideoClip> {
+        val concreteVolume = volume?.takeIf { it.isNotBlank() && it != MediaStore.VOLUME_EXTERNAL }
+        val collection = concreteVolume?.let { MediaStore.Video.Media.getContentUri(it) }
+            ?: MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val selection = "${MediaStore.Video.Media._ID} = ? AND ${MediaStore.MediaColumns.IS_PENDING} = 0"
+        val hits = readCursor(collection, selection, arrayOf(id.toString()), null, failures, includeTrash = SYSTEM_TRASH_SUPPORTED)
+        return hits.filter { it.id == id &&
+            (concreteVolume == null || mediaRowRefOf(it.uri.toString())?.volume == concreteVolume) }
+            .distinctBy { it.uri.toString() }
+    }
+
     private fun readCursor(
         contentUri: Uri,
         selection: String?,
         args: Array<String>?,
-        sort: String?
+        sort: String?,
+        failures: MutableList<Throwable>? = null,
+        includeTrash: Boolean = false
     ): List<VideoClip> {
         val out = ArrayList<VideoClip>()
         val resolver = app.contentResolver
         runCatching {
-            resolver.query(contentUri, projection, selection, args, sort)?.use { c ->
-                readRows(c, out)
+            val cursor = if (includeTrash && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                resolver.query(contentUri, projection, Bundle().apply {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+                    putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+                }, null)
+            } else {
+                resolver.query(contentUri, projection, selection, args, sort)
+            }
+            if (cursor == null) {
+                // 返回 null 与「查到 0 行」是两件事：前者是 provider 故障，后者才是真空库
+                failures?.add(IllegalStateException("query returned null"))
+                Log.e(TAG, "查询返回 null uri=$contentUri selection=$selection → 按空列表返回")
+            } else {
+                cursor.use { c -> readRows(c, out) }
             }
         }.onFailure {
-            // 语义不变：失败仍返回（可能是空的）out。补日志只为把"媒体库列表空"从
+            // 语义不变：失败仍返回（可能是空的）out。补日志+失败类别只为把"媒体库列表空"从
             // 「本来就没视频」和「查询炸了」这两种现场里区分出来——不记就永远无从判断。
+            failures?.add(it)
             Log.e(TAG, "查询失败 uri=$contentUri selection=$selection → 按空/半截列表返回", it)
         }
         return out
@@ -507,22 +768,29 @@ class MediaRepo private constructor(private val app: Context) {
      * 全是 `isTrashed=false`，`filterByTab` 的回收站判据又只看本地表 —— 结果会是每条成片在网格里出现两遍。
      * 29 上本地 `trash_item` 表才是唯一权威（见 [SYSTEM_TRASH_SUPPORTED]），直接返回空。
      */
-    private fun readTrashed(): List<VideoClip> {
+    private fun readTrashed(failures: MutableList<Throwable>? = null): List<VideoClip> {
         if (!SYSTEM_TRASH_SUPPORTED) return emptyList()
         val out = ArrayList<VideoClip>()
         val queryArgs = Bundle().apply {
             putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
         }
         runCatching {
-            app.contentResolver.query(
+            val cursor = app.contentResolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 projection,
                 queryArgs,
                 null
-            )?.use { c -> readRows(c, out) }
+            )
+            if (cursor == null) {
+                failures?.add(IllegalStateException("trash query returned null"))
+                Log.e(TAG, "回收站查询返回 null（API ${Build.VERSION.SDK_INT}）→ 按空列表返回")
+            } else {
+                cursor.use { c -> readRows(c, out) }
+            }
         }.onFailure {
             // 同上：失败仍返回空列表（回收站页签显示空），只是把失败现场留下来。
             // 不记的话「回收站是空的」与「系统回收站查询炸了」在界面上长得一模一样。
+            failures?.add(it)
             Log.e(TAG, "回收站查询失败（API ${Build.VERSION.SDK_INT}）→ 按空列表返回", it)
         }
         return out
@@ -540,9 +808,17 @@ class MediaRepo private constructor(private val app: Context) {
         val IData = c.getColumnIndex(MediaStore.Video.Media.DATA)
         val iMime = c.getColumnIndex(MediaStore.Video.Media.MIME_TYPE)
         val iTrashed = c.getColumnIndex(TRASHED_COLUMN)
-        val base = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val iVolume = c.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
         while (c.moveToNext()) {
             val id = c.getLong(iId)
+            // 逐行按真实卷拼 URI（Y27）：`content://media/<volume>/video/media/<id>`；
+            // 拿不到卷名才退回聚合集合。id 仍是同一行身份（Room 标签/系列继续按 mediaId 关联）
+            val volume = if (iVolume >= 0) c.getString(iVolume) else null
+            val base = if (volume.isNullOrBlank()) {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Video.Media.getContentUri(volume)
+            }
             out += VideoClip(
                 id = id,
                 uri = android.content.ContentUris.withAppendedId(base, id),
@@ -563,11 +839,16 @@ class MediaRepo private constructor(private val app: Context) {
 
     // endregion
 
+    /**
+     * 标签联表（Y27 读端）：一次建索引；不因同号另一行被隐藏/卸载而改变标签归属。
+     */
     private fun joinTags(raw: List<VideoClip>, tags: List<MediaTag>): List<VideoClip> {
         if (tags.isEmpty()) return raw
-        val byId = HashMap<Long, MutableSet<String>>()
-        tags.forEach { t -> byId.getOrPut(t.mediaId) { HashSet() }.add(t.tag) }
-        return raw.map { c -> c.copy(tags = byId[c.id] ?: emptySet()) }
+        val byId = tags.groupBy { it.mediaId }
+        return raw.map { clip ->
+            val candidates = byId[clip.id] ?: return@map clip
+            clip.copy(tags = tagsForRow(candidates, clip.tagPathKeys()))
+        }
     }
 
     private fun filterByTab(list: List<VideoClip>, filter: ClipFilter, localTrash: List<TrashItem>): List<VideoClip> {
@@ -684,6 +965,34 @@ fun formatSize(bytes: Long): String {
     }
 }
 
+/** 媒体库缩略图缓存键前缀：只有这些键参与「按可见行清理」，外来 provider 的缩略图不碰 */
+private const val MEDIA_URI_PREFIX = "content://media/"
+
+/**
+ * 从 [ThumbLoader.bitmapKey] 的 `"$uri@$px@$gen"` 里取回行 URI（Y26，纯函数）。
+ *
+ * 取**最后两个** `@` 之前的部分：URI 自身允许含 `@`（路径/查询里都可能出现），
+ * 从右往左切才不会被截断。格式不符返回 null（调用方跳过，不猜）。
+ */
+internal fun thumbKeyUri(key: String): String? {
+    val gen = key.lastIndexOf('@')
+    if (gen <= 0) return null
+    val px = key.lastIndexOf('@', gen - 1)
+    if (px <= 0) return null
+    return key.substring(0, px).takeIf { it.isNotEmpty() }
+}
+
+/**
+ * 该缓存键是否应因「行已不可见」被驱逐（Y26，纯函数）。
+ *
+ * 只处理媒体库 URI：`content://media/...` 之外的缓存（照片选择器等外来来源）没有
+ * 对应的列表可见集合，不参与清理。可见集合为空 = 保守清空全部媒体缩略图。
+ */
+internal fun thumbKeyShouldEvict(key: String, visibleUris: Set<String>): Boolean {
+    val uri = thumbKeyUri(key) ?: return false
+    return uri.startsWith(MEDIA_URI_PREFIX) && uri !in visibleUris
+}
+
 /**
  * 缩略图加载：ContentResolver.loadThumbnail（API 29+）失败回退 MediaMetadataRetriever。
  * 并发限 2；列表滑动中由 [paused] 暂停新请求（06 文档性能节）。
@@ -708,11 +1017,19 @@ object ThumbLoader {
 
     private val permits = Semaphore(2)
 
+    /**
+     * 缓存代数（Y26）：撤权/权限变化时推进。键里带代数 ⇒ 屏内 `remember(uri, px, gen)`
+     * 跟着换代重取，旧 Bitmap 不会被继续显示。只清 `cache` 而不推进代数时，已经组合出来的
+     * 缩略图会一直挂在记忆里（那是 `evictAll` 够不着的层）。
+     */
+    private val generationState = MutableStateFlow(0)
+    val generation: StateFlow<Int> get() = generationState
+
     /** 滑动中置 true：新请求直接排队等待，不抢解码资源 */
     @Volatile
     var paused: Boolean = false
 
-    fun bitmapKey(uri: Uri, px: Int): String = "$uri@$px"
+    fun bitmapKey(uri: Uri, px: Int): String = "$uri@$px@${generationState.value}"
 
     fun peek(uri: Uri, px: Int = DEFAULT_PX): Bitmap? = cache.get(bitmapKey(uri, px))
 
@@ -756,5 +1073,31 @@ object ThumbLoader {
 
     fun evict(uri: Uri) {
         cache.remove(bitmapKey(uri, DEFAULT_PX))
+    }
+
+    /**
+     * 全量失效（Y26 撤权/授权枚举变化）：清空缓存并推进代数。
+     * 两个动作缺一不可——`evictAll` 管仓库缓存，代数管屏内已组合的 Bitmap。
+     */
+    fun invalidateAll() {
+        cache.evictAll()
+        generationState.value += 1
+    }
+
+    /**
+     * **定向**失效（Y26 同枚举部分授权重选）：只驱逐确实不再可见的媒体行缩略图。
+     *
+     * 与 [invalidateAll] 的分工：可见集合换了一批时，留在屏上的行仍可读、缓存仍有效；
+     * 消失的行会随列表快照离开组合。此时全量清空 + 推进代数会让整屏缩略图白白重解码，
+     * 每次回前台都清一次。这里只 `remove` 不在 [visibleUris] 里的媒体键，不动代数。
+     *
+     * 遍历 [LruCache.snapshot] 而不是缓存自己记录键：LruCache 的淘汰是被动的，
+     * 快照是唯一能拿到当前全部键的公开入口；`remove` 在遍历副本上执行是安全的。
+     */
+    fun retainMediaRows(visibleUris: Set<String>) {
+        val keys = cache.snapshot().keys
+        keys.forEach { key ->
+            if (thumbKeyShouldEvict(key, visibleUris)) cache.remove(key)
+        }
     }
 }

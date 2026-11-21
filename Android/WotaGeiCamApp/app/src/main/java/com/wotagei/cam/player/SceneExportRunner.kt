@@ -11,12 +11,14 @@ import android.media.MediaMuxer
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.view.Surface
 import com.wotagei.cam.diag.Diag as Log
 import com.wotagei.cam.media.VideoClip
 import com.wotagei.cam.record.ORIENTATION_MUXER_CCW
-import com.wotagei.cam.record.monotonicPts
+import com.wotagei.cam.record.SealMarker
 import com.wotagei.cam.record.decoderFormatOf
 import com.wotagei.cam.record.exportOrientationHint
+import com.wotagei.cam.record.mediaIdOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,7 +27,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -108,13 +109,13 @@ class SceneExportRunner(private val ctx: Context) {
             sealed = true
         }
 
-        /** 同一 owner 至多领取一次 pending 删除权；外部 Binder 调用不在锁内执行。 */
+        /** 同一 owner 至多领取一次 pending 删除权；外部 Binder 调用不在锁内执行，返回值须核对（Y32）。 */
         fun deletePending(ctx: Context) {
             val uri = synchronized(lock) {
                 if (sealed || pendingDeleted) null
                 else pendingUri?.also { pendingDeleted = true }
             } ?: return
-            runCatching { ctx.contentResolver.delete(uri, null, null) }
+            deletePendingRowVerified(ctx, uri, TAG)
         }
     }
 
@@ -125,13 +126,24 @@ class SceneExportRunner(private val ctx: Context) {
         track: SelectedTrack,
         offsetMs: Long,
         effects: SceneExportEffects,
+        onLateOutcome: (Result) -> Unit = {},
         onProgress: (Float) -> Unit
     ): Result = suspendCancellableCoroutine { continuation ->
         val owner = ExportOwner()
         owner.bindProgress(onProgress)
+        // 已到达的公开终态（Done / COMMIT 保留）：caller 已取消/超时离开后，真话仍要回填（Y32）。
+        val terminal = ExportTerminal<Result>()
         val settled = AtomicBoolean(false)
-        val finish: (Result) -> Unit = { result ->
-            if (settled.compareAndSet(false, true)) resumeIfActive(continuation, result)
+        // caller 结算与 owner 终态记账分开：预算到点只结算 caller（TIMEOUT），**不能**先写 terminal，
+        // 否则已进入 commit 的迟到 Done 会被 TIMEOUT 抢占，真话永远回填不了（Y32）。
+        // 结算必须对"送达"诚实：CAS 赢了但等待方已经取消/超时离开时，这次结果并没有送达，
+        // 返回 false 让 worker 走 onLateOutcome 按任务身份回填（Y32），不许把没送到的终态当已结算。
+        val settle: (Result) -> Boolean = { result ->
+            settled.compareAndSet(false, true) && resumeIfActive(continuation, result)
+        }
+        val finish: (Result) -> Boolean = { result ->
+            terminal.reached(result)
+            settle(result)
         }
         // 独立等待侧：准备期的 insert/open/codec/GL 或失败清理的 delete 都可能永久阻塞，
         // 不能等主循环才建 deadline。预算到点只放弃 owner 并结束 caller，迟到资源仍由原 owner 收口。
@@ -148,7 +160,8 @@ class SceneExportRunner(private val ctx: Context) {
             while (!owner.isAbandoned()) {
                 if (SystemClock.elapsedRealtime() > deadlineAt) {
                     owner.abandon()
-                    finish(Failed(Reason.TIMEOUT))
+                    // 只结束等待方；worker 收口后若已有终态，由 onLateOutcome 回填（含迟到 Done）。
+                    settle(Failed(Reason.TIMEOUT))
                     return@Thread
                 }
                 try {
@@ -168,20 +181,26 @@ class SceneExportRunner(private val ctx: Context) {
             EXPORT_OWNER_EXECUTOR.execute {
                 val result = try {
                     runBlocking(owner.workerJob) {
-                        performExport(owner, src, startMs, endMs, track, offsetMs, effects) {
+                        performExport(owner, terminal, src, startMs, endMs, track, offsetMs, effects) {
                             owner.publishProgress(it)
                         }
                     }
                 } catch (_: CancellationException) {
-                    null
+                    // 封轨/提交成功后才取消：块的返回值被取消边界吞掉，取已记账的终态。
+                    terminal.peek()
                 } catch (failure: Throwable) {
                     Log.w(TAG, "后渲染导出 owner 异常：${failure.message}", failure)
-                    Failed(Reason.ENCODER)
+                    // 封轨后异常/取消已记账 COMMIT（真话）：Error 也要把已发生的终态交出去，
+                    // 不能改写成 ENCODER 让"成片在盘上"被谎报成没写成（Y32）。
+                    terminal.peek() ?: Failed(Reason.ENCODER)
                 } finally {
                     owner.workerJob.cancel()
                     watchdog.interrupt()
                 }
-                result?.let { finish(it) }
+                // caller 已离开（取消/超时）时真话必须回填：Done 要刷索引，COMMIT 要如实报保留
+                if (result != null && !finish(result)) {
+                    runCatching { onLateOutcome(result) }
+                }
             }
         } catch (_: RejectedExecutionException) {
             owner.abandon()
@@ -192,6 +211,7 @@ class SceneExportRunner(private val ctx: Context) {
 
     private suspend fun performExport(
         owner: ExportOwner,
+        terminal: ExportTerminal<Result>,
         src: VideoClip,
         startMs: Long,
         endMs: Long,
@@ -216,11 +236,17 @@ class SceneExportRunner(private val ctx: Context) {
 
         lateinit var pendingUri: android.net.Uri
         var sealed = false
+        // 封轨即落 SealMarker（与 ClipExport/VideoStore.seal 同口径）：commit 全败/取消/封轨后
+        // 异常都保留 pending 行，冷启救援据此把等待门槛从 1 小时缩到 SEALED_RESCUE_MS；发布成功即清。
+        var sealedPath: String? = null
         var submitted = 0L
         var gl: SceneExportGl? = null
         var extractor: MediaExtractor? = null
+        var audioExtractor: MediaExtractor? = null
+        var audioLane: SceneAudioLane? = null
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
+        var encoderInput: Surface? = null
         var muxer: MediaMuxer? = null
         var videoTrack = -1
         var muxerStarted = false
@@ -269,17 +295,17 @@ class SceneExportRunner(private val ctx: Context) {
                 val srcFps = vFormat.intOr(MediaFormat.KEY_FRAME_RATE, 0)
                 val srcBitrate = vFormat.intOr(MediaFormat.KEY_BIT_RATE, 0)
 
-                // ---- 时间基准：入点之后第一个**视频样本**的源 PTS。
-                // 必须先扫出来（只读样本头、不解码），因为音轨预扫和「建不建音轨」都发生在
-                // muxer.start() 之前，而 start() 一过就再也不能 addTrack
-                ex.selectTrack(vIdx)
-                ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-                while (ex.sampleTime in 0 until startUs) {
-                    if (!ex.advance()) break
+                // 用已有的样本头扫描同时定位最早呈现 PTS 与最后一个界内样本。
+                // 解码序首个界内样本可能是 P 帧。用它定零会把较早呈现的 B 帧压到同一时刻。
+                val scan = scanTargetSamples(ex, vIdx, startUs, endUs, job)
+                val basePtsUs = if (scan.safe) {
+                    scan.firstPtsUs ?: return@withContext fail(owner, Reason.RANGE)
+                } else {
+                    // 部分访问单元与输出帧不保证一一对应，音画共同使用用户指定的入点。
+                    startUs
                 }
-                val basePtsUs = ex.sampleTime
-                if (basePtsUs < 0L || basePtsUs >= endUs) return@withContext fail(owner, Reason.RANGE)
-                // 内录轨按同步偏移平移（与 ClipExport 同一枚纯函数，别在别处再写一份）
+                val lastTargetIndex = if (scan.safe) scan.lastIndex else -1
+                val boundedInput = lastTargetIndex >= 0
                 val shiftUs = TrackRule.shiftUsFor(track, offsetMs)
 
                 // ---- 编码器（surface 输入）
@@ -297,7 +323,7 @@ class SceneExportRunner(private val ctx: Context) {
                 val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 encoder = enc
                 enc.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                val inputSurface = enc.createInputSurface()
+                val inputSurface = enc.createInputSurface().also { encoderInput = it }
                 enc.start()
 
                 // ---- GL（先建，解码器要它的 Surface）
@@ -319,30 +345,37 @@ class SceneExportRunner(private val ctx: Context) {
                 dec.configure(decoderFormatOf(vFormat), decoderSurface, null, 0)
                 dec.start()
 
-                // ---- muxer：音轨格式先入，视频轨等编码器回报
+                // ---- 音频车道（Y30）：音轨格式先入，视频轨等编码器回报；音频与视频交错写出。
                 // 选中轨在区间内没有可写样本就不建轨（零样本轨会让 muxer.stop() 抛异常，
-                // 而异常路径会删掉整份输出——视频明明完好）。预扫与拷贝同口径见 [audioTrackWritable]
-                val audioTrack = if (audioFormat != null && audioIdx >= 0 &&
+                // 而异常路径会删掉整份输出——视频明明完好）。预扫与写出同口径见 [audioTrackWritable]。
+                // 车道用**独立提取器**：主提取器在编码循环里还选着视频轨，选择是累加的，共用会读到
+                // 音视频交错样本（r10 真机：整帧视频被当 AAC 写进音轨）。
+                if (audioFormat != null && audioIdx >= 0 &&
                     audioTrackWritable(
                         ex, audioIdx, basePtsUs, shiftUs, endUs - basePtsUs,
-                        AUDIO_TAIL_TOLERANCE
+                        AUDIO_TAIL_TOLERANCE, seekUs = sceneExportAudioSeekUs(basePtsUs, shiftUs)
                     )
                 ) {
-                    muxer?.addTrack(audioFormat) ?: -1
-                } else {
-                    if (audioFormat != null) {
-                        Log.w(TAG, "选中轨在区间内没有可写样本，本片只导出视频")
+                    // 打开必须早于 addTrack：打开失败就不能建轨，否则留下零样本轨把 stop 崩掉
+                    runCatching {
+                        val ax = MediaExtractor()
+                        ax.setDataSource(ctx, src.uri, null)
+                        audioExtractor = ax
+                        val lane = SceneAudioLane(ax, audioIdx, muxer!!, basePtsUs, shiftUs, endUs, job)
+                        // Y30：prepare 成功后才 addTrack。若反过来（addTrack 做 arm 的实参），
+                        // select/seek 失败时 muxer 已留下零样本音轨，stop 会抛异常并删掉整份视频。
+                        lane.prepare(sceneExportAudioSeekUs(basePtsUs, shiftUs))
+                        lane.arm(muxer!!.addTrack(audioFormat))
+                        audioLane = lane
+                    }.onFailure {
+                        Log.w(TAG, "音频车道起不来，本片只导出视频：${it.message}")
+                        runCatching { audioExtractor?.release() }
+                        audioExtractor = null
                     }
-                    -1
+                } else if (audioFormat != null) {
+                    Log.w(TAG, "选中轨在区间内没有可写样本，本片只导出视频")
                 }
 
-                // 先只读样本头扫出目标区间的最后一个视频样本索引：这能证明“后面没有界内样本”，
-                // 而不像输出 PTS 前缀那样把未来单调当安全前提。扫描只 advance()，不解码、不读数据。
-                // 含 PARTIAL_FRAME 的输入可能一个样本不是完整访问单元，退回读到 EOF 的保守路径。
-                val scan = if (endUs > startUs) scanTargetSamples(ex, vIdx, startUs, endUs) else null
-                val lastTargetIndex = scan?.takeIf { it.safe }?.lastIndex ?: -1
-                val expectedTargets = scan?.takeIf { it.safe }?.expected ?: 0
-                val boundedInput = lastTargetIndex >= 0
                 ex.selectTrack(vIdx)
                 ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
 
@@ -402,14 +435,25 @@ class SceneExportRunner(private val ctx: Context) {
                                 // 只会停在最新一帧，后续提交帧的时机会错位
                                 if (!engine.awaitFrame()) return@withContext fail(owner, Reason.GL)
                                 if (submit) {
-                                    if (!engine.acquireAndRender(sceneExportPtsUs(ptsUs, basePtsUs))) {
+                                    val outputPtsUs = sceneExportPtsUs(ptsUs, basePtsUs)
+                                    // 样本扫描与解码器若给出互相矛盾的时间轴，不发布错误的成片。
+                                    if (outputPtsUs < 0L) return@withContext fail(owner, Reason.RANGE)
+                                    if (!engine.acquireAndRender(outputPtsUs)) {
                                         return@withContext fail(owner, Reason.GL)
                                     }
                                     submitted++
+                                    // Y30：音频按平移后 PTS 追帧，最多超前 0.5s；窗口外样本留在
+                                    // extractor 里不读入内存（等待而非积压）。muxer 未 start 前不能写。
+                                    if (muxerStarted) {
+                                        audioLane?.drainUpTo(outputPtsUs + SceneAudioLane.LEAD_US)
+                                    }
                                     val total = (endUs - basePtsUs).coerceAtLeast(1L)
-                                    onProgress(((ptsUs - basePtsUs).toFloat() / total).coerceIn(0f, 0.99f))
+                                    onProgress((outputPtsUs.toFloat() / total).coerceIn(0f, 0.99f))
                                 } else {
-                                    engine.acquireOnly()
+                                    // B07（2026-11-19）：消费帧也必须认失败——只 acquire 不渲染的
+                                    // 帧如果 updateTexImage/拷贝就错了，后面"已提交帧数"仍会照常
+                                    // 前进，终态却报成功。错误必须沿同一条 Reason.GL 失败出口进结果。
+                                    if (!engine.acquireOnly()) return@withContext fail(owner, Reason.GL)
                                 }
                             }
                             if (eos) decEos = true
@@ -434,7 +478,7 @@ class SceneExportRunner(private val ctx: Context) {
                                         val out = enc.getOutputBuffer(idx)!!
                                         out.position(encInfo.offset)
                                         out.limit(encInfo.offset + encInfo.size)
-                                        muxer!!.writeSampleData(videoTrack, out, encInfo)
+                                        writePerf { muxer!!.writeSampleData(videoTrack, out, encInfo) }
                                     }
                                     enc.releaseOutputBuffer(idx, false)
                                     if (eosEnc) break
@@ -444,12 +488,12 @@ class SceneExportRunner(private val ctx: Context) {
                     }
                 }
 
-                if (boundedInput && submitted != expectedTargets.toLong()) {
+                if (boundedInput && submitted != scan.expected.toLong()) {
                     // 有界路径依赖“样本=完整访问单元且与输出帧一一对应”。若实跑数量不符，
                     // 宁可显式失败也不发布缺帧成片；此时尚未封轨，pending 由 owner 回收。
                     Log.w(
                         TAG,
-                        "有界输入核验失败：目标样本=$expectedTargets 实际提交=$submitted"
+                        "有界输入核验失败：目标样本=${scan.expected} 实际提交=$submitted"
                     )
                     return@withContext fail(owner, Reason.RANGE)
                 }
@@ -476,7 +520,7 @@ class SceneExportRunner(private val ctx: Context) {
                                 val out = enc.getOutputBuffer(idx)!!
                                 out.position(encInfo.offset)
                                 out.limit(encInfo.offset + encInfo.size)
-                                muxer!!.writeSampleData(videoTrack, out, encInfo)
+                                writePerf { muxer!!.writeSampleData(videoTrack, out, encInfo) }
                             }
                             enc.releaseOutputBuffer(idx, false)
                             if (eosEnc) encDone = true
@@ -489,15 +533,22 @@ class SceneExportRunner(private val ctx: Context) {
                     return@withContext Failed(Reason.MUXER)
                 }
 
-                // ---- 音轨透传：源 PTS − basePts + 内录偏移（与视频同一时间基准）
-                if (audioTrack >= 0) {
-                    copyAudio(ex, audioIdx, audioTrack, muxer!!, basePtsUs, shiftUs, endUs, job)
-                }
+                // ---- 音轨尾部排空：交错阶段留在窗口外的样本在视频 EOS 后一次写完
+                audioLane?.drainAll()
                 // 包括最后一包/advance 到 EOF 的取消窄窗：未完成音轨不能继续封轨公开。
                 coroutineContext.ensureActive()
-                muxer!!.stop()
+                ExportPerfProbe.onStopStart()
+                try {
+                    muxer!!.stop()
+                } finally {
+                    ExportPerfProbe.onStopEnd()
+                }
                 sealed = true
                 owner.markSealed()
+                // 封轨即落旁路标记：commit 全败、取消、封轨后异常都保留行，冷启救援据此快速收。
+                // 路径查询失败只少一条加速线索，不影响成片与提交。
+                sealedPath = queryData(pendingUri)
+                SealMarker.mark(sealedPath)
             }
 
             // ---- 提交（与 ClipExport 同一条 IS_PENDING 口径；commit 全败保留行待冷启救援）
@@ -513,132 +564,100 @@ class SceneExportRunner(private val ctx: Context) {
                 }
             }
             if (!committed) {
-                Log.w(TAG, "commit 两连败，保留 pending 行待冷启救援 uri=$pendingUri")
+                Log.w(TAG, "commit 两连败，保留 pending 行待冷启救援 id=${mediaIdOf(pendingUri)}")
+                terminal.reached(Failed(Reason.COMMIT))
                 return@withContext Failed(Reason.COMMIT)
             }
+            // 发布成功：清掉封轨旁路标记（对齐 VideoStore.seal 的"发布了就清标记"）
+            SealMarker.clear(sealedPath)
             val id = ContentUris.parseId(pendingUri)
             Log.i(TAG, "后渲染导出完成 id=$id ${sMs}..$eMs glow=${effects.glow != null} denoise=${effects.denoise} echo=${effects.echo != null} frames=$submitted")
-            Done(id, ClipRule.clipNameOf(src.name))
+            Done(id, ClipRule.clipNameOf(src.name)).also { terminal.reached(it) }
         } catch (e: CancellationException) {
-            if (!sealed) owner.deletePending(ctx)
+            // 封轨后取消：成片字节已在盘上，行必须保留，且把"已保留待救援"记成公开终态，
+            // 否则等待方离开后这次结局没有任何人知道（Y32）。
+            if (!sealed) owner.deletePending(ctx) else terminal.reached(Failed(Reason.COMMIT))
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "后渲染导出失败：${e.message}", e)
-            if (!sealed) owner.deletePending(ctx)
-            Failed(mapError(e))
+            if (!sealed) {
+                owner.deletePending(ctx)
+                Failed(mapError(e))
+            } else {
+                // 封轨后异常：没写成的是 IS_PENDING 清除，不是成片——不许报 MUXER/ENCODER 谎称没写成
+                terminal.peek() ?: Failed(Reason.COMMIT)
+            }
         } finally {
-            runCatching { decoder?.stop() }
-            runCatching { decoder?.release() }
-            runCatching { encoder?.stop() }
-            runCatching { encoder?.release() }
-            runCatching { muxer?.release() }
+            val stopDecoder = {
+                runCatching { decoder?.stop() }
+                runCatching { decoder?.release() }
+                Unit
+            }
+            val releaseEncoder = {
+                runCatching { encoder?.stop() }
+                runCatching { encoder?.release() }
+                runCatching { encoderInput?.release() }
+                Unit
+            }
             val engine = gl
             if (engine != null) {
-                engine.release()
-                // release 是“有界等待”，不代表 GL 线程真退出；线程仍活着就把准入关到实际退出。
+                engine.release(stopDecoder, releaseEncoder)
                 if (engine.glThreadAlive()) SETTLING_GL_OWNER.set(engine.exportThread())
+            } else {
+                stopDecoder()
+                releaseEncoder()
             }
+            runCatching { muxer?.release() }
             runCatching { extractor?.release() }
+            // 音频车道自己的提取器：与主提取器分开建、分开还（Y30），失败路径也不许漏
+            runCatching { audioExtractor?.release() }
         }
     }
 
-    private data class TargetSampleScan(val lastIndex: Int, val expected: Int, val safe: Boolean)
+    private data class TargetSampleScan(
+        val lastIndex: Int,
+        val expected: Int,
+        val firstPtsUs: Long?,
+        val safe: Boolean
+    )
 
     /**
-     * 只读样本头定位目标区间的最后一个视频样本；不解码、不读 payload。
-     * 含 [MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME] 时一个样本可能不是完整访问单元，
-     * 无法把“最后目标样本”等同于“最后目标输出帧”，返回 safe=false 让调用方读源到尾。
+     * 只扫描样本头，定位目标区间的最早呈现时刻与最后一个解码序索引。
+     * 部分访问单元无法建立样本与帧的映射，此时保持完整的解码输入。
      */
     private fun scanTargetSamples(
         ex: MediaExtractor,
         videoTrack: Int,
         startUs: Long,
-        endUs: Long
-    ): TargetSampleScan = runCatching {
-        for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
+        endUs: Long,
+        job: Job?
+    ): TargetSampleScan {
         ex.selectTrack(videoTrack)
-        ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-        var index = 0
-        var lastIndex = -1
-        var expected = 0
-        var safe = true
-        while (true) {
-            // EOF 的唯一判据是样本索引 -1；开放 GOP 的负 PTS 是合法前导，不能当文件结束。
-            val track = ex.sampleTrackIndex
-            if (track < 0) break
-            val pts = ex.sampleTime
-            if (track == videoTrack) {
-                if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) safe = false
-                if (pts >= startUs && pts < endUs) {
+        try {
+            ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            var index = 0
+            var lastIndex = -1
+            var expected = 0
+            var minPts = Long.MAX_VALUE
+            while (ex.sampleTrackIndex >= 0) {
+                job?.ensureActive()
+                // 开放 GOP 的负 PTS 是合法前导。EOF 只由 sampleTrackIndex/advance 确定。
+                if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) {
+                    return TargetSampleScan(-1, 0, null, false)
+                }
+                val pts = ex.sampleTime
+                if (sceneExportShouldSubmit(pts, startUs, endUs)) {
+                    minPts = minOf(minPts, pts)
                     lastIndex = index
                     expected++
                 }
                 index++
+                if (!ex.advance()) break
             }
-            if (!ex.advance()) break
+            return TargetSampleScan(lastIndex, expected, minPts.takeIf { expected > 0 }, true)
+        } finally {
+            ex.unselectTrack(videoTrack)
         }
-        TargetSampleScan(lastIndex, expected, safe)
-    }.getOrElse { TargetSampleScan(-1, 0, false) }
-
-    // ---------------------------------------------------------------- 音轨
-
-    /**
-     * 音轨样本透传：`输出 PTS = 源 PTS − basePts + shift`（负值丢弃、不 clip 到 0）。
-     *
-     * 与 [ClipExporter] 的 copy() 音频支**逐条同口径**：
-     * - 判据（封轨/丢弃）吃**平移后**的时刻，写出前再过逐轨单调桥 [monotonicPts]
-     *   （B 帧源的样本序会在界内外来回跳，同轨倒退会让 MPEG4Writer 抛异常）；
-     * - 出点用「连续越界满容忍数才封轨」，与 [audioTrackWritable] 预扫同判据；
-     * - 平移后为负的头部样本持续丢弃，直到可写样本或 EOF；偏移可以跨过任意多个 AAC 包。
-     */
-    private fun copyAudio(
-        ex: MediaExtractor,
-        audioIdx: Int,
-        outTrack: Int,
-        muxer: MediaMuxer,
-        basePtsUs: Long,
-        shiftUs: Long,
-        endUs: Long,
-        job: Job?
-    ) {
-        // **必须先全部取消选择**：MediaExtractor 的选择是累加的，视频轨在编码循环里还选着，
-        // 不撤就会读到音视频交错的样本流——音轨里混进整帧视频（真机实测：成片音轨码率
-        // 5.2 Mbps、AAC 帧里夹着 20KB 的巨块）
-        for (i in 0 until ex.trackCount) runCatching { ex.unselectTrack(i) }
-        ex.selectTrack(audioIdx)
-        ex.seekTo(basePtsUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-        val endRelUs = endUs - basePtsUs
-        val info = MediaCodec.BufferInfo()
-        var buf: ByteBuffer = ByteBuffer.allocateDirect(INITIAL_AUDIO_BUF)
-        var tail = 0
-        var lastPts = -1L
-        while (true) {
-            job?.ensureActive()
-            val size: Long = ex.sampleSize
-            if (size < 0L) break
-            val rel = ex.sampleTime - basePtsUs
-            val outRel = rel + shiftUs
-            if (outRel > endRelUs) {
-                if (++tail >= AUDIO_TAIL_TOLERANCE) break
-            } else if (ClipRule.keepSample(outRel)) {
-                tail = 0
-                if (buf.capacity() < size) {
-                    buf = ByteBuffer.allocateDirect((size * 2).toInt().coerceAtLeast(INITIAL_AUDIO_BUF))
-                }
-                buf.clear()
-                val n: Int = ex.readSampleData(buf, 0)
-                if (n < 0) break
-                val fix = monotonicPts(lastPts, outRel)
-                lastPts = fix.ptsUs
-                @Suppress("WrongConstant") // sampleFlags 与 BUFFER_FLAG_* 同值体系（同 ClipExport）
-                info.set(0, n, fix.ptsUs, ex.sampleFlags)
-                muxer.writeSampleData(outTrack, buf, info)
-            } else {
-                tail = 0
-            }
-            if (!ex.advance()) break
-        }
-        job?.ensureActive()
     }
 
     // ---------------------------------------------------------------- 输出
@@ -657,6 +676,13 @@ class SceneExportRunner(private val ctx: Context) {
         val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
         ctx.contentResolver.update(uri, values, null, null) > 0
     }.getOrDefault(false)
+
+    /** pending 记录的真实路径（DATA 列）；封轨标记与它同目录同名（与 ClipExport 同一口径） */
+    private fun queryData(uri: android.net.Uri): String? = runCatching {
+        ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
+        }
+    }.getOrNull()
 
     private fun fail(owner: ExportOwner, reason: Reason): Failed {
         owner.deletePending(ctx)
@@ -700,14 +726,22 @@ class SceneExportRunner(private val ctx: Context) {
 
         private fun resumeIfActive(
             continuation: kotlinx.coroutines.CancellableContinuation<Result>, result: Result
-        ) {
-            if (continuation.isActive) runCatching { continuation.resume(result) }
+        ): Boolean {
+            if (!continuation.isActive) return false
+            return runCatching { continuation.resume(result); true }.getOrDefault(false)
         }
 
         /** 音轨"连续越界即封轨"的容忍样本数（AAC 帧间无重排，与 ClipExport 同一枚值） */
         private const val AUDIO_TAIL_TOLERANCE = 8
+    }
+}
 
-        /** 音轨样本缓冲初始容量；单枚 AAC 帧远小于此，不再按需翻倍之外额外开销 */
-        private const val INITIAL_AUDIO_BUF = 256 * 1024
+/** Y30 探针：只包一层 writeSampleData 计时，异常也记账（export 失败路径同样要看背压）。 */
+private inline fun writePerf(block: () -> Unit) {
+    val t0 = if (ExportPerfProbe.enabled) System.nanoTime() else 0L
+    try {
+        block()
+    } finally {
+        if (t0 != 0L) ExportPerfProbe.onWrite(System.nanoTime() - t0)
     }
 }

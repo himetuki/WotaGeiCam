@@ -29,10 +29,15 @@
     <string name="player_arc_cpu_note">兼容模式</string>
     <string name="player_arc_note">抽掉多余帧转到所选帧率，被抽帧的画面并入前后帧保持光弧连贯；后台处理生成新视频，不改原片</string>
     <string name="player_arc_done">修复完成，已存入相册</string>
+    <string name="player_arc_pending_publish">修复已完成，文件已保存待发布（相册暂不可见）</string>
     <string name="player_arc_failed">修复失败</string>
     <string name="player_arc_no_need">源帧率不高于目标帧率，没有帧可抽</string>
     <string name="player_arc_running">修复中 %1$d%%</string>
     <string name="player_arc_busy">已有修复任务在跑</string>
+    <!-- Y23：取消入口只在本片确实有一轮在跑时出现；取消与完成赛跑时照实展示真结果 -->
+    <string name="player_arc_cancel">取消本次修复</string>
+    <string name="player_arc_cancelling">正在取消…</string>
+    <string name="player_arc_cancelled">修复已取消</string>
 
     <!-- 倍速档位（需求：0.1 / 0.3 / 0.5 / 0.75 / 1.0） -->
     <string name="player_speed_current">倍速 %1$s</string>
@@ -108,7 +113,10 @@
          弹层内给百分比与「准备中」态；弹层外给一行常驻小字（与光弧修复同族）。 -->
     <string name="player_clip_percent">%1$d%%</string>
     <string name="player_clip_preparing">正在准备导出…</string>
-    <string name="player_clip_running">导出中 %1$d%%</string>
+    <string name="player_clip_running">剪辑导出中 %1$d%%</string>
+    <string name="player_track_running">音轨导出中 %1$d%%</string>
+    <string name="player_clip_cancelling">正在结束导出…</string>
+    <string name="player_export_other_source">%1$s · %2$s</string>
     <string name="player_clip_done">剪辑已导出到媒体库</string>
     <string name="player_clip_failed">导出失败，请重试</string>
     <!-- 上一轮导出的资源 owner 仍在收尾：不是源/成片错误，提示稍后再试 -->

@@ -31,6 +31,22 @@ class LiquidSwitchWiringTest {
     private val audioSrc by lazy {
         KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/dialog/AudioSourcePanel.kt"))
     }
+    /** Y57 抽出的手势状态机：翻转/清理的实际实现在这里 */
+    private val gestureSrc by lazy {
+        KotlinSourceScan.codeOnly(KotlinSourceScan.mainSourceText("ui/design/SwitchGestureState.kt"))
+    }
+
+    /** 液态开关函数体（Y57 的守卫只看这一枚组件内部） */
+    private val switchBody by lazy {
+        KotlinSourceScan.bodyOf(switchSrc, "LiquidGestureSwitch")
+    }
+
+    /** 手势收尾段：从 `finally {` 到函数体尾（清理语句必须落在这段里） */
+    private fun finallyBlock(text: String): String {
+        val flat = KotlinSourceScan.flatten(text)
+        val i = flat.indexOf("finally {")
+        return if (i < 0) "" else flat.substring(i)
+    }
 
     @Test
     fun `只有液态档换成液态开关_其余档保持Material3原样`() {
@@ -62,11 +78,15 @@ class LiquidSwitchWiringTest {
     fun `松手必须继承速度而不是归零重启`() {
         assertTrue(
             "落位动画必须带 initialVelocity（离手速度接着走）",
-            switchSrc.contains("initialVelocity = v0")
+            switchSrc.contains("initialVelocity = release.initialVelocity")
         )
         assertTrue(
             "手上速度约等于 0 时必须用当前动画速度续上（不许当成静止）",
             switchSrc.contains("x.velocity")
+        )
+        assertTrue(
+            "速度继承的判据在状态机里：手上速度小才回落到 x.velocity",
+            gestureSrc.contains("abs(dragVelocity) > 1f")
         )
         assertFalse(
             "不许用 snapTo 直接落位（那是速度归零的实现）——snapTo 只允许出现在起跑/直达路径",
@@ -86,6 +106,71 @@ class LiquidSwitchWiringTest {
         assertTrue(
             "拉伸参数必须来自设计稿（上限 0.4 / 分母 600 px/s）",
             switchSrc.contains("StretchMax = 0.4f") && switchSrc.contains("StretchVelocityScalePx = 600f")
+        )
+    }
+
+    // ------------------------------------------------------------------ Y57：跨中点手势不中断 + finally 清理
+
+    @Test
+    fun `跨中点翻转不许换掉手势键`() {
+        val flat = KotlinSourceScan.flatten(switchBody)
+        assertTrue(
+            "手势键必须只由「可交互 + 行程」决定（checked 变化来自手势自己，不能反过来取消手势）",
+            flat.contains("pointerInput(interactive, travelPx)")
+        )
+        assertFalse(
+            "checked 不许进 pointerInput 键：过中点回调翻转它 → 重组换键 → 当前手势被取消",
+            flat.contains("pointerInput(interactive, checked")
+        )
+        assertTrue(
+            "checked 的最新值必须经 rememberUpdatedState 读取",
+            flat.contains("rememberUpdatedState(checked)")
+        )
+        assertTrue(
+            "手势内的翻转判断必须读本段手势自己的逻辑档（不等重组回灌）",
+            gestureSrc.contains("past != checked") && gestureSrc.contains("checked = past")
+        )
+        assertTrue(
+            "组件必须把移动交给状态机（跨中点后手势不中断）",
+            flat.contains("gesture.move(at, grab, travelPx, velocity)")
+        )
+        assertTrue(
+            "松手落位也必须读本段手势的逻辑档",
+            gestureSrc.contains("if (checked) travelPx else 0f")
+        )
+        // 突变自证：把 checked 放回键里 → 上面第一条必须变红
+        val mutant = switchSrc.replace(
+            "pointerInput(interactive, travelPx)",
+            "pointerInput(interactive, checked, travelPx)"
+        )
+        assertTrue("突变体必须真的改到了源码", mutant != switchSrc)
+        assertFalse(
+            "把 checked 放回手势键后守卫必须变红",
+            KotlinSourceScan.flatten(mutant).contains("pointerInput(interactive, travelPx)")
+        )
+    }
+
+    @Test
+    fun `取消路径必须由finally清空拖动状态`() {
+        val f = finallyBlock(switchBody)
+        assertTrue("手势必须有 finally 清理段（正常/取消/异常都从这里出去）", f.isNotEmpty())
+        assertTrue(
+            "取消/异常统一走状态机的 endGesture（清空 + 回位参数）",
+            f.contains("gesture.endGesture(travelPx)")
+        )
+        assertTrue("按压态要复位", gestureSrc.contains("pressing = false"))
+        assertTrue("拖动残余要清空（取消后不许停在半路）", gestureSrc.contains("dragX = null"))
+        assertTrue("速度要清零", gestureSrc.contains("dragVelocity = 0f"))
+        assertTrue(
+            "取消路径要把拇指从当前位置落回本段手势的逻辑档",
+            gestureSrc.contains("!handled && moved && at != null")
+        )
+        // 突变自证：finally 改成普通块（清理不再保证执行）→ 识别不到清理段
+        val mutant = switchBody.replace("} finally {", "} run {")
+        assertTrue("突变体必须真的改到了源码", mutant != switchBody)
+        assertTrue(
+            "清理不在 finally 里时守卫必须变红",
+            finallyBlock(mutant).isEmpty()
         )
     }
 }

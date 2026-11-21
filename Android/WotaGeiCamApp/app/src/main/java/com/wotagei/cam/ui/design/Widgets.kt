@@ -116,12 +116,16 @@ val hudFrostInherit: HudFrostCard = HudFrostCard(asPlate = false, radiusPx = 0f,
 val LocalPreviewOverlaysOn = compositionLocalOf { false }
 
 /**
- * HUD 底板的霜感知版 `wotaCard`：**同一套描边、同一套圆角，只有那层纯色 fill 会在霜真在屏幕上时让位**。
+ * HUD 底板的霜感知版 `wotaCard`：**同一套描边、同一套圆角，只有那层纯色 fill 会在霜真贴在这块板上时让位**。
  *
- * 三条不可逆性守卫都落在这函数里：
- * - [frost] 为 null（纸面页/弹窗）或 [com.wotagei.cam.ui.HudFrost.live] 为 false（开关关 / DIRECT /
- *   离屏链停用 / 相机还没出帧）⇒ 走 [wotaCard] 那一条**逐字不变**的链，观感与接霜前完全相同；
- * - `live` 只在**GL 真画了板**之后才为 true，所以不会出现"fill 让开了而底下没有霜"的空窗；
+ * 四条不可逆性守卫都落在这函数里：
+ * - [frost] 为 null（纸面页/弹窗）或开关意图 [com.wotagei.cam.ui.HudFrost.intent] 为 false ⇒ 走
+ *   [wotaCard] 那一条**逐字不变**的链，观感与接霜前完全相同；
+ * - 注册（喂表）只看 `intent`，fill 让位只看**这一槽**的 GL 覆盖位（[HudFrost.isCovered]）。
+ *   两者必须分开：用 live 去闸注册会形成"卡片要 live 才写、live 要画过板才真、画板要卡片才有"
+ *   的启动死锁；而拿整页 live 去给所有板让位，会把完全落在信箱黑边上（[com.wotagei.cam.camera.frostUvInto]
+ *   无交集 ⇒ 一块都没画）的板的本地底一起撤掉，留下透明描边框（Y14 真机缺陷）。
+ * - 逐槽覆盖位只在 **GL swap 成功之后**才发布，所以不会出现"fill 让开了而底下没有霜"的空窗；
  *   反过来 GL 撤报那一帧起 fill 就回来（撤回的延迟见 HudFrost 那条轮询，≤ 一个轮询周期，真机未量）。
  * - 让位的是 fill，**不是** clip、不是 border、不是内容：圆角仍由 Shape 裁、1dp 高光边仍在这里描、
  *   选中态那层 accent 实底由调用方的 `.background(fill)` 负责（它在链路更内侧，霜动不到它）。
@@ -133,25 +137,52 @@ fun Modifier.wotaHudCard(
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(WotaShape.card),
     frost: HudFrostCard? = null
 ): Modifier {
-    if (frost == null || !HudFrost.live) return this.wotaCard(shape)
+    if (frost == null || !HudFrost.intent) return this.wotaCard(shape)
     if (LocalPreviewOverlaysOn.current) {
         // 2026-11-10 二次反馈：97% 暖黑在左右黑边栏上等于"没有板"（用户报残影/降噪霜板变透明）。
         // 改为**压暗的毛玻璃**：自己出板的卡片铺 75% hudScrim 并继续注册 GL 霜板（板还在，只是压暗）；
         // 吃父板的胶囊不铺——父板已经压暗，叠第二层会黑成洞。参考线只透 25%，控件仍可读。
         val edged = this.clip(shape).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
         if (!frost.asPlate) return edged
-        return edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost))
+        // 只有自己出板的节点才领槽：吃父板的胶囊领了也从不写表，会把 8 枚槽位白白吃掉
+        val slot = rememberFrostSlot(HudFrost.intent)
+        return edged.background(WotaColor.hudScrim).then(hudFrostRectRegistrar(frost, slot))
+    }
+    if (!frost.asPlate) return this.wotaCard(shape)
+    val slot = rememberFrostSlot(HudFrost.intent)
+    // 逐板判据（Y14）：这一槽真贴出了 GL 霜才让 fill 让位；黑边上无交集 / 还没出帧的板
+    // 保留本地纯色底——否则卡片只剩一圈描边，文字压在实时画面上。
+    if (!HudFrost.isCovered(slot)) {
+        return this.wotaCard(shape).then(hudFrostRectRegistrar(frost, slot))
     }
     val edged = this.clip(shape).border(WotaStroke.hairline, WotaColor.acrylicBorder, shape)
-    if (!frost.asPlate) return edged
-    return edged.then(hudFrostRectRegistrar(frost))
+    return edged.then(hudFrostRectRegistrar(frost, slot))
+}
+
+/**
+ * 为一块要注册霜板的节点领一枚槽位（组合期一次），节点离开组合时还回去（[FrostCardTable.releaseSlot]）。
+ *
+ * 把领槽/还槽从注册器里提出来，是为了让**画 fill 的那一处与写矩形的那一处用同一枚槽**：
+ * Y14 的让位判据是逐槽的，两处各领一枚就会把 fill 的判据绑到别的板身上去。
+ * `intent` 为 false 时恒 -1（不领槽、不写表，观感与接霜前逐字相同）。
+ */
+@Composable
+internal fun rememberFrostSlot(intent: Boolean): Int {
+    val slot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
+    DisposableEffect(slot) {
+        onDispose {
+            if (slot >= 0) FrostCardTable.releaseSlot(slot)
+        }
+    }
+    return slot
 }
 
 /**
  * 把这一枚节点的**窗口矩形**注册进 `FrostCardTable`（GL 每帧读那张表来贴板）。
  *
  * 每帧零分配怎么做到的（这一段是本任务唯一的资源纪律，写清以免被后来人"顺手改成每帧 new"）：
- * - 槽位 `remember` 一次，节点离开组合时 `releaseSlot`（fill 让位态结束时槽自动还回去）；
+ * - 槽位由调用方经 [rememberFrostSlot] `remember` 一次、节点离开组合时 `releaseSlot`；
+ *   本函数只消费它（画 fill 的那一处与写矩形的那一处必须同一枚槽，Y14）；
  * - 写表发生在 `LaunchedEffect` 里，**键变了才写**：布局矩形变、`intent` 翻转、透光档位变这三件事
  *   才各花一次"表头事务 + 一格 7 个 float"；静止态一次都不写；
  * - 写之前先 [com.wotagei.cam.ui.HudFrost.refreshHeader]：视图原点用到的"组合根尺寸"与卡片矩形
@@ -173,15 +204,15 @@ fun Modifier.wotaHudCard(
  * 自动回退旧的窗口系，观感不变。
  */
 @Composable
-private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean = true): Modifier {
+private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, slot: Int, visible: Boolean = true): Modifier {
     val alpha = frostScrimAlphaFor(frost.ink)
     // 预览盒坐标（CameraScreen 在录制页 provide）：非空 ⇒ 卡片矩形在**承载视图局部坐标**里量，
     // 分屏那层祖先 graphicsLayer 的缩放被 localPositionOf 抵消；为空（编辑控件页）⇒ 回退旧窗口系。
     val preview = LocalPreviewCoords.current
     // 喂表只看"开关意图"，不看 live —— 用 live 当闸门会启动死锁：卡片要 live 才写、
     // live 要 GL 画过板才真、GL 要表里有卡片才画得出。分工见 HudFrost.intent 的注释。
+    // 槽位由调用方经 [rememberFrostSlot] 领好（fill 的让位判据也用同一枚，Y14）。
     val intent = HudFrost.intent
-    val slot = if (intent) remember(intent) { FrostCardTable.acquireSlot() } else -1
     var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     // 矩形临时数组：布局回调与轮询复用同一枚（两者都在主线程，不会重叠）
     val rectScratch = remember { FloatArray(4) }
@@ -203,11 +234,6 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
     // 这是"统一换算"的唯一入口：里面用 localPositionOf 抵消共同祖先变换，故体内不出现 positionInWindow。
     fun measure(card: LayoutCoordinates): Boolean =
         if (preview != null) viewLocalRectInto(rectScratch, card, preview) else windowRectInto(rectScratch, card)
-    DisposableEffect(slot) {
-        onDispose {
-            if (slot >= 0) FrostCardTable.releaseSlot(slot)
-        }
-    }
     LaunchedEffect(slot, coords, preview, rectX, rectY, rectW, rectH, alpha, intent, visible) {
         Log.i("FrostDock", "effect slot=$slot hasCoords=${coords != null} intent=$intent visible=$visible")
         val c = coords ?: return@LaunchedEffect
@@ -298,14 +324,13 @@ private fun Modifier.hudFrostRectRegistrar(frost: HudFrostCard, visible: Boolean
 
 /**
  * 竖 Dock 滑出用的常驻注册（用户 2026-10-04「Dock 背影未收回」修复）：[frostVisible]=false 时
- * 板写屏外哨兵而不是撤槽离场——离场会让 GL 表清空、live 翻 false，恢复被 [wotaHudCard] 的
- * live 短路挡死（死锁机理见 [hudFrostRectRegistrar] 屏外哨兵分支注释）。
- * 本包装与 [wotaHudCard] 霜分支的差别只有一条：**不读 [com.wotagei.cam.ui.HudFrost.live]**，
- * 调用方（HudDockZone）自己决定 fill 是否让位。
+ * 板写屏外哨兵而不是撤槽离场——离场会让 GL 表清空、逐槽覆盖位归零，恢复被让位判据挡死
+ * （死锁机理见 [hudFrostRectRegistrar] 屏外哨兵分支注释）。
+ * 槽位由调用方经 [rememberFrostSlot] 领好并自己决定 fill 是否让位（Y14：逐槽覆盖位）。
  */
 @Composable
-internal fun Modifier.hudFrostDockRegistrar(radiusPx: Float, frostVisible: Boolean): Modifier =
-    hudFrostRectRegistrar(hudFrostPlate(radiusPx, HudInkLevel.PRIMARY), frostVisible)
+internal fun Modifier.hudFrostDockRegistrar(radiusPx: Float, frostVisible: Boolean, slot: Int): Modifier =
+    hudFrostRectRegistrar(hudFrostPlate(radiusPx, HudInkLevel.PRIMARY), slot, frostVisible)
 
 /**
  * 胶囊的**两档内剂量**（任务 #70 B）。做成"档"而不是直接改 [WotaChip] 的理由写在字段注释里：
@@ -500,7 +525,8 @@ private fun WotaChipImpl(
  * [frost] 同 [WotaChip]：只有取景 HUD 会传，圆形的半径就是短边一半（送负数哨兵，见 [HudFrostCard]）。
  *
  * 选中态分两种落点（accent 压霜板收口 2026-10-02）：
- * - **霜真在屏幕上**（[frost] 非 null 且 `HudFrost.live`——与 [wotaHudCard] 让位 fill 的判据同一条）：
+ * - **霜在场**（[frost] 非 null 且整页 `HudFrost.live`；本枚板可能落在信箱黑边上、那时它的
+ *   底色是自绘实底，不透明 accentSurface 在两种情形下都安全）：
  *   玻璃上不能再用 accent 作图标 tint——worst case（白墙透光）只有 1.49~1.79，图形档 3.0 都不过
  *   （accentActive 同样 1.46~1.75；textHi 能过 4.80+ 但选中态就和常态不可区分了）。
  *   改走与 [WotaChip] 选中同一套语言：accentSurface **实底** + onAccent 白图形——实底不透明，
@@ -525,8 +551,8 @@ fun WotaIconButton(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) motion.pressScale else 1f, motion.press)
-    // 与 wotaHudCard 内部同一条判据：live 只在 GL 真画了板之后才为 true，
-    // 所以 onFrost 为真时玻璃必然在场，选中态的 accentSurface 实底正是给这块玻璃兜住图形的
+    // 整页 live 只在 GL 真画了任一块板之后才为 true；选中态那层不透明 accentSurface 实底
+    // 在"本枚板有霜"和"本枚板落在黑边、底下是自绘实底"两种情形下都兜得住图形
     val onFrost = frost != null && HudFrost.live
     Box(
         modifier
@@ -575,8 +601,8 @@ fun WotaIconButton(
 fun WotaOutlineIcon(
     image: ImageVector,
     description: String,
-    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
     size: Dp = 26.dp,
     glyph: Dp = 15.dp,
     stroke: Dp = 1.5.dp,

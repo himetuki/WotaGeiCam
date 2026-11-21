@@ -91,8 +91,9 @@ class SegmentRotateSuppressGuardTest {
             engine.contains("fun clearSegmentRotating()")
         )
         assertTrue(
-            "新面谓词必须是 native 面同一性判定（isOutputSurfaceBound 看不出新旧面）",
-            engine.contains("fun isEncoderSurfaceNative(s: Surface?): Boolean = encoderNative === s")
+            "新面谓词必须是 native 面同一性判定（isOutputSurfaceBound 看不出新旧面）；" +
+                "R05/Y28：身份取自绑定时整体发布、失活先清的就绪快照，且上下文丢失后恒 false",
+            flatten(engine).contains("fun isEncoderSurfaceNative(s: Surface): Boolean = !contextLost && !released.get() && encoderTarget?.native === s")
         )
     }
 
@@ -155,5 +156,33 @@ class SegmentRotateSuppressGuardTest {
             "拆 finally 后尺子必须红",
             rebindViolations(noFinally).any { it.contains("finally") }
         )
+    }
+
+    // ------------------------------------------------------------------ 就绪身份快照（Y28/R01 契约）
+
+    @Test
+    fun `就绪身份快照先失效后解绑_只在绑定成功后整体发布`() {
+        val engine = maskedMain("camera/GlRenderEngine.kt")
+        val replace = flatten(bodyOf(engine, "replaceEncoderSurface"))
+        val setNative = replace.indexOf("encoderNative = surface")
+        val clearAt = replace.indexOf("clearEncoderTarget()")
+        val publishAt = replace.indexOf("publishEncoderTarget()")
+        assertTrue("解绑/换面路径必须先清快照（读方不得再看到旧身份）", clearAt >= 0)
+        assertTrue("绑定成功后必须发布快照（R01 等待谓词唯一读对象）", publishAt >= 0)
+        assertTrue("先清后发（clear=$clearAt publish=$publishAt）——顺序反 = 旧面身份残留", clearAt < publishAt)
+        assertTrue(
+            "发布必须在 native 落值之后（setNative=$setNative publish=$publishAt）——否则快照可能带 null 面",
+            setNative >= 0 && setNative < publishAt
+        )
+        assertTrue(
+            "上下文丢失必须清快照（丢失瞬间谓词恒 false，不许让等待方误判已挂上）",
+            flatten(bodyOf(engine, "handleContextLost")).contains("clearEncoderTarget()")
+        )
+        // 突变自证：拆掉发布后"绑定成功后发布"不成立
+        val noPublish = replace.replace("publishEncoderTarget()", "")
+        assertTrue("拆掉发布后尺子必须红", noPublish.indexOf("publishEncoderTarget()") < 0)
+        // 突变自证：拆掉清快照后"先清后发"不成立
+        val noClear = replace.replace("clearEncoderTarget()", "")
+        assertTrue("拆掉清快照后尺子必须红", noClear.indexOf("clearEncoderTarget()") < 0)
     }
 }

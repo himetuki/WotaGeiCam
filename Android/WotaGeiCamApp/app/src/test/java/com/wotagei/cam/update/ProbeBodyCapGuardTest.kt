@@ -76,15 +76,15 @@ class ProbeBodyCapGuardTest {
     /** 上限接线体检：返回违规清单，空 = 接线完整（真身与突变体同吃） */
     private fun capWiringViolations(src: String): List<String> {
         val bad = ArrayList<String>()
-        val fetch = flatten(bodyOf(src, "fetchJson"))
+        val fetch = flatten(bodyOf(src, "fetchJsonSource"))
         if (!fetch.contains("probeBytesAllowed(conn.contentLengthLong)")) {
-            bad.add("fetchJson 缺 Content-Length 头判据（显式超帽的长体照读 = OOM）")
+            bad.add("fetchJsonSource 缺 Content-Length 头判据（显式超帽的长体照读 = OOM）")
         }
         if (!fetch.contains("bytesOverLimit(total, MAX_PROBE_BYTES)")) {
-            bad.add("fetchJson 缺限流读取的越帽判定（无 Content-Length 时无界读入内存）")
+            bad.add("fetchJsonSource 缺限流读取的越帽判定（无 Content-Length 时无界读入内存）")
         }
         if (fetch.contains("readText()")) {
-            bad.add("fetchJson 复活 readText() 无界读（readText 读到 EOF 才返回，帽形同虚设）")
+            bad.add("fetchJsonSource 复活 readText() 无界读（readText 读到 EOF 才返回，帽形同虚设）")
         }
         val tryNode = flatten(bodyOf(src, "tryNode"))
         if (!tryNode.contains("bytesOverLimit(declared, MAX_APK_BYTES)")) {

@@ -143,18 +143,14 @@ class GalleryRefreshGateStateTest {
         )
     }
 
-    /** 闸门的开合仍归删除收尾管：hold/release 还得挂在 finishDelete 上 */
     @Test
-    fun `闸门仍由删除收尾驱动`() {
+    fun `刷新闸门的持有权由删除批次交还`() {
         val masked = codeOnly(KotlinSourceScan.mainSourceText("media/MediaActions.kt"))
-        val body = bodyOf(masked, "finishDelete")
-        assertTrue(
-            "finishDelete 必须仍然 holdListRefresh()（关闸早于出栈， 定版）",
-            body.contains("holdListRefresh()")
-        )
-        assertTrue(
-            "finishDelete 必须仍然 releaseListRefresh()（开闸 + invalidate，闸门卡死就是进程级空列表）",
-            body.contains("releaseListRefresh()")
-        )
+        val batch = bodyOf(masked, "deleteOneByOne")
+        val finish = bodyOf(masked, "runDeleteFinish")
+        assertTrue(batch.contains("hold = repo::holdListRefresh"))
+        val acquire = finish.indexOf("val lease = hold()")
+        assertTrue(acquire >= 0 && acquire < finish.indexOf("deleteAndReconcile()"))
+        assertTrue(finish.substringAfter("finally", "").contains("lease.close()"))
     }
 }

@@ -84,29 +84,18 @@ class MediaSilentFailGuardTest {
 
     @Test
     fun `批量删除失败必须逐条记日志`() {
-        val b = rawBody("media/MediaActions.kt", "deleteOneByOne")
-        assertTrue("每条删除失败都要记日志（只报一个总数事后无从复盘）", b.contains("Log.e(TAG,"))
-        assertTrue("日志要带 uri（定位是哪一条）", b.contains("uri=\${clip.uri}"))
-        assertTrue("日志要带异常类名", b.contains("\${err.javaClass.simpleName}"))
-        assertTrue("日志要带 message", b.contains("\${err.message}"))
-        assertTrue("异常对象本身也要传下去（栈才有取证价值）", b.contains("\${err.message}\", err)"))
+        val b = rawBody("media/MediaActions.kt", "deleteMediaRow")
+        assertTrue("异常和行数未命中分别记账", b.contains("Log.e(TAG,") && b.contains("Log.w(TAG,"))
+        assertTrue("日志保留异常类别和调用栈", b.contains("\${err.javaClass.simpleName}\", err)"))
+        assertFalse("删除诊断不写入媒体 URI", b.contains("uri=\${target.uri}"))
     }
 
     @Test
     fun `只有SecurityException才提开权限`() {
-        val del = body("media/MediaActions.kt", "deleteOneByOne")
-        assertTrue(
-            "权限位只能由 SecurityException 置起（别的异常让用户去开权限是误导）",
-            del.contains("err is SecurityException")
-        )
-        assertTrue(
-            "权限位必须只在 SecurityException 分支置起（放在失败计数之后无条件的行上等于恒真）",
-            del.contains("if (err is SecurityException) permissionDenied = true")
-        )
-        assertTrue(
-            "收尾文案必须把权限位传给 deniedRes（不传就退回了『一律提权限』的老口径）",
-            del.contains("deniedRes(R.string.media_delete_failed, permissionDenied)")
-        )
+        val row = body("media/MediaActions.kt", "deleteMediaRow")
+        val batch = body("media/MediaActions.kt", "deleteOneByOne")
+        assertTrue(row.contains("permissionDenied = err is SecurityException"))
+        assertTrue(batch.contains("deniedRes(R.string.media_delete_failed, batch.permissionDenied)"))
     }
 
     /** `deniedRes` 是表达式体，`bodyOf` 定位不到它，按声明切片后折叠断言 */

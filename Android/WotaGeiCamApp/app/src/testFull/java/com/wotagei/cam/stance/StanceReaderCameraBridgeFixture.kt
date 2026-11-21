@@ -58,7 +58,7 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
     fun call(target: Any, name: String, vararg args: Any?): Any? = platform.call(target, name, *args)
     fun field(target: Any, name: String): Any? = platform.field(target, name)
     fun analysis(): Any = requireNotNull(field(stance, "analysis"))
-    fun reader(): Any = requireNotNull(call(analysis(), "reader"))
+    fun reader(): Any = requireNotNull(call(analysis(), "reader")) { "分析管线当前没有 reader" }
     fun engine(): Any = platform.engineOf(camera)
     fun stanceState(): Any = (call(stance, "getState") as StateFlow<*>).value!!
     fun output(): Any? = call(stanceState(), "getOutput")
@@ -86,7 +86,7 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
         call(camera, "bind", sink)
         call(camera, "start")
         pumpCameraAndMain()
-        // INCLUDED 是建会话前的协商回执，不代表参数下发成功；先验真实预览已提交 repeating。
+        // INCLUDED 只说明会话配置成功（Y69），不代表参数下发成功；先验真实预览已提交 repeating。
         requireRepeatingSession()
         runBlocking {
             withTimeout(5_000L) {
@@ -99,10 +99,27 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
         }
         // 不注入 attached/running：从真实开关，经真实 hooks 完成挂流与会话重建。
         call(stance, "setEnabled", app, true)
-        pumpCameraAndMain()
+        // Y08：分配在真实分析 owner 线程完成，Main 只收交付——两边排空到挂槽落定。
+        settleAttach()
         requireRepeatingSession()
         relayDecision()
-        analysisIdle()
+        pumpCameraAndMain()
+    }
+
+    /**
+     * Y08：反复排空 Main 与分析 owner，直到真实挂槽链落定（[stance] 的 `attached`）。
+     *
+     * 分析面现在是 owner 线程异步分配的——只 pump 一次 Main 不足以看到交付；这里不 sleep、
+     * 不 join 无限等待，每个来回都用 owner 队列的收尾标记证明「分配已经跑完」。
+     */
+    fun settleAttach() {
+        if (field(stance, "analysis") == null) return
+        repeat(20) {
+            pumpCameraAndMain()
+            analysisIdle()
+            pumpCameraAndMain()
+            if (field(stance, "attached") == true) return
+        }
     }
 
     /** 只验平台实际收到的请求；不得用反射 submit、补 builder 或直接 emit reader 修补正向对照。 */
@@ -126,6 +143,24 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
         check(call(handler, "post", marker) == true) { "分析 owner 拒绝收尾标记" }
         marker.get(5, TimeUnit.SECONDS)
     }
+
+    /** Y08 取证：真实 `ImageReader.newInstance` 的创建线程（平台侧记录，不是产物代码自报）。 */
+    fun readerCreationOwners(): List<Thread> =
+        (imageReaderType().getField("creationOwners").get(null) as List<*>).map { it as Thread }
+
+    fun readerCreatedCount(): Int = imageReaderType().getMethod("createdCount").invoke(null) as Int
+
+    fun resetReaderCreations() = imageReaderType().getMethod("resetCreations").invoke(null)
+
+    /** Y08 取证：真实 `CameraManager.getCameraCharacteristics` 的调用线程/相机 id。 */
+    fun cameraCharacteristicQueries(): List<String> =
+        (platform.type("android.hardware.camera2.CameraManager").getMethod("characteristicQueries").invoke(null) as List<*>)
+            .map { it as String }
+
+    fun resetCameraCharacteristicQueries() =
+        platform.type("android.hardware.camera2.CameraManager").getMethod("resetQueries").invoke(null)
+
+    private fun imageReaderType(): Class<*> = platform.type("android.media.ImageReader")
 
     /** 由真实会话的 repeating targets 投递平台帧，缺分析目标时绝不绕道直接 emit reader。 */
     fun emitCurrentSession(): Int {
@@ -337,6 +372,9 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
             "android.hardware.camera2.CameraManager" to """
                 package android.hardware.camera2;
                 public class CameraManager {
+                    public static final java.util.List<String> queries=new java.util.concurrent.CopyOnWriteArrayList<>();
+                    public static java.util.List<String> characteristicQueries(){return queries;}
+                    public static void resetQueries(){queries.clear();}
                     private final CameraCharacteristics cc=new CameraCharacteristics();
                     public CameraManager(){
                         cc.put("LENS_FACING",1);cc.put("LENS_INFO_AVAILABLE_FOCAL_LENGTHS",new float[]{4f});
@@ -349,7 +387,7 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
                         cc.put("SCALER_STREAM_CONFIGURATION_MAP",new android.hardware.camera2.params.StreamConfigurationMap());
                     }
                     public String[] getCameraIdList(){return new String[]{"0"};}
-                    public CameraCharacteristics getCameraCharacteristics(String id){if(!id.equals("0"))throw new IllegalArgumentException(id);return cc;}
+                    public CameraCharacteristics getCameraCharacteristics(String id){queries.add(Thread.currentThread().getName()+"|"+id);if(!id.equals("0"))throw new IllegalArgumentException(id);return cc;}
                     public void openCamera(String id,CameraDevice.StateCallback callback,android.os.Handler handler){handler.post(()->callback.onOpened(new CameraDevice()));}
                 }
             """,
@@ -445,6 +483,10 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
                 package android.media;
                 public class ImageReader implements java.io.Closeable {
                     public interface OnImageAvailableListener {void onImageAvailable(ImageReader reader);}
+                    public static final java.util.List<Thread> creationOwners=new java.util.concurrent.CopyOnWriteArrayList<>();
+                    private static final java.util.concurrent.atomic.AtomicInteger created=new java.util.concurrent.atomic.AtomicInteger();
+                    public static int createdCount(){return created.get();}
+                    public static void resetCreations(){created.set(0);creationOwners.clear();}
                     private static int next;
                     public final java.util.List<String> events=new java.util.concurrent.CopyOnWriteArrayList<>();
                     public final java.util.List<Thread> closeOwners=new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -460,7 +502,11 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
                     private volatile java.util.concurrent.CountDownLatch planeEntered,planeContinue;
                     public ImageReader(String name){this(name,2,2);}
                     private ImageReader(String name,int w,int h){surface=new android.view.Surface(name);surface.reader=this;width=w;height=h;}
-                    public static ImageReader newInstance(int w,int h,int format,int max){return new ImageReader("analysis-"+(++next),w,h);}
+                    public static volatile boolean failNextAllocation;
+                    public static ImageReader newInstance(int w,int h,int format,int max){
+                        if(failNextAllocation){failNextAllocation=false;throw new IllegalStateException("allocation rejected");}
+                        created.incrementAndGet();creationOwners.add(Thread.currentThread());return new ImageReader("analysis-"+(++next),w,h);
+                    }
                     public android.view.Surface getSurface(){return surface;}
                     public void setOnImageAvailableListener(OnImageAvailableListener listener,android.os.Handler handler){this.handler=handler;this.listener=listener;}
                     public Image acquireLatestImage(){
@@ -535,6 +581,8 @@ internal class StanceReaderCameraBridgeFixture(root: File, parent: ClassLoader) 
                     public Interpreter(java.nio.ByteBuffer model,Options options){}
                     public Tensor getInputTensor(int index){return new Tensor(){public int[] shape(){return new int[]{1,3,2,2};}public DataType dataType(){return DataType.FLOAT32;}};}
                     public Tensor getOutputTensor(int index){return new Tensor(){public int[] shape(){return new int[]{1,5,2};}public DataType dataType(){return DataType.FLOAT32;}};}
+                    public int getInputTensorCount(){return 1;}
+                    public int getOutputTensorCount(){return 1;}
                     public void run(Object input,Object output){
                         if(output instanceof java.nio.ByteBuffer)return;
                         float[][][] rows=(float[][][])output;

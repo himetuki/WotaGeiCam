@@ -720,6 +720,19 @@ data class HudLayoutTable(val version: Int, val zones: Map<HudZone, ZoneState>) 
     }
 }
 
+/**
+ * 布局提交后「已保存基线」的推进规则（Y53 纯桥）。
+ *
+ * 编辑器用 `draft != saved` 决定「未保存」高亮（保存键亮起），撤销/重置的武装状态也依附在
+ * 这条基线之上。SharedPreferences 的 `commit()` 回执为 false 时（磁盘满/存储异常）草稿并没有
+ * 落盘：若照样把 [saved] 推成 [target]，高亮熄灭、用户以为保存成功，撤销/重试入口也一起消失。
+ * 所以只有回执成功才推进基线；失败保持旧基线，草稿与它的差异继续亮着、重试入口可用。
+ *
+ * 保存、重置、撤销三个分支共用这一条规则，只是 [target] 不同（当前草稿 / 默认表 / 撤销前那份）。
+ */
+fun savedAfterCommit(ok: Boolean, saved: HudLayoutTable, target: HudLayoutTable): HudLayoutTable =
+    if (ok) target else saved
+
 // ------------------------------------------------------------------ 两页各自的可见集（纯函数）
 
 /**
@@ -760,6 +773,23 @@ fun editorVisibleEntries(levelEnabled: Boolean): Set<HudEntry> = HudEntry.ALL
     // 水平仪那颗在显示开关关掉时整颗不渲染 ⇒ 列出来也只是空格，本页不列
     .filterNot { it.pill == CamPill.LEVEL && !levelEnabled }
     .toSet()
+
+/**
+ * 编辑页底栏「伴随条目」的可见集合（Y58 纯桥）：固定顺序、只收当前归属底栏的那些。
+ *
+ * 出厂伴随序在 `defaultOrderOf(BOTTOM)` 里是 ECHO → DENOISE → LENS（录制页
+ * `BottomBandChips` 同序）。编辑页此前只渲染 DENOISE，导致旧配置里
+ * ECHO 留在底栏时在这一页既看不见也拖不走（没有恢复入口）。这里把 ECHO 纳入，顺序与
+ * 录制页同一份，挪去别的容器后自然从集合消失。
+ *
+ * [sourceZoneOf] 由调用方传当前草稿的归属查询（纯函数不持有表状态；测试可直接喂映射）。
+ */
+fun editorBottomBandEntries(
+    visible: Set<HudEntry>,
+    sourceZoneOf: (HudEntry) -> HudZone
+): List<HudEntry> =
+    listOf(HudEntry.of(CamPill.ECHO), HudEntry.of(CamPill.DENOISE))
+        .filter { it in visible && sourceZoneOf(it) == HudZone.BOTTOM }
 
 // ------------------------------------------------------------------ 越界钳制与落位（纯函数）
 
@@ -884,6 +914,30 @@ fun clampZonePos(
     val yRange = clampZoneYRange(zone, area, hDp, topZoneMinYDp)
     val x = if (zone == HudZone.BOTTOM) -1 else xDp.coerceIn(0, clampZoneX(area, wDp))
     return ZonePlacement(x, yDp.coerceIn(yRange.first, yRange.last))
+}
+
+/**
+ * 拖放落位读哪一份区域（Y54）：**与渲染同一个 when**。
+ *
+ * 编辑页四枚区域约束不同：两枚竖 Dock 各避真横向重叠的邻居，读数块的 y 带还要让开底栏
+ * （`readoutPlan.bottomAvoidDp`），其余容器读基础区。渲染侧一直按这份选择走；松手若退回
+ * 统一的 baseArea，落点就会进档到渲染层不允许的 y 上（拖到边界时"看到的位置"和
+ * "存进表的位置"分叉，重开编辑页又跳一下）。
+ *
+ * 抽成纯函数是为了让"拖放区域 = 渲染区域"这条约束可 JVM 测：两枚区域给不同的
+ * bottomAvoid，边界落点的 y 必须与 [clampZonePos] 在渲染区域上的结果一致。
+ */
+fun dropAreaFor(
+    zone: HudZone,
+    base: HudAreaDp,
+    left: HudAreaDp,
+    right: HudAreaDp,
+    readout: HudAreaDp
+): HudAreaDp = when (zone) {
+    HudZone.LEFT -> left
+    HudZone.RIGHT -> right
+    HudZone.READOUT -> readout
+    else -> base
 }
 
 /**

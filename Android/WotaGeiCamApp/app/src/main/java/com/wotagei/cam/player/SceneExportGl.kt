@@ -9,10 +9,9 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
 import android.view.Surface
+import com.wotagei.cam.camera.OfflineGlWorker
 import com.wotagei.cam.camera.Shaders
 import com.wotagei.cam.camera.nativeFloatBuffer
 import com.wotagei.cam.core.EchoMode
@@ -24,8 +23,6 @@ import com.wotagei.cam.core.echoTrailTintRgbOf
 import com.wotagei.cam.core.echoTrailTolOf
 import com.wotagei.cam.core.glowRgb
 import com.wotagei.cam.diag.Diag as Log
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * 「内置播放器内后渲染导出」的 GL 引擎（2026-10-28 用户需求）：
@@ -76,8 +73,7 @@ internal class SceneExportGl(
         private val TINT_WHITE = floatArrayOf(1f, 1f, 1f)
     }
 
-    private val thread = HandlerThread("WotaSceneExportGl").apply { start() }
-    private val handler = Handler(thread.looper)
+    private val worker = OfflineGlWorker(TAG)
 
     private var eglDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext = EGL14.EGL_NO_CONTEXT
@@ -202,9 +198,9 @@ internal class SceneExportGl(
     /** 解码器要写的面（管线线程拿它去 `decoder.configure`） */
     fun decoderOutputSurface(): Surface? = decoderSurface
 
-    fun start(): Boolean = onGl(false) { initGl() }
+    fun start(): Boolean = onGl { initGl() }
 
-    fun attachEncoderSurface(surface: Surface): Boolean = onGl(false) { createEncoderSurface(surface) }
+    fun attachEncoderSurface(surface: Surface): Boolean = onGl { createEncoderSurface(surface) }
 
     /** 等解码器推来一帧（[acquire] 消费它） */
     fun awaitFrame(timeoutMs: Long = FRAME_WAIT_MS): Boolean = synchronized(frameLock) {
@@ -223,27 +219,25 @@ internal class SceneExportGl(
     }
 
     /** 只消费这一帧（区间外的帧要解码出来才能继续，但不进编码器） */
-    fun acquireOnly(): Boolean = onGl(false) { acquire() }
+    fun acquireOnly(): Boolean = onGl { acquire() }
 
     /**
      * 消费一帧并渲染进编码器：[ptsUs] 相对导出起点的呈现时间（微秒）。
      * 打戳失败按"这一帧没发出去"处理（与 ArcRepairGl 同判据：坏戳不可自愈）。
      */
-    fun acquireAndRender(ptsUs: Long): Boolean = onGl(false) {
+    fun acquireAndRender(ptsUs: Long): Boolean = onGl {
         if (!acquire()) return@onGl false
         render(ptsUs)
     }
 
-    fun release() {
-        onGl(false) { releaseGl(); true }
-        thread.quitSafely()
-        runCatching { thread.join(1500) }
+    /** 将 codec 和输入面交给 GL 线程收尾。等待到期时，任务准入继续检查该线程的活性。 */
+    fun release(stopDecoder: () -> Unit, releaseEncoder: () -> Unit) {
+        worker.close(1_500L, stopDecoder, ::releaseGl, releaseEncoder)
     }
 
-    /** release() 有界返回不代表 GL 线程已退出；准入判定必须看这条线程的真实活性。 */
-    fun glThreadAlive(): Boolean = thread.isAlive
+    fun glThreadAlive(): Boolean = worker.thread.isAlive
 
-    fun exportThread(): Thread = thread
+    fun exportThread(): Thread = worker.thread
 
     // ---------------------------------------------------------------- 初始化
 
@@ -275,7 +269,7 @@ internal class SceneExportGl(
 
         val st = SurfaceTexture(oesTex)
         st.setDefaultBufferSize(widthPx, heightPx)
-        st.setOnFrameAvailableListener({ onFrameAvailable() }, handler)
+        st.setOnFrameAvailableListener({ onFrameAvailable() }, worker.handler)
         texture = st
         decoderSurface = Surface(st)
 
@@ -440,7 +434,15 @@ internal class SceneExportGl(
         )
         val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        return if (status == GLES20.GL_FRAMEBUFFER_COMPLETE) tex to fbo else 0 to 0
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            // B03（2026-11-19）：失败也要归还本次已生成的句柄——否则调用方只看到 (0,0)、
+            // 无法回收，这些纹理/FBO 会在存活到收尾前的 EGL 上下文里滞留。
+            Log.w(TAG, "离屏 FBO 不完整 status=0x${Integer.toHexString(status)}（已归还句柄）")
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
+            return 0 to 0
+        }
+        return tex to fbo
     }
 
     private fun buildPrograms(): Boolean {
@@ -540,7 +542,7 @@ internal class SceneExportGl(
         val st = texture ?: return false
         st.updateTexImage()
         st.getTransformMatrix(stMatrix)
-        val ok = drawTo(curFbo, oesProgram, oesAPos, oesATex, oesUMatrix, identity) {
+        val ok = drawTo(curFbo, oesProgram, oesAPos, oesATex) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
             if (oesUFrame >= 0) GLES20.glUniform1i(oesUFrame, UNIT_A)
@@ -556,7 +558,7 @@ internal class SceneExportGl(
         // 1) 降噪：cur → den（scene 顺序：降噪在 Glow 之前）
         var base = curTex
         if (effects.denoise) {
-            val ok = drawTo(denFbo, bilatProgram, bilatAPos, bilatATex, bilatUMatrix, identity) {
+            val ok = drawTo(denFbo, bilatProgram, bilatAPos, bilatATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)
                 if (bilatUFrame >= 0) GLES20.glUniform1i(bilatUFrame, UNIT_A)
@@ -569,7 +571,7 @@ internal class SceneExportGl(
         }
         // 2) Glow：亮部提取 → 横/纵模糊；3) 合成到编码器面
         if (glow != null) {
-            val brightOk = drawTo(glowAFbo, brightProgram, brightAPos, brightATex, brightUMatrix, identity) {
+            val brightOk = drawTo(glowAFbo, brightProgram, brightAPos, brightATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, base)
                 if (brightUSrc >= 0) GLES20.glUniform1i(brightUSrc, UNIT_A)
@@ -595,7 +597,7 @@ internal class SceneExportGl(
                 else -> 0
             }
             repeat(blurPasses) {
-                val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                val hOk = drawTo(glowBFbo, blurProgram, blurAPos, blurATex) {
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowATex)
                     if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
@@ -603,7 +605,7 @@ internal class SceneExportGl(
                     if (blurUOffset >= 0) GLES20.glUniform2f(blurUOffset, dx, 0f)
                 }
                 if (!hOk) return false
-                val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex, blurUMatrix, identity) {
+                val vOk = drawTo(glowAFbo, blurProgram, blurAPos, blurATex) {
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, glowBTex)
                     if (blurUSrc >= 0) GLES20.glUniform1i(blurUSrc, UNIT_A)
@@ -616,7 +618,7 @@ internal class SceneExportGl(
         // 2.5) 残影累积（R2 第三路）：读**原始 2D 帧** curTex（与实时链读原始 OES 同口径，
         // 降噪/Glow 不改累积源）+ 上一枚累积面 → 新累积面，乒乓交换。逐帧顺序 ⇒ 拖尾连续。
         if (echo != null) {
-            val accOk = drawTo(echoAccFbo[1 - echoAccIdx], echoAccProgram, echoAccAPos, echoAccATex, echoAccUMatrix, identity) {
+            val accOk = drawTo(echoAccFbo[1 - echoAccIdx], echoAccProgram, echoAccAPos, echoAccATex) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + UNIT_A)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curTex)
                 if (echoAccUSrc >= 0) GLES20.glUniform1i(echoAccUSrc, UNIT_A)
@@ -703,6 +705,13 @@ internal class SceneExportGl(
             drawQuad(pass2dAPos, pass2dATex)
         }
         unbindUnits()
+        // Y11（2026-11-19）：最终合成趟（直接 drawQuad，不经 drawTo）的 GL 错误必须在
+        // **打戳/swap 之前**拦截——旧顺序把 drain 放在 swap 之后且丢弃返回值，坏帧照样进容器、
+        // 导出结果报成功。判据语义回到「这一帧根本没发出去」。
+        if (drainGlError("sceneRender") > 0) {
+            Log.w(TAG, "本帧 GL 绘制有错 ⇒ 不提交（本帧判未发出）")
+            return false
+        }
         val stamped = runCatching {
             EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderSurface, ptsUs * 1000L)
         }.getOrElse { false }
@@ -722,8 +731,6 @@ internal class SceneExportGl(
         program: Int,
         aPos: Int,
         aTex: Int,
-        uMatrix: Int,
-        matrix: FloatArray,
         bindUniforms: () -> Unit
     ): Boolean {
         if (!glReady || program == 0 || fbo == 0) return false
@@ -867,24 +874,5 @@ internal class SceneExportGl(
         return err
     }
 
-    /** 把一次调用投递到 GL 线程并阻塞等结果（EGL 上下文绑线程：任何 GL 调用都不许留在调用方线程） */
-    private fun <T> onGl(default: T, timeoutMs: Long = OP_WAIT_MS, block: () -> T): T {
-        if (Thread.currentThread() === thread) return block()
-        var result = default
-        val latch = CountDownLatch(1)
-        val posted = handler.post {
-            try {
-                result = block()
-            } catch (t: Throwable) {
-                Log.w(TAG, "GL 线程异常：${t.message}", t)
-            } finally {
-                latch.countDown()
-            }
-        }
-        if (!posted) return default
-        return if (latch.await(timeoutMs, TimeUnit.MILLISECONDS)) result else {
-            Log.w(TAG, "GL 操作超时 ${timeoutMs}ms")
-            default
-        }
-    }
+    private fun onGl(block: () -> Boolean): Boolean = worker.call(OP_WAIT_MS, block)
 }

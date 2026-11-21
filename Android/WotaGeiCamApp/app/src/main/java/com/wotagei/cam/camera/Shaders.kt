@@ -139,14 +139,19 @@ internal object Shaders {
             vec3 c = texture2D(uSrc, vUv).rgb;
             float l = dot(c, vec3(0.299, 0.587, 0.114));
             // 软边朝 1.0 收敛（与 GLOW_COPY_FS 同口径，见其注释）
-            float s = min(uSoft, max(1.0 - uThreshold, 0.0) + 0.0001);
+            float s = min(uSoft, max(1.0 - uThreshold, 0.0));
             float lo = max(uThreshold - s, 0.0);
-            // hi 必须严格 > lo（GLOW_COPY_FS 同款防御，勿叠加 1.0 上限——叠加会在唯一角点
-            // (threshold=1.0, soft=0) 把余量截回 lo==hi ⇒ smoothstep 未定义，驱动相关 NaN 可
-            // 污染导出帧）。修复后该角点 lo=1.0、hi=1.0001，edge0<edge1 恒成立；luma=1.0 时
-            // w=0 与 GLOW_COPY_FS 既有语义一致，非新分叉。
-            float hi = max(uThreshold + s, lo + 0.0001);
-            float w = smoothstep(lo, hi, l);
+            float hi = uThreshold + s;
+            // 边界在 fp16 下不可分辨时必须硬切（Y12）：mediump 的 ulp 在 1.0 附近 ≈0.0009766，
+            // 原先给 lo 加一小段余量的写法会被舍回 lo ⇒ lo==hi，smoothstep 结果未定义
+            // （驱动相关 NaN 可污染导出帧）。threshold=1.0、soft=0 是 UI 允许的角点，
+            // 这里只在 hi>lo（fp16 实际可表示）时调用 smoothstep，否则 step 硬阈值。
+            float w;
+            if (hi > lo) {
+                w = smoothstep(lo, hi, l);
+            } else {
+                w = step(uThreshold, l);
+            }
             // 光晕颜色模式（2026-10-29）：1 = 仅色盘颜色；0 = 像素自身颜色
             vec3 pick = mix(c, uTint, uColorOnly);
             gl_FragColor = vec4(pick * w, 1.0);
@@ -663,8 +668,9 @@ $decl
      *   就得先跑一遍主 pass，零代价当场破产。副作用是"曲线压暗后光晕仍按光源真实亮度出现"，
      *   这是 R2 刻意登记的观感口径（T7 真机回看）。
      * - `uGlowSoft` 是过渡带半宽：0 = 硬切（会出锯齿状发光边），默认 0.05。
-     * - 上界取 `max(th + soft, th − soft + 0.0001)`：`smoothstep` 要求 `edge0 < edge1`，
-     *   否则结果未定义；th=soft=0 这种极端组合下仍给出一个极窄的合法过渡带。
+     * - 上界取 `th + soft`，且只在 `hi > lo` 时调用 `smoothstep`：`smoothstep` 要求 `edge0 < edge1`，
+     *   否则结果未定义。mediump/fp16 下 `1.0 + 0.0001` 会舍回 1.0，所以任何"加小余量保证严格大于"
+     *   的写法在 1.0 角点都不可靠（Y12）；边界不可分辨时退化为 `step` 硬阈值，两趟 shader 同口径。
      * - 只吃 `samplerExternalOES`（OES 不能当 FBO 附件，所以这一趟必须落到 2D）；
      *   与模糊趟的 `sampler2D` 分属两条 program（混用会直接链接失败，见 [FROST_COPY_FS] 的注释）。
      * - 恒等 UV + `uTexMatrix`：RT(q)=B(M·q)，主 pass 的 `vUvGlow = aTexCoord` 才能逐像素对齐。
@@ -685,10 +691,18 @@ $decl
             // 软边朝 1.0 收敛（2026-10-29 用户口径：阈值 100% 时只给画面最亮像素加光晕）。
             // 阈值越接近 1，剩余余量越小，过渡带随之变窄；不做这层压缩的话 soft 会跨过 1.0，
             // 100% 档仍会把整片高光拉亮，与"最亮像素"口径不符。
-            float soft = min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0) + 0.0001);
+            float soft = min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0));
             float lo = max(uGlowThreshold - soft, 0.0);
-            float hi = max(uGlowThreshold + soft, lo + 0.0001);
-            float t = smoothstep(lo, hi, luma);
+            float hi = uGlowThreshold + soft;
+            // 边界在 fp16 下不可分辨时必须硬切（Y12）：mediump 的 ulp 在 1.0 附近 ≈0.0009766，
+            // threshold=1.0、soft=0 时 lo==hi，smoothstep 未定义。只在 hi>lo（fp16 实际可表示）
+            // 时调用 smoothstep，否则退化为 step —— 与 SCENE_BRIGHT_FS 逐字同口径。
+            float t;
+            if (hi > lo) {
+                t = smoothstep(lo, hi, luma);
+            } else {
+                t = step(uGlowThreshold, luma);
+            }
             // 光晕颜色模式：1 = 仅色盘颜色（不乘原色）；0 = 像素自身颜色（乘回原色）
             vec3 pick = mix(c, uGlowTint, uGlowColorOnly);
             gl_FragColor = vec4(pick * t, 1.0);

@@ -113,7 +113,7 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     fun physical(slot: Any): String? = call(slot, "getPhysicalId") as String?
     fun ability(slot: Any): Any = call(slot, "getAbility")!!
     fun abilityOf(id: String): Any {
-        val companion = type("com.wotagei.cam.core.CameraAbility").getField("Companion").get(null)
+        val companion = requireNotNull(type("com.wotagei.cam.core.CameraAbility").getField("Companion").get(null))
         return call(companion, "from", id, call(manager, "getCameraCharacteristics", id), null)!!
     }
     fun slot(id: String, physical: String? = null): Any {
@@ -162,7 +162,9 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
     }
     fun open(h: Harness, slot: Any) { call(h.engine, "open", slot); call(h.engine, "startPreview") }
     fun analysis(h: Harness, enabled: Boolean = true) { call(h.engine, "setAnalysisTarget", if (enabled) h.analysis else null, null) }
-    fun extra(h: Harness, enabled: Boolean = true) { call(h.engine, "setExtraTarget", if (enabled) h.extra else null, null) }
+    fun extra(h: Harness, enabled: Boolean = true) {
+        call(h.engine, "setExtraTarget", if (enabled) h.extra else null, null, if (enabled) 1 else 0)
+    }
     fun pulse(h: Harness, fps: Int) {
         fps(h.params, fps)
         val pulse = type("com.wotagei.cam.camera.Camera2Engine\$Pulse").declaredConstructors.single().apply {
@@ -171,6 +173,30 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
         call(h.engine, "onStructuralPulse", pulse)
     }
     fun sessionType(config: Any = sessions.last()): Int = call(config, "getSessionType") as Int
+
+    /** Y69：让平台拒绝带分析面的输出组合（「单流 YUV 支持、组合不支持」的缺陷形态）。 */
+    fun rejectAnalysisCombination(on: Boolean = true) { set(manager, "rejectAnalysisCombination", on) }
+
+    /**
+     * 投递「最近一次 createCaptureSession 配置成功」的真实平台回调。
+     * 只投递平台事件，不自己拼 StateCallback——配置结果是生产代码的判据（Y69 的 INCLUDED 确认点）。
+     */
+    fun configured(index: Int = sessions.size - 1) {
+        val config = sessions[index]
+        val session = new(
+            if (call(config, "getSessionType") as Int == 1)
+                "android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession"
+            else "android.hardware.camera2.CameraCaptureSession"
+        )
+        call(call(config, "getStateCallback")!!, "onConfigured", session)
+    }
+
+    /** 投递「最近一次 createCaptureSession 配置失败」的真实平台回调。 */
+    fun configureFailed(index: Int = sessions.size - 1) {
+        val config = sessions[index]
+        call(call(config, "getStateCallback")!!, "onConfigureFailed", new("android.hardware.camera2.CameraCaptureSession"))
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun outputs(config: Any = sessions.last()): List<Any> = call(config, "getOutputConfigurations") as List<Any>
     fun outputNames(config: Any = sessions.last()): List<String> = outputs(config).map { call(it, "getSurface").toString() }
@@ -185,8 +211,42 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
         return session
     }
     fun frame(session: Any, frame: Long) { call(session, "emit", frame) }
+
+    /** Y01：让回执带上指定请求实例（不是当前 repeating 请求时即「旧请求迟到」）。 */
+    fun frameFrom(session: Any, request: Any, frame: Long) {
+        call(session, "emitFrom", request, frame)
+    }
+
+    /** B01：结果侧可控的 SENSOR_TIMESTAMP / SENSOR_EXPOSURE_TIME。 */
+    fun frameWithResult(session: Any, request: Any, frame: Long, tsNs: Long?, exposureNs: Long?) {
+        call(session, "emitFrom", request, frame, tsNs, exposureNs)
+    }
+
+    /** 平台当前记录的那支 repeating 请求（普通会话）。 */
+    fun requestOf(session: Any): Any = field(session, "request") ?: error("会话还没有 repeating 请求")
+
+    /** 跑掉引擎线程上已排的 delayed 任务（flushTask / 等号探测独立超时等）；post 本身仍立即执行。 */
+    fun runDelayed(h: Harness) {
+        call(field(h.engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler"), "runDelayed")
+    }
+
+    fun delayedCount(h: Harness): Int =
+        call(field(h.engine, "workHandler") ?: error("真实 Camera2Engine 没有 workHandler"), "delayedCount") as Int
+
+    /**
+     * 把参数总线上的某个数值档（[com.wotagei.cam.core.ParamState]，如 Shutter/Iso）整体换成新值。
+     * 只换 value，range/enabled 保持可用态——测试要的是「用户在可用档位上选了这个值」。
+     */
+    fun setParamValue(params: Any, property: String, value: Long) {
+        val flow = call(params, "get$property") ?: error("WotaParams 没有 $property")
+        val state = type("com.wotagei.cam.core.ParamState")
+            .declaredConstructors.single { it.parameterCount == 4 }
+            .newInstance(value, null, true, true)
+        call(flow, "setValue", state)
+    }
+
     fun ledger(): Long {
-        val ledger = type("com.wotagei.cam.record.FrameLedger").getField("INSTANCE").get(null)
+        val ledger = requireNotNull(type("com.wotagei.cam.record.FrameLedger").getField("INSTANCE").get(null))
         return call(call(ledger, "snapshot")!!, "getCameraStarted") as Long
     }
     override fun close() {
@@ -212,13 +272,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                 "android.hardware.camera2.CaptureResult" to resultSource()
             )
             val sources = generated.map { (name, source) ->
-                File(root, name.replace('.', '/') + ".java").apply { parentFile.mkdirs(); writeText(source.trimIndent()) }
+                File(root, name.replace('.', '/') + ".java").apply { requireNotNull(parentFile).mkdirs(); writeText(source.trimIndent()) }
             }
             val compiler = Class.forName("javax.tools.ToolProvider").getMethod("getSystemJavaCompiler").invoke(null)
             assertNotNull("使用已有宿主 JDK，不下载任何依赖", compiler)
             val classpath = listOf(Camera2Engine::class.java, kotlin.Unit::class.java,
                 CoroutineScope::class.java, Context::class.java).map {
-                File(it.protectionDomain.codeSource.location.toURI()).absolutePath
+                File(requireNotNull(it.protectionDomain?.codeSource?.location).toURI()).absolutePath
             }.distinct().joinToString(File.pathSeparator)
             val args = listOf("-proc:none", "-encoding", "UTF-8", "-classpath", classpath, "-d", classes.absolutePath) +
                 sources.map { it.absolutePath }
@@ -267,7 +327,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
             public class CaptureResult {
                 public static class Key<T>{public final String name;public Key(String n){name=n;}public String getName(){return name;}}
                 ${keys(CaptureResult::class.java)}
-                public <T>T get(Key<T> key){return null;}
+                public Long sensorTimestampNs, sensorExposureNs;
+                @SuppressWarnings("unchecked") public <T>T get(Key<T> key){
+                    Object value=null;
+                    if("SENSOR_TIMESTAMP".equals(key.name))value=sensorTimestampNs;
+                    else if("SENSOR_EXPOSURE_TIME".equals(key.name))value=sensorExposureNs;
+                    return (T)value;
+                }
             }
         """
 
@@ -307,6 +373,12 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public boolean postDelayed(Runnable r,long ms){if(looper.closed)return false;delayed.add(r);return true;}
                     public void removeCallbacks(Runnable r){delayed.remove(r);}
                     public void removeCallbacksAndMessages(Object o){delayed.clear();}
+                    public int delayedCount(){return delayed.size();}
+                    public void runDelayed(){
+                        java.util.ArrayList<Runnable> copy=new java.util.ArrayList<>(delayed);
+                        delayed.clear();
+                        for(Runnable r:copy)r.run();
+                    }
                 }
             """,
             "android.os.SystemClock" to "package android.os; public class SystemClock {public static long now;public static long elapsedRealtime(){return now;}}",
@@ -345,6 +417,8 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                 package android.hardware.camera2;
                 public class CameraManager {
                     public String[] publicIds=new String[0];
+                    /** Y69：置位后拒绝带分析面的输出组合（其余组合照常成功）。 */
+                    public boolean rejectAnalysisCombination;
                     private final java.util.Map<String,CameraCharacteristics> cameras=new java.util.HashMap<>();
                     private final java.util.Set<String> openable=new java.util.HashSet<>();
                     public final java.util.List<String> opened=new java.util.ArrayList<>();
@@ -369,6 +443,15 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public void close(){probe.CameraEvents.all.add("device.close:"+id);}
                     public CaptureRequest.Builder createCaptureRequest(int template){return new CaptureRequest.Builder();}
                     public void createCaptureSession(android.hardware.camera2.params.SessionConfiguration config){
+                        // Y69 缺陷形态：设备支持该 YUV 单流尺寸，却拒绝它和预览/编码面的组合。
+                        if(manager.rejectAnalysisCombination){
+                            for(android.hardware.camera2.params.OutputConfiguration output:config.getOutputConfigurations()){
+                                if(String.valueOf(output.getSurface()).contains("yuv-analysis")){
+                                    probe.CameraEvents.all.add("reject:analysis");
+                                    throw new IllegalArgumentException("analysis combination rejected");
+                                }
+                            }
+                        }
                         manager.sessions.add(config);probe.CameraEvents.all.add("create:"+config.getSessionType());
                     }
                     public abstract static class StateCallback {
@@ -403,7 +486,16 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public int setRepeatingRequest(CaptureRequest r,CaptureCallback c,android.os.Handler h){request=r;callback=c;return 1;}
                     public int capture(CaptureRequest r,CaptureCallback c,android.os.Handler h){return 1;}
                     public void stopRepeating(){}public void close(){}
-                    public void emit(long frame){if(callback==null)throw new AssertionError("生产出口没有绑定回调");callback.onCaptureStarted(this,request,frame*1000000,frame);callback.onCaptureCompleted(this,request,new TotalCaptureResult());}
+                    public void emit(long frame){emitFrom(request,frame);}
+                    /** Y01：允许指定回执归属的请求实例（模拟同会话在途的旧请求回执）。 */
+                    public void emitFrom(CaptureRequest r,long frame){emitFrom(r,frame,null,null);}
+                    /** B01：结果侧带 SENSOR_TIMESTAMP / SENSOR_EXPOSURE_TIME 的可控回执。 */
+                    public void emitFrom(CaptureRequest r,long frame,Long sensorTimestampNs,Long sensorExposureNs){
+                        if(callback==null)throw new AssertionError("生产出口没有绑定回调");
+                        TotalCaptureResult result=new TotalCaptureResult(sensorTimestampNs,sensorExposureNs);
+                        callback.onCaptureStarted(this,r,frame*1000000,frame);
+                        callback.onCaptureCompleted(this,r,result);
+                    }
                     public abstract static class StateCallback {public abstract void onConfigured(CameraCaptureSession s);public abstract void onConfigureFailed(CameraCaptureSession s);}
                     public static class CaptureCallback {
                         public void onCaptureStarted(CameraCaptureSession s,CaptureRequest r,long timestamp,long frame){}
@@ -419,7 +511,13 @@ internal class CameraPlatformFixture(classes: File, parent: ClassLoader) : Close
                     public int captureBurst(java.util.List<CaptureRequest> requests,CaptureCallback c,android.os.Handler h){return 1;}
                 }
             """,
-            "android.hardware.camera2.TotalCaptureResult" to "package android.hardware.camera2; public class TotalCaptureResult extends CaptureResult {}",
+            "android.hardware.camera2.TotalCaptureResult" to """
+                package android.hardware.camera2;
+                public class TotalCaptureResult extends CaptureResult {
+                    public TotalCaptureResult(){}
+                    public TotalCaptureResult(Long ts,Long exp){sensorTimestampNs=ts;sensorExposureNs=exp;}
+                }
+            """,
             "com.wotagei.cam.diag.Diag" to """
                 package com.wotagei.cam.diag;
                 public class Diag {

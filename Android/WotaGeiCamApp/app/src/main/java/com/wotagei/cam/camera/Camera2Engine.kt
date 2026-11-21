@@ -21,6 +21,7 @@ import android.view.Surface
 import com.wotagei.cam.core.CameraAbility
 import com.wotagei.cam.core.ExposureCorrection
 import com.wotagei.cam.core.Flash
+import com.wotagei.cam.core.FpsDecision
 import com.wotagei.cam.core.FpsPick
 import com.wotagei.cam.core.LensSlot
 import com.wotagei.cam.core.LensType
@@ -62,8 +63,13 @@ enum class PreviewStatus { INIT, START, ING, STOP, ERROR }
 /** 录制状态机（与 record 包共用；中间态必须区分） */
 enum class RecordStatus { IDLE, PREPARE, START, STOPPING, ERROR }
 
-/** 分析流会话协商回执：仅陈述接纳结果，不改用户帧率或分析开关。 */
-enum class AnalysisSessionDecision { ABSENT, INCLUDED, BLOCKED_HIGH_SPEED }
+/**
+ * 分析流会话协商回执：仅陈述接纳结果，不改用户帧率或分析开关。
+ *
+ * [INCLUDED] 只在普通会话**配置成功**后发布（Y69）——设备是否接受「基础输出 + 分析 YUV」的
+ * 组合是 HAL 的裁决，建会话前先报接纳等于替平台打包票；被拒时改发 [BLOCKED_COMBINATION]。
+ */
+enum class AnalysisSessionDecision { ABSENT, INCLUDED, BLOCKED_HIGH_SPEED, BLOCKED_COMBINATION }
 
 /**
  * Camera2 引擎：开关设备、建会话、下发 repeating、点按对焦、错误恢复。
@@ -133,6 +139,19 @@ class Camera2Engine(
         private const val REOPEN_MAX = 2
 
         /**
+         * Y02：AE 翻档重建失败后的重试间隔/次数。重建失败时**不重发旧档请求**（AUTO 档不能落在
+         * 上一支手动手 builder 上），只排队重试重建；次数封顶避免设备已失效时无限忙等。
+         */
+        private const val AE_FLIP_RETRY_MS = 100L
+        private const val AE_FLIP_RETRY_MAX = 5
+
+        /**
+         * B01：HAL 实际曝光回读的最小间隔。结果侧 `SENSOR_EXPOSURE_TIME` 逐帧可取，但逐帧
+         * 装箱 + 写 StateFlow 是没必要的开销；500ms 节流且只在变化时发布，读数/HUD 足够跟手。
+         */
+        private const val HAL_EXPOSURE_SAMPLE_MS = 500L
+
+        /**
          * 设备状态回调专用 Looper：**进程内单例、永不 quit**。
          *
          * 为什么不用引擎自己的 workHandler：`close()` 收尾会 `quitSafely()`，此后迟到的
@@ -196,8 +215,10 @@ class Camera2Engine(
     private var builderTargets: List<Surface> = emptyList()
 
     /**
-     * 当前 repeating builder 对应的 AE 档（true=手动/AE_OFF）：与参数总线不一致 ⇒ 翻转发生，
-     * 下一次下发前先重建 builder。null = builder 刚建、还没对过账。
+     * 当前 repeating builder 的**键集账**（true = 这支 builder 已被写过手动 SENSOR 三键）。
+     * 注意它描述的是 builder 上**可能存在的残值**，不是参数总线当前档位：Camera2 没有单键
+     * remove，写过手动三键的 builder 永远清不掉 —— 切 AUTO 必须先换一支新 builder（Y02）。
+     * null/false = builder 干净（无手动三键），可直接应用 AUTO 或手动快照。
      */
     private var builderAeManual: Boolean? = null
 
@@ -232,9 +253,85 @@ class Camera2Engine(
     private var exposureProbeStartMs = 0L
     private var exposureProbeCooldownUntilMs = 0L
 
+    /**
+     * Y01：最近一次**被平台接纳**的 repeating 请求对象。探测只允许推进由这支请求产生的回执：
+     * `session` 相同还不够——提交换代（探测请求刚下发/刚重建 builder）前后在途的旧请求回执
+     * 仍来自同一会话，若按帧计数就会把旧请求的间隔混进新探测窗，甚至把重建前的帧算成热身。
+     *
+     * Camera2 的 repeating 回调回传的就是提交出去的那支 `CaptureRequest` 实例，因此这里用
+     * 对象身份 + [repeatingUsedExposureProbe] 双重限定（后者证明该次提交确实带了等号请求）。
+     */
+    private var lastSubmittedRepeatingRequest: CaptureRequest? = null
+
+    /**
+     * Y01：高速会话那一支对应的回执身份。`setRepeatingBurst(createHighSpeedRequestList(...))`
+     * 提交的是平台**重建出来的**请求列表，回调里拿不到原始 `request` 实例，只能用「最近一次
+     * 提交出去的那批实例」做成员身份比对；普通会话仍走单对象身份（更快更严）。
+     * 两者互斥：一次提交只可能落在其中一条通道。
+     */
+    private var lastSubmittedHighSpeedRequests: List<CaptureRequest>? = null
+
+    /**
+     * B01：HAL **结果侧**回报的实际曝光（`SENSOR_EXPOSURE_TIME`）。与 [lastSentExposureText]
+     * （我方写入请求的值）刻意分开：HAL 可能夹取/改写，只有结果里的值才是真正生效的曝光。
+     * 节流采样 + 只在变化时发布，不逐帧装箱、不分配字符串、不触网。
+     */
+    @Volatile private var lastHalExposureNs: Long? = null
+    private var lastHalExposureSampleMs = 0L
+    private var lastPublishedHalExposureNs: Long? = null
+
+    /**
+     * Y02：AUTO 切档需要一支**干净 builder**（无 SENSOR 三键残留），重建失败（设备/目标面
+     * 暂不可用）时不能拿旧手动 builder 硬发。这里做有上限的短重试——100ms × [AE_FLIP_RETRY_MAX]，
+     * 期间任何脏刷新也会再次尝试；触顶后停手，等下一次参数变化，避免在坏设备上无限打转。
+     */
+    private var aeFlipRetryAttempt = 0
+    private val aeFlipRetryTask = Runnable {
+        if (!threadRunning) return@Runnable
+        if (session == null && highSpeedSession == null) return@Runnable
+        try {
+            applyRepeatingNow()
+        } catch (e: Exception) {
+            // 与 flushTask 同一条 P1 纪律：重试跑在 Handler 上，未捕获异常会穿透到引擎线程。
+            Log.e(TAG, "AUTO 重建重试异常：${paramSnapshot()}", e)
+        }
+    }
+
+    /**
+     * B14：预览流共享裁剪区的**实测**宽高比（`CaptureResult.SCALER_CROP_REGION`），只读留痕。
+     *
+     * 站位叠加要把「已转正分析帧」的归一化坐标落到预览画幅上，必须先知道 Camera2 实际给这批
+     * 输出裁了什么区——输出画幅与裁剪区不同时，平台按文档**居中裁掉多余部分**。这里只读回执键，
+     * 不构造/不修改请求、不参与曝光与帧率决议（与曝光 owner 的边界：本字段只被站位侧读取）。
+     * null = 预览帧回执尚未到达（叠加侧回退枚举 active-array，并如实标注证据等级）。
+     */
+    @Volatile
+    private var sensorCropAspectValue: Float? = null
+
+    /**
+     * Y01：探测的**独立超时**任务。帧回执是探测的唯一推进来源，帧流一断（停帧/卡流/换会话间隙）
+     * [feedExposureProbe] 里的超时分支就永远不会执行，探测态会一直挂着——等号请求滞留整场，
+     * 用户切回预览时才发现曝光被等号档改写。挂在引擎线程 delayed 上，与帧回执互为兜底。
+     */
+    private val exposureProbeTimeoutTask = Runnable {
+        if (!exposureProbeActive || exposureProbeKey == null) return@Runnable
+        val now = SystemClock.elapsedRealtime()
+        if (now - exposureProbeStartMs <= ExposureCorrection.PROBE_TIMEOUT_MS) return@Runnable
+        exposureProbeCooldownUntilMs = now + ExposureCorrection.PROBE_COOLDOWN_MS
+        cancelExposureProbe("超时（独立计时：帧回执中断）")
+    }
+
     /** 曝光下发的格式化快照（给帧率守卫行复用；null = 本场还没发过曝光键，即 AE 自动档） */
     @Volatile
     private var lastSentExposureText: String? = null
+
+    /**
+     * B01：本次 build 出来、**尚未提交成功**的送出曝光读数。applyParams 在 build 之前跑，
+     * 那时请求还没交给平台——只有 [submitRepeating] 的平台调用返回成功才允许由
+     * [publishSentExposure] 写进总线（提交前发布 = HUD 显示可能从未生效的值）。
+     */
+    private var pendingSentExposureNs: Long? = null
+    private var pendingSentCorrectionNs: Long? = null
 
     /** 录像面：DIRECT 模式由 record 包提供 MediaRecorder 的 surface */
     private var extraSurface: Surface? = null
@@ -250,6 +347,12 @@ class Camera2Engine(
     private var highSpeedActive = false
     private var structuralSignature = ""
     private var lastAnalysisDecision: AnalysisSessionDecision? = null
+
+    /**
+     * Y69：本镜头上普通会话已拒绝过「基础输出 + 分析 YUV」的组合。置位后分析面仍留在引擎
+     * （调用方意图、surface 与 reader 都不动），只是不再塞进会话；换镜头 / 用户重新挂槽才再试一次。
+     */
+    private var analysisCombinationRejected = false
     private var desiredPreview = false
     private var sinkWaitRetries = 0
     private var reopenRetries = 0
@@ -268,6 +371,29 @@ class Camera2Engine(
      * 否则会把刚停掉的预览在后台复活（旧 session 赋回字段并重发 repeating，相机持续推流）。
      */
     private var sessionAttempt = 0
+
+    /**
+     * 会话就绪快照（R01）：`previewStatus` 是意图流，B 站/首录/换段需要的是「本世代会话已配置
+     * 且 repeating 已被接纳」。只由引擎线程写，UI/录制线程读整份不可变快照。
+     */
+    @Volatile
+    private var readiness = CameraSessionReadiness()
+
+    /** 当前 DIRECT 交接编号，由 Controller 分配，跨引擎重放时保持不变。 */
+    private var recordingTargetEpoch = 0
+
+    /**
+     * 录制业务窗口（含 PREPARE，R02）：GPU 路编码面不进相机会话，只看 extraSurface 会漏掉
+     * GPU 录制期；由 RecordRunner 显式开关，探测/等号纠偏在窗口内一律不启动。
+     */
+    @Volatile
+    private var recordingWindowActive = false
+
+    /** 最近一次成功提交的 repeating 是否用了等号探测曝光。仅相机线程读写。 */
+    private var repeatingUsedExposureProbe = false
+
+    /** 自动重开的在途任务（R03）：新意图/新重开必须能撤掉旧回调，不能让迟到回调复活预览。 */
+    private var reopenTask: Runnable? = null
 
     // 点按对焦上下文
     private var tapAfModeOverride: Int? = null
@@ -373,11 +499,14 @@ class Camera2Engine(
             if (slot.ability.isLegacy()) {
                 Log.w(TAG, "镜头 ${slot.logicId} 是 LEGACY 等级，手动参数可能不生效")
             }
-            highSpeedActive = slot.ability.highSpeedCapable &&
-                slot.ability.needsHighSpeed(params.size.value, fpsValue())
+            // Y05：开镜时同一拍就吃 [CameraAbility.decideFps]——会话模态不再另写
+            // `highSpeedCapable && needsHighSpeed(...)` 的第二份判据（与 UI 落档/请求区间同源）。
+            highSpeedActive = slot.ability.decideFps(params.size.value, fpsValue())?.highSpeed == true
             reqState = RequestApplier.stateOf(slot.ability, params.size.value, highSpeedActive)
             chosenFps = null
             structuralSignature = ""
+            // Y69：换镜头 = 新设备会话，给分析组合一次重新协商的机会（同一挂槽只自动撤一次）
+            analysisCombinationRejected = false
             sink.setOrientation(slot.ability.sensorOrientation, slot.type == LensType.FRONT)
             pushSinkFrameSize(params.size.value)
             publishDevice(DeviceStatus.OPEN_ING)
@@ -500,15 +629,16 @@ class Camera2Engine(
      * 追加输出面。DIRECT 模式下 record 包把 MediaRecorder 的 surface 交进来，会话形状随之重建；
      * reader 非 null 时由引擎在关闭序列里先停它。
      */
-    fun setExtraTarget(surface: Surface?, reader: ImageReader? = null) {
+    fun setExtraTarget(surface: Surface?, reader: ImageReader?, handoffEpoch: Int) {
         post {
             if (reader !== extraReader) stopImageReaders()
             extraSurface = surface
             extraReader = reader
-            // 等号档探测（方案 31）：录制目标在场必须**立刻**退出探测态——探测发的是等号请求，
-            // 决不能带进录制。进冷却，录完回预览后重探。
-            if (surface != null) cancelExposureProbe("录制目标在场")
+            recordingTargetEpoch = handoffEpoch
+            // 会话马上换面。在旧 builder 上重发会让同一 Surface 的旧请求冒充本次交接。
+            if (surface != null) cancelExposureProbe("录制目标在场", reapply = false)
             structuralSignature = ""
+            publishReadiness(configured = false, repeatingSubmitted = false)
             if (desiredPreview) ensureSession()
         }
     }
@@ -529,6 +659,9 @@ class Camera2Engine(
             }
             analysisSurface = surface
             analysisReader = reader
+            // Y69：重新挂槽是用户显式重试——组合被拒过也要再协商一次（只对真正换了目标生效，
+            // 同目标重放仍走上面的幂等分支，避免拒绝后每次回场都白撞一次失败）。
+            analysisCombinationRejected = false
             structuralSignature = ""
             if (desiredPreview) ensureSession()
         }
@@ -628,7 +761,7 @@ class Camera2Engine(
             }
             builder.addTarget(reader.surface)
             syncFpsPick(writeBack = false)
-            applyParams(builder, state)
+            applyParams(builder, state, snapshotNow(state))
             val request = builder.build()
             reader.setOnImageAvailableListener({ latest ->
                 val image = latest.acquireLatestImage()             // 丢旧保新
@@ -654,6 +787,16 @@ class Camera2Engine(
     private fun fpsValue(): Int = params.fps.value.value
 
     /**
+     * 一档帧率的**完整决议**（Y05 单一出口）：普通表先来、普通表覆盖不了才看高速表。
+     *
+     * 会话类型（[wantHighSpeed]/[onStructuralPulse]）、下发区间与退档（[syncFpsPick]）、
+     * 通知（[onFpsDowngraded]）都消费这一支——与 UI 的可选性/※ 标记同一个
+     * [com.wotagei.cam.core.CameraAbility.decideFps]。null = 两张表都不覆盖该档。
+     */
+    private fun fpsDecision(target: Int): FpsDecision? =
+        ability?.decideFps(params.size.value, target)
+
+    /**
      * 把「相机帧尺寸」推给输出面（GPU 侧要用它设 SurfaceTexture 默认缓冲与等比适配源比例）。
      * sink 的 onSizeChanged 语义是相机帧而非视图尺寸，视图尺寸由 UI 侧自己给（03 文档第 3 节）。
      */
@@ -671,7 +814,62 @@ class Camera2Engine(
      * 卡死在没人重启的死态：页面在、HUD 在、预览全黑，只有重进页面才可能恢复。
      */
     fun isPreviewLive(): Boolean =
-        threadRunning && device != null && session != null && desiredPreview
+        threadRunning && device != null && session != null && desiredPreview &&
+            readiness.ready && readiness.attempt == sessionAttempt
+
+    /**
+     * 当前就绪快照（R01）。调用方必须比较 `generation/attempt/recordingTargetEpoch`：
+     * 只看到 `ready==true` 可能仍是发起交接前的旧会话，不能据此开始录制。
+     */
+    fun sessionReadiness(): CameraSessionReadiness = readiness
+
+    /**
+     * B14：当前会话实测的裁剪区宽高比（`SCALER_CROP_REGION` 宽/高）。只读；null = 还没收到
+     * 普通会话的帧回执。分析流与预览流共享同一裁剪区，叠加映射用它还原真实取景范围。
+     */
+    fun sensorCropAspect(): Float? = sensorCropAspectValue
+
+    /** 每帧一次的单键读取；失败/缺失保持上一次值，绝不让诊断键异常打断帧回调。 */
+    private fun rememberSensorCrop(result: TotalCaptureResult) {
+        val crop = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.SCALER_CROP_REGION)
+        }.getOrNull() ?: return
+        if (crop.width() <= 0 || crop.height() <= 0) return
+        sensorCropAspectValue = crop.width().toFloat() / crop.height()
+    }
+
+    /**
+     * 录制窗口开关（R02）。窗口内：曝光等号探测必须完全退出（探测请求不能进录制），
+     * 并且取消已闩锁/在途探测，避免录制中途因一次脏刷新改写 SENSOR 三键。
+     */
+    fun setRecordingWindowActive(active: Boolean) {
+        post {
+            if (recordingWindowActive == active) return@post
+            recordingWindowActive = active
+            if (active) cancelExposureProbe("录制窗口", reapply = false)
+            publishReadiness()
+            // GPU 沿用原相机会话。必须等正常曝光请求取代已提交的满窗探测，才允许开始编码。
+            if (active && repeatingUsedExposureProbe) applyRepeatingNow()
+        }
+    }
+
+    private fun publishReadiness(
+        configured: Boolean = readiness.configured,
+        repeatingSubmitted: Boolean = readiness.repeatingSubmitted
+    ) {
+        readiness = CameraSessionReadiness(
+            generation = generation,
+            attempt = sessionAttempt,
+            configured = configured,
+            repeatingSubmitted = repeatingSubmitted,
+            recordingTargetPresent = extraSurface != null,
+            recordingTargetEpoch = if (
+                repeatingSubmitted && extraSurface?.let { target -> builderTargets.any { it === target } } == true
+            ) recordingTargetEpoch else 0,
+            recordingWindow = recordingWindowActive,
+            exposureProbeSubmitted = repeatingSubmitted && repeatingUsedExposureProbe
+        )
+    }
 
     /**
      * 真身四项的快照（诊断行用）：回场没复用成功时，把**哪一项断了**留在日志里——
@@ -717,38 +915,77 @@ class Camera2Engine(
     /**
      * GPU 的录像面不进相机会话；分析槽只在普通会话接纳。
      * constrained high-speed 不允许 YUV：保留分析意图与 reader，回普通档时自动恢复，不能靠录制期摘槽规避。
+     * Y69：普通会话拒过「基础输出 + 分析 YUV」组合时（[analysisCombinationRejected]）同样只保留
+     * 意图、不进会话——站位是可选增强，不能让它把预览/录制的建会话拖死。
      */
     private fun currentTargets(highSpeed: Boolean, mode: RenderMode = params.renderMode.value): List<Surface> {
         val base = sink.cameraTargets()
         val withExtra = if (mode == RenderMode.DIRECT) {
             (extraSurface?.let { base + it }) ?: base
         } else base
-        return if (highSpeed) withExtra else (analysisSurface?.let { withExtra + it }) ?: withExtra
+        val analysis = if (!highSpeed && !analysisCombinationRejected) analysisSurface else null
+        return analysis?.let { withExtra + it } ?: withExtra
     }
 
-    /** 建会话前同步回执；同一结果不重复提示，切回普通/摘槽时仍须交代状态变化。 */
+    /**
+     * 建会话前同步回执（Y69）：只宣布**此刻就能定论**的结果——没有分析面 = ABSENT，
+     * 高速会话按能力表硬性排除 YUV = BLOCKED_HIGH_SPEED，已拒过的组合 = BLOCKED_COMBINATION。
+     * 普通会话能否真的带上分析面是设备对组合的裁决，必须等 [sessionCallback] 的 onConfigured，
+     * 绝不在这里预支 INCLUDED（旧实现先报接纳，配置失败后整个设备重开仍带同一分析面）。
+     */
     private fun reportAnalysisDecision(highSpeed: Boolean) {
         val decision = when {
             analysisSurface == null -> AnalysisSessionDecision.ABSENT
             highSpeed -> AnalysisSessionDecision.BLOCKED_HIGH_SPEED
-            else -> AnalysisSessionDecision.INCLUDED
+            analysisCombinationRejected -> AnalysisSessionDecision.BLOCKED_COMBINATION
+            else -> return
         }
+        publishAnalysisDecision(decision)
+    }
+
+    /** 同一结果不重复提示；切回普通/摘槽时仍须交代状态变化。 */
+    private fun publishAnalysisDecision(decision: AnalysisSessionDecision) {
         if (decision == lastAnalysisDecision) return
         lastAnalysisDecision = decision
         runCatching { onAnalysisSessionDecision(decision) }
             .onFailure { Log.w(TAG, "分析流协商回执异常：$decision", it) }
     }
 
+    /**
+     * Y69：普通会话组合被拒（[sessionCallback] 的 onConfigureFailed 或 createCaptureSession
+     * 同步抛 IAE）时的一次性自救。
+     *
+     * 分析流是**可选**输出：部分机型支持该 YUV 单流尺寸，却拒绝它与预览/编码面的组合。旧实现
+     * 走 failDevice → 自动重开，重开仍带同一个分析面 ⇒ 整场预览/录制被一个可选功能拖死
+     * （REOPEN_MAX 用尽后停在失败态）。这里只撤「进会话的分析面」：surface/reader 与调用方
+     * 意图原样保留（与 [AnalysisSessionDecision.BLOCKED_HIGH_SPEED] 同一口径），并向站位层
+     * 给出明确暂停原因 [AnalysisSessionDecision.BLOCKED_COMBINATION]；随后按基础输出重连一次。
+     *
+     * 一次挂槽只自动撤一次：撤完基础会话再失败就没有可选面可撤，自然落回既有 failDevice
+     * 自愈链路，不会形成「拒绝 → 重试 → 再拒绝」的循环。
+     */
+    private fun withdrawAnalysisAndRetry(reason: String): Boolean {
+        if (analysisSurface == null || analysisCombinationRejected) return false
+        Log.w(TAG, "分析组合被拒，撤分析面重试基础会话：$reason")
+        analysisCombinationRejected = true
+        structuralSignature = ""
+        publishAnalysisDecision(AnalysisSessionDecision.BLOCKED_COMBINATION)
+        if (desiredPreview) ensureSession()
+        return true
+    }
+
     private fun wantHighSpeed(): Boolean {
         val a = ability ?: return false
-        if (!a.highSpeedCapable) return false
-        // 帧率普通会话覆盖不了（厂商把 50/60 只放进高速表，如 vivo V2520A）⇒ 高速会话；
-        // 旧阈值 fps > 60 会让 50/60 落回普通会话，而普通流根本没有这两档
-        return a.needsHighSpeed(params.size.value, fpsValue())
+        // Y05：会话类型吃 [fpsDecision] 的同一条结论（普通表先来、覆盖不了才看高速表）。
+        // 旧实现另算一遍 `needsHighSpeed`：与 UI 落档/请求区间用的 decideFps 是两份判据，
+        // 两边各改一次就会「界面按普通档显示、引擎按高速档开会话」。
+        // 非高速机型不需要额外预判：fpsRangesFor(size, true) 会退回普通表，决议只会给 false。
+        return a.decideFps(params.size.value, fpsValue())?.highSpeed == true
     }
 
     private fun signatureOf(size: Size, mode: RenderMode, highSpeed: Boolean, targets: List<Surface>): String =
-        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|an=${!highSpeed && analysisSurface != null}|${sink.structuralToken()}"
+        "${size.width}x${size.height}|$mode|hs=$highSpeed|n=${targets.size}|" +
+            "an=${!highSpeed && !analysisCombinationRejected && analysisSurface != null}|${sink.structuralToken()}"
 
     private fun ensureSession() {
         val dev = device
@@ -818,7 +1055,9 @@ class Camera2Engine(
             else failDevice(mapAccessReason(e.reason), "createCaptureSession 失败 reason=${e.reason}")
         } catch (e: IllegalArgumentException) {
             if (highSpeed) downgradeHighSpeed("高速输出面组合不被支持")
-            else failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话输出面组合非法（尺寸/格式不受支持）")
+            else if (!withdrawAnalysisAndRetry("会话输出面组合非法（尺寸/格式不受支持）")) {
+                failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话输出面组合非法（尺寸/格式不受支持）")
+            }
         } catch (e: IllegalStateException) {
             // 手里的 CameraDevice 已被系统收回：createCaptureSession 抛 IllegalStateException。
             // 切渲染模式（换 sink → 重建会话）的瞬间最容易撞上；不接住就是工作线程直接崩掉，
@@ -833,9 +1072,7 @@ class Camera2Engine(
         runCatching { dead.close() }
         if (stale) return
         device = null
-        session = null
-        highSpeedSession = null
-        reqBuilder = null
+        closeSessionQuietly()
         desiredPreview = false
         structuralSignature = ""
         publishPreview(PreviewStatus.STOP)
@@ -865,12 +1102,24 @@ class Camera2Engine(
                     highSpeedSession = null
                 }
                 session = configured
-                prepareBuilder(dev, targets)
+                if (!prepareBuilder(dev, targets)) {
+                    // R01/Y02：没有 builder 就没有 repeating，绝不能留下「configured 成功」的假就绪。
+                    failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "会话配置成功但 createCaptureRequest 失败")
+                    return
+                }
                 // 重开计数归零点（自 onOpened 挪来，2026-10-13）：只有会话真正配置成功才算
                 // "重开成功"——configure 连续失败的设备上 reopenRetries 得以累积到 REOPEN_MAX，
                 // scheduleReopen 触顶后停在失败态交 UI 恢复，不再无限重开
                 reopenRetries = 0
-                publishPreview(PreviewStatus.ING)
+                // 不在这里发布 ING（R01）：配置成功只证明会话对象可用，repeating 仍可能被 HAL
+                // 拒绝。等 applyRepeatingNow 的 setRepeatingRequest 真正返回成功再发布。
+                publishReadiness(configured = true, repeatingSubmitted = false)
+                // Y69：配置成功才确认接纳——这条普通会话确实把分析面带进了输出组合。
+                // 高速会话的 YUV 排除是能力表上的硬结论，已在建会话前报过 BLOCKED_HIGH_SPEED；
+                // 组合被拒后重连的基础会话没有分析面，不许在这里冒充 INCLUDED。
+                if (!highSpeed && analysisSurface != null && !analysisCombinationRejected) {
+                    publishAnalysisDecision(AnalysisSessionDecision.INCLUDED)
+                }
                 // 手动白平衡稳压窗（2026-10-29 用户真机报障）：设置页返回等场景会重建会话，
                 // 桥/HAL 对"一帧请求里的整套 WB 键"可能非原子生效——AWB_OFF 先落、矩阵/增益
                 // 后落，中间那几拍就是裸 OFF 的传感器原色绿。会话活起来的头一拍先按自动走，
@@ -886,12 +1135,14 @@ class Camera2Engine(
                 runCatching { failed.close() }
                 if (gen != generation || attempt != sessionAttempt) return
                 if (highSpeed) downgradeHighSpeed("高速会话 onConfigureFailed fps=${fpsValue()}")
-                else failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "普通会话 onConfigureFailed targets=${targets.size}")
+                else if (!withdrawAnalysisAndRetry("普通会话 onConfigureFailed targets=${targets.size}")) {
+                    failDevice(DeviceStatus.OPEN_FAILED_INNER_ERROR, "普通会话 onConfigureFailed targets=${targets.size}")
+                }
             }
         }
 
     /** 模板按 AF 模式选：录像连续 → TEMPLATE_RECORD，拍照连续 → TEMPLATE_PREVIEW */
-    private fun prepareBuilder(dev: CameraDevice, targets: List<Surface>) {
+    private fun prepareBuilder(dev: CameraDevice, targets: List<Surface>): Boolean {
         val pictureCf = params.afMode.value.cam2Mode ==
             CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
         val template = if (pictureCf) CameraDevice.TEMPLATE_PREVIEW else CameraDevice.TEMPLATE_RECORD
@@ -899,18 +1150,20 @@ class Camera2Engine(
             dev.createCaptureRequest(template)
         } catch (e: RuntimeException) {
             Log.w(TAG, "createCaptureRequest 失败：${e.message}")
-            return
+            return false
         }
         targets.forEach { surface -> builder.addTarget(surface) }
         reqBuilder = builder
         builderTargets = targets
         // 新 builder = 请求里没有我们写过的任何键 ⇒ 残留账清零（生命周期与 builder 严格一致）；
-        // AE 档对齐当前值（新 builder 无 SENSOR 三键，manual 档下一次 apply 会补写）
+        // 键集账记成"干净"（AUTO 形态，无 SENSOR 三键）。注意这不是"参数总线是 AUTO"：
+        // 若当前是手动档，紧接着的 applyParams 会写三键并把账翻成 true（Y02）。
         halNrWritten = false
         halNrStuckLogged = false
         halNrLastLogged = null
         halNrLoggedOnce = false
-        builderAeManual = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
+        builderAeManual = false
+        return true
     }
 
     /**
@@ -924,15 +1177,16 @@ class Camera2Engine(
         )
 
     /**
-     * 下发一帧参数——**三个通道（repeating / 单发 / 拍照前）共用**，`NOISE_REDUCTION_MODE` 的
-     * "写过什么"就记在这里（唯一副作用点）。
+     * Y02：**一份**参数快照决定这一拍的全部写键（AE 档、SENSOR 三键、降噪、白平衡……）。
+     * 翻档判定必须与写键吃同一份快照——原先 `applyRepeatingNow` 先读一次 `params.aeMode`
+     * 决定要不要重建 builder、`applyParams` 里再读一次生成快照；两读之间用户切档时，会出现
+     * 「按 AUTO 判定不复建、快照却已经是 MANUAL/或反之」的撕裂，AUTO 分支跳过 SENSOR 三键
+     * 就把旧 builder 的残值原样发了出去。
      *
-     * 为什么需要记：`CaptureRequest.Builder` 每会话只建一次、跨多次下发复用，且 Camera2 没有单键
-     * remove ⇒ "不再写这个键"不等于"清掉上一次写的值"。策略本身在
-     * [com.wotagei.cam.core.noiseReductionModeToSend]（纯函数、JVM 全测），这里只管
-     * ①把决议结果塞进快照 ②把"写过什么"记回来。
+     * 降噪的 "写过什么" 也在这里结算：`NOISE_REDUCTION_MODE` 与 SENSOR 三键同病（无删键），
+     * 策略本身在 [com.wotagei.cam.core.noiseReductionModeToSend]（纯函数、JVM 全测）。
      */
-    private fun applyParams(builder: CaptureRequest.Builder, state: RequestApplier.State) {
+    private fun snapshotNow(state: RequestApplier.State): RequestApplier.Snapshot {
         val requested = videoDenoiseActual()
         val mode = com.wotagei.cam.core.noiseReductionModeToSend(
             requested, state.noiseReductionModes, halNrWritten
@@ -968,7 +1222,22 @@ class Camera2Engine(
             halNrStuckLogged = true
             Log.w(TAG, "退出画面降噪但本机未声明 NOISE_REDUCTION_MODE_OFF，本场请求仍带上一档（下次开会话恢复）")
         }
-        RequestApplier.apply(builder, state, snapshot(mode))
+        return snapshot(mode)
+    }
+
+    /**
+     * 下发一帧参数——**三个通道（repeating / 单发 / 拍照前）共用**，`NOISE_REDUCTION_MODE` 的
+     * "写过什么"就记在这里（唯一副作用点）。
+     *
+     * [snap] 必须由 [snapshotNow] 在**同一次下发决策**里生成（Y02）：调用方用同一份快照判定
+     * AE 翻档、决定 builder 是否干净，再原样交进来写键；这里不再读第二遍参数。
+     */
+    private fun applyParams(
+        builder: CaptureRequest.Builder,
+        state: RequestApplier.State,
+        snap: RequestApplier.Snapshot
+    ) {
+        RequestApplier.apply(builder, state, snap)
         // 曝光三键的**下发真值**（2026-10-30 审查 🟡-1/🟡-2 取证）：手动档写三键、自动档缺席。
         // 与降噪那枚同纪律：只在变化时打一行，不跟着逐帧刷。帧率归因（"60fps+手动1/240 掉到
         // 30"）靠这一行定位——它直接给出当时下发的曝光与帧周期，以及是否被设备范围钳制过。
@@ -982,13 +1251,24 @@ class Camera2Engine(
                     "%.2fms(1/%d)".format(ms, (1_000_000_000L / it.coerceAtLeast(1L)))
                 } ?: "缺席"
             }
-            val clampNote = buildString {
-                if (state.exposureMinNs > 0 && sentExpNs != null && sentExpNs < state.exposureMinNs) append("min抬升 ")
-                if (state.exposureMaxNs > 0 && sentExpNs != null && sentExpNs > state.exposureMaxNs) append("max压回 ")
+            // B01：夹取判据吃「用户请求值 → 钳制后中间值 → 最终发送值」三段——拿最终值跟设备
+            // 范围比永远相等，日志恒为 clamp=无，真发生过夹取也查不出来（帧率掉档取证最需要
+            // 这一行）。范围夹取（min/max）、1/fps 与 1/10s 钳制、等号档纠偏三者都会让
+            // sent ≠ requested：中间值由 [RequestApplier.clampShutterNs] 按同一参数复算，专门
+            // 区分「设备范围夹取」与「纠偏余量」这两类，避免把纠偏误报成夹取。
+            val requestedNs = snap.shutterNs
+            val clampedNs = RequestApplier.clampShutterNs(
+                requestedNs, snap.fpsTarget, state.exposureMinNs, state.exposureMaxNs,
+                forceDeviceRange = WotaTiers.isRequiredShutterNs(requestedNs)
+            )
+            val clampNote = if (sentExpNs == null) "无" else buildString {
+                if (clampedNs != requestedNs) append("clamped=$clampedNs ")
+                if (requestedNs != sentExpNs) append("req=${requestedNs}ns→sent=${sentExpNs}ns")
             }.ifEmpty { "无" }
             Log.i(
                 TAG,
-                "曝光下发 ae=${if (builderAeManual == true) "MANUAL" else "AUTO"} iso=${sentIso ?: "缺席"} " +
+                "曝光下发 ae=${if (snap.aeMode == com.wotagei.cam.core.AeMode.MANUAL) "MANUAL" else "AUTO"} " +
+                    "iso=${sentIso ?: "缺席"} " +
                     "exposure=${fmtNs(sentExpNs)} frameDuration=${fmtNs(sentFdNs)} clamp=$clampNote"
             )
             expIsoLogged = sentIso
@@ -1001,15 +1281,24 @@ class Camera2Engine(
         // HUD 实测读数（方案 31，2026-11-01 用户定版）：实际下发曝光与生效纠偏值。
         // 手动档才有曝光可言（自动档三键缺席 ⇒ null）；非等号档纠偏不适用 ⇒ null——
         // 这两枚只进左上角读数行，与帧率守卫提示行互不相干。
-        params.actualSentExposureNs.value = sentExpNs
-        params.actualCorrectionNs.value =
-            if (sentExpNs != null && ExposureCorrection.applicable(params.shutter.value.value, fpsValue())) {
-                (ExposureCorrection.framePeriodNs(fpsValue()) - sentExpNs).coerceAtLeast(0L)
+        // B01：这里只是**候选**——applyParams 在 build 之前跑，请求还没交给平台。真正写总线
+        // 要等 [submitRepeating] 的平台调用返回成功（[publishSentExposure]），否则 HUD 会显示
+        // 一个从未生效的值（无会话/请求被拒时尤其误导）。
+        pendingSentExposureNs = sentExpNs
+        pendingSentCorrectionNs =
+            if (sentExpNs != null && ExposureCorrection.applicable(snap.shutterNs, snap.fpsTarget)) {
+                (ExposureCorrection.framePeriodNs(snap.fpsTarget) - sentExpNs).coerceAtLeast(0L)
             } else {
                 null
             }
+        val mode = snap.halNoiseReductionMode
         if (mode != null) {
             halNrWritten = mode != CaptureRequest.NOISE_REDUCTION_MODE_OFF
+        }
+        // Y02：只有 repeating builder 的键集账由这里维护；singleCapture 复用它（同一对象），
+        // captureStill 的临时 builder 不受影响（否则会把仍干净的 repeating builder 误记成手动）。
+        if (builder === reqBuilder) {
+            builderAeManual = snap.aeMode == com.wotagei.cam.core.AeMode.MANUAL
         }
     }
 
@@ -1025,7 +1314,8 @@ class Camera2Engine(
 
     /** 读出闩锁的配置键（方案 31 §3）：读出时间随镜头/画幅/fps 变，键不匹配即重探 */
     private fun readoutKeyNow(): String =
-        "${params.lens.value.name}|${params.size.value.width}x${params.size.value.height}|${fpsValue()}"
+        "g$generation|a$sessionAttempt|${lens?.key ?: params.lens.value.name}|" +
+            "${params.size.value.width}x${params.size.value.height}|${fpsValue()}"
 
     /**
      * 等号档读出探测（方案 31 §3，2026-11-01 用户定版）：挂在 [captureCallback] 每帧回执上。
@@ -1033,15 +1323,31 @@ class Camera2Engine(
      * 条件一破立刻退出探测态（等号请求不能漏进任何别的状态）。前 [EXPOSURE_PROBE_WARMUP_FRAMES]
      * 拍是换挡热身（等号请求生效 + HAL 换 FD 需要几拍），不采；采满 [ExposureCorrection.PROBE_SAMPLES]
      * 个间隔即折算中位数落闩锁，下一拍下发就带纠偏。
+     *
+     * 归属（Y01/R02）：回执必须来自**当前会话**，并且推进采样的每一拍都必须是**本探测自己
+     * 提交出去的那一代请求**（[lastSubmittedRepeatingRequest]/[lastSubmittedHighSpeedRequests]）
+     * 产生的回执。只比 session 不够：探测请求刚下发、builder 刚重建时，同会话在途的旧请求回执
+     * 仍会到达，把旧间隔混进新窗、把重建前的帧算成热身，都会污染 Δ。
+     *
+     * 首拍例外：条件刚齐的那一拍只负责「开窗 + 排超时 + markDirty」，不采时间戳——它可能来自
+     * 旧请求，但后续采样一律经 [isProbeRequestEcho] 身份门。录制窗口内（含 GPU）一律不探测。
      */
-    private fun feedExposureProbe(result: TotalCaptureResult) {
+    private fun feedExposureProbe(
+        session: CameraCaptureSession,
+        request: CaptureRequest,
+        result: TotalCaptureResult
+    ) {
+        if (session !== this.session) return
         val key = readoutKeyNow()
-        val shouldProbe = deviceStatus == DeviceStatus.OPEN_SUCCEED &&
-            extraSurface == null &&
-            params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL &&
-            params.exposureCorrectionAuto.value &&
-            ExposureCorrection.applicable(params.shutter.value.value, fpsValue()) &&
-            params.readoutLatch.value?.takeIf { it.key == key } == null
+        val shouldProbe = exposureProbeAllowed(
+            deviceOpen = deviceStatus == DeviceStatus.OPEN_SUCCEED,
+            directSurfacePresent = extraSurface != null,
+            recordingWindow = recordingWindowActive,
+            manualAe = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL,
+            correctionAuto = params.exposureCorrectionAuto.value,
+            correctionApplicable = ExposureCorrection.applicable(params.shutter.value.value, fpsValue()),
+            alreadyLatched = params.readoutLatch.value?.takeIf { it.key == key } != null
+        )
         if (!shouldProbe) {
             cancelExposureProbe("条件退出")
             return
@@ -1052,13 +1358,21 @@ class Camera2Engine(
             exposureProbeKey = key
             exposureProbeIntervals.clear()
             exposureProbeLastTsNs = 0L
-            exposureProbeFramesSeen = 0
+            // 首拍只开窗（见 KDoc）：它不一定来自探测请求，故计入热身但不采时间戳
+            exposureProbeFramesSeen = 1
             exposureProbeStartMs = now
             exposureProbeActive = true
+            // Y01：开一次探测就排一枚独立超时，帧回执中断时由它兜底退出（见 [exposureProbeTimeoutTask]）
+            if (threadRunning) workHandler.postDelayed(exposureProbeTimeoutTask, ExposureCorrection.PROBE_TIMEOUT_MS)
             markDirty() // 下一拍起发等号请求（量程本身）；不 mark 的话这一场还带着 5% 余量
             Log.i(TAG, "等号档读出探测开始 key=$key（预览态发等号请求；录制目标在场即中止）")
+        } else {
+            // Y01：身份门——只有「最近一次提交成功、且那次确实带了等号请求」的回执才能推进窗口。
+            // `repeatingUsedExposureProbe` 是提交那一刻的账（探测已开 ⇒ 请求带等号）；
+            // 请求身份证明它属于本世代，旧请求/旧 builder 的迟到回执到此为止。
+            if (!repeatingUsedExposureProbe || !isProbeRequestEcho(request)) return
+            exposureProbeFramesSeen++
         }
-        exposureProbeFramesSeen++
         if (exposureProbeFramesSeen <= EXPOSURE_PROBE_WARMUP_FRAMES) return
         val tsNs = runCatching { result.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) }.getOrNull() ?: return
         if (exposureProbeLastTsNs > 0L && tsNs > exposureProbeLastTsNs) {
@@ -1082,8 +1396,29 @@ class Camera2Engine(
         }
     }
 
-    /** 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量） */
-    private fun cancelExposureProbe(why: String) {
+    /**
+     * Y01：这条回执是否来自最近一次**提交成功**的 repeating 请求。
+     * 普通会话是单对象身份；高速会话的回执由平台从请求列表重建，只能做成员身份比对。
+     * 两者都为空（还没提交过/会话刚拆）⇒ false，探测窗口不会被无主回执推进。
+     */
+    private fun isProbeRequestEcho(request: CaptureRequest): Boolean {
+        val normal = lastSubmittedRepeatingRequest
+        if (normal != null) return request === normal
+        val burst = lastSubmittedHighSpeedRequests ?: return false
+        for (i in burst.indices) if (burst[i] === request) return true
+        return false
+    }
+
+    /**
+     * 退出探测态并触发一次重下发（probeActive 翻回 false ⇒ exposurePlan 恢复正常余量）。
+     * 同时清掉在途的 [exposureProbeTimeoutTask]（Y01）：否则迟到的那枚超时会在探测已经
+     * 退出/换代之后又跑一次，把冷却账写在无关的世代上。
+     *
+     * [reapply] = false 用于拆除路径（[closeSessionQuietly]/[teardownDevice]）：只清探测态与
+     * 在途计时，不再 markDirty——拆会话前再排一次 flushTask 只会白发一轮等号请求。
+     */
+    private fun cancelExposureProbe(why: String, reapply: Boolean = true) {
+        workHandler.removeCallbacks(exposureProbeTimeoutTask)
         if (!exposureProbeActive && exposureProbeKey == null) return
         exposureProbeActive = false
         exposureProbeKey = null
@@ -1091,7 +1426,7 @@ class Camera2Engine(
         exposureProbeLastTsNs = 0L
         exposureProbeFramesSeen = 0
         Log.i(TAG, "等号档探测退出：$why")
-        markDirty()
+        if (reapply) markDirty()
     }
 
     private fun snapshot(halNoiseReductionMode: Int?): RequestApplier.Snapshot = with(params) {
@@ -1144,22 +1479,40 @@ class Camera2Engine(
         // （flushTask 与 onConfigured 都无包装）→ 引擎线程未捕获即进程死亡。一并纳入，
         // 让下面的分类 catch 对「下发前的最后计算」同样生效。
         try {
-            syncFpsPick(writeBack = true)
-            // AE 档翻转（反馈 #1 方案A）：SENSOR 三键在自动档必须从请求里**缺席**，
-            // 而 builder 无删键 ⇒ 整个重建（键集天然自洽，applyParams 随后全量重放其余键）。
-            // 放在 try 内：与 syncFpsPick/apply/build 同一条 P1 纪律（任何 RuntimeException 不许穿透）。
-            val manualNow = params.aeMode.value == com.wotagei.cam.core.AeMode.MANUAL
-            if (builderAeManual != manualNow) {
-                device?.takeIf { builderTargets.isNotEmpty() }?.let { prepareBuilder(it, builderTargets) }
-                builderAeManual = manualNow
-                Log.i(TAG, "AE 档翻转 → 重建 repeating builder（manual=$manualNow），清 SENSOR 三键残留")
+            if (syncFpsPick(writeBack = true)) {
+                // Y05：帧率决议要求的会话模态与当前会话不一致（高速 ↔ 普通）。本拍**不 build**
+                // ——旧会话照旧下发另一张表的区间会出现「界面 120、HAL 跑 30）。换会话后由
+                // onConfigured 的 applyRepeatingNow 重放（syncFpsPick 已把总线值/通知做完）。
+                structuralSignature = ""
+                ensureSession()
+                return
+            }
+            // Y02：**一份快照**贯穿翻档判定与写键。先前的两次读（这里读 aeMode、applyParams
+            // 里再快照）在用户切档的瞬间会撕裂：按 AUTO 判定不复建，快照却是另一档，AUTO
+            // 分支跳过 SENSOR 三键 ⇒ 旧手动 builder 的三键残值原样进请求。
+            val snap = snapshotNow(state)
+            val manualNow = snap.aeMode == com.wotagei.cam.core.AeMode.MANUAL
+            // 只有「手动 builder 切 AUTO」必须换 builder：Camera2 无删键，AUTO 分支不写三键，
+            // 残值清不掉。反向（干净 builder 切手动）安全——apply 会把三键全部写上新值。
+            if (!manualNow && builderAeManual == true) {
+                val dev = device
+                val rebuilt = dev != null && builderTargets.isNotEmpty() &&
+                    prepareBuilder(dev, builderTargets)
+                if (!rebuilt) {
+                    // 重建失败：绝不拿旧手动 builder 发 AUTO（残值会让 HAL 行为不可预期）。
+                    // 本拍不下发，短重试 + 下一次脏刷新继续；账（builderAeManual）保持 true。
+                    scheduleAeFlipRetry(manualNow)
+                    return
+                }
+                aeFlipRetryAttempt = 0
+                Log.i(TAG, "手动→AUTO 翻转 → 重建 repeating builder，清 SENSOR 三键残留")
             }
             // builder 可能刚被重建：apply 与 build 都必须落在新 builder 上——
             // 【2026-10-27 复审修掉的 P1】重建后若仍 build 旧 builder，翻转那一次下发的是
             // 带 SENSOR 三键残值的旧请求（闪动修复在翻转瞬间静默失效，且 AUTO 档此后
-            // 没有别的下发时机会自愈）。prepareBuilder 失败时 reqBuilder 不动 = 沿用旧值。
+            // 没有别的下发时机会自愈）。
             val effectiveBuilder = reqBuilder ?: builder
-            applyParams(effectiveBuilder, state)
+            applyParams(effectiveBuilder, state, snap)
             val request = effectiveBuilder.build()
             submitRepeating(request)
         } catch (e: CameraAccessException) {
@@ -1182,19 +1535,83 @@ class Camera2Engine(
         }
     }
 
+    /**
+     * Y02：AUTO 切档重建 builder 失败后的短重试（100ms × [AE_FLIP_RETRY_MAX]）。
+     * 触顶后不再自动重排——避免在设备/目标面长期不可用时无限打转；任何参数脏刷新仍会再试。
+     */
+    private fun scheduleAeFlipRetry(manualNow: Boolean) {
+        if (aeFlipRetryAttempt >= AE_FLIP_RETRY_MAX) {
+            Log.w(
+                TAG,
+                "手动→AUTO 重建 builder 连续失败 $aeFlipRetryAttempt 次，停止自动重试" +
+                    "（manual=$manualNow，等下一次参数变化）"
+            )
+            return
+        }
+        aeFlipRetryAttempt++
+        workHandler.removeCallbacks(aeFlipRetryTask)
+        workHandler.postDelayed(aeFlipRetryTask, AE_FLIP_RETRY_MS)
+        Log.w(
+            TAG,
+            "手动→AUTO 重建 builder 失败，${AE_FLIP_RETRY_MS}ms 后重试" +
+                " #$aeFlipRetryAttempt/$AE_FLIP_RETRY_MAX（manual=$manualNow）"
+        )
+    }
+
     /** repeating 的平台出口：与参数计算分开，保持普通/高速回调选择及异常处理不变。 */
     private fun submitRepeating(request: CaptureRequest) {
         val hs = highSpeedSession
         val normal = session
-        if (hs != null) hs.setRepeatingBurst(hs.createHighSpeedRequestList(request), frameCountCallback, workHandler)
-        else normal?.setRepeatingRequest(request, captureCallback, workHandler)
+        if (hs != null) {
+            // Y01：高速回执是平台从这份列表重建的请求对象，保存「这一代提交出去的实例」
+            // 供探测做成员身份比对（普通会话则保存原始 request 单对象）。
+            val burst = hs.createHighSpeedRequestList(request)
+            hs.setRepeatingBurst(burst, frameCountCallback, workHandler)
+            lastSubmittedRepeatingRequest = null
+            lastSubmittedHighSpeedRequests = burst
+        } else {
+            // 无会话不能算提交成功：不能让就绪快照停在 configured=true / submitted=false 之外
+            normal?.setRepeatingRequest(request, captureCallback, workHandler) ?: return
+            lastSubmittedRepeatingRequest = request
+            lastSubmittedHighSpeedRequests = null
+        }
+        // 只有平台调用返回成功才把就绪快照推进到 ready（R01）——这是首录/换段唯一可信的
+        // 「本世代会话已接纳帧请求」证据；调用抛异常时 applyRepeatingNow 的 catch 负责失败态。
+        // B01：送出曝光读数同一处发布——与「请求真的进了平台」用同一条证据线，不提前显示。
+        publishSentExposure()
+        repeatingUsedExposureProbe = exposureProbeActive
+        aeFlipRetryAttempt = 0
+        publishReadiness(configured = true, repeatingSubmitted = true)
+        if (desiredPreview) publishPreview(PreviewStatus.ING)
+    }
+
+    /** B01：把本次**提交成功**的送出曝光读数发布到总线（HUD 只读）。 */
+    private fun publishSentExposure() {
+        params.actualSentExposureNs.value = pendingSentExposureNs
+        params.actualCorrectionNs.value = pendingSentCorrectionNs
     }
 
     private fun singleCapture(tag: String) {
         val builder = reqBuilder ?: return
         val state = reqState ?: return
-        applyParams(builder, state)
-        val request = builder.build()
+        val snap = snapshotNow(state)
+        // Y02：单发走的是 repeating builder。AUTO 目标若落在这支写过手动三键的 builder 上，
+        // 同样会把残值带进请求（只是单拍，危害小但取证会误导）。按同一规则先换干净 builder；
+        // 重建失败则跳过这一拍单发（AF 触发下轮/下一次参数变化还会再来）。
+        if (snap.aeMode != com.wotagei.cam.core.AeMode.MANUAL && builderAeManual == true) {
+            val dev = device
+            val rebuilt = dev != null && builderTargets.isNotEmpty() &&
+                prepareBuilder(dev, builderTargets)
+            if (!rebuilt) {
+                Log.w(TAG, "$tag 单发跳过：AUTO 需重建干净 builder 但失败，避免 SENSOR 三键残值")
+                scheduleAeFlipRetry(manualNow = false)
+                return
+            }
+            aeFlipRetryAttempt = 0
+        }
+        val effectiveBuilder = reqBuilder ?: builder
+        applyParams(effectiveBuilder, state, snap)
+        val request = effectiveBuilder.build()
         val hs = highSpeedSession
         val normal = session
         try {
@@ -1231,9 +1648,19 @@ class Camera2Engine(
         ) {
             camResultCount++
             camResultTotal++
-            feedExposureProbe(result)
+            // B14：裁剪读数只认当前普通会话实际下发的 repeating；迟到帧不能改新画幅。
+            if (session === this@Camera2Engine.session && request === lastSubmittedRepeatingRequest) {
+                rememberSensorCrop(result)
+            }
+            feedExposureProbe(session, request, result)
+            sampleHalExposure(session, result)
             logAeAfTelemetry(result)
-            val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value)
+            // Y06：手动白平衡判负必须归属到**产出这条回报的那支请求**，而不是回报到达时总线怎么想。
+            // 总线切到手动后，改档前发出的 AUTO 拍、种子/稳压窗里按自动走的拍、旧会话迟到的拍
+            // 都会晚 2~4 帧到；旧实现一律按「现在是手动」计负 ⇒ 冷启即手动/换会话后前几拍被误判
+            // 「HAL 不采纳增益」，白平衡被无故闩到画面算法。
+            val manual = RequestApplier.isManualWhiteBalance(params.wbMode.value) &&
+                manualWbRequestOf(session, request)
             logWbTelemetry(result, manual)
             // 种子捕获：只要回报显示 3A 自己的色彩管理还在跑（模式不是 TRANSFORM_MATRIX），
             // HAL 回报的 CCM 就是"活"的，抓来当种子（500ms 节流）。手动 HAL 档回报的是我们
@@ -1252,7 +1679,11 @@ class Camera2Engine(
                 }
             }
             if (!manual) {
+                // Y06：不是「这一拍真的写了 OFF+TRANSFORM_MATRIX」的回报，一律不参与判负，
+                // 也不延续上一轮连续拍计数（连续必须是**连续的手动请求**结论）。
                 wbProbeFails = 0
+                wbAwbActiveFails = 0
+                wbAdoptFails = 0
                 return
             }
             // 单调钟而非 System.currentTimeMillis()（2026-10-10 S3-03）：墙钟被往回调时
@@ -1344,6 +1775,9 @@ class Camera2Engine(
         ) {
             camResultCount++
             camResultTotal++
+            // B01：高速会话也要有 HAL 结果侧读数（节流 500ms，无字符串/无分配）；探测本身
+            // 只在普通回执上跑（等号请求不进高速录制窗口），这里不重复喂探测。
+            sampleHalExposure(session, result)
         }
     }
 
@@ -1369,6 +1803,7 @@ class Camera2Engine(
     private var camResultCount = 0L
 
     /** 结果回调**进程内单调累计**（只增不重置）：预览自愈心跳的唯一相机侧判据，见 [frameResultCount] */
+    @Volatile
     private var camResultTotal = 0L
     private var camRateLastMs = 0L
     private var lowFpsWatch: LowFpsWatch? = null
@@ -1377,6 +1812,32 @@ class Camera2Engine(
         while (isActive) {
             delay(LOW_FPS_SAMPLE_PERIOD_MS)
             sampleCameraRate(SystemClock.elapsedRealtime())
+        }
+    }
+
+    /**
+     * B01：HAL **结果侧**曝光采样（独立于我方送出值）。`SENSOR_EXPOSURE_TIME` 在结果里是
+     * HAL 实际生效的曝光——设备范围夹取、HAL 改写、等号档处理都体现在这里；请求侧写的值
+     * （[params.actualSentExposureNs]）只证明"发了什么"。两者并排才能定位"发的和跑的不一样"。
+     *
+     * 500ms 节流（[HAL_EXPOSURE_SAMPLE_MS]）：曝光随 AE 慢变，没必要逐帧读；只在值变化时
+     * 写总线（StateFlow 同值去重之外再省一次装箱），不分配字符串、不触网。
+     * 单拍缺报保留上一次好观测（与 CCM 种子同纪律），会话关闭/设备不在时由清理路径置空。
+     */
+    private fun sampleHalExposure(session: CameraCaptureSession, result: TotalCaptureResult) {
+        // 普通/高速两条会话通道都要认（二者互斥：高速时 this.session 为 null）
+        if (session !== this.session && session !== highSpeedSession) return
+        if (deviceStatus != DeviceStatus.OPEN_SUCCEED) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHalExposureSampleMs < HAL_EXPOSURE_SAMPLE_MS) return
+        lastHalExposureSampleMs = now
+        val ns = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
+        }.getOrNull() ?: return
+        lastHalExposureNs = ns
+        if (ns != lastPublishedHalExposureNs) {
+            lastPublishedHalExposureNs = ns
+            params.actualHalExposureNs.value = ns
         }
     }
 
@@ -1390,10 +1851,21 @@ class Camera2Engine(
         val aeFps = runCatching {
             result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)?.let { "[${it.lower},${it.upper}]" }
         }.getOrNull()
+        // B01：HAL 结果侧曝光与请求侧送出值并排（请求侧见「曝光下发」行）——两者不等即证明
+        // HAL 夹取/改写，光看请求侧会误判"已按档位生效"。
+        val halExpNs = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
+        }.getOrNull()
+        val halExpText = halExpNs?.let {
+            "${it}ns(1/${1_000_000_000L / it.coerceAtLeast(1L)})"
+        } ?: "无"
+        val lensFocus = runCatching {
+            result.get(android.hardware.camera2.CaptureResult.LENS_FOCUS_DISTANCE)
+        }.getOrNull()
         Log.d(
             TAG,
             "3A遥测 aeState=$aeState afState=$afState afMode=$afMode fpsRange=${aeFps ?: "无"}" +
-                " lensFocus=${runCatching { result.get(android.hardware.camera2.CaptureResult.LENS_FOCUS_DISTANCE) }.getOrNull()}"
+                " halExp=$halExpText lensFocus=$lensFocus"
         )
     }
 
@@ -1413,6 +1885,10 @@ class Camera2Engine(
             params.actualSentExposureNs.value = null
             params.actualCorrectionNs.value = null
             params.actualFps.value = null
+            params.actualHalExposureNs.value = null
+            lastHalExposureNs = null
+            lastHalExposureSampleMs = 0L
+            lastPublishedHalExposureNs = null
             return
         }
         val target = params.fps.value.value
@@ -1464,6 +1940,26 @@ class Camera2Engine(
                 params.wbHalRejected.value ||
                 // 会话重建稳压窗：窗内先按自动走，WB 键整套装稳后再切手动
                 SystemClock.elapsedRealtime() < wbHoldUntilMs)
+
+    /**
+     * 这条回报是否来自**我们真的写了手动白平衡键**的请求（Y06 归属口径）：
+     * ① 会话身份：必须是当前会话——旧会话/旧世代迟到的回报按代数丢弃（切镜头必换会话，
+     *    所以这里同时锁住了镜头身份）；
+     * ② 请求实际写键：`CONTROL_AWB_MODE=OFF` 且 `COLOR_CORRECTION_MODE=TRANSFORM_MATRIX`。
+     *    [RequestApplier.applyWhiteBalance] 只在「手动档 + 种子已到手 + 不走画面算法」时写这对键；
+     *    种子窗、稳压窗、画面算法兜底写的都是 AUTO+FAST。总线现值不代表在途请求的键。
+     * 读键失败/缺键一律按「不是手动请求」处理：宁可少判负，不许把自动回报计进手动判负。
+     */
+    private fun manualWbRequestOf(session: CameraCaptureSession, request: CaptureRequest): Boolean {
+        // 普通回执只挂在普通会话上（高速会话走 frameCountCallback），比较当前会话即可；
+        // 会话重建后旧对象的迟到回执在这里被整体丢弃。
+        if (session !== this.session) return false
+        return runCatching {
+            request.get(CaptureRequest.CONTROL_AWB_MODE) == CaptureRequest.CONTROL_AWB_MODE_OFF &&
+                request.get(CaptureRequest.COLOR_CORRECTION_MODE) ==
+                CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+        }.getOrDefault(false)
+    }
 
     /** 增益采纳判据的相对容差（见 logWbTelemetry）：HAL 量化/归一化不算未采纳 */
     private val WB_ADOPT_TOL = 0.15f
@@ -1580,26 +2076,33 @@ class Camera2Engine(
     /**
      * 每次下发前对齐 fps：固定 [f,f] 优先，否则落可变范围并标 exact=false；
      * 总线值与快门上限的回写只在 [writeBack] 为真时做（避免在拍照通道里改用户值）。
+     *
+     * 返回 true = **决议要求的会话模态与当前会话不一致**（高速 ↔ 普通），调用方必须先重建
+     * 会话再下发；本函数已经把它能做的回写/通知做完（Y05）。
      */
-    private fun syncFpsPick(writeBack: Boolean) {
-        val state = reqState ?: return
+    private fun syncFpsPick(writeBack: Boolean): Boolean {
+        val state = reqState ?: return false
         val target = fpsValue()
-        val normal = RequestApplier.pickFps(state.fpsRanges, target, state.highSpeed)
-        if (normal != null) {
-            if (chosenFps != normal) {
+        // Y05：UI 可选性、会话类型、下发区间、退档与提示全部消费同一条 [decideFps] 决议
+        //（普通表先来、普通表覆盖不了才看高速表）。旧实现在这里读 state.fpsRanges +
+        // state.highSpeed 再选一遍，等于给"下发走哪张表"开了第二份判据。
+        val decision = fpsDecision(target)
+        if (decision != null && decision.highSpeed == state.highSpeed) {
+            val pick = decision.pick
+            if (chosenFps != pick) {
                 // 帧率决议留痕（2026-10-26）：50/60 这类"区间内由 HAL 定"的档，事后只能靠这行
                 // 判断到底下发成了什么；ranges 一并打出来，机型差异（表长什么样）不用重编就能核。
                 // 这就是"给适配留的口子"：真机 logcat 一行 `adb logcat -s WotaCam | grep 帧率决议`
                 Log.i(
                     TAG,
-                    "帧率决议 fps=$target -> [${normal.lo},${normal.hi}] exact=${normal.exact} " +
+                    "帧率决议 fps=$target -> [${pick.lo},${pick.hi}] exact=${pick.exact} " +
                         "highSpeed=${state.highSpeed} ranges=[${rangesSummary(state.fpsRanges)}]"
                 )
             }
-            chosenFps = normal
+            chosenFps = pick
             if (writeBack) {
                 // 总线保持用户档位（24 就是 24），不可用固定范围时用 exact 标记「※」
-                writeBackFps(target, normal.exact)
+                writeBackFps(target, pick.exact)
                 // 帧周期钳制吃**范围下界**（2026-10-04 r26 与 r10/r11 同源）：lo=档位（[24,30] 的
                 // lo=24），1/24 的 41.67ms 在合法域 [1/30, 1/24] 内不再被 hi=30 钳回 1/30——
                 // 旧口径在回写时就把强制档改写掉，r10 的下发修正根本见不到 1/24
@@ -1607,7 +2110,20 @@ class Camera2Engine(
                 // 50/60 档放行 1/30 死档（帧周期 20ms 装不下），见 Snapshot.fpsTarget 的说明
                 clampShutterToFrame(target)
             }
-            return
+            return false
+        }
+        if (decision != null) {
+            // 决议落在**另一张表**（会话模态还没跟上）：不能把另一张表的区间发进本会话
+            //（会发生「界面 60、HAL 跑 120」）。拍照通道不重建会话，沿用本会话上一份区间。
+            if (!writeBack) return false
+            Log.w(
+                TAG,
+                "帧率决议要求换会话模态：fps=$target 决议hs=${decision.highSpeed} " +
+                    "会话hs=${state.highSpeed} ranges=[${rangesSummary(state.fpsRanges)}]"
+            )
+            writeBackFps(target, decision.pick.exact)
+            clampShutterToFrame(target)
+            return true
         }
         // target 完全不在设备能力内（多为 120/240 无高帧率）：退到可达上限并报一次高帧率失败
         val ceiling = ceilingFps(state)
@@ -1621,20 +2137,31 @@ class Camera2Engine(
             Log.w(
                 TAG,
                 "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围且无退档目标，保持 $target；" +
-                    "ranges=[${rangesSummary(state.fpsRanges)}] cap=$capText ceiling=$ceiling " +
+                    "ranges=[${rangesSummary(state.fpsRanges)}] normal=[${rangesSummary(normalFpsRangesOf())}] " +
+                    "cap=$capText ceiling=$ceiling " +
                     "判定=保持总线原值·不回写帧率·不发高帧率失败态"
             )
-            return
+            return false
         }
-        val fallback = RequestApplier.pickFps(state.fpsRanges, ceiling, false) ?: return
+        // Y05：退档区间也走同一决议出口（普通表优先）——不再单独 pickFps(state.fpsRanges)：
+        // 高速态下那张表是高速表，退档会回写一个"界面说 120、HAL 实际跑 30"的值。
+        val fallback = fpsDecision(ceiling)?.pick
+            ?: RequestApplier.pickFps(normalFpsRangesOf(), ceiling, false)
+            ?: return false
         chosenFps = fallback
         if (writeBack) {
             Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：fps=$target 无可用范围，退到 $ceiling")
             publishDevice(DeviceStatus.OPEN_FAILED_HIGH_FPS)
             writeBackFps(ceiling, fallback.exact)
             clampShutterToFrame(ceiling)
+            // Y05：通用退档同样是「用户看得见的档位变化」，必须走与 downgradeHighSpeed
+            // 同一个通知出口——旧实现只改总线，界面上的帧率自己变了却没有提示。
+            onFpsDowngraded(ceiling)
             if (device != null) publishDevice(DeviceStatus.OPEN_SUCCEED)
+            // 从高速会话退到普通区间必须换会话，否则旧会话照旧下发高速表里的区间
+            return state.highSpeed || highSpeedActive
         }
+        return false
     }
 
     private fun clampShutterToFrame(fps: Int) {
@@ -1658,7 +2185,12 @@ class Camera2Engine(
      */
     // 保持**花括号体**：既有接线守卫用 bodyOf 定位本函数体，改成表达式体会让守卫直接失去输入。
     private fun ceilingFps(state: RequestApplier.State): Int {
-        return FrameRateFallback.ceilingFps(state.fpsRanges, fpsCap())
+        // Y05：退档候选只认**普通表**——与 downgradeHighSpeed 同一条真源（normalFpsRangesOf）。
+        // 旧口径吃 state.fpsRanges：高速态下那是高速表（hi 全 ≥120），通用退档会写回一个
+        // 「界面说 120、HAL 实际跑 30」的值。ability 缺失（normal 表为空）时退回状态表：
+        // 实际不可达（ability 与 reqState 同一处置空），留作防御而不是另写一份候选来源。
+        val ranges = normalFpsRangesOf().ifEmpty { state.fpsRanges }
+        return FrameRateFallback.ceilingFps(ranges, fpsCap())
     }
 
     /**
@@ -1689,7 +2221,10 @@ class Camera2Engine(
     private fun onStructuralPulse(pulse: Pulse) {
         val slotAbility = ability ?: return
         val previous = reqState
-        val highSpeed = slotAbility.highSpeedCapable && slotAbility.needsHighSpeed(pulse.size, pulse.fps)
+        // Y05：会话类型与 [syncFpsPick] 的下发区间吃**同一条 decideFps 决议**（普通表先来）。
+        // 旧实现是 `highSpeedCapable && needsHighSpeed(...)`——判据与 UI 落档用的 decideFps
+        // 各写一份，覆盖范围一旦（哪怕是理论上的）分叉，就会出现「档位是普通档、会话是高速」。
+        val highSpeed = slotAbility.decideFps(pulse.size, pulse.fps)?.highSpeed == true
         // 每次结构脉冲都重建能力快照：fps 档位表、4K 门禁、active array 都跟着尺寸/分支变
         reqState = RequestApplier.stateOf(slotAbility, pulse.size, highSpeed)
         pushSinkFrameSize(pulse.size)
@@ -1855,7 +2390,8 @@ class Camera2Engine(
             return
         }
         Log.w(TAG, "设备状态→OPEN_FAILED_HIGH_FPS：$reason，fps 退到 $ceiling")
-        val pick = RequestApplier.pickFps(normalRanges, ceiling, false) ?: return
+        // Y05：退档区间也走同一决议出口（普通表优先；ceiling 本就取自普通表，决议必命中普通档）
+        val pick = fpsDecision(ceiling)?.pick ?: RequestApplier.pickFps(normalRanges, ceiling, false) ?: return
         highSpeedActive = false
         chosenFps = pick
         writeBackFps(ceiling, pick.exact)
@@ -1904,10 +2440,33 @@ class Camera2Engine(
             return
         }
         reopenRetries++
-        postDelayed(REOPEN_DELAY_MS) { reopenLastLens() }
+        // R03：自动重开必须绑定发起时的设备世代与预览意图。迟到回调若能无条件 reopen，
+        // 会在 stopPreview / 用户换镜头 / 页面退出之后把相机重新拉起来（后台偷跑、镜头回跳）。
+        val expectedGeneration = generation
+        reopenTask?.let { workHandler.removeCallbacks(it) }
+        val task = Runnable {
+            reopenTask = null
+            if (!threadRunning || !desiredPreview) {
+                Log.i(TAG, "自动重开已作废：预览意图已撤销（gen=$expectedGeneration）")
+                return@Runnable
+            }
+            if (expectedGeneration != generation) {
+                Log.i(TAG, "自动重开已作废：设备世代已变（$expectedGeneration→$generation）")
+                return@Runnable
+            }
+            reopenLastLens(expectedGeneration)
+        }
+        reopenTask = task
+        workHandler.postDelayed(task, REOPEN_DELAY_MS)
     }
 
-    private fun reopenLastLens() {
+    private fun reopenLastLens(expectedGeneration: Int? = null) {
+        if (expectedGeneration != null &&
+            (!threadRunning || !desiredPreview || expectedGeneration != generation)
+        ) {
+            Log.i(TAG, "重开镜头跳过：意图/世代已变（期望=$expectedGeneration 当前=$generation）")
+            return
+        }
         val slot = lens ?: return
         desiredPreview = true
         open(slot)
@@ -1938,6 +2497,22 @@ class Camera2Engine(
     private fun closeSessionQuietly() {
         // 先使配置中的在途回调作废（session 字段此刻可能是 null，下面的 close 关不到它）
         sessionAttempt++
+        publishReadiness(configured = false, repeatingSubmitted = false)
+        // Y01：拆会话必须同时拆探测窗——否则新会话的帧间隔会接着旧窗计数，把两个世代的采样
+        // 折算成一枚 Δ 闩锁进去；在途超时任务也要一起摘掉，不能让它在拆完之后再跑一次。
+        cancelExposureProbe("会话关闭", reapply = false)
+        // Y01：请求世代证据一并作废——新会话的回执不允许与旧会话提交的请求实例比对通过。
+        lastSubmittedRepeatingRequest = null
+        lastSubmittedHighSpeedRequests = null
+        sensorCropAspectValue = null
+        // Y02：拆会话后旧 builder 已经不在了，重建重试没有意义；下一场由 onConfigured 重新建。
+        workHandler.removeCallbacks(aeFlipRetryTask)
+        aeFlipRetryAttempt = 0
+        // B01：HAL 结果侧读数随会话失效（新会话重新采样），不把上一场的曝光冒充当前值。
+        lastHalExposureNs = null
+        lastHalExposureSampleMs = 0L
+        lastPublishedHalExposureNs = null
+        params.actualHalExposureNs.value = null
         val hs = highSpeedSession
         val normal = session
         highSpeedSession = null

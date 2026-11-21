@@ -48,7 +48,9 @@ class AudioFeedEosGuardTest {
         )
         assertTrue(
             "视频起点之前的音频（音轨早启动的源）必须有丢弃支，防负 PTS / 0 点重播",
-            body.contains("norm < 0L")
+            // 多 lane 泛化后判据收敛到 arcAudioOutPtsUs（同一判据也用于建轨预扫），
+            // 「负 norm 丢弃」的语义位置变成 outPts < 0L，守卫钉的仍是这一条，不是旧字面量
+            body.contains("arcAudioOutPtsUs(pendingPts, ptsBase, shiftUs)") && body.contains("outPts < 0L")
         )
     }
 }

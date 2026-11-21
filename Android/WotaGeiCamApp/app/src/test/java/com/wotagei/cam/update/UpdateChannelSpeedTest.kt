@@ -193,12 +193,12 @@ class UpdateChannelSpeedTest {
         if (!raw.contains("instanceFollowRedirects = false")) {
             bad.add("重定向被交回平台自动跟随（不校验目标主机，可被镜像引向内网）")
         }
-        val follow = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "openFollowing"))
+        val follow = KotlinSourceScan.flatten(KotlinSourceScan.bodyOf(src, "openFollowingTracked"))
         if (!follow.contains("openRaw(")) {
-            bad.add("openFollowing 没有逐跳开新连接（重定向目标没过安全门槛）")
+            bad.add("openFollowingTracked 没有逐跳开新连接（重定向目标没过安全门槛）")
         }
         if (!follow.contains("MAX_REDIRECTS")) {
-            bad.add("openFollowing 缺跳数上限（重定向环可无限跟）")
+            bad.add("openFollowingTracked 缺跳数上限（重定向环可无限跟）")
         }
         return bad
     }

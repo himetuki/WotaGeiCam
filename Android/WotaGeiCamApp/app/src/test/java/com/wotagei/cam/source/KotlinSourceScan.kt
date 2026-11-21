@@ -66,7 +66,10 @@ internal object KotlinSourceScan {
     }
 
     /** 读主源码（**显式 UTF-8**：测试 JVM 的 file.encoding 不由本工程保证） */
-    fun mainSourceText(relativePath: String): String = mainSourceFile(relativePath).readText(Charsets.UTF_8)
+    fun mainSourceText(relativePath: String): String =
+        // 统一 LF：Windows 检出是 CRLF，守卫的多行锚点（相邻两行）否则永远匹配不上，
+        // 突变自证会退化成"没改到源码"的假红。
+        mainSourceFile(relativePath).readText(Charsets.UTF_8).lineSequence().joinToString("\n")
 
     // ------------------------------------------------------------------ 整仓遍历
 

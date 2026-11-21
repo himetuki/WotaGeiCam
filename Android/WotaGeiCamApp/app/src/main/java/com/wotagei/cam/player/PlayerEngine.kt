@@ -68,6 +68,19 @@ object PlayerSpeedTiers {
  */
 internal fun audioPitchFor(@Suppress("UNUSED_PARAMETER") speed: Float): Float = 1f
 
+/** 新实例起播要套用的倍速参数（速度取缓存档位、pitch 恒 1.0；纯值对象供 JVM 单测直打） */
+internal data class CachedPlayback(val speed: Float, val pitch: Float)
+
+/**
+ * [PlayerEngine.build] 建新实例时套用的**缓存倍速**：先设倍速再选片/重建时，UI 已显示慢放，
+ * 旧实现在 build 里不下发缓存值，新 ExoPlayer 会按默认 1.0 起播直到下一次 setSpeed/同步。
+ * 速度先归一到档位（与 setSpeed 同口径），pitch 仍恒 1.0（原声口径见 [audioPitchFor]）。
+ */
+internal fun cachedPlaybackOf(speed: Float): CachedPlayback {
+    val tier = PlayerSpeedTiers.normalize(speed)
+    return CachedPlayback(tier, audioPitchFor(tier))
+}
+
 /**
  * Media3 封装。
  *
@@ -237,6 +250,12 @@ class PlayerEngine(private val context: Context) {
                 // SeekParameters 在 exoplayer 而非 common 中；本轮升级不额外启用 EXACT。
                 addListener(listener)
                 repeatMode = Player.REPEAT_MODE_OFF
+                // Y34：新实例先把**缓存档位**应用再挂片起播。setSpeed 可能早于 build（右片尚未
+                // attach 时用户已切 0.3×），旧实现只在 setSpeed 当下写 player，缓存值不会随
+                // 新实例下发，右片会以默认 1.0× 起步直到同步路径再补一次。此赋值在 apply 内，
+                // 早于函数尾的 boundViews 补挂与 attach 的 setMediaItem/prepare。
+                val cached = cachedPlaybackOf(_speed.value)
+                playbackParameters = androidx.media3.common.PlaybackParameters(cached.speed, cached.pitch)
             }
         // player 是 attach 里懒建的，晚于首帧：AndroidView 的 factory/update 先跑，bind 只把视图
         // 登记进 boundViews（此时 view.player = null）。这里建好后**补挂**一次，登记过的视图当场
@@ -490,7 +509,7 @@ class PlayerEngine(private val context: Context) {
         val pos = p.currentPosition.coerceAtLeast(0L)
         resolvePendingStep(pos)
         _positionMs.value = pos
-        val dur = p.duration?.coerceAtLeast(0L) ?: 0L
+        val dur = p.duration.coerceAtLeast(0L)
         if (dur != _durationMs.value) _durationMs.value = dur
 
         val ab = _ab.value
@@ -514,7 +533,7 @@ class PlayerEngine(private val context: Context) {
 
     private fun refreshDurations() {
         val p = player ?: return
-        _durationMs.value = p.duration?.coerceAtLeast(0L) ?: 0L
+        _durationMs.value = p.duration.coerceAtLeast(0L)
     }
 
     private fun readFrameRate(tracks: Tracks) {

@@ -33,11 +33,10 @@ class ExportCompatibilityBridgeTest {
             for (packetSamples in listOf(960L, 1024L)) platform { p ->
                 val pts = LongArray(220) { it * packetSamples * 1_000_000L / 48_000L }
                 p.script("audioPts", pts)
-                // base 跨过AAC包界；独立oracle不调用任何生产PTS/可写helper。
+                // 以整条音轨作 oracle，避免用生产 seek 公式截断期望值而漏掉片头合法包。
                 val base = 21_334L
                 val shift = if (track == SelectedTrack.CAP) -offset * 1000L else 0L
-                val seekIndex = pts.indexOfLast { it <= base }.coerceAtLeast(0)
-                val expected = pts.drop(seekIndex).map { it - base + shift }.filter { it in 0..2_000_000L }
+                val expected = pts.map { it - base + shift }.filter { it in 0..2_000_000L }
                 val ex = p.new("android.media.MediaExtractor")
                 val audioIdx = if (track == SelectedTrack.ENV) 1 else 2
                 val writable = p.writable(ex, base, shift, 2_000_000, audioIdx)
@@ -78,6 +77,31 @@ class ExportCompatibilityBridgeTest {
             120_000, 121_000, 122_000, 123_000, 124_000, 125_000, 126_000, 127_000, 70_000))
         copyAudio(p, p.new("android.media.MediaExtractor"), 0, 0, 100_000)
         assertEquals(listOf(0L, 80_000L, 90_000L), p.list<Long>("audioWritten"))
+    }
+
+    @Test
+    fun `R10 非零入点按呈现序定共同基准并保住音频首包`() = platform { p ->
+        // 30..330ms 满足导出最短区间。解码序首个界内样本是 P100，最早呈现帧是 B33。
+        p.script("videoPts", longArrayOf(0, 100_000, 33_000, 66_000))
+        p.script("videoSync", booleanArrayOf(true, false, false, false))
+        p.script("reorderDepth", 2)
+        p.script("audioPts", longArrayOf(0, 33_000, 54_000, 75_000, 96_000))
+        val result = p.export(p.runner(), startMs = 30, endMs = 330)
+        assertEquals("Done", result.javaClass.simpleName)
+        assertEquals(listOf(0L, 33_000L, 67_000L), p.list<Long>("renderedPts"))
+        assertEquals(listOf(0L, 21_000L, 42_000L, 63_000L), p.list<Long>("audioWritten"))
+    }
+
+    @Test
+    fun `Y29 正向平移时预扫与复制都从反推入点读取`() = platform { p ->
+        p.script("videoPts", longArrayOf(0, 100_000, 200_000, 300_000, 400_000))
+        // 视频基准 100ms，内录向后移动 50ms。100ms 向前 seek 会停在 90ms，
+        // 所以仅检查有无音轨不足以验收，必须检查 50ms 起的所有合法包。
+        p.script("audioPts", longArrayOf(40_000, 50_000, 70_000, 90_000, 110_000))
+        val result = p.export(p.runner(), startMs = 100, endMs = 400, track = SelectedTrack.CAP, offsetMs = -50)
+        assertEquals("Done", result.javaClass.simpleName)
+        assertTrue(p.events.contains("track.add:audio/mp4a-latm"))
+        assertEquals(listOf(0L, 20_000L, 40_000L, 60_000L), p.list<Long>("audioWritten"))
     }
 
     @Test
@@ -137,6 +161,8 @@ class ExportCompatibilityBridgeTest {
         val job = Job()
         p.script("afterStop", Runnable { job.cancel() })
         assertTrue(cancelledExport(p, job))
+        // caller 取消立即返回，owner 的 commit/finally 仍在后台：先等它退出再读资源账。
+        assertTrue("取消后 owner 必须在有界时间内完成清理", p.awaitOwnerQuiescence(5_000L))
         assertEquals(1, p.events.count { it == "muxer.stop" })
         assertFalse(p.events.contains("pending.delete"))
         assertResourcesReleased(p)
@@ -288,13 +314,19 @@ class ExportCompatibilityBridgeTest {
             assertTrue("finally必须归还$event", p.events.contains(event))
         }
     }
+    /**
+     * Y30：音轨复制已从「视频 EOS 后整段透传」改成交错车道 [SceneAudioLane]。
+     * 测试仍跑**同一份真实字节码**的车道（arm 入点公式 = 生产 `sceneExportAudioSeekUs`，
+     * 判据/单调桥同源），不另写复制控制流。
+     */
     private fun copyAudio(p: ExportPlatformFixture, ex: Any, base: Long, shift: Long, end: Long, audioIdx: Int = 2) {
-        val muxer = p.type("android.media.MediaMuxer").getConstructor(java.io.FileDescriptor::class.java, Int::class.javaPrimitiveType)
-            .newInstance(java.io.FileDescriptor(), 0)
-        p.call(muxer, "addTrack", p.call(ex, "getTrackFormat", audioIdx))
+        val muxer = p.muxer()
+        val outTrack = p.call(muxer, "addTrack", p.call(ex, "getTrackFormat", audioIdx))
         p.call(muxer, "start")
+        val lane = p.lane(ex, audioIdx, muxer, base, shift, end)
         try {
-            p.call(p.runner(), "copyAudio", ex, audioIdx, 0, muxer, base, shift, end, Job())
+            p.call(lane, "arm", p.audioSeekUs(base, shift), outTrack)
+            p.call(lane, "drainAll")
         } finally {
             p.call(muxer, "release")
         }
@@ -319,7 +351,7 @@ class ExportCompatibilityBridgeTest {
     }
     private data class Work(val reads: Int, val decoded: Int, val awaits: Int, val acquireOnly: Int)
     private fun platform(block: suspend (ExportPlatformFixture) -> Unit) = runBlocking {
-        ExportPlatformFixture(classes, javaClass.classLoader).use { block(it) }
+        ExportPlatformFixture(classes, requireNotNull(javaClass.classLoader!!)).use { block(it) }
     }
     companion object {
         @ClassRule @JvmField

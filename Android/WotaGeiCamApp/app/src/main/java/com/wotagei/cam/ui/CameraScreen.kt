@@ -2,7 +2,6 @@ package com.wotagei.cam.ui
 
 import android.app.Activity
 import android.Manifest
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
@@ -11,6 +10,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.content.res.Configuration
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.display.DisplayManager
@@ -64,7 +64,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Remove
-import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.automirrored.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.ViewWeek
 import androidx.compose.material.icons.outlined.Splitscreen
 import androidx.compose.material3.CircularProgressIndicator
@@ -77,10 +77,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -120,6 +122,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -132,9 +136,12 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.R
 import com.wotagei.cam.bt.BtSpeakerController
 import com.wotagei.cam.camera.CameraController
+import com.wotagei.cam.camera.CameraPulse
+import com.wotagei.cam.camera.CameraWatchClock
 import com.wotagei.cam.camera.DeviceStatus
 import com.wotagei.cam.camera.DirectSink
 import com.wotagei.cam.camera.GlRenderEngine
@@ -159,6 +166,7 @@ import com.wotagei.cam.core.HudItem
 import com.wotagei.cam.core.LensType
 import com.wotagei.cam.core.MediaAccessState
 import com.wotagei.cam.core.RenderMode
+import com.wotagei.cam.stance.PreviewStreamGeometry
 import com.wotagei.cam.stance.StanceFeature
 import com.wotagei.cam.core.isMediaStoreVideoUri
 import com.wotagei.cam.core.mediaAccessLabel
@@ -169,10 +177,12 @@ import com.wotagei.cam.core.TOP_BAR_CHROME_RESERVE_DP
 import com.wotagei.cam.core.TapPoint
 import com.wotagei.cam.core.WotaParams
 import com.wotagei.cam.core.WotaTiers
+import com.wotagei.cam.core.popupWidthCapPx
 import com.wotagei.cam.media.SeriesStore
 import com.wotagei.cam.media.formatDuration
 import com.wotagei.cam.media.persistPickReadPermission
 import com.wotagei.cam.media.rememberMediaRepo
+import com.wotagei.cam.media.WotaDb
 import com.wotagei.cam.player.AudioTrackKind
 import com.wotagei.cam.player.ComparePractice
 import com.wotagei.cam.player.LoopMode
@@ -187,6 +197,7 @@ import com.wotagei.cam.player.rememberPlayerEngine
 import com.wotagei.cam.core.ArcConvertMode
 import com.wotagei.cam.record.AudioProbe
 import com.wotagei.cam.record.AudioTrack
+import com.wotagei.cam.record.AndroidTakeSettlementBackend
 import com.wotagei.cam.record.ArcDropLog
 import com.wotagei.cam.record.ArcDropSegment
 import com.wotagei.cam.record.ArcRateProbe
@@ -203,11 +214,15 @@ import com.wotagei.cam.record.RecordError
 import com.wotagei.cam.record.RecordHealthWindow
 import com.wotagei.cam.record.RecordProfile
 import com.wotagei.cam.record.RecordResult
+import com.wotagei.cam.record.RecordSession
 import com.wotagei.cam.record.Recorder
+import com.wotagei.cam.record.RecorderDelivery
 import com.wotagei.cam.record.Recorders
 import com.wotagei.cam.record.RetryAction
 import com.wotagei.cam.record.RotateFailLog
 import com.wotagei.cam.record.STORE_CALL_BUDGET_MS
+import com.wotagei.cam.record.SessionDelta
+import com.wotagei.cam.record.SessionDeliverySink
 import com.wotagei.cam.record.HealthVerdict
 import com.wotagei.cam.record.muxRecoveredCode
 import com.wotagei.cam.record.MAX_RESTART_ATTEMPTS
@@ -215,6 +230,7 @@ import com.wotagei.cam.record.MIN_OUTPUT_BYTES
 import com.wotagei.cam.record.PlaybackCaptureController
 import com.wotagei.cam.record.VIDEO_WINDOW_MS
 import com.wotagei.cam.record.FULL_WINDOW_MS
+import com.wotagei.cam.record.TakeSettlement
 import com.wotagei.cam.record.VideoStore
 import com.wotagei.cam.record.audioTrackPlan
 import com.wotagei.cam.record.engineWatchdogTrips
@@ -251,7 +267,6 @@ import com.wotagei.cam.ui.theme.WotaWarn
 import com.wotagei.cam.ui.widget.CameraSurface
 import com.wotagei.cam.ui.widget.MarkerLineOverlay
 import com.wotagei.cam.ui.widget.RefLineOverlay
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -296,6 +311,7 @@ private fun findHostActivity(ctx: Context): MainActivity? {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 @Suppress("LongMethod")
 fun CameraScreen(
     onOpenGallery: () -> Unit,
@@ -303,6 +319,12 @@ fun CameraScreen(
     onPracticeFinish: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // B12 测量入口：组合体起点时间戳（探针关闭时恒 0）。前面再串一枚编译期常量
+    // BuildConfig.HUD_RECOMP_PROBE：debug/release 里它是 false（javac 常量），Kotlin 折叠后
+    // 整句连 @Volatile 读都不剩——正常变体的关闭态是真正的零开销。
+    // 终点在函数末尾，两者之差就是"这份 UI 自己在一帧里花掉多少组合时间"——审查 B12 要的就是这个数。
+    val hudProbeStartNs =
+        if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) System.nanoTime() else 0L
     val context = LocalContext.current
     val app = remember(context) { context.applicationContext }
     val owner = LocalLifecycleOwner.current
@@ -391,6 +413,8 @@ fun CameraScreen(
     var stanceAnchorRect by remember { mutableStateOf<Rect?>(null) }
     // 模型组装配 + 引擎槽接缝（prepare 幂等；hooks 一次性注入）
     remember(app) {
+        // B16：装配前先同步渲染门（首帧 renderMode），避免 DIRECT 冷启按 GPU 偏好先装配一遍。
+        stance.setRenderGpuAllowed(renderMode == RenderMode.GPU)
         stance.prepare(app)
         stance.attachHook = { s, r -> ctrl.setAnalysisTarget(s, r) }
         stance.detachHook = { ctrl.setAnalysisTarget(null) }
@@ -402,6 +426,9 @@ fun CameraScreen(
         }
         // YUV 尺寸表从当前镜头的 characteristics 现取（枚举完成前回退默认档）
         stance.characteristicsProvider = { ctrl.currentCharacteristics() }
+        // Y09/B14：分析 reader 的复用键取「实际槽位」（与 D13 的 frontLens 同一条真值）——
+        // 请求中的档位可能还没落到物理头，拿它当键会把旧 FOV 的 reader 复用到新镜头上。
+        stance.lensKeyProvider = { ctrl.state.value.currentSlot?.key }
         true
     }
     // 常驻 HUD 与震动开关是纯 UI 设置，直接读 prefs：走参数总线会被 applyDefaultsOnce 的
@@ -446,7 +473,7 @@ fun CameraScreen(
     val lens by params.lens.observed()
     val audioEnabled by params.audioEnabled.observed()
 
-    val runner = remember(ctrl) { RecordRunner(app, params, ctrl) }
+    val runner = remember(ctrl) { RecordRunner(app, params, ctrl, { repo.db() }) }
     // 设备丢失转移检测器（跨重组保活）：观察钩子的"上一拍设备态"住在这里，纯函数折叠见 CameraLostWatch
     val cameraLostWatch = remember { CameraLostWatch() }
     val recStatus by runner.status.observed()
@@ -454,13 +481,21 @@ fun CameraScreen(
     val recDb by runner.volumeDb.observed()
     // 换段预提示（2026-10-28 审查加固）：pollTask 按真实写入字节置位，录制结束自动清
     val segNearCap by runner.segNearCap.observed()
-    val recording = recStatus == RecordStatus.START || recStatus == RecordStatus.PREPARE ||
+    // B13：起录按下的本地闩锁 = 合成 PREPARE。insert + 编码器准备要 1~2s，这段里 runner.status
+    // 还没离开 IDLE；按钮若等状态回流才变忙碌，第二按会再排一次 start——工作线程拒非 IDLE 的
+    // 重复 start，那一按等于被静默吞掉。闩锁在按下的同一下拉响（同一次点击里立即可见），
+    // 状态机一旦自己接管（离开 IDLE）就交还，此后按真实 PREPARE/START 语义走。
+    var startQueued by remember { mutableStateOf(false) }
+    LaunchedEffect(recStatus) {
+        if (recStatus != RecordStatus.IDLE) startQueued = false
+    }
+    val recording = startQueued || recStatus == RecordStatus.START || recStatus == RecordStatus.PREPARE ||
         recStatus == RecordStatus.STOPPING
 
     var sheet by remember { mutableStateOf(Sheet.NONE) }
     var hint by remember { mutableStateOf<String?>(null) }
     var lastUri by remember { mutableStateOf<Uri?>(null) }
-    var freeMb by remember { mutableStateOf(0L) }
+    var freeMb by remember { mutableLongStateOf(0L) }
 
     // ---- 分屏（用户第 3 项）：把**完整录制页**压到左半屏，右侧让给模式面板。
     // 压缩只做 graphicsLayer 变换、布局参数一个都没动 ⇒ 参数/参考线/用户摆好的位置全部**结构性保持**
@@ -510,8 +545,19 @@ fun CameraScreen(
 // 只暂停本管线回调——MediaRecorder 面已在会话里时再摘槽重建会打断录制；停录自动恢复，
 // 开关与持久化都不重置）。切前置 = 直接关闭并重置开关（D13）。
     LaunchedEffect(recording) { stance.setRecordingActive(recording) }
+    // B16：设置页切渲染模式 = 推理加速准入变化；与弹窗「GPU/NPU 加速」显示/装配同口径。
+    LaunchedEffect(renderMode) { stance.setRenderGpuAllowed(renderMode == RenderMode.GPU) }
     // 前置 = 直接关闭并重置开关（D13）；同时挡住"在前置下重新开启"（方向语义只对后置成立）。
-    LaunchedEffect(lens) { stance.setFrontLens(lens == LensType.FRONT) }
+    // Y70：判据取**实际落定**的镜头 [CameraUiState.currentLens]，不是请求中的 `lens`——
+    // 后者的档位在切镜途中已变，此时新会话还没开好，先把开关关掉会让用户在后摄上看到
+    // 「前置禁用」的假判定；而真正的切换窗口由 lensSwitching 负责先停分析。
+    // 两条写在同一协程里且 frontLens 在前：落定那一拍若先放行 settling，maybeAttachAfterGate
+    // 会在 frontLens 还没置位的窗口里把分析挂到前置上——拆成两条 effect 就没有这条顺序保证了。
+    LaunchedEffect(ui.currentSlot?.key, ui.currentLens, ui.lensSwitching, size) {
+        stance.setFrontLens(ui.currentLens == LensType.FRONT)
+        stance.setLensSettling(ui.lensSwitching)
+        stance.onAnalysisTargetChanged()
+    }
 
     // ---- 提示与文案（录制失败码、锁定提示、近似帧率说明）
     val lockTipText = stringResource(R.string.cam_lock_tip)
@@ -566,40 +612,37 @@ fun CameraScreen(
                 // 凡结果含已保存分段就刷新相册（含失败/降级/join 超时路径，2026-10-16 "录制结果
                 // 如实化"）：旧实现只认 ok，失败/混合路径下已 commit 的片段要等退出重进才可见。
                 repo.invalidate()
-                // 分段归组落库（#5）：一次录制的多段写进 media_series/series_part，媒体库据此
-                // 把它们归成一组。必须在 invalidate **之后**落：invalidate 触发的重查与写库并发，
-                // 写完的 observe 流会再触发一次，届时成员关系已在库里。
-                // 重录沿用同一 seriesId，upsert 是 REPLACE ⇒ 只保留最终 attempt 的 parts。
-                // 整段 NonCancellable（SeriesStore 内部）：用户在写库途中离场不许把归组漏掉。
-                // 取消必须原样抛回（同 launchOp 口径）：runCatching 会把 CancellationException 一并吞掉，
-                // 吞掉之后这个协程会在已取消的作用域里继续 collect，闸门与后续逻辑全乱。
-                try {
-                    SeriesStore.record(repo.db(), result.seriesId, runner.sessionStartedAtMs, result.parts)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (e: Throwable) {
-                    Log.e(TAG_UI, "分段归组落库调用失败 seriesId=${result.seriesId}", e)
-                }
+                // 分段归组与练习交付的唯一入口是**进程级会话所有者**（RecordSession →
+                // TakeSettlement，Y21/R07）：页面不再自行结算。stopInternal 登记时已按会话键
+                // 发起首次结算，迟到发布/终态由同一槽按确切段序对账；本页只消费它的增量。
                 // 结果文案 = 原因句 + 附注句**叠加**（P3-1/P3-2 收口）：判定（哪个标志出哪件事、
                 // 混合结果走「已保存 N 段」）全在 recordTextPlan 纯函数里，这里只做资源渲染——
                 // 理由与附注各成一族、任两件同时命中谁也不许盖谁。
                 showTip(app.recordText(plan))
-                // 练习闭环（2026-10-04 方向 4）：对比页发来的录制**干净成功**才弹栈回对比页，把新片
-                // 填右槽；非干净成功（半场成片）不交付、清桥态（同失败路：留在本页），不许把
-                // 上次练习的尾巴错配到本次半场录上。pending uri 自带 MediaStore id，此刻 IS_PENDING
-                // 已清，回程查询即刻可见；deliver 只在桥 armed 时认账，普通录制不受影响
-                if (result.ok) {
-                    val practiceId = result.uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
-                    if (practiceId != null && ComparePractice.deliver(practiceId)) onPracticeFinish()
-                } else {
-                    ComparePractice.armed = false
-                }
             } else {
-                // 无产物失败清掉桥态（留在本页看错误），不弹栈
-                ComparePractice.armed = false
+                // 只有**权威**的零产物失败才清练习桥：临时快照/发布仍在途时清掉，会漏掉随后
+                // 迟到落地的成片（R07）。权威结论的练习交付统一在 lateResult 增量里等待。
+                if (result.authoritative) ComparePractice.armed = false
                 recordResultText(app.resources, result.error)?.let { showTip(it) }
             }
             runner.clearResult()
+        }
+    }
+    // 迟到对账增量（R06/R07）：停录那一刻之后才 commit 的段 / 泵线程延迟收尾的终态。
+    // 不补提示（同一场录制已经给过结果文案），只把相册与回看字段刷新到与结果一致。
+    LaunchedEffect(runner) {
+        runner.lateResult.collect { delta ->
+            if (delta == null) return@collect
+            lastUri = delta.result.uri ?: lastUri
+            repo.invalidate()
+            // 练习闭环：只有权威结论（terminal 且发布路静默）才等待结算任务；
+            // 交付成功即弹回对比页。重复增量里 deliverPractice 已在桥态清空后返回 false。
+            val job = delta.settlement
+            if (delta.terminal && job != null && delta.practiceArmed) {
+                val delivered = runCatching { job.await().practiceDelivered }.getOrDefault(false)
+                if (delivered) onPracticeFinish()
+            }
+            runner.clearLateResult()
         }
     }
     // 自检自动重录提示：走既有 hint 通道（含淡出约 2.6s），不弹错误窗、status 全程 START。
@@ -686,6 +729,21 @@ fun CameraScreen(
             }
         }
     }
+    // GL 渲染上下文丢失（R05，2026-11-19）：EGL_CONTEXT_LOST 是**终态**，CameraController 已经把
+    // 整条引擎实例换掉；录制侧必须**显式停录收尾**——旧引擎的编码面已失效，本段不可能再有新帧，
+    // 不显式停就会一路录到用户点停（成片尾部定格却报「已保存」，与相机丢失同族的欺骗）。
+    // 这里只投递意图：START 正常收已录部分、PREPARE 中止起录，分派全在 RecordRunner 控制线程判。
+    LaunchedEffect(runner, ctrl) {
+        ctrl.glContextLost.collect { reason ->
+            Log.w(TAG_UI, "GL 渲染上下文丢失（$reason）⇒ 通知录制侧显式收尾")
+            runner.onGlContextLost()
+        }
+    }
+    // 恢复结果必须可见（用户口径：一切自动变更都要看得见）——「已重启渲染」与
+    // 「预览未在运行，引擎已重建」两种出口都说，不许静默。
+    LaunchedEffect(ctrl) {
+        ctrl.glRecoveryNotice.collect { notice -> showTip(notice) }
+    }
     // 余量探测含 StatFs 磁盘访问（StrictMode P2，2026-10-24）：LaunchedEffect 跑在主线程
     // 组合作用域上，裸调 probeFreeSpace 会在每次录制态切换时给主线程插一刀 20~80ms 的磁盘读。
     // 探测本体重（runner 的其余路径本就在后台线程），这里只把调度切到 IO。
@@ -714,7 +772,12 @@ fun CameraScreen(
     // GPU 引擎从门面取**页面级缓存**实例：跨设置往返（previewKeptBehind）复用同一 SurfaceTexture，
     // 相机会话因此不必重建——重建的首几拍在卓易通桥上是裸 AWB_OFF 的绿帧（2026-10-29 真机取证）
     val directSink = remember { DirectSink() }
-    val activeSink: PreviewSink = remember(renderMode) {
+    // R05：GL 引擎代。上下文丢失（EGL_CONTEXT_LOST）后 CameraController 整条换掉缓存实例并把
+    // 代 +1；activeSink 必须以它为键重新取——否则页面 remember 回来的还是**已失效**的旧实例，
+    // 之后的 bind/看门狗会把死引擎反复接回去（重挂永远救不活）。DIRECT 下代变化返回同一枚
+    // directSink（remember 值相等 ⇒ 下游 effect 不会重跑）。
+    val glSinkEpoch by ctrl.glSinkEpoch.collectAsState()
+    val activeSink: PreviewSink = remember(renderMode, glSinkEpoch) {
         if (renderMode == RenderMode.GPU) ctrl.glSink() else directSink
     }
     val glEngine = activeSink as? GlRenderEngine
@@ -766,17 +829,15 @@ fun CameraScreen(
     // 「相机活着、屏幕全黑」这一档的**唯一**出路：承载视图整体重建 ⇒ 新 TextureView ⇒ 新
     // SurfaceTexture ⇒ 引擎重接窗口面。重启预览/重建引擎都动不到这条链（相机本来就在出帧）。
     // 请求来自两处看门狗（页面内 + Activity 级），这里只负责把它落成一次视图重建。
-    var surfaceEpoch by remember(activeSink) { mutableIntStateOf(0) }
-    LaunchedEffect(ctrl) {
-        // 限频 600ms：swap 连环失败时（挂上又立刻失败）不至于无限重建视图；
-        // 连环失败的最终兜底仍是看门狗的 forceRebind
-        var lastAt = 0L
+    val reattachEpoch = remember(activeSink) { ReattachEpoch { SystemClock.elapsedRealtime() } }
+    // 键必须带 activeSink（Y52）：GPU↔DIRECT 切换后旧收集器若继续存活，重挂请求会把
+    // 计数/日志写进**旧持有者**，新建承载视图的纪元不推进（画面仍是黑的）。收集器与
+    // 计数持有者同键 ⇒ 换 sink 时旧协程取消、新协程以新持有者起步，600ms 限频窗口也随
+    // 持有者重来（换面本身就是一次重建，不该被上一面的限频吞掉）。
+    LaunchedEffect(ctrl, activeSink) {
         ctrl.displayReattach.collect {
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastAt < 600L) return@collect
-            lastAt = now
-            Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${surfaceEpoch + 1}")
-            surfaceEpoch++
+            if (!reattachEpoch.request()) return@collect
+            Log.i(TAG_UI, "上屏面重挂：重建承载视图 epoch=${reattachEpoch.epoch}")
         }
     }
 
@@ -808,15 +869,16 @@ fun CameraScreen(
     // 本节留在组合里、以 ctrl 为键——录制页被弹出栈时组合销毁，页面不可见也不该后台拉相机；
     // 回到页面会重新布防（各计数归零重来）。
     LaunchedEffect(ctrl, activeSink) {
-        var camLast = ctrl.frameResultCount() ?: -1L
-        var camGrowAtMs = SystemClock.elapsedRealtime()
+        // Y07：判活基准必须与帧计数**同代**读出。引擎换代（bind/forceRebind 新建引擎）时
+        // 计数从 0 起步，只比 `cam != camLast` 会把 0 当成"涨了"：新引擎一帧没出也算活着，
+        // 自愈基准被往后推。这里三代一体（代/计数/基准时刻），换代只重建基线不算进展。
+        val clock = CameraWatchClock(SystemClock.elapsedRealtime())
         var camMiss = 0
         var dispLast = ctrl.displayFrameCount() ?: -1L
         var dispGrowAtMs = SystemClock.elapsedRealtime()
-        // 上屏判据要等相机**真的出过帧**才启用：相机还没开起来时"屏上没换帧"是必然的，
-        // 那时去重挂面只会把首帧推得更晚（慢机型开相机要 1.5s+）
-        var camSeenFrames = false
         var reattachTries = 0
+        // 上屏判据要等相机**真的出过帧**才启用（见下方 clock.everSawFrames）：相机还没开起来时
+        // "屏上没换帧"是必然的，那时去重挂面只会把首帧推得更晚（慢机型开相机要 1.5s+）
         while (true) {
             delay(1000)
             val nowMs = SystemClock.elapsedRealtime()
@@ -825,17 +887,24 @@ fun CameraScreen(
             // 不许把那时的"没帧"当死态去自愈拉起（r31 的看门狗没这道闸，后台会被反复重启相机）
             val pageOkay = !s.needsCameraPermission &&
                 runner.status.value == RecordStatus.IDLE &&
+                !ctrl.isRecordingActive() &&
                 owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
 
-            val cam = ctrl.frameResultCount()
-            if (cam != null && cam != camLast) {
-                if (!camSeenFrames) {
-                    camSeenFrames = true
+            val health = ctrl.cameraHealth()
+            val cam = health?.frameCount
+            when (clock.observe(health, nowMs)) {
+                // 换代（含首次采样）：新基线，0 帧不算进展，只重开一段自愈宽限。
+                CameraPulse.REBASED -> {
                     dispGrowAtMs = nowMs
+                    camMiss = 0
                 }
-                camLast = cam
-                camGrowAtMs = nowMs
-                camMiss = 0
+                // 本代第一帧：真的出图了，上屏判据从这一刻启用。
+                CameraPulse.FIRST_FRAMES -> {
+                    dispGrowAtMs = nowMs
+                    camMiss = 0
+                }
+                CameraPulse.ADVANCED -> camMiss = 0
+                CameraPulse.STILL -> Unit
             }
             val disp = ctrl.displayFrameCount()
             if (disp != null && disp != dispLast) {
@@ -844,24 +913,22 @@ fun CameraScreen(
                 reattachTries = 0
             }
             if (!pageOkay) {
-                camGrowAtMs = nowMs
+                clock.arm(nowMs)
                 dispGrowAtMs = nowMs
                 camMiss = 0
                 reattachTries = 0
                 continue
             }
             // ① 相机侧：连续 2.5s 无新帧才算可疑（相机打开本身约 1s，避免开局误触）
-            val camDeadMs = nowMs - camGrowAtMs
+            val camDeadMs = nowMs - clock.grewAtMs
             if (camDeadMs >= 2_500L) {
                 camMiss++
                 when {
                     cam == null && camMiss >= 2 -> {
                         Log.w(TAG_UI, "预览自愈：引擎不在（device=${s.device}）⇒ 重新绑定引擎")
                         ctrl.bind(activeSink)
-                        camLast = -1L
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                         camMiss = 0
                     }
                     cam == null -> Unit
@@ -880,17 +947,15 @@ fun CameraScreen(
                             "预览自愈：重启预览后仍无帧 ⇒ 整条重建引擎（device=${s.device} preview=${s.preview}）"
                         )
                         ctrl.forceRebind(activeSink)
-                        camLast = -1L
-                        camGrowAtMs = nowMs
+                        clock.arm(nowMs)
                         dispGrowAtMs = nowMs
-                        camSeenFrames = false
                         camMiss = 0
                     }
                 }
                 continue
             }
             // ② 上屏侧：相机在出帧而屏上不换帧——只有重挂承载面能救（重启相机做不到）
-            if (disp != null && camSeenFrames && nowMs - dispGrowAtMs >= 1_500L) {
+            if (disp != null && clock.everSawFrames && nowMs - dispGrowAtMs >= 1_500L) {
                 reattachTries++
                 Log.w(
                     TAG_UI,
@@ -901,10 +966,8 @@ fun CameraScreen(
                 if (reattachTries >= 3) {
                     Log.w(TAG_UI, "预览自愈：重挂显示面无效 ⇒ 整条重建引擎 + 再重挂")
                     ctrl.forceRebind(activeSink)
-                    camLast = -1L
-                    camGrowAtMs = nowMs
+                    clock.arm(nowMs)
                     dispGrowAtMs = nowMs
-                    camSeenFrames = false
                     reattachTries = 0
                 } else {
                     ctrl.requestDisplayReattach()
@@ -1025,6 +1088,11 @@ fun CameraScreen(
     // 同一条纪律：录制态也是组合期 Boolean，而双击入口由 pointerInput(Unit) 首帧闭包捕获——
     // 直接读 `recording` 会把首帧值固化，录制中双击仍能上锁（审查 P1）。装进稳定持有者现读。
     val recordingNow by rememberUpdatedState(recording)
+    // Y56 同款：能力枚举完成/换镜头会改 focusUsable，而点按手势层同样只捕获首帧闭包——
+    // 直接读 `focusUsable` 会让"首帧能力未知（默认可用）"固化，定焦镜头上点焦照发。
+    // 装进稳定持有者后闭包现读，切镜头/枚举完成即生效。
+    val focusUsableLatest = remember { LatestBoolean(focusUsable) }
+    focusUsableLatest.update(focusUsable)
     /** 普通点焦三处写点共用：记最近点按处 + 先置 null 再写（StateFlow 去重会吞同一点重触） */
     val focusTapAt: (TapPoint) -> Unit = { point ->
         lastFocusTap = point
@@ -1083,7 +1151,7 @@ fun CameraScreen(
         buddies.value = found
         Log.i("WotaSplit", "concurrent buddies=${found.joinToString(",")} camera=$id")
     }
-    var deviceDegrees by remember { mutableStateOf(0) }
+    var deviceDegrees by remember { mutableIntStateOf(0) }
     LaunchedEffect(owner, ui.device) { deviceDegrees = readDeviceDegrees(context) }
     // 正反向横屏（90↔270）窗口尺寸不变，onSizeChanged 不会触发，必须另挂显示监听才能跟着转
     DisposableEffect(app) {
@@ -1119,6 +1187,48 @@ fun CameraScreen(
         val w = if (swapped) size.height else size.width
         val h = if (swapped) size.width else size.height
         if (h <= 0) 16f / 9f else w.toFloat() / h.toFloat()
+    }
+    // B14：站位叠加的几何证据。来源全部是可测/枚举量——
+    //   DIRECT = `DirectSink.streamSize()`（实际写进 ST 的缓冲尺寸，可能按能力表换挡）；
+    //   GPU    = `GlRenderEngine.streamSize()`（`onSizeChanged` 写进 GL 纹理的相机帧尺寸）；
+    //   转正角 = 与画幅布局同一个 `glOrientation`；镜像 = 前置镜头的屏幕空间镜像；
+    //   裁剪比 = 先取本会话帧回执的 `SCALER_CROP_REGION`，未到时才回退枚举 active-array，
+    //   证据等级随几何一起下传（[StanceOverlayGeometry.evidence]），不把回退值当实测。
+    // 提供器只读快照、不做查询与分配；Controller 在判定输出到达/转正角变化时各取一次。
+    remember(stance, renderMode, directSink, glOrientation, isFront, slot) {
+        stance.previewGeometryProvider = {
+            val (streamW, streamH) = if (renderMode == RenderMode.GPU) {
+                ctrl.glSink().streamSize()
+            } else {
+                directSink.streamSize()
+            }
+            if (streamW <= 0 || streamH <= 0) {
+                null
+            } else {
+                PreviewStreamGeometry(
+                    width = streamW,
+                    height = streamH,
+                    rotationDegrees = glOrientation,
+                    mirrored = isFront,
+                    measuredCropAspect = ctrl.sensorCropAspect(),
+                    activeArrayAspect = slot?.characteristics?.let { c ->
+                        runCatching {
+                            val r = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                                ?: return@runCatching null
+                            if (r.width() > 0 && r.height() > 0) {
+                                r.width().toFloat() / r.height()
+                            } else {
+                                null
+                            }
+                        }.getOrNull()
+                    },
+                )
+            }
+        }
+        true
+    }
+    DisposableEffect(stance) {
+        onDispose { stance.previewGeometryProvider = null }
     }
 
     // ---- 生命周期：ON_PAUSE 停录 + 停预览（02 文档 §7）
@@ -1524,7 +1634,7 @@ fun CameraScreen(
             ) {
                 // 承载视图按 surfaceEpoch 重建（上屏面重挂自愈）：换 key = 换 TextureView，
                 // 新 SurfaceTexture 会让引擎重接窗口面——黑屏里"相机活着、屏不换帧"的唯一出路
-                key(surfaceEpoch) {
+                key(reattachEpoch.epoch) {
                     CameraSurface(
                         mode = renderMode,
                         sink = activeSink,
@@ -1570,7 +1680,7 @@ fun CameraScreen(
                         .tapFocus(
                             onTap = { point ->
                                 when {
-                                    !focusUsable -> Unit
+                                    !focusUsableLatest.value -> Unit
                                     // 锁定期轻触不重焦（防误触字面要求）：首次轻触给一句提示
                                     focusLocked -> showLockedTapTip()
                                     else -> focusTapAt(point)
@@ -1578,7 +1688,7 @@ fun CameraScreen(
                             },
                             onDoubleTap = { point ->
                                 when {
-                                    !focusUsable -> Unit
+                                    !focusUsableLatest.value -> Unit
                                     // 锁定期双击按轻触同款处理（不重焦、给提示）；未锁时是该点锁定入口
                                     focusLocked -> showLockedTapTip()
                                     else -> lockFocusAt(point)
@@ -1614,13 +1724,17 @@ fun CameraScreen(
     val topBarTotalBps = bitrate + com.wotagei.cam.record.BitratePolicy.AUDIO_BITRATE
     val topBarSizeLabel = sizeText(size)
     val topBarWidths = rememberCapacityTextWidths(freeMb, topBarTotalBps, topBarSizeLabel)
+    // B12：单量 HudCtx 这一段汇集（含 stringResource/String.format 的标签计算）的耗时，
+    // 回答"组合耗时里 HudCtx 占几成"；探针关闭时恒 0，不进入计时分支
+    val hudCtxStartNs =
+        if (BuildConfig.HUD_RECOMP_PROBE && HudRecompProbe.enabled) System.nanoTime() else 0L
     val hudCtx = HudCtx(
         // 能力闸两颗（2026-10-26 口径反转）：给不了时胶囊**在场但禁用**（HudEntryItem 画半透明，
         // 点击给解释），不再整颗隐藏——隐藏会在钉格上留洞且用户无从理解（见 visibleEntries 处注释）
         focusUsable = focusUsable,
         flashUsable = canFlash,
         recording = recStatus == RecordStatus.START,
-        busy = recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
+        busy = startQueued || recStatus == RecordStatus.PREPARE || recStatus == RecordStatus.STOPPING,
         // 计时与状态是**读数**不是入口：给它们挂 onClick 只会让人以为点开有配置项（§37 第 4 条）
         recStateLabel = when (recStatus) {
             RecordStatus.PREPARE -> stringResource(R.string.cam_state_prepare)
@@ -1772,6 +1886,9 @@ fun CameraScreen(
                 // 准备期（insert+prepare+挂面窗 1~2s）点停止不许静默吞：挂 pendingStop，
                 // 会话进 START 后立即停（2026-10-07 真机"一次停止点击未生效"的根因）
                 recStatus == RecordStatus.PREPARE -> runner.requestStopWhenReady()
+                // B13：上一按已排起录、真实 PREPARE 还没回流（按钮已按合成 PREPARE 画忙碌）：
+                // 同一段准备期的第二按不许再排一次 start。
+                startQueued -> Unit
                 recStatus != RecordStatus.IDLE -> Unit
                 ui.preview != PreviewStatus.ING -> showTip(app.getString(R.string.cam_wait_preview))
                 else -> {
@@ -1783,6 +1900,10 @@ fun CameraScreen(
                         params.renderMode.value = RenderMode.GPU
                         showTip(app.getString(R.string.cam_arc_switch_gpu))
                     } else {
+                        // B13：先闩住请求，填平 start 投递到 PREPARE 回流之间的窗口。
+                        startQueued = true
+                        // Y71：先同步停播报，再投递起录，避免麦克风收进提示尾音。
+                        stance.setRecordingActive(true)
                         runner.start(
                             width = size.width,
                             height = size.height,
@@ -1811,6 +1932,10 @@ fun CameraScreen(
             }
         }
     )
+    // 终点同样先过编译期常量：debug/release 整句消失，连这枚"起点恒 0"的判空都不留。
+    if (BuildConfig.HUD_RECOMP_PROBE && hudCtxStartNs != 0L) {
+        HudRecompProbe.onCtxAssembled(System.nanoTime() - hudCtxStartNs)
+    }
 
     /** 卡片本体的窗口矩形进实测表：值真变了才写。布局期写状态会重组，空转一次就是白掉一帧 */
     fun putCardRect(zone: HudZone, rect: IntRect) {
@@ -1955,6 +2080,26 @@ fun CameraScreen(
                                 if (stanceAnchorRect != r) stanceAnchorRect = r
                             }
                     )
+                    // Y55：浮层**内容**实测宽上限（不是只钳滑杆）。右缘目标 = 锚点右缘与右 Dock 槽
+                    // 左缘取小（与 [MarkerPopupPosition] 同源），再让出左缘最小边距：内容宽不超
+                    // 该值时，左缘钳制与右缘目标才同时成立。锚点落点不动，只是内容变窄——控件层
+                    // 与选色层用 FlowRow 换行/折行，站位面板按宽收缩，窄窗下依然可用。
+                    val stancePopupMaxWidth = remember(stanceAnchorRect, rightDockSlotRect, hudDensity) {
+                        popupContentMaxWidthOf(
+                            anchor = stanceAnchorRect,
+                            rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                            density = hudDensity,
+                            fallback = 320.dp
+                        )
+                    }
+                    val markerPopupMaxWidth = remember(markerAnchorRect, rightDockSlotRect, hudDensity) {
+                        popupContentMaxWidthOf(
+                            anchor = markerAnchorRect,
+                            rightKeepOutPx = rightDockSlotRect?.left?.roundToInt(),
+                            density = hudDensity,
+                            fallback = 220.dp
+                        )
+                    }
                     if (stanceControlsOpen) {
                         Popup(
                             popupPositionProvider = MarkerPopupPosition(
@@ -1966,8 +2111,13 @@ fun CameraScreen(
                             onDismissRequest = { stanceControlsOpen = false },
                             properties = PopupProperties(focusable = true)
                         ) {
-                            // 弹窗内容经桥分发（docs/plan/33）：full=完整控制面板，lite=宣传导流卡
-                            stance.ControlsPopup(gpuAllowed = renderMode == RenderMode.GPU)
+                            // 弹窗内容经桥分发（docs/plan/33）：full=完整控制面板，lite=宣传导流卡。
+                            // Y55：外层按实测可用宽收缩（min 由内容侧 264dp 兜住，incoming max 更小时自动降）；
+                            // 不加 min/max 常量，宽度仍由内容决定，只是不再越过右 Dock 槽左缘。
+                            stance.ControlsPopup(
+                                gpuAllowed = renderMode == RenderMode.GPU,
+                                modifier = Modifier.widthIn(max = stancePopupMaxWidth)
+                            )
                         }
                     }
                     if (markerControlsOpen) {
@@ -1995,12 +2145,19 @@ fun CameraScreen(
                                 onDispose { Log.i(TAG_UI, "marker 控件层 dispose") }
                             }
                             Column(
+                                modifier = Modifier.widthIn(max = markerPopupMaxWidth),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(WotaSpace.m)
+                                // +/线数/-：用 FlowRow 而非 Row——窄窗可用宽不足时线数/− 换到
+                                // 第二行（仍居中、仍可点），而不是把内容顶过右 Dock 槽左缘。
+                                // 1.6.8 的 FlowRow 不认 itemVerticalAlignment，计数文本用同高 Box 居中。
+                                FlowRow(
+                                    verticalArrangement = Arrangement.spacedBy(WotaSpace.xs),
+                                    horizontalArrangement = Arrangement.spacedBy(
+                                        WotaSpace.m,
+                                        Alignment.CenterHorizontally
+                                    )
                                 ) {
                                     MarkerClusterButton(
                                         image = Icons.Outlined.Remove,
@@ -2010,18 +2167,24 @@ fun CameraScreen(
                                                 MarkerLines.clampCount(markerCount - 1)
                                         }
                                     )
-                                    Text(
-                                        text = markerCount.toString(),
-                                        style = MaterialTheme.typography.titleLarge.copy(
-                                            shadow = Shadow(
-                                                color = Color.Black,
-                                                offset = Offset(1f, 1f),
-                                                blurRadius = 3f
-                                            )
-                                        ),
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = WotaSpace.s)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .height(MarkerClusterButtonSize)
+                                            .padding(horizontal = WotaSpace.s),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = markerCount.toString(),
+                                            style = MaterialTheme.typography.titleLarge.copy(
+                                                shadow = Shadow(
+                                                    color = Color.Black,
+                                                    offset = Offset(1f, 1f),
+                                                    blurRadius = 3f
+                                                )
+                                            ),
+                                            color = Color.White
+                                        )
+                                    }
                                     MarkerClusterButton(
                                         image = Icons.Outlined.Add,
                                         description = stringResource(R.string.cam_marker_add),
@@ -2042,7 +2205,11 @@ fun CameraScreen(
                                     // 纪律——拖拽中途不写盘，避免每帧 commit
                                     onValueChangeFinished = { persist.flush() },
                                     valueRange = MarkerLines.MIN_SPREAD..MarkerLines.MAX_SPREAD,
-                                    modifier = Modifier.width(220.dp)
+                                    // 宽屏保持 220dp；窄窗/分屏按实测可用宽收缩（Y55），
+                                    // 否则左缘钳制会把右缘顶过右 Dock 槽左缘
+                                    modifier = Modifier
+                                        .widthIn(max = minOf(220.dp, markerPopupMaxWidth))
+                                        .fillMaxWidth()
                                 )
                             }
                         }
@@ -2061,12 +2228,18 @@ fun CameraScreen(
                             onDismissRequest = { markerColorPop = false },
                             properties = PopupProperties(focusable = true)
                         ) {
-                            Row(
+                            // 选色格同样按实测可用宽折行（Y55）：上限套在卡片外，含 padding
+                            // 一起算，右缘不会越 Dock；宽窗仍是单行六色，窄窗折成两行。
+                            FlowRow(
                                 Modifier
+                                    .widthIn(max = markerPopupMaxWidth)
                                     .wotaCard()
                                     .padding(WotaSpace.s),
-                                horizontalArrangement = Arrangement.spacedBy(WotaSpace.s),
-                                verticalAlignment = Alignment.CenterVertically
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    WotaSpace.s,
+                                    Alignment.CenterHorizontally
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(WotaSpace.s)
                             ) {
                                 MarkerLineColor.ALL.forEach { c ->
                                     val selected = c == markerColor
@@ -2102,6 +2275,16 @@ fun CameraScreen(
                     // #84 霜探针：debugHook 变体 + adb extra 才组合（见 FrostProbe 的类注释）。
                     // 挂 TopStart：默认横屏下左上角不与顶栏（居中）或左 Dock（中段）相压；只画不收指
                     FrostProbeOverlay(glEngine, Modifier.align(Alignment.TopStart))
+                    // B12 重组测量：debugHook/probe 变体 + adb extra 才组合（见 HudRecompProbe 的类注释）。
+                    // 让在霜探针读数下方，避免同角叠放互挡；偏移是探针专用常量，不进布局账。
+                    // 外层编译期常量：debug/release 整段被折叠掉，连 mountEnabled 的状态读都不发生。
+                    if (BuildConfig.HUD_RECOMP_PROBE) {
+                        HudRecompProbeOverlay(
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .padding(top = HUD_RECOMP_PROBE_TOP_DP.dp)
+                        )
+                    }
                     // 顶栏胶囊组（可拖动）：录制计时/状态那颗 + 画幅 | 容量
                     // 不进 sheet 互斥那一道门：抽取前的 TopBar 是整条顶栏（胶囊组 + 设置入口 + 告警条），
                     // 门只夹住四周一圈控件，顶栏恒组合。曲线面板开着又在录的时候，计时那颗是唯一的"还在录"
@@ -2299,11 +2482,9 @@ fun CameraScreen(
                     //（OPEN_FAILED_*）才给「重试/去设置」。2026-10-30 真机视频实锤：回场重开的
                     // ~1s 里 device 还没到 OPEN_ING（枚举能力中）或已回到 CLOSE，这行失败文案
                     // 直接把用户吓退（按返回 = 接一整段黑屏），是黑屏反馈链的起爆点。
-                    opening = ui.preview != PreviewStatus.ERROR && (
-                        ui.device == DeviceStatus.OPEN_ING ||
-                            ui.device == DeviceStatus.CLOSE ||
-                            ui.device == DeviceStatus.OPEN_SUCCEED
-                        ),
+                    // Y60：缺相机权限是确定态，直呈拒权提示——否则 CLOSE/INIT 且缺权限时
+                    // 转圈盖住「去设置」入口，权限弹窗关掉后用户无路可走（判定见 previewGateOpening）。
+                    opening = previewGateOpening(ui),
                     needPermission = ui.needsCameraPermission,
                     modifier = Modifier.fillMaxSize(),
                     onRetry = {
@@ -2455,6 +2636,11 @@ fun CameraScreen(
                 )
             }
         }
+    }
+    // B12 终点：非 Composable 语句，画完这棵子树再记一笔。
+    // 前置编译期常量 ⇒ debug/release 整句消失；只有 debugHook/probe 才可能走到。
+    if (BuildConfig.HUD_RECOMP_PROBE && hudProbeStartNs != 0L) {
+        HudRecompProbe.onBodyComposed(System.nanoTime() - hudProbeStartNs)
     }
 }
 
@@ -2775,7 +2961,7 @@ private fun SplitComparePlayer(autoAttachId: Long?, modifier: Modifier = Modifie
                 // 逆时针旋转钮：右缘竖直居中（不遮画面主体、不与下方控制行/进度条重叠），
                 // 点按转 90°，四分之一圈循环
                 WotaIconButton(
-                    image = Icons.Outlined.RotateLeft,
+                    image = Icons.AutoMirrored.Outlined.RotateLeft,
                     description = stringResource(R.string.player_rotate_ccw),
                     onClick = { rotationQuarter = nextCcwQuarter(rotationQuarter) },
                     modifier = Modifier.align(Alignment.CenterEnd).padding(8.dp)
@@ -3049,7 +3235,12 @@ private fun writeFocusPoint(params: WotaParams, point: TapPoint) {
 private class RecordRunner(
     private val app: Context,
     private val params: WotaParams,
-    private val ctrl: CameraController
+    private val ctrl: CameraController,
+    /**
+     * 会话结算后端的数据来源（R06/R07 迟到对账用）：停录线程在结果交出前就要登记会话并发起
+     * 首次结算——不能等页面的 `result.collect`（退页/取消会让那条路整段消失）。
+     */
+    private val dbProvider: () -> WotaDb
 ) {
 
     private val thread = HandlerThread("WotaRecordCtl").apply { start() }
@@ -3083,6 +3274,14 @@ private class RecordRunner(
         private set
 
     /**
+     * 本会话的系列归属（与 [sessionStore] 同生，重录不换）。
+     *
+     * **不依赖结果里有没有段**：空首段/零产物失败也用同一个系列号登记结算与迟到对账；
+     * 否则引擎按 `store.seriesId` 交付、页面按 0 登记，两边永远不是同一个键（R06/R07）。
+     */
+    val sessionSeriesId: Long get() = sessionStore?.seriesId ?: 0L
+
+    /**
      * 当前尝试创建的输出 sink：重录时作为丢弃兜底（引擎 discardCurrent 已删，重复删幂等）。
      *
      * ⚠ **只在 [beginSession] 赋值一次**，引擎发生分段轮转后它指向的仍是**首段**——那时首段已封段
@@ -3090,13 +3289,30 @@ private class RecordRunner(
      */
     private var sessionSink: OutputSink? = null
 
-    /** 自检已自动重录次数（0 = 首次尝试）；触顶 [MAX_RESTART_ATTEMPTS] 即明确失败 */
+    /**
+     * 自检已自动重录次数（0 = 首次尝试）；触顶 [MAX_RESTART_ATTEMPTS] 即明确失败。
+     * **这是引擎身份，不是重试预算**：同一会话内只增不减（R07 迟到终态的结算键靠它隔离
+     * 被判废那次与重录成功那次）。健康检查通过后也不许归零，否则会话键会与旧尝试撞车。
+     */
     private var attempt = 0
+
+    /**
+     * 当前自检窗口内已用掉的重录次数（只服务 [retryActionOf] 的预算判定）。
+     * 健康检查通过后可以归零（自检链结束），绝不影响 [attempt] 的引擎身份。
+     */
+    private var healthRestartCount = 0
 
     val status = MutableStateFlow(RecordStatus.IDLE)
     val elapsedMs = MutableStateFlow(0L)
     val volumeDb = MutableStateFlow(MIN_DB - 40f)
     val result = MutableStateFlow<RecordResult?>(null)
+
+    /**
+     * 迟到对账带来的结果视图增量（R06：发布等待窗后才 commit 的段、R07：泵线程延迟收尾的终态）。
+     * 只用于刷新相册/回看字段——提示已在停录那一刻给过，不重复弹；读走即清（同 [retryNotice]
+     * 的 StateFlow 去重口径，不清的话第二次迟到事件发不出来）。
+     */
+    val lateResult = MutableStateFlow<SessionDelta?>(null)
 
     /**
      * 换段预提示（2026-10-28 审查加固）：当前段已写字节 ≥ 单段上限 85% 时置真。
@@ -3154,6 +3370,11 @@ private class RecordRunner(
         retryNotice.value = null
     }
 
+    /** UI 读走迟到对账增量后清槽（StateFlow 相等去重：清了才收得到下一次） */
+    fun clearLateResult() {
+        lateResult.value = null
+    }
+
     /** UI 读走环境音丢失提示后清槽（StateFlow 相等去重：清了才收得到下一次同因事件） */
     fun clearAmbientLostNotice() {
         ambientLostNotice.value = null
@@ -3178,11 +3399,22 @@ private class RecordRunner(
      * 链上阻塞步依次是 createPending(≤3s) → prepare → 挂面等待(≤1.5s×2) → 自检窗口(≤3s) → 再重录，
      * 排队的 stopWithGrace 只能等整条链走完——用户点"停止"最长 ~10s 无响应）。stopAsync 在 UI 线程
      * **先置位再排队**，链上检查点见它即让出：重录放弃（abandonAndRestart 开头）、起录中止
-     * （beginSession 检查点①②③）、等待窗提前打断（awaitPreview/awaitEncoderSurface）。
+     * （beginSession 检查点①②③）、等待窗提前打断（awaitSessionReady/awaitEncoderSurface）。
      * UI 线程写、控制线程读，@Volatile。清零点：stopInternal 收尾完成 / start() 起新会话 / shutdown()。
      */
     @Volatile
     private var stopRequested = false
+
+    /** R01 等待结果：TIMEOUT 必须显式失败。 */
+    private enum class WaitOutcome { READY, STOPPED, TIMEOUT }
+
+    /** GL 丢失代号（R05）：UI 写，控制线程及换面回调读。 */
+    @Volatile
+    private var glLossSeq = 0
+
+    /** 起录时捕获的 GL 代号，同一场录制的自检重录沿用。 */
+    @Volatile
+    private var sessionGlLossSeq = 0
 
     /** 上次自动停录巡检时刻（`SystemClock.elapsedRealtime()`；0 = 本会话还没查过）。控制线程单写者。 */
     private var lastAutoStopCheckAt = 0L
@@ -3198,6 +3430,16 @@ private class RecordRunner(
     fun requestStopWhenReady() {
         pendingStop = true
         Log.i(TAG_UI, "准备期收到停止请求，录制态就绪后立即停")
+    }
+
+    /**
+     * 本会话的中止信号（控制线程单读）：用户停止请求，**或本会话起录途中发生 GL 上下文丢失**
+     * （[glLossSeq] 与本会话起点代号不等）。后者同样走判废收尾——旧引擎的编码面已失效，
+     * 本段不可能再出帧，继续 start 只会产出一段定格后尾且报「已保存」的坏片。
+     */
+    private fun sessionAborted(): Boolean {
+        // 用户停止 ∨ 本会话起录途中 GL 上下文丢失：共用同一批检查点与等待窗轮询判据
+        return stopRequested || glLossSeq != sessionGlLossSeq
     }
 
     fun probeFreeSpace(): Long = runCatching { VideoStore(app).freeSpaceMb() }.getOrDefault(0L)
@@ -3227,14 +3469,18 @@ private class RecordRunner(
                 Log.i(TAG_UI, "录制已在 ${status.value}，忽略重复 start")
                 return@post
             }
+            // 先立本次会话身份，再发布 PREPARE。用户看到准备态后发出的停止信号不能被清账。
+            pendingStop = false
+            stopRequested = false
+            sessionGlLossSeq = glLossSeq
+            ctrl.setRecordingActive(true)
             status.value = RecordStatus.PREPARE
-            pendingStop = false // 新会话不继承旧意图（上一会话残留的标记在此清账）
-            stopRequested = false // 同上：上一会话的停止取消信号不带进新会话
             ambientLostNotified = false // 环境音提示按"一次录制一条"复位（重录 attempt 间不去重）
             denoiseInactiveNotified = false // 同上：降噪未生效提示也按一次录制一条复位
             activeArcConvert = arcConvert
             activeArcDstFps = if (arcConvert != null) fps else 0
             attempt = 0
+            healthRestartCount = 0
             sessionArgs = SessionArgs(width, height, fps, sensorOrientation, deviceDegrees, front, arcConvert, captureAudio)
             sessionStore = VideoStore(app)
             // 系列起始时刻：与 sessionStore 同一刻打点（重录沿用同一会话，不刷新）
@@ -3298,8 +3544,10 @@ private class RecordRunner(
         if (pending == null) {
             failNow(RecordError.NO_OUTPUT); return true
         }
-        // 停止检查点①：pending 已建、引擎未建——用户意图立即生效，弃掉这枚 pending 即走
-        if (stopRequested) {
+        // 停止检查点①：pending 已建、引擎未建——用户意图立即生效，弃掉这枚 pending 即走。
+        // R05：判据同检查点②③（sessionAborted 含"本会话途中 GL 上下文丢失"），否则丢失落在
+        // 这一小段时会被 start() 的清账吞掉，继续建引擎并 start，产出旧引擎零帧的坏段。
+        if (sessionAborted()) {
             store.discard(OutputSink.Pending(pending))
             Log.i(TAG_UI, "起录准备期收到停止请求：弃 pending 收场，不再起录")
             return false
@@ -3308,6 +3556,21 @@ private class RecordRunner(
         sessionSink = sink
         val rec = Recorders.create(app, profile, store)
         recorder = rec
+        // 会话身份（R07 交付键）与交付通道：迟到发布/泵线程终态回到本页，由 RecordSession
+        // 合并去重后补结算（页面退场不影响：结算任务在进程级作用域里跑）。
+        // 只有带超时收尾形态的引擎实现该内部接口（MR 路不实现，行为与旧版逐字一致）。
+        (rec as? SessionDeliverySink)?.let { deliverySink ->
+            deliverySink.bindSession(store.seriesId, sessionStartedAtMs, attempt)
+            deliverySink.onSessionDelivery = { delivery ->
+                RecordSession.onDelivery(delivery)?.let { lateResult.value = it }
+                if (delivery is RecorderDelivery.FinalResult) {
+                    Log.i(
+                        TAG_UI,
+                        "泵线程延迟收尾终态：error=${delivery.result.error} parts=${delivery.result.parts.size}"
+                    )
+                }
+            }
+        }
         if (!rec.prepare(profile, sink)) {
             rec.release()
             // prepare 内部已按原因码记日志；这里把余量不足与通用失败区分给 UI
@@ -3316,7 +3579,7 @@ private class RecordRunner(
         }
         // 停止检查点②：引擎已 prepare、面未交相机——走共用判废收尾（停引擎/弃段账目/摘面，
         // 与 abandonAndRestart/GIVE_UP 同一套，禁止另写一份）
-        if (stopRequested) {
+        if (sessionAborted()) {
             teardownAbandonedSession(rec)
             return false
         }
@@ -3330,7 +3593,7 @@ private class RecordRunner(
         // 必须在编码面交给相机**之前**跑——此时正式采集器尚未 start，临时 AudioRecord 不会与
         // 录制链抢同一路采集。取消信号必须同时看 pendingStop：PREPARE 期点停只置 pendingStop
         // （requestStopWhenReady），只看 stopRequested 会白等满 800ms 并继续 start。
-        val preflightCancelled = { stopRequested || pendingStop }
+        val preflightCancelled = { sessionAborted() || pendingStop }
         runCatching { rec.preflightAudioSync(preflightCancelled) }
             .onFailure { Log.w(TAG_UI, "预校准异常（已忽略）：${it.javaClass.simpleName} ${it.message}") }
         if (preflightCancelled()) {
@@ -3338,17 +3601,26 @@ private class RecordRunner(
             return false
         }
         if (renderMode == RenderMode.DIRECT) {
-            ctrl.setRecordingTarget(surface)
-            // 换段重挂（2026-10-08）：换段会销毁旧引擎实例，而 DIRECT 的编码面来自实例本身
-            //（`getSurface()` 的 producer 属实例）⇒ 面随换代而换，相机会话必须改指新面；不改指的话
-            // 相机把帧写进已释放实例的 producer，下一段静默零帧。首段口径不变（下发 + 等预览回 ING）
+            // 交接号只在本次 Surface 进入 repeating 后回执。其他原因的会话重建不能放行这段。
+            val firstHandoff = ctrl.setRecordingTarget(surface)
             rec.onInputSurfaceRecreated = { newSurface ->
-                (newSurface as? Surface)?.let { s ->
-                    ctrl.setRecordingTarget(s)
-                    awaitPreview(PreviewStatus.ING)
+                val s = checkNotNull(newSurface as? Surface)
+                val handoff = ctrl.setRecordingTarget(s)
+                check(awaitSessionReady(handoff) == WaitOutcome.READY) { "相机未接纳本次换段编码面" }
+            }
+            when (awaitSessionReady(firstHandoff)) {
+                WaitOutcome.READY -> Unit
+                WaitOutcome.STOPPED -> {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                WaitOutcome.TIMEOUT -> {
+                    Log.e(TAG_UI, "首段编码面会话交接未就绪（拒绝乐观 start）")
+                    teardownAbandonedSession(rec)
+                    failNow(RecordError.START_FAILED)
+                    return true
                 }
             }
-            awaitPreview(PreviewStatus.ING)
         } else {
             // 转换配置**每段必发**（含 null）：引擎侧的模式/档位账不随停录自清，
             // 按本段是否转换跳过下发的话，关掉转换后的录制仍被上段残留模式暗改
@@ -3367,19 +3639,48 @@ private class RecordRunner(
                     // 好过降级把后半段变成慢放/清掉位次账）；await 落定或超时都必须 clear。
                     val gl = glProvider()
                     gl?.markSegmentRotating()
-                    try {
+                    val bound = try {
                         gl?.setOutputSurface(s, profile.width, profile.height, profile.fps, profile.fpsNtsc)
                         awaitEncoderSurface(s)
                     } finally {
                         gl?.clearSegmentRotating()
                     }
+                    // 同步回调失败由 Recorder 弃掉本段并结算前面的段。
+                    if (!bound) {
+                        throw IllegalStateException("GL 未绑定本次换段编码面")
+                    }
                 }
             }
-            awaitEncoderSurface()
+            // 首段：先确认相机会话本身可出帧（R01），再要求编码面确实挂到**本次** Surface 上。
+            // R01：expected=surface —— 首段也必须是「本段编码面已挂」，不能沿用「任意面已绑定」
+            // 的乐观谓词：换代后旧绑定可能尚未解绑，首查恒真，编码器会把帧写进已死的旧面。
+            when (awaitSessionReady()) {
+                WaitOutcome.READY -> Unit
+                WaitOutcome.STOPPED -> {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                WaitOutcome.TIMEOUT -> {
+                    Log.e(TAG_UI, "首段相机会话未就绪（拒绝乐观 start）")
+                    teardownAbandonedSession(rec)
+                    failNow(RecordError.START_FAILED)
+                    return true
+                }
+            }
+            if (!awaitEncoderSurface(surface)) {
+                if (sessionAborted()) {
+                    teardownAbandonedSession(rec)
+                    return false
+                }
+                Log.e(TAG_UI, "首段编码面未在预算内挂载到本次 Surface（拒绝乐观 start）")
+                teardownAbandonedSession(rec)
+                failNow(RecordError.START_FAILED)
+                return true
+            }
         }
         // 停止检查点③：面已下发、等待窗结束（含被停止提前打断）——rec.start 前最后一道闸，
         // 收尾与检查点②同一套共用判废收尾
-        if (stopRequested) {
+        if (sessionAborted()) {
             teardownAbandonedSession(rec)
             return false
         }
@@ -3433,6 +3734,45 @@ private class RecordRunner(
             autoStopReason = AutoStopRules.REASON_CAMERA_LOST
             Log.w(TAG_UI, "自动停录：相机设备被系统收回（已录部分按正常产物收尾）")
             stopAsync()
+        }
+    }
+
+    /**
+     * GL 渲染上下文丢失时的自动停录入口（R05；观察钩子见录制页 composable 的
+     * [com.wotagei.cam.camera.CameraController.glContextLost] 订阅）。
+     *
+     * 为什么必须显式停：`EGL_CONTEXT_LOST` 是终态，所有权方整条换掉引擎实例后，本段编码器的
+     * 输入面仍绑在**旧**引擎的 EGLSurface 上——新引擎既不会、也不该接管这枚面（中途换面会让
+     * 容器时间轴断轨）。本段不可能再有新帧，继续录只会让尾部定格、结果却报「已保存」。
+     *
+     * 与 [onCameraLost] 同一条**正常收尾**通道（error 保持 null），原因用独立的
+     * [AutoStopRules.REASON_GL_CONTEXT_LOST]（不复用「相机被收回」——那是另一件事）。
+     * 覆盖两种在途形态：
+     * - START：已写数据照常封口保存，原因随结果交 UI；
+     * - PREPARE：起录链可能正卡在入库/挂面等待窗——先置 [stopRequested]（@Volatile）让检查点
+     *   与等待窗立刻让位，再由控制线程的检查点②/③走共用判废收尾，本段不 start。
+     * 一次会话至多一条原因：autoStopReason 短路（先到的电量/存储/相机丢失不被覆盖）。
+     */
+    fun onGlContextLost() {
+        // 即时信号先于排队（同 stopAsync 的纪律）：PREPARE 等待窗最长 1.5s×N，只靠排队消息
+        // 要等整条起录链走完才生效；置位后就绪等待和起录检查点立即让出。
+        glLossSeq++
+        stopRequested = true
+        handler.post {
+            if (glLossSeq == sessionGlLossSeq) return@post
+            when (status.value) {
+                RecordStatus.START -> {
+                    if (autoStopReason != null) return@post
+                    autoStopReason = AutoStopRules.REASON_GL_CONTEXT_LOST
+                    Log.w(TAG_UI, "自动停录：GL 渲染上下文丢失（已录部分按正常产物收尾）")
+                    // 与 stopAsync 同一条宽限通道（起的太快就停会废片），stopRequested 已置
+                    stopWithGrace()
+                }
+                RecordStatus.PREPARE -> Log.w(TAG_UI, "起录准备期 GL 上下文丢失：等待窗/检查点中止本段起录")
+                // IDLE（start 已投递未执行）/ STOPPING（已在收尾）/ ERROR：无事可做；
+                // stopRequested 由 start 起新会话或 stopInternal 收尾清账
+                else -> Unit
+            }
         }
     }
 
@@ -3615,7 +3955,8 @@ private class RecordRunner(
     /**
      * 起录自检：起录后**两档窗口**内问引擎"真在产出吗"（三格见 [com.wotagei.cam.record.healthVerdict]）。
      * 判废且还有机会就 [abandonAndRestart] 从零重录；触顶走 [RecordError.SELF_CHECK_FAILED]。
-     * 健康即停检查（attempt 归零）。全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
+     * 健康即停检查（只清自检重试预算 [healthRestartCount]；[attempt] 是引擎会话身份，单调不回退）。
+     * 全部在 handler 线程执行，与 [beginSession] 同一线程无竞争。
      *
      * 【窗口口径】视频路（`videoTrackAdded`）吃短窗 [VIDEO_WINDOW_MS]：编码器 1.2s 都没建起来
      * （EGL_BAD_ALLOC 那次）短窗即抓。含音轨就绪的完整三格吃长窗 [FULL_WINDOW_MS]：`muxer` 启动要等
@@ -3684,12 +4025,15 @@ private class RecordRunner(
         when (verdict) {
             HealthVerdict.WAIT -> handler.postDelayed(healthCheckTask, HEALTH_TICK_MS)
             HealthVerdict.HEALTHY -> {
-                attempt = 0
+                // 只清自检重试预算；`attempt` 是当前引擎的会话身份，**不许回退**：
+                // 重录到 attempt 1 后若归零，停录登记会与 attempt 0 的迟到终态撞键，
+                // 缓冲里的失败结论会把这次成功会话洗成失败（R07/Y21 漏交付）。
+                healthRestartCount = 0
                 // 起录窗口内的健全性已确认：从这里起交给录制中途看门狗（引擎中途判废不再无声）。
                 // 自检链自身到此结束（不再重投），看门狗是**另一条**自续链，只认错误码。
                 handler.post(engineWatchdogTask)
             }
-            HealthVerdict.UNHEALTHY -> when (retryActionOf(attempt, window, verdict)) {
+            HealthVerdict.UNHEALTHY -> when (retryActionOf(healthRestartCount, window, verdict)) {
                 RetryAction.RESTART -> abandonAndRestart()
                 RetryAction.GIVE_UP -> {
                     Log.w(TAG_UI, "录制自检未过且重录触顶（attempt=$attempt code=${h.errorCode}）")
@@ -3733,6 +4077,7 @@ private class RecordRunner(
         Log.i(TAG_UI, "录制自检未过，丢弃本段并自动重录（第 ${attempt + 1} 次重录）")
         teardownAbandonedSession(rec)
         attempt++
+        healthRestartCount++
         retryNotice.value = R.string.record_auto_retry
         // 返回 false = 重录途中被停止请求打断（检查点①②③已收走半成品），补状态收尾
         if (!beginSession()) stopInternal()
@@ -3786,10 +4131,14 @@ private class RecordRunner(
             if (status.value != RecordStatus.IDLE) status.value = RecordStatus.IDLE
             // 幂等早退也是"停止收尾完成"：取消信号在此清账（调用方多为检查点让出后的补收尾）
             stopRequested = false
+            ctrl.setRecordingActive(false)
             return
         }
         polling = false
         status.value = RecordStatus.STOPPING
+        // 收尾身份由会话持有：系列号来自本会话 store（空首段也有身份），练习武装取"停录那一刻"
+        // 的快照——release/迟到收尾再久，也不许拿后来变过的桥态给同一场录制二次交付。
+        val practiceArmedAtStop = ComparePractice.armed
         // 停止期先于一切拆解动作置位：此后 GL 侧任何编码失败都是「面已死」的拆解伪影而非
         // 会话中真失败，引擎侧 degradeArcConvert 看到该位不再清账换模式——否则晚到的帧撞死面
         // （codec.stop 即输入面失效 → swap EGL_BAD_ALLOC）会触发降级，把已记好的位次账/实测帧率
@@ -3802,8 +4151,23 @@ private class RecordRunner(
             if (flushed > 0) Log.i(TAG_UI, "arc pending flushed=$flushed")
         }
         val out = rec.stop()
-        rec.release()
+        // release 失败不许吞掉会话登记：登记与迟到对账是泵线程终态的唯一认领口。
+        runCatching { rec.release() }.onFailure { Log.w(TAG_UI, "停录 release 失败（泵线程/资源自收）：${it.message}") }
         recorder = null
+        // R06/R07 收尾责任：停录线程在结果交出前**登记会话并发起首次结算**（不依赖页面 collect——
+        // 退页/取消会让那条协程整段消失）。页面只消费同一所有者的增量（含这里当场权威的那份），
+        // 不再自行结算；迟到发布（R06）与泵线程延迟终态（R07）经 onSessionDelivery 合并补账。
+        runCatching {
+            RecordSession.record(
+                backend = AndroidTakeSettlementBackend(dbProvider()),
+                seriesId = sessionSeriesId,
+                startedAtMs = sessionStartedAtMs,
+                result = out,
+                practiceArmed = practiceArmedAtStop,
+                attempt = attempt,
+                onDelta = { d -> lateResult.value = d }
+            )
+        }.onFailure { Log.w(TAG_UI, "会话登记失败（归组/练习交付走页面路径兜底）：${it.message}") }
         // 换段受阻账（2026-10-08 真机缺陷）：这台 ROM 吞掉应用日志，"哪一环卡住、丢了多久"只能靠
         // 落盘账目分辨。只在真出事时写（失败码或丢过内容），与成片同目录，adb 直接 pull。
         // 降级段（error 已置空、degradedCode 有值，如收尾抽干超时但容器收尾正常）同样落账：
@@ -3936,7 +4300,9 @@ private class RecordRunner(
                 val queried = out.parts.firstOrNull()?.uri?.let { queryDisplayName(it) }
                 val videoName = (PendingName.sidecarConvergeTarget(path, queried) ?: path)
                     .substringAfterLast('/')
-                val displayName = videoName.substringBeforeLast('.') + ArcDropLog.EXTENSION
+                // 规范名走 ArcDropLog.sidecarName 单一出口（与 File 通道/读取/清扫同一套规则）：
+                // 去掉成片最后一段扩展名再换 `.drops.json`，不在 UI 侧各拼一套
+                val displayName = ArcDropLog.sidecarName(videoName)
                 val viaStore = sessionStore?.writeSidecar(displayName, storeLog.encode().toByteArray()) != null
                 // 不回写 sidecarWritten/sidecarChannel：这两个标记唯一的下游是上面那段
                 // File 通道归位（已在本次改名之后走完），此处再赋值是死写（编译器告警）
@@ -3980,6 +4346,9 @@ private class RecordRunner(
         }
         // 停止收尾完成：取消信号清账（显示值 out.durationMs 是引擎结算值，下一场 start 从零起算）
         stopRequested = false
+        // R02/R04：录制窗口关闭放在最后——上面的 setRecordingTarget(null) 已经摘面，
+        // 之后再允许看门狗/等号探测介入，不会拆到仍在收尾的编码面。
+        ctrl.setRecordingActive(false)
     }
 
     /** 改名后回查真实 DISPLAY_NAME：MediaStore 撞名会自行加序号后缀，代码拼的名字不可信 */
@@ -3992,50 +4361,40 @@ private class RecordRunner(
     private fun failNow(code: String) {
         polling = false
         recorder = null
+        // 起录失败不走 stopInternal：录制窗口必须在这里也关掉，否则 page/activity 看门狗
+        // 会误以为录制仍在进行而长期不介入预览自愈。
+        ctrl.setRecordingActive(false)
         status.value = RecordStatus.ERROR
         result.value = RecordResult.fail(code)
         handler.postDelayed({ if (status.value == RecordStatus.ERROR) status.value = RecordStatus.IDLE }, 80L)
         Log.w(TAG_UI, "录制失败：$code")
     }
 
-    /**
-     * 会话重建是异步的（DIRECT 换了输出面），等预览回到 ING 再 start，避免编码器拿不到帧。
-     * 轮询条件带 [stopRequested]：停止请求把等待窗立即打断（≤ 一个 POLL_SLICE_MS），
-     * 未就绪返回后由 beginSession 检查点③走停止分支。
-     */
-    private fun awaitPreview(target: PreviewStatus) {
+    /** GPU 等当前相机会话接纳 repeating，DIRECT 还须收到本次编码面交接的回执。 */
+    private fun awaitSessionReady(expectedHandoff: Int? = null): WaitOutcome {
         var waited = 0L
-        while (waited < WAIT_MS && !stopRequested) {
-            if (ctrl.state.value.preview == target) return
+        while (waited < WAIT_MS && !sessionAborted()) {
+            if (ctrl.sessionReadiness()?.canStartRecording(expectedHandoff) == true) {
+                return if (sessionAborted()) WaitOutcome.STOPPED else WaitOutcome.READY
+            }
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        // 被停止提前打断不算超时，不告警（正常超时仍按既有口径留一行）
-        if (!stopRequested) Log.w(TAG_UI, "等待预览会话重建超时，继续 start")
+        return if (sessionAborted()) WaitOutcome.STOPPED else WaitOutcome.TIMEOUT
     }
 
     /**
-     * 等编码面挂好（GL 挂面是 postGl 异步）。[expected] 传重挂路径的新面：必须等「新面已绑定」
-     * ——换段时旧绑定还在，isOutputSurfaceBound 首查恒真、零等待，旧面会先于 GL 解绑被 release；
-     * 首段无旧绑定，null 保持既有「任意面已绑定」谓词不变。
+     * 等待本段 [expected] 在 GL 线程上完成绑定。旧段的绑定在交接前仍可见，不能用于首段或换段放行。
+     * 引擎缺席、超时、用户停止或 GL 丢失均返回 false，由调用方进入弃段或失败收尾。
      */
-    private fun awaitEncoderSurface(expected: Surface? = null) {
-        val gl = glProvider() ?: return
-        fun arrived(): Boolean =
-            if (expected == null) gl.isOutputSurfaceBound() else gl.isEncoderSurfaceNative(expected)
+    private fun awaitEncoderSurface(expected: Surface): Boolean {
+        val gl = glProvider() ?: return false
         var waited = 0L
-        // 轮询条件带 [stopRequested]：停止请求把等待窗立即打断，未挂好返回后由检查点③走停止分支
-        while (waited < WAIT_MS && !arrived() && !stopRequested) {
+        while (waited < WAIT_MS && !sessionAborted() && !gl.isEncoderSurfaceNative(expected)) {
             Thread.sleep(POLL_SLICE_MS)
             waited += POLL_SLICE_MS
         }
-        // 超时静默放行会把「GL 挂面失败」埋进后续日志里翻不着：与 awaitPreview 同口径留一行。
-        // 被停止提前打断不算超时（检查点③会收走半成品），不告警
-        if (!arrived()) {
-            if (!stopRequested) {
-                Log.w(TAG_UI, "等待编码面挂载超时，继续 start")
-            }
-        }
+        return !sessionAborted() && gl.isEncoderSurfaceNative(expected)
     }
 
     private fun buildProfile(
@@ -4266,6 +4625,36 @@ private fun BoxScope.BottomBandChips(
 }
 
 /**
+ * +/− 圆钮直径（2026-10-27 二轮定版）：按钮自身与计数文本的同高 Box 共用这一枚常量，
+ * 保证 FlowRow 换行时行内三者仍以同一中轴对齐。
+ */
+private val MarkerClusterButtonSize = 40.dp
+
+/**
+ * Y55：浮层**内容**宽上限（dp），由实测落点反推。
+ *
+ * [MarkerPopupPosition] 把右缘对齐到 `min(anchor.right, rightKeepOutPx)`，再整块钳进窗口、
+ * 至少留 [HudEdgePad]。内容宽 > `rightLimit - margin` 时，左缘钳制会把右缘顶过目标
+ * （窄窗/分屏最易出现）——70bb902 只钳了间距滑杆，+/线数/−、六色格与站位面板仍会越界。
+ * 这里把同一条算术前移到内容侧：上限 = 右缘目标 − 左缘边距；**锚点落点本身不变**，
+ * 只是内容变窄（控件层与选色层换行，站位面板按宽收缩），窄窗下依然可用。
+ *
+ * 锚点未实测到时给 [fallback]：下一帧实测值到达即改，与 [MarkerPopupPosition] 的回落一致。
+ */
+private fun popupContentMaxWidthOf(
+    anchor: Rect?,
+    rightKeepOutPx: Int?,
+    density: Density,
+    fallback: Dp
+): Dp {
+    val a = anchor ?: return fallback
+    val rightLimit = minOf(a.right.roundToInt(), rightKeepOutPx ?: Int.MAX_VALUE)
+    return with(density) {
+        popupWidthCapPx(rightLimit, HudEdgePad.roundToPx()).toDp()
+    }
+}
+
+/**
  * 站位线浮层的定位（2026-10-27 三轮）：**贴着圆钮右下**，不漂画面中间、也不压右 Dock。
  *
  * 三条约束都来自实测矩形（[anchor] = 圆钮、[rightKeepOutPx] = 右 Dock 槽左缘），
@@ -4319,7 +4708,7 @@ private fun MarkerClusterButton(
 ) {
     Box(
         Modifier
-            .size(40.dp)
+            .size(MarkerClusterButtonSize)
             .clip(CircleShape)
             .background(Color.White.copy(alpha = 0.35f))
             .clickable(onClick = onClick),
@@ -4369,17 +4758,20 @@ private fun DisplayScaleReadout(scale: DisplayScale, anchor: IntRect) {
 
 /**
  * 「预览：<档位>」下方的**实测读数行**（2026-11-01 用户定版，docs/plan/31）：
- * 实际曝光（`XX ms | 1/YY`）· 实际帧率（`XX fps`）· 纠偏模式（自动/手动）· 纠偏值（`X.X ms`）。
+ * 实际曝光（`XX ms | 1/YY`）· HAL 回报曝光（`HAL XX ms | 1/YY`，B01 独立读数）· 实际帧率
+ * （`XX fps`）· 纠偏模式（自动/手动）· 纠偏值（`X.X ms`）。
  *
  * - 数据同源帧率守卫（~1s 采样）与曝光下发留痕（applyParams 逐次回写总线），但**渲染互不相干**：
  *   帧率过低提示是告警行（lowFpsHint），这一行是常态读数，各占各的位；
  * - 只在手动曝光（AE_OFF）且有实际下发值时显示——自动档三键缺席，"实际曝光"无从谈起；
+ * - HAL 回报与送出值并排（B01）：两者不等即 HAL 夹取/改写，排障时一眼能看出"发的和跑的不一样"；
  * - 样式与 [DisplayScaleReadout] 同一套（红描边 + 半透明灰、9sp），钉在它正下方一行的位置。
  */
 @Composable
 private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
     val aeMode by params.aeMode.observed()
     val sentNs by params.actualSentExposureNs.observed()
+    val halNs by params.actualHalExposureNs.observed()
     val shutterState by params.shutter.observed()
     val fpsMeasured by params.actualFps.observed()
     val corrAuto by params.exposureCorrectionAuto.observed()
@@ -4395,10 +4787,21 @@ private fun ExposureTelemetryReadout(params: WotaParams, anchor: IntRect) {
         sent / 1_000_000.0,
         (WotaTiers.NS_PER_SECOND.toDouble() / refNs).roundToInt().coerceAtLeast(1)
     )
+    // B01：HAL 结果侧独立读数，与送出值并排；分数标同样按实发值反推（HAL 值就是实际跑的）
+    val halPart = halNs?.takeIf { it > 0L }?.let {
+        "HAL %.1f ms | 1/%d".format(
+            it / 1_000_000.0,
+            (WotaTiers.NS_PER_SECOND.toDouble() / it).roundToInt().coerceAtLeast(1)
+        )
+    }
     val fpsPart = fpsMeasured?.let { "%.0f fps".format(it) } ?: "-- fps"
     val modePart = stringResource(if (corrAuto) R.string.cam_ae_auto else R.string.cam_ae_manual)
     val corrPart = "%.1f ms".format((corrNs ?: 0L) / 1_000_000.0)
-    val text = "$expPart · $fpsPart · $modePart · $corrPart"
+    val text = buildString {
+        append(expPart)
+        if (halPart != null) append(" · ").append(halPart)
+        append(" · ").append(fpsPart).append(" · ").append(modePart).append(" · ").append(corrPart)
+    }
     val density = LocalDensity.current
     val gap = with(density) { 4.dp.roundToPx() }
     // DisplayScaleReadout 的正文行高（12sp）：这一行钉在它下面一行，避免两行文字叠在一起
