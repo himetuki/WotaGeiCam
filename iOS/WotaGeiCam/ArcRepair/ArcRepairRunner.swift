@@ -611,9 +611,9 @@ private final class ArcRepairSession {
             index += 1
             let label = "audio\(index)"
             var formatHint: CMFormatDescription?
-            // AVAssetTrack.formatDescriptions 的元素本身就是 CMFormatDescription，
-            // 对 CoreFoundation 类型再做 `as?` 在 Swift 5 下是编译错误（恒成功）。
-            formatHint = track.formatDescriptions.first
+            // formatDescriptions 的元素按 Any 桥接；对 CoreFoundation 类型
+            // `as?` 恒成功属编译错误，必须用非条件 `as`。
+            formatHint = track.formatDescriptions.first.map { $0 as CMFormatDescription }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
                 outputSettings: nil,

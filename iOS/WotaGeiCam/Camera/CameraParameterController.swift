@@ -259,8 +259,8 @@ final class CameraParameterController {
         setManualExposure(iso: nil, exposureSeconds: seconds, completion: completion)
     }
 
-    /// 手动曝光：走 `setExposureModeCustom`；两个参数都可为 nil（nil = `device.currentISO` /
-    /// `device.currentExposureDuration`，即保持当前值；旧全局常量名已废弃）。
+    /// 手动曝光：走 `setExposureModeCustom`；两个参数都可为 nil（nil = `AVCaptureDevice.currentISO` /
+    /// `AVCaptureDevice.currentExposureDuration`（static 类属性；旧全局常量名已废弃）。
     ///
     /// 「快门档可用（帧周期能锁）」与「sensor 曝光时间可设」是两件事，这里只处理后者。
     func setManualExposure(
@@ -286,12 +286,12 @@ final class CameraParameterController {
                     outcome = .unsupported("曝光时间", "该设备未上报可用曝光时间域，曝光时间不可调。")
                 } else {
                     // `AVCaptureISOCurrent`/`AVCaptureExposureDurationCurrent` 已改名：
-                    // 新 API 是 AVCaptureDevice 的实例属性 currentISO/currentExposureDuration。
-                    var isoValue = device.currentISO
+                    // 新 API 是 AVCaptureDevice 的 static 类属性 currentISO/currentExposureDuration。
+                    var isoValue = AVCaptureDevice.currentISO
                     if let iso = iso {
                         isoValue = Float(ability.isoRange.clamp(iso))
                     }
-                    var duration = device.currentExposureDuration
+                    var duration = AVCaptureDevice.currentExposureDuration
                     var durationText = "曝光时间保持"
                     if let seconds = exposureSeconds {
                         // 先按「不超过帧周期、不超过 1/10s」夹，再按设备曝光域夹（两者都是纳秒口径）。
