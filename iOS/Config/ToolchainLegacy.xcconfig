@@ -1,0 +1,13 @@
+// Legacy 工具链片段：Xcode 13.4.1 或更早（Swift 5.6）+ iOS 10 + armv7/arm64。
+//
+// 这是 iPhone 5 / 5c（armv7，最高 iOS 10.3.4）唯一可达的构建组合。
+// 现代 Xcode 会直接拒绝 armv7 与 iOS 10 部署目标：
+//   “Building iOS projects with deployment targets for the armv7, armv7s, and i386
+//    architectures is no longer supported.”（Xcode 14 Release Notes）
+//
+// 注意：iOS 10 时代还没有 Metal 全平台覆盖，A6（iPhone 5）没有 Metal；
+// 渲染后端必须保留 OpenGL ES / CPU 降级（见 WotaCore.RenderBackendPolicy）。
+IPHONEOS_DEPLOYMENT_TARGET = 10.0
+ARCHS = armv7 arm64
+VALID_ARCHS = "armv7 arm64"
+ONLY_ACTIVE_ARCH = NO

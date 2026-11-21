@@ -1,0 +1,8 @@
+// lite 变体片段（与 full 共用 Bundle ID）。
+// 单独使用不完整：必须由 Config/LiteLegacy.xcconfig 或 Config/LiteModern.xcconfig
+// 与 Shared.xcconfig、对应 Toolchain-*.xcconfig 一起 #include。
+// 当前骨架没有 AI 站位功能，两变体行为一致，只通过 WOTA_LITE / WOTA_VARIANT 提供后续分流入口。
+WOTA_VARIANT = lite
+WOTA_DISPLAY_NAME = WotaGeiCam
+PRODUCT_BUNDLE_IDENTIFIER = com.wotagei.cam
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) WOTA_LITE

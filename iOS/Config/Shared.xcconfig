@@ -1,0 +1,30 @@
+// WotaGeiCam iOS 共享构建设置（变体无关、工具链无关的公共项）。
+//
+// 目标设备口径：最低限度适配 iPhone 5/6 一级的旧设备。
+// - 源码 API 基线：iOS 10（UIKit + AVFoundation；无 SwiftUI/Combine/@MainActor/concurrency）；
+// - 部署目标与架构**不在这里写死**：
+//     Legacy（旧 Xcode + iOS 10 + armv7/arm64）见 ToolchainLegacy.xcconfig；
+//     Modern（新 Xcode + arm64 + iOS 15）见 ToolchainModern.xcconfig。
+//
+// Apple 官方事实（影响 iPhone 5 可达性）：
+// - “32-bit app support has been discontinued in Xcode 14. Xcode 14 will only build 64-bit apps.”
+// - Xcode 14 Release Notes：“Building iOS projects with deployment targets for the armv7, armv7s,
+//   and i386 architectures is no longer supported.”，并且不再支持低于 iOS 11 的部署目标。
+// 因此 iPhone 5/5c（armv7，最高 iOS 10.3.4）只能用 Xcode 13 或更早的 legacy 工具链构建。
+
+WOTA_SOURCE_API_BASELINE = 10.0
+
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos
+TARGETED_DEVICE_FAMILY = 1
+
+SWIFT_VERSION = 5.0
+CLANG_ENABLE_MODULES = YES
+
+CODE_SIGN_STYLE = Automatic
+// 不写 DEVELOPMENT_TEAM / PROVISIONING_PROFILE：无签名入口在命令行传
+// CODE_SIGNING_ALLOWED=NO，真机签名由使用者自行提供。
+
+MARKETING_VERSION = 0.0.12
+CURRENT_PROJECT_VERSION = 12
+WOTA_ANDROID_BASELINE = 7394187

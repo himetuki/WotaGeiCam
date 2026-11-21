@@ -1,0 +1,5 @@
+// 组合配置：lite 变体 + Legacy 工具链（iOS 10 / armv7 + arm64，需 Xcode <= 13）。
+// 对应构建配置：Debug-Lite / Release-Lite。
+#include "Shared.xcconfig"
+#include "Lite.xcconfig"
+#include "ToolchainLegacy.xcconfig"

@@ -1,0 +1,29 @@
+# 平台差异与升级事项（Android → iOS）
+
+基线：`Android/` 只读参考，提交 `7394187`。本表列出**平台无可行等价**或**需产品降级/裁决**的项，
+每项给出 **Android 源码证据** 与 **iOS 能力边界**。**本表不替用户作最终产品裁决**；
+是否采用替代、替代形态如何，均由用户在升级规则下决定。所有条目默认状态 `待实现（平台无等价，需裁决）`。
+
+> 说明：这些项**不是**实现缺陷，而是两个平台的能力边界差异。可先推进不依赖这些裁决的移植工作。
+
+| ID | 主题 | Android 证据 | iOS 能力边界 | 影响面 | 状态 |
+|---|---|---|---|---|---|
+| PD-001 | 设备内录（其他 App 音频） | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/record/CodecRecorder.kt:319`「内录（AudioPlaybackCapture）第二音轨」；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/record/CodecRecorder.kt:693` 起 `createAudioEncoder` 双 Aac 轨；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/CameraScreen.kt:2571` 自述「内录要 MediaProjection 授权」；`Android/WotaGeiCamApp/app/src/main/AndroidManifest.xml:1` 声明 `FOREGROUND_SERVICE_MEDIA_PROJECTION` | iOS 无「采集其它 App 音频并混入自有录像音轨」的公开 API。ReplayKit 只能**全屏录制**（产物为系统录屏，形态不同），**不能**把设备内音频混进 `AVCaptureSession`/`AVAssetWriter` 的自定义音轨。 | 内录音轨、选轨、同步后端、后校准、相关设置/胶囊 | 待实现（平台无等价，需裁决） |
+| PD-002 | 全盘媒体删改/回收站/重命名 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/media/MediaActions.kt:160` API30+ 直写 `IS_TRASHED`、API29 本地 `trash_item`；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/media/MediaActions.kt:251` 直接 delete（无系统授权框）；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/media/MediaActions.kt:86` 重命名读真实文件名并移动 sidecar；`Android/WotaGeiCamApp/app/src/main/AndroidManifest.xml:1` `MANAGE_EXTERNAL_STORAGE` | iOS Photos 不允许任意删改**他方**资源、无跨 App 回收站；对自有导入项删除需经系统确认（`PHPhotoLibrary.performChanges`），重命名照片库资源受限（须导入导出）。 | 媒体库回收站/删除/重命名/分享 | 待实现（平台无等价，需裁决） |
+| PD-003 | App 内更新与安装 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/update/UpdateChecker.kt:1` 读 GitHub latest release + 镜像测速；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/update/UpdateInstaller.kt:1` `FileProvider` + 系统安装器；`Android/WotaGeiCamApp/app/src/main/AndroidManifest.xml:1` `INTERNET`（仅更新）+ `REQUEST_INSTALL_PACKAGES`；`Android/WotaGeiCamApp/app/src/main/res/xml/file_paths.xml:13` cache `updates/` | iOS 无 App 内 APK 式安装/覆盖安装。本轮为 **unsigned 侧载**：只能查版本 + 跳转/提示，下载 unsigned IPA 后由外部工具重签安装。 | 更新模块、设置「关于」 | 待实现（平台无等价，需裁决） |
+| PD-004 | 蓝牙 A2DP 电量与遥控 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/bt/BtSpeakerController.kt:1` 已配对/已连 A2DP 设备列表、电量、音量/传输控制；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/dialog/BtSpeakerPanel.kt:82` 设备行/电量/连接/设置 | iOS 无第三方读取 A2DP 电量/transport 的公开 API。退化为系统音量 + 音频路由（`AVAudioSession` 路由、`MPVolumeView`）；设备名/电量不保证可得。 | 蓝牙面板、音源路由 | 待实现（平台无等价，需裁决） |
+| PD-005 | 系统备份/迁移 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/backup/WotaBackupAgent.kt:1` `onFullBackup`/`onRestoreFinished`；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/backup/PortableUserData.kt:12` `wota_user_backup.bin`（4MiB/VERSION=1）；`Android/WotaGeiCamApp/app/src/main/res/xml/backup_rules.xml:5`、`Android/WotaGeiCamApp/app/src/main/res/xml/data_extraction_rules.xml:5` 仅 include 该文件 | iOS 无 `BackupAgent` 等价。改为**显式导出/导入**二进制快照 + Files 共享，保持 additive 不覆盖、排除 AI 键。 | 备份/恢复、设置页入口 | 待实现（平台无等价，需裁决） |
+| PD-006 | 分屏布局 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/ui/CameraScreen.kt:465`（`:2479` `SPLIT_SQUEEZE=0.5f`、`transformOrigin=(0f,0.5f)`；`:2493` `SplitPanel`；`:2583` `SplitComparePlayer`）：**App 内左右栏**——录制页整层缩到**左半屏**（仅 graphicsLayer 变换，布局不重排），**右半屏**给模式/实时对比面板；录制中锁定；进入时探并发双摄。**非** OS 多窗口，**无**上下变体，代码自述「横竖屏共用一套布局」。 | iPhone 无系统级 Split View（仅 iPad 且条件受限）。若要复刻，只能做 **App 内左右分栏**；具体取向（竖上/下、横左/右）与是否实现属**产品决策**。 | 取景页布局、对比入口 | 待实现（平台无等价，需裁决） |
+| PD-007 | 所有文件访问 | `Android/WotaGeiCamApp/app/src/main/AndroidManifest.xml:1` `MANAGE_EXTERNAL_STORAGE`；`Android/WotaGeiCamApp/app/src/main/res/values/strings_settings.xml:121`「所有文件访问」区与引导；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/core/StorageAccess.kt:1`（`WotaStorage`） | iOS 无全局存储权限；改为 App 自有目录 + 显式 Photos 导入导出。 | 存储/权限设置 | 待实现（平台无等价，需裁决） |
+| PD-008 | 前台服务与常驻通知 | `Android/WotaGeiCamApp/app/src/main/AndroidManifest.xml:1` `FOREGROUND_SERVICE`/`FOREGROUND_SERVICE_MEDIA_PROJECTION`/`POST_NOTIFICATIONS`；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/WotaApp.kt:65` 内录前台服务通知渠道 | Android 用前台服务保活内录（media projection）。iOS 无同一机制；长时间录制须用后台音频/`beginBackgroundTask` 等自有能力，且内录本身已无等价（见 PD-001）。 | 录制保活 | 待实现（平台无等价，需裁决） |
+| PD-009 | 系统媒体库可见性 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/record/VideoStore.kt:26` MediaStore `IS_PENDING` 两段式入库、`MediaScanner` 不用；`Android/WotaGeiCamApp/app/src/main/res/xml/file_paths.xml:12` 暴露 `Movies/WotaGeiCam/` | iOS 媒体库是 Photos；App 自有目录文件默认不进系统相册。可见性须经显式 Photos 动作，**不引入 Android 不存在的隐式媒体库行为**。 | 入库/可见性/分享 | 待实现（平台无等价，需裁决） |
+| PD-010 | 真机能力差异（1/24、120/240fps、OIS/EIS、镜头、白平衡增益、手电） | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/core/CameraAbility.kt:49`/`:222` 运行时能力提取；`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/camera/RequestApplier.kt:435` 每参数 gating | iOS `AVCaptureDevice` 能力与 Camera2 非语义等价；具体机型是否支持某档**不可自动证明**。 | 相机参数、导出 | 待实现（平台无等价，需裁决） |
+| PD-011 | 无 Metal 机型（iPhone 5）渲染降级 | `Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/camera/GlRenderEngine.kt:1`、`Android/WotaGeiCamApp/app/src/main/java/com/wotagei/cam/camera/Shaders.kt:1`（Android 独立 GL/EGL 引擎，可作三态后端的算法参考） | **无 Metal 的机型（iPhone 5，A6/armv7）**：iOS 侧须提供 **OpenGL ES 或 CPU** 降级后端；Metal 仅 A7+ 设备可用。**不得**把 Android GL/GLSL 直接翻译，降级后端须 iOS 侧独立重写，且核心参数调整在降级路径上仍可用。 | 取景/导出渲染、最低机型 | 待实现（平台无等价，需裁决） |
+| PD-012 | 双工具链门（armv7 / arm64） | `Android/WotaGeiCamApp/app/build.gradle.kts:76`（`splits.include("arm64-v8a", "armeabi-v7a")`，上游本就双 ABI 切片） | **旧 Xcode 产 armv7 切片** 与 **现代 Xcode 编 arm64** 为两个**独立工具链门**：iPhone 5 需 armv7，iPhone 6+ 需 arm64。是否可行、是否合并为 universal、如何取舍由**主代理核实并裁决**。 | 构建/打包、最低机型 | 待实现（平台无等价，需裁决） |
+
+## 处理纪律（写给实现方）
+
+1. **不擅自删减**：以上项在映射表中一律 `待实现（平台无等价，需裁决）`，**不得**因为无等价就静默移除 Android 功能或把状态改写成完成态。
+2. **不代用户裁决**：替代形态（如内录是否用 ReplayKit 全屏录制、分屏是否实现/取向、更新是否只提示）由用户决定。
+3. **证据可追溯**：每项均给出 Android 源码路径与行号，便于复核与后续 diff 同步。
+4. **可独立推进**：不依赖这些裁决的移植（环境音录制、媒体库自有目录、播放/剪辑/导出、设置主体等）可先行。

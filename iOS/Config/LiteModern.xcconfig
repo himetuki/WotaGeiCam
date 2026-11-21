@@ -1,0 +1,5 @@
+// 组合配置：lite 变体 + Modern 工具链（arm64 / iOS 15，Xcode 14+）。
+// 对应构建配置：Debug-Lite-Modern / Release-Lite-Modern。
+#include "Shared.xcconfig"
+#include "Lite.xcconfig"
+#include "ToolchainModern.xcconfig"

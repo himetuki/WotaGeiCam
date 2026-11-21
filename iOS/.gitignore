@@ -1,0 +1,16 @@
+# iOS 构建与临时产物（全部限制在 iOS/ 下）
+.DS_Store
+.build/
+build/
+DerivedData/
+Archives/
+*.xcarchive
+*.ipa
+*.app
+*.dSYM
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.moved-aside
+.swiftpm/
+Package.resolved
