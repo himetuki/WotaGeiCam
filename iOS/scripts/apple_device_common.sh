@@ -334,13 +334,13 @@ apple_validate_device_app() {
     fi
     if [ -z "$header" ]; then
       snippet="$(printf '%s' "$otool_out" | head -c 400 | tr '\n' '|')"
-      apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：$exec_path（otool 输出：${snippet:-<empty>}）"
+      apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：${exec_path}（otool 输出：${snippet:-<empty>}）"
     fi
     filetype="$(printf '%s\n' "$header" | awk '{print $5}')"
     [ "$filetype" = "2" ] || apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=${filetype}）。"
 
     loads="$(apple_otool -arch "$arch" -l "$exec_path" 2>&1)" || \
-      apple_fail 65 "otool 无法读取 $arch 的 load commands：$exec_path（otool 输出：$(printf '%s' "$loads" | head -c 400 | tr '\n' '|')）"
+      apple_fail 65 "otool 无法读取 $arch 的 load commands：${exec_path}（otool 输出：$(printf '%s' "$loads" | head -c 400 | tr '\n' '|')）"
 
     if printf '%s\n' "$loads" | grep -q 'cmd LC_BUILD_VERSION'; then
       build_platform="$(printf '%s\n' "$loads" | awk '/cmd LC_BUILD_VERSION/ {f=1} f && /^[[:space:]]*platform / {sub(/^[[:space:]]*platform[[:space:]]+/, ""); print; exit}')"
