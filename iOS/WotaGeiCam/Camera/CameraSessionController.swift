@@ -947,7 +947,7 @@ final class CameraSessionController {
         } catch {
             return (false, "锁定摄像头以设置曝光时间失败：\(error.localizedDescription)")
         }
-        device.setExposureModeCustom(duration: duration, iso: AVCaptureISOCurrent, completionHandler: nil)
+        device.setExposureModeCustom(duration: duration, iso: device.currentISO, completionHandler: nil)
         device.unlockForConfiguration()
         return (true, nil)
     }

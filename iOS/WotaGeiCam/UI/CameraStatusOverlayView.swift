@@ -198,7 +198,7 @@ final class CameraStatusOverlayView: UIView {
             view.color = .white
             return view
         } else {
-            return UIActivityIndicatorView(activityIndicatorStyle: .white)
+            return UIActivityIndicatorView(style: .white)
         }
     }
 

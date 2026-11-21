@@ -82,7 +82,8 @@ final class CameraCaptureControls {
     private func runRestore(_ steps: [RestoreStep], start: Int, id: UUID) {
         guard restoreID == id else { return }
         if start < steps.count && camera.latest.ability.isAvailable {
-            steps[start] { self.runRestore(steps, start: start + 1, id: id) }
+            // 下标取出的闭包不能再用尾随闭包调用（Swift 5 语义），显式加括号。
+            steps[start]({ self.runRestore(steps, start: start + 1, id: id) })
         } else {
             if camera.latest.ability.isAvailable {
                 camera.setStabilization(mode: selectionState.stabilization)

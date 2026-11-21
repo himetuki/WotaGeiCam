@@ -192,7 +192,9 @@ final class PlayerEngine: NSObject {
     private func loadAssetMetadata(asset: AVURLAsset) {
         asset.loadValuesAsynchronously(forKeys: ["duration", "tracks"]) { [weak self] in
             guard let self = self, !self.isReleased else { return }
-            DispatchQueue.main.async {
+            // 主队列回调必须再走一次 weak 捕获：沿用外层强引用时，
+            // 内层 `guard let self = self` 会对非可选值做条件绑定（Swift 5 编译错误）。
+            DispatchQueue.main.async { [weak self] in
                 guard let self = self, !self.isReleased else { return }
                 // 旧 asset 的异步回填不得覆盖换片后的时长/帧率。
                 guard self.playerItem?.asset === asset else { return }

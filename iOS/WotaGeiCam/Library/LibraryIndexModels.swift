@@ -196,24 +196,26 @@ struct LibraryIndexState {
         ]
     }
 
+    /// 归一化数组块：先转成 `[Any]`（键缺失/类型不对都算空数组），再逐项按字典映射。
+    private static func decodeArray<T>(_ raw: Any?, _ make: ([String: Any]) -> T?) -> [T] {
+        guard let list = raw as? [Any] else { return [] }
+        return list.compactMap { item in
+            guard let dict = item as? [String: Any] else { return nil }
+            return make(dict)
+        }
+    }
+
     static func from(_ object: Any) -> LibraryIndexState? {
         guard let dict = object as? [String: Any] else { return nil }
         var state = LibraryIndexState()
-        state.identities = (dict["identities"] as? [Any])?.compactMap {
-            ($0 as? [String: Any]).flatMap(LibraryIdentity.from)
-        }?.filter { $0.mediaId > 0 && $0.mediaId < Int64.max } ?? []
-        state.tags = (dict["tags"] as? [Any])?.compactMap {
-            ($0 as? [String: Any]).flatMap(LibraryTag.from)
-        } ?? []
-        state.trash = (dict["trash"] as? [Any])?.compactMap {
-            ($0 as? [String: Any]).flatMap(LibraryTrashItem.from)
-        } ?? []
-        state.series = (dict["series"] as? [Any])?.compactMap {
-            ($0 as? [String: Any]).flatMap(LibrarySeries.from)
-        } ?? []
-        state.seriesParts = (dict["seriesParts"] as? [Any])?.compactMap {
-            ($0 as? [String: Any]).flatMap(LibrarySeriesPart.from)
-        } ?? []
+        // `(.as? [Any])?.compactMap { ... }?.filter` 在 Swift 5 下会报「对非可选值使用可选链」
+        // （compactMap 的返回已是非可选数组），改为先把原始值归一成 [Any] 再映射。
+        state.identities = LibraryIndexState.decodeArray(dict["identities"], LibraryIdentity.from)
+            .filter { $0.mediaId > 0 && $0.mediaId < Int64.max }
+        state.tags = LibraryIndexState.decodeArray(dict["tags"], LibraryTag.from)
+        state.trash = LibraryIndexState.decodeArray(dict["trash"], LibraryTrashItem.from)
+        state.series = LibraryIndexState.decodeArray(dict["series"], LibrarySeries.from)
+        state.seriesParts = LibraryIndexState.decodeArray(dict["seriesParts"], LibrarySeriesPart.from)
         state.compareHistory = LibraryIndexJSON.compareEntries(dict["compareHistory"])
         state.nextMediaId = LibraryIndexJSON.int64(dict["nextMediaId"]) ?? 1
         if state.nextMediaId < 1 { state.nextMediaId = 1 }

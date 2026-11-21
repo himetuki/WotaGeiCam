@@ -483,12 +483,12 @@ final class MediaLibrary {
         queue.async { [weak self] in
             guard let self = self else { return }
             if seriesId == 0 {
-                MediaLibrary.deliver((), completion)
+                MediaLibrary.deliver(completion)
                 return
             }
             let valid = parts.filter { $0.mediaId > 0 }
             if valid.count < MediaSeriesGrouper.minGroupSize {
-                MediaLibrary.deliver((), completion)
+                MediaLibrary.deliver(completion)
                 return
             }
             do {
@@ -509,7 +509,7 @@ final class MediaLibrary {
             } catch {
                 MediaLibraryLog.error("分段归组落库失败 seriesId=\(seriesId)：\(error)")
             }
-            MediaLibrary.deliver((), completion)
+            MediaLibrary.deliver(completion)
         }
     }
 
@@ -532,7 +532,7 @@ final class MediaLibrary {
                     state.compareHistory, rightId: rightId, rightUri: rightUri, leftId: leftId, nowMs: now
                 )
             }
-            MediaLibrary.deliver((), completion)
+            MediaLibrary.deliver(completion)
         }
     }
 
@@ -542,7 +542,7 @@ final class MediaLibrary {
             try? self.indexStore.apply { state in
                 state.compareHistory = MediaCompareHistory.remove(state.compareHistory, key: key)
             }
-            MediaLibrary.deliver((), completion)
+            MediaLibrary.deliver(completion)
         }
     }
 
@@ -690,5 +690,12 @@ final class MediaLibrary {
     private static func deliver<T>(_ value: T, _ completion: ((T) -> Void)?) {
         guard let completion = completion else { return }
         DispatchQueue.main.async { completion(value) }
+    }
+
+    /// `deliver((), completion)` 在 Swift 5 下会因 `(() -> Void)?` 与 `((()) -> Void)?`
+    /// 是两种不同形状（零参 vs 单个空元组参）而无法互换；Void 结果走这枚无参重载。
+    private static func deliver(_ completion: (() -> Void)?) {
+        guard let completion = completion else { return }
+        DispatchQueue.main.async { completion() }
     }
 }

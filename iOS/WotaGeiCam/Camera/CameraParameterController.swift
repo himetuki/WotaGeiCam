@@ -259,8 +259,8 @@ final class CameraParameterController {
         setManualExposure(iso: nil, exposureSeconds: seconds, completion: completion)
     }
 
-    /// 手动曝光：走 `setExposureModeCustom`；两个参数都可为 nil（nil = `AVCaptureISOCurrent` /
-    /// `AVCaptureExposureDurationCurrent`，即保持当前值）。
+    /// 手动曝光：走 `setExposureModeCustom`；两个参数都可为 nil（nil = `device.currentISO` /
+    /// `device.currentExposureDuration`，即保持当前值；旧全局常量名已废弃）。
     ///
     /// 「快门档可用（帧周期能锁）」与「sensor 曝光时间可设」是两件事，这里只处理后者。
     func setManualExposure(
@@ -285,11 +285,13 @@ final class CameraParameterController {
                 } else if exposureSeconds != nil && !ability.hasManualExposureDuration {
                     outcome = .unsupported("曝光时间", "该设备未上报可用曝光时间域，曝光时间不可调。")
                 } else {
-                    var isoValue = AVCaptureISOCurrent
+                    // `AVCaptureISOCurrent`/`AVCaptureExposureDurationCurrent` 已改名：
+                    // 新 API 是 AVCaptureDevice 的实例属性 currentISO/currentExposureDuration。
+                    var isoValue = device.currentISO
                     if let iso = iso {
                         isoValue = Float(ability.isoRange.clamp(iso))
                     }
-                    var duration = AVCaptureExposureDurationCurrent
+                    var duration = device.currentExposureDuration
                     var durationText = "曝光时间保持"
                     if let seconds = exposureSeconds {
                         // 先按「不超过帧周期、不超过 1/10s」夹，再按设备曝光域夹（两者都是纳秒口径）。
@@ -438,13 +440,13 @@ final class CameraParameterController {
                     } else {
                         let clampedKelvin = RecordingTiers.kelvinRange.clamp(Double(kelvin))
                         let clampedTint = RecordingTiers.tintRange.clamp(tint ?? 0)
-                        let values = AVCaptureWhiteBalanceTemperatureAndTintValues(
+                        let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
                             temperature: Float(clampedKelvin),
                             tint: Float(clampedTint)
                         )
                         let maximumGain = device.maxWhiteBalanceGain
                         let raw = device.deviceWhiteBalanceGains(for: values)
-                        let gains = AVCaptureWhiteBalanceGains(
+                        let gains = AVCaptureDevice.WhiteBalanceGains(
                             redGain: Swift.min(Swift.max(raw.redGain, 1), maximumGain),
                             greenGain: Swift.min(Swift.max(raw.greenGain, 1), maximumGain),
                             blueGain: Swift.min(Swift.max(raw.blueGain, 1), maximumGain)
@@ -515,7 +517,7 @@ final class CameraParameterController {
                         guard value.isFinite else { return 1 }
                         return Float(Swift.min(Swift.max(value, 1), maximum))
                     }
-                    let gains = AVCaptureWhiteBalanceGains(
+                    let gains = AVCaptureDevice.WhiteBalanceGains(
                         redGain: clampGain(red),
                         greenGain: clampGain(green),
                         blueGain: clampGain(blue)

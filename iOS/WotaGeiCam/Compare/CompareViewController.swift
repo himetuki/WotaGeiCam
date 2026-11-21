@@ -120,8 +120,8 @@ final class CompareViewController: UIViewController {
     private let statusLabel = UILabel()
     private let footnoteLabel = UILabel()
     private let bannerLabel = UILabel()
-    // `init(style:)` 是 iOS 13+；iOS 10 基线用 `init(activityIndicatorStyle:)`（仅弃用警告）。
-    private let loadingIndicator = UIActivityIndicatorView(activityIndicatorStyle: .white)
+    // Swift 下旧名 `init(activityIndicatorStyle:)` 是改名错误而非弃用警告，必须用 `init(style:)`。
+    private let loadingIndicator = UIActivityIndicatorView(style: .white)
 
     // MARK: - 生命周期
 

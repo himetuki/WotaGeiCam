@@ -48,7 +48,7 @@ final class CameraLibraryViewController: UIViewController {
 
     private let stateView = UIView()
     private let stateLabel = UILabel()
-    private let loadingIndicator = UIActivityIndicatorView(activityIndicatorStyle: .gray)
+    private let loadingIndicator = UIActivityIndicatorView(style: .gray)
 
     private let actionBar = UIView()
     private var actionBarHeightConstraint: NSLayoutConstraint?
@@ -194,7 +194,7 @@ final class CameraLibraryViewController: UIViewController {
         NSLayoutConstraint.activate([
             stateView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             stateView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            stateView.widthAnchor.constraint(lessThanOrEqualTo: 280),
+            stateView.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
             stateLabel.topAnchor.constraint(equalTo: stateView.topAnchor),
             stateLabel.leadingAnchor.constraint(equalTo: stateView.leadingAnchor),
             stateLabel.trailingAnchor.constraint(equalTo: stateView.trailingAnchor),
@@ -698,7 +698,7 @@ final class LibraryItemCell: UITableViewCell {
     private var currentItem: MediaItem?
     private var onLike: ((MediaItem) -> Void)?
 
-    override init(style: UITableViewCellStyle, reuseIdentifier: String?) {
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         configure()
     }

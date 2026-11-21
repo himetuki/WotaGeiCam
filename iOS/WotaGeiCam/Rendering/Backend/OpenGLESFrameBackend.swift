@@ -107,7 +107,7 @@ public final class OpenGLESFrameBackend: FrameRenderBackend {
     private func resetEchoHistoryOnQueue() {
         hasHistory = false
         pendingAccumulationClear = false
-        guard ready, accumFramebuffer[0] != 0, accumFramebuffer[1] != 0 else { return }
+        guard ready, accFramebuffer[0] != 0, accFramebuffer[1] != 0 else { return }
         do {
             try withContext { clearAccumulation() }
         } catch {
