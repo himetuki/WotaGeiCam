@@ -613,7 +613,7 @@ private final class ArcRepairSession {
             var formatHint: CMFormatDescription?
             // formatDescriptions 的元素按 Any 桥接；对 CoreFoundation 类型
             // `as?` 恒成功属编译错误，必须用非条件 `as`。
-            formatHint = track.formatDescriptions.first.map { $0 as CMFormatDescription }
+            formatHint = track.formatDescriptions.first.map { $0 as! CMFormatDescription }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
                 outputSettings: nil,
