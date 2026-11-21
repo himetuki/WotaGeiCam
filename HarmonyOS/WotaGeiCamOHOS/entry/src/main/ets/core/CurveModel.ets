@@ -291,14 +291,28 @@ export class CurveEdit {
 
   /** 最近的点；超出 HIT_RADIUS 返回 -1（表示点的是空白，应新增控制点） */
   static hitTest(points: Array<CurvePoint>, x: number, y: number): number {
+    return CurveEdit.hitTestPx(points, x, y, CurveEdit.HIT_RADIUS, CurveEdit.HIT_RADIUS);
+  }
+
+  /**
+   * 像素域命中（29 §3.2-1，上游 bda89bb）：[rx]/[ry] 是**归一化半径**（调用方按
+   * radiusPx ÷ 画布宽/高换算——x/y 各自换算，正方形画布下二者相等）。
+   * 归一化常数 HIT_RADIUS 在面板放大后相对手指变小（120 画布 ≈8.4dp），
+   * 是「左下/右上端点抓不住」的根因之一；像素域半径随面板放大同步变大。
+   * rx/ry 非正返回 -1（防御：无半径即无命中）。
+   */
+  static hitTestPx(points: Array<CurvePoint>, x: number, y: number, rx: number, ry: number): number {
+    if (rx <= 0 || ry <= 0) {
+      return -1;
+    }
     let best: number = -1;
     let bestDist: number = Number.MAX_VALUE;
     for (let i = 0; i < points.length; i++) {
       const p: CurvePoint = points[i];
-      const dx: number = p.x - x;
-      const dy: number = p.y - y;
+      const dx: number = (p.x - x) / rx;
+      const dy: number = (p.y - y) / ry;
       const d: number = Math.sqrt(dx * dx + dy * dy);
-      if (d <= CurveEdit.HIT_RADIUS && d < bestDist) {
+      if (d <= 1.0 && d < bestDist) {
         bestDist = d;
         best = i;
       }

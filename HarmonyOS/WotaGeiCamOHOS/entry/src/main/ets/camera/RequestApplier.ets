@@ -32,6 +32,7 @@
 import {
   AeMode, AfMode, Flash, Rect, Size, Stabilize, TapPoint, WbPreset, WotaTag, WotaTiers
 } from '../core/Constants';
+import { ExposureCorrection, ReadoutLatch } from '../core/ExposureCorrection';
 import { CameraAbility, FpsPick, RangeI, RangeF, pickFpsRange, pickHighSpeedFpsRange } from '../core/CameraAbility';
 import { WotaParams } from '../core/WotaParams';
 import { camera } from '@kit.CameraKit';
@@ -207,6 +208,16 @@ export interface SnapshotArgs {
    * lo > 目标的选档（现在不可能），仍以较长帧周期为准不炸。
    */
   fpsTarget?: number;
+  // ---- 等号档曝光纠偏（2026-11-01 用户定版，上游 docs/plan/31）：以下字段只作用于手动档的
+  // ---- 曝光时长键，AE 状态与帧周期不受影响；全部带默认值，旧构造点/旧用例不破。
+  /** 自动微调曝光（默认 true）：开 = 实测 Δ+安全系数夹界取余量；关 = 手动滑杆值 */
+  correctionAuto?: boolean;
+  /** 手动微调滑杆（ns，0..+8ms、0.5ms 步进；0 = 满窗直发） */
+  correctionManualNs?: number;
+  /** 当前配置键下的实测拉长量 Δ（undefined = 没测到/键不匹配 ⇒ 自动档走 5% 下限） */
+  readoutDeltaNs?: number;
+  /** 预览态探测进行中：发等号请求量 Δ（录制目标在场时引擎已退出探测，等号不进录制） */
+  probeActive?: boolean;
 }
 
 export class Snapshot {
@@ -228,6 +239,11 @@ export class Snapshot {
   tapPoint: TapPoint | undefined;
   /** 见 SnapshotArgs.fpsTarget；缺省 0 = 来源缺失，exposurePlan 走兜底链 */
   fpsTarget: number;
+  /** 等号档纠偏四件（见 SnapshotArgs 注释；缺省 = 自动开/无手动值/无 Δ/非探测） */
+  correctionAuto: boolean;
+  correctionManualNs: number;
+  readoutDeltaNs: number | undefined;
+  probeActive: boolean;
 
   constructor(p: SnapshotArgs) {
     this.aeMode = p.aeMode;
@@ -247,6 +263,10 @@ export class Snapshot {
     this.stabilize = p.stabilize;
     this.tapPoint = p.tapPoint;
     this.fpsTarget = p.fpsTarget ?? 0;
+    this.correctionAuto = p.correctionAuto ?? true;
+    this.correctionManualNs = p.correctionManualNs ?? 0;
+    this.readoutDeltaNs = p.readoutDeltaNs;
+    this.probeActive = p.probeActive ?? false;
   }
 }
 
@@ -416,23 +436,44 @@ export function exposurePlan(state: State, p: Snapshot): ExposurePlan {
   const manual: boolean = p.aeMode === AeMode.MANUAL;
   const fpsBase: number = Math.max(p.fpsTarget, p.fps !== undefined ? p.fps.lo : 0);
   const fps: number = fpsBase > 0 ? fpsBase : WotaTiers.HIGH_SPEED_FPS;
+  const clamped: number = clampShutterNs(
+    p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
+    // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
+    WotaTiers.isRequiredShutterNs(p.shutterNs)
+  );
+  const perFrame: number = frameDurationNs(fps);
+  // 等号档曝光纠偏（2026-11-01 用户定版，上游 docs/plan/31）：满窗（曝光==帧周期）落在
+  // 相机合同的边界域，部分 HAL 会拉长帧周期 ⇒ 帧率掉档。发送侧永不发等号值——纠偏只动
+  // 曝光时长这一个键：AE 状态、帧周期（节奏真值）、总线档位全部不动；clampShutterNs 本体不改。
+  const marginNs: number = ExposureCorrection.applicable(p.shutterNs, fps)
+    ? (p.probeActive
+      // 探测中发等号：这是"测 Δ"的量程本身，等号请求只允许出现在预览态
+      ? 0
+      : (p.correctionAuto
+        ? ExposureCorrection.autoMarginNs(p.readoutDeltaNs, perFrame)
+        : ExposureCorrection.manualMarginNs(p.correctionManualNs)))
+    : 0;
   return new ExposurePlan({
     aeLock: !manual && p.aeMode === AeMode.LOCK,
     aeMode: manual ? AE_MODE_OFF : AE_MODE_ON,
     aeComp: manual ? 0 : state.clampEv(p.evSteps),
     sensitivity: state.clampIso(p.iso),
-    exposureNs: clampShutterNs(
-      p.shutterNs, fps, state.exposureMinNs, state.exposureMaxNs,
-      // 强制快门档（1/24、1/25）：设备曝光范围容不下也按该值下发
-      WotaTiers.isRequiredShutterNs(p.shutterNs)
-    ),
-    frameDurationNs: frameDurationNs(fps)
+    exposureNs: manual
+      ? ExposureCorrection.correctedExposureNs(clamped, marginNs, perFrame)
+      : clamped,
+    frameDurationNs: perFrame
   });
+}
+
+/** 读出闩锁的配置键（上游 docs/plan/31 §3）：读出时间随镜头/画幅/fps 变，键不匹配即重探 */
+export function readoutKeyOf(params: WotaParams): string {
+  return `${params.lens.value}|${params.size.value.width}x${params.size.value.height}|${params.fps.value.value}`;
 }
 
 /** 从参数总线取一帧快照（StateFlow .value；fps 经 pickFps 落档；fpsTarget = 用户档位，钳制基准） */
 export function snapshotOf(params: WotaParams, state: State): Snapshot {
   const fpsPick: FpsPick | undefined = pickFps(state.fpsRanges, params.fps.value.value, state.highSpeed);
+  const latch: ReadoutLatch | undefined = params.readoutLatch.value;
   return new Snapshot({
     aeMode: params.aeMode.value,
     iso: params.iso.value.value,
@@ -450,7 +491,12 @@ export function snapshotOf(params: WotaParams, state: State): Snapshot {
     tint: params.tint.value.value,
     flash: params.flash.value,
     stabilize: params.stabilize.value,
-    tapPoint: params.focusPoint.value
+    tapPoint: params.focusPoint.value,
+    // 等号档纠偏（上游 docs/plan/31）：闩锁只认当前配置键——换镜头/画幅/fps ⇒ 视同没测过，重探
+    correctionAuto: params.exposureCorrectionAuto.value,
+    correctionManualNs: params.exposureCorrectionManualNs.value,
+    readoutDeltaNs: latch !== undefined && latch.key === readoutKeyOf(params) ? latch.deltaNs : undefined,
+    probeActive: false
   });
 }
 

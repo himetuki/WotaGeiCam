@@ -27,6 +27,10 @@
 #include <GLES2/gl2ext.h> // GL_TEXTURE_EXTERNAL_OES
 #include <hilog/log.h>
 #include <native_image/native_image.h>
+#include <native_buffer/native_buffer.h>
+#include <native_buffer/buffer_common.h>
+#include <native_window/buffer_handle.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <atomic>
@@ -143,6 +147,8 @@ std::atomic<int32_t> g_glCallbacks{0};
 std::atomic<int32_t> g_glConsumed{0};
 std::atomic<int32_t> g_encoderSwapOk{0};
 std::atomic<int32_t> g_encoderSwapFail{0};
+/** 最近一次编码面 eglSwapBuffers 失败的 eglGetError（应用内 Diag 可读；0=尚未失败） */
+std::atomic<int32_t> g_encSwapErr{0};
 std::atomic<int32_t> g_arcDropped{0};
 
 int64_t NowSteadyNs()
@@ -236,8 +242,7 @@ struct ProgramLocs {
     GLint uGlowAdd = -1;
     GLint uGlowFreq = -1;
     GLint uGlowBlend = -1;
-    GLint uGlowColorA = -1;
-    GLint uGlowColorB = -1;
+    GLint uGlowTint = -1;
 };
 ProgramLocs g_passLocs;   // 直通（链接失败即无画面，永不删除）
 ProgramLocs g_slotLocs;   // 上屏效果槽（曲线/斑马/峰值之一）
@@ -269,8 +274,8 @@ struct GlowParams {
     float add = 0.0f;
     float freq = 0.0f;
     float blend = 0.6f;
-    uint32_t colorA = 0xFFFF3399u;
-    uint32_t colorB = 0xFF33E6FFu;
+    uint32_t tint = 0xFFFFFFFFu;   // 白 = 不改色（跟随光棒自身颜色）
+    int colorOnly = 0;             // 1 = 仅色盘颜色（拷贝趟上色，主 pass tint 传白）
 };
 GlowParams g_glowParams;
 /** 画面降噪档请求（0=关 1=完整 2=轻量；上游 DENOISE_LEVEL_* 同值） */
@@ -298,20 +303,20 @@ int g_glowScaleLogged = 0;
 
 // ---- 直方图采样（上游 f31d18c 的 OHOS 对应物：RGB 曲线框背景，调曲线参考用）----
 // 数据路：上屏帧绘制后 250ms 一拍把当前帧经**当前 program**（上屏槽 ⇒ 曲线输出后的画面，
-// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 3×64 计数
+// 「边调边看分布」口径）画进 64×64 迷你 FBO 并 glReadPixels 16KB，近地分箱成 4×64 计数
 // （BinHistogramRgba 与 core/HistogramMath.ets binRgba 同式镜像）。只在弹窗可见时采
 // （WotaGlSetHistogramEnabled）；16KB/4Hz 的读回停顿远低于既有霜板/补弧 pass，只发生在目标场景。
 constexpr int kHistSize = 64;
 constexpr int kHistBins = 64;
-constexpr int kHistChannels = 3;
+constexpr int kHistChannels = 4; // R/G/B/亮度Y（320a956 四通道直方图）
 constexpr int kHistValues = kHistBins * kHistChannels;
 constexpr int64_t kHistogramPeriodMs = 250;
 bool g_histRequested = false;
 GLuint g_histFbo = 0;
 GLuint g_histTex = 0;
 int64_t g_histLastSampleMs = 0;
-// 快照（3×64 计数，R/G/B 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
-// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，192 int 量级锁可忽略，登记偏离）
+// 快照（4×64 计数，R/G/B/Y 依次）：napi 读侧与 GL 写侧跨线程，短临界锁（Android 用
+// @Volatile 引用替换免锁；本侧 getter 直接出 Int32Array，256 int 量级锁可忽略，登记偏离）
 std::mutex g_histMutex;
 std::vector<int32_t> g_histSnapshot;
 
@@ -348,6 +353,36 @@ float g_texMatrix[16] = {
     0.0f, 0.0f, 0.0f, 1.0f
 };
 std::string g_inputSurfaceId;
+// ---- YUV 预览帧源（2026-11-02 真机取证修复 v2：设备预览仅 YUV_420_SP）
+// 真机两轮实证：①相机→OH_NativeImage 面有帧（包C 有画面，帧账 cameraStart>0）；
+// ②相机→ImageReceiver 面**零帧**（frameStart 不触发）——ImageReceiver 面不被该 HAL 接受。
+// 因此帧源回到**已验证能收帧的 NativeImage 面**，但不再让 EGL 按 RGBA 采样它：
+// AcquireNativeWindowBuffer 取原始缓冲 → CPU 按 NV21 解 YUV → 转 RGBA → 写入内部
+// NativeImage 生产者面（RGBA）→ UpdateSurfaceImage → 现有 OES 采样/特效/编码全部零改动复用。
+// 布局按缓冲元数据判定：format∈{24,25}（YCBCR/YCRCB_420_SP）按 stride 取 Y 行字节；
+// 其余（该机把 YUV 平铺进 RGBA 声明面，包C「细纹」即此布局）按 width 平铺、UV 紧接 Y 平面。
+OH_NativeImage* g_feedImage = nullptr;
+OHNativeWindow* g_feedWindow = nullptr;
+GLuint g_feedTexId = 0;
+int32_t g_feedW = 0;
+int32_t g_feedH = 0;
+bool g_yuvMode = false;
+int32_t g_pumpFailLogs = 0;
+// 喂入诊断（Diag 导出可读；native hilog 不进应用内日志件）
+std::atomic<int32_t> g_yuvAcqOk{0};
+std::atomic<int32_t> g_yuvAcqFail{0};
+std::atomic<int32_t> g_yuvAcqErr{0};
+std::atomic<int32_t> g_yuvFed{0};
+std::atomic<int32_t> g_yuvFeedFail{0};
+std::atomic<int32_t> g_yuvFeedErr{0};
+int32_t g_camBufFmt = -1;
+int32_t g_camBufStride = 0;
+int32_t g_camBufSize = 0;
+/** 相机缓冲矩阵是否已成功取到（false 时方向退回 sensor 角兜底） */
+bool g_hasBufferMatrix = false;
+/* 前向声明（绑定点位于定义之前） */
+GLuint ActiveFrameTexture();
+bool PumpYuvPreview();
 /** NativeImage 失败原因（空 = 正常）；页面按它区分「未就绪」与「创建失败」 */
 std::string g_nativeImageError;
 
@@ -504,8 +539,7 @@ void FetchLocations(ProgramLocs& locs)
     locs.uGlowAdd = glGetUniformLocation(locs.program, "uGlowAdd");
     locs.uGlowFreq = glGetUniformLocation(locs.program, "uGlowFreq");
     locs.uGlowBlend = glGetUniformLocation(locs.program, "uGlowBlend");
-    locs.uGlowColorA = glGetUniformLocation(locs.program, "uGlowColorA");
-    locs.uGlowColorB = glGetUniformLocation(locs.program, "uGlowColorB");
+    locs.uGlowTint = glGetUniformLocation(locs.program, "uGlowTint");
 }
 
 /** 编译+链接一组 VS/FS 到指定槽；失败打印 info log 返回 false */
@@ -744,15 +778,12 @@ void BindGlowUniforms(const ProgramLocs& locs)
         if (locs.uGlowBlend >= 0) {
             glUniform1f(locs.uGlowBlend, g_glowParams.blend);
         }
-        float rgbA[3];
-        float rgbB[3];
-        GlowRgbOf(g_glowParams.colorA, rgbA);
-        GlowRgbOf(g_glowParams.colorB, rgbB);
-        if (locs.uGlowColorA >= 0) {
-            glUniform3f(locs.uGlowColorA, rgbA[0], rgbA[1], rgbA[2]);
-        }
-        if (locs.uGlowColorB >= 0) {
-            glUniform3f(locs.uGlowColorB, rgbB[0], rgbB[1], rgbB[2]);
+        // colorOnly 时颜色已在拷贝趟按亮部采样上色，主 pass 传白避免二次染色（上游同口径）
+        float tintRgb[3];
+        const uint32_t eff = g_glowParams.colorOnly != 0 ? 0xFFFFFFFFu : g_glowParams.tint;
+        GlowRgbOf(eff, tintRgb);
+        if (locs.uGlowTint >= 0) {
+            glUniform3f(locs.uGlowTint, tintRgb[0], tintRgb[1], tintRgb[2]);
         }
     } else {
         // 关着：零贡献（program 里仍有 Glow 段，靠 uniform 归零；与上游「关着时零成本」对齐到观感层）
@@ -979,7 +1010,7 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
         glUniform2f(locs.uFit, applyFit ? g_fitX : 1.0f, applyFit ? g_fitY : 1.0f);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
@@ -1063,9 +1094,9 @@ void DrawScene(const ProgramLocs& locs, GLuint uvVbo, bool vaoOk, bool applyFit 
 // ---------------------------------------------------------------- 直方图采样（曲线框背景，f31d18c）
 
 /**
- * RGBA(8888) 像素 → 3×64 档计数（R/G/B 依次）。与 core/HistogramMath.ets binRgba
- * **同式镜像**（bin = v >> 2；像素住在 GL 线程，16KB 读回后近地分箱再传 192 个 int）——
- * 契约在两处出现，接线守卫钉住两边的公式文本。
+ * RGBA(8888) 像素 → 4×64 档计数（R/G/B/Y 依次）。与 core/HistogramMath.ets binRgba
+ * **同式镜像**（bin = v >> 2；Y 用 Rec.601 整数权重 >>10；像素住在 GL 线程，16KB 读回后
+ * 近地分箱再传 256 个 int）——契约在两处出现，接线守卫钉住两边的公式文本。
  */
 void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<int32_t>& out)
 {
@@ -1076,6 +1107,7 @@ void BinHistogramRgba(const uint8_t* rgba, int width, int height, std::vector<in
         out[rgba[o] >> 2]++;
         out[kHistBins + (rgba[o + 1] >> 2)]++;
         out[2 * kHistBins + (rgba[o + 2] >> 2)]++;
+        out[3 * kHistBins + ((54 * rgba[o] + 183 * rgba[o + 1] + 19 * rgba[o + 2]) >> 10)]++;
     }
 }
 
@@ -1213,6 +1245,9 @@ bool DrawEncoderPass()
         g_encoderFrameIndex++; // 仅成功送帧推进输出序号（抽帧丢弃帧不推进）
     } else {
         g_encoderSwapFail++;
+        if (drawn) {
+            g_encSwapErr.store(static_cast<int>(eglGetError()));
+        }
     }
     // 恢复上屏上下文：失败视一次即中止（若上下文仍绑在编码面，下一帧上屏会画错面）。
     // 置 g_displayCtxLost，WotaGlRender 下一帧开头先重试绑定，未成功前跳过全部绘制。
@@ -1276,8 +1311,10 @@ bool EmitMendedPending()
     const EGLBoolean swapped = eglSwapBuffers(g_display, g_encSurface);
     if (swapped != EGL_TRUE) {
         g_encoderSwapFail++;
+        const int swapErr = static_cast<int>(eglGetError());
+        g_encSwapErr.store(swapErr);
         OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-            "mend emit swap failed err=%{public}d", static_cast<int>(eglGetError()));
+            "mend emit swap failed err=%{public}d", swapErr);
         return false;
     }
     g_encoderSwapOk++;
@@ -1446,9 +1483,12 @@ struct FrostProgram {
     GLint uSrc = -1;
     GLint uOffset = -1;
     GLint uWeight = -1;
-    // 2026-10-28 Glow 链复用同一套离屏 program 结构：拷贝趟的亮部阈值两参
+    // 2026-10-28 Glow 链复用同一套离屏 program 结构：拷贝趟的亮部阈值两参 +
+    // 单色 tint/颜色模式两参（2026-10-29 350c671：拷贝趟按亮部采样上色）
     GLint uGlowThreshold = -1;
     GLint uGlowSoft = -1;
+    GLint uGlowTint = -1;
+    GLint uGlowColorOnly = -1;
 };
 
 FrostProgram g_frostCopy;
@@ -1595,6 +1635,8 @@ bool BuildFrostProgram(const char* vsSrc, const std::string& fsSrc, FrostProgram
     out.uWeight = needWeight ? glGetUniformLocation(program, "uWeight[0]") : -1;
     out.uGlowThreshold = glGetUniformLocation(program, "uGlowThreshold");
     out.uGlowSoft = glGetUniformLocation(program, "uGlowSoft");
+    out.uGlowTint = glGetUniformLocation(program, "uGlowTint");
+    out.uGlowColorOnly = glGetUniformLocation(program, "uGlowColorOnly");
     return true;
 }
 
@@ -1775,7 +1817,7 @@ bool RunFrostChain()
         glUniformMatrix4fv(g_frostCopy.uTexMatrix, 1, GL_FALSE, g_texMatrix);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (g_frostCopy.uFrame >= 0) {
         glUniform1i(g_frostCopy.uFrame, 0);
     }
@@ -2235,7 +2277,7 @@ bool TickGlow()
         glUniform2f(g_glowCopy.uFit, 1.0f, 1.0f); // 离屏 RT：恒等（尺寸本身已按档缩小）
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (g_glowCopy.uFrame >= 0) {
         glUniform1i(g_glowCopy.uFrame, 0);
     }
@@ -2245,6 +2287,15 @@ bool TickGlow()
     }
     if (g_glowCopy.uGlowSoft >= 0) {
         glUniform1f(g_glowCopy.uGlowSoft, g_glowParams.soft);
+    }
+    // 拷贝趟上色（350c671）：colorOnly=1 → pick = tint（仅色盘色）；0 → pick = 原色
+    float copyTint[3];
+    GlowRgbOf(g_glowParams.tint, copyTint);
+    if (g_glowCopy.uGlowTint >= 0) {
+        glUniform3f(g_glowCopy.uGlowTint, copyTint[0], copyTint[1], copyTint[2]);
+    }
+    if (g_glowCopy.uGlowColorOnly >= 0) {
+        glUniform1f(g_glowCopy.uGlowColorOnly, g_glowParams.colorOnly != 0 ? 1.0f : 0.0f);
     }
     DrawFullscreenQuad(g_glowCopy.aPosition, g_glowCopy.aTexCoord, g_posVbo, g_idUvVbo);
     errors += DrainGlErrors();
@@ -2420,7 +2471,7 @@ bool CreateNativeImage()
 {
     g_nativeImageError.clear();
     glGenTextures(1, &g_texId);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2455,6 +2506,294 @@ bool CreateNativeImage()
     return true;
 }
 
+/** 取当前帧源纹理：YUV 喂入模式用内部 RGBA NativeImage 的 OES 纹理，否则原生相机 NativeImage */
+GLuint ActiveFrameTexture()
+{
+    return g_yuvMode ? g_feedTexId : g_texId;
+}
+
+/** 喂入目标（内部 NativeImage，RGBA 生产者面）：懒建，需 GL context current */
+bool EnsureFeedTarget()
+{
+    if (g_feedImage != nullptr && g_feedWindow != nullptr) {
+        return true;
+    }
+    if (g_feedW <= 0 || g_feedH <= 0) {
+        return false;
+    }
+    glGenTextures(1, &g_feedTexId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_feedTexId);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g_feedImage = OH_NativeImage_Create(g_feedTexId, GL_TEXTURE_EXTERNAL_OES);
+    if (g_feedImage == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed image create failed");
+        return false;
+    }
+    // 纹理矩阵由相机缓冲矩阵每帧刷新（GetBufferMatrix）；喂入面本身不引入任何变换
+    uint64_t surfaceId = 0;
+    if (OH_NativeImage_GetSurfaceId(g_feedImage, &surfaceId) != 0) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed surfaceId failed");
+        return false;
+    }
+    if (OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &g_feedWindow) != 0 ||
+        g_feedWindow == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, WOTA_LOG_DOMAIN, WOTA_LOG_TAG, "yuv feed window failed");
+        return false;
+    }
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_BUFFER_GEOMETRY, g_feedW, g_feedH);
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_FORMAT,
+        static_cast<int32_t>(NATIVEBUFFER_PIXEL_FMT_RGBA_8888));
+    // CPU 写 + GPU 采样两种用途都要：只给 CPU_WRITE 时 EGL 侧可能拿不到可采样缓冲
+    OH_NativeWindow_NativeWindowHandleOpt(g_feedWindow, SET_USAGE,
+        static_cast<int32_t>(NATIVEBUFFER_USAGE_CPU_WRITE | NATIVEBUFFER_USAGE_HW_TEXTURE));
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "yuv feed target ready %{public}dx%{public}d", g_feedW, g_feedH);
+    return true;
+}
+
+/**
+ * YUV_420_SP → RGBA8888（BT.601 视频域；stride 逐行）。
+ * vuOrder：NV21（V 在前，CameraFormat YUV_420_SP 的官方映射格式 25）为 true；
+ * NV12（U 在前，格式 24）为 false。色度顺序读反 = 红蓝互换，不是「偏色」可事后调。
+ */
+void ConvertYuvToRgba(const uint8_t* y, int32_t yStride, const uint8_t* uv, int32_t uvStride,
+    int32_t w, int32_t h, bool vuOrder, uint8_t* out, int32_t outStrideBytes)
+{
+    auto clip = [](int32_t v) -> uint8_t {
+        return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    };
+    for (int32_t row = 0; row < h; ++row) {
+        const uint8_t* yRow = y + static_cast<int64_t>(row) * yStride;
+        const uint8_t* uvRow = uv + static_cast<int64_t>(row / 2) * uvStride;
+        uint8_t* o = out + static_cast<int64_t>(row) * outStrideBytes;
+        int32_t col = 0;
+        // 两像素共用一组 UV（4:2:0）：UV 读取与色差计算减半，1080p 逐帧转码的主要开销
+        for (; col + 1 < w; col += 2) {
+            const int32_t c0 = static_cast<int32_t>(uvRow[col]);
+            const int32_t c1 = static_cast<int32_t>(uvRow[col + 1]);
+            const int32_t U = (vuOrder ? c1 : c0) - 128;
+            const int32_t V = (vuOrder ? c0 : c1) - 128;
+            const int32_t rAdd = 409 * V + 128;
+            const int32_t gAdd = -100 * U - 208 * V + 128;
+            const int32_t bAdd = 516 * U + 128;
+            for (int32_t k = 0; k < 2; ++k) {
+                const int32_t Y = static_cast<int32_t>(yRow[col + k]) - 16;
+                uint8_t* px = o + (col + k) * 4;
+                px[0] = clip((298 * Y + rAdd) >> 8);
+                px[1] = clip((298 * Y + gAdd) >> 8);
+                px[2] = clip((298 * Y + bAdd) >> 8);
+                px[3] = 255;
+            }
+        }
+        if (col < w) {
+            const int32_t c0 = static_cast<int32_t>(uvRow[col]);
+            const int32_t c1 = static_cast<int32_t>(uvRow[col + 1]);
+            const int32_t U = (vuOrder ? c1 : c0) - 128;
+            const int32_t V = (vuOrder ? c0 : c1) - 128;
+            const int32_t Y = static_cast<int32_t>(yRow[col]) - 16;
+            uint8_t* px = o + col * 4;
+            px[0] = clip((298 * Y + 409 * V + 128) >> 8);
+            px[1] = clip((298 * Y - 100 * U - 208 * V + 128) >> 8);
+            px[2] = clip((298 * Y + 516 * U + 128) >> 8);
+            px[3] = 255;
+        }
+    }
+}
+
+/**
+ * YUV → RGBA 直接写进喂入 NativeImage 生产者面并绑定为纹理（GL 线程）。
+ * 省掉中间 RGBA scratch 的一次写+一次读（1080p 每帧 ~16MB 内存流量）。
+ */
+bool FeedYuvToTexture(const uint8_t* y, int32_t yStride, const uint8_t* uv, int32_t uvStride,
+    int32_t w, int32_t h, bool vuOrder)
+{
+    if (!EnsureFeedTarget()) {
+        g_yuvFeedFail++;
+        return false;
+    }
+    OHNativeWindowBuffer* winBuf = nullptr;
+    int fenceFd = -1;
+    if (OH_NativeWindow_NativeWindowRequestBuffer(g_feedWindow, &winBuf, &fenceFd) != 0 ||
+        winBuf == nullptr) {
+        g_yuvFeedFail++;
+        return false;
+    }
+    BufferHandle* handle = OH_NativeWindow_GetBufferHandleFromNative(winBuf);
+    uint8_t* dst = nullptr;
+    bool mapped = false;
+    if (handle != nullptr) {
+        dst = static_cast<uint8_t*>(handle->virAddr);
+        if (dst == nullptr && handle->fd >= 0 && handle->size > 0) {
+            void* m = mmap(nullptr, static_cast<size_t>(handle->size),
+                PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
+            if (m != MAP_FAILED) {
+                dst = static_cast<uint8_t*>(m);
+                mapped = true;
+            }
+        }
+    }
+    if (dst == nullptr) {
+        OH_NativeWindow_NativeWindowAbortBuffer(g_feedWindow, winBuf);
+        g_yuvFeedFail++;
+        return false;
+    }
+    // 行距按缓冲实际大小推：stride 字段单位随格式而异（RGBA 记像素、YUV 记字节），
+    // size/height 恒为字节行距，避免把 1920 像素当 1920 字节把画面写歪。
+    int32_t strideBytes = (handle->height > 0 && handle->size > 0)
+        ? handle->size / handle->height : w * 4;
+    if (strideBytes < w * 4) {
+        strideBytes = w * 4;
+    }
+    ConvertYuvToRgba(y, yStride, uv, uvStride, w, h, vuOrder, dst, strideBytes);
+    if (mapped) {
+        munmap(dst, static_cast<size_t>(handle->size));
+    }
+    if (OH_NativeWindow_NativeWindowFlushBuffer(g_feedWindow, winBuf, fenceFd, Region{}) != 0) {
+        g_yuvFeedFail++;
+        return false;
+    }
+    if (OH_NativeImage_UpdateSurfaceImage(g_feedImage) != 0) {
+        const int eglErr = static_cast<int>(eglGetError());
+        g_yuvFeedErr.store(eglErr);
+        g_yuvFeedFail++;
+        if (g_pumpFailLogs < 5) {
+            g_pumpFailLogs++;
+            OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+                "yuv feed UpdateSurfaceImage failed err=%{public}d", eglErr);
+        }
+        return false;
+    }
+    g_yuvFed++;
+    return true;
+}
+
+/**
+ * 从相机 NativeImage 消费面取原始缓冲 → NV21 解 YUV → 转 RGBA → 喂入纹理。
+ * 相机面是**包C 实证能收帧的那一张**（ImageReceiver 面在该机零帧，已弃用）。
+ * 成败计数进 g_yuv*，由 getYuvDiag 暴露到应用内 Diag（native hilog 不进导出件）。
+ */
+bool PumpYuvPreview()
+{
+    if (!g_yuvMode || g_nativeImage == nullptr) {
+        return false;
+    }
+    OHNativeWindowBuffer* camBuf = nullptr;
+    int fenceFd = -1;
+    const int32_t acq = OH_NativeImage_AcquireNativeWindowBuffer(g_nativeImage, &camBuf, &fenceFd);
+    if (acq != 0 || camBuf == nullptr) {
+        g_yuvAcqFail++;
+        g_yuvAcqErr.store(acq);
+        return false;
+    }
+    g_yuvAcqOk++;
+    // 相机缓冲矩阵（含生产端旋转 + 有效内容裁剪）：Acquire 也会刷新它（native_image.h 明示）。
+    // 沿用包C 已标定的「矩阵 + UV 旋转」组合——上屏/编码几何与旧路径逐位一致，不重猜方向。
+    if (OH_NativeImage_GetBufferMatrix(g_nativeImage, g_texMatrix) == 0) {
+        g_hasBufferMatrix = true;
+        const int st = StRotationFromMatrix(g_texMatrix);
+        if (st >= 0 && st != g_stRotDeg) {
+            g_stRotDeg = st;
+            g_geomKey = -1;
+        }
+    }
+    bool ok = false;
+    bool srcMapped = false;
+    uint8_t* src = nullptr;
+    BufferHandle* camHandle = OH_NativeWindow_GetBufferHandleFromNative(camBuf);
+    do {
+        if (camHandle == nullptr || g_feedW <= 0 || g_feedH <= 0) {
+            break;
+        }
+        if (g_camBufFmt < 0) {
+            g_camBufFmt = camHandle->format;
+            g_camBufStride = camHandle->stride;
+            g_camBufSize = camHandle->size;
+        }
+        src = static_cast<uint8_t*>(camHandle->virAddr);
+        if (src == nullptr && camHandle->fd >= 0 && camHandle->size > 0) {
+            void* m = mmap(nullptr, static_cast<size_t>(camHandle->size),
+                PROT_READ | PROT_WRITE, MAP_SHARED, camHandle->fd, 0);
+            if (m == MAP_FAILED) {
+                m = mmap(nullptr, static_cast<size_t>(camHandle->size),
+                    PROT_READ, MAP_SHARED, camHandle->fd, 0);
+            }
+            if (m != MAP_FAILED) {
+                src = static_cast<uint8_t*>(m);
+                srcMapped = true;
+            }
+        }
+        if (src == nullptr) {
+            break;
+        }
+        const int32_t w = g_feedW;
+        const int32_t h = g_feedH;
+        // 布局判定（两种真机形态都覆盖）：
+        // ①原生 YUV 缓冲（format 为 YUV 家族 / 缓冲只有 ~1.5B/px）→ stride 是 Y 行字节，UV 紧接整幅 Y；
+        // ②该机把 YUV 平铺进 RGBA 声明面（包C 细纹布局）→ 行距 = width，UV 紧跟 Y 平面（w*h）。
+        const int32_t fmt = camHandle->format;
+        const bool yuvFmt = (fmt >= 22 && fmt <= 31) || fmt == 1000 || fmt == 1003;
+        const bool yuvSized = camHandle->size > 0 &&
+            static_cast<int64_t>(camHandle->size) < static_cast<int64_t>(w) * h * 2;
+        int32_t yStride = w;
+        int32_t uvStride = w;
+        int64_t uvOffset = static_cast<int64_t>(w) * h;
+        if ((yuvFmt || yuvSized) && camHandle->stride >= w && camHandle->stride <= w * 2) {
+            yStride = camHandle->stride;
+            uvStride = camHandle->stride;
+            uvOffset = static_cast<int64_t>(yStride) * h;
+        }
+        if (camHandle->size > 0 &&
+            uvOffset + static_cast<int64_t>(uvStride) * (h / 2) > camHandle->size) {
+            yStride = w; // 元数据与实际不符：退回平铺口径（同样是已知能出画面的解释）
+            uvStride = w;
+            uvOffset = static_cast<int64_t>(w) * h;
+        }
+        if (camHandle->size > 0 &&
+            uvOffset + static_cast<int64_t>(uvStride) * (h / 2) > camHandle->size) {
+            break; // 缓冲比 1.5 字节/像素还小：不是可解释的 YUV 布局，宁可不出帧也不越界读
+        }
+        // CameraFormat YUV_420_SP 官方映射为 NV21（V 在前，格式 25）；只有明确 24 = NV12 才 U 在前
+        const bool vuOrder = fmt != 24;
+        ok = FeedYuvToTexture(src, yStride, src + uvOffset, uvStride, w, h, vuOrder);
+    } while (false);
+    if (srcMapped && src != nullptr) {
+        munmap(src, static_cast<size_t>(camHandle->size));
+    }
+    OH_NativeImage_ReleaseNativeWindowBuffer(g_nativeImage, camBuf, fenceFd);
+    return ok;
+}
+
+/**
+ * 打开 YUV 帧源（返回相机用的 SurfaceId；空串 = 不可用，调用方回退原生 RGBA 路）。
+ * 注意：**不新建任何面**——相机面就是 getInputSurfaceId() 的 NativeImage 面（真机实证能收帧）；
+ * 本函数只登记画幅并切到「取原始缓冲自转 RGBA」的采样通路。
+ */
+static std::string EnableYuvFeedInternal(int32_t width, int32_t height)
+{
+    if (width <= 0 || height <= 0 || g_nativeImage == nullptr || g_inputSurfaceId.empty()) {
+        return "";
+    }
+    g_feedW = width;
+    g_feedH = height;
+    g_yuvMode = true;
+    g_hasBufferMatrix = false;
+    // 兜底方向：缓冲矩阵取不到时按 sensor 方向转（矩阵一到就以矩阵为准，见 PumpYuvPreview）
+    g_stRotDeg = g_sensorDeg;
+    g_geomKey = -1;
+    OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
+        "yuv feed enabled %{public}dx%{public}d surfaceId=%{public}s stRot=%{public}d",
+        width, height, g_inputSurfaceId.c_str(), g_stRotDeg);
+    return g_inputSurfaceId;
+}
+
+static bool YuvModeInternal()
+{
+    return g_yuvMode;
+}
+
 /** 拆 NativeImage：顺序 = 反注册 listener → destroy → 删纹理（均在 context current 时） */
 void DestroyNativeImage()
 {
@@ -2463,6 +2802,32 @@ void DestroyNativeImage()
         OH_NativeImage_Destroy(&g_nativeImage);
         g_nativeImage = nullptr;
     }
+    // YUV 喂入面同属 GL 资源（纹理 + 生产者窗口），随相机面一起拆；否则重进页残留
+    if (g_feedImage != nullptr) {
+        OH_NativeImage_Destroy(&g_feedImage);
+        g_feedImage = nullptr;
+    }
+    if (g_feedWindow != nullptr) {
+        OH_NativeWindow_DestroyNativeWindow(g_feedWindow);
+        g_feedWindow = nullptr;
+    }
+    if (g_feedTexId != 0) {
+        glDeleteTextures(1, &g_feedTexId);
+        g_feedTexId = 0;
+    }
+    g_yuvMode = false;
+    g_feedW = 0;
+    g_feedH = 0;
+    g_yuvAcqOk.store(0);
+    g_yuvAcqFail.store(0);
+    g_yuvAcqErr.store(0);
+    g_yuvFed.store(0);
+    g_yuvFeedFail.store(0);
+    g_yuvFeedErr.store(0);
+    g_camBufFmt = -1;
+    g_camBufStride = 0;
+    g_camBufSize = 0;
+    g_hasBufferMatrix = false;
     if (g_texId != 0) {
         glDeleteTextures(1, &g_texId);
         g_texId = 0;
@@ -2731,7 +3096,27 @@ void WotaGlRender(uint64_t timestamp)
     // 帧可用才拉起新帧（回调里只置位）；无帧时仅清屏（不画未完成纹理）
     bool newFrameConsumed = false;
     int64_t frameTs = 0;
-    if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
+    if (g_yuvMode) {
+        // YUV 帧源：从相机 NativeImage 面取原始缓冲 → 转 RGBA → 喂入面 → UpdateSurfaceImage。
+        // 以 NativeImage 帧回调为节奏（正常 30/60Hz 出帧）；若该回调不触发（面语义异常），
+        // 每 2 拍兜底试一次（≈30Hz，空队列时 Acquire 立即失败、代价可忽略），
+        // 避免「零回调 = 零尝试」把现场变成纯黑还查不出原因。
+        static int32_t yuvIdleTicks = 0;
+        bool tryPump = g_frameAvailable.exchange(false);
+        if (tryPump) {
+            yuvIdleTicks = 0;
+        } else if (++yuvIdleTicks >= 2) {
+            yuvIdleTicks = 0;
+            tryPump = true;
+        }
+        if (tryPump && PumpYuvPreview()) {
+            g_hasFrame = true;
+            newFrameConsumed = true;
+            g_glConsumed++;
+            // 原始缓冲没有可用帧时间戳（未走 UpdateSurfaceImage）：用 steady clock 顶，弧链只要求单调
+            frameTs = NormalizeArcTimestamp(0, 0);
+        }
+    } else if (g_nativeImage != nullptr && g_frameAvailable.exchange(false)) {
         if (OH_NativeImage_UpdateSurfaceImage(g_nativeImage) == 0) {
             OH_NativeImage_GetTransformMatrix(g_nativeImage, g_texMatrix);
             const int st = StRotationFromMatrix(g_texMatrix);
@@ -2811,7 +3196,7 @@ void WotaGlRender(uint64_t timestamp)
         glUniform2f(locs.uFit, g_fitX, g_fitY); // 上屏：letterbox 等比收缩
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, g_texId);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, ActiveFrameTexture());
     if (locs.uFrame >= 0) {
         glUniform1i(locs.uFrame, 0);
     }
@@ -3173,8 +3558,10 @@ int WotaGlFlushArcPending()
             flushed = 1;
         } else {
             g_encoderSwapFail++;
+            const int swapErr = static_cast<int>(eglGetError());
+            g_encSwapErr.store(swapErr);
             OH_LOG_Print(LOG_APP, LOG_WARN, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
-                "flush arc pending: swap failed err=%{public}d", static_cast<int>(eglGetError()));
+                "flush arc pending: swap failed err=%{public}d", swapErr);
         }
     } else {
         g_encoderSwapFail++;
@@ -3242,6 +3629,10 @@ void WotaGlSetDisplayGeometry(int sensorDeg, int displayDeg, bool mirrored)
     g_sensorDeg = sensorDeg;
     g_displayDeg = displayDeg;
     g_mirrored = mirrored;
+    if (g_yuvMode && !g_hasBufferMatrix) {
+        // 兜底：缓冲矩阵尚未取到（或该机不支持）时按 sensor 方向猜；取到后以矩阵为准
+        g_stRotDeg = WotaNormalizeDeg(sensorDeg);
+    }
     g_geomKey = -1;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "geometry sensor=%{public}d display=%{public}d mirror=%{public}d",
@@ -3386,19 +3777,20 @@ static float GlowClampF(float value, float lo, float hi, float fallback)
  * OnFrame 懒建仍兜底）。关掉只停跑、不删资源（再打开不重建、不闪）。
  */
 void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
-    float add, float freq, float blend, uint32_t colorA, uint32_t colorB)
+    float add, float freq, float blend, uint32_t tint, int colorOnly)
 {
     const bool was = g_glowParams.enabled;
     g_glowParams.enabled = enabled != 0;
-    g_glowParams.threshold = GlowClampF(threshold, 0.0f, 1.0f, 0.5f);
+    // 阈值域 0.6..1.0（2026-10-29 用户口径 60~100%；坏值回默认 0.7）
+    g_glowParams.threshold = GlowClampF(threshold, 0.6f, 1.0f, 0.7f);
     g_glowParams.soft = GlowClampF(soft, 0.0f, 0.5f, 0.05f);
     g_glowParams.width = GlowClampF(width, 0.0f, 0.2f, 0.02f);
     g_glowParams.gain = GlowClampF(gain, 0.0f, 4.0f, 1.0f);
     g_glowParams.add = GlowClampF(add, 0.0f, 1.0f, 0.0f);
     g_glowParams.freq = GlowClampF(freq, 0.0f, 64.0f, 0.0f);
     g_glowParams.blend = GlowClampF(blend, 0.0f, 1.0f, 0.6f);
-    g_glowParams.colorA = colorA & 0xFFFFFFFFu;
-    g_glowParams.colorB = colorB & 0xFFFFFFFFu;
+    g_glowParams.tint = tint & 0xFFFFFFFFu;
+    g_glowParams.colorOnly = colorOnly != 0 ? 1 : 0;
     if (g_glowParams.enabled && !was) {
         // 显式开启 = 给坏键/停用链一次重试（同一坏键不逐帧重试的口径不变）
         g_glowBroken = false;
@@ -3412,10 +3804,11 @@ void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, 
     }
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "glow params enabled=%{public}d th=%{public}.3f soft=%{public}.3f width=%{public}.3f "
-        "gain=%{public}.3f add=%{public}.3f freq=%{public}.2f blend=%{public}.3f a=%{public}u b=%{public}u",
+        "gain=%{public}.3f add=%{public}.3f freq=%{public}.2f blend=%{public}.3f "
+        "tint=%{public}u coloronly=%{public}d",
         g_glowParams.enabled ? 1 : 0, g_glowParams.threshold, g_glowParams.soft, g_glowParams.width,
         g_glowParams.gain, g_glowParams.add, g_glowParams.freq, g_glowParams.blend,
-        static_cast<unsigned>(g_glowParams.colorA), static_cast<unsigned>(g_glowParams.colorB));
+        static_cast<unsigned>(g_glowParams.tint), g_glowParams.colorOnly);
 }
 
 /**
@@ -3468,4 +3861,40 @@ void WotaGlSetDenoiseLevel(int level)
     g_denoiseLevel = safe;
     OH_LOG_Print(LOG_APP, LOG_INFO, WOTA_LOG_DOMAIN, WOTA_LOG_TAG,
         "video denoise level=%{public}d (0=off 1=full 2=lite; applied on next frame)", safe);
+}
+
+/* ---- 外部链接出口（匿名命名空间内的实现经此暴露给 napi） ---- */
+std::string WotaGlEnableYuvFeed(int32_t width, int32_t height)
+{
+    return EnableYuvFeedInternal(width, height);
+}
+
+bool WotaGlYuvMode()
+{
+    return YuvModeInternal();
+}
+
+/**
+ * YUV 帧源诊断（应用内 Diag 可读；native hilog 不进用户导出的日志件）：
+ * mode/acq=取帧成功/fail/err=最近一次获取错误码/fed=喂入成功数/ffail/ferr=最近 UpdateSurfaceImage 错误码/
+ * fmt,stride,size=相机缓冲元数据（fmt 24/25=YUV，其余=平铺进 RGBA 声明面）。
+ */
+std::string WotaGlGetYuvDiag()
+{
+    std::string out = "mode=";
+    out += g_yuvMode ? "1" : "0";
+    out += " acq=" + std::to_string(g_yuvAcqOk.load());
+    out += " fail=" + std::to_string(g_yuvAcqFail.load());
+    out += " err=" + std::to_string(g_yuvAcqErr.load());
+    out += " fed=" + std::to_string(g_yuvFed.load());
+    out += " ffail=" + std::to_string(g_yuvFeedFail.load());
+    out += " ferr=" + std::to_string(g_yuvFeedErr.load());
+    out += " fmt=" + std::to_string(g_camBufFmt);
+    out += " stride=" + std::to_string(g_camBufStride);
+    out += " size=" + std::to_string(g_camBufSize);
+    out += " wh=" + std::to_string(g_feedW) + "x" + std::to_string(g_feedH);
+    out += " stRot=" + std::to_string(g_stRotDeg);
+    out += " mat=" + std::to_string(g_hasBufferMatrix ? 1 : 0);
+    out += " encErr=" + std::to_string(g_encSwapErr.load());
+    return out;
 }

@@ -70,6 +70,9 @@ import { DisplayScale, displayRtNeedsRebuild, displayScaleReadoutLabel, nearestD
 import { AudioDenoise, VideoDenoise, audioDenoiseNeedsCodec, denoiseKernelLite,
   effectiveVideoDenoise, videoDenoiseActive } from '../core/Denoise';
 import { HistogramMath } from '../core/HistogramMath';
+import { ExposureCorrection } from '../core/ExposureCorrection';
+import { MarkerLines } from '../core/MarkerLines';
+import { WbApply, isIdentityGains, manualGains, wbApplyPlan } from '../core/WbPlan';
 
 /** 编译探针用空定时器（不排真定时器；只让节流器类型面进 abc） */
 class NoopFlushScheduler implements FlushScheduler {
@@ -109,6 +112,9 @@ export class PureLogicBarrel {
     PureLogicBarrel.paramsFlushThrottleCompileProbe();
     PureLogicBarrel.hudLayoutCompileProbe();
     PureLogicBarrel.cameraCatchupCompileProbe();
+    PureLogicBarrel.exposureCorrectionCompileProbe();
+    PureLogicBarrel.wbPlanCompileProbe();
+    PureLogicBarrel.markerLinesCompileProbe();
     return `sr=${AudioSync.TARGET_SR} max=${CompareHistory.MAX_ENTRIES} ` +
       `vol=${effect.leftVolume}/${effect.rightVolume} armed=${comparePractice.armed} ` +
       `cap=${capLabel} src=${firstCaptureSource} sync=${sync} chunk=${chunk} ` +
@@ -278,7 +284,7 @@ export class PureLogicBarrel {
    */
   private static cameraCatchupCompileProbe(): void {
     const glow: GlowParams = decodeGlow(encodeGlow(GLOW_DEFAULT));
-    const rgb: Array<number> = glowRgb(glow.colorA);
+    const rgb: Array<number> = glowRgb(glow.color);
     const scale: number = glowScaleFor(1920, 1080, 30);
     const blurOffset: Array<number> = [0, 0];
     fillGlowBlurOffset(blurOffset, 960, 540, 0.02, true);
@@ -295,7 +301,46 @@ export class PureLogicBarrel {
       HistogramMath.binRgba(new ArrayBuffer(64 * 64 * 4), 64, 64));
     if (glow.threshold >= 0 && rgb.length === 3 && scale > 0 && blurOffset[0] >= 0 &&
       note !== undefined && rt !== undefined && fallbackScale.divisor > 0 && readout !== '' &&
-      !rebuild && !videoActive && !codec && lite && hist.length === 192) {
+      !rebuild && !videoActive && !codec && lite && hist.length === 256) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 等号档曝光纠偏纯逻辑（r42 移植）的编译探针：适用判定/自动余量夹界/纠偏合成/探测折算。
+   * 零副作用（产物丢弃）；消费方（RequestApplier.exposurePlan）已接线，本探针保住常量面。
+   */
+  private static exposureCorrectionCompileProbe(): void {
+    const applicable: boolean = ExposureCorrection.applicable(40_000_000, 25);
+    const margin: number = ExposureCorrection.autoMarginNs(6_000_000, 40_000_000);
+    const corrected: number = ExposureCorrection.correctedExposureNs(40_000_000, margin, 40_000_000);
+    const manual: number = ExposureCorrection.clampManualNs(8_000_000);
+    const delta: number = ExposureCorrection.probeDeltaNs([42_000_000, 44_000_000], 40_000_000);
+    const period: number = ExposureCorrection.framePeriodNs(24);
+    if (applicable && margin > 0 && corrected > 0 && manual >= 0 && delta >= 0 && period > 0) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /** 站位指示线纯层探针（等距比例 + 域钳；零副作用） */
+  private static markerLinesCompileProbe(): void {
+    const xs: Array<number> = MarkerLines.lineXsFraction(3, 0.6);
+    const c: number = MarkerLines.clampCount(99);
+    const s: number = MarkerLines.clampSpread(0.01);
+    if (xs.length === 3 && c === 8 && s === 0.15) {
+      // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
+    }
+  }
+
+  /**
+   * 手动白平衡走线决策（WB 兜底纯层）的编译探针：模型/归一化/三分支走线。
+   * 零副作用；GL 兜底的 native 面待平台批（登记 WbPlan.ets 头注释），本探针保住编译门。
+   */
+  private static wbPlanCompileProbe(): void {
+    const gains: Array<number> = manualGains(5500, 0);
+    const plan: WbApply = wbApplyPlan(true, false, 3200, 10);
+    const identity: boolean = isIdentityGains(plan.gains);
+    if (gains.length === 3 && !plan.byHal && plan.byGl && plan.noticeNeeded && !identity) {
       // 编译探针：条件恒真，仅为引用常量与函数（无副作用）
     }
   }

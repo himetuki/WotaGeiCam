@@ -50,6 +50,30 @@ export class ComparePractice {
     this.pendingRightId = mediaId;
     return true;
   }
+
+  /**
+   * **OHOS 等价面（登记偏离）**：本侧录制落盘即刻没有 MediaStore 级 id（媒体库是
+   * MediaRepo 扫描派生，id=文件名哈希要到扫描后才存在）⇒ 练习回归动线按**文件路径**记账
+   * （路径即身份，比 id 更强）；对比页 onPageShow 消费时在列表里按路径反查回 id。
+   */
+  pendingRightPath: string | undefined = undefined;
+
+  /** 录制页：练习动线里录成 → 记账新片路径（armed 为真才记；普通录制拒绝） */
+  deliverPath(path: string): boolean {
+    if (!this.armed) {
+      return false;
+    }
+    this.armed = false;
+    this.pendingRightPath = path;
+    return true;
+  }
+
+  /** 对比页 onPageShow：取走待填右片路径（读后即清） */
+  takePendingRightPath(): string | undefined {
+    const v: string | undefined = this.pendingRightPath;
+    this.pendingRightPath = undefined;
+    return v;
+  }
 }
 
 /** 模块单例（页面侧直接 import 本常量，等价上游 ComparePractice object） */

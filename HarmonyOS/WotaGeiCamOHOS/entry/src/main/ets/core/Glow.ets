@@ -36,7 +36,9 @@ export const GLOW_FULL_MAX_PIXEL_RATE: number = 40_000_000;
 /** 逐帧全分辨率 pass 的负载分水岭（真值常量）单一真源在文件顶部 import 的 core/Denoise.ets */
 
 // 安全域（sanitize 与 UI 滑杆共用同一套端点，别在 UI 里再写一份）
-export const GLOW_THRESHOLD_MIN: number = 0;
+// 亮度阈值 0.6..1.0（2026-10-29 用户口径：滑杆域 60~100%——1.0 = 只给最亮像素加光晕，
+// 软边朝 1.0 收敛，见 shaders.h GLOW_COPY_FS 的 soft 压缩）
+export const GLOW_THRESHOLD_MIN: number = 0.6;
 export const GLOW_THRESHOLD_MAX: number = 1;
 export const GLOW_SOFT_MAX: number = 0.5;
 export const GLOW_WIDTH_MAX: number = 0.2;
@@ -65,14 +67,16 @@ export interface GlowParamsArgs {
   add?: number;
   freq?: number;
   blend?: number;
-  colorA?: number;
-  colorB?: number;
+  /** 光晕颜色（ARGB number；白 = 不改色，跟随光棒自身颜色） */
+  color?: number;
+  /** true = 仅用色盘选中的颜色发光（不乘原色）；出厂 false（物理直觉口径） */
+  colorOnly?: boolean;
 }
 
 export class GlowParams {
   /** 开关：映射成 ProgramKey 的 glow 一维（换开关 = 换 program，走会话缓存） */
   enabled: boolean;
-  /** 0..1 亮度阈值：超过才发光（与 Sapphire S_Glow.Threshold 同名同义） */
+  /** 亮度阈值 0.6..1.0：超过才发光（2026-10-29 用户口径，滑杆域 60~100%） */
   threshold: number;
   /** 0..0.5 阈值软边宽度（smoothstep 的过渡带） */
   soft: number;
@@ -86,37 +90,37 @@ export class GlowParams {
   freq: number;
   /** 0..1 混合强度比例（0 = 原图，1 = 满强度） */
   blend: number;
-  /** 色带 A 端（ARGB number）；hue 的位置参数取归一化亮度，不取红通道 */
-  colorA: number;
-  /** 色带 B 端（ARGB number） */
-  colorB: number;
+  /** 光晕颜色（ARGB number；白 = 不改色，跟随光棒自身颜色） */
+  color: number;
+  /** true = 仅用色盘颜色（拷贝趟按亮部采样上色，主 pass 传白防二次染色） */
+  colorOnly: boolean;
 
   constructor(args: GlowParamsArgs = {}) {
     this.enabled = args.enabled ?? false;
-    this.threshold = args.threshold ?? 0.5;
+    this.threshold = args.threshold ?? 0.7;
     this.soft = args.soft ?? 0.05;
     this.width = args.width ?? 0.02;
     this.gain = args.gain ?? 1.0;
     this.add = args.add ?? 0.0;
     this.freq = args.freq ?? 0.0;
     this.blend = args.blend ?? 0.6;
-    this.colorA = maskArgb(args.colorA ?? 0xFFFF3399);
-    this.colorB = maskArgb(args.colorB ?? 0xFF33E6FF);
+    this.color = maskArgb(args.color ?? 0xFFFFFFFF);
+    this.colorOnly = args.colorOnly ?? false;
   }
 
   /** 域钳之后的同一份参数（幂等）。落盘/下发前必须过这一关，见文件头注 */
   sanitize(): GlowParams {
     return new GlowParams({
       enabled: this.enabled,
-      threshold: glowClamp(this.threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.5),
+      threshold: glowClamp(this.threshold, GLOW_THRESHOLD_MIN, GLOW_THRESHOLD_MAX, 0.7),
       soft: glowClamp(this.soft, 0, GLOW_SOFT_MAX, 0.05),
       width: glowClamp(this.width, 0, GLOW_WIDTH_MAX, 0.02),
       gain: glowClamp(this.gain, 0, GLOW_GAIN_MAX, 1),
       add: glowClamp(this.add, 0, GLOW_ADD_MAX, 0),
       freq: glowClamp(this.freq, 0, GLOW_FREQ_MAX, 0),
       blend: glowClamp(this.blend, 0, 1, 0.6),
-      colorA: maskArgb(this.colorA),
-      colorB: maskArgb(this.colorB)
+      color: maskArgb(this.color),
+      colorOnly: this.colorOnly
     });
   }
 
@@ -124,24 +128,102 @@ export class GlowParams {
   sameAs(o: GlowParams): boolean {
     return this.enabled === o.enabled && this.threshold === o.threshold && this.soft === o.soft &&
       this.width === o.width && this.gain === o.gain && this.add === o.add &&
-      this.freq === o.freq && this.blend === o.blend && this.colorA === o.colorA &&
-      this.colorB === o.colorB;
+      this.freq === o.freq && this.blend === o.blend && this.color === o.color &&
+      this.colorOnly === o.colorOnly;
   }
 }
 
-/** 出厂预设 A：品红 → 青（用户拍板，见 24 §六-1） */
-export const GLOW_PRESET_A: GlowParams = new GlowParams();
+/**
+ * 出厂默认：**白 = 不改色**（同色光晕）。2026-10-28 用户口径两步走：① 撤掉「预设 A/B +
+ * 两端色带」（那是给整片换色）；② 开放**色盘自选单色**。白是中性元 ⇒ 默认观感仍是
+ * "光棒什么色就发什么色的光晕"，只有用户显式选色才偏色。
+ */
+export const GLOW_DEFAULT: GlowParams = new GlowParams();
 
-/** 预设 B：橙 → 绿（同一条色带公式，只换两端色与强度） */
-export const GLOW_PRESET_B: GlowParams = new GlowParams({
-  threshold: 0.45,
-  blend: 0.55,
-  colorA: 0xFFFF730D,
-  colorB: 0xFF33D940
-});
+/** 出厂光晕色：白 = 不改色（跟随光棒自身颜色） */
+export const GLOW_COLOR_DEFAULT: number = 0xFFFFFFFF;
 
-/** 出厂默认 = 预设 A */
-export const GLOW_DEFAULT: GlowParams = GLOW_PRESET_A;
+/** ARGB number → 0..1 三元组（uniform 用）。只取 RGB：alpha 不参与光晕（输出恒不透明） */
+export function glowRgb(argb: number): Array<number> {
+  const v: number = maskArgb(argb);
+  return [
+    (Math.floor(v / 65536) % 256) / 255,
+    (Math.floor(v / 256) % 256) / 255,
+    (v % 256) / 255
+  ];
+}
+
+// ---------------------------------------------------------------- 色盘几何（纯函数）
+
+/**
+ * 像素圆心 → 色相（0..1）与饱和度（0..1，圆心 0 = 白）：圆盘 = 色相角 + 饱和度半径，
+ * 明度固定 1（光晕是加法层，亮度由「增益」滑杆管；色盘只负责色相与饱和度）。
+ */
+export function glowHueSatOf(dx: number, dy: number, radiusPx: number): Array<number> {
+  if (radiusPx <= 0) {
+    return [0, 0];
+  }
+  const dist: number = Math.sqrt(dx * dx + dy * dy);
+  const sat: number = Math.min(1, Math.max(0, dist / radiusPx));
+  // atan2 的 0° 在 +x，色盘把红放 0°（顺时针与屏幕坐标一致：+y 向下 = 加角度）
+  const deg: number = Math.atan2(dy, dx) * 180 / Math.PI;
+  const hue: number = (((deg % 360) + 360) % 360) / 360;
+  return [hue, sat];
+}
+
+/** HSV（各 0..1）→ ARGB number；色相归一化到 0..1，饱和度/明度越界钳制 */
+export function glowArgbFromHsv(h: number, s2: number, v: number): number {
+  const hh: number = (((h % 1) + 1) % 1) * 6;
+  const ss: number = Math.min(1, Math.max(0, s2));
+  const vv: number = Math.min(1, Math.max(0, v));
+  const i: number = Math.floor(hh);
+  const f: number = hh - i;
+  const p: number = vv * (1 - ss);
+  const q: number = vv * (1 - ss * f);
+  const t: number = vv * (1 - ss * (1 - f));
+  let r: number = 0;
+  let g: number = 0;
+  let b: number = 0;
+  const m: number = i % 6;
+  if (m === 0) { r = vv; g = t; b = p; } else if (m === 1) { r = q; g = vv; b = p; }
+  else if (m === 2) { r = p; g = vv; b = t; } else if (m === 3) { r = p; g = q; b = vv; }
+  else if (m === 4) { r = t; g = p; b = vv; } else { r = vv; g = p; b = q; }
+  const ch: (x: number) => number =
+    (x: number): number => Math.floor(Math.min(1, Math.max(0, x)) * 255 + 0.5);
+  return maskArgb(0xFF000000 + ch(r) * 65536 + ch(g) * 256 + ch(b));
+}
+
+/** 色盘拖拽点 → ARGB（明度恒 1）：glowHueSatOf 之后直接取色；圆心即白（= 跟随原色） */
+export function glowArgbFromWheel(dx: number, dy: number, radiusPx: number): number {
+  const hs: Array<number> = glowHueSatOf(dx, dy, radiusPx);
+  return glowArgbFromHsv(hs[0], hs[1], 1);
+}
+
+/** 参数色 → 色盘落点（单位圆内 x/y 与饱和度）：给 UI 画选中圈；白/灰无彩 ⇒ 圆心 */
+export function glowWheelMarkerOf(argb: number): Array<number> {
+  const rgb: Array<number> = glowRgb(argb);
+  const mx: number = Math.max(rgb[0], Math.max(rgb[1], rgb[2]));
+  const mn: number = Math.min(rgb[0], Math.min(rgb[1], rgb[2]));
+  const delta: number = mx - mn;
+  if (delta <= 1e-4 || mx <= 1e-4) {
+    return [0, 0, 0];
+  }
+  const sat: number = delta / mx;
+  let hue: number;
+  if (mx === rgb[0]) {
+    hue = (rgb[1] - rgb[2]) / delta;
+    if (hue < 0) {
+      hue += 6;
+    }
+  } else if (mx === rgb[1]) {
+    hue = (rgb[2] - rgb[0]) / delta + 2;
+  } else {
+    hue = (rgb[0] - rgb[1]) / delta + 4;
+  }
+  hue /= 6;
+  const ang: number = hue * 2 * Math.PI;
+  return [Math.cos(ang) * sat, Math.sin(ang) * sat, sat];
+}
 
 /** Glow 参数 → 单串持久化键（B7 用；与 hud_layout 的复合键同族）。写盘前先 sanitize */
 export function encodeGlow(params: GlowParams): string {
@@ -154,8 +236,8 @@ export function encodeGlow(params: GlowParams): string {
     ';add=' + p.add +
     ';freq=' + p.freq +
     ';blend=' + p.blend +
-    ';colorA=' + p.colorA.toString(16).toUpperCase() +
-    ';colorB=' + p.colorB.toString(16).toUpperCase();
+    ';color=' + p.color.toString(16).toUpperCase() +
+    ';coloronly=' + (p.colorOnly ? 1 : 0);
 }
 
 /** 严格浮点解析（对齐 Kotlin toFloatOrNull：整串合法才算数，"9x"/"abc" 都不收） */
@@ -202,11 +284,20 @@ export function decodeGlow(raw: string | undefined | null): GlowParams {
   const add: number | undefined = strictFloat(values.get('add') ?? '');
   const freq: number | undefined = strictFloat(values.get('freq') ?? '');
   const blend: number | undefined = strictFloat(values.get('blend') ?? '');
-  const colorA: number | undefined = strictHexColor(values.get('colorA') ?? '');
-  const colorB: number | undefined = strictHexColor(values.get('colorB') ?? '');
+  // color 是 2026-10-28 新增的**可选**键：缺键（旧串，含 colorA/colorB 旧键串）= 白
+  // （跟随原色）；键在但解析失败 ⇒ 整串回默认（坏色值不许猜）。旧 colorA/colorB 键走
+  // 「未知键忽略」分支自然退役。coloronly 同为可选布尔键，缺键 = false
+  const colorRaw: string | undefined = values.get('color');
+  let color: number = GLOW_COLOR_DEFAULT;
+  if (colorRaw !== undefined) {
+    const parsed: number | undefined = strictHexColor(colorRaw);
+    if (parsed === undefined) {
+      return GLOW_DEFAULT;
+    }
+    color = parsed;
+  }
   if (threshold === undefined || soft === undefined || width === undefined || gain === undefined ||
-    add === undefined || freq === undefined || blend === undefined || colorA === undefined ||
-    colorB === undefined) {
+    add === undefined || freq === undefined || blend === undefined) {
     return GLOW_DEFAULT;
   }
   return new GlowParams({
@@ -218,8 +309,8 @@ export function decodeGlow(raw: string | undefined | null): GlowParams {
     add: add,
     freq: freq,
     blend: blend,
-    colorA: colorA,
-    colorB: colorB
+    color: color,
+    colorOnly: values.get('coloronly') === '1'
   }).sanitize();
 }
 
@@ -320,51 +411,6 @@ export function fillGlowBlurOffset(out: Array<number>, rtWidthPx: number, rtHeig
   return true;
 }
 
-/**
- * ARGB → 0..1 三元组（uniform 用）。只取 RGB：alpha 不参与光晕（输出恒不透明，
- * 与 PASS_THROUGH_FS 同一条「强制不透明」纪律）。
- */
-export function glowRgb(argb: number): Array<number> {
-  const v: number = maskArgb(argb);
-  return [
-    ((v >>> 16) & 0xFF) / 255,
-    ((v >>> 8) & 0xFF) / 255,
-    (v & 0xFF) / 255
-  ];
-}
-
-/**
- * Glow 色带的**可选色点**（UI 两行色点用；参数本身仍只存 ARGB 的 colorA/B）。
- * 登记偏离：上游 label 是 R.string 资源 id，本侧为字面量（随 UI 批进资源）。
- * 调色板只约束「点选得到什么」，**不约束持久化域**——手改 prefs 写进任意 32 位色值也照单
- * 全收（解码过 sanitize 的掩码），此时 UI 上没有任何色点被点亮（of 返回 undefined）。
- */
-export class GlowColor {
-  readonly label: string;
-  readonly argb: number;
-
-  constructor(label: string, argb: number) {
-    this.label = label;
-    this.argb = argb;
-  }
-}
-
-export const GLOW_COLORS: Array<GlowColor> = [
-  new GlowColor('品红', 0xFFFF3399),
-  new GlowColor('青', 0xFF33E6FF),
-  new GlowColor('橙', 0xFFFF730D),
-  new GlowColor('绿', 0xFF33D940),
-  new GlowColor('黄', 0xFFFFE033),
-  new GlowColor('蓝', 0xFF4D7CFF),
-  new GlowColor('紫', 0xFFB44DFF),
-  new GlowColor('白', 0xFFFFFFFF)
-];
-
-/** 参数里的色值 → 调色板项（没有精确匹配时 undefined = 这行一个点都不点亮，不猜） */
-export function glowColorOf(argb: number): GlowColor | undefined {
-  const masked: number = maskArgb(argb);
-  return GLOW_COLORS.find((c: GlowColor): boolean => c.argb === masked);
-}
 
 /** Glow 胶囊状态行的文案键（上游返回 R.string 资源 id，本侧 core 不引资源 → 键，UI 批映射文案） */
 export type GlowNoteKey =

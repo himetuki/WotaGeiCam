@@ -10,7 +10,8 @@
  *   （上游无默认值必传；ArkTS struct 成员必须给默认值，编译期强制不可得 → 点名守卫）、
  *   四根弹层滑杆逐个点名（EV 整数域显式 null）、设置页组真的写 prefs。
  *
- * 与上游接线臂的差异（登记）：本侧 PillSlider 调用点是 4 处（快门/ISO/EV/色温）而非上游
+ * 与上游接线臂的差异（登记）：本侧 PillSlider 调用点为快门/ISO/EV/色温/对焦屈光度/
+ * 等号档手动微调（r42）六处而非上游
  * 录制页 10 处（变焦/对焦/斑马/并入门槛等胶囊未进本批）；播放器/设置页并入门槛滑杆
  * 未移植，无对应 null 点名臂。
  */
@@ -103,15 +104,16 @@ function wiringIssues(popup: string, pills: string, settings: string, store: str
     }
   }
 
-  // 3) 弹层五根滑杆逐个点名（1 根整数域显式 null，4 根各一次；FC 批加对焦屈光度）
-  if (occurrences(pills, 'PillSlider({') !== 5) {
-    bad.push('PillSlider 调用点不是 5 处');
+  // 3) 弹层六根滑杆逐个点名（2 根整数域显式 null，4 根各一次；FC 批对焦屈光度 +
+  //    r42 批C 等号档手动微调——产品语义恒定刻度梯，不进吸附设置页 ⇒ null 同 EV）
+  if (occurrences(pills, 'PillSlider({') !== 6) {
+    bad.push('PillSlider 调用点不是 6 处');
   }
-  if (occurrences(pills, 'snapKey:') !== 5) {
+  if (occurrences(pills, 'snapKey:') !== 6) {
     bad.push('有滑杆没点名 snapKey');
   }
-  if (occurrences(pills, 'snapKey: null') !== 1) {
-    bad.push('整数域滑杆（EV）必须显式传 snapKey: null，且恰好 1 处');
+  if (occurrences(pills, 'snapKey: null') !== 2) {
+    bad.push('整数域滑杆（EV、等号档手动微调）必须显式传 snapKey: null，且恰好 2 处');
   }
   for (const name of KEY_NAMES) {
     const n: number = occurrences(pills, 'snapKey: SliderKey.' + name);

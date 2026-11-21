@@ -65,6 +65,40 @@ export function pickDefaultLens(slots: Array<LensSlot>): LensSlot | undefined {
  * 镜头枚举后会话/输出要用 device 本体开输入（LensSlot 只存 id 不存设备引用），
  * KitProbe 取能力与 KitPreview/KitRecorder 开会话共用这一份查找，不复制遍历。
  */
+/**
+ * 双摄并发探测（上游 DualCameraProbe 的 OHOS 对位，2026-11-02 裁定实现）：
+ * `getCameraConcurrentInfos(devices)`（API 18+）查询一组设备能否并发——返回表里出现
+ * **≥2 台设备**即该组可并发，伙伴 = 表中除当前外的 id 并集（上游 buddiesOf 同义）。
+ * 机型无关：不写死任何 cameraId；API 不可用/查询抛异常一律回空集（保守=不支持，
+ * 与上游「宁可少给一个功能也不给一个点了必崩的入口」同口径）。
+ */
+export function concurrentPartnersOf(mgr: camera.CameraManager,
+  currentId: string): Array<string> {
+  try {
+    const all: Array<camera.CameraDevice> = mgr.getSupportedCameras() ?? [];
+    const current: camera.CameraDevice | undefined =
+      all.find((d: camera.CameraDevice): boolean => d.cameraId === currentId);
+    if (current === undefined) {
+      return [];
+    }
+    const infos: Array<camera.CameraConcurrentInfo> = mgr.getCameraConcurrentInfos([current]);
+    if (infos === undefined || infos.length === 0) {
+      return [];
+    }
+    // 单查当前设备：返回表的长度 ≥2 视为该组可并发，伙伴取表中除当前外
+    const partners: Array<string> = [];
+    for (const info of infos) {
+      const id: string = info.device !== undefined ? info.device.cameraId : '';
+      if (id !== '' && id !== currentId && partners.indexOf(id) < 0) {
+        partners.push(id);
+      }
+    }
+    return partners;
+  } catch (e) {
+    return [];
+  }
+}
+
 export function findDeviceById(mgr: camera.CameraManager, id: string): camera.CameraDevice | undefined {
   let devices: Array<camera.CameraDevice> = [];
   try {

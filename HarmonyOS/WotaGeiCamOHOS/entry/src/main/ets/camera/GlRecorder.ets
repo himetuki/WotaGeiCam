@@ -21,6 +21,8 @@ import {
 } from '../record/FrameLedger';
 import { WOTA_RECORD_TAG } from '../record/RecordResult';
 import { SegmentPolicy } from '../record/SegmentPolicy';
+import { RecordAudioTap } from './RecordAudioTap';
+import { AudioSourceStore } from '../ui/SettingsStore';
 import { VideoStore } from '../record/VideoStore';
 
 /** libentry.so 录制出口（camera/GlLibBridge 的导出子集） */
@@ -224,6 +226,12 @@ export class GlRecorder {
       this.clearSession();
       return detail;
     }
+    // 音轨（2026-11-02）：MIC 采集 → native AAC/muxer；失败静默只记 W（视频照录，
+    // 与上游「内录/蓝牙未就绪降级为无音轨」同姿态——绝不阻塞录制）。
+    // 开关 = 设置页「麦克风录音」（默认开）；现读 prefs（录制动作完成点，成本可忽略）
+    if (AudioSourceStore.readEnabled(ctx)) {
+      RecordAudioTap.start();
+    }
     return '';
   }
 
@@ -405,6 +413,22 @@ export class GlRecorder {
     return part;
   }
 
+  /**
+   * 当前段已写字节（换段预提示的数据源，上游 36917e5 RecorderHealth.outputBytes 对应面）；
+   * lib 缺席/读取失败返回 -1 = 不可观测（"量不到"不是"超了"，判据按 false 处理）。
+   */
+  currentSegmentBytes(): number {
+    const lib: GlRecordLib | undefined = this.lib;
+    if (lib === undefined) {
+      return -1;
+    }
+    try {
+      return lib.getGpuWrittenBytes();
+    } catch (e) {
+      return -1;
+    }
+  }
+
   /** 页面 500ms 轮询：达到阈值 → 收当前段 → 新段；返回 ''/rotated:N/error:<code> */
   maybeRotate(ctx: common.Context, lib: GlRecordLib): string {
     if (this.fd < 0 || this.startParams === undefined) {
@@ -522,6 +546,7 @@ export class GlRecorder {
     this.fd = -1;
     this.path = '';
     this.lib = undefined;
+    RecordAudioTap.stop();
     this.startParams = undefined;
     this.parts = [];
     this.partIndex = 0;

@@ -36,9 +36,11 @@ static const char* WOTA_TEXTURE_VS =
     "}\n";
 
 /**
- * 上游 Shaders.GLOW_DECL 逐 token：
- * `out = c + ((glow * gain + add) * hue) * (blend * n)`；pos 取归一化亮度、噪声频率 0 = 干净。
- * 注入点：直通/曲线/双边的终写表达式、斑马的 else 分支、峰值的 mix(c, uColor, paint) 的 c。
+ * 上游 Shaders.GLOW_DECL 逐 token（2026-10-28 同色光晕 + 单色 tint 口径，350c671 终态）：
+ * `out = c + glow * tint * (gain + add) * (blend * n)`。tint 出厂 = 白 ⇒ 恒等，输出仍是
+ * "光棒自身颜色"的光晕；用户选色后光晕整体偏该色调。add 是增益的加成项（仍乘提取出来的
+ * 颜色），全画面不再被抬一层灰。注入点：直通/曲线/双边的终写表达式、斑马的 else 分支、
+ * 峰值的 mix(c, uColor, paint) 的 c。
  */
 static const std::string WOTA_GLOW_DECL =
     "varying vec2 vUvGlow;\n"
@@ -47,8 +49,7 @@ static const std::string WOTA_GLOW_DECL =
     "uniform float uGlowAdd;\n"
     "uniform float uGlowFreq;\n"
     "uniform float uGlowBlend;\n"
-    "uniform vec3 uGlowColorA;\n"
-    "uniform vec3 uGlowColorB;\n"
+    "uniform vec3 uGlowTint;\n"
     "float glowHash(vec2 p) {\n"
     "    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));\n"
     "    q += dot(q, q.yzx + 33.33);\n"
@@ -56,10 +57,8 @@ static const std::string WOTA_GLOW_DECL =
     "}\n"
     "vec3 applyGlow(vec3 c, vec2 uv) {\n"
     "    vec3 glow = texture2D(uGlowSrc, uv).rgb;\n"
-    "    float pos = clamp(dot(glow, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);\n"
-    "    vec3 hue = mix(uGlowColorA, uGlowColorB, pos);\n"
     "    float n = mix(1.0, glowHash(uv * uGlowFreq), step(0.0001, uGlowFreq));\n"
-    "    return c + ((glow * uGlowGain + uGlowAdd) * hue) * (uGlowBlend * n);\n"
+    "    return c + glow * uGlowTint * (uGlowGain + uGlowAdd) * (uGlowBlend * n);\n"
     "}\n";
 
 /** 上游 Shaders.PASS_THROUGH_FS（ES 1.00；#extension 必须是首条指令；终写包 applyGlow） */
@@ -184,14 +183,21 @@ static const char* WOTA_GLOW_COPY_FS =
     "uniform samplerExternalOES uFrame;\n"
     "uniform float uGlowThreshold;\n"
     "uniform float uGlowSoft;\n"
+    "uniform vec3 uGlowTint;\n"
+    "uniform float uGlowColorOnly;\n"
     "void main() {\n"
     "    vec3 c = texture2D(uFrame, vUv).rgb;\n"
     "    float luma = dot(c, vec3(0.299, 0.587, 0.114));\n"
-    "    float t = smoothstep(\n"
-    "        uGlowThreshold - uGlowSoft,\n"
-    "        max(uGlowThreshold + uGlowSoft, uGlowThreshold - uGlowSoft + 0.0001),\n"
-    "        luma);\n"
-    "    gl_FragColor = vec4(c * t, 1.0);\n"
+    "    // 软边朝 1.0 收敛（2026-10-29 用户口径：阈值 100% 时只给画面最亮像素加光晕）。\n"
+    "    // 阈值越接近 1，剩余余量越小，过渡带随之变窄；不做这层压缩的话 soft 会跨过 1.0，\n"
+    "    // 100% 档仍会把整片高光拉亮。hi 必须严格 > lo（角点 (1.0, 0) 防驱动 NaN）\n"
+    "    float soft = min(uGlowSoft, max(1.0 - uGlowThreshold, 0.0) + 0.0001);\n"
+    "    float lo = max(uGlowThreshold - soft, 0.0);\n"
+    "    float hi = max(uGlowThreshold + soft, lo + 0.0001);\n"
+    "    float t = smoothstep(lo, hi, luma);\n"
+    "    // 光晕颜色模式：1 = 仅色盘颜色（不乘原色）；0 = 像素自身颜色（乘回原色）\n"
+    "    vec3 pick = mix(c, uGlowTint, uGlowColorOnly);\n"
+    "    gl_FragColor = vec4(pick * t, 1.0);\n"
     "}\n";
 
 /**

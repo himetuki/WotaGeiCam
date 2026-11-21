@@ -8,6 +8,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HudDragOrder } from '../../entry/src/main/ets/core/HudDragOrder';
+import {
+  HudEntry, HudGridPlan, HudLayoutTable, HudZone, hudZoneAll
+} from '../../entry/src/main/ets/core/HudLayout';
 
 function srcRoot(): string {
   let dir: string = __dirname;
@@ -92,4 +95,38 @@ test('接线_范围声明在册_跨容器仍是产品决策', () => {
     '头注必须写明跨容器自由布局不在本批（无渲染面 + 需真机验收）');
   const ed: string = sourceText('entry/src/main/ets/pages/HudEditor.ets');
   assertTrue(ed.indexOf('writeOrder') >= 0);
+});
+
+test('接线+行为：编辑器换区（⇄）走 moveEntryTo 表驱动，条目唯一归属', () => {
+  const { existsSync, readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
+  let dir: string = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(resolve(dir, 'entry/src/main/ets/core/CameraAbility.ets'))) {
+      break;
+    }
+    dir = resolve(dir, '..');
+  }
+  const editor: string = readFileSync(resolve(dir, 'entry/src/main/ets/pages/HudEditor.ets'), 'utf8');
+  assertTrue(editor.indexOf('onMoveZone') >= 0, '换区入口在册');
+  assertTrue(editor.indexOf('moveEntryTo(entry, next, targetLen') >= 0, '表驱动跨容器移动（纯层收口）');
+  assertTrue(editor.indexOf("Button('⇄')") >= 0, '逐行换区按钮');
+  // 行为：默认表里 READOUT 的条目移到下一容器后唯一归属改变（normalize 去重保证）
+  const table = HudLayoutTable.default();
+  const zones: Array<HudZone> = hudZoneAll();
+  const entry = table.orderOf(HudZone.READOUT)[0];
+  const next: HudZone = zones[(zones.indexOf(HudZone.READOUT) + 1) % zones.length];
+  const PLAN_ALL: HudGridPlan = new HudGridPlan(new Set<string>(), 3,
+    (_z: HudZone): number => 56, (_e: HudEntry): number => 48);
+  const moved = table.moveEntryTo(entry, next, table.orderOf(next).length, PLAN_ALL).normalize();
+  assertEq(next, moved.sourceZoneOf(entry), '归属随换区走');
+  let count: number = 0;
+  for (const z of zones) {
+    for (const e of moved.orderOf(z)) {
+      if (e.id === entry.id) {
+        count++;
+      }
+    }
+  }
+  assertEq(1, count, '唯一归属（不双挂）');
 });

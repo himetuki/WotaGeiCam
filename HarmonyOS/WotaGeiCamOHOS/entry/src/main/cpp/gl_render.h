@@ -32,6 +32,15 @@ bool WotaGlReady();
  * EGL/NativeImage 未就绪时返回空串（ArkTS 侧轮询）。
  */
 std::string WotaGlGetInputSurfaceId();
+/**
+ * 打开 YUV 帧源（真机仅 YUV_420_SP 的设备）：画幅登记 + 切「取相机原始缓冲自转 RGBA」通路，
+ * 返回相机输出面 surfaceId（= getInputSurfaceId；空串 = 不可用，调用方回退原生 RGBA 路）。
+ * 不新建任何面：相机仍写 NativeImage 面（真机实证唯一能收帧的消费面）。
+ */
+std::string WotaGlEnableYuvFeed(int32_t width, int32_t height);
+bool WotaGlYuvMode();
+/** YUV 帧源诊断串（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh），供 Diag 导出定位 */
+std::string WotaGlGetYuvDiag();
 
 /**
  * NativeImage 失败原因（空串 = 正常/尚未失败）：create-failed / set-listener-failed /
@@ -61,7 +70,7 @@ void WotaGlSetPeakingParams(float strength, int colorIndex);
 /** 直方图采样开关（RGB 曲线框背景，f31d18c）：曲线弹窗可见时开；关 = 停采清快照 */
 void WotaGlSetHistogramEnabled(bool on);
 
-/** 取直方图快照（3×64 计数 R/G/B，出参容量 ≥192；无样本返回 false）。归一在 ArkTS core/HistogramMath */
+/** 取直方图快照（4×64 计数 R/G/B/Y，出参容量 ≥256；无样本返回 false）。归一在 ArkTS core/HistogramMath */
 bool WotaGlGetHistogramSnapshot(int32_t* out, int capacity);
 
 /** 毛玻璃全屏链开关（GL-3：OES→2D 拷贝→横向高斯→纵向高斯→2D 直通上屏） */
@@ -118,7 +127,7 @@ int WotaGlGetArcEffectiveMode();
  * 形状参数只换 uniform（不重建 program）；打开动作给停用链一次干净重试。
  */
 void WotaGlSetGlowParams(int enabled, float threshold, float soft, float width, float gain,
-    float add, float freq, float blend, uint32_t colorA, uint32_t colorB);
+    float add, float freq, float blend, uint32_t tint, int colorOnly);
 
 /**
  * Glow 状态串：`off` 或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`。

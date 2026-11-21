@@ -17,6 +17,8 @@
  * 读取失败/类型异常回默认值；保存失败记日志不抛。
  */
 import { preferences } from '@kit.ArkData';
+import { BrightnessRampMath } from '../core/BrightnessRampMath';
+import { CurvePanelSize } from '../core/CurvePanelSize';
 import { common } from '@kit.AbilityKit';
 import { HudItems, Size, WotaTiers } from '../core/Constants';
 import { UIOrientation, UIOrientations } from '../core/UIOrientation';
@@ -48,8 +50,109 @@ const KEY_TEXT_SCALE_CAMERA: string = 'text_scale_camera';
 const KEY_DIAG_ENABLED: string = 'diag_enabled';
 /** 诊断详细档（上游 WotaSettings.KEY_DIAG_VERBOSE，逐字一致） */
 const KEY_DIAG_VERBOSE: string = 'diag_verbose';
+/**
+ * 曲线面板边长（dp）独立读写（上游 5216e72…错——上游 320a956 WotaSettings 的两个直读写
+ * 同构）：纯 UI 设置**不走 CameraSettings 也没有默认值应用链**；弹窗开启时读、把手抬手/重置时写。
+ */
+/**
+ * 动效档直读（PillSlider.readContinuous 同款注入形态：组件 aboutToAppear 现读 prefs，
+ * 免逐宿主穿参）。坏串/读失败回 FLUENT。
+ */
+export class MotionModeStore {
+  static read(ctx: common.Context): string {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_MOTION, 'FLUENT');
+      const v: string = typeof raw === 'string' ? raw as string : '';
+      return v === 'PLAIN' || v === 'FLUENT' || v === 'LIQUID' ? v : 'FLUENT';
+    } catch (e) {
+      return 'FLUENT';
+    }
+  }
+}
+
+/** 录制音轨开关直读（组件/录制器现读 prefs；坏值回默认开） */
+export class AudioSourceStore {
+  static readEnabled(ctx: common.Context): boolean {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_RECORD_AUDIO, true);
+      return raw === true;
+    } catch (e) {
+      return true;
+    }
+  }
+}
+
+/** 播放页顶栏收起态读写（纯 UI 设置：进页读、点按写，冷启保持） */
+export class PlayerChromeStore {
+  static readCollapsed(ctx: common.Context): boolean {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_PLAYER_TOP_BAR_COLLAPSED, false);
+      return raw === true;
+    } catch (e) {
+      Diag.w('WotaStore', `player top bar collapsed read failed: ${e}`);
+      return false;
+    }
+  }
+
+  static writeCollapsed(ctx: common.Context, collapsed: boolean): void {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      store.putSync(KEY_PLAYER_TOP_BAR_COLLAPSED, collapsed);
+      store.flush();
+    } catch (e) {
+      Diag.w('WotaStore', `player top bar collapsed write failed: ${e}`);
+    }
+  }
+}
+
+export class CurvePanelSideStore {
+  static read(ctx: common.Context): number {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      const raw: preferences.ValueType = store.getSync(KEY_CURVE_PANEL_SIDE_DP, 200);
+      return CurvePanelSize.readSideOf(typeof raw === 'number' ? raw as number : undefined);
+    } catch (e) {
+      Diag.w('WotaStore', `curve panel side read failed: ${e}`);
+      return CurvePanelSize.DEFAULT_SIDE_DP;
+    }
+  }
+
+  static write(ctx: common.Context, sideDp: number): void {
+    try {
+      const store: preferences.Preferences = preferences.getPreferencesSync(ctx,
+        { name: PARAMS_STORE_NAME });
+      store.putSync(KEY_CURVE_PANEL_SIDE_DP, sideDp);
+      store.flush();
+    } catch (e) {
+      Diag.w('WotaStore', `curve panel side write failed: ${e}`);
+    }
+  }
+}
+
 /** RGB 曲线栈持久串（上游 WotaSettings.KEY_CURVE_STACK，逐字一致；CURVE 批） */
 const KEY_CURVE_STACK: string = 'curve_stack';
+// 曲线面板**实际边长** dp（29 §1.2 F1，上游 curve_panel_side_dp 逐字）：存 dp 不存 scale——
+// 跨屏幕/转屏时 baseSide 会变，存 scale 会漂移。缺省 200，读取经 CurvePanelSize 读侧钳
+const KEY_CURVE_PANEL_SIDE_DP: string = 'curve_panel_side_dp';
+// 播放页顶栏持久收起（29 §6.3，上游 player_top_bar_collapsed 逐字）：进页读、点按写
+const KEY_PLAYER_TOP_BAR_COLLAPSED: string = 'player_top_bar_collapsed';
+// 动效档（上游 motion_mode 逐字；PLAIN=简洁无动画 / FLUENT=流畅 / LIQUID=液态Q弹）
+const KEY_MOTION: string = 'motion_mode';
+// 录制音轨麦克风开关（2026-11-02 音轨链批）：默认开；关 = 录纯视频（上游音源面板
+// 「环境声」开关的 OHOS 面；内录/蓝牙需 AVScreenCapture 合流，登记待批）
+const KEY_RECORD_AUDIO: string = 'record_audio_enabled';
+// 「启动后自动亮屏」延迟秒（0–10，0=关闭；上游 camera_brighten_delay_sec，5216e72）
+const KEY_CAMERA_BRIGHTEN_DELAY_SEC: string = 'camera_brighten_delay_sec';
+// 「起播渐亮」时长十分之一秒（0–30 步 5，0=关闭；上游 player_brighten_ramp_tenths）
+const KEY_PLAYER_BRIGHTEN_RAMP_TENTHS: string = 'player_brighten_ramp_tenths';
 /**
  * 「用户显式选过镜头」持久化位 + 选中的槽位键（上游 0525fa2 LensPickPreference 语义对齐）：
  * false 期间冷启走能力协商默认（core/LensSlot.pickCapabilityDefault——后摄里最大视频档者，
@@ -87,6 +190,14 @@ export class CameraSettings {
   refLines: number = 0;
   /** 取景读数条位掩码（上游 hud_items；默认上屏四档，0 = 读数条整条不渲染） */
   hudItems: number = HudItems.DEFAULT_MASK;
+  /** 「启动后自动亮屏」延迟秒（0=关闭；冷启首次进取景页延迟后 7s 渐变到满亮度） */
+  cameraBrightenDelaySec: number = 1;
+  /** 「起播渐亮」时长十分之一秒（0=关闭；单播放页首次起播从当前亮度渐到满） */
+  playerBrightenRampTenths: number = 10;
+  /** 动效档（MotionMode 名串：PLAIN/FLUENT/LIQUID；坏串回 FLUENT） */
+  motionMode: string = 'FLUENT';
+  /** 录制音轨麦克风开关（默认开 = 录环境下声；关 = 纯视频） */
+  recordAudioEnabled: boolean = true;
   /**
    * HUD 位置表原文（上游 hud_layout，`HudLayoutTable.encode` 的 v2 串；空串 = 默认表）。
    * 本侧 J3b 只消费 READOUT 容器的条目顺序；容器位置/格子留给后续（编辑器本体见
@@ -182,6 +293,18 @@ export class SettingsStore {
       // 坏值（非有限数/负数）收口在 HudItems.maskOrDefault；类型不符（手改 prefs）按缺失回默认
       const hudRaw: preferences.ValueType = await store.get(KEY_HUD_ITEMS, s.hudItems);
       s.hudItems = typeof hudRaw === 'number' ? HudItems.maskOrDefault(hudRaw as number) : s.hudItems;
+      // 亮度两项：读侧钳（坏值/越界回默认，0=关闭是合法档不当坏值兜底）
+      const wakeRaw: preferences.ValueType = await store.get(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
+      s.cameraBrightenDelaySec =
+        BrightnessRampMath.cameraBrightenDelaySec(typeof wakeRaw === 'number' ? wakeRaw as number : undefined);
+      const playRaw: preferences.ValueType = await store.get(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
+      s.playerBrightenRampTenths =
+        BrightnessRampMath.playerBrightenRampTenths(typeof playRaw === 'number' ? playRaw as number : undefined);
+      const raRaw: preferences.ValueType = await store.get(KEY_RECORD_AUDIO, s.recordAudioEnabled);
+      s.recordAudioEnabled = typeof raRaw === 'boolean' ? raRaw as boolean : s.recordAudioEnabled;
+      const motionRaw: preferences.ValueType = await store.get(KEY_MOTION, s.motionMode);
+      const mv: string = typeof motionRaw === 'string' ? motionRaw as string : '';
+      s.motionMode = mv === 'PLAIN' || mv === 'FLUENT' || mv === 'LIQUID' ? mv : 'FLUENT';
       // 坏串（类型不符）当缺失 → 默认表；串本身的收口在 HudLayoutTable.decode（坏段丢弃/整表回默认）
       const layoutRaw: preferences.ValueType = await store.get(KEY_HUD_LAYOUT, s.hudLayout);
       s.hudLayout = typeof layoutRaw === 'string' ? layoutRaw as string : '';
@@ -253,6 +376,10 @@ export class SettingsStore {
       await store.put(KEY_LEVEL_BUZZ, s.levelBuzz);
       await store.put(KEY_DEFAULT_REF_LINES, s.refLines);
       await store.put(KEY_HUD_ITEMS, s.hudItems);
+      await store.put(KEY_CAMERA_BRIGHTEN_DELAY_SEC, s.cameraBrightenDelaySec);
+      await store.put(KEY_PLAYER_BRIGHTEN_RAMP_TENTHS, s.playerBrightenRampTenths);
+      await store.put(KEY_MOTION, s.motionMode);
+      await store.put(KEY_RECORD_AUDIO, s.recordAudioEnabled);
       await store.put(KEY_HUD_LAYOUT, s.hudLayout);
       await store.put(KEY_UI_ORIENTATION, UIOrientations.persistValue(s.uiOrientation));
       await store.put(KEY_COMPARE_TICK_MS, s.compareTickMs);

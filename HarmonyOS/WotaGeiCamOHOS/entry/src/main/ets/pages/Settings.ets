@@ -149,6 +149,8 @@ struct Settings {
   @State downloadRead: number = 0;
   @State downloadTotal: number = -1;
   @State versionName: string = '1.0.0';
+  /** 包名（上游 BlockAbout InfoRow set_package 对应面；bundleName 单一真源 = bundleManager） */
+  @State bundleName: string = '';
   /** 版本号读不到时保持 0：任何可比 tag 都算「有新版」——宁可多提示一次，不漏更新 */
   private versionCode: number = 0;
   /** 探测取消探针（检查中点行 = 取消）；编排只在节点前查，置位后最坏再等一个探测超时 */
@@ -260,6 +262,7 @@ struct Settings {
       const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
         bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       this.versionName = info.versionName;
+      this.bundleName = info.appInfo !== undefined ? info.appInfo.name : info.name;
       this.versionCode = info.versionCode;
     } catch (e) {
       this.versionName = '未知';
@@ -796,6 +799,18 @@ struct Settings {
             this.persist();
           })
         this.cardDivider()
+        // 音源（上游 AudioSourcePanel 的 OHOS 面）：麦克风开关 + 内录/蓝牙注明
+        this.switchRow('麦克风录音', '录制时同时录环境下声；关闭 = 纯视频', this.settings.recordAudioEnabled,
+          true, (on: boolean): void => {
+            this.settings.recordAudioEnabled = on;
+            this.persist();
+          })
+        Text('内录（系统声音）与蓝牙音源需屏幕捕获合流，后续批次提供')
+          .fontSize(SettingsVisual.ROW_DESC)
+          .fontColor(SettingsVisual.TEXT_DIM)
+          .width('100%')
+          .padding({ top: 4, bottom: 4 })
+        this.cardDivider()
         this.optionRow('HUD 网格', '', this.settings.grid ? '开' : '关', ['开', '关'],
           this.settings.grid ? 0 : 1,
           (index: number): void => {
@@ -850,6 +865,66 @@ struct Settings {
    * 位运算全部走 `core/RefLine` 的纯函数（不许在这里手写 `mask ^ bit`）。
    * 水平线额外受「显示水平仪与俯仰仪」总开关约束（关掉就没有 roll 读数可画）。
    */
+  /**
+   * 亮度分组（上游 5216e72，docs/plan/29 §5.3）：「启动后自动亮屏」0–10s 步 1（0=关闭，
+   * 默认 1s；触发后 7s 渐变到满）+「起播渐亮」0–3.0s 步 0.5（0=关闭，默认 1.0s）。
+   * 两项都是纯 UI 设置：触发点每次直读，不走默认值应用链。
+   */
+  @Builder
+  private brightnessGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('亮度')
+      Column() {
+        this.optionRow('启动后自动亮屏', '冷启后第一次进取景页：延迟后 7 秒渐变到满亮度；0 = 跟随系统',
+          `${this.settings.cameraBrightenDelaySec}s`,
+          ['0s', '1s', '2s', '3s', '4s', '5s', '6s', '7s', '8s', '9s', '10s'],
+          this.settings.cameraBrightenDelaySec, (index: number): void => {
+            this.settings.cameraBrightenDelaySec = index;
+            this.persist();
+          })
+        this.cardDivider()
+        this.optionRow('起播渐亮', '单播放页首次起播时从当前亮度渐变到满；离开页面恢复',
+          `${(this.settings.playerBrightenRampTenths / 10).toFixed(1)}s`,
+          ['0s', '0.5s', '1.0s', '1.5s', '2.0s', '2.5s', '3.0s'],
+          Math.round(this.settings.playerBrightenRampTenths / 5), (index: number): void => {
+            this.settings.playerBrightenRampTenths = index * 5;
+            this.persist();
+          })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
+  /**
+   * 动效档分组（上游 BlockMotion，motion_mode 键逐字）：简洁=无动画（0 时长直达）、
+   * 流畅=默认 S 曲线、液态=Q 弹弹簧。消费方（红心/弹层动效）读档降级——系统
+   * 「减少动效」无 ArkUI 读取面，登记平台面。
+   */
+  @Builder
+  private motionGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('动效')
+      Column() {
+        this.optionRow('动效档', '简洁=无动画；流畅=默认；液态=Q 弹弹簧（红心/开关）',
+          this.settings.motionMode,
+          ['简洁', '流畅', '液态'],
+          ['PLAIN', 'FLUENT', 'LIQUID'].indexOf(this.settings.motionMode), (index: number): void => {
+            this.settings.motionMode = ['PLAIN', 'FLUENT', 'LIQUID'][index];
+            this.persist();
+          })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
   @Builder
   private refLineGroup() {
     Column({ space: SettingsVisual.HEAD_GAP }) {
@@ -1190,6 +1265,31 @@ struct Settings {
         .onClick((): void => {
           this.onVersionTap();
         })
+        // 包名（上游 BlockAbout InfoRow set_package 对应面）
+        if (this.bundleName !== '') {
+          this.cardDivider()
+          Row() {
+            Text('包名')
+              .fontSize(SettingsVisual.ROW_TITLE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .layoutWeight(1)
+            Text(this.bundleName)
+              .fontSize(SettingsVisual.VALUE)
+              .fontColor(SettingsVisual.BLUE)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 14, bottom: 14 })
+          .alignItems(VerticalAlign.Center)
+        }
+        // 数据边界说明（上游 set_about_note 逐字语义）
+        this.cardDivider()
+        Text('全部数据保存在本机；仅点「检查更新」时联网')
+          .fontSize(SettingsVisual.ROW_DESC)
+          .fontColor(SettingsVisual.TEXT_DIM)
+          .width('100%')
+          .padding({ top: 10, bottom: 4 })
         if (this.devUnlocked) {
           this.cardDivider()
           Row() {
@@ -1219,6 +1319,8 @@ struct Settings {
       this.recordGroup()
       this.sliderSnapGroup()
       this.levelGroup()
+      this.brightnessGroup()
+      this.motionGroup()
       this.refLineGroup()
       this.uiOrientationGroup()
     }
@@ -1247,6 +1349,8 @@ struct Settings {
       this.recordGroup()
       this.sliderSnapGroup()
       this.levelGroup()
+      this.brightnessGroup()
+      this.motionGroup()
       this.refLineGroup()
       this.monitorGroup()
       this.compareTickGroup()

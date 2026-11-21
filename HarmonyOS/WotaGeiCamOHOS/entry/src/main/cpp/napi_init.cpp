@@ -15,6 +15,7 @@
 #include "arc_repair.h"
 #include "avscreen_probe.h"
 #include "clip_exporter.h"
+#include "scene_exporter.h"
 #include "codec_recorder.h"
 #include "gl_render.h"
 
@@ -100,6 +101,34 @@ static napi_value GetInputSurfaceId(napi_env env, napi_callback_info info)
     std::string surfaceId = WotaGlGetInputSurfaceId();
     napi_value result = nullptr;
     napi_create_string_utf8(env, surfaceId.c_str(), surfaceId.size(), &result);
+    return result;
+}
+
+/** YUV 帧源：登记画幅并返回相机面 surfaceId（空串=不可用；页面据此回退原生 RGBA 路） */
+static napi_value EnableYuvFeed(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    int32_t w = 0;
+    int32_t h = 0;
+    if (argc >= 2) {
+        napi_get_value_int32(env, argv[0], &w);
+        napi_get_value_int32(env, argv[1], &h);
+    }
+    const std::string sid = WotaGlEnableYuvFeed(w, h);
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, sid.c_str(), sid.size(), &result);
+    return result;
+}
+
+/** YUV 帧源诊断（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh；Diag 导出定位用） */
+static napi_value GetYuvDiag(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    std::string diag = WotaGlGetYuvDiag();
+    napi_value result = nullptr;
+    napi_create_string_utf8(env, diag.c_str(), diag.size(), &result);
     return result;
 }
 
@@ -257,8 +286,8 @@ static napi_value SetGlowParams(napi_env env, napi_callback_info info)
     double add = 0.0;
     double freq = 0.0;
     double blend = 0.6;
-    uint32_t colorA = 0xFFFF3399u;
-    uint32_t colorB = 0xFF33E6FFu;
+    uint32_t tint = 0xFFFFFFFFu;
+    int32_t colorOnly = 0;
     if (argc >= 10) {
         napi_get_value_int32(env, argv[0], &enabled);
         napi_get_value_double(env, argv[1], &threshold);
@@ -268,16 +297,37 @@ static napi_value SetGlowParams(napi_env env, napi_callback_info info)
         napi_get_value_double(env, argv[5], &add);
         napi_get_value_double(env, argv[6], &freq);
         napi_get_value_double(env, argv[7], &blend);
-        napi_get_value_uint32(env, argv[8], &colorA);
-        napi_get_value_uint32(env, argv[9], &colorB);
+        napi_get_value_uint32(env, argv[8], &tint);
+        napi_get_value_int32(env, argv[9], &colorOnly);
     }
     WotaGlSetGlowParams(enabled, static_cast<float>(threshold), static_cast<float>(soft),
         static_cast<float>(width), static_cast<float>(gain), static_cast<float>(add),
-        static_cast<float>(freq), static_cast<float>(blend), colorA, colorB);
+        static_cast<float>(freq), static_cast<float>(blend), tint, colorOnly);
     return nullptr;
 }
 
 /** Glow 状态串：off 或 on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1> */
+/** 音轨 PCM 喂入：S16LE 交织 48k 立体声；返回 ''=已接收，非空=拒绝原因 */
+static napi_value PushAudioPcm(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_value a=nullptr; napi_create_string_utf8(env,"args",4,&a); return a;
+    }
+    void* data = nullptr;
+    size_t len = 0;
+    napi_status st = napi_get_arraybuffer_info(env, argv[0], &data, &len);
+    if (st != napi_ok || data == nullptr || len == 0) {
+        napi_value b=nullptr; napi_create_string_utf8(env,"buffer",6,&b); return b;
+    }
+    const std::string r = CodecRecorder::Instance().PushAudioPcm(static_cast<const uint8_t*>(data), static_cast<int32_t>(len));
+    napi_value out = nullptr;
+    napi_create_string_utf8(env, r.c_str(), r.size(), &out);
+    return out;
+}
+
 static napi_value GetGlowStatus(napi_env env, napi_callback_info info)
 {
     (void)info;
@@ -513,6 +563,55 @@ static napi_value CancelClipExport(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+/** 后渲染导出：inFd/inSize/outFd/startMs/endMs/audioOrdinal/glowSpec/denoiseOn；返回 ''=已起跑 */
+static napi_value StartSceneExport(napi_env env, napi_callback_info info)
+{
+    size_t argc = 8;
+    napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 6) {
+        return MakeString(env, "args");
+    }
+    int32_t inFd = -1;
+    int64_t inSize = 0;
+    int32_t outFd = -1;
+    int64_t startMs = 0;
+    int64_t endMs = 0;
+    int32_t audioOrdinal = -1;
+    char glowBuf[1024] = {0};
+    size_t glowLen = 0;
+    int32_t denoiseOn = 0;
+    napi_get_value_int32(env, argv[0], &inFd);
+    napi_get_value_int64(env, argv[1], &inSize);
+    napi_get_value_int32(env, argv[2], &outFd);
+    napi_get_value_int64(env, argv[3], &startMs);
+    napi_get_value_int64(env, argv[4], &endMs);
+    napi_get_value_int32(env, argv[5], &audioOrdinal);
+    if (argc >= 7) {
+        napi_get_value_string_utf8(env, argv[6], glowBuf, sizeof(glowBuf) - 1, &glowLen);
+    }
+    if (argc >= 8) {
+        napi_get_value_int32(env, argv[7], &denoiseOn);
+    }
+    return MakeString(env, wota::SceneExporter::Instance().Start(inFd, inSize, outFd,
+        startMs, endMs, audioOrdinal, std::string(glowBuf), denoiseOn));
+}
+
+/** idle | running:<pct> | done:<id> | cancel:<detail> | failed:<reason>（cancel 是独立终态） */
+static napi_value GetSceneExportStatus(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    return MakeString(env, wota::SceneExporter::Instance().Status());
+}
+
+static napi_value CancelSceneExport(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    (void)env;
+    wota::SceneExporter::Instance().Cancel();
+    return nullptr;
+}
+
 /** 只读轨探测："videoCount,audioCount"；失败 "err:<code>" */
 static napi_value ProbeClipTracks(napi_env env, napi_callback_info info)
 {
@@ -633,8 +732,8 @@ static napi_value SetHistogramEnabled(napi_env env, napi_callback_info info)
 /** 直方图快照 → Int32Array(192)（3×64 计数 R/G/B）；无样本返回 null（ArkTS 侧按无数据绘制） */
 static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
 {
-    int32_t bins[192];
-    if (!WotaGlGetHistogramSnapshot(bins, 192)) {
+    int32_t bins[256];
+    if (!WotaGlGetHistogramSnapshot(bins, 256)) {
         napi_value nullValue = nullptr;
         napi_get_null(env, &nullValue);
         return nullValue;
@@ -646,7 +745,7 @@ static napi_value GetHistogramSnapshot(napi_env env, napi_callback_info info)
         memcpy(data, bins, sizeof(bins));
     }
     napi_value typed = nullptr;
-    napi_create_typedarray(env, napi_int32_array, 192, out, 0, &typed);
+    napi_create_typedarray(env, napi_int32_array, 256, out, 0, &typed);
     return typed;
 }
 
@@ -657,6 +756,8 @@ static napi_value Init(napi_env env, napi_value exports)
     // 不能因为 unwrap 失败就把 getInputSurfaceId 一起丢掉
     napi_property_descriptor desc[] = {
         {"getInputSurfaceId", nullptr, GetInputSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"enableYuvFeed", nullptr, EnableYuvFeed, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getYuvDiag", nullptr, GetYuvDiag, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getNativeImageError", nullptr, GetNativeImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayGeometry", nullptr, SetDisplayGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayFit", nullptr, SetDisplayFit, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -670,6 +771,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"setFrostEnabled", nullptr, SetFrostEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setGlowParams", nullptr, SetGlowParams, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getGlowStatus", nullptr, GetGlowStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"pushAudioPcm", nullptr, PushAudioPcm, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDenoiseLevel", nullptr, SetDenoiseLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startGpuRecord", nullptr, StartGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopGpuRecord", nullptr, StopGpuRecord, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -686,6 +788,9 @@ static napi_value Init(napi_env env, napi_value exports)
         {"getAvScreenProbeStatus", nullptr, GetAvScreenProbeStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelAvScreenProbe", nullptr, CancelAvScreenProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startClipExport", nullptr, StartClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startSceneExport", nullptr, StartSceneExport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getSceneExportStatus", nullptr, GetSceneExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelSceneExport", nullptr, CancelSceneExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getClipExportStatus", nullptr, GetClipExportStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancelClipExport", nullptr, CancelClipExport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeClipTracks", nullptr, ProbeClipTracks, nullptr, nullptr, nullptr, napi_default, nullptr},

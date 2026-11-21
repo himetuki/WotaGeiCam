@@ -4,6 +4,10 @@
  * getNativeImageError：NativeImage 失败原因（空串 = 正常/尚未失败；create-failed / set-listener-failed / get-surface-id-failed）。
  */
 export const getInputSurfaceId: () => string;
+/** YUV 帧源（设备仅 YUV_420_SP 时）：画幅登记 + 取原始缓冲自转 RGBA；返回相机面 surfaceId，空串=不可用 */
+export const enableYuvFeed: (width: number, height: number) => string;
+/** YUV 帧源诊断（mode/acq/fail/err/fed/ffail/ferr/fmt/stride/size/wh）；Diag 导出定位用 */
+export const getYuvDiag: () => string;
 export const getNativeImageError: () => string;
 export const setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
 /** WLB：上屏 letterbox 等比收缩因子（NDC 半域，1,1 = 铺满；编码面恒满幅） */
@@ -20,16 +24,19 @@ export const uploadCurveLut: (data: ArrayBuffer) => boolean;
 export const setFrostEnabled: (on: boolean) => void;
 /**
  * Glow 光晕（2026-10-28 批，上游 core/Glow.kt + camera/GlowBlurChain.kt）：
- * - setGlowParams：enabled 0/1；threshold 0..1、soft 0..0.5、width 0..0.2（RT 短边单位）、
- *   gain 0..4、add 0..1、freq 0..64、blend 0..1；colorA/colorB 为 32 位 ARGB 数值。
+ * - setGlowParams：enabled 0/1；threshold 0.6..1.0（2026-10-29 口径 60~100%）、soft 0..0.5、
+ *   width 0..0.2（RT 短边单位）、gain 0..4、add 0..1、freq 0..64、blend 0..1；
+ *   tint=ARGB（白 0xFFFFFFFF = 不改色，跟随原色）、colorOnly 0/1（1 = 仅色盘颜色）。
  *   native 侧越域钳制、NaN/Inf 回落出厂值（与上游 sanitize 同域）；打开动作给停用链一次重试。
  * - getGlowStatus：`off`，或 `on:<broken0/1>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped0/1>`；
  *   scale = 1/2/4（像素率 ≤40M/≤150M/其余），fps 未知按 30，rt 未建时两位为 0。
  * - setDenoiseLevel：0=关 / 1=完整核（9 采样）/ 2=轻量核（5 采样）；0 时槽键归零、下一帧回收变体。
  */
 export const setGlowParams: (enabled: number, threshold: number, soft: number, width: number,
-  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+  gain: number, add: number, freq: number, blend: number, tint: number, colorOnly: number) => void;
 export const getGlowStatus: () => string;
+/** 录制音轨 PCM 喂入（S16LE 交织 48k 立体声）；''=已接收，非空=拒绝原因 */
+export const pushAudioPcm: (pcm: ArrayBuffer) => string;
 export const setDenoiseLevel: (level: number) => void;
 /**
  * GL-4 GPU 录制最小切片（视频-only、单段）：
@@ -78,6 +85,11 @@ export const getArcEffectiveMode: () => number;
 export const startClipExport: (inFd: number, inSize: number, outFd: number, startMs: number,
   endMs: number, audioOrdinal: number, audioShiftUs?: number) => string;
 export const getClipExportStatus: () => string;
+/** 后渲染导出（决策口径对拍 player/SceneExportPlan.ets；glowSpec = encodeGlow 单串；取消是独立终态 cancel:） */
+export const startSceneExport: (inFd: number, inSize: number, outFd: number, startMs: number,
+  endMs: number, audioOrdinal: number, glowSpec: string, denoiseOn: number) => string;
+export const getSceneExportStatus: () => string;
+export const cancelSceneExport: () => void;
 export const cancelClipExport: () => void;
 export const probeClipTracks: (inFd: number, inSize: number) => string;
 

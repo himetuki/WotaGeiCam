@@ -106,9 +106,14 @@ export class PreviewEngine {
         new Size(p.size.width, p.size.height));
       const recordAnchor: Size | undefined = slot.ability.videoSizes[0];
       let chosen: Size | undefined = pickDirectPreviewSize(candidates, recordAnchor ?? new Size(0, 0), viewW, viewH);
-      let profile: camera.Profile | undefined = profileForSize(previewProfiles, chosen);
-      if (profile === undefined && previewProfiles.length > 0) {
-        profile = previewProfiles[0]; // 兜底：挑选未命中时退预览表首档，宁可出画面不可黑屏
+      // 像素格式优先（2026-11-02 真机取证修复，与 GlCameraEngine.previewProfileFor 同口径）：
+      // OH_NativeImage 只能吃 RGBA_8888；同尺寸 YUV_420_SP 档被选中即出「灰渐变+彩条」花屏
+      const rgbaProfiles: Array<camera.Profile> = previewProfiles.filter((p: camera.Profile): boolean =>
+        p.format === camera.CameraFormat.CAMERA_FORMAT_RGBA_8888);
+      const profilePool: Array<camera.Profile> = rgbaProfiles.length > 0 ? rgbaProfiles : previewProfiles;
+      let profile: camera.Profile | undefined = profileForSize(profilePool, chosen);
+      if (profile === undefined && profilePool.length > 0) {
+        profile = profilePool[0]; // 兜底：挑选未命中时退预览表首档，宁可出画面不可黑屏
         chosen = new Size(profile.size.width, profile.size.height);
         Diag.w(WotaTag.ABILITY, `preview: profile pick fallback to ${chosen.width}x${chosen.height}`);
       }

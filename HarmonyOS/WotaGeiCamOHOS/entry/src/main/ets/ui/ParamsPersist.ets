@@ -20,13 +20,16 @@
  * - `focusPoint`：瞬时点按态，冷启不应钉死对焦框；
  * - `curve`/`arc_convert_mode`：各有专属直写链，避免第二写入方。
  *
- * 键名是**持久化契约**：24 个键逐字等于上游 `WotaSettings.KEY_*` 常量值；`SettingsStore` 的
+ * 键名是**持久化契约**：26 个键逐字等于上游 `WotaSettings.KEY_*` 常量值（上游 r42 起 32 键
+ * 的差集=denoise/marker/glow/tone 各批尚未移植，登记）；`SettingsStore` 的
  * 迁移读/写也复用这里的常量（一个字段只有一个权威键名）。
  */
 import {
   AeMode, AfMode, ArcMergeDeadband, Flash, FrameEffect, PeakingColor, Size, Stabilize,
   WotaTiers, WbPreset
 } from '../core/Constants';
+import { ExposureCorrection } from '../core/ExposureCorrection';
+import { MarkerLineColor, MarkerLines } from '../core/MarkerLines';
 import { LensType } from '../core/LensSlot';
 import { ParamState, WotaParams } from '../core/WotaParams';
 
@@ -56,6 +59,12 @@ export const KEY_DEFAULT_PEAKING_STRENGTH: string = 'default_peaking_strength';
 export const KEY_DEFAULT_PEAKING_COLOR: string = 'default_peaking_color';
 export const KEY_DEFAULT_LENS: string = 'default_lens';
 export const KEY_DEFAULT_ARC_MERGE_DEADBAND: string = 'default_arc_merge_deadband';
+// 2026-11-01：等号档曝光纠偏两项（自动开关默认开 + 手动滑杆值）——上游 r42 对齐
+export const KEY_CORRECTION_AUTO: string = 'correction_auto';
+// 2026-10-27/28：站位线**间距与颜色**入档（**线数刻意不入档**——「启动时取景器干净无线」）
+export const KEY_DEFAULT_MARKER_SPREAD: string = 'default_marker_spread';
+export const KEY_DEFAULT_MARKER_COLOR: string = 'default_marker_color';
+export const KEY_CORRECTION_MANUAL_NS: string = 'correction_manual_ns';
 
 /** 入档字段的键白名单（顺序照上游 `ParamsPersist.KEYS`；单测手写清单双向核对）。 */
 export const PARAMS_KEYS: Array<string> = [
@@ -82,7 +91,11 @@ export const PARAMS_KEYS: Array<string> = [
   KEY_DEFAULT_PEAKING_STRENGTH,
   KEY_DEFAULT_PEAKING_COLOR,
   KEY_DEFAULT_LENS,
-  KEY_DEFAULT_ARC_MERGE_DEADBAND
+  KEY_DEFAULT_ARC_MERGE_DEADBAND,
+  KEY_CORRECTION_AUTO,
+  KEY_CORRECTION_MANUAL_NS,
+  KEY_DEFAULT_MARKER_SPREAD,
+  KEY_DEFAULT_MARKER_COLOR
 ];
 
 /**
@@ -467,10 +480,12 @@ export class ParamsPersist {
    * 机型域钳制不在本函数：起镜后 `applyAbility` 仍按能力收口。
    */
   static restore(prefs: ParamsPrefs, params: WotaParams): void {
-    // ① 帧率：产品档位区间钳（与上游 applyDefaults 同一口径）
+    // ① 帧率：产品档位区间钳（与上游 applyDefaults 同一口径）。走 setFps 单一写入者
+    //    （上游 docs/plan/28 §4.4）：冷启恢复时能力快照还没建（applyAbility 未跑），
+    //    行为与直写等价；留单一入口是为了「所有 fps 写入点都过 setFps」这条守卫不漏例外
     const fps: number = clampInt(prefs.getInt(KEY_DEFAULT_FPS, 25),
       WotaTiers.FPS[0], WotaTiers.FPS[WotaTiers.FPS.length - 1]);
-    params.fps.value = withValue(params.fps.value, fps);
+    params.setFps(withValue(params.fps.value, fps));
     // ② 快门（ns）：>0 才套；坏值跳过 = 维持出厂默认（最终设备域由 applyAbility 收口）
     const shutterNs: number = prefs.getInt(KEY_DEFAULT_SHUTTER_NS, 40_000_000);
     if (shutterNs > 0) {
@@ -533,6 +548,18 @@ export class ParamsPersist {
       prefs.getString(KEY_DEFAULT_LENS, 'WIDE'), LensType.WIDE) as LensType;
     // ⑯ 补弧差分死区：走总线 setter（同步发布给 GL/离线修复的只读快照），坏值/越界钳回 0..32
     params.setArcMergeDeadband(prefs.getInt(KEY_DEFAULT_ARC_MERGE_DEADBAND, ArcMergeDeadband.DEFAULT));
+    // ⑰ 等号档曝光纠偏（2026-11-01 用户定版，上游 r42）：自动开关布尔键；手动滑杆值钳回
+    //    产品域（0..8ms——负值区 2026-11-01 裁决去掉）。手改 prefs 的脏值最多回到域边界
+    params.exposureCorrectionAuto.value = prefs.getBool(KEY_CORRECTION_AUTO, true);
+    params.exposureCorrectionManualNs.value = ExposureCorrection.clampManualNs(
+      prefs.getInt(KEY_CORRECTION_MANUAL_NS, 0));
+    // ⑱ 站位线（上游 ⑱，2026-10-27）：**只恢复间距与颜色，线数不恢复**——用户口径「启动时
+    //    取景器能干净无线」，线数恒停在出厂 0（= 关），由用户当场用 +/− 调；间距越界钳回
+    //    产品域，颜色坏名回黄（存储值是枚举名，与上游 enum.name 逐字同域）
+    params.markerSpread.value =
+      MarkerLines.clampSpread(prefs.getFloat(KEY_DEFAULT_MARKER_SPREAD, MarkerLines.DEFAULT_SPREAD));
+    params.markerColor.value = MarkerLineColor.fromName(
+      prefs.getString(KEY_DEFAULT_MARKER_COLOR, 'YELLOW'));
   }
 
   /** LOCK 归一：写 `default_ae_mode` 时 LOCK 一律存/恢复为 AUTO（锁是瞬时态）。 */
@@ -582,6 +609,10 @@ export class ParamsPersistSession {
   private shPeakC: PeakingColor = PeakingColor.RED;
   private shLens: LensType = LensType.WIDE;
   private shArcDeadband: number = 0;
+  private shCorrectionAuto: boolean = true;
+  private shCorrectionManualNs: number = 0;
+  private shMarkerSpread: number = MarkerLines.DEFAULT_SPREAD;
+  private shMarkerColor: MarkerLineColor = MarkerLineColor.YELLOW;
 
   constructor(prefs: ParamsPrefs, params: WotaParams) {
     this.prefs = prefs;
@@ -620,6 +651,10 @@ export class ParamsPersistSession {
     this.shPeakC = this.params.peakingColor.value;
     this.shLens = this.params.lens.value;
     this.shArcDeadband = this.params.arcMergeDeadband.value;
+    this.shCorrectionAuto = this.params.exposureCorrectionAuto.value;
+    this.shCorrectionManualNs = this.params.exposureCorrectionManualNs.value;
+    this.shMarkerSpread = this.params.markerSpread.value;
+    this.shMarkerColor = this.params.markerColor.value;
   }
 
   /**
@@ -654,6 +689,10 @@ export class ParamsPersistSession {
     const peakC: PeakingColor = this.params.peakingColor.value;
     const lens: LensType = this.params.lens.value;
     const arcDeadband: number = this.params.arcMergeDeadband.value;
+    const correctionAuto: boolean = this.params.exposureCorrectionAuto.value;
+    const correctionManualNs: number = this.params.exposureCorrectionManualNs.value;
+    const markerSpread: number = this.params.markerSpread.value;
+    const markerColor: MarkerLineColor = this.params.markerColor.value;
 
     // 无差异：不 put、不 commit（一次空落盘也不做；影子与总线本来就一致）
     const changed: boolean = fps !== this.shFps || shutter !== this.shShutter ||
@@ -664,7 +703,9 @@ export class ParamsPersistSession {
       diopter !== this.shDiopter || size.width !== this.shSizeW || size.height !== this.shSizeH ||
       effect !== this.shEffect || zebraT !== this.shZebraT || zebraD !== this.shZebraD ||
       peakS !== this.shPeakS || peakC !== this.shPeakC || lens !== this.shLens ||
-      arcDeadband !== this.shArcDeadband;
+      arcDeadband !== this.shArcDeadband ||
+      correctionAuto !== this.shCorrectionAuto || correctionManualNs !== this.shCorrectionManualNs ||
+      markerSpread !== this.shMarkerSpread || markerColor.enumName() !== this.shMarkerColor.enumName();
     if (!changed) {
       return true;
     }
@@ -742,6 +783,19 @@ export class ParamsPersistSession {
     if (arcDeadband !== this.shArcDeadband) {
       ok = this.prefs.putInt(KEY_DEFAULT_ARC_MERGE_DEADBAND, Math.trunc(arcDeadband)) && ok;
     }
+    if (correctionAuto !== this.shCorrectionAuto) {
+      ok = this.prefs.putBool(KEY_CORRECTION_AUTO, correctionAuto) && ok;
+    }
+    if (correctionManualNs !== this.shCorrectionManualNs) {
+      // 上游是 putLong；本侧 ParamsPrefs 单 number 型且纠偏域 0..8_000_000 < 2^31，int 等价（登记）
+      ok = this.prefs.putInt(KEY_CORRECTION_MANUAL_NS, Math.trunc(correctionManualNs)) && ok;
+    }
+    if (markerSpread !== this.shMarkerSpread) {
+      ok = this.prefs.putFloat(KEY_DEFAULT_MARKER_SPREAD, markerSpread) && ok;
+    }
+    if (markerColor.enumName() !== this.shMarkerColor.enumName()) {
+      ok = this.prefs.putString(KEY_DEFAULT_MARKER_COLOR, markerColor.enumName()) && ok;
+    }
 
     if (!ok) {
       return false; // 写内存失败：影子保持旧值，下次 flush 重试
@@ -775,6 +829,10 @@ export class ParamsPersistSession {
     this.shPeakC = peakC;
     this.shLens = lens;
     this.shArcDeadband = arcDeadband;
+    this.shCorrectionAuto = correctionAuto;
+    this.shCorrectionManualNs = correctionManualNs;
+    this.shMarkerSpread = markerSpread;
+    this.shMarkerColor = markerColor;
     return true;
   }
 }

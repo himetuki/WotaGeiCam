@@ -72,3 +72,52 @@ test('普通录制不污染pendingRight', (): void => {
   assertFalse(comparePractice.deliver(10), '普通录制拒绝');
   assertEq(5, comparePractice.pendingRightId ?? -1, '原记账保持不变');
 });
+
+test('接线：分屏对比动线三点在位（对比页发起/录制页消费/分屏面板）', () => {
+  const { existsSync, readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
+  let dir: string = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(resolve(dir, 'entry/src/main/ets/core/CameraAbility.ets'))) {
+      break;
+    }
+    dir = resolve(dir, '..');
+  }
+  const compare: string = readFileSync(resolve(dir, 'entry/src/main/ets/pages/Compare.ets'), 'utf8');
+  const camera: string = readFileSync(resolve(dir, 'entry/src/main/ets/pages/Camera.ets'), 'utf8');
+  assertTrue(compare.indexOf('comparePractice.primeWith(') >= 0, '对比页「对着练」发起');
+  assertTrue(compare.indexOf('对着练') >= 0);
+  assertTrue(camera.indexOf('comparePractice.takeLeftId()') >= 0, '录制页首次组合消费');
+  assertTrue(camera.indexOf('splitOn = true') >= 0, '消费即切分屏');
+  assertTrue(camera.indexOf('实时对比播放') >= 0 && camera.indexOf('退出分屏') >= 0, '分屏面板两态');
+  assertTrue(camera.indexOf('x: 0.5, y: 0.5, centerX: 0, centerY: '50%'') >= 0,
+    '左半压缩 = 变换（布局不重排，上游 graphicsLayer 同式）');
+  assertTrue(camera.indexOf('AbRange(0, dur, true)') >= 0, '参考片整段循环');
+});
+
+test('练习回归路径通道：armed 才记账、取即清、普通录制拒绝', () => {
+  resetPractice();
+  assertFalse(comparePractice.deliverPath('/x/rec.mp4'), '未武装拒绝');
+  comparePractice.primeWith(42);
+  assertTrue(comparePractice.deliverPath('/x/rec.mp4'), '练习动线记账');
+  assertEq('/x/rec.mp4', comparePractice.takePendingRightPath() ?? '', '取走路径');
+  assertNull(comparePractice.takePendingRightPath(), '取即清');
+});
+
+test('接线：双摄并发探测两钉（getCameraConcurrentInfos 查询 + 分屏 chip 门控）', () => {
+  const { existsSync, readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
+  let dir: string = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(resolve(dir, 'entry/src/main/ets/core/CameraAbility.ets'))) {
+      break;
+    }
+    dir = resolve(dir, '..');
+  }
+  const lens: string = readFileSync(resolve(dir, 'entry/src/main/ets/camera/KitLens.ets'), 'utf8');
+  const camera: string = readFileSync(resolve(dir, 'entry/src/main/ets/pages/Camera.ets'), 'utf8');
+  assertTrue(lens.indexOf('getCameraConcurrentInfos') >= 0, '并发探测走官方 API');
+  assertTrue(camera.indexOf('probeConcurrentPartners') >= 0, '分屏进入时探一次');
+  assertTrue(camera.indexOf('splitLensSupported') >= 0 && camera.indexOf('本机不支持双摄并发') >= 0,
+    'chip 可用态门控 + 不支持说明');
+});

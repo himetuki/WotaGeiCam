@@ -30,6 +30,10 @@ interface ClipNativeLib {
     endMs: number, audioOrdinal: number, audioShiftUs: number) => string;
   getClipExportStatus: () => string;
   cancelClipExport: () => void;
+  startSceneExport: (inFd: number, inSize: number, outFd: number, startMs: number,
+    endMs: number, audioOrdinal: number, glowSpec: string, denoiseOn: number) => string;
+  getSceneExportStatus: () => string;
+  cancelSceneExport: () => void;
   probeClipTracks: (inFd: number, inSize: number) => string;
 }
 
@@ -307,6 +311,140 @@ export class ClipExporter {
       ClipExporter.closeQuietly(inFd);
     }
   }
+
+  /**
+   * 后渲染导出（scene_exporter.cpp；决策口径 = player/SceneExportPlan.ets）。
+   * fd/超时/取消面与 exportClip 同构；状态机差异：done:<id>（无 path 后缀）、
+   * cancel:<detail>（独立终态，a0ef71d 口径——不映射成普通失败值）。
+   * 无 .drops.json sidecar（后渲染不经打点平移链）⇒ sidecarOk 恒 true。
+   */
+  static async exportScene(ctx: common.Context, clip: VideoClip, range: ClipRange,
+    audioOrdinal: number, glowSpec: string, denoiseOn: boolean,
+    onProgress: (percent: number) => void): Promise<ClipExportResult> {
+    const durationMs: number = clip.durationMs > 0 ? clip.durationMs :
+      Math.max(range.startMs, range.endMs);
+    const valid: ClipRange | undefined = normalize(range.startMs, range.endMs, durationMs);
+    if (valid === undefined) {
+      return ClipExporter.failed('', 'RANGE', false);
+    }
+    let inFd: number = -1;
+    let outFd: number = -1;
+    let outPath: string = '';
+    let completed: boolean = false;
+    try {
+      const lib: ClipNativeLib = await ClipExporter.ensureLib();
+      ClipExporter.reapPendingFds();
+      const stat: fileIo.Stat = fileIo.statSync(clip.path);
+      if (stat.size <= 0) {
+        return ClipExporter.failed('', 'OPEN', false);
+      }
+      inFd = fileIo.openSync(clip.path, fileIo.OpenMode.READ_ONLY).fd;
+      outPath = ClipExporter.uniqueOutputPath(ctx, clipNameOf(clip.name, Date.now()));
+      outFd = fileIo.openSync(outPath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC).fd;
+      onProgress(0);
+      const startError: string = lib.startSceneExport(inFd, stat.size, outFd, valid.startMs,
+        valid.endMs, audioOrdinal < 0 ? -1 : audioOrdinal, glowSpec, denoiseOn ? 1 : 0);
+      if (startError !== '') {
+        ClipExporter.closeQuietly(outFd);
+        outFd = -1;
+        ClipExporter.closeQuietly(inFd);
+        inFd = -1;
+        VideoStore.discard(outPath);
+        return ClipExporter.failed(outPath, startError, false);
+      }
+
+      let status: string = '';
+      let timeoutAt: number = 0;
+      let cancelAt: number = 0;
+      const deadline: number = Date.now() + EXPORT_TIMEOUT_MS;
+      for (;;) {
+        status = lib.getSceneExportStatus();
+        ClipExporter.reapPendingFds();
+        if (status.indexOf('running:') === 0) {
+          const pct: number = Number(status.substring('running:'.length));
+          if (Number.isFinite(pct)) {
+            onProgress(Math.min(99, Math.max(0, Math.round(pct))));
+          }
+        } else if (status.indexOf('done:') === 0 || status.indexOf('cancel:') === 0 ||
+          status.indexOf('failed:') === 0) {
+          break;
+        } else if (status === 'idle') {
+          status = 'failed:idle';
+          break;
+        }
+        const now: number = Date.now();
+        if (now > deadline && timeoutAt === 0) {
+          timeoutAt = now;
+          cancelAt = now;
+          lib.cancelSceneExport();
+        } else if (timeoutAt > 0 && now - cancelAt > CANCEL_GRACE_MS) {
+          const lingerDeadline: number = Date.now() + NATIVE_LINGER_MS;
+          let nativeLeft: boolean = false;
+          for (;;) {
+            let probe: string = '';
+            try {
+              probe = lib.getSceneExportStatus();
+            } catch (e) {
+              probe = '';
+            }
+            if (probe.indexOf('running:') !== 0) {
+              nativeLeft = true;
+              break;
+            }
+            if (Date.now() > lingerDeadline) {
+              break;
+            }
+            await delayMs(POLL_MS);
+          }
+          if (nativeLeft) {
+            status = 'failed:timeout';
+            break;
+          }
+          ClipExporter.parkPendingFds(outFd, inFd, outPath);
+          outFd = -1;
+          inFd = -1;
+          status = 'failed:timeout';
+          break;
+        }
+        await delayMs(POLL_MS);
+      }
+
+      ClipExporter.closeQuietly(outFd);
+      outFd = -1;
+      ClipExporter.closeQuietly(inFd);
+      inFd = -1;
+      completed = status.indexOf('done:') === 0;
+
+      if (status.indexOf('cancel:') === 0) {
+        VideoStore.discard(outPath);
+        return ClipExporter.failed(outPath, 'CANCELLED', true);
+      }
+      if (status.indexOf('failed:') === 0) {
+        VideoStore.discard(outPath);
+        return ClipExporter.failed(outPath, status.substring('failed:'.length), false);
+      }
+      if (!completed) {
+        VideoStore.discard(outPath);
+        return ClipExporter.failed(outPath, 'UNKNOWN', false);
+      }
+      let sizeBytes: number = 0;
+      try {
+        sizeBytes = fileIo.statSync(outPath).size;
+      } catch (e) {
+        sizeBytes = 0;
+      }
+      return new ClipExportResult(true, outPath, 0, 0, 0, '', false, false, sizeBytes, true);
+    } catch (e) {
+      ClipExporter.closeQuietly(outFd);
+      ClipExporter.closeQuietly(inFd);
+      if (outPath !== '') {
+        VideoStore.discard(outPath);
+      }
+      return ClipExporter.failed(outPath, `${e}`, false);
+    }
+  }
+
 
   /** 取消当前 native 导出（无导出 = no-op；必须在 probe/export 之后加载过桥） */
   static cancel(): void {

@@ -63,7 +63,7 @@ import { GlRecordLib, GlRecorder } from '../camera/GlRecorder';
 import { requestCameraPermission } from '../camera/PermGate';
 import { CurveStack } from '../core/CurveModel';
 import { ContentPoint, PreviewBox, PreviewFit } from '../core/PreviewFit';
-import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size, WotaTiers } from '../core/Constants';
+import { AeMode, AfMode, ArcMergeDeadband, FrameEffect, HudItem, HudItems, PeakingColor, Size, WotaTiers, segmentCapApproached } from '../core/Constants';
 import { CameraAbility, FpsDecision, forcedShutterOutOfRange } from '../core/CameraAbility';
 import { ParamState, WotaParams } from '../core/WotaParams';
 import { ApplyReport } from '../camera/RequestApplier';
@@ -86,12 +86,21 @@ import { FlushScheduler, ParamsFlushThrottle } from '../ui/ParamsFlushThrottle';
 import { LevelReading, LevelSensor } from '../camera/LevelSensor';
 import { AttitudeMeter } from '../ui/AttitudeMeter';
 import { RefLineOverlay } from '../ui/RefLineOverlay';
+import { MarkerLineOverlay } from '../ui/MarkerLineOverlay';
+import { MarkerLineColor, MarkerLines } from '../core/MarkerLines';
+import { comparePractice } from '../player/ComparePractice';
+import { PlayerEngine } from '../player/PlayerEngine';
+import { MediaRepo, VideoClip } from '../media/MediaRepo';
+import { ClipFilter } from '../media/MediaTag';
+import { AbRange } from '../player/PlayerModel';
 import { RefLine, RefLineType } from '../core/RefLine';
 import { HUD_ROW_GAP_DP, hudPerRowFor, hudRoomDp } from '../core/HudMetrics';
 import { HudEntry, HudLayoutTable, HudZone, hudRowGroups } from '../core/HudLayout';
 import { UserSettings } from '../core/UserSettings';
 import { FocusTapArbiter, FocusTapMath } from '../core/FocusTap';
 import { TapPoint } from '../core/Constants';
+import { LowFpsHint } from '../core/LowFpsWatch';
+import { WindowBrightness } from '../ui/WindowBrightness';
 import { HudSpec } from '../ui/HudSpec';
 import { HudColor, HudShape, HudSpace, HudTouch, HudType, PageColor } from '../ui/HudTokens';
 import { HudPill } from '../ui/HudPill';
@@ -114,6 +123,8 @@ import { LensSlot } from '../core/LensSlot';
 
 interface GlLibApi extends GlRecordLib {
   getInputSurfaceId: () => string;
+  enableYuvFeed: (width: number, height: number) => string;
+  getYuvDiag: () => string;
   getNativeImageError: () => string;
   setDisplayGeometry: (sensorDeg: number, displayDeg: number, mirrored: boolean) => void;
   setDisplayFit: (fitX: number, fitY: number) => void;
@@ -128,7 +139,7 @@ interface GlLibApi extends GlRecordLib {
   getHistogramSnapshot: () => Int32Array | undefined;
   /** 光晕（追赶轮 Glow 接线）：参数十连发 + 运行期状态串（'off' | 'on:broken:scale:inW:inH:fps:rtW:rtH:clamped'） */
   setGlowParams: (enabled: number, threshold: number, soft: number, width: number, gain: number,
-    add: number, freq: number, blend: number, colorA: number, colorB: number) => void;
+    add: number, freq: number, blend: number, tint: number, colorOnly: number) => void;
   getGlowStatus: () => string;
   /** 画面降噪核档位：0 关 / 1 完整核 / 2 轻量核（台侧按负载分档，见 core/Denoise.ets） */
   setDenoiseLevel: (level: number) => void;
@@ -136,6 +147,9 @@ interface GlLibApi extends GlRecordLib {
 
 const POLL_INTERVAL_MS: number = 100;
 const POLL_TIMEOUT_MS: number = 5000;
+/** 冷启亮屏闸（进程内一次）：上游「只在冷启后第一次进入取景页触发」的进程内闸 */
+let camBrightenArmed: boolean = true;
+
 const RECORD_WIDTH_1080: number = 1920;
 const RECORD_HEIGHT_1080: number = 1080;
 const RECORD_WIDTH_4K: number = 3840;
@@ -154,6 +168,8 @@ const PILL_DENOISE_ID: string = 'pill_denoise';
 const GLOW_STATUS_INTERVAL_MS: number = 500;
 /** 竖屏右上第三枚圆钮（曲线编辑入口；回归修复——横屏左侧 float 已有 RGB 曲线，竖屏此前无入口） */
 const PILL_CURVE_ID: string = 'pill_curve';
+/** 站位线圆钮（右上簇第四枚；控件浮层/选色浮层的锚点实测 id） */
+const MARKER_BTN_ID: string = 'marker_btn';
 
 /**
  * native 状态串 → core.GlowStatus（纯数据；enabled 由用户开关给，native 只报链侧事实）。
@@ -407,6 +423,40 @@ struct CameraPage {
   @State freeMb: number = -1;
   @State zoomLabel: string = '1x';
   @State flashOn: boolean = false;
+  /** 闪光模式（上游 FlashPill 四模式摊开弹层：0 关 1 自动 2 开 3 常亮；Dock 点按循环保留） */
+  @State flashMode: number = 0;
+  // ---- 站位线（上游 CameraScreen 圆钮 + 两浮层，2026-10-27 交互定版）----
+  /** 控件浮层（+/线数/− + 间距滑杆；无卡片底透明）开合 */
+  @State markerPanelOpen: boolean = false;
+  /** 选色浮层（长按圆钮；6 色圆片）开合 */
+  @State markerColorOpen: boolean = false;
+  /** 圆钮窗口矩形（px；getRectangleById 实测，禁手算坐标） */
+  private markerAnchor: PillRect = { left: 0, top: 0, right: 0, bottom: 0 };
+  /** 浮层放置点（vp；贴圆钮右下、不越屏右缘） */
+  @State markerPanelX: number = 0;
+  @State markerPanelY: number = 0;
+  /** 站位线三参数镜像（@State 原语：StateFlow 变化不触发重渲染，订阅里刷新） */
+  @State markerCount: number = 0;
+  @State markerSpread: number = 0.6;
+  @State markerColorArgb: number = 0xFFE6C700;
+  // ---- 分屏（上游 SplitPanel/SplitComparePlayer 的 OHOS 面，用户第 3 项）----
+  /** 分屏开关：完整录制页压到左半屏（只做变换、布局不重排），右侧模式面板/对比播放器 */
+  @State splitOn: boolean = false;
+  /** 右侧面板态：false = 模式列表；true = 实时对比播放器 */
+  @State splitCompareOn: boolean = false;
+  /** 对比播放器当前参考片名（'' = 未挂片） */
+  @State splitRefTitle: string = '';
+  /** 参考片选择列表（内嵌小面板，来自媒体库全部片） */
+  @State splitPickOpen: boolean = false;
+  @State splitClips: Array<VideoClip> = [];
+  /** 另镜头录制可用态（双摄并发探测；空=本机不支持并发，chip 灰置+说明） */
+  @State splitLensSupported: boolean = false;
+  private splitPlayer: PlayerEngine = new PlayerEngine();
+  private splitXc: XComponentController = new XComponentController();
+  private splitRef: VideoClip | undefined = undefined;
+  private splitSurfaceReady: boolean = false;
+  private splitRefId: number = -1;
+  private markerDensity: number = 1;
   /** 画面降噪开关（settings.videoDenoise 的镜像 @State：横屏芯片选中态要刷新） */
   @State denoiseOn: boolean = false;
   /** engine 报闪光不支持后的禁用观感（仍可点出一次「该镜头不支持闪光/常亮」提示） */
@@ -518,6 +568,15 @@ struct CameraPage {
   @State pillIsoLabel: string = 'AUTO';
   @State pillEvLabel: string = '+0.0EV';
   @State pillWbLabel: string = '自动';
+  /** 等号档实测读数行（r42；上游 ExposureTelemetryReadout）：手动 AE 且实发曝光在场才显 */
+  @State expTelemetryText: string = '';
+  /** 「启动后自动亮屏」（上游 5216e72，29 §5.3-①）：驱动器页面持有（离页必 restore） */
+  private winBrightness: WindowBrightness = new WindowBrightness();
+  private camBrightenTimer: number = -1;
+  // ---- 运行时告警三行（上游 91e6353+36917e5）：低帧守卫 / 换段预提示 / 近似档+手动预告知 ----
+  @State lowFpsNote: string = '';
+  @State segNearCap: boolean = false;
+  @State approxManual: boolean = false;
   /** 横屏帧率芯片文案（pickFps 改的是 settings.fps，非 @State：不落成 State 芯片不会刷新） */
   @State landFpsLabel: string = '30×';
   /** T31 沉浸式安全区（vp）：顶部状态栏/挖孔、底部导航条 */
@@ -540,6 +599,18 @@ struct CameraPage {
         this.flushParamsDirect();
       });
     this.bindParamsLabels();
+    this.bindExposureTelemetry();
+    // 等号档探测与实测遥测（r42）：引擎要读写参数总线（帧到达采样/探测闩锁/下发真值回写）
+    this.engine.attachParams(this.params);
+    // 「对着左片练」动线（上游 2026-10-04）：对比页 primeWith 过参考片 ⇒ 首次组合即切分屏
+    // 对比并自动挂参考片循环播放；取即清（之后用户自己切分屏/退出不被旧意图拉回）
+    const practiceId: number | undefined = comparePractice.takeLeftId();
+    if (practiceId !== undefined) {
+      this.splitOn = true;
+      this.splitCompareOn = true;
+      this.splitRefId = practiceId;
+      this.loadSplitRefById(practiceId);
+    }
     this.initLevelSensor();
     this.applyImmersiveChrome();
     this.refreshHudReadoutMetrics();
@@ -693,6 +764,11 @@ struct CameraPage {
       this.healthPausedByHide = true;
     }
     this.stopHealthMonitor(); // 页面隐藏统一停健康巡检（录制中亦不后台读 native）
+    // 亮度渐变收尾（上游口径：延迟期间离开取消且不补触发；渐变中离开恢复进页前亮度）
+    this.cancelColdStartBrighten();
+    if (this.ctx !== undefined) {
+      this.winBrightness.cancelAndRestore(this.ctx);
+    }
     if (!this.recording) {
       this.stopStatusTimer();
       this.stopHealthMonitor();
@@ -700,6 +776,41 @@ struct CameraPage {
       this.engine.stop();
       this.cameraStarted = false;
       this.setKeepScreenOn(false);
+    }
+  }
+
+  /**
+   * 「启动后自动亮屏」（29 §5.3-①，上游 5216e72 直译）：只在**冷启后第一次进入取景页**
+   * 触发一次（进程内闸），延迟 0–10s（0=关闭，语义=全程跟随系统），之后 7s 内线性渐变到
+   * 满亮度；延迟期间离开取景页取消且**不补触发**。
+   */
+  private armColdStartBrighten(): void {
+    if (!camBrightenArmed) {
+      return;
+    }
+    camBrightenArmed = false; // 进程内一次：无论本页接下来走没走，闸都放下（取消不补触发）
+    const delaySec: number = this.settings.cameraBrightenDelaySec;
+    if (delaySec <= 0) {
+      return; // 0 = 关闭 = 全程跟随系统
+    }
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    this.camBrightenTimer = setTimeout((): void => {
+      this.camBrightenTimer = -1;
+      if (this.disposed || !this.pageVisible) {
+        return; // 延迟期间离开：不补触发
+      }
+      this.winBrightness.rampToFull(ctx, 7_000);
+    }, delaySec * 1_000);
+  }
+
+  /** 冷启亮屏延迟的取消（离页/销毁；渐变本体由 cancelAndRestore 收口） */
+  private cancelColdStartBrighten(): void {
+    if (this.camBrightenTimer >= 0) {
+      clearTimeout(this.camBrightenTimer);
+      this.camBrightenTimer = -1;
     }
   }
 
@@ -942,7 +1053,11 @@ struct CameraPage {
       // 不认档位标签，上游 0525fa2）
       const startKey: string | undefined =
         this.settings.lensUserPicked && this.settings.lensKey !== '' ? this.settings.lensKey : undefined;
-      return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps);
+      return this.engine.start(ctx, this.surfaceId, startKey, want, this.settings.fps,
+        (w: number, h: number): string => {
+          const lib: GlLibApi | undefined = this.glLib;
+          return lib === undefined ? '' : lib.enableYuvFeed(w, h);
+        });
     }).then((summary: string): void => {
       this.startingCamera = false;
       if (summary === 'cancelled') {
@@ -982,6 +1097,18 @@ struct CameraPage {
       this.zoomIndex = this.nearestZoomIndex(initialZoom);
       this.zoomLabel = `${initialZoom}x`;
       this.applyGeometry();
+      // YUV 帧源自检：起镜 2.5s 后把 native 取帧/喂入计数写进应用内日志。native hilog 不进
+      // 用户导出的日志件——黑屏/花屏现场只能靠这一行归因（acq=0 ⇒ 相机没往 NativeImage 面出帧；
+      // acq>0/fed=0 ⇒ 喂入面失败，ferr 给 EGL 错误码）。
+      const feedLib: GlLibApi | undefined = this.glLib;
+      if (feedLib !== undefined) {
+        setTimeout((): void => {
+          try {
+            Diag.i(WOTA_RECORD_TAG, `gl yuv feed ${feedLib.getYuvDiag()}`);
+          } catch (e) {
+          }
+        }, 2500);
+      }
       this.initNativeParams();
       // T21：起镜成功后能力落档（参数总线按会话期能力重算 range 并钳制当前值）；
       // fps 先对齐设置档（applyAbility 以总线 fps 档位为快门上限基准）
@@ -993,11 +1120,14 @@ struct CameraPage {
         if (this.flashUnsupported) {
           this.flashOn = false;
         }
-        this.params.fps.value = ParamState.of(this.settings.fps);
+        // 走 setFps 单一写入者（上游 docs/plan/28 §4.4）：起镜预写档位也走唯一入口，
+        // 快门可选域与档位同一拍收口（applyAbility 紧随其后按新能力全量重算）
+        this.params.setFps(ParamState.of(this.settings.fps));
         this.params.applyAbility(refined);
         this.syncParamLabels();
       }
       this.startStatusTimer();
+      this.armColdStartBrighten();
       this.message = this.message === '' ? '取景就绪' : this.message;
     }).catch((e: Object): void => {
       this.startingCamera = false;
@@ -1051,7 +1181,59 @@ struct CameraPage {
     this.params.ev.subscribe(recompute);
     this.params.wbMode.subscribe(recompute);
     this.params.kelvin.subscribe(recompute);
+    // 站位线三参数镜像（值流 → 页面原语 State；覆盖层/浮层读镜像才重渲染）
+    const markerSync = (): void => {
+      this.markerCount = this.params.markerCount.value;
+      this.markerSpread = this.params.markerSpread.value;
+      this.markerColorArgb = this.params.markerColor.value.argb;
+    };
+    this.params.markerCount.subscribe(markerSync);
+    this.params.markerSpread.subscribe(markerSync);
+    this.params.markerColor.subscribe(markerSync);
+    markerSync();
     this.syncParamLabels();
+  }
+
+  /**
+   * 等号档实测读数行（r42 移植，上游 ExposureTelemetryReadout 的数据面）：
+   * 实发曝光 · 实测帧率 · 纠偏模式 · 纠偏值，引擎回写驱动。数据同源帧率守卫与曝光下发
+   * 真值，但渲染互不相干：帧率告警行（未移植批）是告警，这一行是常态读数。
+   * @State 对象字段赋值不触发重渲染 ⇒ 订阅里折算成字符串（纯原语 State 面向 ArkUI）。
+   */
+  private bindExposureTelemetry(): void {
+    const recompute = (): void => {
+      this.refreshExpTelemetry();
+    };
+    this.params.actualSentExposureNs.subscribe(recompute);
+    this.params.actualFps.subscribe(recompute);
+    this.params.actualCorrectionNs.subscribe(recompute);
+    this.params.exposureCorrectionAuto.subscribe(recompute);
+    this.params.aeMode.subscribe(recompute);
+    // 低帧守卫告警行（上游 91e6353）：总线驱动；取景器不在（重开中/已关）时不显示——
+    // 会话关闭后采样停了，总线里可能残留上一场的提示，跟着设备状态机走
+    this.params.lowFpsHint.subscribe(recompute);
+    this.refreshExpTelemetry();
+  }
+
+  /** 读数行文案：手动 AE 且实发曝光在场才显示（自动档曝光键缺席，"实际曝光"无从谈起） */
+  private refreshExpTelemetry(): void {
+    const manual: boolean = this.params.aeMode.value === AeMode.MANUAL;
+    const sent: number | undefined = this.params.actualSentExposureNs.value;
+    if (!manual || sent === undefined || sent <= 0) {
+      this.expTelemetryText = '';
+      return;
+    }
+    const expPart: string = `${(sent / 1_000_000).toFixed(1)} ms | 1/${Math.max(1, Math.round(1_000_000_000 / sent))}`;
+    const fps: number | undefined = this.params.actualFps.value;
+    const fpsPart: string = fps === undefined ? '-- fps' : `${Math.round(fps)} fps`;
+    const modePart: string = this.params.exposureCorrectionAuto.value ? '自动' : '手动';
+    const corr: number | undefined = this.params.actualCorrectionNs.value;
+    const corrPart: string = `${((corr === undefined ? 0 : corr) / 1_000_000).toFixed(1)} ms`;
+    this.expTelemetryText = `${expPart} · ${fpsPart} · ${modePart} · ${corrPart}`;
+    const hint: LowFpsHint | undefined = this.params.lowFpsHint.value;
+    this.lowFpsNote = hint !== undefined && this.engine.deviceStatus() === DeviceStatus.OPEN_SUCCEED
+      ? `实际帧率只有约 ${hint.achievedFps}（目标 ${hint.targetFps}）：光线不足或快门过慢所限，画面会卡`
+      : '';
   }
 
   /** 快照当前参数到顶栏第二行/胶囊标签（AE AUTO 时 ISO 显示 AUTO、EV 仅非 MANUAL 显示、能力缺失 -） */
@@ -1081,6 +1263,10 @@ struct CameraPage {
     this.pillWbLabel = this.rowWb;
     // 横屏帧率芯片与 settings.fps 同源（pickFps → syncParamLabels 这一跳负责刷新）
     this.landFpsLabel = `${this.settings.fps}×`;
+    // 近似档+手动曝光组合预告知（上游 36917e5）：※ 档的区间下界不受 App 控制，暗光下 HAL
+    // 可以合法下探——r03 时代这一组合正是帧率坍塌主力，取景态就告知
+    const fpsState: ParamState = this.params.fps.value;
+    this.approxManual = !fpsState.exact && fpsState.enabled && this.params.aeMode.value === AeMode.MANUAL;
   }
 
   /**
@@ -1267,7 +1453,7 @@ struct CameraPage {
       return;
     }
     this.settings.fps = fps;
-    this.params.fps.value = ParamState.of(fps);
+    this.params.setFps(ParamState.of(fps)); // 单一写入者（§4.4）：换档即时重算快门可选域
     if (this.ability !== undefined) {
       this.params.applyAbility(this.ability);
     }
@@ -1287,7 +1473,7 @@ struct CameraPage {
     const s: GlowParams = p.sanitize();
     try {
       lib.setGlowParams(s.enabled ? 1 : 0, s.threshold, s.soft, s.width, s.gain, s.add, s.freq,
-        s.blend, s.colorA, s.colorB);
+        s.blend, s.color, s.colorOnly ? 1 : 0);
     } catch (e) {
       Diag.w(WOTA_RECORD_TAG, `setGlowParams failed: ${e}`);
     }
@@ -1460,6 +1646,40 @@ struct CameraPage {
     }
   }
 
+  /**
+   * 闪光四模式弹层选档（上游 FlashPill 对应面）：关/自动/开/常亮一次摊开，不再靠连点循环。
+   * MANUAL/AE 档无法用 AE 驱动的自动闪（下发侧 flashPlan 同口径）——自动档仅 AE 参与档可选。
+   */
+  private applyFlashMode(mode: number): void {
+    if (!this.cameraStarted) {
+      return;
+    }
+    if (this.flashUnsupported) {
+      this.message = '该镜头不支持闪光/常亮';
+      return;
+    }
+    let flashMode: camera.FlashMode;
+    if (mode === 3) {
+      flashMode = camera.FlashMode.FLASH_MODE_ALWAYS_OPEN;
+    } else if (mode === 2) {
+      flashMode = camera.FlashMode.FLASH_MODE_OPEN;
+    } else if (mode === 1) {
+      flashMode = camera.FlashMode.FLASH_MODE_AUTO;
+    } else {
+      flashMode = camera.FlashMode.FLASH_MODE_CLOSE;
+    }
+    if (this.engine.applyFlash(flashMode)) {
+      this.flashMode = mode;
+      this.flashOn = mode === 3; // Dock 循环兼容面：常亮 = 开观感
+      this.flashUnsupported = false;
+      this.flushParamsNow();
+      this.closePill();
+    } else {
+      this.flashUnsupported = true;
+      this.message = '该镜头不支持闪光/常亮';
+    }
+  }
+
   private flashLabel(): string {
     return this.flashOn ? '闪光:常亮' : '闪光:关';
   }
@@ -1479,7 +1699,9 @@ struct CameraPage {
       new Uint8Array(ab).set(finalLut);
       lib.uploadCurveLut(ab);
       // 曲线独立层（安卓同口径）：非恒等即生效，与效果档（斑马/峰值）互不排斥
-      lib.setCurveEnabled(!this.curveStack.isPassthrough);
+      // 开关判据 = 曲线与色调**合取**（上游 66f88e0 红线）：只用曲线一侧决定，恒等曲线+
+      // 非恒等色调时 LUT 被禁用，色调被静默丢掉
+      lib.setCurveEnabled(!this.curveStack.isPassthrough || !this.toneParams.isIdentity());
     } catch (e) {
       this.message = `曲线上传失败: ${e}`;
     }
@@ -1524,7 +1746,9 @@ struct CameraPage {
         // 直通档（0）与遗留「曲线」档（1）的效果槽都恒 NONE——曲线由上面的独立开关承担
         lib.setEffect(0);
       }
-      lib.setCurveEnabled(!this.curveStack.isPassthrough);
+      // 开关判据 = 曲线与色调**合取**（上游 66f88e0 红线）：只用曲线一侧决定，恒等曲线+
+      // 非恒等色调时 LUT 被禁用，色调被静默丢掉
+      lib.setCurveEnabled(!this.curveStack.isPassthrough || !this.toneParams.isIdentity());
     } catch (e) {
       this.message = `效果切换失败: ${e}`;
     }
@@ -2128,6 +2352,8 @@ struct CameraPage {
       return;
     }
     this.recording = true;
+    // 等号档探测（r42）：录制目标在场即取消（等号不进录制；探测态翻转经引擎重下发恢复余量）
+    this.engine.setRecordingActive(true);
     // 长时任务（上游前台服务的对应物）：切后台续录；失败只记日志不阻塞录制
     if (this.ctx !== undefined) {
       RecordTask.start(this.ctx);
@@ -2359,6 +2585,8 @@ struct CameraPage {
           this.appendNotice(`分段轮转失败，已停止，保留已完成段：${rotateResult}`);
           return;
         }
+        // 换段预提示（上游 36917e5）：真实写入字节（不是估算）对上限；轮转后回落重新武装
+        this.segNearCap = segmentCapApproached(this.recorder.currentSegmentBytes());
         if (rotateResult.indexOf('rotated:') === 0) {
           this.message = `录制中 分段 ${rotateResult.substring('rotated:'.length)}`;
           if (this.healthTimer >= 0) {
@@ -2407,6 +2635,8 @@ struct CameraPage {
       clearInterval(this.recordTimer);
       this.recordTimer = -1;
     }
+    // 停录/轮询结束必须清掉换段预提示，否则下一场录制前顶栏还挂着上一场的旧行
+    this.segNearCap = false;
   }
 
   private requestStop(reason: string = ''): void {
@@ -2452,6 +2682,7 @@ struct CameraPage {
     this.healthPausedByHide = false;
     const summary: string = this.recorder.stop();
     this.recording = false;
+    this.engine.setRecordingActive(false); // 收尾回预览态：等号档可重探（闩锁在册则不重探）
     // 长时任务收口（幂等）：所有停录终态都汇到 finishRecord，这里解一次即可
     if (this.ctx !== undefined) {
       RecordTask.stop(this.ctx);
@@ -2469,6 +2700,20 @@ struct CameraPage {
     this.message = `录制: ${summary}${reasonText === '' ? '' : `（${reasonText}）`}`;
     this.lastStopSummary = summary;
     this.lastStopAtMs = Date.now();
+    // 「对着左片练」回归动线（上游 deliver 同构的 OHOS 面）：练习动线里录成的片 →
+    // 按**路径**记账并弹回对比页（对比页 onPageShow 消费填右片；普通录制 armed=false 不进）
+    if (saved && comparePractice.armed) {
+      const m: RegExpExecArray | null = new RegExp('lastPath=([^ ]+)').exec(summary);
+      if (m !== null && m[1] !== '') {
+        comparePractice.deliverPath(m[1]);
+        try {
+          this.getUIContext().getRouter().back();
+        } catch (e) {
+        }
+      } else {
+        comparePractice.armed = false; // 无路径：清意图防错配（自愈口径）
+      }
+    }
     if (this.engine.deviceStatus() !== DeviceStatus.OPEN_SUCCEED) {
       this.cameraStarted = false;
       this.resetCameraLabels();
@@ -2561,7 +2806,8 @@ struct CameraPage {
       return;
     }
     if (key === 'flash') {
-      this.toggleFlash();
+      // 上游 FlashPill 对应面：Dock 闪光 = 锚点弹层（四模式摊开），不再点按循环
+      this.openPill('flash', PILL_FLASH_ID);
       return;
     }
     if (key === 'bitrate') {
@@ -2655,8 +2901,174 @@ struct CameraPage {
     this.getUIContext().getRouter().pushUrl({ url: 'pages/Settings' });
   }
 
+  // ---------------------------------------------------------------- 分屏（上游第 3 项）
+
+  /**
+   * 分屏开关（上游分屏圆钮同款）：录制中只给锁提示不切版（会话与文件已开写，
+   * 不能中途改版面）；退出分屏同时收起对比面板与练习播放器。
+   */
+  private toggleSplit(): void {
+    if (this.recording || this.stopPending) {
+      this.message = '录制中不可切换分屏，停止后可改';
+      return;
+    }
+    if (this.splitOn) {
+      this.splitOn = false;
+      this.splitCompareOn = false;
+      this.splitPickOpen = false;
+      this.releaseSplitPlayer();
+    } else {
+      this.splitOn = true;
+      // 进入分屏时探一次双摄并发（上游 LaunchedEffect(splitOn) 同口径；录制中不切分屏已闸）
+      const ctx: common.Context | undefined = this.ctx;
+      this.splitLensSupported = ctx !== undefined && this.cameraStarted &&
+        this.engine.probeConcurrentPartners(ctx).length > 0;
+    }
+  }
+
+  /** 参考片 id → 媒体库片（练习动线用；找不到只提示不硬挂） */
+  private loadSplitRefById(id: number): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    const repo: MediaRepo = new MediaRepo(ctx);
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (this.disposed) {
+        return;
+      }
+      const hit: VideoClip | undefined = list.find((c: VideoClip): boolean => c.id === id);
+      if (hit === undefined) {
+        this.message = '练习参考片已不在媒体库';
+        return;
+      }
+      this.splitPick(hit);
+    }).catch((e: Object): void => {
+      this.message = `读取媒体库失败: ${e}`;
+    });
+  }
+
+  /** 内嵌选择列表：媒体库全部片（独立分屏对比时手选参考片） */
+  private openSplitPicker(): void {
+    const ctx: common.Context | undefined = this.ctx;
+    if (ctx === undefined) {
+      return;
+    }
+    const repo: MediaRepo = new MediaRepo(ctx);
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (!this.disposed) {
+        this.splitClips = list;
+        this.splitPickOpen = true;
+      }
+    }).catch((e: Object): void => {
+      this.message = `读取媒体库失败: ${e}`;
+    });
+  }
+
+  /** 挂参考片：换引擎实例（旧片先释放），表面就绪后 attach（未就绪走 onLoad 补挂） */
+  private splitPick(clip: VideoClip): void {
+    this.releaseSplitPlayer();
+    this.splitRef = clip;
+    this.splitRefTitle = clip.name;
+    this.splitPickOpen = false;
+    if (this.splitSurfaceReady) {
+      this.attachSplitPlayer();
+    }
+  }
+
+  private attachSplitPlayer(): void {
+    const clip: VideoClip | undefined = this.splitRef;
+    if (clip === undefined) {
+      return;
+    }
+    const sid: string = this.splitXc.getXComponentSurfaceId();
+    if (sid === '') {
+      return;
+    }
+    this.splitPlayer.attach(sid, clip, 30).then((err: string): void => {
+      if (this.disposed) {
+        return;
+      }
+      if (err !== '') {
+        this.message = `参考片加载失败: ${err}`;
+        return;
+      }
+      // 整段循环（练习场景：边看参考边跳）+ 自动开播（上游 autoAttach 同口径）
+      const dur: number = clip.durationMs;
+      if (dur > 0) {
+        this.splitPlayer.applyPersistedAb(new AbRange(0, dur, true));
+      }
+      this.splitPlayer.playPause();
+    }).catch((e: Object): void => {
+      this.message = `参考片加载失败: ${e}`;
+    });
+  }
+
+  private releaseSplitPlayer(): void {
+    try {
+      this.splitPlayer.release();
+    } catch (e) {
+    }
+    this.splitRef = undefined;
+    this.splitRefTitle = '';
+  }
+
+  /** 站位线浮层定位：量圆钮窗口矩形（px）→ 换算 vp，贴其右下、右缘钳回安全边内 */
+  private placeMarkerPanels(): void {
+    let left: number = 0;
+    let top: number = 0;
+    let right: number = 0;
+    let bottom: number = 0;
+    try {
+      const info = this.getUIContext().getComponentUtils().getRectangleById(MARKER_BTN_ID);
+      this.markerAnchor = {
+        left: info.windowOffset.x,
+        top: info.windowOffset.y,
+        right: info.windowOffset.x + info.size.width,
+        bottom: info.windowOffset.y + info.size.height
+      };
+      left = this.markerAnchor.left;
+      top = this.markerAnchor.top;
+      right = this.markerAnchor.right;
+      bottom = this.markerAnchor.bottom;
+      const d = display.getDefaultDisplaySync();
+      this.markerDensity = d.densityPixels > 0 ? d.densityPixels : 1;
+    } catch (e) {
+      // 量不到（首帧未布局）：浮层贴屏右上下方兜底
+      this.markerDensity = 1;
+    }
+    const dens: number = this.markerDensity;
+    // 浮层宽约 240vp：右缘贴圆钮右缘、钳进屏宽 - 8vp；纵向贴圆钮下方 4vp
+    const panelW: number = 240;
+    const scrW: number = this.winWvp > 0 ? this.winWvp : 360;
+    const xVp: number = Math.max(8, Math.min(scrW - panelW - 8,
+      (right > 0 ? right / dens - panelW * 0.65 : scrW - panelW - 8)));
+    const yVp: number = bottom > 0 ? bottom / dens + 4 : 120;
+    this.markerPanelX = xVp;
+    this.markerPanelY = yVp;
+  }
+
+  private toggleMarkerPanel(): void {
+    this.markerColorOpen = false;
+    this.markerPanelOpen = !this.markerPanelOpen;
+    if (this.markerPanelOpen) {
+      this.placeMarkerPanels();
+    }
+    this.flushParamsNow(); // 关浮层是完成点：拖动期未落的间距值立即落一次
+  }
+
+  private openMarkerColor(): void {
+    this.markerPanelOpen = false;
+    this.markerColorOpen = true;
+    this.placeMarkerPanels();
+  }
+
   build() {
     Stack() {
+      // 分屏（上游第 3 项 / SplitPanel）：**只做变换、布局不重排**——把「预览+HUD+覆盖层」
+      // 整层缩到左半屏（transformOrigin 左缘中点，与上游 graphicsLayer 同式：
+      // x' = x·s 自然收进左半，y 以中线为原点纵向居中）；弹层/浮层挂在变换层之外不随缩放。
+      Stack() {
       XComponent({ id: 'wotaCamera', type: XComponentType.SURFACE, libraryname: 'entry' })
       .accessibilityText('取景画面')
       .accessibilityDescription('点按对焦，长按锁定对焦')
@@ -2674,6 +3086,16 @@ struct CameraPage {
           aspect: this.refLineAspect(),
           rollDegrees: this.levelRoll,
           showLevelLine: this.levelOn && this.levelAvailable
+        })
+      }
+      // 站位指示线（上游 MarkerLineOverlay 同通道：纯 UI 层、结构上进不了编码器）；
+      // 画在参考线之上（站位线是排练走位的主参考，压暗的参考线在其下）
+      if (this.markerCount !== 0) {
+        MarkerLineOverlay({
+          count: this.markerCount,
+          spread: this.markerSpread,
+          argb: this.markerColorArgb,
+          aspect: this.refLineAspect()
         })
       }
       // T31 渐变遮罩：上/下两条压暗带，保证白字在任何画面上可读（不拦触摸）。
@@ -2778,6 +3200,39 @@ struct CameraPage {
           // 回归修复：竖屏此前没有曲线入口（横屏左侧 float 有 RGB 曲线）——右起第三枚「曲」补上，
           // 横排三枚 40vp（3×40 + 2×6 = 132）不压顶栏两行读数，录制中也可开（曲线/LUT 上传与录制无冲突）。
           Row({ space: HudSpace.S }) {
+            Text('分')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(this.splitOn ? PageColor.ACCENT_BLUE : HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('分屏')
+              .onClick((): void => {
+                this.toggleSplit();
+              })
+            Text('位')
+              .fontSize(HudType.VALUE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width(40)
+              .height(40)
+              .borderRadius(20)
+              .backgroundColor(this.markerPanelOpen ? PageColor.ACCENT_BLUE : HudColor.PILL_BG)
+              .border({ width: 1, color: HudColor.DIVIDER })
+              .textAlign(TextAlign.Center)
+              .accessibilityText('站位线')
+              .id(MARKER_BTN_ID)
+              .onClick((): void => {
+                this.toggleMarkerPanel();
+              })
+              .gesture(
+                LongPressGesture({ repeat: false, duration: 500 })
+                  .onAction((): void => {
+                    this.openMarkerColor();
+                  })
+              )
             Text('曲')
               .fontSize(HudType.VALUE)
               .fontColor(HudColor.TEXT_PRIMARY)
@@ -2823,7 +3278,7 @@ struct CameraPage {
                 }
               })
           }
-          .width(132)
+          .width(224)
         }
         .width('100%')
         .height(HudSpec.TOP_BAR_HEIGHT + this.safeTop)
@@ -2833,6 +3288,38 @@ struct CameraPage {
           right: HudSpec.SAFE_MARGIN,
           top: this.safeTop + HudSpace.S
         })
+
+        // ---------- 运行时告警三行（上游 91e6353+36917e5）：状态行排在读数条之上，
+        // WARN 色小字；换段预提示只在录制在场时有意义（与上游 segNearCap && recording 同闸）
+        if (this.lowFpsNote !== '' || (this.segNearCap && this.recording) || this.approxManual) {
+          Column({ space: 2 }) {
+            if (this.lowFpsNote !== '') {
+              Text(this.lowFpsNote)
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(2)
+            }
+            if (this.segNearCap && this.recording) {
+              Text('接近单段大小上限，即将自动换段写入新文件')
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(1)
+            }
+            if (this.approxManual) {
+              Text('当前帧率档为本机近似档：暗光下实际帧率可能低于所选值')
+                .fontSize(HudType.LABEL)
+                .fontColor(HudColor.WARN)
+                .maxLines(1)
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({
+            left: HudSpec.SAFE_MARGIN,
+            right: HudSpec.SAFE_MARGIN,
+            top: HudSpace.XS
+          })
+        }
 
         // ---------- 读数条（J3a：hud_items 位掩码驱动；**临时落位**在固定两行之下，J3b 挪进 READOUT
         // zone 并换 planReadoutRow 的同行裁决）。条目/分组/换行档全在 hudReadoutRowGroups()（J1/J2 算式）；
@@ -2883,6 +3370,22 @@ struct CameraPage {
             right: HudSpec.SAFE_MARGIN,
             top: HudSpace.XS
           })
+        }
+
+        // ---------- 等号档实测读数行（r42）：与读数条同位独立一行；手动 AE 且实发在场才渲染。
+        // 上游钉在「预览：<档位>」DisplayScaleReadout 正下方；本侧无该行，落读数条之下同语义位
+        if (this.expTelemetryText !== '') {
+          Text(this.expTelemetryText)
+            .fontSize(HudType.LABEL)
+            .fontColor(HudColor.TEXT_TERTIARY)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+            .padding({
+              left: HudSpec.SAFE_MARGIN,
+              right: HudSpec.SAFE_MARGIN,
+              top: HudSpace.XS
+            })
         }
 
         Blank()
@@ -3547,6 +4050,154 @@ struct CameraPage {
       }
 
       // T21 高级参数就近浮层（最顶层：遮罩拦点按，量框后定位面板）
+      }
+      .width('100%')
+      .height('100%')
+      .scale(this.splitOn
+        ? { x: 0.5, y: 0.5, centerX: 0, centerY: '50%' }
+        : { x: 1, y: 1 })
+
+      // ---------- 右侧分屏面板（上游 SplitPanel）：模式列表 / 实时对比播放器 ----------
+      if (this.splitOn) {
+        Column({ space: 8 }) {
+          if (this.splitCompareOn) {
+            // 对比播放器态：顶行「返回」回模式列表（不退出分屏）+ 标题
+            Row({ space: 8 }) {
+              Button('‹ 返回')
+                .fontSize(11)
+                .onClick((): void => {
+                  this.splitCompareOn = false;
+                  this.splitPickOpen = false;
+                })
+              Text('实时对比播放')
+                .fontSize(12)
+                .fontColor(HudColor.TEXT_PRIMARY)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            // 内嵌练习播放器：独立引擎实例（整条相机链路一次都不碰）；整段循环 + 自动开播
+            Stack({ alignContent: Alignment.Center }) {
+              XComponent({ type: XComponentType.SURFACE, controller: this.splitXc })
+                .accessibilityText('练习参考画面')
+                .onLoad((): void => {
+                  this.splitSurfaceReady = true;
+                  if (this.splitRef !== undefined) {
+                    this.attachSplitPlayer();
+                  }
+                })
+                .width('100%')
+                .height('100%')
+              if (this.splitRef === undefined) {
+                Button('选择参考片')
+                  .fontSize(11)
+                  .onClick((): void => {
+                    this.openSplitPicker();
+                  })
+              }
+            }
+            .layoutWeight(1)
+            .width('100%')
+            .backgroundColor(Color.Black)
+            .borderRadius(10)
+            if (this.splitRefTitle !== '') {
+              Row({ space: 6 }) {
+                Text(this.splitRefTitle)
+                  .fontSize(10)
+                  .fontColor(PageColor.TEXT_SECONDARY)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Button('换片')
+                  .fontSize(10)
+                  .onClick((): void => {
+                    this.openSplitPicker();
+                  })
+              }
+              .width('100%')
+            }
+            if (this.splitPickOpen) {
+              // 内嵌参考片列表（媒体库全部片；点一行即挂片循环播放）
+              List({ space: 4 }) {
+                ForEach(this.splitClips, (c: VideoClip): void => {
+                  ListItem() {
+                    Text(c.name)
+                      .fontSize(11)
+                      .fontColor(HudColor.TEXT_PRIMARY)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .width('100%')
+                      .padding({ top: 6, bottom: 6 })
+                      .onClick((): void => {
+                        this.splitPick(c);
+                      })
+                  }
+                }, (c: VideoClip): string => `${c.id}`)
+              }
+              .height(140)
+              .width('100%')
+            }
+          } else {
+            Text('分屏')
+              .fontSize(12)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width('100%')
+            // 另镜头录制（上游同款占位入口）：可用态来自双摄并发探测
+            // （getCameraConcurrentInfos）；可用也只是占位（上游同为占位），点击给提示；
+            // 不支持时灰置 + 如实说明（不摆一个点了必崩/没反应的假入口）
+            Button('另镜头录制（下一批）')
+              .fontSize(11)
+              .width('100%')
+              .enabled(this.splitLensSupported)
+              .onClick((): void => {
+                this.message = '另镜头录制在后续批次实现';
+              })
+            if (!this.splitLensSupported) {
+              Text('本机不支持双摄并发（或相机未就绪）')
+                .fontSize(10)
+                .fontColor(PageColor.TEXT_DIM)
+                .width('100%')
+            }
+            Button('实时对比播放')
+              .fontSize(11)
+              .width('100%')
+              .onClick((): void => {
+                this.splitCompareOn = true;
+                if (this.splitRef === undefined) {
+                  this.openSplitPicker();
+                }
+              })
+            Blank()
+            Button('退出分屏')
+              .fontSize(11)
+              .width('100%')
+              .onClick((): void => {
+                this.toggleSplit();
+              })
+          }
+          if (this.splitPickOpen && !this.splitCompareOn) {
+            List({ space: 4 }) {
+              ForEach(this.splitClips, (c: VideoClip): void => {
+                ListItem() {
+                  Text(c.name)
+                    .fontSize(11)
+                    .fontColor(HudColor.TEXT_PRIMARY)
+                    .maxLines(1)
+                    .onClick((): void => {
+                      this.splitPick(c);
+                    })
+                }
+              }, (c: VideoClip): string => `p${c.id}`)
+            }
+            .height(120)
+          }
+        }
+        .width('50%')
+        .height('100%')
+        .padding(10)
+        .position({ x: '50%', y: 0 })
+        .backgroundColor('#CC14161A')
+      }
+
       if (this.activePill === 'shutter') {
         ShutterPillPopup({
           anchor: this.pillAnchor,
@@ -3629,6 +4280,34 @@ struct CameraPage {
               this.settings.bitrate = opt.value;
               this.persistSettings();
               this.closePill();
+            }
+          })
+        }
+      }
+      if (this.activePill === 'flash') {
+        WotaPillPopup({
+          anchor: this.pillAnchor,
+          panelTitle: '闪光灯',
+          onDismiss: (): void => {
+            this.closePill();
+          }
+        }) {
+          if (this.flashUnsupported) {
+            PillNote({ noteText: '该镜头不支持闪光/常亮' })
+          }
+          // 四模式一次摊开（上游 FlashPill）；AE 关闭（手动档）下自动预闪无语义 → 禁用自动档
+          PillChoices({
+            options: [
+              new PillOption(0, '关闭', true),
+              new PillOption(1, '自动', this.params.aeMode.value !== AeMode.MANUAL),
+              new PillOption(2, '闪光', true),
+              new PillOption(3, '常亮', true)
+            ],
+            selected: this.flashMode,
+            perRow: 4,
+            active: !this.flashUnsupported,
+            onPick: (opt: PillOption): void => {
+              this.applyFlashMode(opt.value);
             }
           })
         }
@@ -3761,6 +4440,100 @@ struct CameraPage {
             }
           }
         })
+      }
+      // ---------- 站位线浮层（上游 2026-10-27 交互定版）：**无卡片底透明浮层**，
+      // 控制 = [+/线数/− 一行 + 间距滑杆]，选色 = 长按圆钮出的六色圆片；均贴圆钮右下
+      if (this.markerPanelOpen || this.markerColorOpen) {
+        // 点外部关闭捕获层（透明，不拦底下的取景手势之外的面板操作）
+        Column()
+          .width('100%')
+          .height('100%')
+          .onClick((): void => {
+            this.markerPanelOpen = false;
+            this.markerColorOpen = false;
+            this.flushParamsNow();
+          })
+      }
+      if (this.markerPanelOpen) {
+        Column({ space: 6 }) {
+          Row({ space: 14 }) {
+            Text('−')
+              .fontSize(20)
+              .fontColor(Color.White)
+              .width(36)
+              .height(36)
+              .borderRadius(18)
+              .backgroundColor('#59FFFFFF')
+              .textAlign(TextAlign.Center)
+              .accessibilityText('减少站位线')
+              .onClick((): void => {
+                this.params.markerCount.value =
+                  MarkerLines.clampCount(this.params.markerCount.value - 1);
+              })
+            Text(`${this.markerCount}`)
+              .fontSize(22)
+              .fontColor(Color.White)
+              .fontWeight(FontWeight.Bold)
+              .textShadow({ radius: 3, color: Color.Black, offsetX: 1, offsetY: 1 })
+            Text('+')
+              .fontSize(20)
+              .fontColor(Color.White)
+              .width(36)
+              .height(36)
+              .borderRadius(18)
+              .backgroundColor('#59FFFFFF')
+              .textAlign(TextAlign.Center)
+              .accessibilityText('增加站位线')
+              .onClick((): void => {
+                this.params.markerCount.value =
+                  MarkerLines.clampCount(this.params.markerCount.value + 1);
+              })
+          }
+          .alignItems(VerticalAlign.Center)
+          // 间距滑杆 = 调「整组展开宽度」：等距线随之变疏/变密；松手落盘（间距入档）
+          Slider({
+            value: this.markerSpread,
+            min: MarkerLines.MIN_SPREAD,
+            max: MarkerLines.MAX_SPREAD,
+            step: 0.01
+          })
+            .width(220)
+            .selectedColor('#CCFFFFFF')
+            .trackColor('#33FFFFFF')
+            .onChange((v: number, mode: SliderChangeMode): void => {
+              this.params.markerSpread.value = MarkerLines.clampSpread(v);
+              if (mode === SliderChangeMode.End) {
+                this.flushParamsNow(); // 完成点写盘（与 PillSlider 同一纪律）
+              }
+            })
+        }
+        .position({ x: this.markerPanelX, y: this.markerPanelY })
+        .alignItems(HorizontalAlign.Center)
+      }
+      if (this.markerColorOpen) {
+        Row({ space: 8 }) {
+          ForEach(MarkerLineColor.ALL, (c: MarkerLineColor): void => {
+            Column()
+              .width(28)
+              .height(28)
+              .borderRadius(14)
+              .backgroundColor(c.argb)
+              .border({
+                width: c.argb === this.markerColorArgb ? 2 : 0,
+                color: Color.White
+              })
+              .accessibilityText(`站位线颜色：${c.label}`)
+              .onClick((): void => {
+                this.params.markerColor.value = c;
+                this.markerColorOpen = false;
+                this.flushParamsNow(); // 选色是离散完成点：当场落盘（颜色入档）
+              })
+          }, (c: MarkerLineColor): string => c.enumName())
+        }
+        .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+        .backgroundColor('#CC1C1C1E')
+        .borderRadius(18)
+        .position({ x: this.markerPanelX, y: this.markerPanelY })
       }
     }
     .width('100%')

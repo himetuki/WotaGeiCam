@@ -23,6 +23,14 @@ export function cancelAvScreenProbe(): void {
   glLib.cancelAvScreenProbe();
 }
 
+export function enableYuvFeed(width: number, height: number): string {
+  return glLib.enableYuvFeed(width, height);
+}
+
+export function getYuvDiag(): string {
+  return glLib.getYuvDiag();
+}
+
 export function getInputSurfaceId(): string {
   return glLib.getInputSurfaceId();
 }
@@ -78,9 +86,14 @@ export function setFrostEnabled(on: boolean): void {
 // ---------------------------------------------------------------- 追赶轮：光晕三口 + 降噪一口
 // 参数序是 native napi 注册表的字面契约（cpp/napi_init.cpp 同名口），调用点不得重排
 
+/** 录制音轨 PCM（S16LE 交织 48k 立体声）：''=已接收，非空=拒绝原因 */
+export function pushAudioPcm(pcm: ArrayBuffer): string {
+  return glLib.pushAudioPcm(pcm);
+}
+
 export function setGlowParams(enabled: number, threshold: number, soft: number, width: number,
-  gain: number, add: number, freq: number, blend: number, colorA: number, colorB: number): void {
-  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, colorA, colorB);
+  gain: number, add: number, freq: number, blend: number, tint: number, colorOnly: number): void {
+  glLib.setGlowParams(enabled, threshold, soft, width, gain, add, freq, blend, tint, colorOnly);
 }
 
 /** 'off' 或 'on:<broken>:<scale>:<inW>:<inH>:<fps>:<rtW>:<rtH>:<clamped>' */

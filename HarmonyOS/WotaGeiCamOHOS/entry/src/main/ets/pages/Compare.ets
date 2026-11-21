@@ -23,6 +23,7 @@
  * - 单侧进度：右片未选/报错时 positionMs/sliderValue 跟左钟（重建中保留 T，预录态不回落）。
  */
 import { common } from '@kit.AbilityKit';
+import { comparePractice } from '../player/ComparePractice';
 import { ArcDropLog } from '../record/ArcDropLog';
 import { Diag } from '../diag/Diag';
 import { ClipFilter } from '../media/MediaTag';
@@ -32,6 +33,7 @@ import { ClipExporter, ClipTrackInfo } from '../player/ClipExporter';
 import { PlayerEngine } from '../player/PlayerEngine';
 import { SettingsStore } from '../ui/SettingsStore';
 import { AbRange, PlayerSpeedTiers } from '../player/PlayerModel';
+import { Pan, clampPan } from '../player/PlayerModel';
 import {
   AudioTrackKind, CompareAudioPlan, EngineCommand, EngineCommandKind, Side, applyOrderOf, audioPlanOf
 } from '../player/CompareAudio';
@@ -128,8 +130,46 @@ struct Compare {
 
   private leftEngine: PlayerEngine = new PlayerEngine();
   private rightEngine: PlayerEngine = new PlayerEngine();
+  // ---- 双画面捏合缩放/平移（上游 CompareScreen pinchZoom 的重建；1..4x、第二指才消费）----
+  @State private zoomL: number = 1;
+  @State private zoomR: number = 1;
+  @State private panLX: number = 0;
+  @State private panLY: number = 0;
+  @State private panRX: number = 0;
+  @State private panRY: number = 0;
+  private baseZoomL: number = 1;
+  private baseZoomR: number = 1;
+  private basePanLX: number = 0;
+  private basePanLY: number = 0;
+  private basePanRX: number = 0;
+  private basePanRY: number = 0;
+  /** 捏合宿主实测尺寸（onAreaChange 接管；首帧按 0 = 平移钳不生效，缩放仍可用） */
+  private paneW: number = 0;
+  private paneH: number = 0;
+
   private leftXc: XComponentController = new XComponentController();
   private rightXc: XComponentController = new XComponentController();
+
+  private paneTransform(zoom: number, px: number, py: number): ScaleOptions {
+    return { x: zoom, y: zoom, centerX: '50%', centerY: '50%' };
+  }
+
+  private paneTranslate(px: number, py: number): TranslateOptions {
+    return { x: px, y: py };
+  }
+
+  private clampL(): void {
+    const p: Pan = clampPan(this.panLX, this.panLY, this.zoomL, this.paneW, this.paneH);
+    this.panLX = p.x;
+    this.panLY = p.y;
+  }
+
+  private clampR(): void {
+    const p: Pan = clampPan(this.panRX, this.panRY, this.zoomR, this.paneW, this.paneH);
+    this.panRX = p.x;
+    this.panRY = p.y;
+  }
+
   private leftSid: string = '';
   private rightSid: string = '';
   private leftAttachStarted: boolean = false;
@@ -215,12 +255,43 @@ struct Compare {
     }
     this.startTick();
     this.consumeDeferredRebuilds();
+    this.consumePracticeReturn();
     if (this.leftReady) {
       this.leftEngine.resumeTick();
     }
     if (this.rightReady) {
       this.rightEngine.resumeTick();
     }
+  }
+
+  /**
+   * 练习回归消费（上游 pendingRightId 的 OHOS 路径面）：录制页弹回后取走新片路径，
+   * 在媒体库里按路径反查成 clip 填右槽（chooseRight 走既有换片链：音轨重探/续播/历史）。
+   * 找不到（用户删了/还没扫到）只提示，不硬填。
+   */
+  private consumePracticeReturn(): void {
+    const path: string | undefined = comparePractice.takePendingRightPath();
+    if (path === undefined) {
+      return;
+    }
+    const repo: MediaRepo | undefined = this.repo;
+    if (repo === undefined) {
+      this.hint = '练习新片已保存，媒体库未就绪稍后自动可见';
+      return;
+    }
+    repo.load(ClipFilter.all()).then((list: Array<VideoClip>): void => {
+      if (this.disposed) {
+        return;
+      }
+      const hit: VideoClip | undefined = list.find((c: VideoClip): boolean => c.path === path);
+      if (hit === undefined) {
+        this.hint = '练习新片已保存，暂未在媒体库找到';
+        return;
+      }
+      this.chooseRight(hit);
+    }).catch((e: Object): void => {
+      this.hint = `练习回归读取媒体库失败: ${e}`;
+    });
   }
 
   /** 隐藏期发生的 surface 重建在此消费：页面可见后才走 release/换引擎/attach（防隐藏期双开销） */
@@ -1302,12 +1373,44 @@ struct Compare {
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.leftXc })
           .accessibilityText('左片画面')
-          .accessibilityDescription('播放控制见底部控制条')
+          .accessibilityDescription('播放控制见底部控制条；双指缩放平移')
           .onLoad((): void => {
             this.onSurfaceLoaded(true);
           })
           .width('100%')
           .height('100%')
+          .scale(this.paneTransform(this.zoomL, this.panLX, this.panLY))
+          .translate(this.paneTranslate(this.panLX, this.panLY))
+          .gesture(
+            PinchGesture({ fingers: 2 })
+              .onActionStart((): void => {
+                this.baseZoomL = this.zoomL;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.zoomL = Math.min(4, Math.max(1, this.baseZoomL * e.scale));
+                this.clampL();
+              })
+          )
+          .gesture(
+            PanGesture({ fingers: 2, direction: PanDirection.All, distance: 1 })
+              .onActionStart((): void => {
+                this.basePanLX = this.panLX;
+                this.basePanLY = this.panLY;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.panLX = this.basePanLX + e.offsetX;
+                this.panLY = this.basePanLY + e.offsetY;
+                this.clampL();
+              })
+          )
+          .onAreaChange((_o: Area, a: Area): void => {
+            const w: number = a.width as number;
+            const h: number = a.height as number;
+            if (w > 0 && h > 0) {
+              this.paneW = w;
+              this.paneH = h;
+            }
+          })
         // T25 dormant 黑层：常驻透明层，只在左独播域外/左独播时由 decide 写回；不拦触摸
         if (BLACK_LAYER_ENABLED) {
           Column()
@@ -1374,12 +1477,44 @@ struct Compare {
       Stack() {
         XComponent({ type: XComponentType.SURFACE, controller: this.rightXc })
           .accessibilityText('右片画面')
-          .accessibilityDescription('播放控制见底部控制条')
+          .accessibilityDescription('播放控制见底部控制条；双指缩放平移')
           .onLoad((): void => {
             this.onSurfaceLoaded(false);
           })
           .width('100%')
           .height('100%')
+          .scale(this.paneTransform(this.zoomR, this.panRX, this.panRY))
+          .translate(this.paneTranslate(this.panRX, this.panRY))
+          .gesture(
+            PinchGesture({ fingers: 2 })
+              .onActionStart((): void => {
+                this.baseZoomR = this.zoomR;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.zoomR = Math.min(4, Math.max(1, this.baseZoomR * e.scale));
+                this.clampR();
+              })
+          )
+          .gesture(
+            PanGesture({ fingers: 2, direction: PanDirection.All, distance: 1 })
+              .onActionStart((): void => {
+                this.basePanRX = this.panRX;
+                this.basePanRY = this.panRY;
+              })
+              .onActionUpdate((e: GestureEvent): void => {
+                this.panRX = this.basePanRX + e.offsetX;
+                this.panRY = this.basePanRY + e.offsetY;
+                this.clampR();
+              })
+          )
+          .onAreaChange((_o: Area, a: Area): void => {
+            const w: number = a.width as number;
+            const h: number = a.height as number;
+            if (w > 0 && h > 0) {
+              this.paneW = w;
+              this.paneH = h;
+            }
+          })
         // T25 dormant 黑层（右）
         if (BLACK_LAYER_ENABLED) {
           Column()
@@ -1648,6 +1783,21 @@ struct Compare {
             .fontSize(11)
             .onClick((): void => {
               this.openHistory();
+            })
+          // 「对着左片练」（上游 CompareScreen 2026-10-04 方向 4）：primeWith 参考片后
+          // 压栈录制页——录制页首次组合取走并自动切分屏对比循环播放
+          Button('对着练')
+            .fontSize(11)
+            .enabled(this.leftClip !== undefined)
+            .onClick((): void => {
+              const lc: VideoClip | undefined = this.leftClip;
+              if (lc === undefined) {
+                return;
+              }
+              comparePractice.primeWith(lc.id);
+              this.getUIContext().getRouter().pushUrl({ url: 'pages/Camera' }).catch((e: Object): void => {
+                this.hint = `打开录制页失败: ${e}`;
+              });
             })
           Button(this.rightClip === undefined ? '选右片' : '换右片')
             .fontSize(11)

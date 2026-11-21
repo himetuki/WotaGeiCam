@@ -14,14 +14,22 @@
 #include <multimedia/player_framework/native_avcodec_videoencoder.h>
 #include <multimedia/player_framework/native_avformat.h>
 #include <multimedia/player_framework/native_avmuxer.h>
+#include <multimedia/player_framework/native_avcodec_audiocodec.h>
 
 #include <chrono>
+#include <cstring>
 
 #define WOTA_LOG_DOMAIN 0x0000
 #define WOTA_LOG_TAG "WotaGL"
 #define WOTA_RECORD_TAG "WotaRecord"
 
 namespace {
+/** 音轨参数（与 ArkTS RecordAudioTap 采集口径逐值一致：48kHz 立体声 S16LE，AAC-LC 128k） */
+constexpr int32_t kAudioSampleRate = 48'000;
+constexpr int32_t kAudioChannels = 2;
+constexpr int32_t kAudioBitrate = 128'000;
+constexpr int32_t kAudioBytesPerSec = kAudioSampleRate * kAudioChannels * 2;
+
 int64_t NowUs()
 {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -119,6 +127,51 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
     if (trackRet != AV_ERR_OK || track_ < 0) {
         return fail("track");
     }
+    // ---------- 音轨（2026-11-02）：AAC 编码器 + muxer 音轨（须都在 muxer Start 前就绪） ----------
+    // 同步模式（不注册回调）：PCM 经 PushAudioPcm 送入，查输入缓冲→写→推；再排输出写 muxer。
+    audioCodec_ = OH_AudioCodec_CreateByMime(OH_AVCODEC_MIMETYPE_AUDIO_AAC, true);
+    if (audioCodec_ != nullptr) {
+        OH_AVFormat* audioFormat = OH_AVFormat_Create();
+        bool audioOk = OH_AVFormat_SetIntValue(audioFormat, OH_MD_KEY_AUD_SAMPLE_RATE, kAudioSampleRate);
+        audioOk = OH_AVFormat_SetIntValue(audioFormat, OH_MD_KEY_AUD_CHANNEL_COUNT, kAudioChannels) && audioOk;
+        audioOk = OH_AVFormat_SetIntValue(audioFormat, OH_MD_KEY_AUDIO_SAMPLE_FORMAT,
+            SAMPLE_S16LE) && audioOk;
+        audioOk = OH_AVFormat_SetLongValue(audioFormat, OH_MD_KEY_BITRATE,
+            static_cast<int64_t>(kAudioBitrate)) && audioOk;
+        if (audioOk && OH_AudioCodec_Configure(audioCodec_, audioFormat) == AV_ERR_OK &&
+            OH_AudioCodec_Prepare(audioCodec_) == AV_ERR_OK) {
+            OH_AVFormat* audioTrackFormat = OH_AVFormat_Create();
+            bool trackOk2 = OH_AVFormat_SetStringValue(audioTrackFormat, OH_MD_KEY_CODEC_MIME,
+                OH_AVCODEC_MIMETYPE_AUDIO_AAC);
+            trackOk2 = OH_AVFormat_SetIntValue(audioTrackFormat, OH_MD_KEY_AUD_SAMPLE_RATE,
+                kAudioSampleRate) && trackOk2;
+            trackOk2 = OH_AVFormat_SetIntValue(audioTrackFormat, OH_MD_KEY_AUD_CHANNEL_COUNT,
+                kAudioChannels) && trackOk2;
+            trackOk2 = OH_AVFormat_SetIntValue(audioTrackFormat, OH_MD_KEY_AUDIO_SAMPLE_FORMAT,
+                SAMPLE_S16LE) && trackOk2;
+            trackOk2 = OH_AVFormat_SetLongValue(audioTrackFormat, OH_MD_KEY_BITRATE,
+                static_cast<int64_t>(kAudioBitrate)) && trackOk2;
+            const OH_AVErrCode atRet = trackOk2 ? OH_AVMuxer_AddTrack(muxer_, &audioTrack_, audioTrackFormat)
+                : AV_ERR_UNKNOWN;
+            OH_AVFormat_Destroy(audioTrackFormat);
+            if (atRet == AV_ERR_OK && audioTrack_ >= 0 &&
+                OH_AudioCodec_Start(audioCodec_) == AV_ERR_OK) {
+                audioPtsUs_ = 0;
+                audioSamples_ = 0;
+                audioEos_ = false;
+            } else {
+                audioTrack_ = -1;
+                OH_AudioCodec_Destroy(audioCodec_);
+                audioCodec_ = nullptr;
+            }
+        } else {
+            OH_AudioCodec_Destroy(audioCodec_);
+            audioCodec_ = nullptr;
+        }
+        OH_AVFormat_Destroy(audioFormat);
+    }
+    // 音轨起不来不连坐视频：audioCodec_==nullptr ⇒ PushAudioPcm 拒绝、Stop 跳过音轨收尾
+
     // 容器旋转 hint（须在 muxer Start 前）：编码 UV 只送缓冲原样帧（stRotDeg、不镜像），
     // 竖屏转正靠这里（上游 orientationHint 同义）。muxer 只接受 0/90/180/270，按上游
     // normalizeQuarter 四舍五入（45→90、359→0），非 90 倍数 sensor 不得让起录失败。
@@ -150,9 +203,15 @@ std::string CodecRecorder::Start(int32_t fd, int32_t width, int32_t height, int3
 std::string CodecRecorder::FailStart(std::unique_lock<std::mutex>& lock, const char* code)
 {
     OH_AVCodec* codec = codec_;
+    OH_AVCodec* audioCodec = audioCodec_;
     OH_AVMuxer* muxer = muxer_;
     OHNativeWindow* window = window_;
     codec_ = nullptr;
+    audioCodec_ = nullptr;
+    audioTrack_ = -1;
+    audioPtsUs_ = 0;
+    audioSamples_ = 0;
+    audioEos_ = false;
     muxer_ = nullptr;
     window_ = nullptr;
     track_ = -1;
@@ -174,6 +233,10 @@ std::string CodecRecorder::FailStart(std::unique_lock<std::mutex>& lock, const c
     }
     if (codec != nullptr) {
         OH_VideoEncoder_Destroy(codec);
+    }
+    if (audioCodec != nullptr) {
+        OH_AudioCodec_Stop(audioCodec);
+        OH_AudioCodec_Destroy(audioCodec);
     }
     if (window != nullptr) {
         OH_NativeWindow_DestroyNativeWindow(window);
@@ -218,10 +281,18 @@ std::string CodecRecorder::Stop()
     const std::string error = lastError_;
 
     // 先摘走资源指针再解锁销毁：回调线程见 codec_ == nullptr 即安全返回，避免与 Stop/Destroy 互等锁
+    const int32_t audioTrackSnapshot = audioTrack_;
+    const bool muxStartedSnapshot = muxStarted_;
     OH_AVCodec* codec = codec_;
+    OH_AVCodec* audioCodec = audioCodec_;
     OH_AVMuxer* muxer = muxer_;
     OHNativeWindow* window = window_;
     codec_ = nullptr;
+    audioCodec_ = nullptr;
+    audioTrack_ = -1;
+    audioPtsUs_ = 0;
+    audioSamples_ = 0;
+    audioEos_ = false;
     muxer_ = nullptr;
     window_ = nullptr;
     track_ = -1;
@@ -237,6 +308,45 @@ std::string CodecRecorder::Stop()
 
     if (codec != nullptr) {
         OH_VideoEncoder_Stop(codec);
+    }
+    if (audioCodec != nullptr) {
+        // 音轨收尾：推 EOS 排空编码器（同步模式），再停/毁
+        uint32_t ai = 0;
+        if (OH_AudioCodec_QueryInputBuffer(audioCodec, &ai, 20'000) == AV_ERR_OK) {
+            OH_AVBuffer* ab = OH_AudioCodec_GetInputBuffer(audioCodec, ai);
+            if (ab != nullptr) {
+                OH_AVCodecBufferAttr at{};
+                at.pts = audioPtsUs_;
+                at.size = 0;
+                at.offset = 0;
+                at.flags = AVCODEC_BUFFER_FLAGS_EOS;
+                OH_AVBuffer_SetBufferAttr(ab, &at);
+                OH_AudioCodec_PushInputBuffer(audioCodec, ai);
+            }
+        }
+        for (int guard = 0; guard < 64; guard++) {
+            uint32_t oi = 0;
+            if (OH_AudioCodec_QueryOutputBuffer(audioCodec, &oi, 5'000) != AV_ERR_OK) {
+                break;
+            }
+            OH_AVBuffer* ob = OH_AudioCodec_GetOutputBuffer(audioCodec, oi);
+            if (ob == nullptr) {
+                break;
+            }
+            OH_AVCodecBufferAttr oa{};
+            const bool okAttr = OH_AVBuffer_GetBufferAttr(ob, &oa) == AV_ERR_OK;
+            const bool isEos = okAttr && (oa.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0;
+            if (okAttr && !isEos && oa.size > 0 && muxer != nullptr &&
+                audioTrackSnapshot >= 0 && muxStartedSnapshot) {
+                OH_AVMuxer_WriteSampleBuffer(muxer, static_cast<uint32_t>(audioTrackSnapshot), ob);
+            }
+            OH_AudioCodec_FreeOutputBuffer(audioCodec, oi);
+            if (isEos) {
+                break;
+            }
+        }
+        OH_AudioCodec_Stop(audioCodec);
+        OH_AudioCodec_Destroy(audioCodec);
     }
     if (muxer != nullptr) {
         OH_AVMuxer_Stop(muxer);
@@ -257,6 +367,80 @@ std::string CodecRecorder::Stop()
         return error + " samples=" + std::to_string(samples);
     }
     return "ok samples=" + std::to_string(samples) + " eos=" + (eos ? "1" : "0");
+}
+
+std::string CodecRecorder::PushAudioPcm(const uint8_t* data, int32_t size)
+{
+    if (data == nullptr || size <= 0) {
+        return "audio-empty";
+    }
+    OH_AVCodec* enc = nullptr;
+    OH_AVMuxer* muxer = nullptr;
+    int32_t track = -1;
+    int64_t pts = 0;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (state_ != State::RECORDING || audioCodec_ == nullptr || audioTrack_ < 0) {
+            return "audio-off";
+        }
+        if (audioEos_ || writeFailed_) {
+            return "audio-stopped";
+        }
+        enc = audioCodec_;
+        muxer = muxer_;
+        track = audioTrack_;
+        pts = audioPtsUs_;
+    }
+    // 同步编码：查输入缓冲 → 拷 PCM → 推；再排输出写 muxer
+    uint32_t inIndex = 0;
+    if (OH_AudioCodec_QueryInputBuffer(enc, &inIndex, 20'000) != AV_ERR_OK) {
+        return "audio-feed"; // 编码器忙：丢弃本拍（音频短缺口<1帧，不致命）
+    }
+    OH_AVBuffer* inBuf = OH_AudioCodec_GetInputBuffer(enc, inIndex);
+    if (inBuf == nullptr || OH_AVBuffer_GetCapacity(inBuf) < size) {
+        return "audio-feed";
+    }
+    std::memcpy(OH_AVBuffer_GetAddr(inBuf), data, static_cast<size_t>(size));
+    OH_AVCodecBufferAttr attr{};
+    attr.pts = pts;
+    attr.size = size;
+    attr.offset = 0;
+    attr.flags = AVCODEC_BUFFER_FLAGS_NONE;
+    if (OH_AVBuffer_SetBufferAttr(inBuf, &attr) != AV_ERR_OK ||
+        OH_AudioCodec_PushInputBuffer(enc, inIndex) != AV_ERR_OK) {
+        return "audio-feed";
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        audioPtsUs_ += static_cast<int64_t>(size) * 1'000'000 / kAudioBytesPerSec;
+        audioSamples_ += size;
+    }
+    // 排输出（非阻塞节拍；每拍最多排 8 枚）
+    for (int guard = 0; guard < 8; guard++) {
+        uint32_t oi = 0;
+        if (OH_AudioCodec_QueryOutputBuffer(enc, &oi, 0) != AV_ERR_OK) {
+            break;
+        }
+        OH_AVBuffer* ob = OH_AudioCodec_GetOutputBuffer(enc, oi);
+        if (ob == nullptr) {
+            break;
+        }
+        OH_AVCodecBufferAttr oa{};
+        const bool okAttr = OH_AVBuffer_GetBufferAttr(ob, &oa) == AV_ERR_OK;
+        const bool isEos = okAttr && (oa.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0;
+        if (okAttr && !isEos && oa.size > 0 && muxer != nullptr && track >= 0) {
+            if (OH_AVMuxer_WriteSampleBuffer(muxer, static_cast<uint32_t>(track), ob) != AV_ERR_OK) {
+                std::lock_guard<std::mutex> lock(mtx_);
+                writeFailed_ = true;
+                lastError_ = "audio-mux";
+            }
+        }
+        OH_AudioCodec_FreeOutputBuffer(enc, oi);
+        if (isEos) {
+            break;
+        }
+    }
+    return "";
 }
 
 bool CodecRecorder::IsRecording()

@@ -6,6 +6,10 @@
  * - 回收站语义：移入只写本地记录、文件原地保留；彻底删除二次确认后才 unlink 文件与 .drops.json。
  */
 import { common } from '@kit.AbilityKit';
+import { curves } from '@kit.ArkUI';
+import { SettingsStore, CameraSettings } from '../ui/SettingsStore';
+import { LikeHeart } from '../ui/LikeHeart';
+import { LiquidSpring } from '../core/LiquidSpring';
 import { image } from '@kit.ImageKit';
 import { MediaRepo, VideoClip } from '../media/MediaRepo';
 import { ClipFilter, GalleryTab, GalleryTabs } from '../media/MediaTag';
@@ -117,6 +121,15 @@ struct Gallery {
   }
 
   onPageShow(): void {
+    const gctx: common.Context | undefined = this.ctx;
+    if (gctx !== undefined) {
+      SettingsStore.load(gctx).then((gs: CameraSettings): void => {
+        if (!this.disposed) {
+          this.motionMode = gs.motionMode;
+        }
+      }).catch((_e: Object): void => {
+      });
+    }
     if (!this.pageShownOnce) {
       this.pageShownOnce = true;
       return;
@@ -480,6 +493,9 @@ struct Gallery {
   }
 
   /** G3b：全屏当前片（越界钳末位——回收站动作后列表变短） */
+    /** 动效档（motion_mode；onPageShow 直读存储——PLAIN 时红心只切状态） */
+  private motionMode: string = 'FLUENT';
+
   private fsCurrentClip(): VideoClip | undefined {
     if (this.clips.length === 0) {
       return undefined;
@@ -1350,6 +1366,8 @@ struct Gallery {
         }
         if (this.listMode === LIST_FULLSCREEN) {
           Stack({ alignContent: Alignment.Bottom }) {
+            // 翻页吸附弹簧（上游 Pager snapAnimationSpec = motion.float 的对应面）：
+            // Swiper.curve 吃 ICurve，springMotion 即同语义液态吸附；velocity 由手势连续性继承
             Swiper() {
               ForEach(this.clips, (clip: VideoClip, idx: number): void => {
                 if (idx === this.fullscreenIndex) {
@@ -1375,6 +1393,9 @@ struct Gallery {
                 }
               }, (clip: VideoClip): string => clip.path)
             }
+            // 翻页吸附弹簧（上游 Pager snapAnimationSpec = motion.float 对应面）：Swiper.curve
+            // 吃 ICurve，springMotion 即同语义液态吸附；velocity 由手势连续性继承
+            .curve(curves.springMotion(LiquidSpring.FLOAT.response, LiquidSpring.FLOAT.damping))
             .loop(false)
             .index(this.fullscreenIndex)
             .onChange((idx: number): void => {
@@ -1394,12 +1415,15 @@ struct Gallery {
                 Text(`${formatDuration(this.fsPosMs)} / ${formatDuration(this.fsDurMs)}`)
                   .fontSize(10)
                   .fontColor(Color.White)
-                Button(this.fsCurrentClip()!.liked ? '★' : '☆')
-                  .fontSize(11)
-                  .height(26)
-                  .onClick((): void => {
+                // 收藏红心（上游 a3855c3）：收藏那一下播 Bencho "Like" 红心动画
+                LikeHeart({
+                  liked: this.fsCurrentClip()!.liked,
+                  motionMode: this.motionMode,
+                  onToggle: (_next: boolean): void => {
                     this.toggleLike(this.fsCurrentClip()!);
-                  })
+                  },
+                  contentDescription: '收藏'
+                })
                 Button('分享')
                   .fontSize(11)
                   .height(26)

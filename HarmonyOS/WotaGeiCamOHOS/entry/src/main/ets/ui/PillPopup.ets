@@ -22,7 +22,9 @@ import { display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { nearestLadderIndex } from './SliderLadder';
 import { SliderKey, effectiveLadder } from './SliderSnap';
-import { SettingsStore } from './SettingsStore';
+import { MotionModeStore, SettingsStore } from './SettingsStore';
+import { curves } from '@kit.ArkUI';
+import { LiquidSpring } from '../core/LiquidSpring';
 import { HudType } from './HudTokens';
 
 /** 弹窗内容区最多占可视区高度的比例；超了就内部滚，保证「收起」永远在屏内（上游 0.62f） */
@@ -119,8 +121,12 @@ export struct WotaPillPopup {
   @BuilderParam content: () => void = pillPopupEmptyContent;
   /** 量框完成并定位后置真（透明期不拦截视觉） */
   @State shown: boolean = false;
+  /** 显形缩放（上游 LocalMotion 0.94 长开的 OHOS 面：0.94→1 弹簧；PLAIN 直达 1） */
+  @State appearScale: number = 1;
   @State posX: number = 0;
   @State posY: number = 0;
+  /** 动效档（aboutToAppear 现读；PLAIN = 无动画直达） */
+  private motionMode: string = 'FLUENT';
   @State maxContentVp: number = 200;
   private density: number = 1;
   private screenW: number = 0;
@@ -139,6 +145,10 @@ export struct WotaPillPopup {
       // 读不到显示参数（极端）：保持 density=1/屏幕 1px，place() 的钳制全部退到 margin 兜底
     }
     this.maxContentVp = PillAnchor.MAX_HEIGHT_RATIO * this.screenH / this.density;
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext() as common.Context | undefined;
+    if (ctx !== undefined) {
+      this.motionMode = MotionModeStore.read(ctx);
+    }
   }
 
   /**
@@ -171,7 +181,19 @@ export struct WotaPillPopup {
     this.lastHVp = hVp;
     this.posX = p.x / this.density;
     this.posY = p.y / this.density;
-    this.shown = true;
+    if (this.motionMode === 'PLAIN') {
+      this.appearScale = 1;
+      this.shown = true;
+      return;
+    }
+    // 显形动效（上游 LocalMotion：淡入 + 0.94 长开）：弹簧 0.94→1 + 淡入
+    this.appearScale = 0.94;
+    this.getUIContext().animateTo(
+      { duration: 250, curve: curves.springMotion(LiquidSpring.OFFSET.response, LiquidSpring.OFFSET.damping) },
+      (): void => {
+        this.appearScale = 1;
+        this.shown = true;
+      });
   }
 
   build() {
@@ -214,6 +236,7 @@ export struct WotaPillPopup {
       .border({ width: 1, color: '#26FFFFFF' })
       .padding({ left: 10, right: 10, top: 8, bottom: 8 })
       .position({ x: this.posX, y: this.posY })
+      .scale({ x: this.appearScale, y: this.appearScale })
       .opacity(this.shown ? 1 : 0)
       .onAreaChange((_old: Area, newArea: Area): void => {
         this.onMeasured(newArea.width as number, newArea.height as number);

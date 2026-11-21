@@ -32,35 +32,35 @@ function sourceText(rel: string): string {
 
 // ------------------------------------------------------------------ 上游四例的鸿蒙守卫
 
-test('缩放下限必须是1即默认最小值', () => {
+test('边长域钳进 [最小尺寸, 可用区]（29 §1.2：clamp 收口一处）', () => {
   const popup: string = sourceText('entry/src/main/ets/ui/CurvePopup.ets');
-  const at: number = popup.indexOf('maxScale: number = this.maxSide() / base');
-  assertTrue(at >= 0, '找不到缩放把手（baseSide/maxSide 判据被挪走，守卫失去输入）');
+  const at: number = popup.indexOf('private onHandlePan');
+  assertTrue(at >= 0, '找不到缩放把手（守卫失去输入）');
   const body: string = popup.substring(at, popup.indexOf('drawCurve', at));
-  assertTrue(body.indexOf('Math.max(1,') >= 0,
-    '缩放下限必须是 1（默认最小值）：低于它违背「当前尺寸=最小值」的需求');
+  assertTrue(body.indexOf('CurvePanelSize.clamp(start + e.offsetX, this.maxSide(), MIN_CURVE_SIDE)') >= 0,
+    '把手增量必须经组合期钳：下限 = 最小尺寸、上限 = 可用区（存实际边长，29 §1.2）');
 });
 
-test('扇面重置必须同时复位面板尺寸', () => {
+test('扇面重置必须同时复位面板尺寸并落盘', () => {
   const popup: string = sourceText('entry/src/main/ets/ui/CurvePopup.ets');
   const reset: number = popup.indexOf('private resetAllWithSize(): void {');
   assertTrue(reset >= 0, '找不到重置钮接线（守卫失去输入）');
-  const block: string = popup.substring(reset, popup.indexOf('this.panelScale = 1;', reset) + 22);
+  const block: string = popup.substring(reset, popup.indexOf('this.writeSide();', reset) + 18);
   assertTrue(block.indexOf('this.resetAll()') >= 0, '重置钮必须仍做四通道回恒等（resetAll）');
-  assertTrue(block.indexOf('this.panelScale = 1;') >= 0,
-    '重置钮必须复位 panelScale（需求③：重置也包括把弹窗大小复位到默认最小值）');
+  assertTrue(block.indexOf('this.savedSide = CurvePanelSize.DEFAULT_SIDE_DP') >= 0,
+    '重置写回设计档 200（29 §1.2：重置连边长一起复位并落盘）');
+  assertTrue(block.indexOf('this.writeSide();') >= 0, '重置即落盘一次');
 });
 
-test('曲线框随panelScale缩放且不越可用区上限', () => {
+test('曲线框边长=存储值带组合期二次钳（可用区）', () => {
   const popup: string = sourceText('entry/src/main/ets/ui/CurvePopup.ets');
-  assertTrue(popup.indexOf('this.baseSide() * this.panelScale') >= 0,
-    'side 必须随 panelScale 缩放（等比放大的落点）');
   const sideAt: number = popup.indexOf('private side(): number {');
   assertTrue(sideAt >= 0, '找不到 side 算式');
-  const sideBody: string = popup.substring(sideAt, popup.indexOf('}', popup.indexOf('panelScale', sideAt)));
-  assertTrue(sideBody.indexOf('this.maxSide()') >= 0, '缩放上限必须夹在可用区 maxSide（放大越界出屏）');
-  assertTrue(popup.indexOf('this.panelScale = Math.min(maxScale, Math.max(1,') >= 0,
-    '把手增量必须 coerce 到 [1, maxScale]');
+  const sideBody: string = popup.substring(sideAt, popup.indexOf('}', popup.indexOf('CurvePanelSize.clamp', sideAt)));
+  assertTrue(sideBody.indexOf('CurvePanelSize.clamp(this.savedSide, this.maxSide(), MIN_CURVE_SIDE)') >= 0,
+    'side = 持久边长带可用区二次钳（29 §1.2：换小屏缩回、手改小值抬回最小）');
+  assertTrue(popup.indexOf('private panelScale(): number') >= 0,
+    'dot/线宽的等比输入保留（与旧 panelScale 同义）');
 });
 
 test('节点与线宽随scale等比', () => {
@@ -69,8 +69,10 @@ test('节点与线宽随scale等比', () => {
   assertTrue(popup.indexOf('ctx.lineWidth = 1 * scale') >= 0 &&
     popup.indexOf('ctx.lineWidth = 1.5 * scale') >= 0 &&
     popup.indexOf('ctx.lineWidth = 2 * scale') >= 0, '网格/y=x/折线线宽必须乘 scale');
-  assertTrue(popup.indexOf('(i === this.selected ? 9 : 6.5) * scale') >= 0,
-    '节点半径必须乘 scale');
+  // 半径仍乘 scale；端点 1.15×（7.5）与中间点可区分（29 §3.2-2）
+  assertTrue(popup.indexOf('? 9 : endpoint ? 7.5 : 6.5') >= 0 &&
+    popup.indexOf('* scale') >= 0,
+    '节点半径必须乘 scale（端点 7.5 与中间 6.5 可区分）');
 });
 
 // ------------------------------------------------------------------ CurveStack 编解码（curve_stack 持久化格式）
