@@ -98,7 +98,7 @@ trap cleanup EXIT
 settings_rc=0
 apple_show_build_settings "$APPLE_SCHEME" "$APPLE_CONFIGURATION" "$SETTINGS_FILE" || settings_rc=$?
 if [ "$settings_rc" -ne 0 ]; then
-  echo "ERROR: xcodebuild -showBuildSettings 失败（退出码 $settings_rc），未执行 archive。" >&2
+  echo "ERROR: xcodebuild -showBuildSettings 失败（退出码 ${settings_rc}），未执行 archive。" >&2
   exit "$settings_rc"
 fi
 
@@ -130,7 +130,7 @@ xcodebuild \
 
 echo "ARCHIVE_EXIT=$archive_rc"
 if [ "$archive_rc" -ne 0 ]; then
-  echo "ERROR: xcodebuild archive 失败（退出码 $archive_rc），保留旧归档不变。" >&2
+  echo "ERROR: xcodebuild archive 失败（退出码 ${archive_rc}），保留旧归档不变。" >&2
   exit "$archive_rc"
 fi
 
@@ -141,7 +141,7 @@ APPS_DIR="$TMP_ARCHIVE/Products/Applications"
 TOTAL_APPS="$(apple_count_apps "$TMP_ARCHIVE/Products")"
 FLAT_APPS="$(apple_count_apps "$APPS_DIR")"
 if [ "$TOTAL_APPS" != "1" ] || [ "$FLAT_APPS" != "1" ]; then
-  echo "ERROR: archive Products 下的 .app 数量异常：Products=$TOTAL_APPS，Products/Applications=$FLAT_APPS；要求恰好 1 个。" >&2
+  echo "ERROR: archive Products 下的 .app 数量异常：Products=${TOTAL_APPS}，Products/Applications=${FLAT_APPS}；要求恰好 1 个。" >&2
   exit 70
 fi
 

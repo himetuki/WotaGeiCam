@@ -160,7 +160,7 @@ fi
 unzip -q "$TMP_IPA" -d "$VERIFY" || apple_fail 70 "IPA 解压回读失败：$TMP_IPA"
 [ -d "$VERIFY/Payload" ] || apple_fail 70 "IPA 缺 Payload 目录。"
 IPA_APP_COUNT="$(find "$VERIFY/Payload" -mindepth 1 -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')"
-[ "$IPA_APP_COUNT" = "1" ] || apple_fail 70 "Payload 下应有且仅有 1 个 .app，实际 $IPA_APP_COUNT。"
+[ "$IPA_APP_COUNT" = "1" ] || apple_fail 70 "Payload 下应有且仅有 1 个 .app，实际 ${IPA_APP_COUNT}。"
 IPA_APP="$(apple_first_app_flat "$VERIFY/Payload")"
 [ -n "$IPA_APP" ] || apple_fail 70 "无法定位 Payload 内的 .app。"
 [ "$(basename "$IPA_APP")" = "$APP_NAME" ] || \
@@ -172,7 +172,7 @@ SRC_EXEC_SHA="$(apple_sha256 "$APP_DIR/$EXEC_NAME")" || apple_fail 70 "无法计
 IPA_EXEC_NAME="$(apple_app_executable "$IPA_APP")" || apple_fail 70 "解压后的 .app 缺 CFBundleExecutable。"
 IPA_EXEC_SHA="$(apple_sha256 "$IPA_APP/$IPA_EXEC_NAME")" || apple_fail 70 "无法计算解压后可执行文件 SHA-256。"
 [ "$SRC_EXEC_SHA" = "$IPA_EXEC_SHA" ] || \
-  apple_fail 70 "解压后主可执行文件 SHA-256 不一致：源=$SRC_EXEC_SHA，IPA=$IPA_EXEC_SHA。"
+  apple_fail 70 "解压后主可执行文件 SHA-256 不一致：源=${SRC_EXEC_SHA}，IPA=${IPA_EXEC_SHA}。"
 
 SRC_BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$APP_DIR/Info.plist" 2>/dev/null || true)"
 IPA_BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$IPA_APP/Info.plist" 2>/dev/null || true)"

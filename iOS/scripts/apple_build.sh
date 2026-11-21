@@ -92,7 +92,7 @@ trap cleanup EXIT
 settings_rc=0
 apple_show_build_settings "$APPLE_SCHEME" "$APPLE_CONFIGURATION" "$SETTINGS_FILE" || settings_rc=$?
 if [ "$settings_rc" -ne 0 ]; then
-  echo "ERROR: xcodebuild -showBuildSettings 失败（退出码 $settings_rc），未执行构建。" >&2
+  echo "ERROR: xcodebuild -showBuildSettings 失败（退出码 ${settings_rc}），未执行构建。" >&2
   exit "$settings_rc"
 fi
 
@@ -123,7 +123,7 @@ xcodebuild \
 
 echo "BUILD_EXIT=$build_rc"
 if [ "$build_rc" -ne 0 ]; then
-  echo "ERROR: xcodebuild build 失败（退出码 $build_rc），不产出新的 .app。" >&2
+  echo "ERROR: xcodebuild build 失败（退出码 ${build_rc}），不产出新的 .app。" >&2
   exit "$build_rc"
 fi
 

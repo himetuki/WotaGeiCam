@@ -232,8 +232,8 @@ apple_validate_scheme_configuration() {
   case "$configuration" in
     "$APPLE_DEBUG_CONFIG"|"$APPLE_RELEASE_CONFIG") ;;
     *)
-      echo "ERROR: scheme $scheme 不支持 configuration=$configuration。" >&2
-      echo "  该 scheme 只接受：$APPLE_DEBUG_CONFIG（Debug）或 $APPLE_RELEASE_CONFIG（Release）。" >&2
+      echo "ERROR: scheme $scheme 不支持 configuration=${configuration}。" >&2
+      echo "  该 scheme 只接受：${APPLE_DEBUG_CONFIG}（Debug）或 ${APPLE_RELEASE_CONFIG}（Release）。" >&2
       exit 64
       ;;
   esac
@@ -294,7 +294,7 @@ apple_validate_device_app() {
 
   signed_artifact="$(find "$app" \( -name '_CodeSignature' -o -name '*.mobileprovision' -o -name 'CodeResources' \) -print -quit 2>/dev/null || true)"
   [ -z "$signed_artifact" ] || \
-    apple_fail 65 "拒绝已签名/带描述文件的输入：$signed_artifact（必须来自 CODE_SIGNING_ALLOWED=NO 的设备构建）"
+    apple_fail 65 "拒绝已签名/带描述文件的输入：${signed_artifact}（必须来自 CODE_SIGNING_ALLOWED=NO 的设备构建）"
 
   exec_name="$(apple_app_executable "$app")" || apple_fail 65 "Info.plist 缺 CFBundleExecutable。"
   case "$exec_name" in
@@ -327,7 +327,7 @@ apple_validate_device_app() {
     header="$(apple_otool -arch "$arch" -hv "$exec_path" 2>/dev/null | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}' || true)"
     [ -n "$header" ] || apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：$exec_path"
     filetype="$(printf '%s\n' "$header" | awk '{print $5}')"
-    [ "$filetype" = "2" ] || apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=$filetype）。"
+    [ "$filetype" = "2" ] || apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=${filetype}）。"
 
     loads="$(apple_otool -arch "$arch" -l "$exec_path" 2>/dev/null)" || \
       apple_fail 65 "otool 无法读取 $arch 的 load commands：$exec_path"
@@ -339,7 +339,7 @@ apple_validate_device_app() {
       build_min_os="$(apple_trim "$build_min_os")"
       case "$build_platform" in
         IOS) ;;
-        *SIMULATOR*|IOSSIMULATOR) apple_fail 65 "$arch 的 LC_BUILD_VERSION platform=$build_platform，拒绝模拟器产物。" ;;
+        *SIMULATOR*|IOSSIMULATOR) apple_fail 65 "$arch 的 LC_BUILD_VERSION platform=${build_platform}，拒绝模拟器产物。" ;;
         *) apple_fail 65 "$arch 的 LC_BUILD_VERSION platform=${build_platform:-<missing>}，不是 IOS。" ;;
       esac
       [ -n "$build_min_os" ] || apple_fail 65 "$arch 的 LC_BUILD_VERSION 缺 minos。"
@@ -354,7 +354,7 @@ apple_validate_device_app() {
     fi
 
     apple_version_ge "$build_min_os" "$expected_min_os" || \
-      apple_fail 65 "$arch Mach-O 最低系统 $build_min_os 低于 $profile 期望 $expected_min_os。"
+      apple_fail 65 "$arch Mach-O 最低系统 $build_min_os 低于 $profile 期望 ${expected_min_os}。"
     echo "MACHO_ARCH=$arch $evidence"
   done
 
@@ -403,14 +403,14 @@ apple_validate_build_settings() {
   full_name="$(apple_trim "$(apple_setting "$file" FULL_PRODUCT_NAME)")"
   target_dir="$(apple_trim "$(apple_setting "$file" TARGET_BUILD_DIR)")"
 
-  [ "$sdk" = "iphoneos" ] || apple_fail 65 "SDKROOT=$sdk，要求 iphoneos。"
-  [ "$platform" = "iphoneos" ] || apple_fail 65 "PLATFORM_NAME=$platform，要求 iphoneos。"
+  [ "$sdk" = "iphoneos" ] || apple_fail 65 "SDKROOT=${sdk}，要求 iphoneos。"
+  [ "$platform" = "iphoneos" ] || apple_fail 65 "PLATFORM_NAME=${platform}，要求 iphoneos。"
   [ "$resolved_config" = "$configuration" ] || \
-    apple_fail 65 "实际构建配置=$resolved_config，与请求的 $configuration 不符。"
+    apple_fail 65 "实际构建配置=${resolved_config}，与请求的 $configuration 不符。"
   [ "$archs" = "$(apple_normalize_archs "$(apple_profile_archs "$profile")")" ] || \
     apple_fail 65 "ARCHS=[$archs]，$profile 期望=[$(apple_profile_archs "$profile")]。"
   [ "$(apple_version_key "$min_os")" = "$(apple_version_key "$(apple_profile_min_os "$profile")")" ] || \
-    apple_fail 65 "IPHONEOS_DEPLOYMENT_TARGET=$min_os，$profile 期望=$(apple_profile_min_os "$profile")。"
+    apple_fail 65 "IPHONEOS_DEPLOYMENT_TARGET=${min_os}，$profile 期望=$(apple_profile_min_os "$profile")。"
 
   case "$full_name" in
     */*|"") apple_fail 70 "FULL_PRODUCT_NAME 非法：$full_name" ;;
@@ -440,7 +440,7 @@ apple_require_fresh() {
   [ -e "$path" ] || apple_fail 70 "产物不存在：$path"
   mtime="$(apple_mtime "$path")" || apple_fail 70 "无法读取 mtime：$path"
   if [ "$mtime" -lt "$((since - 2))" ]; then
-    apple_fail 70 "拒绝陈旧产物（mtime=$mtime，本次构建开始=$since）：$path"
+    apple_fail 70 "拒绝陈旧产物（mtime=${mtime}，本次构建开始=${since}）：$path"
   fi
   echo "FRESH_PRODUCT=$path"
 }
@@ -480,14 +480,14 @@ apple_resolve_output_path() {
   real_ancestor="$(cd "$ancestor" && pwd -P)" || apple_fail 64 "无法解析输出目录：$dir"
   case "$real_ancestor/" in
     "$APPLE_IOS_ROOT"/*) ;;
-    *) apple_fail 64 "输出必须物理位于 iOS/ 下：$raw（解析到 $real_ancestor）" ;;
+    *) apple_fail 64 "输出必须物理位于 iOS/ 下：${raw}（解析到 ${real_ancestor}）" ;;
   esac
 
   mkdir -p "$dir" || apple_fail 70 "无法创建输出目录：$dir"
   real_dir="$(cd "$dir" && pwd -P)" || apple_fail 64 "无法解析输出目录：$dir"
   case "$real_dir/" in
     "$APPLE_IOS_ROOT"/*) ;;
-    *) apple_fail 64 "输出必须物理位于 iOS/ 下：$raw（解析到 $real_dir）" ;;
+    *) apple_fail 64 "输出必须物理位于 iOS/ 下：${raw}（解析到 ${real_dir}）" ;;
   esac
 
   APPLE_RESOLVED_OUTPUT="$real_dir/$(basename "$abs")"

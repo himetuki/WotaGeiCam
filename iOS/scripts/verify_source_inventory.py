@@ -256,6 +256,26 @@ def check_upstream_sync() -> None:
         check(token in text, f"UPSTREAM_SYNC.md: 缺少『{desc}』关键词『{token}』")
 
 
+def check_shell_script_locale_safety() -> None:
+    """v0.0.12-r14 CI 实证：`$var` 后紧跟多字节字符时，C locale 的 bash 会把
+    该字节吸收进变量名，报 `unbound variable`（macOS runner 无 UTF-8 locale）。
+    因此 iOS 脚本里所有「$var 紧跟非 ASCII」必须写成 `${var}`；此检查让
+    structure-checks 在 ubuntu 上提前拦截，不再等 macOS job 失败。
+    """
+    pattern = re.compile(rb"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
+    for path in sorted((IOS_ROOT / "scripts").glob("*.sh")):
+        data = path.read_bytes()
+        hits = []
+        for m in pattern.finditer(data):
+            line = data.count(b"\n", 0, m.start()) + 1
+            hits.append(f"{path.relative_to(REPO_ROOT)}:{line}")
+        check(
+            not hits,
+            "iOS 脚本存在 `$var` 紧跟多字节字符（runner 的 C locale 会解析成未定义变量，"
+            f"必须改写为 ${{var}}）：{hits}",
+        )
+
+
 def main() -> int:
     check_required_files()
 
@@ -265,6 +285,7 @@ def main() -> int:
 
     check_ai_exclusion()
     check_upstream_sync()
+    check_shell_script_locale_safety()
 
     print(f"checks={CHECKS} failures={len(FAILURES)}")
     if FAILURES:
