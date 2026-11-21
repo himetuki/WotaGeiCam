@@ -324,13 +324,23 @@ apple_validate_device_app() {
     apple_fail 65 "架构不匹配：实际=[$archs_norm]，$profile 期望=[$expected_archs]。"
 
   for arch in $archs_norm; do
-    header="$(apple_otool -arch "$arch" -hv "$exec_path" 2>/dev/null | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}' || true)"
-    [ -n "$header" ] || apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：$exec_path"
+    # 2>&1 而非丢弃 stderr：诊断期要把 otool 的真实输出带进失败信息（r14 CI 实证 -hv 输出为空）。
+    otool_out="$(apple_otool -arch "$arch" -hv "$exec_path" 2>&1 || true)"
+    header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}')"
+    if [ -z "$header" ]; then
+      # 回退：某些 otool 对薄二进制不接受 -arch 过滤，去掉 -arch 再读一次。
+      otool_out="$(apple_otool -hv "$exec_path" 2>&1 || true)"
+      header="$(printf '%s\n' "$otool_out" | awk '/^[[:space:]]*0x[0-9a-fA-F]+[[:space:]]/ {print; exit}')"
+    fi
+    if [ -z "$header" ]; then
+      snippet="$(printf '%s' "$otool_out" | head -c 400 | tr '\n' '|')"
+      apple_fail 65 "otool 无法读取 $arch 的 Mach-O header：$exec_path（otool 输出：${snippet:-<empty>}）"
+    fi
     filetype="$(printf '%s\n' "$header" | awk '{print $5}')"
     [ "$filetype" = "2" ] || apple_fail 65 "$arch 不是 MH_EXECUTE（filetype=${filetype}）。"
 
-    loads="$(apple_otool -arch "$arch" -l "$exec_path" 2>/dev/null)" || \
-      apple_fail 65 "otool 无法读取 $arch 的 load commands：$exec_path"
+    loads="$(apple_otool -arch "$arch" -l "$exec_path" 2>&1)" || \
+      apple_fail 65 "otool 无法读取 $arch 的 load commands：$exec_path（otool 输出：$(printf '%s' "$loads" | head -c 400 | tr '\n' '|')）"
 
     if printf '%s\n' "$loads" | grep -q 'cmd LC_BUILD_VERSION'; then
       build_platform="$(printf '%s\n' "$loads" | awk '/cmd LC_BUILD_VERSION/ {f=1} f && /^[[:space:]]*platform / {sub(/^[[:space:]]*platform[[:space:]]+/, ""); print; exit}')"
