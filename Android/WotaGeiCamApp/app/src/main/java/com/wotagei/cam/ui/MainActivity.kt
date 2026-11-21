@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,11 +40,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner as ComposeLocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner as LifecycleLocalLifecycleOwner
 import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -328,11 +331,23 @@ class MainActivity : ComponentActivity() {
             }, "wota-sweep").apply { isDaemon = true }.start()
         }
         setContent {
-            WotaTheme {
-                val prefs = remember { WotaSettings.of(this) }
-                var motion by remember { mutableStateOf(WotaSettings.motionMode(prefs)) }
-                WatchMotion(prefs) { motion = it }
-                WotaMotionProvider(mode = motion) { WotaRoot() }
+            // 版本对齐桥（2026-11-21 启动闪退根因）：lifecycle-runtime-compose 2.8.2 的
+            // `collectAsStateWithLifecycle()` 读取新版 `androidx.lifecycle.compose.LocalLifecycleOwner`，
+            // 而本工程锁在 Compose UI 1.6.8（BOM 2024.06.00），其根组合只提供旧版
+            // `androidx.compose.ui.platform.LocalLifecycleOwner`。release 的 R8 优化档下新版 Local
+            // 没有值，CameraScreen 首帧的 `observed()` 直接抛
+            // `IllegalStateException: CompositionLocal LocalLifecycleOwner not present`。
+            // 在根组合把同一个 owner 补给新版 Local：语义与升级 Compose 1.7 后一致，
+            // 所有 `observed()` 保留 lifecycle 感知（后台不采集）。升级 BOM 到 1.7+ 后可删除本桥。
+            CompositionLocalProvider(
+                LifecycleLocalLifecycleOwner provides ComposeLocalLifecycleOwner.current
+            ) {
+                WotaTheme {
+                    val prefs = remember { WotaSettings.of(this) }
+                    var motion by remember { mutableStateOf(WotaSettings.motionMode(prefs)) }
+                    WatchMotion(prefs) { motion = it }
+                    WotaMotionProvider(mode = motion) { WotaRoot() }
+                }
             }
         }
     }
