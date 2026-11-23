@@ -88,9 +88,23 @@ final class SettingsViewController: UITableViewController, UIDocumentPickerDeleg
             SettingRow(title: "当前版本", kind: .value("\(updater.localVersionName) (\(updater.flavor))"), onSelect: nil),
             SettingRow(title: "检查更新", kind: .disclosure, onSelect: { [weak self] in self?.performUpdateCheck() }),
             SettingRow(title: "打开发布页", kind: .disclosure, onSelect: { [weak self] in self?.updater.openReleasePage() }),
+            // 「WotaGeiCam issues」反馈收集表（2026-11-23）：iOS 侧本页没有独立日志导出区，
+            // 紧挨检查更新/发布页挂（与另两端「日志导出 ↔ 反馈 ↔ 检查更新」的相邻关系保持一致方向）。
+            SettingRow(title: "WotaGeiCam issues", kind: .disclosure, onSelect: { [weak self] in self?.openFeedbackForm() }),
         ]
         return rows
     }
+
+    /// 「WotaGeiCam issues」反馈收集表（腾讯文档，2026-11-23）：给不用 GitHub 的用户提交反馈；
+    /// 三类可选——报告问题、bug；请求新功能；功能改进建议。浏览器打开，App 自身不发起网络请求。
+    private func openFeedbackForm() {
+        guard let url = URL(string: Self.feedbackFormUrl), url.scheme == "https" else { return }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
+    }
+
+    private static let feedbackFormUrl = "https://docs.qq.com/form/page/DT2ZCckViZHJEdmh5"
 
     private func cameraDefaultRows() -> [SettingRow] {
         let store = self.store

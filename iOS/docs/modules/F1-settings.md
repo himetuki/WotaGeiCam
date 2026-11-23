@@ -339,6 +339,9 @@ final class UpdateChecker {                                     // Update/
   不崩溃、不明显卡顿、内存无数百 MB 峰值；正常 < 4 MiB 备份仍可导入。
 - MV-F1-11 取消/失败可见：导入选择器点「取消」无副作用；选中损坏文件有失败弹窗；导出后分享面板
   可取消，未点选任何目标时不会产生网络/外发行为。
+- MV-F1-12 问题反馈（2026-11-23）：「版本与更新」组内「WotaGeiCam issues」行（检查更新/打开发布页
+  之下）→ Safari 打开腾讯文档收集表 `https://docs.qq.com/form/page/DT2ZCckViZHJEdmh5`；App 自身无网络请求。
+  iOS 本页无独立日志导出区，行位紧挨检查更新（另两端为「日志导出 ↔ 反馈 ↔ 检查更新」）。
 
 ## 10. 验证状态（本机 Windows，无 Apple 工具链）
 
