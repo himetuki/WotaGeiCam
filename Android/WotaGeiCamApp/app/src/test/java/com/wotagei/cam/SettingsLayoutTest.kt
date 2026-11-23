@@ -35,14 +35,16 @@ class SettingsLayoutTest {
         SettingsBlock.TEXT,
         SettingsBlock.PERM,
         SettingsBlock.ABOUT,
+        // 2026-11-23 新增：问题反馈（「WotaGeiCam issues」腾讯文档收集表入口），插在关于与诊断日志之间
+        SettingsBlock.FEEDBACK,
         // 2026-10-09 新增：诊断日志（详细档开关 + 一键导出），排在最后 = 仍是"改造前单列顺序"的追加
         SettingsBlock.DIAG,
     )
 
     @Test
-    fun `blocksOf恰好14项且顺序与改造前单列视觉顺序一致`() {
+    fun `blocksOf恰好15项且顺序与改造前单列视觉顺序一致`() {
         assertEquals(expectedOrder, blocksOf())
-        assertEquals(14, blocksOf().size)
+        assertEquals(15, blocksOf().size)
     }
 
     @Test
@@ -60,6 +62,7 @@ class SettingsLayoutTest {
         assertEquals(1, columnOfBlock(SettingsBlock.TEXT))
         assertEquals(1, columnOfBlock(SettingsBlock.PERM))
         assertEquals(1, columnOfBlock(SettingsBlock.ABOUT))
+        assertEquals(1, columnOfBlock(SettingsBlock.FEEDBACK))
         assertEquals(1, columnOfBlock(SettingsBlock.DIAG))
     }
 
@@ -86,9 +89,9 @@ class SettingsLayoutTest {
         val plan = layoutPlanOf(766)
         assertEquals(2, plan.columns)
         val union = plan.left + plan.right
-        // 无重复：并集条数必须正好是全部区块数（重一项会变 15）
-        assertEquals(14, union.size)
-        // 并集真断言：不只大小相同，元素集合也必须等于全表（漏一项会变 13 且集合不等）
+        // 无重复：并集条数必须正好是全部区块数（重一项会变 16）
+        assertEquals(15, union.size)
+        // 并集真断言：不只大小相同，元素集合也必须等于全表（漏一项会变 14 且集合不等）
         assertEquals(expectedOrder.toSet(), union.toSet())
     }
 
@@ -123,6 +126,7 @@ class SettingsLayoutTest {
                 SettingsBlock.TEXT,
                 SettingsBlock.PERM,
                 SettingsBlock.ABOUT,
+                SettingsBlock.FEEDBACK,
                 SettingsBlock.DIAG,
             ),
             plan.right,

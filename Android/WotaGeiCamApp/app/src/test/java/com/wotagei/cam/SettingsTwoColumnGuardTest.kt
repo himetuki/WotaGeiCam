@@ -13,7 +13,7 @@ import org.junit.Test
  *
  * 两栏改造最容易做半截：区块搬进具名 composable 时漏搬一两个，剩下的 `SettingGroup(...)` 继续
  * 挂在根 Column 上——编译全过、观感却一半两栏一半单栏，肉眼未必当场看出。三条判据：
- * 1. 11 个 `Block*` 具名 composable **逐个**都在（用 [bodyOf] 定位，缺一个直接红）；
+ * 1. 13 个 `Block*` 具名 composable **逐个**都在（用 [bodyOf] 定位，缺一个直接红）；
  * 2. 「检查更新」入口的**唯一调用点**仍挂在关于区块 [bodyOf] 体内（搬动不许把入口搬丢/搬去别处）；
  * 3. **负面锁**：根 Column 所在的 `SettingsScreen` / `SettingsBody` 体内不得再出现裸 `SettingGroup(`。
  *
@@ -25,7 +25,7 @@ class SettingsTwoColumnGuardTest {
         codeOnly(KotlinSourceScan.mainSourceText("ui/SettingsScreen.kt"))
     }
 
-    /** 12 个区块 composable 的函数名（枚举声明顺序）；具名强绑定，改一个名字这里就红 */
+    /** 13 个区块 composable 的函数名（枚举声明顺序；滑杆/诊断日志两块历史未入列）；具名强绑定，改一个名字这里就红 */
     private val blockFns = listOf(
         "BlockDefault",
         "BlockOrientation",
@@ -39,6 +39,7 @@ class SettingsTwoColumnGuardTest {
         "BlockText",
         "BlockPerm",
         "BlockAbout",
+        "BlockFeedback",
     )
 
     // ------------------------------------------------------------------ 判据（纯函数，真身与突变体同吃）
@@ -87,7 +88,7 @@ class SettingsTwoColumnGuardTest {
     // ------------------------------------------------------------------ 真身断言
 
     @Test
-    fun `十一个区块具名composable逐个都在`() {
+    fun `十三个区块具名composable逐个都在`() {
         assertEquals("缺失/无体的区块 composable：", emptyList<String>(), missingBlocks(realMasked))
     }
 

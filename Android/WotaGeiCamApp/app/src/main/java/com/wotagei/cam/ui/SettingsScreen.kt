@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import com.wotagei.cam.BuildConfig
 import com.wotagei.cam.diag.Diag
@@ -675,6 +676,7 @@ private fun BlockHost(block: SettingsBlock, prefs: SharedPreferences, onOpenHudE
         SettingsBlock.TEXT -> BlockText(prefs)
         SettingsBlock.PERM -> BlockPerm()
         SettingsBlock.ABOUT -> BlockAbout()
+        SettingsBlock.FEEDBACK -> BlockFeedback()
         SettingsBlock.DIAG -> BlockDiag(prefs)
     }
 }
@@ -1362,6 +1364,66 @@ private fun BlockAbout() {
             color = WotaColor.textMid,
             modifier = Modifier.padding(top = 8.dp)
         )
+    }
+}
+
+// ------------------------------------------------------------------ 问题反馈
+
+/** 「WotaGeiCam issues」反馈收集表（腾讯文档，2026-11-23）链接字面量（改链先改守卫） */
+private const val FEEDBACK_FORM_URL = "https://docs.qq.com/form/page/DT2ZCckViZHJEdmh5"
+
+/**
+ * 问题反馈区块（2026-11-23 用户指令「加到日志导出与软件更新之间」，让不用 GitHub 的用户也能提交）：
+ * 一行链接入口交给**系统浏览器**打开腾讯文档收集表，三类反馈可选——报告问题、bug；请求新功能；功能改进建议。
+ * 本应用自身不发起任何网络请求（点击只是把 https 链接交给浏览器），
+ * 「网络只允许出现在 update/ 包」的红线（UpdateNetworkGuardTest / DiagGuardTest）不受影响。
+ */
+@Composable
+private fun BlockFeedback() {
+    val context = LocalContext.current
+    // 打开失败（无浏览器等极少数环境）在行下方如实提示，成功不占位
+    var openFailed by remember { mutableStateOf(false) }
+    SettingGroup(stringResource(R.string.set_group_feedback))
+    Card {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    openFailed = false
+                    openFailed = runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(FEEDBACK_FORM_URL))
+                        )
+                    }.isFailure
+                }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = stringResource(R.string.set_feedback_open),
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaText,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.bodyMedium,
+                color = WotaColor.textMid
+            )
+        }
+        Text(
+            text = stringResource(R.string.set_feedback_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = WotaColor.textMid
+        )
+        if (openFailed) {
+            Text(
+                text = stringResource(R.string.set_feedback_open_failed),
+                style = MaterialTheme.typography.bodySmall,
+                // 失败提示与权限「未授权」同一强调色（WotaRec），不新建色
+                color = WotaRec
+            )
+        }
     }
 }
 

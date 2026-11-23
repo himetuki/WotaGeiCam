@@ -93,6 +93,11 @@
     <string name="set_package">包名</string>
     <!-- 2026-10-06「检查更新」上线后原「应用不联网」不再属实：联网只发生在用户点「检查更新」那一下 -->
     <string name="set_about_note">全部数据保存在本机；仅点「检查更新」时联网</string>
+    <!-- 问题反馈（2026-11-23）：「WotaGeiCam issues」腾讯文档收集表，浏览器打开、不用 GitHub 账号 -->
+    <string name="set_group_feedback">问题反馈</string>
+    <string name="set_feedback_open">WotaGeiCam issues</string>
+    <string name="set_feedback_note">腾讯文档收集表，浏览器打开、不用 GitHub 账号；可提交：报告问题、bug；请求新功能；功能改进建议</string>
+    <string name="set_feedback_open_failed">打开失败：本机没有能打开链接的应用</string>
     <!-- 检查更新（纯手动：仅点击时联网，无自动检查） -->
     <string name="set_update">检查更新</string>
     <string name="set_update_idle">点此联网检查 GitHub 最新版</string>

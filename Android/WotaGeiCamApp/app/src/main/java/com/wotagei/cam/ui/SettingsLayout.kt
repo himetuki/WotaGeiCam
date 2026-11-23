@@ -50,6 +50,9 @@ enum class SettingsBlock(val id: String) {
     /** 关于（版本号/包名/检查更新） */
     ABOUT("about"),
 
+    /** 问题反馈（「WotaGeiCam issues」腾讯文档收集表，浏览器打开；插在关于与诊断日志之间，2026-11-23） */
+    FEEDBACK("feedback"),
+
     /** 诊断日志（详细档开关 + 一键导出，2026-10-09） */
     DIAG("diag"),
 }
@@ -76,6 +79,7 @@ private val RIGHT_COLUMN = listOf(
     SettingsBlock.TEXT,
     SettingsBlock.PERM,
     SettingsBlock.ABOUT,
+    SettingsBlock.FEEDBACK,
     SettingsBlock.DIAG,
 )
 
