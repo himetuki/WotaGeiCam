@@ -81,6 +81,9 @@ const EFFECT_LABELS: Array<string> = ['直通', '曲线', '斑马', '峰值'];
 const DEV_UNLOCK_TAPS: number = 7;
 const DEV_UNLOCK_WINDOW_MS: number = 2000;
 
+/** 「WotaGeiCam issues」反馈收集表（腾讯文档，2026-11-23）：给不用 GitHub 的用户提交反馈用 */
+const FEEDBACK_FORM_URL: string = 'https://docs.qq.com/form/page/DT2ZCckViZHJEdmh5';
+
 /**
  * 设置页局部视觉令牌（横屏复刻安卓侧 v0.0.11 截图）：只在 Settings.ets 使用，
  * 不动 ui/HudTokens 公共真源。HudColor.ACCENT 是录制粉，截图里的设置页强调色是亮蓝。
@@ -428,7 +431,19 @@ struct Settings {
     if (ctx === undefined) {
       return;
     }
-    const ok: boolean = await UpdateInstaller.openReleasePage(ctx, UpdateConfig.RELEASES_LATEST_PAGE);
+    const ok: boolean = await UpdateInstaller.openInBrowser(ctx, UpdateConfig.RELEASES_LATEST_PAGE);
+    if (!ok) {
+      this.message = '打开浏览器失败';
+    }
+  }
+
+  /** 打开「WotaGeiCam issues」反馈收集表（浏览器；本应用自身不联网） */
+  private async openFeedbackForm(): Promise<void> {
+    const ctx: common.Context | undefined = this.hostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    const ok: boolean = await UpdateInstaller.openInBrowser(ctx, FEEDBACK_FORM_URL);
     if (!ok) {
       this.message = '打开浏览器失败';
     }
@@ -1242,6 +1257,44 @@ struct Settings {
     .width('100%')
   }
 
+  /** 问题反馈（2026-11-23）：「WotaGeiCam issues」收集表，浏览器打开、不用 GitHub 账号；挂在诊断日志与检查更新之间 */
+  @Builder
+  private feedbackGroup() {
+    Column({ space: SettingsVisual.HEAD_GAP }) {
+      this.sectionTitle('问题反馈')
+      Column() {
+        Row({ space: 12 }) {
+          Column({ space: 3 }) {
+            Text('WotaGeiCam issues')
+              .fontSize(SettingsVisual.ROW_TITLE)
+              .fontColor(HudColor.TEXT_PRIMARY)
+              .width('100%')
+            Text('腾讯文档收集表，浏览器打开、不用 GitHub 账号；可提交：报告问题、bug；请求新功能；功能改进建议')
+              .fontSize(SettingsVisual.ROW_DESC)
+              .fontColor(SettingsVisual.TEXT_DIM)
+              .width('100%')
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          Text('›')
+            .fontSize(SettingsVisual.ROW_TITLE)
+            .fontColor(SettingsVisual.TEXT_DIM)
+        }
+        .width('100%')
+        .padding({ top: 14, bottom: 14 })
+        .alignItems(VerticalAlign.Center)
+        .onClick((): void => {
+          this.openFeedbackForm();
+        })
+      }
+      .width('100%')
+      .padding(SettingsVisual.CARD_PAD)
+      .backgroundColor(SettingsVisual.CARD_BG)
+      .borderRadius(SettingsVisual.CARD_RADIUS)
+    }
+    .width('100%')
+  }
+
   /** 检查更新：纯手动行 + 版本行（版本 7 连点解锁开发者入口，逻辑不变） */
   @Builder
   private aboutGroup() {
@@ -1327,7 +1380,7 @@ struct Settings {
     .width('100%')
   }
 
-  /** 横屏右列：取景读数 / 屏幕监看 / 对比播放 / 文本高度 / 权限状态 / 诊断日志 / 检查更新 */
+  /** 横屏右列：取景读数 / 屏幕监看 / 对比播放 / 文本高度 / 权限状态 / 诊断日志 / 问题反馈 / 检查更新 */
   @Builder
   private rightColumn() {
     Column({ space: SettingsVisual.SECTION_GAP }) {
@@ -1337,12 +1390,13 @@ struct Settings {
       this.textScaleGroup()
       this.permissionGroup()
       this.diagGroup()
+      this.feedbackGroup()
       this.aboutGroup()
     }
     .width('100%')
   }
 
-  /** 竖屏单列：顺序沿用旧页（录制 → 吸附 → 取景辅助/参考线 → 屏幕监看 → 对比/缩放 → 方向/读数 → 权限/诊断/更新） */
+  /** 竖屏单列：顺序沿用旧页（录制 → 吸附 → 取景辅助/参考线 → 屏幕监看 → 对比/缩放 → 方向/读数 → 权限/诊断/反馈/更新） */
   @Builder
   private portraitColumn() {
     Column({ space: SettingsVisual.SECTION_GAP }) {
@@ -1359,6 +1413,7 @@ struct Settings {
       this.hudItemsGroup()
       this.permissionGroup()
       this.diagGroup()
+      this.feedbackGroup()
       this.aboutGroup()
     }
     .width('100%')

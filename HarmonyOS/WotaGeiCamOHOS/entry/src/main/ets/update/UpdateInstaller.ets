@@ -77,8 +77,8 @@ export class UpdateInstaller {
     }
   }
 
-  /** 打开 Release 页（浏览器）——没有安装器可拉起时的兜底入口 */
-  static async openReleasePage(ctx: common.Context, url: string): Promise<boolean> {
+  /** 用系统浏览器打开 https 链接（通用外链入口）——Release 页兜底、问题反馈表单等共用 */
+  static async openInBrowser(ctx: common.Context, url: string): Promise<boolean> {
     try {
       // startAbility 定义在 UIAbilityContext 上（页面侧拿到的就是它；声明类型是更宽的 Context）
       await (ctx as common.UIAbilityContext).startAbility({
@@ -88,7 +88,7 @@ export class UpdateInstaller {
       });
       return true;
     } catch (e) {
-      Diag.w(TAG, `打开 Release 页失败：${url}`, e as Error);
+      Diag.w(TAG, `浏览器打开失败：${url}`, e as Error);
       return false;
     }
   }
